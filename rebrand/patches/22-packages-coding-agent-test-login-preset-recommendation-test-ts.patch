@@ -1,0 +1,20 @@
+--- a/packages/coding-agent/test/login-preset-recommendation.test.ts
++++ b/packages/coding-agent/test/login-preset-recommendation.test.ts
+@@ -177,7 +177,7 @@
+ 		await login(ctx, "ollama");
+ 
+ 		expect(ctx.showHookConfirm).not.toHaveBeenCalled();
+-		expect(ctx.showStatus).toHaveBeenCalledWith("Logging in to ollama…");
++		expect(ctx.showStatus).toHaveBeenCalledWith("Logging in to ollama… (Esc to cancel)");
+ 		expect(session.setModelTemporaryCalls).toEqual([]);
+ 	});
+ 
+@@ -190,7 +190,7 @@
+ 		await login(ctx, "minimax");
+ 
+ 		expect(ctx.showHookConfirm).not.toHaveBeenCalled();
+-		expect(ctx.showStatus).toHaveBeenCalledWith("Logging in to minimax…");
++		expect(ctx.showStatus).toHaveBeenCalledWith("Logging in to minimax… (Esc to cancel)");
+ 		expect(ctx.showStatus).not.toHaveBeenCalledWith("Preset minimax-medium is available in /model.");
+ 		expect(session.setModelTemporaryCalls).toEqual([]);
+ 	});

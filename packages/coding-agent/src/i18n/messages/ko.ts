@@ -1,0 +1,69 @@
+import type { MsgKey } from "./en";
+
+// Korean (한국어). Missing keys fall back to English.
+export const ko: Partial<Record<MsgKey, string>> = {
+	"lang.auto": "자동 (시스템)",
+
+	"welcome.tagline": "생각하듯, 코딩하다.",
+	"welcome.workflows": "워크플로",
+	"welcome.wf.deepInterview": "요구사항 인터뷰 → 명세",
+	"welcome.wf.ralplan": "합의 기반 계획",
+	"welcome.wf.ultragoal": "자율 목표 실행",
+	"welcome.wf.team": "병렬 에이전트",
+	"welcome.flowKeys": "단축키",
+	"welcome.commands": "명령",
+	"welcome.actions": "액션",
+	"welcome.shell": "셸",
+	"welcome.python": "파이썬",
+	"welcome.keymap": "키맵",
+	"welcome.model": "모델",
+	"welcome.reasoning": "추론",
+	"welcome.projectPulse": "프로젝트 상태",
+	"welcome.noLsp": "LSP 서버 없음",
+	"welcome.sessionTrail": "세션 기록",
+	"welcome.noSessions": "저장된 세션 없음",
+	"welcome.chooseModel": "모델 선택",
+	"welcome.modelHint": "ctrl+l 선택 · / 명령",
+
+	"settings.tab.appearance": "외관",
+	"settings.tab.model": "모델",
+	"settings.tab.interaction": "상호작용",
+	"settings.tab.context": "컨텍스트",
+	"settings.tab.memory": "메모리",
+	"settings.tab.editing": "편집",
+	"settings.tab.tools": "도구",
+	"settings.tab.tasks": "작업",
+	"settings.tab.providers": "공급자",
+
+	"settings.language.label": "언어",
+	"settings.language.desc": "인터페이스 언어. 자동은 시스템 로케일을 따릅니다.",
+
+	"help.usage": "사용법",
+	"help.flags": "플래그",
+	"help.commands": "명령",
+	"help.examples": "예시",
+	"help.envVars": "환경 변수",
+	"help.tools": "사용 가능한 도구",
+	"help.usefulCommands": "유용한 명령",
+	"help.appDescription": "Sayknow-CLI — AI 코딩 어시스턴트",
+
+	"statusline.plan": "계획",
+	"statusline.goal": "목표",
+	"statusline.paused": "일시정지",
+
+	"common.yes": "예",
+	"common.no": "아니오",
+	"nav.hint": "↑/↓ 이동  enter 선택  esc 취소",
+
+	"star.title": "Sayknow-CLI가 마음에 드시나요?",
+	"star.message": "GitHub에서 {repo}에 별을 눌러 프로젝트를 응원해 주세요!",
+
+	"cmd.settings": "설정 메뉴 열기",
+	"cmd.theme": "테마 선택기 열기",
+	"cmd.model": "모델 선택 (선택 UI 열기)",
+	"cmd.help": "도움말 보기",
+	"cmd.export": "세션을 HTML 파일로 내보내기",
+	"cmd.session": "세션 관리 명령",
+	"cmd.clear": "대화 지우기",
+	"cmd.quit": "Sayknow-CLI 종료",
+};

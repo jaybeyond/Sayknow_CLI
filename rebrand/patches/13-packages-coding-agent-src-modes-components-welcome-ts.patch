@@ -1,0 +1,206 @@
+--- a/packages/coding-agent/src/modes/components/welcome.ts
++++ b/packages/coding-agent/src/modes/components/welcome.ts
+@@ -1,5 +1,6 @@
+ import { type Component, padding, TERMINAL, truncateToWidth, visibleWidth } from "@sayknow-cli/tui";
+ import { APP_NAME } from "@sayknow-cli/utils";
++import { t } from "../../i18n";
+ import { type ThemeColor, theme } from "../../modes/theme/theme";
+ 
+ export interface RecentSession {
+@@ -14,8 +15,9 @@
+ }
+ 
+ /**
+- * SKC-native launch surface with compact command affordances, project
+- * signals, and a claw/talon mark without copying another agent shell.
++ * Sayknow-CLI launch surface: a blue-gradient SAYKNOW wordmark, compact
++ * command affordances, and project signals — a distinct identity, not a
++ * copy of another agent shell.
+  */
+ export class WelcomeComponent implements Component {
+ 	#animStart: number | null = null;
+@@ -79,20 +81,19 @@
+ 		}
+ 		const dualContentWidth = boxWidth - 3; // 3 = │ + │ + │
+ 		const preferredLeftCol = 36;
+-		const minLeftCol = 18; // claw mark plus SKC identity labels
++		const minLeftCol = 18; // wordmark plus Sayknow identity labels
+ 		const minRightCol = 20;
+ 		const modelPill = this.#pill(theme.icon.model || "model", this.modelName, "statusLineModel");
+ 		const providerPill = this.#pill(theme.icon.package || "provider", this.providerName, "statusLinePath");
+-		const logoMinWidth = Math.max(...RED_CLAW_LOGO.map(line => visibleWidth(line)));
++		const logoMinWidth = Math.max(...BRAND_LOGO.map(line => visibleWidth(line)));
+ 		const leftMinContentWidth = Math.max(
+ 			minLeftCol,
+ 			logoMinWidth,
+-			visibleWidth("Sayknow forge"),
+-			visibleWidth("shape · act · prove"),
++			visibleWidth(t("welcome.tagline")),
+ 			visibleWidth(modelPill),
+ 			visibleWidth(providerPill),
+ 		);
+-		const desiredLeftCol = Math.min(preferredLeftCol, Math.max(minLeftCol, Math.floor(dualContentWidth * 0.35)));
++		const desiredLeftCol = Math.min(preferredLeftCol, Math.max(minLeftCol, Math.floor(dualContentWidth * 0.42)));
+ 		const dualLeftCol =
+ 			dualContentWidth >= minRightCol + 1
+ 				? Math.min(desiredLeftCol, dualContentWidth - minRightCol)
+@@ -105,16 +106,26 @@
+ 		// Logo: pick a frame from the intro animation if active, else the resting frame.
+ 		const logoColored = this.#currentLogoFrame();
+ 
+-		// Left column - centered content
++		// When no model is resolved yet, guide the user instead of showing "Unknown".
++		const hasModel = this.modelName !== "Unknown" && this.modelName.length > 0;
++		const identityTail = hasModel
++			? [this.#centerText(modelPill, leftCol), this.#centerText(providerPill, leftCol)]
++			: [
++					this.#centerText(
++						this.#pill(theme.icon.model || "model", t("welcome.chooseModel"), "statusLineModel"),
++						leftCol,
++					),
++					this.#centerText(theme.fg("dim", t("welcome.modelHint")), leftCol),
++				];
++
++		// Left column - centered identity stack: wordmark, tagline, then model state.
+ 		const leftLines = [
+ 			"",
+-			this.#centerText(theme.bold(theme.fg("accent", "Sayknow forge")), leftCol),
+-			this.#centerText(theme.fg("dim", "shape · act · prove"), leftCol),
+-			"",
+ 			...logoColored.map(l => this.#centerText(l, leftCol)),
+ 			"",
+-			this.#centerText(modelPill, leftCol),
+-			this.#centerText(providerPill, leftCol),
++			this.#centerText(theme.fg("muted", t("welcome.tagline")), leftCol),
++			"",
++			...identityTail,
+ 		];
+ 
+ 		// Right column separator
+@@ -124,7 +135,7 @@
+ 		// Recent sessions content
+ 		const sessionLines: string[] = [];
+ 		if (this.recentSessions.length === 0) {
+-			sessionLines.push(` ${theme.fg("dim", "No saved trails")}`);
++			sessionLines.push(` ${theme.fg("dim", t("welcome.noSessions"))}`);
+ 		} else {
+ 			// Reserve width for the bullet prefix (" • ") and the trailing " (timeAgo)"
+ 			// so the relative time is never the part that gets truncated. The name
+@@ -146,7 +157,7 @@
+ 		// LSP servers content
+ 		const lspLines: string[] = [];
+ 		if (this.lspServers.length === 0) {
+-			lspLines.push(` ${theme.fg("dim", "No LSP servers")}`);
++			lspLines.push(` ${theme.fg("dim", t("welcome.noLsp"))}`);
+ 		} else {
+ 			for (const server of this.lspServers) {
+ 				const icon =
+@@ -160,27 +171,39 @@
+ 			}
+ 		}
+ 
++		// Workflow affordances: pad the command so descriptions align.
++		const wf = (cmd: string, desc: string): string => {
++			const pad = " ".repeat(Math.max(1, 17 - visibleWidth(cmd)));
++			return ` ${theme.fg("accent", cmd)}${pad}${theme.fg("muted", desc)}`;
++		};
++
+ 		// Right column
+ 		const rightLines = [
+-			` ${theme.bold(theme.fg("accent", "Flow keys"))}`,
+-			` ${theme.fg("dim", "/")}${theme.fg("muted", " commands")} ${theme.fg("dim", "·")} ${theme.fg(
++			` ${theme.bold(theme.fg("accent", t("welcome.workflows")))}`,
++			wf("/deep-interview", t("welcome.wf.deepInterview")),
++			wf("/ralplan", t("welcome.wf.ralplan")),
++			wf("/ultragoal", t("welcome.wf.ultragoal")),
++			wf("/team", t("welcome.wf.team")),
++			separator,
++			` ${theme.bold(theme.fg("accent", t("welcome.flowKeys")))}`,
++			` ${theme.fg("dim", "/")}${theme.fg("muted", ` ${t("welcome.commands")}`)} ${theme.fg("dim", "·")} ${theme.fg(
+ 				"dim",
+ 				"#",
+-			)}${theme.fg("muted", " actions")}`,
+-			` ${theme.fg("dim", "!")}${theme.fg("muted", " shell")} ${theme.fg("dim", "·")} ${theme.fg("dim", "$")}${theme.fg(
++			)}${theme.fg("muted", ` ${t("welcome.actions")}`)}`,
++			` ${theme.fg("dim", "!")}${theme.fg("muted", ` ${t("welcome.shell")}`)} ${theme.fg("dim", "·")} ${theme.fg("dim", "$")}${theme.fg(
+ 				"muted",
+-				" python",
++				` ${t("welcome.python")}`,
+ 			)}`,
+-			` ${theme.fg("dim", "?")}${theme.fg("muted", " keymap")} ${theme.fg("dim", "·")} ${theme.fg(
++			` ${theme.fg("dim", "?")}${theme.fg("muted", ` ${t("welcome.keymap")}`)} ${theme.fg("dim", "·")} ${theme.fg(
+ 				"dim",
+ 				"ctrl+l",
+-			)}${theme.fg("muted", " model")}`,
+-			` ${theme.fg("dim", "shift+tab")}${theme.fg("muted", " reasoning")}`,
++			)}${theme.fg("muted", ` ${t("welcome.model")}`)}`,
++			` ${theme.fg("dim", "shift+tab")}${theme.fg("muted", ` ${t("welcome.reasoning")}`)}`,
+ 			separator,
+-			` ${theme.bold(theme.fg("accent", "Project pulse"))}`,
++			` ${theme.bold(theme.fg("accent", t("welcome.projectPulse")))}`,
+ 			...lspLines,
+ 			separator,
+-			` ${theme.bold(theme.fg("accent", "Session trail"))}`,
++			` ${theme.bold(theme.fg("accent", t("welcome.sessionTrail")))}`,
+ 			...sessionLines,
+ 			"",
+ 		];
+@@ -197,7 +220,7 @@
+ 		const lines: string[] = [];
+ 
+ 		// Top border with embedded title
+-		const title = ` ${APP_NAME} v${this.version} · SKC forge `;
++		const title = ` ${APP_NAME} · Sayknow-CLI v${this.version} `;
+ 		const titlePrefixRaw = hChar.repeat(3);
+ 		const titleStyled = theme.fg("dim", titlePrefixRaw) + theme.fg("muted", title);
+ 		const titleVisLen = visibleWidth(titlePrefixRaw) + visibleWidth(title);
+@@ -273,31 +296,28 @@
+ 		// the same ease-out curve so the highlight is gone by the resting frame.
+ 		const shinePos = (((progress * INTRO_SHINE_TRAVERSALS) % 1) + 1) % 1;
+ 		const shineStrength = (1 - eased) ** 1.5;
+-		return gradientLogo(RED_CLAW_LOGO, phase, { strength: shineStrength, pos: shinePos });
++		return gradientLogo(BRAND_LOGO, phase, { strength: shineStrength, pos: shinePos });
+ 	}
+ }
+ 
+ // biome-ignore format: preserve ASCII art layout
+-const RED_CLAW_LOGO = [
+-	"╭────────────────╮        ╭────────╮",
+-	"╰──────╮      ╭──╯     ╭──╯  ╭─────╯",
+-	"       ╰──────╯    ╭───╯  ╭──╯      ",
+-	"       ╭──────╮    ╰───╮  ╰──╮      ",
+-	"╭──────╯      ╰──╮     ╰──╮  ╰─────╮",
+-	"╰────────────────╯        ╰────────╯",
++const BRAND_LOGO = [
++	"╔═╗╔═╗╦ ╦╦╔═╔╗╔╔═╗╦ ╦",
++	"╚═╗╠═╣╚╦╝╠╩╗║║║║ ║║║║",
++	"╚═╝╩ ╩ ╩ ╩ ╩╝╚╝╚═╝╚╩╝",
+ ];
+ 
+-/** Multi-stop palette for the red-octopus diagonal gradient. */
++/** Multi-stop palette for the blue-octopus diagonal gradient. */
+ const GRADIENT_STOPS: ReadonlyArray<readonly [number, number, number]> = [
+-	[127, 29, 29], // deep shell red
+-	[220, 38, 38], // claw red
+-	[249, 115, 22], // orange coral
+-	[255, 138, 101], // bright coral
+-	[255, 215, 168], // shell highlight
++	[6, 19, 33], // deep navy
++	[11, 79, 138], // ocean
++	[47, 155, 255], // octopus mantle blue
++	[94, 200, 255], // bright tentacle blue
++	[168, 224, 255], // sky highlight
+ ];
+ 
+ /** 256-color ramp fallback when truecolor isn't available. */
+-const GRADIENT_RAMP_256 = [52, 88, 124, 160, 202, 209, 215];
++const GRADIENT_RAMP_256 = [17, 18, 24, 31, 38, 75, 117];
+ 
+ /** Half-width of the shine highlight band, expressed in gradient-t units. */
+ const SHINE_HALF_WIDTH = 0.18;
+@@ -386,4 +406,4 @@
+ const INTRO_SHINE_TRAVERSALS = 3;
+ 
+ /** Resting gradient frame, cached for re-renders outside of the intro. */
+-const REST_FRAME = gradientLogo(RED_CLAW_LOGO, 0);
++const REST_FRAME = gradientLogo(BRAND_LOGO, 0);

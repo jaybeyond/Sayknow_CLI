@@ -1,0 +1,86 @@
+--- a/packages/coding-agent/src/modes/theme/theme.ts
++++ b/packages/coding-agent/src/modes/theme/theme.ts
+@@ -264,7 +264,7 @@
+ 	"icon.context": "◫",
+ 	"icon.cost": "💲",
+ 	"icon.time": "⏱",
+-	"icon.pi": "🦞",
++	"icon.pi": "🐙",
+ 	"icon.agents": "👥",
+ 	"icon.cache": "💾",
+ 	"icon.input": "⤵",
+@@ -1781,7 +1781,7 @@
+ var themeReloadTimer: NodeJS.Timeout | undefined;
+ var sigwinchHandler: (() => void) | undefined;
+ var autoDetectedTheme: boolean = false;
+-var autoDarkTheme: string = "red-octopus";
++var autoDarkTheme: string = "blue-octopus";
+ var autoLightTheme: string = "blue-octopus";
+ var onThemeChangeCallback: (() => void) | undefined;
+ var themeLoadRequestId: number = 0;
+@@ -1802,7 +1802,7 @@
+ 	lightTheme?: string,
+ ): Promise<void> {
+ 	autoDetectedTheme = true;
+-	autoDarkTheme = darkTheme ?? "red-octopus";
++	autoDarkTheme = darkTheme ?? "blue-octopus";
+ 	autoLightTheme = lightTheme ?? "blue-octopus";
+ 	const name = getDefaultTheme();
+ 	previewThemeActive = false;
+@@ -1816,9 +1816,9 @@
+ 			startSigwinchListener();
+ 		}
+ 	} catch (err) {
+-		logger.debug("Theme loading failed, falling back to red-octopus theme", { error: String(err) });
+-		currentThemeName = "red-octopus";
+-		theme = await loadTheme("red-octopus", getCurrentThemeOptions());
++		logger.debug("Theme loading failed, falling back to blue-octopus theme", { error: String(err) });
++		currentThemeName = "blue-octopus";
++		theme = await loadTheme("blue-octopus", getCurrentThemeOptions());
+ 		// Don't start watcher for fallback theme
+ 	}
+ }
+@@ -1848,9 +1848,9 @@
+ 		if (requestId !== themeLoadRequestId) {
+ 			return { success: false, error: "Theme change superseded by a newer request" };
+ 		}
+-		// Theme is invalid - fall back to red-octopus theme
+-		currentThemeName = "red-octopus";
+-		theme = await loadTheme("red-octopus", getCurrentThemeOptions());
++		// Theme is invalid - fall back to blue-octopus theme
++		currentThemeName = "blue-octopus";
++		theme = await loadTheme("blue-octopus", getCurrentThemeOptions());
+ 		// Don't start watcher for fallback theme
+ 		return {
+ 			success: false,
+@@ -1958,8 +1958,8 @@
+ 		try {
+ 			theme = await loadTheme(currentThemeName, getCurrentThemeOptions());
+ 		} catch {
+-			// Fall back to red-octopus theme with new preset
+-			theme = await loadTheme("red-octopus", getCurrentThemeOptions());
++			// Fall back to blue-octopus theme with new preset
++			theme = await loadTheme("blue-octopus", getCurrentThemeOptions());
+ 		}
+ 		if (onThemeChangeCallback) {
+ 			onThemeChangeCallback();
+@@ -1984,8 +1984,8 @@
+ 		try {
+ 			theme = await loadTheme(currentThemeName, getCurrentThemeOptions());
+ 		} catch {
+-			// Fall back to red-octopus theme
+-			theme = await loadTheme("red-octopus", getCurrentThemeOptions());
++			// Fall back to blue-octopus theme
++			theme = await loadTheme("blue-octopus", getCurrentThemeOptions());
+ 		}
+ 		if (onThemeChangeCallback) {
+ 			onThemeChangeCallback();
+@@ -2273,7 +2273,7 @@
+ }
+ 
+ export function isLightTheme(themeName?: string, agentDir?: string): boolean {
+-	const name = themeName ?? "red-octopus";
++	const name = themeName ?? "blue-octopus";
+ 	const builtinThemes = getBuiltinThemes();
+ 	let themeJson: ThemeJson | undefined;
+ 	if (name in builtinThemes) {

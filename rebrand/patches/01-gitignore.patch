@@ -1,0 +1,9 @@
+--- a/.gitignore
++++ b/.gitignore
+@@ -86,3 +86,6 @@
+ python/roboskc/web/dist/
+ python/roboskc/.env
+ .release-040-artifacts/
++
++# OMC orchestration runtime state
++.omc/

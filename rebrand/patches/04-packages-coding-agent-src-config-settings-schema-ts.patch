@@ -1,0 +1,56 @@
+--- a/packages/coding-agent/src/config/settings-schema.ts
++++ b/packages/coding-agent/src/config/settings-schema.ts
+@@ -83,6 +83,7 @@
+ 	| "token_total"
+ 	| "token_rate"
+ 	| "cost"
++	| "context_bar"
+ 	| "context_pct"
+ 	| "context_total"
+ 	| "time_spent"
+@@ -348,7 +349,7 @@
+ 	// Theme
+ 	"theme.dark": {
+ 		type: "string",
+-		default: "red-octopus",
++		default: "blue-octopus",
+ 		ui: {
+ 			tab: "appearance",
+ 			label: "Dark Theme",
+@@ -380,6 +381,27 @@
+ 				{ value: "unicode", label: "Unicode", description: "Standard symbols (default)" },
+ 				{ value: "nerd", label: "Nerd Font", description: "Requires Nerd Font" },
+ 				{ value: "ascii", label: "ASCII", description: "Maximum compatibility" },
++			],
++		},
++	},
++
++	language: {
++		type: "enum",
++		values: ["auto", "en", "ko", "zh", "ja", "es", "fr", "de"] as const,
++		default: "auto",
++		ui: {
++			tab: "appearance",
++			label: "Language",
++			description: "Interface language. Auto follows your system locale.",
++			options: [
++				{ value: "auto", label: "Auto (system)", description: "Follow the system locale" },
++				{ value: "en", label: "English", description: "English" },
++				{ value: "ko", label: "한국어", description: "Korean" },
++				{ value: "zh", label: "中文 (简体)", description: "Chinese (Simplified)" },
++				{ value: "ja", label: "日本語", description: "Japanese" },
++				{ value: "es", label: "Español", description: "Spanish" },
++				{ value: "fr", label: "Français", description: "French" },
++				{ value: "de", label: "Deutsch", description: "German" },
+ 			],
+ 		},
+ 	},
+@@ -1077,7 +1099,7 @@
+ 
+ 	"starReminder.enabled": {
+ 		type: "boolean",
+-		default: true,
++		default: false,
+ 		ui: {
+ 			tab: "interaction",
+ 			label: "GitHub Star Reminder",

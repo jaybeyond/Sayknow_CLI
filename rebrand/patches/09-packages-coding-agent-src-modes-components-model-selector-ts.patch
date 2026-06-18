@@ -1,0 +1,73 @@
+--- a/packages/coding-agent/src/modes/components/model-selector.ts
++++ b/packages/coding-agent/src/modes/components/model-selector.ts
+@@ -105,6 +105,12 @@
+ 	  }
+ 	| {
+ 			kind: "createProfile";
++	  }
++	| {
++			// User picked an unauthenticated preset/model — launch OAuth login for
++			// the first missing provider instead of only printing a hint.
++			kind: "login";
++			providerId: string;
+ 	  };
+ 
+ interface PendingThinkingChoice {
+@@ -732,9 +738,15 @@
+ 		const profiles = Array.isArray(profileOrProfiles) ? profileOrProfiles : [profileOrProfiles];
+ 		const providers = new Set<string>();
+ 		for (const profile of profiles) for (const provider of profileRequiredProviders(profile)) providers.add(provider);
+-		return [...providers]
+-			.filter(provider => this.#isProviderAuthenticated(provider) !== true)
+-			.sort((a, b) => a.localeCompare(b));
++		return (
++			[...providers]
++				// Only providers we've CONFIRMED are unauthenticated (=== false) count as
++				// missing. An unknown/pending status (undefined, before #refreshProviderAuth
++				// resolves) must NOT count as missing — otherwise selecting an already-
++				// authenticated preset gets hijacked into a login flow.
++				.filter(provider => this.#isProviderAuthenticated(provider) === false)
++				.sort((a, b) => a.localeCompare(b))
++		);
+ 	}
+ 
+ 	#isPresetAuthenticated(profileOrProfiles: ModelProfileDefinition | ModelProfileDefinition[]): boolean {
+@@ -1274,6 +1286,7 @@
+ 			// navigable so the user can drill in and pick a usable member.
+ 			if (!this.#isPresetGroupUsable(row.profiles)) {
+ 				const missing = this.#getMissingProviders(row.profiles);
++				if (this.#startLoginForMissing(missing)) return;
+ 				this.#presetLoginHint = `Run ${missing.map(provider => `/login ${provider}`).join(", ")}`;
+ 				this.#renderPresetLanding();
+ 			}
+@@ -1281,6 +1294,7 @@
+ 		}
+ 		const missing = this.#getMissingProviders(row.profile);
+ 		if (missing.length > 0) {
++			if (this.#startLoginForMissing(missing)) return;
+ 			this.#presetLoginHint = `Run ${missing.map(provider => `/login ${provider}`).join(", ")}`;
+ 			this.#renderPresetLanding();
+ 			return;
+@@ -1290,6 +1304,22 @@
+ 		this.#renderPresetLanding();
+ 	}
+ 
++	/**
++	 * Ask the host to start OAuth login for the first missing provider. Returns
++	 * true if a login request was dispatched (caller should stop). The controller
++	 * decides whether the provider is actually OAuth-capable; if not it falls back
++	 * to showing the `/login` / `/provider add` hint itself.
++	 */
++	#startLoginForMissing(missing: string[]): boolean {
++		// Never auto-start login while provider auth is still being checked, or in
++		// temporary-only mode. Only dispatch for a provider confirmed unauthenticated.
++		if (this.#temporaryOnly || this.#providerAuthPending) return false;
++		const providerId = missing.find(p => this.#isProviderAuthenticated(p) === false);
++		if (!providerId) return false;
++		void this.#onSelectCallback({ kind: "login", providerId });
++		return true;
++	}
++
+ 	#beginActionMenuOrSelect(item: ModelItem | CanonicalModelItem): void {
+ 		if (this.#temporaryOnly) {
+ 			this.#handleSelect(item, null);

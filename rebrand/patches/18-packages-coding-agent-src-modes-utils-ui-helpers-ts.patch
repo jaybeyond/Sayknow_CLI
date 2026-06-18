@@ -1,0 +1,49 @@
+--- a/packages/coding-agent/src/modes/utils/ui-helpers.ts
++++ b/packages/coding-agent/src/modes/utils/ui-helpers.ts
+@@ -2,6 +2,7 @@
+ import type { AssistantMessage, ImageContent, Message } from "@sayknow-cli/ai";
+ import { type Component, Spacer, Text, TruncatedText } from "@sayknow-cli/tui";
+ import { settings } from "../../config/settings";
++import { tMessage } from "../../i18n";
+ import { AssistantMessageComponent } from "../../modes/components/assistant-message";
+ import { BashExecutionComponent } from "../../modes/components/bash-execution";
+ import { BranchSummaryMessageComponent } from "../../modes/components/branch-summary-message";
+@@ -62,6 +63,7 @@
+ 		if (this.ctx.isBackgrounded) {
+ 			return;
+ 		}
++		message = tMessage(message);
+ 		const children = this.ctx.chatContainer.children;
+ 		const last = children.length > 0 ? children[children.length - 1] : undefined;
+ 		const secondLast = children.length > 1 ? children[children.length - 2] : undefined;
+@@ -507,22 +509,26 @@
+ 	}
+ 
+ 	showError(errorMessage: string): void {
++		const label = tMessage("Error");
++		errorMessage = tMessage(errorMessage);
+ 		if (this.ctx.isBackgrounded) {
+-			process.stderr.write(`Error: ${errorMessage}\n`);
++			process.stderr.write(`${label}: ${errorMessage}\n`);
+ 			return;
+ 		}
+ 		this.ctx.chatContainer.addChild(new Spacer(1));
+-		this.ctx.chatContainer.addChild(new Text(theme.fg("error", `Error: ${errorMessage}`), 1, 0));
++		this.ctx.chatContainer.addChild(new Text(theme.fg("error", `${label}: ${errorMessage}`), 1, 0));
+ 		this.ctx.ui.requestRender();
+ 	}
+ 
+ 	showWarning(warningMessage: string): void {
++		const label = tMessage("Warning");
++		warningMessage = tMessage(warningMessage);
+ 		if (this.ctx.isBackgrounded) {
+-			process.stderr.write(`Warning: ${warningMessage}\n`);
++			process.stderr.write(`${label}: ${warningMessage}\n`);
+ 			return;
+ 		}
+ 		this.ctx.chatContainer.addChild(new Spacer(1));
+-		this.ctx.chatContainer.addChild(new Text(theme.fg("warning", `Warning: ${warningMessage}`), 1, 0));
++		this.ctx.chatContainer.addChild(new Text(theme.fg("warning", `${label}: ${warningMessage}`), 1, 0));
+ 		this.ctx.ui.requestRender();
+ 	}
+ 

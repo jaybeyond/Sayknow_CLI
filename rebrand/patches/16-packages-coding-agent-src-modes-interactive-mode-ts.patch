@@ -1,0 +1,19 @@
+--- a/packages/coding-agent/src/modes/interactive-mode.ts
++++ b/packages/coding-agent/src/modes/interactive-mode.ts
+@@ -42,6 +42,7 @@
+ import { resolveSkillSlashCommands, type Skill } from "../extensibility/skills";
+ import { BUILTIN_SLASH_COMMANDS, loadSlashCommands } from "../extensibility/slash-commands";
+ import { type Goal, type GoalModeState, normalizeGoal } from "../goals/state";
++import { t } from "../i18n";
+ import { resolveLocalUrlToPath } from "../internal-urls";
+ import { LSP_STARTUP_EVENT_CHANNEL, type LspStartupEvent } from "../lsp/startup-events";
+ import {
+@@ -1456,7 +1457,7 @@
+ 	#getPlanReviewHelpText(): string {
+ 		const externalEditorKey = this.keybindings.getDisplayString("app.editor.external");
+ 		if (!externalEditorKey) {
+-			return "up/down navigate  enter select  esc cancel";
++			return t("nav.hint");
+ 		}
+ 		return `up/down navigate  enter select  ${externalEditorKey.toLowerCase()} open in editor  esc cancel`;
+ 	}
