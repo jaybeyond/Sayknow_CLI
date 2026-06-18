@@ -1,0 +1,121 @@
+--- a/packages/coding-agent/src/modes/components/settings-selector.ts
++++ b/packages/coding-agent/src/modes/components/settings-selector.ts
+@@ -21,6 +21,7 @@
+ 	StatusLineSeparatorStyle,
+ } from "../../config/settings-schema";
+ import { SETTING_TABS, TAB_METADATA } from "../../config/settings-schema";
++import { t, td } from "../../i18n";
+ import { getCurrentThemeName, getSelectListTheme, getSettingsListTheme, theme } from "../../modes/theme/theme";
+ import { matchesAppInterrupt } from "../../modes/utils/keybinding-matchers";
+ import { getTabBarTheme } from "../shared";
+@@ -29,6 +30,26 @@
+ import { getSettingsForTab, type SettingDef } from "./settings-defs";
+ import { getPreset } from "./status-line/presets";
+ 
++// Settings UI strings are translated by deterministic keys derived from the
++// setting path; English (the schema value) is the fallback. Keys match those
++// generated into i18n/messages/<lang>.settings.ts.
++function tSettingLabel(def: SettingDef): string {
++	return def.label ? td(`set:${def.path}:l`, def.label) : def.label;
++}
++function tSettingDesc(def: SettingDef): string {
++	return def.description ? td(`set:${def.path}:d`, def.description) : def.description;
++}
++function tSettingOptions<T extends { value: string; label?: string; description?: string }>(
++	path: string,
++	options: ReadonlyArray<T>,
++): T[] {
++	return options.map(o => ({
++		...o,
++		label: o.label ? td(`set:${path}:o:${o.value}:l`, o.label) : o.label,
++		description: o.description ? td(`set:${path}:o:${o.value}:d`, o.description) : o.description,
++	}));
++}
++
+ /**
+  * A submenu component for selecting from a list of options.
+  */
+@@ -167,7 +188,7 @@
+ 		...SETTING_TABS.map(id => {
+ 			const meta = TAB_METADATA[id];
+ 			const icon = theme.symbol(meta.icon as Parameters<typeof theme.symbol>[0]);
+-			return { id, label: `${icon} ${meta.label}` };
++			return { id, label: `${icon} ${t(`settings.tab.${id}`)}` };
+ 		}),
+ 		{ id: "plugins", label: `${theme.icon.package} Plugins` },
+ 	];
+@@ -295,13 +316,15 @@
+ 		}
+ 
+ 		const currentValue = this.#getCurrentValue(def);
++		const label = tSettingLabel(def);
++		const description = tSettingDesc(def);
+ 
+ 		switch (def.type) {
+ 			case "boolean":
+ 				return {
+ 					id: def.path,
+-					label: def.label,
+-					description: def.description,
++					label,
++					description,
+ 					currentValue: currentValue ? "true" : "false",
+ 					values: ["true", "false"],
+ 				};
+@@ -309,8 +332,8 @@
+ 			case "enum":
+ 				return {
+ 					id: def.path,
+-					label: def.label,
+-					description: def.description,
++					label,
++					description,
+ 					currentValue: currentValue as string,
+ 					values: [...def.values],
+ 				};
+@@ -318,8 +341,8 @@
+ 			case "submenu":
+ 				return {
+ 					id: def.path,
+-					label: def.label,
+-					description: def.description,
++					label,
++					description,
+ 					currentValue: this.#getSubmenuCurrentValue(def.path, currentValue),
+ 					submenu: (cv, done) => this.#createSubmenu(def, cv, done),
+ 				};
+@@ -327,8 +350,8 @@
+ 			case "text":
+ 				return {
+ 					id: def.path,
+-					label: def.label,
+-					description: def.description,
++					label,
++					description,
+ 					currentValue: (currentValue as string) ?? "",
+ 					submenu: (cv, done) => this.#createTextInput(def, cv, done),
+ 				};
+@@ -426,9 +449,9 @@
+ 		const getPreview = isThemeSetting ? this.callbacks.getStatusLinePreview : undefined;
+ 
+ 		return new SelectSubmenu(
+-			def.label,
+-			def.description,
+-			options,
++			tSettingLabel(def),
++			tSettingDesc(def),
++			tSettingOptions(def.path, options),
+ 			currentValue,
+ 			value => {
+ 				this.#setSettingValue(def.path, value);
+@@ -458,8 +481,8 @@
+ 			done(value);
+ 		};
+ 		return new TextInputSubmenu(
+-			def.label,
+-			def.description,
++			tSettingLabel(def),
++			tSettingDesc(def),
+ 			currentValue,
+ 			value => {
+ 				// Empty string clears the setting; undefined-typed string settings

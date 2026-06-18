@@ -1,0 +1,8 @@
+{
+  "kind": "sayknow-cli-plugin",
+  "name": "invalid-forbidden-surface",
+  "version": "1.0.0",
+  "subskills": [],
+  "tools": [],
+  "hooks": []
+}

@@ -1,0 +1,87 @@
+--- a/packages/coding-agent/src/modes/controllers/selector-controller.ts
++++ b/packages/coding-agent/src/modes/controllers/selector-controller.ts
+@@ -102,6 +102,10 @@
+ 
+ export class SelectorController {
+ 	constructor(private ctx: InteractiveModeContext) {}
++
++	/** At most one OAuth login may run at a time (fixed callback ports, single
++	 *  manual-input slot). Holds the active login's provider + abort handle. */
++	#activeOAuthLogin?: { providerId: string; abort: AbortController };
+ 
+ 	async #refreshOAuthProviderAuthState(): Promise<void> {
+ 		const oauthProviders = getOAuthProviders();
+@@ -652,6 +656,22 @@
+ 				this.ctx.session.scopedModels,
+ 				async selection => {
+ 					try {
++						if (selection.kind === "login") {
++							// User picked an unauthenticated preset/model. Close the model
++							// selector and start OAuth for the provider if it supports it;
++							// otherwise guide them to the right command.
++							const oauth = getOAuthProviders().find(p => p.id === selection.providerId);
++							done();
++							if (oauth) {
++								void this.showOAuthSelector("login", oauth.id);
++							} else {
++								this.ctx.showStatus(
++									`${selection.providerId} needs an API key — run /provider add ${selection.providerId}`,
++								);
++							}
++							this.ctx.ui.requestRender();
++							return;
++						}
+ 						if (selection.kind === "createProfile") {
+ 							done();
+ 							this.showCustomModelPresetWizard();
+@@ -1149,11 +1169,33 @@
+ 	}
+ 
+ 	async #handleOAuthLogin(providerId: string): Promise<void> {
+-		this.ctx.showStatus(`Logging in to ${providerId}…`);
++		// Concurrency guard: only one login at a time. A second attempt (e.g. picking
++		// another unauthenticated model while one is mid-flight) would collide on the
++		// fixed OAuth callback port and the single manual-input slot, freezing the UI.
++		if (this.#activeOAuthLogin) {
++			const active = this.#activeOAuthLogin.providerId;
++			this.ctx.showWarning(
++				active === providerId
++					? `Already logging in to ${providerId}. Press Esc to cancel, or finish in the browser.`
++					: `Login to ${active} is still in progress. Press Esc to cancel it first.`,
++			);
++			return;
++		}
++
++		this.ctx.showStatus(`Logging in to ${providerId}… (Esc to cancel)`);
+ 		const manualInput = this.ctx.oauthManualInput;
+ 		const useManualInput = CALLBACK_SERVER_PROVIDERS.has(providerId as OAuthProvider);
++		const abort = new AbortController();
++		this.#activeOAuthLogin = { providerId, abort };
++		// Wire Esc to cancel the in-flight login, restoring the prior handler after.
++		const originalOnEscape = this.ctx.editor.onEscape;
++		this.ctx.editor.onEscape = () => {
++			abort.abort(new Error("Login cancelled"));
++			manualInput.clear(`Login cancelled for ${providerId}`);
++		};
+ 		try {
+ 			await this.ctx.session.modelRegistry.authStorage.login(providerId as OAuthProvider, {
++				signal: abort.signal,
+ 				onAuth: (info: { url: string; instructions?: string }) => {
+ 					this.ctx.chatContainer.addChild(new Spacer(1));
+ 					this.ctx.chatContainer.addChild(new Text(theme.fg("dim", info.url), 1, 0));
+@@ -1207,8 +1249,14 @@
+ 			await this.#handlePostLoginModelProfileRecommendation(providerId);
+ 			this.ctx.ui.requestRender();
+ 		} catch (error: unknown) {
+-			this.ctx.showError(`Login failed: ${error instanceof Error ? error.message : String(error)}`);
++			if (abort.signal.aborted) {
++				this.ctx.showStatus(`Login cancelled for ${providerId}`);
++			} else {
++				this.ctx.showError(`Login failed: ${error instanceof Error ? error.message : String(error)}`);
++			}
+ 		} finally {
++			this.ctx.editor.onEscape = originalOnEscape;
++			this.#activeOAuthLogin = undefined;
+ 			if (useManualInput) {
+ 				manualInput.clear(`Manual OAuth input cleared for ${providerId}`);
+ 			}

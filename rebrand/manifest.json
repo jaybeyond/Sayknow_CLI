@@ -1,0 +1,48 @@
+{
+  "_comment": "Declares how the fork layer is reconstructed on top of codemod+finalizer output. Files NOT listed here that still differ are treated as OVERLAY (whole-file copy). PATCH files are in-place edits to upstream-owned files (3-way applied, conflicts surface loudly). REGENERATE files are produced by a build step.",
+  "patch": [
+    ".gitignore",
+    "packages/coding-agent/src/cli.ts",
+    "packages/coding-agent/src/commands/launch.ts",
+    "packages/coding-agent/src/config/settings-schema.ts",
+    "packages/coding-agent/src/config/settings.ts",
+    "packages/coding-agent/src/extensibility/slash-commands.ts",
+    "packages/coding-agent/src/modes/components/history-search.ts",
+    "packages/coding-agent/src/modes/components/hook-selector.ts",
+    "packages/coding-agent/src/modes/components/model-selector.ts",
+    "packages/coding-agent/src/modes/components/settings-selector.ts",
+    "packages/coding-agent/src/modes/components/status-line/presets.ts",
+    "packages/coding-agent/src/modes/components/status-line/segments.ts",
+    "packages/coding-agent/src/modes/components/welcome.ts",
+    "packages/coding-agent/src/modes/controllers/extension-ui-controller.ts",
+    "packages/coding-agent/src/modes/controllers/selector-controller.ts",
+    "packages/coding-agent/src/modes/interactive-mode.ts",
+    "packages/coding-agent/src/modes/theme/theme.ts",
+    "packages/coding-agent/src/modes/utils/ui-helpers.ts",
+    "packages/coding-agent/src/reminders/star-reminder.ts",
+    "packages/coding-agent/src/sdk.ts",
+    "packages/coding-agent/src/slash-commands/builtin-registry.ts",
+    "packages/coding-agent/test/login-preset-recommendation.test.ts",
+    "packages/coding-agent/test/model-preset-landing-redteam-qa.test.ts",
+    "packages/coding-agent/test/modes/components/redesigned-shell.test.ts",
+    "packages/coding-agent/test/sdk-model-selection.test.ts",
+    "packages/coding-agent/test/settings-manager.test.ts",
+    "packages/coding-agent/test/skc-ui-redesign.test.ts",
+    "packages/tui/src/components/editor.ts"
+  ],
+  "regenerate": [
+    "bun.lock",
+    "Cargo.lock",
+    "packages/coding-agent/src/internal-urls/docs-index.generated.ts"
+  ],
+  "toolingOnly": [
+    "scripts/apply-rebrand.ts",
+    "scripts/apply-fork-identity.ts",
+    "scripts/extract-fork-layer.ts",
+    "scripts/gen-tree.ts",
+    "scripts/sync-upstream.sh",
+    "docs/FORK_MAINTENANCE.md",
+    "rebrand/",
+    "scripts/publish-npm.ts"
+  ]
+}

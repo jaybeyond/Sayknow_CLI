@@ -1,0 +1,91 @@
+# Dependencies
+node_modules/
+node_modules
+.npm/
+
+# Build output
+dist/
+packages/*/dist/
+packages/*/dist-chrome/
+packages/*/dist-firefox/
+target/
+*.tsbuildinfo
+*.node
+*.node.build.json
+*.b64.js
+
+# Environment
+.env
+
+# Editors
+.vscode/
+.zed/
+.idea/
+*.swp
+*.swo
+*.kate-swp
+*~
+
+# OS
+*.tmp
+.DS_Store
+
+# Logs & profiling
+*.log
+tui-debug.log
+*.cpuprofile
+
+# Test & coverage
+coverage/
+.nyc_output/
+packages/ai/test/.temp-images/
+
+# Project specific
+!.skc/
+!.skc/agents/
+!.skc/agents/**
+!.skc/skills/
+!.skc/skills/**
+.skc/plugins/
+.skc/context/
+.skc/interviews/
+.skc/plans/
+.skc/ralplan/
+.skc/specs/
+.skc/ultragoal/
+.skc/verification/
+.skc/logs/
+.skc/state/
+.skc/metrics.json
+.pi_config/
+.opencode/
+.worktrees/
+compaction-results/
+changes/
+__pycache__/
+
+# Scratch files
+syntax.jsonl
+out.jsonl
+out.html
+pi-*.html
+
+# Generated files
+packages/coding-agent/src/internal-urls/docs-index.generated.ts
+/runs/
+python/skc-rpc/src/skc_rpc.egg-info/
+# parallel-agent worktrees
+.wt/
+CPU*.md
+packages/coding-agent/binaries/
+
+# roboskc runtime state
+python/roboskc/data/
+python/roboskc/.cache/
+python/roboskc/src/roboskc/static/
+python/roboskc/web/dist/
+python/roboskc/.env
+.release-040-artifacts/
+
+# OMC orchestration runtime state
+.omc/
