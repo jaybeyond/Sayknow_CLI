@@ -1,0 +1,34 @@
+--- a/packages/coding-agent/src/extensibility/slash-commands.ts
++++ b/packages/coding-agent/src/extensibility/slash-commands.ts
+@@ -100,18 +100,27 @@
+ 		getInlineHint?: (argumentText: string) => string | null;
+ 	}
+ > = BUILTIN_SLASH_COMMAND_DEFS.map(cmd => {
++	// Spreading `...cmd` would evaluate the live `description` getter once (at module
++	// load, before the language is set) and freeze it to English. Re-install a getter
++	// that delegates to the source so translations resolve at render time.
++	const withLiveDescription = <T extends object>(obj: T): T =>
++		Object.defineProperty(obj, "description", {
++			get: () => cmd.description,
++			enumerable: true,
++			configurable: true,
++		});
+ 	if (cmd.subcommands) {
+-		return {
++		return withLiveDescription({
+ 			...cmd,
+ 			getArgumentCompletions: buildArgumentCompletions(cmd.subcommands),
+ 			getInlineHint: buildSubcommandInlineHint(cmd.subcommands),
+-		};
++		});
+ 	}
+ 	if (cmd.inlineHint) {
+-		return {
++		return withLiveDescription({
+ 			...cmd,
+ 			getInlineHint: buildStaticInlineHint(cmd.inlineHint),
+-		};
++		});
+ 	}
+ 	return cmd;
+ });

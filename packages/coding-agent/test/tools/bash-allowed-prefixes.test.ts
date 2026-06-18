@@ -1,0 +1,94 @@
+import { describe, expect, it } from "bun:test";
+import { checkBashAllowedPrefixes } from "../../src/tools/bash-allowed-prefixes";
+
+const ROLE_AGENT_PREFIXES = ["skc ralplan --write", "skc state"] as const;
+
+describe("checkBashAllowedPrefixes", () => {
+	it("allows ralplan artifact writes for role agents", () => {
+		expect(
+			checkBashAllowedPrefixes(
+				"skc ralplan --write --stage architect --stage_n 1 --artifact 'Architect verdict'",
+				ROLE_AGENT_PREFIXES,
+			),
+		).toEqual({ allowed: true });
+	});
+
+	it("blocks non-write ralplan commands", () => {
+		const result = checkBashAllowedPrefixes("skc ralplan --consensus 'task'", ROLE_AGENT_PREFIXES);
+
+		expect(result.allowed).toBe(false);
+		expect(result.reason).toContain("skc ralplan --write");
+	});
+
+	it("allows SKC state writes through the sanctioned workflow CLI", () => {
+		expect(
+			checkBashAllowedPrefixes(
+				'skc state ralplan write --input \'{"current_phase":"handoff"}\' --json',
+				ROLE_AGENT_PREFIXES,
+			),
+		).toEqual({ allowed: true });
+	});
+
+	it("blocks destructive state clears", () => {
+		const result = checkBashAllowedPrefixes("skc state ralplan clear --json", ROLE_AGENT_PREFIXES);
+
+		expect(result.allowed).toBe(false);
+		expect(result.reason).toContain("skc state clear");
+	});
+
+	it("blocks direct SKC state handoffs", () => {
+		const result = checkBashAllowedPrefixes("skc state ralplan handoff --to team --json", ROLE_AGENT_PREFIXES);
+
+		expect(result.allowed).toBe(false);
+		expect(result.reason).toContain("skc state handoff");
+	});
+
+	it("blocks shell expansion that could synthesize a state action", () => {
+		const result = checkBashAllowedPrefixes("skc state ralplan $ACTION --json", ROLE_AGENT_PREFIXES);
+
+		expect(result.allowed).toBe(false);
+		expect(result.reason).toContain("shell expansion character");
+	});
+
+	it("blocks double-quoted shell expansion that could synthesize a state action", () => {
+		const dollar = "$";
+		const result = checkBashAllowedPrefixes(
+			`skc state "${dollar}{X:-handoff}" --mode ralplan --to team`,
+			ROLE_AGENT_PREFIXES,
+		);
+
+		expect(result.allowed).toBe(false);
+		expect(result.reason).toContain("shell expansion character");
+	});
+
+	it("blocks backslash escape smuggling", () => {
+		const result = checkBashAllowedPrefixes("skc state ralplan\\ clear --json", ROLE_AGENT_PREFIXES);
+
+		expect(result.allowed).toBe(false);
+		expect(result.reason).toContain("backslash escapes");
+	});
+
+	it("blocks malformed or unknown state action shapes", () => {
+		const result = checkBashAllowedPrefixes("skc state ralplan nope --json", ROLE_AGENT_PREFIXES);
+
+		expect(result.allowed).toBe(false);
+		expect(result.reason).toContain("documented `skc state` action shapes");
+	});
+
+	it("blocks shell chaining that could smuggle destructive commands", () => {
+		const result = checkBashAllowedPrefixes(
+			"skc ralplan --write --stage critic --artifact ok; rm -rf .skc",
+			ROLE_AGENT_PREFIXES,
+		);
+
+		expect(result.allowed).toBe(false);
+		expect(result.reason).toContain("shell control operator");
+	});
+
+	it("blocks ordinary shell commands for restricted role agents", () => {
+		const result = checkBashAllowedPrefixes("echo verdict", ROLE_AGENT_PREFIXES);
+
+		expect(result.allowed).toBe(false);
+		expect(result.reason).toContain("restricted role-agent bash only allows commands starting with");
+	});
+});

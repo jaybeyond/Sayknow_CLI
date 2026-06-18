@@ -1,0 +1,29 @@
+--- a/packages/coding-agent/src/reminders/star-reminder.ts
++++ b/packages/coding-agent/src/reminders/star-reminder.ts
+@@ -17,6 +17,7 @@
+ import type { ImageContent, MessageAttribution } from "@sayknow-cli/ai";
+ import { getConfigRootDir, isEnoent } from "@sayknow-cli/utils";
+ import { withFileLock } from "../config/file-lock";
++import { t } from "../i18n";
+ import type { CustomMessage } from "../session/messages";
+ 
+ export const STAR_REMINDER_REPO = "jaybeyond/sayknow-cli";
+@@ -276,9 +277,6 @@
+ 	/** Optional guard; when it returns false the nudge is skipped silently. */
+ 	isIdle?: () => boolean;
+ }
+-
+-const LAUNCH_PROMPT_TITLE = "Enjoying SKC?";
+-const LAUNCH_PROMPT_MESSAGE = `Star ${STAR_REMINDER_REPO} on GitHub to support the project?`;
+ 
+ /**
+  * Run the launch nudge once. Caller is responsible for the `startup.quiet`,
+@@ -306,7 +304,7 @@
+ 		// declined (recordDeclinedAfterNo only preserves a still-starred state).
+ 		await recordFreshStarCheck("unstarred", deps);
+ 		if (ui.isIdle && !ui.isIdle()) return;
+-		const accepted = await ui.confirm(LAUNCH_PROMPT_TITLE, LAUNCH_PROMPT_MESSAGE);
++		const accepted = await ui.confirm(t("star.title"), t("star.message", { repo: STAR_REMINDER_REPO }));
+ 		if (accepted) {
+ 			const ok = await autoStarRepo(deps);
+ 			if (ok) await recordStarredFromPut(deps);

@@ -1,0 +1,19 @@
+--- a/packages/coding-agent/src/modes/components/history-search.ts
++++ b/packages/coding-agent/src/modes/components/history-search.ts
+@@ -11,6 +11,7 @@
+ 	visibleWidth,
+ } from "@sayknow-cli/tui";
+ import { getProjectDir } from "@sayknow-cli/utils";
++import { t } from "../../i18n";
+ import { theme } from "../../modes/theme/theme";
+ import { matchesAppInterrupt } from "../../modes/utils/keybinding-matchers";
+ import type { HistoryEntry, HistoryStorage } from "../../session/history-storage";
+@@ -111,7 +112,7 @@
+ 		this.addChild(new Spacer(1));
+ 		this.addChild(this.#resultsList);
+ 		this.addChild(new Spacer(1));
+-		this.addChild(new Text(theme.fg("muted", "up/down navigate  enter select  esc cancel"), 1, 0));
++		this.addChild(new Text(theme.fg("muted", t("nav.hint")), 1, 0));
+ 		this.addChild(new Spacer(1));
+ 		this.addChild(new DynamicBorder());
+ 

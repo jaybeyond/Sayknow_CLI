@@ -1,0 +1,8 @@
+{
+  "name": "skc-grok-cli-vendor",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Grok CLI chat proxy provider for SKC (SuperGrok OAuth, Composer 2.5 Fast)",
+  "dependencies": {}
+}

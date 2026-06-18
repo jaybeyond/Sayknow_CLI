@@ -1,0 +1,40 @@
+--- a/packages/coding-agent/src/config/settings.ts
++++ b/packages/coding-agent/src/config/settings.ts
+@@ -28,6 +28,7 @@
+ import { type Settings as SettingsCapabilityItem, settingsCapability } from "../capability/settings";
+ import type { ModelRole } from "../config/model-registry";
+ import { loadCapability } from "../discovery";
++import { type LanguagePref, setLanguage } from "../i18n";
+ import { isLightTheme, setAutoThemeMapping, setColorBlindMode, setSymbolPreset } from "../modes/theme/theme";
+ import { AgentStorage } from "../session/agent-storage";
+ import { type EditMode, normalizeEditMode } from "../utils/edit-mode";
+@@ -102,7 +103,7 @@
+ 
+ const PATH_SCOPED_ARRAY_SETTINGS = new Set<SettingPath>(["enabledModels", "disabledProviders"]);
+ const LEGACY_THEME_NAME_REPLACEMENTS = {
+-	dark: "red-octopus",
++	dark: "blue-octopus",
+ 	light: "blue-octopus",
+ } as const;
+ 
+@@ -640,7 +641,7 @@
+ 		if (typeof raw.theme === "string") {
+ 			const oldTheme = raw.theme;
+ 			const migratedTheme = this.#migrateLegacyBuiltInThemeName(oldTheme);
+-			if (oldTheme === "dark" && migratedTheme === "red-octopus") {
++			if (oldTheme === "dark" && migratedTheme === "blue-octopus") {
+ 				raw.theme = { dark: migratedTheme };
+ 			} else if (oldTheme === "light" && migratedTheme === "blue-octopus") {
+ 				raw.theme = { light: migratedTheme };
+@@ -886,6 +887,11 @@
+ 			});
+ 		}
+ 	},
++	language: value => {
++		if (typeof value === "string") {
++			setLanguage(value as LanguagePref);
++		}
++	},
+ 	colorBlindMode: value => {
+ 		if (typeof value === "boolean") {
+ 			setColorBlindMode(value).catch(err => {

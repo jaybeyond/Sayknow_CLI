@@ -1,0 +1,423 @@
+import * as path from "node:path";
+import { safeStderrWrite } from "@sayknow-cli/utils";
+import type { Args } from "../cli/args";
+import { SKC_COORDINATOR_SESSION_ID_ENV, SKC_COORDINATOR_SESSION_STATE_FILE_ENV } from "./session-state-sidecar";
+import {
+	buildSkcTmuxProfileCommands,
+	buildSkcTmuxSessionName,
+	buildSkcTmuxSessionSlug,
+	resolveSkcTmuxCommand,
+	SKC_DEFAULT_TMUX_SESSION,
+	SKC_TMUX_COMMAND_ENV,
+	SKC_TMUX_MOUSE_ENV,
+	SKC_TMUX_PROFILE_ENV,
+	SKC_TMUX_SESSION_PREFIX,
+	type SkcTmuxProfileCommand,
+} from "./tmux-common";
+import { findSkcTmuxSessionByBranch } from "./tmux-sessions";
+
+export {
+	buildSkcTmuxProfileCommands,
+	SKC_DEFAULT_TMUX_SESSION,
+	SKC_TMUX_COMMAND_ENV,
+	SKC_TMUX_MOUSE_ENV,
+	SKC_TMUX_PROFILE_ENV,
+	SKC_TMUX_SESSION_PREFIX,
+};
+
+export const SKC_TMUX_LAUNCHED_ENV = "SKC_TMUX_LAUNCHED";
+export const SKC_LAUNCH_POLICY_ENV = "SKC_LAUNCH_POLICY";
+export const SKC_TMUX_WINDOW_LABEL_MAX_WIDTH = 48;
+
+type LaunchPolicy = "direct" | "tmux";
+
+interface TtyState {
+	stdin: boolean;
+	stdout: boolean;
+}
+
+export interface TmuxLaunchContext {
+	parsed: Args;
+	rawArgs: string[];
+	cwd?: string;
+	env?: NodeJS.ProcessEnv;
+	argv?: string[];
+	execPath?: string;
+	platform?: NodeJS.Platform;
+	tty?: TtyState;
+	spawnSync?: TmuxSpawnSync;
+	tmuxAvailable?: boolean;
+	worktreeBranch?: string | null;
+	currentBranch?: string | null;
+	existingBranchSessionName?: string | null;
+	project?: string | null;
+	diagnosticWriter?: (message: string) => void;
+}
+
+export interface TmuxSpawnResult {
+	exitCode: number | null;
+	signalCode?: string | null;
+	stderr?: string;
+}
+
+export type TmuxSpawnSync = (command: string, args: string[], options: TmuxSpawnOptions) => TmuxSpawnResult;
+
+export interface TmuxSpawnOptions {
+	cwd: string;
+	env: NodeJS.ProcessEnv;
+	stdin: "inherit";
+	stdout: "inherit";
+	stderr: "inherit";
+}
+
+export interface TmuxLaunchPlan {
+	tmuxCommand: string;
+	sessionName: string;
+	cwd: string;
+	innerCommand: string;
+	newSessionArgs: string[];
+	branch?: string | null;
+	attachSessionName?: string;
+	project?: string | null;
+	sessionId?: string | null;
+	sessionStateFile?: string | null;
+}
+
+export interface SkcTmuxProfileResult {
+	skipped: boolean;
+	commands: SkcTmuxProfileCommand[];
+	failures: Array<{ command: SkcTmuxProfileCommand; stderr?: string }>;
+}
+
+export interface SkcTmuxProfileContext {
+	tmuxCommand: string;
+	target: string;
+	cwd?: string;
+	env?: NodeJS.ProcessEnv;
+	spawnSync?: TmuxSpawnSync;
+	branch?: string | null;
+	branchSlug?: string | null;
+	project?: string | null;
+	sessionId?: string | null;
+	sessionStateFile?: string | null;
+}
+
+interface CommandResolutionContext {
+	cwd: string;
+	argv: string[];
+	execPath: string;
+	extraEnv?: Record<string, string>;
+}
+
+function parseLaunchPolicy(env: NodeJS.ProcessEnv): LaunchPolicy {
+	const raw = env[SKC_LAUNCH_POLICY_ENV]?.trim().toLowerCase();
+	if (raw === "direct" || raw === "tmux") return raw;
+	if (env.SKC_NO_TMUX === "1" || env.SKC_NO_TMUX === "true") return "direct";
+	return "tmux";
+}
+
+function isInteractiveRootLaunch(parsed: Args, tty: TtyState): boolean {
+	return (
+		tty.stdin &&
+		tty.stdout &&
+		!parsed.help &&
+		!parsed.version &&
+		!parsed.print &&
+		parsed.mode === undefined &&
+		parsed.export === undefined &&
+		parsed.listModels === undefined
+	);
+}
+
+function isBunVirtualPath(value: string | undefined): boolean {
+	return value?.startsWith("/$bunfs/") === true;
+}
+
+function formatTmuxLaunchDiagnostic(stage: string, stderr?: string): string {
+	const detail = stderr?.trim();
+	const suffix = detail ? ` ${detail.slice(0, 240)}` : "";
+	return `skc --tmux failed after creating tmux session: ${stage}.${suffix}\n`;
+}
+
+function shellQuote(value: string): string {
+	if (value.length === 0) return "''";
+	return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+function buildEnvAssignments(values: Record<string, string> | undefined): string {
+	const entries = Object.entries(values ?? {});
+	return entries.length === 0 ? "" : ` ${entries.map(([key, value]) => `${key}=${shellQuote(value)}`).join(" ")}`;
+}
+
+export function applySkcTmuxProfile(context: SkcTmuxProfileContext): SkcTmuxProfileResult {
+	const env = context.env ?? process.env;
+	const branchSlug = context.branch ? buildSkcTmuxSessionSlug(context.branch) : (context.branchSlug ?? null);
+	const commands = buildSkcTmuxProfileCommands(context.target, env, {
+		branch: context.branch ?? null,
+		branchSlug,
+		project: context.project ?? null,
+		sessionId: context.sessionId ?? env[SKC_COORDINATOR_SESSION_ID_ENV] ?? null,
+		sessionStateFile: context.sessionStateFile ?? env[SKC_COORDINATOR_SESSION_STATE_FILE_ENV] ?? null,
+	});
+	if (commands.length === 0) return { skipped: true, commands: [], failures: [] };
+	const spawnSync = context.spawnSync ?? defaultSpawnSync;
+	const cwd = context.cwd ?? process.cwd();
+	const options: TmuxSpawnOptions = { cwd, env, stdin: "inherit", stdout: "inherit", stderr: "inherit" };
+	const failures: SkcTmuxProfileResult["failures"] = [];
+	for (const command of commands) {
+		const result = spawnSync(context.tmuxCommand, command.args, options);
+		if (result.exitCode !== 0) failures.push({ command, stderr: result.stderr });
+	}
+	return { skipped: false, commands, failures };
+}
+
+function resolveCurrentSkcCommand(context: CommandResolutionContext): string[] {
+	const entrypoint = context.argv[1];
+	if (!entrypoint) return ["skc"];
+	if (isBunVirtualPath(entrypoint)) {
+		return isBunVirtualPath(context.execPath) ? ["skc"] : [context.execPath];
+	}
+	const resolvedEntrypoint = path.isAbsolute(entrypoint) ? entrypoint : path.resolve(context.cwd, entrypoint);
+	if (entrypoint.endsWith(".ts") || entrypoint.endsWith(".js") || entrypoint.endsWith(".mjs")) {
+		return [context.execPath, resolvedEntrypoint];
+	}
+	return [resolvedEntrypoint];
+}
+
+function buildInnerCommand(context: CommandResolutionContext, rawArgs: string[]): string {
+	const command = resolveCurrentSkcCommand(context);
+	const quoted = [...command, ...rawArgs].map(shellQuote).join(" ");
+	return `exec env ${SKC_TMUX_LAUNCHED_ENV}=1${buildEnvAssignments(context.extraEnv)} ${quoted}`;
+}
+
+function visibleWidth(value: string): number {
+	return Bun.stringWidth(value);
+}
+
+function truncateVisible(value: string, maxWidth: number): string {
+	if (maxWidth <= 0) return "";
+	if (visibleWidth(value) <= maxWidth) return value;
+	if (maxWidth === 1) return "…";
+
+	let result = "";
+	for (const char of value) {
+		if (visibleWidth(`${result}${char}…`) > maxWidth) break;
+		result += char;
+	}
+
+	return `${result}…`;
+}
+
+function truncateVisibleTail(value: string, maxWidth: number): string {
+	if (maxWidth <= 0) return "";
+	if (visibleWidth(value) <= maxWidth) return value;
+	if (maxWidth === 1) return "…";
+
+	let result = "";
+	for (const char of Array.from(value).reverse()) {
+		if (visibleWidth(`…${char}${result}`) > maxWidth) break;
+		result = `${char}${result}`;
+	}
+
+	return `…${result}`;
+}
+
+export function buildSkcTmuxWindowTitle(cwd: string, branch: string | null | undefined): string {
+	const project = path.basename(path.resolve(cwd)) || "skc";
+	const trimmedBranch = branch?.trim();
+	if (!trimmedBranch) return truncateVisible(project, SKC_TMUX_WINDOW_LABEL_MAX_WIDTH);
+
+	const separatorWidth = visibleWidth(":");
+	const projectWidth = visibleWidth(project);
+	const fullTitle = `${project}:${trimmedBranch}`;
+	if (visibleWidth(fullTitle) <= SKC_TMUX_WINDOW_LABEL_MAX_WIDTH) return fullTitle;
+
+	const remainingBranchWidth = SKC_TMUX_WINDOW_LABEL_MAX_WIDTH - projectWidth - separatorWidth;
+	if (remainingBranchWidth <= 0) return truncateVisible(project, SKC_TMUX_WINDOW_LABEL_MAX_WIDTH);
+
+	return `${project}:${truncateVisibleTail(trimmedBranch, remainingBranchWidth)}`;
+}
+
+function buildTmuxRenameWindowArgs(title: string, target?: string): string[] {
+	return target ? ["rename-window", "-t", target, "--", title] : ["rename-window", "--", title];
+}
+
+function renameTmuxWindow(
+	tmuxCommand: string,
+	title: string,
+	spawnSync: TmuxSpawnSync,
+	options: TmuxSpawnOptions,
+	target?: string,
+): void {
+	spawnSync(tmuxCommand, buildTmuxRenameWindowArgs(title, target), options);
+}
+
+function renameExistingTmuxWindowIfNeeded(context: TmuxLaunchContext): void {
+	const env = context.env ?? process.env;
+	if (!env.TMUX || env[SKC_TMUX_LAUNCHED_ENV] === "1") return;
+	if (parseLaunchPolicy(env) === "direct") return;
+
+	const platform = context.platform ?? process.platform;
+	if (platform === "win32") return;
+
+	const tty = context.tty ?? { stdin: Boolean(process.stdin.isTTY), stdout: Boolean(process.stdout.isTTY) };
+	if (!isInteractiveRootLaunch(context.parsed, tty)) return;
+
+	const tmuxCommand = resolveSkcTmuxCommand(env);
+	const tmuxAvailable = context.tmuxAvailable ?? Bun.which(tmuxCommand) !== null;
+	if (!tmuxAvailable) return;
+
+	const cwd = context.cwd ?? process.cwd();
+	const branch = context.worktreeBranch ?? context.currentBranch ?? readCurrentBranch(cwd);
+	const title = buildSkcTmuxWindowTitle(context.project ?? cwd, branch);
+	const spawnSync = context.spawnSync ?? defaultSpawnSync;
+	renameTmuxWindow(tmuxCommand, title, spawnSync, {
+		cwd,
+		env,
+		stdin: "inherit",
+		stdout: "inherit",
+		stderr: "inherit",
+	});
+}
+
+function readCurrentBranch(cwd: string): string | null {
+	try {
+		const result = Bun.spawnSync(["git", "symbolic-ref", "--quiet", "--short", "HEAD"], {
+			cwd,
+			stdout: "pipe",
+			stderr: "ignore",
+		});
+		if (result.exitCode !== 0) return null;
+		const branch = result.stdout.toString().trim();
+		return branch || null;
+	} catch {
+		return null;
+	}
+}
+
+function cleanupCreatedTmuxSession(plan: TmuxLaunchPlan, spawnSync: TmuxSpawnSync, options: TmuxSpawnOptions): void {
+	spawnSync(plan.tmuxCommand, ["kill-session", "-t", `=${plan.sessionName}`], options);
+}
+
+export function buildDefaultTmuxLaunchPlan(context: TmuxLaunchContext): TmuxLaunchPlan | undefined {
+	const env = context.env ?? process.env;
+	const policy = parseLaunchPolicy(env);
+	if (!context.parsed.tmux || policy === "direct") return undefined;
+	if (env.TMUX || env[SKC_TMUX_LAUNCHED_ENV] === "1") return undefined;
+	const platform = context.platform ?? process.platform;
+	if (platform === "win32") return undefined;
+	const tty = context.tty ?? { stdin: Boolean(process.stdin.isTTY), stdout: Boolean(process.stdout.isTTY) };
+	if (policy === "tmux" && !isInteractiveRootLaunch(context.parsed, tty)) return undefined;
+
+	const cwd = context.cwd ?? process.cwd();
+	const branch = context.worktreeBranch ?? context.currentBranch ?? readCurrentBranch(cwd);
+	const project = context.project ?? cwd;
+	const sessionName = buildSkcTmuxSessionName(env, { branch });
+	const tmuxCommand = resolveSkcTmuxCommand(env);
+	const sessionId = env[SKC_COORDINATOR_SESSION_ID_ENV]?.trim() || sessionName;
+	const sessionStateFile =
+		env[SKC_COORDINATOR_SESSION_STATE_FILE_ENV]?.trim() ||
+		path.join(cwd, ".skc", "runtime", "tmux-sessions", `${buildSkcTmuxSessionSlug(sessionName)}.json`);
+	const tmuxAvailable = context.tmuxAvailable ?? Bun.which(tmuxCommand) !== null;
+	if (!tmuxAvailable) return undefined;
+	const existingBranchSessionName =
+		"existingBranchSessionName" in context
+			? (context.existingBranchSessionName ?? undefined)
+			: context.worktreeBranch
+				? findSkcTmuxSessionByBranch(context.worktreeBranch, env, project)?.name
+				: undefined;
+	const innerCommand = buildInnerCommand(
+		{
+			cwd,
+			argv: context.argv ?? process.argv,
+			execPath: context.execPath ?? process.execPath,
+			extraEnv: {
+				[SKC_COORDINATOR_SESSION_ID_ENV]: sessionId,
+				[SKC_COORDINATOR_SESSION_STATE_FILE_ENV]: sessionStateFile,
+			},
+		},
+		context.rawArgs,
+	);
+	return {
+		tmuxCommand,
+		sessionName,
+		cwd,
+		innerCommand,
+		newSessionArgs: ["new-session", "-d", "-s", sessionName, "-c", cwd, innerCommand],
+		branch,
+		project,
+		sessionId,
+		sessionStateFile,
+		attachSessionName: existingBranchSessionName,
+	};
+}
+
+function defaultSpawnSync(command: string, args: string[], options: TmuxSpawnOptions): TmuxSpawnResult {
+	const result = Bun.spawnSync({
+		cmd: [command, ...args],
+		cwd: options.cwd,
+		env: options.env,
+		stdin: options.stdin,
+		stdout: options.stdout,
+		stderr: options.stderr,
+	});
+	return { exitCode: result.exitCode, signalCode: result.signalCode };
+}
+
+export function launchDefaultTmuxIfNeeded(context: TmuxLaunchContext): boolean {
+	renameExistingTmuxWindowIfNeeded(context);
+
+	const plan = buildDefaultTmuxLaunchPlan(context);
+	if (!plan) return false;
+	const env = context.env ?? process.env;
+	const spawnSync = context.spawnSync ?? defaultSpawnSync;
+	const options: TmuxSpawnOptions = {
+		cwd: plan.cwd,
+		env,
+		stdin: "inherit",
+		stdout: "inherit",
+		stderr: "inherit",
+	};
+
+	if (plan.attachSessionName) {
+		const attached = spawnSync(plan.tmuxCommand, ["attach-session", "-t", `=${plan.attachSessionName}`], options);
+		return attached.exitCode === 0;
+	}
+
+	const created = spawnSync(plan.tmuxCommand, plan.newSessionArgs, options);
+	if (created.exitCode === 0) {
+		renameTmuxWindow(
+			plan.tmuxCommand,
+			buildSkcTmuxWindowTitle(plan.project ?? plan.cwd, plan.branch),
+			spawnSync,
+			options,
+			`=${plan.sessionName}`,
+		);
+
+		const profile = applySkcTmuxProfile({
+			tmuxCommand: plan.tmuxCommand,
+			target: plan.sessionName,
+			cwd: plan.cwd,
+			env,
+			spawnSync,
+			branch: plan.branch,
+			project: plan.project,
+			sessionId: plan.sessionId ?? null,
+			sessionStateFile: plan.sessionStateFile ?? null,
+		});
+		if (profile.failures.length > 0) {
+			cleanupCreatedTmuxSession(plan, spawnSync, options);
+			const failure =
+				profile.failures.find(item => item.command.args.includes("@skc-profile")) ?? profile.failures[0];
+			(context.diagnosticWriter ?? safeStderrWrite)(
+				formatTmuxLaunchDiagnostic("profile tagging failed", failure?.stderr),
+			);
+			return true;
+		}
+	}
+	if (created.exitCode !== 0) return false;
+	const attached = spawnSync(plan.tmuxCommand, ["attach-session", "-t", plan.sessionName], options);
+	if (attached.exitCode === 0) return true;
+	(context.diagnosticWriter ?? safeStderrWrite)(formatTmuxLaunchDiagnostic("attach failed", attached.stderr));
+	return true;
+}

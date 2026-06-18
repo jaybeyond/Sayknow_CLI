@@ -1,0 +1,29 @@
+{
+  "receiptId": "rcpt-golden-001",
+  "schemaVersion": 1,
+  "sessionId": "skc-golden-session",
+  "family": "completion",
+  "valid": true,
+  "createdAt": "2026-06-12T16:00:00.000Z",
+  "source": "harness-control-plane",
+  "subject": {
+    "workspace": "/work/golden-project",
+    "branch": "main",
+    "head": "deadbeef",
+    "commit": "deadbeef"
+  },
+  "evidence": {
+    "finalLifecycle": "completed",
+    "finalCommit": "deadbeef",
+    "prUrl": "https://github.com/example/golden/pull/1",
+    "issueArtifact": null,
+    "requiredValidationReceiptIds": [
+      "rcpt-validation-001"
+    ],
+    "blockers": []
+  },
+  "artifactHashes": {
+    "diff-patch": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  },
+  "sha256": "42c7179dfa2ed492520fc137c7a3e5b068187a8fca89be02056a87efed3f61eb"
+}
