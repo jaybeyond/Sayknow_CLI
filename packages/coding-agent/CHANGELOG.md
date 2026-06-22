@@ -4,6 +4,18 @@ Sayknow-CLI is a rebranded fork of [gajae-code](https://github.com/Yeachan-Heo/g
 This file tracks the **fork's own releases**; upstream's full feature history lives
 in that project. Each release notes the upstream version it is built on.
 
+## [0.2.7] — 2026-06-23
+
+### Added
+
+- **Plugin install security scan (advisory).** Newly installed plugins/skills are now
+  statically scanned before activation for risky patterns — `curl|bash` download-and-exec,
+  `eval`/dynamic import, credential/secret access, obfuscation, cron persistence, and
+  package-install markers — with risk scoring. Findings surface as warnings in the install
+  output and in `plugin doctor`. Controlled by `plugins.security.scanMode`
+  (`warn` = default, `off`, `block`) and `plugins.security.riskThreshold`. Warn-only by
+  default — it never blocks an install unless you opt into `block` mode.
+
 ## [0.2.6] — 2026-06-22
 
 ### Fixed

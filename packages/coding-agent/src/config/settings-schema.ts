@@ -2970,6 +2970,38 @@ export const SETTINGS_SCHEMA = {
 	"thinkingBudgets.xhigh": { type: "number", default: 32768 },
 
 	"thinkingBudgets.max": { type: "number", default: 65536 },
+
+	// ────────────────────────────────────────────────────────────────────────
+	// Plugins — security scanner
+	// ────────────────────────────────────────────────────────────────────────
+
+	"plugins.security.scanMode": {
+		type: "enum",
+		values: ["warn", "off", "block"] as const,
+		default: "warn",
+		ui: {
+			tab: "interaction",
+			label: "Plugin Security Scan Mode",
+			description:
+				"warn: scan on install and log advisory findings (default); off: skip scan; block: deny install when score exceeds threshold",
+			options: [
+				{ value: "warn", label: "Warn", description: "Scan and log advisory findings (default)" },
+				{ value: "off", label: "Off", description: "Disable security scanning" },
+				{ value: "block", label: "Block", description: "Deny install when risk score exceeds threshold" },
+			],
+		},
+	},
+
+	"plugins.security.riskThreshold": {
+		type: "number",
+		default: 60,
+		validate: (value: number) => Number.isFinite(value) && value >= 0 && value <= 100,
+		ui: {
+			tab: "interaction",
+			label: "Plugin Security Risk Threshold",
+			description: "Score threshold (0–100) above which block mode denies install. Default 60.",
+		},
+	},
 } as const;
 
 // ═══════════════════════════════════════════════════════════════════════════

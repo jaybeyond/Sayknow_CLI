@@ -30,7 +30,11 @@
     "packages/coding-agent/test/skc-ui-redesign.test.ts",
     "packages/tui/src/components/editor.ts",
     "packages/tui/src/terminal.ts",
-    "packages/utils/src/postmortem.ts"
+    "packages/utils/src/postmortem.ts",
+    "packages/coding-agent/src/cli/plugin-cli.ts",
+    "packages/coding-agent/src/extensibility/plugins/index.ts",
+    "packages/coding-agent/src/extensibility/plugins/manager.ts",
+    "packages/coding-agent/src/extensibility/plugins/marketplace/manager.ts"
   ],
   "regenerate": [
     "bun.lock",

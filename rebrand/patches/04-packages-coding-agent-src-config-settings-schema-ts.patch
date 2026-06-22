@@ -17,14 +17,10 @@
  		ui: {
  			tab: "appearance",
  			label: "Dark Theme",
-@@ -380,6 +381,27 @@
- 				{ value: "unicode", label: "Unicode", description: "Standard symbols (default)" },
- 				{ value: "nerd", label: "Nerd Font", description: "Requires Nerd Font" },
- 				{ value: "ascii", label: "ASCII", description: "Maximum compatibility" },
-+			],
-+		},
-+	},
-+
+@@ -384,6 +385,27 @@
+ 		},
+ 	},
+ 
 +	language: {
 +		type: "enum",
 +		values: ["auto", "en", "ko", "zh", "ja", "es", "fr", "de"] as const,
@@ -42,10 +38,14 @@
 +				{ value: "es", label: "Español", description: "Spanish" },
 +				{ value: "fr", label: "Français", description: "French" },
 +				{ value: "de", label: "Deutsch", description: "German" },
- 			],
- 		},
- 	},
-@@ -1077,7 +1099,7 @@
++			],
++		},
++	},
++
+ 	colorBlindMode: {
+ 		type: "boolean",
+ 		default: false,
+@@ -1094,7 +1116,7 @@
  
  	"starReminder.enabled": {
  		type: "boolean",
@@ -54,3 +54,42 @@
  		ui: {
  			tab: "interaction",
  			label: "GitHub Star Reminder",
+@@ -2948,6 +2970,38 @@
+ 	"thinkingBudgets.xhigh": { type: "number", default: 32768 },
+ 
+ 	"thinkingBudgets.max": { type: "number", default: 65536 },
++
++	// ────────────────────────────────────────────────────────────────────────
++	// Plugins — security scanner
++	// ────────────────────────────────────────────────────────────────────────
++
++	"plugins.security.scanMode": {
++		type: "enum",
++		values: ["warn", "off", "block"] as const,
++		default: "warn",
++		ui: {
++			tab: "interaction",
++			label: "Plugin Security Scan Mode",
++			description:
++				"warn: scan on install and log advisory findings (default); off: skip scan; block: deny install when score exceeds threshold",
++			options: [
++				{ value: "warn", label: "Warn", description: "Scan and log advisory findings (default)" },
++				{ value: "off", label: "Off", description: "Disable security scanning" },
++				{ value: "block", label: "Block", description: "Deny install when risk score exceeds threshold" },
++			],
++		},
++	},
++
++	"plugins.security.riskThreshold": {
++		type: "number",
++		default: 60,
++		validate: (value: number) => Number.isFinite(value) && value >= 0 && value <= 100,
++		ui: {
++			tab: "interaction",
++			label: "Plugin Security Risk Threshold",
++			description: "Score threshold (0–100) above which block mode denies install. Default 60.",
++		},
++	},
+ } as const;
+ 
+ // ═══════════════════════════════════════════════════════════════════════════

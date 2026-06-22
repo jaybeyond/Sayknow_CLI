@@ -2115,6 +2115,33 @@
 				}
 			},
 			"additionalProperties": false
+		},
+		"plugins": {
+			"type": "object",
+			"properties": {
+				"security": {
+					"type": "object",
+					"properties": {
+						"scanMode": {
+							"type": "string",
+							"enum": [
+								"warn",
+								"off",
+								"block"
+							],
+							"description": "warn: scan on install and log advisory findings (default); off: skip scan; block: deny install when score exceeds threshold",
+							"default": "warn"
+						},
+						"riskThreshold": {
+							"type": "number",
+							"description": "Score threshold (0–100) above which block mode denies install. Default 60.",
+							"default": 60
+						}
+					},
+					"additionalProperties": false
+				}
+			},
+			"additionalProperties": false
 		}
 	},
 	"additionalProperties": false

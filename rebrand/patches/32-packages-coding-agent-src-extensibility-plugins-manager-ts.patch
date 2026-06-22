@@ -1,0 +1,81 @@
+--- a/packages/coding-agent/src/extensibility/plugins/manager.ts
++++ b/packages/coding-agent/src/extensibility/plugins/manager.ts
+@@ -10,7 +10,9 @@
+ 	isEnoent,
+ 	logger,
+ } from "@sayknow-cli/utils";
++import { settings } from "../../config/settings";
+ import { extractPackageName, parsePluginSpec } from "./parser";
++import { scanPluginDir, toDoctorChecks } from "./security-scanner";
+ import type {
+ 	DoctorCheck,
+ 	DoctorOptions,
+@@ -210,6 +212,9 @@
+ 			}
+ 		}
+ 		// null = use defaults
++
++		// Security scan — advisory hook, runs after package is on disk but before config is saved.
++		await this.#runSecurityScan(pkg.name, path.join(getPluginsNodeModules(), actualName));
+ 
+ 		// Update runtime config
+ 		const config = await this.#ensureConfigLoaded();
+@@ -614,6 +619,14 @@
+ 					}
+ 				}
+ 			}
++
++			// Security scan for installed plugin
++			try {
++				const secReport = await scanPluginDir(pluginPath);
++				checks.push(...toDoctorChecks(name, secReport));
++			} catch {
++				// advisory — never fail doctor
++			}
+ 		}
+ 
+ 		// Check for orphaned runtime config entries
+@@ -630,6 +643,43 @@
+ 		}
+ 
+ 		return checks;
++	}
++
++	async #runSecurityScan(pluginName: string, dir: string): Promise<void> {
++		// Resolve the scan mode defensively — this can run from CLI paths where Settings
++		// is not initialized, and an advisory scan must NEVER abort an install.
++		let mode = "warn";
++		try {
++			mode = settings.get("plugins.security.scanMode");
++		} catch {
++			mode = "warn";
++		}
++		if (mode === "off") return;
++		try {
++			const report = await scanPluginDir(dir);
++			if (report.riskLevel === "none") return;
++			logger.warn("Plugin security scan flagged risky patterns", {
++				plugin: pluginName,
++				riskLevel: report.riskLevel,
++				score: report.score,
++				findings: report.findings,
++			});
++			// score: 100 = safe, lower = riskier — block when it drops to/under the threshold.
++			let threshold = 60;
++			try {
++				threshold = settings.get("plugins.security.riskThreshold");
++			} catch {
++				threshold = 60;
++			}
++			if (mode === "block" && report.score <= threshold) {
++				throw new Error(
++					`Plugin "${pluginName}" blocked by security policy: ${report.riskLevel} risk (score ${report.score}). Set plugins.security.scanMode=warn to override.`,
++				);
++			}
++		} catch (err) {
++			if (mode === "block") throw err;
++			logger.debug("Security scan skipped due to error", { plugin: pluginName, error: err });
++		}
+ 	}
+ 
+ 	async #fixMissingPlugin(): Promise<boolean> {

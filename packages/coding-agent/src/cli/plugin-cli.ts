@@ -6,6 +6,7 @@
 
 import { APP_NAME, getProjectDir } from "@sayknow-cli/utils";
 import chalk from "chalk";
+import { Settings } from "../config/settings";
 import { resolveOrDefaultProjectRegistryPath } from "../discovery/helpers";
 import { PluginManager, parseSettingValue, validateSetting } from "../extensibility/plugins";
 import {
@@ -15,6 +16,7 @@ import {
 	getPluginsCacheDir,
 	MarketplaceManager,
 } from "../extensibility/plugins/marketplace/index.js";
+import { type ScanReport, scanPluginDir } from "../extensibility/plugins/security-scanner";
 import { theme } from "../modes/theme/theme";
 
 // =============================================================================
@@ -147,6 +149,10 @@ export { classifyInstallTarget } from "./classify-install-target";
  * Run a plugin command.
  */
 export async function runPluginCommand(cmd: PluginCommandArgs): Promise<void> {
+	// Initialize settings so plugin commands can read config (e.g. the install-time
+	// security-scan mode/threshold); mirrors the other CLI command handlers. The scan
+	// itself also tolerates an uninitialized Settings, so this is best-effort.
+	await Settings.init().catch(() => {});
 	const manager = new PluginManager();
 
 	switch (cmd.action) {
@@ -342,6 +348,21 @@ async function handleUpgrade(args: string[], flags: PluginCommandArgs["flags"]):
 	}
 }
 
+function printSecurityAdvisory(report: ScanReport): void {
+	const riskColor = report.riskLevel === "high" ? chalk.red : report.riskLevel === "medium" ? chalk.yellow : chalk.dim;
+	console.log(
+		riskColor(`${theme.status.warning} Security advisory: ${report.riskLevel} risk (score ${report.score})`),
+	);
+	for (const f of report.findings.slice(0, 5)) {
+		const loc = f.line !== undefined ? `${f.file}:${f.line}` : f.file;
+		console.log(chalk.dim(`  ${f.id}: ${loc}`));
+	}
+	if (report.findings.length > 5) {
+		console.log(chalk.dim(`  ... and ${report.findings.length - 5} more finding(s)`));
+	}
+	console.log(chalk.dim("  Advisory only (regex-based, may have false positives)."));
+}
+
 async function handleInstall(
 	manager: PluginManager,
 	packages: string[],
@@ -368,11 +389,28 @@ async function handleInstall(
 					force: flags.force,
 					scope: flags.scope,
 				});
-				console.log(
-					chalk.green(
-						`${theme.status.success} Installed ${target.name} from ${target.marketplace} (${entry.version})`,
-					),
-				);
+				if (flags.json) {
+					// advisory is attached below via the scan path
+				} else {
+					console.log(
+						chalk.green(
+							`${theme.status.success} Installed ${target.name} from ${target.marketplace} (${entry.version})`,
+						),
+					);
+				}
+				// Post-install advisory scan (non-blocking)
+				try {
+					const report = await scanPluginDir(entry.installPath);
+					if (report.riskLevel !== "none") {
+						if (flags.json) {
+							console.log(JSON.stringify({ installed: target.name, securityAdvisory: report }, null, 2));
+						} else {
+							printSecurityAdvisory(report);
+						}
+					}
+				} catch {
+					// advisory — never fail install
+				}
 			} catch (err) {
 				console.error(chalk.red(`${theme.status.error} Failed to install ${spec}: ${err}`));
 				process.exit(1);
@@ -394,7 +432,17 @@ async function handleInstall(
 			const result = await manager.install(spec, { force: flags.force, dryRun: flags.dryRun });
 
 			if (flags.json) {
-				console.log(JSON.stringify(result, null, 2));
+				// Post-install advisory scan for JSON output
+				let securityAdvisory: ScanReport | undefined;
+				if (!flags.dryRun && result.path) {
+					try {
+						const report = await scanPluginDir(result.path);
+						if (report.riskLevel !== "none") securityAdvisory = report;
+					} catch {
+						// advisory
+					}
+				}
+				console.log(JSON.stringify(securityAdvisory ? { ...result, securityAdvisory } : result, null, 2));
 			} else {
 				if (flags.dryRun) {
 					console.log(chalk.dim(`[dry-run] Would install ${spec}`));
@@ -405,6 +453,15 @@ async function handleInstall(
 					}
 					if (result.manifest.description) {
 						console.log(chalk.dim(`  ${result.manifest.description}`));
+					}
+					// Post-install advisory scan
+					if (result.path) {
+						try {
+							const report = await scanPluginDir(result.path);
+							if (report.riskLevel !== "none") printSecurityAdvisory(report);
+						} catch {
+							// advisory
+						}
 					}
 				}
 			}
