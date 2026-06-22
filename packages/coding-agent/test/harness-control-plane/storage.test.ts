@@ -26,20 +26,29 @@ import {
 	type SessionHandle,
 	type SessionState,
 } from "../../src/harness-control-plane/types";
+import { harnessStateRoot } from "../../src/skc-runtime/session-layout";
 
 let root: string;
 let registryRoot: string;
 let registryEnv: NodeJS.ProcessEnv;
+let originalSkcSessionId: string | undefined;
 
 beforeEach(async () => {
 	root = await mkdtemp(path.join(tmpdir(), "harness-store-"));
 	registryRoot = await mkdtemp(path.join(tmpdir(), "harness-root-registry-"));
 	registryEnv = { ...process.env, SKC_HARNESS_ROOT_REGISTRY_DIR: registryRoot };
+	originalSkcSessionId = process.env.SKC_SESSION_ID;
+	process.env.SKC_SESSION_ID = "test-session";
 });
 
 afterEach(async () => {
 	await rm(root, { recursive: true, force: true });
 	await rm(registryRoot, { recursive: true, force: true });
+	if (originalSkcSessionId === undefined) {
+		delete process.env.SKC_SESSION_ID;
+	} else {
+		process.env.SKC_SESSION_ID = originalSkcSessionId;
+	}
 });
 
 function state(sessionId: string): SessionState {
@@ -126,8 +135,8 @@ describe("harness storage", () => {
 		expect(resolveHarnessRoot({ env: { SKC_HARNESS_STATE_ROOT: "/z" } as NodeJS.ProcessEnv })).toBe(
 			path.resolve("/z"),
 		);
-		expect(resolveHarnessRoot({ cwd: "/repo", env: {} as NodeJS.ProcessEnv })).toBe(
-			path.join("/repo", ".skc", "state", "harness"),
+		expect(resolveHarnessRoot({ cwd: "/repo", env: { SKC_SESSION_ID: "test-session" } as NodeJS.ProcessEnv })).toBe(
+			harnessStateRoot("/repo", "test-session"),
 		);
 	});
 

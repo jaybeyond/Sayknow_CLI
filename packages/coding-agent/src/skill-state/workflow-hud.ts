@@ -40,7 +40,7 @@ interface UltragoalHudState extends WorkflowGateHudState {
 	currentGoal?: UltragoalLikeGoal;
 	counts: Record<string, number>;
 	goals: UltragoalLikeGoal[];
-	latestLedgerEvent?: { event?: string; goalId?: string; timestamp?: string };
+	latestLedgerEvent?: { event?: string; goalId?: string; timestamp?: string; kind?: string; evidence?: string };
 	updatedAt?: string;
 }
 
@@ -237,7 +237,9 @@ export function buildUltragoalHudSummary(state: UltragoalHudState): WorkflowHudS
 			chip(
 				"ledger",
 				state.latestLedgerEvent?.event
-					? [state.latestLedgerEvent.event, state.latestLedgerEvent.goalId].filter(Boolean).join(":")
+					? [state.latestLedgerEvent.event, state.latestLedgerEvent.kind, state.latestLedgerEvent.goalId]
+							.filter(Boolean)
+							.join(":")
 					: undefined,
 				35,
 			),

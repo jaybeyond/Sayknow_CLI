@@ -1,12 +1,17 @@
 /**
- * RLM session artifact layout under <cwd>/.skc/rlm/<sessionId>/.
+ * RLM session artifact layout under <cwd>/.skc/_session-{skcSessionId}/rlm/<rlmSessionId>/.
+ *
+ * The SKC session id (process boundary) scopes the directory; the RLM session id
+ * names the individual research run within it. The two ids are kept distinct.
  */
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { readNotebookDocument } from "../edit/notebook";
+import { rlmArtifactRoot } from "../skc-runtime/session-layout";
+import { resolveSkcSessionForWrite } from "../skc-runtime/session-resolution";
 import type { RlmArtifactPaths } from "./types";
 
-export const RLM_DIR_SEGMENT = path.join(".skc", "rlm");
+export const RLM_DIR_SEGMENT = "rlm";
 
 const SESSION_ID_RE = /^[A-Za-z0-9_-]+$/;
 
@@ -25,7 +30,11 @@ export function resolveRlmArtifactPaths(cwd: string, sessionId: string): RlmArti
 	if (!isValidRlmSessionId(sessionId)) {
 		throw new Error(`Invalid RLM session id: ${JSON.stringify(sessionId)}`);
 	}
-	const dir = path.join(cwd, RLM_DIR_SEGMENT, sessionId);
+	const dir = rlmArtifactRoot(
+		cwd,
+		resolveSkcSessionForWrite(cwd, { envSessionId: process.env.SKC_SESSION_ID }).skcSessionId,
+		sessionId,
+	);
 	return {
 		dir,
 		notebookPath: path.join(dir, "notebook.ipynb"),

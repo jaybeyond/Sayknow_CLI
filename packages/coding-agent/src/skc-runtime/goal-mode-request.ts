@@ -8,6 +8,8 @@ import {
 	type ModeChangeEntry,
 	type SessionEntry,
 } from "../session/session-manager";
+import { sessionStateDir, sessionUltragoalDir } from "./session-layout";
+import { resolveSkcSessionForRead, resolveSkcSessionForWrite, writeSessionActivityMarker } from "./session-resolution";
 import { removeFileAudited, writeJsonAtomic } from "./state-writer";
 
 export const SKC_SESSION_FILE_ENV = "SKC_SESSION_FILE";
@@ -48,12 +50,12 @@ function isEnoent(error: unknown): boolean {
 	);
 }
 
-function requestPath(cwd: string): string {
-	return path.join(cwd, ".skc", "state", "goal-mode-request.json");
+function requestPath(cwd: string, sessionId: string): string {
+	return path.join(sessionStateDir(cwd, sessionId), "goal-mode-request.json");
 }
 
-function ultragoalGoalsPath(cwd: string): string {
-	return path.join(cwd, ".skc", "ultragoal", "goals.json");
+function ultragoalGoalsPath(cwd: string, sessionId: string): string {
+	return path.join(sessionUltragoalDir(cwd, sessionId), "goals.json");
 }
 
 function isCreateGoalsArg(value: string): boolean {
@@ -65,8 +67,14 @@ export function isUltragoalCreateGoalsInvocation(args: readonly string[]): boole
 	return command !== undefined && isCreateGoalsArg(command);
 }
 
-export async function readUltragoalSkcObjective(cwd: string): Promise<{ objective: string; goalsPath: string }> {
-	const goalsPath = ultragoalGoalsPath(cwd);
+export async function readUltragoalSkcObjective(
+	cwd: string,
+	sessionId?: string | null,
+): Promise<{ objective: string; goalsPath: string }> {
+	const session = sessionId?.trim()
+		? { skcSessionId: sessionId.trim() }
+		: await resolveSkcSessionForRead(cwd, { envSessionId: process.env.SKC_SESSION_ID });
+	const goalsPath = ultragoalGoalsPath(cwd, session.skcSessionId);
 	try {
 		const plan = (await Bun.file(goalsPath).json()) as UltragoalPlanShape;
 		const objective = typeof plan.skcObjective === "string" ? plan.skcObjective.trim() : "";
@@ -87,7 +95,10 @@ export async function writePendingGoalModeRequest(input: {
 }): Promise<PendingGoalModeRequest> {
 	const objective = input.objective.trim();
 	if (!objective) throw new Error("goal objective is required");
-	const sessionId = input.sessionId?.trim();
+	const resolvedSessionId =
+		input.sessionId?.trim() ||
+		resolveSkcSessionForWrite(input.cwd, { envSessionId: process.env.SKC_SESSION_ID }).skcSessionId;
+	const sessionId = resolvedSessionId;
 	const request: PendingGoalModeRequest = {
 		version: REQUEST_VERSION,
 		kind: "goal_mode_request",
@@ -97,11 +108,12 @@ export async function writePendingGoalModeRequest(input: {
 		goalsPath: input.goalsPath,
 		...(sessionId ? { sessionId } : {}),
 	};
-	const filePath = requestPath(input.cwd);
+	const filePath = requestPath(input.cwd, sessionId);
 	await writeJsonAtomic(filePath, request, {
 		cwd: input.cwd,
-		audit: { category: "state", verb: "write", owner: "skc-runtime" },
+		audit: { category: "state", verb: "write", owner: "skc-runtime", sessionId },
 	});
+	await writeSessionActivityMarker(input.cwd, sessionId, { writer: "goal-mode-request", path: filePath });
 	return request;
 }
 
@@ -175,7 +187,10 @@ export async function consumePendingGoalModeRequest(
 	cwd: string,
 	currentSessionId?: string | null,
 ): Promise<PendingGoalModeRequest | null> {
-	const filePath = requestPath(cwd);
+	const session = currentSessionId?.trim()
+		? { skcSessionId: currentSessionId.trim() }
+		: await resolveSkcSessionForRead(cwd, { envSessionId: process.env.SKC_SESSION_ID });
+	const filePath = requestPath(cwd, session.skcSessionId);
 	let raw: unknown;
 	try {
 		raw = await Bun.file(filePath).json();
@@ -203,7 +218,7 @@ export async function consumePendingGoalModeRequest(
 	}
 	await removeFileAudited(filePath, {
 		cwd,
-		audit: { category: "prune", verb: "remove", owner: "skc-runtime" },
+		audit: { category: "prune", verb: "remove", owner: "skc-runtime", sessionId: session.skcSessionId },
 	}).catch(error => {
 		if (!isEnoent(error)) throw error;
 	});

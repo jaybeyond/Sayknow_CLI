@@ -131,9 +131,12 @@ describe("AgentSession concurrent prompt guard", () => {
 		const firstPrompt = session.prompt("First message");
 		await waitFor(() => session.isStreaming);
 
-		// steer should work while streaming
-		expect(() => session.steer("Steering message")).not.toThrow();
+		// steer should work while streaming. Capture the queued state before
+		// awaiting steer(): async steering may immediately resume/consume the
+		// queued message on fast runners once the promise settles.
+		const steering = session.steer("Steering message");
 		expect(session.queuedMessageCount).toBe(1);
+		await expect(steering).resolves.toBeUndefined();
 
 		// Cleanup
 		await session.abort();

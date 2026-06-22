@@ -6,9 +6,9 @@
  import { type Goal, type GoalModeState, normalizeGoal } from "../goals/state";
 +import { t } from "../i18n";
  import { resolveLocalUrlToPath } from "../internal-urls";
- import { LSP_STARTUP_EVENT_CHANNEL, type LspStartupEvent } from "../lsp/startup-events";
+ import { getLspStartupWarningMessage, LSP_STARTUP_EVENT_CHANNEL, type LspStartupEvent } from "../lsp/startup-events";
  import {
-@@ -1456,7 +1457,7 @@
+@@ -1478,7 +1479,7 @@
  	#getPlanReviewHelpText(): string {
  		const externalEditorKey = this.keybindings.getDisplayString("app.editor.external");
  		if (!externalEditorKey) {

@@ -11,7 +11,6 @@
  * - Extension UI: Extension UI requests are emitted, client responds with extension_ui_response
  */
 
-import * as path from "node:path";
 import { $pickenv, logger, readLines, Snowflake } from "@sayknow-cli/utils";
 import type {
 	ExtensionUIContext,
@@ -20,6 +19,7 @@ import type {
 } from "../../extensibility/extensions";
 import { type Theme, theme } from "../../modes/theme/theme";
 import type { AgentSession } from "../../session/agent-session";
+import { workflowGatePath } from "../../skc-runtime/session-layout";
 import { initializeExtensions } from "../runtime-init";
 import { dispatchRpcCommand } from "../shared/agent-wire/command-dispatch";
 import { AgentWireFrameSequencer, toAgentWireEventFrame } from "../shared/agent-wire/event-envelope";
@@ -336,7 +336,7 @@ export async function runRpcMode(
 	// Unattended control plane (#318/#319/#323/G011): routes negotiate_unattended +
 	// workflow_gate_response and lets skill runtimes emit gates over RPC.
 	const gateStore = new FileGateStore(
-		path.join(session.sessionManager.getCwd(), ".skc", "state", "workflow-gates", `${session.sessionId}.json`),
+		workflowGatePath(session.sessionManager.getCwd(), session.sessionId, session.sessionId),
 	);
 	const unattendedControlPlane = new UnattendedSessionControlPlane({
 		runId: session.sessionId,

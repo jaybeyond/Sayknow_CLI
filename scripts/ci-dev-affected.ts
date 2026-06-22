@@ -103,6 +103,10 @@ if (import.meta.main) {
 export type PlanMode = "pr" | "push";
 
 export function resolvePlanMode(): PlanMode {
+	const explicitMode = Bun.env.CI_DEV_PLAN_MODE?.trim();
+	if (explicitMode === "pr" || explicitMode === "push") {
+		return explicitMode;
+	}
 	return Bun.env.GITHUB_EVENT_NAME?.trim() === "pull_request" ? "pr" : "push";
 }
 
@@ -172,6 +176,7 @@ function isNativeBuildKey(key: string): boolean {
 // build task, so the shard can always download the artifact built once upstream.
 function taskNeedsNative(key: string): boolean {
 	return (
+		key === "root-check" ||
 		key === "root-test" ||
 		key === "cli-smoke" ||
 		key === "wrapper-version" ||
@@ -208,6 +213,7 @@ export function describeTasks(tasks: readonly Task[]): TaskMatrixEntry[] {
 // instead of re-resolving the base ref on each runner.
 async function emitMatrix(): Promise<void> {
 	const paths = await getChangedPaths();
+	const mode = resolvePlanMode();
 	const tasks = await resolvePlannedTasks(paths);
 	const entries = describeTasks(tasks);
 
@@ -225,6 +231,7 @@ async function emitMatrix(): Promise<void> {
 		`matrix=${JSON.stringify({ include: shards })}`,
 		`has_tasks=${shards.length > 0}`,
 		`has_native=${hasNative}`,
+		`plan_mode=${mode}`,
 		"changed_paths<<__SKC_PATHS_EOF__",
 		...paths,
 		"__SKC_PATHS_EOF__",
@@ -449,6 +456,7 @@ export function planTasks(paths: readonly string[], packages: readonly Workspace
 
 	if (toolingScriptChanged && !fullWorkspace && !ciOnly && !workflowHarnessOnly) {
 		add(tasks, "root-check", "Root TypeScript/tooling check", ["bun", "run", "check:ts"]);
+		ensureNativeBuild(tasks);
 	}
 	if (wrapperChanged) {
 		add(tasks, "wrapper-version", "Unscoped wrapper CLI version smoke", ["bun", "packages/sayknow-cli/bin/skc.js", "--version"]);
@@ -605,7 +613,7 @@ function addTestFileTask(tasks: Map<string, Task>, testFile: string): void {
 // root-level files). Returns [] when there is no direct mapping.
 function mappedTestsFor(changedPath: string, packages: readonly WorkspacePackage[], testFiles: readonly string[]): string[] {
 	if (isTestFilePath(changedPath)) {
-		return [changedPath];
+		return testFiles.includes(changedPath) ? [changedPath] : [];
 	}
 	const base = path.posix.basename(changedPath).replace(/\.(tsx?|jsx?|mts|cts)$/, "");
 	if (base === "") {

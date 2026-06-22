@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { estimateTokens } from "@sayknow-cli/agent-core/compaction/compaction";
+import { estimateMessageTokensHeuristic } from "@sayknow-cli/agent-core/compaction/compaction";
 import type { SessionEntry, SessionMessageEntry } from "@sayknow-cli/agent-core/compaction/entries";
 import { type PruneConfig, pruneToolOutputs } from "@sayknow-cli/agent-core/compaction/pruning";
 import type { ToolResultMessage } from "@sayknow-cli/ai/types";
@@ -52,7 +52,7 @@ function textOf(entry: SessionMessageEntry): string {
 }
 
 function tokens(entry: SessionMessageEntry): number {
-	return estimateTokens(entry.message);
+	return estimateMessageTokensHeuristic(entry.message);
 }
 
 function config(overrides: Partial<PruneConfig> = {}): PruneConfig {

@@ -99,7 +99,13 @@ describe("tmux GC safety", () => {
 					].join("\n"),
 				);
 			}
-			if (cmd.includes("show-options")) return spawnResult(0, cmd.at(-1) === "@skc-profile" ? "1\n" : "\n");
+			if (cmd.includes("show-options")) {
+				const target = cmd[cmd.indexOf("-t") + 1] ?? "";
+				return spawnResult(
+					0,
+					cmd.at(-1) === "@skc-profile" && target.includes("sayknow_cli_orphan") ? "1\n" : "\n",
+				);
+			}
 			return spawnResult(0, "");
 		});
 

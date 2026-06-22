@@ -147,11 +147,22 @@ export function resolveProviderModelReference(
 	modelId: string,
 	availableModels: readonly Model<Api>[],
 ): Model<Api> | undefined {
-	const normalizedProvider = provider.trim().toLowerCase();
-	const normalizedModelId = modelId.trim().toLowerCase();
+	const trimmedProvider = provider.trim();
+	const trimmedModelId = modelId.trim();
+	const normalizedProvider = trimmedProvider.toLowerCase();
+	const normalizedModelId = trimmedModelId.toLowerCase();
 	if (!normalizedProvider || !normalizedModelId) {
 		return undefined;
 	}
+
+	// Prefer an exact provider/model id match before falling back to the
+	// case-insensitive index. Some provider catalogs intentionally carry both a
+	// machine-id form (for example `minimax-m3`) and a display-cased alias
+	// (`MiniMax-M3`). The lowercase index correctly treats those aliases as
+	// ambiguous for fuzzy/case-insensitive lookup, but an exact selector should
+	// still resolve deterministically.
+	const caseExact = availableModels.find(m => m.provider === trimmedProvider && m.id === trimmedModelId);
+	if (caseExact) return caseExact;
 
 	const index = getProviderModelIndex(availableModels);
 	const exact = index.get(`${normalizedProvider}\u0000${normalizedModelId}`);

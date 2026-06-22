@@ -15,6 +15,8 @@ import { AskTool } from "@sayknow-cli/coding-agent/tools/ask";
 import { ToolError } from "@sayknow-cli/coding-agent/tools/tool-errors";
 import { guardToolForUltragoalAsk } from "@sayknow-cli/coding-agent/tools/ultragoal-ask-guard";
 
+const TEST_SESSION_ID = "ultragoal-ask-guard-test-session";
+const ORIGINAL_SKC_SESSION_ID = process.env.SKC_SESSION_ID;
 const tempRoots: string[] = [];
 
 async function tempDir(): Promise<string> {
@@ -24,6 +26,8 @@ async function tempDir(): Promise<string> {
 }
 
 afterEach(async () => {
+	if (ORIGINAL_SKC_SESSION_ID === undefined) delete process.env.SKC_SESSION_ID;
+	else process.env.SKC_SESSION_ID = ORIGINAL_SKC_SESSION_ID;
 	await Promise.all(tempRoots.splice(0).map(dir => fs.rm(dir, { recursive: true, force: true })));
 });
 
@@ -83,15 +87,38 @@ class StubExtensionWrappedAskTool {
 }
 
 describe("ultragoal ask guard", () => {
-	it("allows ask when durable ultragoal state is absent", async () => {
+	it("allows ask when durable ultragoal state is absent without requiring ambient SKC_SESSION_ID", async () => {
 		const cwd = await tempDir();
+		const previousSessionId = process.env.SKC_SESSION_ID;
+		delete process.env.SKC_SESSION_ID;
+		try {
+			const diagnostic = await isUltragoalAskBlocked(cwd);
+			expect(diagnostic.active).toBe(false);
+			expect(diagnostic.source).toBe("absent");
+			expect(diagnostic.goalsPath).toBe(path.join(cwd, ".skc", "ultragoal", "goals.json"));
+		} finally {
+			if (previousSessionId === undefined) delete process.env.SKC_SESSION_ID;
+			else process.env.SKC_SESSION_ID = previousSessionId;
+		}
+	});
+
+	it("blocks latest session-scoped ultragoal ask when SKC_SESSION_ID is absent", async () => {
+		const cwd = await tempDir();
+		process.env.SKC_SESSION_ID = TEST_SESSION_ID;
+		await createUltragoalPlan({ cwd, brief: "Implement the story" });
+		delete process.env.SKC_SESSION_ID;
+
 		const diagnostic = await isUltragoalAskBlocked(cwd);
-		expect(diagnostic.active).toBe(false);
-		expect(diagnostic.source).toBe("absent");
+
+		expect(diagnostic.active).toBe(true);
+		expect(diagnostic.source).toBe("goals_json");
+		expect(diagnostic.goalsPath).toBe(getUltragoalPaths(cwd, TEST_SESSION_ID).goalsPath);
+		expect(diagnostic.message).toContain("record-review-blockers");
 	});
 
 	it("blocks SDK-initial-path style wrapped ask while ultragoal is active", async () => {
 		const cwd = await tempDir();
+		process.env.SKC_SESSION_ID = TEST_SESSION_ID;
 		await createUltragoalPlan({ cwd, brief: "Implement the story" });
 		const execute = vi.fn(async () => {});
 		const guarded = guardToolForUltragoalAsk(stubAskTool(execute), () => cwd);
@@ -117,6 +144,7 @@ describe("ultragoal ask guard", () => {
 
 	it("blocks an unwrapped AskTool before prompting while ultragoal is active", async () => {
 		const cwd = await tempDir();
+		process.env.SKC_SESSION_ID = TEST_SESSION_ID;
 		await createUltragoalPlan({ cwd, brief: "Implement the story" });
 		const select = vi.fn(async () => "Yes");
 		const tool = new AskTool(createSession(cwd));
@@ -135,6 +163,7 @@ describe("ultragoal ask guard", () => {
 
 	it("allows ask when the ultragoal run is verified complete", async () => {
 		const cwd = await tempDir();
+		process.env.SKC_SESSION_ID = TEST_SESSION_ID;
 		await createUltragoalPlan({ cwd, brief: "Implement the story" });
 		const paths = getUltragoalPaths(cwd);
 		const now = new Date().toISOString();

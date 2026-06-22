@@ -4,7 +4,7 @@ exclude = ["crates/brush-core-vendored", "crates/brush-builtins-vendored"]
 resolver = "3"
 
 [workspace.package]
-version = "0.2.4"
+version = "0.2.5"
 edition = "2024"
 license = "MIT"
 authors = ["jaybeyond"]
@@ -291,11 +291,6 @@ syntect = { version = "5.3", default-features = false, features = [
 # Markup Conversion
 # ──────────────────────────────────────────────────────────────────────────────
 html-to-markdown-rs = { version = "2.24", default-features = false }
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Tokenization
-# ──────────────────────────────────────────────────────────────────────────────
-tiktoken-rs = "0.11"
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Shell Parsing

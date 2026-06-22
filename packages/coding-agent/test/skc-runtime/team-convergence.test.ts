@@ -1,11 +1,26 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { runNativeStateCommand } from "../../src/skc-runtime/state-runtime";
 import { monitorSkcTeam, persistSkcTeamModeStateSummary, startSkcTeam } from "../../src/skc-runtime/team-runtime";
 
+const TEST_SESSION_ID = "test-session";
 let cleanupRoot: string | undefined;
+let previousSkcSessionId: string | undefined;
+
+beforeAll(() => {
+	previousSkcSessionId = process.env.SKC_SESSION_ID;
+	process.env.SKC_SESSION_ID = TEST_SESSION_ID;
+});
+
+afterAll(() => {
+	if (previousSkcSessionId === undefined) {
+		delete process.env.SKC_SESSION_ID;
+	} else {
+		process.env.SKC_SESSION_ID = previousSkcSessionId;
+	}
+});
 
 afterEach(async () => {
 	if (!cleanupRoot) return;
@@ -23,12 +38,12 @@ describe("native skc team mode-state convergence", () => {
 			teamName: "converge-team",
 			cwd: cleanupRoot,
 			dryRun: true,
-			env: { PATH: "" },
+			env: { PATH: "", SKC_SESSION_ID: TEST_SESSION_ID },
 		});
 		await persistSkcTeamModeStateSummary(started, cleanupRoot);
 
 		const startRead = await runNativeStateCommand(
-			["read", "--mode", "team", "--session-id", "", "--json"],
+			["read", "--mode", "team", "--session-id", TEST_SESSION_ID, "--json"],
 			cleanupRoot,
 		);
 		expect(startRead.status).toBe(0);
@@ -37,11 +52,14 @@ describe("native skc team mode-state convergence", () => {
 		expect(startState.state.team_name).toBe(started.team_name);
 		expect(startState.state.task_counts).toEqual(started.task_counts);
 
-		const status = await monitorSkcTeam(started.team_name, cleanupRoot, { PATH: "" });
+		const status = await monitorSkcTeam(started.team_name, cleanupRoot, {
+			PATH: "",
+			SKC_SESSION_ID: TEST_SESSION_ID,
+		});
 		await persistSkcTeamModeStateSummary(status, cleanupRoot);
 
 		const statusRead = await runNativeStateCommand(
-			["read", "--mode", "team", "--session-id", "", "--json"],
+			["read", "--mode", "team", "--session-id", TEST_SESSION_ID, "--json"],
 			cleanupRoot,
 		);
 		expect(statusRead.status).toBe(0);

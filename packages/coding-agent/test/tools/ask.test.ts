@@ -1,10 +1,12 @@
-import { beforeAll, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeAll, describe, expect, it, spyOn, vi } from "bun:test";
 import type { AgentToolContext } from "@sayknow-cli/agent-core";
 import { Settings } from "@sayknow-cli/coding-agent/config/settings";
 import { getThemeByName, initTheme } from "@sayknow-cli/coding-agent/modes/theme/theme";
+import * as deepInterviewRecorder from "@sayknow-cli/coding-agent/skc-runtime/deep-interview-recorder";
 import type { ToolSession } from "@sayknow-cli/coding-agent/tools";
-import { AskTool, askToolRenderer } from "@sayknow-cli/coding-agent/tools/ask";
+import { AskTool, askSchema, askToolRenderer } from "@sayknow-cli/coding-agent/tools/ask";
 import { ToolAbortError } from "@sayknow-cli/coding-agent/tools/tool-errors";
+import { logger } from "@sayknow-cli/utils";
 
 function createSession(overrides: Partial<ToolSession> = {}): ToolSession {
 	return {
@@ -66,6 +68,23 @@ function stripAnsi(text: string): string {
 beforeAll(async () => {
 	await initTheme(false);
 });
+
+afterEach(() => {
+	vi.restoreAllMocks();
+});
+
+function deepInterviewMeta() {
+	return { round: 2, component: "Scope", dimension: "Constraints", ambiguity: 0.42 };
+}
+
+function singleDeepInterviewQuestion() {
+	return {
+		id: "q-deep",
+		question: "Which constraint matters most?",
+		options: [{ label: "Budget" }, { label: "Timeline" }],
+		deepInterview: deepInterviewMeta(),
+	};
+}
 
 describe("AskTool cancellation", () => {
 	it("aborts the turn when the user cancels selection", async () => {
@@ -1375,5 +1394,158 @@ describe("AskTool deep-interview rendering middleware", () => {
 		expect(renderedText).toContain("1. CSV");
 		expect(renderedText).toContain("2. PDF");
 		expect(renderedText).not.toContain("Round 2 | Component:");
+	});
+});
+
+describe("AskTool deep-interview recorder persistence", () => {
+	it("swallows recorder rejection and preserves the selected answer", async () => {
+		const warn = spyOn(logger, "warn").mockImplementation(() => {});
+		const recorder = spyOn(deepInterviewRecorder, "appendOrMergeDeepInterviewRound").mockRejectedValue(
+			new Error("recorder boom"),
+		);
+		const tool = new AskTool(createSession({ getSessionId: () => "session-ask" }));
+		const context = createContext({ select: async (_prompt, options) => options[1] });
+
+		const result = await tool.execute(
+			"call-recorder-reject",
+			{ questions: [singleDeepInterviewQuestion()] },
+			undefined,
+			undefined,
+			context,
+		);
+
+		expect(result.content[0]).toMatchObject({ type: "text", text: "User selected: Timeline" });
+		expect(result.details).toEqual({
+			question: "Which constraint matters most?",
+			options: ["Budget", "Timeline"],
+			multi: false,
+			selectedOptions: ["Timeline"],
+			customInput: undefined,
+		});
+		expect(recorder).toHaveBeenCalledWith(
+			"/tmp/test",
+			expect.any(String),
+			expect.objectContaining({
+				round: 2,
+				questionId: "q-deep",
+				component: "Scope",
+				dimension: "Constraints",
+				ambiguity: 0.42,
+				selectedOptions: ["Timeline"],
+			}),
+			{ sessionId: "session-ask" },
+		);
+		expect(warn).toHaveBeenCalledWith(expect.stringContaining("deep-interview round recording failed"));
+	});
+
+	it("times out a never-resolving recorder promise within the bounded await", async () => {
+		const warn = spyOn(logger, "warn").mockImplementation(() => {});
+		spyOn(deepInterviewRecorder, "appendOrMergeDeepInterviewRound").mockImplementation(
+			() => new Promise(() => {}) as ReturnType<typeof deepInterviewRecorder.appendOrMergeDeepInterviewRound>,
+		);
+		const tool = new AskTool(createSession({ getSessionId: () => "session-ask" }));
+		const context = createContext({ select: async (_prompt, options) => options[0] });
+		const started = performance.now();
+
+		const result = await tool.execute(
+			"call-recorder-timeout",
+			{ questions: [singleDeepInterviewQuestion()] },
+			undefined,
+			undefined,
+			context,
+		);
+
+		expect(performance.now() - started).toBeLessThan(1000);
+		expect(result.content[0]).toMatchObject({ type: "text", text: "User selected: Budget" });
+		expect(warn).toHaveBeenCalledWith(expect.stringContaining("timed out"));
+	});
+
+	it("swallows HUD sync failure after recorder write", async () => {
+		const warn = spyOn(logger, "warn").mockImplementation(() => {});
+		spyOn(deepInterviewRecorder, "appendOrMergeDeepInterviewRound").mockResolvedValue({
+			action: "created",
+			record: {} as Awaited<ReturnType<typeof deepInterviewRecorder.appendOrMergeDeepInterviewRound>>["record"],
+		});
+		spyOn(deepInterviewRecorder, "syncDeepInterviewRecorderHud").mockRejectedValue(new Error("hud boom"));
+		const tool = new AskTool(createSession({ getSessionId: () => "session-ask" }));
+		const context = createContext({ select: async (_prompt, options) => options[0] });
+
+		const result = await tool.execute(
+			"call-hud-reject",
+			{ questions: [singleDeepInterviewQuestion()] },
+			undefined,
+			undefined,
+			context,
+		);
+
+		expect(result.content[0]).toMatchObject({ type: "text", text: "User selected: Budget" });
+		expect(warn).toHaveBeenCalledWith(expect.stringContaining("deep-interview round recording failed"));
+	});
+
+	it("passes optional metadata for single, multi-question, and unattended workflow gate asks", async () => {
+		const recorder = spyOn(deepInterviewRecorder, "appendOrMergeDeepInterviewRound").mockResolvedValue({
+			action: "created",
+			record: {} as Awaited<ReturnType<typeof deepInterviewRecorder.appendOrMergeDeepInterviewRound>>["record"],
+		});
+		spyOn(deepInterviewRecorder, "syncDeepInterviewRecorderHud").mockResolvedValue(undefined);
+
+		await new AskTool(createSession({ getSessionId: () => "single-session" })).execute(
+			"call-single-meta",
+			{ questions: [singleDeepInterviewQuestion()] },
+			undefined,
+			undefined,
+			createContext({ select: async (_prompt, options) => options[0] }),
+		);
+
+		await new AskTool(createSession({ getSessionId: () => "multi-session" })).execute(
+			"call-multi-meta",
+			{
+				questions: [
+					singleDeepInterviewQuestion(),
+					{
+						...singleDeepInterviewQuestion(),
+						id: "q-deep-2",
+						deepInterview: { ...deepInterviewMeta(), round: 3 },
+					},
+				],
+			},
+			undefined,
+			undefined,
+			createContext({ select: async (_prompt, options) => options[0] }),
+		);
+
+		const gateEmitter = {
+			isUnattended: () => true,
+			emitGate: vi.fn(async () => ({ selected: ["Timeline"] })),
+		};
+		await new AskTool(
+			createSession({ hasUI: false, getSessionId: () => "gate-session", getWorkflowGateEmitter: () => gateEmitter }),
+		).execute("call-gate-meta", { questions: [singleDeepInterviewQuestion()] }, undefined, undefined, undefined);
+
+		expect(recorder).toHaveBeenCalledTimes(4);
+		expect(recorder.mock.calls.map(call => call[2])).toEqual([
+			expect.objectContaining({ round: 2, component: "Scope", dimension: "Constraints", ambiguity: 0.42 }),
+			expect.objectContaining({ round: 2, component: "Scope", dimension: "Constraints", ambiguity: 0.42 }),
+			expect.objectContaining({ round: 3, component: "Scope", dimension: "Constraints", ambiguity: 0.42 }),
+			expect.objectContaining({ round: 2, component: "Scope", dimension: "Constraints", ambiguity: 0.42 }),
+		]);
+	});
+
+	it("keeps deepInterview optional and rejects malformed metadata", () => {
+		expect(
+			askSchema.safeParse({ questions: [{ id: "q", question: "Pick?", options: [{ label: "A" }] }] }).success,
+		).toBe(true);
+		expect(
+			askSchema.safeParse({
+				questions: [
+					{
+						id: "q",
+						question: "Pick?",
+						options: [{ label: "A" }],
+						deepInterview: { round: "two", component: "Scope", dimension: "Constraints", ambiguity: 1.2 },
+					},
+				],
+			}).success,
+		).toBe(false);
 	});
 });

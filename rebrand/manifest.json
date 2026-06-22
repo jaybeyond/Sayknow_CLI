@@ -28,7 +28,9 @@
     "packages/coding-agent/test/sdk-model-selection.test.ts",
     "packages/coding-agent/test/settings-manager.test.ts",
     "packages/coding-agent/test/skc-ui-redesign.test.ts",
-    "packages/tui/src/components/editor.ts"
+    "packages/tui/src/components/editor.ts",
+    "packages/tui/src/terminal.ts",
+    "packages/utils/src/postmortem.ts"
   ],
   "regenerate": [
     "bun.lock",

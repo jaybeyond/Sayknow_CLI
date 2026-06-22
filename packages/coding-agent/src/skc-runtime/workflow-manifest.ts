@@ -4,8 +4,7 @@
  * hand-edited.
  */
 
-import type { CanonicalSkcWorkflowSkill } from "../skill-state/active-state";
-import { CANONICAL_SKC_WORKFLOW_SKILLS } from "../skill-state/active-state";
+import { CANONICAL_SKC_WORKFLOW_SKILLS, type CanonicalSkcWorkflowSkill } from "../skill-state/canonical-skills";
 import { initialPhaseForSkill } from "../skill-state/initial-phase";
 
 export interface WorkflowState {

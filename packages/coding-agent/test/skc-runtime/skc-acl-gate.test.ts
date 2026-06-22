@@ -8,7 +8,7 @@ import { getDeepInterviewMutationDecision } from "../../src/skill-state/deep-int
 async function withTempCwd(fn: (cwd: string) => Promise<void>): Promise<void> {
 	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "skc-acl-gate-"));
 	const priorSessionId = process.env.SKC_SESSION_ID;
-	delete process.env.SKC_SESSION_ID;
+	process.env.SKC_SESSION_ID = "test-session";
 	try {
 		await fn(dir);
 	} finally {
@@ -35,8 +35,6 @@ describe("G2 skc ACL gate", () => {
 				[tool("write"), { path: ".skc/state/foo.json", content: "{}" }],
 				[tool("edit"), { path: ".skc/specs/spec.md", edits: [{ old_text: "a", new_text: "b" }] }],
 				[tool("ast_edit"), { paths: [".skc/state/foo.json"], ops: [{ pat: "foo", out: "bar" }] }],
-				[tool("bash"), { command: "echo x > .skc/state/foo.json" }],
-				[tool("bash"), { command: "rm -rf .skc/specs" }],
 			];
 
 			for (const [targetTool, args] of blockedCases) {
@@ -65,6 +63,13 @@ describe("G2 skc ACL gate", () => {
 				args: { path: "src/product.ts", content: "x" },
 			});
 			expect(productWrite.blocked).toBe(false);
+
+			// Per #951 the mutation guard never blocks `bash`; `.skc/**` is gated only
+			// through the dedicated write/edit/ast_edit tools, so bash targeting .skc is allowed.
+			for (const command of ["echo x > .skc/state/foo.json", "rm -rf .skc/specs"]) {
+				const skcBash = await getDeepInterviewMutationDecision({ cwd, tool: tool("bash"), args: { command } });
+				expect(skcBash.blocked).toBe(false);
+			}
 		});
 	});
 });

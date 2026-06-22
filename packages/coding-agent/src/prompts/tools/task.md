@@ -28,13 +28,12 @@ Subagents have no conversation history. Every fact, file path, and direction the
 {{/if}}
 {{#if independentMode}}- `.inheritContext`: independent mode cannot inherit parent conversation. Omit it or set `"none"`; any non-`none` value is rejected before scheduling.{{/if}}
 {{#if customSchemaEnabled}}- `schema`: JTD schema for expected structured output (do not put format rules in assignments){{/if}}
-- `spawnPlan` (optional): required before any batch with more than 4 tasks, and before a reviewer agent spawns `explore`; include whyParallel, whyNotLocal, independence, expectedReceiptShape, and maxInlineTokens.
+- `spawnPlan` (optional): required before any batch with more than 4 tasks; include whyParallel, whyNotLocal, independence, expectedReceiptShape, and maxInlineTokens.
 {{#if isolationEnabled}}- `isolated`: run in isolated env; use when tasks edit overlapping files{{/if}}
 </parameters>
 
 <rules>
 - HARD runtime gate: calls with more than 4 tasks are rejected before any child launches unless `spawnPlan` is complete.
-- Reviewer->explore gate: a `reviewer` spawning `explore` is rejected before launch unless `spawnPlan` is complete, even for a single task.
 - NEVER assign tasks to run project-wide build/test/lint. Caller verifies after the batch.
 - **Subagents do not verify, lint, or format.** Every assignment MUST instruct the subagent to skip all gates and formatters. You run them once at the end across the union of changed files — avoids redundant runs and racing formatter passes.
 {{#if ircEnabled}}

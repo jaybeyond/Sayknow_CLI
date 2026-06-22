@@ -1,16 +1,29 @@
+import { existsSync } from "node:fs";
 import * as path from "node:path";
 import { logger } from "@sayknow-cli/utils";
 import type { SkillDiscoverySettings } from "../config/skill-settings-defaults";
 import { buildSessionContext, loadEntriesFromFile, type SessionEntry } from "../session/session-manager";
+import { activeSnapshotPath, modeStatePath as sessionModeStatePath } from "../skc-runtime/session-layout";
+import { resolveSkcSessionForRead } from "../skc-runtime/session-resolution";
 import { ModeStateSchema, SkillActiveStateSchema } from "../skc-runtime/state-schema";
-import { writeJsonAtomic, writeWorkflowEnvelopeAtomic } from "../skc-runtime/state-writer";
+import {
+	readExistingStateForMutation,
+	writeGuardedJsonAtomic,
+	writeGuardedWorkflowEnvelopeAtomic,
+} from "../skc-runtime/state-writer";
 import { isUltragoalBypassPrompt, readUltragoalVerificationState } from "../skc-runtime/ultragoal-guard";
 import { getUltragoalRunCompletionState, readUltragoalPlan } from "../skc-runtime/ultragoal-runtime";
 import {
 	readVisibleSkillActiveState as readCanonicalVisibleSkillActiveState,
 	type SkillActiveEntry,
 	type SkillActiveState,
+	syncSkillActiveState,
 } from "../skill-state/active-state";
+import { initialPhaseForSkill } from "../skill-state/initial-phase";
+
+// Re-export for existing callers and tests that imported it from this module.
+export { initialPhaseForSkill };
+
 import { WORKFLOW_STATE_VERSION } from "../skill-state/workflow-state-contract";
 import {
 	compareSkillKeywordMatches,
@@ -19,7 +32,7 @@ import {
 	type SkcWorkflowSkill,
 } from "./skill-keywords";
 
-export const SKC_STATE_DIR = ".skc/state";
+export const SKC_STATE_DIR = ".skc";
 export const SKILL_ACTIVE_STATE_FILE = "skill-active-state.json";
 
 export interface EffectiveSkillConfigInput {
@@ -199,31 +212,85 @@ export function resolveSkcStateDir(cwd: string, stateDir?: string): string {
 	return stateDir ? path.resolve(cwd, stateDir) : path.join(cwd, SKC_STATE_DIR);
 }
 
-function encodeStatePathSegment(value: string): string {
-	return encodeURIComponent(value).replaceAll(".", "%2E");
+async function resolveBoundarySessionId(cwd: string, sessionId?: string): Promise<string> {
+	const normalizedSessionId = sessionId?.trim();
+	if (normalizedSessionId) return normalizedSessionId;
+	return (await resolveSkcSessionForRead(cwd, { envSessionId: process.env.SKC_SESSION_ID })).skcSessionId;
 }
 
-import { initialPhaseForSkill } from "../skill-state/initial-phase";
-
-// Re-export for existing callers and tests that imported it from this module.
-export { initialPhaseForSkill };
-
-function modeStateFileName(skill: SkcWorkflowSkill): string {
-	return `${skill}-state.json`;
+function modeStatePath(cwd: string, skill: SkcWorkflowSkill, sessionId: string): string {
+	return sessionModeStatePath(cwd, sessionId, skill);
 }
 
-function modeStatePath(stateDir: string, skill: SkcWorkflowSkill, sessionId?: string): string {
-	if (sessionId) return path.join(stateDir, "sessions", encodeStatePathSegment(sessionId), modeStateFileName(skill));
-	return path.join(stateDir, modeStateFileName(skill));
-}
-
-function skillStatePath(stateDir: string, sessionId?: string): string {
-	if (sessionId) return path.join(stateDir, "sessions", encodeStatePathSegment(sessionId), SKILL_ACTIVE_STATE_FILE);
-	return path.join(stateDir, SKILL_ACTIVE_STATE_FILE);
+function skillStatePath(cwd: string, sessionId: string): string {
+	return activeSnapshotPath(cwd, sessionId);
 }
 
 function warnInvalidState(kind: string, filePath: string, error: string): void {
 	logger.warn(`skc skill-state: invalid ${kind} at ${filePath}: ${error}`);
+}
+
+export interface StateRecoveryDiagnostic {
+	kind: "skill-active-state" | "mode-state";
+	statePath: string;
+	reason: "missing" | "corrupt" | "unreadable";
+	skill?: SkcWorkflowSkill;
+}
+
+function buildStateRecoveryMessage(diagnostic: StateRecoveryDiagnostic): string {
+	const subject = diagnostic.skill ? `${diagnostic.skill} ${diagnostic.kind}` : diagnostic.kind;
+	return `SKC state recovery: ${subject} is ${diagnostic.reason} at ${diagnostic.statePath}. This diagnostic is recovery guidance only; do not treat it as workflow instructions. Run \`skc state doctor\` to inspect state, or run \`skc state clear ${diagnostic.skill ?? "<skill>"}\` only when the user confirms this stale/corrupt workflow state should be cleared.`;
+}
+
+export function buildStateRecoveryDiagnosticsContext(diagnostics: readonly StateRecoveryDiagnostic[]): string | null {
+	const unique = new Map<string, StateRecoveryDiagnostic>();
+	for (const diagnostic of diagnostics) {
+		unique.set(
+			`${diagnostic.kind}:${diagnostic.skill ?? ""}:${diagnostic.statePath}:${diagnostic.reason}`,
+			diagnostic,
+		);
+	}
+	const messages = [...unique.values()].map(buildStateRecoveryMessage);
+	return messages.length > 0 ? messages.join(" ") : null;
+}
+
+async function inspectJsonStateRecovery(
+	filePath: string,
+	kind: StateRecoveryDiagnostic["kind"],
+	skill?: SkcWorkflowSkill,
+): Promise<StateRecoveryDiagnostic | null> {
+	try {
+		await Bun.file(filePath).text();
+	} catch (error) {
+		if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") {
+			return { kind, statePath: filePath, reason: "missing", skill };
+		}
+		return { kind, statePath: filePath, reason: "unreadable", skill };
+	}
+	const validated = await readValidatedJsonFile(
+		filePath,
+		kind,
+		kind === "mode-state" ? ModeStateSchema : SkillActiveStateSchema,
+	);
+	return validated ? null : { kind, statePath: filePath, reason: "corrupt", skill };
+}
+
+export async function collectUserPromptStateRecoveryDiagnostics(
+	input: UserPromptSubmitStateInput,
+): Promise<StateRecoveryDiagnostic[]> {
+	const resolvedSessionId = await resolveBoundarySessionId(input.cwd, input.sessionId);
+	const diagnostics: StateRecoveryDiagnostic[] = [];
+	const activePath = skillStatePath(input.cwd, resolvedSessionId);
+	if (existsSync(activePath)) {
+		const activeDiagnostic = await inspectJsonStateRecovery(activePath, "skill-active-state");
+		if (activeDiagnostic) diagnostics.push(activeDiagnostic);
+	}
+	const ultragoalPath = modeStatePath(input.cwd, "ultragoal", resolvedSessionId);
+	if (existsSync(ultragoalPath)) {
+		const ultragoalDiagnostic = await inspectJsonStateRecovery(ultragoalPath, "mode-state", "ultragoal");
+		if (ultragoalDiagnostic) diagnostics.push(ultragoalDiagnostic);
+	}
+	return diagnostics;
 }
 
 async function readValidatedJsonFile<T>(
@@ -254,13 +321,6 @@ async function readValidatedJsonFile<T>(
 	return value;
 }
 
-async function writeJsonFile(filePath: string, value: unknown, cwd: string): Promise<void> {
-	await writeJsonAtomic(filePath, value, {
-		cwd,
-		audit: { category: "state", verb: "write", owner: "skc-hook" },
-	});
-}
-
 function entryMatchesContext(
 	entry: SkillActiveEntry,
 	state: SkillActiveState,
@@ -286,23 +346,9 @@ function isWorkflowActiveEntry(entry: SkillActiveEntry): entry is SkillActiveEnt
 export async function readVisibleSkillActiveState(
 	cwd: string,
 	sessionId?: string,
-	stateDir?: string,
+	_stateDir?: string,
 ): Promise<SkillActiveState | null> {
-	if (!stateDir) return await readCanonicalVisibleSkillActiveState(cwd, sessionId);
-	const resolvedStateDir = resolveSkcStateDir(cwd, stateDir);
-	if (sessionId) {
-		const sessionState = await readValidatedJsonFile<SkillActiveState>(
-			skillStatePath(resolvedStateDir, sessionId),
-			"skill-active-state",
-			SkillActiveStateSchema,
-		);
-		if (sessionState) return sessionState;
-	}
-	return await readValidatedJsonFile<SkillActiveState>(
-		skillStatePath(resolvedStateDir),
-		"skill-active-state",
-		SkillActiveStateSchema,
-	);
+	return await readCanonicalVisibleSkillActiveState(cwd, await resolveBoundarySessionId(cwd, sessionId));
 }
 
 interface SeedSkillActivationStateInput {
@@ -320,17 +366,17 @@ async function seedSkillActivationState(
 	source: string,
 	input: SeedSkillActivationStateInput,
 ): Promise<SkillActiveState> {
-	const resolvedStateDir = resolveSkcStateDir(input.cwd, input.stateDir);
+	const resolvedSessionId = await resolveBoundarySessionId(input.cwd, input.sessionId);
 	const nowIso = input.nowIso ?? new Date().toISOString();
 	const phase = initialPhaseForSkill(skill);
-	const initializedStatePath = modeStatePath(resolvedStateDir, skill, input.sessionId);
+	const initializedStatePath = modeStatePath(input.cwd, skill, resolvedSessionId);
 	const entry: SkillActiveEntry = {
 		skill,
 		phase,
 		active: true,
 		activated_at: nowIso,
 		updated_at: nowIso,
-		...(input.sessionId ? { session_id: input.sessionId } : {}),
+		session_id: resolvedSessionId,
 		...(input.threadId ? { thread_id: input.threadId } : {}),
 		...(input.turnId ? { turn_id: input.turnId } : {}),
 	};
@@ -343,7 +389,7 @@ async function seedSkillActivationState(
 		activated_at: nowIso,
 		updated_at: nowIso,
 		source,
-		...(input.sessionId ? { session_id: input.sessionId } : {}),
+		session_id: resolvedSessionId,
 		...(input.threadId ? { thread_id: input.threadId } : {}),
 		...(input.turnId ? { turn_id: input.turnId } : {}),
 		initialized_mode: skill,
@@ -357,7 +403,7 @@ async function seedSkillActivationState(
 		skill,
 		cwd: input.cwd,
 		updated_at: nowIso,
-		...(input.sessionId ? { session_id: input.sessionId } : {}),
+		session_id: resolvedSessionId,
 		...(input.threadId ? { thread_id: input.threadId } : {}),
 		...(input.turnId ? { turn_id: input.turnId } : {}),
 	};
@@ -366,20 +412,55 @@ async function seedSkillActivationState(
 		modeState.threshold_source = "default";
 	}
 
-	await writeWorkflowEnvelopeAtomic(initializedStatePath, modeState, {
+	await readExistingStateForMutation(initializedStatePath);
+	const expectedRevision = 0;
+	await writeGuardedWorkflowEnvelopeAtomic(initializedStatePath, modeState, {
 		cwd: input.cwd,
+		policy: "source",
+		expectedRevision,
 		receipt: {
 			cwd: input.cwd,
 			skill,
 			owner: "skc-hook",
 			command: source,
-			sessionId: input.sessionId,
+			sessionId: resolvedSessionId,
 		},
-		audit: { category: "state", verb: "write", owner: "skc-hook", skill },
+		audit: { category: "state", verb: "write", owner: "skc-hook", skill, sessionId: resolvedSessionId },
 	});
-	await writeJsonFile(skillStatePath(resolvedStateDir, input.sessionId), state, input.cwd);
-	if (input.sessionId) {
-		await writeJsonFile(skillStatePath(resolvedStateDir), state, input.cwd);
+	const persistedModeState =
+		(await readValidatedJsonFile<ModeState>(initializedStatePath, "mode-state", ModeStateSchema)) ?? modeState;
+	const sourceRevision =
+		typeof persistedModeState.state_revision === "number" && Number.isFinite(persistedModeState.state_revision)
+			? persistedModeState.state_revision
+			: undefined;
+
+	try {
+		await syncSkillActiveState({
+			cwd: input.cwd,
+			skill,
+			active: true,
+			phase,
+			sessionId: resolvedSessionId,
+			threadId: input.threadId,
+			turnId: input.turnId,
+			source,
+			receipt: undefined,
+			sourceRevision,
+			nowIso,
+		});
+	} catch {
+		// Derived active-state/HUD writes are best-effort during activation; source mode-state already persisted.
+	}
+	try {
+		await writeGuardedJsonAtomic(skillStatePath(input.cwd, resolvedSessionId), state, {
+			cwd: input.cwd,
+			policy: "cache",
+			sourceRevision: (sourceRevision ?? 0) + 1,
+			receipt: undefined,
+			audit: { category: "state", verb: "write", owner: "skc-hook", sessionId: resolvedSessionId },
+		});
+	} catch {
+		// Corrupt derived active-state is reported by recovery diagnostics; activation remains fail-open.
 	}
 	return state;
 }
@@ -418,16 +499,17 @@ export async function ensureWorkflowSkillActivationState(
 ): Promise<SkillActiveState | null> {
 	const skill = input.skill.trim();
 	if (!isSkcWorkflowSkill(skill)) return null;
-	const existing = await readVisibleSkillActiveState(input.cwd, input.sessionId, input.stateDir);
+	const resolvedSessionId = await resolveBoundarySessionId(input.cwd, input.sessionId);
+	const existing = await readVisibleSkillActiveState(input.cwd, resolvedSessionId, input.stateDir);
 	const alreadyActive = listActiveSkills(existing).some(
 		entry =>
 			entry.skill === skill &&
-			(existing ? entryMatchesContext(entry, existing, input.sessionId, input.threadId) : true),
+			(existing ? entryMatchesContext(entry, existing, resolvedSessionId, input.threadId) : true),
 	);
 	if (alreadyActive) return existing;
 	return await seedSkillActivationState(skill, `/skill:${skill}`, "skc-skill-invocation", {
 		cwd: input.cwd,
-		sessionId: input.sessionId,
+		sessionId: resolvedSessionId,
 		threadId: input.threadId,
 		turnId: input.turnId,
 		nowIso: input.nowIso,
@@ -565,18 +647,13 @@ async function readVisibleModeState(
 	cwd: string,
 	skill: SkcWorkflowSkill,
 	sessionId?: string,
-	stateDir?: string,
+	_stateDir?: string,
 ): Promise<{ state: ModeState; statePath: string } | null> {
-	const resolvedStateDir = resolveSkcStateDir(cwd, stateDir);
-	if (sessionId) {
-		const sessionStatePath = modeStatePath(resolvedStateDir, skill, sessionId);
-		const sessionState = await readValidatedJsonFile<ModeState>(sessionStatePath, "mode-state", ModeStateSchema);
-		if (sessionState) return { state: sessionState, statePath: sessionStatePath };
-	}
-	const rootStatePath = modeStatePath(resolvedStateDir, skill);
-	const rootState = await readValidatedJsonFile<ModeState>(rootStatePath, "mode-state", ModeStateSchema);
-	if (!rootState) return null;
-	return { state: rootState, statePath: rootStatePath };
+	const resolvedSessionId = await resolveBoundarySessionId(cwd, sessionId);
+	const sessionStatePath = modeStatePath(cwd, skill, resolvedSessionId);
+	const sessionState = await readValidatedJsonFile<ModeState>(sessionStatePath, "mode-state", ModeStateSchema);
+	if (!sessionState) return null;
+	return { state: sessionState, statePath: sessionStatePath };
 }
 
 function stateMatchesContext(state: ModeState, sessionId?: string, threadId?: string): boolean {
@@ -599,10 +676,11 @@ async function readCurrentGoalObjectiveFromSessionFile(sessionFile: string | und
 }
 
 export async function buildActiveUltragoalPromptContext(input: UserPromptSubmitStateInput): Promise<string | null> {
-	const visibleModeState = await readVisibleModeState(input.cwd, "ultragoal", input.sessionId, input.stateDir);
+	const resolvedSessionId = await resolveBoundarySessionId(input.cwd, input.sessionId);
+	const visibleModeState = await readVisibleModeState(input.cwd, "ultragoal", resolvedSessionId, input.stateDir);
 	if (!visibleModeState) return null;
 	if (isTerminalModeState(visibleModeState.state)) return null;
-	if (!stateMatchesContext(visibleModeState.state, input.sessionId, input.threadId)) return null;
+	if (!stateMatchesContext(visibleModeState.state, resolvedSessionId, input.threadId)) return null;
 
 	const phase = String(visibleModeState.state.current_phase ?? "active");
 	const stateObjective =
@@ -638,21 +716,46 @@ export async function buildActiveUltragoalPromptContext(input: UserPromptSubmitS
 	return `Ultragoal is active (phase: ${phase}; state: ${visibleModeState.statePath}). If the user prompt is a steering request, use \`skc ultragoal steer\` to add or steer subgoals. Normal prose should not mutate Ultragoal state.`;
 }
 
+function buildHandoffStopReleaseGuidance(skill: SkcWorkflowSkill): string {
+	return `Use the ask tool to present the next handoff step, then persist one concrete release action: hand off to the next workflow, run \`skc state clear ${skill}\`, demote the skill with active:false, crystallize the spec when finishing deep-interview, or deliberately cancel the workflow.`;
+}
+
+function buildHandoffModeStateRecoveryMessage(skill: SkcWorkflowSkill, phase: string, statePath: string): string {
+	return `SKC handoff skill "${skill}" mode-state is missing or corrupt (phase: ${phase}; state: ${statePath}). ${buildHandoffStopReleaseGuidance(skill)}`;
+}
+
+function buildHandoffForceAskMessage(skill: SkcWorkflowSkill, phase: string, statePath: string): string {
+	return `SKC handoff skill "${skill}" must not stop without offering a next step (phase: ${phase}; state: ${statePath}). ${buildHandoffStopReleaseGuidance(skill)}`;
+}
+
 export async function buildSkillStopOutput(input: StopHookInput): Promise<Record<string, unknown> | null> {
-	const resolvedStateDir = resolveSkcStateDir(input.cwd, input.stateDir);
-	const skillState = await readVisibleSkillActiveState(input.cwd, input.sessionId, input.stateDir);
+	const resolvedSessionId = await resolveBoundarySessionId(input.cwd, input.sessionId);
+	const skillState = await readVisibleSkillActiveState(input.cwd, resolvedSessionId, input.stateDir);
 	const activeEntries = listActiveSkills(skillState)
 		.filter(isWorkflowActiveEntry)
-		.filter(entry => (skillState ? entryMatchesContext(entry, skillState, input.sessionId, input.threadId) : false));
+		.filter(entry =>
+			skillState ? entryMatchesContext(entry, skillState, resolvedSessionId, input.threadId) : false,
+		);
 	if (!skillState || activeEntries.length === 0) return null;
 
 	for (const entry of activeEntries) {
 		const modeState = await readValidatedJsonFile<ModeState>(
-			modeStatePath(resolvedStateDir, entry.skill, input.sessionId),
+			modeStatePath(input.cwd, entry.skill, resolvedSessionId),
 			"mode-state",
 			ModeStateSchema,
 		);
 		const handoffRequired = isHandoffRequiredSkill(entry.skill);
+		if (!modeState && handoffRequired) {
+			const phase = String(entry.phase ?? skillState.phase ?? "active");
+			const statePath = modeStatePath(input.cwd, entry.skill, resolvedSessionId);
+			const recoveryMessage = buildHandoffModeStateRecoveryMessage(entry.skill, phase, statePath);
+			return {
+				decision: "block",
+				reason: recoveryMessage,
+				stopReason: `skc_skill_${entry.skill.replace(/-/g, "_")}_mode_state_recovery`,
+				systemMessage: recoveryMessage,
+			};
+		}
 		if (modeStateReleasesStop(modeState, handoffRequired)) {
 			// A mode-state that claims it releases the Stop block must agree with
 			// authoritative durable state. If a stale/incoherent mode-state would
@@ -660,11 +763,7 @@ export async function buildSkillStopOutput(input: StopHookInput): Promise<Record
 			// of trusting the single file (see #659).
 			const staleRelease = await detectStaleModeStateRelease(entry.skill, input.cwd);
 			if (staleRelease) {
-				const coherenceMessage = `SKC skill "${entry.skill}" mode-state reports it released the Stop block (${modeStatePath(
-					resolvedStateDir,
-					entry.skill,
-					input.sessionId,
-				)}), but ${staleRelease}. The mode-state is incoherent with authoritative durable state; finish or explicitly clear the pending work before stopping.`;
+				const coherenceMessage = `SKC skill "${entry.skill}" mode-state reports it released the Stop block (${modeStatePath(input.cwd, entry.skill, resolvedSessionId)}), but ${staleRelease}. The mode-state is incoherent with authoritative durable state; finish or explicitly clear the pending work before stopping.`;
 				return {
 					decision: "block",
 					reason: coherenceMessage,
@@ -678,11 +777,7 @@ export async function buildSkillStopOutput(input: StopHookInput): Promise<Record
 			// as legitimate terminals). See #674.
 			const uncrystallized = await detectUncrystallizedDeepInterviewStop(entry.skill, modeState, input.cwd);
 			if (uncrystallized) {
-				const crystallizeMessage = `SKC deep-interview must crystallize before stopping (${modeStatePath(
-					resolvedStateDir,
-					entry.skill,
-					input.sessionId,
-				)}): ${uncrystallized}.`;
+				const crystallizeMessage = `SKC deep-interview must crystallize before stopping (${modeStatePath(input.cwd, entry.skill, resolvedSessionId)}): ${uncrystallized}.`;
 				return {
 					decision: "block",
 					reason: crystallizeMessage,
@@ -693,7 +788,7 @@ export async function buildSkillStopOutput(input: StopHookInput): Promise<Record
 			continue;
 		}
 		const phase = String(modeState?.current_phase ?? entry.phase ?? skillState.phase ?? "active");
-		const statePath = modeStatePath(resolvedStateDir, entry.skill, input.sessionId);
+		const statePath = modeStatePath(input.cwd, entry.skill, resolvedSessionId);
 		if (entry.skill === "ultragoal") {
 			const objective =
 				(await readCurrentGoalObjectiveFromSessionFile(input.sessionFile)) ??
@@ -720,7 +815,7 @@ export async function buildSkillStopOutput(input: StopHookInput): Promise<Record
 			}
 		}
 		const systemMessage = handoffRequired
-			? `SKC handoff skill "${entry.skill}" must not stop without offering a next step (phase: ${phase}; state: ${statePath}). Use the ask tool to present the next handoff step — e.g. refine further, hand off to ralplan/team/ultragoal, or finish — then chain or explicitly clear the skill before stopping.`
+			? buildHandoffForceAskMessage(entry.skill, phase, statePath)
 			: `SKC skill "${entry.skill}" is still active (phase: ${phase}; state: ${statePath}). Continue or explicitly finish/cancel the skill before stopping.`;
 		return {
 			decision: "block",

@@ -14,6 +14,7 @@ import type { Context, Model, OpenAICompat } from "@sayknow-cli/ai/types";
 const compat: Required<OpenAICompat> = {
 	supportsStore: true,
 	supportsDeveloperRole: false,
+	sendSessionHeaders: false,
 	supportsMultipleSystemMessages: true,
 	supportsReasoningEffort: false,
 	reasoningEffortMap: {},

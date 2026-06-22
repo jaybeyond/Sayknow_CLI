@@ -150,6 +150,52 @@ export async function updateMCPServer(filePath: string, name: string, config: MC
 }
 
 /**
+ * Result of an {@link upsertMCPServer} call.
+ * - `added`: server did not exist and was written.
+ * - `updated`: server existed and was overwritten because `force` was set.
+ * - `skipped`: server existed and `force` was not set, so nothing was written.
+ */
+export type UpsertMCPServerResult =
+	| { status: "added" }
+	| { status: "updated" }
+	| { status: "skipped"; reason: "exists" };
+
+/**
+ * Add an MCP server, or overwrite an existing one only when `force` is set.
+ *
+ * Collision-aware wrapper over {@link addMCPServer} / {@link updateMCPServer} used by
+ * `skc migrate`. Never connects to the server. Reuses the underlying writers so the
+ * rest of the config file (including `disabledServers`) is preserved on update.
+ *
+ * @throws Error if the server name or config is invalid (validated before any write).
+ */
+export async function upsertMCPServer(
+	filePath: string,
+	name: string,
+	config: MCPServerConfig,
+	options: { force?: boolean } = {},
+): Promise<UpsertMCPServerResult> {
+	// Validate name up front so an invalid name fails regardless of collision state.
+	const nameError = validateServerName(name);
+	if (nameError) {
+		throw new Error(nameError);
+	}
+
+	const existing = await getMCPServer(filePath, name);
+	if (existing) {
+		if (!options.force) {
+			return { status: "skipped", reason: "exists" };
+		}
+		// updateMCPServer preserves the rest of MCPConfigFile, incl. disabledServers.
+		await updateMCPServer(filePath, name, config);
+		return { status: "updated" };
+	}
+
+	await addMCPServer(filePath, name, config);
+	return { status: "added" };
+}
+
+/**
  * Remove an MCP server from a config file.
  *
  * @throws Error if server doesn't exist

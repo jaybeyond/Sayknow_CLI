@@ -141,10 +141,10 @@ export function sanctionedWorkflowStateCommand(skill: CanonicalSkcWorkflowSkill)
 export function describeWorkflowStateContract(skill: CanonicalSkcWorkflowSkill): string[] {
 	return [
 		`Sanctioned mutation path: skc state ${skill} read|write --input '<json>'`,
-		`Canonical active HUD state: .skc/state/${SKILL_ACTIVE_STATE_FILE} and .skc/state/sessions/<session>/${SKILL_ACTIVE_STATE_FILE}`,
-		`Skill mode state: .skc/state/${workflowModeStateFileName(skill)} or .skc/state/sessions/<session>/${workflowModeStateFileName(skill)}`,
+		`Canonical active HUD state: .skc/_session-{sessionid}/state/${SKILL_ACTIVE_STATE_FILE}`,
+		`Skill mode state: .skc/_session-{sessionid}/state/${workflowModeStateFileName(skill)}`,
 		"Receipts include version, skill, owner, command, state_path, storage_path, mutated_at, fresh_until, status, and mutation_id.",
 		"Receipts are fresh for 30 minutes; older receipts are stale and render as HUD warnings.",
-		"Planning artifacts under .skc/specs/** and .skc/plans/** remain writable outside the state command.",
+		"Planning artifacts under .skc/_session-{sessionid}/specs/** and .skc/_session-{sessionid}/plans/** remain writable outside the state command.",
 	];
 }

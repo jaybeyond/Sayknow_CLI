@@ -1,5 +1,6 @@
 import * as fs from "node:fs/promises";
 import { DEFAULT_ULTRAGOAL_OBJECTIVE } from "./goal-mode-request";
+import { resolveSkcSessionForRead, SessionResolutionError } from "./session-resolution";
 import {
 	computeUltragoalPlanGeneration,
 	getUltragoalPaths,
@@ -10,6 +11,7 @@ import {
 	type UltragoalCompletionVerification,
 	type UltragoalGoal,
 	type UltragoalLedgerEvent,
+	type UltragoalPaths,
 	type UltragoalPlan,
 	type UltragoalReceiptKind,
 } from "./ultragoal-runtime";
@@ -63,9 +65,30 @@ function isKnownUltragoalObjective(currentObjective: string): boolean {
 	);
 }
 
-async function hasDurableUltragoalState(cwd: string): Promise<boolean> {
+async function ultragoalReadPaths(cwd: string): Promise<UltragoalPaths> {
+	const envSessionId = process.env.SKC_SESSION_ID?.trim();
+	if (envSessionId) return getUltragoalPaths(cwd, envSessionId);
 	try {
-		await fs.stat(getUltragoalPaths(cwd).dir);
+		const session = await resolveSkcSessionForRead(cwd, { envSessionId: process.env.SKC_SESSION_ID });
+		return getUltragoalPaths(cwd, session.skcSessionId);
+	} catch (error) {
+		if (error instanceof SessionResolutionError && error.code === "no_session") {
+			return getUltragoalPaths(cwd, null);
+		}
+		throw error;
+	}
+}
+
+async function hasDurableUltragoalState(cwd: string): Promise<boolean> {
+	let paths: UltragoalPaths;
+	try {
+		paths = await ultragoalReadPaths(cwd);
+	} catch (error) {
+		if (error instanceof SessionResolutionError) return true;
+		throw error;
+	}
+	try {
+		await fs.stat(paths.dir);
 		return true;
 	} catch (error) {
 		if (
@@ -308,6 +331,18 @@ export async function readUltragoalVerificationState(input: {
 	}
 	const receiptTarget = findReceiptGoal(plan, currentObjective);
 	if (!receiptTarget) {
+		// When earlier required goals are already complete but later ones remain, name the
+		// specific blocking goals (a final-aggregate receipt cannot exist yet anyway). Only
+		// fall back to the generic missing-receipt message when no progress has been verified.
+		const completedRequired = requiredGoals(plan).filter(goal => goal.status === "complete");
+		if (completedRequired.length > 0 && runState.incompleteGoals.length > 0) {
+			return {
+				state: "active_missing_final_receipt",
+				message: `Ultragoal still has incomplete required goals: ${runState.incompleteGoals
+					.map(goal => goal.id)
+					.join(", ")}. Run \`skc ultragoal complete-goals\` to continue.`,
+			};
+		}
 		return {
 			state: "active_missing_final_receipt",
 			message: "Ultragoal aggregate completion requires a fresh final aggregate receipt.",
@@ -331,7 +366,15 @@ export async function readUltragoalVerificationState(input: {
 }
 
 export async function isUltragoalAskBlocked(cwd: string): Promise<UltragoalAskBlockDiagnostic> {
-	const paths = getUltragoalPaths(cwd);
+	let paths: UltragoalPaths;
+	try {
+		paths = await ultragoalReadPaths(cwd);
+	} catch (error) {
+		return activeAskDiagnostic({
+			reason: `Unable to resolve durable Ultragoal state: ${error instanceof Error ? error.message : String(error)}`,
+			source: "durable_state_unreadable",
+		});
+	}
 	try {
 		await fs.stat(paths.dir);
 	} catch (error) {

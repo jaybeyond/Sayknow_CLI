@@ -1,3 +1,16 @@
+import { resolveSkcSessionForRead, SessionResolutionError } from "../../skc-runtime/session-resolution";
+
+async function resolveBoundarySessionId(cwd: string, sessionId?: string): Promise<string | undefined> {
+	const normalizedSessionId = sessionId?.trim();
+	if (normalizedSessionId) return normalizedSessionId;
+	try {
+		return (await resolveSkcSessionForRead(cwd, { envSessionId: process.env.SKC_SESSION_ID })).skcSessionId;
+	} catch (error) {
+		if (error instanceof SessionResolutionError && error.code === "no_session") return undefined;
+		throw error;
+	}
+}
+
 import type { ActiveSubskillEntry } from "../../skill-state/active-state";
 import { readVisibleSkillActiveState } from "../../skill-state/active-state";
 import type { LoadedSubskillActivation } from "./types";
@@ -21,7 +34,9 @@ export async function readActiveSubskillsForParent(input: {
 	parent: string;
 	phase: string;
 }): Promise<ActiveSubskillEntry[]> {
-	const state = await readVisibleSkillActiveState(input.cwd, input.sessionId);
+	const resolvedSessionId = await resolveBoundarySessionId(input.cwd, input.sessionId);
+	if (!resolvedSessionId) return [];
+	const state = await readVisibleSkillActiveState(input.cwd, resolvedSessionId);
 	const parent = input.parent.trim();
 	const phase = input.phase.trim();
 	if (!state || !parent || !phase) return [];

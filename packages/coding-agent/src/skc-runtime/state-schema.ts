@@ -60,6 +60,7 @@ export const WorkflowStateEnvelopeSchema = z
 		updated_at: z.string().optional(),
 		session_id: z.string().optional(),
 		receipt: WorkflowStateReceiptSchema.optional(),
+		state_revision: z.number().optional(),
 	})
 	.passthrough();
 
@@ -95,6 +96,7 @@ export const RequiredOnWriteEnvelopeSchema = z
 		current_phase: z.string(),
 		active: z.boolean(),
 		receipt: RequiredWorkflowStateReceiptSchema,
+		state_revision: z.number().optional(),
 	})
 	.passthrough();
 

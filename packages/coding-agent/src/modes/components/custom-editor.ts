@@ -1,6 +1,6 @@
 import { Editor, type KeyId, matchesKey, parseKittySequence } from "@sayknow-cli/tui";
 import { BracketedPasteHandler } from "@sayknow-cli/tui/bracketed-paste";
-import type { AppKeybinding } from "../../config/keybindings";
+import { type AppKeybinding, KEYBINDINGS } from "../../config/keybindings";
 
 type ConfigurableEditorAction = Extract<
 	AppKeybinding,
@@ -23,25 +23,35 @@ type ConfigurableEditorAction = Extract<
 	| "app.clipboard.copyPrompt"
 >;
 
-const DEFAULT_ACTION_KEYS: Record<ConfigurableEditorAction, KeyId[]> = {
-	"app.interrupt": ["escape"],
-	"app.clear": ["ctrl+c"],
-	"app.exit": ["ctrl+d"],
-	"app.suspend": ["ctrl+z"],
-	"app.thinking.cycle": ["shift+tab"],
-	"app.model.cycleForward": ["ctrl+p"],
-	"app.model.cycleBackward": ["shift+ctrl+p"],
-	"app.model.select": ["ctrl+l"],
-	"app.model.selectTemporary": ["alt+p"],
-	"app.tools.expand": ["ctrl+o"],
-	"app.thinking.toggle": ["ctrl+t"],
-	"app.editor.external": ["ctrl+g"],
-	"app.history.search": ["ctrl+r"],
-	"app.message.queue": ["alt+enter"],
-	"app.message.dequeue": ["alt+up"],
-	"app.clipboard.pasteImage": ["ctrl+v"],
-	"app.clipboard.copyPrompt": ["alt+shift+c"],
-};
+// Editor-configurable app actions. Defaults are derived from the central
+// KEYBINDINGS registry so there is a single source of truth (e.g. the
+// platform-aware app.clipboard.pasteImage default is not duplicated here).
+const CONFIGURABLE_EDITOR_ACTIONS = [
+	"app.interrupt",
+	"app.clear",
+	"app.exit",
+	"app.suspend",
+	"app.thinking.cycle",
+	"app.model.cycleForward",
+	"app.model.cycleBackward",
+	"app.model.select",
+	"app.model.selectTemporary",
+	"app.tools.expand",
+	"app.thinking.toggle",
+	"app.editor.external",
+	"app.history.search",
+	"app.message.queue",
+	"app.message.dequeue",
+	"app.clipboard.pasteImage",
+	"app.clipboard.copyPrompt",
+] as const satisfies readonly ConfigurableEditorAction[];
+
+const DEFAULT_ACTION_KEYS = Object.fromEntries(
+	CONFIGURABLE_EDITOR_ACTIONS.map(action => {
+		const defaultKeys = KEYBINDINGS[action].defaultKeys;
+		return [action, Array.isArray(defaultKeys) ? [...defaultKeys] : [defaultKeys]];
+	}),
+) as Record<ConfigurableEditorAction, KeyId[]>;
 
 const PASTE_DECISION_TIMEOUT_MS = 5_000;
 const PENDING_PASTE_INPUT_MAX = 64;

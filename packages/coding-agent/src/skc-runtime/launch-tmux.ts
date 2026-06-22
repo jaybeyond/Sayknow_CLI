@@ -1,6 +1,8 @@
+import { Buffer } from "node:buffer";
 import * as path from "node:path";
 import { safeStderrWrite } from "@sayknow-cli/utils";
 import type { Args } from "../cli/args";
+import { tmuxRuntimeSessionPath } from "./session-layout";
 import { SKC_COORDINATOR_SESSION_ID_ENV, SKC_COORDINATOR_SESSION_STATE_FILE_ENV } from "./session-state-sidecar";
 import {
 	buildSkcTmuxProfileCommands,
@@ -14,7 +16,7 @@ import {
 	SKC_TMUX_SESSION_PREFIX,
 	type SkcTmuxProfileCommand,
 } from "./tmux-common";
-import { findSkcTmuxSessionByBranch } from "./tmux-sessions";
+import { findSkcTmuxSessionByName, findSkcTmuxSessionByScope } from "./tmux-sessions";
 
 export {
 	buildSkcTmuxProfileCommands,
@@ -83,6 +85,20 @@ export interface TmuxLaunchPlan {
 	sessionStateFile?: string | null;
 }
 
+function explicitTmuxSessionName(env: NodeJS.ProcessEnv): string | undefined {
+	return env.SKC_TMUX_SESSION?.trim() || undefined;
+}
+
+function findExistingSessionForLaunch(context: {
+	env: NodeJS.ProcessEnv;
+	project: string;
+	branch?: string | null;
+}): string | undefined {
+	const explicit = explicitTmuxSessionName(context.env);
+	if (explicit) return findSkcTmuxSessionByName(explicit, context.env)?.name;
+	return findSkcTmuxSessionByScope(context.project, context.branch, context.env)?.name;
+}
+
 export interface SkcTmuxProfileResult {
 	skipped: boolean;
 	commands: SkcTmuxProfileCommand[];
@@ -107,6 +123,7 @@ interface CommandResolutionContext {
 	argv: string[];
 	execPath: string;
 	extraEnv?: Record<string, string>;
+	platform?: NodeJS.Platform;
 }
 
 function parseLaunchPolicy(env: NodeJS.ProcessEnv): LaunchPolicy {
@@ -148,6 +165,26 @@ function buildEnvAssignments(values: Record<string, string> | undefined): string
 	const entries = Object.entries(values ?? {});
 	return entries.length === 0 ? "" : ` ${entries.map(([key, value]) => `${key}=${shellQuote(value)}`).join(" ")}`;
 }
+function powershellQuote(value: string): string {
+	return `'${value.replace(/'/g, "''")}'`;
+}
+function stripRootTmuxFlag(rawArgs: string[]): string[] {
+	return rawArgs.filter(arg => arg !== "--tmux");
+}
+
+function buildWindowsPowerShellInnerCommand(context: CommandResolutionContext, rawArgs: string[]): string {
+	const command = resolveCurrentSkcCommand(context);
+	const envLines = Object.entries({ [SKC_TMUX_LAUNCHED_ENV]: "1", ...(context.extraEnv ?? {}) }).map(
+		([key, value]) => `$env:${key} = ${powershellQuote(value)}`,
+	);
+	const invocation = ["&", ...command.map(powershellQuote), ...stripRootTmuxFlag(rawArgs).map(powershellQuote)].join(
+		" ",
+	);
+	const exitLine = "if ($null -ne $LASTEXITCODE) { exit $LASTEXITCODE } else { exit 1 }";
+	const script = [...envLines, invocation, exitLine].join("\n");
+	const encodedCommand = Buffer.from(script, "utf16le").toString("base64");
+	return `pwsh -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ${encodedCommand}`;
+}
 
 export function applySkcTmuxProfile(context: SkcTmuxProfileContext): SkcTmuxProfileResult {
 	const env = context.env ?? process.env;
@@ -177,16 +214,26 @@ function resolveCurrentSkcCommand(context: CommandResolutionContext): string[] {
 	if (isBunVirtualPath(entrypoint)) {
 		return isBunVirtualPath(context.execPath) ? ["skc"] : [context.execPath];
 	}
-	const resolvedEntrypoint = path.isAbsolute(entrypoint) ? entrypoint : path.resolve(context.cwd, entrypoint);
+	const pathModule = pathModuleForPlatform(context.platform);
+	const resolvedEntrypoint = pathModule.isAbsolute(entrypoint)
+		? entrypoint
+		: pathModule.resolve(context.cwd, entrypoint);
 	if (entrypoint.endsWith(".ts") || entrypoint.endsWith(".js") || entrypoint.endsWith(".mjs")) {
 		return [context.execPath, resolvedEntrypoint];
 	}
 	return [resolvedEntrypoint];
 }
+function isWindowsPlatform(platform: NodeJS.Platform | undefined): boolean {
+	return platform === "win32";
+}
+function pathModuleForPlatform(platform: NodeJS.Platform | undefined): typeof path.win32 | typeof path {
+	return isWindowsPlatform(platform) ? path.win32 : path;
+}
 
 function buildInnerCommand(context: CommandResolutionContext, rawArgs: string[]): string {
+	if (isWindowsPlatform(context.platform)) return buildWindowsPowerShellInnerCommand(context, rawArgs);
 	const command = resolveCurrentSkcCommand(context);
-	const quoted = [...command, ...rawArgs].map(shellQuote).join(" ");
+	const quoted = [...command, ...stripRootTmuxFlag(rawArgs)].map(shellQuote).join(" ");
 	return `exec env ${SKC_TMUX_LAUNCHED_ENV}=1${buildEnvAssignments(context.extraEnv)} ${quoted}`;
 }
 
@@ -305,7 +352,6 @@ export function buildDefaultTmuxLaunchPlan(context: TmuxLaunchContext): TmuxLaun
 	if (!context.parsed.tmux || policy === "direct") return undefined;
 	if (env.TMUX || env[SKC_TMUX_LAUNCHED_ENV] === "1") return undefined;
 	const platform = context.platform ?? process.platform;
-	if (platform === "win32") return undefined;
 	const tty = context.tty ?? { stdin: Boolean(process.stdin.isTTY), stdout: Boolean(process.stdout.isTTY) };
 	if (policy === "tmux" && !isInteractiveRootLaunch(context.parsed, tty)) return undefined;
 
@@ -315,17 +361,23 @@ export function buildDefaultTmuxLaunchPlan(context: TmuxLaunchContext): TmuxLaun
 	const sessionName = buildSkcTmuxSessionName(env, { branch });
 	const tmuxCommand = resolveSkcTmuxCommand(env);
 	const sessionId = env[SKC_COORDINATOR_SESSION_ID_ENV]?.trim() || sessionName;
+	// The session ROOT is keyed by the active SKC session (SKC_SESSION_ID), NOT the
+	// coordinator/tmux identity. Fall back to the coordinator id only for standalone
+	// tmux launches with no SKC session context.
+	const skcSessionId = env.SKC_SESSION_ID?.trim() || sessionId;
 	const sessionStateFile =
 		env[SKC_COORDINATOR_SESSION_STATE_FILE_ENV]?.trim() ||
-		path.join(cwd, ".skc", "runtime", "tmux-sessions", `${buildSkcTmuxSessionSlug(sessionName)}.json`);
+		tmuxRuntimeSessionPath(cwd, skcSessionId, buildSkcTmuxSessionSlug(sessionName));
 	const tmuxAvailable = context.tmuxAvailable ?? Bun.which(tmuxCommand) !== null;
 	if (!tmuxAvailable) return undefined;
-	const existingBranchSessionName =
+	const existingSessionName =
 		"existingBranchSessionName" in context
 			? (context.existingBranchSessionName ?? undefined)
-			: context.worktreeBranch
-				? findSkcTmuxSessionByBranch(context.worktreeBranch, env, project)?.name
-				: undefined;
+			: findExistingSessionForLaunch({
+					env,
+					project,
+					branch,
+				});
 	const innerCommand = buildInnerCommand(
 		{
 			cwd,
@@ -335,6 +387,7 @@ export function buildDefaultTmuxLaunchPlan(context: TmuxLaunchContext): TmuxLaun
 				[SKC_COORDINATOR_SESSION_ID_ENV]: sessionId,
 				[SKC_COORDINATOR_SESSION_STATE_FILE_ENV]: sessionStateFile,
 			},
+			platform,
 		},
 		context.rawArgs,
 	);
@@ -348,7 +401,7 @@ export function buildDefaultTmuxLaunchPlan(context: TmuxLaunchContext): TmuxLaun
 		project,
 		sessionId,
 		sessionStateFile,
-		attachSessionName: existingBranchSessionName,
+		attachSessionName: existingSessionName,
 	};
 }
 
@@ -405,19 +458,19 @@ export function launchDefaultTmuxIfNeeded(context: TmuxLaunchContext): boolean {
 			sessionId: plan.sessionId ?? null,
 			sessionStateFile: plan.sessionStateFile ?? null,
 		});
-		if (profile.failures.length > 0) {
+		const ownershipFailure = profile.failures.find(item => item.command.args.includes("@skc-profile"));
+		if (ownershipFailure) {
 			cleanupCreatedTmuxSession(plan, spawnSync, options);
-			const failure =
-				profile.failures.find(item => item.command.args.includes("@skc-profile")) ?? profile.failures[0];
 			(context.diagnosticWriter ?? safeStderrWrite)(
-				formatTmuxLaunchDiagnostic("profile tagging failed", failure?.stderr),
+				formatTmuxLaunchDiagnostic("profile tagging failed", ownershipFailure.stderr),
 			);
 			return true;
 		}
 	}
 	if (created.exitCode !== 0) return false;
-	const attached = spawnSync(plan.tmuxCommand, ["attach-session", "-t", plan.sessionName], options);
+	const attached = spawnSync(plan.tmuxCommand, ["attach-session", "-t", `=${plan.sessionName}`], options);
 	if (attached.exitCode === 0) return true;
+	cleanupCreatedTmuxSession(plan, spawnSync, options);
 	(context.diagnosticWriter ?? safeStderrWrite)(formatTmuxLaunchDiagnostic("attach failed", attached.stderr));
 	return true;
 }

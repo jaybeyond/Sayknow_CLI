@@ -5,8 +5,9 @@ import type { WorkflowHudSummary } from "../skill-state/active-state";
 import { buildTeamHudSummary as buildWorkflowTeamHudSummary } from "../skill-state/workflow-hud";
 import { WORKFLOW_STATE_VERSION } from "../skill-state/workflow-state-contract";
 import type { GcPidProbe, GcRecord } from "./gc-runtime";
-
 import { applySkcTmuxProfile, SKC_TMUX_LAUNCHED_ENV } from "./launch-tmux";
+import { modeStatePath, sessionIdFromDirName, sessionReportsDir, teamStateRoot } from "./session-layout";
+import { resolveSkcSessionForWrite, writeSessionActivityMarker } from "./session-resolution";
 import {
 	AlreadyExistsError,
 	appendJsonl as appendJsonlAudited,
@@ -554,7 +555,14 @@ function stateWriterOptions(filePath: string, category: "state" | "ledger" | "re
 	const marker = `${path.sep}.skc${path.sep}`;
 	const markerIndex = resolved.indexOf(marker);
 	const cwd = markerIndex >= 0 ? resolved.slice(0, markerIndex) : process.cwd();
-	return { cwd, audit: { category, verb, owner: "skc-runtime" as const } };
+	const parts = resolved.split(path.sep);
+	const sessionId =
+		parts.map(part => sessionIdFromDirName(part)).find((value): value is string => Boolean(value)) ??
+		process.env.SKC_SESSION_ID?.trim();
+	// Session-scoped audit requires a SKC session. When an explicit env-root override
+	// (e.g. SKC_TEAM_STATE_ROOT) is in effect with no resolvable session, omit the audit
+	// context entirely so the override write does not fail on a session-scoped audit.
+	return sessionId ? { cwd, audit: { category, verb, owner: "skc-runtime" as const, sessionId } } : { cwd };
 }
 
 function sanitizeName(value: string): string {
@@ -668,7 +676,8 @@ function workerIntegrationDedupePath(dir: string, worker: string): string {
 export function resolveSkcTeamStateRoot(cwd = process.cwd(), env: NodeJS.ProcessEnv = process.env): string {
 	const explicit = env.SKC_TEAM_STATE_ROOT?.trim();
 	if (explicit) return path.resolve(cwd, explicit);
-	return path.join(cwd, ".skc", "state", "team");
+	const session = resolveSkcSessionForWrite(cwd, { envSessionId: env.SKC_SESSION_ID });
+	return teamStateRoot(cwd, session.skcSessionId);
 }
 
 async function readJsonFile<T>(filePath: string): Promise<T | null> {
@@ -1170,15 +1179,17 @@ async function writeWorkerLifecycleForConfig(
 	return Object.fromEntries(entries.map(entry => [entry.worker, entry]));
 }
 
-function teamModeStatePath(): string {
-	return path.join(".skc", "state", "team-state.json");
+function teamModeStatePath(cwd: string, sessionId: string): string {
+	return modeStatePath(cwd, sessionId, "team");
 }
 
 export async function persistSkcTeamModeStateSummary(snapshot: SkcTeamSnapshot, cwd = process.cwd()): Promise<void> {
 	const active = snapshot.phase !== "complete" && snapshot.phase !== "cancelled";
 	const updatedAt = now();
+	const sessionId = resolveSkcSessionForWrite(cwd, { envSessionId: process.env.SKC_SESSION_ID }).skcSessionId;
+	const statePath = teamModeStatePath(cwd, sessionId);
 	await writeWorkflowEnvelopeAtomic(
-		teamModeStatePath(),
+		statePath,
 		{
 			skill: "team",
 			version: WORKFLOW_STATE_VERSION,
@@ -1195,11 +1206,13 @@ export async function persistSkcTeamModeStateSummary(snapshot: SkcTeamSnapshot, 
 				skill: "team",
 				owner: "skc-runtime",
 				command: "skc team sync-team-summary",
+				sessionId,
 				nowIso: updatedAt,
 			},
-			audit: { category: "state", verb: "sync-team-summary", owner: "skc-runtime", skill: "team" },
+			audit: { category: "state", verb: "sync-team-summary", owner: "skc-runtime", skill: "team", sessionId },
 		},
 	);
+	await writeSessionActivityMarker(cwd, sessionId, { writer: "team-runtime", path: statePath });
 }
 
 function appendLivenessRecoveryReason(
@@ -2120,7 +2133,14 @@ function integrationReportPath(dir: string): string {
 	return path.join(dir, "integration-report.md");
 }
 function commitHygieneLedgerPath(config: SkcTeamConfig): string {
-	return path.join(config.leader_cwd, ".skc", "reports", "team-commit-hygiene", `${config.team_name}.ledger.json`);
+	return path.join(
+		sessionReportsDir(
+			config.leader_cwd,
+			resolveSkcSessionForWrite(config.leader_cwd, { envSessionId: process.env.SKC_SESSION_ID }).skcSessionId,
+		),
+		"team-commit-hygiene",
+		`${config.team_name}.ledger.json`,
+	);
 }
 function integrationNowState(
 	status: SkcTeamIntegrationStatus,
@@ -2186,11 +2206,15 @@ export type SkcWorkerCheckpointClassification =
 
 const UNMERGED_GIT_STATUS_CODES = new Set(["DD", "AU", "UD", "UA", "DU", "AA", "UU"]);
 const PROTECTED_WORKER_CHECKPOINT_PREFIXES = [
-	".skc/state/",
-	".skc/logs/",
-	".skc/reports/",
-	".skc/tmp/",
-	".skc/ultragoal/",
+	".skc/_session-*/state/",
+	".skc/_session-*/logs/",
+	".skc/_session-*/reports/",
+	".skc/_session-*/runtime/",
+	".skc/_session-*/ultragoal/",
+	".skc/_session-*/plans/",
+	".skc/_session-*/specs/",
+	".skc/_session-*/rlm/",
+	".skc/_session-*/audit/",
 ];
 
 function parsePorcelainStatusFiles(stdout: string): string[] {
@@ -2211,12 +2235,12 @@ export function classifySkcTeamCheckpointFiles(files: string[]): { eligible: str
 	const protectedFiles: string[] = [];
 	for (const file of files) {
 		const normalized = normalizeGitStatusPath(file);
-		if (
-			PROTECTED_WORKER_CHECKPOINT_PREFIXES.some(
-				prefix => normalized === prefix.slice(0, -1) || normalized.startsWith(prefix),
-			)
-		)
-			protectedFiles.push(file);
+		const isProtected = PROTECTED_WORKER_CHECKPOINT_PREFIXES.some(prefix => {
+			if (!prefix.includes("*")) return normalized === prefix.slice(0, -1) || normalized.startsWith(prefix);
+			const [head, tail] = prefix.split("*");
+			return Boolean(head && tail) && normalized.startsWith(head) && normalized.slice(head.length).includes(tail);
+		});
+		if (isProtected) protectedFiles.push(file);
 		else eligible.push(file);
 	}
 	return { eligible, protected: protectedFiles };

@@ -10,6 +10,7 @@ import { FooterComponent } from "@sayknow-cli/coding-agent/modes/components/foot
 import { STATUS_LINE_PRESETS } from "@sayknow-cli/coding-agent/modes/components/status-line/presets";
 import { UserMessageComponent } from "@sayknow-cli/coding-agent/modes/components/user-message";
 import { WelcomeComponent } from "@sayknow-cli/coding-agent/modes/components/welcome";
+import { resolveWelcomeLogoMode } from "@sayknow-cli/coding-agent/modes/interactive-mode";
 import { getEditorTheme, initTheme } from "@sayknow-cli/coding-agent/modes/theme/theme";
 import type { AgentSession } from "@sayknow-cli/coding-agent/session/agent-session";
 import { type TUI, visibleWidth } from "@sayknow-cli/tui";
@@ -114,6 +115,42 @@ describe("redesigned interactive shell chrome", () => {
 		for (const line of lines) {
 			expect(visibleWidth(line)).toBeLessThanOrEqual(54);
 		}
+	});
+
+	it("renders the brand wordmark even when an ASCII-safe logo is requested", () => {
+		// The Sayknow fork ships a single SAYKNOW wordmark for every logo mode, so an
+		// "ascii" request still resolves to the brand wordmark — never the upstream claw art.
+		const component = new WelcomeComponent("1.2.3", "gpt-5.5", "openai", [], [], "ascii");
+		const lines = component.render(54);
+		const rendered = Bun.stripANSI(lines.join("\n"));
+
+		expect(rendered).toContain("╔═╗╔═╗╦ ╦╦╔═╔╗╔╔═╗╦ ╦");
+		expect(rendered).not.toContain("+----------------+");
+		for (const line of lines) {
+			expect(visibleWidth(line)).toBeLessThanOrEqual(54);
+		}
+	});
+
+	it("renders the brand wordmark even when a square-corner logo is requested", () => {
+		const component = new WelcomeComponent("1.2.3", "gpt-5.5", "openai", [], [], "square");
+		const lines = component.render(54);
+		const rendered = Bun.stripANSI(lines.join("\n"));
+
+		expect(rendered).toContain("╔═╗╔═╗╦ ╦╦╔═╔╗╔╔═╗╦ ╦");
+		expect(rendered).not.toContain("┌────────────────┐");
+		expect(rendered).not.toContain("+----------------+");
+		for (const line of lines) {
+			expect(visibleWidth(line)).toBeLessThanOrEqual(54);
+		}
+	});
+
+	it("resolves welcome banner auto and manual override modes", () => {
+		expect(resolveWelcomeLogoMode("auto", { WT_SESSION: "session-id" }, "win32")).toBe("unicode");
+		expect(resolveWelcomeLogoMode("auto", { WT_SESSION: "session-id" }, "linux")).toBe("unicode");
+		expect(resolveWelcomeLogoMode("auto", {}, "win32")).toBe("unicode");
+		expect(resolveWelcomeLogoMode("unicode", { WT_SESSION: "session-id" }, "win32")).toBe("unicode");
+		expect(resolveWelcomeLogoMode("square", { WT_SESSION: "session-id" }, "win32")).toBe("square");
+		expect(resolveWelcomeLogoMode("ascii", {}, "linux")).toBe("ascii");
 	});
 
 	it("renders the live composer as a borderless opencode-style prompt", () => {

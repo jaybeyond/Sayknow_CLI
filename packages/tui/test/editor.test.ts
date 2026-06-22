@@ -506,6 +506,40 @@ describe("Editor component", () => {
 			}
 		});
 
+		it("inserts a newline for Ctrl+Shift+Enter terminal protocol variants", () => {
+			const variants = ["\x1b[13;6u", "\x1b[27;6;13~", "\x1b[13;6~", "\x1b[13;2~"];
+
+			for (const [index, variant] of variants.entries()) {
+				const editor = new Editor(defaultEditorTheme);
+				const prefix = index === 0 ? "alpha" : "beta";
+
+				editor.setText(prefix);
+				editor.handleInput(variant);
+
+				expect(editor.getText()).toBe(`${prefix}\n`);
+			}
+		});
+
+		it("submits raw LF as Enter on Windows instead of inserting newline", () => {
+			const originalPlatform = Object.getOwnPropertyDescriptor(process, "platform");
+			Object.defineProperty(process, "platform", { value: "win32" });
+			try {
+				const editor = new Editor(defaultEditorTheme);
+				let submitted = "";
+				editor.onSubmit = text => {
+					submitted = text;
+				};
+
+				editor.handleInput("a");
+				editor.handleInput("\n");
+
+				expect(submitted).toBe("a");
+				expect(editor.getText()).toBe("");
+			} finally {
+				if (originalPlatform) Object.defineProperty(process, "platform", originalPlatform);
+			}
+		});
+
 		it("deletes single-code-unit unicode characters (umlauts) with Backspace", () => {
 			const editor = new Editor(defaultEditorTheme);
 

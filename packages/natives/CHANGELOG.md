@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.6.2] - 2026-06-19
+
+### Removed
+
+- Removed the embedded tiktoken/o200k tokenizer: deleted `crates/pi-natives/src/tokens.rs`, the `tiktoken-rs` dependency, and the `countTokens`/`Encoding` napi exports. This shrinks the native addon by ~3.8MB on disk and removes the ~50MB BPE table that previously materialized on first token count (#879).
+
 ## [0.6.0] - 2026-06-18
 
 ### Fixed

@@ -44,7 +44,7 @@ import { BUILTIN_SLASH_COMMANDS, loadSlashCommands } from "../extensibility/slas
 import { type Goal, type GoalModeState, normalizeGoal } from "../goals/state";
 import { t } from "../i18n";
 import { resolveLocalUrlToPath } from "../internal-urls";
-import { LSP_STARTUP_EVENT_CHANNEL, type LspStartupEvent } from "../lsp/startup-events";
+import { getLspStartupWarningMessage, LSP_STARTUP_EVENT_CHANNEL, type LspStartupEvent } from "../lsp/startup-events";
 import {
 	humanizePlanTitle,
 	type PlanApprovalDetails,
@@ -72,6 +72,7 @@ import { normalizeLocalScheme } from "../tools/path-utils";
 import { type ResolveToolDetails, runResolveInvocation } from "../tools/resolve";
 import { formatPhaseDisplayName } from "../tools/todo-write";
 import { ToolError } from "../tools/tool-errors";
+
 import type { EventBus } from "../utils/event-bus";
 import { getEditorCommand, openInEditor } from "../utils/external-editor";
 import { getSessionAccentAnsi, getSessionAccentHex } from "../utils/session-color";
@@ -86,7 +87,11 @@ import type { HookInputComponent } from "./components/hook-input";
 import type { HookSelectorComponent } from "./components/hook-selector";
 import { StatusLineComponent } from "./components/status-line";
 import type { ToolExecutionHandle } from "./components/tool-execution";
-import { WelcomeComponent, type LspServerInfo as WelcomeLspServerInfo } from "./components/welcome";
+import {
+	WelcomeComponent,
+	type WelcomeLogoMode,
+	type LspServerInfo as WelcomeLspServerInfo,
+} from "./components/welcome";
 import { BtwController } from "./controllers/btw-controller";
 import { CommandController } from "./controllers/command-controller";
 import { EventController } from "./controllers/event-controller";
@@ -216,6 +221,21 @@ function parseGoalSubcommand(args: string): { sub: GoalSubcommand | undefined; r
 		return { sub: first as GoalSubcommand, rest: match[2]?.trim() ?? "" };
 	}
 	return { sub: undefined, rest: trimmed };
+}
+
+export type WelcomeBannerSettingMode = "auto" | "unicode" | "square" | "ascii";
+
+export function resolveWelcomeLogoMode(
+	mode: WelcomeBannerSettingMode,
+	env: Record<string, string | undefined> = Bun.env,
+	platform: NodeJS.Platform = process.platform,
+): WelcomeLogoMode {
+	void env;
+	void platform;
+	if (mode === "unicode") return "unicode";
+	if (mode === "square") return "square";
+	if (mode === "ascii") return "ascii";
+	return "unicode";
 }
 
 /** Options for creating an InteractiveMode instance (for future API use) */
@@ -479,6 +499,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		);
 
 		const startupQuiet = settings.get("startup.quiet");
+		const welcomeLogoMode = resolveWelcomeLogoMode(settings.get("startup.welcomeBannerMode"));
 		this.#welcomeComponent = undefined;
 
 		for (const warning of this.session.configWarnings) {
@@ -494,6 +515,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				providerName,
 				recentSessions,
 				this.#getWelcomeLspServers(),
+				welcomeLogoMode,
 			);
 
 			// Setup UI layout
@@ -2062,23 +2084,9 @@ export class InteractiveMode implements InteractiveModeContext {
 	#handleLspStartupEvent(event: LspStartupEvent): void {
 		this.#updateWelcomeLspServers();
 
-		if (event.type === "failed") {
-			this.showWarning(`LSP startup failed: ${event.error}. It will retry lazily on write.`);
-			return;
-		}
-
-		const failedServers = event.servers.filter(server => server.status === "error");
-
-		if (failedServers.length === 1) {
-			const failedServer = failedServers[0];
-			const detail = failedServer.error ? `: ${failedServer.error}` : "";
-			this.showWarning(`LSP startup failed for ${failedServer.name}${detail}. It will retry lazily on write.`);
-			return;
-		}
-
-		if (failedServers.length > 1) {
-			const failedNames = failedServers.map(server => server.name).join(", ");
-			this.showWarning(`LSP startup failed for ${failedNames}. It will retry lazily on write.`);
+		const warningMessage = getLspStartupWarningMessage(event);
+		if (warningMessage) {
+			this.showWarning(warningMessage);
 		}
 	}
 

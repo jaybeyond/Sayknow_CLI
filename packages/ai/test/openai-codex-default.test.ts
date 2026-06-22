@@ -16,8 +16,8 @@ describe("OpenAI Codex defaults", () => {
 			maxLevel: Effort.XHigh,
 			defaultLevel: Effort.XHigh,
 		});
-		// gpt-5.5 is a 400K-context model and must not demote to the smaller gpt-5.4.
+		// gpt-5.5 is pinned to its true 400K context window so long sessions do not
+		// incorrectly look over-cap at the stale 272K discovery fallback.
 		expect(model.contextWindow).toBe(400000);
-		expect(model.contextPromotionTarget).toBeUndefined();
 	});
 });

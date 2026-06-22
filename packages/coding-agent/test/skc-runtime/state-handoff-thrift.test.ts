@@ -7,6 +7,7 @@ import type { Skill } from "@sayknow-cli/coding-agent/extensibility/skills";
 import { SKILL_PROMPT_MESSAGE_TYPE } from "@sayknow-cli/coding-agent/session/messages";
 import { runNativeDeepInterviewCommand } from "@sayknow-cli/coding-agent/skc-runtime/deep-interview-runtime";
 import { runNativeRalplanCommand } from "@sayknow-cli/coding-agent/skc-runtime/ralplan-runtime";
+import { modeStatePath } from "@sayknow-cli/coding-agent/skc-runtime/session-layout";
 import { runNativeStateCommand } from "@sayknow-cli/coding-agent/skc-runtime/state-runtime";
 import {
 	createUltragoalPlan,
@@ -14,6 +15,8 @@ import {
 } from "@sayknow-cli/coding-agent/skc-runtime/ultragoal-runtime";
 import type { ToolSession } from "@sayknow-cli/coding-agent/tools";
 import { SkillTool } from "@sayknow-cli/coding-agent/tools/skill";
+
+const TEST_SESSION_ID = "test-session";
 
 const repoRoot = path.resolve(import.meta.dir, "..", "..", "..", "..");
 const roots: string[] = [];
@@ -26,7 +29,7 @@ async function tempDir(prefix = "skc-handoff-thrift-"): Promise<string> {
 
 afterEach(async () => {
 	await Promise.all(roots.splice(0).map(root => fs.rm(root, { recursive: true, force: true })));
-	delete process.env.SKC_SESSION_ID;
+	process.env.SKC_SESSION_ID = TEST_SESSION_ID;
 });
 
 function scrub(text: string): string {
@@ -87,7 +90,7 @@ async function makeSkill(name: string, content: string): Promise<Skill> {
 
 describe("CONSUMER/KEY-FIELD MATRIX for compact handoff payloads", () => {
 	it("goldens and asserts every preserved consumer key field", async () => {
-		delete process.env.SKC_SESSION_ID;
+		process.env.SKC_SESSION_ID = TEST_SESSION_ID;
 		const root = await tempDir();
 
 		const ralplanReceipt = await runNativeRalplanCommand(
@@ -156,7 +159,7 @@ describe("CONSUMER/KEY-FIELD MATRIX for compact handoff payloads", () => {
 			"
 			`);
 
-		await writeJson(path.join(root, ".skc/state/deep-interview-state.json"), {
+		await writeJson(modeStatePath(root, TEST_SESSION_ID, "deep-interview"), {
 			skill: "deep-interview",
 			version: 1,
 			active: true,

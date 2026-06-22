@@ -43,6 +43,7 @@ const commands: CommandEntry[] = [
 		load: () => import("./commands/contribution-prep").then(m => m.default),
 	},
 	{ name: "deep-interview", load: () => import("./commands/deep-interview").then(m => m.default) },
+	{ name: "migrate", load: () => import("./commands/migrate").then(m => m.default) },
 	{ name: "rlm", load: () => import("./commands/rlm").then(m => m.default) },
 	{ name: "update", load: () => import("./commands/update").then(m => m.default) },
 	{ name: "launch", load: () => import("./commands/launch").then(m => m.default) },

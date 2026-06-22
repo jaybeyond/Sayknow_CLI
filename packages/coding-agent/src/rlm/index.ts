@@ -15,6 +15,7 @@ import { type RlmPreset, runRootCommand } from "../main";
 import rlmReportCommandPrompt from "../prompts/system/rlm-report-command.md" with { type: "text" };
 import type { CreateAgentSessionOptions } from "../sdk";
 import type { AgentSession } from "../session/agent-session";
+import { resolveSessionIdFromSources, writeSessionActivityMarker } from "../skc-runtime/session-resolution";
 import {
 	ensureRlmSessionDir,
 	generateRlmSessionId,
@@ -231,6 +232,12 @@ async function writeRlmMetadata(input: {
 		successfulRuns: input.successfulRuns,
 	};
 	await Bun.write(input.paths.metadataPath, `${JSON.stringify(metadata, null, 2)}\n`);
+	// Best-effort: update the per-session activity marker so latest-session auto-detect
+	// accounts for RLM-only generated output (AC2). Never let marker failure break RLM.
+	const skcSessionId = resolveSessionIdFromSources({ envSessionId: process.env.SKC_SESSION_ID })?.skcSessionId;
+	if (skcSessionId) {
+		await writeSessionActivityMarker(input.cwd, skcSessionId, { writer: "rlm" }).catch(() => {});
+	}
 }
 
 export async function runRlmCommand(argv: string[]): Promise<void> {

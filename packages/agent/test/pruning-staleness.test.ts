@@ -404,8 +404,10 @@ describe("protect-window interaction", () => {
 		const entries: SessionEntry[] = [];
 		const oldBash = pair(entries, "c1", "bash", { command: "a" }, 60_000);
 		const newBash = pair(entries, "c2", "bash", { command: "b" }, 60_000);
-		// Window covers only the newest result (~15k tokens each).
-		const config: PruneConfig = { ...EAGER, protectTokens: 20_000 };
+		// Each result is ~15k tokens (60k chars / 4). The 10k window is smaller than
+		// one result, so only the newest result stays inside the recency window and
+		// the older one falls beyond it and is prunable.
+		const config: PruneConfig = { ...EAGER, protectTokens: 10_000 };
 		const ids = prunedIds(entries, config);
 		expect(ids).toContain(oldBash.id);
 		expect(ids).not.toContain(newBash.id);

@@ -1,0 +1,70 @@
+--- a/packages/utils/src/postmortem.ts
++++ b/packages/utils/src/postmortem.ts
+@@ -76,9 +76,34 @@ function formatFatalError(label: string, err: Error): string {
+ 	return `\n[${label}] ${name}: ${message}${formattedStack}\n`;
+ }
+ 
++/**
++ * True for terminal/pipe write failures (EIO, EPIPE, EBADF, …) on the write side.
++ *
++ * Bun flushes TTY writes asynchronously, so when the controlling terminal hangs up
++ * (terminal closed, external volume stalled, SSH dropped) a restore write issued during
++ * shutdown can surface as an uncaughtException on a later tick — after cleanup has already
++ * begun. Treating that as fatal logs a scary stack and exits nonzero, which a hosting
++ * terminal renders as a crash/restart loop. When it happens mid-shutdown it is a benign
++ * artifact, not a real fault. We only match write-side syscalls so genuine bugs (a read
++ * EIO, a logic error that happens to carry one of these codes) are never masked.
++ */
++function isBenignIoWriteError(err: unknown): boolean {
++	if (!err || typeof err !== "object") return false;
++	const { code, syscall } = err as { code?: unknown; syscall?: unknown };
++	const isIoCode =
++		code === "EIO" ||
++		code === "EPIPE" ||
++		code === "EBADF" ||
++		code === "ENXIO" ||
++		code === "ENOTTY" ||
++		code === "ECONNRESET";
++	return isIoCode && (syscall === undefined || syscall === "write" || syscall === "writev");
++}
++
+ if (isMainThread) {
+ 	process
+ 		.on("SIGINT", async () => {
++			logger.debug("Shutting down on SIGINT");
+ 			await runCleanup(Reason.SIGINT);
+ 			process.exit(130); // 128 + SIGINT (2)
+ 		})
+@@ -90,6 +115,19 @@ if (isMainThread) {
+ 			safeStderrWrite(`Inspector opened: ${url}\n`);
+ 		})
+ 		.on("uncaughtException", async err => {
++			// A terminal/stdout write can fail asynchronously (EIO/EPIPE) while we are
++			// already tearing down — e.g. the controlling terminal hung up, or the volume
++			// the runtime lives on stalled. Bun surfaces that on a later tick, after cleanup
++			// has begun. Treat it as a benign shutdown artifact: log at debug and let the
++			// in-progress shutdown own the exit, instead of logging a fatal error and exiting
++			// nonzero (which a hosting terminal renders as a crash/restart loop).
++			if (cleanupStage !== "idle" && isBenignIoWriteError(err)) {
++				logger.debug("Ignoring benign terminal I/O write error during shutdown", {
++					code: (err as { code?: unknown }).code,
++					syscall: (err as { syscall?: unknown }).syscall,
++				});
++				return;
++			}
+ 			safeStderrWrite(formatFatalError("Uncaught Exception", err));
+ 			logger.error("Uncaught exception", { err, stack: err.stack });
+ 			await runCleanup(Reason.UNCAUGHT_EXCEPTION);
+@@ -106,10 +144,12 @@ if (isMainThread) {
+ 			void runCleanup(Reason.EXIT); // fire and forget (exit imminent)
+ 		})
+ 		.on("SIGTERM", async () => {
++			logger.warn("Shutting down on SIGTERM (terminated by another process)");
+ 			await runCleanup(Reason.SIGTERM);
+ 			process.exit(143); // 128 + SIGTERM (15)
+ 		})
+ 		.on("SIGHUP", async () => {
++			logger.warn("Shutting down on SIGHUP (controlling terminal hung up / disconnected)");
+ 			await runCleanup(Reason.SIGHUP);
+ 			process.exit(129); // 128 + SIGHUP (1)
+ 		});

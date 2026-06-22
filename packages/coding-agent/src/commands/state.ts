@@ -2,7 +2,8 @@ import { Command } from "@sayknow-cli/utils/cli";
 import { runNativeStateCommand } from "../skc-runtime/state-runtime";
 
 export default class State extends Command {
-	static description = "Read or update SKC workflow state receipts under .skc/state";
+	static description =
+		"Read or update current-session SKC workflow state receipts under .skc/_session-{sessionid}/state";
 	static strict = false;
 	static examples = [
 		'$ skc state read --input \'{"mode":"deep-interview"}\' --json',

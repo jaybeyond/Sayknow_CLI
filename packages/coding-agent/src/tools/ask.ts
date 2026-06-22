@@ -37,7 +37,7 @@ import type { RenderResultOptions } from "../extensibility/custom-tools/types";
 import { gateAnswerToResult, questionToGate } from "../modes/shared/agent-wire/deep-interview-gate";
 import { getMarkdownTheme, type Theme, theme } from "../modes/theme/theme";
 import askDescription from "../prompts/tools/ask.md" with { type: "text" };
-import { appendOrMergeDeepInterviewRound } from "../skc-runtime/deep-interview-recorder";
+import { appendOrMergeDeepInterviewRound, syncDeepInterviewRecorderHud } from "../skc-runtime/deep-interview-recorder";
 import { deepInterviewStatePath } from "../skc-runtime/deep-interview-runtime";
 import { renderStatusLine } from "../tui";
 import type { ToolSession } from ".";
@@ -104,6 +104,30 @@ export interface AskToolDetails {
 const OTHER_OPTION = "Other (type your own)";
 const RECOMMENDED_SUFFIX = " (Recommended)";
 const DEEP_INTERVIEW_SELECTOR_SCROLL_TITLE_ROWS = Number.MAX_SAFE_INTEGER;
+const DEEP_INTERVIEW_RECORDER_AWAIT_TIMEOUT_MS = 250;
+
+function errorMessage(error: unknown): string {
+	return error instanceof Error ? error.message : String(error);
+}
+
+async function awaitDeepInterviewRecorderPersistence(persistence: Promise<void>): Promise<void> {
+	let timeout: ReturnType<typeof setTimeout> | undefined;
+	try {
+		await Promise.race([
+			persistence,
+			new Promise<never>((_resolve, reject) => {
+				timeout = setTimeout(
+					() => reject(new Error(`timed out after ${DEEP_INTERVIEW_RECORDER_AWAIT_TIMEOUT_MS}ms`)),
+					DEEP_INTERVIEW_RECORDER_AWAIT_TIMEOUT_MS,
+				);
+			}),
+		]);
+	} catch (error) {
+		logger.warn(`ask: deep-interview round recording failed: ${errorMessage(error)}`);
+	} finally {
+		if (timeout) clearTimeout(timeout);
+	}
+}
 
 function getDoneOptionLabel(): string {
 	return `${theme.status.success} Done selecting`;
@@ -481,11 +505,11 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 	): Promise<void> {
 		const meta = q.deepInterview;
 		if (!meta) return;
-		try {
-			const cwd = this.session.cwd;
-			const sessionId = this.session.getSessionId?.() ?? undefined;
-			const statePath = deepInterviewStatePath(cwd, sessionId);
-			await appendOrMergeDeepInterviewRound(
+		const cwd = this.session.cwd;
+		const sessionId = this.session.getSessionId?.() ?? undefined;
+		const statePath = deepInterviewStatePath(cwd, sessionId);
+		await awaitDeepInterviewRecorderPersistence(
+			appendOrMergeDeepInterviewRound(
 				cwd,
 				statePath,
 				{
@@ -500,12 +524,10 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 					customInput,
 				},
 				{ sessionId },
-			);
-		} catch (error) {
-			logger.warn(
-				`ask: deep-interview round recording failed: ${error instanceof Error ? error.message : String(error)}`,
-			);
-		}
+			).then(async () => {
+				await syncDeepInterviewRecorderHud(cwd, statePath, sessionId);
+			}),
+		);
 	}
 
 	async execute(

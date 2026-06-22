@@ -2,6 +2,29 @@
 
 ## [Unreleased]
 
+## [0.6.4] - 2026-06-20
+
+### Fixed
+
+- Fixed argument mis-attribution in the OpenAI-compatible Responses API streaming decoder when a single response emits multiple tool-call items. The decoder buffered streamed argument deltas against a single most-recent item/block slot, so interleaved or back-to-back `function_call`/`custom_tool_call` argument deltas could be applied to the wrong item — finalizing a tool call with another call's arguments (e.g. one tool's payload landing on a different tool's schema and tripping validation). Streamed deltas now accumulate against a per-item buffer keyed on stable item identity (`item_id` primary; positional `output_index` only when finite), each block records its content index at registration time, and finalization writes onto the same block stored in the message content while reading only the matching item's buffer. Single-tool-call streams, reasoning/text streaming, and the Chat Completions path are unchanged.
+
+## [0.6.2] - 2026-06-19
+### Added
+
+- Added opt-in `compat.sendSessionHeaders` for the `openai-completions` provider. When enabled (default off), the agent session id is forwarded as vendor-neutral `session_id` and `x-session-id` request headers to any OpenAI-compatible endpoint, letting relays/proxies do session-affinity routing and reuse a server-side prompt cache keyed by the session. Previously only the `openai-responses` provider injected session headers, and only against a first-party OpenAI base URL. Injection runs after the caller's `headers`/`extraHeaders` are merged and before `requestTransform`, and uses `??=` so any header the caller already set always wins; it is skipped entirely when the flag is off or no session id is available, leaving existing provider behavior byte-identical. The first-party `openai-responses` gating is unchanged.
+
+### Fixed
+
+- Prevented OpenAI Codex Responses `invalid_function_parameters` / tool-schema validation error events from being treated as retryable `server_error`s, so malformed request schemas fail fast instead of burning the full retry budget.
+- Read LM Studio `/v1/models` nested metadata such as `meta.n_ctx`, `meta.n_ctx_train`, and `details.max_tokens` when normalizing dynamically discovered GGUF-backed local models.
+- Corrected the bundled `openai-codex/gpt-5.5` context window from an overstated 400K back to its true 272K (272,000-token) window, so context-cap / auto-compaction thresholds no longer let gpt-5.5 sessions overrun the model's real limit before compaction (#873).
+
+## [0.6.1] - 2026-06-18
+
+### Fixed
+
+- Generalized tool `input_schema` root-combinator flattening across providers so discriminated-union tool inputs (e.g. the `computer` tool, a `z.union`) no longer ship a bare top-level `anyOf`/`oneOf`/`allOf` root that strict validators reject. The Anthropic-only fix from 0.5.4 is now the shared, provider-agnostic `flattenToolRootCombinators` (in `utils/schema`) and is applied by Amazon Bedrock, OpenAI Chat Completions / Responses / Codex-Responses / Azure-Responses, Ollama, and Cursor. Previously only Anthropic flattened the root, so those providers forwarded the union root verbatim and a union-root tool failed upstream — Bedrock Converse (including via Kiro/CodeWhisperer relays) returned `400 TOOL_SCHEMA_INVALID: The value at toolConfig.tools.N.toolSpec.inputSchema.json.type must be one of the following: object`. Anthropic behavior is unchanged (it now calls the shared util), Google / Cloud Code Assist keep their own object-merge, and object-root tools, nested combinators, and runtime Zod validation are all untouched.
+
 ## [0.6.0] - 2026-06-18
 ### Fixed
 

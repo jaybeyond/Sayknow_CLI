@@ -27,6 +27,7 @@ import { synthesizeRlmReport } from "@sayknow-cli/coding-agent/rlm/report";
 import type { RlmCellResult } from "@sayknow-cli/coding-agent/rlm/types";
 import { type CreateAgentSessionOptions, createAgentSession } from "@sayknow-cli/coding-agent/sdk";
 import { SessionManager } from "@sayknow-cli/coding-agent/session/session-manager";
+import { rlmArtifactRoot } from "@sayknow-cli/coding-agent/skc-runtime/session-layout";
 import {
 	checkBashAllowedPrefixes,
 	normalizeReadOnlyBashCommand,
@@ -67,15 +68,21 @@ describe("rlm artifacts", () => {
 		expect(a).not.toBe(b);
 	});
 
-	test("resolves artifact paths under .skc/rlm/<id> and creates the dir", async () => {
-		const paths = resolveRlmArtifactPaths(tmp, "sess1");
-		expect(paths.dir).toBe(path.join(tmp, ".skc", "rlm", "sess1"));
-		expect(paths.notebookPath.endsWith(path.join("sess1", "notebook.ipynb"))).toBe(true);
-		expect(paths.reportPath.endsWith("report.md")).toBe(true);
-		await ensureRlmSessionDir(paths);
-		expect((await fs.stat(paths.dir)).isDirectory()).toBe(true);
+	test("resolves artifact paths under the session-scoped rlm dir and creates the dir", async () => {
+		const prior = process.env.SKC_SESSION_ID;
+		process.env.SKC_SESSION_ID = "test-session";
+		try {
+			const paths = resolveRlmArtifactPaths(tmp, "sess1");
+			expect(paths.dir).toBe(rlmArtifactRoot(tmp, "test-session", "sess1"));
+			expect(paths.notebookPath.endsWith(path.join("sess1", "notebook.ipynb"))).toBe(true);
+			expect(paths.reportPath.endsWith("report.md")).toBe(true);
+			await ensureRlmSessionDir(paths);
+			expect((await fs.stat(paths.dir)).isDirectory()).toBe(true);
+		} finally {
+			if (prior !== undefined) process.env.SKC_SESSION_ID = prior;
+			else delete process.env.SKC_SESSION_ID;
+		}
 	});
-
 	test("rejects invalid session ids when resolving paths", () => {
 		expect(() => resolveRlmArtifactPaths(tmp, "../escape")).toThrow();
 	});

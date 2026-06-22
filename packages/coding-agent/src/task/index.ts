@@ -55,7 +55,7 @@ import { assertNoRawTaskFields, buildTaskReceipt, buildTaskRoiSummary } from "./
 import { renderResult, renderCall as renderTaskCall } from "./render";
 import { reconcileSpawnRoi } from "./roi-reconciliation";
 import { getTaskSimpleModeCapabilities, type TaskSimpleMode } from "./simple-mode";
-import { DEFAULT_SPAWN_THRESHOLD, evaluateReviewerExploreGate, evaluateSpawnGate } from "./spawn-gate";
+import { DEFAULT_SPAWN_THRESHOLD, evaluateSpawnGate } from "./spawn-gate";
 import {
 	applyNestedPatches,
 	captureBaseline,
@@ -359,7 +359,6 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	readonly renderResult = renderResult;
 	readonly #discoveredAgents: AgentDefinition[];
 	readonly #blockedAgent: string | undefined;
-	readonly #spawningAgentType: string | undefined;
 
 	get parameters(): TaskToolSchemaInstance {
 		const isolationEnabled = this.session.settings.get("task.isolation.mode") !== "none";
@@ -391,7 +390,6 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		discoveredAgents: AgentDefinition[],
 	) {
 		this.#blockedAgent = $env.PI_BLOCKED_AGENT;
-		this.#spawningAgentType = session.currentAgentType;
 		this.#discoveredAgents = discoveredAgents;
 	}
 
@@ -472,23 +470,6 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					{
 						type: "text",
 						text: `Task spawn gate rejected this batch: ${batchGateDecision.reason}. Batches with more than ${DEFAULT_SPAWN_THRESHOLD} tasks require spawnPlan fields: ${batchGateDecision.missingFields.join(", ")}.`,
-					},
-				],
-				details: { projectAgentsDir: null, results: [], totalDurationMs: 0 },
-			};
-		}
-
-		const reviewerExploreDecision = evaluateReviewerExploreGate({
-			spawningAgentType: this.#spawningAgentType,
-			targetAgent: params.agent,
-			plan: params.spawnPlan,
-		});
-		if (reviewerExploreDecision.outcome === "rejected") {
-			return {
-				content: [
-					{
-						type: "text",
-						text: `Task spawn gate rejected reviewer->explore: ${reviewerExploreDecision.reason}. Provide spawnPlan fields: ${reviewerExploreDecision.missingFields.join(", ")}.`,
 					},
 				],
 				details: { projectAgentsDir: null, results: [], totalDurationMs: 0 },
@@ -1073,27 +1054,6 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					{
 						type: "text",
 						text: `Task spawn gate rejected this batch: ${batchGateDecision.reason}. Batches with more than ${DEFAULT_SPAWN_THRESHOLD} tasks require spawnPlan fields: ${batchGateDecision.missingFields.join(", ")}.`,
-					},
-				],
-				details: {
-					projectAgentsDir,
-					results: [],
-					totalDurationMs: Date.now() - startTime,
-				},
-			};
-		}
-
-		const reviewerExploreDecision = evaluateReviewerExploreGate({
-			spawningAgentType: this.#spawningAgentType,
-			targetAgent: agentName,
-			plan: params.spawnPlan,
-		});
-		if (reviewerExploreDecision.outcome === "rejected") {
-			return {
-				content: [
-					{
-						type: "text",
-						text: `Task spawn gate rejected reviewer->explore: ${reviewerExploreDecision.reason}. Provide spawnPlan fields: ${reviewerExploreDecision.missingFields.join(", ")}.`,
 					},
 				],
 				details: {

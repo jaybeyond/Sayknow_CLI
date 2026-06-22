@@ -23,13 +23,17 @@ Ralplan is the consensus planning workflow. It triggers iterative planning with 
 - `--deliberate`: Forces deliberate mode for high-risk work. Adds pre-mortem (3 scenarios) and expanded test planning (unit/integration/e2e/observability). Without this flag, deliberate mode can still auto-enable when the request explicitly signals high risk (auth/security, migrations, destructive changes, production incidents, compliance/PII, public API breakage).
 - `--architect openai-code`: Use OpenAI code for the Architect pass when OpenAI code CLI is available. Otherwise, briefly note the fallback and keep the default SKC Architect review.
 - `--critic openai-code`: Use OpenAI code for the Critic pass when OpenAI code CLI is available. Otherwise, briefly note the fallback and keep the default SKC Critic review.
-- `--write --stage <type> --stage_n <N> --artifact <markdown file path or markdown string>`: Native artifact write path persisting Planner, Architect, Critic, revision, ADR, and final pending-approval plan markdown under `.skc/plans/ralplan/<run-id>/`. Use this instead of editing `.skc/` files directly.
+- `--write --stage <type> --stage_n <N> --artifact <markdown file path or markdown string>`: Native artifact write path persisting Planner, Architect, Critic, revision, ADR, and final pending-approval plan markdown under `.skc/_session-{sessionid}/plans/ralplan/<run-id>/`. Use this instead of editing `.skc/` files directly.
 
 ## Usage with interactive mode
 
 ```
 /skill:ralplan --interactive "task description"
 ```
+
+## Corrupt current-session state recovery
+
+When ralplan detects its own current-session state is corrupt, tampered, unreadable, or stale on resume, run `skc state clear --force --mode ralplan` before reseeding or restarting. Scope the clear to the current session via `--session-id`, the command payload, or `SKC_SESSION_ID`; it clears only ralplan state for that session and never clears other skills or sessions.
 
 ## Behavior
 
@@ -43,7 +47,9 @@ Planning artifacts and stage handoffs MUST be persisted through the ralplan CLI 
 skc ralplan --write --stage <type> --stage_n <N> --artifact "markdown file path or markdown string"
 ```
 
-Use stage values that match the producer or artifact kind, such as `planner`, `architect`, `critic`, `revision`, `adr`, or `final`. Increment `--stage_n` for each consensus-loop pass. The `--artifact` value may be either a markdown file path prepared outside `.skc/` for ingestion or the markdown content string itself. The native `--write` handler persists markdown under `.skc/plans/ralplan/<run-id>/stage-<NN>-<stage>.md`, maintains an `index.jsonl` audit log, and for `final` stages additionally writes a `pending-approval.md` copy. Direct `write`, `edit`, or `ast_edit` calls against `.skc/specs`, `.skc/plans`, `.skc/state`, or any other `.skc/` path are forbidden unless an explicit force override is active.
+Use stage values that match the producer or artifact kind, such as `planner`, `architect`, `critic`, `revision`, `adr`, or `final`. Increment `--stage_n` for each consensus-loop pass. The `--artifact` value may be either a markdown file path prepared outside `.skc/` for ingestion or the markdown content string itself. The native `--write` handler persists markdown under `.skc/_session-{sessionid}/plans/ralplan/<run-id>/stage-<NN>-<stage>.md`, maintains an `index.jsonl` audit log, and for `final` stages additionally writes a `pending-approval.md` copy. Direct `write`, `edit`, or `ast_edit` calls against `.skc/_session-{sessionid}/specs`, `.skc/_session-{sessionid}/plans`, `.skc/_session-{sessionid}/state`, or any other `.skc/` path are forbidden unless an explicit force override is active.
+
+While ralplan is active it is a pre-approval planning phase: product-code mutation tools (`write`/`edit`/`ast_edit`) and product-mutating `bash` (e.g. `tee src/...`, redirects into the project tree) are blocked, exactly like deep-interview. Prefer passing the `--artifact` markdown **inline** (the content string) so no scratch file is needed; this is mandatory for restricted role agents (see below). Only the leader, and only when an artifact is too large to pass inline, may stage it as a file in a system temp directory (`os.tmpdir()`/`$TMPDIR`, `/tmp`, `/var/tmp`) outside the project tree and pass that path — never write scratch files into the repo or `.skc/`. Product code is mutated only after the plan is approved and execution begins.
 
 Restricted read-only role agents (`planner`, `architect`, and `critic`) must pass markdown content directly in `--artifact`; their restricted bash environment intentionally disables artifact file-path ingestion so a verdict command cannot persist arbitrary file contents.
 
@@ -74,7 +80,7 @@ The consensus workflow:
    d. Return to Critic evaluation
    e. Repeat this loop until Critic returns `APPROVE` or 5 iterations are reached
    f. If 5 iterations are reached without `APPROVE`, present the best version to the user
-6. On Critic approval, mark the plan `pending approval` unless explicit execution approval has already been captured, persist the ADR/final plan via `skc ralplan --write --stage final --stage_n <N> --artifact "..."`, and do not directly edit `.skc/plans`. *(--interactive only)* If `--interactive` is set, use the `ask` tool to present the plan with approval options (Approve execution via ultragoal (Recommended) / Approve execution via team (only when tmux-based interactive worker parallelization is required) / Compact then return for execution approval / Request changes / Reject). Final plan must include ADR (Decision, Drivers, Alternatives considered, Why chosen, Consequences, Follow-ups). Otherwise, output the final plan and stop before any mutation or delegation.
+6. On Critic approval, mark the plan `pending approval` unless explicit execution approval has already been captured, persist the ADR/final plan via `skc ralplan --write --stage final --stage_n <N> --artifact "..."`, and do not directly edit `.skc/_session-{sessionid}/plans`. *(--interactive only)* If `--interactive` is set, use the `ask` tool to present the plan with approval options (Approve execution via ultragoal (Recommended) / Approve execution via team (only when tmux-based interactive worker parallelization is required) / Compact then return for execution approval / Request changes / Reject). Final plan must include ADR (Decision, Drivers, Alternatives considered, Why chosen, Consequences, Follow-ups). Otherwise, output the final plan and stop before any mutation or delegation.
 7. *(--interactive only)* User chooses: Approve ultragoal execution (recommended), Approve team execution (tmux parallelization only), Request changes, or Reject
 8. *(--interactive only)* On approval: invoke `/skill:ultragoal` for execution by default; invoke `/skill:team` only when the user explicitly needs tmux-based interactive worker parallelization -- never implement directly
 
@@ -84,7 +90,7 @@ The consensus workflow:
    skc state ralplan write --input '{"current_phase":"handoff"}' --json
    ```
 
-   The skill tool then dispatches the execution skill same-turn and runs `skc state ralplan handoff --to <team|ultragoal> --json` in-process to atomically demote ralplan, promote the callee, and sync both `skill-active-state.json` files. You do not need to run the handoff verb yourself.
+   The skill tool then dispatches the execution skill same-turn and runs `skc state ralplan handoff --to <team|ultragoal> --json` in-process to atomically demote ralplan, promote the callee, and sync `.skc/_session-{sessionid}/state/skill-active-state.json`. You do not need to run the handoff verb yourself.
 
 > **Important:** Steps 3 and 4 MUST run sequentially. Do NOT issue both agent Task calls in the same parallel batch. Always await the Architect result before issuing the Critic Task.
 

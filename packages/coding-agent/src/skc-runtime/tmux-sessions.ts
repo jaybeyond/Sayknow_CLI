@@ -114,7 +114,13 @@ function runListSessions(format: string, env: NodeJS.ProcessEnv = process.env): 
 		output = runTmux(["list-sessions", "-F", format], env);
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
-		if (message.includes("no server running") || message.includes("failed to connect to server")) return [];
+		if (
+			message.includes("no server running") ||
+			message.includes("failed to connect to server") ||
+			message.includes("error connecting to")
+		) {
+			return [];
+		}
 		throw error;
 	}
 	return output
@@ -137,6 +143,8 @@ function listRawTmuxSessionNames(env: NodeJS.ProcessEnv = process.env): string[]
 export function listSkcTmuxSessions(env: NodeJS.ProcessEnv = process.env): SkcTmuxSessionStatus[] {
 	return listSessionLines(env)
 		.map(parseSessionLine)
+		.filter((session): session is SkcTmuxSessionStatus => session != null)
+		.map(session => hydrateSessionFromExactOptions(session, env))
 		.filter((session): session is SkcTmuxSessionStatus => session?.profile === SKC_TMUX_PROFILE_VALUE)
 		.sort((a, b) => a.name.localeCompare(b.name));
 }
@@ -145,7 +153,8 @@ export function listSkcTmuxSessions(env: NodeJS.ProcessEnv = process.env): SkcTm
 export function listTmuxSessionsForGc(env: NodeJS.ProcessEnv = process.env): SkcTmuxSessionsForGc {
 	const sessions = listSessionLines(env)
 		.map(parseSessionLine)
-		.filter((session): session is SkcTmuxSessionStatus => session != null);
+		.filter((session): session is SkcTmuxSessionStatus => session != null)
+		.map(session => hydrateSessionFromExactOptions(session, env));
 	const tagged = sessions
 		.filter(session => session.profile === SKC_TMUX_PROFILE_VALUE)
 		.sort((a, b) => a.name.localeCompare(b.name));
@@ -179,6 +188,22 @@ export function findSkcTmuxSessionByBranch(
 	);
 }
 
+export function findSkcTmuxSessionByName(
+	sessionName: string,
+	env: NodeJS.ProcessEnv = process.env,
+): SkcTmuxSessionStatus | undefined {
+	return listSkcTmuxSessions(env).find(session => session.name === sessionName);
+}
+
+export function findSkcTmuxSessionByScope(
+	project: string,
+	branch: string | null | undefined,
+	env: NodeJS.ProcessEnv = process.env,
+): SkcTmuxSessionStatus | undefined {
+	return listSkcTmuxSessions(env).find(
+		session => session.project === project && (branch ? session.branch === branch : session.branch === undefined),
+	);
+}
 export function statusSkcTmuxSession(sessionName: string, env: NodeJS.ProcessEnv = process.env): SkcTmuxSessionStatus {
 	const session = listSkcTmuxSessions(env).find(candidate => candidate.name === sessionName);
 	if (session) return session;
@@ -225,6 +250,22 @@ function readExactOptionForGc(sessionName: string, option: string, env: NodeJS.P
 	} catch {
 		return undefined;
 	}
+}
+
+function hydrateSessionFromExactOptions(session: SkcTmuxSessionStatus, env: NodeJS.ProcessEnv): SkcTmuxSessionStatus {
+	if (session.profile === SKC_TMUX_PROFILE_VALUE) return session;
+	const profile = readExactOptionForGc(session.name, SKC_TMUX_PROFILE_OPTION, env);
+	if (profile !== SKC_TMUX_PROFILE_VALUE) return session;
+	return {
+		...session,
+		profile,
+		branch: session.branch ?? readExactOptionForGc(session.name, SKC_TMUX_BRANCH_OPTION, env),
+		branchSlug: session.branchSlug ?? readExactOptionForGc(session.name, SKC_TMUX_BRANCH_SLUG_OPTION, env),
+		project: session.project ?? readExactOptionForGc(session.name, SKC_TMUX_PROJECT_OPTION, env),
+		sessionId: session.sessionId ?? readExactOptionForGc(session.name, SKC_TMUX_SESSION_ID_OPTION, env),
+		sessionStateFile:
+			session.sessionStateFile ?? readExactOptionForGc(session.name, SKC_TMUX_SESSION_STATE_FILE_OPTION, env),
+	};
 }
 
 /** @internal */

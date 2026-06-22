@@ -44,7 +44,6 @@ import {
 	type EmergencyCompactionSample,
 	emergencyCompactionReason,
 	estimateMessageTokensHeuristic,
-	estimateTokens,
 	generateBranchSummary,
 	generateHandoff,
 	prepareCompaction,
@@ -217,6 +216,11 @@ import { MCPManager } from "../runtime-mcp/manager";
 import { deobfuscateSessionContext, type SecretObfuscator } from "../secrets/obfuscator";
 import { formatNoCredentialOnboardingError, formatNoModelOnboardingError } from "../setup/model-onboarding-guidance";
 import { buildSkcRuntimeSessionEnv, consumePendingGoalModeRequest } from "../skc-runtime/goal-mode-request";
+import {
+	assertNonEmptySkcSessionId,
+	modeStatePath as sessionModeStatePath,
+	sessionStateDir,
+} from "../skc-runtime/session-layout";
 import { persistCoordinatorRuntimeStateFromEvent } from "../skc-runtime/session-state-sidecar";
 import { writeArtifact } from "../skc-runtime/state-writer";
 import { requestSkcWorkerIntegrationAttempt } from "../skc-runtime/team-runtime";
@@ -225,7 +229,7 @@ import {
 	readVisibleSkillActiveState,
 	syncSkillActiveState,
 } from "../skill-state/active-state";
-import { assertDeepInterviewMutationAllowed } from "../skill-state/deep-interview-mutation-guard";
+import { assertWorkflowMutationAllowed } from "../skill-state/deep-interview-mutation-guard";
 import { invalidateHostMetadata } from "../ssh/connection-manager";
 import { resolveThinkingLevelForModel, toReasoningEffort } from "../thinking";
 import {
@@ -312,13 +316,6 @@ export type AgentSessionEvent =
 	| { type: "notice"; level: "info" | "warning" | "error"; message: string; source?: string }
 	| { type: "thinking_level_changed"; thinkingLevel: ThinkingLevel | undefined }
 	| { type: "goal_updated"; goal: Goal | null; state?: GoalModeState };
-
-/**
- * Safe path component pattern used to validate session-id segments before
- * joining them into `.skc/state` paths. Mirrors the regex used by the
- * `skc state` runtime selector resolver.
- */
-const SAFE_PATH_COMPONENT = /^[A-Za-z0-9_-][A-Za-z0-9._-]{0,63}$/;
 
 function isUnderProjectSkc(cwd: string, targetPath: string): boolean {
 	const relative = path.relative(path.join(path.resolve(cwd), ".skc"), path.resolve(targetPath));
@@ -1371,21 +1368,17 @@ export class AgentSession {
 	getActiveSkillPhase(): string | undefined {
 		const active = this.#activeSkillState;
 		if (!active) return undefined;
-		// Path safety: refuse to read mode-state files when the skill or
-		// session-id are not safe path components. The `skill` tool
-		// interprets undefined as a non-terminal phase, so chaining is
-		// refused — there is no risk of bypassing the guard via a custom
-		// skill name with `..` or a session-id with separators.
 		if (!isCanonicalSkcWorkflowSkill(active.skill)) return undefined;
-		if (active.sessionId !== undefined && !SAFE_PATH_COMPONENT.test(active.sessionId)) {
-			return undefined;
-		}
+		const sessionId = active.sessionId ?? this.sessionManager.getSessionId();
 		try {
-			const stateDir = path.join(this.sessionManager.getCwd(), ".skc", "state");
-			const segments = active.sessionId
-				? [stateDir, "sessions", encodeURIComponent(active.sessionId).replaceAll(".", "%2E")]
-				: [stateDir];
-			const filePath = path.join(...segments, `${active.skill}-state.json`);
+			assertNonEmptySkcSessionId(sessionId, "AgentSession.getActiveSkillPhase");
+			// Keep the session-state-dir construction explicit here so the chain guard
+			// refuses to fall back to a legacy root `.skc/state` read.
+			const stateDir = sessionStateDir(this.sessionManager.getCwd(), sessionId);
+			const filePath = path.join(
+				stateDir,
+				path.basename(sessionModeStatePath(this.sessionManager.getCwd(), sessionId, active.skill)),
+			);
 			const raw = fs.readFileSync(filePath, "utf-8");
 			const parsed = JSON.parse(raw) as { current_phase?: unknown };
 			return typeof parsed.current_phase === "string" ? parsed.current_phase : undefined;
@@ -1475,7 +1468,7 @@ export class AgentSession {
 			}
 			const sanitized = sanitizeMessage(providerMessages[i]!);
 			if (!sanitized) continue;
-			const messageTokens = estimateTokens(sanitized);
+			const messageTokens = estimateMessageTokensHeuristic(sanitized);
 			if (maxTokens > 0 && approximateTokens + messageTokens > maxTokens) {
 				recordSkip("token-limit");
 				continue;
@@ -3764,7 +3757,7 @@ export class AgentSession {
 	 * prompts or tool execution can run.
 	 */
 	#wrapToolForDeepInterviewMutationGuard<T extends AgentTool>(tool: T): T {
-		if (!["edit", "write", "ast_edit", "bash"].includes(tool.name)) return tool;
+		if (!["edit", "write", "ast_edit"].includes(tool.name)) return tool;
 		return new Proxy(tool, {
 			get: (target, prop) => {
 				if (prop !== "execute") return Reflect.get(target, prop, target);
@@ -3775,7 +3768,7 @@ export class AgentSession {
 					onUpdate: never,
 					ctx: never,
 				) => {
-					await assertDeepInterviewMutationAllowed({
+					await assertWorkflowMutationAllowed({
 						cwd: this.sessionManager.getCwd(),
 						sessionId: this.sessionManager.getSessionId(),
 						tool: target,
@@ -9901,9 +9894,9 @@ export class AgentSession {
 	#estimateContextTokensForCompaction(pendingMessages: readonly AgentMessage[]): {
 		tokens: number;
 	} {
-		const estimate = this.#estimateContextTokensWith(message => this.#estimateMessageNativeContextTokens(message));
+		const estimate = this.#estimateContextTokensWith(message => this.#estimateMessageCompactionDeltaTokens(message));
 		return {
-			tokens: estimate.tokens + this.#estimateMessagesNativeContextTokens(pendingMessages),
+			tokens: estimate.tokens + this.#estimateMessagesCompactionDeltaTokens(pendingMessages),
 		};
 	}
 
@@ -9949,10 +9942,10 @@ export class AgentSession {
 		};
 	}
 
-	#estimateMessagesNativeContextTokens(messages: readonly AgentMessage[]): number {
+	#estimateMessagesCompactionDeltaTokens(messages: readonly AgentMessage[]): number {
 		let tokens = 0;
 		for (const message of messages) {
-			tokens += this.#estimateMessageNativeContextTokens(message);
+			tokens += this.#estimateMessageCompactionDeltaTokens(message);
 		}
 		return tokens;
 	}
@@ -9965,11 +9958,17 @@ export class AgentSession {
 		return tokens;
 	}
 
-	#nativeTokenCache = new WeakMap<AgentMessage, { len: number; tokens: number }>();
-
-	/** Cheap content-size signal to invalidate the native token cache on mutation (growth). */
 	/**
-	 * Cheap content-size signal to invalidate the native token cache on mutation. Recursively
+	 * Conservative inflation applied to the native-free chars/4 estimate of the
+	 * UNSENT context delta. chars/4 undercounts dense code/CJK, so we bias high
+	 * to compact slightly early rather than overflow the model window before the
+	 * next provider response re-anchors the exact count.
+	 */
+	#compactionDeltaInflation = 1.2;
+	#compactionDeltaTokenCache = new WeakMap<AgentMessage, { len: number; tokens: number }>();
+
+	/**
+	 * Cheap content-size signal to invalidate the compaction-delta token cache on mutation. Recursively
 	 * sums string lengths across the whole message (depth-bounded), so it covers every
 	 * provider-visible shape (text/thinking/tool args, toolResult output, tool names, etc.)
 	 * without allocating a serialized copy. A size-preserving in-place edit yields only a
@@ -9992,19 +9991,22 @@ export class AgentSession {
 		return 0;
 	}
 
-	#estimateMessageNativeContextTokens(message: AgentMessage): number {
-		// F10/F22: cache the expensive native token count per message object, invalidated by a
-		// cheap content-size signal, so unchanged (stable-size) messages are not re-tokenized on
-		// every pre-prompt estimate. A rare size-preserving in-place edit yields only a benign
-		// token-estimate drift, never wrong output.
+	#estimateMessageCompactionDeltaTokens(message: AgentMessage): number {
+		// Provider usage anchors the already-sent context (see calculatePromptTokens); this
+		// estimates only the UNSENT delta with the native-free chars/4 heuristic, inflated by
+		// #compactionDeltaInflation so dense input cannot undercount us past the compaction
+		// threshold before the next provider response re-anchors the exact count. Cached per
+		// message object, invalidated by a cheap content-size signal; a rare size-preserving
+		// in-place edit yields only a benign estimate drift, never wrong output.
 		const len = this.#messageTokenSize(message);
-		const cached = this.#nativeTokenCache.get(message);
+		const cached = this.#compactionDeltaTokenCache.get(message);
 		if (cached && cached.len === len) return cached.tokens;
-		let tokens = 0;
+		let heuristic = 0;
 		for (const llmMessage of convertToLlm([message])) {
-			tokens += estimateTokens(llmMessage);
+			heuristic += estimateMessageTokensHeuristic(llmMessage);
 		}
-		this.#nativeTokenCache.set(message, { len, tokens });
+		const tokens = Math.ceil(heuristic * this.#compactionDeltaInflation);
+		this.#compactionDeltaTokenCache.set(message, { len, tokens });
 		return tokens;
 	}
 

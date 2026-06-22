@@ -1,11 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { toolWireSchema } from "@sayknow-cli/ai/utils/schema";
-import {
-	DEFAULT_SPAWN_THRESHOLD,
-	evaluateReviewerExploreGate,
-	evaluateSpawnGate,
-	type SpawnPlanReceipt,
-} from "../../src/task/spawn-gate";
+import { DEFAULT_SPAWN_THRESHOLD, evaluateSpawnGate, type SpawnPlanReceipt } from "../../src/task/spawn-gate";
 import { getTaskSchema } from "../../src/task/types";
 
 const completePlan: SpawnPlanReceipt = {
@@ -66,34 +61,6 @@ describe("task spawn gate", () => {
 		expect(() => evaluateSpawnGate({ childCount: 1.5 })).toThrow("childCount must be a non-negative integer");
 	});
 });
-
-describe("reviewer explore spawn gate", () => {
-	it("rejects reviewer->explore without a plan", () => {
-		const decision = evaluateReviewerExploreGate({ spawningAgentType: "reviewer", targetAgent: "explore" });
-		expect(decision.outcome).toBe("rejected");
-		expect(decision.planRequired).toBe(true);
-	});
-
-	it("allows reviewer->explore with a complete plan", () => {
-		const decision = evaluateReviewerExploreGate({
-			spawningAgentType: "reviewer",
-			targetAgent: "explore",
-			plan: completePlan,
-		});
-		expect(decision.outcome).toBe("allowed");
-		expect(decision.planRequired).toBe(true);
-	});
-
-	it("does not gate non-reviewer->explore or reviewer->other", () => {
-		expect(evaluateReviewerExploreGate({ spawningAgentType: "executor", targetAgent: "explore" }).outcome).toBe(
-			"allowed",
-		);
-		expect(evaluateReviewerExploreGate({ spawningAgentType: "reviewer", targetAgent: "executor" }).outcome).toBe(
-			"allowed",
-		);
-	});
-});
-
 describe("task schema spawnPlan", () => {
 	it.each([
 		{ isolationEnabled: true, simpleMode: "default" },

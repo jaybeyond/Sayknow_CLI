@@ -34,14 +34,22 @@ east,300
 
 let cwd: string;
 let sessionId: string;
+let previousSkcSessionId: string | undefined;
 
 beforeEach(async () => {
 	cwd = await fs.mkdtemp(path.join(os.tmpdir(), "rlm-e2e-"));
 	sessionId = generateRlmSessionId();
+	previousSkcSessionId = process.env.SKC_SESSION_ID;
+	process.env.SKC_SESSION_ID = "rlm-e2e-test-session";
 });
 
 afterEach(async () => {
 	await disposeKernelSessionsByOwner(`rlm:${sessionId}`);
+	if (previousSkcSessionId === undefined) {
+		delete process.env.SKC_SESSION_ID;
+	} else {
+		process.env.SKC_SESSION_ID = previousSkcSessionId;
+	}
 	await fs.rm(cwd, { recursive: true, force: true });
 });
 

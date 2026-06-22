@@ -11,13 +11,17 @@ Use when the user asks for `ultragoal`, `create-goals`, `complete-goals`, durabl
 
 ## Purpose
 
-`ultragoal` turns a brief into repo-native artifacts and then drives a SKC goal safely through the unified `goal` tool. New plans default to a stable pointer-style aggregate SKC goal for the whole durable plan in `.skc/ultragoal/goals.json`, including later accepted/appended stories under the original brief constraints, while SKC tracks G001/G002 story progress in the ledger. Ultragoal does not require any `/goal` slash-command between runs. For back-to-back ultragoal runs in one session/thread, call `goal({"op":"drop"})` only when `goal({"op":"get"})` still reports an active aggregate; then call `goal({"op":"create"})`. The goal tool stays armed across drop so the next create works in-session, and no slash-command cleanup exists or is required.
+`ultragoal` turns a brief into repo-native artifacts and then drives a SKC goal safely through the unified `goal` tool. New plans default to a stable pointer-style aggregate SKC goal for the whole durable plan in `.skc/_session-{sessionid}/ultragoal/goals.json`, including later accepted/appended stories under the original brief constraints, while SKC tracks G001/G002 story progress in the ledger. Ultragoal does not require any `/goal` slash-command between runs. For back-to-back ultragoal runs in one session/thread, call `goal({"op":"drop"})` only when `goal({"op":"get"})` still reports an active aggregate; then call `goal({"op":"create"})`. The goal tool stays armed across drop so the next create works in-session, and no slash-command cleanup exists or is required.
 
-- `.skc/ultragoal/brief.md`
-- `.skc/ultragoal/goals.json`
-- `.skc/ultragoal/ledger.jsonl` (checkpoint and structured steering audit events)
+- `.skc/_session-{sessionid}/ultragoal/brief.md`
+- `.skc/_session-{sessionid}/ultragoal/goals.json`
+- `.skc/_session-{sessionid}/ultragoal/ledger.jsonl` (checkpoint and structured steering audit events)
 
 Existing aggregate plans with the legacy enumerated objective are migrated to the stable pointer objective on read, persisted to `goals.json`, retained in `skcObjectiveAliases` for already-active hidden goal reconciliation, and audited with an `aggregate_objective_migrated` ledger entry.
+
+## Corrupt current-session state recovery
+
+When ultragoal detects its own current-session state is corrupt, tampered, unreadable, or stale on resume, run `skc state clear --force --mode ultragoal` before reseeding or restarting. Scope the clear to the current session via `--session-id`, the command payload, or `SKC_SESSION_ID`; it clears only ultragoal state for that session and never clears other skills or sessions.
 
 ## Always-used command examples
 
@@ -81,7 +85,7 @@ Use `goal({"op":"get"})` snapshots inside Ultragoal for ledger reconciliation. T
    - `skc ultragoal create-goals --brief-file <path>`
    - `cat <brief> | skc ultragoal create-goals --from-stdin`
    - `skc ultragoal create-goals --skc-goal-mode per-story --brief "<brief>"` only when one SKC goal context per story is explicitly preferred
-3. Inspect `.skc/ultragoal/goals.json` and refine if needed.
+3. Inspect `.skc/_session-{sessionid}/ultragoal/goals.json` and refine if needed.
 
 ## Complete goals
 
@@ -131,9 +135,9 @@ skc ultragoal steer --kind mark_blocked_superseded --goal-id G004 --evidence "Th
 
 Steering invariants:
 
-- Do not edit the aggregate goal objective, original brief constraints, quality gates, or completion status. The aggregate objective is a stable pointer to `.skc/ultragoal/goals.json` and `.skc/ultragoal/ledger.jsonl`, not an enumeration of initial goal ids.
-- Do not hard-delete goals, auto-complete work, weaken verification, or silently mutate `.skc/ultragoal`.
-- Accepted and rejected attempts append structured audit entries to `.skc/ultragoal/ledger.jsonl`.
+- Do not edit the aggregate goal objective, original brief constraints, quality gates, or completion status. The aggregate objective is a stable pointer to `.skc/_session-{sessionid}/ultragoal/goals.json` and `.skc/_session-{sessionid}/ultragoal/ledger.jsonl`, not an enumeration of initial goal ids.
+- Do not hard-delete goals, auto-complete work, weaken verification, or silently mutate `.skc/_session-{sessionid}/ultragoal`.
+- Accepted and rejected attempts append structured audit entries to `.skc/_session-{sessionid}/ultragoal/ledger.jsonl`.
 - Superseded goals remain in `goals.json` with steering metadata and are skipped for scheduling.
 - Blocked goals without replacements are skipped for scheduling but still block final completion until later explicit steering replaces or supersedes them.
 
@@ -152,18 +156,18 @@ When delegating with native subagents, an await timeout only limits the leader's
 
 If an Ultragoal request has no approved plan or consensus artifact, run `ralplan` first and preserve its PRD, test spec, role roster, and verification guidance in the Ultragoal ledger. Do not silently substitute ad-hoc execution for missing planning.
 
-The Ultragoal leader owns `.skc/ultragoal/goals.json` and `.skc/ultragoal/ledger.jsonl`. Role agents return implementation/review evidence; they do not checkpoint Ultragoal or mutate goal state.
+The Ultragoal leader owns `.skc/_session-{sessionid}/ultragoal/goals.json` and `.skc/_session-{sessionid}/ultragoal/ledger.jsonl`. Role agents return implementation/review evidence; they do not checkpoint Ultragoal or mutate goal state.
 
-For large subgoals with independent slices, the Ultragoal leader must spawn parallel `executor` subagents instead of doing serial solo work. Split only cleanly separable files/surfaces, give each executor bounded targets and acceptance criteria, and keep checkpoint ownership in the leader. Use `architect` / `critic` review lanes after integration; do not let worker agents mutate `.skc/ultragoal` or call goal tools.
+For large subgoals with independent slices, the Ultragoal leader must spawn parallel `executor` subagents instead of doing serial solo work. Split only cleanly separable files/surfaces, give each executor bounded targets and acceptance criteria, and keep checkpoint ownership in the leader. Use `architect` / `critic` review lanes after integration; do not let worker agents mutate `.skc/_session-{sessionid}/ultragoal` or call goal tools.
 
 ## Use Ultragoal and Team together
 
-Use ultragoal and team together for a durable Ultragoal story that benefits from one visible tmux worker session. Ultragoal remains leader-owned: `.skc/ultragoal/goals.json` stores the story plan and `.skc/ultragoal/ledger.jsonl` stores checkpoints. Team is the single-worker tmux execution engine and returns task/evidence status to the leader.
+Use ultragoal and team together for a durable Ultragoal story that benefits from one visible tmux worker session. Ultragoal remains leader-owned: `.skc/_session-{sessionid}/ultragoal/goals.json` stores the story plan and `.skc/_session-{sessionid}/ultragoal/ledger.jsonl` stores checkpoints. Team is the single-worker tmux execution engine and returns task/evidence status to the leader.
 
 The leader checkpoints Ultragoal from Team evidence with a fresh `goal({"op":"get"})` snapshot:
 
 ```sh
-skc ultragoal checkpoint --goal-id <id> --status complete --evidence "<team evidence mentioning .skc/ultragoal and <id>>" --skc-goal-json <fresh-goal-get-json-or-path> --quality-gate-json <quality-gate-json-or-path>
+skc ultragoal checkpoint --goal-id <id> --status complete --evidence "<team evidence mentioning .skc/_session-{sessionid}/ultragoal and <id>>" --skc-goal-json <fresh-goal-get-json-or-path> --quality-gate-json <quality-gate-json-or-path>
 ```
 
 Workers do not own ultragoal goal state, do not create worker ultragoal ledgers, and do not checkpoint Ultragoal. Workers must not run `skc ultragoal checkpoint`; checkpoint authority stays with the leader after worker tasks are terminal. Team launch remains explicit; Ultragoal does not auto-launch Team and performs no hidden goal mutation.
@@ -335,7 +339,7 @@ When the aggregate ultragoal is complete OR the user requests return to planning
 skc state ultragoal write --input '{"current_phase":"handoff"}' --json
 ```
 
-The skill tool then dispatches `/skill:ralplan` or `/skill:deep-interview` same-turn and runs `skc state ultragoal handoff --to <ralplan|deep-interview> --json` in-process to atomically demote ultragoal, promote the callee, and sync both `skill-active-state.json` files. You do not need to run the handoff verb yourself.
+The skill tool then dispatches `/skill:ralplan` or `/skill:deep-interview` same-turn and runs `skc state ultragoal handoff --to <ralplan|deep-interview> --json` in-process to atomically demote ultragoal, promote the callee, and sync both `.skc/_session-{sessionid}/state/skill-active-state.json` files. You do not need to run the handoff verb yourself.
 
 ## Constraints
 

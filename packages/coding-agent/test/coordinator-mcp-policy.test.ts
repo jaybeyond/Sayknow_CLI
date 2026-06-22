@@ -22,9 +22,22 @@ afterEach(async () => {
 });
 
 describe("Hermes MCP safety policy", () => {
-	it("defaults to read-only with no implicit global namespace", () => {
+	it("defaults to read-only with a deterministic local state root when no session env exists", () => {
 		const config = buildCoordinatorMcpConfig({});
 
+		expect(config.stateRoot).toBe(path.join(process.cwd(), ".skc", "state", "coordinator-mcp"));
+		expect(config.mutationClasses.size).toBe(0);
+		expect(config.namespace.profile).toBeNull();
+		expect(config.namespace.repo).toBeNull();
+		expect(config.artifactByteCap).toBe(65536);
+	});
+
+	it("scopes the default state root to SKC_SESSION_ID when present", () => {
+		const config = buildCoordinatorMcpConfig({ SKC_SESSION_ID: "coordinator-policy-test-session" });
+
+		expect(config.stateRoot).toContain(
+			path.join(".skc", "_session-coordinator-policy-test-session", "state", "coordinator-mcp"),
+		);
 		expect(config.mutationClasses.size).toBe(0);
 		expect(config.namespace.profile).toBeNull();
 		expect(config.namespace.repo).toBeNull();
@@ -32,7 +45,10 @@ describe("Hermes MCP safety policy", () => {
 	});
 
 	it("requires startup mutation opt-in and per-call allow_mutation", () => {
-		const config = buildCoordinatorMcpConfig({ SKC_COORDINATOR_MCP_MUTATIONS: "sessions,reports" });
+		const config = buildCoordinatorMcpConfig({
+			SKC_SESSION_ID: "coordinator-policy-test-session",
+			SKC_COORDINATOR_MCP_MUTATIONS: "sessions,reports",
+		});
 
 		expect(() => requireCoordinatorMutation(config, "sessions", { allow_mutation: false })).toThrow(
 			"coordinator_mutation_call_not_allowed",
@@ -46,7 +62,10 @@ describe("Hermes MCP safety policy", () => {
 	it("rejects workdirs outside canonical allowlisted roots", async () => {
 		const root = await tempRoot();
 		const outside = await tempRoot();
-		const config = buildCoordinatorMcpConfig({ SKC_COORDINATOR_MCP_WORKDIR_ROOTS: root });
+		const config = buildCoordinatorMcpConfig({
+			SKC_SESSION_ID: "coordinator-policy-test-session",
+			SKC_COORDINATOR_MCP_WORKDIR_ROOTS: root,
+		});
 
 		await expect(assertCoordinatorWorkdir(config, path.join(root, "child"))).resolves.toBe(path.join(root, "child"));
 		await expect(assertCoordinatorWorkdir(config, outside)).rejects.toThrow(
@@ -66,6 +85,7 @@ describe("Hermes MCP safety policy", () => {
 		await Bun.write(path.join(outside, "secret.txt"), "secret");
 		await fs.symlink(path.join(outside, "secret.txt"), escapedLink);
 		const config = buildCoordinatorMcpConfig({
+			SKC_SESSION_ID: "coordinator-policy-test-session",
 			SKC_COORDINATOR_MCP_WORKDIR_ROOTS: root,
 			SKC_COORDINATOR_MCP_ARTIFACT_BYTE_CAP: "3",
 		});

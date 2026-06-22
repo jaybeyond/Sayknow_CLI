@@ -1,7 +1,7 @@
-import * as path from "node:path";
 import type { ExtensionUIContext } from "../../extensibility/extensions";
 import type { AgentSession } from "../../session/agent-session";
 import type { ClientBridgePermissionOutcome } from "../../session/client-bridge";
+import { workflowGatePath } from "../../skc-runtime/session-layout";
 import type { RpcCommand, RpcResponse, RpcWorkflowGateResponse } from "../rpc/rpc-types";
 import { dispatchRpcCommand } from "../shared/agent-wire/command-dispatch";
 import { isRpcCommand } from "../shared/agent-wire/command-validation";
@@ -611,7 +611,7 @@ export async function runBridgeMode(
 		});
 	};
 	const gateStore = new FileGateStore(
-		path.join(session.sessionManager.getCwd(), ".skc", "state", "workflow-gates", `${session.sessionId}.json`),
+		workflowGatePath(session.sessionManager.getCwd(), session.sessionId, session.sessionId),
 	);
 	const unattendedControlPlane = new UnattendedSessionControlPlane({
 		runId: session.sessionId,

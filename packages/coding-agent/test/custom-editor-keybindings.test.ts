@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import { defaultEditorTheme } from "../../tui/test/test-themes";
+import { KEYBINDINGS } from "../src/config/keybindings";
 import { CustomEditor } from "../src/modes/components/custom-editor";
 
 function ctrl(key: string): string {
@@ -65,6 +66,22 @@ describe("CustomEditor queue keybinding", () => {
 
 		editor.handleInput("\x1bq");
 		expect(onQueue).toHaveBeenCalledTimes(1);
+	});
+});
+
+describe("CustomEditor pasteImage default sourced from KEYBINDINGS", () => {
+	it("intercepts the registry's platform-aware pasteImage default (single source of truth)", () => {
+		const editor = createEditor();
+		const onPasteImage = vi.fn();
+		editor.onPasteImage = onPasteImage;
+
+		const def = KEYBINDINGS["app.clipboard.pasteImage"].defaultKeys;
+		const key = Array.isArray(def) ? def[0]! : def;
+		// ctrl+v on most platforms, alt+v on win32 — both come from the registry now.
+		const data = key === "alt+v" ? "\x1bv" : ctrl("v");
+
+		editor.handleInput(data);
+		expect(onPasteImage).toHaveBeenCalledTimes(1);
 	});
 });
 

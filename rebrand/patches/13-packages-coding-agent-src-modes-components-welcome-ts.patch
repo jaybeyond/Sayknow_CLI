@@ -7,8 +7,8 @@
  import { type ThemeColor, theme } from "../../modes/theme/theme";
  
  export interface RecentSession {
-@@ -14,8 +15,9 @@
- }
+@@ -16,8 +17,9 @@
+ export type WelcomeLogoMode = "unicode" | "square" | "ascii";
  
  /**
 - * SKC-native launch surface with compact command affordances, project
@@ -19,7 +19,7 @@
   */
  export class WelcomeComponent implements Component {
  	#animStart: number | null = null;
-@@ -79,20 +81,19 @@
+@@ -82,7 +84,7 @@
  		}
  		const dualContentWidth = boxWidth - 3; // 3 = │ + │ + │
  		const preferredLeftCol = 36;
@@ -28,8 +28,7 @@
  		const minRightCol = 20;
  		const modelPill = this.#pill(theme.icon.model || "model", this.modelName, "statusLineModel");
  		const providerPill = this.#pill(theme.icon.package || "provider", this.providerName, "statusLinePath");
--		const logoMinWidth = Math.max(...RED_CLAW_LOGO.map(line => visibleWidth(line)));
-+		const logoMinWidth = Math.max(...BRAND_LOGO.map(line => visibleWidth(line)));
+@@ -91,12 +93,11 @@
  		const leftMinContentWidth = Math.max(
  			minLeftCol,
  			logoMinWidth,
@@ -44,9 +43,9 @@
  		const dualLeftCol =
  			dualContentWidth >= minRightCol + 1
  				? Math.min(desiredLeftCol, dualContentWidth - minRightCol)
-@@ -105,16 +106,26 @@
- 		// Logo: pick a frame from the intro animation if active, else the resting frame.
- 		const logoColored = this.#currentLogoFrame();
+@@ -108,16 +109,26 @@
+ 
+ 		const logoColored = this.#currentLogoFrame(logoLines);
  
 -		// Left column - centered content
 +		// When no model is resolved yet, guide the user instead of showing "Unknown".
@@ -77,7 +76,7 @@
  		];
  
  		// Right column separator
-@@ -124,7 +135,7 @@
+@@ -127,7 +138,7 @@
  		// Recent sessions content
  		const sessionLines: string[] = [];
  		if (this.recentSessions.length === 0) {
@@ -86,7 +85,7 @@
  		} else {
  			// Reserve width for the bullet prefix (" • ") and the trailing " (timeAgo)"
  			// so the relative time is never the part that gets truncated. The name
-@@ -146,7 +157,7 @@
+@@ -149,7 +160,7 @@
  		// LSP servers content
  		const lspLines: string[] = [];
  		if (this.lspServers.length === 0) {
@@ -95,7 +94,7 @@
  		} else {
  			for (const server of this.lspServers) {
  				const icon =
-@@ -160,27 +171,39 @@
+@@ -163,27 +174,39 @@
  			}
  		}
  
@@ -145,7 +144,7 @@
  			...sessionLines,
  			"",
  		];
-@@ -197,7 +220,7 @@
+@@ -200,7 +223,7 @@
  		const lines: string[] = [];
  
  		// Top border with embedded title
@@ -154,12 +153,14 @@
  		const titlePrefixRaw = hChar.repeat(3);
  		const titleStyled = theme.fg("dim", titlePrefixRaw) + theme.fg("muted", title);
  		const titleVisLen = visibleWidth(titlePrefixRaw) + visibleWidth(title);
-@@ -273,31 +296,28 @@
- 		// the same ease-out curve so the highlight is gone by the resting frame.
- 		const shinePos = (((progress * INTRO_SHINE_TRAVERSALS) % 1) + 1) % 1;
- 		const shineStrength = (1 - eased) ** 1.5;
--		return gradientLogo(RED_CLAW_LOGO, phase, { strength: shineStrength, pos: shinePos });
-+		return gradientLogo(BRAND_LOGO, phase, { strength: shineStrength, pos: shinePos });
+@@ -280,53 +303,28 @@
+ 	}
+ 
+ 	#logoLines(): readonly string[] {
+-		if (this.logoMode === "ascii") return ASCII_CLAW_LOGO;
+-		if (this.logoMode === "square") return SQUARE_CLAW_LOGO;
+-		return RED_CLAW_LOGO;
++		return BRAND_LOGO;
  	}
  }
  
@@ -177,6 +178,26 @@
 +	"╚═╝╩ ╩ ╩ ╩ ╩╝╚╝╚═╝╚╩╝",
  ];
  
+-// biome-ignore format: preserve ASCII art layout
+-const SQUARE_CLAW_LOGO = [
+-	"┌────────────────┐        ┌────────┐",
+-	"└──────┐      ┌──┘     ┌──┘  ┌─────┘",
+-	"       └──────┘    ┌───┘  ┌──┘      ",
+-	"       ┌──────┐    └───┐  └──┐      ",
+-	"┌──────┘      └──┐     └──┐  └─────┐",
+-	"└────────────────┘        └────────┘",
+-];
+-
+-// biome-ignore format: preserve ASCII art layout
+-const ASCII_CLAW_LOGO = [
+-	"+----------------+        +--------+",
+-	"+------+      +--+     +--+  +-----+",
+-	"       +------+    +---+  +--+      ",
+-	"       +------+    +---+  +--+      ",
+-	"+------+      +--+     +--+  +-----+",
+-	"+----------------+        +--------+",
+-];
+-
 -/** Multi-stop palette for the red-octopus diagonal gradient. */
 +/** Multi-stop palette for the blue-octopus diagonal gradient. */
  const GRADIENT_STOPS: ReadonlyArray<readonly [number, number, number]> = [
@@ -198,9 +219,14 @@
  
  /** Half-width of the shine highlight band, expressed in gradient-t units. */
  const SHINE_HALF_WIDTH = 0.18;
-@@ -386,4 +406,4 @@
- const INTRO_SHINE_TRAVERSALS = 3;
+@@ -416,7 +414,7 @@
  
- /** Resting gradient frame, cached for re-renders outside of the intro. */
--const REST_FRAME = gradientLogo(RED_CLAW_LOGO, 0);
-+const REST_FRAME = gradientLogo(BRAND_LOGO, 0);
+ /** Resting gradient frames, cached for re-renders outside of the intro. */
+ const REST_FRAMES: Record<WelcomeLogoMode, readonly string[]> = {
+-	unicode: gradientLogo(RED_CLAW_LOGO, 0),
+-	square: gradientLogo(SQUARE_CLAW_LOGO, 0),
+-	ascii: gradientLogo(ASCII_CLAW_LOGO, 0),
++	unicode: gradientLogo(BRAND_LOGO, 0),
++	square: gradientLogo(BRAND_LOGO, 0),
++	ascii: gradientLogo(BRAND_LOGO, 0),
+ };

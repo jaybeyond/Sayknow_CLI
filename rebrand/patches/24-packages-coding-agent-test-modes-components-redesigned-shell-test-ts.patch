@@ -8,7 +8,7 @@
  import { AssistantMessageComponent } from "@sayknow-cli/coding-agent/modes/components/assistant-message";
  import { BashExecutionComponent } from "@sayknow-cli/coding-agent/modes/components/bash-execution";
  import { CustomEditor } from "@sayknow-cli/coding-agent/modes/components/custom-editor";
-@@ -79,6 +80,9 @@
+@@ -80,6 +81,9 @@
  beforeAll(async () => {
  	resetSettingsForTest();
  	await Settings.init({ inMemory: true });
@@ -18,7 +18,7 @@
  	await initTheme(false);
  });
  
-@@ -103,9 +107,9 @@
+@@ -104,36 +108,36 @@
  		const lines = component.render(54);
  		const rendered = Bun.stripANSI(lines.join("\n"));
  
@@ -31,7 +31,42 @@
  		expect(rendered).not.toContain("●");
  		for (const line of lines) {
  			expect(visibleWidth(line)).toBeLessThanOrEqual(54);
-@@ -212,9 +216,15 @@
+ 		}
+ 	});
+ 
+-	it("renders an ASCII-safe welcome logo when requested", () => {
++	it("renders the brand wordmark even when an ASCII-safe logo is requested", () => {
++		// The Sayknow fork ships a single SAYKNOW wordmark for every logo mode, so an
++		// "ascii" request still resolves to the brand wordmark — never the upstream claw art.
+ 		const component = new WelcomeComponent("1.2.3", "gpt-5.5", "openai", [], [], "ascii");
+ 		const lines = component.render(54);
+ 		const rendered = Bun.stripANSI(lines.join("\n"));
+ 
+-		expect(rendered).toContain("+----------------+        +--------+");
+-		expect(rendered).toContain("+------+      +--+     +--+  +-----+");
+-		expect(rendered).not.toContain("╭────────────────╮");
++		expect(rendered).toContain("╔═╗╔═╗╦ ╦╦╔═╔╗╔╔═╗╦ ╦");
++		expect(rendered).not.toContain("+----------------+");
+ 		for (const line of lines) {
+ 			expect(visibleWidth(line)).toBeLessThanOrEqual(54);
+ 		}
+ 	});
+ 
+-	it("renders a square-corner Unicode welcome logo when requested", () => {
++	it("renders the brand wordmark even when a square-corner logo is requested", () => {
+ 		const component = new WelcomeComponent("1.2.3", "gpt-5.5", "openai", [], [], "square");
+ 		const lines = component.render(54);
+ 		const rendered = Bun.stripANSI(lines.join("\n"));
+ 
+-		expect(rendered).toContain("┌────────────────┐        ┌────────┐");
+-		expect(rendered).toContain("└────────────────┘        └────────┘");
+-		expect(rendered).not.toContain("╭────────────────╮");
++		expect(rendered).toContain("╔═╗╔═╗╦ ╦╦╔═╔╗╔╔═╗╦ ╦");
++		expect(rendered).not.toContain("┌────────────────┐");
+ 		expect(rendered).not.toContain("+----------------+");
+ 		for (const line of lines) {
+ 			expect(visibleWidth(line)).toBeLessThanOrEqual(54);
+@@ -249,9 +253,15 @@
  		expect(STATUS_LINE_PRESETS.default.rightSegments).toEqual([
  			"session_name",
  			"jobs",

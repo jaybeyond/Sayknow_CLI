@@ -6,10 +6,11 @@ import type { WorkflowHudSummary } from "../skill-state/active-state";
 import { buildUltragoalHudSummary as buildWorkflowUltragoalHudSummary } from "../skill-state/workflow-hud";
 import { renderCliWriteReceipt } from "./cli-write-receipt";
 import { DEFAULT_ULTRAGOAL_OBJECTIVE } from "./goal-mode-request";
-import { latestUltragoalLedgerEventFromText } from "./ledger-event-renderer";
+import { sessionUltragoalDir, skcRoot } from "./session-layout";
+import { resolveSkcSessionForRead, resolveSkcSessionForWrite, writeSessionActivityMarker } from "./session-resolution";
 import { renderUltragoalStatusMarkdown } from "./state-renderer";
 import { reconcileWorkflowSkillState } from "./state-runtime";
-import { appendJsonl, writeArtifact, writeJsonAtomic } from "./state-writer";
+import { appendJsonl, persistedStateRevision, writeArtifact, writeGuardedJsonAtomic } from "./state-writer";
 
 export type UltragoalSkcGoalMode = "aggregate" | "per-story";
 export type UltragoalGoalStatus =
@@ -44,6 +45,7 @@ export interface UltragoalPlan {
 	goals: UltragoalGoal[];
 	createdAt: string;
 	updatedAt: string;
+	[key: string]: unknown;
 }
 
 export type UltragoalReceiptKind = "per-goal" | "final-aggregate";
@@ -107,6 +109,10 @@ interface JsonObject {
 	[key: string]: unknown;
 }
 
+function currentUltragoalSessionId(cwd: string): string {
+	return resolveSkcSessionForWrite(cwd, { envSessionId: process.env.SKC_SESSION_ID }).skcSessionId;
+}
+
 const TERMINAL_OR_SKIPPED_STATUSES = new Set<UltragoalGoalStatus>(["complete", "superseded"]);
 const CLEAN_ARCHITECT_STATUS = "CLEAR";
 const APPROVE_RECOMMENDATION = "APPROVE";
@@ -162,8 +168,9 @@ export function hashStructuredValue(value: unknown): string {
 		.digest("hex");
 }
 
-export function getUltragoalPaths(cwd: string): UltragoalPaths {
-	const dir = path.join(cwd, ".skc", "ultragoal");
+export function getUltragoalPaths(cwd: string, sessionId?: string | null): UltragoalPaths {
+	const explicitSessionId = sessionId?.trim() || process.env.SKC_SESSION_ID?.trim();
+	const dir = explicitSessionId ? sessionUltragoalDir(cwd, explicitSessionId) : path.join(skcRoot(cwd), "ultragoal");
 	return {
 		dir,
 		briefPath: path.join(dir, "brief.md"),
@@ -178,8 +185,10 @@ function isEnoent(error: unknown): boolean {
 	);
 }
 
-async function appendLedger(cwd: string, event: JsonObject): Promise<UltragoalLedgerEvent> {
-	const paths = getUltragoalPaths(cwd);
+async function appendLedger(cwd: string, event: JsonObject, sessionId?: string | null): Promise<UltragoalLedgerEvent> {
+	const resolvedSessionId =
+		sessionId?.trim() || resolveSkcSessionForWrite(cwd, { envSessionId: process.env.SKC_SESSION_ID }).skcSessionId;
+	const paths = getUltragoalPaths(cwd, resolvedSessionId);
 	const entry: UltragoalLedgerEvent = {
 		eventId: typeof event.eventId === "string" ? event.eventId : crypto.randomUUID(),
 		...event,
@@ -187,14 +196,18 @@ async function appendLedger(cwd: string, event: JsonObject): Promise<UltragoalLe
 	};
 	await appendJsonl(paths.ledgerPath, entry, {
 		cwd,
-		audit: { category: "ledger", verb: "append", owner: "skc-runtime" },
+		audit: { category: "ledger", verb: "append", owner: "skc-runtime", sessionId: resolvedSessionId },
 	});
+	await writeSessionActivityMarker(cwd, resolvedSessionId, { writer: "ultragoal-runtime", path: paths.ledgerPath });
 	return entry;
 }
 
-export async function readUltragoalLedger(cwd: string): Promise<UltragoalLedgerEvent[]> {
+export async function readUltragoalLedger(cwd: string, sessionId?: string | null): Promise<UltragoalLedgerEvent[]> {
+	const resolvedSessionId =
+		sessionId?.trim() ||
+		(await resolveSkcSessionForRead(cwd, { envSessionId: process.env.SKC_SESSION_ID })).skcSessionId;
 	try {
-		const raw = await Bun.file(getUltragoalPaths(cwd).ledgerPath).text();
+		const raw = await Bun.file(getUltragoalPaths(cwd, resolvedSessionId).ledgerPath).text();
 		return raw
 			.split(/\r?\n/)
 			.map(line => line.trim())
@@ -206,16 +219,21 @@ export async function readUltragoalLedger(cwd: string): Promise<UltragoalLedgerE
 	}
 }
 
-async function writePlan(cwd: string, plan: UltragoalPlan): Promise<void> {
-	const paths = getUltragoalPaths(cwd);
+async function writePlan(cwd: string, plan: UltragoalPlan, sessionId?: string | null): Promise<void> {
+	const resolvedSessionId =
+		sessionId?.trim() || resolveSkcSessionForWrite(cwd, { envSessionId: process.env.SKC_SESSION_ID }).skcSessionId;
+	const paths = getUltragoalPaths(cwd, resolvedSessionId);
 	await writeArtifact(paths.briefPath, `${plan.brief.trim()}\n`, {
 		cwd,
-		audit: { category: "artifact", verb: "write", owner: "skc-runtime" },
+		audit: { category: "artifact", verb: "write", owner: "skc-runtime", sessionId: resolvedSessionId },
 	});
-	await writeJsonAtomic(paths.goalsPath, plan, {
+	await writeGuardedJsonAtomic(paths.goalsPath, plan, {
 		cwd,
-		audit: { category: "state", verb: "write", owner: "skc-runtime" },
+		policy: "source",
+		expectedRevision: typeof plan.state_revision === "number" ? persistedStateRevision(plan) : undefined,
+		audit: { category: "state", verb: "write", owner: "skc-runtime", sessionId: resolvedSessionId },
 	});
+	await writeSessionActivityMarker(cwd, resolvedSessionId, { writer: "ultragoal-runtime", path: paths.goalsPath });
 }
 
 function requiredUltragoalGoals(plan: UltragoalPlan): UltragoalGoal[] {
@@ -426,6 +444,7 @@ function normalizePlan(raw: unknown): UltragoalPlan {
 		const objective = nonEmptyString(goalRecord.objective) ?? title;
 		const goalCreatedAt = nonEmptyString(goalRecord.createdAt) ?? createdAt;
 		return {
+			...goalRecord,
 			id,
 			title,
 			objective,
@@ -459,12 +478,18 @@ function normalizePlan(raw: unknown): UltragoalPlan {
 		goals,
 		createdAt,
 		updatedAt,
+		...(typeof record.state_revision === "number" && Number.isFinite(record.state_revision)
+			? { state_revision: record.state_revision }
+			: {}),
 	};
 }
 
-export async function readUltragoalPlan(cwd: string): Promise<UltragoalPlan | null> {
+export async function readUltragoalPlan(cwd: string, sessionId?: string | null): Promise<UltragoalPlan | null> {
+	const resolvedSessionId =
+		sessionId?.trim() ||
+		(await resolveSkcSessionForRead(cwd, { envSessionId: process.env.SKC_SESSION_ID })).skcSessionId;
 	try {
-		return normalizePlan(await Bun.file(getUltragoalPaths(cwd).goalsPath).json());
+		return normalizePlan(await Bun.file(getUltragoalPaths(cwd, resolvedSessionId).goalsPath).json());
 	} catch (error) {
 		if (isEnoent(error)) return null;
 		throw error;
@@ -483,9 +508,12 @@ function emptyCounts(): Record<UltragoalGoalStatus, number> {
 	};
 }
 
-export async function getUltragoalStatus(cwd: string): Promise<UltragoalStatusSummary> {
-	const paths = getUltragoalPaths(cwd);
-	const plan = await readUltragoalPlan(cwd);
+export async function getUltragoalStatus(cwd: string, sessionId?: string | null): Promise<UltragoalStatusSummary> {
+	const resolvedSessionId =
+		sessionId?.trim() ||
+		(await resolveSkcSessionForRead(cwd, { envSessionId: process.env.SKC_SESSION_ID })).skcSessionId;
+	const paths = getUltragoalPaths(cwd, resolvedSessionId);
+	const plan = await readUltragoalPlan(cwd, resolvedSessionId);
 	const counts = emptyCounts();
 	if (!plan) return { exists: false, status: "missing", paths, counts, goals: [] };
 	for (const goal of plan.goals) counts[goal.status] += 1;
@@ -577,6 +605,7 @@ export async function createUltragoalPlan(input: {
 	cwd: string;
 	brief: string;
 	skcGoalMode?: UltragoalSkcGoalMode;
+	sessionId?: string | null;
 }): Promise<UltragoalPlan> {
 	const brief = input.brief.trim();
 	if (!brief) throw new Error("ultragoal brief is required");
@@ -601,8 +630,8 @@ export async function createUltragoalPlan(input: {
 		createdAt: now,
 		updatedAt: now,
 	};
-	await writePlan(input.cwd, plan);
-	await appendLedger(input.cwd, { event: "plan_created", goalIds: plan.goals.map(goal => goal.id) });
+	await writePlan(input.cwd, plan, input.sessionId);
+	await appendLedger(input.cwd, { event: "plan_created", goalIds: plan.goals.map(goal => goal.id) }, input.sessionId);
 	return plan;
 }
 
@@ -639,12 +668,16 @@ export function getUltragoalRunCompletionState(
 	};
 }
 
-export async function startNextUltragoalGoal(input: { cwd: string; retryFailed?: boolean }): Promise<{
+export async function startNextUltragoalGoal(input: {
+	cwd: string;
+	retryFailed?: boolean;
+	sessionId?: string | null;
+}): Promise<{
 	plan: UltragoalPlan;
 	goal?: UltragoalGoal;
 	allComplete: boolean;
 }> {
-	const plan = await readUltragoalPlan(input.cwd);
+	const plan = await readUltragoalPlan(input.cwd, input.sessionId);
 	if (!plan) throw new Error("No ultragoal plan found. Run `skc ultragoal create-goals --brief ...` first.");
 	const goal = chooseNextGoal(plan, input.retryFailed === true);
 	if (!goal) return { plan, allComplete: getUltragoalRunCompletionState(plan).allComplete };
@@ -654,8 +687,8 @@ export async function startNextUltragoalGoal(input: { cwd: string; retryFailed?:
 		goal.startedAt = goal.startedAt ?? now;
 		goal.updatedAt = now;
 		plan.updatedAt = now;
-		await writePlan(input.cwd, plan);
-		await appendLedger(input.cwd, { event: "goal_started", goalId: goal.id });
+		await writePlan(input.cwd, plan, input.sessionId);
+		await appendLedger(input.cwd, { event: "goal_started", goalId: goal.id }, input.sessionId);
 	}
 	return { plan, goal, allComplete: false };
 }
@@ -2350,6 +2383,8 @@ export async function checkpointUltragoalGoal(input: {
 	if (input.status === "complete") goal.completedAt = now;
 	plan.updatedAt = now;
 	await writePlan(input.cwd, plan);
+	const persistedPlan = await readUltragoalPlan(input.cwd);
+	if (persistedPlan?.state_revision !== undefined) plan.state_revision = persistedPlan.state_revision;
 	await appendLedger(input.cwd, {
 		eventId: pendingCheckpointEventId,
 		event: "goal_checkpointed",
@@ -2799,6 +2834,8 @@ export async function recordUltragoalReviewBlockers(input: {
 		evidence: input.evidence,
 		skcGoalJson: input.skcGoalJson,
 	});
+	const persistedPlan = await readUltragoalPlan(input.cwd);
+	if (persistedPlan?.state_revision !== undefined) plan.state_revision = persistedPlan.state_revision;
 	const now = new Date().toISOString();
 	const nextId = `G${String(plan.goals.length + 1).padStart(3, "0")}`;
 	plan.goals.push({
@@ -3329,7 +3366,7 @@ function renderCompleteHandoff(
 			goal_id: result.goal?.id,
 			goal_status: result.goal?.status,
 			skc_objective: result.plan.skcObjective,
-			goals_path: getUltragoalPaths(cwd).goalsPath,
+			goals_path: getUltragoalPaths(cwd, currentUltragoalSessionId(cwd)).goalsPath,
 		});
 	}
 	if (result.allComplete) return "ultragoal complete all=true\n";
@@ -3353,7 +3390,7 @@ function renderCheckpointContinuation(
 			ok: true,
 			goal_id: result.checkpointedGoal.id,
 			status,
-			goals_path: getUltragoalPaths(cwd).goalsPath,
+			goals_path: getUltragoalPaths(cwd, currentUltragoalSessionId(cwd)).goalsPath,
 			completion_receipt_kind: result.checkpointedGoal.completionVerification?.receiptKind,
 			quality_gate_hash: result.checkpointedGoal.completionVerification?.qualityGateHash,
 			all_complete: result.allComplete,
@@ -3407,7 +3444,12 @@ async function executeUltragoalSteeringCommand(args: readonly string[], cwd: str
 				return {
 					kind,
 					message: "Accepted add_subgoal steering.\n",
-					receipt: { ok: true, kind, goal_id: result.goalId, goals_path: getUltragoalPaths(cwd).goalsPath },
+					receipt: {
+						ok: true,
+						kind,
+						goal_id: result.goalId,
+						goals_path: getUltragoalPaths(cwd, currentUltragoalSessionId(cwd)).goalsPath,
+					},
 				};
 			}
 			case "split_subgoal": {
@@ -3427,7 +3469,7 @@ async function executeUltragoalSteeringCommand(args: readonly string[], cwd: str
 						kind,
 						goal_id: result.goalId,
 						replacement_goal_ids: result.replacementGoalIds,
-						goals_path: getUltragoalPaths(cwd).goalsPath,
+						goals_path: getUltragoalPaths(cwd, currentUltragoalSessionId(cwd)).goalsPath,
 					},
 				};
 			}
@@ -3446,7 +3488,7 @@ async function executeUltragoalSteeringCommand(args: readonly string[], cwd: str
 						ok: true,
 						kind,
 						pending_goal_ids: result.pendingGoalIds,
-						goals_path: getUltragoalPaths(cwd).goalsPath,
+						goals_path: getUltragoalPaths(cwd, currentUltragoalSessionId(cwd)).goalsPath,
 					},
 				};
 			}
@@ -3468,7 +3510,7 @@ async function executeUltragoalSteeringCommand(args: readonly string[], cwd: str
 						kind,
 						goal_id: result.goalId,
 						changed_fields: result.changedFields,
-						goals_path: getUltragoalPaths(cwd).goalsPath,
+						goals_path: getUltragoalPaths(cwd, currentUltragoalSessionId(cwd)).goalsPath,
 					},
 				};
 			}
@@ -3477,7 +3519,11 @@ async function executeUltragoalSteeringCommand(args: readonly string[], cwd: str
 				return {
 					kind,
 					message: "Accepted annotate_ledger steering.\n",
-					receipt: { ok: true, kind, ledger_path: getUltragoalPaths(cwd).ledgerPath },
+					receipt: {
+						ok: true,
+						kind,
+						ledger_path: getUltragoalPaths(cwd, currentUltragoalSessionId(cwd)).ledgerPath,
+					},
 				};
 			}
 			case "mark_blocked_superseded": {
@@ -3496,7 +3542,7 @@ async function executeUltragoalSteeringCommand(args: readonly string[], cwd: str
 						kind,
 						goal_id: result.goalId,
 						no_replacement_required: true,
-						goals_path: getUltragoalPaths(cwd).goalsPath,
+						goals_path: getUltragoalPaths(cwd, currentUltragoalSessionId(cwd)).goalsPath,
 					},
 				};
 			}
@@ -3517,6 +3563,7 @@ async function executeUltragoalSteeringCommand(args: readonly string[], cwd: str
 }
 
 async function dispatchUltragoalCommand(args: string[], cwd: string): Promise<UltragoalCommandResult> {
+	const sessionId = currentUltragoalSessionId(cwd);
 	const help = renderUltragoalHelp(args);
 	if (help) return { status: 0, stdout: help };
 	try {
@@ -3524,7 +3571,7 @@ async function dispatchUltragoalCommand(args: string[], cwd: string): Promise<Ul
 		const json = hasFlag(args, "--json");
 		switch (command) {
 			case "status":
-				return { status: 0, stdout: renderStatus(await getUltragoalStatus(cwd), json) };
+				return { status: 0, stdout: renderStatus(await getUltragoalStatus(cwd, sessionId), json) };
 			case "create":
 			case "create-goals": {
 				const mode = flagValue(args, "--skc-goal-mode") === "per-story" ? "per-story" : "aggregate";
@@ -3537,9 +3584,9 @@ async function dispatchUltragoalCommand(args: string[], cwd: string): Promise<Ul
 								ok: true,
 								goals_count: plan.goals.length,
 								goal_ids: plan.goals.map(goal => goal.id),
-								goals_path: getUltragoalPaths(cwd).goalsPath,
+								goals_path: getUltragoalPaths(cwd, currentUltragoalSessionId(cwd)).goalsPath,
 							})
-						: `Created ultragoal plan with ${plan.goals.length} goal${plan.goals.length === 1 ? "" : "s"} at ${getUltragoalPaths(cwd).goalsPath}.\n`,
+						: `Created ultragoal plan with ${plan.goals.length} goal${plan.goals.length === 1 ? "" : "s"} at ${getUltragoalPaths(cwd, currentUltragoalSessionId(cwd)).goalsPath}.\n`,
 				};
 			}
 			case "complete-goals":
@@ -3598,7 +3645,11 @@ async function dispatchUltragoalCommand(args: string[], cwd: string): Promise<Ul
 				return {
 					status: 0,
 					stdout: json
-						? renderCliWriteReceipt({ ok: true, goal_id: goal?.id, goals_path: getUltragoalPaths(cwd).goalsPath })
+						? renderCliWriteReceipt({
+								ok: true,
+								goal_id: goal?.id,
+								goals_path: getUltragoalPaths(cwd, currentUltragoalSessionId(cwd)).goalsPath,
+							})
 						: "Recorded review blockers.\n",
 				};
 			}
@@ -3632,9 +3683,9 @@ const RECONCILE_COMMANDS = new Set([
  * beyond that reconcile-failure audit event.
  */
 async function reconcileUltragoalState(cwd: string): Promise<void> {
-	const sessionId = process.env.SKC_SESSION_ID?.trim() || undefined;
+	const sessionId = currentUltragoalSessionId(cwd);
 	try {
-		const summary = await getUltragoalStatus(cwd);
+		const summary = await getUltragoalStatus(cwd, sessionId);
 		const status = summary.status;
 		const active = summary.exists && status !== "complete";
 		const payload: Record<string, unknown> = {
@@ -3653,15 +3704,44 @@ async function reconcileUltragoalState(cwd: string): Promise<void> {
 		const ledgerText = await Bun.file(summary.paths.ledgerPath)
 			.text()
 			.catch(() => "");
-		const latestLedger = latestUltragoalLedgerEventFromText(ledgerText);
+		const latestLedger = ledgerText
+			.split(/\r?\n/)
+			.map(line => line.trim())
+			.filter(Boolean)
+			.toReversed()
+			.map(line => {
+				try {
+					const row = JSON.parse(line) as Record<string, unknown>;
+					const event =
+						typeof row.event === "string" ? row.event : typeof row.type === "string" ? row.type : undefined;
+					return event ? { ...row, event } : undefined;
+				} catch {
+					return undefined;
+				}
+			})
+			.find((row): row is Record<string, unknown> & { event: string } => Boolean(row));
 		if (latestLedger) {
 			payload.latestLedgerEvent = {
 				event: latestLedger.event,
 				...(latestLedger.goalId ? { goalId: latestLedger.goalId } : {}),
 				...(latestLedger.timestamp ? { timestamp: latestLedger.timestamp } : {}),
+				...(typeof latestLedger.kind === "string" ? { kind: latestLedger.kind } : {}),
+				...(typeof latestLedger.evidence === "string" ? { evidence: latestLedger.evidence } : {}),
 			};
 		}
-		await reconcileWorkflowSkillState({ cwd, mode: "ultragoal", sessionId, active, phase: status, payload });
+		const sourceRevision = Math.max(
+			persistedStateRevision(await readUltragoalPlan(cwd, sessionId)),
+			ledgerText.split(/\r?\n/).filter(line => line.trim().length > 0).length,
+		);
+		await reconcileWorkflowSkillState({
+			cwd,
+			mode: "ultragoal",
+			sessionId,
+			active,
+			phase: status,
+			payload,
+			...(sourceRevision > 0 ? { sourceRevision } : {}),
+		});
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
 		process.stderr.write(`ultragoal state reconciliation failed: ${message}\n`);

@@ -33,6 +33,7 @@ describe("SKC public CLI command surface", () => {
 			"mcp-serve",
 			"contribute-pr",
 			"deep-interview",
+			"migrate",
 			"rlm",
 			"update",
 			"launch",
@@ -80,7 +81,7 @@ describe("SKC public CLI command surface", () => {
 
 		expect(result.exitCode, output).toBe(0);
 		expect(output).toContain("--dry-run");
-		expect(output).toContain(".skc/state/team");
+		expect(output).toContain(".skc/_session-{sessionid}/state/team");
 		expect(output).toContain("do not commit");
 		expect(output).toContain("existing tmux/SKC --tmux session");
 		expect(output).toContain("skc --tmux");

@@ -27,12 +27,20 @@ import { RlmNotebookWriter } from "@sayknow-cli/coding-agent/rlm/notebook";
 import type { RlmCellResult } from "@sayknow-cli/coding-agent/rlm/types";
 
 let tmp: string;
+let previousSkcSessionId: string | undefined;
 
 beforeEach(async () => {
 	tmp = await fs.mkdtemp(path.join(os.tmpdir(), "rlm-auto-"));
+	previousSkcSessionId = process.env.SKC_SESSION_ID;
+	process.env.SKC_SESSION_ID = "rlm-autonomous-test-session";
 });
 
 afterEach(async () => {
+	if (previousSkcSessionId === undefined) {
+		delete process.env.SKC_SESSION_ID;
+	} else {
+		process.env.SKC_SESSION_ID = previousSkcSessionId;
+	}
 	await fs.rm(tmp, { recursive: true, force: true });
 });
 

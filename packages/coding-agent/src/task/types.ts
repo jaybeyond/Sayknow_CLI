@@ -72,7 +72,7 @@ const spawnPlanSchema = z
 		expectedReceiptShape: z.string(),
 		maxInlineTokens: z.number(),
 	})
-	.describe("justification required before spawning more than four tasks or reviewer-spawned explore tasks");
+	.describe("justification required before spawning more than four tasks");
 
 const createTaskItemSchema = (_contextEnabled: boolean) =>
 	z.object({

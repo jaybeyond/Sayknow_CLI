@@ -50,7 +50,13 @@ import { finalizeErrorMessage, type RawHttpRequestDump } from "../utils/http-ins
 import { getOpenAIStreamIdleTimeoutMs, iterateWithIdleTimeout } from "../utils/idle-iterator";
 import { parseStreamingJson } from "../utils/json-parse";
 import { resolveRetryBudget } from "../utils/retry-budget";
-import { adaptSchemaForStrict, NO_STRICT, sanitizeSchemaForOpenAIResponses, toolWireSchema } from "../utils/schema";
+import {
+	adaptSchemaForStrict,
+	flattenToolRootCombinators,
+	NO_STRICT,
+	sanitizeSchemaForOpenAIResponses,
+	toolWireSchema,
+} from "../utils/schema";
 import {
 	isForcedToolChoiceUnsupportedError,
 	markToolChoiceIncapability,
@@ -98,6 +104,14 @@ const CODEX_WEBSOCKET_RETRY_BUDGET = CODEX_MAX_RETRIES;
 const CODEX_WEBSOCKET_TRANSPORT_ERROR_PREFIX = "Codex websocket transport error";
 const CODEX_PREVIOUS_RESPONSE_STALE_CODES = new Set(["previous_response_not_found", "codex_previous_response_stale"]);
 const CODEX_RETRYABLE_EVENT_CODES = new Set(["model_error", "server_error", "internal_error"]);
+const CODEX_NON_RETRYABLE_EVENT_CODES = new Set([
+	"invalid_function_parameters",
+	"invalid_request_error",
+	"invalid_schema",
+	"invalid_tool_schema",
+]);
+const CODEX_NON_RETRYABLE_EVENT_MESSAGE =
+	/invalid[_ -]function[_ -]parameters|invalid schema for function|invalid[_ -]tool[_ -]schema|schema must have type ["']?object["']?/i;
 const CODEX_RETRYABLE_EVENT_MESSAGE =
 	/processing your request|retry your request|temporar(?:y|ily)|overloaded|service.?unavailable|internal error|server error/i;
 const CODEX_PROVIDER_SESSION_STATE_KEY = "openai-codex-responses";
@@ -2658,7 +2672,7 @@ export function convertOpenAICodexResponsesTools(
 			};
 		}
 		const strict = !!(!NO_STRICT && tool.strict);
-		const baseParameters = sanitizeSchemaForOpenAIResponses(toolWireSchema(tool));
+		const baseParameters = sanitizeSchemaForOpenAIResponses(flattenToolRootCombinators(toolWireSchema(tool)));
 		const { schema: parameters, strict: effectiveStrict } = adaptSchemaForStrict(baseParameters, strict);
 		return {
 			type: "function",
@@ -2703,11 +2717,17 @@ class CodexProviderStreamError extends Error {
 }
 
 function isRetryableCodexFailureEvent(rawEvent: Record<string, unknown>): boolean {
-	const code = getCodexEventErrorCode(rawEvent);
-	if (code && CODEX_RETRYABLE_EVENT_CODES.has(code.toLowerCase())) {
+	const code = getCodexEventErrorCode(rawEvent).toLowerCase();
+	const message = getCodexEventErrorMessage(rawEvent);
+	if (
+		(code && CODEX_NON_RETRYABLE_EVENT_CODES.has(code)) ||
+		(!!message && CODEX_NON_RETRYABLE_EVENT_MESSAGE.test(message))
+	) {
+		return false;
+	}
+	if (code && CODEX_RETRYABLE_EVENT_CODES.has(code)) {
 		return true;
 	}
-	const message = getCodexEventErrorMessage(rawEvent);
 	return !!message && CODEX_RETRYABLE_EVENT_MESSAGE.test(message);
 }
 

@@ -872,7 +872,13 @@ const customReferenceMap = buildCustomReferenceMap();
 
 function getCustomReferenceCandidateIds(modelId: string): string[] {
 	const candidates = new Set<string>();
-	const queue = [modelId];
+	const minimaxM = /^minimax-m(\d+(?:\.\d+)*)$/i.exec(modelId.trim());
+	const queue = minimaxM ? [`MiniMax-M${minimaxM[1]}`, modelId] : [modelId];
+	if (minimaxM) {
+		// MiniMax catalogs include lowercase wire ids plus display-cased aliases.
+		// Custom providers should keep the lowercase wire id while inheriting the
+		// canonical display casing when the alias exists.
+	}
 	for (let index = 0; index < queue.length; index += 1) {
 		const candidate = queue[index]?.trim();
 		if (!candidate || candidates.has(candidate)) continue;
@@ -1212,13 +1218,14 @@ export class ModelRegistry {
 			const existingIndex = indexByKey.get(key);
 			if (existingIndex !== undefined) {
 				const existingModel = merged[existingIndex];
+				const referenceModel = resolveCustomModelReference(customModel.id);
 				merged[existingIndex] = enrichModelThinking({
 					...existingModel,
 					id: customModel.id,
 					provider: customModel.provider,
 					api: customModel.api,
 					baseUrl: customModel.baseUrl,
-					name: customModel.name ?? existingModel.name,
+					name: customModel.name ?? referenceModel?.name ?? existingModel.name,
 					reasoning: customModel.reasoning ?? existingModel.reasoning,
 					thinking: customModel.thinking ?? existingModel.thinking,
 					input: customModel.input ?? existingModel.input,

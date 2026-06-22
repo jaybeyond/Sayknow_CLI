@@ -14,6 +14,8 @@ export interface LspServerInfo {
 	fileTypes: string[];
 }
 
+export type WelcomeLogoMode = "unicode" | "square" | "ascii";
+
 /**
  * Sayknow-CLI launch surface: a blue-gradient SAYKNOW wordmark, compact
  * command affordances, and project signals — a distinct identity, not a
@@ -29,6 +31,7 @@ export class WelcomeComponent implements Component {
 		private providerName: string,
 		private recentSessions: RecentSession[] = [],
 		private lspServers: LspServerInfo[] = [],
+		private readonly logoMode: WelcomeLogoMode = "unicode",
 	) {}
 
 	invalidate(): void {}
@@ -85,7 +88,8 @@ export class WelcomeComponent implements Component {
 		const minRightCol = 20;
 		const modelPill = this.#pill(theme.icon.model || "model", this.modelName, "statusLineModel");
 		const providerPill = this.#pill(theme.icon.package || "provider", this.providerName, "statusLinePath");
-		const logoMinWidth = Math.max(...BRAND_LOGO.map(line => visibleWidth(line)));
+		const logoLines = this.#logoLines();
+		const logoMinWidth = Math.max(...logoLines.map(line => visibleWidth(line)));
 		const leftMinContentWidth = Math.max(
 			minLeftCol,
 			logoMinWidth,
@@ -103,8 +107,7 @@ export class WelcomeComponent implements Component {
 		const leftCol = showRightColumn ? dualLeftCol : boxWidth - 2;
 		const rightCol = showRightColumn ? dualRightCol : 0;
 
-		// Logo: pick a frame from the intro animation if active, else the resting frame.
-		const logoColored = this.#currentLogoFrame();
+		const logoColored = this.#currentLogoFrame(logoLines);
 
 		// When no model is resolved yet, guide the user instead of showing "Unknown".
 		const hasModel = this.modelName !== "Unknown" && this.modelName.length > 0;
@@ -281,10 +284,10 @@ export class WelcomeComponent implements Component {
 	}
 
 	/** Pick the logo frame for the current intro phase, or the resting frame. */
-	#currentLogoFrame(): readonly string[] {
-		if (this.#animStart == null) return REST_FRAME;
+	#currentLogoFrame(logoLines: readonly string[]): readonly string[] {
+		if (this.#animStart == null) return REST_FRAMES[this.logoMode];
 		const elapsed = performance.now() - this.#animStart;
-		if (elapsed >= INTRO_MS) return REST_FRAME;
+		if (elapsed >= INTRO_MS) return REST_FRAMES[this.logoMode];
 		// Ease-out cubic so the spin decelerates into the resting state.
 		const progress = elapsed / INTRO_MS;
 		const eased = 1 - (1 - progress) ** 3;
@@ -296,7 +299,11 @@ export class WelcomeComponent implements Component {
 		// the same ease-out curve so the highlight is gone by the resting frame.
 		const shinePos = (((progress * INTRO_SHINE_TRAVERSALS) % 1) + 1) % 1;
 		const shineStrength = (1 - eased) ** 1.5;
-		return gradientLogo(BRAND_LOGO, phase, { strength: shineStrength, pos: shinePos });
+		return gradientLogo(logoLines, phase, { strength: shineStrength, pos: shinePos });
+	}
+
+	#logoLines(): readonly string[] {
+		return BRAND_LOGO;
 	}
 }
 
@@ -405,5 +412,9 @@ const INTRO_SWEEPS = 2.5;
 /** Number of times the shine highlight crosses the diagonal across the intro. */
 const INTRO_SHINE_TRAVERSALS = 3;
 
-/** Resting gradient frame, cached for re-renders outside of the intro. */
-const REST_FRAME = gradientLogo(BRAND_LOGO, 0);
+/** Resting gradient frames, cached for re-renders outside of the intro. */
+const REST_FRAMES: Record<WelcomeLogoMode, readonly string[]> = {
+	unicode: gradientLogo(BRAND_LOGO, 0),
+	square: gradientLogo(BRAND_LOGO, 0),
+	ascii: gradientLogo(BRAND_LOGO, 0),
+};

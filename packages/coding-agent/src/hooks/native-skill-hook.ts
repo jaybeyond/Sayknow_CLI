@@ -4,10 +4,13 @@ import * as path from "node:path";
 import { YAML } from "bun";
 import type { SkillDiscoverySettings } from "../config/skill-settings-defaults";
 import { DEFAULT_DISABLED_EXTENSIONS, DEFAULT_SKILL_DISCOVERY_SETTINGS } from "../config/skill-settings-defaults";
+import { sessionLogsDir } from "../skc-runtime/session-layout";
 import {
 	buildActiveUltragoalPromptContext,
 	buildSkillActivationAdditionalContext,
 	buildSkillStopOutput,
+	buildStateRecoveryDiagnosticsContext,
+	collectUserPromptStateRecoveryDiagnostics,
 	type EffectiveSkillConfigInput,
 	recordSkillActivation,
 } from "./skill-state";
@@ -169,6 +172,15 @@ export async function dispatchSkcNativeSkillHook(
 	const hookEventName = readHookEventName(payload);
 	const cwd = (options.cwd ?? safeString(payload.cwd).trim()) || process.cwd();
 	if (hookEventName === "UserPromptSubmit") {
+		const recoveryDiagnostics = await collectUserPromptStateRecoveryDiagnostics({
+			cwd,
+			sessionId: readSessionId(payload),
+			threadId: readThreadId(payload),
+			stateDir: options.stateDir,
+			prompt: readPromptText(payload),
+			sessionFile: readSessionFile(payload),
+		});
+		const recoveryContext = buildStateRecoveryDiagnosticsContext(recoveryDiagnostics);
 		const prompt = readPromptText(payload);
 		const skillState = prompt
 			? await recordSkillActivation({
@@ -206,19 +218,22 @@ export async function dispatchSkcNativeSkillHook(
 				},
 			};
 		}
+		const additionalContext = [
+			skillState ? buildSkillActivationAdditionalContext(skillState, effectiveSkillConfig) : activeUltragoalContext,
+			recoveryContext,
+		]
+			.filter((value): value is string => Boolean(value))
+			.join(" ");
 		return {
 			hookEventName,
-			outputJson:
-				skillState || activeUltragoalContext
-					? {
-							hookSpecificOutput: {
-								hookEventName,
-								additionalContext: skillState
-									? buildSkillActivationAdditionalContext(skillState, effectiveSkillConfig)
-									: activeUltragoalContext,
-							},
-						}
-					: null,
+			outputJson: additionalContext
+				? {
+						hookSpecificOutput: {
+							hookEventName,
+							additionalContext,
+						},
+					}
+				: null,
 		};
 	}
 
@@ -253,7 +268,18 @@ async function readStdinJson(): Promise<{ payload: HookPayload; parseError: Erro
 }
 
 async function logHookError(cwd: string, type: string, error: unknown): Promise<void> {
-	const logsDir = path.join(cwd, ".skc", "logs");
+	const skcSessionId = process.env.SKC_SESSION_ID?.trim();
+	if (!skcSessionId) {
+		console.error(
+			JSON.stringify({
+				timestamp: new Date().toISOString(),
+				type,
+				error: error instanceof Error ? error.message : String(error),
+			}),
+		);
+		return;
+	}
+	const logsDir = sessionLogsDir(cwd, skcSessionId);
 	await mkdir(logsDir, { recursive: true }).catch(() => {});
 	await appendFile(
 		path.join(logsDir, `native-hook-${new Date().toISOString().split("T")[0]}.jsonl`),
