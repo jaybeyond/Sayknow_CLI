@@ -4,6 +4,22 @@ Sayknow-CLI is a rebranded fork of [gajae-code](https://github.com/Yeachan-Heo/g
 This file tracks the **fork's own releases**; upstream's full feature history lives
 in that project. Each release notes the upstream version it is built on.
 
+## [0.2.5] — 2026-06-22
+
+### Changed
+
+- Synced onto upstream **gajae-code v0.6.5** (from v0.6.0), bringing its latest
+  features and fixes while preserving the Sayknow-CLI brand. The new welcome
+  logo-mode support renders the blue **SAYKNOW** wordmark in every mode.
+
+### Fixed
+
+- Hardened shutdown against terminal/volume I/O errors: an asynchronous EIO/EPIPE
+  stdout write failure during teardown (controlling terminal hang-up or a stalled
+  external volume) is now swallowed instead of crashing the process into a
+  "[Process exited] — press any key to restart" loop.
+- Regenerated the bundled config JSON schema so it matches the v0.6.5 settings.
+
 ## [0.2.4] — 2026-06-19
 
 ### Added
