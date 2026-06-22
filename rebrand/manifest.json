@@ -35,7 +35,9 @@
   "regenerate": [
     "bun.lock",
     "Cargo.lock",
-    "packages/coding-agent/src/internal-urls/docs-index.generated.ts"
+    "packages/coding-agent/src/internal-urls/docs-index.generated.ts",
+    "schemas/config.schema.json",
+    "schemas/models.schema.json"
   ],
   "toolingOnly": [
     "scripts/apply-rebrand.ts",

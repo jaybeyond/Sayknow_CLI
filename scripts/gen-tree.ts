@@ -93,6 +93,9 @@ if (doBuild) {
 	try {
 		run("bun", ["install"], target);
 		run("bun", ["--cwd=packages/coding-agent", "run", "generate-docs-index"], target);
+		// JSON schemas derive from the (patched) settings-schema.ts, so regenerate them after
+		// patches land — otherwise check:schemas flags schemas/config.schema.json as stale.
+		run("bun", ["run", "generate-schemas"], target);
 	} catch (e) {
 		console.warn("  regenerate step failed (run manually):", String(e));
 	}
