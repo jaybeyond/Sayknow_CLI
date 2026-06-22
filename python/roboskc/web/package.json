@@ -1,7 +1,7 @@
 {
   "name": "roboskc-web",
   "private": true,
-  "version": "0.2.5",
+  "version": "0.2.6",
   "type": "module",
   "description": "Glassmorphic SolidJS dashboard bundled by Vite and served by roboskc's FastAPI app.",
   "scripts": {

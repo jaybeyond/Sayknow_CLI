@@ -4,6 +4,14 @@ Sayknow-CLI is a rebranded fork of [gajae-code](https://github.com/Yeachan-Heo/g
 This file tracks the **fork's own releases**; upstream's full feature history lives
 in that project. Each release notes the upstream version it is built on.
 
+## [0.2.6] — 2026-06-22
+
+### Fixed
+
+- The welcome screen's "Updated to vX" line now reflects the running release.
+  0.2.5 shipped without its own changelog entry, so a fresh launch reported
+  "Updated to v0.2.4"; every release now carries a matching entry.
+
 ## [0.2.5] — 2026-06-22
 
 ### Changed
