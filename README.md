@@ -297,3 +297,5 @@ Sayknow-CLI's default TUI identity is the cephalopod pair: blue-octopus as the d
 ## License
 
 MIT. See [`LICENSE`](LICENSE).
+
+Sayknow-CLI is a rebranded fork of [gajae-code](https://github.com/Yeachan-Heo/gajae-code) (MIT). Upstream's copyright is retained in [`LICENSE`](LICENSE) and its full feature history lives in that project; this repo tracks the fork's own releases and brand.

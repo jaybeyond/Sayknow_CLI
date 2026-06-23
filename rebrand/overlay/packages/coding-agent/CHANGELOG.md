@@ -4,6 +4,26 @@ Sayknow-CLI is a rebranded fork of [gajae-code](https://github.com/Yeachan-Heo/g
 This file tracks the **fork's own releases**; upstream's full feature history lives
 in that project. Each release notes the upstream version it is built on.
 
+## [0.3.0] — 2026-06-23
+
+### Changed
+
+- Synced onto upstream **gajae-code v0.7.1** (from v0.6.5), bringing 0.7.0's mobile
+  notifications SDK + managed Telegram daemon and 0.7.1's fixes (assistant
+  notification lead-in, stale tmux session reuse, packaged native imports, and the
+  glm-zcode Z.AI provider) while preserving the Sayknow-CLI brand.
+
+### Added
+
+- **Decepticon red-team integration.** Vendored [Decepticon](https://github.com/PurpleAILAB/Decepticon)
+  as a git submodule (`vendor/decepticon`) plus `python/decepticon-bridge` — an
+  `skc-rpc` host-tool bridge that exposes Decepticon's red-team agents to skc
+  (`decepticon_run_agent` / `decepticon_list_agents`).
+- **Ponytail default rule.** Bundled the ponytail "lazy senior dev" ruleset as an
+  always-on default rule: pick the simplest working solution first (YAGNI, reuse,
+  stdlib/native first) without ever cutting validation, error handling, security,
+  or accessibility. Adapted from [ponytail](https://github.com/DietrichGebert/ponytail) (MIT).
+
 ## [0.2.7] — 2026-06-23
 
 ### Added
