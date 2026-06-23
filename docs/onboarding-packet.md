@@ -43,6 +43,7 @@ Do not add a fifth default skill, fifth public role agent, new command, new conf
 - `packages/typescript-edit-benchmark/` — TypeScript edit benchmark tooling.
 - `python/skc-rpc/` — Python client for `skc --mode rpc`.
 - `python/roboskc/` — GitHub triage/fix bot that drives `skc --mode rpc`; this subtree has its own `AGENTS.md`.
+- `python/decepticon-bridge/` — sidecar exposing the vendored Decepticon red-team agents (`vendor/decepticon`) to `skc` as host tools via `skc --mode rpc`.
 
 ## Build, test, and validation commands
 

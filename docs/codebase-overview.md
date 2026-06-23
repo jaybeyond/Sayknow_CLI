@@ -119,6 +119,15 @@ Self-hosted GitHub triage/fix bot that drives `skc --mode rpc`.
 - `python/roboskc/README.md` documents the webhook-to-worktree-to-skc flow, GitHub sidecar trust boundary, persistent per-issue sessions, and audit trail.
 - Important modules include `src/server.py`, `src/queue.py`, `src/tasks.py`, `src/worker.py`, `src/host_tools.py`, `src/sandbox.py`, `src/github_client.py`, `src/github_events.py`, `src/db.py`, and `src/config.py`.
 
+### `python/decepticon-bridge/`
+
+Sidecar that exposes the vendored [Decepticon](https://github.com/PurpleAILAB/Decepticon) red-team agents (`vendor/decepticon` submodule) to `skc` as host tools.
+
+- `python/decepticon-bridge/pyproject.toml` packages `decepticon-bridge` for Python 3.11+; depends on `skc-rpc`, with the heavy Decepticon runtime behind the optional `redteam` extra.
+- It launches an `skc --mode rpc` session via `skc-rpc` and registers `decepticon_run_agent` / `decepticon_list_agents`; handlers lazily import the vendored Decepticon agent graphs (Python 3.13 + the Decepticon service stack required only to actually run an agent).
+- Modules: `src/decepticon_bridge/roster.py` (agent roster, kept in sync with `vendor/decepticon/langgraph.json`), `runner.py` (lazy graph invocation + graceful degradation), `tools.py` (the skc host tools), `bridge.py` / `__main__.py` (runnable glue).
+- `python/decepticon-bridge/README.md` documents the topology, install, run, and safety notes.
+
 ## Runtime flow
 
 A normal CLI session starts in `packages/coding-agent/src/cli.ts`, routes through command handling, then reaches `packages/coding-agent/src/main.ts`. `main.ts` converts CLI/runtime settings into `CreateAgentSessionOptions` and calls `createAgentSession()` in `packages/coding-agent/src/sdk.ts`.
