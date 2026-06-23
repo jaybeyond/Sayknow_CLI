@@ -10,10 +10,11 @@ import ralplanSkill from "./skc/skills/ralplan/SKILL.md" with { type: "text" };
 import teamSkill from "./skc/skills/team/SKILL.md" with { type: "text" };
 import aiSlopCleanerFragment from "./skc/skills/ultragoal/ai-slop-cleaner.md" with { type: "text" };
 import ultragoalSkill from "./skc/skills/ultragoal/SKILL.md" with { type: "text" };
+import ponytailRule from "./skc/rules/ponytail.md" with { type: "text" };
 
 export const DEFAULT_SKC_DEFINITION_NAMES = ["deep-interview", "ralplan", "team", "ultragoal"] as const;
 export type DefaultSkcDefinitionName = (typeof DEFAULT_SKC_DEFINITION_NAMES)[number];
-export type DefaultSkcDefinitionKind = "skill" | "skill-fragment";
+export type DefaultSkcDefinitionKind = "skill" | "skill-fragment" | "rule";
 export type EmbeddedDefaultSkcSkill = {
 	name: DefaultSkcDefinitionName;
 	description: string;
@@ -39,7 +40,17 @@ export interface DefaultSkcSkillFragmentDefinition {
 	content: string;
 }
 
-export type DefaultSkcDefinition = DefaultSkcSkillDefinition | DefaultSkcSkillFragmentDefinition;
+export interface DefaultSkcRuleDefinition {
+	kind: "rule";
+	name: string;
+	relativePath: string;
+	content: string;
+}
+
+export type DefaultSkcDefinition =
+	| DefaultSkcSkillDefinition
+	| DefaultSkcSkillFragmentDefinition
+	| DefaultSkcRuleDefinition;
 
 export interface InstallDefaultSkcDefinitionsOptions {
 	check?: boolean;
@@ -57,6 +68,12 @@ export type DefaultSkcDefinitionInstallFile =
 	| {
 			kind: "skill-fragment";
 			parentSkillName: DefaultSkcDefinitionName;
+			path: string;
+			status: DefaultSkcInstallStatus;
+	  }
+	| {
+			kind: "rule";
+			name: string;
 			path: string;
 			status: DefaultSkcInstallStatus;
 	  };
@@ -106,6 +123,7 @@ const DEFAULT_SKC_DEFINITIONS: readonly DefaultSkcDefinition[] = [
 		relativePath: "skill-fragments/ultragoal/ai-slop-cleaner.md",
 		content: aiSlopCleanerFragment,
 	},
+	{ kind: "rule", name: "ponytail", relativePath: "rules/ponytail.md", content: ponytailRule },
 ];
 
 export function getDefaultSkcDefinitions(): readonly DefaultSkcDefinition[] {
@@ -168,6 +186,13 @@ export async function installDefaultSkcDefinitions(
 		}
 
 		if (definition.kind === "skill") {
+			files.push({
+				kind: definition.kind,
+				name: definition.name,
+				path: destination,
+				status,
+			});
+		} else if (definition.kind === "rule") {
 			files.push({
 				kind: definition.kind,
 				name: definition.name,
