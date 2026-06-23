@@ -234,18 +234,18 @@ providers:
 
 ### Interactive `--tmux` startup and scroll/mouse profile
 
-`skc --tmux` launches the interactive TUI inside a fresh SKC-managed tmux session. When SKC creates that session it applies a profile that is **scoped to the SKC session only** (it never runs `set -g` / global tmux options), including:
+`skc --tmux` launches the interactive TUI inside a SKC-managed tmux session. SKC may reuse a scoped managed session from the same project/branch when that session is tagged with the current SKC version; older-version sessions are not auto-attached after upgrades. When SKC creates a session it applies a profile that is **scoped to the SKC session only** (it never runs `set -g` / global tmux options), including:
 
 - `mouse on` — enables mouse-wheel scrolling into tmux copy-mode (history/scrollback).
 - `set-clipboard on` and a readable copy-mode `mode-style`.
-- SKC ownership/identity tags (`@skc-profile`, branch/project markers).
+- SKC ownership/identity tags (`@skc-profile`, version, branch/project markers).
 
 This profile is applied on macOS, Linux, and WSL (Linux) alike; only native Windows (`win32`) skips the tmux launch. It is applied **only to sessions SKC itself creates**. If you start tmux yourself and then run `skc` inside it, SKC leaves your tmux configuration untouched — add `set -g mouse on` to your own `~/.tmux.conf`, or relaunch with `skc --tmux` to get the managed profile.
 
 | Variable | Behavior |
 | --- | --- |
 | `SKC_LAUNCH_POLICY` | Launch policy for `--tmux` startup: `tmux` (default) or `direct` (skip the tmux session) |
-| `SKC_TMUX_SESSION` | Explicit tmux session name override for `--tmux` startup |
+| `SKC_TMUX_SESSION` | Explicit tmux session name override for `--tmux` startup. Use a unique value (for example `SKC_TMUX_SESSION=skc-fresh-$(date +%s) skc --tmux`) to force a fresh named session. |
 | `SKC_TMUX_COMMAND` | tmux binary/command override for every SKC tmux flow (`SKC_TEAM_TMUX_COMMAND` is honored as a team-path alias) |
 | `SKC_TMUX_PROFILE` | Set `0`/`false`/`off` to apply only the required ownership tags and skip the scroll/mouse/clipboard profile |
 | `SKC_MOUSE` | Set `0`/`false`/`off` to skip `mouse on`, leaving wheel scrolling to the host terminal instead of tmux copy-mode |

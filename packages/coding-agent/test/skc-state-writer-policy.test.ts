@@ -96,7 +96,7 @@ describe("SKC state writer revision policy", () => {
 			{ cwd: root, policy: "cache", sourceRevision: 5 },
 		);
 
-		expect(result).toEqual({ path: path.join(root, target), written: false, reason: "stale-skip" });
+		expect(result).toEqual({ path: path.join(root, target), written: false, reason: "stale-skip", revision: 1 });
 		await expect(readJson(root, target)).resolves.toMatchObject({
 			value: "newer",
 			source_state_revision: 5,
@@ -115,7 +115,7 @@ describe("SKC state writer revision policy", () => {
 			{ cwd: root, policy: "cache", sourceRevision: 3 },
 		);
 
-		expect(result).toEqual({ path: path.join(root, target), written: true });
+		expect(result).toEqual({ path: path.join(root, target), written: true, revision: 2 });
 		await expect(readJson(root, target)).resolves.toMatchObject({
 			value: "new",
 			source_state_revision: 3,

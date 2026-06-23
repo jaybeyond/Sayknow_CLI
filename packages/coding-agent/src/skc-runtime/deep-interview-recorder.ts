@@ -362,8 +362,8 @@ async function syncRecorderHud(
 		phase,
 		sessionId,
 		source: "skc-runtime-deep-interview-recorder",
-		hud: deriveDeepInterviewHud(envelope as Record<string, unknown>, { phase }),
-		sourceRevision: existingStateRevision(envelope),
+		hud: deriveDeepInterviewHud(normalizeDeepInterviewEnvelope(envelope) as Record<string, unknown>, { phase }),
+		sourceRevision: (existingStateRevision(envelope) ?? 0) + 1,
 	});
 }
 

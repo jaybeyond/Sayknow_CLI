@@ -2,6 +2,7 @@ import { afterEach, beforeAll, describe, expect, it, spyOn, vi } from "bun:test"
 import type { AgentToolContext } from "@sayknow-cli/agent-core";
 import { Settings } from "@sayknow-cli/coding-agent/config/settings";
 import { getThemeByName, initTheme } from "@sayknow-cli/coding-agent/modes/theme/theme";
+import type { AppendOrMergeResult } from "@sayknow-cli/coding-agent/skc-runtime/deep-interview-recorder";
 import * as deepInterviewRecorder from "@sayknow-cli/coding-agent/skc-runtime/deep-interview-recorder";
 import type { ToolSession } from "@sayknow-cli/coding-agent/tools";
 import { AskTool, askSchema, askToolRenderer } from "@sayknow-cli/coding-agent/tools/ask";
@@ -113,6 +114,137 @@ describe("AskTool cancellation", () => {
 			),
 		).rejects.toBeInstanceOf(ToolAbortError);
 		expect(abort).toHaveBeenCalledTimes(1);
+	});
+
+	it("registers the remote ask before opening the local selector (Telegram buttons at invocation)", async () => {
+		const order: string[] = [];
+		// Remote source never resolves on its own; we only assert it was invoked
+		// (i.e. action_needed was broadcast) BEFORE the local selector opened.
+		const source = {
+			awaitAnswer: (_q: string, _opts: string[], _signal?: AbortSignal) => {
+				order.push("remote");
+				return new Promise<string | undefined>(() => {});
+			},
+		};
+		const tool = new AskTool(createSession({ getAskAnswerSource: () => source } as Partial<ToolSession>));
+		const context = createContext({
+			select: async () => {
+				order.push("local");
+				return "yes";
+			},
+		});
+
+		const result = await tool.execute(
+			"call-remote-emit",
+			{ questions: [{ id: "confirm", question: "Proceed?", options: [{ label: "yes" }, { label: "no" }] }] },
+			undefined,
+			undefined,
+			context,
+		);
+
+		// The remote ask must be registered first so the notification is emitted at
+		// invocation, not only after the ask is finalized locally.
+		expect(order[0]).toBe("remote");
+		expect(order).toContain("local");
+		expect(result.content[0]?.type).toBe("text");
+		if (result.content[0]?.type === "text") expect(result.content[0].text).toContain("yes");
+	});
+
+	it("resolves the ask from a remote (Telegram) answer that wins the race", async () => {
+		const source = {
+			awaitAnswer: (_q: string, _opts: string[], _signal?: AbortSignal) => Promise.resolve("yes"),
+		};
+		const tool = new AskTool(createSession({ getAskAnswerSource: () => source } as Partial<ToolSession>));
+		const context = createContext({
+			// Local selector never resolves: only the remote answer can finish the ask.
+			select: () => new Promise<string | undefined>(() => {}),
+		});
+
+		const result = await tool.execute(
+			"call-remote-answer",
+			{ questions: [{ id: "confirm", question: "Proceed?", options: [{ label: "yes" }, { label: "no" }] }] },
+			undefined,
+			undefined,
+			context,
+		);
+
+		expect(result.content[0]?.type).toBe("text");
+		if (result.content[0]?.type === "text") expect(result.content[0].text).toContain("yes");
+	});
+
+	it("closes (aborts) the local selector when a remote answer wins the race", async () => {
+		const source = {
+			awaitAnswer: (_q: string, _opts: string[], _signal?: AbortSignal) => Promise.resolve("yes"),
+		};
+		const tool = new AskTool(createSession({ getAskAnswerSource: () => source } as Partial<ToolSession>));
+		let localAborted = false;
+		const context = createContext({
+			// The local selector only ends when its signal is aborted — proving the
+			// remote win actually tears the TUI dialog down instead of leaving it open.
+			select: (_prompt, _options, dialogOptions) =>
+				new Promise<string | undefined>(resolve => {
+					dialogOptions?.signal?.addEventListener("abort", () => {
+						localAborted = true;
+						resolve(undefined);
+					});
+				}),
+		});
+
+		const result = await tool.execute(
+			"call-remote-closes-local",
+			{ questions: [{ id: "confirm", question: "Proceed?", options: [{ label: "yes" }, { label: "no" }] }] },
+			undefined,
+			undefined,
+			context,
+		);
+
+		expect(localAborted).toBe(true);
+		expect(result.content[0]?.type).toBe("text");
+		if (result.content[0]?.type === "text") expect(result.content[0].text).toContain("yes");
+	});
+
+	it("treats an unmatched remote answer as provide-my-own custom input", async () => {
+		const source = {
+			awaitAnswer: (_q: string, _opts: string[], _signal?: AbortSignal) => Promise.resolve("ship it tomorrow"),
+		};
+		const tool = new AskTool(createSession({ getAskAnswerSource: () => source } as Partial<ToolSession>));
+		const context = createContext({
+			// Local selector never resolves; the remote free-text answer wins.
+			select: () => new Promise<string | undefined>(() => {}),
+		});
+
+		const result = await tool.execute(
+			"call-remote-custom",
+			{ questions: [{ id: "confirm", question: "Proceed?", options: [{ label: "yes" }, { label: "no" }] }] },
+			undefined,
+			undefined,
+			context,
+		);
+
+		expect(result.details?.customInput).toBe("ship it tomorrow");
+		expect(result.details?.selectedOptions).toEqual([]);
+		if (result.content[0]?.type === "text") expect(result.content[0].text).toContain("custom input");
+	});
+
+	it("treats a remote answer that matches an option as a selection (not custom input)", async () => {
+		const source = {
+			awaitAnswer: (_q: string, _opts: string[], _signal?: AbortSignal) => Promise.resolve("no"),
+		};
+		const tool = new AskTool(createSession({ getAskAnswerSource: () => source } as Partial<ToolSession>));
+		const context = createContext({
+			select: () => new Promise<string | undefined>(() => {}),
+		});
+
+		const result = await tool.execute(
+			"call-remote-match",
+			{ questions: [{ id: "confirm", question: "Proceed?", options: [{ label: "yes" }, { label: "no" }] }] },
+			undefined,
+			undefined,
+			context,
+		);
+
+		expect(result.details?.selectedOptions).toEqual(["no"]);
+		expect(result.details?.customInput).toBeUndefined();
 	});
 
 	it("defaults to no timeout when ask.timeout is unset", async () => {
@@ -727,6 +859,36 @@ describe("AskTool custom input", () => {
 		expect(result.content[0].text).toContain("User selected: alpha");
 		expect(editor).toHaveBeenCalledTimes(1);
 	});
+
+	it("fills the Other/custom-input editor from a remote free-text answer", async () => {
+		let calls = 0;
+		const source = {
+			// 1st call = the select step (local picks Other); 2nd call = the editor step,
+			// which a remote (e.g. Telegram) reply fills instead of blocking locally.
+			awaitAnswer: (_q: string, _opts: string[], _signal?: AbortSignal) => {
+				calls++;
+				return calls === 1 ? new Promise<string | undefined>(() => {}) : Promise.resolve("remote typed answer");
+			},
+		};
+		const tool = new AskTool(createSession({ getAskAnswerSource: () => source } as Partial<ToolSession>));
+		const context = createContext({
+			// Local selector picks the last entry — the "Other / type your own" option.
+			select: (_prompt, options) => Promise.resolve(options[options.length - 1]),
+			// Local editor never resolves; only the remote answer can complete it.
+			editor: () => new Promise<string | undefined>(() => {}),
+		});
+
+		const result = await tool.execute(
+			"call-remote-editor",
+			{ questions: [{ id: "confirm", question: "Proceed?", options: [{ label: "yes" }, { label: "no" }] }] },
+			undefined,
+			undefined,
+			context,
+		);
+
+		expect(result.details?.customInput).toBe("remote typed answer");
+		if (result.content[0]?.type === "text") expect(result.content[0].text).toContain("remote typed answer");
+	});
 });
 
 describe("AskTool option rendering", () => {
@@ -1276,6 +1438,51 @@ describe("AskTool deep-interview rendering middleware", () => {
 						id: "round-4",
 						question: rawQuestion,
 						options: [{ label: "Visible options" }, { label: "Scrollable prompt" }],
+					},
+				],
+			},
+			undefined,
+			undefined,
+			context,
+		);
+
+		const dialogOptions = select.mock.calls[0]?.[2];
+		expect(dialogOptions?.scrollTitleRows).toBe(Number.MAX_SAFE_INTEGER);
+		expect(dialogOptions?.helpText).toContain("wheel/PgUp/PgDn scroll question");
+	});
+
+	it("opts structured deep-interview questions into local prompt scrolling", async () => {
+		spyOn(deepInterviewRecorder, "appendOrMergeDeepInterviewRound").mockResolvedValue({
+			action: "created",
+			record: {} as AppendOrMergeResult["record"],
+		});
+		spyOn(deepInterviewRecorder, "syncDeepInterviewRecorderHud").mockResolvedValue(undefined);
+		const tool = new AskTool(createSession({ getSessionId: () => "session-structured-scroll" }));
+		const rawQuestion = [
+			"The user-facing context is long enough that answer options can be pushed off screen.",
+			"",
+			"Which answer should prove the question area remains scrollable?",
+		].join("\n");
+		const select = vi.fn(
+			async (_prompt: string, options: string[], _dialogOptions?: { scrollTitleRows?: number; helpText?: string }) =>
+				options[0],
+		);
+		const context = createContext({ select });
+
+		await tool.execute(
+			"call-structured-deep-interview-scroll",
+			{
+				questions: [
+					{
+						id: "round-6",
+						question: rawQuestion,
+						options: [{ label: "Keep question scrolling" }, { label: "Regular selection" }],
+						deepInterview: {
+							round: 6,
+							component: "Selector UI",
+							dimension: "Readability",
+							ambiguity: 0.41,
+						},
 					},
 				],
 			},

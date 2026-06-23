@@ -20,6 +20,7 @@ Normal standalone SKC (`skc`, `skc --tmux`, and print-mode prompts) does not inh
 ### Coordinator MCP
 
 Coordinator MCP is the default answer for external bot and orchestration integrations. It exposes a transport-level MCP tool contract for session discovery, managed session start, visible tmux registration, prompt delivery, bounded turn waiting, structured question answering, artifact reads, and explicit completion/failure/cancellation reports.
+It also exposes high-level `skc_delegate_plan` / `skc_delegate_execute` / `skc_delegate_team` tools so a host can delegate a whole SKC workflow (ralplan/ultragoal/team) in one call and consume the durable turn result. The canonical sayknow-cli plugin bundles under `plugins/` and `skc setup claude|codex|hermes` package this surface with fail-closed defaults (workdir-scoped roots, mutations off until opt-in). Claude Code is installable through its generated local marketplace; Codex artifacts are preview-only until a versioned Codex local marketplace smoke proves install and runtime activation.
 
 Readiness claim:
 

@@ -29,10 +29,14 @@ import {
 	setTheme,
 	theme,
 } from "../../modes/theme/theme";
-import type { InteractiveModeContext } from "../../modes/types";
+import type { InteractiveModeContext, OAuthSelectorOptions } from "../../modes/types";
 import { type SessionInfo, SessionManager } from "../../session/session-manager";
 import { FileSessionStorage } from "../../session/session-storage";
-import { discoverExternalCredentials, formatDiscoverySummary, importCredentials } from "../../setup/credential-import";
+import {
+	CREDENTIAL_AUTO_IMPORT_ROTATION_WARNING,
+	runExternalCredentialAutoImport,
+} from "../../setup/credential-auto-import";
+import { filterAutoImportOAuthCredentials, formatDiscoverySummary } from "../../setup/credential-import";
 import {
 	MODEL_ONBOARDING_API_PROVIDER_COMMAND,
 	MODEL_ONBOARDING_PROVIDER_PRESET_COMMAND,
@@ -160,10 +164,22 @@ export class SelectorController {
 
 	async #handleCredentialImport(): Promise<void> {
 		this.ctx.showStatus("Scanning for existing Claude Code / Codex CLI credentials…");
-		const result = await discoverExternalCredentials();
-		const summaryLines = formatDiscoverySummary(result);
+		const preview = await runExternalCredentialAutoImport({
+			authStorage: {
+				importCredentialIfAbsent: async () => ({
+					inserted: false,
+					reason: "skipped-existing",
+					provider: "",
+					entries: [],
+				}),
+			},
+			trigger: "bare-login",
+		});
+		const result = preview.discovery ?? { importable: [], skipped: [], environment: [] };
+		const candidates = filterAutoImportOAuthCredentials(result.importable);
+		const summaryLines = formatDiscoverySummary({ ...result, importable: candidates });
 
-		if (result.importable.length === 0) {
+		if (candidates.length === 0) {
 			this.ctx.chatContainer.addChild(new Spacer(1));
 			for (const line of summaryLines) {
 				this.ctx.chatContainer.addChild(new Text(theme.fg("dim", line), 1, 0));
@@ -172,7 +188,7 @@ export class SelectorController {
 				new Text(
 					theme.fg(
 						"warning",
-						"No importable Claude/Codex credentials found. Use /login or add a custom provider.",
+						"No importable Claude/Codex OAuth credentials found. Use /login or add a custom provider.",
 					),
 					1,
 					0,
@@ -183,7 +199,7 @@ export class SelectorController {
 		}
 
 		const confirmed = await this.ctx.showHookConfirm(
-			`Import ${result.importable.length} credential(s)?`,
+			`Import ${candidates.length} credential(s)?`,
 			summaryLines.join("\n"),
 		);
 		if (!confirmed) {
@@ -191,9 +207,10 @@ export class SelectorController {
 			return;
 		}
 
-		const summary = await importCredentials(result.importable, (provider, credential) =>
-			this.ctx.session.modelRegistry.authStorage.upsertCredential(provider, credential),
-		);
+		const summary = await runExternalCredentialAutoImport({
+			authStorage: this.ctx.session.modelRegistry.authStorage,
+			trigger: "bare-login",
+		});
 		await this.ctx.session.modelRegistry.refresh();
 
 		this.ctx.chatContainer.addChild(new Spacer(1));
@@ -206,13 +223,15 @@ export class SelectorController {
 				),
 			);
 		}
-		for (const failure of summary.failed) {
+		for (const skip of summary.skipped) {
 			this.ctx.chatContainer.addChild(
-				new Text(
-					theme.fg("error", `${theme.status.error} Failed ${failure.credential.provider}: ${failure.error}`),
-					1,
-					0,
-				),
+				new Text(theme.fg("dim", `${theme.status.info} Skipped ${skip.credential.provider}: ${skip.reason}`), 1, 0),
+			);
+		}
+		for (const failure of summary.failures) {
+			const provider = failure.credential?.provider ?? failure.origin ?? "credential discovery";
+			this.ctx.chatContainer.addChild(
+				new Text(theme.fg("error", `${theme.status.error} Failed ${provider}: ${failure.failureClass}`), 1, 0),
 			);
 		}
 		if (summary.imported.length > 0) {
@@ -1280,7 +1299,11 @@ export class SelectorController {
 		}
 	}
 
-	async showOAuthSelector(mode: "login" | "logout", providerId?: string): Promise<void> {
+	async showOAuthSelector(
+		mode: "login" | "logout",
+		providerId?: string,
+		options?: OAuthSelectorOptions,
+	): Promise<void> {
 		if (providerId) {
 			const oauthProvider = getOAuthProviders().find(provider => provider.id === providerId);
 			if (!oauthProvider && !this.ctx.session.modelRegistry.getModelProfiles().has(providerId)) {
@@ -1307,6 +1330,45 @@ export class SelectorController {
 			}
 		}
 
+		let externalCredentialCandidates: ReturnType<typeof filterAutoImportOAuthCredentials> = [];
+		if (
+			mode === "login" &&
+			providerId === undefined &&
+			options?.allowExternalCredentialDiscovery === true &&
+			options.trigger === "bare-login"
+		) {
+			const preview = await runExternalCredentialAutoImport({
+				authStorage: {
+					importCredentialIfAbsent: async () => ({
+						inserted: false,
+						reason: "skipped-existing",
+						provider: "",
+						entries: [],
+					}),
+				},
+				trigger: "bare-login",
+				discover: options.externalCredentialDiscover,
+			});
+			const result = preview.discovery ?? { importable: [], skipped: [], environment: [] };
+			const candidates = filterAutoImportOAuthCredentials(result.importable);
+			if (candidates.length > 0) {
+				const confirmed = await this.ctx.showHookConfirm(
+					`Import ${candidates.length} external credential(s)?`,
+					`${formatDiscoverySummary({ ...result, importable: candidates }).join("\n")}\n\n${CREDENTIAL_AUTO_IMPORT_ROTATION_WARNING}`,
+				);
+				if (confirmed) {
+					const summary = await runExternalCredentialAutoImport({
+						authStorage: this.ctx.session.modelRegistry.authStorage,
+						trigger: "bare-login",
+						discover: options.externalCredentialDiscover,
+					});
+					externalCredentialCandidates = summary.imported;
+					if (externalCredentialCandidates.length > 0) {
+						await this.ctx.session.modelRegistry.refresh("offline");
+					}
+				}
+			}
+		}
 		this.showSelector(done => {
 			let selector: OAuthSelectorComponent;
 			selector = new OAuthSelectorComponent(
@@ -1337,6 +1399,7 @@ export class SelectorController {
 					requestRender: () => {
 						this.ctx.ui.requestRender();
 					},
+					externalCredentialCandidates,
 				},
 			);
 			return { component: selector, focus: selector };

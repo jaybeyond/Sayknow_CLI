@@ -404,13 +404,11 @@ function applyGeneratedModelPolicy(model: ApiModel<Api>): void {
 	if (model.provider === "zai" && model.id === "glm-5.2") {
 		model.contextWindow = 1_000_000;
 	}
-	// MiniMax-M3: official MiniMax docs (platform.minimax.io/docs/guides/models-intro)
-	// document a 1M context window, but models.dev and the bundled catalog both report
-	// 512K. The stale 512K survives generate-models (provider-scoped models bypass the
-	// models.dev refresh in applyGlobalModelsDevFallback), tripping auto-compaction /
-	// context-cap thresholds 2x early on MiniMax sessions. Pin to the true 1M.
+	// MiniMax-M3: MiniMax exposes a 1M context tier, but usage beyond 512K is
+	// billed separately. Keep bundled/default metadata at the billing-safe 512K
+	// unless an explicit paid-tier contract is added.
 	if (model.provider !== "opencode-go" && model.id === "minimax-m3") {
-		model.contextWindow = 1_000_000;
+		model.contextWindow = 512_000;
 	}
 }
 
@@ -455,10 +453,13 @@ function inferGeneratedApplyPatchToolType(
 }
 
 function applyGpt55ContextWindow(model: ApiModel<Api>, parsedModel: OpenAIModel): boolean {
-	// gpt-5.5 is a 400K-context model. OpenAI code backend discovery can omit the
-	// context window, falling back to the 272K default, which incorrectly trips
-	// context-cap / auto-promote thresholds (a ~272K session would look over-cap
-	// and demote to gpt-5.4). Pin gpt-5.5 to its true 400K window.
+	// OpenAI Codex reports GPT-5.5 with a 272K prompt budget. Keep the generated
+	// bundle aligned with the backend limit so compaction fires before the prompt
+	// crosses the usable Codex window instead of trusting stale 400K snapshots.
+	if (model.provider === "openai-codex" && parsedModel.variant === "base" && semverEqual(parsedModel.version, "5.5")) {
+		model.contextWindow = 272000;
+		return true;
+	}
 	if (parsedModel.variant === "base" && semverEqual(parsedModel.version, "5.5")) {
 		model.contextWindow = 400000;
 		return true;

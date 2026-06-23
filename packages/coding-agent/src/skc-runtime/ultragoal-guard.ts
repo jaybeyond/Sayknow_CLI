@@ -288,14 +288,15 @@ export function validateCompletionReceipt(input: {
 export async function readUltragoalVerificationState(input: {
 	cwd: string;
 	currentGoal?: CurrentGoalLike | null;
+	sessionId?: string | null;
 }): Promise<UltragoalGuardDiagnostic> {
 	const currentObjective = input.currentGoal?.objective?.trim() ?? "";
 	if (!currentObjective) return { state: "inactive", message: "No current goal objective is active." };
 	let plan: UltragoalPlan | null;
 	let ledger: UltragoalLedgerEvent[];
 	try {
-		plan = await readUltragoalPlan(input.cwd);
-		ledger = await readUltragoalLedger(input.cwd);
+		plan = await readUltragoalPlan(input.cwd, input.sessionId ?? undefined);
+		ledger = await readUltragoalLedger(input.cwd, input.sessionId ?? undefined);
 	} catch (error) {
 		if (currentObjective === DEFAULT_ULTRAGOAL_OBJECTIVE) {
 			return {
@@ -479,6 +480,7 @@ export async function isUltragoalAskBlocked(cwd: string): Promise<UltragoalAskBl
 export async function assertCanCompleteCurrentGoal(input: {
 	cwd: string;
 	currentGoal?: CurrentGoalLike | null;
+	sessionId?: string | null;
 }): Promise<void> {
 	if (!input.cwd) return;
 	const diagnostic = await readUltragoalVerificationState(input);
@@ -494,5 +496,58 @@ export function isUltragoalBypassPrompt(prompt: string): boolean {
 		/update_goal\s*\(|goal\s+complete|checkpoint[^\n]+--status\s+complete|skip\s+verification|weaken\s+verification|mark\s+.*complete/i.test(
 			normalized,
 		) || /goal[\s\S]{0,80}complete/i.test(normalized)
+	);
+}
+export interface UltragoalPauseBlockDiagnostic {
+	blocked: boolean;
+	reason: string;
+}
+
+/**
+ * While an Ultragoal run is active, `goal({"op":"pause"})` is only allowed when the
+ * current durable Ultragoal state is readable and the latest durable ledger event
+ * classifies the current blocker as `human_blocked`. Resolvable blockers must be
+ * worked, not parked. Reads fail closed so unreadable durable state or ledger data
+ * blocks pause rather than silently allowing a give-up.
+ */
+export async function isUltragoalPauseBlocked(cwd: string): Promise<UltragoalPauseBlockDiagnostic> {
+	if (!cwd) return { blocked: false, reason: "No cwd to resolve durable Ultragoal state." };
+	const ask = await isUltragoalAskBlocked(cwd);
+	if (ask.source === "durable_state_unreadable") {
+		return {
+			blocked: true,
+			reason: `Unable to verify current durable Ultragoal state for pause: ${ask.reason}`,
+		};
+	}
+	if (!ask.active) return { blocked: false, reason: "No active Ultragoal run." };
+	let ledger: UltragoalLedgerEvent[];
+	try {
+		ledger = await readUltragoalLedger(cwd);
+	} catch (error) {
+		return {
+			blocked: true,
+			reason: `Unable to read durable Ultragoal ledger: ${error instanceof Error ? error.message : String(error)}`,
+		};
+	}
+	const latest = ledger.at(-1);
+	if (latest?.event === "blocker_classified" && latest.classification === "human_blocked") {
+		return { blocked: false, reason: "Latest Ultragoal ledger event classifies the blocker as human_blocked." };
+	}
+	return {
+		blocked: true,
+		reason:
+			"An Ultragoal run is active. Pausing requires the current blocker to be classified human_blocked as the latest ledger event.",
+	};
+}
+
+export async function assertUltragoalPauseAllowed(cwd: string): Promise<void> {
+	const diagnostic = await isUltragoalPauseBlocked(cwd);
+	if (!diagnostic.blocked) return;
+	throw new Error(
+		[
+			diagnostic.reason,
+			"Resolvable blockers must be worked, not paused: investigate, `skc ultragoal steer --kind add_subgoal`, delegate an executor, or `skc ultragoal record-review-blockers`.",
+			'If the blocker is genuinely human-only, record `skc ultragoal classify-blocker --classification human_blocked --evidence "<human-only dependency>"` immediately before pausing.',
+		].join("\n"),
 	);
 }

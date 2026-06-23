@@ -48,7 +48,7 @@ describe("G2 skc ACL gate", () => {
 		});
 	});
 
-	it("allows sanctioned skc bash commands and non-.skc writes", async () => {
+	it("allows sanctioned skc bash commands, bash mutations, and non-.skc writes", async () => {
 		await withTempCwd(async cwd => {
 			const skcCommand = await getDeepInterviewMutationDecision({
 				cwd,
@@ -56,6 +56,13 @@ describe("G2 skc ACL gate", () => {
 				args: { command: "skc state ralplan write --input '{}'" },
 			});
 			expect(skcCommand.blocked).toBe(false);
+
+			const bashMutation = await getDeepInterviewMutationDecision({
+				cwd,
+				tool: tool("bash"),
+				args: { command: "rm -rf .skc/specs" },
+			});
+			expect(bashMutation.blocked).toBe(false);
 
 			const productWrite = await getDeepInterviewMutationDecision({
 				cwd,

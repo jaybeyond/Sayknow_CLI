@@ -1443,7 +1443,8 @@
         "appliesToVerbs": [
           "checkpoint",
           "record-review-blockers",
-          "steer"
+          "steer",
+          "classify-blocker"
         ],
         "name": "evidence",
         "required": true,
@@ -1470,6 +1471,25 @@
         ],
         "name": "goal-id",
         "type": "string"
+      },
+      {
+        "appliesToVerbs": [
+          "classify-blocker"
+        ],
+        "name": "goal-id",
+        "type": "string"
+      },
+      {
+        "appliesToVerbs": [
+          "classify-blocker"
+        ],
+        "enumValues": [
+          "human_blocked",
+          "resolvable"
+        ],
+        "name": "classification",
+        "required": true,
+        "type": "enum"
       },
       {
         "appliesToVerbs": [
@@ -1570,7 +1590,8 @@
           "review",
           "checkpoint",
           "record-review-blockers",
-          "steer"
+          "steer",
+          "classify-blocker"
         ],
         "name": "json",
         "type": "boolean"
@@ -1649,6 +1670,10 @@
       },
       {
         "name": "steer",
+        "surface": "command-positional"
+      },
+      {
+        "name": "classify-blocker",
         "surface": "command-positional"
       },
       {

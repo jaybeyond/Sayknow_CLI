@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-06-22
+
+### Added
+
+- `skc-notifications` native core: a per-session loopback WebSocket notification server with token-gated handshake, action lifecycle (ask/idle, resolve, reply rejection), endpoint discovery file, and the camelCase-field/snake_case-type wire protocol that underpins the notifications SDK (#874).
+
 ## [0.6.2] - 2026-06-19
 
 ### Removed

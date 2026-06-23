@@ -22,6 +22,7 @@ import {
 	getUltragoalStatus,
 	readUltragoalLedger,
 	readUltragoalPlan,
+	resolveGitBase,
 	runNativeUltragoalCommand,
 	startNextUltragoalGoal,
 	validateExecutorQaRedTeamEvidenceForReview,
@@ -900,6 +901,21 @@ describe("native SKC ultragoal runtime", () => {
 		expect(result.stdout).toContain("--quality-gate-json");
 		expect(result.stdout).toContain('goal({"op":"get"})');
 		expect(result.stdout).toContain("obligation");
+	});
+
+	it("prints top-level and command-specific help for classify-blocker", async () => {
+		const root = await tempDir();
+
+		const topLevel = await runNativeUltragoalCommand(["--help"], root);
+		const commandSpecific = await runNativeUltragoalCommand(["classify-blocker", "--help"], root);
+
+		expect(topLevel.status).toBe(0);
+		expect(topLevel.stdout).toContain("classify-blocker");
+		expect(topLevel.stdout).toContain("skc ultragoal classify-blocker --help");
+		expect(commandSpecific.status).toBe(0);
+		expect(commandSpecific.stdout).toContain("--classification <human_blocked|resolvable>");
+		expect(commandSpecific.stdout).toContain("--evidence <text>");
+		expect(commandSpecific.stdout).toContain("--goal-id=<value>");
 	});
 
 	it("prints receipt-only json for steering", async () => {
@@ -2177,6 +2193,46 @@ describe("native SKC ultragoal runtime", () => {
 		expect(coverageError).toContain("executorQa.contractCoverage[0].surfaceEvidenceRefs.surface-gui.status");
 	});
 
+	it("does not require computer-use adversarial cases for prompt-only wording changes", async () => {
+		const root = await tempDir();
+		await writeStructuralArtifacts(root);
+
+		await validateExecutorQaRedTeamEvidenceForReview(root, webExecutorQa(), {
+			mode: "review",
+			changeSet: {
+				source: "review-worktree",
+				trusted: true,
+				paths: [
+					{
+						path: "packages/coding-agent/src/defaults/skc/skills/ultragoal/SKILL.md",
+						status: "modified",
+					},
+				],
+			},
+		});
+	});
+
+	it("requires computer-use adversarial cases for real computer-control surface changes", async () => {
+		const root = await tempDir();
+		await writeStructuralArtifacts(root);
+
+		await expect(
+			validateExecutorQaRedTeamEvidenceForReview(root, webExecutorQa(), {
+				mode: "review",
+				changeSet: {
+					source: "review-worktree",
+					trusted: true,
+					paths: [
+						{
+							path: "packages/coding-agent/src/tools/computer.ts",
+							status: "modified",
+						},
+					],
+				},
+			}),
+		).rejects.toThrow(/kill-switch-bypass/);
+	});
+
 	it("requires a fresh goal get snapshot for complete checkpoints", async () => {
 		const root = await tempDir();
 		await createUltragoalPlan({ cwd: root, brief: "Ship the fix" });
@@ -3143,5 +3199,57 @@ describe("ultragoal mode-state + HUD reconciliation (#342)", () => {
 			const ledger = await Bun.file(path.join(sessionUltragoalDir(root, TEST_SESSION_ID), "ledger.jsonl")).text();
 			expect(ledger).toContain("reconcile_failed");
 		});
+	});
+});
+
+describe("resolveGitBase nearest integration base", () => {
+	async function git(cwd: string, args: string[]): Promise<void> {
+		const proc = Bun.spawn(["git", ...args], {
+			cwd,
+			env: {
+				...process.env,
+				GIT_AUTHOR_NAME: "T",
+				GIT_AUTHOR_EMAIL: "t@example.com",
+				GIT_COMMITTER_NAME: "T",
+				GIT_COMMITTER_EMAIL: "t@example.com",
+			},
+			stdout: "pipe",
+			stderr: "pipe",
+		});
+		await proc.exited;
+		if (proc.exitCode !== 0) {
+			throw new Error(`git ${args.join(" ")} failed: ${await new Response(proc.stderr).text()}`);
+		}
+	}
+
+	async function commit(cwd: string, file: string, message: string): Promise<void> {
+		await fs.writeFile(path.join(cwd, file), `${message}\n`);
+		await git(cwd, ["add", "."]);
+		await git(cwd, ["commit", "-m", message]);
+	}
+
+	it("scopes a dev-forked branch to dev, not a stale main", async () => {
+		const dir = await tempDir();
+		await git(dir, ["init", "-q"]);
+		await git(dir, ["checkout", "-q", "-b", "main"]);
+		await commit(dir, "base.txt", "base");
+		await git(dir, ["checkout", "-q", "-b", "dev"]);
+		await commit(dir, "dev.txt", "dev work");
+		await git(dir, ["checkout", "-q", "-b", "feature/x"]);
+		await commit(dir, "feature.txt", "feature work");
+
+		// dev is the nearest base (1 commit ahead) vs main (2 commits ahead).
+		expect(await resolveGitBase(dir)).toBe("dev");
+	});
+
+	it("honors an explicit branch argument", async () => {
+		const dir = await tempDir();
+		await git(dir, ["init", "-q"]);
+		await git(dir, ["checkout", "-q", "-b", "main"]);
+		await commit(dir, "base.txt", "base");
+		await git(dir, ["checkout", "-q", "-b", "feature/y"]);
+		await commit(dir, "feature.txt", "feature work");
+
+		expect(await resolveGitBase(dir, "main")).toBe("main");
 	});
 });

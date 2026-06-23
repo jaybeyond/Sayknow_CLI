@@ -29,6 +29,8 @@ describe("SKC public CLI command surface", () => {
 			"gc",
 			"ralplan",
 			"config",
+			"notify",
+			"daemon",
 			"web-search",
 			"mcp-serve",
 			"contribute-pr",

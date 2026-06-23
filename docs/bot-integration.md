@@ -107,6 +107,14 @@ Mutating tools:
 - `skc_coordinator_submit_question_answer`
 - `skc_coordinator_report_status`
 
+High-level delegation tools:
+
+- `skc_delegate_plan`
+- `skc_delegate_execute`
+- `skc_delegate_team`
+
+The `skc_delegate_*` tools package common SKC workflows for hosts that want to delegate an entire planning, execution, or team turn without manually composing `start_session` and `send_prompt`. They use the same coordinator mutation gates and workdir allowlists as the lower-level session tools.
+
 ### Start a managed SKC session
 
 Call `skc_coordinator_start_session` with a canonical workdir inside `SKC_COORDINATOR_MCP_WORKDIR_ROOTS`:

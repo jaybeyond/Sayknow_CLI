@@ -10,8 +10,8 @@ import { addApiCompatibleProvider } from "@sayknow-cli/coding-agent/setup/provid
 import { $credentialEnv, hookFetch, Snowflake } from "@sayknow-cli/utils";
 
 describe("model roles", () => {
-	test("only the default role remains after legacy role cleanup", () => {
-		expect(MODEL_ROLE_IDS).toEqual(["default"]);
+	test("default and vision are built-in model roles", () => {
+		expect(MODEL_ROLE_IDS).toEqual(["default", "vision"]);
 	});
 });
 

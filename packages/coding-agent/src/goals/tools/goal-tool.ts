@@ -6,7 +6,7 @@ import * as z from "zod/v4";
 import type { RenderResultOptions } from "../../extensibility/custom-tools/types";
 import type { Theme, ThemeColor } from "../../modes/theme/theme";
 import goalDescription from "../../prompts/tools/goal.md" with { type: "text" };
-import { assertCanCompleteCurrentGoal } from "../../skc-runtime/ultragoal-guard";
+import { assertCanCompleteCurrentGoal, assertUltragoalPauseAllowed } from "../../skc-runtime/ultragoal-guard";
 import { formatDuration } from "../../slash-commands/helpers/format";
 import type { ToolSession } from "../../tools";
 import { formatErrorMessage, TRUNCATE_LENGTHS } from "../../tools/render-utils";
@@ -94,6 +94,11 @@ async function executeGoalOperation(session: ToolSession, params: GoalToolInput)
 		return buildGoalToolResponse(resumed.goal);
 	}
 	if (params.op === "pause") {
+		try {
+			await assertUltragoalPauseAllowed(session.cwd);
+		} catch (error) {
+			throw new ToolError(error instanceof Error ? error.message : String(error));
+		}
 		const paused = await runtime.pauseGoal();
 		return buildGoalToolResponse(paused?.goal ?? null);
 	}
@@ -102,7 +107,11 @@ async function executeGoalOperation(session: ToolSession, params: GoalToolInput)
 		return buildGoalToolResponse(dropped ?? null);
 	}
 	try {
-		await assertCanCompleteCurrentGoal({ cwd: session.cwd, currentGoal: session.getGoalModeState?.()?.goal ?? null });
+		await assertCanCompleteCurrentGoal({
+			cwd: session.cwd,
+			currentGoal: session.getGoalModeState?.()?.goal ?? null,
+			sessionId: session.getSessionId?.(),
+		});
 	} catch (error) {
 		throw new ToolError(error instanceof Error ? error.message : String(error));
 	}

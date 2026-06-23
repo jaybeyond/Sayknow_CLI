@@ -10,6 +10,7 @@ export const SKC_TMUX_BRANCH_SLUG_OPTION = "@skc-branch-slug";
 export const SKC_TMUX_PROJECT_OPTION = "@skc-project";
 export const SKC_TMUX_SESSION_ID_OPTION = "@skc-session-id";
 export const SKC_TMUX_SESSION_STATE_FILE_OPTION = "@skc-session-state-file";
+export const SKC_TMUX_VERSION_OPTION = "@skc-version";
 
 export interface SkcTmuxProfileCommand {
 	description: string;
@@ -101,6 +102,7 @@ export function buildSkcTmuxRequiredProfileCommands(
 		project?: string | null;
 		sessionId?: string | null;
 		sessionStateFile?: string | null;
+		version?: string | null;
 	} = {},
 ): SkcTmuxProfileCommand[] {
 	const commands: SkcTmuxProfileCommand[] = [
@@ -134,6 +136,11 @@ export function buildSkcTmuxRequiredProfileCommands(
 			description: "record SKC session state marker",
 			args: ["set-option", "-t", target, SKC_TMUX_SESSION_STATE_FILE_OPTION, metadata.sessionStateFile],
 		});
+	if (metadata.version)
+		commands.push({
+			description: "record SKC version identity",
+			args: ["set-option", "-t", target, SKC_TMUX_VERSION_OPTION, metadata.version],
+		});
 	return commands;
 }
 
@@ -146,6 +153,7 @@ export function buildSkcTmuxProfileCommands(
 		project?: string | null;
 		sessionId?: string | null;
 		sessionStateFile?: string | null;
+		version?: string | null;
 	} = {},
 ): SkcTmuxProfileCommand[] {
 	const commands = buildSkcTmuxRequiredProfileCommands(target, metadata);

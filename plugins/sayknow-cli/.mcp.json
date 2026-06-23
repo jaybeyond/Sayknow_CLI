@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "skc-coordinator": {
+      "command": "skc",
+      "args": [
+        "mcp-serve",
+        "coordinator"
+      ],
+      "env": {
+        "SKC_COORDINATOR_MCP_WORKDIR_ROOTS": "${CLAUDE_PROJECT_DIR}",
+        "SKC_COORDINATOR_MCP_REPO": "sayknow-cli-plugin",
+        "SKC_COORDINATOR_MCP_SESSION_COMMAND": "skc --worktree"
+      }
+    }
+  }
+}

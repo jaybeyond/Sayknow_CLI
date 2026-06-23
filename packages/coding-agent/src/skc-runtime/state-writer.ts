@@ -99,8 +99,8 @@ export interface GuardedStateWriterOptions extends StateWriterOptions {
 }
 
 export type GuardedWriteResult =
-	| { path: string; written: true }
-	| { path: string; written: false; reason: "stale-skip" };
+	| { path: string; written: true; revision: number }
+	| { path: string; written: false; reason: "stale-skip"; revision: number };
 
 export interface StateWriterOptions {
 	cwd?: string;
@@ -511,13 +511,13 @@ async function writeGuardedResolvedJsonAtomic(
 				const next = stampStateRevision(withWorkflowReceipt(value, buildReceipt(options)), currentRevision + 1);
 				await atomicWrite(filePath, jsonText(next));
 				await maybeAudit(filePath, options);
-				return { path: filePath, written: true };
+				return { path: filePath, written: true, revision: currentRevision + 1 };
 			}
 
 			const incomingSourceRevision =
 				options.sourceRevision ?? (isPlainObject(value) ? persistedStateRevision(value) : 0);
 			if (current !== undefined && incomingSourceRevision <= persistedSourceRevision(current)) {
-				return { path: filePath, written: false, reason: "stale-skip" };
+				return { path: filePath, written: false, reason: "stale-skip", revision: currentRevision };
 			}
 			const next = stampStateRevision(
 				withWorkflowReceipt(value, buildReceipt(options)),
@@ -526,7 +526,7 @@ async function writeGuardedResolvedJsonAtomic(
 			);
 			await atomicWrite(filePath, jsonText(next));
 			await maybeAudit(filePath, options);
-			return { path: filePath, written: true };
+			return { path: filePath, written: true, revision: currentRevision + 1 };
 		},
 		options.lock,
 	);
@@ -574,13 +574,13 @@ export async function writeGuardedWorkflowEnvelopeAtomic(
 				}
 				await atomicWrite(filePath, jsonText(next));
 				await maybeAudit(filePath, options);
-				return { path: filePath, written: true };
+				return { path: filePath, written: true, revision: currentRevision + 1 };
 			}
 
 			const incomingSourceRevision =
 				options.sourceRevision ?? (isPlainObject(value) ? persistedStateRevision(value) : 0);
 			if (current !== undefined && incomingSourceRevision <= persistedSourceRevision(current)) {
-				return { path: filePath, written: false, reason: "stale-skip" };
+				return { path: filePath, written: false, reason: "stale-skip", revision: currentRevision };
 			}
 			const next = stampWorkflowEnvelopeRevisionAndChecksum(
 				value,
@@ -599,7 +599,7 @@ export async function writeGuardedWorkflowEnvelopeAtomic(
 			}
 			await atomicWrite(filePath, jsonText(next));
 			await maybeAudit(filePath, options);
-			return { path: filePath, written: true };
+			return { path: filePath, written: true, revision: currentRevision + 1 };
 		},
 		options.lock,
 	);

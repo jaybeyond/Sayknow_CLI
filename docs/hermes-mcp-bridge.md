@@ -134,6 +134,11 @@ Mutating tools:
 - `skc_coordinator_send_prompt`
 - `skc_coordinator_submit_question_answer`
 - `skc_coordinator_report_status`
+- `skc_delegate_plan`
+- `skc_delegate_execute`
+- `skc_delegate_team`
+
+The `skc_delegate_*` tools are high-level, session-level delegation: each starts (or reuses) a session and sends one workflow-tagged turn that runs `/skill:ralplan`, `/skill:ultragoal`, or `/skill:team` to completion, returning a durable `turn_id`, status, and artifact references. They use the same `sessions` mutation class and fail-closed workdir gating as `skc_coordinator_start_session`, and emit a `delegation.started` event. Pass `cwd` and `task`; set `allow_mutation: true` only with startup mutation opt-in plus per-call consent. Prefer these over manual `start_session` + `send_prompt` when delegating a whole workflow.
 
 
 `skc_coordinator_register_session` registers an existing visible tmux-backed SKC pane as the coordinator-authoritative session. Use it when an operator has already launched a visible terminal/tmux lane and the external coordinator must send prompts to that same pane instead of creating a hidden `skc-coordinator-*` session. The tool validates the workdir allowlist, safe session/target tokens, and tmux target liveness before writing session state.

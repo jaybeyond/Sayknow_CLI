@@ -818,7 +818,7 @@ async function writeJsonAtomic(
 		toPhase?: string;
 		owner?: WorkflowStateMutationOwner;
 	},
-): Promise<{ warning?: string; stamped: Record<string, unknown> }> {
+): Promise<{ warning?: string; stamped: Record<string, unknown>; revision: number }> {
 	const warning = options?.skill
 		? await warnAndAuditOutOfBandIfNeeded(cwd, options.sessionId, filePath, options.skill, {
 				mutationId: options.mutationId,
@@ -832,7 +832,7 @@ async function writeJsonAtomic(
 	// writer lock; do not enforce an optimistic `expectedRevision` here (tamper
 	// detection is handled by warnAndAuditOutOfBandIfNeeded above, and a forced
 	// write must succeed over corrupt/missing prior state).
-	await writeGuardedWorkflowEnvelopeAtomic(filePath, value, {
+	const writeResult = await writeGuardedWorkflowEnvelopeAtomic(filePath, value, {
 		cwd,
 		policy: "source",
 		audit: {
@@ -847,7 +847,11 @@ async function writeJsonAtomic(
 			forced: options?.force ?? false,
 		},
 	});
-	return { warning, stamped: (await readJsonFile(filePath)) ?? {} };
+	// `writeResult.revision` is computed inside the writer lock, so it is the revision this
+	// write actually owns. Prefer it over a post-lock file re-read, which a concurrent writer
+	// could have advanced before the read — that race could otherwise let this payload be
+	// published with another writer's newer revision.
+	return { warning, stamped: (await readJsonFile(filePath)) ?? {}, revision: writeResult.revision };
 }
 
 function parseFieldsFlag(args: readonly string[]): StateProjectionField[] | undefined {
@@ -1399,7 +1403,11 @@ async function handleWrite(
 	const validation = validateWorkflowStateEnvelope(mode, merged);
 	if (!validation.valid) throw new StateCommandError(2, validation.error ?? `invalid ${mode} state envelope`);
 
-	const { warning: outOfBandWarning, stamped } = await writeJsonAtomic(cwd, filePath, merged, "write", {
+	const {
+		warning: outOfBandWarning,
+		stamped,
+		revision: stampedRevision,
+	} = await writeJsonAtomic(cwd, filePath, merged, "write", {
 		sessionId,
 		skill: mode,
 		mutationId,
@@ -1411,12 +1419,12 @@ async function handleWrite(
 
 	const phase = typeof merged.current_phase === "string" ? merged.current_phase : undefined;
 	const active = merged.active !== false;
-	// Reflect the freshly stamped mode-state revision onto the in-memory payload so the
-	// active-state/HUD sync derives a `sourceRevision` from the persisted revision, not the
-	// stale pre-write value; otherwise the active-state writer stale-skips the update and the
-	// mirror keeps the prior phase (e.g. staying "interviewing" after a "handoff" write).
-	const stampedRevision = existingStateRevision(stamped);
-	if (typeof stampedRevision === "number") merged.state_revision = stampedRevision;
+	// Reflect the lock-owned mode-state revision onto the in-memory payload so the active-state/HUD
+	// sync derives a `sourceRevision` from the revision this write actually owns (computed inside the
+	// writer lock), not the stale pre-write value or a post-lock re-read a concurrent writer could
+	// have advanced; otherwise the active-state writer stale-skips the update and the mirror keeps the
+	// prior phase (e.g. staying "interviewing" after a "handoff" write).
+	merged.state_revision = stampedRevision;
 	await syncWorkflowSkillState({ cwd, mode, sessionId, threadId, turnId, active, phase, payload: merged, receipt });
 	await touchStateActivityMarker(cwd, sessionId, filePath);
 

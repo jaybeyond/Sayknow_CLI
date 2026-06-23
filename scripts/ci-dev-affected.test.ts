@@ -375,6 +375,10 @@ describe("planTargetedTasks PR-mode targeting", () => {
 		expect(targeted(["docs/guide.md", "CHANGELOG.md", "packages/coding-agent/README.md"])).toEqual([]);
 	});
 
+	test("roboskc static asset changes plan no Python lint/test shards", () => {
+		expect(targeted(["python/roboskc/assets/icon.png", "python/roboskc/assets/icon.jpg"])).toEqual([]);
+	});
+
 	test("native-consuming test files pull in a single native build task", () => {
 		const tasks = targeted(["packages/coding-agent/test/cli.test.ts"]);
 		const keys = tasks.map(task => task.key);

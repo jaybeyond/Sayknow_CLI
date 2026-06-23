@@ -149,4 +149,33 @@ describe("skc state workflow command", () => {
 			expect(readPayload.state.current_phase).toBe("handoff");
 		});
 	}, 20_000);
+
+	it("syncs the active-state mirror with the lock-owned mode-state revision on each write", async () => {
+		await withTempCwd(async cwd => {
+			const dir = sessionStateDir(cwd, "session-rev");
+			const readActiveRev = async () => {
+				const active = await Bun.file(path.join(dir, "skill-active-state.json")).json();
+				return active.active_skills[0].source_state_revision as number;
+			};
+			const readModeRev = async () => {
+				const mode = await Bun.file(path.join(dir, "deep-interview-state.json")).json();
+				return mode.state_revision as number;
+			};
+
+			for (let i = 0; i < 3; i++) {
+				const result = runState(cwd, [
+					"write",
+					"--session-id",
+					"session-rev",
+					"--input",
+					JSON.stringify({ skill: "deep-interview", current_phase: "interviewing", state: { round: i } }),
+					"--json",
+				]);
+				expect(result.exitCode, result.stderr.toString()).toBe(0);
+				// The active mirror must carry the revision this write actually owns (lock-computed),
+				// never a stale pre-write value, so later writes are not stale-skipped.
+				expect(await readActiveRev()).toBe(await readModeRev());
+			}
+		});
+	}, 20_000);
 });

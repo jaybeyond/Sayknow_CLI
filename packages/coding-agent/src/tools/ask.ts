@@ -430,8 +430,18 @@ async function askSingleQuestion(
 				// If input was dismissed (undefined), keep prior selectedOptions/customInput intact
 			}
 		} else {
-			selectedOptions = [stripRecommendedSuffix(choice)];
-			customInput = undefined;
+			const stripped = stripRecommendedSuffix(choice);
+			if (optionLabels.includes(stripped)) {
+				selectedOptions = [stripped];
+				customInput = undefined;
+			} else {
+				// A remote answer (e.g. a typed Telegram reply) that is not one of the
+				// listed options is the "provide my own" custom input — recorded the same
+				// as picking Other and typing it. The local selector can only ever return
+				// a listed entry, so this branch is reached only for free-text answers.
+				customInput = choice;
+				selectedOptions = [];
+			}
 		}
 		if (navigation?.allowForward) {
 			return { selectedOptions, customInput, timedOut, navigation: "forward" };
@@ -551,11 +561,71 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 		const ui: UIContext = {
 			select: (prompt, options, dialogOptions) => {
 				if (!extensionUi) throw new ToolAbortError("Ask tool requires interactive mode");
-				return extensionUi.select(prompt, options, dialogOptions);
+				const source = this.session.getAskAnswerSource?.();
+				if (!source) return extensionUi.select(prompt, options, dialogOptions);
+				// Race the local UI against a remote answer (e.g. a Telegram reply via the
+				// notifications SDK) so asks can be answered without RPC mode. When the
+				// local UI wins, abort the remote source so it stops waiting and marks the
+				// action resolved-locally. First valid answer wins.
+				// Race the local UI against a remote answer (e.g. a Telegram reply via the
+				// notifications SDK) so asks can be answered without RPC mode. First valid
+				// answer wins; the loser is aborted so neither side is left hanging:
+				//   - local wins  -> abort the remote source (marks the action resolved-locally)
+				//   - remote wins -> abort the local selector so the TUI dialog actually closes
+				const remoteController = new AbortController();
+				const localController = new AbortController();
+				// Propagate an external cancel (the tool's signal) to the local selector too.
+				const toolSignal = dialogOptions?.signal;
+				if (toolSignal) {
+					if (toolSignal.aborted) localController.abort();
+					else toolSignal.addEventListener("abort", () => localController.abort(), { once: true });
+				}
+				const remote = source.awaitAnswer(prompt, options, remoteController.signal).then(answer => {
+					// undefined is not a valid remote answer (registration failed, or the local
+					// UI already won and aborted us): never settle the race, let the local
+					// selector decide instead of cancelling the ask.
+					if (answer === undefined) return new Promise<string | undefined>(() => {});
+					localController.abort();
+					return answer;
+				});
+				const local = extensionUi
+					.select(prompt, options, { ...dialogOptions, signal: localController.signal })
+					.then(answer => {
+						remoteController.abort();
+						return answer;
+					});
+				// The losing selector may reject when aborted after the race already settled;
+				// swallow that so it is not an unhandled rejection (the race result is unaffected).
+				void local.catch(() => undefined);
+				return Promise.race([local, remote]);
 			},
 			editor: (title, prefill, dialogOptions, editorOptions) => {
 				if (!extensionUi) throw new ToolAbortError("Ask tool requires interactive mode");
-				return extensionUi.editor(title, prefill, dialogOptions, editorOptions);
+				const source = this.session.getAskAnswerSource?.();
+				if (!source) return extensionUi.editor(title, prefill, dialogOptions, editorOptions);
+				// Race the local editor against a remote free-text answer so "Other / type
+				// your own" custom input can be provided remotely (e.g. a typed Telegram
+				// reply) instead of blocking on the local-only editor. Mirrors `select`.
+				const remoteController = new AbortController();
+				const localController = new AbortController();
+				const toolSignal = dialogOptions?.signal;
+				if (toolSignal) {
+					if (toolSignal.aborted) localController.abort();
+					else toolSignal.addEventListener("abort", () => localController.abort(), { once: true });
+				}
+				const remote = source.awaitAnswer(title, [], remoteController.signal).then(answer => {
+					if (answer === undefined) return new Promise<string | undefined>(() => {});
+					localController.abort();
+					return answer;
+				});
+				const local = extensionUi
+					.editor(title, prefill, { ...(dialogOptions ?? {}), signal: localController.signal }, editorOptions)
+					.then(answer => {
+						remoteController.abort();
+						return answer;
+					});
+				void local.catch(() => undefined);
+				return Promise.race([local, remote]);
 			},
 		};
 
@@ -605,8 +675,9 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 			}
 			try {
 				const deepInterviewPrompt = formatDeepInterviewSelectorPrompt(q.question);
+				const isDeepInterviewQuestion = deepInterviewPrompt !== null || q.deepInterview !== undefined;
 				const displayQuestion = deepInterviewPrompt ?? q.question;
-				const shouldNumberOptions = isDeepInterviewAskQuestion(q.question);
+				const shouldNumberOptions = isDeepInterviewQuestion || isDeepInterviewAskQuestion(q.question);
 				const optionLabels = shouldNumberOptions ? numberOptionLabels(rawOptionLabels) : rawOptionLabels;
 				const initialSelection =
 					shouldNumberOptions && options?.previous
@@ -630,7 +701,7 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 					signal,
 					initialSelection,
 					navigation: options?.navigation,
-					scrollTitleRows: deepInterviewPrompt === null ? undefined : DEEP_INTERVIEW_SELECTOR_SCROLL_TITLE_ROWS,
+					scrollTitleRows: isDeepInterviewQuestion ? DEEP_INTERVIEW_SELECTOR_SCROLL_TITLE_ROWS : undefined,
 					otherOptionLabel: shouldNumberOptions
 						? formatNumberedOptionLabel(OTHER_OPTION, optionLabels.length)
 						: undefined,

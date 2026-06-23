@@ -238,8 +238,9 @@ import {
 	type DiscoverableTool,
 	type DiscoverableToolSearchIndex,
 } from "../tool-discovery/tool-index";
-import type { ToolSession } from "../tools";
+import type { AskAnswerSource, ToolSession } from "../tools";
 import { AskTool } from "../tools/ask";
+import { getAskAnswerSource as getAskAnswerSourceFromRegistry } from "../tools/ask-answer-registry";
 import { assertEditableFile } from "../tools/auto-generated-guard";
 import { releaseTabsForOwner } from "../tools/browser/tab-supervisor";
 import type { CheckpointState } from "../tools/checkpoint";
@@ -313,6 +314,7 @@ export type AgentSessionEvent =
 	| { type: "todo_reminder"; todos: TodoItem[]; attempt: number; maxAttempts: number }
 	| { type: "todo_auto_clear" }
 	| { type: "irc_message"; message: CustomMessage }
+	| { type: "subagent_steer_message"; message: CustomMessage }
 	| { type: "notice"; level: "info" | "warning" | "error"; message: string; source?: string }
 	| { type: "thinking_level_changed"; thinkingLevel: ThinkingLevel | undefined }
 	| { type: "goal_updated"; goal: Goal | null; state?: GoalModeState };
@@ -4385,6 +4387,10 @@ export class AgentSession {
 		return this.#workflowGateEmitter;
 	}
 
+	getAskAnswerSource(): AskAnswerSource | undefined {
+		return getAskAnswerSourceFromRegistry(this.sessionId);
+	}
+
 	setWorkflowGateEmitter(emitter: WorkflowGateEmitter | undefined): void {
 		this.#workflowGateEmitter = emitter;
 		if (emitter) {
@@ -5453,6 +5459,16 @@ export class AgentSession {
 			return;
 		}
 
+		// No explicit delivery mode: only a live stream makes prompt() throw
+		// AgentBusyError, so queue the message as steering while streaming.
+		// Compaction is intentionally NOT diverted here: prompt() handles an
+		// in-flight compaction internally, and #queueSteer would otherwise park
+		// the message in the steering queue with no turn to consume it.
+		if (this.isStreaming) {
+			await this.#queueSteer(text, images);
+			return;
+		}
+
 		// Use prompt() with expandPromptTemplates: false to skip command handling and template expansion
 		await this.prompt(text, {
 			expandPromptTemplates: false,
@@ -5857,11 +5873,45 @@ export class AgentSession {
 	}
 
 	/**
+	 * The model selector ("provider/id") that resume restores as the session
+	 * default — the latest session-log `model_change` with role="default".
+	 * Model-profile activation snapshots this before mutating the session so a
+	 * failed-activation rollback can restore the pre-activation resume default
+	 * instead of promoting a transient runtime model to the resume default.
+	 */
+	getSessionDefaultModelSelector(): string | undefined {
+		return this.sessionManager.buildSessionContext().models.default;
+	}
+
+	/**
+	 * Re-assert the session resume default ("provider/id") in the session log
+	 * WITHOUT touching the live runtime model. Appends a `model_change` with
+	 * role="default"; never writes to global settings (apply-for-this-session
+	 * semantics). Used by model-profile activation rollback to neutralize the
+	 * profile main model the failed activation already recorded as the default.
+	 */
+	recordResumeDefaultModel(selector: string): void {
+		this.sessionManager.appendModelChange(selector, "default");
+	}
+
+	/**
 	 * Set model temporarily (for this session only).
 	 * Validates API key, saves to session log but NOT to settings.
+	 *
+	 * The change is recorded in the session log as `role: "temporary"` by
+	 * default, which means it is NOT restored as the session default on resume —
+	 * transient retry/fallback/context-promotion/plan switches must not clobber
+	 * the user's explicit pick (issue #849). Model-profile activation passes
+	 * `persistAsSessionDefault: true` so the profile's main model becomes the
+	 * session default and survives resume, while still not being written to
+	 * global settings (new sessions keep the global default).
 	 * @throws Error if no API key available for the model
 	 */
-	async setModelTemporary(model: Model, thinkingLevel?: ThinkingLevel): Promise<void> {
+	async setModelTemporary(
+		model: Model,
+		thinkingLevel?: ThinkingLevel,
+		options?: { persistAsSessionDefault?: boolean },
+	): Promise<void> {
 		const previousEditMode = this.#resolveActiveEditMode();
 		const apiKey = await this.#modelRegistry.getApiKey(model, this.sessionId);
 		if (!apiKey) {
@@ -5870,7 +5920,10 @@ export class AgentSession {
 
 		this.#clearActiveRetryFallback();
 		this.#setModelWithProviderSessionReset(model);
-		this.sessionManager.appendModelChange(`${model.provider}/${model.id}`, "temporary");
+		this.sessionManager.appendModelChange(
+			`${model.provider}/${model.id}`,
+			options?.persistAsSessionDefault ? "default" : "temporary",
+		);
 		this.settings.getStorage()?.recordModelUsage(`${model.provider}/${model.id}`);
 
 		// Apply explicit thinking level if given; otherwise prefer the model's
@@ -9087,6 +9140,63 @@ export class AgentSession {
 	 */
 	emitIrcRelayObservation(record: CustomMessage): void {
 		void this.#emitSessionEvent({ type: "irc_message", message: record });
+	}
+
+	emitSubagentSteerObservation(args: { from: string; to: string; body: string; timestamp?: number }): void {
+		const timestamp = args.timestamp ?? Date.now();
+		const observationId = crypto.randomUUID();
+		const message: CustomMessage = {
+			role: "custom",
+			customType: "subagent:steer",
+			content: `[Steer \`${args.from}\` ⇨ \`${args.to}\` (queued)]\n\n${args.body}`,
+			display: true,
+			details: { observationId, from: args.from, to: args.to, body: args.body, state: "queued" },
+			attribution: "agent",
+			timestamp,
+		};
+		void this.#emitSessionEvent({ type: "subagent_steer_message", message });
+		this.#forwardSubagentSteerRelayToMain({
+			from: args.from,
+			to: args.to,
+			body: args.body,
+			observationId,
+			timestamp,
+		});
+	}
+
+	#forwardSubagentSteerRelayToMain(args: {
+		from: string;
+		to: string;
+		body: string;
+		observationId: string;
+		timestamp: number;
+	}): void {
+		const registry = this.#agentRegistry;
+		if (!registry) return;
+		if (this.#agentId === MAIN_AGENT_ID) return;
+		const mainRef = registry.get(MAIN_AGENT_ID);
+		const mainSession = mainRef?.session;
+		if (!mainSession || mainSession === this) return;
+		const record: CustomMessage = {
+			role: "custom",
+			customType: "subagent:steer:relay",
+			content: `[Steer \`${args.from}\` ⇨ \`${args.to}\` (queued)]\n\n${args.body}`,
+			display: true,
+			details: {
+				observationId: args.observationId,
+				from: args.from,
+				to: args.to,
+				body: args.body,
+				state: "queued",
+			},
+			attribution: "agent",
+			timestamp: args.timestamp,
+		};
+		mainSession.emitSubagentSteerRelayObservation(record);
+	}
+
+	emitSubagentSteerRelayObservation(record: CustomMessage): void {
+		void this.#emitSessionEvent({ type: "subagent_steer_message", message: record });
 	}
 
 	/**

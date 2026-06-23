@@ -81,6 +81,12 @@ import type { HindsightSessionState } from "./hindsight/state";
 import { LocalProtocolHandler, type LocalProtocolOptions } from "./internal-urls";
 import { LSP_STARTUP_EVENT_CHANNEL, type LspStartupEvent } from "./lsp/startup-events";
 import { resolveMemoryBackend } from "./memory-backend";
+import { createNotificationsExtension } from "./notifications";
+import {
+	getNotificationConfig,
+	type NotificationConfig,
+	shouldRegisterNotificationsExtension,
+} from "./notifications/config";
 import asyncResultTemplate from "./prompts/tools/async-result.md" with { type: "text" };
 import { AgentRegistry, MAIN_AGENT_ID } from "./registry/agent-registry";
 import { MCPManager } from "./runtime-mcp";
@@ -1240,6 +1246,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			getPlanModeState: () => session?.getPlanModeState(),
 			getGoalModeState: () => session?.getGoalModeState(),
 			getWorkflowGateEmitter: () => session?.getWorkflowGateEmitter(),
+			getAskAnswerSource: () => session?.getAskAnswerSource(),
 			getGoalRuntime: () => session?.goalRuntime,
 			getClientBridge: () => session?.clientBridge,
 			getCompactContext: () => session.formatCompactContext(),
@@ -1387,6 +1394,15 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		const inlineExtensions: ExtensionFactory[] = [...(options.extensions ?? [])];
 		if (customTools.length > 0) {
 			inlineExtensions.push(createCustomToolsExtension(customTools));
+		}
+		let notificationCfg: NotificationConfig | undefined;
+		try {
+			notificationCfg = getNotificationConfig(Settings.instance);
+		} catch {
+			notificationCfg = undefined;
+		}
+		if (shouldRegisterNotificationsExtension({ env: process.env, cfg: notificationCfg })) {
+			inlineExtensions.push(createNotificationsExtension);
 		}
 
 		// Extension/module discovery is quarantined; retain only the private

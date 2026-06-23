@@ -52,6 +52,93 @@ export declare class MacOSPowerAssertion {
   stop(): void
 }
 
+/** In-process notification server handle exposed to TypeScript. */
+export declare class NotificationServer {
+  /**
+   * Create a server for `session_id` authenticated by `token`.
+   *
+   * `state_root` (when given) is where the endpoint discovery file is written
+   * (e.g. `<repo>/.skc/state`). `resolver_available` defaults to `true`.
+   */
+  constructor(sessionId: string, token: string, stateRoot?: string | undefined | null, resolverAvailable?: boolean | undefined | null)
+  /** Register the reply callback. Must be called before [`Self::start`]. */
+  onReply(callback: (err: null | Error, reply: ReplyEvent) => void): void
+  /**
+   * Register the inbound-message callback (free-text injections and in-thread
+   * config commands). Must be called before [`Self::start`].
+   */
+  onInbound(callback: (err: null | Error, msg: InboundEvent) => void): void
+  /**
+   * Bind the loopback endpoint and start serving. Resolves with the bound
+   * endpoint info once the socket is bound.
+   *
+   * # Errors
+   * Fails if already started or the loopback socket cannot be bound.
+   */
+  start(): Promise<NotificationEndpoint>
+  /**
+   * Broadcast an `action_needed` ask. `needed_json` is a JSON `ActionNeeded`.
+   *
+   * `repliable` should be `true` only in unattended/RPC mode.
+   *
+   * # Errors
+   * Fails if not started or `needed_json` is invalid.
+   */
+  registerAsk(neededJson: string, repliable: boolean): void
+  /**
+   * Broadcast an ephemeral `action_needed` idle ping. `needed_json` is JSON
+   * `ActionNeeded`.
+   *
+   * # Errors
+   * Fails if not started or `needed_json` is invalid.
+   */
+  noteIdle(neededJson: string): void
+  /**
+   * Broadcast an ephemeral threaded-session frame. `frame_json` is a JSON
+   * `ServerMessage` (e.g. `identity_header`, `context_update`, `turn_stream`,
+   * `image_attachment`, `config_update`, `hello`). Not buffered for replay.
+   *
+   * # Errors
+   * Fails if not started or `frame_json` is not a valid `ServerMessage`.
+   */
+  pushFrame(frameJson: string): void
+  /**
+   * Resolve an action locally (the CLI/TUI answered). `answer_json` is an
+   * optional JSON `ReplyAnswer`.
+   *
+   * # Errors
+   * Fails if not started or `answer_json` is invalid.
+   */
+  resolveLocal(id: string, answerJson?: string | undefined | null): void
+  /**
+   * Resolve an action answered by a remote client, after TS resolved the real
+   * gate. `answer_json` is an optional JSON `ReplyAnswer`.
+   *
+   * # Errors
+   * Fails if not started or `answer_json` is invalid.
+   */
+  resolveClient(id: string, answerJson?: string | undefined | null, idempotencyKey?: string | undefined | null): void
+  /**
+   * Reject a forwarded reply after TS failed to resolve its gate. `reason` is
+   * one of the protocol reject reasons (default `invalid_answer`).
+   *
+   * # Errors
+   * Fails if not started.
+   */
+  reject(id: string, reason?: string | undefined | null): void
+  /**
+   * Update whether the unattended gate resolver is currently available.
+   *
+   * # Errors
+   * Fails if not started.
+   */
+  setResolverAvailable(available: boolean): void
+  /** Number of currently connected clients. */
+  clientCount(): number
+  /** Stop the server (idempotent) and remove the endpoint discovery file. */
+  stop(): void
+}
+
 /** Stable process reference. */
 export declare class Process {
   /** Open a stable process reference from a PID. */
@@ -149,7 +236,7 @@ export declare class Shell {
  * `packages/natives/native/index.js` (which derives the name from
  * `package.json#version`).
  */
-export declare function __piNativesV0_2_7(): void
+export declare function __piNativesV0_3_0(): void
 
 /**
  * Apply conservative pre-execution rewrites to a bash command.
@@ -824,6 +911,27 @@ export interface HtmlToMarkdownOptions {
 }
 
 /**
+ * An inbound message forwarded to the TypeScript host: a free-text injection
+ * (`user_message`) or an in-thread config command (`config_command`).
+ */
+export interface InboundEvent {
+  /** Either `"user_message"` or `"config_command"`. */
+  kind: string
+  /** The session this inbound belongs to. */
+  sessionId: string
+  /** Free-text body (`user_message` only). */
+  text?: string
+  /** Telegram update id for dedupe (`user_message` only). */
+  updateId?: number
+  /** Originating thread/topic id (`user_message` only). */
+  threadId?: string
+  /** Requested verbosity `"lean"|"verbose"` (`config_command` only). */
+  verbosity?: string
+  /** Requested redaction state (`config_command` only). */
+  redact?: boolean
+}
+
+/**
  * Installs a Rust panic hook only when `SKC_NATIVE_CRASH_DIAGNOSTICS` is set.
  *
  * This is an opt-in structured panic report, not a minidump/signal handler.
@@ -1142,6 +1250,18 @@ export interface MinimizerResult {
 
 export declare function nativeBuildInfo(): BuildInfo
 
+/** Bound endpoint info returned from [`NotificationServer::start`]. */
+export interface NotificationEndpoint {
+  /** Bind host (loopback). */
+  host: string
+  /** Bound port. */
+  port: number
+  /** `ws://host:port` URL. */
+  url: string
+  /** The session id this endpoint serves. */
+  sessionId: string
+}
+
 /** Parsed Kitty keyboard protocol sequence result for a Kitty input sequence. */
 export interface ParsedKittyResult {
   /** Primary codepoint associated with the key. */
@@ -1243,6 +1363,16 @@ export interface PtyStartOptions {
  * Returns an error if clipboard access fails or image encoding fails.
  */
 export declare function readImageFromClipboard(): Promise<ClipboardImage | undefined | null>
+
+/** A client reply forwarded to the TypeScript host for gate resolution. */
+export interface ReplyEvent {
+  /** The action id being answered (the real broker `gate_id` for asks). */
+  id: string
+  /** JSON-encoded `ReplyAnswer` (number, string, or `{selected,custom}`). */
+  answerJson: string
+  /** Optional idempotency key supplied by the client. */
+  idempotencyKey?: string
+}
 
 /**
  * Search content for a pattern (one-shot, compiles pattern each time).

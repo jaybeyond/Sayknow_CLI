@@ -10486,6 +10486,31 @@
 				"maxLevel": "high"
 			}
 		},
+		"gemini-3.5-flash": {
+			"id": "gemini-3.5-flash",
+			"name": "Gemini 3.5 Flash",
+			"api": "google-gemini-cli",
+			"provider": "google-gemini-cli",
+			"baseUrl": "https://cloudcode-pa.googleapis.com",
+			"reasoning": true,
+			"input": [
+				"text",
+				"image"
+			],
+			"cost": {
+				"input": 1.5,
+				"output": 9,
+				"cacheRead": 0.15,
+				"cacheWrite": 0
+			},
+			"contextWindow": 1048576,
+			"maxTokens": 65536,
+			"thinking": {
+				"mode": "google-level",
+				"minLevel": "minimal",
+				"maxLevel": "high"
+			}
+		},
 		"gemini-3-flash-preview": {
 			"id": "gemini-3-flash-preview",
 			"name": "Gemini 3 Flash Preview",
@@ -37453,7 +37478,7 @@
 				"cacheRead": 0.12,
 				"cacheWrite": 0
 			},
-			"contextWindow": 1000000,
+			"contextWindow": 512000,
 			"maxTokens": 128000,
 			"thinking": {
 				"mode": "budget",
@@ -37673,7 +37698,7 @@
 				"cacheRead": 0.12,
 				"cacheWrite": 0
 			},
-			"contextWindow": 1000000,
+			"contextWindow": 512000,
 			"maxTokens": 128000,
 			"thinking": {
 				"mode": "budget",
@@ -37965,7 +37990,7 @@
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
-			"contextWindow": 1000000,
+			"contextWindow": 512000,
 			"maxTokens": 128000,
 			"compat": {
 				"supportsStore": false,
@@ -38300,7 +38325,7 @@
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
-			"contextWindow": 1000000,
+			"contextWindow": 512000,
 			"maxTokens": 128000,
 			"compat": {
 				"supportsStore": false,
@@ -56285,7 +56310,7 @@
 				"cacheRead": 0.5,
 				"cacheWrite": 0
 			},
-			"contextWindow": 400000,
+			"contextWindow": 272000,
 			"maxTokens": 128000,
 			"preferWebsockets": true,
 			"priority": 9,
@@ -68507,7 +68532,7 @@
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
-			"contextWindow": 1000000,
+			"contextWindow": 512000,
 			"maxTokens": 128000,
 			"compat": {
 				"supportsUsageInStreaming": false
@@ -75665,6 +75690,32 @@
 				"cacheWrite": 0
 			},
 			"contextWindow": 200000,
+			"maxTokens": 131072,
+			"thinking": {
+				"mode": "budget",
+				"minLevel": "minimal",
+				"maxLevel": "xhigh"
+			}
+		}
+	},
+	"glm-zcode": {
+		"glm-5.2": {
+			"id": "glm-5.2",
+			"name": "GLM-5.2 (ZCode)",
+			"api": "anthropic-messages",
+			"provider": "glm-zcode",
+			"baseUrl": "https://api.z.ai/api/anthropic",
+			"reasoning": true,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 1000000,
 			"maxTokens": 131072,
 			"thinking": {
 				"mode": "budget",

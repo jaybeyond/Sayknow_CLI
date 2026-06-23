@@ -47,6 +47,7 @@ import {
 import type { AgentSession } from "./session/agent-session";
 import type { AuthStorage } from "./session/auth-storage";
 import { resolveResumableSession, type SessionInfo, SessionManager } from "./session/session-manager";
+import { runStartupCredentialAutoImportIfNeeded } from "./setup/credential-auto-import";
 import { formatModelOnboardingGuidance } from "./setup/model-onboarding-guidance";
 import { executeBuiltinSlashCommand } from "./slash-commands/builtin-registry";
 import { resolvePromptInput } from "./system-prompt";
@@ -856,6 +857,14 @@ export async function runRootCommand(
 		settingsInstance.get("theme.light"),
 	);
 
+	const credentialAutoImportNotice = isInteractive
+		? await logger.time("credentialAutoImport", runStartupCredentialAutoImportIfNeeded, {
+				authStorage,
+				modelRegistry,
+				agentDir: settingsInstance.getAgentDir(),
+			})
+		: undefined;
+
 	let scopedModels: ScopedModel[] = [];
 	const modelPatterns = parsedArgs.models ?? settingsInstance.get("enabledModels");
 	const modelMatchPreferences = {
@@ -893,6 +902,24 @@ export async function runRootCommand(
 			return;
 		}
 		sessionManager = await SessionManager.open(selectedPath);
+	}
+
+	// Restore the resumed session's working directory so the HUD branch, the
+	// project path, and the agent's tools all match where the session was
+	// created. A `--worktree` session lives in a linked worktree whose path
+	// differs from where `--continue`/`--resume` is invoked, which would
+	// otherwise leave the HUD pinned to the main checkout's branch.
+	if (sessionManager && !parsedArgs.cwd) {
+		const sessionCwd = sessionManager.getCwd();
+		if (sessionCwd && normalizePathForComparison(sessionCwd) !== normalizePathForComparison(getProjectDir())) {
+			try {
+				if ((await fs.stat(sessionCwd)).isDirectory()) {
+					setProjectDir(sessionCwd);
+				}
+			} catch {
+				// Session cwd no longer exists (e.g. worktree removed); keep current dir.
+			}
+		}
 	}
 
 	const { options: sessionOptions } = await logger.time(
@@ -975,6 +1002,9 @@ export async function runRootCommand(
 		const modelRegistryError = modelRegistry.getError();
 		if (modelRegistryError) {
 			notifs.push({ kind: "error", message: modelRegistryError.message });
+		}
+		if (credentialAutoImportNotice) {
+			notifs.push({ kind: "info", message: credentialAutoImportNotice });
 		}
 
 		if (isInteractive && !session.model && !modelFallbackMessage) {

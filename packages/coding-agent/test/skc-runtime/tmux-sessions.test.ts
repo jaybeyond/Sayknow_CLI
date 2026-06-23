@@ -49,7 +49,7 @@ describe("SKC tmux session management", () => {
 				"tmux-test",
 				"list-sessions",
 				"-F",
-				"#{session_name}\t#{session_windows}\t#{session_attached}\t#{session_created}\t#{@skc-profile}\t#{session_key_table}\t#{session_panes}\t#{pane_pid}\t#{@skc-branch}\t#{@skc-branch-slug}\t#{@skc-project}\t#{@skc-session-id}\t#{@skc-session-state-file}",
+				"#{session_name}\t#{session_windows}\t#{session_attached}\t#{session_created}\t#{@skc-profile}\t#{session_key_table}\t#{session_panes}\t#{pane_pid}\t#{@skc-branch}\t#{@skc-branch-slug}\t#{@skc-project}\t#{@skc-session-id}\t#{@skc-session-state-file}\t#{@skc-version}",
 			],
 			expect.any(Object),
 		);

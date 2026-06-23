@@ -18,6 +18,7 @@ If you rely on a specific MCP server, run it through one of the supported integr
 | Editor/ACP client owns MCP servers and wants SKC as the agent backend | [ACP mode](./external-control-readiness.md#acp-mode) via `skc --mode acp` or `skc acp` | The ACP client supplies and owns MCP servers. SKC keeps those client-owned MCP tools isolated from standalone on-disk discovery. |
 | Host application already manages MCP servers and policies | [RPC host tools](./rpc.md#host-tool-sub-protocol) via `skc --mode rpc` | Convert the selected MCP capabilities into host-owned RPC tools. The host executes the MCP call and returns `host_tool_result`. |
 | OpenClaw/Hermes-style host wants to map its own MCP/skills into SKC | [OpenClaw / Hermes RPC integration notes](./openclaw-hermes-rpc-integration.md) | Treat MCP as a host implementation detail and expose only policy-approved capabilities as RPC host tools. |
+| Codex / Claude Code want a one-step install to delegate planning/execution to SKC | [Canonical sayknow-cli plugin](./hermes-mcp-bridge.md) under `plugins/` via `skc setup claude` / `skc setup codex` | Installs the Coordinator MCP server plus `skc_delegate_plan/execute/team` commands. Fail-closed: workdir-scoped roots, mutations off until opt-in. Install with `codex plugin marketplace add ./plugins` (verified on Codex CLI 0.139.0) or `/plugin marketplace add ./plugins` for Claude Code. |
 
 ## What standalone SKC does not do
 

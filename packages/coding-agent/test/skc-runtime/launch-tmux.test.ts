@@ -13,6 +13,7 @@ import {
 	type TmuxSpawnOptions,
 } from "@sayknow-cli/coding-agent/skc-runtime/launch-tmux";
 import { sessionRuntimeDir } from "@sayknow-cli/coding-agent/skc-runtime/session-layout";
+import { VERSION } from "@sayknow-cli/utils/dirs";
 
 function args(overrides: Partial<Args> = {}): Args {
 	return {
@@ -341,6 +342,54 @@ describe("default SKC tmux launch", () => {
 		expect(plan?.attachSessionName).toBe("custom-skc");
 		expect(plan?.newSessionArgs.slice(0, 6)).toEqual(["new-session", "-d", "-s", "custom-skc", "-c", "/repo"]);
 	});
+	it("does not auto-reuse scoped sessions from another SKC version", () => {
+		spyOn(Bun, "spawnSync").mockReturnValue(
+			spawnResult(
+				0,
+				"old-skc\t1\t0\t1770000000\t1\troot\t1\t12345\tfeature/demo\tfeature-demo\t/repo\told-session\t/state\t0.0.0",
+			),
+		);
+		const plan = buildDefaultTmuxLaunchPlan({
+			parsed: args({ messages: ["hello world"], tmux: true }),
+			rawArgs: ["--tmux", "hello world"],
+			cwd: "/repo",
+			env: {},
+			argv: ["bun", "packages/coding-agent/src/cli.ts"],
+			execPath: "/bin/bun",
+			platform: "darwin",
+			tty: interactiveTty,
+			tmuxAvailable: true,
+			currentBranch: "feature/demo",
+			project: "/repo",
+		});
+
+		expect(plan?.attachSessionName).toBeUndefined();
+		expect(plan?.newSessionArgs.slice(0, 2)).toEqual(["new-session", "-d"]);
+	});
+
+	it("auto-reuses scoped sessions from the current SKC version", () => {
+		spyOn(Bun, "spawnSync").mockReturnValue(
+			spawnResult(
+				0,
+				`current-skc\t1\t0\t1770000000\t1\troot\t1\t12345\tfeature/demo\tfeature-demo\t/repo\tcurrent-session\t/state\t${VERSION}`,
+			),
+		);
+		const plan = buildDefaultTmuxLaunchPlan({
+			parsed: args({ messages: ["hello world"], tmux: true }),
+			rawArgs: ["--tmux", "hello world"],
+			cwd: "/repo",
+			env: {},
+			argv: ["bun", "packages/coding-agent/src/cli.ts"],
+			execPath: "/bin/bun",
+			platform: "darwin",
+			tty: interactiveTty,
+			tmuxAvailable: true,
+			currentBranch: "feature/demo",
+			project: "/repo",
+		});
+
+		expect(plan?.attachSessionName).toBe("current-skc");
+	});
 
 	it("does not reuse a same-branch session from another worktree path in the same project", () => {
 		const plan = buildDefaultTmuxLaunchPlan({
@@ -423,6 +472,7 @@ describe("default SKC tmux launch", () => {
 			{
 				sessionId: "session-123",
 				sessionStateFile: "/tmp/skc-state/session.json",
+				version: VERSION,
 			},
 		);
 		const args = commands.map(command => command.args);
@@ -435,6 +485,7 @@ describe("default SKC tmux launch", () => {
 			"@skc-session-state-file",
 			"/tmp/skc-state/session.json",
 		]);
+		expect(args).toContainEqual(["set-option", "-t", "skc-session:0", "@skc-version", VERSION]);
 	});
 
 	it("plans matching tmux marker tags and inner process marker env", () => {
@@ -476,6 +527,7 @@ describe("default SKC tmux launch", () => {
 			platform: "darwin",
 			tty: interactiveTty,
 			tmuxAvailable: true,
+			existingBranchSessionName: null,
 		});
 		expect(plan).toBeDefined();
 		if (!plan?.sessionStateFile) throw new Error("expected tmux plan with state file");
@@ -864,6 +916,7 @@ describe("default SKC tmux launch", () => {
 		// The SKC-launched tmux/profile path must not bypass mouse scrolling on WSL.
 		expect(calls.some(call => call.command === "tmux")).toBe(true);
 		expect(calls.map(call => call.args)).toContainEqual(["set-option", "-t", sessionName, "mouse", "on"]);
+		expect(calls.map(call => call.args)).toContainEqual(["set-option", "-t", sessionName, "@skc-version", VERSION]);
 		// All profile mutations stay scoped to the SKC session, never global tmux state.
 		expect(calls.flatMap(call => call.args)).not.toContain("-g");
 	});
@@ -893,5 +946,6 @@ describe("default SKC tmux launch", () => {
 		const sessionName = created?.args[3] ?? "";
 		expect(calls.flatMap(call => call.args)).not.toContain("mouse");
 		expect(calls.map(call => call.args)).toContainEqual(["set-option", "-t", sessionName, "@skc-profile", "1"]);
+		expect(calls.map(call => call.args)).toContainEqual(["set-option", "-t", sessionName, "@skc-version", VERSION]);
 	});
 });

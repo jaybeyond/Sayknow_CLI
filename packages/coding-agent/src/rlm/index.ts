@@ -240,8 +240,27 @@ async function writeRlmMetadata(input: {
 	}
 }
 
+/**
+ * RLM artifacts are scoped under a SKC session directory and resolving their
+ * paths is a *write* (it must pick a concrete session). When `skc rlm` runs
+ * standalone — no parent agent, no `SKC_SESSION_ID` in the environment — there is
+ * no session to resolve and `resolveSkcSessionForWrite` throws
+ * `missing_for_write`. Establish a dedicated SKC session id in that case and pin
+ * it into the environment so artifact-path resolution, the per-session activity
+ * marker, and the child agent's workflow state all share one writable session.
+ *
+ * Returns the resolved (existing or freshly generated) SKC session id.
+ */
+export function ensureRlmSkcSessionId(): string {
+	const existing = resolveSessionIdFromSources({ envSessionId: process.env.SKC_SESSION_ID })?.skcSessionId;
+	if (existing) return existing;
+	const generated = `rlm-${generateRlmSessionId()}`;
+	process.env.SKC_SESSION_ID = generated;
+	return generated;
+}
 export async function runRlmCommand(argv: string[]): Promise<void> {
 	const cwd = getProjectDir();
+	ensureRlmSkcSessionId();
 	const { dataPath, resumeSessionId, minSuccessfulRuns, rest } = extractRlmFlags(argv);
 	const dataContext = await loadRlmDataContext(cwd, dataPath);
 

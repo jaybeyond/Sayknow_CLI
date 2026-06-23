@@ -190,10 +190,18 @@ describe("default SKC definitions", () => {
 		});
 	});
 
-	it("exposes only default plus four SKC role agents as model assignment targets", () => {
-		expect(SKC_MODEL_ASSIGNMENT_TARGET_IDS).toEqual(["default", "executor", "architect", "planner", "critic"]);
+	it("exposes default, vision, and four SKC role agents as model assignment targets", () => {
+		expect(SKC_MODEL_ASSIGNMENT_TARGET_IDS).toEqual([
+			"default",
+			"vision",
+			"executor",
+			"architect",
+			"planner",
+			"critic",
+		]);
 		expect(SKC_MODEL_ASSIGNMENT_TARGET_IDS.map(id => SKC_MODEL_ASSIGNMENT_TARGETS[id].tag)).toEqual([
 			"DEFAULT",
+			"VISION",
 			"EXECUTOR",
 			"ARCHITECT",
 			"PLANNER",

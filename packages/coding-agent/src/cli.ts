@@ -35,6 +35,8 @@ const commands: CommandEntry[] = [
 	{ name: "gc", load: () => import("./commands/gc").then(m => m.default) },
 	{ name: "ralplan", load: () => import("./commands/ralplan").then(m => m.default) },
 	{ name: "config", load: () => import("./commands/config").then(m => m.default) },
+	{ name: "notify", load: () => import("./commands/notify").then(m => m.default) },
+	{ name: "daemon", load: () => import("./commands/daemon").then(m => m.default) },
 	{ name: "web-search", aliases: ["q"], load: () => import("./commands/web-search").then(m => m.default) },
 	{ name: "mcp-serve", load: () => import("./commands/mcp-serve").then(m => m.default) },
 	{
@@ -177,9 +179,7 @@ async function runSmokeTest(): Promise<void> {
 	// the COMPILED single binary (dev runs only load the on-disk .node). Loading the
 	// natives module triggers loadNative()/embedded extraction; calling each new
 	// export confirms the symbols are present in the shipped binary.
-	const { h06FormatHashLines, h02ScoreSequenceFuzzy, h01FindBestFuzzyMatch } = await import(
-		"../../natives/native/index.js"
-	);
+	const { h06FormatHashLines, h02ScoreSequenceFuzzy, h01FindBestFuzzyMatch } = await import("@sayknow-cli/natives");
 	const hashed = h06FormatHashLines("a\nb", 1);
 	if (hashed.split("\n").length !== 2) {
 		throw new Error(`smoke-test: h06FormatHashLines returned unexpected output: ${JSON.stringify(hashed)}`);

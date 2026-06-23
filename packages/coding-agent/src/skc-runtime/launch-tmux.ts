@@ -1,6 +1,7 @@
 import { Buffer } from "node:buffer";
 import * as path from "node:path";
 import { safeStderrWrite } from "@sayknow-cli/utils";
+import { VERSION } from "@sayknow-cli/utils/dirs";
 import type { Args } from "../cli/args";
 import { tmuxRuntimeSessionPath } from "./session-layout";
 import { SKC_COORDINATOR_SESSION_ID_ENV, SKC_COORDINATOR_SESSION_STATE_FILE_ENV } from "./session-state-sidecar";
@@ -16,7 +17,7 @@ import {
 	SKC_TMUX_SESSION_PREFIX,
 	type SkcTmuxProfileCommand,
 } from "./tmux-common";
-import { findSkcTmuxSessionByName, findSkcTmuxSessionByScope } from "./tmux-sessions";
+import { findSkcTmuxSessionByName, findSkcTmuxSessionByScope, type SkcTmuxSessionStatus } from "./tmux-sessions";
 
 export {
 	buildSkcTmuxProfileCommands,
@@ -88,6 +89,9 @@ export interface TmuxLaunchPlan {
 function explicitTmuxSessionName(env: NodeJS.ProcessEnv): string | undefined {
 	return env.SKC_TMUX_SESSION?.trim() || undefined;
 }
+function hasCurrentSkcVersion(session: SkcTmuxSessionStatus | undefined): boolean {
+	return session?.version === VERSION;
+}
 
 function findExistingSessionForLaunch(context: {
 	env: NodeJS.ProcessEnv;
@@ -96,7 +100,8 @@ function findExistingSessionForLaunch(context: {
 }): string | undefined {
 	const explicit = explicitTmuxSessionName(context.env);
 	if (explicit) return findSkcTmuxSessionByName(explicit, context.env)?.name;
-	return findSkcTmuxSessionByScope(context.project, context.branch, context.env)?.name;
+	const scoped = findSkcTmuxSessionByScope(context.project, context.branch, context.env);
+	return hasCurrentSkcVersion(scoped) ? scoped?.name : undefined;
 }
 
 export interface SkcTmuxProfileResult {
@@ -116,6 +121,7 @@ export interface SkcTmuxProfileContext {
 	project?: string | null;
 	sessionId?: string | null;
 	sessionStateFile?: string | null;
+	version?: string | null;
 }
 
 interface CommandResolutionContext {
@@ -195,6 +201,7 @@ export function applySkcTmuxProfile(context: SkcTmuxProfileContext): SkcTmuxProf
 		project: context.project ?? null,
 		sessionId: context.sessionId ?? env[SKC_COORDINATOR_SESSION_ID_ENV] ?? null,
 		sessionStateFile: context.sessionStateFile ?? env[SKC_COORDINATOR_SESSION_STATE_FILE_ENV] ?? null,
+		version: context.version ?? null,
 	});
 	if (commands.length === 0) return { skipped: true, commands: [], failures: [] };
 	const spawnSync = context.spawnSync ?? defaultSpawnSync;
@@ -457,6 +464,7 @@ export function launchDefaultTmuxIfNeeded(context: TmuxLaunchContext): boolean {
 			project: plan.project,
 			sessionId: plan.sessionId ?? null,
 			sessionStateFile: plan.sessionStateFile ?? null,
+			version: VERSION,
 		});
 		const ownershipFailure = profile.failures.find(item => item.command.args.includes("@skc-profile"));
 		if (ownershipFailure) {

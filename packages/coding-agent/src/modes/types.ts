@@ -17,6 +17,7 @@ import type { MCPManager } from "../runtime-mcp";
 import type { AgentSession, AgentSessionEvent } from "../session/agent-session";
 import type { HistoryStorage } from "../session/history-storage";
 import type { SessionContext, SessionManager } from "../session/session-manager";
+import type { CredentialAutoImportOptions } from "../setup/credential-auto-import";
 import type { LspStartupServerInfo } from "../tools";
 import type { AssistantMessageComponent } from "./components/assistant-message";
 import type { BashExecutionComponent } from "./components/bash-execution";
@@ -247,7 +248,7 @@ export interface InteractiveModeContext {
 	showSessionSelector(): void;
 	handleResumeSession(sessionPath: string): Promise<void>;
 	handleSessionDeleteCommand(): Promise<void>;
-	showOAuthSelector(mode: "login" | "logout", providerId?: string): Promise<void>;
+	showOAuthSelector(mode: "login" | "logout", providerId?: string, options?: OAuthSelectorOptions): Promise<void>;
 	showHookConfirm(title: string, message: string): Promise<boolean>;
 	showDebugSelector(): void;
 	showSessionObserver(): void;
@@ -310,4 +311,9 @@ export interface InteractiveModeContext {
 	): Promise<T>;
 	showExtensionError(extensionPath: string, error: string): void;
 	showToolError(toolName: string, error: string): void;
+}
+export interface OAuthSelectorOptions {
+	allowExternalCredentialDiscovery?: boolean;
+	trigger?: "bare-login";
+	externalCredentialDiscover?: CredentialAutoImportOptions["discover"];
 }
