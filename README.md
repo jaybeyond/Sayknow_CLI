@@ -56,13 +56,21 @@ It is intentionally not a hidden plugin for Codex CLI, Claude Code, OpenCode, or
 
 ## Install
 
+SKC runs on the [Bun](https://bun.sh) runtime, so install Bun first, then SKC:
+
 ```sh
-npm install -g sayknow-cli       # or: bun install -g sayknow-cli
+# 1. Install Bun — the skc runtime (skip if you already have bun >= 1.3.14)
+curl -fsSL https://bun.sh/install | bash   # Windows: powershell -c "irm bun.sh/install.ps1|iex"
+
+# 2. Install skc, then verify
+bun install -g sayknow-cli       # or: npm install -g sayknow-cli
 skc --version
 ```
 
-That's it. The package bundles prebuilt native addons for macOS, Linux, and
-Windows, so there is **no Rust toolchain or build step** — just a one-line install.
+The package bundles prebuilt native addons for Apple-Silicon macOS, Linux
+(x64/arm64), and Windows (x64), so there is **no Rust toolchain or build step**.
+Bun is the one prerequisite: the `skc` launcher runs on Bun and will not start
+without it. (Intel-Mac users: no prebuilt binary yet — build from source below.)
 
 ### Upgrading
 
