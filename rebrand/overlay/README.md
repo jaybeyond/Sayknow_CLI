@@ -67,10 +67,10 @@ bun install -g sayknow-cli       # or: npm install -g sayknow-cli
 skc --version
 ```
 
-The package bundles prebuilt native addons for Apple-Silicon macOS, Linux
-(x64/arm64), and Windows (x64), so there is **no Rust toolchain or build step**.
-Bun is the one prerequisite: the `skc` launcher runs on Bun and will not start
-without it. (Intel-Mac users: no prebuilt binary yet — build from source below.)
+The package bundles prebuilt native addons for macOS (Intel + Apple Silicon),
+Linux (x64/arm64), and Windows (x64), so there is **no Rust toolchain or build
+step**. Bun is the one prerequisite: the `skc` launcher runs on Bun and will not
+start without it.
 
 ### Upgrading
 
