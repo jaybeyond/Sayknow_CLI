@@ -13,15 +13,15 @@
 
 use std::path::PathBuf;
 
-use skc_notifications::{
-	ActionNeeded, ClientMessage, ReplyAnswer, ServerConfig, ServerHandle, ServerMessage, Verbosity,
-};
 use napi::{
 	bindgen_prelude::*,
 	threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode},
 };
 use napi_derive::napi;
 use parking_lot::Mutex;
+use skc_notifications::{
+	ActionNeeded, ClientMessage, ReplyAnswer, ServerConfig, ServerHandle, ServerMessage, Verbosity,
+};
 
 /// Bound endpoint info returned from [`NotificationServer::start`].
 #[napi(object)]
