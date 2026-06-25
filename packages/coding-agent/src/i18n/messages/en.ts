@@ -37,6 +37,7 @@ export const en = {
 	"settings.tab.appearance": "Appearance",
 	"settings.tab.model": "Model",
 	"settings.tab.interaction": "Interaction",
+	"settings.tab.notifications": "Notifications",
 	"settings.tab.context": "Context",
 	"settings.tab.memory": "Memory",
 	"settings.tab.editing": "Editing",

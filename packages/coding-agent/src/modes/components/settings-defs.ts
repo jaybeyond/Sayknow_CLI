@@ -62,6 +62,7 @@ export interface SubmenuSettingDef extends BaseSettingDef {
 
 export interface TextInputSettingDef extends BaseSettingDef {
 	type: "text";
+	secret?: boolean;
 }
 
 export type SettingDef = BooleanSettingDef | EnumSettingDef | SubmenuSettingDef | TextInputSettingDef;
@@ -128,7 +129,7 @@ function pathToSettingDef(path: SettingPath): SettingDef | null {
 		if (options) {
 			return { ...base, type: "submenu", options };
 		}
-		return { ...base, type: "text" };
+		return { ...base, type: "text", secret: (ui as { secret?: boolean }).secret };
 	}
 
 	return null;

@@ -31,9 +31,9 @@ function createSelector(): SettingsSelectorComponent {
 	);
 }
 
-/** Switch the selector to the memory tab. SETTING_TABS puts memory at index 4 (after appearance/model/interaction/context). */
+/** Switch the selector to the memory tab. SETTING_TABS puts memory at index 5 (after appearance/model/interaction/notifications/context). */
 function focusMemoryTab(comp: SettingsSelectorComponent): void {
-	for (let i = 0; i < 4; i++) {
+	for (let i = 0; i < 5; i++) {
 		comp.handleInput("\x1b[C");
 	}
 }

@@ -183,6 +183,7 @@ export type SymbolKey =
 	| "tab.appearance"
 	| "tab.model"
 	| "tab.interaction"
+	| "tab.notifications"
 	| "tab.context"
 	| "tab.editing"
 	| "tab.tools"
@@ -347,6 +348,7 @@ const UNICODE_SYMBOLS: SymbolMap = {
 	"tab.appearance": "🎨",
 	"tab.model": "🤖",
 	"tab.interaction": "⌨",
+	"tab.notifications": "🔔",
 	"tab.context": "📋",
 	"tab.editing": "💻",
 	"tab.tools": "🔧",
@@ -606,6 +608,7 @@ const NERD_SYMBOLS: SymbolMap = {
 	"tab.appearance": "󰃣",
 	"tab.model": "󰚩",
 	"tab.interaction": "󰌌",
+	"tab.notifications": "󰂚",
 	"tab.context": "󰘸",
 	"tab.editing": "",
 	"tab.tools": "󰠭",
@@ -768,6 +771,7 @@ const ASCII_SYMBOLS: SymbolMap = {
 	"tab.appearance": "[A]",
 	"tab.model": "[M]",
 	"tab.interaction": "[I]",
+	"tab.notifications": "[N]",
 	"tab.context": "[X]",
 	"tab.editing": "[E]",
 	"tab.tools": "[T]",

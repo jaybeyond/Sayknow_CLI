@@ -28,6 +28,7 @@ export const ko: Partial<Record<MsgKey, string>> = {
 	"settings.tab.appearance": "외관",
 	"settings.tab.model": "모델",
 	"settings.tab.interaction": "상호작용",
+	"settings.tab.notifications": "알림",
 	"settings.tab.context": "컨텍스트",
 	"settings.tab.memory": "메모리",
 	"settings.tab.editing": "편집",
