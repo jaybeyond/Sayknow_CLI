@@ -236,7 +236,7 @@ export declare class Shell {
  * `packages/natives/native/index.js` (which derives the name from
  * `package.json#version`).
  */
-export declare function __piNativesV0_3_0(): void
+export declare function __piNativesV0_7_2(): void
 
 /**
  * Apply conservative pre-execution rewrites to a bash command.
@@ -929,6 +929,16 @@ export interface InboundEvent {
   verbosity?: string
   /** Requested redaction state (`config_command` only). */
   redact?: boolean
+  /** Inline image attachments forwarded with the message (`user_message` only). */
+  images?: Array<InboundImageEvent>
+}
+
+/** One inline image attachment forwarded with an inbound user message. */
+export interface InboundImageEvent {
+  /** Base64-encoded image bytes. */
+  data: string
+  /** MIME type when known (e.g. "image/jpeg"). */
+  mime?: string
 }
 
 /**

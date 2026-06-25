@@ -1,0 +1,200 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+import { type SettingPath, Settings } from "@sayknow-cli/coding-agent/config/settings";
+import type { ToolSession } from "@sayknow-cli/coding-agent/tools";
+import { tryInsaneFallback } from "@sayknow-cli/coding-agent/tools/fetch";
+import { ReadTool } from "@sayknow-cli/coding-agent/tools/read";
+import * as bridge from "@sayknow-cli/coding-agent/web/insane/bridge";
+import * as urlGuard from "@sayknow-cli/coding-agent/web/insane/url-guard";
+import * as scrapers from "@sayknow-cli/coding-agent/web/scrapers/types";
+import { Snowflake } from "@sayknow-cli/utils";
+
+const baseArgs = {
+	url: "https://example.com/x",
+	finalUrl: "https://example.com/x",
+	timeout: 20,
+	signal: undefined as AbortSignal | undefined,
+	fetchedAt: new Date().toISOString(),
+};
+
+afterEach(() => vi.restoreAllMocks());
+
+describe("tryInsaneFallback gating", () => {
+	it("returns null with no guard or bridge call when raw mode is set", async () => {
+		const guardSpy = vi.spyOn(urlGuard, "validatePublicHttpUrlForInsane");
+		const bridgeSpy = vi.spyOn(bridge, "tryInsaneFetch");
+		const notes: string[] = [];
+		const result = await tryInsaneFallback({
+			...baseArgs,
+			raw: true,
+			settings: Settings.isolated({ "web.insaneFallback": true }),
+			notes,
+		});
+		expect(result).toBeNull();
+		expect(notes).toHaveLength(0);
+		expect(guardSpy).not.toHaveBeenCalled();
+		expect(bridgeSpy).not.toHaveBeenCalled();
+	});
+
+	it("returns null with no guard or bridge call when the setting is off (default)", async () => {
+		const guardSpy = vi.spyOn(urlGuard, "validatePublicHttpUrlForInsane");
+		const bridgeSpy = vi.spyOn(bridge, "tryInsaneFetch");
+		const notes: string[] = [];
+		const result = await tryInsaneFallback({ ...baseArgs, raw: false, settings: Settings.isolated(), notes });
+		expect(result).toBeNull();
+		expect(notes).toHaveLength(0);
+		expect(guardSpy).not.toHaveBeenCalled();
+		expect(bridgeSpy).not.toHaveBeenCalled();
+	});
+
+	it("rejects a guard-blocked target without spawning the engine", async () => {
+		const guardSpy = vi
+			.spyOn(urlGuard, "validatePublicHttpUrlForInsane")
+			.mockResolvedValue({ ok: false, reason: "private, loopback, link-local, or reserved IP literal" });
+		const bridgeSpy = vi.spyOn(bridge, "tryInsaneFetch");
+		const notes: string[] = [];
+		const result = await tryInsaneFallback({
+			...baseArgs,
+			raw: false,
+			settings: Settings.isolated({ "web.insaneFallback": true }),
+			notes,
+		});
+		expect(result).toBeNull();
+		expect(guardSpy).toHaveBeenCalledTimes(1);
+		expect(bridgeSpy).not.toHaveBeenCalled();
+		expect(notes.some(n => n.startsWith("insane fallback blocked:"))).toBe(true);
+	});
+
+	it("returns a method:insane result on bridge success", async () => {
+		vi.spyOn(urlGuard, "validatePublicHttpUrlForInsane").mockResolvedValue({
+			ok: true,
+			url: new URL("https://example.com/x"),
+			addresses: ["93.184.216.34"],
+		});
+		vi.spyOn(bridge, "tryInsaneFetch").mockResolvedValue({
+			ok: true,
+			content: "recovered public content",
+			profileUsed: "chrome",
+			notes: [],
+		});
+		const notes: string[] = [];
+		const result = await tryInsaneFallback({
+			...baseArgs,
+			raw: false,
+			settings: Settings.isolated({ "web.insaneFallback": true }),
+			notes,
+		});
+		expect(result).not.toBeNull();
+		expect(result?.method).toBe("insane");
+		expect(result?.content).toContain("recovered public content");
+	});
+
+	it("returns null and appends notes on bridge failure", async () => {
+		vi.spyOn(urlGuard, "validatePublicHttpUrlForInsane").mockResolvedValue({
+			ok: true,
+			url: new URL("https://example.com/x"),
+			addresses: ["93.184.216.34"],
+		});
+		vi.spyOn(bridge, "tryInsaneFetch").mockResolvedValue({
+			ok: false,
+			reason: "auth-required",
+			notes: [bridge.INSANE_NOTES.authRequired],
+		});
+		const notes: string[] = [];
+		const result = await tryInsaneFallback({
+			...baseArgs,
+			raw: false,
+			settings: Settings.isolated({ "web.insaneFallback": true }),
+			notes,
+		});
+		expect(result).toBeNull();
+		expect(notes).toContain(bridge.INSANE_NOTES.authRequired);
+	});
+});
+
+describe("renderUrl hard-fail hook (integration via ReadTool)", () => {
+	let testDir: string;
+
+	beforeEach(() => {
+		testDir = path.join(os.tmpdir(), `fetch-insane-${Snowflake.next()}`);
+		fs.mkdirSync(testDir, { recursive: true });
+	});
+
+	afterEach(() => {
+		vi.restoreAllMocks();
+		fs.rmSync(testDir, { recursive: true, force: true });
+	});
+
+	const createSession = (overrides: Partial<Record<SettingPath, unknown>> = {}): ToolSession => {
+		const sessionFile = path.join(testDir, "session.jsonl");
+		const artifactsDir = sessionFile.slice(0, -6);
+		let nextArtifactId = 0;
+		return {
+			cwd: testDir,
+			hasUI: false,
+			getSessionFile: () => sessionFile,
+			getArtifactsDir: () => artifactsDir,
+			getSessionSpawns: () => null,
+			allocateOutputArtifact: async (toolType: string) => ({
+				id: String(nextArtifactId++),
+				path: path.join(artifactsDir, `${nextArtifactId}.${toolType}.log`),
+			}),
+			settings: Settings.isolated({ "fetch.enabled": true, ...overrides }),
+		} as unknown as ToolSession;
+	};
+
+	const mock403 = () =>
+		vi.spyOn(scrapers, "loadPage").mockResolvedValue({
+			ok: false,
+			status: 403,
+			contentType: "text/html",
+			finalUrl: "https://blocked.example/x",
+			content: "",
+		});
+
+	it("does not invoke the bridge when the setting is off", async () => {
+		mock403();
+		const bridgeSpy = vi.spyOn(bridge, "tryInsaneFetch");
+		const tool = new ReadTool(createSession());
+		const result = await tool.execute("r1", { path: "https://blocked.example/x" });
+		expect(result.details?.method).toBe("failed");
+		expect(bridgeSpy).not.toHaveBeenCalled();
+	});
+
+	it("escalates to the engine and returns method:insane on success when enabled", async () => {
+		mock403();
+		vi.spyOn(urlGuard, "validatePublicHttpUrlForInsane").mockResolvedValue({
+			ok: true,
+			url: new URL("https://blocked.example/x"),
+			addresses: ["93.184.216.34"],
+		});
+		vi.spyOn(bridge, "tryInsaneFetch").mockResolvedValue({
+			ok: true,
+			content: "content via insane route",
+			profileUsed: "safari",
+			notes: [],
+		});
+		const tool = new ReadTool(createSession({ "web.insaneFallback": true }));
+		const result = await tool.execute("r2", { path: "https://blocked.example/x" });
+		expect(result.details?.method).toBe("insane");
+	});
+
+	it("preserves method:failed with notes when the engine fails", async () => {
+		mock403();
+		vi.spyOn(urlGuard, "validatePublicHttpUrlForInsane").mockResolvedValue({
+			ok: true,
+			url: new URL("https://blocked.example/x"),
+			addresses: ["93.184.216.34"],
+		});
+		vi.spyOn(bridge, "tryInsaneFetch").mockResolvedValue({
+			ok: false,
+			reason: "no-curl-cffi",
+			notes: [bridge.INSANE_NOTES.noCurlCffi],
+		});
+		const tool = new ReadTool(createSession({ "web.insaneFallback": true }));
+		const result = await tool.execute("r3", { path: "https://blocked.example/x" });
+		expect(result.details?.method).toBe("failed");
+	});
+});

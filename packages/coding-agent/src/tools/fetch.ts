@@ -16,6 +16,8 @@ import { renderStatusLine } from "../tui";
 import { CachedOutputBlock } from "../tui/output-block";
 import { formatDimensionNote, resizeImage } from "../utils/image-resize";
 import { ensureTool } from "../utils/tools-manager";
+import { INSANE_NOTES, tryInsaneFetch } from "../web/insane/bridge";
+import { validatePublicHttpUrlForInsane } from "../web/insane/url-guard";
 import { extractWithParallel, findParallelApiKey, getParallelExtractContent } from "../web/parallel";
 import { specialHandlers } from "../web/scrapers";
 import type { RenderResult } from "../web/scrapers/types";
@@ -706,6 +708,55 @@ async function handleSpecialUrls(
 // =============================================================================
 
 /**
+ * Opt-in insane-search fallback for blocked / degraded public URL reads.
+ *
+ * Returns a finalized `method: "insane"` result on success, or null (so the
+ * caller continues with its normal degraded behavior). Fail-closed: no note,
+ * guard DNS, dependency probe, or subprocess when raw mode or the opt-in
+ * setting is off. The public-URL guard runs BEFORE any probe/spawn.
+ */
+export async function tryInsaneFallback(args: {
+	url: string;
+	finalUrl: string;
+	timeout: number;
+	raw: boolean;
+	settings: Settings;
+	signal: AbortSignal | undefined;
+	fetchedAt: string;
+	notes: string[];
+}): Promise<FetchRenderResult | null> {
+	if (args.raw) return null;
+	if (args.settings.get("web.insaneFallback") !== true) return null;
+
+	const target = args.finalUrl || args.url;
+	const guard = await validatePublicHttpUrlForInsane(target);
+	if (!guard.ok) {
+		args.notes.push(INSANE_NOTES.guardBlocked(guard.reason));
+		return null;
+	}
+
+	const result = await tryInsaneFetch(guard.url.toString(), {
+		timeoutMs: args.timeout * 1000,
+		signal: args.signal,
+	});
+	if (result.ok) {
+		const output = finalizeOutput(result.content);
+		return {
+			url: args.url,
+			finalUrl: target,
+			contentType: "text/markdown",
+			method: "insane",
+			content: output.content,
+			fetchedAt: args.fetchedAt,
+			truncated: output.truncated,
+			notes: [...args.notes, ...result.notes],
+		};
+	}
+	for (const note of result.notes) args.notes.push(note);
+	return null;
+}
+
+/**
  * Main render function implementing the full pipeline
  */
 async function renderUrl(
@@ -751,6 +802,19 @@ async function renderUrl(
 		throw new ToolAbortError();
 	}
 	if (!response.ok) {
+		const failureNote = response.status ? `Failed to fetch URL (HTTP ${response.status})` : "Failed to fetch URL";
+		notes.push(failureNote);
+		const insane = await tryInsaneFallback({
+			url,
+			finalUrl: response.finalUrl || url,
+			timeout,
+			raw,
+			settings,
+			signal,
+			fetchedAt,
+			notes,
+		});
+		if (insane) return insane;
 		return {
 			url,
 			finalUrl: response.finalUrl || url,
@@ -759,7 +823,7 @@ async function renderUrl(
 			content: "",
 			fetchedAt,
 			truncated: false,
-			notes: [response.status ? `Failed to fetch URL (HTTP ${response.status})` : "Failed to fetch URL"],
+			notes,
 		};
 	}
 
@@ -1062,6 +1126,8 @@ async function renderUrl(
 		const htmlResult = await renderHtmlToText(finalUrl, rawContent, timeout, settings, signal, storage);
 		if (!htmlResult.ok) {
 			notes.push("html rendering failed (lynx/html2text unavailable)");
+			const insane = await tryInsaneFallback({ url, finalUrl, timeout, raw, settings, signal, fetchedAt, notes });
+			if (insane) return insane;
 			const output = finalizeOutput(rawContent);
 			return {
 				url,
@@ -1122,6 +1188,17 @@ async function renderUrl(
 				};
 			}
 
+			const insaneLowQuality = await tryInsaneFallback({
+				url,
+				finalUrl,
+				timeout,
+				raw,
+				settings,
+				signal,
+				fetchedAt,
+				notes,
+			});
+			if (insaneLowQuality) return insaneLowQuality;
 			notes.push("Page appears to require JavaScript or is mostly navigation");
 		}
 

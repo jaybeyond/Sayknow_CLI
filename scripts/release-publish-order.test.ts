@@ -80,22 +80,24 @@ describe("release bump set equals publish set", () => {
 });
 
 describe("native release binary coverage", () => {
-	test("release workflow skips deprecated Intel macOS runners", async () => {
+	test("release workflow builds Intel macOS (darwin-x64) binaries again", async () => {
 		const workflow = await Bun.file(path.join(repoRoot, ".github/workflows/ci.yml")).text();
 
+		// The deprecated macos-13 runner pool stays retired; Intel coverage now
+		// rides the supported macos-15-intel runner.
 		expect(workflow).not.toContain("{ os: macos-13, platform: darwin, arch: x64 }");
-		expect(workflow).not.toContain("target_id: darwin-x64");
-		expect(workflow).not.toContain("binary_path: packages/coding-agent/binaries/skc-darwin-x64");
+		expect(workflow).toContain("{ os: macos-15-intel, platform: darwin, arch: x64 }");
+		expect(workflow).toContain("target_id: darwin-x64");
+		expect(workflow).toContain("binary_path: packages/coding-agent/binaries/skc-darwin-x64");
 		expect(workflow).toContain("{ os: macos-14, platform: darwin, arch: arm64 }");
 		expect(workflow).toContain("target_id: darwin-arm64");
 		expect(workflow).toContain("pattern: pi-natives-${{ matrix.platform }}-${{ matrix.arch }}*-h${{ needs.rust-hash.outputs.hash }}");
 	});
 
-	test("installer explains missing Intel macOS release assets", async () => {
+	test("installer explains missing release assets with fallback guidance", async () => {
 		const installer = await Bun.file(path.join(repoRoot, "scripts/install.sh")).text();
 
 		expect(installer).toContain("No prebuilt SKC binary was found for ${PLATFORM}-${ARCH} in ${LATEST}.");
-		expect(installer).toContain("Intel macOS standalone binaries are not built by current release CI");
 		expect(installer).toContain("Re-run this installer with --source");
 		expect(installer).toContain("Expected asset URL: $BINARY_URL");
 	});

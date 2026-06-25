@@ -80,6 +80,7 @@ class FakeBotApi {
 			this.updates = [];
 			return { ok: true, result };
 		}
+		if (method === "getFile") return { ok: true, result: { file_path: "docs/file_7.bin" } };
 		if (method === "createForumTopic") return { ok: true, result: { message_thread_id: this.calls.length } };
 		if (method === "sendMessage") return { ok: true, result: { message_id: this.calls.length } };
 		return { ok: true, result: true };
@@ -845,6 +846,198 @@ test("image_attachment frame uploads via sendPhoto into the session topic", asyn
 	expect(Number(photo!.body.message_thread_id)).toBeGreaterThan(0);
 });
 
+test("threaded mode off: frames fall back to the flat paired chat with a one-time notice", async () => {
+	const agentDir = tempAgentDir();
+	const bot = new FakeBotApi();
+	// Threaded Mode is off: createForumTopic yields no message_thread_id, so
+	// ensureTopic fails and the daemon must route flat instead of dropping.
+	bot.call = (async (method: string, body: any) => {
+		bot.calls.push({ method, body });
+		if (method === "createForumTopic") return { ok: true, result: {} };
+		if (method === "getChat") return { ok: true, result: { type: "private" } };
+		if (method === "sendMessage") return { ok: true, result: { message_id: bot.calls.length } };
+		return { ok: true, result: true };
+	}) as any;
+	const daemon = new TelegramNotificationDaemon({
+		settings: settings(agentDir),
+		ownerId: "owner",
+		botToken: "tok",
+		chatId: "42",
+		botApi: bot,
+	});
+	const session = { sessionId: "S", token: "tok", ws: { readyState: 1, send() {} }, pending: new Map() };
+
+	await daemon.handleSessionMessage(session as any, {
+		type: "identity_header",
+		sessionId: "S",
+		repo: "r",
+		branch: "b",
+	});
+	await daemon.handleSessionMessage(session as any, {
+		type: "context_update",
+		sessionId: "S",
+		lastMessage: "hello world",
+	});
+	await daemon.handleSessionMessage(session as any, {
+		type: "action_needed",
+		sessionId: "S",
+		id: "ask1",
+		kind: "ask",
+		question: "Proceed?",
+		options: ["Yes", "No"],
+	});
+
+	const sends = bot.calls.filter(c => c.method === "sendMessage");
+	// Everything is delivered flat (no message_thread_id) since topics are unavailable.
+	expect(sends.length).toBeGreaterThan(0);
+	expect(sends.every(c => c.body.message_thread_id === undefined)).toBe(true);
+	// The nudge is sent exactly once with the requested copy.
+	const notices = sends.filter(c =>
+		String(c.body.text).includes("turn on threaded mode from botfather miniapp to receive skc notification!"),
+	);
+	expect(notices).toHaveLength(1);
+	// The ask still carries its inline keyboard in flat mode.
+	const ask = sends.find(c => String(c.body.text).includes("Proceed?"));
+	expect(ask).toBeTruthy();
+	expect(ask!.body.reply_markup?.inline_keyboard?.length).toBeGreaterThan(0);
+});
+
+test("threaded mode off: multiple sessions share a single fallback notice", async () => {
+	const agentDir = tempAgentDir();
+	const bot = new FakeBotApi();
+	bot.call = (async (method: string, body: any) => {
+		bot.calls.push({ method, body });
+		if (method === "createForumTopic") return { ok: true, result: {} };
+		if (method === "getChat") return { ok: true, result: { type: "private" } };
+		if (method === "sendMessage") return { ok: true, result: { message_id: bot.calls.length } };
+		return { ok: true, result: true };
+	}) as any;
+	const daemon = new TelegramNotificationDaemon({
+		settings: settings(agentDir),
+		ownerId: "owner",
+		botToken: "tok",
+		chatId: "42",
+		botApi: bot,
+	});
+	for (const sessionId of ["A", "B", "C"]) {
+		await daemon.handleSessionMessage(
+			{ sessionId, token: "tok", ws: { readyState: 1, send() {} }, pending: new Map() } as any,
+			{ type: "identity_header", sessionId, repo: "r", branch: sessionId },
+		);
+	}
+	const sends = bot.calls.filter(c => c.method === "sendMessage");
+	expect(sends.every(c => c.body.message_thread_id === undefined)).toBe(true);
+	expect(
+		sends.filter(c =>
+			String(c.body.text).includes("turn on threaded mode from botfather miniapp to receive skc notification!"),
+		),
+	).toHaveLength(1);
+});
+
+test("threaded mode off: image_attachment uploads flat without message_thread_id", async () => {
+	const agentDir = tempAgentDir();
+	const bot = new FakeBotApi();
+	bot.call = (async (method: string, body: any) => {
+		bot.calls.push({ method, body });
+		if (method === "createForumTopic") return { ok: true, result: {} };
+		if (method === "getChat") return { ok: true, result: { type: "private" } };
+		if (method === "sendPhoto") return { ok: true, result: { message_id: bot.calls.length } };
+		if (method === "sendMessage") return { ok: true, result: { message_id: bot.calls.length } };
+		return { ok: true, result: true };
+	}) as any;
+	const daemon = new TelegramNotificationDaemon({
+		settings: settings(agentDir),
+		ownerId: "owner",
+		botToken: "tok",
+		chatId: "42",
+		botApi: bot,
+	});
+	await daemon.handleSessionMessage(
+		{ sessionId: "S", token: "tok", ws: { readyState: 1, send() {} }, pending: new Map() } as any,
+		{ type: "image_attachment", sessionId: "S", source: "computer", mime: "image/png", data: "AAAA" },
+	);
+	const photo = bot.calls.find(c => c.method === "sendPhoto");
+	expect(photo).toBeTruthy();
+	expect(photo!.body.photo).toBe("AAAA");
+	expect(photo!.body.message_thread_id).toBeUndefined();
+	const notice = bot.calls.filter(
+		c =>
+			c.method === "sendMessage" &&
+			String(c.body.text).includes("turn on threaded mode from botfather miniapp to receive skc notification!"),
+	);
+	expect(notice).toHaveLength(1);
+});
+
+test("threaded off + non-private chat: fails closed (no flat send, no notice)", async () => {
+	for (const chatType of ["supergroup", "group", "channel"]) {
+		const agentDir = tempAgentDir();
+		const bot = new FakeBotApi();
+		// Topics off AND the paired chat is not a private DM: must drop fail-closed
+		// so session content never lands in a shared chat.
+		bot.call = (async (method: string, body: any) => {
+			bot.calls.push({ method, body });
+			if (method === "createForumTopic") return { ok: true, result: {} };
+			if (method === "getChat") return { ok: true, result: { type: chatType } };
+			if (method === "sendMessage") return { ok: true, result: { message_id: bot.calls.length } };
+			return { ok: true, result: true };
+		}) as any;
+		const daemon = new TelegramNotificationDaemon({
+			settings: settings(agentDir),
+			ownerId: "owner",
+			botToken: "tok",
+			chatId: "42",
+			botApi: bot,
+		});
+		const session = { sessionId: "S", token: "tok", ws: { readyState: 1, send() {} }, pending: new Map() };
+
+		await daemon.handleSessionMessage(session as any, {
+			type: "identity_header",
+			sessionId: "S",
+			repo: "r",
+			branch: "b",
+		});
+		await daemon.handleSessionMessage(session as any, {
+			type: "context_update",
+			sessionId: "S",
+			lastMessage: "secret",
+		});
+		await daemon.handleSessionMessage(session as any, {
+			type: "action_needed",
+			sessionId: "S",
+			id: "ask1",
+			kind: "ask",
+			question: "Proceed?",
+			options: ["Yes"],
+		});
+
+		const sends = bot.calls.filter(c => c.method === "sendMessage");
+		expect(sends).toHaveLength(0);
+	}
+});
+
+test("threaded off + unresolvable getChat: fails closed", async () => {
+	const agentDir = tempAgentDir();
+	const bot = new FakeBotApi();
+	bot.call = (async (method: string, body: any) => {
+		bot.calls.push({ method, body });
+		if (method === "createForumTopic") return { ok: true, result: {} };
+		if (method === "getChat") throw new Error("getChat failed");
+		if (method === "sendMessage") return { ok: true, result: { message_id: bot.calls.length } };
+		return { ok: true, result: true };
+	}) as any;
+	const daemon = new TelegramNotificationDaemon({
+		settings: settings(agentDir),
+		ownerId: "owner",
+		botToken: "tok",
+		chatId: "42",
+		botApi: bot,
+	});
+	const session = { sessionId: "S", token: "tok", ws: { readyState: 1, send() {} }, pending: new Map() };
+
+	await daemon.handleSessionMessage(session as any, { type: "context_update", sessionId: "S", lastMessage: "secret" });
+	expect(bot.calls.filter(c => c.method === "sendMessage")).toHaveLength(0);
+});
+
 test("identity_header without a title names the topic repo/branch", async () => {
 	const agentDir = tempAgentDir();
 	const bot = new FakeBotApi();
@@ -994,6 +1187,226 @@ test("inbound thread message gets a queued reaction, flipped to consumed on ack"
 	expect(consumed).toBeTruthy();
 	expect(consumed!.body.message_id).toBe(555);
 	expect(consumed!.body.reaction[0].emoji).toBe("✅");
+});
+
+test("inbound photo is downloaded and forwarded as an image in the user_message", async () => {
+	FakeWs.instances = [];
+	const agentDir = tempAgentDir();
+	const bot = new FakeBotApi();
+	const fetchImpl = (async () => ({
+		ok: true,
+		arrayBuffer: async () => new Uint8Array([1, 2, 3, 4]).buffer,
+	})) as unknown as typeof fetch;
+	const daemon = new TelegramNotificationDaemon({
+		settings: settings(agentDir),
+		ownerId: "owner",
+		botToken: "tok",
+		chatId: "42",
+		botApi: bot,
+		fetchImpl,
+		WebSocketImpl: FakeWs as any,
+	});
+	daemon.connectSession("S", "ws://s", "ts");
+	const session = daemon.sessions.get("S")!;
+	await daemon.handleSessionMessage(session, { type: "identity_header", sessionId: "S", repo: "r", branch: "b" });
+	const threadId = bot.calls.find(c => c.method === "sendMessage")!.body.message_thread_id;
+
+	await daemon.handleTelegramUpdate({
+		update_id: 11,
+		message: {
+			chat: { id: 42 },
+			message_thread_id: threadId,
+			message_id: 100,
+			photo: [{ file_id: "small" }, { file_id: "large" }],
+		},
+	});
+
+	const frame = JSON.parse(FakeWs.instances[0]!.sent[0]!);
+	expect(frame.type).toBe("user_message");
+	expect(frame.images).toHaveLength(1);
+	expect(frame.images[0].mime).toBe("image/jpeg");
+	expect(Buffer.from(frame.images[0].data, "base64")).toEqual(Buffer.from([1, 2, 3, 4]));
+	// The largest photo size is the one resolved/downloaded.
+	expect(bot.calls.some(c => c.method === "getFile" && c.body.file_id === "large")).toBe(true);
+});
+
+test("inbound document is saved to a tmp file and its path injected into the text", async () => {
+	FakeWs.instances = [];
+	const agentDir = tempAgentDir();
+	const bot = new FakeBotApi();
+	const fetchImpl = (async () => ({
+		ok: true,
+		arrayBuffer: async () => new Uint8Array([9, 9, 9]).buffer,
+	})) as unknown as typeof fetch;
+	const daemon = new TelegramNotificationDaemon({
+		settings: settings(agentDir),
+		ownerId: "owner",
+		botToken: "tok",
+		chatId: "42",
+		botApi: bot,
+		fetchImpl,
+		WebSocketImpl: FakeWs as any,
+	});
+	daemon.connectSession("S", "ws://s", "ts");
+	const session = daemon.sessions.get("S")!;
+	await daemon.handleSessionMessage(session, { type: "identity_header", sessionId: "S", repo: "r", branch: "b" });
+	const threadId = bot.calls.find(c => c.method === "sendMessage")!.body.message_thread_id;
+
+	await daemon.handleTelegramUpdate({
+		update_id: 12,
+		message: {
+			chat: { id: 42 },
+			message_thread_id: threadId,
+			message_id: 101,
+			caption: "look",
+			document: { file_id: "doc-1", mime_type: "application/pdf", file_name: "report.pdf" },
+		},
+	});
+
+	const frame = JSON.parse(FakeWs.instances[0]!.sent[0]!);
+	expect(frame.type).toBe("user_message");
+	expect(frame.images).toHaveLength(0);
+	expect(frame.text).toContain("look");
+	const match = String(frame.text).match(/saved to (\S+report\.pdf)/);
+	expect(match).toBeTruthy();
+	expect(fs.existsSync(match![1]!)).toBe(true);
+	expect(fs.readFileSync(match![1]!)).toEqual(Buffer.from([9, 9, 9]));
+	// Security: the saved file must be private (0600, no group/other access) inside
+	// a private 0700 per-session directory under the system temp root — not a
+	// predictable, world-readable /tmp path.
+	const dest = match![1]!;
+	const fileMode = fs.statSync(dest).mode & 0o777;
+	const dirMode = fs.statSync(path.dirname(dest)).mode & 0o777;
+	expect(fileMode).toBe(0o600);
+	expect(fileMode & 0o077).toBe(0);
+	expect(dirMode & 0o077).toBe(0);
+	expect(dest.startsWith(os.tmpdir())).toBe(true);
+});
+
+test("inbound document with a path-traversal filename stays sandboxed in the private temp dir", async () => {
+	FakeWs.instances = [];
+	const agentDir = tempAgentDir();
+	const bot = new FakeBotApi();
+	const fetchImpl = (async () => ({
+		ok: true,
+		arrayBuffer: async () => new Uint8Array([7]).buffer,
+	})) as unknown as typeof fetch;
+	const daemon = new TelegramNotificationDaemon({
+		settings: settings(agentDir),
+		ownerId: "owner",
+		botToken: "tok",
+		chatId: "42",
+		botApi: bot,
+		fetchImpl,
+		WebSocketImpl: FakeWs as any,
+	});
+	daemon.connectSession("S", "ws://s", "ts");
+	const session = daemon.sessions.get("S")!;
+	await daemon.handleSessionMessage(session, { type: "identity_header", sessionId: "S", repo: "r", branch: "b" });
+	const threadId = bot.calls.find(c => c.method === "sendMessage")!.body.message_thread_id;
+
+	await daemon.handleTelegramUpdate({
+		update_id: 21,
+		message: {
+			chat: { id: 42 },
+			message_thread_id: threadId,
+			message_id: 200,
+			document: { file_id: "doc-evil", mime_type: "application/octet-stream", file_name: "../../../etc/passwd" },
+		},
+	});
+
+	const frame = JSON.parse(FakeWs.instances[0]!.sent[0]!);
+	const match = String(frame.text).match(/saved to (\S+)/);
+	expect(match).toBeTruthy();
+	const dest = match![1]!;
+	const base = path.basename(dest);
+	const dir = path.dirname(dest);
+	// The attacker-controlled name must be sanitized so it cannot traverse:
+	// no path separators and no ".." segments survive.
+	expect(base.includes("/")).toBe(false);
+	expect(base.includes("\\")).toBe(false);
+	expect(base).not.toContain("..");
+	// The real saved file lives directly inside the private per-session temp dir
+	// (under the system temp root), not at the attacker-referenced location.
+	expect(path.dirname(fs.realpathSync(dest))).toBe(fs.realpathSync(dir));
+	expect(dir.startsWith(os.tmpdir())).toBe(true);
+	expect(fs.realpathSync(dest)).not.toBe("/etc/passwd");
+});
+
+test("daemon attachment temp dirs are removed by the shutdown cleanup path", async () => {
+	FakeWs.instances = [];
+	const agentDir = tempAgentDir();
+	const bot = new FakeBotApi();
+	const fetchImpl = (async () => ({
+		ok: true,
+		arrayBuffer: async () => new Uint8Array([1, 1]).buffer,
+	})) as unknown as typeof fetch;
+	const daemon = new TelegramNotificationDaemon({
+		settings: settings(agentDir),
+		ownerId: "owner",
+		botToken: "tok",
+		chatId: "42",
+		botApi: bot,
+		fetchImpl,
+		WebSocketImpl: FakeWs as any,
+	});
+	daemon.connectSession("S", "ws://s", "ts");
+	const session = daemon.sessions.get("S")!;
+	await daemon.handleSessionMessage(session, { type: "identity_header", sessionId: "S", repo: "r", branch: "b" });
+	const threadId = bot.calls.find(c => c.method === "sendMessage")!.body.message_thread_id;
+
+	await daemon.handleTelegramUpdate({
+		update_id: 22,
+		message: {
+			chat: { id: 42 },
+			message_thread_id: threadId,
+			message_id: 201,
+			document: { file_id: "doc-x", mime_type: "application/pdf", file_name: "keep.pdf" },
+		},
+	});
+
+	const frame = JSON.parse(FakeWs.instances[0]!.sent[0]!);
+	const dir = path.dirname(String(frame.text).match(/saved to (\S+)/)![1]!);
+	expect(fs.existsSync(dir)).toBe(true);
+	// run()'s `finally` invokes cleanupAllAttachmentDirs() on daemon shutdown;
+	// exercise that exact cleanup path here.
+	await (daemon as any).cleanupAllAttachmentDirs();
+	expect(fs.existsSync(dir)).toBe(false);
+});
+
+test("outbound file_attachment frame triggers a sendDocument upload to the topic", async () => {
+	FakeWs.instances = [];
+	const agentDir = tempAgentDir();
+	const bot = new FakeBotApi();
+	const daemon = new TelegramNotificationDaemon({
+		settings: settings(agentDir),
+		ownerId: "owner",
+		botToken: "tok",
+		chatId: "42",
+		botApi: bot,
+		WebSocketImpl: FakeWs as any,
+	});
+	daemon.connectSession("S", "ws://s", "ts");
+	const session = daemon.sessions.get("S")!;
+	await daemon.handleSessionMessage(session, { type: "identity_header", sessionId: "S", repo: "r", branch: "b" });
+	bot.calls = [];
+
+	const data = Buffer.from([5, 6, 7]).toString("base64");
+	await daemon.handleSessionMessage(session, {
+		type: "file_attachment",
+		sessionId: "S",
+		name: "out.pdf",
+		mime: "application/pdf",
+		data,
+		caption: "here",
+	});
+
+	const doc = bot.calls.find(c => c.method === "sendDocument");
+	expect(doc).toBeTruthy();
+	expect(doc!.body.document).toBe(data);
+	expect(doc!.body.fileName).toBe("out.pdf");
+	expect(doc!.body.mime).toBe("application/pdf");
+	expect(Number(doc!.body.message_thread_id)).toBeGreaterThan(0);
 });
 
 describe("telegram daemon reconnect reconciliation", () => {

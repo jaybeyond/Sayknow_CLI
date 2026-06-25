@@ -50,7 +50,7 @@ export function getExtraHelpText(): string {
   SKC_SLOW_MODEL              - Override slow/reasoning model (see --slow)
   SKC_PLAN_MODEL              - Override planning model (see --plan)
   SKC_NO_PTY                  - Disable PTY-based interactive bash execution
-  --tmux                       - Launch interactive startup inside a new tmux session
+  --tmux                       - Launch interactive startup inside a fresh tmux session
   skc session                  - List, inspect, create, remove, or attach tagged SKC-managed tmux sessions
   SKC_LAUNCH_POLICY           - Launch policy for --tmux startup: tmux or direct
   SKC_TMUX_SESSION            - Explicit tmux session name override for --tmux startup

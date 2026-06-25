@@ -44,6 +44,13 @@ const targets: BinaryTarget[] = [
 		outfile: "packages/coding-agent/binaries/skc-darwin-arm64",
 	},
 	{
+		id: "darwin-x64",
+		platform: "darwin",
+		arch: "x64",
+		target: "bun-darwin-x64-baseline",
+		outfile: "packages/coding-agent/binaries/skc-darwin-x64",
+	},
+	{
 		id: "linux-x64",
 		platform: "linux",
 		arch: "x64",

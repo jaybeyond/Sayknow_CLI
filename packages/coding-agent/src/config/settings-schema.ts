@@ -255,10 +255,14 @@ export const SETTINGS_SCHEMA = {
 	"auth.broker.url": { type: "string", default: undefined },
 	"auth.broker.token": { type: "string", default: undefined },
 
-	// Notifications (Telegram bundled reference client)
+	// Notifications (shared daemon with Telegram/Discord/Slack presentation adapters)
 	"notifications.enabled": { type: "boolean", default: false },
 	"notifications.telegram.botToken": { type: "string", default: undefined },
 	"notifications.telegram.chatId": { type: "string", default: undefined },
+	"notifications.discord.botToken": { type: "string", default: undefined },
+	"notifications.discord.channelId": { type: "string", default: undefined },
+	"notifications.slack.botToken": { type: "string", default: undefined },
+	"notifications.slack.channelId": { type: "string", default: undefined },
 	"notifications.redact": { type: "boolean", default: false },
 	"notifications.verbosity": {
 		type: "string",
@@ -2126,6 +2130,17 @@ export const SETTINGS_SCHEMA = {
 		ui: { tab: "tools", label: "Read URLs", description: "Allow the read tool to fetch and process URLs" },
 	},
 
+	"web.insaneFallback": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "tools",
+			label: "Insane Search Fallback",
+			description:
+				"Opt in to the vendored insane-search escalation for blocked public URL reads (403/WAF/JS-gated). Off by default. Requires preinstalled python3 + curl_cffi (and node + playwright/stealth for the browser phase); changes network posture by enabling TLS/browser impersonation for public pages.",
+		},
+	},
+
 	"github.enabled": {
 		type: "boolean",
 		default: false,
@@ -2753,6 +2768,7 @@ export const SETTINGS_SCHEMA = {
 		values: [
 			"auto",
 			"duckduckgo",
+			"insane",
 			"exa",
 			"brave",
 			"jina",
@@ -2784,6 +2800,11 @@ export const SETTINGS_SCHEMA = {
 					value: "duckduckgo",
 					label: "DuckDuckGo",
 					description: "Keyless default — no API key or OAuth required",
+				},
+				{
+					value: "insane",
+					label: "Insane",
+					description: "Keyless safe public-route fallback inspired by upstream insane-search",
 				},
 				{ value: "exa", label: "Exa", description: "Uses Exa API when EXA_API_KEY is set" },
 				{ value: "brave", label: "Brave", description: "Requires BRAVE_API_KEY" },
@@ -3230,6 +3251,14 @@ export interface NotificationsSettings {
 	telegram: {
 		botToken: string | undefined;
 		chatId: string | undefined;
+	};
+	discord: {
+		botToken: string | undefined;
+		channelId: string | undefined;
+	};
+	slack: {
+		botToken: string | undefined;
+		channelId: string | undefined;
 	};
 	redact: boolean;
 	daemon: {

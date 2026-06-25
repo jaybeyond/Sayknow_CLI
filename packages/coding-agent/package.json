@@ -1,7 +1,7 @@
 {
 	"type": "module",
 	"name": "@sayknow-cli/coding-agent",
-	"version": "0.3.0",
+	"version": "0.3.1",
 	"description": "Sayknow-CLI CLI with read, bash, edit, write tools and session management",
 	"homepage": "https://github.com/jaybeyond/Sayknow_CLI",
 	"author": "jaybeyond",
@@ -45,7 +45,8 @@
 		"generate-docs-index": "bun scripts/generate-docs-index.ts",
 		"prepack": "bun scripts/generate-docs-index.ts",
 		"generate-template": "bun scripts/generate-template.ts",
-		"install:defaults": "bun src/cli.ts setup defaults"
+		"install:defaults": "bun src/cli.ts setup defaults",
+		"verify:insane-vendor": "bun scripts/verify-insane-vendor.ts"
 	},
 	"dependencies": {
 		"@agentclientprotocol/sdk": "catalog:",
@@ -83,7 +84,8 @@
 		"scripts",
 		"examples",
 		"README.md",
-		"CHANGELOG.md"
+		"CHANGELOG.md",
+		"vendor"
 	],
 	"exports": {
 		"./cli": {

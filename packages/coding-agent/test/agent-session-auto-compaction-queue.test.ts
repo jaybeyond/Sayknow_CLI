@@ -99,11 +99,12 @@ describe("AgentSession auto-compaction queue resume", () => {
 		if (!model) {
 			throw new Error("Expected built-in anthropic model to exist");
 		}
+		const sessionModel = { ...model, contextWindow: 200_000, maxTokens: 128_000 };
 		streamCallCount = 0;
 
 		const agent = new Agent({
 			initialState: {
-				model,
+				model: sessionModel,
 				systemPrompt: ["Test"],
 				tools: [],
 				messages: [],
@@ -227,6 +228,94 @@ describe("AgentSession auto-compaction queue resume", () => {
 		const runtimeSignals = getRuntimeSignals();
 		expect(runtimeSignals).toContain("compaction:start:threshold");
 		expect(runtimeSignals.some(signal => signal.startsWith("compaction:end:"))).toBe(true);
+	});
+	it("does not reserve model output capability for threshold maintenance", async () => {
+		const assistantMsg: AssistantMessage = {
+			role: "assistant",
+			content: [],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-sonnet-4-5",
+			stopReason: "stop",
+			usage: {
+				input: 110_000,
+				output: 1_000,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 111_000,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			timestamp: Date.now(),
+		};
+
+		session.agent.emitExternalEvent({ type: "message_end", message: assistantMsg });
+		session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMsg] });
+
+		await Promise.resolve();
+		await Promise.resolve();
+
+		expect(getRuntimeSignals()).not.toContain("compaction:start:threshold");
+		expect(sessionManager.getBranch().some(entry => entry.type === "compaction")).toBe(false);
+	});
+
+	it("runs pre-continue compaction before resuming queued messages", async () => {
+		vi.useRealTimers();
+		session.settings.set("compaction.thresholdTokens", 1000);
+		session.settings.set("compaction.keepRecentTokens", 1);
+		session.agent.followUp({
+			role: "custom",
+			customType: "test",
+			content: [{ type: "text", text: "Queued custom" }],
+			display: false,
+			timestamp: Date.now(),
+		});
+		const continueSpy = vi.spyOn(session.agent, "continue").mockResolvedValue();
+		const { promise: firstCompactionDone, resolve: onFirstCompactionDone } = Promise.withResolvers<void>();
+		const { promise: secondCompactionDone, resolve: onSecondCompactionDone } = Promise.withResolvers<void>();
+		let compactionEndCount = 0;
+		session.subscribe(event => {
+			if (event.type !== "auto_compaction_end") return;
+			compactionEndCount++;
+			if (compactionEndCount === 1) onFirstCompactionDone();
+			if (compactionEndCount === 2) onSecondCompactionDone();
+		});
+		const assistantMsg: AssistantMessage = {
+			role: "assistant",
+			content: [],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-sonnet-4-5",
+			stopReason: "stop",
+			usage: {
+				input: 190000,
+				output: 1000,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 191000,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			timestamp: Date.now(),
+		};
+
+		session.agent.emitExternalEvent({ type: "message_end", message: assistantMsg });
+		session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMsg] });
+
+		await withTimeout(firstCompactionDone, 1000, "Initial queued compaction timed out");
+		const largeToolResult: ToolResultMessage = {
+			role: "toolResult",
+			toolCallId: "queued-large-read",
+			toolName: "read",
+			content: [{ type: "text", text: "x".repeat(10_000) }],
+			isError: false,
+			timestamp: Date.now(),
+		};
+		sessionManager.appendMessage(largeToolResult);
+		session.agent.appendMessage(largeToolResult);
+		await withTimeout(secondCompactionDone, 1000, "Pre-continue compaction timed out");
+		await session.waitForIdle();
+
+		expect(continueSpy).toHaveBeenCalledTimes(1);
+		expect(getRuntimeSignals().filter(signal => signal === "compaction:start:threshold")).toHaveLength(2);
 	});
 
 	it("compacts before a new prompt when tool results push context over threshold", async () => {
@@ -450,7 +539,7 @@ describe("AgentSession auto-compaction queue resume", () => {
 		await Promise.resolve();
 
 		expect(getRuntimeSignals()).toContain("todo:1/3");
-		expect(continueSpy).toHaveBeenCalledTimes(1);
 		await session.waitForIdle();
+		expect(continueSpy).toHaveBeenCalledTimes(1);
 	});
 });

@@ -2,6 +2,8 @@
 
 > Run one web query through the first available search provider and return LLM-formatted answer, source URLs, and optional citations.
 
+> Note: `insane-search` is **not** a `web_search` provider and does not affect search-provider selection. It is an opt-in fallback for the `read` tool's URL fetch path (`web.insaneFallback`); see `docs/tools/read.md`.
+
 ## Source
 - Entry: `packages/coding-agent/src/web/search/index.ts`
 - Model-facing prompt: `packages/coding-agent/src/prompts/tools/web-search.md`
@@ -14,6 +16,7 @@
   - `packages/coding-agent/src/web/search/providers/anthropic.ts` — Anthropic model web-search provider.
   - `packages/coding-agent/src/web/search/providers/brave.ts` — Brave Search API adapter.
   - `packages/coding-agent/src/web/search/providers/duckduckgo.ts` — keyless DuckDuckGo html/lite scrape adapter (permissionless default/fallback).
+  - `packages/coding-agent/src/web/search/providers/insane.ts` — keyless safe public-route adapter inspired by upstream `fivetaku/insane-search`.
   - `packages/coding-agent/src/web/search/providers/openai-code.ts` — OpenAI code provider SSE adapter.
   - `packages/coding-agent/src/web/search/providers/exa.ts` — Exa API adapter.
   - `packages/coding-agent/src/web/search/providers/gemini.ts` — Gemini grounding SSE adapter.
@@ -73,7 +76,8 @@ Streaming: none. `WebSearchTool.execute()` does not forward its `_signal` argume
 2. `executeSearch()` resolves the provider list via a single `resolveProviderChain(authStorage, params.provider ?? "auto", activeModelProvider)` call. The active model's provider is threaded in from `WebSearchTool` (`this.#session.model?.provider`, falling back to parsing `getActiveModelString()`) and from the CustomTool path (`ctx.model?.provider`).
 3. `resolveProviderChain()` is active-model-gated, not credential-scanning:
    - an explicitly preferred/selected provider that is `isAvailable()` becomes the primary;
-   - otherwise the active model's own native search (`MODEL_PROVIDER_TO_SEARCH`) becomes the primary, but only when that provider's own credentials exist (`isAvailable()`);
+   - otherwise the active model's own native search (`MODEL_PROVIDER_TO_SEARCH` + `inferNativeProviderFromModel()`) becomes the primary, when that provider's canonical credentials exist (`isAvailable()`);
+   - failing that, **native-over-proxy** kicks in: `activeContextNativeId()` matches the active model's wire `api` (+ model-id family) to a native provider, and if the active model's OWN credential resolves (`getApiKey(ctx.provider, { baseUrl, modelId })`), that native provider is attempted reusing those credentials and `ctx.baseUrl`. Dispatch: `anthropic-messages`+`claude-*`→`anthropic`, `openai-responses`/`openai-completions`→`openai-compatible`, `google-generative-ai`+`gemini-*`→`gemini`;
    - keyed standalone providers are never auto-selected — explicit selection only.
 4. DuckDuckGo (keyless, `isAvailable()` always true) is always appended as the terminal fallback, so a missing primary — or a primary runtime failure — still returns results with zero configuration. There is no longer a "No web search provider configured" path.
 5. For each provider in order, `executeSearch()` calls `provider.search()` with:
@@ -92,8 +96,15 @@ Streaming: none. `WebSearchTool.execute()` does not forward its `_signal` argume
 - **Provider selection**
   - **Forced provider**: internal callers may pass `provider`; an unavailable forced provider falls back to the chain (which always ends in DuckDuckGo) instead of hard-failing (`packages/coding-agent/src/web/search/index.ts`). This field is not in the model-facing schema.
   - **Preferred provider**: `setPreferredSearchProvider()` sets a module-global default consumed by `resolveProviderChain()`. `packages/coding-agent/src/sdk.ts` and `packages/coding-agent/src/modes/controllers/selector-controller.ts` wire this from settings.
-  - **Active-model-gated auto**: in `auto` mode, resolution maps the active model's provider to its own native search via `MODEL_PROVIDER_TO_SEARCH` (`openai|openai-codex→codex`, `anthropic→anthropic`, `google|google-gemini-cli|google-antigravity|gemini→gemini`, `moonshot|kimi-code|kimi→kimi`, `zai`, `perplexity`, `synthetic`), used only if that provider's creds exist; everything else falls to DuckDuckGo. `SEARCH_PROVIDER_ORDER` no longer drives auto credential scanning — it is retained for explicit selection, labels, and CLI option lists.
+  - **Active-model-gated auto**: in `auto` mode, resolution first maps the active model's provider to its own native search via `MODEL_PROVIDER_TO_SEARCH` (`openai|openai-codex→codex`, `anthropic→anthropic`, `google|google-gemini-cli|google-antigravity|gemini→gemini`, `moonshot|kimi-code|kimi→kimi`, `zai`, `perplexity`, `synthetic`) and `inferNativeProviderFromModel()`, used when that provider's canonical creds exist. When no canonical native is selected, `activeContextNativeId()` drives native search through the active model's OWN credential + `baseUrl` (native-over-proxy), dispatched by wire `api`: `anthropic-messages`+`claude-*`→`anthropic` (reuses `ctx` key/baseUrl via `searchAnthropic`), `openai-responses`/`openai-completions`→`openai-compatible`, `google-generative-ai`+`gemini-*`→`gemini` (Generative Language `generateContent`). The native provider fails closed (and the chain falls through to DuckDuckGo) if the endpoint does not actually support web search. `SEARCH_PROVIDER_ORDER` no longer drives auto credential scanning — it is retained for explicit selection, labels, and CLI option lists.
 - **Provider adapters**
+  - **Insane** — `packages/coding-agent/src/web/search/providers/insane.ts`
+    - Availability: always available; no API key, OAuth, cookies, browser profile, subprocess, or auto-installed dependency.
+    - Querying: if the query is a supported public URL, tries deterministic no-auth public routes first; otherwise uses DuckDuckGo discovery and enriches supported result URLs through the same safe routes.
+    - Safe upstream concepts ported: Phase 0 public route table and route-attempt metadata for Reddit RSS, X/Twitter tweet-result/oEmbed/syndication, YouTube oEmbed/channel feed, and Hacker News Firebase item metadata.
+    - Explicitly not ported from upstream: TLS impersonation, Playwright/browser fallback, cookie warming/storage, CAPTCHA/paywall/login bypasses, credential storage, and auto dependency installation. Unsupported or blocked routes fail closed with a provider error.
+    - `limit` / `num_search_results`: collapsed together, clamped to `1..20`, default `10`.
+    - Output: `sources` only, with snippets annotated by the public route used and `searchQueries` containing compact route-attempt diagnostics.
   - **Tavily** — `packages/coding-agent/src/web/search/providers/tavily.ts`
     - Availability: API key from env or `agent.db` via `findCredential()`.
     - Querying: POST `https://api.tavily.com/search`.
@@ -128,6 +139,7 @@ Streaming: none. `WebSearchTool.execute()` does not forward its `_signal` argume
     - `max_tokens` and `temperature` pass through.
     - `limit` and `num_search_results` are collapsed together before dispatch: `num_results = params.numSearchResults ?? params.limit`.
     - Output may include `answer`, `sources`, `citations`, `searchQueries`, `usage.searchRequests`, `model`, `requestId`.
+    - When a search ran (`web_search_tool_result` / `server_tool_use` / `usage.server_tool_use.web_search_requests`) but only inline citations were emitted, sources are recovered from the answer text via `providers/text-citations.ts`. If no search ran and nothing is grounded, it fails closed (`424`) so the chain falls through to DuckDuckGo.
   - **Gemini** — `packages/coding-agent/src/web/search/providers/gemini.ts`
     - Availability: OAuth credentials in `agent.db` for `google-gemini-cli` or `google-antigravity`.
     - Querying: SSE `streamGenerateContent` call with Google Search grounding enabled. Antigravity auth tries two fallback endpoints and retries `401/403/400 invalid auth` once after token refresh; `429/5xx` retry with exponential backoff and server-provided retry delay, capped by a `5 * 60 * 1000` ms rate-limit budget.
@@ -190,7 +202,8 @@ Streaming: none. `WebSearchTool.execute()` does not forward its `_signal` argume
   - Many provider adapters accept `AbortSignal`, but `WebSearchTool.execute()` does not pass its `_signal` into `executeSearch()`. Internal callers can still use cancellation by calling `runSearchQuery()` / `executeSearch()` with `signal` embedded in params.
 
 ## Limits & Caps
-- Provider registry size: 15 providers (`SEARCH_PROVIDER_ORDER` in `packages/coding-agent/src/web/search/provider.ts`), including the keyless `duckduckgo` default/fallback. `SEARCH_PROVIDER_ORDER` no longer drives auto selection — see "Active-model-gated auto" above.
+- Provider registry size: 16 providers (`SEARCH_PROVIDER_ORDER` in `packages/coding-agent/src/web/search/provider.ts`), including the keyless `duckduckgo` default/fallback and selectable `insane` safe-public-route provider. `SEARCH_PROVIDER_ORDER` no longer drives auto selection — see "Active-model-gated auto" above.
+- Insane result count: default `10`, max `20` (`packages/coding-agent/src/web/search/providers/insane.ts`).
 - `formatForLLM()` truncates source snippets and citation text to 240 chars (`packages/coding-agent/src/web/search/index.ts`).
 - `formatForLLM()` emits at most 3 search queries, each truncated to 120 chars (`packages/coding-agent/src/web/search/index.ts`).
 - Brave result count: default `10`, max `20` (`DEFAULT_NUM_RESULTS`, `MAX_NUM_RESULTS` in `packages/coding-agent/src/web/search/providers/brave.ts`).
@@ -222,5 +235,5 @@ Streaming: none. `WebSearchTool.execute()` does not forward its `_signal` argume
 - Most providers treat `limit` and `num_search_results` as the same number because adapters pass `params.numSearchResults ?? params.limit`. Perplexity is the only implementation that preserves both concepts.
 - The prompt says `recency` is for Brave and Perplexity, but code also implements it for Tavily and SearXNG.
 - The year rewrite in `executeSearch()` is blunt: any `2020`-`2029` substring is replaced with the current year.
-- `packages/coding-agent/src/config/settings-schema.ts` exposes provider preferences for `auto`, `exa`, `brave`, `jina`, `kimi`, `perplexity`, `anthropic`, `zai`, `tavily`, `kagi`, `synthetic`, `parallel`, and `searxng`. Gemini and OpenAI code are in the registry and auto chain but not in that settings enum.
+- `packages/coding-agent/src/config/settings-schema.ts` exposes provider preferences for `auto`, `duckduckgo`, `insane`, `exa`, `brave`, `jina`, `kimi`, `perplexity`, `anthropic`, `gemini`, `codex`, `xai`, `zai`, `tavily`, `kagi`, `synthetic`, `parallel`, and `searxng`.
 - Exa availability fails closed unless `EXA_API_KEY` is present and Exa settings remain enabled.

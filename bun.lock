@@ -15,7 +15,7 @@
     },
     "packages/agent": {
       "name": "@sayknow-cli/agent-core",
-      "version": "0.3.0",
+      "version": "0.3.1",
       "dependencies": {
         "@opentelemetry/api": "catalog:",
         "@sayknow-cli/ai": "catalog:",
@@ -30,7 +30,7 @@
     },
     "packages/ai": {
       "name": "@sayknow-cli/ai",
-      "version": "0.3.0",
+      "version": "0.3.1",
       "bin": {
         "pi-ai": "./src/cli.ts",
       },
@@ -48,14 +48,14 @@
     },
     "packages/bridge-client": {
       "name": "@sayknow-cli/bridge-client",
-      "version": "0.3.0",
+      "version": "0.3.1",
       "devDependencies": {
         "@types/bun": "catalog:",
       },
     },
     "packages/coding-agent": {
       "name": "@sayknow-cli/coding-agent",
-      "version": "0.3.0",
+      "version": "0.3.1",
       "bin": {
         "skc": "src/cli.ts",
       },
@@ -90,7 +90,7 @@
     },
     "packages/natives": {
       "name": "@sayknow-cli/natives",
-      "version": "0.3.0",
+      "version": "0.3.1",
       "devDependencies": {
         "@napi-rs/cli": "catalog:",
         "@types/bun": "catalog:",
@@ -98,14 +98,14 @@
     },
     "packages/orchestration-token-benchmark": {
       "name": "@sayknow-cli/orchestration-token-benchmark",
-      "version": "0.3.0",
+      "version": "0.3.1",
       "devDependencies": {
         "@types/bun": "catalog:",
       },
     },
     "packages/sayknow-cli": {
       "name": "sayknow-cli",
-      "version": "0.3.0",
+      "version": "0.3.1",
       "bin": {
         "skc": "bin/skc.js",
       },
@@ -115,7 +115,7 @@
     },
     "packages/stats": {
       "name": "@sayknow-cli/stats",
-      "version": "0.3.0",
+      "version": "0.3.1",
       "bin": {
         "skc-stats": "./src/index.ts",
       },
@@ -140,7 +140,7 @@
     },
     "packages/tui": {
       "name": "@sayknow-cli/tui",
-      "version": "0.3.0",
+      "version": "0.3.1",
       "dependencies": {
         "@sayknow-cli/natives": "catalog:",
         "@sayknow-cli/utils": "catalog:",
@@ -154,7 +154,7 @@
     },
     "packages/typescript-edit-benchmark": {
       "name": "@sayknow-cli/typescript-edit-benchmark",
-      "version": "0.3.0",
+      "version": "0.3.1",
       "bin": {
         "typescript-edit-benchmark": "src/index.ts",
       },
@@ -180,7 +180,7 @@
     },
     "packages/utils": {
       "name": "@sayknow-cli/utils",
-      "version": "0.3.0",
+      "version": "0.3.1",
       "dependencies": {
         "@sayknow-cli/natives": "catalog:",
         "beautiful-mermaid": "catalog:",
@@ -194,7 +194,7 @@
     },
     "python/roboskc/web": {
       "name": "roboskc-web",
-      "version": "0.3.0",
+      "version": "0.3.1",
       "dependencies": {
         "solid-js": "catalog:",
       },
@@ -224,14 +224,14 @@
     "@opentelemetry/context-async-hooks": "^2.0.0",
     "@opentelemetry/sdk-trace-base": "^2.0.0",
     "@puppeteer/browsers": "^2.13.0",
-    "@sayknow-cli/agent-core": "0.3.0",
-    "@sayknow-cli/ai": "0.3.0",
-    "@sayknow-cli/bridge-client": "0.3.0",
-    "@sayknow-cli/coding-agent": "0.3.0",
-    "@sayknow-cli/natives": "0.3.0",
-    "@sayknow-cli/stats": "0.3.0",
-    "@sayknow-cli/tui": "0.3.0",
-    "@sayknow-cli/utils": "0.3.0",
+    "@sayknow-cli/agent-core": "0.3.1",
+    "@sayknow-cli/ai": "0.3.1",
+    "@sayknow-cli/bridge-client": "0.3.1",
+    "@sayknow-cli/coding-agent": "0.3.1",
+    "@sayknow-cli/natives": "0.3.1",
+    "@sayknow-cli/stats": "0.3.1",
+    "@sayknow-cli/tui": "0.3.1",
+    "@sayknow-cli/utils": "0.3.1",
     "@tailwindcss/node": "^4.2.4",
     "@tailwindcss/vite": "^4.2.4",
     "@types/babel__generator": "^7.27.0",
@@ -1066,7 +1066,7 @@
 
     "mute-stream": ["mute-stream@3.0.0", "", {}, "sha512-dkEJPVvun4FryqBmZ5KhDo0K9iDXAwn08tMLDinNdRBNPcYEDiWYysLcc6k3mjTMlbP9KyylvRpd4wFtwrT9rw=="],
 
-    "nanoid": ["nanoid@3.3.13", "", { "bin": { "nanoid": "bin/nanoid.cjs" } }, "sha512-sPdqC6ByMVVGvF1ynvvMo0/o+oD1VX7DaHhijt1bFgjvBkHBib4t49GoNDhf2NDta4oeUNlaGbSt5K7qjZ955Q=="],
+    "nanoid": ["nanoid@3.3.14", "", { "bin": { "nanoid": "bin/nanoid.cjs" } }, "sha512-U9kYi5bpVMEI31yC8iw4bJJp0avcHXA0W8/wNfLfnvJYzihQo2ZRPYPvpAAd570HAcCBjCTN7vnr+v4StKl1IQ=="],
 
     "neo-async": ["neo-async@2.6.2", "", {}, "sha512-Yd3UES5mWCSqR+qNT93S3UoYUkqAZ9lLg8a7g9rimsWmYGK8cVToA4/sF3RrshdyV3sAGMXVUmpMYOw+dLpOuw=="],
 
@@ -1100,7 +1100,7 @@
 
     "partial-json": ["partial-json@0.1.7", "", {}, "sha512-Njv/59hHaokb/hRUjce3Hdv12wd60MtM9Z5Olmn+nehe0QDAsRtRbJPvJ0Z91TusF0SuZRIvnM+S4l6EIP8leA=="],
 
-    "path-expression-matcher": ["path-expression-matcher@1.5.0", "", {}, "sha512-cbrerZV+6rvdQrrD+iGMcZFEiiSrbv9Tfdkvnusy6y0x0GKBXREFg/Y65GhIfm0tnLntThhzCnfKwp1WRjeCyQ=="],
+    "path-expression-matcher": ["path-expression-matcher@1.6.0", "", {}, "sha512-e5y7RCLHKjemsgQ4eqGJtPyr10ILz25HO7flzxhTV8bgvd5yHx98DGtCAtbVW9f2TqnYI/gEVZd+vz7snrdPTw=="],
 
     "path-is-absolute": ["path-is-absolute@1.0.1", "", {}, "sha512-AVbw3UJ2e9bq64vSaS9Am0fje1Pa8pbGqTTsmXfaIiMpnr5DlDhfJOuLj9Sf95ZPVDAUerDfEk88MPmPe7UCQg=="],
 

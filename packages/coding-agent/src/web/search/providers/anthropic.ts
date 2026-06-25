@@ -25,6 +25,7 @@ import type {
 import { SearchProviderError } from "../../../web/search/types";
 import type { SearchParams } from "./base";
 import { SearchProvider } from "./base";
+import { extractTextSources } from "./text-citations";
 import { classifyProviderHttpError, withHardTimeout } from "./utils";
 
 const DEFAULT_MODEL = "claude-haiku-4-5";
@@ -87,9 +88,10 @@ async function callSearch(
 	maxTokens?: number,
 	temperature?: number,
 	signal?: AbortSignal,
+	extraHeaders?: Record<string, string>,
 ): Promise<AnthropicApiResponse> {
 	const url = buildAnthropicUrl(auth);
-	const headers = buildAnthropicSearchHeaders(auth);
+	const headers = { ...(extraHeaders ?? {}), ...buildAnthropicSearchHeaders(auth) };
 
 	const systemBlocks = buildSystemBlocks(auth, model, systemPrompt);
 
@@ -191,7 +193,7 @@ function parseResponse(response: AnthropicApiResponse): SearchResponse {
 			if (block.input?.query) {
 				searchQueries.push(block.input.query);
 			}
-		} else if (block.type === "web_search_tool_result" && block.content) {
+		} else if (block.type === "web_search_tool_result" && Array.isArray(block.content)) {
 			// Search results
 			for (const result of block.content) {
 				if (result.type === "web_search_result") {
@@ -236,6 +238,34 @@ function parseResponse(response: AnthropicApiResponse): SearchResponse {
 }
 
 /**
+ * Whether the response carries proof that a web search actually ran: a
+ * `web_search_tool_result` block, a `web_search` server tool call, or a
+ * non-zero `server_tool_use.web_search_requests` usage counter.
+ */
+function anthropicSearchPerformed(response: AnthropicApiResponse): boolean {
+	if (response.usage?.server_tool_use?.web_search_requests) return true;
+	for (const block of response.content ?? []) {
+		if (block.type === "web_search_tool_result") {
+			// `content` is an array of results on success but an error OBJECT
+			// (`web_search_tool_result_error`) on failure; only count a result
+			// array with at least one real result as proof of search.
+			if (Array.isArray(block.content) && block.content.some(result => result.type === "web_search_result")) {
+				return true;
+			}
+			continue;
+		}
+		if (
+			block.type === "server_tool_use" &&
+			block.name &&
+			stripClaudeToolPrefix(block.name) === WEB_SEARCH_TOOL_NAME
+		) {
+			return true;
+		}
+	}
+	return false;
+}
+
+/**
  * Executes a web search using Anthropic's Anthropic model with built-in web search tool.
  * @param params - Search parameters including query and optional settings
  * @returns Search response with synthesized answer, sources, and citations
@@ -248,6 +278,10 @@ export async function searchAnthropic(
 	const searchApiKey = $env.ANTHROPIC_SEARCH_API_KEY;
 	const searchBaseUrl = $env.ANTHROPIC_SEARCH_BASE_URL;
 	let auth: AnthropicAuthConfig | undefined;
+	// When reusing the active model's own credentials (native search over a
+	// proxy), prefer its wire model id and carry its request headers through.
+	let modelOverride: string | undefined;
+	let extraHeaders: Record<string, string> | undefined;
 
 	if (searchApiKey) {
 		auth = buildAnthropicAuthConfig(searchApiKey, searchBaseUrl);
@@ -256,6 +290,23 @@ export async function searchAnthropic(
 			signal: params.signal,
 		});
 		if (apiKey) auth = buildAnthropicAuthConfig(apiKey);
+
+		// Fall back to the active model's own credentials + baseUrl when no
+		// canonical Anthropic key exists but the active model speaks the
+		// Anthropic wire (e.g. Claude served through a proxy).
+		const ctx = params.activeModelContext;
+		if (!auth && ctx && ctx.api === "anthropic-messages") {
+			const ctxKey = await params.authStorage.getApiKey(ctx.provider, params.sessionId, {
+				baseUrl: ctx.baseUrl,
+				modelId: ctx.modelId,
+				signal: params.signal,
+			});
+			if (ctxKey) {
+				auth = buildAnthropicAuthConfig(ctxKey, ctx.baseUrl);
+				modelOverride = ctx.wireModelId ?? ctx.modelId;
+				extraHeaders = ctx.headers;
+			}
+		}
 	}
 
 	if (!auth) {
@@ -264,7 +315,7 @@ export async function searchAnthropic(
 		);
 	}
 
-	const model = getModel();
+	const model = modelOverride ?? getModel();
 	const systemPrompt = "authStorage" in params ? params.systemPrompt : params.system_prompt;
 	const maxTokens = "authStorage" in params ? params.maxOutputTokens : params.max_tokens;
 	const response = await callSearch(
@@ -275,9 +326,25 @@ export async function searchAnthropic(
 		maxTokens,
 		params.temperature,
 		params.signal,
+		extraHeaders,
 	);
 
 	const result = parseResponse(response);
+	const searched = anthropicSearchPerformed(response);
+
+	// When a search ran but the model wrote its citations inline instead of as
+	// structured `web_search_result_location` blocks, recover sources from the
+	// answer text so a genuinely grounded result is not discarded.
+	if (result.sources.length === 0 && searched && result.answer) {
+		const inline = extractTextSources(result.answer);
+		if (inline.length > 0) result.sources = inline;
+	}
+
+	// Fail closed so the chain falls through to DuckDuckGo when Claude answered
+	// from stable knowledge without running a web search.
+	if (result.sources.length === 0 && !(result.citations && result.citations.length > 0) && !searched) {
+		throw new SearchProviderError("anthropic", "Anthropic web search returned no grounded sources", 424);
+	}
 
 	const numResults = "authStorage" in params ? (params.numSearchResults ?? params.limit) : params.num_results;
 	if (numResults && result.sources.length > numResults) {

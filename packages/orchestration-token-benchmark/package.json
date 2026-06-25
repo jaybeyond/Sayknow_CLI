@@ -2,7 +2,7 @@
 	"type": "module",
 	"private": true,
 	"name": "@sayknow-cli/orchestration-token-benchmark",
-	"version": "0.3.0",
+	"version": "0.3.1",
 	"description": "Deterministic internal benchmark for orchestration token efficiency (token metrics, prompt-prefix stability, spawn-gate decisions). No live-model calls.",
 	"author": "jaybeyond",
 	"license": "MIT",

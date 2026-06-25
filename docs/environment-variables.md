@@ -234,7 +234,7 @@ providers:
 
 ### Interactive `--tmux` startup and scroll/mouse profile
 
-`skc --tmux` launches the interactive TUI inside a SKC-managed tmux session. SKC may reuse a scoped managed session from the same project/branch when that session is tagged with the current SKC version; older-version sessions are not auto-attached after upgrades. When SKC creates a session it applies a profile that is **scoped to the SKC session only** (it never runs `set -g` / global tmux options), including:
+`skc --tmux` launches the interactive TUI inside a fresh SKC-managed tmux session. Plain `skc --tmux` does not auto-attach a scoped managed session from the same project/branch; use an explicit resume path such as `skc --tmux --continue`, `skc --tmux --resume`, or `skc session attach <session>` when you intend to continue existing tmux context. Older-version sessions are not auto-attached after upgrades. When SKC creates a session it applies a profile that is **scoped to the SKC session only** (it never runs `set -g` / global tmux options), including:
 
 - `mouse on` — enables mouse-wheel scrolling into tmux copy-mode (history/scrollback).
 - `set-clipboard on` and a readable copy-mode `mode-style`.

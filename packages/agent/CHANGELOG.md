@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.7.2] - 2026-06-24
+
+### Fixed
+
+- Reserved headroom when trimming OpenAI remote compaction input so `/responses/compact` requests stay below the model context window instead of filling the entire window.
+
 ## [0.6.2] - 2026-06-19
 
 ### Changed

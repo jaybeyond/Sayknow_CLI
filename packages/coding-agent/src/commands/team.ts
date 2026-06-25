@@ -95,7 +95,7 @@ export default class Team extends Command {
 	};
 
 	static examples = [
-		"skc --tmux  # start/attach the required tmux-backed leader session first",
+		"skc --tmux  # start the required tmux-backed leader session first",
 		'skc team 3:executor "Implement the approved plan"',
 		"skc team status <team-name> --json",
 		"skc team monitor <team-name> --json",

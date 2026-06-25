@@ -29,7 +29,7 @@ import {
 import { APP_NAME, adjustHsv, getProjectDir, hsvToRgb, isEnoent, logger, postmortem, prompt } from "@sayknow-cli/utils";
 import chalk from "chalk";
 import { AsyncJobManager } from "../async";
-import { KeybindingsManager } from "../config/keybindings";
+import { type AppKeybinding, KeybindingsManager } from "../config/keybindings";
 import { isSettingsInitialized, type Settings, settings } from "../config/settings";
 import { DEFAULT_SKC_DEFINITION_NAMES } from "../defaults/skc-defaults";
 import type {
@@ -118,6 +118,24 @@ import type { CompactionQueuedMessage, InteractiveModeContext, SubmittedUserInpu
 import { UiHelpers } from "./utils/ui-helpers";
 
 const INTERACTIVE_ABORT_CLEANUP_TIMEOUT_MS = 5_000;
+const DEFAULT_COMPOSER_PLACEHOLDER = "Type your message...";
+const FRIENDLY_KEY_PARTS: Record<string, string> = {
+	alt: "Alt",
+	cmd: "Command",
+	command: "Command",
+	ctrl: "Control",
+	enter: "Enter",
+	meta: process.platform === "darwin" ? "Command" : "Meta",
+	option: "Option",
+	shift: "Shift",
+};
+
+function formatShortcutForPlaceholder(key: string): string {
+	return key
+		.split("+")
+		.map(part => FRIENDLY_KEY_PARTS[part.toLowerCase()] ?? part)
+		.join("+");
+}
 
 const HINT_SHIMMER_PALETTE: ShimmerPalette = {
 	low: "dim",
@@ -142,7 +160,7 @@ function configureDefaultComposerChrome(editor: CustomEditor): void {
 	editor.setClosedBorderBox(true);
 	editor.setPromptGutter(undefined);
 	editor.setInputPrefix(getDefaultInputPrefix());
-	editor.setPlaceholder("Type your message...");
+	editor.setPlaceholder(DEFAULT_COMPOSER_PLACEHOLDER);
 	editor.setPaddingX(1);
 	editor.setTopBorder(undefined);
 }
@@ -904,6 +922,31 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.editor.setMaxHeight(this.#computeEditorMaxHeight());
 	}
 
+	#isPromptDeliveryBusy(): boolean {
+		return this.session.isStreaming || this.session.isCompacting;
+	}
+
+	#getFirstKeyForAction(action: AppKeybinding): string | undefined {
+		return this.keybindings.getKeys(action)[0];
+	}
+
+	#getMessageQueueShortcut(): string | undefined {
+		const preferredAction: AppKeybinding =
+			process.platform === "darwin" ? "app.message.followUp" : "app.message.queue";
+		const fallbackAction: AppKeybinding =
+			process.platform === "darwin" ? "app.message.queue" : "app.message.followUp";
+		return this.#getFirstKeyForAction(preferredAction) ?? this.#getFirstKeyForAction(fallbackAction);
+	}
+
+	#getComposerPlaceholder(): string {
+		if (!this.#isPromptDeliveryBusy()) return DEFAULT_COMPOSER_PLACEHOLDER;
+		const enterAction = this.settings.get("busyPromptMode") === "steer" ? "Steering" : "Message Queueing";
+		const parts = [`Enter: ${enterAction}`];
+		const queueKey = this.#getMessageQueueShortcut();
+		if (queueKey) parts.push(`${formatShortcutForPlaceholder(queueKey)}: Message Queueing`);
+		return `${DEFAULT_COMPOSER_PLACEHOLDER} ${parts.join(" · ")}`;
+	}
+
 	updateEditorChrome(): void {
 		if (this.isBashMode) {
 			this.editor.borderColor = this.isBashNoContext
@@ -927,6 +970,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (!this.isBashMode) {
 			this.editor.setInputPrefix(getDefaultInputPrefix());
 		}
+		this.editor.setPlaceholder(this.#getComposerPlaceholder());
 		this.#setComposerTopBorder();
 		this.ui.requestRender();
 	}

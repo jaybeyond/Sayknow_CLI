@@ -232,9 +232,6 @@ install_binary() {
         rm -f "${INSTALL_DIR}/skc"
         echo ""
         echo "No prebuilt SKC binary was found for ${PLATFORM}-${ARCH} in ${LATEST}."
-        if [ "$PLATFORM" = "darwin" ] && [ "$ARCH" = "x64" ]; then
-            echo "Intel macOS standalone binaries are not built by current release CI because the macos-13 runner pool is deprecated."
-        fi
         echo "Fallback options:"
         echo "  - Install via Bun/npm source package: bun install -g sayknow-cli"
         echo "  - Re-run this installer with --source to build/use the npm package path"

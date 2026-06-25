@@ -198,7 +198,7 @@ ws.on("message", (data) => {
 Swap `ws` for a Telegram bot's long-poll loop, a Discord gateway client, or a
 Slack socket-mode app — the contract above is all you implement.
 
-## Telegram onboarding
+## Managed notification adapters
 
 For the exact user setup flow (`skc notify setup`, BotFather token, private-chat pairing, status, and troubleshooting), see [Telegram notification onboarding](./telegram-onboarding.md).
 
@@ -209,6 +209,13 @@ workflow. It remains a client of the generic SDK: it scans session discovery
 files, opens each session WebSocket, and routes Telegram replies back to the
 matching endpoint.
 
+The daemon/session engine is shared. Session discovery, WebSocket protocol,
+redaction decisions, rate-limit pooling, reply routing, singleton ownership, and
+lifecycle control are not reimplemented by each chat surface. Telegram, Discord,
+and Slack adapters are thin presentation layers: they render internal notification
+events into transport payloads and map transport interactions back to `{sessionId,
+actionId,answer}` replies.
+
 ### Setup and auto-connect
 
 Run the setup command once:
@@ -217,14 +224,17 @@ Run the setup command once:
 skc notify setup
 ```
 
-The wizard validates the bot token with Telegram, waits for a private DM to the
-bot, and writes canonical global Settings under `config.yml` in the SKC agent
+The wizard validates the bot token with Telegram, verifies private-chat Threaded
+Mode capability via `getMe.has_topics_enabled`, waits for a private DM to the bot,
+and writes canonical global Settings under `config.yml` in the SKC agent
 directory. It enables:
 
 - `notifications.enabled`
 - `notifications.telegram.botToken`
 - `notifications.telegram.chatId`
 - `notifications.redact` (optional; default false)
+- `notifications.discord.botToken` / `notifications.discord.channelId` (optional Discord adapter)
+- `notifications.slack.botToken` / `notifications.slack.channelId` (optional Slack adapter)
 
 After setup, sessions auto-connect when notifications are enabled. Each session
 still publishes its own loopback endpoint; the daemon is only the Telegram-side
@@ -246,11 +256,21 @@ The trust model is intentionally strict:
   action ids, pending status, or configuration hints;
 - daemon state stores a token fingerprint, not the raw bot token.
 
-### Routing in shared chats
+### Routing in private-chat topics
 
-A single paired chat can receive actions from multiple sessions. The daemon tags
-messages by session, stores compact callback aliases for inline buttons, and
-routes replies back to the exact session/action.
+The paired private chat receives actions from multiple sessions through
+per-session Telegram topics (Threaded Mode). The daemon tags messages by session,
+stores compact callback aliases for inline buttons, and routes replies back to the
+exact session/action. A forum-enabled supergroup is no longer required: once the
+bot owner enables Threaded Mode in @BotFather, the daemon creates one topic per
+session in the paired private chat. SKC cannot enable Threaded Mode through the Bot
+API; setup only verifies the capability and guides the manual BotFather toggle.
+Even after setup verifies `has_topics_enabled`, the first runtime
+`createForumTopic` for the paired chat can still be refused by Telegram. When that
+happens the daemon does not drop the send: it routes the notification to the normal
+(flat) paired chat and posts a one-time `turn on threaded mode from botfather
+miniapp to receive skc notification!` nudge. Pairing is private-only, so flat
+delivery stays within the user's own private DM.
 
 Supported reply paths:
 
@@ -266,6 +286,32 @@ removed — replies are routed by the topic they arrive in.
 Unknown, expired, or restart-unvalidated callback aliases fail closed: the daemon
 sends guidance and does not guess a target session or action.
 
+### Discord and Slack setup
+
+Discord and Slack use the same internal notification events and reply protocol as
+Telegram. Store only runtime credentials in local SKC settings or environment;
+never paste bot tokens, webhook URLs, transcripts, prompts, host paths, or raw logs
+into docs, tests, issues, or PR comments.
+
+Configuration keys:
+
+```yaml
+notifications:
+  enabled: true
+  discord:
+    botToken: "<local Discord bot token>"
+    channelId: "<Discord channel id>"
+  slack:
+    botToken: "<local Slack bot token>"
+    channelId: "<Slack channel id>"
+  redact: true
+```
+
+The bundled adapters intentionally render public-safe message bodies and return
+route metadata only for pending internal actions. They do not own polling,
+session scans, daemon locks, rate limits, or SDK lifecycle. Production transport
+senders should consume the adapter payloads and keep all credential-bearing HTTP
+or gateway details outside logged payloads.
 ### Redaction
 
 `notifications.redact` strips sensitive content before remote delivery, but

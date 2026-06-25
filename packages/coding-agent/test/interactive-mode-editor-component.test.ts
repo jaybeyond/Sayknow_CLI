@@ -72,6 +72,42 @@ describe("InteractiveMode.setEditorComponent", () => {
 		expect(lines.join("\n")).not.toContain("›");
 	});
 
+	function expectedQueueShortcutHint(): string {
+		return `${process.platform === "darwin" ? "Control+Enter" : "Alt+Enter"}: Message Queueing`;
+	}
+
+	it("shows busy steering and queueing hints only while work is active", () => {
+		let rendered = mode.editor
+			.render(96)
+			.map(line => stripVTControlCharacters(line))
+			.join("\n");
+		expect(rendered).toContain("Type your message...");
+		expect(rendered).not.toContain("Enter: Steering");
+		expect(rendered).not.toContain(expectedQueueShortcutHint());
+
+		(session.agent as unknown as { state: { isStreaming: boolean } }).state.isStreaming = true;
+		mode.updateEditorChrome();
+
+		rendered = mode.editor
+			.render(96)
+			.map(line => stripVTControlCharacters(line))
+			.join("\n");
+		expect(rendered).toContain("Type your message...");
+		expect(rendered).toContain("Enter: Steering");
+		expect(rendered).toContain(expectedQueueShortcutHint());
+
+		(session.agent as unknown as { state: { isStreaming: boolean } }).state.isStreaming = false;
+		mode.updateEditorChrome();
+
+		rendered = mode.editor
+			.render(96)
+			.map(line => stripVTControlCharacters(line))
+			.join("\n");
+		expect(rendered).toContain("Type your message...");
+		expect(rendered).not.toContain("Enter: Steering");
+		expect(rendered).not.toContain(expectedQueueShortcutHint());
+	});
+
 	it("renders one visible blank row between status line and composer without hook widgets", async () => {
 		vi.spyOn(mode.ui, "start").mockImplementation(() => {});
 

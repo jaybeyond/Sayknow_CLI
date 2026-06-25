@@ -2370,7 +2370,7 @@ mod tests {
 			.expect("grandchild marker should be emitted before timeout");
 		assert_eq!(result.exit_code, Some(124), "output={output:?}");
 
-		for _ in 0..50 {
+		for _ in 0..250 {
 			let grandchild_dead = process::Process::from_pid(grandchild_pid)
 				.is_none_or(|process| process.status() != process::ProcessStatus::Running);
 			let sibling_alive = process::Process::from_pid(sibling_pid)
@@ -2420,13 +2420,18 @@ mod tests {
 			loop {
 				let chunk = rx.recv().await.expect("output channel should stay open");
 				output.push_str(&chunk);
+				// Wait for BOTH markers: the grandchild and parent lines race on the
+				// pipe, so returning as soon as `grandchild=` appears can leave the
+				// not-yet-read `parent=` chunk pending and flake the parent assertion.
 				if let Some(pid) = parse_marker_pid(&output, "grandchild=") {
-					return pid;
+					if parse_marker_pid(&output, "parent=").is_some() {
+						return pid;
+					}
 				}
 			}
 		})
 		.await
-		.expect("grandchild pid marker");
+		.expect("grandchild and parent pid markers");
 		let parent_pid = parse_marker_pid(&output, "parent=").expect("parent pid marker");
 		let command_pgid = process::Process::from_pid(grandchild_pid)
 			.and_then(|process| process.group_id())

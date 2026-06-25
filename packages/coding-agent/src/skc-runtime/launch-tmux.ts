@@ -93,6 +93,10 @@ function hasCurrentSkcVersion(session: SkcTmuxSessionStatus | undefined): boolea
 	return session?.version === VERSION;
 }
 
+function allowsExistingTmuxAttach(parsed: Args, env: NodeJS.ProcessEnv): boolean {
+	return Boolean(parsed.continue || parsed.resume || explicitTmuxSessionName(env));
+}
+
 function findExistingSessionForLaunch(context: {
 	env: NodeJS.ProcessEnv;
 	project: string;
@@ -352,6 +356,11 @@ function readCurrentBranch(cwd: string): string | null {
 function cleanupCreatedTmuxSession(plan: TmuxLaunchPlan, spawnSync: TmuxSpawnSync, options: TmuxSpawnOptions): void {
 	spawnSync(plan.tmuxCommand, ["kill-session", "-t", `=${plan.sessionName}`], options);
 }
+function isTmuxAttachDisconnectError(result: TmuxSpawnResult): boolean {
+	if (result.signalCode === "SIGHUP") return true;
+	const stderr = result.stderr?.toLowerCase() ?? "";
+	return stderr.includes("eio") || stderr.includes("input/output error");
+}
 
 export function buildDefaultTmuxLaunchPlan(context: TmuxLaunchContext): TmuxLaunchPlan | undefined {
 	const env = context.env ?? process.env;
@@ -377,14 +386,15 @@ export function buildDefaultTmuxLaunchPlan(context: TmuxLaunchContext): TmuxLaun
 		tmuxRuntimeSessionPath(cwd, skcSessionId, buildSkcTmuxSessionSlug(sessionName));
 	const tmuxAvailable = context.tmuxAvailable ?? Bun.which(tmuxCommand) !== null;
 	if (!tmuxAvailable) return undefined;
-	const existingSessionName =
-		"existingBranchSessionName" in context
+	const existingSessionName = allowsExistingTmuxAttach(context.parsed, env)
+		? "existingBranchSessionName" in context
 			? (context.existingBranchSessionName ?? undefined)
 			: findExistingSessionForLaunch({
 					env,
 					project,
 					branch,
-				});
+				})
+		: undefined;
 	const innerCommand = buildInnerCommand(
 		{
 			cwd,
@@ -478,6 +488,10 @@ export function launchDefaultTmuxIfNeeded(context: TmuxLaunchContext): boolean {
 	if (created.exitCode !== 0) return false;
 	const attached = spawnSync(plan.tmuxCommand, ["attach-session", "-t", `=${plan.sessionName}`], options);
 	if (attached.exitCode === 0) return true;
+	if (isTmuxAttachDisconnectError(attached)) {
+		(context.diagnosticWriter ?? safeStderrWrite)(formatTmuxLaunchDiagnostic("attach disconnected", attached.stderr));
+		return true;
+	}
 	cleanupCreatedTmuxSession(plan, spawnSync, options);
 	(context.diagnosticWriter ?? safeStderrWrite)(formatTmuxLaunchDiagnostic("attach failed", attached.stderr));
 	return true;

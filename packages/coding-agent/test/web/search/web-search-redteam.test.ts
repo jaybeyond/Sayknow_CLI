@@ -118,18 +118,26 @@ describe("red-team native-provider inference", () => {
 		await expect(chainIds(ctx, { auth: ["codex", "openai-codex"] })).resolves.toEqual(["duckduckgo"]);
 	});
 
-	it("selects codex for hosted OpenAI-family models only when Codex credentials exist", async () => {
-		await expect(chainIds(hostedOpenAI, { auth: [] })).resolves.toEqual(["duckduckgo"]);
-		await expect(chainIds(hostedOpenAI, { auth: ["openai-codex"] })).resolves.toEqual(["codex", "duckduckgo"]);
+	it("selects codex only for official OpenAI base URLs, never for custom/proxy endpoints", async () => {
+		const officialOpenAI = { ...hostedOpenAI, provider: "openai", baseUrl: "https://api.openai.com/v1" };
+		// Official OpenAI endpoint + Codex OAuth → dedicated codex (ChatGPT backend).
+		await expect(chainIds(officialOpenAI, { auth: [] })).resolves.toEqual(["duckduckgo"]);
+		await expect(chainIds(officialOpenAI, { auth: ["openai-codex"] })).resolves.toEqual(["codex", "duckduckgo"]);
+		// A custom/proxy endpoint must NOT use the local-OAuth codex backend even
+		// when Codex OAuth exists; with no own creds here it falls to DuckDuckGo.
+		await expect(chainIds(hostedOpenAI, { auth: ["openai-codex"] })).resolves.toEqual(["duckduckgo"]);
 	});
 
-	it("keeps ambiguous OpenAI-family ids non-codex on local baseUrls", async () => {
+	it("never selects hosted codex for ambiguous OpenAI-family ids on local baseUrls", async () => {
+		// Codex (ChatGPT backend) is never inferred for a local endpoint. The endpoint's
+		// OWN credential, however, drives the generic native web_search attempt (which
+		// fails closed to DuckDuckGo if the endpoint ignores the tool).
 		await expect(
 			chainIds(
 				{ provider: "local", modelId: "gpt-oss-120b", api: "openai-completions", baseUrl: "http://0.0.0.0:9999" },
 				{ auth: ["openai-codex", "local"] },
 			),
-		).resolves.toEqual(["duckduckgo"]);
+		).resolves.toEqual(["openai-compatible", "duckduckgo"]);
 	});
 
 	it("maps Claude over a localhost proxy to Anthropic dedicated search credentials", async () => {
