@@ -6,6 +6,7 @@
     "packages/coding-agent/src/commands/launch.ts",
     "packages/coding-agent/src/config/settings-schema.ts",
     "packages/coding-agent/src/config/settings.ts",
+    "packages/coding-agent/src/config/model-profile-activation.ts",
     "packages/coding-agent/src/extensibility/slash-commands.ts",
     "packages/coding-agent/src/modes/components/history-search.ts",
     "packages/coding-agent/src/modes/components/hook-selector.ts",

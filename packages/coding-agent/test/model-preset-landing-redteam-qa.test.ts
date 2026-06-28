@@ -6,6 +6,7 @@ import {
 	ModelSelectorComponent,
 	type ModelSelectorSelection,
 } from "@sayknow-cli/coding-agent/modes/components/model-selector";
+import { setLanguage } from "@sayknow-cli/coding-agent/i18n/index";
 import { getThemeByName, setThemeInstance } from "@sayknow-cli/coding-agent/modes/theme/theme";
 import type { TUI } from "@sayknow-cli/tui";
 
@@ -151,6 +152,11 @@ function cursorRowLabel(selector: ModelSelectorComponent): string | undefined {
 
 describe("preset landing adversarial QA", () => {
 	beforeAll(async () => {
+		// The fork's model selector is i18n'd; the assertions below check the
+		// Korean strings, so pin the language deterministically — otherwise the
+		// active language leaks from whichever test ran last (en vs ko) and these
+		// assertions flake by test-execution order.
+		setLanguage("ko");
 		testTheme = await getThemeByName("red-octopus");
 		installTestTheme();
 	});
@@ -163,16 +169,16 @@ describe("preset landing adversarial QA", () => {
 		selector.handleInput("\x1b[B");
 		selector.handleInput("\n"); // preview first expanded profile
 		selector.handleInput("\n"); // scope menu
-		expect(normalizeRenderedText(selector.render(260).join("\n"))).toContain("Apply for this session");
+		expect(normalizeRenderedText(selector.render(260).join("\n"))).toContain("이 세션에만 적용");
 
 		selector.handleInput("\x1b");
 		let text = normalizeRenderedText(selector.render(260).join("\n"));
-		expect(text).not.toContain("Apply for this session");
-		expect(text).toContain("Preset preview: Codex Eco");
+		expect(text).not.toContain("이 세션에만 적용");
+		expect(text).toContain("프리셋 미리보기: Codex Eco");
 
 		selector.handleInput("\x1b");
 		text = normalizeRenderedText(selector.render(260).join("\n"));
-		expect(text).not.toContain("Preset preview:");
+		expect(text).not.toContain("프리셋 미리보기:");
 		expect(text).toContain("Codex Eco");
 
 		selector.handleInput("\x1b");
@@ -193,10 +199,10 @@ describe("preset landing adversarial QA", () => {
 		selector.handleInput("\n");
 		selector.handleInput("g");
 		const text = normalizeRenderedText(selector.render(260).join("\n"));
-		expect(text).toContain("Models");
+		expect(text).toContain("모델");
 		expect(text).toContain("gpt-5.5");
-		expect(text).not.toContain("Preset preview:");
-		expect(text).not.toContain("Apply for this session");
+		expect(text).not.toContain("프리셋 미리보기:");
+		expect(text).not.toContain("이 세션에만 적용");
 	});
 
 	test("up/down wraps at landing boundaries and Browse all preserves model role menu", async () => {
@@ -204,7 +210,7 @@ describe("preset landing adversarial QA", () => {
 		await rendered(selector);
 		selector.handleInput("\x1b[A");
 		let text = normalizeRenderedText(selector.render(260).join("\n"));
-		expect(text).toContain("Browse all models");
+		expect(text).toContain("전체 모델 보기");
 		selector.handleInput("\x1b[B");
 		text = normalizeRenderedText(selector.render(260).join("\n"));
 		expect(text).toContain("CODEX");
@@ -212,19 +218,19 @@ describe("preset landing adversarial QA", () => {
 		selector.handleInput("\n");
 		selector.handleInput("\n");
 		text = normalizeRenderedText(selector.render(260).join("\n"));
-		expect(text).toContain("Action for:");
+		expect(text).toContain("작업 대상:");
 		expect(text).toContain("Set as DEFAULT");
 		expect(text).toContain("Set as EXECUTOR");
 	});
 
 	test("temporaryOnly, initialSearchInput, and scoped models bypass preset landing", async () => {
-		expect(await rendered(createSelector({ temporaryOnly: true }))).not.toContain("Model presets");
+		expect(await rendered(createSelector({ temporaryOnly: true }))).not.toContain("모델 프리셋");
 		const initial = await rendered(createSelector({ initialSearchInput: "claude" }));
-		expect(initial).not.toContain("Model presets");
-		expect(initial).toContain("Models");
+		expect(initial).not.toContain("모델 프리셋");
+		expect(initial).toContain("모델");
 		const scoped = await rendered(createSelector({ scopedModels: [{ model: codexModel }] }));
-		expect(scoped).not.toContain("Model presets");
-		expect(scoped).toContain("Showing models from --models scope");
+		expect(scoped).not.toContain("모델 프리셋");
+		expect(scoped).toContain("--models 범위의 모델만 표시 중");
 	});
 
 	test("partial combo auth requests login for a missing provider", async () => {
@@ -325,7 +331,7 @@ describe("preset landing adversarial QA", () => {
 		selector.handleInput("\x1b[B"); // cross boundary into MINIMAX group
 		const headerLabel = cursorRowLabel(selector);
 		expect(headerLabel).toContain("MINIMAX");
-		expect(headerLabel).not.toContain("Browse all models");
+		expect(headerLabel).not.toContain("전체 모델 보기");
 		expect(headerLabel).not.toContain("MiniMax Medium");
 
 		// Navigation continues correctly through the destination group after

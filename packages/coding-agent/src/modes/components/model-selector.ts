@@ -20,6 +20,7 @@ import {
 import type { ModelRegistry, SkcModelAssignmentTargetId } from "../../config/model-registry";
 import {
 	isAuthenticated,
+	kNoAuth,
 	SKC_MODEL_ASSIGNMENT_TARGET_IDS,
 	SKC_MODEL_ASSIGNMENT_TARGETS,
 } from "../../config/model-registry";
@@ -804,7 +805,14 @@ export class ModelSelectorComponent extends Container {
 		const entries = await Promise.all(
 			[...providers].map(async provider => {
 				const apiKey = await this.#modelRegistry.getApiKeyForProvider(provider, this.#authSessionId);
-				return [provider, isAuthenticated(apiKey)] as const;
+				// "Usable" — not "has a real API key". getApiKeyForProvider returns the
+				// kNoAuth ("N/A") sentinel for keyless/no-auth providers (local LLMs,
+				// `--auth none` custom providers), which are usable WITHOUT a key. But
+				// isAuthenticated() deliberately rejects kNoAuth, so using it alone would
+				// flag those providers unauthenticated and silently bail their presets
+				// into a login flow instead of applying. Treat kNoAuth as usable here,
+				// matching setModel()/getApiKey() which already accept it.
+				return [provider, isAuthenticated(apiKey) || apiKey === kNoAuth] as const;
 			}),
 		);
 		this.#providerAuthById = new Map(entries);

@@ -1,6 +1,14 @@
 --- a/packages/coding-agent/src/modes/components/model-selector.ts
 +++ b/packages/coding-agent/src/modes/components/model-selector.ts
-@@ -29,6 +29,7 @@
+@@ -20,6 +20,7 @@
+ import type { ModelRegistry, SkcModelAssignmentTargetId } from "../../config/model-registry";
+ import {
+ 	isAuthenticated,
++	kNoAuth,
+ 	SKC_MODEL_ASSIGNMENT_TARGET_IDS,
+ 	SKC_MODEL_ASSIGNMENT_TARGETS,
+ } from "../../config/model-registry";
+@@ -29,6 +30,7 @@
  	type ScopedModelSelection,
  } from "../../config/model-resolver";
  import type { Settings } from "../../config/settings";
@@ -8,7 +16,7 @@
  import { type ThemeColor, theme } from "../../modes/theme/theme";
  import { formatModelOnboardingInlineHint } from "../../setup/model-onboarding-guidance";
  import { formatClampedModelSelector, getThinkingLevelMetadata, parseThinkingLevel } from "../../thinking";
-@@ -105,6 +106,12 @@
+@@ -105,6 +107,12 @@
  	  }
  	| {
  			kind: "createProfile";
@@ -21,7 +29,7 @@
  	  };
  
  interface PendingThinkingChoice {
-@@ -184,7 +191,7 @@
+@@ -184,7 +192,7 @@
  	"critic",
  	"architect",
  ];
@@ -30,7 +38,7 @@
  
  function isPrintableCharacter(keyData: string): boolean {
  	return keyData.length === 1 && keyData >= " " && keyData !== "\x7f";
-@@ -284,8 +291,7 @@
+@@ -298,8 +306,7 @@
  		this.addChild(new Spacer(1));
  
  		// Add hint about model filtering
@@ -40,7 +48,7 @@
  		this.addChild(new Text(theme.fg("warning", hintText), 0, 0));
  		this.addChild(new Spacer(1));
  
-@@ -588,7 +594,7 @@
+@@ -619,7 +626,7 @@
  		this.#headerContainer.clear();
  
  		const tabs: Tab[] = this.#providers.map(provider => ({ id: provider.id, label: provider.label }));
@@ -49,7 +57,7 @@
  		tabBar.onTabChange = (_tab, index) => {
  			this.#activeTabIndex = index;
  			this.#selectedIndex = 0;
-@@ -732,9 +738,15 @@
+@@ -763,9 +770,15 @@
  		const profiles = Array.isArray(profileOrProfiles) ? profileOrProfiles : [profileOrProfiles];
  		const providers = new Set<string>();
  		for (const profile of profiles) for (const provider of profileRequiredProviders(profile)) providers.add(provider);
@@ -68,7 +76,23 @@
  	}
  
  	#isPresetAuthenticated(profileOrProfiles: ModelProfileDefinition | ModelProfileDefinition[]): boolean {
-@@ -818,19 +830,19 @@
+@@ -792,7 +805,14 @@
+ 		const entries = await Promise.all(
+ 			[...providers].map(async provider => {
+ 				const apiKey = await this.#modelRegistry.getApiKeyForProvider(provider, this.#authSessionId);
+-				return [provider, isAuthenticated(apiKey)] as const;
++				// "Usable" — not "has a real API key". getApiKeyForProvider returns the
++				// kNoAuth ("N/A") sentinel for keyless/no-auth providers (local LLMs,
++				// `--auth none` custom providers), which are usable WITHOUT a key. But
++				// isAuthenticated() deliberately rejects kNoAuth, so using it alone would
++				// flag those providers unauthenticated and silently bail their presets
++				// into a login flow instead of applying. Treat kNoAuth as usable here,
++				// matching setModel()/getApiKey() which already accept it.
++				return [provider, isAuthenticated(apiKey) || apiKey === kNoAuth] as const;
+ 			}),
+ 		);
+ 		this.#providerAuthById = new Map(entries);
+@@ -849,19 +869,19 @@
  		this.#headerContainer.clear();
  		this.#tabBar = null;
  		this.#listContainer.clear();
@@ -91,7 +115,7 @@
  				this.#listContainer.addChild(new Text(`${prefix}${selected ? theme.fg("accent", label) : label}`, 0, 0));
  				continue;
  			}
-@@ -860,7 +872,14 @@
+@@ -891,7 +911,14 @@
  	#renderPresetPreview(profile: ModelProfileDefinition): void {
  		this.#listContainer.addChild(new Spacer(1));
  		this.#listContainer.addChild(
@@ -107,7 +131,7 @@
  		);
  		for (const role of PROFILE_ROLE_PREVIEW_ORDER) {
  			const selector = profile.modelMapping[role];
-@@ -877,15 +896,15 @@
+@@ -908,15 +935,15 @@
  		}
  		this.#listContainer.addChild(new Spacer(1));
  		if (this.#presetScopeMenuOpen) {
@@ -126,7 +150,7 @@
  		}
  	}
  
-@@ -1038,7 +1057,10 @@
+@@ -1083,7 +1110,10 @@
  			const statusMessage = this.#getProviderEmptyStateMessage();
  			this.#listContainer.addChild(
  				new Text(
@@ -138,7 +162,7 @@
  					0,
  					0,
  				),
-@@ -1053,7 +1075,11 @@
+@@ -1098,7 +1128,11 @@
  				? ` (${selected.model.provider}/${selected.model.id}, ${(selected as CanonicalModelItem).variantCount} variants)`
  				: "";
  			this.#listContainer.addChild(
@@ -151,7 +175,7 @@
  			);
  			if (this.#pendingThinkingChoice) {
  				this.#renderThinkingMenu(this.#pendingThinkingChoice);
-@@ -1065,7 +1091,9 @@
+@@ -1110,7 +1144,9 @@
  
  	#renderActionMenu(item: ModelItem | CanonicalModelItem): void {
  		this.#listContainer.addChild(new Spacer(1));
@@ -162,7 +186,7 @@
  		this.#listContainer.addChild(new Spacer(1));
  		const actionCount = this.#getActionCount(item.model);
  		for (let i = 0; i < actionCount; i++) {
-@@ -1079,10 +1107,18 @@
+@@ -1124,10 +1160,18 @@
  	}
  
  	#renderThinkingMenu(choice: PendingThinkingChoice): void {
@@ -183,7 +207,7 @@
  		);
  		this.#listContainer.addChild(new Spacer(1));
  		for (let i = 0; i < choice.levels.length; i++) {
-@@ -1176,7 +1212,7 @@
+@@ -1221,7 +1265,7 @@
  			if (rows.length === 0) return;
  			if (this.#presetScopeMenuOpen) {
  				this.#presetScopeIndex =
@@ -192,7 +216,7 @@
  			} else {
  				this.#presetCursor = this.#presetCursor === 0 ? rows.length - 1 : this.#presetCursor - 1;
  				this.#previewProfileName = undefined;
-@@ -1190,7 +1226,7 @@
+@@ -1235,7 +1279,7 @@
  			const rows = this.#getPresetRows();
  			if (rows.length === 0) return;
  			if (this.#presetScopeMenuOpen) {
@@ -201,7 +225,7 @@
  			} else {
  				this.#presetCursor = (this.#presetCursor + 1) % rows.length;
  				this.#previewProfileName = undefined;
-@@ -1274,6 +1310,7 @@
+@@ -1319,6 +1363,7 @@
  			// navigable so the user can drill in and pick a usable member.
  			if (!this.#isPresetGroupUsable(row.profiles)) {
  				const missing = this.#getMissingProviders(row.profiles);
@@ -209,7 +233,7 @@
  				this.#presetLoginHint = `Run ${missing.map(provider => `/login ${provider}`).join(", ")}`;
  				this.#renderPresetLanding();
  			}
-@@ -1281,6 +1318,7 @@
+@@ -1326,6 +1371,7 @@
  		}
  		const missing = this.#getMissingProviders(row.profile);
  		if (missing.length > 0) {
@@ -217,7 +241,7 @@
  			this.#presetLoginHint = `Run ${missing.map(provider => `/login ${provider}`).join(", ")}`;
  			this.#renderPresetLanding();
  			return;
-@@ -1290,6 +1328,22 @@
+@@ -1335,6 +1381,22 @@
  		this.#renderPresetLanding();
  	}
  

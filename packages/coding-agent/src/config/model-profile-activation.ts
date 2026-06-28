@@ -9,6 +9,7 @@ import {
 } from "./model-profiles";
 import {
 	isAuthenticated,
+	kNoAuth,
 	type ModelRegistry,
 	SKC_MODEL_ASSIGNMENT_TARGETS,
 	type SkcModelAssignmentTargetId,
@@ -192,7 +193,12 @@ export async function prepareModelProfileActivation(
 	const authenticatedProviders: string[] = [];
 	for (const provider of allProviders) {
 		const apiKey = await options.modelRegistry.getApiKeyForProvider(provider, options.session.sessionId);
-		if (!isAuthenticated(apiKey)) {
+		// kNoAuth ("N/A") is the sentinel for keyless/no-auth providers (local LLMs,
+		// `--auth none` custom providers): usable WITHOUT a key. isAuthenticated()
+		// rejects it, so gate on usability ("a credential resolved OR keyless")
+		// rather than "has a real key" — otherwise activating a keyless profile
+		// throws a spurious "requires credentials" error and the model never applies.
+		if (!isAuthenticated(apiKey) && apiKey !== kNoAuth) {
 			missingProviders.push(provider);
 		} else {
 			authenticatedProviders.push(provider);
