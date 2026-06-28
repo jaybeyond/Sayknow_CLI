@@ -176,6 +176,12 @@ pub enum ServerMessage {
 	Activity(Activity),
 	/// Inbound user-message delivery acknowledgement (native double-check UX).
 	InboundAck(InboundAck),
+	/// Replayable readiness signal: the session is up and surfaced. Buffered
+	/// and replayed to late clients so WS-open alone never implies readiness.
+	SessionReady(SessionReady),
+	/// Session endpoint teardown signal for clients that maintain per-session
+	/// surfaces.
+	SessionClosed(SessionClosed),
 	/// Application-level liveness response to a client ping.
 	Pong(Pong),
 	/// Forward-compat: an unrecognized frame type. Tolerated, never emitted.
@@ -329,6 +335,14 @@ pub struct ConfigUpdate {
 	pub redact:     Option<bool>,
 }
 
+/// Session endpoint teardown signal.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionClosed {
+	/// The session whose notification endpoint is shutting down.
+	pub session_id: String,
+}
+
 /// Server capability/version advertisement.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -458,6 +472,35 @@ pub struct InboundAck {
 	pub state:      InboundAckState,
 }
 
+/// A replayable per-session readiness signal.
+///
+/// Emitted once the session's endpoint is up and surfaced into its thread.
+/// Unlike [`IdentityHeader`], this frame is buffered and replayed to clients
+/// that connect late, so a lifecycle control client can deterministically wait
+/// for readiness instead of relying on WS-open (which proves nothing about the
+/// session actually being live and surfaced).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionReady {
+	/// The session that is now ready.
+	pub session_id:           String,
+	/// The lifecycle marker that spawned this session, when applicable.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub lifecycle_request_id: Option<String>,
+	/// The startup-prompt reference consumed by this session, when applicable.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub startup_prompt_ref:   Option<String>,
+	/// Repository/project name, when known.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub repo:                 Option<String>,
+	/// Branch name, when known.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub branch:               Option<String>,
+	/// A short session title, when known.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub title:                Option<String>,
+}
+
 /// Current protocol version emitted in [`ServerHello`].
 pub const PROTOCOL_VERSION: u32 = 2;
 
@@ -479,6 +522,10 @@ pub mod capabilities {
 	pub const INBOUND_ACK: &str = "inbound_ack";
 	/// Application-level client ping/server pong.
 	pub const CLIENT_PING_PONG: &str = "client_ping_pong";
+	/// Daemon-owned session lifecycle control (create/close/resume ingress).
+	pub const SESSION_LIFECYCLE: &str = "session_lifecycle";
+	/// Replayable readiness signal for late-connecting clients.
+	pub const SESSION_READY: &str = "session_ready";
 }
 
 #[cfg(test)]
@@ -604,6 +651,14 @@ mod tests {
 		assert_eq!(v["branch"], "feat/notification-surface");
 		assert_eq!(v["machine"], "mac-studio");
 		assert_eq!(v["title"], "Rebuild notifications");
+	}
+
+	#[test]
+	fn session_closed_serializes_camelcase() {
+		let msg = ServerMessage::SessionClosed(SessionClosed { session_id: "sess-1".into() });
+		let v = serde_json::to_value(&msg).unwrap();
+		assert_eq!(v["type"], "session_closed");
+		assert_eq!(v["sessionId"], "sess-1");
 	}
 
 	#[test]

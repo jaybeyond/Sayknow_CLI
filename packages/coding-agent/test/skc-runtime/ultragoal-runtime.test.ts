@@ -35,10 +35,13 @@ const TEST_SESSION_ID = "test-session";
 const tempRoots: string[] = [];
 
 let savedSessionId: string | undefined;
+let savedSessionFile: string | undefined;
 
 beforeEach(() => {
 	savedSessionId = process.env.SKC_SESSION_ID;
+	savedSessionFile = process.env.SKC_SESSION_FILE;
 	process.env.SKC_SESSION_ID = TEST_SESSION_ID;
+	delete process.env.SKC_SESSION_FILE;
 });
 
 async function tempDir(): Promise<string> {
@@ -50,6 +53,8 @@ async function tempDir(): Promise<string> {
 afterEach(async () => {
 	if (savedSessionId === undefined) delete process.env.SKC_SESSION_ID;
 	else process.env.SKC_SESSION_ID = savedSessionId;
+	if (savedSessionFile === undefined) delete process.env.SKC_SESSION_FILE;
+	else process.env.SKC_SESSION_FILE = savedSessionFile;
 	await Promise.all(tempRoots.splice(0).map(dir => fs.rm(dir, { recursive: true, force: true })));
 });
 
@@ -411,6 +416,80 @@ function goalSnapshot(objective: string, status = "active", updatedAt: number | 
 	});
 }
 
+async function seedGoalModeSessionFile(root: string, objective: string, status = "active"): Promise<string> {
+	const sessionFile = path.join(root, "session.jsonl");
+	const now = Date.now();
+	await Bun.write(
+		sessionFile,
+		`${JSON.stringify({ version: 3, type: "session", id: TEST_SESSION_ID, createdAt: new Date(now).toISOString() })}\n${JSON.stringify(
+			{
+				type: "mode_change",
+				id: "goal-mode",
+				parentId: null,
+				timestamp: new Date(now).toISOString(),
+				mode: "goal",
+				data: {
+					goal: {
+						id: "goal-1",
+						objective,
+						status,
+						tokensUsed: 0,
+						timeUsedSeconds: 0,
+						createdAt: now,
+						updatedAt: now,
+					},
+				},
+			},
+		)}\n`,
+	);
+	process.env.SKC_SESSION_FILE = sessionFile;
+	return sessionFile;
+}
+
+async function seedAmbiguousGoalModeSessionFile(root: string, objective: string): Promise<string> {
+	const sessionFile = path.join(root, "ambiguous-session.jsonl");
+	const now = Date.now();
+	const staleMatchingGoal = {
+		id: "stale-goal",
+		objective,
+		status: "active",
+		tokensUsed: 0,
+		timeUsedSeconds: 0,
+		createdAt: now,
+		updatedAt: now,
+	};
+	const intendedBranchGoal = { ...staleMatchingGoal, id: "intended-goal", objective: "different active branch goal" };
+	const entries = [
+		{ version: 3, type: "session", id: TEST_SESSION_ID, timestamp: new Date(now).toISOString(), cwd: root },
+		{
+			type: "mode_change",
+			id: "root-goal",
+			parentId: null,
+			timestamp: new Date(now).toISOString(),
+			mode: "goal",
+			data: { goal: intendedBranchGoal },
+		},
+		{
+			type: "mode_change",
+			id: "intended-branch",
+			parentId: "root-goal",
+			timestamp: new Date(now).toISOString(),
+			mode: "none",
+		},
+		{
+			type: "mode_change",
+			id: "stale-matching-branch",
+			parentId: "root-goal",
+			timestamp: new Date(now).toISOString(),
+			mode: "goal",
+			data: { goal: staleMatchingGoal },
+		},
+	];
+	await Bun.write(sessionFile, `${entries.map(entry => JSON.stringify(entry)).join("\n")}\n`);
+	process.env.SKC_SESSION_FILE = sessionFile;
+	return sessionFile;
+}
+
 async function readJsonFile(filePath: string): Promise<Record<string, unknown>> {
 	return (await Bun.file(filePath).json()) as Record<string, unknown>;
 }
@@ -589,6 +668,10 @@ describe("ultragoal CLI replay validation", () => {
 			cliExecutorQa([cliReplayArtifact({ command: ["bun", "install"] })]),
 		);
 		expect(unallowlistedError).toContain("allowlist");
+		expect(unallowlistedError).toContain('command "bun" with 1 arg is blocked');
+		expect(unallowlistedError).not.toContain("install");
+		expect(unallowlistedError).toContain("Allowed replay commands");
+		expect(unallowlistedError).toContain("replayExempt metadata");
 	});
 
 	it("rejects execution-affecting env and git side-effect flags", async () => {
@@ -611,6 +694,8 @@ describe("ultragoal CLI replay validation", () => {
 			]),
 		);
 		expect(gitError).toContain("allowlist");
+		expect(gitError).toContain('command "git" with 2 args is blocked');
+		expect(gitError).not.toContain("--output=artifact.txt");
 	});
 
 	it("rejects path-qualified or case-spoofed replay executables", async () => {
@@ -909,7 +994,7 @@ describe("native SKC ultragoal runtime", () => {
 		expect(result.status).toBe(0);
 		expect(result.stdout).toContain("skc ultragoal checkpoint --goal-id");
 		expect(result.stdout).toContain("--quality-gate-json");
-		expect(result.stdout).toContain('goal({"op":"get"})');
+		expect(result.stdout).toContain("current session goal state");
 		expect(result.stdout).toContain("obligation");
 	});
 
@@ -2107,7 +2192,7 @@ describe("native SKC ultragoal runtime", () => {
 		expect(coverageError).toContain("executorQa.contractCoverage[0].surfaceEvidenceRefs");
 	});
 
-	it("enforces not-applicable and GUI/web artifact compatibility rules", async () => {
+	it("enforces not-applicable and surface artifact compatibility rules", async () => {
 		const root = await tempDir();
 		const created = await createUltragoalPlan({ cwd: root, brief: "Ship the fix" });
 		await startNextUltragoalGoal({ cwd: root });
@@ -2129,14 +2214,29 @@ describe("native SKC ultragoal runtime", () => {
 			refs[0]!.kind = "cli-log";
 			refs[1]!.kind = "terminal-transcript";
 		});
+		const apiWithFailureArtifact = await mutateLiveQualityGate(root, gate => {
+			const surfaceEvidence = gate.executorQa!.surfaceEvidence as Array<Record<string, unknown>>;
+			surfaceEvidence[0] = {
+				id: "surface-api",
+				surface: "api/package",
+				contractRef: "approved-plan:goal",
+				invocation: "Run package consumer verification",
+				verdict: "passed",
+				artifactRefs: ["adversarial-report"],
+			};
+		});
 
 		const notApplicableError = await expectRejectedCompleteGate(root, created, notApplicableWithoutReason);
 		const adversarialError = await expectRejectedCompleteGate(root, created, adversarialNotApplicable);
 		const guiError = await expectRejectedCompleteGate(root, created, guiWithCliOnlyArtifact);
+		const apiError = await expectRejectedCompleteGate(root, created, apiWithFailureArtifact);
 
 		expect(notApplicableError).toContain("executorQa.surfaceEvidence[0].reason");
 		expect(adversarialError).toContain("executorQa.adversarialCases[0].status");
 		expect(guiError).toContain("GUI/web surfaces");
+		expect(apiError).toContain("API/package surfaces");
+		expect(apiError).toContain("expected at least one artifact kind containing one of");
+		expect(apiError).toContain("adversarial-report=failure-mode-test");
 	});
 
 	it("rejects failed executor QA matrix row outcomes before mutation", async () => {
@@ -2243,7 +2343,39 @@ describe("native SKC ultragoal runtime", () => {
 		).rejects.toThrow(/kill-switch-bypass/);
 	});
 
-	it("requires a fresh goal get snapshot for complete checkpoints", async () => {
+	it("sources complete checkpoint goal snapshots from current session state when omitted", async () => {
+		const root = await tempDir();
+		const created = await createUltragoalPlan({ cwd: root, brief: "Ship the fix" });
+		await startNextUltragoalGoal({ cwd: root });
+		await seedGoalModeSessionFile(root, created.skcObjective);
+
+		const result = await runNativeUltragoalCommand(
+			[
+				"checkpoint",
+				"--goal-id",
+				"G001",
+				"--status",
+				"complete",
+				"--evidence",
+				"tests passed",
+				"--quality-gate-json",
+				await passingLiveQualityGate(root),
+				"--json",
+			],
+			root,
+		);
+		const receipt = JSON.parse(result.stdout ?? "{}");
+		const plan = await readUltragoalPlan(root);
+		const ledger = await readUltragoalLedger(root);
+		const checkpoint = ledger.find(event => event.event === "goal_checkpointed");
+
+		expect(result.status).toBe(0);
+		expect(receipt.quality_gate_hash).toEqual(expect.any(String));
+		expect(plan?.goals[0]?.completionVerification?.skcGoalSnapshotHash).toEqual(expect.any(String));
+		expect(checkpoint?.skcGoalJson).toMatchObject({ goal: { objective: created.skcObjective, status: "active" } });
+	});
+
+	it("requires supplied or current-session goal snapshots for complete checkpoints", async () => {
 		const root = await tempDir();
 		await createUltragoalPlan({ cwd: root, brief: "Ship the fix" });
 		await startNextUltragoalGoal({ cwd: root });
@@ -2265,9 +2397,42 @@ describe("native SKC ultragoal runtime", () => {
 		);
 
 		expect(result.status).toBe(1);
-		expect(result.stderr).toContain("complete checkpoints require --skc-goal-json");
+		expect(result.stderr).toContain("complete checkpoints require an active SKC goal-mode snapshot");
 		expect(await Bun.file(path.join(sessionUltragoalDir(root, TEST_SESSION_ID), "goals.json")).text()).toBe(
 			beforeGoals,
+		);
+	});
+
+	it("fails closed instead of using stale last-entry goal snapshots from ambiguous session branches", async () => {
+		const root = await tempDir();
+		const created = await createUltragoalPlan({ cwd: root, brief: "Ship the fix" });
+		await startNextUltragoalGoal({ cwd: root });
+		await seedAmbiguousGoalModeSessionFile(root, created.skcObjective);
+		const beforeGoals = await Bun.file(path.join(sessionUltragoalDir(root, TEST_SESSION_ID), "goals.json")).text();
+		const beforeLedger = await Bun.file(path.join(sessionUltragoalDir(root, TEST_SESSION_ID), "ledger.jsonl")).text();
+
+		const result = await runNativeUltragoalCommand(
+			[
+				"checkpoint",
+				"--goal-id",
+				"G001",
+				"--status",
+				"complete",
+				"--evidence",
+				"tests passed",
+				"--quality-gate-json",
+				await passingLiveQualityGate(root),
+			],
+			root,
+		);
+
+		expect(result.status).toBe(1);
+		expect(result.stderr).toContain("complete checkpoints require an active SKC goal-mode snapshot");
+		expect(await Bun.file(path.join(sessionUltragoalDir(root, TEST_SESSION_ID), "goals.json")).text()).toBe(
+			beforeGoals,
+		);
+		expect(await Bun.file(path.join(sessionUltragoalDir(root, TEST_SESSION_ID), "ledger.jsonl")).text()).toBe(
+			beforeLedger,
 		);
 	});
 

@@ -10,8 +10,32 @@ import type { DaemonRuntimeInfo } from "../daemon/control-types";
 import { resolveSkcRuntimeSpawnInfo } from "../daemon/runtime";
 import { getNotificationConfig, isGloballyConfigured, tokenFingerprint } from "./config";
 import { parseInThreadConfigCommand } from "./config-commands";
-import { buildButtonGrid, TELEGRAM_PARSE_MODE } from "./html-format";
+import { buildCompactChoiceGrid, TELEGRAM_PARSE_MODE } from "./html-format";
+import type {
+	SessionCloseTarget,
+	SessionCreateTarget,
+	SessionLifecycleRequest,
+	SessionLifecycleResponse,
+	SessionResumeTarget,
+} from "./index";
+import {
+	formatLifecycleOutcome,
+	isLifecycleCommandText,
+	lifecycleUsage,
+	parseLifecycleCommand,
+	validateLifecycleTarget,
+} from "./lifecycle-commands";
+import {
+	attachLifecycleControl,
+	buildOrchestratorDeps,
+	type ControlServerLike,
+	createNativeControlServer,
+	type LifecycleControlServer,
+	type LifecycleControlServerFactory,
+} from "./lifecycle-control-runtime";
+import { NotificationOperatorRuntime, OperatorBackoffPolicy, OperatorEventRouter } from "./operator-runtime";
 import { RateLimitPool } from "./rate-limit-pool";
+import { listRecentSessions } from "./recent-activity";
 import {
 	type AliasTable,
 	buildActionMessage,
@@ -104,6 +128,7 @@ const TYPING_REFRESH_INTERVAL_MS = 4_000;
 // Native reactions used as a two-stage delivery double-check on inbound thread
 // messages: queued on receipt, consumed once a turn picks the message up.
 const QUEUED_REACTION = "👀";
+const PENDING_TOPIC_FRAME_LIMIT = 20;
 const CONSUMED_REACTION = "✅";
 
 /**
@@ -169,6 +194,31 @@ export function daemonPaths(agentDir: string): DaemonPaths {
 		steal: path.join(dir, "telegram-daemon.steal"),
 		aliases: path.join(dir, "telegram-callback-aliases.json"),
 	};
+}
+
+/**
+ * Attach session-lifecycle control (create/close/resume) to the running daemon.
+ *
+ * Wires an already-started, authenticated control server to the lifecycle
+ * orchestrator with real daemon-side effects (tmux launcher / force-close /
+ * resume), a durable fsynced idempotency ledger + audit JSONL under the agent
+ * notifications dir, and strict paired-chat gating. The control server itself
+ * (NotificationControlServer) is owned/started by the daemon process; this
+ * function only connects it to policy. Returns the orchestrator deps for tests.
+ */
+export function startDaemonLifecycleControl(input: {
+	controlServer: ControlServerLike;
+	pairedChatId: string;
+	agentDir: string;
+	env?: NodeJS.ProcessEnv;
+}): void {
+	const deps = buildOrchestratorDeps({
+		pairedChatId: input.pairedChatId,
+		agentNotificationsDir: daemonPaths(input.agentDir).dir,
+		sessionsRoot: path.join(input.agentDir, "sessions"),
+		env: input.env,
+	});
+	attachLifecycleControl(input.controlServer, deps);
 }
 
 async function ensureDir(fsImpl: TelegramDaemonFs, dir: string): Promise<void> {
@@ -527,6 +577,154 @@ export interface BotApi {
 	call(method: string, body: unknown, opts?: { signal?: AbortSignal }): Promise<unknown>;
 }
 
+export interface TelegramTransportOptions {
+	botToken: string;
+	apiBase?: string;
+	fetchImpl?: typeof fetch;
+	setTimeoutImpl?: typeof setTimeout;
+}
+
+/** Telegram Bot API transport: HTTP JSON/multipart details stay out of daemon orchestration. */
+export class TelegramBotTransport implements BotApi {
+	#opts: TelegramTransportOptions;
+
+	constructor(opts: TelegramTransportOptions) {
+		this.#opts = opts;
+	}
+
+	async call(method: string, body: unknown, opts?: { signal?: AbortSignal }): Promise<unknown> {
+		const apiBase = this.#opts.apiBase ?? "https://api.telegram.org";
+		const url = `${apiBase}/bot${this.#opts.botToken}/${method}`;
+		const fetchImpl = this.#opts.fetchImpl ?? fetch;
+		const setTimeoutImpl = this.#opts.setTimeoutImpl ?? setTimeout;
+		const sleep = (ms: number) => new Promise<void>(resolve => setTimeoutImpl(resolve, ms));
+		// sendPhoto with base64 bytes must be a multipart upload (Telegram does
+		// not accept base64 in JSON). Other methods stay JSON.
+		const photoBody = body as { photo?: unknown; mime?: unknown } | null;
+		if (method === "sendPhoto" && photoBody && typeof photoBody.photo === "string") {
+			const b = body as {
+				chat_id: unknown;
+				message_thread_id?: unknown;
+				photo: string;
+				mime?: string;
+				caption?: string;
+				parse_mode?: string;
+			};
+			const form = new FormData();
+			form.set("chat_id", String(b.chat_id));
+			if (b.message_thread_id !== undefined) form.set("message_thread_id", String(b.message_thread_id));
+			if (b.caption) form.set("caption", b.caption);
+			if (b.parse_mode) form.set("parse_mode", String(b.parse_mode));
+			form.set("photo", new Blob([Buffer.from(b.photo, "base64")], { type: b.mime ?? "image/png" }), "image");
+			const res = await fetchWithRetry(fetchImpl, url, { method: "POST", body: form, signal: opts?.signal }, sleep);
+			return res.json();
+		}
+		const docBody = body as { document?: unknown } | null;
+		if (method === "sendDocument" && docBody && typeof docBody.document === "string") {
+			const b = body as {
+				chat_id: unknown;
+				message_thread_id?: unknown;
+				document: string;
+				mime?: string;
+				fileName?: string;
+				caption?: string;
+				parse_mode?: string;
+			};
+			const form = new FormData();
+			form.set("chat_id", String(b.chat_id));
+			if (b.message_thread_id !== undefined) form.set("message_thread_id", String(b.message_thread_id));
+			if (b.caption) form.set("caption", b.caption);
+			if (b.parse_mode) form.set("parse_mode", String(b.parse_mode));
+			form.set(
+				"document",
+				new Blob([Buffer.from(b.document, "base64")], { type: b.mime ?? "application/octet-stream" }),
+				b.fileName ?? "file",
+			);
+			const res = await fetchWithRetry(fetchImpl, url, { method: "POST", body: form, signal: opts?.signal }, sleep);
+			return res.json();
+		}
+		const res = await fetchWithRetry(
+			fetchImpl,
+			url,
+			{
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify(body),
+				signal: opts?.signal,
+			},
+			sleep,
+		);
+		return res.json();
+	}
+}
+
+export interface TelegramUpdatePollerOptions {
+	botApi: BotApi;
+	runtime: NotificationOperatorRuntime;
+	backoff: OperatorBackoffPolicy;
+	processUpdate: (update: unknown) => Promise<void>;
+}
+
+/** Owns getUpdates offset, conflict backoff, and per-update error isolation. */
+export class TelegramUpdatePoller {
+	#offset = 0;
+	#opts: TelegramUpdatePollerOptions;
+
+	constructor(opts: TelegramUpdatePollerOptions) {
+		this.#opts = opts;
+	}
+
+	async pollOnce(signal?: AbortSignal): Promise<number> {
+		let body: {
+			ok?: boolean;
+			error_code?: number;
+			description?: string;
+			result?: Array<{ update_id: number } & Record<string, unknown>>;
+		};
+		try {
+			body = (await this.#opts.botApi.call(
+				"getUpdates",
+				{ offset: this.#offset, timeout: 25, allowed_updates: ["message", "callback_query"] },
+				{ signal },
+			)) as typeof body;
+		} catch (err) {
+			// A cooperative stop aborts the in-flight long poll; treat as a clean wake.
+			if (isAbortError(err)) return 0;
+			// A transient Telegram API failure must never crash the daemon.
+			logger.error("notifications daemon: getUpdates failed", { error: String(err) });
+			await this.#opts.runtime.sleep(POLL_BACKOFF_MS, signal);
+			return 0;
+		}
+		// Telegram allows only one active getUpdates poller per bot. A 409 means
+		// another poller is live; back off boundedly instead of hot-looping.
+		if (body && body.ok === false && (body.error_code === 409 || /409|conflict/i.test(body.description ?? ""))) {
+			const backoffMs = this.#opts.backoff.next();
+			logger.error(
+				`notifications daemon: Telegram getUpdates 409 conflict (${body.description ?? "no description"}); backing off ${backoffMs}ms`,
+			);
+			await this.#opts.runtime.sleep(backoffMs, signal);
+			return 0;
+		}
+		this.#opts.backoff.reset();
+		for (const update of body.result ?? []) {
+			this.#offset = update.update_id + 1;
+			try {
+				await this.#opts.processUpdate(update);
+			} catch (err) {
+				logger.error("notifications daemon: handleTelegramUpdate failed", { error: String(err) });
+			}
+		}
+		return body.result?.length ?? 0;
+	}
+}
+
+/** Mutable dispatch state shared by session frames and inbound Telegram updates. */
+export class TelegramEventDispatchState {
+	readonly busy = new Set<string>();
+	readonly inboundReactions = new Map<number, { messageId: number }>();
+	readonly seenUpdateIds = new Set<number>();
+}
+
 /**
  * Cooperative control seam for the daemon run loop. Implemented by the
  * daemon-internal CLI / controller against the owner-scoped control-request
@@ -556,8 +754,17 @@ export interface TelegramDaemonOptions {
 	idleTimeoutMs?: number;
 	scanIntervalMs?: number;
 	pid?: number;
+	/** Liveness probe for skipping dead-PID endpoint records in {@link TelegramNotificationDaemon.scanRoots}. */
+	pidAlive?: (pid: number) => boolean;
 	botApi?: BotApi;
 	control?: DaemonControlHooks;
+	/**
+	 * Factory for the session-lifecycle control server. Defaults to the real
+	 * native NotificationControlServer; tests inject a fake to verify the
+	 * owner-bound start/stop lifecycle without a socket. When `undefined` AND no
+	 * default applies (e.g. lifecycle control disabled), no control server starts.
+	 */
+	createLifecycleControlServer?: LifecycleControlServerFactory | null;
 }
 
 interface SessionSocket {
@@ -575,37 +782,63 @@ interface SessionSocket {
 	pingTimer: ReturnType<typeof setInterval> | undefined;
 }
 
+interface PendingThreadedFrame {
+	send: ThreadedSend;
+	msg: Record<string, unknown>;
+}
+
 export class TelegramNotificationDaemon {
 	readonly aliasTable: AliasTable;
 	readonly messageRoutes = new Map<string | number, CallbackRoute | Omit<CallbackRoute, "answer">>();
 	readonly sessions = new Map<string, SessionSocket>();
+	private readonly runtime: NotificationOperatorRuntime;
+	private readonly sessionRouter: OperatorEventRouter<SessionSocket>;
+	private readonly pollConflictBackoff = new OperatorBackoffPolicy({ initialMs: 500, maxMs: 5_000 });
+	private readonly loopBackoff = new OperatorBackoffPolicy({ initialMs: 250, maxMs: 4_000 });
 	private running = false;
-	private offset = 0;
 	private readonly fsImpl: TelegramDaemonFs;
 	private readonly botApi: BotApi;
 	private readonly topics = new TopicRegistry();
 	private readonly pool: RateLimitPool<{ send: ThreadedSend; topicId?: string }>;
-	private readonly seenUpdateIds = new Set<number>();
+	private readonly poller: TelegramUpdatePoller;
+	private readonly dispatchState = new TelegramEventDispatchState();
+	/** Identity-bearing sessions by repo/branch surface, used to avoid transient duplicate topics. */
+	private readonly topicOwnerByIdentity = new Map<string, string>();
+	/** Non-identity frames held until identity creates the correct thread. */
+	private readonly pendingThreadedFrames = new Map<string, PendingThreadedFrame[]>();
 	/** True once the daemon has nudged the user to enable Threaded Mode. */
 	private threadedFallbackNoticeSent = false;
 	/** Sessions whose identity header was already sent flat (Threaded Mode off). */
 	private readonly flatIdentitySent = new Set<string>();
 	/** Cached result of whether the paired chat is a private chat (flat-fallback gate). */
 	private pairedChatPrivate: boolean | undefined;
-	private flushTimer: ReturnType<typeof setInterval> | undefined;
-	private scanTimer: ReturnType<typeof setInterval> | undefined;
-	private scanning = false;
-	private typingTimer: ReturnType<typeof setInterval> | undefined;
 	/** Sessions whose agent loop is currently busy (drives the typing indicator). */
-	private readonly busy = new Set<string>();
+	private get busy(): Set<string> {
+		return this.dispatchState.busy;
+	}
 	/** Inbound update id → originating Telegram message, for delivery reactions. */
-	private readonly inboundReactions = new Map<number, { messageId: number }>();
-	/** AbortController for the in-flight long poll; aborted by requestStop() to wake the loop. */
-	private activePoll: AbortController | undefined;
-	/** Set when a cooperative stop has been requested (signal or control request). */
-	private stopRequested = false;
-	/** Current bounded backoff after a Telegram getUpdates 409 conflict (0 when healthy). */
-	private pollConflictBackoffMs = 0;
+	private get inboundReactions(): Map<number, { messageId: number }> {
+		return this.dispatchState.inboundReactions;
+	}
+	/**
+	 * The owner-bound session-lifecycle control server (create/close/resume).
+	 * Started in {@link run} after ownership is confirmed (so exactly one owner
+	 * ever runs one), stopped in run()'s finally on any exit path.
+	 */
+	private controlServer: LifecycleControlServer | undefined;
+	/** True while lifecycle control is active, so the loop keeps polling at idle. */
+	private lifecycleControlActive = false;
+	/** Control token (in-memory) the loopback client presents; never persisted/logged. */
+	private controlToken: string | undefined;
+	/** Loopback WS client to the daemon's own control endpoint (Option A real wire path). */
+	private controlClient: WebSocket | undefined;
+	/** Pending lifecycle responses awaiting a control-endpoint reply, by requestId. */
+	private readonly pendingLifecycle = new Map<
+		string,
+		{ resolve: (r: SessionLifecycleResponse) => void; timer: ReturnType<typeof setTimeout> }
+	>();
+	/** Monotonic counter for unique lifecycle request ids. */
+	private lifecycleSeq = 0;
 
 	/**
 	 * Cooperatively stop the daemon: set the stop flag and abort the in-flight
@@ -613,91 +846,368 @@ export class TelegramNotificationDaemon {
 	 * ~25s getUpdates timeout. Safe to call from a signal handler.
 	 */
 	requestStop(_reason?: "reload" | "stop" | "signal"): void {
-		this.stopRequested = true;
+		this.runtime.requestStop();
 		this.running = false;
-		this.activePoll?.abort();
+	}
+
+	/**
+	 * Start the owner-bound lifecycle control server and wire it to the
+	 * orchestrator. Called from {@link run} ONLY after ownership is confirmed, so
+	 * exactly one owner ever starts exactly one control server (no second poller
+	 * / 409). A control-server failure degrades gracefully: the daemon keeps
+	 * serving notifications without lifecycle control. Returns true when started.
+	 */
+	private async startLifecycleControl(): Promise<boolean> {
+		const factory =
+			this.opts.createLifecycleControlServer === null
+				? undefined
+				: (this.opts.createLifecycleControlServer ?? createNativeControlServer);
+		if (!factory) return false;
+		let server: LifecycleControlServer | undefined;
+		try {
+			// High-entropy, in-memory control token (never persisted raw / logged).
+			const token = crypto.randomBytes(32).toString("base64url");
+			const agentDir = this.opts.settings.getAgentDir();
+			server = factory({ token, ownerId: this.opts.ownerId, agentDir });
+			const deps = buildOrchestratorDeps({
+				pairedChatId: this.opts.chatId,
+				agentNotificationsDir: daemonPaths(agentDir).dir,
+				sessionsRoot: path.join(agentDir, "sessions"),
+			});
+			// Register the lifecycle-request handler BEFORE start(): the native
+			// control server captures the callback at start time, so wiring must
+			// precede start or forwarded requests never reach the orchestrator.
+			attachLifecycleControl(server, deps);
+			const endpoint = (await server.start()) as { url?: string } | undefined;
+			this.controlServer = server;
+			this.controlToken = token;
+			// Option A: connect a loopback WS client to our own control endpoint so
+			// parsed /session_* commands traverse the real authenticated wire path.
+			// Mark control active ONLY after the client is open, so a first-poll
+			// /session_create never races a still-CONNECTING socket.
+			const opened = endpoint?.url ? await this.connectControlClient(endpoint.url, token) : false;
+			this.lifecycleControlActive = opened;
+			if (!opened) {
+				logger.warn("notifications: lifecycle control client did not open; lifecycle commands disabled");
+			}
+			return opened;
+		} catch (e) {
+			// Never let lifecycle-control startup kill the notifications daemon.
+			// Stop any partially-started server so it cannot leak.
+			try {
+				server?.stop();
+			} catch {
+				// best-effort
+			}
+			logger.warn(`notifications: lifecycle control failed to start: ${String(e)}`);
+			this.controlServer = undefined;
+			this.lifecycleControlActive = false;
+			return false;
+		}
+	}
+
+	/** Stop the lifecycle control server (idempotent); called from run()'s finally. */
+	private stopLifecycleControl(): void {
+		this.lifecycleControlActive = false;
+		this.controlToken = undefined;
+		const client = this.controlClient;
+		this.controlClient = undefined;
+		try {
+			client?.close();
+		} catch {
+			// best-effort
+		}
+		// Reject any in-flight lifecycle requests so callers do not hang.
+		for (const [requestId, pending] of this.pendingLifecycle) {
+			clearTimeout(pending.timer);
+			pending.resolve({
+				type: "session_lifecycle_error",
+				requestId,
+				status: "error",
+				reason: "terminal_uncertain",
+				message: "control server stopped",
+			});
+		}
+		this.pendingLifecycle.clear();
+		const server = this.controlServer;
+		this.controlServer = undefined;
+		try {
+			server?.stop();
+		} catch (e) {
+			logger.warn(`notifications: lifecycle control failed to stop cleanly: ${String(e)}`);
+		}
+	}
+
+	/**
+	 * Connect the loopback control client and resolve responses by requestId.
+	 * Resolves true once the socket is OPEN (bounded), false on error/timeout, so
+	 * the caller only marks lifecycle control active when commands can be sent.
+	 */
+	private connectControlClient(url: string, token: string): Promise<boolean> {
+		return new Promise<boolean>(resolve => {
+			let settled = false;
+			const finish = (ok: boolean) => {
+				if (settled) return;
+				settled = true;
+				resolve(ok);
+			};
+			try {
+				const WsCtor = this.opts.WebSocketImpl ?? WebSocket;
+				const client = new WsCtor(`${url}/?token=${encodeURIComponent(token)}`);
+				this.controlClient = client;
+				const openTimer = (this.opts.setTimeoutImpl ?? setTimeout)(() => finish(false), 5_000);
+				client.addEventListener("open", () => {
+					clearTimeout(openTimer);
+					finish(true);
+				});
+				client.addEventListener("error", () => {
+					clearTimeout(openTimer);
+					finish(false);
+				});
+				client.addEventListener("message", (ev: MessageEvent) => {
+					let msg: SessionLifecycleResponse;
+					try {
+						msg = JSON.parse(String((ev as { data: unknown }).data)) as SessionLifecycleResponse;
+					} catch {
+						return;
+					}
+					const requestId = (msg as { requestId?: string }).requestId;
+					if (!requestId) return;
+					const pending = this.pendingLifecycle.get(requestId);
+					if (!pending) return;
+					clearTimeout(pending.timer);
+					this.pendingLifecycle.delete(requestId);
+					pending.resolve(msg);
+				});
+			} catch (e) {
+				logger.warn(`notifications: lifecycle control client failed to connect: ${String(e)}`);
+				finish(false);
+			}
+		});
+	}
+
+	/** Send a lifecycle frame over the loopback client and await the response. */
+	private submitLifecycleFrame(frame: SessionLifecycleRequest): Promise<SessionLifecycleResponse> {
+		return new Promise<SessionLifecycleResponse>(resolve => {
+			const client = this.controlClient;
+			if (!client || client.readyState !== WebSocket.OPEN) {
+				resolve({
+					type: "session_lifecycle_error",
+					requestId: frame.requestId,
+					status: "error",
+					reason: "terminal_uncertain",
+					message: "lifecycle control unavailable",
+				});
+				return;
+			}
+			const timer = (this.opts.setTimeoutImpl ?? setTimeout)(() => {
+				this.pendingLifecycle.delete(frame.requestId);
+				resolve({
+					type: "session_lifecycle_error",
+					requestId: frame.requestId,
+					status: "error",
+					reason: "readiness_timeout",
+					message: "lifecycle request timed out",
+				});
+			}, 120_000);
+			this.pendingLifecycle.set(frame.requestId, { resolve, timer });
+			try {
+				client.send(JSON.stringify(frame));
+			} catch (e) {
+				clearTimeout(timer);
+				this.pendingLifecycle.delete(frame.requestId);
+				resolve({
+					type: "session_lifecycle_error",
+					requestId: frame.requestId,
+					status: "error",
+					reason: "terminal_uncertain",
+					message: `lifecycle send failed: ${String(e)}`,
+				});
+			}
+		});
+	}
+
+	private nextLifecycleRequestId(): string {
+		this.lifecycleSeq += 1;
+		return `tg-${this.opts.ownerId}-${this.lifecycleSeq}-${crypto.randomBytes(4).toString("hex")}`;
+	}
+
+	/** Build an authenticated lifecycle frame from a parsed command + identity. */
+	private buildLifecycleFrame(
+		parsed:
+			| { kind: "create"; target: SessionCreateTarget }
+			| { kind: "close"; target: SessionCloseTarget }
+			| { kind: "resume"; target: SessionResumeTarget },
+		updateId: number,
+	): SessionLifecycleRequest {
+		const requestId = this.nextLifecycleRequestId();
+		const token = this.controlToken ?? "";
+		const chatId = this.opts.chatId;
+		if (parsed.kind === "create") {
+			return {
+				type: "session_create",
+				requestId,
+				lifecycleRequestId: requestId,
+				intendedSessionId: `s${crypto.randomBytes(6).toString("hex")}`,
+				updateId,
+				chatId,
+				token,
+				target: parsed.target,
+			};
+		}
+		if (parsed.kind === "close") {
+			return { type: "session_close", requestId, updateId, chatId, token, target: parsed.target, force: true };
+		}
+		return { type: "session_resume", requestId, updateId, chatId, token, target: parsed.target };
+	}
+
+	/**
+	 * Handle a paired-chat /session_* command: validate (shared validator),
+	 * route to the control endpoint, and reply with the outcome. Returns true
+	 * when the message was a lifecycle command (so the caller stops processing).
+	 */
+	private async handleLifecycleCommand(
+		text: string | undefined,
+		updateId: number | undefined,
+		threadId: number | undefined,
+	): Promise<boolean> {
+		if (!isLifecycleCommandText(text)) return false;
+		const reply = (body: string) =>
+			this.botApi
+				.call("sendMessage", {
+					chat_id: this.opts.chatId,
+					...(threadId !== undefined ? { message_thread_id: threadId } : {}),
+					text: body,
+				})
+				.catch(() => undefined);
+
+		if (!this.lifecycleControlActive) {
+			await reply("Session lifecycle control is not available right now.");
+			return true;
+		}
+		if (updateId !== undefined && this.dispatchState.seenUpdateIds.has(updateId)) return true;
+		if (updateId !== undefined) this.dispatchState.seenUpdateIds.add(updateId);
+
+		const parsed = parseLifecycleCommand(text);
+		if (parsed.kind === "none") return false;
+		if (parsed.kind === "usage" || parsed.kind === "reject") {
+			await reply(parsed.message);
+			return true;
+		}
+		if (parsed.kind === "recent") {
+			const recent = listRecentSessions({
+				sessionsRoot: path.join(this.opts.settings.getAgentDir(), "sessions"),
+				limit: 10,
+			});
+			const lines = recent.length
+				? recent.map(e => `\u2022 ${e.sessionId}${e.path ? ` (${e.path})` : ""}`).join("\n")
+				: "No recent sessions.";
+			await reply(lines);
+			return true;
+		}
+
+		// Defensive shared-validator pre-check before any effect.
+		const verb =
+			parsed.kind === "create" ? "session_create" : parsed.kind === "close" ? "session_close" : "session_resume";
+		const valid = validateLifecycleTarget(verb, parsed.target);
+		if (!valid.ok) {
+			await reply(`${valid.message}\n\n${lifecycleUsage()}`);
+			return true;
+		}
+
+		const frame = this.buildLifecycleFrame(parsed, updateId ?? Date.now());
+		const response = await this.submitLifecycleFrame(frame);
+		await reply(this.formatLifecycleResponse(response));
+		return true;
+	}
+
+	/** Map a lifecycle response/error to a user-facing message (G010 surfacing). */
+	private formatLifecycleResponse(r: SessionLifecycleResponse): string {
+		return formatLifecycleOutcome(r);
 	}
 
 	constructor(private readonly opts: TelegramDaemonOptions) {
 		this.fsImpl = opts.fs ?? nodeFs;
 		this.aliasTable = createAliasTable();
-		this.botApi = opts.botApi ?? {
-			call: async (method, body, callOpts) => {
-				const apiBase = opts.apiBase ?? "https://api.telegram.org";
-				const url = `${apiBase}/bot${opts.botToken}/${method}`;
-				const fetchImpl = opts.fetchImpl ?? fetch;
-				const setTimeoutImpl = opts.setTimeoutImpl ?? setTimeout;
-				const sleep = (ms: number) => new Promise<void>(resolve => setTimeoutImpl(resolve, ms));
-				// sendPhoto with base64 bytes must be a multipart upload (Telegram does
-				// not accept base64 in JSON). Other methods stay JSON.
-				const photoBody = body as { photo?: unknown; mime?: unknown } | null;
-				if (method === "sendPhoto" && photoBody && typeof photoBody.photo === "string") {
-					const b = body as {
-						chat_id: unknown;
-						message_thread_id?: unknown;
-						photo: string;
-						mime?: string;
-						caption?: string;
-						parse_mode?: string;
-					};
-					const form = new FormData();
-					form.set("chat_id", String(b.chat_id));
-					if (b.message_thread_id !== undefined) form.set("message_thread_id", String(b.message_thread_id));
-					if (b.caption) form.set("caption", b.caption);
-					if (b.parse_mode) form.set("parse_mode", String(b.parse_mode));
-					form.set("photo", new Blob([Buffer.from(b.photo, "base64")], { type: b.mime ?? "image/png" }), "image");
-					const res = await fetchWithRetry(
-						fetchImpl,
-						url,
-						{ method: "POST", body: form, signal: callOpts?.signal },
-						sleep,
-					);
-					return res.json();
-				}
-				const docBody = body as { document?: unknown } | null;
-				if (method === "sendDocument" && docBody && typeof docBody.document === "string") {
-					const b = body as {
-						chat_id: unknown;
-						message_thread_id?: unknown;
-						document: string;
-						mime?: string;
-						fileName?: string;
-						caption?: string;
-						parse_mode?: string;
-					};
-					const form = new FormData();
-					form.set("chat_id", String(b.chat_id));
-					if (b.message_thread_id !== undefined) form.set("message_thread_id", String(b.message_thread_id));
-					if (b.caption) form.set("caption", b.caption);
-					if (b.parse_mode) form.set("parse_mode", String(b.parse_mode));
-					form.set(
-						"document",
-						new Blob([Buffer.from(b.document, "base64")], { type: b.mime ?? "application/octet-stream" }),
-						b.fileName ?? "file",
-					);
-					const res = await fetchWithRetry(
-						fetchImpl,
-						url,
-						{ method: "POST", body: form, signal: callOpts?.signal },
-						sleep,
-					);
-					return res.json();
-				}
-				const res = await fetchWithRetry(
-					fetchImpl,
-					url,
-					{
-						method: "POST",
-						headers: { "content-type": "application/json" },
-						body: JSON.stringify(body),
-						signal: callOpts?.signal,
-					},
-					sleep,
-				);
-				return res.json();
-			},
-		};
+		this.botApi =
+			opts.botApi ??
+			new TelegramBotTransport({
+				botToken: opts.botToken,
+				apiBase: opts.apiBase,
+				fetchImpl: opts.fetchImpl,
+				setTimeoutImpl: opts.setTimeoutImpl,
+			});
+		this.runtime = new NotificationOperatorRuntime({
+			now: opts.now,
+			setTimeoutImpl: opts.setTimeoutImpl,
+			clearTimeoutImpl: opts.clearTimeoutImpl,
+			setIntervalImpl: opts.setIntervalImpl,
+			clearIntervalImpl: opts.clearIntervalImpl,
+		});
+		this.sessionRouter = this.createSessionRouter();
 		this.pool = new RateLimitPool<{ send: ThreadedSend; topicId?: string }>({ now: opts.now });
+		this.poller = new TelegramUpdatePoller({
+			botApi: this.botApi,
+			runtime: this.runtime,
+			backoff: this.pollConflictBackoff,
+			processUpdate: update => this.handleTelegramUpdate(update),
+		});
+	}
+
+	private createSessionRouter(): OperatorEventRouter<SessionSocket> {
+		return new OperatorEventRouter<SessionSocket>()
+			.add({
+				name: "hello",
+				matches: msg => msg.type === "hello",
+				handle: (session, msg) => {
+					const caps = Array.isArray(msg.capabilities) ? msg.capabilities : [];
+					if (caps.includes(CLIENT_PING_PONG_CAPABILITY)) {
+						session.capable = true;
+						this.startLiveness(session);
+					}
+				},
+			})
+			.add({
+				name: "pong",
+				matches: msg => msg.type === "pong",
+				handle: (session, msg) => {
+					if (typeof msg.nonce === "string" && msg.nonce === session.awaitingNonce) {
+						session.awaitingNonce = undefined;
+						session.lastPongAt = this.runtime.now();
+					}
+				},
+			})
+			.add({
+				name: "activity",
+				matches: msg => msg.type === "activity",
+				handle: async (session, msg) => {
+					if (msg.state === "busy") {
+						this.busy.add(session.sessionId);
+						await this.sendTyping(session.sessionId);
+					} else {
+						this.busy.delete(session.sessionId);
+					}
+				},
+			})
+			.add({
+				name: "inbound_ack",
+				matches: msg => msg.type === "inbound_ack" && typeof msg.updateId === "number",
+				handle: async (_session, msg) => {
+					const target = this.inboundReactions.get(msg.updateId as number);
+					if (target && msg.state === "consumed") {
+						this.inboundReactions.delete(msg.updateId as number);
+						await this.setReaction(target.messageId, CONSUMED_REACTION);
+					}
+				},
+			})
+			.add({
+				name: "session_closed",
+				matches: msg => msg.type === "session_closed",
+				handle: async session => {
+					this.busy.delete(session.sessionId);
+					await this.deleteTopic(session.sessionId);
+				},
+			});
 	}
 
 	async loadAliases(): Promise<void> {
@@ -727,6 +1237,11 @@ export class TelegramNotificationDaemon {
 				if (this.sessions.has(sessionId)) continue;
 				try {
 					const endpoint = readEndpoint(path.join(dir, file));
+					// Skip endpoint files whose owning process is gone or that are
+					// explicitly stale (e.g. a hard-closed session): reconnecting
+					// would chase a dead, token-bearing record forever.
+					const pidAlive = this.opts.pidAlive ?? defaultPidAlive;
+					if (endpoint.stale || (endpoint.pid !== undefined && !pidAlive(endpoint.pid))) continue;
 					this.connectSession(sessionId, endpoint.url, endpoint.token);
 				} catch {}
 			}
@@ -762,6 +1277,12 @@ export class TelegramNotificationDaemon {
 					);
 				} catch {}
 			}
+			// Eagerly create the session's Telegram topic as soon as it connects, so
+			// a thread exists the moment a notifications-enabled session is live —
+			// not lazily on the first delivered frame (which only arrives once the
+			// user sends a prompt). A provisional "SKC <id>" name is used; the
+			// identity_header frame renames it to "{repo}/{branch} - {title}" later.
+			void this.ensureTopic(sessionId, this.topicNameFor(sessionId, {})).catch(() => undefined);
 		});
 		ws.addEventListener("message", ev => {
 			// Identity guard: a delayed frame from a superseded socket must not act
@@ -770,7 +1291,7 @@ export class TelegramNotificationDaemon {
 			void this.handleSessionMessage(session, JSON.parse(String(ev.data))).catch(err => {
 				// Surface frame-handling failures (e.g. a rejected ask sendMessage) to
 				// the daemon log instead of an invisible unhandled rejection.
-				console.error("notifications daemon: handleSessionMessage failed:", err);
+				logger.error("notifications daemon: handleSessionMessage failed", { error: String(err) });
 			});
 		});
 		ws.addEventListener("close", () => {
@@ -788,7 +1309,7 @@ export class TelegramNotificationDaemon {
 	private startLiveness(session: SessionSocket): void {
 		if (session.pingTimer) return;
 		const setIntervalImpl = this.opts.setIntervalImpl ?? setInterval;
-		const now = () => (this.opts.now ?? Date.now)();
+		const now = () => this.runtime.now();
 		session.lastPongAt = now();
 		session.pingTimer = setIntervalImpl(() => {
 			if (this.sessions.get(session.sessionId) !== session) return;
@@ -851,6 +1372,60 @@ export class TelegramNotificationDaemon {
 		return `SKC ${sessionId.slice(-6)}`;
 	}
 
+	private topicIdentityKey(msg: { repo?: unknown; branch?: unknown }): string | undefined {
+		const repo = typeof msg?.repo === "string" && msg.repo.trim() ? msg.repo.trim() : undefined;
+		if (!repo) return undefined;
+		const branch = typeof msg?.branch === "string" && msg.branch.trim() ? msg.branch.trim() : "";
+		return `${repo}\0${branch}`;
+	}
+
+	private topicIdentityBase(msg: { repo?: unknown; branch?: unknown }): string | undefined {
+		const repo = typeof msg?.repo === "string" && msg.repo.trim() ? msg.repo.trim() : undefined;
+		if (!repo) return undefined;
+		const branch = typeof msg?.branch === "string" && msg.branch.trim() ? msg.branch.trim() : undefined;
+		return branch ? `${repo}/${branch}` : repo;
+	}
+
+	private topicOwnerForIdentity(msg: { repo?: unknown; branch?: unknown }): string | undefined {
+		const identityKey = this.topicIdentityKey(msg);
+		const remembered = identityKey ? this.topicOwnerByIdentity.get(identityKey) : undefined;
+		if (remembered && this.topics.get(remembered)) return remembered;
+		const base = this.topicIdentityBase(msg);
+		if (!identityKey || !base) return undefined;
+		for (const sessionId of this.topics.sessionIds()) {
+			const name = this.topics.get(sessionId)?.name;
+			if (name === base || name?.startsWith(`${base} - `)) {
+				this.topicOwnerByIdentity.set(identityKey, sessionId);
+				return sessionId;
+			}
+		}
+		return undefined;
+	}
+
+	private async submitThreadedFrame(sessionId: string, send: ThreadedSend, topicId: string): Promise<void> {
+		this.pool.submit({
+			sessionId,
+			lane: send.lane,
+			coalesceKey: send.coalesceKey,
+			payload: { send, topicId },
+		});
+		await this.flushPool();
+	}
+
+	private rememberPendingThreadedFrame(sessionId: string, send: ThreadedSend, msg: Record<string, unknown>): void {
+		const frames = this.pendingThreadedFrames.get(sessionId) ?? [];
+		frames.push({ send, msg });
+		if (frames.length > PENDING_TOPIC_FRAME_LIMIT) frames.shift();
+		this.pendingThreadedFrames.set(sessionId, frames);
+	}
+
+	private async flushPendingThreadedFrames(sessionId: string, topicId: string): Promise<void> {
+		const frames = this.pendingThreadedFrames.get(sessionId);
+		if (!frames || frames.length === 0) return;
+		this.pendingThreadedFrames.delete(sessionId);
+		for (const frame of frames) await this.submitThreadedFrame(sessionId, frame.send, topicId);
+	}
+
 	/**
 	 * Resolve (creating once via `createForumTopic`) the forum topic for a
 	 * session. On capability failure (e.g. Threaded Mode off) this returns
@@ -873,12 +1448,41 @@ export class TelegramNotificationDaemon {
 					return String(tid);
 				},
 				this.opts.now,
+				// The create winner records the name it actually used; callers that
+				// merely JOIN an in-flight create must not overwrite it locally, or a
+				// later identity rename would be wrongly skipped (topic stuck at the
+				// provisional name on Telegram).
+				name,
 			);
-			this.topics.applyName(sessionId, name);
 			await this.persistTopics();
 			return rec.topicId;
 		} catch {
 			return undefined;
+		}
+	}
+
+	/** Best-effort delete of a session topic once its local notification endpoint shuts down. */
+	private async deleteTopic(sessionId: string): Promise<void> {
+		const record = this.topics.get(sessionId);
+		if (!record) return;
+		try {
+			// Drop queued sends for this session before deleting the topic; otherwise
+			// rate-limited frames can flush later into a deleted topic or across resume.
+			this.pool.removeWhere(item => item.sessionId === sessionId);
+			await this.flushPool();
+			const res = (await this.botApi.call("deleteForumTopic", {
+				chat_id: this.opts.chatId,
+				message_thread_id: Number(record.topicId),
+			})) as { ok?: boolean };
+			if (res?.ok === false) return;
+			this.topics.delete(sessionId);
+			this.topicOwnerByIdentity.forEach((ownerSessionId, identityKey) => {
+				if (ownerSessionId === sessionId) this.topicOwnerByIdentity.delete(identityKey);
+			});
+			this.pendingThreadedFrames.delete(sessionId);
+			await this.persistTopics();
+		} catch {
+			// Best-effort: missing Telegram topic permissions must not stop teardown.
 		}
 	}
 
@@ -1092,46 +1696,32 @@ export class TelegramNotificationDaemon {
 	}
 
 	private startFlushTimer(): void {
-		if (this.flushTimer) return;
-		const setIntervalImpl = this.opts.setIntervalImpl ?? setInterval;
-		this.flushTimer = setIntervalImpl(() => {
+		this.runtime.startInterval("telegram-flush", RATE_LIMIT_FLUSH_INTERVAL_MS, () => {
 			if (!this.running || this.pool.pending === 0) return;
 			void this.flushPool();
-		}, RATE_LIMIT_FLUSH_INTERVAL_MS);
+		});
 	}
 
 	private stopFlushTimer(): void {
-		if (!this.flushTimer) return;
-		const clearIntervalImpl = this.opts.clearIntervalImpl ?? clearInterval;
-		clearIntervalImpl(this.flushTimer);
-		this.flushTimer = undefined;
+		this.runtime.stopInterval("telegram-flush");
 	}
 
 	/** Run a root scan, guarding against overlapping scans from the timer + loop. */
 	private async runScan(): Promise<void> {
-		if (this.scanning) return;
-		this.scanning = true;
-		try {
+		await this.runtime.runExclusive("telegram-scan", async () => {
 			await this.scanRoots();
-		} finally {
-			this.scanning = false;
-		}
+		});
 	}
 
 	private startScanTimer(): void {
-		if (this.scanTimer) return;
-		const setIntervalImpl = this.opts.setIntervalImpl ?? setInterval;
-		this.scanTimer = setIntervalImpl(() => {
+		this.runtime.startInterval("telegram-scan", this.opts.scanIntervalMs ?? SESSION_SCAN_INTERVAL_MS, () => {
 			if (!this.running) return;
 			void this.runScan();
-		}, this.opts.scanIntervalMs ?? SESSION_SCAN_INTERVAL_MS);
+		});
 	}
 
 	private stopScanTimer(): void {
-		if (!this.scanTimer) return;
-		const clearIntervalImpl = this.opts.clearIntervalImpl ?? clearInterval;
-		clearIntervalImpl(this.scanTimer);
-		this.scanTimer = undefined;
+		this.runtime.stopInterval("telegram-scan");
 	}
 
 	/** Send a single `typing` chat action into a busy session's topic (best-effort). */
@@ -1163,67 +1753,43 @@ export class TelegramNotificationDaemon {
 	}
 
 	private startTypingTimer(): void {
-		if (this.typingTimer) return;
-		const setIntervalImpl = this.opts.setIntervalImpl ?? setInterval;
-		this.typingTimer = setIntervalImpl(() => {
+		this.runtime.startInterval("telegram-typing", TYPING_REFRESH_INTERVAL_MS, () => {
 			if (!this.running || this.busy.size === 0) return;
 			for (const sessionId of this.busy) void this.sendTyping(sessionId);
-		}, TYPING_REFRESH_INTERVAL_MS);
+		});
 	}
 
 	private stopTypingTimer(): void {
-		if (!this.typingTimer) return;
-		const clearIntervalImpl = this.opts.clearIntervalImpl ?? clearInterval;
-		clearIntervalImpl(this.typingTimer);
-		this.typingTimer = undefined;
+		this.runtime.stopInterval("telegram-typing");
 	}
 
 	async handleSessionMessage(session: SessionSocket, msg: any): Promise<void> {
-		if (msg?.type === "hello") {
-			const caps = Array.isArray(msg.capabilities) ? msg.capabilities : [];
-			if (caps.includes(CLIENT_PING_PONG_CAPABILITY)) {
-				session.capable = true;
-				this.startLiveness(session);
-			}
-			return;
-		}
-		if (msg?.type === "pong") {
-			if (typeof msg.nonce === "string" && msg.nonce === session.awaitingNonce) {
-				session.awaitingNonce = undefined;
-				session.lastPongAt = (this.opts.now ?? Date.now)();
-			}
-			return;
-		}
-		// Live typing indicator: track busy/idle per session and push an immediate
-		// chat action so "typing…" appears without waiting for the refresh tick.
-		if (msg?.type === "activity") {
-			if (msg.state === "busy") {
-				this.busy.add(session.sessionId);
-				await this.sendTyping(session.sessionId);
-			} else {
-				this.busy.delete(session.sessionId);
-			}
-			return;
-		}
-		// Inbound delivery double-check: flip the queued reaction to the consumed
-		// reaction once the session reports a turn picked the message up.
-		if (msg?.type === "inbound_ack" && typeof msg.updateId === "number") {
-			const target = this.inboundReactions.get(msg.updateId);
-			if (target && msg.state === "consumed") {
-				this.inboundReactions.delete(msg.updateId);
-				await this.setReaction(target.messageId, CONSUMED_REACTION);
-			}
-			return;
-		}
+		if (await this.sessionRouter.dispatch(session, msg as Record<string, unknown>)) return;
 		if (typeof msg?.type === "string" && TelegramNotificationDaemon.THREADED_FRAMES.has(msg.type)) {
 			const send = renderThreadedFrame(msg);
 			if (!send) return;
-			const topicId = await this.ensureTopic(session.sessionId, this.topicNameFor(session.sessionId, msg));
+			const existingTopic = this.topics.get(session.sessionId)?.topicId;
+			if (!send.identity && !existingTopic && !this.flatIdentitySent.has(session.sessionId)) {
+				this.rememberPendingThreadedFrame(session.sessionId, send, msg as Record<string, unknown>);
+				return;
+			}
+			if (send.identity) {
+				const ownerId = this.topicOwnerForIdentity(msg);
+				const ownerTopic = ownerId ? this.topics.get(ownerId) : undefined;
+				if (ownerId && ownerId !== session.sessionId && ownerTopic) {
+					await this.flushPendingThreadedFrames(session.sessionId, ownerTopic.topicId);
+					return;
+				}
+			}
+			const topicId =
+				existingTopic ?? (await this.ensureTopic(session.sessionId, this.topicNameFor(session.sessionId, msg)));
 			if (!topicId) {
 				await this.deliverFlatFallback(session.sessionId, send);
 				return;
 			}
 			if (send.identity) {
+				const identityKey = this.topicIdentityKey(msg);
+				if (identityKey) this.topicOwnerByIdentity.set(identityKey, session.sessionId);
 				// Rename the topic if the title changed (e.g. the session title was
 				// auto-generated after the topic was first created). This runs on
 				// every identity frame, but does NOT re-send the bulleted message.
@@ -1241,25 +1807,14 @@ export class TelegramNotificationDaemon {
 				}
 				// Send the full bulleted identity header EXACTLY ONCE per topic.
 				if (this.topics.needsIdentity(session.sessionId)) {
-					this.pool.submit({
-						sessionId: session.sessionId,
-						lane: send.lane,
-						coalesceKey: send.coalesceKey,
-						payload: { send, topicId },
-					});
-					await this.flushPool();
+					await this.submitThreadedFrame(session.sessionId, send, topicId);
 					this.topics.markIdentitySent(session.sessionId);
 				}
+				await this.flushPendingThreadedFrames(session.sessionId, topicId);
 				await this.persistTopics();
 				return;
 			}
-			this.pool.submit({
-				sessionId: session.sessionId,
-				lane: send.lane,
-				coalesceKey: send.coalesceKey,
-				payload: { send, topicId },
-			});
-			await this.flushPool();
+			await this.submitThreadedFrame(session.sessionId, send, topicId);
 			return;
 		}
 		if (msg.type === "action_needed" && msg.id) {
@@ -1279,9 +1834,9 @@ export class TelegramNotificationDaemon {
 				summary: msg.summary,
 			});
 			const options = Array.isArray(msg.options) ? msg.options : [];
-			// Daemon keyboards MUST use alias callback data (not reference encodeCallbackData).
-			// Labels show one-based numbers; the stored alias answer stays zero-based.
-			const inline_keyboard = buildButtonGrid(options, (i: number) =>
+			// Daemon keyboards use alias callback data with compact one-based tap targets;
+			// full option text is rendered in the message body by buildActionMessage.
+			const inline_keyboard = buildCompactChoiceGrid(options, (i: number) =>
 				this.aliasTable.put({ sessionId: session.sessionId, actionId: msg.id, answer: i }),
 			);
 			const result = (await this.botApi.call("sendMessage", {
@@ -1325,6 +1880,20 @@ export class TelegramNotificationDaemon {
 	}
 
 	async handleTelegramUpdate(update: unknown): Promise<void> {
+		// Session-lifecycle command (/session_*): handled ONLY from the paired chat,
+		// gated before any arg parsing or side effect, and routed through the control
+		// endpoint. Must run before threaded-injection so commands are not treated as
+		// session input.
+		{
+			const m = (update as { update_id?: number; message?: Record<string, unknown> }).message;
+			const chatId = (m?.chat as { id?: unknown } | undefined)?.id;
+			const cmdText = typeof m?.text === "string" ? m.text : undefined;
+			if (m !== undefined && String(chatId) === String(this.opts.chatId) && isLifecycleCommandText(cmdText)) {
+				const updateId = (update as { update_id?: number }).update_id;
+				const threadId = typeof m.message_thread_id === "number" ? (m.message_thread_id as number) : undefined;
+				if (await this.handleLifecycleCommand(cmdText, updateId, threadId)) return;
+			}
+		}
 		// Threaded injection: a free-text message in a known topic (not a button
 		// tap and not a reply to a specific ask message) injects a user turn or an
 		// in-thread config command. Fail-closed: paired chat + known topic +
@@ -1343,11 +1912,11 @@ export class TelegramNotificationDaemon {
 			const inbound = decideThreadedInbound(update as never, {
 				pairedChatId: this.opts.chatId,
 				topicToSession: t => this.topics.sessionForTopic(t),
-				isDuplicate: id => this.seenUpdateIds.has(id),
+				isDuplicate: id => this.dispatchState.seenUpdateIds.has(id),
 			});
 			if (inbound.kind === "duplicate") return;
 			if (inbound.kind === "inject") {
-				this.seenUpdateIds.add(inbound.updateId);
+				this.dispatchState.seenUpdateIds.add(inbound.updateId);
 				const session = this.sessions.get(inbound.sessionId);
 				if (session?.ws.readyState === WebSocket.OPEN) {
 					const attachmentResult = inbound.attachment
@@ -1425,67 +1994,7 @@ export class TelegramNotificationDaemon {
 	}
 
 	async pollOnce(signal?: AbortSignal): Promise<number> {
-		let body: {
-			ok?: boolean;
-			error_code?: number;
-			description?: string;
-			result?: Array<{ update_id: number } & Record<string, unknown>>;
-		};
-		try {
-			body = (await this.botApi.call(
-				"getUpdates",
-				{ offset: this.offset, timeout: 25, allowed_updates: ["message", "callback_query"] },
-				{ signal },
-			)) as typeof body;
-		} catch (err) {
-			// A cooperative stop aborts the in-flight long poll; treat as a clean wake.
-			if (isAbortError(err)) return 0;
-			// A transient Telegram API failure (e.g. ECONNRESET on the long-poll) must
-			// never crash the daemon — that silently stops all delivery, including ask
-			// notifications. Log, back off, and let the run loop retry.
-			console.error("notifications daemon: getUpdates failed:", err);
-			await this.sleep(POLL_BACKOFF_MS, signal);
-			return 0;
-		}
-		// Telegram allows only one active getUpdates poller per bot. A 409 means
-		// another poller is live; back off boundedly instead of hot-looping.
-		if (body && body.ok === false && (body.error_code === 409 || /409|conflict/i.test(body.description ?? ""))) {
-			this.pollConflictBackoffMs = Math.min(
-				this.pollConflictBackoffMs ? this.pollConflictBackoffMs * 2 : 500,
-				5_000,
-			);
-			console.error(
-				`notifications daemon: Telegram getUpdates 409 conflict (${body.description ?? "no description"}); backing off ${this.pollConflictBackoffMs}ms`,
-			);
-			await this.sleep(this.pollConflictBackoffMs, signal);
-			return 0;
-		}
-		this.pollConflictBackoffMs = 0;
-		for (const update of body.result ?? []) {
-			this.offset = update.update_id + 1;
-			try {
-				await this.handleTelegramUpdate(update);
-			} catch (err) {
-				console.error("notifications daemon: handleTelegramUpdate failed:", err);
-			}
-		}
-		return body.result?.length ?? 0;
-	}
-
-	/** Abortable sleep honoring the injected timer; resolves early on abort. */
-	private sleep(ms: number, signal?: AbortSignal): Promise<void> {
-		return new Promise<void>(resolve => {
-			if (signal?.aborted) return resolve();
-			const timer = (this.opts.setTimeoutImpl ?? setTimeout)(() => resolve(), ms);
-			signal?.addEventListener(
-				"abort",
-				() => {
-					(this.opts.clearTimeoutImpl ?? clearTimeout)(timer);
-					resolve();
-				},
-				{ once: true },
-			);
-		});
+		return this.poller.pollOnce(signal);
 	}
 
 	/** Sync the bot's Telegram command menu to what the daemon actually handles. */
@@ -1512,6 +2021,7 @@ export class TelegramNotificationDaemon {
 			pid: this.opts.pid ?? process.pid,
 		});
 		if (!this.running) return;
+		this.runtime.start();
 		this.startFlushTimer();
 		this.startScanTimer();
 		this.startTypingTimer();
@@ -1520,8 +2030,10 @@ export class TelegramNotificationDaemon {
 			await this.loadAliases();
 			await this.loadTopics();
 			await this.runScan();
-			let idleSince = (this.opts.now ?? Date.now)();
-			let pollBackoffMs = 0;
+			// Owner-only: start the session-lifecycle control server now that
+			// ownership is confirmed (singleton-safe). Best-effort; degrades.
+			await this.startLifecycleControl();
+			let idleSince = this.runtime.now();
 			while (this.running) {
 				if (await this.controlStopRequested()) break;
 				if (
@@ -1536,33 +2048,42 @@ export class TelegramNotificationDaemon {
 					break;
 				await this.runScan();
 				if (await this.controlStopRequested()) break;
-				if (this.sessions.size === 0) {
-					if ((this.opts.now ?? Date.now)() - idleSince >= (this.opts.idleTimeoutMs ?? 60_000)) break;
+				const idleElapsed = this.runtime.now() - idleSince >= (this.opts.idleTimeoutMs ?? 60_000);
+				if (this.sessions.size === 0 && !this.lifecycleControlActive) {
+					// No sessions and no lifecycle control: idle-exit on timeout.
+					if (idleElapsed) break;
 				} else {
-					idleSince = (this.opts.now ?? Date.now)();
-					this.activePoll = new AbortController();
+					// Poll getUpdates when sessions exist OR lifecycle control is active
+					// (so phone /session_* commands are received even with zero sessions).
+					// With zero sessions, still idle-exit after the timeout so the owner
+					// does not run forever; an active session resets the idle window.
+					if (this.sessions.size > 0) idleSince = this.runtime.now();
+					else if (idleElapsed) break;
+					const activePoll = this.runtime.createAbortController();
 					try {
-						await this.pollOnce(this.activePoll.signal);
-						pollBackoffMs = 0;
+						await this.pollOnce(activePoll.signal);
+						this.loopBackoff.reset();
 					} catch (e) {
 						// A transient getUpdates/network failure must not kill the
 						// daemon. Back off (bounded, below the heartbeat TTL) and keep
 						// renewing ownership at the loop top.
-						pollBackoffMs = pollBackoffMs === 0 ? 250 : Math.min(pollBackoffMs * 2, 4_000);
-						logger.warn(`notifications: getUpdates failed, backing off ${pollBackoffMs}ms: ${String(e)}`);
-						await new Promise(resolve => (this.opts.setTimeoutImpl ?? setTimeout)(resolve, pollBackoffMs));
+						const backoffMs = this.loopBackoff.next();
+						logger.warn(`notifications: getUpdates failed, backing off ${backoffMs}ms: ${String(e)}`);
+						await this.runtime.sleep(backoffMs);
 						continue;
 					} finally {
-						this.activePoll = undefined;
+						this.runtime.clearAbortController(activePoll);
 					}
 				}
 				if (await this.controlStopRequested()) break;
-				await new Promise(resolve => (this.opts.setTimeoutImpl ?? setTimeout)(resolve, 10));
+				await this.runtime.sleep(10);
 			}
 		} finally {
+			this.runtime.stop();
 			this.stopFlushTimer();
 			this.stopScanTimer();
 			this.stopTypingTimer();
+			this.stopLifecycleControl();
 			await this.cleanupAllAttachmentDirs();
 			// Persist durable state before releasing ownership so a fresh daemon
 			// (e.g. after reload) reloads aliases/topics seamlessly.
@@ -1580,7 +2101,7 @@ export class TelegramNotificationDaemon {
 
 	/** True when a signal-driven stop or an owner-scoped control request asks the loop to exit. */
 	private async controlStopRequested(): Promise<boolean> {
-		if (this.stopRequested) return true;
+		if (this.runtime.stopRequested) return true;
 		if (!this.opts.control) return false;
 		try {
 			return await this.opts.control.shouldStop(this.opts.ownerId);

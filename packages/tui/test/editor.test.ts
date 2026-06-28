@@ -507,7 +507,7 @@ describe("Editor component", () => {
 		});
 
 		it("inserts a newline for Ctrl+Shift+Enter terminal protocol variants", () => {
-			const variants = ["\x1b[13;6u", "\x1b[27;6;13~", "\x1b[13;6~", "\x1b[13;2~"];
+			const variants = ["\x1b[13;6u", "\x1b[27;6;13~", "\x1b[13;6~", "\x1b[13;2~", "\x1b[13;2u"];
 
 			for (const [index, variant] of variants.entries()) {
 				const editor = new Editor(defaultEditorTheme);
@@ -856,6 +856,22 @@ describe("Editor component", () => {
 			expect(editor.getText()).toBe("한글");
 			expect(markerIndex).toBeGreaterThanOrEqual(0);
 			expect(visibleWidth(line!.slice(0, markerIndex))).toBe(2 + visibleWidth("한글"));
+		});
+
+		it("anchors terminal cursor at an empty placeholder", () => {
+			const editor = new Editor(defaultEditorTheme);
+			editor.setBorderVisible(false);
+			editor.setPromptGutter("> ");
+			editor.setPlaceholder("Describe the change");
+			editor.setUseTerminalCursor(true);
+			editor.focused = true;
+
+			const [line] = editor.render(40);
+			const markerIndex = line!.indexOf(CURSOR_MARKER);
+
+			expect(markerIndex).toBeGreaterThanOrEqual(0);
+			expect(visibleWidth(line!.slice(0, markerIndex))).toBe(2);
+			expect(Bun.stripANSI(line!.replaceAll(CURSOR_MARKER, ""))).toContain("Describe the change");
 		});
 
 		it("handles mixed ASCII and wide characters in wrapping", () => {

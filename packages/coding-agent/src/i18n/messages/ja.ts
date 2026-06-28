@@ -28,7 +28,6 @@ export const ja: Partial<Record<MsgKey, string>> = {
 	"settings.tab.appearance": "外観",
 	"settings.tab.model": "モデル",
 	"settings.tab.interaction": "操作",
-	"settings.tab.notifications": "通知",
 	"settings.tab.context": "コンテキスト",
 	"settings.tab.memory": "メモリ",
 	"settings.tab.editing": "編集",

@@ -31,7 +31,6 @@ export type SettingTab =
 	| "appearance"
 	| "model"
 	| "interaction"
-	| "notifications"
 	| "context"
 	| "memory"
 	| "editing"
@@ -47,7 +46,6 @@ export const SETTING_TABS: SettingTab[] = [
 	"appearance",
 	"model",
 	"interaction",
-	"notifications",
 	"context",
 	"memory",
 	"editing",
@@ -61,7 +59,6 @@ export const TAB_METADATA: Record<SettingTab, { label: string; icon: `tab.${stri
 	appearance: { label: "Appearance", icon: "tab.appearance" },
 	model: { label: "Model", icon: "tab.model" },
 	interaction: { label: "Interaction", icon: "tab.interaction" },
-	notifications: { label: "Notifications", icon: "tab.notifications" },
 	context: { label: "Context", icon: "tab.context" },
 	memory: { label: "Memory", icon: "tab.memory" },
 	editing: { label: "Editing", icon: "tab.editing" },
@@ -133,14 +130,11 @@ interface UiString extends UiBase {
 	 *  - Omitted → renders as a free text input.
 	 */
 	options?: ReadonlyArray<SubmenuOption> | "runtime";
-	/** When true, the value is masked in the settings list display but edited in full. */
-	secret?: boolean;
 }
 
 /** Wide ui shape exposed to consumers that walk the schema generically. */
 export type AnyUiMetadata = UiBase & {
 	options?: ReadonlyArray<SubmenuOption> | "runtime";
-	secret?: boolean;
 };
 
 interface BooleanDef {
@@ -262,97 +256,18 @@ export const SETTINGS_SCHEMA = {
 	"auth.broker.token": { type: "string", default: undefined },
 
 	// Notifications (shared daemon with Telegram/Discord/Slack presentation adapters)
-	"notifications.enabled": {
-		type: "boolean",
-		default: false,
-		ui: {
-			tab: "notifications",
-			label: "Enabled",
-			description:
-				"Master switch for notifications. Requires at least one adapter (Telegram/Discord/Slack) configured with a token and a chat/channel to actually deliver.",
-		},
-	},
-	"notifications.telegram.botToken": {
-		type: "string",
-		default: undefined,
-		ui: {
-			tab: "notifications",
-			label: "Telegram bot token",
-			description: "Telegram BotFather HTTP API token. Stored locally; shown masked.",
-			secret: true,
-		},
-	},
-	"notifications.telegram.chatId": {
-		type: "string",
-		default: undefined,
-		ui: {
-			tab: "notifications",
-			label: "Telegram chat ID",
-			description:
-				"Target chat. For end-to-end per-session delivery this must be a forum-enabled supergroup the bot can manage; a private chat id is only enough for setup/status.",
-		},
-	},
-	"notifications.discord.botToken": {
-		type: "string",
-		default: undefined,
-		ui: {
-			tab: "notifications",
-			label: "Discord bot token",
-			description: "Discord bot token for the notifications adapter. Stored locally; shown masked.",
-			secret: true,
-		},
-	},
-	"notifications.discord.channelId": {
-		type: "string",
-		default: undefined,
-		ui: {
-			tab: "notifications",
-			label: "Discord channel ID",
-			description: "Discord channel that receives notifications and routes replies back.",
-		},
-	},
-	"notifications.slack.botToken": {
-		type: "string",
-		default: undefined,
-		ui: {
-			tab: "notifications",
-			label: "Slack bot token",
-			description: "Slack bot token for the notifications adapter. Stored locally; shown masked.",
-			secret: true,
-		},
-	},
-	"notifications.slack.channelId": {
-		type: "string",
-		default: undefined,
-		ui: {
-			tab: "notifications",
-			label: "Slack channel ID",
-			description: "Slack channel that receives notifications and routes replies back.",
-		},
-	},
-	"notifications.redact": {
-		type: "boolean",
-		default: false,
-		ui: {
-			tab: "notifications",
-			label: "Redact",
-			description:
-				"Strip idle summaries and streamed content before remote delivery. Ask prompts are always sent so they remain answerable.",
-		},
-	},
+	"notifications.enabled": { type: "boolean", default: false },
+	"notifications.telegram.botToken": { type: "string", default: undefined },
+	"notifications.telegram.chatId": { type: "string", default: undefined },
+	"notifications.discord.botToken": { type: "string", default: undefined },
+	"notifications.discord.channelId": { type: "string", default: undefined },
+	"notifications.slack.botToken": { type: "string", default: undefined },
+	"notifications.slack.channelId": { type: "string", default: undefined },
+	"notifications.redact": { type: "boolean", default: false },
 	"notifications.verbosity": {
 		type: "string",
 		default: "lean",
 		validate: (value: string) => value === "lean" || value === "verbose",
-		ui: {
-			tab: "notifications",
-			label: "Verbosity",
-			description: "How much session context to stream to Telegram.",
-			options: [
-				{ value: "lean", label: "Lean" },
-				{ value: "verbose", label: "Verbose" },
-			],
-		},
 	},
 	"notifications.daemon.idleTimeoutMs": {
 		type: "number",

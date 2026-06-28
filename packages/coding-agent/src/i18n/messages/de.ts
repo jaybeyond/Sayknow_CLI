@@ -30,7 +30,6 @@ export const de: Partial<Record<MsgKey, string>> = {
 	"settings.tab.appearance": "Darstellung",
 	"settings.tab.model": "Modell",
 	"settings.tab.interaction": "Interaktion",
-	"settings.tab.notifications": "Benachrichtigungen",
 	"settings.tab.context": "Kontext",
 	"settings.tab.memory": "Speicher",
 	"settings.tab.editing": "Bearbeitung",

@@ -2,6 +2,25 @@
 
 ## [Unreleased]
 
+## [0.7.4] - 2026-06-27
+
+### Fixed
+
+- Fixed Korean IME ghost character on macOS: a Hangul syllable committed by the IME immediately after `ctrl+u` (line-delete) is now discarded, preventing it from appearing in the cleared buffer (#1150).
+- Fixed CJK IME composition overlay positioning on macOS: the TUI now shows a steady-block hardware cursor (`\x1b[2 q`) when the soft cursor is active, anchoring the IME overlay to the correct position. Removed the synchronized-output wrapper from standalone cursor nudges, which was flushing terminal state and dismissing the overlay on every keystroke (#1150).
+- Fixed IME preedit caret anchoring so the composition caret stays aligned with the composed text (#1178).
+- Preserve the composer placeholder while an IME cursor is active so the prompt hint does not flicker during composition.
+- Reflow the in-progress prompt draft when the terminal is resized.
+- Repaint the multiplexer viewport on resize so stale rows are not left behind (#1137).
+- Fixed Alt+Enter queue key parsing (#1145).
+- Fixed Windows prompt newline shortcut discoverability (#1134).
+
+## [0.7.3] - 2026-06-25
+
+### Added
+
+- Added bottom-pinned TUI layout support so short initial screens can pad above composer/status components and keep the prompt anchored to the terminal viewport bottom (#1120).
+
 ## [0.6.0] - 2026-06-18
 
 ### Fixed

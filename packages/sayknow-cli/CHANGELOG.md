@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+## [0.7.5] - 2026-06-27
+
+### Fixed
+
+- Patch release bundling memory hotfixes: resume OOM cycle guards for session-tree traversal (#1193, #1195) and elision of runaway thinking-token loops (#1196), plus psmux session support (#1192), tmux window-title sanitization (#1198), and Codex history replay sanitization (#1199, #1200).
+
+## [0.7.4] - 2026-06-27
+
+### Fixed
+
+- Fixed the `sayknow-cli` npm wrapper to invoke the `skc` CLI through the global bin wrapper so global installs launch the CLI correctly.
+
 ## [0.5.1] - 2026-06-14
 
 - Version aligned with the 0.5.1 monorepo release; no functional changes in this package.

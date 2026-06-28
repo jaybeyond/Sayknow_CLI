@@ -1,7 +1,7 @@
 import { Buffer } from "node:buffer";
 import * as path from "node:path";
-import { safeStderrWrite } from "@sayknow-cli/utils";
 import { VERSION } from "@sayknow-cli/utils/dirs";
+import { safeStderrWrite } from "@sayknow-cli/utils/safe-stderr";
 import type { Args } from "../cli/args";
 import { tmuxRuntimeSessionPath } from "./session-layout";
 import { SKC_COORDINATOR_SESSION_ID_ENV, SKC_COORDINATOR_SESSION_STATE_FILE_ENV } from "./session-state-sidecar";
@@ -9,6 +9,7 @@ import {
 	buildSkcTmuxProfileCommands,
 	buildSkcTmuxSessionName,
 	buildSkcTmuxSessionSlug,
+	resolveSkcTmuxBinary,
 	resolveSkcTmuxCommand,
 	SKC_DEFAULT_TMUX_SESSION,
 	SKC_TMUX_COMMAND_ENV,
@@ -31,6 +32,7 @@ export {
 export const SKC_TMUX_LAUNCHED_ENV = "SKC_TMUX_LAUNCHED";
 export const SKC_LAUNCH_POLICY_ENV = "SKC_LAUNCH_POLICY";
 export const SKC_TMUX_WINDOW_LABEL_MAX_WIDTH = 48;
+export const SKC_PSMUX_PROFILE_FORCE_ENV = "SKC_PSMUX_PROFILE_FORCE";
 
 type LaunchPolicy = "direct" | "tmux";
 
@@ -166,6 +168,18 @@ function formatTmuxLaunchDiagnostic(stage: string, stderr?: string): string {
 	return `skc --tmux failed after creating tmux session: ${stage}.${suffix}\n`;
 }
 
+function formatTmuxUnavailableDiagnostic(platform: NodeJS.Platform, tmuxCommand: string): string {
+	if (platform === "win32") {
+		return (
+			`skc --tmux requested but no tmux executable was found; starting without a tmux-backed session. ` +
+			`SKC searched for psmux, pmux, and tmux on PATH (got \`${tmuxCommand}\`). ` +
+			"Install psmux (https://github.com/psmux/psmux) for native Windows tmux support, or use WSL with real tmux. " +
+			"You can also point SKC at a specific binary via SKC_TMUX_COMMAND.\n"
+		);
+	}
+	return `skc --tmux requested but no ${tmuxCommand} executable was found; starting without a tmux-backed session.\n`;
+}
+
 function shellQuote(value: string): string {
 	if (value.length === 0) return "''";
 	return `'${value.replace(/'/g, `'\\''`)}'`;
@@ -199,14 +213,26 @@ function buildWindowsPowerShellInnerCommand(context: CommandResolutionContext, r
 export function applySkcTmuxProfile(context: SkcTmuxProfileContext): SkcTmuxProfileResult {
 	const env = context.env ?? process.env;
 	const branchSlug = context.branch ? buildSkcTmuxSessionSlug(context.branch) : (context.branchSlug ?? null);
-	const commands = buildSkcTmuxProfileCommands(context.target, env, {
-		branch: context.branch ?? null,
-		branchSlug,
-		project: context.project ?? null,
-		sessionId: context.sessionId ?? env[SKC_COORDINATOR_SESSION_ID_ENV] ?? null,
-		sessionStateFile: context.sessionStateFile ?? env[SKC_COORDINATOR_SESSION_STATE_FILE_ENV] ?? null,
-		version: context.version ?? null,
-	});
+	// The psmux UX filter (mouse / set-clipboard / mode-style /
+	// set-window-option) now lives in buildSkcTmuxProfileCommands so every
+	// caller — skc --tmux planning, skc session create, skc team bootstrap —
+	// applies the same drop set when the active multiplexer is psmux. We pass
+	// the resolved tmuxCommand through the new opts seam so the filter
+	// engages for this exact command, not whatever the resolver returns at
+	// profile-build time.
+	const commands = buildSkcTmuxProfileCommands(
+		context.target,
+		env,
+		{
+			branch: context.branch ?? null,
+			branchSlug,
+			project: context.project ?? null,
+			sessionId: context.sessionId ?? env[SKC_COORDINATOR_SESSION_ID_ENV] ?? null,
+			sessionStateFile: context.sessionStateFile ?? env[SKC_COORDINATOR_SESSION_STATE_FILE_ENV] ?? null,
+			version: context.version ?? null,
+		},
+		{ tmuxCommand: context.tmuxCommand },
+	);
 	if (commands.length === 0) return { skipped: true, commands: [], failures: [] };
 	const spawnSync = context.spawnSync ?? defaultSpawnSync;
 	const cwd = context.cwd ?? process.cwd();
@@ -280,20 +306,33 @@ function truncateVisibleTail(value: string, maxWidth: number): string {
 	return `…${result}`;
 }
 
+const SKC_TMUX_WINDOW_BRANCH_SEPARATOR = "-";
+
+function sanitizeTmuxWindowTitleSegment(value: string): string {
+	return value.replace(/:+/g, "-");
+}
+
+function sanitizeTmuxWindowProjectName(project: string): string {
+	const trimmed = project.trim();
+	if (!trimmed || /^\.+$/.test(trimmed)) return "skc";
+	if (trimmed.startsWith(".")) return sanitizeTmuxWindowTitleSegment(`dot-${trimmed.replace(/^\.+/, "")}`);
+	return sanitizeTmuxWindowTitleSegment(trimmed);
+}
+
 export function buildSkcTmuxWindowTitle(cwd: string, branch: string | null | undefined): string {
-	const project = path.basename(path.resolve(cwd)) || "skc";
-	const trimmedBranch = branch?.trim();
+	const project = sanitizeTmuxWindowProjectName(path.basename(path.resolve(cwd)) || "skc");
+	const trimmedBranch = sanitizeTmuxWindowTitleSegment(branch?.trim() ?? "");
 	if (!trimmedBranch) return truncateVisible(project, SKC_TMUX_WINDOW_LABEL_MAX_WIDTH);
 
-	const separatorWidth = visibleWidth(":");
+	const separatorWidth = visibleWidth(SKC_TMUX_WINDOW_BRANCH_SEPARATOR);
 	const projectWidth = visibleWidth(project);
-	const fullTitle = `${project}:${trimmedBranch}`;
+	const fullTitle = `${project}${SKC_TMUX_WINDOW_BRANCH_SEPARATOR}${trimmedBranch}`;
 	if (visibleWidth(fullTitle) <= SKC_TMUX_WINDOW_LABEL_MAX_WIDTH) return fullTitle;
 
 	const remainingBranchWidth = SKC_TMUX_WINDOW_LABEL_MAX_WIDTH - projectWidth - separatorWidth;
 	if (remainingBranchWidth <= 0) return truncateVisible(project, SKC_TMUX_WINDOW_LABEL_MAX_WIDTH);
 
-	return `${project}:${truncateVisibleTail(trimmedBranch, remainingBranchWidth)}`;
+	return `${project}${SKC_TMUX_WINDOW_BRANCH_SEPARATOR}${truncateVisibleTail(trimmedBranch, remainingBranchWidth)}`;
 }
 
 function buildTmuxRenameWindowArgs(title: string, target?: string): string[] {
@@ -315,8 +354,10 @@ function renameExistingTmuxWindowIfNeeded(context: TmuxLaunchContext): void {
 	if (!env.TMUX || env[SKC_TMUX_LAUNCHED_ENV] === "1") return;
 	if (parseLaunchPolicy(env) === "direct") return;
 
-	const platform = context.platform ?? process.platform;
-	if (platform === "win32") return;
+	// Note: Windows is intentionally allowed here. Psmux supports
+	// `rename-window` and we want the leader window to inherit the
+	// sanitized project-branch title even on native Windows, where
+	// skc --tmux runs through PowerShell to a psmux backend.
 
 	const tty = context.tty ?? { stdin: Boolean(process.stdin.isTTY), stdout: Boolean(process.stdout.isTTY) };
 	if (!isInteractiveRootLaunch(context.parsed, tty)) return;
@@ -375,7 +416,12 @@ export function buildDefaultTmuxLaunchPlan(context: TmuxLaunchContext): TmuxLaun
 	const branch = context.worktreeBranch ?? context.currentBranch ?? readCurrentBranch(cwd);
 	const project = context.project ?? cwd;
 	const sessionName = buildSkcTmuxSessionName(env, { branch });
-	const tmuxCommand = resolveSkcTmuxCommand(env);
+	// Pick the most appropriate tmux binary for this platform. On native Windows
+	// the resolver walks psmux / pmux / tmux and uses the first one present on
+	// PATH, so the default `skc --tmux` flow lands on a real multiplexer even
+	// without an explicit SKC_TMUX_COMMAND override.
+	const resolvedBinary = resolveSkcTmuxBinary({ platform, env });
+	const tmuxCommand = resolvedBinary.command;
 	const sessionId = env[SKC_COORDINATOR_SESSION_ID_ENV]?.trim() || sessionName;
 	// The session ROOT is keyed by the active SKC session (SKC_SESSION_ID), NOT the
 	// coordinator/tmux identity. Fall back to the coordinator id only for standalone
@@ -385,7 +431,10 @@ export function buildDefaultTmuxLaunchPlan(context: TmuxLaunchContext): TmuxLaun
 		env[SKC_COORDINATOR_SESSION_STATE_FILE_ENV]?.trim() ||
 		tmuxRuntimeSessionPath(cwd, skcSessionId, buildSkcTmuxSessionSlug(sessionName));
 	const tmuxAvailable = context.tmuxAvailable ?? Bun.which(tmuxCommand) !== null;
-	if (!tmuxAvailable) return undefined;
+	if (!tmuxAvailable) {
+		(context.diagnosticWriter ?? safeStderrWrite)(formatTmuxUnavailableDiagnostic(platform, tmuxCommand));
+		return undefined;
+	}
 	const existingSessionName = allowsExistingTmuxAttach(context.parsed, env)
 		? "existingBranchSessionName" in context
 			? (context.existingBranchSessionName ?? undefined)
@@ -451,7 +500,7 @@ export function launchDefaultTmuxIfNeeded(context: TmuxLaunchContext): boolean {
 
 	if (plan.attachSessionName) {
 		const attached = spawnSync(plan.tmuxCommand, ["attach-session", "-t", `=${plan.attachSessionName}`], options);
-		return attached.exitCode === 0;
+		if (attached.exitCode === 0) return true;
 	}
 
 	const created = spawnSync(plan.tmuxCommand, plan.newSessionArgs, options);

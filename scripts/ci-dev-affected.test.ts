@@ -55,6 +55,22 @@ describe("planTasks command shape (issue #622)", () => {
 		expect(typecheck?.cwd).toBe(resolvePackageCwd("python/roboskc/web"));
 		expect(build?.cwd).toBe(resolvePackageCwd("python/roboskc/web"));
 	});
+
+	test("python tasks install dev dependencies before invoking pytest and ruff modules", () => {
+		const tasks = planForPaths(["python/roboskc/src/server.py"]);
+		const lint = tasks.find(task => task.key === "python-lint");
+		const runTest = tasks.find(task => task.key === "python-test");
+		expect(lint?.command).toEqual([
+			"bash",
+			"-lc",
+			"python3 -m pip install --user --upgrade 'pip>=24' 'setuptools>=69' wheel && python3 -m pip install --user -e python/skc-rpc -e 'python/roboskc[dev]' && python3 -m ruff check python && python3 -m ruff format --check python/roboskc",
+		]);
+		expect(runTest?.command).toEqual([
+			"bash",
+			"-lc",
+			"python3 -m pip install --user --upgrade 'pip>=24' 'setuptools>=69' wheel && python3 -m pip install --user -e python/skc-rpc -e 'python/roboskc[dev]' && python3 -m pytest -x --import-mode=importlib python/skc-rpc/tests python/roboskc/tests",
+		]);
+	});
 });
 
 	describe("deep-interview selector narrowing", () => {

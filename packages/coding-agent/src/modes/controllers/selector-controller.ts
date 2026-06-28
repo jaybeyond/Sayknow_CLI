@@ -4,8 +4,10 @@ import type { OAuthProvider } from "@sayknow-cli/ai/utils/oauth/types";
 import type { Component, OverlayHandle } from "@sayknow-cli/tui";
 import { Input, Loader, Spacer, Text } from "@sayknow-cli/tui";
 import { getAgentDbPath, getProjectDir } from "@sayknow-cli/utils";
-import { activateModelProfile } from "../../config/model-profile-activation";
+import { activateModelProfile, materializeActiveModelProfileAssignment } from "../../config/model-profile-activation";
 import { recommendModelProfileForProvider } from "../../config/model-profiles";
+import { SKC_MODEL_ASSIGNMENT_TARGETS } from "../../config/model-registry";
+import { formatModelSelectorValue } from "../../config/model-resolver";
 import { settings } from "../../config/settings";
 import { DebugSelectorComponent } from "../../debug";
 import { disableProvider, enableProvider } from "../../discovery";
@@ -667,7 +669,8 @@ export class SelectorController {
 
 	showModelSelector(options?: { temporaryOnly?: boolean }): void {
 		this.showSelector(done => {
-			const selector = new ModelSelectorComponent(
+			let modelSelector: ModelSelectorComponent;
+			modelSelector = new ModelSelectorComponent(
 				this.ctx.ui,
 				this.ctx.session.model,
 				this.ctx.settings,
@@ -717,38 +720,73 @@ export class SelectorController {
 							this.ctx.ui.requestRender();
 							return;
 						}
-						const { model, role, thinkingLevel, selector } = selection;
+						const { model, role, thinkingLevel, selector: selectedSelector } = selection;
 						if (role === null) {
 							// Temporary: update agent state but don't persist to settings
 							await this.ctx.session.setModelTemporary(model, thinkingLevel);
 							this.ctx.statusLine.invalidate();
 							this.ctx.updateEditorBorderColor();
-							this.ctx.showStatus(`Temporary model: ${selector ?? model.id}`);
+							this.ctx.showStatus(`Temporary model: ${selectedSelector ?? model.id}`);
 							done();
 							this.ctx.ui.requestRender();
 						} else if (role === "default") {
 							// Default: update agent state and persist as the active default model.
 							await this.ctx.session.setModel(model, role, {
-								selector,
+								selector: selectedSelector,
 								thinkingLevel,
+							});
+							const value = formatModelSelectorValue(
+								selectedSelector ?? `${model.provider}/${model.id}`,
+								thinkingLevel,
+							);
+							materializeActiveModelProfileAssignment({
+								session: this.ctx.session,
+								settings: this.ctx.settings,
+								role,
+								selector: value,
 							});
 							if (thinkingLevel && thinkingLevel !== ThinkingLevel.Inherit) {
 								this.ctx.session.setThinkingLevel(thinkingLevel);
 							}
+							modelSelector.refreshRoleAssignments({
+								currentModel: this.ctx.session.model,
+								currentThinkingLevel: this.ctx.session.thinkingLevel,
+								activeModelProfile:
+									this.ctx.session.getActiveModelProfile?.() ?? this.ctx.settings.get("modelProfile.default"),
+							});
 							this.ctx.statusLine.invalidate();
 							this.ctx.updateEditorBorderColor();
-							this.ctx.showStatus(`Default model: ${selector ?? model.id}`);
+							this.ctx.showStatus(`Default model: ${selectedSelector ?? model.id}`);
 							done();
 							this.ctx.ui.requestRender();
 						} else {
-							// Role-agent assignments configure Task dispatch and must not switch the active chat model.
 							const apiKey = await this.ctx.session.modelRegistry.getApiKey(model, this.ctx.session.sessionId);
 							if (!apiKey) {
 								throw new Error(`No API key for ${model.provider}/${model.id}`);
 							}
-							const overrides = this.ctx.settings.get("task.agentModelOverrides");
-							const value = selector ?? `${model.provider}/${model.id}`;
-							this.ctx.settings.set("task.agentModelOverrides", { ...overrides, [role]: value });
+							const value =
+								selectedSelector ?? formatModelSelectorValue(`${model.provider}/${model.id}`, thinkingLevel);
+							const materializedProfile = materializeActiveModelProfileAssignment({
+								session: this.ctx.session,
+								settings: this.ctx.settings,
+								role,
+								selector: value,
+							});
+							if (!materializedProfile) {
+								const target = SKC_MODEL_ASSIGNMENT_TARGETS[role];
+								if (target.settingsPath === "modelRoles") {
+									this.ctx.settings.setModelRole(role, value);
+								} else {
+									const overrides = this.ctx.settings.get("task.agentModelOverrides");
+									this.ctx.settings.set("task.agentModelOverrides", { ...overrides, [role]: value });
+								}
+							}
+							modelSelector.refreshRoleAssignments({
+								currentModel: this.ctx.session.model,
+								currentThinkingLevel: this.ctx.session.thinkingLevel,
+								activeModelProfile:
+									this.ctx.session.getActiveModelProfile?.() ?? this.ctx.settings.get("modelProfile.default"),
+							});
 							this.ctx.settings.getStorage()?.recordModelUsage(`${model.provider}/${model.id}`);
 							this.ctx.showStatus(`${role} agent model: ${value}`);
 							done();
@@ -765,11 +803,15 @@ export class SelectorController {
 				{
 					...options,
 					sessionId: this.ctx.session.sessionId,
+					currentThinkingLevel: this.ctx.session.thinkingLevel,
+					activeModelProfile:
+						this.ctx.session.getActiveModelProfile?.() ?? this.ctx.settings.get("modelProfile.default"),
 					isFastForProvider: provider => this.ctx.session.isFastForProvider(provider),
 					isFastForSubagentProvider: provider => this.ctx.session.isFastForSubagentProvider(provider),
+					isCurrentModelFastModeActive: () => this.ctx.session.isFastModeActive(),
 				},
 			);
-			return { component: selector, focus: selector };
+			return { component: modelSelector, focus: modelSelector };
 		});
 	}
 

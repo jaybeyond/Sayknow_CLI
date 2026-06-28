@@ -76,6 +76,11 @@ const builtInOAuthProviders: OAuthProviderInfo[] = [
 		available: true,
 	},
 	{
+		id: "fugu",
+		name: "Sakana Fugu (API key)",
+		available: true,
+	},
+	{
 		id: "github-copilot",
 		name: "GitHub Copilot",
 		available: true,
@@ -353,6 +358,7 @@ export async function refreshOAuthToken(
 		case "cerebras":
 		case "fireworks":
 		case "firepass":
+		case "fugu":
 		case "nvidia":
 		case "nanogpt":
 		case "synthetic":
@@ -466,6 +472,9 @@ export async function getOAuthApiKey(
 	return { newCredentials: creds, apiKey };
 }
 
+export function resolveOAuthStorageProvider(provider: OAuthProviderId): OAuthProviderId {
+	return provider === "openai-codex-device" ? "openai-codex" : provider;
+}
 /**
  * Get list of OAuth providers.
  */

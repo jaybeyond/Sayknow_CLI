@@ -1,3 +1,6 @@
+import type { ResolvedTmuxBinary } from "./psmux-detect";
+import { resolveSkcTmuxBinary } from "./psmux-detect";
+
 export const SKC_DEFAULT_TMUX_SESSION = "sayknow_cli";
 export const SKC_TMUX_SESSION_PREFIX = `${SKC_DEFAULT_TMUX_SESSION}_`;
 export const SKC_TMUX_COMMAND_ENV = "SKC_TMUX_COMMAND";
@@ -11,6 +14,7 @@ export const SKC_TMUX_PROJECT_OPTION = "@skc-project";
 export const SKC_TMUX_SESSION_ID_OPTION = "@skc-session-id";
 export const SKC_TMUX_SESSION_STATE_FILE_OPTION = "@skc-session-state-file";
 export const SKC_TMUX_VERSION_OPTION = "@skc-version";
+export const SKC_PSMUX_PROFILE_FORCE_ENV = "SKC_PSMUX_PROFILE_FORCE";
 
 export interface SkcTmuxProfileCommand {
 	description: string;
@@ -31,9 +35,32 @@ export function envDisabled(value: string | undefined): boolean {
 	return normalized === "0" || normalized === "false" || normalized === "off" || normalized === "no";
 }
 
-export function resolveSkcTmuxCommand(env: NodeJS.ProcessEnv = process.env): string {
-	return env[SKC_TMUX_COMMAND_ENV]?.trim() || env.SKC_TEAM_TMUX_COMMAND?.trim() || "tmux";
+/**
+ * Resolve the tmux (or tmux-compatible multiplexer) command SKC should invoke.
+ *
+ * This is the shared entry point used by every SKC code path that needs to talk
+ * to a multiplexer: `skc --tmux` planning, `skc session ...`, `skc team ...`,
+ * the lifecycle controller, and the harness resident owner. Routing all of
+ * them through the same resolver means a single `SKC_TMUX_COMMAND` override or
+ * a single Windows psmux / pmux detection wins for the whole process — the
+ * failure mode where `skc --tmux` creates a psmux-backed session and then
+ * `skc session status` fails because it queries literal `tmux` is closed off.
+ *
+ * Explicit `SKC_TMUX_COMMAND` / `SKC_TEAM_TMUX_COMMAND` overrides are honored on
+ * every platform. On native Windows without an override the resolver walks
+ * `psmux`, then `pmux`, then `tmux` and uses the first binary present on PATH.
+ * On POSIX the resolver returns `tmux` (the historical default) and only
+ * falls through to the platform-aware walker if the caller opts in.
+ */
+export function resolveSkcTmuxCommand(
+	env: NodeJS.ProcessEnv = process.env,
+	platform: NodeJS.Platform = process.platform,
+): string {
+	return resolveSkcTmuxBinary({ env, platform }).command;
 }
+
+export type { PsmuxProbe, ResolvedTmuxBinary, ResolveSkcTmuxBinaryOptions } from "./psmux-detect";
+export { clearPsmuxDetectionCache, detectPsmux, probePsmux, resolveSkcTmuxBinary } from "./psmux-detect";
 
 /**
  * Build the exact-session target for tmux *option* commands
@@ -45,7 +72,17 @@ export function resolveSkcTmuxCommand(env: NodeJS.ProcessEnv = process.env): str
  * keeps the exact-session match while giving tmux the window-qualified target
  * those commands require. See sayknow-cli#580.
  */
-export function buildSkcTmuxExactOptionTarget(sessionName: string): string {
+export function buildSkcTmuxExactOptionTarget(
+	sessionName: string,
+	opts: { env?: NodeJS.ProcessEnv; platform?: NodeJS.Platform; binary?: ResolvedTmuxBinary } = {},
+): string {
+	const binary = opts.binary ?? resolveSkcTmuxBinary({ env: opts.env, platform: opts.platform });
+	// psmux 3.3.0 rejects the tmux `=NAME` exact-session prefix for option
+	// commands ("no server running on session '=NAME'"); bare `NAME` and
+	// window-qualified `NAME:` both work. tmux 3.6a needs the
+	// window-qualified `=NAME:` to resolve the session for option
+	// commands (sayknow-cli#580).
+	if (binary.isPsmux) return sessionName;
 	return `=${sessionName}:`;
 }
 
@@ -55,7 +92,9 @@ export function buildSkcTmuxUntaggedSessionHint(tmuxCommand: string): string {
 	return (
 		`the active multiplexer "${tmuxCommand}" lists this session but did not return SKC's ${SKC_TMUX_PROFILE_OPTION} ownership tag; ` +
 		"SKC-managed sessions and `skc team` require a tmux provider that round-trips tmux user options. " +
-		"Alternative multiplexers such as psmux on Windows do not persist user options yet, so the Windows-native psmux path is not fully supported; " +
+		"For psmux on Windows, cwd/start-directory flags such as `-c` do not isolate the server namespace; psmux uses the tmux-compatible global `-L <namespace>` flag for that. " +
+		"SKC_TMUX_COMMAND and SKC_TEAM_TMUX_COMMAND are binary overrides, not shell command lines, so `psmux -L name` is not a supported value. " +
+		"Alternative multiplexers such as psmux on Windows do not reliably persist user options yet, so the Windows-native psmux path is not fully supported; " +
 		"use real tmux for SKC-managed session and team flows."
 	);
 }
@@ -144,6 +183,16 @@ export function buildSkcTmuxRequiredProfileCommands(
 	return commands;
 }
 
+/**
+ * Keys whose set-option / set-window-option round-trip is unreliable on psmux
+ * 3.3.0. psmux does not support the tmux `set-window-option` command at all
+ * (it reports "unknown command: set-window-option") and silently drops several
+ * `set-option` keys. The list lives here so every code path that tags a tmux
+ * session (skc --tmux planning, skc session create, skc team bootstrap)
+ * applies the same filter.
+ */
+const PSMUX_UNSUPPORTED_PROFILE_KEYS = new Set(["mouse", "set-clipboard", "mode-style"]);
+
 export function buildSkcTmuxProfileCommands(
 	target: string,
 	env: NodeJS.ProcessEnv = process.env,
@@ -155,6 +204,7 @@ export function buildSkcTmuxProfileCommands(
 		sessionStateFile?: string | null;
 		version?: string | null;
 	} = {},
+	opts: { platform?: NodeJS.Platform; tmuxCommand?: string } = {},
 ): SkcTmuxProfileCommand[] {
 	const commands = buildSkcTmuxRequiredProfileCommands(target, metadata);
 	if (envDisabled(env[SKC_TMUX_PROFILE_ENV])) return commands;
@@ -170,6 +220,40 @@ export function buildSkcTmuxProfileCommands(
 			description: "enable tmux mouse scrolling",
 			args: ["set-option", "-t", target, "mouse", "on"],
 		});
+	// psmux does not implement set-window-option and historically drops
+	// mouse / set-clipboard / mode-style. Filter the UX profile commands
+	// centrally so every code path that tags a session (skc --tmux planning,
+	// skc session create, skc team bootstrap) drops the same set. The
+	// SKC_PSMUX_PROFILE_FORCE override lets the operator opt back in when
+	// running on a psmux build that has caught up. The ownership-tag
+	// round-trip (set-option @skc-*) is never filtered, since skc session /
+	// skc team rely on it.
+	// The filter is opt-in: callers that explicitly pass `opts.tmuxCommand`
+	// name a psmux-class multiplexer (psmux / pmux) when they want the UX
+	// profile filtered. Auto-detect on Windows hosts where psmux happens
+	// to be on PATH would silently change the test output for every caller
+	// that does not pin the multiplexer, so we require the caller to opt
+	// in by naming the multiplexer. SKC_PSMUX_PROFILE_FORCE re-enables
+	// the UX profile commands when a psmux build catches up.
+	const tmuxName = (opts.tmuxCommand ?? "").toLowerCase();
+	const isPsmuxClass =
+		tmuxName === "psmux" ||
+		tmuxName === "pmux" ||
+		tmuxName.endsWith("/psmux") ||
+		tmuxName.endsWith("/pmux") ||
+		tmuxName.endsWith("\\psmux") ||
+		tmuxName.endsWith("\\pmux");
+	const dropUx = isPsmuxClass && !envDisabled(env[SKC_PSMUX_PROFILE_FORCE_ENV]);
+	if (dropUx) {
+		return commands.filter(command => {
+			const flag = command.args[0];
+			const key = command.args[command.args.length - 2];
+			return !(
+				PSMUX_UNSUPPORTED_PROFILE_KEYS.has(String(key)) &&
+				(flag === "set-option" || flag === "set-window-option")
+			);
+		});
+	}
 	return commands;
 }
 

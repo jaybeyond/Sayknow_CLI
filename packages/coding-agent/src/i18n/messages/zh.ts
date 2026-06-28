@@ -28,7 +28,6 @@ export const zh: Partial<Record<MsgKey, string>> = {
 	"settings.tab.appearance": "外观",
 	"settings.tab.model": "模型",
 	"settings.tab.interaction": "交互",
-	"settings.tab.notifications": "通知",
 	"settings.tab.context": "上下文",
 	"settings.tab.memory": "记忆",
 	"settings.tab.editing": "编辑",

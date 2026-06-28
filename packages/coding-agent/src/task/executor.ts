@@ -9,6 +9,7 @@ import * as fs from "node:fs/promises";
 import path from "node:path";
 import type { AgentEvent, AgentIdentity, AgentTelemetryConfig, ThinkingLevel } from "@sayknow-cli/agent-core";
 import { recordHandoff, resolveTelemetry } from "@sayknow-cli/agent-core";
+import type { ServiceTier } from "@sayknow-cli/ai";
 import { type JsonSchemaValidationIssue, validateJsonSchemaValue } from "@sayknow-cli/ai/utils/schema";
 import { logger, prompt, untilAborted } from "@sayknow-cli/utils";
 import { AsyncJobManager } from "../async";
@@ -19,7 +20,7 @@ import { Settings } from "../config/settings";
 import { SETTINGS_SCHEMA, type SettingPath } from "../config/settings-schema";
 import { runExtensionCompact, runExtensionSetModel } from "../extensibility/extensions/compact-handler";
 import { getSessionSlashCommands } from "../extensibility/extensions/get-commands-handler";
-import { buildAgentSubskillInjection } from "../extensibility/skc-plugins";
+import { buildAgentSubskillInjection, renderAgentPromptAdditions } from "../extensibility/skc-plugins";
 import { buildSkillPromptMessage, type Skill } from "../extensibility/skills";
 import type { HindsightSessionState } from "../hindsight/state";
 import type { LocalProtocolOptions } from "../internal-urls";
@@ -146,6 +147,13 @@ export interface ExecutorOptions {
 	authStorage?: AuthStorage;
 	modelRegistry?: ModelRegistry;
 	settings?: Settings;
+	/**
+	 * Live service-tier intent of the parent session (`AgentSession.serviceTier`),
+	 * used as the inherited tier when `task.serviceTier === "inherit"`. Passing the
+	 * live value (not the stale settings snapshot) lets a runtime `/fast on` reach
+	 * subagents, and a main-model fast-mode auto-disable does not clobber it.
+	 */
+	inheritedServiceTier?: ServiceTier;
 	/** Override local:// protocol options so subagent shares parent's local:// root */
 	localProtocolOptions?: LocalProtocolOptions;
 	/**
@@ -482,15 +490,19 @@ function getUsageTokens(usage: unknown): number {
 	return firstNumberField(record, ["totalTokens", "total_tokens"]) ?? 0;
 }
 
-export function createSubagentSettings(baseSettings: Settings): Settings {
+export function createSubagentSettings(baseSettings: Settings, inheritedServiceTier?: ServiceTier): Settings {
 	const snapshot: Partial<Record<SettingPath, unknown>> = {};
 	for (const key of Object.keys(SETTINGS_SCHEMA) as SettingPath[]) {
 		snapshot[key] = baseSettings.get(key);
 	}
-	// Subagent-scoped service-tier override: "inherit" keeps the snapshotted main
-	// session tier; any explicit value applies only to subagent sessions.
+	// Subagent-scoped service-tier override: "inherit" uses the parent session's
+	// LIVE intent (so a runtime `/fast on` reaches subagents and a main-model
+	// fast-mode auto-disable never clobbers it); any explicit value applies only
+	// to subagent sessions and wins over inherited intent.
 	const taskServiceTier = baseSettings.get("task.serviceTier");
-	if (taskServiceTier !== "inherit") {
+	if (taskServiceTier === "inherit") {
+		snapshot.serviceTier = inheritedServiceTier ?? "none";
+	} else {
 		snapshot.serviceTier = taskServiceTier;
 	}
 	return Settings.isolated({
@@ -571,7 +583,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 	}
 
 	const settings = options.settings ?? Settings.isolated();
-	const subagentSettings = createSubagentSettings(settings);
+	const subagentSettings = createSubagentSettings(settings, options.inheritedServiceTier);
 	const maxRecursionDepth = settings.get("task.maxRecursionDepth") ?? 2;
 	const maxRuntimeMs = Math.max(0, Math.trunc(Number(settings.get("task.maxRuntimeMs") ?? 0) || 0));
 	const parentDepth = options.taskDepth ?? 0;
@@ -1229,6 +1241,13 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				agentName: agent.name,
 			});
 
+			let agentPromptAdditions = { appendix: "", advertisement: "" };
+			try {
+				agentPromptAdditions = await renderAgentPromptAdditions({ cwd, agentName: agent.name });
+			} catch (error) {
+				logger.warn("Failed to render SKC plugin agent prompt additions", { error });
+			}
+
 			const { session } = await awaitAbortable(
 				createAgentSession({
 					cwd: worktree ?? cwd,
@@ -1259,7 +1278,12 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 							ircSelfId: ircEnabled ? id : "",
 							forkContext: forkContextNotice,
 						});
-						const promptWithSubskills = `${subagentPrompt}${agentSubskillBlock}`;
+						// Order: base agent prompt -> agent appendix -> Tier-1 advertisement -> Tier-2 body.
+						const appendixPart = agentPromptAdditions.appendix ? `\n\n${agentPromptAdditions.appendix}` : "";
+						const advertPart = agentPromptAdditions.advertisement
+							? `\n\n${agentPromptAdditions.advertisement}`
+							: "";
+						const promptWithSubskills = `${subagentPrompt}${appendixPart}${advertPart}${agentSubskillBlock}`;
 						return defaultPrompt.length === 0
 							? [promptWithSubskills]
 							: [...defaultPrompt.slice(0, -1), promptWithSubskills, defaultPrompt[defaultPrompt.length - 1]];

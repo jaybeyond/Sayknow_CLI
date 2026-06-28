@@ -240,15 +240,36 @@ providers:
 - `set-clipboard on` and a readable copy-mode `mode-style`.
 - SKC ownership/identity tags (`@skc-profile`, version, branch/project markers).
 
-This profile is applied on macOS, Linux, and WSL (Linux) alike; only native Windows (`win32`) skips the tmux launch. It is applied **only to sessions SKC itself creates**. If you start tmux yourself and then run `skc` inside it, SKC leaves your tmux configuration untouched — add `set -g mouse on` to your own `~/.tmux.conf`, or relaunch with `skc --tmux` to get the managed profile.
+This profile is applied on macOS, Linux, WSL (Linux), and native Windows when a compatible tmux provider is available. It is applied **only to sessions SKC itself creates**. If you start tmux yourself and then run `skc` inside it, SKC leaves your tmux configuration untouched — add `set -g mouse on` to your own `~/.tmux.conf`, or relaunch with `skc --tmux` to get the managed profile.
 
 | Variable | Behavior |
 | --- | --- |
 | `SKC_LAUNCH_POLICY` | Launch policy for `--tmux` startup: `tmux` (default) or `direct` (skip the tmux session) |
 | `SKC_TMUX_SESSION` | Explicit tmux session name override for `--tmux` startup. Use a unique value (for example `SKC_TMUX_SESSION=skc-fresh-$(date +%s) skc --tmux`) to force a fresh named session. |
-| `SKC_TMUX_COMMAND` | tmux binary/command override for every SKC tmux flow (`SKC_TEAM_TMUX_COMMAND` is honored as a team-path alias) |
+| `SKC_TMUX_COMMAND` | tmux binary/name override for every SKC tmux flow (`SKC_TEAM_TMUX_COMMAND` is honored as a team-path alias). This is not a shell command line; include only the executable path/name, not flags. |
 | `SKC_TMUX_PROFILE` | Set `0`/`false`/`off` to apply only the required ownership tags and skip the scroll/mouse/clipboard profile |
 | `SKC_MOUSE` | Set `0`/`false`/`off` to skip `mouse on`, leaving wheel scrolling to the host terminal instead of tmux copy-mode |
+| `SKC_PSMUX_COMMAND` | Force the resolved multiplexer to be treated as psmux (skips the version-banner probe). Useful when the binary is a thin wrapper that does not advertise `psmux` in `-V` output. |
+| `SKC_PSMUX_DETECTION` | Set `0`/`false`/`off` to skip psmux detection entirely. SKC falls back to treating the resolved command as plain tmux. |
+| `SKC_PSMUX_FORCE_DETECT` | Set `1`/`true`/`on` to re-probe the multiplexer on every call instead of caching the per-process verdict. |
+
+#### Windows psmux support
+
+On native Windows, [psmux](https://github.com/psmux/psmux) is the supported tmux-compatible multiplexer for `skc --tmux`, `skc session`, and `skc team`. Psmux may be installed as `psmux.exe` or through its `tmux.exe` / `pmux.exe` aliases; the same guidance applies when `SKC_TMUX_COMMAND` is left at the default `tmux` but the executable on PATH is actually psmux.
+
+Detection runs once per process: SKC walks `psmux`, then `pmux`, then `tmux` on Windows PATH, picks the first binary that resolves, and probes it with `<binary> -V`. The probe verdict is cached for the lifetime of the process. The cached verdict keys off the resolved binary path, so renaming or installing a different binary in the same PATH slot still gets re-probed on next launch.
+
+The probe matches the `psmux` and `pmux` substrings in the version banner. If psmux is installed under a custom wrapper that hides the version banner, set `SKC_PSMUX_COMMAND` to that wrapper path so the multiplexer is treated as psmux without a probe. To turn detection off entirely (for example to debug a non-psmux Windows tmux port), set `SKC_PSMUX_DETECTION=off`.
+
+Native Windows `skc --tmux` builds a real PowerShell-encoded plan when psmux is on PATH: `pwsh -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ...` invokes skc inside a psmux-managed session, the same ownership-tag (`@skc-profile`) and project/branch/session-identity markers round-trip via `set-option` / `show-options` / `list-sessions -F`, and `skc team` spawns worker panes via `split-window` against the same psmux session. Worker commands are emitted with PowerShell-safe `$env:VAR = 'value';` assignments so psmux's ConPTY panes inherit `SKC_TEAM_*` correctly.
+
+The `mouse`, `set-clipboard`, and `mode-style` UX profile options are filtered out of the emitted profile when the resolved multiplexer is psmux because psmux historically does not round-trip those keys; the `@skc-profile` ownership tag and the branch / project / session identity markers are still emitted because those are the ones that gate `skc session` and `skc team`. If you want the full UX profile on Windows, set `SKC_TMUX_COMMAND=tmux` against a real tmux binary (via WSL or a separate install).
+
+#### Windows psmux namespace boundary
+
+psmux follows tmux-style server semantics: `new-session -c <path>`, `new-window -c <path>`, and SKC's `skc --tmux` cwd only choose the start directory for the session/window/pane. They do **not** create a per-project server namespace. psmux server isolation uses the tmux-compatible global flag `-L <namespace>`.
+
+SKC does not currently expose a supported `SKC_TMUX_NAMESPACE` runtime knob or parse flags from `SKC_TMUX_COMMAND`. Do not set `SKC_TMUX_COMMAND="psmux -L my-project"`; SKC treats the value as one executable path/name. Runtime `-L` support requires a structured tmux command resolver so launch, `skc session`, and `skc team` all target the same namespace. Until that exists, manage psmux namespaces explicitly outside SKC (for example by starting `psmux -L <namespace>` yourself before `skc --tmux` and letting SKC attach) and treat them as unsupported for SKC ownership-tag/team guarantees.
 
 #### WSL / Windows Terminal scrolling
 

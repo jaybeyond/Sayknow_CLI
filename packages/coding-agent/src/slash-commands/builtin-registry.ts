@@ -6,6 +6,7 @@ import { getOAuthProviders } from "@sayknow-cli/ai/utils/oauth";
 import { Spacer, Text } from "@sayknow-cli/tui";
 import { setProjectDir } from "@sayknow-cli/utils";
 import { jobElapsedMs } from "../async";
+import { materializeActiveModelProfileAssignment } from "../config/model-profile-activation";
 import {
 	SKC_MODEL_ASSIGNMENT_TARGET_IDS,
 	SKC_MODEL_ASSIGNMENT_TARGETS,
@@ -299,6 +300,12 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 							selector: selection.selector,
 							thinkingLevel: selection.thinkingLevel,
 						});
+						materializeActiveModelProfileAssignment({
+							session: runtime.session,
+							settings: runtime.settings,
+							role: parsedArgs.targetId,
+							selector: persistedSelector,
+						});
 						if (selection.thinkingLevel) {
 							runtime.session.setThinkingLevel(selection.thinkingLevel);
 						}
@@ -317,10 +324,23 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 							selection.thinkingLevel ??
 							extractExplicitThinkingSelector(overrides[parsedArgs.targetId], runtime.settings);
 						const roleSelector = formatModelSelectorValue(selection.selector, thinkingLevel);
-						runtime.settings.set("task.agentModelOverrides", {
-							...overrides,
-							[parsedArgs.targetId]: roleSelector,
+						const materializedProfile = materializeActiveModelProfileAssignment({
+							session: runtime.session,
+							settings: runtime.settings,
+							role: parsedArgs.targetId,
+							selector: roleSelector,
 						});
+						if (!materializedProfile) {
+							const target = SKC_MODEL_ASSIGNMENT_TARGETS[parsedArgs.targetId];
+							if (target.settingsPath === "modelRoles") {
+								runtime.settings.setModelRole(parsedArgs.targetId, roleSelector);
+							} else {
+								runtime.settings.set("task.agentModelOverrides", {
+									...overrides,
+									[parsedArgs.targetId]: roleSelector,
+								});
+							}
+						}
 						runtime.settings.getStorage()?.recordModelUsage(`${selection.model.provider}/${selection.model.id}`);
 						await runtime.output(`${parsedArgs.targetId} agent model set to ${roleSelector}.`);
 					}

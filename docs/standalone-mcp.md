@@ -6,9 +6,16 @@ This page answers the common user question: “Does normal `skc` inherit my Clau
 
 Normal standalone SKC (`skc`, `skc --tmux`, and print-mode prompts) does **not** inherit MCP servers from Claude Code, Codex, Cursor, Gemini, Windsurf, or other tools as a public startup contract.
 
-There is also no supported user-facing `~/.skc/agent/config.yml` setting that makes the normal standalone TUI automatically load arbitrary MCP servers for the model. Historical/internal MCP discovery code and `.mcp.json` shapes exist in the repository, but they are not the supported public integration boundary for ordinary standalone sessions.
+Standalone SKC also has a narrow direct-registration command for explicit user-provided server definitions:
 
-If you rely on a specific MCP server, run it through one of the supported integration surfaces below instead of assuming another tool's MCP config will be imported into standalone SKC.
+```bash
+skc mcp add context7 npx -y @upstash/context7-mcp
+skc mcp add docs --type http --url https://example.test/mcp --header Authorization="Bearer $TOKEN"
+skc mcp list
+skc mcp remove context7
+```
+
+`skc mcp add` writes only the definition supplied on that invocation to SKC's own MCP config (`~/.skc/agent/mcp.json` by default, or `./.skc/mcp.json` with `--project`). It does not read Claude Code, Codex, OpenCode, Cursor, Gemini, Windsurf, or other live configs. `skc mcp list` and `skc mcp remove` print redacted definitions so env/header/auth/OAuth credential values are not exposed in public output.
 
 ## What is supported today
 

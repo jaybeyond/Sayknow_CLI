@@ -318,8 +318,9 @@ Project executor override body.
 			path.join(repoRoot, "packages", "coding-agent", "src", "defaults", "skc", "skills", "ultragoal", "SKILL.md"),
 		).text();
 
+		expect(team).toContain("current-session active SKC goal snapshot");
+		expect(ultragoal).toContain("current-session SKC goal snapshot");
 		for (const content of [team, ultragoal]) {
-			expect(content).toContain('fresh `goal({"op":"get"})` snapshot');
 			expect(content).toContain("Workers must not run `skc ultragoal checkpoint`");
 			expect(content).toContain("checkpoint authority stays with the leader");
 			expect(content).toContain("Ultragoal does not auto-launch Team");
@@ -351,6 +352,8 @@ Project executor override body.
 		expect(content).toContain('"language": "<existing language object from active state, if present>"');
 		expect(content).toContain("progress reports, and spec prose");
 		expect(content).toContain("translated/localized according to `language.instruction`");
+		expect(content).toContain("must not print `Question:`/`Options:` blocks as assistant prose");
+		expect(content).toContain("call `ask` with the same question/options");
 		expect(content).not.toContain("default `0.2`");
 		expect(content).not.toContain("20%");
 

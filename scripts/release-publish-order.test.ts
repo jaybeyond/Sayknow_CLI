@@ -34,6 +34,9 @@ describe("unscoped sayknow-cli package publication", () => {
 		);
 		expect(aliasManifest.bin).toEqual({ skc: "bin/skc.js" });
 		expect(aliasManifest.dependencies?.["@sayknow-cli/coding-agent"]).toBe("catalog:");
+		const wrapper = await Bun.file(path.join(repoRoot, "packages/sayknow-cli/bin/skc.js")).text();
+		expect(wrapper).toContain('import { runCli } from "@sayknow-cli/coding-agent/cli";');
+		expect(wrapper).toContain("await runCli(process.argv.slice(2));");
 	});
 
 	test("release dependency normalization collapses repeated file prefixes", () => {

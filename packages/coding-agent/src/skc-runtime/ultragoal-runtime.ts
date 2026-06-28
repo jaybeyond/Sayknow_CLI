@@ -1,11 +1,12 @@
 import * as crypto from "node:crypto";
 import * as path from "node:path";
 import { inflateSync } from "node:zlib";
-
+import { normalizeGoal } from "../goals/state";
+import { buildSessionContext, loadEntriesFromFile, type SessionEntry } from "../session/session-manager";
 import type { WorkflowHudSummary } from "../skill-state/active-state";
 import { buildUltragoalHudSummary as buildWorkflowUltragoalHudSummary } from "../skill-state/workflow-hud";
 import { renderCliWriteReceipt } from "./cli-write-receipt";
-import { DEFAULT_ULTRAGOAL_OBJECTIVE } from "./goal-mode-request";
+import { DEFAULT_ULTRAGOAL_OBJECTIVE, SKC_SESSION_FILE_ENV } from "./goal-mode-request";
 import { sessionUltragoalDir, skcRoot } from "./session-layout";
 import { resolveSkcSessionForRead, resolveSkcSessionForWrite, writeSessionActivityMarker } from "./session-resolution";
 import { renderUltragoalStatusMarkdown } from "./state-renderer";
@@ -831,6 +832,14 @@ function normalizedEvidenceKind(row: JsonObject): string {
 function evidenceKindMatches(kind: string, words: string[]): boolean {
 	return words.some(word => kind.includes(word));
 }
+function formatActualArtifactKinds(artifactIds: string[], kinds: string[]): string {
+	if (artifactIds.length === 0) return "none";
+	return artifactIds.map((id, index) => `${id}=${kinds[index] ?? "<missing-kind>"}`).join(", ");
+}
+
+function formatExpectedKindWords(words: string[]): string {
+	return words.map(word => `"${word}"`).join(", ");
+}
 
 type SurfaceFamily = "web" | "cli" | "native" | "api-package" | "algorithm-math" | "unknown";
 
@@ -899,9 +908,18 @@ function categorizeComputerChangePath(value: string): UltragoalChangeCategory {
 }
 
 function isComputerControlSurfaceCategory(category: UltragoalChangeCategory): boolean {
-	return (
-		category === "code" || category === "generated-binding" || category === "tool" || category === "settings-registry"
-	);
+	// The computer-use red-team suite is conditional, not universal (see the
+	// ultragoal SKILL): require it only when the change actually touches
+	// computer-control source — the computer tool (`tool`), its settings/registry
+	// wiring (`settings-registry`), or computer Rust (`code`). A bare regeneration
+	// of the SHARED native binding (`generated-binding`: packages/natives/native/
+	// index.{d.ts,js}) is NOT by itself a computer-use change: that file is
+	// generated from Rust, so any real computer-use behavior change must also
+	// touch one of the categories above and will still trigger the suite. Treating
+	// the regenerated aggregate binding as a computer surface forced the suite on
+	// unrelated features (e.g. notifications), which the SKILL explicitly warns
+	// against, so it is excluded here.
+	return category === "code" || category === "tool" || category === "settings-registry";
 }
 
 function isComputerControlSurfaceChangePath(row: UltragoalChangeSetPath): boolean {
@@ -967,7 +985,7 @@ function validateSurfaceArtifactCompatibility(
 		const hasVisual = kinds.some(kind => evidenceKindMatches(kind, ["screenshot", "image", "visual"]));
 		if (!hasBrowser || !hasVisual) {
 			throw new Error(
-				`qualityGate ${fieldName} for GUI/web surfaces must reference browser automation plus screenshot or image-verdict artifacts`,
+				`qualityGate ${fieldName} for GUI/web surfaces must reference browser automation plus screenshot or image-verdict artifacts; surface "${surface}" expected one artifact kind containing one of ${formatExpectedKindWords(["browser", "playwright", "pandawright", "automation"])} and one containing one of ${formatExpectedKindWords(["screenshot", "image", "visual"])}; actual artifact kinds: ${formatActualArtifactKinds(artifactIds, kinds)}`,
 			);
 		}
 		return;
@@ -994,7 +1012,7 @@ function validateSurfaceArtifactCompatibility(
 		const expected = surfaceFamilies[family];
 		if (!kinds.some(kind => evidenceKindMatches(kind, expected.evidence))) {
 			throw new Error(
-				`qualityGate ${fieldName} for ${expected.label} surfaces must reference compatible artifact kinds`,
+				`qualityGate ${fieldName} for ${expected.label} surfaces must reference compatible artifact kinds; surface "${surface}" expected at least one artifact kind containing one of ${formatExpectedKindWords(expected.evidence)}; actual artifact kinds: ${formatActualArtifactKinds(artifactIds, kinds)}`,
 			);
 		}
 	}
@@ -1490,6 +1508,20 @@ function isAllowedCliReplayCommand(command: readonly string[]): boolean {
 	if (executable === "skc") return args.length === 1 && ["read", "status"].includes(args[0] ?? "");
 	return false;
 }
+function summarizeBlockedCliReplayCommand(command: readonly string[]): string {
+	const executable = command[0] ? basenameCommand(command[0]) : "<missing>";
+	const argCount = Math.max(0, command.length - 1);
+	return `${JSON.stringify(executable)} with ${argCount} arg${argCount === 1 ? "" : "s"}`;
+}
+
+function cliReplayAllowlistDescription(): string {
+	return [
+		'`bun --version`, `node --version`, or deterministic `bun/node -e "console.log(...)"`',
+		"`npm|pnpm|yarn --version` or `npm|pnpm|yarn list`",
+		"read-only `git status|rev-parse|merge-base|diff|show|log` with safe args",
+		"`skc read` or `skc status`",
+	].join("; ");
+}
 
 function resolveCliReplayCommand(command: string[]): string[] {
 	if (basenameCommand(command[0]!) === "bun") return [process.execPath, ...command.slice(1)];
@@ -1578,8 +1610,11 @@ function parseCliReplayRecord(
 	if (!command) throw new Error(`qualityGate ${fieldName}.command must be a non-empty string array`);
 	if (record.replaySafe !== true)
 		throw new Error(`qualityGate ${fieldName}.replaySafe must be true before CLI replay executes`);
-	if (!isAllowedCliReplayCommand(command))
-		throw new Error(`qualityGate ${fieldName}.command is not in the conservative CLI replay allowlist`);
+	if (!isAllowedCliReplayCommand(command)) {
+		throw new Error(
+			`qualityGate ${fieldName}.command is not in the conservative CLI replay allowlist; command ${summarizeBlockedCliReplayCommand(command)} is blocked. Allowed replay commands: ${cliReplayAllowlistDescription()}. For other commands, provide audited replayExempt metadata with reasonCode, reason, approvedBy, and fallbackArtifactRefs that point to a structurally valid fallback artifact.`,
+		);
+	}
 	if (record.normalization !== undefined && record.normalization !== "default") {
 		throw new Error(`qualityGate ${fieldName}.normalization must be default when provided`);
 	}
@@ -2231,6 +2266,28 @@ function snapshotUpdatedAtMilliseconds(value: unknown): number | null {
 	const parsed = Date.parse(trimmed);
 	return Number.isFinite(parsed) ? parsed : null;
 }
+
+function singleSessionLeafId(entries: readonly SessionEntry[]): string | undefined {
+	if (entries.length === 0) return undefined;
+	const parentIds = new Set(
+		entries.map(entry => entry.parentId).filter((parentId): parentId is string => typeof parentId === "string"),
+	);
+	const leafIds = entries.map(entry => entry.id).filter(id => !parentIds.has(id));
+	return leafIds.length === 1 ? leafIds[0] : undefined;
+}
+
+async function readCurrentSessionSkcGoalSnapshot(): Promise<unknown | undefined> {
+	const sessionFile = process.env[SKC_SESSION_FILE_ENV]?.trim();
+	if (!sessionFile) return undefined;
+	const fileEntries = await loadEntriesFromFile(sessionFile);
+	const entries = fileEntries.filter((entry): entry is SessionEntry => entry.type !== "session");
+	const leafId = singleSessionLeafId(entries);
+	if (!leafId) return undefined;
+	const context = buildSessionContext(entries, leafId);
+	if (context.mode !== "goal" && context.mode !== "goal_paused") return undefined;
+	const goal = normalizeGoal(context.modeData?.goal);
+	return goal ? { goal } : undefined;
+}
 async function readSkcGoalSnapshot(input: {
 	cwd: string;
 	value: string | undefined;
@@ -2240,13 +2297,15 @@ async function readSkcGoalSnapshot(input: {
 	errorPrefix: string;
 	allowCompletedLegacyBlocker?: boolean;
 }): Promise<unknown> {
-	if (!input.value?.trim()) {
+	const snapshot = input.value?.trim()
+		? await readStructuredValue(input.cwd, input.value)
+		: await readCurrentSessionSkcGoalSnapshot();
+	if (snapshot === undefined) {
 		if (!input.required) return undefined;
 		throw new Error(
-			`${input.errorPrefix} require --skc-goal-json from a fresh active goal({"op":"get"}) snapshot; this is the SKC goal-mode receipt, not the .skc/ultragoal/goals.json goal record`,
+			`${input.errorPrefix} require an active SKC goal-mode snapshot from the current session or --skc-goal-json; this is the SKC goal-mode receipt, not the .skc/ultragoal/goals.json goal record`,
 		);
 	}
-	const snapshot = await readStructuredValue(input.cwd, input.value);
 	const snapshotObject = qualityGateObject(snapshot);
 	const detailsObject = qualityGateObject(snapshotObject?.details);
 	const goalObject = qualityGateObject(snapshotObject?.goal) ?? qualityGateObject(detailsObject?.goal);
@@ -3331,18 +3390,19 @@ function renderUltragoalHelp(args: readonly string[]): string | null {
 			"      --status=<value>             pending|active|complete|failed|blocked|review_blocked|superseded",
 			"      --evidence=<value>           Completion or checkpoint evidence text",
 			"      --quality-gate-json=<value>  JSON string or path for complete checkpoints",
-			'      --skc-goal-json=<value>      JSON string or path containing the current goal({"op":"get"}) snapshot',
+			"      --skc-goal-json=<value>      Optional JSON/path override for current goal snapshot; omitted complete checkpoints read current session goal state",
 			"      --json                       Output a machine-readable receipt",
 			"",
 			"COMPLETE CHECKPOINT RECEIPTS",
 			"  --quality-gate-json must be an object with architectReview, executorQa, and iteration.",
 			"  executorQa.contractCoverage[] rows require an obligation field; description is not a substitute.",
-			'  --skc-goal-json must contain the active SKC goal-mode snapshot from goal({"op":"get"}), not the .skc/ultragoal/goals.json goal record.',
+			"  Complete checkpoints use the current session's active SKC goal-mode snapshot when --skc-goal-json is omitted.",
+			"  Explicit --skc-goal-json values must contain an active SKC goal-mode snapshot, not the .skc/ultragoal/goals.json goal record.",
 			"  goal.updatedAt may be epoch milliseconds or an ISO timestamp and must be fresh.",
 			"",
 			"EXAMPLES",
 			'  $ skc ultragoal checkpoint --goal-id G001 --status blocked --evidence "waiting on review"',
-			'  $ skc ultragoal checkpoint --goal-id G001 --status complete --evidence "tests passed" --skc-goal-json ./goal.json --quality-gate-json ./quality-gate.json --json',
+			'  $ skc ultragoal checkpoint --goal-id G001 --status complete --evidence "tests passed" --quality-gate-json ./quality-gate.json --json',
 			"",
 		].join("\n");
 	}

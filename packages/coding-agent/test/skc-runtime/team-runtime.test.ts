@@ -53,7 +53,7 @@ function runGit(cwd: string, args: string[]): string {
 
 async function createFakeTmuxBin(
 	root: string,
-	options: { failDisplay?: boolean; failSplit?: boolean; skcProfile?: boolean } = {},
+	options: { failDisplay?: boolean; failSplit?: boolean; skcProfile?: boolean; untaggableProfile?: boolean } = {},
 ): Promise<string> {
 	const binDir = path.join(root, ".test-bin");
 	await fs.mkdir(binDir, { recursive: true });
@@ -90,9 +90,13 @@ case "$1" in
     ;;
   set-option)
     profile_file=${JSON.stringify(path.join(root, "tmux-profile-tag"))}
-    for arg in "$@"; do
+    ${
+			options.untaggableProfile
+				? `: # psmux-like provider: accepts set-option but does not persist tmux user options`
+				: `for arg in "$@"; do
       if [ "$arg" = "@skc-profile" ]; then echo "1" > "$profile_file"; fi
-    done
+    done`
+}
     exit 0
     ;;
   split-window)
@@ -656,7 +660,7 @@ describe("native skc team runtime", () => {
 					SKC_TEAM_TMUX_COMMAND: fakeTmux,
 				},
 			}),
-		).rejects.toThrow(/skc_team_requires_tmux_leader: run `skc --tmux` first/);
+		).rejects.toThrow(/skc_team_requires_tmux_leader: start a tmux session first/);
 
 		expect(await Bun.file(path.join(teamStateDir(cleanupRoot, "fail-team"), "phase.json")).exists()).toBe(false);
 		expect(
@@ -664,9 +668,56 @@ describe("native skc team runtime", () => {
 		).toBe(false);
 	});
 
-	it("rejects unmanaged tmux sessions before state, worktree, split, or profile mutation", async () => {
+	it("fails with friendly guidance when tmux is not installed", async () => {
 		cleanupRoot = await createGitRepo();
-		const fakeTmux = await createFakeTmuxBin(cleanupRoot, { skcProfile: false });
+
+		await expect(
+			startSkcTeam({
+				workerCount: 1,
+				agentType: "executor",
+				task: "No tmux here",
+				teamName: "no-tmux-team",
+				cwd: cleanupRoot,
+				env: {
+					SKC_SESSION_ID: TEST_SESSION_ID,
+					PATH: process.env.PATH ?? "",
+					SKC_TEAM_WORKER_COMMAND: "true",
+					SKC_TEAM_TMUX_COMMAND: "skc-nonexistent-tmux-binary-xyz",
+				},
+			}),
+		).rejects.toThrow(/skc_team_requires_tmux_leader:.*tmux_not_installed/);
+
+		expect(await Bun.file(path.join(teamStateDir(cleanupRoot, "no-tmux-team"), "phase.json")).exists()).toBe(false);
+	});
+
+	it("fails with not_inside_tmux guidance when run outside any tmux session", async () => {
+		cleanupRoot = await createGitRepo();
+		const fakeTmux = await createFakeTmuxBin(cleanupRoot, { failDisplay: true });
+
+		await expect(
+			startSkcTeam({
+				workerCount: 1,
+				agentType: "executor",
+				task: "Outside tmux",
+				teamName: "outside-tmux-team",
+				cwd: cleanupRoot,
+				env: {
+					SKC_SESSION_ID: TEST_SESSION_ID,
+					PATH: process.env.PATH ?? "",
+					SKC_TEAM_WORKER_COMMAND: "true",
+					SKC_TEAM_TMUX_COMMAND: fakeTmux,
+				},
+			}),
+		).rejects.toThrow(/skc_team_requires_tmux_leader:.*not_inside_tmux/);
+
+		expect(await Bun.file(path.join(teamStateDir(cleanupRoot, "outside-tmux-team"), "phase.json")).exists()).toBe(
+			false,
+		);
+	});
+
+	it("rejects a tmux provider that cannot persist SKC's ownership tag (e.g. psmux)", async () => {
+		cleanupRoot = await createGitRepo();
+		const fakeTmux = await createFakeTmuxBin(cleanupRoot, { skcProfile: false, untaggableProfile: true });
 
 		await expect(
 			startSkcTeam({
@@ -696,8 +747,10 @@ describe("native skc team runtime", () => {
 		// tmux 3.6a refuses to resolve the bare `=NAME` form for show-options (#580).
 		expect(tmuxLog).toContain("show-options -qv -t =test-session: @skc-profile");
 		expect(tmuxLog).not.toContain("show-options -qv -t =test-session @skc-profile");
+		// Adoption probes the tag once, but a provider that drops user options
+		// never round-trips it, so the leader is rejected before any pane split.
+		expect(tmuxLog).toContain("set-option -t =test-session: @skc-profile 1");
 		expect(tmuxLog).not.toContain("split-window");
-		expect(tmuxLog).not.toContain("set-option -t test-session:0");
 	});
 
 	it("self-heals a missing @skc-profile tag when the leader pane was launched by skc --tmux", async () => {
@@ -730,29 +783,33 @@ describe("native skc team runtime", () => {
 		expect(tmuxLog).toContain("split-window");
 	});
 
-	it("keeps rejecting untagged sessions when SKC_TMUX_LAUNCHED is not set even with TMUX present", async () => {
+	it("adopts a user-created tmux leader by tagging it even without SKC_TMUX_LAUNCHED", async () => {
 		cleanupRoot = await createGitRepo();
 		const fakeTmux = await createFakeTmuxBin(cleanupRoot, { skcProfile: false });
 
-		await expect(
-			startSkcTeam({
-				workerCount: 1,
-				agentType: "executor",
-				task: "Do not hijack foreign tmux",
-				teamName: "foreign-team",
-				cwd: cleanupRoot,
-				env: {
-					SKC_SESSION_ID: TEST_SESSION_ID,
-					PATH: process.env.PATH ?? "",
-					SKC_TEAM_WORKER_COMMAND: "true",
-					SKC_TEAM_TMUX_COMMAND: fakeTmux,
-					TMUX: "/tmp/tmux-501/default,1,0",
-				},
-			}),
-		).rejects.toThrow(/unmanaged_tmux_session:test-session/);
+		const snapshot = await startSkcTeam({
+			workerCount: 1,
+			agentType: "executor",
+			task: "Adopt the user's own tmux",
+			teamName: "adopted-team",
+			cwd: cleanupRoot,
+			dryRun: false,
+			env: {
+				SKC_SESSION_ID: TEST_SESSION_ID,
+				PATH: process.env.PATH ?? "",
+				SKC_TEAM_WORKER_COMMAND: "true",
+				SKC_TEAM_TMUX_COMMAND: fakeTmux,
+				TMUX: "/tmp/tmux-501/default,1,0",
+			},
+		});
 
+		expect(snapshot.team_name).toBe("adopted-team");
+		expect(snapshot.tmux_target).toBe("test-session:0");
 		const tmuxLog = await Bun.file(path.join(cleanupRoot, "tmux.log")).text();
-		expect(tmuxLog).not.toContain("set-option");
+		// A real tmux session the user created (no SKC_TMUX_LAUNCHED) is adopted
+		// by writing and reading back SKC's ownership tag, then split into workers.
+		expect(tmuxLog).toContain("set-option -t =test-session: @skc-profile 1");
+		expect(tmuxLog).toContain("split-window");
 	});
 
 	it("cleans partial worker worktrees without killing the leader session when pane startup fails", async () => {

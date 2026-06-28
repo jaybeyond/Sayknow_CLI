@@ -1,3 +1,4 @@
+import { resolveSkcTmuxBinary } from "./psmux-detect";
 import {
 	buildSkcTmuxExactOptionTarget,
 	buildSkcTmuxProfileCommands,
@@ -128,10 +129,29 @@ function runListSessions(format: string, env: NodeJS.ProcessEnv = process.env): 
 		}
 		throw error;
 	}
-	return output
+	const lines = output
 		.split("\n")
 		.map(line => line.trim())
 		.filter(Boolean);
+	// psmux 3.3.0 silently ignores the tmux `-F` format flag and returns its
+	// default `name: N windows (created ...)` shape. Detect that case and
+	// synthesize a tab-separated row so downstream parseSessionLine /
+	// hydrateSessionFromExactOptions can recover the @skc-* ownership tags
+	// via follow-up show-options calls. Without this fallback skc session
+	// list / status return an empty list on psmux even when sessions exist.
+	if (lines.length > 0 && !lines[0].includes("\t")) {
+		const binary = resolveSkcTmuxBinary({ env });
+		if (binary.isPsmux) {
+			return lines.map(line => {
+				const match = line.match(/^([^:]+):\s*(\d+)\s+windows?\s+\(created\s+([^)]+)\)/);
+				if (!match) return line;
+				const [, name, windows, created] = match;
+				const createdEpoch = String(Math.floor(new Date(`${created} UTC`).getTime() / 1000) || 0);
+				return [name, windows, "0", createdEpoch, "", "", "0", "", "", "", "", "", "", ""].join("\t");
+			});
+		}
+	}
+	return lines;
 }
 
 function listSessionLines(env: NodeJS.ProcessEnv = process.env): string[] {
@@ -221,7 +241,13 @@ export function statusSkcTmuxSession(sessionName: string, env: NodeJS.ProcessEnv
 export function createSkcTmuxSession(env: NodeJS.ProcessEnv = process.env): SkcTmuxSessionStatus {
 	const tmuxCommand = resolveSkcTmuxCommand(env);
 	const sessionName = buildSkcTmuxSessionName(env);
-	const command = "exec env SKC_TMUX_LAUNCHED=1 skc";
+	// Build a shell-bootstrap command appropriate for the host shell. Psmux on
+	// Windows runs the new-session command through PowerShell, so we use the
+	// $env:VAR = ... assignment form there. POSIX keeps the historical exec
+	// env form so the launched skc inherits SKC_TMUX_LAUNCHED without leaking
+	// into the parent tmux server.
+	const platform = process.platform;
+	const command = platform === "win32" ? "$env:SKC_TMUX_LAUNCHED = '1'; skc" : "exec env SKC_TMUX_LAUNCHED=1 skc";
 	const created = Bun.spawnSync([tmuxCommand, "new-session", "-d", "-s", sessionName, command], {
 		stdout: "pipe",
 		stderr: "pipe",
@@ -229,7 +255,14 @@ export function createSkcTmuxSession(env: NodeJS.ProcessEnv = process.env): SkcT
 	});
 	if (created.exitCode !== 0) throw new Error(created.stderr.toString().trim() || "skc_tmux_session_create_failed");
 	try {
-		for (const profileCommand of buildSkcTmuxProfileCommands(sessionName, env)) {
+		// psmux 3.3.0 rejects the tmux `=NAME` exact-session prefix for option
+		// commands, so the target is the bare session name on psmux and the
+		// window-qualified `=NAME:` on tmux. The ownership-tag round-trip
+		// (set-option @skc-*) is preserved on both; only the UX profile commands
+		// (mouse / set-clipboard / mode-style / set-window-option) get filtered
+		// by buildSkcTmuxProfileCommands when the active binary is psmux.
+		const target = buildSkcTmuxExactOptionTarget(sessionName, { env });
+		for (const profileCommand of buildSkcTmuxProfileCommands(target, env, {}, { tmuxCommand })) {
 			runTmux(profileCommand.args, env);
 		}
 	} catch (error) {
@@ -240,18 +273,43 @@ export function createSkcTmuxSession(env: NodeJS.ProcessEnv = process.env): SkcT
 }
 
 function readProfileForExactTarget(sessionName: string, env: NodeJS.ProcessEnv): string {
-	return runTmux(
-		["show-options", "-qv", "-t", buildSkcTmuxExactOptionTarget(sessionName), SKC_TMUX_PROFILE_OPTION],
+	const raw = runTmux(
+		["show-options", "-qv", "-t", buildSkcTmuxExactOptionTarget(sessionName, { env }), SKC_TMUX_PROFILE_OPTION],
 		env,
 	).trim();
+	// tmux returns just the value; psmux returns `key value`. Strip the
+	// leading key on psmux so the SKC_TMUX_PROFILE_VALUE equality check
+	// against "1" works the same on both.
+	if (raw && resolveSkcTmuxBinary({ env }).isPsmux) {
+		const tokens = raw.split(/\s+/).filter(Boolean);
+		return tokens[tokens.length - 1] ?? raw;
+	}
+	return raw;
 }
 
 function readExactOptionForGc(sessionName: string, option: string, env: NodeJS.ProcessEnv): string | undefined {
 	try {
-		return (
-			runTmux(["show-options", "-qv", "-t", buildSkcTmuxExactOptionTarget(sessionName), option], env).trim() ||
-			undefined
-		);
+		const raw = runTmux(
+			["show-options", "-qv", "-t", buildSkcTmuxExactOptionTarget(sessionName, { env }), option],
+			env,
+		).trim();
+		if (!raw) return undefined;
+		// tmux returns just the option value (e.g. `1` for @skc-profile).
+		// psmux 3.3.0 returns `key value` (or `key "value with space"` for
+		// @skc-branch etc.). On psmux, parse the last token and strip any
+		// surrounding double quotes so both shapes resolve to the same value.
+		if (resolveSkcTmuxBinary({ env }).isPsmux) {
+			// Prefer the last whitespace-separated token. If the value is
+			// quoted, find the matching close-quote and slice.
+			const lastQuote = raw.lastIndexOf('"');
+			if (lastQuote > 0 && raw[lastQuote - 1] !== "\\") {
+				const firstQuote = raw.lastIndexOf('"', lastQuote - 1);
+				if (firstQuote > 0) return raw.slice(firstQuote + 1, lastQuote);
+			}
+			const tokens = raw.split(/\s+/).filter(Boolean);
+			return tokens[tokens.length - 1];
+		}
+		return raw;
 	} catch {
 		return undefined;
 	}
@@ -302,6 +360,50 @@ export function removeSkcTmuxSession(sessionName: string, env: NodeJS.ProcessEnv
 	if (readProfileForExactTarget(session.name, env) !== SKC_TMUX_PROFILE_VALUE) {
 		throw new Error(`skc_tmux_session_not_managed:${sessionName}`);
 	}
+	runTmux(["kill-session", "-t", `=${session.name}`], env);
+	return session;
+}
+
+/**
+ * Force-close a SKC-managed tmux session, even if a live pane is attached.
+ *
+ * This is the lifecycle-control counterpart to {@link removeSkcTmuxSession}: it
+ * intentionally does NOT refuse live/attached panes (hard-kill is the contract),
+ * but it keeps every safety check so it can only ever kill a genuinely
+ * SKC-managed session:
+ * - re-reads the exact tmux profile immediately before kill (never a non-SKC
+ *   session, even one that collides by name);
+ * - when `expectedSessionId` is given, requires the `@skc-session-id` tag match;
+ * - when `expectedStateFile` is given, requires the `@skc-session-state-file`
+ *   tag match.
+ *
+ * Returns the prior status (for audit). Throws a tagged error otherwise:
+ * `skc_tmux_session_not_found`, `skc_tmux_session_not_managed`,
+ * `skc_tmux_session_id_mismatch`, or `skc_tmux_session_state_file_mismatch`.
+ */
+export function forceCloseSkcTmuxSession(
+	sessionName: string,
+	env: NodeJS.ProcessEnv = process.env,
+	expectedSessionId?: string,
+	expectedStateFile?: string,
+): SkcTmuxSessionStatus {
+	const session = statusSkcTmuxSession(sessionName, env);
+	if (readProfileForExactTarget(session.name, env) !== SKC_TMUX_PROFILE_VALUE) {
+		throw new Error(`skc_tmux_session_not_managed:${sessionName}`);
+	}
+	if (expectedSessionId !== undefined) {
+		const actual = readExactOptionForGc(session.name, SKC_TMUX_SESSION_ID_OPTION, env);
+		if (actual !== expectedSessionId) {
+			throw new Error(`skc_tmux_session_id_mismatch:${sessionName}`);
+		}
+	}
+	if (expectedStateFile !== undefined) {
+		const actual = readExactOptionForGc(session.name, SKC_TMUX_SESSION_STATE_FILE_OPTION, env);
+		if (actual !== expectedStateFile) {
+			throw new Error(`skc_tmux_session_state_file_mismatch:${sessionName}`);
+		}
+	}
+	// Intentionally NOT refusing live/attached panes — force-close is hard-kill.
 	runTmux(["kill-session", "-t", `=${session.name}`], env);
 	return session;
 }

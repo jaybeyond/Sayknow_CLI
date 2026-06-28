@@ -5,7 +5,7 @@ import type { WorkflowHudSummary } from "../skill-state/active-state";
 import { buildTeamHudSummary as buildWorkflowTeamHudSummary } from "../skill-state/workflow-hud";
 import { WORKFLOW_STATE_VERSION } from "../skill-state/workflow-state-contract";
 import type { GcPidProbe, GcRecord } from "./gc-runtime";
-import { applySkcTmuxProfile, SKC_TMUX_LAUNCHED_ENV } from "./launch-tmux";
+import { applySkcTmuxProfile } from "./launch-tmux";
 import { modeStatePath, sessionIdFromDirName, sessionReportsDir, teamStateRoot } from "./session-layout";
 import { resolveSkcSessionForWrite, writeSessionActivityMarker } from "./session-resolution";
 import {
@@ -594,6 +594,16 @@ function teamDir(stateRoot: string, teamName: string): string {
 }
 function shellQuote(value: string): string {
 	return `'${value.replace(/'/g, "'\\''")}'`;
+}
+
+/**
+ * PowerShell-safe single-quote escape: doubles single quotes inside a
+ * single-quoted PowerShell literal ('it''s ok') and uses the same
+ * surrounding quotes. Used to build worker command strings that psmux
+ * will hand to a Windows ConPTY pane running PowerShell.
+ */
+function powershellQuote(value: string): string {
+	return `'${value.replace(/'/g, "''")}'`;
 }
 function safePathSegment(kind: string, value: string): string {
 	assertSafeId(kind, value);
@@ -1812,7 +1822,7 @@ async function ensureWorkerWorktree(
 
 function buildTeamTmuxLeaderRequirementMessage(detail?: string): string {
 	const suffix = detail?.trim() ? `:${detail.trim()}` : "";
-	return `skc_team_requires_tmux_leader: run \`skc --tmux\` first, then run \`skc team ...\` inside that tmux-backed leader session, or use \`skc team --dry-run\` for state-only smoke tests${suffix}`;
+	return `skc_team_requires_tmux_leader: start a tmux session first (run \`skc --tmux\`, or launch tmux yourself), then run \`skc team ...\` inside it, or use \`skc team --dry-run\` for state-only smoke tests${suffix}`;
 }
 function readSkcTmuxProfileValue(tmuxCommand: string, sessionName: string): string {
 	const result = Bun.spawnSync(
@@ -1826,7 +1836,7 @@ function readSkcTmuxProfileValue(tmuxCommand: string, sessionName: string): stri
 	return result.stdout.toString().trim();
 }
 
-function retagSkcLaunchedTmuxSession(tmuxCommand: string, sessionName: string): boolean {
+function tagTmuxSessionAsSkcLeader(tmuxCommand: string, sessionName: string): boolean {
 	const result = Bun.spawnSync(
 		[
 			tmuxCommand,
@@ -1845,25 +1855,39 @@ function retagSkcLaunchedTmuxSession(tmuxCommand: string, sessionName: string): 
 }
 
 function readCurrentTmuxLeaderContext(tmuxCommand: string, env: NodeJS.ProcessEnv): SkcTmuxLeaderContext {
+	if (Bun.which(tmuxCommand) === null)
+		throw new Error(buildTeamTmuxLeaderRequirementMessage(`tmux_not_installed:${tmuxCommand}`));
 	const paneTarget = env.TMUX_PANE?.trim();
 	const args = paneTarget
 		? ["display-message", "-p", "-t", paneTarget, "#S:#I #{pane_id}"]
 		: ["display-message", "-p", "#S:#I #{pane_id}"];
 	const result = Bun.spawnSync([tmuxCommand, ...args], { stdout: "pipe", stderr: "pipe" });
-	if (result.exitCode !== 0) throw new Error(buildTeamTmuxLeaderRequirementMessage(result.stderr.toString()));
+	if (result.exitCode !== 0) {
+		// Distinguish "you are not inside any tmux session" from a genuine tmux
+		// query failure so the caller gets actionable guidance instead of raw
+		// tmux stderr. `skc team` needs a tmux leader; outside tmux there is none.
+		const insideTmux = Boolean(env.TMUX?.trim() || env.TMUX_PANE?.trim());
+		const stderr = result.stderr.toString().trim();
+		throw new Error(
+			buildTeamTmuxLeaderRequirementMessage(
+				insideTmux ? `tmux_query_failed${stderr ? `:${stderr}` : ""}` : "not_inside_tmux",
+			),
+		);
+	}
 	const [sessionAndWindow = "", leaderPaneId = ""] = result.stdout.toString().trim().split(/\s+/);
 	const [sessionName = "", windowIndex = ""] = sessionAndWindow.split(":");
 	if (!sessionName || !windowIndex || !leaderPaneId.startsWith("%"))
 		throw new Error(buildTeamTmuxLeaderRequirementMessage(`invalid_tmux_context:${result.stdout.toString().trim()}`));
 	if (readSkcTmuxProfileValue(tmuxCommand, sessionName) !== SKC_TMUX_PROFILE_VALUE) {
-		// Self-heal: a pane launched through `skc --tmux` exports
-		// SKC_TMUX_LAUNCHED=1, but the session can lose (or never receive) the
-		// @skc-profile user-option tag when startup attach fails mid-way or the
-		// registry write races. That stranded-but-genuinely-SKC leader pane
-		// previously hard-failed as unmanaged_tmux_session; re-tag it instead.
-		const launchedBySkc = env[SKC_TMUX_LAUNCHED_ENV] === "1";
-		const retagged = launchedBySkc && retagSkcLaunchedTmuxSession(tmuxCommand, sessionName);
-		if (!retagged || readSkcTmuxProfileValue(tmuxCommand, sessionName) !== SKC_TMUX_PROFILE_VALUE)
+		// Adopt any real tmux leader as a SKC team leader — including a session
+		// the user created outside `skc --tmux` — by writing SKC's @skc-profile
+		// ownership tag and reading it back. A provider that round-trips tmux
+		// user options (real tmux) keeps the tag and is adopted; one that does
+		// not (e.g. psmux on Windows) drops it, so the readback still fails and
+		// the leader is rejected as unmanaged. This also self-heals a genuine
+		// `skc --tmux` pane that lost its @skc-profile tag mid-startup.
+		const tagged = tagTmuxSessionAsSkcLeader(tmuxCommand, sessionName);
+		if (!tagged || readSkcTmuxProfileValue(tmuxCommand, sessionName) !== SKC_TMUX_PROFILE_VALUE)
 			throw new Error(
 				buildTeamTmuxLeaderRequirementMessage(
 					`unmanaged_tmux_session:${sessionName} — ${buildSkcTmuxUntaggedSessionHint(tmuxCommand)}`,
@@ -1881,7 +1905,15 @@ export function resolveSkcWorkerCommand(cwd = process.cwd(), env: NodeJS.Process
 	if (entrypoint && path.basename(entrypoint).startsWith("skc")) return shellQuote(path.resolve(cwd, entrypoint));
 	return "skc";
 }
-function buildWorkerCommand(config: SkcTeamConfig, worker: SkcTeamWorker): string {
+/** @internal Exported for unit tests. */
+export function buildWorkerCommand(
+	config: SkcTeamConfig,
+	worker: SkcTeamWorker,
+	platform: NodeJS.Platform = process.platform,
+): string {
+	const quote = platform === "win32" ? powershellQuote : shellQuote;
+	const envAssignment = (key: string, value: string): string =>
+		platform === "win32" ? `$env:${key} = ${quote(value)};` : `${key}=${quote(value)}`;
 	const workspace = worker.worktree_path
 		? `Worker worktree: ${worker.worktree_path}.`
 		: `Worker cwd: ${config.leader.cwd}.`;
@@ -1894,17 +1926,18 @@ function buildWorkerCommand(config: SkcTeamConfig, worker: SkcTeamWorker): strin
 		`Before claiming work, send startup ACK: skc team api worker-startup-ack --input '{"team_name":"${config.team_name}","worker_id":"${worker.id}","protocol_version":"1"}' --json.`,
 		`Use skc team api update-worker-status to report task-local activity, then claim-task/transition-task-status with this worker id; keep heartbeat current during long work, record completion_evidence (summary plus a passed command or verified inspection/artifact item) before completed, and do not mutate leader-owned goal state.`,
 	].join("\n");
-	const env = [
-		`SKC_TEAM_WORKER=${shellQuote(`${config.team_name}/${worker.id}`)}`,
-		`SKC_TEAM_INTERNAL_WORKER=${shellQuote(`${config.team_name}/${worker.id}`)}`,
-		`SKC_TEAM_NAME=${shellQuote(config.team_name)}`,
-		`SKC_TEAM_WORKER_ID=${shellQuote(worker.id)}`,
-		`SKC_TEAM_STATE_ROOT=${shellQuote(config.state_root)}`,
-		`SKC_TEAM_LEADER_CWD=${shellQuote(config.leader.cwd)}`,
-		`SKC_TEAM_DISPLAY_NAME=${shellQuote(config.display_name)}`,
-		...(worker.worktree_path ? [`SKC_TEAM_WORKTREE_PATH=${shellQuote(worker.worktree_path)}`] : []),
+	const envLines = [
+		envAssignment("SKC_TEAM_WORKER", `${config.team_name}/${worker.id}`),
+		envAssignment("SKC_TEAM_INTERNAL_WORKER", `${config.team_name}/${worker.id}`),
+		envAssignment("SKC_TEAM_NAME", config.team_name),
+		envAssignment("SKC_TEAM_WORKER_ID", worker.id),
+		envAssignment("SKC_TEAM_STATE_ROOT", config.state_root),
+		envAssignment("SKC_TEAM_LEADER_CWD", config.leader.cwd),
+		envAssignment("SKC_TEAM_DISPLAY_NAME", config.display_name),
+		...(worker.worktree_path ? [envAssignment("SKC_TEAM_WORKTREE_PATH", worker.worktree_path)] : []),
 	];
-	return `${env.join(" ")} ${config.worker_command} ${shellQuote(prompt)}`;
+	const joined = platform === "win32" ? envLines.join(" ") : envLines.join(" ");
+	return `${joined} ${config.worker_command} ${quote(prompt)}`;
 }
 interface SkcTeamInitialLane {
 	label: string;

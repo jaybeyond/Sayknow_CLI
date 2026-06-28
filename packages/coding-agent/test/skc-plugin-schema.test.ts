@@ -19,7 +19,7 @@ function expectLoadError(fn: () => unknown, code: SkcPluginLoadErrorCode): void 
 
 describe("SKC plugin schema", () => {
 	test("parseManifest rejects forbidden extension surfaces", () => {
-		for (const key of ["skills", "slash-commands", "commands", "hooks", "mcp", "mcpServers"]) {
+		for (const key of ["skills", "slash-commands", "commands", "agents"]) {
 			expectLoadError(
 				() =>
 					parseManifest(
@@ -36,6 +36,83 @@ describe("SKC plugin schema", () => {
 				"forbidden_surface",
 			);
 		}
+	});
+
+	test("parseManifest rejects unsupported mcp aliases", () => {
+		for (const key of ["mcp", "mcpServers"]) {
+			expectLoadError(
+				() =>
+					parseManifest(
+						{
+							kind: "sayknow-cli-plugin",
+							name: "aliased",
+							version: "1.0.0",
+							[key]: [],
+						},
+						`/plugin/${key}/sayknow-plugin.json`,
+					),
+				"unsupported_surface",
+			);
+		}
+	});
+
+	test("parseManifest accepts the six additive surfaces", () => {
+		const manifest = parseManifest(
+			{
+				kind: "sayknow-cli-plugin",
+				name: "six",
+				version: "1.0.0",
+				subskills: ["subskills/design/SKILL.md"],
+				tools: [{ name: "domain_note", path: "tools/domain-note.ts" }],
+				hooks: [{ name: "audit", event: "tool_call", target: "read", phase: "before", path: "hooks/a.ts" }],
+				mcps: [{ name: "docs", transport: "stdio", command: "bun", args: ["mcp/s.ts"] }],
+				system_appendix: [{ name: "policy", path: "prompts/sa.md" }],
+				"agent-appendix": [{ agent: "executor", name: "guide", path: "prompts/ea.md" }],
+			},
+			"/plugin/sayknow-plugin.json",
+		);
+		expect(manifest.tools[0]).toMatchObject({
+			name: "domain_note",
+			path: "tools/domain-note.ts",
+			surface: "always-on",
+		});
+		expect(manifest.hooks[0]?.event).toBe("tool_call");
+		expect(manifest.mcps[0]?.transport).toBe("stdio");
+		expect(manifest.systemAppendix[0]?.name).toBe("policy");
+		expect(manifest.agentAppendix[0]?.agent).toBe("executor");
+	});
+
+	test("parseManifest accepts absent subskills/tools as empty", () => {
+		const manifest = parseManifest(
+			{ kind: "sayknow-cli-plugin", name: "empty", version: "1.0.0" },
+			"/plugin/sayknow-plugin.json",
+		);
+		expect(manifest.subskills).toEqual([]);
+		expect(manifest.tools).toEqual([]);
+		expect(manifest.hooks).toEqual([]);
+	});
+
+	test("parseManifest normalizes legacy string tool shorthand", () => {
+		const manifest = parseManifest(
+			{ kind: "sayknow-cli-plugin", name: "legacy", version: "1.0.0", tools: ["tools/domain-note.ts"] },
+			"/plugin/sayknow-plugin.json",
+		);
+		expect(manifest.tools[0]).toMatchObject({
+			name: "domain-note",
+			path: "tools/domain-note.ts",
+			surface: "subskill",
+		});
+	});
+
+	test("parseManifest rejects malformed known fields", () => {
+		expectLoadError(
+			() =>
+				parseManifest(
+					{ kind: "sayknow-cli-plugin", name: "bad", version: "1.0.0", hooks: {} },
+					"/plugin/sayknow-plugin.json",
+				),
+			"invalid_manifest",
+		);
 	});
 
 	test("parseManifest rejects invalid kind", () => {

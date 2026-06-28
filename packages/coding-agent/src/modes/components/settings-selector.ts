@@ -14,7 +14,6 @@ import {
 	Text,
 } from "@sayknow-cli/tui";
 import { type SettingPath, settings } from "../../config/settings";
-import { maskToken } from "../../notifications/config";
 import type {
 	SettingTab,
 	StatusLinePreset,
@@ -353,9 +352,7 @@ export class SettingsSelectorComponent extends Container {
 					id: def.path,
 					label,
 					description,
-					currentValue: def.secret
-						? maskToken(currentValue as string | undefined)
-						: ((currentValue as string) ?? ""),
+					currentValue: (currentValue as string) ?? "",
 					submenu: (cv, done) => this.#createTextInput(def, cv, done),
 				};
 		}
@@ -483,12 +480,10 @@ export class SettingsSelectorComponent extends Container {
 			this.#textInputActive = false;
 			done(value);
 		};
-		// For secret fields, pre-fill with the real stored value rather than the masked display value.
-		const prefillValue = def.secret ? ((settings.get(def.path) as string) ?? "") : currentValue;
 		return new TextInputSubmenu(
 			tSettingLabel(def),
 			tSettingDesc(def),
-			prefillValue,
+			currentValue,
 			value => {
 				// Empty string clears the setting; undefined-typed string settings
 				// store "" which the browser.ts expandPath ignores (no-op fallback).

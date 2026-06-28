@@ -121,4 +121,183 @@ describe("CLI help load order", () => {
 		expect(combined).not.toContain("raw-http-request");
 		expect(combined).not.toContain("http-400-requests");
 	}, 15_000);
+
+	it("lists representative commands in root --help", async () => {
+		if (Bun.semver.order(Bun.version, "1.3.14") < 0) {
+			return;
+		}
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "skc-help-commands-"));
+		cleanupRoot = root;
+		const home = path.join(root, "home");
+		const xdg = path.join(root, "xdg");
+		const agentDir = path.join(root, "agent");
+		await fs.mkdir(home, { recursive: true });
+		await fs.mkdir(xdg, { recursive: true });
+		await fs.mkdir(agentDir, { recursive: true });
+
+		const proc = Bun.spawn([process.execPath, cliEntry, "--help"], {
+			cwd: repoRoot,
+			stdout: "pipe",
+			stderr: "pipe",
+			env: {
+				...process.env,
+				HOME: home,
+				XDG_CONFIG_HOME: xdg,
+				XDG_DATA_HOME: xdg,
+				SKC_CODING_AGENT_DIR: agentDir,
+				PI_CODING_AGENT_DIR: agentDir,
+				PI_NO_TITLE: "1",
+				NO_COLOR: "1",
+			},
+		});
+
+		const [stdout, stderr, exitCode] = await Promise.all([
+			readStream(proc.stdout as ReadableStream<Uint8Array>),
+			readStream(proc.stderr as ReadableStream<Uint8Array>),
+			proc.exited,
+		]);
+		const combined = `${stdout}\n${stderr}`;
+
+		expect(exitCode, combined).toBe(0);
+		expect(stdout).toContain("Commands:");
+		expect(stdout).toContain("skc setup");
+		expect(stdout).toContain("skc session");
+		expect(stdout).toContain("skc state");
+		expect(stdout).toContain("skc harness");
+		expect(stdout).toContain("skc config");
+		expect(stdout).toContain("skc ralplan");
+		expect(stdout).toContain("skc ultragoal");
+		expect(stdout).toContain("skc team");
+		expect(stdout).toContain("skc mcp");
+		expect(stdout).toContain("skc mcp-serve");
+		expect(stdout).toContain("skc contribute-pr");
+		expect(stdout).toContain("skc web-search");
+		expect(stdout).toContain("skc codex-native-hook");
+		expect(stdout).toContain("skc gc");
+		expect(stdout).toContain("skc <command> --help");
+		expect(stdout).toContain("Available Tools");
+		expect(stdout).toContain("Useful Commands");
+		expect(stderr).toBe("");
+	}, 15_000);
+
+	it("fast-paths root --tmux --help before runtime globals", async () => {
+		if (Bun.semver.order(Bun.version, "1.3.14") < 0) {
+			return;
+		}
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "skc-tmux-help-fast-path-"));
+		cleanupRoot = root;
+		const home = path.join(root, "home");
+		const xdg = path.join(root, "xdg");
+		const agentDir = path.join(root, "agent");
+		await fs.mkdir(home, { recursive: true });
+		await fs.mkdir(xdg, { recursive: true });
+		await fs.mkdir(agentDir, { recursive: true });
+
+		const proc = Bun.spawn([process.execPath, cliEntry, "--tmux", "--help"], {
+			cwd: repoRoot,
+			stdout: "pipe",
+			stderr: "pipe",
+			env: {
+				...process.env,
+				HOME: home,
+				XDG_CONFIG_HOME: xdg,
+				XDG_DATA_HOME: xdg,
+				PI_CODING_AGENT_DIR: agentDir,
+				PI_NO_TITLE: "1",
+				NO_COLOR: "1",
+			},
+		});
+
+		const [stdout, stderr, exitCode] = await Promise.all([
+			readStream(proc.stdout as ReadableStream<Uint8Array>),
+			readStream(proc.stderr as ReadableStream<Uint8Array>),
+			proc.exited,
+		]);
+
+		expect(exitCode).toBe(0);
+		expect(stdout).toContain("USAGE");
+		expect(stderr).toBe("");
+	}, 15_000);
+
+	it("fast-paths root --tmux --version before runtime globals", async () => {
+		if (Bun.semver.order(Bun.version, "1.3.14") < 0) {
+			return;
+		}
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "skc-tmux-version-fast-path-"));
+		cleanupRoot = root;
+		const home = path.join(root, "home");
+		const xdg = path.join(root, "xdg");
+		const agentDir = path.join(root, "agent");
+		await fs.mkdir(home, { recursive: true });
+		await fs.mkdir(xdg, { recursive: true });
+		await fs.mkdir(agentDir, { recursive: true });
+
+		const proc = Bun.spawn([process.execPath, cliEntry, "--tmux", "--version"], {
+			cwd: repoRoot,
+			stdout: "pipe",
+			stderr: "pipe",
+			env: {
+				...process.env,
+				HOME: home,
+				XDG_CONFIG_HOME: xdg,
+				XDG_DATA_HOME: xdg,
+				PI_CODING_AGENT_DIR: agentDir,
+				PI_NO_TITLE: "1",
+				NO_COLOR: "1",
+			},
+		});
+
+		const [stdout, stderr, exitCode] = await Promise.all([
+			readStream(proc.stdout as ReadableStream<Uint8Array>),
+			readStream(proc.stderr as ReadableStream<Uint8Array>),
+			proc.exited,
+		]);
+
+		expect(exitCode).toBe(0);
+		expect(stdout).toMatch(/^skc\/\d+\.\d+\.\d+\n$/);
+		expect(stderr).toBe("");
+	}, 15_000);
+	it("package bin wrapper executes CLI help when imported by a Bun global shim", async () => {
+		if (Bun.semver.order(Bun.version, "1.3.14") < 0) {
+			return;
+		}
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "skc-bin-wrapper-help-"));
+		cleanupRoot = root;
+		const home = path.join(root, "home");
+		const xdg = path.join(root, "xdg");
+		const agentDir = path.join(root, "agent");
+		await fs.mkdir(home, { recursive: true });
+		await fs.mkdir(xdg, { recursive: true });
+		await fs.mkdir(agentDir, { recursive: true });
+
+		const wrapperPath = path.join(repoRoot, "packages", "coding-agent", "bin", "skc.js");
+		const proc = Bun.spawn([process.execPath, wrapperPath, "--help"], {
+			cwd: repoRoot,
+			stdout: "pipe",
+			stderr: "pipe",
+			env: {
+				...process.env,
+				HOME: home,
+				XDG_CONFIG_HOME: xdg,
+				XDG_DATA_HOME: xdg,
+				SKC_CODING_AGENT_DIR: agentDir,
+				PI_CODING_AGENT_DIR: agentDir,
+				PI_NO_TITLE: "1",
+				NO_COLOR: "1",
+			},
+		});
+
+		const [stdout, stderr, exitCode] = await Promise.all([
+			readStream(proc.stdout as ReadableStream<Uint8Array>),
+			readStream(proc.stderr as ReadableStream<Uint8Array>),
+			proc.exited,
+		]);
+		const combined = `${stdout}
+${stderr}`;
+
+		expect(exitCode, combined).toBe(0);
+		expect(stdout).toContain("skc v");
+		expect(stdout).toContain("USAGE");
+		expect(combined).not.toContain("Bun is a fast JavaScript runtime");
+	}, 15_000);
 });

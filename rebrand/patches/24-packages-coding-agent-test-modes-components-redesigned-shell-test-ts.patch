@@ -18,7 +18,13 @@
  	await initTheme(false);
  });
  
-@@ -104,36 +108,36 @@
+@@ -99,21 +103,21 @@
+ 		expect(assistant).not.toContain("▌");
+ 	});
+ 
+-	it("keeps the SKC forge launch surface responsive", () => {
++	it("keeps the Sayknow launch surface responsive", () => {
+ 		const component = new WelcomeComponent("1.2.3", "gpt-5.5", "openai");
  		const lines = component.render(54);
  		const rendered = Bun.stripANSI(lines.join("\n"));
  
@@ -31,6 +37,22 @@
  		expect(rendered).not.toContain("●");
  		for (const line of lines) {
  			expect(visibleWidth(line)).toBeLessThanOrEqual(54);
+ 		}
+ 	});
+ 
+-	it("uses a wider forge splash box on wide terminals", () => {
++	it("uses a wider splash box on wide terminals", () => {
+ 		const component = new WelcomeComponent("1.2.3", "gpt-5.5", "openai");
+ 		const narrowLines = component.render(100);
+ 		const wideLines = component.render(160);
+@@ -123,33 +127,33 @@
+ 		expect(visibleWidth(narrowTop)).toBe(98);
+ 		expect(visibleWidth(wideTop)).toBe(158);
+ 		expect(visibleWidth(wideTop)).toBeGreaterThan(visibleWidth(narrowTop));
+-		expect(wideTop).toContain("SKC forge");
++		expect(wideTop).toContain("Sayknow-CLI");
+ 		for (const line of wideLines) {
+ 			expect(visibleWidth(line)).toBeLessThanOrEqual(160);
  		}
  	});
  
@@ -66,7 +88,7 @@
  		expect(rendered).not.toContain("+----------------+");
  		for (const line of lines) {
  			expect(visibleWidth(line)).toBeLessThanOrEqual(54);
-@@ -249,9 +253,15 @@
+@@ -265,9 +269,15 @@
  		expect(STATUS_LINE_PRESETS.default.rightSegments).toEqual([
  			"session_name",
  			"jobs",

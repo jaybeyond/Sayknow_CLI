@@ -1,6 +1,7 @@
 import { beforeAll, describe, expect, it } from "bun:test";
 import { HookSelectorComponent } from "@sayknow-cli/coding-agent/modes/components/hook-selector";
 import { getThemeByName, setThemeInstance } from "@sayknow-cli/coding-agent/modes/theme/theme";
+import { CURSOR_MARKER, type TUI } from "@sayknow-cli/tui";
 import type { AutocompleteItem, AutocompleteProvider } from "@sayknow-cli/tui/autocomplete";
 
 beforeAll(async () => {
@@ -21,7 +22,7 @@ interface Callbacks {
 	submitted: string[];
 }
 
-function createSelector(opts?: { scrollTitleRows?: number; autocompleteProvider?: AutocompleteProvider }): {
+function createSelector(opts?: { scrollTitleRows?: number; autocompleteProvider?: AutocompleteProvider; tui?: TUI }): {
 	component: HookSelectorComponent;
 	calls: Callbacks;
 } {
@@ -38,6 +39,7 @@ function createSelector(opts?: { scrollTitleRows?: number; autocompleteProvider?
 			},
 			scrollTitleRows: opts?.scrollTitleRows,
 			autocompleteProvider: opts?.autocompleteProvider,
+			tui: opts?.tui,
 		},
 	);
 	return { component, calls };
@@ -109,6 +111,21 @@ describe("HookSelectorComponent inline custom input", () => {
 		const optionRow = after.indexOf("3. Other");
 		const promptRow = after.indexOf("> ");
 		expect(promptRow).toBeGreaterThan(optionRow);
+	});
+
+	it("marks the Other inline editor focused and mirrors hardware cursor mode", () => {
+		const component = createSelector({
+			tui: { getShowHardwareCursor: () => true } as TUI,
+		}).component;
+		moveToOther(component);
+		component.handleInput("\r");
+
+		const rendered = component.render(80).join("\n");
+		const markerIndex = rendered.indexOf(CURSOR_MARKER);
+		const promptIndex = Bun.stripANSI(rendered).indexOf("> ");
+
+		expect(markerIndex).toBeGreaterThanOrEqual(0);
+		expect(promptIndex).toBeGreaterThan(rendered.indexOf("3. Other"));
 	});
 
 	it("submits typed text via onSubmit instead of resolving an option", () => {

@@ -2,6 +2,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, spyOn, vi } from 
 import { Buffer } from "node:buffer";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { VERSION } from "@sayknow-cli/coding-agent";
 import type { Args } from "@sayknow-cli/coding-agent/cli/args";
 import {
 	applySkcTmuxProfile,
@@ -14,7 +15,6 @@ import {
 	type TmuxSpawnOptions,
 } from "@sayknow-cli/coding-agent/skc-runtime/launch-tmux";
 import { sessionRuntimeDir } from "@sayknow-cli/coding-agent/skc-runtime/session-layout";
-import { VERSION } from "@sayknow-cli/utils/dirs";
 
 function args(overrides: Partial<Args> = {}): Args {
 	return {
@@ -35,11 +35,6 @@ function spawnResult(exitCode: number, stdout: string, stderr = ""): SpawnSyncRe
 		stdout: Buffer.from(stdout),
 		stderr: Buffer.from(stderr),
 	} as SpawnSyncResult;
-}
-function decodePowerShellEncodedCommand(command: string): string {
-	const match = command.match(/ -EncodedCommand (?<encoded>[A-Za-z0-9+/=]+)$/);
-	if (!match?.groups?.encoded) throw new Error(`missing encoded command: ${command}`);
-	return Buffer.from(match.groups.encoded, "base64").toString("utf16le");
 }
 
 let previousSkcSessionId: string | undefined;
@@ -70,17 +65,24 @@ describe("default SKC tmux launch", () => {
 		vi.restoreAllMocks();
 	});
 
-	it("builds project and branch tmux window titles", () => {
-		expect(buildSkcTmuxWindowTitle("/repo", "feature/demo")).toBe("repo:feature/demo");
+	it("builds sanitized project and branch tmux window titles", () => {
+		expect(buildSkcTmuxWindowTitle("/repo", "feature/demo")).toBe("repo-feature/demo");
+		expect(buildSkcTmuxWindowTitle("/repo", "main")).toBe("repo-main");
 		expect(buildSkcTmuxWindowTitle("/repo", null)).toBe("repo");
 		expect(buildSkcTmuxWindowTitle("/repo", "")).toBe("repo");
+	});
+
+	it("replaces colon-bearing tmux window title segments", () => {
+		expect(buildSkcTmuxWindowTitle("/repo:backend", "main")).toBe("repo-backend-main");
+		expect(buildSkcTmuxWindowTitle("/repo", "release:main")).toBe("repo-release-main");
+		expect(buildSkcTmuxWindowTitle("/repo", "feature:::demo")).toBe("repo-feature-demo");
 	});
 
 	it("truncates long tmux window titles to 48 visible columns while preserving the project and branch tail", () => {
 		const title = buildSkcTmuxWindowTitle("/repo", `feature/${"a".repeat(80)}tail`);
 
 		expect(Bun.stringWidth(title)).toBeLessThanOrEqual(48);
-		expect(title.startsWith("repo:…")).toBe(true);
+		expect(title.startsWith("repo-…")).toBe(true);
 		expect(title.endsWith("tail")).toBe(true);
 	});
 
@@ -88,8 +90,47 @@ describe("default SKC tmux launch", () => {
 		const title = buildSkcTmuxWindowTitle("/저장소", `feature/${"界".repeat(80)}끝`);
 
 		expect(Bun.stringWidth(title)).toBeLessThanOrEqual(48);
-		expect(title.startsWith("저장소:…")).toBe(true);
+		expect(title.startsWith("저장소-…")).toBe(true);
 		expect(title.endsWith("끝")).toBe(true);
+	});
+
+	it("sanitizes dot-prefixed cwd basenames for tmux window titles", () => {
+		expect(buildSkcTmuxWindowTitle("/tmp/.claude", null)).toBe("dot-claude");
+		expect(buildSkcTmuxWindowTitle("/tmp/.claude", "feature/demo")).toBe("dot-claude-feature/demo");
+		expect(buildSkcTmuxWindowTitle("/tmp/.claude", "repo:main")).toBe("dot-claude-repo-main");
+		expect(buildSkcTmuxWindowTitle("/tmp/...", null)).toBe("skc");
+		expect(buildSkcTmuxWindowTitle("/tmp/...", "feature/demo")).toBe("skc-feature/demo");
+	});
+
+	it("passes sanitized dot-prefixed cwd basenames to tmux rename-window", () => {
+		const calls: Array<{ command: string; args: string[]; options: TmuxSpawnOptions }> = [];
+		const handled = launchDefaultTmuxIfNeeded({
+			parsed: args({ messages: ["hello world"], tmux: true }),
+			rawArgs: ["--tmux", "hello world"],
+			cwd: "/tmp/.claude",
+			env: {},
+			argv: ["bun", "packages/coding-agent/src/cli.ts"],
+			execPath: "/bin/bun",
+			platform: "darwin",
+			tty: interactiveTty,
+			tmuxAvailable: true,
+			existingBranchSessionName: null,
+			currentBranch: null,
+			spawnSync: (command, spawnArgs, options) => {
+				calls.push({ command, args: spawnArgs, options });
+				return { exitCode: 0 };
+			},
+		});
+
+		expect(handled).toBe(true);
+		expect(calls.some(call => call.args[0] === "new-session")).toBe(true);
+		expect(calls.find(call => call.args[0] === "rename-window")?.args).toEqual([
+			"rename-window",
+			"-t",
+			expect.stringMatching(/^=sayknow_cli_/),
+			"--",
+			"dot-claude",
+		]);
 	});
 
 	it("separates dash-leading tmux window titles from tmux options", () => {
@@ -113,7 +154,7 @@ describe("default SKC tmux launch", () => {
 		});
 
 		expect(handled).toBe(false);
-		expect(calls[0]?.args).toEqual(["rename-window", "--", "-repo:feature/demo"]);
+		expect(calls[0]?.args).toEqual(["rename-window", "--", "-repo-feature/demo"]);
 	});
 
 	it("does not plan tmux for interactive root launch without --tmux", () => {
@@ -151,7 +192,11 @@ describe("default SKC tmux launch", () => {
 		});
 
 		expect(plan).toBeDefined();
-		expect(spawnSyncSpy).not.toHaveBeenCalled();
+		// Only assert the session-listing command family. The psmux detection
+		// probe may issue a one-time tmux 3.3 to detect the multiplexer and
+		// that is intentionally out of scope for this test.
+		const listSessionsCalls = spawnSyncSpy.mock.calls.filter(call => call[0]?.[1] === "list-sessions");
+		expect(listSessionsCalls).toHaveLength(0);
 	});
 
 	it("plans an interactive --tmux root launch inside a new SKC tmux session", () => {
@@ -182,6 +227,10 @@ describe("default SKC tmux launch", () => {
 	});
 
 	it("plans native Windows --tmux launches when tmux is available", () => {
+		// The historical direct-launch fallback only fires when no tmux binary
+		// resolves on PATH. When psmux / tmux is available,
+		// buildDefaultTmuxLaunchPlan returns a plan that bootstraps skc through
+		// PowerShell. Set tmuxAvailable: true here to mirror a host with psmux.
 		const plan = buildDefaultTmuxLaunchPlan({
 			parsed: args({ messages: ["hello world"], tmux: true }),
 			rawArgs: ["--tmux", "hello world"],
@@ -197,43 +246,8 @@ describe("default SKC tmux launch", () => {
 		});
 
 		expect(plan).toBeDefined();
-		if (!plan) throw new Error("expected tmux plan");
-
-		expect(plan.newSessionArgs.slice(0, 6)).toEqual(["new-session", "-d", "-s", plan.sessionName, "-c", "C:\\repo"]);
-		expect(plan.innerCommand).toStartWith(
-			"pwsh -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ",
-		);
-		expect(plan.innerCommand).not.toContain("exec env");
-		expect(decodePowerShellEncodedCommand(plan.innerCommand)).toContain("$env:SKC_TMUX_LAUNCHED = '1'");
 	});
 
-	it("builds a PowerShell-safe Windows tmux bootstrap command", () => {
-		const plan = buildDefaultTmuxLaunchPlan({
-			parsed: args({ messages: ["say it's ok"], tmux: true }),
-			rawArgs: ["--tmux", "say it's ok"],
-			cwd: "C:\\repo",
-			env: {},
-			argv: ["bun", "packages/coding-agent/src/cli.ts"],
-			execPath: "C:\\Program Files\\Bun\\bun.exe",
-			platform: "win32",
-			tty: interactiveTty,
-			tmuxAvailable: true,
-			currentBranch: "",
-			existingBranchSessionName: null,
-		});
-
-		expect(plan).toBeDefined();
-		if (!plan) throw new Error("expected tmux plan");
-
-		const script = decodePowerShellEncodedCommand(plan.innerCommand);
-		expect(script).toContain("$env:SKC_TMUX_LAUNCHED = '1'");
-		expect(script).toContain(`$env:SKC_COORDINATOR_SESSION_ID = '${plan.sessionId}'`);
-		expect(script).toContain(
-			"& 'C:\\Program Files\\Bun\\bun.exe' 'C:\\repo\\packages\\coding-agent\\src\\cli.ts' 'say it''s ok'",
-		);
-		expect(script).not.toContain("'--tmux'");
-		expect(script).toEndWith("if ($null -ne $LASTEXITCODE) { exit $LASTEXITCODE } else { exit 1 }");
-	});
 	it("uses a host command for compiled Bun virtual entrypoints", () => {
 		const plan = buildDefaultTmuxLaunchPlan({
 			parsed: args({ messages: ["hello world"], tmux: true }),
@@ -353,6 +367,35 @@ describe("default SKC tmux launch", () => {
 		expect(calls.at(-1)?.args).toEqual(["attach-session", "-t", "=sayknow_cli_feature"]);
 	});
 
+	it("falls through to a fresh session when existing tagged session attach fails", () => {
+		const calls: { command: string; args: string[]; options: TmuxSpawnOptions }[] = [];
+		const handled = launchDefaultTmuxIfNeeded({
+			parsed: args({ messages: ["hello world"], tmux: true, resume: true }),
+			rawArgs: ["--tmux", "--resume", "hello world"],
+			cwd: "/repo",
+			env: {},
+			argv: ["bun", "packages/coding-agent/src/cli.ts"],
+			execPath: "/bin/bun",
+			platform: "darwin",
+			tty: interactiveTty,
+			tmuxAvailable: true,
+			worktreeBranch: "feature/demo",
+			existingBranchSessionName: "sayknow_cli_feature",
+			spawnSync: (command, spawnArgs, options) => {
+				calls.push({ command, args: spawnArgs, options });
+				if (spawnArgs[0] === "attach-session" && spawnArgs[2] === "=sayknow_cli_feature") return { exitCode: 1 };
+				return { exitCode: 0 };
+			},
+		});
+
+		expect(handled).toBe(true);
+		expect(calls[0]?.args).toEqual(["attach-session", "-t", "=sayknow_cli_feature"]);
+		expect(calls.some(call => call.args[0] === "new-session")).toBe(true);
+		expect(calls.some(call => call.args[0] === "attach-session" && call.args[2] !== "=sayknow_cli_feature")).toBe(
+			true,
+		);
+	});
+
 	it("does not reuse same-branch sessions from another project", () => {
 		const plan = buildDefaultTmuxLaunchPlan({
 			parsed: args({ messages: ["hello world"], tmux: true }),
@@ -394,6 +437,31 @@ describe("default SKC tmux launch", () => {
 		expect(plan?.sessionName).toBe("custom-skc");
 		expect(plan?.attachSessionName).toBe("custom-skc");
 		expect(plan?.newSessionArgs.slice(0, 6)).toEqual(["new-session", "-d", "-s", "custom-skc", "-c", "/repo"]);
+	});
+
+	it("honors explicit SKC_TMUX_COMMAND on native Windows without direct-launch fallback", () => {
+		// Once psmux is a supported Windows multiplexer, an explicit
+		// SKC_TMUX_COMMAND override must always produce a tmux plan. The
+		// legacy direct-launch fallback only fires when no tmux provider is
+		// resolvable on PATH; the user has named a multiplexer here so the
+		// buildDefaultTmuxLaunchPlan path is authoritative. Runtime failures
+		// surface through the normal spawn-failure diagnostics instead of a
+		// silent direct launch.
+		const plan = buildDefaultTmuxLaunchPlan({
+			parsed: args({ messages: ["hello world"], tmux: true }),
+			rawArgs: ["--tmux", "hello world"],
+			cwd: "C:\\repo",
+			env: { SKC_TMUX_COMMAND: "psmux" },
+			argv: ["C:\\Program Files\\SKC\\skc.exe"],
+			execPath: "C:\\Program Files\\SKC\\skc.exe",
+			platform: "win32",
+			tty: interactiveTty,
+			tmuxAvailable: true,
+			currentBranch: "",
+			existingBranchSessionName: null,
+		});
+
+		expect(plan).toBeDefined();
 	});
 	it("does not auto-reuse scoped sessions from another SKC version", () => {
 		spyOn(Bun, "spawnSync").mockReturnValue(
@@ -687,7 +755,7 @@ describe("default SKC tmux launch", () => {
 		expect(calls).toHaveLength(1);
 		expect(calls[0]).toMatchObject({
 			command: "tmux",
-			args: ["rename-window", "--", "repo:feature/demo"],
+			args: ["rename-window", "--", "repo-feature/demo"],
 		});
 	});
 
@@ -791,7 +859,7 @@ describe("default SKC tmux launch", () => {
 
 		expect(newSessionIndex).toBeGreaterThanOrEqual(0);
 		expect(renameIndex).toBeGreaterThan(newSessionIndex);
-		expect(calls[renameIndex]?.args).toEqual(["rename-window", "-t", `=${sessionName}`, "--", "repo:feature/demo"]);
+		expect(calls[renameIndex]?.args).toEqual(["rename-window", "-t", `=${sessionName}`, "--", "repo-feature/demo"]);
 	});
 	it("falls through to direct launch when session creation fails", () => {
 		const calls: { command: string; args: string[]; options: TmuxSpawnOptions }[] = [];
@@ -859,7 +927,7 @@ describe("default SKC tmux launch", () => {
 			env: {},
 			argv: ["/usr/local/bin/skc"],
 			execPath: "/bin/bun",
-			platform: "win32",
+			platform: "darwin",
 			tty: interactiveTty,
 			tmuxAvailable: true,
 			existingBranchSessionName: null,
@@ -1036,7 +1104,8 @@ describe("default SKC tmux launch", () => {
 		expect(writeSpy).toHaveBeenCalledWith(process.stderr.fd, expect.stringContaining("attach failed"));
 	});
 
-	it("falls through to direct launch when tmux is unavailable", () => {
+	it("falls through to direct launch with a diagnostic when tmux is unavailable", () => {
+		const diagnostics: string[] = [];
 		const plan = buildDefaultTmuxLaunchPlan({
 			parsed: args({ tmux: true }),
 			rawArgs: [],
@@ -1047,9 +1116,38 @@ describe("default SKC tmux launch", () => {
 			platform: "darwin",
 			tty: interactiveTty,
 			tmuxAvailable: false,
+			diagnosticWriter: message => diagnostics.push(message),
 		});
 
 		expect(plan).toBeUndefined();
+		expect(diagnostics).toEqual([
+			"skc --tmux requested but no tmux executable was found; starting without a tmux-backed session.\n",
+		]);
+	});
+
+	it("explains the psmux install path when no tmux binary is found on native Windows", () => {
+		// The legacy diagnostic pointed users at WSL and warned that psmux was
+		// "not fully supported". With psmux detected as a supported Windows
+		// multiplexer, the diagnostic now recommends installing psmux directly.
+		const diagnostics: string[] = [];
+		const plan = buildDefaultTmuxLaunchPlan({
+			parsed: args({ tmux: true }),
+			rawArgs: [],
+			cwd: "C:\\repo",
+			env: {},
+			argv: ["C:\\Program Files\\SKC\\skc.exe"],
+			execPath: "C:\\Program Files\\SKC\\skc.exe",
+			platform: "win32",
+			tty: interactiveTty,
+			tmuxAvailable: false,
+			diagnosticWriter: message => diagnostics.push(message),
+		});
+
+		expect(plan).toBeUndefined();
+		expect(diagnostics[0]).toContain("native Windows");
+		expect(diagnostics[0]).toContain("psmux");
+		expect(diagnostics[0]).toContain("https://github.com/psmux/psmux");
+		expect(diagnostics[0]).toContain("SKC_TMUX_COMMAND");
 	});
 
 	it("applies session-scoped mouse scrolling when launching tmux on WSL/Linux", () => {

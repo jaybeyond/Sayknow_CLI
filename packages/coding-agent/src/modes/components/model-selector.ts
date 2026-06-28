@@ -228,8 +228,11 @@ export class ModelSelectorComponent extends Container {
 	#scopedModels: ReadonlyArray<ScopedModelItem>;
 	#temporaryOnly: boolean;
 	#currentModel?: Model;
+	#currentThinkingLevel?: ThinkingLevel;
+	#activeModelProfile?: string;
 	#isFastForProvider: (provider?: string) => boolean = () => false;
 	#isFastForSubagentProvider: (provider?: string) => boolean = () => false;
+	#isCurrentModelFastModeActive: () => boolean = () => false;
 	#pendingActionItem?: ModelItem | CanonicalModelItem;
 	#selectedActionIndex: number = 0;
 	#pendingThinkingChoice?: PendingThinkingChoice;
@@ -265,6 +268,9 @@ export class ModelSelectorComponent extends Container {
 			sessionId?: string;
 			isFastForProvider?: (provider?: string) => boolean;
 			isFastForSubagentProvider?: (provider?: string) => boolean;
+			isCurrentModelFastModeActive?: () => boolean;
+			currentThinkingLevel?: ThinkingLevel;
+			activeModelProfile?: string;
 		},
 	) {
 		super();
@@ -278,8 +284,16 @@ export class ModelSelectorComponent extends Container {
 		this.#temporaryOnly = options?.temporaryOnly ?? false;
 		this.#authSessionId = options?.sessionId;
 		this.#currentModel = _currentModel;
+		this.#currentThinkingLevel = options?.currentThinkingLevel;
+		this.#activeModelProfile = options?.activeModelProfile;
 		this.#isFastForProvider = options?.isFastForProvider ?? (() => false);
 		this.#isFastForSubagentProvider = options?.isFastForSubagentProvider ?? (() => false);
+		// Current-model EFFECTIVE fast state. Defaults to intent for the current
+		// model so existing callers/tests keep prior behavior; production wires the
+		// session's effective predicate so an auto-disabled provider shows no glyph.
+		this.#isCurrentModelFastModeActive =
+			options?.isCurrentModelFastModeActive ??
+			(() => (this.#currentModel ? this.#isFastForProvider(this.#currentModel.provider) : false));
 		const initialSearchInput = options?.initialSearchInput;
 		this.#viewMode = this.#temporaryOnly || initialSearchInput || scopedModels.length > 0 ? "models" : "presets";
 
@@ -373,6 +387,23 @@ export class ModelSelectorComponent extends Container {
 				};
 			}
 		}
+		if (this.#activeModelProfile && this.#currentModel) {
+			this.#roles.default = {
+				model: this.#currentModel,
+				thinkingLevel: this.#currentThinkingLevel ?? ThinkingLevel.Inherit,
+			};
+		}
+	}
+
+	refreshRoleAssignments(
+		options: { currentModel?: Model; currentThinkingLevel?: ThinkingLevel; activeModelProfile?: string } = {},
+	): void {
+		if ("currentModel" in options) this.#currentModel = options.currentModel;
+		if ("currentThinkingLevel" in options) this.#currentThinkingLevel = options.currentThinkingLevel;
+		if ("activeModelProfile" in options) this.#activeModelProfile = options.activeModelProfile;
+		this.#roles = {};
+		this.#loadRoleModels();
+		this.#applyTabFilter();
 	}
 
 	#sortModels(models: ModelItem[]): void {
@@ -980,32 +1011,46 @@ export class ModelSelectorComponent extends Container {
 
 			// Build role badges (inverted: color as background, black text)
 			const roleBadgeTokens: string[] = [];
-			let roleMatched = false;
+			// Whether a non-subagent (modelRoles) badge on the CURRENT model row already
+			// rendered the current-model EFFECTIVE glyph. Only that case should suppress
+			// the standalone current glyph below — a subagent-only match must NOT, since
+			// subagent badges reflect the subagent tier, not the current model.
+			let currentModelEffectiveGlyphRendered = false;
 			for (const role of SKC_MODEL_ASSIGNMENT_TARGET_IDS) {
 				const roleInfo = SKC_MODEL_ASSIGNMENT_TARGETS[role];
 				const assigned = this.#roles[role];
 				if (roleInfo.tag && assigned && modelsAreEqual(assigned.model, item.model)) {
-					roleMatched = true;
 					const badge = makeInvertedBadge(roleInfo.tag, roleInfo.color ?? "muted");
 					const thinkingLabel = getThinkingLevelMetadata(assigned.thinkingLevel).label;
-					// Subagent roles (task.agentModelOverrides) run under task.serviceTier, so
-					// their ⚡ must reflect the effective subagent tier, not the main session tier.
-					const roleFast =
-						roleInfo.settingsPath === "task.agentModelOverrides"
-							? this.#isFastForSubagentProvider(assigned.model.provider)
+
+					// Subagent roles (task.agentModelOverrides) run under task.serviceTier,
+					// so their ⚡ uses the effective subagent tier. A non-subagent
+					// (modelRoles) badge on the CURRENT model row uses the current-model
+					// effective predicate so a provider auto-disable hides the glyph;
+					// other modelRoles rows show pure intent.
+					const isSubagentRole = roleInfo.settingsPath === "task.agentModelOverrides";
+					const isCurrentRow = this.#currentModel !== undefined && modelsAreEqual(this.#currentModel, item.model);
+					const roleFast = isSubagentRole
+						? this.#isFastForSubagentProvider(assigned.model.provider)
+						: isCurrentRow
+							? this.#isCurrentModelFastModeActive()
 							: this.#isFastForProvider(assigned.model.provider);
+					if (roleFast && isCurrentRow && !isSubagentRole) {
+						currentModelEffectiveGlyphRendered = true;
+					}
 					const fastSuffix = roleFast ? ` ${theme.icon.fast}` : "";
 					roleBadgeTokens.push(`${badge} ${theme.fg("dim", `(${thinkingLabel})`)}${fastSuffix}`);
 				}
 			}
 			// Active/current non-role row: show the fast glyph on the session's current
-			// model row even when it carries no role badge. Skip when a role token for
-			// this row already rendered the glyph (duplicate-glyph guard).
+			// model row. Suppress only when a non-subagent current-row badge already
+			// rendered the current-model effective glyph (duplicate-glyph guard) — a
+			// subagent-only match must not hide the current model's own indicator.
 			if (
-				!roleMatched &&
+				!currentModelEffectiveGlyphRendered &&
 				this.#currentModel !== undefined &&
 				modelsAreEqual(this.#currentModel, item.model) &&
-				this.#isFastForProvider(item.model.provider)
+				this.#isCurrentModelFastModeActive()
 			) {
 				roleBadgeTokens.push(theme.icon.fast);
 			}

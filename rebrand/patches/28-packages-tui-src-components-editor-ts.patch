@@ -1,6 +1,6 @@
 --- a/packages/tui/src/components/editor.ts
 +++ b/packages/tui/src/components/editor.ts
-@@ -847,7 +847,11 @@
+@@ -850,7 +850,11 @@
  			let hasCursor = layoutLine.hasCursor && layoutLine.cursorPos !== undefined;
  			const marker = emitCursorMarker ? CURSOR_MARKER : "";
  
@@ -11,5 +11,5 @@
 +			// When NOT focused, show the placeholder alone with no caret.
 +			if (showPlaceholder && !this.focused) {
  				const hintText = hintStyle(truncateToWidth(this.#placeholder ?? "", lineContentWidth));
- 				displayText = hintText;
- 				displayWidth = Math.min(visibleWidth(this.#placeholder ?? ""), lineContentWidth);
+ 				// Anchor the hardware cursor at the input start (terminal-cursor mode) even
+ 				// while the placeholder shows. Otherwise no cursor marker is emitted, the

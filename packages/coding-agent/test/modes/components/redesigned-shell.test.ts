@@ -103,7 +103,7 @@ describe("redesigned interactive shell chrome", () => {
 		expect(assistant).not.toContain("▌");
 	});
 
-	it("keeps the SKC forge launch surface responsive", () => {
+	it("keeps the Sayknow launch surface responsive", () => {
 		const component = new WelcomeComponent("1.2.3", "gpt-5.5", "openai");
 		const lines = component.render(54);
 		const rendered = Bun.stripANSI(lines.join("\n"));
@@ -114,6 +114,22 @@ describe("redesigned interactive shell chrome", () => {
 		expect(rendered).not.toContain("●");
 		for (const line of lines) {
 			expect(visibleWidth(line)).toBeLessThanOrEqual(54);
+		}
+	});
+
+	it("uses a wider splash box on wide terminals", () => {
+		const component = new WelcomeComponent("1.2.3", "gpt-5.5", "openai");
+		const narrowLines = component.render(100);
+		const wideLines = component.render(160);
+		const narrowTop = Bun.stripANSI(narrowLines[0] ?? "");
+		const wideTop = Bun.stripANSI(wideLines[0] ?? "");
+
+		expect(visibleWidth(narrowTop)).toBe(98);
+		expect(visibleWidth(wideTop)).toBe(158);
+		expect(visibleWidth(wideTop)).toBeGreaterThan(visibleWidth(narrowTop));
+		expect(wideTop).toContain("Sayknow-CLI");
+		for (const line of wideLines) {
+			expect(visibleWidth(line)).toBeLessThanOrEqual(160);
 		}
 	});
 
