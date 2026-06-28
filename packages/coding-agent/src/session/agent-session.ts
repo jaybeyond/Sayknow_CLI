@@ -250,6 +250,7 @@ import { releaseTabsForOwner } from "../tools/browser/tab-supervisor";
 import type { CheckpointState } from "../tools/checkpoint";
 import { outputMeta, wrapToolWithMetaNotice } from "../tools/output-meta";
 import { normalizeLocalScheme, resolveToCwd } from "../tools/path-utils";
+import { registerResourceGcSession } from "../tools/resource-gc";
 import { getLatestTodoPhasesFromEntries, type TodoItem, type TodoPhase } from "../tools/todo-write";
 import { ToolAbortError, ToolError } from "../tools/tool-errors";
 import { clampTimeout } from "../tools/tool-timeouts";
@@ -964,6 +965,8 @@ export class AgentSession {
 	// Python execution state
 	#evalAbortControllers = new Set<AbortController>();
 	#evalKernelOwnerId: string;
+	/** Idempotent unregister handle for this session's resource-GC registration. */
+	#unregisterResourceGc?: () => void;
 	/**
 	 * AsyncJobManager owned by this session (top-level only). Subagents leave
 	 * this undefined and **MUST NOT** dispose the global instance on teardown.
@@ -1180,6 +1183,15 @@ export class AgentSession {
 		this.sessionManager = config.sessionManager;
 		this.settings = config.settings;
 		this.taskDepth = config.taskDepth ?? 0;
+		// Register this session with the process-wide resource GC (idle/RSS browser-tab eviction
+		// + stale screenshot cleanup). Session-keyed so concurrent sessions share one timer safely.
+		const resourceGcSessionId = this.sessionManager.getSessionId();
+		if (resourceGcSessionId) {
+			this.#unregisterResourceGc = registerResourceGcSession({
+				sessionId: resourceGcSessionId,
+				settings: this.settings,
+			});
+		}
 		// Power assertions are taken per turn (see #beginInFlight); nothing acquired here.
 		this.#evalKernelOwnerId = config.evalKernelOwnerId ?? `agent-session:${Snowflake.next()}`;
 		this.#ownedAsyncJobManager = config.ownedAsyncJobManager;
@@ -3285,6 +3297,8 @@ export class AgentSession {
 		// browsers disconnect, headless close gracefully). Scoped by the session id the
 		// browser tool tagged tabs with, so other live sessions' tabs are untouched.
 		// No-op when this session opened no tabs. Failure is logged, not thrown.
+		this.#unregisterResourceGc?.();
+		this.#unregisterResourceGc = undefined;
 		await releaseTabsForOwner(this.sessionManager.getSessionId()).catch((error: unknown) =>
 			logger.warn("session dispose: releaseTabsForOwner failed", { error }),
 		);
@@ -3324,6 +3338,8 @@ export class AgentSession {
 	async disposeChildSubprocesses(timeoutMs = SIGNAL_TEARDOWN_TIMEOUT_MS): Promise<void> {
 		const sessionId = this.sessionManager.getSessionId();
 		const kernelOwnerId = this.#evalKernelOwnerId;
+		this.#unregisterResourceGc?.();
+		this.#unregisterResourceGc = undefined;
 		const work = Promise.allSettled([
 			// kill:true so a forced exit also reaps spawned-app Chrome we own (headless
 			// always closes; connected/attached browsers only disconnect — never killed).
@@ -5231,6 +5247,19 @@ export class AgentSession {
 			attribution: "user",
 			timestamp: Date.now(),
 		});
+		// A live agent loop polls the steering queue at every tool/turn boundary
+		// and consumes this message on its own. But when a steer is queued while no
+		// loop is actively running — e.g. the session still reports busy only
+		// because a finished prompt is unwinding (deferred agent_end / post-prompt
+		// work) — nothing delivers it until the next explicit prompt or a
+		// user-interrupt abort, so it stalls until the user presses Esc. Schedule a
+		// continue so the steer is delivered promptly. A live loop (or an
+		// already-drained queue) makes the scheduled continue a no-op.
+		if (this.#canAutoContinueForSteer()) {
+			this.#scheduleAgentContinue({
+				shouldContinue: () => this.#canAutoContinueForSteer() && this.agent.hasQueuedSteering(),
+			});
+		}
 	}
 
 	/**
@@ -5269,6 +5298,21 @@ export class AgentSession {
 	 */
 	#canAutoContinueForFollowUp(): boolean {
 		if (this.isStreaming) return false;
+		if (this.isRetrying) return false;
+		const messages = this.agent.state.messages;
+		const last = messages[messages.length - 1];
+		return last?.role === "assistant";
+	}
+
+	/**
+	 * Gate for idle / winding-down steer auto-continue. Unlike the follow-up gate
+	 * this checks `agent.state.isStreaming` (a live agent loop) rather than the
+	 * public `isStreaming` (which stays true while a finished prompt unwinds), so a
+	 * steer queued during the unwind window is still delivered. A live loop returns
+	 * false here because it polls the steering queue itself.
+	 */
+	#canAutoContinueForSteer(): boolean {
+		if (this.agent.state.isStreaming) return false;
 		if (this.isRetrying) return false;
 		const messages = this.agent.state.messages;
 		const last = messages[messages.length - 1];

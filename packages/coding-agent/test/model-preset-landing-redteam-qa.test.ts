@@ -2,11 +2,11 @@ import { beforeAll, describe, expect, test, vi } from "bun:test";
 import { Effort, type Model } from "@sayknow-cli/ai";
 import type { ModelProfileDefinition } from "@sayknow-cli/coding-agent/config/model-profiles";
 import { Settings } from "@sayknow-cli/coding-agent/config/settings";
+import { setLanguage } from "@sayknow-cli/coding-agent/i18n/index";
 import {
 	ModelSelectorComponent,
 	type ModelSelectorSelection,
 } from "@sayknow-cli/coding-agent/modes/components/model-selector";
-import { setLanguage } from "@sayknow-cli/coding-agent/i18n/index";
 import { getThemeByName, setThemeInstance } from "@sayknow-cli/coding-agent/modes/theme/theme";
 import type { TUI } from "@sayknow-cli/tui";
 

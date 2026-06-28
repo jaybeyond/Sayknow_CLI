@@ -19,34 +19,36 @@ const MAX_RECURRING_JITTER_MS = 30 * 60 * 1000;
 const MAX_ONE_SHOT_EARLY_JITTER_MS = 90 * 1000;
 const MAX_TIMEOUT_MS = 2_147_483_647;
 
-const cronCreateSchema = z.object({
-	cron_expression: z
-		.string()
-		.describe(
-			"Standard 5-field cron expression in the user's local timezone: 'minute hour day-of-month month day-of-week'. Examples: '*/5 * * * *' (every 5 min), '0 9 * * *' (9am daily), '0 9 * * 1-5' (weekdays at 9am). Day-of-week uses 0/7 for Sunday through 6 for Saturday. When both day-of-month and day-of-week are constrained, a date matches if either field matches (vixie-cron semantics).",
-		),
-	prompt: z
-		.string()
-		.describe(
-			"Prompt to inject between turns when the cron fires. May reference slash commands (e.g. '/review-pr 1234') or natural-language instructions.",
-		),
-	recurring: z
-		.boolean()
-		.default(true)
-		.describe(
-			"true to fire on every match of the cron expression (recurring, auto-expires after 7 days); false to fire once at the next match and then self-delete.",
-		),
-});
+const cronSchema = z
+	.object({
+		op: z
+			.enum(["create", "list", "delete"])
+			.describe(
+				"operation: 'create' schedules a prompt on a cron expression, 'list' enumerates scheduled tasks, 'delete' cancels a task by id",
+			),
+		cron_expression: z
+			.string()
+			.optional()
+			.describe(
+				"(op=create, required) Standard 5-field cron expression in the user's local timezone: 'minute hour day-of-month month day-of-week'. Examples: '*/5 * * * *' (every 5 min), '0 9 * * *' (9am daily), '0 9 * * 1-5' (weekdays at 9am). Day-of-week uses 0/7 for Sunday through 6 for Saturday. When both day-of-month and day-of-week are constrained, a date matches if either field matches (vixie-cron semantics).",
+			),
+		prompt: z
+			.string()
+			.optional()
+			.describe(
+				"(op=create, required) Prompt to inject between turns when the cron fires. May reference slash commands (e.g. '/review-pr 1234') or natural-language instructions.",
+			),
+		recurring: z
+			.boolean()
+			.optional()
+			.describe(
+				"(op=create) true to fire on every match of the cron expression (recurring, auto-expires after 7 days); false to fire once at the next match and then self-delete.",
+			),
+		id: z.string().optional().describe("(op=delete, required) The 8-character job ID returned by op=create."),
+	})
+	.strict();
 
-export type CronCreateParams = z.infer<typeof cronCreateSchema>;
-
-const cronListSchema = z.object({});
-export type CronListParams = z.infer<typeof cronListSchema>;
-
-const cronDeleteSchema = z.object({
-	id: z.string().min(1).describe("The 8-character job ID returned by CronCreate."),
-});
-export type CronDeleteParams = z.infer<typeof cronDeleteSchema>;
+export type CronParams = z.infer<typeof cronSchema>;
 
 export interface CronJobSnapshot {
 	id: string;
@@ -68,20 +70,14 @@ export interface CronListJobDetails {
 	humanSchedule: string;
 }
 
-export interface CronCreateToolDetails {
-	id: string;
-	cron_expression: string;
-	recurring: boolean;
+export interface CronToolDetails {
+	op: "create" | "list" | "delete";
+	id?: string;
+	cron_expression?: string;
+	recurring?: boolean;
 	nextFireAt?: number;
-}
-
-export interface CronListToolDetails {
-	jobs: CronListJobDetails[];
-}
-
-export interface CronDeleteToolDetails {
-	id: string;
-	deleted: boolean;
+	jobs?: CronListJobDetails[];
+	deleted?: boolean;
 }
 
 interface CronTimerHandle {
@@ -543,12 +539,12 @@ function isCronDisabled(): boolean {
 	return process.env.CLAUDE_CODE_DISABLE_CRON === "1";
 }
 
-export class CronCreateTool implements AgentTool<typeof cronCreateSchema, CronCreateToolDetails> {
-	readonly name = "CronCreate";
-	readonly label = "CronCreate";
-	readonly summary = "Schedule a prompt on a 5-field cron expression";
+export class CronTool implements AgentTool<typeof cronSchema, CronToolDetails> {
+	readonly name = "cron";
+	readonly label = "Cron";
+	readonly summary = "Schedule, list, and cancel cron-style prompts (op: create | list | delete)";
 	readonly description: string;
-	readonly parameters = cronCreateSchema;
+	readonly parameters = cronSchema;
 	readonly strict = true;
 	readonly loadMode = "discoverable";
 
@@ -556,19 +552,30 @@ export class CronCreateTool implements AgentTool<typeof cronCreateSchema, CronCr
 		this.description = prompt.render(cronDescription);
 	}
 
-	static createIf(session: ToolSession): CronCreateTool | null {
+	static createIf(session: ToolSession): CronTool | null {
 		if (!isBackgroundJobSupportEnabled(session.settings)) return null;
 		if (isCronDisabled()) return null;
-		return new CronCreateTool(session);
+		return new CronTool(session);
 	}
 
 	async execute(
 		_toolCallId: string,
-		params: CronCreateParams,
+		params: CronParams,
 		_signal?: AbortSignal,
-		_onUpdate?: AgentToolUpdateCallback<CronCreateToolDetails>,
+		_onUpdate?: AgentToolUpdateCallback<CronToolDetails>,
 		_context?: AgentToolContext,
-	): Promise<AgentToolResult<CronCreateToolDetails>> {
+	): Promise<AgentToolResult<CronToolDetails>> {
+		switch (params.op) {
+			case "create":
+				return this.#create(params);
+			case "list":
+				return this.#list();
+			case "delete":
+				return this.#delete(params);
+		}
+	}
+
+	async #create(params: CronParams): Promise<AgentToolResult<CronToolDetails>> {
 		const manager = AsyncJobManager.instance();
 		if (!manager) {
 			throw new ToolError("Async execution is disabled; cron is unavailable in this session.");
@@ -576,26 +583,30 @@ export class CronCreateTool implements AgentTool<typeof cronCreateSchema, CronCr
 		if (isCronDisabled()) {
 			throw new ToolError("Cron is disabled by CLAUDE_CODE_DISABLE_CRON=1.");
 		}
+		if (!params.cron_expression || !params.prompt) {
+			throw new ToolError("cron op=create requires both 'cron_expression' and 'prompt'.");
+		}
 		validateCronExpression(params.cron_expression);
 
 		const ownerId = this.session.getAgentId?.() ?? undefined;
 		const state = getOrCreateOwnerState(ownerId);
 		if (state.jobs.size >= MAX_CRON_TASKS_PER_OWNER) {
 			throw new ToolError(
-				`Cron task limit reached (${MAX_CRON_TASKS_PER_OWNER}). Cancel an existing task with CronDelete first.`,
+				`Cron task limit reached (${MAX_CRON_TASKS_PER_OWNER}). Cancel an existing task with cron op=delete first.`,
 			);
 		}
 		ensureOwnerCleanup(ownerId, manager, state);
 
 		const id = generateCronId(new Set(state.jobs.keys()));
 		const now = Date.now();
+		const recurring = params.recurring ?? true;
 		const snapshot: CronJobSnapshot = {
 			id,
 			cron_expression: params.cron_expression.trim(),
 			prompt: params.prompt,
-			recurring: params.recurring,
+			recurring,
 			createdAt: now,
-			expiresAt: params.recurring ? now + CRON_RECURRING_MAX_AGE_MS : undefined,
+			expiresAt: recurring ? now + CRON_RECURRING_MAX_AGE_MS : undefined,
 			humanSchedule: humanizeCronExpression(params.cron_expression.trim()),
 			ownerId,
 		};
@@ -604,7 +615,7 @@ export class CronCreateTool implements AgentTool<typeof cronCreateSchema, CronCr
 		scheduleExpiry(ownerId, record);
 		scheduleRecord(ownerId, state, record);
 
-		logger.debug("CronCreate: scheduled task", {
+		logger.debug("cron op=create: scheduled task", {
 			id,
 			ownerId,
 			cron: snapshot.cron_expression,
@@ -614,6 +625,7 @@ export class CronCreateTool implements AgentTool<typeof cronCreateSchema, CronCr
 		return {
 			content: [{ type: "text", text: `Scheduled ${id} (${snapshot.humanSchedule})` }],
 			details: {
+				op: "create",
 				id,
 				cron_expression: snapshot.cron_expression,
 				recurring: snapshot.recurring,
@@ -621,34 +633,8 @@ export class CronCreateTool implements AgentTool<typeof cronCreateSchema, CronCr
 			},
 		};
 	}
-}
 
-export class CronListTool implements AgentTool<typeof cronListSchema, CronListToolDetails> {
-	readonly name = "CronList";
-	readonly label = "CronList";
-	readonly summary = "List scheduled cron jobs";
-	readonly description: string;
-	readonly parameters = cronListSchema;
-	readonly strict = true;
-	readonly loadMode = "discoverable";
-
-	constructor(private readonly session: ToolSession) {
-		this.description = prompt.render(cronDescription);
-	}
-
-	static createIf(session: ToolSession): CronListTool | null {
-		if (!isBackgroundJobSupportEnabled(session.settings)) return null;
-		if (isCronDisabled()) return null;
-		return new CronListTool(session);
-	}
-
-	async execute(
-		_toolCallId: string,
-		_params: CronListParams,
-		_signal?: AbortSignal,
-		_onUpdate?: AgentToolUpdateCallback<CronListToolDetails>,
-		_context?: AgentToolContext,
-	): Promise<AgentToolResult<CronListToolDetails>> {
+	async #list(): Promise<AgentToolResult<CronToolDetails>> {
 		const ownerId = this.session.getAgentId?.() ?? undefined;
 		const state = schedulesByOwner.get(ownerKey(ownerId));
 		const records = state
@@ -658,7 +644,7 @@ export class CronListTool implements AgentTool<typeof cronListSchema, CronListTo
 		if (jobs.length === 0) {
 			return {
 				content: [{ type: "text", text: "No scheduled jobs" }],
-				details: { jobs: [] },
+				details: { op: "list", jobs: [] },
 			};
 		}
 		const lines = jobs.map(job => {
@@ -667,43 +653,20 @@ export class CronListTool implements AgentTool<typeof cronListSchema, CronListTo
 		});
 		return {
 			content: [{ type: "text", text: lines.join("\n") }],
-			details: { jobs },
+			details: { op: "list", jobs },
 		};
 	}
-}
 
-export class CronDeleteTool implements AgentTool<typeof cronDeleteSchema, CronDeleteToolDetails> {
-	readonly name = "CronDelete";
-	readonly label = "CronDelete";
-	readonly summary = "Cancel a scheduled cron job by ID";
-	readonly description: string;
-	readonly parameters = cronDeleteSchema;
-	readonly strict = true;
-	readonly loadMode = "discoverable";
-
-	constructor(private readonly session: ToolSession) {
-		this.description = prompt.render(cronDescription);
-	}
-
-	static createIf(session: ToolSession): CronDeleteTool | null {
-		if (!isBackgroundJobSupportEnabled(session.settings)) return null;
-		if (isCronDisabled()) return null;
-		return new CronDeleteTool(session);
-	}
-
-	async execute(
-		_toolCallId: string,
-		params: CronDeleteParams,
-		_signal?: AbortSignal,
-		_onUpdate?: AgentToolUpdateCallback<CronDeleteToolDetails>,
-		_context?: AgentToolContext,
-	): Promise<AgentToolResult<CronDeleteToolDetails>> {
+	async #delete(params: CronParams): Promise<AgentToolResult<CronToolDetails>> {
+		if (!params.id) {
+			throw new ToolError("cron op=delete requires 'id'.");
+		}
 		const ownerId = this.session.getAgentId?.() ?? undefined;
 		const deleted = deleteRecord(ownerId, params.id);
 		const text = deleted ? `Cancelled ${params.id}` : `No scheduled task '${params.id}' found; nothing to cancel.`;
 		return {
 			content: [{ type: "text", text }],
-			details: { id: params.id, deleted },
+			details: { op: "delete", id: params.id, deleted },
 		};
 	}
 }

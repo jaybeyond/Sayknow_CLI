@@ -670,9 +670,7 @@ describe("Coding Agent Tools", () => {
 			const testFile = path.join(testDir, "image.txt");
 			fs.writeFileSync(testFile, pngBuffer);
 
-			const legacyReadTool = wrapToolWithMetaNotice(
-				new ReadTool(createTestToolSession(testDir, Settings.isolated({ "inspect_image.enabled": false }))),
-			);
+			const legacyReadTool = wrapToolWithMetaNotice(new ReadTool(createTestToolSession(testDir)));
 			const result = await legacyReadTool.execute("test-call-img-1", { path: testFile });
 
 			expect(result.content[0]?.type).toBe("text");
@@ -685,30 +683,6 @@ describe("Coding Agent Tools", () => {
 			expect(imageBlock?.mimeType).toBe("image/png");
 			expect(typeof imageBlock?.data).toBe("string");
 			expect((imageBlock?.data ?? "").length).toBeGreaterThan(0);
-		});
-
-		it("returns metadata guidance (no image blocks) when inspect_image is enabled", async () => {
-			const png1x1Base64 =
-				"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+X2Z0AAAAASUVORK5CYII=";
-			const pngBuffer = Buffer.from(png1x1Base64, "base64");
-			const testFile = path.join(testDir, "image-guidance.png");
-			fs.writeFileSync(testFile, pngBuffer);
-
-			const inspectModeReadTool = wrapToolWithMetaNotice(
-				new ReadTool(createTestToolSession(testDir, Settings.isolated({ "inspect_image.enabled": true }))),
-			);
-			const result = await inspectModeReadTool.execute("test-call-img-guidance", { path: testFile });
-			const output = getTextOutput(result);
-
-			expect(output).toContain("Image metadata:");
-			expect(output).toContain("MIME: image/png");
-			expect(output).toContain("Bytes:");
-			expect(output).toContain("Dimensions:");
-			expect(output).toContain("inspect_image");
-			expect(output).toContain(`path="${path.basename(testFile)}"`);
-			expect(output).toContain("question");
-			expect(output).not.toContain("optional context");
-			expect(result.content.some(c => c.type === "image")).toBe(false);
 		});
 
 		it("should treat files with image extension but non-image content as text", async () => {

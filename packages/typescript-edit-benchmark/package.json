@@ -2,7 +2,7 @@
 	"type": "module",
 	"private": true,
 	"name": "@sayknow-cli/typescript-edit-benchmark",
-	"version": "0.3.3",
+	"version": "0.3.4",
 	"description": "Edit benchmark suite using TypeScript source code mutations",
 	"author": "jaybeyond",
 	"license": "MIT",

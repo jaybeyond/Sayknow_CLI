@@ -194,9 +194,9 @@ Delegate by default for multi-file changes, refactors, new features, tests, and 
 </detached-subagents>
 {{/has}}
 
-{{#has tools "inspect_image"}}
+{{#has tools "read"}}
 <images>
-For image understanding, use `{{toolRefs.inspect_image}}` with a specific question instead of reading raw image metadata only.
+For image understanding, call `{{toolRefs.read}}` on the image path; the image is returned inline for direct visual inspection.
 </images>
 {{/has}}
 

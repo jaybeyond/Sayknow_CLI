@@ -6,7 +6,11 @@ import * as z from "zod/v4";
 import type { RenderResultOptions } from "../../extensibility/custom-tools/types";
 import type { Theme, ThemeColor } from "../../modes/theme/theme";
 import goalDescription from "../../prompts/tools/goal.md" with { type: "text" };
-import { assertCanCompleteCurrentGoal, assertUltragoalPauseAllowed } from "../../skc-runtime/ultragoal-guard";
+import {
+	assertCanCompleteCurrentGoal,
+	assertUltragoalDropAllowed,
+	assertUltragoalPauseAllowed,
+} from "../../skc-runtime/ultragoal-guard";
 import { formatDuration } from "../../slash-commands/helpers/format";
 import type { ToolSession } from "../../tools";
 import { formatErrorMessage, TRUNCATE_LENGTHS } from "../../tools/render-utils";
@@ -103,6 +107,15 @@ async function executeGoalOperation(session: ToolSession, params: GoalToolInput)
 		return buildGoalToolResponse(paused?.goal ?? null);
 	}
 	if (params.op === "drop") {
+		try {
+			await assertUltragoalDropAllowed({
+				cwd: session.cwd,
+				currentGoal: session.getGoalModeState?.()?.goal ?? null,
+				sessionId: session.getSessionId?.(),
+			});
+		} catch (error) {
+			throw new ToolError(error instanceof Error ? error.message : String(error));
+		}
 		const dropped = await runtime.dropGoal();
 		return buildGoalToolResponse(dropped ?? null);
 	}

@@ -34,14 +34,12 @@ describe("blockImages setting", () => {
 			fs.rmSync(testDir, { recursive: true, force: true });
 		});
 
-		it("should include image blocks when inspect_image is disabled", async () => {
+		it("should include image blocks when read is called without a question", async () => {
 			// Create test image
 			const imagePath = path.join(testDir, "test.png");
 			fs.writeFileSync(imagePath, Buffer.from(TINY_PNG_BASE64, "base64"));
 
-			const tool = new ReadTool(
-				createTestToolSession(testDir, Settings.isolated({ "inspect_image.enabled": false })),
-			);
+			const tool = new ReadTool(createTestToolSession(testDir));
 			const result = await tool.execute("test-1", { path: imagePath });
 
 			// Should have text note + image content

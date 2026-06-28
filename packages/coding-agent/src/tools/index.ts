@@ -38,12 +38,11 @@ import { BrowserTool } from "./browser";
 import { CalculatorTool } from "./calculator";
 import { type CheckpointState, CheckpointTool, RewindTool } from "./checkpoint";
 import { ComputerTool, isComputerCallable, isComputerLoadablePlatform } from "./computer";
-import { CronCreateTool, CronDeleteTool, CronListTool } from "./cron";
+import { CronTool } from "./cron";
 import { DebugTool } from "./debug";
 import { EvalTool } from "./eval";
 import { FindTool } from "./find";
 import { GithubTool } from "./gh";
-import { InspectImageTool } from "./inspect-image";
 import { IrcTool } from "./irc";
 import { JobTool } from "./job";
 import { MonitorTool } from "./monitor";
@@ -83,7 +82,6 @@ export * from "./eval";
 export * from "./find";
 export * from "./gh";
 export * from "./image-gen";
-export * from "./inspect-image";
 export * from "./irc";
 export * from "./job";
 export * from "./monitor";
@@ -389,7 +387,6 @@ export const BUILTIN_TOOLS: Record<string, ToolFactory> = {
 	find: s => new FindTool(s),
 	search: s => new SearchTool(s),
 	lsp: LspTool.createIf,
-	inspect_image: s => new InspectImageTool(s),
 	browser: s => new BrowserTool(s),
 	...(isComputerLoadablePlatform() ? { computer: ComputerTool.createIf } : {}),
 	checkpoint: CheckpointTool.createIf,
@@ -398,9 +395,7 @@ export const BUILTIN_TOOLS: Record<string, ToolFactory> = {
 	subagent: s => new SubagentTool(s),
 	job: JobTool.createIf,
 	monitor: MonitorTool.createIf,
-	CronCreate: CronCreateTool.createIf,
-	CronList: CronListTool.createIf,
-	CronDelete: CronDeleteTool.createIf,
+	cron: CronTool.createIf,
 	recipe: RecipeTool.createIf,
 	irc: IrcTool.createIf,
 	todo_write: s => new TodoWriteTool(s),
@@ -560,7 +555,6 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 		if (name === "ast_grep") return session.settings.get("astGrep.enabled");
 		if (name === "ast_edit") return session.settings.get("astEdit.enabled");
 		if (name === "render_mermaid") return session.settings.get("renderMermaid.enabled");
-		if (name === "inspect_image") return session.settings.get("inspect_image.enabled");
 		if (name === "web_search") return session.settings.get("web_search.enabled");
 		// search_tool_bm25 is allowed when either legacy mcp.discoveryMode or new tools.discoveryMode is active.
 		if (name === "search_tool_bm25") return discoveryActive;

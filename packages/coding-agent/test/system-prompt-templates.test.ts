@@ -68,7 +68,6 @@ const baseRenderContext: prompt.TemplateContext = {
 		subagent: "subagent",
 		web_search: "web_search",
 		todo_write: "todo_write",
-		inspect_image: "inspect_image",
 		search_tool_bm25: "search_tool_bm25",
 		lsp: "lsp",
 		ast_grep: "ast_grep",

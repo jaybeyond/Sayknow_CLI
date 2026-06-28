@@ -219,7 +219,6 @@ describe("ModelSelector canonical model selection", () => {
 
 		selector.handleInput("\n");
 		selector.handleInput("\x1b[B");
-		selector.handleInput("\x1b[B");
 		selector.handleInput("\n");
 
 		const selectedAfterEnter = selected;
@@ -299,7 +298,6 @@ describe("ModelSelector canonical model selection", () => {
 
 		selector.handleInput("\t");
 		selector.handleInput("\n");
-		selector.handleInput("\x1b[B");
 		selector.handleInput("\x1b[B");
 		selector.handleInput("\n");
 
@@ -452,7 +450,6 @@ describe("ModelSelector canonical model selection", () => {
 		installTestTheme();
 
 		selector.handleInput("\n");
-		selector.handleInput("\x1b[B");
 		selector.handleInput("\x1b[B");
 		selector.handleInput("\n");
 

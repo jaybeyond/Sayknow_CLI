@@ -1113,17 +1113,6 @@
         return html;
       }
 
-      function renderInspectImage(name, args, result, ctx) {
-        const p = str(args.path == null ? args.url : args.path) || '';
-        let html = toolHead('inspect_image', escapeHtml(shortenPath(p)));
-        if (result) {
-          html += ctx.renderResultImages();
-          const output = ctx.getResultText();
-          if (output) html += formatExpandableOutput(output, 8);
-        }
-        return html;
-      }
-
       function renderGenerateImage(name, args, result, ctx) {
         const subject = str(args.subject) || '';
         const badges = args.aspect_ratio ? [String(args.aspect_ratio)] : null;
@@ -1544,7 +1533,6 @@
         debug: renderDebug,
         puppeteer: renderBrowser,
         browser: renderBrowser,
-        inspect_image: renderInspectImage,
         generate_image: renderGenerateImage,
         ask: renderAsk,
         resolve: renderResolve,

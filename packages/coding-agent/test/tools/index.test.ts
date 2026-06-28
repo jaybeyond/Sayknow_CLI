@@ -229,7 +229,6 @@ describe("createTools", () => {
 				"renderMermaid.enabled": false,
 				"web_search.enabled": false,
 				"browser.enabled": false,
-				"inspect_image.enabled": false,
 				"calc.enabled": false,
 			}),
 		});
@@ -243,7 +242,6 @@ describe("createTools", () => {
 		expect(names).not.toContain("render_mermaid");
 		expect(names).not.toContain("web_search");
 		expect(names).not.toContain("browser");
-		expect(names).not.toContain("inspect_image");
 		expect(names).not.toContain("calc");
 	});
 

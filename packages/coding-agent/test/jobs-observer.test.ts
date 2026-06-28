@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { AsyncJobManager } from "../src/async/job-manager";
 import { JobsObserver } from "../src/modes/jobs-observer";
-import { CronCreateTool, resetCronRegistryForTests } from "../src/tools/cron";
+import { CronTool, resetCronRegistryForTests } from "../src/tools/cron";
 import type { ToolSession } from "../src/tools/index";
 
 const OWNER = "0-Main";
@@ -154,8 +154,13 @@ describe("JobsObserver", () => {
 			fires += 1;
 		});
 
-		const tool = new CronCreateTool(createCronSession());
-		await tool.execute("call-1", { cron_expression: "*/5 * * * *", prompt: "/review-pr 1", recurring: true });
+		const tool = new CronTool(createCronSession());
+		await tool.execute("call-1", {
+			op: "create",
+			cron_expression: "*/5 * * * *",
+			prompt: "/review-pr 1",
+			recurring: true,
+		});
 		await flush();
 
 		const snapshot = observer.getSnapshot();
@@ -172,11 +177,17 @@ describe("JobsObserver", () => {
 		const manager = makeManager();
 		AsyncJobManager.setInstance(manager);
 		const observer = new JobsObserver(manager, OWNER);
-		const ownTool = new CronCreateTool(createCronSession(OWNER));
-		const otherTool = new CronCreateTool(createCronSession("0-Other"));
+		const ownTool = new CronTool(createCronSession(OWNER));
+		const otherTool = new CronTool(createCronSession("0-Other"));
 
-		const own = await ownTool.execute("own", { cron_expression: "*/5 * * * *", prompt: "own", recurring: true });
+		const own = await ownTool.execute("own", {
+			op: "create",
+			cron_expression: "*/5 * * * *",
+			prompt: "own",
+			recurring: true,
+		});
 		const other = await otherTool.execute("other", {
+			op: "create",
 			cron_expression: "*/5 * * * *",
 			prompt: "other",
 			recurring: true,
@@ -184,15 +195,15 @@ describe("JobsObserver", () => {
 		if (!own.details || !other.details) throw new Error("Expected cron create details");
 		await flush();
 
-		expect(observer.getSnapshot().crons.map(cron => cron.id)).toEqual([own.details.id]);
-		expect(observer.deleteCron(other.details.id)).toBe(false);
-		expect(observer.getSnapshot().crons.map(cron => cron.id)).toEqual([own.details.id]);
-		expect(observer.deleteCron(own.details.id)).toBe(true);
+		expect(observer.getSnapshot().crons.map(cron => cron.id)).toEqual([own.details.id!]);
+		expect(observer.deleteCron(other.details.id!)).toBe(false);
+		expect(observer.getSnapshot().crons.map(cron => cron.id)).toEqual([own.details.id!]);
+		expect(observer.deleteCron(own.details.id!)).toBe(true);
 		await flush();
 		expect(observer.getSnapshot().crons).toHaveLength(0);
 
 		const otherObserver = new JobsObserver(manager, "0-Other");
-		expect(otherObserver.getSnapshot().crons.map(cron => cron.id)).toEqual([other.details.id]);
+		expect(otherObserver.getSnapshot().crons.map(cron => cron.id)).toEqual([other.details.id!]);
 		otherObserver.dispose();
 		observer.dispose();
 		await manager.dispose();

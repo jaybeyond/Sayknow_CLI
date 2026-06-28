@@ -16,8 +16,8 @@ import {
 	getPluginsCacheDir,
 	MarketplaceManager,
 } from "../extensibility/plugins/marketplace/index.js";
-import { installSkcPluginBundle, isSkcPluginBundleSource, readRegistry } from "../extensibility/skc-plugins";
 import { type ScanReport, scanPluginDir } from "../extensibility/plugins/security-scanner";
+import { installSkcPluginBundle, isSkcPluginBundleSource, readRegistry } from "../extensibility/skc-plugins";
 import { theme } from "../modes/theme/theme";
 
 // =============================================================================
