@@ -163,6 +163,32 @@ def t_validator_small_fragment_still_challenge():
     print(f"  ✓ incomplete fragment → {v.verdict.value}")
 
 
+def t_validator_soft_marker_on_complete_page_is_weak_ok():
+    # A COMPLETE content page that merely embeds a soft marker (e.g. a site-wide
+    # reCAPTCHA / login-modal / age-gate script, common on adult & e-commerce
+    # sites) is a real page we actually retrieved — not a challenge. Regression
+    # guard for the soft-marker false positive that silently dropped fully
+    # rendered pages whose body was already in hand.
+    body = ('<!doctype html><html lang="en"><head><title>Real Page</title>'
+            '<script src="https://www.google.com/recaptcha/api.js"></script></head>'
+            '<body><h1>Welcome</h1><p>' + ('real content ' * 400) +
+            '</p><div class="captcha">protected</div></body></html>')
+    v = validate(_Resp(200, body, headers={"Content-Type": "text/html"}))
+    assert v.body_size >= 3000, v.body_size
+    assert v.verdict == Verdict.WEAK_OK, (v.verdict, v.reasons)
+    assert any("soft_on_complete" in r for r in v.reasons), v.reasons
+    print(f"  ✓ soft marker on complete page → {v.verdict.value} ({v.reasons})")
+
+
+def t_validator_soft_marker_on_stub_still_challenge():
+    # A soft marker on a script-only / incomplete stub (no real visible text)
+    # stays a challenge — the fix must not swallow genuine interstitials.
+    body = '<html><head></head><body><script>showCaptcha();</script></body></html>'
+    v = validate(_Resp(200, body, headers={"Content-Type": "text/html"}))
+    assert v.verdict == Verdict.CHALLENGE, (v.verdict, v.reasons)
+    print(f"  ✓ soft marker on script stub → {v.verdict.value}")
+
+
 ALL = [
     ("scheduler_diversity_under_cap", t_scheduler_diversity_under_cap),
     ("scheduler_avoid_deprioritized_not_deleted", t_scheduler_avoid_deprioritized_not_deleted),
@@ -176,6 +202,8 @@ ALL = [
     ("validator_small_complete_page_is_weak_ok", t_validator_small_complete_page_is_weak_ok),
     ("validator_small_script_stub_still_challenge", t_validator_small_script_stub_still_challenge),
     ("validator_small_fragment_still_challenge", t_validator_small_fragment_still_challenge),
+    ("validator_soft_marker_on_complete_page_is_weak_ok", t_validator_soft_marker_on_complete_page_is_weak_ok),
+    ("validator_soft_marker_on_stub_still_challenge", t_validator_soft_marker_on_stub_still_challenge),
 ]
 
 

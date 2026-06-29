@@ -28,6 +28,11 @@ function fail(msg: string): void {
 function walk(dir: string): string[] {
 	const out: string[] = [];
 	for (const entry of readdirSync(dir)) {
+		// node_modules holds locally-installed Phase 3 runtime deps (gitignored,
+		// never vendored and never packed by npm). Vendor checks apply only to
+		// vendored upstream source; third-party package files legitimately carry
+		// paths like ".../references/" that would otherwise false-positive.
+		if (entry === "node_modules") continue;
 		const full = join(dir, entry);
 		if (statSync(full).isDirectory()) out.push(...walk(full));
 		else out.push(full);
