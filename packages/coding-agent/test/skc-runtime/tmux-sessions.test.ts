@@ -3,7 +3,10 @@ import {
 	__setBinaryResolverForTests,
 	clearPsmuxDetectionCache,
 } from "@sayknow-cli/coding-agent/skc-runtime/psmux-detect";
-import { buildSkcTmuxExactOptionTarget } from "@sayknow-cli/coding-agent/skc-runtime/tmux-common";
+import {
+	buildSkcTmuxExactOptionTarget,
+	buildSkcTmuxExactSessionTarget,
+} from "@sayknow-cli/coding-agent/skc-runtime/tmux-common";
 import {
 	createSkcTmuxSession,
 	listSkcTmuxSessions,
@@ -188,6 +191,23 @@ describe("SKC tmux session management", () => {
 		expect(showOptions).toEqual(["tmux", "show-options", "-qv", "-t", "=sayknow_cli_work:", "@skc-profile"]);
 		// Session-scoped commands keep the bare exact target, which tmux resolves.
 		expect(calls.at(-1)).toEqual(["tmux", "kill-session", "-t", "=sayknow_cli_work"]);
+	});
+
+	it("builds psmux-aware targets for session-scoped commands", () => {
+		__setBinaryResolverForTests(candidate =>
+			candidate === "psmux" || candidate === "pmux" ? `/fake/${candidate}` : null,
+		);
+		try {
+			expect(buildSkcTmuxExactSessionTarget("work", { env: { SKC_TMUX_COMMAND: "tmux" } })).toBe("=work");
+			expect(
+				buildSkcTmuxExactSessionTarget("work", { env: { SKC_TMUX_COMMAND: "psmux", SKC_PSMUX_COMMAND: "psmux" } }),
+			).toBe("work");
+			expect(
+				buildSkcTmuxExactSessionTarget("work", { env: { SKC_TMUX_COMMAND: "pmux", SKC_PSMUX_COMMAND: "pmux" } }),
+			).toBe("work");
+		} finally {
+			__setBinaryResolverForTests(null);
+		}
 	});
 
 	it("drops the tmux `=NAME` exact-session prefix on psmux for option commands", () => {

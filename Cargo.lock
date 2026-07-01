@@ -1264,6 +1264,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "gjc-notifications"
+version = "0.7.9"
+dependencies = [
+ "futures-util",
+ "libc",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-tungstenite",
+ "tokio-util",
+]
+
+[[package]]
 name = "glob"
 version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2342,7 +2356,7 @@ dependencies = [
 
 [[package]]
 name = "pi-ast"
-version = "0.3.5"
+version = "0.7.9"
 dependencies = [
  "anyhow",
  "ast-grep-core",
@@ -2410,7 +2424,7 @@ dependencies = [
 
 [[package]]
 name = "pi-iso"
-version = "0.3.5"
+version = "0.7.9"
 dependencies = [
  "async-trait",
  "libc",
@@ -2422,13 +2436,14 @@ dependencies = [
 
 [[package]]
 name = "pi-natives"
-version = "0.3.5"
+version = "0.7.9"
 dependencies = [
  "anyhow",
  "arboard",
  "ast-grep-core",
  "clap",
  "dashmap",
+ "gjc-notifications",
  "globset",
  "grep-matcher",
  "grep-regex",
@@ -2454,7 +2469,6 @@ dependencies = [
  "serde",
  "serde_json",
  "similar 3.1.1",
- "skc-notifications",
  "smallvec",
  "syntect",
  "tokio",
@@ -2468,7 +2482,7 @@ dependencies = [
 
 [[package]]
 name = "pi-shell"
-version = "0.3.5"
+version = "0.7.9"
 dependencies = [
  "anyhow",
  "brush-builtins",
@@ -3055,20 +3069,6 @@ name = "siphasher"
 version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8ee5873ec9cce0195efcb7a4e9507a04cd49aec9c83d0389df45b1ef7ba2e649"
-
-[[package]]
-name = "skc-notifications"
-version = "0.3.5"
-dependencies = [
- "futures-util",
- "libc",
- "parking_lot",
- "serde",
- "serde_json",
- "tokio",
- "tokio-tungstenite",
- "tokio-util",
-]
 
 [[package]]
 name = "slab"
@@ -4038,9 +4038,9 @@ dependencies = [
 
 [[package]]
 name = "triomphe"
-version = "0.1.15"
+version = "0.1.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dd69c5aa8f924c7519d6372789a74eac5b94fb0f8fcf0d4a97eb0bfc3e785f39"
+checksum = "b40688ea6389c8171614b25491f71d4a27946e0c7ce2da1c6de27e25abf1a0ae"
 
 [[package]]
 name = "tungstenite"

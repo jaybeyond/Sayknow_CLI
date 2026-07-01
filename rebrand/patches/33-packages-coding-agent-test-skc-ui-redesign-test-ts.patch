@@ -1,0 +1,62 @@
+--- a/packages/coding-agent/test/skc-ui-redesign.test.ts
++++ b/packages/coding-agent/test/skc-ui-redesign.test.ts
+@@ -15,13 +15,13 @@
+ 		vi.restoreAllMocks();
+ 	});
+ 
+-	it("uses red-octopus as the default dark theme and blue-octopus as the default light theme", async () => {
++	it("uses blue-octopus as the default dark and light theme", async () => {
+ 		themeModule.onTerminalAppearanceChange("dark");
+ 		await themeModule.initTheme(false);
+ 
+-		expect(SETTINGS_SCHEMA["theme.dark"].default).toBe("red-octopus");
++		expect(SETTINGS_SCHEMA["theme.dark"].default).toBe("blue-octopus");
+ 		expect(SETTINGS_SCHEMA["theme.light"].default).toBe("blue-octopus");
+-		expect(themeModule.getCurrentThemeName()).toBe("red-octopus");
++		expect(themeModule.getCurrentThemeName()).toBe("blue-octopus");
+ 
+ 		themeModule.onTerminalAppearanceChange("light");
+ 		await themeModule.initTheme(false);
+@@ -33,14 +33,14 @@
+ 		const vars = redOctopusTheme.vars;
+ 
+ 		expect(vars.brandRed).toBeDefined();
+-		expect(vars.claw).toBeDefined();
++		expect(vars.tentacle).toBeDefined();
+ 		expect(vars.coral).toBeDefined();
+ 		expect(vars.shell).toBeDefined();
+ 		expect(vars.dangerRed).toBeDefined();
+ 		expect(vars.warningAmber).toBeDefined();
+ 		expect(vars.diffRemovalRed).toBeDefined();
+ 
+-		expect(colors.accent).toBe(vars.claw);
++		expect(colors.accent).toBe(vars.tentacle);
+ 		expect(colors.borderAccent).toBe(vars.brandRed);
+ 		expect(colors.error).toBe(vars.dangerRed);
+ 		expect(colors.warning).toBe(vars.warningAmber);
+@@ -60,7 +60,7 @@
+ 			"opencode",
+ 			"red-octopus",
+ 		]);
+-		expect(SETTINGS_SCHEMA["theme.dark"].default).toBe("red-octopus");
++		expect(SETTINGS_SCHEMA["theme.dark"].default).toBe("blue-octopus");
+ 		expect(SETTINGS_SCHEMA["theme.light"].default).toBe("blue-octopus");
+ 	});
+ 
+@@ -128,14 +128,14 @@
+ 		const vars = blueOctopusTheme.vars;
+ 
+ 		expect(vars.brandBlue).toBeDefined();
+-		expect(vars.claw).toBeDefined();
++		expect(vars.tentacle).toBeDefined();
+ 		expect(vars.seafoam).toBeDefined();
+ 		expect(vars.sand).toBeDefined();
+ 		expect(vars.dangerRed).toBeDefined();
+ 		expect(vars.warningAmber).toBeDefined();
+ 		expect(vars.diffRemovalRed).toBeDefined();
+ 
+-		expect(colors.accent).toBe(vars.claw);
++		expect(colors.accent).toBe(vars.tentacle);
+ 		expect(colors.borderAccent).toBe(vars.brandBlue);
+ 		expect(colors.error).toBe(vars.dangerRed);
+ 		expect(colors.warning).toBe(vars.warningAmber);

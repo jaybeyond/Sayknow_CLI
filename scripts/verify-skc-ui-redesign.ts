@@ -50,16 +50,17 @@ async function verifyThemeDefaults(): Promise<GateResult> {
 		.filter(([left, right]) => resolveColor(colors[left], vars) === resolveColor(colors[right], vars))
 		.map(([left, right]) => `${left} matches ${right}`);
 
-	const expectedBuiltIns = ["blue-octopus", "claude-code", "codex", "opencode", "red-octopus"];
+	const expectedBuiltIns = ["blue-octopus", "claude-code", "codex", "gruvbox-dark", "opencode", "red-octopus"];
 	const retainedBuiltIns =
 		[...defaultIndex.matchAll(/^import /gm)].length === expectedBuiltIns.length &&
 		[...defaultIndex.matchAll(/^\t/gm)].length === expectedBuiltIns.length &&
 		defaultIndex.includes('"blue-octopus": blue_octopus') &&
 		defaultIndex.includes('"claude-code": claude_code') &&
 		defaultIndex.includes("\tcodex,") &&
+		defaultIndex.includes('"gruvbox-dark": gruvbox_dark') &&
 		defaultIndex.includes("\topencode,") &&
 		defaultIndex.includes('"red-octopus": red_octopus') &&
-		!defaultIndex.includes("dark_") &&
+		!defaultIndex.includes("light_") &&
 		!defaultIndex.includes("light_") &&
 		isRecord(blueOctopus.colors);
 

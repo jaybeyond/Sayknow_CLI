@@ -1,0 +1,19 @@
+--- a/packages/coding-agent/src/modes/components/hook-selector.ts
++++ b/packages/coding-agent/src/modes/components/hook-selector.ts
+@@ -18,6 +18,7 @@
+ 	visibleWidth,
+ 	wrapTextWithAnsi,
+ } from "@sayknow-cli/tui";
++import { t } from "../../i18n";
+ import { getEditorTheme, getMarkdownTheme, theme } from "../../modes/theme/theme";
+ import {
+ 	matchesAppExternalEditor,
+@@ -417,7 +418,7 @@
+ 		this.#inputArea = new Container();
+ 		this.addChild(this.#inputArea);
+ 		this.addChild(new Spacer(1));
+-		this.#baseHelpText = opts?.helpText ?? "up/down navigate  enter select  esc cancel";
++		this.#baseHelpText = opts?.helpText ?? t("nav.hint");
+ 		this.#helpTextComponent = new Text(theme.fg("dim", this.#baseHelpText), 1, 0);
+ 		this.addChild(this.#helpTextComponent);
+ 		this.addChild(new Spacer(1));

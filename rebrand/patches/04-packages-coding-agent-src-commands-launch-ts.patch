@@ -1,0 +1,11 @@
+--- a/packages/coding-agent/src/commands/launch.ts
++++ b/packages/coding-agent/src/commands/launch.ts
+@@ -51,7 +51,7 @@
+ }
+ 
+ export default class Index extends Command {
+-	static description = "Red-claw AI coding assistant";
++	static description = "Sayknow-CLI — an AI coding assistant";
+ 	static hidden = true;
+ 
+ 	static args = {

@@ -8,8 +8,8 @@
 import { beforeAll, describe, expect, test, vi } from "bun:test";
 import { Effort, type Model } from "@sayknow-cli/ai";
 import { prepareModelProfileActivation } from "@sayknow-cli/coding-agent/config/model-profile-activation";
-import { kNoAuth } from "@sayknow-cli/coding-agent/config/model-registry";
 import type { ModelProfileDefinition } from "@sayknow-cli/coding-agent/config/model-profiles";
+import { kNoAuth } from "@sayknow-cli/coding-agent/config/model-registry";
 import { Settings } from "@sayknow-cli/coding-agent/config/settings";
 import {
 	ModelSelectorComponent,

@@ -292,20 +292,6 @@ def validate(
     # --- Layer 6: no positive proof — heuristics --------------------------
     soft = _soft_marker_hits(lowered)
     if soft:
-        # Soft markers ("captcha", "datadome", "access denied", "checking your
-        # browser") legitimately appear site-wide in scripts, login/age-gate
-        # modals, and consent banners on real content pages — notably adult and
-        # e-commerce sites that embed reCAPTCHA everywhere. Treating a lone soft
-        # hit as decisive silently drops fully-rendered pages whose body we
-        # actually retrieved. Real WAF interstitials are caught by the HARD
-        # markers above, or are script-only / incomplete stubs that fail the
-        # completeness check. So: a COMPLETE, content-bearing HTML document that
-        # merely mentions a soft marker is a real page (terminal WEAK_OK); only
-        # an incomplete / script-only / stub body stays a challenge.
-        if _looks_complete_content_page(text, lowered):
-            r.verdict = Verdict.WEAK_OK
-            r.reasons.extend(f"soft_on_complete:{m}" for m in soft[:3])
-            return r
         r.verdict = Verdict.CHALLENGE
         r.reasons.extend(f"soft:{m}" for m in soft[:3])
         return r
