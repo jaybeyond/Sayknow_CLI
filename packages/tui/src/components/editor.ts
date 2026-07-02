@@ -385,6 +385,8 @@ export class Editor implements Component, Focusable {
 
 	#theme: EditorTheme;
 	#useTerminalCursor = false;
+	// macOS: Hangul arriving within 50ms of a line-delete is an IME ghost char — discard it.
+	#lastLineDeleteAt = 0;
 
 	/** When set, replaces the normal cursor glyph at end-of-text with this ANSI-styled string. */
 	cursorOverride: string | undefined;
@@ -447,6 +449,7 @@ export class Editor implements Component, Focusable {
 	onAltEnter?: (text: string) => void;
 	onChange?: (text: string) => void;
 	onAutocompleteCancel?: () => void;
+	onTabDeclined?: (text: string) => void;
 	disableSubmit: boolean = false;
 
 	// Custom top border (for status line integration)
@@ -853,7 +856,13 @@ export class Editor implements Component, Focusable {
 			// When NOT focused, show the placeholder alone with no caret.
 			if (showPlaceholder && !this.focused) {
 				const hintText = hintStyle(truncateToWidth(this.#placeholder ?? "", lineContentWidth));
-				displayText = hintText;
+				// Anchor the hardware cursor at the input start (terminal-cursor mode) even
+				// while the placeholder shows. Otherwise no cursor marker is emitted, the
+				// hardware cursor is left at its stale position from the previous frame,
+				// and a composing IME preedit renders there instead of at the prompt.
+				// The marker is zero-width and stripped before output, so the placeholder is unchanged.
+				const anchorCursor = emitCursorMarker && this.#useTerminalCursor && visibleIndex === 0;
+				displayText = anchorCursor ? marker + hintText : hintText;
 				displayWidth = Math.min(visibleWidth(this.#placeholder ?? ""), lineContentWidth);
 				hasCursor = false;
 			}
@@ -1248,11 +1257,12 @@ export class Editor implements Component, Focusable {
 		else if (
 			(data.charCodeAt(0) === 10 && data.length > 1) || // Ctrl+Enter with modifiers
 			matchesKey(data, "ctrl+enter") || // Ctrl+Enter (Kitty/modifyOtherKeys, including lock bits/keypad Enter)
+			matchesKey(data, "ctrl+shift+enter") || // Ctrl+Shift+Enter (Kitty/modifyOtherKeys combined modifier)
 			data === "\x1b\r" || // Option+Enter in some terminals (legacy)
 			data === "\x1b[13;2~" || // Shift+Enter in some terminals (legacy format)
 			kb.matches(data, "tui.input.newLine") || // Shift+Enter (Kitty protocol, handles lock bits)
 			(data.length > 1 && data.includes("\x1b") && data.includes("\r")) ||
-			(data === "\n" && data.length === 1) // Shift+Enter from iTerm2 mapping
+			(data === "\n" && data.length === 1) // Shift+Enter from terminal sendInput mapping
 		) {
 			if (this.#shouldSubmitOnBackslashEnter(data, kb)) {
 				this.#handleBackspace();
@@ -1386,6 +1396,21 @@ export class Editor implements Component, Focusable {
 		else {
 			const printableText = extractPrintableText(data);
 			if (printableText) {
+				if (
+					process.platform === "darwin" &&
+					printableText.length === 1 &&
+					Date.now() - this.#lastLineDeleteAt < 50
+				) {
+					const code = printableText.charCodeAt(0);
+					const isHangul =
+						(code >= 0xac00 && code <= 0xd7a3) ||
+						(code >= 0x1100 && code <= 0x11ff) ||
+						(code >= 0x3130 && code <= 0x318f);
+					if (isHangul) {
+						this.#lastLineDeleteAt = 0;
+						return;
+					}
+				}
 				this.#insertCharacter(printableText);
 			}
 		}
@@ -2211,6 +2236,7 @@ export class Editor implements Component, Focusable {
 	#deleteToStartOfLine(): void {
 		this.#historyIndex = -1; // Exit history browsing mode
 		this.#recordUndoState();
+		if (process.platform === "darwin") this.#lastLineDeleteAt = Date.now();
 
 		const currentLine = this.#state.lines[this.#state.cursorLine] || "";
 		let deletedText = "";
@@ -2616,6 +2642,9 @@ export class Editor implements Component, Focusable {
 
 	// Autocomplete methods
 	async #tryTriggerAutocomplete(explicitTab: boolean = false): Promise<void> {
+		const declineExplicitTab = (): void => {
+			if (explicitTab) this.onTabDeclined?.(this.getText());
+		};
 		if (!this.#autocompleteProvider) return;
 		// Check if we should trigger file completion on Tab
 		if (explicitTab) {
@@ -2624,6 +2653,7 @@ export class Editor implements Component, Focusable {
 				!provider.shouldTriggerFileCompletion ||
 				provider.shouldTriggerFileCompletion(this.#state.lines, this.#state.cursorLine, this.#state.cursorCol);
 			if (!shouldTrigger) {
+				declineExplicitTab();
 				return;
 			}
 		}
@@ -2645,6 +2675,7 @@ export class Editor implements Component, Focusable {
 		} else {
 			this.#cancelAutocomplete();
 			this.onAutocompleteUpdate?.();
+			declineExplicitTab();
 		}
 	}
 	#createAutocompleteList(
@@ -2659,7 +2690,10 @@ export class Editor implements Component, Focusable {
 	}
 
 	#handleTabCompletion(): void {
-		if (!this.#autocompleteProvider) return;
+		if (!this.#autocompleteProvider) {
+			this.onTabDeclined?.(this.getText());
+			return;
+		}
 
 		const currentLine = this.#state.lines[this.#state.cursorLine] || "";
 		const beforeCursor = currentLine.slice(0, this.#state.cursorCol);
@@ -2730,6 +2764,7 @@ https://github.com/EsotericSoftware/spine-runtimes/actions/runs/19536643416/job/
 		} else {
 			this.#cancelAutocomplete();
 			this.onAutocompleteUpdate?.();
+			if (explicitTab) this.onTabDeclined?.(this.getText());
 		}
 	}
 

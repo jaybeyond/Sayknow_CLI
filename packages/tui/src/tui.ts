@@ -4,8 +4,9 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { performance } from "node:perf_hooks";
-import { $flag, getDebugLogPath } from "@sayknow-cli/utils";
-import { isKeyRelease, matchesKey } from "./keys";
+import { $flag, getDebugLogPath, logger } from "@sayknow-cli/utils";
+import { getKeybindings } from "./keybindings";
+import { isKeyRelease } from "./keys";
 import { renderMetrics } from "./metrics";
 import type { Terminal } from "./terminal";
 import { ImageProtocol, setCellDimensions, setTerminalImageProtocol, TERMINAL } from "./terminal-capabilities";
@@ -256,12 +257,46 @@ export class Container implements Component {
 		width = Math.max(1, width);
 		const lines: string[] = [];
 		for (const child of this.children) {
-			const childLines = child.render(width);
+			const childLines = safeRenderComponent(child, width, "container-child");
 			for (let i = 0; i < childLines.length; i++) {
 				lines.push(childLines[i]);
 			}
 		}
 		return lines;
+	}
+}
+
+const MAX_REPORTED_RENDER_ERRORS = 200;
+const reportedRenderErrors = new Set<string>();
+
+/**
+ * Render a component's lines without letting a thrown error escape the frame.
+ *
+ * The TUI render loop ({@link TUI.#doRender}) runs inside a `nextTick`/`setTimeout`
+ * with no try/catch, and the process installs a fail-fast `uncaughtException`
+ * handler that exits. So a single component whose `render()` throws (e.g. a tool
+ * renderer fed an optional/undefined field) used to take down the whole app —
+ * fatal on whatever happened to trigger the frame (a keystroke, resize, or a
+ * command such as `/background`). Isolate the failure: log it once, emit a
+ * visible fallback line, and keep rendering the rest of the tree.
+ */
+function safeRenderComponent(component: Component, width: number, where: string): string[] {
+	try {
+		return component.render(width);
+	} catch (err) {
+		const name = component?.constructor?.name ?? "Component";
+		const key = `${where}:${name}:${err instanceof Error ? err.message : String(err)}`;
+		if (!reportedRenderErrors.has(key)) {
+			if (reportedRenderErrors.size >= MAX_REPORTED_RENDER_ERRORS) reportedRenderErrors.clear();
+			reportedRenderErrors.add(key);
+			logger.error("Component render failed; emitting fallback line", {
+				where,
+				component: name,
+				error: err instanceof Error ? err.message : String(err),
+				stack: err instanceof Error ? err.stack : undefined,
+			});
+		}
+		return [`[render error: ${name}]`];
 	}
 }
 
@@ -312,6 +347,10 @@ export class TUI extends Container {
 	#sixelProbeTimeout?: NodeJS.Timeout;
 	#sixelProbeUnsubscribe?: () => void;
 	#showHardwareCursor = $flag("PI_HARDWARE_CURSOR");
+	// macOS: steady-block cursor anchors CJK IME overlays; disable with SKC_TUI_IME_CURSOR=0.
+	readonly #useImeBlockCursor = $flag("SKC_TUI_IME_CURSOR", process.platform === "darwin");
+	// showHardwareCursor=false but cursor is shown for IME anchoring (macOS).
+	#imeCursorActive = false;
 	#clearOnShrink = $flag("PI_CLEAR_ON_SHRINK"); // Clear empty rows when content shrinks (default: off)
 	// Opt-in: reuse the previous normalized off-screen prefix and only normalize/diff the
 	// visible window, bounding per-frame work on huge transcripts. Output stays byte-identical.
@@ -320,6 +359,7 @@ export class TUI extends Container {
 	#fullRedrawCount = 0;
 	#stopped = false;
 	#terminalUnavailable = false;
+	#bottomPinnedComponent: Component | null = null;
 
 	// Overlay stack for modal components rendered on top of base content
 	overlayStack: {
@@ -335,6 +375,7 @@ export class TUI extends Container {
 		if (showHardwareCursor !== undefined) {
 			this.#showHardwareCursor = showHardwareCursor;
 		}
+		this.#imeCursorActive = !this.#showHardwareCursor && this.#useImeBlockCursor;
 	}
 
 	get fullRedraws(): number {
@@ -348,6 +389,7 @@ export class TUI extends Container {
 	setShowHardwareCursor(enabled: boolean): void {
 		if (this.#showHardwareCursor === enabled) return;
 		this.#showHardwareCursor = enabled;
+		this.#imeCursorActive = !enabled && this.#useImeBlockCursor;
 		if (!enabled) {
 			this.#hideCursor();
 		}
@@ -379,6 +421,11 @@ export class TUI extends Container {
 		if (isFocusable(component)) {
 			component.focused = true;
 		}
+	}
+
+	setBottomPinnedComponent(component: Component | null): void {
+		this.#bottomPinnedComponent = component;
+		this.requestRender();
 	}
 
 	/**
@@ -477,7 +524,10 @@ export class TUI extends Container {
 		this.#terminalUnavailable = false;
 		this.terminal.start(
 			data => this.#handleInput(data),
-			() => this.requestRender(),
+			() => {
+				this.invalidate();
+				this.requestRender(!(isMultiplexerSession() && !useLegacyMultiplexerFullRender()), "resize");
+			},
 		);
 		this.#hideCursor();
 		this.#querySixelSupport();
@@ -697,6 +747,9 @@ export class TUI extends Container {
 			this.#writeTerminal("\r\n");
 		}
 
+		if (this.#useImeBlockCursor) {
+			this.#writeTerminal("\x1b[0 q");
+		}
 		this.#showCursor();
 		try {
 			this.terminal.stop();
@@ -842,8 +895,8 @@ export class TUI extends Container {
 			return;
 		}
 
-		// Global debug key handler (Shift+Ctrl+D)
-		if (matchesKey(data, "shift+ctrl+d") && this.onDebug) {
+		// Global debug key handler (registry: tui.global.debug, default Shift+Ctrl+D)
+		if (getKeybindings().matches(data, "tui.global.debug") && this.onDebug) {
 			this.onDebug();
 			return;
 		}
@@ -1052,7 +1105,7 @@ export class TUI extends Container {
 			const { width, maxHeight } = this.#resolveOverlayLayout(options, 0, termWidth, termHeight);
 
 			// Render component at calculated width
-			let overlayLines = component.render(width);
+			let overlayLines = safeRenderComponent(component, width, "overlay");
 
 			// Apply maxHeight if specified
 			if (maxHeight !== undefined && overlayLines.length > maxHeight) {
@@ -1268,6 +1321,31 @@ export class TUI extends Container {
 		return lines;
 	}
 
+	#padBeforeBottomPinnedComponent(lines: string[], height: number): string[] {
+		const component = this.#bottomPinnedComponent;
+		if (component === null || lines.length >= height) return lines;
+
+		let pinnedStart = -1;
+		for (let i = this.children.length - 1; i >= 0; i--) {
+			if (this.children[i] === component) {
+				pinnedStart = i;
+				break;
+			}
+		}
+		if (pinnedStart < 0) return lines;
+
+		let pinnedLineCount = 0;
+		for (let i = pinnedStart; i < this.children.length; i++) {
+			pinnedLineCount += safeRenderComponent(this.children[i], this.terminal.columns, "pinned").length;
+		}
+
+		const blankRows = height - lines.length;
+		const insertAt = Math.max(0, lines.length - pinnedLineCount);
+		const padded = [...lines];
+		padded.splice(insertAt, 0, ...Array.from({ length: blankRows }, () => ""));
+		return padded;
+	}
+
 	#doRender(): void {
 		if (this.#stopped || !this.terminalAvailable) return;
 		const width = this.terminal.columns;
@@ -1285,6 +1363,10 @@ export class TUI extends Container {
 		const renderTreeStart = renderMetrics.now();
 		let newLines = this.render(width);
 		if (renderMetrics.enabled) renderMetrics.recordHelper("renderTree", renderMetrics.now() - renderTreeStart);
+
+		if (this.#bottomPinnedComponent !== null && height > 0) {
+			newLines = this.#padBeforeBottomPinnedComponent(newLines, height);
+		}
 
 		// Composite overlays into the rendered lines (before differential compare)
 		if (this.overlayStack.length > 0) {
@@ -1726,8 +1808,10 @@ export class TUI extends Container {
 		totalLines: number,
 		fromRow: number,
 	): { seq: string; toRow: number } {
-		// No IME target or no content — hide cursor regardless of preference
-		if (!cursorPos || totalLines <= 0) return { seq: "\x1b[?25l", toRow: fromRow };
+		if (!cursorPos || totalLines <= 0) {
+			const hide = this.#useImeBlockCursor ? "\x1b[0 q\x1b[?25l" : "\x1b[?25l";
+			return { seq: hide, toRow: fromRow };
+		}
 
 		// Clamp cursor position to valid range
 		const targetRow = Math.max(0, Math.min(cursorPos.row, totalLines - 1));
@@ -1743,7 +1827,11 @@ export class TUI extends Container {
 		}
 		// Move to absolute column (1-indexed)
 		seq += `\x1b[${targetCol + 1}G`;
-		seq += this.#showHardwareCursor ? "\x1b[?25h" : "\x1b[?25l";
+		if (this.#showHardwareCursor || this.#imeCursorActive) {
+			seq += this.#useImeBlockCursor ? "\x1b[2 q\x1b[?25h" : "\x1b[?25h";
+		} else {
+			seq += "\x1b[?25l";
+		}
 
 		return { seq, toRow: targetRow };
 	}
@@ -1760,6 +1848,7 @@ export class TUI extends Container {
 		}
 		const { seq, toRow } = this.#cursorControlSequence(cursorPos, totalLines, this.#hardwareCursorRow);
 		this.#hardwareCursorRow = toRow;
-		this.#writeTerminal(`\x1b[?2026h${seq}\x1b[?2026l`);
+		// No \x1b[?2026h/l wrapper: synchronized output flushes terminal state and discards macOS IME composition.
+		this.#writeTerminal(seq);
 	}
 }

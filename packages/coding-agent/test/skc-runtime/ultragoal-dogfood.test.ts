@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { deflateSync } from "node:zlib";
@@ -9,10 +9,23 @@ import {
 	startNextUltragoalGoal,
 } from "@sayknow-cli/coding-agent/skc-runtime/ultragoal-runtime";
 
+const TEST_SESSION_ID = "test-session";
 const tempRoots: string[] = [];
+let savedSessionId: string | undefined;
 
 afterEach(async () => {
+	process.env.SKC_SESSION_ID = TEST_SESSION_ID;
 	await Promise.all(tempRoots.splice(0).map(dir => fs.rm(dir, { recursive: true, force: true })));
+});
+
+afterAll(() => {
+	if (savedSessionId === undefined) delete process.env.SKC_SESSION_ID;
+	else process.env.SKC_SESSION_ID = savedSessionId;
+});
+
+beforeAll(() => {
+	savedSessionId = process.env.SKC_SESSION_ID;
+	process.env.SKC_SESSION_ID = TEST_SESSION_ID;
 });
 
 async function tempDir(): Promise<string> {

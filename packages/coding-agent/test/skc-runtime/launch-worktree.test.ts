@@ -134,6 +134,17 @@ describe("default launch worktrees", () => {
 		).toBe(false);
 	});
 
+	it("reports actionable diagnostics when the deterministic detached target is a different branch", async () => {
+		const repo = await createRepo("skc-launch-target-mismatch-");
+		const first = prepareLaunchWorktree(repo, ["--worktree"]);
+		expect(first.worktree.enabled && first.worktree.created).toBe(true);
+		run("git", ["checkout", "-b", "other-agent-work"], first.cwd);
+
+		expect(() => prepareLaunchWorktree(repo, ["--worktree"])).toThrow(
+			/worktree_target_mismatch:[\s\S]*already registered for refs\/heads\/other-agent-work[\s\S]*Refusing to delete or reuse the conflicting worktree automatically[\s\S]*git worktree remove/,
+		);
+	});
+
 	it("updates a clean reused detached launch worktree when source HEAD advances", async () => {
 		const repo = await createRepo("skc-launch-advance-worktree-");
 		const first = prepareLaunchWorktree(repo, ["--worktree"]);
@@ -231,6 +242,7 @@ describe("default launch worktrees", () => {
 			platform: "darwin",
 			tty: { stdin: true, stdout: true },
 			tmuxAvailable: true,
+			existingBranchSessionName: null,
 		});
 
 		expect(plan?.cwd).toBe(launch.cwd);

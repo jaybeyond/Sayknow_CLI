@@ -94,6 +94,8 @@ With that command configured, `skc_coordinator_start_session` launches a detache
 
 For resume safety, prefer the generated SKC-native worktree command over creating a git worktree in Hermes itself. SKC's launch path records the original repo as the project identity while running in the worktree, so session listing/resume can still group the session under the source project. If Hermes creates and later deletes an unmanaged worktree, a saved session may still exist but its cwd can be gone.
 
+When an operator needs the session to stay visible in a routed tmux pane (for example a Clawhip/Hermes/OpenClaw channel that watches stale sessions and accepts follow-up prompts), use the documented visible-session fallback instead of inventing a private terminal protocol: [`docs/skc-session-clawhip-routing.md`](./skc-session-clawhip-routing.md). It keeps the same worktree isolation discipline while making the router, not SKC internals, own channel ids, mentions, and notification policy.
+
 Artifact reads are canonicalized, symlink escapes are rejected, and returned content is byte-capped by `SKC_COORDINATOR_MCP_ARTIFACT_BYTE_CAP`.
 
 `skc setup hermes` renders `SKC_COORDINATOR_MCP_WORKDIR_ROOTS` with the host platform path delimiter (`:` on POSIX, `;` on Windows). Manual configs should prefer the same encoding.
@@ -132,6 +134,11 @@ Mutating tools:
 - `skc_coordinator_send_prompt`
 - `skc_coordinator_submit_question_answer`
 - `skc_coordinator_report_status`
+- `skc_delegate_plan`
+- `skc_delegate_execute`
+- `skc_delegate_team`
+
+The `skc_delegate_*` tools are high-level, session-level delegation: each starts (or reuses) a session and sends one workflow-tagged turn that runs `/skill:ralplan`, `/skill:ultragoal`, or `/skill:team` to completion, returning a durable `turn_id`, status, and artifact references. They use the same `sessions` mutation class and fail-closed workdir gating as `skc_coordinator_start_session`, and emit a `delegation.started` event. Pass `cwd` and `task`; set `allow_mutation: true` only with startup mutation opt-in plus per-call consent. Prefer these over manual `start_session` + `send_prompt` when delegating a whole workflow.
 
 
 `skc_coordinator_register_session` registers an existing visible tmux-backed SKC pane as the coordinator-authoritative session. Use it when an operator has already launched a visible terminal/tmux lane and the external coordinator must send prompts to that same pane instead of creating a hidden `skc-coordinator-*` session. The tool validates the workdir allowlist, safe session/target tokens, and tmux target liveness before writing session state.

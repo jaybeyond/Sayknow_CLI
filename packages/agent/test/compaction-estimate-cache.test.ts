@@ -2,11 +2,14 @@ import { describe, expect, test } from "bun:test";
 import {
 	estimateEntriesTokens,
 	estimateEntryTokens,
-	estimateTokens,
 	findCutPoint,
 } from "@sayknow-cli/agent-core/compaction/compaction";
 import type { SessionEntry, SessionMessageEntry } from "@sayknow-cli/agent-core/compaction/entries";
-import { estimateOpenAiCompactInputTokens, trimOpenAiCompactInput } from "@sayknow-cli/agent-core/compaction/openai";
+import {
+	estimateOpenAiCompactInputTokens,
+	resolveOpenAiCompactInputBudget,
+	trimOpenAiCompactInput,
+} from "@sayknow-cli/agent-core/compaction/openai";
 import { type PruneConfig, pruneToolOutputs } from "@sayknow-cli/agent-core/compaction/pruning";
 import type { AssistantMessage, Message, ToolResultMessage } from "@sayknow-cli/ai/types";
 
@@ -49,6 +52,10 @@ function config(overrides: Partial<PruneConfig> = {}): PruneConfig {
 		staleOverridableTools: ["read"],
 		...overrides,
 	};
+}
+
+function freshEstimateEntryTokens(entry: SessionMessageEntry): number {
+	return estimateEntryTokens({ ...entry });
 }
 
 describe("entry token cache", () => {
@@ -127,7 +134,7 @@ describe("entry token cache", () => {
 		};
 		const entry: SessionMessageEntry = { type: "message", id: "assistant-order", parentId: null, timestamp, message };
 		const first = estimateEntryTokens(entry);
-		const firstFresh = estimateTokens(message);
+		const firstFresh = freshEstimateEntryTokens(entry);
 		expect(first).toBe(firstFresh);
 
 		message.content[0] = {
@@ -136,7 +143,7 @@ describe("entry token cache", () => {
 			name: "read",
 			arguments: { long_descriptive_property_name_with_many_tokens: "value with several words", a: 1 },
 		};
-		const secondFresh = estimateTokens(message);
+		const secondFresh = freshEstimateEntryTokens(entry);
 		expect(JSON.stringify(message.content[0].arguments)).not.toBe(
 			JSON.stringify({ a: 1, long_descriptive_property_name_with_many_tokens: "value with several words" }),
 		);
@@ -163,7 +170,7 @@ describe("entry token cache", () => {
 			} as Message,
 		};
 		const first = estimateEntryTokens(entry);
-		expect(first).toBe(estimateTokens(entry.message));
+		expect(first).toBe(freshEstimateEntryTokens(entry));
 
 		entry.message = {
 			role: "user",
@@ -173,7 +180,7 @@ describe("entry token cache", () => {
 			],
 			timestamp: Date.parse(timestamp),
 		} as Message;
-		expect(estimateEntryTokens(entry)).toBe(estimateTokens(entry.message));
+		expect(estimateEntryTokens(entry)).toBe(freshEstimateEntryTokens(entry));
 
 		entry.message = {
 			role: "user",
@@ -183,7 +190,7 @@ describe("entry token cache", () => {
 			],
 			timestamp: Date.parse(timestamp),
 		} as Message;
-		expect(estimateEntryTokens(entry)).toBe(estimateTokens(entry.message));
+		expect(estimateEntryTokens(entry)).toBe(freshEstimateEntryTokens(entry));
 
 		entry.message = {
 			role: "user",
@@ -193,10 +200,10 @@ describe("entry token cache", () => {
 			],
 			timestamp: Date.parse(timestamp),
 		} as Message;
-		expect(estimateEntryTokens(entry)).toBe(estimateTokens(entry.message));
+		expect(estimateEntryTokens(entry)).toBe(freshEstimateEntryTokens(entry));
 	});
 
-	test("entry token cache remains exactly equal to fresh estimateTokens for every counted role", () => {
+	test("entry token cache remains exactly equal to fresh estimateEntryTokens recomputation for every counted role", () => {
 		const messages: Message[] = [
 			{ role: "user", content: "user text", timestamp: Date.parse(timestamp) },
 			{ role: "developer", content: "developer custom text", timestamp: Date.parse(timestamp) } as Message,
@@ -287,7 +294,7 @@ describe("entry token cache", () => {
 
 		for (const entry of entries) {
 			if (entry.type !== "message") continue;
-			expect(estimateEntryTokens(entry)).toBe(estimateTokens(entry.message));
+			expect(estimateEntryTokens(entry)).toBe(freshEstimateEntryTokens(entry));
 		}
 		expect(estimateEntriesTokens(entries, 0, entries.length)).toBe(
 			entries.reduce((total, entry) => total + estimateEntryTokens(entry), 0),
@@ -345,6 +352,35 @@ describe("digest pruning notices", () => {
 });
 
 describe("OpenAI trim sizing", () => {
+	test("resolveOpenAiCompactInputBudget reserves output and clamps tiny positive windows", () => {
+		expect(resolveOpenAiCompactInputBudget(100, 0)).toBe(85);
+		expect(resolveOpenAiCompactInputBudget(100, 20)).toBe(80);
+		expect(resolveOpenAiCompactInputBudget(2, 0)).toBe(1);
+		expect(resolveOpenAiCompactInputBudget(1, 0)).toBe(1);
+		expect(resolveOpenAiCompactInputBudget(10, 20)).toBe(1);
+		expect(resolveOpenAiCompactInputBudget(0, 0)).toBe(0);
+		expect(resolveOpenAiCompactInputBudget(-5, 0)).toBe(0);
+	});
+
+	test("trimOpenAiCompactInput removes suffix items when resolved budget is below full context window", () => {
+		const instructions = "compact";
+		const contextWindow = 100;
+		const budget = resolveOpenAiCompactInputBudget(contextWindow, 20);
+		const items: Array<Record<string, unknown>> = [
+			{ type: "message", role: "user", content: [{ type: "input_text", text: "keep user message" }] },
+			{
+				type: "message",
+				role: "developer",
+				content: [{ type: "input_text", text: "remove developer message ".repeat(8) }],
+			},
+		];
+
+		expect(estimateOpenAiCompactInputTokens(items, instructions)).toBeLessThanOrEqual(contextWindow);
+		expect(estimateOpenAiCompactInputTokens(items, instructions)).toBeGreaterThan(budget);
+		expect(trimOpenAiCompactInput(items, contextWindow, instructions)).toEqual(items);
+		expect(trimOpenAiCompactInput(items, budget, instructions)).toEqual([items[0]]);
+	});
+
 	test("trimOpenAiCompactInput matches full recount across removable scenarios", () => {
 		const instructions = "compact these items";
 		const scenarios: Array<{ name: string; items: Array<Record<string, unknown>>; budget: number }> = [

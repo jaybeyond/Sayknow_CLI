@@ -45,7 +45,7 @@ async function discoverSkcPluginRootsIn(baseDir: string): Promise<string[]> {
 			}),
 	);
 
-	return roots.filter((root): root is string => root !== null);
+	return roots.filter((root): root is string => root !== null).sort((a, b) => a.localeCompare(b));
 }
 
 export async function discoverSkcPluginRoots({ cwd }: { cwd: string; home?: string }): Promise<string[]> {

@@ -6,6 +6,9 @@ import * as path from "node:path";
 const repoRoot = path.resolve(import.meta.dir, "..", "..", "..");
 const cliEntry = path.join(repoRoot, "packages", "coding-agent", "src", "cli.ts");
 const workflowSkills = ["deep-interview", "ralplan", "ultragoal", "team"] as const;
+function sessionStateDir(cwd: string, sessionId: string): string {
+	return path.join(cwd, ".skc", `_session-${encodeURIComponent(sessionId).replaceAll(".", "%2E")}`, "state");
+}
 const initialPhases: Record<(typeof workflowSkills)[number], string> = {
 	"deep-interview": "interviewing",
 	ralplan: "planner",
@@ -60,7 +63,7 @@ describe("skc state workflow command", () => {
 				expect(payload).toMatchObject({ skill, status: "fresh" });
 
 				const modeState = await Bun.file(
-					path.join(cwd, ".skc", "state", "sessions", `session-${skill}`, `${skill}-state.json`),
+					path.join(sessionStateDir(cwd, `session-${skill}`), `${skill}-state.json`),
 				).json();
 				expect(modeState).toMatchObject({
 					skill,
@@ -70,7 +73,7 @@ describe("skc state workflow command", () => {
 				expect(modeState.receipt.command).toBe(`skc state ${skill} write`);
 
 				const activeState = await Bun.file(
-					path.join(cwd, ".skc", "state", "sessions", `session-${skill}`, "skill-active-state.json"),
+					path.join(sessionStateDir(cwd, `session-${skill}`), "skill-active-state.json"),
 				).json();
 				expect(activeState.active_skills[0]).toMatchObject({
 					skill,
@@ -130,12 +133,12 @@ describe("skc state workflow command", () => {
 			expect(transition.exitCode, transition.stderr.toString()).toBe(0);
 
 			const modeState = await Bun.file(
-				path.join(cwd, ".skc", "state", "sessions", "session-1", "deep-interview-state.json"),
+				path.join(sessionStateDir(cwd, "session-1"), "deep-interview-state.json"),
 			).json();
 			expect(modeState.current_phase).toBe("handoff");
 
 			const activeState = await Bun.file(
-				path.join(cwd, ".skc", "state", "sessions", "session-1", "skill-active-state.json"),
+				path.join(sessionStateDir(cwd, "session-1"), "skill-active-state.json"),
 			).json();
 			expect(activeState.active_skills[0]).toMatchObject({ skill: "deep-interview", phase: "handoff" });
 
@@ -144,6 +147,35 @@ describe("skc state workflow command", () => {
 			const readPayload = JSON.parse(read.stdout.toString()) as { skill: string; state: { current_phase: string } };
 			expect(readPayload.skill).toBe("deep-interview");
 			expect(readPayload.state.current_phase).toBe("handoff");
+		});
+	}, 20_000);
+
+	it("syncs the active-state mirror with the lock-owned mode-state revision on each write", async () => {
+		await withTempCwd(async cwd => {
+			const dir = sessionStateDir(cwd, "session-rev");
+			const readActiveRev = async () => {
+				const active = await Bun.file(path.join(dir, "skill-active-state.json")).json();
+				return active.active_skills[0].source_state_revision as number;
+			};
+			const readModeRev = async () => {
+				const mode = await Bun.file(path.join(dir, "deep-interview-state.json")).json();
+				return mode.state_revision as number;
+			};
+
+			for (let i = 0; i < 3; i++) {
+				const result = runState(cwd, [
+					"write",
+					"--session-id",
+					"session-rev",
+					"--input",
+					JSON.stringify({ skill: "deep-interview", current_phase: "interviewing", state: { round: i } }),
+					"--json",
+				]);
+				expect(result.exitCode, result.stderr.toString()).toBe(0);
+				// The active mirror must carry the revision this write actually owns (lock-computed),
+				// never a stale pre-write value, so later writes are not stale-skipped.
+				expect(await readActiveRev()).toBe(await readModeRev());
+			}
 		});
 	}, 20_000);
 });

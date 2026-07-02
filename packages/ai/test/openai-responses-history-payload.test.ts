@@ -223,6 +223,18 @@ const incrementalItems2 = [
 	},
 ];
 
+const computerCallHistoryItems = [
+	{
+		type: "computer_call",
+		id: "cu_1",
+		call_id: "call_computer_1",
+		status: "completed",
+		pending_safety_checks: [],
+		action: { type: "screenshot" },
+		actions: [{ type: "screenshot" }],
+	},
+];
+
 function makeAssistantMessage(
 	items: Record<string, unknown>[],
 	incremental = false,
@@ -459,6 +471,118 @@ describe("OpenAI responses history payload", () => {
 		]);
 	});
 
+	it("normalizes object-valued text fields before replaying openai-codex native history", async () => {
+		const model = getBundledModel("openai-codex", "gpt-5.2-codex") as Model<"openai-codex-responses">;
+		const malformedHistoryItems: Record<string, unknown>[] = [
+			{
+				type: "message",
+				role: "user",
+				id: "msg_user",
+				content: [{ type: "input_text", text: { type: "text", text: "Recovered user" } }],
+			},
+			{
+				type: "message",
+				role: "assistant",
+				id: "msg_assistant",
+				content: [{ type: "output_text", text: { type: "text", text: "Recovered assistant" } }],
+			},
+		];
+		const payload = (await captureCodexPayload(model, {
+			messages: [
+				{ role: "user", content: "generic history that should be replaced", timestamp: Date.now() },
+				makeAssistantMessage(malformedHistoryItems, false, "openai-codex", "gpt-5.2-codex"),
+				{ role: "user", content: "follow-up user", timestamp: Date.now() },
+			],
+		})) as { input?: unknown[] };
+
+		expect(payload.input).toEqual([
+			{ type: "message", role: "user", content: [{ type: "input_text", text: "Recovered user" }] },
+			{
+				type: "message",
+				role: "assistant",
+				content: [{ type: "output_text", text: "Recovered assistant" }],
+			},
+			{ role: "user", content: [{ type: "input_text", text: "follow-up user" }] },
+		]);
+	});
+
+	it("normalizes string-valued message text to well-formed replay input", async () => {
+		const model = getBundledModel("openai-codex", "gpt-5.2-codex") as Model<"openai-codex-responses">;
+		const illFormedText = "Bad surrogate \uD800";
+		const payload = (await captureCodexPayload(model, {
+			messages: [
+				{ role: "user", content: "generic history that should be replaced", timestamp: Date.now() },
+				makeAssistantMessage(
+					[
+						{
+							type: "message",
+							role: "user",
+							content: [{ type: "input_text", text: illFormedText }],
+						},
+					],
+					false,
+					"openai-codex",
+					"gpt-5.2-codex",
+				),
+				{ role: "user", content: "follow-up user", timestamp: Date.now() },
+			],
+		})) as { input?: Array<{ content?: Array<{ text?: string }> }> };
+
+		expect(payload.input?.[0]?.content?.[0]?.text).toBe(illFormedText.toWellFormed());
+	});
+
+	it("stringifies object-valued tool replay fields instead of collapsing nested text", async () => {
+		const model = getBundledModel("openai-codex", "gpt-5.2-codex") as Model<"openai-codex-responses">;
+		const functionCallId = "call_replay_object_args";
+		const customCallId = "call_replay_custom_input";
+		const malformedHistoryItems: Record<string, unknown>[] = [
+			{
+				type: "function_call",
+				id: "fc_replay_object_args",
+				call_id: functionCallId,
+				name: "echo",
+				arguments: { text: "hello", limit: 3 },
+			},
+			{
+				type: "function_call_output",
+				call_id: functionCallId,
+				output: { text: "tool result", ok: true },
+			},
+			{
+				type: "custom_tool_call",
+				id: "ctc_replay_custom_input",
+				call_id: customCallId,
+				name: "apply_patch",
+				input: { text: "patch body", operation: "insert" },
+			},
+			{
+				type: "custom_tool_call_output",
+				call_id: customCallId,
+				output: { text: "custom result", ok: true },
+			},
+		];
+		const payload = (await captureCodexPayload(model, {
+			messages: [
+				{ role: "user", content: "generic history that should be replaced", timestamp: Date.now() },
+				makeAssistantMessage(malformedHistoryItems, false, "openai-codex", "gpt-5.2-codex"),
+				{ role: "user", content: "follow-up user", timestamp: Date.now() },
+			],
+		})) as { input?: Array<Record<string, unknown>> };
+
+		expect(payload.input?.find(item => item.type === "function_call")).toMatchObject({
+			arguments: '{"text":"hello","limit":3}',
+		});
+		expect(payload.input?.find(item => item.type === "function_call_output")).toMatchObject({
+			output: '{"text":"tool result","ok":true}',
+		});
+		expect(payload.input?.find(item => item.type === "custom_tool_call")).toMatchObject({
+			input: '{"text":"patch body","operation":"insert"}',
+		});
+		expect(payload.input?.find(item => item.type === "custom_tool_call_output")).toMatchObject({
+			output: '{"text":"custom result","ok":true}',
+		});
+	});
+
 	it("ignores incompatible native history snapshots across providers", async () => {
 		const model = getBundledModel("github-copilot", "gpt-5.4") as Model<"openai-responses">;
 		const payload = (await captureResponsesPayload(model, codexToCopilotContext)) as { input?: unknown[] };
@@ -475,6 +599,28 @@ describe("OpenAI responses history payload", () => {
 			{ role: "user", content: [{ type: "input_text", text: "second question" }] },
 			...incrementalItems2.map(({ id: _id, ...item }) => item),
 			{ role: "user", content: [{ type: "input_text", text: "third question" }] },
+		]);
+	});
+
+	it("strips computer_call actions from replayed native history", async () => {
+		const model = getOpenAIReasoningModel("openai", "gpt-5-mini");
+		const payload = (await captureResponsesPayload(model, {
+			messages: [
+				{ role: "user", content: "inspect", timestamp: Date.now() },
+				makeAssistantMessage(computerCallHistoryItems, true),
+				{ role: "user", content: "continue", timestamp: Date.now() },
+			],
+		})) as { input?: unknown[] };
+
+		expect(payload.input).toEqual([
+			{ role: "user", content: [{ type: "input_text", text: "inspect" }] },
+			{
+				type: "computer_call",
+				call_id: "call_computer_1",
+				status: "completed",
+				pending_safety_checks: [],
+			},
+			{ role: "user", content: [{ type: "input_text", text: "continue" }] },
 		]);
 	});
 

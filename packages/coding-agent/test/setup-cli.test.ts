@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { YAML } from "bun";
 import { parseSetupArgs, runSetupCommand } from "../src/cli/setup-cli";
+import { addApiCompatibleProvider } from "../src/setup/provider-onboarding";
 
 let tempRoot: string | undefined;
 
@@ -37,14 +38,39 @@ describe("setup CLI parsing", () => {
 		});
 	});
 
-	it("rejects provider flags unless provider setup is explicit", () => {
-		vi.spyOn(console, "error").mockImplementation(() => {});
-		const exit = vi.spyOn(process, "exit").mockImplementation((() => {
-			throw new Error("exit");
-		}) as (code?: string | number | null | undefined) => never);
+	it("rejects provider flags unless provider setup is explicit", async () => {
+		const proc = Bun.spawn({
+			cmd: [
+				process.execPath,
+				"-e",
+				`import { parseSetupArgs } from "./src/cli/setup-cli";
+				const errors = [];
+				const realExit = process.exit;
+				console.error = (...args) => errors.push(args.join(" "));
+				process.exit = code => { throw new Error("exit " + code); };
+				try {
+					parseSetupArgs(["setup", "--provider", "proxy", "--compat", "openai"]);
+					process.exit(2);
+				} catch (error) {
+					if (String(error?.message ?? error) === "exit 1" && errors.some(error => error.includes("Provider setup flags require the explicit"))) {
+						process.stdout.write("ok");
+						realExit(0);
+					}
+					process.stderr.write(String(error?.stack ?? error));
+					realExit(1);
+				}`,
+			],
+			cwd: path.join(import.meta.dir, ".."),
+			stdout: "pipe",
+			stderr: "pipe",
+		});
+		const [exitCode, stdout, stderr] = await Promise.all([
+			proc.exited,
+			new Response(proc.stdout).text(),
+			new Response(proc.stderr).text(),
+		]);
 
-		expect(() => parseSetupArgs(["setup", "--provider", "proxy", "--compat", "openai"])).toThrow("exit");
-		expect(exit).toHaveBeenCalledWith(1);
+		expect({ exitCode, stdout, stderr }).toEqual({ exitCode: 0, stdout: "ok", stderr: "" });
 	});
 
 	it("allows provider flags for explicit provider setup", () => {
@@ -57,49 +83,29 @@ describe("setup CLI parsing", () => {
 	it("rejects preset provider setup with arbitrary CLI base URL, model, or API key env", async () => {
 		tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "skc-setup-cli-"));
 		const modelsPath = path.join(tempRoot, "models.yml");
-		const stdout = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
-		vi.spyOn(process, "exit").mockImplementation((code?: string | number | null | undefined): never => {
-			throw new Error(`exit ${code}`);
-		});
 
 		await expect(
-			runSetupCommand({
-				component: "provider",
-				flags: {
-					json: true,
-					preset: "minimax",
-					baseUrl: "https://example.invalid/v1",
-					modelsPath,
-				},
+			addApiCompatibleProvider({
+				preset: "minimax",
+				baseUrl: "https://example.invalid/v1",
+				modelsPath,
 			}),
-		).rejects.toThrow("exit 1");
+		).rejects.toThrow("fixed base URL");
 		await expect(
-			runSetupCommand({
-				component: "provider",
-				flags: {
-					json: true,
-					preset: "minimax",
-					model: ["custom-model"],
-					modelsPath,
-				},
+			addApiCompatibleProvider({
+				preset: "minimax",
+				models: ["custom-model"],
+				modelsPath,
 			}),
-		).rejects.toThrow("exit 1");
+		).rejects.toThrow("fixed model ids");
 		await expect(
-			runSetupCommand({
-				component: "provider",
-				flags: {
-					json: true,
-					preset: "minimax",
-					apiKeyEnv: "CUSTOM_KEY",
-					modelsPath,
-				},
+			addApiCompatibleProvider({
+				preset: "minimax",
+				apiKeyEnv: "CUSTOM_KEY",
+				modelsPath,
 			}),
-		).rejects.toThrow("exit 1");
+		).rejects.toThrow("MINIMAX_CODE_API_KEY");
 
-		const errors = stdout.mock.calls.map(call => String(call[0])).join("\n");
-		expect(errors).toContain("fixed base URL");
-		expect(errors).toContain("fixed model ids");
-		expect(errors).toContain("MINIMAX_CODE_API_KEY");
 		expect(await Bun.file(modelsPath).exists()).toBe(false);
 	});
 
@@ -290,22 +296,32 @@ describe("setup CLI parsing", () => {
 					},
 				}),
 			);
-			vi.spyOn(process.stdout, "write").mockImplementation(() => true);
-			vi.spyOn(process, "exit").mockImplementation((code?: string | number | null | undefined): never => {
-				throw new Error(`exit ${code}`);
+			const proc = Bun.spawn({
+				cmd: [
+					process.execPath,
+					"-e",
+					`import { runHermesSetup } from "./src/setup/hermes-setup";
+					try {
+						await runHermesSetup({ json: true, install: true, root: [${JSON.stringify(tempRoot)}], target: ${JSON.stringify(configPath)} });
+						process.exit(1);
+					} catch (error) {
+						const message = String(error?.message ?? error);
+						if (error?.name === "HermesSetupError" && message.includes("already exists and is not managed by SKC")) {
+							process.stdout.write("ok");
+							process.exit(0);
+						}
+						process.stderr.write(String(error?.stack ?? error));
+						process.exit(1);
+					}`,
+				],
+				cwd: path.join(import.meta.dir, ".."),
+				stdout: "pipe",
+				stderr: "pipe",
 			});
+			const [exitCode, stdout] = await Promise.all([proc.exited, new Response(proc.stdout).text()]);
 
-			await expect(
-				runSetupCommand({
-					component: "hermes",
-					flags: {
-						json: true,
-						install: true,
-						root: [tempRoot],
-						target: configPath,
-					},
-				}),
-			).rejects.toThrow("exit 3");
+			expect(exitCode).toBe(0);
+			expect(stdout).toBe("ok");
 		});
 
 		it("smoke checks the current Hermes MCP tool contract without provider credentials", async () => {
@@ -318,6 +334,7 @@ describe("setup CLI parsing", () => {
 					json: true,
 					smoke: true,
 					root: [tempRoot],
+					stateRoot: path.join(tempRoot, "state"),
 				},
 			});
 
@@ -328,5 +345,67 @@ describe("setup CLI parsing", () => {
 			expect(output).not.toContain("OPENAI");
 			expect(output).not.toContain("ANTHROPIC");
 		});
+	});
+});
+
+describe("setup CLI host plugins", () => {
+	it("parses claude and codex components", () => {
+		expect(parseSetupArgs(["setup", "claude", "--json"])).toEqual({ component: "claude", flags: { json: true } });
+		expect(parseSetupArgs(["setup", "codex", "--json"])).toEqual({ component: "codex", flags: { json: true } });
+	});
+
+	it("renders a fail-closed Claude plugin setup with concrete workdir roots", async () => {
+		const stdout = vi.spyOn(process.stdout, "write").mockReturnValue(true);
+		try {
+			await runSetupCommand({ component: "claude", flags: { json: true, root: ["/tmp/example-repo"] } });
+			const output = stdout.mock.calls.map(call => String(call[0])).join("");
+			const parsed = JSON.parse(output) as {
+				host: string;
+				gated: boolean;
+				coordinatorConfigPreview: { env: Record<string, string> };
+			};
+			expect(parsed.host).toBe("claude");
+			expect(parsed.gated).toBe(false);
+			expect(parsed.coordinatorConfigPreview.env.SKC_COORDINATOR_MCP_WORKDIR_ROOTS).toBe("/tmp/example-repo");
+			expect(parsed.coordinatorConfigPreview.env.SKC_COORDINATOR_MCP_MUTATIONS).toBeUndefined();
+			expect("SKC_COORDINATOR_MCP_ROOTS" in parsed.coordinatorConfigPreview.env).toBe(false);
+		} finally {
+			stdout.mockRestore();
+		}
+	});
+
+	it("renders Codex plugin setup verified on a local marketplace smoke", async () => {
+		const stdout = vi.spyOn(process.stdout, "write").mockReturnValue(true);
+		try {
+			await runSetupCommand({ component: "codex", flags: { json: true, root: ["/tmp/example-repo"] } });
+			const output = stdout.mock.calls.map(call => String(call[0])).join("");
+			const parsed = JSON.parse(output) as {
+				host: string;
+				gated: boolean;
+				notes: string[];
+				installGuidance: string[];
+			};
+			expect(parsed.host).toBe("codex");
+			expect(parsed.gated).toBe(false);
+			expect(parsed.installGuidance.join(" ")).toContain("codex plugin marketplace add");
+		} finally {
+			stdout.mockRestore();
+		}
+	});
+
+	it("performs a real non-mutating check against the generated bundle on disk", async () => {
+		const repoRoot = path.resolve(import.meta.dir, "..", "..", "..");
+		const stdout = vi.spyOn(process.stdout, "write").mockReturnValue(true);
+		try {
+			await runSetupCommand({ component: "claude", flags: { json: true, check: true, root: [repoRoot] } });
+			const output = stdout.mock.calls.map(call => String(call[0])).join("");
+			const parsed = JSON.parse(output) as { check?: { ok: boolean; checked: string[]; missing: string[] } };
+			expect(parsed.check).toBeDefined();
+			expect(parsed.check?.checked.length).toBeGreaterThan(0);
+			expect(parsed.check?.ok).toBe(true);
+			expect(parsed.check?.missing).toEqual([]);
+		} finally {
+			stdout.mockRestore();
+		}
 	});
 });

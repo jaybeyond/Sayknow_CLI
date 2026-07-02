@@ -1,5 +1,6 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { coordinatorMcpStateRoot, skcRoot } from "../skc-runtime/session-layout";
 
 export type CoordinatorMutationClass = "sessions" | "questions" | "reports";
 
@@ -73,9 +74,16 @@ function cleanScope(value: string | undefined): string | null {
 	return trimmed.replace(/[^a-zA-Z0-9_.-]+/g, "-").slice(0, 100) || null;
 }
 
+function defaultCoordinatorMcpStateRoot(cwd: string, skcSessionId?: string): string {
+	return skcSessionId
+		? coordinatorMcpStateRoot(cwd, skcSessionId)
+		: path.join(skcRoot(cwd), "state", "coordinator-mcp");
+}
+
 export function buildCoordinatorMcpConfig(env: NodeJS.ProcessEnv = process.env): CoordinatorMcpConfig {
-	const stateRoot =
-		env.SKC_COORDINATOR_MCP_STATE_ROOT?.trim() || path.join(process.cwd(), ".skc", "state", "coordinator-mcp");
+	const stateRootOverride = env.SKC_COORDINATOR_MCP_STATE_ROOT?.trim();
+	const skcSessionId = env.SKC_SESSION_ID?.trim();
+	const stateRoot = stateRootOverride || defaultCoordinatorMcpStateRoot(process.cwd(), skcSessionId);
 	return {
 		allowedRoots: parseRootList(env.SKC_COORDINATOR_MCP_WORKDIR_ROOTS).map(root => path.resolve(root)),
 		mutationClasses: parseMutationClasses(

@@ -2,12 +2,11 @@ from __future__ import annotations
 
 import sys
 import textwrap
-import threading
 import time
 import unittest
 
 from skc_rpc import RpcClient, host_uri
-from skc_rpc.host_uris import HostUri, normalize_read_result
+from skc_rpc.host_uris import normalize_read_result
 
 
 URI_SERVER = textwrap.dedent(

@@ -1,5 +1,4 @@
-import type { CanonicalSkcWorkflowSkill } from "../skill-state/active-state";
-import { CANONICAL_SKC_WORKFLOW_SKILLS } from "../skill-state/active-state";
+import { CANONICAL_SKC_WORKFLOW_SKILLS, type CanonicalSkcWorkflowSkill } from "../skill-state/canonical-skills";
 
 export type CommandRefVisibility = "public" | "hidden" | "planned";
 export type CommandRefIncludeWhen = "implemented-only" | "planned";

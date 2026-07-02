@@ -11,13 +11,17 @@ Use when the user asks for `ultragoal`, `create-goals`, `complete-goals`, durabl
 
 ## Purpose
 
-`ultragoal` turns a brief into repo-native artifacts and then drives a SKC goal safely through the unified `goal` tool. New plans default to a stable pointer-style aggregate SKC goal for the whole durable plan in `.skc/ultragoal/goals.json`, including later accepted/appended stories under the original brief constraints, while SKC tracks G001/G002 story progress in the ledger. Ultragoal does not require any `/goal` slash-command between runs. For back-to-back ultragoal runs in one session/thread, call `goal({"op":"drop"})` only when `goal({"op":"get"})` still reports an active aggregate; then call `goal({"op":"create"})`. The goal tool stays armed across drop so the next create works in-session, and no slash-command cleanup exists or is required.
+`ultragoal` turns a brief into repo-native artifacts and then drives a SKC goal safely through the unified `goal` tool. New plans default to a stable pointer-style aggregate SKC goal for the whole durable plan in `.skc/_session-{sessionid}/ultragoal/goals.json`, including later accepted/appended stories under the original brief constraints, while SKC tracks G001/G002 story progress in the ledger. Ultragoal does not require any `/goal` slash-command between runs. For back-to-back ultragoal runs in one session/thread, call `goal({"op":"drop"})` only when `goal({"op":"get"})` still reports an active aggregate; then call `goal({"op":"create"})`. The goal tool stays armed across drop so the next create works in-session, and no slash-command cleanup exists or is required.
 
-- `.skc/ultragoal/brief.md`
-- `.skc/ultragoal/goals.json`
-- `.skc/ultragoal/ledger.jsonl` (checkpoint and structured steering audit events)
+- `.skc/_session-{sessionid}/ultragoal/brief.md`
+- `.skc/_session-{sessionid}/ultragoal/goals.json`
+- `.skc/_session-{sessionid}/ultragoal/ledger.jsonl` (checkpoint and structured steering audit events)
 
 Existing aggregate plans with the legacy enumerated objective are migrated to the stable pointer objective on read, persisted to `goals.json`, retained in `skcObjectiveAliases` for already-active hidden goal reconciliation, and audited with an `aggregate_objective_migrated` ledger entry.
+
+## Corrupt current-session state recovery
+
+When ultragoal detects its own current-session state is corrupt, tampered, unreadable, or stale on resume, run `skc state clear --force --mode ultragoal` before reseeding or restarting. Scope the clear to the current session via `--session-id`, the command payload, or `SKC_SESSION_ID`; it clears only ultragoal state for that session and never clears other skills or sessions.
 
 ## Always-used command examples
 
@@ -30,7 +34,7 @@ skc ultragoal create-goals --brief "<brief>"
 skc ultragoal create-goals --brief-file <path>
 skc ultragoal complete-goals
 skc ultragoal complete-goals --retry-failed
-skc ultragoal checkpoint --goal-id <id> --status complete --evidence "<evidence>" --skc-goal-json <goal-get-json-or-path> --quality-gate-json <quality-gate-json-or-path>
+skc ultragoal checkpoint --goal-id <id> --status complete --evidence "<evidence>" --quality-gate-json <quality-gate-json-or-path>
 skc ultragoal checkpoint --goal-id <id> --status failed --evidence "<blocker/evidence>"
 skc ultragoal record-review-blockers --goal-id <id> --title "Resolve final review blockers" --objective "<blocker-resolution objective>" --evidence "<review findings>" --skc-goal-json <active-goal-get-json-or-path>
 ```
@@ -46,7 +50,7 @@ goal({"op":"resume"})
 ```
 `drop` clears the active goal without exiting goal mode; `resume` reactivates a paused goal.
 
-Use `goal({"op":"get"})` snapshots inside Ultragoal for ledger reconciliation. The unified `goal` tool is the only agent-facing surface for goal state; no `/goal` subcommand is required.
+Complete checkpoints source the active SKC goal snapshot from the current session when `--skc-goal-json` is omitted. Use an explicit `--skc-goal-json` only as an override; supplied values are still strictly validated and must be active goal-mode snapshots, not `.skc/ultragoal/goals.json` records.
 
 ## Create goals
 
@@ -81,7 +85,7 @@ Use `goal({"op":"get"})` snapshots inside Ultragoal for ledger reconciliation. T
    - `skc ultragoal create-goals --brief-file <path>`
    - `cat <brief> | skc ultragoal create-goals --from-stdin`
    - `skc ultragoal create-goals --skc-goal-mode per-story --brief "<brief>"` only when one SKC goal context per story is explicitly preferred
-3. Inspect `.skc/ultragoal/goals.json` and refine if needed.
+3. Inspect `.skc/_session-{sessionid}/ultragoal/goals.json` and refine if needed.
 
 ## Complete goals
 
@@ -93,15 +97,30 @@ Loop until `skc ultragoal status` reports all goals complete:
 4. If no active SKC goal exists, call `goal({"op":"create","objective":"<printed payload objective>"})` with the printed payload. In aggregate mode, if the same aggregate objective is already active, continue the current SKC story without creating a new SKC goal. If `goal({"op":"get"})` shows a stale dropped goal (status `"dropped"`) and a new aggregate must start, no extra cleanup is needed — `goal({"op":"create"})` succeeds directly. If a previous aggregate is still active and you genuinely need a fresh start in the same session, call `goal({"op":"drop"})` first, then `goal({"op":"create"})`.
 5. Complete the current SKC story only.
 6. Run a completion audit against the story objective and real artifacts/tests.
-7. Before any `--status complete` checkpoint, run the mandatory final cleanup/review gate below. In aggregate mode, do **not** call `goal({"op":"complete"})` for intermediate stories; checkpoint each story with a fresh `goal({"op":"get"})` snapshot whose aggregate objective is still `active`. On the final story, use the same fresh active snapshot to create the final aggregate receipt first; only after that receipt exists may `goal({"op":"complete"})` run.
-8. Checkpoint the durable ledger with that fresh active snapshot. Complete checkpoints require `--quality-gate-json`; the runtime hook rejects closure without a clean architect review:
-   `skc ultragoal checkpoint --goal-id <id> --status complete --evidence "<evidence>" --skc-goal-json <goal-get-json-or-path> --quality-gate-json <quality-gate-json-or-path>`
+7. Before any `--status complete` checkpoint, run the mandatory final cleanup/review gate below. In aggregate mode, do **not** call `goal({"op":"complete"})` for intermediate stories; checkpoint each story while the aggregate objective is still `active`. On the final story, create the final aggregate receipt first; only after that receipt exists may `goal({"op":"complete"})` run.
+8. Checkpoint the durable ledger. Complete checkpoints require `--quality-gate-json`; the runtime sources the active SKC goal snapshot from current session state when `--skc-goal-json` is omitted, and rejects any explicitly supplied bad snapshot:
+   `skc ultragoal checkpoint --goal-id <id> --status complete --evidence "<evidence>" --quality-gate-json <quality-gate-json-or-path>`
    A successful complete checkpoint is story completion, not automatic run completion. Read the checkpoint output: when it prints `Next ultragoal goal: <id>`, continue that active story under the same aggregate SKC goal; when it prints `All ultragoal goals are complete`, the durable run is terminal. `skc ultragoal complete-goals` remains the supported manual next-story command if continuation output was missed.
 9. If blocked or failed, checkpoint failure:
    `skc ultragoal checkpoint --goal-id <id> --status failed --evidence "<blocker/evidence>"`
 10. For legacy per-story completed-goal blockers, preserve the non-terminal blocker with:
    `skc ultragoal checkpoint --goal-id <id> --status blocked --evidence "<completed legacy SKC goal blocks goal create in this thread>" --skc-goal-json <goal-get-json-or-path>`
 11. Resume failed goals with `skc ultragoal complete-goals --retry-failed`.
+
+## Blocker triage and pause discipline
+
+An active Ultragoal run must not give up on a blocker by pausing the goal and asking the user. Classify every blocker before deciding what to do, and default to `resolvable` when unsure:
+
+- **`resolvable`** — anything the agent can act on: failing tests, missing implementation, a dependency to install, an ambiguous-but-inferable detail, investigation. **Never pause.** Exhaust autonomous resolution first: investigate, `skc ultragoal steer --kind add_subgoal --title "Investigate blocker" --objective "..." --evidence "..." --rationale "..."`, delegate an `executor`, or preserve the blocker durably with `skc ultragoal checkpoint --status blocked` / `skc ultragoal record-review-blockers` and keep scheduling the next goal.
+- **`human_blocked`** — only the user can act: credentials/secrets, a manual or physical step, an external approval/decision, access the agent lacks. Pause is the last resort and is gated.
+
+`goal({"op":"pause"})` is **blocked at runtime** while an Ultragoal run is active unless the latest durable ledger event classifies the current blocker as `human_blocked`. To pause, record the classification immediately before pausing and cite the human-only dependency as evidence:
+
+```sh
+skc ultragoal classify-blocker --classification human_blocked --evidence "<the specific human-only dependency>" [--goal-id <id>]
+```
+
+Recording `--classification resolvable` is an audit note only; it never authorizes a pause. The `ask` tool stays blocked during active runs regardless of classification — record unresolved decisions as durable blockers instead of prompting.
 
 ## Dynamic steering
 
@@ -131,9 +150,9 @@ skc ultragoal steer --kind mark_blocked_superseded --goal-id G004 --evidence "Th
 
 Steering invariants:
 
-- Do not edit the aggregate goal objective, original brief constraints, quality gates, or completion status. The aggregate objective is a stable pointer to `.skc/ultragoal/goals.json` and `.skc/ultragoal/ledger.jsonl`, not an enumeration of initial goal ids.
-- Do not hard-delete goals, auto-complete work, weaken verification, or silently mutate `.skc/ultragoal`.
-- Accepted and rejected attempts append structured audit entries to `.skc/ultragoal/ledger.jsonl`.
+- Do not edit the aggregate goal objective, original brief constraints, quality gates, or completion status. The aggregate objective is a stable pointer to `.skc/_session-{sessionid}/ultragoal/goals.json` and `.skc/_session-{sessionid}/ultragoal/ledger.jsonl`, not an enumeration of initial goal ids.
+- Do not hard-delete goals, auto-complete work, weaken verification, or silently mutate `.skc/_session-{sessionid}/ultragoal`.
+- Accepted and rejected attempts append structured audit entries to `.skc/_session-{sessionid}/ultragoal/ledger.jsonl`.
 - Superseded goals remain in `goals.json` with steering metadata and are skipped for scheduling.
 - Blocked goals without replacements are skipped for scheduling but still block final completion until later explicit steering replaces or supersedes them.
 
@@ -152,18 +171,18 @@ When delegating with native subagents, an await timeout only limits the leader's
 
 If an Ultragoal request has no approved plan or consensus artifact, run `ralplan` first and preserve its PRD, test spec, role roster, and verification guidance in the Ultragoal ledger. Do not silently substitute ad-hoc execution for missing planning.
 
-The Ultragoal leader owns `.skc/ultragoal/goals.json` and `.skc/ultragoal/ledger.jsonl`. Role agents return implementation/review evidence; they do not checkpoint Ultragoal or mutate goal state.
+The Ultragoal leader owns `.skc/_session-{sessionid}/ultragoal/goals.json` and `.skc/_session-{sessionid}/ultragoal/ledger.jsonl`. Role agents return implementation/review evidence; they do not checkpoint Ultragoal or mutate goal state.
 
-For large subgoals with independent slices, the Ultragoal leader must spawn parallel `executor` subagents instead of doing serial solo work. Split only cleanly separable files/surfaces, give each executor bounded targets and acceptance criteria, and keep checkpoint ownership in the leader. Use `architect` / `critic` review lanes after integration; do not let worker agents mutate `.skc/ultragoal` or call goal tools.
+For large subgoals with independent slices, the Ultragoal leader must spawn parallel `executor` subagents instead of doing serial solo work. Split only cleanly separable files/surfaces, give each executor bounded targets and acceptance criteria, and keep checkpoint ownership in the leader. Use `architect` / `critic` review lanes after integration; do not let worker agents mutate `.skc/_session-{sessionid}/ultragoal` or call goal tools.
 
 ## Use Ultragoal and Team together
 
-Use ultragoal and team together for a durable Ultragoal story that benefits from one visible tmux worker session. Ultragoal remains leader-owned: `.skc/ultragoal/goals.json` stores the story plan and `.skc/ultragoal/ledger.jsonl` stores checkpoints. Team is the single-worker tmux execution engine and returns task/evidence status to the leader.
+Use ultragoal and team together for a durable Ultragoal story that benefits from one visible tmux worker session. Ultragoal remains leader-owned: `.skc/_session-{sessionid}/ultragoal/goals.json` stores the story plan and `.skc/_session-{sessionid}/ultragoal/ledger.jsonl` stores checkpoints. Team is the single-worker tmux execution engine and returns task/evidence status to the leader.
 
-The leader checkpoints Ultragoal from Team evidence with a fresh `goal({"op":"get"})` snapshot:
+The leader checkpoints Ultragoal from Team evidence; the runtime uses the active current-session SKC goal snapshot unless an explicit `--skc-goal-json` override is supplied:
 
 ```sh
-skc ultragoal checkpoint --goal-id <id> --status complete --evidence "<team evidence mentioning .skc/ultragoal and <id>>" --skc-goal-json <fresh-goal-get-json-or-path> --quality-gate-json <quality-gate-json-or-path>
+skc ultragoal checkpoint --goal-id <id> --status complete --evidence "<team evidence mentioning .skc/_session-{sessionid}/ultragoal and <id>>" --quality-gate-json <quality-gate-json-or-path>
 ```
 
 Workers do not own ultragoal goal state, do not create worker ultragoal ledgers, and do not checkpoint Ultragoal. Workers must not run `skc ultragoal checkpoint`; checkpoint authority stays with the leader after worker tasks are terminal. Team launch remains explicit; Ultragoal does not auto-launch Team and performs no hidden goal mutation.
@@ -192,9 +211,10 @@ An ultragoal story cannot be checkpointed `complete` until the active agent has 
 5. Delegate an `executor` QA/red-team lane to build and run the e2e/read-teaming QA suite appropriate for the story. This lane must try to break the change, not just confirm the happy path. It must start from the approved plan/spec/acceptance criteria, then user-facing contracts, and only then implementation code as supporting evidence. Plan/code mismatches are blockers, not items to paper over with implementation intent.
 6. The executor QA/red-team lane must prove evidence by the real surface under test:
    - GUI/web surfaces require a valid automation transcript plus a non-uniform screenshot. Bare `inlineEvidence` text or typed receipts never prove live GUI/web execution.
-   - CLI surfaces require runtime argv replay: `replaySafe: true`, an allowlisted argv `command`, and replayed normalized stdout matching `recordedStdout`; unsafe commands require audited `replayExempt` metadata with exact fields `reasonCode`, `reason`, `approvedBy`, and `fallbackArtifactRefs` plus a structurally valid fallback artifact. Allowed `reasonCode` values are exactly `unsafe_side_effect`, `requires_credentials`, `requires_network`, `non_deterministic_external`, `destructive`, `interactive_only`, and `platform_unavailable`.
+   - CLI surfaces require runtime argv replay: `replaySafe: true`, an allowlisted argv `command`, and replayed normalized stdout matching `recordedStdout`. The conservative allowlist is intentionally small: `bun --version`, `node --version`, deterministic `bun/node -e "console.log(...)"`, `npm|pnpm|yarn --version`, `npm|pnpm|yarn list`, read-only `git status|rev-parse|merge-base|diff|show|log` with safe args, and `skc read|status`. Unsafe, non-deterministic, credentialed, interactive, or otherwise unallowlisted commands require audited `replayExempt` metadata with exact fields `reasonCode`, `reason`, `approvedBy`, and `fallbackArtifactRefs` plus a structurally valid fallback artifact. Allowed `reasonCode` values are exactly `unsafe_side_effect`, `requires_credentials`, `requires_network`, `non_deterministic_external`, `destructive`, `interactive_only`, and `platform_unavailable`.
    - Native/desktop/tui surfaces require a structurally valid screenshot, PTY capture with terminal control codes, or app-automation transcript.
-   - API/package/algorithm/math surfaces require a real artifact file or typed receipt. Bare `inlineEvidence` text alone is not sufficient for any surface.
+   - API/package surfaces require a real artifact file or typed receipt whose artifact `kind` contains one of `api`, `package`, `consumer`, `black-box`, or `test-report`; examples: `api-package-test-report`, `package-consumer-report`, `black-box-api-receipt`. Algorithm/math surfaces require a real artifact file or typed receipt whose artifact `kind` contains one of `property`, `boundary`, `edge`, `adversarial`, `failure`, `math`, `algorithm`, or `test-report`; examples: `property-test-report`, `algorithm-boundary-report`. Bare `inlineEvidence` text alone is not sufficient for any surface.
+   - The mandatory **computer-use** red-team suite (`kill-switch-bypass`, `suspended-enforcement`, `permission-revoked`, …) is conditional, not universal: require it only when computer/desktop control is genuinely part of the product surface being dogfooded. For every other product type, prove the change through the matching live surface instead — browser-use automation for web/GUI, bash/CLI live invocation or argv replay for CLI, and real artifacts or typed receipts for API/package/algorithm/math. Editing docs, prompts, or skills that merely mention computer-use does not by itself make the computer-use suite applicable; pick the red-team surface that matches what the change actually ships.
 7. The executor QA/red-team lane must report a matrix using `executorQa.contractCoverage`, `executorQa.surfaceEvidence`, `executorQa.adversarialCases`, and `executorQa.artifactRefs`. Not-applicable rows are allowed only in `contractCoverage` and `surfaceEvidence`; each `status: "not_applicable"` row requires `contractRef` plus `reason`. `adversarialCases` rows cannot be not-applicable.
 8. Run a final code review pass and fold it into the strict quality gate. Clean means `architectReview.architectureStatus`, `architectReview.productStatus`, and `architectReview.codeStatus` are all `"CLEAR"`, `architectReview.recommendation` is `"APPROVE"`, executor QA statuses are `"passed"`, iteration is `"passed"` with `fullRerun: true`, every evidence field is non-empty, every required matrix row is present, and every blockers array is empty. `COMMENT`, `WATCH`, `REQUEST CHANGES`, `BLOCK`, missing evidence, missing or shallow matrix rows, plan/code mismatches, or non-empty blockers are non-clean.
 9. If any lane finds an issue, do **not** checkpoint `complete` and do **not** call `goal({"op":"complete"})`. Record durable blocker work instead:
@@ -202,7 +222,7 @@ An ultragoal story cannot be checkpointed `complete` until the active agent has 
    skc ultragoal record-review-blockers --goal-id <id> --title "Resolve verification blockers" --objective "<blocker-resolution objective>" --evidence "<architect/executor findings>" --skc-goal-json <active-goal-get-json-or-path>
    ```
 10. Complete or steer through the blocker story, then rerun the full blocking verification loop. Repeat until all verifier lanes are clean.
-11. Only after the loop is clean, checkpoint the story as complete with a structured quality gate and a fresh active `goal({"op":"get"})` snapshot. The checkpoint creates a receipt; `goals.json.status` alone is not proof. In aggregate mode, the final aggregate receipt must exist before `goal({"op":"complete"})` is allowed.
+11. Only after the loop is clean, checkpoint the story as complete with a structured quality gate and current-session active goal snapshot. The checkpoint creates a receipt; `goals.json.status` alone is not proof. In aggregate mode, the final aggregate receipt must exist before `goal({"op":"complete"})` is allowed.
 
 While an Ultragoal run is active, the `ask` tool is blocked for all agents. Record unresolved review decisions as durable blockers with `skc ultragoal record-review-blockers` instead of prompting interactively.
 
@@ -243,13 +263,25 @@ The native `checkpoint --status complete` command rejects missing or shallow gat
         "id": "cli-replay",
         "kind": "command-replay",
         "path": "artifacts/cli-replay.json",
-        "description": "artifact file containing argv-only CLI replay JSON: schemaVersion 1, kind cli-replay, replaySafe true, allowlisted command, recordedStdout"
+        "description": "artifact file containing argv-only CLI replay JSON: schemaVersion 1, kind cli-replay, replaySafe true, allowlisted command such as bun/node --version or deterministic bun/node -e console.log(...), recordedStdout"
       },
       {
         "id": "adversarial-report",
         "kind": "failure-mode-test",
         "path": "artifacts/adversarial-report.txt",
         "description": "boundary, property, adversarial, or failure-mode result"
+      },
+      {
+        "id": "api-package-report",
+        "kind": "api-package-test-report",
+        "path": "artifacts/api-package-report.txt",
+        "description": "API/package consumer or endpoint verification output"
+      },
+      {
+        "id": "algorithm-report",
+        "kind": "property-test-report",
+        "path": "artifacts/algorithm-report.txt",
+        "description": "Algorithm/math property, boundary, or invariant verification output"
       }
     ],
     "contractCoverage": [
@@ -285,6 +317,22 @@ The native `checkpoint --status complete` command rejects missing or shallow gat
         "invocation": "argv replay executed by the Ultragoal runtime",
         "verdict": "passed",
         "artifactRefs": ["cli-replay"]
+      },
+      {
+        "id": "surface-api",
+        "contractRef": "API/package public interface under test",
+        "surface": "api/package",
+        "invocation": "real endpoint call, package consumer call, or schema contract check",
+        "verdict": "passed",
+        "artifactRefs": ["api-package-report"]
+      },
+      {
+        "id": "surface-algorithm",
+        "contractRef": "algorithm/math invariant under test",
+        "surface": "algorithm/math",
+        "invocation": "property, boundary, or invariant test run",
+        "verdict": "passed",
+        "artifactRefs": ["algorithm-report"]
       },
       {
         "id": "surface-out-of-scope",
@@ -335,7 +383,7 @@ When the aggregate ultragoal is complete OR the user requests return to planning
 skc state ultragoal write --input '{"current_phase":"handoff"}' --json
 ```
 
-The skill tool then dispatches `/skill:ralplan` or `/skill:deep-interview` same-turn and runs `skc state ultragoal handoff --to <ralplan|deep-interview> --json` in-process to atomically demote ultragoal, promote the callee, and sync both `skill-active-state.json` files. You do not need to run the handoff verb yourself.
+The skill tool then dispatches `/skill:ralplan` or `/skill:deep-interview` same-turn and runs `skc state ultragoal handoff --to <ralplan|deep-interview> --json` in-process to atomically demote ultragoal, promote the callee, and sync both `.skc/_session-{sessionid}/state/skill-active-state.json` files. You do not need to run the handoff verb yourself.
 
 ## Constraints
 
@@ -344,6 +392,6 @@ The skill tool then dispatches `/skill:ralplan` or `/skill:deep-interview` same-
 - For back-to-back ultragoal runs in the same session/thread, when `goal({"op":"get"})` still reports an active aggregate, call `goal({"op":"drop"})` before `goal({"op":"create"})`; when no active goal exists or the prior aggregate is already complete or dropped, call `goal({"op":"create"})` directly. The goal tool remains callable across drop; no slash-command cleanup exists or is required.
 - Never call `goal({"op":"create"})` when `goal({"op":"get"})` reports a different active goal.
 - Never call `goal({"op":"complete"})` unless the aggregate run or legacy per-story goal is actually complete.
-- In aggregate mode, intermediate and final story checkpoints require a matching `active` SKC goal snapshot; the final story checkpoint creates the final aggregate receipt before `goal({"op":"complete"})` may reconcile the inline goal state.
-- Completion checkpoints require read-only goal snapshot reconciliation: pass fresh `goal({"op":"get"})` JSON/path with `--skc-goal-json`; shell commands and hooks must not mutate goal state.
+- In aggregate mode, intermediate and final story checkpoints require a matching `active` SKC goal snapshot; omitted complete-checkpoint `--skc-goal-json` reads that snapshot from current session state, and the final story checkpoint creates the final aggregate receipt before `goal({"op":"complete"})` may reconcile the inline goal state.
+- Completion checkpoints require read-only goal snapshot reconciliation: omit `--skc-goal-json` to use current session state, or pass an explicit JSON/path override that remains strictly validated; shell commands and hooks must not mutate goal state.
 - Treat `ledger.jsonl` as the durable audit trail; checkpoint after every success or failure.

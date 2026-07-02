@@ -1,5 +1,5 @@
 import type { AgentTelemetryConfig, AgentTool } from "@sayknow-cli/agent-core";
-import type { Model, ToolChoice } from "@sayknow-cli/ai";
+import type { Model, ServiceTier, ToolChoice } from "@sayknow-cli/ai";
 import { $env, $flag, logger } from "@sayknow-cli/utils";
 import type { PromptTemplate } from "../config/prompt-templates";
 import type { Settings } from "../config/settings";
@@ -38,12 +38,11 @@ import { BrowserTool } from "./browser";
 import { CalculatorTool } from "./calculator";
 import { type CheckpointState, CheckpointTool, RewindTool } from "./checkpoint";
 import { ComputerTool, isComputerCallable, isComputerLoadablePlatform } from "./computer";
-import { CronCreateTool, CronDeleteTool, CronListTool } from "./cron";
+import { CronTool } from "./cron";
 import { DebugTool } from "./debug";
 import { EvalTool } from "./eval";
 import { FindTool } from "./find";
 import { GithubTool } from "./gh";
-import { InspectImageTool } from "./inspect-image";
 import { IrcTool } from "./irc";
 import { JobTool } from "./job";
 import { MonitorTool } from "./monitor";
@@ -58,6 +57,7 @@ import { SearchToolBm25Tool } from "./search-tool-bm25";
 import { SkillTool } from "./skill";
 import { loadSshTool } from "./ssh";
 import { SubagentTool } from "./subagent";
+import { TelegramSendTool } from "./telegram-send";
 import { type TodoPhase, TodoWriteTool } from "./todo-write";
 import { WriteTool } from "./write";
 import { YieldTool } from "./yield";
@@ -82,7 +82,6 @@ export * from "./eval";
 export * from "./find";
 export * from "./gh";
 export * from "./image-gen";
-export * from "./inspect-image";
 export * from "./irc";
 export * from "./job";
 export * from "./monitor";
@@ -96,6 +95,7 @@ export * from "./search-tool-bm25";
 export * from "./skill";
 export * from "./ssh";
 export * from "./subagent";
+export * from "./telegram-send";
 export * from "./todo-write";
 export * from "./vim";
 export * from "./write";
@@ -117,6 +117,18 @@ export type {
 	DiscoverableToolSearchResult,
 	DiscoverableToolSource,
 } from "../tool-discovery/tool-index";
+
+/**
+ * Source of remote answers for interactive asks (e.g. a Telegram reply routed
+ * through the notifications SDK). Lets a pending ask resolve without RPC mode.
+ */
+export interface AskAnswerSource {
+	/**
+	 * Race a remote answer against the local UI for one question. Resolves with the
+	 * chosen option label or free-text answer, or `undefined` to defer to local UI.
+	 */
+	awaitAnswer(question: string, options: string[], signal?: AbortSignal): Promise<string | undefined>;
+}
 
 /** Session context for tool factories */
 export interface ToolSession {
@@ -208,12 +220,21 @@ export interface ToolSession {
 	agentOutputManager?: AgentOutputManager;
 	/** Settings instance for passing to subagents */
 	settings: Settings;
+	/** Live service-tier intent of the parent session, inherited by `inherit` subagents. */
+	serviceTier?: ServiceTier;
 	/** Plan mode state (if active) */
 	getPlanModeState?: () => PlanModeState | undefined;
 	/** Goal mode state (if active or paused) */
 	getGoalModeState?: () => GoalModeState | undefined;
 	/** Unattended workflow-gate emitter (present only when unattended mode is negotiated). */
 	getWorkflowGateEmitter?: () => WorkflowGateEmitter | undefined;
+	/**
+	 * Optional remote answer source for interactive asks. When present, the ask
+	 * tool races the local UI selection against a remote answer (e.g. a Telegram
+	 * reply via the notifications SDK) so asks can be answered without RPC mode.
+	 * No-op when undefined: the ask path behaves exactly as before.
+	 */
+	getAskAnswerSource?: () => AskAnswerSource | undefined;
 	/** Optional per-session restriction for goal tool operations. */
 	goalToolAllowedOps?: readonly ("create" | "get" | "complete" | "resume" | "drop" | "pause")[];
 	/** Goal runtime for the active agent session. */
@@ -366,7 +387,6 @@ export const BUILTIN_TOOLS: Record<string, ToolFactory> = {
 	find: s => new FindTool(s),
 	search: s => new SearchTool(s),
 	lsp: LspTool.createIf,
-	inspect_image: s => new InspectImageTool(s),
 	browser: s => new BrowserTool(s),
 	...(isComputerLoadablePlatform() ? { computer: ComputerTool.createIf } : {}),
 	checkpoint: CheckpointTool.createIf,
@@ -375,14 +395,13 @@ export const BUILTIN_TOOLS: Record<string, ToolFactory> = {
 	subagent: s => new SubagentTool(s),
 	job: JobTool.createIf,
 	monitor: MonitorTool.createIf,
-	CronCreate: CronCreateTool.createIf,
-	CronList: CronListTool.createIf,
-	CronDelete: CronDeleteTool.createIf,
+	cron: CronTool.createIf,
 	recipe: RecipeTool.createIf,
 	irc: IrcTool.createIf,
 	todo_write: s => new TodoWriteTool(s),
 	web_search: s => new WebSearchTool(s),
 	search_tool_bm25: SearchToolBm25Tool.createIf,
+	telegram_send: TelegramSendTool.createIf,
 	write: s => new WriteTool(s),
 	skill: SkillTool.createIf,
 	goal: s => new GoalTool(s),
@@ -536,7 +555,6 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 		if (name === "ast_grep") return session.settings.get("astGrep.enabled");
 		if (name === "ast_edit") return session.settings.get("astEdit.enabled");
 		if (name === "render_mermaid") return session.settings.get("renderMermaid.enabled");
-		if (name === "inspect_image") return session.settings.get("inspect_image.enabled");
 		if (name === "web_search") return session.settings.get("web_search.enabled");
 		// search_tool_bm25 is allowed when either legacy mcp.discoveryMode or new tools.discoveryMode is active.
 		if (name === "search_tool_bm25") return discoveryActive;

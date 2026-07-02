@@ -4,8 +4,7 @@
  * hand-edited.
  */
 
-import type { CanonicalSkcWorkflowSkill } from "../skill-state/active-state";
-import { CANONICAL_SKC_WORKFLOW_SKILLS } from "../skill-state/active-state";
+import { CANONICAL_SKC_WORKFLOW_SKILLS, type CanonicalSkcWorkflowSkill } from "../skill-state/canonical-skills";
 import { initialPhaseForSkill } from "../skill-state/initial-phase";
 
 export interface WorkflowState {
@@ -173,12 +172,16 @@ export const WORKFLOW_MANIFEST: Record<CanonicalSkcWorkflowSkill, SkillManifest>
 	}),
 	ralplan: manifest({
 		skill: "ralplan",
-		states: ["planner", "architect", "critic", "revision", "adr", "final", "handoff"],
+		states: ["planner", "architect", "critic", "revision", "post-interview", "adr", "final", "handoff"],
 		terminalStates: ["final", "handoff"],
 		transitions: [
 			{ from: "planner", to: "architect", verb: "write-artifact" },
 			{ from: "architect", to: "critic", verb: "write-artifact" },
 			{ from: "critic", to: "revision", verb: "write-artifact" },
+			{ from: "revision", to: "post-interview", verb: "write-artifact" },
+			{ from: "critic", to: "post-interview", verb: "write-artifact" },
+			{ from: "post-interview", to: "revision", verb: "write-artifact" },
+			{ from: "post-interview", to: "adr", verb: "write-artifact" },
 			{ from: "revision", to: "adr", verb: "write-artifact" },
 			{ from: "adr", to: "final", verb: "write-artifact" },
 			{ from: "planner", to: "handoff", verb: "handoff" },
@@ -186,6 +189,7 @@ export const WORKFLOW_MANIFEST: Record<CanonicalSkcWorkflowSkill, SkillManifest>
 			{ from: "critic", to: "handoff", verb: "handoff" },
 			{ from: "revision", to: "handoff", verb: "handoff" },
 			{ from: "adr", to: "handoff", verb: "handoff" },
+			{ from: "post-interview", to: "handoff", verb: "handoff" },
 		],
 		verbs: [...stateVerbs(), ...flagVerbs(["kickoff", "write-artifact"]), ...plannedVerbs(PLANNED_ADMIN_VERBS)],
 		typedArgs: [
@@ -197,7 +201,7 @@ export const WORKFLOW_MANIFEST: Record<CanonicalSkcWorkflowSkill, SkillManifest>
 			{
 				name: "stage",
 				type: "enum",
-				enumValues: ["planner", "architect", "critic", "revision", "adr", "final"],
+				enumValues: ["planner", "architect", "critic", "revision", "post-interview", "adr", "final"],
 				appliesToVerbs: ["write-artifact"],
 			},
 			{ name: "stage_n", type: "number", appliesToVerbs: ["write-artifact"] },
@@ -238,6 +242,7 @@ export const WORKFLOW_MANIFEST: Record<CanonicalSkcWorkflowSkill, SkillManifest>
 				"review",
 				"record-review-blockers",
 				"steer",
+				"classify-blocker",
 			]),
 			...plannedVerbs(PLANNED_ADMIN_VERBS),
 		],
@@ -264,11 +269,19 @@ export const WORKFLOW_MANIFEST: Record<CanonicalSkcWorkflowSkill, SkillManifest>
 				name: "evidence",
 				type: "string",
 				required: true,
-				appliesToVerbs: ["checkpoint", "record-review-blockers", "steer"],
+				appliesToVerbs: ["checkpoint", "record-review-blockers", "steer", "classify-blocker"],
 			},
 			{ name: "skc-goal-json", type: "string", appliesToVerbs: ["checkpoint", "record-review-blockers"] },
 			{ name: "quality-gate-json", type: "string", appliesToVerbs: ["checkpoint"] },
 			{ name: "goal-id", type: "string", appliesToVerbs: ["steer"] },
+			{ name: "goal-id", type: "string", appliesToVerbs: ["classify-blocker"] },
+			{
+				name: "classification",
+				type: "enum",
+				enumValues: ["human_blocked", "resolvable"],
+				required: true,
+				appliesToVerbs: ["classify-blocker"],
+			},
 			{
 				name: "kind",
 				type: "enum",
@@ -308,6 +321,7 @@ export const WORKFLOW_MANIFEST: Record<CanonicalSkcWorkflowSkill, SkillManifest>
 					"checkpoint",
 					"record-review-blockers",
 					"steer",
+					"classify-blocker",
 				],
 			},
 			{ name: "directive-json", type: "string", appliesToVerbs: ["steer"], planned: true },

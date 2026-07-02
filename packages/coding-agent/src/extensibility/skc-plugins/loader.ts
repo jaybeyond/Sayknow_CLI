@@ -59,7 +59,9 @@ export async function loadSkcPlugin(root: string): Promise<LoadedSkcPlugin> {
 	const pluginRoot = path.resolve(root);
 	const manifestPath = path.join(pluginRoot, SKC_PLUGIN_MANIFEST_FILENAME);
 	const manifest = parseManifest(await readJsonFile(manifestPath), manifestPath);
-	const manifestToolPaths = manifest.tools.map(rel => resolveWithinRoot(pluginRoot, rel));
+	const manifestToolPaths = manifest.tools
+		.filter(tool => tool.surface === "subskill")
+		.map(tool => resolveWithinRoot(pluginRoot, tool.path));
 
 	for (const toolPath of manifestToolPaths) {
 		await readRequiredText(toolPath, "tool");

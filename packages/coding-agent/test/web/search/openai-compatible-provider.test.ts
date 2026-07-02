@@ -40,9 +40,13 @@ describe("OpenAI-compatible web search provider", () => {
 		expect(body.model).toBe("gpt-5-mini");
 	});
 
-	it("sends Chat Completions requests with web_search_options", async () => {
+	it("falls back to Chat Completions with web_search_options when /responses is absent", async () => {
 		let body: any;
-		using _hook = hookFetch(async (_input, init) => {
+		const urls: string[] = [];
+		using _hook = hookFetch(async (input, init) => {
+			const url = String(input);
+			urls.push(url);
+			if (url.endsWith("/responses")) return new Response("not found", { status: 404 });
 			body = JSON.parse(String(init?.body));
 			return Response.json({
 				choices: [
@@ -55,9 +59,44 @@ describe("OpenAI-compatible web search provider", () => {
 				],
 			});
 		});
-		await new OpenAICompatibleSearchProvider().search(params({ ...baseCtx, api: "openai-completions" }));
+		const result = await new OpenAICompatibleSearchProvider().search(
+			params({ ...baseCtx, api: "openai-completions" }),
+		);
+		// Tried /responses first, then fell back to /chat/completions.
+		expect(urls.some(u => u.endsWith("/responses"))).toBe(true);
+		expect(urls.some(u => u.endsWith("/chat/completions"))).toBe(true);
 		expect(body.web_search_options).toEqual({});
 		expect(body.messages[1].content).toBe("news");
+		expect(result.sources).toEqual([{ title: "B", url: "https://b.example", snippet: undefined }]);
+	});
+
+	it("prefers /responses for search even when the model's chat wire is openai-completions", async () => {
+		const urls: string[] = [];
+		using _hook = hookFetch(async input => {
+			urls.push(String(input));
+			return Response.json({
+				id: "r-pref",
+				output: [
+					{ type: "web_search_call", status: "completed", action: { type: "search" } },
+					{
+						type: "message",
+						content: [
+							{
+								type: "output_text",
+								text: "grounded",
+								annotations: [{ type: "url_citation", url: "https://r.example", title: "R" }],
+							},
+						],
+					},
+				],
+			});
+		});
+		const result = await new OpenAICompatibleSearchProvider().search(
+			params({ ...baseCtx, api: "openai-completions" }),
+		);
+		expect(urls).toHaveLength(1);
+		expect(urls[0]?.endsWith("/responses")).toBe(true);
+		expect(result.sources).toEqual([{ title: "R", url: "https://r.example", snippet: undefined }]);
 	});
 
 	it("parses citations into sources", async () => {

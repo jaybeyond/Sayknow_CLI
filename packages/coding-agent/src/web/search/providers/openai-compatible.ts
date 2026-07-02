@@ -2,7 +2,21 @@ import type { SearchCitation, SearchResponse, SearchSource } from "../types";
 import { SearchProviderError } from "../types";
 import type { SearchParams } from "./base";
 import { SearchProvider } from "./base";
+import { extractTextSources } from "./text-citations";
 import { classifyProviderHttpError, withHardTimeout } from "./utils";
+
+/**
+ * Whether the response carries independent proof that a web search ran. Used to
+ * gate inline-citation recovery so a stray prose URL in a non-search answer is
+ * never promoted to a citation.
+ */
+function webSearchPerformed(json: any): boolean {
+	if (Array.isArray(json?.output) && json.output.some((item: any) => item?.type === "web_search_call")) {
+		return true;
+	}
+	const numRequests = json?.tool_usage?.web_search?.num_requests;
+	return typeof numRequests === "number" && numRequests > 0;
+}
 
 function endpoint(baseUrl: string, api: string): string {
 	const base = baseUrl.replace(/\/+$/, "");
@@ -94,35 +108,44 @@ export class OpenAICompatibleSearchProvider extends SearchProvider {
 		});
 		if (!apiKey) throw new SearchProviderError(this.id, `No credentials for ${ctx.provider}`, 401);
 		const model = ctx.wireModelId ?? ctx.modelId;
+		const baseUrl = ctx.baseUrl ?? "";
 		const headers = { ...(ctx.headers ?? {}), Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" };
-		const body =
-			ctx.api === "openai-completions"
-				? {
-						model,
-						messages: [
-							{ role: "system", content: params.systemPrompt },
-							{ role: "user", content: params.query },
-						],
-						web_search_options: {},
-						temperature: params.temperature,
-						max_tokens: params.maxOutputTokens,
-					}
-				: {
-						model,
-						input: [
-							{ role: "system", content: params.systemPrompt },
-							{ role: "user", content: params.query },
-						],
-						tools: [{ type: "web_search" }],
-						temperature: params.temperature,
-						max_output_tokens: params.maxOutputTokens,
-					};
-		const response = await fetch(endpoint(ctx.baseUrl ?? "", ctx.api), {
-			method: "POST",
-			headers,
-			body: JSON.stringify(body),
-			signal: withHardTimeout(params.signal),
-		});
+		const messages = [
+			{ role: "system", content: params.systemPrompt },
+			{ role: "user", content: params.query },
+		];
+		const responsesBody = {
+			model,
+			input: messages,
+			tools: [{ type: "web_search" }],
+			temperature: params.temperature,
+			max_output_tokens: params.maxOutputTokens,
+		};
+		const chatBody = {
+			model,
+			messages,
+			web_search_options: {},
+			temperature: params.temperature,
+			max_tokens: params.maxOutputTokens,
+		};
+
+		const post = (api: "openai-responses" | "openai-completions", payload: unknown) =>
+			fetch(endpoint(baseUrl, api), {
+				method: "POST",
+				headers,
+				body: JSON.stringify(payload),
+				signal: withHardTimeout(params.signal),
+			});
+
+		// Web search is a Responses-API capability: many OpenAI-compatible
+		// endpoints (incl. proxies fronting chat-only models) only ground search
+		// through `/responses`, while `/chat/completions` answers from the model's
+		// stale knowledge. Prefer `/responses` regardless of the model's chat wire,
+		// and fall back to `/chat/completions` only when `/responses` is absent.
+		let response = await post("openai-responses", responsesBody);
+		if (response.status === 404 || response.status === 405) {
+			response = await post("openai-completions", chatBody);
+		}
 		const text = await response.text();
 		if (!response.ok) {
 			const classified = classifyProviderHttpError(this.id, response.status, text);
@@ -135,14 +158,25 @@ export class OpenAICompatibleSearchProvider extends SearchProvider {
 		}
 		const json = text ? JSON.parse(text) : {};
 		const citations = parseCitations(json);
-		if (citations.length === 0) {
+		const answer = textFromResponse(json);
+		const limit = params.limit ?? params.numSearchResults ?? 10;
+		let sources = toSources(citations, limit);
+		const searched = webSearchPerformed(json);
+		// Recover inline-cited sources only when a search demonstrably ran
+		// (Responses `web_search_call` / `tool_usage.web_search`). This refuses to
+		// promote a model's guessed prose URLs from a non-search answer — exactly
+		// what a chat endpoint that ignores `web_search_options` returns.
+		if (sources.length === 0 && searched && answer) {
+			sources = extractTextSources(answer).slice(0, limit);
+		}
+		if (sources.length === 0 && !searched) {
 			throw new SearchProviderError(this.id, "OpenAI-compatible web search returned no citations", 424);
 		}
 		return {
 			provider: this.id,
-			answer: textFromResponse(json),
-			sources: toSources(citations, params.limit ?? params.numSearchResults ?? 10),
-			citations,
+			answer,
+			sources,
+			citations: citations.length > 0 ? citations : undefined,
 			model,
 			requestId: json.id,
 			authMode: "api-key",

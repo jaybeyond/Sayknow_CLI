@@ -3,6 +3,7 @@ import { calculatePromptTokens } from "@sayknow-cli/agent-core/compaction/compac
 import type { AssistantMessage, ImageContent } from "@sayknow-cli/ai";
 import { parseRateLimitReason } from "@sayknow-cli/ai";
 import { type Component, Loader, TERMINAL, Text } from "@sayknow-cli/tui";
+import { logger } from "@sayknow-cli/utils";
 import { settings } from "../../config/settings";
 import { AssistantMessageComponent } from "../../modes/components/assistant-message";
 import {
@@ -15,16 +16,56 @@ import { ToolExecutionComponent } from "../../modes/components/tool-execution";
 import { TtsrNotificationComponent } from "../../modes/components/ttsr-notification";
 import { getSymbolTheme, theme } from "../../modes/theme/theme";
 import type { InteractiveModeContext, TodoPhase } from "../../modes/types";
+import { summaryFromMessage } from "../../notifications/helpers";
 import type { PlanApprovalDetails } from "../../plan-mode/approved-plan";
 import type { AgentSessionEvent } from "../../session/agent-session";
 import { isSilentAbort, readPendingDisplayTag } from "../../session/messages";
 import type { ResolveToolDetails } from "../../tools/resolve";
 import { interruptHint } from "../shared";
 import { buildAbortDisplayMessage } from "../utils/abort-message";
+import { ringTerminalBell } from "../utils/terminal-bell";
 
 type AgentSessionEventKind = AgentSessionEvent["type"];
 
 const IRC_MESSAGE_VISIBLE_TTL_MS = 10_000;
+const COMPLETION_NOTIFY_COMMAND_TIMEOUT_MS = 10_000;
+
+interface CompletionNotifyPayload {
+	type: "agent-turn-complete";
+	title: string;
+	body: string;
+	cwd: string;
+	sessionId?: string;
+	sessionName?: string;
+	lastAssistantMessage?: string;
+	stopReason?: string;
+}
+
+function completionNotifyShellCommand(command: string): string[] {
+	if (process.platform === "win32") {
+		return ["cmd.exe", "/d", "/s", "/c", command];
+	}
+	return ["/bin/sh", "-c", command];
+}
+
+function cleanNotificationEnvValue(value: string | undefined, max = 4000): string {
+	if (!value) return "";
+	return value.replaceAll("\0", "").slice(0, max);
+}
+
+function buildCompletionNotifyEnv(payload: CompletionNotifyPayload): Record<string, string> {
+	return {
+		SKC_NOTIFICATION_TYPE: payload.type,
+		SKC_NOTIFICATION_TITLE: cleanNotificationEnvValue(payload.title, 500),
+		SKC_NOTIFICATION_BODY: cleanNotificationEnvValue(payload.body),
+		SKC_NOTIFICATION_CWD: cleanNotificationEnvValue(payload.cwd, 2000),
+		SKC_NOTIFICATION_SESSION_ID: cleanNotificationEnvValue(payload.sessionId, 500),
+		SKC_NOTIFICATION_SESSION_NAME: cleanNotificationEnvValue(payload.sessionName, 500),
+		SKC_NOTIFICATION_LAST_ASSISTANT_MESSAGE: cleanNotificationEnvValue(payload.lastAssistantMessage),
+		SKC_NOTIFICATION_STOP_REASON: cleanNotificationEnvValue(payload.stopReason, 100),
+		SKC_NOTIFICATION_JSON: cleanNotificationEnvValue(JSON.stringify(payload), 8000),
+	};
+}
 
 function friendlyRetryReason(errorMessage: string | undefined): string {
 	if (!errorMessage) return "";
@@ -83,6 +124,7 @@ export class EventController {
 			todo_reminder: e => this.#handleTodoReminder(e),
 			todo_auto_clear: e => this.#handleTodoAutoClear(e),
 			irc_message: e => this.#handleIrcMessage(e),
+			subagent_steer_message: e => this.#handleSubagentSteerMessage(e),
 			notice: e => this.#handleNotice(e),
 			thinking_level_changed: async () => {},
 			goal_updated: async () => {},
@@ -200,6 +242,7 @@ export class EventController {
 			this.ctx.statusContainer.clear();
 		}
 		this.#cancelIdleCompaction();
+		this.ctx.updateEditorBorderColor();
 		this.ctx.ensureLoadingAnimation();
 		this.ctx.ui.requestRender();
 	}
@@ -281,6 +324,25 @@ export class EventController {
 		this.#resetReadGroup();
 		const components = this.ctx.addMessageToChat(event.message);
 		this.#scheduleIrcExpiry(signature, components);
+		this.ctx.ui.requestRender();
+	}
+
+	async #handleSubagentSteerMessage(
+		event: Extract<AgentSessionEvent, { type: "subagent_steer_message" }>,
+	): Promise<void> {
+		const details = event.message.details as
+			| { observationId?: string; from?: string; to?: string; body?: string; state?: string }
+			| undefined;
+		const obsId = details?.observationId;
+		const signature = obsId
+			? `steer:${obsId}`
+			: `${event.message.role}:${event.message.customType}:${event.message.timestamp}:${details?.from}:${details?.to}:${details?.state}:${details?.body}`;
+		if (this.#renderedCustomMessages.has(signature)) {
+			return;
+		}
+		this.#renderedCustomMessages.add(signature);
+		this.#resetReadGroup();
+		this.ctx.addMessageToChat(event.message);
 		this.ctx.ui.requestRender();
 	}
 
@@ -613,6 +675,7 @@ export class EventController {
 		this.#readToolCallArgs.clear();
 		this.#readToolCallAssistantComponents.clear();
 		this.#lastAssistantComponent = undefined;
+		this.ctx.updateEditorBorderColor();
 		this.ctx.ui.requestRender();
 		this.#scheduleIdleCompaction();
 		this.sendCompletionNotification();
@@ -622,6 +685,7 @@ export class EventController {
 		event: Extract<AgentSessionEvent, { type: "auto_compaction_start" }>,
 	): Promise<void> {
 		this.#cancelIdleCompaction();
+		this.ctx.updateEditorBorderColor();
 		this.ctx.autoCompactionEscapeHandler = this.ctx.editor.onEscape;
 		this.ctx.editor.onEscape = () => {
 			this.ctx.session.abortCompaction();
@@ -652,13 +716,20 @@ export class EventController {
 			this.ctx.autoCompactionLoader = undefined;
 			this.ctx.statusContainer.clear();
 		}
+		this.ctx.updateEditorBorderColor();
 		const isHandoffAction = event.action === "handoff";
+		const continuationDisabled = event.continuationSkipReason === "auto_continue_disabled_non_resumable_tail";
 		if (event.aborted) {
 			this.ctx.showStatus(isHandoffAction ? "Auto-handoff cancelled" : "Auto context-full maintenance cancelled");
 		} else if (event.result) {
 			this.ctx.rebuildChatFromMessages();
 			this.ctx.statusLine.invalidate();
 			this.ctx.updateEditorTopBorder();
+			if (continuationDisabled && !isHandoffAction) {
+				this.ctx.showStatus("Context overflow recovery skipped: auto_continue_disabled_non_resumable_tail");
+			} else if (event.willRetry && !isHandoffAction) {
+				this.ctx.showStatus("Context overflow maintenance completed");
+			}
 		} else if (event.errorMessage) {
 			this.ctx.showWarning(event.errorMessage);
 		} else if (isHandoffAction) {
@@ -671,6 +742,11 @@ export class EventController {
 		} else if (event.skipped) {
 			// Benign skip: no model selected, no candidate models available, or nothing
 			// to compact yet. Not a failure — suppress the warning.
+			if (continuationDisabled) {
+				this.ctx.showStatus("Context overflow recovery skipped: auto_continue_disabled_non_resumable_tail");
+			} else if (event.willRetry && !isHandoffAction) {
+				this.ctx.showStatus("Context overflow maintenance skipped");
+			}
 		} else {
 			this.ctx.showWarning("Auto context-full maintenance failed; continuing without maintenance");
 		}
@@ -822,8 +898,46 @@ export class EventController {
 		return lastAssistant?.usage ? calculatePromptTokens(lastAssistant.usage) : 0;
 	}
 
+	#runCompletionNotifyCommand(payload: CompletionNotifyPayload): void {
+		const command = settings.getGlobal("completion.notifyCommand")?.trim();
+		if (!command) return;
+
+		try {
+			const proc = Bun.spawn(completionNotifyShellCommand(command), {
+				cwd: payload.cwd,
+				env: {
+					...process.env,
+					...buildCompletionNotifyEnv(payload),
+				},
+				stdin: "ignore",
+				stdout: "ignore",
+				stderr: "ignore",
+			});
+			proc.unref();
+			const timer = setTimeout(() => {
+				try {
+					proc.kill();
+				} catch {}
+			}, COMPLETION_NOTIFY_COMMAND_TIMEOUT_MS);
+			timer.unref?.();
+			void proc.exited
+				.then(exitCode => {
+					clearTimeout(timer);
+					if (exitCode !== 0) {
+						logger.warn("completion notify command exited non-zero", { exitCode });
+					}
+				})
+				.catch(error => {
+					clearTimeout(timer);
+					logger.warn("completion notify command failed", { error: String(error) });
+				});
+		} catch (error) {
+			logger.warn("completion notify command failed to start", { error: String(error) });
+		}
+	}
+
 	sendCompletionNotification(): void {
-		if (this.ctx.isBackgrounded === false) return;
+		const isBackgrounded = this.ctx.isBackgrounded !== false;
 		const notify = settings.get("completion.notify");
 		if (notify === "off") return;
 
@@ -834,9 +948,24 @@ export class EventController {
 		const last = this.ctx.session.getLastAssistantMessage?.();
 		if (last?.stopReason === "aborted" || last?.stopReason === "error") return;
 
-		const title = this.ctx.sessionManager.getSessionName();
-		const message = title ? `${title}: Complete` : "Complete";
-		TERMINAL.sendNotification(message);
+		const sessionName = this.ctx.sessionManager.getSessionName();
+		const title = sessionName ? `${sessionName}: Complete` : "Complete";
+		const summary = summaryFromMessage(last, 1000);
+		const body = summary ?? "Complete";
+		const sessionManager = this.ctx.sessionManager as { getCwd?: () => string; getSessionId?: () => string };
+		const payload: CompletionNotifyPayload = {
+			type: "agent-turn-complete",
+			title,
+			body,
+			cwd: sessionManager.getCwd?.() ?? settings.getCwd(),
+			sessionId: sessionManager.getSessionId?.(),
+			sessionName: sessionName || undefined,
+			lastAssistantMessage: summary,
+			stopReason: last?.stopReason,
+		};
+		ringTerminalBell("complete");
+		if (isBackgrounded) TERMINAL.sendNotification(title);
+		this.#runCompletionNotifyCommand(payload);
 	}
 
 	async handleBackgroundEvent(event: AgentSessionEvent): Promise<void> {

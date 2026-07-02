@@ -1,7 +1,15 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import {
+	auditPath,
+	modeStatePath,
+	sessionStateDir,
+	transactionJournalPath,
+} from "@sayknow-cli/coding-agent/skc-runtime/session-layout";
 import { runNativeStateCommand } from "@sayknow-cli/coding-agent/skc-runtime/state-runtime";
+
+const TEST_SESSION_ID = "test-session";
 
 const tempRoots: string[] = [];
 
@@ -18,10 +26,11 @@ afterEach(async () => {
 let priorSessionId: string | undefined;
 beforeAll(() => {
 	priorSessionId = process.env.SKC_SESSION_ID;
-	delete process.env.SKC_SESSION_ID;
+	process.env.SKC_SESSION_ID = TEST_SESSION_ID;
 });
 afterAll(() => {
 	if (priorSessionId !== undefined) process.env.SKC_SESSION_ID = priorSessionId;
+	else delete process.env.SKC_SESSION_ID;
 });
 
 async function writeJson(filePath: string, value: unknown): Promise<void> {
@@ -84,7 +93,7 @@ async function writeStampedState(root: string, skill: string, value: Record<stri
 		root,
 	);
 	expect(result.status).toBe(0);
-	return path.join(root, ".skc", "state", `${skill}-state.json`);
+	return modeStatePath(root, TEST_SESSION_ID, skill);
 }
 
 describe("skc state doctor", () => {
@@ -95,7 +104,7 @@ describe("skc state doctor", () => {
 			current_phase: "interviewing",
 		});
 		expect(statePath).toContain("deep-interview-state.json");
-		await writeJson(path.join(root, ".skc", "state", "audit.jsonl"), { seeded: true });
+		await writeJson(auditPath(root, TEST_SESSION_ID), { seeded: true });
 
 		const result = await runDoctorUnchanged(root, ["doctor", "--json"]);
 		expect(result.status).toBe(0);
@@ -109,11 +118,53 @@ describe("skc state doctor", () => {
 		});
 	});
 
+	it("uses SKC_SESSION_ID for session-scoped active state when --session-id is absent", async () => {
+		const root = await tempDir();
+		const sessionId = "doctor-env-default";
+		const write = await runNativeStateCommand(
+			[
+				"write",
+				"--mode",
+				"deep-interview",
+				"--session-id",
+				sessionId,
+				"--input",
+				JSON.stringify({ current_phase: "interviewing" }),
+				"--json",
+			],
+			root,
+		);
+		expect(write.status).toBe(0);
+		const handoff = await runNativeStateCommand(
+			["handoff", "--mode", "deep-interview", "--to", "ralplan", "--session-id", sessionId, "--json"],
+			root,
+		);
+		expect(handoff.status).toBe(0);
+
+		const prior = process.env.SKC_SESSION_ID;
+		process.env.SKC_SESSION_ID = sessionId;
+		try {
+			const result = await runDoctorUnchanged(root, ["doctor", "--json"]);
+			expect(result.status).toBe(0);
+			const parsed = JSON.parse(result.stdout ?? "{}");
+			expect(parsed.ok).toBe(true);
+			expect(parsed.summary.by_kind.stale_active_state).toBe(0);
+			expect(parsed.problems).toEqual([]);
+			expect(parsed.problems).not.toEqual(
+				expect.arrayContaining([expect.objectContaining({ type: "stale_active_state" })]),
+			);
+			expect(result.stdout).not.toContain("skc state ralplan clear");
+		} finally {
+			if (prior === undefined) process.env.SKC_SESSION_ID = TEST_SESSION_ID;
+			else process.env.SKC_SESSION_ID = prior;
+		}
+	});
+
 	it("detects orphan transaction journals and prints the hard prune fix command", async () => {
 		const root = await tempDir();
-		const journalPath = path.join(root, ".skc", "state", "transactions", "orphan.json");
+		const journalPath = transactionJournalPath(root, TEST_SESSION_ID, "orphan");
 		await writeJson(journalPath, { version: 1, mutation_id: "orphan", status: "committed", paths: [] });
-		await writeJson(path.join(root, ".skc", "state", "audit.jsonl"), { seeded: true });
+		await writeJson(auditPath(root, TEST_SESSION_ID), { seeded: true });
 
 		const text = await runDoctorUnchanged(root, ["doctor"]);
 		expect(text.status).toBe(1);
@@ -137,7 +188,7 @@ describe("skc state doctor", () => {
 		const state = JSON.parse(await fs.readFile(statePath, "utf-8"));
 		state.current_phase = "critic";
 		await writeJson(statePath, state);
-		await writeJson(path.join(root, ".skc", "state", "audit.jsonl"), { seeded: true });
+		await writeJson(auditPath(root, TEST_SESSION_ID), { seeded: true });
 
 		const result = await runDoctorUnchanged(root, ["doctor", "--skill", "ralplan", "--json"]);
 		expect(result.status).toBe(1);
@@ -155,9 +206,9 @@ describe("skc state doctor", () => {
 
 	it("detects schema violations and prints the migrate fix command", async () => {
 		const root = await tempDir();
-		const statePath = path.join(root, ".skc", "state", "ultragoal-state.json");
+		const statePath = modeStatePath(root, TEST_SESSION_ID, "ultragoal");
 		await writeJson(statePath, { skill: "ultragoal", version: "one", active: "yes", current_phase: 7 });
-		await writeJson(path.join(root, ".skc", "state", "audit.jsonl"), { seeded: true });
+		await writeJson(auditPath(root, TEST_SESSION_ID), { seeded: true });
 
 		const result = await runDoctorUnchanged(root, ["doctor", "--json"]);
 		expect(result.status).toBe(1);
@@ -174,7 +225,7 @@ describe("skc state doctor", () => {
 
 	it("detects stale active-state from raw snapshot and per-skill active entries", async () => {
 		const root = await tempDir();
-		const stateRoot = path.join(root, ".skc", "state");
+		const stateRoot = sessionStateDir(root, TEST_SESSION_ID);
 		const activeEntryPath = path.join(stateRoot, "active", "team.json");
 		await writeJson(activeEntryPath, { skill: "team", active: true, phase: "running" });
 		await writeJson(path.join(stateRoot, "skill-active-state.json"), {

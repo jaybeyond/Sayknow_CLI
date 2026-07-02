@@ -33,6 +33,43 @@ let activeTerminal: ProcessTerminal | null = null;
 // Track if a terminal was ever started (for emergency restore logic)
 let terminalEverStarted = false;
 
+// ── Durable stdout write guard ───────────────────────────────────────────────
+// Bun flushes TTY writes asynchronously, so a write that fails after the terminal
+// disconnects (controlling-terminal hangup, external-volume stall, etc.) surfaces as
+// an "error" event on process.stdout on a LATER tick. During shutdown, stop() removes
+// its per-instance "error" handler synchronously, but the restore writes it just issued
+// flush afterwards — so their EIO/EPIPE error arrives with no listener attached and
+// becomes an uncaughtException. That crashes the process with a nonzero exit, turning a
+// benign terminal hangup into a "[Process exited] / press any key to restart" loop.
+//
+// This guard is installed once and never removed, so such asynchronous write errors are
+// always handled (swallowed) instead of crashing. It is intentionally minimal: a stdout
+// write failure in a TUI is never recoverable beyond "stop writing", which the active
+// terminal's #markUnavailable already handles.
+let stdoutWriteGuardInstalled = false;
+/** Error codes for terminal/pipe write failures that should never crash the process. */
+export function isBenignTerminalWriteError(err: unknown): boolean {
+	const code = (err as { code?: unknown } | null | undefined)?.code;
+	return (
+		code === "EIO" ||
+		code === "EPIPE" ||
+		code === "EBADF" ||
+		code === "ENXIO" ||
+		code === "ENOTTY" ||
+		code === "ECONNRESET"
+	);
+}
+function installStdoutWriteGuard(): void {
+	if (stdoutWriteGuardInstalled) return;
+	stdoutWriteGuardInstalled = true;
+	process.stdout.on("error", (err: Error) => {
+		// Best-effort: mark the active terminal dead so it stops issuing further writes.
+		// The crucial part is simply that a listener EXISTS, so an asynchronous write
+		// failure is "handled" rather than promoted to a fatal uncaughtException.
+		activeTerminal?.markStdoutUnavailable(err);
+	});
+}
+
 const STD_INPUT_HANDLE = -10;
 const ENABLE_VIRTUAL_TERMINAL_INPUT = 0x0200;
 /**
@@ -41,6 +78,9 @@ const ENABLE_VIRTUAL_TERMINAL_INPUT = 0x0200;
  */
 export function emergencyTerminalRestore(): void {
 	try {
+		// Ensure the durable guard is present even if we reach here via the blind-restore
+		// path below without a live ProcessTerminal (idempotent).
+		installStdoutWriteGuard();
 		const terminal = activeTerminal;
 		if (terminal) {
 			terminal.stop();
@@ -124,6 +164,46 @@ export interface Terminal {
 	get appearance(): TerminalAppearance | undefined;
 }
 
+interface TerminalSizeStream {
+	columns?: number;
+	rows?: number;
+	getWindowSize?: () => [number, number] | number[];
+}
+
+function positiveDimension(value: unknown): number | undefined {
+	if (typeof value !== "number" || !Number.isFinite(value)) return undefined;
+	const dimension = Math.trunc(value);
+	return dimension > 0 ? dimension : undefined;
+}
+
+export function resolveTerminalColumns(
+	stream: TerminalSizeStream = process.stdout,
+	envColumns: string | undefined = Bun.env.COLUMNS,
+): number {
+	try {
+		const windowSize = stream.getWindowSize?.();
+		const liveColumns = positiveDimension(windowSize?.[0]);
+		if (liveColumns !== undefined) return liveColumns;
+	} catch {
+		// Fall back below when the stream cannot report a live TTY size.
+	}
+	return positiveDimension(stream.columns) ?? positiveDimension(Number(envColumns)) ?? 80;
+}
+
+export function resolveTerminalRows(
+	stream: TerminalSizeStream = process.stdout,
+	envRows: string | undefined = Bun.env.LINES,
+): number {
+	try {
+		const windowSize = stream.getWindowSize?.();
+		const liveRows = positiveDimension(windowSize?.[1]);
+		if (liveRows !== undefined) return liveRows;
+	} catch {
+		// Fall back below when the stream cannot report a live TTY size.
+	}
+	return positiveDimension(stream.rows) ?? positiveDimension(Number(envRows)) ?? 24;
+}
+
 function isWindowsSubsystemForLinux(): boolean {
 	return process.platform === "linux" && (!!$env.WSL_DISTRO_NAME || !!$env.WSL_INTEROP);
 }
@@ -175,6 +255,10 @@ export class ProcessTerminal implements Terminal {
 		// Register for emergency cleanup
 		activeTerminal = this;
 		terminalEverStarted = true;
+		// Install the durable stdout write guard before issuing ANY terminal writes, so
+		// an asynchronous EIO/EPIPE flush failure can never escape as an uncaughtException
+		// (which would crash the process and trigger a host restart loop).
+		installStdoutWriteGuard();
 
 		// Save previous state and enable raw mode
 		this.#wasRaw = process.stdin.isRaw || false;
@@ -700,6 +784,11 @@ export class ProcessTerminal implements Terminal {
 		}
 	}
 
+	/** Invoked by the durable module-level stdout write guard (see installStdoutWriteGuard). */
+	markStdoutUnavailable(err: unknown): void {
+		this.#markUnavailable(err, "stdout-error");
+	}
+
 	#markUnavailable(err: unknown, operation: string): void {
 		if (this.#dead) return;
 		this.#dead = true;
@@ -740,11 +829,11 @@ export class ProcessTerminal implements Terminal {
 	}
 
 	get columns(): number {
-		return process.stdout.columns || Number(Bun.env.COLUMNS) || 80;
+		return resolveTerminalColumns();
 	}
 
 	get rows(): number {
-		return process.stdout.rows || Number(Bun.env.LINES) || 24;
+		return resolveTerminalRows();
 	}
 
 	moveBy(lines: number): void {

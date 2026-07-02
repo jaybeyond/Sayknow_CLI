@@ -91,7 +91,7 @@ describe("pruning staleness red-team", () => {
 	it("different tools targeting the same path do not cross-supersede by path alone", () => {
 		const entries: SessionEntry[] = [];
 		const read = pair(entries, "c1", "read", { path: "src/shared.ts" });
-		const inspect = pair(entries, "c2", "inspect_image", { path: "src/shared.ts" });
+		const inspect = pair(entries, "c2", "lsp", { path: "src/shared.ts" });
 
 		const ids = prunedIds(entries, { ...EAGER, protectTokens: 1_000_000 });
 		expect(ids).not.toContain(read.id);

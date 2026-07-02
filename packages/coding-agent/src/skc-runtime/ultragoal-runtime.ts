@@ -1,15 +1,24 @@
 import * as crypto from "node:crypto";
+import * as os from "node:os";
 import * as path from "node:path";
 import { inflateSync } from "node:zlib";
-
+import { normalizeGoal } from "../goals/state";
+import { buildSessionContext, loadEntriesFromFile, type SessionEntry } from "../session/session-manager";
 import type { WorkflowHudSummary } from "../skill-state/active-state";
 import { buildUltragoalHudSummary as buildWorkflowUltragoalHudSummary } from "../skill-state/workflow-hud";
 import { renderCliWriteReceipt } from "./cli-write-receipt";
-import { DEFAULT_ULTRAGOAL_OBJECTIVE } from "./goal-mode-request";
-import { latestUltragoalLedgerEventFromText } from "./ledger-event-renderer";
+import { DEFAULT_ULTRAGOAL_OBJECTIVE, SKC_SESSION_FILE_ENV } from "./goal-mode-request";
+import { sessionUltragoalDir, skcRoot } from "./session-layout";
+import { resolveSkcSessionForRead, resolveSkcSessionForWrite, writeSessionActivityMarker } from "./session-resolution";
 import { renderUltragoalStatusMarkdown } from "./state-renderer";
 import { reconcileWorkflowSkillState } from "./state-runtime";
-import { appendJsonl, writeArtifact, writeJsonAtomic } from "./state-writer";
+import {
+	appendJsonl,
+	persistedStateRevision,
+	withWorkflowStateLock,
+	writeArtifact,
+	writeGuardedJsonAtomic,
+} from "./state-writer";
 
 export type UltragoalSkcGoalMode = "aggregate" | "per-story";
 export type UltragoalGoalStatus =
@@ -44,6 +53,7 @@ export interface UltragoalPlan {
 	goals: UltragoalGoal[];
 	createdAt: string;
 	updatedAt: string;
+	[key: string]: unknown;
 }
 
 export type UltragoalReceiptKind = "per-goal" | "final-aggregate";
@@ -77,6 +87,44 @@ export interface UltragoalLedgerEvent extends JsonObject {
 	timestamp?: string;
 }
 
+export type UltragoalNudgeSurface = "pause" | "drop" | "ask" | "premature_complete";
+export type UltragoalNudgeTargetKind = "story" | "final_aggregate_receipt";
+
+export interface UltragoalNudgeLedgerEvent extends UltragoalLedgerEvent {
+	event: "nudge";
+	goalId: string;
+	targetKind: UltragoalNudgeTargetKind;
+	surface: UltragoalNudgeSurface;
+	attempt: number;
+	budget: number;
+	reason: string;
+	currentGoalObjective?: string;
+}
+
+export interface UltragoalNudgeTarget {
+	goalId: string;
+	targetKind: UltragoalNudgeTargetKind;
+}
+
+export type UltragoalNudgeOutcome =
+	| {
+			nudged: true;
+			attempt: number;
+			budget: number;
+			goalId: string;
+			targetKind: UltragoalNudgeTargetKind;
+			event: UltragoalNudgeLedgerEvent;
+	  }
+	| {
+			nudged: false;
+			exhausted: true;
+			count: number;
+			budget: number;
+			goalId: string;
+			targetKind: UltragoalNudgeTargetKind;
+	  }
+	| { nudged: false; inactive: true; reason: string };
+
 export interface UltragoalPaths {
 	dir: string;
 	briefPath: string;
@@ -92,6 +140,11 @@ export interface UltragoalStatusSummary {
 	currentGoal?: UltragoalGoal;
 	counts: Record<UltragoalGoalStatus, number>;
 	goals: UltragoalGoal[];
+	nudgeBudget?: number;
+	nudgeCount?: number;
+	nudgeRemaining?: number;
+	nudgeGoalId?: string;
+	nudgeTargetKind?: UltragoalNudgeTargetKind;
 }
 
 export interface UltragoalCommandResult {
@@ -105,6 +158,10 @@ export interface UltragoalCommandResult {
 
 interface JsonObject {
 	[key: string]: unknown;
+}
+
+function currentUltragoalSessionId(cwd: string): string {
+	return resolveSkcSessionForWrite(cwd, { envSessionId: process.env.SKC_SESSION_ID }).skcSessionId;
 }
 
 const TERMINAL_OR_SKIPPED_STATUSES = new Set<UltragoalGoalStatus>(["complete", "superseded"]);
@@ -162,8 +219,9 @@ export function hashStructuredValue(value: unknown): string {
 		.digest("hex");
 }
 
-export function getUltragoalPaths(cwd: string): UltragoalPaths {
-	const dir = path.join(cwd, ".skc", "ultragoal");
+export function getUltragoalPaths(cwd: string, sessionId?: string | null): UltragoalPaths {
+	const explicitSessionId = sessionId?.trim() || process.env.SKC_SESSION_ID?.trim();
+	const dir = explicitSessionId ? sessionUltragoalDir(cwd, explicitSessionId) : path.join(skcRoot(cwd), "ultragoal");
 	return {
 		dir,
 		briefPath: path.join(dir, "brief.md"),
@@ -178,8 +236,10 @@ function isEnoent(error: unknown): boolean {
 	);
 }
 
-async function appendLedger(cwd: string, event: JsonObject): Promise<UltragoalLedgerEvent> {
-	const paths = getUltragoalPaths(cwd);
+async function appendLedger(cwd: string, event: JsonObject, sessionId?: string | null): Promise<UltragoalLedgerEvent> {
+	const resolvedSessionId =
+		sessionId?.trim() || resolveSkcSessionForWrite(cwd, { envSessionId: process.env.SKC_SESSION_ID }).skcSessionId;
+	const paths = getUltragoalPaths(cwd, resolvedSessionId);
 	const entry: UltragoalLedgerEvent = {
 		eventId: typeof event.eventId === "string" ? event.eventId : crypto.randomUUID(),
 		...event,
@@ -187,14 +247,18 @@ async function appendLedger(cwd: string, event: JsonObject): Promise<UltragoalLe
 	};
 	await appendJsonl(paths.ledgerPath, entry, {
 		cwd,
-		audit: { category: "ledger", verb: "append", owner: "skc-runtime" },
+		audit: { category: "ledger", verb: "append", owner: "skc-runtime", sessionId: resolvedSessionId },
 	});
+	await writeSessionActivityMarker(cwd, resolvedSessionId, { writer: "ultragoal-runtime", path: paths.ledgerPath });
 	return entry;
 }
 
-export async function readUltragoalLedger(cwd: string): Promise<UltragoalLedgerEvent[]> {
+export async function readUltragoalLedger(cwd: string, sessionId?: string | null): Promise<UltragoalLedgerEvent[]> {
+	const resolvedSessionId =
+		sessionId?.trim() ||
+		(await resolveSkcSessionForRead(cwd, { envSessionId: process.env.SKC_SESSION_ID })).skcSessionId;
 	try {
-		const raw = await Bun.file(getUltragoalPaths(cwd).ledgerPath).text();
+		const raw = await Bun.file(getUltragoalPaths(cwd, resolvedSessionId).ledgerPath).text();
 		return raw
 			.split(/\r?\n/)
 			.map(line => line.trim())
@@ -206,16 +270,171 @@ export async function readUltragoalLedger(cwd: string): Promise<UltragoalLedgerE
 	}
 }
 
-async function writePlan(cwd: string, plan: UltragoalPlan): Promise<void> {
-	const paths = getUltragoalPaths(cwd);
+export const DEFAULT_ULTRAGOAL_NUDGE_BUDGET = 10;
+
+/** Pure: count ledger `nudge` rows for an exact goalId. */
+export function countUltragoalNudges(ledger: readonly UltragoalLedgerEvent[], goalId: string): number {
+	return ledger.filter(event => event.event === "nudge" && event.goalId === goalId).length;
+}
+
+function parseNudgeBudgetValue(value: unknown): number | null {
+	return typeof value === "number" && Number.isFinite(value) && Number.isInteger(value) && value >= 0 ? value : null;
+}
+
+async function readSettingsNudgeBudget(settingsPath: string): Promise<number | null> {
+	try {
+		const raw = await Bun.file(settingsPath).text();
+		const parsed = JSON.parse(raw) as Record<string, unknown>;
+		// Support both the flat dotted key and a nested skc.ultragoal.nudgeBudget shape.
+		const flat = parseNudgeBudgetValue(parsed["skc.ultragoal.nudgeBudget"]);
+		if (flat !== null) return flat;
+		const skc = parsed.skc;
+		if (skc && typeof skc === "object") {
+			const ultragoal = (skc as Record<string, unknown>).ultragoal;
+			if (ultragoal && typeof ultragoal === "object") {
+				return parseNudgeBudgetValue((ultragoal as Record<string, unknown>).nudgeBudget);
+			}
+		}
+		return null;
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * Resolve the per-story nudge budget. Project `./.skc/settings.json` overrides the
+ * user settings (`$SKC_CONFIG_DIR/settings.json` or `~/.skc/settings.json`), else the
+ * default. Mirrors the `skc.deepInterview.ambiguityThreshold` user+project precedence.
+ */
+export async function resolveUltragoalNudgeBudget(cwd: string): Promise<{ budget: number; source: string }> {
+	const projectPath = path.join(skcRoot(cwd), "settings.json");
+	const project = await readSettingsNudgeBudget(projectPath);
+	if (project !== null) return { budget: project, source: projectPath };
+	const userDir = process.env.SKC_CONFIG_DIR?.trim() || path.join(os.homedir(), ".skc");
+	const userPath = path.join(userDir, "settings.json");
+	const user = await readSettingsNudgeBudget(userPath);
+	if (user !== null) return { budget: user, source: userPath };
+	return { budget: DEFAULT_ULTRAGOAL_NUDGE_BUDGET, source: "default" };
+}
+
+/**
+ * Pure canonical selector shared by guards and status so `nudgeGoalId` can never
+ * diverge between what a guard consumes and what status displays. Prefers the active
+ * current-goal objective, then active > pending > failed (matching `chooseNextGoal`),
+ * then the aggregate final-receipt target when all stories are complete but the
+ * aggregate run still needs a final receipt. Returns null for verified-complete or
+ * absent/unrelated plans.
+ */
+export function selectUltragoalNudgeTarget(
+	plan: UltragoalPlan,
+	options: { currentGoalObjective?: string; retryFailed?: boolean } = {},
+): UltragoalNudgeTarget | null {
+	const objective = options.currentGoalObjective?.trim();
+	if (objective) {
+		const matched = plan.goals.find(
+			goal => goal.objective.trim() === objective && SCHEDULABLE_STATUSES.has(goal.status),
+		);
+		if (matched) return { goalId: matched.id, targetKind: "story" };
+	}
+	const next = chooseNextGoal(plan, options.retryFailed === true);
+	if (next) return { goalId: next.id, targetKind: "story" };
+	const completion = getUltragoalRunCompletionState(plan, { retryFailed: options.retryFailed });
+	if (completion.needsFinalAggregateReceipt) {
+		const required = requiredUltragoalGoals(plan);
+		const finalGoal = required.at(-1);
+		if (finalGoal) return { goalId: finalGoal.id, targetKind: "final_aggregate_receipt" };
+	}
+	return null;
+}
+
+/**
+ * Atomic consuming writer. Locks the ledger path, rereads + counts nudge rows for the
+ * target story, and appends exactly one `nudge` row inside the same critical section
+ * only while budget remains. Reuses the lockless `appendLedger` inside the lock (it
+ * does not acquire a conflicting lock), so concurrent guarded attempts cannot both
+ * observe `count = budget - 1` and overshoot the budget.
+ */
+export async function recordUltragoalNudgeIfBudgetRemaining(input: {
+	cwd: string;
+	sessionId?: string | null;
+	target: UltragoalNudgeTarget;
+	surface: UltragoalNudgeSurface;
+	budget: number;
+	reason: string;
+	currentGoalObjective?: string;
+}): Promise<UltragoalNudgeOutcome> {
+	const { cwd, sessionId, target, surface, budget, reason } = input;
+	if (!Number.isFinite(budget) || budget <= 0) {
+		return {
+			nudged: false,
+			exhausted: true,
+			count: 0,
+			budget: Math.max(0, budget | 0),
+			goalId: target.goalId,
+			targetKind: target.targetKind,
+		};
+	}
+	const resolvedSessionId =
+		sessionId?.trim() || resolveSkcSessionForWrite(cwd, { envSessionId: process.env.SKC_SESSION_ID }).skcSessionId;
+	const paths = getUltragoalPaths(cwd, resolvedSessionId);
+	return withWorkflowStateLock(
+		paths.ledgerPath,
+		async () => {
+			const ledger = await readUltragoalLedger(cwd, resolvedSessionId);
+			const count = countUltragoalNudges(ledger, target.goalId);
+			if (count >= budget) {
+				return {
+					nudged: false,
+					exhausted: true,
+					count,
+					budget,
+					goalId: target.goalId,
+					targetKind: target.targetKind,
+				} as const;
+			}
+			const attempt = count + 1;
+			const entry = (await appendLedger(
+				cwd,
+				{
+					event: "nudge",
+					goalId: target.goalId,
+					targetKind: target.targetKind,
+					surface,
+					attempt,
+					budget,
+					reason,
+					...(input.currentGoalObjective ? { currentGoalObjective: input.currentGoalObjective } : {}),
+				},
+				resolvedSessionId,
+			)) as UltragoalNudgeLedgerEvent;
+			return {
+				nudged: true,
+				attempt,
+				budget,
+				goalId: target.goalId,
+				targetKind: target.targetKind,
+				event: entry,
+			} as const;
+		},
+		{ cwd },
+	);
+}
+
+async function writePlan(cwd: string, plan: UltragoalPlan, sessionId?: string | null): Promise<void> {
+	const resolvedSessionId =
+		sessionId?.trim() || resolveSkcSessionForWrite(cwd, { envSessionId: process.env.SKC_SESSION_ID }).skcSessionId;
+	const paths = getUltragoalPaths(cwd, resolvedSessionId);
 	await writeArtifact(paths.briefPath, `${plan.brief.trim()}\n`, {
 		cwd,
-		audit: { category: "artifact", verb: "write", owner: "skc-runtime" },
+		audit: { category: "artifact", verb: "write", owner: "skc-runtime", sessionId: resolvedSessionId },
 	});
-	await writeJsonAtomic(paths.goalsPath, plan, {
+	await writeGuardedJsonAtomic(paths.goalsPath, plan, {
 		cwd,
-		audit: { category: "state", verb: "write", owner: "skc-runtime" },
+		policy: "source",
+		expectedRevision: typeof plan.state_revision === "number" ? persistedStateRevision(plan) : undefined,
+		audit: { category: "state", verb: "write", owner: "skc-runtime", sessionId: resolvedSessionId },
 	});
+	await writeSessionActivityMarker(cwd, resolvedSessionId, { writer: "ultragoal-runtime", path: paths.goalsPath });
 }
 
 function requiredUltragoalGoals(plan: UltragoalPlan): UltragoalGoal[] {
@@ -426,6 +645,7 @@ function normalizePlan(raw: unknown): UltragoalPlan {
 		const objective = nonEmptyString(goalRecord.objective) ?? title;
 		const goalCreatedAt = nonEmptyString(goalRecord.createdAt) ?? createdAt;
 		return {
+			...goalRecord,
 			id,
 			title,
 			objective,
@@ -459,12 +679,18 @@ function normalizePlan(raw: unknown): UltragoalPlan {
 		goals,
 		createdAt,
 		updatedAt,
+		...(typeof record.state_revision === "number" && Number.isFinite(record.state_revision)
+			? { state_revision: record.state_revision }
+			: {}),
 	};
 }
 
-export async function readUltragoalPlan(cwd: string): Promise<UltragoalPlan | null> {
+export async function readUltragoalPlan(cwd: string, sessionId?: string | null): Promise<UltragoalPlan | null> {
+	const resolvedSessionId =
+		sessionId?.trim() ||
+		(await resolveSkcSessionForRead(cwd, { envSessionId: process.env.SKC_SESSION_ID })).skcSessionId;
 	try {
-		return normalizePlan(await Bun.file(getUltragoalPaths(cwd).goalsPath).json());
+		return normalizePlan(await Bun.file(getUltragoalPaths(cwd, resolvedSessionId).goalsPath).json());
 	} catch (error) {
 		if (isEnoent(error)) return null;
 		throw error;
@@ -483,9 +709,12 @@ function emptyCounts(): Record<UltragoalGoalStatus, number> {
 	};
 }
 
-export async function getUltragoalStatus(cwd: string): Promise<UltragoalStatusSummary> {
-	const paths = getUltragoalPaths(cwd);
-	const plan = await readUltragoalPlan(cwd);
+export async function getUltragoalStatus(cwd: string, sessionId?: string | null): Promise<UltragoalStatusSummary> {
+	const resolvedSessionId =
+		sessionId?.trim() ||
+		(await resolveSkcSessionForRead(cwd, { envSessionId: process.env.SKC_SESSION_ID })).skcSessionId;
+	const paths = getUltragoalPaths(cwd, resolvedSessionId);
+	const plan = await readUltragoalPlan(cwd, resolvedSessionId);
 	const counts = emptyCounts();
 	if (!plan) return { exists: false, status: "missing", paths, counts, goals: [] };
 	for (const goal of plan.goals) counts[goal.status] += 1;
@@ -496,6 +725,20 @@ export async function getUltragoalStatus(cwd: string): Promise<UltragoalStatusSu
 	else if (counts.active > 0) status = "active";
 	else if (counts.failed > 0) status = "failed";
 	else if (counts.blocked > 0 || counts.review_blocked > 0) status = "blocked";
+	const nudgeTarget = selectUltragoalNudgeTarget(plan, { currentGoalObjective: currentGoal?.objective });
+	let nudgeFields: Partial<UltragoalStatusSummary> = {};
+	if (nudgeTarget) {
+		const { budget } = await resolveUltragoalNudgeBudget(cwd);
+		const ledger = await readUltragoalLedger(cwd, resolvedSessionId);
+		const nudgeCount = countUltragoalNudges(ledger, nudgeTarget.goalId);
+		nudgeFields = {
+			nudgeBudget: budget,
+			nudgeCount,
+			nudgeRemaining: Math.max(0, budget - nudgeCount),
+			nudgeGoalId: nudgeTarget.goalId,
+			nudgeTargetKind: nudgeTarget.targetKind,
+		};
+	}
 	return {
 		exists: true,
 		status,
@@ -504,6 +747,7 @@ export async function getUltragoalStatus(cwd: string): Promise<UltragoalStatusSu
 		currentGoal,
 		counts,
 		goals: plan.goals,
+		...nudgeFields,
 	};
 }
 export function buildUltragoalHudSummary(
@@ -577,6 +821,7 @@ export async function createUltragoalPlan(input: {
 	cwd: string;
 	brief: string;
 	skcGoalMode?: UltragoalSkcGoalMode;
+	sessionId?: string | null;
 }): Promise<UltragoalPlan> {
 	const brief = input.brief.trim();
 	if (!brief) throw new Error("ultragoal brief is required");
@@ -601,8 +846,8 @@ export async function createUltragoalPlan(input: {
 		createdAt: now,
 		updatedAt: now,
 	};
-	await writePlan(input.cwd, plan);
-	await appendLedger(input.cwd, { event: "plan_created", goalIds: plan.goals.map(goal => goal.id) });
+	await writePlan(input.cwd, plan, input.sessionId);
+	await appendLedger(input.cwd, { event: "plan_created", goalIds: plan.goals.map(goal => goal.id) }, input.sessionId);
 	return plan;
 }
 
@@ -639,12 +884,16 @@ export function getUltragoalRunCompletionState(
 	};
 }
 
-export async function startNextUltragoalGoal(input: { cwd: string; retryFailed?: boolean }): Promise<{
+export async function startNextUltragoalGoal(input: {
+	cwd: string;
+	retryFailed?: boolean;
+	sessionId?: string | null;
+}): Promise<{
 	plan: UltragoalPlan;
 	goal?: UltragoalGoal;
 	allComplete: boolean;
 }> {
-	const plan = await readUltragoalPlan(input.cwd);
+	const plan = await readUltragoalPlan(input.cwd, input.sessionId);
 	if (!plan) throw new Error("No ultragoal plan found. Run `skc ultragoal create-goals --brief ...` first.");
 	const goal = chooseNextGoal(plan, input.retryFailed === true);
 	if (!goal) return { plan, allComplete: getUltragoalRunCompletionState(plan).allComplete };
@@ -654,8 +903,8 @@ export async function startNextUltragoalGoal(input: { cwd: string; retryFailed?:
 		goal.startedAt = goal.startedAt ?? now;
 		goal.updatedAt = now;
 		plan.updatedAt = now;
-		await writePlan(input.cwd, plan);
-		await appendLedger(input.cwd, { event: "goal_started", goalId: goal.id });
+		await writePlan(input.cwd, plan, input.sessionId);
+		await appendLedger(input.cwd, { event: "goal_started", goalId: goal.id }, input.sessionId);
 	}
 	return { plan, goal, allComplete: false };
 }
@@ -798,6 +1047,14 @@ function normalizedEvidenceKind(row: JsonObject): string {
 function evidenceKindMatches(kind: string, words: string[]): boolean {
 	return words.some(word => kind.includes(word));
 }
+function formatActualArtifactKinds(artifactIds: string[], kinds: string[]): string {
+	if (artifactIds.length === 0) return "none";
+	return artifactIds.map((id, index) => `${id}=${kinds[index] ?? "<missing-kind>"}`).join(", ");
+}
+
+function formatExpectedKindWords(words: string[]): string {
+	return words.map(word => `"${word}"`).join(", ");
+}
 
 type SurfaceFamily = "web" | "cli" | "native" | "api-package" | "algorithm-math" | "unknown";
 
@@ -865,32 +1122,38 @@ function categorizeComputerChangePath(value: string): UltragoalChangeCategory {
 	return "other";
 }
 
-function isComputerChangePath(row: UltragoalChangeSetPath): boolean {
-	return (
-		categorizeComputerChangePath(row.path) !== "other" ||
-		(row.oldPath ? categorizeComputerChangePath(row.oldPath) !== "other" : false)
-	);
+function isComputerControlSurfaceCategory(category: UltragoalChangeCategory): boolean {
+	// The computer-use red-team suite is conditional, not universal (see the
+	// ultragoal SKILL): require it only when the change actually touches
+	// computer-control source — the computer tool (`tool`), its settings/registry
+	// wiring (`settings-registry`), or computer Rust (`code`). A bare regeneration
+	// of the SHARED native binding (`generated-binding`: packages/natives/native/
+	// index.{d.ts,js}) is NOT by itself a computer-use change: that file is
+	// generated from Rust, so any real computer-use behavior change must also
+	// touch one of the categories above and will still trigger the suite. Treating
+	// the regenerated aggregate binding as a computer surface forced the suite on
+	// unrelated features (e.g. notifications), which the SKILL explicitly warns
+	// against, so it is excluded here.
+	return category === "code" || category === "tool" || category === "settings-registry";
 }
 
-function isDocsOnlyStaticComputerChangeSet(changeSet: UltragoalChangeSet | undefined): boolean {
-	if (!changeSet || changeSet.paths.length === 0) return false;
-	return changeSet.paths.every(row => {
-		const category = row.category ?? categorizeComputerChangePath(row.path);
-		const oldCategory = row.oldPath ? categorizeComputerChangePath(row.oldPath) : category;
-		return category === "docs-static" && oldCategory === "docs-static";
-	});
+function isComputerControlSurfaceChangePath(row: UltragoalChangeSetPath): boolean {
+	const category = row.category ?? categorizeComputerChangePath(row.path);
+	const oldCategory = row.oldPath ? categorizeComputerChangePath(row.oldPath) : category;
+	return isComputerControlSurfaceCategory(category) || isComputerControlSurfaceCategory(oldCategory);
 }
 
 function trustedChangeSetRequiresComputerSuite(changeSet: UltragoalChangeSet | undefined): boolean {
 	if (!changeSet?.trusted) return false;
-	if (isDocsOnlyStaticComputerChangeSet(changeSet)) return false;
-	return changeSet.paths.some(isComputerChangePath);
+	return changeSet.paths.some(isComputerControlSurfaceChangePath);
 }
 
 function requiresComputerRedTeamSuite(executorQa: JsonObject, changeSet: UltragoalChangeSet | undefined): boolean {
 	if (trustedChangeSetRequiresComputerSuite(changeSet)) return true;
 	const declaredPaths = Array.isArray(executorQa.changedPaths) ? executorQa.changedPaths : [];
-	return declaredPaths.some(value => typeof value === "string" && categorizeComputerChangePath(value) !== "other");
+	return declaredPaths.some(
+		value => typeof value === "string" && isComputerControlSurfaceCategory(categorizeComputerChangePath(value)),
+	);
 }
 
 function normalizeAdversarialCaseId(value: string): string {
@@ -937,7 +1200,7 @@ function validateSurfaceArtifactCompatibility(
 		const hasVisual = kinds.some(kind => evidenceKindMatches(kind, ["screenshot", "image", "visual"]));
 		if (!hasBrowser || !hasVisual) {
 			throw new Error(
-				`qualityGate ${fieldName} for GUI/web surfaces must reference browser automation plus screenshot or image-verdict artifacts`,
+				`qualityGate ${fieldName} for GUI/web surfaces must reference browser automation plus screenshot or image-verdict artifacts; surface "${surface}" expected one artifact kind containing one of ${formatExpectedKindWords(["browser", "playwright", "pandawright", "automation"])} and one containing one of ${formatExpectedKindWords(["screenshot", "image", "visual"])}; actual artifact kinds: ${formatActualArtifactKinds(artifactIds, kinds)}`,
 			);
 		}
 		return;
@@ -964,7 +1227,7 @@ function validateSurfaceArtifactCompatibility(
 		const expected = surfaceFamilies[family];
 		if (!kinds.some(kind => evidenceKindMatches(kind, expected.evidence))) {
 			throw new Error(
-				`qualityGate ${fieldName} for ${expected.label} surfaces must reference compatible artifact kinds`,
+				`qualityGate ${fieldName} for ${expected.label} surfaces must reference compatible artifact kinds; surface "${surface}" expected at least one artifact kind containing one of ${formatExpectedKindWords(expected.evidence)}; actual artifact kinds: ${formatActualArtifactKinds(artifactIds, kinds)}`,
 			);
 		}
 	}
@@ -1460,6 +1723,20 @@ function isAllowedCliReplayCommand(command: readonly string[]): boolean {
 	if (executable === "skc") return args.length === 1 && ["read", "status"].includes(args[0] ?? "");
 	return false;
 }
+function summarizeBlockedCliReplayCommand(command: readonly string[]): string {
+	const executable = command[0] ? basenameCommand(command[0]) : "<missing>";
+	const argCount = Math.max(0, command.length - 1);
+	return `${JSON.stringify(executable)} with ${argCount} arg${argCount === 1 ? "" : "s"}`;
+}
+
+function cliReplayAllowlistDescription(): string {
+	return [
+		'`bun --version`, `node --version`, or deterministic `bun/node -e "console.log(...)"`',
+		"`npm|pnpm|yarn --version` or `npm|pnpm|yarn list`",
+		"read-only `git status|rev-parse|merge-base|diff|show|log` with safe args",
+		"`skc read` or `skc status`",
+	].join("; ");
+}
 
 function resolveCliReplayCommand(command: string[]): string[] {
 	if (basenameCommand(command[0]!) === "bun") return [process.execPath, ...command.slice(1)];
@@ -1548,8 +1825,11 @@ function parseCliReplayRecord(
 	if (!command) throw new Error(`qualityGate ${fieldName}.command must be a non-empty string array`);
 	if (record.replaySafe !== true)
 		throw new Error(`qualityGate ${fieldName}.replaySafe must be true before CLI replay executes`);
-	if (!isAllowedCliReplayCommand(command))
-		throw new Error(`qualityGate ${fieldName}.command is not in the conservative CLI replay allowlist`);
+	if (!isAllowedCliReplayCommand(command)) {
+		throw new Error(
+			`qualityGate ${fieldName}.command is not in the conservative CLI replay allowlist; command ${summarizeBlockedCliReplayCommand(command)} is blocked. Allowed replay commands: ${cliReplayAllowlistDescription()}. For other commands, provide audited replayExempt metadata with reasonCode, reason, approvedBy, and fallbackArtifactRefs that point to a structurally valid fallback artifact.`,
+		);
+	}
 	if (record.normalization !== undefined && record.normalization !== "default") {
 		throw new Error(`qualityGate ${fieldName}.normalization must be default when provided`);
 	}
@@ -2201,6 +2481,28 @@ function snapshotUpdatedAtMilliseconds(value: unknown): number | null {
 	const parsed = Date.parse(trimmed);
 	return Number.isFinite(parsed) ? parsed : null;
 }
+
+function singleSessionLeafId(entries: readonly SessionEntry[]): string | undefined {
+	if (entries.length === 0) return undefined;
+	const parentIds = new Set(
+		entries.map(entry => entry.parentId).filter((parentId): parentId is string => typeof parentId === "string"),
+	);
+	const leafIds = entries.map(entry => entry.id).filter(id => !parentIds.has(id));
+	return leafIds.length === 1 ? leafIds[0] : undefined;
+}
+
+async function readCurrentSessionSkcGoalSnapshot(): Promise<unknown | undefined> {
+	const sessionFile = process.env[SKC_SESSION_FILE_ENV]?.trim();
+	if (!sessionFile) return undefined;
+	const fileEntries = await loadEntriesFromFile(sessionFile);
+	const entries = fileEntries.filter((entry): entry is SessionEntry => entry.type !== "session");
+	const leafId = singleSessionLeafId(entries);
+	if (!leafId) return undefined;
+	const context = buildSessionContext(entries, leafId);
+	if (context.mode !== "goal" && context.mode !== "goal_paused") return undefined;
+	const goal = normalizeGoal(context.modeData?.goal);
+	return goal ? { goal } : undefined;
+}
 async function readSkcGoalSnapshot(input: {
 	cwd: string;
 	value: string | undefined;
@@ -2210,13 +2512,15 @@ async function readSkcGoalSnapshot(input: {
 	errorPrefix: string;
 	allowCompletedLegacyBlocker?: boolean;
 }): Promise<unknown> {
-	if (!input.value?.trim()) {
+	const snapshot = input.value?.trim()
+		? await readStructuredValue(input.cwd, input.value)
+		: await readCurrentSessionSkcGoalSnapshot();
+	if (snapshot === undefined) {
 		if (!input.required) return undefined;
 		throw new Error(
-			`${input.errorPrefix} require --skc-goal-json from a fresh active goal({"op":"get"}) snapshot; this is the SKC goal-mode receipt, not the .skc/ultragoal/goals.json goal record`,
+			`${input.errorPrefix} require an active SKC goal-mode snapshot from the current session or --skc-goal-json; this is the SKC goal-mode receipt, not the .skc/ultragoal/goals.json goal record`,
 		);
 	}
-	const snapshot = await readStructuredValue(input.cwd, input.value);
 	const snapshotObject = qualityGateObject(snapshot);
 	const detailsObject = qualityGateObject(snapshotObject?.details);
 	const goalObject = qualityGateObject(snapshotObject?.goal) ?? qualityGateObject(detailsObject?.goal);
@@ -2350,6 +2654,8 @@ export async function checkpointUltragoalGoal(input: {
 	if (input.status === "complete") goal.completedAt = now;
 	plan.updatedAt = now;
 	await writePlan(input.cwd, plan);
+	const persistedPlan = await readUltragoalPlan(input.cwd);
+	if (persistedPlan?.state_revision !== undefined) plan.state_revision = persistedPlan.state_revision;
 	await appendLedger(input.cwd, {
 		eventId: pendingCheckpointEventId,
 		event: "goal_checkpointed",
@@ -2799,6 +3105,8 @@ export async function recordUltragoalReviewBlockers(input: {
 		evidence: input.evidence,
 		skcGoalJson: input.skcGoalJson,
 	});
+	const persistedPlan = await readUltragoalPlan(input.cwd);
+	if (persistedPlan?.state_revision !== undefined) plan.state_revision = persistedPlan.state_revision;
 	const now = new Date().toISOString();
 	const nextId = `G${String(plan.goals.length + 1).padStart(3, "0")}`;
 	plan.goals.push({
@@ -2814,6 +3122,33 @@ export async function recordUltragoalReviewBlockers(input: {
 	await writePlan(input.cwd, plan);
 	await appendLedger(input.cwd, { event: "review_blockers_recorded", goalId: input.goalId, blockerGoalId: nextId });
 	return plan;
+}
+
+export type UltragoalBlockerClassification = "human_blocked" | "resolvable";
+
+/**
+ * Record an audited blocker triage classification in the durable ledger. A
+ * `human_blocked` classification is the only thing that authorizes
+ * `goal({"op":"pause"})` while an Ultragoal run is active; `resolvable` is an
+ * audit note and never unblocks pause.
+ */
+export async function recordUltragoalBlockerClassification(input: {
+	cwd: string;
+	classification: UltragoalBlockerClassification;
+	evidence: string;
+	goalId?: string;
+}): Promise<UltragoalLedgerEvent> {
+	const evidence = input.evidence.trim();
+	if (!evidence) throw new Error("classify-blocker --evidence is required");
+	if (input.classification !== "human_blocked" && input.classification !== "resolvable") {
+		throw new Error('classify-blocker --classification must be "human_blocked" or "resolvable"');
+	}
+	return appendLedger(input.cwd, {
+		event: "blocker_classified",
+		classification: input.classification,
+		...(input.goalId?.trim() ? { goalId: input.goalId.trim() } : {}),
+		evidence,
+	});
 }
 
 type UltragoalReviewMode = "review-only" | "review-start";
@@ -2883,11 +3218,33 @@ async function spawnText(
 	}
 }
 
-async function resolveGitBase(cwd: string, branch?: string): Promise<string> {
-	const candidates = branch ? [branch] : ["origin/main", "origin/master", "main", "master"];
-	for (const candidate of candidates) {
-		const exists = await spawnText(["git", "rev-parse", "--verify", candidate], { cwd, timeoutMs: 3000 });
-		if (exists.ok) return candidate;
+export async function resolveGitBase(cwd: string, branch?: string): Promise<string> {
+	if (branch) {
+		const exists = await spawnText(["git", "rev-parse", "--verify", branch], { cwd, timeoutMs: 3000 });
+		if (exists.ok) return branch;
+	} else {
+		// Prefer the NEAREST integration base (the branch this work actually forks
+		// from) rather than always `main`. A branch opened against `dev` must be
+		// scoped to `dev`; using a stale `main` sweeps in unrelated trunk history
+		// and mis-attributes other people's changes to this story (e.g. falsely
+		// tripping change-scoped gates). Among existing candidates, pick the one
+		// whose merge-base with HEAD is closest to HEAD (fewest commits ahead).
+		const candidates = ["origin/dev", "dev", "origin/main", "origin/master", "main", "master"];
+		let best: { ref: string; ahead: number } | undefined;
+		for (const candidate of candidates) {
+			const exists = await spawnText(["git", "rev-parse", "--verify", candidate], { cwd, timeoutMs: 3000 });
+			if (!exists.ok) continue;
+			const mergeBase = await spawnText(["git", "merge-base", "HEAD", candidate], { cwd, timeoutMs: 3000 });
+			if (!mergeBase.ok || !mergeBase.stdout.trim()) continue;
+			const count = await spawnText(["git", "rev-list", "--count", `${mergeBase.stdout.trim()}..HEAD`], {
+				cwd,
+				timeoutMs: 3000,
+			});
+			const ahead = Number.parseInt(count.stdout.trim(), 10);
+			if (!Number.isFinite(ahead)) continue;
+			if (!best || ahead < best.ahead) best = { ref: candidate, ahead };
+		}
+		if (best) return best.ref;
 	}
 	const mergeBase = await spawnText(["git", "merge-base", "HEAD", "origin/main"], { cwd, timeoutMs: 3000 });
 	if (mergeBase.ok && mergeBase.stdout.trim()) return mergeBase.stdout.trim();
@@ -3208,6 +3565,7 @@ const FLAGS_WITH_VALUES = new Set([
 	"--rationale",
 	"--replacements-json",
 	"--order-json",
+	"--classification",
 ]);
 
 function isHelpArg(arg: string): boolean {
@@ -3247,18 +3605,19 @@ function renderUltragoalHelp(args: readonly string[]): string | null {
 			"      --status=<value>             pending|active|complete|failed|blocked|review_blocked|superseded",
 			"      --evidence=<value>           Completion or checkpoint evidence text",
 			"      --quality-gate-json=<value>  JSON string or path for complete checkpoints",
-			'      --skc-goal-json=<value>      JSON string or path containing the current goal({"op":"get"}) snapshot',
+			"      --skc-goal-json=<value>      Optional JSON/path override for current goal snapshot; omitted complete checkpoints read current session goal state",
 			"      --json                       Output a machine-readable receipt",
 			"",
 			"COMPLETE CHECKPOINT RECEIPTS",
 			"  --quality-gate-json must be an object with architectReview, executorQa, and iteration.",
 			"  executorQa.contractCoverage[] rows require an obligation field; description is not a substitute.",
-			'  --skc-goal-json must contain the active SKC goal-mode snapshot from goal({"op":"get"}), not the .skc/ultragoal/goals.json goal record.',
+			"  Complete checkpoints use the current session's active SKC goal-mode snapshot when --skc-goal-json is omitted.",
+			"  Explicit --skc-goal-json values must contain an active SKC goal-mode snapshot, not the .skc/ultragoal/goals.json goal record.",
 			"  goal.updatedAt may be epoch milliseconds or an ISO timestamp and must be fresh.",
 			"",
 			"EXAMPLES",
 			'  $ skc ultragoal checkpoint --goal-id G001 --status blocked --evidence "waiting on review"',
-			'  $ skc ultragoal checkpoint --goal-id G001 --status complete --evidence "tests passed" --skc-goal-json ./goal.json --quality-gate-json ./quality-gate.json --json',
+			'  $ skc ultragoal checkpoint --goal-id G001 --status complete --evidence "tests passed" --quality-gate-json ./quality-gate.json --json',
 			"",
 		].join("\n");
 	}
@@ -3282,6 +3641,25 @@ function renderUltragoalHelp(args: readonly string[]): string | null {
 			"",
 		].join("\n");
 	}
+	if (subject === "classify-blocker") {
+		return [
+			"Run native SKC Ultragoal workflow commands",
+			"",
+			"USAGE",
+			"  $ skc ultragoal classify-blocker --classification <human_blocked|resolvable> --evidence <text> [FLAGS]",
+			"",
+			"FLAGS",
+			"      --classification=<value>     Required. human_blocked authorizes pause only as the latest ledger event; resolvable never authorizes pause",
+			"      --evidence=<value>           Required. Specific blocker evidence; must name the human-only dependency for human_blocked",
+			"      --goal-id=<value>            Optional durable .skc/ultragoal goal id, e.g. G001",
+			"      --json                       Output a machine-readable receipt",
+			"",
+			"EXAMPLES",
+			'  $ skc ultragoal classify-blocker --classification resolvable --evidence "failing test can be fixed autonomously"',
+			'  $ skc ultragoal classify-blocker --classification human_blocked --evidence "user must provide production API credentials" --goal-id G001',
+			"",
+		].join("\n");
+	}
 	return [
 		"Run native SKC Ultragoal workflow commands",
 		"",
@@ -3296,8 +3674,9 @@ function renderUltragoalHelp(args: readonly string[]): string | null {
 		"  review",
 		"  steer",
 		"  record-review-blockers",
+		"  classify-blocker",
 		"",
-		"Run `skc ultragoal checkpoint --help` or `skc ultragoal review --help` for command-specific requirements.",
+		"Run `skc ultragoal checkpoint --help`, `skc ultragoal review --help`, or `skc ultragoal classify-blocker --help` for command-specific requirements.",
 		"",
 	].join("\n");
 }
@@ -3329,7 +3708,7 @@ function renderCompleteHandoff(
 			goal_id: result.goal?.id,
 			goal_status: result.goal?.status,
 			skc_objective: result.plan.skcObjective,
-			goals_path: getUltragoalPaths(cwd).goalsPath,
+			goals_path: getUltragoalPaths(cwd, currentUltragoalSessionId(cwd)).goalsPath,
 		});
 	}
 	if (result.allComplete) return "ultragoal complete all=true\n";
@@ -3353,7 +3732,7 @@ function renderCheckpointContinuation(
 			ok: true,
 			goal_id: result.checkpointedGoal.id,
 			status,
-			goals_path: getUltragoalPaths(cwd).goalsPath,
+			goals_path: getUltragoalPaths(cwd, currentUltragoalSessionId(cwd)).goalsPath,
 			completion_receipt_kind: result.checkpointedGoal.completionVerification?.receiptKind,
 			quality_gate_hash: result.checkpointedGoal.completionVerification?.qualityGateHash,
 			all_complete: result.allComplete,
@@ -3407,7 +3786,12 @@ async function executeUltragoalSteeringCommand(args: readonly string[], cwd: str
 				return {
 					kind,
 					message: "Accepted add_subgoal steering.\n",
-					receipt: { ok: true, kind, goal_id: result.goalId, goals_path: getUltragoalPaths(cwd).goalsPath },
+					receipt: {
+						ok: true,
+						kind,
+						goal_id: result.goalId,
+						goals_path: getUltragoalPaths(cwd, currentUltragoalSessionId(cwd)).goalsPath,
+					},
 				};
 			}
 			case "split_subgoal": {
@@ -3427,7 +3811,7 @@ async function executeUltragoalSteeringCommand(args: readonly string[], cwd: str
 						kind,
 						goal_id: result.goalId,
 						replacement_goal_ids: result.replacementGoalIds,
-						goals_path: getUltragoalPaths(cwd).goalsPath,
+						goals_path: getUltragoalPaths(cwd, currentUltragoalSessionId(cwd)).goalsPath,
 					},
 				};
 			}
@@ -3446,7 +3830,7 @@ async function executeUltragoalSteeringCommand(args: readonly string[], cwd: str
 						ok: true,
 						kind,
 						pending_goal_ids: result.pendingGoalIds,
-						goals_path: getUltragoalPaths(cwd).goalsPath,
+						goals_path: getUltragoalPaths(cwd, currentUltragoalSessionId(cwd)).goalsPath,
 					},
 				};
 			}
@@ -3468,7 +3852,7 @@ async function executeUltragoalSteeringCommand(args: readonly string[], cwd: str
 						kind,
 						goal_id: result.goalId,
 						changed_fields: result.changedFields,
-						goals_path: getUltragoalPaths(cwd).goalsPath,
+						goals_path: getUltragoalPaths(cwd, currentUltragoalSessionId(cwd)).goalsPath,
 					},
 				};
 			}
@@ -3477,7 +3861,11 @@ async function executeUltragoalSteeringCommand(args: readonly string[], cwd: str
 				return {
 					kind,
 					message: "Accepted annotate_ledger steering.\n",
-					receipt: { ok: true, kind, ledger_path: getUltragoalPaths(cwd).ledgerPath },
+					receipt: {
+						ok: true,
+						kind,
+						ledger_path: getUltragoalPaths(cwd, currentUltragoalSessionId(cwd)).ledgerPath,
+					},
 				};
 			}
 			case "mark_blocked_superseded": {
@@ -3496,7 +3884,7 @@ async function executeUltragoalSteeringCommand(args: readonly string[], cwd: str
 						kind,
 						goal_id: result.goalId,
 						no_replacement_required: true,
-						goals_path: getUltragoalPaths(cwd).goalsPath,
+						goals_path: getUltragoalPaths(cwd, currentUltragoalSessionId(cwd)).goalsPath,
 					},
 				};
 			}
@@ -3517,6 +3905,7 @@ async function executeUltragoalSteeringCommand(args: readonly string[], cwd: str
 }
 
 async function dispatchUltragoalCommand(args: string[], cwd: string): Promise<UltragoalCommandResult> {
+	const sessionId = currentUltragoalSessionId(cwd);
 	const help = renderUltragoalHelp(args);
 	if (help) return { status: 0, stdout: help };
 	try {
@@ -3524,7 +3913,7 @@ async function dispatchUltragoalCommand(args: string[], cwd: string): Promise<Ul
 		const json = hasFlag(args, "--json");
 		switch (command) {
 			case "status":
-				return { status: 0, stdout: renderStatus(await getUltragoalStatus(cwd), json) };
+				return { status: 0, stdout: renderStatus(await getUltragoalStatus(cwd, sessionId), json) };
 			case "create":
 			case "create-goals": {
 				const mode = flagValue(args, "--skc-goal-mode") === "per-story" ? "per-story" : "aggregate";
@@ -3537,9 +3926,9 @@ async function dispatchUltragoalCommand(args: string[], cwd: string): Promise<Ul
 								ok: true,
 								goals_count: plan.goals.length,
 								goal_ids: plan.goals.map(goal => goal.id),
-								goals_path: getUltragoalPaths(cwd).goalsPath,
+								goals_path: getUltragoalPaths(cwd, currentUltragoalSessionId(cwd)).goalsPath,
 							})
-						: `Created ultragoal plan with ${plan.goals.length} goal${plan.goals.length === 1 ? "" : "s"} at ${getUltragoalPaths(cwd).goalsPath}.\n`,
+						: `Created ultragoal plan with ${plan.goals.length} goal${plan.goals.length === 1 ? "" : "s"} at ${getUltragoalPaths(cwd, currentUltragoalSessionId(cwd)).goalsPath}.\n`,
 				};
 			}
 			case "complete-goals":
@@ -3598,8 +3987,30 @@ async function dispatchUltragoalCommand(args: string[], cwd: string): Promise<Ul
 				return {
 					status: 0,
 					stdout: json
-						? renderCliWriteReceipt({ ok: true, goal_id: goal?.id, goals_path: getUltragoalPaths(cwd).goalsPath })
+						? renderCliWriteReceipt({
+								ok: true,
+								goal_id: goal?.id,
+								goals_path: getUltragoalPaths(cwd, currentUltragoalSessionId(cwd)).goalsPath,
+							})
 						: "Recorded review blockers.\n",
+				};
+			}
+			case "classify-blocker": {
+				const event = await recordUltragoalBlockerClassification({
+					cwd,
+					classification: (flagValue(args, "--classification") ?? "") as UltragoalBlockerClassification,
+					evidence: flagValue(args, "--evidence") ?? "",
+					goalId: flagValue(args, "--goal-id"),
+				});
+				return {
+					status: 0,
+					stdout: json
+						? renderCliWriteReceipt({
+								ok: true,
+								event: "blocker_classified",
+								classification: event.classification,
+							})
+						: `Recorded blocker classification: ${String(event.classification)}.\n`,
 				};
 			}
 			default:
@@ -3619,6 +4030,7 @@ const RECONCILE_COMMANDS = new Set([
 	"steer",
 	"record-review-blockers",
 	"review",
+	"classify-blocker",
 ]);
 
 /**
@@ -3632,9 +4044,9 @@ const RECONCILE_COMMANDS = new Set([
  * beyond that reconcile-failure audit event.
  */
 async function reconcileUltragoalState(cwd: string): Promise<void> {
-	const sessionId = process.env.SKC_SESSION_ID?.trim() || undefined;
+	const sessionId = currentUltragoalSessionId(cwd);
 	try {
-		const summary = await getUltragoalStatus(cwd);
+		const summary = await getUltragoalStatus(cwd, sessionId);
 		const status = summary.status;
 		const active = summary.exists && status !== "complete";
 		const payload: Record<string, unknown> = {
@@ -3650,18 +4062,52 @@ async function reconcileUltragoalState(cwd: string): Promise<void> {
 			goals_path: summary.paths.goalsPath,
 		};
 		if (summary.skcObjective) payload.skc_objective = summary.skcObjective;
+		if (summary.nudgeBudget !== undefined) payload.nudge_budget = summary.nudgeBudget;
+		if (summary.nudgeCount !== undefined) payload.nudge_count = summary.nudgeCount;
+		if (summary.nudgeRemaining !== undefined) payload.nudge_remaining = summary.nudgeRemaining;
+		if (summary.nudgeGoalId !== undefined) payload.nudge_goal_id = summary.nudgeGoalId;
+		if (summary.nudgeTargetKind !== undefined) payload.nudge_target_kind = summary.nudgeTargetKind;
 		const ledgerText = await Bun.file(summary.paths.ledgerPath)
 			.text()
 			.catch(() => "");
-		const latestLedger = latestUltragoalLedgerEventFromText(ledgerText);
+		const latestLedger = ledgerText
+			.split(/\r?\n/)
+			.map(line => line.trim())
+			.filter(Boolean)
+			.toReversed()
+			.map(line => {
+				try {
+					const row = JSON.parse(line) as Record<string, unknown>;
+					const event =
+						typeof row.event === "string" ? row.event : typeof row.type === "string" ? row.type : undefined;
+					return event ? { ...row, event } : undefined;
+				} catch {
+					return undefined;
+				}
+			})
+			.find((row): row is Record<string, unknown> & { event: string } => Boolean(row));
 		if (latestLedger) {
 			payload.latestLedgerEvent = {
 				event: latestLedger.event,
 				...(latestLedger.goalId ? { goalId: latestLedger.goalId } : {}),
 				...(latestLedger.timestamp ? { timestamp: latestLedger.timestamp } : {}),
+				...(typeof latestLedger.kind === "string" ? { kind: latestLedger.kind } : {}),
+				...(typeof latestLedger.evidence === "string" ? { evidence: latestLedger.evidence } : {}),
 			};
 		}
-		await reconcileWorkflowSkillState({ cwd, mode: "ultragoal", sessionId, active, phase: status, payload });
+		const sourceRevision = Math.max(
+			persistedStateRevision(await readUltragoalPlan(cwd, sessionId)),
+			ledgerText.split(/\r?\n/).filter(line => line.trim().length > 0).length,
+		);
+		await reconcileWorkflowSkillState({
+			cwd,
+			mode: "ultragoal",
+			sessionId,
+			active,
+			phase: status,
+			payload,
+			...(sourceRevision > 0 ? { sourceRevision } : {}),
+		});
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
 		process.stderr.write(`ultragoal state reconciliation failed: ${message}\n`);

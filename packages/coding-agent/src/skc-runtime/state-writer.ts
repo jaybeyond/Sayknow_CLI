@@ -11,6 +11,13 @@ import {
 	type WorkflowStateMutationOwner,
 	type WorkflowStateReceipt,
 } from "../skill-state/workflow-state-contract";
+import {
+	activeEntryPath as layoutActiveEntryPath,
+	activeSnapshotPath as layoutActiveSnapshotPath,
+	activeStateDir as layoutActiveStateDir,
+	auditPath as layoutAuditPath,
+	transactionJournalPath as layoutTransactionJournalPath,
+} from "./session-layout";
 import { RequiredOnWriteEnvelopeSchema } from "./state-schema";
 
 /**
@@ -22,7 +29,7 @@ import { RequiredOnWriteEnvelopeSchema } from "./state-schema";
  * supplied mutation context. No lockfiles are used; isolation is by atomic rename,
  * append, O_EXCL creates, conditional deletes, per-entry active-state files,
  * and derived active-state snapshots.
- * Transaction journals are per mutation id under `.skc/state/transactions/`;
+ * Transaction journals are per mutation id under the session state transactions directory;
  * they are recovery evidence only, never global locks or waiters, so stale
  * journals do not block unrelated state reads or writes.
  */
@@ -46,10 +53,15 @@ export interface StateWriterReceiptContext {
 	sessionId?: string;
 	mutationId?: string;
 	nowIso?: string;
+	verb?: string;
+	fromPhase?: string;
+	toPhase?: string;
+	forced?: boolean;
 }
 
 export interface StateWriterAuditContext {
 	cwd?: string;
+	sessionId?: string;
 	category: WriterCategory;
 	verb: string;
 	owner: WorkflowStateMutationOwner;
@@ -78,16 +90,42 @@ export interface WorkflowTransactionJournal {
 	steps: string[];
 }
 
+export type StateWritePolicy = "source" | "cache";
+
+export interface GuardedStateWriterOptions extends StateWriterOptions {
+	policy: StateWritePolicy;
+	expectedRevision?: number;
+	sourceRevision?: number;
+}
+
+export type GuardedWriteResult =
+	| { path: string; written: true; revision: number }
+	| { path: string; written: false; reason: "stale-skip"; revision: number };
+
 export interface StateWriterOptions {
 	cwd?: string;
 	receipt?: StateWriterReceiptContext;
 	audit?: StateWriterAuditContext;
+	sourceRevision?: number;
 	/**
 	 * Cross-process lock tuning for read-modify-write paths that route through
 	 * `withWorkflowStateLock` / `updateJsonAtomic`. Omit for the hardened
 	 * `withFileLock` defaults.
 	 */
 	lock?: FileLockOptions;
+}
+
+export class StateWriteConflictError extends Error {
+	constructor(
+		public readonly path: string,
+		public readonly expectedRevision: number,
+		public readonly persistedRevision: number,
+	) {
+		super(
+			`state write conflict at ${path}: expected revision ${expectedRevision}, persisted revision ${persistedRevision}`,
+		);
+		this.name = "StateWriteConflictError";
+	}
 }
 
 export interface DeleteIfOwnedOptions extends StateWriterOptions {
@@ -255,32 +293,23 @@ function safeString(value: unknown): string {
 	return typeof value === "string" ? value : "";
 }
 
-function encodePathSegment(value: string): string {
-	return encodeURIComponent(value).replaceAll(".", "%2E");
+function requireSessionId(sessionScope: string | ActiveSessionScope | undefined, source: string): string {
+	const sessionId = typeof sessionScope === "string" ? sessionScope : sessionScope?.sessionId;
+	const normalizedSessionId = safeString(sessionId).trim();
+	if (!normalizedSessionId) throw new Error(`a non-empty SKC session id is required (${source})`);
+	return normalizedSessionId;
 }
 
 function activeStateDir(cwd: string, sessionScope?: string | ActiveSessionScope): string {
-	const sessionId = typeof sessionScope === "string" ? sessionScope : sessionScope?.sessionId;
-	const normalizedSessionId = safeString(sessionId).trim();
-	const stateDir = path.join(cwd, ".skc", "state");
-	return normalizedSessionId
-		? path.join(stateDir, "sessions", encodePathSegment(normalizedSessionId), "active")
-		: path.join(stateDir, "active");
+	return layoutActiveStateDir(cwd, requireSessionId(sessionScope, "activeStateDir"));
 }
 
 function activeSnapshotPath(cwd: string, sessionScope?: string | ActiveSessionScope): string {
-	const sessionId = typeof sessionScope === "string" ? sessionScope : sessionScope?.sessionId;
-	const normalizedSessionId = safeString(sessionId).trim();
-	const stateDir = path.join(cwd, ".skc", "state");
-	return normalizedSessionId
-		? path.join(stateDir, "sessions", encodePathSegment(normalizedSessionId), "skill-active-state.json")
-		: path.join(stateDir, "skill-active-state.json");
+	return layoutActiveSnapshotPath(cwd, requireSessionId(sessionScope, "activeSnapshotPath"));
 }
 
 function activeEntryPath(cwd: string, sessionScope: string | ActiveSessionScope | undefined, skill: string): string {
-	const normalizedSkill = safeString(skill).trim();
-	if (!normalizedSkill) throw new Error("skill is required");
-	return path.join(activeStateDir(cwd, sessionScope), `${encodePathSegment(normalizedSkill)}.json`);
+	return layoutActiveEntryPath(cwd, requireSessionId(sessionScope, "activeEntryPath"), skill);
 }
 
 function activeSubskillKey(entry: ActiveSubskillEntry): string {
@@ -298,8 +327,28 @@ function flattenActiveSubskills(entries: SkillActiveEntry[]): ActiveSubskillEntr
 	return [...deduped.values()];
 }
 
+const CANONICAL_PIPELINE_RANK = new Map<string, number>([
+	["deep-interview", 0],
+	["ralplan", 1],
+	["ultragoal", 2],
+]);
+
+function canonicalPipelineRank(skill: string): number | undefined {
+	return CANONICAL_PIPELINE_RANK.get(skill);
+}
+
+function compareActiveEntryPrimary(a: SkillActiveEntry, b: SkillActiveEntry): number {
+	const aRank = canonicalPipelineRank(a.skill);
+	const bRank = canonicalPipelineRank(b.skill);
+	if (aRank !== undefined || bRank !== undefined) return (bRank ?? -1) - (aRank ?? -1);
+	const aTime = Date.parse(safeString(a.updated_at));
+	const bTime = Date.parse(safeString(b.updated_at));
+	if (Number.isFinite(aTime) || Number.isFinite(bTime)) return (bTime || 0) - (aTime || 0);
+	return 0;
+}
+
 function buildActiveSnapshot(entries: SkillActiveEntry[]): SkillActiveState {
-	const visible = entries.filter(entry => entry.active !== false);
+	const visible = entries.filter(entry => entry.active !== false).toSorted(compareActiveEntryPrimary);
 	const primary = visible[0];
 	return {
 		version: 1,
@@ -336,14 +385,68 @@ async function readJsonIfPresent(filePath: string): Promise<unknown | undefined>
 	}
 }
 
+// Corrupt-tolerant variant for the guarded writers' revision computation: a prior
+// file that is unparseable has no usable revision, so treat it as absent (revision 0)
+// rather than throwing. This lets an authoritative/forced write overwrite corrupt
+// state and a derived cache write overwrite (not stale-skip) corrupt cache.
+async function readJsonIfPresentTolerant(filePath: string): Promise<unknown | undefined> {
+	try {
+		return await readJsonIfPresent(filePath);
+	} catch {
+		return undefined;
+	}
+}
+
+export function persistedStateRevision(value: unknown): number {
+	if (!isPlainObject(value)) return 0;
+	const revision = value.state_revision;
+	return typeof revision === "number" && Number.isFinite(revision) ? revision : 0;
+}
+
+function persistedSourceRevision(value: unknown): number {
+	if (!isPlainObject(value)) return 0;
+	const revision = value.source_state_revision;
+	return typeof revision === "number" && Number.isFinite(revision) ? revision : persistedStateRevision(value);
+}
+
+function withoutCandidateRevision(value: unknown): unknown {
+	if (!isPlainObject(value)) return value;
+	const next = { ...value };
+	delete next.state_revision;
+	return next;
+}
+
+function stampStateRevision(value: unknown, stateRevision: number, sourceRevision?: number): unknown {
+	if (!isPlainObject(value)) return value;
+	const next = withoutCandidateRevision(value) as Record<string, unknown>;
+	return {
+		...next,
+		...(sourceRevision === undefined ? {} : { source_state_revision: sourceRevision }),
+		state_revision: stateRevision,
+	};
+}
+
 function withWorkflowReceipt(value: unknown, receipt: WorkflowStateReceipt | undefined): unknown {
 	if (!receipt || !value || typeof value !== "object" || Array.isArray(value)) return value;
 	return { ...(value as Record<string, unknown>), receipt };
 }
 
+function stampWorkflowEnvelopeRevisionAndChecksum(
+	value: unknown,
+	filePath: string,
+	stateRevision: number,
+	sourceRevision: number | undefined,
+	options: StateWriterOptions | undefined,
+): unknown {
+	return stampWorkflowEnvelopeChecksum(
+		stampStateRevision(withWorkflowReceipt(value, buildReceipt(options)), stateRevision, sourceRevision),
+		filePath,
+	);
+}
+
 function buildReceipt(options: StateWriterOptions | undefined): WorkflowStateReceipt | undefined {
 	if (!options?.receipt) return undefined;
-	return buildWorkflowStateReceipt({
+	const receipt = buildWorkflowStateReceipt({
 		cwd: path.resolve(options.receipt.cwd ?? options.cwd ?? process.cwd()),
 		skill: options.receipt.skill,
 		owner: options.receipt.owner,
@@ -352,13 +455,18 @@ function buildReceipt(options: StateWriterOptions | undefined): WorkflowStateRec
 		nowIso: options.receipt.nowIso,
 		mutationId: options.receipt.mutationId,
 	});
+	receipt.verb = options.receipt.verb;
+	receipt.from_phase = options.receipt.fromPhase;
+	receipt.to_phase = options.receipt.toPhase;
+	receipt.forced = options.receipt.forced;
+	return receipt;
 }
 
 async function maybeAudit(mutatedPath: string, options?: StateWriterOptions): Promise<void> {
 	if (!options?.audit) return;
 	const audit = options.audit;
 	const cwd = path.resolve(audit.cwd ?? options.cwd ?? process.cwd());
-	await appendAuditEntry(cwd, {
+	await appendAuditEntry(cwd, options?.audit?.sessionId ?? "", {
 		ts: new Date().toISOString(),
 		skill: audit.skill,
 		category: audit.category,
@@ -383,6 +491,118 @@ async function atomicWrite(filePath: string, content: string): Promise<string> {
 		throw error;
 	}
 	return filePath;
+}
+
+async function writeGuardedResolvedJsonAtomic(
+	filePath: string,
+	value: unknown,
+	options: GuardedStateWriterOptions,
+): Promise<GuardedWriteResult> {
+	return lockResolvedWorkflowTarget(
+		filePath,
+		async () => {
+			const current = await readJsonIfPresentTolerant(filePath);
+			const currentRevision = persistedStateRevision(current);
+
+			if (options.policy === "source") {
+				if (options.expectedRevision !== undefined && options.expectedRevision !== currentRevision) {
+					throw new StateWriteConflictError(filePath, options.expectedRevision, currentRevision);
+				}
+				const next = stampStateRevision(withWorkflowReceipt(value, buildReceipt(options)), currentRevision + 1);
+				await atomicWrite(filePath, jsonText(next));
+				await maybeAudit(filePath, options);
+				return { path: filePath, written: true, revision: currentRevision + 1 };
+			}
+
+			const incomingSourceRevision =
+				options.sourceRevision ?? (isPlainObject(value) ? persistedStateRevision(value) : 0);
+			if (current !== undefined && incomingSourceRevision <= persistedSourceRevision(current)) {
+				return { path: filePath, written: false, reason: "stale-skip", revision: currentRevision };
+			}
+			const next = stampStateRevision(
+				withWorkflowReceipt(value, buildReceipt(options)),
+				currentRevision + 1,
+				incomingSourceRevision,
+			);
+			await atomicWrite(filePath, jsonText(next));
+			await maybeAudit(filePath, options);
+			return { path: filePath, written: true, revision: currentRevision + 1 };
+		},
+		options.lock,
+	);
+}
+
+export async function writeGuardedJsonAtomic(
+	targetPath: string,
+	value: unknown,
+	options: GuardedStateWriterOptions,
+): Promise<GuardedWriteResult> {
+	const filePath = resolveSkcTarget(targetPath, cwdForOptions(options));
+	return writeGuardedResolvedJsonAtomic(filePath, value, options);
+}
+
+export async function writeGuardedWorkflowEnvelopeAtomic(
+	targetPath: string,
+	value: unknown,
+	options: GuardedStateWriterOptions,
+): Promise<GuardedWriteResult> {
+	const filePath = resolveSkcTarget(targetPath, cwdForOptions(options));
+	return lockResolvedWorkflowTarget(
+		filePath,
+		async () => {
+			const current = await readJsonIfPresentTolerant(filePath);
+			const currentRevision = persistedStateRevision(current);
+
+			if (options.policy === "source") {
+				if (options.expectedRevision !== undefined && options.expectedRevision !== currentRevision) {
+					throw new StateWriteConflictError(filePath, options.expectedRevision, currentRevision);
+				}
+				const next = stampWorkflowEnvelopeRevisionAndChecksum(
+					value,
+					filePath,
+					currentRevision + 1,
+					undefined,
+					options,
+				);
+				const parsed = RequiredOnWriteEnvelopeSchema.safeParse(next);
+				if (!parsed.success) {
+					throw new Error(
+						`Refusing to write invalid workflow state envelope to ${filePath}: ${parsed.error.issues
+							.map(issue => `${issue.path.join(".") || "<root>"}: ${issue.message}`)
+							.join("; ")}`,
+					);
+				}
+				await atomicWrite(filePath, jsonText(next));
+				await maybeAudit(filePath, options);
+				return { path: filePath, written: true, revision: currentRevision + 1 };
+			}
+
+			const incomingSourceRevision =
+				options.sourceRevision ?? (isPlainObject(value) ? persistedStateRevision(value) : 0);
+			if (current !== undefined && incomingSourceRevision <= persistedSourceRevision(current)) {
+				return { path: filePath, written: false, reason: "stale-skip", revision: currentRevision };
+			}
+			const next = stampWorkflowEnvelopeRevisionAndChecksum(
+				value,
+				filePath,
+				currentRevision + 1,
+				incomingSourceRevision,
+				options,
+			);
+			const parsed = RequiredOnWriteEnvelopeSchema.safeParse(next);
+			if (!parsed.success) {
+				throw new Error(
+					`Refusing to write invalid workflow state envelope to ${filePath}: ${parsed.error.issues
+						.map(issue => `${issue.path.join(".") || "<root>"}: ${issue.message}`)
+						.join("; ")}`,
+				);
+			}
+			await atomicWrite(filePath, jsonText(next));
+			await maybeAudit(filePath, options);
+			return { path: filePath, written: true, revision: currentRevision + 1 };
+		},
+		options.lock,
+	);
 }
 
 export async function writeJsonAtomic(
@@ -429,7 +649,7 @@ async function recordInvalidWorkflowTransition(args: {
 	// internal write skipped a manifest edge.
 	const cwd = path.resolve(options?.audit?.cwd ?? options?.cwd ?? process.cwd());
 	try {
-		await appendAuditEntry(cwd, {
+		await appendAuditEntry(cwd, options?.audit?.sessionId ?? "", {
 			ts: new Date().toISOString(),
 			skill,
 			category: "state",
@@ -736,8 +956,7 @@ export async function removeFileAudited(targetPath: string, options?: StateWrite
 }
 
 /**
- * Active entry files under `.skc/state/active/<skill>.json` and
- * `.skc/state/sessions/<id>/active/<skill>.json` are authoritative. The
+ * Active entry files under `.skc/_session-{id}/state/active/<skill>.json` are authoritative. The
  * adjacent `skill-active-state.json` file is only a derived cache rebuilt from
  * those entries, so concurrent snapshot rebuilds can race without losing any
  * writer's per-skill state.
@@ -750,8 +969,16 @@ export async function writeActiveEntry(
 	options?: StateWriterOptions,
 ): Promise<string> {
 	const filePath = activeEntryPath(path.resolve(cwd), sessionScope, skill);
-	await atomicWrite(filePath, jsonText({ ...entry, skill }));
-	await maybeAudit(filePath, options);
+	await writeGuardedResolvedJsonAtomic(
+		filePath,
+		{ ...entry, skill },
+		{
+			...options,
+			policy: "cache",
+			sourceRevision:
+				persistedSourceRevision(entry) || persistedSourceRevision(await readJsonIfPresent(filePath)) + 1,
+		},
+	);
 	return filePath;
 }
 
@@ -762,9 +989,24 @@ export async function removeActiveEntry(
 	options?: StateWriterOptions,
 ): Promise<DeleteResult> {
 	const filePath = activeEntryPath(path.resolve(cwd), sessionScope, skill);
-	const deleted = await atomicRemove(filePath);
-	if (deleted) await maybeAudit(filePath, options);
-	return { path: filePath, deleted };
+	return lockResolvedWorkflowTarget(
+		filePath,
+		async () => {
+			const current = await readJsonIfPresent(filePath);
+			const incomingSourceRevision = options?.sourceRevision;
+			if (
+				current !== undefined &&
+				incomingSourceRevision !== undefined &&
+				incomingSourceRevision < persistedSourceRevision(current)
+			) {
+				return { path: filePath, deleted: false };
+			}
+			const deleted = await atomicRemove(filePath);
+			if (deleted) await maybeAudit(filePath, options);
+			return { path: filePath, deleted };
+		},
+		options?.lock,
+	);
 }
 
 export async function readActiveEntries(
@@ -799,8 +1041,14 @@ export async function rebuildActiveSnapshot(
 	const resolvedCwd = path.resolve(cwd);
 	const snapshotPath = activeSnapshotPath(resolvedCwd, sessionScope);
 	const entries = await readActiveEntries(resolvedCwd, sessionScope);
-	await atomicWrite(snapshotPath, jsonText(buildActiveSnapshot(entries)));
-	await maybeAudit(snapshotPath, options);
+	await writeGuardedResolvedJsonAtomic(snapshotPath, buildActiveSnapshot(entries), {
+		...options,
+		policy: "cache",
+		sourceRevision: Math.max(
+			persistedSourceRevision(await readJsonIfPresent(snapshotPath)) + 1,
+			...entries.map(entry => persistedSourceRevision(entry)),
+		),
+	});
 	return snapshotPath;
 }
 
@@ -905,7 +1153,7 @@ export async function hardPrune(
 	}
 	if (options?.audit && removed.length > 0) {
 		const audit = options.audit;
-		await appendAuditEntry(path.resolve(audit.cwd ?? options.cwd ?? process.cwd()), {
+		await appendAuditEntry(path.resolve(audit.cwd ?? options.cwd ?? process.cwd()), audit.sessionId ?? "", {
 			ts: new Date().toISOString(),
 			skill: audit.skill,
 			category: audit.category,
@@ -947,26 +1195,41 @@ export async function forceOverwrite(
 	);
 }
 
-export async function appendAuditEntry(cwd: string, entry: AuditEntry): Promise<string> {
-	const filePath = resolveSkcTarget(path.join(".skc", "state", "audit.jsonl"), cwd);
+export async function appendAuditEntry(
+	cwd: string,
+	sessionIdOrEntry: string | AuditEntry,
+	maybeEntry?: AuditEntry,
+): Promise<string> {
+	const sessionId =
+		typeof sessionIdOrEntry === "string"
+			? sessionIdOrEntry.trim()
+			: safeString((sessionIdOrEntry as AuditEntry & { session_id?: unknown }).session_id).trim();
+	if (!sessionId) throw new Error("a non-empty SKC session id is required (appendAuditEntry)");
+	const entry = typeof sessionIdOrEntry === "string" ? maybeEntry : sessionIdOrEntry;
+	if (!entry) throw new Error("audit entry is required");
+	const filePath = resolveSkcTarget(layoutAuditPath(cwd, sessionId), cwd);
 	await fs.mkdir(path.dirname(filePath), { recursive: true });
 	await fs.appendFile(filePath, `${JSON.stringify(entry)}\n`, "utf-8");
 	return filePath;
 }
 
-function transactionJournalPath(cwd: string, mutationId: string): string {
-	return path.join(path.resolve(cwd), ".skc", "state", "transactions", `${encodePathSegment(mutationId)}.json`);
+function transactionJournalPath(cwd: string, sessionId: string, mutationId: string): string {
+	return layoutTransactionJournalPath(path.resolve(cwd), sessionId, mutationId);
 }
 
 export async function readWorkflowTransactionJournal(
 	cwd: string,
+	sessionId: string,
 	mutationId: string,
 ): Promise<WorkflowTransactionJournal | undefined> {
-	return (await readJsonIfPresent(transactionJournalPath(cwd, mutationId))) as WorkflowTransactionJournal | undefined;
+	return (await readJsonIfPresent(transactionJournalPath(cwd, sessionId, mutationId))) as
+		| WorkflowTransactionJournal
+		| undefined;
 }
 
 export async function beginWorkflowTransactionJournal(input: {
 	cwd: string;
+	sessionId: string;
 	mutationId: string;
 	caller?: CanonicalSkcWorkflowSkill;
 	callee?: CanonicalSkcWorkflowSkill;
@@ -985,7 +1248,7 @@ export async function beginWorkflowTransactionJournal(input: {
 		steps: [],
 	};
 	try {
-		return await createJsonNoClobber(transactionJournalPath(input.cwd, input.mutationId), journal, {
+		return await createJsonNoClobber(transactionJournalPath(input.cwd, input.sessionId, input.mutationId), journal, {
 			cwd: input.cwd,
 		});
 	} catch (error) {
@@ -996,17 +1259,22 @@ export async function beginWorkflowTransactionJournal(input: {
 
 export async function updateWorkflowTransactionJournal(
 	cwd: string,
+	sessionId: string,
 	mutationId: string,
 	patch: Partial<WorkflowTransactionJournal>,
 ): Promise<string> {
-	const filePath = transactionJournalPath(cwd, mutationId);
+	const filePath = transactionJournalPath(cwd, sessionId, mutationId);
 	const current = ((await readJsonIfPresent(filePath)) ?? {}) as WorkflowTransactionJournal;
 	const next = { ...current, ...patch, updated_at: new Date().toISOString() } as WorkflowTransactionJournal;
 	await atomicWrite(filePath, jsonText(next));
 	return filePath;
 }
 
-export async function completeWorkflowTransactionJournal(cwd: string, mutationId: string): Promise<void> {
-	await updateWorkflowTransactionJournal(cwd, mutationId, { status: "committed" });
-	await atomicRemove(transactionJournalPath(cwd, mutationId)).catch(() => false);
+export async function completeWorkflowTransactionJournal(
+	cwd: string,
+	sessionId: string,
+	mutationId: string,
+): Promise<void> {
+	await updateWorkflowTransactionJournal(cwd, sessionId, mutationId, { status: "committed" });
+	await atomicRemove(transactionJournalPath(cwd, sessionId, mutationId)).catch(() => false);
 }

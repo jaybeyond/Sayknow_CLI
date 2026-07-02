@@ -8,6 +8,7 @@ import {
 	extractHarmonyRemoved,
 	isHarmonyLeakMitigationTarget,
 	recoverHarmonyToolCall,
+	shouldMitigateHarmonyLeak,
 	signalListLabel,
 } from "../src/harmony-leak";
 import corpus from "./fixtures/harmony-leak-corpus.json" with { type: "json" };
@@ -49,6 +50,30 @@ describe("isHarmonyLeakMitigationTarget", () => {
 
 	it("does not target Anthropic models", () => {
 		expect(isHarmonyLeakMitigationTarget(anthropicModel)).toBe(false);
+	});
+});
+
+describe("shouldMitigateHarmonyLeak", () => {
+	it("mitigates provider-neutral invoke envelope leaks for Anthropic models", () => {
+		const detection = detectHarmonyLeak(
+			[
+				"call",
+				'<invoke name="web_search">',
+				'<parameter name="query">portfolio copywriting examples</parameter>',
+				"</invoke>",
+			].join("\n"),
+			"assistant_text",
+		);
+
+		expect(detection).toBeDefined();
+		expect(shouldMitigateHarmonyLeak(anthropicModel, detection!)).toBe(true);
+	});
+
+	it("does not broaden codex harmony-header mitigation to Anthropic models", () => {
+		const detection = detectHarmonyLeak("analysis to=functions.read code {}", "assistant_text");
+
+		expect(detection).toBeDefined();
+		expect(shouldMitigateHarmonyLeak(anthropicModel, detection!)).toBe(false);
 	});
 });
 
@@ -253,5 +278,63 @@ describe("createHarmonyAuditEvent", () => {
 		// non-junk char becomes `·`; marker tokens are kept verbatim).
 		expect(event.removedPreview.length).toBeGreaterThan(0);
 		expect(event.signal).toBe(signalListLabel(detection.signals));
+	});
+});
+
+describe("detectHarmonyLeak — leaked <invoke> envelope dialect (I)", () => {
+	const leakedAsk = [
+		"court",
+		'<invoke name="proxy_ask">',
+		'<parameter name="_i">Round 11 self-ref exclusion detail</parameter>',
+		'<parameter name="questions">[{"id":"r11"}]</parameter>',
+		"</invoke>",
+	].join("\n");
+
+	it("trips on a leaked tool-call envelope in assistant text (no co-signal needed)", () => {
+		const detection = detectHarmonyLeak(leakedAsk, "assistant_text");
+		expect(detection).toBeDefined();
+		expect(signalListLabel(detection!.signals)).toContain("I");
+	});
+
+	it("trips with zero non-Latin content (the leak is not a Korean/script issue)", () => {
+		const asciiLeak = '<invoke name="proxy_read">\n<parameter name="path">src/x.ts</parameter>\n</invoke>';
+		const detection = detectHarmonyLeak(asciiLeak, "assistant_text");
+		expect(detection).toBeDefined();
+		expect(signalListLabel(detection!.signals)).toContain("I");
+	});
+
+	it("trips on the thinking surface too", () => {
+		expect(detectHarmonyLeak(leakedAsk, "assistant_thinking")).toBeDefined();
+	});
+
+	it("detects via detectHarmonyLeakInAssistantMessage; text-surface leak is not recoverable", () => {
+		const message = createAssistantMessage([{ type: "text", text: `ok\n\n${leakedAsk}` }], "stop");
+		const detection = detectHarmonyLeakInAssistantMessage(message);
+		expect(detection).toBeDefined();
+		expect(detection!.surface).toBe("assistant_text");
+		expect(recoverHarmonyToolCall(message, detection!)).toBeUndefined();
+	});
+
+	it("does NOT trip on an invoke example inside a fenced code block", () => {
+		const fenced = [
+			"Here is the wire format:",
+			"```xml",
+			'<invoke name="ask">',
+			'<parameter name="x">1</parameter>',
+			"</invoke>",
+			"```",
+		].join("\n");
+		expect(detectHarmonyLeak(fenced, "assistant_text")).toBeUndefined();
+	});
+
+	it("does NOT trip on prose that mentions the opening tag without a committed body", () => {
+		const prose =
+			'The model sometimes prints a bare <invoke name="ask"> and then ordinary prose continues right here with no parameter or closing tag whatsoever.';
+		expect(detectHarmonyLeak(prose, "assistant_text")).toBeUndefined();
+	});
+
+	it("does not treat normal Korean prose (even containing the word court) as a leak", () => {
+		const korean = "법원 판결문을 읽고 다음 단계를 정합니다. court 같은 단어가 나와도 문제 없어야 한다.";
+		expect(detectHarmonyLeak(korean, "assistant_text")).toBeUndefined();
 	});
 });

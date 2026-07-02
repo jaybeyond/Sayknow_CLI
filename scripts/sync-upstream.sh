@@ -16,7 +16,11 @@ REPO="$(git rev-parse --show-toplevel)"
 cd "$REPO"
 
 echo "▸ fetching upstream $TAG"
-git fetch upstream --tags --quiet
+# Tolerate tag-clobber rejections: the fork reuses some vX.Y.Z tag names that
+# collide with upstream's, so a bulk `--tags` fetch returns non-zero ("would
+# clobber existing tag"). We must NOT --force (that would overwrite our fork's
+# release tags). The rev-parse guard below is the real check that $TAG exists.
+git fetch upstream --tags --quiet || true
 git rev-parse "$TAG^{commit}" >/dev/null 2>&1 || { echo "unknown tag: $TAG" >&2; exit 1; }
 
 WT="$(mktemp -d)/skc-$TAG"
@@ -33,10 +37,18 @@ echo "═══ GATES ═══"
 fail=0
 
 # G1 — no residual legacy brand tokens (lockfiles excluded: integrity hashes).
+# Two classes of files legitimately retain upstream brand tokens and are excluded
+# (both are also skipped by apply-rebrand so the G2 idempotence gate stays green):
+#   1. overlay attribution docs — NOTICE.md, README.md, top coding-agent CHANGELOG.md
+#      ("a rebranded fork of gajae-code", MIT attribution + sync history);
+#   2. toolingOnly pipeline files carried into the output by gen-tree — the rebrand
+#      scripts (which quote the rename rules), FORK_MAINTENANCE.md, and the whole
+#      rebrand/ dir (*.patch context lines quote upstream gajae/gjc).
 echo -n "G1 residual-tokens … "
 if grep -rIE 'gajae|robogjc|red-claw|blue-crab|crabShell|\bcan1357\b|Yeachan-Heo' "$WT" \
      --include='*.ts' --include='*.json' --include='*.md' --include='*.toml' --include='*.rs' --include='*.py' \
-     --exclude-dir=node_modules 2>/dev/null | grep -vq 'REBRANDING_PLAN'; then
+     --exclude-dir=node_modules --exclude-dir=rebrand 2>/dev/null \
+     | grep -vqE "REBRANDING_PLAN|^${WT}/(NOTICE\.md|README\.md|packages/coding-agent/CHANGELOG\.md|scripts/(apply-rebrand|apply-fork-identity|extract-fork-layer|gen-tree|sync-upstream|publish-npm)\.(ts|sh)|docs/FORK_MAINTENANCE\.md):"; then
   echo "FAIL"; grep -rIE 'gajae|robogjc|red-claw|blue-crab' "$WT" --include='*.ts' --exclude-dir=node_modules | head -3; fail=1
 else echo "ok"; fi
 

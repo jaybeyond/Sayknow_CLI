@@ -3,20 +3,14 @@
  *
  * Agents are embedded at build time via Bun's import with { type: "text" }.
  */
-import { Effort } from "@sayknow-cli/ai";
 import { parseFrontmatter, prompt } from "@sayknow-cli/utils";
 import { parseAgentFields } from "../discovery/helpers";
+// Embed agent markdown files at build time
 import architectMd from "../prompts/agents/architect.md" with { type: "text" };
 import criticMd from "../prompts/agents/critic.md" with { type: "text" };
 import executorMd from "../prompts/agents/executor.md" with { type: "text" };
-import exploreMd from "../prompts/agents/explore.md" with { type: "text" };
-// Embed agent markdown files at build time
 import agentFrontmatterTemplate from "../prompts/agents/frontmatter.md" with { type: "text" };
-
-import planMd from "../prompts/agents/plan.md" with { type: "text" };
 import plannerMd from "../prompts/agents/planner.md" with { type: "text" };
-import reviewerMd from "../prompts/agents/reviewer.md" with { type: "text" };
-import taskMd from "../prompts/agents/task.md" with { type: "text" };
 
 import type { AgentDefinition, AgentSource } from "./types";
 
@@ -50,21 +44,6 @@ const EMBEDDED_AGENT_DEFS: EmbeddedAgentDef[] = [
 	{ fileName: "architect.md", template: architectMd },
 	{ fileName: "planner.md", template: plannerMd },
 	{ fileName: "critic.md", template: criticMd },
-	{ fileName: "explore.md", template: exploreMd },
-	{ fileName: "plan.md", template: planMd },
-	{ fileName: "reviewer.md", template: reviewerMd },
-	{
-		fileName: "task.md",
-		frontmatter: {
-			name: "task",
-			description: "General-purpose subagent with full capabilities for delegated multi-step tasks",
-			spawns: "*",
-			model: "pi/default",
-			thinkingLevel: Effort.Medium,
-			hide: true,
-		},
-		template: taskMd,
-	},
 ];
 
 // Computed lazily on first loadBundledAgents() call to avoid eager prompt.render at module load.

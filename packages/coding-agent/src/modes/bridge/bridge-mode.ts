@@ -1,7 +1,7 @@
-import * as path from "node:path";
 import type { ExtensionUIContext } from "../../extensibility/extensions";
 import type { AgentSession } from "../../session/agent-session";
 import type { ClientBridgePermissionOutcome } from "../../session/client-bridge";
+import { workflowGatePath } from "../../skc-runtime/session-layout";
 import type { RpcCommand, RpcResponse, RpcWorkflowGateResponse } from "../rpc/rpc-types";
 import { dispatchRpcCommand } from "../shared/agent-wire/command-dispatch";
 import { isRpcCommand } from "../shared/agent-wire/command-validation";
@@ -151,6 +151,14 @@ function jsonResponse(status: number, body: unknown): Response {
 		status,
 		headers: { "Content-Type": "application/json" },
 	});
+}
+
+function isBridgeControllerOwner(options: BridgeFetchHandlerOptions, ownerToken: string): boolean {
+	if (!ownerToken) return false;
+	const ownerTokens = [options.permissionBroker?.ownerToken, options.uiBroker?.ownerToken].filter(
+		(token): token is string => typeof token === "string" && token.length > 0,
+	);
+	return ownerTokens.length > 0 && ownerTokens.every(token => token === ownerToken);
 }
 
 function parseBridgeScopes(value: string | undefined): readonly BridgeCommandScope[] {
@@ -425,6 +433,9 @@ export function createBridgeFetchHandler(options: BridgeFetchHandlerOptions): (r
 				"answer" in payload &&
 				(correlationId === (payload as RpcWorkflowGateResponse).gate_id || correlationId.startsWith("wg_"))
 			) {
+				if (!isBridgeControllerOwner(options, ownerToken)) {
+					return jsonResponse(403, { status: "rejected", code: "not_controller" });
+				}
 				try {
 					const resolution = await options.unattendedControlPlane?.resolveGate({
 						gate_id: (payload as RpcWorkflowGateResponse).gate_id,
@@ -611,7 +622,7 @@ export async function runBridgeMode(
 		});
 	};
 	const gateStore = new FileGateStore(
-		path.join(session.sessionManager.getCwd(), ".skc", "state", "workflow-gates", `${session.sessionId}.json`),
+		workflowGatePath(session.sessionManager.getCwd(), session.sessionId, session.sessionId),
 	);
 	const unattendedControlPlane = new UnattendedSessionControlPlane({
 		runId: session.sessionId,

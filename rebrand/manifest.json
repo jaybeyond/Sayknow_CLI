@@ -6,6 +6,7 @@
     "packages/coding-agent/src/commands/launch.ts",
     "packages/coding-agent/src/config/settings-schema.ts",
     "packages/coding-agent/src/config/settings.ts",
+    "packages/coding-agent/src/config/model-profile-activation.ts",
     "packages/coding-agent/src/extensibility/slash-commands.ts",
     "packages/coding-agent/src/modes/components/history-search.ts",
     "packages/coding-agent/src/modes/components/hook-selector.ts",
@@ -28,12 +29,21 @@
     "packages/coding-agent/test/sdk-model-selection.test.ts",
     "packages/coding-agent/test/settings-manager.test.ts",
     "packages/coding-agent/test/skc-ui-redesign.test.ts",
-    "packages/tui/src/components/editor.ts"
+    "packages/tui/src/components/editor.ts",
+    "packages/tui/src/terminal.ts",
+    "packages/utils/src/postmortem.ts",
+    "packages/coding-agent/src/cli/plugin-cli.ts",
+    "packages/coding-agent/src/extensibility/plugins/index.ts",
+    "packages/coding-agent/src/extensibility/plugins/manager.ts",
+    "packages/coding-agent/src/extensibility/plugins/marketplace/manager.ts",
+    "packages/coding-agent/src/prompts/system/system-prompt.md"
   ],
   "regenerate": [
     "bun.lock",
     "Cargo.lock",
-    "packages/coding-agent/src/internal-urls/docs-index.generated.ts"
+    "packages/coding-agent/src/internal-urls/docs-index.generated.ts",
+    "schemas/config.schema.json",
+    "schemas/models.schema.json"
   ],
   "toolingOnly": [
     "scripts/apply-rebrand.ts",

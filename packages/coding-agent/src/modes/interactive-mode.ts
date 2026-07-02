@@ -29,7 +29,7 @@ import {
 import { APP_NAME, adjustHsv, getProjectDir, hsvToRgb, isEnoent, logger, postmortem, prompt } from "@sayknow-cli/utils";
 import chalk from "chalk";
 import { AsyncJobManager } from "../async";
-import { KeybindingsManager } from "../config/keybindings";
+import { type AppKeybinding, KeybindingsManager } from "../config/keybindings";
 import { isSettingsInitialized, type Settings, settings } from "../config/settings";
 import { DEFAULT_SKC_DEFINITION_NAMES } from "../defaults/skc-defaults";
 import type {
@@ -44,7 +44,7 @@ import { BUILTIN_SLASH_COMMANDS, loadSlashCommands } from "../extensibility/slas
 import { type Goal, type GoalModeState, normalizeGoal } from "../goals/state";
 import { t } from "../i18n";
 import { resolveLocalUrlToPath } from "../internal-urls";
-import { LSP_STARTUP_EVENT_CHANNEL, type LspStartupEvent } from "../lsp/startup-events";
+import { getLspStartupWarningMessage, LSP_STARTUP_EVENT_CHANNEL, type LspStartupEvent } from "../lsp/startup-events";
 import {
 	humanizePlanTitle,
 	type PlanApprovalDetails,
@@ -72,6 +72,7 @@ import { normalizeLocalScheme } from "../tools/path-utils";
 import { type ResolveToolDetails, runResolveInvocation } from "../tools/resolve";
 import { formatPhaseDisplayName } from "../tools/todo-write";
 import { ToolError } from "../tools/tool-errors";
+
 import type { EventBus } from "../utils/event-bus";
 import { getEditorCommand, openInEditor } from "../utils/external-editor";
 import { getSessionAccentAnsi, getSessionAccentHex } from "../utils/session-color";
@@ -86,7 +87,11 @@ import type { HookInputComponent } from "./components/hook-input";
 import type { HookSelectorComponent } from "./components/hook-selector";
 import { StatusLineComponent } from "./components/status-line";
 import type { ToolExecutionHandle } from "./components/tool-execution";
-import { WelcomeComponent, type LspServerInfo as WelcomeLspServerInfo } from "./components/welcome";
+import {
+	WelcomeComponent,
+	type WelcomeLogoMode,
+	type LspServerInfo as WelcomeLspServerInfo,
+} from "./components/welcome";
 import { BtwController } from "./controllers/btw-controller";
 import { CommandController } from "./controllers/command-controller";
 import { EventController } from "./controllers/event-controller";
@@ -113,6 +118,24 @@ import type { CompactionQueuedMessage, InteractiveModeContext, SubmittedUserInpu
 import { UiHelpers } from "./utils/ui-helpers";
 
 const INTERACTIVE_ABORT_CLEANUP_TIMEOUT_MS = 5_000;
+const DEFAULT_COMPOSER_PLACEHOLDER = "Type your message...";
+const FRIENDLY_KEY_PARTS: Record<string, string> = {
+	alt: "Alt",
+	cmd: "Command",
+	command: "Command",
+	ctrl: "Control",
+	enter: "Enter",
+	meta: process.platform === "darwin" ? "Command" : "Meta",
+	option: "Option",
+	shift: "Shift",
+};
+
+function formatShortcutForPlaceholder(key: string): string {
+	return key
+		.split("+")
+		.map(part => FRIENDLY_KEY_PARTS[part.toLowerCase()] ?? part)
+		.join("+");
+}
 
 const HINT_SHIMMER_PALETTE: ShimmerPalette = {
 	low: "dim",
@@ -133,11 +156,11 @@ function getShellInputPrefix(isNoContext: boolean): string {
 
 function configureDefaultComposerChrome(editor: CustomEditor): void {
 	editor.setBorderVisible(true);
-	editor.setBorderStyle("sharp");
+	editor.setBorderStyle("round");
 	editor.setClosedBorderBox(true);
 	editor.setPromptGutter(undefined);
 	editor.setInputPrefix(getDefaultInputPrefix());
-	editor.setPlaceholder("Type your message...");
+	editor.setPlaceholder(DEFAULT_COMPOSER_PLACEHOLDER);
 	editor.setPaddingX(1);
 	editor.setTopBorder(undefined);
 }
@@ -216,6 +239,21 @@ function parseGoalSubcommand(args: string): { sub: GoalSubcommand | undefined; r
 		return { sub: first as GoalSubcommand, rest: match[2]?.trim() ?? "" };
 	}
 	return { sub: undefined, rest: trimmed };
+}
+
+export type WelcomeBannerSettingMode = "auto" | "unicode" | "square" | "ascii";
+
+export function resolveWelcomeLogoMode(
+	mode: WelcomeBannerSettingMode,
+	env: Record<string, string | undefined> = Bun.env,
+	platform: NodeJS.Platform = process.platform,
+): WelcomeLogoMode {
+	void env;
+	void platform;
+	if (mode === "unicode") return "unicode";
+	if (mode === "square") return "square";
+	if (mode === "ascii") return "ascii";
+	return "unicode";
 }
 
 /** Options for creating an InteractiveMode instance (for future API use) */
@@ -394,6 +432,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#resizeHandler = () => {
 			this.#syncEditorMaxHeight();
 			this.updateEditorChrome();
+			this.editor.invalidate();
+			this.ui.requestRender(true, "resize");
 		};
 		process.stdout.on("resize", this.#resizeHandler);
 		try {
@@ -479,6 +519,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		);
 
 		const startupQuiet = settings.get("startup.quiet");
+		const welcomeLogoMode = resolveWelcomeLogoMode(settings.get("startup.welcomeBannerMode"));
 		this.#welcomeComponent = undefined;
 
 		for (const warning of this.session.configWarnings) {
@@ -494,6 +535,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				providerName,
 				recentSessions,
 				this.#getWelcomeLspServers(),
+				welcomeLogoMode,
 			);
 
 			// Setup UI layout
@@ -529,6 +571,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.ui.addChild(this.hookWidgetContainerAbove);
 		this.ui.addChild(this.editorContainer);
 		this.ui.addChild(this.hookWidgetContainerBelow);
+		this.ui.setBottomPinnedComponent(this.statusLine);
 		this.ui.setFocus(this.editor);
 
 		this.#inputController.setupKeyHandlers();
@@ -882,6 +925,31 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.editor.setMaxHeight(this.#computeEditorMaxHeight());
 	}
 
+	#isPromptDeliveryBusy(): boolean {
+		return this.session.isStreaming || this.session.isCompacting;
+	}
+
+	#getFirstKeyForAction(action: AppKeybinding): string | undefined {
+		return this.keybindings.getKeys(action)[0];
+	}
+
+	#getMessageQueueShortcut(): string | undefined {
+		const preferredAction: AppKeybinding =
+			process.platform === "darwin" ? "app.message.followUp" : "app.message.queue";
+		const fallbackAction: AppKeybinding =
+			process.platform === "darwin" ? "app.message.queue" : "app.message.followUp";
+		return this.#getFirstKeyForAction(preferredAction) ?? this.#getFirstKeyForAction(fallbackAction);
+	}
+
+	#getComposerPlaceholder(): string {
+		if (!this.#isPromptDeliveryBusy()) return DEFAULT_COMPOSER_PLACEHOLDER;
+		const enterAction = this.settings.get("busyPromptMode") === "steer" ? "Steering" : "Message Queueing";
+		const parts = [`Enter: ${enterAction}`];
+		const queueKey = this.#getMessageQueueShortcut();
+		if (queueKey) parts.push(`${formatShortcutForPlaceholder(queueKey)}: Message Queueing`);
+		return `${DEFAULT_COMPOSER_PLACEHOLDER} ${parts.join(" · ")}`;
+	}
+
 	updateEditorChrome(): void {
 		if (this.isBashMode) {
 			this.editor.borderColor = this.isBashNoContext
@@ -905,6 +973,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (!this.isBashMode) {
 			this.editor.setInputPrefix(getDefaultInputPrefix());
 		}
+		this.editor.setPlaceholder(this.#getComposerPlaceholder());
 		this.#setComposerTopBorder();
 		this.ui.requestRender();
 	}
@@ -2062,23 +2131,9 @@ export class InteractiveMode implements InteractiveModeContext {
 	#handleLspStartupEvent(event: LspStartupEvent): void {
 		this.#updateWelcomeLspServers();
 
-		if (event.type === "failed") {
-			this.showWarning(`LSP startup failed: ${event.error}. It will retry lazily on write.`);
-			return;
-		}
-
-		const failedServers = event.servers.filter(server => server.status === "error");
-
-		if (failedServers.length === 1) {
-			const failedServer = failedServers[0];
-			const detail = failedServer.error ? `: ${failedServer.error}` : "";
-			this.showWarning(`LSP startup failed for ${failedServer.name}${detail}. It will retry lazily on write.`);
-			return;
-		}
-
-		if (failedServers.length > 1) {
-			const failedNames = failedServers.map(server => server.name).join(", ");
-			this.showWarning(`LSP startup failed for ${failedNames}. It will retry lazily on write.`);
+		const warningMessage = getLspStartupWarningMessage(event);
+		if (warningMessage) {
+			this.showWarning(warningMessage);
 		}
 	}
 
@@ -2495,8 +2550,12 @@ export class InteractiveMode implements InteractiveModeContext {
 		return this.#selectorController.handleSessionDeleteCommand();
 	}
 
-	showOAuthSelector(mode: "login" | "logout", providerId?: string): Promise<void> {
-		return this.#selectorController.showOAuthSelector(mode, providerId);
+	showOAuthSelector(
+		mode: "login" | "logout",
+		providerId?: string,
+		options?: import("./types").OAuthSelectorOptions,
+	): Promise<void> {
+		return this.#selectorController.showOAuthSelector(mode, providerId, options);
 	}
 
 	showHookConfirm(title: string, message: string): Promise<boolean> {

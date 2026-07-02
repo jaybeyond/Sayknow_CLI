@@ -1,7 +1,7 @@
 /** The hard, locked batch threshold enforced by the runtime gate. */
 export const DEFAULT_SPAWN_THRESHOLD = 4;
 
-/** The justification a large batch or reviewer-spawned explorer must supply to pass the hard gate. */
+/** The justification a large batch must supply to pass the hard gate. */
 export interface SpawnPlanReceipt {
 	whyParallel: string;
 	whyNotLocal: string;
@@ -13,15 +13,6 @@ export interface SpawnPlanReceipt {
 export interface SpawnGateRequest {
 	/** Number of children the batch wants to spawn. */
 	childCount: number;
-	/** The spawn-plan receipt, when provided. */
-	plan?: SpawnPlanReceipt;
-}
-
-export interface ReviewerExploreGateRequest {
-	/** Agent type/name doing the spawning, when known. */
-	spawningAgentType?: string | null;
-	/** Target agent type/name requested by the task call. */
-	targetAgent: string;
 	/** The spawn-plan receipt, when provided. */
 	plan?: SpawnPlanReceipt;
 }
@@ -101,32 +92,4 @@ export function decide(childCount: number, threshold: number, plan: SpawnPlanRec
 
 export function evaluateSpawnGate(request: SpawnGateRequest): SpawnGateDecision {
 	return decide(request.childCount, DEFAULT_SPAWN_THRESHOLD, request.plan);
-}
-
-export function evaluateReviewerExploreGate(request: ReviewerExploreGateRequest): SpawnGateDecision {
-	if (request.spawningAgentType !== "reviewer" || request.targetAgent !== "explore") {
-		return {
-			outcome: "allowed",
-			reason: "reviewer->explore gate does not apply",
-			planRequired: false,
-			missingFields: [],
-		};
-	}
-
-	const missingFields = findMissingPlanFields(request.plan);
-	if (missingFields.length > 0) {
-		return {
-			outcome: "rejected",
-			reason: `reviewer->explore spawn requires a complete spawn-plan receipt (${missingFields.join(", ")})`,
-			planRequired: true,
-			missingFields,
-		};
-	}
-
-	return {
-		outcome: "allowed",
-		reason: "reviewer->explore spawn has a complete spawn-plan receipt",
-		planRequired: true,
-		missingFields: [],
-	};
 }

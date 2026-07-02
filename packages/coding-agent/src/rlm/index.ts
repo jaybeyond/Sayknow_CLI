@@ -15,6 +15,7 @@ import { type RlmPreset, runRootCommand } from "../main";
 import rlmReportCommandPrompt from "../prompts/system/rlm-report-command.md" with { type: "text" };
 import type { CreateAgentSessionOptions } from "../sdk";
 import type { AgentSession } from "../session/agent-session";
+import { resolveSessionIdFromSources, writeSessionActivityMarker } from "../skc-runtime/session-resolution";
 import {
 	ensureRlmSessionDir,
 	generateRlmSessionId,
@@ -231,10 +232,35 @@ async function writeRlmMetadata(input: {
 		successfulRuns: input.successfulRuns,
 	};
 	await Bun.write(input.paths.metadataPath, `${JSON.stringify(metadata, null, 2)}\n`);
+	// Best-effort: update the per-session activity marker so latest-session auto-detect
+	// accounts for RLM-only generated output (AC2). Never let marker failure break RLM.
+	const skcSessionId = resolveSessionIdFromSources({ envSessionId: process.env.SKC_SESSION_ID })?.skcSessionId;
+	if (skcSessionId) {
+		await writeSessionActivityMarker(input.cwd, skcSessionId, { writer: "rlm" }).catch(() => {});
+	}
 }
 
+/**
+ * RLM artifacts are scoped under a SKC session directory and resolving their
+ * paths is a *write* (it must pick a concrete session). When `skc rlm` runs
+ * standalone — no parent agent, no `SKC_SESSION_ID` in the environment — there is
+ * no session to resolve and `resolveSkcSessionForWrite` throws
+ * `missing_for_write`. Establish a dedicated SKC session id in that case and pin
+ * it into the environment so artifact-path resolution, the per-session activity
+ * marker, and the child agent's workflow state all share one writable session.
+ *
+ * Returns the resolved (existing or freshly generated) SKC session id.
+ */
+export function ensureRlmSkcSessionId(): string {
+	const existing = resolveSessionIdFromSources({ envSessionId: process.env.SKC_SESSION_ID })?.skcSessionId;
+	if (existing) return existing;
+	const generated = `rlm-${generateRlmSessionId()}`;
+	process.env.SKC_SESSION_ID = generated;
+	return generated;
+}
 export async function runRlmCommand(argv: string[]): Promise<void> {
 	const cwd = getProjectDir();
+	ensureRlmSkcSessionId();
 	const { dataPath, resumeSessionId, minSuccessfulRuns, rest } = extractRlmFlags(argv);
 	const dataContext = await loadRlmDataContext(cwd, dataPath);
 

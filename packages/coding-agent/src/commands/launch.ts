@@ -2,6 +2,8 @@
  * Root command for the coding agent CLI.
  */
 
+import * as fs from "node:fs/promises";
+import * as path from "node:path";
 import { THINKING_EFFORTS } from "@sayknow-cli/ai";
 import { APP_NAME, setProjectDir } from "@sayknow-cli/utils";
 import { Args, Command, Flags } from "@sayknow-cli/utils/cli";
@@ -10,6 +12,43 @@ import { runRootCommand } from "../main";
 import { prepareAcpTerminalAuthArgs } from "../modes/acp/terminal-auth";
 import { launchDefaultTmuxIfNeeded } from "../skc-runtime/launch-tmux";
 import { prepareLaunchWorktree } from "../skc-runtime/launch-worktree";
+import {
+	SKC_COORDINATOR_SESSION_ID_ENV,
+	SKC_COORDINATOR_SESSION_STATE_FILE_ENV,
+} from "../skc-runtime/session-state-sidecar";
+
+async function persistCoordinatorLaunchFailure(error: unknown, cwd: string): Promise<void> {
+	const stateFile = process.env[SKC_COORDINATOR_SESSION_STATE_FILE_ENV]?.trim();
+	if (!stateFile) return;
+	const message = error instanceof Error ? error.message : String(error);
+	const code = message.split(":", 1)[0] || "launch_failed";
+	const now = new Date().toISOString();
+	const payload = {
+		schema_version: 1,
+		session_id: process.env[SKC_COORDINATOR_SESSION_ID_ENV]?.trim() || null,
+		state: "errored",
+		ready_for_input: false,
+		updated_at: now,
+		current_turn_id: null,
+		last_turn_id: null,
+		live: false,
+		reason: code,
+		source: "agent_session_event",
+		event: "launch_error",
+		cwd,
+		session_file: null,
+		final_response: {
+			text: message,
+			format: "markdown",
+			source: "launch_error",
+			artifact_path: null,
+			truncated: false,
+		},
+		error: { code, message, recoverable: true },
+	};
+	await fs.mkdir(path.dirname(stateFile), { recursive: true });
+	await Bun.write(stateFile, `${JSON.stringify(payload, null, 2)}\n`);
+}
 
 export default class Index extends Command {
 	static description = "Sayknow-CLI — an AI coding assistant";
@@ -157,7 +196,13 @@ export default class Index extends Command {
 			return;
 		}
 
-		const launch = prepareLaunchWorktree(process.cwd(), args);
+		let launch: ReturnType<typeof prepareLaunchWorktree>;
+		try {
+			launch = prepareLaunchWorktree(process.cwd(), args);
+		} catch (error) {
+			await persistCoordinatorLaunchFailure(error, process.cwd());
+			throw error;
+		}
 		if (launch.worktree.enabled) {
 			process.chdir(launch.cwd);
 			setProjectDir(launch.cwd);
@@ -169,7 +214,7 @@ export default class Index extends Command {
 				rawArgs: launch.args,
 				cwd: launch.cwd,
 				worktreeBranch: launch.worktree.enabled && !launch.worktree.detached ? launch.worktree.branchName : null,
-				project: launch.worktree.enabled ? launch.worktree.repoRoot : launch.cwd,
+				project: launch.cwd,
 			})
 		)
 			return;

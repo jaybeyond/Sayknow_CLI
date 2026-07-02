@@ -79,8 +79,36 @@ const SPECIAL_CASES: ReadonlyArray<readonly [string, string]> = [
 	["discord.gg/sj4exxQ9v", "discord.gg/your-invite"],
 ];
 
-const SKIP_DIRS = new Set([".git", "node_modules", "dist", "build", "coverage", ".turbo"]);
+// `rebrand` is the fork's own rebrand machinery (overlay sources, *.patch files
+// whose context lines quote upstream `gajae/gjc`, manifest/identity). gen-tree
+// carries it into the output (toolingOnly) so the fork can re-sync; the codemod
+// must never rewrite it (that would corrupt patches and break idempotence on the
+// G2 gate, which re-applies to the assembled tree).
+const SKIP_DIRS = new Set([".git", "node_modules", "dist", "build", "coverage", ".turbo", "rebrand"]);
 const SKIP_FILES = new Set(["bun.lock", "Cargo.lock", ".git"]);
+// Fork-owned overlay docs that intentionally RETAIN upstream attribution
+// ("a rebranded fork of gajae-code by ...", "synced onto upstream gajae-code
+// vX"). These are whole-file overlays (rebrand/overlay/**); the codemod must
+// leave them verbatim, because (a) rewriting "gajae-code" → "sayknow-cli" would
+// make the attribution false, and (b) it would break codemod idempotence — the
+// G2 gate re-applies apply-rebrand to the assembled tree, which by then includes
+// these overlay files. Matched by exact path relative to the tree root.
+const PRESERVE_RELPATHS = new Set([
+	// Overlay attribution docs (see above).
+	"NOTICE.md",
+	"README.md",
+	"packages/coding-agent/CHANGELOG.md",
+	// toolingOnly pipeline files carried into the output by gen-tree. They quote
+	// the upstream brand by necessity (rename rules + maintenance docs); the
+	// codemod must leave them verbatim or it corrupts its own tooling on re-apply.
+	"scripts/apply-rebrand.ts",
+	"scripts/apply-fork-identity.ts",
+	"scripts/extract-fork-layer.ts",
+	"scripts/gen-tree.ts",
+	"scripts/sync-upstream.sh",
+	"scripts/publish-npm.ts",
+	"docs/FORK_MAINTENANCE.md",
+]);
 const BINARY_EXT = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico", ".node", ".wasm", ".woff", ".woff2", ".ttf", ".otf", ".pdf", ".zip", ".gz", ".tgz", ".tar"]);
 
 function applyTokens(input: string): string {
@@ -144,6 +172,8 @@ function buildPlan(target: string): Plan {
 	const plan: Plan = { contentEdits: [], renames: [] };
 	for (const abs of files) {
 		const rel = path.relative(target, abs);
+		// Fork-owned overlay attribution docs: leave content AND path verbatim.
+		if (PRESERVE_RELPATHS.has(rel)) continue;
 		// Content edits: text files only.
 		if (!isBinary(abs)) {
 			try {

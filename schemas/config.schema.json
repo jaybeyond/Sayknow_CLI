@@ -26,6 +26,90 @@
 			},
 			"additionalProperties": false
 		},
+		"notifications": {
+			"type": "object",
+			"properties": {
+				"enabled": {
+					"type": "boolean",
+					"default": false
+				},
+				"telegram": {
+					"type": "object",
+					"properties": {
+						"botToken": {
+							"type": "string"
+						},
+						"chatId": {
+							"type": "string"
+						}
+					},
+					"additionalProperties": false
+				},
+				"discord": {
+					"type": "object",
+					"properties": {
+						"botToken": {
+							"type": "string"
+						},
+						"channelId": {
+							"type": "string"
+						}
+					},
+					"additionalProperties": false
+				},
+				"slack": {
+					"type": "object",
+					"properties": {
+						"botToken": {
+							"type": "string"
+						},
+						"channelId": {
+							"type": "string"
+						}
+					},
+					"additionalProperties": false
+				},
+				"redact": {
+					"type": "boolean",
+					"default": false
+				},
+				"verbosity": {
+					"type": "string",
+					"default": "lean"
+				},
+				"daemon": {
+					"type": "object",
+					"properties": {
+						"idleTimeoutMs": {
+							"type": "number",
+							"default": 60000
+						}
+					},
+					"additionalProperties": false
+				},
+				"terminalBell": {
+					"type": "boolean",
+					"description": "Emit a BEL character for local terminal notifications",
+					"default": false
+				},
+				"bellOnComplete": {
+					"type": "boolean",
+					"description": "Ring the terminal bell when an agent turn completes",
+					"default": true
+				},
+				"bellOnApproval": {
+					"type": "boolean",
+					"description": "Ring the terminal bell when a plan or approval prompt needs attention",
+					"default": true
+				},
+				"bellOnAsk": {
+					"type": "boolean",
+					"description": "Ring the terminal bell when an ask/user-input prompt needs attention",
+					"default": true
+				}
+			},
+			"additionalProperties": false
+		},
 		"autoResume": {
 			"type": "boolean",
 			"description": "Automatically resume the most recent session in the current directory",
@@ -720,6 +804,17 @@
 					"description": "Skip welcome screen and startup status messages",
 					"default": false
 				},
+				"welcomeBannerMode": {
+					"type": "string",
+					"enum": [
+						"auto",
+						"unicode",
+						"square",
+						"ascii"
+					],
+					"description": "Logo style for the startup welcome screen",
+					"default": "auto"
+				},
 				"checkUpdate": {
 					"type": "boolean",
 					"description": "If false, skip update check",
@@ -755,6 +850,11 @@
 					],
 					"description": "Notify when the agent completes",
 					"default": "on"
+				},
+				"notifyCommand": {
+					"type": "string",
+					"description": "Optional user-level shell command to run when an agent turn completes; receives SKC_NOTIFICATION_* environment variables.",
+					"default": ""
 				}
 			},
 			"additionalProperties": false
@@ -1553,17 +1653,6 @@
 			},
 			"additionalProperties": false
 		},
-		"inspect_image": {
-			"type": "object",
-			"properties": {
-				"enabled": {
-					"type": "boolean",
-					"description": "Enable the inspect_image tool, delegating image understanding to a vision-capable model",
-					"default": false
-				}
-			},
-			"additionalProperties": false
-		},
 		"checkpoint": {
 			"type": "object",
 			"properties": {
@@ -1593,6 +1682,17 @@
 					"type": "boolean",
 					"description": "Allow the read tool to fetch and process URLs",
 					"default": true
+				}
+			},
+			"additionalProperties": false
+		},
+		"web": {
+			"type": "object",
+			"properties": {
+				"insaneFallback": {
+					"type": "boolean",
+					"description": "Opt in to the vendored insane-search escalation for blocked public URL reads (403/WAF/JS-gated). Off by default. Requires preinstalled python3 + curl_cffi (and node + playwright/stealth for the browser phase); changes network posture by enabling TLS/browser impersonation for public pages.",
+					"default": false
 				}
 			},
 			"additionalProperties": false
@@ -1643,6 +1743,7 @@
 						"type": "string",
 						"enum": [
 							"duckduckgo",
+							"insane",
 							"exa",
 							"brave",
 							"jina",
@@ -1662,6 +1763,11 @@
 					},
 					"description": "Ordered fallback web search providers after the active model native provider",
 					"default": []
+				},
+				"timeout": {
+					"type": "number",
+					"description": "Hard timeout in seconds for a single web search request (default 300)",
+					"default": 300
 				}
 			},
 			"additionalProperties": false
@@ -1682,6 +1788,38 @@
 				"screenshotDir": {
 					"type": "string",
 					"description": "Directory to save screenshots. If unset, screenshots go to a temp file. Supports ~. Examples: ~/Downloads, ~/Desktop, /sdcard/Download (Android)"
+				},
+				"gc": {
+					"type": "object",
+					"properties": {
+						"enabled": {
+							"type": "boolean",
+							"description": "Automatically reclaim idle, unheld SKC-managed headless/spawned browser tabs.",
+							"default": true
+						},
+						"idleMs": {
+							"type": "number",
+							"description": "Evict headless/spawned tabs idle longer than this many milliseconds.",
+							"default": 300000
+						},
+						"rssLimitMb": {
+							"type": "number",
+							"description": "Parent-process RSS (MB) above which idle tabs are opportunistically evicted LRU.",
+							"default": 1536
+						}
+					},
+					"additionalProperties": false
+				}
+			},
+			"additionalProperties": false
+		},
+		"resourceGc": {
+			"type": "object",
+			"properties": {
+				"sweepIntervalMs": {
+					"type": "number",
+					"description": "How often the resource GC sweeps browser tabs and stale screenshot directories.",
+					"default": 30000
 				}
 			},
 			"additionalProperties": false
@@ -1721,6 +1859,27 @@
 							"type": "boolean",
 							"description": "Persist audit records for enabled computer-use actions.",
 							"default": true
+						}
+					},
+					"additionalProperties": false
+				},
+				"screenshotGc": {
+					"type": "object",
+					"properties": {
+						"enabled": {
+							"type": "boolean",
+							"description": "Delete stale computer-use screenshot fallback directories on disk.",
+							"default": true
+						},
+						"staleMs": {
+							"type": "number",
+							"description": "Remove screenshot fallback directories whose mtime is older than this many milliseconds.",
+							"default": 43200000
+						},
+						"scanIntervalMs": {
+							"type": "number",
+							"description": "Minimum interval between os.tmpdir scans for stale screenshot directories.",
+							"default": 1800000
 						}
 					},
 					"additionalProperties": false
@@ -1920,6 +2079,7 @@
 					"enum": [
 						"auto",
 						"duckduckgo",
+						"insane",
 						"exa",
 						"brave",
 						"jina",
@@ -2101,6 +2261,33 @@
 				"max": {
 					"type": "number",
 					"default": 65536
+				}
+			},
+			"additionalProperties": false
+		},
+		"plugins": {
+			"type": "object",
+			"properties": {
+				"security": {
+					"type": "object",
+					"properties": {
+						"scanMode": {
+							"type": "string",
+							"enum": [
+								"warn",
+								"off",
+								"block"
+							],
+							"description": "warn: scan on install and log advisory findings (default); off: skip scan; block: deny install when score exceeds threshold",
+							"default": "warn"
+						},
+						"riskThreshold": {
+							"type": "number",
+							"description": "Score threshold (0–100) above which block mode denies install. Default 60.",
+							"default": 60
+						}
+					},
+					"additionalProperties": false
 				}
 			},
 			"additionalProperties": false

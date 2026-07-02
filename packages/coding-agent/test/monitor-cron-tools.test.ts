@@ -1,15 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import type { AgentToolContext } from "@sayknow-cli/agent-core";
+import type { AgentToolContext, AgentToolResult } from "@sayknow-cli/agent-core";
 import * as z from "zod/v4";
 import { AsyncJobManager } from "../src/async/job-manager";
 import { Settings } from "../src/config/settings";
 import {
 	CRON_RECURRING_MAX_AGE_MS,
-	CronCreateTool,
-	CronDeleteTool,
-	CronListTool,
+	type CronListJobDetails,
+	CronTool,
 	calculateCronFireTimeMs,
 	findNextCronMatchMs,
 	MAX_CRON_TASKS_PER_OWNER,
@@ -307,11 +306,26 @@ describe("MonitorTool", () => {
 describe("Cron tools", () => {
 	function makeTools(options: SessionOptions = {}) {
 		const session = createSession(settings, options);
+		const cron = CronTool.createIf(session)!;
 		return {
 			session,
-			create: CronCreateTool.createIf(session)!,
-			list: CronListTool.createIf(session)!,
-			del: CronDeleteTool.createIf(session)!,
+			cron,
+			create: {
+				execute: (id: string, params: { cron_expression: string; prompt: string; recurring: boolean }) =>
+					cron.execute(id, { op: "create", ...params }) as Promise<
+						AgentToolResult<{ id: string; cron_expression: string; recurring: boolean; nextFireAt?: number }>
+					>,
+			},
+			list: {
+				execute: (id: string, _params: Record<string, never> = {}) =>
+					cron.execute(id, { op: "list" }) as Promise<AgentToolResult<{ jobs: CronListJobDetails[] }>>,
+			},
+			del: {
+				execute: (id: string, params: { id: string }) =>
+					cron.execute(id, { op: "delete", id: params.id }) as Promise<
+						AgentToolResult<{ id: string; deleted: boolean }>
+					>,
+			},
 		};
 	}
 
@@ -324,17 +338,15 @@ describe("Cron tools", () => {
 		expect(() => validateCronExpression("5-1 * * * *")).toThrow(/ascending/);
 	});
 
-	it("matches upstream JSON Schemas exactly", async () => {
-		const { create, list, del } = makeTools();
-		const createFixture = await loadFixture<{ tool_name: string; input_schema: unknown }>("cron-create.schema.json");
-		const listFixture = await loadFixture<{ tool_name: string; input_schema: unknown }>("cron-list.schema.json");
-		const deleteFixture = await loadFixture<{ tool_name: string; input_schema: unknown }>("cron-delete.schema.json");
-		expect(create.name).toBe(createFixture.tool_name);
-		expect(list.name).toBe(listFixture.tool_name);
-		expect(del.name).toBe(deleteFixture.tool_name);
-		expectSchemaParity(create.parameters, createFixture.input_schema);
-		expectSchemaParity(list.parameters, listFixture.input_schema);
-		expectSchemaParity(del.parameters, deleteFixture.input_schema);
+	it("exposes one cron tool with create/list/delete operations", () => {
+		const { cron } = makeTools();
+		expect(cron.name).toBe("cron");
+		expect(cron.parameters.safeParse({ op: "create", cron_expression: "*/5 * * * *", prompt: "p" }).success).toBe(
+			true,
+		);
+		expect(cron.parameters.safeParse({ op: "list" }).success).toBe(true);
+		expect(cron.parameters.safeParse({ op: "delete", id: "ab12cd34" }).success).toBe(true);
+		expect(cron.parameters.safeParse({ op: "bogus" }).success).toBe(false);
 	});
 
 	it("schedules a recurring task, lists it with human schedule, and returns an 8-character id", async () => {
@@ -463,14 +475,15 @@ describe("Cron tools", () => {
 	it("isolates schedules by owner — subagent cannot list parent's tasks", async () => {
 		const parentSession = createSession(settings, { agentId: "0-Parent" });
 		const childSession = createSession(settings, { agentId: "0-Child" });
-		const parentCreate = CronCreateTool.createIf(parentSession)!;
-		const childList = CronListTool.createIf(childSession)!;
-		await parentCreate.execute("call", {
+		const parentCron = CronTool.createIf(parentSession)!;
+		const childCron = CronTool.createIf(childSession)!;
+		await parentCron.execute("call", {
+			op: "create",
 			cron_expression: "*/5 * * * *",
 			prompt: "parent-task",
 			recurring: true,
 		});
-		const childListing = expectText(await childList.execute("call", {}));
+		const childListing = expectText(await childCron.execute("call", { op: "list" }));
 		expect(childListing.details.jobs).toHaveLength(0);
 	});
 
@@ -506,22 +519,16 @@ describe("Cron tools", () => {
 });
 
 describe("BUILTIN_TOOLS registry", () => {
-	it("exposes monitor + CronCreate/CronList/CronDelete entries", () => {
+	it("exposes monitor + cron entries", () => {
 		expect(BUILTIN_TOOLS.monitor).toBeDefined();
-		expect(BUILTIN_TOOLS.CronCreate).toBeDefined();
-		expect(BUILTIN_TOOLS.CronList).toBeDefined();
-		expect(BUILTIN_TOOLS.CronDelete).toBeDefined();
+		expect(BUILTIN_TOOLS.cron).toBeDefined();
 	});
 
 	it("constructs the new tools through the factory map when background-jobs are enabled", async () => {
 		const session = createSession(settings);
 		const monitor = await BUILTIN_TOOLS.monitor(session);
-		const cronCreate = await BUILTIN_TOOLS.CronCreate(session);
-		const cronList = await BUILTIN_TOOLS.CronList(session);
-		const cronDelete = await BUILTIN_TOOLS.CronDelete(session);
+		const cron = await BUILTIN_TOOLS.cron(session);
 		expect(monitor?.name).toBe("monitor");
-		expect(cronCreate?.name).toBe("CronCreate");
-		expect(cronList?.name).toBe("CronList");
-		expect(cronDelete?.name).toBe("CronDelete");
+		expect(cron?.name).toBe("cron");
 	});
 });

@@ -1,7 +1,7 @@
 /**
  * Session-scoped storage for the harness control plane.
  *
- * Layout (under the harness state root, default `<cwd>/.skc/state/harness`):
+ * Layout (under the harness state root, default `<cwd>/.skc/_session-{sessionid}/state/harness`):
  *   sessions/<encoded-id>/state.json        lifecycle + handle (atomic)
  *   sessions/<encoded-id>/lease.json         owner lease (M3)
  *   sessions/<encoded-id>/events.jsonl       owner-only severity envelopes
@@ -18,6 +18,7 @@ import * as fsSync from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { harnessStateRoot } from "../skc-runtime/session-layout";
 import { appendReceiptToConfiguredSpool } from "./receipt-spool";
 import type { ReceiptEnvelope } from "./receipts";
 import type { EventEnvelope, ReceiptFamily, SessionState } from "./types";
@@ -232,13 +233,22 @@ export class StorageError extends Error {
 	}
 }
 
-/** Resolve the harness state root from explicit value, env, or cwd default. */
-export function resolveHarnessRoot(opts?: { root?: string; cwd?: string; env?: NodeJS.ProcessEnv }): string {
+/** Resolve the harness state root from explicit value, env, or cwd/session default. */
+export function resolveHarnessRoot(opts?: {
+	root?: string;
+	cwd?: string;
+	env?: NodeJS.ProcessEnv;
+	skcSessionId?: string;
+}): string {
 	const env = opts?.env ?? process.env;
 	if (opts?.root) return path.resolve(opts.root);
 	const fromEnv = env.SKC_HARNESS_STATE_ROOT;
 	if (fromEnv?.trim()) return path.resolve(fromEnv.trim());
-	return path.join(opts?.cwd ?? process.cwd(), ".skc", "state", "harness");
+	const skcSessionId = opts?.skcSessionId ?? env.SKC_SESSION_ID?.trim();
+	if (!skcSessionId) {
+		throw new StorageError("SKC session id is required for default harness state root", "missing_skc_session_id");
+	}
+	return harnessStateRoot(opts?.cwd ?? process.cwd(), skcSessionId);
 }
 
 export function assertSafeSessionId(id: string): void {

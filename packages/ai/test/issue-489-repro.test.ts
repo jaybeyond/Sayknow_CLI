@@ -123,10 +123,12 @@ describe("opencode-go qwen3.7-max keeps anthropic-messages transport (issue #489
 	test("dynamic discovery still enriches matching-transport models", async () => {
 		// A genuinely openai-completions opencode-go model should still pick up
 		// dynamic metadata (pricing/limits) without transport regressions.
+		// Qwen Plus/Max rows are now Anthropic Messages on the official Go contract,
+		// so use a chat-completions row here.
 		const discovered: Model<"openai-completions">[] = [
 			{
-				id: "qwen3.6-plus",
-				name: "Qwen3.6 Plus",
+				id: "glm-5.2",
+				name: "GLM-5.2",
 				api: "openai-completions",
 				provider: "opencode-go",
 				baseUrl: "https://opencode.ai/zen/go/v1",
@@ -134,7 +136,7 @@ describe("opencode-go qwen3.7-max keeps anthropic-messages transport (issue #489
 				input: ["text"],
 				cost: { input: 9, output: 9, cacheRead: 9, cacheWrite: 9 },
 				contextWindow: 1000000,
-				maxTokens: 65536,
+				maxTokens: 131072,
 			},
 		];
 
@@ -147,12 +149,12 @@ describe("opencode-go qwen3.7-max keeps anthropic-messages transport (issue #489
 			"online",
 		);
 
-		const qwen = models.find(m => m.id === "qwen3.6-plus");
-		expect(qwen?.api).toBe("openai-completions");
-		expect(qwen?.baseUrl).toBe("https://opencode.ai/zen/go/v1");
-		expect(qwen?.cost.input).toBe(9);
+		const glm = models.find(m => m.id === "glm-5.2");
+		expect(glm?.api).toBe("openai-completions");
+		expect(glm?.baseUrl).toBe("https://opencode.ai/zen/go/v1");
+		expect(glm?.cost.input).toBe(9);
 	});
-	test("gpt-5.5 context cap is clamped without clobbering static overrides", async () => {
+	test("gpt-5.5 context cap is normalized without clobbering static overrides", async () => {
 		const staticModels: Model<Api>[] = [
 			{
 				id: "gpt-5.5",
@@ -243,7 +245,7 @@ describe("opencode-go qwen3.7-max keeps anthropic-messages transport (issue #489
 		const preview = models.find(m => m.id === "gpt-5.5-preview");
 		const unknownSuffix = models.find(m => m.id === "gpt-5.5-experimental");
 		const other = models.find(m => m.id === "gpt-5.4");
-		expect(gpt55?.contextWindow).toBe(400_000);
+		expect(gpt55?.contextWindow).toBe(1_000_000);
 		expect(gpt55?.api).toBe("openai-responses");
 		expect(gpt55?.baseUrl).toBe("https://api.openai.com/v1");
 		expect(pro?.contextWindow).toBe(1_100_000);

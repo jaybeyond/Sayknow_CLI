@@ -3,9 +3,15 @@
 These fixtures freeze the runtime-facing schema and observed behavior of upstream
 Claude Code's `Monitor`, `CronCreate`, `CronList`, and `CronDelete` tools.
 
-They are the **parity oracle** used by `monitor-tool.test.ts`,
-`cron-tool.test.ts`, and the fixture validation test. SKC's inline `Monitor`
-and Cron* tools must mirror these surfaces exactly; any divergence is a bug.
+They are the **parity oracle** used by `monitor-tool.test.ts` and the fixture
+validation test. SKC's inline `Monitor` tool must mirror the `monitor` surface
+exactly; any divergence there is a bug.
+
+> **Cron divergence:** SKC intentionally consolidates upstream's `CronCreate` /
+> `CronList` / `CronDelete` into a single `cron` tool with an `op` discriminator
+> (`create` | `list` | `delete`). The three `cron-*.schema.json` fixtures are kept
+> as a historical record of the upstream surface; `claude-code-tools-fixtures.test.ts`
+> validates those frozen JSON records, not SKC's live `cron` tool shape.
 
 ## Source
 

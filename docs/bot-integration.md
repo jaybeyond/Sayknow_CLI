@@ -107,6 +107,14 @@ Mutating tools:
 - `skc_coordinator_submit_question_answer`
 - `skc_coordinator_report_status`
 
+High-level delegation tools:
+
+- `skc_delegate_plan`
+- `skc_delegate_execute`
+- `skc_delegate_team`
+
+The `skc_delegate_*` tools package common SKC workflows for hosts that want to delegate an entire planning, execution, or team turn without manually composing `start_session` and `send_prompt`. They use the same coordinator mutation gates and workdir allowlists as the lower-level session tools.
+
 ### Start a managed SKC session
 
 Call `skc_coordinator_start_session` with a canonical workdir inside `SKC_COORDINATOR_MCP_WORKDIR_ROOTS`:
@@ -191,6 +199,48 @@ When the work is done, your bot must call `skc_coordinator_report_status` with t
 
 Use `status: "failed"` plus `blocker` for provider failures, unrecoverable tool failures, missing credentials, policy denial, or task blockers.
 Use `status: "cancelled"` when the coordinator policy intentionally stops tracking an active turn, for example after an operator abort or a bot-side shutdown decision. This records the turn as terminal in coordinator state; it does not kill the underlying tmux process. To supersede one active turn with replacement work, send the replacement prompt with `force: true` and preserve the superseded turn id in your audit trail.
+
+### Forward finish/stop lifecycle notifications
+
+Discord, Hermes, Clawhip, and similar external notifiers should be opt-in and should forward only the public lifecycle surface. Use one of these supported paths:
+
+- Coordinator controllers: watch or poll turn state with `skc_coordinator_watch_events`, `skc_coordinator_await_turn`, or `skc_coordinator_read_turn`, then notify from the terminal turn status your controller records with `skc_coordinator_report_status`.
+- In-process extensions or hooks: subscribe to the public lifecycle events `turn_end` and `agent_end` from the shared hook/extension event contract.
+
+Recommended notification mapping:
+
+| Notification intent | Public surface | Safe meaning |
+| --- | --- | --- |
+| Turn finished | `turn_end` or terminal coordinator turn status `completed` | One LLM turn produced its final assistant message. |
+| Agent stopped / finished | `agent_end` | The agent loop ended for the submitted prompt. |
+| Waiting for user | Coordinator turn status `waiting_for_answer` | The agent is blocked on a structured question. |
+| Failed or blocked | Coordinator status `failed` with a public `blocker` summary | The controller recorded a terminal failure. |
+| Cancelled / superseded | Coordinator status `cancelled` or `superseded` | The controller intentionally stopped tracking or replaced the turn. |
+
+Do not forward raw prompts, transcripts, tool outputs, hidden instructions, private configs, host paths, channel ids, webhook URLs, or tokens. If your notifier needs a human-readable sentence, create a caller-supplied sanitized summary and keep provider/tool details out of the payload.
+
+Example public-safe extension event payloads:
+
+```json
+{ "type": "turn_end", "turnIndex": 2, "summary": "Turn finished; review the local SKC session for details." }
+```
+
+```json
+{ "type": "agent_end", "summary": "Agent loop ended; no raw transcript is included." }
+```
+
+Example opt-in forwarding policy:
+
+```json
+{
+  "enabled": true,
+  "events": ["turn_end", "agent_end"],
+  "destination": "external-notifier-profile",
+  "redaction": "metadata-only"
+}
+```
+
+SKC does not currently expose a structured stop-reason field on `agent_end`; integrators that need `waiting_for_answer`, `failed`, `cancelled`, or `superseded` should prefer the Coordinator MCP turn status because it is explicit, terminal-state oriented, and safe to relay after controller-side redaction.
 
 ### Answer structured questions
 

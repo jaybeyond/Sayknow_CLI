@@ -1,6 +1,6 @@
 --- a/.gitignore
 +++ b/.gitignore
-@@ -86,3 +86,6 @@
+@@ -88,3 +88,6 @@
  python/roboskc/web/dist/
  python/roboskc/.env
  .release-040-artifacts/

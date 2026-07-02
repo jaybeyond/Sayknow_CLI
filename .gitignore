@@ -55,7 +55,9 @@ packages/ai/test/.temp-images/
 .skc/ultragoal/
 .skc/verification/
 .skc/logs/
+.skc/rlm/
 .skc/state/
+.skc/_session-*/
 .skc/metrics.json
 .pi_config/
 .opencode/

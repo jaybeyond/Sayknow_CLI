@@ -10,6 +10,7 @@ import { FooterComponent } from "@sayknow-cli/coding-agent/modes/components/foot
 import { STATUS_LINE_PRESETS } from "@sayknow-cli/coding-agent/modes/components/status-line/presets";
 import { UserMessageComponent } from "@sayknow-cli/coding-agent/modes/components/user-message";
 import { WelcomeComponent } from "@sayknow-cli/coding-agent/modes/components/welcome";
+import { resolveWelcomeLogoMode } from "@sayknow-cli/coding-agent/modes/interactive-mode";
 import { getEditorTheme, initTheme } from "@sayknow-cli/coding-agent/modes/theme/theme";
 import type { AgentSession } from "@sayknow-cli/coding-agent/session/agent-session";
 import { type TUI, visibleWidth } from "@sayknow-cli/tui";
@@ -102,7 +103,34 @@ describe("redesigned interactive shell chrome", () => {
 		expect(assistant).not.toContain("▌");
 	});
 
-	it("keeps the SKC forge launch surface responsive", () => {
+	it("sizes submitted Korean user prompts to the current viewport width", () => {
+		const prompt = "안녕하세요 ".repeat(30);
+		const narrowLines = new UserMessageComponent(prompt).render(80);
+		const wideLines = new UserMessageComponent(prompt).render(160);
+		const contentWidths = (lines: string[]) =>
+			lines
+				.map(line =>
+					Bun.stripANSI(line)
+						.replace(/\x1b\]133;[ABC]\x07/g, "")
+						.trimEnd(),
+				)
+				.filter(line => line.includes("안녕하세요"))
+				.map(line => visibleWidth(line));
+
+		const narrowContentWidths = contentWidths(narrowLines);
+		const wideContentWidths = contentWidths(wideLines);
+
+		expect(wideContentWidths.length).toBeLessThan(narrowContentWidths.length);
+		expect(Math.max(...wideContentWidths)).toBeGreaterThan(120);
+		for (const line of narrowLines) {
+			expect(visibleWidth(line)).toBeLessThanOrEqual(80);
+		}
+		for (const line of wideLines) {
+			expect(visibleWidth(line)).toBeLessThanOrEqual(160);
+		}
+	});
+
+	it("keeps the Sayknow launch surface responsive", () => {
 		const component = new WelcomeComponent("1.2.3", "gpt-5.5", "openai");
 		const lines = component.render(54);
 		const rendered = Bun.stripANSI(lines.join("\n"));
@@ -114,6 +142,58 @@ describe("redesigned interactive shell chrome", () => {
 		for (const line of lines) {
 			expect(visibleWidth(line)).toBeLessThanOrEqual(54);
 		}
+	});
+
+	it("uses a wider splash box on wide terminals", () => {
+		const component = new WelcomeComponent("1.2.3", "gpt-5.5", "openai");
+		const narrowLines = component.render(100);
+		const wideLines = component.render(160);
+		const narrowTop = Bun.stripANSI(narrowLines[0] ?? "");
+		const wideTop = Bun.stripANSI(wideLines[0] ?? "");
+
+		expect(visibleWidth(narrowTop)).toBe(98);
+		expect(visibleWidth(wideTop)).toBe(158);
+		expect(visibleWidth(wideTop)).toBeGreaterThan(visibleWidth(narrowTop));
+		expect(wideTop).toContain("Sayknow-CLI");
+		for (const line of wideLines) {
+			expect(visibleWidth(line)).toBeLessThanOrEqual(160);
+		}
+	});
+
+	it("renders the brand wordmark even when an ASCII-safe logo is requested", () => {
+		// The Sayknow fork ships a single SAYKNOW wordmark for every logo mode, so an
+		// "ascii" request still resolves to the brand wordmark — never the upstream claw art.
+		const component = new WelcomeComponent("1.2.3", "gpt-5.5", "openai", [], [], "ascii");
+		const lines = component.render(54);
+		const rendered = Bun.stripANSI(lines.join("\n"));
+
+		expect(rendered).toContain("╔═╗╔═╗╦ ╦╦╔═╔╗╔╔═╗╦ ╦");
+		expect(rendered).not.toContain("+----------------+");
+		for (const line of lines) {
+			expect(visibleWidth(line)).toBeLessThanOrEqual(54);
+		}
+	});
+
+	it("renders the brand wordmark even when a square-corner logo is requested", () => {
+		const component = new WelcomeComponent("1.2.3", "gpt-5.5", "openai", [], [], "square");
+		const lines = component.render(54);
+		const rendered = Bun.stripANSI(lines.join("\n"));
+
+		expect(rendered).toContain("╔═╗╔═╗╦ ╦╦╔═╔╗╔╔═╗╦ ╦");
+		expect(rendered).not.toContain("┌────────────────┐");
+		expect(rendered).not.toContain("+----------------+");
+		for (const line of lines) {
+			expect(visibleWidth(line)).toBeLessThanOrEqual(54);
+		}
+	});
+
+	it("resolves welcome banner auto and manual override modes", () => {
+		expect(resolveWelcomeLogoMode("auto", { WT_SESSION: "session-id" }, "win32")).toBe("unicode");
+		expect(resolveWelcomeLogoMode("auto", { WT_SESSION: "session-id" }, "linux")).toBe("unicode");
+		expect(resolveWelcomeLogoMode("auto", {}, "win32")).toBe("unicode");
+		expect(resolveWelcomeLogoMode("unicode", { WT_SESSION: "session-id" }, "win32")).toBe("unicode");
+		expect(resolveWelcomeLogoMode("square", { WT_SESSION: "session-id" }, "win32")).toBe("square");
+		expect(resolveWelcomeLogoMode("ascii", {}, "linux")).toBe("ascii");
 	});
 
 	it("renders the live composer as a borderless opencode-style prompt", () => {
@@ -229,7 +309,7 @@ describe("redesigned interactive shell chrome", () => {
 		expect(STATUS_LINE_PRESETS.default.segmentOptions?.path?.maxLength).toBe(32);
 	});
 
-	it("keeps forge launch rendering on the bounded-work path", () => {
+	it("keeps launch rendering on the bounded-work path", () => {
 		const component = new WelcomeComponent("1.2.3", "gpt-5.5", "openai", [
 			{ name: "very-long-session-name".repeat(10), timeAgo: "2h" },
 		]);

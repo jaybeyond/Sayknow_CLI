@@ -255,8 +255,16 @@ describe("GoalTool", () => {
 	it("blocks direct unified goal completion for active ultragoal objectives without verification receipt", async () => {
 		const root = await fs.mkdtemp(path.join(os.tmpdir(), "skc-goal-ultragoal-"));
 		try {
-			const plan = await createUltragoalPlan({ cwd: root, brief: "Ship verified ultragoal" });
-			await startNextUltragoalGoal({ cwd: root });
+			const sessionId = "goal-tool-ultragoal-test";
+			const plan = await createUltragoalPlan({ cwd: root, brief: "Ship verified ultragoal", sessionId });
+			// Isolate the receipt gate: disable the pre-gate try-harder nudge (covered
+			// separately in ultragoal-nudge-guard.test.ts).
+			await fs.mkdir(path.join(root, ".skc"), { recursive: true });
+			await fs.writeFile(
+				path.join(root, ".skc", "settings.json"),
+				JSON.stringify({ "skc.ultragoal.nudgeBudget": 0 }),
+			);
+			await startNextUltragoalGoal({ cwd: root, sessionId });
 			const harness = createRuntimeHarness({
 				enabled: true,
 				mode: "active",
@@ -265,6 +273,7 @@ describe("GoalTool", () => {
 			const tool = new GoalTool(
 				createToolSession({
 					cwd: root,
+					getSessionId: () => sessionId,
 					getGoalRuntime: () => harness.runtime,
 					getGoalModeState: () => harness.getState(),
 				}),

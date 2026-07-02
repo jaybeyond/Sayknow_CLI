@@ -11,7 +11,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 
 import { listVerbs } from "../packages/coding-agent/src/skc-runtime/workflow-manifest";
-import { CANONICAL_SKC_WORKFLOW_SKILLS, type CanonicalSkcWorkflowSkill } from "../packages/coding-agent/src/skill-state/active-state";
+import { CANONICAL_SKC_WORKFLOW_SKILLS, type CanonicalSkcWorkflowSkill } from "../packages/coding-agent/src/skill-state/canonical-skills";
 
 const repoRoot = path.join(import.meta.dir, "..");
 const skillsRoot = path.join(repoRoot, "packages", "coding-agent", "src", "defaults", "skc", "skills");

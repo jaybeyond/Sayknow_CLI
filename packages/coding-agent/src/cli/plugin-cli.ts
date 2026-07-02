@@ -6,6 +6,7 @@
 
 import { APP_NAME, getProjectDir } from "@sayknow-cli/utils";
 import chalk from "chalk";
+import { Settings } from "../config/settings";
 import { resolveOrDefaultProjectRegistryPath } from "../discovery/helpers";
 import { PluginManager, parseSettingValue, validateSetting } from "../extensibility/plugins";
 import {
@@ -15,6 +16,8 @@ import {
 	getPluginsCacheDir,
 	MarketplaceManager,
 } from "../extensibility/plugins/marketplace/index.js";
+import { type ScanReport, scanPluginDir } from "../extensibility/plugins/security-scanner";
+import { installSkcPluginBundle, isSkcPluginBundleSource, readRegistry } from "../extensibility/skc-plugins";
 import { theme } from "../modes/theme/theme";
 
 // =============================================================================
@@ -48,6 +51,8 @@ export interface PluginCommandArgs {
 		disable?: string;
 		set?: string;
 		scope?: "user" | "project";
+		user?: boolean;
+		project?: boolean;
 	};
 }
 
@@ -109,6 +114,10 @@ export function parsePluginArgs(args: string[]): PluginCommandArgs | undefined {
 			result.flags.dryRun = true;
 		} else if (arg === "-l" || arg === "--local") {
 			result.flags.local = true;
+		} else if (arg === "--user") {
+			result.flags.user = true;
+		} else if (arg === "--project") {
+			result.flags.project = true;
 		} else if (arg === "--enable" && i + 1 < args.length) {
 			result.flags.enable = args[++i];
 		} else if (arg === "--disable" && i + 1 < args.length) {
@@ -147,6 +156,10 @@ export { classifyInstallTarget } from "./classify-install-target";
  * Run a plugin command.
  */
 export async function runPluginCommand(cmd: PluginCommandArgs): Promise<void> {
+	// Initialize settings so plugin commands can read config (e.g. the install-time
+	// security-scan mode/threshold); mirrors the other CLI command handlers. The scan
+	// itself also tolerates an uninitialized Settings, so this is best-effort.
+	await Settings.init().catch(() => {});
 	const manager = new PluginManager();
 
 	switch (cmd.action) {
@@ -342,10 +355,32 @@ async function handleUpgrade(args: string[], flags: PluginCommandArgs["flags"]):
 	}
 }
 
+function printSecurityAdvisory(report: ScanReport): void {
+	const riskColor = report.riskLevel === "high" ? chalk.red : report.riskLevel === "medium" ? chalk.yellow : chalk.dim;
+	console.log(
+		riskColor(`${theme.status.warning} Security advisory: ${report.riskLevel} risk (score ${report.score})`),
+	);
+	for (const f of report.findings.slice(0, 5)) {
+		const loc = f.line !== undefined ? `${f.file}:${f.line}` : f.file;
+		console.log(chalk.dim(`  ${f.id}: ${loc}`));
+	}
+	if (report.findings.length > 5) {
+		console.log(chalk.dim(`  ... and ${report.findings.length - 5} more finding(s)`));
+	}
+	console.log(chalk.dim("  Advisory only (regex-based, may have false positives)."));
+}
+
 async function handleInstall(
 	manager: PluginManager,
 	packages: string[],
-	flags: { json?: boolean; force?: boolean; dryRun?: boolean; scope?: "user" | "project" },
+	flags: {
+		json?: boolean;
+		force?: boolean;
+		dryRun?: boolean;
+		scope?: "user" | "project";
+		user?: boolean;
+		project?: boolean;
+	},
 ): Promise<void> {
 	if (packages.length === 0) {
 		console.error(chalk.red(`Usage: ${APP_NAME} plugin install <package[@version]>[features] ...`));
@@ -360,6 +395,32 @@ async function handleInstall(
 	const knownMarketplaces = new Set((await mktMgr.listMarketplaces()).map(m => m.name));
 
 	for (const spec of packages) {
+		// SKC plugin bundle classifier: a source containing sayknow-plugin.json (or a
+		// git/tarball source) routes to the bundle installer BEFORE marketplace/npm.
+		if (await isSkcPluginBundleSource(spec)) {
+			if (flags.user === flags.project) {
+				console.error(
+					chalk.red(`SKC plugin bundle install requires exactly one of --user or --project for "${spec}".`),
+				);
+				process.exit(1);
+			}
+			const scope: "user" | "project" = flags.user ? "user" : "project";
+			try {
+				const res = await installSkcPluginBundle(spec, { scope, cwd: process.cwd(), force: flags.force });
+				if (flags.json) {
+					console.log(JSON.stringify({ name: res.entry.name, status: res.status, scope }, null, 2));
+				} else {
+					console.log(
+						chalk.green(`${theme.status.success} ${res.status} SKC plugin ${res.entry.name} (${scope})`),
+					);
+				}
+			} catch (err) {
+				console.error(chalk.red(`${theme.status.error} Failed to install SKC plugin ${spec}: ${err}`));
+				process.exit(1);
+			}
+			continue;
+		}
+
 		const target = classifyInstallTarget(spec, knownMarketplaces);
 
 		if (target.type === "marketplace") {
@@ -368,11 +429,28 @@ async function handleInstall(
 					force: flags.force,
 					scope: flags.scope,
 				});
-				console.log(
-					chalk.green(
-						`${theme.status.success} Installed ${target.name} from ${target.marketplace} (${entry.version})`,
-					),
-				);
+				if (flags.json) {
+					// advisory is attached below via the scan path
+				} else {
+					console.log(
+						chalk.green(
+							`${theme.status.success} Installed ${target.name} from ${target.marketplace} (${entry.version})`,
+						),
+					);
+				}
+				// Post-install advisory scan (non-blocking)
+				try {
+					const report = await scanPluginDir(entry.installPath);
+					if (report.riskLevel !== "none") {
+						if (flags.json) {
+							console.log(JSON.stringify({ installed: target.name, securityAdvisory: report }, null, 2));
+						} else {
+							printSecurityAdvisory(report);
+						}
+					}
+				} catch {
+					// advisory — never fail install
+				}
 			} catch (err) {
 				console.error(chalk.red(`${theme.status.error} Failed to install ${spec}: ${err}`));
 				process.exit(1);
@@ -394,7 +472,17 @@ async function handleInstall(
 			const result = await manager.install(spec, { force: flags.force, dryRun: flags.dryRun });
 
 			if (flags.json) {
-				console.log(JSON.stringify(result, null, 2));
+				// Post-install advisory scan for JSON output
+				let securityAdvisory: ScanReport | undefined;
+				if (!flags.dryRun && result.path) {
+					try {
+						const report = await scanPluginDir(result.path);
+						if (report.riskLevel !== "none") securityAdvisory = report;
+					} catch {
+						// advisory
+					}
+				}
+				console.log(JSON.stringify(securityAdvisory ? { ...result, securityAdvisory } : result, null, 2));
 			} else {
 				if (flags.dryRun) {
 					console.log(chalk.dim(`[dry-run] Would install ${spec}`));
@@ -405,6 +493,15 @@ async function handleInstall(
 					}
 					if (result.manifest.description) {
 						console.log(chalk.dim(`  ${result.manifest.description}`));
+					}
+					// Post-install advisory scan
+					if (result.path) {
+						try {
+							const report = await scanPluginDir(result.path);
+							if (report.riskLevel !== "none") printSecurityAdvisory(report);
+						} catch {
+							// advisory
+						}
 					}
 				}
 			}
@@ -462,13 +559,16 @@ async function handleList(manager: PluginManager, flags: { json?: boolean }): Pr
 	const npmPlugins = await manager.list();
 	const mktMgr = await makeMarketplaceManager();
 	const mktPlugins = await mktMgr.listInstalledPlugins();
+	const cwd = getProjectDir();
+	const [skcUser, skcProject] = await Promise.all([readRegistry("user", cwd), readRegistry("project", cwd)]);
+	const skcBundles = [...skcUser.plugins, ...skcProject.plugins];
 
 	if (flags.json) {
-		console.log(JSON.stringify({ npm: npmPlugins, marketplace: mktPlugins }, null, 2));
+		console.log(JSON.stringify({ npm: npmPlugins, marketplace: mktPlugins, skc: skcBundles }, null, 2));
 		return;
 	}
 
-	if (npmPlugins.length === 0 && mktPlugins.length === 0) {
+	if (npmPlugins.length === 0 && mktPlugins.length === 0 && skcBundles.length === 0) {
 		console.log(chalk.dim("No plugins installed"));
 		console.log(chalk.dim(`\nInstall plugins with: ${APP_NAME} plugin install <package>`));
 		return;
@@ -508,6 +608,26 @@ async function handleList(manager: PluginManager, flags: { json?: boolean }): Pr
 			const shadowLabel = plugin.shadowedBy ? chalk.dim(" [shadowed]") : "";
 			const scopeLabel = chalk.dim(` (${plugin.scope})`);
 			console.log(`  ${plugin.id} (${version})${scopeLabel}${shadowLabel}`);
+		}
+	}
+
+	if (skcBundles.length > 0) {
+		if (npmPlugins.length > 0 || mktPlugins.length > 0) console.log();
+		console.log(chalk.bold("SKC Plugin Bundles:\n"));
+		for (const plugin of skcBundles) {
+			const status = plugin.enabled ? chalk.green(theme.status.enabled) : chalk.dim(theme.status.disabled);
+			const scopeLabel = chalk.dim(` (${plugin.scope})`);
+			const disabledCount = plugin.disabledSurfaceIds.length;
+			const quarantineCount = plugin.quarantine?.length ?? 0;
+			const detail = [
+				disabledCount > 0 ? `${disabledCount} disabled` : null,
+				quarantineCount > 0 ? `${quarantineCount} quarantined` : null,
+			]
+				.filter((v): v is string => Boolean(v))
+				.join(", ");
+			console.log(
+				`${status} ${plugin.name}@${plugin.version}${scopeLabel}${detail ? chalk.dim(` — ${detail}`) : ""}`,
+			);
 		}
 	}
 }

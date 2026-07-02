@@ -20,6 +20,7 @@ import {
 import type { ModelRegistry, SkcModelAssignmentTargetId } from "../../config/model-registry";
 import {
 	isAuthenticated,
+	kNoAuth,
 	SKC_MODEL_ASSIGNMENT_TARGET_IDS,
 	SKC_MODEL_ASSIGNMENT_TARGETS,
 } from "../../config/model-registry";
@@ -28,6 +29,7 @@ import {
 	resolveModelRoleValue,
 	type ScopedModelSelection,
 } from "../../config/model-resolver";
+import type { ModelProfileConfig } from "../../config/models-config-schema";
 import type { Settings } from "../../config/settings";
 import { t } from "../../i18n";
 import { type ThemeColor, theme } from "../../modes/theme/theme";
@@ -106,10 +108,9 @@ export type ModelSelectorSelection =
 	  }
 	| {
 			kind: "createProfile";
+			profile: ModelProfileConfig;
 	  }
 	| {
-			// User picked an unauthenticated preset/model — launch OAuth login for
-			// the first missing provider instead of only printing a hint.
 			kind: "login";
 			providerId: string;
 	  };
@@ -162,11 +163,27 @@ interface PresetCreateRow {
 	kind: "create";
 }
 
+interface PresetCreateUnavailableRow {
+	kind: "createUnavailable";
+	label: string;
+}
+
+interface PresetAlreadySavedRow {
+	kind: "alreadySaved";
+	profileName: string;
+}
+
 interface PresetBrowseRow {
 	kind: "browse";
 }
 
-type PresetLandingRow = PresetGroupRow | PresetProfileRow | PresetCreateRow | PresetBrowseRow;
+type PresetLandingRow =
+	| PresetGroupRow
+	| PresetProfileRow
+	| PresetCreateRow
+	| PresetCreateUnavailableRow
+	| PresetAlreadySavedRow
+	| PresetBrowseRow;
 
 // Stable logical identity for a preset landing row, independent of its current
 // list position. Used to relocate the cursor after the expanded group changes so
@@ -181,6 +198,10 @@ function presetRowIdentity(row: PresetLandingRow): string {
 			return "browse";
 		case "create":
 			return "create";
+		case "createUnavailable":
+			return "createUnavailable";
+		case "alreadySaved":
+			return `alreadySaved:${row.profileName}`;
 	}
 }
 
@@ -199,6 +220,64 @@ function isPrintableCharacter(keyData: string): boolean {
 
 function profileRequiredProviders(profile: ModelProfileDefinition): string[] {
 	return [...new Set(profile.requiredProviders)].sort((a, b) => a.localeCompare(b));
+}
+
+function isInheritedRoleSelector(value: string | undefined): boolean {
+	const normalized = value?.trim();
+	return !normalized || normalized === "default" || normalized === "pi/default";
+}
+
+function getDefaultAliasThinkingLevel(value: string | undefined): ThinkingLevel | undefined {
+	const normalized = value?.trim();
+	if (!normalized?.startsWith("pi/default:")) return undefined;
+	return parseThinkingLevel(normalized.slice("pi/default:".length));
+}
+
+function getSelectorProvider(selector: string): string | undefined {
+	const slashIndex = selector.indexOf("/");
+	return slashIndex > 0 ? selector.slice(0, slashIndex) : undefined;
+}
+
+function deriveRequiredProviders(modelMapping: ModelProfileConfig["model_mapping"]): string[] {
+	const providers = new Set<string>();
+	for (const selector of Object.values(modelMapping)) {
+		const provider = getSelectorProvider(selector);
+		if (provider) providers.add(provider);
+	}
+	return [...providers].sort((a, b) => a.localeCompare(b));
+}
+
+function sameStringRecord(
+	left: Readonly<Record<string, string | undefined>>,
+	right: Readonly<Record<string, string | undefined>>,
+): boolean {
+	const leftEntries = Object.entries(left)
+		.filter((entry): entry is [string, string] => entry[1] !== undefined)
+		.sort(([a], [b]) => a.localeCompare(b));
+	const rightEntries = Object.entries(right)
+		.filter((entry): entry is [string, string] => entry[1] !== undefined)
+		.sort(([a], [b]) => a.localeCompare(b));
+	if (leftEntries.length !== rightEntries.length) return false;
+	for (let i = 0; i < leftEntries.length; i++) {
+		const leftEntry = leftEntries[i];
+		const rightEntry = rightEntries[i];
+		if (!leftEntry || !rightEntry || leftEntry[0] !== rightEntry[0] || leftEntry[1] !== rightEntry[1]) {
+			return false;
+		}
+	}
+	return true;
+}
+
+function sameStringArray(left: readonly string[], right: readonly string[]): boolean {
+	if (left.length !== right.length) return false;
+	for (let i = 0; i < left.length; i++) {
+		if (left[i] !== right[i]) return false;
+	}
+	return true;
+}
+
+function hasPersistableProfileSnapshot(snapshot: ModelProfileConfig): boolean {
+	return Object.keys(snapshot.model_mapping).length > 0 && snapshot.required_providers.length > 0;
 }
 /**
  * Component that renders a canonical model selector with provider tabs.
@@ -228,8 +307,11 @@ export class ModelSelectorComponent extends Container {
 	#scopedModels: ReadonlyArray<ScopedModelItem>;
 	#temporaryOnly: boolean;
 	#currentModel?: Model;
+	#currentThinkingLevel?: ThinkingLevel;
+	#activeModelProfile?: string;
 	#isFastForProvider: (provider?: string) => boolean = () => false;
 	#isFastForSubagentProvider: (provider?: string) => boolean = () => false;
+	#isCurrentModelFastModeActive: () => boolean = () => false;
 	#pendingActionItem?: ModelItem | CanonicalModelItem;
 	#selectedActionIndex: number = 0;
 	#pendingThinkingChoice?: PendingThinkingChoice;
@@ -265,6 +347,9 @@ export class ModelSelectorComponent extends Container {
 			sessionId?: string;
 			isFastForProvider?: (provider?: string) => boolean;
 			isFastForSubagentProvider?: (provider?: string) => boolean;
+			isCurrentModelFastModeActive?: () => boolean;
+			currentThinkingLevel?: ThinkingLevel;
+			activeModelProfile?: string;
 		},
 	) {
 		super();
@@ -278,8 +363,16 @@ export class ModelSelectorComponent extends Container {
 		this.#temporaryOnly = options?.temporaryOnly ?? false;
 		this.#authSessionId = options?.sessionId;
 		this.#currentModel = _currentModel;
+		this.#currentThinkingLevel = options?.currentThinkingLevel;
+		this.#activeModelProfile = options?.activeModelProfile;
 		this.#isFastForProvider = options?.isFastForProvider ?? (() => false);
 		this.#isFastForSubagentProvider = options?.isFastForSubagentProvider ?? (() => false);
+		// Current-model EFFECTIVE fast state. Defaults to intent for the current
+		// model so existing callers/tests keep prior behavior; production wires the
+		// session's effective predicate so an auto-disabled provider shows no glyph.
+		this.#isCurrentModelFastModeActive =
+			options?.isCurrentModelFastModeActive ??
+			(() => (this.#currentModel ? this.#isFastForProvider(this.#currentModel.provider) : false));
 		const initialSearchInput = options?.initialSearchInput;
 		this.#viewMode = this.#temporaryOnly || initialSearchInput || scopedModels.length > 0 ? "models" : "presets";
 
@@ -373,6 +466,23 @@ export class ModelSelectorComponent extends Container {
 				};
 			}
 		}
+		if (this.#activeModelProfile && this.#currentModel) {
+			this.#roles.default = {
+				model: this.#currentModel,
+				thinkingLevel: this.#currentThinkingLevel ?? ThinkingLevel.Inherit,
+			};
+		}
+	}
+
+	refreshRoleAssignments(
+		options: { currentModel?: Model; currentThinkingLevel?: ThinkingLevel; activeModelProfile?: string } = {},
+	): void {
+		if ("currentModel" in options) this.#currentModel = options.currentModel;
+		if ("currentThinkingLevel" in options) this.#currentThinkingLevel = options.currentThinkingLevel;
+		if ("activeModelProfile" in options) this.#activeModelProfile = options.activeModelProfile;
+		this.#roles = {};
+		this.#loadRoleModels();
+		this.#applyTabFilter();
 	}
 
 	#sortModels(models: ModelItem[]): void {
@@ -708,6 +818,67 @@ export class ModelSelectorComponent extends Container {
 		return groupModelProfilesForPresetLanding(this.#modelRegistry.getModelProfiles?.() ?? new Map());
 	}
 
+	#formatCurrentModelSelector(
+		thinkingLevel: ThinkingLevel | undefined = this.#currentThinkingLevel,
+	): string | undefined {
+		if (!this.#currentModel) return undefined;
+		return formatModelSelectorValue(`${this.#currentModel.provider}/${this.#currentModel.id}`, thinkingLevel);
+	}
+
+	#resolveProfileModelSelector(value: string | undefined): string | undefined {
+		const normalized = value?.trim();
+		if (isInheritedRoleSelector(normalized)) return undefined;
+
+		const resolved = resolveModelRoleValue(normalized, this.#modelRegistry.getAll(), {
+			settings: this.#settings,
+			matchPreferences: { usageOrder: this.#settings.getStorage()?.getModelUsageOrder() },
+			modelRegistry: this.#modelRegistry,
+		});
+		if (resolved.model) {
+			return formatModelSelectorValue(`${resolved.model.provider}/${resolved.model.id}`, resolved.thinkingLevel);
+		}
+
+		const inheritedDefaultThinkingLevel = getDefaultAliasThinkingLevel(normalized);
+		if (inheritedDefaultThinkingLevel) return this.#formatCurrentModelSelector(inheritedDefaultThinkingLevel);
+		return undefined;
+	}
+
+	#buildCustomModelProfileSnapshot(): ModelProfileConfig {
+		const modelMapping: ModelProfileConfig["model_mapping"] = {};
+		const currentModelSelector = this.#formatCurrentModelSelector();
+		if (currentModelSelector) {
+			modelMapping.default = currentModelSelector;
+		} else {
+			const defaultRole = this.#settings.getModelRole("default");
+			const defaultSelector = this.#resolveProfileModelSelector(defaultRole);
+			if (defaultSelector) modelMapping.default = defaultSelector;
+		}
+
+		const agentOverrides = this.#settings.get("task.agentModelOverrides");
+		for (const role of SKC_MODEL_ASSIGNMENT_TARGET_IDS) {
+			if (role === "default") continue;
+			const selector = this.#resolveProfileModelSelector(agentOverrides[role]);
+			if (selector) modelMapping[role] = selector;
+		}
+
+		return {
+			required_providers: deriveRequiredProviders(modelMapping),
+			model_mapping: modelMapping,
+		};
+	}
+
+	#findDuplicateGeneratedProfile(snapshot: ModelProfileConfig): ModelProfileDefinition | undefined {
+		for (const profile of this.#modelRegistry.getModelProfiles?.().values() ?? []) {
+			if (
+				sameStringRecord(profile.modelMapping, snapshot.model_mapping) &&
+				sameStringArray(profile.requiredProviders, snapshot.required_providers)
+			) {
+				return profile;
+			}
+		}
+		return undefined;
+	}
+
 	#getPresetRows(): PresetLandingRow[] {
 		const rows: PresetLandingRow[] = [];
 		for (const [groupId, profiles] of this.#getPresetGroups()) {
@@ -716,7 +887,15 @@ export class ModelSelectorComponent extends Container {
 				for (const profile of profiles) rows.push({ kind: "profile", groupId, profile });
 			}
 		}
-		rows.push({ kind: "create" });
+		const snapshot = this.#buildCustomModelProfileSnapshot();
+		if (hasPersistableProfileSnapshot(snapshot)) {
+			const duplicateProfile = this.#findDuplicateGeneratedProfile(snapshot);
+			rows.push(
+				duplicateProfile ? { kind: "alreadySaved", profileName: duplicateProfile.name } : { kind: "create" },
+			);
+		} else {
+			rows.push({ kind: "createUnavailable", label: "Select a model before creating a custom preset" });
+		}
 		rows.push({ kind: "browse" });
 		return rows;
 	}
@@ -773,7 +952,14 @@ export class ModelSelectorComponent extends Container {
 		const entries = await Promise.all(
 			[...providers].map(async provider => {
 				const apiKey = await this.#modelRegistry.getApiKeyForProvider(provider, this.#authSessionId);
-				return [provider, isAuthenticated(apiKey)] as const;
+				// "Usable" — not "has a real API key". getApiKeyForProvider returns the
+				// kNoAuth ("N/A") sentinel for keyless/no-auth providers (local LLMs,
+				// `--auth none` custom providers), which are usable WITHOUT a key. But
+				// isAuthenticated() deliberately rejects kNoAuth, so using it alone would
+				// flag those providers unauthenticated and silently bail their presets
+				// into a login flow instead of applying. Treat kNoAuth as usable here,
+				// matching setModel()/getApiKey() which already accept it.
+				return [provider, isAuthenticated(apiKey) || apiKey === kNoAuth] as const;
 			}),
 		);
 		this.#providerAuthById = new Map(entries);
@@ -796,7 +982,14 @@ export class ModelSelectorComponent extends Container {
 
 	#expandSelectedPresetProvider(): void {
 		const selected = this.#getSelectedPresetRow();
-		if (!selected || selected.kind === "browse" || selected.kind === "create") return;
+		if (
+			!selected ||
+			selected.kind === "browse" ||
+			selected.kind === "create" ||
+			selected.kind === "createUnavailable" ||
+			selected.kind === "alreadySaved"
+		)
+			return;
 		if (this.#expandedPresetProviderId === selected.groupId) return;
 		const targetIdentity = presetRowIdentity(selected);
 		this.#expandedPresetProviderId = selected.groupId;
@@ -805,7 +998,14 @@ export class ModelSelectorComponent extends Container {
 
 	#collapseSelectedPresetProvider(): void {
 		const selected = this.#getSelectedPresetRow();
-		if (!selected || selected.kind === "browse" || selected.kind === "create") return;
+		if (
+			!selected ||
+			selected.kind === "browse" ||
+			selected.kind === "create" ||
+			selected.kind === "createUnavailable" ||
+			selected.kind === "alreadySaved"
+		)
+			return;
 		if (this.#expandedPresetProviderId !== selected.groupId) return;
 		const targetIdentity = selected.kind === "profile" ? `group:${selected.groupId}` : presetRowIdentity(selected);
 		this.#expandedPresetProviderId = undefined;
@@ -839,6 +1039,17 @@ export class ModelSelectorComponent extends Container {
 			if (row.kind === "create") {
 				const label = t("modelSelector.createCustom");
 				this.#listContainer.addChild(new Text(`${prefix}${selected ? theme.fg("accent", label) : label}`, 0, 0));
+				continue;
+			}
+			if (row.kind === "createUnavailable") {
+				const renderedLabel = selected ? theme.fg("accent", row.label) : theme.fg("dim", row.label);
+				this.#listContainer.addChild(new Text(`${prefix}${renderedLabel}`, 0, 0));
+				continue;
+			}
+			if (row.kind === "alreadySaved") {
+				const label = `Already saved as ${row.profileName}`;
+				const renderedLabel = selected ? theme.fg("accent", label) : theme.fg("dim", label);
+				this.#listContainer.addChild(new Text(`${prefix}${renderedLabel}`, 0, 0));
 				continue;
 			}
 			if (row.kind === "browse") {
@@ -980,32 +1191,46 @@ export class ModelSelectorComponent extends Container {
 
 			// Build role badges (inverted: color as background, black text)
 			const roleBadgeTokens: string[] = [];
-			let roleMatched = false;
+			// Whether a non-subagent (modelRoles) badge on the CURRENT model row already
+			// rendered the current-model EFFECTIVE glyph. Only that case should suppress
+			// the standalone current glyph below — a subagent-only match must NOT, since
+			// subagent badges reflect the subagent tier, not the current model.
+			let currentModelEffectiveGlyphRendered = false;
 			for (const role of SKC_MODEL_ASSIGNMENT_TARGET_IDS) {
 				const roleInfo = SKC_MODEL_ASSIGNMENT_TARGETS[role];
 				const assigned = this.#roles[role];
 				if (roleInfo.tag && assigned && modelsAreEqual(assigned.model, item.model)) {
-					roleMatched = true;
 					const badge = makeInvertedBadge(roleInfo.tag, roleInfo.color ?? "muted");
 					const thinkingLabel = getThinkingLevelMetadata(assigned.thinkingLevel).label;
-					// Subagent roles (task.agentModelOverrides) run under task.serviceTier, so
-					// their ⚡ must reflect the effective subagent tier, not the main session tier.
-					const roleFast =
-						roleInfo.settingsPath === "task.agentModelOverrides"
-							? this.#isFastForSubagentProvider(assigned.model.provider)
+
+					// Subagent roles (task.agentModelOverrides) run under task.serviceTier,
+					// so their ⚡ uses the effective subagent tier. A non-subagent
+					// (modelRoles) badge on the CURRENT model row uses the current-model
+					// effective predicate so a provider auto-disable hides the glyph;
+					// other modelRoles rows show pure intent.
+					const isSubagentRole = roleInfo.settingsPath === "task.agentModelOverrides";
+					const isCurrentRow = this.#currentModel !== undefined && modelsAreEqual(this.#currentModel, item.model);
+					const roleFast = isSubagentRole
+						? this.#isFastForSubagentProvider(assigned.model.provider)
+						: isCurrentRow
+							? this.#isCurrentModelFastModeActive()
 							: this.#isFastForProvider(assigned.model.provider);
+					if (roleFast && isCurrentRow && !isSubagentRole) {
+						currentModelEffectiveGlyphRendered = true;
+					}
 					const fastSuffix = roleFast ? ` ${theme.icon.fast}` : "";
 					roleBadgeTokens.push(`${badge} ${theme.fg("dim", `(${thinkingLabel})`)}${fastSuffix}`);
 				}
 			}
 			// Active/current non-role row: show the fast glyph on the session's current
-			// model row even when it carries no role badge. Skip when a role token for
-			// this row already rendered the glyph (duplicate-glyph guard).
+			// model row. Suppress only when a non-subagent current-row badge already
+			// rendered the current-model effective glyph (duplicate-glyph guard) — a
+			// subagent-only match must not hide the current model's own indicator.
 			if (
-				!roleMatched &&
+				!currentModelEffectiveGlyphRendered &&
 				this.#currentModel !== undefined &&
 				modelsAreEqual(this.#currentModel, item.model) &&
-				this.#isFastForProvider(item.model.provider)
+				this.#isCurrentModelFastModeActive()
 			) {
 				roleBadgeTokens.push(theme.icon.fast);
 			}
@@ -1297,7 +1522,10 @@ export class ModelSelectorComponent extends Container {
 		const row = this.#getSelectedPresetRow();
 		if (!row) return;
 		if (row.kind === "create") {
-			this.#onSelectCallback({ kind: "createProfile" });
+			this.#onSelectCallback({ kind: "createProfile", profile: this.#buildCustomModelProfileSnapshot() });
+			return;
+		}
+		if (row.kind === "alreadySaved" || row.kind === "createUnavailable") {
 			return;
 		}
 		if (row.kind === "browse") {

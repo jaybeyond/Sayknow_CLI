@@ -197,7 +197,7 @@ export function applyGeneratedModelPolicies(models: ApiModel<Api>[]): void {
  * model with a larger context window on the same provider:
  * - `OpenAI code backend-spark` variants promote to `gpt-5.5`.
  *
- * `gpt-5.5` itself is a 400K-context model and is not demoted to `gpt-5.4`
+ * `gpt-5.5` itself is a 1M-context model and is not demoted to `gpt-5.4`
  * (which has a smaller window), so it has no promotion target.
  */
 export function linkOpenAIPromotionTargets(models: ApiModel<Api>[]): void {
@@ -404,13 +404,11 @@ function applyGeneratedModelPolicy(model: ApiModel<Api>): void {
 	if (model.provider === "zai" && model.id === "glm-5.2") {
 		model.contextWindow = 1_000_000;
 	}
-	// MiniMax-M3: official MiniMax docs (platform.minimax.io/docs/guides/models-intro)
-	// document a 1M context window, but models.dev and the bundled catalog both report
-	// 512K. The stale 512K survives generate-models (provider-scoped models bypass the
-	// models.dev refresh in applyGlobalModelsDevFallback), tripping auto-compaction /
-	// context-cap thresholds 2x early on MiniMax sessions. Pin to the true 1M.
-	if (model.id === "minimax-m3") {
-		model.contextWindow = 1_000_000;
+	// MiniMax-M3: MiniMax exposes a 1M context tier, but usage beyond 512K is
+	// billed separately. Keep bundled/default metadata at the billing-safe 512K
+	// unless an explicit paid-tier contract is added.
+	if (model.provider !== "opencode-go" && model.id === "minimax-m3") {
+		model.contextWindow = 512_000;
 	}
 }
 
@@ -455,12 +453,14 @@ function inferGeneratedApplyPatchToolType(
 }
 
 function applyGpt55ContextWindow(model: ApiModel<Api>, parsedModel: OpenAIModel): boolean {
-	// gpt-5.5 is a 400K-context model. OpenAI code backend discovery can omit the
-	// context window, falling back to the 272K default, which incorrectly trips
-	// context-cap / auto-promote thresholds (a ~272K session would look over-cap
-	// and demote to gpt-5.4). Pin gpt-5.5 to its true 400K window.
 	if (parsedModel.variant === "base" && semverEqual(parsedModel.version, "5.5")) {
-		model.contextWindow = 400000;
+		// The first-party OpenAI GPT-5.5 model advertises a 1M total window, but
+		// the OpenAI code backend request path still enforces the smaller prompt
+		// budget. SKC's `contextWindow` is the usable prompt/input cap, not the
+		// marketing total window; using 1M here delays compaction and makes the UI
+		// promise space that `/responses/compact`/agent turns cannot actually use.
+		model.contextWindow =
+			model.provider === "openai-codex" || model.api === "openai-codex-responses" ? 272_000 : 1_000_000;
 		return true;
 	}
 	return false;

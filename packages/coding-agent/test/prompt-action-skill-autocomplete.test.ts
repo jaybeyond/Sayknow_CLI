@@ -18,6 +18,8 @@ function createProvider() {
 		keybindings: { getKeys: () => [] } as unknown as KeybindingsManager,
 		copyCurrentLine: () => {},
 		copyPrompt: () => {},
+		pasteImage: () => {},
+		scrollTmuxToPreviousUserInput: () => {},
 		undo: () => {},
 		moveCursorToMessageEnd: () => {},
 		moveCursorToMessageStart: () => {},

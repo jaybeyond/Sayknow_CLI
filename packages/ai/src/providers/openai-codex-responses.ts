@@ -44,13 +44,20 @@ import {
 	getOpenAIResponsesHistoryItems,
 	getOpenAIResponsesHistoryPayload,
 	normalizeSystemPrompts,
+	sanitizeOpenAIResponsesHistoryItemsForReplay,
 } from "../utils";
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import { finalizeErrorMessage, type RawHttpRequestDump } from "../utils/http-inspector";
 import { getOpenAIStreamIdleTimeoutMs, iterateWithIdleTimeout } from "../utils/idle-iterator";
 import { parseStreamingJson } from "../utils/json-parse";
 import { resolveRetryBudget } from "../utils/retry-budget";
-import { adaptSchemaForStrict, NO_STRICT, sanitizeSchemaForOpenAIResponses, toolWireSchema } from "../utils/schema";
+import {
+	adaptSchemaForStrict,
+	flattenToolRootCombinators,
+	NO_STRICT,
+	sanitizeSchemaForOpenAIResponses,
+	toolWireSchema,
+} from "../utils/schema";
 import {
 	isForcedToolChoiceUnsupportedError,
 	markToolChoiceIncapability,
@@ -72,6 +79,7 @@ import {
 	convertResponsesInputContent,
 	encodeResponsesToolCallId,
 	encodeTextSignatureV1,
+	flagTruncatedToolCalls,
 	mapOpenAIResponsesStopReason,
 	populateResponsesUsageFromResponse,
 } from "./openai-responses-shared";
@@ -98,6 +106,14 @@ const CODEX_WEBSOCKET_RETRY_BUDGET = CODEX_MAX_RETRIES;
 const CODEX_WEBSOCKET_TRANSPORT_ERROR_PREFIX = "Codex websocket transport error";
 const CODEX_PREVIOUS_RESPONSE_STALE_CODES = new Set(["previous_response_not_found", "codex_previous_response_stale"]);
 const CODEX_RETRYABLE_EVENT_CODES = new Set(["model_error", "server_error", "internal_error"]);
+const CODEX_NON_RETRYABLE_EVENT_CODES = new Set([
+	"invalid_function_parameters",
+	"invalid_request_error",
+	"invalid_schema",
+	"invalid_tool_schema",
+]);
+const CODEX_NON_RETRYABLE_EVENT_MESSAGE =
+	/invalid[_ -]function[_ -]parameters|invalid schema for function|invalid[_ -]tool[_ -]schema|schema must have type ["']?object["']?/i;
 const CODEX_RETRYABLE_EVENT_MESSAGE =
 	/processing your request|retry your request|temporar(?:y|ily)|overloaded|service.?unavailable|internal error|server error/i;
 const CODEX_PROVIDER_SESSION_STATE_KEY = "openai-codex-responses";
@@ -240,6 +256,8 @@ interface CodexStreamRuntime {
 	providerRetryAttempt: number;
 	sawTerminalEvent: boolean;
 	canSafelyReplayWebsocketOverSse: boolean;
+	/** Ids of tool calls that received their terminal `output_item.done`. */
+	finalizedToolCallIds: Set<string>;
 }
 
 interface CodexStreamProcessingContext {
@@ -896,6 +914,7 @@ function createCodexStreamRuntime(initial: {
 		providerRetryAttempt: 0,
 		sawTerminalEvent: false,
 		canSafelyReplayWebsocketOverSse: true,
+		finalizedToolCallIds: new Set<string>(),
 	};
 }
 
@@ -1253,9 +1272,11 @@ function handleOutputItemDone(
 	}
 
 	if (item.type === "function_call") {
+		const id = encodeResponsesToolCallId(item.call_id, item.id);
+		runtime.finalizedToolCallIds.add(id);
 		const toolCall: ToolCall = {
 			type: "toolCall",
-			id: encodeResponsesToolCallId(item.call_id, item.id),
+			id,
 			name: item.name,
 			arguments: parseStreamingJson(item.arguments || "{}"),
 		};
@@ -1265,13 +1286,15 @@ function handleOutputItemDone(
 	}
 
 	if (item.type === "custom_tool_call") {
+		const id = encodeResponsesToolCallId(item.call_id, item.id);
+		runtime.finalizedToolCallIds.add(id);
 		const rawInput =
 			runtime.currentBlock?.type === "toolCall" && runtime.currentBlock.partialJson
 				? runtime.currentBlock.partialJson
 				: (item.input ?? "");
 		const toolCall: ToolCall = {
 			type: "toolCall",
-			id: encodeResponsesToolCallId(item.call_id, item.id),
+			id,
 			name: item.name,
 			arguments: { input: rawInput },
 			customWireName: item.name,
@@ -1335,6 +1358,10 @@ function handleResponseCompleted(
 	calculateCost(model, output.usage);
 	applyCodexServiceTierPricing(model, output.usage, response?.service_tier, runtime.requestBodyForState.service_tier);
 	output.stopReason = mapOpenAIResponsesStopReason(response?.status as OpenAI.Responses.ResponseStatus | undefined);
+	// A response cut short for length may have stopped mid-tool-call. Flag any
+	// call that never received its `output_item.done` so the agent loop rejects
+	// the truncated arguments instead of executing a best-effort partial parse.
+	flagTruncatedToolCalls(output, output.stopReason, block => runtime.finalizedToolCallIds.has(block.id));
 	if (output.content.some(block => block.type === "toolCall") && output.stopReason === "stop") {
 		output.stopReason = "toolUse";
 	}
@@ -2524,17 +2551,16 @@ function convertMessages(model: Model<"openai-codex-responses">, context: Contex
 	for (const msg of transformedMessages) {
 		if (msg.role === "user" || msg.role === "developer") {
 			const providerPayload = (msg as { providerPayload?: AssistantMessage["providerPayload"] }).providerPayload;
-			const historyItems = getOpenAIResponsesHistoryItems(providerPayload, model.provider) as
-				| Array<ResponseInput[number]>
-				| undefined;
+			const historyItems = getOpenAIResponsesHistoryItems(providerPayload, model.provider);
 			if (historyItems) {
-				for (const item of historyItems) {
+				const sanitizedHistoryItems = sanitizeOpenAIResponsesHistoryItemsForReplay(historyItems);
+				for (const item of sanitizedHistoryItems) {
 					const maybe = item as { type?: string; call_id?: string };
 					if (maybe.type === "custom_tool_call" && typeof maybe.call_id === "string") {
 						customCallIds.add(maybe.call_id);
 					}
 				}
-				messages.push(...historyItems);
+				messages.push(...sanitizedHistoryItems);
 				msgIndex += 1;
 				continue;
 			}
@@ -2553,18 +2579,19 @@ function convertMessages(model: Model<"openai-codex-responses">, context: Contex
 				model.provider,
 				assistantMsg.provider,
 			);
-			const historyItems = providerPayload?.items as Array<ResponseInput[number]> | undefined;
+			const historyItems = providerPayload?.items;
 			if (historyItems) {
-				for (const item of historyItems) {
+				const sanitizedHistoryItems = sanitizeOpenAIResponsesHistoryItemsForReplay(historyItems);
+				for (const item of sanitizedHistoryItems) {
 					const maybe = item as { type?: string; call_id?: string };
 					if (maybe.type === "custom_tool_call" && typeof maybe.call_id === "string") {
 						customCallIds.add(maybe.call_id);
 					}
 				}
 				if (providerPayload?.dt) {
-					messages.push(...historyItems);
+					messages.push(...sanitizedHistoryItems);
 				} else {
-					messages.splice(0, messages.length, ...historyItems);
+					messages.splice(0, messages.length, ...sanitizedHistoryItems);
 					// Keep customCallIds from the pre-splice state since historyItems may re-introduce them.
 				}
 				msgIndex += 1;
@@ -2658,7 +2685,7 @@ export function convertOpenAICodexResponsesTools(
 			};
 		}
 		const strict = !!(!NO_STRICT && tool.strict);
-		const baseParameters = sanitizeSchemaForOpenAIResponses(toolWireSchema(tool));
+		const baseParameters = sanitizeSchemaForOpenAIResponses(flattenToolRootCombinators(toolWireSchema(tool)));
 		const { schema: parameters, strict: effectiveStrict } = adaptSchemaForStrict(baseParameters, strict);
 		return {
 			type: "function",
@@ -2703,11 +2730,17 @@ class CodexProviderStreamError extends Error {
 }
 
 function isRetryableCodexFailureEvent(rawEvent: Record<string, unknown>): boolean {
-	const code = getCodexEventErrorCode(rawEvent);
-	if (code && CODEX_RETRYABLE_EVENT_CODES.has(code.toLowerCase())) {
+	const code = getCodexEventErrorCode(rawEvent).toLowerCase();
+	const message = getCodexEventErrorMessage(rawEvent);
+	if (
+		(code && CODEX_NON_RETRYABLE_EVENT_CODES.has(code)) ||
+		(!!message && CODEX_NON_RETRYABLE_EVENT_MESSAGE.test(message))
+	) {
+		return false;
+	}
+	if (code && CODEX_RETRYABLE_EVENT_CODES.has(code)) {
 		return true;
 	}
-	const message = getCodexEventErrorMessage(rawEvent);
 	return !!message && CODEX_RETRYABLE_EVENT_MESSAGE.test(message);
 }
 

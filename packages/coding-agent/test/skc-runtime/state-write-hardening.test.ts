@@ -1,7 +1,10 @@
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { modeStatePath, sessionStateDir } from "@sayknow-cli/coding-agent/skc-runtime/session-layout";
 import { runNativeStateCommand } from "@sayknow-cli/coding-agent/skc-runtime/state-runtime";
+
+const TEST_SESSION_ID = "test-session";
 
 const tempRoots: string[] = [];
 
@@ -18,10 +21,11 @@ afterEach(async () => {
 let priorSessionId: string | undefined;
 beforeAll(() => {
 	priorSessionId = process.env.SKC_SESSION_ID;
-	delete process.env.SKC_SESSION_ID;
+	process.env.SKC_SESSION_ID = TEST_SESSION_ID;
 });
 afterAll(() => {
 	if (priorSessionId !== undefined) process.env.SKC_SESSION_ID = priorSessionId;
+	else delete process.env.SKC_SESSION_ID;
 });
 
 function receiptFrom(stdout: string | undefined): Record<string, unknown> {
@@ -29,13 +33,21 @@ function receiptFrom(stdout: string | undefined): Record<string, unknown> {
 	expect(parsed.state).toBeUndefined();
 	return parsed;
 }
+function captureStderrWrites(): { writes: string[]; restore: () => void } {
+	const writes: string[] = [];
+	const spy = spyOn(process.stderr, "write").mockImplementation((chunk: string | Uint8Array) => {
+		writes.push(typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8"));
+		return true;
+	});
+	return { writes, restore: () => spy.mockRestore() };
+}
 
 async function writeState(root: string, mode: string, state: Record<string, unknown>, extra: string[] = []) {
 	return runNativeStateCommand(["write", "--mode", mode, "--input", JSON.stringify(state), "--json", ...extra], root);
 }
 
 async function writeRawState(root: string, mode: string, state: unknown) {
-	const stateDir = path.join(root, ".skc", "state");
+	const stateDir = sessionStateDir(root, TEST_SESSION_ID);
 	await fs.mkdir(stateDir, { recursive: true });
 	await fs.writeFile(
 		path.join(stateDir, `${mode}-state.json`),
@@ -97,7 +109,7 @@ describe("skc state write hardening", () => {
 		const result = await writeState(root, "ralplan", { active: true });
 		expect(result.status).toBe(0);
 		expect(receiptFrom(result.stdout).current_phase).toBe("planner");
-		const onDisk = JSON.parse(await fs.readFile(path.join(root, ".skc", "state", "ralplan-state.json"), "utf-8"));
+		const onDisk = JSON.parse(await fs.readFile(modeStatePath(root, TEST_SESSION_ID, "ralplan"), "utf-8"));
 		expect(onDisk.current_phase).toBe("planner");
 	});
 
@@ -106,7 +118,7 @@ describe("skc state write hardening", () => {
 		const result = await writeState(root, "ralplan", { current_phase: "" });
 		expect(result.status).toBe(0);
 		expect(receiptFrom(result.stdout).current_phase).toBe("planner");
-		const onDisk = JSON.parse(await fs.readFile(path.join(root, ".skc", "state", "ralplan-state.json"), "utf-8"));
+		const onDisk = JSON.parse(await fs.readFile(modeStatePath(root, TEST_SESSION_ID, "ralplan"), "utf-8"));
 		expect(onDisk.current_phase).toBe("planner");
 	});
 
@@ -122,7 +134,7 @@ describe("skc state write hardening", () => {
 		const result = await writeState(root, "ralplan", { active: true });
 		expect(result.status).toBe(0);
 		expect(receiptFrom(result.stdout).current_phase).toBe("planner");
-		const onDisk = JSON.parse(await fs.readFile(path.join(root, ".skc", "state", "ralplan-state.json"), "utf-8"));
+		const onDisk = JSON.parse(await fs.readFile(modeStatePath(root, TEST_SESSION_ID, "ralplan"), "utf-8"));
 		expect(onDisk.current_phase).toBe("planner");
 	});
 
@@ -146,7 +158,7 @@ describe("skc state write hardening", () => {
 
 	it("reads unknown legacy phases fail-open", async () => {
 		const root = await tempDir();
-		const stateDir = path.join(root, ".skc", "state");
+		const stateDir = sessionStateDir(root, TEST_SESSION_ID);
 		await fs.mkdir(stateDir, { recursive: true });
 		await fs.writeFile(
 			path.join(stateDir, "ralplan-state.json"),
@@ -162,11 +174,16 @@ describe("skc state write hardening", () => {
 	it("corrupt existing state fails open for read and status but write and clear require force", async () => {
 		const root = await tempDir();
 		await writeRawState(root, "ralplan", "{broken json");
-
-		const read = await runNativeStateCommand(["read", "--mode", "ralplan", "--json"], root);
-		expect(read.status).toBe(0);
-		const status = await runNativeStateCommand(["status", "--mode", "ralplan", "--json"], root);
-		expect(status.status).toBe(0);
+		const stderr = captureStderrWrites();
+		try {
+			const read = await runNativeStateCommand(["read", "--mode", "ralplan", "--json"], root);
+			expect(read.status).toBe(0);
+			const status = await runNativeStateCommand(["status", "--mode", "ralplan", "--json"], root);
+			expect(status.status).toBe(0);
+			expect(stderr.writes.join("")).toContain("ignoring corrupt state");
+		} finally {
+			stderr.restore();
+		}
 
 		const rejectedWrite = await writeState(root, "ralplan", { current_phase: "planner" });
 		expect(rejectedWrite.status).not.toBe(0);
@@ -228,9 +245,7 @@ describe("skc state write hardening", () => {
 		expect(result.status).toBe(0);
 		const written = receiptFrom(result.stdout);
 		expect(written).toMatchObject({ ok: true, skill: "deep-interview", current_phase: "interviewing" });
-		const onDisk = JSON.parse(
-			await fs.readFile(path.join(root, ".skc", "state", "deep-interview-state.json"), "utf-8"),
-		);
+		const onDisk = JSON.parse(await fs.readFile(modeStatePath(root, TEST_SESSION_ID, "deep-interview"), "utf-8"));
 		expect(onDisk.state.rounds).toEqual(extension.rounds);
 		expect(onDisk.state.topology).toEqual(extension.topology);
 		expect(onDisk.state.ontology_snapshots).toEqual(extension.ontology_snapshots);

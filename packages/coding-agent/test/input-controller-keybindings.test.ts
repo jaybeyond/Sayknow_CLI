@@ -26,22 +26,25 @@ type FakeEditor = {
 	onQueue?: () => void | Promise<void>;
 	onChange?: (text: string) => void;
 	onSubmit?: (text: string) => void | Promise<void>;
+	onTabDeclined?: (text: string) => void;
 	setText(text: string): void;
 	getText(): string;
 	insertText(text: string): void;
 	addToHistory(text: string): void;
 	setActionKeys(action: string, keys: string[]): void;
-	setCustomKeyHandler(key: string, handler: () => void): void;
+	setCustomKeyHandler(key: string, handler: () => boolean | undefined): void;
 	clearCustomKeyHandlers(): void;
 };
 
-async function createContext(options?: { busyPromptMode?: "steer" | "queue" }) {
+async function createContext(options?: { busyPromptMode?: "steer" | "queue"; followUpKeys?: string[] }) {
 	let editorText = "";
 	const keyMap: Record<string, string[]> = {
 		"app.model.selectTemporary": ["ctrl+y"],
 		"app.model.select": ["ctrl+l"],
 		"app.message.queue": ["alt+enter"],
+		"app.message.followUp": options?.followUpKeys ?? [],
 	};
+
 	const setActionKeys = vi.fn();
 	const showModelSelector = vi.fn();
 	const prompt = vi.fn(async () => {});
@@ -197,6 +200,67 @@ describe("InputController keybinding setup", () => {
 		expect(spies.setActionKeys).toHaveBeenCalledWith("app.message.queue", ["alt+enter"]);
 		expect(ctx.locallySubmittedUserSignatures.has("queue after current response\u00000")).toBe(true);
 		expect(spies.prompt).toHaveBeenCalledWith("queue after current response", {
+			streamingBehavior: "followUp",
+		});
+		expect(spies.updatePendingMessagesDisplay).toHaveBeenCalledTimes(1);
+	});
+
+	it("does not register a default Ctrl+Enter follow-up handler", async () => {
+		const { InputController, ctx, editor } = await createContext();
+		const controller = new InputController(ctx);
+
+		controller.setupKeyHandlers();
+
+		expect(editor.setCustomKeyHandler).not.toHaveBeenCalledWith("ctrl+enter", expect.any(Function));
+	});
+
+	it("lets an explicit Ctrl+Enter follow-up remap fall through while idle", async () => {
+		const { InputController, ctx, editor, spies } = await createContext({ followUpKeys: ["ctrl+enter"] });
+		const controller = new InputController(ctx);
+
+		controller.setupKeyHandlers();
+		const followUpRegistration = (editor.setCustomKeyHandler as ReturnType<typeof vi.fn>).mock.calls.find(
+			([key]) => key === "ctrl+enter",
+		);
+		expect(followUpRegistration).toBeDefined();
+		const handler = followUpRegistration?.[1] as () => boolean | undefined;
+
+		expect(handler()).toBe(false);
+		expect(spies.prompt).not.toHaveBeenCalled();
+	});
+
+	it("consumes Ctrl+Enter as follow-up while streaming", async () => {
+		const { InputController, ctx, editor, spies } = await createContext({ followUpKeys: ["ctrl+enter"] });
+		const session = ctx.session as unknown as { isStreaming: boolean };
+		session.isStreaming = true;
+		editor.setText("follow up from shortcut");
+		const controller = new InputController(ctx);
+
+		controller.setupKeyHandlers();
+		const followUpRegistration = (editor.setCustomKeyHandler as ReturnType<typeof vi.fn>).mock.calls.find(
+			([key]) => key === "ctrl+enter",
+		);
+		const handler = followUpRegistration?.[1] as () => boolean | undefined;
+
+		expect(handler()).toBe(true);
+		await Bun.sleep(0);
+		expect(spies.prompt).toHaveBeenCalledWith("follow up from shortcut", {
+			streamingBehavior: "followUp",
+		});
+	});
+
+	it("queues streaming Tab only after editor tab completion declines", async () => {
+		const { InputController, ctx, editor, spies } = await createContext();
+		const session = ctx.session as unknown as { isStreaming: boolean };
+		session.isStreaming = true;
+		editor.setText("queue after declined tab completion");
+		const controller = new InputController(ctx);
+
+		controller.setupKeyHandlers();
+		editor.onTabDeclined?.(editor.getText());
+		await Bun.sleep(0);
+
+		expect(spies.prompt).toHaveBeenCalledWith("queue after declined tab completion", {
 			streamingBehavior: "followUp",
 		});
 		expect(spies.updatePendingMessagesDisplay).toHaveBeenCalledTimes(1);

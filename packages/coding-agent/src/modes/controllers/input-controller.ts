@@ -9,6 +9,7 @@ import { buildSkillPromptMessage, parseSkillInvocations } from "../../extensibil
 import { expandEmoticons } from "../../modes/emoji-autocomplete";
 import { createPromptActionAutocompleteProvider } from "../../modes/prompt-action-autocomplete";
 import { theme } from "../../modes/theme/theme";
+import { scrollTmuxToPreviousUserInput as scrollTmuxPaneToPreviousUserInput } from "../../modes/tmux-scroll";
 import type { InteractiveModeContext } from "../../modes/types";
 import type { AgentSessionEvent } from "../../session/agent-session";
 import { SKILL_PROMPT_MESSAGE_TYPE, type SkillPromptDetails } from "../../session/messages";
@@ -199,6 +200,9 @@ export class InputController {
 		this.ctx.editor.onDequeue = () => this.handleDequeue();
 		this.ctx.editor.setActionKeys("app.message.queue", this.ctx.keybindings.getKeys("app.message.queue"));
 		this.ctx.editor.onQueue = () => void this.handleQueueSubmit();
+		this.ctx.editor.onTabDeclined = () => {
+			if (this.ctx.session.isStreaming) void this.handleQueueSubmit();
+		};
 
 		this.ctx.editor.clearCustomKeyHandlers();
 		// Wire up extension shortcuts
@@ -228,7 +232,11 @@ export class InputController {
 			});
 		}
 		for (const key of this.ctx.keybindings.getKeys("app.message.followUp")) {
-			this.ctx.editor.setCustomKeyHandler(key, () => void this.handleFollowUp());
+			this.ctx.editor.setCustomKeyHandler(key, () => {
+				if (!this.#isFollowUpShortcutActive()) return false;
+				void this.handleFollowUp();
+				return true;
+			});
 		}
 		for (const key of this.ctx.keybindings.getKeys("app.stt.toggle")) {
 			this.ctx.editor.setCustomKeyHandler(key, () => void this.ctx.handleSTTToggle());
@@ -501,6 +509,15 @@ export class InputController {
 	 */
 	#busyStreamingBehavior(): "steer" | "followUp" {
 		return this.ctx.settings.get("busyPromptMode") === "steer" ? "steer" : "followUp";
+	}
+
+	#isFollowUpShortcutActive(): boolean {
+		return (
+			this.ctx.session.isStreaming ||
+			this.ctx.session.isCompacting ||
+			this.ctx.session.isBashRunning ||
+			this.ctx.session.isEvalRunning
+		);
 	}
 
 	/**
@@ -824,8 +841,9 @@ export class InputController {
 				this.ctx.ui.requestRender();
 				return true;
 			}
-			// No image in clipboard - show hint
-			this.ctx.showStatus("No image in clipboard (use terminal paste for text)");
+			this.ctx.showStatus(
+				"No image in clipboard. Use #paste-image, paste a copied image, or attach an image file with @path/to/image.png.",
+			);
 			return false;
 		} catch {
 			this.ctx.showStatus("Failed to read clipboard");
@@ -840,6 +858,8 @@ export class InputController {
 			keybindings: this.ctx.keybindings,
 			copyCurrentLine: () => this.handleCopyCurrentLine(),
 			copyPrompt: () => this.handleCopyPrompt(),
+			pasteImage: () => void this.handleImagePaste(),
+			scrollTmuxToPreviousUserInput: () => this.scrollTmuxToPreviousUserInput(),
 			undo: prefix => this.ctx.editor.undoPastTransientText(prefix),
 			moveCursorToMessageEnd: () => this.ctx.editor.moveToMessageEnd(),
 			moveCursorToMessageStart: () => this.ctx.editor.moveToMessageStart(),
@@ -932,6 +952,19 @@ export class InputController {
 
 	toggleToolOutputExpansion(): void {
 		this.setToolsExpanded(!this.ctx.toolOutputExpanded);
+	}
+
+	scrollTmuxToPreviousUserInput(): void {
+		const result = scrollTmuxPaneToPreviousUserInput();
+		if (result.ok) return;
+
+		if (result.reason === "not_inside_tmux") {
+			this.ctx.showWarning("Previous-input scroll works only inside tmux.");
+			return;
+		}
+
+		const detail = result.error ? `: ${result.error}` : ".";
+		this.ctx.showWarning(`Failed to scroll tmux to previous user input${detail}`);
 	}
 
 	setToolsExpanded(expanded: boolean): void {

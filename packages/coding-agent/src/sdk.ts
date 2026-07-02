@@ -73,7 +73,13 @@ import {
 	wrapRegisteredTools,
 } from "./extensibility/extensions";
 import { ExtensionRuntime } from "./extensibility/extensions/loader";
+import { type ConstrainedPluginHook, loadConstrainedPluginHooks } from "./extensibility/skc-plugins/constrained-hooks";
 import { resolveCurrentPhaseForParent } from "./extensibility/skc-plugins/injection";
+import {
+	buildPluginMcpConfigs,
+	loadAlwaysOnPluginTools,
+	renderAlwaysOnSystemAppendices,
+} from "./extensibility/skc-plugins/runtime-adapters";
 import { loadActiveSubskillTools } from "./extensibility/skc-plugins/tools";
 import { loadSkills, type Skill, type SkillWarning, setActiveSkills } from "./extensibility/skills";
 import type { FileSlashCommand } from "./extensibility/slash-commands";
@@ -81,6 +87,12 @@ import type { HindsightSessionState } from "./hindsight/state";
 import { LocalProtocolHandler, type LocalProtocolOptions } from "./internal-urls";
 import { LSP_STARTUP_EVENT_CHANNEL, type LspStartupEvent } from "./lsp/startup-events";
 import { resolveMemoryBackend } from "./memory-backend";
+import { createNotificationsExtension } from "./notifications";
+import {
+	getNotificationConfig,
+	type NotificationConfig,
+	shouldRegisterNotificationsExtension,
+} from "./notifications/config";
 import asyncResultTemplate from "./prompts/tools/async-result.md" with { type: "text" };
 import { AgentRegistry, MAIN_AGENT_ID } from "./registry/agent-registry";
 import { MCPManager } from "./runtime-mcp";
@@ -130,6 +142,7 @@ import {
 	setPreferredImageProvider,
 	setPreferredSearchProvider,
 	setSearchFallbackProviders,
+	setSearchHardTimeoutMs,
 	type Tool,
 	type ToolSession,
 	WebSearchTool,
@@ -742,6 +755,27 @@ function createCustomToolsExtension(tools: CustomTool[]): ExtensionFactory {
 	};
 }
 
+export function createPluginHooksExtension(hooks: ConstrainedPluginHook[]): ExtensionFactory {
+	return api => {
+		for (const hook of hooks) {
+			// Constrained plugin hooks register exactly their declared event handler
+			// through the standard extension API; the loader already denied every
+			// session-mutation/command/exec capability at load time. At execution we
+			// additionally enforce the declared `target`: a tool-scoped hook only
+			// fires for its declared tool, never for arbitrary tool events.
+			const target = hook.target;
+			const handler = target
+				? (event: { toolName?: string; tool?: { name?: string }; name?: string }, ...rest: unknown[]) => {
+						const toolName = event?.toolName ?? event?.tool?.name ?? event?.name;
+						if (toolName !== target) return undefined;
+						return (hook.handler as (...a: unknown[]) => unknown)(event, ...rest);
+					}
+				: hook.handler;
+			(api.on as (event: string, handler: (...args: unknown[]) => unknown) => void)(hook.event, handler);
+		}
+	};
+}
+
 // Factory
 
 /**
@@ -909,6 +943,10 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		setSearchFallbackProviders(
 			webSearchFallback.filter(value => typeof value === "string" && isConfigurableSearchProviderId(value)),
 		);
+	}
+	const webSearchTimeout = settings.get("web_search.timeout");
+	if (typeof webSearchTimeout === "number" && Number.isFinite(webSearchTimeout) && webSearchTimeout > 0) {
+		setSearchHardTimeoutMs(webSearchTimeout * 1000);
 	}
 
 	const imageProvider = settings.get("providers.image");
@@ -1227,6 +1265,13 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			get model() {
 				return agent?.state.model ?? model;
 			},
+			get serviceTier() {
+				// Live parent service-tier intent (e.g. runtime `/fast on|off`), inherited
+				// by `inherit` subagents. Only fall back to the startup tier when there is
+				// no live agent yet — never `??`, or an intentional `/fast off`
+				// (serviceTier === undefined) would be resurrected to the startup value.
+				return agent ? agent.serviceTier : initialServiceTier;
+			},
 			getAgentId: () => resolvedAgentId,
 			bashAllowedPrefixes: options.bashAllowedPrefixes,
 			bashRestrictionProfile: options.bashRestrictionProfile,
@@ -1240,6 +1285,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			getPlanModeState: () => session?.getPlanModeState(),
 			getGoalModeState: () => session?.getGoalModeState(),
 			getWorkflowGateEmitter: () => session?.getWorkflowGateEmitter(),
+			getAskAnswerSource: () => session?.getAskAnswerSource(),
 			getGoalRuntime: () => session?.goalRuntime,
 			getClientBridge: () => session?.clientBridge,
 			getCompactContext: () => session.formatCompactContext(),
@@ -1320,14 +1366,13 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 
 		// MCP runtime discovery is quarantined for the SKC surface. Keep an
 		// explicitly supplied manager only for legacy in-process callers that own
-		// lifecycle themselves; never discover project/user MCP configs here.
-		const mcpManager: MCPManager | undefined = options.mcpManager;
+		// lifecycle themselves; never discover project/user MCP configs here. The
+		// owned manager for always-on plugin-bundle MCP servers is created further
+		// below, after `customTools` is populated, so its tools can be surfaced as
+		// always-on tools per the plugin product contract.
+		let mcpManager: MCPManager | undefined = options.mcpManager;
+		let ownsMcpManager = false;
 		const customTools: CustomTool[] = [];
-		// Only top-level sessions own the global MCPManager. Subagents already
-		// receive the parent's manager via `options.mcpManager`, and reassigning
-		// the singleton to the same value is a no-op \u2014 keep the gate explicit
-		// to mirror the AsyncJobManager ownership rule.
-		if (mcpManager && !options.parentTaskPrefix) MCPManager.setInstance(mcpManager);
 
 		// Add image tools when the active model or configured image providers can generate images.
 		const imageGenTools = await logger.time("getImageGenTools", () => getImageGenTools(modelRegistry, model));
@@ -1381,12 +1426,113 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			}
 		}
 
+		// Always-on SKC plugin bundle tools (validated registry surfaces). This is
+		// additive and a no-op when no plugins are installed for the cwd. Surfaces
+		// are hash-verified and collision-checked; declared names are authoritative.
+		try {
+			const pluginToolResult = await loadAlwaysOnPluginTools({
+				cwd,
+				reservedToolNames: [...getReservedSubskillToolNames(), ...customTools.map(tool => tool.name)],
+			});
+			if (pluginToolResult.tools.length > 0) customTools.push(...pluginToolResult.tools);
+			for (const q of pluginToolResult.quarantine) {
+				logger.warn("Quarantined SKC plugin surface", { plugin: q.plugin, surface: q.surfaceId, code: q.code });
+			}
+		} catch (error) {
+			logger.warn("Failed to load always-on SKC plugin tools", { error });
+		}
+
+		// Always-on SKC plugin-bundle MCP servers. Top-level sessions own a manager
+		// and connect the validated servers; subagents inherit the parent's manager
+		// via options.mcpManager and never spawn their own (prevents duplicate
+		// processes and leaks). Per the plugin product contract, connected MCP tools
+		// are surfaced as always-on tools rather than gated behind MCP selection.
+		if (!mcpManager && !options.parentTaskPrefix) {
+			try {
+				const { configs, quarantine } = await buildPluginMcpConfigs({ cwd });
+				for (const q of quarantine) {
+					logger.warn("Quarantined SKC plugin MCP", { plugin: q.plugin, surface: q.surfaceId, code: q.code });
+				}
+				if (Object.keys(configs).length > 0) {
+					const owned = new MCPManager(cwd);
+					try {
+						const sources = Object.fromEntries(
+							Object.keys(configs).map(name => [
+								name,
+								{ provider: "skc-plugins", providerName: "SKC plugin bundle", level: "project" as const },
+							]),
+						);
+						const result = await owned.connectServers(configs, sources as never);
+						for (const [server, err] of result.errors) {
+							logger.warn("SKC plugin MCP connect failed", { path: `mcp:${server}`, error: err });
+						}
+						if (result.connectedServers.length > 0) {
+							mcpManager = owned;
+							ownsMcpManager = true;
+							customTools.push(...(result.tools as CustomTool[]));
+						} else {
+							await owned.disconnectAll().catch(() => {});
+						}
+					} catch (error) {
+						// Avoid leaking partially-started server processes on failure.
+						await owned.disconnectAll().catch(() => {});
+						throw error;
+					}
+				}
+			} catch (error) {
+				logger.warn("Failed to wire SKC plugin MCP servers", { error });
+			}
+		} else if (options.parentTaskPrefix) {
+			// Subagent: inherit the parent's always-on plugin MCP tools WITHOUT
+			// owning the manager (no connect, no callbacks, no disposal). The
+			// top-level session installed its manager as the process-global
+			// instance; reading getTools() surfaces the same always-on tools so the
+			// product decision holds for subagent sessions too.
+			const inherited = mcpManager ?? MCPManager.instance();
+			if (inherited) {
+				try {
+					const inheritedTools = inherited.getTools();
+					if (inheritedTools.length > 0) customTools.push(...(inheritedTools as CustomTool[]));
+				} catch (error) {
+					logger.warn("Failed to inherit plugin MCP tools in subagent", { error });
+				}
+			}
+		}
+		// Only top-level sessions own the global MCPManager. Subagents already
+		// receive the parent's manager via options.mcpManager; reassigning the
+		// singleton to the same value is a no-op. Keep the gate explicit to mirror
+		// the AsyncJobManager ownership rule.
+		if (mcpManager && !options.parentTaskPrefix) MCPManager.setInstance(mcpManager);
+
 		// Custom tool and extension discovery is quarantined from the public SKC utility surface.
 		// Explicit SDK extension factories are still honored; callers use them to
 		// register in-process tools/providers without enabling filesystem discovery.
 		const inlineExtensions: ExtensionFactory[] = [...(options.extensions ?? [])];
 		if (customTools.length > 0) {
 			inlineExtensions.push(createCustomToolsExtension(customTools));
+		}
+
+		// Always-on constrained plugin hooks (validated registry surfaces). Additive
+		// and a no-op without installed plugins; the loader denies all dangerous APIs.
+		try {
+			const pluginHookResult = await loadConstrainedPluginHooks({ cwd });
+			if (pluginHookResult.hooks.length > 0) {
+				inlineExtensions.push(createPluginHooksExtension(pluginHookResult.hooks));
+			}
+			for (const q of pluginHookResult.quarantine) {
+				logger.warn("Quarantined SKC plugin hook", { plugin: q.plugin, surface: q.surfaceId, code: q.code });
+			}
+		} catch (error) {
+			logger.warn("Failed to load constrained SKC plugin hooks", { error });
+		}
+		let notificationCfg: NotificationConfig | undefined;
+		try {
+			notificationCfg = getNotificationConfig(Settings.instance);
+		} catch {
+			notificationCfg = undefined;
+		}
+		if (shouldRegisterNotificationsExtension({ env: process.env, cfg: notificationCfg })) {
+			inlineExtensions.push(createNotificationsExtension);
 		}
 
 		// Extension/module discovery is quarantined; retain only the private
@@ -1677,6 +1823,12 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				}
 				appendPrompt = parts.join("\n\n");
 			}
+			let pluginSystemAppendices = "";
+			try {
+				pluginSystemAppendices = await renderAlwaysOnSystemAppendices({ cwd });
+			} catch (error) {
+				logger.warn("Failed to render SKC plugin system appendices", { error });
+			}
 			const defaultPrompt = await buildSystemPromptInternal({
 				cwd,
 				skills,
@@ -1687,6 +1839,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				alwaysApplyRules,
 				skillsSettings: settings.getGroup("skills"),
 				appendSystemPrompt: appendPrompt,
+				pluginAppendices: pluginSystemAppendices,
 				repeatToolDescriptions,
 				intentField,
 				mcpDiscoveryMode: false,
@@ -2043,6 +2196,10 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			// AsyncJobManager on teardown; subagents inherit the parent's and
 			// **MUST NOT** tear it down.
 			ownedAsyncJobManager: asyncJobManager,
+			// Only the owned plugin-bundle MCP manager is torn down on dispose;
+			// subagents/callers that merely observe the global must not (see
+			// AgentSession.dispose).
+			ownedMcpManager: ownsMcpManager ? mcpManager : undefined,
 			scopedModels: options.scopedModels,
 			promptTemplates,
 			slashCommands,
@@ -2207,9 +2364,20 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		// Wire MCP manager callbacks to session for reactive tool updates.
 		// Skip when reusing a parent's manager — the parent owns the callbacks.
 		if (mcpManager && !options.mcpManager) {
-			mcpManager.setOnToolsChanged(tools => {
-				void session.refreshMCPTools(tools);
-			});
+			// The owned plugin-bundle manager surfaces its tools as always-on custom
+			// tools (registered above), so it must NOT drive refreshMCPTools — that
+			// path strips MCP bridge tools and re-gates them behind MCP selection,
+			// which would deactivate the always-on plugin tools. Reactive tool
+			// updates remain wired only for externally supplied managers.
+			// The owned manager is disconnected by AgentSession.dispose via
+			// ownedMcpManager; only externally supplied managers wire reactive
+			// refreshMCPTools (the owned always-on path must not, or it would
+			// deactivate the plugin tools).
+			if (!ownsMcpManager) {
+				mcpManager.setOnToolsChanged(tools => {
+					void session.refreshMCPTools(tools);
+				});
+			}
 			// Wire prompt refresh → rebuild MCP prompt slash commands
 			mcpManager.setOnPromptsChanged(serverName => {
 				const promptCommands = buildMCPPromptCommands(mcpManager);

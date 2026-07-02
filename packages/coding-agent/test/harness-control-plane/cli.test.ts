@@ -11,6 +11,7 @@ import {
 	sessionPaths,
 	writeSessionState,
 } from "../../src/harness-control-plane/storage";
+import { harnessStateRoot } from "../../src/skc-runtime/session-layout";
 import { createHarnessCliEnv, type HarnessCliEnv } from "./cli-workspace-env";
 
 const repoRoot = path.resolve(import.meta.dir, "..", "..", "..", "..");
@@ -19,17 +20,26 @@ const cliEntry = path.join(repoRoot, "packages", "coding-agent", "src", "cli.ts"
 let root: string;
 let workspace: string;
 let cliEnv: HarnessCliEnv;
+let originalSkcSessionId: string | undefined;
 
 beforeEach(async () => {
 	root = await mkdtemp(path.join(tmpdir(), "harness-cli-root-"));
 	workspace = realpathSync(await mkdtemp(path.join(tmpdir(), "harness-cli-ws-")));
 	cliEnv = createHarnessCliEnv(repoRoot);
+	originalSkcSessionId = process.env.SKC_SESSION_ID;
+	process.env.SKC_SESSION_ID = "test-session";
+	cliEnv.env.SKC_SESSION_ID = "test-session";
 });
 
 afterEach(async () => {
 	cliEnv.cleanup();
 	await rm(root, { recursive: true, force: true });
 	await rm(workspace, { recursive: true, force: true });
+	if (originalSkcSessionId === undefined) {
+		delete process.env.SKC_SESSION_ID;
+	} else {
+		process.env.SKC_SESSION_ID = originalSkcSessionId;
+	}
 });
 
 interface HarnessResult {
@@ -326,7 +336,7 @@ describe("skc harness CLI (foundation)", () => {
 			expect(started.code).toBe(0);
 			const sessionId = started.json.evidence.handle.sessionId as string;
 
-			await appendEvent(path.join(workspace, ".skc", "state", "harness"), sessionId, {
+			await appendEvent(harnessStateRoot(workspace, "test-session"), sessionId, {
 				eventId: "evt-cross-cwd-prompt",
 				cursor: 1,
 				createdAt: "2026-06-03T00:00:01.000Z",

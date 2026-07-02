@@ -131,9 +131,12 @@ describe("AgentSession concurrent prompt guard", () => {
 		const firstPrompt = session.prompt("First message");
 		await waitFor(() => session.isStreaming);
 
-		// steer should work while streaming
-		expect(() => session.steer("Steering message")).not.toThrow();
+		// steer should work while streaming. Capture the queued state before
+		// awaiting steer(): async steering may immediately resume/consume the
+		// queued message on fast runners once the promise settles.
+		const steering = session.steer("Steering message");
 		expect(session.queuedMessageCount).toBe(1);
+		await expect(steering).resolves.toBeUndefined();
 
 		// Cleanup
 		await session.abort();
@@ -154,6 +157,37 @@ describe("AgentSession concurrent prompt guard", () => {
 		// Cleanup
 		await session.abort();
 		await firstPrompt.catch(() => {});
+	});
+
+	it("sendUserMessage with no deliverAs steers while streaming instead of throwing", async () => {
+		await createSession();
+
+		// Start first prompt (blocks until abort)
+		const firstPrompt = session.prompt("First message");
+		await waitFor(() => session.isStreaming);
+
+		// With no explicit deliverAs, a busy session should queue as steering
+		// rather than throw AgentBusyError.
+		const send = session.sendUserMessage("Busy message");
+		expect(session.getQueuedMessages()).toEqual({ steering: ["Busy message"], followUp: [] });
+		await expect(send).resolves.toBeUndefined();
+
+		// Cleanup
+		await session.abort();
+		await firstPrompt.catch(() => {});
+	});
+
+	it("sendUserMessage with no deliverAs starts a fresh turn when idle", async () => {
+		await createSession();
+
+		expect(session.isStreaming).toBe(false);
+		const send = session.sendUserMessage("Idle message");
+		await waitFor(() => session.isStreaming);
+		expect(session.queuedMessageCount).toBe(0);
+
+		// Cleanup
+		await session.abort();
+		await send.catch(() => {});
 	});
 
 	it("delivers hidden nextTurn stop reactions through the next LLM call without exposing them in the visible queue", async () => {

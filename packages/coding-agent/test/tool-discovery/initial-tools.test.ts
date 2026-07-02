@@ -15,6 +15,7 @@ import {
 	JobTool,
 	RecipeTool,
 	SshTool,
+	TelegramSendTool,
 } from "../../src/tools/index";
 
 const allToolsSettings = Settings.isolated({
@@ -26,7 +27,6 @@ const allToolsSettings = Settings.isolated({
 	"search.enabled": true,
 	"github.enabled": true,
 	"lsp.enabled": true,
-	"inspect_image.enabled": true,
 	"web_search.enabled": true,
 	"calc.enabled": true,
 	"browser.enabled": true,
@@ -97,6 +97,7 @@ async function getToolMetadata(): Promise<Map<string, { loadMode?: string; summa
 		new JobTool(toolSession),
 		new RecipeTool(toolSession, []),
 		new IrcTool(toolSession),
+		new TelegramSendTool(toolSession),
 	]) {
 		metadata.set(tool.name, { loadMode: tool.loadMode, summary: tool.summary });
 	}

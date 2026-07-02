@@ -1,0 +1,8 @@
+--- a/packages/coding-agent/src/extensibility/plugins/index.ts
++++ b/packages/coding-agent/src/extensibility/plugins/index.ts
+@@ -6,4 +6,5 @@
+ export * from "./manager";
+ export * from "./marketplace";
+ export * from "./parser";
++export * from "./security-scanner";
+ export type * from "./types";

@@ -303,6 +303,12 @@ async function cmdRelease(version: string): Promise<void> {
 	await $`cargo generate-lockfile`;
 	console.log();
 
+	// 4b. Regenerate the SKC plugin bundle so its embedded version tracks the
+	// freshly bumped package version (otherwise `check:plugins` reports drift).
+	console.log("Regenerating plugin bundle...");
+	await $`bun run generate-plugins`;
+	console.log();
+
 	// 5. Update changelogs
 	console.log("Updating CHANGELOGs...");
 	await updateChangelogsForRelease(version);

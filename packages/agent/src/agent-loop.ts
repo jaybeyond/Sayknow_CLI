@@ -7,6 +7,7 @@ import {
 	type AssistantMessageEvent,
 	type Context,
 	EventStream,
+	isContextOverflow,
 	isZodSchema,
 	streamSimple,
 	type ToolResultMessage,
@@ -17,9 +18,13 @@ import {
 import { sanitizeText } from "@sayknow-cli/utils";
 import {
 	createHarmonyAuditEvent,
+	detectHarmonyLeakInAssistantMessage,
+	extractHarmonyRemoved,
 	type HarmonyDetection,
 	type HarmonyRecoveredToolCall,
 	isHarmonyLeakMitigationTarget,
+	recoverHarmonyToolCall,
+	shouldMitigateHarmonyLeak,
 	signalListLabel,
 } from "./harmony-leak";
 import { type AgentRunCoverage, type AgentRunSummary, ToolCallBlockedError } from "./run-collector";
@@ -51,6 +56,15 @@ import type {
 
 /** Sentinel returned by the abort race in `streamAssistantResponse`. */
 const ABORTED: unique symbol = Symbol("agent-loop-aborted");
+/**
+ * Detect empty "successful" responses that indicate a proxy-level context
+ * overflow (e.g. LiteLLM returning `content: []`, `stopReason: "stop"`, and a
+ * fabricated near-zero usage). We delegate to {@link isContextOverflow} which
+ * has the threshold constant, so the detection logic stays in one place.
+ */
+function isEmptyResponseOverflow(message: AssistantMessage): boolean {
+	return isContextOverflow(message);
+}
 
 class HarmonyLeakInterruption extends Error {
 	constructor(
@@ -502,6 +516,12 @@ async function runLoopBody(
 					streamFn,
 					harmonyRetryAttempt,
 				);
+				const detection = detectHarmonyLeakInAssistantMessage(message);
+				if (detection && shouldMitigateHarmonyLeak(config.model, detection)) {
+					const rec = recoverHarmonyToolCall(message, detection);
+					const removed = rec ? rec.removed : extractHarmonyRemoved(message, detection);
+					throw new HarmonyLeakInterruption(detection, removed, rec);
+				}
 				harmonyRetryAttempt = 0;
 				harmonyTruncateResumeCount = 0;
 			} catch (err) {
@@ -516,6 +536,15 @@ async function runLoopBody(
 					harmonyTruncateResumeCount++;
 					recovered = err.recovered;
 					message = recovered.message;
+					// Replace the contaminated assistant message committed during
+					// streaming with the recovered (truncated) one so the retry
+					// sees clean history.
+					{
+						const idx = currentContext.messages.length - 1;
+						if (idx >= 0 && currentContext.messages[idx]?.role === "assistant") {
+							currentContext.messages[idx] = recovered.message;
+						}
+					}
 					await emitHarmonyAudit(config, err, "truncate_resume", harmonyRetryAttempt);
 				} else {
 					if (harmonyRetryAttempt >= 2) {
@@ -526,11 +555,33 @@ async function runLoopBody(
 					}
 					await emitHarmonyAudit(config, err, "abort_retry", harmonyRetryAttempt);
 					harmonyRetryAttempt++;
+					// Drop the contaminated assistant message committed during
+					// streaming so the retry does not replay the model's own leak
+					// back to it as history.
+					{
+						const idx = currentContext.messages.length - 1;
+						if (idx >= 0 && currentContext.messages[idx]?.role === "assistant") {
+							currentContext.messages.splice(idx, 1);
+						}
+					}
 					continue;
 				}
 			}
 			newMessages.push(message);
 			let steeringMessagesFromExecution: AgentMessage[] | undefined;
+
+			// Detect empty "successful" responses (stopReason "stop" + empty content).
+			// Some proxies (e.g. LiteLLM) return this when the upstream model's context
+			// window is exceeded, fabricating a near-zero usage instead of surfacing an
+			// error. Without this guard the agent loop treats the empty response as a
+			// natural turn completion and stops, leaving the user with a frozen session.
+			// Promote it to an error so the overflow/compaction recovery path can fire.
+			if (message.stopReason === "stop" && message.content.length === 0 && isEmptyResponseOverflow(message)) {
+				message.stopReason = "error";
+				message.errorMessage = message.errorMessage
+					? `${message.errorMessage} | Provider returned an empty response with anomalously low token usage (possible context overflow via proxy)`
+					: "Provider returned an empty response with anomalously low token usage (possible context overflow via proxy)";
+			}
 
 			if (message.stopReason === "error" || message.stopReason === "aborted") {
 				// Create placeholder tool results for any tool calls in the aborted message
@@ -1084,6 +1135,17 @@ async function executeToolCalls(
 
 		await runInActiveSpan(toolSpan, async () => {
 			try {
+				if (toolCall.incompleteArguments) {
+					// The provider flagged this call's argument JSON as truncated
+					// (the model hit its output-token limit mid-call). Executing the
+					// best-effort partial parse would run the tool on wrong input, so
+					// reject with a retryable, actionable error instead.
+					throw new Error(
+						`Tool call "${toolCall.name}" was cut off before its arguments finished streaming ` +
+							`(the response hit its output token limit). The partial arguments cannot be executed. ` +
+							`Re-issue the call with complete arguments, splitting the work into smaller steps if needed.`,
+					);
+				}
 				if (!tool) throw new Error(`Tool ${toolCall.name} not found`);
 
 				let effectiveArgs: Record<string, unknown>;

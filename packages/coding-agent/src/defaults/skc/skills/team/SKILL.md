@@ -7,9 +7,13 @@ source: "forked from upstream team skill and rebranded for SKC"
 
 # Team Skill
 
-`$team` is the tmux-based multi-worker execution mode for SKC. It starts real SKC worker CLI sessions by splitting the current tmux leader window and coordinates them through `.skc/state/team/...` files plus CLI team interop (`skc team api ...`) and state files.
+`$team` is the tmux-based multi-worker execution mode for SKC. It starts real SKC worker CLI sessions by splitting the current tmux leader window and coordinates them through `.skc/_session-{sessionid}/state/team/...` files plus CLI team interop (`skc team api ...`) and state files.
 
 This skill is operationally sensitive. Treat it as an operator workflow, not a generic prompt pattern. In SKC App or plain outside-tmux sessions, do not present `$team` / `skc team` as directly available; launch SKC CLI from shell first, or stay on the nearest app-safe surface until the user explicitly wants the tmux runtime.
+
+## Corrupt current-session state recovery
+
+When team detects its own current-session state is corrupt, tampered, unreadable, or stale on resume, run `skc state clear --force --mode team` before reseeding or restarting. Scope the clear to the current session via `--session-id`, the command payload, or `SKC_SESSION_ID`; it clears only team state for that session and never clears other skills or sessions.
 
 ## Team vs Native Subagents
 
@@ -62,9 +66,9 @@ requiring a separate linked execution loop up front. SKC team supports current-w
 
 ### Team + Ultragoal bridge
 
-Use `$ultragoal` for durable leader-owned goal/ledger tracking and `$team` for parallel visible tmux execution lanes. When Team is launched with an active `.skc/ultragoal/goals.json`, worker task/status context may include leader-owned Ultragoal context: `.skc/ultragoal/goals.json`, `.skc/ultragoal/ledger.jsonl`, the active goal id, SKC goal mode, and the `fresh_leader_goal_get_required` checkpoint policy.
+Use `$ultragoal` for durable leader-owned goal/ledger tracking and `$team` for parallel visible tmux execution lanes. When Team is launched with an active `.skc/_session-{sessionid}/ultragoal/goals.json`, worker task/status context may include leader-owned Ultragoal context: `.skc/_session-{sessionid}/ultragoal/goals.json`, `.skc/_session-{sessionid}/ultragoal/ledger.jsonl`, the active goal id, SKC goal mode, and the `fresh_leader_goal_get_required` checkpoint policy.
 
-Workers provide task status and verification evidence only. They do not own Ultragoal goal state, create worker ledgers, mutate `.skc/ultragoal`, auto-launch Team from Ultragoal, or perform hidden SKC goal mutation. Workers must not run `skc ultragoal checkpoint`; checkpoint authority stays with the leader after worker tasks are terminal. Ultragoal does not auto-launch Team and performs no hidden goal mutation. The leader uses terminal Team evidence plus a fresh `goal({"op":"get"})` snapshot and strict quality gate to run `skc ultragoal checkpoint --goal-id <id> --status complete --evidence "<team evidence mentioning .skc/ultragoal and <id>>" --skc-goal-json <fresh-goal-get-json-or-path> --quality-gate-json <quality-gate-json-or-path>`.
+Workers provide task status and verification evidence only. They do not own Ultragoal goal state, create worker ledgers, mutate `.skc/_session-{sessionid}/ultragoal`, auto-launch Team from Ultragoal, or perform hidden SKC goal mutation. Workers must not run `skc ultragoal checkpoint`; checkpoint authority stays with the leader after worker tasks are terminal. Ultragoal does not auto-launch Team and performs no hidden goal mutation. The leader uses terminal Team evidence plus the current-session active SKC goal snapshot and strict quality gate to run `skc ultragoal checkpoint --goal-id <id> --status complete --evidence "<team evidence mentioning .skc/_session-{sessionid}/ultragoal and <id>>" --quality-gate-json <quality-gate-json-or-path>`.
 
 ### Worker command override
 
@@ -107,12 +111,12 @@ Before launching `skc team`, require a grounded context snapshot:
    - constraints
    - unknowns/open questions
    - likely codebase touchpoints
-4. If ambiguity remains high, run `explore` first for brownfield facts, then run `$deep-interview --quick <task>` before team launch.
+4. If ambiguity remains high, gather brownfield facts with focused repo inspection or a canonical read-only role agent first, then run `$deep-interview --quick <task>` before team launch.
 5. If current correctness depends on official docs, version-aware framework guidance, best practices, or external dependency behavior, auto-delegate `researcher` as an evidence lane before or alongside worker launch instead of relying on repo-local recall alone.
 
 Do not start the worker pane until this gate is satisfied; if forced to proceed quickly, state explicit scope/risk limitations in the launch report.
 
-For simple read-only brownfield lookups during intake, follow active session guidance: when `USE_SKC_EXPLORE_CMD` is enabled, prefer `skc explore` with narrow, concrete prompts; otherwise use the richer normal explore path and fall back normally if `skc explore` is unavailable.
+For simple read-only brownfield lookups during intake, use narrow repo inspection first; for broader mapping, delegate to `planner` or `architect` with a concrete fact-finding assignment.
 
 ## Follow-up Staffing Contract
 
@@ -141,19 +145,19 @@ When `$team` is used as a follow-up mode from ralplan, carry forward the approve
 1. Parse args (`N`, `agent-type`, task), default to 3 workers, and cap workers at 20.
 2. Non-dry-run: detect the current tmux leader context with `display-message -p "#S:#I #{pane_id}"` before creating state or worktrees.
 3. Initialize team state:
-   - `.skc/state/team/<team>/config.json`
-   - `.skc/state/team/<team>/manifest.v2.json`
-   - `.skc/state/team/<team>/tasks/task-*.json` (one per explicit lane section, otherwise one worker-owned compatibility task per worker)
-   - `.skc/state/team/<team>/mailbox/worker-1.json`
-   - `.skc/state/team/<team>/workers/<worker>/status.json`
-   - `.skc/state/team/<team>/workers/<worker>/lifecycle.json`
-   - `.skc/state/team/<team>/workers/<worker>/heartbeat.json`
+   - `.skc/_session-{sessionid}/state/team/<team>/config.json`
+   - `.skc/_session-{sessionid}/state/team/<team>/manifest.v2.json`
+   - `.skc/_session-{sessionid}/state/team/<team>/tasks/task-*.json` (one per explicit lane section, otherwise one worker-owned compatibility task per worker)
+   - `.skc/_session-{sessionid}/state/team/<team>/mailbox/worker-1.json`
+   - `.skc/_session-{sessionid}/state/team/<team>/workers/<worker>/status.json`
+   - `.skc/_session-{sessionid}/state/team/<team>/workers/<worker>/lifecycle.json`
+   - `.skc/_session-{sessionid}/state/team/<team>/workers/<worker>/heartbeat.json`
 4. Resolve the worker command from `SKC_TEAM_WORKER_COMMAND` or the active `skc` entrypoint.
 5. Split the current tmux window like SKC team: worker 1 is split horizontally to the right of the leader, workers 2..N are vertically stacked in the right column, then `select-layout main-vertical` and `main-pane-width` keep leader-left/worker-right at roughly 50/50.
 6. Launch the worker with:
    - `SKC_TEAM_NAME=<team>`
    - `SKC_TEAM_WORKER_ID=worker-1`
-   - `SKC_TEAM_STATE_ROOT=<leader-cwd>/.skc/state/team`
+   - `SKC_TEAM_STATE_ROOT=<leader-cwd>/.skc/_session-{sessionid}/state/team`
    - optional `SKC_TEAM_WORKTREE_PATH=<path>` when worktree mode is active
 7. Automatically integrate worker worktree commits during leader monitoring:
    - dirty worker worktrees are auto-checkpointed before integration
@@ -216,7 +220,7 @@ Semantics:
 - `list`: pure read path; lists known teams without integrating worker commits.
 - API/read-only snapshot operations are pure unless explicitly documented as a monitor path.
 - `claim-task`: mutating task path; before granting a new claim, it recovers expired claims and rejects claims from workers already classified as not live.
-- `shutdown`: writes per-worker graceful `shutdown-request.json`, moves lifecycle through `draining` to `stopped`, kills the recorded worker pane when it still belongs to the stored tmux target, removes clean created worktrees, marks worker runtime status stopped, and sets phase from task, lifecycle, and integration state: `complete` only when all tasks have verified `completion_evidence`, every worker has matching graceful shutdown lifecycle evidence, and no integration request/conflict is pending; `awaiting_integration` when tasks and lifecycle are complete but leader integration still requires action; `failed` when tasks failed/blocked or completed tasks lack valid evidence; and `cancelled` when work remains pending or in progress. It preserves `.skc/state/team/<team>` as evidence.
+- `shutdown`: writes per-worker graceful `shutdown-request.json`, moves lifecycle through `draining` to `stopped`, kills the recorded worker pane when it still belongs to the stored tmux target, removes clean created worktrees, marks worker runtime status stopped, and sets phase from task, lifecycle, and integration state: `complete` only when all tasks have verified `completion_evidence`, every worker has matching graceful shutdown lifecycle evidence, and no integration request/conflict is pending; `awaiting_integration` when tasks and lifecycle are complete but leader integration still requires action; `failed` when tasks failed/blocked or completed tasks lack valid evidence; and `cancelled` when work remains pending or in progress. It preserves `.skc/_session-{sessionid}/state/team/<team>` as evidence.
 
 ## Data Plane and Control Plane
 
@@ -228,26 +232,26 @@ Semantics:
 
 ### Data Plane
 
-- `.skc/state/team/<team>/config.json`
-- `.skc/state/team/<team>/manifest.v2.json`
-- `.skc/state/team/<team>/phase.json`
-- `.skc/state/team/<team>/events.jsonl`
-- `.skc/state/team/<team>/trace.jsonl`
-- `.skc/state/team/<team>/trace-errors.jsonl`
-- `.skc/state/team/<team>/telemetry.jsonl`
-- `.skc/state/team/<team>/monitor-snapshot.json`
-- `.skc/state/team/<team>/integration-report.md`
-- `.skc/state/team/<team>/tasks/task-1.json` (includes structured `completion_evidence` after completed transitions)
-- `.skc/state/team/<team>/mailbox/worker-1/<message-id>.json`
-- `.skc/state/team/<team>/mailbox/worker-1.json` (legacy compatibility view)
-- `.skc/state/team/<team>/notifications/<notification-id>.json`
-- `.skc/state/team/<team>/workers/<worker>/startup-ack.json`
-- `.skc/state/team/<team>/workers/<worker>/status.json`
-- `.skc/state/team/<team>/workers/<worker>/lifecycle.json`
-- `.skc/state/team/<team>/workers/<worker>/heartbeat.json`
-- `.skc/state/team/<team>/workers/<worker>/shutdown-request.json`
-- `.skc/state/team/<team>/workers/<worker>/nudges/<fingerprint>.json`
-- `.skc/reports/team-commit-hygiene/<team>.ledger.json`
+- `.skc/_session-{sessionid}/state/team/<team>/config.json`
+- `.skc/_session-{sessionid}/state/team/<team>/manifest.v2.json`
+- `.skc/_session-{sessionid}/state/team/<team>/phase.json`
+- `.skc/_session-{sessionid}/state/team/<team>/events.jsonl`
+- `.skc/_session-{sessionid}/state/team/<team>/trace.jsonl`
+- `.skc/_session-{sessionid}/state/team/<team>/trace-errors.jsonl`
+- `.skc/_session-{sessionid}/state/team/<team>/telemetry.jsonl`
+- `.skc/_session-{sessionid}/state/team/<team>/monitor-snapshot.json`
+- `.skc/_session-{sessionid}/state/team/<team>/integration-report.md`
+- `.skc/_session-{sessionid}/state/team/<team>/tasks/task-1.json` (includes structured `completion_evidence` after completed transitions)
+- `.skc/_session-{sessionid}/state/team/<team>/mailbox/worker-1/<message-id>.json`
+- `.skc/_session-{sessionid}/state/team/<team>/mailbox/worker-1.json` (legacy compatibility view)
+- `.skc/_session-{sessionid}/state/team/<team>/notifications/<notification-id>.json`
+- `.skc/_session-{sessionid}/state/team/<team>/workers/<worker>/startup-ack.json`
+- `.skc/_session-{sessionid}/state/team/<team>/workers/<worker>/status.json`
+- `.skc/_session-{sessionid}/state/team/<team>/workers/<worker>/lifecycle.json`
+- `.skc/_session-{sessionid}/state/team/<team>/workers/<worker>/heartbeat.json`
+- `.skc/_session-{sessionid}/state/team/<team>/workers/<worker>/shutdown-request.json`
+- `.skc/_session-{sessionid}/state/team/<team>/workers/<worker>/nudges/<fingerprint>.json`
+- `.skc/_session-{sessionid}/reports/team-commit-hygiene/<team>.ledger.json`
 
 ## Team Mutation Interop (CLI-first)
 
@@ -285,10 +289,10 @@ SKC ports team-mode concepts from `../../oh-my-codex`, not code or OMX/Codex-spe
 
 | Concept | SKC-native equivalent |
 |---------|-----------------------|
-| Worker identity/inbox/mailbox paths | `.skc/state/team/<team>/workers/<worker>/identity.json`, `inbox.md`, and per-message mailbox records under `.skc/state/team/<team>/mailbox/<worker>/`. |
+| Worker identity/inbox/mailbox paths | `.skc/_session-{sessionid}/state/team/<team>/workers/<worker>/identity.json`, `inbox.md`, and per-message mailbox records under `.skc/_session-{sessionid}/state/team/<team>/mailbox/<worker>/`. |
 | Startup ACK | `skc team api worker-startup-ack`, persisted as `workers/<worker>/startup-ack.json`. |
 | Claim-safe lifecycle APIs | `claim-task`, `transition-task-status`, and `release-task-claim` with worker ownership and claim-token guards. |
-| Delivery states and deferred pane attempts | Native notification records under `.skc/state/team/<team>/notifications/` with `pending`, `sent`, `queued`, `deferred`, `failed`, `delivered`, and `acknowledged` states. |
+| Delivery states and deferred pane attempts | Native notification records under `.skc/_session-{sessionid}/state/team/<team>/notifications/` with `pending`, `sent`, `queued`, `deferred`, `failed`, `delivered`, and `acknowledged` states. |
 | Non-destructive leader nudges | Lifecycle nudge records under `workers/<worker>/nudges/`; SKC suggests inspection/relaunch but never auto-kills or auto-relaunches workers. |
 
 Forbidden assumptions: do not copy OMX paths, Codex notify payload formats, OMX process names, or source code directly. Keep tmux as the current runtime; native split-worker TUI remains roadmap-only.
@@ -300,19 +304,21 @@ Worker protocol:
 - Claim pending work with `claim-task`.
 - Transition the task to `completed`, `failed`, or `blocked` with `transition-task-status`, including claim token and evidence for completion.
 - Commit or leave worktree changes in the worker worktree; the leader `monitor`/`resume` path will auto-checkpoint dirty worktrees and integrate committed history where possible.
-- Record implementation/verification evidence in normal task output and state files; leader integration/conflict notifications are delivered through `.skc/state/team/<team>/mailbox/leader-fixed.json`.
+- Record implementation/verification evidence in normal task output and state files; leader integration/conflict notifications are delivered through `.skc/_session-{sessionid}/state/team/<team>/mailbox/leader-fixed.json`.
 
 ## Environment Knobs
 
 Useful runtime env vars:
 
 - `SKC_TMUX_COMMAND` / `SKC_TEAM_TMUX_COMMAND`
-  - tmux binary/command override (default `tmux`). `SKC_TMUX_COMMAND` applies to every SKC tmux flow; `SKC_TEAM_TMUX_COMMAND` is honored as an alias by the team path. Both resolve through the same resolver, so the team leader and `skc session ...` always target the same multiplexer.
-  - Multiplexer support boundary: SKC-managed sessions and the team leader are detected via tmux user options (`@skc-profile`, written with `set-option` and read back with `show-options` / `list-sessions -F`). A provider must round-trip those user options to be supported. Real tmux works. Alternative multiplexers such as psmux on Windows do not reliably persist tmux user options yet, so `skc session status` reports `skc_tmux_session_untagged` (the session exists in the multiplexer but is not SKC-tagged) and team startup rejects the leader as `unmanaged_tmux_session`. The Windows-native psmux path is therefore not fully supported; use real tmux for SKC-managed session and team flows.
+  - tmux binary/name override (default `tmux` on POSIX, `psmux` / `pmux` / `tmux` on native Windows when one of those resolves on PATH). `SKC_TMUX_COMMAND` applies to every SKC tmux flow; `SKC_TEAM_TMUX_COMMAND` is honored as an alias by the team path. Both resolve through the same resolver, so the team leader and `skc session ...` always target the same multiplexer. These values are executable path/name overrides, not shell command lines; do not include flags such as `psmux -L <namespace>` in the env var.
+  - Native Windows psmux support: psmux is the supported tmux-compatible multiplexer for native Windows `skc --tmux`, `skc session`, and `skc team`. Psmux can be exposed as `psmux.exe` or as its `tmux.exe`/`pmux.exe` aliases. SKC probes `psmux` / `pmux` / `tmux` on Windows PATH, picks the first that resolves, and treats that binary as the multiplexer. Worker commands on Windows are emitted with PowerShell-safe `$env:VAR = 'value';` assignments so psmux's ConPTY panes inherit `SKC_TEAM_*` correctly.
+  - Multiplexer detection knobs (Windows): `SKC_PSMUX_COMMAND` forces a wrapper to be treated as psmux, `SKC_PSMUX_DETECTION=off` skips detection, `SKC_PSMUX_FORCE_DETECT=1` re-probes every call. The mouse / set-clipboard / mode-style UX profile is filtered out for psmux; the `@skc-profile` ownership tag and branch / project / session identity markers still round-trip and are required for `skc session` and `skc team`.
+  - Windows psmux namespace boundary: psmux `-c <path>` cwd/start-directory flags do not isolate the server namespace; psmux uses the tmux-compatible global `-L <namespace>` flag for isolated server instances. SKC does not currently expose structured runtime `-L` support, because launch, `skc session`, and `skc team` must all carry the same namespace prefix together. If you need isolated psmux servers, start `psmux -L <namespace>` yourself before `skc --tmux` and let SKC attach to it; do not pass `-L` through `SKC_TMUX_COMMAND`.
 - `SKC_TEAM_WORKER_COMMAND`
   - worker command override (default resolves to active SKC entrypoint or `skc`)
 - `SKC_TEAM_STATE_ROOT`
-  - team state root override (default `<cwd>/.skc/state/team`)
+  - team state root override (default `<cwd>/.skc/_session-{sessionid}/state/team`)
 
 ## Failure Modes and Diagnosis
 
@@ -325,18 +331,18 @@ Operator note (important for SKC panes):
 
 - **Outside tmux:** non-dry-run launch fails before team state or worktrees are created. Start `skc team` from an attached tmux leader pane.
 - **Split failure:** startup records a failed phase if state was already initialized, rolls back created worktrees, and never kills the leader tmux session.
-- **Worker API ENOENT:** team state is missing or `SKC_TEAM_STATE_ROOT` points somewhere else. Check `.skc/state/team/<team>/` before assuming worker failure.
+- **Worker API ENOENT:** team state is missing or `SKC_TEAM_STATE_ROOT` points somewhere else. Check `.skc/_session-{sessionid}/state/team/<team>/` before assuming worker failure.
 - **Stale pane on shutdown:** shutdown only kills a recorded worker pane when it still belongs to the stored `tmux_target` and is not the leader pane. Stale panes outside that target require manual inspection.
-- **Integration conflict:** `skc team monitor <team>` / `resume` aborts the failing merge, cherry-pick, or worker rebase; `skc team status <team>` is read-only inspection. Inspect `.skc/state/team/<team>/integration-report.md`, `.skc/state/team/<team>/events.jsonl`, `.skc/state/team/<team>/mailbox/leader-fixed.json`, and `.skc/reports/team-commit-hygiene/<team>.ledger.json`.
+- **Integration conflict:** `skc team monitor <team>` / `resume` aborts the failing merge, cherry-pick, or worker rebase; `skc team status <team>` is read-only inspection. Inspect `.skc/_session-{sessionid}/state/team/<team>/integration-report.md`, `.skc/_session-{sessionid}/state/team/<team>/events.jsonl`, `.skc/_session-{sessionid}/state/team/<team>/mailbox/leader-fixed.json`, and `.skc/_session-{sessionid}/reports/team-commit-hygiene/<team>.ledger.json`.
 
 ### Safe Manual Intervention (last resort)
 
 Use only after checking `skc team status <team>` and state evidence:
 
 1. Inspect team files:
-   - `.skc/state/team/<team>/config.json`
-   - `.skc/state/team/<team>/tasks/task-1.json`
-   - `.skc/state/team/<team>/mailbox/worker-1.json`
+   - `.skc/_session-{sessionid}/state/team/<team>/config.json`
+   - `.skc/_session-{sessionid}/state/team/<team>/tasks/task-1.json`
+   - `.skc/_session-{sessionid}/state/team/<team>/mailbox/worker-1.json`
 2. Capture pane tail to confirm current worker state:
    - `tmux capture-pane -t %<worker-pane> -p -S -120`
    - If a larger-tail read or bounded summary would help, prefer explicit opt-in inspection via `skc sparkshell --tmux-pane %<worker-pane> --tail-lines 400` before improvising extra tmux commands.
@@ -385,7 +391,7 @@ When operating this skill, provide concrete progress evidence:
 
 1. Team started line (`Team started: <name>`)
 2. tmux target and worker pane id
-3. task state from read-only `skc team status <team>`, mutating `skc team monitor <team>`, or `.skc/state/team/<team>/tasks/task-1.json`
+3. task state from read-only `skc team status <team>`, mutating `skc team monitor <team>`, or `.skc/_session-{sessionid}/state/team/<team>/tasks/task-1.json`
 4. shutdown outcome (`phase=complete`, worker status `stopped`) when the run is terminal; incomplete shutdowns must report `phase=cancelled`/`failed`, and integration-blocked shutdowns must report `phase=awaiting_integration`
 
 Do not claim success without file/pane evidence.
@@ -399,13 +405,13 @@ Use the `skc team ...` CLI as the supported team-launch surface. For automation,
 ### Supported current surfaces
 
 - **`skc team ...` CLI** — Primary method for interactive or automated team orchestration. Use this when you want direct tmux-pane visibility or a scriptable launch path.
-- **Team state files** — Inspect `.skc/state/team/<team>/` when you need status, task, or mailbox evidence after launch.
+- **Team state files** — Inspect `.skc/_session-{sessionid}/state/team/<team>/` when you need status, task, or mailbox evidence after launch.
 
 ### Cleanup distinction
 
 Two cleanup paths exist and must not be confused:
 
-- `team_cleanup` (**state-server**): Deletes team state **files** on disk (`.skc/state/team/<team>/`). Use after a team run is fully complete.
+- `team_cleanup` (**state-server**): Deletes team state **files** on disk (`.skc/_session-{sessionid}/state/team/<team>/`). Use after a team run is fully complete.
 - tmux/session cleanup: Use the documented `skc team` shutdown / cleanup flow when you need to stop the worker pane or clean up an interrupted run.
 
 ### Automation example
@@ -439,4 +445,4 @@ When the team task-set completes OR the user requests return to planning/persist
 skc state team write --input '{"current_phase":"handoff"}' --json
 ```
 
-The skill tool then dispatches `/skill:ralplan`, `/skill:deep-interview`, or `/skill:ultragoal` same-turn and runs `skc state team handoff --to <ralplan|deep-interview|ultragoal> --json` in-process to atomically demote team, promote the callee, and sync both `skill-active-state.json` files. You do not need to run the handoff verb yourself.
+The skill tool then dispatches `/skill:ralplan`, `/skill:deep-interview`, or `/skill:ultragoal` same-turn and runs `skc state team handoff --to <ralplan|deep-interview|ultragoal> --json` in-process to atomically demote team, promote the callee, and sync both `.skc/_session-{sessionid}/state/skill-active-state.json` files. You do not need to run the handoff verb yourself.

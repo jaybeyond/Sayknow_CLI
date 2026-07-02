@@ -173,6 +173,7 @@ export async function migrateAndPersistLegacyState(
 			verb: "migrate",
 			owner: "skc-state-cli",
 			category: "state",
+			sessionId: args.sessionId,
 		},
 	});
 	return { migrated: true, path: persistedPath };

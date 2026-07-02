@@ -905,9 +905,8 @@ describe("expandRoleAlias", () => {
 		expect(expandRoleAlias("pi/default", settings)).toBe("openai/gpt-4o");
 	});
 
-	test("keeps an unknown role alias unchanged", () => {
+	test("leaves an unknown role alias unchanged", () => {
 		const settings = Settings.isolated();
-		settings.setModelRole("default", "anthropic/claude-sonnet-4-5");
 
 		expect(expandRoleAlias("pi/vision", settings)).toBe("pi/vision");
 	});

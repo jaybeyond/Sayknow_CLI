@@ -4,6 +4,62 @@ Sayknow-CLI is a rebranded fork of [gajae-code](https://github.com/Yeachan-Heo/g
 This file tracks the **fork's own releases**; upstream's full feature history lives
 in that project. Each release notes the upstream version it is built on.
 
+## [0.3.0] — 2026-06-23
+
+### Changed
+
+- Synced onto upstream **gajae-code v0.7.1** (from v0.6.5), bringing 0.7.0's mobile
+  notifications SDK + managed Telegram daemon and 0.7.1's fixes (assistant
+  notification lead-in, stale tmux session reuse, packaged native imports, and the
+  glm-zcode Z.AI provider) while preserving the Sayknow-CLI brand.
+
+### Added
+
+- **Decepticon red-team integration.** Vendored [Decepticon](https://github.com/PurpleAILAB/Decepticon)
+  as a git submodule (`vendor/decepticon`) plus `python/decepticon-bridge` — an
+  `skc-rpc` host-tool bridge that exposes Decepticon's red-team agents to skc
+  (`decepticon_run_agent` / `decepticon_list_agents`).
+- **Ponytail default rule.** Bundled the ponytail "lazy senior dev" ruleset as an
+  always-on default rule: pick the simplest working solution first (YAGNI, reuse,
+  stdlib/native first) without ever cutting validation, error handling, security,
+  or accessibility. Adapted from [ponytail](https://github.com/DietrichGebert/ponytail) (MIT).
+
+## [0.2.7] — 2026-06-23
+
+### Added
+
+- **Plugin install security scan (advisory).** Newly installed plugins/skills are now
+  statically scanned before activation for risky patterns — `curl|bash` download-and-exec,
+  `eval`/dynamic import, credential/secret access, obfuscation, cron persistence, and
+  package-install markers — with risk scoring. Findings surface as warnings in the install
+  output and in `plugin doctor`. Controlled by `plugins.security.scanMode`
+  (`warn` = default, `off`, `block`) and `plugins.security.riskThreshold`. Warn-only by
+  default — it never blocks an install unless you opt into `block` mode.
+
+## [0.2.6] — 2026-06-22
+
+### Fixed
+
+- The welcome screen's "Updated to vX" line now reflects the running release.
+  0.2.5 shipped without its own changelog entry, so a fresh launch reported
+  "Updated to v0.2.4"; every release now carries a matching entry.
+
+## [0.2.5] — 2026-06-22
+
+### Changed
+
+- Synced onto upstream **gajae-code v0.6.5** (from v0.6.0), bringing its latest
+  features and fixes while preserving the Sayknow-CLI brand. The new welcome
+  logo-mode support renders the blue **SAYKNOW** wordmark in every mode.
+
+### Fixed
+
+- Hardened shutdown against terminal/volume I/O errors: an asynchronous EIO/EPIPE
+  stdout write failure during teardown (controlling terminal hang-up or a stalled
+  external volume) is now swallowed instead of crashing the process into a
+  "[Process exited] — press any key to restart" loop.
+- Regenerated the bundled config JSON schema so it matches the v0.6.5 settings.
+
 ## [0.2.4] — 2026-06-19
 
 ### Added

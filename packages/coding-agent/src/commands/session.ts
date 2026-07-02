@@ -2,6 +2,7 @@ import { Args, Command, Flags } from "@sayknow-cli/utils/cli";
 import {
 	attachSkcTmuxSession,
 	createSkcTmuxSession,
+	forceCloseSkcTmuxSession,
 	listSkcTmuxSessions,
 	removeSkcTmuxSession,
 	statusSkcTmuxSession,
@@ -60,6 +61,12 @@ export default class Session extends Command {
 
 	static flags = {
 		json: Flags.boolean({ char: "j", description: "Emit machine-readable JSON", default: false }),
+		"session-id": Flags.string({
+			description: "Expected @skc-session-id tag for force-close (defense-in-depth match)",
+		}),
+		"state-file": Flags.string({
+			description: "Expected @skc-session-state-file tag for force-close (defense-in-depth match)",
+		}),
 	};
 
 	static examples = [
@@ -68,6 +75,7 @@ export default class Session extends Command {
 		"skc session status <session>",
 		"skc session attach <session>",
 		"skc session remove <session>",
+		"skc session force-close <session> --session-id <id>",
 	];
 
 	async run(): Promise<void> {
@@ -133,6 +141,16 @@ export default class Session extends Command {
 					return;
 				}
 				writeText([`removed: ${removed.name}`]);
+				return;
+			}
+
+			if (action === "force-close" || action === "force-remove") {
+				const closed = forceCloseSkcTmuxSession(sessionName, process.env, flags["session-id"], flags["state-file"]);
+				if (json) {
+					writeJson({ ok: true, session: sessionJson(closed) });
+					return;
+				}
+				writeText([`force-closed: ${closed.name}`]);
 				return;
 			}
 

@@ -12,31 +12,18 @@ function extractEmbeddedAgentFileNames(source: string): string[] {
 }
 
 describe("SKC bundled task agent surface", () => {
-	it("ships four visible role agents plus retained hidden support agents", async () => {
+	it("ships exactly the four canonical role agents", async () => {
 		const source = await Bun.file(agentsEntry).text();
-		expect(extractEmbeddedAgentFileNames(source)).toEqual([
-			"architect.md",
-			"critic.md",
-			"executor.md",
-			"explore.md",
-			"plan.md",
-			"planner.md",
-			"reviewer.md",
-			"task.md",
-		]);
+		expect(extractEmbeddedAgentFileNames(source)).toEqual(["architect.md", "critic.md", "executor.md", "planner.md"]);
 
 		const promptFiles = Array.from(new Bun.Glob("*.md").scanSync({ cwd: promptsDir })).sort();
 		expect(promptFiles).toEqual([
 			"architect.md",
 			"critic.md",
 			"executor.md",
-			"explore.md",
 			"frontmatter.md",
 			"init.md",
-			"plan.md",
 			"planner.md",
-			"reviewer.md",
-			"task.md",
 		]);
 	});
 });

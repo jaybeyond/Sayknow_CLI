@@ -1,16 +1,23 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { deflateSync } from "node:zlib";
-
+import { sessionUltragoalDir } from "@sayknow-cli/coding-agent/skc-runtime/session-layout";
 import {
 	createUltragoalPlan,
 	runNativeUltragoalCommand,
 	startNextUltragoalGoal,
 } from "@sayknow-cli/coding-agent/skc-runtime/ultragoal-runtime";
 
+const TEST_SESSION_ID = "test-session";
 const tempRoots: string[] = [];
+let savedSessionId: string | undefined;
+
+beforeAll(() => {
+	savedSessionId = process.env.SKC_SESSION_ID;
+	process.env.SKC_SESSION_ID = TEST_SESSION_ID;
+});
 
 async function tempDir(): Promise<string> {
 	const root = await fs.mkdtemp(path.join(os.tmpdir(), "skc-computer-red-team-"));
@@ -19,7 +26,13 @@ async function tempDir(): Promise<string> {
 }
 
 afterEach(async () => {
+	process.env.SKC_SESSION_ID = TEST_SESSION_ID;
 	await Promise.all(tempRoots.splice(0).map(dir => fs.rm(dir, { recursive: true, force: true })));
+});
+
+afterAll(() => {
+	if (savedSessionId === undefined) delete process.env.SKC_SESSION_ID;
+	else process.env.SKC_SESSION_ID = savedSessionId;
 });
 
 async function runGit(cwd: string, args: string[]): Promise<void> {
@@ -92,7 +105,11 @@ async function seedPlan(root: string): Promise<void> {
 		cwd: root,
 		brief: "@goal computer gate fixture",
 	});
-	await runGit(root, ["add", ".skc/ultragoal/goals.json", ".skc/ultragoal/ledger.jsonl"]);
+	await runGit(root, [
+		"add",
+		path.relative(root, path.join(sessionUltragoalDir(root, TEST_SESSION_ID), "goals.json")),
+		path.relative(root, path.join(sessionUltragoalDir(root, TEST_SESSION_ID), "ledger.jsonl")),
+	]);
 	await runGit(root, ["commit", "-m", "plan"]);
 	activeObjective = created.skcObjective;
 	await startNextUltragoalGoal({ cwd: root });

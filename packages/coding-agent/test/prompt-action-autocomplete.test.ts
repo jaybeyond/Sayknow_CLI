@@ -25,9 +25,12 @@ describe("prompt action autocomplete", () => {
 			keybindings: AppKeybindingsManager.inMemory({
 				"app.clipboard.copyLine": "ctrl+shift+l",
 				"app.clipboard.copyPrompt": ["alt+shift+c", "ctrl+shift+c"],
+				"app.clipboard.pasteImage": "ctrl+i",
 			}),
 			copyCurrentLine: () => {},
 			copyPrompt: () => {},
+			pasteImage: () => {},
+			scrollTmuxToPreviousUserInput: () => {},
 			undo: () => {},
 			moveCursorToMessageEnd: () => {},
 			moveCursorToMessageStart: () => {},
@@ -41,6 +44,8 @@ describe("prompt action autocomplete", () => {
 		expect(suggestions?.items.map(item => item.label)).toEqual([
 			"Copy current line",
 			"Copy whole prompt",
+			"Paste image from clipboard",
+			"Scroll to previous user input",
 			"Undo",
 			"Move cursor to end of message",
 			"Move cursor to beginning of message",
@@ -51,6 +56,7 @@ describe("prompt action autocomplete", () => {
 		expect(suggestions?.items.find(item => item.label === "Copy whole prompt")?.description).toBe(
 			"Alt+Shift+C/Ctrl+Shift+C",
 		);
+		expect(suggestions?.items.find(item => item.label === "Paste image from clipboard")?.description).toBe("Ctrl+I");
 		expect(suggestions?.items.find(item => item.label === "Move cursor to beginning of line")?.description).toBe(
 			"Home/F6",
 		);
@@ -67,6 +73,8 @@ describe("prompt action autocomplete", () => {
 			keybindings: AppKeybindingsManager.inMemory(),
 			copyCurrentLine: () => {},
 			copyPrompt: () => {},
+			pasteImage: () => {},
+			scrollTmuxToPreviousUserInput: () => {},
 			undo: prefix => {
 				undoCalls += 1;
 				undoPrefix = prefix;
@@ -93,6 +101,76 @@ describe("prompt action autocomplete", () => {
 		expect(undoPrefix).toBe("#undo");
 	});
 
+	it("runs image paste from the prompt action menu", async () => {
+		let pasteCalls = 0;
+		const provider = createPromptActionAutocompleteProvider({
+			commands: [],
+			basePath: "/tmp",
+			keybindings: AppKeybindingsManager.inMemory({
+				"app.clipboard.pasteImage": "ctrl+i",
+			}),
+			copyCurrentLine: () => {},
+			copyPrompt: () => {},
+			pasteImage: () => {
+				pasteCalls += 1;
+			},
+			scrollTmuxToPreviousUserInput: () => {},
+			undo: () => {},
+			moveCursorToMessageEnd: () => {},
+			moveCursorToMessageStart: () => {},
+			moveCursorToLineStart: () => {},
+			moveCursorToLineEnd: () => {},
+		});
+
+		const suggestions = await provider.getSuggestions(["please #paste-image"], 0, 19);
+		const item = suggestions?.items.find(entry => entry.label === "Paste image from clipboard");
+		expect(item).toBeDefined();
+		if (!item || !suggestions) {
+			throw new Error("expected paste image suggestion");
+		}
+
+		const result = provider.applyCompletion(["please #paste-image"], 0, 19, item, suggestions.prefix);
+		expect(result.lines).toEqual(["please "]);
+		expect(result.cursorLine).toBe(0);
+		expect(result.cursorCol).toBe(7);
+		result.onApplied?.();
+		expect(pasteCalls).toBe(1);
+	});
+
+	it("runs tmux previous-user-input scroll from the prompt action menu", async () => {
+		let scrollCalls = 0;
+		const provider = createPromptActionAutocompleteProvider({
+			commands: [],
+			basePath: "/tmp",
+			keybindings: AppKeybindingsManager.inMemory(),
+			copyCurrentLine: () => {},
+			copyPrompt: () => {},
+			pasteImage: () => {},
+			scrollTmuxToPreviousUserInput: () => {
+				scrollCalls += 1;
+			},
+			undo: () => {},
+			moveCursorToMessageEnd: () => {},
+			moveCursorToMessageStart: () => {},
+			moveCursorToLineStart: () => {},
+			moveCursorToLineEnd: () => {},
+		});
+
+		const suggestions = await provider.getSuggestions(["please #prev"], 0, 12);
+		const item = suggestions?.items.find(entry => entry.label === "Scroll to previous user input");
+		expect(item).toBeDefined();
+		if (!item || !suggestions) {
+			throw new Error("expected tmux previous-user-input suggestion");
+		}
+
+		const result = provider.applyCompletion(["please #prev"], 0, 12, item, suggestions.prefix);
+		expect(result.lines).toEqual(["please "]);
+		expect(result.cursorLine).toBe(0);
+		expect(result.cursorCol).toBe(7);
+		result.onApplied?.();
+		expect(scrollCalls).toBe(1);
+	});
+
 	it("falls back to normal typing for literal hashtags with no matching action", async () => {
 		const provider = createPromptActionAutocompleteProvider({
 			commands: [],
@@ -100,6 +178,8 @@ describe("prompt action autocomplete", () => {
 			keybindings: AppKeybindingsManager.inMemory(),
 			copyCurrentLine: () => {},
 			copyPrompt: () => {},
+			pasteImage: () => {},
+			scrollTmuxToPreviousUserInput: () => {},
 			undo: () => {},
 			moveCursorToMessageEnd: () => {},
 			moveCursorToMessageStart: () => {},
@@ -118,6 +198,8 @@ describe("prompt action autocomplete", () => {
 			keybindings: AppKeybindingsManager.inMemory(),
 			copyCurrentLine: () => {},
 			copyPrompt: () => {},
+			pasteImage: () => {},
+			scrollTmuxToPreviousUserInput: () => {},
 			undo: () => {},
 			moveCursorToMessageEnd: () => {},
 			moveCursorToMessageStart: () => {},
@@ -137,6 +219,8 @@ describe("prompt action autocomplete", () => {
 			keybindings: AppKeybindingsManager.inMemory(),
 			copyCurrentLine: () => {},
 			copyPrompt: () => {},
+			pasteImage: () => {},
+			scrollTmuxToPreviousUserInput: () => {},
 			undo: () => {},
 			moveCursorToMessageEnd: () => {},
 			moveCursorToMessageStart: () => {},

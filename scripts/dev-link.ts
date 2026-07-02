@@ -176,10 +176,19 @@ function link(): never {
 		console.warn(`    export PATH="${targetDir}:$PATH"`);
 	}
 
+	// The repo's own `node_modules/.bin/skc` is recreated by every `bun install`
+	// and sits earlier on PATH, so remove it automatically instead of nagging.
+	const repoBinShadow = path.join(repoRoot, "node_modules", ".bin", "skc");
+
 	// Warn about any drifted `skc` that shadows the link (earlier on PATH).
 	for (const hit of findSkcOnPath()) {
 		if (hit.file === target) break; // our link wins from here on
 		if (hit.real === cliSourceReal) continue; // another correct source link — harmless
+		if (realpath(hit.file) === realpath(repoBinShadow) || hit.file === repoBinShadow) {
+			fs.rmSync(hit.file, { force: true });
+			console.log(`✓ Removed in-repo shadow: ${hit.file}`);
+			continue;
+		}
 		console.warn("");
 		console.warn(`! A different \`skc\` shadows the dev link (earlier on PATH): ${hit.file}`);
 		console.warn(`    -> ${describe(hit.real)}`);

@@ -1,4 +1,4 @@
-import { enrichModelThinking } from "./model-thinking";
+import { applyGeneratedModelPolicies, enrichModelThinking } from "./model-thinking";
 import MODELS from "./models.json" with { type: "json" };
 import type { Api, KnownProvider, Model, Usage } from "./types";
 import { isClaudeForcedToolChoiceIncapableModelId } from "./utils/tool-choice-capability";
@@ -33,14 +33,23 @@ function getProviderModels(provider: GeneratedProvider): Map<string, Model<Api>>
  * Mythos rejecting forced tool use) without a full regeneration.
  */
 function applyBundledCompatDefaults(model: Model<Api>): Model<Api> {
-	if (
-		(model.api === "anthropic-messages" || model.api === "bedrock-converse-stream") &&
-		isClaudeForcedToolChoiceIncapableModelId(model.id) &&
-		(model.compat as { toolChoiceSupport?: string } | undefined)?.toolChoiceSupport === undefined
-	) {
-		return { ...model, compat: { ...(model.compat ?? {}), toolChoiceSupport: "auto" } as Model<Api>["compat"] };
+	let normalized = model;
+	if (normalized.id === "minimax-m3" && normalized.name === "MiniMax M3") {
+		normalized = { ...normalized, name: "MiniMax-M3" };
 	}
-	return model;
+	if (
+		(normalized.api === "anthropic-messages" || normalized.api === "bedrock-converse-stream") &&
+		isClaudeForcedToolChoiceIncapableModelId(normalized.id) &&
+		(normalized.compat as { toolChoiceSupport?: string } | undefined)?.toolChoiceSupport === undefined
+	) {
+		return {
+			...normalized,
+			compat: { ...(normalized.compat ?? {}), toolChoiceSupport: "auto" } as Model<Api>["compat"],
+		};
+	}
+	const policyModels = [normalized];
+	applyGeneratedModelPolicies(policyModels);
+	return policyModels[0] ?? normalized;
 }
 
 export type GeneratedProvider = keyof typeof MODELS;

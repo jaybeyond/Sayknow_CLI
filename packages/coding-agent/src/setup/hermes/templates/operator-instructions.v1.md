@@ -15,6 +15,16 @@ These instructions teach a Hermes-style coordinator how to operate SKC through t
 6. Use `{{TOOL_PREFIX}}_report_status` for coordinator-visible status and final reports.
 7. Use `{{TOOL_PREFIX}}_read_tail` only as advisory debug output when structured turn state is insufficient.
 
+## Prefer high-level delegation
+
+When the goal is to hand SKC a whole workflow rather than micro-manage one prompt, prefer the first-class delegate tools over manual `{{TOOL_PREFIX}}_start_session` + `{{TOOL_PREFIX}}_send_prompt` sequencing:
+
+- `skc_delegate_plan` — run consensus planning (`/skill:ralplan`) to a pending-approval plan.
+- `skc_delegate_execute` — run execution (`/skill:ultragoal`) to completion with verification.
+- `skc_delegate_team` — run parallel team execution (`/skill:team`) with internal tmux workers.
+
+Each delegate starts (or reuses) a session, sends one workflow-tagged turn, and returns a durable `turn_id`. Pass `cwd` and `task`; set `allow_mutation: true` only when the bridge startup mutation class is enabled and the user has approved changes. Poll the returned `turn_id` with `{{TOOL_PREFIX}}_await_turn` or watch for the `delegation.started` event, exactly as with `send_prompt`. Drop to the manual start/send tools only for fine-grained control the delegate tools do not cover.
+
 ## Event watch
 
 `{{TOOL_PREFIX}}_watch_events` is a bounded long-poll read tool. Call it with `after_seq` set to the last stored sequence number, optional `session_id` or `event_types`, `timeout_ms` up to 30000, and `limit` up to 100. Store the returned `latest_seq` before the next wait. A timeout with no events is not failure; call again or use the turn/status read tools for a snapshot.
@@ -28,6 +38,14 @@ Coordinator MCP is a durable polling/await bridge, not a push subscription strea
 The Hermes bridge does not choose a model/provider. Generated setup configures `SKC_COORDINATOR_MCP_SESSION_COMMAND` to `skc --worktree` by default, so SKC creates and tracks the worktree while still using normal local model/provider resolution. Keep worktree creation inside SKC rather than creating unmanaged Hermes-side git worktrees; this preserves the original project identity for session listing and resume. If the operator config supplies a different `SKC_COORDINATOR_MCP_SESSION_COMMAND`, preserve it as explicit user intent.
 
 Provider-specific commands are examples only, never product defaults.
+
+## Visible routed-session fallback
+
+If a Hermes/OpenClaw/Clawhip-style operator needs a human-visible, channel-routed SKC pane instead of a pure Coordinator MCP session, use the visible session pattern in [`docs/skc-session-clawhip-routing.md`](../../../../../../docs/skc-session-clawhip-routing.md).
+
+Use that pattern only when the router must watch tmux output, send stale-session alerts, or inject follow-up prompts into the same visible pane. The short version is: prepare a dedicated worktree, register a stable tmux session through the host router, start interactive `skc`, wait for TUI readiness, inject the task prompt separately, and verify actual tool/work activity before reporting acceptance.
+
+Do not put private channel ids, mention targets, socket names, tokens, or local routing policy into portable setup output. Keep those in the host/operator deployment.
 
 ## Safety
 

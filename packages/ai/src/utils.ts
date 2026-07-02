@@ -91,6 +91,92 @@ export function sanitizeOpenAIResponsesHistoryItemsForReplay(items: Array<Record
 		return sanitized ? [sanitized] : [];
 	});
 }
+function stringifyResponsesStringParamForReplay(value: unknown): string {
+	if (typeof value === "string") return value.toWellFormed();
+	try {
+		const encoded = JSON.stringify(value);
+		if (typeof encoded === "string") return encoded.toWellFormed();
+	} catch {
+		// Fall through to String().
+	}
+	return String(value ?? "").toWellFormed();
+}
+
+function normalizeResponsesMessageTextForReplay(value: unknown): string {
+	if (typeof value === "string") return value.toWellFormed();
+	if (value && typeof value === "object") {
+		const nestedText = (value as { text?: unknown }).text;
+		if (typeof nestedText === "string") return nestedText.toWellFormed();
+	}
+	return stringifyResponsesStringParamForReplay(value);
+}
+
+type ResponsesImageDetail = "auto" | "low" | "high";
+
+interface NormalizedResponsesImageUrl {
+	readonly imageUrl: string;
+	readonly detail?: ResponsesImageDetail;
+}
+
+function isResponsesImageDetail(value: unknown): value is ResponsesImageDetail {
+	return value === "auto" || value === "low" || value === "high";
+}
+
+function normalizeResponsesImageUrlForReplay(value: unknown): NormalizedResponsesImageUrl {
+	if (typeof value === "string") return { imageUrl: value.toWellFormed() };
+	if (value && typeof value === "object" && "url" in value && typeof value.url === "string") {
+		const detail = "detail" in value && isResponsesImageDetail(value.detail) ? value.detail : undefined;
+		return {
+			imageUrl: value.url.toWellFormed(),
+			...(detail ? { detail } : {}),
+		};
+	}
+	return { imageUrl: stringifyResponsesStringParamForReplay(value) };
+}
+
+function sanitizeResponsesMessageContentForReplay(content: unknown): unknown {
+	if (typeof content === "string") return content.toWellFormed();
+	if (!Array.isArray(content)) return content;
+	return content.map(part => {
+		if (!part || typeof part !== "object") return part;
+		const sanitizedPart = { ...(part as Record<string, unknown>) };
+		if ("text" in sanitizedPart) {
+			sanitizedPart.text = normalizeResponsesMessageTextForReplay(sanitizedPart.text);
+		}
+		if ("image_url" in sanitizedPart) {
+			const normalizedImageUrl = normalizeResponsesImageUrlForReplay(sanitizedPart.image_url);
+			sanitizedPart.image_url = normalizedImageUrl.imageUrl;
+			if (sanitizedPart.type === "image_url") {
+				sanitizedPart.type = "input_image";
+			}
+			if (normalizedImageUrl.detail) {
+				sanitizedPart.detail = normalizedImageUrl.detail;
+			} else if ("detail" in sanitizedPart && !isResponsesImageDetail(sanitizedPart.detail)) {
+				delete sanitizedPart.detail;
+			}
+		}
+		return sanitizedPart;
+	});
+}
+
+function sanitizeResponsesStringFieldsForReplay(item: Record<string, unknown>): void {
+	if (item.type === "message") {
+		item.content = sanitizeResponsesMessageContentForReplay(item.content);
+	}
+	if (item.type === "function_call" && "arguments" in item && typeof item.arguments !== "string") {
+		item.arguments = stringifyResponsesStringParamForReplay(item.arguments);
+	}
+	if (item.type === "custom_tool_call" && "input" in item && typeof item.input !== "string") {
+		item.input = stringifyResponsesStringParamForReplay(item.input);
+	}
+	if (
+		(item.type === "function_call_output" || item.type === "custom_tool_call_output") &&
+		"output" in item &&
+		typeof item.output !== "string"
+	) {
+		item.output = stringifyResponsesStringParamForReplay(item.output);
+	}
+}
 
 function sanitizeOpenAIResponsesHistoryItemForReplay(
 	item: Record<string, unknown>,
@@ -98,13 +184,23 @@ function sanitizeOpenAIResponsesHistoryItemForReplay(
 ): OpenAIResponsesReplayItem | undefined {
 	if (item.type === "item_reference") return undefined;
 
-	// providerPayload stores raw output items; replay strips item ids and keeps only normalized call_id.
-	const { id: _id, ...sanitizedItem } = item;
+	// providerPayload stores raw output items; replay strips fields that are output-only.
+	const { id: _id, ...itemWithoutId } = item;
+	const sanitizedItem =
+		item.type === "computer_call" ? sanitizeComputerCallForResponsesInput(itemWithoutId) : itemWithoutId;
 	if (typeof item.call_id === "string") {
 		sanitizedItem.call_id = normalizeReplayedResponsesHistoryCallId(item.call_id, normalizedCallIds);
 	}
+	sanitizeResponsesStringFieldsForReplay(sanitizedItem);
 
 	return sanitizedItem as unknown as OpenAIResponsesReplayItem;
+}
+
+function sanitizeComputerCallForResponsesInput(item: Record<string, unknown>): Record<string, unknown> {
+	// The Responses stream includes the performed computer action on output items,
+	// but the create input accepts only the call identity/status fields on replay.
+	const { action: _action, actions: _actions, ...inputSafeItem } = item;
+	return inputSafeItem;
 }
 
 function normalizeReplayedResponsesHistoryCallId(value: string, normalizedValues: Map<string, string>): string {

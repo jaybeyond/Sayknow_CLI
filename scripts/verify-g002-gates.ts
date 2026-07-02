@@ -19,7 +19,6 @@ const ALLOWED_PUBLIC_PACKAGE_VERSIONS = new Map<string, string>();
 const ALLOWED_PRIVATE_PACKAGE_VERSIONS = new Map<string, string>([
 	["@sayknow-cli/orchestration-token-benchmark", "0.0.1"],
 	["@sayknow-cli/typescript-edit-benchmark", "0.0.1"],
-	["@sayknow-cli/telegram-remote", "0.0.1"],
 ]);
 const ALLOWED_UNSCOPED_PACKAGE_NAMES = new Set<string>(["sayknow-cli"]);
 const ALLOWED_PACKAGE_BINARIES = new Map<string, readonly string[]>([
@@ -27,7 +26,6 @@ const ALLOWED_PACKAGE_BINARIES = new Map<string, readonly string[]>([
 	["@sayknow-cli/coding-agent", ["skc"]],
 	["sayknow-cli", ["skc"]],
 	["@sayknow-cli/stats", ["skc-stats"]],
-	["@sayknow-cli/telegram-remote", ["skc-telegram-remote"]],
 	["@sayknow-cli/typescript-edit-benchmark", ["typescript-edit-benchmark"]],
 ]);
 const PUBLIC_DOC_FILES = ["README.md", "packages/coding-agent/README.md"] as const;

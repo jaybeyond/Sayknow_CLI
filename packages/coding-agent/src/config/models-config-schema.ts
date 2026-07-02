@@ -22,6 +22,7 @@ const ReasoningEffortMapSchema = z.object({
 export const OpenAICompatSchema = z.object({
 	supportsStore: z.boolean().optional(),
 	supportsDeveloperRole: z.boolean().optional(),
+	sendSessionHeaders: z.boolean().optional(),
 	supportsMultipleSystemMessages: z.boolean().optional(),
 	supportsReasoningEffort: z.boolean().optional(),
 	reasoningEffortMap: ReasoningEffortMapSchema.optional(),
@@ -192,6 +193,14 @@ export const ProviderDiscoverySchema = z.object({
 	type: z.enum(["ollama", "llama.cpp", "lm-studio", "openai-models-list"]),
 });
 
+const LocalOpenAICompatSchema = z
+	.object({
+		baseUrl: z.string().min(1),
+		apiKey: z.string().min(1).optional(),
+		apiKeyEnv: z.string().min(1).optional(),
+	})
+	.strict();
+
 export const ProviderAuthSchema = z.enum(["apiKey", "none", "oauth"]);
 
 export type ProviderAuthMode = z.infer<typeof ProviderAuthSchema>;
@@ -236,6 +245,7 @@ const ProviderConfigSchema = z
 		 */
 		transport: z.literal("pi-native").optional(),
 		cacheRetention: CacheRetentionSchema.optional(),
+		openaiCompat: LocalOpenAICompatSchema.optional(),
 	})
 	.strict();
 

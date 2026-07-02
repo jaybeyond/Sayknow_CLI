@@ -48,11 +48,12 @@ import {
 import type { AgentSession } from "./session/agent-session";
 import type { AuthStorage } from "./session/auth-storage";
 import { resolveResumableSession, type SessionInfo, SessionManager } from "./session/session-manager";
+import { runStartupCredentialAutoImportIfNeeded } from "./setup/credential-auto-import";
 import { formatModelOnboardingGuidance } from "./setup/model-onboarding-guidance";
 import { executeBuiltinSlashCommand } from "./slash-commands/builtin-registry";
 import { resolvePromptInput } from "./system-prompt";
 import type { LspStartupServerInfo } from "./tools";
-import { getDisplayChangelogEntries, getNewEntries } from "./utils/changelog";
+import { getDisplayChangelogEntries, getInstalledVersionChangelogEntry, getNewEntries } from "./utils/changelog";
 import type { EventBus } from "./utils/event-bus";
 
 async function checkForNewVersion(currentVersion: string): Promise<string | undefined> {
@@ -407,7 +408,7 @@ async function getChangelogForDisplay(parsed: Args): Promise<string | undefined>
 		if (entries.length > 0) {
 			settings.set("lastChangelogVersion", VERSION);
 			await flushChangelogVersion();
-			return entries.map(e => e.content).join("\n\n");
+			return getInstalledVersionChangelogEntry(entries, VERSION)?.content;
 		}
 	} else {
 		const newEntries = getNewEntries(entries, lastVersion);
@@ -429,7 +430,7 @@ async function flushChangelogVersion(): Promise<void> {
 	}
 }
 
-async function createSessionManager(
+export async function createSessionManager(
 	parsed: Args,
 	cwd: string,
 	activeSettings: Settings = settings,
@@ -481,6 +482,17 @@ async function createSessionManager(
 	// If --session-dir provided without --continue/--resume, create new session there
 	if (parsed.sessionDir) {
 		return SessionManager.create(cwd, parsed.sessionDir);
+	}
+	// A lifecycle `/session_create` child must start a FRESH session that adopts
+	// the pre-allocated id (SKC_SESSION_ID), never auto-resume existing history in
+	// the target cwd — otherwise the daemon/tmux id and the session header id
+	// diverge and close/resume-by-create-id break. Resume children are launched
+	// with `--resume <id>` (handled above) and carry no SKC_LIFECYCLE_REQUEST_ID.
+	if (
+		process.env.SKC_LIFECYCLE_REQUEST_ID &&
+		/^[A-Za-z0-9._-]{1,128}$/.test(process.env.SKC_SESSION_ID?.trim() ?? "")
+	) {
+		return undefined;
 	}
 	// Auto-resume: behave like --continue if the setting is enabled and a prior
 	// session exists. When a prior session is resumed, mark parsed.continue so
@@ -859,6 +871,14 @@ export async function runRootCommand(
 		settingsInstance.get("theme.light"),
 	);
 
+	const credentialAutoImportNotice = isInteractive
+		? await logger.time("credentialAutoImport", runStartupCredentialAutoImportIfNeeded, {
+				authStorage,
+				modelRegistry,
+				agentDir: settingsInstance.getAgentDir(),
+			})
+		: undefined;
+
 	let scopedModels: ScopedModel[] = [];
 	const modelPatterns = parsedArgs.models ?? settingsInstance.get("enabledModels");
 	const modelMatchPreferences = {
@@ -896,6 +916,24 @@ export async function runRootCommand(
 			return;
 		}
 		sessionManager = await SessionManager.open(selectedPath);
+	}
+
+	// Restore the resumed session's working directory so the HUD branch, the
+	// project path, and the agent's tools all match where the session was
+	// created. A `--worktree` session lives in a linked worktree whose path
+	// differs from where `--continue`/`--resume` is invoked, which would
+	// otherwise leave the HUD pinned to the main checkout's branch.
+	if (sessionManager && !parsedArgs.cwd) {
+		const sessionCwd = sessionManager.getCwd();
+		if (sessionCwd && normalizePathForComparison(sessionCwd) !== normalizePathForComparison(getProjectDir())) {
+			try {
+				if ((await fs.stat(sessionCwd)).isDirectory()) {
+					setProjectDir(sessionCwd);
+				}
+			} catch {
+				// Session cwd no longer exists (e.g. worktree removed); keep current dir.
+			}
+		}
 	}
 
 	const { options: sessionOptions } = await logger.time(
@@ -978,6 +1016,9 @@ export async function runRootCommand(
 		const modelRegistryError = modelRegistry.getError();
 		if (modelRegistryError) {
 			notifs.push({ kind: "error", message: modelRegistryError.message });
+		}
+		if (credentialAutoImportNotice) {
+			notifs.push({ kind: "info", message: credentialAutoImportNotice });
 		}
 
 		if (isInteractive && !session.model && !modelFallbackMessage) {

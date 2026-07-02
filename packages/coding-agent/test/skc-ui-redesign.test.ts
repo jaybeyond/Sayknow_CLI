@@ -51,11 +51,12 @@ describe("SKC red-octopus redesign defaults", () => {
 	it("exposes bundled selectable themes while preserving red-octopus and blue-octopus defaults", async () => {
 		const themes = await themeModule.getAvailableThemes();
 
-		expect(themes).toEqual(["blue-octopus", "claude-code", "codex", "opencode", "red-octopus"]);
+		expect(themes).toEqual(["blue-octopus", "claude-code", "codex", "gruvbox-dark", "opencode", "red-octopus"]);
 		expect(Object.keys(defaultThemes).sort()).toEqual([
 			"blue-octopus",
 			"claude-code",
 			"codex",
+			"gruvbox-dark",
 			"opencode",
 			"red-octopus",
 		]);

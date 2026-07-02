@@ -12,7 +12,6 @@ import { getConfigDirs } from "../../config";
 import { execCommand } from "../../exec/exec";
 import * as typebox from "../typebox";
 import { GreenCommand } from "./bundled/ci-green";
-import { ReviewCommand } from "./bundled/review";
 import type {
 	CustomCommand,
 	CustomCommandAPI,
@@ -153,12 +152,6 @@ function loadBundledCommands(sharedApi: CustomCommandAPI): LoadedCustomCommand[]
 		path: "bundled:green",
 		resolvedPath: "bundled:green",
 		command: new GreenCommand(sharedApi),
-		source: "bundled",
-	});
-	bundled.push({
-		path: "bundled:review",
-		resolvedPath: "bundled:review",
-		command: new ReviewCommand(sharedApi),
 		source: "bundled",
 	});
 

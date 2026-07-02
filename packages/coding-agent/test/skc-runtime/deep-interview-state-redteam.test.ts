@@ -1,4 +1,4 @@
-import { afterEach, beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -6,22 +6,30 @@ import {
 	appendOrMergeDeepInterviewRound,
 	enrichDeepInterviewRoundScoring,
 } from "@sayknow-cli/coding-agent/skc-runtime/deep-interview-recorder";
-import { deepInterviewStatePath } from "@sayknow-cli/coding-agent/skc-runtime/deep-interview-runtime";
 import {
 	mergeDeepInterviewEnvelope,
 	mergeDeepInterviewRounds,
 	normalizeDeepInterviewEnvelope,
 } from "@sayknow-cli/coding-agent/skc-runtime/deep-interview-state";
+import { activeSnapshotPath, modeStatePath } from "@sayknow-cli/coding-agent/skc-runtime/session-layout";
 import {
 	reconcileWorkflowSkillState,
 	runNativeStateCommand,
 } from "@sayknow-cli/coding-agent/skc-runtime/state-runtime";
 import { deriveDeepInterviewHud } from "@sayknow-cli/coding-agent/skill-state/workflow-hud";
 
+const TEST_SESSION_ID = "test-session";
 const tempRoots: string[] = [];
+let priorSessionId: string | undefined;
 
 beforeAll(() => {
-	delete process.env.SKC_SESSION_ID;
+	priorSessionId = process.env.SKC_SESSION_ID;
+	process.env.SKC_SESSION_ID = TEST_SESSION_ID;
+});
+
+afterAll(() => {
+	if (priorSessionId !== undefined) process.env.SKC_SESSION_ID = priorSessionId;
+	else delete process.env.SKC_SESSION_ID;
 });
 
 afterEach(async () => {
@@ -47,7 +55,7 @@ async function readJson(filePath: string): Promise<Record<string, unknown>> {
 }
 
 async function activeChips(cwd: string): Promise<Record<string, string | undefined>> {
-	const raw = JSON.parse(await fs.readFile(path.join(cwd, ".skc", "state", "skill-active-state.json"), "utf-8")) as {
+	const raw = JSON.parse(await fs.readFile(activeSnapshotPath(cwd, TEST_SESSION_ID), "utf-8")) as {
 		active_skills?: Array<{ skill: string; hud?: { chips?: Array<{ label: string; value?: string }> } }>;
 	};
 	const entry = (raw.active_skills ?? []).find(skill => skill.skill === "deep-interview");
@@ -188,15 +196,30 @@ describe("deep-interview redteam: idempotency and lossless shape normalization",
 describe("deep-interview redteam: writer and recorder integration", () => {
 	it("preserves all recorder rounds across multiple sequential partial state writes", async () => {
 		const cwd = await tempDir();
-		const statePath = deepInterviewStatePath(cwd, undefined);
-		await appendOrMergeDeepInterviewRound(cwd, statePath, { round: 1, questionId: "q1", questionText: "Q1?" });
-		await appendOrMergeDeepInterviewRound(cwd, statePath, { round: 2, questionId: "q2", questionText: "Q2?" });
-		await enrichDeepInterviewRoundScoring(cwd, statePath, {
-			round: 1,
-			questionId: "q1",
-			scores: { goal: 0.4 },
-			ambiguity: 0.61,
-		});
+		const statePath = modeStatePath(cwd, TEST_SESSION_ID, "deep-interview");
+		await appendOrMergeDeepInterviewRound(
+			cwd,
+			statePath,
+			{ round: 1, questionId: "q1", questionText: "Q1?" },
+			{ sessionId: TEST_SESSION_ID },
+		);
+		await appendOrMergeDeepInterviewRound(
+			cwd,
+			statePath,
+			{ round: 2, questionId: "q2", questionText: "Q2?" },
+			{ sessionId: TEST_SESSION_ID },
+		);
+		await enrichDeepInterviewRoundScoring(
+			cwd,
+			statePath,
+			{
+				round: 1,
+				questionId: "q1",
+				scores: { goal: 0.4 },
+				ambiguity: 0.61,
+			},
+			{ sessionId: TEST_SESSION_ID },
+		);
 
 		const writes = [
 			{ state: { current_ambiguity: 0.51, topology: { last_targeted_component_id: "api" } } },
@@ -233,7 +256,7 @@ describe("deep-interview redteam: writer and recorder integration", () => {
 
 	it("fails closed on corrupt or tampered on-disk state for state write and recorder mutation", async () => {
 		const cwd = await tempDir();
-		const statePath = deepInterviewStatePath(cwd, undefined);
+		const statePath = modeStatePath(cwd, TEST_SESSION_ID, "deep-interview");
 		await fs.mkdir(path.dirname(statePath), { recursive: true });
 		const corruptBytes = "{ definitely-not-json";
 		await fs.writeFile(statePath, corruptBytes, "utf-8");
@@ -369,7 +392,7 @@ describe("deep-interview redteam: reconcile and state write HUD parity", () => {
 			await reconcileWorkflowSkillState({
 				cwd: reconcileCwd,
 				mode: "deep-interview",
-				sessionId: undefined,
+				sessionId: TEST_SESSION_ID,
 				active: payload.current_phase !== "complete",
 				phase: payload.current_phase,
 				payload,

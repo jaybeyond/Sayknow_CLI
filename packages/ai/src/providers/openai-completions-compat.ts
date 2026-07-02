@@ -103,6 +103,7 @@ export function detectOpenAICompat(model: Model<"openai-completions">, resolvedB
 		provider === "opencode-go" ||
 		baseUrl.includes("opencode.ai");
 	const isOpenCodeProvider = provider === "opencode-go" || provider === "opencode-zen";
+	const isOpenCodeGoReasoning = provider === "opencode-go" && Boolean(model.reasoning);
 
 	const useMaxTokens =
 		provider === "mistral" ||
@@ -189,11 +190,12 @@ export function detectOpenAICompat(model: Model<"openai-completions">, resolvedB
 	return {
 		supportsStore: !isNonStandard,
 		supportsDeveloperRole: !isNonStandard,
+		sendSessionHeaders: false,
 		supportsMultipleSystemMessages: supportsMultipleSystemMessagesDefault,
 		supportsReasoningEffort: !isGrok && !isZai,
 		reasoningEffortMap,
 		supportsUsageInStreaming: !isCerebras,
-		disableReasoningOnForcedToolChoice: isKimiModel || isAnthropicModel,
+		disableReasoningOnForcedToolChoice: isKimiModel || isAnthropicModel || isOpenCodeGoReasoning,
 		disableReasoningOnToolChoice: isDeepseekFamily && Boolean(model.reasoning) && !isOpenRouter,
 		supportsToolChoice: !isDirectDeepseekReasoning,
 		supportsForcedToolChoice: true,
@@ -254,6 +256,7 @@ export function resolveOpenAICompat(
 	return {
 		supportsStore: model.compat.supportsStore ?? detected.supportsStore,
 		supportsDeveloperRole: model.compat.supportsDeveloperRole ?? detected.supportsDeveloperRole,
+		sendSessionHeaders: model.compat.sendSessionHeaders ?? detected.sendSessionHeaders,
 		supportsMultipleSystemMessages:
 			model.compat.supportsMultipleSystemMessages ?? detected.supportsMultipleSystemMessages,
 		supportsReasoningEffort: model.compat.supportsReasoningEffort ?? detected.supportsReasoningEffort,

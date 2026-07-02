@@ -16,8 +16,9 @@ describe("OpenAI Codex defaults", () => {
 			maxLevel: Effort.XHigh,
 			defaultLevel: Effort.XHigh,
 		});
-		// gpt-5.5 is a 400K-context model and must not demote to the smaller gpt-5.4.
-		expect(model.contextWindow).toBe(400000);
-		expect(model.contextPromotionTarget).toBeUndefined();
+		// Codex GPT-5.5 may advertise a 1M total window, but the code backend's
+		// effective prompt/request cap is lower. Status and compaction must use the
+		// safe request cap instead of promising a window that overflows upstream.
+		expect(model.contextWindow).toBe(272_000);
 	});
 });

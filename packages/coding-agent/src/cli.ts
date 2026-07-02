@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 
 /**
- * CLI entry point â registers all commands explicitly and delegates to the
+ * CLI entry point — registers all commands explicitly and delegates to the
  * lightweight CLI runner from pi-utils.
  */
 import { Args, type CliConfig, Command, type CommandEntry, Flags, run } from "@sayknow-cli/utils/cli";
@@ -22,7 +22,7 @@ process.title = APP_NAME;
 const rootHelpFlags = ["--help", "-h", "help"];
 const versionFlags = ["--version", "-v"];
 
-const commands: CommandEntry[] = [
+export const commands: CommandEntry[] = [
 	{ name: "codex-native-hook", load: () => import("./commands/codex-native-hook").then(m => m.default) },
 	{ name: "state", load: () => import("./commands/state").then(m => m.default) },
 	{ name: "setup", load: () => import("./commands/setup").then(m => m.default) },
@@ -35,16 +35,22 @@ const commands: CommandEntry[] = [
 	{ name: "gc", load: () => import("./commands/gc").then(m => m.default) },
 	{ name: "ralplan", load: () => import("./commands/ralplan").then(m => m.default) },
 	{ name: "config", load: () => import("./commands/config").then(m => m.default) },
+	{ name: "notify", load: () => import("./commands/notify").then(m => m.default) },
+	{ name: "daemon", load: () => import("./commands/daemon").then(m => m.default) },
 	{ name: "web-search", aliases: ["q"], load: () => import("./commands/web-search").then(m => m.default) },
+	{ name: "local-provider", load: () => import("./commands/local-provider").then(m => m.default) },
 	{ name: "mcp-serve", load: () => import("./commands/mcp-serve").then(m => m.default) },
+	{ name: "mcp", load: () => import("./commands/mcp").then(m => m.default) },
 	{
 		name: "contribute-pr",
 		aliases: ["contribution-prep"],
 		load: () => import("./commands/contribution-prep").then(m => m.default),
 	},
 	{ name: "deep-interview", load: () => import("./commands/deep-interview").then(m => m.default) },
+	{ name: "migrate", load: () => import("./commands/migrate").then(m => m.default) },
 	{ name: "rlm", load: () => import("./commands/rlm").then(m => m.default) },
 	{ name: "update", load: () => import("./commands/update").then(m => m.default) },
+	{ name: "plugin", load: () => import("./commands/plugin").then(m => m.default) },
 	{ name: "launch", load: () => import("./commands/launch").then(m => m.default) },
 	{ name: "telegram", load: () => import("./commands/telegram").then(m => m.default) },
 ];
@@ -60,10 +66,7 @@ async function showHelp(config: CliConfig): Promise<void> {
 }
 
 async function installRuntimeGlobals(): Promise<void> {
-	const [{ installH2Fetch }, { procmgr }] = await Promise.all([
-		import("@sayknow-cli/ai"),
-		import("@sayknow-cli/utils"),
-	]);
+	const { installH2Fetch } = await import("@sayknow-cli/ai/utils/h2-fetch");
 	// Activate HTTP/2 for all `fetch()` calls (provider streams, OAuth, model
 	// discovery, web tools). Bun's HTTP/2 client is gated on a startup flag we
 	// can't toggle from JS, so we patch globalThis.fetch to pass
@@ -73,8 +76,38 @@ async function installRuntimeGlobals(): Promise<void> {
 
 	// Strip macOS malloc-stack-logging env vars before any subprocess is spawned.
 	// Otherwise every child bun process (subagents, plugin installs, ptree spawns,
-	// etc.) prints a `MallocStackLogging: can't turn off â¦` warning to stderr.
-	procmgr.scrubProcessEnv();
+	// etc.) prints a `MallocStackLogging: can't turn off …` warning to stderr.
+	delete process.env.MallocStackLogging;
+	delete process.env.MallocStackLoggingNoCompact;
+}
+
+function isNotifyDaemonInternalFastPath(argv: string[]): boolean {
+	return argv[0] === "notify" && argv[1] === "daemon-internal";
+}
+
+async function runNotifyDaemonInternalFastPath(argv: string[]): Promise<void> {
+	const { parseNotifyArgs, runNotifyCommand } = await import("./cli/notify-cli");
+	const cmd = parseNotifyArgs(argv);
+	if (cmd?.action !== "daemon-internal") {
+		throw new Error("invalid notify daemon-internal fast path");
+	}
+	await runNotifyCommand(cmd);
+}
+
+function hasRootFastFlag(argv: string[], flags: readonly string[]): boolean {
+	for (const arg of argv) {
+		if (isSubcommand(arg)) return false;
+		if (flags.includes(arg)) return true;
+	}
+	return false;
+}
+
+function hasRootHelpFlag(argv: string[]): boolean {
+	return hasRootFastFlag(argv, rootHelpFlags);
+}
+
+function hasRootVersionFlag(argv: string[]): boolean {
+	return hasRootFastFlag(argv, versionFlags);
 }
 
 class RootHelpCommand extends Command {
@@ -163,7 +196,7 @@ function isSubcommand(first: string | undefined): boolean {
  *
  * Purpose: catch the silent worker-load regressions that hit compiled
  * binaries (issues #1011 and #1027). Neither `--version` nor
- * `stats --summary` actually spawns a Worker on a fresh install â the
+ * `stats --summary` actually spawns a Worker on a fresh install — the
  * sync path early-returns when no session files exist. This probe is the
  * minimal end-to-end test that proves `new Worker(...)` resolves and the
  * bundled worker module evaluates successfully. Wired into
@@ -177,9 +210,7 @@ async function runSmokeTest(): Promise<void> {
 	// the COMPILED single binary (dev runs only load the on-disk .node). Loading the
 	// natives module triggers loadNative()/embedded extraction; calling each new
 	// export confirms the symbols are present in the shipped binary.
-	const { h06FormatHashLines, h02ScoreSequenceFuzzy, h01FindBestFuzzyMatch } = await import(
-		"../../natives/native/index.js"
-	);
+	const { h06FormatHashLines, h02ScoreSequenceFuzzy, h01FindBestFuzzyMatch } = await import("@sayknow-cli/natives");
 	const hashed = h06FormatHashLines("a\nb", 1);
 	if (hashed.split("\n").length !== 2) {
 		throw new Error(`smoke-test: h06FormatHashLines returned unexpected output: ${JSON.stringify(hashed)}`);
@@ -192,11 +223,15 @@ async function runSmokeTest(): Promise<void> {
 
 /** Run the CLI with the given argv (no `process.argv` prefix). */
 export async function runCli(argv: string[]): Promise<void> {
+	if (isNotifyDaemonInternalFastPath(argv)) {
+		await runNotifyDaemonInternalFastPath(argv);
+		return;
+	}
 	if (argv[0] === "--smoke-test") {
 		await runSmokeTest();
 		return;
 	}
-	if (rootHelpFlags.includes(argv[0] ?? "")) {
+	if (hasRootHelpFlag(argv)) {
 		const { renderRootHelp } = await import("@sayknow-cli/utils/cli");
 		const { getExtraHelpText } = await import("./cli/fast-help");
 		renderRootHelp({ bin: APP_NAME, version: VERSION, commands: new Map([["launch", RootHelpCommand]]) });
@@ -206,7 +241,7 @@ export async function runCli(argv: string[]): Promise<void> {
 		}
 		return;
 	}
-	if (versionFlags.includes(argv[0] ?? "")) {
+	if (hasRootVersionFlag(argv)) {
 		process.stdout.write(`${APP_NAME}/${VERSION}\n`);
 		return;
 	}
@@ -223,4 +258,6 @@ export async function runCli(argv: string[]): Promise<void> {
 	return run({ bin: APP_NAME, version: VERSION, argv: runArgv, commands, help: showHelp });
 }
 
-await runCli(process.argv.slice(2));
+if (import.meta.main) {
+	await runCli(process.argv.slice(2));
+}

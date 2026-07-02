@@ -39,6 +39,8 @@ export interface Keybindings {
 	"tui.select.pageDown": true;
 	"tui.select.confirm": true;
 	"tui.select.cancel": true;
+	// Global engine actions
+	"tui.global.debug": true;
 }
 
 export type Keybinding = keyof Keybindings;
@@ -133,6 +135,10 @@ export const TUI_KEYBINDINGS = {
 	"tui.select.cancel": {
 		defaultKeys: ["escape", "ctrl+c"],
 		description: "Cancel selection",
+	},
+	"tui.global.debug": {
+		defaultKeys: "shift+ctrl+d",
+		description: "Toggle debug overlay",
 	},
 } as const satisfies KeybindingDefinitions;
 
@@ -263,6 +269,30 @@ export class KeybindingsManager {
 		}
 		return resolved;
 	}
+}
+
+/**
+ * Detect default-key collisions across the registry: keys whose default
+ * binding is claimed by more than one action. Cross-context collisions are
+ * often intentional (the dispatch context disambiguates them), so this is a
+ * diagnostics aid for auditing the surface, not an error by itself.
+ */
+export function detectDefaultKeyCollisions(definitions: KeybindingDefinitions): KeybindingConflict[] {
+	const claims = new Map<KeyId, Set<Keybinding>>();
+	for (const [id, definition] of Object.entries(definitions)) {
+		for (const key of normalizeKeys(definition.defaultKeys)) {
+			const claimants = claims.get(key) ?? new Set<Keybinding>();
+			claimants.add(id as Keybinding);
+			claims.set(key, claimants);
+		}
+	}
+	const collisions: KeybindingConflict[] = [];
+	for (const [key, keybindings] of claims) {
+		if (keybindings.size > 1) {
+			collisions.push({ key, keybindings: [...keybindings] });
+		}
+	}
+	return collisions;
 }
 
 let globalKeybindings: KeybindingsManager | null = null;

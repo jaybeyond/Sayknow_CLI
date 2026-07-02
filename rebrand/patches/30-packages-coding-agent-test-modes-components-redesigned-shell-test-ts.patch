@@ -1,0 +1,112 @@
+--- a/packages/coding-agent/test/modes/components/redesigned-shell.test.ts
++++ b/packages/coding-agent/test/modes/components/redesigned-shell.test.ts
+@@ -1,6 +1,7 @@
+ import { beforeAll, describe, expect, it } from "bun:test";
+ import type { AssistantMessage } from "@sayknow-cli/ai";
+ import { resetSettingsForTest, Settings } from "@sayknow-cli/coding-agent/config/settings";
++import { setLanguage } from "@sayknow-cli/coding-agent/i18n/index";
+ import { AssistantMessageComponent } from "@sayknow-cli/coding-agent/modes/components/assistant-message";
+ import { BashExecutionComponent } from "@sayknow-cli/coding-agent/modes/components/bash-execution";
+ import { CustomEditor } from "@sayknow-cli/coding-agent/modes/components/custom-editor";
+@@ -80,6 +81,9 @@
+ beforeAll(async () => {
+ 	resetSettingsForTest();
+ 	await Settings.init({ inMemory: true });
++	// Settings.init auto-detects the system language; pin English so these
++	// English UI assertions are deterministic regardless of the test machine.
++	setLanguage("en");
+ 	await initTheme(false);
+ });
+ 
+@@ -126,21 +130,21 @@
+ 		}
+ 	});
+ 
+-	it("keeps the SKC forge launch surface responsive", () => {
++	it("keeps the Sayknow launch surface responsive", () => {
+ 		const component = new WelcomeComponent("1.2.3", "gpt-5.5", "openai");
+ 		const lines = component.render(54);
+ 		const rendered = Bun.stripANSI(lines.join("\n"));
+ 
+-		expect(rendered).toContain("Sayknow forge");
+-		expect(rendered).toContain("╭────────────────╮        ╭────────╮");
+-		expect(rendered).toContain("╰────────────────╯        ╰────────╯");
++		expect(rendered).toContain("Coding should feel like thinking.");
++		expect(rendered).toContain("╔═╗╔═╗╦ ╦╦╔═╔╗╔╔═╗╦ ╦");
++		expect(rendered).toContain("╚═╝╩ ╩ ╩ ╩ ╩╝╚╝╚═╝╚╩╝");
+ 		expect(rendered).not.toContain("●");
+ 		for (const line of lines) {
+ 			expect(visibleWidth(line)).toBeLessThanOrEqual(54);
+ 		}
+ 	});
+ 
+-	it("uses a wider forge splash box on wide terminals", () => {
++	it("uses a wider splash box on wide terminals", () => {
+ 		const component = new WelcomeComponent("1.2.3", "gpt-5.5", "openai");
+ 		const narrowLines = component.render(100);
+ 		const wideLines = component.render(160);
+@@ -150,33 +154,33 @@
+ 		expect(visibleWidth(narrowTop)).toBe(98);
+ 		expect(visibleWidth(wideTop)).toBe(158);
+ 		expect(visibleWidth(wideTop)).toBeGreaterThan(visibleWidth(narrowTop));
+-		expect(wideTop).toContain("SKC forge");
++		expect(wideTop).toContain("Sayknow-CLI");
+ 		for (const line of wideLines) {
+ 			expect(visibleWidth(line)).toBeLessThanOrEqual(160);
+ 		}
+ 	});
+ 
+-	it("renders an ASCII-safe welcome logo when requested", () => {
++	it("renders the brand wordmark even when an ASCII-safe logo is requested", () => {
++		// The Sayknow fork ships a single SAYKNOW wordmark for every logo mode, so an
++		// "ascii" request still resolves to the brand wordmark — never the upstream claw art.
+ 		const component = new WelcomeComponent("1.2.3", "gpt-5.5", "openai", [], [], "ascii");
+ 		const lines = component.render(54);
+ 		const rendered = Bun.stripANSI(lines.join("\n"));
+ 
+-		expect(rendered).toContain("+----------------+        +--------+");
+-		expect(rendered).toContain("+------+      +--+     +--+  +-----+");
+-		expect(rendered).not.toContain("╭────────────────╮");
++		expect(rendered).toContain("╔═╗╔═╗╦ ╦╦╔═╔╗╔╔═╗╦ ╦");
++		expect(rendered).not.toContain("+----------------+");
+ 		for (const line of lines) {
+ 			expect(visibleWidth(line)).toBeLessThanOrEqual(54);
+ 		}
+ 	});
+ 
+-	it("renders a square-corner Unicode welcome logo when requested", () => {
++	it("renders the brand wordmark even when a square-corner logo is requested", () => {
+ 		const component = new WelcomeComponent("1.2.3", "gpt-5.5", "openai", [], [], "square");
+ 		const lines = component.render(54);
+ 		const rendered = Bun.stripANSI(lines.join("\n"));
+ 
+-		expect(rendered).toContain("┌────────────────┐        ┌────────┐");
+-		expect(rendered).toContain("└────────────────┘        └────────┘");
+-		expect(rendered).not.toContain("╭────────────────╮");
++		expect(rendered).toContain("╔═╗╔═╗╦ ╦╦╔═╔╗╔╔═╗╦ ╦");
++		expect(rendered).not.toContain("┌────────────────┐");
+ 		expect(rendered).not.toContain("+----------------+");
+ 		for (const line of lines) {
+ 			expect(visibleWidth(line)).toBeLessThanOrEqual(54);
+@@ -292,14 +296,20 @@
+ 		expect(STATUS_LINE_PRESETS.default.rightSegments).toEqual([
+ 			"session_name",
+ 			"jobs",
++			"token_in",
++			"token_out",
++			"cache_read",
+ 			"token_rate",
++			"context_bar",
+ 			"context_pct",
+ 			"cost",
++			"usage",
++			"time_spent",
+ 		]);
+ 		expect(STATUS_LINE_PRESETS.default.segmentOptions?.path?.maxLength).toBe(32);
+ 	});
+ 
+-	it("keeps forge launch rendering on the bounded-work path", () => {
++	it("keeps launch rendering on the bounded-work path", () => {
+ 		const component = new WelcomeComponent("1.2.3", "gpt-5.5", "openai", [
+ 			{ name: "very-long-session-name".repeat(10), timeAgo: "2h" },
+ 		]);

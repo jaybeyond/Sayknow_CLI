@@ -506,6 +506,61 @@ describe("Editor component", () => {
 			}
 		});
 
+		it("inserts a newline for Ctrl+Shift+Enter terminal protocol variants", () => {
+			const variants = ["\x1b[13;6u", "\x1b[27;6;13~", "\x1b[13;6~", "\x1b[13;2~", "\x1b[13;2u"];
+
+			for (const [index, variant] of variants.entries()) {
+				const editor = new Editor(defaultEditorTheme);
+				const prefix = index === 0 ? "alpha" : "beta";
+
+				editor.setText(prefix);
+				editor.handleInput(variant);
+
+				expect(editor.getText()).toBe(`${prefix}\n`);
+			}
+		});
+
+		it("inserts a newline for raw LF on Windows terminal sendInput mappings", () => {
+			const originalPlatform = Object.getOwnPropertyDescriptor(process, "platform");
+			Object.defineProperty(process, "platform", { value: "win32" });
+			try {
+				const editor = new Editor(defaultEditorTheme);
+				let submitted = "";
+				editor.onSubmit = text => {
+					submitted = text;
+				};
+
+				editor.handleInput("a");
+				editor.handleInput("\n");
+				editor.handleInput("b");
+
+				expect(submitted).toBe("");
+				expect(editor.getText()).toBe("a\nb");
+			} finally {
+				if (originalPlatform) Object.defineProperty(process, "platform", originalPlatform);
+			}
+		});
+
+		it("still submits plain CR Enter on Windows", () => {
+			const originalPlatform = Object.getOwnPropertyDescriptor(process, "platform");
+			Object.defineProperty(process, "platform", { value: "win32" });
+			try {
+				const editor = new Editor(defaultEditorTheme);
+				let submitted = "";
+				editor.onSubmit = text => {
+					submitted = text;
+				};
+
+				editor.handleInput("a");
+				editor.handleInput("\r");
+
+				expect(submitted).toBe("a");
+				expect(editor.getText()).toBe("");
+			} finally {
+				if (originalPlatform) Object.defineProperty(process, "platform", originalPlatform);
+			}
+		});
+
 		it("deletes single-code-unit unicode characters (umlauts) with Backspace", () => {
 			const editor = new Editor(defaultEditorTheme);
 
@@ -801,6 +856,22 @@ describe("Editor component", () => {
 			expect(editor.getText()).toBe("한글");
 			expect(markerIndex).toBeGreaterThanOrEqual(0);
 			expect(visibleWidth(line!.slice(0, markerIndex))).toBe(2 + visibleWidth("한글"));
+		});
+
+		it("anchors terminal cursor at an empty placeholder", () => {
+			const editor = new Editor(defaultEditorTheme);
+			editor.setBorderVisible(false);
+			editor.setPromptGutter("> ");
+			editor.setPlaceholder("Describe the change");
+			editor.setUseTerminalCursor(true);
+			editor.focused = true;
+
+			const [line] = editor.render(40);
+			const markerIndex = line!.indexOf(CURSOR_MARKER);
+
+			expect(markerIndex).toBeGreaterThanOrEqual(0);
+			expect(visibleWidth(line!.slice(0, markerIndex))).toBe(2);
+			expect(Bun.stripANSI(line!.replaceAll(CURSOR_MARKER, ""))).toContain("Describe the change");
 		});
 
 		it("handles mixed ASCII and wide characters in wrapping", () => {

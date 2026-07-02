@@ -69,7 +69,7 @@ async function chainIds(
 							: activeModelProvider.includes("kimi")
 								? "anthropic-messages"
 								: "openai-responses",
-				baseUrl: "https://api.example.com",
+				baseUrl: activeModelProvider.startsWith("openai") ? "https://api.openai.com/v1" : "https://api.example.com",
 			}
 		: undefined;
 	const providers = await resolveProviderChain({ authStorage, preferredProvider, activeModelContext });
@@ -234,7 +234,6 @@ describe("resolveProviderChain — active-model-gated resolution", () => {
 		expect(await chainIds(fakeAuth({ oauth: ["openai-codex"] }), "auto", "openai")).toEqual(["codex", "duckduckgo"]);
 		expect(await chainIds(fakeAuth({ oauth: ["openai-codex"] }), "auto", "openai-codex")).toEqual([
 			"codex",
-			"openai-compatible",
 			"duckduckgo",
 		]);
 		expect(await chainIds(fakeAuth({ oauth: ["google-gemini-cli"] }), "auto", "google-gemini-cli")).toEqual([

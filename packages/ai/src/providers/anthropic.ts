@@ -1,5 +1,6 @@
 import * as nodeCrypto from "node:crypto";
 import * as fs from "node:fs";
+import * as os from "node:os";
 import { scheduler } from "node:timers/promises";
 import * as tls from "node:tls";
 import Anthropic, { type ClientOptions as AnthropicSdkClientOptions } from "@anthropic-ai/sdk";
@@ -62,7 +63,13 @@ import { parseGitHubCopilotApiKey } from "../utils/oauth/github-copilot";
 import { notifyProviderResponse } from "../utils/provider-response";
 import { isCopilotTransientModelError } from "../utils/retry";
 import { resolveRetryBudget } from "../utils/retry-budget";
-import { COMBINATOR_KEYS, NO_STRICT, toolWireSchema } from "../utils/schema";
+import {
+	COMBINATOR_KEYS,
+	flattenToolRootCombinators,
+	isJsonSchemaObjectNode,
+	NO_STRICT,
+	toolWireSchema,
+} from "../utils/schema";
 import { spillToDescription } from "../utils/schema/spill";
 import { notifyRawSseEvent, wrapFetchForSseDebug } from "../utils/sse-debug";
 import {
@@ -87,6 +94,13 @@ export type AnthropicHeaderOptions = {
 	stream?: boolean;
 	modelHeaders?: Record<string, string>;
 	isCloudflareAiGateway?: boolean;
+	/**
+	 * Attach ZCode client "source" headers (User-Agent: ZCode/<ver>, X-Title,
+	 * X-ZCode-Agent: glm, X-Platform, etc.) so api.z.ai recognizes the caller as
+	 * the ZCode client, exactly like ZCode's `buildZCodeSourceHeaders` does for
+	 * GLM providers. glm-zcode only.
+	 */
+	zcodeSourceHeaders?: boolean;
 };
 
 export function normalizeAnthropicBaseUrl(baseUrl?: string): string | undefined {
@@ -155,6 +169,67 @@ const sharedHeaders = {
 	"X-App": "cli",
 };
 
+// ZCode bakes its app version and runtime env at build time. Mirror the values
+// from the analyzed ZCode 3.1.2 desktop bundle (`resolveRuntimeZCodeEnv` returns
+// "production" for non-test builds). Both are overridable for forward-compat.
+const ZCODE_APP_VERSION = process.env.ZCODE_APP_VERSION?.trim() || "3.1.2";
+const ZCODE_RELEASE_CHANNEL = process.env.ZCODE_RELEASE_CHANNEL?.trim() || "production";
+
+// Mirrors ZCode's `normalizePrintableHeaderValue`: only printable ASCII passes.
+function normalizePrintableHeaderValue(value: string | undefined): string | undefined {
+	const trimmed = value?.trim();
+	if (trimmed && /^[\x20-\x7e]+$/.test(trimmed)) return trimmed;
+	return undefined;
+}
+
+// Mirrors ZCode's `normalizeOsCategory`.
+function normalizeOsCategory(platform: NodeJS.Platform): string {
+	switch (platform) {
+		case "darwin":
+			return "macos";
+		case "win32":
+			return "windows";
+		default:
+			return "linux";
+	}
+}
+
+/**
+ * Replicates ZCode's `buildZCodeSourceHeaders()` + GLM `X-ZCode-Agent` tag
+ * (host bundle `Bl` / `buildConnectivitySourceHeaders` for GLM providers), so
+ * api.z.ai sees skc's glm-zcode requests as the ZCode client. Dynamic values
+ * (platform/arch, locale, timezone, OS version) are resolved at runtime exactly
+ * as ZCode does; printable-ASCII-only and conditionally omitted when empty.
+ */
+export function buildZCodeSourceHeaders(): Record<string, string> {
+	const platform = process.platform;
+	const arch = process.arch;
+	const appVersion = normalizePrintableHeaderValue(ZCODE_APP_VERSION);
+	const releaseChannel = normalizePrintableHeaderValue(ZCODE_RELEASE_CHANNEL);
+	let locale: string | undefined;
+	let timezone: string | undefined;
+	try {
+		const resolved = Intl.DateTimeFormat().resolvedOptions();
+		locale = normalizePrintableHeaderValue(resolved.locale);
+		timezone = normalizePrintableHeaderValue(resolved.timeZone);
+	} catch {}
+	const osVersion = normalizePrintableHeaderValue(os.version());
+	const headers: Record<string, string> = {
+		"User-Agent": `ZCode/${appVersion ?? "unknown"}`,
+		"HTTP-Referer": "https://zcode.z.ai",
+		"X-Title": "Z Code@electron",
+		"X-Platform": `${platform}-${arch}`,
+		"X-Client-Language": locale ?? "unknown",
+		"X-Client-Timezone": timezone ?? "unknown",
+		"X-Os-Category": normalizeOsCategory(platform),
+		"X-ZCode-Agent": "glm",
+	};
+	if (appVersion) headers["X-ZCode-App-Version"] = appVersion;
+	if (releaseChannel) headers["X-Release-Channel"] = releaseChannel;
+	if (osVersion) headers["X-Os-Version"] = osVersion;
+	return headers;
+}
+
 export function buildAnthropicHeaders(options: AnthropicHeaderOptions): Record<string, string> {
 	const oauthToken = options.isOAuth ?? isAnthropicOAuthToken(options.apiKey);
 	const extraBetas = options.extraBetas ?? [];
@@ -191,6 +266,9 @@ export function buildAnthropicHeaders(options: AnthropicHeaderOptions): Record<s
 		};
 	} else if (!isAnthropicApiBaseUrl(options.baseUrl)) {
 		const incomingUserAgent = getHeaderCaseInsensitive(options.modelHeaders, "User-Agent");
+		// ZCode merges its source headers LAST for GLM providers (`withZCodeSourceHeaders`
+		// → `{ ...base, ...extra, ...source }`), so they win over any incoming User-Agent.
+		const zcodeSourceHeaders = options.zcodeSourceHeaders ? buildZCodeSourceHeaders() : undefined;
 		return {
 			...modelHeaders,
 			Accept: acceptHeader,
@@ -198,6 +276,7 @@ export function buildAnthropicHeaders(options: AnthropicHeaderOptions): Record<s
 			...sharedHeaders,
 			"Anthropic-Beta": betaHeader,
 			...(incomingUserAgent ? { "User-Agent": incomingUserAgent } : {}),
+			...(zcodeSourceHeaders ?? {}),
 		};
 	} else {
 		return {
@@ -671,6 +750,12 @@ type FoundryTlsOptions = {
 function resolveAnthropicBaseUrl(model: Model<"anthropic-messages">, apiKey?: string): string | undefined {
 	if (model.provider === "github-copilot") {
 		return normalizeAnthropicBaseUrl(resolveGitHubCopilotBaseUrl(model.baseUrl, apiKey) ?? model.baseUrl);
+	}
+	// glm-zcode logs in via ZCode's OAuth but auto-provisions a real Z.AI API key and
+	// calls api.z.ai directly (no zcode.z.ai gateway, no captcha). Pin the base so dynamic
+	// discovery / stale bundled catalogs / model cache can't redirect it elsewhere.
+	if (model.provider === "glm-zcode") {
+		return normalizeAnthropicBaseUrl(process.env.ZCODE_PLAN_ANTHROPIC_BASE_URL) ?? "https://api.z.ai/api/anthropic";
 	}
 	if (model.provider === "anthropic" && isFoundryEnabled()) {
 		const foundryBaseUrl = normalizeAnthropicBaseUrl($env.FOUNDRY_BASE_URL);
@@ -1691,6 +1776,7 @@ export function buildAnthropicClientOptions(args: AnthropicClientOptionsArgs): A
 		stream,
 		modelHeaders: mergeHeaders(model.headers, foundryCustomHeaders, headers, dynamicHeaders),
 		isCloudflareAiGateway: model.provider === "cloudflare-ai-gateway",
+		zcodeSourceHeaders: model.provider === "glm-zcode",
 	});
 
 	if (model.provider === "cloudflare-ai-gateway") {
@@ -2163,7 +2249,7 @@ function buildParams(
  * See: https://github.com/jaybeyond/Sayknow_CLI/issues/814
  */
 function isZaiAnthropicEndpoint(model: Model<"anthropic-messages">): boolean {
-	if (model.provider === "zai") return true;
+	if (model.provider === "zai" || model.provider === "glm-zcode") return true;
 	const baseUrl = model.baseUrl;
 	if (!baseUrl) return false;
 	try {
@@ -2181,7 +2267,7 @@ function isZaiAnthropicEndpoint(model: Model<"anthropic-messages">): boolean {
  */
 function isNonSigningAnthropicEndpoint(model: Model<"anthropic-messages">): boolean {
 	// Known non-signing providers
-	if (model.provider === "zai" || model.provider === "deepseek") return true;
+	if (model.provider === "zai" || model.provider === "glm-zcode" || model.provider === "deepseek") return true;
 	const baseUrl = model.baseUrl;
 	if (!baseUrl) return false;
 	try {
@@ -2406,22 +2492,6 @@ const MAX_ANTHROPIC_STRICT_TOOLS = 20;
 const MAX_ANTHROPIC_STRICT_OPTIONAL_PARAMETERS = 24;
 const MAX_ANTHROPIC_STRICT_UNION_PARAMETERS = 16;
 
-/** `minItems` / `maxItems` apply to arrays; Anthropic rejects them on `type: "object"` (including `minItems: 0`/`1`). */
-function isJsonSchemaArrayNode(schema: Record<string, unknown>): boolean {
-	const t = schema.type;
-	if (t === "array") return true;
-	if (Array.isArray(t) && t.includes("array") && !t.includes("object")) return true;
-	return false;
-}
-
-function isJsonSchemaObjectNode(schema: Record<string, unknown>): boolean {
-	if (isJsonSchemaArrayNode(schema)) return false;
-	if (schema.type === "object") return true;
-	if (Array.isArray(schema.type) && schema.type.includes("object")) return true;
-	if (isRecord(schema.properties)) return true;
-	return false;
-}
-
 /**
  * Pick the principal non-null scalar type from a `type` keyword. Anthropic accepts
  * `type` as either a single string or an array (e.g. `["number", "null"]` for a
@@ -2570,111 +2640,6 @@ export function normalizeAnthropicToolSchema(schema: unknown): unknown {
 	}
 
 	spillToDescription(result, spill);
-	return result;
-}
-
-function getRequiredNames(schema: Record<string, unknown>): Set<string> {
-	return new Set(
-		Array.isArray(schema.required)
-			? schema.required.filter((entry): entry is string => typeof entry === "string")
-			: [],
-	);
-}
-
-function getSingleLiteralValue(schema: unknown): unknown | undefined {
-	if (!isRecord(schema)) return undefined;
-	if (Object.hasOwn(schema, "const")) return schema.const;
-	if (Array.isArray(schema.enum) && schema.enum.length === 1) return schema.enum[0];
-	return undefined;
-}
-
-function describeAnthropicRootBranch(index: number, branch: Record<string, unknown>, action: unknown): string {
-	const required = [...getRequiredNames(branch)];
-	const parts = [`Branch ${index + 1}`];
-	if (typeof action === "string" || typeof action === "number" || typeof action === "boolean") {
-		parts.push(`action ${JSON.stringify(action)}`);
-	}
-	if (required.length > 0) parts.push(`branch-required fields: ${required.join(", ")}`);
-	if (typeof branch.description === "string" && branch.description.length > 0) parts.push(branch.description);
-	return parts.join("; ");
-}
-function collectAnthropicRootObjectBranches(schema: unknown): Record<string, unknown>[] | undefined {
-	if (!isRecord(schema)) return undefined;
-	if (isJsonSchemaObjectNode(schema)) return [schema];
-
-	const combinatorKeys = COMBINATOR_KEYS.filter(key => Array.isArray(schema[key]));
-	if (combinatorKeys.length === 0) return undefined;
-
-	const branches: Record<string, unknown>[] = [];
-	for (const key of combinatorKeys) {
-		const variants = schema[key];
-		if (!Array.isArray(variants) || variants.length === 0) return undefined;
-		for (const variant of variants) {
-			const nestedBranches = collectAnthropicRootObjectBranches(variant);
-			if (nestedBranches === undefined) return undefined;
-			branches.push(...nestedBranches);
-		}
-	}
-	return branches;
-}
-
-/**
- * Anthropic rejects tool `input_schema` roots containing top-level oneOf/anyOf/allOf.
- * Keep the generic normalizer schema-preserving, then flatten only provider-emitted
- * tool roots into one object while leaving nested combinators untouched.
- */
-export function normalizeAnthropicToolRootInputSchema(schema: Record<string, unknown>): Record<string, unknown> {
-	const result: Record<string, unknown> = { ...schema };
-	const rootCombinators = COMBINATOR_KEYS.filter(key => Array.isArray(result[key]));
-	if (rootCombinators.length === 0) return result;
-
-	const baseProperties = isRecord(result.properties) ? { ...result.properties } : {};
-	const flattenedBranches = rootCombinators
-		.map(key => ({ key, branches: collectAnthropicRootObjectBranches({ [key]: result[key] }) }))
-		.find(entry => entry.branches !== undefined && entry.branches.length > 0);
-
-	result.type = "object";
-	result.properties = baseProperties;
-	result.additionalProperties = result.additionalProperties === undefined ? false : result.additionalProperties;
-
-	if (flattenedBranches?.branches !== undefined) {
-		const variants = flattenedBranches.branches;
-		const commonRequired = variants.map(variant => getRequiredNames(variant));
-		const required = [...commonRequired[0]].filter(name => commonRequired.every(set => set.has(name)));
-		const actionValues: unknown[] = [];
-		const guidance: string[] = [];
-
-		for (const [index, branch] of variants.entries()) {
-			if (isRecord(branch.properties)) {
-				Object.assign(baseProperties, branch.properties);
-				const actionValue = getSingleLiteralValue(branch.properties.action);
-				if (actionValue !== undefined && !actionValues.includes(actionValue)) actionValues.push(actionValue);
-				guidance.push(describeAnthropicRootBranch(index, branch, actionValue));
-			} else {
-				guidance.push(describeAnthropicRootBranch(index, branch, undefined));
-			}
-		}
-
-		if (actionValues.length > 0) {
-			const existingAction = isRecord(baseProperties.action) ? { ...baseProperties.action } : {};
-			delete existingAction.const;
-			baseProperties.action = { ...existingAction, enum: actionValues };
-		}
-		result.required = required;
-		spillToDescription(result, [
-			["rootCombinatorGuidance", guidance],
-			...rootCombinators
-				.filter(key => key !== flattenedBranches.key)
-				.map(key => [key, result[key]] as [string, unknown]),
-		]);
-	} else {
-		spillToDescription(
-			result,
-			rootCombinators.map(key => [key, result[key]]),
-		);
-	}
-
-	for (const key of COMBINATOR_KEYS) delete result[key];
 	return result;
 }
 
@@ -2845,7 +2810,7 @@ function normalizeAnthropicStrictSchema(
 
 function buildAnthropicBaseToolInputSchema(tool: Tool): Record<string, unknown> {
 	const jsonSchema = toolWireSchema(tool);
-	return normalizeAnthropicToolRootInputSchema(
+	return flattenToolRootCombinators(
 		normalizeAnthropicToolSchema({
 			...jsonSchema,
 			type: "object",
