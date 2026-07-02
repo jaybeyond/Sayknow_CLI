@@ -46,6 +46,7 @@ const commands: CommandEntry[] = [
 	{ name: "rlm", load: () => import("./commands/rlm").then(m => m.default) },
 	{ name: "update", load: () => import("./commands/update").then(m => m.default) },
 	{ name: "launch", load: () => import("./commands/launch").then(m => m.default) },
+	{ name: "telegram", load: () => import("./commands/telegram").then(m => m.default) },
 ];
 
 async function showHelp(config: CliConfig): Promise<void> {

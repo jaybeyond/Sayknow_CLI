@@ -30,6 +30,7 @@ import { activateModelProfile } from "./config/model-profile-activation";
 import { ModelRegistry, ModelsConfigFile } from "./config/model-registry";
 import { resolveCliModel, resolveModelRoleValue, resolveModelScope, type ScopedModel } from "./config/model-resolver";
 import { getDefault, type SettingPath, Settings, settings } from "./config/settings";
+import { maybeAutostartTelegramRemote } from "./config/telegram-autostart";
 import { BUNDLED_GROK_BUILD_EXTENSION_ID, getBundledGrokBuildExtensionFactory } from "./defaults/skc-grok-cli";
 import { initializeWithSettings } from "./discovery";
 import { exportFromFile } from "./export/html";
@@ -833,6 +834,8 @@ export async function runRootCommand(
 
 	// Initialize discovery system with settings for provider persistence
 	logger.time("initializeWithSettings", initializeWithSettings, settingsInstance);
+	// Auto-start Telegram Remote gateway if enabled in settings
+	if (!parsedArgs.print && !autoPrint) await maybeAutostartTelegramRemote();
 
 	// Apply model role overrides from CLI args or env vars (ephemeral, not persisted)
 	const smolModel = parsedArgs.smol ?? $env.PI_SMOL_MODEL;

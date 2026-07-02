@@ -34,6 +34,7 @@ export const zh: Partial<Record<MsgKey, string>> = {
 	"settings.tab.tools": "工具",
 	"settings.tab.tasks": "任务",
 	"settings.tab.providers": "提供商",
+	"settings.tab.integrations": "集成",
 
 	"settings.language.label": "语言",
 	"settings.language.desc": "界面语言。自动模式跟随系统区域设置。",

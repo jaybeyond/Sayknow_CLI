@@ -36,7 +36,8 @@ export type SettingTab =
 	| "editing"
 	| "tools"
 	| "tasks"
-	| "providers";
+	| "providers"
+	| "integrations";
 
 /** Tab display metadata - icon is resolved via theme.symbol() */
 export type TabMetadata = { label: string; icon: `tab.${string}` };
@@ -52,6 +53,7 @@ export const SETTING_TABS: SettingTab[] = [
 	"tools",
 	"tasks",
 	"providers",
+	"integrations",
 ];
 
 /** Tab display metadata - icon is a symbol key from theme.ts (tab.*) */
@@ -65,6 +67,7 @@ export const TAB_METADATA: Record<SettingTab, { label: string; icon: `tab.${stri
 	tools: { label: "Tools", icon: "tab.tools" },
 	tasks: { label: "Tasks", icon: "tab.tasks" },
 	providers: { label: "Providers", icon: "tab.providers" },
+	integrations: { label: "Integrations", icon: "tab.integrations" },
 };
 
 /** Status line segment identifiers */
@@ -2953,6 +2956,150 @@ export const SETTINGS_SCHEMA = {
 	"thinkingBudgets.xhigh": { type: "number", default: 32768 },
 
 	"thinkingBudgets.max": { type: "number", default: 65536 },
+	// Telegram Remote — two-way messaging integration.
+	// Maps to SKC_TELEGRAM_REMOTE_* env vars consumed by the
+	// @sayknow-cli/telegram-remote gateway (packages/telegram-remote).
+	// The settings bridge converts these into env before spawning the gateway.
+	"telegram.enabled": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "integrations",
+			label: "Telegram Remote",
+			description: "Enable two-way Telegram bot control of skc sessions",
+		},
+	},
+
+	"telegram.botToken": {
+		type: "string",
+		default: undefined,
+		ui: {
+			tab: "integrations",
+			label: "Bot Token",
+			description: "Telegram bot token from @BotFather (required when enabled)",
+		},
+	},
+
+	"telegram.allowedUserIds": {
+		type: "string",
+		default: undefined,
+		ui: {
+			tab: "integrations",
+			label: "Allowed User IDs",
+			description: "Comma-separated Telegram user IDs permitted to send commands",
+		},
+	},
+
+	"telegram.allowedChatIds": {
+		type: "string",
+		default: undefined,
+		ui: {
+			tab: "integrations",
+			label: "Allowed Chat IDs",
+			description: "Comma-separated Telegram chat IDs permitted to send commands",
+		},
+	},
+
+	"telegram.backend": {
+		type: "enum",
+		values: ["coordinator", "rpc"] as const,
+		default: "coordinator",
+		ui: {
+			tab: "integrations",
+			label: "Backend",
+			description: "Coordinator (multi-session lifecycle) or RPC (single persistent session)",
+			options: [
+				{ value: "coordinator", label: "Coordinator", description: "Multi-session lifecycle + observation" },
+				{ value: "rpc", label: "RPC", description: "Attach/detach to one persistent session socket" },
+			],
+		},
+	},
+
+	"telegram.enableStop": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "integrations",
+			label: "Enable /stop",
+			description: "Allow graceful stop requests (adds the reports mutation class)",
+		},
+	},
+
+	"telegram.enableRich": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "integrations",
+			label: "Rich Messages",
+			description: "HTML formatting + inline keyboards",
+		},
+	},
+
+	"telegram.enablePush": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "integrations",
+			label: "Push Notifications",
+			description: "Follow/Mute subscriptions via coordinator event watch",
+		},
+	},
+
+	"telegram.registerCommands": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "integrations",
+			label: "Register Bot Menu",
+			description: "Register the Bot command menu at startup",
+		},
+	},
+
+	"telegram.presets": {
+		type: "string",
+		default: undefined,
+		ui: {
+			tab: "integrations",
+			label: "Session Presets",
+			description: "JSON array of {id, workdir, sessionCommand, taskTemplate?, taskMaxLen?}",
+		},
+	},
+
+	"telegram.rpcSocket": {
+		type: "string",
+		default: undefined,
+		ui: {
+			tab: "integrations",
+			label: "RPC Socket",
+			description: "Path to the skc launch --output rpc UNIX socket (RPC backend only)",
+		},
+	},
+
+	"telegram.stateDir": {
+		type: "string",
+		default: undefined,
+		ui: {
+			tab: "integrations",
+			label: "State Directory",
+			description: "Gateway state dir for reconnect/resync (required for RPC backend)",
+		},
+	},
+
+	// Telegram advanced — hidden from UI, editable via config.yml
+	"telegram.pollTimeoutSec": { type: "number", default: 30 },
+	"telegram.apiBase": { type: "string", default: undefined },
+	"telegram.coordinatorCommand": { type: "string", default: "skc" },
+	"telegram.coordinatorArgs": { type: "string", default: "mcp-serve,coordinator" },
+	"telegram.enableEditMessageText": { type: "boolean", default: false },
+	"telegram.richCallbackTtlMs": { type: "number", default: 600000 },
+	"telegram.richCallbackMaxTokens": { type: "number", default: 500 },
+	"telegram.defaultTaskMaxLen": { type: "number", default: 2000 },
+	"telegram.livenessMs": { type: "number", default: 60000 },
+	"telegram.followTtlMs": { type: "number", default: 86400000 },
+	"telegram.subscriptionsMax": { type: "number", default: 1000 },
+	"telegram.longPollMs": { type: "number", default: 25000 },
+	"telegram.digestThreshold": { type: "number", default: 5 },
+	"telegram.allowAttachSocketArg": { type: "boolean", default: false },
 } as const;
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -3160,6 +3307,35 @@ export interface ShellMinimizerSettings {
 	maxCaptureBytes: number;
 }
 
+export interface TelegramSettings {
+	enabled: boolean;
+	botToken: string | undefined;
+	allowedUserIds: string | undefined;
+	allowedChatIds: string | undefined;
+	backend: "coordinator" | "rpc";
+	enableStop: boolean;
+	enableRich: boolean;
+	enablePush: boolean;
+	registerCommands: boolean;
+	presets: string | undefined;
+	rpcSocket: string | undefined;
+	stateDir: string | undefined;
+	pollTimeoutSec: number;
+	apiBase: string | undefined;
+	coordinatorCommand: string;
+	coordinatorArgs: string;
+	enableEditMessageText: boolean;
+	richCallbackTtlMs: number;
+	richCallbackMaxTokens: number;
+	defaultTaskMaxLen: number;
+	livenessMs: number;
+	followTtlMs: number;
+	subscriptionsMax: number;
+	longPollMs: number;
+	digestThreshold: number;
+	allowAttachSocketArg: boolean;
+}
+
 /** Map group prefix -> typed settings interface */
 export interface GroupTypeMap {
 	compaction: CompactionSettings;
@@ -3178,6 +3354,7 @@ export interface GroupTypeMap {
 	modelTags: ModelTagsSettings;
 	cycleOrder: string[];
 	shellMinimizer: ShellMinimizerSettings;
+	telegram: TelegramSettings;
 }
 
 export type GroupPrefix = keyof GroupTypeMap;
