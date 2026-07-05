@@ -10,7 +10,14 @@ import type { DaemonRuntimeInfo } from "../daemon/control-types";
 import { resolveSkcRuntimeSpawnInfo } from "../daemon/runtime";
 import { getNotificationConfig, isGloballyConfigured, tokenFingerprint } from "./config";
 import { parseInThreadConfigCommand } from "./config-commands";
-import { buildCompactChoiceGrid, TELEGRAM_PARSE_MODE } from "./html-format";
+import { daemonPaths } from "./daemon-paths";
+import {
+	buildCompactChoiceGrid,
+	code,
+	splitTelegramHtml,
+	TELEGRAM_MESSAGE_LIMIT,
+	TELEGRAM_PARSE_MODE,
+} from "./html-format";
 import type {
 	SessionCloseTarget,
 	SessionCreateTarget,
@@ -62,16 +69,6 @@ export interface DaemonState {
 	version: 1;
 	stoppedAt?: number;
 }
-
-export interface DaemonPaths {
-	dir: string;
-	lock: string;
-	state: string;
-	roots: string;
-	steal: string;
-	aliases: string;
-}
-
 export interface TelegramDaemonFs {
 	mkdir(path: string, opts?: fs.MakeDirectoryOptions): Promise<void>;
 	readFile(path: string, encoding: BufferEncoding): Promise<string>;
@@ -131,6 +128,24 @@ const QUEUED_REACTION = "👀";
 const PENDING_TOPIC_FRAME_LIMIT = 20;
 const CONSUMED_REACTION = "✅";
 
+function splitTelegramPlainText(text: string, max = TELEGRAM_MESSAGE_LIMIT): string[] {
+	if (text.length <= max) return [text];
+	const chunks: string[] = [];
+	let out = "";
+	for (const ch of text) {
+		if (out.length + ch.length > max) {
+			chunks.push(out);
+			out = "";
+		}
+		out += ch;
+	}
+	if (out) chunks.push(out);
+	return chunks;
+}
+function endpointGenerationKey(url: string, token: string): string {
+	return `${url}\0${token}`;
+}
+
 /**
  * Whether `err` is a transient network failure worth retrying. Telegram API
  * calls over HTTP/2 occasionally surface mid-stream `ECONNRESET` (and similar)
@@ -184,17 +199,7 @@ async function fetchWithRetry(
 	throw lastErr;
 }
 
-export function daemonPaths(agentDir: string): DaemonPaths {
-	const dir = path.join(agentDir, "notifications");
-	return {
-		dir,
-		lock: path.join(dir, "telegram-daemon.lock"),
-		state: path.join(dir, "telegram-daemon.state.json"),
-		roots: path.join(dir, "telegram-daemon.roots.json"),
-		steal: path.join(dir, "telegram-daemon.steal"),
-		aliases: path.join(dir, "telegram-callback-aliases.json"),
-	};
-}
+export { type DaemonPaths, daemonPaths } from "./daemon-paths";
 
 /**
  * Attach session-lifecycle control (create/close/resume) to the running daemon.
@@ -770,6 +775,7 @@ export interface TelegramDaemonOptions {
 interface SessionSocket {
 	sessionId: string;
 	token: string;
+	endpointKey: string;
 	ws: WebSocket;
 	pending: Map<string, { sessionId: string; actionId: string }>;
 	/** True once the server advertised the `client_ping_pong` capability. */
@@ -806,6 +812,8 @@ export class TelegramNotificationDaemon {
 	private readonly topicOwnerByIdentity = new Map<string, string>();
 	/** Non-identity frames held until identity creates the correct thread. */
 	private readonly pendingThreadedFrames = new Map<string, PendingThreadedFrame[]>();
+	/** Endpoint generation tombstones for sessions that already sent session_closed. */
+	private readonly closedEndpointKeys = new Map<string, string>();
 	/** True once the daemon has nudged the user to enable Threaded Mode. */
 	private threadedFallbackNoticeSent = false;
 	/** Sessions whose identity header was already sent flat (Threaded Mode off). */
@@ -1072,14 +1080,29 @@ export class TelegramNotificationDaemon {
 		threadId: number | undefined,
 	): Promise<boolean> {
 		if (!isLifecycleCommandText(text)) return false;
-		const reply = (body: string) =>
-			this.botApi
-				.call("sendMessage", {
-					chat_id: this.opts.chatId,
-					...(threadId !== undefined ? { message_thread_id: threadId } : {}),
-					text: body,
-				})
-				.catch(() => undefined);
+		const reply = async (body: string): Promise<void> => {
+			for (const text of splitTelegramPlainText(body)) {
+				await this.botApi
+					.call("sendMessage", {
+						chat_id: this.opts.chatId,
+						...(threadId !== undefined ? { message_thread_id: threadId } : {}),
+						text,
+					})
+					.catch(() => undefined);
+			}
+		};
+		const replyHtml = async (body: string): Promise<void> => {
+			for (const text of splitTelegramHtml(body)) {
+				await this.botApi
+					.call("sendMessage", {
+						chat_id: this.opts.chatId,
+						...(threadId !== undefined ? { message_thread_id: threadId } : {}),
+						text,
+						parse_mode: TELEGRAM_PARSE_MODE,
+					})
+					.catch(() => undefined);
+			}
+		};
 
 		if (!this.lifecycleControlActive) {
 			await reply("Session lifecycle control is not available right now.");
@@ -1098,11 +1121,12 @@ export class TelegramNotificationDaemon {
 			const recent = listRecentSessions({
 				sessionsRoot: path.join(this.opts.settings.getAgentDir(), "sessions"),
 				limit: 10,
+				includeInternal: false,
 			});
-			const lines = recent.length
-				? recent.map(e => `\u2022 ${e.sessionId}${e.path ? ` (${e.path})` : ""}`).join("\n")
+			const body = recent.length
+				? recent.map(e => `• ${code(e.sessionId)}${e.path ? ` (${code(e.path)})` : ""}`).join("\n")
 				: "No recent sessions.";
-			await reply(lines);
+			await replyHtml(body);
 			return true;
 		}
 
@@ -1205,7 +1229,9 @@ export class TelegramNotificationDaemon {
 				matches: msg => msg.type === "session_closed",
 				handle: async session => {
 					this.busy.delete(session.sessionId);
+					this.closedEndpointKeys.set(session.sessionId, session.endpointKey);
 					await this.deleteTopic(session.sessionId);
+					this.dropSession(session, "session_closed");
 				},
 			});
 	}
@@ -1242,6 +1268,9 @@ export class TelegramNotificationDaemon {
 					// would chase a dead, token-bearing record forever.
 					const pidAlive = this.opts.pidAlive ?? defaultPidAlive;
 					if (endpoint.stale || (endpoint.pid !== undefined && !pidAlive(endpoint.pid))) continue;
+					const endpointKey = endpointGenerationKey(endpoint.url, endpoint.token);
+					if (this.closedEndpointKeys.get(sessionId) === endpointKey) continue;
+					this.closedEndpointKeys.delete(sessionId);
 					this.connectSession(sessionId, endpoint.url, endpoint.token);
 				} catch {}
 			}
@@ -1251,9 +1280,12 @@ export class TelegramNotificationDaemon {
 	connectSession(sessionId: string, url: string, token: string): void {
 		const WS = this.opts.WebSocketImpl ?? WebSocket;
 		const ws = new WS(`${url}/?token=${encodeURIComponent(token)}`);
+		const endpointKey = endpointGenerationKey(url, token);
+		this.closedEndpointKeys.delete(sessionId);
 		const session: SessionSocket = {
 			sessionId,
 			token,
+			endpointKey,
 			ws,
 			pending: new Map(),
 			capable: false,
@@ -1631,12 +1663,14 @@ export class TelegramNotificationDaemon {
 						parse_mode: TELEGRAM_PARSE_MODE,
 					});
 				} else if (send.text) {
-					await this.botApi.call("sendMessage", {
-						chat_id: this.opts.chatId,
-						...threadField,
-						text: send.text,
-						parse_mode: TELEGRAM_PARSE_MODE,
-					});
+					for (const text of splitTelegramHtml(send.text)) {
+						await this.botApi.call("sendMessage", {
+							chat_id: this.opts.chatId,
+							...threadField,
+							text,
+							parse_mode: TELEGRAM_PARSE_MODE,
+						});
+					}
 				}
 			} catch {
 				// Best-effort: a failed send must never stop the daemon.
@@ -1839,13 +1873,17 @@ export class TelegramNotificationDaemon {
 			const inline_keyboard = buildCompactChoiceGrid(options, (i: number) =>
 				this.aliasTable.put({ sessionId: session.sessionId, actionId: msg.id, answer: i }),
 			);
-			const result = (await this.botApi.call("sendMessage", {
-				chat_id: this.opts.chatId,
-				...threadField,
-				text: rendered.text,
-				parse_mode: TELEGRAM_PARSE_MODE,
-				...(inline_keyboard.length ? { reply_markup: { inline_keyboard } } : {}),
-			})) as { result?: { message_id?: number } };
+			const chunks = splitTelegramHtml(rendered.text);
+			let result: { result?: { message_id?: number } } = {};
+			for (let i = 0; i < chunks.length; i++) {
+				result = (await this.botApi.call("sendMessage", {
+					chat_id: this.opts.chatId,
+					...threadField,
+					text: chunks[i]!,
+					parse_mode: TELEGRAM_PARSE_MODE,
+					...(i === chunks.length - 1 && inline_keyboard.length ? { reply_markup: { inline_keyboard } } : {}),
+				})) as { result?: { message_id?: number } };
+			}
 			const messageId = result.result?.message_id;
 			if (messageId !== undefined)
 				this.messageRoutes.set(String(messageId), { sessionId: session.sessionId, actionId: msg.id });

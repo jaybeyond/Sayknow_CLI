@@ -26,7 +26,7 @@ import * as path from "node:path";
 import { promisify } from "node:util";
 import type { ImageContent, TextContent } from "@sayknow-cli/ai";
 import { NotificationServer } from "@sayknow-cli/natives";
-import { logger } from "@sayknow-cli/utils";
+import { logger, postmortem } from "@sayknow-cli/utils";
 import { Settings } from "../config/settings";
 import type { ExtensionCommandContext, ExtensionContext, ExtensionFactory } from "../extensibility/extensions";
 import { registerAskAnswerSource } from "../tools/ask-answer-registry";
@@ -297,6 +297,15 @@ function buildIdentity(
 	return { repo, branch, machine: os.hostname(), title: sessionName };
 }
 
+/** Compact cwd label for remote session identity; never emits the full host path by default. */
+function compactCwd(cwd: string): string | undefined {
+	const home = os.homedir();
+	const resolved = path.resolve(cwd);
+	if (resolved === home) return "~";
+	const base = path.basename(resolved);
+	return base || path.parse(resolved).root || undefined;
+}
+
 const execFileAsync = promisify(execFile);
 
 /** Best-effort working-tree diff stat for the context update (no throw). */
@@ -339,6 +348,8 @@ interface SessionRuntime {
 	/** Assistant text already flushed before an ask this turn (turn-scoped dedupe
 	 * so turn_end does not re-emit the pre-ask lead-in). Reset each turn. */
 	preAskFlushedText?: string;
+	/** Cancels the postmortem cleanup that emits `session_closed` on process teardown. */
+	cancelPostmortemCleanup: () => void;
 }
 
 interface ResolvedSettings {
@@ -491,6 +502,7 @@ export const createNotificationsExtension: ExtensionFactory = api => {
 		if (!rt) return false;
 		runtimes.delete(id);
 		try {
+			rt.cancelPostmortemCleanup();
 			rt.disposeAnswerSource();
 			rt.disposeFileSink();
 		} catch {}
@@ -671,6 +683,7 @@ export const createNotificationsExtension: ExtensionFactory = api => {
 				pendingInteractive,
 				disposeAnswerSource,
 				disposeFileSink,
+				cancelPostmortemCleanup: () => {},
 				redact,
 				verbosity,
 				sessionTag: tag,
@@ -678,6 +691,15 @@ export const createNotificationsExtension: ExtensionFactory = api => {
 				pendingInbound: new Set<number>(),
 			};
 			runtimes.set(id, runtime);
+			// A native terminal close (SIGHUP), SIGTERM, Ctrl+C exit, or fatal error
+			// skips AgentSession.dispose(), so the `session_shutdown` extension event
+			// never fires and the daemon-side topic would be orphaned. postmortem
+			// awaits registered cleanups on those paths, so send the graceful
+			// `session_closed` frame from there too. stopSession() cancels this
+			// registration on every other teardown path, so it never double-fires.
+			runtime.cancelPostmortemCleanup = postmortem.register(`notifications-session-closed:${id}`, async () => {
+				await stopSession(id);
+			});
 			logger.info(`notifications: serving session ${id} at ${endpoint.url} (unattended=${unattended})`);
 
 			if (settingsAvailable && settings && isGloballyConfigured(cfg)) {
@@ -839,9 +861,15 @@ export const createNotificationsExtension: ExtensionFactory = api => {
 		// Re-bind the interactive ask answer source: the ask tool resolves the
 		// source by the current session id, which just changed.
 		try {
+			rt.cancelPostmortemCleanup();
 			rt.disposeAnswerSource();
 			rt.disposeFileSink();
 		} catch {}
+		// Follow the id change so a later process teardown closes the re-keyed
+		// session (the old closure captured the retired id).
+		rt.cancelPostmortemCleanup = postmortem.register(`notifications-session-closed:${newId}`, async () => {
+			await stopSession(newId);
+		});
 		rt.disposeAnswerSource = registerInteractiveAnswerSource(
 			newId,
 			rt.server,
@@ -973,7 +1001,8 @@ export const createNotificationsExtension: ExtensionFactory = api => {
 			const tokenUsage = usage && usage.tokens != null ? `${usage.tokens}/${usage.contextWindow}` : undefined;
 			const modelId = model?.id;
 			void readGitDiffStat(ctx.cwd).then(diff => {
-				if (!diff && !tokenUsage && !modelId) return;
+				const cwd = compactCwd(ctx.cwd);
+				if (!diff && !tokenUsage && !modelId && !cwd) return;
 				try {
 					rt.server.pushFrame(
 						JSON.stringify({
@@ -982,6 +1011,7 @@ export const createNotificationsExtension: ExtensionFactory = api => {
 							tokenUsage,
 							model: modelId,
 							diff,
+							cwd,
 						}),
 					);
 				} catch (e) {

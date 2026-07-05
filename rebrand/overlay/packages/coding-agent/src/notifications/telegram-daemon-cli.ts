@@ -3,12 +3,19 @@ import * as path from "node:path";
 import { YAML } from "bun";
 import type { Settings } from "../config/settings";
 import { getNotificationConfig, isGloballyConfigured } from "./config";
-import { daemonPaths, TelegramNotificationDaemon } from "./telegram-daemon";
-import { clearTelegramControlRequest, readTelegramControlRequest } from "./telegram-daemon-control";
+import { daemonPaths } from "./daemon-paths";
+import type { TelegramDaemonOptions } from "./telegram-daemon";
+
+type TelegramDaemonRunner = {
+	run(): Promise<void>;
+	requestStop(reason?: "reload" | "signal" | "stop"): void;
+};
+
+type TelegramDaemonConstructor = new (opts: TelegramDaemonOptions) => TelegramDaemonRunner;
 
 export interface RunDaemonInternalDeps {
 	SettingsImpl?: { init: (options?: { agentDir?: string }) => Promise<Pick<Settings, "get" | "getAgentDir">> };
-	DaemonImpl?: typeof TelegramNotificationDaemon;
+	DaemonImpl?: TelegramDaemonConstructor;
 	processPid?: number;
 	pidAlive?: (pid: number) => boolean;
 }
@@ -140,7 +147,9 @@ export async function runDaemonInternal(argv: string[], deps: RunDaemonInternalD
 	const settings = await resolveDaemonSettings(resolvedAgentDir, deps);
 	const cfg = getNotificationConfig(settings as Settings);
 	if (!isGloballyConfigured(cfg) || !cfg.botToken || !cfg.chatId) return;
-	const Daemon = deps.DaemonImpl ?? TelegramNotificationDaemon;
+	const { clearTelegramControlRequest, readTelegramControlRequest } = await import("./telegram-daemon-control");
+	const Daemon: TelegramDaemonConstructor =
+		deps.DaemonImpl ?? (await import("./telegram-daemon")).TelegramNotificationDaemon;
 	const daemon = new Daemon({
 		settings: settings as Settings,
 		ownerId,

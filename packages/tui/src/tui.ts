@@ -341,6 +341,8 @@ export class TUI extends Container {
 	#cursorRow = 0; // Logical cursor row (end of rendered content)
 	#hardwareCursorRow = 0; // Actual terminal cursor row (may differ due to IME positioning)
 	#viewportTopRow = 0; // Content row currently mapped to screen row 0
+	#manualViewportTop: number | undefined;
+	#lastCursorPosition: { row: number; col: number } | null = null;
 	#sixelProbePendingDa = false;
 	#sixelProbePendingGraphics = false;
 	#sixelProbeBuffer = "";
@@ -426,6 +428,47 @@ export class TUI extends Container {
 	setBottomPinnedComponent(component: Component | null): void {
 		this.#bottomPinnedComponent = component;
 		this.requestRender();
+	}
+	scrollViewportPages(direction: -1 | 1): boolean {
+		const height = this.terminal.rows;
+		const width = this.terminal.columns;
+		if (height <= 0 || width <= 0 || this.#previousLines.length === 0) return false;
+		const maxViewportTop = Math.max(0, this.#previousLines.length - height);
+		const currentViewportTop = Math.max(0, Math.min(maxViewportTop, this.#manualViewportTop ?? this.#viewportTopRow));
+		const pageStep = Math.max(1, height - 1);
+		const targetViewportTop = Math.max(0, Math.min(maxViewportTop, currentViewportTop + direction * pageStep));
+
+		if (targetViewportTop >= maxViewportTop) {
+			this.#manualViewportTop = undefined;
+		} else {
+			this.#manualViewportTop = targetViewportTop;
+		}
+
+		const cursorPos = this.#manualViewportTop === undefined ? this.#lastCursorPosition : null;
+		return this.#repaintViewportFromLines(
+			this.#previousLines,
+			width,
+			height,
+			targetViewportTop,
+			cursorPos,
+			"manual viewport scroll",
+		);
+	}
+
+	followLiveViewport(): boolean {
+		if (this.#manualViewportTop === undefined) return false;
+		const height = this.terminal.rows;
+		const width = this.terminal.columns;
+		const liveViewportTop = Math.max(0, this.#previousLines.length - height);
+		this.#manualViewportTop = undefined;
+		return this.#repaintViewportFromLines(
+			this.#previousLines,
+			width,
+			height,
+			liveViewportTop,
+			this.#lastCursorPosition,
+			"manual viewport follow live",
+		);
 	}
 
 	/**
@@ -526,7 +569,7 @@ export class TUI extends Container {
 			data => this.#handleInput(data),
 			() => {
 				this.invalidate();
-				this.requestRender(!(isMultiplexerSession() && !useLegacyMultiplexerFullRender()), "resize");
+				this.requestResizeRender();
 			},
 		);
 		this.#hideCursor();
@@ -768,6 +811,22 @@ export class TUI extends Container {
 		this.#lineTruncationCache.clear();
 		this.#previousWidth = 0;
 		this.#previousHeight = 0;
+	}
+
+	/**
+	 * Multiplexer-aware resize render request.
+	 *
+	 * A forced full redraw (`requestRender(true)`) resets `#previousWidth`/`#previousHeight`
+	 * to -1, which makes `#doRender` treat the frame as a width change and fall into the
+	 * `fullRender` path. In terminal multiplexers that path skips the scrollback-clearing
+	 * `3J` escape (users navigate scrollback history), so replaying every transcript line
+	 * piles it back on top of scrollback — the "top of screen scrolls down to the prompt at
+	 * high speed" resize storm. Here we keep force off in multiplexers so `#doRender`'s
+	 * height-change branch takes the viewport-only `multiplexerViewportRepaint` path instead.
+	 * Set `PI_TUI_LEGACY_MULTIPLEXER_FULL_RENDER=1` to restore the legacy forced redraw.
+	 */
+	requestResizeRender(): void {
+		this.requestRender(!(isMultiplexerSession() && !useLegacyMultiplexerFullRender()), "resize");
 	}
 
 	requestRender(force = false, source = "unknown"): void {
@@ -1345,6 +1404,64 @@ export class TUI extends Container {
 		padded.splice(insertAt, 0, ...Array.from({ length: blankRows }, () => ""));
 		return padded;
 	}
+	#repaintViewportFromLines(
+		lines: string[],
+		width: number,
+		height: number,
+		viewportTop: number,
+		cursorPos: { row: number; col: number } | null,
+		reason: string,
+	): boolean {
+		if (height <= 0 || width <= 0) return false;
+		const maxViewportTop = Math.max(0, lines.length - height);
+		const nextViewportTop = Math.max(0, Math.min(maxViewportTop, viewportTop));
+		const currentScreenRow = Math.max(0, Math.min(height - 1, this.#hardwareCursorRow - this.#viewportTopRow));
+		let buffer = "\x1b[?2026h";
+		if (currentScreenRow > 0) {
+			buffer += `\x1b[${currentScreenRow}A`;
+		}
+		buffer += "\r";
+
+		for (let screenRow = 0; screenRow < height; screenRow++) {
+			if (screenRow > 0) buffer += "\r\n";
+			buffer += "\x1b[2K";
+			const lineIndex = nextViewportTop + screenRow;
+			if (lineIndex >= lines.length) continue;
+			const line = lines[lineIndex];
+			const isImage = TERMINAL.isImageLine(line);
+			if (!isImage && visibleWidth(line) > width) {
+				let truncatedLine = truncateToWidth(line, width, Ellipsis.Omit);
+				truncatedLine += truncatedLine.includes("\x1b]8;") ? LINE_TERMINATOR : SEGMENT_RESET;
+				buffer += truncatedLine;
+			} else {
+				buffer += line;
+			}
+		}
+
+		const finalPhysicalRow = nextViewportTop + Math.max(0, height - 1);
+		let cursorSeq = "\x1b[?25l";
+		let cursorToRow = finalPhysicalRow;
+		if (cursorPos && cursorPos.row >= nextViewportTop && cursorPos.row < nextViewportTop + height) {
+			const cursor = this.#cursorControlSequence(cursorPos, lines.length, finalPhysicalRow);
+			cursorSeq = cursor.seq;
+			cursorToRow = cursor.toRow;
+		}
+		this.#hardwareCursorRow = cursorToRow;
+		buffer += cursorSeq;
+		buffer += "\x1b[?2026l";
+		if (!this.#writeTerminal(buffer)) return false;
+
+		if ($flag("PI_DEBUG_REDRAW")) {
+			const logPath = getDebugLogPath();
+			const msg = `[${new Date().toISOString()}] viewportRepaint: ${reason} (lines=${lines.length}, height=${height}, viewportTop=${nextViewportTop})\n`;
+			fs.appendFileSync(logPath, msg);
+		}
+
+		this.#cursorRow = Math.max(0, lines.length - 1);
+		this.#maxLinesRendered = lines.length;
+		this.#viewportTopRow = nextViewportTop;
+		return true;
+	}
 
 	#doRender(): void {
 		if (this.#stopped || !this.terminalAvailable) return;
@@ -1375,6 +1492,7 @@ export class TUI extends Container {
 
 		// Extract cursor position (marker must be found before diff comparison)
 		const cursorPos = this.#extractCursorPosition(newLines, height);
+		this.#lastCursorPosition = cursorPos;
 
 		// Terminate every non-image line so #previousLines mirrors emitted bytes
 		// (closes SGR + OSC 8 hyperlink state). Must run after cursor extraction
@@ -1435,6 +1553,28 @@ export class TUI extends Container {
 			if (usedWindowNormalize) renderMetrics.recordLineCount("offscreenScan", diffStart);
 		}
 
+		if (this.#manualViewportTop !== undefined) {
+			const maxViewportTop = Math.max(0, newLines.length - height);
+			const nextViewportTop = Math.max(0, Math.min(maxViewportTop, this.#manualViewportTop));
+			const followingLive = nextViewportTop >= maxViewportTop;
+			this.#manualViewportTop = followingLive ? undefined : nextViewportTop;
+			const repaintCursorPos = followingLive ? cursorPos : null;
+			if (
+				this.#repaintViewportFromLines(
+					newLines,
+					width,
+					height,
+					nextViewportTop,
+					repaintCursorPos,
+					"manual viewport render",
+				)
+			) {
+				this.#previousLines = newLines;
+				this.#previousWidth = width;
+				this.#previousHeight = height;
+			}
+			return;
+		}
 		// Helper to clear scrollback and viewport and render all new lines
 		const fullRender = (clear: boolean, reason = "full render"): void => {
 			this.#fullRedrawCount += 1;
@@ -1540,7 +1680,16 @@ export class TUI extends Container {
 		// Width changes always need a full re-render because wrapping changes.
 		if (widthChanged) {
 			logRedraw(`terminal width changed (${this.#previousWidth} -> ${width})`);
-			fullRender(true, "terminal width changed");
+			if (isMultiplexerSession() && !useLegacyMultiplexerFullRender()) {
+				// In multiplexers a full replay piles the whole transcript back onto
+				// scrollback (3J is intentionally skipped). Repaint the viewport only,
+				// mirroring the height-change branch. This also neutralizes the fake
+				// width change that requestRender(true) injects via #previousWidth = -1,
+				// so every force-render call site is safe in multiplexers too.
+				multiplexerViewportRepaint(`terminal width changed (${this.#previousWidth} -> ${width})`);
+			} else {
+				fullRender(true, "terminal width changed");
+			}
 			return;
 		}
 

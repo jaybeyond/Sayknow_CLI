@@ -29,11 +29,23 @@ describe("builtin /copy slash command", () => {
 		const copyCommand = BUILTIN_SLASH_COMMAND_DEFS.find(command => command.name === "copy");
 
 		expect(copyCommand).toBeDefined();
-		expect(copyCommand?.description).toBe("Copy last response as markdown");
+		expect(copyCommand?.description).toBe("Copy the last response for review or sharing");
 		expect(copyCommand?.subcommands).toBeUndefined();
 		expect(copyCommand?.inlineHint).toBeUndefined();
 		expect(BUILTIN_SLASH_COMMAND_DEFS.some(command => command.name === "clear")).toBe(false);
 		expect(BUILTIN_SLASH_COMMANDS_INTERNAL.some(command => command.name === "clear")).toBe(false);
+	});
+
+	it("surfaces beginner session commands with clear labels", () => {
+		const helpCommand = BUILTIN_SLASH_COMMAND_DEFS.find(command => command.name === "help");
+		const newCommand = BUILTIN_SLASH_COMMAND_DEFS.find(command => command.name === "new");
+		const sessionCommand = BUILTIN_SLASH_COMMAND_DEFS.find(command => command.name === "session");
+
+		expect(helpCommand?.description).toContain("beginner workflows");
+		expect(helpCommand?.priority).toBeGreaterThan(newCommand?.priority ?? 0);
+		expect(newCommand?.description).toBe("Start a new session");
+		expect(sessionCommand?.description).toBe("Show current session info or delete current session");
+		expect(sessionCommand?.subcommands?.map(command => command.name)).toEqual(["info", "delete"]);
 	});
 
 	it("dispatches zero-argument /copy to the existing copy controller path", async () => {

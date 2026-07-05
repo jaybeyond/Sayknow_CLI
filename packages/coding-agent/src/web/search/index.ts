@@ -16,7 +16,7 @@ import { discoverAuthStorage } from "../../sdk";
 import type { ToolSession } from "../../tools";
 import { formatAge } from "../../tools/render-utils";
 import { throwIfAborted } from "../../tools/tool-errors";
-import { getSearchProviderLabel, resolveProviderChain, type SearchProvider } from "./provider";
+import { getSearchProviderLabel, prewarmSearchProviders, resolveProviderChain, type SearchProvider } from "./provider";
 import { renderSearchCall, renderSearchResult, type SearchRenderDetails } from "./render";
 import type { ActiveSearchModelContext, SearchProviderId, SearchResponse } from "./types";
 import { SearchProviderError } from "./types";
@@ -66,6 +66,18 @@ function formatProviderError(error: unknown, provider: SearchProvider): string {
 	}
 	if (error instanceof Error) return error.message;
 	return `Unknown error from ${provider.label}`;
+}
+
+function formatProviderFailure(error: unknown, provider: SearchProvider): string {
+	if (error instanceof SearchProviderError) return error.message;
+	return `${provider.id}: ${formatProviderError(error, provider)}`;
+}
+
+function formatFallbackWarning(
+	failures: Array<{ provider: SearchProvider; error: unknown }>,
+	provider: SearchProvider,
+): string {
+	return `Web search provider fallback: ${failures.map(f => formatProviderFailure(f.error, f.provider)).join("; ")}; using ${provider.label}.`;
 }
 
 /** Truncate text for tool output */
@@ -136,6 +148,22 @@ interface ExecuteSearchOptions {
 	activeModelContext?: ActiveSearchModelContext;
 }
 
+/**
+ * Delay before the keyless DuckDuckGo hedge fires while a slower primary is
+ * still in flight. Chosen to be comfortably above DDG's typical ~1-2s
+ * round-trip cost budget yet far below LLM-mediated primary latency, so a
+ * failing primary can fall back to an already-completed hedge result instead
+ * of paying primary-failure time plus DDG time sequentially.
+ */
+const DDG_HEDGE_DELAY_MS = 3_000;
+
+let ddgHedgeDelayMs = DDG_HEDGE_DELAY_MS;
+
+/** Override the hedge delay (tests). Non-finite/non-positive resets to default. */
+export function setDdgHedgeDelayMs(ms: number | undefined): void {
+	ddgHedgeDelayMs = typeof ms === "number" && Number.isFinite(ms) && ms > 0 ? ms : DDG_HEDGE_DELAY_MS;
+}
+
 /** Execute web search */
 async function executeSearch(
 	_toolCallId: string,
@@ -154,51 +182,91 @@ async function executeSearch(
 		activeModelContext,
 	});
 
+	const baseSearchParams = {
+		query: params.query.replace(/202\d/g, String(new Date().getFullYear())), // LUL
+		limit: params.limit,
+		recency: params.recency,
+		systemPrompt: webSearchSystemPrompt,
+		maxOutputTokens: params.max_tokens,
+		numSearchResults: params.num_search_results,
+		temperature: params.temperature,
+		xaiSearchMode: params.xai_search_mode,
+		allowedDomains: params.allowed_domains,
+		excludedDomains: params.excluded_domains,
+		allowedXHandles: params.allowed_x_handles,
+		excludedXHandles: params.excluded_x_handles,
+		fromDate: params.from_date,
+		toDate: params.to_date,
+		enableImageUnderstanding: params.enable_image_understanding,
+		enableImageSearch: params.enable_image_search,
+		enableVideoUnderstanding: params.enable_video_understanding,
+		noInlineCitations: params.no_inline_citations,
+		authStorage,
+		sessionId,
+		activeModelContext,
+	};
+
+	// Hedged fallback: when DuckDuckGo (keyless, cheap) is a non-primary member
+	// of the chain, start it in the background after a short delay. If the
+	// primary succeeds first the hedge is aborted; if the primary fails, the
+	// hedge result is typically already available, collapsing the fallback
+	// latency from `t(primary failure) + t(ddg)` to `max(t(primary failure), t(ddg))`.
+	const ddgIndex = providers.findIndex(p => p.id === "duckduckgo");
+	const hedgeCtl = new AbortController();
+	const onUpstreamAbort = () => hedgeCtl.abort();
+	signal?.addEventListener("abort", onUpstreamAbort, { once: true });
+	let hedgePromise: Promise<SearchResponse> | undefined;
+	let hedgeTimer: NodeJS.Timeout | undefined;
+	if (ddgIndex > 0) {
+		const ddg = providers[ddgIndex]!;
+		hedgeTimer = setTimeout(() => {
+			hedgePromise = ddg.search({ ...baseSearchParams, signal: hedgeCtl.signal });
+			// Failures are consumed when (and if) the loop reaches DuckDuckGo;
+			// never let a losing hedge become an unhandled rejection.
+			hedgePromise.catch(() => {});
+		}, ddgHedgeDelayMs);
+	}
+	const cancelHedge = () => {
+		if (hedgeTimer !== undefined) clearTimeout(hedgeTimer);
+		hedgeCtl.abort();
+		signal?.removeEventListener("abort", onUpstreamAbort);
+	};
+
 	const failures: Array<{ provider: SearchProvider; error: unknown }> = [];
 	let lastProvider = providers[0];
-	for (const provider of providers) {
-		lastProvider = provider;
-		try {
-			const response = await provider.search({
-				query: params.query.replace(/202\d/g, String(new Date().getFullYear())), // LUL
-				limit: params.limit,
-				recency: params.recency,
-				systemPrompt: webSearchSystemPrompt,
-				maxOutputTokens: params.max_tokens,
-				numSearchResults: params.num_search_results,
-				temperature: params.temperature,
-				xaiSearchMode: params.xai_search_mode,
-				allowedDomains: params.allowed_domains,
-				excludedDomains: params.excluded_domains,
-				allowedXHandles: params.allowed_x_handles,
-				excludedXHandles: params.excluded_x_handles,
-				fromDate: params.from_date,
-				toDate: params.to_date,
-				enableImageUnderstanding: params.enable_image_understanding,
-				enableImageSearch: params.enable_image_search,
-				enableVideoUnderstanding: params.enable_video_understanding,
-				noInlineCitations: params.no_inline_citations,
-				signal,
-				authStorage,
-				sessionId,
-				activeModelContext,
-			});
+	try {
+		for (const provider of providers) {
+			lastProvider = provider;
+			try {
+				let response: SearchResponse;
+				if (provider.id === "duckduckgo" && hedgePromise) {
+					// Reuse the in-flight (often already-settled) hedge request.
+					if (hedgeTimer !== undefined) clearTimeout(hedgeTimer);
+					response = await hedgePromise;
+				} else {
+					if (provider.id === "duckduckgo" && hedgeTimer !== undefined) clearTimeout(hedgeTimer);
+					response = await provider.search({ ...baseSearchParams, signal });
+				}
 
-			const text = formatForLLM(response);
+				const text = formatForLLM(response);
+				const warning = failures.length > 0 ? formatFallbackWarning(failures, provider) : undefined;
 
-			return {
-				content: [{ type: "text" as const, text }],
-				details: { response },
-			};
-		} catch (error) {
-			// Surface user-initiated cancellation immediately so the session sees
-			// a clean abort instead of a generic "all providers failed" message.
-			// Without this, an AbortError from `fetch()` is treated as a provider
-			// failure and the loop falls through to the next provider (or to the
-			// summary error), masking the cancellation.
-			throwIfAborted(signal);
-			failures.push({ provider, error });
+				return {
+					content: [{ type: "text" as const, text: warning ? `Warning: ${warning}\n\n${text}` : text }],
+					details: { response, ...(warning ? { warning } : {}) },
+				};
+			} catch (error) {
+				// Surface user-initiated cancellation immediately so the session sees
+				// a clean abort instead of a generic "all providers failed" message.
+				// Without this, an AbortError from `fetch()` is treated as a provider
+				// failure and the loop falls through to the next provider (or to the
+				// summary error), masking the cancellation.
+				throwIfAborted(signal);
+				failures.push({ provider, error });
+			}
 		}
+	} finally {
+		cancelHedge();
 	}
 
 	const lastFailure = failures[failures.length - 1];
@@ -207,13 +275,7 @@ async function executeSearch(
 		: `Unknown error from ${lastProvider.label}`;
 	const message =
 		providers.length > 1
-			? `All web search providers failed: ${failures
-					.map(f =>
-						f.error instanceof SearchProviderError
-							? f.error.message
-							: `${f.provider.id}: ${formatProviderError(f.error, f.provider)}`,
-					)
-					.join("; ")}`
+			? `All web search providers failed: ${failures.map(f => formatProviderFailure(f.error, f.provider)).join("; ")}`
 			: baseMessage;
 
 	return {
@@ -266,6 +328,24 @@ export class WebSearchTool implements AgentTool<typeof webSearchSchema, SearchRe
 	constructor(session: ToolSession) {
 		this.#session = session;
 		this.description = prompt.render(webSearchDescription);
+		// Prewarm: resolve the provider chain once in the background so the
+		// provider modules are imported and the chain cache is primed before
+		// the first user-visible search. Best-effort only.
+		const authStorage = session.authStorage;
+		if (authStorage) {
+			try {
+				const activeModelContext = session.model
+					? session.modelRegistry?.getActiveSearchModelContext(session.model)
+					: undefined;
+				prewarmSearchProviders({
+					authStorage,
+					sessionId: session.getSessionId?.() ?? undefined,
+					activeModelContext,
+				});
+			} catch {
+				// Never let prewarming break tool construction.
+			}
+		}
 	}
 
 	async execute(
@@ -321,7 +401,12 @@ export function getSearchTools(): CustomTool<any, any>[] {
 	return [webSearchCustomTool];
 }
 
-export { getSearchProvider, setPreferredSearchProvider, setSearchFallbackProviders } from "./provider";
-export { setSearchHardTimeoutMs } from "./providers/utils";
+export {
+	getConfiguredSearchProviderPreference,
+	getSearchProvider,
+	setPreferredSearchProvider,
+	setSearchFallbackProviders,
+} from "./provider";
+export { applyConfiguredSearchTimeout, setSearchHardTimeoutMs } from "./providers/utils";
 export type { SearchProviderId as SearchProvider, SearchResponse } from "./types";
 export { isConfigurableSearchProviderId, isSearchProviderPreference } from "./types";

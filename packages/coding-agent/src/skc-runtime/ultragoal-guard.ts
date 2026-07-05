@@ -69,9 +69,12 @@ function isKnownUltragoalObjective(currentObjective: string): boolean {
 	);
 }
 
-async function ultragoalReadPaths(cwd: string): Promise<{ paths: UltragoalPaths; sessionId: string | null }> {
-	const envSessionId = process.env.SKC_SESSION_ID?.trim();
-	if (envSessionId) return { paths: getUltragoalPaths(cwd, envSessionId), sessionId: envSessionId };
+async function ultragoalReadPaths(
+	cwd: string,
+	options: { sessionId?: string | null } = {},
+): Promise<{ paths: UltragoalPaths; sessionId: string | null }> {
+	const explicitSessionId = options.sessionId?.trim() || process.env.SKC_SESSION_ID?.trim();
+	if (explicitSessionId) return { paths: getUltragoalPaths(cwd, explicitSessionId), sessionId: explicitSessionId };
 	try {
 		const session = await resolveSkcSessionForRead(cwd, { envSessionId: process.env.SKC_SESSION_ID });
 		return { paths: getUltragoalPaths(cwd, session.skcSessionId), sessionId: session.skcSessionId };
@@ -250,13 +253,6 @@ export function validateCompletionReceipt(input: {
 			goalId: input.goal.id,
 		};
 	}
-	if (hashStructuredValue(event.skcGoalJson) !== receipt.skcGoalSnapshotHash) {
-		return {
-			state: "active_stale_receipt",
-			message: `Ultragoal ${input.goal.id} receipt goal({"op":"get"}) snapshot hash does not match ledger.`,
-			goalId: input.goal.id,
-		};
-	}
 	if (input.goal.updatedAt !== receipt.verifiedAt) {
 		return {
 			state: "active_stale_receipt",
@@ -273,15 +269,28 @@ export function validateCompletionReceipt(input: {
 				goalId: input.goal.id,
 			};
 		}
-		const missingReceipts = requiredGoals(input.plan).filter(
-			goal => goal.id !== input.goal.id && !goal.completionVerification,
-		);
-		if (missingReceipts.length > 0) {
-			return {
-				state: "active_missing_receipt",
-				message: `Ultragoal final receipt is missing per-goal evidence for: ${missingReceipts.map(goal => goal.id).join(", ")}.`,
-				goalId: input.goal.id,
-			};
+		for (const priorGoal of requiredGoals(input.plan)) {
+			if (priorGoal.id === input.goal.id) continue;
+			if (!priorGoal.completionVerification) {
+				return {
+					state: "active_missing_receipt",
+					message: `Ultragoal final receipt is missing per-goal evidence for: ${priorGoal.id}.`,
+					goalId: input.goal.id,
+				};
+			}
+			const priorDiagnostic = validateCompletionReceipt({
+				plan: input.plan,
+				ledger: input.ledger,
+				goal: priorGoal,
+				receiptKind: "per-goal",
+			});
+			if (priorDiagnostic.state !== "active_verified_complete") {
+				return {
+					state: priorDiagnostic.state,
+					message: `Ultragoal final receipt requires a valid per-goal receipt for ${priorGoal.id}: ${priorDiagnostic.message}`,
+					goalId: input.goal.id,
+				};
+			}
 		}
 	}
 	return {
@@ -372,11 +381,128 @@ export async function readUltragoalVerificationState(input: {
 	return receiptDiagnostic;
 }
 
-export async function isUltragoalAskBlocked(cwd: string): Promise<UltragoalAskBlockDiagnostic> {
+export async function verifyUltragoalDurableCompletionState(input: {
+	cwd: string;
+	sessionId?: string | null;
+}): Promise<UltragoalGuardDiagnostic> {
 	let paths: UltragoalPaths;
 	let sessionId: string | null;
 	try {
-		({ paths, sessionId } = await ultragoalReadPaths(cwd));
+		({ paths, sessionId } = await ultragoalReadPaths(input.cwd, { sessionId: input.sessionId }));
+	} catch (error) {
+		return {
+			state: "unreadable_fail_closed",
+			message: `Unable to resolve durable Ultragoal state: ${error instanceof Error ? error.message : String(error)}`,
+		};
+	}
+	if (sessionId === null)
+		return { state: "inactive", message: "No active SKC session resolved; ultragoal is inactive." };
+	try {
+		await fs.stat(paths.dir);
+	} catch (error) {
+		if (isEnoent(error)) return { state: "inactive", message: "No durable .skc/ultragoal state exists." };
+		return {
+			state: "unreadable_fail_closed",
+			message: `Durable .skc/ultragoal state is present but unreadable: ${error instanceof Error ? error.message : String(error)}`,
+		};
+	}
+
+	let plan: UltragoalPlan | null;
+	let ledger: UltragoalLedgerEvent[];
+	try {
+		plan = await readUltragoalPlan(input.cwd, sessionId);
+		ledger = await readUltragoalLedger(input.cwd, sessionId);
+	} catch (error) {
+		return {
+			state: "unreadable_fail_closed",
+			message: `Unable to read durable Ultragoal state: ${error instanceof Error ? error.message : String(error)}`,
+		};
+	}
+	if (!plan) return { state: "inactive", message: "No Ultragoal plan exists." };
+
+	if (plan.goals.some(goal => goal.status === "review_blocked")) {
+		return {
+			state: "active_review_blocked_recorded",
+			message: "Ultragoal has recorded review blockers; complete blocker work and rerun verification.",
+		};
+	}
+
+	const runState = getUltragoalRunCompletionState(plan);
+	if (runState.incompleteGoals.some(goal => goal.status === "blocked" || goal.status === "failed")) {
+		return {
+			state: "active_dirty_quality_gate",
+			message: "Ultragoal has blocked or failed goals; record blockers or rerun verification.",
+		};
+	}
+
+	if (plan.skcGoalMode === "per-story") {
+		const incomplete = requiredGoals(plan).filter(goal => goal.status !== "complete");
+		if (incomplete.length > 0) {
+			return {
+				state: "active_missing_receipt",
+				message: `Ultragoal per-story completion requires all required stories to be complete; incomplete: ${incomplete.map(goal => goal.id).join(", ")}.`,
+				goalId: incomplete[0]?.id,
+			};
+		}
+		for (const goal of requiredGoals(plan)) {
+			const diagnostic = validateCompletionReceipt({
+				plan,
+				ledger,
+				goal,
+				receiptKind: "per-goal",
+			});
+			if (diagnostic.state !== "active_verified_complete") return diagnostic;
+		}
+		return {
+			state: "active_verified_complete",
+			message: "Ultragoal per-story run is verified complete.",
+		};
+	}
+
+	const ask = await isUltragoalAskBlocked(input.cwd, { sessionId });
+	if (!ask.active) {
+		return {
+			state: "active_verified_complete",
+			message: ask.reason,
+			goalId: ask.goalIds?.at(0),
+		};
+	}
+	if (ask.source === "durable_state_unreadable") {
+		return {
+			state: "unreadable_fail_closed",
+			message: ask.reason,
+			goalId: ask.goalIds?.at(0),
+		};
+	}
+	if (ask.reason.includes("recorded review blockers")) {
+		return {
+			state: "active_review_blocked_recorded",
+			message: ask.reason,
+			goalId: ask.goalIds?.at(0),
+		};
+	}
+	if (ask.reason.includes("incomplete required goals")) {
+		return {
+			state: "active_missing_final_receipt",
+			message: ask.reason,
+			goalId: ask.goalIds?.at(0),
+		};
+	}
+	return {
+		state: "active_missing_final_receipt",
+		message: ask.reason,
+		goalId: ask.goalIds?.at(0),
+	};
+}
+
+export async function isUltragoalAskBlocked(
+	cwd: string,
+	options: { sessionId?: string | null } = {},
+): Promise<UltragoalAskBlockDiagnostic> {
+	let paths: UltragoalPaths;
+	let sessionId: string | null;
+	try {
+		({ paths, sessionId } = await ultragoalReadPaths(cwd, options));
 	} catch (error) {
 		return activeAskDiagnostic({
 			reason: `Unable to resolve durable Ultragoal state: ${error instanceof Error ? error.message : String(error)}`,
@@ -594,8 +720,8 @@ export async function assertCanCompleteCurrentGoal(input: {
 	sessionId?: string | null;
 }): Promise<void> {
 	if (!input.cwd) return;
-	const diagnostic = await readUltragoalVerificationState(input);
-	if (["inactive", "unrelated_goal", "active_verified_complete"].includes(diagnostic.state)) return;
+	const diagnostic = await verifyUltragoalDurableCompletionState(input);
+	if (["inactive", "active_verified_complete"].includes(diagnostic.state)) return;
 	const nudge = await consumeUltragoalNudge({
 		cwd: input.cwd,
 		surface: "premature_complete",
@@ -604,7 +730,7 @@ export async function assertCanCompleteCurrentGoal(input: {
 	});
 	if (nudge.nudged) throw new Error(nudge.message);
 	throw new Error(
-		`${diagnostic.message} Run strict \`skc ultragoal checkpoint --status complete --quality-gate-json <file> --skc-goal-json <file>\` first, or record review blockers and rerun verification.`,
+		`${diagnostic.message} Run \`skc ultragoal checkpoint --status complete --quality-gate-json <file>\` first, or record review blockers and rerun verification.`,
 	);
 }
 

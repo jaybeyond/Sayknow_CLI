@@ -3,9 +3,9 @@ contact_links:
   - name: Model Configuration
     url: https://github.com/jaybeyond/Sayknow_CLI/blob/main/docs/models.md
     about: How to add custom providers and models via models.yml
-  - name: Extensions Guide
-    url: https://github.com/jaybeyond/Sayknow_CLI/blob/main/docs/extensions.md
-    about: Build custom tools, commands, and integrations
+  - name: Plugin Bundles
+    url: https://github.com/jaybeyond/Sayknow_CLI/blob/main/docs/skc-plugins.md
+    about: Build and distribute SKC plugin bundles
   - name: Skills Documentation
-    url: https://github.com/jaybeyond/Sayknow_CLI/blob/main/docs/skills.md
-    about: How to create and use skills
+    url: https://sayknow-cli.com/docs/skills.html
+    about: Create and use workflow skills

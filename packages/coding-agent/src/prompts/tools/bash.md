@@ -33,7 +33,7 @@ This session's bash tool is restricted. It only accepts commands beginning with:
 {{#each restrictedAllowedPrefixes}}
 - `{{this}}`
 {{/each}}
-Use it only for sanctioned SKC workflow CLI persistence or state read/write/contract operations; per-command env overrides and all other shell command shapes are blocked before execution.
+Use it only for sanctioned SKC workflow CLI persistence or state read/write/contract operations; the only per-command env override allowed is `SKC_RALPLAN_ARTIFACT` when paired with `skc ralplan --write ... --artifact-env SKC_RALPLAN_ARTIFACT`, and all other shell command shapes are blocked before execution.
 {{/when}}
 </restricted-bash-mode>
 {{/if}}

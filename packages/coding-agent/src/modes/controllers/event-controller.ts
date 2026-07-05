@@ -138,6 +138,7 @@ export class EventController {
 			this.ctx.editor.onEscape = this.ctx.retryEscapeHandler;
 			this.ctx.retryEscapeHandler = undefined;
 		}
+		this.ctx.retryEscapePrimed = false;
 		if (this.ctx.retryLoader) {
 			this.ctx.retryLoader.stop();
 			this.ctx.retryLoader = undefined;
@@ -241,6 +242,7 @@ export class EventController {
 			this.ctx.retryLoader = undefined;
 			this.ctx.statusContainer.clear();
 		}
+		this.ctx.retryEscapePrimed = false;
 		this.#cancelIdleCompaction();
 		this.ctx.updateEditorBorderColor();
 		this.ctx.ensureLoadingAnimation();
@@ -768,6 +770,7 @@ export class EventController {
 		if (!this.ctx.retryEscapeHandler) {
 			this.ctx.retryEscapeHandler = this.ctx.editor.onEscape;
 		}
+		this.ctx.retryEscapePrimed = false;
 		let escPressed = false;
 		this.ctx.editor.onEscape = () => {
 			if (!escPressed) {
@@ -818,6 +821,7 @@ export class EventController {
 			this.ctx.retryLoader = undefined;
 			this.ctx.statusContainer.clear();
 		}
+		this.ctx.retryEscapePrimed = false;
 		if (!event.success) {
 			this.ctx.showError(`Retry failed after ${event.attempt} attempts: ${event.finalError || "Unknown error"}`);
 		}

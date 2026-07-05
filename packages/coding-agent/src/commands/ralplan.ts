@@ -8,6 +8,7 @@ export default class Ralplan extends Command {
 		'$ skc ralplan "<task description>"',
 		'$ skc ralplan --interactive --deliberate "<task description>"',
 		'$ skc ralplan --write --stage planner --stage_n 1 --artifact "<markdown or path>"',
+		"$ skc ralplan --write --stage critic --stage_n 1 --artifact-env SKC_RALPLAN_ARTIFACT",
 	];
 
 	async run(): Promise<void> {

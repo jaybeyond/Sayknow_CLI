@@ -10,10 +10,8 @@ import {
 	sessionUltragoalDir,
 } from "@sayknow-cli/coding-agent/skc-runtime/session-layout";
 import { reconcileWorkflowSkillState } from "@sayknow-cli/coding-agent/skc-runtime/state-runtime";
-import {
-	assertCanCompleteCurrentGoal,
-	validateCompletionReceipt,
-} from "@sayknow-cli/coding-agent/skc-runtime/ultragoal-guard";
+import { validateCompletionReceipt } from "@sayknow-cli/coding-agent/skc-runtime/ultragoal-guard";
+
 import {
 	addUltragoalSubgoal,
 	buildUltragoalHudSummary,
@@ -336,7 +334,7 @@ function cliExecutorQa(artifactRefs: Record<string, unknown>[]): Record<string, 
 }
 
 async function expectRejectedExecutorQa(root: string, executorQa: Record<string, unknown>): Promise<string> {
-	const created = await createUltragoalPlan({ cwd: root, brief: "Ship CLI replay" });
+	await createUltragoalPlan({ cwd: root, brief: "Ship CLI replay" });
 	await startNextUltragoalGoal({ cwd: root });
 	const result = await runNativeUltragoalCommand(
 		[
@@ -347,8 +345,6 @@ async function expectRejectedExecutorQa(root: string, executorQa: Record<string,
 			"complete",
 			"--evidence",
 			"focused CLI replay gate check",
-			"--skc-goal-json",
-			goalSnapshot(created.skcObjective),
 			"--quality-gate-json",
 			JSON.stringify({ ...JSON.parse(passingQualityGate()), executorQa }),
 		],
@@ -359,7 +355,7 @@ async function expectRejectedExecutorQa(root: string, executorQa: Record<string,
 }
 
 async function expectAcceptedExecutorQa(root: string, executorQa: Record<string, unknown>): Promise<void> {
-	const created = await createUltragoalPlan({ cwd: root, brief: "Ship CLI replay" });
+	await createUltragoalPlan({ cwd: root, brief: "Ship CLI replay" });
 	await startNextUltragoalGoal({ cwd: root });
 	const result = await runNativeUltragoalCommand(
 		[
@@ -370,8 +366,6 @@ async function expectAcceptedExecutorQa(root: string, executorQa: Record<string,
 			"complete",
 			"--evidence",
 			"focused CLI replay gate check",
-			"--skc-goal-json",
-			goalSnapshot(created.skcObjective),
 			"--quality-gate-json",
 			JSON.stringify({ ...JSON.parse(passingQualityGate()), executorQa }),
 		],
@@ -402,92 +396,6 @@ function webExecutorQa(overrides: Record<string, unknown> = {}): Record<string, 
 async function passingLiveQualityGate(root: string): Promise<string> {
 	await writeStructuralArtifacts(root);
 	return passingQualityGate();
-}
-
-function goalSnapshot(objective: string, status = "active", updatedAt: number | string = Date.now()): string {
-	return JSON.stringify({
-		goal: {
-			threadId: "test-thread",
-			objective,
-			status,
-			createdAt: updatedAt,
-			updatedAt,
-		},
-	});
-}
-
-async function seedGoalModeSessionFile(root: string, objective: string, status = "active"): Promise<string> {
-	const sessionFile = path.join(root, "session.jsonl");
-	const now = Date.now();
-	await Bun.write(
-		sessionFile,
-		`${JSON.stringify({ version: 3, type: "session", id: TEST_SESSION_ID, createdAt: new Date(now).toISOString() })}\n${JSON.stringify(
-			{
-				type: "mode_change",
-				id: "goal-mode",
-				parentId: null,
-				timestamp: new Date(now).toISOString(),
-				mode: "goal",
-				data: {
-					goal: {
-						id: "goal-1",
-						objective,
-						status,
-						tokensUsed: 0,
-						timeUsedSeconds: 0,
-						createdAt: now,
-						updatedAt: now,
-					},
-				},
-			},
-		)}\n`,
-	);
-	process.env.SKC_SESSION_FILE = sessionFile;
-	return sessionFile;
-}
-
-async function seedAmbiguousGoalModeSessionFile(root: string, objective: string): Promise<string> {
-	const sessionFile = path.join(root, "ambiguous-session.jsonl");
-	const now = Date.now();
-	const staleMatchingGoal = {
-		id: "stale-goal",
-		objective,
-		status: "active",
-		tokensUsed: 0,
-		timeUsedSeconds: 0,
-		createdAt: now,
-		updatedAt: now,
-	};
-	const intendedBranchGoal = { ...staleMatchingGoal, id: "intended-goal", objective: "different active branch goal" };
-	const entries = [
-		{ version: 3, type: "session", id: TEST_SESSION_ID, timestamp: new Date(now).toISOString(), cwd: root },
-		{
-			type: "mode_change",
-			id: "root-goal",
-			parentId: null,
-			timestamp: new Date(now).toISOString(),
-			mode: "goal",
-			data: { goal: intendedBranchGoal },
-		},
-		{
-			type: "mode_change",
-			id: "intended-branch",
-			parentId: "root-goal",
-			timestamp: new Date(now).toISOString(),
-			mode: "none",
-		},
-		{
-			type: "mode_change",
-			id: "stale-matching-branch",
-			parentId: "root-goal",
-			timestamp: new Date(now).toISOString(),
-			mode: "goal",
-			data: { goal: staleMatchingGoal },
-		},
-	];
-	await Bun.write(sessionFile, `${entries.map(entry => JSON.stringify(entry)).join("\n")}\n`);
-	process.env.SKC_SESSION_FILE = sessionFile;
-	return sessionFile;
 }
 
 async function readJsonFile(filePath: string): Promise<Record<string, unknown>> {
@@ -589,7 +497,7 @@ async function mutateLiveQualityGate(
 
 async function expectRejectedCompleteGate(
 	root: string,
-	created: { skcObjective: string },
+	_created: { skcObjective: string },
 	qualityGateJson: string,
 ): Promise<string> {
 	const beforeGoals = await Bun.file(path.join(sessionUltragoalDir(root, TEST_SESSION_ID), "goals.json")).text();
@@ -603,8 +511,6 @@ async function expectRejectedCompleteGate(
 			"complete",
 			"--evidence",
 			"tests passed",
-			"--skc-goal-json",
-			goalSnapshot(created.skcObjective),
 			"--quality-gate-json",
 			qualityGateJson,
 		],
@@ -616,22 +522,6 @@ async function expectRejectedCompleteGate(
 		beforeLedger,
 	);
 	return result.stderr ?? "";
-}
-
-function goalToolSnapshot(objective: string, status = "active", updatedAt: number | string = Date.now()): string {
-	return JSON.stringify({
-		content: [{ type: "text", text: `Goal: ${objective}` }],
-		details: {
-			op: "get",
-			goal: {
-				threadId: "test-thread",
-				objective,
-				status,
-				createdAt: updatedAt,
-				updatedAt,
-			},
-		},
-	});
 }
 
 async function expectRejectedSteering(root: string, args: string[], kind: string): Promise<string> {
@@ -952,7 +842,7 @@ describe("native SKC ultragoal runtime", () => {
 
 	it("prints receipt-only json for checkpoint", async () => {
 		const root = await tempDir();
-		const created = await createUltragoalPlan({ cwd: root, brief: "Ship the fix" });
+		await createUltragoalPlan({ cwd: root, brief: "Ship the fix" });
 		await startNextUltragoalGoal({ cwd: root });
 
 		const result = await runNativeUltragoalCommand(
@@ -964,8 +854,6 @@ describe("native SKC ultragoal runtime", () => {
 				"complete",
 				"--evidence",
 				"tests passed",
-				"--skc-goal-json",
-				goalSnapshot(created.skcObjective),
 				"--quality-gate-json",
 				await passingLiveQualityGate(root),
 				"--json",
@@ -994,7 +882,7 @@ describe("native SKC ultragoal runtime", () => {
 		expect(result.status).toBe(0);
 		expect(result.stdout).toContain("skc ultragoal checkpoint --goal-id");
 		expect(result.stdout).toContain("--quality-gate-json");
-		expect(result.stdout).toContain("current session goal state");
+		expect(result.stdout).toContain("COMPLETE CHECKPOINT RECEIPTS");
 		expect(result.stdout).toContain("obligation");
 	});
 
@@ -1361,7 +1249,7 @@ describe("native SKC ultragoal runtime", () => {
 
 	it("prints receipt-only json for review blockers", async () => {
 		const root = await tempDir();
-		const created = await createUltragoalPlan({ cwd: root, brief: "Ship the fix" });
+		await createUltragoalPlan({ cwd: root, brief: "Ship the fix" });
 		await startNextUltragoalGoal({ cwd: root });
 
 		const result = await runNativeUltragoalCommand(
@@ -1375,8 +1263,6 @@ describe("native SKC ultragoal runtime", () => {
 				"Fix architect and executor QA findings.",
 				"--evidence",
 				"architect found product regression",
-				"--skc-goal-json",
-				goalSnapshot(created.skcObjective),
 				"--json",
 			],
 			root,
@@ -1394,7 +1280,7 @@ describe("native SKC ultragoal runtime", () => {
 
 	it("starts and checkpoints the current goal", async () => {
 		const root = await tempDir();
-		const created = await createUltragoalPlan({ cwd: root, brief: "Ship the fix" });
+		await createUltragoalPlan({ cwd: root, brief: "Ship the fix" });
 
 		const started = await startNextUltragoalGoal({ cwd: root });
 		expect(started.goal?.status).toBe("active");
@@ -1403,7 +1289,6 @@ describe("native SKC ultragoal runtime", () => {
 			goalId: "G001",
 			status: "complete",
 			evidence: "tests passed",
-			skcGoalJson: goalSnapshot(created.skcObjective),
 			qualityGateJson: await passingLiveQualityGate(root),
 		});
 		const status = await getUltragoalStatus(root);
@@ -1473,9 +1358,9 @@ describe("native SKC ultragoal runtime", () => {
 		expect(await countCheckpoints()).toBe(2);
 	});
 
-	it("accepts full goal get tool result snapshots with millisecond timestamps", async () => {
+	it("completes from durable active goal state", async () => {
 		const root = await tempDir();
-		const created = await createUltragoalPlan({ cwd: root, brief: "Ship the fix" });
+		await createUltragoalPlan({ cwd: root, brief: "Ship the fix" });
 		await startNextUltragoalGoal({ cwd: root });
 
 		const plan = await checkpointUltragoalGoal({
@@ -1483,17 +1368,15 @@ describe("native SKC ultragoal runtime", () => {
 			goalId: "G001",
 			status: "complete",
 			evidence: "tests passed",
-			skcGoalJson: goalToolSnapshot(created.skcObjective),
 			qualityGateJson: await passingLiveQualityGate(root),
 		});
 
 		expect(plan.goals[0]?.status).toBe("complete");
-		expect(plan.goals[0]?.completionVerification?.skcGoalSnapshotHash).toBeTruthy();
 	});
 
-	it("accepts ISO goal snapshot timestamps after normalizing freshness", async () => {
+	it("completes without goal snapshot freshness input", async () => {
 		const root = await tempDir();
-		const created = await createUltragoalPlan({ cwd: root, brief: "Ship the fix" });
+		await createUltragoalPlan({ cwd: root, brief: "Ship the fix" });
 		await startNextUltragoalGoal({ cwd: root });
 
 		const plan = await checkpointUltragoalGoal({
@@ -1501,15 +1384,13 @@ describe("native SKC ultragoal runtime", () => {
 			goalId: "G001",
 			status: "complete",
 			evidence: "tests passed",
-			skcGoalJson: goalSnapshot(created.skcObjective, "active", new Date().toISOString()),
 			qualityGateJson: await passingLiveQualityGate(root),
 		});
 
 		expect(plan.goals[0]?.status).toBe("complete");
-		expect(plan.goals[0]?.completionVerification?.skcGoalSnapshotHash).toBeTruthy();
 	});
 
-	it("accepts per-story goal get snapshots for per-story plans", async () => {
+	it("accepts per-story durable active goals for per-story plans", async () => {
 		const root = await tempDir();
 		const created = await createUltragoalPlan({ cwd: root, brief: "Ship the fix", skcGoalMode: "per-story" });
 		await startNextUltragoalGoal({ cwd: root });
@@ -1521,7 +1402,6 @@ describe("native SKC ultragoal runtime", () => {
 			goalId: "G001",
 			status: "complete",
 			evidence: "tests passed",
-			skcGoalJson: goalSnapshot(storyObjective),
 			qualityGateJson: await passingLiveQualityGate(root),
 		});
 
@@ -1530,7 +1410,7 @@ describe("native SKC ultragoal runtime", () => {
 	});
 	it("continues to next ultragoal goal after checkpointing G001 complete", async () => {
 		const root = await tempDir();
-		const created = await createUltragoalPlan({ cwd: root, brief: "Ship the fix" });
+		await createUltragoalPlan({ cwd: root, brief: "Ship the fix" });
 		await addUltragoalSubgoal({
 			cwd: root,
 			title: "Second stage",
@@ -1549,8 +1429,6 @@ describe("native SKC ultragoal runtime", () => {
 				"complete",
 				"--evidence",
 				"tests passed",
-				"--skc-goal-json",
-				goalSnapshot(created.skcObjective),
 				"--quality-gate-json",
 				await passingLiveQualityGate(root),
 			],
@@ -1569,7 +1447,7 @@ describe("native SKC ultragoal runtime", () => {
 
 	it("keeps per-goal receipt fresh after unrelated next goal starts", async () => {
 		const root = await tempDir();
-		const created = await createUltragoalPlan({ cwd: root, brief: "Ship the fix" });
+		await createUltragoalPlan({ cwd: root, brief: "Ship the fix" });
 		await addUltragoalSubgoal({
 			cwd: root,
 			title: "Second stage",
@@ -1588,8 +1466,6 @@ describe("native SKC ultragoal runtime", () => {
 				"complete",
 				"--evidence",
 				"tests passed",
-				"--skc-goal-json",
-				goalSnapshot(created.skcObjective),
 				"--quality-gate-json",
 				await passingLiveQualityGate(root),
 				"--json",
@@ -1612,14 +1488,13 @@ describe("native SKC ultragoal runtime", () => {
 
 	it("treats receipts as stale after target goal mutation", async () => {
 		const root = await tempDir();
-		const created = await createUltragoalPlan({ cwd: root, brief: "Ship the fix" });
+		await createUltragoalPlan({ cwd: root, brief: "Ship the fix" });
 		await startNextUltragoalGoal({ cwd: root });
 		const plan = await checkpointUltragoalGoal({
 			cwd: root,
 			goalId: "G001",
 			status: "complete",
 			evidence: "tests passed",
-			skcGoalJson: goalSnapshot(created.skcObjective),
 			qualityGateJson: await passingLiveQualityGate(root),
 		});
 		const goal = plan.goals[0];
@@ -1636,22 +1511,24 @@ describe("native SKC ultragoal runtime", () => {
 		expect(diagnostic.state).toBe("active_stale_receipt");
 	});
 
-	it("treats receipts as stale after goal get snapshot ledger mutation", async () => {
+	it("treats receipts as dirty after quality gate ledger mutation", async () => {
 		const root = await tempDir();
-		const created = await createUltragoalPlan({ cwd: root, brief: "Ship the fix" });
+		await createUltragoalPlan({ cwd: root, brief: "Ship the fix" });
 		await startNextUltragoalGoal({ cwd: root });
 		const plan = await checkpointUltragoalGoal({
 			cwd: root,
 			goalId: "G001",
 			status: "complete",
 			evidence: "tests passed",
-			skcGoalJson: goalSnapshot(created.skcObjective),
 			qualityGateJson: await passingLiveQualityGate(root),
 		});
 		const ledger = await readUltragoalLedger(root);
 		const checkpointEvent = ledger.find(event => event.event === "goal_checkpointed");
 		if (!checkpointEvent) throw new Error("missing checkpoint event");
-		checkpointEvent.skcGoalJson = { goal: { objective: created.skcObjective, status: "active", updatedAt: 1 } };
+		checkpointEvent.qualityGateJson = {
+			...(checkpointEvent.qualityGateJson as Record<string, unknown>),
+			tampered: true,
+		};
 
 		const diagnostic = validateCompletionReceipt({
 			plan,
@@ -1660,8 +1537,53 @@ describe("native SKC ultragoal runtime", () => {
 			receiptKind: "final-aggregate",
 		});
 
-		expect(diagnostic.state).toBe("active_stale_receipt");
-		expect(diagnostic.message).toContain("snapshot hash");
+		expect(diagnostic.state).toBe("active_dirty_quality_gate");
+		expect(diagnostic.message).toContain("quality-gate hash");
+	});
+
+	it("rejects final-aggregate release when a prior per-goal receipt is tampered", async () => {
+		const root = await tempDir();
+		await createUltragoalPlan({ cwd: root, brief: "Ship the multi-stage fix" });
+		await addUltragoalSubgoal({
+			cwd: root,
+			title: "Second stage",
+			objective: "Complete the second stage.",
+			evidence: "Need a prior required goal to tamper.",
+			rationale: "Regression coverage for prior per-goal receipt validation.",
+		});
+		await startNextUltragoalGoal({ cwd: root });
+		await checkpointUltragoalGoal({
+			cwd: root,
+			goalId: "G001",
+			status: "complete",
+			evidence: "first stage verified",
+			qualityGateJson: await passingLiveQualityGate(root),
+		});
+		await startNextUltragoalGoal({ cwd: root });
+		const plan = await checkpointUltragoalGoal({
+			cwd: root,
+			goalId: "G002",
+			status: "complete",
+			evidence: "second stage verified",
+			qualityGateJson: await passingLiveQualityGate(root),
+		});
+		const ledger = await readUltragoalLedger(root);
+		const priorEvent = ledger.find(event => event.event === "goal_checkpointed" && event.goalId === "G001");
+		if (!priorEvent) throw new Error("missing prior checkpoint event");
+		priorEvent.qualityGateJson = {
+			...(priorEvent.qualityGateJson as Record<string, unknown>),
+			tampered: true,
+		};
+
+		const diagnostic = validateCompletionReceipt({
+			plan,
+			ledger,
+			goal: plan.goals.find(goal => goal.id === "G002")!,
+			receiptKind: "final-aggregate",
+		});
+
+		expect(diagnostic.state).not.toBe("active_verified_complete");
+		expect(diagnostic.message).toContain("G001");
 	});
 
 	it("blocks complete checkpoints without full architect and executor verification", async () => {
@@ -1757,7 +1679,7 @@ describe("native SKC ultragoal runtime", () => {
 
 	it("rejects complete gates with missing evidence or dirty blockers before mutation", async () => {
 		const root = await tempDir();
-		const created = await createUltragoalPlan({ cwd: root, brief: "Ship the fix" });
+		await createUltragoalPlan({ cwd: root, brief: "Ship the fix" });
 		await startNextUltragoalGoal({ cwd: root });
 		const beforeGoals = await Bun.file(path.join(sessionUltragoalDir(root, TEST_SESSION_ID), "goals.json")).text();
 		const beforeLedger = await Bun.file(path.join(sessionUltragoalDir(root, TEST_SESSION_ID), "ledger.jsonl")).text();
@@ -1765,8 +1687,6 @@ describe("native SKC ultragoal runtime", () => {
 		missingEvidenceGate.architectReview!.evidence = "";
 		const dirtyBlockersGate = JSON.parse(passingQualityGate()) as Record<string, Record<string, unknown>>;
 		dirtyBlockersGate.executorQa!.blockers = ["regression remains"];
-		const snapshot = goalSnapshot(created.skcObjective);
-
 		const missingEvidence = await runNativeUltragoalCommand(
 			[
 				"checkpoint",
@@ -1776,8 +1696,6 @@ describe("native SKC ultragoal runtime", () => {
 				"complete",
 				"--evidence",
 				"tests passed",
-				"--skc-goal-json",
-				snapshot,
 				"--quality-gate-json",
 				JSON.stringify(missingEvidenceGate),
 			],
@@ -1792,8 +1710,6 @@ describe("native SKC ultragoal runtime", () => {
 				"complete",
 				"--evidence",
 				"tests passed",
-				"--skc-goal-json",
-				snapshot,
 				"--quality-gate-json",
 				JSON.stringify(dirtyBlockersGate),
 			],
@@ -2132,7 +2048,7 @@ describe("native SKC ultragoal runtime", () => {
 
 	it("accepts live artifact files as proof for completed checkpoints", async () => {
 		const root = await tempDir();
-		const created = await createUltragoalPlan({ cwd: root, brief: "Ship the fix" });
+		await createUltragoalPlan({ cwd: root, brief: "Ship the fix" });
 		await startNextUltragoalGoal({ cwd: root });
 		const mixedProof = await passingLiveQualityGate(root);
 
@@ -2141,7 +2057,6 @@ describe("native SKC ultragoal runtime", () => {
 			goalId: "G001",
 			status: "complete",
 			evidence: "tests passed",
-			skcGoalJson: goalSnapshot(created.skcObjective),
 			qualityGateJson: mixedProof,
 		});
 
@@ -2343,11 +2258,10 @@ describe("native SKC ultragoal runtime", () => {
 		).rejects.toThrow(/kill-switch-bypass/);
 	});
 
-	it("sources complete checkpoint goal snapshots from current session state when omitted", async () => {
+	it("sources complete checkpoint identity from durable ultragoal state", async () => {
 		const root = await tempDir();
-		const created = await createUltragoalPlan({ cwd: root, brief: "Ship the fix" });
+		await createUltragoalPlan({ cwd: root, brief: "Ship the fix" });
 		await startNextUltragoalGoal({ cwd: root });
-		await seedGoalModeSessionFile(root, created.skcObjective);
 
 		const result = await runNativeUltragoalCommand(
 			[
@@ -2365,152 +2279,12 @@ describe("native SKC ultragoal runtime", () => {
 			root,
 		);
 		const receipt = JSON.parse(result.stdout ?? "{}");
-		const plan = await readUltragoalPlan(root);
-		const ledger = await readUltragoalLedger(root);
-		const checkpoint = ledger.find(event => event.event === "goal_checkpointed");
 
 		expect(result.status).toBe(0);
 		expect(receipt.quality_gate_hash).toEqual(expect.any(String));
-		expect(plan?.goals[0]?.completionVerification?.skcGoalSnapshotHash).toEqual(expect.any(String));
-		expect(checkpoint?.skcGoalJson).toMatchObject({ goal: { objective: created.skcObjective, status: "active" } });
 	});
 
-	it("requires supplied or current-session goal snapshots for complete checkpoints", async () => {
-		const root = await tempDir();
-		await createUltragoalPlan({ cwd: root, brief: "Ship the fix" });
-		await startNextUltragoalGoal({ cwd: root });
-		const beforeGoals = await Bun.file(path.join(sessionUltragoalDir(root, TEST_SESSION_ID), "goals.json")).text();
-
-		const result = await runNativeUltragoalCommand(
-			[
-				"checkpoint",
-				"--goal-id",
-				"G001",
-				"--status",
-				"complete",
-				"--evidence",
-				"tests passed",
-				"--quality-gate-json",
-				await passingLiveQualityGate(root),
-			],
-			root,
-		);
-
-		expect(result.status).toBe(1);
-		expect(result.stderr).toContain("complete checkpoints require an active SKC goal-mode snapshot");
-		expect(await Bun.file(path.join(sessionUltragoalDir(root, TEST_SESSION_ID), "goals.json")).text()).toBe(
-			beforeGoals,
-		);
-	});
-
-	it("fails closed instead of using stale last-entry goal snapshots from ambiguous session branches", async () => {
-		const root = await tempDir();
-		const created = await createUltragoalPlan({ cwd: root, brief: "Ship the fix" });
-		await startNextUltragoalGoal({ cwd: root });
-		await seedAmbiguousGoalModeSessionFile(root, created.skcObjective);
-		const beforeGoals = await Bun.file(path.join(sessionUltragoalDir(root, TEST_SESSION_ID), "goals.json")).text();
-		const beforeLedger = await Bun.file(path.join(sessionUltragoalDir(root, TEST_SESSION_ID), "ledger.jsonl")).text();
-
-		const result = await runNativeUltragoalCommand(
-			[
-				"checkpoint",
-				"--goal-id",
-				"G001",
-				"--status",
-				"complete",
-				"--evidence",
-				"tests passed",
-				"--quality-gate-json",
-				await passingLiveQualityGate(root),
-			],
-			root,
-		);
-
-		expect(result.status).toBe(1);
-		expect(result.stderr).toContain("complete checkpoints require an active SKC goal-mode snapshot");
-		expect(await Bun.file(path.join(sessionUltragoalDir(root, TEST_SESSION_ID), "goals.json")).text()).toBe(
-			beforeGoals,
-		);
-		expect(await Bun.file(path.join(sessionUltragoalDir(root, TEST_SESSION_ID), "ledger.jsonl")).text()).toBe(
-			beforeLedger,
-		);
-	});
-
-	it("fails closed when an active Ultragoal objective has no durable plan", async () => {
-		const root = await tempDir();
-		const created = await createUltragoalPlan({ cwd: root, brief: "Ship the fix" });
-		await fs.rm(path.join(sessionUltragoalDir(root, TEST_SESSION_ID), "goals.json"));
-
-		await expect(
-			assertCanCompleteCurrentGoal({
-				cwd: root,
-				currentGoal: { objective: created.skcObjective, status: "active" },
-			}),
-		).rejects.toThrow("missing durable .skc/ultragoal/goals.json");
-	});
-
-	it("fails closed for per-story Ultragoal objectives when the durable plan is missing", async () => {
-		const root = await tempDir();
-		const created = await createUltragoalPlan({ cwd: root, brief: "Ship the fix", skcGoalMode: "per-story" });
-		const storyObjective = created.goals[0]?.objective;
-		if (!storyObjective) throw new Error("missing story objective");
-		await fs.rm(path.join(sessionUltragoalDir(root, TEST_SESSION_ID), "goals.json"));
-
-		await expect(
-			assertCanCompleteCurrentGoal({
-				cwd: root,
-				currentGoal: { objective: storyObjective, status: "active" },
-			}),
-		).rejects.toThrow("missing durable .skc/ultragoal/goals.json");
-	});
-
-	it("rejects unrelated or stale goal get snapshots before mutation", async () => {
-		const root = await tempDir();
-		const created = await createUltragoalPlan({ cwd: root, brief: "Ship the fix" });
-		await startNextUltragoalGoal({ cwd: root });
-		const beforeGoals = await Bun.file(path.join(sessionUltragoalDir(root, TEST_SESSION_ID), "goals.json")).text();
-		const beforeLedger = await Bun.file(path.join(sessionUltragoalDir(root, TEST_SESSION_ID), "ledger.jsonl")).text();
-		const baseArgs = [
-			"checkpoint",
-			"--goal-id",
-			"G001",
-			"--status",
-			"complete",
-			"--evidence",
-			"tests passed",
-			"--quality-gate-json",
-			await passingLiveQualityGate(root),
-			"--skc-goal-json",
-		];
-
-		const bogus = await runNativeUltragoalCommand([...baseArgs, JSON.stringify({ nope: true })], root);
-		const wrongObjective = await runNativeUltragoalCommand([...baseArgs, goalSnapshot("other goal")], root);
-		const staleStatus = await runNativeUltragoalCommand(
-			[...baseArgs, goalSnapshot(created.skcObjective, "complete")],
-			root,
-		);
-		const staleSnapshot = await runNativeUltragoalCommand(
-			[...baseArgs, goalSnapshot(created.skcObjective, "active", 1)],
-			root,
-		);
-
-		expect(bogus.status).toBe(1);
-		expect(bogus.stderr).toContain("goal object");
-		expect(wrongObjective.status).toBe(1);
-		expect(wrongObjective.stderr).toContain("objective");
-		expect(staleStatus.status).toBe(1);
-		expect(staleStatus.stderr).toContain("goal.status to be active");
-		expect(staleSnapshot.status).toBe(1);
-		expect(staleSnapshot.stderr).toContain("fresh");
-		expect(await Bun.file(path.join(sessionUltragoalDir(root, TEST_SESSION_ID), "goals.json")).text()).toBe(
-			beforeGoals,
-		);
-		expect(await Bun.file(path.join(sessionUltragoalDir(root, TEST_SESSION_ID), "ledger.jsonl")).text()).toBe(
-			beforeLedger,
-		);
-	});
-
-	it("allows completed legacy goal snapshots for blocked checkpoints", async () => {
+	it("allows blocked checkpoints without completion quality gates", async () => {
 		const root = await tempDir();
 		await createUltragoalPlan({ cwd: root, brief: "Ship the fix" });
 		await startNextUltragoalGoal({ cwd: root });
@@ -2524,8 +2298,6 @@ describe("native SKC ultragoal runtime", () => {
 				"blocked",
 				"--evidence",
 				"legacy completed SKC goal blocks goal create in this thread",
-				"--skc-goal-json",
-				goalSnapshot("legacy completed unrelated goal", "complete"),
 			],
 			root,
 		);
@@ -2537,43 +2309,9 @@ describe("native SKC ultragoal runtime", () => {
 		expect(ledgerRaw).toContain("legacy completed SKC goal blocks");
 	});
 
-	it("rejects unrelated review-blocker snapshots before mutation", async () => {
-		const root = await tempDir();
-		await createUltragoalPlan({ cwd: root, brief: "Ship the fix" });
-		await startNextUltragoalGoal({ cwd: root });
-		const beforeGoals = await Bun.file(path.join(sessionUltragoalDir(root, TEST_SESSION_ID), "goals.json")).text();
-		const beforeLedger = await Bun.file(path.join(sessionUltragoalDir(root, TEST_SESSION_ID), "ledger.jsonl")).text();
-
-		const result = await runNativeUltragoalCommand(
-			[
-				"record-review-blockers",
-				"--goal-id",
-				"G001",
-				"--title",
-				"Resolve verification blockers",
-				"--objective",
-				"Fix architect and executor QA findings.",
-				"--evidence",
-				"architect found product regression",
-				"--skc-goal-json",
-				goalSnapshot("unrelated", "complete"),
-			],
-			root,
-		);
-
-		expect(result.status).toBe(1);
-		expect(result.stderr).toContain("objective");
-		expect(await Bun.file(path.join(sessionUltragoalDir(root, TEST_SESSION_ID), "goals.json")).text()).toBe(
-			beforeGoals,
-		);
-		expect(await Bun.file(path.join(sessionUltragoalDir(root, TEST_SESSION_ID), "ledger.jsonl")).text()).toBe(
-			beforeLedger,
-		);
-	});
-
 	it("unblocks plans after verification blocker stories complete cleanly", async () => {
 		const root = await tempDir();
-		const created = await createUltragoalPlan({ cwd: root, brief: "Ship the fix" });
+		await createUltragoalPlan({ cwd: root, brief: "Ship the fix" });
 		await startNextUltragoalGoal({ cwd: root });
 
 		const blockers = await runNativeUltragoalCommand(
@@ -2587,8 +2325,6 @@ describe("native SKC ultragoal runtime", () => {
 				"Fix architect and executor QA findings.",
 				"--evidence",
 				"architect found product regression",
-				"--skc-goal-json",
-				goalSnapshot(created.skcObjective),
 			],
 			root,
 		);
@@ -2598,7 +2334,6 @@ describe("native SKC ultragoal runtime", () => {
 			goalId: "G002",
 			status: "complete",
 			evidence: "fixed regression and reran full verification",
-			skcGoalJson: goalSnapshot(created.skcObjective),
 			qualityGateJson: await passingLiveQualityGate(root),
 		});
 		const status = await getUltragoalStatus(root);
@@ -2610,36 +2345,9 @@ describe("native SKC ultragoal runtime", () => {
 		expect(completedBlocker.goals[1]?.completionVerification?.receiptKind).toBe("final-aggregate");
 	});
 
-	it("requires review blockers to include a fresh active goal get snapshot", async () => {
-		const root = await tempDir();
-		await createUltragoalPlan({ cwd: root, brief: "Ship the fix" });
-		await startNextUltragoalGoal({ cwd: root });
-		const beforeGoals = await Bun.file(path.join(sessionUltragoalDir(root, TEST_SESSION_ID), "goals.json")).text();
-
-		const result = await runNativeUltragoalCommand(
-			[
-				"record-review-blockers",
-				"--goal-id",
-				"G001",
-				"--title",
-				"Resolve verification blockers",
-				"--objective",
-				"Fix architect and executor QA findings.",
-				"--evidence",
-				"architect found product regression",
-			],
-			root,
-		);
-
-		expect(result.status).toBe(1);
-		expect(result.stderr).toContain("record-review-blockers require --skc-goal-json");
-		expect(await Bun.file(path.join(sessionUltragoalDir(root, TEST_SESSION_ID), "goals.json")).text()).toBe(
-			beforeGoals,
-		);
-	});
 	it("blocks complete checkpoints without the strict architect/executor/iteration quality gate", async () => {
 		const root = await tempDir();
-		const created = await createUltragoalPlan({ cwd: root, brief: "Ship the fix" });
+		await createUltragoalPlan({ cwd: root, brief: "Ship the fix" });
 		await startNextUltragoalGoal({ cwd: root });
 
 		await expect(
@@ -2648,7 +2356,6 @@ describe("native SKC ultragoal runtime", () => {
 				goalId: "G001",
 				status: "complete",
 				evidence: "tests passed",
-				skcGoalJson: goalSnapshot(created.skcObjective),
 			}),
 		).rejects.toThrow("require --quality-gate-json");
 
@@ -2658,7 +2365,6 @@ describe("native SKC ultragoal runtime", () => {
 				goalId: "G001",
 				status: "complete",
 				evidence: "tests passed",
-				skcGoalJson: goalSnapshot(created.skcObjective),
 				qualityGateJson: JSON.stringify({
 					verification: { status: "passed" },
 					codeReview: { recommendation: "APPROVE", architectStatus: "WATCH" },
@@ -2672,21 +2378,11 @@ describe("native SKC ultragoal runtime", () => {
 
 	it("blocks complete checkpoint commands without the strict quality gate", async () => {
 		const root = await tempDir();
-		const created = await createUltragoalPlan({ cwd: root, brief: "Ship the fix" });
+		await createUltragoalPlan({ cwd: root, brief: "Ship the fix" });
 		await startNextUltragoalGoal({ cwd: root });
 
 		const result = await runNativeUltragoalCommand(
-			[
-				"checkpoint",
-				"--goal-id",
-				"G001",
-				"--status",
-				"complete",
-				"--evidence",
-				"tests passed",
-				"--skc-goal-json",
-				goalSnapshot(created.skcObjective),
-			],
+			["checkpoint", "--goal-id", "G001", "--status", "complete", "--evidence", "tests passed"],
 			root,
 		);
 		const status = await getUltragoalStatus(root);
@@ -2909,7 +2605,7 @@ describe("ultragoal @goal decomposition", () => {
 
 	it("reconciles completed runs with mode-state and HUD active-state", async () => {
 		const root = await tempDir();
-		const created = await createUltragoalPlan({ cwd: root, brief: "Ship state reconciliation" });
+		await createUltragoalPlan({ cwd: root, brief: "Ship state reconciliation" });
 		await startNextUltragoalGoal({ cwd: root });
 		await seedStaleUltragoalWorkflowState(root);
 
@@ -2922,8 +2618,6 @@ describe("ultragoal @goal decomposition", () => {
 				"complete",
 				"--evidence",
 				"final story verified with targeted regression coverage",
-				"--skc-goal-json",
-				goalSnapshot(created.skcObjective),
 				"--quality-gate-json",
 				await passingLiveQualityGate(root),
 			],
@@ -2966,7 +2660,7 @@ describe("ultragoal @goal decomposition", () => {
 
 	it("reconciles terminal checkpoints despite corrupt stale mode-state", async () => {
 		const root = await tempDir();
-		const created = await createUltragoalPlan({ cwd: root, brief: "Ship corrupt state reconciliation" });
+		await createUltragoalPlan({ cwd: root, brief: "Ship corrupt state reconciliation" });
 		await startNextUltragoalGoal({ cwd: root });
 		await seedStaleUltragoalActiveEntry(root);
 		await fs.mkdir(sessionStateDir(root, TEST_SESSION_ID), { recursive: true });
@@ -2981,8 +2675,6 @@ describe("ultragoal @goal decomposition", () => {
 				"complete",
 				"--evidence",
 				"final story verified with targeted regression coverage",
-				"--skc-goal-json",
-				goalSnapshot(created.skcObjective),
 				"--quality-gate-json",
 				await passingLiveQualityGate(root),
 			],
@@ -3003,7 +2695,7 @@ describe("ultragoal @goal decomposition", () => {
 
 	it("schedules each @goal story in order through the existing API", async () => {
 		const root = await tempDir();
-		const created = await createUltragoalPlan({
+		await createUltragoalPlan({
 			cwd: root,
 			brief: "@goal: Parse\nstep one\n@goal: Normalize\nstep two\n@goal: Export\nstep three",
 		});
@@ -3017,7 +2709,6 @@ describe("ultragoal @goal decomposition", () => {
 			goalId: "G001",
 			status: "complete",
 			evidence: "first story verified",
-			skcGoalJson: goalSnapshot(created.skcObjective),
 			qualityGateJson: await passingLiveQualityGate(root),
 		});
 
@@ -3154,7 +2845,7 @@ describe("ultragoal mode-state + HUD reconciliation (#342)", () => {
 	it("reconciles to terminal complete/active:false on aggregate completion (AC2)", async () => {
 		const root = await tempDir();
 		await withSessionId(TEST_SESSION_ID, async () => {
-			const created = await createUltragoalPlan({ cwd: root, brief: "Ship the fix" });
+			await createUltragoalPlan({ cwd: root, brief: "Ship the fix" });
 			await startNextUltragoalGoal({ cwd: root });
 			const result = await runNativeUltragoalCommand(
 				[
@@ -3165,8 +2856,6 @@ describe("ultragoal mode-state + HUD reconciliation (#342)", () => {
 					"complete",
 					"--evidence",
 					"tests passed",
-					"--skc-goal-json",
-					goalSnapshot(created.skcObjective),
 					"--quality-gate-json",
 					await passingLiveQualityGate(root),
 				],

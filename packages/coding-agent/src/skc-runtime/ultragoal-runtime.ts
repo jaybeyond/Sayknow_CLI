@@ -2,12 +2,10 @@ import * as crypto from "node:crypto";
 import * as os from "node:os";
 import * as path from "node:path";
 import { inflateSync } from "node:zlib";
-import { normalizeGoal } from "../goals/state";
-import { buildSessionContext, loadEntriesFromFile, type SessionEntry } from "../session/session-manager";
 import type { WorkflowHudSummary } from "../skill-state/active-state";
 import { buildUltragoalHudSummary as buildWorkflowUltragoalHudSummary } from "../skill-state/workflow-hud";
 import { renderCliWriteReceipt } from "./cli-write-receipt";
-import { DEFAULT_ULTRAGOAL_OBJECTIVE, SKC_SESSION_FILE_ENV } from "./goal-mode-request";
+import { DEFAULT_ULTRAGOAL_OBJECTIVE } from "./goal-mode-request";
 import { sessionUltragoalDir, skcRoot } from "./session-layout";
 import { resolveSkcSessionForRead, resolveSkcSessionForWrite, writeSessionActivityMarker } from "./session-resolution";
 import { renderUltragoalStatusMarkdown } from "./state-renderer";
@@ -68,7 +66,6 @@ export interface UltragoalCompletionVerification {
 	skcGoalMode: UltragoalSkcGoalMode;
 	skcObjective: string;
 	qualityGateHash: string;
-	skcGoalSnapshotHash: string;
 	planGeneration: string;
 	basis: {
 		planHashBeforeCheckpoint: string;
@@ -174,10 +171,9 @@ const ACCEPTED_PROOF_STATUSES = new Set([COVERED_STATUS, "passed", "verified"]);
 const MIN_SUBSTANTIVE_EVIDENCE_WORDS = 5;
 const MIN_SUBSTANTIVE_EVIDENCE_CHARS = 32;
 
-const SKC_GOAL_SNAPSHOT_MAX_AGE_MILLISECONDS = 10 * 60 * 1000;
-const SKC_GOAL_SNAPSHOT_MAX_FUTURE_SKEW_MILLISECONDS = 60 * 1000;
-
 const SCHEDULABLE_STATUSES = new Set<UltragoalGoalStatus>(["pending", "active", "failed"]);
+const COMPLETE_CHECKPOINT_ALLOWED_PRE_STATUSES = new Set<UltragoalGoalStatus>(["active", "failed"]);
+
 const NATIVE_STEERING_KINDS = [
 	"add_subgoal",
 	"split_subgoal",
@@ -570,7 +566,6 @@ function buildCompletionReceipt(input: {
 	receiptKind: UltragoalReceiptKind;
 	beforeStatus: UltragoalGoalStatus;
 	qualityGateJson: JsonObject;
-	skcGoalJson: JsonObject;
 	now: string;
 	checkpointLedgerEventId: string;
 }): UltragoalCompletionVerification {
@@ -593,7 +588,6 @@ function buildCompletionReceipt(input: {
 		skcGoalMode: input.plan.skcGoalMode,
 		skcObjective: input.plan.skcObjective,
 		qualityGateHash: hashStructuredValue(input.qualityGateJson),
-		skcGoalSnapshotHash: hashStructuredValue(input.skcGoalJson),
 		planGeneration: generation.planGeneration,
 		basis: generation.basis,
 		checkpointLedgerEventId: input.checkpointLedgerEventId,
@@ -2470,93 +2464,24 @@ async function readRequiredCompletionQualityGate(
 	return gate;
 }
 
-function snapshotUpdatedAtMilliseconds(value: unknown): number | null {
-	if (typeof value === "number" && Number.isFinite(value)) return value;
-	if (typeof value !== "string" || value.trim().length === 0) return null;
-	const trimmed = value.trim();
-	if (/^\d+$/.test(trimmed)) {
-		const parsed = Number.parseInt(trimmed, 10);
-		return Number.isFinite(parsed) ? parsed : null;
+function validateCompleteCheckpointTargetGoal(goal: UltragoalGoal): void {
+	if (COMPLETE_CHECKPOINT_ALLOWED_PRE_STATUSES.has(goal.status)) return;
+	if (goal.status === "pending") {
+		throw new Error(
+			`Cannot checkpoint ${goal.id} as complete while its durable goals.json status is pending; start the goal before completing it.`,
+		);
 	}
-	const parsed = Date.parse(trimmed);
-	return Number.isFinite(parsed) ? parsed : null;
-}
-
-function singleSessionLeafId(entries: readonly SessionEntry[]): string | undefined {
-	if (entries.length === 0) return undefined;
-	const parentIds = new Set(
-		entries.map(entry => entry.parentId).filter((parentId): parentId is string => typeof parentId === "string"),
+	if (goal.status === "complete") {
+		throw new Error(
+			`Cannot checkpoint ${goal.id} as complete with different evidence because its durable goals.json status is already complete.`,
+		);
+	}
+	if (goal.status === "superseded") {
+		throw new Error(`Cannot checkpoint ${goal.id} as complete because its durable goals.json status is superseded.`);
+	}
+	throw new Error(
+		`Cannot checkpoint ${goal.id} as complete while its durable goals.json status is ${goal.status}; only active or retryable failed goals can be completed.`,
 	);
-	const leafIds = entries.map(entry => entry.id).filter(id => !parentIds.has(id));
-	return leafIds.length === 1 ? leafIds[0] : undefined;
-}
-
-async function readCurrentSessionSkcGoalSnapshot(): Promise<unknown | undefined> {
-	const sessionFile = process.env[SKC_SESSION_FILE_ENV]?.trim();
-	if (!sessionFile) return undefined;
-	const fileEntries = await loadEntriesFromFile(sessionFile);
-	const entries = fileEntries.filter((entry): entry is SessionEntry => entry.type !== "session");
-	const leafId = singleSessionLeafId(entries);
-	if (!leafId) return undefined;
-	const context = buildSessionContext(entries, leafId);
-	if (context.mode !== "goal" && context.mode !== "goal_paused") return undefined;
-	const goal = normalizeGoal(context.modeData?.goal);
-	return goal ? { goal } : undefined;
-}
-async function readSkcGoalSnapshot(input: {
-	cwd: string;
-	value: string | undefined;
-	plan: UltragoalPlan;
-	goal?: UltragoalGoal;
-	required: boolean;
-	errorPrefix: string;
-	allowCompletedLegacyBlocker?: boolean;
-}): Promise<unknown> {
-	const snapshot = input.value?.trim()
-		? await readStructuredValue(input.cwd, input.value)
-		: await readCurrentSessionSkcGoalSnapshot();
-	if (snapshot === undefined) {
-		if (!input.required) return undefined;
-		throw new Error(
-			`${input.errorPrefix} require an active SKC goal-mode snapshot from the current session or --skc-goal-json; this is the SKC goal-mode receipt, not the .skc/ultragoal/goals.json goal record`,
-		);
-	}
-	const snapshotObject = qualityGateObject(snapshot);
-	const detailsObject = qualityGateObject(snapshotObject?.details);
-	const goalObject = qualityGateObject(snapshotObject?.goal) ?? qualityGateObject(detailsObject?.goal);
-	if (!goalObject)
-		throw new Error(
-			`${input.errorPrefix} require --skc-goal-json with a goal object from goal({"op":"get"}); pass the active SKC goal-mode snapshot, not the .skc/ultragoal/goals.json goal record`,
-		);
-	const updatedAt = snapshotUpdatedAtMilliseconds(goalObject.updatedAt);
-	if (!updatedAt)
-		throw new Error(
-			`${input.errorPrefix} require --skc-goal-json goal.updatedAt as epoch milliseconds or an ISO timestamp from goal({"op":"get"}); pass the active SKC goal-mode snapshot, not the .skc/ultragoal/goals.json goal record`,
-		);
-	const nowMilliseconds = Date.now();
-	if (updatedAt < nowMilliseconds - SKC_GOAL_SNAPSHOT_MAX_AGE_MILLISECONDS) {
-		throw new Error(`${input.errorPrefix} require a fresh --skc-goal-json snapshot`);
-	}
-	if (updatedAt > nowMilliseconds + SKC_GOAL_SNAPSHOT_MAX_FUTURE_SKEW_MILLISECONDS) {
-		throw new Error(`${input.errorPrefix} require --skc-goal-json goal.updatedAt that is not from the future`);
-	}
-	const objective = typeof goalObject.objective === "string" ? goalObject.objective : "";
-	const expectedObjectives = new Set([input.plan.skcObjective, ...(input.plan.skcObjectiveAliases ?? [])]);
-	if (input.plan.skcGoalMode === "per-story" && input.goal?.objective) {
-		expectedObjectives.add(input.goal.objective);
-	}
-	if (input.allowCompletedLegacyBlocker && goalObject.status === "complete" && !expectedObjectives.has(objective)) {
-		return snapshot;
-	}
-	if (!expectedObjectives.has(objective)) {
-		throw new Error(
-			`${input.errorPrefix} require --skc-goal-json objective to match the active SKC goal-mode objective from goal({"op":"get"}), not the .skc/ultragoal/goals.json goal ${input.goal?.id ?? "record"}`,
-		);
-	}
-	if (goalObject.status !== "active") {
-		throw new Error(`${input.errorPrefix} require --skc-goal-json goal.status to be active`);
-	}
-	return snapshot;
 }
 
 export async function checkpointUltragoalGoal(input: {
@@ -2564,7 +2489,6 @@ export async function checkpointUltragoalGoal(input: {
 	goalId: string;
 	status: UltragoalGoalStatus;
 	evidence: string;
-	skcGoalJson?: string;
 	qualityGateJson?: string;
 }): Promise<UltragoalPlan> {
 	const plan = await readUltragoalPlan(input.cwd);
@@ -2593,6 +2517,7 @@ export async function checkpointUltragoalGoal(input: {
 		// instead of silently dropping it.
 		return plan;
 	}
+	if (input.status === "complete") validateCompleteCheckpointTargetGoal(goal);
 	const changeSet = input.status === "complete" ? await computeCheckpointChangeSet(input.cwd) : undefined;
 	const qualityGateJson =
 		input.status === "complete"
@@ -2615,25 +2540,6 @@ export async function checkpointUltragoalGoal(input: {
 		}
 	}
 	const receiptKind = input.status === "complete" ? chooseReceiptKind(plan, goal, input.status) : null;
-	const skcGoalJson =
-		input.status === "complete"
-			? await readSkcGoalSnapshot({
-					cwd: input.cwd,
-					value: input.skcGoalJson,
-					plan,
-					goal,
-					required: true,
-					errorPrefix: "complete checkpoints",
-				})
-			: await readSkcGoalSnapshot({
-					cwd: input.cwd,
-					value: input.skcGoalJson,
-					plan,
-					goal,
-					required: false,
-					errorPrefix: `${input.status} checkpoints`,
-					allowCompletedLegacyBlocker: input.status === "blocked",
-				});
 	const pendingCheckpointEventId = crypto.randomUUID();
 	if (input.status === "complete" && receiptKind && qualityGateJson && !Array.isArray(qualityGateJson)) {
 		goal.completionVerification = buildCompletionReceipt({
@@ -2643,7 +2549,6 @@ export async function checkpointUltragoalGoal(input: {
 			receiptKind,
 			beforeStatus,
 			qualityGateJson: qualityGateJson as JsonObject,
-			skcGoalJson: skcGoalJson as JsonObject,
 			now,
 			checkpointLedgerEventId: pendingCheckpointEventId,
 		});
@@ -2662,7 +2567,6 @@ export async function checkpointUltragoalGoal(input: {
 		goalId: goal.id,
 		status: input.status,
 		evidence,
-		skcGoalJson,
 		qualityGateJson,
 		completionVerification: goal.completionVerification,
 	});
@@ -2682,7 +2586,6 @@ export async function checkpointAndContinueUltragoalGoal(input: {
 	goalId: string;
 	status: UltragoalGoalStatus;
 	evidence: string;
-	skcGoalJson?: string;
 	qualityGateJson?: string;
 	advanceNext?: boolean;
 	retryFailed?: boolean;
@@ -3091,19 +2994,14 @@ export async function recordUltragoalReviewBlockers(input: {
 	title: string;
 	objective: string;
 	evidence: string;
-	skcGoalJson?: string;
 }): Promise<UltragoalPlan> {
 	const objective = input.objective.trim();
 	if (!objective) throw new Error("record-review-blockers --objective is required");
-	if (!input.skcGoalJson?.trim()) {
-		throw new Error('record-review-blockers require --skc-goal-json from a fresh active goal({"op":"get"}) snapshot');
-	}
 	const plan = await checkpointUltragoalGoal({
 		cwd: input.cwd,
 		goalId: input.goalId,
 		status: "review_blocked",
 		evidence: input.evidence,
-		skcGoalJson: input.skcGoalJson,
 	});
 	const persistedPlan = await readUltragoalPlan(input.cwd);
 	if (persistedPlan?.state_revision !== undefined) plan.state_revision = persistedPlan.state_revision;
@@ -3551,7 +3449,6 @@ const FLAGS_WITH_VALUES = new Set([
 	"--goal-id",
 	"--status",
 	"--evidence",
-	"--skc-goal-json",
 	"--quality-gate-json",
 	"--executor-qa-json",
 	"--executor-qa",
@@ -3605,15 +3502,12 @@ function renderUltragoalHelp(args: readonly string[]): string | null {
 			"      --status=<value>             pending|active|complete|failed|blocked|review_blocked|superseded",
 			"      --evidence=<value>           Completion or checkpoint evidence text",
 			"      --quality-gate-json=<value>  JSON string or path for complete checkpoints",
-			"      --skc-goal-json=<value>      Optional JSON/path override for current goal snapshot; omitted complete checkpoints read current session goal state",
 			"      --json                       Output a machine-readable receipt",
 			"",
 			"COMPLETE CHECKPOINT RECEIPTS",
 			"  --quality-gate-json must be an object with architectReview, executorQa, and iteration.",
 			"  executorQa.contractCoverage[] rows require an obligation field; description is not a substitute.",
-			"  Complete checkpoints use the current session's active SKC goal-mode snapshot when --skc-goal-json is omitted.",
-			"  Explicit --skc-goal-json values must contain an active SKC goal-mode snapshot, not the .skc/ultragoal/goals.json goal record.",
-			"  goal.updatedAt may be epoch milliseconds or an ISO timestamp and must be fresh.",
+			"  Complete checkpoints validate the target durable goals.json record before writing a receipt.",
 			"",
 			"EXAMPLES",
 			'  $ skc ultragoal checkpoint --goal-id G001 --status blocked --evidence "waiting on review"',
@@ -3949,7 +3843,6 @@ async function dispatchUltragoalCommand(args: string[], cwd: string): Promise<Ul
 					goalId,
 					status,
 					evidence,
-					skcGoalJson: flagValue(args, "--skc-goal-json"),
 					qualityGateJson: flagValue(args, "--quality-gate-json"),
 					advanceNext: status === "complete",
 				});
@@ -3981,7 +3874,6 @@ async function dispatchUltragoalCommand(args: string[], cwd: string): Promise<Ul
 					title: flagValue(args, "--title") ?? "Resolve final code-review blockers",
 					objective: flagValue(args, "--objective") ?? "",
 					evidence: flagValue(args, "--evidence") ?? "",
-					skcGoalJson: flagValue(args, "--skc-goal-json"),
 				});
 				const goal = plan.goals.at(-1);
 				return {

@@ -41,6 +41,9 @@ type FakeEditor = {
 	clearCustomKeyHandlers(): void;
 };
 
+type FakeInputListenerResult = { consume?: boolean; data?: string } | undefined;
+type FakeInputListener = (data: string) => FakeInputListenerResult;
+
 function createSubmission(input: {
 	text: string;
 	images?: InteractiveModeContext["pendingImages"];
@@ -56,6 +59,7 @@ function createSubmission(input: {
 function createContext(): {
 	ctx: InteractiveModeContext;
 	editor: FakeEditor;
+	inputListeners: FakeInputListener[];
 	spies: {
 		abort: ReturnType<typeof vi.fn>;
 		abortBash: ReturnType<typeof vi.fn>;
@@ -72,12 +76,20 @@ function createContext(): {
 		requestRender: ReturnType<typeof vi.fn>;
 		startPendingSubmission: ReturnType<typeof vi.fn>;
 		clearEditor: ReturnType<typeof vi.fn>;
+		abortCompaction: ReturnType<typeof vi.fn>;
+		abortHandoff: ReturnType<typeof vi.fn>;
+		abortRetry: ReturnType<typeof vi.fn>;
+		retryNow: ReturnType<typeof vi.fn>;
 	};
 } {
 	let editorText = "";
 	const abort = vi.fn(() => Promise.resolve());
 	const abortBash = vi.fn();
 	const abortEval = vi.fn();
+	const abortCompaction = vi.fn();
+	const abortHandoff = vi.fn();
+	const abortRetry = vi.fn();
+	const retryNow = vi.fn();
 	const addMessageToChat = vi.fn();
 	const cancelPendingSubmission = vi.fn(() => false);
 	const clearQueue = vi.fn(() => ({ steering: [], followUp: [] }));
@@ -87,6 +99,14 @@ function createContext(): {
 	const handleBtwCommand = vi.fn(async () => {});
 	const handleBtwEscape = vi.fn(() => true);
 	const hasActiveBtw = vi.fn(() => false);
+	const inputListeners: FakeInputListener[] = [];
+	const addInputListener = vi.fn((listener: FakeInputListener) => {
+		inputListeners.push(listener);
+		return () => {
+			const index = inputListeners.indexOf(listener);
+			if (index >= 0) inputListeners.splice(index, 1);
+		};
+	});
 	const startPendingSubmission = vi.fn((input: { text: string; images?: InteractiveModeContext["pendingImages"] }) => {
 		ensureLoadingAnimation();
 		return createSubmission(input);
@@ -116,16 +136,18 @@ function createContext(): {
 	ctx = {
 		settings: { get: () => undefined } as unknown as InteractiveModeContext["settings"],
 		editor: editor as unknown as InteractiveModeContext["editor"],
-		ui: { requestRender } as unknown as InteractiveModeContext["ui"],
+		ui: { requestRender, addInputListener } as unknown as InteractiveModeContext["ui"],
 		loadingAnimation: undefined,
 		autoCompactionLoader: undefined,
 		retryLoader: undefined,
 		autoCompactionEscapeHandler: undefined,
 		retryEscapeHandler: undefined,
+		retryEscapePrimed: false,
 		session: {
 			isStreaming: false,
 			isCompacting: false,
 			isGeneratingHandoff: false,
+			isRetrying: false,
 			isBashRunning: false,
 			isEvalRunning: false,
 			queuedMessageCount: 0,
@@ -135,6 +157,10 @@ function createContext(): {
 			abort,
 			abortBash,
 			abortEval,
+			abortCompaction,
+			abortHandoff,
+			abortRetry,
+			retryNow,
 			clearQueue,
 			prompt,
 		} as unknown as InteractiveModeContext["session"],
@@ -142,7 +168,7 @@ function createContext(): {
 			getSessionName: () => "existing session",
 		} as unknown as InteractiveModeContext["sessionManager"],
 		keybindings: {
-			getKeys: () => [],
+			getKeys: (action: string) => (action === "app.interrupt" ? ["escape"] : []),
 		} as unknown as InteractiveModeContext["keybindings"],
 		pendingImages: [],
 		lastEscapeTime: 0,
@@ -177,10 +203,15 @@ function createContext(): {
 	return {
 		ctx,
 		editor,
+		inputListeners,
 		spies: {
 			abort,
 			abortBash,
 			abortEval,
+			abortCompaction,
+			abortHandoff,
+			abortRetry,
+			retryNow,
 			addMessageToChat,
 			cancelPendingSubmission,
 			clearQueue,
@@ -330,6 +361,95 @@ describe("InputController escape behavior", () => {
 		expect(spies.cancelPendingSubmission).not.toHaveBeenCalled();
 		expect(spies.clearQueue).not.toHaveBeenCalled();
 		expect(spies.abort).toHaveBeenCalledTimes(1);
+	});
+
+	it("cancels compaction even when the composer contains a draft", () => {
+		const { ctx, editor, spies } = createContext();
+		(ctx.session as { isCompacting: boolean }).isCompacting = true;
+		const controller = new InputController(ctx);
+
+		controller.setupKeyHandlers();
+		editor.setText("draft while compacting");
+		editor.onEscape?.();
+
+		expect(spies.abortCompaction).toHaveBeenCalledTimes(1);
+		expect(spies.abortHandoff).not.toHaveBeenCalled();
+		expect(spies.abort).not.toHaveBeenCalled();
+		expect(spies.clearEditor).not.toHaveBeenCalled();
+		expect(editor.getText()).toBe("draft while compacting");
+	});
+
+	it("cancels manual handoff even when the composer contains a draft", () => {
+		const { ctx, editor, spies } = createContext();
+		(ctx.session as { isGeneratingHandoff: boolean }).isGeneratingHandoff = true;
+		const controller = new InputController(ctx);
+
+		controller.setupKeyHandlers();
+		editor.setText("draft while handing off");
+		editor.onEscape?.();
+
+		expect(spies.abortHandoff).toHaveBeenCalledTimes(1);
+		expect(spies.abortCompaction).not.toHaveBeenCalled();
+		expect(spies.abort).not.toHaveBeenCalled();
+		expect(spies.clearEditor).not.toHaveBeenCalled();
+		expect(editor.getText()).toBe("draft while handing off");
+	});
+
+	it("cancels auto-handoff through the compaction controller", () => {
+		const { ctx, editor, spies } = createContext();
+		(ctx.session as { isCompacting: boolean; isGeneratingHandoff: boolean }).isCompacting = true;
+		(ctx.session as { isGeneratingHandoff: boolean }).isGeneratingHandoff = true;
+		const controller = new InputController(ctx);
+
+		controller.setupKeyHandlers();
+		editor.onEscape?.();
+
+		expect(spies.abortCompaction).toHaveBeenCalledTimes(1);
+		expect(spies.abortHandoff).not.toHaveBeenCalled();
+	});
+
+	it("keeps retry backoff escape handling wired from the central handler", () => {
+		const { ctx, editor, spies } = createContext();
+		ctx.retryLoader = {} as InteractiveModeContext["retryLoader"];
+		const controller = new InputController(ctx);
+
+		controller.setupKeyHandlers();
+		editor.setText("draft during retry");
+		editor.onEscape?.();
+		editor.onEscape?.();
+
+		expect(spies.retryNow).toHaveBeenCalledTimes(1);
+		expect(spies.abortRetry).toHaveBeenCalledTimes(1);
+		expect(spies.clearEditor).not.toHaveBeenCalled();
+		expect(editor.getText()).toBe("draft during retry");
+	});
+
+	it("globally aborts a workflow stream while a hook dialog has focus", () => {
+		const { ctx, inputListeners, spies } = createContext();
+		(ctx.session as { isStreaming: boolean }).isStreaming = true;
+		ctx.hookSelector = {} as InteractiveModeContext["hookSelector"];
+		const controller = new InputController(ctx);
+
+		controller.setupKeyHandlers();
+		const result = inputListeners[0]?.("\x1b");
+
+		expect(result).toEqual({ consume: true });
+		expect(spies.abort).toHaveBeenCalledTimes(1);
+		expect(spies.abort).toHaveBeenCalledWith(expect.objectContaining({ cause: "user_interrupt" }));
+	});
+
+	it("does not globally steal draft-clearing Esc from a normal stream", () => {
+		const { ctx, editor, inputListeners, spies } = createContext();
+		(ctx.session as { isStreaming: boolean }).isStreaming = true;
+		const controller = new InputController(ctx);
+
+		controller.setupKeyHandlers();
+		editor.setText("draft message");
+		const result = inputListeners[0]?.("\x1b");
+
+		expect(result).toBeUndefined();
+		expect(spies.abort).not.toHaveBeenCalled();
+		expect(editor.getText()).toBe("draft message");
 	});
 
 	it("silently consumes a queued steer on the first Esc instead of a loud abort", () => {

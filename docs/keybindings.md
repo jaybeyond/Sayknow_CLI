@@ -8,13 +8,14 @@ User remaps live in `~/.skc/agent/keybindings.json`. The file is a JSON object w
 
 ```json
 {
-  "app.model.cycleForward": "Ctrl+P",
+  "app.commandPalette.open": "Ctrl+P",
+  "app.model.cycleForward": "Alt+N",
   "app.model.selectTemporary": "Alt+P",
   "app.plan.toggle": "Alt+Shift+P"
 }
 ```
 
-Chord names are case-insensitive and use the same notation shown in the UI, such as `Ctrl+P`, `Alt+Shift+P`, `Shift+Enter`, and `Ctrl+Backspace`.
+Chord names are case-insensitive and use the same notation shown in the UI, such as `Ctrl+P`, `Alt+N`, `Alt+Shift+P`, `Shift+Enter`, and `Ctrl+Backspace`.
 
 Set an action to an empty array to disable it:
 
@@ -28,8 +29,9 @@ Set an action to an empty array to disable it:
 
 | Action ID | Default | Meaning |
 | --- | --- | --- |
-| `app.model.cycleForward` | `Ctrl+P` | Cycle role models forward |
-| `app.model.cycleBackward` | `Shift+Ctrl+P` | Cycle role models backward |
+| `app.commandPalette.open` | `Ctrl+P` | Open the command palette |
+| `app.model.cycleForward` | `Alt+N` | Cycle role models forward |
+| `app.model.cycleBackward` | `Alt+Shift+N` | Cycle role models backward |
 | `app.model.selectTemporary` | `Alt+P` | Pick a model temporarily for this session |
 | `app.model.select` | `Ctrl+L` | Open the model selector and set roles |
 | `app.plan.toggle` | `Alt+Shift+P` | Toggle plan mode |
@@ -39,7 +41,7 @@ Set an action to an empty array to disable it:
 | `app.thinking.cycle` | `Shift+Tab` | Cycle thinking level |
 | `app.editor.external` | `Ctrl+G` | Edit the draft in `$VISUAL` / `$EDITOR` |
 | `app.message.followUp` | _(none)_ | Optional remap for a follow-up message; `Ctrl+Enter` is reserved for editor newline |
-| `app.message.queue` | `Alt+Enter` | Explicitly queue a message for the next turn |
+| `app.message.queue` | `Alt+Enter` (`Alt+Q` on win32) | Explicitly queue a message for the next turn |
 | `app.message.dequeue` | `Alt+Up` | Dequeue a queued message back into the editor |
 
 | `app.clipboard.copyLine` | `Alt+Shift+L` | Copy the current line |
@@ -47,6 +49,10 @@ Set an action to an empty array to disable it:
 | `app.stt.toggle` | `Alt+H` | Toggle speech-to-text recording |
 
 Older unqualified action names are migrated when `keybindings.json` is loaded, but new docs and new configs should use the namespaced action IDs above.
+
+On native Windows terminals, SKC defaults `app.message.queue` to `Alt+Q` because Windows Terminal and PowerShell commonly reserve `Alt+Enter` for fullscreen before SKC can receive it. Users who prefer another chord can remap `app.message.queue` in `~/.skc/agent/keybindings.json`.
+
+In the main SKC composer, plain `PageUp` / `PageDown` page the visible transcript viewport instead of browsing prompt history; use `Up` / `Down` or `Ctrl+R` for prompt history. Autocomplete and selector surfaces still use `PageUp` / `PageDown` for list paging while they have focus.
 
 ## Auditing default-key collisions
 
@@ -122,15 +128,16 @@ Authoritative inventory of the keybinding registry, one row per action. Generate
 | `app.suspend` | `ctrl+z` | |
 | `app.thinking.cycle` | `shift+tab` | |
 | `app.thinking.toggle` | `ctrl+t` | |
-| `app.model.cycleForward` | `ctrl+p` | also `app.session.togglePath` (session list) |
-| `app.model.cycleBackward` | `shift+ctrl+p` | |
+| `app.commandPalette.open` | `ctrl+p` | Open command palette from the editor |
+| `app.model.cycleForward` | `alt+n` | |
+| `app.model.cycleBackward` | `alt+shift+n` | |
 | `app.model.select` | `ctrl+l` | |
 | `app.model.selectTemporary` | `alt+p` | |
 | `app.tools.expand` | `ctrl+o` | |
 | `app.tool.backgroundFold` | `ctrl+b` | |
 | `app.editor.external` | `ctrl+g` | |
 | `app.message.followUp` | _(none)_ | `Ctrl+Enter` remains newline unless the user explicitly remaps this action; while idle the chord still falls through to newline |
-| `app.message.queue` | `alt+enter` | |
+| `app.message.queue` | `alt+enter` (`alt+q` on win32) | platform-aware; avoids the Windows Terminal fullscreen shortcut |
 | `app.message.dequeue` | `alt+up` | |
 | `app.clipboard.pasteImage` | `ctrl+v` (`alt+v` on win32) | platform-aware; single source of truth in `KEYBINDINGS` |
 | `app.clipboard.copyLine` | `alt+shift+l` | registry-backed via input-controller custom handler |
@@ -158,7 +165,7 @@ Authoritative inventory of the keybinding registry, one row per action. Generate
 | --- | --- | --- |
 | `tui.global.debug` | `shift+ctrl+d` | Toggle debug overlay; resolved through the registry in `tui.ts` |
 
-Cross-context default reuse (`ctrl+p`, `ctrl+s`, `ctrl+r`, `ctrl+d`, `ctrl+b`, `ctrl+left`/`ctrl+right`, `enter`, `escape`, `ctrl+c`) is intentional: each pair is active in a different focused context and is disambiguated at dispatch time. Use `detectDefaultKeyCollisions()` (above) to re-derive this list from the registry.
+Cross-context default reuse (`ctrl+s`, `ctrl+r`, `ctrl+d`, `ctrl+b`, `ctrl+left`/`ctrl+right`, `enter`, `escape`, `ctrl+c`) is intentional: each pair is active in a different focused context and is disambiguated at dispatch time. Use `detectDefaultKeyCollisions()` (above) to re-derive this list from the registry.
 
 ### Not yet registry-managed
 

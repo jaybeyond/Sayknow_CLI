@@ -13,18 +13,20 @@ import {
 import { getMarkdownTheme, theme } from "../../modes/theme/theme";
 import type { CustomMessage, SkillPromptDetails } from "../../session/messages";
 
-const COLLAPSED_ARGS_PREVIEW_WIDTH = 96;
+const DEFAULT_COLLAPSED_ARGS_PREVIEW_WIDTH = 96;
 const COLLAPSED_ARGS_PREVIEW_LINES = 6;
+const SKILL_BOX_HORIZONTAL_PADDING = 1;
 export class SkillMessageComponent extends Container {
 	#box: Box;
 	#contentComponent?: Component;
 	#expanded = false;
+	#argsPreviewWidth = DEFAULT_COLLAPSED_ARGS_PREVIEW_WIDTH;
 
 	constructor(private readonly message: CustomMessage<SkillPromptDetails>) {
 		super();
 		this.addChild(new Spacer(1));
 
-		this.#box = new Box(1, 1, t => theme.bg("customMessageBg", t));
+		this.#box = new Box(SKILL_BOX_HORIZONTAL_PADDING, 1, t => theme.bg("customMessageBg", t));
 		this.#rebuild();
 	}
 
@@ -38,6 +40,15 @@ export class SkillMessageComponent extends Container {
 	override invalidate(): void {
 		super.invalidate();
 		this.#rebuild();
+	}
+
+	override render(width: number): string[] {
+		const contentWidth = Math.max(1, width - SKILL_BOX_HORIZONTAL_PADDING * 2);
+		if (this.#argsPreviewWidth !== contentWidth) {
+			this.#argsPreviewWidth = contentWidth;
+			this.#rebuild();
+		}
+		return super.render(width);
 	}
 
 	#rebuild(): void {
@@ -57,7 +68,7 @@ export class SkillMessageComponent extends Container {
 		// Collapsed view keeps args readable without exposing the full prompt body.
 		// Each visual line is bounded, but multi-line arguments remain multi-line so
 		// the invocation context is not mistaken for a one-line truncated payload.
-		const argsPreview = args ? this.#formatArgsPreview(args) : [];
+		const argsPreview = args ? this.#formatArgsPreview(args, this.#argsPreviewWidth) : [];
 		const header = `${theme.fg("customMessageLabel", theme.bold("[skill]"))} ${theme.fg("customMessageText", name)}`;
 		this.#box.addChild(new Text(header, 0, 0));
 		if (argsPreview.length > 0) {
@@ -111,19 +122,19 @@ export class SkillMessageComponent extends Container {
 		this.#box.addChild(this.#contentComponent);
 	}
 
-	#formatArgsPreview(args: string): string[] {
+	#formatArgsPreview(args: string, width: number): string[] {
 		const preview: string[] = [];
 		let omitted = false;
 		const sourceLines = replaceTabs(args).split(/\r?\n/);
 		for (let index = 0; index < sourceLines.length; index += 1) {
 			const sourceLine = sourceLines[index]?.trimEnd() ?? "";
-			const wrapped = wrapTextWithAnsi(sourceLine.length > 0 ? sourceLine : " ", COLLAPSED_ARGS_PREVIEW_WIDTH);
+			const wrapped = wrapTextWithAnsi(sourceLine.length > 0 ? sourceLine : " ", width);
 			for (const line of wrapped.length > 0 ? wrapped : [""]) {
 				if (preview.length >= COLLAPSED_ARGS_PREVIEW_LINES) {
 					omitted = true;
 					break;
 				}
-				preview.push(truncateToWidth(line, COLLAPSED_ARGS_PREVIEW_WIDTH));
+				preview.push(truncateToWidth(line, width));
 			}
 			if (omitted) break;
 		}
@@ -132,10 +143,7 @@ export class SkillMessageComponent extends Container {
 			omitted ||= replaceTabs(args).trimEnd().length > visibleSource.trimEnd().length;
 		}
 		if (omitted && preview.length > 0) {
-			preview[preview.length - 1] = truncateToWidth(
-				`${preview[preview.length - 1]} …`,
-				COLLAPSED_ARGS_PREVIEW_WIDTH,
-			);
+			preview[preview.length - 1] = truncateToWidth(`${preview[preview.length - 1]} …`, width);
 		}
 		return preview;
 	}

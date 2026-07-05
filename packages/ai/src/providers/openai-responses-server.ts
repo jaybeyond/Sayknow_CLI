@@ -22,6 +22,7 @@ import type {
 	Tool,
 	ToolCall,
 } from "../types";
+import { sanitizeJsonStrings } from "../utils";
 import {
 	type OpenAIResponsesFunctionCallItem,
 	type OpenAIResponsesFunctionCallOutputItem,
@@ -612,7 +613,8 @@ function buildOutputItems(message: AssistantMessage): OutputItem[] {
 		} else if (part.type === "toolCall") {
 			flushMessage();
 			if (part.customWireName) {
-				const rawInput = typeof part.arguments?.input === "string" ? (part.arguments.input as string) : "";
+				const rawInput =
+					typeof part.arguments?.input === "string" ? (part.arguments.input as string).toWellFormed() : "";
 				out.push({
 					type: "custom_tool_call",
 					id: part.thoughtSignature ?? makeCustomCallId(),
@@ -627,7 +629,7 @@ function buildOutputItems(message: AssistantMessage): OutputItem[] {
 					id: part.thoughtSignature ?? makeFuncCallId(),
 					call_id: part.id,
 					name: part.name,
-					arguments: JSON.stringify(part.arguments ?? {}),
+					arguments: JSON.stringify(sanitizeJsonStrings(part.arguments ?? {})),
 					status: "completed",
 				});
 			}
@@ -1085,7 +1087,8 @@ export function encodeStream(
 							} else {
 								// Standard JSON tool: arguments object on the skc side, the
 								// wire wants the JSON string the model emitted (= streamed deltas).
-								const argsJson = cur.argsText || JSON.stringify(tc.arguments ?? {});
+								const argsJson =
+									cur.argsText.toWellFormed() || JSON.stringify(sanitizeJsonStrings(tc.arguments ?? {}));
 								cur.argsText = argsJson;
 								emit("response.function_call_arguments.done", {
 									item_id: cur.itemId,

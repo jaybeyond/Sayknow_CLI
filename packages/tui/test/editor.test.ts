@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import { stripVTControlCharacters } from "node:util";
 import { CURSOR_MARKER } from "@sayknow-cli/tui";
-import { CombinedAutocompleteProvider } from "@sayknow-cli/tui/autocomplete";
+import { type AutocompleteProvider, CombinedAutocompleteProvider } from "@sayknow-cli/tui/autocomplete";
 import { Editor } from "@sayknow-cli/tui/components/editor";
 import { visibleWidth } from "@sayknow-cli/tui/utils";
 import { setDefaultTabWidth } from "@sayknow-cli/utils";
@@ -353,6 +353,40 @@ describe("Editor component", () => {
 			expect(editor.isShowingAutocomplete()).toBe(false);
 		});
 
+		it("lets app-level Tab handlers consume before force file autocomplete", async () => {
+			const editor = new Editor(defaultEditorTheme);
+			let forceFileSuggestionCalls = 0;
+			const provider = {
+				async getSuggestions() {
+					return null;
+				},
+				applyCompletion(lines, cursorLine, cursorCol) {
+					return { lines, cursorLine, cursorCol };
+				},
+				async getForceFileSuggestions() {
+					forceFileSuggestionCalls += 1;
+					return { prefix: "", items: [{ label: "src/", value: "src/" }] };
+				},
+			} satisfies AutocompleteProvider & {
+				getForceFileSuggestions(): Promise<{ prefix: string; items: Array<{ label: string; value: string }> }>;
+			};
+			editor.setAutocompleteProvider(provider);
+			editor.setText("draft");
+			const tabTexts: string[] = [];
+			editor.onTab = text => {
+				tabTexts.push(text);
+				return true;
+			};
+
+			editor.handleInput("\t");
+			await Bun.sleep(0);
+
+			expect(tabTexts).toEqual(["draft"]);
+			expect(forceFileSuggestionCalls).toBe(0);
+			expect(editor.isShowingAutocomplete()).toBe(false);
+			expect(editor.getText()).toBe("draft");
+		});
+
 		it("does not show argument completions when command has no argument completer", async () => {
 			const editor = new Editor(defaultEditorTheme);
 			editor.setAutocompleteProvider(
@@ -417,6 +451,36 @@ describe("Editor component", () => {
 			const narrow = editor.render(20).length;
 
 			expect(narrow).toBeGreaterThan(wide);
+		});
+
+		it("renders cursor movement immediately after a trailing space on wrapped input", () => {
+			const editor = new Editor(defaultEditorTheme);
+			editor.setBorderVisible(false);
+			editor.setPaddingX(0);
+			editor.focused = true;
+
+			for (const char of "aaaaaaaaaa") editor.handleInput(char);
+			const beforeSpace = editor.render(10).map(line => stripVTControlCharacters(line));
+
+			editor.handleInput(" ");
+			const afterSpace = editor.render(10);
+			const afterSpacePlain = afterSpace.map(line => stripVTControlCharacters(line));
+
+			expect(editor.getText()).toBe("aaaaaaaaaa ");
+			expect(beforeSpace).toHaveLength(1);
+			expect(afterSpace).toHaveLength(2);
+			expect(afterSpacePlain[0]).toBe("aaaaaaaaaa");
+			expect(afterSpace[1]).toContain("\x1b[5m|\x1b[0m");
+
+			editor.handleInput("bbb");
+			const beforeWrappedSpace = editor.render(10);
+
+			editor.handleInput(" ");
+			const afterWrappedSpace = editor.render(10);
+
+			expect(editor.getText()).toBe("aaaaaaaaaa bbb ");
+			expect(beforeWrappedSpace[1]).toContain("bbb\x1b_pi:c\u0007\x1b[5m|\x1b[0m");
+			expect(afterWrappedSpace[1]).toContain("bbb \x1b_pi:c\u0007\x1b[5m|\x1b[0m");
 		});
 
 		it("recomputes layout after synchronous autocomplete replacement", () => {

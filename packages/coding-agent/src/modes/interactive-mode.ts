@@ -72,7 +72,6 @@ import { normalizeLocalScheme } from "../tools/path-utils";
 import { type ResolveToolDetails, runResolveInvocation } from "../tools/resolve";
 import { formatPhaseDisplayName } from "../tools/todo-write";
 import { ToolError } from "../tools/tool-errors";
-
 import type { EventBus } from "../utils/event-bus";
 import { getEditorCommand, openInEditor } from "../utils/external-editor";
 import { getSessionAccentAnsi, getSessionAccentHex } from "../utils/session-color";
@@ -104,6 +103,7 @@ import { JobsObserver } from "./jobs-observer";
 import { OAuthManualInputManager } from "./oauth-manual-input";
 import { SessionObserverRegistry } from "./session-observer-registry";
 import { interruptHint } from "./shared";
+import { shouldShowExtensionCommand } from "./slash-command-visibility";
 import { type ShimmerPalette, shimmerSegments, shimmerText } from "./theme/shimmer";
 import type { Theme } from "./theme/theme";
 import {
@@ -322,6 +322,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 	autoCompactionEscapeHandler?: () => void;
 	retryEscapeHandler?: () => void;
+	retryEscapePrimed = false;
 	retryCountdownTimer?: NodeJS.Timeout;
 	unsubscribe?: () => void;
 	onInputCallback?: (input: SubmittedUserInput) => void;
@@ -423,7 +424,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.editor.setUseTerminalCursor(this.ui.getShowHardwareCursor());
 		this.editor.setAutocompleteMaxVisible(settings.get("autocompleteMaxVisible"));
 		this.editor.onAutocompleteCancel = () => {
-			this.ui.requestRender(true);
+			this.ui.requestRender();
 		};
 		this.editor.onAutocompleteUpdate = () => {
 			this.ui.requestRender();
@@ -433,7 +434,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.#syncEditorMaxHeight();
 			this.updateEditorChrome();
 			this.editor.invalidate();
-			this.ui.requestRender(true, "resize");
+			this.ui.requestResizeRender();
 		};
 		process.stdout.on("resize", this.#resizeHandler);
 		try {
@@ -453,13 +454,16 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.hideThinkingBlock = settings.get("hideThinkingBlock");
 
 		const builtinCommandNames = new Set(BUILTIN_SLASH_COMMANDS.map(c => c.name));
+		const activeProvider = this.session.model?.provider;
 		const hookCommands: SlashCommand[] = (
 			this.session.extensionRunner?.getRegisteredCommands(builtinCommandNames) ?? []
-		).map(cmd => ({
-			name: cmd.name,
-			description: cmd.description ?? "(hook command)",
-			getArgumentCompletions: cmd.getArgumentCompletions,
-		}));
+		)
+			.filter(cmd => shouldShowExtensionCommand(cmd.name, activeProvider))
+			.map(cmd => ({
+				name: cmd.name,
+				description: cmd.description ?? "(hook command)",
+				getArgumentCompletions: cmd.getArgumentCompletions,
+			}));
 
 		// Convert custom commands (TypeScript) to SlashCommand format
 		const customCommands: SlashCommand[] = this.session.customCommands.map(loaded => ({
@@ -528,6 +532,14 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 
 		if (!startupQuiet) {
+			const getWelcomeReservedBottomRows = (width: number): number =>
+				[
+					this.statusLine,
+					this.hookWidgetContainerAbove,
+					this.editorContainer,
+					this.hookWidgetContainerBelow,
+				].reduce((rows, component) => rows + component.render(width).length, 0);
+
 			// Add welcome header
 			this.#welcomeComponent = new WelcomeComponent(
 				this.#version,
@@ -536,30 +548,16 @@ export class InteractiveMode implements InteractiveModeContext {
 				recentSessions,
 				this.#getWelcomeLspServers(),
 				welcomeLogoMode,
+				{
+					getViewportRows: () => this.ui.terminal.rows,
+					getReservedBottomRows: getWelcomeReservedBottomRows,
+					changelogMarkdown: this.#changelogMarkdown,
+					collapseChangelog: settings.get("collapseChangelog"),
+				},
 			);
 
-			// Setup UI layout
-			this.ui.addChild(new Spacer(1));
 			this.ui.addChild(this.#welcomeComponent);
-			this.ui.addChild(new Spacer(1));
 			this.#welcomeComponent.playIntro(() => this.ui.requestRender());
-
-			// Add changelog if provided
-			if (this.#changelogMarkdown) {
-				this.ui.addChild(new DynamicBorder());
-				if (settings.get("collapseChangelog")) {
-					const versionMatch = this.#changelogMarkdown.match(/##\s+\[?(\d+\.\d+\.\d+)\]?/);
-					const latestVersion = versionMatch ? versionMatch[1] : this.#version;
-					const condensedText = `Updated to v${latestVersion}. Use ${theme.bold("/changelog")} to view full changelog.`;
-					this.ui.addChild(new Text(condensedText, 1, 0));
-				} else {
-					this.ui.addChild(new Text(theme.bold(theme.fg("accent", "What's New")), 1, 0));
-					this.ui.addChild(new Spacer(1));
-					this.ui.addChild(new Markdown(this.#changelogMarkdown.trim(), 1, 0, getMarkdownTheme()));
-					this.ui.addChild(new Spacer(1));
-				}
-				this.ui.addChild(new DynamicBorder());
-			}
 		}
 
 		this.ui.addChild(this.chatContainer);
@@ -1961,6 +1959,8 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.loadingAnimation.stop();
 			this.loadingAnimation = undefined;
 		}
+		this.#welcomeComponent?.dispose();
+		this.#welcomeComponent = undefined;
 		this.#cleanupMicAnimation();
 		this.#cancelGoalContinuation();
 		if (this.#sttController) {
@@ -2036,7 +2036,9 @@ export class InteractiveMode implements InteractiveModeContext {
 		const sessionId = this.sessionManager.getSessionId();
 		const sessionFile = this.sessionManager.getSessionFile();
 		if (sessionId && sessionFile) {
-			process.stderr.write(`\n${chalk.dim(`Resume this session with ${APP_NAME} --resume ${sessionId}`)}\n`);
+			process.stderr.write(
+				`\n${chalk.dim("Resume this session with:")}\n${chalk.dim(`${APP_NAME} --resume ${sessionId}`)}\n`,
+			);
 		}
 
 		await postmortem.quit(0);
@@ -2072,7 +2074,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		nextEditor.setUseTerminalCursor(this.ui.getShowHardwareCursor());
 		nextEditor.setAutocompleteMaxVisible(this.settings.get("autocompleteMaxVisible"));
 		nextEditor.onAutocompleteCancel = () => {
-			this.ui.requestRender(true);
+			this.ui.requestRender();
 		};
 		nextEditor.onAutocompleteUpdate = () => {
 			this.ui.requestRender();
@@ -2310,6 +2312,10 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	handleHotkeysCommand(): void {
 		this.#commandController.handleHotkeysCommand();
+	}
+
+	handleHelpCommand(): void {
+		this.#commandController.handleHelpCommand();
 	}
 
 	handleToolsCommand(): void {

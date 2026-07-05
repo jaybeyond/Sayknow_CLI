@@ -258,6 +258,63 @@ export const SETTINGS_SCHEMA = {
 	"auth.broker.url": { type: "string", default: undefined },
 	"auth.broker.token": { type: "string", default: undefined },
 
+	// Notifications (shared daemon with Telegram/Discord/Slack presentation adapters)
+	"notifications.enabled": { type: "boolean", default: false },
+	"notifications.telegram.botToken": { type: "string", default: undefined },
+	"notifications.telegram.chatId": { type: "string", default: undefined },
+	"notifications.discord.botToken": { type: "string", default: undefined },
+	"notifications.discord.channelId": { type: "string", default: undefined },
+	"notifications.slack.botToken": { type: "string", default: undefined },
+	"notifications.slack.channelId": { type: "string", default: undefined },
+	"notifications.redact": { type: "boolean", default: false },
+	"notifications.verbosity": {
+		type: "string",
+		default: "lean",
+		validate: (value: string) => value === "lean" || value === "verbose",
+	},
+	"notifications.daemon.idleTimeoutMs": {
+		type: "number",
+		default: 60000,
+		validate: (value: number) => Number.isFinite(value) && value > 0,
+	},
+
+	"notifications.terminalBell": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "interaction",
+			label: "Terminal Bell",
+			description: "Emit a BEL character for local terminal notifications",
+		},
+	},
+	"notifications.bellOnComplete": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "interaction",
+			label: "Bell on Completion",
+			description: "Ring the terminal bell when an agent turn completes",
+		},
+	},
+	"notifications.bellOnApproval": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "interaction",
+			label: "Bell on Approval",
+			description: "Ring the terminal bell when a plan or approval prompt needs attention",
+		},
+	},
+	"notifications.bellOnAsk": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "interaction",
+			label: "Bell on Ask",
+			description: "Ring the terminal bell when an ask/user-input prompt needs attention",
+		},
+	},
+
 	autoResume: {
 		type: "boolean",
 		default: false,
@@ -422,7 +479,7 @@ export const SETTINGS_SCHEMA = {
 	// Status line
 	"statusLine.preset": {
 		type: "enum",
-		values: ["default", "minimal", "compact", "full", "nerd", "ascii", "custom"] as const,
+		values: ["default", "default-usage", "minimal", "compact", "full", "nerd", "ascii", "custom"] as const,
 		default: "default",
 		ui: {
 			tab: "appearance",
@@ -430,6 +487,11 @@ export const SETTINGS_SCHEMA = {
 			description: "Pre-built status line configurations",
 			options: [
 				{ value: "default", label: "Default", description: "Model, path, git, context, tokens, cost" },
+				{
+					value: "default-usage",
+					label: "Default + Usage",
+					description: "Default layout with provider usage quota",
+				},
 				{ value: "minimal", label: "Minimal", description: "Path and git only" },
 				{ value: "compact", label: "Compact", description: "Model, git, cost, context" },
 				{ value: "full", label: "Full", description: "All segments including time" },
@@ -467,6 +529,21 @@ export const SETTINGS_SCHEMA = {
 			tab: "appearance",
 			label: "Session Accent",
 			description: "Use the session name color for the editor border and status line gap",
+		},
+	},
+	"statusLine.maxRows": {
+		type: "number",
+		default: 1,
+		ui: {
+			tab: "appearance",
+			label: "Status Line Rows",
+			description:
+				"Maximum rows for the status line. When greater than 1, overflowing segments wrap onto additional rows instead of being dropped.",
+			options: [
+				{ value: "1", label: "1 row", description: "Single line; overflow is truncated (default)" },
+				{ value: "2", label: "2 rows", description: "Wrap overflow onto a second row" },
+				{ value: "3", label: "3 rows", description: "Wrap overflow across up to three rows" },
+			],
 		},
 	},
 	"tools.artifactSpillThreshold": {
@@ -1090,6 +1167,23 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"startup.welcomeBannerMode": {
+		type: "enum",
+		values: ["auto", "unicode", "square", "ascii"] as const,
+		default: "auto",
+		ui: {
+			tab: "interaction",
+			label: "Welcome Banner Mode",
+			description: "Logo style for the startup welcome screen",
+			options: [
+				{ value: "auto", label: "Auto", description: "Use the rounded Unicode logo" },
+				{ value: "unicode", label: "Unicode", description: "Force the rounded Unicode logo" },
+				{ value: "square", label: "Square Unicode", description: "Force the square-corner Unicode fallback" },
+				{ value: "ascii", label: "ASCII", description: "Force the ASCII-safe logo" },
+			],
+		},
+	},
+
 	"startup.checkUpdate": {
 		type: "boolean",
 		default: true,
@@ -1122,6 +1216,16 @@ export const SETTINGS_SCHEMA = {
 		values: ["on", "off"] as const,
 		default: "on",
 		ui: { tab: "interaction", label: "Completion Notification", description: "Notify when the agent completes" },
+	},
+	"completion.notifyCommand": {
+		type: "string",
+		default: "",
+		ui: {
+			tab: "interaction",
+			label: "Completion Notification Command",
+			description:
+				"Optional user-level shell command to run when an agent turn completes; receives SKC_NOTIFICATION_* environment variables.",
+		},
 	},
 
 	"ask.timeout": {
@@ -2059,16 +2163,6 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
-	"inspect_image.enabled": {
-		type: "boolean",
-		default: false,
-		ui: {
-			tab: "tools",
-			label: "Inspect Image",
-			description: "Enable the inspect_image tool, delegating image understanding to a vision-capable model",
-		},
-	},
-
 	"checkpoint.enabled": {
 		type: "boolean",
 		default: false,
@@ -2094,6 +2188,17 @@ export const SETTINGS_SCHEMA = {
 		type: "boolean",
 		default: true,
 		ui: { tab: "tools", label: "Read URLs", description: "Allow the read tool to fetch and process URLs" },
+	},
+
+	"web.insaneFallback": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "tools",
+			label: "Insane Search Fallback",
+			description:
+				"Opt in to the vendored insane-search escalation for blocked public URL reads (403/WAF/JS-gated). Off by default. Requires preinstalled python3 + curl_cffi (and node + playwright/stealth for the browser phase); changes network posture by enabling TLS/browser impersonation for public pages.",
+		},
 	},
 
 	"github.enabled": {
@@ -2144,6 +2249,11 @@ export const SETTINGS_SCHEMA = {
 		ui: { tab: "tools", label: "Web Search", description: "Enable the web_search tool for web searching" },
 	},
 
+	"web_search.provider": {
+		type: "enum",
+		values: ["auto", ...CONFIGURABLE_SEARCH_PROVIDER_IDS] as const,
+		default: "auto",
+	},
 	"web_search.fallback": {
 		type: "array",
 		default: EMPTY_STRING_ARRAY,
@@ -2152,6 +2262,17 @@ export const SETTINGS_SCHEMA = {
 			tab: "tools",
 			label: "Web Search Fallback",
 			description: "Ordered fallback web search providers after the active model native provider",
+		},
+	},
+
+	"web_search.timeout": {
+		type: "number",
+		default: 300,
+		validate: (value: number) => Number.isFinite(value) && value > 0,
+		ui: {
+			tab: "tools",
+			label: "Web Search Timeout",
+			description: "Hard timeout in seconds for a single web search request (default 300)",
 		},
 	},
 
@@ -2182,6 +2303,46 @@ export const SETTINGS_SCHEMA = {
 			label: "Screenshot directory",
 			description:
 				"Directory to save screenshots. If unset, screenshots go to a temp file. Supports ~. Examples: ~/Downloads, ~/Desktop, /sdcard/Download (Android)",
+		},
+	},
+
+	"browser.gc.enabled": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "tools",
+			label: "Browser Tab GC",
+			description: "Automatically reclaim idle, unheld SKC-managed headless/spawned browser tabs.",
+		},
+	},
+	"browser.gc.idleMs": {
+		type: "number",
+		default: 300_000,
+		validate: (value: number) => Number.isFinite(value) && value >= 0,
+		ui: {
+			tab: "tools",
+			label: "Browser Tab GC Idle (ms)",
+			description: "Evict headless/spawned tabs idle longer than this many milliseconds.",
+		},
+	},
+	"browser.gc.rssLimitMb": {
+		type: "number",
+		default: 1536,
+		validate: (value: number) => Number.isFinite(value) && value > 0,
+		ui: {
+			tab: "tools",
+			label: "Browser Tab GC RSS Limit (MB)",
+			description: "Parent-process RSS (MB) above which idle tabs are opportunistically evicted LRU.",
+		},
+	},
+	"resourceGc.sweepIntervalMs": {
+		type: "number",
+		default: 30_000,
+		validate: (value: number) => Number.isFinite(value) && value > 0,
+		ui: {
+			tab: "tools",
+			label: "Resource GC Sweep Interval (ms)",
+			description: "How often the resource GC sweeps browser tabs and stale screenshot directories.",
 		},
 	},
 
@@ -2242,6 +2403,35 @@ export const SETTINGS_SCHEMA = {
 			tab: "tools",
 			label: "Computer Audit Log",
 			description: "Persist audit records for enabled computer-use actions.",
+		},
+	},
+	"computer.screenshotGc.enabled": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "tools",
+			label: "Computer Screenshot GC",
+			description: "Delete stale computer-use screenshot fallback directories on disk.",
+		},
+	},
+	"computer.screenshotGc.staleMs": {
+		type: "number",
+		default: 43_200_000,
+		validate: (value: number) => Number.isFinite(value) && value >= 0,
+		ui: {
+			tab: "tools",
+			label: "Computer Screenshot GC Stale Age (ms)",
+			description: "Remove screenshot fallback directories whose mtime is older than this many milliseconds.",
+		},
+	},
+	"computer.screenshotGc.scanIntervalMs": {
+		type: "number",
+		default: 1_800_000,
+		validate: (value: number) => Number.isFinite(value) && value > 0,
+		ui: {
+			tab: "tools",
+			label: "Computer Screenshot GC Scan Interval (ms)",
+			description: "Minimum interval between os.tmpdir scans for stale screenshot directories.",
 		},
 	},
 
@@ -2327,7 +2517,7 @@ export const SETTINGS_SCHEMA = {
 	"tools.discoveryMode": {
 		type: "enum",
 		values: ["off", "all"] as const,
-		default: "off",
+		default: "all",
 		ui: {
 			tab: "tools",
 			label: "Tool Discovery",
@@ -2342,7 +2532,7 @@ export const SETTINGS_SCHEMA = {
 			tab: "tools",
 			label: "Essential Tools Override",
 			description:
-				"Override the always-loaded built-in tools (default: read, bash, edit). Leave empty to use defaults.",
+				"Override the always-loaded built-in tools (default: read, bash, edit, write, search, find). Leave empty to use defaults.",
 		},
 	},
 
@@ -2723,6 +2913,7 @@ export const SETTINGS_SCHEMA = {
 		values: [
 			"auto",
 			"duckduckgo",
+			"insane",
 			"exa",
 			"brave",
 			"jina",
@@ -2754,6 +2945,11 @@ export const SETTINGS_SCHEMA = {
 					value: "duckduckgo",
 					label: "DuckDuckGo",
 					description: "Keyless default — no API key or OAuth required",
+				},
+				{
+					value: "insane",
+					label: "Insane",
+					description: "Keyless safe public-route fallback inspired by upstream insane-search",
 				},
 				{ value: "exa", label: "Exa", description: "Uses Exa API when EXA_API_KEY is set" },
 				{ value: "brave", label: "Brave", description: "Requires BRAVE_API_KEY" },
@@ -2956,6 +3152,7 @@ export const SETTINGS_SCHEMA = {
 	"thinkingBudgets.xhigh": { type: "number", default: 32768 },
 
 	"thinkingBudgets.max": { type: "number", default: 65536 },
+
 	// ────────────────────────────────────────────────────────────────────────
 	// Plugins — security scanner
 	// ────────────────────────────────────────────────────────────────────────
@@ -2987,6 +3184,7 @@ export const SETTINGS_SCHEMA = {
 			description: "Score threshold (0–100) above which block mode denies install. Default 60.",
 		},
 	},
+
 	// Telegram Remote — two-way messaging integration.
 	// Maps to SKC_TELEGRAM_REMOTE_* env vars consumed by the
 	// @sayknow-cli/telegram-remote gateway (packages/telegram-remote).
@@ -3298,6 +3496,7 @@ export interface ExaSettings {
 export interface StatusLineSettings {
 	preset: StatusLinePreset;
 	separator: StatusLineSeparatorStyle;
+	maxRows: number;
 	showHookStatus: boolean;
 	showSkillHud: boolean;
 	leftSegments: StatusLineSegmentId[];
@@ -3336,6 +3535,26 @@ export interface ShellMinimizerSettings {
 	only: string[];
 	except: string[];
 	maxCaptureBytes: number;
+}
+
+export interface NotificationsSettings {
+	enabled: boolean;
+	telegram: {
+		botToken: string | undefined;
+		chatId: string | undefined;
+	};
+	discord: {
+		botToken: string | undefined;
+		channelId: string | undefined;
+	};
+	slack: {
+		botToken: string | undefined;
+		channelId: string | undefined;
+	};
+	redact: boolean;
+	daemon: {
+		idleTimeoutMs: number;
+	};
 }
 
 export interface TelegramSettings {
@@ -3386,6 +3605,7 @@ export interface GroupTypeMap {
 	cycleOrder: string[];
 	shellMinimizer: ShellMinimizerSettings;
 	telegram: TelegramSettings;
+	notifications: NotificationsSettings;
 }
 
 export type GroupPrefix = keyof GroupTypeMap;

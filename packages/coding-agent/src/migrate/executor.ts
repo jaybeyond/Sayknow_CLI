@@ -12,11 +12,28 @@ import * as path from "node:path";
 import { upsertMCPServer } from "../runtime-mcp/config-writer";
 import type { MigrateAction } from "./types";
 
-async function ensureRealDirectoryPathNoFollow(directory: string): Promise<void> {
-	const resolved = path.resolve(directory);
-	const parsed = path.parse(resolved);
-	let current = parsed.root;
-	for (const part of resolved.slice(parsed.root.length).split(path.sep).filter(Boolean)) {
+function trustedSkillDestinationBase(destination: string): string {
+	const skillDir = path.dirname(path.resolve(destination));
+	const skillsRoot = path.dirname(skillDir);
+	const scopeRoot = path.dirname(skillsRoot);
+	return path.basename(scopeRoot) === ".skc" ? path.dirname(scopeRoot) : scopeRoot;
+}
+
+async function ensureRealDirectoryPathNoFollow(directory: string, trustedBase: string): Promise<void> {
+	const resolvedBase = path.resolve(trustedBase);
+	const resolvedDirectory = path.resolve(directory);
+	const relative = path.relative(resolvedBase, resolvedDirectory);
+	if (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+		throw new Error(`skill destination escapes trusted base: ${resolvedDirectory}`);
+	}
+
+	const baseStat = await fs.stat(resolvedBase);
+	if (!baseStat.isDirectory()) {
+		throw new Error(`skill destination base is not a directory: ${resolvedBase}`);
+	}
+
+	let current = resolvedBase;
+	for (const part of relative.split(path.sep).filter(part => part && part !== ".")) {
 		current = path.join(current, part);
 		try {
 			const stat = await fs.lstat(current);
@@ -36,7 +53,7 @@ async function ensureRealDirectoryPathNoFollow(directory: string): Promise<void>
 
 async function writeSkillFileNoFollow(destination: string, content: string): Promise<void> {
 	const skillDir = path.dirname(destination);
-	await ensureRealDirectoryPathNoFollow(skillDir);
+	await ensureRealDirectoryPathNoFollow(skillDir, trustedSkillDestinationBase(destination));
 	const handle = await fs.open(
 		destination,
 		fsSync.constants.O_WRONLY | fsSync.constants.O_CREAT | fsSync.constants.O_TRUNC | fsSync.constants.O_NOFOLLOW,

@@ -141,12 +141,78 @@ const MODEL_PROVIDER_TO_SEARCH: Record<string, SearchProviderId> = {
 let preferredProvId: SearchProviderId | "auto" = "auto";
 let fallbackProvIds: SearchProviderId[] = [];
 
+/**
+ * Resolved-chain cache. Chain resolution probes provider availability
+ * (credential lookups, potentially an OAuth refresh through the broker) on
+ * every web_search call even though the result only changes when the active
+ * model, provider preference, or credentials change. Cache the resolved
+ * provider-id list per AuthStorage instance for a short TTL.
+ *
+ * Keyed by AuthStorage identity (WeakMap) so tests and short-lived CLI calls
+ * with fresh storage handles never see another handle's chain. The TTL keeps
+ * a login/logout mid-session from being masked for more than a minute.
+ */
+const CHAIN_CACHE_TTL_MS = 60_000;
+let chainCache = new WeakMap<AuthStorage, Map<string, { ids: SearchProviderId[]; expires: number }>>();
+
+/** Drop every cached resolved chain (settings changed, tests). */
+export function clearResolvedChainCache(): void {
+	chainCache = new WeakMap();
+}
+
+function chainCacheKey(
+	preferred: SearchProviderId | "auto" | undefined,
+	fallbacks: readonly SearchProviderId[],
+	ctx: ActiveSearchModelContext | undefined,
+	authStorage: AuthStorage,
+): string {
+	// Include the AuthStorage generation so credential changes (login/logout,
+	// key rotation) invalidate cached chains immediately instead of being
+	// masked for up to the TTL. Stubs without getGeneration() key as 0.
+	const generation = (authStorage as { getGeneration?: () => number }).getGeneration?.() ?? 0;
+	return JSON.stringify([
+		generation,
+		preferred ?? null,
+		fallbacks,
+		ctx
+			? [ctx.provider, ctx.modelId, ctx.wireModelId ?? null, ctx.api, ctx.baseUrl ?? null, ctx.webSearch ?? null]
+			: null,
+	]);
+}
+
 export function setPreferredSearchProvider(provider: SearchProviderId | "auto"): void {
 	preferredProvId = provider;
+	clearResolvedChainCache();
 }
 
 export function setSearchFallbackProviders(ids: readonly string[]): void {
 	fallbackProvIds = ids.filter(isConfigurableSearchProviderId);
+	clearResolvedChainCache();
+}
+
+/**
+ * Fire-and-forget warm-up: resolve the provider chain once so the provider
+ * modules are imported and the chain cache is primed before the first
+ * user-visible search. Errors are intentionally swallowed — prewarming must
+ * never surface a failure the real search path would handle itself.
+ */
+export function prewarmSearchProviders(options: ResolveProviderChainOptions): void {
+	void resolveProviderChain(options).catch(() => {});
+}
+
+export interface SearchProviderPreferenceSource {
+	get(path: "providers.webSearch" | "web_search.provider"): SearchProviderId | "auto";
+	has(path: "providers.webSearch" | "web_search.provider"): boolean;
+}
+
+export function getConfiguredSearchProviderPreference(
+	settings: SearchProviderPreferenceSource,
+): SearchProviderId | "auto" {
+	const providerPreference = settings.get("providers.webSearch");
+	if (settings.has("providers.webSearch") || providerPreference !== "auto") return providerPreference;
+
+	const legacyProviderPreference = settings.get("web_search.provider");
+	return legacyProviderPreference;
 }
 
 export interface ResolveProviderChainOptions {
@@ -342,6 +408,16 @@ export async function resolveProviderChain(options: ResolveProviderChainOptions)
 		activeModelContext,
 		fallbackProviders = fallbackProvIds,
 	} = options;
+
+	const cacheKey = chainCacheKey(preferredProvider, fallbackProviders, activeModelContext, authStorage);
+	const perStorage = chainCache.get(authStorage);
+	const cached = perStorage?.get(cacheKey);
+	if (cached && cached.expires > Date.now()) {
+		const cachedProviders: SearchProvider[] = [];
+		for (const id of cached.ids) cachedProviders.push(await getSearchProvider(id));
+		return cachedProviders;
+	}
+
 	const chain: SearchProviderId[] = [];
 
 	// A forced primary is honored only when it is a user-configurable provider.
@@ -376,6 +452,10 @@ export async function resolveProviderChain(options: ResolveProviderChainOptions)
 		await appendAvailable(chain, id, authStorage);
 	}
 	appendDeduped(chain, "duckduckgo");
+
+	const storageEntry = chainCache.get(authStorage) ?? new Map<string, { ids: SearchProviderId[]; expires: number }>();
+	storageEntry.set(cacheKey, { ids: [...chain], expires: Date.now() + CHAIN_CACHE_TTL_MS });
+	chainCache.set(authStorage, storageEntry);
 
 	const providers: SearchProvider[] = [];
 	for (const id of chain) providers.push(await getSearchProvider(id));

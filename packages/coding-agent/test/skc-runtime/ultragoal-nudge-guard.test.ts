@@ -144,9 +144,7 @@ describe("ultragoal nudge guard", () => {
 		).rejects.toThrow(/try-harder nudge/);
 		await expect(
 			assertCanCompleteCurrentGoal({ cwd, currentGoal: DEFAULT_OBJECTIVE_GOAL, sessionId: TEST_SESSION_ID }),
-		).rejects.toThrow(
-			/strict `skc ultragoal checkpoint --status complete --quality-gate-json <file> --skc-goal-json <file>`/,
-		);
+		).rejects.toThrow(/`skc ultragoal checkpoint --status complete --quality-gate-json <file>`/);
 		const ledger = await readUltragoalLedger(cwd, TEST_SESSION_ID);
 		expect(ledger.filter(event => event.event === "nudge" && event.surface === "premature_complete").length).toBe(1);
 	});

@@ -23,13 +23,11 @@ import {
 	extractPrintableText,
 	Input,
 	matchesKey,
-	padding,
 	replaceTabs,
 	resolveTerminalColumns,
 	Spacer,
 	Text,
 	truncateToWidth,
-	visibleWidth,
 	wrapTextWithAnsi,
 } from "@sayknow-cli/tui";
 import { isEnoent, prompt } from "@sayknow-cli/utils";
@@ -52,6 +50,7 @@ import { shortenPath } from "../../tools/render-utils";
 import { theme } from "../theme/theme";
 import { matchesAppInterrupt } from "../utils/keybinding-matchers";
 import { DynamicBorder } from "./dynamic-border";
+import { TwoColumnBody } from "./two-column-body";
 
 type SourceTabId = "all" | AgentSource;
 type AgentScope = "project" | "user";
@@ -294,38 +293,6 @@ class AgentInspectorPane implements Component {
 	}
 
 	invalidate(): void {}
-}
-
-class TwoColumnBody implements Component {
-	constructor(
-		private readonly leftPane: AgentListPane,
-		private readonly rightPane: AgentInspectorPane,
-		private readonly maxHeight: number,
-	) {}
-
-	render(width: number): string[] {
-		const leftWidth = Math.floor(width * 0.5);
-		const rightWidth = width - leftWidth - 3;
-		const leftLines = this.leftPane.render(leftWidth);
-		const rightLines = this.rightPane.render(rightWidth);
-		const lineCount = Math.min(this.maxHeight, Math.max(leftLines.length, rightLines.length));
-		const out: string[] = [];
-		const separator = theme.fg("dim", ` ${theme.boxSharp.vertical} `);
-
-		for (let i = 0; i < lineCount; i++) {
-			const left = truncateToWidth(leftLines[i] ?? "", leftWidth);
-			const leftPadded = left + padding(Math.max(0, leftWidth - visibleWidth(left)));
-			const right = truncateToWidth(rightLines[i] ?? "", rightWidth);
-			out.push(leftPadded + separator + right);
-		}
-
-		return out;
-	}
-
-	invalidate(): void {
-		this.leftPane.invalidate?.();
-		this.rightPane.invalidate?.();
-	}
 }
 
 export class AgentDashboard extends Container {

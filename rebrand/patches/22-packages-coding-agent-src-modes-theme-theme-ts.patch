@@ -1,6 +1,16 @@
 --- a/packages/coding-agent/src/modes/theme/theme.ts
 +++ b/packages/coding-agent/src/modes/theme/theme.ts
-@@ -264,7 +264,7 @@
+@@ -188,7 +188,8 @@
+ 	| "tab.tools"
+ 	| "tab.memory"
+ 	| "tab.tasks"
+-	| "tab.providers";
++	| "tab.providers"
++	| "tab.integrations";
+ 
+ type SymbolMap = Record<SymbolKey, string>;
+ 
+@@ -264,7 +265,7 @@
  	"icon.context": "◫",
  	"icon.cost": "💲",
  	"icon.time": "⏱",
@@ -9,7 +19,31 @@
  	"icon.agents": "👥",
  	"icon.cache": "💾",
  	"icon.input": "⤵",
-@@ -1781,7 +1781,7 @@
+@@ -353,6 +354,7 @@
+ 	"tab.memory": "🧠",
+ 	"tab.tasks": "📦",
+ 	"tab.providers": "🌐",
++	"tab.integrations": "🔌",
+ };
+ 
+ const NERD_SYMBOLS: SymbolMap = {
+@@ -612,6 +614,7 @@
+ 	"tab.memory": "󰧑",
+ 	"tab.tasks": "󰐱",
+ 	"tab.providers": "󰖟",
++	"tab.integrations": "󰚇",
+ };
+ 
+ const ASCII_SYMBOLS: SymbolMap = {
+@@ -774,6 +777,7 @@
+ 	"tab.memory": "[Y]",
+ 	"tab.tasks": "[K]",
+ 	"tab.providers": "[P]",
++	"tab.integrations": "[+]",
+ };
+ 
+ const SYMBOL_PRESETS: Record<SymbolPreset, SymbolMap> = {
+@@ -1781,7 +1785,7 @@
  var themeReloadTimer: NodeJS.Timeout | undefined;
  var sigwinchHandler: (() => void) | undefined;
  var autoDetectedTheme: boolean = false;
@@ -18,7 +52,7 @@
  var autoLightTheme: string = "blue-octopus";
  var onThemeChangeCallback: (() => void) | undefined;
  var themeLoadRequestId: number = 0;
-@@ -1802,7 +1802,7 @@
+@@ -1802,7 +1806,7 @@
  	lightTheme?: string,
  ): Promise<void> {
  	autoDetectedTheme = true;
@@ -27,7 +61,7 @@
  	autoLightTheme = lightTheme ?? "blue-octopus";
  	const name = getDefaultTheme();
  	previewThemeActive = false;
-@@ -1816,9 +1816,9 @@
+@@ -1816,9 +1820,9 @@
  			startSigwinchListener();
  		}
  	} catch (err) {
@@ -40,7 +74,7 @@
  		// Don't start watcher for fallback theme
  	}
  }
-@@ -1848,9 +1848,9 @@
+@@ -1848,9 +1852,9 @@
  		if (requestId !== themeLoadRequestId) {
  			return { success: false, error: "Theme change superseded by a newer request" };
  		}
@@ -53,7 +87,7 @@
  		// Don't start watcher for fallback theme
  		return {
  			success: false,
-@@ -1958,8 +1958,8 @@
+@@ -1958,8 +1962,8 @@
  		try {
  			theme = await loadTheme(currentThemeName, getCurrentThemeOptions());
  		} catch {
@@ -64,7 +98,7 @@
  		}
  		if (onThemeChangeCallback) {
  			onThemeChangeCallback();
-@@ -1984,8 +1984,8 @@
+@@ -1984,8 +1988,8 @@
  		try {
  			theme = await loadTheme(currentThemeName, getCurrentThemeOptions());
  		} catch {
@@ -75,7 +109,7 @@
  		}
  		if (onThemeChangeCallback) {
  			onThemeChangeCallback();
-@@ -2273,7 +2273,7 @@
+@@ -2273,7 +2277,7 @@
  }
  
  export function isLightTheme(themeName?: string, agentDir?: string): boolean {

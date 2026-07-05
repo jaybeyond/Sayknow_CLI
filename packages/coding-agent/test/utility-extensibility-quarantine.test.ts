@@ -34,7 +34,6 @@ describe("SKC utility extensibility quarantine", () => {
 			"reload-plugins",
 			"plan",
 			"share",
-			"browser",
 			"todo",
 			"changelog",
 			"branch",

@@ -89,7 +89,7 @@
 				},
 				"terminalBell": {
 					"type": "boolean",
-					"description": "Emit a BEL character for local terminal notifications",
+					"description": "Emit a BEL character for local terminal notifications. Windows Terminal may keep BEL silent depending on profile/system sound settings; use completion.notifyCommand for a PowerShell Console.Beep workaround.",
 					"default": false
 				},
 				"bellOnComplete": {
@@ -237,7 +237,7 @@
 				"dark": {
 					"type": "string",
 					"description": "Theme used when terminal has dark background",
-					"default": "blue-octopus"
+					"default": "red-octopus"
 				},
 				"light": {
 					"type": "string",
@@ -257,21 +257,6 @@
 			"description": "Icon/symbol style",
 			"default": "unicode"
 		},
-		"language": {
-			"type": "string",
-			"enum": [
-				"auto",
-				"en",
-				"ko",
-				"zh",
-				"ja",
-				"es",
-				"fr",
-				"de"
-			],
-			"description": "Interface language. Auto follows your system locale.",
-			"default": "auto"
-		},
 		"colorBlindMode": {
 			"type": "boolean",
 			"description": "Use blue instead of green for diff additions",
@@ -284,6 +269,7 @@
 					"type": "string",
 					"enum": [
 						"default",
+						"default-usage",
 						"minimal",
 						"compact",
 						"full",
@@ -312,6 +298,11 @@
 					"type": "boolean",
 					"description": "Use the session name color for the editor border and status line gap",
 					"default": true
+				},
+				"maxRows": {
+					"type": "number",
+					"description": "Maximum rows for the status line. When greater than 1, overflowing segments wrap onto additional rows instead of being dropped.",
+					"default": 1
 				},
 				"showHookStatus": {
 					"type": "boolean",
@@ -384,12 +375,12 @@
 						"all"
 					],
 					"description": "Hide non-essential built-in tools behind a search tool to save tokens.",
-					"default": "off"
+					"default": "all"
 				},
 				"essentialOverride": {
 					"type": "array",
 					"items": true,
-					"description": "Override the always-loaded built-in tools (default: read, bash, edit). Leave empty to use defaults.",
+					"description": "Override the always-loaded built-in tools (default: read, bash, edit, write, search, find). Leave empty to use defaults.",
 					"default": []
 				}
 			},
@@ -829,7 +820,7 @@
 				"enabled": {
 					"type": "boolean",
 					"description": "Show the interactive GitHub star reminder when gh is authenticated",
-					"default": false
+					"default": true
 				}
 			},
 			"additionalProperties": false
@@ -853,7 +844,7 @@
 				},
 				"notifyCommand": {
 					"type": "string",
-					"description": "Optional user-level shell command to run when an agent turn completes; receives SKC_NOTIFICATION_* environment variables.",
+					"description": "Optional user-level shell command to run when an agent turn completes; receives SKC_NOTIFICATION_* environment variables. On Windows, this can call PowerShell [Console]::Beep when terminal BEL is silent.",
 					"default": ""
 				}
 			},
@@ -1737,6 +1728,30 @@
 					"description": "Enable the web_search tool for web searching",
 					"default": true
 				},
+				"provider": {
+					"type": "string",
+					"enum": [
+						"auto",
+						"duckduckgo",
+						"insane",
+						"exa",
+						"brave",
+						"jina",
+						"kimi",
+						"zai",
+						"anthropic",
+						"perplexity",
+						"gemini",
+						"codex",
+						"xai",
+						"tavily",
+						"parallel",
+						"kagi",
+						"synthetic",
+						"searxng"
+					],
+					"default": "auto"
+				},
 				"fallback": {
 					"type": "array",
 					"items": {
@@ -2261,33 +2276,6 @@
 				"max": {
 					"type": "number",
 					"default": 65536
-				}
-			},
-			"additionalProperties": false
-		},
-		"plugins": {
-			"type": "object",
-			"properties": {
-				"security": {
-					"type": "object",
-					"properties": {
-						"scanMode": {
-							"type": "string",
-							"enum": [
-								"warn",
-								"off",
-								"block"
-							],
-							"description": "warn: scan on install and log advisory findings (default); off: skip scan; block: deny install when score exceeds threshold",
-							"default": "warn"
-						},
-						"riskThreshold": {
-							"type": "number",
-							"description": "Score threshold (0–100) above which block mode denies install. Default 60.",
-							"default": 60
-						}
-					},
-					"additionalProperties": false
 				}
 			},
 			"additionalProperties": false

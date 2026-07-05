@@ -36,6 +36,7 @@ export const es: Partial<Record<MsgKey, string>> = {
 	"settings.tab.tools": "Herramientas",
 	"settings.tab.tasks": "Tareas",
 	"settings.tab.providers": "Proveedores",
+	"settings.tab.integrations": "Integraciones",
 	"settings.language.label": "Idioma",
 	"settings.language.desc": "Idioma de la interfaz. Automático sigue la configuración regional del sistema.",
 	"help.usage": "USO",

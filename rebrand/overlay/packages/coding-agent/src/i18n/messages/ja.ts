@@ -34,6 +34,7 @@ export const ja: Partial<Record<MsgKey, string>> = {
 	"settings.tab.tools": "ツール",
 	"settings.tab.tasks": "タスク",
 	"settings.tab.providers": "プロバイダー",
+	"settings.tab.integrations": "統合",
 
 	"settings.language.label": "言語",
 	"settings.language.desc": "インターフェース言語。自動はシステムのロケールに従います。",

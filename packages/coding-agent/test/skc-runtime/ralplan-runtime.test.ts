@@ -2,7 +2,10 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { runNativeRalplanCommand } from "@sayknow-cli/coding-agent/skc-runtime/ralplan-runtime";
-import { SKC_RESTRICTED_ROLE_AGENT_BASH_ENV } from "@sayknow-cli/coding-agent/skc-runtime/restricted-role-agent-bash";
+import {
+	SKC_RALPLAN_ARTIFACT_ENV,
+	SKC_RESTRICTED_ROLE_AGENT_BASH_ENV,
+} from "@sayknow-cli/coding-agent/skc-runtime/restricted-role-agent-bash";
 import {
 	activeEntryPath,
 	activeSnapshotPath,
@@ -316,6 +319,49 @@ describe("native skc ralplan runtime — --write artifact path", () => {
 				process.env[SKC_RESTRICTED_ROLE_AGENT_BASH_ENV] = previous;
 			}
 		}
+	});
+
+	it("--artifact-env reads artifact markdown from the sanctioned env var", async () => {
+		const root = await tempDir();
+		const previous = process.env[SKC_RALPLAN_ARTIFACT_ENV];
+		process.env[SKC_RALPLAN_ARTIFACT_ENV] =
+			'# Critic Review\n\nMentions `"studio"`, `use client`, $VALUE, and backslashes: C:\\tmp.\n';
+		try {
+			const result = await runNativeRalplanCommand(
+				[
+					"--write",
+					"--stage",
+					"critic",
+					"--stage_n",
+					"3",
+					"--artifact-env",
+					SKC_RALPLAN_ARTIFACT_ENV,
+					"--run-id",
+					"env-run",
+				],
+				root,
+			);
+			expect(result.status).toBe(0);
+			const content = await fs.readFile(ralplanPlanPath(root, "env-run", "stage-03-critic.md"), "utf-8");
+			expect(content).toContain('Mentions `"studio"`, `use client`, $VALUE');
+			expect(content).toContain("C:\\tmp");
+		} finally {
+			if (previous === undefined) {
+				delete process.env[SKC_RALPLAN_ARTIFACT_ENV];
+			} else {
+				process.env[SKC_RALPLAN_ARTIFACT_ENV] = previous;
+			}
+		}
+	});
+
+	it("--artifact-env rejects arbitrary env variable names", async () => {
+		const root = await tempDir();
+		const result = await runNativeRalplanCommand(
+			["--write", "--stage", "critic", "--stage_n", "3", "--artifact-env", "HOME", "--run-id", "bad-env-run"],
+			root,
+		);
+		expect(result.status).toBe(2);
+		expect(result.stderr).toContain("--artifact-env must be SKC_RALPLAN_ARTIFACT");
 	});
 
 	it("final stage emits pending-approval.md alongside the stage artifact", async () => {

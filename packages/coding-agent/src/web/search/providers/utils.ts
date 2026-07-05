@@ -44,38 +44,81 @@ export function findCredential(
 }
 
 /**
- * Default hard ceiling for a single web-search round-trip. 300s tolerates
- * legitimate slow LLM-mediated responses (anthropic web_search_20250305,
- * perplexity, gemini, OpenAI code backend) while still guaranteeing the session unfreezes
- * if Bun's `AbortSignal` fails to propagate on Windows.
- *
- * Pure search APIs (brave, exa, jina, tavily, searxng, synthetic, zai)
- * settle far faster in practice; reusing the same ceiling keeps the wiring
- * uniform without compromising correctness.
+ * Legacy hard ceiling for a single web-search round-trip, retained as the
+ * fallback for call sites that do not declare a timeout class. 300s tolerates
+ * pathological cases while still guaranteeing the session unfreezes if Bun's
+ * `AbortSignal` fails to propagate on Windows.
  */
 export const SEARCH_HARD_TIMEOUT_MS = 300_000;
 
 /**
- * Runtime-configurable hard timeout, seeded from the `web_search.timeout`
- * setting via {@link setSearchHardTimeoutMs}. Falls back to
- * {@link SEARCH_HARD_TIMEOUT_MS} when unset or invalid.
+ * Hard ceiling for pure search APIs (brave, exa, jina, tavily, kagi,
+ * parallel, searxng, synthetic, zai, duckduckgo). These settle in ~1-3s in
+ * practice; a hung TCP/TLS connection should fall through to the next
+ * provider in seconds, not minutes. Kimi is the exception: it declares an
+ * explicit ceiling aligned with its upstream 30s request budget.
  */
-let configuredHardTimeoutMs = SEARCH_HARD_TIMEOUT_MS;
+export const SEARCH_API_TIMEOUT_MS = 15_000;
+
+/**
+ * Hard ceiling for LLM-mediated search providers (anthropic, codex, gemini,
+ * perplexity, xai, openai-compatible). These legitimately take tens of
+ * seconds because a model performs the search and synthesizes an answer.
+ */
+export const SEARCH_LLM_TIMEOUT_MS = 120_000;
+
+/** Timeout class a provider declares for its outbound round-trips. */
+export type SearchTimeoutClass = "api" | "llm";
+
+const TIMEOUT_CLASS_MS: Record<SearchTimeoutClass, number> = {
+	api: SEARCH_API_TIMEOUT_MS,
+	llm: SEARCH_LLM_TIMEOUT_MS,
+};
+
+/**
+ * Runtime-configurable hard timeout, seeded from the `web_search.timeout`
+ * setting via {@link setSearchHardTimeoutMs}. When set, it overrides every
+ * class default so users keep a single knob. Unset means class defaults apply.
+ */
+let configuredHardTimeoutMs: number | undefined;
 
 /**
  * Override the hard timeout applied to every web-search round-trip.
  *
  * @param ms - Hard timeout in milliseconds. Non-finite or non-positive
- *   values reset the timeout to {@link SEARCH_HARD_TIMEOUT_MS}.
+ *   values clear the override so per-class defaults apply.
  */
 export function setSearchHardTimeoutMs(ms: number | undefined): void {
-	configuredHardTimeoutMs = typeof ms === "number" && Number.isFinite(ms) && ms > 0 ? ms : SEARCH_HARD_TIMEOUT_MS;
+	configuredHardTimeoutMs = typeof ms === "number" && Number.isFinite(ms) && ms > 0 ? ms : undefined;
+}
+
+/** Structural settings source for {@link applyConfiguredSearchTimeout}. */
+export interface SearchTimeoutSettingSource {
+	get(path: "web_search.timeout"): unknown;
+	has(path: "web_search.timeout"): boolean;
+}
+
+/**
+ * Install the `web_search.timeout` override from settings — but only when the
+ * user explicitly configured it. The settings schema ships a default value
+ * (300), and consuming that default via `get()` alone would reinstall a
+ * uniform 300s ceiling on every session, silently disabling the per-class
+ * timeout defaults. `has()` distinguishes loaded/overridden settings from
+ * schema defaults; unset clears any previous override so class defaults apply.
+ */
+export function applyConfiguredSearchTimeout(settings: SearchTimeoutSettingSource): void {
+	if (!settings.has("web_search.timeout")) {
+		setSearchHardTimeoutMs(undefined);
+		return;
+	}
+	const value = settings.get("web_search.timeout");
+	setSearchHardTimeoutMs(typeof value === "number" && Number.isFinite(value) && value > 0 ? value * 1000 : undefined);
 }
 
 /**
  * Compose a caller-supplied {@link AbortSignal} with a hard timeout so an
- * outbound `fetch()` is guaranteed to settle within `ms` even when the
- * runtime fails to propagate cancellation to the underlying transport.
+ * outbound `fetch()` is guaranteed to settle even when the runtime fails to
+ * propagate cancellation to the underlying transport.
  *
  * Bun's WinHTTP backend on Windows is known to ignore `AbortSignal` once a
  * TCP/TLS connection stalls (oven-sh/bun#15275, oven-sh/bun#18536); without
@@ -83,9 +126,16 @@ export function setSearchHardTimeoutMs(ms: number | undefined): void {
  * because the user's Esc is never delivered to the native layer.
  *
  * @param signal - Caller cancellation signal, if any.
- * @param ms - Hard timeout in milliseconds. Defaults to the configured value.
+ * @param msOrClass - Explicit timeout in milliseconds, or a
+ *   {@link SearchTimeoutClass} resolved to its class default. Omitted falls
+ *   back to the legacy {@link SEARCH_HARD_TIMEOUT_MS} ceiling. A user-set
+ *   `web_search.timeout` overrides class defaults (but not explicit ms).
  */
-export function withHardTimeout(signal: AbortSignal | undefined, ms: number = configuredHardTimeoutMs): AbortSignal {
+export function withHardTimeout(signal: AbortSignal | undefined, msOrClass?: number | SearchTimeoutClass): AbortSignal {
+	const ms =
+		typeof msOrClass === "number"
+			? msOrClass
+			: (configuredHardTimeoutMs ?? (msOrClass ? TIMEOUT_CLASS_MS[msOrClass] : SEARCH_HARD_TIMEOUT_MS));
 	const timeout = AbortSignal.timeout(ms);
 	return signal ? AbortSignal.any([signal, timeout]) : timeout;
 }

@@ -1,6 +1,6 @@
 {
 	"name": "@sayknow-cli/natives",
-	"version": "0.3.6",
+	"version": "0.3.7",
 	"description": "Native Rust bindings for grep, clipboard, image processing, syntax highlighting, PTY, and shell operations via N-API",
 	"type": "module",
 	"homepage": "https://github.com/jaybeyond/Sayknow_CLI",

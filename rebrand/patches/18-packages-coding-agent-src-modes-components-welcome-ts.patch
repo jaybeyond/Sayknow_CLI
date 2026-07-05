@@ -1,3 +1,5 @@
+diff --git a/packages/coding-agent/src/modes/components/welcome.ts b/packages/coding-agent/src/modes/components/welcome.ts
+index 94ab17bb..302b8f5b 100644
 --- a/packages/coding-agent/src/modes/components/welcome.ts
 +++ b/packages/coding-agent/src/modes/components/welcome.ts
 @@ -1,5 +1,6 @@
@@ -7,8 +9,8 @@
  import { type ThemeColor, theme } from "../../modes/theme/theme";
  
  export interface RecentSession {
-@@ -16,8 +17,9 @@
- export type WelcomeLogoMode = "unicode" | "square" | "ascii";
+@@ -22,8 +23,9 @@ export interface WelcomeComponentOptions {
+ }
  
  /**
 - * SKC-native launch surface with compact command affordances, project
@@ -19,35 +21,34 @@
   */
  export class WelcomeComponent implements Component {
  	#animStart: number | null = null;
-@@ -81,7 +83,7 @@
- 		}
+@@ -98,7 +100,7 @@ export class WelcomeComponent implements Component {
+ 		const targetContentRows = targetRows === undefined ? undefined : Math.max(0, targetRows - 2);
  		const dualContentWidth = boxWidth - 3; // 3 = │ + │ + │
- 		const preferredLeftCol = 36;
--		const minLeftCol = 18; // claw mark plus SKC identity labels
-+		const minLeftCol = 18; // wordmark plus Sayknow identity labels
- 		const minRightCol = 20;
+ 		const preferredLeftCol = 40;
+-		const minLeftCol = 20; // logo mark plus SKC identity labels
++		const minLeftCol = 20; // wordmark plus Sayknow identity labels
+ 		const minRightCol = 24;
  		const modelPill = this.#pill(theme.icon.model || "model", this.modelName, "statusLineModel");
  		const providerPill = this.#pill(theme.icon.package || "provider", this.providerName, "statusLinePath");
-@@ -90,12 +92,11 @@
+@@ -107,12 +109,11 @@ export class WelcomeComponent implements Component {
  		const leftMinContentWidth = Math.max(
  			minLeftCol,
  			logoMinWidth,
--			visibleWidth("Sayknow forge"),
+-			visibleWidth("SKC Forge"),
 -			visibleWidth("shape · act · prove"),
 +			visibleWidth(t("welcome.tagline")),
  			visibleWidth(modelPill),
  			visibleWidth(providerPill),
  		);
--		const desiredLeftCol = Math.min(preferredLeftCol, Math.max(minLeftCol, Math.floor(dualContentWidth * 0.35)));
+-		const desiredLeftCol = Math.min(preferredLeftCol, Math.max(minLeftCol, Math.floor(dualContentWidth * 0.38)));
 +		const desiredLeftCol = Math.min(preferredLeftCol, Math.max(minLeftCol, Math.floor(dualContentWidth * 0.42)));
  		const dualLeftCol =
  			dualContentWidth >= minRightCol + 1
  				? Math.min(desiredLeftCol, dualContentWidth - minRightCol)
-@@ -107,16 +108,26 @@
+@@ -124,17 +125,26 @@ export class WelcomeComponent implements Component {
  
  		const logoColored = this.#currentLogoFrame(logoLines);
  
--		// Left column - centered content
 +		// When no model is resolved yet, guide the user instead of showing "Unknown".
 +		const hasModel = this.modelName !== "Unknown" && this.modelName.length > 0;
 +		const identityTail = hasModel
@@ -62,39 +63,40 @@
 +
 +		// Left column - centered identity stack: wordmark, tagline, then model state.
  		const leftLines = [
- 			"",
--			this.#centerText(theme.bold(theme.fg("accent", "Sayknow forge")), leftCol),
--			this.#centerText(theme.fg("dim", "shape · act · prove"), leftCol),
 -			"",
+-			this.#centerText(theme.bold(theme.fg("accent", "SKC Forge")), leftCol),
+-			this.#centerText(theme.fg("dim", "shape · act · prove"), leftCol),
+ 			"",
  			...logoColored.map(l => this.#centerText(l, leftCol)),
  			"",
+-			this.#centerText(this.#loadingLine(), leftCol),
 -			this.#centerText(modelPill, leftCol),
 -			this.#centerText(providerPill, leftCol),
 +			this.#centerText(theme.fg("muted", t("welcome.tagline")), leftCol),
-+			"",
+ 			"",
 +			...identityTail,
  		];
  
- 		// Right column separator
-@@ -126,7 +137,7 @@
- 		// Recent sessions content
+ 		const buildSeparator = (columnWidth: number): string =>
+@@ -146,7 +156,7 @@ export class WelcomeComponent implements Component {
+ 
  		const sessionLines: string[] = [];
  		if (this.recentSessions.length === 0) {
 -			sessionLines.push(` ${theme.fg("dim", "No saved trails")}`);
 +			sessionLines.push(` ${theme.fg("dim", t("welcome.noSessions"))}`);
  		} else {
- 			// Reserve width for the bullet prefix (" • ") and the trailing " (timeAgo)"
- 			// so the relative time is never the part that gets truncated. The name
-@@ -148,7 +159,7 @@
- 		// LSP servers content
+ 			const bulletPrefix = ` ${theme.md.bullet} `;
+ 			const prefixWidth = visibleWidth(bulletPrefix);
+@@ -164,7 +174,7 @@ export class WelcomeComponent implements Component {
+ 
  		const lspLines: string[] = [];
  		if (this.lspServers.length === 0) {
 -			lspLines.push(` ${theme.fg("dim", "No LSP servers")}`);
 +			lspLines.push(` ${theme.fg("dim", t("welcome.noLsp"))}`);
  		} else {
- 			for (const server of this.lspServers) {
+ 			for (const server of this.lspServers.slice(0, 4)) {
  				const icon =
-@@ -162,27 +173,39 @@
+@@ -178,30 +188,42 @@ export class WelcomeComponent implements Component {
  			}
  		}
  
@@ -104,8 +106,11 @@
 +			return ` ${theme.fg("accent", cmd)}${pad}${theme.fg("muted", desc)}`;
 +		};
 +
- 		// Right column
  		const rightLines = [
+ 			"",
+ 			` ${theme.bold(theme.fg("accent", "What's New"))}`,
+ 			...this.#whatsNewLines(rightColumnWidth, changelogBudget),
+ 			separator,
 -			` ${theme.bold(theme.fg("accent", "Flow keys"))}`,
 -			` ${theme.fg("dim", "/")}${theme.fg("muted", " commands")} ${theme.fg("dim", "·")} ${theme.fg(
 +			` ${theme.bold(theme.fg("accent", t("welcome.workflows")))}`,
@@ -144,16 +149,16 @@
  			...sessionLines,
  			"",
  		];
-@@ -199,7 +222,7 @@
- 		const lines: string[] = [];
+@@ -221,7 +243,7 @@ export class WelcomeComponent implements Component {
+ 		const br = theme.fg("dim", theme.boxRound.bottomRight);
  
- 		// Top border with embedded title
--		const title = ` ${APP_NAME} v${this.version} · SKC forge `;
+ 		const lines: string[] = [];
+-		const title = ` ${APP_NAME} v${this.version} · SKC Forge `;
 +		const title = ` ${APP_NAME} · Sayknow-CLI v${this.version} `;
  		const titlePrefixRaw = hChar.repeat(3);
  		const titleStyled = theme.fg("dim", titlePrefixRaw) + theme.fg("muted", title);
  		const titleVisLen = visibleWidth(titlePrefixRaw) + visibleWidth(title);
-@@ -279,53 +302,28 @@
+@@ -415,53 +437,28 @@ export class WelcomeComponent implements Component {
  	}
  
  	#logoLines(): readonly string[] {
@@ -172,12 +177,8 @@
 -	"       ╭──────╮    ╰───╮  ╰──╮      ",
 -	"╭──────╯      ╰──╮     ╰──╮  ╰─────╮",
 -	"╰────────────────╯        ╰────────╯",
-+const BRAND_LOGO = [
-+	"╔═╗╔═╗╦ ╦╦╔═╔╗╔╔═╗╦ ╦",
-+	"╚═╗╠═╣╚╦╝╠╩╗║║║║ ║║║║",
-+	"╚═╝╩ ╩ ╩ ╩ ╩╝╚╝╚═╝╚╩╝",
- ];
- 
+-];
+-
 -// biome-ignore format: preserve ASCII art layout
 -const SQUARE_CLAW_LOGO = [
 -	"┌────────────────┐        ┌────────┐",
@@ -196,8 +197,12 @@
 -	"       +------+    +---+  +--+      ",
 -	"+------+      +--+     +--+  +-----+",
 -	"+----------------+        +--------+",
--];
--
++const BRAND_LOGO = [
++	"╔═╗╔═╗╦ ╦╦╔═╔╗╔╔═╗╦ ╦",
++	"╚═╗╠═╣╚╦╝╠╩╗║║║║ ║║║║",
++	"╚═╝╩ ╩ ╩ ╩ ╩╝╚╝╚═╝╚╩╝",
+ ];
+ 
 -/** Multi-stop palette for the red-octopus diagonal gradient. */
 +/** Multi-stop palette for the blue-octopus diagonal gradient. */
  const GRADIENT_STOPS: ReadonlyArray<readonly [number, number, number]> = [
@@ -219,7 +224,7 @@
  
  /** Half-width of the shine highlight band, expressed in gradient-t units. */
  const SHINE_HALF_WIDTH = 0.18;
-@@ -415,7 +413,7 @@
+@@ -551,7 +548,7 @@ const INTRO_SHINE_TRAVERSALS = 3;
  
  /** Resting gradient frames, cached for re-renders outside of the intro. */
  const REST_FRAMES: Record<WelcomeLogoMode, readonly string[]> = {

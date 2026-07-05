@@ -196,7 +196,7 @@ async function fetchAndParse(
 			"Accept-Language": "en-US,en;q=0.9",
 		},
 		body,
-		signal: withHardTimeout(signal),
+		signal: withHardTimeout(signal, "api"),
 	});
 
 	// DuckDuckGo signals soft blocks with 202 (which is still response.ok).

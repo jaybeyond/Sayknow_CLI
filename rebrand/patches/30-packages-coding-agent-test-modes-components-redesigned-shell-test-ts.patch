@@ -1,3 +1,5 @@
+diff --git a/packages/coding-agent/test/modes/components/redesigned-shell.test.ts b/packages/coding-agent/test/modes/components/redesigned-shell.test.ts
+index d67ad50f..f2a7781d 100644
 --- a/packages/coding-agent/test/modes/components/redesigned-shell.test.ts
 +++ b/packages/coding-agent/test/modes/components/redesigned-shell.test.ts
 @@ -1,6 +1,7 @@
@@ -8,7 +10,7 @@
  import { AssistantMessageComponent } from "@sayknow-cli/coding-agent/modes/components/assistant-message";
  import { BashExecutionComponent } from "@sayknow-cli/coding-agent/modes/components/bash-execution";
  import { CustomEditor } from "@sayknow-cli/coding-agent/modes/components/custom-editor";
-@@ -80,6 +81,9 @@
+@@ -80,6 +81,9 @@ function createAssistantMessage(text: string): AssistantMessage {
  beforeAll(async () => {
  	resetSettingsForTest();
  	await Settings.init({ inMemory: true });
@@ -18,7 +20,7 @@
  	await initTheme(false);
  });
  
-@@ -126,21 +130,21 @@
+@@ -126,21 +130,21 @@ describe("redesigned interactive shell chrome", () => {
  		}
  	});
  
@@ -28,7 +30,7 @@
  		const lines = component.render(54);
  		const rendered = Bun.stripANSI(lines.join("\n"));
  
--		expect(rendered).toContain("Sayknow forge");
+-		expect(rendered).toContain("SKC Forge");
 -		expect(rendered).toContain("╭────────────────╮        ╭────────╮");
 -		expect(rendered).toContain("╰────────────────╯        ╰────────╯");
 +		expect(rendered).toContain("Coding should feel like thinking.");
@@ -45,11 +47,11 @@
  		const component = new WelcomeComponent("1.2.3", "gpt-5.5", "openai");
  		const narrowLines = component.render(100);
  		const wideLines = component.render(160);
-@@ -150,33 +154,33 @@
- 		expect(visibleWidth(narrowTop)).toBe(98);
- 		expect(visibleWidth(wideTop)).toBe(158);
+@@ -150,33 +154,33 @@ describe("redesigned interactive shell chrome", () => {
+ 		expect(visibleWidth(narrowTop)).toBe(100);
+ 		expect(visibleWidth(wideTop)).toBe(160);
  		expect(visibleWidth(wideTop)).toBeGreaterThan(visibleWidth(narrowTop));
--		expect(wideTop).toContain("SKC forge");
+-		expect(wideTop).toContain("SKC Forge");
 +		expect(wideTop).toContain("Sayknow-CLI");
  		for (const line of wideLines) {
  			expect(visibleWidth(line)).toBeLessThanOrEqual(160);
@@ -88,7 +90,7 @@
  		expect(rendered).not.toContain("+----------------+");
  		for (const line of lines) {
  			expect(visibleWidth(line)).toBeLessThanOrEqual(54);
-@@ -292,14 +296,20 @@
+@@ -292,9 +296,15 @@ describe("redesigned interactive shell chrome", () => {
  		expect(STATUS_LINE_PRESETS.default.rightSegments).toEqual([
  			"session_name",
  			"jobs",
@@ -104,9 +106,3 @@
  		]);
  		expect(STATUS_LINE_PRESETS.default.segmentOptions?.path?.maxLength).toBe(32);
  	});
- 
--	it("keeps forge launch rendering on the bounded-work path", () => {
-+	it("keeps launch rendering on the bounded-work path", () => {
- 		const component = new WelcomeComponent("1.2.3", "gpt-5.5", "openai", [
- 			{ name: "very-long-session-name".repeat(10), timeAgo: "2h" },
- 		]);

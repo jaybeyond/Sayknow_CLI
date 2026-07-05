@@ -216,7 +216,7 @@ async function callCodexSearch(
 		method: "POST",
 		headers,
 		body: JSON.stringify(body),
-		signal: withHardTimeout(options.signal),
+		signal: withHardTimeout(options.signal, "llm"),
 	});
 
 	if (!response.ok) {

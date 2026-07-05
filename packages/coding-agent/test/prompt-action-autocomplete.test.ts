@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import type { SlashCommand } from "@sayknow-cli/tui";
 import { KeybindingsManager, setKeybindings, TUI_KEYBINDINGS } from "@sayknow-cli/tui";
 import { KeybindingsManager as AppKeybindingsManager } from "../src/config/keybindings";
 import { createPromptActionAutocompleteProvider } from "../src/modes/prompt-action-autocomplete";
@@ -18,6 +19,25 @@ describe("prompt action autocomplete", () => {
 		setKeybindings(new KeybindingsManager(TUI_KEYBINDINGS));
 	});
 
+	function createNoopProvider(commands: SlashCommand[] = []) {
+		return createPromptActionAutocompleteProvider({
+			commands,
+			basePath: "/tmp",
+			keybindings: AppKeybindingsManager.inMemory(),
+			copyCurrentLine: () => {},
+			copyPrompt: () => {},
+			pasteImage: () => {},
+			newSession: () => {},
+			showHelp: () => {},
+			scrollTmuxToPreviousUserInput: () => {},
+			undo: () => {},
+			moveCursorToMessageEnd: () => {},
+			moveCursorToMessageStart: () => {},
+			moveCursorToLineStart: () => {},
+			moveCursorToLineEnd: () => {},
+		});
+	}
+
 	it("shows prompt actions with configured shortcut hints", async () => {
 		const provider = createPromptActionAutocompleteProvider({
 			commands: [],
@@ -26,10 +46,13 @@ describe("prompt action autocomplete", () => {
 				"app.clipboard.copyLine": "ctrl+shift+l",
 				"app.clipboard.copyPrompt": ["alt+shift+c", "ctrl+shift+c"],
 				"app.clipboard.pasteImage": "ctrl+i",
+				"app.session.new": "ctrl+n",
 			}),
 			copyCurrentLine: () => {},
 			copyPrompt: () => {},
 			pasteImage: () => {},
+			newSession: () => {},
+			showHelp: () => {},
 			scrollTmuxToPreviousUserInput: () => {},
 			undo: () => {},
 			moveCursorToMessageEnd: () => {},
@@ -42,6 +65,8 @@ describe("prompt action autocomplete", () => {
 		expect(suggestions).not.toBeNull();
 		expect(suggestions?.prefix).toBe("#");
 		expect(suggestions?.items.map(item => item.label)).toEqual([
+			"Start new session",
+			"Open command help",
 			"Copy current line",
 			"Copy whole prompt",
 			"Paste image from clipboard",
@@ -62,6 +87,33 @@ describe("prompt action autocomplete", () => {
 		);
 		expect(suggestions?.items.find(item => item.label === "Move cursor to end of line")?.description).toBe("F7");
 		expect(suggestions?.items.find(item => item.label === "Undo")?.description).toBe("F8");
+		expect(suggestions?.items.find(item => item.label === "Start new session")?.description).toBe("Ctrl+N");
+		expect(suggestions?.items.find(item => item.label === "Open command help")?.description).toBe("/help");
+	});
+
+	it("orders top-level slash commands by beginner-first priorities and keeps provider internals low", async () => {
+		const provider = createNoopProvider([
+			{ name: "grok-build-usage", description: "Advanced provider diagnostics" },
+			{ name: "settings", description: "Open settings and preferences", priority: 40 },
+			{ name: "session", description: "Show current session info or delete current session", priority: 88 },
+			{ name: "resume", description: "Resume a previous session", priority: 92 },
+			{ name: "new", description: "Start a new session", priority: 96 },
+			{ name: "help", description: "Learn commands and beginner workflows", priority: 100 },
+		]);
+
+		const suggestions = await provider.getSuggestions(["/"], 0, 1);
+
+		expect(suggestions?.items.map(item => item.value)).toEqual([
+			"help",
+			"new",
+			"resume",
+			"session",
+			"settings",
+			"grok-build-usage",
+		]);
+		expect(suggestions?.items.find(item => item.value === "session")?.description).toBe(
+			"Show current session info or delete current session",
+		);
 	});
 
 	it("passes the typed trigger to undo and leaves text removal to the editor", async () => {
@@ -74,6 +126,8 @@ describe("prompt action autocomplete", () => {
 			copyCurrentLine: () => {},
 			copyPrompt: () => {},
 			pasteImage: () => {},
+			newSession: () => {},
+			showHelp: () => {},
 			scrollTmuxToPreviousUserInput: () => {},
 			undo: prefix => {
 				undoCalls += 1;
@@ -114,6 +168,8 @@ describe("prompt action autocomplete", () => {
 			pasteImage: () => {
 				pasteCalls += 1;
 			},
+			newSession: () => {},
+			showHelp: () => {},
 			scrollTmuxToPreviousUserInput: () => {},
 			undo: () => {},
 			moveCursorToMessageEnd: () => {},
@@ -137,6 +193,40 @@ describe("prompt action autocomplete", () => {
 		expect(pasteCalls).toBe(1);
 	});
 
+	it("runs new session from the prompt action menu", async () => {
+		let newSessionCalls = 0;
+		const provider = createPromptActionAutocompleteProvider({
+			commands: [],
+			basePath: "/tmp",
+			keybindings: AppKeybindingsManager.inMemory(),
+			copyCurrentLine: () => {},
+			copyPrompt: () => {},
+			pasteImage: () => {},
+			newSession: () => {
+				newSessionCalls += 1;
+			},
+			showHelp: () => {},
+			scrollTmuxToPreviousUserInput: () => {},
+			undo: () => {},
+			moveCursorToMessageEnd: () => {},
+			moveCursorToMessageStart: () => {},
+			moveCursorToLineStart: () => {},
+			moveCursorToLineEnd: () => {},
+		});
+
+		const suggestions = await provider.getSuggestions(["#new"], 0, 4);
+		const item = suggestions?.items.find(entry => entry.label === "Start new session");
+		expect(item).toBeDefined();
+		if (!item || !suggestions) {
+			throw new Error("expected new session suggestion");
+		}
+
+		const result = provider.applyCompletion(["#new"], 0, 4, item, suggestions.prefix);
+		expect(result.lines).toEqual([""]);
+		result.onApplied?.();
+		expect(newSessionCalls).toBe(1);
+	});
+
 	it("runs tmux previous-user-input scroll from the prompt action menu", async () => {
 		let scrollCalls = 0;
 		const provider = createPromptActionAutocompleteProvider({
@@ -146,6 +236,8 @@ describe("prompt action autocomplete", () => {
 			copyCurrentLine: () => {},
 			copyPrompt: () => {},
 			pasteImage: () => {},
+			newSession: () => {},
+			showHelp: () => {},
 			scrollTmuxToPreviousUserInput: () => {
 				scrollCalls += 1;
 			},
@@ -179,6 +271,8 @@ describe("prompt action autocomplete", () => {
 			copyCurrentLine: () => {},
 			copyPrompt: () => {},
 			pasteImage: () => {},
+			newSession: () => {},
+			showHelp: () => {},
 			scrollTmuxToPreviousUserInput: () => {},
 			undo: () => {},
 			moveCursorToMessageEnd: () => {},
@@ -199,6 +293,8 @@ describe("prompt action autocomplete", () => {
 			copyCurrentLine: () => {},
 			copyPrompt: () => {},
 			pasteImage: () => {},
+			newSession: () => {},
+			showHelp: () => {},
 			scrollTmuxToPreviousUserInput: () => {},
 			undo: () => {},
 			moveCursorToMessageEnd: () => {},
@@ -220,6 +316,8 @@ describe("prompt action autocomplete", () => {
 			copyCurrentLine: () => {},
 			copyPrompt: () => {},
 			pasteImage: () => {},
+			newSession: () => {},
+			showHelp: () => {},
 			scrollTmuxToPreviousUserInput: () => {},
 			undo: () => {},
 			moveCursorToMessageEnd: () => {},

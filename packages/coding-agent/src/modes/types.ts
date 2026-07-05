@@ -110,6 +110,7 @@ export interface InteractiveModeContext {
 	retryLoader: Loader | undefined;
 	autoCompactionEscapeHandler?: () => void;
 	retryEscapeHandler?: () => void;
+	retryEscapePrimed: boolean;
 	retryCountdownTimer?: NodeJS.Timeout;
 	unsubscribe?: () => void;
 	onInputCallback?: (input: SubmittedUserInput) => void;
@@ -209,6 +210,7 @@ export interface InteractiveModeContext {
 	handleUsageCommand(reports?: UsageReport[] | null): Promise<void>;
 	handleChangelogCommand(showFull?: boolean): Promise<void>;
 	handleHotkeysCommand(): void;
+	handleHelpCommand(): void;
 	handleToolsCommand(): void;
 	handleContextCommand(): void;
 	handleDumpCommand(): void;
@@ -290,7 +292,12 @@ export interface InteractiveModeContext {
 		dialogOptions?: ExtensionUIDialogOptions,
 	): Promise<string | undefined>;
 	hideHookSelector(): void;
-	showHookInput(title: string, placeholder?: string): Promise<string | undefined>;
+	showHookInput(
+		title: string,
+		placeholder?: string,
+		dialogOptions?: ExtensionUIDialogOptions,
+		inputOptions?: { readonly initialValue?: string },
+	): Promise<string | undefined>;
 	hideHookInput(): void;
 	showHookEditor(
 		title: string,

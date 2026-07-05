@@ -134,7 +134,7 @@ export class OpenAICompatibleSearchProvider extends SearchProvider {
 				method: "POST",
 				headers,
 				body: JSON.stringify(payload),
-				signal: withHardTimeout(params.signal),
+				signal: withHardTimeout(params.signal, "llm"),
 			});
 
 		// Web search is a Responses-API capability: many OpenAI-compatible

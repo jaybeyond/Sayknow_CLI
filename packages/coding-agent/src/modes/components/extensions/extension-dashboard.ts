@@ -11,20 +11,12 @@
  * - Space: Toggle selected item (or master switch)
  * - Esc: Close dashboard (clears search first if active)
  */
-import {
-	type Component,
-	Container,
-	matchesKey,
-	padding,
-	Spacer,
-	Text,
-	truncateToWidth,
-	visibleWidth,
-} from "@sayknow-cli/tui";
+import { Container, matchesKey, Spacer, Text } from "@sayknow-cli/tui";
 import { Settings } from "../../../config/settings";
 import { DynamicBorder } from "../../../modes/components/dynamic-border";
 import { theme } from "../../../modes/theme/theme";
 import { matchesAppInterrupt } from "../../../modes/utils/keybinding-matchers";
+import { TwoColumnBody } from "../two-column-body";
 import { ExtensionList } from "./extension-list";
 import { InspectorPanel } from "./inspector-panel";
 import {
@@ -308,43 +300,5 @@ export class ExtensionDashboard extends Container {
 			this.#state.searchQuery = query;
 			this.#state.searchFiltered = applyFilter(this.#state.tabFiltered, query);
 		}
-	}
-}
-
-/**
- * Two-column body component for side-by-side rendering.
- */
-class TwoColumnBody implements Component {
-	constructor(
-		private readonly leftPane: ExtensionList,
-		private readonly rightPane: InspectorPanel,
-		private readonly maxHeight: number,
-	) {}
-
-	render(width: number): string[] {
-		const leftWidth = Math.floor(width * 0.5);
-		const rightWidth = Math.max(0, width - leftWidth - 3);
-
-		const leftLines = this.leftPane.render(leftWidth);
-		const rightLines = this.rightPane.render(rightWidth);
-
-		// Limit to maxHeight lines
-		const numLines = Math.min(this.maxHeight, Math.max(leftLines.length, rightLines.length));
-		const combined: string[] = [];
-		const separator = theme.fg("dim", ` ${theme.boxSharp.vertical} `);
-
-		for (let i = 0; i < numLines; i++) {
-			const left = truncateToWidth(leftLines[i] ?? "", leftWidth);
-			const leftPadded = left + padding(Math.max(0, leftWidth - visibleWidth(left)));
-			const right = truncateToWidth(rightLines[i] ?? "", rightWidth);
-			combined.push(leftPadded + separator + right);
-		}
-
-		return combined;
-	}
-
-	invalidate(): void {
-		this.leftPane.invalidate?.();
-		this.rightPane.invalidate?.();
 	}
 }

@@ -1258,6 +1258,66 @@ function b() {
 			await asyncJobManager.dispose();
 		});
 
+		it("should fold a managed foreground command even when auto-background is disabled", async () => {
+			const deliveries: Array<{ jobId: string; text: string }> = [];
+			const asyncJobManager = new AsyncJobManager({
+				onJobComplete: async (jobId, text) => {
+					deliveries.push({ jobId, text });
+				},
+			});
+			AsyncJobManager.setInstance(asyncJobManager);
+			let backgroundRequestHandler: (() => void) | undefined;
+			const foregroundBashTool = wrapToolWithMetaNotice(
+				new BashTool(
+					createTestToolSession(
+						testDir,
+						Settings.isolated({
+							"bash.autoBackground.enabled": false,
+						}),
+						{
+							getSessionId: () => "test-session",
+							registerForegroundBashBackgroundRequestHandler: handler => {
+								backgroundRequestHandler = handler;
+								return () => {
+									if (backgroundRequestHandler === handler) backgroundRequestHandler = undefined;
+								};
+							},
+						},
+					),
+				),
+			);
+
+			const resultPromise = foregroundBashTool.execute(
+				"test-call-9-fold-foreground-noauto",
+				{
+					command: "printf 'start\\n'; sleep 0.05; printf 'after-fold\\n'; sleep 0.2; printf 'done\\n'",
+				},
+				undefined,
+			);
+
+			for (let i = 0; i < 50 && !backgroundRequestHandler; i++) {
+				await Bun.sleep(10);
+			}
+			expect(backgroundRequestHandler).toBeDefined();
+			backgroundRequestHandler?.();
+
+			const result = await resultPromise;
+			expect(result.details?.async?.state).toBe("running");
+			expect(getTextOutput(result)).toContain("Background job");
+
+			const jobId = result.details?.async?.jobId;
+			if (!jobId) {
+				throw new Error("expected a folded background job id");
+			}
+			const runningJob = asyncJobManager.getJob(jobId);
+			await runningJob?.promise;
+			await asyncJobManager.drainDeliveries({ timeoutMs: 1 });
+			expect(deliveries).toHaveLength(1);
+			expect(deliveries[0]?.jobId).toBe(jobId);
+			expect(deliveries[0]?.text).toContain("done");
+			await asyncJobManager.dispose();
+		});
+
 		it("should background instead of timing out when auto-background wait exceeds the effective timeout", async () => {
 			const deliveries: Array<{ jobId: string; text: string }> = [];
 			const asyncJobManager = new AsyncJobManager({
@@ -1996,8 +2056,7 @@ describe("edit tool CRLF handling", () => {
 		).rejects.toThrow(/Found 2 occurrences/);
 	});
 
-	// TODO: CRLF preservation broken by LSP formatting - fix later
-	it.skip("should preserve UTF-8 BOM after edit", async () => {
+	it("should preserve UTF-8 BOM and CRLF line endings after edit", async () => {
 		const testFile = path.join(testDir, "bom-test.txt");
 		fs.writeFileSync(testFile, "\uFEFFfirst\r\nsecond\r\nthird\r\n");
 
@@ -2006,7 +2065,8 @@ describe("edit tool CRLF handling", () => {
 			edits: [{ old_text: "second\n", new_text: "REPLACED\n" }],
 		});
 
-		const content = await Bun.file(testFile).text();
+		const content = fs.readFileSync(testFile, "utf8");
 		expect(content).toBe("\uFEFFfirst\r\nREPLACED\r\nthird\r\n");
+		expect([...fs.readFileSync(testFile).slice(0, 3)]).toEqual([0xef, 0xbb, 0xbf]);
 	});
 });

@@ -19,6 +19,8 @@ function createProvider() {
 		copyCurrentLine: () => {},
 		copyPrompt: () => {},
 		pasteImage: () => {},
+		newSession: () => {},
+		showHelp: () => {},
 		scrollTmuxToPreviousUserInput: () => {},
 		undo: () => {},
 		moveCursorToMessageEnd: () => {},
@@ -46,6 +48,22 @@ describe("prompt action skill autocomplete", () => {
 		expect(suggestions?.items[0]?.value).toBe("skill:deep-interview");
 		const applied = provider.applyCompletion([line], 0, line.length, suggestions!.items[0]!, suggestions!.prefix);
 		expect(applied.lines[0]).toBe("/skill:deep-interview first /skill:deep-interview ");
+	});
+
+	it("does not offer skill completions from a bare slash token after prompt text", async () => {
+		const provider = createProvider();
+		const line = "please use /";
+		const suggestions = await provider.getSuggestions([line], 0, line.length);
+		expect(suggestions).toBeNull();
+	});
+
+	it("offers skill completions from an inline /skill token after prompt text", async () => {
+		const provider = createProvider();
+		const line = "please use /skill";
+		const suggestions = await provider.getSuggestions([line], 0, line.length);
+		expect(suggestions?.prefix).toBe("/skill");
+		expect(suggestions?.items.map(item => item.value)).toContain("skill:team");
+		expect(suggestions?.items.map(item => item.value)).not.toContain("model");
 	});
 
 	it("does not let direct-name normalization shadow an exact non-skill command", async () => {

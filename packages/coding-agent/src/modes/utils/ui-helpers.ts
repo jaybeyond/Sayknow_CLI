@@ -3,6 +3,8 @@ import type { AssistantMessage, ImageContent, Message } from "@sayknow-cli/ai";
 import { type Component, Spacer, Text, TruncatedText } from "@sayknow-cli/tui";
 import { settings } from "../../config/settings";
 import { tMessage } from "../../i18n";
+import { resolveSubskillActivationForSkillInvocation } from "../../extensibility/skc-plugins";
+import { buildSkillPromptMessage, parseSkillInvocations } from "../../extensibility/skills";
 import { AssistantMessageComponent } from "../../modes/components/assistant-message";
 import { BashExecutionComponent } from "../../modes/components/bash-execution";
 import { BranchSummaryMessageComponent } from "../../modes/components/branch-summary-message";
@@ -616,9 +618,80 @@ export class UiHelpers {
 		this.ctx.updatePendingMessagesDisplay();
 		this.ctx.showStatus("Queued message for after compaction");
 	}
+	#hasSkillInvocations(text: string): boolean {
+		return parseSkillInvocations(text, this.ctx.skillCommands ?? new Map()).length > 0;
+	}
 
+	#isCompactionCommandMessage(text: string): boolean {
+		return this.#hasSkillInvocations(text) || this.isKnownSlashCommand(text);
+	}
+
+	async #deliverQueuedSkillMessage(message: CompactionQueuedMessage): Promise<boolean> {
+		const invocations = parseSkillInvocations(message.text, this.ctx.skillCommands ?? new Map());
+		if (invocations.length === 0) {
+			return false;
+		}
+
+		for (let index = 0; index < invocations.length; index += 1) {
+			const invocation = invocations[index];
+			if (!invocation) continue;
+
+			const activationResult = await resolveSubskillActivationForSkillInvocation({
+				cwd: this.ctx.sessionManager.getCwd(),
+				sessionId: this.ctx.session.sessionId,
+				skillName: invocation.skill.name,
+				args: invocation.args,
+			});
+			const built = await buildSkillPromptMessage(invocation.skill, activationResult.cleanedArgs, {
+				subskillActivation: activationResult.activation,
+				subskillActivationSet: activationResult.activeSubskillsToPersist,
+				cwd: this.ctx.sessionManager.getCwd(),
+				sessionId: this.ctx.session.sessionId,
+			});
+			const details: SkillPromptDetails = built.details;
+			const displayText = `/${invocation.commandName}${activationResult.cleanedArgs ? ` ${activationResult.cleanedArgs}` : ""}`;
+
+			if (this.ctx.session.isStreaming) {
+				const tag = this.ctx.session.enqueueCustomMessageDisplay(displayText, message.mode);
+				details.__pendingDisplayTag = tag;
+			}
+
+			const isLast = index === invocations.length - 1;
+			if (!this.ctx.session.isStreaming && !isLast) {
+				await this.ctx.session.sendCustomMessage({
+					customType: SKILL_PROMPT_MESSAGE_TYPE,
+					content: built.message,
+					display: true,
+					details,
+					attribution: "user",
+				});
+				continue;
+			}
+
+			await this.ctx.session.promptCustomMessage(
+				{
+					customType: SKILL_PROMPT_MESSAGE_TYPE,
+					content: built.message,
+					display: true,
+					details,
+					attribution: "user",
+				},
+				{ streamingBehavior: message.mode },
+			);
+		}
+
+		if (this.ctx.session.isStreaming) {
+			this.ctx.updatePendingMessagesDisplay();
+			this.ctx.ui.requestRender();
+		}
+
+		return true;
+	}
 	async #deliverQueuedMessage(message: CompactionQueuedMessage): Promise<void> {
-		if (this.ctx.isKnownSlashCommand(message.text)) {
+		if (await this.#deliverQueuedSkillMessage(message)) {
+			return;
+		}
+		if (this.isKnownSlashCommand(message.text)) {
 			await this.ctx.session.prompt(message.text);
 			return;
 		}
@@ -677,14 +750,14 @@ export class UiHelpers {
 
 			let firstPromptIndex = -1;
 			for (let i = 0; i < queuedMessages.length; i++) {
-				if (!this.ctx.isKnownSlashCommand(queuedMessages[i].text)) {
+				if (!this.#isCompactionCommandMessage(queuedMessages[i].text)) {
 					firstPromptIndex = i;
 					break;
 				}
 			}
 			if (firstPromptIndex === -1) {
 				for (const message of queuedMessages) {
-					await this.ctx.session.prompt(message.text);
+					await this.#deliverQueuedMessage(message);
 				}
 				return;
 			}

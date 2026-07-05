@@ -119,7 +119,7 @@ async function callSearch(
 		method: "POST",
 		headers,
 		body: JSON.stringify(body),
-		signal: withHardTimeout(signal),
+		signal: withHardTimeout(signal, "llm"),
 	});
 
 	if (!response.ok) {

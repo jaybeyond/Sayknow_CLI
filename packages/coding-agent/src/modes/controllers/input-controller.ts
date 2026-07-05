@@ -1,7 +1,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { type AgentMessage, ThinkingLevel } from "@sayknow-cli/agent-core";
-import type { AutocompleteProvider, SlashCommand } from "@sayknow-cli/tui";
+import { type AutocompleteProvider, matchesKey, type SlashCommand } from "@sayknow-cli/tui";
 import { $env, sanitizeText } from "@sayknow-cli/utils";
 import { isSettingsInitialized, settings } from "../../config/settings";
 import { resolveSubskillActivationForSkillInvocation } from "../../extensibility/skc-plugins";
@@ -42,6 +42,127 @@ export class InputController {
 	 *  so abort cleanup going idle cannot turn the second Esc into an idle action. */
 	#steerConsumePending = false;
 
+	#globalInterruptUnsubscribe: (() => void) | undefined;
+
+	#matchesInterruptKey(data: string): boolean {
+		return this.ctx.keybindings.getKeys("app.interrupt").some(key => matchesKey(data, key));
+	}
+
+	#hasHookDialog(): boolean {
+		return Boolean(this.ctx.hookSelector || this.ctx.hookInput || this.ctx.hookEditor);
+	}
+
+	#isRetryBackoffActive(): boolean {
+		return Boolean(
+			this.ctx.retryLoader ||
+				this.ctx.retryEscapeHandler ||
+				(this.ctx.session.isRetrying && !this.ctx.session.isStreaming),
+		);
+	}
+
+	#handleCancellableWorkEscape(options: {
+		loading?: boolean;
+		processes?: boolean;
+		modes?: boolean;
+		maintenance?: boolean;
+		retry?: boolean;
+		streaming?: boolean;
+	}): boolean {
+		if (options.loading && this.ctx.loadingAnimation) {
+			if (this.ctx.cancelPendingSubmission()) {
+				return true;
+			}
+			this.restoreQueuedMessagesToEditor({ abort: true });
+			return true;
+		}
+		if (options.processes && this.ctx.session.isBashRunning) {
+			this.ctx.session.abortBash();
+			return true;
+		}
+		if (options.modes && this.ctx.isBashMode) {
+			this.ctx.editor.setText("");
+			this.ctx.isBashMode = false;
+			this.ctx.isBashNoContext = false;
+			this.ctx.updateEditorBorderColor();
+			return true;
+		}
+		if (options.processes && this.ctx.session.isEvalRunning) {
+			this.ctx.session.abortEval();
+			return true;
+		}
+		if (options.modes && this.ctx.isPythonMode) {
+			this.ctx.editor.setText("");
+			this.ctx.isPythonMode = false;
+			this.ctx.updateEditorBorderColor();
+			return true;
+		}
+		if (
+			options.maintenance &&
+			(this.ctx.session.isCompacting || this.ctx.autoCompactionLoader || this.ctx.autoCompactionEscapeHandler)
+		) {
+			this.ctx.session.abortCompaction();
+			return true;
+		}
+		if (options.maintenance && this.ctx.session.isGeneratingHandoff) {
+			this.ctx.session.abortHandoff();
+			return true;
+		}
+		if (options.retry) {
+			if (this.#isRetryBackoffActive()) {
+				if (this.ctx.retryEscapePrimed) {
+					this.ctx.session.abortRetry();
+				} else {
+					this.ctx.retryEscapePrimed = true;
+					this.ctx.session.retryNow();
+				}
+				return true;
+			}
+			this.ctx.retryEscapePrimed = false;
+		}
+		if (options.streaming && this.ctx.session.isStreaming) {
+			if (this.ctx.session.hasQueuedSteering && !this.#steerConsumePending) {
+				// First Esc with a queued steer: silently consume it and
+				// auto-continue via steer-on-interrupt instead of stalling on
+				// "Operation aborted".
+				this.#steerConsumePending = true;
+				void this.#abortInteractive({ silent: true });
+			} else {
+				void this.#abortInteractive();
+			}
+			return true;
+		}
+		return false;
+	}
+
+	#installGlobalInterruptListener(): void {
+		if (typeof this.ctx.ui.addInputListener !== "function") {
+			return;
+		}
+		this.#globalInterruptUnsubscribe?.();
+		this.#globalInterruptUnsubscribe = this.ctx.ui.addInputListener(data => {
+			if (!this.#matchesInterruptKey(data)) {
+				return undefined;
+			}
+			if (this.ctx.hasActiveBtw() && this.ctx.handleBtwEscape()) {
+				return { consume: true };
+			}
+			const hookDialogActive = this.#hasHookDialog();
+			if (
+				this.#handleCancellableWorkEscape({
+					loading: hookDialogActive,
+					processes: hookDialogActive,
+					modes: false,
+					maintenance: true,
+					retry: true,
+					streaming: hookDialogActive,
+				})
+			) {
+				return { consume: true };
+			}
+			return undefined;
+		});
+	}
+
 	#abortInteractive(options?: { silent?: boolean }): Promise<void> {
 		return this.ctx.session.abort({
 			timeoutMs: INTERACTIVE_ABORT_CLEANUP_TIMEOUT_MS,
@@ -60,6 +181,7 @@ export class InputController {
 					this.ctx.session.isStreaming ||
 					this.ctx.session.isCompacting ||
 					this.ctx.session.isGeneratingHandoff ||
+					this.ctx.session.isRetrying ||
 					this.ctx.session.isBashRunning ||
 					this.ctx.session.isEvalRunning ||
 					this.ctx.autoCompactionLoader ||
@@ -67,6 +189,8 @@ export class InputController {
 					this.ctx.autoCompactionEscapeHandler ||
 					this.ctx.retryEscapeHandler,
 			);
+		this.#installGlobalInterruptListener();
+
 		// An open btw panel must stay dismissable with Esc even while another
 		// controller (auto-compaction, auto-retry, manual compaction, etc.) has
 		// temporarily replaced editor.onEscape. This priority hook is never
@@ -87,6 +211,9 @@ export class InputController {
 				}
 				this.#steerConsumePending = false;
 			}
+			if (this.#handleCancellableWorkEscape({ maintenance: true, retry: true })) {
+				return;
+			}
 			// Normal input state with user-typed text: Esc must not interrupt a
 			// running task (streaming turn, bash/eval). A double Esc within the
 			// 500ms window clears the composer instead. Bash/Python input modes
@@ -101,35 +228,19 @@ export class InputController {
 				}
 				return;
 			}
-			if (this.ctx.loadingAnimation) {
-				if (this.ctx.cancelPendingSubmission()) {
-					return;
-				}
-				this.restoreQueuedMessagesToEditor({ abort: true });
-			} else if (this.ctx.session.isBashRunning) {
-				this.ctx.session.abortBash();
-			} else if (this.ctx.isBashMode) {
-				this.ctx.editor.setText("");
-				this.ctx.isBashMode = false;
-				this.ctx.isBashNoContext = false;
-				this.ctx.updateEditorBorderColor();
-			} else if (this.ctx.session.isEvalRunning) {
-				this.ctx.session.abortEval();
-			} else if (this.ctx.isPythonMode) {
-				this.ctx.editor.setText("");
-				this.ctx.isPythonMode = false;
-				this.ctx.updateEditorBorderColor();
-			} else if (this.ctx.session.isStreaming) {
-				if (this.ctx.session.hasQueuedSteering && !this.#steerConsumePending) {
-					// First Esc with a queued steer: silently consume it and
-					// auto-continue via steer-on-interrupt instead of stalling on
-					// "Operation aborted".
-					this.#steerConsumePending = true;
-					void this.#abortInteractive({ silent: true });
-				} else {
-					void this.#abortInteractive();
-				}
-			} else if (!this.ctx.editor.getText().trim()) {
+			if (
+				this.#handleCancellableWorkEscape({
+					loading: true,
+					processes: true,
+					modes: true,
+					maintenance: true,
+					retry: true,
+					streaming: true,
+				})
+			) {
+				return;
+			}
+			if (!this.ctx.editor.getText().trim()) {
 				// Double-interrupt with empty editor triggers /tree, /branch, or nothing based on setting
 				const action = settings.get("doubleEscapeAction");
 				if (action !== "none") {
@@ -156,6 +267,8 @@ export class InputController {
 		this.ctx.editor.onSuspend = () => this.handleCtrlZ();
 		this.ctx.editor.setActionKeys("app.thinking.cycle", this.ctx.keybindings.getKeys("app.thinking.cycle"));
 		this.ctx.editor.onCycleThinkingLevel = () => this.cycleThinkingLevel();
+		this.ctx.editor.setActionKeys("app.commandPalette.open", this.ctx.keybindings.getKeys("app.commandPalette.open"));
+		this.ctx.editor.onOpenCommandPalette = () => this.openCommandPalette();
 		this.ctx.editor.setActionKeys("app.model.cycleForward", this.ctx.keybindings.getKeys("app.model.cycleForward"));
 		this.ctx.editor.onCycleModelForward = () => this.cycleRoleModel();
 		this.ctx.editor.setActionKeys("app.model.cycleBackward", this.ctx.keybindings.getKeys("app.model.cycleBackward"));
@@ -200,8 +313,17 @@ export class InputController {
 		this.ctx.editor.onDequeue = () => this.handleDequeue();
 		this.ctx.editor.setActionKeys("app.message.queue", this.ctx.keybindings.getKeys("app.message.queue"));
 		this.ctx.editor.onQueue = () => void this.handleQueueSubmit();
+		this.ctx.editor.onTab = () => {
+			if (!this.ctx.session.isStreaming && !this.ctx.session.isCompacting) return false;
+			void this.handleQueueSubmit();
+			return true;
+		};
 		this.ctx.editor.onTabDeclined = () => {
-			if (this.ctx.session.isStreaming) void this.handleQueueSubmit();
+			if (this.ctx.session.isStreaming || this.ctx.session.isCompacting) void this.handleQueueSubmit();
+		};
+		this.ctx.editor.onViewportPageScroll = direction => this.ctx.ui.scrollViewportPages(direction);
+		this.ctx.editor.onViewportFollowLive = () => {
+			this.ctx.ui.followLiveViewport();
 		};
 
 		this.ctx.editor.clearCustomKeyHandlers();
@@ -492,7 +614,7 @@ export class InputController {
 	}
 
 	handleDequeue(): void {
-		const restored = this.restoreQueuedMessagesToEditor();
+		const restored = this.restoreLatestQueuedMessageToEditor();
 		if (restored === 0) {
 			this.ctx.showStatus("No queued messages to restore");
 		} else {
@@ -522,19 +644,18 @@ export class InputController {
 
 	/**
 	 * Dispatch skill slash invocation(s) (`/skill:<name>`) through custom messages
-	 * using the supplied `streamingBehavior`. Returns true if the text was a
-	 * recognised skill command chain and was dispatched. A failure to load a skill
-	 * file is surfaced via `showError` but still returns true — the editor was
-	 * already cleared on the success path, so falling through to plain-text
-	 * handling at that point would double-submit. Returns false when the text
-	 * isn't a `/skill:` prefix or the command name isn't a registered skill,
-	 * so the caller can fall through to plain-text handling (this branch
+	 * using the supplied `streamingBehavior`. Returns true if the text contains a
+	 * recognised canonical skill command or command chain and was dispatched. A
+	 * failure to load a skill file is surfaced via `showError` but still returns
+	 * true — the editor was already cleared on the success path, so falling
+	 * through to plain-text handling at that point would double-submit. Returns
+	 * false when the text has no registered canonical skill invocation, so the
+	 * caller can fall through to plain-text handling (this branch
 	 * leaves the editor state untouched). `streamingBehavior` is only consulted
 	 * while the agent is streaming; the idle path of `promptCustomMessage`
 	 * ignores it.
 	 */
 	async #invokeSkillCommand(text: string, streamingBehavior: "steer" | "followUp"): Promise<boolean> {
-		if (!text.startsWith("/")) return false;
 		const invocations = parseSkillInvocations(text, this.ctx.skillCommands ?? new Map());
 		if (invocations.length === 0) return false;
 		this.ctx.editor.addToHistory(text);
@@ -603,13 +724,15 @@ export class InputController {
 		const text = this.ctx.editor.getText().trim();
 		if (!text) return;
 
-		// Compaction first: while compacting, free text gets queued via
-		// `queueCompactionMessage`, and `/skill:*` rides the same queue so a
-		// skill typed during compaction is not lost or short-circuited through
-		// `promptCustomMessage`. The skill text is queued verbatim; whether
-		// the queued entry is later re-parsed into a skill invocation is a
-		// separate concern owned by the compaction-resume path.
+		// Compaction first: while compacting, queue free text and `/skill:*`
+		// commands in the compaction-local queue. `flushCompactionQueue`
+		// replays skill entries through the custom-message skill path after
+		// compaction finishes so they are not degraded into plain prompts.
 		if (this.ctx.session.isCompacting) {
+			if (this.ctx.pendingImages.length > 0) {
+				this.ctx.showStatus("Compaction in progress. Retry after it completes to send images.");
+				return;
+			}
 			this.ctx.queueCompactionMessage(text, "followUp");
 			return;
 		}
@@ -643,10 +766,28 @@ export class InputController {
 		return this.handleFollowUp();
 	}
 
+	restoreLatestQueuedMessageToEditor(options?: { currentText?: string }): number {
+		const compactionQueued = this.ctx.compactionQueuedMessages.pop();
+		const queuedText = compactionQueued?.text ?? this.ctx.session.popLastQueuedMessage();
+		if (!queuedText) {
+			this.ctx.updatePendingMessagesDisplay();
+			return 0;
+		}
+
+		this.ctx.locallySubmittedUserSignatures.delete(`${queuedText}\u00000`);
+		const currentText = options?.currentText ?? this.ctx.editor.getText();
+		const combinedText = [queuedText, currentText].filter(t => t.trim()).join("\n\n");
+		this.ctx.editor.setText(combinedText);
+		this.ctx.updatePendingMessagesDisplay();
+		return 1;
+	}
+
 	restoreQueuedMessagesToEditor(options?: { abort?: boolean; currentText?: string }): number {
 		this.ctx.locallySubmittedUserSignatures.clear();
 		const { steering, followUp } = this.ctx.session.clearQueue();
-		const allQueued = [...steering, ...followUp];
+		const compactionQueued = (this.ctx.compactionQueuedMessages ?? []).map(entry => entry.text);
+		this.ctx.compactionQueuedMessages = [];
+		const allQueued = [...steering, ...followUp, ...compactionQueued];
 		if (allQueued.length === 0) {
 			this.ctx.updatePendingMessagesDisplay();
 			if (options?.abort) {
@@ -705,6 +846,7 @@ export class InputController {
 			this.ctx.editor.onEscape = this.ctx.retryEscapeHandler;
 			this.ctx.retryEscapeHandler = undefined;
 		}
+		this.ctx.retryEscapePrimed = false;
 		this.ctx.statusContainer.clear();
 		this.ctx.statusLine.dispose();
 
@@ -859,6 +1001,8 @@ export class InputController {
 			copyCurrentLine: () => this.handleCopyCurrentLine(),
 			copyPrompt: () => this.handleCopyPrompt(),
 			pasteImage: () => void this.handleImagePaste(),
+			newSession: () => void this.ctx.handleClearCommand(),
+			showHelp: () => this.ctx.handleHelpCommand(),
 			scrollTmuxToPreviousUserInput: () => this.scrollTmuxToPreviousUserInput(),
 			undo: prefix => this.ctx.editor.undoPastTransientText(prefix),
 			moveCursorToMessageEnd: () => this.ctx.editor.moveToMessageEnd(),
@@ -901,6 +1045,14 @@ export class InputController {
 		} catch {
 			this.ctx.showWarning("Failed to copy to clipboard");
 		}
+	}
+
+	openCommandPalette(): void {
+		if (this.ctx.editor.getText().trim().length > 0) {
+			this.ctx.showStatus("Command palette opens from an empty prompt. Type / for inline commands.");
+			return;
+		}
+		this.ctx.editor.handleInput("/");
 	}
 
 	cycleThinkingLevel(): void {

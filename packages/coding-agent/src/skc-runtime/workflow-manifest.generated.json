@@ -1481,14 +1481,6 @@
       },
       {
         "appliesToVerbs": [
-          "checkpoint",
-          "record-review-blockers"
-        ],
-        "name": "skc-goal-json",
-        "type": "string"
-      },
-      {
-        "appliesToVerbs": [
           "checkpoint"
         ],
         "name": "quality-gate-json",

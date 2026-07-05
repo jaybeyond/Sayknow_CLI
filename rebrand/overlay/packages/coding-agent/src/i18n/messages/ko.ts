@@ -34,6 +34,7 @@ export const ko: Partial<Record<MsgKey, string>> = {
 	"settings.tab.tools": "도구",
 	"settings.tab.tasks": "작업",
 	"settings.tab.providers": "공급자",
+	"settings.tab.integrations": "연동",
 
 	"settings.language.label": "언어",
 	"settings.language.desc": "인터페이스 언어. 자동은 시스템 로케일을 따릅니다.",

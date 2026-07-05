@@ -151,8 +151,8 @@ describe("redesigned interactive shell chrome", () => {
 		const narrowTop = Bun.stripANSI(narrowLines[0] ?? "");
 		const wideTop = Bun.stripANSI(wideLines[0] ?? "");
 
-		expect(visibleWidth(narrowTop)).toBe(98);
-		expect(visibleWidth(wideTop)).toBe(158);
+		expect(visibleWidth(narrowTop)).toBe(100);
+		expect(visibleWidth(wideTop)).toBe(160);
 		expect(visibleWidth(wideTop)).toBeGreaterThan(visibleWidth(narrowTop));
 		expect(wideTop).toContain("Sayknow-CLI");
 		for (const line of wideLines) {
@@ -309,7 +309,20 @@ describe("redesigned interactive shell chrome", () => {
 		expect(STATUS_LINE_PRESETS.default.segmentOptions?.path?.maxLength).toBe(32);
 	});
 
-	it("keeps launch rendering on the bounded-work path", () => {
+	it("adds a default plus usage status preset without changing default", () => {
+		expect(STATUS_LINE_PRESETS["default-usage"].leftSegments).toEqual(STATUS_LINE_PRESETS.default.leftSegments);
+		expect(STATUS_LINE_PRESETS["default-usage"].rightSegments).toEqual([
+			"session_name",
+			"jobs",
+			"token_rate",
+			"usage",
+			"context_pct",
+			"cost",
+		]);
+		expect(STATUS_LINE_PRESETS["default-usage"].segmentOptions).toEqual(STATUS_LINE_PRESETS.default.segmentOptions);
+	});
+
+	it("keeps forge launch rendering on the bounded-work path", () => {
 		const component = new WelcomeComponent("1.2.3", "gpt-5.5", "openai", [
 			{ name: "very-long-session-name".repeat(10), timeAgo: "2h" },
 		]);

@@ -207,6 +207,28 @@ describe("system Handlebars prompt templates", () => {
 		expect(rendered).toContain("call `search_tool_bm25` before concluding no such tool exists");
 	});
 
+	test("system-prompt renders tool-discovery block with discoverable tools when active", async () => {
+		const templatePath = path.join(systemPromptsDir, "system-prompt.md");
+		const template = await Bun.file(templatePath).text();
+
+		const rendered = prompt.render(template, {
+			...baseRenderContext,
+			toolDiscoveryActive: true,
+			discoverableTools: [
+				{ name: "browser", summary: "Control a headless browser" },
+				{ name: "todo_write", summary: "Manage a phased task list" },
+			],
+		});
+
+		expect(rendered).toContain("<tool-discovery>");
+		expect(rendered).toContain("`search_tool_bm25`");
+		expect(rendered).toContain("- `browser` — Control a headless browser");
+		expect(rendered).toContain("- `todo_write` — Manage a phased task list");
+
+		const disabled = prompt.render(template, { ...baseRenderContext, toolDiscoveryActive: false });
+		expect(disabled).not.toContain("<tool-discovery>");
+	});
+
 	test("system-prompt renders detached subagent semantics", async () => {
 		const templatePath = path.join(systemPromptsDir, "system-prompt.md");
 		const template = await Bun.file(templatePath).text();

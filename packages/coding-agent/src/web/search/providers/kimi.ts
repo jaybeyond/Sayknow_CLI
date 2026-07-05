@@ -19,6 +19,11 @@ const KIMI_SEARCH_URL = "https://api.kimi.com/coding/v1/search";
 const DEFAULT_NUM_RESULTS = 10;
 const MAX_NUM_RESULTS = 20;
 const DEFAULT_TIMEOUT_SECONDS = 30;
+// Local hard ceiling aligned with the upstream `timeout_seconds` request budget
+// (plus transport headroom) instead of the generic 15s "api" class: Kimi
+// legitimately runs search + page crawling up to its advertised 30s window,
+// and aborting earlier would discard valid in-budget responses.
+const KIMI_HARD_TIMEOUT_MS = (DEFAULT_TIMEOUT_SECONDS + 5) * 1000;
 
 export interface KimiSearchParams {
 	query: string;
@@ -87,7 +92,7 @@ async function callKimiSearch(
 			enable_page_crawling: params.includeContent,
 			timeout_seconds: DEFAULT_TIMEOUT_SECONDS,
 		}),
-		signal: withHardTimeout(params.signal),
+		signal: withHardTimeout(params.signal, KIMI_HARD_TIMEOUT_MS),
 	});
 
 	if (!response.ok) {

@@ -80,8 +80,6 @@ class TextInputSubmenu extends Container {
 		this.#input = new Input();
 		if (currentValue) {
 			this.#input.setValue(currentValue);
-			// Move cursor to end of pre-filled value (ctrl+e = cursorLineEnd).
-			this.#input.handleInput("\x05");
 		}
 		this.#input.onSubmit = value => {
 			this.onSubmit(value); // empty string clears the setting
@@ -184,6 +182,7 @@ class SelectSubmenu extends Container {
 	}
 }
 const STATUS_LINE_CUSTOM_EDITOR_ID = "statusLine.customEditor";
+const STATUS_LINE_USAGE_MODE_ID = "statusLine.usageMode";
 const PUBLIC_STATUS_SEGMENTS = ALL_SEGMENT_IDS.filter(id => id !== "pi");
 
 type StatusLineDraft = Required<
@@ -199,6 +198,8 @@ const TIME_FORMAT_OPTIONS: SelectItem[] = [
 	{ value: "24h", label: "24h" },
 	{ value: "12h", label: "12h" },
 ];
+const USAGE_MODE_VALUES = ["used", "remaining"] as const;
+type UsageMode = (typeof USAGE_MODE_VALUES)[number];
 
 function cloneSegmentOptions(options: StatusLineSegmentOptions | undefined): StatusLineSegmentOptions {
 	return mergeSegmentOptions(undefined, options);
@@ -236,6 +237,25 @@ function effectiveCustomSegments(
 		leftSegments: [...presetDef.leftSegments],
 		rightSegments: [...presetDef.rightSegments],
 	};
+}
+
+function getSavedUsageMode(): UsageMode {
+	const segmentOptions = settings.get("statusLine.segmentOptions") as StatusLineSegmentOptions;
+	return segmentOptions.usage?.mode === "remaining" ? "remaining" : "used";
+}
+
+function setSavedUsageMode(mode: string): StatusLineSegmentOptions {
+	const normalizedMode: UsageMode = mode === "remaining" ? "remaining" : "used";
+	const segmentOptions = settings.get("statusLine.segmentOptions") as StatusLineSegmentOptions;
+	const nextOptions: StatusLineSegmentOptions = {
+		...segmentOptions,
+		usage: {
+			...(segmentOptions.usage ?? {}),
+			mode: normalizedMode,
+		},
+	};
+	settings.set("statusLine.segmentOptions", nextOptions as Record<string, unknown>);
+	return nextOptions;
 }
 
 function statusSegmentLabel(id: StatusLineSegmentId): string {
@@ -662,6 +682,7 @@ export interface StatusLinePreviewSettings {
 	segmentOptions?: StatusLineSegmentOptions;
 	previewHighlightSegment?: StatusLineSegmentId;
 	sessionAccent?: boolean;
+	maxRows?: number;
 }
 
 export interface SettingsCallbacks {
@@ -858,9 +879,7 @@ export class SettingsSelectorComponent extends Container {
 			};
 		} else if (def.path === "statusLine.preset") {
 			onPreview = value => {
-				const presetDef = getPreset(
-					value as "default" | "minimal" | "compact" | "full" | "nerd" | "ascii" | "custom",
-				);
+				const presetDef = getPreset(value as StatusLinePreset);
 				this.callbacks.onStatusLinePreview?.({
 					preset: value as StatusLinePreset,
 					leftSegments: presetDef.leftSegments,
@@ -902,6 +921,18 @@ export class SettingsSelectorComponent extends Container {
 			onPreviewCancel = () => {
 				const separator = settings.get("statusLine.separator");
 				this.callbacks.onStatusLinePreview?.({ separator, previewHighlightSegment: undefined });
+				this.#updateStatusPreview();
+			};
+		} else if (def.path === "statusLine.maxRows") {
+			onPreview = value => {
+				this.callbacks.onStatusLinePreview?.({ maxRows: Number(value) });
+				this.#updateStatusPreview();
+			};
+			onPreviewCancel = () => {
+				this.callbacks.onStatusLinePreview?.({
+					maxRows: settings.get("statusLine.maxRows"),
+					previewHighlightSegment: undefined,
+				});
 				this.#updateStatusPreview();
 			};
 		}
@@ -998,6 +1029,16 @@ export class SettingsSelectorComponent extends Container {
 			10,
 			getSettingsListTheme(),
 			(id, newValue) => {
+				if (id === STATUS_LINE_USAGE_MODE_ID) {
+					const segmentOptions = setSavedUsageMode(newValue);
+					this.callbacks.onChange("statusLine.segmentOptions", segmentOptions);
+					if (tabId === "appearance") {
+						this.#triggerStatusLinePreview();
+					}
+					this.#refreshCurrentTabItems(defs);
+					return;
+				}
+
 				const def = defs.find(d => d.path === id);
 				if (!def) return;
 
@@ -1054,6 +1095,20 @@ export class SettingsSelectorComponent extends Container {
 				items.splice(presetIndex + 1, 0, customEditorItem);
 			} else {
 				items.push(customEditorItem);
+			}
+			{
+				const usageModeItem: SettingItem = {
+					id: STATUS_LINE_USAGE_MODE_ID,
+					label: "Status Line Usage Mode",
+					description: "Show provider quota in the status line as used or remaining.",
+					currentValue: getSavedUsageMode(),
+					values: [...USAGE_MODE_VALUES],
+				};
+				if (presetIndex >= 0) {
+					items.splice(presetIndex + 2, 0, usageModeItem);
+				} else {
+					items.push(usageModeItem);
+				}
 			}
 		}
 		return items;

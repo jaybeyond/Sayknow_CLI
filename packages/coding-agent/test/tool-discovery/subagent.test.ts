@@ -34,8 +34,8 @@ describe("effective discovery mode resolution", () => {
 		expect(resolveEffectiveMode(s)).toBe("off");
 	});
 
-	it("default settings → off", () => {
+	it("default settings → all", () => {
 		const s = Settings.isolated({});
-		expect(resolveEffectiveMode(s)).toBe("off");
+		expect(resolveEffectiveMode(s)).toBe("all");
 	});
 });

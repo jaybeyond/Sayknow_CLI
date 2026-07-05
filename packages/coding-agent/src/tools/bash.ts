@@ -14,7 +14,10 @@ import bashDescription from "../prompts/tools/bash.md" with { type: "text" };
 import type { ClientBridgeTerminalExitStatus, ClientBridgeTerminalOutput } from "../session/client-bridge";
 import { DEFAULT_MAX_BYTES, streamTailUpdates, TailBuffer } from "../session/streaming-output";
 import { buildSkcRuntimeSessionEnv } from "../skc-runtime/goal-mode-request";
-import { SKC_RESTRICTED_ROLE_AGENT_BASH_ENV } from "../skc-runtime/restricted-role-agent-bash";
+import {
+	SKC_RALPLAN_ARTIFACT_ENV,
+	SKC_RESTRICTED_ROLE_AGENT_BASH_ENV,
+} from "../skc-runtime/restricted-role-agent-bash";
 import { renderStatusLine } from "../tui";
 import { CachedOutputBlock } from "../tui/output-block";
 import { getSixelLineMask } from "../utils/sixel";
@@ -530,13 +533,24 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 
 		const rawCommand = input.command;
 		const allowedPrefixes = this.session.bashAllowedPrefixes;
+		const isRestrictedRalplanArtifactEnv =
+			allowedPrefixes &&
+			allowedPrefixes.length > 0 &&
+			this.session.bashRestrictionProfile !== "read-only" &&
+			env &&
+			Object.keys(env).length === 1 &&
+			Object.hasOwn(env, SKC_RALPLAN_ARTIFACT_ENV) &&
+			rawCommand.includes(`--artifact-env ${SKC_RALPLAN_ARTIFACT_ENV}`);
 		if (
 			(this.session.bashRestrictionProfile === "read-only" || (allowedPrefixes && allowedPrefixes.length > 0)) &&
 			env &&
-			Object.keys(env).length > 0
+			Object.keys(env).length > 0 &&
+			!isRestrictedRalplanArtifactEnv
 		) {
 			const mode = this.session.bashRestrictionProfile === "read-only" ? "Read-only" : "Restricted role-agent";
-			throw new ToolError(`${mode} bash does not allow per-command env overrides.`);
+			throw new ToolError(
+				`${mode} bash only allows the ${SKC_RALPLAN_ARTIFACT_ENV} env override for --artifact-env.`,
+			);
 		}
 		if (allowedPrefixes && allowedPrefixes.length > 0) {
 			const commandsToCheck = rawCommand === command ? [command] : [rawCommand, command];
@@ -597,11 +611,13 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 					await Promise.all(
 						Object.entries(env).map(async ([key, value]) => [
 							key,
-							await expandInternalUrls(value, {
-								...internalUrlOptions,
-								ensureLocalParentDirs: true,
-								noEscape: true,
-							}),
+							key === SKC_RALPLAN_ARTIFACT_ENV
+								? value
+								: await expandInternalUrls(value, {
+										...internalUrlOptions,
+										ensureLocalParentDirs: true,
+										noEscape: true,
+									}),
 						]),
 					),
 				)
@@ -817,9 +833,22 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			});
 		}
 
+		// Route through the client terminal when the client advertises the terminal capability.
+		// Skip when pty=true (PTY needs the local terminal UI).
+		const clientBridge =
+			this.session.bashRestrictionProfile === "read-only" ? undefined : this.session.getClientBridge?.();
+		const clientTerminalActive = Boolean(clientBridge?.capabilities.terminal && clientBridge.createTerminal && !pty);
+
 		const autoBgManager = AsyncJobManager.instance();
-		if (this.#autoBackgroundEnabled && !pty && autoBgManager) {
-			const autoBackgroundWaitMs = this.#resolveAutoBackgroundWaitMs(timeoutMs);
+		// Run non-PTY bash through the managed job path so Ctrl+B-twice fold-on-demand works
+		// even when auto-background is disabled. When a client terminal will handle the
+		// command, keep the existing bridge path unless auto-background is enabled.
+		if (!pty && autoBgManager && (this.#autoBackgroundEnabled || !clientTerminalActive)) {
+			// With auto-background off, wait past the command's own timeout so the job only
+			// leaves the foreground on an explicit Ctrl+B fold, never on an auto-background timer.
+			const autoBackgroundWaitMs = this.#autoBackgroundEnabled
+				? this.#resolveAutoBackgroundWaitMs(timeoutMs)
+				: timeoutMs + 1_000;
 			const startBackgrounded = autoBackgroundWaitMs === 0;
 			const job = this.#startManagedBashJob({
 				command,
@@ -875,10 +904,6 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			});
 		}
 
-		// Route through the client terminal when the client advertises the terminal capability.
-		// Skip when pty=true (PTY needs the local terminal UI).
-		const clientBridge =
-			this.session.bashRestrictionProfile === "read-only" ? undefined : this.session.getClientBridge?.();
 		if (clientBridge?.capabilities.terminal && clientBridge.createTerminal && !pty) {
 			const handle = await clientBridge.createTerminal({
 				command,

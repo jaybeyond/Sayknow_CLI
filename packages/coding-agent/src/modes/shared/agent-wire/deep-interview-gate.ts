@@ -11,7 +11,7 @@
  * the interactive select/editor UI) when an unattended controller + gate broker
  * are attached is wired with the transport in #321 and exercised by #323.
  */
-import type { RpcJsonSchema } from "../../rpc/rpc-types";
+import type { RpcJsonSchema, RpcWorkflowGateKind, RpcWorkflowStage } from "../../rpc/rpc-types";
 import type { OpenGateInput } from "./workflow-gate-broker";
 
 /** "Other (type your own)" sentinel, mirroring the interactive ask tool. */
@@ -26,6 +26,11 @@ export interface AskGateDeepInterviewState {
 	ambiguity: number;
 }
 
+export interface AskGateWorkflowGateMeta {
+	stage: RpcWorkflowStage;
+	kind: RpcWorkflowGateKind;
+}
+
 export interface AskGateQuestion {
 	id: string;
 	question: string;
@@ -37,6 +42,8 @@ export interface AskGateQuestion {
 	 * `stage_state`; when absent, the question text is regex-parsed as a fallback.
 	 */
 	deepInterview?: AskGateDeepInterviewState;
+	/** Override the emitted workflow gate address for non-deep-interview ask prompts. */
+	workflowGate?: AskGateWorkflowGateMeta;
 }
 
 export interface AskGateResult {
@@ -46,6 +53,7 @@ export interface AskGateResult {
 	multi: boolean;
 	selectedOptions: string[];
 	customInput?: string;
+	clarificationQuestion?: string;
 }
 
 /**
@@ -54,12 +62,15 @@ export interface AskGateResult {
  * `selected` are picked option labels; free text is conveyed by `other: true`
  * plus `custom`, encoded separately from `selected` so a real option whose label
  * happens to equal the display sentinel can never collide with the free-text path.
+ *
+ * `action: "clarify"` is a non-answer. It lets a Deep Interview user ask about
+ * the presented choices without advancing the round, scoring ambiguity, or
+ * recording selection state.
  */
-export interface DeepInterviewGateAnswer {
-	selected: string[];
-	other?: boolean;
-	custom?: string;
-}
+export type DeepInterviewGateAnswer =
+	| { selected: string[]; other?: false; custom?: undefined; action?: "answer" }
+	| { selected: string[]; other: true; custom: string; action?: "answer" }
+	| { action: "clarify"; question: string };
 
 export class DeepInterviewGateError extends Error {
 	constructor(
@@ -68,6 +79,7 @@ export class DeepInterviewGateError extends Error {
 			| "unknown_option"
 			| "multi_not_allowed"
 			| "missing_custom"
+			| "missing_clarification"
 			| "empty_selection"
 			| "duplicate_selection",
 		message: string,
@@ -119,14 +131,29 @@ function questionAnswerSchema(question: AskGateQuestion, labels: string[]): RpcJ
 		properties: {
 			selected: selectedBase,
 			other: { type: "boolean", description: "set true to provide a free-text answer in `custom`" },
-			custom: { type: "string", minLength: 1, description: "free-text answer; required when `other` is true" },
+			custom: {
+				type: "string",
+				minLength: 1,
+				pattern: "\\S",
+				description: "free-text answer; required when `other` is true",
+			},
+			action: {
+				type: "string",
+				enum: ["answer", "clarify"],
+				description: "set to `clarify` to ask about the choices without answering the round",
+			},
+			question: {
+				type: "string",
+				minLength: 1,
+				pattern: "\\S",
+				description: "clarification question; required when action is `clarify`",
+			},
 		},
-		required: ["selected"],
 		additionalProperties: false,
 		anyOf: [
 			{
 				type: "object",
-				properties: { selected: selectedOnly, other: { const: false } },
+				properties: { selected: selectedOnly, other: { const: false }, action: { const: "answer" } },
 				required: ["selected"],
 				additionalProperties: false,
 			},
@@ -135,9 +162,19 @@ function questionAnswerSchema(question: AskGateQuestion, labels: string[]): RpcJ
 				properties: {
 					selected: selectedWithOther,
 					other: { const: true },
-					custom: { type: "string", minLength: 1 },
+					custom: { type: "string", minLength: 1, pattern: "\\S" },
+					action: { const: "answer" },
 				},
 				required: ["selected", "other", "custom"],
+				additionalProperties: false,
+			},
+			{
+				type: "object",
+				properties: {
+					action: { const: "clarify" },
+					question: { type: "string", minLength: 1, pattern: "\\S" },
+				},
+				required: ["action", "question"],
 				additionalProperties: false,
 			},
 		],
@@ -157,13 +194,13 @@ function structuredDeepInterviewState(meta: AskGateDeepInterviewState): Record<s
 	return state;
 }
 
-/** Build the `workflow_gate` open-input for one deep-interview question. */
+/** Build the `workflow_gate` open-input for one ask question. */
 export function questionToGate(question: AskGateQuestion): OpenGateInput {
 	const labels = question.options.map(o => o.label);
 	const schema = questionAnswerSchema(question, labels);
 	return {
-		stage: "deep-interview",
-		kind: "question",
+		stage: question.workflowGate?.stage ?? "deep-interview",
+		kind: question.workflowGate?.kind ?? "question",
 		schema,
 		options: question.options.map((o, i) => ({
 			value: o.label,
@@ -178,6 +215,7 @@ export function questionToGate(question: AskGateQuestion): OpenGateInput {
 				multi: question.multi ?? false,
 				options: labels,
 				other_option: GATE_OTHER_OPTION,
+				clarification_action: "clarify",
 				...(question.deepInterview
 					? structuredDeepInterviewState(question.deepInterview)
 					: deepInterviewQuestionState(question.question)),
@@ -188,8 +226,14 @@ export function questionToGate(question: AskGateQuestion): OpenGateInput {
 
 function isAnswer(value: unknown): value is DeepInterviewGateAnswer {
 	if (typeof value !== "object" || value === null) return false;
-	const v = value as DeepInterviewGateAnswer;
+	const v = value as Record<string, unknown>;
+	if (v.action === "clarify") {
+		return (
+			typeof v.question === "string" && v.selected === undefined && v.other === undefined && v.custom === undefined
+		);
+	}
 	return (
+		(v.action === undefined || v.action === "answer") &&
 		Array.isArray(v.selected) &&
 		v.selected.every(s => typeof s === "string") &&
 		(v.other === undefined || typeof v.other === "boolean") &&
@@ -207,11 +251,24 @@ export function gateAnswerToResult(question: AskGateQuestion, answer: unknown): 
 	if (!isAnswer(answer)) {
 		throw new DeepInterviewGateError(
 			"invalid_answer_shape",
-			"answer must be { selected: string[]; other?: boolean; custom?: string }",
+			'answer must be an answer ({ selected: string[]; other?: boolean; custom?: string }) or clarification ({ action: "clarify"; question: string })',
 		);
 	}
 	const labels = question.options.map(o => o.label);
 	const multi = question.multi ?? false;
+	if (answer.action === "clarify") {
+		if (answer.question.trim() === "") {
+			throw new DeepInterviewGateError("missing_clarification", "clarification question is required");
+		}
+		return {
+			id: question.id,
+			question: question.question,
+			options: labels,
+			multi,
+			selectedOptions: [],
+			clarificationQuestion: answer.question,
+		};
+	}
 	const valid = new Set(labels);
 	for (const sel of answer.selected) {
 		if (!valid.has(sel)) throw new DeepInterviewGateError("unknown_option", `unknown option: ${sel}`);

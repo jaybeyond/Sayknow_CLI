@@ -306,7 +306,7 @@ export async function searchWithParallel(
 				max_chars_per_result: options.maxCharsPerResult ?? 10_000,
 			},
 		}),
-		signal: withHardTimeout(options.signal),
+		signal: withHardTimeout(options.signal, "api"),
 	});
 	if (!response.ok) {
 		throw parseParallelErrorResponse(response.status, await response.text());
@@ -338,7 +338,7 @@ export async function extractWithParallel(
 			excerpts: options.excerpts ?? true,
 			full_content: options.fullContent ?? false,
 		}),
-		signal: withHardTimeout(options.signal),
+		signal: withHardTimeout(options.signal, "api"),
 	});
 	if (!response.ok) {
 		throw parseParallelErrorResponse(response.status, await response.text());

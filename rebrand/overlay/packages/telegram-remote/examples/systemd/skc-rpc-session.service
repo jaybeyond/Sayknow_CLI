@@ -1,0 +1,22 @@
+# Linux systemd user unit for the persistent SKC RPC-mode session.
+# Copy to: ~/.config/systemd/user/skc-rpc-session.service
+# IMPORTANT: run this as the same Unix user as the Telegram bot service.
+[Unit]
+Description=SKC persistent RPC session for Telegram Remote
+Documentation=https://github.com/jaybeyond/Sayknow_CLI/tree/dev/packages/telegram-remote
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/src/sayknow-cli
+Environment=PATH=%h/.bun/bin:%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+RuntimeDirectory=skc
+RuntimeDirectoryMode=0700
+ExecStart=/usr/bin/env skc launch --output rpc --listen %t/skc/telegram-remote.sock
+Restart=on-failure
+RestartSec=10s
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target

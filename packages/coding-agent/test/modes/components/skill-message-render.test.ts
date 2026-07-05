@@ -25,11 +25,11 @@ function makeMessage(details: SkillPromptDetails, content: string): CustomMessag
 	};
 }
 
-function render(message: CustomMessage<SkillPromptDetails>, expanded: boolean): string {
+function render(message: CustomMessage<SkillPromptDetails>, expanded: boolean, width = 120): string {
 	const component = new SkillMessageComponent(message);
 	component.setExpanded(expanded);
 	return component
-		.render(120)
+		.render(width)
 		.map(line => Bun.stripANSI(line))
 		.join("\n");
 }
@@ -75,6 +75,23 @@ describe("SkillMessageComponent rendering", () => {
 		expect(out).toContain("to re-architect our problem banks");
 		expect(out).toContain("make sure gaebal-sayknow skill-invocation modal");
 		expect(out).toContain("even though we need few lines to use.");
+	});
+
+	it("collapsed args preview reflows when the terminal grows instead of keeping a fixed narrow cap", () => {
+		const longArgs = "A".repeat(120);
+		const component = new SkillMessageComponent(makeMessage({ ...DETAILS, args: longArgs }, "BODY"));
+
+		const narrowOut = component
+			.render(80)
+			.map(line => Bun.stripANSI(line))
+			.join("\n");
+		expect(narrowOut).not.toContain(longArgs);
+
+		const wideOut = component
+			.render(160)
+			.map(line => Bun.stripANSI(line))
+			.join("\n");
+		expect(wideOut).toContain(longArgs);
 	});
 
 	it("bounds over-long args without leaking the full payload", () => {

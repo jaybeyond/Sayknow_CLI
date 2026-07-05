@@ -36,7 +36,7 @@ describe("createAgentSession wires getAskAnswerSource into built-in AskTool", ()
 		const { session } = await createAgentSession({
 			cwd: tempDir,
 			agentDir: tempDir,
-			sessionManager: SessionManager.inMemory(),
+			sessionManager: SessionManager.inMemory(tempDir),
 			settings: Settings.isolated(),
 			hasUI: true,
 		});

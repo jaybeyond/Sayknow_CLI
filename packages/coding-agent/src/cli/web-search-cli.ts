@@ -9,13 +9,14 @@ import chalk from "chalk";
 import { Settings } from "../config/settings";
 import { initTheme, theme } from "../modes/theme/theme";
 import {
+	getConfiguredSearchProviderPreference,
 	isConfigurableSearchProviderId,
 	isSearchProviderPreference,
 	runSearchQuery,
 	type SearchQueryParams,
 } from "../web/search/index";
 import { SEARCH_PROVIDER_ORDER, setPreferredSearchProvider, setSearchFallbackProviders } from "../web/search/provider";
-import { setSearchHardTimeoutMs } from "../web/search/providers/utils";
+import { applyConfiguredSearchTimeout } from "../web/search/providers/utils";
 import { renderSearchResult } from "../web/search/render";
 import type { SearchProviderId } from "../web/search/types";
 
@@ -170,8 +171,8 @@ export async function runSearchCommand(cmd: SearchCommandArgs): Promise<void> {
 
 	await initTheme();
 	const settings = await Settings.init();
-	const configuredProvider = settings.get("providers.webSearch");
-	if (typeof configuredProvider === "string" && isSearchProviderPreference(configuredProvider)) {
+	const configuredProvider = getConfiguredSearchProviderPreference(settings);
+	if (isSearchProviderPreference(configuredProvider)) {
 		setPreferredSearchProvider(configuredProvider);
 	}
 	const configuredFallback = settings.get("web_search.fallback");
@@ -180,10 +181,7 @@ export async function runSearchCommand(cmd: SearchCommandArgs): Promise<void> {
 			configuredFallback.filter(value => typeof value === "string" && isConfigurableSearchProviderId(value)),
 		);
 	}
-	const configuredTimeout = settings.get("web_search.timeout");
-	if (typeof configuredTimeout === "number" && Number.isFinite(configuredTimeout) && configuredTimeout > 0) {
-		setSearchHardTimeoutMs(configuredTimeout * 1000);
-	}
+	applyConfiguredSearchTimeout(settings);
 
 	const params: SearchQueryParams = {
 		query: cmd.query,

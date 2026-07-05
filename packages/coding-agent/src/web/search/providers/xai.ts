@@ -441,7 +441,7 @@ export async function searchXai(params: XaiSearchParams): Promise<SearchResponse
 				noInlineCitations: params.no_inline_citations,
 			}),
 		),
-		signal: withHardTimeout(params.signal),
+		signal: withHardTimeout(params.signal, "llm"),
 	});
 
 	const text = await response.text();

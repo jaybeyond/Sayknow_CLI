@@ -134,30 +134,38 @@ describe("createAgentSession MCP discovery prompt gating", () => {
 		);
 	});
 
-	it("exposes generic discovery tooling for builtin-only tools.discoveryMode all sessions", async () => {
-		const { session } = await createAgentSession({
-			cwd: tempDir,
-			agentDir: tempDir,
-			modelRegistry,
-			sessionManager: SessionManager.inMemory(),
-			settings: Settings.isolated({ "tools.discoveryMode": "all" }),
-			model: getBundledModel("openai", "gpt-4o-mini"),
-			disableExtensionDiscovery: true,
-			skills: [],
-			contextFiles: [],
-			promptTemplates: [],
-			slashCommands: [],
-			enableMCP: false,
-			enableLsp: false,
-		});
+	it(
+		"exposes generic discovery tooling for builtin-only tools.discoveryMode all sessions",
+		async () => {
+			const { session } = await createAgentSession({
+				cwd: tempDir,
+				agentDir: tempDir,
+				modelRegistry,
+				sessionManager: SessionManager.inMemory(),
+				settings: Settings.isolated({
+					"tools.discoveryMode": "all",
+					"browser.enabled": false,
+					"debug.enabled": false,
+				}),
+				model: getBundledModel("openai", "gpt-4o-mini"),
+				disableExtensionDiscovery: true,
+				skills: [],
+				contextFiles: [],
+				promptTemplates: [],
+				slashCommands: [],
+				enableMCP: false,
+				enableLsp: false,
+			});
 
-		const prompt = session.systemPrompt.join("\n");
-		const searchTool = session.agent.state.tools.find(tool => tool.name === "search_tool_bm25");
-		expect(session.getActiveToolNames()).not.toContain("find");
-		expect(prompt).toContain("SearchTools: `search_tool_bm25`");
-		expect(searchTool?.description).toContain("Search hidden tool metadata");
-		expect(searchTool?.description).toContain("total_tools");
-	});
+			const prompt = session.systemPrompt.join("\n");
+			const searchTool = session.agent.state.tools.find(tool => tool.name === "search_tool_bm25");
+			expect(session.getActiveToolNames()).not.toContain("todo_write");
+			expect(prompt).toContain("SearchTools: `search_tool_bm25`");
+			expect(searchTool?.description).toContain("Search hidden tool metadata");
+			expect(searchTool?.description).toContain("total_tools");
+		},
+		SLOW_SDK_TEST_TIMEOUT_MS,
+	);
 
 	it("preserves explicitly requested MCP tools in discovery mode", async () => {
 		const { session } = await createAgentSession({
@@ -291,7 +299,11 @@ describe("createAgentSession MCP discovery prompt gating", () => {
 				agentDir: tempDir,
 				modelRegistry,
 				sessionManager: SessionManager.inMemory(),
-				settings: Settings.isolated({ "tools.discoveryMode": "all" }),
+				settings: Settings.isolated({
+					"tools.discoveryMode": "all",
+					"browser.enabled": false,
+					"debug.enabled": false,
+				}),
 				model: getBundledModel("openai", "gpt-4o-mini"),
 				disableExtensionDiscovery: true,
 				skills: [],
@@ -302,15 +314,15 @@ describe("createAgentSession MCP discovery prompt gating", () => {
 				enableLsp: false,
 			});
 
-			expect(await session.activateDiscoveredTools(["find"])).toEqual(["find"]);
-			expect(session.getSelectedDiscoveredToolNames()).toContain("find");
+			expect(await session.activateDiscoveredTools(["todo_write"])).toEqual(["todo_write"]);
+			expect(session.getSelectedDiscoveredToolNames()).toContain("todo_write");
 
 			await session.setActiveToolsByName(["read", "search_tool_bm25"]);
 
-			expect(session.getActiveToolNames()).not.toContain("find");
-			expect(session.getSelectedDiscoveredToolNames()).not.toContain("find");
-			expect(await session.activateDiscoveredTools(["find"])).toEqual(["find"]);
-			expect(session.getActiveToolNames()).toContain("find");
+			expect(session.getActiveToolNames()).not.toContain("todo_write");
+			expect(session.getSelectedDiscoveredToolNames()).not.toContain("todo_write");
+			expect(await session.activateDiscoveredTools(["todo_write"])).toEqual(["todo_write"]);
+			expect(session.getActiveToolNames()).toContain("todo_write");
 		},
 		SLOW_SDK_TEST_TIMEOUT_MS,
 	);

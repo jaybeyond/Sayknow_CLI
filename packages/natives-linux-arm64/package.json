@@ -1,9 +1,9 @@
 {
 	"name": "@sayknow-cli/natives-linux-arm64",
-	"version": "0.3.6",
+	"version": "0.3.7",
 	"description": "Linux arm64 native addon for @sayknow-cli/natives",
 	"type": "module",
-	"homepage": "https://github.com/jaybeyond/Sayknow_CLI",
+	"homepage": "https://sayknow-cli.com",
 	"author": "jaybeyond",
 	"license": "MIT",
 	"repository": {

@@ -1,6 +1,8 @@
+diff --git a/packages/coding-agent/src/modes/components/settings-selector.ts b/packages/coding-agent/src/modes/components/settings-selector.ts
+index 5ae2c592..94993782 100644
 --- a/packages/coding-agent/src/modes/components/settings-selector.ts
 +++ b/packages/coding-agent/src/modes/components/settings-selector.ts
-@@ -21,6 +21,7 @@
+@@ -21,6 +21,7 @@ import type {
  	StatusLineSeparatorStyle,
  } from "../../config/settings-schema";
  import { SETTING_TABS, TAB_METADATA } from "../../config/settings-schema";
@@ -8,7 +10,7 @@
  import { getCurrentThemeName, getSelectListTheme, getSettingsListTheme, theme } from "../../modes/theme/theme";
  import { matchesAppInterrupt } from "../../modes/utils/keybinding-matchers";
  import { getTabBarTheme } from "../shared";
-@@ -31,6 +32,25 @@
+@@ -31,6 +32,25 @@ import type { StatusLineSegmentOptions } from "./status-line";
  import { getPreset } from "./status-line/presets";
  import { ALL_SEGMENT_IDS } from "./status-line/segments";
  
@@ -34,7 +36,7 @@
  /**
   * A submenu component for selecting from a list of options.
   */
-@@ -179,10 +199,6 @@
+@@ -178,10 +198,6 @@ const TIME_FORMAT_OPTIONS: SelectItem[] = [
  	{ value: "24h", label: "24h" },
  	{ value: "12h", label: "12h" },
  ];
@@ -42,10 +44,10 @@
 -	{ value: "used", label: "Used" },
 -	{ value: "remaining", label: "Remaining" },
 -];
+ const USAGE_MODE_VALUES = ["used", "remaining"] as const;
+ type UsageMode = (typeof USAGE_MODE_VALUES)[number];
  
- function cloneSegmentOptions(options: StatusLineSegmentOptions | undefined): StatusLineSegmentOptions {
- 	return mergeSegmentOptions(undefined, options);
-@@ -197,7 +213,6 @@
+@@ -198,7 +214,6 @@ function mergeSegmentOptions(
  		path: base?.path || overrides?.path ? { ...(base?.path ?? {}), ...(overrides?.path ?? {}) } : undefined,
  		git: base?.git || overrides?.git ? { ...(base?.git ?? {}), ...(overrides?.git ?? {}) } : undefined,
  		time: base?.time || overrides?.time ? { ...(base?.time ?? {}), ...(overrides?.time ?? {}) } : undefined,
@@ -53,7 +55,7 @@
  	};
  }
  
-@@ -240,6 +255,8 @@
+@@ -260,6 +275,8 @@ function segmentPlacement(
  class StatusLineCustomEditor extends Container {
  	#list!: SettingsList;
  	#draft: StatusLineDraft;
@@ -62,7 +64,7 @@
  	#previewHighlightSegment: StatusLineSegmentId | undefined;
  
  	constructor(
-@@ -271,6 +288,13 @@
+@@ -291,6 +308,13 @@ class StatusLineCustomEditor extends Container {
  		this.clear();
  		this.addChild(new Text(theme.bold(theme.fg("accent", "Status Line Custom Editor")), 0, 0));
  		this.addChild(new Spacer(1));
@@ -76,7 +78,7 @@
  		this.#list = new SettingsList(
  			this.#items(),
  			14,
-@@ -278,17 +302,27 @@
+@@ -298,17 +322,27 @@ class StatusLineCustomEditor extends Container {
  			(id, value) => this.#handleChange(id, value),
  			() => this.#cancel(),
  			item => this.#setSelectedItem(item),
@@ -105,7 +107,7 @@
  	}
  
  	#highlightSegmentForItem(item: SettingItem | undefined): StatusLineSegmentId | undefined {
-@@ -374,22 +408,6 @@
+@@ -394,22 +428,6 @@ class StatusLineCustomEditor extends Container {
  					},
  				);
  			}
@@ -128,20 +130,20 @@
  		}
  
  		items.push(
-@@ -553,12 +571,6 @@
- 				break;
+@@ -574,12 +592,6 @@ class StatusLineCustomEditor extends Container {
  			case "time.showSeconds":
  				this.#draft.segmentOptions.time = { ...(this.#draft.segmentOptions.time ?? {}), showSeconds: bool };
--				break;
+ 				break;
 -			case "usage.mode":
 -				this.#draft.segmentOptions.usage = {
 -					...(this.#draft.segmentOptions.usage ?? {}),
 -					mode: value === "remaining" ? "remaining" : "used",
 -				};
- 				break;
+-				break;
  		}
  	}
-@@ -620,7 +632,7 @@
+ 
+@@ -640,7 +652,7 @@ function getSettingsTabs(): Tab[] {
  		...SETTING_TABS.map(id => {
  			const meta = TAB_METADATA[id];
  			const icon = theme.symbol(meta.icon as Parameters<typeof theme.symbol>[0]);
@@ -150,7 +152,7 @@
  		}),
  		{ id: "plugins", label: `${theme.icon.package} Plugins` },
  	];
-@@ -750,13 +762,15 @@
+@@ -771,13 +783,15 @@ export class SettingsSelectorComponent extends Container {
  		}
  
  		const currentValue = this.#getCurrentValue(def);
@@ -168,7 +170,7 @@
  					currentValue: currentValue ? "true" : "false",
  					values: ["true", "false"],
  				};
-@@ -764,8 +778,8 @@
+@@ -785,8 +799,8 @@ export class SettingsSelectorComponent extends Container {
  			case "enum":
  				return {
  					id: def.path,
@@ -179,7 +181,7 @@
  					currentValue: currentValue as string,
  					values: [...def.values],
  				};
-@@ -773,8 +787,8 @@
+@@ -794,8 +808,8 @@ export class SettingsSelectorComponent extends Container {
  			case "submenu":
  				return {
  					id: def.path,
@@ -190,7 +192,7 @@
  					currentValue: this.#getSubmenuCurrentValue(def.path, currentValue),
  					submenu: (cv, done) => this.#createSubmenu(def, cv, done),
  				};
-@@ -782,8 +796,8 @@
+@@ -803,8 +817,8 @@ export class SettingsSelectorComponent extends Container {
  			case "text":
  				return {
  					id: def.path,
@@ -201,7 +203,7 @@
  					currentValue: (currentValue as string) ?? "",
  					submenu: (cv, done) => this.#createTextInput(def, cv, done),
  				};
-@@ -897,9 +911,9 @@
+@@ -928,9 +942,9 @@ export class SettingsSelectorComponent extends Container {
  		const getPreview = isThemeSetting ? this.callbacks.getStatusLinePreview : undefined;
  
  		return new SelectSubmenu(
@@ -214,7 +216,7 @@
  			currentValue,
  			value => {
  				this.#setSettingValue(def.path, value);
-@@ -929,8 +943,8 @@
+@@ -960,8 +974,8 @@ export class SettingsSelectorComponent extends Container {
  			done(value);
  		};
  		return new TextInputSubmenu(
@@ -225,7 +227,7 @@
  			currentValue,
  			value => {
  				// Empty string clears the setting; undefined-typed string settings
-@@ -1027,20 +1041,13 @@
+@@ -1068,20 +1082,13 @@ export class SettingsSelectorComponent extends Container {
  	#buildItemsForTab(defs: SettingDef[], tabId: SettingTab): SettingItem[] {
  		const items = this.#buildItemsForDefs(defs);
  		if (tabId === "appearance") {

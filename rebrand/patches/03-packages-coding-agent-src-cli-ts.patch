@@ -8,7 +8,15 @@
  	{ name: "skills", load: () => import("./commands/skills").then(m => m.default) },
  	{ name: "session", load: () => import("./commands/session").then(m => m.default) },
  	{ name: "harness", load: () => import("./commands/harness").then(m => m.default) },
-@@ -111,7 +110,7 @@
+@@ -53,6 +52,7 @@
+ 	{ name: "update", load: () => import("./commands/update").then(m => m.default) },
+ 	{ name: "plugin", load: () => import("./commands/plugin").then(m => m.default) },
+ 	{ name: "launch", load: () => import("./commands/launch").then(m => m.default) },
++	{ name: "telegram", load: () => import("./commands/telegram").then(m => m.default) },
+ ];
+ 
+ async function showHelp(config: CliConfig): Promise<void> {
+@@ -111,7 +111,7 @@
  }
  
  class RootHelpCommand extends Command {

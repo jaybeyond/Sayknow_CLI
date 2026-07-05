@@ -29,7 +29,11 @@ const ANTIGRAVITY_ENDPOINT_FALLBACKS = [ANTIGRAVITY_DAILY_ENDPOINT, ANTIGRAVITY_
 const DEFAULT_MODEL = "gemini-2.5-flash";
 const MAX_RETRIES = 3;
 const BASE_DELAY_MS = 1000;
-const RATE_LIMIT_BUDGET_MS = 5 * 60 * 1000;
+// Retry-delay ceiling for 429/5xx. The web_search chain always terminates in
+// the keyless DuckDuckGo fallback, so a rate-limited Gemini should fail
+// through in seconds instead of parking the chain behind long server-provided
+// retry delays (previously a 5-minute budget).
+const RATE_LIMIT_BUDGET_MS = 30 * 1000;
 
 const GEMINI_PROVIDERS = ["google-gemini-cli", "google-antigravity"] as const;
 type GeminiProviderId = (typeof GEMINI_PROVIDERS)[number];
@@ -230,7 +234,7 @@ async function callGeminiSearch(
 			...headers,
 		},
 		body: JSON.stringify(requestBody),
-		signal: withHardTimeout(signal),
+		signal: withHardTimeout(signal, "llm"),
 	});
 	const urlFor = (attempt: number) =>
 		`${endpoints[Math.min(attempt, endpoints.length - 1)]}/v1internal:streamGenerateContent?alt=sse`;
@@ -466,7 +470,7 @@ async function searchGeminiViaGenerativeLanguage(params: SearchParams): Promise<
 		method: "POST",
 		headers: { ...(ctx.headers ?? {}), "x-goog-api-key": apiKey, "Content-Type": "application/json" },
 		body: JSON.stringify(body),
-		signal: withHardTimeout(params.signal),
+		signal: withHardTimeout(params.signal, "llm"),
 	});
 	const text = await response.text();
 	if (!response.ok) {

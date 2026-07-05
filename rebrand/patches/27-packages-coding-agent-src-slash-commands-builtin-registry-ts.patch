@@ -1,6 +1,8 @@
+diff --git a/packages/coding-agent/src/slash-commands/builtin-registry.ts b/packages/coding-agent/src/slash-commands/builtin-registry.ts
+index f8d5fc98..8a897d0c 100644
 --- a/packages/coding-agent/src/slash-commands/builtin-registry.ts
 +++ b/packages/coding-agent/src/slash-commands/builtin-registry.ts
-@@ -19,6 +19,7 @@
+@@ -19,6 +19,7 @@ import {
  	parseModelString,
  } from "../config/model-resolver";
  import { clearPluginRootsAndCaches, resolveActiveProjectRegistryPath } from "../discovery/helpers.js";
@@ -8,7 +10,7 @@
  import { resolveMemoryBackend } from "../memory-backend";
  import { DynamicBorder } from "../modes/components/dynamic-border";
  import { theme } from "../modes/theme/theme";
-@@ -1239,7 +1240,10 @@
+@@ -1258,7 +1259,10 @@ export function formatUnknownBuiltinSlashCommandDiagnostic(commandName: string):
  export const BUILTIN_SLASH_COMMAND_DEFS: ReadonlyArray<BuiltinSlashCommand> = ACTIVE_BUILTIN_SLASH_COMMAND_REGISTRY.map(
  	command => ({
  		name: command.name,
@@ -19,4 +21,4 @@
 +		},
  		subcommands: command.subcommands,
  		inlineHint: command.inlineHint,
- 	}),
+ 		priority: command.priority,
