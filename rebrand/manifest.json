@@ -30,6 +30,7 @@
     "packages/coding-agent/test/modes/components/redesigned-shell.test.ts",
     "packages/coding-agent/test/sdk-model-selection.test.ts",
     "packages/coding-agent/test/settings-manager.test.ts",
+    "packages/coding-agent/test/system-prompt-templates.test.ts",
     "packages/coding-agent/test/skc-ui-redesign.test.ts",
     "packages/coding-agent/test/welcome-viewport.test.ts",
     "packages/tui/src/components/editor.ts",

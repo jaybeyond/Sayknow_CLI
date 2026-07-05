@@ -42,6 +42,7 @@ describe("SKC public CLI command surface", () => {
 			"update",
 			"plugin",
 			"launch",
+			"telegram",
 		]);
 	});
 

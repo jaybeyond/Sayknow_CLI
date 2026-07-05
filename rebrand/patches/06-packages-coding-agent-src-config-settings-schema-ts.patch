@@ -34,17 +34,7 @@
  	| "context_pct"
  	| "context_total"
  	| "time_spent"
-@@ -280,8 +284,7 @@
- 		ui: {
- 			tab: "interaction",
- 			label: "Terminal Bell",
--			description:
--				"Emit a BEL character for local terminal notifications. Windows Terminal may keep BEL silent depending on profile/system sound settings; use completion.notifyCommand for a PowerShell Console.Beep workaround.",
-+			description: "Emit a BEL character for local terminal notifications",
- 		},
- 	},
- 	"notifications.bellOnComplete": {
-@@ -406,7 +409,7 @@
+@@ -406,7 +410,7 @@
  	// Theme
  	"theme.dark": {
  		type: "string",
@@ -53,14 +43,10 @@
  		ui: {
  			tab: "appearance",
  			label: "Dark Theme",
-@@ -438,6 +441,27 @@
- 				{ value: "unicode", label: "Unicode", description: "Standard symbols (default)" },
- 				{ value: "nerd", label: "Nerd Font", description: "Requires Nerd Font" },
- 				{ value: "ascii", label: "ASCII", description: "Maximum compatibility" },
-+			],
-+		},
-+	},
-+
+@@ -442,6 +446,27 @@
+ 		},
+ 	},
+ 
 +	language: {
 +		type: "enum",
 +		values: ["auto", "en", "ko", "zh", "ja", "es", "fr", "de"] as const,
@@ -78,10 +64,14 @@
 +				{ value: "es", label: "Español", description: "Spanish" },
 +				{ value: "fr", label: "Français", description: "French" },
 +				{ value: "de", label: "Deutsch", description: "German" },
- 			],
- 		},
- 	},
-@@ -1172,7 +1196,7 @@
++			],
++		},
++	},
++
+ 	colorBlindMode: {
+ 		type: "boolean",
+ 		default: false,
+@@ -1172,7 +1197,7 @@
  
  	"starReminder.enabled": {
  		type: "boolean",
@@ -90,16 +80,7 @@
  		ui: {
  			tab: "interaction",
  			label: "GitHub Star Reminder",
-@@ -1200,7 +1224,7 @@
- 			tab: "interaction",
- 			label: "Completion Notification Command",
- 			description:
--				"Optional user-level shell command to run when an agent turn completes; receives SKC_NOTIFICATION_* environment variables. On Windows, this can call PowerShell [Console]::Beep when terminal BEL is silent.",
-+				"Optional user-level shell command to run when an agent turn completes; receives SKC_NOTIFICATION_* environment variables.",
- 		},
- 	},
- 
-@@ -3128,6 +3152,183 @@
+@@ -3128,6 +3153,183 @@
  	"thinkingBudgets.xhigh": { type: "number", default: 32768 },
  
  	"thinkingBudgets.max": { type: "number", default: 65536 },
@@ -283,10 +264,12 @@
  } as const;
  
  // ═══════════════════════════════════════════════════════════════════════════
-@@ -3356,6 +3557,35 @@
+@@ -3354,6 +3556,35 @@
+ 	daemon: {
+ 		idleTimeoutMs: number;
  	};
- }
- 
++}
++
 +export interface TelegramSettings {
 +	enabled: boolean;
 +	botToken: string | undefined;
@@ -314,12 +297,10 @@
 +	longPollMs: number;
 +	digestThreshold: number;
 +	allowAttachSocketArg: boolean;
-+}
-+
+ }
+ 
  /** Map group prefix -> typed settings interface */
- export interface GroupTypeMap {
- 	compaction: CompactionSettings;
-@@ -3374,6 +3604,7 @@
+@@ -3374,6 +3605,7 @@
  	modelTags: ModelTagsSettings;
  	cycleOrder: string[];
  	shellMinimizer: ShellMinimizerSettings;
