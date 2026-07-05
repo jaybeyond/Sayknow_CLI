@@ -3,13 +3,13 @@
  * integration, driven entirely by the `telegram.*` settings group.
  */
 
-import * as path from "node:path";
-import { isCompiledBinary, logger } from "@sayknow-cli/utils";
+import { logger } from "@sayknow-cli/utils";
+import { resolveSkcRuntimeSpawnInfo } from "../daemon/runtime";
 import { isSettingsInitialized, Settings, settings } from "../config/settings";
 import type { TelegramSettings } from "../config/settings-schema";
 import { telegramSettingsToEnv, validateTelegramSettings } from "../config/telegram-env-bridge";
 
-export type TelegramAction = "start" | "status" | "env";
+export type TelegramAction = "start" | "status" | "env" | "__gateway";
 
 export interface TelegramCommandArgs {
 	action: TelegramAction;
@@ -18,7 +18,7 @@ export interface TelegramCommandArgs {
 	};
 }
 
-export const TELEGRAM_ACTIONS: readonly TelegramAction[] = ["start", "status", "env"];
+export const TELEGRAM_ACTIONS: readonly TelegramAction[] = ["start", "status", "env", "__gateway"];
 
 /** Read the full telegram settings group from the settings singleton. */
 function readTelegramSettings(): TelegramSettings {
@@ -52,13 +52,12 @@ function readTelegramSettings(): TelegramSettings {
 	};
 }
 
-/** Resolve the gateway executable + args for the current runtime. */
+/** Resolve the gateway spawn command by re-invoking skc's own hidden
+ *  `telegram __gateway` subcommand: a compiled binary self-spawns the bundled
+ *  gateway entrypoint, and a source run re-executes cli.ts under bun. */
 function resolveGatewayCommand(): { cmd: string; args: string[] } {
-	if (isCompiledBinary()) {
-		return { cmd: "skc-telegram-remote", args: [] };
-	}
-	const cliPath = path.resolve(path.dirname(new URL(import.meta.url).pathname), "../../telegram-remote/src/cli.ts");
-	return { cmd: process.execPath, args: ["run", cliPath] };
+	const rt = resolveSkcRuntimeSpawnInfo();
+	return { cmd: rt.execPath, args: [...rt.argsPrefix, "telegram", "__gateway"] };
 }
 
 async function runStart(): Promise<void> {
@@ -146,5 +145,12 @@ export async function runTelegramCommand(cmd: TelegramCommandArgs): Promise<void
 		case "env":
 			await runEnv();
 			return;
+		case "__gateway": {
+			// Hidden entrypoint: run the Telegram Remote gateway in-process. Reached
+			// only via the self-spawn from runStart()/autostart, never by users.
+			const { loadConfigFromEnv, runService } = await import("../../../telegram-remote/src/index");
+			await runService(loadConfigFromEnv(process.env));
+			return;
+		}
 	}
 }

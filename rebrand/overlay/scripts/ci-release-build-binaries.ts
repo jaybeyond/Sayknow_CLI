@@ -33,6 +33,12 @@ const workerEntrypoints = [
 	"./packages/stats/src/sync-worker.ts",
 	"./packages/coding-agent/src/tools/browser/tab-worker-entry.ts",
 	"./packages/coding-agent/src/eval/js/worker-entry.ts",
+	// Hidden CLIs that skc self-spawns (parity with build-binary.ts): the
+	// notifications daemon and the Telegram Remote gateway. Without these entries
+	// Bun omits them from bunfs, so `skc notify` / `skc telegram start` break in
+	// the published cross-platform binaries.
+	"./packages/coding-agent/src/notifications/telegram-daemon-cli.ts",
+	"./packages/telegram-remote/src/index.ts",
 ];
 const isDryRun = process.argv.includes("--dry-run");
 const targets: BinaryTarget[] = [

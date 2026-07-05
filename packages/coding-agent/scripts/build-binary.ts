@@ -69,6 +69,9 @@ async function main(): Promise<void> {
 					// Hidden notify daemon CLI (loaded via dynamic import from notify-cli); list it
 					// explicitly so Bun standalone keeps `skc notify daemon-internal` usable.
 					"./src/notifications/telegram-daemon-cli.ts",
+					// Hidden Telegram Remote gateway entrypoint. `skc telegram start` self-spawns
+					// `skc telegram __gateway`, which dynamic-imports this bundled entry.
+					"../telegram-remote/src/index.ts",
 					"--outfile",
 					"dist/skc",
 				],

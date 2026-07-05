@@ -40,7 +40,8 @@
     "packages/coding-agent/src/extensibility/plugins/index.ts",
     "packages/coding-agent/src/extensibility/plugins/manager.ts",
     "packages/coding-agent/src/extensibility/plugins/marketplace/manager.ts",
-    "packages/coding-agent/src/prompts/system/system-prompt.md"
+    "packages/coding-agent/src/prompts/system/system-prompt.md",
+    "packages/coding-agent/scripts/build-binary.ts"
   ],
   "regenerate": [
     "bun.lock",
