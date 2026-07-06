@@ -154,6 +154,9 @@ function isIgnoredPath(relativePath: string): boolean {
 	return (
 		relativePath.startsWith(".git/") ||
 		relativePath.startsWith(".skc/") ||
+		// Fork-only rebrand pipeline: overlay holds staged COPIES of source (incl.
+		// the pi-natives crate); the canonical files are scanned at their real paths.
+		relativePath.startsWith("rebrand/") ||
 		relativePath.startsWith(".worktrees/") ||
 		relativePath.startsWith(".wt/") ||
 		relativePath.startsWith("node_modules/") ||

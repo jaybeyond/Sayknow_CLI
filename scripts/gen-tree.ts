@@ -72,6 +72,16 @@ for (const pf of patchFiles) {
 }
 if (rejected) console.warn(`  ${rejected} patch(es) had conflicts — resolve .rej then re-run gates`);
 
+// 4b. Heal Rust formatting broken by the brand rename. Import ordering depends on
+//     identifier names (group_imports = "StdExternalCrate"), so gjc_* -> skc_*
+//     renames can desort `use` groups and fail `cargo fmt --check` inside check:rs.
+step("cargo fmt (heal rename-induced Rust formatting)");
+try {
+	run("cargo", ["fmt", "--all"], target);
+} catch {
+	console.warn("  cargo fmt skipped (rustfmt unavailable?) — run `cargo fmt --all` in the output before check:rs");
+}
+
 // 5. carry the pipeline into the output so the fork can re-sync
 step("tooling (carry pipeline into output)");
 const manifest = JSON.parse(fs.readFileSync(path.join(REPO, "rebrand/manifest.json"), "utf8")) as { toolingOnly: string[] };
