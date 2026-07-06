@@ -142,7 +142,7 @@
           needs.release_binary.result == 'success' &&
           needs.release_github_verify.result == 'success' &&
 -         !inputs.skip_npm }}
-+         false }}  # fork policy: never publish to npm; GitHub Releases only
++         !inputs.skip_npm }}
        needs: [release_binary, release_github_verify, rust-hash]
        runs-on: ubuntu-22.04
        steps:
