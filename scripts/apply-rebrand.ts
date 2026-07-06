@@ -87,8 +87,8 @@ const SPECIAL_CASES: ReadonlyArray<readonly [string, string]> = [
 const SKIP_DIRS = new Set([".git", "node_modules", "dist", "build", "coverage", ".turbo", "rebrand"]);
 const SKIP_FILES = new Set(["bun.lock", "Cargo.lock", ".git"]);
 // Fork-owned overlay docs that intentionally RETAIN upstream attribution
-// ("a rebranded fork of gajae-code by ...", "synced onto upstream gajae-code
-// vX"). These are whole-file overlays (rebrand/overlay/**); the codemod must
+// (they reference/build upon gajae-code, MIT, and the CHANGELOG records "synced
+// onto upstream gajae-code vX"). These are whole-file overlays (rebrand/overlay/**); the codemod must
 // leave them verbatim, because (a) rewriting "gajae-code" → "sayknow-cli" would
 // make the attribution false, and (b) it would break codemod idempotence — the
 // G2 gate re-applies apply-rebrand to the assembled tree, which by then includes

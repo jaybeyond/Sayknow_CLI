@@ -1,8 +1,18 @@
 # Notices
 
-Sayknow-CLI is a rebranded fork of [`gajae-code`](https://github.com/Yeachan-Heo/gajae-code) (MIT) by Can Bölük. The upstream copyright is retained in [`LICENSE`](LICENSE), and upstream's full feature history lives in that project; this repository tracks the fork's own releases and brand. See [`docs/FORK_MAINTENANCE.md`](docs/FORK_MAINTENANCE.md) for how upstream releases are synced.
+Sayknow-CLI is an **independently developed, MIT-licensed** project. It references and
+builds upon [`gajae-code`](https://github.com/Yeachan-Heo/gajae-code) (MIT) — which in
+turn descends from the original MIT work of Mario Zechner and Can Bölük — and extends
+that lineage substantially with its own features, workflows, tooling, and brand. It is
+**not** a mere rebrand, and it is **not** maintained or endorsed by the upstream authors.
 
-Sayknow-CLI also builds on lessons from a small family of agent harnesses and keeps attribution visible:
+As the MIT License requires, the upstream authors' copyright notices are retained in
+[`LICENSE`](LICENSE) alongside Sayknow-CLI's own copyright. See
+[`docs/FORK_MAINTENANCE.md`](docs/FORK_MAINTENANCE.md) for how upstream releases are
+referenced and synced.
+
+Sayknow-CLI also builds on lessons from a small family of agent harnesses and keeps
+attribution visible:
 
 - [`oh-my-pi`](https://github.com/jaybeyond/oh-my-pi) — the upstream red-octopus lineage and implementation DNA.
 - [`oh-my-codex`](https://github.com/jaybeyond/oh-my-codex) — Codex-focused orchestration experiments.
