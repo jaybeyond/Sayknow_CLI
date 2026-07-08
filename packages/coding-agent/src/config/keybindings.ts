@@ -61,7 +61,7 @@ declare module "@sayknow-cli/tui" {
 }
 
 export function defaultMessageQueueKeysForPlatform(platform: NodeJS.Platform = process.platform): KeyId {
-	return platform === "win32" ? "alt+q" : "alt+enter";
+	return platform === "win32" || platform === "darwin" ? "alt+q" : "alt+enter";
 }
 
 /**

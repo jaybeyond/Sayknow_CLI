@@ -16,6 +16,12 @@ export interface NotificationConfig {
 	redact: boolean;
 	verbosity: "lean" | "verbose";
 	idleTimeoutMs: number;
+	rich: {
+		enabled: boolean;
+	};
+	richDraft: {
+		enabled: boolean;
+	};
 }
 
 /** Read typed config from Settings. */
@@ -35,6 +41,12 @@ export function getNotificationConfig(settings: Settings): NotificationConfig {
 		redact: settings.get("notifications.redact"),
 		verbosity: settings.get("notifications.verbosity") === "verbose" ? "verbose" : "lean",
 		idleTimeoutMs: settings.get("notifications.daemon.idleTimeoutMs"),
+		rich: {
+			enabled: settings.get("notifications.telegram.rich.enabled"),
+		},
+		richDraft: {
+			enabled: settings.get("notifications.telegram.richDraft.enabled"),
+		},
 	};
 }
 
@@ -59,6 +71,20 @@ export function isGloballyConfigured(cfg: NotificationConfig): boolean {
 	);
 }
 
+/**
+ * Per-run opt-out for completion notifications, honored before settings lookups.
+ *
+ * `SKC_NOTIFY=off` (also `0` / `false`, case-insensitive) suppresses the
+ * completion notification surface for this process only. `config.yml` is
+ * untouched and child processes inherit the env var, which lets non-interactive
+ * fleet runs (`skc -p --no-session`) stay silent even when a user-level/global
+ * completion notification configuration is enabled.
+ */
+export function completionNotifyDisabledByEnv(env: NodeJS.ProcessEnv): boolean {
+	const v = env.SKC_NOTIFY?.trim().toLowerCase();
+	return v === "off" || v === "0" || v === "false";
+}
+
 /** Resolve whether the notifications extension should be registered at SDK startup. */
 export function shouldRegisterNotificationsExtension(input: {
 	env: NodeJS.ProcessEnv;
@@ -71,6 +97,7 @@ export function shouldRegisterNotificationsExtension(input: {
 	currentAgentType?: string;
 }): boolean {
 	if ((input.taskDepth ?? 0) > 0 || input.parentTaskPrefix || input.currentAgentType) return false;
+	if (completionNotifyDisabledByEnv(input.env)) return false;
 	if (input.env.SKC_NOTIFICATIONS === "0") return false;
 	if (input.env.SKC_NOTIFICATIONS === "1" || input.env.SKC_NOTIFICATIONS_TOKEN) return true;
 	return input.cfg ? isGloballyConfigured(input.cfg) : false;

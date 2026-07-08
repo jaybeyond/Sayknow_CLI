@@ -123,7 +123,12 @@ import {
 } from "./system-prompt";
 import { AgentOutputManager } from "./task/output-manager";
 import { parseThinkingLevel, resolveThinkingLevelForModel, toReasoningEffort } from "./thinking";
-import { collectDiscoverableTools, type DiscoverableTool } from "./tool-discovery/tool-index";
+import {
+	collectDiscoverableTools,
+	type DiscoverableTool,
+	isMCPBridgeTool,
+	isMCPToolName,
+} from "./tool-discovery/tool-index";
 import {
 	applyConfiguredSearchTimeout,
 	BashTool,
@@ -1812,7 +1817,15 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 							{ source: "builtin" },
 						)
 					: [];
-			const discoverableToolsForDesc: DiscoverableTool[] = [...discoverableBuiltinTools];
+			const discoverableMCPTools: DiscoverableTool[] = mcpDiscoveryEnabled
+				? collectDiscoverableTools(
+						Array.from(tools.values()).filter(
+							tool => isMCPToolName(tool.name) && !activeToolNames.has(tool.name),
+						),
+						{ source: "mcp" },
+					)
+				: [];
+			const discoverableToolsForDesc: DiscoverableTool[] = [...discoverableBuiltinTools, ...discoverableMCPTools];
 			const promptTools = buildSystemPromptToolMetadata(tools, {
 				search_tool_bm25: { description: renderSearchToolBm25Description(discoverableToolsForDesc) },
 			});
@@ -1861,8 +1874,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				intentField,
 				mcpDiscoveryMode: false,
 				mcpDiscoveryServerSummaries: [],
-				toolDiscoveryActive: effectiveDiscoveryMode === "all",
-				discoverableTools: discoverableBuiltinTools
+				toolDiscoveryActive: effectiveDiscoveryMode === "all" || mcpDiscoveryEnabled,
+				discoverableTools: [...discoverableBuiltinTools, ...discoverableMCPTools]
 					.map(tool => ({ name: tool.name, summary: tool.summary }))
 					.sort((a, b) => a.name.localeCompare(b.name)),
 				eagerTasks,
@@ -1893,11 +1906,12 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			: toolNamesFromRegistry;
 		const normalizedRequested = requestedToolNames.filter(name => toolRegistry.has(name));
 		const requestedToolNameSet = new Set(normalizedRequested);
-		// Effective discovery mode only covers built-in tools; MCP tool discovery
-		// is quarantined from the SKC public surface.
+		// Generic tool discovery hides non-essential built-ins behind search_tool_bm25.
+		// Legacy MCP discovery remains separately controlled by mcp.discoveryMode so
+		// loaded MCP catalogs can be searched without enabling every hidden built-in.
 		const toolsDiscoveryModeSetting = settings.get("tools.discoveryMode");
 		const effectiveDiscoveryMode: "off" | "all" = toolsDiscoveryModeSetting === "all" ? "all" : "off";
-		const mcpDiscoveryEnabled = false;
+		const mcpDiscoveryEnabled = settings.get("mcp.discoveryMode") === true;
 		const defaultInactiveToolNames = new Set(
 			registeredTools.filter(tool => tool.definition.defaultInactive).map(tool => tool.definition.name),
 		);
@@ -1910,6 +1924,20 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		const discoveryDefaultServerToolNames: string[] = [];
 		let initialSelectedMCPToolNames: string[] = [];
 		let defaultSelectedMCPToolNames: string[] = [];
+		if (mcpDiscoveryEnabled) {
+			const defaultServerNames = new Set(settings.get("mcp.discoveryDefaultServers") ?? []);
+			for (const tool of toolRegistry.values()) {
+				if (!isMCPBridgeTool(tool)) continue;
+				discoverableMCPToolNames.add(tool.name);
+				if (initialRequestedActiveToolNames.includes(tool.name)) {
+					explicitlyRequestedMCPToolNames.push(tool.name);
+				}
+				const serverName = (tool as AgentTool & { mcpServerName?: string }).mcpServerName;
+				if (serverName && defaultServerNames.has(serverName)) {
+					discoveryDefaultServerToolNames.push(tool.name);
+				}
+			}
+		}
 		let initialToolNames = [...initialRequestedActiveToolNames];
 		if (mcpDiscoveryEnabled) {
 			const restoredSelectedMCPToolNames = existingSession.selectedMCPToolNames.filter(name =>
@@ -2261,7 +2289,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			initialSelectedMCPToolNames,
 			defaultSelectedMCPToolNames,
 			persistInitialMCPToolSelection: !hasExistingSession,
-			defaultSelectedMCPServerNames: [],
+			defaultSelectedMCPServerNames: settings.get("mcp.discoveryDefaultServers") ?? [],
 			ttsrManager,
 			obfuscator,
 			agentId: resolvedAgentId,

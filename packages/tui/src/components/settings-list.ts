@@ -213,9 +213,11 @@ export class SettingsList implements Component {
 
 	#closeSubmenu(): void {
 		this.#submenuComponent = null;
-		// Restore selection to the item that opened the submenu
+		// Restore selection to the item that opened the submenu, clamped against
+		// the current list because callers may replace items while the submenu is open.
 		if (this.#submenuItemIndex !== null) {
-			this.#selectedIndex = this.#submenuItemIndex;
+			this.#selectedIndex =
+				this.#items.length === 0 ? 0 : Math.min(this.#submenuItemIndex, Math.max(0, this.#items.length - 1));
 			this.#submenuItemIndex = null;
 			this.#notifySelectionChange();
 		}

@@ -86,31 +86,59 @@ describe("update-cli install target detection", () => {
 		expect(target).toBeUndefined();
 	});
 
-	it("keeps non-Windows package-manager-like shims on the existing bun/binary classifier", () => {
-		const target = resolveNpmManagedTargetForTest("/usr/local/bin/skc", "linux", () => true);
+	it("detects POSIX npm symlinks and updates them through npm", async () => {
+		const dir = await makeTempDir();
+		const packageRoot = path.join(dir, "lib/node_modules/sayknow-cli");
+		const binDir = path.join(dir, "bin");
+		const binTarget = path.join(packageRoot, "bin/skc.js");
+		await fs.mkdir(path.dirname(binTarget), { recursive: true });
+		await fs.mkdir(binDir, { recursive: true });
+		await Bun.write(path.join(packageRoot, "package.json"), JSON.stringify({ name: "sayknow-cli" }));
+		await Bun.write(binTarget, "#!/usr/bin/env bun\n");
+		await fs.symlink(binTarget, path.join(binDir, "skc"));
 
-		expect(target).toBeUndefined();
+		const target = resolveNpmManagedTargetForTest(path.join(binDir, "skc"), "linux", (_packageName, packageRoot) =>
+			fsNode.existsSync(path.join(packageRoot, "package.json")),
+		);
+
+		expect(target).toEqual({ manager: "npm", packageName: "sayknow-cli" });
+	});
+
+	it("keeps Bun global symlinks on the Bun updater even when they resolve into node_modules", async () => {
+		const dir = await makeTempDir();
+		const packageRoot = path.join(dir, "install/global/node_modules/@sayknow-cli/coding-agent");
+		const binDir = path.join(dir, "bin");
+		const binTarget = path.join(packageRoot, "bin/skc.js");
+		await fs.mkdir(path.dirname(binTarget), { recursive: true });
+		await fs.mkdir(binDir, { recursive: true });
+		await Bun.write(path.join(packageRoot, "package.json"), JSON.stringify({ name: "@sayknow-cli/coding-agent" }));
+		await Bun.write(binTarget, "#!/usr/bin/env bun\n");
+		await fs.symlink(binTarget, path.join(binDir, "skc"));
+
+		const method = resolveUpdateMethodForTest(path.join(binDir, "skc"), binDir);
+
+		expect(method).toBe("bun");
 	});
 });
 
 describe("update-cli binary release assets", () => {
 	it("downloads fallback binaries from the current owner release repository", () => {
 		expect(buildReleaseBinaryUrlForTest("0.2.3", "linux", "x64")).toBe(
-			"https://github.com/jaybeyond/Sayknow_CLI/releases/download/v0.2.3/skc-linux-x64",
+			"https://github.com/jaybeyond/Sayknow_CLI/releases/download/sayknow-v0.2.3/skc-linux-x64",
 		);
 	});
 
 	it("uses the existing Windows .exe release asset name", () => {
 		expect(buildReleaseBinaryUrlForTest("0.2.3", "win32", "x64")).toBe(
-			"https://github.com/jaybeyond/Sayknow_CLI/releases/download/v0.2.3/skc-windows-x64.exe",
+			"https://github.com/jaybeyond/Sayknow_CLI/releases/download/sayknow-v0.2.3/skc-windows-x64.exe",
 		);
 	});
 
 	it("reports actionable Unix manual update commands for unsupported fallback paths", () => {
 		const instructions = formatManualUpdateInstructionsForTest("linux");
 
-		expect(instructions).toContain("bun install -g @sayknow-cli/coding-agent@latest");
-		expect(instructions).toContain("npm, pnpm, or another package manager");
+		expect(instructions).toContain("bun install -g sayknow-cli@latest");
+		expect(instructions).toContain("npm install -g sayknow-cli@latest");
 		expect(instructions).toContain(
 			"curl -fsSL https://raw.githubusercontent.com/jaybeyond/Sayknow_CLI/main/scripts/install.sh | sh -s -- --binary",
 		);
@@ -119,8 +147,8 @@ describe("update-cli binary release assets", () => {
 	it("reports actionable Windows manual update commands for unsupported fallback paths", () => {
 		const instructions = formatManualUpdateInstructionsForTest("win32");
 
-		expect(instructions).toContain("bun install -g @sayknow-cli/coding-agent@latest");
-		expect(instructions).toContain("npm, pnpm, or another package manager");
+		expect(instructions).toContain("bun install -g sayknow-cli@latest");
+		expect(instructions).toContain("npm install -g sayknow-cli@latest");
 		expect(instructions).toContain(
 			"irm https://raw.githubusercontent.com/jaybeyond/Sayknow_CLI/main/scripts/install.ps1 | iex",
 		);
@@ -159,19 +187,19 @@ describe("update-cli binary release assets", () => {
 	it("includes actionable guidance when a release asset download fails", () => {
 		const message = formatBinaryDownloadFailureMessageForTest(
 			"skc-linux-x64",
-			"https://github.com/jaybeyond/Sayknow_CLI/releases/download/v0.2.3/skc-linux-x64",
+			"https://github.com/jaybeyond/Sayknow_CLI/releases/download/sayknow-v0.2.3/skc-linux-x64",
 			"Not Found",
 			"linux",
 		);
 
 		expect(message).toContain("Download failed for skc-linux-x64");
-		expect(message).toContain("jaybeyond/Sayknow_CLI/releases/download/v0.2.3/skc-linux-x64");
-		expect(message).toContain("bun install -g @sayknow-cli/coding-agent@latest");
+		expect(message).toContain("jaybeyond/Sayknow_CLI/releases/download/sayknow-v0.2.3/skc-linux-x64");
+		expect(message).toContain("bun install -g sayknow-cli@latest");
 	});
 
 	it("includes actionable guidance when the platform has no release asset", () => {
 		expect(() => buildReleaseBinaryUrlForTest("0.2.3", "freebsd", "x64")).toThrow(
-			"bun install -g @sayknow-cli/coding-agent@latest",
+			"bun install -g sayknow-cli@latest",
 		);
 	});
 });

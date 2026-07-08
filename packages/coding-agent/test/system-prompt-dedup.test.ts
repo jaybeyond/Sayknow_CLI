@@ -22,8 +22,11 @@ describe("SYSTEM.md prompt assembly", () => {
 	let originalHome: string | undefined;
 
 	beforeEach(() => {
-		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "skc-system-prompt-"));
-		tempHomeDir = fs.mkdtempSync(path.join(os.tmpdir(), "skc-system-home-"));
+		// Keep project-context fixtures outside the real user HOME even when
+		// TMPDIR points at ~/tmp; walk-up context discovery must not see
+		// host-level /home/bellman/AGENTS.md as a project file.
+		tempDir = fs.mkdtempSync(path.join(path.sep, "tmp", "skc-system-prompt-"));
+		tempHomeDir = fs.mkdtempSync(path.join(path.sep, "tmp", "skc-system-home-"));
 		originalHome = process.env.HOME;
 		process.env.HOME = tempHomeDir;
 		vi.spyOn(os, "homedir").mockReturnValue(tempHomeDir);

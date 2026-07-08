@@ -4,6 +4,7 @@ import { resolveSkcTmuxBinary } from "./psmux-detect";
 export const SKC_DEFAULT_TMUX_SESSION = "sayknow_cli";
 export const SKC_TMUX_SESSION_PREFIX = `${SKC_DEFAULT_TMUX_SESSION}_`;
 export const SKC_TMUX_COMMAND_ENV = "SKC_TMUX_COMMAND";
+export const SKC_TMUX_ACTIVE_SESSION_ENV = "SKC_TMUX_ACTIVE_SESSION";
 export const SKC_TMUX_PROFILE_ENV = "SKC_TMUX_PROFILE";
 export const SKC_TMUX_MOUSE_ENV = "SKC_MOUSE";
 export const SKC_TMUX_PROFILE_OPTION = "@skc-profile";

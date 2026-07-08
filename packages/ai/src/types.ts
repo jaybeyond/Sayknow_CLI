@@ -116,6 +116,7 @@ export type KnownProvider =
 	| "gitlab-duo"
 	| "cursor"
 	| "deepseek"
+	| "deepinfra"
 	| "xai"
 	| "groq"
 	| "cerebras"
@@ -224,17 +225,20 @@ export function resolveServiceTier(
 
 /**
  * True when the (possibly scoped) tier should be sent as OpenAI's
- * `service_tier` request field for the given provider. Non-OpenAI
- * providers, unsupported tiers (`"auto"`, `"default"`), and scope
- * mismatches all return false.
+ * `service_tier` request field for the given provider. OpenAI accepts
+ * `flex`, `scale`, and `priority`; DeepInfra accepts `priority`.
+ * Unsupported tiers (`"auto"`, `"default"`) and scope mismatches return false.
  */
 export function shouldSendServiceTier(
 	serviceTier: ServiceTier | null | undefined,
 	provider: Provider | undefined,
 ): boolean {
-	if (provider !== "openai" && provider !== "openai-codex") return false;
 	const resolved = resolveServiceTier(serviceTier, provider);
-	return resolved === "flex" || resolved === "scale" || resolved === "priority";
+	if (provider === "openai" || provider === "openai-codex") {
+		return resolved === "flex" || resolved === "scale" || resolved === "priority";
+	}
+	if (provider === "deepinfra") return resolved === "priority";
+	return false;
 }
 
 /**
@@ -252,7 +256,9 @@ export function getPriorityPremiumRequests(
 	if (resolveServiceTier(serviceTier, provider) !== "priority") return 0;
 	// Only providers that realize `priority` on the wire bill the user.
 	// Everywhere else, the field is silently dropped and nothing is charged.
-	return provider === "openai" || provider === "openai-codex" || provider === "anthropic" ? 1 : 0;
+	return provider === "openai" || provider === "openai-codex" || provider === "anthropic" || provider === "deepinfra"
+		? 1
+		: 0;
 }
 
 export interface ProviderSessionState {

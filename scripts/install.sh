@@ -11,7 +11,7 @@ set -e
 #   -r <ref>       Shorthand for --ref
 
 REPO="jaybeyond/Sayknow_CLI"
-PACKAGE="@sayknow-cli/coding-agent"
+PACKAGE="sayknow-cli"
 INSTALL_DIR="${SKC_INSTALL_DIR:-$HOME/.local/bin}"
 MIN_BUN_VERSION="1.3.14"
 
@@ -225,11 +225,13 @@ install_binary() {
     echo "Using version: $LATEST"
 
     mkdir -p "$INSTALL_DIR"
-    # Download binary
+    # Download binary to a temp file first so a failed or partial download
+    # never clobbers an existing working install at ${INSTALL_DIR}/skc.
     BINARY_URL="https://github.com/${REPO}/releases/download/${LATEST}/${BINARY}"
+    DOWNLOAD_TMP="${INSTALL_DIR}/.skc.download.$$"
     echo "Downloading ${BINARY}..."
-    if ! curl -fsSL "$BINARY_URL" -o "${INSTALL_DIR}/skc"; then
-        rm -f "${INSTALL_DIR}/skc"
+    if ! curl -fsSL "$BINARY_URL" -o "$DOWNLOAD_TMP"; then
+        rm -f "$DOWNLOAD_TMP"
         echo ""
         echo "No prebuilt SKC binary was found for ${PLATFORM}-${ARCH} in ${LATEST}."
         echo "Fallback options:"
@@ -239,7 +241,8 @@ install_binary() {
         echo "Expected asset URL: $BINARY_URL"
         exit 1
     fi
-    chmod +x "${INSTALL_DIR}/skc"
+    chmod +x "$DOWNLOAD_TMP"
+    mv -f "$DOWNLOAD_TMP" "${INSTALL_DIR}/skc"
     echo ""
     echo "✓ Installed skc to ${INSTALL_DIR}/skc"
 

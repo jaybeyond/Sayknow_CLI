@@ -1,6 +1,6 @@
 {
 	"name": "@sayknow-cli/natives-darwin-arm64",
-	"version": "0.3.8",
+	"version": "0.3.9",
 	"description": "Darwin arm64 native addon for @sayknow-cli/natives",
 	"type": "module",
 	"homepage": "https://sayknow-cli.com",

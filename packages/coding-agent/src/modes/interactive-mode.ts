@@ -331,6 +331,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	onInputCallback?: (input: SubmittedUserInput) => void;
 	optimisticUserMessageSignature: string | undefined = undefined;
 	locallySubmittedUserSignatures: Set<string> = new Set();
+	optimisticInjectedSignatures: Map<string, number> = new Map();
 	#pendingSubmittedInput: SubmittedUserInput | undefined;
 	#pendingSubmissionDispose: (() => void) | undefined;
 	lastSigintTime = 0;
@@ -2559,6 +2560,10 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	showModelSelector(options?: { temporaryOnly?: boolean }): void {
 		this.#selectorController.showModelSelector(options);
+	}
+
+	showEffortSelector(): void {
+		this.#selectorController.showEffortSelector();
 	}
 
 	showProviderOnboarding(): void {

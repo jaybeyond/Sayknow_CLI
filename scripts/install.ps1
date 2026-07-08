@@ -16,8 +16,14 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+# Windows PowerShell 5.1 runs on .NET Framework, which may still default to
+# TLS 1.0; GitHub and bun.sh both require TLS 1.2+, so opt in explicitly.
+try {
+    [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+} catch {}
+
 $Repo = "jaybeyond/Sayknow_CLI"
-$Package = "@sayknow-cli/coding-agent"
+$Package = "sayknow-cli"
 $InstallDir = if ($env:SKC_INSTALL_DIR) { $env:SKC_INSTALL_DIR } else { "$env:LOCALAPPDATA\skc" }
 $BinaryName = "skc-windows-x64.exe"
 $MinimumBunVersion = "1.3.14"
@@ -128,11 +134,19 @@ function Configure-BashShell {
                 New-Item -ItemType Directory -Force -Path $settingsDir | Out-Null
             }
 
-            # Read existing settings or create new
+            # Read existing settings or create new. ConvertFrom-Json's AsHashtable
+            # switch only exists on PowerShell 6+; the documented `irm | iex`
+            # install path runs under Windows PowerShell 5.1, where that parameter
+            # throws and the catch below used to wipe every existing settings key.
             $settings = @{}
             if (Test-Path $settingsFile) {
                 try {
-                    $settings = Get-Content $settingsFile -Raw | ConvertFrom-Json -AsHashtable
+                    $parsed = Get-Content $settingsFile -Raw | ConvertFrom-Json
+                    if ($parsed) {
+                        foreach ($prop in $parsed.PSObject.Properties) {
+                            $settings[$prop.Name] = $prop.Value
+                        }
+                    }
                 } catch {
                     $settings = @{}
                 }
@@ -256,11 +270,19 @@ function Install-Binary {
 
     New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 
-    # Download binary
+    # Download binary to a temp file first so a failed or partial download
+    # never clobbers an existing working install at $InstallDir\skc.exe.
     $BinaryUrl = "https://github.com/$Repo/releases/download/$Latest/$BinaryName"
     Write-Host "Downloading $BinaryName..."
     $OutPath = Join-Path $InstallDir "skc.exe"
-    Invoke-WebRequest -Uri $BinaryUrl -OutFile $OutPath
+    $DownloadTmp = Join-Path $InstallDir (".skc.download." + [System.Guid]::NewGuid().ToString("N"))
+    try {
+        Invoke-WebRequest -Uri $BinaryUrl -OutFile $DownloadTmp
+    } catch {
+        Remove-Item -Force $DownloadTmp -ErrorAction SilentlyContinue
+        throw
+    }
+    Move-Item -Force $DownloadTmp $OutPath
 
     Write-Host ""
     Write-Host "✓ Installed skc to $OutPath" -ForegroundColor Green
