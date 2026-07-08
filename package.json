@@ -159,7 +159,8 @@
     "generate-docs-index": "bun --cwd=packages/coding-agent run generate-docs-index",
     "generate-template": "bun --cwd=packages/coding-agent run generate-template",
     "check-spoofed-versions": "bun scripts/check-spoofed-versions.ts",
-    "check:skc-ui": "bun scripts/verify-skc-ui-redesign.ts && bun scripts/rebrand-inventory.ts --strict"
+    "check:skc-ui": "bun scripts/verify-skc-ui-redesign.ts && bun scripts/rebrand-inventory.ts --strict",
+    "check:public-sync": "bun scripts/check-public-version-sync.ts"
   },
   "devDependencies": {
     "@biomejs/biome": "catalog:",
