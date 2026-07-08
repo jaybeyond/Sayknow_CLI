@@ -904,6 +904,77 @@ describe("OpenAI responses history payload", () => {
 		});
 	});
 
+	it("strips output-only image_generation_call fields when replaying native history", async () => {
+		const context: Context = {
+			messages: [
+				{ role: "user", content: "generate an image", timestamp: Date.now() },
+				makeAssistantMessage([
+					{
+						type: "image_generation_call",
+						id: "ig_123",
+						status: "completed",
+						action: "generate",
+						background: "auto",
+						output_format: "png",
+						quality: "medium",
+						revised_prompt: "A safe revised prompt",
+						size: "1024x1024",
+						result: "base64-image-data",
+					},
+				]),
+				{ role: "user", content: "continue with text", timestamp: Date.now() },
+			],
+		};
+		const model = getOpenAIReasoningModel("openai", "gpt-5-mini");
+		const payload = (await captureResponsesPayload(model, context)) as { input?: unknown[] };
+		const imageItem = (payload.input ?? []).find(item => {
+			if (!item || typeof item !== "object") return false;
+			return (item as { type?: unknown }).type === "image_generation_call";
+		}) as Record<string, unknown> | undefined;
+
+		expect(imageItem).toEqual({
+			type: "image_generation_call",
+			status: "completed",
+			result: "base64-image-data",
+		});
+	});
+
+	it("strips image_generation_call action when opening a generated image after incremental replay", async () => {
+		const context: Context = {
+			messages: [
+				{ role: "user", content: "이미지 만들어줘", timestamp: Date.now() },
+				makeAssistantMessage(
+					[
+						{ type: "reasoning", encrypted_content: "enc_image_turn", summary: [] },
+						{
+							type: "image_generation_call",
+							id: "ig_123",
+							status: "generating",
+							action: "generate",
+							background: "opaque",
+							output_format: "png",
+							quality: "medium",
+							revised_prompt: "A safe revised prompt",
+							size: "1024x1536",
+							result: "base64-image-data",
+						},
+					],
+					true,
+				),
+				{ role: "user", content: "이미지 열어봐", timestamp: Date.now() },
+			],
+		};
+		const model = getOpenAIReasoningModel("openai", "gpt-5-mini");
+		const payload = (await captureResponsesPayload(model, context)) as { input?: unknown[] };
+		const imageItem = payload.input?.[2] as Record<string, unknown> | undefined;
+
+		expect(imageItem).toEqual({
+			type: "image_generation_call",
+			status: "generating",
+			result: "base64-image-data",
+		});
+	});
+
 	it("converts orphan function_call_output replayed from providerPayload into an assistant note (issue #1351)", async () => {
 		// Reproduces the symptom: a previous turn's snapshot carries a
 		// `function_call_output` whose matching `function_call` was wiped by an

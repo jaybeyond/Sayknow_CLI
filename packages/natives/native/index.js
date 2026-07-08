@@ -27,7 +27,7 @@ export const PtySession = nativeBindings.PtySession;
 export const Shell = nativeBindings.Shell;
 
 // functions
-export const __piNativesV0_3_6 = nativeBindings.__piNativesV0_3_6;
+export const __piNativesV0_9_0 = nativeBindings.__piNativesV0_9_0;
 export const applyBashFixups = nativeBindings.applyBashFixups;
 export const astEdit = nativeBindings.astEdit;
 export const astGrep = nativeBindings.astGrep;
@@ -70,8 +70,10 @@ export const search = nativeBindings.search;
 export const sliceWithWidth = nativeBindings.sliceWithWidth;
 export const summarizeCode = nativeBindings.summarizeCode;
 export const supportsLanguage = nativeBindings.supportsLanguage;
+export const truncateLinesToWidth = nativeBindings.truncateLinesToWidth;
 export const truncateToWidth = nativeBindings.truncateToWidth;
 export const visibleWidth = nativeBindings.visibleWidth;
+export const visibleWidths = nativeBindings.visibleWidths;
 export const wrapTextWithAnsi = nativeBindings.wrapTextWithAnsi;
 
 // string/numeric enums (napi-rs string_enum produces TS-only const enum)

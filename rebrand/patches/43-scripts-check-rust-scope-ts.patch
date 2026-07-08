@@ -1,6 +1,6 @@
 --- a/scripts/check-rust-scope.ts
 +++ b/scripts/check-rust-scope.ts
-@@ -154,6 +154,9 @@ function isIgnoredPath(relativePath: string): boolean {
+@@ -154,6 +154,9 @@
  	return (
  		relativePath.startsWith(".git/") ||
  		relativePath.startsWith(".skc/") ||

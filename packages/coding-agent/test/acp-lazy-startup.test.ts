@@ -13,6 +13,7 @@ import {
 import type { Model } from "@sayknow-cli/ai";
 import { TempDir } from "@sayknow-cli/utils";
 import { Settings } from "../src/config/settings";
+import type { ExtensionAPI } from "../src/extensibility/extensions";
 import { createAcpConnection } from "../src/modes/acp/acp-mode";
 import type { AgentSession } from "../src/session/agent-session";
 import { AuthStorage } from "../src/session/auth-storage";
@@ -186,30 +187,28 @@ describe("ACP lazy startup", () => {
 		}
 	});
 
-	it.skip("applies CLI runtime API keys after ACP lazy session creation resolves extension models", async () => {
+	it("applies CLI runtime API keys after ACP lazy session creation resolves extension models", async () => {
 		using tempDir = TempDir.createSync("@skc-acp-lazy-api-key-");
 		const cwd = tempDir.path();
 
-		await Bun.write(
-			path.join(cwd, "runtime-provider.ts"),
-			`export default function(pi) {
-	pi.registerProvider("runtime-provider", {
-		baseUrl: "https://runtime.example.com/v1",
-		apiKey: "extension-key",
-		api: "openai-completions",
-		models: [{
-			id: "runtime-model",
-			name: "Runtime Model",
-			reasoning: false,
-			input: ["text"],
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-			contextWindow: 128000,
-			maxTokens: 8192,
-		}],
-	});
-}
-`,
-		);
+		const registerRuntimeProvider = (api: ExtensionAPI): void => {
+			api.registerProvider("runtime-provider", {
+				baseUrl: "https://runtime.example.com/v1",
+				apiKey: "extension-key",
+				api: "openai-completions",
+				models: [
+					{
+						id: "runtime-model",
+						name: "Runtime Model",
+						reasoning: false,
+						input: ["text"],
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+						contextWindow: 128000,
+						maxTokens: 8192,
+					},
+				],
+			});
+		};
 
 		const authStorage = await AuthStorage.create(path.join(cwd, "auth.db"));
 		try {
@@ -230,13 +229,17 @@ describe("ACP lazy startup", () => {
 					noTools: true,
 					noLsp: true,
 					sessionDir: cwd,
-					extensions: [path.join(cwd, "runtime-provider.ts")],
+
 					model: "runtime-provider/runtime-model",
 				},
 				[],
 				{
 					discoverAuthStorage: async () => authStorage,
-					createAgentSession,
+					createAgentSession: options =>
+						createAgentSession({
+							...(options ?? {}),
+							extensions: [...(options?.extensions ?? []), registerRuntimeProvider],
+						}),
 					settings,
 					runAcpMode: async createAcpSession => {
 						session = await createAcpSession(cwd);

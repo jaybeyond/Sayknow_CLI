@@ -147,4 +147,66 @@ describe("AgentSession queued prompts (issue #434)", () => {
 		// after it. Submission order across both is preserved.
 		expect(userTexts(session)).toEqual(["p1", "steer me", "queue me"]);
 	});
+
+	it("removes an arbitrary queued prompt selected for editing", async () => {
+		const gate = Promise.withResolvers<void>();
+		session = buildSession([
+			async () => {
+				await gate.promise;
+				return { content: ["turn 1"] };
+			},
+			{ content: ["after steer"] },
+			{ content: ["after remaining queue"] },
+		]);
+
+		const first = session.prompt("p1");
+		await waitUntil(() => session!.isStreaming);
+
+		await session.prompt("steer me", { streamingBehavior: "steer" });
+		await session.prompt("queue older", { streamingBehavior: "followUp" });
+		await session.prompt("queue newest", { streamingBehavior: "followUp" });
+
+		const entries = session.getQueuedMessageEntries();
+		expect(entries.map(entry => entry.text)).toEqual(["steer me", "queue older", "queue newest"]);
+		const removed = session.removeQueuedMessageForEditing(entries[1]?.id ?? "");
+
+		expect(removed).toBe("queue older");
+		expect(session.getQueuedMessages().steering).toEqual(["steer me"]);
+		expect(session.getQueuedMessages().followUp).toEqual(["queue newest"]);
+
+		gate.resolve();
+		await first;
+		await session.waitForIdle();
+
+		expect(userTexts(session)).toEqual(["p1", "steer me", "queue newest"]);
+	});
+
+	it("reorders queued follow-up prompts selected for editing", async () => {
+		const gate = Promise.withResolvers<void>();
+		session = buildSession([
+			async () => {
+				await gate.promise;
+				return { content: ["turn 1"] };
+			},
+			{ content: ["after moved queue"] },
+			{ content: ["after remaining queue"] },
+		]);
+
+		const first = session.prompt("p1");
+		await waitUntil(() => session!.isStreaming);
+
+		await session.prompt("queue older", { streamingBehavior: "followUp" });
+		await session.prompt("queue newest", { streamingBehavior: "followUp" });
+
+		const entries = session.getQueuedMessageEntries();
+		expect(entries.map(entry => entry.text)).toEqual(["queue older", "queue newest"]);
+		expect(session.moveQueuedMessageForEditing(entries[1]?.id ?? "", "up")).toBe(true);
+		expect(session.getQueuedMessages().followUp).toEqual(["queue newest", "queue older"]);
+
+		gate.resolve();
+		await first;
+		await session.waitForIdle();
+
+		expect(userTexts(session)).toEqual(["p1", "queue newest", "queue older"]);
+	});
 });

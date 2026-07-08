@@ -1,7 +1,7 @@
 # Notifications SDK
 
 <p align="center">
-  <img src="../assets/telegram-mobile-hero.png" alt="Sayknow-CLI 0.7.0 mobile answers for coding agents hero illustration" width="100%" />
+  <img src="../assets/telegram-mobile-hero.png" alt="Sayknow-CLI mobile answers for coding agents hero illustration" width="100%" />
 </p>
 
 A small, transport-agnostic way to get **action-needed** signals out of a SKC
@@ -294,7 +294,8 @@ config commands: `/verbose`, `/lean`, `/verbosity <lean|verbose>`, and
 removed — replies are routed by the topic they arrive in.
 
 Flat fallback keeps outbound notifications and inline-button answers working,
-but free-text replies and `/verbose`/`/lean`/`/verbosity`/`/redact` commands are
+but plain free-text never guesses from the global pending-ask set. Free-text
+replies and `/verbose`/`/lean`/`/verbosity`/`/redact` commands are
 thread-native and require topic routing. Do not pair a group, supergroup, or
 channel to work around a missing BotFather menu; the bundled setup flow is
 private-chat only, and non-private chat ids remain fail-closed to avoid session

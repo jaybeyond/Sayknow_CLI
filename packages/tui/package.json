@@ -3,7 +3,7 @@
 	"name": "@sayknow-cli/tui",
 	"version": "0.3.7",
 	"description": "Terminal User Interface library with differential rendering for efficient text-based applications",
-	"homepage": "https://github.com/jaybeyond/Sayknow_CLI",
+	"homepage": "https://sayknow-cli.com",
 	"author": "jaybeyond",
 	"contributors": [
 		"Mario Zechner"

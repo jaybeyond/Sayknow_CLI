@@ -20,7 +20,6 @@ pathIgnorePatterns = [
   "python/roboskc/data/**",
   ".wt/**",
   ".worktrees/**",
-  "rebrand/overlay/**",
 ]
 
 [run]

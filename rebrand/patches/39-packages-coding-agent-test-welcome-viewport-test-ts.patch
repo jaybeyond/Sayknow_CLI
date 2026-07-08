@@ -1,6 +1,6 @@
 --- a/packages/coding-agent/test/welcome-viewport.test.ts
 +++ b/packages/coding-agent/test/welcome-viewport.test.ts
-@@ -39,7 +39,7 @@
+@@ -85,7 +85,7 @@
  		for (const line of lines) {
  			expect(visibleWidth(line)).toBe(100);
  		}
@@ -8,4 +8,4 @@
 +		expect(lines.some(line => line.includes("Sayknow-CLI"))).toBe(true);
  		expect(lines.some(line => line.includes("What's New"))).toBe(true);
  	});
- 
+ 	it("integrates changelog highlights without overflowing narrow CJK content", () => {

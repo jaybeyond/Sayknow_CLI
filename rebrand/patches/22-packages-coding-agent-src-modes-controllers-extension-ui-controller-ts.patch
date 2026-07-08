@@ -1,0 +1,38 @@
+--- a/packages/coding-agent/src/modes/controllers/extension-ui-controller.ts
++++ b/packages/coding-agent/src/modes/controllers/extension-ui-controller.ts
+@@ -17,6 +17,7 @@
+ 	TerminalInputHandler,
+ } from "../../extensibility/extensions";
+ import { getSessionSlashCommands } from "../../extensibility/extensions/get-commands-handler";
++import { t } from "../../i18n";
+ import { HookEditorComponent } from "../../modes/components/hook-editor";
+ import { HookInputComponent } from "../../modes/components/hook-input";
+ import { HookSelectorComponent } from "../../modes/components/hook-selector";
+@@ -714,8 +715,9 @@
+ 	 * Show a confirmation dialog for hooks.
+ 	 */
+ 	async showHookConfirm(title: string, message: string): Promise<boolean> {
+-		const result = await this.showHookSelector(`${title}\n${message}`, ["Yes", "No"]);
+-		return result === "Yes";
++		const yes = t("common.yes");
++		const result = await this.showHookSelector(`${title}\n${message}`, [yes, t("common.no")]);
++		return result === yes;
+ 	}
+ 
+ 	/**
+@@ -725,7 +727,6 @@
+ 		title: string,
+ 		placeholder?: string,
+ 		dialogOptions?: ExtensionUIDialogOptions,
+-		inputOptions?: { readonly initialValue?: string },
+ 	): Promise<string | undefined> {
+ 		const { promise, finish, attachAbort } = this.#createHookDialogState(
+ 			() => this.hideHookInput(),
+@@ -743,7 +744,6 @@
+ 				finish(undefined);
+ 			},
+ 			{
+-				initialValue: inputOptions?.initialValue,
+ 				timeout: dialogOptions?.timeout,
+ 				onTimeout: dialogOptions?.onTimeout,
+ 				tui: this.ctx.ui,

@@ -31,6 +31,13 @@ export interface DeepInterviewEstablishedFact {
 	dimension?: string;
 	evidence?: string;
 	disputed: boolean;
+	/**
+	 * Resolution pointer for a disputed fact: the id of the fact that replaced it
+	 * after the user confirmed a pivot. A disputed fact without `superseded_by`
+	 * keeps the deterministic ambiguity floor elevated; setting it releases the
+	 * pressure while preserving the contradicted fact for audit.
+	 */
+	superseded_by?: string;
 }
 
 export interface DeepInterviewTriggerMetadata {
@@ -66,7 +73,12 @@ export interface DeepInterviewRoundRecord {
 	answered_at: string;
 	scored_at?: string;
 	scores?: Record<string, number>;
+	/** Effective ambiguity after the deterministic floor clamp (`max(reported, floor)`). */
 	ambiguity?: number;
+	/** Original LLM-reported ambiguity, preserved for audit when the floor clamped it. */
+	reported_ambiguity?: number;
+	/** Deterministic floor in effect when this round was scored, when it clamped. */
+	ambiguity_floor?: number;
 	triggers?: DeepInterviewTriggerMetadata[];
 }
 
@@ -125,6 +137,7 @@ const TRANSCRIPT_STATE_FIELDS = [
 	"rounds",
 	"established_facts",
 	"current_ambiguity",
+	"ambiguity_floor",
 	"topology",
 	"ontology_snapshots",
 	"auto_researched_rounds",
@@ -151,12 +164,38 @@ const HOISTED_STATE_FIELDS = [
 ] as const;
 
 /**
+ * Envelope-reserved keys that are never legitimate interview `state` fields.
+ *
+ * A malformed write that wraps a whole envelope under `state`
+ * (`skc state deep-interview write --input '{"state": <envelope>}'`) leaks these
+ * into the nested state. Because normalization otherwise preserves unknown
+ * nested fields, they would accrete a recursive `state.state` chain (plus stale
+ * `receipt`/`skill`/`version`/... duplicates) that no later merge or write ever
+ * removes, permanently corrupting the shape. They are stripped from `state` on
+ * normalize so the canonical envelope self-heals on the next write.
+ */
+const ENVELOPE_RESERVED_STATE_KEYS = [
+	"state",
+	"receipt",
+	"skill",
+	"version",
+	"updated_at",
+	"active",
+	"current_phase",
+	"state_revision",
+	"session_id",
+] as const;
+
+/**
  * Canonicalize a deep-interview envelope: interview data nested under `state`,
  * legacy flattened fields hoisted in losslessly, transcript duplicates removed
  * from the top level, and `rounds`/`established_facts` guaranteed to be arrays.
  *
- * Idempotent: a canonical envelope is returned unchanged in shape. Never deletes
- * unknown envelope or nested fields, and never mutates the input.
+ * Idempotent: a canonical envelope is returned unchanged in shape. Preserves all
+ * unknown envelope and nested fields except the envelope-reserved keys that leak
+ * into `state` (see `ENVELOPE_RESERVED_STATE_KEYS`), which are stripped so a
+ * malformed envelope-in-state write cannot permanently nest state. Never mutates
+ * the input.
  */
 export function normalizeDeepInterviewEnvelope(value: unknown): DeepInterviewStateEnvelope {
 	const envelope: DeepInterviewStateEnvelope = isPlainObject(value) ? { ...value } : {};
@@ -168,6 +207,9 @@ export function normalizeDeepInterviewEnvelope(value: unknown): DeepInterviewSta
 	}
 	for (const field of HOISTED_STATE_FIELDS) {
 		if (inner[field] === undefined && envelope[field] !== undefined) inner[field] = envelope[field];
+	}
+	for (const field of ENVELOPE_RESERVED_STATE_KEYS) {
+		if (field in inner) delete inner[field];
 	}
 
 	if (!Array.isArray(inner.rounds)) inner.rounds = [];

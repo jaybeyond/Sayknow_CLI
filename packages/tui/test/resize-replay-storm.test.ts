@@ -94,6 +94,7 @@ describe("multiplexer resize replay storm regression", () => {
 			// now routes to viewport repaint: at most `rows` distinct lines, never the
 			// full 60-line transcript.
 			expect(distinctReplayedLineMarkers(out)).toBeLessThanOrEqual(term.rows + 2);
+			expect(out).toContain("\x1b[29A\r");
 
 			tui.stop();
 		});
@@ -121,17 +122,137 @@ describe("multiplexer resize replay storm regression", () => {
 		});
 	});
 
-	describe("in a plain terminal (no TMUX)", () => {
+	describe("in a SKC-launched psmux pane without TMUX env", () => {
 		let origTmux: string | undefined;
+		let origTmuxPane: string | undefined;
+		let origLaunched: string | undefined;
 
 		beforeEach(() => {
 			origTmux = process.env.TMUX;
+			origTmuxPane = process.env.TMUX_PANE;
+			origLaunched = process.env.SKC_TMUX_LAUNCHED;
 			delete process.env.TMUX;
+			delete process.env.TMUX_PANE;
+			process.env.SKC_TMUX_LAUNCHED = "1";
 		});
 
 		afterEach(() => {
 			if (origTmux === undefined) delete process.env.TMUX;
 			else process.env.TMUX = origTmux;
+			if (origTmuxPane === undefined) delete process.env.TMUX_PANE;
+			else process.env.TMUX_PANE = origTmuxPane;
+			if (origLaunched === undefined) delete process.env.SKC_TMUX_LAUNCHED;
+			else process.env.SKC_TMUX_LAUNCHED = origLaunched;
+		});
+
+		it("treats the launched pane as a multiplexer for forced redraws", async () => {
+			const term = new VirtualTerminal(COLS, 30);
+			const tui = new TUI(term);
+			tui.start();
+			await term.waitForRender();
+
+			await buildTranscript(tui, term, 60);
+			term.clearWriteLog();
+
+			tui.requestRender(true, "test.psmux.force");
+			await term.waitForRender();
+
+			const out = term.getWriteLog().join("");
+			expect(distinctReplayedLineMarkers(out)).toBeLessThanOrEqual(term.rows + 2);
+			expect(out).not.toContain("\x1b[3J");
+
+			tui.stop();
+		});
+	});
+
+	describe("in Termux", () => {
+		let origTermuxVersion: string | undefined;
+		let origTmux: string | undefined;
+		let origSty: string | undefined;
+		let origZellij: string | undefined;
+		let origLaunched: string | undefined;
+
+		beforeEach(() => {
+			origTermuxVersion = process.env.TERMUX_VERSION;
+			origTmux = process.env.TMUX;
+			origSty = process.env.STY;
+			origZellij = process.env.ZELLIJ;
+			origLaunched = process.env.SKC_TMUX_LAUNCHED;
+			process.env.TERMUX_VERSION = "1";
+			delete process.env.TMUX;
+			delete process.env.STY;
+			delete process.env.ZELLIJ;
+			delete process.env.SKC_TMUX_LAUNCHED;
+		});
+
+		afterEach(() => {
+			if (origTermuxVersion === undefined) delete process.env.TERMUX_VERSION;
+			else process.env.TERMUX_VERSION = origTermuxVersion;
+			if (origTmux === undefined) delete process.env.TMUX;
+			else process.env.TMUX = origTmux;
+			if (origSty === undefined) delete process.env.STY;
+			else process.env.STY = origSty;
+			if (origZellij === undefined) delete process.env.ZELLIJ;
+			else process.env.ZELLIJ = origZellij;
+			if (origLaunched === undefined) delete process.env.SKC_TMUX_LAUNCHED;
+			else process.env.SKC_TMUX_LAUNCHED = origLaunched;
+		});
+
+		it("does not full-clear or replay the transcript on a height-only resize", async () => {
+			const term = new VirtualTerminal(COLS, 30);
+			const tui = new TUI(term);
+			tui.start();
+			await term.waitForRender();
+
+			await buildTranscript(tui, term, 60);
+			term.clearWriteLog();
+
+			term.resize(COLS, 20);
+			await term.waitForRender();
+
+			const out = term.getWriteLog().join("");
+			expect(out).not.toContain("\x1b[3J");
+			expect(distinctReplayedLineMarkers(out)).toBeLessThan(60);
+
+			tui.stop();
+		});
+	});
+	describe("in a plain terminal (no multiplexer markers)", () => {
+		let origTmux: string | undefined;
+		let origTmuxPane: string | undefined;
+		let origSty: string | undefined;
+		let origZellij: string | undefined;
+		let origLaunched: string | undefined;
+		let origTerm: string | undefined;
+
+		beforeEach(() => {
+			origTmux = process.env.TMUX;
+			origTmuxPane = process.env.TMUX_PANE;
+			origSty = process.env.STY;
+			origZellij = process.env.ZELLIJ;
+			origLaunched = process.env.SKC_TMUX_LAUNCHED;
+			origTerm = process.env.TERM;
+			delete process.env.TMUX;
+			delete process.env.TMUX_PANE;
+			delete process.env.STY;
+			delete process.env.ZELLIJ;
+			delete process.env.SKC_TMUX_LAUNCHED;
+			process.env.TERM = "xterm-256color";
+		});
+
+		afterEach(() => {
+			if (origTmux === undefined) delete process.env.TMUX;
+			else process.env.TMUX = origTmux;
+			if (origTmuxPane === undefined) delete process.env.TMUX_PANE;
+			else process.env.TMUX_PANE = origTmuxPane;
+			if (origSty === undefined) delete process.env.STY;
+			else process.env.STY = origSty;
+			if (origZellij === undefined) delete process.env.ZELLIJ;
+			else process.env.ZELLIJ = origZellij;
+			if (origLaunched === undefined) delete process.env.SKC_TMUX_LAUNCHED;
+			else process.env.SKC_TMUX_LAUNCHED = origLaunched;
+			if (origTerm === undefined) delete process.env.TERM;
+			else process.env.TERM = origTerm;
 		});
 
 		it("requestRender(true) replays the whole transcript (fullRender + 3J clears scrollback cleanly)", async () => {

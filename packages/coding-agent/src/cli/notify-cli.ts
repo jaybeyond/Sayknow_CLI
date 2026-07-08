@@ -4,7 +4,7 @@
  * Handles `skc notify` setup/status and the hidden daemon entrypoint.
  */
 import { createInterface } from "node:readline/promises";
-import { APP_NAME } from "@sayknow-cli/utils";
+import { APP_NAME } from "@sayknow-cli/utils/dirs";
 import chalk from "chalk";
 import type { Settings } from "../config/settings";
 import { getNotificationConfig, maskToken } from "../notifications/config";
@@ -56,6 +56,11 @@ interface TelegramUser {
 	username?: string;
 	has_topics_enabled?: boolean;
 	allows_users_to_create_topics?: boolean;
+}
+
+interface TelegramChat {
+	id?: number | string;
+	type?: string;
 }
 
 type ThreadedModeState = "enabled" | "disabled" | "unknown";
@@ -148,6 +153,7 @@ async function runSetup(deps: NotifyCommandDeps): Promise<void> {
 	let chatId: string;
 	if (deps.setupChatId?.trim()) {
 		chatId = deps.setupChatId.trim();
+		await verifyPrivateChatId(fetchImpl, apiBase, token, chatId);
 		process.stdout.write(`Using provided chat id ${chatId} (non-interactive).\n`);
 	} else {
 		const stale = await getUpdates(fetchImpl, apiBase, token, { timeout: 0, allowed_updates: ["message"] });
@@ -170,16 +176,76 @@ async function runSetup(deps: NotifyCommandDeps): Promise<void> {
 	);
 }
 
-async function promptForToken(): Promise<string> {
-	if (!process.stdin.isTTY) {
+type TokenPromptInput = NodeJS.ReadStream & {
+	isRaw?: boolean;
+	setRawMode?: (mode: boolean) => unknown;
+};
+
+type TokenPromptOutput = Pick<NodeJS.WriteStream, "write">;
+
+export async function promptForToken(
+	input: TokenPromptInput = process.stdin,
+	output: TokenPromptOutput = process.stdout,
+): Promise<string> {
+	if (!input.isTTY) {
 		throw new Error("notify setup requires an interactive TTY unless setupToken is injected.");
 	}
-	const rl = createInterface({ input: process.stdin, output: process.stdout, terminal: true });
-	try {
-		return (await rl.question("Telegram BotFather token: ")).trim();
-	} finally {
-		rl.close();
+	if (typeof input.setRawMode !== "function") {
+		throw new Error("notify setup requires a TTY with raw input support unless setupToken is injected.");
 	}
+
+	output.write("Telegram BotFather token: ");
+	const wasRaw = input.isRaw === true;
+	input.setRawMode(true);
+
+	return await new Promise<string>((resolve, reject) => {
+		let value = "";
+		let settled = false;
+
+		const cleanup = () => {
+			input.off("data", onData);
+			input.off("error", onError);
+			input.setRawMode?.(wasRaw);
+			output.write("\n");
+		};
+
+		const finish = (callback: () => void) => {
+			if (settled) return;
+			settled = true;
+			cleanup();
+			callback();
+		};
+
+		const accept = () => finish(() => resolve(value.trim()));
+		const cancel = () => finish(() => reject(new Error("Telegram bot token prompt cancelled.")));
+		const onError = (error: Error) => finish(() => reject(error));
+		const onData = (chunk: Buffer | string) => {
+			for (const char of String(chunk)) {
+				if (char === "\r" || char === "\n") {
+					accept();
+					return;
+				}
+				if (char === "\u0003") {
+					cancel();
+					return;
+				}
+				if (char === "\u0004") {
+					if (value) accept();
+					else cancel();
+					return;
+				}
+				if (char === "\u007f" || char === "\b") {
+					value = value.slice(0, -1);
+					continue;
+				}
+				if (char >= " ") value += char;
+			}
+		};
+
+		input.on("data", onData);
+		input.once("error", onError);
+		input.resume();
+	});
 }
 
 const THREADED_ENABLED_SUCCESS =
@@ -221,6 +287,24 @@ async function getMe(fetchImpl: typeof fetch, apiBase: string, token: string): P
 		throw new Error("Telegram getMe returned invalid Telegram response: missing valid User result.");
 	}
 	return user;
+}
+
+async function verifyPrivateChatId(
+	fetchImpl: typeof fetch,
+	apiBase: string,
+	token: string,
+	chatId: string,
+): Promise<void> {
+	const chat = (await callTelegram<unknown>(fetchImpl, apiBase, token, "getChat", { chat_id: chatId })) as
+		| TelegramChat
+		| undefined;
+	if (!chat || typeof chat !== "object") {
+		throw new Error("Telegram getChat returned invalid Telegram response: missing valid Chat result.");
+	}
+	if (chat.type !== "private") {
+		const type = typeof chat.type === "string" && chat.type ? chat.type : "unknown";
+		throw new Error(`Provided chat id ${chatId} is a ${type} chat; pairing requires a private Telegram chat.`);
+	}
 }
 
 function threadedModeState(user: TelegramUser): ThreadedModeState {

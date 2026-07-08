@@ -48,6 +48,7 @@ import * as git from "../utils/git";
 import { discoverAgents, filterVisibleAgents, getAgent } from "./discovery";
 import { runSubprocess } from "./executor";
 import { adviseForkContextMode } from "./fork-context-advisory";
+import { FORK_CONTEXT_TOKEN_BUDGET_BY_MODE } from "./fork-context-budget";
 import { getTaskIdValidationError, validateAllocatedTaskId } from "./id";
 import { AgentOutputManager } from "./output-manager";
 import { mapWithConcurrencyLimit, Semaphore } from "./parallel";
@@ -178,6 +179,10 @@ export {
 /**
  * Render the tool description from a cached agent list and current settings.
  */
+function hasAvailableIrcTool(session: ToolSession): boolean {
+	return session.settings.get("irc.enabled") === true && session.getToolByName?.("irc") !== undefined;
+}
+
 function renderDescription(
 	agents: AgentDefinition[],
 	maxConcurrency: number,
@@ -299,11 +304,11 @@ function resolveForkSeedParamsForMode(
 		case "none":
 			return undefined;
 		case "receipt":
-			return { maxMessages: 1, maxTokens: 64 };
+			return { maxMessages: 1, maxTokens: FORK_CONTEXT_TOKEN_BUDGET_BY_MODE.receipt };
 		case "last-turn":
-			return { maxMessages: 2, maxTokens: 250 };
+			return { maxMessages: 2, maxTokens: FORK_CONTEXT_TOKEN_BUDGET_BY_MODE["last-turn"] };
 		case "bounded":
-			return { maxMessages: capMessages(50), maxTokens: 250 };
+			return { maxMessages: capMessages(50), maxTokens: FORK_CONTEXT_TOKEN_BUDGET_BY_MODE.bounded };
 		case "full":
 			return { maxMessages: capMessages(500), maxTokens: resolveForkContextMaxTokens(configuredMaxTokens, model) };
 		default:
@@ -381,7 +386,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			true,
 			disabledAgents,
 			this.#getTaskSimpleMode(),
-			this.session.settings.get("irc.enabled") === true,
+			hasAvailableIrcTool(this.session),
 			this.session.getSessionSpawns() ?? "*",
 		);
 	}
@@ -814,7 +819,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				? ` Failed to schedule ${failedSchedules.length} task${failedSchedules.length === 1 ? "" : "s"}.`
 				: "";
 
-		const ircEnabled = this.session.settings.get("irc.enabled") === true;
+		const ircEnabled = hasAvailableIrcTool(this.session);
 		const taskIdByItemId = new Map<string, string>();
 		for (let i = 0; i < taskItems.length; i++) {
 			taskIdByItemId.set(taskItems[i].id, uniqueIds[i]);
@@ -1171,7 +1176,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			// Write parent conversation context for subagents. When IRC is available,
 			// subagents should ask live peers instead of reading a stale markdown dump.
 			await fs.mkdir(effectiveArtifactsDir, { recursive: true });
-			const shouldWriteConversationContext = this.session.settings.get("irc.enabled") !== true;
+			const shouldWriteConversationContext = !hasAvailableIrcTool(this.session);
 			const compactContext = shouldWriteConversationContext ? this.session.getCompactContext?.() : undefined;
 			let contextFilePath: string | undefined;
 			if (compactContext) {
@@ -1298,6 +1303,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 						persistArtifacts: !!artifactsDir,
 						artifactsDir: effectiveArtifactsDir,
 						contextFile: contextFilePath,
+						ircAvailable: hasAvailableIrcTool(this.session),
 						enableLsp: subagentLspEnabled,
 						signal,
 						eventBus: this.session.eventBus,
@@ -1360,6 +1366,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 						persistArtifacts: !!artifactsDir,
 						artifactsDir: effectiveArtifactsDir,
 						contextFile: contextFilePath,
+						ircAvailable: hasAvailableIrcTool(this.session),
 						enableLsp: subagentLspEnabled,
 						signal,
 						eventBus: this.session.eventBus,

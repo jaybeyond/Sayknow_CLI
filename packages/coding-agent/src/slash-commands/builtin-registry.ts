@@ -6,12 +6,13 @@ import { getOAuthProviders } from "@sayknow-cli/ai/utils/oauth";
 import { Spacer, Text } from "@sayknow-cli/tui";
 import { setProjectDir } from "@sayknow-cli/utils";
 import { jobElapsedMs } from "../async";
-import { materializeActiveModelProfileAssignment } from "../config/model-profile-activation";
+import { materializeActiveModelProfileAssignments } from "../config/model-profile-activation";
 import {
 	SKC_MODEL_ASSIGNMENT_TARGET_IDS,
 	SKC_MODEL_ASSIGNMENT_TARGETS,
 	type SkcModelAssignmentTargetId,
 } from "../config/model-registry";
+
 import {
 	extractExplicitThinkingSelector,
 	formatModelSelectorValue,
@@ -32,6 +33,7 @@ import {
 	parseProviderCompatibility,
 } from "../setup/provider-onboarding";
 import { parseThinkingLevel } from "../thinking";
+import { getDisplayChangelogEntries } from "../utils/changelog";
 import { buildContextReportText } from "./helpers/context-report";
 import { buildFastStatusReport } from "./helpers/fast-status-report";
 import { formatDuration } from "./helpers/format";
@@ -52,12 +54,45 @@ export type { BuiltinSlashCommand, SubcommandDef } from "./types";
 /** TUI-specific runtime accepted by `executeBuiltinSlashCommand`. */
 export type BuiltinSlashCommandRuntime = TuiSlashCommandRuntime;
 
+type SkcModelBatchAssignmentTargetId = "all-role-agents" | "all-targets";
+type ParsedModelCommandArgs =
+	| { kind: "summary" }
+	| { kind: "assign"; targetId: SkcModelAssignmentTargetId | SkcModelBatchAssignmentTargetId; selector: string };
+
+const SKC_MODEL_ROLE_AGENT_TARGET_IDS: SkcModelAssignmentTargetId[] = ["executor", "architect", "planner", "critic"];
+
 function fastStatusRoleTargets(): Array<{ id: SkcModelAssignmentTargetId; label: string; isSubagentRole: boolean }> {
 	return SKC_MODEL_ASSIGNMENT_TARGET_IDS.map(id => ({
 		id,
 		label: SKC_MODEL_ASSIGNMENT_TARGETS[id].tag ?? id.toUpperCase(),
 		isSubagentRole: SKC_MODEL_ASSIGNMENT_TARGETS[id].settingsPath === "task.agentModelOverrides",
 	}));
+}
+
+function toSlashCommandRuntime(runtime: TuiSlashCommandRuntime): SlashCommandRuntime {
+	const ctx = runtime.ctx;
+	return {
+		session: ctx.session,
+		sessionManager: ctx.sessionManager,
+		settings: ctx.settings,
+		cwd: ctx.sessionManager.getCwd(),
+		output: (text: string) => {
+			ctx.showStatus(text);
+		},
+		refreshCommands: () => ctx.refreshSlashCommandState(),
+		reloadPlugins: async () => {
+			const projectPath = await resolveActiveProjectRegistryPath(ctx.sessionManager.getCwd());
+			clearPluginRootsAndCaches(projectPath ? [projectPath] : undefined);
+			await ctx.refreshSlashCommandState();
+			await ctx.session.refreshSshTool({ activateIfAvailable: true });
+		},
+		notifyTitleChanged: () => {
+			ctx.statusLine.invalidate();
+			ctx.updateEditorBorderColor();
+			ctx.ui.requestRender();
+		},
+		notifyConfigChanged: () => ctx.notifyConfigChanged?.(),
+	};
 }
 
 function parseProviderSetupSlashArgs(args: string): {
@@ -147,22 +182,37 @@ function formatModelAssignmentSummary(runtime: SlashCommandRuntime): string {
 	return lines.join("\n");
 }
 
-function parseModelCommandArgs(args: string): { targetId: SkcModelAssignmentTargetId; selector: string } {
+function parseModelCommandArgs(args: string): ParsedModelCommandArgs {
 	const tokens = args.trim().split(/\s+/).filter(Boolean);
 	const first = tokens[0]?.toLowerCase();
-	const explicitTarget = SKC_MODEL_ASSIGNMENT_TARGET_IDS.includes(first as SkcModelAssignmentTargetId)
-		? (first as SkcModelAssignmentTargetId)
-		: undefined;
+	if (first === "roles" || first === "assignments") return { kind: "summary" };
+
+	const parseTarget = (
+		token: string | undefined,
+	): SkcModelAssignmentTargetId | SkcModelBatchAssignmentTargetId | undefined => {
+		const normalized = token?.toLowerCase();
+		if (SKC_MODEL_ASSIGNMENT_TARGET_IDS.includes(normalized as SkcModelAssignmentTargetId)) {
+			return normalized as SkcModelAssignmentTargetId;
+		}
+		if (normalized === "all-role-agents" || normalized === "all-targets") return normalized;
+		return undefined;
+	};
+
+	if (first === "assign") {
+		const targetId = parseTarget(tokens[1]);
+		if (targetId) return { kind: "assign", targetId, selector: tokens.slice(2).join(" ") };
+		return { kind: "assign", targetId: "default", selector: tokens.slice(1).join(" ") };
+	}
+
+	const explicitTarget = parseTarget(first);
 	if (explicitTarget) {
-		return { targetId: explicitTarget, selector: tokens.slice(1).join(" ") };
+		return { kind: "assign", targetId: explicitTarget, selector: tokens.slice(1).join(" ") };
 	}
 	if (first === "set") {
-		const second = tokens[1]?.toLowerCase();
-		if (SKC_MODEL_ASSIGNMENT_TARGET_IDS.includes(second as SkcModelAssignmentTargetId)) {
-			return { targetId: second as SkcModelAssignmentTargetId, selector: tokens.slice(2).join(" ") };
-		}
+		const targetId = parseTarget(tokens[1]);
+		if (targetId) return { kind: "assign", targetId, selector: tokens.slice(2).join(" ") };
 	}
-	return { targetId: "default", selector: args.trim() };
+	return { kind: "assign", targetId: "default", selector: args.trim() };
 }
 
 function splitExplicitThinkingSelector(selector: string): { baseSelector: string; thinkingLevel?: ThinkingLevel } {
@@ -297,11 +347,33 @@ async function resolveModelCommandSelection(
 	};
 }
 
+function getModelAssignmentTargetIds(
+	targetId: SkcModelAssignmentTargetId | SkcModelBatchAssignmentTargetId,
+): SkcModelAssignmentTargetId[] {
+	if (targetId === "all-role-agents") return [...SKC_MODEL_ROLE_AGENT_TARGET_IDS];
+	if (targetId === "all-targets") return [...SKC_MODEL_ASSIGNMENT_TARGET_IDS];
+	return [targetId];
+}
+
+function formatModelAssignmentSuccess(
+	targetId: SkcModelAssignmentTargetId | SkcModelBatchAssignmentTargetId,
+	selector: string,
+): string {
+	if (targetId === "all-role-agents") {
+		return `Role-agent models set to ${selector} for EXECUTOR, ARCHITECT, PLANNER, CRITIC.`;
+	}
+	if (targetId === "all-targets") {
+		return `All model targets set to ${selector} for DEFAULT, EXECUTOR, ARCHITECT, PLANNER, CRITIC.`;
+	}
+	if (targetId === "default") return `Default model set to ${selector}.`;
+	return `${targetId} agent model set to ${selector}.`;
+}
+
 function modelSelectionUsage(runtime: SlashCommandRuntime, currentModelLine?: string): string {
 	return [
 		currentModelLine,
 		formatModelAssignmentSummary(runtime),
-		"ACP/text mode: use /model <model> for DEFAULT, or /model <target> <model> for EXECUTOR, ARCHITECT, PLANNER, or CRITIC.",
+		"Use /model <model> for DEFAULT, or /model <target> <model[:effort]> for EXECUTOR, ARCHITECT, PLANNER, or CRITIC.",
 		formatModelOnboardingGuidance(),
 	]
 		.filter((line): line is string => Boolean(line))
@@ -312,6 +384,30 @@ function refreshStatusLine(ctx: InteractiveModeContext): void {
 	ctx.statusLine.invalidate();
 	ctx.updateEditorTopBorder();
 	ctx.ui.requestRender();
+}
+
+type ChangelogCommandArgs = { showFull: boolean } | { error: string };
+
+function parseChangelogCommandArgs(args: string): ChangelogCommandArgs {
+	const normalized = args.trim().toLowerCase();
+	if (!normalized) return { showFull: false };
+	if (normalized === "full" || normalized === "--full") return { showFull: true };
+	return { error: "Usage: /changelog [full|--full]" };
+}
+
+function buildChangelogCommandOutput(showFull: boolean): string {
+	const allEntries = getDisplayChangelogEntries();
+	const entriesToShow = showFull ? allEntries : allEntries.slice(0, 3);
+	const changelogMarkdown =
+		entriesToShow.length > 0
+			? [...entriesToShow]
+					.reverse()
+					.map(entry => entry.content)
+					.join("\n\n")
+			: "No changelog entries found.";
+	const title = showFull ? "Full Changelog" : "Recent Changes";
+	const hint = showFull ? "" : "\n\nUse `/changelog --full` to view the complete changelog.";
+	return `${title}\n\n${changelogMarkdown}${hint}`;
 }
 
 const shutdownHandlerTui = (_command: ParsedSlashCommand, runtime: TuiSlashCommandRuntime): SlashCommandResult => {
@@ -373,9 +469,16 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 		acpDescription: "Show current model selection",
 		inlineHint: "[target] <model>",
 		acpInputHint: "[target] <model>",
+		allowArgs: true,
 		handle: async (command, runtime) => {
 			if (command.args) {
 				const parsedArgs = parseModelCommandArgs(command.args);
+				if (parsedArgs.kind === "summary") {
+					await runtime.output(formatModelAssignmentSummary(runtime));
+					return commandConsumed();
+				}
+
+				const targetIds = getModelAssignmentTargetIds(parsedArgs.targetId);
 				const modelId = parsedArgs.selector;
 				if (!modelId) {
 					return usage(
@@ -389,24 +492,9 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 				}
 				const { selection } = resolution;
 				try {
-					const persistedSelector = formatModelSelectorValue(selection.selector, selection.thinkingLevel);
-					if (parsedArgs.targetId === "default") {
-						await runtime.session.setModel(selection.model, "default", {
-							selector: selection.selector,
-							thinkingLevel: selection.thinkingLevel,
-						});
-						materializeActiveModelProfileAssignment({
-							session: runtime.session,
-							settings: runtime.settings,
-							role: parsedArgs.targetId,
-							selector: persistedSelector,
-						});
-						if (selection.thinkingLevel) {
-							runtime.session.setThinkingLevel(selection.thinkingLevel);
-						}
-						await runtime.output(`Default model set to ${persistedSelector}.`);
-						await runtime.notifyTitleChanged?.();
-					} else {
+					const includesDefault = targetIds.includes("default");
+					const includesRoleAgent = targetIds.some(role => role !== "default");
+					if (includesRoleAgent) {
 						const apiKey = await runtime.session.modelRegistry.getApiKey(
 							selection.model,
 							runtime.session.sessionId,
@@ -414,31 +502,60 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 						if (!apiKey) {
 							throw new Error(`No API key for ${selection.model.provider}/${selection.model.id}`);
 						}
-						const overrides = runtime.settings.get("task.agentModelOverrides");
+					}
+
+					const overrides = runtime.settings.get("task.agentModelOverrides");
+					const assignments = new Map<SkcModelAssignmentTargetId, string>();
+					const existingDefaultThinkingLevel =
+						selection.thinkingLevel !== undefined
+							? selection.thinkingLevel
+							: runtime.session.getActiveModelProfile?.()
+								? undefined
+								: extractExplicitThinkingSelector(runtime.settings.getModelRole("default"), runtime.settings);
+					const persistedSelector = formatModelSelectorValue(selection.selector, existingDefaultThinkingLevel);
+					for (const targetId of targetIds) {
+						if (targetId === "default") {
+							assignments.set(targetId, persistedSelector);
+							continue;
+						}
 						const thinkingLevel =
-							selection.thinkingLevel ??
-							extractExplicitThinkingSelector(overrides[parsedArgs.targetId], runtime.settings);
-						const roleSelector = formatModelSelectorValue(selection.selector, thinkingLevel);
-						const materializedProfile = materializeActiveModelProfileAssignment({
-							session: runtime.session,
-							settings: runtime.settings,
-							role: parsedArgs.targetId,
-							selector: roleSelector,
+							selection.thinkingLevel ?? extractExplicitThinkingSelector(overrides[targetId], runtime.settings);
+						assignments.set(targetId, formatModelSelectorValue(selection.selector, thinkingLevel));
+					}
+
+					if (includesDefault) {
+						await runtime.session.setModel(selection.model, "default", {
+							selector: selection.selector,
+							thinkingLevel: existingDefaultThinkingLevel,
 						});
-						if (!materializedProfile) {
-							const target = SKC_MODEL_ASSIGNMENT_TARGETS[parsedArgs.targetId];
+						if (existingDefaultThinkingLevel) {
+							runtime.session.setThinkingLevel(existingDefaultThinkingLevel);
+						}
+					}
+
+					const materializedProfile = materializeActiveModelProfileAssignments({
+						session: runtime.session,
+						settings: runtime.settings,
+						assignments,
+					});
+					if (!materializedProfile) {
+						for (const [targetId, selector] of assignments) {
+							const target = SKC_MODEL_ASSIGNMENT_TARGETS[targetId];
 							if (target.settingsPath === "modelRoles") {
-								runtime.settings.setModelRole(parsedArgs.targetId, roleSelector);
+								runtime.settings.setModelRole(targetId, selector);
 							} else {
-								runtime.settings.set("task.agentModelOverrides", {
-									...overrides,
-									[parsedArgs.targetId]: roleSelector,
-								});
+								runtime.settings.setAgentModelOverride(targetId, selector);
 							}
 						}
-						runtime.settings.getStorage()?.recordModelUsage(`${selection.model.provider}/${selection.model.id}`);
-						await runtime.output(`${parsedArgs.targetId} agent model set to ${roleSelector}.`);
 					}
+					runtime.settings.getStorage()?.recordModelUsage(`${selection.model.provider}/${selection.model.id}`);
+					await runtime.output(
+						formatModelAssignmentSuccess(
+							parsedArgs.targetId,
+							assignments.get(targetIds[0] ?? "default") ?? persistedSelector,
+						),
+					);
+					if (includesDefault) await runtime.notifyTitleChanged?.();
 					await runtime.notifyConfigChanged?.();
 					return commandConsumed();
 				} catch (err) {
@@ -455,7 +572,18 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 			);
 			return commandConsumed();
 		},
-		handleTui: (_command, runtime) => {
+		handleTui: async (command, runtime) => {
+			if (command.args.trim()) {
+				const result = await BUILTIN_SLASH_COMMAND_LOOKUP.get(command.name)?.handle?.(
+					command,
+					toSlashCommandRuntime(runtime),
+				);
+				runtime.ctx.statusLine.invalidate();
+				runtime.ctx.updateEditorBorderColor();
+				runtime.ctx.editor.setText("");
+				runtime.ctx.ui.requestRender();
+				return result;
+			}
 			runtime.ctx.showModelSelector();
 			runtime.ctx.editor.setText("");
 		},
@@ -721,6 +849,29 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 		},
 	},
 	{
+		name: "changelog",
+		description: "Show release notes and changelog entries",
+		inlineHint: "[full|--full]",
+		subcommands: [{ name: "full", description: "Show complete changelog" }],
+		allowArgs: true,
+		handle: async (command, runtime) => {
+			const parsed = parseChangelogCommandArgs(command.args);
+			if ("error" in parsed) return usage(parsed.error, runtime);
+			await runtime.output(buildChangelogCommandOutput(parsed.showFull));
+			return commandConsumed();
+		},
+		handleTui: async (command, runtime) => {
+			const parsed = parseChangelogCommandArgs(command.args);
+			if ("error" in parsed) {
+				runtime.ctx.showError(parsed.error);
+				runtime.ctx.editor.setText("");
+				return;
+			}
+			await runtime.ctx.handleChangelogCommand(parsed.showFull);
+			runtime.ctx.editor.setText("");
+		},
+	},
+	{
 		name: "help",
 		priority: 100,
 		description: "Learn commands and beginner workflows",
@@ -965,6 +1116,22 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 			runtime.ctx.editor.addToHistory(command.text);
 			runtime.ctx.editor.setText("");
 			await runtime.ctx.handleSSHCommand(command.text);
+		},
+	},
+	{
+		name: "clear",
+		priority: 97,
+		description: "Clear context while preserving this session ID",
+		acpDescription: "Clear context while preserving this session ID",
+		handle: async (_command, runtime) => {
+			const beforeSessionId = runtime.session.sessionId;
+			await runtime.session.clearContext();
+			await runtime.output(`Context cleared. Session preserved: ${beforeSessionId}`);
+			return commandConsumed();
+		},
+		handleTui: async (_command, runtime) => {
+			runtime.ctx.editor.setText("");
+			await runtime.ctx.handleContextClearCommand();
 		},
 	},
 	{
@@ -1227,6 +1394,7 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 	},
 	{
 		name: "exit",
+		aliases: ["quit"],
 		description: "Exit the application",
 		handleTui: shutdownHandlerTui,
 	},
@@ -1307,29 +1475,8 @@ export async function executeBuiltinSlashCommand(
 		return true;
 	}
 	if (command.handle) {
-		// No TUI-specific override → adapt the ACP/text-mode `handle` to the
-		// TUI by routing `runtime.output` through `ctx.showStatus`, clearing
-		// the editor after the call, and reusing the active session's plugin
-		// reload pipeline. Spec authors get a single body usable from either
-		// dispatcher without forcing every TUI test to construct the full
-		// `SlashCommandRuntime` shape.
 		const ctx = runtime.ctx;
-		const adapted: SlashCommandRuntime = {
-			session: ctx.session,
-			sessionManager: ctx.sessionManager,
-			settings: ctx.settings,
-			cwd: ctx.sessionManager.getCwd(),
-			output: (text: string) => {
-				ctx.showStatus(text);
-			},
-			refreshCommands: () => ctx.refreshSlashCommandState(),
-			reloadPlugins: async () => {
-				const projectPath = await resolveActiveProjectRegistryPath(ctx.sessionManager.getCwd());
-				clearPluginRootsAndCaches(projectPath ? [projectPath] : undefined);
-				await ctx.refreshSlashCommandState();
-				await ctx.session.refreshSshTool({ activateIfAvailable: true });
-			},
-		};
+		const adapted = toSlashCommandRuntime(runtime);
 		const result = await command.handle(parsed, adapted);
 		ctx.editor.setText("");
 		if (result && typeof result === "object" && "prompt" in result) return result.prompt;

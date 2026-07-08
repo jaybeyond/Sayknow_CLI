@@ -6,6 +6,7 @@
  */
 import { Args, type CliConfig, Command, type CommandEntry, Flags, run } from "@sayknow-cli/utils/cli";
 import { APP_NAME, formatBunRuntimeError, MIN_BUN_VERSION, VERSION } from "@sayknow-cli/utils/dirs";
+import { runFixtureReport } from "./cli/fixture-report";
 
 if (Bun.semver.order(Bun.version, MIN_BUN_VERSION) < 0) {
 	process.stderr.write(
@@ -35,6 +36,7 @@ export const commands: CommandEntry[] = [
 	{ name: "gc", load: () => import("./commands/gc").then(m => m.default) },
 	{ name: "ralplan", load: () => import("./commands/ralplan").then(m => m.default) },
 	{ name: "config", load: () => import("./commands/config").then(m => m.default) },
+	{ name: "stats", load: () => import("./commands/stats").then(m => m.default) },
 	{ name: "notify", load: () => import("./commands/notify").then(m => m.default) },
 	{ name: "daemon", load: () => import("./commands/daemon").then(m => m.default) },
 	{ name: "web-search", aliases: ["q"], load: () => import("./commands/web-search").then(m => m.default) },
@@ -51,6 +53,7 @@ export const commands: CommandEntry[] = [
 	{ name: "rlm", load: () => import("./commands/rlm").then(m => m.default) },
 	{ name: "update", load: () => import("./commands/update").then(m => m.default) },
 	{ name: "plugin", load: () => import("./commands/plugin").then(m => m.default) },
+	{ name: "completion", load: () => import("./commands/completion").then(m => m.default) },
 	{ name: "launch", load: () => import("./commands/launch").then(m => m.default) },
 	{ name: "telegram", load: () => import("./commands/telegram").then(m => m.default) },
 ];
@@ -74,6 +77,9 @@ async function installRuntimeGlobals(): Promise<void> {
 	// `HTTP2Unsupported`. See @sayknow-cli/ai/utils/h2-fetch for details.
 	installH2Fetch();
 
+	const { warnIfMacOSNoFileLimitTooLow } = await import("./cli/nofile-limit");
+	warnIfMacOSNoFileLimitTooLow();
+
 	// Strip macOS malloc-stack-logging env vars before any subprocess is spawned.
 	// Otherwise every child bun process (subagents, plugin installs, ptree spawns,
 	// etc.) prints a `MallocStackLogging: can't turn off …` warning to stderr.
@@ -94,6 +100,17 @@ async function runNotifyDaemonInternalFastPath(argv: string[]): Promise<void> {
 	await runNotifyCommand(cmd);
 }
 
+function rootFixtureArg(argv: string[]): { present: boolean; id: string | undefined } {
+	for (let i = 0; i < argv.length; i++) {
+		const arg = argv[i];
+		// Stop at the first subcommand token so a `--fixture` flag belonging to a
+		// subcommand never hijacks the root fast-path into fixture-report mode.
+		if (isSubcommand(arg)) return { present: false, id: undefined };
+		if (arg === "--fixture") return { present: true, id: argv[i + 1] };
+	}
+	return { present: false, id: undefined };
+}
+
 function hasRootFastFlag(argv: string[], flags: readonly string[]): boolean {
 	for (const arg of argv) {
 		if (isSubcommand(arg)) return false;
@@ -110,7 +127,7 @@ function hasRootVersionFlag(argv: string[]): boolean {
 	return hasRootFastFlag(argv, versionFlags);
 }
 
-class RootHelpCommand extends Command {
+export class RootHelpCommand extends Command {
 	static description = "Sayknow-CLI — an AI coding assistant";
 	static hidden = true;
 	static args = {
@@ -229,6 +246,17 @@ export async function runCli(argv: string[]): Promise<void> {
 	}
 	if (argv[0] === "--smoke-test") {
 		await runSmokeTest();
+		return;
+	}
+	const fixtureArg = rootFixtureArg(argv);
+	if (fixtureArg.present) {
+		const id = fixtureArg.id;
+		if (!id || id.startsWith("-")) {
+			process.stderr.write(`${APP_NAME} --fixture requires a fixture id\n`);
+			process.exitCode = 1;
+			return;
+		}
+		process.exitCode = await runFixtureReport(id);
 		return;
 	}
 	if (hasRootHelpFlag(argv)) {

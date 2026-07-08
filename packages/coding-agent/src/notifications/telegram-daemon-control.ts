@@ -20,7 +20,7 @@ import type {
 	DaemonStatus,
 } from "../daemon/control-types";
 import { resolveSkcRuntimeSpawnInfo } from "../daemon/runtime";
-import { getNotificationConfig, isGloballyConfigured, tokenFingerprint } from "./config";
+import { getNotificationConfig, isTelegramConfigured, tokenFingerprint } from "./config";
 import {
 	daemonPaths,
 	isFreshLiveOwner,
@@ -159,7 +159,7 @@ export class TelegramDaemonController implements BuiltInDaemonController {
 	async status(): Promise<DaemonStatus> {
 		const runtime = this.runtimeInfo();
 		const cfg = getNotificationConfig(this.settings);
-		const configured = isGloballyConfigured(cfg) && Boolean(cfg.botToken) && Boolean(cfg.chatId);
+		const configured = isTelegramConfigured(cfg);
 		if (!configured) {
 			return { kind: this.kind, configured: false, health: "not_configured", runtime };
 		}
@@ -269,6 +269,7 @@ export class TelegramDaemonController implements BuiltInDaemonController {
 				{ settings: this.settings, roots, tokenFingerprint: fp, chatId },
 				this.spawnDeps(),
 			);
+			warnings.push(...spawned.warnings);
 			const after = await this.status();
 			return this.result(
 				action,
@@ -351,6 +352,7 @@ export class TelegramDaemonController implements BuiltInDaemonController {
 			{ settings: this.settings, roots, tokenFingerprint: fp, chatId },
 			this.spawnDeps(),
 		);
+		warnings.push(...spawned.warnings);
 		const after = await this.status();
 		if (spawned.result === "attached") {
 			// A live owner already exists; attaching to it is a valid running end-state.
@@ -360,7 +362,7 @@ export class TelegramDaemonController implements BuiltInDaemonController {
 		}
 		return this.result(
 			action,
-			spawned.result !== "disabled",
+			spawned.result !== "disabled" && spawned.result !== "blocked",
 			`reloaded telegram daemon (${spawned.result})`,
 			before,
 			after,

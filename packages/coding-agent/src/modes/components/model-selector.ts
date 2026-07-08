@@ -98,6 +98,7 @@ export type ModelSelectorSelection =
 			kind: "assignment";
 			model: Model;
 			role: SkcModelAssignmentTargetId | null;
+			roles?: readonly SkcModelAssignmentTargetId[];
 			thinkingLevel?: ThinkingLevel;
 			selector?: string;
 	  }
@@ -1374,7 +1375,11 @@ export class ModelSelectorComponent extends Container {
 		for (let i = 0; i < actionCount; i++) {
 			const prefix = i === this.#selectedActionIndex ? theme.fg("accent", `${theme.nav.cursor} `) : "  ";
 			const role = SKC_MODEL_ASSIGNMENT_TARGET_IDS[i];
-			const label = `Set as ${SKC_MODEL_ASSIGNMENT_TARGETS[role].tag ?? role.toUpperCase()} (${SKC_MODEL_ASSIGNMENT_TARGETS[role].name})`;
+			const label = role
+				? `Set as ${SKC_MODEL_ASSIGNMENT_TARGETS[role].tag ?? role.toUpperCase()} (${SKC_MODEL_ASSIGNMENT_TARGETS[role].name})`
+				: i === SKC_MODEL_ASSIGNMENT_TARGET_IDS.length
+					? "Set for all role agents"
+					: "Set for all targets";
 			this.#listContainer.addChild(
 				new Text(`${prefix}${i === this.#selectedActionIndex ? theme.fg("accent", label) : label}`, 0, 0),
 			);
@@ -1411,7 +1416,7 @@ export class ModelSelectorComponent extends Container {
 		return this.#roles[role]?.thinkingLevel ?? ThinkingLevel.Inherit;
 	}
 	#getActionCount(_model: Model): number {
-		return SKC_MODEL_ASSIGNMENT_TARGET_IDS.length;
+		return SKC_MODEL_ASSIGNMENT_TARGET_IDS.length + 2;
 	}
 
 	#getSelectedItem(): ModelItem | CanonicalModelItem | undefined {
@@ -1659,7 +1664,15 @@ export class ModelSelectorComponent extends Container {
 		if (matchesKey(keyData, "enter") || matchesKey(keyData, "return") || keyData === "\n") {
 			this.#pendingActionItem = undefined;
 			const role = SKC_MODEL_ASSIGNMENT_TARGET_IDS[this.#selectedActionIndex];
-			if (role) this.#handleSelect(item, role);
+			if (role) {
+				this.#handleSelect(item, role);
+				return;
+			}
+			const roles =
+				this.#selectedActionIndex === SKC_MODEL_ASSIGNMENT_TARGET_IDS.length
+					? (["executor", "architect", "planner", "critic"] as const)
+					: SKC_MODEL_ASSIGNMENT_TARGET_IDS;
+			this.#handleSelect(item, "default", undefined, roles);
 			return;
 		}
 		if (getKeybindings().matches(keyData, "tui.select.cancel")) {
@@ -1698,17 +1711,34 @@ export class ModelSelectorComponent extends Container {
 			this.#updateList();
 		}
 	}
+	#getInitialThinkingChoiceIndex(item: ModelItem | CanonicalModelItem, levels: ThinkingLevel[]): number {
+		const preferred = this.#getPreferredThinkingLevel(item);
+		if (preferred && preferred !== ThinkingLevel.Inherit) {
+			const index = levels.indexOf(preferred);
+			if (index !== -1) return index;
+		}
+		return 0;
+	}
+
+	#getPreferredThinkingLevel(item: ModelItem | CanonicalModelItem): ThinkingLevel | undefined {
+		if (item.thinkingLevel && item.thinkingLevel !== ThinkingLevel.Inherit) {
+			return item.thinkingLevel;
+		}
+		return undefined;
+	}
 
 	#handleSelect(
 		item: ModelItem | CanonicalModelItem,
 		role: SkcModelAssignmentTargetId | null,
 		thinkingLevel?: ThinkingLevel,
+		roles?: readonly SkcModelAssignmentTargetId[],
 	): void {
 		const itemThinkingLevel = thinkingLevel ?? item.thinkingLevel;
 		const hasExplicitThinkingChoice = thinkingLevel !== undefined || item.explicitThinkingLevel === true;
-		if (!hasExplicitThinkingChoice && requiresExplicitThinkingChoice(item.model)) {
-			this.#pendingThinkingChoice = { item, role, levels: getSelectableThinkingLevels(item.model) };
-			this.#selectedThinkingIndex = 0;
+		if (!hasExplicitThinkingChoice && requiresExplicitThinkingChoice(item.model, role)) {
+			const levels = getSelectableThinkingLevels(item.model);
+			this.#pendingThinkingChoice = { item, role, levels };
+			this.#selectedThinkingIndex = this.#getInitialThinkingChoiceIndex(item, levels);
 			this.#updateList();
 			return;
 		}
@@ -1726,17 +1756,23 @@ export class ModelSelectorComponent extends Container {
 		}
 
 		const selectedThinkingLevel = itemThinkingLevel ?? this.#getCurrentRoleThinkingLevel(role);
-		const selectorValue =
-			role === "default" ? item.selector : formatModelSelectorValue(item.selector, selectedThinkingLevel);
+		const selectorValue = roles
+			? formatModelSelectorValue(item.selector, selectedThinkingLevel)
+			: role === "default"
+				? item.selector
+				: formatModelSelectorValue(item.selector, selectedThinkingLevel);
 
 		// Update local state for UI
-		this.#roles[role] = { model: item.model, thinkingLevel: selectedThinkingLevel };
+		for (const targetRole of roles ?? [role]) {
+			this.#roles[targetRole] = { model: item.model, thinkingLevel: selectedThinkingLevel };
+		}
 
 		// Notify caller (for updating agent state if needed)
 		this.#onSelectCallback({
 			kind: "assignment",
 			model: item.model,
 			role,
+			roles,
 			thinkingLevel: selectedThinkingLevel,
 			selector: selectorValue,
 		});
@@ -1751,10 +1787,17 @@ export class ModelSelectorComponent extends Container {
 	async __testSelectProfile(profileName: string, setDefault: boolean): Promise<void> {
 		await this.#onSelectCallback({ kind: "profile", profileName, setDefault });
 	}
+	async __testSelectAssignment(
+		selection: Omit<Extract<ModelSelectorSelection, { kind: "assignment" }>, "kind">,
+	): Promise<void> {
+		await this.#onSelectCallback({ kind: "assignment", ...selection });
+	}
 }
 
-function requiresExplicitThinkingChoice(model: Model): boolean {
-	return model.reasoning === true && (model.provider === "openai" || model.provider === "openai-codex");
+function requiresExplicitThinkingChoice(model: Model, role: SkcModelAssignmentTargetId | null): boolean {
+	if (model.reasoning !== true) return false;
+	if (model.provider === "openai" || model.provider === "openai-codex") return true;
+	return role !== null && SKC_MODEL_ASSIGNMENT_TARGETS[role].settingsPath === "task.agentModelOverrides";
 }
 
 function getSelectableThinkingLevels(model: Model): ThinkingLevel[] {

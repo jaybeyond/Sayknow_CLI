@@ -2,9 +2,9 @@ import type { AgentMessage } from "@sayknow-cli/agent-core";
 import type { AssistantMessage, ImageContent, Message } from "@sayknow-cli/ai";
 import { type Component, Spacer, Text, TruncatedText } from "@sayknow-cli/tui";
 import { settings } from "../../config/settings";
-import { tMessage } from "../../i18n";
 import { resolveSubskillActivationForSkillInvocation } from "../../extensibility/skc-plugins";
 import { buildSkillPromptMessage, parseSkillInvocations } from "../../extensibility/skills";
+import { tMessage } from "../../i18n";
 import { AssistantMessageComponent } from "../../modes/components/assistant-message";
 import { BashExecutionComponent } from "../../modes/components/bash-execution";
 import { BranchSummaryMessageComponent } from "../../modes/components/branch-summary-message";
@@ -35,6 +35,19 @@ import { buildAbortDisplayMessage } from "./abort-message";
 type TextBlock = { type: "text"; text: string };
 interface RenderInitialMessagesOptions {
 	preserveExistingChat?: boolean;
+}
+
+export function argsWithPartialJson(args: unknown, partialJson: unknown): unknown {
+	if (typeof partialJson !== "string" || !args || typeof args !== "object" || Array.isArray(args)) return args;
+	// Non-enumerable so the transient streaming buffer reaches renderers via direct
+	// property read but never serializes into persisted/wire message content.
+	Object.defineProperty(args, "__partialJson", {
+		value: partialJson,
+		enumerable: false,
+		configurable: true,
+		writable: true,
+	});
+	return args;
 }
 
 type QueuedMessages = {
@@ -394,10 +407,10 @@ export class UiHelpers {
 
 					readGroup = null;
 					const tool = this.ctx.session.getToolByName(content.name);
-					const renderArgs =
-						"partialJson" in content
-							? { ...content.arguments, __partialJson: content.partialJson }
-							: content.arguments;
+					const renderArgs = argsWithPartialJson(
+						content.arguments,
+						"partialJson" in content ? content.partialJson : undefined,
+					);
 					const component = new ToolExecutionComponent(
 						content.name,
 						renderArgs,
@@ -605,8 +618,8 @@ export class UiHelpers {
 				const queuedText = theme.fg("dim", `${entry.label}: ${entry.message}`);
 				this.ctx.pendingMessagesContainer.addChild(new TruncatedText(queuedText, 1, 0));
 			}
-			const dequeueKey = this.ctx.keybindings.getDisplayString("app.message.dequeue") || "Alt+Up";
-			const hintText = theme.fg("dim", `${theme.tree.hook} ${dequeueKey} to edit`);
+			const dequeueKey = this.ctx.keybindings.getDisplayString("app.message.dequeue") || "Alt+Up/Alt+Down";
+			const hintText = theme.fg("dim", `${theme.tree.hook} ${dequeueKey} to select/edit/reorder`);
 			this.ctx.pendingMessagesContainer.addChild(new TruncatedText(hintText, 1, 0));
 		}
 	}

@@ -1,0 +1,144 @@
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -3,7 +3,7 @@
+ on:
+    push:
+       branches: [main]
+-      tags: ["v*"]
++      tags: ["v*", "sayknow-v*"]
+    pull_request:
+       branches: [main]
+    workflow_dispatch:
+@@ -100,7 +100,7 @@
+    # Branch protection must add the always-present `skc-state-gates` status as required.
+    skc-state-gates:
+       name: skc-state-gates
+-      if: ${{ !startsWith(github.ref, 'refs/tags/v') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
++      if: ${{ !(startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/sayknow-v')) && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+       runs-on: ubuntu-22.04
+       timeout-minutes: 15
+       env:
+@@ -129,7 +129,7 @@
+    check:
+       timeout-minutes: 30
+       needs: [relevance]
+-      if: ${{ !startsWith(github.ref, 'refs/tags/v') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
++      if: ${{ !(startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/sayknow-v')) && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+       runs-on: ubuntu-22.04
+       steps:
+          - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+@@ -156,7 +156,7 @@
+       timeout-minutes: 60
+       needs: [rust-hash, relevance]
+       if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) &&
+-         (startsWith(github.ref, 'refs/tags/v') || needs.rust-hash.outputs.run-id == '') }}
++         ((startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/sayknow-v')) || needs.rust-hash.outputs.run-id == '') }}
+       runs-on: ubuntu-22.04
+       strategy:
+          fail-fast: false
+@@ -174,7 +174,7 @@
+               arch: x64
+               variant: ${{ matrix.variant }}
+               rust_checks: ${{ matrix.rust_checks && 'true' || 'false' }}
+-              save_cache: ${{ github.event_name == 'push' && ((github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev') || startsWith(github.ref, 'refs/tags/v')) }}
++              save_cache: ${{ github.event_name == 'push' && ((github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev') || (startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/sayknow-v'))) }}
+ 
+    # Windows-latest smoke for the `bun install -g sayknow-cli` runtime path
+    # (issue #525): build the win32-x64 native addon, then exercise the bun-run
+@@ -185,7 +185,7 @@
+    windows_smoke:
+       timeout-minutes: 60
+       needs: [relevance]
+-      if: ${{ !startsWith(github.ref, 'refs/tags/v') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
++      if: ${{ !(startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/sayknow-v')) && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+       runs-on: windows-latest
+       steps:
+          - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+@@ -207,7 +207,7 @@
+            with:
+               shared-key: windows-smoke-win32-x64
+               cache-on-failure: true
+-              save-if: ${{ github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) }}
++              save-if: ${{ github.event_name == 'push' && (github.ref == 'refs/heads/main' || (startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/sayknow-v'))) }}
+               cache-workspace-crates: true
+          - name: Cache bun dependencies
+            if: needs.relevance.outputs.relevant == 'true'
+@@ -238,7 +238,7 @@
+    native_release:
+       timeout-minutes: 90
+       needs: [rust-hash]
+-      if: ${{ startsWith(github.ref, 'refs/tags/v') }}
++      if: ${{ (startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/sayknow-v')) }}
+       strategy:
+          fail-fast: false
+          matrix:
+@@ -257,13 +257,13 @@
+               arch: ${{ matrix.arch }}
+               variant: ${{ matrix.variant }}
+               target: ${{ matrix.target }}
+-              save_cache: ${{ github.event_name == 'push' && ((github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev') || startsWith(github.ref, 'refs/tags/v')) }}
++              save_cache: ${{ github.event_name == 'push' && ((github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev') || (startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/sayknow-v'))) }}
+ 
+    test:
+       runs-on: ubuntu-22.04
+       needs: [native_linux, rust-hash, relevance]
+       if: ${{ !cancelled() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) &&
+-         !startsWith(github.ref, 'refs/tags/v') && needs.native_linux.result != 'failure' }}
++         !(startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/sayknow-v')) && needs.native_linux.result != 'failure' }}
+       timeout-minutes: 30
+       steps:
+          - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+@@ -319,7 +319,7 @@
+    install_methods:
+       timeout-minutes: 45
+       needs: [relevance]
+-      if: ${{ !startsWith(github.ref, 'refs/tags/v') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
++      if: ${{ !(startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/sayknow-v')) && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+       runs-on: ubuntu-22.04
+       steps:
+          - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+@@ -340,7 +340,7 @@
+               shared-key: install-methods-linux-x64
+               cache-on-failure: true
+               save-if: ${{ github.event_name == 'push' && ((github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev') ||
+-                 startsWith(github.ref, 'refs/tags/v')) }}
++                 (startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/sayknow-v'))) }}
+               cache-workspace-crates: true
+          - name: Cache bun dependencies
+            if: needs.relevance.outputs.relevant == 'true'
+@@ -359,7 +359,7 @@
+ 
+    release_binary:
+       timeout-minutes: 60
+-      if: ${{ always() && startsWith(github.ref, 'refs/tags/v') && !cancelled() &&
++      if: ${{ always() && (startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/sayknow-v')) && !cancelled() &&
+          needs.native_linux.result == 'success' && needs.native_release.result ==
+          'success' && (needs.check.result == 'success' || needs.check.result == 'skipped') }}
+       needs: [check, native_linux, native_release, rust-hash]
+@@ -455,7 +455,7 @@
+       timeout-minutes: 30
+       if: ${{ (github.event_name != 'pull_request' ||
+          github.event.pull_request.head.repo.full_name == github.repository) &&
+-         startsWith(github.ref, 'refs/tags/v') && !cancelled() &&
++         (startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/sayknow-v')) && !cancelled() &&
+          needs.release_binary.result == 'success' }}
+       needs: [release_binary]
+       runs-on: ubuntu-22.04
+@@ -479,7 +479,7 @@
+ 
+    release_github_verify:
+       timeout-minutes: 15
+-      if: ${{ startsWith(github.ref, 'refs/tags/v') && !cancelled() &&
++      if: ${{ (startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/sayknow-v')) && !cancelled() &&
+          needs['release-github'].result == 'success' }}
+       needs: [release-github]
+       runs-on: macos-14
+@@ -500,7 +500,7 @@
+       timeout-minutes: 30
+       if: ${{ (github.event_name != 'pull_request' ||
+          github.event.pull_request.head.repo.full_name == github.repository) &&
+-         startsWith(github.ref, 'refs/tags/v') && !cancelled() &&
++         (startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/sayknow-v')) && !cancelled() &&
+          needs.release_binary.result == 'success' &&
+          needs.release_github_verify.result == 'success' &&
+          !inputs.skip_npm }}

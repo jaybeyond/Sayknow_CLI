@@ -41,7 +41,7 @@ The interface is localized into **7 languages** — English, 한국어 (Korean),
 Français (French), and Deutsch (German). It auto-detects your system locale on
 first run; switch any time in **Settings → Appearance → Language**, or launch
 with e.g. `LANG=ja_JP.UTF-8 skc`. Untranslated strings fall back to English, and
-brand/technical names (Claude, OpenAI, MCP, …) stay verbatim across all locales.
+brand/technical names (Claude, OpenAI, protocol labels, …) stay verbatim across all locales.
 
 ## What is Sayknow-CLI?
 
@@ -205,9 +205,9 @@ No sprawling default skill zoo: SKC improves by making this small method better.
 | Claude Code | `skc --tmux` or `skc --tmux --worktree <name>` | SKC does not become a Claude Code extension. |
 | OpenCode | `skc` or `skc --tmux` | External-runner workflow only today. |
 | Claw Code | `skc --tmux --worktree <name>` | SKC does not install into or replace Claw Code. |
-| External controller / bot | `skc mcp-serve coordinator` plus `skc setup hermes` for compatible config, or `skc --mode rpc` for a subprocess worker | Any MCP/RPC-capable bot drives SKC through the generic coordinator/RPC contract, not scrollback scraping. |
+| External controller / bot | `skc --mode rpc` for a subprocess worker, or the documented coordinator bridge for compatible integrations | Compatible bots drive SKC through an explicit coordinator/RPC contract, not scrollback scraping. |
 
-For generic third-party bot setup and provider-independent smokes, see [`docs/bot-integration.md`](docs/bot-integration.md). For evaluating Aside as an opt-in search/context retrieval sidecar, see [`docs/aside-integration.md`](docs/aside-integration.md). For the readiness classification across MCP, RPC, ACP, and Bridge/HTTPS surfaces, see [`docs/external-control-readiness.md`](docs/external-control-readiness.md). For lower-level protocol details, see [`docs/hermes-mcp-bridge.md`](docs/hermes-mcp-bridge.md), [`docs/rpc.md`](docs/rpc.md), and [`docs/bridge.md`](docs/bridge.md). For the remote operator surfaces roadmap, see [`docs/sayknow-remote.md`](docs/sayknow-remote.md) (web steering wheel) and [`docs/telegram-remote.md`](docs/telegram-remote.md) (Telegram lifecycle button).
+For generic third-party bot setup and provider-independent smokes, see [`docs/bot-integration.md`](docs/bot-integration.md). For evaluating Aside as an opt-in search/context retrieval sidecar, see [`docs/aside-integration.md`](docs/aside-integration.md). For readiness classification across external-control surfaces, see [`docs/external-control-readiness.md`](docs/external-control-readiness.md). For lower-level protocol details, see [`docs/rpc.md`](docs/rpc.md) and [`docs/bridge.md`](docs/bridge.md). For the remote operator surfaces roadmap, see [`docs/sayknow-remote.md`](docs/sayknow-remote.md) (web steering wheel) and [`docs/telegram-remote.md`](docs/telegram-remote.md) (Telegram lifecycle button).
 
 ## Configuration
 

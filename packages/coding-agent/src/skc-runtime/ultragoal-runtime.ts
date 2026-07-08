@@ -6,8 +6,23 @@ import type { WorkflowHudSummary } from "../skill-state/active-state";
 import { buildUltragoalHudSummary as buildWorkflowUltragoalHudSummary } from "../skill-state/workflow-hud";
 import { renderCliWriteReceipt } from "./cli-write-receipt";
 import { DEFAULT_ULTRAGOAL_OBJECTIVE } from "./goal-mode-request";
+import {
+	computeUltragoalPlanGeneration,
+	findFreshBatchCloseReceipt,
+	requiredUltragoalGoals,
+	validateDeferredMemberReceiptFresh,
+	validateReceiptFreshBase,
+} from "./ultragoal-receipt-freshness";
+
+export { computeUltragoalPlanGeneration, receiptRelevantGoals } from "./ultragoal-receipt-freshness";
+
 import { sessionUltragoalDir, skcRoot } from "./session-layout";
-import { resolveSkcSessionForRead, resolveSkcSessionForWrite, writeSessionActivityMarker } from "./session-resolution";
+import {
+	resolveSkcSessionForRead,
+	resolveSkcSessionForWrite,
+	SessionResolutionError,
+	writeSessionActivityMarker,
+} from "./session-resolution";
 import { renderUltragoalStatusMarkdown } from "./state-renderer";
 import { reconcileWorkflowSkillState } from "./state-runtime";
 import {
@@ -28,6 +43,96 @@ export type UltragoalGoalStatus =
 	| "review_blocked"
 	| "superseded";
 
+export type UltragoalPipelineMetadataSource = "original_plan_graph" | "legacy_brief_only" | "steering";
+export type UltragoalPipelineOverlapState =
+	| "none"
+	| "open"
+	| "joined_clean"
+	| "blocked_disjoint_continue"
+	| "quarantine_required"
+	| "rebaseline_complete";
+
+export interface UltragoalPipelineTargets extends JsonObject {
+	files: string[];
+	surfaces: string[];
+}
+
+export interface UltragoalPipelineMetadata extends JsonObject {
+	schemaVersion: 1;
+	goalId: string;
+	source: UltragoalPipelineMetadataSource;
+	eligible: boolean;
+	dependsOn: string[];
+	independentOf: string[];
+	targets: UltragoalPipelineTargets;
+	metadataHash: string;
+	overlap: UltragoalPipelineOverlapState;
+	overlapId?: string;
+	priorGoalId?: string;
+	nextGoalId?: string;
+	blockerFootprints?: UltragoalPipelineTargets[];
+	invalidationReason?: string;
+	invalidatedAt?: string;
+}
+
+export interface UltragoalGoalMetadataInput {
+	schemaVersion: 1;
+	goalId: string;
+	source: UltragoalPipelineMetadataSource;
+	dependsOn?: string[];
+	independentOf?: string[];
+	targets?: Partial<UltragoalPipelineTargets>;
+}
+
+export interface UltragoalValidationBatchMetadata extends JsonObject {
+	schemaVersion: 1;
+	batchId: string;
+	memberIds: string[];
+	finalGoalId: string;
+	mode: "aggregate-only";
+	metadataHash: string;
+}
+
+export interface UltragoalValidationBatchInput {
+	schemaVersion: 1;
+	batchId: string;
+	memberIds: string[];
+	finalGoalId: string;
+}
+
+export interface UltragoalPipelineOverlapHandles extends JsonObject {
+	review: JsonObject;
+	qa: JsonObject;
+	implementation: JsonObject;
+}
+
+export interface UltragoalPipelineOverlapReceipt extends JsonObject {
+	ok: true;
+	event: string;
+	overlap_id: string;
+	prior_goal_id: string;
+	next_goal_id?: string;
+	goal_id?: string;
+	status?: UltragoalPipelineOverlapState;
+	next_goal_status?: UltragoalGoalStatus;
+	goals_path: string;
+	ledger_path: string;
+}
+
+export type UltragoalPipelineLedgerEventName =
+	| "pipeline_overlap_started"
+	| "pipeline_overlap_joined"
+	| "pipeline_overlap_blocked"
+	| "pipeline_overlap_quarantined"
+	| "pipeline_overlap_rebaselined";
+
+export interface UltragoalPipelineLedgerEvent extends UltragoalLedgerEvent {
+	event: UltragoalPipelineLedgerEventName;
+	schemaVersion: 1;
+	overlapId: string;
+	priorGoalId: string;
+	nextGoalId: string;
+}
 export interface UltragoalGoal {
 	id: string;
 	title: string;
@@ -40,6 +145,8 @@ export interface UltragoalGoal {
 	evidence?: string;
 	steering?: Record<string, unknown>;
 	completionVerification?: UltragoalCompletionVerification;
+	pipelineMetadata?: UltragoalPipelineMetadata;
+	validationBatch?: UltragoalValidationBatchMetadata;
 }
 
 export interface UltragoalPlan {
@@ -75,7 +182,36 @@ export interface UltragoalCompletionVerification {
 		requiredGoalSetHashBeforeCheckpoint: string;
 	};
 	checkpointLedgerEventId: string;
+	validationBatch?:
+		| {
+				schemaVersion: 1;
+				role: "deferred-member";
+				batchId: string;
+				memberIds: string[];
+				finalGoalId: string;
+				metadataHash: string;
+				changeSetHash: string;
+		  }
+		| {
+				schemaVersion: 1;
+				role: "batch-close";
+				batchId: string;
+				memberIds: string[];
+				finalGoalId: string;
+				memberMetadataHashes: Record<string, string>;
+				memberReceiptIds: Record<string, string>;
+				memberCheckpointLedgerEventIds: Record<string, string>;
+				memberChangeSetHashes: Record<string, string>;
+				unionHash: string;
+		  };
 }
+
+type UltragoalDeferredCompletionVerification = UltragoalCompletionVerification & {
+	validationBatch: Extract<
+		NonNullable<UltragoalCompletionVerification["validationBatch"]>,
+		{ role: "deferred-member" }
+	>;
+};
 
 export interface UltragoalLedgerEvent extends JsonObject {
 	eventId?: string;
@@ -142,6 +278,7 @@ export interface UltragoalStatusSummary {
 	nudgeRemaining?: number;
 	nudgeGoalId?: string;
 	nudgeTargetKind?: UltragoalNudgeTargetKind;
+	pipelineOverlap?: JsonObject;
 }
 
 export interface UltragoalCommandResult {
@@ -433,119 +570,6 @@ async function writePlan(cwd: string, plan: UltragoalPlan, sessionId?: string | 
 	await writeSessionActivityMarker(cwd, resolvedSessionId, { writer: "ultragoal-runtime", path: paths.goalsPath });
 }
 
-function requiredUltragoalGoals(plan: UltragoalPlan): UltragoalGoal[] {
-	return plan.goals.filter(goal => goal.status !== "superseded");
-}
-
-function receiptRelevantGoals(
-	plan: UltragoalPlan,
-	goal: UltragoalGoal,
-	receiptKind: UltragoalReceiptKind,
-): UltragoalGoal[] {
-	return receiptKind === "final-aggregate" ? requiredUltragoalGoals(plan) : [goal];
-}
-
-function ledgerEventId(event: UltragoalLedgerEvent): string | null {
-	return typeof event.eventId === "string" && event.eventId.trim().length > 0 ? event.eventId : null;
-}
-
-function latestRelevantLedgerEventId(
-	ledger: readonly UltragoalLedgerEvent[],
-	relevantGoalIds: readonly string[],
-	excludeEventId?: string,
-): string | null {
-	const relevant = new Set(relevantGoalIds);
-	for (const event of [...ledger].reverse()) {
-		const eventId = ledgerEventId(event);
-		if (eventId && eventId === excludeEventId) continue;
-		const goalId = typeof event.goalId === "string" ? event.goalId : null;
-		if (!goalId || relevant.has(goalId)) return eventId;
-	}
-	return null;
-}
-
-function planSnapshotForReceipt(input: {
-	plan: UltragoalPlan;
-	goal: UltragoalGoal;
-	beforeStatus: UltragoalGoalStatus;
-	targetGoalUpdatedAt: string;
-	receiptKind: UltragoalReceiptKind;
-}): unknown {
-	const targetGoalSnapshot = {
-		...input.goal,
-		status: input.beforeStatus,
-		updatedAt: input.targetGoalUpdatedAt,
-		evidence: undefined,
-		completedAt: undefined,
-		completionVerification: undefined,
-	};
-	const goals =
-		input.receiptKind === "final-aggregate"
-			? input.plan.goals.map(goal => ({
-					...goal,
-					status: goal.id === input.goal.id ? input.beforeStatus : goal.status,
-					updatedAt: goal.id === input.goal.id ? input.targetGoalUpdatedAt : goal.updatedAt,
-					evidence: goal.id === input.goal.id ? undefined : goal.evidence,
-					completedAt: goal.id === input.goal.id ? undefined : goal.completedAt,
-					completionVerification: undefined,
-				}))
-			: [targetGoalSnapshot];
-	return {
-		version: input.plan.version,
-		brief: input.plan.brief,
-		skcGoalMode: input.plan.skcGoalMode,
-		skcObjective: input.plan.skcObjective,
-		skcObjectiveAliases: input.plan.skcObjectiveAliases,
-		createdAt: input.plan.createdAt,
-		goals,
-	};
-}
-
-export function computeUltragoalPlanGeneration(input: {
-	plan: UltragoalPlan;
-	ledger: readonly UltragoalLedgerEvent[];
-	goal: UltragoalGoal;
-	receiptKind: UltragoalReceiptKind;
-	beforeStatus: UltragoalGoalStatus;
-	excludeEventId?: string;
-	targetGoalUpdatedAt?: string;
-}): {
-	planGeneration: string;
-	basis: UltragoalCompletionVerification["basis"];
-} {
-	const relevantGoals = receiptRelevantGoals(input.plan, input.goal, input.receiptKind);
-	const relevantGoalIds = relevantGoals.map(goal => goal.id);
-	const targetGoalUpdatedAt = input.targetGoalUpdatedAt ?? input.goal.updatedAt;
-	const planHashBeforeCheckpoint = hashStructuredValue(
-		planSnapshotForReceipt({
-			plan: input.plan,
-			goal: input.goal,
-			beforeStatus: input.beforeStatus,
-			targetGoalUpdatedAt,
-			receiptKind: input.receiptKind,
-		}),
-	);
-	const requiredGoalSetHashBeforeCheckpoint = hashStructuredValue(
-		relevantGoals.map(goal => ({
-			id: goal.id,
-			status: goal.id === input.goal.id ? input.beforeStatus : goal.status,
-			updatedAt: goal.id === input.goal.id ? targetGoalUpdatedAt : goal.updatedAt,
-		})),
-	);
-	const basis: UltragoalCompletionVerification["basis"] = {
-		planHashBeforeCheckpoint,
-		latestRelevantLedgerEventIdBeforeCheckpoint: latestRelevantLedgerEventId(
-			input.ledger,
-			relevantGoalIds,
-			input.excludeEventId,
-		),
-		goalUpdatedAtBeforeCheckpoint: targetGoalUpdatedAt,
-		relevantGoalIdsBeforeCheckpoint: relevantGoalIds,
-		requiredGoalSetHashBeforeCheckpoint,
-	};
-	return { planGeneration: hashStructuredValue(basis), basis };
-}
-
 function chooseReceiptKind(
 	plan: UltragoalPlan,
 	goal: UltragoalGoal,
@@ -553,7 +577,12 @@ function chooseReceiptKind(
 ): UltragoalReceiptKind {
 	if (plan.skcGoalMode === "per-story") return "per-goal";
 	if (status !== "complete") return "per-goal";
-	const unfinishedRequiredGoals = requiredUltragoalGoals(plan).filter(
+	const requiredGoals = requiredUltragoalGoals(plan);
+	const existingFinalAggregateGoal = requiredGoals.find(
+		item => item.id !== goal.id && item.completionVerification?.receiptKind === "final-aggregate",
+	);
+	if (existingFinalAggregateGoal) return "per-goal";
+	const unfinishedRequiredGoals = requiredGoals.filter(
 		item => item.id !== goal.id && !TERMINAL_OR_SKIPPED_STATUSES.has(item.status),
 	);
 	return unfinishedRequiredGoals.length === 0 ? "final-aggregate" : "per-goal";
@@ -578,6 +607,54 @@ function buildCompletionReceipt(input: {
 		targetGoalUpdatedAt: input.now,
 		excludeEventId: input.checkpointLedgerEventId,
 	});
+	let validationBatch: UltragoalCompletionVerification["validationBatch"];
+	if (input.goal.validationBatch) {
+		if (input.goal.id !== input.goal.validationBatch.finalGoalId) {
+			const deferred = qualityGateObject(input.qualityGateJson.deferredToBatch);
+			const changeSet = qualityGateObject(deferred?.changeSet);
+			validationBatch = {
+				schemaVersion: 1,
+				role: "deferred-member",
+				batchId: input.goal.validationBatch.batchId,
+				memberIds: [...input.goal.validationBatch.memberIds],
+				finalGoalId: input.goal.validationBatch.finalGoalId,
+				metadataHash: input.goal.validationBatch.metadataHash,
+				changeSetHash: String(changeSet?.changeSetHash ?? ""),
+			};
+		} else {
+			const close = qualityGateObject(input.qualityGateJson.validationBatchClose);
+			const union = qualityGateObject(close?.unionChangeSet);
+			const memberReceiptIds: Record<string, string> = {};
+			const memberCheckpointLedgerEventIds: Record<string, string> = {};
+			const rows = Array.isArray(close?.memberReceipts) ? close.memberReceipts : [];
+			for (const row of rows) {
+				if (typeof row === "object" && row !== null && !Array.isArray(row)) {
+					const record = row as JsonObject;
+					const goalId = nonEmptyString(record.goalId);
+					if (goalId) {
+						memberReceiptIds[goalId] = String(record.receiptId ?? "");
+						memberCheckpointLedgerEventIds[goalId] = String(record.checkpointLedgerEventId ?? "");
+					}
+				}
+			}
+			validationBatch = {
+				schemaVersion: 1,
+				role: "batch-close",
+				batchId: input.goal.validationBatch.batchId,
+				memberIds: [...input.goal.validationBatch.memberIds],
+				finalGoalId: input.goal.validationBatch.finalGoalId,
+				memberMetadataHashes: {
+					...(qualityGateObject(close?.memberMetadataHashes) as Record<string, string> | undefined),
+				},
+				memberReceiptIds,
+				memberCheckpointLedgerEventIds,
+				memberChangeSetHashes: {
+					...(qualityGateObject(union?.memberChangeSetHashes) as Record<string, string> | undefined),
+				},
+				unionHash: String(union?.unionHash ?? ""),
+			};
+		}
+	}
 	return {
 		schemaVersion: 1,
 		receiptId: crypto.randomUUID(),
@@ -591,11 +668,560 @@ function buildCompletionReceipt(input: {
 		planGeneration: generation.planGeneration,
 		basis: generation.basis,
 		checkpointLedgerEventId: input.checkpointLedgerEventId,
+		validationBatch,
 	};
 }
 
 function nonEmptyString(value: unknown): string | null {
 	return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
+}
+function stringArray(value: unknown): string[] | null {
+	return Array.isArray(value) && value.every(item => typeof item === "string") ? value.map(item => item.trim()) : null;
+}
+
+function normalizePipelineStringArray(value: unknown, fieldName: string): string[] {
+	const items = stringArray(value) ?? [];
+	const filtered = items.filter(item => item.length > 0);
+	if (items.length !== filtered.length) throw new Error(`${fieldName} must contain only non-empty strings`);
+	return filtered;
+}
+
+function normalizePipelinePath(value: string, fieldName: string): string {
+	const raw = value.trim();
+	if (raw.split(/[\\/]+/).includes("..")) throw new Error(`${fieldName} contains unsafe path ${value}`);
+	const normalized = normalizeRepoPath(raw);
+	if (
+		!normalized ||
+		normalized.startsWith("../") ||
+		normalized === ".." ||
+		path.isAbsolute(normalized) ||
+		normalized.includes("\0")
+	) {
+		throw new Error(`${fieldName} contains unsafe path ${value}`);
+	}
+	return normalized;
+}
+
+function normalizePipelineTargets(value: unknown, fieldName: string): UltragoalPipelineTargets {
+	const record = typeof value === "object" && value !== null && !Array.isArray(value) ? (value as JsonObject) : {};
+	const files = normalizePipelineStringArray(record.files, `${fieldName}.files`).map(item =>
+		normalizePipelinePath(item, `${fieldName}.files`),
+	);
+	const surfaces = normalizePipelineStringArray(record.surfaces, `${fieldName}.surfaces`).map(normalizeSurfaceToken);
+	if (new Set(files).size !== files.length) throw new Error(`${fieldName}.files contains duplicate normalized paths`);
+	if (new Set(surfaces).size !== surfaces.length)
+		throw new Error(`${fieldName}.surfaces contains duplicate normalized surfaces`);
+	return { files, surfaces };
+}
+
+function pipelineMetadataHashBasis(metadata: Omit<UltragoalPipelineMetadata, "metadataHash">): JsonObject {
+	return {
+		schemaVersion: metadata.schemaVersion,
+		goalId: metadata.goalId,
+		source: metadata.source,
+		dependsOn: metadata.dependsOn,
+		independentOf: metadata.independentOf,
+		targets: metadata.targets,
+	};
+}
+
+function hashPipelineMetadata(metadata: Omit<UltragoalPipelineMetadata, "metadataHash">): string {
+	return hashStructuredValue(pipelineMetadataHashBasis(metadata));
+}
+
+function withPipelineMetadataHash(
+	metadata: Omit<UltragoalPipelineMetadata, "metadataHash">,
+): UltragoalPipelineMetadata {
+	return { ...metadata, metadataHash: hashPipelineMetadata(metadata) } as UltragoalPipelineMetadata;
+}
+function validationBatchHashBasis(metadata: Omit<UltragoalValidationBatchMetadata, "metadataHash">): JsonObject {
+	return {
+		schemaVersion: metadata.schemaVersion,
+		batchId: metadata.batchId,
+		memberIds: metadata.memberIds,
+		finalGoalId: metadata.finalGoalId,
+		mode: metadata.mode,
+	};
+}
+
+function hashValidationBatch(metadata: Omit<UltragoalValidationBatchMetadata, "metadataHash">): string {
+	return hashStructuredValue(validationBatchHashBasis(metadata));
+}
+
+function withValidationBatchHash(
+	metadata: Omit<UltragoalValidationBatchMetadata, "metadataHash">,
+): UltragoalValidationBatchMetadata {
+	return { ...metadata, metadataHash: hashValidationBatch(metadata) } as UltragoalValidationBatchMetadata;
+}
+
+function parseValidationBatchInput(
+	value: unknown,
+	goalIds: ReadonlySet<string>,
+	skcGoalMode: UltragoalSkcGoalMode,
+): UltragoalValidationBatchMetadata[] {
+	if (!Array.isArray(value)) throw new Error("validation batch JSON must be an array");
+	if (value.length === 0) return [];
+	if (skcGoalMode !== "aggregate") throw new Error("validation batches require aggregate ultragoal mode");
+	const goalOrder = new Map([...goalIds].map((id, index) => [id, index]));
+	const assigned = new Set<string>();
+	const batches: UltragoalValidationBatchMetadata[] = [];
+	for (const row of value) {
+		if (typeof row !== "object" || row === null || Array.isArray(row))
+			throw new Error("validation batch rows must be objects");
+		const record = row as JsonObject;
+		if (record.schemaVersion !== 1) throw new Error("validation batch schemaVersion must be 1");
+		const batchId = nonEmptyString(record.batchId);
+		if (!batchId) throw new Error("validation batch batchId is required");
+		const finalGoalId = nonEmptyString(record.finalGoalId);
+		if (!finalGoalId || !goalIds.has(finalGoalId))
+			throw new Error(`validation batch ${batchId} references unknown finalGoalId ${finalGoalId ?? ""}`);
+		const memberIds = stringArray(record.memberIds);
+		if (!memberIds || memberIds.length === 0)
+			throw new Error(`validation batch ${batchId} memberIds must be non-empty`);
+		if (memberIds.some(id => id.length === 0))
+			throw new Error(`validation batch ${batchId} memberIds must contain only non-empty strings`);
+		if (new Set(memberIds).size !== memberIds.length)
+			throw new Error(`validation batch ${batchId} contains duplicate memberIds`);
+		for (const memberId of memberIds) {
+			if (!goalIds.has(memberId))
+				throw new Error(`validation batch ${batchId} references unknown member ${memberId}`);
+			if (assigned.has(memberId)) throw new Error(`Goal ${memberId} belongs to more than one validation batch`);
+		}
+		if (!memberIds.includes(finalGoalId))
+			throw new Error(`validation batch ${batchId} memberIds must contain finalGoalId ${finalGoalId}`);
+		for (const memberId of memberIds) assigned.add(memberId);
+		const canonicalMemberIds = [...memberIds].sort(
+			(left, right) => (goalOrder.get(left) ?? 0) - (goalOrder.get(right) ?? 0),
+		);
+		batches.push(
+			withValidationBatchHash({
+				schemaVersion: 1,
+				batchId,
+				memberIds: canonicalMemberIds,
+				finalGoalId,
+				mode: "aggregate-only",
+			}),
+		);
+	}
+	return batches;
+}
+
+function normalizeSavedValidationBatch(record: unknown, id: string): UltragoalValidationBatchMetadata | undefined {
+	if (typeof record !== "object" || record === null || Array.isArray(record)) return undefined;
+	const value = record as JsonObject;
+	if (value.schemaVersion !== 1) throw new Error(`Goal ${id} validation batch schemaVersion must be 1`);
+	const batchId = nonEmptyString(value.batchId);
+	if (!batchId) throw new Error(`Goal ${id} validation batch batchId is required`);
+	const memberIds = stringArray(value.memberIds);
+	if (!memberIds || memberIds.length === 0) throw new Error(`Goal ${id} validation batch memberIds must be non-empty`);
+	if (new Set(memberIds).size !== memberIds.length || memberIds.some(memberId => memberId.length === 0)) {
+		throw new Error(`Goal ${id} validation batch memberIds must be unique non-empty strings`);
+	}
+	if (!memberIds.includes(id)) throw new Error(`Goal ${id} validation batch must include its goal id`);
+	const finalGoalId = nonEmptyString(value.finalGoalId);
+	if (!finalGoalId || !memberIds.includes(finalGoalId))
+		throw new Error(`Goal ${id} validation batch finalGoalId must be a member`);
+	if (value.mode !== "aggregate-only") throw new Error(`Goal ${id} validation batch mode must be aggregate-only`);
+	const basis: Omit<UltragoalValidationBatchMetadata, "metadataHash"> = {
+		schemaVersion: 1,
+		batchId,
+		memberIds,
+		finalGoalId,
+		mode: "aggregate-only",
+	};
+	const metadataHash = nonEmptyString(value.metadataHash);
+	if (!metadataHash) throw new Error(`Goal ${id} validation batch metadataHash is required`);
+	const normalized = { ...basis, metadataHash } as UltragoalValidationBatchMetadata;
+	if (metadataHash !== hashValidationBatch(basis))
+		throw new Error(`Goal ${id} has stale validation batch metadata hash`);
+	return normalized;
+}
+
+function pipelineMetadataConflictsWithValidationBatch(metadata: UltragoalPipelineMetadata | undefined): boolean {
+	return metadata?.eligible === true || metadata?.source === "original_plan_graph" || metadata?.source === "steering";
+}
+
+function validateValidationBatchPipelineExclusion(goal: UltragoalGoal): void {
+	if (goal.validationBatch && pipelineMetadataConflictsWithValidationBatch(goal.pipelineMetadata)) {
+		throw new Error(`Goal ${goal.id} cannot combine validationBatch with eligible pipeline metadata`);
+	}
+}
+function requireFreshValidationBatchMetadata(goal: UltragoalGoal): UltragoalValidationBatchMetadata | undefined {
+	const metadata = goal.validationBatch;
+	if (!metadata) return undefined;
+	const { metadataHash, ...basis } = metadata;
+	if (metadataHash !== hashValidationBatch(basis))
+		throw new Error(`Goal ${goal.id} has stale validation batch metadata hash`);
+	validateValidationBatchPipelineExclusion(goal);
+	return metadata;
+}
+
+function findFreshValidationBatchClose(
+	plan: UltragoalPlan,
+	metadata: UltragoalValidationBatchMetadata,
+	member: UltragoalGoal,
+	ledger: readonly UltragoalLedgerEvent[],
+): UltragoalGoal | undefined {
+	const receipt = member.completionVerification;
+	if (!receipt) return undefined;
+	const finalReceipt = findFreshBatchCloseReceipt({ plan, ledger, deferredGoal: member, deferredReceipt: receipt });
+	if (!finalReceipt) return undefined;
+	const finalGoal = plan.goals.find(goal => goal.id === metadata.finalGoalId);
+	const close = finalReceipt.validationBatch;
+	if (!finalGoal || close?.role !== "batch-close") return undefined;
+	if (close.batchId !== metadata.batchId || close.finalGoalId !== metadata.finalGoalId) return undefined;
+	if (
+		close.memberIds.length !== metadata.memberIds.length ||
+		close.memberIds.some((id, index) => id !== metadata.memberIds[index])
+	)
+		return undefined;
+	if (close.memberMetadataHashes[member.id] !== metadata.metadataHash) return undefined;
+	return finalGoal;
+}
+
+function requireDeferredMemberReceiptFresh(
+	plan: UltragoalPlan,
+	ledger: readonly UltragoalLedgerEvent[],
+	member: UltragoalGoal,
+	fieldName: string,
+): UltragoalDeferredCompletionVerification {
+	const receipt = member.completionVerification;
+	if (!receipt) throw new Error(`${fieldName} requires fresh deferred receipt for ${member.id}`);
+	if (receipt.validationBatch?.role !== "deferred-member")
+		throw new Error(`${fieldName} requires fresh deferred receipt for ${member.id}`);
+	const diagnostic = validateDeferredMemberReceiptFresh({
+		plan,
+		ledger,
+		goal: member,
+		receipt,
+		receiptKind: "per-goal",
+		requireClose: false,
+	});
+	if (diagnostic.state !== "active_verified_complete")
+		throw new Error(`${fieldName}.${member.id} ${diagnostic.message}`);
+	return receipt as UltragoalDeferredCompletionVerification;
+}
+
+function requireFreshBatchCloseReceiptBasis(
+	plan: UltragoalPlan,
+	ledger: readonly UltragoalLedgerEvent[],
+	goal: UltragoalGoal,
+	receipt: UltragoalCompletionVerification,
+	event: UltragoalLedgerEvent,
+): void {
+	const batch = receipt.validationBatch;
+	if (batch?.role !== "batch-close") return;
+	const base = validateReceiptFreshBase({ plan, ledger, goal, receipt, receiptKind: receipt.receiptKind });
+	if (base) throw new Error(base.message);
+	for (const memberId of batch.memberIds) {
+		const member = plan.goals.find(item => item.id === memberId);
+		if (
+			!member?.validationBatch ||
+			member.validationBatch.batchId !== batch.batchId ||
+			member.validationBatch.metadataHash !== batch.memberMetadataHashes[memberId]
+		) {
+			throw new Error(`Goal ${goal.id} has stale validation batch close receipt for ${batch.batchId}`);
+		}
+		if (memberId === batch.finalGoalId) continue;
+		const memberReceipt = requireDeferredMemberReceiptFresh(
+			plan,
+			ledger,
+			member,
+			`Goal ${goal.id} batch-close receipt`,
+		);
+		if (
+			batch.memberReceiptIds[memberId] !== memberReceipt.receiptId ||
+			batch.memberCheckpointLedgerEventIds[memberId] !== memberReceipt.checkpointLedgerEventId ||
+			batch.memberChangeSetHashes[memberId] !== memberReceipt.validationBatch!.changeSetHash
+		) {
+			throw new Error(`Goal ${goal.id} batch-close receipt is stale for deferred member ${memberId}`);
+		}
+	}
+	const close = qualityGateObject(qualityGateObject(event.qualityGateJson)?.validationBatchClose);
+	const unionHash = String(qualityGateObject(close?.unionChangeSet)?.unionHash ?? "");
+	if (batch.unionHash !== unionHash)
+		throw new Error(`Goal ${goal.id} validation batch close receipt union hash is stale`);
+}
+
+function clearValidationBatchForBatch(
+	plan: UltragoalPlan,
+	metadata: UltragoalValidationBatchMetadata | undefined,
+): void {
+	if (!metadata) return;
+	for (const member of plan.goals) {
+		if (member.validationBatch?.batchId === metadata.batchId) delete member.validationBatch;
+	}
+}
+
+function freshDeferredValidationBatchBlocker(
+	plan: UltragoalPlan,
+	metadata: UltragoalValidationBatchMetadata,
+	ledger: readonly UltragoalLedgerEvent[],
+): UltragoalGoal | undefined {
+	for (const memberId of metadata.memberIds) {
+		const member = plan.goals.find(goal => goal.id === memberId);
+		if (!member?.validationBatch || member.status !== "complete") continue;
+		try {
+			requireDeferredMemberReceiptFresh(plan, ledger, member, "validation batch steering");
+		} catch {
+			continue;
+		}
+		if (!findFreshValidationBatchClose(plan, member.validationBatch, member, ledger)) return member;
+	}
+	return undefined;
+}
+
+function requireValidationBatchSteeringAllowed(
+	plan: UltragoalPlan,
+	goal: UltragoalGoal,
+	kind: UltragoalSteeringKind,
+	ledger: readonly UltragoalLedgerEvent[],
+): void {
+	const metadata = goal.validationBatch;
+	if (!metadata) return;
+	const blocker = freshDeferredValidationBatchBlocker(plan, metadata, ledger);
+	if (blocker)
+		throw new Error(
+			`steer ${kind} cannot invalidate validation batch ${metadata.batchId} while member ${blocker.id} has a fresh deferred receipt`,
+		);
+}
+function legacyPipelineMetadata(goalId: string): UltragoalPipelineMetadata {
+	const basis: Omit<UltragoalPipelineMetadata, "metadataHash"> = {
+		schemaVersion: 1,
+		goalId,
+		source: "legacy_brief_only",
+		eligible: false,
+		dependsOn: [],
+		independentOf: [],
+		targets: { files: [], surfaces: [] },
+		overlap: "none",
+		invalidationReason: "missing_pipeline_metadata",
+	};
+	return withPipelineMetadataHash(basis);
+}
+
+function normalizePipelineMetadataRecord(value: unknown, goalIds: ReadonlySet<string>): UltragoalPipelineMetadata {
+	if (typeof value !== "object" || value === null || Array.isArray(value))
+		throw new Error("goal metadata rows must be objects");
+	const record = value as JsonObject;
+	if (record.schemaVersion !== 1) throw new Error("goal metadata schemaVersion must be 1");
+	const goalId = nonEmptyString(record.goalId);
+	if (!goalId || !goalIds.has(goalId)) throw new Error(`goal metadata references unknown goal id ${goalId ?? ""}`);
+	const source = record.source;
+	if (source !== "original_plan_graph" && source !== "legacy_brief_only" && source !== "steering") {
+		throw new Error("goal metadata source must be original_plan_graph, legacy_brief_only, or steering");
+	}
+	const dependsOn = normalizePipelineStringArray(record.dependsOn, `metadata ${goalId}.dependsOn`);
+	const independentOf = normalizePipelineStringArray(record.independentOf, `metadata ${goalId}.independentOf`);
+	if (dependsOn.includes(goalId) || independentOf.includes(goalId))
+		throw new Error(`goal metadata ${goalId} cannot reference itself`);
+	for (const id of [...dependsOn, ...independentOf]) {
+		if (!goalIds.has(id)) throw new Error(`goal metadata ${goalId} references unknown goal id ${id}`);
+	}
+	if (dependsOn.some(id => independentOf.includes(id)))
+		throw new Error(`goal metadata ${goalId} has dependency/independence conflict`);
+	const targets = requireNonEmptyPipelineTargets(record.targets, `metadata ${goalId}.targets`);
+	const basis: Omit<UltragoalPipelineMetadata, "metadataHash"> = {
+		schemaVersion: 1,
+		goalId,
+		source,
+		eligible: false,
+		dependsOn,
+		independentOf,
+		targets,
+		overlap: "none",
+	};
+	return withPipelineMetadataHash(basis);
+}
+
+function targetsAreDisjoint(left: UltragoalPipelineTargets, right: UltragoalPipelineTargets): boolean {
+	return (
+		left.files.every(file => !right.files.includes(file)) &&
+		left.surfaces.every(surface => !right.surfaces.includes(surface))
+	);
+}
+
+function targetsOverlap(left: UltragoalPipelineTargets, right: UltragoalPipelineTargets): boolean {
+	return (
+		left.files.some(file => right.files.includes(file)) ||
+		left.surfaces.some(surface => right.surfaces.includes(surface))
+	);
+}
+
+function requireNonEmptyPipelineTargets(value: unknown, fieldName: string): UltragoalPipelineTargets {
+	const targets = normalizePipelineTargets(value, fieldName);
+	if (targets.files.length === 0 && targets.surfaces.length === 0)
+		throw new Error(`${fieldName} requires files or surfaces`);
+	return targets;
+}
+
+function collectPipelineBlockerFootprints(result: JsonObject, fieldName: string): UltragoalPipelineTargets[] {
+	const raw = Array.isArray(result.blockers)
+		? result.blockers
+		: Array.isArray(result.blockerFootprints)
+			? result.blockerFootprints
+			: [];
+	return raw.map((item, index) => {
+		const record = requireJsonObjectValue(item, `${fieldName}.blockers[${index}]`);
+		const footprint = typeof record.footprint === "object" && record.footprint !== null ? record.footprint : record;
+		return requireNonEmptyPipelineTargets(footprint, `${fieldName}.blockers[${index}].footprint`);
+	});
+}
+
+function pipelineTargetsCoverPath(targets: UltragoalPipelineTargets, filePath: string): boolean {
+	const normalized = normalizeRepoPath(filePath);
+	return targets.files.some(target => normalized === target || normalized.startsWith(`${target}/`));
+}
+
+function pipelinePeer(plan: UltragoalPlan, metadata: UltragoalPipelineMetadata): UltragoalGoal | undefined {
+	const peerId = metadata.goalId === metadata.priorGoalId ? metadata.nextGoalId : metadata.priorGoalId;
+	return peerId ? plan.goals.find(goal => goal.id === peerId) : undefined;
+}
+
+function handleIdsFromValue(value: JsonObject | JsonObject[], fieldName: string): string[] {
+	const records = Array.isArray(value) ? value : [value];
+	const ids = records.map(
+		(record, index) =>
+			nonEmptyString(record.id) ??
+			nonEmptyString(record.handleId) ??
+			nonEmptyString(record.name) ??
+			`${fieldName}-${index}`,
+	);
+	if (ids.some(id => id.length === 0)) throw new Error(`${fieldName} handles require ids`);
+	return ids;
+}
+
+function resultHandleIds(value: JsonObject, fieldName: string): string[] {
+	const ids = stringArray(value.handleIds) ?? stringArray(value.handles) ?? [];
+	if (ids.length === 0) throw new Error(`${fieldName} requires handleIds`);
+	return ids;
+}
+
+function requireCoveredHandles(expected: readonly string[], actual: readonly string[], fieldName: string): void {
+	const missing = expected.filter(id => !actual.includes(id));
+	if (missing.length > 0) throw new Error(`${fieldName} is missing handle coverage for ${missing.join(", ")}`);
+}
+
+function validatePipelineEligibility(metadata: UltragoalPipelineMetadata[]): UltragoalPipelineMetadata[] {
+	const byId = new Map(metadata.map(item => [item.goalId, item]));
+	return metadata.map(item => {
+		const invalidationReasons: string[] = [];
+		if (item.source !== "original_plan_graph") invalidationReasons.push("not_original_plan_graph");
+		if (item.targets.files.length === 0 && item.targets.surfaces.length === 0)
+			invalidationReasons.push("empty_targets");
+		for (const otherId of item.independentOf) {
+			const other = byId.get(otherId);
+			if (!other?.independentOf.includes(item.goalId))
+				invalidationReasons.push(`missing_symmetric_independence:${otherId}`);
+			if (other && !targetsAreDisjoint(item.targets, other.targets))
+				invalidationReasons.push(`shared_targets:${otherId}`);
+		}
+		const eligible = invalidationReasons.length === 0;
+		return {
+			...item,
+			eligible,
+			...(eligible ? {} : { invalidationReason: invalidationReasons.join(",") || "ineligible" }),
+		};
+	});
+}
+
+function parseGoalMetadataInput(value: unknown, goalIds: ReadonlySet<string>): UltragoalPipelineMetadata[] {
+	if (!Array.isArray(value)) throw new Error("goal metadata JSON must be an array");
+	const seen = new Set<string>();
+	const metadata = value.map(row => {
+		const item = normalizePipelineMetadataRecord(row, goalIds);
+		if (seen.has(item.goalId)) throw new Error(`duplicate goal metadata for ${item.goalId}`);
+		seen.add(item.goalId);
+		return item;
+	});
+	return validatePipelineEligibility(metadata);
+}
+function normalizeSavedPipelineMetadata(value: unknown, goalId: string): UltragoalPipelineMetadata | undefined {
+	if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+	const record = value as JsonObject;
+	const source =
+		record.source === "original_plan_graph" || record.source === "legacy_brief_only" || record.source === "steering"
+			? record.source
+			: "legacy_brief_only";
+	const overlap =
+		record.overlap === "open" ||
+		record.overlap === "joined_clean" ||
+		record.overlap === "blocked_disjoint_continue" ||
+		record.overlap === "quarantine_required" ||
+		record.overlap === "rebaseline_complete"
+			? record.overlap
+			: "none";
+	const basis: Omit<UltragoalPipelineMetadata, "metadataHash"> = {
+		schemaVersion: 1,
+		goalId,
+		source,
+		eligible: record.eligible === true,
+		dependsOn: normalizePipelineStringArray(record.dependsOn, `metadata ${goalId}.dependsOn`),
+		independentOf: normalizePipelineStringArray(record.independentOf, `metadata ${goalId}.independentOf`),
+		targets: normalizePipelineTargets(record.targets, `metadata ${goalId}.targets`),
+		overlap,
+		...(nonEmptyString(record.overlapId) ? { overlapId: nonEmptyString(record.overlapId)! } : {}),
+		...(nonEmptyString(record.priorGoalId) ? { priorGoalId: nonEmptyString(record.priorGoalId)! } : {}),
+		...(nonEmptyString(record.nextGoalId) ? { nextGoalId: nonEmptyString(record.nextGoalId)! } : {}),
+		...(Array.isArray(record.blockerFootprints)
+			? {
+					blockerFootprints: record.blockerFootprints.map((item, index) =>
+						normalizePipelineTargets(item, `metadata ${goalId}.blockerFootprints[${index}]`),
+					),
+				}
+			: {}),
+		...(nonEmptyString(record.invalidationReason)
+			? { invalidationReason: nonEmptyString(record.invalidationReason)! }
+			: {}),
+		...(nonEmptyString(record.invalidatedAt) ? { invalidatedAt: nonEmptyString(record.invalidatedAt)! } : {}),
+	};
+	return {
+		...basis,
+		metadataHash: nonEmptyString(record.metadataHash) ?? hashPipelineMetadata(basis),
+	} as UltragoalPipelineMetadata;
+}
+
+function currentPipelineHash(metadata: UltragoalPipelineMetadata): string {
+	return hashPipelineMetadata(metadata);
+}
+
+function requireFreshPipelineMetadata(goal: UltragoalGoal): UltragoalPipelineMetadata {
+	const metadata = goal.pipelineMetadata;
+	if (!metadata) throw new Error(`Goal ${goal.id} has no pipeline metadata`);
+	if (metadata.metadataHash !== currentPipelineHash(metadata))
+		throw new Error(`Goal ${goal.id} has stale pipeline metadata hash`);
+	return metadata;
+}
+
+function openPipelineOverlap(
+	plan: UltragoalPlan,
+): { prior: UltragoalGoal; next: UltragoalGoal; overlapId: string } | null {
+	const openGoals = plan.goals.filter(goal => goal.pipelineMetadata?.overlap === "open");
+	if (openGoals.length === 0) return null;
+	const overlapId = openGoals[0]?.pipelineMetadata?.overlapId;
+	if (!overlapId) return null;
+	const peers = openGoals.filter(goal => goal.pipelineMetadata?.overlapId === overlapId);
+	if (peers.length !== 2) return null;
+	const prior = peers[0];
+	const next = peers[1];
+	if (!prior || !next) return null;
+	return { prior, next, overlapId };
+}
+
+function invalidatePipelineMetadata(goal: UltragoalGoal, reason: string, now: string): void {
+	const basis: Omit<UltragoalPipelineMetadata, "metadataHash"> = {
+		schemaVersion: 1,
+		goalId: goal.id,
+		source: goal.pipelineMetadata?.source ?? "steering",
+		eligible: false,
+		dependsOn: goal.pipelineMetadata?.dependsOn ?? [],
+		independentOf: goal.pipelineMetadata?.independentOf ?? [],
+		targets: goal.pipelineMetadata?.targets ?? { files: [], surfaces: [] },
+		overlap: "none",
+		invalidationReason: reason,
+		invalidatedAt: now,
+	};
+	goal.pipelineMetadata = withPipelineMetadataHash(basis);
 }
 
 function normalizeGoalStatus(value: unknown): UltragoalGoalStatus {
@@ -638,6 +1264,8 @@ function normalizePlan(raw: unknown): UltragoalPlan {
 		const title = nonEmptyString(goalRecord.title) ?? id;
 		const objective = nonEmptyString(goalRecord.objective) ?? title;
 		const goalCreatedAt = nonEmptyString(goalRecord.createdAt) ?? createdAt;
+		const pipelineMetadata = normalizeSavedPipelineMetadata(goalRecord.pipelineMetadata, id);
+		const validationBatch = normalizeSavedValidationBatch(goalRecord.validationBatch, id);
 		return {
 			...goalRecord,
 			id,
@@ -657,6 +1285,8 @@ function normalizePlan(raw: unknown): UltragoalPlan {
 				typeof goalRecord.completionVerification === "object" && goalRecord.completionVerification !== null
 					? (goalRecord.completionVerification as UltragoalCompletionVerification)
 					: undefined,
+			pipelineMetadata,
+			validationBatch,
 		};
 	});
 	const aliases = Array.isArray(record.skcObjectiveAliases)
@@ -713,6 +1343,7 @@ export async function getUltragoalStatus(cwd: string, sessionId?: string | null)
 	if (!plan) return { exists: false, status: "missing", paths, counts, goals: [] };
 	for (const goal of plan.goals) counts[goal.status] += 1;
 	const currentGoal = plan.goals.find(goal => SCHEDULABLE_STATUSES.has(goal.status));
+	const overlap = openPipelineOverlap(plan);
 	let status: UltragoalStatusSummary["status"] = "pending";
 	if (plan.goals.length > 0 && plan.goals.every(goal => TERMINAL_OR_SKIPPED_STATUSES.has(goal.status)))
 		status = "complete";
@@ -742,6 +1373,16 @@ export async function getUltragoalStatus(cwd: string, sessionId?: string | null)
 		counts,
 		goals: plan.goals,
 		...nudgeFields,
+		...(overlap
+			? {
+					pipelineOverlap: {
+						overlapId: overlap.overlapId,
+						priorGoalId: overlap.prior.id,
+						nextGoalId: overlap.next.id,
+						status: overlap.next.pipelineMetadata?.overlap,
+					},
+				}
+			: {}),
 	};
 }
 export function buildUltragoalHudSummary(
@@ -816,6 +1457,10 @@ export async function createUltragoalPlan(input: {
 	brief: string;
 	skcGoalMode?: UltragoalSkcGoalMode;
 	sessionId?: string | null;
+	goalMetadata?: UltragoalGoalMetadataInput[];
+	goalMetadataJson?: string;
+	validationBatches?: UltragoalValidationBatchInput[];
+	validationBatchJson?: string;
 }): Promise<UltragoalPlan> {
 	const brief = input.brief.trim();
 	if (!brief) throw new Error("ultragoal brief is required");
@@ -831,6 +1476,33 @@ export async function createUltragoalPlan(input: {
 		createdAt: now,
 		updatedAt: now,
 	}));
+	const goalIds = new Set(goals.map(goal => goal.id));
+	const metadataInput = input.goalMetadataJson
+		? await readStructuredValue(input.cwd, input.goalMetadataJson)
+		: input.goalMetadata;
+	const validationBatchInput = input.validationBatchJson
+		? await readStructuredValue(input.cwd, input.validationBatchJson)
+		: input.validationBatches;
+	if (metadataInput !== undefined && validationBatchInput !== undefined) {
+		const metadataRows = Array.isArray(metadataInput) ? metadataInput : [];
+		const batchRows = Array.isArray(validationBatchInput) ? validationBatchInput : [];
+		if (metadataRows.length > 0 && batchRows.length > 0)
+			throw new Error("validation-batch-json and goal-metadata-json are mutually exclusive");
+	}
+	const metadata = metadataInput === undefined ? [] : parseGoalMetadataInput(metadataInput, goalIds);
+	const validationBatches =
+		validationBatchInput === undefined
+			? []
+			: parseValidationBatchInput(validationBatchInput, goalIds, input.skcGoalMode ?? "aggregate");
+	const metadataByGoalId = new Map(metadata.map(item => [item.goalId, item]));
+	const validationBatchByGoalId = new Map<string, UltragoalValidationBatchMetadata>();
+	for (const batch of validationBatches)
+		for (const memberId of batch.memberIds) validationBatchByGoalId.set(memberId, batch);
+	for (const goal of goals) {
+		goal.pipelineMetadata = metadataByGoalId.get(goal.id) ?? legacyPipelineMetadata(goal.id);
+		goal.validationBatch = validationBatchByGoalId.get(goal.id);
+		validateValidationBatchPipelineExclusion(goal);
+	}
 	const plan: UltragoalPlan = {
 		version: 1,
 		brief,
@@ -859,6 +1531,305 @@ export interface UltragoalRunCompletionState {
 	allComplete: boolean;
 	hasBlockers: boolean;
 	needsFinalAggregateReceipt: boolean;
+}
+function requireJsonObjectValue(value: unknown, fieldName: string): JsonObject {
+	if (typeof value !== "object" || value === null || Array.isArray(value))
+		throw new Error(`${fieldName} must be an object`);
+	if (Object.keys(value).length === 0) throw new Error(`${fieldName} must be non-empty`);
+	return value as JsonObject;
+}
+
+function requireJsonObjectOrArrayValue(value: unknown, fieldName: string): JsonObject | JsonObject[] {
+	if (Array.isArray(value)) {
+		if (value.length === 0) throw new Error(`${fieldName} must be non-empty`);
+		return value.map((item, index) => requireJsonObjectValue(item, `${fieldName}[${index}]`));
+	}
+	return requireJsonObjectValue(value, fieldName);
+}
+
+async function readRequiredJsonObject(cwd: string, value: string, fieldName: string): Promise<JsonObject> {
+	return requireJsonObjectValue(await readStructuredValue(cwd, value), fieldName);
+}
+
+async function readRequiredJsonObjectOrArray(
+	cwd: string,
+	value: string,
+	fieldName: string,
+): Promise<JsonObject | JsonObject[]> {
+	return requireJsonObjectOrArrayValue(await readStructuredValue(cwd, value), fieldName);
+}
+
+function requirePipelineStartable(plan: UltragoalPlan, prior: UltragoalGoal, next: UltragoalGoal): void {
+	if (plan.skcGoalMode !== "aggregate")
+		throw new Error("pipeline overlap is supported only for aggregate ultragoal mode");
+	if (openPipelineOverlap(plan))
+		throw new Error("Cannot start pipeline overlap because another overlap is already open");
+	if (prior.status !== "active")
+		throw new Error(`Prior goal ${prior.id} must be active before pipeline overlap starts`);
+	if (next.status !== "pending" && next.status !== "failed")
+		throw new Error(`Next goal ${next.id} must be pending or retryable failed`);
+	validateValidationBatchPipelineExclusion(prior);
+	validateValidationBatchPipelineExclusion(next);
+	if (prior.validationBatch || next.validationBatch)
+		throw new Error("pipeline overlap cannot start for validation batch goals");
+	const priorMetadata = requireFreshPipelineMetadata(prior);
+	const nextMetadata = requireFreshPipelineMetadata(next);
+	if (!priorMetadata.eligible || !nextMetadata.eligible)
+		throw new Error("pipeline overlap requires eligible original-plan metadata on both goals");
+	if (!priorMetadata.independentOf.includes(next.id) || !nextMetadata.independentOf.includes(prior.id)) {
+		throw new Error("pipeline overlap requires symmetric original independence");
+	}
+	if (!targetsAreDisjoint(priorMetadata.targets, nextMetadata.targets))
+		throw new Error("pipeline overlap requires disjoint files and surfaces");
+}
+
+function pipelineEventRefs(prior: UltragoalGoal, next: UltragoalGoal): JsonObject {
+	return {
+		priorMetadataHash: prior.pipelineMetadata?.metadataHash,
+		nextMetadataHash: next.pipelineMetadata?.metadataHash,
+		priorTargets: prior.pipelineMetadata?.targets,
+		nextTargets: next.pipelineMetadata?.targets,
+	};
+}
+
+function pipelineReceipt(
+	cwd: string,
+	event: string,
+	overlapId: string,
+	prior: UltragoalGoal,
+	next: UltragoalGoal,
+): UltragoalPipelineOverlapReceipt {
+	const paths = getUltragoalPaths(cwd, currentUltragoalSessionId(cwd));
+	return {
+		ok: true,
+		event,
+		overlap_id: overlapId,
+		prior_goal_id: prior.id,
+		next_goal_id: next.id,
+		status: next.pipelineMetadata?.overlap,
+		next_goal_status: next.status,
+		goals_path: paths.goalsPath,
+		ledger_path: paths.ledgerPath,
+	};
+}
+
+export async function startUltragoalPipelineOverlap(input: {
+	cwd: string;
+	priorGoalId: string;
+	nextGoalId: string;
+	reviewHandles: JsonObject | JsonObject[];
+	qaHandles: JsonObject | JsonObject[];
+	implementationHandle: JsonObject;
+}): Promise<UltragoalPipelineOverlapReceipt> {
+	const plan = await readUltragoalPlan(input.cwd);
+	if (!plan) throw new Error("No ultragoal plan found. Run `skc ultragoal create-goals --brief ...` first.");
+	const prior = plan.goals.find(goal => goal.id === input.priorGoalId);
+	const next = plan.goals.find(goal => goal.id === input.nextGoalId);
+	if (!prior || !next) throw new Error("start-pipeline-overlap requires existing prior and next goal ids");
+	const reviewHandles = requireJsonObjectOrArrayValue(input.reviewHandles, "review handles");
+	const qaHandles = requireJsonObjectOrArrayValue(input.qaHandles, "QA handles");
+	requireJsonObjectValue(input.implementationHandle, "implementation handle");
+	requirePipelineStartable(plan, prior, next);
+	const now = new Date().toISOString();
+	const overlapId = `pipeline-${crypto.randomUUID()}`;
+	const priorMetadata = requireFreshPipelineMetadata(prior);
+	const nextMetadata = requireFreshPipelineMetadata(next);
+	const priorOpenMetadata = {
+		...priorMetadata,
+		overlap: "open" as const,
+		overlapId,
+		priorGoalId: prior.id,
+		nextGoalId: next.id,
+	};
+	const nextOpenMetadata = {
+		...nextMetadata,
+		overlap: "open" as const,
+		overlapId,
+		priorGoalId: prior.id,
+		nextGoalId: next.id,
+	};
+	prior.pipelineMetadata = { ...priorOpenMetadata, metadataHash: hashPipelineMetadata(priorOpenMetadata) };
+	next.pipelineMetadata = { ...nextOpenMetadata, metadataHash: hashPipelineMetadata(nextOpenMetadata) };
+	prior.updatedAt = now;
+	next.updatedAt = now;
+	next.status = "active";
+	next.startedAt = next.startedAt ?? now;
+	plan.updatedAt = now;
+	await writePlan(input.cwd, plan);
+	const refs = pipelineEventRefs(prior, next);
+	const expectedReviewHandleIds = handleIdsFromValue(reviewHandles, "review");
+	const expectedQaHandleIds = handleIdsFromValue(qaHandles, "QA");
+	await appendLedger(input.cwd, {
+		event: "pipeline_overlap_started",
+		eventId: crypto.randomUUID(),
+		timestamp: now,
+		schemaVersion: 1,
+		overlapId,
+		priorGoalId: prior.id,
+		nextGoalId: next.id,
+		reviewHandles,
+		reviewHandleIds: expectedReviewHandleIds,
+		qaHandles,
+		qaHandleIds: expectedQaHandleIds,
+		implementationHandle: input.implementationHandle,
+		...refs,
+	});
+	await appendLedger(input.cwd, { event: "goal_started", goalId: next.id, pipelineOverlapId: overlapId });
+	return pipelineReceipt(input.cwd, "pipeline_overlap_started", overlapId, prior, next);
+}
+
+function resultStatus(value: JsonObject, fieldName: string): string {
+	const status = nonEmptyString(value.status) ?? nonEmptyString(value.verdict) ?? nonEmptyString(value.result);
+	if (!status) throw new Error(`${fieldName} requires status, verdict, or result`);
+	return status.toLowerCase();
+}
+
+function requireCleanPipelineResult(result: JsonObject, expectedHandleIds: readonly string[], fieldName: string): void {
+	const status = resultStatus(result, fieldName);
+	if (!["passed", "pass", "approved", "clear"].includes(status)) throw new Error(`${fieldName} did not pass`);
+	const evidence = nonEmptyString(result.evidence);
+	if (!evidence || !isSubstantiveEvidence(evidence)) throw new Error(`${fieldName} requires substantive evidence`);
+	requireCoveredHandles(expectedHandleIds, resultHandleIds(result, fieldName), fieldName);
+	if (collectPipelineBlockerFootprints(result, fieldName).length > 0)
+		throw new Error(`${fieldName} cannot clean-join with blockers`);
+}
+
+function pipelineStartEventHandleIds(
+	ledger: UltragoalLedgerEvent[],
+	overlapId: string,
+): { review: string[]; qa: string[] } {
+	const event = ledger.find(row => row.event === "pipeline_overlap_started" && row.overlapId === overlapId) as
+		| JsonObject
+		| undefined;
+	if (!event) throw new Error(`No pipeline_overlap_started event found for ${overlapId}`);
+	const review =
+		stringArray(event.reviewHandleIds) ??
+		handleIdsFromValue(requireJsonObjectOrArrayValue(event.reviewHandles, "review handles"), "review");
+	const qa =
+		stringArray(event.qaHandleIds) ??
+		handleIdsFromValue(requireJsonObjectOrArrayValue(event.qaHandles, "QA handles"), "QA");
+	return { review, qa };
+}
+
+export async function joinUltragoalPipelineOverlap(input: {
+	cwd: string;
+	overlapId: string;
+	reviewResult: JsonObject;
+	qaResult: JsonObject;
+}): Promise<UltragoalPipelineOverlapReceipt> {
+	const plan = await readUltragoalPlan(input.cwd);
+	if (!plan) throw new Error("No ultragoal plan found. Run `skc ultragoal create-goals --brief ...` first.");
+	const overlap = openPipelineOverlap(plan);
+	if (!overlap || overlap.overlapId !== input.overlapId)
+		throw new Error(`No open pipeline overlap found for ${input.overlapId}`);
+	const { prior, next, overlapId } = overlap;
+	const nextMetadata = requireFreshPipelineMetadata(next);
+	const ledger = await readUltragoalLedger(input.cwd);
+	const expectedHandles = pipelineStartEventHandleIds(ledger, overlapId);
+	const reviewBlockers = collectPipelineBlockerFootprints(input.reviewResult, "review result");
+	const qaBlockers = collectPipelineBlockerFootprints(input.qaResult, "QA result");
+	const blockerFootprints = [...reviewBlockers, ...qaBlockers];
+	let state: UltragoalPipelineOverlapState;
+	let event: UltragoalPipelineLedgerEventName;
+	if (blockerFootprints.length === 0) {
+		try {
+			requireCleanPipelineResult(input.reviewResult, expectedHandles.review, "review result");
+			requireCleanPipelineResult(input.qaResult, expectedHandles.qa, "QA result");
+			state = "joined_clean";
+			event = "pipeline_overlap_joined";
+		} catch {
+			state = "quarantine_required";
+			event = "pipeline_overlap_quarantined";
+		}
+	} else if (blockerFootprints.every(footprint => !targetsOverlap(footprint, nextMetadata.targets))) {
+		state = "blocked_disjoint_continue";
+		event = "pipeline_overlap_joined";
+	} else {
+		state = "quarantine_required";
+		event = "pipeline_overlap_quarantined";
+	}
+	const now = new Date().toISOString();
+	for (const goal of [prior, next]) {
+		const metadata = requireFreshPipelineMetadata(goal);
+		const joinedMetadata = { ...metadata, overlap: state, blockerFootprints };
+		goal.pipelineMetadata = { ...joinedMetadata, metadataHash: hashPipelineMetadata(joinedMetadata) };
+		goal.updatedAt = now;
+	}
+	if (state === "quarantine_required") next.status = "blocked";
+	plan.updatedAt = now;
+	await writePlan(input.cwd, plan);
+	await appendLedger(input.cwd, {
+		event,
+		eventId: crypto.randomUUID(),
+		timestamp: now,
+		schemaVersion: 1,
+		overlapId,
+		priorGoalId: prior.id,
+		nextGoalId: next.id,
+		status: state,
+		reviewResult: input.reviewResult,
+		qaResult: input.qaResult,
+		blockerFootprints,
+		...pipelineEventRefs(prior, next),
+	});
+	return pipelineReceipt(input.cwd, event, overlapId, prior, next);
+}
+
+export async function rebaselineUltragoalPipelineOverlap(input: {
+	cwd: string;
+	overlapId: string;
+	goalId: string;
+	evidence: string;
+	targetState: JsonObject;
+}): Promise<UltragoalPipelineOverlapReceipt> {
+	const plan = await readUltragoalPlan(input.cwd);
+	if (!plan) throw new Error("No ultragoal plan found. Run `skc ultragoal create-goals --brief ...` first.");
+	const goal = plan.goals.find(item => item.id === input.goalId);
+	if (!goal) throw new Error(`No ultragoal goal found for ${input.goalId}.`);
+	const evidence = input.evidence.trim();
+	if (!isSubstantiveEvidence(evidence)) throw new Error("rebaseline-pipeline-overlap requires substantive evidence");
+	const targetState = requireNonEmptyPipelineTargets(input.targetState, "target state");
+	const metadata = requireFreshPipelineMetadata(goal);
+	if (metadata.overlap !== "quarantine_required" || metadata.overlapId !== input.overlapId) {
+		throw new Error(`Goal ${goal.id} is not quarantined for overlap ${input.overlapId}`);
+	}
+	for (const footprint of metadata.blockerFootprints ?? []) {
+		if (targetsOverlap(footprint, targetState))
+			throw new Error("rebaseline-pipeline-overlap target state overlaps unresolved blocker footprints");
+	}
+	const now = new Date().toISOString();
+	const rebaselinedMetadata = { ...metadata, overlap: "rebaseline_complete" as const, targets: targetState };
+	goal.pipelineMetadata = { ...rebaselinedMetadata, metadataHash: hashPipelineMetadata(rebaselinedMetadata) };
+	goal.status = "active";
+	goal.evidence = evidence;
+	goal.updatedAt = now;
+	plan.updatedAt = now;
+	await writePlan(input.cwd, plan);
+	const peer = pipelinePeer(plan, metadata);
+	await appendLedger(input.cwd, {
+		event: "pipeline_overlap_rebaselined",
+		eventId: crypto.randomUUID(),
+		timestamp: now,
+		schemaVersion: 1,
+		overlapId: input.overlapId,
+		priorGoalId: metadata.priorGoalId ?? peer?.id ?? "",
+		nextGoalId: metadata.nextGoalId ?? goal.id,
+		goalId: goal.id,
+		evidence,
+		targetState,
+		metadataHash: goal.pipelineMetadata.metadataHash,
+	});
+	const paths = getUltragoalPaths(input.cwd, currentUltragoalSessionId(input.cwd));
+	return {
+		ok: true,
+		event: "pipeline_overlap_rebaselined",
+		overlap_id: input.overlapId,
+		prior_goal_id: metadata.priorGoalId ?? peer?.id ?? "",
+		goal_id: goal.id,
+		status: goal.pipelineMetadata.overlap,
+		goals_path: paths.goalsPath,
+		ledger_path: paths.ledgerPath,
+	};
 }
 
 export function getUltragoalRunCompletionState(
@@ -1074,6 +2045,7 @@ interface UltragoalChangeSet extends JsonObject {
 	mergeBase?: string;
 	paths: UltragoalChangeSetPath[];
 	rawDiffStat?: string;
+	rawDiff?: string;
 	trusted: true;
 }
 
@@ -1086,9 +2058,14 @@ const MANDATORY_COMPUTER_CASE_IDS = [
 	"runaway-loop-halt",
 	"blast-radius",
 ] as const;
+const TOOLS_INDEX_PATH = "packages/coding-agent/src/tools/index.ts";
 
 function normalizeRepoPath(value: string): string {
 	return value.replaceAll("\\\\", "/").replace(/^\.\//, "");
+}
+
+function isToolsIndexPath(value: string): boolean {
+	return normalizeRepoPath(value) === TOOLS_INDEX_PATH;
 }
 
 function categorizeComputerChangePath(value: string): UltragoalChangeCategory {
@@ -1101,7 +2078,6 @@ function categorizeComputerChangePath(value: string): UltragoalChangeCategory {
 	)
 		return "tool";
 	if (
-		normalized === "packages/coding-agent/src/tools/index.ts" ||
 		normalized === "packages/coding-agent/src/tools/renderers.ts" ||
 		normalized === "packages/coding-agent/src/config/settings-schema.ts"
 	)
@@ -1119,16 +2095,74 @@ function categorizeComputerChangePath(value: string): UltragoalChangeCategory {
 function isComputerControlSurfaceCategory(category: UltragoalChangeCategory): boolean {
 	// The computer-use red-team suite is conditional, not universal (see the
 	// ultragoal SKILL): require it only when the change actually touches
-	// computer-control source — the computer tool (`tool`), its settings/registry
-	// wiring (`settings-registry`), or computer Rust (`code`). A bare regeneration
-	// of the SHARED native binding (`generated-binding`: packages/natives/native/
-	// index.{d.ts,js}) is NOT by itself a computer-use change: that file is
-	// generated from Rust, so any real computer-use behavior change must also
-	// touch one of the categories above and will still trigger the suite. Treating
-	// the regenerated aggregate binding as a computer surface forced the suite on
-	// unrelated features (e.g. notifications), which the SKILL explicitly warns
-	// against, so it is excluded here.
+	// computer-control source — the computer tool (`tool`), its behavior-bearing
+	// settings/renderer wiring (`settings-registry`), or computer Rust (`code`).
+	// A bare regeneration of the SHARED native binding (`generated-binding`:
+	// packages/natives/native/index.{d.ts,js}) is NOT by itself a computer-use
+	// change: that file is generated from Rust, so any real computer-use behavior
+	// change must also touch one of the categories above and will still trigger
+	// the suite. Treating aggregate binding or registration files as a computer
+	// surface forced the suite on unrelated changes, which the SKILL explicitly
+	// warns against, so they are excluded here.
 	return category === "code" || category === "tool" || category === "settings-registry";
+}
+
+function isComputerSpecificToolsIndexDiff(diff: string | undefined, targetPath: string): boolean {
+	if (!diff || !isToolsIndexPath(targetPath)) return false;
+	let inTargetFile = false;
+	for (const line of diff.split("\n")) {
+		if (line.startsWith("diff --git ")) {
+			const match = /^diff --git a\/(.+?) b\/(.+)$/.exec(line);
+			inTargetFile = !!match && (isToolsIndexPath(match[1]!) || isToolsIndexPath(match[2]!));
+			continue;
+		}
+		if (!inTargetFile || line.startsWith("+++") || line.startsWith("---")) continue;
+		if (!line.startsWith("+") && !line.startsWith("-")) continue;
+		const changedLine = line.slice(1);
+		if (
+			/\bComputerTool\b/.test(changedLine) ||
+			/\bisComputerCallable\b/.test(changedLine) ||
+			/\bisComputerLoadablePlatform\b/.test(changedLine) ||
+			/["']computer["']/.test(changedLine) ||
+			/["']\.\/computer["']/.test(changedLine) ||
+			/\bcomputer\s*:/.test(changedLine)
+		) {
+			return true;
+		}
+	}
+	return false;
+}
+
+/** Settings registry file that holds ALL settings, most of them unrelated to computer control. */
+const SETTINGS_SCHEMA_PATH = "packages/coding-agent/src/config/settings-schema.ts";
+
+function isSettingsSchemaPath(value: string): boolean {
+	return normalizeRepoPath(value) === SETTINGS_SCHEMA_PATH;
+}
+
+/**
+ * The settings registry holds every setting (themes, tool output sizes, retry
+ * knobs, …), so a bare `settings-schema.ts` edit is NOT by itself a computer
+ * change. Mirror {@link isComputerSpecificToolsIndexDiff}: only treat it as a
+ * computer-control surface when the diff actually adds/removes a `computer.*`
+ * setting key. When no diff is available, callers fall back to the conservative
+ * (fail-closed) categorization instead of this narrowing.
+ */
+function isComputerSpecificSettingsDiff(diff: string | undefined, targetPath: string): boolean {
+	if (!diff || !isSettingsSchemaPath(targetPath)) return false;
+	let inTargetFile = false;
+	for (const line of diff.split("\n")) {
+		if (line.startsWith("diff --git ")) {
+			const match = /^diff --git a\/(.+?) b\/(.+)$/.exec(line);
+			inTargetFile = !!match && (isSettingsSchemaPath(match[1]!) || isSettingsSchemaPath(match[2]!));
+			continue;
+		}
+		if (!inTargetFile || line.startsWith("+++") || line.startsWith("---")) continue;
+		if (!line.startsWith("+") && !line.startsWith("-")) continue;
+		const changedLine = line.slice(1);
+		if (/["']computer\./.test(changedLine)) return true;
+	}
+	return false;
 }
 
 function isComputerControlSurfaceChangePath(row: UltragoalChangeSetPath): boolean {
@@ -1139,7 +2173,26 @@ function isComputerControlSurfaceChangePath(row: UltragoalChangeSetPath): boolea
 
 function trustedChangeSetRequiresComputerSuite(changeSet: UltragoalChangeSet | undefined): boolean {
 	if (!changeSet?.trusted) return false;
-	return changeSet.paths.some(isComputerControlSurfaceChangePath);
+	return changeSet.paths.some(row => {
+		if (isComputerControlSurfaceChangePath(row)) {
+			// The settings registry mixes computer and non-computer settings. Narrow it
+			// with the diff so unrelated settings edits do not force the computer suite;
+			// fall back to the conservative categorization when no diff is available.
+			const touchesSettingsSchema =
+				isSettingsSchemaPath(row.path) || (row.oldPath ? isSettingsSchemaPath(row.oldPath) : false);
+			if (touchesSettingsSchema && changeSet.rawDiff !== undefined) {
+				return (
+					isComputerSpecificSettingsDiff(changeSet.rawDiff, row.path) ||
+					(row.oldPath ? isComputerSpecificSettingsDiff(changeSet.rawDiff, row.oldPath) : false)
+				);
+			}
+			return true;
+		}
+		return (
+			isComputerSpecificToolsIndexDiff(changeSet.rawDiff, row.path) ||
+			(row.oldPath ? isComputerSpecificToolsIndexDiff(changeSet.rawDiff, row.oldPath) : false)
+		);
+	});
 }
 
 function requiresComputerRedTeamSuite(executorQa: JsonObject, changeSet: UltragoalChangeSet | undefined): boolean {
@@ -2387,18 +3440,141 @@ export async function validateExecutorQaRedTeamEvidenceForReview(
 	await validateExecutorQaRedTeamEvidenceInternal(cwd, executorQa as JsonObject, options);
 }
 
+function canonicalChangeSetRows(value: unknown, fieldName: string): UltragoalChangeSetPath[] {
+	if (!Array.isArray(value)) throw new Error(`${fieldName} must be an array`);
+	return value.map((row, index) => {
+		if (typeof row !== "object" || row === null || Array.isArray(row))
+			throw new Error(`${fieldName}[${index}] must be an object`);
+		const record = row as JsonObject;
+		const pathValue = nonEmptyString(record.path);
+		if (!pathValue) throw new Error(`${fieldName}[${index}].path is required`);
+		if ("goalId" in record) throw new Error(`${fieldName}[${index}] must not contain goalId attribution`);
+		const status = nonEmptyString(record.status);
+		if (!status) throw new Error(`${fieldName}[${index}].status is required`);
+		return { path: normalizeRepoPath(pathValue), status: status as UltragoalChangeStatus };
+	});
+}
+
+function changeSetHashForPaths(paths: readonly UltragoalChangeSetPath[]): string {
+	return hashStructuredValue(paths.map(row => ({ path: row.path, status: row.status, oldPath: row.oldPath })));
+}
+
+function requireChangeSetCoverage(
+	expected: UltragoalChangeSet | undefined,
+	declared: readonly UltragoalChangeSetPath[],
+	fieldName: string,
+): void {
+	if (!expected) return;
+	const declaredExactKeys = new Set(declared.map(row => `${row.oldPath ?? ""}\u0000${row.path}\u0000${row.status}`));
+	const declaredPathKeys = new Set(declared.map(row => `${row.oldPath ?? ""}\u0000${row.path}`));
+	for (const row of expected.paths) {
+		const pathKey = `${row.oldPath ?? ""}\u0000${row.path}`;
+		const exactKey = `${pathKey}\u0000${row.status}`;
+		const covered = row.status === "unknown" ? declaredPathKeys.has(pathKey) : declaredExactKeys.has(exactKey);
+		if (!covered) throw new Error(`${fieldName} does not cover computed checkpoint change-set path ${row.path}`);
+	}
+}
+
+function requireValidationBatchTuple(
+	metadata: UltragoalValidationBatchMetadata,
+	record: JsonObject,
+	fieldName: string,
+): void {
+	if (record.schemaVersion !== 1) throw new Error(`${fieldName}.schemaVersion must be 1`);
+	if (record.batchId !== metadata.batchId) throw new Error(`${fieldName}.batchId must match durable validationBatch`);
+	if (record.finalGoalId !== metadata.finalGoalId)
+		throw new Error(`${fieldName}.finalGoalId must match durable validationBatch`);
+	if (record.metadataHash !== metadata.metadataHash)
+		throw new Error(`${fieldName}.metadataHash must match durable validationBatch`);
+	const memberIds = stringArray(record.memberIds);
+	if (
+		!memberIds ||
+		memberIds.length !== metadata.memberIds.length ||
+		memberIds.some((id, index) => id !== metadata.memberIds[index])
+	) {
+		throw new Error(`${fieldName}.memberIds must match durable validationBatch order`);
+	}
+}
+
+function validateDeferredCompletionQualityGate(
+	gate: JsonObject,
+	goal: UltragoalGoal,
+	metadata: UltragoalValidationBatchMetadata,
+	changeSet?: UltragoalChangeSet,
+): void {
+	const allowedKeys = new Set(["deferredToBatch"]);
+	const unsupportedKeys = Object.keys(gate).filter(key => !allowedKeys.has(key));
+	if (unsupportedKeys.length > 0)
+		throw new Error(`deferred qualityGate contains unsupported keys: ${unsupportedKeys.join(", ")}`);
+	const deferred = qualityGateObject(gate.deferredToBatch);
+	if (!deferred) throw new Error("deferred qualityGate requires deferredToBatch object");
+	if (deferred.kind !== "validation-batch-deferred")
+		throw new Error("deferredToBatch.kind must be validation-batch-deferred");
+	requireValidationBatchTuple(metadata, deferred, "deferredToBatch");
+	if (goal.id === metadata.finalGoalId)
+		throw new Error("final validation batch goal cannot use deferredToBatch quality gate");
+	const deferredLanes = stringArray(deferred.deferredLanes)?.filter(Boolean).sort();
+	if (deferredLanes?.join(",") !== "architectReview,executorQa")
+		throw new Error("deferredToBatch.deferredLanes must be architectReview and executorQa");
+	const targeted = qualityGateObject(deferred.targetedVerification);
+	if (!targeted || targeted.status !== PASSED_STATUS || !nonEmptyStringArray(targeted.commands))
+		throw new Error("deferredToBatch.targetedVerification must pass with non-empty commands");
+	requireNonEmptyString(targeted.evidence, "deferredToBatch.targetedVerification.evidence");
+	const cleaner = qualityGateObject(deferred.aiSlopCleaner);
+	if (!cleaner || cleaner.status !== PASSED_STATUS) throw new Error("deferredToBatch.aiSlopCleaner must pass");
+	requireNonEmptyString(cleaner.evidence, "deferredToBatch.aiSlopCleaner.evidence");
+	const iteration = qualityGateObject(deferred.iteration);
+	if (!iteration || iteration.status !== PASSED_STATUS || iteration.fullRerun !== true)
+		throw new Error("deferredToBatch.iteration must pass with fullRerun true");
+	if (!nonEmptyStringArray(iteration.rerunCommands))
+		throw new Error("deferredToBatch.iteration.rerunCommands must be non-empty");
+	requireNonEmptyString(iteration.evidence, "deferredToBatch.iteration.evidence");
+	requireEmptyBlockers(iteration.blockers, "deferredToBatch.iteration.blockers");
+	const declaredChangeSet = qualityGateObject(deferred.changeSet);
+	if (!declaredChangeSet) throw new Error("deferredToBatch.changeSet is required");
+	if (declaredChangeSet.memberGoalId !== goal.id)
+		throw new Error("deferredToBatch.changeSet.memberGoalId must label the checkpointed goal");
+	if (declaredChangeSet.cumulativeFromBase !== true)
+		throw new Error("deferredToBatch.changeSet.cumulativeFromBase must be true");
+	const paths = canonicalChangeSetRows(declaredChangeSet.paths, "deferredToBatch.changeSet.paths");
+	requireChangeSetCoverage(changeSet, paths, "deferredToBatch.changeSet.paths");
+	if (declaredChangeSet.changeSetHash !== changeSetHashForPaths(paths))
+		throw new Error("deferredToBatch.changeSet.changeSetHash does not match declared paths");
+}
 async function validateCompletionQualityGate(
 	cwd: string,
 	gate: JsonObject,
-	options: { changeSet?: UltragoalChangeSet } = {},
+	options: {
+		changeSet?: UltragoalChangeSet;
+		plan?: UltragoalPlan;
+		goal?: UltragoalGoal;
+		ledger?: readonly UltragoalLedgerEvent[];
+	} = {},
 ): Promise<void> {
+	const batchMode = options.goal?.validationBatch;
+	if (batchMode && options.goal && options.goal.id !== batchMode.finalGoalId) {
+		validateDeferredCompletionQualityGate(gate, options.goal, batchMode, options.changeSet);
+		return;
+	}
+	if (batchMode && options.goal && options.goal.id === batchMode.finalGoalId) {
+		const allowedKeys = new Set(["architectReview", "executorQa", "iteration", "validationBatchClose"]);
+		const unsupportedKeys = Object.keys(gate).filter(key => !allowedKeys.has(key));
+		if (unsupportedKeys.length > 0)
+			throw new Error(`qualityGate contains unsupported keys: ${unsupportedKeys.join(", ")}`);
+		if (!qualityGateObject(gate.validationBatchClose))
+			throw new Error("final validation batch goal requires validationBatchClose");
+	}
 	const codeReview = qualityGateObject(gate.codeReview);
 	if (codeReview) {
 		throw new Error(
 			"checkpoint --status complete requires architect review approval through architectReview, executorQa, and iteration quality-gate evidence; legacy codeReview-only gates are not sufficient",
 		);
 	}
-	const allowedKeys = new Set(["architectReview", "executorQa", "iteration"]);
+	const allowedKeys = new Set(
+		batchMode
+			? ["architectReview", "executorQa", "iteration", "validationBatchClose"]
+			: ["architectReview", "executorQa", "iteration"],
+	);
 	const unsupportedKeys = Object.keys(gate).filter(key => !allowedKeys.has(key));
 	if (unsupportedKeys.length > 0) {
 		throw new Error(`qualityGate contains unsupported keys: ${unsupportedKeys.join(", ")}`);
@@ -2445,12 +3621,105 @@ async function validateCompletionQualityGate(
 	}
 	requireNonEmptyString(iteration.evidence, "iteration.evidence");
 	requireEmptyBlockers(iteration.blockers, "iteration.blockers");
+	if (batchMode && options.goal && options.plan && options.ledger) {
+		validateBatchCloseQualityGate(gate, options.plan, batchMode, options.ledger, options.changeSet);
+	}
 }
 
+function validateBatchCloseQualityGate(
+	gate: JsonObject,
+	plan: UltragoalPlan,
+	metadata: UltragoalValidationBatchMetadata,
+	ledger: readonly UltragoalLedgerEvent[],
+	changeSet?: UltragoalChangeSet,
+): void {
+	const close = qualityGateObject(gate.validationBatchClose);
+	if (!close) throw new Error("validationBatchClose is required");
+	if (close.schemaVersion !== 1 || close.kind !== "validation-batch-close")
+		throw new Error("validationBatchClose.kind must be validation-batch-close");
+	if (close.batchId !== metadata.batchId || close.finalGoalId !== metadata.finalGoalId)
+		throw new Error("validationBatchClose tuple must match durable validationBatch");
+	const memberIds = stringArray(close.memberIds);
+	if (
+		!memberIds ||
+		memberIds.length !== metadata.memberIds.length ||
+		memberIds.some((id, index) => id !== metadata.memberIds[index])
+	)
+		throw new Error("validationBatchClose.memberIds must match durable validationBatch order");
+	const memberMetadataHashes = qualityGateObject(close.memberMetadataHashes);
+	const memberChangeSetHashes = qualityGateObject(qualityGateObject(close.unionChangeSet)?.memberChangeSetHashes);
+	if (!memberMetadataHashes || !memberChangeSetHashes)
+		throw new Error("validationBatchClose member metadata and change-set hashes are required");
+	const seenReceipts = new Set<string>();
+	const receiptRows = Array.isArray(close.memberReceipts) ? close.memberReceipts : [];
+	const nonFinalIds = metadata.memberIds.filter(memberId => memberId !== metadata.finalGoalId);
+	for (const memberId of metadata.memberIds) {
+		const member = plan.goals.find(item => item.id === memberId);
+		if (!member?.validationBatch) throw new Error(`validationBatchClose references missing batch member ${memberId}`);
+		if (member.validationBatch.metadataHash !== memberMetadataHashes[memberId])
+			throw new Error(`validationBatchClose.memberMetadataHashes.${memberId} does not match durable metadata`);
+		if (memberId !== metadata.finalGoalId && member.status !== "complete")
+			throw new Error(`validationBatchClose cannot close before ${memberId} is complete`);
+	}
+	if (receiptRows.length !== nonFinalIds.length)
+		throw new Error("validationBatchClose.memberReceipts must list every non-final member exactly once");
+	for (const row of receiptRows) {
+		if (typeof row !== "object" || row === null || Array.isArray(row))
+			throw new Error("validationBatchClose.memberReceipts rows must be objects");
+		const record = row as JsonObject;
+		const memberId = nonEmptyString(record.goalId);
+		if (!memberId || !nonFinalIds.includes(memberId))
+			throw new Error("validationBatchClose.memberReceipts contains invalid member goalId");
+		if (seenReceipts.has(memberId))
+			throw new Error(`validationBatchClose.memberReceipts contains duplicate member ${memberId}`);
+		seenReceipts.add(memberId);
+		const member = plan.goals.find(item => item.id === memberId)!;
+		const receipt = requireDeferredMemberReceiptFresh(plan, ledger, member, "validationBatchClose.memberReceipts");
+		if (
+			record.role !== "deferred-member" ||
+			record.receiptId !== receipt.receiptId ||
+			record.qualityGateHash !== receipt.qualityGateHash ||
+			record.changeSetHash !== receipt.validationBatch.changeSetHash ||
+			record.checkpointLedgerEventId !== receipt.checkpointLedgerEventId
+		) {
+			throw new Error(`validationBatchClose.memberReceipts.${memberId} does not match deferred receipt`);
+		}
+		if (memberChangeSetHashes[memberId] !== receipt.validationBatch.changeSetHash)
+			throw new Error(
+				`validationBatchClose.unionChangeSet.memberChangeSetHashes.${memberId} does not match deferred receipt`,
+			);
+	}
+	if (seenReceipts.size !== nonFinalIds.length)
+		throw new Error("validationBatchClose.memberReceipts is missing a non-final member");
+	const union = qualityGateObject(close.unionChangeSet);
+	if (union?.source !== "validation-batch")
+		throw new Error("validationBatchClose.unionChangeSet.source must be validation-batch");
+	const unionPaths = canonicalChangeSetRows(union.paths, "validationBatchClose.unionChangeSet.paths");
+	requireChangeSetCoverage(changeSet, unionPaths, "validationBatchClose.unionChangeSet.paths");
+	const finalHash = changeSetHashForPaths(unionPaths);
+	if (memberChangeSetHashes[metadata.finalGoalId] !== finalHash)
+		throw new Error(
+			"validationBatchClose.unionChangeSet.memberChangeSetHashes final member hash does not match current change set",
+		);
+	if (
+		union.unionHash !==
+		hashStructuredValue({
+			memberChangeSetHashes,
+			paths: unionPaths.map(row => ({ path: row.path, status: row.status, oldPath: row.oldPath })),
+		})
+	)
+		throw new Error("validationBatchClose.unionChangeSet.unionHash does not match declared union");
+	requireNonEmptyString(close.coverageEvidence, "validationBatchClose.coverageEvidence");
+}
 async function readRequiredCompletionQualityGate(
 	cwd: string,
 	value: string | undefined,
-	options: { changeSet?: UltragoalChangeSet } = {},
+	options: {
+		changeSet?: UltragoalChangeSet;
+		plan?: UltragoalPlan;
+		goal?: UltragoalGoal;
+		ledger?: readonly UltragoalLedgerEvent[];
+	} = {},
 ): Promise<unknown> {
 	if (!value?.trim()) {
 		throw new Error(
@@ -2460,8 +3729,53 @@ async function readRequiredCompletionQualityGate(
 	const gate = await readStructuredValue(cwd, value);
 	const gateObject = qualityGateObject(gate);
 	if (!gateObject) throw new Error("qualityGate must be a JSON object");
-	await validateCompletionQualityGate(cwd, gateObject, { changeSet: options.changeSet });
+	await validateCompletionQualityGate(cwd, gateObject, {
+		changeSet: options.changeSet,
+		plan: options.plan,
+		goal: options.goal,
+		ledger: options.ledger,
+	});
 	return gate;
+}
+
+function validatePipelineCheckpointSafety(
+	plan: UltragoalPlan,
+	goal: UltragoalGoal,
+	changeSet?: UltragoalChangeSet,
+): void {
+	const metadata = goal.pipelineMetadata;
+	if (!metadata) return;
+	validateValidationBatchPipelineExclusion(goal);
+	requireFreshPipelineMetadata(goal);
+	if (metadata.overlap === "open") {
+		throw new Error(
+			`Cannot complete ${goal.id} while pipeline overlap ${metadata.overlapId ?? ""} is open; join or quarantine first.`,
+		);
+	}
+	if (metadata.overlap === "quarantine_required") {
+		throw new Error(
+			`Cannot complete ${goal.id} while pipeline overlap ${metadata.overlapId ?? ""} requires rebaseline.`,
+		);
+	}
+	if (metadata.goalId === metadata.priorGoalId && metadata.overlap !== "none" && metadata.overlap !== "joined_clean") {
+		throw new Error(
+			`Cannot complete ${goal.id} without a clean join for pipeline overlap ${metadata.overlapId ?? ""}.`,
+		);
+	}
+	const peer = pipelinePeer(plan, metadata);
+	if (changeSet && metadata.overlap !== "none") {
+		const peerTargets = peer?.pipelineMetadata?.targets;
+		for (const row of changeSet.paths) {
+			const ownedByGoal = pipelineTargetsCoverPath(metadata.targets, row.path);
+			const ownedByPeer = peerTargets ? pipelineTargetsCoverPath(peerTargets, row.path) : false;
+			if (ownedByGoal && ownedByPeer)
+				throw new Error(`Cannot complete ${goal.id} with shared pipeline change-set path ${row.path}.`);
+			if (!ownedByGoal && !ownedByPeer)
+				throw new Error(`Cannot complete ${goal.id} with unattributable pipeline change-set path ${row.path}.`);
+			if (!ownedByGoal && ownedByPeer)
+				throw new Error(`Cannot complete ${goal.id} with next-goal pipeline change-set path ${row.path}.`);
+		}
+	}
 }
 
 function validateCompleteCheckpointTargetGoal(goal: UltragoalGoal): void {
@@ -2498,17 +3812,51 @@ export async function checkpointUltragoalGoal(input: {
 	const evidence = input.evidence.trim();
 	if (!evidence) throw new Error("checkpoint evidence is required");
 	const ledgerBefore = await readUltragoalLedger(input.cwd);
-	if (
-		goal.status === input.status &&
-		goal.evidence === evidence &&
-		ledgerBefore.some(
-			event =>
-				event.event === "goal_checkpointed" &&
-				event.goalId === goal.id &&
-				event.status === input.status &&
-				event.evidence === evidence,
-		)
-	) {
+	const matchingIdempotentEvent = ledgerBefore.find(
+		event =>
+			event.event === "goal_checkpointed" &&
+			event.goalId === goal.id &&
+			event.status === input.status &&
+			event.evidence === evidence,
+	);
+	const batchMetadata = input.status === "complete" ? requireFreshValidationBatchMetadata(goal) : undefined;
+	if (batchMetadata && goal.completionVerification?.validationBatch) {
+		const receiptBatch = goal.completionVerification.validationBatch;
+		if (receiptBatch.role === "deferred-member" && receiptBatch.metadataHash !== batchMetadata.metadataHash) {
+			throw new Error(`Goal ${goal.id} has stale validation batch completion receipt for ${batchMetadata.batchId}`);
+		}
+		if (
+			receiptBatch.role === "batch-close" &&
+			receiptBatch.memberMetadataHashes[goal.id] !== batchMetadata.metadataHash
+		) {
+			throw new Error(`Goal ${goal.id} has stale validation batch close receipt for ${batchMetadata.batchId}`);
+		}
+	}
+	if (input.status === "complete" && goal.completionVerification?.validationBatch && !batchMetadata) {
+		throw new Error(`Goal ${goal.id} has stale validation batch completion receipt`);
+	}
+	if (goal.status === input.status && goal.evidence === evidence && matchingIdempotentEvent) {
+		if (batchMetadata) {
+			const receipt = goal.completionVerification;
+			const receiptBatch = receipt?.validationBatch;
+			if (!receipt || !receiptBatch)
+				throw new Error(
+					`Goal ${goal.id} has validation batch ${batchMetadata.batchId} but no matching completion receipt`,
+				);
+			if (receipt.checkpointLedgerEventId !== matchingIdempotentEvent.eventId)
+				throw new Error(`Goal ${goal.id} validation batch receipt does not match prior checkpoint event`);
+			if (hashStructuredValue(matchingIdempotentEvent.qualityGateJson) !== receipt.qualityGateHash)
+				throw new Error(`Goal ${goal.id} validation batch receipt quality gate is stale`);
+			if (receiptBatch.role === "deferred-member" && receiptBatch.metadataHash !== batchMetadata.metadataHash)
+				throw new Error(`Goal ${goal.id} has stale validation batch metadata hash in deferred receipt`);
+			if (receiptBatch.role === "batch-close")
+				requireFreshBatchCloseReceiptBasis(plan, ledgerBefore, goal, receipt, matchingIdempotentEvent);
+			if (
+				receiptBatch.role === "batch-close" &&
+				receiptBatch.memberMetadataHashes[goal.id] !== batchMetadata.metadataHash
+			)
+				throw new Error(`Goal ${goal.id} has stale validation batch metadata hash in close receipt`);
+		}
 		// Idempotent re-checkpoint: this goal is already recorded in the target status with the same
 		// evidence, so skip the plan rewrite and ledger append to avoid duplicate goal_checkpointed
 		// events. The ledger is the dedup source of truth because it is exactly what a duplicate write
@@ -2517,11 +3865,19 @@ export async function checkpointUltragoalGoal(input: {
 		// instead of silently dropping it.
 		return plan;
 	}
-	if (input.status === "complete") validateCompleteCheckpointTargetGoal(goal);
 	const changeSet = input.status === "complete" ? await computeCheckpointChangeSet(input.cwd) : undefined;
+	if (input.status === "complete") {
+		validatePipelineCheckpointSafety(plan, goal, changeSet);
+		validateCompleteCheckpointTargetGoal(goal);
+	}
 	const qualityGateJson =
 		input.status === "complete"
-			? await readRequiredCompletionQualityGate(input.cwd, input.qualityGateJson, { changeSet })
+			? await readRequiredCompletionQualityGate(input.cwd, input.qualityGateJson, {
+					changeSet,
+					plan,
+					goal,
+					ledger: ledgerBefore,
+				})
 			: input.qualityGateJson
 				? await readStructuredValue(input.cwd, input.qualityGateJson)
 				: undefined;
@@ -2769,6 +4125,7 @@ async function addUltragoalSubgoalToPlan(input: {
 		createdAt: now,
 		updatedAt: now,
 		steering: { kind, evidence, rationale },
+		pipelineMetadata: legacyPipelineMetadata(nextId),
 	});
 	input.plan.updatedAt = now;
 	await writePlan(input.cwd, input.plan);
@@ -2810,6 +4167,8 @@ async function splitUltragoalSubgoal(input: {
 	});
 	const target = findGoalOrThrow(input.plan, input.goalId, kind);
 	requireGoalStatus(target, ["pending"], kind);
+	const ledger = await readUltragoalLedger(input.cwd);
+	requireValidationBatchSteeringAllowed(input.plan, target, kind, ledger);
 	const replacements = parseReplacementSpecs(input.replacementsJson, kind);
 	const now = new Date().toISOString();
 	const replacementGoalIds = replacements.map((_, index) => nextUltragoalGoalId(input.plan, index + 1));
@@ -2817,6 +4176,8 @@ async function splitUltragoalSubgoal(input: {
 	target.evidence = evidence;
 	target.updatedAt = now;
 	target.steering = { kind, evidence, rationale, replacementGoalIds };
+	invalidatePipelineMetadata(target, "split_subgoal_superseded", now);
+	clearValidationBatchForBatch(input.plan, target.validationBatch);
 	const replacementGoals = replacements.map(
 		(replacement, index): UltragoalGoal => ({
 			id: replacementGoalIds[index]!,
@@ -2826,6 +4187,7 @@ async function splitUltragoalSubgoal(input: {
 			createdAt: now,
 			updatedAt: now,
 			steering: { kind: "split_replacement", sourceGoalId: target.id, evidence, rationale },
+			pipelineMetadata: legacyPipelineMetadata(replacementGoalIds[index]!),
 		}),
 	);
 	const targetIndex = input.plan.goals.findIndex(goal => goal.id === target.id);
@@ -2903,6 +4265,8 @@ async function revisePendingUltragoalWording(input: {
 	});
 	const goal = findGoalOrThrow(input.plan, input.goalId, kind);
 	requireGoalStatus(goal, ["pending"], kind);
+	const ledger = await readUltragoalLedger(input.cwd);
+	requireValidationBatchSteeringAllowed(input.plan, goal, kind, ledger);
 	const title = input.title === undefined ? undefined : input.title.trim();
 	const objective = input.objective === undefined ? undefined : input.objective.trim();
 	if (input.title !== undefined && !title)
@@ -2922,6 +4286,8 @@ async function revisePendingUltragoalWording(input: {
 	const now = new Date().toISOString();
 	goal.updatedAt = now;
 	goal.steering = { kind, evidence, rationale, changedFields };
+	invalidatePipelineMetadata(goal, "revised_pending_wording", now);
+	clearValidationBatchForBatch(input.plan, goal.validationBatch);
 	input.plan.updatedAt = now;
 	await writePlan(input.cwd, input.plan);
 	await appendLedger(input.cwd, {
@@ -2966,6 +4332,8 @@ async function markBlockedUltragoalSuperseded(input: {
 	});
 	const goal = findGoalOrThrow(input.plan, input.goalId, kind);
 	requireGoalStatus(goal, ["blocked", "review_blocked"], kind);
+	const ledger = await readUltragoalLedger(input.cwd);
+	requireValidationBatchSteeringAllowed(input.plan, goal, kind, ledger);
 	const remainingRequiredGoals = requiredUltragoalGoals(input.plan).filter(item => item.id !== goal.id);
 	if (remainingRequiredGoals.length === 0) {
 		throw new Error(`steer ${kind} cannot supersede ${goal.id} because it is the only remaining required goal`);
@@ -2975,6 +4343,7 @@ async function markBlockedUltragoalSuperseded(input: {
 	goal.evidence = evidence;
 	goal.updatedAt = now;
 	goal.steering = { kind, evidence, rationale, noReplacementRequired: true };
+	clearValidationBatchForBatch(input.plan, goal.validationBatch);
 	input.plan.updatedAt = now;
 	await writePlan(input.cwd, input.plan);
 	await appendLedger(input.cwd, {
@@ -3175,6 +4544,20 @@ function parseGitNameStatus(output: string): UltragoalChangeSetPath[] {
 	return rows;
 }
 
+function ciDevChangedPathRows(): UltragoalChangeSetPath[] {
+	const raw = process.env.CI_DEV_CHANGED_PATHS;
+	if (!raw) return [];
+	return raw
+		.split(/\r?\n/)
+		.map(row => row.trim())
+		.filter(Boolean)
+		.map(pathValue => ({
+			path: normalizeRepoPath(pathValue),
+			status: "unknown" as UltragoalChangeStatus,
+			category: categorizeComputerChangePath(pathValue),
+		}));
+}
+
 function mergeChangeSetPaths(groups: UltragoalChangeSetPath[][]): UltragoalChangeSetPath[] {
 	const byKey = new Map<string, UltragoalChangeSetPath>();
 	for (const row of groups.flat()) byKey.set(`${row.oldPath ?? ""}\u0000${row.path}`, row);
@@ -3182,30 +4565,39 @@ function mergeChangeSetPaths(groups: UltragoalChangeSetPath[][]): UltragoalChang
 }
 
 async function computeCheckpointChangeSet(cwd: string): Promise<UltragoalChangeSet | undefined> {
+	const ciChangedPaths = ciDevChangedPathRows();
 	const inGit = await spawnText(["git", "rev-parse", "--is-inside-work-tree"], { cwd, timeoutMs: 3000 });
-	if (!inGit.ok || inGit.stdout.trim() !== "true") return undefined;
-	if (!(await Bun.file(path.join(cwd, ".git")).exists())) return undefined;
+	if (!inGit.ok || inGit.stdout.trim() !== "true") {
+		if (ciChangedPaths.length === 0) return undefined;
+		return { source: "checkpoint-git", paths: ciChangedPaths, trusted: true };
+	}
 	const baseRef = await resolveGitBase(cwd);
 	const base = baseRef;
 	const mergeBase = await spawnText(["git", "merge-base", "HEAD", baseRef], { cwd, timeoutMs: 3000 });
-	const [committed, unstaged, staged, stat] = await Promise.all([
+	const [committed, unstaged, staged, stat, committedDiff, unstagedDiff, stagedDiff] = await Promise.all([
 		spawnText(["git", "diff", "--name-status", `${base}...HEAD`], { cwd, timeoutMs: 5000 }),
 		spawnText(["git", "diff", "--name-status"], { cwd, timeoutMs: 5000 }),
 		spawnText(["git", "diff", "--cached", "--name-status"], { cwd, timeoutMs: 5000 }),
 		spawnText(["git", "diff", "--stat", `${base}...HEAD`], { cwd, timeoutMs: 5000 }),
+		spawnText(["git", "diff", `${base}...HEAD`], { cwd, timeoutMs: 5000 }),
+		spawnText(["git", "diff"], { cwd, timeoutMs: 5000 }),
+		spawnText(["git", "diff", "--cached"], { cwd, timeoutMs: 5000 }),
 	]);
-	if (!committed.ok && !unstaged.ok && !staged.ok) return undefined;
+	if (!committed.ok && !unstaged.ok && !staged.ok && ciChangedPaths.length === 0) return undefined;
+	const gitPaths = mergeChangeSetPaths([
+		parseGitNameStatus(committed.stdout),
+		parseGitNameStatus(unstaged.stdout),
+		parseGitNameStatus(staged.stdout),
+	]);
+	const paths = gitPaths.length > 0 ? gitPaths : ciChangedPaths;
 	return {
 		source: "checkpoint-git",
 		baseRef,
 		mergeBase: mergeBase.ok && mergeBase.stdout.trim() ? mergeBase.stdout.trim() : undefined,
 		headRef: "HEAD",
-		paths: mergeChangeSetPaths([
-			parseGitNameStatus(committed.stdout),
-			parseGitNameStatus(unstaged.stdout),
-			parseGitNameStatus(staged.stdout),
-		]),
+		paths,
 		rawDiffStat: stat.stdout,
+		rawDiff: [committedDiff.stdout, unstagedDiff.stdout, stagedDiff.stdout].filter(Boolean).join("\n"),
 		trusted: true,
 	};
 }
@@ -3236,6 +4628,7 @@ function changeSetFromReviewSource(source: JsonObject): UltragoalChangeSet | und
 			source: "review-pr",
 			paths: parseUnifiedDiffPaths(source.diff),
 			rawDiffStat: source.diff,
+			rawDiff: source.diff,
 			trusted: true,
 		};
 	const local = qualityGateObject(source.local);
@@ -3245,6 +4638,7 @@ function changeSetFromReviewSource(source: JsonObject): UltragoalChangeSet | und
 			source: "review-worktree",
 			paths: parseGitNameStatus(String(source.nameStatus ?? source.status ?? "")),
 			rawDiffStat: String(source.diffStat ?? ""),
+			rawDiff: String(source.diff ?? ""),
 			trusted: true,
 		};
 	if (kind === "branch" || kind === "pr-fallback")
@@ -3254,6 +4648,7 @@ function changeSetFromReviewSource(source: JsonObject): UltragoalChangeSet | und
 			headRef: "HEAD",
 			paths: parseGitNameStatus(String(source.nameStatus ?? "")),
 			rawDiffStat: String(source.diffStat ?? ""),
+			rawDiff: String(source.diff ?? ""),
 			trusted: true,
 		};
 	return undefined;
@@ -3261,25 +4656,36 @@ function changeSetFromReviewSource(source: JsonObject): UltragoalChangeSet | und
 
 async function localDiffSource(cwd: string, sourceKind: string, branch?: string): Promise<JsonObject> {
 	if (sourceKind === "worktree") {
-		const [status, diff, unstaged, staged] = await Promise.all([
+		const [status, diffStat, unstaged, staged, unstagedDiff, stagedDiff] = await Promise.all([
 			spawnText(["git", "status", "--short"], { cwd, timeoutMs: 5000 }),
 			spawnText(["git", "diff", "--stat"], { cwd, timeoutMs: 5000 }),
 			spawnText(["git", "diff", "--name-status"], { cwd, timeoutMs: 5000 }),
 			spawnText(["git", "diff", "--cached", "--name-status"], { cwd, timeoutMs: 5000 }),
+			spawnText(["git", "diff"], { cwd, timeoutMs: 5000 }),
+			spawnText(["git", "diff", "--cached"], { cwd, timeoutMs: 5000 }),
 		]);
 		return {
 			kind: "worktree",
 			status: status.stdout,
-			diffStat: diff.stdout,
+			diffStat: diffStat.stdout,
+			diff: [unstagedDiff.stdout, stagedDiff.stdout].filter(Boolean).join("\n"),
 			nameStatus: `${unstaged.stdout}\n${staged.stdout}`,
 		};
 	}
 	const base = await resolveGitBase(cwd, branch);
-	const [diff, nameStatus] = await Promise.all([
+	const [diffStat, nameStatus, diff] = await Promise.all([
 		spawnText(["git", "diff", "--stat", `${base}...HEAD`], { cwd, timeoutMs: 5000 }),
 		spawnText(["git", "diff", "--name-status", `${base}...HEAD`], { cwd, timeoutMs: 5000 }),
+		spawnText(["git", "diff", `${base}...HEAD`], { cwd, timeoutMs: 5000 }),
 	]);
-	return { kind: sourceKind, base, branch, diffStat: diff.stdout, nameStatus: nameStatus.stdout };
+	return {
+		kind: sourceKind,
+		base,
+		branch,
+		diffStat: diffStat.stdout,
+		diff: diff.stdout,
+		nameStatus: nameStatus.stdout,
+	};
 }
 
 async function resolveReviewSource(
@@ -3463,6 +4869,17 @@ const FLAGS_WITH_VALUES = new Set([
 	"--replacements-json",
 	"--order-json",
 	"--classification",
+	"--goal-metadata-json",
+	"--validation-batch-json",
+	"--prior-goal-id",
+	"--next-goal-id",
+	"--review-handles-json",
+	"--qa-handles-json",
+	"--implementation-handle-json",
+	"--overlap-id",
+	"--review-result-json",
+	"--qa-result-json",
+	"--target-state-json",
 ]);
 
 function isHelpArg(arg: string): boolean {
@@ -3569,6 +4986,9 @@ function renderUltragoalHelp(args: readonly string[]): string | null {
 		"  steer",
 		"  record-review-blockers",
 		"  classify-blocker",
+		"  start-pipeline-overlap",
+		"  join-pipeline-overlap",
+		"  rebaseline-pipeline-overlap",
 		"",
 		"Run `skc ultragoal checkpoint --help`, `skc ultragoal review --help`, or `skc ultragoal classify-blocker --help` for command-specific requirements.",
 		"",
@@ -3799,9 +5219,18 @@ async function executeUltragoalSteeringCommand(args: readonly string[], cwd: str
 }
 
 async function dispatchUltragoalCommand(args: string[], cwd: string): Promise<UltragoalCommandResult> {
-	const sessionId = currentUltragoalSessionId(cwd);
+	// Help must not require a resolvable session; render it before session resolution.
 	const help = renderUltragoalHelp(args);
 	if (help) return { status: 0, stdout: help };
+	let sessionId: string;
+	try {
+		sessionId = currentUltragoalSessionId(cwd);
+	} catch (error) {
+		// A missing/ambiguous session is an operator input error, not a crash:
+		// surface the guidance on stderr instead of an uncaught-exception dump.
+		if (error instanceof SessionResolutionError) return { status: 1, stderr: `${error.message}\n` };
+		throw error;
+	}
 	try {
 		const command = commandName(args);
 		const json = hasFlag(args, "--json");
@@ -3810,8 +5239,20 @@ async function dispatchUltragoalCommand(args: string[], cwd: string): Promise<Ul
 				return { status: 0, stdout: renderStatus(await getUltragoalStatus(cwd, sessionId), json) };
 			case "create":
 			case "create-goals": {
+				if (
+					flagValue(args, "--goal-metadata-json") !== undefined &&
+					flagValue(args, "--validation-batch-json") !== undefined
+				) {
+					throw new Error("--validation-batch-json and --goal-metadata-json are mutually exclusive");
+				}
 				const mode = flagValue(args, "--skc-goal-mode") === "per-story" ? "per-story" : "aggregate";
-				const plan = await createUltragoalPlan({ cwd, brief: await readBrief(cwd, args), skcGoalMode: mode });
+				const plan = await createUltragoalPlan({
+					cwd,
+					brief: await readBrief(cwd, args),
+					skcGoalMode: mode,
+					goalMetadataJson: flagValue(args, "--goal-metadata-json"),
+					validationBatchJson: flagValue(args, "--validation-batch-json"),
+				});
 				return {
 					status: 0,
 					createdPlan: true,
@@ -3905,6 +5346,65 @@ async function dispatchUltragoalCommand(args: string[], cwd: string): Promise<Ul
 						: `Recorded blocker classification: ${String(event.classification)}.\n`,
 				};
 			}
+			case "start-pipeline-overlap": {
+				const receipt = await startUltragoalPipelineOverlap({
+					cwd,
+					priorGoalId: flagValue(args, "--prior-goal-id") ?? "",
+					nextGoalId: flagValue(args, "--next-goal-id") ?? "",
+					reviewHandles: await readRequiredJsonObjectOrArray(
+						cwd,
+						flagValue(args, "--review-handles-json") ?? "",
+						"review handles",
+					),
+					qaHandles: await readRequiredJsonObjectOrArray(
+						cwd,
+						flagValue(args, "--qa-handles-json") ?? "",
+						"QA handles",
+					),
+					implementationHandle: await readRequiredJsonObject(
+						cwd,
+						flagValue(args, "--implementation-handle-json") ?? "",
+						"implementation handle",
+					),
+				});
+				return {
+					status: 0,
+					stdout: json ? renderCliWriteReceipt(receipt) : `Started pipeline overlap ${receipt.overlap_id}.\n`,
+				};
+			}
+			case "join-pipeline-overlap": {
+				const receipt = await joinUltragoalPipelineOverlap({
+					cwd,
+					overlapId: flagValue(args, "--overlap-id") ?? "",
+					reviewResult: await readRequiredJsonObject(
+						cwd,
+						flagValue(args, "--review-result-json") ?? "",
+						"review result",
+					),
+					qaResult: await readRequiredJsonObject(cwd, flagValue(args, "--qa-result-json") ?? "", "QA result"),
+				});
+				return {
+					status: 0,
+					stdout: json ? renderCliWriteReceipt(receipt) : `Joined pipeline overlap ${receipt.overlap_id}.\n`,
+				};
+			}
+			case "rebaseline-pipeline-overlap": {
+				const receipt = await rebaselineUltragoalPipelineOverlap({
+					cwd,
+					overlapId: flagValue(args, "--overlap-id") ?? "",
+					goalId: flagValue(args, "--goal-id") ?? "",
+					evidence: flagValue(args, "--evidence") ?? "",
+					targetState: await readRequiredJsonObject(
+						cwd,
+						flagValue(args, "--target-state-json") ?? "",
+						"target state",
+					),
+				});
+				return {
+					status: 0,
+					stdout: json ? renderCliWriteReceipt(receipt) : `Rebaselined pipeline overlap ${receipt.overlap_id}.\n`,
+				};
+			}
 			default:
 				return { status: 1, stderr: `Unknown skc ultragoal command: ${command}\n` };
 		}
@@ -3923,6 +5423,9 @@ const RECONCILE_COMMANDS = new Set([
 	"record-review-blockers",
 	"review",
 	"classify-blocker",
+	"start-pipeline-overlap",
+	"join-pipeline-overlap",
+	"rebaseline-pipeline-overlap",
 ]);
 
 /**
@@ -3959,6 +5462,7 @@ async function reconcileUltragoalState(cwd: string): Promise<void> {
 		if (summary.nudgeRemaining !== undefined) payload.nudge_remaining = summary.nudgeRemaining;
 		if (summary.nudgeGoalId !== undefined) payload.nudge_goal_id = summary.nudgeGoalId;
 		if (summary.nudgeTargetKind !== undefined) payload.nudge_target_kind = summary.nudgeTargetKind;
+		if (summary.pipelineOverlap) payload.pipeline_overlap = summary.pipelineOverlap;
 		const ledgerText = await Bun.file(summary.paths.ledgerPath)
 			.text()
 			.catch(() => "");

@@ -298,7 +298,7 @@ export declare class Shell {
  * `packages/natives/native/index.js` (which derives the name from
  * `package.json#version`).
  */
-export declare function __piNativesV0_3_6(): void
+export declare function __piNativesV0_9_0(): void
 
 /**
  * Apply conservative pre-execution rewrites to a bash command.
@@ -1650,11 +1650,9 @@ export interface SummarySegment {
  */
 export declare function supportsLanguage(lang: string): boolean
 
-/**
- * Truncate text to a visible width, preserving ANSI codes.
- *
- * Pads with spaces when requested.
- */
+/** Truncate many strings to a visible width, preserving ANSI codes. */
+export declare function truncateLinesToWidth(lines: Array<string>, maxWidth: number, ellipsisKind: Ellipsis | undefined | null, pad: boolean | undefined | null, tabWidth: number): Array<string>
+
 export declare function truncateToWidth(text: string, maxWidth: number, ellipsisKind: Ellipsis | undefined | null, pad: boolean | undefined | null, tabWidth: number): string
 
 /**
@@ -1663,6 +1661,9 @@ export declare function truncateToWidth(text: string, maxWidth: number, ellipsis
  * Tabs count as a fixed-width cell.
  */
 export declare function visibleWidth(text: string, tabWidth: number): number
+
+/** Calculate visible widths of many strings, excluding ANSI escape sequences. */
+export declare function visibleWidths(lines: Array<string>, tabWidth: number): Array<number>
 
 /** Profiling results returned to JavaScript. */
 export interface WorkProfile {

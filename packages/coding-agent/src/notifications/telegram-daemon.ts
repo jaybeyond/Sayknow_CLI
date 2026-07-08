@@ -8,7 +8,7 @@ import { withFileLock } from "../config/file-lock";
 import type { Settings } from "../config/settings";
 import type { DaemonRuntimeInfo } from "../daemon/control-types";
 import { resolveSkcRuntimeSpawnInfo } from "../daemon/runtime";
-import { getNotificationConfig, isGloballyConfigured, tokenFingerprint } from "./config";
+import { getNotificationConfig, isTelegramConfigured, tokenFingerprint } from "./config";
 import { parseInThreadConfigCommand } from "./config-commands";
 import { daemonPaths } from "./daemon-paths";
 import {
@@ -27,6 +27,7 @@ import type {
 } from "./index";
 import {
 	formatLifecycleOutcome,
+	isLifecycleCommandLikeText,
 	isLifecycleCommandText,
 	lifecycleUsage,
 	parseLifecycleCommand,
@@ -48,7 +49,6 @@ import {
 	buildActionMessage,
 	type CallbackRoute,
 	createAliasTable,
-	type PendingAsk,
 	readEndpoint,
 	routeInboundUpdate,
 } from "./telegram-reference";
@@ -56,7 +56,7 @@ import { decideThreadedInbound, type InboundAttachment } from "./threaded-inboun
 import { renderThreadedFrame, type ThreadedSend } from "./threaded-render";
 import { TopicRegistry, type TopicRegistryState } from "./topic-registry";
 
-export type EnsureDaemonResult = "owner_spawned" | "attached" | "disabled";
+export type EnsureDaemonResult = "owner_spawned" | "attached" | "disabled" | "blocked";
 
 export interface DaemonState {
 	pid: number;
@@ -126,6 +126,7 @@ const TYPING_REFRESH_INTERVAL_MS = 4_000;
 // messages: queued on receipt, consumed once a turn picks the message up.
 const QUEUED_REACTION = "👀";
 const PENDING_TOPIC_FRAME_LIMIT = 20;
+const SEEN_UPDATE_ID_LIMIT = 1_000;
 const CONSUMED_REACTION = "✅";
 
 function splitTelegramPlainText(text: string, max = TELEGRAM_MESSAGE_LIMIT): string[] {
@@ -267,7 +268,7 @@ export async function registerNotificationRoot(input: {
 	const fsImpl = input.fs ?? nodeFs;
 	const paths = daemonPaths(input.settings.getAgentDir());
 	await ensureDir(fsImpl, paths.dir);
-	const root = path.join(input.cwd, ".skc", "state");
+	const root = notificationRootForCwd(input.cwd);
 	await withFileLock(
 		paths.roots,
 		async () => {
@@ -286,6 +287,29 @@ export async function registerNotificationRoot(input: {
 	return root;
 }
 
+function notificationRootForCwd(cwd: string): string {
+	return path.join(cwd, ".skc", "state");
+}
+
+function ownerIdentityMatches(state: DaemonState, tokenFingerprint: string, chatId: string): boolean {
+	return state.tokenFingerprint === tokenFingerprint && state.chatId === chatId;
+}
+
+function liveOwnerUsesDifferentIdentity(input: {
+	state: DaemonState | undefined;
+	tokenFingerprint: string;
+	chatId: string;
+	pidAlive: (pid: number) => boolean;
+}): boolean {
+	const { state } = input;
+	return Boolean(
+		state &&
+			state.version === DAEMON_VERSION &&
+			!ownerIdentityMatches(state, input.tokenFingerprint, input.chatId) &&
+			input.pidAlive(state.pid),
+	);
+}
+
 export function isFreshLiveOwner(input: {
 	state: DaemonState | undefined;
 	now: number;
@@ -297,8 +321,7 @@ export function isFreshLiveOwner(input: {
 	return Boolean(
 		state &&
 			state.version === DAEMON_VERSION &&
-			state.tokenFingerprint === input.tokenFingerprint &&
-			state.chatId === input.chatId &&
+			ownerIdentityMatches(state, input.tokenFingerprint, input.chatId) &&
 			input.now - state.heartbeatAt <= HEARTBEAT_TTL_MS &&
 			input.pidAlive(state.pid),
 	);
@@ -314,7 +337,13 @@ export async function acquireDaemonOwnership(input: {
 	pid?: number;
 	pidAlive?: (pid: number) => boolean;
 	randomId?: () => string;
-}): Promise<{ acquired: boolean; ownerId?: string; attached?: boolean }> {
+}): Promise<{
+	acquired: boolean;
+	ownerId?: string;
+	attached?: boolean;
+	blocked?: boolean;
+	reason?: "identity_mismatch";
+}> {
 	const fsImpl = input.fs ?? nodeFs;
 	const now = input.now ?? Date.now;
 	const pid = input.pid ?? process.pid;
@@ -324,6 +353,16 @@ export async function acquireDaemonOwnership(input: {
 	const ownerId = input.randomId?.() ?? `${pid}-${now().toString(36)}-${Math.random().toString(36).slice(2)}`;
 	const roots = input.roots ?? (await readJson<{ roots?: string[] }>(fsImpl, paths.roots))?.roots ?? [];
 	const existing = await readJson<DaemonState>(fsImpl, paths.state);
+	if (
+		liveOwnerUsesDifferentIdentity({
+			state: existing,
+			tokenFingerprint: input.tokenFingerprint,
+			chatId: input.chatId,
+			pidAlive,
+		})
+	) {
+		return { acquired: false, blocked: true, reason: "identity_mismatch" };
+	}
 	if (
 		isFreshLiveOwner({
 			state: existing,
@@ -350,6 +389,16 @@ export async function acquireDaemonOwnership(input: {
 	}
 	const afterLock = await readJson<DaemonState>(fsImpl, paths.state);
 	if (
+		liveOwnerUsesDifferentIdentity({
+			state: afterLock,
+			tokenFingerprint: input.tokenFingerprint,
+			chatId: input.chatId,
+			pidAlive,
+		})
+	) {
+		return { acquired: false, blocked: true, reason: "identity_mismatch" };
+	}
+	if (
 		isFreshLiveOwner({
 			state: afterLock,
 			now: now(),
@@ -374,6 +423,16 @@ export async function acquireDaemonOwnership(input: {
 			})
 		) {
 			return { acquired: false, attached: true };
+		}
+		if (
+			liveOwnerUsesDifferentIdentity({
+				state: rechecked,
+				tokenFingerprint: input.tokenFingerprint,
+				chatId: input.chatId,
+				pidAlive,
+			})
+		) {
+			return { acquired: false, blocked: true, reason: "identity_mismatch" };
 		}
 		if (rechecked && pidAlive(rechecked.pid)) {
 			return { acquired: false, attached: true };
@@ -552,7 +611,16 @@ export async function spawnTelegramDaemonOwner(
 		ownerId: ownership.ownerId ?? "",
 		agentDir,
 	});
-	if (!ownership.acquired) return { result: "attached", runtime, warnings: [] };
+	if (!ownership.acquired) {
+		if (ownership.blocked) {
+			return {
+				result: "blocked",
+				runtime,
+				warnings: ["live telegram daemon uses a different bot token or chat; refusing to attach"],
+			};
+		}
+		return { result: "attached", runtime, warnings: [] };
+	}
 	const spawnImpl = deps.spawn ?? defaultDaemonSpawn;
 	const child = spawnImpl(command, args, {
 		detached: true,
@@ -568,13 +636,18 @@ export async function ensureTelegramDaemonRunning(
 	deps: TelegramDaemonDeps = {},
 ): Promise<EnsureDaemonResult> {
 	const cfg = getNotificationConfig(input.settings);
-	if (!isGloballyConfigured(cfg) || !cfg.botToken || !cfg.chatId) return "disabled";
-	const root = await registerNotificationRoot({ ...input, fs: deps.fs });
+	if (!isTelegramConfigured(cfg)) return "disabled";
+	const root = notificationRootForCwd(input.cwd);
 	const fp = tokenFingerprint(cfg.botToken);
 	const spawned = await spawnTelegramDaemonOwner(
 		{ settings: input.settings, roots: [root], tokenFingerprint: fp, chatId: cfg.chatId },
 		deps,
 	);
+	if (spawned.result === "blocked") {
+		logger.warn(`notifications: failed to ensure Telegram daemon: ${spawned.warnings.join("; ")}`);
+		return spawned.result;
+	}
+	await registerNotificationRoot({ ...input, fs: deps.fs });
 	return spawned.result;
 }
 
@@ -796,6 +869,8 @@ interface PendingThreadedFrame {
 export class TelegramNotificationDaemon {
 	readonly aliasTable: AliasTable;
 	readonly messageRoutes = new Map<string | number, CallbackRoute | Omit<CallbackRoute, "answer">>();
+	/** Telegram message id backing each streamed `${sessionId}:${coalesceKey}`, for in-place edits. */
+	private readonly liveMessages = new Map<string, number>();
 	readonly sessions = new Map<string, SessionSocket>();
 	private readonly runtime: NotificationOperatorRuntime;
 	private readonly sessionRouter: OperatorEventRouter<SessionSocket>;
@@ -820,6 +895,8 @@ export class TelegramNotificationDaemon {
 	private readonly flatIdentitySent = new Set<string>();
 	/** Cached result of whether the paired chat is a private chat (flat-fallback gate). */
 	private pairedChatPrivate: boolean | undefined;
+	/** Bot username from getMe, cached once at owner startup for group/forum command targeting. */
+	private botUsername: string | undefined;
 	/** Sessions whose agent loop is currently busy (drives the typing indicator). */
 	private get busy(): Set<string> {
 		return this.dispatchState.busy;
@@ -1078,8 +1155,10 @@ export class TelegramNotificationDaemon {
 		text: string | undefined,
 		updateId: number | undefined,
 		threadId: number | undefined,
+		commandCtx: { chatType?: string; botUsername?: string },
 	): Promise<boolean> {
-		if (!isLifecycleCommandText(text)) return false;
+		if (!isLifecycleCommandText(text, commandCtx)) return false;
+		if (!(await this.pairedChatIsPrivate())) return true;
 		const reply = async (body: string): Promise<void> => {
 			for (const text of splitTelegramPlainText(body)) {
 				await this.botApi
@@ -1104,15 +1183,15 @@ export class TelegramNotificationDaemon {
 			}
 		};
 
+		const parsed = parseLifecycleCommand(text, commandCtx);
+		if (parsed.kind === "none") return false;
 		if (!this.lifecycleControlActive) {
 			await reply("Session lifecycle control is not available right now.");
 			return true;
 		}
 		if (updateId !== undefined && this.dispatchState.seenUpdateIds.has(updateId)) return true;
-		if (updateId !== undefined) this.dispatchState.seenUpdateIds.add(updateId);
+		if (updateId !== undefined) await this.rememberSeenUpdateId(updateId);
 
-		const parsed = parseLifecycleCommand(text);
-		if (parsed.kind === "none") return false;
 		if (parsed.kind === "usage" || parsed.kind === "reject") {
 			await reply(parsed.message);
 			return true;
@@ -1143,6 +1222,17 @@ export class TelegramNotificationDaemon {
 		const response = await this.submitLifecycleFrame(frame);
 		await reply(this.formatLifecycleResponse(response));
 		return true;
+	}
+
+	private async refreshBotIdentity(): Promise<void> {
+		try {
+			const response = (await this.botApi.call("getMe", {})) as { result?: { username?: unknown } };
+			const username = response.result?.username;
+			this.botUsername =
+				typeof username === "string" && username.trim() ? username.trim().replace(/^@/, "") : undefined;
+		} catch {
+			this.botUsername = undefined;
+		}
 	}
 
 	/** Map a lifecycle response/error to a user-facing message (G010 surfacing). */
@@ -1245,6 +1335,51 @@ export class TelegramNotificationDaemon {
 		const paths = daemonPaths(this.opts.settings.getAgentDir());
 		await ensureDir(this.fsImpl, paths.dir);
 		await writeJsonAtomic(this.fsImpl, paths.aliases, this.aliasTable.serialize());
+	}
+
+	async loadSeenUpdateIds(): Promise<void> {
+		const raw = await readJson<{ updateIds?: unknown }>(
+			this.fsImpl,
+			daemonPaths(this.opts.settings.getAgentDir()).seenUpdates,
+		);
+		this.dispatchState.seenUpdateIds.clear();
+		const updateIds = Array.isArray(raw?.updateIds) ? raw.updateIds : [];
+		for (const updateId of updateIds) {
+			if (Number.isSafeInteger(updateId) && Number(updateId) >= 0) {
+				this.dispatchState.seenUpdateIds.add(Number(updateId));
+			}
+		}
+		this.pruneSeenUpdateIds();
+	}
+
+	async persistSeenUpdateIds(): Promise<void> {
+		const paths = daemonPaths(this.opts.settings.getAgentDir());
+		await ensureDir(this.fsImpl, paths.dir);
+		await writeJsonAtomic(this.fsImpl, paths.seenUpdates, {
+			version: 1,
+			updateIds: [...this.dispatchState.seenUpdateIds].slice(-SEEN_UPDATE_ID_LIMIT),
+		});
+	}
+
+	private pruneSeenUpdateIds(): void {
+		let extra = this.dispatchState.seenUpdateIds.size - SEEN_UPDATE_ID_LIMIT;
+		if (extra <= 0) return;
+		for (const updateId of this.dispatchState.seenUpdateIds) {
+			this.dispatchState.seenUpdateIds.delete(updateId);
+			extra -= 1;
+			if (extra <= 0) break;
+		}
+	}
+
+	private async rememberSeenUpdateId(updateId: number): Promise<void> {
+		if (!Number.isSafeInteger(updateId) || updateId < 0) return;
+		this.dispatchState.seenUpdateIds.add(updateId);
+		this.pruneSeenUpdateIds();
+		try {
+			await this.persistSeenUpdateIds();
+		} catch (err) {
+			logger.warn(`notifications: failed to persist Telegram update id ${updateId}: ${String(err)}`);
+		}
 	}
 
 	async scanRoots(): Promise<void> {
@@ -1366,19 +1501,31 @@ export class TelegramNotificationDaemon {
 	 * (so a delayed old close cannot delete a replacement), and best-effort closes
 	 * the socket. `scanRoots()` then reconnects the session.
 	 */
-	private dropSession(session: SessionSocket, _reason: string): void {
+	private dropSession(session: SessionSocket, reason: string): void {
 		const clearIntervalImpl = this.opts.clearIntervalImpl ?? clearInterval;
 		if (session.pingTimer) {
 			clearIntervalImpl(session.pingTimer);
 			session.pingTimer = undefined;
 		}
-		if (this.sessions.get(session.sessionId) === session) {
+		const isCurrentSession = this.sessions.get(session.sessionId) === session;
+		if (isCurrentSession || reason === "session_closed") {
+			this.deleteMessageRoutes(session.sessionId);
+		}
+		if (isCurrentSession) {
 			this.sessions.delete(session.sessionId);
 		}
 		if (session.ws.readyState !== WebSocket.CLOSED) {
 			try {
 				session.ws.close();
 			} catch {}
+		}
+	}
+
+	private deleteMessageRoutes(sessionId: string, actionId?: string): void {
+		for (const [messageId, route] of this.messageRoutes.entries()) {
+			if (route.sessionId === sessionId && (actionId === undefined || route.actionId === actionId)) {
+				this.messageRoutes.delete(messageId);
+			}
 		}
 	}
 
@@ -1434,6 +1581,13 @@ export class TelegramNotificationDaemon {
 		return undefined;
 	}
 
+	private sessionCanClaimIdentity(session: SessionSocket, msg: { repo?: unknown; branch?: unknown }): boolean {
+		const current = this.sessions.get(session.sessionId);
+		if (current) return current === session;
+		const ownerId = this.topicOwnerForIdentity(msg);
+		return !ownerId || ownerId === session.sessionId;
+	}
+
 	private async submitThreadedFrame(sessionId: string, send: ThreadedSend, topicId: string): Promise<void> {
 		this.pool.submit({
 			sessionId,
@@ -1442,6 +1596,11 @@ export class TelegramNotificationDaemon {
 			payload: { send, topicId },
 		});
 		await this.flushPool();
+	}
+
+	private async existingTopicForPrivateChat(sessionId: string): Promise<string | undefined> {
+		if (!(await this.pairedChatIsPrivate())) return undefined;
+		return this.topics.get(sessionId)?.topicId;
 	}
 
 	private rememberPendingThreadedFrame(sessionId: string, send: ThreadedSend, msg: Record<string, unknown>): void {
@@ -1465,6 +1624,7 @@ export class TelegramNotificationDaemon {
 	 * one-time nudge) or drop fail-closed for a non-private chat.
 	 */
 	private async ensureTopic(sessionId: string, name: string): Promise<string | undefined> {
+		if (!(await this.pairedChatIsPrivate())) return undefined;
 		const existing = this.topics.get(sessionId);
 		if (existing) return existing.topicId;
 		try {
@@ -1508,6 +1668,9 @@ export class TelegramNotificationDaemon {
 			})) as { ok?: boolean };
 			if (res?.ok === false) return;
 			this.topics.delete(sessionId);
+			for (const k of [...this.liveMessages.keys()]) {
+				if (k.startsWith(`${sessionId}:`)) this.liveMessages.delete(k);
+			}
 			this.topicOwnerByIdentity.forEach((ownerSessionId, identityKey) => {
 				if (ownerSessionId === sessionId) this.topicOwnerByIdentity.delete(identityKey);
 			});
@@ -1637,10 +1800,25 @@ export class TelegramNotificationDaemon {
 
 	/** Drain the shared rate-limit pool and deliver each granted send to its topic. */
 	private async flushPool(): Promise<void> {
-		for (const item of this.pool.drain()) {
+		const batch = this.pool.drain();
+		// Within a batch a finalized frame supersedes any still-queued live frame for
+		// the same streamed message (finalized outranks live), so drop the stale live
+		// edit — otherwise the authoritative final text could be overwritten by an
+		// older partial delivered right after it.
+		const finalizedKeys = new Set<string>();
+		for (const item of batch) {
+			if (item.lane === "finalized" && item.coalesceKey !== undefined) {
+				finalizedKeys.add(`${item.sessionId}:${item.coalesceKey}`);
+			}
+		}
+		for (const item of batch) {
 			const { send, topicId } = item.payload;
+			if (topicId && !(await this.pairedChatIsPrivate())) continue;
 			// Threaded topic when available; otherwise deliver flat to the paired chat.
 			const threadField = topicId ? { message_thread_id: Number(topicId) } : {};
+			const ckey = send.editable ? item.coalesceKey : undefined;
+			const editKey = ckey !== undefined ? `${item.sessionId}:${ckey}` : undefined;
+			if (item.lane === "live" && editKey && finalizedKeys.has(editKey)) continue;
 			try {
 				if (send.method === "sendPhoto" && send.photoBase64) {
 					// Real photo upload (the default botApi multiparts base64 -> file).
@@ -1663,19 +1841,77 @@ export class TelegramNotificationDaemon {
 						parse_mode: TELEGRAM_PARSE_MODE,
 					});
 				} else if (send.text) {
-					for (const text of splitTelegramHtml(send.text)) {
-						await this.botApi.call("sendMessage", {
+					const chunks = splitTelegramHtml(send.text);
+					const existingId = editKey ? this.liveMessages.get(editKey) : undefined;
+					if (editKey && existingId !== undefined && chunks.length === 1) {
+						// In-place edit of the streamed message. An unchanged edit is
+						// rejected by Telegram ("message is not modified") and swallowed.
+						await this.botApi.call("editMessageText", {
 							chat_id: this.opts.chatId,
-							...threadField,
-							text,
+							message_id: existingId,
+							text: chunks[0],
 							parse_mode: TELEGRAM_PARSE_MODE,
 						});
+					} else {
+						// A single granted slot MUST map to a single Telegram send. When the
+						// rendered text splits into multiple chunks (e.g. a long finalized
+						// turn raised via SKC_NOTIFICATIONS_TURN_MAX), deliver the first
+						// chunk on this token and re-submit the remaining chunks as their
+						// own pool items so each consumes a token on a later drain.
+						// Otherwise one frame would fan out into many sends against a single
+						// slot, bypassing the per-chat rate-limit / fairness invariant.
+						const res = (await this.botApi.call("sendMessage", {
+							chat_id: this.opts.chatId,
+							...threadField,
+							text: chunks[0]!,
+							parse_mode: TELEGRAM_PARSE_MODE,
+						})) as { result?: { message_id?: number } };
+						for (let i = 1; i < chunks.length; i++) {
+							// Continuation chunks are fresh, non-editable text sends: no
+							// coalesce key (they neither replace nor are replaced by other
+							// frames) and no media payload.
+							this.pool.submit({
+								sessionId: item.sessionId,
+								lane: item.lane,
+								payload: {
+									send: {
+										...send,
+										method: "sendMessage",
+										text: chunks[i]!,
+										editable: false,
+										coalesceKey: undefined,
+										photoBase64: undefined,
+										documentBase64: undefined,
+									},
+									topicId,
+								},
+							});
+						}
+						const firstMessageId = res?.result?.message_id;
+						if (editKey && ckey !== undefined && firstMessageId !== undefined) {
+							this.recordLiveMessage(item.sessionId, ckey, firstMessageId);
+						}
 					}
 				}
 			} catch {
-				// Best-effort: a failed send must never stop the daemon.
+				// Best-effort: a failed send/edit must never stop the daemon.
 			}
 		}
+	}
+
+	/**
+	 * Track the Telegram message id backing a streamed `(sessionId, coalesceKey)`
+	 * so later live/finalized frames edit it in place. Evicts this session's stale
+	 * same-category entries (e.g. prior turns) so the map stays bounded.
+	 */
+	private recordLiveMessage(sessionId: string, coalesceKey: string, messageId: number): void {
+		const mapKey = `${sessionId}:${coalesceKey}`;
+		const category = coalesceKey.split(":")[0] ?? "";
+		const prefix = `${sessionId}:${category}:`;
+		for (const k of [...this.liveMessages.keys()]) {
+			if (k !== mapKey && k.startsWith(prefix)) this.liveMessages.delete(k);
+		}
+		this.liveMessages.set(mapKey, messageId);
 	}
 
 	/**
@@ -1697,9 +1933,10 @@ export class TelegramNotificationDaemon {
 	}
 
 	/**
-	 * Resolve once (cached) whether the paired `chatId` is a private chat. Flat
-	 * fallback is only safe in a private DM; any non-private chat or an unresolvable
-	 * `getChat` is treated as not-private so delivery fails closed.
+	 * Resolve (and cache successful resolution of) whether the paired `chatId` is a
+	 * private chat. Topic and flat delivery are only safe in a private DM; any
+	 * non-private chat fails closed, while a transient `getChat` failure fails closed
+	 * for the current attempt and is retried later.
 	 */
 	private async pairedChatIsPrivate(): Promise<boolean> {
 		if (this.pairedChatPrivate !== undefined) return this.pairedChatPrivate;
@@ -1708,15 +1945,16 @@ export class TelegramNotificationDaemon {
 				result?: { type?: string };
 			};
 			this.pairedChatPrivate = res.result?.type === "private";
-		} catch {
-			this.pairedChatPrivate = false;
+			return this.pairedChatPrivate;
+		} catch (e) {
+			logger.warn(`notifications: getChat failed while checking Telegram chat privacy: ${String(e)}`);
+			return false;
 		}
-		return this.pairedChatPrivate;
 	}
 
 	/** Tell the user once (per daemon run) how to enable Threaded Mode. */
 	private async notifyThreadedFallback(): Promise<void> {
-		if (this.threadedFallbackNoticeSent) return;
+		if (this.threadedFallbackNoticeSent || !(await this.pairedChatIsPrivate())) return;
 		this.threadedFallbackNoticeSent = true;
 		try {
 			await this.botApi.call("sendMessage", {
@@ -1761,7 +1999,7 @@ export class TelegramNotificationDaemon {
 	/** Send a single `typing` chat action into a busy session's topic (best-effort). */
 	private async sendTyping(sessionId: string): Promise<void> {
 		const topicId = this.topics.get(sessionId)?.topicId;
-		if (!topicId) return;
+		if (!topicId || !(await this.pairedChatIsPrivate())) return;
 		try {
 			await this.botApi.call("sendChatAction", {
 				chat_id: this.opts.chatId,
@@ -1775,6 +2013,7 @@ export class TelegramNotificationDaemon {
 
 	/** Set a native reaction on an inbound thread message (best-effort). */
 	private async setReaction(messageId: number, emoji: string): Promise<void> {
+		if (!(await this.pairedChatIsPrivate())) return;
 		try {
 			await this.botApi.call("setMessageReaction", {
 				chat_id: this.opts.chatId,
@@ -1802,12 +2041,12 @@ export class TelegramNotificationDaemon {
 		if (typeof msg?.type === "string" && TelegramNotificationDaemon.THREADED_FRAMES.has(msg.type)) {
 			const send = renderThreadedFrame(msg);
 			if (!send) return;
-			const existingTopic = this.topics.get(session.sessionId)?.topicId;
+			const existingTopic = await this.existingTopicForPrivateChat(session.sessionId);
 			if (!send.identity && !existingTopic && !this.flatIdentitySent.has(session.sessionId)) {
 				this.rememberPendingThreadedFrame(session.sessionId, send, msg as Record<string, unknown>);
 				return;
 			}
-			if (send.identity) {
+			if (send.identity && !this.sessionCanClaimIdentity(session, msg)) {
 				const ownerId = this.topicOwnerForIdentity(msg);
 				const ownerTopic = ownerId ? this.topics.get(ownerId) : undefined;
 				if (ownerId && ownerId !== session.sessionId && ownerTopic) {
@@ -1890,6 +2129,7 @@ export class TelegramNotificationDaemon {
 			await this.persistAliases();
 		} else if (msg.type === "action_resolved" && msg.id) {
 			session.pending.delete(msg.id);
+			this.deleteMessageRoutes(session.sessionId, msg.id);
 			for (const [alias, route] of this.aliasTable.entries()) {
 				if (route.sessionId === session.sessionId && route.actionId === msg.id) this.aliasTable.delete(alias);
 			}
@@ -1897,19 +2137,22 @@ export class TelegramNotificationDaemon {
 		}
 	}
 
-	pendingBySession = (sessionId?: string): PendingAsk[] => {
-		const result: PendingAsk[] = [];
-		for (const session of this.sessions.values()) {
-			if (sessionId && session.sessionId !== sessionId) continue;
-			result.push(...session.pending.values());
+	private async answerCallbackQueryBestEffort(callbackId: unknown, text?: string): Promise<void> {
+		if (typeof callbackId !== "string") return;
+		try {
+			await this.botApi.call("answerCallbackQuery", {
+				callback_query_id: callbackId,
+				...(text === undefined ? {} : { text }),
+			});
+		} catch {
+			// Telegram callback acknowledgements only dismiss the client-side spinner;
+			// they must never block the already-validated local reply path.
 		}
-		return result;
-	};
+	}
 
 	private async sendStaleGuidance(callbackId: unknown): Promise<void> {
-		if (typeof callbackId === "string") {
-			await this.botApi.call("answerCallbackQuery", { callback_query_id: callbackId, text: "Button is stale" });
-		}
+		await this.answerCallbackQueryBestEffort(callbackId, "Button is stale");
+		if (!(await this.pairedChatIsPrivate())) return;
 		await this.botApi.call("sendMessage", {
 			chat_id: this.opts.chatId,
 			text: "This button is stale after notification daemon restart. Please answer locally in the SKC session or wait for a fresh notification.",
@@ -1924,12 +2167,18 @@ export class TelegramNotificationDaemon {
 		// session input.
 		{
 			const m = (update as { update_id?: number; message?: Record<string, unknown> }).message;
-			const chatId = (m?.chat as { id?: unknown } | undefined)?.id;
+			const chat = m?.chat as { id?: unknown; type?: unknown } | undefined;
+			const chatId = chat?.id;
+			const chatType = typeof chat?.type === "string" ? chat.type : undefined;
 			const cmdText = typeof m?.text === "string" ? m.text : undefined;
-			if (m !== undefined && String(chatId) === String(this.opts.chatId) && isLifecycleCommandText(cmdText)) {
-				const updateId = (update as { update_id?: number }).update_id;
-				const threadId = typeof m.message_thread_id === "number" ? (m.message_thread_id as number) : undefined;
-				if (await this.handleLifecycleCommand(cmdText, updateId, threadId)) return;
+			const commandCtx = { chatType, botUsername: this.botUsername };
+			if (m !== undefined && String(chatId) === String(this.opts.chatId)) {
+				if (chatType !== undefined && chatType !== "private" && isLifecycleCommandLikeText(cmdText)) return;
+				if (isLifecycleCommandText(cmdText, commandCtx)) {
+					const updateId = (update as { update_id?: number }).update_id;
+					const threadId = typeof m.message_thread_id === "number" ? (m.message_thread_id as number) : undefined;
+					if (await this.handleLifecycleCommand(cmdText, updateId, threadId, commandCtx)) return;
+				}
 			}
 		}
 		// Threaded injection: a free-text message in a known topic (not a button
@@ -1954,7 +2203,6 @@ export class TelegramNotificationDaemon {
 			});
 			if (inbound.kind === "duplicate") return;
 			if (inbound.kind === "inject") {
-				this.dispatchState.seenUpdateIds.add(inbound.updateId);
 				const session = this.sessions.get(inbound.sessionId);
 				if (session?.ws.readyState === WebSocket.OPEN) {
 					const attachmentResult = inbound.attachment
@@ -1979,6 +2227,7 @@ export class TelegramNotificationDaemon {
 								token: session.token,
 							}),
 						);
+						await this.rememberSeenUpdateId(inbound.updateId);
 						if (inbound.messageId !== undefined) await this.setReaction(inbound.messageId, QUEUED_REACTION);
 						return;
 					}
@@ -1997,6 +2246,7 @@ export class TelegramNotificationDaemon {
 									},
 						),
 					);
+					await this.rememberSeenUpdateId(inbound.updateId);
 					// User turns get a native delivery double-check: queued on receipt,
 					// flipped to consumed when the session acks the turn that picks it
 					// up. Config commands are not user turns and get no reaction.
@@ -2012,7 +2262,6 @@ export class TelegramNotificationDaemon {
 		const decision = routeInboundUpdate(update, {
 			aliasTable: this.aliasTable,
 			messageRoutes: this.messageRoutes,
-			pendingBySession: this.pendingBySession,
 			pairedChatId: this.opts.chatId,
 		});
 		if (decision.kind === "reply") {
@@ -2021,11 +2270,10 @@ export class TelegramNotificationDaemon {
 				await this.sendStaleGuidance(callbackId);
 				return;
 			}
-			if (typeof callbackId === "string")
-				await this.botApi.call("answerCallbackQuery", { callback_query_id: callbackId });
 			session.ws.send(
 				JSON.stringify({ type: "reply", id: decision.actionId, answer: decision.answer, token: session.token }),
 			);
+			await this.answerCallbackQueryBestEffort(callbackId);
 		} else if (decision.kind === "stale") {
 			await this.sendStaleGuidance(callbackId);
 		}
@@ -2068,9 +2316,11 @@ export class TelegramNotificationDaemon {
 		this.startScanTimer();
 		this.startTypingTimer();
 		try {
+			await this.refreshBotIdentity();
 			await this.registerBotCommands();
 			await this.loadAliases();
 			await this.loadTopics();
+			await this.loadSeenUpdateIds();
 			await this.runScan();
 			// Owner-only: start the session-lifecycle control server now that
 			// ownership is confirmed (singleton-safe). Best-effort; degrades.
@@ -2131,6 +2381,7 @@ export class TelegramNotificationDaemon {
 			// (e.g. after reload) reloads aliases/topics seamlessly.
 			await this.persistAliases().catch(() => undefined);
 			await this.persistTopics().catch(() => undefined);
+			await this.persistSeenUpdateIds().catch(() => undefined);
 			await this.opts.control?.clear?.(this.opts.ownerId).catch(() => undefined);
 			await releaseDaemonOwnership({
 				settings: this.opts.settings,

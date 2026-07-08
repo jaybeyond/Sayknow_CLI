@@ -1,0 +1,250 @@
+--- a/packages/coding-agent/src/modes/components/welcome.ts
++++ b/packages/coding-agent/src/modes/components/welcome.ts
+@@ -1,5 +1,6 @@
+ import { type Component, padding, TERMINAL, truncateToWidth, visibleWidth } from "@sayknow-cli/tui";
+ import { APP_NAME } from "@sayknow-cli/utils";
++import { t } from "../../i18n";
+ import { type ThemeColor, theme } from "../../modes/theme/theme";
+ 
+ export interface RecentSession {
+@@ -21,7 +22,7 @@
+ 	collapseChangelog?: boolean;
+ }
+ 
+-const WELCOME_STATIC_RIGHT_ROWS_EXCLUDING_DYNAMIC_SECTIONS = 9;
++const WELCOME_STATIC_RIGHT_ROWS_EXCLUDING_DYNAMIC_SECTIONS = 15;
+ const DEFAULT_WHATS_NEW_ROWS = 3;
+ const MAX_WHATS_NEW_ROWS = 12;
+ const NEWLINE_FLOW_KEY =
+@@ -41,8 +42,9 @@
+ ];
+ 
+ /**
+- * SKC-native launch surface with compact command affordances, project
+- * signals, and a claw/talon mark without copying another agent shell.
++ * Sayknow-CLI launch surface: a blue-gradient SAYKNOW wordmark, compact
++ * command affordances, and project signals — a distinct identity, not a
++ * copy of another agent shell.
+  */
+ export class WelcomeComponent implements Component {
+ 	#animStart: number | null = null;
+@@ -116,7 +118,7 @@
+ 		}
+ 		const targetContentRows = targetRows === undefined ? undefined : Math.max(0, targetRows - 2);
+ 		const dualContentWidth = boxWidth - 3; // 3 = │ + │ + │
+-		const minLeftCol = 20; // logo mark plus SKC identity labels
++		const minLeftCol = 20; // wordmark plus Sayknow identity labels
+ 		const minRightCol = 24;
+ 		const modelPill = this.#pill(theme.icon.model || "model", this.modelName, "statusLineModel");
+ 		const providerPill = this.#pill(theme.icon.package || "provider", this.providerName, "statusLinePath");
+@@ -125,8 +127,7 @@
+ 		const leftMinContentWidth = Math.max(
+ 			minLeftCol,
+ 			logoMinWidth,
+-			visibleWidth("SKC Forge"),
+-			visibleWidth("shape · act · prove"),
++			visibleWidth(t("welcome.tagline")),
+ 			visibleWidth(modelPill),
+ 			visibleWidth(providerPill),
+ 		);
+@@ -144,17 +145,26 @@
+ 
+ 		const logoColored = this.#currentLogoFrame(logoLines);
+ 
++		// When no model is resolved yet, guide the user instead of showing "Unknown".
++		const hasModel = this.modelName !== "Unknown" && this.modelName.length > 0;
++		const identityTail = hasModel
++			? [this.#centerText(modelPill, leftCol), this.#centerText(providerPill, leftCol)]
++			: [
++					this.#centerText(
++						this.#pill(theme.icon.model || "model", t("welcome.chooseModel"), "statusLineModel"),
++						leftCol,
++					),
++					this.#centerText(theme.fg("dim", t("welcome.modelHint")), leftCol),
++				];
++
++		// Left column - centered identity stack: wordmark, tagline, then model state.
+ 		const leftLines = [
+ 			"",
+-			this.#centerText(theme.bold(theme.fg("accent", "SKC Forge")), leftCol),
+-			this.#centerText(theme.fg("dim", "shape · act · prove"), leftCol),
+-			"",
+ 			...logoColored.map(l => this.#centerText(l, leftCol)),
+ 			"",
+-			this.#centerText(this.#loadingLine(), leftCol),
+-			this.#centerText(modelPill, leftCol),
+-			this.#centerText(providerPill, leftCol),
++			this.#centerText(theme.fg("muted", t("welcome.tagline")), leftCol),
+ 			"",
++			...identityTail,
+ 		];
+ 
+ 		const buildSeparator = (columnWidth: number): string =>
+@@ -164,7 +174,7 @@
+ 		const separator = buildSeparator(rightColumnWidth);
+ 		const lspLines: string[] = [];
+ 		if (this.lspServers.length === 0) {
+-			lspLines.push(` ${theme.fg("dim", "No LSP servers")}`);
++			lspLines.push(` ${theme.fg("dim", t("welcome.noLsp"))}`);
+ 		} else {
+ 			for (const server of this.lspServers.slice(0, 4)) {
+ 				const icon =
+@@ -196,18 +206,30 @@
+ 		);
+ 		const sessionLines = this.#sessionTrailLines(rightColumnWidth, sessionLimit);
+ 
++		// Workflow affordances: pad the command so descriptions align.
++		const wf = (cmd: string, desc: string): string => {
++			const pad = " ".repeat(Math.max(1, 17 - visibleWidth(cmd)));
++			return ` ${theme.fg("accent", cmd)}${pad}${theme.fg("muted", desc)}`;
++		};
++
+ 		const rightLines = [
+ 			"",
+ 			` ${theme.bold(theme.fg("accent", "What's New"))}`,
+ 			...changelogLines,
+ 			separator,
+-			` ${theme.bold(theme.fg("accent", "Flow keys"))}`,
++			` ${theme.bold(theme.fg("accent", t("welcome.workflows")))}`,
++			wf("/deep-interview", t("welcome.wf.deepInterview")),
++			wf("/ralplan", t("welcome.wf.ralplan")),
++			wf("/ultragoal", t("welcome.wf.ultragoal")),
++			wf("/team", t("welcome.wf.team")),
++			separator,
++			` ${theme.bold(theme.fg("accent", t("welcome.flowKeys")))}`,
+ 			...flowLines,
+ 			separator,
+-			` ${theme.bold(theme.fg("accent", "Project pulse"))}`,
++			` ${theme.bold(theme.fg("accent", t("welcome.projectPulse")))}`,
+ 			...lspLines,
+ 			separator,
+-			` ${theme.bold(theme.fg("accent", "Session trail"))}`,
++			` ${theme.bold(theme.fg("accent", t("welcome.sessionTrail")))}`,
+ 			...sessionLines,
+ 			"",
+ 		];
+@@ -227,7 +249,7 @@
+ 		const br = theme.fg("dim", theme.boxRound.bottomRight);
+ 
+ 		const lines: string[] = [];
+-		const title = ` ${APP_NAME} v${this.version} · SKC Forge `;
++		const title = ` ${APP_NAME} · Sayknow-CLI v${this.version} `;
+ 		const titlePrefixRaw = hChar.repeat(3);
+ 		const titleStyled = theme.fg("dim", titlePrefixRaw) + theme.fg("muted", title);
+ 		const titleVisLen = visibleWidth(titlePrefixRaw) + visibleWidth(title);
+@@ -322,7 +344,28 @@
+ 	}
+ 
+ 	#flowKeyItemText(item: { key: string; label: string }): string {
+-		return `${theme.fg("dim", item.key)}${theme.fg("muted", ` ${item.label}`)}`;
++		return `${theme.fg("dim", item.key)}${theme.fg("muted", ` ${this.#flowKeyLabel(item.label)}`)}`;
++	}
++
++	#flowKeyLabel(label: string): string {
++		switch (label) {
++			case "commands":
++				return t("welcome.commands");
++			case "actions":
++				return t("welcome.actions");
++			case "shell":
++				return t("welcome.shell");
++			case "python":
++				return t("welcome.python");
++			case "keymap":
++				return t("welcome.keymap");
++			case "model":
++				return t("welcome.model");
++			case "reasoning":
++				return t("welcome.reasoning");
++			default:
++				return label;
++		}
+ 	}
+ 
+ 	#flowKeyRows(width: number): string[] {
+@@ -414,7 +457,7 @@
+ 
+ 	#sessionTrailLines(rightColumnWidth: number, limit: number): string[] {
+ 		if (this.recentSessions.length === 0) {
+-			return [` ${theme.fg("dim", "No saved trails")}`];
++			return [` ${theme.fg("dim", t("welcome.noSessions"))}`];
+ 		}
+ 
+ 		const bulletPrefix = ` ${theme.md.bullet} `;
+@@ -532,53 +575,28 @@
+ 	}
+ 
+ 	#logoLines(): readonly string[] {
+-		if (this.logoMode === "ascii") return ASCII_CLAW_LOGO;
+-		if (this.logoMode === "square") return SQUARE_CLAW_LOGO;
+-		return RED_CLAW_LOGO;
++		return BRAND_LOGO;
+ 	}
+ }
+-
+-// biome-ignore format: preserve ASCII art layout
+-const RED_CLAW_LOGO = [
+-	"╭────────────────╮        ╭────────╮",
+-	"╰──────╮      ╭──╯     ╭──╯  ╭─────╯",
+-	"       ╰──────╯    ╭───╯  ╭──╯      ",
+-	"       ╭──────╮    ╰───╮  ╰──╮      ",
+-	"╭──────╯      ╰──╮     ╰──╮  ╰─────╮",
+-	"╰────────────────╯        ╰────────╯",
+-];
+-
+-// biome-ignore format: preserve ASCII art layout
+-const SQUARE_CLAW_LOGO = [
+-	"┌────────────────┐        ┌────────┐",
+-	"└──────┐      ┌──┘     ┌──┘  ┌─────┘",
+-	"       └──────┘    ┌───┘  ┌──┘      ",
+-	"       ┌──────┐    └───┐  └──┐      ",
+-	"┌──────┘      └──┐     └──┐  └─────┐",
+-	"└────────────────┘        └────────┘",
+-];
+ 
+ // biome-ignore format: preserve ASCII art layout
+-const ASCII_CLAW_LOGO = [
+-	"+----------------+        +--------+",
+-	"+------+      +--+     +--+  +-----+",
+-	"       +------+    +---+  +--+      ",
+-	"       +------+    +---+  +--+      ",
+-	"+------+      +--+     +--+  +-----+",
+-	"+----------------+        +--------+",
++const BRAND_LOGO = [
++	"╔═╗╔═╗╦ ╦╦╔═╔╗╔╔═╗╦ ╦",
++	"╚═╗╠═╣╚╦╝╠╩╗║║║║ ║║║║",
++	"╚═╝╩ ╩ ╩ ╩ ╩╝╚╝╚═╝╚╩╝",
+ ];
+ 
+-/** Multi-stop palette for the red-octopus diagonal gradient. */
++/** Multi-stop palette for the blue-octopus diagonal gradient. */
+ const GRADIENT_STOPS: ReadonlyArray<readonly [number, number, number]> = [
+-	[127, 29, 29], // deep shell red
+-	[220, 38, 38], // claw red
+-	[249, 115, 22], // orange coral
+-	[255, 138, 101], // bright coral
+-	[255, 215, 168], // shell highlight
++	[6, 19, 33], // deep navy
++	[11, 79, 138], // ocean
++	[47, 155, 255], // octopus mantle blue
++	[94, 200, 255], // bright tentacle blue
++	[168, 224, 255], // sky highlight
+ ];
+ 
+ /** 256-color ramp fallback when truecolor isn't available. */
+-const GRADIENT_RAMP_256 = [52, 88, 124, 160, 202, 209, 215];
++const GRADIENT_RAMP_256 = [17, 18, 24, 31, 38, 75, 117];
+ 
+ /** Half-width of the shine highlight band, expressed in gradient-t units. */
+ const SHINE_HALF_WIDTH = 0.18;
+@@ -667,7 +685,7 @@
+ 
+ /** Resting gradient frames, cached for re-renders outside of the intro. */
+ const REST_FRAMES: Record<WelcomeLogoMode, readonly string[]> = {
+-	unicode: gradientLogo(RED_CLAW_LOGO, 0),
+-	square: gradientLogo(SQUARE_CLAW_LOGO, 0),
+-	ascii: gradientLogo(ASCII_CLAW_LOGO, 0),
++	unicode: gradientLogo(BRAND_LOGO, 0),
++	square: gradientLogo(BRAND_LOGO, 0),
++	ascii: gradientLogo(BRAND_LOGO, 0),
+ };

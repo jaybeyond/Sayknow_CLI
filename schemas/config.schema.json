@@ -237,7 +237,7 @@
 				"dark": {
 					"type": "string",
 					"description": "Theme used when terminal has dark background",
-					"default": "red-octopus"
+					"default": "blue-octopus"
 				},
 				"light": {
 					"type": "string",
@@ -256,6 +256,21 @@
 			],
 			"description": "Icon/symbol style",
 			"default": "unicode"
+		},
+		"language": {
+			"type": "string",
+			"enum": [
+				"auto",
+				"en",
+				"ko",
+				"zh",
+				"ja",
+				"es",
+				"fr",
+				"de"
+			],
+			"description": "Interface language. Auto follows your system locale.",
+			"default": "auto"
 		},
 		"colorBlindMode": {
 			"type": "boolean",
@@ -338,6 +353,16 @@
 					"description": "Tool output above this size is saved as an artifact; tail is kept inline",
 					"default": 50
 				},
+				"readArtifactSpillThreshold": {
+					"type": "number",
+					"description": "Advanced opt-in only: combined-size cap for `read` output across all requested ranges. Above this the full output is saved as an artifact and a bounded head+tail snippet is kept inline. Live layofflabs/gpt-5.5 medium evidence on 2026-07-07 found no token savings and a lower cache-hit rate at 50 KB, so normal coding sessions should leave this Off unless intentionally measuring large-read behavior.",
+					"default": 0
+				},
+				"fileMentionInlineBytes": {
+					"type": "number",
+					"description": "Inline byte cap for auto-read `@path` file mentions, deliberately below the read-tool cap so an incidental mention injects a smaller snippet than an explicit read. The full file is still available via the read tool.",
+					"default": 20
+				},
 				"artifactTailBytes": {
 					"type": "number",
 					"description": "Amount of tail content kept inline when output spills to artifact",
@@ -357,6 +382,11 @@
 					"type": "number",
 					"description": "Maximum lines of tail content kept inline when output spills to artifact",
 					"default": 500
+				},
+				"maxInlineResultBytes": {
+					"type": "number",
+					"description": "Absolute backstop cap on inline tool-result text, enforced after artifact spill for every tool (including read and tools that set their own partial artifact meta). Output above this size is force-saved as an artifact and truncated to head+tail. 0 disables (default; opt-in pending measurement).",
+					"default": 0
 				},
 				"intentTracing": {
 					"type": "boolean",
@@ -820,7 +850,7 @@
 				"enabled": {
 					"type": "boolean",
 					"description": "Show the interactive GitHub star reminder when gh is authenticated",
-					"default": true
+					"default": false
 				}
 			},
 			"additionalProperties": false
@@ -964,6 +994,14 @@
 				},
 				"remoteEndpoint": {
 					"type": "string"
+				},
+				"maintenancePruningEnabled": {
+					"type": "boolean",
+					"default": false
+				},
+				"maintenancePruningMinSavingsTokens": {
+					"type": "number",
+					"default": 8000
 				},
 				"idleEnabled": {
 					"type": "boolean",
@@ -1219,7 +1257,7 @@
 						"discard",
 						"keep"
 					],
-					"description": "What to do with partial output when TTSR triggers",
+					"description": "What to do with partial output when TTSR triggers. 'discard' (recommended) drops the aborted partial turn so it never accumulates in context. 'keep' retains every aborted partial turn, which grows the token footprint each time a rule fires — prefer 'discard' unless you specifically need the partial output.",
 					"default": "discard"
 				},
 				"interruptMode": {
@@ -2276,6 +2314,152 @@
 				"max": {
 					"type": "number",
 					"default": 65536
+				}
+			},
+			"additionalProperties": false
+		},
+		"plugins": {
+			"type": "object",
+			"properties": {
+				"security": {
+					"type": "object",
+					"properties": {
+						"scanMode": {
+							"type": "string",
+							"enum": [
+								"warn",
+								"off",
+								"block"
+							],
+							"description": "warn: scan on install and log advisory findings (default); off: skip scan; block: deny install when score exceeds threshold",
+							"default": "warn"
+						},
+						"riskThreshold": {
+							"type": "number",
+							"description": "Score threshold (0–100) above which block mode denies install. Default 60.",
+							"default": 60
+						}
+					},
+					"additionalProperties": false
+				}
+			},
+			"additionalProperties": false
+		},
+		"telegram": {
+			"type": "object",
+			"properties": {
+				"enabled": {
+					"type": "boolean",
+					"description": "Enable two-way Telegram bot control of skc sessions",
+					"default": false
+				},
+				"botToken": {
+					"type": "string",
+					"description": "Telegram bot token from @BotFather (required when enabled)"
+				},
+				"allowedUserIds": {
+					"type": "string",
+					"description": "Comma-separated Telegram user IDs permitted to send commands"
+				},
+				"allowedChatIds": {
+					"type": "string",
+					"description": "Comma-separated Telegram chat IDs permitted to send commands"
+				},
+				"backend": {
+					"type": "string",
+					"enum": [
+						"coordinator",
+						"rpc"
+					],
+					"description": "Coordinator (multi-session lifecycle) or RPC (single persistent session)",
+					"default": "coordinator"
+				},
+				"enableStop": {
+					"type": "boolean",
+					"description": "Allow graceful stop requests (adds the reports mutation class)",
+					"default": false
+				},
+				"enableRich": {
+					"type": "boolean",
+					"description": "HTML formatting + inline keyboards",
+					"default": true
+				},
+				"enablePush": {
+					"type": "boolean",
+					"description": "Follow/Mute subscriptions via coordinator event watch",
+					"default": false
+				},
+				"registerCommands": {
+					"type": "boolean",
+					"description": "Register the Bot command menu at startup",
+					"default": true
+				},
+				"presets": {
+					"type": "string",
+					"description": "JSON array of {id, workdir, sessionCommand, taskTemplate?, taskMaxLen?}"
+				},
+				"rpcSocket": {
+					"type": "string",
+					"description": "Path to the skc launch --output rpc UNIX socket (RPC backend only)"
+				},
+				"stateDir": {
+					"type": "string",
+					"description": "Gateway state dir for reconnect/resync (required for RPC backend)"
+				},
+				"pollTimeoutSec": {
+					"type": "number",
+					"default": 30
+				},
+				"apiBase": {
+					"type": "string"
+				},
+				"coordinatorCommand": {
+					"type": "string",
+					"default": "skc"
+				},
+				"coordinatorArgs": {
+					"type": "string",
+					"default": "mcp-serve,coordinator"
+				},
+				"enableEditMessageText": {
+					"type": "boolean",
+					"default": false
+				},
+				"richCallbackTtlMs": {
+					"type": "number",
+					"default": 600000
+				},
+				"richCallbackMaxTokens": {
+					"type": "number",
+					"default": 500
+				},
+				"defaultTaskMaxLen": {
+					"type": "number",
+					"default": 2000
+				},
+				"livenessMs": {
+					"type": "number",
+					"default": 60000
+				},
+				"followTtlMs": {
+					"type": "number",
+					"default": 86400000
+				},
+				"subscriptionsMax": {
+					"type": "number",
+					"default": 1000
+				},
+				"longPollMs": {
+					"type": "number",
+					"default": 25000
+				},
+				"digestThreshold": {
+					"type": "number",
+					"default": 5
+				},
+				"allowAttachSocketArg": {
+					"type": "boolean",
+					"default": false
 				}
 			},
 			"additionalProperties": false

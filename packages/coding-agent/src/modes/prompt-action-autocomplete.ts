@@ -1,5 +1,12 @@
-import type { AutocompleteItem, AutocompleteProvider, SlashCommand } from "@sayknow-cli/tui";
-import { CombinedAutocompleteProvider, getKeybindings, getSlashCommandMatchRank } from "@sayknow-cli/tui";
+import {
+	type AutocompleteItem,
+	type AutocompleteProvider,
+	CombinedAutocompleteProvider,
+	extractSlashCommandTokenPrefix,
+	getKeybindings,
+	getSlashCommandMatchRank,
+	type SlashCommand,
+} from "@sayknow-cli/tui";
 import type { KeybindingsManager } from "../config/keybindings";
 import { formatKeyHints } from "../config/keybindings";
 import { isSettingsInitialized, settings } from "../config/settings";
@@ -147,6 +154,10 @@ function sortSlashCommandSuggestions(
 	return { ...suggestions, items };
 }
 
+function isRootPathSuggestionResult(suggestions: { items: AutocompleteItem[]; prefix: string } | null): boolean {
+	return suggestions?.prefix.startsWith("/") === true && suggestions.items.some(item => item.value.startsWith("/"));
+}
+
 function withoutSkillCommandSuggestions(
 	suggestions: { items: AutocompleteItem[]; prefix: string } | null,
 ): { items: AutocompleteItem[]; prefix: string } | null {
@@ -168,18 +179,9 @@ function getPromptActionPrefix(textBeforeCursor: string): string | null {
 }
 
 function getSlashTokenPrefix(textBeforeCursor: string): string | null {
-	const slashIndex = textBeforeCursor.lastIndexOf("/");
-	if (slashIndex === -1) return null;
-	const beforeSlash = textBeforeCursor.slice(0, slashIndex);
-	if (beforeSlash && !/\s$/.test(beforeSlash)) return null;
-	const token = textBeforeCursor.slice(slashIndex);
-	if (/[\s]/.test(token)) return null;
-	return token;
+	return extractSlashCommandTokenPrefix(textBeforeCursor);
 }
 
-function isLeadingSlashToken(textBeforeCursor: string, slashPrefix: string): boolean {
-	return textBeforeCursor.trimStart() === slashPrefix;
-}
 export class PromptActionAutocompleteProvider implements AutocompleteProvider {
 	#baseProvider: CombinedAutocompleteProvider;
 	#actions: PromptActionDefinition[];
@@ -226,14 +228,13 @@ export class PromptActionAutocompleteProvider implements AutocompleteProvider {
 
 		const slashPrefix = getSlashTokenPrefix(textBeforeCursor);
 		if (slashPrefix) {
-			const isLeading = isLeadingSlashToken(textBeforeCursor, slashPrefix);
-			const baseSuggestions = isLeading
-				? withoutSkillCommandSuggestions(await this.#baseProvider.getSuggestions(lines, cursorLine, cursorCol))
-				: null;
-			const skillCommandSuggestions =
-				isLeading || slashPrefix.startsWith("/skill")
-					? this.#getSkillCommandSuggestions(textBeforeCursor, { includeEmpty: isLeading })
-					: null;
+			const baseSuggestions = withoutSkillCommandSuggestions(
+				await this.#baseProvider.getSuggestions(lines, cursorLine, cursorCol),
+			);
+			if (isRootPathSuggestionResult(baseSuggestions)) return baseSuggestions;
+			const skillCommandSuggestions = this.#getSkillCommandSuggestions(textBeforeCursor, {
+				includeEmpty: false,
+			});
 			return sortSlashCommandSuggestions(
 				mergeAutocompleteSuggestions(baseSuggestions, skillCommandSuggestions),
 				this.#commands,

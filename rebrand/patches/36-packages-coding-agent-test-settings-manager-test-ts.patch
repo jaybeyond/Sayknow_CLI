@@ -1,0 +1,28 @@
+--- a/packages/coding-agent/test/settings-manager.test.ts
++++ b/packages/coding-agent/test/settings-manager.test.ts
+@@ -291,14 +291,14 @@
+ 			await writeSettings({ theme: "dark" });
+ 
+ 			let settings = await Settings.init({ cwd: projectDir, agentDir });
+-			expect(settings.get("theme.dark")).toBe("red-octopus");
++			expect(settings.get("theme.dark")).toBe("blue-octopus");
+ 			expect(settings.get("theme.light")).toBe("blue-octopus");
+ 
+ 			resetSettingsForTest();
+ 			await writeSettings({ theme: "light" });
+ 
+ 			settings = await Settings.init({ cwd: projectDir, agentDir });
+-			expect(settings.get("theme.dark")).toBe("red-octopus");
++			expect(settings.get("theme.dark")).toBe("blue-octopus");
+ 			expect(settings.get("theme.light")).toBe("blue-octopus");
+ 		});
+ 
+@@ -307,7 +307,7 @@
+ 
+ 			const settings = await Settings.init({ cwd: projectDir, agentDir });
+ 
+-			expect(settings.get("theme.dark")).toBe("red-octopus");
++			expect(settings.get("theme.dark")).toBe("blue-octopus");
+ 			expect(settings.get("theme.light")).toBe("blue-octopus");
+ 		});
+ 

@@ -3,7 +3,11 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { type AgentTool, INTENT_FIELD } from "@sayknow-cli/agent-core";
-import { buildSystemPrompt, buildSystemPromptToolMetadata } from "@sayknow-cli/coding-agent/system-prompt";
+import {
+	buildSystemPrompt,
+	buildSystemPromptToolMetadata,
+	buildVolatileProjectContext,
+} from "@sayknow-cli/coding-agent/system-prompt";
 import { prompt } from "@sayknow-cli/utils";
 import Handlebars from "handlebars";
 import * as z from "zod/v4";
@@ -190,6 +194,44 @@ describe("system Handlebars prompt templates", () => {
 		expect(subagentUser).not.toContain("[CONTEXT]");
 		expect(subagentUser).not.toContain("Shared task background");
 	});
+
+	test("system-prompt trims workflow/soul blocks for subagents while retaining safety contracts", async () => {
+		const templatePath = path.join(systemPromptsDir, "system-prompt.md");
+		const template = await Bun.file(templatePath).text();
+
+		const full = prompt.render(template, { ...baseRenderContext, subagent: false });
+		const sub = prompt.render(template, { ...baseRenderContext, subagent: true });
+
+		// Top-level agent keeps the workflow surface, routing, and soul blocks.
+		expect(full).toContain("<skc-runtime>");
+		expect(full).toContain("<public-workflow-surface>");
+		expect(full).toContain("<routing>");
+		expect(full).toContain("<soul>");
+
+		// Subagent base prompt drops workflow-surface/routing/self-awareness and soul.
+		expect(sub).not.toContain("<skc-runtime>");
+		expect(sub).not.toContain("<public-workflow-surface>");
+		expect(sub).not.toContain("<role-agent-surface>");
+		expect(sub).not.toContain("<routing>");
+		expect(sub).not.toContain("<self-awareness>");
+		expect(sub).not.toContain("<soul>");
+
+		// Required repo/tool/completion constraints remain for subagents.
+		expect(sub).toContain("<completion-contract>");
+		expect(sub).toContain("<repo-safety>");
+		expect(sub).toContain("<tools>");
+		expect(sub).toContain("<authority>");
+
+		// No shared-cache-identity assertion is introduced (Phase 2, gated on prefix factoring).
+		expect(sub.toLowerCase()).not.toContain("cache identity");
+		expect(sub.toLowerCase()).not.toContain("shared cache");
+
+		// Measured byte reduction target: >= 25%.
+		const fullBytes = Buffer.byteLength(full);
+		const subBytes = Buffer.byteLength(sub);
+		const reduction = 1 - subBytes / fullBytes;
+		expect(reduction).toBeGreaterThanOrEqual(0.25);
+	});
 	test("system-prompt renders MCP discovery hint when enabled", async () => {
 		const templatePath = path.join(systemPromptsDir, "system-prompt.md");
 		const template = await Bun.file(templatePath).text();
@@ -243,31 +285,68 @@ describe("system Handlebars prompt templates", () => {
 		expect(rendered).toContain("`job` remains the generic background-job tool");
 	});
 
-	test("buildSystemPrompt keeps system and project as separate ordered blocks with date context in project", async () => {
+	test("system-prompt bounds long-form media ingestion before fallback drafting", async () => {
+		const templatePath = path.join(systemPromptsDir, "system-prompt.md");
+		const template = await Bun.file(templatePath).text();
+		const rendered = prompt.render(template, baseRenderContext);
+
+		expect(rendered).toContain("<media-ingestion>");
+		expect(rendered).toContain("For YouTube, podcasts, webinars, screen recordings");
+		expect(rendered).toContain('Do not let "recover the full transcript" silently replace');
+		expect(rendered).toContain("transcript/caption retrieval fails after two attempts");
+		expect(rendered).toContain("produce an evidence-scoped draft");
+		expect(rendered).toContain("Evidence used");
+		expect(rendered).toContain("Limitations");
+		expect(rendered).toContain("Never spend an extended turn repeatedly trying to ingest the same blocked video");
+	});
+
+	test("system-prompt distinguishes informational questions from explicit implementation requests", async () => {
+		const templatePath = path.join(systemPromptsDir, "system-prompt.md");
+		const template = await Bun.file(templatePath).text();
+		const rendered = prompt.render(template, baseRenderContext);
+
+		expect(countOccurrences(rendered, "Informational questions, bare `?`, and unambiguous explanatory prompts")).toBe(
+			1,
+		);
+		expect(rendered).toContain("answer-only/read-only");
+		expect(rendered).toContain("unless the user explicitly asks to change, run, implement, or execute something");
+		expect(rendered).toMatch(/Clear, low-risk implementation request\s+→\s+implement directly/i);
+		expect(rendered).toMatch(/Ambiguous implementation asks[\s\S]*require clarification[\s\S]*before mutation/i);
+	});
+
+	test("keeps system and project as separate ordered blocks; volatile facts excluded from stable prefix", async () => {
 		await withTempDir(async dir => {
+			const workspaceTree = {
+				rootPath: dir,
+				rendered: ".\n  - src/        1m",
+				truncated: false,
+				totalLines: 2,
+				agentsMdFiles: [],
+			};
 			const { systemPrompt } = await buildSystemPrompt({
 				cwd: dir,
 				contextFiles: [],
 				skills: [],
 				rules: [],
 				toolNames: ["read"],
-				workspaceTree: {
-					rootPath: dir,
-					rendered: ".\n  - src/        1m",
-					truncated: false,
-					totalLines: 2,
-					agentsMdFiles: [],
-				},
+				workspaceTree,
 			});
 
 			expect(systemPrompt).toHaveLength(2);
 			expect(systemPrompt[0]).toContain("<completion-contract>");
 			expect(systemPrompt[0]).not.toContain("current working directory");
 			expect(systemPrompt[1]).toContain("<workstation>");
-			expect(systemPrompt[1]).toContain("<workspace-tree>");
-			expect(systemPrompt[1]).toContain("Today is ");
-			expect(systemPrompt[1]).toContain(`current working directory is '${dir}'.`);
-			expect(systemPrompt[1].indexOf("</workspace-tree>")).toBeLessThan(systemPrompt[1].indexOf("Today is "));
+			// Volatile facts must NOT appear in the stable system prefix anymore.
+			expect(systemPrompt[1]).not.toContain("<workspace-tree>");
+			expect(systemPrompt[1]).not.toContain("Today is ");
+			expect(systemPrompt[1]).not.toContain("current working directory is");
+
+			// They are delivered via the per-turn volatile context instead.
+			const volatile = buildVolatileProjectContext({ cwd: dir, workspaceTree });
+			expect(volatile).toContain("<workspace-tree>");
+			expect(volatile).toContain("Today is ");
+			expect(volatile).toContain(`current working directory is '${dir}'.`);
+			expect(volatile.indexOf("</workspace-tree>")).toBeLessThan(volatile.indexOf("Today is "));
 		});
 	});
 	test("buildSystemPrompt wires SYSTEM.md customization without replacing the base prompt", async () => {
@@ -299,29 +378,32 @@ describe("system Handlebars prompt templates", () => {
 		});
 	});
 
-	test("buildSystemPrompt renders workspace tree after directory context in project prompt", async () => {
+	test("renders workspace tree in the per-turn volatile context, not the stable project prompt", async () => {
 		await withTempDir(async dir => {
+			const workspaceTree = {
+				rootPath: dir,
+				rendered: ".\n  - src/        1m",
+				truncated: true,
+				totalLines: 2,
+				agentsMdFiles: ["packages/coding-agent/AGENTS.md"],
+			};
 			const { systemPrompt } = await buildSystemPrompt({
 				cwd: dir,
 				contextFiles: [],
 				skills: [],
 				rules: [],
 				toolNames: ["read"],
-				workspaceTree: {
-					rootPath: dir,
-					rendered: ".\n  - src/        1m",
-					truncated: true,
-					totalLines: 2,
-					agentsMdFiles: ["packages/coding-agent/AGENTS.md"],
-				},
+				workspaceTree,
 			});
 
 			const projectPrompt = systemPrompt[1] ?? "";
+			// The stable project prompt no longer carries the mtime-sorted tree.
+			expect(projectPrompt).not.toContain("<workspace-tree>");
 
-			expect(projectPrompt).toContain("<workspace-tree>");
-			expect(projectPrompt).toContain("Working directory layout (sorted by mtime, recent first; depth ≤ 3):");
-			expect(projectPrompt).toContain("(some entries elided to keep the tree short");
-			expect(projectPrompt.indexOf("</dir-context>")).toBeLessThan(projectPrompt.indexOf("<workspace-tree>"));
+			const volatile = buildVolatileProjectContext({ cwd: dir, workspaceTree });
+			expect(volatile).toContain("<workspace-tree>");
+			expect(volatile).toContain("Working directory layout (sorted by mtime, recent first; depth ≤ 3):");
+			expect(volatile).toContain("(some entries elided to keep the tree short");
 		});
 	});
 

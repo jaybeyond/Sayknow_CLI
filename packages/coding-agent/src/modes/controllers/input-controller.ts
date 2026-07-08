@@ -11,7 +11,7 @@ import { createPromptActionAutocompleteProvider } from "../../modes/prompt-actio
 import { theme } from "../../modes/theme/theme";
 import { scrollTmuxToPreviousUserInput as scrollTmuxPaneToPreviousUserInput } from "../../modes/tmux-scroll";
 import type { InteractiveModeContext } from "../../modes/types";
-import type { AgentSessionEvent } from "../../session/agent-session";
+import type { AgentSessionEvent, QueuedMessageEditEntry } from "../../session/agent-session";
 import { SKILL_PROMPT_MESSAGE_TYPE, type SkillPromptDetails } from "../../session/messages";
 import { executeBuiltinSlashCommand } from "../../slash-commands/builtin-registry";
 import { copyToClipboard, readImageFromClipboard } from "../../utils/clipboard";
@@ -19,6 +19,7 @@ import { getEditorCommand, openInEditor } from "../../utils/external-editor";
 import { ensureSupportedImageInput, ImageInputTooLargeError, loadImageInput } from "../../utils/image-loading";
 import { resizeImage } from "../../utils/image-resize";
 import { generateSessionTitle, setSessionTerminalTitle } from "../../utils/title-generator";
+import { type QueuedMessageMoveDirection, QueuedMessageSelectorComponent } from "../components/queued-message-selector";
 
 interface Expandable {
 	setExpanded(expanded: boolean): void;
@@ -313,14 +314,7 @@ export class InputController {
 		this.ctx.editor.onDequeue = () => this.handleDequeue();
 		this.ctx.editor.setActionKeys("app.message.queue", this.ctx.keybindings.getKeys("app.message.queue"));
 		this.ctx.editor.onQueue = () => void this.handleQueueSubmit();
-		this.ctx.editor.onTab = () => {
-			if (!this.ctx.session.isStreaming && !this.ctx.session.isCompacting) return false;
-			void this.handleQueueSubmit();
-			return true;
-		};
-		this.ctx.editor.onTabDeclined = () => {
-			if (this.ctx.session.isStreaming || this.ctx.session.isCompacting) void this.handleQueueSubmit();
-		};
+
 		this.ctx.editor.onViewportPageScroll = direction => this.ctx.ui.scrollViewportPages(direction);
 		this.ctx.editor.onViewportFollowLive = () => {
 			this.ctx.ui.followLiveViewport();
@@ -614,12 +608,182 @@ export class InputController {
 	}
 
 	handleDequeue(): void {
-		const restored = this.restoreLatestQueuedMessageToEditor();
-		if (restored === 0) {
+		const entries = this.#getEditableQueuedMessages();
+		if (entries.length === 0) {
+			this.ctx.updatePendingMessagesDisplay();
 			this.ctx.showStatus("No queued messages to restore");
-		} else {
-			this.ctx.showStatus(`Restored ${restored} queued message${restored > 1 ? "s" : ""} to editor`);
+			return;
 		}
+		if (entries.length === 1) {
+			const restored = this.#restoreQueuedMessageToEditor(entries[0]);
+			this.ctx.showStatus(
+				restored === 0 ? "Queued message is no longer available" : "Restored queued message to editor",
+			);
+			return;
+		}
+		this.#showQueuedMessageSelector(entries, this.#newestQueuedMessageIndex(entries));
+	}
+
+	#compactionQueuedMessageId(index: number): string {
+		return `compaction:${index}`;
+	}
+
+	#getEditableQueuedMessages(): QueuedMessageEditEntry[] {
+		const compactionEntries = this.ctx.compactionQueuedMessages.map((entry, index): QueuedMessageEditEntry => {
+			const label = entry.mode === "steer" ? "Steer" : "Queued";
+			return {
+				id: this.#compactionQueuedMessageId(index),
+				text: entry.text,
+				mode: entry.mode,
+				label,
+			};
+		});
+		return [...compactionEntries, ...this.ctx.session.getQueuedMessageEntries()];
+	}
+
+	#queuedMessageStableSequence(entry: QueuedMessageEditEntry): number | undefined {
+		const [mode, sequenceText] = entry.id.split(":");
+		if ((mode !== "steer" && mode !== "followUp") || sequenceText === undefined) return undefined;
+		const sequence = Number(sequenceText);
+		return Number.isInteger(sequence) ? sequence : undefined;
+	}
+
+	#newestQueuedMessageIndex(entries: QueuedMessageEditEntry[]): number {
+		let selectedIndex = entries.length - 1;
+		let newestSequence = Number.NEGATIVE_INFINITY;
+		for (let index = 0; index < entries.length; index += 1) {
+			const sequence = this.#queuedMessageStableSequence(entries[index]);
+			if (sequence !== undefined && sequence > newestSequence) {
+				newestSequence = sequence;
+				selectedIndex = index;
+			}
+		}
+		return Math.max(0, selectedIndex);
+	}
+
+	#restoreEditorFocus(): void {
+		this.ctx.editorContainer.clear();
+		this.ctx.editorContainer.addChild(this.ctx.editor);
+		this.ctx.ui.setFocus(this.ctx.editor);
+	}
+
+	#showQueuedMessageSelector(entries: QueuedMessageEditEntry[], selectedIndex = 0): void {
+		const selector = new QueuedMessageSelectorComponent(
+			entries,
+			entry => {
+				const restored = this.#restoreQueuedMessageToEditor(entry);
+				this.#restoreEditorFocus();
+				this.ctx.showStatus(
+					restored === 0 ? "Queued message is no longer available" : "Restored queued message to editor",
+				);
+				this.ctx.ui.requestRender();
+			},
+			(entry, index) => {
+				const deleted = this.#deleteQueuedMessage(entry);
+				const nextEntries = this.#getEditableQueuedMessages();
+				if (nextEntries.length === 0) {
+					this.#restoreEditorFocus();
+					this.ctx.showStatus(deleted ? "Deleted queued message" : "Queued message is no longer available");
+					this.ctx.ui.requestRender();
+					return;
+				}
+				this.ctx.showStatus(deleted ? "Deleted queued message" : "Queued message is no longer available");
+				this.#showQueuedMessageSelector(nextEntries, Math.min(index, nextEntries.length - 1));
+			},
+			(entry, index, direction) => {
+				const moved = this.#moveQueuedMessage(entry, direction);
+				const nextEntries = this.#getEditableQueuedMessages();
+				if (nextEntries.length === 0) {
+					this.#restoreEditorFocus();
+					this.ctx.showStatus("Queued message is no longer available");
+					this.ctx.ui.requestRender();
+					return;
+				}
+				const nextIndex = direction === "up" ? index - 1 : index + 1;
+				const selectedNextIndex = moved ? nextIndex : index;
+				this.ctx.showStatus(moved ? "Moved queued message" : "Queued message cannot move further");
+				this.#showQueuedMessageSelector(
+					nextEntries,
+					Math.max(0, Math.min(selectedNextIndex, nextEntries.length - 1)),
+				);
+			},
+			() => {
+				this.#restoreEditorFocus();
+				this.ctx.ui.requestRender();
+			},
+			{ selectedIndex },
+		);
+		this.ctx.editorContainer.clear();
+		this.ctx.editorContainer.addChild(selector);
+		this.ctx.ui.setFocus(selector);
+		this.ctx.ui.requestRender();
+	}
+
+	#removeQueuedMessageForEditing(id: string): string | undefined {
+		const compactionPrefix = "compaction:";
+		if (id.startsWith(compactionPrefix)) {
+			const index = Number(id.slice(compactionPrefix.length));
+			if (!Number.isInteger(index)) return undefined;
+			const [entry] = this.ctx.compactionQueuedMessages.splice(index, 1);
+			return entry?.text;
+		}
+		return this.ctx.session.removeQueuedMessageForEditing(id);
+	}
+	#parseCompactionQueuedMessageId(id: string): number | undefined {
+		const compactionPrefix = "compaction:";
+		if (!id.startsWith(compactionPrefix)) return undefined;
+		const index = Number(id.slice(compactionPrefix.length));
+		return Number.isInteger(index) ? index : undefined;
+	}
+
+	#moveCompactionQueuedMessage(index: number, direction: QueuedMessageMoveDirection): boolean {
+		const targetIndex = direction === "up" ? index - 1 : index + 1;
+		if (index < 0 || index >= this.ctx.compactionQueuedMessages.length) return false;
+		if (targetIndex < 0 || targetIndex >= this.ctx.compactionQueuedMessages.length) return false;
+		const current = this.ctx.compactionQueuedMessages[index];
+		const target = this.ctx.compactionQueuedMessages[targetIndex];
+		if (!current || !target) return false;
+		this.ctx.compactionQueuedMessages[index] = target;
+		this.ctx.compactionQueuedMessages[targetIndex] = current;
+		this.ctx.updatePendingMessagesDisplay();
+		return true;
+	}
+
+	#moveQueuedMessage(entry: QueuedMessageEditEntry, direction: QueuedMessageMoveDirection): boolean {
+		const compactionIndex = this.#parseCompactionQueuedMessageId(entry.id);
+		if (compactionIndex !== undefined) {
+			return this.#moveCompactionQueuedMessage(compactionIndex, direction);
+		}
+		const moved = this.ctx.session.moveQueuedMessageForEditing(entry.id, direction);
+		if (moved) {
+			this.ctx.updatePendingMessagesDisplay();
+		}
+		return moved;
+	}
+
+	#deleteQueuedMessage(entry: QueuedMessageEditEntry): boolean {
+		const queuedText = this.#removeQueuedMessageForEditing(entry.id);
+		this.ctx.updatePendingMessagesDisplay();
+		if (!queuedText) return false;
+		this.ctx.locallySubmittedUserSignatures.delete(`${queuedText}\u00000`);
+		return true;
+	}
+
+	#restoreQueuedMessageToEditor(entry: QueuedMessageEditEntry | undefined): number {
+		if (!entry) {
+			this.ctx.updatePendingMessagesDisplay();
+			return 0;
+		}
+		const queuedText = this.#removeQueuedMessageForEditing(entry.id);
+		if (!queuedText) {
+			this.ctx.updatePendingMessagesDisplay();
+			return 0;
+		}
+
+		this.ctx.locallySubmittedUserSignatures.delete(`${queuedText}\u00000`);
+		this.ctx.editor.setText(queuedText);
+		this.ctx.updatePendingMessagesDisplay();
+		return 1;
 	}
 
 	/**
@@ -766,7 +930,7 @@ export class InputController {
 		return this.handleFollowUp();
 	}
 
-	restoreLatestQueuedMessageToEditor(options?: { currentText?: string }): number {
+	restoreLatestQueuedMessageToEditor(): number {
 		const compactionQueued = this.ctx.compactionQueuedMessages.pop();
 		const queuedText = compactionQueued?.text ?? this.ctx.session.popLastQueuedMessage();
 		if (!queuedText) {
@@ -775,9 +939,7 @@ export class InputController {
 		}
 
 		this.ctx.locallySubmittedUserSignatures.delete(`${queuedText}\u00000`);
-		const currentText = options?.currentText ?? this.ctx.editor.getText();
-		const combinedText = [queuedText, currentText].filter(t => t.trim()).join("\n\n");
-		this.ctx.editor.setText(combinedText);
+		this.ctx.editor.setText(queuedText);
 		this.ctx.updatePendingMessagesDisplay();
 		return 1;
 	}
@@ -1146,7 +1308,7 @@ export class InputController {
 		// If streaming, re-add the streaming component with updated visibility and re-render
 		if (this.ctx.streamingComponent && this.ctx.streamingMessage) {
 			this.ctx.streamingComponent.setHideThinkingBlock(this.ctx.hideThinkingBlock);
-			this.ctx.streamingComponent.updateContent(this.ctx.streamingMessage);
+			this.ctx.streamingComponent.updateContent(this.ctx.streamingMessage, { streaming: true });
 			this.ctx.chatContainer.addChild(this.ctx.streamingComponent);
 		}
 

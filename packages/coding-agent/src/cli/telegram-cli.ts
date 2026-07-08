@@ -4,10 +4,10 @@
  */
 
 import { logger } from "@sayknow-cli/utils";
-import { resolveSkcRuntimeSpawnInfo } from "../daemon/runtime";
 import { isSettingsInitialized, Settings, settings } from "../config/settings";
 import type { TelegramSettings } from "../config/settings-schema";
 import { telegramSettingsToEnv, validateTelegramSettings } from "../config/telegram-env-bridge";
+import { resolveSkcRuntimeSpawnInfo } from "../daemon/runtime";
 
 export type TelegramAction = "start" | "status" | "env" | "__gateway";
 

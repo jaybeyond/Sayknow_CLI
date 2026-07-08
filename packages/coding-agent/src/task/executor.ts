@@ -34,6 +34,7 @@ import type { AuthStorage } from "../session/auth-storage";
 import { SKILL_PROMPT_MESSAGE_TYPE } from "../session/messages";
 import { SessionManager } from "../session/session-manager";
 import { truncateTail } from "../session/streaming-output";
+import { sessionRoot } from "../skc-runtime/session-layout";
 import type { ContextFileEntry } from "../tools";
 import { jtdToJsonSchema, normalizeSchema } from "../tools/jtd-to-json-schema";
 import { type ReportFindingDetails, toReviewFinding } from "../tools/review";
@@ -42,6 +43,7 @@ import type { EventBus } from "../utils/event-bus";
 import { buildNamedToolChoiceResult } from "../utils/tool-choice";
 import type { WorkspaceTree } from "../workspace-tree";
 import { subprocessToolRegistry } from "./subprocess-tool-registry";
+import { persistTaskTokenLog, taskTokenLogFromUsage } from "./token-log";
 import {
 	type AgentDefinition,
 	type AgentProgress,
@@ -139,6 +141,8 @@ export interface ExecutorOptions {
 	artifactsDir?: string;
 	/** Path to parent conversation context file */
 	contextFile?: string;
+	/** Whether the parent runtime actually exposes IRC coordination. */
+	ircAvailable?: boolean;
 	eventBus?: EventBus;
 	contextFiles?: ContextFileEntry[];
 	skills?: Skill[];
@@ -243,6 +247,51 @@ function previewOffendingData(value: unknown, maxLength = 500): string {
 	}
 	return serialized.length > maxLength ? `${serialized.slice(0, maxLength)}…` : serialized;
 }
+const PLACEHOLDER_YIELD_PATTERNS = [
+	/^see (?:the )?message body(?:\b|[\s—:.,-])/i,
+	/^(?:complete\s+\w+\s+)?returned inline(?:\b|[\s—:.,-])/i,
+	/^leader persists(?:\b|[\s—:.,-])/i,
+	/^caller persists(?:\b|[\s—:.,-])/i,
+];
+
+const PLACEHOLDER_YIELD_FIELD_NAMES = new Set([
+	"artifactmarkdown",
+	"finalmarkdown",
+	"fullplan",
+	"markdown",
+	"planmarkdown",
+]);
+
+function looksLikePlaceholderYieldString(value: string): boolean {
+	const trimmed = value.trim();
+	if (trimmed.length === 0 || trimmed.length > 500) return false;
+	return PLACEHOLDER_YIELD_PATTERNS.some(pattern => pattern.test(trimmed));
+}
+
+function normalizePlaceholderYieldFieldName(key: string): string {
+	return key.replace(/[^a-z0-9]/gi, "").toLowerCase();
+}
+
+function findPlaceholderYieldPath(value: unknown, path = "$", depth = 0, inspectStrings = true): string | undefined {
+	if (typeof value === "string") {
+		return inspectStrings && looksLikePlaceholderYieldString(value) ? path : undefined;
+	}
+	if (!value || typeof value !== "object" || depth > 4) return undefined;
+	if (Array.isArray(value)) {
+		for (let i = 0; i < value.length; i++) {
+			const found = findPlaceholderYieldPath(value[i], `${path}[${i}]`, depth + 1, false);
+			if (found) return found;
+		}
+		return undefined;
+	}
+	const record = value as Record<string, unknown>;
+	for (const [key, item] of Object.entries(record)) {
+		const shouldInspectString = PLACEHOLDER_YIELD_FIELD_NAMES.has(normalizePlaceholderYieldFieldName(key));
+		const found = findPlaceholderYieldPath(item, `${path}.${key}`, depth + 1, shouldInspectString);
+		if (found) return found;
+	}
+	return undefined;
+}
 
 function tryParseJsonOutput(text: string): unknown | undefined {
 	const trimmed = text.trim();
@@ -319,6 +368,8 @@ interface FinalizeSubprocessOutputResult {
 export const SUBAGENT_WARNING_NULL_YIELD = "SYSTEM WARNING: Subagent called yield with null data.";
 export const SUBAGENT_WARNING_MISSING_YIELD =
 	"SYSTEM WARNING: Subagent exited without calling yield tool after 3 reminders.";
+export const SUBAGENT_WARNING_PLACEHOLDER_YIELD =
+	"SYSTEM WARNING: Subagent yield data contains a placeholder instead of the actual result.";
 
 /** Build a schema_violation outcome — surfaced as a non-zero exit so callers treat it as a failure. */
 function buildSchemaViolationOutcome(
@@ -343,6 +394,21 @@ function buildSchemaViolationOutcome(
 		rawOutput = `{"error":"schema_violation","message":${JSON.stringify(headline)}}`;
 	}
 	return { rawOutput, stderr: headline, exitCode: 1 };
+}
+
+function buildPlaceholderYieldOutcome(
+	placeholderPath: string,
+	data: unknown,
+): { rawOutput: string; stderr: string; exitCode: number } {
+	return buildSchemaViolationOutcome(
+		{
+			message:
+				`${SUBAGENT_WARNING_PLACEHOLDER_YIELD} Offending path: ${placeholderPath}. ` +
+				"Return the real payload in yield.result.data or persist a durable artifact receipt.",
+			missingRequired: [],
+		},
+		data,
+	);
 }
 
 export function finalizeSubprocessOutput(args: FinalizeSubprocessOutputArgs): FinalizeSubprocessOutputResult {
@@ -374,21 +440,29 @@ export function finalizeSubprocessOutput(args: FinalizeSubprocessOutputArgs): Fi
 					stderr = `schema_violation: invalid output schema: ${schemaError}`;
 					exitCode = 1;
 				} else {
-					const verdict = validator ? validator.validate(completeData) : { ok: true as const };
-					if (!verdict.ok) {
-						const outcome = buildSchemaViolationOutcome(verdict, completeData);
+					const placeholderPath = findPlaceholderYieldPath(completeData);
+					if (placeholderPath) {
+						const outcome = buildPlaceholderYieldOutcome(placeholderPath, completeData);
 						rawOutput = outcome.rawOutput;
 						stderr = outcome.stderr;
 						exitCode = outcome.exitCode;
 					} else {
-						try {
-							rawOutput = JSON.stringify(completeData, null, 2) ?? "null";
-						} catch (err) {
-							const errorMessage = err instanceof Error ? err.message : String(err);
-							rawOutput = `{"error":"Failed to serialize yield data: ${errorMessage}"}`;
+						const verdict = validator ? validator.validate(completeData) : { ok: true as const };
+						if (!verdict.ok) {
+							const outcome = buildSchemaViolationOutcome(verdict, completeData);
+							rawOutput = outcome.rawOutput;
+							stderr = outcome.stderr;
+							exitCode = outcome.exitCode;
+						} else {
+							try {
+								rawOutput = JSON.stringify(completeData, null, 2) ?? "null";
+							} catch (err) {
+								const errorMessage = err instanceof Error ? err.message : String(err);
+								rawOutput = `{"error":"Failed to serialize yield data: ${errorMessage}"}`;
+							}
+							exitCode = 0;
+							stderr = "";
 						}
-						exitCode = 0;
-						stderr = "";
 					}
 				}
 			}
@@ -401,21 +475,29 @@ export function finalizeSubprocessOutput(args: FinalizeSubprocessOutputArgs): Fi
 		if (fallback) {
 			const completeData = normalizeCompleteData(fallback.data, reportFindings);
 			const { validator } = buildOutputValidator(outputSchema);
-			const verdict = validator ? validator.validate(completeData) : { ok: true as const };
-			if (!verdict.ok) {
-				const outcome = buildSchemaViolationOutcome(verdict, completeData);
+			const placeholderPath = findPlaceholderYieldPath(completeData);
+			if (placeholderPath) {
+				const outcome = buildPlaceholderYieldOutcome(placeholderPath, completeData);
 				rawOutput = outcome.rawOutput;
 				stderr = outcome.stderr;
 				exitCode = outcome.exitCode;
 			} else {
-				try {
-					rawOutput = JSON.stringify(completeData, null, 2) ?? "null";
-				} catch (err) {
-					const errorMessage = err instanceof Error ? err.message : String(err);
-					rawOutput = `{"error":"Failed to serialize fallback completion: ${errorMessage}"}`;
+				const verdict = validator ? validator.validate(completeData) : { ok: true as const };
+				if (!verdict.ok) {
+					const outcome = buildSchemaViolationOutcome(verdict, completeData);
+					rawOutput = outcome.rawOutput;
+					stderr = outcome.stderr;
+					exitCode = outcome.exitCode;
+				} else {
+					try {
+						rawOutput = JSON.stringify(completeData, null, 2) ?? "null";
+					} catch (err) {
+						const errorMessage = err instanceof Error ? err.message : String(err);
+						rawOutput = `{"error":"Failed to serialize fallback completion: ${errorMessage}"}`;
+					}
+					exitCode = 0;
+					stderr = "";
 				}
-				exitCode = 0;
-				stderr = "";
 			}
 		} else if (!hasOutputSchema && allowFallback && rawOutput.trim().length > 0) {
 			exitCode = 0;
@@ -623,7 +705,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				: agent.spawns.join(",");
 
 	const lspEnabled = enableLsp ?? true;
-	const ircEnabled = subagentSettings.get("irc.enabled") === true;
+	const ircEnabled = options.ircAvailable === true;
 	const contextFileForPrompt = ircEnabled ? undefined : options.contextFile;
 	const skipPythonPreflight = Array.isArray(toolNames) && !toolNames.includes("eval");
 
@@ -1207,6 +1289,10 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			const subagentAgentIdentity: AgentIdentity | undefined = options.parentTelemetry
 				? { id, name: agent.name, description: agent.description }
 				: undefined;
+			let subagentTokenTurn = 0;
+			const tokenLogDir = options.parentSessionId
+				? path.join(sessionRoot(cwd, options.parentSessionId), "token-logs")
+				: undefined;
 			const subagentTelemetry: AgentTelemetryConfig | undefined =
 				options.parentTelemetry && subagentAgentIdentity
 					? {
@@ -1215,6 +1301,27 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 							// Clear parent's conversationId; the child loop falls back to
 							// its own AgentLoopConfig.sessionId.
 							conversationId: undefined,
+							// Intentionally REPLACES (does not chain) the parent's onChatUsage:
+							// the parent handler attributes turns to subagentId "root", so
+							// chaining it here would double-log every subagent turn under root.
+							// Subagent turns are attributed to this child's id instead.
+							onChatUsage: async event => {
+								if (!tokenLogDir) return;
+								subagentTokenTurn += 1;
+								await persistTaskTokenLog(
+									taskTokenLogFromUsage(event.usage, {
+										subagentId: id,
+										agent: agent.name,
+										// Monotonic 1-based sequence per subagent session
+										// (event.stepNumber is 0-based and -1 for oneshots).
+										turn: subagentTokenTurn,
+										at: new Date().toISOString(),
+										model: event.model,
+										cost: event.cost,
+									}),
+									{ dir: tokenLogDir },
+								);
+							},
 						}
 					: undefined;
 
@@ -1231,9 +1338,10 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 
 			const { normalized: normalizedOutputSchema } = normalizeSchema(outputSchema);
 
-			const forkContextNotice = options.forkContextSeed
-				? `This subagent was started with a forked snapshot of the parent conversation. Included ${options.forkContextSeed.metadata.includedMessages} message(s), skipped ${options.forkContextSeed.metadata.skippedMessages}, approximately ${options.forkContextSeed.metadata.approximateTokens} tokens. The snapshot is not live; use IRC for live coordination when enabled.`
-				: "";
+			const forkContextNotice =
+				options.forkContextSeed && options.forkContextSeed.metadata.includedMessages > 0
+					? `This subagent was started with a forked snapshot of the parent conversation. Included ${options.forkContextSeed.metadata.includedMessages} message(s), skipped ${options.forkContextSeed.metadata.skippedMessages}, approximately ${options.forkContextSeed.metadata.approximateTokens} tokens. The snapshot is not live.${ircEnabled ? " Use IRC for live coordination." : " Rely on the explicit assignment and supplied context for coordination."}`
+					: "";
 
 			const agentSubskillBlock = await buildAgentSubskillInjection({
 				cwd,

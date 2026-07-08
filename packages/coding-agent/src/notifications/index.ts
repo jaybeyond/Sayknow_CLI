@@ -28,13 +28,13 @@ import type { ImageContent, TextContent } from "@sayknow-cli/ai";
 import { NotificationServer } from "@sayknow-cli/natives";
 import { logger, postmortem } from "@sayknow-cli/utils";
 import { Settings } from "../config/settings";
-import type { ExtensionCommandContext, ExtensionContext, ExtensionFactory } from "../extensibility/extensions";
+import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "../extensibility/extensions";
 import { registerAskAnswerSource } from "../tools/ask-answer-registry";
 import { registerTelegramFileSink } from "./attachment-registry";
 import {
 	getNotificationConfig,
-	isGloballyConfigured,
 	isSessionNotificationsEnabled,
+	isTelegramConfigured,
 	type NotificationConfig,
 	sessionTag,
 } from "./config";
@@ -100,7 +100,7 @@ export interface SessionCloseFrame {
 	chatId: string;
 	token: string;
 	target: SessionCloseTarget;
-	/** Hard-kill even if a live pane is attached (SKC-managed only). */
+	/** Required force-only close flag; false/omitted is rejected by daemon policy. */
 	force?: boolean;
 }
 
@@ -336,6 +336,8 @@ interface SessionRuntime {
 	disposeAnswerSource: () => void;
 	/** Deregisters this session's Telegram file sink. */
 	disposeFileSink: () => void;
+	/** Deregisters this session's unattended workflow-gate listener. */
+	disposeGateListener: () => void;
 	redact: boolean;
 	verbosity: "lean" | "verbose";
 	sessionTag: string;
@@ -348,6 +350,12 @@ interface SessionRuntime {
 	/** Assistant text already flushed before an ask this turn (turn-scoped dedupe
 	 * so turn_end does not re-emit the pre-ask lead-in). Reset each turn. */
 	preAskFlushedText?: string;
+	/** Live streaming: opt-in flag, monotonic per-turn ref, and emit throttle state. */
+	stream: boolean;
+	turnSeq?: number;
+	liveRef?: string;
+	lastLiveAt?: number;
+	lastLiveText?: string;
 	/** Cancels the postmortem cleanup that emits `session_closed` on process teardown. */
 	cancelPostmortemCleanup: () => void;
 }
@@ -357,6 +365,8 @@ interface ResolvedSettings {
 	cfg: NotificationConfig;
 	settingsAvailable: boolean;
 }
+
+const TELEGRAM_FILE_REDACTION_ERROR = "Telegram file attachments are disabled while notifications redaction is on.";
 
 const defaultConfig: NotificationConfig = {
 	enabled: false,
@@ -379,7 +389,36 @@ export function notificationsEnabled(): boolean {
 	return process.env.SKC_NOTIFICATIONS === "1" || Boolean(process.env.SKC_NOTIFICATIONS_TOKEN);
 }
 
-function resolveSettings(): ResolvedSettings {
+// Live streaming (opt-in): emit throttled non-finalized `turn_stream` frames as
+// the assistant message streams so remote clients can edit ONE message live. The
+// finalized frame (turn_end) carries the same messageRef and stays authoritative,
+// so a dropped live frame self-heals. Off unless SKC_NOTIFICATIONS_STREAM=1.
+function streamingEnabled(): boolean {
+	return process.env.SKC_NOTIFICATIONS_STREAM === "1";
+}
+function streamIntervalMs(): number {
+	return Math.max(200, Number(process.env.SKC_NOTIFICATIONS_STREAM_INTERVAL_MS) || 500);
+}
+// Max chars of a turn's assistant text carried by the FINALIZED turn_stream (and
+// the pre-ask capture). Default 3500 keeps the mirror a glanceable per-turn
+// summary; a client that splits long messages (the Telegram daemon does so via
+// splitTelegramHtml, scheduling each chunk through the shared rate-limit pool so
+// the fan-out never bypasses the per-chat limit) can raise it with
+// SKC_NOTIFICATIONS_TURN_MAX to deliver full turns. The value is clamped to a
+// finite [280, TURN_TEXT_MAX_CEILING] range: a non-finite or non-positive env
+// (unset, NaN, Infinity, <= 0) falls back to the default, so the cap can never
+// be unbounded. Live frames are intentionally NOT raised — they stay one
+// editable preview message rather than fanning a long in-progress turn across
+// sends.
+const TURN_TEXT_MAX_CEILING = 40_000;
+function turnTextMax(): number {
+	const raw = Number(process.env.SKC_NOTIFICATIONS_TURN_MAX);
+	if (!Number.isFinite(raw) || raw <= 0) return 3500;
+	return Math.min(TURN_TEXT_MAX_CEILING, Math.max(280, raw));
+}
+function resolveSettings(settingsOverride?: Settings): ResolvedSettings {
+	if (settingsOverride)
+		return { settings: settingsOverride, cfg: getNotificationConfig(settingsOverride), settingsAvailable: true };
 	try {
 		const settings = Settings.instance;
 		return { settings, cfg: getNotificationConfig(settings), settingsAvailable: true };
@@ -491,7 +530,7 @@ function sessionIdFromFile(file: string | undefined): string | undefined {
 	return underscore >= 0 ? base.slice(underscore + 1) : undefined;
 }
 
-export const createNotificationsExtension: ExtensionFactory = api => {
+export function createNotificationsExtension(api: ExtensionAPI, options: { settings?: Settings } = {}): void {
 	const runtimes = new Map<string, SessionRuntime>();
 	const disabledSessions = new Set<string>();
 	const sessionId = (ctx: ExtensionContext): string => ctx.sessionManager.getSessionId();
@@ -503,8 +542,15 @@ export const createNotificationsExtension: ExtensionFactory = api => {
 		runtimes.delete(id);
 		try {
 			rt.cancelPostmortemCleanup();
+		} catch {}
+		try {
 			rt.disposeAnswerSource();
+		} catch {}
+		try {
 			rt.disposeFileSink();
+		} catch {}
+		try {
+			rt.disposeGateListener();
 		} catch {}
 		// Resolve any still-pending interactive asks so the ask tool is not left hanging.
 		for (const pending of rt.pendingInteractive.values()) pending.resolve(undefined);
@@ -529,10 +575,14 @@ export const createNotificationsExtension: ExtensionFactory = api => {
 		return isSessionNotificationsEnabled({ cfg, env: process.env, sessionDisabled: disabledSessions.has(id) });
 	}
 
+	function isNotificationEligibleContext(ctx: ExtensionContext): boolean {
+		return ctx.sessionMetadata?.kind !== "sub";
+	}
+
 	async function startSession(ctx: ExtensionContext): Promise<"started" | "already" | "disabled" | "failed"> {
 		const id = sessionId(ctx);
-		const { settings, cfg, settingsAvailable } = resolveSettings();
-		if (!isEnabledForSession(id, cfg)) return "disabled";
+		const { settings, cfg, settingsAvailable } = resolveSettings(options.settings);
+		if (!isNotificationEligibleContext(ctx) || !isEnabledForSession(id, cfg)) return "disabled";
 		if (runtimes.has(id)) return "already";
 
 		const stateRoot = path.join(ctx.cwd, ".skc", "state");
@@ -660,6 +710,10 @@ export const createNotificationsExtension: ExtensionFactory = api => {
 				tag,
 			);
 			const disposeFileSink = registerTelegramFileSink(id, async file => {
+				if (runtime?.redact ?? redact) {
+					return { ok: false, error: TELEGRAM_FILE_REDACTION_ERROR };
+				}
+
 				try {
 					const data = await fs.promises.readFile(file.path);
 					server.pushFrame(
@@ -683,9 +737,11 @@ export const createNotificationsExtension: ExtensionFactory = api => {
 				pendingInteractive,
 				disposeAnswerSource,
 				disposeFileSink,
+				disposeGateListener: () => {},
 				cancelPostmortemCleanup: () => {},
 				redact,
 				verbosity,
+				stream: streamingEnabled(),
 				sessionTag: tag,
 				busy: false,
 				pendingInbound: new Set<number>(),
@@ -702,7 +758,7 @@ export const createNotificationsExtension: ExtensionFactory = api => {
 			});
 			logger.info(`notifications: serving session ${id} at ${endpoint.url} (unattended=${unattended})`);
 
-			if (settingsAvailable && settings && isGloballyConfigured(cfg)) {
+			if (settingsAvailable && settings && isTelegramConfigured(cfg)) {
 				try {
 					await ensureTelegramDaemonRunning({ settings, cwd: ctx.cwd, sessionId: id });
 				} catch (e) {
@@ -726,7 +782,7 @@ export const createNotificationsExtension: ExtensionFactory = api => {
 
 			// Unattended: a real ask emits a workflow gate; register it repliable by gate_id.
 			if (unattended && gate?.onGateEmitted) {
-				gate.onGateEmitted(g => {
+				runtime.disposeGateListener = gate.onGateEmitted(g => {
 					const options = (g.options ?? []).map(o => String((o as { label?: unknown }).label ?? ""));
 					gateOptions.set(g.gate_id, options);
 					const promptCtx = g.context as { prompt?: unknown; title?: unknown } | undefined;
@@ -761,7 +817,7 @@ export const createNotificationsExtension: ExtensionFactory = api => {
 		async handler(args: string, ctx: ExtensionCommandContext): Promise<void> {
 			const id = sessionId(ctx);
 			const command = args.trim().split(/\s+/, 1)[0]?.toLowerCase() || "status";
-			const resolved = resolveSettings();
+			const resolved = resolveSettings(options.settings);
 			const enabledWithoutLocalOff = isSessionNotificationsEnabled({
 				cfg: resolved.cfg,
 				env: process.env,
@@ -781,6 +837,10 @@ export const createNotificationsExtension: ExtensionFactory = api => {
 			}
 
 			if (command === "on") {
+				if (!isNotificationEligibleContext(ctx)) {
+					ctx.ui.notify("Notifications are disabled for subagent sessions.", "warning");
+					return;
+				}
 				if (process.env.SKC_NOTIFICATIONS === "0") {
 					ctx.ui.notify(
 						"Notifications remain disabled: SKC_NOTIFICATIONS=0 is an authoritative opt-out.",
@@ -878,6 +938,10 @@ export const createNotificationsExtension: ExtensionFactory = api => {
 			rt.sessionTag,
 		);
 		rt.disposeFileSink = registerTelegramFileSink(newId, async file => {
+			if (rt.redact) {
+				return { ok: false, error: TELEGRAM_FILE_REDACTION_ERROR };
+			}
+
 			try {
 				const data = await fs.promises.readFile(file.path);
 				rt.server.pushFrame(
@@ -1033,7 +1097,15 @@ export const createNotificationsExtension: ExtensionFactory = api => {
 		if (!text || text === rt.preAskFlushedText) return;
 		rt.preAskFlushedText = text;
 		try {
-			rt.server.pushFrame(JSON.stringify({ type: "turn_stream", sessionId: id, phase: "finalized", text }));
+			rt.server.pushFrame(
+				JSON.stringify({
+					type: "turn_stream",
+					sessionId: id,
+					phase: "finalized",
+					text,
+					...(rt.liveRef ? { messageRef: rt.liveRef } : {}),
+				}),
+			);
 		} catch (e) {
 			logger.warn(`notifications: pushFrame (turn) failed: ${String(e)}`);
 		}
@@ -1057,12 +1129,43 @@ export const createNotificationsExtension: ExtensionFactory = api => {
 		const id = sessionId(ctx);
 		const rt = runtimes.get(id);
 		if (!rt) return;
-		const text = rt.redact ? undefined : summaryFromMessage(event.message, 3500);
+		const text = rt.redact ? undefined : summaryFromMessage(event.message, turnTextMax());
 		if (text) flushTurnText(rt, id, text);
 		// Reset per-turn streaming state so the next turn starts fresh and a later
 		// turn with identical text is not falsely deduped.
 		rt.currentTurnText = undefined;
 		rt.preAskFlushedText = undefined;
+		rt.liveRef = undefined;
+		rt.lastLiveAt = undefined;
+		rt.lastLiveText = undefined;
+	});
+
+	// Live streaming (opt-in): push throttled in-progress assistant text as
+	// non-finalized turn_stream frames so remote clients edit one message as the
+	// turn streams. The finalized frame (turn_end) carries the same messageRef and
+	// lands the authoritative text. Suppressed under redaction.
+	api.on("message_update", (event, ctx) => {
+		const id = sessionId(ctx);
+		const rt = runtimes.get(id);
+		if (!rt?.stream || rt.redact) return;
+		if ((event.message as { role?: unknown }).role !== "assistant") return;
+		if (rt.liveRef === undefined) {
+			rt.turnSeq = (rt.turnSeq ?? 0) + 1;
+			rt.liveRef = String(rt.turnSeq);
+		}
+		const now = Date.now();
+		if (now - (rt.lastLiveAt ?? 0) < streamIntervalMs()) return;
+		const text = summaryFromMessage(event.message, 3500);
+		if (!text || text === rt.lastLiveText) return;
+		rt.lastLiveAt = now;
+		rt.lastLiveText = text;
+		try {
+			rt.server.pushFrame(
+				JSON.stringify({ type: "turn_stream", sessionId: id, phase: "live", text, messageRef: rt.liveRef }),
+			);
+		} catch (e) {
+			logger.warn(`notifications: pushFrame (live) failed: ${String(e)}`);
+		}
 	});
 
 	// Stream agent-produced images (computer/browser/tool screenshots) as
@@ -1076,7 +1179,7 @@ export const createNotificationsExtension: ExtensionFactory = api => {
 		// flush can emit it before the ask prompt. Role-scoped: message_end also
 		// fires for the user prompt, which must never be mirrored back as turn output.
 		if ((event.message as { role?: unknown }).role === "assistant") {
-			const turnText = summaryFromMessage(event.message, 3500);
+			const turnText = summaryFromMessage(event.message, turnTextMax());
 			if (turnText) rt.currentTurnText = turnText;
 		}
 		for (const img of imageAttachmentsFromMessage(event.message)) {
@@ -1099,4 +1202,4 @@ export const createNotificationsExtension: ExtensionFactory = api => {
 	api.on("session_shutdown", async (_event, ctx) => {
 		await stopSession(sessionId(ctx));
 	});
-};
+}

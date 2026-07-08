@@ -1,10 +1,15 @@
-import { describe, expect, test } from "bun:test";
-import { Settings } from "../src/config/settings";
+import { afterEach, describe, expect, test } from "bun:test";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+import { getBundledModel } from "@sayknow-cli/ai";
+import { resetSettingsForTest, Settings } from "../src/config/settings";
 import {
 	buildRedactedAction,
 	getNotificationConfig,
 	isGloballyConfigured,
 	isSessionNotificationsEnabled,
+	isTelegramConfigured,
 	maskToken,
 	type NotificationConfig,
 	type RedactableAction,
@@ -12,6 +17,10 @@ import {
 	shouldRegisterNotificationsExtension,
 	tokenFingerprint,
 } from "../src/notifications/config";
+import { createNotificationsExtension } from "../src/notifications/index";
+import { daemonPaths } from "../src/notifications/telegram-daemon";
+import { createAgentSession } from "../src/sdk";
+import { SessionManager } from "../src/session/session-manager";
 
 const BASE_CFG: NotificationConfig = {
 	enabled: false,
@@ -36,6 +45,11 @@ const GLOBAL_CFG: NotificationConfig = {
 	botToken: "1234567890:abc",
 	chatId: "chat-1",
 };
+const tempDirs: string[] = [];
+
+afterEach(() => {
+	for (const dir of tempDirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
+});
 
 describe("notifications config", () => {
 	test("getNotificationConfig reads defaults", () => {
@@ -80,6 +94,16 @@ describe("notifications config", () => {
 		expect(isGloballyConfigured({ ...GLOBAL_CFG, botToken: "" })).toBe(false);
 		expect(isGloballyConfigured({ ...GLOBAL_CFG, chatId: undefined })).toBe(false);
 		expect(isGloballyConfigured({ ...GLOBAL_CFG, chatId: "" })).toBe(false);
+		expect(isGloballyConfigured({ ...GLOBAL_CFG, botToken: " " })).toBe(false);
+		expect(isGloballyConfigured({ ...GLOBAL_CFG, chatId: "\t" })).toBe(false);
+		expect(
+			isGloballyConfigured({
+				...BASE_CFG,
+				enabled: true,
+				botToken: " ",
+				chatId: "\t",
+			}),
+		).toBe(false);
 		expect(
 			isGloballyConfigured({
 				...BASE_CFG,
@@ -101,6 +125,19 @@ describe("notifications config", () => {
 				discord: { botToken: "discord-token", channelId: undefined },
 			}),
 		).toBe(false);
+	});
+
+	test("isTelegramConfigured rejects blank Telegram credentials even when another adapter is configured", () => {
+		const mixedAdapterCfg: NotificationConfig = {
+			...BASE_CFG,
+			enabled: true,
+			botToken: " ",
+			chatId: "\t",
+			discord: { botToken: "discord-token", channelId: "discord-channel" },
+		};
+
+		expect(isGloballyConfigured(mixedAdapterCfg)).toBe(true);
+		expect(isTelegramConfigured(mixedAdapterCfg)).toBe(false);
 	});
 
 	test("isSessionNotificationsEnabled applies precedence", () => {
@@ -149,11 +186,193 @@ describe("notifications config", () => {
 		expect(shouldRegisterNotificationsExtension({ cfg: GLOBAL_CFG, env: {} })).toBe(true);
 		expect(shouldRegisterNotificationsExtension({ cfg: BASE_CFG, env: {} })).toBe(false);
 		expect(shouldRegisterNotificationsExtension({ env: {} })).toBe(false);
+		expect(
+			shouldRegisterNotificationsExtension({
+				cfg: GLOBAL_CFG,
+				env: { SKC_NOTIFICATIONS: "1", SKC_NOTIFICATIONS_TOKEN: "legacy-token" },
+				taskDepth: 1,
+			}),
+		).toBe(false);
+		expect(
+			shouldRegisterNotificationsExtension({
+				cfg: GLOBAL_CFG,
+				env: { SKC_NOTIFICATIONS: "1" },
+				parentTaskPrefix: "0-Sub",
+			}),
+		).toBe(false);
+		expect(
+			shouldRegisterNotificationsExtension({
+				cfg: GLOBAL_CFG,
+				env: { SKC_NOTIFICATIONS: "1" },
+				currentAgentType: "executor",
+			}),
+		).toBe(false);
 	});
+	test("settings-enabled subagent sessions do not register the notifications extension", async () => {
+		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "skc-notifications-subagent-"));
+		tempDirs.push(cwd);
+		const previous = process.env.SKC_NOTIFICATIONS;
+		delete process.env.SKC_NOTIFICATIONS;
+		const settings = Settings.isolated({
+			"notifications.enabled": true,
+			"notifications.telegram.botToken": " ",
+			"notifications.telegram.chatId": "\t",
+			"notifications.discord.botToken": "discord-token",
+			"notifications.discord.channelId": "discord-channel",
+		});
+
+		const disposers: Array<() => Promise<void>> = [];
+
+		try {
+			resetSettingsForTest();
+			await Settings.init({ inMemory: true, cwd, agentDir: cwd });
+			const topLevel = await createAgentSession({
+				cwd,
+				agentDir: cwd,
+				sessionManager: SessionManager.inMemory(cwd),
+				settings,
+				model: getBundledModel("openai", "gpt-4o-mini"),
+				disableExtensionDiscovery: true,
+				extensions: [],
+				skills: [],
+				contextFiles: [],
+				promptTemplates: [],
+				slashCommands: [],
+				enableMCP: false,
+				enableLsp: false,
+			});
+			disposers.push(() => topLevel.session.dispose());
+
+			const subagent = await createAgentSession({
+				cwd,
+				agentDir: cwd,
+				sessionManager: SessionManager.inMemory(cwd),
+				settings,
+				model: getBundledModel("openai", "gpt-4o-mini"),
+				disableExtensionDiscovery: true,
+				extensions: [],
+				skills: [],
+				contextFiles: [],
+				promptTemplates: [],
+				slashCommands: [],
+				enableMCP: false,
+				enableLsp: false,
+				taskDepth: 1,
+			});
+			disposers.push(() => subagent.session.dispose());
+			const parentPrefixSubagent = await createAgentSession({
+				cwd,
+				agentDir: cwd,
+				sessionManager: SessionManager.inMemory(cwd),
+				settings,
+				model: getBundledModel("openai", "gpt-4o-mini"),
+				disableExtensionDiscovery: true,
+				extensions: [],
+				skills: [],
+				contextFiles: [],
+				promptTemplates: [],
+				slashCommands: [],
+				enableMCP: false,
+				enableLsp: false,
+				parentTaskPrefix: "0-Sub",
+			});
+			disposers.push(() => parentPrefixSubagent.session.dispose());
+			const agentTypeOnlySubagent = await createAgentSession({
+				cwd,
+				agentDir: cwd,
+				sessionManager: SessionManager.inMemory(cwd),
+				settings,
+				model: getBundledModel("openai", "gpt-4o-mini"),
+				disableExtensionDiscovery: true,
+				extensions: [],
+				skills: [],
+				contextFiles: [],
+				promptTemplates: [],
+				slashCommands: [],
+				enableMCP: false,
+				enableLsp: false,
+				currentAgentType: "executor",
+			});
+			disposers.push(() => agentTypeOnlySubagent.session.dispose());
+			const explicitExtensionSubagent = await createAgentSession({
+				cwd,
+				agentDir: cwd,
+				sessionManager: SessionManager.inMemory(cwd),
+				settings,
+				model: getBundledModel("openai", "gpt-4o-mini"),
+				disableExtensionDiscovery: true,
+				extensions: [api => createNotificationsExtension(api, { settings })],
+				skills: [],
+				contextFiles: [],
+				promptTemplates: [],
+				slashCommands: [],
+				enableMCP: false,
+				enableLsp: false,
+				taskDepth: 1,
+			});
+			disposers.push(() => explicitExtensionSubagent.session.dispose());
+			await topLevel.session.extensionRunner?.emit({ type: "session_start" });
+			await subagent.session.extensionRunner?.emit({ type: "session_start" });
+			await parentPrefixSubagent.session.extensionRunner?.emit({ type: "session_start" });
+			await agentTypeOnlySubagent.session.extensionRunner?.emit({ type: "session_start" });
+			await explicitExtensionSubagent.session.extensionRunner?.emit({ type: "session_start" });
+			const topLevelEndpoint = path.join(
+				cwd,
+				".skc",
+				"state",
+				"notifications",
+				`${topLevel.session.sessionId}.json`,
+			);
+			const subagentEndpoint = path.join(
+				cwd,
+				".skc",
+				"state",
+				"notifications",
+				`${subagent.session.sessionId}.json`,
+			);
+			const parentPrefixSubagentEndpoint = path.join(
+				cwd,
+				".skc",
+				"state",
+				"notifications",
+				`${parentPrefixSubagent.session.sessionId}.json`,
+			);
+			const agentTypeOnlySubagentEndpoint = path.join(
+				cwd,
+				".skc",
+				"state",
+				"notifications",
+				`${agentTypeOnlySubagent.session.sessionId}.json`,
+			);
+			const explicitExtensionSubagentEndpoint = path.join(
+				cwd,
+				".skc",
+				"state",
+				"notifications",
+				`${explicitExtensionSubagent.session.sessionId}.json`,
+			);
+			expect(fs.existsSync(topLevelEndpoint)).toBe(true);
+			expect(fs.existsSync(subagentEndpoint)).toBe(false);
+			expect(fs.existsSync(parentPrefixSubagentEndpoint)).toBe(false);
+			expect(fs.existsSync(agentTypeOnlySubagentEndpoint)).toBe(false);
+			expect(fs.existsSync(explicitExtensionSubagentEndpoint)).toBe(false);
+			expect(fs.existsSync(daemonPaths(cwd).roots)).toBe(false);
+		} finally {
+			await Promise.all(disposers.reverse().map(dispose => dispose()));
+			if (previous === undefined) {
+				delete process.env.SKC_NOTIFICATIONS;
+			} else {
+				process.env.SKC_NOTIFICATIONS = previous;
+			}
+			resetSettingsForTest();
+		}
+	}, 30000);
 
 	test("maskToken handles unset tokens and never reveals the raw token", () => {
 		expect(maskToken(undefined)).toBe("(unset)");
 		expect(maskToken("")).toBe("(unset)");
+		expect(maskToken("abc")).toBe("…(len 3)");
+		expect(maskToken("abc")).not.toContain("abc");
 
 		const token = "1234567890:super-secret-token";
 		const masked = maskToken(token);
@@ -199,6 +418,23 @@ describe("notifications config", () => {
 		};
 
 		expect(buildRedactedAction(action, { redact: false, sessionTag: "abcdef" })).toBe(action);
+	});
+
+	test("buildRedactedAction strips question and options for non-ask actions", () => {
+		const action: RedactableAction = {
+			id: "custom-1",
+			kind: "custom",
+			sessionId: "session-abcdef",
+			question: "Sensitive question?",
+			options: ["Sensitive option"],
+			summary: "Sensitive summary",
+		};
+
+		expect(buildRedactedAction(action, { redact: true, sessionTag: "abcdef" })).toEqual({
+			id: "custom-1",
+			kind: "custom",
+			sessionId: "session-abcdef",
+		});
 	});
 
 	test("buildRedactedAction strips only summary for idle actions", () => {

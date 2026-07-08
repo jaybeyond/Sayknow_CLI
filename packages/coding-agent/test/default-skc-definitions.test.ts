@@ -23,6 +23,13 @@ const tempRoots: string[] = [];
 const roleAgentNames = ["architect", "critic", "executor", "planner"] as const;
 const repoRoot = path.resolve(import.meta.dir, "..", "..", "..");
 
+function extractPromptSection(content: string, sectionName: string): string {
+	const sectionMatch = content.match(new RegExp(`<${sectionName}>\\n([\\s\\S]*?)\\n</${sectionName}>`));
+	const sectionContent = sectionMatch?.[1];
+	if (sectionContent === undefined) throw new Error(`missing <${sectionName}> section`);
+	return sectionContent;
+}
+
 async function makeTempRoot(): Promise<string> {
 	const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "skc-default-definitions-"));
 	tempRoots.push(tempRoot);
@@ -60,14 +67,15 @@ describe("default SKC definitions", () => {
 
 		expect(skills).toEqual(expected);
 		expect(workflowDefinitions).toHaveLength(4);
-		expect(definitions).toHaveLength(8);
+		expect(definitions).toHaveLength(9);
 		expect(workflowDefinitions.every(definition => definition.relativePath.startsWith("skills/"))).toBe(true);
 		expect(workflowDefinitions.every(definition => definition.content.includes(definition.name))).toBe(true);
-		expect(fragmentDefinitions).toHaveLength(4);
+		expect(fragmentDefinitions).toHaveLength(5);
 		expect(fragmentDefinitions.map(definition => definition.parentSkillName).sort()).toEqual([
 			"deep-interview",
 			"deep-interview",
 			"deep-interview",
+			"ultragoal",
 			"ultragoal",
 		]);
 		expect(fragmentDefinitions.map(definition => definition.relativePath).sort()).toEqual([
@@ -75,7 +83,13 @@ describe("default SKC definitions", () => {
 			"skill-fragments/deep-interview/auto-research-greenfield.md",
 			"skill-fragments/deep-interview/lateral-review-panel.md",
 			"skill-fragments/ultragoal/ai-slop-cleaner.md",
+			"skill-fragments/ultragoal/pipeline-validation-contracts.md",
 		]);
+		const team = workflowDefinitions.find(definition => definition.name === "team");
+		expect(team?.content).toContain("supported surfaces only");
+		expect(team?.content).toContain("`planner` for broad context mapping/sequencing");
+		expect(team?.content).toContain("`architect` for architecture or external-doc-risk assessment");
+		expect(team?.content).not.toMatch(/auto-delegate `researcher`|`researcher` as an evidence lane/i);
 	});
 
 	it("exposes deep-interview fragments only through the parent-scoped fragment accessor", () => {
@@ -96,7 +110,7 @@ describe("default SKC definitions", () => {
 		expect(fragments.every(fragment => fragment.content.includes("read-only architect"))).toBe(true);
 	});
 
-	it("exposes the ultragoal ai-slop-cleaner fragment only through the parent-scoped fragment accessor", () => {
+	it("exposes the ultragoal fragments only through the parent-scoped fragment accessor", () => {
 		const fragments = getEmbeddedDefaultSkcSkillFragments("ultragoal");
 
 		expect(
@@ -104,17 +118,24 @@ describe("default SKC definitions", () => {
 				.map(skill => skill.name)
 				.sort(),
 		).toEqual([...DEFAULT_SKC_DEFINITION_NAMES].sort());
-		expect(fragments).toHaveLength(1);
-		expect(fragments.map(fragment => fragment.kind)).toEqual(["skill-fragment"]);
-		expect(fragments.map(fragment => fragment.relativePath)).toEqual([
+		expect(fragments).toHaveLength(2);
+		expect(fragments.map(fragment => fragment.kind)).toEqual(["skill-fragment", "skill-fragment"]);
+		expect(fragments.map(fragment => fragment.relativePath).sort()).toEqual([
 			"skill-fragments/ultragoal/ai-slop-cleaner.md",
+			"skill-fragments/ultragoal/pipeline-validation-contracts.md",
 		]);
-		expect(fragments[0]!.content).toContain("AI SLOP CLEANUP REPORT");
-		expect(fragments[0]!.content).toContain("read-only detector");
+		const cleaner = fragments.find(fragment => fragment.relativePath.endsWith("ai-slop-cleaner.md"))!;
+		expect(cleaner.content).toContain("AI SLOP CLEANUP REPORT");
+		expect(cleaner.content).toContain("read-only detector");
+		const contracts = fragments.find(fragment => fragment.relativePath.endsWith("pipeline-validation-contracts.md"))!;
+		expect(contracts.content).toContain("never user-facing");
+		expect(contracts.content).toContain("fails closed");
 	});
 
 	it("authors the ai-slop-cleaner fragment with the mandated report labels and full taxonomy", () => {
-		const fragment = getEmbeddedDefaultSkcSkillFragments("ultragoal")[0]!;
+		const fragment = getEmbeddedDefaultSkcSkillFragments("ultragoal").find(candidate =>
+			candidate.relativePath.endsWith("ai-slop-cleaner.md"),
+		)!;
 		const content = fragment.content;
 
 		for (const label of [
@@ -300,6 +321,137 @@ Project executor override body.
 		expect(ultragoal).toContain("the subagent has actually failed");
 		expect(ultragoal).toContain("gone off-track");
 		expect(ultragoal).toContain("become unrecoverably wrong");
+		expect(ultragoal).toContain("Native executor parallelism contract");
+		expect(ultragoal).toContain("MUST use native `executor` parallelism");
+		expect(ultragoal).toContain("SHOULD prefer parallel `executor` subagents");
+		expect(ultragoal).toContain("MUST NOT mutate `.skc/_session-{sessionid}/ultragoal`");
+		expect(ultragoal).toContain("target files/surfaces");
+		expect(ultragoal).toContain("independence assumptions");
+		expect(ultragoal).toContain("allowed coordination channel");
+		expect(ultragoal).toContain("conflict-escalation rule");
+		expect(ultragoal).toContain("expected evidence");
+		expect(ultragoal).toContain("terminal status");
+		expect(ultragoal).toContain("failed, timed-out, or contract-violating slices");
+		expect(ultragoal).toContain("durable ledger evidence");
+		expect(ultragoal).toContain("reassign, retry, or collapse");
+		expect(ultragoal).toContain("targeted verification");
+		expect(ultragoal).toContain("cleaner + architect + executor QA/red-team gate");
+		expect(ultragoal).toContain("Runtime-backed pipelined scheduling");
+		expect(ultragoal).toContain("--goal-metadata-json");
+		expect(ultragoal).toContain("aggregate mode only");
+		expect(ultragoal).toContain("pipeline-validation-contracts");
+		expect(ultragoal).toContain("skill-fragments/ultragoal/pipeline-validation-contracts.md");
+		expect(ultragoal).toContain("Team is not auto-launched");
+		expect(ultragoal).toContain("not a hidden pipeline scheduler");
+
+		const contracts = getEmbeddedDefaultSkcSkillFragments("ultragoal").find(fragment =>
+			fragment.relativePath.endsWith("pipeline-validation-contracts.md"),
+		)!;
+		expect(contracts.content).toContain("start-pipeline-overlap");
+		expect(contracts.content).toContain("join-pipeline-overlap");
+		expect(contracts.content).toContain("rebaseline-pipeline-overlap");
+		expect(contracts.content).toContain("At most one eligible next goal");
+		expect(contracts.content).toContain("G(N) remains active");
+		expect(contracts.content).toContain("clean join");
+		expect(contracts.content).toContain("quarantine and re-baseline");
+		expect(contracts.content).toContain("unattributable change-set paths");
+		expect(contracts.content).toContain("fail closed");
+	});
+
+	it("documents validation-batch granularity, contract, and intra-goal lane parallelism in the ultragoal prompt", async () => {
+		const ultragoal = await Bun.file(
+			path.join(repoRoot, "packages", "coding-agent", "src", "defaults", "skc", "skills", "ultragoal", "SKILL.md"),
+		).text();
+
+		// A: create-goals granularity — merge validation-coupled stories, fan out executor slices.
+		expect(ultragoal).toContain("validation-coupled");
+		expect(ultragoal).toContain("Merge validation-coupled stories into one goal");
+		expect(ultragoal).toContain("fan out executor slices");
+		expect(ultragoal).toContain("the same feature stack");
+		expect(ultragoal).toContain("the same red-team surface");
+		expect(ultragoal).toContain("the same final review boundary");
+
+		// B: validation-batch contract summary in the SKILL; full contract in the fragment.
+		expect(ultragoal).toContain("## Validation batches (aggregate-only)");
+		expect(ultragoal).toContain("--validation-batch-json");
+		expect(ultragoal).toContain("aggregate-only");
+		expect(ultragoal).toContain("fail-closed");
+		expect(ultragoal).toContain("deferredToBatch");
+		expect(ultragoal).toContain("validation-batch-deferred");
+		expect(ultragoal).toContain("validationBatchClose");
+		expect(ultragoal).toContain("mutually exclusive");
+		expect(ultragoal).toContain("no batch/pipeline mixing");
+		expect(ultragoal).toContain("out-of-order close is rejected");
+		expect(ultragoal).toContain("append-only proof");
+		expect(ultragoal).toContain("cumulative-since-base");
+		expect(ultragoal).toContain("skill-fragments/ultragoal/pipeline-validation-contracts.md");
+
+		const contracts = getEmbeddedDefaultSkcSkillFragments("ultragoal").find(fragment =>
+			fragment.relativePath.endsWith("pipeline-validation-contracts.md"),
+		)!;
+		expect(contracts.content).toContain("deferredToBatch");
+		expect(contracts.content).toContain("validation-batch-deferred");
+		expect(contracts.content).toContain("validationBatchClose");
+		expect(contracts.content).toContain("out-of-order close is rejected");
+		expect(contracts.content).toContain("append-only proof");
+		expect(contracts.content).toContain("Never stamp");
+		expect(contracts.content).toContain("cumulative-since-base");
+		expect(contracts.content).toContain("`cumulativeFromBase: true`");
+		expect(contracts.content).toContain("`memberGoalId` is a label not a per-path attribution");
+		expect(contracts.content).toContain("Batch invalidation is fail-closed");
+
+		// B: receipts freshness for deferred members.
+		expect(ultragoal).toContain(
+			"Deferred per-goal receipts (validation-batch members) are incomplete until a matching fresh batch-close receipt exists",
+		);
+
+		// C: intra-goal validation-lane parallelism.
+		expect(ultragoal).toContain("### Intra-goal validation-lane parallelism");
+		expect(ultragoal).toContain("frozen post-cleaner change set");
+		expect(ultragoal).toContain("architect review and the executor QA/red-team lane MAY run in parallel");
+		expect(ultragoal).toContain("join before checkpoint");
+		expect(ultragoal).toContain("Fall back to **sequential** lanes");
+		expect(ultragoal).toContain("red-team lane depends on architect fixes");
+	});
+
+	it("routes simple clear implementation requests directly without contradictory workflow escalation", async () => {
+		const systemPrompt = await Bun.file(
+			path.join(repoRoot, "packages", "coding-agent", "src", "prompts", "system", "system-prompt.md"),
+		).text();
+		const routing = extractPromptSection(systemPrompt, "routing");
+		const decomposition = extractPromptSection(systemPrompt, "decomposition");
+
+		expect(routing).toMatch(/Clear,\s+low-risk implementation request\s+→\s+implement directly/i);
+		expect(routing).toMatch(/simple clear implementation requests[\s\S]*direct tools[\s\S]*default launch path/i);
+		expect(routing).toMatch(/workflow-intent-diff[\s\S]*CustomEntry[\s\S]*does not participate in LLM context/i);
+		expect(routing).toMatch(/clear,\s+bounded,\s+and low-risk[\s\S]*smallest correct change[\s\S]*verify/i);
+		expect(routing).toMatch(/Small verification needs[\s\S]*do not make[\s\S]*planning workflow/i);
+		expect(routing).toMatch(/Architecture\/sequence risk[\s\S]*`ralplan --deliberate`/i);
+		expect(routing).toMatch(/Vague requirements[\s\S]*`deep-interview`/i);
+		expect(routing).toMatch(/Durable goal ledger[\s\S]*`ultragoal`/i);
+		expect(routing).toMatch(
+			/root-cause phase schema[\s\S]*only[\s\S]*contradiction[\s\S]*regression[\s\S]*high-risk transition/i,
+		);
+		for (const escalationTrigger of [
+			"Vague requirements",
+			"non-trivial architecture/sequence risk",
+			"Durable goal ledger",
+			"coordinated persistent workers",
+		]) {
+			expect(routing).toContain(escalationTrigger);
+		}
+
+		expect(routing).toMatch(
+			/Informational questions, bare `\?`, and unambiguous explanatory prompts[\s\S]*answer-only\/read-only/i,
+		);
+		expect(routing).toMatch(/unless the user explicitly asks to change, run, implement, or execute/i);
+		expect(routing).toMatch(/Ambiguous implementation asks[\s\S]*require clarification[\s\S]*before mutation/i);
+		expect(decomposition).toMatch(/skip it for one-step or obvious two-step fixes/i);
+		expect(decomposition).toMatch(/Do not delegate[\s\S]*single-line typos[\s\S]*known-location fixes/i);
+		const simpleRequestRule = routing.split("\n").find(line => line.includes("simple clear implementation requests"));
+		expect(simpleRequestRule).toBeDefined();
+		expect(simpleRequestRule).not.toMatch(/use `deep-interview`|use `ralplan`|use `ultragoal`|use `team`|delegate/i);
+		expect(simpleRequestRule).toMatch(/Do not invoke/i);
 	});
 
 	it("documents leader-owned Ultragoal checkpoints for Team bridge workers", async () => {
@@ -376,6 +528,8 @@ Project executor override body.
 		expect(content).toContain("--stage critic");
 		expect(content).toContain("do not directly edit `.skc/_session-{sessionid}/plans`");
 		expect(content).toContain("skc state clear --force --mode ralplan");
+		expect(content).toContain('workflowGate: { stage: "ralplan", kind: "approval" }');
+		expect(content).toContain("RPC/headless clients receive a `ralplan`/`approval` workflow gate");
 		expect(content).toContain(
 			"Direct `write`, `edit`, or `ast_edit` calls against `.skc/_session-{sessionid}/specs`, `.skc/_session-{sessionid}/plans`, `.skc/_session-{sessionid}/state`, or any other `.skc/` path are forbidden",
 		);
@@ -387,10 +541,10 @@ Project executor override body.
 		const deepInterviewSkillPath = path.join(targetRoot, "skills", "deep-interview", "SKILL.md");
 		const installedDeepInterview = await Bun.file(deepInterviewSkillPath).text();
 
-		expect(initial.written).toBe(8);
-		expect(initial.total).toBe(8);
+		expect(initial.written).toBe(9);
+		expect(initial.total).toBe(9);
 		expect(initial.skipped).toBe(0);
-		expect(initial.files.filter(file => file.kind === "skill-fragment")).toHaveLength(4);
+		expect(initial.files.filter(file => file.kind === "skill-fragment")).toHaveLength(5);
 
 		const installedResearchFragment = await Bun.file(
 			path.join(targetRoot, "skill-fragments", "deep-interview", "auto-research-greenfield.md"),
@@ -399,19 +553,47 @@ Project executor override body.
 		await Bun.write(deepInterviewSkillPath, "local edit");
 		const skipped = await installDefaultSkcDefinitions({ targetRoot });
 		expect(skipped.written).toBe(0);
-		expect(skipped.skipped).toBe(8);
+		expect(skipped.skipped).toBe(9);
 		expect(await Bun.file(deepInterviewSkillPath).text()).toBe("local edit");
 
 		const check = await installDefaultSkcDefinitions({ targetRoot, check: true });
 		expect(check.different).toBe(1);
-		expect(check.matching).toBe(7);
+		expect(check.matching).toBe(8);
 
 		const forced = await installDefaultSkcDefinitions({ targetRoot, force: true });
-		expect(forced.written).toBe(8);
+		expect(forced.written).toBe(9);
 		expect(await Bun.file(deepInterviewSkillPath).text()).toBe(installedDeepInterview);
 		expect(
 			forced.files.some(file => file.kind === "skill-fragment" && file.parentSkillName === "deep-interview"),
 		).toBe(true);
+	});
+
+	it("refreshOnly rewrites stale local copies but never materializes missing ones", async () => {
+		const targetRoot = await makeTempRoot();
+		const deepInterviewSkillPath = path.join(targetRoot, "skills", "deep-interview", "SKILL.md");
+
+		// No files on disk yet: refreshOnly must not create any (opt-in preserved).
+		const untouched = await installDefaultSkcDefinitions({ targetRoot, refreshOnly: true });
+		expect(untouched.written).toBe(0);
+		expect(untouched.missing).toBe(9);
+		expect(await Bun.file(deepInterviewSkillPath).exists()).toBe(false);
+
+		// User opted in, then a local file went stale relative to the embedded default.
+		const installed = await installDefaultSkcDefinitions({ targetRoot });
+		const canonicalDeepInterview = await Bun.file(deepInterviewSkillPath).text();
+		expect(installed.written).toBe(9);
+		await Bun.write(deepInterviewSkillPath, "stale content");
+
+		const refreshed = await installDefaultSkcDefinitions({ targetRoot, refreshOnly: true });
+		expect(refreshed.written).toBe(1);
+		expect(refreshed.matching).toBe(8);
+		expect(refreshed.missing).toBe(0);
+		expect(await Bun.file(deepInterviewSkillPath).text()).toBe(canonicalDeepInterview);
+
+		// Second refresh is a no-op once everything matches.
+		const stable = await installDefaultSkcDefinitions({ targetRoot, refreshOnly: true });
+		expect(stable.written).toBe(0);
+		expect(stable.matching).toBe(9);
 	});
 
 	it("does not make installed fragments reachable as skill-relative internal URL assets", async () => {
@@ -523,7 +705,7 @@ Project executor override body.
 		expect(await jsonProc.exited).toBe(0);
 		expect(jsonStderr).toBe("");
 		expect(jsonStdout).not.toContain("skc skills list");
-		expect(JSON.parse(jsonStdout) as { skipped: number }).toMatchObject({ skipped: 8 });
+		expect(JSON.parse(jsonStdout) as { skipped: number }).toMatchObject({ skipped: 9 });
 	});
 });
 

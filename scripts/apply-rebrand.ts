@@ -98,6 +98,7 @@ const PRESERVE_RELPATHS = new Set([
 	"NOTICE.md",
 	"README.md",
 	"packages/coding-agent/CHANGELOG.md",
+	"packages/coding-agent/src/internal-urls/docs-index.generated.ts",
 	// toolingOnly pipeline files carried into the output by gen-tree. They quote
 	// the upstream brand by necessity (rename rules + maintenance docs); the
 	// codemod must leave them verbatim or it corrupts its own tooling on re-apply.

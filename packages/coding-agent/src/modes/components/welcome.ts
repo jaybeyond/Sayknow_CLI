@@ -22,6 +22,25 @@ export interface WelcomeComponentOptions {
 	collapseChangelog?: boolean;
 }
 
+const WELCOME_STATIC_RIGHT_ROWS_EXCLUDING_DYNAMIC_SECTIONS = 15;
+const DEFAULT_WHATS_NEW_ROWS = 3;
+const MAX_WHATS_NEW_ROWS = 12;
+const NEWLINE_FLOW_KEY =
+	process.platform === "win32" ? { key: "alt+enter", label: "newline" } : { key: "ctrl+j", label: "newline" };
+
+const FLOW_KEY_ITEMS: ReadonlyArray<{ key: string; label: string }> = [
+	{ key: "/", label: "commands" },
+	{ key: "#", label: "actions" },
+	{ key: "!", label: "shell" },
+	{ key: "$", label: "python" },
+	{ key: "?", label: "keymap" },
+	{ key: "ctrl+l", label: "model" },
+	{ key: "shift+tab", label: "reasoning" },
+	{ key: "tab", label: "complete" },
+	NEWLINE_FLOW_KEY,
+	{ key: "ctrl+c", label: "clear" },
+];
+
 /**
  * Sayknow-CLI launch surface: a blue-gradient SAYKNOW wordmark, compact
  * command affordances, and project signals — a distinct identity, not a
@@ -99,7 +118,6 @@ export class WelcomeComponent implements Component {
 		}
 		const targetContentRows = targetRows === undefined ? undefined : Math.max(0, targetRows - 2);
 		const dualContentWidth = boxWidth - 3; // 3 = │ + │ + │
-		const preferredLeftCol = 40;
 		const minLeftCol = 20; // wordmark plus Sayknow identity labels
 		const minRightCol = 24;
 		const modelPill = this.#pill(theme.icon.model || "model", this.modelName, "statusLineModel");
@@ -113,10 +131,12 @@ export class WelcomeComponent implements Component {
 			visibleWidth(modelPill),
 			visibleWidth(providerPill),
 		);
-		const desiredLeftCol = Math.min(preferredLeftCol, Math.max(minLeftCol, Math.floor(dualContentWidth * 0.42)));
+		const evenLeftCol = Math.floor(dualContentWidth / 2);
+		const maxLeftColWithRightMinimum = Math.max(1, dualContentWidth - minRightCol);
+		const desiredLeftCol = Math.max(leftMinContentWidth, evenLeftCol);
 		const dualLeftCol =
 			dualContentWidth >= minRightCol + 1
-				? Math.min(desiredLeftCol, dualContentWidth - minRightCol)
+				? Math.min(desiredLeftCol, maxLeftColWithRightMinimum)
 				: Math.max(1, dualContentWidth - 1);
 		const dualRightCol = Math.max(1, dualContentWidth - dualLeftCol);
 		const showRightColumn = dualLeftCol >= leftMinContentWidth && dualRightCol >= minRightCol;
@@ -152,26 +172,6 @@ export class WelcomeComponent implements Component {
 
 		const rightColumnWidth = showRightColumn ? rightCol : leftCol;
 		const separator = buildSeparator(rightColumnWidth);
-		const changelogBudget = Math.max(1, Math.min(6, Math.floor((targetContentRows ?? 18) * 0.3)));
-
-		const sessionLines: string[] = [];
-		if (this.recentSessions.length === 0) {
-			sessionLines.push(` ${theme.fg("dim", t("welcome.noSessions"))}`);
-		} else {
-			const bulletPrefix = ` ${theme.md.bullet} `;
-			const prefixWidth = visibleWidth(bulletPrefix);
-			for (const session of this.recentSessions.slice(0, 3)) {
-				const timeSuffixRaw = ` (${session.timeAgo})`;
-				const timeWidth = visibleWidth(timeSuffixRaw);
-				const nameBudget = Math.max(1, rightColumnWidth - prefixWidth - timeWidth);
-				const nameVis = visibleWidth(session.name);
-				const name = nameVis > nameBudget ? truncateToWidth(session.name, nameBudget) : session.name;
-				sessionLines.push(
-					`${theme.fg("dim", bulletPrefix)}${theme.fg("muted", name)}${theme.fg("dim", timeSuffixRaw)}`,
-				);
-			}
-		}
-
 		const lspLines: string[] = [];
 		if (this.lspServers.length === 0) {
 			lspLines.push(` ${theme.fg("dim", t("welcome.noLsp"))}`);
@@ -188,6 +188,24 @@ export class WelcomeComponent implements Component {
 			}
 		}
 
+		const flowPreferredRows = this.#flowKeyRows(rightColumnWidth).length;
+		const changelogRowLimit = this.#whatsNewRowLimit(targetContentRows, lspLines.length, flowPreferredRows);
+		const changelogLines = this.#whatsNewLines(rightColumnWidth, changelogRowLimit);
+		const flowRowLimit = this.#flowKeyRowLimit(
+			targetContentRows,
+			changelogLines.length,
+			lspLines.length,
+			rightColumnWidth,
+		);
+		const flowLines = this.#flowKeyLines(rightColumnWidth, flowRowLimit);
+		const sessionLimit = this.#sessionTrailLimit(
+			targetContentRows,
+			changelogLines.length,
+			lspLines.length,
+			flowLines.length,
+		);
+		const sessionLines = this.#sessionTrailLines(rightColumnWidth, sessionLimit);
+
 		// Workflow affordances: pad the command so descriptions align.
 		const wf = (cmd: string, desc: string): string => {
 			const pad = " ".repeat(Math.max(1, 17 - visibleWidth(cmd)));
@@ -197,7 +215,7 @@ export class WelcomeComponent implements Component {
 		const rightLines = [
 			"",
 			` ${theme.bold(theme.fg("accent", "What's New"))}`,
-			...this.#whatsNewLines(rightColumnWidth, changelogBudget),
+			...changelogLines,
 			separator,
 			` ${theme.bold(theme.fg("accent", t("welcome.workflows")))}`,
 			wf("/deep-interview", t("welcome.wf.deepInterview")),
@@ -206,19 +224,7 @@ export class WelcomeComponent implements Component {
 			wf("/team", t("welcome.wf.team")),
 			separator,
 			` ${theme.bold(theme.fg("accent", t("welcome.flowKeys")))}`,
-			` ${theme.fg("dim", "/")}${theme.fg("muted", ` ${t("welcome.commands")}`)} ${theme.fg("dim", "·")} ${theme.fg(
-				"dim",
-				"#",
-			)}${theme.fg("muted", ` ${t("welcome.actions")}`)}`,
-			` ${theme.fg("dim", "!")}${theme.fg("muted", ` ${t("welcome.shell")}`)} ${theme.fg("dim", "·")} ${theme.fg("dim", "$")}${theme.fg(
-				"muted",
-				` ${t("welcome.python")}`,
-			)}`,
-			` ${theme.fg("dim", "?")}${theme.fg("muted", ` ${t("welcome.keymap")}`)} ${theme.fg("dim", "·")} ${theme.fg(
-				"dim",
-				"ctrl+l",
-			)}${theme.fg("muted", ` ${t("welcome.model")}`)}`,
-			` ${theme.fg("dim", "shift+tab")}${theme.fg("muted", ` ${t("welcome.reasoning")}`)}`,
+			...flowLines,
 			separator,
 			` ${theme.bold(theme.fg("accent", t("welcome.projectPulse")))}`,
 			...lspLines,
@@ -337,7 +343,139 @@ export class WelcomeComponent implements Component {
 		return [...Array.from({ length: topPad }, () => ""), ...clipped, ...Array.from({ length: bottomPad }, () => "")];
 	}
 
-	#whatsNewLines(width: number, maxItems: number): string[] {
+	#flowKeyItemText(item: { key: string; label: string }): string {
+		return `${theme.fg("dim", item.key)}${theme.fg("muted", ` ${this.#flowKeyLabel(item.label)}`)}`;
+	}
+
+	#flowKeyLabel(label: string): string {
+		switch (label) {
+			case "commands":
+				return t("welcome.commands");
+			case "actions":
+				return t("welcome.actions");
+			case "shell":
+				return t("welcome.shell");
+			case "python":
+				return t("welcome.python");
+			case "keymap":
+				return t("welcome.keymap");
+			case "model":
+				return t("welcome.model");
+			case "reasoning":
+				return t("welcome.reasoning");
+			default:
+				return label;
+		}
+	}
+
+	#flowKeyRows(width: number): string[] {
+		const contentWidth = Math.max(1, width - 1);
+		const separator = ` ${theme.fg("dim", "·")} `;
+		const rows: string[] = [];
+		let current = "";
+		for (const item of FLOW_KEY_ITEMS) {
+			const segment = this.#flowKeyItemText(item);
+			const next = current ? `${current}${separator}${segment}` : segment;
+			if (current && visibleWidth(next) > contentWidth) {
+				rows.push(` ${current}`);
+				current = segment;
+			} else {
+				current = next;
+			}
+		}
+		if (current) rows.push(` ${current}`);
+		return rows.length > 0 ? rows : [` ${theme.fg("dim", "No flow keys")}`];
+	}
+
+	#flowKeyLines(width: number, maxRows: number): string[] {
+		const rows = this.#flowKeyRows(width);
+		const rowLimit = Math.max(1, Math.floor(maxRows));
+		if (rows.length <= rowLimit) return rows;
+		if (rowLimit === 1) {
+			const firstItem = FLOW_KEY_ITEMS[0];
+			const firstSegment = firstItem ? this.#flowKeyItemText(firstItem) : theme.fg("dim", "keys");
+			return [this.#fitToWidth(` ${firstSegment} ${theme.fg("dim", "· … ")}${theme.bold("/help")}`, width)];
+		}
+		return [...rows.slice(0, rowLimit - 1), ` ${theme.fg("dim", `… ${theme.bold("/help")} for more`)}`];
+	}
+
+	#flowKeyRowLimit(
+		targetContentRows: number | undefined,
+		changelogLineCount: number,
+		lspLineCount: number,
+		rightColumnWidth: number,
+	): number {
+		const preferredRows = this.#flowKeyRows(rightColumnWidth).length;
+		if (targetContentRows === undefined) return preferredRows;
+
+		const sessionBaselineRows = this.recentSessions.length === 0 ? 1 : Math.min(3, this.recentSessions.length);
+		const availableRows =
+			targetContentRows -
+			WELCOME_STATIC_RIGHT_ROWS_EXCLUDING_DYNAMIC_SECTIONS -
+			changelogLineCount -
+			lspLineCount -
+			sessionBaselineRows;
+		return Math.max(1, Math.min(preferredRows, availableRows));
+	}
+
+	#whatsNewRowLimit(targetContentRows: number | undefined, lspLineCount: number, flowLineCount: number): number {
+		if (targetContentRows === undefined) return 5;
+
+		const sessionBaselineRows = this.recentSessions.length === 0 ? 1 : Math.min(3, this.recentSessions.length);
+		const dynamicRows = Math.max(
+			1,
+			targetContentRows - WELCOME_STATIC_RIGHT_ROWS_EXCLUDING_DYNAMIC_SECTIONS - flowLineCount - lspLineCount,
+		);
+		const rowsAfterBaselineSessions = Math.max(1, dynamicRows - sessionBaselineRows);
+		const spareRows = Math.max(0, rowsAfterBaselineSessions - DEFAULT_WHATS_NEW_ROWS);
+		return Math.max(
+			1,
+			Math.min(MAX_WHATS_NEW_ROWS, rowsAfterBaselineSessions, DEFAULT_WHATS_NEW_ROWS + Math.floor(spareRows / 2)),
+		);
+	}
+
+	#sessionTrailLimit(
+		targetContentRows: number | undefined,
+		changelogLineCount: number,
+		lspLineCount: number,
+		flowLineCount: number,
+	): number {
+		if (this.recentSessions.length === 0) return 0;
+
+		const defaultLimit = Math.min(3, this.recentSessions.length);
+		if (targetContentRows === undefined) return defaultLimit;
+
+		const rowsWithDefaultTrail =
+			WELCOME_STATIC_RIGHT_ROWS_EXCLUDING_DYNAMIC_SECTIONS +
+			changelogLineCount +
+			flowLineCount +
+			lspLineCount +
+			defaultLimit;
+		const extraRows = Math.max(0, targetContentRows - rowsWithDefaultTrail);
+		return Math.min(this.recentSessions.length, defaultLimit + extraRows);
+	}
+
+	#sessionTrailLines(rightColumnWidth: number, limit: number): string[] {
+		if (this.recentSessions.length === 0) {
+			return [` ${theme.fg("dim", t("welcome.noSessions"))}`];
+		}
+
+		const bulletPrefix = ` ${theme.md.bullet} `;
+		const prefixWidth = visibleWidth(bulletPrefix);
+		const lines: string[] = [];
+		for (const session of this.recentSessions.slice(0, limit)) {
+			const timeSuffixRaw = ` (${session.timeAgo})`;
+			const timeWidth = visibleWidth(timeSuffixRaw);
+			const nameBudget = Math.max(1, rightColumnWidth - prefixWidth - timeWidth);
+			const nameVis = visibleWidth(session.name);
+			const name = nameVis > nameBudget ? truncateToWidth(session.name, nameBudget) : session.name;
+			lines.push(`${theme.fg("dim", bulletPrefix)}${theme.fg("muted", name)}${theme.fg("dim", timeSuffixRaw)}`);
+		}
+		return lines;
+	}
+
+	#whatsNewLines(width: number, maxRows: number): string[] {
+		const rowLimit = Math.max(1, Math.floor(maxRows));
 		const changelog = this.options.changelogMarkdown?.trim();
 		if (!changelog) {
 			return [` ${theme.fg("dim", "Ready for your next prompt")}`];
@@ -348,25 +486,25 @@ export class WelcomeComponent implements Component {
 			return [
 				` ${theme.fg("muted", `Updated to v${version}`)}`,
 				` ${theme.fg("dim", `Use ${theme.bold("/changelog")} for details`)}`,
-			];
+			].slice(0, rowLimit);
 		}
 
-		const itemLimit = Math.max(1, Math.floor(maxItems));
 		const items = this.#changelogItems(changelog);
 		if (items.length === 0) {
 			return [
 				` ${theme.fg("muted", `Updated to v${version}`)}`,
 				` ${theme.fg("dim", `Use ${theme.bold("/changelog")} for details`)}`,
-			];
+			].slice(0, rowLimit);
 		}
 
 		const prefix = ` ${theme.md.bullet} `;
 		const textWidth = Math.max(1, width - visibleWidth(prefix));
-		const visibleItems = items.slice(0, itemLimit).map(item => {
+		const visibleItemCount = items.length > rowLimit ? Math.max(1, rowLimit - 1) : rowLimit;
+		const visibleItems = items.slice(0, visibleItemCount).map(item => {
 			const text = visibleWidth(item) > textWidth ? truncateToWidth(item, textWidth) : item;
 			return `${theme.fg("dim", prefix)}${theme.fg("muted", text)}`;
 		});
-		if (items.length > visibleItems.length) {
+		if (items.length > visibleItems.length && visibleItems.length < rowLimit) {
 			visibleItems.push(` ${theme.fg("dim", `… ${theme.bold("/changelog")} for full notes`)}`);
 		}
 		return visibleItems;
@@ -469,7 +607,6 @@ interface ShineConfig {
 	/** Center of the shine band along the diagonal, in [0, 1]. */
 	pos: number;
 }
-
 /**
  * Apply a multi-stop diagonal gradient (bottom-left → top-right) plus an
  * optional sliding shine band across multi-line art. `phase` (0..1) shifts the

@@ -1,5 +1,9 @@
 import { describe, expect, it } from "bun:test";
-import type { AutocompleteItem, AutocompleteProvider } from "@sayknow-cli/tui/autocomplete";
+import {
+	type AutocompleteItem,
+	type AutocompleteProvider,
+	CombinedAutocompleteProvider,
+} from "@sayknow-cli/tui/autocomplete";
 import { Editor } from "@sayknow-cli/tui/components/editor";
 import { defaultEditorTheme } from "./test-themes";
 
@@ -145,26 +149,28 @@ class InlineSkillProvider implements AutocompleteProvider {
 	suggestionCalls = 0;
 }
 describe("Editor Enter handler sync slash completion", () => {
-	it("does not auto-trigger slash autocomplete from a bare slash after prior prompt text", async () => {
-		let suggestionCalls = 0;
+	it("auto-triggers slash command autocomplete from an inline slash after prompt text", async () => {
 		const editor = new Editor(defaultEditorTheme);
-		editor.setAutocompleteProvider({
-			async getSuggestions(lines, cursorLine, cursorCol) {
-				suggestionCalls += 1;
-				const currentLine = lines[cursorLine] ?? "";
-				return { prefix: currentLine.slice(0, cursorCol), items: [{ value: "model", label: "/model" }] };
-			},
-			applyCompletion(lines, cursorLine, cursorCol) {
-				return { lines, cursorLine, cursorCol };
-			},
-		});
+		editor.setAutocompleteProvider(
+			new CombinedAutocompleteProvider([{ name: "model", description: "Switch model", value: "model" }], "/tmp"),
+		);
 
-		editor.setText("explain this\n");
-		editor.handleInput("/");
+		editor.handleInput("explain this/");
 		await Bun.sleep(0);
 
-		expect(suggestionCalls).toBe(0);
-		expect(editor.isShowingAutocomplete()).toBe(false);
+		expect(editor.isShowingAutocomplete()).toBe(true);
+	});
+
+	it("auto-triggers slash command autocomplete from an adjacent slash after prompt text", async () => {
+		const editor = new Editor(defaultEditorTheme);
+		editor.setAutocompleteProvider(
+			new CombinedAutocompleteProvider([{ name: "help", description: "Learn commands", value: "help" }], "/tmp"),
+		);
+
+		editor.handleInput("explain this/");
+		await Bun.sleep(0);
+
+		expect(editor.isShowingAutocomplete()).toBe(true);
 	});
 
 	it("auto-triggers inline slash skill autocomplete after prompt text", async () => {

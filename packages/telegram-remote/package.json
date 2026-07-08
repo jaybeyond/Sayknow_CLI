@@ -12,9 +12,6 @@
 		"directory": "packages/telegram-remote"
 	},
 	"main": "./src/index.ts",
-	"bin": {
-		"skc-telegram-remote": "./src/cli.ts"
-	},
 	"scripts": {
 		"check": "biome check . && bun run check:types",
 		"check:types": "tsgo -p tsconfig.json --noEmit",

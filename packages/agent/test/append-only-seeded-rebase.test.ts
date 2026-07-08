@@ -24,7 +24,7 @@ describe("AppendOnlyContextManager seeded-fork rebase (W4 / F9)", () => {
 		expect(() => mgr.syncMessages([...seed, msg("c1")])).not.toThrow();
 		expect(contents(mgr)).toEqual(["s1", "s2", "c1"]);
 
-		// After rebase the seed binding is gone; further syncs behave as a normal baseline.
+		// After rebase the inherited seed remains active, and explicit seed input is not duplicated.
 		mgr.syncMessages([...seed, msg("c1"), msg("c4", "assistant")]);
 		expect(contents(mgr)).toEqual(["s1", "s2", "c1", "c4"]);
 	});
@@ -46,5 +46,47 @@ describe("AppendOnlyContextManager seeded-fork rebase (W4 / F9)", () => {
 		mgr.syncMessages([...seed, msg("a", "assistant")]);
 		mgr.syncMessages([...seed, msg("a", "assistant"), msg("b")]);
 		expect(contents(mgr)).toEqual(["s1", "a", "b"]);
+	});
+
+	it("preserves inherited seed when compacted child context omits the seed prefix", () => {
+		const seed = [msg("s1"), msg("s2", "assistant")];
+		const mgr = AppendOnlyContextManager.forkFromSeed({ messages: seed, options: BUILD_OPTS });
+		mgr.syncMessages([...seed, msg("c1"), msg("c2", "assistant"), msg("c3")]);
+
+		// Real forked task sessions can compact child-local entries without persisting
+		// the inherited seed as session messages. The manager must rebase to the
+		// synthetic seed + compacted child context, not the seedless normalized input.
+		expect(() => mgr.syncMessages([msg("child-summary"), msg("c3")])).not.toThrow();
+		expect(contents(mgr)).toEqual(["s1", "s2", "child-summary", "c3"]);
+	});
+
+	it("preserves inherited seed across successive seedless child compactions", () => {
+		const seed = [msg("s1"), msg("s2", "assistant")];
+		const mgr = AppendOnlyContextManager.forkFromSeed({ messages: seed, options: BUILD_OPTS });
+		mgr.syncMessages([...seed, msg("c1"), msg("c2", "assistant"), msg("c3")]);
+
+		expect(() => mgr.syncMessages([msg("child-summary-1"), msg("c3")])).not.toThrow();
+		expect(contents(mgr)).toEqual(["s1", "s2", "child-summary-1", "c3"]);
+
+		expect(() => mgr.syncMessages([msg("child-summary-2")])).not.toThrow();
+		expect(contents(mgr)).toEqual(["s1", "s2", "child-summary-2"]);
+	});
+
+	it("does not duplicate inherited seed when compacted child context includes the seed prefix", () => {
+		const seed = [msg("s1"), msg("s2", "assistant")];
+		const mgr = AppendOnlyContextManager.forkFromSeed({ messages: seed, options: BUILD_OPTS });
+		mgr.syncMessages([...seed, msg("c1"), msg("c2", "assistant")]);
+
+		expect(() => mgr.syncMessages([...seed, msg("child-summary")])).not.toThrow();
+		expect(contents(mgr)).toEqual(["s1", "s2", "child-summary"]);
+	});
+
+	it("keeps ordinary no-seed compaction behavior unchanged", () => {
+		const mgr = new AppendOnlyContextManager();
+		mgr.syncMessages([msg("a"), msg("b", "assistant"), msg("c")]);
+		expect(contents(mgr)).toEqual(["a", "b", "c"]);
+
+		expect(() => mgr.syncMessages([msg("summary")])).not.toThrow();
+		expect(contents(mgr)).toEqual(["summary"]);
 	});
 });

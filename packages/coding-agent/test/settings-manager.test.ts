@@ -212,6 +212,30 @@ describe("Settings", () => {
 
 			expect(settings.getModelRole("default")).toBe("anthropic/claude-opus-4-5");
 		});
+
+		it("keeps live agent model overrides aligned without persisting profile entries", () => {
+			const settings = Settings.isolated();
+
+			settings.set("task.agentModelOverrides", { executor: "persisted/executor" });
+			settings.override("task.agentModelOverrides", {
+				executor: "profile/executor",
+				planner: "profile/planner",
+			});
+
+			settings.setAgentModelOverride("planner", "user/planner:high");
+
+			expect(settings.get("task.agentModelOverrides")).toEqual({
+				executor: "profile/executor",
+				planner: "user/planner:high",
+			});
+
+			settings.clearOverride("task.agentModelOverrides");
+
+			expect(settings.get("task.agentModelOverrides")).toEqual({
+				executor: "persisted/executor",
+				planner: "user/planner:high",
+			});
+		});
 	});
 
 	describe("migrations", () => {
@@ -318,6 +342,25 @@ describe("Settings", () => {
 
 			settings = await Settings.init({ cwd: projectDir, agentDir });
 			expect(settings.get("theme.light")).toBe("light");
+		});
+	});
+
+	describe("below-threshold maintenance pruning defaults (Finding 13)", () => {
+		it("keeps maintenance pruning off by default (evidence-gated) with a high min-savings floor", () => {
+			const settings = Settings.isolated();
+			const compaction = settings.getGroup("compaction");
+			expect(compaction.maintenancePruningEnabled).toBe(false);
+			expect(compaction.maintenancePruningMinSavingsTokens).toBe(8000);
+		});
+
+		it("exposes the opt-in override through getGroup", () => {
+			const settings = Settings.isolated({
+				"compaction.maintenancePruningEnabled": true,
+				"compaction.maintenancePruningMinSavingsTokens": 12000,
+			});
+			const compaction = settings.getGroup("compaction");
+			expect(compaction.maintenancePruningEnabled).toBe(true);
+			expect(compaction.maintenancePruningMinSavingsTokens).toBe(12000);
 		});
 	});
 });

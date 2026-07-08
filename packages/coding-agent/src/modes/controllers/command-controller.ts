@@ -13,6 +13,7 @@ import {
 import { Loader, Markdown, padding, Spacer, Text, visibleWidth } from "@sayknow-cli/tui";
 import { formatDuration, Snowflake, setProjectDir } from "@sayknow-cli/utils";
 import { $ } from "bun";
+import { resolveAppendOnlyMode } from "../../append-only-mode";
 import { jobElapsedMs } from "../../async";
 import { reset as resetCapabilities } from "../../capability";
 import { clearClaudePluginRootsCache } from "../../discovery/helpers";
@@ -400,7 +401,7 @@ export class CommandController {
 		{
 			const setting = this.ctx.settings.get("provider.appendOnlyContext") ?? "auto";
 			const provider = this.ctx.session.model?.provider;
-			const mode = setting === "on" ? true : setting === "off" ? false : provider === "deepseek";
+			const mode = resolveAppendOnlyMode(setting, provider ?? "");
 			const activeLabel = mode ? theme.fg("success", "active") : theme.fg("dim", "inactive");
 			const settingLabel = setting === "auto" ? `${setting} (${provider ?? "?"})` : setting;
 			info += `${theme.fg("dim", "Append-Only:")} ${activeLabel} (setting: ${settingLabel})\n`;
@@ -540,7 +541,7 @@ export class CommandController {
 		const title = showFull ? "Full Changelog" : "Recent Changes";
 		const hint = showFull
 			? ""
-			: `\n\n${theme.fg("dim", "Use")} ${theme.bold("/changelog full")} ${theme.fg("dim", "to view the complete changelog.")}`;
+			: `\n\n${theme.fg("dim", "Use")} ${theme.bold("/changelog --full")} ${theme.fg("dim", "to view the complete changelog.")}`;
 
 		this.ctx.chatContainer.addChild(new Spacer(1));
 		this.ctx.chatContainer.addChild(new DynamicBorder());
@@ -926,14 +927,49 @@ export class CommandController {
 		this.ctx.streamingMessage = undefined;
 		this.ctx.pendingTools.clear();
 
-		this.ctx.chatContainer.addChild(new Spacer(1));
-		this.ctx.chatContainer.addChild(new Text(`${theme.fg("accent", `${theme.status.success} ${label}`)}`, 1, 1));
+		this.ctx.chatContainer.addChild(new Text(`${theme.fg("accent", `${theme.status.success} ${label}`)}`, 1, 0));
 		await this.ctx.reloadTodos();
 		this.ctx.ui.requestRender();
 	}
 
 	async handleClearCommand(): Promise<void> {
 		await this.#runNewSessionFlow();
+	}
+
+	async handleContextClearCommand(): Promise<void> {
+		if (this.ctx.loadingAnimation) {
+			this.ctx.loadingAnimation.stop();
+			this.ctx.loadingAnimation = undefined;
+		}
+		this.ctx.statusContainer.clear();
+
+		if (this.ctx.session.isCompacting) {
+			this.ctx.session.abortCompaction();
+			while (this.ctx.session.isCompacting) {
+				await Bun.sleep(10);
+			}
+		}
+		if (!(await this.ctx.session.clearContext())) return;
+		setSessionTerminalTitle(this.ctx.sessionManager.getSessionName(), this.ctx.sessionManager.getCwd());
+
+		this.ctx.statusLine.invalidate();
+		this.ctx.statusLine.setSessionStartTime(Date.now());
+		this.ctx.updateEditorTopBorder();
+		this.ctx.updateEditorBorderColor();
+		this.ctx.ui.requestRender();
+
+		this.ctx.chatContainer.clear();
+		this.ctx.pendingMessagesContainer.clear();
+		this.ctx.compactionQueuedMessages = [];
+		this.ctx.streamingComponent = undefined;
+		this.ctx.streamingMessage = undefined;
+		this.ctx.pendingTools.clear();
+
+		this.ctx.chatContainer.addChild(
+			new Text(`${theme.fg("accent", `${theme.status.success} Context cleared`)}`, 1, 0),
+		);
+		await this.ctx.reloadTodos();
+		this.ctx.ui.requestRender();
 	}
 
 	async handleDropCommand(): Promise<void> {

@@ -230,9 +230,13 @@ async function checkpoint(root: string, qa: Record<string, unknown>): Promise<st
 	return (result.stderr ?? "") + (result.stdout ?? "");
 }
 
-async function seedComputerChange(root: string, file = "crates/pi-natives/src/computer/executor.rs"): Promise<void> {
+async function seedComputerChange(
+	root: string,
+	file = "crates/pi-natives/src/computer/executor.rs",
+	content = "// computer change\n",
+): Promise<void> {
 	await fs.mkdir(path.dirname(path.join(root, file)), { recursive: true });
-	await fs.writeFile(path.join(root, file), "// computer change\n");
+	await fs.writeFile(path.join(root, file), content);
 	await runGit(root, ["add", file]);
 }
 
@@ -324,6 +328,48 @@ describe("computer red-team fixture matrix", () => {
 		expect(await checkpoint(root, qa)).toContain("Checkpointed G001 as complete");
 	});
 
+	it("does not trigger from non-computer edit to tools index registration", async () => {
+		const root = await tempDir();
+		await initRepo(root);
+		await seedPlan(root);
+		await writeQaArtifacts(root);
+		await seedComputerChange(root, "packages/coding-agent/src/tools/index.ts");
+		const cases = (executorQa().adversarialCases as Record<string, unknown>[]).filter(
+			row => row.id !== "blast-radius",
+		);
+		const qa = executorQa({ computerTouching: false, cases, surface: "native" });
+		expect(await checkpoint(root, qa)).toContain("Checkpointed G001 as complete");
+	});
+
+	it("triggers from computer-specific tools index registration diff", async () => {
+		const root = await tempDir();
+		await initRepo(root);
+		await seedPlan(root);
+		await writeQaArtifacts(root);
+		await seedComputerChange(
+			root,
+			"packages/coding-agent/src/tools/index.ts",
+			`import { ComputerTool, isComputerCallable, isComputerLoadablePlatform } from "./computer";
+
+export const BUILTIN_TOOLS = {
+	...(isComputerLoadablePlatform() ? { computer: ComputerTool.createIf } : {}),
+};
+
+export function isToolAllowed(name: string): boolean {
+	if (name === "computer") return isComputerCallable({});
+	return true;
+}
+`,
+		);
+		const cases = (executorQa().adversarialCases as Record<string, unknown>[]).filter(
+			row => row.id !== "blast-radius",
+		);
+		const message = await checkpoint(root, executorQa({ computerTouching: false, cases })).catch(error =>
+			String(error),
+		);
+		expect(message).toContain("COMPUTER_REDTEAM_CASE_MISSING");
+	});
+
 	it("allows non-operational docs-only computer tiering", async () => {
 		const root = await tempDir();
 		await initRepo(root);
@@ -332,5 +378,41 @@ describe("computer red-team fixture matrix", () => {
 		await seedComputerChange(root, "docs/computer-use/README.md");
 		const qa = executorQa({ computerTouching: false, surface: "native" });
 		expect(await checkpoint(root, qa)).toContain("Checkpointed G001 as complete");
+	});
+
+	it("does not trigger from a non-computer settings-schema edit", async () => {
+		const root = await tempDir();
+		await initRepo(root);
+		await seedPlan(root);
+		await writeQaArtifacts(root);
+		await seedComputerChange(
+			root,
+			"packages/coding-agent/src/config/settings-schema.ts",
+			`export const SETTINGS = {\n\t"tools.maxInlineResultBytes": { type: "number", default: 0 },\n};\n`,
+		);
+		const cases = (executorQa().adversarialCases as Record<string, unknown>[]).filter(
+			row => row.id !== "blast-radius",
+		);
+		const qa = executorQa({ computerTouching: false, cases, surface: "native" });
+		expect(await checkpoint(root, qa)).toContain("Checkpointed G001 as complete");
+	});
+
+	it("triggers from a computer-specific settings-schema diff", async () => {
+		const root = await tempDir();
+		await initRepo(root);
+		await seedPlan(root);
+		await writeQaArtifacts(root);
+		await seedComputerChange(
+			root,
+			"packages/coding-agent/src/config/settings-schema.ts",
+			`export const SETTINGS = {\n\t"computer.enabled": { type: "boolean", default: false },\n};\n`,
+		);
+		const cases = (executorQa().adversarialCases as Record<string, unknown>[]).filter(
+			row => row.id !== "blast-radius",
+		);
+		const message = await checkpoint(root, executorQa({ computerTouching: false, cases })).catch(error =>
+			String(error),
+		);
+		expect(message).toContain("COMPUTER_REDTEAM_CASE_MISSING");
 	});
 });

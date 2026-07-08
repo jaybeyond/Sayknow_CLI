@@ -9,6 +9,9 @@ import deepInterviewSkill from "./skc/skills/deep-interview/SKILL.md" with { typ
 import ralplanSkill from "./skc/skills/ralplan/SKILL.md" with { type: "text" };
 import teamSkill from "./skc/skills/team/SKILL.md" with { type: "text" };
 import aiSlopCleanerFragment from "./skc/skills/ultragoal/ai-slop-cleaner.md" with { type: "text" };
+import pipelineValidationContractsFragment from "./skc/skills/ultragoal/pipeline-validation-contracts.md" with {
+	type: "text",
+};
 import ultragoalSkill from "./skc/skills/ultragoal/SKILL.md" with { type: "text" };
 
 export const DEFAULT_SKC_DEFINITION_NAMES = ["deep-interview", "ralplan", "team", "ultragoal"] as const;
@@ -112,6 +115,12 @@ const DEFAULT_SKC_DEFINITIONS: readonly DefaultSkcDefinition[] = [
 		parentSkillName: "ultragoal",
 		relativePath: "skill-fragments/ultragoal/ai-slop-cleaner.md",
 		content: aiSlopCleanerFragment,
+	},
+	{
+		kind: "skill-fragment",
+		parentSkillName: "ultragoal",
+		relativePath: "skill-fragments/ultragoal/pipeline-validation-contracts.md",
+		content: pipelineValidationContractsFragment,
 	},
 ];
 

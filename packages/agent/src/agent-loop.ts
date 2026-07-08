@@ -342,9 +342,136 @@ export function normalizeMessagesForProvider(
 	return changed ? normalized : messages;
 }
 
+interface ConvertedContextCacheEntry {
+	messageHashes: string[];
+	modelKey: string;
+	toolKey: string;
+	intentTracing: boolean;
+	convertToLlm: AgentLoopConfig["convertToLlm"];
+	transformContext: AgentLoopConfig["transformContext"];
+	llmMessages: Context["messages"];
+	normalizedMessages: Context["messages"];
+}
+
+const convertedContextCache = new WeakMap<AgentLoopConfig, ConvertedContextCacheEntry>();
+
+function stableCacheString(value: unknown): string | undefined {
+	try {
+		return JSON.stringify(value, (_key, item) =>
+			typeof item === "function" ? `[Function:${item.name || "anonymous"}]` : item,
+		);
+	} catch {
+		return undefined;
+	}
+}
+
+/**
+ * Hash a message by full content serialization.
+ *
+ * Deliberately NOT memoized by object identity: callers mutate messages in
+ * place (compaction rewrites, obfuscation, abort markers) and the cache's
+ * correctness contract requires detecting those mutations. The per-turn
+ * serialization cost is the price of that contract; the win is skipping
+ * convertToLlm + normalize on stable contexts, which dominates for
+ * image-heavy histories.
+ */
+function hashMessageContent(message: AgentMessage): string | undefined {
+	return stableCacheString(message);
+}
+
+function buildConvertedContextCacheKeys(
+	messages: AgentMessage[],
+	context: AgentContext,
+	config: AgentLoopConfig,
+): Pick<ConvertedContextCacheEntry, "messageHashes" | "modelKey" | "toolKey" | "intentTracing"> | undefined {
+	const intentTracing = !!config.intentTracing;
+	const messageHashes = messages.map(hashMessageContent);
+	const modelKey = stableCacheString(config.model);
+	const toolKey = stableCacheString(normalizeTools(context.tools, intentTracing) ?? []);
+	if (messageHashes.some(hash => hash === undefined) || modelKey === undefined || toolKey === undefined) {
+		return undefined;
+	}
+	return {
+		messageHashes: messageHashes as string[],
+		modelKey,
+		toolKey,
+		intentTracing,
+	};
+}
+
+function findStablePrefixLength(previous: string[], next: string[]): number {
+	const max = Math.min(previous.length, next.length);
+	let index = 0;
+	while (index < max && previous[index] === next[index]) index++;
+	return index;
+}
+
+async function convertAndNormalizeMessages(
+	messages: AgentMessage[],
+	context: AgentContext,
+	config: AgentLoopConfig,
+): Promise<Context["messages"]> {
+	const keys = buildConvertedContextCacheKeys(messages, context, config);
+	if (!keys) {
+		return normalizeMessagesForProvider(await config.convertToLlm(messages), config.model);
+	}
+	const previous = convertedContextCache.get(config);
+	const canReuse =
+		previous &&
+		previous.convertToLlm === config.convertToLlm &&
+		previous.transformContext === config.transformContext &&
+		previous.modelKey === keys.modelKey &&
+		previous.toolKey === keys.toolKey &&
+		previous.intentTracing === keys.intentTracing;
+
+	if (canReuse) {
+		const stablePrefixLength = findStablePrefixLength(previous.messageHashes, keys.messageHashes);
+		if (stablePrefixLength === keys.messageHashes.length && stablePrefixLength === previous.messageHashes.length) {
+			return previous.normalizedMessages;
+		}
+		// Append-only fast path: convert only the new suffix and concatenate.
+		// CONTRACT: `convertToLlm` must be per-message (each output message
+		// derived solely from its input message). The bundled converters
+		// satisfy this — they map/filter message-by-message. A converter that
+		// merges adjacent messages or pairs across the suffix boundary would
+		// diverge from a full rebuild; such converters must not be combined
+		// with appendOnlyContext. Covered by the suffix-equivalence test in
+		// agent-loop-context-cache.test.ts.
+		if (
+			config.appendOnlyContext &&
+			stablePrefixLength === previous.messageHashes.length &&
+			keys.messageHashes.length > previous.messageHashes.length
+		) {
+			const suffix = messages.slice(stablePrefixLength);
+			const convertedSuffix = await config.convertToLlm(suffix);
+			const llmMessages = [...previous.llmMessages, ...convertedSuffix];
+			const normalizedMessages = normalizeMessagesForProvider(llmMessages, config.model);
+			convertedContextCache.set(config, {
+				...keys,
+				convertToLlm: config.convertToLlm,
+				transformContext: config.transformContext,
+				llmMessages,
+				normalizedMessages,
+			});
+			return normalizedMessages;
+		}
+	}
+
+	const llmMessages = await config.convertToLlm(messages);
+	const normalizedMessages = normalizeMessagesForProvider(llmMessages, config.model);
+	convertedContextCache.set(config, {
+		...keys,
+		convertToLlm: config.convertToLlm,
+		transformContext: config.transformContext,
+		llmMessages,
+		normalizedMessages,
+	});
+	return normalizedMessages;
+}
+
 export const INTENT_FIELD = "_i";
 
-function injectIntentIntoSchema(schema: unknown, mode: "require" | "optional" = "require"): unknown {
+function injectIntentIntoSchema(schema: unknown, mode: "require" | "optional" = "optional"): unknown {
 	if (!schema || typeof schema !== "object" || Array.isArray(schema)) return schema;
 	const schemaRecord = schema as Record<string, unknown>;
 	const propertiesValue = schemaRecord.properties;
@@ -400,7 +527,7 @@ export function normalizeTools(tools: AgentContext["tools"], injectIntent: boole
 function resolveIntentMode(intent: AgentTool["intent"]): "require" | "optional" | "omit" {
 	if (typeof intent === "function") return "omit";
 	if (intent === "optional" || intent === "omit") return intent;
-	return "require";
+	return intent === "require" ? "require" : "optional";
 }
 
 function extractIntent(args: Record<string, unknown>): { intent?: string; strippedArgs: Record<string, unknown> } {
@@ -711,9 +838,9 @@ async function streamAssistantResponse(
 		messages = await config.transformContext(messages, signal);
 	}
 
-	// Convert to LLM-compatible messages (AgentMessage[] → Message[])
-	const llmMessages = await config.convertToLlm(messages);
-	const normalizedMessages = normalizeMessagesForProvider(llmMessages, config.model);
+	// Convert to LLM-compatible messages (AgentMessage[] → Message[]) and normalize at the LLM boundary.
+	// Cache hits are keyed by provider-visible content hashes, never message object identity.
+	const normalizedMessages = await convertAndNormalizeMessages(messages, context, config);
 
 	// Build LLM context — append-only mode caches system prompt + tools
 	// AND keeps an append-only message log so prior-turn bytes are stable.

@@ -1,0 +1,15 @@
+--- a/packages/tui/src/components/editor.ts
++++ b/packages/tui/src/components/editor.ts
+@@ -935,7 +935,11 @@
+ 			let hasCursor = layoutLine.hasCursor && layoutLine.cursorPos !== undefined;
+ 			const marker = emitCursorMarker ? CURSOR_MARKER : "";
+ 
+-			if (showPlaceholder) {
++			// When focused, fall through to the cursor-draw logic below: it already
++			// renders the caret followed by the placeholder as ghost text, so the
++			// blinking cursor shows immediately on focus (not only after typing).
++			// When NOT focused, show the placeholder alone with no caret.
++			if (showPlaceholder && !this.focused) {
+ 				const hintText = hintStyle(truncateToWidth(this.#placeholder ?? "", lineContentWidth));
+ 				// Anchor the hardware cursor at the input start (terminal-cursor mode) even
+ 				// while the placeholder shows. Otherwise no cursor marker is emitted, the

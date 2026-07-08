@@ -1,13 +1,29 @@
 # SKC dogfood local skill template
 
-Issue #93 requested a gaebal-sayknow/operator dogfood skill. The live issue has no comment approving a fifth bundled default workflow skill, so this stays a local template instead of changing the default workflow surface. Operators can copy it into a user or project override when they want SKC-first session guidance:
+Issue #93 requested a gaebal-sayknow/operator dogfood skill. The live issue has no comment approving a fifth bundled default workflow skill, so this stays a local template instead of changing the default workflow surface. Operators can copy it into a user or project override when they want SKC-first session guidance.
+
+The installable skill body is everything from the first frontmatter marker down; the frontmatter must be the **first line** of the installed file or the skill scan silently skips it (the scan requires a parsed `description`). Install into the user-level scan location (`~/.skc/agent/skills/`, not `~/.skc/skills/`):
 
 ```sh
-mkdir -p ~/.skc/skills/skc-dogfood
-cp docs/skc-dogfood-skill-template.md ~/.skc/skills/skc-dogfood/SKILL.md
+mkdir -p ~/.skc/agent/skills/skc-dogfood
+sed -n '/^---$/,$p' docs/skc-dogfood-skill-template.md > ~/.skc/agent/skills/skc-dogfood/SKILL.md
 ```
 
-For a single project, copy it to `<project>/.skc/skills/skc-dogfood/SKILL.md` instead. Do not commit that project `.skc` copy unless the project explicitly wants a local override.
+For a single project, install to `<project>/.skc/skills/skc-dogfood/SKILL.md` with the same extraction. Do not commit that project `.skc` copy unless the project explicitly wants a local override.
+
+Filesystem skill discovery is off by default, so enable it once. Set `skills.enabled`, then enable **only the scan that matches where you installed** — `enablePiUser` and `enablePiProject` default to `false` in `DEFAULT_SKILL_DISCOVERY_SETTINGS`, and enabling the project scan opts every future session into repo-local `.skc/skills` discovery, so do not enable it for a user-only install:
+
+```sh
+skc config set skills.enabled true
+
+# for the user-level install (~/.skc/agent/skills/):
+skc config set skills.enablePiUser true
+
+# OR, for the project-level install (<project>/.skc/skills/):
+skc config set skills.enablePiProject true
+```
+
+Then verify in a new session: `/skill:skc-dogfood` should autocomplete.
 
 ---
 name: skc-dogfood

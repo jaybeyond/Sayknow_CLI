@@ -1,3 +1,4 @@
+import { sanitizeText } from "@sayknow-cli/utils";
 import type { SkcModelAssignmentTargetId } from "./model-registry";
 import type { ModelsConfig } from "./models-config-schema";
 
@@ -98,10 +99,17 @@ export const BUILTIN_MODEL_PROFILES: readonly ModelProfileDefinition[] = [
 	}),
 	profile("claude-opus", ["anthropic"], {
 		default: "anthropic/claude-opus-4-8:xhigh",
-		executor: "anthropic/claude-sonnet-4-6",
+		executor: "anthropic/claude-sonnet-5",
 		planner: "anthropic/claude-opus-4-8:low",
 		critic: "anthropic/claude-opus-4-8:high",
 		architect: "anthropic/claude-opus-4-8:xhigh",
+	}),
+	profile("claude-fable", ["anthropic"], {
+		default: "anthropic/claude-fable-5:xhigh",
+		executor: "anthropic/claude-sonnet-5",
+		planner: "anthropic/claude-fable-5:low",
+		critic: "anthropic/claude-fable-5:high",
+		architect: "anthropic/claude-fable-5:xhigh",
 	}),
 	profile("glm-eco", ["zai"], {
 		default: "zai/glm-5.2:low",
@@ -260,11 +268,22 @@ export const BUILTIN_MODEL_PROFILES: readonly ModelProfileDefinition[] = [
 		critic: "opencode-go/mimo-v2.5-pro",
 		architect: "openai-codex/gpt-5.5:xhigh",
 	}),
+	profile("fable-opus-codex", ["anthropic", "openai-codex"], {
+		default: "anthropic/claude-fable-5:high",
+		executor: "openai-codex/gpt-5.5:high",
+		planner: "anthropic/claude-opus-4-8:medium",
+		critic: "anthropic/claude-opus-4-8:high",
+		architect: "openai-codex/gpt-5.5:xhigh",
+	}),
 ];
 
 export interface ModelProfilePresentation {
 	displayName: string;
 	providerGroup: string;
+}
+
+function sanitizeModelProfileLabel(value: string): string {
+	return sanitizeText(value).replace(/\s+/g, " ").trim();
 }
 
 const PROFILE_PRESENTATION: Record<string, ModelProfilePresentation> = {
@@ -273,6 +292,7 @@ const PROFILE_PRESENTATION: Record<string, ModelProfilePresentation> = {
 	"codex-pro": { displayName: "Codex Pro", providerGroup: "CODEX" },
 	opencodego: { displayName: "OpenCodeGo", providerGroup: "OPENCODEGO" },
 	"claude-opus": { displayName: "Claude Opus", providerGroup: "CLAUDE" },
+	"claude-fable": { displayName: "Claude Fable", providerGroup: "CLAUDE" },
 	"glm-eco": { displayName: "GLM Eco", providerGroup: "GLM" },
 	"glm-medium": { displayName: "GLM Medium", providerGroup: "GLM" },
 	"glm-pro": { displayName: "GLM Pro", providerGroup: "GLM" },
@@ -294,6 +314,7 @@ const PROFILE_PRESENTATION: Record<string, ModelProfilePresentation> = {
 	"minimax-pro": { displayName: "MiniMax Pro", providerGroup: "MINIMAX" },
 	"opus-codex": { displayName: "Opus + Codex", providerGroup: "COMBOS" },
 	"codex-opencodego": { displayName: "Codex + OpenCodeGo", providerGroup: "COMBOS" },
+	"fable-opus-codex": { displayName: "Fable + Opus + Codex", providerGroup: "COMBOS" },
 };
 
 const PROFILE_GROUP_ORDER = [
@@ -332,7 +353,15 @@ export function getModelProfilePresentation(
 	const displayName = typeof profile === "string" ? undefined : profile.displayName;
 	const presentation = PROFILE_PRESENTATION[name];
 	if (presentation) return presentation;
-	return { displayName: displayName ?? name, providerGroup: "CUSTOM" };
+	return { displayName: formatModelProfileDisplayLabel({ name, displayName }), providerGroup: "CUSTOM" };
+}
+
+export function formatModelProfileDisplayLabel(profile: Pick<ModelProfileDefinition, "name" | "displayName">): string {
+	return (
+		sanitizeModelProfileLabel(profile.displayName ?? profile.name) ||
+		sanitizeModelProfileLabel(profile.name) ||
+		"Unnamed profile"
+	);
 }
 
 export function groupModelProfilesForPresetLanding(

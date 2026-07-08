@@ -4,9 +4,13 @@ import type { OAuthProvider } from "@sayknow-cli/ai/utils/oauth/types";
 import type { Component, OverlayHandle } from "@sayknow-cli/tui";
 import { Input, Loader, Spacer, Text } from "@sayknow-cli/tui";
 import { getAgentDbPath, getProjectDir } from "@sayknow-cli/utils";
-import { activateModelProfile, materializeActiveModelProfileAssignment } from "../../config/model-profile-activation";
-import { recommendModelProfileForProvider } from "../../config/model-profiles";
-import { SKC_MODEL_ASSIGNMENT_TARGETS } from "../../config/model-registry";
+import {
+	activateModelProfile,
+	materializeActiveModelProfileAssignment,
+	materializeActiveModelProfileAssignments,
+} from "../../config/model-profile-activation";
+import { formatModelProfileDisplayLabel, recommendModelProfileForProvider } from "../../config/model-profiles";
+import { SKC_MODEL_ASSIGNMENT_TARGETS, type SkcModelAssignmentTargetId } from "../../config/model-registry";
 import { formatModelSelectorValue } from "../../config/model-resolver";
 import type { ModelProfileConfig } from "../../config/models-config-schema";
 import { type Settings, settings } from "../../config/settings";
@@ -332,6 +336,7 @@ export class SelectorController {
 						availableThinkingLevels: [...this.ctx.session.getAvailableThinkingLevels()],
 						thinkingLevel: this.ctx.session.thinkingLevel,
 						availableThemes,
+						availableModelProfiles: [...this.ctx.session.modelRegistry.getModelProfiles().keys()],
 						cwd: getProjectDir(),
 					},
 					{
@@ -528,6 +533,18 @@ export class SelectorController {
 				this.ctx.updateEditorBorderColor();
 				break;
 
+			case "modelProfile.default": {
+				// Applying the default profile live mirrors the /model preset flow so the
+				// running session switches immediately, not only on next startup.
+				const profileName = typeof value === "string" ? value : "";
+				if (!profileName) break;
+				this.#applyModelProfile(profileName, true)
+					.then(() => this.ctx.ui.requestRender())
+					.catch(error => {
+						this.ctx.showError(error instanceof Error ? error.message : String(error));
+					});
+				break;
+			}
 			case "clearOnShrink":
 				this.ctx.ui.setClearOnShrink(value as boolean);
 				break;
@@ -678,6 +695,29 @@ export class SelectorController {
 		}
 	}
 
+	/**
+	 * Activate a model profile through the shared /model + /settings path: swap the
+	 * live session model (and, when persistDefault, persist it as the startup
+	 * default) then refresh the status surfaces. Rethrows so callers surface errors.
+	 */
+	async #applyModelProfile(profileName: string, persistDefault: boolean): Promise<void> {
+		const profileLabel = formatModelProfileDisplayLabel(
+			this.ctx.session.modelRegistry.getModelProfile(profileName) ?? { name: profileName },
+		);
+		await activateModelProfile(
+			{
+				session: this.ctx.session,
+				modelRegistry: this.ctx.session.modelRegistry,
+				settings: this.ctx.settings,
+				profileName,
+			},
+			{ persistDefault },
+		);
+		this.ctx.statusLine.invalidate();
+		this.ctx.updateEditorBorderColor();
+		this.ctx.showStatus(persistDefault ? `Default model profile: ${profileLabel}` : `Model profile: ${profileLabel}`);
+	}
+
 	showModelSelector(options?: { temporaryOnly?: boolean }): void {
 		this.showSelector(done => {
 			let modelSelector: ModelSelectorComponent;
@@ -708,22 +748,7 @@ export class SelectorController {
 							return;
 						}
 						if (selection.kind === "profile") {
-							await activateModelProfile(
-								{
-									session: this.ctx.session,
-									modelRegistry: this.ctx.session.modelRegistry,
-									settings: this.ctx.settings,
-									profileName: selection.profileName,
-								},
-								{ persistDefault: selection.setDefault },
-							);
-							this.ctx.statusLine.invalidate();
-							this.ctx.updateEditorBorderColor();
-							this.ctx.showStatus(
-								selection.setDefault
-									? `Default model profile: ${selection.profileName}`
-									: `Model profile: ${selection.profileName}`,
-							);
+							await this.#applyModelProfile(selection.profileName, selection.setDefault);
 							done();
 							this.ctx.ui.requestRender();
 							return;
@@ -735,6 +760,79 @@ export class SelectorController {
 							this.ctx.statusLine.invalidate();
 							this.ctx.updateEditorBorderColor();
 							this.ctx.showStatus(`Temporary model: ${selectedSelector ?? model.id}`);
+							done();
+							this.ctx.ui.requestRender();
+						} else if (selection.roles) {
+							const targetRoles: readonly SkcModelAssignmentTargetId[] = selection.roles;
+							const includesDefault = targetRoles.includes("default");
+							const includesRoleAgent = targetRoles.some(targetRole => targetRole !== "default");
+							if (includesRoleAgent) {
+								const apiKey = await this.ctx.session.modelRegistry.getApiKey(
+									model,
+									this.ctx.session.sessionId,
+								);
+								if (!apiKey) {
+									throw new Error(`No API key for ${model.provider}/${model.id}`);
+								}
+							}
+							const value =
+								selectedSelector ?? formatModelSelectorValue(`${model.provider}/${model.id}`, thinkingLevel);
+							const assignments = new Map<SkcModelAssignmentTargetId, string>();
+							for (const targetRole of targetRoles) assignments.set(targetRole, value);
+							const defaultSelector =
+								selectedSelector && thinkingLevel && selectedSelector.endsWith(`:${thinkingLevel}`)
+									? selectedSelector.slice(0, -thinkingLevel.length - 1)
+									: selectedSelector;
+
+							if (includesDefault) {
+								await this.ctx.session.setModel(model, "default", {
+									selector: defaultSelector,
+									thinkingLevel,
+								});
+								if (thinkingLevel && thinkingLevel !== ThinkingLevel.Inherit) {
+									this.ctx.session.setThinkingLevel(thinkingLevel);
+								}
+							}
+							const materializedProfile = materializeActiveModelProfileAssignments({
+								session: this.ctx.session,
+								settings: this.ctx.settings,
+								assignments,
+							});
+							if (!materializedProfile) {
+								const overrides = this.ctx.settings.get("task.agentModelOverrides");
+								const nextOverrides = { ...overrides };
+								let writesOverrides = false;
+								for (const targetRole of targetRoles) {
+									const target = SKC_MODEL_ASSIGNMENT_TARGETS[targetRole];
+									if (target.settingsPath === "modelRoles") {
+										this.ctx.settings.setModelRole(targetRole, value);
+									} else {
+										nextOverrides[targetRole] = value;
+										writesOverrides = true;
+									}
+								}
+								if (writesOverrides) {
+									this.ctx.settings.set("task.agentModelOverrides", nextOverrides);
+								}
+							}
+							modelSelector.refreshRoleAssignments({
+								currentModel: this.ctx.session.model,
+								currentThinkingLevel: this.ctx.session.thinkingLevel,
+								activeModelProfile:
+									this.ctx.session.getActiveModelProfile?.() ?? this.ctx.settings.get("modelProfile.default"),
+							});
+							this.ctx.settings.getStorage()?.recordModelUsage(`${model.provider}/${model.id}`);
+							this.ctx.statusLine.invalidate();
+							this.ctx.updateEditorBorderColor();
+							await this.ctx.notifyConfigChanged?.();
+							const labels = targetRoles.map(
+								targetRole => SKC_MODEL_ASSIGNMENT_TARGETS[targetRole].tag ?? targetRole.toUpperCase(),
+							);
+							this.ctx.showStatus(
+								includesDefault
+									? `All model targets set to ${value} for ${labels.join(", ")}.`
+									: `Role-agent models set to ${value} for ${labels.join(", ")}.`,
+							);
 							done();
 							this.ctx.ui.requestRender();
 						} else if (role === "default") {
@@ -774,19 +872,21 @@ export class SelectorController {
 							}
 							const value =
 								selectedSelector ?? formatModelSelectorValue(`${model.provider}/${model.id}`, thinkingLevel);
-							const materializedProfile = materializeActiveModelProfileAssignment({
+							const assignments = new Map<SkcModelAssignmentTargetId, string>([[role, value]]);
+							const materializedProfile = materializeActiveModelProfileAssignments({
 								session: this.ctx.session,
 								settings: this.ctx.settings,
-								role,
-								selector: value,
+								assignments,
 							});
 							if (!materializedProfile) {
 								const target = SKC_MODEL_ASSIGNMENT_TARGETS[role];
 								if (target.settingsPath === "modelRoles") {
 									this.ctx.settings.setModelRole(role, value);
 								} else {
-									const overrides = this.ctx.settings.get("task.agentModelOverrides");
-									this.ctx.settings.set("task.agentModelOverrides", { ...overrides, [role]: value });
+									this.ctx.settings.set("task.agentModelOverrides", {
+										...this.ctx.settings.get("task.agentModelOverrides"),
+										[role]: value,
+									});
 								}
 							}
 							modelSelector.refreshRoleAssignments({
@@ -796,6 +896,9 @@ export class SelectorController {
 									this.ctx.session.getActiveModelProfile?.() ?? this.ctx.settings.get("modelProfile.default"),
 							});
 							this.ctx.settings.getStorage()?.recordModelUsage(`${model.provider}/${model.id}`);
+							this.ctx.statusLine.invalidate();
+							this.ctx.updateEditorBorderColor();
+							await this.ctx.notifyConfigChanged?.();
 							this.ctx.showStatus(`${role} agent model: ${value}`);
 							done();
 							this.ctx.ui.requestRender();

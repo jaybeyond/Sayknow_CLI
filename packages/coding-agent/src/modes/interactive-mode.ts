@@ -118,12 +118,14 @@ import type { CompactionQueuedMessage, InteractiveModeContext, SubmittedUserInpu
 import { UiHelpers } from "./utils/ui-helpers";
 
 const INTERACTIVE_ABORT_CLEANUP_TIMEOUT_MS = 5_000;
-const DEFAULT_COMPOSER_PLACEHOLDER = "Type your message...";
+const COMPOSER_NEWLINE_HINT = process.platform === "win32" ? "Alt+Enter/Ctrl+J" : "Shift+Enter/Ctrl+J";
+export const DEFAULT_COMPOSER_PLACEHOLDER = `Type your message... ${COMPOSER_NEWLINE_HINT}: New line · Ctrl+C: Clear · Ctrl+R: Search history · Shift+Tab: Reasoning`;
+const WELCOME_RESERVED_CONTAINER_CHILD_LIMIT = 8;
 const FRIENDLY_KEY_PARTS: Record<string, string> = {
 	alt: "Alt",
-	cmd: "Command",
-	command: "Command",
-	ctrl: "Control",
+	cmd: "Cmd",
+	command: "Cmd",
+	ctrl: "Ctrl",
 	enter: "Enter",
 	meta: process.platform === "darwin" ? "Command" : "Meta",
 	option: "Option",
@@ -133,7 +135,7 @@ const FRIENDLY_KEY_PARTS: Record<string, string> = {
 function formatShortcutForPlaceholder(key: string): string {
 	return key
 		.split("+")
-		.map(part => FRIENDLY_KEY_PARTS[part.toLowerCase()] ?? part)
+		.map(part => FRIENDLY_KEY_PARTS[part.toLowerCase()] ?? (part.length === 1 ? part.toUpperCase() : part))
 		.join("+");
 }
 
@@ -162,6 +164,7 @@ function configureDefaultComposerChrome(editor: CustomEditor): void {
 	editor.setInputPrefix(getDefaultInputPrefix());
 	editor.setPlaceholder(DEFAULT_COMPOSER_PLACEHOLDER);
 	editor.setPaddingX(1);
+	editor.setRightGutterWidth(1);
 	editor.setTopBorder(undefined);
 }
 
@@ -444,7 +447,6 @@ export class InteractiveMode implements InteractiveModeContext {
 			logger.warn("History storage unavailable", { error: String(error) });
 		}
 		this.hookWidgetContainerAbove = new Container();
-		this.hookWidgetContainerAbove.addChild(new Spacer(1));
 		this.hookWidgetContainerBelow = new Container();
 		this.editorContainer = new Container();
 		this.editorContainer.addChild(this.editor);
@@ -532,13 +534,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 
 		if (!startupQuiet) {
-			const getWelcomeReservedBottomRows = (width: number): number =>
-				[
-					this.statusLine,
-					this.hookWidgetContainerAbove,
-					this.editorContainer,
-					this.hookWidgetContainerBelow,
-				].reduce((rows, component) => rows + component.render(width).length, 0);
+			const getWelcomeReservedBottomRows = (width: number): number => this.#getWelcomeReservedRows(width);
 
 			// Add welcome header
 			this.#welcomeComponent = new WelcomeComponent(
@@ -941,11 +937,37 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	#getComposerPlaceholder(): string {
 		if (!this.#isPromptDeliveryBusy()) return DEFAULT_COMPOSER_PLACEHOLDER;
-		const enterAction = this.settings.get("busyPromptMode") === "steer" ? "Steering" : "Message Queueing";
+		const enterAction = this.settings.get("busyPromptMode") === "steer" ? "Steer" : "Queue";
 		const parts = [`Enter: ${enterAction}`];
 		const queueKey = this.#getMessageQueueShortcut();
-		if (queueKey) parts.push(`${formatShortcutForPlaceholder(queueKey)}: Message Queueing`);
-		return `${DEFAULT_COMPOSER_PLACEHOLDER} ${parts.join(" · ")}`;
+		if (queueKey) parts.push(`${formatShortcutForPlaceholder(queueKey)}: Queue`);
+		return `${DEFAULT_COMPOSER_PLACEHOLDER} · ${parts.join(" · ")}`;
+	}
+
+	#getWelcomeReservedRows(width: number): number {
+		const transientRows = [
+			this.chatContainer,
+			this.pendingMessagesContainer,
+			this.statusContainer,
+			this.todoContainer,
+			this.btwContainer,
+		].reduce((rows, container) => rows + this.#renderShortContainerRowsForWelcomeReservation(width, container), 0);
+
+		const pinnedRows = [
+			this.statusLine,
+			this.hookWidgetContainerAbove,
+			this.editorContainer,
+			this.hookWidgetContainerBelow,
+		].reduce((rows, component) => rows + component.render(width).length, 0);
+
+		return transientRows + pinnedRows;
+	}
+
+	#renderShortContainerRowsForWelcomeReservation(width: number, container: Container): number {
+		if (container.children.length === 0 || container.children.length > WELCOME_RESERVED_CONTAINER_CHILD_LIMIT) {
+			return 0;
+		}
+		return container.render(width).length;
 	}
 
 	updateEditorChrome(): void {
@@ -1352,6 +1374,12 @@ export class InteractiveMode implements InteractiveModeContext {
 			return;
 		}
 
+		// Leaving plan mode invalidates the plan-mode steering and standing
+		// resolve handler that the in-flight turn may still be acting on. Abort
+		// before clearing that state so the model cannot continue from stale
+		// plan-mode context and retry `resolve` against a retired handler.
+		await this.session.abort({ timeoutMs: INTERACTIVE_ABORT_CLEANUP_TIMEOUT_MS });
+
 		const previousTools = this.#planModePreviousTools;
 		if (previousTools && previousTools.length > 0) {
 			await this.session.setActiveToolsByName(previousTools);
@@ -1689,6 +1717,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			planContent,
 			finalPlanFilePath: options.finalPlanFilePath,
 			contextPreserved: options.preserveContext === true,
+			tools: this.session.getActiveToolNames(),
 		});
 		await this.session.prompt(planModePrompt, { synthetic: true });
 	}
@@ -2180,6 +2209,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				message => renderWorkingMessage(message, this.#getWorkingMessageAccent()),
 				this.#defaultWorkingMessage,
 				getSymbolTheme().spinnerFrames,
+				{ timeDependentColor: true },
 			);
 			this.statusContainer.addChild(this.loadingAnimation);
 		}
@@ -2335,6 +2365,11 @@ export class InteractiveMode implements InteractiveModeContext {
 	handleClearCommand(): Promise<void> {
 		this.#prepareSessionSwitch();
 		return this.#commandController.handleClearCommand();
+	}
+
+	handleContextClearCommand(): Promise<void> {
+		this.#prepareSessionSwitch();
+		return this.#commandController.handleContextClearCommand();
 	}
 
 	handleDropCommand(): Promise<void> {

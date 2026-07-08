@@ -1,7 +1,10 @@
-import { describe, expect, it, vi } from "bun:test";
+import { beforeAll, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
+import { QueuedMessageSelectorComponent } from "../src/modes/components/queued-message-selector";
 import { InputController } from "../src/modes/controllers/input-controller";
+import { initTheme } from "../src/modes/theme/theme";
 import type { CompactionQueuedMessage, InteractiveModeContext } from "../src/modes/types";
+import type { QueuedMessageEditEntry } from "../src/session/agent-session";
 
 type FakeEditor = {
 	onEscape?: () => void;
@@ -44,6 +47,7 @@ async function createContext(options?: { busyPromptMode?: "steer" | "queue"; fol
 		"app.model.select": ["ctrl+l"],
 		"app.message.queue": ["alt+enter"],
 		"app.message.followUp": options?.followUpKeys ?? [],
+		"app.message.dequeue": ["alt+up", "alt+down"],
 	};
 
 	const setActionKeys = vi.fn();
@@ -62,6 +66,37 @@ async function createContext(options?: { busyPromptMode?: "steer" | "queue"; fol
 		showStatus("Queued message for after compaction");
 	});
 	const popLastQueuedMessage = vi.fn(() => sessionQueuedMessages.pop());
+	const getQueuedMessageEntries = vi.fn(() =>
+		sessionQueuedMessages.map(
+			(text, index): QueuedMessageEditEntry => ({
+				id: `followUp:${index}`,
+				text,
+				mode: "followUp",
+				label: "Queued",
+			}),
+		),
+	);
+	const removeQueuedMessageForEditing = vi.fn((id: string) => {
+		const [mode, indexText] = id.split(":");
+		if (mode !== "followUp" || indexText === undefined) return undefined;
+		const index = Number(indexText);
+		if (!Number.isInteger(index)) return undefined;
+		const [removed] = sessionQueuedMessages.splice(index, 1);
+		return removed;
+	});
+	const moveQueuedMessageForEditing = vi.fn((id: string, direction: "up" | "down") => {
+		const [mode, indexText] = id.split(":");
+		if (mode !== "followUp" || indexText === undefined) return false;
+		const index = Number(indexText);
+		if (!Number.isInteger(index)) return false;
+		const targetIndex = direction === "up" ? index - 1 : index + 1;
+		if (index < 0 || index >= sessionQueuedMessages.length) return false;
+		if (targetIndex < 0 || targetIndex >= sessionQueuedMessages.length) return false;
+		const [entry] = sessionQueuedMessages.splice(index, 1);
+		if (entry === undefined) return false;
+		sessionQueuedMessages.splice(targetIndex, 0, entry);
+		return true;
+	});
 	const clearQueue = vi.fn(() => {
 		const followUp = [...sessionQueuedMessages];
 		sessionQueuedMessages.length = 0;
@@ -82,9 +117,19 @@ async function createContext(options?: { busyPromptMode?: "steer" | "queue"; fol
 		setCustomKeyHandler: vi.fn(),
 		clearCustomKeyHandlers: vi.fn(),
 	};
+	const editorContainerChildren: unknown[] = [];
+	const editorContainer = {
+		clear: vi.fn(() => {
+			editorContainerChildren.length = 0;
+		}),
+		addChild: vi.fn((child: unknown) => {
+			editorContainerChildren.push(child);
+		}),
+	};
 	const ctx = {
 		editor: editor as unknown as InteractiveModeContext["editor"],
-		ui: { requestRender: vi.fn() } as unknown as InteractiveModeContext["ui"],
+		ui: { requestRender: vi.fn(), setFocus: vi.fn() } as unknown as InteractiveModeContext["ui"],
+		editorContainer: editorContainer as unknown as InteractiveModeContext["editorContainer"],
 		loadingAnimation: undefined,
 		autoCompactionLoader: undefined,
 		retryLoader: undefined,
@@ -102,6 +147,9 @@ async function createContext(options?: { busyPromptMode?: "steer" | "queue"; fol
 			popLastQueuedMessage,
 			clearQueue,
 			getQueuedMessages: () => ({ steering: [], followUp: [...sessionQueuedMessages] }),
+			getQueuedMessageEntries,
+			removeQueuedMessageForEditing,
+			moveQueuedMessageForEditing,
 		} as unknown as InteractiveModeContext["session"],
 		keybindings: {
 			getKeys(action: string) {
@@ -186,13 +234,21 @@ async function createContext(options?: { busyPromptMode?: "steer" | "queue"; fol
 			queueCompactionMessage,
 			popLastQueuedMessage,
 			clearQueue,
+			getQueuedMessageEntries,
+			removeQueuedMessageForEditing,
+			moveQueuedMessageForEditing,
 		},
 		queues: {
 			compactionQueuedMessages,
 			sessionQueuedMessages,
+			editorContainerChildren,
 		},
 	};
 }
+
+beforeAll(() => {
+	initTheme();
+});
 
 describe("InputController keybinding setup", () => {
 	it("registers temporary and persisted model selector actions separately", async () => {
@@ -226,6 +282,7 @@ describe("InputController keybinding setup", () => {
 		await Bun.sleep(0);
 
 		expect(spies.setActionKeys).toHaveBeenCalledWith("app.message.queue", ["alt+enter"]);
+		expect(spies.setActionKeys).toHaveBeenCalledWith("app.message.dequeue", ["alt+up", "alt+down"]);
 		expect(ctx.locallySubmittedUserSignatures.has("queue after current response\u00000")).toBe(true);
 		expect(spies.prompt).toHaveBeenCalledWith("queue after current response", {
 			streamingBehavior: "followUp",
@@ -277,53 +334,38 @@ describe("InputController keybinding setup", () => {
 		});
 	});
 
-	it("queues streaming Tab before editor file completion can open", async () => {
+	it("leaves streaming Tab available for editor autocomplete", async () => {
 		const { InputController, ctx, editor, spies } = await createContext();
 		const session = ctx.session as unknown as { isStreaming: boolean };
 		session.isStreaming = true;
-		editor.setText("queue before file completion");
+		editor.setText("/mo");
 		const controller = new InputController(ctx);
 
 		controller.setupKeyHandlers();
-		expect(editor.onTab?.(editor.getText())).toBe(true);
 		await Bun.sleep(0);
 
-		expect(spies.prompt).toHaveBeenCalledWith("queue before file completion", {
-			streamingBehavior: "followUp",
-		});
-		expect(spies.updatePendingMessagesDisplay).toHaveBeenCalledTimes(1);
+		expect(editor.onTab).toBeUndefined();
+		expect(editor.onTabDeclined).toBeUndefined();
+		expect(spies.prompt).not.toHaveBeenCalled();
+		expect(spies.updatePendingMessagesDisplay).not.toHaveBeenCalled();
+		expect(editor.getText()).toBe("/mo");
 	});
-	it("queues compaction Tab before editor file completion can open", async () => {
+
+	it("leaves compaction Tab available for editor autocomplete", async () => {
 		const { InputController, ctx, editor, spies } = await createContext();
 		const session = ctx.session as unknown as { isCompacting: boolean };
 		session.isCompacting = true;
-		editor.setText("queue while compacting via tab");
+		editor.setText("/skill:team");
 		const controller = new InputController(ctx);
 
 		controller.setupKeyHandlers();
-		expect(editor.onTab?.(editor.getText())).toBe(true);
 		await Bun.sleep(0);
 
-		expect(spies.queueCompactionMessage).toHaveBeenCalledWith("queue while compacting via tab", "followUp");
+		expect(editor.onTab).toBeUndefined();
+		expect(editor.onTabDeclined).toBeUndefined();
+		expect(spies.queueCompactionMessage).not.toHaveBeenCalled();
 		expect(spies.prompt).not.toHaveBeenCalled();
-		expect(editor.getText()).toBe("");
-		expect(spies.updatePendingMessagesDisplay).toHaveBeenCalledTimes(1);
-	});
-
-	it("keeps declined Tab completion as a fallback queue path while streaming", async () => {
-		const { InputController, ctx, editor, spies } = await createContext();
-		const session = ctx.session as unknown as { isStreaming: boolean };
-		session.isStreaming = true;
-		editor.setText("queue after declined tab completion");
-		const controller = new InputController(ctx);
-
-		controller.setupKeyHandlers();
-		editor.onTabDeclined?.(editor.getText());
-		await Bun.sleep(0);
-
-		expect(spies.prompt).toHaveBeenCalledWith("queue after declined tab completion", {
-			streamingBehavior: "followUp",
-		});
+		expect(editor.getText()).toBe("/skill:team");
 	});
 
 	it("queues explicit message action during compaction", async () => {
@@ -343,24 +385,36 @@ describe("InputController keybinding setup", () => {
 		expect(spies.updatePendingMessagesDisplay).toHaveBeenCalledTimes(1);
 	});
 
-	it("restores only the newest compaction queued message for editing", async () => {
+	it("restores a single compaction queued message for editing", async () => {
 		const { InputController, ctx, editor, spies, queues } = await createContext();
-		queues.compactionQueuedMessages.push(
-			{ text: "older compaction queue", mode: "followUp" },
-			{ text: "newest compaction queue", mode: "followUp" },
-		);
+		queues.compactionQueuedMessages.push({ text: "single compaction queue", mode: "followUp" });
 		editor.setText("current draft");
 		const controller = new InputController(ctx);
 
 		controller.handleDequeue();
 
-		expect(editor.getText()).toBe("newest compaction queue\n\ncurrent draft");
-		expect(queues.compactionQueuedMessages.map(entry => entry.text)).toEqual(["older compaction queue"]);
+		expect(editor.getText()).toBe("single compaction queue");
+		expect(queues.compactionQueuedMessages).toEqual([]);
 		expect(spies.popLastQueuedMessage).not.toHaveBeenCalled();
 		expect(spies.updatePendingMessagesDisplay).toHaveBeenCalledTimes(1);
 	});
 
-	it("restores only the newest session queued message for editing", async () => {
+	it("restores a single session queued message for editing", async () => {
+		const { InputController, ctx, editor, spies, queues } = await createContext();
+		queues.sessionQueuedMessages.push("single session queue");
+		editor.setText("current draft");
+		const controller = new InputController(ctx);
+
+		controller.handleDequeue();
+
+		expect(editor.getText()).toBe("single session queue");
+		expect(queues.sessionQueuedMessages).toEqual([]);
+		expect(spies.clearQueue).not.toHaveBeenCalled();
+		expect(spies.removeQueuedMessageForEditing).toHaveBeenCalledWith("followUp:0");
+		expect(spies.updatePendingMessagesDisplay).toHaveBeenCalledTimes(1);
+	});
+
+	it("opens a selector so older queued messages can be restored", async () => {
 		const { InputController, ctx, editor, spies, queues } = await createContext();
 		queues.sessionQueuedMessages.push("older session queue", "newest session queue");
 		editor.setText("current draft");
@@ -368,10 +422,117 @@ describe("InputController keybinding setup", () => {
 
 		controller.handleDequeue();
 
-		expect(editor.getText()).toBe("newest session queue\n\ncurrent draft");
-		expect(queues.sessionQueuedMessages).toEqual(["older session queue"]);
-		expect(spies.clearQueue).not.toHaveBeenCalled();
+		const selector = queues.editorContainerChildren[0];
+		if (!(selector instanceof QueuedMessageSelectorComponent)) {
+			throw new Error("Expected queued message selector to be shown");
+		}
+		expect(editor.getText()).toBe("current draft");
+		selector.getSelectList().setSelectedIndex(0);
+		selector.getSelectList().handleInput("\n");
+
+		expect(editor.getText()).toBe("older session queue");
+		expect(queues.sessionQueuedMessages).toEqual(["newest session queue"]);
+		expect(spies.removeQueuedMessageForEditing).toHaveBeenCalledWith("followUp:0");
 		expect(spies.updatePendingMessagesDisplay).toHaveBeenCalledTimes(1);
+	});
+
+	it("deletes the selected queued message from the selector", async () => {
+		const { InputController, ctx, editor, spies, queues } = await createContext();
+		queues.sessionQueuedMessages.push("older session queue", "newest session queue");
+		editor.setText("current draft");
+		const controller = new InputController(ctx);
+
+		controller.handleDequeue();
+
+		const selector = queues.editorContainerChildren[0];
+		if (!(selector instanceof QueuedMessageSelectorComponent)) {
+			throw new Error("Expected queued message selector to be shown");
+		}
+		selector.handleInput("\x1b[3~");
+
+		expect(editor.getText()).toBe("current draft");
+		expect(queues.sessionQueuedMessages).toEqual(["older session queue"]);
+		expect(spies.removeQueuedMessageForEditing).toHaveBeenCalledWith("followUp:1");
+		expect(spies.updatePendingMessagesDisplay).toHaveBeenCalledTimes(1);
+		expect(spies.showStatus).toHaveBeenCalledWith("Deleted queued message");
+		expect(queues.editorContainerChildren[0]).toBeInstanceOf(QueuedMessageSelectorComponent);
+	});
+
+	it("opens the selector focused on the newest queued message across queue types", async () => {
+		const { InputController, ctx, editor, spies, queues } = await createContext();
+		spies.getQueuedMessageEntries.mockReturnValue([
+			{
+				id: "steer:2",
+				text: "newer steer",
+				mode: "steer",
+				label: "Steer",
+			},
+			{
+				id: "followUp:1",
+				text: "older follow-up",
+				mode: "followUp",
+				label: "Queued",
+			},
+		]);
+		spies.removeQueuedMessageForEditing.mockImplementation(id => {
+			if (id === "steer:2") return "newer steer";
+			if (id === "followUp:1") return "older follow-up";
+			return undefined;
+		});
+		editor.setText("current draft");
+		const controller = new InputController(ctx);
+
+		controller.handleDequeue();
+
+		const selector = queues.editorContainerChildren[0];
+		if (!(selector instanceof QueuedMessageSelectorComponent)) {
+			throw new Error("Expected queued message selector to be shown");
+		}
+		selector.getSelectList().handleInput("\n");
+
+		expect(editor.getText()).toBe("newer steer");
+		expect(spies.removeQueuedMessageForEditing).toHaveBeenCalledWith("steer:2");
+		expect(spies.updatePendingMessagesDisplay).toHaveBeenCalledTimes(1);
+	});
+
+	it("moves the selected queued message from the selector", async () => {
+		const { InputController, ctx, editor, spies, queues } = await createContext();
+		queues.sessionQueuedMessages.push("first session queue", "second session queue", "third session queue");
+		editor.setText("current draft");
+		const controller = new InputController(ctx);
+
+		controller.handleDequeue();
+
+		const selector = queues.editorContainerChildren[0];
+		if (!(selector instanceof QueuedMessageSelectorComponent)) {
+			throw new Error("Expected queued message selector to be shown");
+		}
+		selector.handleInput("\x1b[1;6A");
+
+		expect(editor.getText()).toBe("current draft");
+		expect(queues.sessionQueuedMessages).toEqual([
+			"first session queue",
+			"third session queue",
+			"second session queue",
+		]);
+		expect(spies.moveQueuedMessageForEditing).toHaveBeenCalledWith("followUp:2", "up");
+		expect(spies.updatePendingMessagesDisplay).toHaveBeenCalledTimes(1);
+		expect(spies.showStatus).toHaveBeenCalledWith("Moved queued message");
+
+		const nextSelector = queues.editorContainerChildren[0];
+		if (!(nextSelector instanceof QueuedMessageSelectorComponent)) {
+			throw new Error("Expected queued message selector to remain shown");
+		}
+		nextSelector.handleInput("\x1b[1;5B");
+
+		expect(queues.sessionQueuedMessages).toEqual([
+			"first session queue",
+			"second session queue",
+			"third session queue",
+		]);
+		expect(spies.moveQueuedMessageForEditing).toHaveBeenLastCalledWith("followUp:1", "down");
+		expect(spies.updatePendingMessagesDisplay).toHaveBeenCalledTimes(2);
+		expect(spies.showStatus).toHaveBeenLastCalledWith("Moved queued message");
 	});
 
 	it("steers streaming Enter submissions by default", async () => {

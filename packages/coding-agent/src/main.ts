@@ -38,6 +38,7 @@ import type { ExtensionUIContext } from "./extensibility/extensions/types";
 import type { InteractiveMode } from "./modes/interactive-mode";
 import { initTheme, stopThemeWatcher } from "./modes/theme/theme";
 import type { SubmittedUserInput } from "./modes/types";
+import { applyCliRuntimeApiKeyOverride } from "./runtime-api-key";
 import type { MCPManager } from "./runtime-mcp";
 import {
 	type CreateAgentSessionOptions,
@@ -52,6 +53,7 @@ import { runStartupCredentialAutoImportIfNeeded } from "./setup/credential-auto-
 import { formatModelOnboardingGuidance } from "./setup/model-onboarding-guidance";
 import { executeBuiltinSlashCommand } from "./slash-commands/builtin-registry";
 import { resolvePromptInput } from "./system-prompt";
+import { persistTaskTokenLog, resolveTaskTokenLogDir, taskTokenLogFromUsage } from "./task/token-log";
 import type { LspStartupServerInfo } from "./tools";
 import { getDisplayChangelogEntries, getInstalledVersionChangelogEntry, getNewEntries } from "./utils/changelog";
 import type { EventBus } from "./utils/event-bus";
@@ -190,6 +192,11 @@ function applyExtensionFlagValues(session: AgentSession, rawArgs: string[]): Map
 	return extensionRunner.getFlagValues();
 }
 
+type CreateSessionForMain = (
+	options: CreateAgentSessionOptions,
+	context?: { skipPostCreateModelRefresh?: boolean },
+) => Promise<CreateAgentSessionResult>;
+
 type AcpSessionFactory = (cwd: string) => Promise<AgentSession>;
 
 export interface AcpSessionFactoryOptions {
@@ -200,7 +207,7 @@ export interface AcpSessionFactoryOptions {
 	modelRegistry: ModelRegistry;
 	parsedArgs: Pick<Args, "apiKey" | "default" | "model" | "mpreset" | "thinking">;
 	rawArgs: string[];
-	createSession: (options: CreateAgentSessionOptions) => Promise<CreateAgentSessionResult>;
+	createSession: CreateSessionForMain;
 }
 
 export async function applyStartupModelProfiles(args: {
@@ -222,8 +229,11 @@ export async function applyStartupModelProfiles(args: {
 	// override it. startupModel covers the eager path; session.model covers the
 	// deferred `--model <pattern>` path resolved inside createAgentSession.
 	const explicitModel = args.parsedArgs.model ? (args.startupModel ?? args.session.model) : undefined;
-
 	const defaultProfile = args.settings.get("modelProfile.default");
+	if (defaultProfile || args.parsedArgs.mpreset) {
+		await args.modelRegistry.refresh("online-if-uncached");
+	}
+
 	if (defaultProfile) {
 		await applyProfile(defaultProfile, false);
 	}
@@ -264,19 +274,23 @@ export async function applyStartupModelProfilesOrExit(
 export function createAcpSessionFactory(args: AcpSessionFactoryOptions): AcpSessionFactory {
 	return async cwd => {
 		const nextSettings = await args.settings.cloneForCwd(cwd);
+		const hasStartupProfile = Boolean(nextSettings.get("modelProfile.default") || args.parsedArgs.mpreset);
 		const nextSessionManager = SessionManager.create(cwd, args.sessionDir);
 		const agentId = `acp:${nextSessionManager.getSessionId()}`;
-		const { session: nextSession } = await args.createSession({
-			...args.baseOptions,
-			cwd,
-			sessionManager: nextSessionManager,
-			settings: nextSettings,
-			authStorage: args.authStorage,
-			modelRegistry: args.modelRegistry,
-			agentId,
-			hasUI: false,
-			enableMCP: false,
-		});
+		const { session: nextSession } = await args.createSession(
+			{
+				...args.baseOptions,
+				cwd,
+				sessionManager: nextSessionManager,
+				settings: nextSettings,
+				authStorage: args.authStorage,
+				modelRegistry: args.modelRegistry,
+				agentId,
+				hasUI: false,
+				enableMCP: false,
+			},
+			{ skipPostCreateModelRefresh: hasStartupProfile },
+		);
 		await applyStartupModelProfilesOrExit({
 			session: nextSession,
 			settings: nextSettings,
@@ -285,9 +299,7 @@ export function createAcpSessionFactory(args: AcpSessionFactoryOptions): AcpSess
 			startupModel: args.baseOptions.model,
 			startupThinkingLevel: args.baseOptions.thinkingLevel,
 		});
-		if (args.parsedArgs.apiKey && !args.baseOptions.model && nextSession.model) {
-			args.authStorage.setRuntimeApiKey(nextSession.model.provider, args.parsedArgs.apiKey);
-		}
+		applyCliRuntimeApiKeyOverride(args.authStorage, args.parsedArgs.apiKey, nextSession.model);
 		applyExtensionFlagValues(nextSession, args.rawArgs);
 		return nextSession;
 	};
@@ -396,30 +408,28 @@ async function getChangelogForDisplay(parsed: Args): Promise<string | undefined>
 		return undefined;
 	}
 
-	const lastVersion = settings.get("lastChangelogVersion");
-	if (lastVersion === VERSION) {
-		// Steady state: user already saw the current version's changelog. Skip the file read + parse.
+	const entries = getDisplayChangelogEntries();
+	if (entries.length === 0) {
 		return undefined;
 	}
 
-	const entries = getDisplayChangelogEntries();
-
+	const lastVersion = settings.get("lastChangelogVersion");
 	if (!lastVersion) {
-		if (entries.length > 0) {
-			settings.set("lastChangelogVersion", VERSION);
-			await flushChangelogVersion();
-			return getInstalledVersionChangelogEntry(entries, VERSION)?.content;
-		}
-	} else {
+		settings.set("lastChangelogVersion", VERSION);
+		await flushChangelogVersion();
+		return getInstalledVersionChangelogEntry(entries, VERSION)?.content;
+	}
+
+	if (lastVersion !== VERSION) {
 		const newEntries = getNewEntries(entries, lastVersion);
+		settings.set("lastChangelogVersion", VERSION);
+		await flushChangelogVersion();
 		if (newEntries.length > 0) {
-			settings.set("lastChangelogVersion", VERSION);
-			await flushChangelogVersion();
 			return newEntries.map(e => e.content).join("\n\n");
 		}
 	}
 
-	return undefined;
+	return getInstalledVersionChangelogEntry(entries, VERSION)?.content;
 }
 
 async function flushChangelogVersion(): Promise<void> {
@@ -505,8 +515,8 @@ export async function createSessionManager(
 		}
 		return manager;
 	}
-	// Default case (new session) returns undefined, SDK will create one
-	return undefined;
+	const sessionDir = parsed.sessionDir ?? SessionManager.getDefaultSessionDir(cwd, activeSettings.getAgentDir());
+	return SessionManager.create(cwd, sessionDir);
 }
 
 async function maybeAutoChdir(parsed: Args): Promise<void> {
@@ -945,10 +955,51 @@ export async function runRootCommand(
 		modelRegistry,
 		settingsInstance,
 	);
+	// Resolve the token-log dir lazily on the first chat-usage event: a fresh
+	// launch's session dir does not exist yet at this point (the SDK creates it),
+	// so eager resolution would miss it. Re-resolve when the SessionManager id
+	// changes mid-run (fork/new) so root turns keep landing in the SAME
+	// `<session>/token-logs` dir the task executor uses for subagent turns.
+	let rootTokenLogDir: string | undefined;
+	let rootTokenLogSessionId: string | undefined;
+	let rootTokenLogResolved = false;
+	let rootTokenTurn = 0;
+	const baseTelemetry = sessionOptions.telemetry;
+	sessionOptions.telemetry = {
+		...(baseTelemetry ?? {}),
+		onChatUsage: async event => {
+			await baseTelemetry?.onChatUsage?.(event);
+			const currentSessionId = sessionManager?.getSessionId();
+			if (!rootTokenLogResolved || (currentSessionId && currentSessionId !== rootTokenLogSessionId)) {
+				rootTokenLogDir = await resolveTaskTokenLogDir(process.cwd(), sessionManager);
+				// Reset the per-session turn counter when the log dir moves to a new
+				// session so each session's log starts at turn 1.
+				if (rootTokenLogSessionId !== undefined && currentSessionId !== rootTokenLogSessionId) rootTokenTurn = 0;
+				rootTokenLogSessionId = currentSessionId;
+				rootTokenLogResolved = true;
+			}
+			if (!rootTokenLogDir) return;
+			rootTokenTurn += 1;
+			await persistTaskTokenLog(
+				taskTokenLogFromUsage(event.usage, {
+					subagentId: "root",
+					agent: event.agent?.name ?? "main",
+					// Monotonic 1-based sequence of persisted usage events for this
+					// session (event.stepNumber is 0-based and -1 for oneshot spans).
+					turn: rootTokenTurn,
+					at: new Date().toISOString(),
+					model: event.model,
+					cost: event.cost,
+				}),
+				{ dir: rootTokenLogDir },
+			);
+		},
+	};
 	sessionOptions.authStorage = authStorage;
 	sessionOptions.modelRegistry = modelRegistry;
 	sessionOptions.hasUI = isInteractive || mode === "rpc-ui";
 	sessionOptions.settings = settingsInstance;
+	const hasRootStartupProfile = Boolean(settingsInstance.get("modelProfile.default") || parsedArgs.mpreset);
 
 	// Research-mode (RLM) preset: augment session options before session creation.
 	deps.rlmPreset?.applyOptions(sessionOptions, settingsInstance);
@@ -961,18 +1012,19 @@ export async function runRootCommand(
 			);
 			process.exit(1);
 		}
-		if (sessionOptions.model) {
-			authStorage.setRuntimeApiKey(sessionOptions.model.provider, parsedArgs.apiKey);
-		}
+		applyCliRuntimeApiKeyOverride(authStorage, parsedArgs.apiKey, sessionOptions.model);
 	}
 
 	const createAgentSessionImpl = deps.createAgentSession ?? createAgentSession;
-	const createSession = async (options: CreateAgentSessionOptions): Promise<CreateAgentSessionResult> => {
+	const createSession: CreateSessionForMain = async (options, context): Promise<CreateAgentSessionResult> => {
 		const result = await logger.time("createAgentSession", createAgentSessionImpl, options);
 		// Kick off background model discovery only after createAgentSession finishes its parallel
 		// discovery arms; running these concurrently contends for the event loop and stretches
-		// every parallel arm by ~30ms.
-		modelRegistry.refreshInBackground();
+		// every parallel arm by ~30ms. Startup model profiles do their own foreground refresh
+		// before activation so project-scoped defaults can resolve freshly discovered models.
+		if (!context?.skipPostCreateModelRefresh) {
+			modelRegistry.refreshInBackground();
+		}
 		return result;
 	};
 
@@ -989,11 +1041,11 @@ export async function runRootCommand(
 		});
 		await (deps.runAcpMode ?? (await import("./modes/acp")).runAcpMode)(createAcpSession);
 	} else {
-		const { session, setToolUIContext, modelFallbackMessage, lspServers, mcpManager, eventBus } =
-			await createSession(sessionOptions);
-		if (parsedArgs.apiKey && !sessionOptions.model && session.model) {
-			authStorage.setRuntimeApiKey(session.model.provider, parsedArgs.apiKey);
-		}
+		const { session, setToolUIContext, modelFallbackMessage, lspServers, mcpManager, eventBus } = await createSession(
+			sessionOptions,
+			{ skipPostCreateModelRefresh: hasRootStartupProfile },
+		);
+		applyCliRuntimeApiKeyOverride(authStorage, parsedArgs.apiKey, session.model);
 
 		// Research-mode (RLM) preset: hard tool-boundary assertion after the registry is assembled.
 		if (deps.rlmPreset?.onSessionCreated) {

@@ -112,7 +112,7 @@ Before launching `skc team`, require a grounded context snapshot:
    - unknowns/open questions
    - likely codebase touchpoints
 4. If ambiguity remains high, gather brownfield facts with focused repo inspection or a canonical read-only role agent first, then run `$deep-interview --quick <task>` before team launch.
-5. If current correctness depends on official docs, version-aware framework guidance, best practices, or external dependency behavior, auto-delegate `researcher` as an evidence lane before or alongside worker launch instead of relying on repo-local recall alone.
+5. If current correctness depends on official docs, version-aware framework guidance, best practices, or external dependency behavior, gather evidence before or alongside worker launch using supported surfaces only: focused repo inspection for local facts, `planner` for broad context mapping/sequencing, `architect` for architecture or external-doc-risk assessment, and direct web/search tools when configured.
 
 Do not start the worker pane until this gate is satisfied; if forced to proceed quickly, state explicit scope/risk limitations in the launch report.
 
@@ -343,14 +343,15 @@ Use only after checking `skc team status <team>` and state evidence:
    - `.skc/_session-{sessionid}/state/team/<team>/config.json`
    - `.skc/_session-{sessionid}/state/team/<team>/tasks/task-1.json`
    - `.skc/_session-{sessionid}/state/team/<team>/mailbox/worker-1.json`
-2. Capture pane tail to confirm current worker state:
-   - `tmux capture-pane -t %<worker-pane> -p -S -120`
-   - If a larger-tail read or bounded summary would help, prefer explicit opt-in inspection via `skc sparkshell --tmux-pane %<worker-pane> --tail-lines 400` before improvising extra tmux commands.
-3. If the pane is stuck in an interactive state, safely return to idle prompt first:
-   - optional interrupt `C-c` or escape flow (CLI-specific) once, then re-check pane capture
+2. Use supported team surfaces before manual pane intervention:
+   - `skc team status <team>` for current recorded state
+   - `skc team monitor <team>` when a live monitor/update loop is needed
+   - `skc team api <team>` only for documented programmatic operations
+3. If the recorded worker pane is stuck in an interactive state, safely return to idle prompt first:
+   - optional interrupt `C-c` or escape flow (CLI-specific) once, then re-check `skc team status <team>` and relevant state files
 4. Send one concise trigger only when runtime/state checks show manual prompt input is needed:
    - `tmux send-keys -t %<worker-pane> "continue current task; report status" C-m`
-5. Re-check pane output, task state, worker mailbox, and `skc team status <team>`.
+5. Re-check task state, worker mailbox, and `skc team status <team>`.
 
 ### Shutdown reports success but stale worker panes remain
 
@@ -372,8 +373,9 @@ tmux list-panes -F '#{pane_id}	#{pane_current_command}	#{pane_start_command}'
 tmux kill-pane -t %450
 tmux kill-pane -t %451
 
-# 3) Remove stale team state only after preserving needed evidence, using the state runtime
-# cleanup verb documented by the current manifest
+# 3) Shut down recorded team state/workers through the supported team runtime
+# Replace <team-name> with the team from `skc team list` / `skc team status`.
+skc team shutdown <team-name>
 
 # 4) Retry
 skc team executor "fresh retry"
@@ -396,7 +398,7 @@ When operating this skill, provide concrete progress evidence:
 
 Do not claim success without file/pane evidence.
 Do not claim clean completion if shutdown occurred with `in_progress>0`.
-Use `skc sparkshell --tmux-pane ...` as an explicit opt-in operator aid for pane inspection and summaries; keep raw `tmux capture-pane` evidence available for manual intervention and proof.
+Use `skc team status <team>` and `skc team monitor <team>` as the supported operator aids for status inspection; keep raw state-file or pane evidence available for manual intervention and proof.
 
 ## Programmatic Team Orchestration
 
@@ -405,14 +407,15 @@ Use the `skc team ...` CLI as the supported team-launch surface. For automation,
 ### Supported current surfaces
 
 - **`skc team ...` CLI** — Primary method for interactive or automated team orchestration. Use this when you want direct tmux-pane visibility or a scriptable launch path.
+- **`skc team status <team>`** — Read current team/task/worker state.
+- **`skc team monitor <team>`** — Follow live progress through the supported runtime surface.
+- **`skc team shutdown <team>`** — Stop recorded active workers and move the team toward terminal state.
+- **`skc team api <team>`** — Use only for documented programmatic operations exposed by the team runtime.
 - **Team state files** — Inspect `.skc/_session-{sessionid}/state/team/<team>/` when you need status, task, or mailbox evidence after launch.
 
 ### Cleanup distinction
 
-Two cleanup paths exist and must not be confused:
-
-- `team_cleanup` (**state-server**): Deletes team state **files** on disk (`.skc/_session-{sessionid}/state/team/<team>/`). Use after a team run is fully complete.
-- tmux/session cleanup: Use the documented `skc team` shutdown / cleanup flow when you need to stop the worker pane or clean up an interrupted run.
+Use `skc team shutdown <team>` for recorded active workers. After shutdown reports a terminal state and required evidence is preserved, use supported `skc state ...` session/mode cleanup commands only when you are intentionally clearing state; do not delete team state by hand during an active run. Use manual tmux/session cleanup only for verified stale panes that are not handled by the documented shutdown flow.
 
 ### Automation example
 

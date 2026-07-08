@@ -5,6 +5,7 @@ import * as path from "node:path";
 import {
 	type FileEntry,
 	findMostRecentSession,
+	getRecentSessions,
 	loadEntriesFromFile,
 	resolveResumableSession,
 	type SessionHeader,
@@ -89,6 +90,40 @@ describe("findMostRecentSession", () => {
 		fs.writeFileSync(valid, '{"type":"session","id":"abc","timestamp":"2025-01-01T00:00:00Z","cwd":"/tmp"}\n');
 
 		expect(await findMostRecentSession(tempDir)).toBe(valid);
+	});
+});
+
+describe("getRecentSessions", () => {
+	let tempDir: string;
+
+	beforeEach(() => {
+		tempDir = path.join(os.tmpdir(), `session-test-${Snowflake.next()}`);
+		fs.mkdirSync(tempDir, { recursive: true });
+	});
+
+	afterEach(() => {
+		fs.rmSync(tempDir, { recursive: true, force: true });
+	});
+
+	it("returns enough default entries for the viewport-expanded welcome trail", async () => {
+		for (let index = 0; index < 5; index++) {
+			const file = path.join(tempDir, `session-${index}.jsonl`);
+			fs.writeFileSync(
+				file,
+				`${JSON.stringify({
+					type: "session",
+					id: `session-${index}`,
+					timestamp: `2025-01-01T00:00:0${index}Z`,
+					cwd: "/tmp",
+					title: `Recent Session ${index}`,
+				})}\n`,
+			);
+		}
+
+		const sessions = await getRecentSessions(tempDir);
+
+		expect(sessions).toHaveLength(5);
+		expect(sessions.map(session => session.name)).toContain("Recent Session 4");
 	});
 });
 

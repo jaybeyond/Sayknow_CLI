@@ -277,6 +277,8 @@ class CapturingBotApi {
 	calls: Array<{ method: string; body: any }> = [];
 	async call(method: string, body: unknown): Promise<unknown> {
 		this.calls.push({ method, body });
+		if (method === "getChat")
+			return { ok: true, result: { id: (body as { chat_id?: unknown } | null)?.chat_id, type: "private" } };
 		if (method === "createForumTopic") return { ok: true, result: { message_thread_id: this.calls.length } };
 		if (method === "sendMessage") return { ok: true, result: { message_id: this.calls.length } };
 		return { ok: true, result: true };
@@ -331,6 +333,15 @@ describe("daemon send sites force parse_mode HTML (AC1)", () => {
 			sessionId: "S",
 			phase: "finalized",
 			text: raw,
+		});
+		// The split is scheduled through the rate-limit pool: the first chunk is
+		// sent on the granted slot and the continuation is re-queued, so a follow-up
+		// flush drains it (one send per token — no single-slot burst).
+		await daemon.handleSessionMessage(fakeSession() as any, {
+			type: "turn_stream",
+			sessionId: "S",
+			phase: "finalized",
+			text: "tail",
 		});
 		const texts = bot.calls
 			.filter(c => c.method === "sendMessage" && c.body.text?.startsWith("a"))

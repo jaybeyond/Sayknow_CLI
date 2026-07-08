@@ -38,13 +38,24 @@ export function getNotificationConfig(settings: Settings): NotificationConfig {
 	};
 }
 
+export function hasNonBlankValue(value: string | undefined): boolean {
+	return typeof value === "string" && value.trim().length > 0;
+}
+
+/** Is Telegram configured with usable non-blank boundary credentials? */
+export function isTelegramConfigured(
+	cfg: NotificationConfig,
+): cfg is NotificationConfig & { botToken: string; chatId: string } {
+	return cfg.enabled && hasNonBlankValue(cfg.botToken) && hasNonBlankValue(cfg.chatId);
+}
+
 /** Is global config sufficient for auto-on (enabled + at least one configured adapter)? */
 export function isGloballyConfigured(cfg: NotificationConfig): boolean {
 	return (
 		cfg.enabled &&
-		((Boolean(cfg.botToken) && Boolean(cfg.chatId)) ||
-			(Boolean(cfg.discord.botToken) && Boolean(cfg.discord.channelId)) ||
-			(Boolean(cfg.slack.botToken) && Boolean(cfg.slack.channelId)))
+		(isTelegramConfigured(cfg) ||
+			(hasNonBlankValue(cfg.discord.botToken) && hasNonBlankValue(cfg.discord.channelId)) ||
+			(hasNonBlankValue(cfg.slack.botToken) && hasNonBlankValue(cfg.slack.channelId)))
 	);
 }
 
@@ -52,7 +63,14 @@ export function isGloballyConfigured(cfg: NotificationConfig): boolean {
 export function shouldRegisterNotificationsExtension(input: {
 	env: NodeJS.ProcessEnv;
 	cfg?: NotificationConfig;
+	/** Task recursion depth; helper/subagent sessions must not spawn remote surfaces. */
+	taskDepth?: number;
+	/** Parent subagent id/prefix; present for helper/subagent sessions even when depth is omitted. */
+	parentTaskPrefix?: string;
+	/** Role-agent type/name; present for task sessions even if depth metadata is lost. */
+	currentAgentType?: string;
 }): boolean {
+	if ((input.taskDepth ?? 0) > 0 || input.parentTaskPrefix || input.currentAgentType) return false;
 	if (input.env.SKC_NOTIFICATIONS === "0") return false;
 	if (input.env.SKC_NOTIFICATIONS === "1" || input.env.SKC_NOTIFICATIONS_TOKEN) return true;
 	return input.cfg ? isGloballyConfigured(input.cfg) : false;
@@ -81,6 +99,7 @@ export function isSessionNotificationsEnabled(input: {
 /** Mask a bot token for display: first 4 chars + "…" + "(len N)"; "(unset)" when undefined/empty. Never reveal full token. */
 export function maskToken(token: string | undefined): string {
 	if (!token) return "(unset)";
+	if (token.length <= 4) return `…(len ${token.length})`;
 	return `${token.slice(0, 4)}…(len ${token.length})`;
 }
 
@@ -112,7 +131,8 @@ export interface RedactableAction {
  * When redact is false, return the action unchanged.
  *
  * Redaction still applies to streamed content frames (turn_stream, context_update,
- * image_attachment) which are suppressed at their emit sites, not here.
+ * image_attachment) which are suppressed at their emit sites, not here. Explicit
+ * `telegram_send` file attachments are rejected before the file is read or forwarded.
  */
 export function buildRedactedAction(
 	action: RedactableAction,
@@ -123,6 +143,6 @@ export function buildRedactedAction(
 	// Asks stay fully readable/answerable even under redaction.
 	if (action.kind === "ask") return action;
 
-	const { summary: _summary, question: _question, ...base } = action;
+	const { summary: _summary, question: _question, options: _options, ...base } = action;
 	return base;
 }

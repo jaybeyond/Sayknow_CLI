@@ -4,7 +4,7 @@ import { stripVTControlCharacters } from "node:util";
 import { Agent } from "@sayknow-cli/agent-core";
 import { resetSettingsForTest, Settings } from "@sayknow-cli/coding-agent/config/settings";
 import { initTheme, theme } from "@sayknow-cli/coding-agent/modes/theme/theme";
-import { CURSOR_MARKER } from "@sayknow-cli/tui";
+import { CURSOR_MARKER, Text, visibleWidth } from "@sayknow-cli/tui";
 import { TempDir } from "@sayknow-cli/utils";
 import { ModelRegistry } from "../src/config/model-registry";
 import { CustomEditor } from "../src/modes/components/custom-editor";
@@ -16,6 +16,11 @@ import { SessionManager } from "../src/session/session-manager";
 class TestModalEditor extends CustomEditor {}
 function stripRenderControls(line: string): string {
 	return stripVTControlCharacters(line.replaceAll(CURSOR_MARKER, ""));
+}
+
+function forceTerminalSize(mode: InteractiveMode, columns: number, rows: number): void {
+	Object.defineProperty(mode.ui.terminal, "columns", { configurable: true, get: () => columns });
+	Object.defineProperty(mode.ui.terminal, "rows", { configurable: true, get: () => rows });
 }
 
 describe("InteractiveMode.setEditorComponent", () => {
@@ -67,53 +72,112 @@ describe("InteractiveMode.setEditorComponent", () => {
 	it("renders the default composer as a closed rounded input box", () => {
 		const lines = mode.editor.render(48).map(stripRenderControls);
 
-		expect(lines[0]).toStartWith("╭");
-		expect(lines[0]).toEndWith("╮");
-		expect(lines.at(-1)).toStartWith("╰");
-		expect(lines.at(-1)).toEndWith("╯");
-		expect(lines.some(line => line.startsWith("│") && line.includes(">") && line.endsWith("│"))).toBe(true);
+		expect(lines.every(line => visibleWidth(line) === 48)).toBe(true);
+		expect(lines.every(line => line.endsWith(" "))).toBe(true);
+		expect(lines[0].trimEnd()).toStartWith("╭");
+		expect(lines[0].trimEnd()).toEndWith("╮");
+		expect(lines.at(-1)!.trimEnd()).toStartWith("╰");
+		expect(lines.at(-1)!.trimEnd()).toEndWith("╯");
+		expect(lines.some(line => line.startsWith("│") && line.includes(">") && line.trimEnd().endsWith("│"))).toBe(true);
 		expect(lines.join("\n")).toContain("Type your message...");
 		expect(lines.join("\n")).not.toContain("›");
 	});
 
+	function expectedNewlineShortcutHint(): string {
+		const shortcut = process.platform === "win32" ? "Alt+Enter/Ctrl+J" : "Shift+Enter/Ctrl+J";
+		return `${shortcut}: New line`;
+	}
+
+	it("keeps the composer right border inside a trailing gutter for CJK input", () => {
+		mode.editor.focused = true;
+		mode.editor.setText("이전 커밋들");
+
+		const lines = mode.editor.render(48).map(stripRenderControls);
+		const promptLine = lines.find(line => line.includes("이전 커밋들"));
+
+		expect(promptLine).toBeDefined();
+		expect(lines.every(line => visibleWidth(line) === 48)).toBe(true);
+		expect(lines.every(line => line.endsWith(" "))).toBe(true);
+		expect(promptLine!.trimEnd()).toEndWith("│");
+		expect(promptLine!).toContain("이전 커밋들");
+	});
+
 	function expectedQueueShortcutHint(): string {
-		return "Alt+Enter: Message Queueing";
+		const shortcut = process.platform === "win32" ? "Alt+Q" : "Alt+Enter";
+		return `${shortcut}: Queue`;
 	}
 
 	it("shows busy steering and queueing hints only while work is active", () => {
-		let rendered = mode.editor.render(96).map(stripRenderControls).join("\n");
+		let rendered = mode.editor.render(160).map(stripRenderControls).join("\n");
 		expect(rendered).toContain("Type your message...");
-		expect(rendered).not.toContain("Enter: Steering");
+		expect(rendered).toContain(expectedNewlineShortcutHint());
+		expect(rendered).toContain("Ctrl+C: Clear");
+		expect(rendered).toContain("Ctrl+R: Search history");
+		expect(rendered).toContain("Shift+Tab: Reasoning");
+		expect(rendered).not.toContain("Enter: Steer");
 		expect(rendered).not.toContain(expectedQueueShortcutHint());
 
 		(session.agent as unknown as { state: { isStreaming: boolean } }).state.isStreaming = true;
 		mode.updateEditorChrome();
 
-		rendered = mode.editor.render(96).map(stripRenderControls).join("\n");
+		rendered = mode.editor.render(160).map(stripRenderControls).join("\n");
 		expect(rendered).toContain("Type your message...");
-		expect(rendered).toContain("Enter: Steering");
+		expect(rendered).toContain("Enter: Steer");
 		expect(rendered).toContain(expectedQueueShortcutHint());
 
 		(session.agent as unknown as { state: { isStreaming: boolean } }).state.isStreaming = false;
 		mode.updateEditorChrome();
 
-		rendered = mode.editor.render(96).map(stripRenderControls).join("\n");
+		rendered = mode.editor.render(160).map(stripRenderControls).join("\n");
 		expect(rendered).toContain("Type your message...");
-		expect(rendered).not.toContain("Enter: Steering");
+		expect(rendered).not.toContain("Enter: Steer");
 		expect(rendered).not.toContain(expectedQueueShortcutHint());
 	});
 
-	it("renders one visible blank row above the composer without hook widgets", async () => {
+	it("renders the composer directly below the status line without hook widgets", async () => {
 		vi.spyOn(mode.ui, "start").mockImplementation(() => {});
 
 		await mode.init();
 
-		const rendered = mode.ui.render(48).map(stripRenderControls);
-		const composerContentIndex = rendered.findIndex(line => line.includes("Type your message..."));
-		const composerIndex = composerContentIndex - 1;
+		const assertComposerFollowsStatusLine = () => {
+			const rendered = mode.ui.render(48).map(stripRenderControls);
+			const composerContentIndex = rendered.findIndex(line => line.includes("Type your message..."));
+			const composerIndex = composerContentIndex - 1;
+			const statusRows = mode.statusLine.render(48).map(stripRenderControls);
 
-		expect(composerIndex).toBeGreaterThan(0);
-		expect(rendered[composerIndex - 1]).toBe("");
+			expect(composerIndex).toBeGreaterThan(0);
+			expect(rendered.slice(composerIndex - statusRows.length, composerIndex)).toEqual(statusRows);
+		};
+
+		assertComposerFollowsStatusLine();
+
+		mode.setHookWidget("test", ["temporary widget"]);
+		mode.setHookWidget("test", undefined);
+
+		assertComposerFollowsStatusLine();
+	});
+
+	it("keeps the welcome splash viewport-bound when /new shows a notification", async () => {
+		const width = 100;
+		const rows = 28;
+		vi.spyOn(mode.ui, "start").mockImplementation(() => {});
+		forceTerminalSize(mode, width, rows);
+
+		await mode.init();
+
+		mode.chatContainer.clear();
+		mode.chatContainer.addChild(
+			new Text(`${theme.fg("accent", `${theme.status.success} New session started`)}`, 1, 0),
+		);
+
+		const rendered = mode.ui.render(width).map(stripRenderControls);
+		const renderedText = rendered.join("\n");
+		const noticeIndex = rendered.findIndex(line => line.includes("New session started"));
+		expect(rendered.length).toBeLessThanOrEqual(rows);
+		expect(renderedText).toContain("SKC Forge");
+		expect(noticeIndex).toBeGreaterThan(0);
+		expect(rendered[noticeIndex - 1]?.trim()).not.toBe("");
+		expect(renderedText).toContain("New session started");
 	});
 
 	it("keeps closed rounded composer chrome for one-line, multiline, and narrow prompts", () => {
@@ -125,11 +189,15 @@ describe("InteractiveMode.setEditorComponent", () => {
 			mode.editor.setText(text);
 			const lines = mode.editor.render(width).map(stripRenderControls);
 
-			expect(lines[0]).toStartWith("╭");
-			expect(lines[0]).toEndWith("╮");
-			expect(lines.at(-1)).toStartWith("╰");
-			expect(lines.at(-1)).toEndWith("╯");
-			expect(lines.some(line => line.startsWith("│") && line.includes(">") && line.endsWith("│"))).toBe(true);
+			expect(lines.every(line => visibleWidth(line) === width)).toBe(true);
+			expect(lines.every(line => line.endsWith(" "))).toBe(true);
+			expect(lines[0].trimEnd()).toStartWith("╭");
+			expect(lines[0].trimEnd()).toEndWith("╮");
+			expect(lines.at(-1)!.trimEnd()).toStartWith("╰");
+			expect(lines.at(-1)!.trimEnd()).toEndWith("╯");
+			expect(lines.some(line => line.startsWith("│") && line.includes(">") && line.trimEnd().endsWith("│"))).toBe(
+				true,
+			);
 			expect(lines.join("\n")).not.toContain("Type your message...");
 		}
 	});

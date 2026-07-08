@@ -315,7 +315,7 @@ export function resolveThresholdTokens(
  * Image content has no tokenizer representation; charge a fixed estimate
  * matching what providers typically bill for inline images.
  */
-const IMAGE_TOKEN_ESTIMATE = 1200;
+export const IMAGE_TOKEN_ESTIMATE = 1200;
 /**
  * Estimate tokens for collected message fragments using the native-free
  * heuristic. Provider usage is the authoritative anchor for context-changing
@@ -679,6 +679,49 @@ export interface SummaryOptions {
 	preferWebsockets?: boolean;
 }
 
+/**
+ * Cap the serialized conversation fed to a summarization request so the request
+ * itself fits inside the model's context window.
+ *
+ * Without this, summarizing a near-full context serializes (nearly) the entire
+ * history back into a single summary request; on strict backends (e.g.
+ * OpenAI-code/Codex `context_length_exceeded`) that request itself overflows and
+ * throws, so context-overflow recovery cannot produce a summary and the agent
+ * fails to compact-and-continue — a non-interactive `skc -p` run then terminates
+ * on the very overflow the recovery was meant to absorb.
+ *
+ * The budget reserves the summary's own output tokens plus prompt/system/template
+ * overhead, and applies a conservative safety factor because the chars/4 heuristic
+ * undercounts dense or CJK text (the reason the original overflow was missed).
+ * Truncation keeps the head (origin/goals) and the tail (most recent state) and
+ * elides the middle; it is a last resort that only triggers when the input would
+ * otherwise not fit.
+ */
+export function boundConversationTextForSummary(
+	conversationText: string,
+	model: Model,
+	outputMaxTokens: number,
+): string {
+	const contextWindow = model.contextWindow;
+	if (!Number.isFinite(contextWindow) || contextWindow <= 0) return conversationText;
+
+	const OVERHEAD_TOKENS = 4096;
+	const SAFETY_FACTOR = 0.6;
+	const inputBudgetTokens = Math.floor(
+		(contextWindow - Math.max(0, outputMaxTokens) - OVERHEAD_TOKENS) * SAFETY_FACTOR,
+	);
+	if (inputBudgetTokens <= 0) return conversationText;
+	if (estimateTextTokensHeuristic(conversationText) <= inputBudgetTokens) return conversationText;
+
+	const budgetChars = inputBudgetTokens * HEURISTIC_BYTES_PER_TOKEN;
+	const headChars = Math.floor(budgetChars * 0.35);
+	const tailChars = Math.max(0, budgetChars - headChars);
+	const head = conversationText.slice(0, headChars);
+	const tail = tailChars > 0 ? conversationText.slice(conversationText.length - tailChars) : "";
+	const elided = conversationText.length - head.length - tail.length;
+	return `${head}\n\n[... ${elided} characters of older conversation elided so this summarization request fits within the model context window ...]\n\n${tail}`;
+}
+
 export async function generateSummary(
 	currentMessages: AgentMessage[],
 	model: Model,
@@ -703,7 +746,7 @@ export async function generateSummary(
 	// Serialize conversation to text so model doesn't try to continue it
 	// Convert to LLM messages first (handles custom app messages when caller provides a transformer).
 	const llmMessages = (options?.convertToLlm ?? convertToLlm)(currentMessages);
-	const conversationText = serializeConversation(llmMessages);
+	const conversationText = boundConversationTextForSummary(serializeConversation(llmMessages), model, maxTokens);
 
 	// Build the prompt with conversation wrapped in tags
 	let promptText = `<conversation>\n${conversationText}\n</conversation>\n\n`;
@@ -859,7 +902,7 @@ async function generateShortSummary(
 ): Promise<string> {
 	const maxTokens = Math.min(512, Math.floor(0.2 * reserveTokens));
 	const llmMessages = (options?.convertToLlm ?? convertToLlm)(recentMessages);
-	const conversationText = serializeConversation(llmMessages);
+	const conversationText = boundConversationTextForSummary(serializeConversation(llmMessages), model, maxTokens);
 
 	let promptText = `<conversation>\n${conversationText}\n</conversation>\n\n`;
 	if (historySummary) {
@@ -934,11 +977,35 @@ export interface CompactionPreparation {
 	fileOps: FileOperations;
 	/** Compaction settions from settings.jsonl	*/
 	settings: CompactionSettings;
+	/**
+	 * Diagnostics for the keep-window token correction (Finding 7). `ratio` is the
+	 * clamped heuristic→actual correction that was applied (1 when none supplied);
+	 * `keepRecentTokensCorrected` is the heuristic budget findCutPoint actually used.
+	 */
+	tokenCorrection: { ratio: number; keepRecentTokensCorrected: number };
+}
+
+/** Bounds for the keep-window token correction (Finding 7): never trust a ratio
+ * beyond 2x in either direction so a bad estimate cannot balloon or collapse the
+ * kept window. */
+export const TOKEN_CORRECTION_MIN_RATIO = 0.5;
+export const TOKEN_CORRECTION_MAX_RATIO = 2;
+
+export interface PrepareCompactionOptions {
+	/**
+	 * Observed heuristic→actual token correction for the post-boundary keep window
+	 * (actualTokens / chars-4-heuristicTokens), supplied by the caller from per-turn
+	 * Usage deltas or a stable-prefix-subtracted comparison. Clamped to
+	 * [0.5, 2] and applied bidirectionally. When omitted, no correction is applied
+	 * (the confounded raw promptTokens/estimatedTokens quotient is never used).
+	 */
+	tokenCorrectionRatio?: number;
 }
 
 export function prepareCompaction(
 	pathEntries: SessionEntry[],
 	settings: CompactionSettings,
+	options: PrepareCompactionOptions = {},
 ): CompactionPreparation | undefined {
 	if (pathEntries.length > 0 && pathEntries[pathEntries.length - 1].type === "compaction") {
 		return undefined;
@@ -956,17 +1023,22 @@ export function prepareCompaction(
 
 	const lastUsage = getLastAssistantUsage(pathEntries);
 	const tokensBefore = lastUsage ? calculateContextTokens(lastUsage) : 0;
-	let keepRecentTokens = settings.keepRecentTokens;
-	if (lastUsage) {
-		const estimatedTokens = estimateEntriesTokens(pathEntries, boundaryStart, boundaryEnd);
-		const promptTokens = calculatePromptTokens(lastUsage);
-		const ratio = estimatedTokens > 0 ? promptTokens / estimatedTokens : 0;
-		if (Number.isFinite(ratio) && ratio > 1) {
-			keepRecentTokens = Math.max(1, Math.floor(keepRecentTokens / ratio));
-		}
-	}
 
-	const cutPoint = findCutPoint(pathEntries, boundaryStart, boundaryEnd, keepRecentTokens);
+	// Correct the keep-window budget for the chars/4 heuristic error using the
+	// caller-supplied observed ratio (actual/heuristic). The legacy raw
+	// promptTokens/estimatedTokens quotient is intentionally NOT used: promptTokens
+	// counts system+tools+full history while estimatedTokens counted only the
+	// post-boundary slice, so it was confounded and only ever shrank the window.
+	// Here the correction is bidirectional and clamped to [0.5, 2].
+	const keepRecentTokens = settings.keepRecentTokens;
+	const rawRatio = options.tokenCorrectionRatio;
+	const appliedRatio =
+		rawRatio !== undefined && Number.isFinite(rawRatio) && rawRatio > 0
+			? Math.min(TOKEN_CORRECTION_MAX_RATIO, Math.max(TOKEN_CORRECTION_MIN_RATIO, rawRatio))
+			: 1;
+	const keepRecentTokensCorrected = Math.max(1, Math.round(keepRecentTokens / appliedRatio));
+
+	const cutPoint = findCutPoint(pathEntries, boundaryStart, boundaryEnd, keepRecentTokensCorrected);
 
 	// Get ID of first kept entry
 	const firstKeptEntry = pathEntries[cutPoint.firstKeptEntryIndex];
@@ -1034,6 +1106,7 @@ export function prepareCompaction(
 		previousPreserveData,
 		fileOps,
 		settings,
+		tokenCorrection: { ratio: appliedRatio, keepRecentTokensCorrected },
 	};
 }
 
@@ -1235,7 +1308,7 @@ async function generateTurnPrefixSummary(
 	const maxTokens = Math.floor(0.5 * reserveTokens); // Smaller budget for turn prefix
 
 	const llmMessages = (options?.convertToLlm ?? convertToLlm)(messages);
-	const conversationText = serializeConversation(llmMessages);
+	const conversationText = boundConversationTextForSummary(serializeConversation(llmMessages), model, maxTokens);
 	const promptText = `<conversation>\n${conversationText}\n</conversation>\n\n${TURN_PREFIX_SUMMARIZATION_PROMPT}`;
 	const summarizationMessages = [
 		{

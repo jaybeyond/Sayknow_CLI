@@ -48,7 +48,7 @@ echo -n "G1 residual-tokens … "
 if grep -rIE 'gajae|robogjc|red-claw|blue-crab|crabShell|\bcan1357\b|Yeachan-Heo' "$WT" \
      --include='*.ts' --include='*.json' --include='*.md' --include='*.toml' --include='*.rs' --include='*.py' \
      --exclude-dir=node_modules --exclude-dir=rebrand 2>/dev/null \
-     | grep -vqE "REBRANDING_PLAN|^${WT}/(NOTICE\.md|README\.md|packages/coding-agent/CHANGELOG\.md|scripts/(apply-rebrand|apply-fork-identity|extract-fork-layer|gen-tree|sync-upstream|publish-npm)\.(ts|sh)|docs/FORK_MAINTENANCE\.md):"; then
+     | grep -vqE "REBRANDING_PLAN|^${WT}/(NOTICE\.md|README\.md|packages/coding-agent/CHANGELOG\.md|packages/coding-agent/src/internal-urls/docs-index\.generated\.ts|scripts/(apply-rebrand|apply-fork-identity|extract-fork-layer|gen-tree|sync-upstream|publish-npm)\.(ts|sh)|docs/FORK_MAINTENANCE\.md):"; then
   echo "FAIL"; grep -rIE 'gajae|robogjc|red-claw|blue-crab' "$WT" --include='*.ts' --exclude-dir=node_modules | head -3; fail=1
 else echo "ok"; fi
 
@@ -64,6 +64,9 @@ echo -n "G3 typecheck … "
 if (cd "$WT" && bun --cwd=packages/coding-agent run check:types) >/dev/null 2>&1; then echo "ok"; else echo "FAIL"; fail=1; fi
 
 # G4 — brand/i18n/welcome tests.
+if compgen -G "$REPO/packages/natives/native/*.node" >/dev/null; then
+  cp "$REPO"/packages/natives/native/*.node "$WT/packages/natives/native/" 2>/dev/null || true
+fi
 echo -n "G4 brand+i18n tests … "
 if (cd "$WT" && bun test packages/coding-agent/test/i18n.test.ts \
        packages/coding-agent/test/modes/components/redesigned-shell.test.ts \
