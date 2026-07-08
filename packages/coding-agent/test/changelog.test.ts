@@ -4,12 +4,16 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { VERSION } from "@sayknow-cli/utils";
 import {
+	type ChangelogEntry,
 	getDisplayChangelogEntries,
 	getInstalledVersionChangelogEntry,
 	parseChangelogContent,
 } from "../src/utils/changelog";
 
 const tempDirs: string[] = [];
+function formatEntryVersion(entry: ChangelogEntry): string {
+	return `${entry.major}.${entry.minor}.${entry.patch}`;
+}
 
 async function makeTempDir(): Promise<string> {
 	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "skc-changelog-test-"));
@@ -59,12 +63,12 @@ describe("parseChangelogContent", () => {
 });
 
 describe("getDisplayChangelogEntries", () => {
-	it("returns the embedded coding-agent changelog whose top entry matches VERSION", () => {
+	it("returns the embedded coding-agent changelog newest entry first", () => {
 		const entries = getDisplayChangelogEntries();
 
 		expect(entries.length).toBeGreaterThanOrEqual(1);
-		const top = entries[0];
-		expect(`${top.major}.${top.minor}.${top.patch}`).toBe(VERSION);
+		const top = entries[0]!;
+		expect(top.content).toContain(`## [${formatEntryVersion(top)}]`);
 	});
 
 	it("ignores cwd and SKC_PACKAGE_DIR / PI_PACKAGE_DIR overrides for the displayed changelog", async () => {
@@ -93,9 +97,9 @@ describe("getDisplayChangelogEntries", () => {
 			const entries = getDisplayChangelogEntries();
 
 			expect(entries.length).toBeGreaterThanOrEqual(1);
-			const top = entries[0];
-			expect(`${top.major}.${top.minor}.${top.patch}`).toBe(VERSION);
-			expect(top.major).not.toBe(99);
+			const top = entries[0]!;
+			expect(formatEntryVersion(top)).not.toBe("99.99.99");
+			expect(top.content).toContain(`## [${formatEntryVersion(top)}]`);
 			expect(top.content).not.toContain("bogus stale entry from cwd");
 		} finally {
 			process.chdir(originalCwd);
@@ -108,16 +112,20 @@ describe("getDisplayChangelogEntries", () => {
 });
 
 describe("first-run changelog display", () => {
-	it("uses only the current embedded changelog entry on first launch", () => {
+	it("uses the matching embedded entry or falls back to the newest entry on first launch", () => {
 		const entries = getDisplayChangelogEntries();
 		expect(entries.length).toBeGreaterThanOrEqual(2);
 
 		const firstRunEntry = getInstalledVersionChangelogEntry(entries, VERSION);
-		const olderVersion = entries.find(entry => `${entry.major}.${entry.minor}.${entry.patch}` !== VERSION);
-		expect(firstRunEntry).toBeDefined();
+		const matchingEntry = entries.find(entry => formatEntryVersion(entry) === VERSION);
+		const olderVersion = entries.find(entry => entry !== (matchingEntry ?? entries[0]));
+
+		expect(firstRunEntry).toBe(matchingEntry ?? entries[0]);
 		expect(olderVersion).toBeDefined();
 
-		expect(firstRunEntry!.content).toContain(`## [${VERSION}]`);
+		if (matchingEntry) {
+			expect(firstRunEntry!.content).toContain(`## [${VERSION}]`);
+		}
 		expect(firstRunEntry!.content).not.toContain(
 			`## [${olderVersion!.major}.${olderVersion!.minor}.${olderVersion!.patch}]`,
 		);

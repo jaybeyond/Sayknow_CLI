@@ -92,7 +92,7 @@ describe("lifecycle command parser (G009)", () => {
 			target: { sessionIdOrPrefix: "abc" },
 		});
 		expect(
-			parseLifecycleCommand("/session_recent@SayknowCliBot", { chatType: "group", botUsername: "sayknowcodebot" }),
+			parseLifecycleCommand("/session_recent@SayknowCliBot", { chatType: "group", botUsername: "sayknowclibot" }),
 		).toEqual({
 			kind: "recent",
 			which: "all",

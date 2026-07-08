@@ -1151,7 +1151,7 @@ describe("ModelRegistry", () => {
 			expect(registry.find("openai", "gpt-5.4")?.contextWindow).toBe(256000);
 		});
 
-		test("custom-only gpt-5.5 completions provider defaults to the Codex-safe context window", () => {
+		test("custom-only gpt-5.5 completions provider keeps the first-party context window when contextWindow is omitted", () => {
 			writeRawModelsJson({
 				"my-proxy": {
 					baseUrl: "http://127.0.0.1:8317/v1",
@@ -1163,7 +1163,7 @@ describe("ModelRegistry", () => {
 
 			const registry = new ModelRegistry(authStorage, modelsJsonPath);
 			const model = registry.find("my-proxy", "gpt-5.5");
-			expect(model?.contextWindow).toBe(272_000);
+			expect(model?.contextWindow).toBe(1_000_000);
 			expect(model?.baseUrl).toBe("http://127.0.0.1:8317/v1");
 		});
 
