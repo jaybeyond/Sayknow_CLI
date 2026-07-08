@@ -1,7 +1,7 @@
 {
   "name": "sayknow-cli",
   "description": "Delegate planning, execution, and team workflows to SKC through the coordinator MCP server.",
-  "version": "0.3.6",
+  "version": "0.3.8",
   "commands": "./commands",
   "skills": "./skills",
   "mcpServers": "./.mcp.json"

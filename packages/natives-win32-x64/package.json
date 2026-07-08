@@ -1,6 +1,6 @@
 {
 	"name": "@sayknow-cli/natives-win32-x64",
-	"version": "0.3.7",
+	"version": "0.3.8",
 	"description": "Windows x64 native addon for @sayknow-cli/natives",
 	"type": "module",
 	"homepage": "https://sayknow-cli.com",
