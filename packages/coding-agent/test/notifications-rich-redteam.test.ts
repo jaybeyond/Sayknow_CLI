@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { Settings } from "../src/config/settings";
-import { markdownToTelegramHtml } from "../src/notifications/html-format";
+import { markdownToTelegramHtml, splitTelegramHtml } from "../src/notifications/html-format";
 import { buildRichMessage, deliverRichWithFallback, shouldPromoteRich } from "../src/notifications/rich-render";
 import type { BotApi } from "../src/notifications/telegram-daemon";
 import { TelegramNotificationDaemon } from "../src/notifications/telegram-daemon";
@@ -171,7 +171,7 @@ describe("redteam(b): rich body carries hostile raw verbatim with no HTML-path p
 		expect(markdownToTelegramHtml(hostileRaw)).not.toBe(hostileRaw);
 	});
 
-	test("RT-B1: daemon promotes hostile final answer to rich only; sendMessage(HTML) is never called", async () => {
+	test("RT-B1: daemon keeps oversized hostile final answer on HTML chunk path", async () => {
 		const bot = new RedTeamBot();
 		const daemon = makeRichDaemon(bot, { enabled: true });
 		const session = richSession();
@@ -183,12 +183,12 @@ describe("redteam(b): rich body carries hostile raw verbatim with no HTML-path p
 			finalAnswer: true,
 			text: hostileRaw,
 		});
-		expect(countMethod(bot, "sendRichMessage")).toBe(1);
-		expect(countMethod(bot, "sendMessage")).toBe(0); // no HTML-path pollution
-		const body = findMethod(bot, "sendRichMessage")!.body;
-		expect(body.rich_message.markdown).toBe(hostileRaw); // raw verbatim, unescaped
-		expect(body.rich_message.markdown.length).toBe(hostileRaw.length); // not truncated at 4096
+		expect(countMethod(bot, "sendRichMessage")).toBe(0);
+		expect(countMethod(bot, "sendMessage")).toBe(1);
+		const body = findMethod(bot, "sendMessage")!.body;
+		expect(body.text).toBe(splitTelegramHtml(markdownToTelegramHtml(hostileRaw))[0]);
 		expect(body.message_thread_id).toBe(555); // correct topic attribution
+		expect(body.parse_mode).toBe("HTML");
 	});
 });
 

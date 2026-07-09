@@ -29,7 +29,7 @@ interface PublishPackage {
 	extraFiles?: readonly string[];
 	/** Extra tsgo invocations beyond `tsconfig.publish.json`. */
 	extraTypeConfigs?: readonly string[];
-	/** Native artifact filename prefixes to stage for platform packages. */
+	/** Native addon filename prefixes staged into a per-platform optional package. */
 	nativePrefixes?: readonly string[];
 }
 
@@ -206,6 +206,7 @@ async function rewriteNativeManifest(pkgDir: string): Promise<PackageManifest> {
 	await Bun.write(manifestPath, `${JSON.stringify(manifest, null, "\t")}\n`);
 	return manifest;
 }
+
 async function stageNativePlatformArtifacts(pkg: PublishPackage): Promise<void> {
 	const prefixes = pkg.nativePrefixes ?? [];
 	if (prefixes.length === 0) throw new Error(`Native platform package ${pkg.dir} has no nativePrefixes`);
@@ -232,7 +233,6 @@ async function stageNativePlatformArtifacts(pkg: PublishPackage): Promise<void> 
 	}
 }
 
-
 async function preparePackage(pkg: PublishPackage): Promise<PackageManifest> {
 	const pkgDir = path.join(repoRoot, pkg.dir);
 	if (pkg.kind === "native-platform") {
@@ -256,6 +256,7 @@ async function readPackageManifest(pkgDir: string): Promise<PackageManifest> {
 	return (await Bun.file(path.join(pkgDir, "package.json")).json()) as PackageManifest;
 }
 
+
 async function publishPackage(pkg: PublishPackage): Promise<void> {
 	const pkgDir = path.join(repoRoot, pkg.dir);
 	const manifest = isDryRun ? await readPackageManifest(pkgDir) : await preparePackage(pkg);
@@ -264,18 +265,18 @@ async function publishPackage(pkg: PublishPackage): Promise<void> {
 		console.log(`Skipping ${name} (private)`);
 		return;
 	}
+	if (isDryRun) {
+		if (pkg.kind === "native-platform") await stageNativePlatformArtifacts(pkg);
+		console.log(`DRY RUN npm publish --access public (${pkg.dir})`);
+		return;
+	}
 	const version = typeof manifest.version === "string" ? manifest.version : undefined;
-	if (!isDryRun && version !== undefined) {
+	if (version !== undefined) {
 		const existing = await $`npm view ${`${name}@${version}`} version --json`.quiet().nothrow();
 		if (existing.exitCode === 0) {
 			console.log(`Skipping ${name}@${version} (already published)`);
 			return;
 		}
-	}
-	if (isDryRun) {
-		if (pkg.kind === "native-platform") await stageNativePlatformArtifacts(pkg);
-		console.log(`DRY RUN npm publish --access public (${pkg.dir})`);
-		return;
 	}
 	console.log(`Publishing ${name}…`);
 	const result = await $`npm publish --access public`.cwd(pkgDir).quiet().nothrow();

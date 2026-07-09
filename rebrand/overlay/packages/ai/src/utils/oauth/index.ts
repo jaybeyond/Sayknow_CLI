@@ -61,6 +61,11 @@ const builtInOAuthProviders: OAuthProviderInfo[] = [
 		available: true,
 	},
 	{
+		id: "deepinfra",
+		name: "DeepInfra",
+		available: true,
+	},
+	{
 		id: "xai",
 		name: "xAI",
 		available: true,

@@ -49,6 +49,7 @@ export function shouldPromoteRich(input: { enabled?: boolean; send: ThreadedSend
 		send.editable !== true &&
 		typeof send.richMarkdown === "string" &&
 		send.richMarkdown.trim().length > 0 &&
+		send.richMarkdown.length <= RICH_MESSAGE_LIMIT &&
 		typeof send.text === "string" &&
 		send.text.length > 0
 	);

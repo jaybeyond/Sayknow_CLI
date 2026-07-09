@@ -376,6 +376,21 @@ describe("planTargetedTasks PR-mode targeting", () => {
 		expect(tasks.map(task => task.key).sort()).toEqual(["ci-dry-run", "ci-selftest"]);
 	});
 
+	test("native platform package changes plan release publish validation", () => {
+		const tasks = targeted(["packages/natives-linux-x64/package.json"]);
+		const keys = tasks.map(task => task.key);
+		expect(keys).toContain("release-publish-contract");
+		expect(keys).toContain("release-publish-dry-run");
+	});
+
+	test("unscoped wrapper package changes keep wrapper-version smoke with release validation", () => {
+		const tasks = targeted(["packages/sayknow-cli/bin/skc.js"]);
+		const keys = tasks.map(task => task.key);
+		expect(keys).toContain("release-publish-contract");
+		expect(keys).toContain("release-publish-dry-run");
+		expect(keys).toContain("wrapper-version");
+	});
+
 	test("root-level codeish changes that fall back to root-check provide native artifacts", () => {
 		const tasks = targeted(["scripts/unmapped-tool.ts"]);
 		const keys = tasks.map(task => task.key);
@@ -415,11 +430,46 @@ describe("push-mode broad planning still runs the fuller suite", () => {
 		manifest: { name: "@sayknow-cli/coding-agent", scripts: { check: "biome check .", test: "bun test" } },
 	};
 
-	test("push mode plans the package-wide test for a coding-agent change", () => {
+	test("push mode splits the package-wide coding-agent test across bounded shards", () => {
 		const tasks = planTasks(["packages/coding-agent/src/edit/foo.ts"], [codingAgent]);
 		const keys = tasks.map(task => task.key);
-		// Broad planner keeps the package-wide test (the post-merge fuller suite).
-		expect(keys).toContain("test:@sayknow-cli/coding-agent");
+		const testShards = tasks.filter(task => task.key.startsWith("test:@sayknow-cli/coding-agent:shard-"));
+		// Broad planner keeps the post-merge fuller suite, but not as one 30m shard.
+		expect(testShards.map(task => task.key)).toEqual([
+			"test:@sayknow-cli/coding-agent:shard-1-of-8",
+			"test:@sayknow-cli/coding-agent:shard-2-of-8",
+			"test:@sayknow-cli/coding-agent:shard-3-of-8",
+			"test:@sayknow-cli/coding-agent:shard-4-of-8",
+			"test:@sayknow-cli/coding-agent:shard-5-of-8",
+			"test:@sayknow-cli/coding-agent:shard-6-of-8",
+			"test:@sayknow-cli/coding-agent:shard-7-of-8",
+			"test:@sayknow-cli/coding-agent:shard-8-of-8",
+		]);
+		expect(testShards[0]?.command).toEqual(["bun", "test", "--shard=1/8"]);
+		expect(testShards[0]?.cwd).toBe(resolvePackageCwd("packages/coding-agent"));
+		expect(keys).not.toContain("test:@sayknow-cli/coding-agent");
 		expect(keys).toContain("check:@sayknow-cli/coding-agent");
+
+		const entries = describeTasks(tasks);
+		expect(entries.find(entry => entry.key === "test:@sayknow-cli/coding-agent:shard-1-of-8")?.native).toBe(true);
+	});
+
+	test("full-workspace changes partition root tests into matrix shards", () => {
+		const tasks = planTasks(["tsconfig.json"], [codingAgent]);
+		const keys = tasks.map(task => task.key);
+
+		expect(keys).toContain("root-check");
+		expect(keys).toContain("root-test:release");
+		expect(keys).not.toContain("root-test");
+		expect(tasks.filter(task => task.key.startsWith("test:@sayknow-cli/coding-agent:shard-")).map(task => task.key)).toEqual([
+			"test:@sayknow-cli/coding-agent:shard-1-of-8",
+			"test:@sayknow-cli/coding-agent:shard-2-of-8",
+			"test:@sayknow-cli/coding-agent:shard-3-of-8",
+			"test:@sayknow-cli/coding-agent:shard-4-of-8",
+			"test:@sayknow-cli/coding-agent:shard-5-of-8",
+			"test:@sayknow-cli/coding-agent:shard-6-of-8",
+			"test:@sayknow-cli/coding-agent:shard-7-of-8",
+			"test:@sayknow-cli/coding-agent:shard-8-of-8",
+		]);
 	});
 });

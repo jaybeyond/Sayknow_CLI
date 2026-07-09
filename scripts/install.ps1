@@ -23,7 +23,7 @@ try {
 } catch {}
 
 $Repo = "jaybeyond/Sayknow_CLI"
-$Package = "sayknow-cli"
+$Package = "@sayknow-cli/coding-agent"
 $InstallDir = if ($env:SKC_INSTALL_DIR) { $env:SKC_INSTALL_DIR } else { "$env:LOCALAPPDATA\skc" }
 $BinaryName = "skc-windows-x64.exe"
 $MinimumBunVersion = "1.3.14"

@@ -14,10 +14,9 @@ import { installDefaultSkcDefinitions } from "../defaults/skc-defaults";
 import { theme } from "../modes/theme/theme";
 
 const RELEASE_REPO = "jaybeyond/Sayknow_CLI";
-const RELEASE_TAG_PREFIX = "sayknow-v";
-const PACKAGE = "sayknow-cli";
-const SCOPED_CLI_PACKAGE = "@sayknow-cli/coding-agent";
-const NPM_MANAGED_PACKAGES = [PACKAGE, SCOPED_CLI_PACKAGE] as const;
+const PACKAGE = "@sayknow-cli/coding-agent";
+const NPM_WRAPPER_PACKAGE = "sayknow-cli";
+const NPM_MANAGED_PACKAGES = [NPM_WRAPPER_PACKAGE, PACKAGE] as const;
 
 interface ReleaseInfo {
 	tag: string;
@@ -137,39 +136,10 @@ function defaultPackageExists(_packageName: string, packageRoot: string): boolea
 	return fs.existsSync(path.join(packageRoot, "package.json"));
 }
 
-function npmPackageRootForWindowsShim(binPath: string, packageName: string, platform: PathPlatform): string {
+function npmPackageRootForBinPath(binPath: string, packageName: string, platform: PathPlatform): string {
 	const pathApi = pathApiForPlatform(platform);
 	const segments = packageName.split("/");
 	return pathApi.join(pathApi.dirname(binPath), "node_modules", ...segments);
-}
-
-function packageRootFromNodeModulesPath(
-	binPath: string,
-	packageName: string,
-	platform: PathPlatform,
-): string | undefined {
-	const pathApi = pathApiForPlatform(platform);
-	const packageSegments = packageName.split("/");
-	const parts = pathApi.normalize(binPath).split(pathApi.sep).filter(Boolean);
-	for (let index = 0; index < parts.length; index++) {
-		if (parts[index] !== "node_modules") continue;
-		const packageStart = index + 1;
-		const matched = packageSegments.every((segment, offset) => parts[packageStart + offset] === segment);
-		if (!matched) continue;
-		const prefix = binPath.startsWith(pathApi.sep) ? pathApi.sep : "";
-		return pathApi.join(prefix, ...parts.slice(0, packageStart + packageSegments.length));
-	}
-	return undefined;
-}
-
-function npmPackageRootsForPosixShim(binPath: string, packageName: string): string[] {
-	const pathApi = path.posix;
-	const binDir = pathApi.dirname(binPath);
-	const packageSegments = packageName.split("/");
-	return [
-		pathApi.join(pathApi.dirname(binDir), "lib", "node_modules", ...packageSegments),
-		pathApi.join(binDir, "node_modules", ...packageSegments),
-	];
 }
 
 function resolveNpmManagedTarget(
@@ -177,39 +147,24 @@ function resolveNpmManagedTarget(
 	platform: PathPlatform = process.platform,
 	packageExists: PackageExists = defaultPackageExists,
 ): PackageManagerTarget | undefined {
+	if (platform !== "win32") return undefined;
 	const pathApi = pathApiForPlatform(platform);
-	const basename = pathApi.basename(ompPath, pathApi.extname(ompPath)).toLowerCase();
-	const resolvedPath = tryRealpath(ompPath);
-	const candidatePaths = resolvedPath ? [resolvedPath, ompPath] : [ompPath];
-
-	if (platform === "win32") {
-		const extension = pathApi.extname(ompPath).toLowerCase();
-		if (extension !== ".cmd" && extension !== ".ps1") return undefined;
-		if (basename !== APP_NAME.toLowerCase()) return undefined;
-		for (const packageName of NPM_MANAGED_PACKAGES) {
-			const packageRoot = npmPackageRootForWindowsShim(ompPath, packageName, platform);
-			if (packageExists(packageName, packageRoot)) return { manager: "npm", packageName };
-		}
-		return undefined;
-	}
-
+	const extension = pathApi.extname(ompPath).toLowerCase();
+	if (extension !== ".cmd" && extension !== ".ps1") return undefined;
+	const basename = pathApi.basename(ompPath, extension).toLowerCase();
 	if (basename !== APP_NAME.toLowerCase()) return undefined;
+
 	for (const packageName of NPM_MANAGED_PACKAGES) {
-		for (const candidatePath of candidatePaths) {
-			const packageRoot = packageRootFromNodeModulesPath(candidatePath, packageName, platform);
-			if (packageRoot && packageExists(packageName, packageRoot)) return { manager: "npm", packageName };
-		}
-		for (const packageRoot of npmPackageRootsForPosixShim(ompPath, packageName)) {
-			if (packageExists(packageName, packageRoot)) return { manager: "npm", packageName };
-		}
+		const packageRoot = npmPackageRootForBinPath(ompPath, packageName, platform);
+		if (packageExists(packageName, packageRoot)) return { manager: "npm", packageName };
 	}
 	return undefined;
 }
 
 function resolveUpdateMethod(ompPath: string, bunBinDir: string | undefined): "bun" | "npm" | "binary" {
-	if (bunBinDir && isPathInDirectory(ompPath, bunBinDir)) return "bun";
 	if (resolveNpmManagedTarget(ompPath)) return "npm";
-	return "binary";
+	if (!bunBinDir) return "binary";
+	return isPathInDirectory(ompPath, bunBinDir) ? "bun" : "binary";
 }
 
 export function resolveUpdateMethodForTest(ompPath: string, bunBinDir: string | undefined): "bun" | "npm" | "binary" {
@@ -228,10 +183,16 @@ async function resolveUpdateTarget(): Promise<UpdateTarget> {
 	const ompPath = resolveSkcPath();
 
 	if (ompPath) {
-		if (bunBinDir && isPathInDirectory(ompPath, bunBinDir)) return { method: "bun" };
 		const npmTarget = resolveNpmManagedTarget(ompPath);
 		if (npmTarget) return { method: "npm", packageName: npmTarget.packageName };
-		return { method: "binary", path: ompPath };
+		const method = resolveUpdateMethod(ompPath, bunBinDir);
+		if (method === "bun") return { method };
+		if (method === "npm") {
+			throw new Error(
+				formatUnsupportedTargetMessage(`Could not resolve npm package root for ${APP_NAME} shim ${ompPath}`),
+			);
+		}
+		return { method, path: ompPath };
 	}
 
 	if (bunBinDir) return { method: "bun" };
@@ -251,7 +212,7 @@ async function getLatestRelease(): Promise<ReleaseInfo> {
 
 	const data = (await response.json()) as { version: string };
 	const version = data.version;
-	const tag = `${RELEASE_TAG_PREFIX}${version}`;
+	const tag = `v${version}`;
 
 	return {
 		tag,
@@ -389,7 +350,7 @@ function formatBinaryInstallInstruction(platform: NodeJS.Platform = process.plat
 function formatManualUpdateInstructions(platform: NodeJS.Platform = process.platform): string {
 	return [
 		`If ${APP_NAME} was installed with Bun, run: bun install -g ${PACKAGE}@latest`,
-		`If ${APP_NAME} was installed with npm, pnpm, or another package manager, run: npm install -g ${PACKAGE}@latest`,
+		`If ${APP_NAME} was installed with npm, pnpm, or another package manager, update it with that same manager.`,
 		formatBinaryInstallInstruction(platform),
 	].join("\n");
 }
@@ -404,7 +365,7 @@ function buildReleaseBinaryUrl(
 	arch: string = process.arch,
 ): string {
 	const binaryName = getBinaryName(platform, arch);
-	const tag = `${RELEASE_TAG_PREFIX}${version}`;
+	const tag = `v${version}`;
 	return `https://github.com/${RELEASE_REPO}/releases/download/${tag}/${binaryName}`;
 }
 

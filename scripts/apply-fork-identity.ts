@@ -8,7 +8,7 @@
  * JSON/TOML re-serialize (which would reflow whitespace and explode the diff).
  *
  * Currently stamps the fork VERSION onto:
- *   - every workspace package.json  ("version": "...")
+ *   - release workspace package.json files ("version": "..."), excluding private benchmark packages with fixed local versions
  *   - the root catalog              (@sayknow-cli/*: "...")
  *   - Cargo.toml                    ([workspace.package] version = "...")
  *
@@ -20,6 +20,11 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 
 const SKIP_DIRS = new Set([".git", "node_modules", "dist", "build", "coverage", ".turbo", "target"]);
+const PACKAGE_VERSION_EXCEPTIONS = new Set([
+	"@sayknow-cli/orchestration-token-benchmark",
+	"@sayknow-cli/typescript-edit-benchmark",
+]);
+
 
 interface Identity {
 	version: string;
@@ -42,6 +47,10 @@ function findPackageJsons(root: string, out: string[]): void {
 	if (fs.existsSync(webPj)) out.push(webPj);
 }
 
+function packageName(text: string): string | undefined {
+	const match = text.match(/"name"\s*:\s*"([^"]+)"/);
+	return match?.[1];
+}
 /** Replace ONLY the first top-level `"version": "..."` (package.json convention). */
 function stampPackageVersion(text: string, version: string): string {
 	return text.replace(/("version"\s*:\s*")[^"]*(")/, `$1${version}$2`);
@@ -58,15 +67,16 @@ function stampCargoWorkspaceVersion(text: string, version: string): string {
 }
 
 /**
- * Stamp the napi version sentinel in `crates/pi-natives/src/lib.rs`. The sentinel
- * `js_name = "__piNativesV{major}_{minor}_{patch}"` is a guard that must track the
- * package version: the `@sayknow-cli/natives` test asserts it equals
- * `package.json#version`, so an un-stamped sentinel (still on the upstream version)
- * fails CI. Upstream bumps it via `scripts/release.ts`; the fork bumps it here.
+ * Stamp the napi version sentinel in the Rust source and committed generated
+ * JS/TS binding surfaces. The sentinel `js_name = "__piNativesV{major}_{minor}_{patch}"`
+ * is a guard that must track the package version: the `@sayknow-cli/natives`
+ * test asserts it equals `package.json#version`, and the JS loader expects the
+ * matching generated export. Upstream bumps it via `scripts/release.ts`; the
+ * fork bumps it here so generated fork trees are release-version consistent.
  */
 function stampNativeSentinel(text: string, version: string): string {
 	const sentinel = `__piNativesV${version.replace(/[^A-Za-z0-9]/g, "_")}`;
-	return text.replace(/(js_name = ")__piNativesV[A-Za-z0-9_]+(")/, `$1${sentinel}$2`);
+	return text.replace(/__piNativesV[A-Za-z0-9_]+/g, sentinel);
 }
 
 function main(): void {
@@ -98,15 +108,24 @@ function main(): void {
 	const pkgs: string[] = [];
 	findPackageJsons(root, pkgs);
 	for (const file of pkgs) {
-		queue(file, stampPackageVersion(fs.readFileSync(file, "utf8"), id.version));
+		const text = fs.readFileSync(file, "utf8");
+		const name = packageName(text);
+		if (name !== undefined && PACKAGE_VERSION_EXCEPTIONS.has(name)) continue;
+		queue(file, stampPackageVersion(text, id.version));
 	}
 	const cargo = path.join(root, "Cargo.toml");
 	if (fs.existsSync(cargo)) {
 		queue(cargo, stampCargoWorkspaceVersion(fs.readFileSync(cargo, "utf8"), id.version));
 	}
-	const libRs = path.join(root, "crates/pi-natives/src/lib.rs");
-	if (fs.existsSync(libRs)) {
-		queue(libRs, stampNativeSentinel(fs.readFileSync(libRs, "utf8"), id.version));
+	const nativeSentinelFiles = [
+		path.join(root, "crates/pi-natives/src/lib.rs"),
+		path.join(root, "packages/natives/native/index.d.ts"),
+		path.join(root, "packages/natives/native/index.js"),
+	];
+	for (const file of nativeSentinelFiles) {
+		if (fs.existsSync(file)) {
+			queue(file, stampNativeSentinel(fs.readFileSync(file, "utf8"), id.version));
+		}
 	}
 
 	console.log(`apply-fork-identity: version=${id.version}, ${edits.length} files to stamp`);

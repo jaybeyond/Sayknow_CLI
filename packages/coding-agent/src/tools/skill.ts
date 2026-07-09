@@ -18,6 +18,7 @@
 import type { AgentTool, AgentToolResult } from "@sayknow-cli/agent-core";
 import { prompt, untilAborted } from "@sayknow-cli/utils";
 import * as z from "zod/v4";
+import { findRuntimeSkillByName } from "../extensibility/runtime-skill-discovery";
 import { resolveSubskillActivationForSkillInvocation } from "../extensibility/skc-plugins";
 import { buildSkillPromptMessage } from "../extensibility/skills";
 import skillDescription from "../prompts/tools/skill.md" with { type: "text" };
@@ -62,6 +63,13 @@ export class SkillTool implements AgentTool<typeof skillSchema, SkillToolDetails
 	constructor(session: ToolSession) {
 		this.#session = session;
 		this.description = prompt.render(skillDescription);
+	}
+
+	#getRuntimeSkillPolicy() {
+		return {
+			...this.#session.settings.getGroup("skills"),
+			disabledExtensions: this.#session.settings.get("disabledExtensions"),
+		};
 	}
 
 	static createIf(session: ToolSession): SkillTool | null {
@@ -110,10 +118,15 @@ export class SkillTool implements AgentTool<typeof skillSchema, SkillToolDetails
 				);
 			}
 
-			const skill = skills.find(s => s.name === requestedName);
+			const skill =
+				skills.find(s => s.name === requestedName) ??
+				(await findRuntimeSkillByName(this.#session.cwd, requestedName, this.#getRuntimeSkillPolicy()));
 			if (!skill) {
 				const available = skills.map(s => s.name).sort();
-				const hint = available.length > 0 ? ` Available: ${available.join(", ")}` : "";
+				const hint =
+					available.length > 0
+						? ` Available: ${available.join(", ")}. Use skill_discovery to find project/user runtime skills.`
+						: " Use skill_discovery to find project/user runtime skills.";
 				throw new ToolError(`skill tool: unknown skill "${requestedName}".${hint}`);
 			}
 

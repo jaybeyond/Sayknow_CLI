@@ -473,6 +473,8 @@ export interface PromptOptions {
 	images?: ImageContent[];
 	/** When streaming, how to queue the message: "steer" (interrupt) or "followUp" (wait). */
 	streamingBehavior?: "steer" | "followUp";
+	/** When set to "sequential", this follow-up is delivered one prompt at a time even if followUpMode is "all". */
+	followUpQueuePolicy?: "respect-mode" | "sequential";
 	/** Optional tool choice override for the next LLM call. */
 	toolChoice?: ToolChoice;
 	/** Send as developer/system message instead of user. Providers that support it use the developer role; others fall back to user. */
@@ -5304,7 +5306,9 @@ export class AgentSession {
 				throw new AgentBusyError();
 			}
 			if (options.streamingBehavior === "followUp") {
-				await this.#queueFollowUp(expandedText, options?.images);
+				await this.#queueFollowUp(expandedText, options?.images, {
+					forceOneAtATime: options.followUpQueuePolicy === "sequential",
+				});
 			} else {
 				await this.#queueSteer(expandedText, options?.images);
 			}
@@ -5422,7 +5426,7 @@ export class AgentSession {
 
 	async promptCustomMessage<T = unknown>(
 		message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details" | "attribution">,
-		options?: Pick<PromptOptions, "streamingBehavior" | "toolChoice">,
+		options?: Pick<PromptOptions, "streamingBehavior" | "toolChoice" | "followUpQueuePolicy">,
 	): Promise<void> {
 		const textContent =
 			typeof message.content === "string"
@@ -5436,7 +5440,10 @@ export class AgentSession {
 			if (!options?.streamingBehavior) {
 				throw new AgentBusyError();
 			}
-			await this.sendCustomMessage(message, { deliverAs: options.streamingBehavior });
+			await this.sendCustomMessage(message, {
+				deliverAs: options.streamingBehavior,
+				followUpQueuePolicy: options.followUpQueuePolicy,
+			});
 			return;
 		}
 
@@ -5783,13 +5790,19 @@ export class AgentSession {
 	/**
 	 * Queue a follow-up message to process after the agent would otherwise stop.
 	 */
-	async followUp(text: string, images?: ImageContent[]): Promise<void> {
+	async followUp(
+		text: string,
+		images?: ImageContent[],
+		options?: Pick<PromptOptions, "followUpQueuePolicy">,
+	): Promise<void> {
 		if (text.startsWith("/")) {
 			this.#throwIfExtensionCommand(text);
 		}
 
 		const expandedText = expandPromptTemplate(text, [...this.#promptTemplates]);
-		await this.#queueFollowUp(expandedText, images);
+		await this.#queueFollowUp(expandedText, images, {
+			forceOneAtATime: options?.followUpQueuePolicy === "sequential",
+		});
 	}
 
 	/**
@@ -5826,19 +5839,22 @@ export class AgentSession {
 	/**
 	 * Internal: Queue a follow-up message (already expanded, no extension command check).
 	 */
-	async #queueFollowUp(text: string, images?: ImageContent[]): Promise<void> {
+	async #queueFollowUp(text: string, images?: ImageContent[], options?: { forceOneAtATime?: boolean }): Promise<void> {
 		const displayText = text || (images && images.length > 0 ? "[Image]" : "");
 		this.#followUpMessages.push(this.#createQueuedDisplayEntry(displayText));
 		const content: (TextContent | ImageContent)[] = [{ type: "text", text }];
 		if (images && images.length > 0) {
 			content.push(...images);
 		}
-		this.agent.followUp({
-			role: "user",
-			content,
-			attribution: "user",
-			timestamp: Date.now(),
-		});
+		this.agent.followUp(
+			{
+				role: "user",
+				content,
+				attribution: "user",
+				timestamp: Date.now(),
+			},
+			options?.forceOneAtATime ? { forceOneAtATime: true } : undefined,
+		);
 		// When fully idle AND the session is in a resumable assistant-ended state,
 		// schedule an immediate continue so the queued follow-up is delivered
 		// without waiting for the next user turn. We gate on isStreaming (model
@@ -5986,7 +6002,11 @@ export class AgentSession {
 	 */
 	async sendCustomMessage<T = unknown>(
 		message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details" | "attribution">,
-		options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" },
+		options?: {
+			triggerTurn?: boolean;
+			deliverAs?: "steer" | "followUp" | "nextTurn";
+			followUpQueuePolicy?: "respect-mode" | "sequential";
+		},
 	): Promise<void> {
 		const appMessage: CustomMessage<T> = {
 			role: "custom",
@@ -6004,7 +6024,10 @@ export class AgentSession {
 			}
 
 			if (options?.deliverAs === "followUp") {
-				this.agent.followUp(appMessage);
+				this.agent.followUp(
+					appMessage,
+					options.followUpQueuePolicy === "sequential" ? { forceOneAtATime: true } : undefined,
+				);
 			} else {
 				this.agent.steer(appMessage);
 			}
@@ -6930,7 +6953,7 @@ export class AgentSession {
 
 	/**
 	 * Set thinking level.
-	 * Saves the effective metadata-clamped level to session and settings only if it changes.
+	 * Saves the effective metadata-clamped level to the session, and to settings when requested.
 	 */
 	setThinkingLevel(level: ThinkingLevel | undefined, persist: boolean = false): void {
 		const effectiveLevel = resolveThinkingLevelForModel(this.model, level);
@@ -6939,11 +6962,12 @@ export class AgentSession {
 		this.#thinkingLevel = effectiveLevel;
 		this.agent.setThinkingLevel(toReasoningEffort(effectiveLevel));
 
+		if (persist && effectiveLevel !== undefined) {
+			this.settings.set("defaultThinkingLevel", effectiveLevel);
+		}
+
 		if (isChanging) {
 			this.sessionManager.appendThinkingLevelChange(effectiveLevel);
-			if (persist && effectiveLevel !== undefined && effectiveLevel !== ThinkingLevel.Off) {
-				this.settings.set("defaultThinkingLevel", effectiveLevel);
-			}
 			this.#emit({ type: "thinking_level_changed", thinkingLevel: effectiveLevel });
 		}
 	}

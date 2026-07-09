@@ -1,7 +1,7 @@
 {
 	"type": "module",
 	"name": "@sayknow-cli/bridge-client",
-	"version": "0.3.9",
+	"version": "0.3.10",
 	"description": "TypeScript client SDK for the SKC backend bridge protocol",
 	"homepage": "https://sayknow-cli.com",
 	"author": "jaybeyond",

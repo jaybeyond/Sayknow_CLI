@@ -1,10 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import { ThinkingLevel } from "@sayknow-cli/agent-core";
 import type { Model } from "@sayknow-cli/ai";
+import { CliParseError } from "@sayknow-cli/utils/cli";
 import { parseArgs } from "../src/cli/args";
 import type { ModelProfileDefinition } from "../src/config/model-profiles";
 import { Settings } from "../src/config/settings";
 import { applyStartupModelProfiles, createAcpSessionFactory } from "../src/main";
+import { parseCliCredentialSelector } from "../src/runtime-credential-selector";
 import type { CreateAgentSessionOptions, CreateAgentSessionResult } from "../src/sdk";
 import type { AgentSession } from "../src/session/agent-session";
 
@@ -71,6 +73,33 @@ describe("CLI model profile args", () => {
 
 	test("rejects --default without --mpreset", () => {
 		expect(() => parseArgs(["--default"])).toThrow("--default requires --mpreset <name>");
+	});
+});
+
+describe("CLI credential selector args", () => {
+	test("parses --credential with provider-qualified email selector", () => {
+		const parsed = parseArgs(["--credential", "openai-codex/email:me@example.com"]);
+		expect(parsed.credential).toBe("openai-codex/email:me@example.com");
+
+		const selector = parseCliCredentialSelector(parsed.credential ?? "");
+		expect(selector.provider).toBe("openai-codex");
+		expect(selector.selector).toEqual({ kind: "email", value: "me@example.com" });
+	});
+
+	test("rejects --credential without selector", () => {
+		expect(() => parseArgs(["--credential"])).toThrow(CliParseError);
+		expect(() => parseArgs(["--credential"])).toThrow("--credential requires <selector>");
+		expect(() => parseArgs(["--credential", "--model", "opus"])).toThrow(CliParseError);
+		expect(() => parseArgs(["--credential", "--model", "opus"])).toThrow("--credential requires <selector>");
+	});
+
+	test("parses bare email credential selector as email shorthand", () => {
+		const selector = parseCliCredentialSelector("me@example.com");
+		expect(selector.selector).toEqual({ kind: "email", value: "me@example.com" });
+	});
+
+	test("rejects malformed credential selector", () => {
+		expect(() => parseCliCredentialSelector("openai-codex/nope")).toThrow("Invalid --credential selector");
 	});
 });
 
@@ -169,6 +198,34 @@ test("ACP session factory applies default profile and --mpreset before returning
 	expect(
 		session.setModelTemporaryCalls.map(call => `${call.model.provider}/${call.model.id}:${call.thinkingLevel}`),
 	).toEqual(["profile-provider/default:medium", "cli-provider/explicit:high"]);
+});
+test("persisted default thinking overrides startup default profile effort", async () => {
+	const settings = Settings.isolated({
+		"modelProfile.default": "default-profile",
+		defaultThinkingLevel: ThinkingLevel.XHigh,
+	});
+	const session = fakeSession();
+	const registry = fakeRegistry([
+		{
+			name: "default-profile",
+			requiredProviders: ["profile-provider"],
+			modelMapping: { default: "profile-provider/default:medium" },
+			source: "user",
+		},
+	]) as never;
+
+	await applyStartupModelProfiles({
+		session,
+		settings,
+		modelRegistry: registry,
+		parsedArgs: {},
+		startupModel: undefined,
+		startupThinkingLevel: undefined,
+	});
+
+	expect(
+		session.setModelTemporaryCalls.map(call => `${call.model.provider}/${call.model.id}:${call.thinkingLevel}`),
+	).toEqual(["profile-provider/default:xhigh"]);
 });
 
 test("ACP session factory refreshes registry before applying project default profile", async () => {

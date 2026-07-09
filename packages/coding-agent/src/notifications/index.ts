@@ -24,11 +24,13 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { promisify } from "node:util";
+import { ThinkingLevel } from "@sayknow-cli/agent-core";
 import type { ImageContent, TextContent } from "@sayknow-cli/ai";
 import { NotificationServer } from "@sayknow-cli/natives";
 import { logger, postmortem } from "@sayknow-cli/utils";
 import { Settings } from "../config/settings";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "../extensibility/extensions";
+import { parseThinkingLevel } from "../thinking";
 import { registerAskAnswerSource } from "../tools/ask-answer-registry";
 import { registerTelegramFileSink } from "./attachment-registry";
 import {
@@ -407,20 +409,18 @@ function streamIntervalMs(): number {
 	return Math.max(200, Number(process.env.SKC_NOTIFICATIONS_STREAM_INTERVAL_MS) || 500);
 }
 // Max chars of a turn's assistant text carried by the FINALIZED turn_stream (and
-// the pre-ask capture). Default 3500 keeps the mirror a glanceable per-turn
-// summary; a client that splits long messages (the Telegram daemon does so via
-// splitTelegramHtml, scheduling each chunk through the shared rate-limit pool so
-// the fan-out never bypasses the per-chat limit) can raise it with
-// SKC_NOTIFICATIONS_TURN_MAX to deliver full turns. The value is clamped to a
-// finite [280, TURN_TEXT_MAX_CEILING] range: a non-finite or non-positive env
-// (unset, NaN, Infinity, <= 0) falls back to the default, so the cap can never
-// be unbounded. Live frames are intentionally NOT raised — they stay one
+// the pre-ask capture). Finalized turns default to the bounded full-turn ceiling
+// because split-capable clients such as the Telegram daemon schedule each
+// splitTelegramHtml chunk through the shared rate-limit pool. Operators who want
+// glanceable summaries can lower this with SKC_NOTIFICATIONS_TURN_MAX. The value
+// is always clamped to a finite [280, TURN_TEXT_MAX_CEILING] range so the cap can
+// never be unbounded. Live frames are intentionally NOT raised — they stay one
 // editable preview message rather than fanning a long in-progress turn across
 // sends.
 const TURN_TEXT_MAX_CEILING = 40_000;
 function turnTextMax(): number {
 	const raw = Number(process.env.SKC_NOTIFICATIONS_TURN_MAX);
-	if (!Number.isFinite(raw) || raw <= 0) return 3500;
+	if (!Number.isFinite(raw) || raw <= 0) return TURN_TEXT_MAX_CEILING;
 	return Math.min(TURN_TEXT_MAX_CEILING, Math.max(280, raw));
 }
 function resolveSettings(settingsOverride?: Settings): ResolvedSettings {
@@ -485,6 +485,121 @@ function mapAnswerToGate(
 		return { selected, other: custom !== undefined, custom };
 	}
 	return { selected: [] };
+}
+
+interface NotificationControlCommandPayload {
+	name?: unknown;
+	action?: unknown;
+	level?: unknown;
+	instructions?: unknown;
+}
+
+function parseControlCommandPayload(json: string | undefined): NotificationControlCommandPayload | undefined {
+	if (!json) return undefined;
+	try {
+		const parsed = JSON.parse(json) as unknown;
+		return parsed && typeof parsed === "object" ? (parsed as NotificationControlCommandPayload) : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+function formatCompactTokenCount(value: number | null | undefined): string {
+	if (value == null) return "unknown";
+	if (value >= 1_000_000) return `${Number((value / 1_000_000).toFixed(value % 1_000_000 === 0 ? 0 : 1))}m`;
+	if (value >= 1_000) return `${Number((value / 1_000).toFixed(value % 1_000 === 0 ? 0 : 1))}k`;
+	return value.toLocaleString();
+}
+
+function formatContextUsageLine(ctx: ExtensionContext): string {
+	const usage = ctx.getContextUsage();
+	if (!usage) return "Context usage unavailable.";
+	const tokens = formatCompactTokenCount(usage.tokens);
+	const window = formatCompactTokenCount(usage.contextWindow);
+	const pct = usage.percent == null ? "unknown" : `${usage.percent.toFixed(1)}%`;
+	return `Context: ${tokens}/${window} ${pct}`;
+}
+
+function formatLocalUsage(ctx: ExtensionContext): string {
+	const stats = ctx.sessionManager.getUsageStatistics();
+	return [
+		"Usage",
+		`Input tokens: ${stats.input}`,
+		`Output tokens: ${stats.output}`,
+		`Cache read tokens: ${stats.cacheRead}`,
+		`Cache write tokens: ${stats.cacheWrite}`,
+		`Premium requests: ${stats.premiumRequests}`,
+		`Cost: $${stats.cost.toFixed(6)}`,
+	].join("\n");
+}
+
+function cycleTelegramThinking(api: ExtensionAPI): ThinkingLevel | undefined {
+	const levels = [
+		ThinkingLevel.Off,
+		ThinkingLevel.Minimal,
+		ThinkingLevel.Low,
+		ThinkingLevel.Medium,
+		ThinkingLevel.High,
+		ThinkingLevel.XHigh,
+		ThinkingLevel.Max,
+	];
+	const current = api.getThinkingLevel() ?? ThinkingLevel.Off;
+	const currentIndex = levels.indexOf(current as (typeof levels)[number]);
+	const next = levels[(currentIndex + 1) % levels.length];
+	if (!next) return undefined;
+	api.setThinkingLevel(next);
+	return api.getThinkingLevel() ?? next;
+}
+
+export async function executeNotificationControlCommand(
+	command: NotificationControlCommandPayload | undefined,
+	ctx: ExtensionContext,
+	api: ExtensionAPI,
+): Promise<{ status: "ok" | "error" | "unavailable"; message: string }> {
+	if (!command || typeof command.name !== "string") return { status: "error", message: "Invalid control command." };
+	switch (command.name) {
+		case "reasoning": {
+			const current = api.getThinkingLevel() ?? ThinkingLevel.Off;
+			if (command.action === "status") return { status: "ok", message: `Reasoning effort: ${current}` };
+			if (command.action === "cycle") {
+				const next = cycleTelegramThinking(api);
+				return next
+					? { status: "ok", message: `Reasoning effort set to ${next}.` }
+					: { status: "unavailable", message: "Reasoning effort unavailable for this session." };
+			}
+			if (command.action === "set" && typeof command.level === "string") {
+				const parsed = parseThinkingLevel(command.level);
+				if (!parsed) return { status: "error", message: "Invalid reasoning effort." };
+				api.setThinkingLevel(parsed);
+				return { status: "ok", message: `Reasoning effort set to ${api.getThinkingLevel() ?? ThinkingLevel.Off}.` };
+			}
+			return { status: "error", message: "Invalid reasoning command." };
+		}
+		case "usage":
+			return { status: "ok", message: formatLocalUsage(ctx) };
+		case "context":
+			return { status: "ok", message: formatContextUsageLine(ctx) };
+		case "compact": {
+			const before = ctx.getContextUsage()?.tokens;
+			try {
+				await ctx.compact(typeof command.instructions === "string" ? command.instructions : undefined);
+			} catch (err) {
+				return {
+					status: "error",
+					message: `Compaction failed: ${err instanceof Error ? err.message : String(err)}`,
+				};
+			}
+			const after = ctx.getContextUsage()?.tokens;
+			if (before != null && after != null)
+				return {
+					status: "ok",
+					message: `Compaction complete. Tokens: ${before} -> ${after} (saved ${before - after}).`,
+				};
+			return { status: "ok", message: "Compaction complete." };
+		}
+		default:
+			return { status: "error", message: "Unknown control command." };
+	}
 }
 
 /** Register the interactive `ask` answer source for a session (the ask tool
@@ -702,6 +817,38 @@ export function createNotificationsExtension(api: ExtensionAPI, options: { setti
 						logger.warn(`notifications: config_update failed: ${String(e)}`);
 					}
 				}
+			}
+			if (inbound.kind === "control_command") {
+				if (!runtime || !inbound.requestId) return;
+				void executeNotificationControlCommand(parseControlCommandPayload(inbound.commandJson), ctx, api)
+					.then(result => {
+						runtime?.server.pushFrame(
+							JSON.stringify({
+								type: "control_command_result",
+								sessionId: id,
+								requestId: inbound.requestId,
+								updateId: inbound.updateId,
+								status: result.status,
+								message: result.message,
+							}),
+						);
+					})
+					.catch(err => {
+						try {
+							runtime?.server.pushFrame(
+								JSON.stringify({
+									type: "control_command_result",
+									sessionId: id,
+									requestId: inbound.requestId,
+									updateId: inbound.updateId,
+									status: "error",
+									message: `Control command failed: ${err instanceof Error ? err.message : String(err)}`,
+								}),
+							);
+						} catch (pushErr) {
+							logger.warn(`notifications: control_command_result failed: ${String(pushErr)}`);
+						}
+					});
 			}
 		});
 

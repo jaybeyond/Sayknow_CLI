@@ -44,6 +44,24 @@ find_tarball() {
 
 	echo "${matches[0]}"
 }
+stage_linux_x64_optional_package() {
+	local source_dir="$ROOT_DIR/packages/natives/native"
+	local target_dir="$ROOT_DIR/packages/natives-linux-x64/native"
+	local matches=()
+	shopt -s nullglob
+	matches=("$source_dir"/pi_natives.linux-x64*.node)
+	shopt -u nullglob
+
+	if [ "${#matches[@]}" -eq 0 ]; then
+		echo "Expected at least one linux-x64 native artifact in: $source_dir"
+		exit 1
+	fi
+
+	rm -rf "$target_dir"
+	mkdir -p "$target_dir"
+	cp "${matches[@]}" "$target_dir"/
+}
+
 
 section "Binary install smoke"
 bun --cwd=packages/natives run build
@@ -66,7 +84,8 @@ SOURCE_BUN_HOME="$WORK_DIR/bun-source"
 section "Tarball install smoke"
 TARBALL_DIR="$WORK_DIR/tarballs"
 mkdir -p "$TARBALL_DIR"
-for pkg in utils natives ai agent tui stats coding-agent sayknow-cli; do
+stage_linux_x64_optional_package
+for pkg in utils natives-linux-x64 natives ai agent tui stats coding-agent sayknow-cli; do
 	(
 		cd "$ROOT_DIR/packages/$pkg"
 		bun pm pack --destination "$TARBALL_DIR" --quiet >/dev/null
@@ -74,7 +93,8 @@ for pkg in utils natives ai agent tui stats coding-agent sayknow-cli; do
 done
 
 utils_tgz="$(find_tarball "$TARBALL_DIR"/sayknow-cli-utils-*.tgz)"
-natives_tgz="$(find_tarball "$TARBALL_DIR"/sayknow-cli-natives-*.tgz)"
+natives_tgz="$(find_tarball "$TARBALL_DIR"/sayknow-cli-natives-[0-9]*.tgz)"
+linux_x64_natives_tgz="$(find_tarball "$TARBALL_DIR"/sayknow-cli-natives-linux-x64-[0-9]*.tgz)"
 ai_tgz="$(find_tarball "$TARBALL_DIR"/sayknow-cli-ai-*.tgz)"
 agent_tgz="$(find_tarball "$TARBALL_DIR"/sayknow-cli-agent-core-*.tgz)"
 tui_tgz="$(find_tarball "$TARBALL_DIR"/sayknow-cli-tui-*.tgz)"
@@ -95,6 +115,7 @@ mkdir -p "$TARBALL_APP_DIR"
 		pkg.overrides = {
 			'@sayknow-cli/utils': '$utils_tgz',
 			'@sayknow-cli/natives': '$natives_tgz',
+			'@sayknow-cli/natives-linux-x64': '$linux_x64_natives_tgz',
 			'@sayknow-cli/ai': '$ai_tgz',
 			'@sayknow-cli/agent-core': '$agent_tgz',
 			'@sayknow-cli/tui': '$tui_tgz',
@@ -104,7 +125,7 @@ mkdir -p "$TARBALL_APP_DIR"
 		require('fs').writeFileSync('package.json', JSON.stringify(pkg, null, 2));
 	"
 
-	bun add "$utils_tgz" "$natives_tgz" "$ai_tgz" "$agent_tgz" "$tui_tgz" "$stats_tgz" "$coding_agent_tgz" "$wrapper_tgz"
+	bun add "$utils_tgz" "$linux_x64_natives_tgz" "$natives_tgz" "$ai_tgz" "$agent_tgz" "$tui_tgz" "$stats_tgz" "$coding_agent_tgz" "$wrapper_tgz"
 	smoke_cli ./node_modules/.bin/skc
 )
 

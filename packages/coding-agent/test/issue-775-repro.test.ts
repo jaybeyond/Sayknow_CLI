@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as path from "node:path";
-import { Agent } from "@sayknow-cli/agent-core";
+import { Agent, ThinkingLevel } from "@sayknow-cli/agent-core";
 import { Effort, getBundledModel, type Model } from "@sayknow-cli/ai";
 import { ModelRegistry } from "@sayknow-cli/coding-agent/config/model-registry";
 import { Settings } from "@sayknow-cli/coding-agent/config/settings";
@@ -96,5 +96,27 @@ describe("issue #775: per-model defaultLevel", () => {
 		await session.setModel(opus);
 
 		expect(session.thinkingLevel).toBe(Effort.Low);
+	});
+
+	it("persists a default thinking level even when the effective level is unchanged", async () => {
+		const sonnet = getSonnet();
+		const settings = Settings.isolated();
+		settings.set("defaultThinkingLevel", Effort.Medium);
+		await createSession(sonnet, settings);
+
+		session.setThinkingLevel(Effort.Low, true);
+
+		expect(settings.get("defaultThinkingLevel")).toBe(Effort.Low);
+	});
+
+	it("persists off as the default thinking level", async () => {
+		const sonnet = getSonnet();
+		const settings = Settings.isolated();
+		settings.set("defaultThinkingLevel", Effort.Medium);
+		await createSession(sonnet, settings);
+
+		session.setThinkingLevel(ThinkingLevel.Off, true);
+
+		expect(settings.get("defaultThinkingLevel")).toBe(ThinkingLevel.Off);
 	});
 });

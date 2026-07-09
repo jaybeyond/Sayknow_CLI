@@ -338,7 +338,7 @@ OAuth host chain: `KIMI_CODE_OAUTH_HOST` → `KIMI_OAUTH_HOST` → `https://auth
 
 | Variable                   | Default / behavior                                              |
 | -------------------------- | --------------------------------------------------------------- |
-| `SKC_AI_GEMINI_CLI_VERSION` | Overrides Gemini CLI user-agent version tag (`0.49.0` if unset) |
+| `SKC_AI_GEMINI_CLI_VERSION` | Overrides Gemini CLI user-agent version tag (`0.35.3` if unset) |
 
 ### OpenAI code provider responses (feature/debug controls)
 

@@ -96,6 +96,9 @@ describe("shouldPromoteRich truth table", () => {
 		expect(shouldPromoteRich(baseInput({ send: makeSend({ richMarkdown: undefined }) }))).toBe(false);
 	});
 
+	test("oversized richMarkdown -> false (HTML chunk path owns long finalized turns)", () => {
+		expect(shouldPromoteRich(baseInput({ send: makeSend({ richMarkdown: "x".repeat(4097) }) }))).toBe(false);
+	});
 	test("send.text empty string -> false", () => {
 		expect(shouldPromoteRich(baseInput({ send: makeSend({ text: "" }) }))).toBe(false);
 	});

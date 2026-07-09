@@ -9,7 +9,7 @@ import type { Settings } from "../config/settings";
 import type { DaemonRuntimeInfo } from "../daemon/control-types";
 import { resolveSkcRuntimeSpawnInfo } from "../daemon/runtime";
 import { getNotificationConfig, isTelegramConfigured, tokenFingerprint } from "./config";
-import { parseInThreadConfigCommand, parseRichToggleCommand } from "./config-commands";
+import { parseInThreadConfigCommand, parseRichToggleCommand, parseTelegramControlCommand } from "./config-commands";
 import { daemonPaths } from "./daemon-paths";
 import {
 	buildCompactChoiceGrid,
@@ -111,6 +111,21 @@ export const CLIENT_PING_PONG_CAPABILITY = "client_ping_pong";
 export const NOTIFICATION_PROTOCOL_VERSION = 2;
 
 const nodeFs: TelegramDaemonFs = fs.promises as unknown as TelegramDaemonFs;
+
+/**
+ * Durably persist a `/rich` toggle. A real {@link Settings} exposes
+ * `flushOrThrow()`, which rejects on a failed config.yml write (its `set()` is a
+ * fire-and-forget whose background save swallows errors). The lightweight daemon
+ * settings has no `flushOrThrow` — its `set()` already wrote durably and throws
+ * on failure — so its plain `flush()` no-op drain is sufficient.
+ */
+async function flushRichToggleSettings(settings: Settings): Promise<void> {
+	if (typeof settings.flushOrThrow === "function") {
+		await settings.flushOrThrow();
+		return;
+	}
+	await settings.flush();
+}
 const RATE_LIMIT_FLUSH_INTERVAL_MS = 1_000;
 // How often the daemon rescans for newly-started sessions. This MUST run
 // independently of the Telegram getUpdates long-poll (up to 25s): otherwise a
@@ -1550,6 +1565,7 @@ export class TelegramNotificationDaemon {
 		"image_attachment",
 		"file_attachment",
 		"config_update",
+		"control_command_result",
 	]);
 
 	private topicNameFor(sessionId: string, msg: { title?: unknown; repo?: unknown; branch?: unknown }): string {
@@ -1913,7 +1929,7 @@ export class TelegramNotificationDaemon {
 					// upstream edit/send path, so off behavior is byte-identical.
 					if (
 						shouldPromoteRich({
-							enabled: this.opts.rich?.enabled === false ? false : true,
+							enabled: this.opts.rich?.enabled !== false,
 							send,
 						})
 					) {
@@ -2219,16 +2235,22 @@ export class TelegramNotificationDaemon {
 				// Rename the topic if the title changed (e.g. the session title was
 				// auto-generated after the topic was first created). This runs on
 				// every identity frame, but does NOT re-send the bulleted message.
+				// Only commit the new registry name after Telegram accepts the edit:
+				// a transient editForumTopic failure must remain retryable on the
+				// next identity re-assert instead of leaving the remote topic stuck
+				// at the provisional "SKC <id>" name forever.
 				const name = this.topicNameFor(session.sessionId, msg);
-				if (this.topics.applyName(session.sessionId, name)) {
+				if (this.topics.needsRename(session.sessionId, name)) {
 					try {
 						await this.botApi.call("editForumTopic", {
 							chat_id: this.opts.chatId,
 							message_thread_id: Number(topicId),
 							name,
 						});
+						this.topics.markNameApplied(session.sessionId, name);
 					} catch {
-						// Best-effort rename; never block delivery.
+						// Best-effort rename; never block delivery. Leave the old
+						// registry name intact so a later identity frame retries.
 					}
 				}
 				// Send the full bulleted identity header EXACTLY ONCE per topic.
@@ -2415,6 +2437,15 @@ export class TelegramNotificationDaemon {
 				}
 				try {
 					await this.opts.settings.set("notifications.telegram.rich.enabled", desired);
+					// Confirm success only after a DURABLE write. The real Settings.set is
+					// a synchronous fire-and-forget whose queued save (Settings.#saveNow)
+					// swallows write errors, and Settings.flush() inherits that — neither
+					// rejects on a failed config.yml write. flushOrThrow() rethrows the
+					// durable-write failure so it lands in the catch below (in-memory
+					// isolated Settings short-circuit and never throw). The lightweight
+					// daemon settings has no flushOrThrow: its set() already wrote durably
+					// (and throws on failure), so its flush() is only a no-op drain.
+					await flushRichToggleSettings(this.opts.settings);
 				} catch (err) {
 					logger.warn(
 						`notifications: /rich settings write failed (${err instanceof Error ? err.message : String(err)}); runtime unchanged`,
@@ -2468,6 +2499,45 @@ export class TelegramNotificationDaemon {
 					const injectedText = repliedOriginal
 						? `> replied-to message:\n${repliedOriginal}\n\n${baseInjectedText}`
 						: baseInjectedText;
+					const control = hasMedia
+						? { kind: "none" as const }
+						: parseTelegramControlCommand(inbound.text, this.botUsername);
+					if (control.kind !== "none") {
+						await this.rememberSeenUpdateId(inbound.updateId);
+						const sendControlNotice = async (body: string): Promise<void> => {
+							try {
+								await this.botApi.call("sendMessage", {
+									chat_id: this.opts.chatId,
+									message_thread_id: Number(inbound.threadId),
+									text: body,
+									parse_mode: TELEGRAM_PARSE_MODE,
+								});
+							} catch {
+								// Best-effort control feedback; never convert to user input.
+							}
+						};
+						if (control.kind === "ignored") return;
+						if (control.kind === "invalid") {
+							await sendControlNotice(control.usage);
+							return;
+						}
+						if (session?.ws.readyState !== WebSocket.OPEN) {
+							await sendControlNotice("Session control unavailable: session is disconnected.");
+							return;
+						}
+						session.ws.send(
+							JSON.stringify({
+								type: "control_command",
+								sessionId: inbound.sessionId,
+								token: session.token,
+								requestId: `tg:${inbound.updateId}`,
+								updateId: inbound.updateId,
+								threadId: inbound.threadId,
+								command: control.command,
+							}),
+						);
+						return;
+					}
 					const cfg = hasMedia ? undefined : parseInThreadConfigCommand(inbound.text);
 					// A plain (non-config) message while an ask is pending for this session
 					// answers that ask as free-input — instead of starting a new user turn.
@@ -2484,6 +2554,15 @@ export class TelegramNotificationDaemon {
 							}),
 						);
 						await this.rememberSeenUpdateId(inbound.updateId);
+						await this.botApi
+							.call("sendMessage", {
+								chat_id: this.opts.chatId,
+								message_thread_id: Number(inbound.threadId),
+								text: "Received as an answer to the pending ask.",
+							})
+							.catch(error => {
+								logger.warn(`telegram: failed to acknowledge pending ask reply: ${String(error)}`);
+							});
 						if (inbound.messageId !== undefined) await this.setReaction(inbound.messageId, QUEUED_REACTION);
 						return;
 					}
@@ -2548,6 +2627,10 @@ export class TelegramNotificationDaemon {
 					{ command: "lean", description: "Mirror assistant text + tool names only (default)" },
 					{ command: "redact", description: "Toggle redaction of streamed content: /redact <on|off>" },
 					{ command: "rich", description: "Toggle rich Telegram delivery: /rich <on|off>" },
+					{ command: "reasoning", description: "Show or change reasoning effort in this session" },
+					{ command: "usage", description: "Show provider/local usage for this session" },
+					{ command: "context", description: "Show current context usage for this session" },
+					{ command: "compact", description: "Compact this session: /compact [instructions]" },
 					{ command: "session_create", description: "Create a SKC session: path, worktree, or dir [--mpreset]" },
 					{ command: "session_recent", description: "List recent SKC sessions" },
 					{ command: "session_close", description: "Close a SKC-managed session" },

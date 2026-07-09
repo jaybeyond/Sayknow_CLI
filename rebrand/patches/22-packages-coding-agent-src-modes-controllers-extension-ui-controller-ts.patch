@@ -8,7 +8,7 @@
  import { HookEditorComponent } from "../../modes/components/hook-editor";
  import { HookInputComponent } from "../../modes/components/hook-input";
  import { HookSelectorComponent } from "../../modes/components/hook-selector";
-@@ -714,8 +715,9 @@
+@@ -715,8 +716,9 @@
  	 * Show a confirmation dialog for hooks.
  	 */
  	async showHookConfirm(title: string, message: string): Promise<boolean> {
@@ -20,7 +20,7 @@
  	}
  
  	/**
-@@ -725,7 +727,6 @@
+@@ -726,7 +728,6 @@
  		title: string,
  		placeholder?: string,
  		dialogOptions?: ExtensionUIDialogOptions,
@@ -28,7 +28,7 @@
  	): Promise<string | undefined> {
  		const { promise, finish, attachAbort } = this.#createHookDialogState(
  			() => this.hideHookInput(),
-@@ -743,7 +744,6 @@
+@@ -744,7 +745,6 @@
  				finish(undefined);
  			},
  			{

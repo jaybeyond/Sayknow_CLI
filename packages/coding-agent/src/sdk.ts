@@ -10,6 +10,7 @@ import {
 } from "@sayknow-cli/agent-core";
 import {
 	type Api,
+	type AuthCredentialSelector,
 	type CredentialDisabledEvent,
 	type Message,
 	type Model,
@@ -40,7 +41,7 @@ import {
 import { type AsyncJob, AsyncJobManager, isBackgroundJobSupportEnabled, jobElapsedMs } from "./async";
 import { loadCapability } from "./capability";
 import { type Rule, ruleCapability, setActiveRules } from "./capability/rule";
-import { ModelRegistry } from "./config/model-registry";
+import { kNoAuth, ModelRegistry } from "./config/model-registry";
 import {
 	defaultModelPerProvider,
 	formatModelString,
@@ -274,6 +275,8 @@ export interface CreateAgentSessionOptions {
 	/** Optional provider-facing session identifier for prompt caches and sticky auth selection.
 	 * Keeps persisted session files isolated while reusing provider-side caches. */
 	providerSessionId?: string;
+	/** Runtime credential selector for multi-account auth pools. */
+	credentialSelector?: { provider?: string; selector: AuthCredentialSelector; raw: string };
 
 	/** Custom tools to register (in addition to built-in tools). Accepts both CustomTool and ToolDefinition. */
 	customTools?: (CustomTool | ToolDefinition)[];
@@ -905,10 +908,22 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			startupCredentialDisabledEvents.push(event);
 		}
 	});
+	let runtimeCredentialSelectorInstalled = false;
+	const installRuntimeCredentialSelector = (provider: string): void => {
+		if (!options.credentialSelector || runtimeCredentialSelectorInstalled) return;
+		authStorage.setRuntimeCredentialSelector(provider, options.credentialSelector.selector);
+		runtimeCredentialSelectorInstalled = true;
+	};
+	const earlyCredentialSelectorProvider = options.credentialSelector?.provider ?? options.model?.provider;
+	if (earlyCredentialSelectorProvider) {
+		installRuntimeCredentialSelector(earlyCredentialSelectorProvider);
+	}
 	const settings = options.settings ?? (await logger.time("settings", Settings.init, { cwd, agentDir }));
 	modelRegistry.applyConfiguredModelBindings(settings);
 	logger.time("initializeWithSettings", initializeWithSettings, settings);
-	if (!options.modelRegistry) {
+	const canRefreshModelsBeforeCredentialSelector =
+		!options.credentialSelector || runtimeCredentialSelectorInstalled || options.modelRegistry !== undefined;
+	if (!options.modelRegistry && canRefreshModelsBeforeCredentialSelector) {
 		modelRegistry.refreshInBackground();
 	}
 	// Kick off workspace tree discovery early. The native workspace scan returns
@@ -974,7 +989,29 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			return cached;
 		}
 
-		const hasKey = !!(await modelRegistry.getApiKey(candidate, providerSessionId));
+		const credentialSelector =
+			options.credentialSelector && !runtimeCredentialSelectorInstalled
+				? options.credentialSelector.provider === undefined ||
+					options.credentialSelector.provider === candidate.provider
+					? options.credentialSelector.selector
+					: undefined
+				: undefined;
+		if (options.credentialSelector?.provider && options.credentialSelector.provider !== candidate.provider) {
+			modelApiKeyAvailability.set(availabilityKey, false);
+			return false;
+		}
+		const key = await modelRegistry.getApiKey(candidate, providerSessionId, { credentialSelector }).catch(error => {
+			if (credentialSelector) {
+				logger.debug("Credential selector did not match model availability candidate", {
+					provider: candidate.provider,
+					model: candidate.id,
+					error: error instanceof Error ? error.message : String(error),
+				});
+				return undefined;
+			}
+			throw error;
+		});
+		const hasKey = Boolean(key) && (!credentialSelector || key !== kNoAuth);
 		modelApiKeyAvailability.set(availabilityKey, hasKey);
 		return hasKey;
 	};
@@ -1049,6 +1086,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	const taskDepth = options.taskDepth ?? 0;
 
 	let thinkingLevel = options.thinkingLevel;
+	const hasExplicitDefaultThinkingLevel = settings.has("defaultThinkingLevel");
+	let thinkingLevelFromSchemaDefault = false;
 
 	// If session has data and includes a thinking entry, restore it
 	if (thinkingLevel === undefined && hasExistingSession && hasThinkingEntry) {
@@ -1059,13 +1098,20 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		thinkingLevel = defaultRoleSpec.thinkingLevel;
 	}
 
-	// Prefer the selected model's configured defaultLevel, otherwise fall back
-	// to the global settings default.
+	// An explicit user/project default should win over the model's bundled
+	// defaultLevel. The schema default is only a final fallback so model metadata
+	// can keep driving first-run behavior until the user chooses "Set as default".
+	if (thinkingLevel === undefined && hasExplicitDefaultThinkingLevel) {
+		thinkingLevel = settings.get("defaultThinkingLevel");
+	}
+
 	if (thinkingLevel === undefined && model?.thinking?.defaultLevel !== undefined) {
 		thinkingLevel = model.thinking.defaultLevel;
 	}
+
 	if (thinkingLevel === undefined) {
 		thinkingLevel = settings.get("defaultThinkingLevel");
+		thinkingLevelFromSchemaDefault = true;
 	}
 	if (model) {
 		const resolvedModel = model;
@@ -1610,6 +1656,11 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			if (resolved) {
 				model = resolved;
 				modelFallbackMessage = undefined;
+				if (thinkingLevelFromSchemaDefault && resolved.thinking?.defaultLevel !== undefined) {
+					thinkingLevel = resolved.thinking.defaultLevel;
+					thinkingLevelFromSchemaDefault = false;
+				}
+				thinkingLevel = resolveThinkingLevelForModel(resolved, thinkingLevel);
 			} else {
 				modelFallbackMessage = `Model "${options.modelPattern}" not found`;
 			}
@@ -1662,6 +1713,18 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			}
 		}
 
+		if (options.credentialSelector && !runtimeCredentialSelectorInstalled) {
+			const credentialProvider = options.credentialSelector.provider ?? model?.provider;
+			if (!credentialProvider) {
+				throw new Error(
+					`--credential ${options.credentialSelector.raw} requires a resolved model or an explicit provider prefix`,
+				);
+			}
+			installRuntimeCredentialSelector(credentialProvider);
+			if (!options.modelRegistry && !canRefreshModelsBeforeCredentialSelector) {
+				modelRegistry.refreshInBackground();
+			}
+		}
 		const customCommandsResult: CustomCommandsLoadResult = { commands: [], errors: [] };
 
 		let extensionRunner: ExtensionRunner | undefined;

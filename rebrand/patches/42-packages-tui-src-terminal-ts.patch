@@ -54,7 +54,7 @@
  		const terminal = activeTerminal;
  		if (terminal) {
  			terminal.stop();
-@@ -217,6 +257,10 @@
+@@ -224,6 +264,10 @@
  		// Register for emergency cleanup
  		activeTerminal = this;
  		terminalEverStarted = true;
@@ -65,7 +65,7 @@
  
  		// Save previous state and enable raw mode
  		this.#wasRaw = process.stdin.isRaw || false;
-@@ -776,6 +820,11 @@
+@@ -783,6 +827,11 @@
  		}
  	}
  

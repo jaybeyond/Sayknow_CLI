@@ -26,6 +26,7 @@
     "packages/coding-agent/src/slash-commands/builtin-registry.ts",
     "packages/coding-agent/test/login-preset-recommendation.test.ts",
     "packages/coding-agent/test/model-preset-landing-redteam-qa.test.ts",
+    "packages/coding-agent/test/model-registry.test.ts",
     "packages/coding-agent/test/model-profiles-redteam.test.ts",
     "packages/coding-agent/test/modes/components/redesigned-shell.test.ts",
     "packages/coding-agent/test/sdk-model-selection.test.ts",

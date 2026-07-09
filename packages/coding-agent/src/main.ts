@@ -39,6 +39,7 @@ import type { InteractiveMode } from "./modes/interactive-mode";
 import { initTheme, stopThemeWatcher } from "./modes/theme/theme";
 import type { SubmittedUserInput } from "./modes/types";
 import { applyCliRuntimeApiKeyOverride } from "./runtime-api-key";
+import { parseCliCredentialSelector } from "./runtime-credential-selector";
 import type { MCPManager } from "./runtime-mcp";
 import {
 	type CreateAgentSessionOptions,
@@ -218,10 +219,14 @@ export async function applyStartupModelProfiles(args: {
 	startupModel?: CreateAgentSessionOptions["model"];
 	startupThinkingLevel?: CreateAgentSessionOptions["thinkingLevel"];
 }): Promise<void> {
-	const applyProfile = async (profileName: string, persistDefault: boolean): Promise<void> => {
+	const applyProfile = async (
+		profileName: string,
+		persistDefault: boolean,
+		options: { thinkingLevelOverride?: CreateAgentSessionOptions["thinkingLevel"] } = {},
+	): Promise<void> => {
 		await activateModelProfile(
 			{ session: args.session, modelRegistry: args.modelRegistry, settings: args.settings, profileName },
-			{ persistDefault },
+			{ persistDefault, thinkingLevelOverride: options.thinkingLevelOverride },
 		);
 	};
 
@@ -235,7 +240,11 @@ export async function applyStartupModelProfiles(args: {
 	}
 
 	if (defaultProfile) {
-		await applyProfile(defaultProfile, false);
+		await applyProfile(defaultProfile, false, {
+			thinkingLevelOverride: args.settings.has("defaultThinkingLevel")
+				? args.settings.get("defaultThinkingLevel")
+				: undefined,
+		});
 	}
 	if (args.parsedArgs.mpreset) {
 		await applyProfile(args.parsedArgs.mpreset, args.parsedArgs.default === true);
@@ -1005,6 +1014,20 @@ export async function runRootCommand(
 	deps.rlmPreset?.applyOptions(sessionOptions, settingsInstance);
 
 	// Handle CLI --api-key as runtime override (not persisted)
+	if (parsedArgs.apiKey && parsedArgs.credential) {
+		process.stderr.write(`${chalk.red("--api-key and --credential cannot be used together")}\n`);
+		process.exit(1);
+	}
+
+	if (parsedArgs.credential) {
+		try {
+			sessionOptions.credentialSelector = parseCliCredentialSelector(parsedArgs.credential);
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			process.stderr.write(`${chalk.red(message)}\n`);
+			process.exit(1);
+		}
+	}
 	if (parsedArgs.apiKey) {
 		if (!sessionOptions.model && !sessionOptions.modelPattern) {
 			process.stderr.write(

@@ -11,7 +11,7 @@ set -e
 #   -r <ref>       Shorthand for --ref
 
 REPO="jaybeyond/Sayknow_CLI"
-PACKAGE="sayknow-cli"
+PACKAGE="@sayknow-cli/coding-agent"
 INSTALL_DIR="${SKC_INSTALL_DIR:-$HOME/.local/bin}"
 MIN_BUN_VERSION="1.3.14"
 

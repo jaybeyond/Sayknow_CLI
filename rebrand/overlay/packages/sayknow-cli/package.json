@@ -1,7 +1,7 @@
 {
 	"type": "module",
 	"name": "sayknow-cli",
-	"version": "0.3.9",
+	"version": "0.3.10",
 	"description": "One-line npm install wrapper for the Sayknow-CLI skc CLI",
 	"homepage": "https://sayknow-cli.com",
 	"author": "jaybeyond",

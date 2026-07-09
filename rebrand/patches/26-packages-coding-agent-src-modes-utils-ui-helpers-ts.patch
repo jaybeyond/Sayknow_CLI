@@ -8,7 +8,7 @@
  import { AssistantMessageComponent } from "../../modes/components/assistant-message";
  import { BashExecutionComponent } from "../../modes/components/bash-execution";
  import { BranchSummaryMessageComponent } from "../../modes/components/branch-summary-message";
-@@ -77,6 +78,7 @@
+@@ -87,6 +88,7 @@
  		if (this.ctx.isBackgrounded) {
  			return;
  		}
@@ -16,7 +16,7 @@
  		const children = this.ctx.chatContainer.children;
  		const last = children.length > 0 ? children[children.length - 1] : undefined;
  		const secondLast = children.length > 1 ? children[children.length - 2] : undefined;
-@@ -545,22 +547,26 @@
+@@ -555,22 +557,26 @@
  	}
  
  	showError(errorMessage: string): void {

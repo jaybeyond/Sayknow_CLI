@@ -794,6 +794,74 @@ describe("telegram daemon", () => {
 		expect(sent).toContainEqual({ type: "reply", id: "ask1", answer: "my typed answer", token: "ts" });
 		// ...and must NOT be injected as a new user turn.
 		expect(sent.some(frame => frame.type === "user_message")).toBe(false);
+		const ackSend = bot.calls.find(
+			c =>
+				c.method === "sendMessage" &&
+				c.body.message_thread_id === threadId &&
+				c.body.text === "Received as an answer to the pending ask.",
+		);
+		expect(ackSend).toBeDefined();
+	});
+
+	test("marks pending ask text seen before awaiting Telegram acknowledgement", async () => {
+		FakeWs.instances = [];
+		const agentDir = tempAgentDir();
+		const s = setPrivateAgentDir(settings(agentDir), agentDir);
+		let markAckStarted: () => void = () => {};
+		const ackStarted = new Promise<void>(resolve => {
+			markAckStarted = resolve;
+		});
+		let releaseAck: () => void = () => {};
+		const ackGate = new Promise<unknown>(resolve => {
+			releaseAck = () => resolve({ ok: true, result: { message_id: 999 } });
+		});
+		class BlockingAckBotApi extends FakeBotApi {
+			override async call(method: string, body: unknown): Promise<unknown> {
+				if (
+					method === "sendMessage" &&
+					(body as { text?: unknown }).text === "Received as an answer to the pending ask."
+				) {
+					this.calls.push({ method, body });
+					markAckStarted();
+					return ackGate;
+				}
+				return super.call(method, body);
+			}
+		}
+		const bot = new BlockingAckBotApi();
+		const daemon = new TelegramNotificationDaemon({
+			settings: s,
+			ownerId: "owner",
+			botToken: "tok",
+			chatId: "42",
+			botApi: bot,
+			WebSocketImpl: FakeWs as any,
+		});
+		daemon.connectSession("S", "ws://s", "ts");
+		await daemon.handleSessionMessage(daemon.sessions.get("S")!, {
+			type: "action_needed",
+			kind: "ask",
+			id: "ask1",
+			question: "Name it?",
+			options: ["a", "b"],
+		});
+		const askSend = bot.calls.find(c => c.method === "sendMessage");
+		const threadId = askSend!.body.message_thread_id;
+		const update = {
+			update_id: 1,
+			message: { chat: { id: 42 }, message_thread_id: threadId, text: "my typed answer", message_id: 99 },
+		};
+		const first = daemon.handleTelegramUpdate(update);
+		await ackStarted;
+		const duplicate = daemon.handleTelegramUpdate(update);
+		await Promise.resolve();
+		const repliesBeforeAck = FakeWs.instances[0]!.sent.map(frame => JSON.parse(frame)).filter(
+			frame => frame.type === "reply" && frame.id === "ask1",
+		);
+		expect(repliesBeforeAck).toHaveLength(1);
+		releaseAck();
+		await first;
+		await duplicate;
 	});
 
 	test("no-topic plain text does not answer the only pending ask", async () => {
@@ -863,6 +931,122 @@ describe("telegram daemon", () => {
 		const sent = FakeWs.instances[0]!.sent.map(frame => JSON.parse(frame));
 		expect(sent.some(frame => frame.type === "user_message" && frame.text === "start a new task")).toBe(true);
 		expect(sent.some(frame => frame.type === "reply")).toBe(false);
+	});
+
+	test("telegram control command forwards control_command instead of user_message", async () => {
+		FakeWs.instances = [];
+		const agentDir = tempAgentDir();
+		const s = setPrivateAgentDir(settings(agentDir), agentDir);
+		const bot = new FakeBotApi();
+		const daemon = new TelegramNotificationDaemon({
+			settings: s,
+			ownerId: "owner",
+			botToken: "tok",
+			chatId: "42",
+			botApi: bot,
+			rich: { enabled: false },
+			WebSocketImpl: FakeWs as any,
+		});
+		daemon.connectSession("S", "ws://s", "ts");
+		await daemon.handleSessionMessage(daemon.sessions.get("S")!, {
+			type: "identity_header",
+			sessionId: "S",
+			repo: "r",
+			branch: "b",
+		});
+		const threadId = bot.calls.find(c => c.method === "sendMessage")!.body.message_thread_id;
+
+		await daemon.handleTelegramUpdate({
+			update_id: 8,
+			message: { chat: { id: 42 }, message_thread_id: threadId, text: "/context", message_id: 101 },
+		});
+
+		const sent = FakeWs.instances[0]!.sent.map(frame => JSON.parse(frame));
+		expect(sent).toContainEqual({
+			type: "control_command",
+			sessionId: "S",
+			token: "ts",
+			requestId: "tg:8",
+			updateId: 8,
+			threadId: String(threadId),
+			command: { name: "context" },
+		});
+		expect(sent.some(frame => frame.type === "user_message")).toBe(false);
+	});
+
+	test("invalid telegram control command does not answer pending ask", async () => {
+		FakeWs.instances = [];
+		const agentDir = tempAgentDir();
+		const s = setPrivateAgentDir(settings(agentDir), agentDir);
+		const bot = new FakeBotApi();
+		const daemon = new TelegramNotificationDaemon({
+			settings: s,
+			ownerId: "owner",
+			botToken: "tok",
+			chatId: "42",
+			botApi: bot,
+			rich: { enabled: false },
+			WebSocketImpl: FakeWs as any,
+		});
+		daemon.connectSession("S", "ws://s", "ts");
+		await daemon.handleSessionMessage(daemon.sessions.get("S")!, {
+			type: "action_needed",
+			kind: "ask",
+			id: "ask1",
+			question: "Name it?",
+			options: ["a", "b"],
+		});
+		const threadId = bot.calls.find(c => c.method === "sendMessage")!.body.message_thread_id;
+
+		await daemon.handleTelegramUpdate({
+			update_id: 9,
+			message: { chat: { id: 42 }, message_thread_id: threadId, text: "/reasoning impossible", message_id: 102 },
+		});
+
+		const sent = FakeWs.instances[0]!.sent.map(frame => JSON.parse(frame));
+		expect(sent.some(frame => frame.type === "reply")).toBe(false);
+		expect(sent.some(frame => frame.type === "user_message")).toBe(false);
+		expect(
+			bot.calls.some(c => c.method === "sendMessage" && String(c.body.text).startsWith("Usage: /reasoning")),
+		).toBe(true);
+	});
+
+	test("wrong-suffix telegram control command is consumed, not injected or ask-answered", async () => {
+		FakeWs.instances = [];
+		const agentDir = tempAgentDir();
+		const s = setPrivateAgentDir(settings(agentDir), agentDir);
+		const bot = new FakeBotApi();
+		const daemon = new TelegramNotificationDaemon({
+			settings: s,
+			ownerId: "owner",
+			botToken: "tok",
+			chatId: "42",
+			botApi: bot,
+			rich: { enabled: false },
+			WebSocketImpl: FakeWs as any,
+		});
+		Object.assign(daemon, { botUsername: "SayknowCliBot" });
+		daemon.connectSession("S", "ws://s", "ts");
+		await daemon.handleSessionMessage(daemon.sessions.get("S")!, {
+			type: "action_needed",
+			kind: "ask",
+			id: "ask1",
+			question: "Name it?",
+			options: ["a", "b"],
+		});
+		const threadId = bot.calls.find(c => c.method === "sendMessage")!.body.message_thread_id;
+		bot.calls = [];
+
+		await daemon.handleTelegramUpdate({
+			update_id: 10,
+			message: { chat: { id: 42 }, message_thread_id: threadId, text: "/context@OtherBot", message_id: 103 },
+		});
+
+		const sent = FakeWs.instances[0]!.sent.map(frame => JSON.parse(frame));
+		expect(sent.some(frame => frame.type === "reply")).toBe(false);
+		expect(sent.some(frame => frame.type === "user_message")).toBe(false);
+		expect(sent.some(frame => frame.type === "control_command")).toBe(false);
+		expect(bot.calls.filter(c => c.method === "sendMessage")).toHaveLength(0);
 	});
 
 	test("persisted seen update ids suppress duplicate threaded injection after restart", async () => {
@@ -1419,6 +1603,62 @@ test("identity-less threaded frames wait for identity instead of creating fallba
 	expect(createTopic!.body.name).toBe("sayknow-cli/dev");
 	expect(photo).toBeTruthy();
 	expect(photo!.body.message_thread_id).toBeGreaterThan(0);
+});
+test("transient topic rename failure is retried on the next identity header", async () => {
+	class RetryRenameBotApi extends FakeBotApi {
+		editAttempts = 0;
+		override async call(method: string, body: unknown): Promise<unknown> {
+			if (method === "editForumTopic") {
+				this.editAttempts++;
+				this.calls.push({ method, body });
+				if (this.editAttempts === 1) throw new Error("temporary rename failure");
+				return { ok: true, result: true };
+			}
+			return super.call(method, body);
+		}
+	}
+
+	const agentDir = tempAgentDir();
+	const bot = new RetryRenameBotApi();
+	const daemon = new TelegramNotificationDaemon({
+		settings: settings(agentDir),
+		ownerId: "owner",
+		botToken: "tok",
+		chatId: "42",
+		botApi: bot,
+	});
+	const session = { sessionId: "S", token: "tok", ws: { readyState: 1, send() {} }, pending: new Map() };
+
+	await daemon.handleSessionMessage(session as any, {
+		type: "action_needed",
+		kind: "ask",
+		id: "ask1",
+		question: "Name it?",
+		options: ["a", "b"],
+	});
+	expect(bot.calls.find(c => c.method === "createForumTopic")!.body.name).toBe("SKC S");
+
+	await daemon.handleSessionMessage(session as any, {
+		type: "identity_header",
+		sessionId: "S",
+		repo: "sayknow-cli",
+		branch: "dev",
+		title: "Readable title",
+	});
+	await daemon.handleSessionMessage(session as any, {
+		type: "identity_header",
+		sessionId: "S",
+		repo: "sayknow-cli",
+		branch: "dev",
+		title: "Readable title",
+	});
+
+	const edits = bot.calls.filter(c => c.method === "editForumTopic");
+	expect(edits).toHaveLength(2);
+	expect(edits.map(c => c.body.name)).toEqual([
+		"sayknow-cli/dev - Readable title",
+		"sayknow-cli/dev - Readable title",
+	]);
 });
 
 test("live sessions with the same repo branch create distinct topics", async () => {
@@ -3155,7 +3395,7 @@ describe("telegram daemon rich final-answer promotion (Rev 3 verification)", () 
 		expect(sends.every(c => c.body.parse_mode === TELEGRAM_PARSE_MODE)).toBe(true);
 	});
 
-	test("(d) sendRichMessage throw falls back to chunk 0 now and requeues the rest (fairness)", async () => {
+	test("(d) oversized rich finals skip promotion and drain HTML chunks through the pool", async () => {
 		const raw = "B".repeat(9000);
 		const chunks = splitTelegramHtml(markdownToTelegramHtml(raw));
 		expect(chunks.length).toBeGreaterThan(1);
@@ -3164,8 +3404,9 @@ describe("telegram daemon rich final-answer promotion (Rev 3 verification)", () 
 		const daemon = makeRichDaemon(bot, { enabled: true });
 		const session = richSession();
 		await driveFinalizedTurn(daemon, bot, session, raw);
-		expect(countMethod(bot, "sendRichMessage")).toBe(1);
-		// Fairness: only the first HTML chunk is delivered on this token; the rest are requeued.
+		expect(countMethod(bot, "sendRichMessage")).toBe(0);
+		// Fairness: oversized rich payloads stay on the HTML path, where only the
+		// first chunk is delivered on this token and the rest are requeued.
 		const first = bot.calls.filter(c => c.method === "sendMessage");
 		expect(first).toHaveLength(1);
 		expect(first[0]!.body.text).toBe(chunks[0]);
@@ -3336,18 +3577,14 @@ describe("telegram daemon rich final-answer promotion (Rev 3 verification)", () 
 });
 
 // ---------------------------------------------------------------------------
-// G006: rich overflow boundary. Production caps the final answer at 3500 chars
-// (summaryFromMessage(..., 3500)), so a promoted sendRichMessage never overflows
-// under normal traffic and RICH_MESSAGE_LIMIT (rich-render.ts) stays a purely
-// non-behavioral marker. These tests pin the defended-but-prod-unreachable case:
-// an oversized (4096+) rich payload the Bot API rejects with {ok:false} MUST
-// degrade to the chunked HTML splitTelegramHtml fallback — N chunks, each
-// <= TELEGRAM_MESSAGE_LIMIT, with exactly one diagnostic warn — while normal
-// (<= limit) traffic stays a single send. Purely additive: no existing test case
-// is modified.
+// G006: rich overflow boundary. Oversized finalized answers stay on the HTML
+// chunk path instead of probing rich and then falling back in the same pool
+// drain. The lower-level fallback helper still degrades oversized rich failures
+// to split HTML when called directly; the daemon-level contract is that normal
+// routing avoids the predictable over-limit rich miss entirely.
 // ---------------------------------------------------------------------------
 describe("telegram daemon rich overflow boundary (G006)", () => {
-	test("(g) rich {ok:false} on a 4096+ payload falls back to N HTML chunks, each <= TELEGRAM_MESSAGE_LIMIT", async () => {
+	test("(g) 4096+ finalized payload skips rich and drains HTML chunks through the pool", async () => {
 		const raw = "D".repeat(9000);
 		const html = markdownToTelegramHtml(raw);
 		const chunks = splitTelegramHtml(html);
@@ -3360,9 +3597,9 @@ describe("telegram daemon rich overflow boundary (G006)", () => {
 		const session = richSession();
 		await driveFinalizedTurn(daemon, bot, session, raw);
 
-		// Rich attempted once, then the REAL daemon sendHtmlFallback closure runs:
-		// chunk 0 on this token, the rest requeued (fairness) and drained next flush.
-		expect(countMethod(bot, "sendRichMessage")).toBe(1);
+		// Oversized rich payloads are not promoted, so the granted pool slot maps to
+		// one HTML sendMessage and continuations are drained on later slots.
+		expect(countMethod(bot, "sendRichMessage")).toBe(0);
 		const first = bot.calls.filter(c => c.method === "sendMessage");
 		expect(first).toHaveLength(1);
 		expect(first[0]!.body.text).toBe(chunks[0]);
@@ -3740,5 +3977,51 @@ describe("telegram daemon /rich toggle (G005)", () => {
 			false,
 		);
 		expect(s.get("notifications.telegram.rich.enabled")).toBe(true);
+	});
+
+	test("/rich confirms success only after a durable flushOrThrow (swallowed background save)", async () => {
+		const agentDir = tempAgentDir();
+		// The real Settings.set is a synchronous fire-and-forget whose background
+		// #saveNow swallows write errors, so flushOrThrow() is the only signal of a
+		// failed config.yml write. Simulate set() succeeding while flushOrThrow()
+		// rejects, and assert /rich does NOT confirm success.
+		const base = setPrivateAgentDir(settings(agentDir), agentDir);
+		const s = new Proxy(base, {
+			get(target, prop) {
+				if (prop === "set") return async () => undefined;
+				if (prop === "flushOrThrow")
+					return async () => {
+						throw new Error("config.yml write failed");
+					};
+				const value = Reflect.get(target, prop, target);
+				return typeof value === "function" ? value.bind(target) : value;
+			},
+		}) as Settings;
+		const bot = new RichFakeBotApi();
+		bot.call = (async (method: string, body: any) => {
+			bot.calls.push({ method, body });
+			if (method === "getChat") return { ok: true, result: { id: body.chat_id, type: "private" } };
+			if (method === "sendMessage") return { ok: true, result: { message_id: bot.calls.length } };
+			return { ok: true, result: true };
+		}) as any;
+		const daemon = new TelegramNotificationDaemon({
+			settings: s,
+			ownerId: "owner",
+			botToken: "tok",
+			chatId: "42",
+			botApi: bot as any,
+			rich: { enabled: true },
+		});
+		await daemon.handleTelegramUpdate({
+			update_id: 952,
+			message: { chat: { id: 42, type: "private" }, text: "/rich off", message_id: 1 },
+		});
+		// A durable-write failure is reported as "unchanged"; success is never confirmed.
+		expect(
+			bot.calls.some(
+				c => c.method === "sendMessage" && c.body.text === "Rich messages: unchanged (settings write failed)",
+			),
+		).toBe(true);
+		expect(bot.calls.some(c => c.method === "sendMessage" && c.body.text === "Rich messages: off")).toBe(false);
 	});
 });

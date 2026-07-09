@@ -8,6 +8,11 @@ interface PackageManifest {
 	bin?: Record<string, string>;
 	dependencies?: Record<string, string>;
 	private?: boolean;
+	optionalDependencies?: Record<string, string>;
+	files?: string[];
+	os?: string[];
+	cpu?: string[];
+	libc?: string[];
 }
 
 const repoRoot = path.join(import.meta.dir, "..");
@@ -56,6 +61,87 @@ describe("unscoped sayknow-cli package publication", () => {
 		expect(codingAgentIndex).toBeGreaterThan(-1);
 		expect(aliasIndex).toBeGreaterThan(codingAgentIndex);
 	});
+
+	test("native platform packages publish before the stable loader package", () => {
+		const publishDirs = publishPackages.map((pkg) => pkg.dir);
+		const nativesIndex = publishDirs.indexOf("packages/natives");
+		const platformDirs = [
+			"packages/natives-darwin-arm64",
+			"packages/natives-darwin-x64",
+			"packages/natives-linux-arm64",
+			"packages/natives-linux-x64",
+			"packages/natives-win32-x64",
+		];
+
+		expect(nativesIndex).toBeGreaterThan(-1);
+		for (const dir of platformDirs) {
+			const platformIndex = publishDirs.indexOf(dir);
+			expect(platformIndex).toBeGreaterThan(-1);
+			expect(platformIndex).toBeLessThan(nativesIndex);
+		}
+	});
+
+	test("stable natives package delegates binaries to optional platform packages", async () => {
+		const manifest = await readManifest("packages/natives");
+		expect(manifest.files).toEqual([
+			"native/index.js",
+			"native/index.d.ts",
+			"native/loader-state.js",
+			"native/loader-state.d.ts",
+			"native/embedded-addon.js",
+			"README.md",
+		]);
+		expect(manifest.files?.some((entry) => entry === "native" || entry.endsWith(".node"))).toBe(false);
+		expect(manifest.optionalDependencies).toEqual({
+			"@sayknow-cli/natives-darwin-arm64": "workspace:*",
+			"@sayknow-cli/natives-darwin-x64": "workspace:*",
+			"@sayknow-cli/natives-linux-arm64": "workspace:*",
+			"@sayknow-cli/natives-linux-x64": "workspace:*",
+			"@sayknow-cli/natives-win32-x64": "workspace:*",
+		});
+	});
+
+	test("native platform package manifests constrain host os and cpu", async () => {
+		const cases: Array<[string, string, string]> = [
+			["packages/natives-darwin-arm64", "darwin", "arm64"],
+			["packages/natives-darwin-x64", "darwin", "x64"],
+			["packages/natives-linux-arm64", "linux", "arm64"],
+			["packages/natives-linux-x64", "linux", "x64"],
+			["packages/natives-win32-x64", "win32", "x64"],
+		];
+
+		for (const [dir, os, cpu] of cases) {
+			const manifest = await readManifest(dir);
+			expect(manifest.os).toEqual([os]);
+			expect(manifest.cpu).toEqual([cpu]);
+			expect(manifest.files).toEqual(["native", "README.md"]);
+		}
+	});
+
+	test("release publish dry-run does not rewrite source manifests", async () => {
+		const manifestPaths = [
+			"packages/natives/package.json",
+			"packages/coding-agent/package.json",
+			"packages/stats/package.json",
+		];
+		const before = await Promise.all(manifestPaths.map(async (relativePath) => await Bun.file(path.join(repoRoot, relativePath)).text()));
+		const proc = Bun.spawn(["bun", "scripts/ci-release-publish.ts", "--dry-run"], {
+			cwd: repoRoot,
+			stdout: "pipe",
+			stderr: "pipe",
+		});
+		const [exitCode, stdout, stderr] = await Promise.all([
+			proc.exited,
+			new Response(proc.stdout).text(),
+			new Response(proc.stderr).text(),
+		]);
+		expect(stderr).toBe("");
+		expect(exitCode).toBe(0);
+		expect(stdout).toContain("DRY RUN stage pi_natives.linux-x64 into packages/natives-linux-x64/native");
+		expect(stdout).not.toContain("Building Tailwind CSS");
+		const after = await Promise.all(manifestPaths.map(async (relativePath) => await Bun.file(path.join(repoRoot, relativePath)).text()));
+		expect(after).toEqual(before);
+	});
 });
 
 describe("release bump set equals publish set", () => {
@@ -97,11 +183,36 @@ describe("native release binary coverage", () => {
 		expect(workflow).toContain("pattern: pi-natives-${{ matrix.platform }}-${{ matrix.arch }}*-h${{ needs.rust-hash.outputs.hash }}");
 	});
 
+	test("linux native platform packages declare their glibc requirement", async () => {
+		// The linux native addons are built against *-unknown-linux-gnu targets
+		// only (see the ci.yml build matrix), so the platform packages must set
+		// "libc" to keep npm/bun from installing a glibc-linked .node on musl
+		// systems (e.g. Alpine), where dlopen fails with raw relocation errors.
+		for (const dir of ["packages/natives-linux-x64", "packages/natives-linux-arm64"]) {
+			const manifest = await readManifest(dir);
+			expect(manifest.libc).toEqual(["glibc"]);
+		}
+
+		// libc is a linux-only selector; other platform packages must not set it.
+		for (const dir of ["packages/natives-darwin-arm64", "packages/natives-darwin-x64", "packages/natives-win32-x64"]) {
+			const manifest = await readManifest(dir);
+			expect(manifest.libc).toBeUndefined();
+		}
+	});
+
 	test("installer explains missing release assets with fallback guidance", async () => {
 		const installer = await Bun.file(path.join(repoRoot, "scripts/install.sh")).text();
 
 		expect(installer).toContain("No prebuilt SKC binary was found for ${PLATFORM}-${ARCH} in ${LATEST}.");
 		expect(installer).toContain("Re-run this installer with --source");
 		expect(installer).toContain("Expected asset URL: $BINARY_URL");
+	});
+
+	test("install tarball smoke includes linux x64 optional natives package", async () => {
+		const installer = await Bun.file(path.join(repoRoot, "scripts/install-tests/run-ci.sh")).text();
+		expect(installer).toContain("stage_linux_x64_optional_package");
+		expect(installer).toContain("for pkg in utils natives-linux-x64 natives ai agent tui stats coding-agent sayknow-cli");
+		expect(installer).toContain("@sayknow-cli/natives-linux-x64");
+		expect(installer).toContain("sayknow-cli-natives-[0-9]*.tgz");
 	});
 });

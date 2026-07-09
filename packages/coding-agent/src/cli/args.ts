@@ -3,6 +3,7 @@
  */
 import { type Effort, THINKING_EFFORTS } from "@sayknow-cli/ai";
 import { APP_NAME, CONFIG_DIR_NAME, logger } from "@sayknow-cli/utils";
+import { CliParseError } from "@sayknow-cli/utils/cli";
 import chalk from "chalk";
 import { parseEffort } from "../thinking";
 import { BUILTIN_TOOLS } from "../tools";
@@ -20,6 +21,7 @@ export interface Args {
 	mpreset?: string;
 	default?: boolean;
 	apiKey?: string;
+	credential?: string;
 	systemPrompt?: string;
 	appendSystemPrompt?: string;
 	thinking?: Effort;
@@ -136,6 +138,12 @@ export function parseArgs(args: string[]): Args {
 			result.default = true;
 		} else if (arg === "--api-key" && i + 1 < args.length) {
 			result.apiKey = args[++i];
+		} else if (arg === "--credential") {
+			const next = args[i + 1];
+			if (!next || next.startsWith("-")) {
+				throw new CliParseError("--credential requires <selector>");
+			}
+			result.credential = args[++i];
 		} else if (arg === "--system-prompt" && i + 1 < args.length) {
 			result.systemPrompt = args[++i];
 		} else if (arg === "--append-system-prompt" && i + 1 < args.length) {

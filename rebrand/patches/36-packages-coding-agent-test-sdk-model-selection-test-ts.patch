@@ -1,6 +1,6 @@
 --- a/packages/coding-agent/test/sdk-model-selection.test.ts
 +++ b/packages/coding-agent/test/sdk-model-selection.test.ts
-@@ -149,6 +149,43 @@
+@@ -196,6 +196,47 @@
  		}
  	});
  
@@ -22,7 +22,7 @@
 +			agentDir: tempDir,
 +			sessionManager: SessionManager.inMemory(),
 +			disableExtensionDiscovery: true,
-+			extensions: [providerExtension],
++			extensions: [],
 +			settings,
 +			skills: [],
 +			contextFiles: [],
@@ -30,6 +30,10 @@
 +			slashCommands: [],
 +			enableMCP: false,
 +			enableLsp: false,
++			workspaceTree: { rootPath: tempDir, rendered: "", truncated: false, totalLines: 0, agentsMdFiles: [] },
++			toolNames: [],
++			rules: [],
++			modelRegistry,
 +		});
 +
 +		try {

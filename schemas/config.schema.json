@@ -527,6 +527,7 @@
 		"defaultThinkingLevel": {
 			"type": "string",
 			"enum": [
+				"off",
 				"minimal",
 				"low",
 				"medium",

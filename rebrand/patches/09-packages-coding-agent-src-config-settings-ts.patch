@@ -17,7 +17,7 @@
  	light: "blue-octopus",
  } as const;
  
-@@ -673,7 +674,7 @@
+@@ -692,7 +693,7 @@
  		if (typeof raw.theme === "string") {
  			const oldTheme = raw.theme;
  			const migratedTheme = this.#migrateLegacyBuiltInThemeName(oldTheme);
@@ -26,7 +26,7 @@
  				raw.theme = { dark: migratedTheme };
  			} else if (oldTheme === "light" && migratedTheme === "blue-octopus") {
  				raw.theme = { light: migratedTheme };
-@@ -919,6 +920,11 @@
+@@ -942,6 +943,11 @@
  			});
  		}
  	},

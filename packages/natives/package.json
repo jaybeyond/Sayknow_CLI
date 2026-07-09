@@ -1,6 +1,6 @@
 {
 	"name": "@sayknow-cli/natives",
-	"version": "0.3.9",
+	"version": "0.3.10",
 	"description": "Native Rust bindings for grep, clipboard, image processing, syntax highlighting, PTY, and shell operations via N-API",
 	"type": "module",
 	"homepage": "https://sayknow-cli.com",
@@ -53,10 +53,20 @@
 		"triples": {}
 	},
 	"files": [
-		"src",
-		"native",
+		"native/index.js",
+		"native/index.d.ts",
+		"native/loader-state.js",
+		"native/loader-state.d.ts",
+		"native/embedded-addon.js",
 		"README.md"
 	],
+	"optionalDependencies": {
+		"@sayknow-cli/natives-darwin-arm64": "workspace:*",
+		"@sayknow-cli/natives-darwin-x64": "workspace:*",
+		"@sayknow-cli/natives-linux-arm64": "workspace:*",
+		"@sayknow-cli/natives-linux-x64": "workspace:*",
+		"@sayknow-cli/natives-win32-x64": "workspace:*"
+	},
 	"exports": {
 		".": {
 			"types": "./native/index.d.ts",
