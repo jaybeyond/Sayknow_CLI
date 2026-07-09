@@ -129,4 +129,23 @@ describe("issue 823: standalone-binary native loader path resolution", () => {
 		expect(candidates).not.toContain(path.join(versionedDir, "pi_natives.linux-x64-baseline.node"));
 		expect(candidates).not.toContain(path.join(userDataDir, "pi_natives.linux-x64-baseline.node"));
 	});
+
+	it("probes optional platform package native dir for npm installs", () => {
+		const nativeDir = "/app/node_modules/@sayknow-cli/natives/native";
+		const platformNativeDir = "/app/node_modules/@sayknow-cli/natives-linux-x64/native";
+		const candidates = resolveLoaderCandidates({
+			addonFilenames: getAddonFilenames({ tag: "linux-x64", arch: "x64", variant: "modern" }),
+			isCompiledBinary: false,
+			nativeDir,
+			platformNativeDir,
+			execDir: "/usr/bin",
+			versionedDir: "/home/u/.skc/natives/14.5.2",
+			userDataDir: "/home/u/.local/bin",
+		});
+
+		expect(candidates).toContain(path.join(platformNativeDir, "pi_natives.linux-x64-modern.node"));
+		expect(candidates.indexOf(path.join(nativeDir, "pi_natives.linux-x64-modern.node"))).toBeLessThan(
+			candidates.indexOf(path.join(platformNativeDir, "pi_natives.linux-x64-modern.node")),
+		);
+	});
 });

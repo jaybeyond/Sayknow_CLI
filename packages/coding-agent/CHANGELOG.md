@@ -4,6 +4,14 @@ Sayknow-CLI is a rebranded fork of [gajae-code](https://github.com/Yeachan-Heo/g
 This file tracks the **fork's own releases**; upstream's full feature history lives
 in that project. Each release notes the upstream version it is built on.
 
+## [0.3.11] — 2026-07-09
+
+### Fixed
+
+- Restored npm source-install native loading by probing the platform optional
+  package (`@sayknow-cli/natives-<platform>`) when the stable native loader package
+  no longer carries `.node` binaries directly.
+
 ## [0.3.10] — 2026-07-09
 
 ### Changed

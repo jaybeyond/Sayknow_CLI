@@ -113,6 +113,7 @@ export function shouldStageNodeModulesAddon({ platform, isCompiledBinary, native
  *   isCompiledBinary: boolean;
  *   stageFromNodeModules?: boolean;
  *   nativeDir: string;
+ *   platformNativeDir?: string | null;
  *   execDir: string;
  *   versionedDir: string;
  *   userDataDir: string;
@@ -124,12 +125,14 @@ export function resolveLoaderCandidates({
 	isCompiledBinary,
 	stageFromNodeModules = false,
 	nativeDir,
+	platformNativeDir,
 	execDir,
 	versionedDir,
 	userDataDir,
 }) {
+	const sourceNativeDirs = [nativeDir, platformNativeDir].filter(dir => typeof dir === "string" && dir.length > 0);
 	const baseReleaseCandidates = addonFilenames.flatMap(filename => [
-		path.join(nativeDir, filename),
+		...sourceNativeDirs.map(dir => path.join(dir, filename)),
 		path.join(execDir, filename),
 	]);
 	const compiledCandidates = addonFilenames.flatMap(filename => [
@@ -347,6 +350,7 @@ function initLoaderContext() {
 	const platformTag = `${process.platform}-${process.arch}`;
 	const packageVersion = packageJson.version;
 	const nativeDir = path.join(import.meta.dir, "..", "native");
+	const platformNativeDir = path.join(nativeDir, "..", "..", `natives-${platformTag}`, "native");
 	const execDir = path.dirname(process.execPath);
 	const versionedDir = path.join(getNativesDir(), packageVersion);
 	const userDataDir =
@@ -374,6 +378,7 @@ function initLoaderContext() {
 		isCompiledBinary,
 		stageFromNodeModules,
 		nativeDir,
+		platformNativeDir,
 		execDir,
 		versionedDir,
 		userDataDir,

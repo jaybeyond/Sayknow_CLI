@@ -15,7 +15,7 @@
     },
     "packages/agent": {
       "name": "@sayknow-cli/agent-core",
-      "version": "0.3.10",
+      "version": "0.3.11",
       "dependencies": {
         "@opentelemetry/api": "catalog:",
         "@sayknow-cli/ai": "catalog:",
@@ -30,7 +30,7 @@
     },
     "packages/ai": {
       "name": "@sayknow-cli/ai",
-      "version": "0.3.10",
+      "version": "0.3.11",
       "bin": {
         "pi-ai": "./src/cli.ts",
       },
@@ -48,14 +48,14 @@
     },
     "packages/bridge-client": {
       "name": "@sayknow-cli/bridge-client",
-      "version": "0.3.10",
+      "version": "0.3.11",
       "devDependencies": {
         "@types/bun": "catalog:",
       },
     },
     "packages/coding-agent": {
       "name": "@sayknow-cli/coding-agent",
-      "version": "0.3.10",
+      "version": "0.3.11",
       "bin": {
         "skc": "bin/skc.js",
       },
@@ -91,7 +91,7 @@
     },
     "packages/natives": {
       "name": "@sayknow-cli/natives",
-      "version": "0.3.10",
+      "version": "0.3.11",
       "devDependencies": {
         "@napi-rs/cli": "catalog:",
         "@types/bun": "catalog:",
@@ -107,23 +107,23 @@
     },
     "packages/natives-darwin-arm64": {
       "name": "@sayknow-cli/natives-darwin-arm64",
-      "version": "0.3.10",
+      "version": "0.3.11",
     },
     "packages/natives-darwin-x64": {
       "name": "@sayknow-cli/natives-darwin-x64",
-      "version": "0.3.10",
+      "version": "0.3.11",
     },
     "packages/natives-linux-arm64": {
       "name": "@sayknow-cli/natives-linux-arm64",
-      "version": "0.3.10",
+      "version": "0.3.11",
     },
     "packages/natives-linux-x64": {
       "name": "@sayknow-cli/natives-linux-x64",
-      "version": "0.3.10",
+      "version": "0.3.11",
     },
     "packages/natives-win32-x64": {
       "name": "@sayknow-cli/natives-win32-x64",
-      "version": "0.3.10",
+      "version": "0.3.11",
     },
     "packages/orchestration-token-benchmark": {
       "name": "@sayknow-cli/orchestration-token-benchmark",
@@ -134,7 +134,7 @@
     },
     "packages/sayknow-cli": {
       "name": "sayknow-cli",
-      "version": "0.3.10",
+      "version": "0.3.11",
       "bin": {
         "skc": "bin/skc.js",
       },
@@ -144,7 +144,7 @@
     },
     "packages/stats": {
       "name": "@sayknow-cli/stats",
-      "version": "0.3.10",
+      "version": "0.3.11",
       "bin": {
         "skc-stats": "./src/index.ts",
       },
@@ -169,7 +169,7 @@
     },
     "packages/telegram-remote": {
       "name": "@sayknow-cli/telegram-remote",
-      "version": "0.3.10",
+      "version": "0.3.11",
       "dependencies": {
         "@sayknow-cli/coding-agent": "catalog:",
       },
@@ -179,7 +179,7 @@
     },
     "packages/tui": {
       "name": "@sayknow-cli/tui",
-      "version": "0.3.10",
+      "version": "0.3.11",
       "dependencies": {
         "@sayknow-cli/natives": "catalog:",
         "@sayknow-cli/utils": "catalog:",
@@ -219,7 +219,7 @@
     },
     "packages/utils": {
       "name": "@sayknow-cli/utils",
-      "version": "0.3.10",
+      "version": "0.3.11",
       "dependencies": {
         "@sayknow-cli/natives": "catalog:",
         "beautiful-mermaid": "catalog:",
@@ -233,7 +233,7 @@
     },
     "python/roboskc/web": {
       "name": "roboskc-web",
-      "version": "0.3.10",
+      "version": "0.3.11",
       "dependencies": {
         "solid-js": "catalog:",
       },
@@ -263,14 +263,14 @@
     "@opentelemetry/context-async-hooks": "^2.0.0",
     "@opentelemetry/sdk-trace-base": "^2.0.0",
     "@puppeteer/browsers": "^2.13.0",
-    "@sayknow-cli/agent-core": "0.3.10",
-    "@sayknow-cli/ai": "0.3.10",
-    "@sayknow-cli/bridge-client": "0.3.10",
-    "@sayknow-cli/coding-agent": "0.3.10",
-    "@sayknow-cli/natives": "0.3.10",
-    "@sayknow-cli/stats": "0.3.10",
-    "@sayknow-cli/tui": "0.3.10",
-    "@sayknow-cli/utils": "0.3.10",
+    "@sayknow-cli/agent-core": "0.3.11",
+    "@sayknow-cli/ai": "0.3.11",
+    "@sayknow-cli/bridge-client": "0.3.11",
+    "@sayknow-cli/coding-agent": "0.3.11",
+    "@sayknow-cli/natives": "0.3.11",
+    "@sayknow-cli/stats": "0.3.11",
+    "@sayknow-cli/tui": "0.3.11",
+    "@sayknow-cli/utils": "0.3.11",
     "@tailwindcss/node": "^4.2.4",
     "@tailwindcss/vite": "^4.2.4",
     "@types/babel__generator": "^7.27.0",
