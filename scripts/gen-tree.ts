@@ -28,8 +28,6 @@ if (!target || !fs.existsSync(target)) {
 
 const run = (cmd: string, args: string[], cwd = REPO) =>
 	execFileSync(cmd, args, { cwd, stdio: "inherit" });
-const runQuiet = (cmd: string, args: string[], cwd = REPO) =>
-	execFileSync(cmd, args, { cwd, stdio: "ignore" });
 const step = (msg: string) => console.log(`\n▸ ${msg}`);
 
 // 1. brand rename
@@ -106,8 +104,12 @@ for (const t of manifest.toolingOnly) {
 if (doBuild) {
 	step("regenerate (docs-index, lockfiles)");
 	try {
+		// Regenerate lockfiles from scratch so the freshly-stamped fork version
+		// propagates into them. A stale bun.lock / Cargo.lock silently ships the
+		// OLD version in `skc --version` and the compiled binaries.
+		fs.rmSync(path.join(target, "bun.lock"), { force: true });
 		run("bun", ["install"], target);
-		runQuiet("cargo", ["metadata", "--format-version", "1"], target);
+		run("cargo", ["update", "--workspace"], target);
 		run("bun", ["--cwd=packages/coding-agent", "run", "generate-docs-index"], target);
 		// JSON schemas derive from the (patched) settings-schema.ts, so regenerate them after
 		// patches land — otherwise check:schemas flags schemas/config.schema.json as stale.
