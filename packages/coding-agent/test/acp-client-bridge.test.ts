@@ -1,6 +1,12 @@
 import { describe, expect, it } from "bun:test";
-import type { AgentSideConnection, RequestPermissionRequest } from "@agentclientprotocol/sdk";
+import type { AgentSideConnection, ClientCapabilities, RequestPermissionRequest } from "@agentclientprotocol/sdk";
 import { createAcpClientBridge } from "../src/modes/acp/acp-client-bridge";
+
+function expectPermissionPrompt(clientCapabilities: ClientCapabilities | undefined, enabled: boolean): void {
+	const bridge = createAcpClientBridge({} as AgentSideConnection, "session-1", clientCapabilities);
+	expect(bridge.capabilities.requestPermission).toBe(enabled);
+	expect(typeof bridge.requestPermission === "function").toBe(enabled);
+}
 
 describe("ACP client bridge permission requests", () => {
 	it("forwards pending tool-call status to session/request_permission", async () => {
@@ -12,7 +18,9 @@ describe("ACP client bridge permission requests", () => {
 			},
 		} as unknown as AgentSideConnection;
 
-		const bridge = createAcpClientBridge(connection, "session-1", {});
+		const bridge = createAcpClientBridge(connection, "session-1", {
+			_meta: { skc: { permissionHandling: "prompt" } },
+		});
 
 		await bridge.requestPermission!(
 			{
@@ -35,5 +43,50 @@ describe("ACP client bridge permission requests", () => {
 			rawInput: { command: "echo hi" },
 			content: [{ type: "content", content: { type: "text", text: "$ echo hi" } }],
 		});
+	});
+
+	it("only enables ACP permission requests in prompt mode", () => {
+		expectPermissionPrompt({ _meta: { skc: { permissionHandling: "prompt" } } }, true);
+		expectPermissionPrompt({ _meta: { skc: { permissionHandling: "auto" } } }, false);
+		expectPermissionPrompt({ _meta: { skc: { permissionHandling: "always-allow" } } }, false);
+	});
+
+	it("uses SKC_ACP_PERMISSION_MODE when client metadata is absent", () => {
+		const previous = process.env.SKC_ACP_PERMISSION_MODE;
+		try {
+			process.env.SKC_ACP_PERMISSION_MODE = "auto";
+			expectPermissionPrompt(undefined, false);
+			process.env.SKC_ACP_PERMISSION_MODE = "always-allow";
+			expectPermissionPrompt({}, false);
+			process.env.SKC_ACP_PERMISSION_MODE = "prompt";
+			expectPermissionPrompt({}, true);
+			process.env.SKC_ACP_PERMISSION_MODE = "invalid";
+			expectPermissionPrompt({}, true);
+			process.env.SKC_ACP_PERMISSION_MODE = "AUTO";
+			expectPermissionPrompt({}, true);
+			process.env.SKC_ACP_PERMISSION_MODE = " always-allow ";
+			expectPermissionPrompt({}, true);
+		} finally {
+			if (previous === undefined) delete process.env.SKC_ACP_PERMISSION_MODE;
+			else process.env.SKC_ACP_PERMISSION_MODE = previous;
+		}
+	});
+
+	it("prefers client metadata and fails safely for invalid explicit values", () => {
+		const previous = process.env.SKC_ACP_PERMISSION_MODE;
+		try {
+			process.env.SKC_ACP_PERMISSION_MODE = "prompt";
+			expectPermissionPrompt({ _meta: { skc: { permissionHandling: "auto" } } }, false);
+			expectPermissionPrompt({ _meta: { skc: { permissionHandling: "always-allow" } } }, false);
+			process.env.SKC_ACP_PERMISSION_MODE = "always-allow";
+			expectPermissionPrompt({ _meta: { skc: { permissionHandling: "prompt" } } }, true);
+			expectPermissionPrompt({ _meta: { skc: { permissionHandling: "invalid" } } }, true);
+			expectPermissionPrompt({ _meta: { skc: { permissionHandling: "AUTO" } } }, true);
+			expectPermissionPrompt({ _meta: { skc: { permissionHandling: " always-allow " } } }, true);
+			expectPermissionPrompt({ _meta: { skc: { permissionHandling: null } } }, true);
+		} finally {
+			if (previous === undefined) delete process.env.SKC_ACP_PERMISSION_MODE;
+			else process.env.SKC_ACP_PERMISSION_MODE = previous;
+		}
 	});
 });

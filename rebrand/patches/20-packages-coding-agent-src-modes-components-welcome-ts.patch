@@ -1,14 +1,15 @@
 --- a/packages/coding-agent/src/modes/components/welcome.ts
 +++ b/packages/coding-agent/src/modes/components/welcome.ts
-@@ -1,5 +1,6 @@
+@@ -1,6 +1,7 @@
  import { type Component, padding, TERMINAL, truncateToWidth, visibleWidth } from "@sayknow-cli/tui";
  import { APP_NAME } from "@sayknow-cli/utils";
+ import { formatBuildLabel } from "../../build-metadata";
 +import { t } from "../../i18n";
  import { type ThemeColor, theme } from "../../modes/theme/theme";
  
  export interface RecentSession {
-@@ -21,7 +22,7 @@
- 	collapseChangelog?: boolean;
+@@ -23,7 +24,7 @@
+ 	buildLabel?: string;
  }
  
 -const WELCOME_STATIC_RIGHT_ROWS_EXCLUDING_DYNAMIC_SECTIONS = 9;
@@ -16,7 +17,7 @@
  const DEFAULT_WHATS_NEW_ROWS = 3;
  const MAX_WHATS_NEW_ROWS = 12;
  const NEWLINE_FLOW_KEY =
-@@ -41,8 +42,9 @@
+@@ -43,8 +44,9 @@
  ];
  
  /**
@@ -28,7 +29,7 @@
   */
  export class WelcomeComponent implements Component {
  	#animStart: number | null = null;
-@@ -116,7 +118,7 @@
+@@ -118,7 +120,7 @@
  		}
  		const targetContentRows = targetRows === undefined ? undefined : Math.max(0, targetRows - 2);
  		const dualContentWidth = boxWidth - 3; // 3 = │ + │ + │
@@ -37,7 +38,7 @@
  		const minRightCol = 24;
  		const modelPill = this.#pill(theme.icon.model || "model", this.modelName, "statusLineModel");
  		const providerPill = this.#pill(theme.icon.package || "provider", this.providerName, "statusLinePath");
-@@ -125,8 +127,7 @@
+@@ -127,8 +129,7 @@
  		const leftMinContentWidth = Math.max(
  			minLeftCol,
  			logoMinWidth,
@@ -47,7 +48,7 @@
  			visibleWidth(modelPill),
  			visibleWidth(providerPill),
  		);
-@@ -144,17 +145,26 @@
+@@ -146,17 +147,26 @@
  
  		const logoColored = this.#currentLogoFrame(logoLines);
  
@@ -80,7 +81,7 @@
  		];
  
  		const buildSeparator = (columnWidth: number): string =>
-@@ -164,7 +174,7 @@
+@@ -166,7 +176,7 @@
  		const separator = buildSeparator(rightColumnWidth);
  		const lspLines: string[] = [];
  		if (this.lspServers.length === 0) {
@@ -89,7 +90,7 @@
  		} else {
  			for (const server of this.lspServers.slice(0, 4)) {
  				const icon =
-@@ -196,18 +206,30 @@
+@@ -198,18 +208,30 @@
  		);
  		const sessionLines = this.#sessionTrailLines(rightColumnWidth, sessionLimit);
  
@@ -123,16 +124,16 @@
  			...sessionLines,
  			"",
  		];
-@@ -227,7 +249,7 @@
- 		const br = theme.fg("dim", theme.boxRound.bottomRight);
+@@ -230,7 +252,7 @@
  
  		const lines: string[] = [];
--		const title = ` ${APP_NAME} v${this.version} · SKC Forge `;
-+		const title = ` ${APP_NAME} · Sayknow-CLI v${this.version} `;
+ 		const buildLabel = this.options.buildLabel ?? formatBuildLabel();
+-		const title = ` ${APP_NAME} v${this.version} · ${buildLabel} · SKC Forge `;
++		const title = ` ${APP_NAME} · Sayknow-CLI v${this.version} · ${buildLabel} `;
  		const titlePrefixRaw = hChar.repeat(3);
  		const titleStyled = theme.fg("dim", titlePrefixRaw) + theme.fg("muted", title);
  		const titleVisLen = visibleWidth(titlePrefixRaw) + visibleWidth(title);
-@@ -322,7 +344,28 @@
+@@ -325,7 +347,28 @@
  	}
  
  	#flowKeyItemText(item: { key: string; label: string }): string {
@@ -162,7 +163,7 @@
  	}
  
  	#flowKeyRows(width: number): string[] {
-@@ -414,7 +457,7 @@
+@@ -417,7 +460,7 @@
  
  	#sessionTrailLines(rightColumnWidth: number, limit: number): string[] {
  		if (this.recentSessions.length === 0) {
@@ -171,7 +172,7 @@
  		}
  
  		const bulletPrefix = ` ${theme.md.bullet} `;
-@@ -532,53 +575,28 @@
+@@ -535,53 +578,28 @@
  	}
  
  	#logoLines(): readonly string[] {
@@ -237,7 +238,7 @@
  
  /** Half-width of the shine highlight band, expressed in gradient-t units. */
  const SHINE_HALF_WIDTH = 0.18;
-@@ -667,7 +685,7 @@
+@@ -670,7 +688,7 @@
  
  /** Resting gradient frames, cached for re-renders outside of the intro. */
  const REST_FRAMES: Record<WelcomeLogoMode, readonly string[]> = {

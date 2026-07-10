@@ -8,7 +8,8 @@ import type { CompactionResult } from "@sayknow-cli/agent-core/compaction";
 import type { ImageContent, Model } from "@sayknow-cli/ai";
 import { isRecord, ptree, readJsonl } from "@sayknow-cli/utils";
 import type { BashResult } from "../../exec/bash-executor";
-import type { SessionStats } from "../../session/agent-session";
+import type { AgentSessionEvent, SessionStats } from "../../session/agent-session";
+import { AGENT_WIRE_EVENT_TYPES, type AgentWireEventType } from "../shared/agent-wire/event-contract";
 import type {
 	RpcCommand,
 	RpcExtensionUIRequest,
@@ -64,6 +65,7 @@ export interface RpcClientOptions {
 export type ModelInfo = Pick<Model, "provider" | "id" | "contextWindow" | "reasoning" | "thinking">;
 
 export type RpcEventListener = (event: AgentEvent) => void;
+export type RpcSessionEventListener = (event: AgentSessionEvent) => void;
 
 export interface RpcClientToolContext<TDetails = unknown> {
 	toolCallId: string;
@@ -91,7 +93,8 @@ export function defineRpcClientTool<
 	return tool;
 }
 
-const agentEventTypes = new Set<AgentEvent["type"]>([
+const agentWireEventTypes = new Set<AgentWireEventType>(AGENT_WIRE_EVENT_TYPES);
+const coreAgentEventTypes = new Set<AgentEvent["type"]>([
 	"agent_start",
 	"agent_end",
 	"turn_start",
@@ -116,13 +119,16 @@ function isRpcResponse(value: unknown): value is RpcResponse {
 	return true;
 }
 
-function isAgentEvent(value: unknown): value is AgentEvent {
+function isAgentSessionEvent(value: unknown): value is AgentSessionEvent {
 	if (!isRecord(value)) return false;
 	const type = value.type;
 	if (typeof type !== "string") return false;
-	return agentEventTypes.has(type as AgentEvent["type"]);
+	return agentWireEventTypes.has(type as AgentWireEventType);
 }
 
+function isCoreAgentEvent(value: AgentSessionEvent): value is AgentEvent {
+	return coreAgentEventTypes.has(value.type as AgentEvent["type"]);
+}
 function isRpcHostToolCallRequest(value: unknown): value is RpcHostToolCallRequest {
 	if (!isRecord(value)) return false;
 	return (
@@ -378,6 +384,7 @@ export class RpcClient {
 	#transport: RpcTransport | null = null;
 	#transportClosed = false;
 	#eventListeners: RpcEventListener[] = [];
+	#sessionEventListeners: RpcSessionEventListener[] = [];
 	#pendingRequests: Map<string, { resolve: (response: RpcResponse) => void; reject: (error: Error) => void }> =
 		new Map();
 	#customTools: RpcClientCustomTool[] = [];
@@ -442,7 +449,7 @@ export class RpcClient {
 	}
 
 	/**
-	 * Subscribe to agent events.
+	 * Subscribe to the legacy core AgentEvent subset.
 	 */
 	onEvent(listener: RpcEventListener): () => void {
 		this.#eventListeners.push(listener);
@@ -450,6 +457,19 @@ export class RpcClient {
 			const index = this.#eventListeners.indexOf(listener);
 			if (index !== -1) {
 				this.#eventListeners.splice(index, 1);
+			}
+		};
+	}
+
+	/**
+	 * Subscribe to all renderer-facing agent session events.
+	 */
+	onSessionEvent(listener: RpcSessionEventListener): () => void {
+		this.#sessionEventListeners.push(listener);
+		return () => {
+			const index = this.#sessionEventListeners.indexOf(listener);
+			if (index !== -1) {
+				this.#sessionEventListeners.splice(index, 1);
 			}
 		};
 	}
@@ -928,8 +948,12 @@ export class RpcClient {
 
 		// Canonical agent-wire event frame: { type:"event", payload:{ event_type, event } }.
 		const event = unwrapAgentWireEventFrame(data);
-		if (!isAgentEvent(event)) return;
+		if (!isAgentSessionEvent(event)) return;
 
+		for (const listener of this.#sessionEventListeners) {
+			listener(event);
+		}
+		if (!isCoreAgentEvent(event)) return;
 		for (const listener of this.#eventListeners) {
 			listener(event);
 		}

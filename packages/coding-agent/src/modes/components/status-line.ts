@@ -29,7 +29,7 @@ import { calculateTokensPerSecond } from "./status-line/token-rate";
 import type { SeparatorDef } from "./status-line/types";
 
 export interface StatusLineSegmentOptions {
-	model?: { showThinkingLevel?: boolean };
+	model?: { showThinkingLevel?: boolean; showContextPercent?: boolean };
 	path?: { abbreviate?: boolean; maxLength?: number; stripWorkPrefix?: boolean };
 	git?: { showBranch?: boolean; showStaged?: boolean; showUnstaged?: boolean; showUntracked?: boolean };
 	time?: { format?: "12h" | "24h"; showSeconds?: boolean };
@@ -700,6 +700,11 @@ export class StatusLineComponent implements Component {
 		const contextTokens = breakdown.usedTokens;
 		const contextWindow = breakdown.contextWindow || state.model?.contextWindow || 0;
 		const contextPercent = contextWindow > 0 ? (contextTokens / contextWindow) * 100 : 0;
+		// Suppress the inline model percentage when a standalone context_pct
+		// segment is also rendered, so the value is not shown twice.
+		const contextPctSegmentActive =
+			effectiveSettings.leftSegments.includes("context_pct") ||
+			effectiveSettings.rightSegments.includes("context_pct");
 
 		return {
 			session: this.session,
@@ -710,6 +715,7 @@ export class StatusLineComponent implements Component {
 			usageStats,
 			contextPercent,
 			contextWindow,
+			contextPctSegmentActive,
 			autoCompactEnabled: this.#autoCompactEnabled,
 			subagentCount: this.#subagentCount,
 			jobs: this.#jobs,
@@ -923,11 +929,8 @@ export class StatusLineComponent implements Component {
 		const totalWidth = () => leftWidth + rightWidth + (left.length > 0 && right.length > 0 ? 1 : 0);
 
 		if (topFillWidth > 0) {
-			while (totalWidth() > topFillWidth && right.length > 0) {
-				right.pop();
-				rightWidth = this.#groupWidth(right, rightCapWidth, rightSepWidth);
-			}
-			// Shrink path before dropping left segments — path is the only elastic segment
+			// Shrink path before dropping right-side telemetry — path is the only elastic segment,
+			// and presets such as default-usage should not hide usage just because cwd is long.
 			const pathIdx = leftIds.indexOf("path");
 			if (pathIdx >= 0 && totalWidth() > topFillWidth) {
 				const overflow = totalWidth() - topFillWidth;
@@ -936,6 +939,10 @@ export class StatusLineComponent implements Component {
 					left[pathIdx] = previewHighlightSegment === "path" ? `\x1b[7m${shrunk}\x1b[27m` : shrunk;
 					leftWidth = this.#groupWidth(left, leftCapWidth, leftSepWidth);
 				}
+			}
+			while (totalWidth() > topFillWidth && right.length > 0) {
+				right.pop();
+				rightWidth = this.#groupWidth(right, rightCapWidth, rightSepWidth);
 			}
 			while (totalWidth() > topFillWidth && left.length > 0) {
 				left.pop();

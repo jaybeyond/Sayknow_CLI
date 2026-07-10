@@ -43,6 +43,7 @@
     "packages/coding-agent/src/extensibility/plugins/marketplace/manager.ts",
     "packages/coding-agent/src/prompts/system/system-prompt.md",
     "packages/coding-agent/scripts/build-binary.ts",
+    "packages/coding-agent/scripts/compile-args.ts",
     ".github/workflows/ci.yml",
     "scripts/check-rust-scope.ts"
   ],

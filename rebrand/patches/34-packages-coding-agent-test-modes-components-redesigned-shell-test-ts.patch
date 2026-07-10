@@ -88,19 +88,3 @@
  		expect(rendered).not.toContain("+----------------+");
  		for (const line of lines) {
  			expect(visibleWidth(line)).toBeLessThanOrEqual(54);
-@@ -292,9 +296,15 @@
- 		expect(STATUS_LINE_PRESETS.default.rightSegments).toEqual([
- 			"session_name",
- 			"jobs",
-+			"token_in",
-+			"token_out",
-+			"cache_read",
- 			"token_rate",
-+			"context_bar",
- 			"context_pct",
- 			"cost",
-+			"usage",
-+			"time_spent",
- 		]);
- 		expect(STATUS_LINE_PRESETS.default.segmentOptions?.path?.maxLength).toBe(32);
- 	});

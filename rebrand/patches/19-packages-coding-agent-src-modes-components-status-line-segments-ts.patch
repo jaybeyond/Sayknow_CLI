@@ -17,7 +17,7 @@
  	},
  };
  
-@@ -138,7 +139,7 @@
+@@ -152,7 +153,7 @@
  			break;
  	}
  
@@ -26,7 +26,7 @@
  	const showUsage = ctx.session.settings.get("goal.statusInFooter") === true;
  	if (showUsage && goal) {
  		parts.push(formatGoalUsage(goal.tokensUsed));
-@@ -149,11 +150,11 @@
+@@ -163,11 +164,11 @@
  const modeSegment: StatusLineSegment = {
  	id: "mode",
  	render(ctx) {
@@ -40,7 +40,7 @@
  			const content = withIcon(theme.icon.plan, label);
  			const color = plan.paused ? "warning" : "accent";
  			return { content: theme.fg(color, content), visible: true };
-@@ -376,6 +377,20 @@
+@@ -390,6 +391,20 @@
  		const content = withIcon(theme.icon.context, theme.fg(color, text));
  
  		return { content, visible: true };
@@ -61,7 +61,7 @@
  	},
  };
  
-@@ -548,6 +563,7 @@
+@@ -562,6 +577,7 @@
  	token_total: tokenTotalSegment,
  	token_rate: tokenRateSegment,
  	cost: costSegment,

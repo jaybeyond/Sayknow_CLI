@@ -1,5 +1,6 @@
 import { type Component, padding, TERMINAL, truncateToWidth, visibleWidth } from "@sayknow-cli/tui";
 import { APP_NAME } from "@sayknow-cli/utils";
+import { formatBuildLabel } from "../../build-metadata";
 import { t } from "../../i18n";
 import { type ThemeColor, theme } from "../../modes/theme/theme";
 
@@ -20,6 +21,7 @@ export interface WelcomeComponentOptions {
 	getReservedBottomRows?: (termWidth: number) => number;
 	changelogMarkdown?: string;
 	collapseChangelog?: boolean;
+	buildLabel?: string;
 }
 
 const WELCOME_STATIC_RIGHT_ROWS_EXCLUDING_DYNAMIC_SECTIONS = 15;
@@ -249,7 +251,8 @@ export class WelcomeComponent implements Component {
 		const br = theme.fg("dim", theme.boxRound.bottomRight);
 
 		const lines: string[] = [];
-		const title = ` ${APP_NAME} · Sayknow-CLI v${this.version} `;
+		const buildLabel = this.options.buildLabel ?? formatBuildLabel();
+		const title = ` ${APP_NAME} · Sayknow-CLI v${this.version} · ${buildLabel} `;
 		const titlePrefixRaw = hChar.repeat(3);
 		const titleStyled = theme.fg("dim", titlePrefixRaw) + theme.fg("muted", title);
 		const titleVisLen = visibleWidth(titlePrefixRaw) + visibleWidth(title);

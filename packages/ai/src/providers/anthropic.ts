@@ -586,15 +586,12 @@ const ANTHROPIC_BUILTIN_TOOL_NAMES = new Set(["web_search", "code_execution", "t
 export const applyClaudeToolPrefix = (name: string, prefixOverride: string = claudeToolPrefix) => {
 	if (!prefixOverride) return name;
 	if (ANTHROPIC_BUILTIN_TOOL_NAMES.has(name.toLowerCase())) return name;
-	const prefix = prefixOverride.toLowerCase();
-	if (name.toLowerCase().startsWith(prefix)) return name;
 	return `${prefixOverride}${name}`;
 };
 
 export const stripClaudeToolPrefix = (name: string, prefixOverride: string = claudeToolPrefix) => {
 	if (!prefixOverride) return name;
-	const prefix = prefixOverride.toLowerCase();
-	if (!name.toLowerCase().startsWith(prefix)) return name;
+	if (!name.startsWith(prefixOverride)) return name;
 	return name.slice(prefixOverride.length);
 };
 
@@ -1325,6 +1322,25 @@ export const streamAnthropic: StreamFunction<"anthropic-messages"> = (
 				| (ToolCall & { partialJson: string })
 			) & { index: number };
 			const blocks = output.content as Block[];
+			const blocksByAnthropicIndex = new Map<number, Block>();
+			const getBlockByAnthropicIndex = (anthropicIndex: number) => {
+				const block = blocksByAnthropicIndex.get(anthropicIndex);
+				if (!block) return { block: undefined, contentIndex: -1 };
+				return { block, contentIndex: blocks.indexOf(block) };
+			};
+			const trackBlockByAnthropicIndex = (anthropicIndex: number, block: Block) => {
+				// A duplicate start for an active index is a provider-envelope violation;
+				// finalize the orphaned block so no internal stream fields leak into output.
+				const orphaned = blocksByAnthropicIndex.get(anthropicIndex);
+				if (orphaned) {
+					if (orphaned.type === "toolCall" && orphaned.partialJson.trim()) {
+						orphaned.arguments = parseStreamingJson(orphaned.partialJson);
+					}
+					delete (orphaned as { index?: number }).index;
+					delete (orphaned as { partialJson?: string }).partialJson;
+				}
+				blocksByAnthropicIndex.set(anthropicIndex, block);
+			};
 			const idleTimeoutMs = options?.streamIdleTimeoutMs ?? getStreamIdleTimeoutMs();
 			const firstEventTimeoutMs = options?.streamFirstEventTimeoutMs ?? getStreamFirstEventTimeoutMs(idleTimeoutMs);
 			stream.push({ type: "start", partial: output });
@@ -1334,6 +1350,8 @@ export const streamAnthropic: StreamFunction<"anthropic-messages"> = (
 			let providerRetryAttempt = 0;
 			let thinkingRepairAttempted = false;
 			while (true) {
+				// Retries reset output.content; drop stale block correlations from the aborted attempt.
+				blocksByAnthropicIndex.clear();
 				activeAbortTracker = createAbortSourceTracker(options?.signal);
 				const firstEventTimeoutAbortError = new Error(
 					"Anthropic stream timed out while waiting for the first event",
@@ -1403,6 +1421,7 @@ export const streamAnthropic: StreamFunction<"anthropic-messages"> = (
 									index: event.index,
 								};
 								output.content.push(block);
+								trackBlockByAnthropicIndex(event.index, block);
 								stream.push({
 									type: "text_start",
 									contentIndex: output.content.length - 1,
@@ -1416,6 +1435,7 @@ export const streamAnthropic: StreamFunction<"anthropic-messages"> = (
 									index: event.index,
 								};
 								output.content.push(block);
+								trackBlockByAnthropicIndex(event.index, block);
 								stream.push({
 									type: "thinking_start",
 									contentIndex: output.content.length - 1,
@@ -1428,6 +1448,7 @@ export const streamAnthropic: StreamFunction<"anthropic-messages"> = (
 									index: event.index,
 								};
 								output.content.push(block);
+								trackBlockByAnthropicIndex(event.index, block);
 							} else if (event.content_block.type === "tool_use") {
 								streamedReplayUnsafeContent = true;
 								const block: Block = {
@@ -1441,6 +1462,7 @@ export const streamAnthropic: StreamFunction<"anthropic-messages"> = (
 									index: event.index,
 								};
 								output.content.push(block);
+								trackBlockByAnthropicIndex(event.index, block);
 								stream.push({
 									type: "toolcall_start",
 									contentIndex: output.content.length - 1,
@@ -1449,8 +1471,7 @@ export const streamAnthropic: StreamFunction<"anthropic-messages"> = (
 							}
 						} else if (event.type === "content_block_delta") {
 							if (event.delta.type === "text_delta") {
-								const index = blocks.findIndex(b => b.index === event.index);
-								const block = blocks[index];
+								const { block, contentIndex: index } = getBlockByAnthropicIndex(event.index);
 								if (block && block.type === "text") {
 									block.text += event.delta.text;
 									stream.push({
@@ -1461,8 +1482,7 @@ export const streamAnthropic: StreamFunction<"anthropic-messages"> = (
 									});
 								}
 							} else if (event.delta.type === "thinking_delta") {
-								const index = blocks.findIndex(b => b.index === event.index);
-								const block = blocks[index];
+								const { block, contentIndex: index } = getBlockByAnthropicIndex(event.index);
 								if (block && block.type === "thinking") {
 									block.thinking += event.delta.thinking;
 									stream.push({
@@ -1473,8 +1493,7 @@ export const streamAnthropic: StreamFunction<"anthropic-messages"> = (
 									});
 								}
 							} else if (event.delta.type === "input_json_delta") {
-								const index = blocks.findIndex(b => b.index === event.index);
-								const block = blocks[index];
+								const { block, contentIndex: index } = getBlockByAnthropicIndex(event.index);
 								if (block && block.type === "toolCall") {
 									block.partialJson += event.delta.partial_json;
 									block.arguments = parseStreamingJson(block.partialJson);
@@ -1486,17 +1505,16 @@ export const streamAnthropic: StreamFunction<"anthropic-messages"> = (
 									});
 								}
 							} else if (event.delta.type === "signature_delta") {
-								const index = blocks.findIndex(b => b.index === event.index);
-								const block = blocks[index];
+								const { block } = getBlockByAnthropicIndex(event.index);
 								if (block && block.type === "thinking") {
 									block.thinkingSignature = block.thinkingSignature || "";
 									block.thinkingSignature += event.delta.signature;
 								}
 							}
 						} else if (event.type === "content_block_stop") {
-							const index = blocks.findIndex(b => b.index === event.index);
-							const block = blocks[index];
+							const { block, contentIndex: index } = getBlockByAnthropicIndex(event.index);
 							if (block) {
+								blocksByAnthropicIndex.delete(event.index);
 								delete (block as { index?: number }).index;
 								if (block.type === "text") {
 									stream.push({
@@ -1513,7 +1531,9 @@ export const streamAnthropic: StreamFunction<"anthropic-messages"> = (
 										partial: output,
 									});
 								} else if (block.type === "toolCall") {
-									block.arguments = parseStreamingJson(block.partialJson);
+									if (block.partialJson.trim()) {
+										block.arguments = parseStreamingJson(block.partialJson);
+									}
 									delete (block as { partialJson?: string }).partialJson;
 									stream.push({
 										type: "toolcall_end",
@@ -2243,7 +2263,11 @@ function buildParams(
 		params.tools = convertTools(
 			context.tools,
 			isOAuthToken,
-			disableStrictTools || model.provider === "github-copilot",
+			// The Claude Code OAuth surface mishandles `strict: true` tools:
+			// streamed tool_use blocks arrive with empty/undefined arguments and
+			// occasionally corrupted names (works with PI_NO_STRICT=1). Never
+			// request strict tool use on OAuth requests.
+			disableStrictTools || isOAuthToken || model.provider === "github-copilot",
 			getAnthropicCompat(model).supportsEagerToolInputStreaming,
 		);
 	}

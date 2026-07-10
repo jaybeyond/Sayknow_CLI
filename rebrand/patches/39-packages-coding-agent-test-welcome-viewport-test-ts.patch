@@ -1,0 +1,29 @@
+--- a/packages/coding-agent/test/welcome-viewport.test.ts
++++ b/packages/coding-agent/test/welcome-viewport.test.ts
+@@ -74,7 +74,7 @@
+ 		});
+ 		const rendered = welcome.render(120).map(stripRenderControls).join("\n");
+ 
+-		expect(rendered).toContain("skc v1.2.3 · release build · SKC Forge");
++		expect(rendered).toContain("skc · Sayknow-CLI v1.2.3 · release build");
+ 		expect(rendered).not.toContain("dev build");
+ 	});
+ 
+@@ -83,7 +83,7 @@
+ 		const welcome = new WelcomeComponent("1.2.3", "test-model", "test-provider", [], [], "ascii");
+ 		const rendered = welcome.render(120).map(stripRenderControls).join("\n");
+ 
+-		expect(rendered).toContain("skc v1.2.3 · release build · SKC Forge");
++		expect(rendered).toContain("skc · Sayknow-CLI v1.2.3 · release build");
+ 		expect(rendered).not.toContain("dev build");
+ 	});
+ 
+@@ -113,7 +113,7 @@
+ 		for (const line of lines) {
+ 			expect(visibleWidth(line)).toBe(100);
+ 		}
+-		expect(lines.some(line => line.includes("SKC Forge"))).toBe(true);
++		expect(lines.some(line => line.includes("Sayknow-CLI"))).toBe(true);
+ 		expect(lines.some(line => line.includes("What's New"))).toBe(true);
+ 	});
+ 	it("integrates changelog highlights without overflowing narrow CJK content", () => {

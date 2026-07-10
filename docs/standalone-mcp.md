@@ -15,7 +15,7 @@ skc mcp list
 skc mcp remove context7
 ```
 
-`skc mcp add` writes only the definition supplied on that invocation to SKC's own MCP config (`~/.skc/agent/mcp.json` by default, or `./.skc/mcp.json` with `--project`). It does not read Claude Code, Codex, OpenCode, Cursor, Gemini, Windsurf, or other live configs. `skc mcp list` and `skc mcp remove` print redacted definitions so env/header/auth/OAuth credential values are not exposed in public output.
+`skc mcp add` writes only the definition supplied on that invocation to SKC's own MCP config (`~/.skc/agent/mcp.json` by default, or `./.skc/mcp.json` with `--project`). It does not read Claude Code, Codex, OpenCode, Cursor, Gemini, Windsurf, or other live configs. `skc mcp list` and `skc mcp remove` print redacted definitions so env/header/auth/OAuth credential values are not exposed in public output. These registrations are storage-only today: normal standalone `skc`, `skc --tmux`, and print-mode sessions do not load them as runtime tools.
 
 ## What is supported today
 

@@ -2,7 +2,11 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { decodePastedPathCandidate, resolvePastedImagePath } from "../src/utils/pasted-image-path";
+import {
+	decodePastedPathCandidate,
+	formatPastedImageReference,
+	resolvePastedImagePath,
+} from "../src/utils/pasted-image-path";
 
 const NNBSP = "\u202f"; // narrow no-break space used by macOS screenshot names
 
@@ -25,51 +29,38 @@ describe("resolvePastedImagePath", () => {
 		return filePath;
 	}
 
-	it("resolves a plain absolute path to an existing image", () => {
+	it("does not auto-attach arbitrary absolute image paths", () => {
 		const filePath = writeImage("plain.png");
-		expect(resolvePastedImagePath(filePath)).toBe(filePath);
+		expect(resolvePastedImagePath(filePath)).toBeUndefined();
 	});
 
-	it("resolves a shell-escaped drag-drop path with U+202F before PM", () => {
-		// macOS screenshot drag-drop: ASCII spaces are `\ `-escaped, the U+202F
-		// before "PM" is left as-is.
+	it("does not auto-attach shell-escaped drag-drop image paths", () => {
+		// Saved image paths remain literal text; attach them explicitly with @path/to/image.png.
 		const filePath = writeImage(`Screenshot 2026-07-07 at 11.06.38${NNBSP}PM.png`);
 		const pasted = filePath.replaceAll(" ", "\\ ");
 		expect(pasted).not.toBe(filePath);
-		expect(resolvePastedImagePath(pasted)).toBe(filePath);
+		expect(resolvePastedImagePath(pasted)).toBeUndefined();
 	});
 
-	it("resolves shell-escaped parentheses", () => {
-		const filePath = writeImage("shot (1).png");
-		const pasted = filePath.replaceAll(" ", "\\ ").replaceAll("(", "\\(").replaceAll(")", "\\)");
-		expect(resolvePastedImagePath(pasted)).toBe(filePath);
-	});
-
-	it("resolves single- and double-quoted paths", () => {
+	it("does not auto-attach quoted arbitrary image paths", () => {
 		const filePath = writeImage("quoted image.jpg");
-		expect(resolvePastedImagePath(`'${filePath}'`)).toBe(filePath);
-		expect(resolvePastedImagePath(`"${filePath}"`)).toBe(filePath);
+		expect(resolvePastedImagePath(`'${filePath}'`)).toBeUndefined();
+		expect(resolvePastedImagePath(`"${filePath}"`)).toBeUndefined();
 	});
 
-	it("resolves file:// URIs with percent-encoding", () => {
+	it("does not auto-attach arbitrary file:// image URIs", () => {
 		const filePath = writeImage("uri image.webp");
 		const uri = `file://${filePath.split("/").map(encodeURIComponent).join("/")}`;
-		expect(resolvePastedImagePath(uri)).toBe(filePath);
+		expect(resolvePastedImagePath(uri)).toBeUndefined();
 	});
 
-	it("resolves file://localhost URIs", () => {
-		const filePath = writeImage("localhost.png");
-		expect(resolvePastedImagePath(`file://localhost${filePath}`)).toBe(filePath);
-	});
-
-	it("expands ~/ against the provided homedir", () => {
-		const filePath = writeImage("home.png");
-		expect(resolvePastedImagePath("~/home.png", { homedir: testDir })).toBe(filePath);
-	});
-
-	it("resolves relative paths against the provided cwd", () => {
-		const filePath = writeImage("relative.png");
-		expect(resolvePastedImagePath("./relative.png", { cwd: testDir })).toBe(filePath);
+	it("does not auto-attach arbitrary ~/ or relative image paths", () => {
+		const homeImage = writeImage("home.png");
+		const relativeImage = writeImage("relative.png");
+		expect(resolvePastedImagePath("~/home.png", { homedir: testDir })).toBeUndefined();
+		expect(resolvePastedImagePath("./relative.png", { cwd: testDir })).toBeUndefined();
+		expect(homeImage).toBeTruthy();
+		expect(relativeImage).toBeTruthy();
 	});
 
 	it("still accepts legacy clipboard temp paths", () => {
@@ -107,12 +98,15 @@ describe("resolvePastedImagePath", () => {
 		expect(resolvePastedImagePath(filePath)).toBeUndefined();
 	});
 
-	it("accepts each supported image signature", () => {
+	it("accepts each supported image signature for recognized clipboard temp paths", () => {
 		const signatures: Array<[string, Buffer]> = [
-			["sig.png", Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])],
-			["sig.jpg", Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46])],
-			["sig.gif", Buffer.from("GIF89a", "latin1")],
-			["sig.webp", Buffer.concat([Buffer.from("RIFF", "latin1"), Buffer.alloc(4), Buffer.from("WEBP", "latin1")])],
+			["clipboard-2026-07-07-123456-png.png", Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])],
+			["clipboard-2026-07-07-123456-jpg.jpg", Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46])],
+			["clipboard-2026-07-07-123456-gif.gif", Buffer.from("GIF89a", "latin1")],
+			[
+				"clipboard-2026-07-07-123456-webp.webp",
+				Buffer.concat([Buffer.from("RIFF", "latin1"), Buffer.alloc(4), Buffer.from("WEBP", "latin1")]),
+			],
 		];
 		for (const [name, magic] of signatures) {
 			const filePath = path.join(testDir, name);
@@ -121,8 +115,8 @@ describe("resolvePastedImagePath", () => {
 		}
 	});
 
-	it("accepts mismatched extension when content is a supported image (loader sniffs real mime)", () => {
-		const filePath = path.join(testDir, "actually-png.jpg");
+	it("accepts mismatched extension when recognized clipboard temp content is a supported image", () => {
+		const filePath = path.join(testDir, "clipboard-2026-07-07-123456-actually-png.jpg");
 		fs.writeFileSync(filePath, PNG_SIGNATURE);
 		expect(resolvePastedImagePath(filePath)).toBe(filePath);
 	});
@@ -140,6 +134,21 @@ describe("resolvePastedImagePath", () => {
 	it("rejects empty and whitespace-only pastes", () => {
 		expect(resolvePastedImagePath("")).toBeUndefined();
 		expect(resolvePastedImagePath("   ")).toBeUndefined();
+	});
+});
+
+describe("formatPastedImageReference", () => {
+	it("keeps the image placeholder while preserving the exact source path", () => {
+		const imagePath = `/tmp/Screenshot 2026-07-09 at 10.00.00${NNBSP}PM.png`;
+		expect(formatPastedImageReference("[image 1]", imagePath)).toBe(
+			`[image 1] source="/tmp/Screenshot 2026-07-09 at 10.00.00${NNBSP}PM.png"`,
+		);
+	});
+
+	it("JSON-escapes paths so spaces, quotes, and backslashes stay model-readable", () => {
+		expect(formatPastedImageReference("[image 2]", String.raw`C:\Users\me\shot "final".png`)).toBe(
+			String.raw`[image 2] source="C:\\Users\\me\\shot \"final\".png"`,
+		);
 	});
 });
 

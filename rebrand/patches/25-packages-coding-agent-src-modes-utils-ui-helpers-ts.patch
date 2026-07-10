@@ -8,7 +8,7 @@
  import { AssistantMessageComponent } from "../../modes/components/assistant-message";
  import { BashExecutionComponent } from "../../modes/components/bash-execution";
  import { BranchSummaryMessageComponent } from "../../modes/components/branch-summary-message";
-@@ -87,6 +88,7 @@
+@@ -208,6 +209,7 @@
  		if (this.ctx.isBackgrounded) {
  			return;
  		}
@@ -16,7 +16,7 @@
  		const children = this.ctx.chatContainer.children;
  		const last = children.length > 0 ? children[children.length - 1] : undefined;
  		const secondLast = children.length > 1 ? children[children.length - 2] : undefined;
-@@ -555,22 +557,26 @@
+@@ -676,22 +678,26 @@
  	}
  
  	showError(errorMessage: string): void {
@@ -27,9 +27,9 @@
 +			process.stderr.write(`${label}: ${errorMessage}\n`);
  			return;
  		}
- 		this.ctx.chatContainer.addChild(new Spacer(1));
--		this.ctx.chatContainer.addChild(new Text(theme.fg("error", `Error: ${errorMessage}`), 1, 0));
-+		this.ctx.chatContainer.addChild(new Text(theme.fg("error", `${label}: ${errorMessage}`), 1, 0));
+ 		addChatChild(this.ctx, new Spacer(1));
+-		addChatChild(this.ctx, new Text(theme.fg("error", `Error: ${errorMessage}`), 1, 0));
++		addChatChild(this.ctx, new Text(theme.fg("error", `${label}: ${errorMessage}`), 1, 0));
  		this.ctx.ui.requestRender();
  	}
  
@@ -41,9 +41,9 @@
 +			process.stderr.write(`${label}: ${warningMessage}\n`);
  			return;
  		}
- 		this.ctx.chatContainer.addChild(new Spacer(1));
--		this.ctx.chatContainer.addChild(new Text(theme.fg("warning", `Warning: ${warningMessage}`), 1, 0));
-+		this.ctx.chatContainer.addChild(new Text(theme.fg("warning", `${label}: ${warningMessage}`), 1, 0));
+ 		addChatChild(this.ctx, new Spacer(1));
+-		addChatChild(this.ctx, new Text(theme.fg("warning", `Warning: ${warningMessage}`), 1, 0));
++		addChatChild(this.ctx, new Text(theme.fg("warning", `${label}: ${warningMessage}`), 1, 0));
  		this.ctx.ui.requestRender();
  	}
  

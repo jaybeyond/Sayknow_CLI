@@ -4,8 +4,9 @@
  *
  * Pipeline (deterministic, in order):
  *   1. apply-rebrand        — brand rename (gajae/gjc → sayknow/skc) + identity special-cases
- *   2. apply-fork-identity  — stamp fork version (0.1.0) onto metadata
- *   3. overlay              — copy rebrand/overlay/** (whole files: i18n, themes, assets, docs, tooling)
+ *   2. overlay              — copy rebrand/overlay/** (whole files: i18n, themes, assets, docs, tooling)
+ *   3. apply-fork-identity  — stamp fork version onto metadata (AFTER overlay: identity.json is the
+ *                             single version source; overlay files can't clobber the stamped version)
  *   4. patches              — git apply rebrand/patches/* (in-place edits; .rej on conflict = loud)
  *   5. tooling              — copy the pipeline itself into the output so it can re-sync next time
  *   6. (--build) regenerate — docs-index, lockfiles, native build
@@ -35,11 +36,7 @@ const step = (msg: string) => console.log(`\n▸ ${msg}`);
 step("apply-rebrand (brand rename + special-cases)");
 run("bun", ["scripts/apply-rebrand.ts", target, "--apply"]);
 
-// 2. fork identity (version stamp)
-step("apply-fork-identity (version stamp)");
-run("bun", ["scripts/apply-fork-identity.ts", target, "--config", "rebrand/identity.json", "--apply"]);
-
-// 3. overlay whole files
+// 2. overlay whole files
 step("overlay (whole-file copies)");
 const overlayRoot = path.join(REPO, "rebrand/overlay");
 function copyTree(src: string, destRoot: string): number {
@@ -58,6 +55,12 @@ function copyTree(src: string, destRoot: string): number {
 	return n;
 }
 console.log(`  copied ${copyTree(overlayRoot, target)} files`);
+
+// 3. fork identity (version stamp) — runs AFTER overlay so identity.json is the
+//     single source of version truth; stale overlay package.json / Cargo.toml
+//     versions can no longer clobber the stamped fork version.
+step("apply-fork-identity (version stamp)");
+run("bun", ["scripts/apply-fork-identity.ts", target, "--config", "rebrand/identity.json", "--apply"]);
 
 // 4. patches (in-place edits)
 step("patches (git apply --reject; .rej files signal conflicts)");
@@ -109,6 +112,9 @@ if (doBuild) {
 		// JSON schemas derive from the (patched) settings-schema.ts, so regenerate them after
 		// patches land — otherwise check:schemas flags schemas/config.schema.json as stale.
 		run("bun", ["run", "generate-schemas"], target);
+		// SKC plugin bundle embeds the fork version + workflow definitions; regenerate
+		// after identity + patches so plugins/*.json never drift (check:plugins).
+		run("bun", ["run", "generate-plugins"], target);
 	} catch (e) {
 		console.warn("  regenerate step failed (run manually):", String(e));
 	}

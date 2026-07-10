@@ -3,7 +3,16 @@ import { mkdir, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import * as net from "node:net";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
-import { defineRpcClientTool, RpcClient } from "@sayknow-cli/coding-agent/modes/rpc/rpc-client";
+import type { AgentEvent } from "@sayknow-cli/agent-core";
+import {
+	defineRpcClientTool,
+	RpcClient,
+	type RpcSessionEventListener,
+} from "@sayknow-cli/coding-agent/modes/rpc/rpc-client";
+import { AGENT_WIRE_EVENT_TYPES } from "../src/modes/shared/agent-wire/event-contract";
+import { AgentWireFrameSequencer, toAgentWireEventFrame } from "../src/modes/shared/agent-wire/event-envelope";
+import type { AgentSessionEvent } from "../src/session/agent-session";
+import { EVENT_FIXTURES } from "./agent-wire/fixtures";
 import { createHarnessCliEnv, type HarnessCliEnv } from "./harness-control-plane/cli-workspace-env";
 
 const repoRoot = path.resolve(import.meta.dir, "..", "..", "..");
@@ -225,6 +234,97 @@ describe("RpcClient UDS transport", () => {
 			});
 			client.stop();
 			expect(toolCalls).toBe(1);
+		} finally {
+			serverSocket?.end();
+			server.close();
+		}
+	}, 30_000);
+
+	test("dispatches every registered agent-wire event type through onSessionEvent", async () => {
+		const socketPath = path.join(workspace, "full-event-stream.sock");
+		const sequencer = new AgentWireFrameSequencer("rpc-client-full-events");
+		const requiredRendererEvents = [
+			"notice",
+			"subagent_steer_message",
+			"todo_reminder",
+			"auto_retry_start",
+			"auto_retry_end",
+			"thinking_level_changed",
+			"goal_updated",
+		] as const;
+		let serverSocket: net.Socket | undefined;
+		const server = await new Promise<net.Server>((resolve, reject) => {
+			const srv = net.createServer(socket => {
+				serverSocket = socket;
+				socket.unref();
+				socket.write(`${JSON.stringify({ type: "ready" })}\n`);
+				for (const type of AGENT_WIRE_EVENT_TYPES) {
+					socket.write(`${JSON.stringify(toAgentWireEventFrame(EVENT_FIXTURES[type], sequencer))}\n`);
+				}
+			});
+			srv.once("error", reject);
+			srv.unref();
+			srv.listen(socketPath, () => resolve(srv));
+		});
+		try {
+			const client = new RpcClient({ transport: "uds", socketPath });
+			const events: AgentSessionEvent[] = [];
+			client.onSessionEvent((event: AgentSessionEvent) => events.push(event));
+			await client.start();
+			await Bun.sleep(50);
+
+			expect(events.map(event => event.type)).toEqual([...AGENT_WIRE_EVENT_TYPES]);
+			for (const type of requiredRendererEvents) {
+				expect(events.map(event => event.type)).toContain(type);
+			}
+			client.stop();
+		} finally {
+			serverSocket?.end();
+			server.close();
+		}
+	}, 30_000);
+	test("collectEvents and onEvent keep legacy core-only event collection while onSessionEvent receives the full stream", async () => {
+		const socketPath = path.join(workspace, "collect-events-core-filter.sock");
+		const sequencer = new AgentWireFrameSequencer("rpc-client-collect-core");
+		let serverSocket: net.Socket | undefined;
+		const server = await new Promise<net.Server>((resolve, reject) => {
+			const srv = net.createServer(socket => {
+				serverSocket = socket;
+				socket.unref();
+				socket.write(`${JSON.stringify({ type: "ready" })}\n`);
+				setTimeout(() => {
+					for (const type of ["notice", "tool_execution_start", "agent_end"] as const) {
+						socket.write(`${JSON.stringify(toAgentWireEventFrame(EVENT_FIXTURES[type], sequencer))}\n`);
+					}
+				}, 20);
+			});
+			srv.once("error", reject);
+			srv.unref();
+			srv.listen(socketPath, () => resolve(srv));
+		});
+		try {
+			const client = new RpcClient({ transport: "uds", socketPath });
+			const streamedEvents: AgentSessionEvent[] = [];
+			const reusableFullListener: RpcSessionEventListener = event => streamedEvents.push(event);
+			const unsubscribeFullListener = client.onSessionEvent(reusableFullListener);
+			const coreEvents: AgentEvent[] = [];
+			const unsubscribeCoreListener = client.onEvent((event: AgentEvent) => coreEvents.push(event));
+			let inferredNotice = false;
+			const unsubscribeInferredFullListener = client.onSessionEvent(event => {
+				if (event.type === "notice") inferredNotice = true;
+			});
+			await client.start();
+
+			const collectedEvents = await client.collectEvents(3000);
+
+			expect(streamedEvents.map(event => event.type)).toEqual(["notice", "tool_execution_start", "agent_end"]);
+			expect(collectedEvents.map(event => event.type)).toEqual(["tool_execution_start", "agent_end"]);
+			expect(inferredNotice).toBe(true);
+			expect(coreEvents.map(event => event.type)).toEqual(["tool_execution_start", "agent_end"]);
+			unsubscribeInferredFullListener();
+			unsubscribeCoreListener();
+			unsubscribeFullListener();
+			client.stop();
 		} finally {
 			serverSocket?.end();
 			server.close();

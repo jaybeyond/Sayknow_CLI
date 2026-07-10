@@ -155,6 +155,7 @@ describe("AgentSession auto-compaction queue resume", () => {
 			modelRegistry,
 			extensionRunner,
 		});
+		session.setResourceSampler(() => ({ heapUsedBytes: 0, providerBytes: 0, messageCount: 0, imageBytes: 0 }));
 	});
 
 	afterEach(async () => {
@@ -167,6 +168,8 @@ describe("AgentSession auto-compaction queue resume", () => {
 	});
 
 	it("resumes after threshold compaction when only agent-level queued messages exist", async () => {
+		vi.useRealTimers();
+
 		session.agent.followUp({
 			role: "custom",
 			customType: "test",
@@ -212,7 +215,7 @@ describe("AgentSession auto-compaction queue resume", () => {
 		session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMsg] });
 
 		// Wait for compaction completion, then verify waitForIdle blocks on queued continuation.
-		await compactionDone;
+		await withTimeout(compactionDone, 1000, "Threshold queued compaction timed out");
 		await Promise.resolve();
 		const idlePromise = session.waitForIdle();
 		let idleResolved = false;
@@ -221,8 +224,7 @@ describe("AgentSession auto-compaction queue resume", () => {
 		});
 		await Promise.resolve();
 		expect(idleResolved).toBe(false);
-		vi.advanceTimersByTime(200);
-		await idlePromise;
+		await withTimeout(idlePromise, 1000, "Queued continuation did not become idle");
 
 		expect(continueSpy).toHaveBeenCalledTimes(1);
 		const runtimeSignals = getRuntimeSignals();
@@ -500,6 +502,7 @@ describe("AgentSession auto-compaction queue resume", () => {
 	});
 
 	it("forwards todo reminder lifecycle signals to extensions", async () => {
+		vi.useRealTimers();
 		const continueSpy = vi.spyOn(session.agent, "continue").mockResolvedValue();
 
 		session.setTodoPhases([
@@ -539,7 +542,16 @@ describe("AgentSession auto-compaction queue resume", () => {
 		await Promise.resolve();
 
 		expect(getRuntimeSignals()).toContain("todo:1/3");
-		await session.waitForIdle();
+		await withTimeout(
+			(async () => {
+				while (continueSpy.mock.calls.length === 0) {
+					await Bun.sleep(5);
+				}
+			})(),
+			1000,
+			"Todo reminder continuation did not run",
+		);
+		await withTimeout(session.waitForIdle(), 1000, "Todo reminder continuation did not become idle");
 		expect(continueSpy).toHaveBeenCalledTimes(1);
 	});
 });

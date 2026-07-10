@@ -8,8 +8,19 @@
  * - skc://<file>.md - Reads a specific documentation file
  */
 import * as path from "node:path";
-import { EMBEDDED_DOC_FILENAMES, EMBEDDED_DOCS } from "./docs-index.generated";
 import type { InternalResource, InternalUrl, ProtocolHandler } from "./types";
+
+type DocsIndex = {
+	EMBEDDED_DOC_FILENAMES: readonly string[];
+	EMBEDDED_DOCS: Record<string, string>;
+};
+
+let docsIndexPromise: Promise<DocsIndex> | undefined;
+
+function loadDocsIndex(): Promise<DocsIndex> {
+	if (!docsIndexPromise) docsIndexPromise = import("./docs-index.generated");
+	return docsIndexPromise;
+}
 
 /**
  * Handler for skc:// URLs.
@@ -34,6 +45,7 @@ export class SkcProtocolHandler implements ProtocolHandler {
 	}
 
 	async #listDocs(url: InternalUrl): Promise<InternalResource> {
+		const { EMBEDDED_DOC_FILENAMES } = await loadDocsIndex();
 		if (EMBEDDED_DOC_FILENAMES.length === 0) {
 			throw new Error("No documentation files found");
 		}
@@ -60,6 +72,7 @@ export class SkcProtocolHandler implements ProtocolHandler {
 			throw new Error("Path traversal (..) is not allowed in skc:// URLs");
 		}
 
+		const { EMBEDDED_DOC_FILENAMES, EMBEDDED_DOCS } = await loadDocsIndex();
 		const content = EMBEDDED_DOCS[normalized];
 		if (content === undefined) {
 			const lookup = normalized.replace(/\.md$/, "");

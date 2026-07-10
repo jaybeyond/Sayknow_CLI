@@ -167,6 +167,88 @@ describe("ACP event mapper", () => {
 		).toEqual([]);
 	});
 
+	it("maps automatic compaction lifecycle events to ACP session metadata", () => {
+		const start = mapAgentSessionEventToAcpSessionUpdates(
+			{ type: "auto_compaction_start", reason: "threshold", action: "context-full" } as AgentSessionEvent,
+			"session-1",
+		);
+		const end = mapAgentSessionEventToAcpSessionUpdates(
+			{
+				type: "auto_compaction_end",
+				action: "context-full",
+				result: undefined,
+				aborted: false,
+				willRetry: true,
+				skipped: true,
+				errorMessage: "retrying after maintenance",
+				continuationSkipReason: "auto_continue_disabled_non_resumable_tail",
+			} as AgentSessionEvent,
+			"session-1",
+		);
+
+		expect(start).toEqual([
+			{
+				sessionId: "session-1",
+				update: {
+					sessionUpdate: "session_info_update",
+					_meta: {
+						skcPhase: "compacting",
+						skcCompactionState: "start",
+						skcCompactionTrigger: "threshold",
+						skcCompactionAction: "context-full",
+						running: true,
+						skcRunning: true,
+					},
+				},
+			},
+		]);
+		expect(end).toEqual([
+			{
+				sessionId: "session-1",
+				update: {
+					sessionUpdate: "session_info_update",
+					_meta: {
+						skcPhase: "responding",
+						skcCompactionState: "end",
+						skcCompactionAction: "context-full",
+						skcCompactionAborted: false,
+						skcCompactionWillRetry: true,
+						skcCompactionSkipped: true,
+						skcCompactionErrorMessage: "retrying after maintenance",
+						skcCompactionContinuationSkipReason: "auto_continue_disabled_non_resumable_tail",
+						running: true,
+						skcRunning: true,
+					},
+				},
+			},
+		]);
+		expectAcpNotifications([...start, ...end]);
+	});
+
+	it("returns idle metadata when compaction finishes outside a prompt", () => {
+		const [notification] = mapAgentSessionEventToAcpSessionUpdates(
+			{
+				type: "auto_compaction_end",
+				action: "handoff",
+				result: undefined,
+				aborted: true,
+				willRetry: false,
+			} as AgentSessionEvent,
+			"session-1",
+			{ compactionEndPhase: "idle" },
+		);
+
+		expect(notification?.update._meta).toMatchObject({
+			skcPhase: "idle",
+			skcCompactionState: "end",
+			skcCompactionAction: "handoff",
+			skcCompactionAborted: true,
+			running: false,
+			skcRunning: false,
+		});
+		expectAcpNotifications(notification ? [notification] : []);
+	});
+
 	it("emits final assistant text when no text deltas were observed", () => {
 		const assistantMessage = makeAssistantMessage("final response");
 		const progress = { textEmitted: false, thoughtEmitted: false };

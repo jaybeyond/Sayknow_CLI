@@ -27,6 +27,8 @@ interface AcpEventMapperOptions {
 	 * before emitting `ToolCallLocation` entries.
 	 */
 	cwd?: string;
+	/** Phase to expose after compaction ends. Prompt-bound compaction resumes responding; idle maintenance returns idle. */
+	compactionEndPhase?: "responding" | "idle";
 }
 
 interface ContentArrayContainer {
@@ -236,8 +238,44 @@ export function mapAgentSessionEventToAcpSessionUpdates(
 		case "turn_start":
 		case "turn_end":
 		case "message_start":
+			return [];
 		case "auto_compaction_start":
-		case "auto_compaction_end":
+			return [
+				toSessionNotification(sessionId, {
+					sessionUpdate: "session_info_update",
+					_meta: {
+						skcPhase: "compacting",
+						skcCompactionState: "start",
+						skcCompactionTrigger: event.reason,
+						skcCompactionAction: event.action,
+						running: true,
+						skcRunning: true,
+					},
+				}),
+			];
+		case "auto_compaction_end": {
+			const phase = options.compactionEndPhase ?? "responding";
+			const running = phase !== "idle";
+			const meta: Record<string, unknown> = {
+				skcPhase: phase,
+				skcCompactionState: "end",
+				skcCompactionAction: event.action,
+				skcCompactionAborted: event.aborted,
+				skcCompactionWillRetry: event.willRetry,
+				running,
+				skcRunning: running,
+			};
+			if (event.skipped !== undefined) {
+				meta.skcCompactionSkipped = event.skipped;
+			}
+			if (event.errorMessage !== undefined) {
+				meta.skcCompactionErrorMessage = event.errorMessage;
+			}
+			if (event.continuationSkipReason !== undefined) {
+				meta.skcCompactionContinuationSkipReason = event.continuationSkipReason;
+			}
+			return [toSessionNotification(sessionId, { sessionUpdate: "session_info_update", _meta: meta })];
+		}
 		case "auto_retry_start":
 		case "auto_retry_end":
 		case "retry_fallback_applied":

@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import { scheduler } from "node:timers/promises";
 import { Messages } from "@anthropic-ai/sdk/resources/messages/messages";
-import { streamAnthropic } from "../src/providers/anthropic";
+import { applyClaudeToolPrefix, streamAnthropic, stripClaudeToolPrefix } from "../src/providers/anthropic";
 import type { AssistantMessageEvent, Context, Model, ProviderSessionState } from "../src/types";
 
 const model: Model<"anthropic-messages"> = {
@@ -289,6 +289,232 @@ describe("anthropic stream envelope handling", () => {
 		if (endEvent?.type !== "toolcall_end") throw new Error("Expected toolcall_end");
 		expect(endEvent.toolCall.arguments).toEqual(args);
 		expect(result.content).toEqual([{ type: "toolCall", id: "tool_args", name: "bash", arguments: args }]);
+	});
+	it("preserves non-delta tool-call input from Anthropic content_block_start", async () => {
+		const args = {
+			command: "printf hi",
+			cwd: "/tmp/worktree",
+			timeout: 5,
+		};
+		vi.spyOn(Messages.prototype, "create").mockImplementation(
+			() =>
+				createMockRequest([
+					{
+						type: "message_start",
+						message: {
+							id: "msg_tool_start_input",
+							usage: {
+								input_tokens: 12,
+								output_tokens: 0,
+								cache_read_input_tokens: 0,
+								cache_creation_input_tokens: 0,
+							},
+						},
+					},
+					{
+						type: "content_block_start",
+						index: 0,
+						content_block: { type: "tool_use", id: "tool_start_input", name: "bash", input: args },
+					},
+					{ type: "content_block_stop", index: 0 },
+					{
+						type: "message_delta",
+						delta: { stop_reason: "tool_use" },
+						usage: { output_tokens: 7 },
+					},
+					{ type: "message_stop" },
+				]) as never,
+		);
+
+		const stream = streamAnthropic(model, context, { apiKey: "sk-ant-test" });
+		const events: AssistantMessageEvent[] = [];
+		for await (const event of stream) {
+			events.push(event);
+		}
+		const result = await stream.result();
+		const deltaEvents = events.filter(event => event.type === "toolcall_delta");
+		const endEvent = events.find(event => event.type === "toolcall_end");
+
+		expect(deltaEvents).toHaveLength(0);
+		expect(endEvent?.type).toBe("toolcall_end");
+		if (endEvent?.type !== "toolcall_end") throw new Error("Expected toolcall_end");
+		expect(endEvent.toolCall.arguments).toEqual(args);
+		expect(result.content).toEqual([{ type: "toolCall", id: "tool_start_input", name: "bash", arguments: args }]);
+	});
+	it("keeps interleaved streamed tool-call arguments keyed to their Anthropic content indexes", async () => {
+		vi.spyOn(Messages.prototype, "create").mockImplementation(
+			() =>
+				createMockRequest([
+					{
+						type: "message_start",
+						message: {
+							id: "msg_interleaved_tools",
+							usage: {
+								input_tokens: 12,
+								output_tokens: 0,
+								cache_read_input_tokens: 0,
+								cache_creation_input_tokens: 0,
+							},
+						},
+					},
+					{
+						type: "content_block_start",
+						index: 2,
+						content_block: { type: "tool_use", id: "tool_a", name: "bash", input: {} },
+					},
+					{
+						type: "content_block_start",
+						index: 5,
+						content_block: { type: "tool_use", id: "tool_b", name: "edit", input: {} },
+					},
+					{
+						type: "content_block_delta",
+						index: 5,
+						delta: { type: "input_json_delta", partial_json: '{"path":"a' },
+					},
+					{
+						type: "content_block_delta",
+						index: 2,
+						delta: { type: "input_json_delta", partial_json: '{"command":"printf' },
+					},
+					{
+						type: "content_block_delta",
+						index: 5,
+						delta: { type: "input_json_delta", partial_json: '.ts","old":"x","new":"y"}' },
+					},
+					{ type: "content_block_delta", index: 2, delta: { type: "input_json_delta", partial_json: ' hi"}' } },
+					{ type: "content_block_stop", index: 5 },
+					{ type: "content_block_stop", index: 2 },
+					{ type: "message_delta", delta: { stop_reason: "tool_use" }, usage: { output_tokens: 7 } },
+					{ type: "message_stop" },
+				]) as never,
+		);
+
+		const stream = streamAnthropic(model, context, { apiKey: "sk-ant-test" });
+		for await (const _ of stream) {
+			// drain stream
+		}
+		const result = await stream.result();
+
+		expect(result.content).toEqual([
+			{ type: "toolCall", id: "tool_a", name: "bash", arguments: { command: "printf hi" } },
+			{ type: "toolCall", id: "tool_b", name: "edit", arguments: { path: "a.ts", old: "x", new: "y" } },
+		]);
+	});
+
+	it("keeps later block deltas after an earlier content_block_stop removed its stream index field", async () => {
+		vi.spyOn(Messages.prototype, "create").mockImplementation(
+			() =>
+				createMockRequest([
+					{
+						type: "message_start",
+						message: {
+							id: "msg_stop_then_delta",
+							usage: {
+								input_tokens: 12,
+								output_tokens: 0,
+								cache_read_input_tokens: 0,
+								cache_creation_input_tokens: 0,
+							},
+						},
+					},
+					{
+						type: "content_block_start",
+						index: 0,
+						content_block: { type: "tool_use", id: "tool_done", name: "bash", input: { command: "pwd" } },
+					},
+					{
+						type: "content_block_start",
+						index: 1,
+						content_block: { type: "tool_use", id: "tool_streamed", name: "bash", input: {} },
+					},
+					{ type: "content_block_stop", index: 0 },
+					{
+						type: "content_block_delta",
+						index: 1,
+						delta: { type: "input_json_delta", partial_json: '{"command":"echo' },
+					},
+					{ type: "content_block_delta", index: 1, delta: { type: "input_json_delta", partial_json: ' later"}' } },
+					{ type: "content_block_stop", index: 1 },
+					{ type: "message_delta", delta: { stop_reason: "tool_use" }, usage: { output_tokens: 7 } },
+					{ type: "message_stop" },
+				]) as never,
+		);
+
+		const stream = streamAnthropic(model, context, { apiKey: "sk-ant-test" });
+		for await (const _ of stream) {
+			// drain stream
+		}
+		const result = await stream.result();
+
+		expect(result.content).toEqual([
+			{ type: "toolCall", id: "tool_done", name: "bash", arguments: { command: "pwd" } },
+			{ type: "toolCall", id: "tool_streamed", name: "bash", arguments: { command: "echo later" } },
+		]);
+	});
+	it("finalizes an orphaned block when a duplicate content_block_start reuses an active index", async () => {
+		vi.spyOn(Messages.prototype, "create").mockImplementation(
+			() =>
+				createMockRequest([
+					{
+						type: "message_start",
+						message: {
+							id: "msg_duplicate_start",
+							usage: {
+								input_tokens: 12,
+								output_tokens: 0,
+								cache_read_input_tokens: 0,
+								cache_creation_input_tokens: 0,
+							},
+						},
+					},
+					{
+						type: "content_block_start",
+						index: 4,
+						content_block: { type: "tool_use", id: "tool_orphaned", name: "bash", input: {} },
+					},
+					{
+						type: "content_block_delta",
+						index: 4,
+						delta: { type: "input_json_delta", partial_json: '{"command":"pwd"}' },
+					},
+					{
+						type: "content_block_start",
+						index: 4,
+						content_block: { type: "tool_use", id: "tool_replacement", name: "bash", input: {} },
+					},
+					{
+						type: "content_block_delta",
+						index: 4,
+						delta: { type: "input_json_delta", partial_json: '{"command":"ls"}' },
+					},
+					{ type: "content_block_stop", index: 4 },
+					{ type: "message_delta", delta: { stop_reason: "tool_use" }, usage: { output_tokens: 7 } },
+					{ type: "message_stop" },
+				]) as never,
+		);
+
+		const stream = streamAnthropic(model, context, { apiKey: "sk-ant-test" });
+		for await (const _ of stream) {
+			// drain stream
+		}
+		const result = await stream.result();
+
+		// The orphaned block keeps its streamed arguments and sheds internal
+		// stream-only fields; the replacement block owns subsequent deltas.
+		expect(result.content).toEqual([
+			{ type: "toolCall", id: "tool_orphaned", name: "bash", arguments: { command: "pwd" } },
+			{ type: "toolCall", id: "tool_replacement", name: "bash", arguments: { command: "ls" } },
+		]);
+	});
+
+	it("round-trips OAuth tool prefixes without stripping original tool names that contain the prefix", () => {
+		for (const name of ["bash", "proxy_bash", "Proxy_bash", "web_search"] as const) {
+			expect(stripClaudeToolPrefix(applyClaudeToolPrefix(name))).toBe(name);
+		}
+		expect(stripClaudeToolPrefix("proxy_bash")).toBe("bash");
+		expect(stripClaudeToolPrefix("proxy_proxy_bash")).toBe("proxy_bash");
+		expect(stripClaudeToolPrefix("00y_bash")).toBe("00y_bash");
 	});
 
 	it("ignores ping before message_start and streams the response once", async () => {

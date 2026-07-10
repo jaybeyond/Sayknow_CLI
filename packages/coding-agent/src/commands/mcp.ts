@@ -1,5 +1,5 @@
 /**
- * Direct MCP server registration for standalone SKC.
+ * Explicit MCP server config storage for standalone SKC.
  */
 import { Args, Command, Flags } from "@sayknow-cli/utils/cli";
 import { type MCPAction, type MCPCommandArgs, runMCPCommand } from "../cli/mcp-cli";
@@ -7,7 +7,7 @@ import { type MCPAction, type MCPCommandArgs, runMCPCommand } from "../cli/mcp-c
 const ACTIONS: MCPAction[] = ["add", "list", "remove"];
 
 export default class MCP extends Command {
-	static description = "Register standalone MCP servers explicitly in SKC config";
+	static description = "Store standalone MCP server definitions without loading them at runtime";
 	static delegateHelp = true;
 
 	static examples = [
@@ -81,15 +81,15 @@ export default class MCP extends Command {
 	}
 
 	private printHelp(): void {
-		process.stdout.write(`Register standalone MCP servers explicitly in SKC config
+		process.stdout.write(`Store standalone MCP server definitions in SKC config without loading them at runtime
 
 USAGE
   $ skc mcp [add|list|remove] [NAME] [COMMAND_OR_URL] [ARGS...] [FLAGS]
 
 COMMANDS
-  add     Add an explicit user-provided MCP server definition
-  list    List registered servers with env/header/auth values redacted
-  remove  Remove a registered server and print the removed definition redacted
+  add     Store an explicit user-provided MCP server definition
+  list    List stored servers with env/header/auth values redacted
+  remove  Remove a stored server and print the removed definition redacted
 
 FLAGS
       --project          Use project scope (./.skc/mcp.json) instead of user scope
@@ -110,8 +110,8 @@ EXAMPLES
   $ skc mcp list --json
   $ skc mcp remove context7
 
-SECURITY
-  This command writes only the server definition supplied on this invocation. It does not import or inherit Claude Code, Codex, OpenCode, or other live MCP configs. Public output redacts env, header, auth, and OAuth credential values.
+STORAGE/RUNTIME
+  This command stores only the server definition supplied on this invocation. It does not import or inherit Claude Code, Codex, OpenCode, or other live MCP configs. Normal standalone skc sessions do not load stored MCP registrations today. Public output redacts env, header, auth, and OAuth credential values.
 `);
 	}
 }

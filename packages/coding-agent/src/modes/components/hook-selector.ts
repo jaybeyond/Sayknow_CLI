@@ -435,6 +435,10 @@ export class HookSelectorComponent extends Container {
 		this.#updateList();
 	}
 
+	hasActiveInlineInput(): boolean {
+		return this.#inlineEditor !== undefined;
+	}
+
 	#updateList(): void {
 		if (this.#wrapFocused && this.#focusAwareList) {
 			this.#focusAwareList.setState(this.#options, this.#selectedIndex, this.#maxVisible);

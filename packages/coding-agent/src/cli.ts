@@ -87,6 +87,23 @@ async function installRuntimeGlobals(): Promise<void> {
 	delete process.env.MallocStackLoggingNoCompact;
 }
 
+function isStatsHelpFastPath(argv: string[]): boolean {
+	return argv[0] === "stats" && (argv.includes("--help") || argv.includes("-h"));
+}
+
+function showStatsFastHelp(): void {
+	process.stdout.write(`Usage: ${APP_NAME} stats [options]
+
+View usage statistics
+
+Options:
+  -p, --port <number>   Port for the dashboard server (default: 3847)
+  -j, --json            Output stats as JSON
+  -s, --summary         Print summary to console
+  -h, --help            Show this help
+`);
+}
+
 function isNotifyDaemonInternalFastPath(argv: string[]): boolean {
 	return argv[0] === "notify" && argv[1] === "daemon-internal";
 }
@@ -262,6 +279,10 @@ export async function runCli(argv: string[]): Promise<void> {
 			return;
 		}
 		process.exitCode = await runFixtureReport(id);
+		return;
+	}
+	if (isStatsHelpFastPath(argv)) {
+		showStatsFastHelp();
 		return;
 	}
 	if (hasRootHelpFlag(argv)) {

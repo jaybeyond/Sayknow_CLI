@@ -184,7 +184,7 @@
  							return;
  						}
  						if (selection.kind === "profile") {
-@@ -1482,11 +1384,33 @@
+@@ -1486,11 +1388,33 @@
  	}
  
  	async #handleOAuthLogin(providerId: string): Promise<void> {
@@ -219,7 +219,7 @@
  				onAuth: (info: { url: string; instructions?: string }) => {
  					this.ctx.chatContainer.addChild(new Spacer(1));
  					this.ctx.chatContainer.addChild(new Text(theme.fg("dim", info.url), 1, 0));
-@@ -1540,8 +1464,14 @@
+@@ -1544,8 +1468,14 @@
  			await this.#handlePostLoginModelProfileRecommendation(providerId);
  			this.ctx.ui.requestRender();
  		} catch (error: unknown) {
@@ -235,7 +235,7 @@
  			if (useManualInput) {
  				manualInput.clear(`Manual OAuth input cleared for ${providerId}`);
  			}
-@@ -1596,7 +1526,7 @@
+@@ -1600,7 +1530,7 @@
  			}
  		}
  

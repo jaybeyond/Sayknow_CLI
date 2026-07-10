@@ -8,7 +8,7 @@
  import { resolveMemoryBackend } from "../memory-backend";
  import { DynamicBorder } from "../modes/components/dynamic-border";
  import { theme } from "../modes/theme/theme";
-@@ -1503,7 +1504,10 @@
+@@ -1508,7 +1509,10 @@
  export const BUILTIN_SLASH_COMMAND_DEFS: ReadonlyArray<BuiltinSlashCommand> = ACTIVE_BUILTIN_SLASH_COMMAND_REGISTRY.map(
  	command => ({
  		name: command.name,

@@ -16,7 +16,7 @@
  ];
  
  async function showHelp(config: CliConfig): Promise<void> {
-@@ -128,7 +128,7 @@
+@@ -145,7 +145,7 @@
  }
  
  export class RootHelpCommand extends Command {

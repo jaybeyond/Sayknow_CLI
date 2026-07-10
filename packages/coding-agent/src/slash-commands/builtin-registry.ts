@@ -811,12 +811,12 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 	{
 		name: "session",
 		priority: 88,
-		description: "Show current session info or delete current session",
+		description: "Show session info or delete the current session transcript/artifacts",
 		acpDescription: "Show session information",
 		acpInputHint: "info|delete",
 		subcommands: [
 			{ name: "info", description: "Show current session id, title, and workspace" },
-			{ name: "delete", description: "Delete current session and return to selector" },
+			{ name: "delete", description: "Delete current session transcript and artifacts" },
 		],
 		allowArgs: true,
 		handle: async (command, runtime) => {
@@ -845,7 +845,10 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 					return usage(`Failed to delete session: ${errorMessage(err)}`, runtime);
 				}
 				await runtime.output(
-					`Session deleted: ${sessionFile}. Use ACP \`session/load\` to switch to another session.`,
+					[
+						`Deleted current session transcript and artifacts: ${sessionFile}`,
+						"Other sessions and topic/history metadata were not deleted.",
+					].join("\n"),
 				);
 				return commandConsumed();
 			}
@@ -1021,8 +1024,10 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 				return commandConsumed();
 			}
 			if (args === "login" || args.startsWith("login ")) {
+				const providerId = args.slice("login".length).trim();
+				const loginCommand = providerId ? `/login ${providerId}` : "/login [provider-id]";
 				await runtime.output(
-					"Use the terminal UI /login selector for browser, device-code, or manual callback provider login.",
+					`Open the terminal UI and run ${loginCommand} for OAuth/subscription account login. Paste callbacks with /login <redirect URL or code>.`,
 				);
 				return commandConsumed();
 			}
