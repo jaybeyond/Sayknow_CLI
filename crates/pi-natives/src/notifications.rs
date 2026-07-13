@@ -42,34 +42,83 @@ pub struct NotificationEndpoint {
 #[napi(object)]
 pub struct ReplyEvent {
 	/// The action id being answered (the real broker `gate_id` for asks).
-	pub id:              String,
+	pub id:               String,
 	/// JSON-encoded `ReplyAnswer` (number, string, or `{selected,custom}`).
-	pub answer_json:     String,
+	pub answer_json:      String,
 	/// Optional idempotency key supplied by the client.
-	pub idempotency_key: Option<String>,
+	pub idempotency_key:  Option<String>,
+	/// One-shot receipt binding this callback to the atomically claimed reply.
+	pub reply_receipt_id: String,
 }
 
-/// An inbound message forwarded to the TypeScript host: a free-text injection
-/// (`user_message`) or an in-thread config command (`config_command`).
+/// Typed terminal acknowledgement result returned by acknowledgement promises.
+#[napi(object)]
+pub struct AskSelectedAckOutcomeEvent {
+	pub status:     String,
+	pub message_id: Option<i64>,
+	pub reason:     Option<String>,
+}
+
+impl From<skc_notifications::protocol::AskSelectedAckOutcome> for AskSelectedAckOutcomeEvent {
+	fn from(outcome: skc_notifications::protocol::AskSelectedAckOutcome) -> Self {
+		use skc_notifications::protocol::AskSelectedAckOutcome;
+		match outcome {
+			AskSelectedAckOutcome::Delivered { message_id } => Self {
+				status:     "delivered".to_owned(),
+				message_id: Some(message_id),
+				reason:     None,
+			},
+			AskSelectedAckOutcome::Failed { reason } => Self {
+				status:     "failed".to_owned(),
+				message_id: None,
+				reason:     Some(
+					serde_json::to_value(reason)
+						.expect("ack reason serializes")
+						.as_str()
+						.unwrap_or_default()
+						.to_owned(),
+				),
+			},
+			AskSelectedAckOutcome::Unknown { reason } => Self {
+				status:     "unknown".to_owned(),
+				message_id: None,
+				reason:     Some(
+					serde_json::to_value(reason)
+						.expect("ack reason serializes")
+						.as_str()
+						.unwrap_or_default()
+						.to_owned(),
+				),
+			},
+		}
+	}
+}
+
+/// An inbound message forwarded to the TypeScript host: a free-text injection,
+/// in-thread config command, or deterministic control command.
 #[napi(object)]
 pub struct InboundEvent {
-	/// Either `"user_message"` or `"config_command"`.
-	pub kind:       String,
+	/// Inbound kind (`user_message`, `config_command`, or `control_command`).
+	pub kind:         String,
 	/// The session this inbound belongs to.
-	pub session_id: String,
+	pub session_id:   String,
 	/// Free-text body (`user_message` only).
-	pub text:       Option<String>,
+	pub text:         Option<String>,
 	/// Telegram update id for dedupe (`user_message` only).
-	pub update_id:  Option<i64>,
+	pub update_id:    Option<i64>,
 	/// Originating thread/topic id (`user_message` only).
-	pub thread_id:  Option<String>,
+	pub thread_id:    Option<String>,
 	/// Requested verbosity `"lean"|"verbose"` (`config_command` only).
-	pub verbosity:  Option<String>,
+	pub verbosity:    Option<String>,
 	/// Requested redaction state (`config_command` only).
-	pub redact:     Option<bool>,
+	pub redact:       Option<bool>,
+	/// Client-generated request id (`control_command` only).
+	pub request_id:   Option<String>,
+	/// JSON-encoded command payload (`control_command` only).
+	pub command_json: Option<String>,
 	/// Inline image attachments forwarded with the message (`user_message`
 	/// only).
-	pub images:     Option<Vec<InboundImageEvent>>,
+	pub images:       Option<Vec<InboundImageEvent>>,
 }
 
 /// One inline image attachment forwarded with an inbound user message.
@@ -137,11 +186,14 @@ impl NotificationServer {
 	/// Fails if already started or the loopback socket cannot be bound.
 	#[napi]
 	pub async fn start(&self) -> Result<NotificationEndpoint> {
-		let config = self
+		let mut config = self
 			.config
 			.lock()
 			.take()
 			.ok_or_else(|| Error::from_reason("notification server already started"))?;
+		if self.on_reply.lock().is_none() {
+			config.resolver_available = false;
+		}
 		let session_id = config.session_id.clone();
 		let handle = skc_notifications::start(config)
 			.await
@@ -155,16 +207,19 @@ impl NotificationServer {
 		};
 
 		// Pump forwarded replies to the TS callback (we are inside the runtime).
-		let tsfn = self.on_reply.lock().take();
-		let reply_rx = handle.take_reply_receiver();
-		if let (Some(tsfn), Some(mut rx)) = (tsfn, reply_rx) {
+		let reply_tsfn = self.on_reply.lock().take();
+		if let Some(tsfn) = reply_tsfn {
+			let mut rx = handle
+				.take_reply_receiver()
+				.ok_or_else(|| Error::from_reason("notification reply receiver unavailable"))?;
 			napi::tokio::spawn(async move {
 				while let Some(reply) = rx.recv().await {
 					let event = ReplyEvent {
-						id:              reply.id,
-						answer_json:     serde_json::to_string(&reply.answer)
+						id:               reply.reply.id,
+						answer_json:      serde_json::to_string(&reply.reply.answer)
 							.unwrap_or_else(|_| "null".to_owned()),
-						idempotency_key: reply.idempotency_key,
+						idempotency_key:  reply.reply.idempotency_key,
+						reply_receipt_id: reply.reply_receipt_id,
 					};
 					tsfn.call(Ok(event), ThreadsafeFunctionCallMode::NonBlocking);
 				}
@@ -179,12 +234,12 @@ impl NotificationServer {
 				while let Some(msg) = rx.recv().await {
 					let event = match msg {
 						ClientMessage::UserMessage(u) => InboundEvent {
-							kind:       "user_message".to_owned(),
-							session_id: u.session_id,
-							text:       Some(u.text),
-							update_id:  u.update_id,
-							thread_id:  u.thread_id,
-							images:     if u.images.is_empty() {
+							kind:         "user_message".to_owned(),
+							session_id:   u.session_id,
+							text:         Some(u.text),
+							update_id:    u.update_id,
+							thread_id:    u.thread_id,
+							images:       if u.images.is_empty() {
 								None
 							} else {
 								Some(
@@ -194,21 +249,39 @@ impl NotificationServer {
 										.collect(),
 								)
 							},
-							verbosity:  None,
-							redact:     None,
+							verbosity:    None,
+							redact:       None,
+							request_id:   None,
+							command_json: None,
 						},
 						ClientMessage::ConfigCommand(c) => InboundEvent {
-							kind:       "config_command".to_owned(),
-							session_id: c.session_id,
-							text:       None,
-							update_id:  None,
-							thread_id:  None,
-							verbosity:  c.verbosity.map(|v| match v {
+							kind:         "config_command".to_owned(),
+							session_id:   c.session_id,
+							text:         None,
+							update_id:    None,
+							thread_id:    None,
+							verbosity:    c.verbosity.map(|v| match v {
 								Verbosity::Lean => "lean".to_owned(),
 								Verbosity::Verbose => "verbose".to_owned(),
 							}),
-							redact:     c.redact,
-							images:     None,
+							redact:       c.redact,
+							request_id:   None,
+							command_json: None,
+							images:       None,
+						},
+						ClientMessage::ControlCommand(c) => InboundEvent {
+							kind:         "control_command".to_owned(),
+							session_id:   c.session_id,
+							text:         None,
+							update_id:    c.update_id,
+							thread_id:    c.thread_id,
+							verbosity:    None,
+							redact:       None,
+							request_id:   Some(c.request_id),
+							command_json: Some(
+								serde_json::to_string(&c.command).unwrap_or_else(|_| "null".to_owned()),
+							),
+							images:       None,
 						},
 						_ => continue,
 					};
@@ -253,9 +326,15 @@ impl NotificationServer {
 	/// Fails if not started or `frame_json` is not a valid `ServerMessage`.
 	#[napi]
 	pub fn push_frame(&self, frame_json: String) -> Result<()> {
+		// `ActionNeeded` is rejected at runtime here (see `ServerHandle::push_frame`);
+		// action delivery must go through `register_ask`/`note_idle` so it stays
+		// capability-gated per connection. Kept as an in-body note so the generated
+		// N-API `index.d.ts` signature/docs remain byte-stable for issue #2029.
 		let msg: ServerMessage = serde_json::from_str(&frame_json)
 			.map_err(|e| Error::from_reason(format!("invalid frame json: {e}")))?;
-		self.with_handle(|h| h.push_frame(msg))
+		self
+			.with_handle(|h| h.push_frame(msg))?
+			.map_err(|error| Error::from_reason(error.to_string()))
 	}
 
 	/// Publish a replayable `session_ready` readiness signal. `ready_json` is a
@@ -284,11 +363,11 @@ impl NotificationServer {
 		self.with_handle(|h| h.resolve_local(&id, answer))
 	}
 
-	/// Resolve an action answered by a remote client, after TS resolved the real
-	/// gate. `answer_json` is an optional JSON `ReplyAnswer`.
+	/// Resolve an unclaimed legacy action. Forward-mode replies are
+	/// receipt-bound and must use `resolveClaim` instead.
 	///
 	/// # Errors
-	/// Fails if not started or `answer_json` is invalid.
+	/// Fails if not started, `answer_json` is invalid, or the action is claimed.
 	#[napi]
 	pub fn resolve_client(
 		&self,
@@ -297,18 +376,134 @@ impl NotificationServer {
 		idempotency_key: Option<String>,
 	) -> Result<()> {
 		let answer = parse_answer(answer_json.as_deref())?;
-		self.with_handle(|h| h.resolve_client(&id, answer, idempotency_key))
+		if !self.with_handle(|h| h.resolve_client(&id, answer, idempotency_key))? {
+			return Err(Error::from_reason("claimed action requires resolveClaim with its receipt"));
+		}
+		Ok(())
 	}
 
-	/// Reject a forwarded reply after TS failed to resolve its gate. `reason` is
-	/// one of the protocol reject reasons (default `invalid_answer`).
+	/// Resolve a reply claim after durable semantic settlement.
+	#[napi]
+	pub fn resolve_claim(
+		&self,
+		reply_receipt_id: String,
+		answer_json: Option<String>,
+		idempotency_key: Option<String>,
+	) -> Result<()> {
+		let answer = parse_answer(answer_json.as_deref())?;
+		if !self.with_handle(|h| h.resolve_claim(&reply_receipt_id, answer, idempotency_key))? {
+			return Err(Error::from_reason("claim receipt did not match a pending reply"));
+		}
+		Ok(())
+	}
+
+	/// Close an invalid claim terminally. Retrying must use a fresh action id.
+	#[napi]
+	pub fn close_claim_invalid(&self, reply_receipt_id: String, _reason: String) -> Result<()> {
+		if !self.with_handle(|h| h.close_claim_invalid(&reply_receipt_id))? {
+			return Err(Error::from_reason("claim receipt did not match a pending reply"));
+		}
+		Ok(())
+	}
+
+	/// Cancel a claim as part of abort or shutdown cleanup.
+	#[napi]
+	pub fn cancel_claim(&self, reply_receipt_id: String, _reason: String) -> Result<()> {
+		if !self.with_handle(|h| h.cancel_claim(&reply_receipt_id))? {
+			return Err(Error::from_reason("claim receipt did not match a pending reply"));
+		}
+		Ok(())
+	}
+
+	/// Unicast an origin-bound live acknowledgement and resolve with its exact
+	/// correlated terminal outcome (or native timeout evidence).
+	#[napi]
+	pub async fn request_ask_selected_ack(
+		&self,
+		reply_receipt_id: String,
+		request_json: String,
+	) -> Result<AskSelectedAckOutcomeEvent> {
+		let request: skc_notifications::protocol::AskSelectedAckRequest =
+			serde_json::from_str(&request_json).map_err(|e| {
+				Error::from_reason(format!("invalid live acknowledgement request: {e}"))
+			})?;
+		if !matches!(request, skc_notifications::protocol::AskSelectedAckRequest::Live { .. }) {
+			return Err(Error::from_reason("requestAskSelectedAck requires mode=live"));
+		}
+		let handle = self
+			.handle
+			.lock()
+			.as_ref()
+			.cloned()
+			.ok_or_else(|| Error::from_reason("notification server not started"))?;
+		Ok(handle
+			.request_ask_selected_ack(&reply_receipt_id, request)
+			.await
+			.into())
+	}
+
+	/// Select one current capable participant for a recovery acknowledgement and
+	/// resolve with its exact terminal outcome.
+	#[napi]
+	pub async fn request_recovered_ask_selected_ack(
+		&self,
+		request_json: String,
+	) -> Result<AskSelectedAckOutcomeEvent> {
+		let request: skc_notifications::protocol::AskSelectedAckRequest =
+			serde_json::from_str(&request_json).map_err(|e| {
+				Error::from_reason(format!("invalid recovery acknowledgement request: {e}"))
+			})?;
+		if !matches!(request, skc_notifications::protocol::AskSelectedAckRequest::Recovery { .. }) {
+			return Err(Error::from_reason("requestRecoveredAskSelectedAck requires mode=recovery"));
+		}
+		let handle = self
+			.handle
+			.lock()
+			.as_ref()
+			.cloned()
+			.ok_or_else(|| Error::from_reason("notification server not started"))?;
+		Ok(handle
+			.request_recovered_ask_selected_ack(request)
+			.await
+			.into())
+	}
+
+	/// Correlate and terminalize an acknowledgement request.
+	#[napi]
+	pub fn cancel_ask_selected_ack(
+		&self,
+		request_id: String,
+		commit_key: String,
+		reason: String,
+	) -> Result<AskSelectedAckOutcomeEvent> {
+		let reason = serde_json::from_value(serde_json::Value::String(reason)).map_err(|e| {
+			Error::from_reason(format!("invalid acknowledgement cancellation reason: {e}"))
+		})?;
+		let cancel =
+			skc_notifications::protocol::AskSelectedAckCancel { request_id, commit_key, reason };
+		let handle = self
+			.handle
+			.lock()
+			.as_ref()
+			.cloned()
+			.ok_or_else(|| Error::from_reason("notification server not started"))?;
+		Ok(handle.cancel_ask_selected_ack(cancel).into())
+	}
+
+	/// Reject an unclaimed legacy reply. Claimed forward-mode replies must use
+	/// `closeClaimInvalid` with the exact receipt.
 	///
 	/// # Errors
-	/// Fails if not started.
+	/// Fails if not started or the action is claimed.
 	#[napi]
 	pub fn reject(&self, id: String, reason: Option<String>) -> Result<()> {
 		let reason = parse_reason(reason.as_deref());
-		self.with_handle(|h| h.reject(&id, reason))
+		if !self.with_handle(|h| h.reject(&id, reason))? {
+			return Err(Error::from_reason(
+				"claimed action requires closeClaimInvalid with its receipt",
+			));
+		}
+		Ok(())
 	}
 
 	/// Update whether the unattended gate resolver is currently available.
@@ -339,13 +534,12 @@ impl NotificationServer {
 		}
 	}
 
-	fn with_handle<F: FnOnce(&ServerHandle)>(&self, f: F) -> Result<()> {
+	fn with_handle<T, F: FnOnce(&ServerHandle) -> T>(&self, f: F) -> Result<T> {
 		let guard = self.handle.lock();
 		let handle = guard
 			.as_ref()
 			.ok_or_else(|| Error::from_reason("notification server not started"))?;
-		f(handle);
-		Ok(())
+		Ok(f(handle))
 	}
 }
 
