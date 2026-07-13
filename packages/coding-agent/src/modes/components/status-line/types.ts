@@ -39,7 +39,7 @@ export interface SegmentContext {
 		cost: number;
 		tokensPerSecond: number | null;
 	};
-	contextPercent: number;
+	contextPercent: number | null;
 	contextWindow: number;
 	/**
 	 * True when a standalone `context_pct` segment is also part of the active

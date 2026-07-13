@@ -1,4 +1,4 @@
-import type { AgentTool } from "@sayknow-cli/agent-core";
+import type { AgentTool, ResolvedThinkingLevel } from "@sayknow-cli/agent-core";
 import { ThinkingLevel } from "@sayknow-cli/agent-core";
 import { getOAuthProviders } from "@sayknow-cli/ai/utils/oauth";
 import { Snowflake } from "@sayknow-cli/utils";
@@ -100,6 +100,14 @@ function serializeRpcDispatchError(err: unknown): string | object {
 		return { code: err.code, message: err.message };
 	}
 	return err instanceof Error ? err.message : String(err);
+}
+
+function isConcreteThinkingLevel(value: unknown): value is ResolvedThinkingLevel {
+	return (
+		typeof value === "string" &&
+		value !== ThinkingLevel.Inherit &&
+		(Object.values(ThinkingLevel) as string[]).includes(value)
+	);
 }
 
 export async function dispatchRpcCommand(
@@ -237,6 +245,30 @@ export async function dispatchRpcCommand(
 				}
 				await session.setModel(model);
 				return rpcSuccess(id, "set_model", model);
+			}
+
+			case "set_default_model_selection": {
+				if (typeof command.provider !== "string" || !command.provider.trim()) {
+					return typedError("set_default_model_selection", "provider must be a non-empty string");
+				}
+				if (typeof command.modelId !== "string" || !command.modelId.trim()) {
+					return typedError("set_default_model_selection", "modelId must be a non-empty string");
+				}
+				const requestedLevel: unknown = command.thinkingLevel;
+				if (requestedLevel !== undefined && !isConcreteThinkingLevel(requestedLevel)) {
+					return typedError("set_default_model_selection", "thinkingLevel must be a concrete level");
+				}
+				const model = session
+					.getAvailableModels()
+					.find(candidate => candidate.provider === command.provider && candidate.id === command.modelId);
+				if (!model) {
+					return typedError(
+						"set_default_model_selection",
+						`Model not found: ${command.provider}/${command.modelId}`,
+					);
+				}
+				const selection = await session.setDefaultModelSelection(model, requestedLevel);
+				return rpcSuccess(id, "set_default_model_selection", selection);
 			}
 
 			case "cycle_model": {

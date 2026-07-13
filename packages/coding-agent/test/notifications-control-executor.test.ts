@@ -6,7 +6,12 @@ function fakeCtx(overrides: Record<string, unknown> = {}) {
 	const compactCalls: Array<string | undefined> = [];
 	return {
 		ctx: {
-			getContextUsage: () => ({ tokens: 25_000, contextWindow: 272_000, percent: 9.191 }),
+			getContextUsage: () => ({
+				tokens: 25_000,
+				contextWindow: 272_000,
+				percent: 9.191,
+				source: "provider_anchor" as const,
+			}),
 			compact: async (instructions?: string) => {
 				compactCalls.push(instructions);
 			},

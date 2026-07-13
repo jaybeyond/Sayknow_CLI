@@ -1,10 +1,4 @@
-/**
- * Regression: print-mode must not write SILENT_ABORT_MARKER to stderr.
- *
- * OpenAI code backend review flagged that `print-mode.ts` renders `errorMessage` verbatim
- * when stopReason is "aborted", which would surface the sentinel to stderr
- * (and exit with code 1). This test verifies the guard skips silent-abort.
- */
+/** Print-mode output, terminal-status, and stdout-ownership regressions. */
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import type { AssistantMessage, Message, ToolResultMessage } from "@sayknow-cli/ai";
 import type { AgentSession } from "../src/session/agent-session";
@@ -31,7 +25,40 @@ function makeAssistantMessage(overrides: Partial<AssistantMessage> = {}): Assist
 	};
 }
 
-/** Minimal mock of AgentSession for print-mode text output path */
+function makeToolResultMessage(): ToolResultMessage {
+	return {
+		role: "toolResult",
+		toolCallId: "call_1",
+		toolName: "read",
+		content: [{ type: "text", text: "file contents" }],
+		isError: false,
+		timestamp: Date.now(),
+	} as ToolResultMessage;
+}
+
+function invokeWriteCallback(args: unknown[], error?: Error): void {
+	const callback = args[args.length - 1];
+	if (typeof callback === "function") callback(error);
+}
+
+function installImmediateStderrMock(output: string[]): void {
+	vi.spyOn(process.stderr, "write").mockImplementation((...args: unknown[]) => {
+		output.push(String(args[0]));
+		invokeWriteCallback(args);
+		return true;
+	});
+}
+
+function installImmediateStdoutMock(output: string[] = []): void {
+	vi.spyOn(process.stdout, "write").mockImplementation((...args: unknown[]) => {
+		const chunk = args[0];
+		if (typeof chunk === "string" && chunk.length > 0) output.push(chunk);
+		invokeWriteCallback(args);
+		return true;
+	});
+}
+
+/** Minimal mock of the AgentSession text-output path. */
 function createMockSession(
 	messages: Message[],
 	opts?: { contextWindow?: number; autoCompactionEnabled?: boolean },
@@ -50,31 +77,90 @@ function createMockSession(
 	} as unknown as AgentSession;
 }
 
-describe("Print-mode silent-abort regression", () => {
-	let exitSpy: ReturnType<typeof vi.spyOn>;
-	let stderrOutput: string[];
+function eventName(event: unknown): string {
+	if (typeof event === "object" && event !== null && "type" in event) return String(event.type);
+	return String(event);
+}
+
+function createPrintModeTrackingSession(
+	options: {
+		messages?: Message[];
+		header?: unknown;
+		events?: unknown[];
+		disposeEvents?: unknown[];
+		disposeError?: unknown;
+		onDispose?: () => void;
+	} = {},
+) {
+	const { messages = [], header, events = [], disposeEvents = [], disposeError, onDispose } = options;
+	const lifecycle: string[] = [];
+	let onEvent: ((event: unknown) => void) | undefined;
+	let unsubscribeCount = 0;
+	const emit = (event: unknown): void => {
+		lifecycle.push(`emit:${eventName(event)}`);
+		onEvent?.(event);
+	};
+	const dispose = vi.fn(async () => {
+		lifecycle.push("dispose:start");
+		for (const event of disposeEvents) emit(event);
+		onDispose?.();
+		lifecycle.push("dispose:end");
+		if (disposeError !== undefined) throw disposeError;
+	});
+	const prompt = vi.fn(async () => {
+		lifecycle.push("prompt:start");
+		for (const event of events) emit(event);
+		lifecycle.push("prompt:end");
+	});
+	const session = {
+		state: { messages },
+		sessionManager: { getHeader: () => header },
+		extensionRunner: undefined,
+		subscribe: (listener: (event: unknown) => void) => {
+			lifecycle.push("subscribe");
+			onEvent = listener;
+			return () => {
+				lifecycle.push("unsubscribe");
+				onEvent = undefined;
+				unsubscribeCount += 1;
+			};
+		},
+		prompt,
+		dispose,
+	} as unknown as AgentSession;
+
+	return {
+		session,
+		dispose,
+		prompt,
+		lifecycle,
+		unsubscribeCount: () => unsubscribeCount,
+	};
+}
+
+function stdoutError(code: string): Error & { code: string } {
+	return Object.assign(new Error(`stdout ${code}`), { code });
+}
+
+describe("Print mode", () => {
+	let previousExitCode: number | string | null | undefined;
 
 	beforeEach(() => {
-		stderrOutput = [];
-		vi.spyOn(process.stderr, "write").mockImplementation((chunk: unknown) => {
-			stderrOutput.push(String(chunk));
-			return true;
-		});
-		exitSpy = vi.spyOn(process, "exit").mockImplementation(() => undefined as never);
-		vi.spyOn(process.stdout, "write").mockImplementation((...args: unknown[]) => {
-			// Invoke callback if present (runPrintMode flushes stdout before returning)
-			const last = args[args.length - 1];
-			if (typeof last === "function") last();
-			return true;
-		});
+		previousExitCode = process.exitCode;
+		process.exitCode = 0;
 	});
 
 	afterEach(() => {
 		vi.restoreAllMocks();
+		process.exitCode = previousExitCode ?? 0;
 	});
 
-	it("does not write silent-abort marker to stderr or exit non-zero", async () => {
+	it("does not render a silent-abort marker or overwrite a caller status", async () => {
 		const { runPrintMode } = await import("../src/modes/print-mode");
+		const stderrOutput: string[] = [];
+		installImmediateStderrMock(stderrOutput);
+		installImmediateStdoutMock();
+		process.exitCode = 19;
 
 		const silentAbortMsg = makeAssistantMessage({
 			stopReason: "aborted",
@@ -82,188 +168,349 @@ describe("Print-mode silent-abort regression", () => {
 			content: [],
 		});
 
-		const session = createMockSession([silentAbortMsg]);
-		await runPrintMode(session, { mode: "text" });
+		await runPrintMode(createMockSession([silentAbortMsg]), { mode: "text" });
 
-		// The silent-abort marker MUST NOT appear in stderr
-		const stderrText = stderrOutput.join("");
-		expect(stderrText).not.toContain(SILENT_ABORT_MARKER);
-		// process.exit MUST NOT have been called (clean termination)
+		expect(stderrOutput.join("")).not.toContain(SILENT_ABORT_MARKER);
+		expect(process.exitCode).toBe(19);
+	});
+
+	it("sets ordinary terminal errors to status 1 without calling process.exit", async () => {
+		const { runPrintMode } = await import("../src/modes/print-mode");
+		const stderrOutput: string[] = [];
+		installImmediateStderrMock(stderrOutput);
+		installImmediateStdoutMock();
+		const exitSpy = vi.spyOn(process, "exit").mockImplementation(() => undefined as never);
+
+		await runPrintMode(
+			createMockSession([
+				makeAssistantMessage({ stopReason: "error", errorMessage: "Rate limit exceeded", content: [] }),
+			]),
+			{ mode: "text" },
+		);
+
+		expect(stderrOutput.join("")).toContain("Rate limit exceeded");
+		expect(process.exitCode).toBe(1);
 		expect(exitSpy).not.toHaveBeenCalled();
 	});
 
-	it("writes real error messages to stderr and exits non-zero", async () => {
+	it("leaves terminal status unchanged when the caller suppresses print-mode status handling", async () => {
 		const { runPrintMode } = await import("../src/modes/print-mode");
+		const stderrOutput: string[] = [];
+		installImmediateStderrMock(stderrOutput);
+		installImmediateStdoutMock();
+		process.exitCode = 23;
 
-		const errorMsg = makeAssistantMessage({
-			stopReason: "error",
-			errorMessage: "Rate limit exceeded",
-			content: [],
-		});
+		await runPrintMode(
+			createMockSession([
+				makeAssistantMessage({ stopReason: "error", errorMessage: "delegated failure", content: [] }),
+			]),
+			{ mode: "text", suppressProcessExit: true },
+		);
 
-		const session = createMockSession([errorMsg]);
-		await runPrintMode(session, { mode: "text" });
-
-		// A real error SHOULD be written to stderr
-		const stderrText = stderrOutput.join("");
-		expect(stderrText).toContain("Rate limit exceeded");
-		// process.exit(1) SHOULD have been called
-		expect(exitSpy).toHaveBeenCalledWith(1);
-	});
-});
-
-function makeToolResultMessage(): ToolResultMessage {
-	return {
-		role: "toolResult",
-		toolCallId: "call_1",
-		toolName: "read",
-		content: [{ type: "text", text: "file contents" }],
-		isError: false,
-		timestamp: Date.now(),
-	} as ToolResultMessage;
-}
-
-describe("Print-mode last-assistant output regression (#484)", () => {
-	let stdoutOutput: string[];
-
-	beforeEach(() => {
-		stdoutOutput = [];
-		vi.spyOn(process.stderr, "write").mockImplementation(() => true);
-		vi.spyOn(process, "exit").mockImplementation(() => undefined as never);
-		vi.spyOn(process.stdout, "write").mockImplementation((...args: unknown[]) => {
-			const chunk = args[0];
-			if (typeof chunk === "string" && chunk.length > 0) stdoutOutput.push(chunk);
-			const last = args[args.length - 1];
-			if (typeof last === "function") last();
-			return true;
-		});
+		expect(stderrOutput.join("")).toContain("delegated failure");
+		expect(process.exitCode).toBe(23);
 	});
 
-	afterEach(() => {
-		vi.restoreAllMocks();
-	});
-
-	it("prints last assistant text even when a toolResult trails it", async () => {
+	it("prints the last assistant text after a trailing tool result without changing an existing success-path status", async () => {
 		const { runPrintMode } = await import("../src/modes/print-mode");
+		const stdoutOutput: string[] = [];
+		installImmediateStderrMock([]);
+		installImmediateStdoutMock(stdoutOutput);
+		process.exitCode = 0;
 
-		const assistantMsg = makeAssistantMessage({
-			content: [{ type: "text", text: "@sayknow-cli/coding-agent" }],
-		});
-		// Cursor native tool execution can append a toolResult after the assistant reply.
-		const session = createMockSession([assistantMsg, makeToolResultMessage()]);
-		await runPrintMode(session, { mode: "text" });
+		const assistantMsg = makeAssistantMessage({ content: [{ type: "text", text: "@sayknow-cli/coding-agent" }] });
+		await runPrintMode(createMockSession([assistantMsg, makeToolResultMessage()]), { mode: "text" });
 
-		const stdoutText = stdoutOutput.join("");
-		expect(stdoutText).toContain("@sayknow-cli/coding-agent");
-	});
-});
-
-/**
- * Contract: in TEXT mode only, a terminal context-overflow assistant message is
- * surfaced with an actionable diagnostic and a distinct exit code
- * (CONTEXT_OVERFLOW_EXIT_CODE) so `skc -p` callers can detect context exhaustion.
- * JSON mode is intentionally out of scope (it streams events and never runs this
- * terminal branch) — the last test documents that boundary.
- */
-describe("Print-mode context-overflow terminal handling (text mode)", () => {
-	let exitSpy: ReturnType<typeof vi.spyOn>;
-	let stderrOutput: string[];
-
-	beforeEach(() => {
-		stderrOutput = [];
-		vi.spyOn(process.stderr, "write").mockImplementation((chunk: unknown) => {
-			stderrOutput.push(String(chunk));
-			return true;
-		});
-		exitSpy = vi.spyOn(process, "exit").mockImplementation(() => undefined as never);
-		vi.spyOn(process.stdout, "write").mockImplementation((...args: unknown[]) => {
-			const last = args[args.length - 1];
-			if (typeof last === "function") last();
-			return true;
-		});
+		expect(stdoutOutput.join("")).toContain("@sayknow-cli/coding-agent");
+		expect(process.exitCode).toBe(0);
 	});
 
-	afterEach(() => {
-		vi.restoreAllMocks();
-	});
-
-	it("emits an actionable diagnostic and a distinct exit code on context overflow", async () => {
+	it("sets context overflow to status 78 after an immediate stderr write without calling process.exit", async () => {
 		const { runPrintMode, CONTEXT_OVERFLOW_EXIT_CODE } = await import("../src/modes/print-mode");
-
-		// The exact string a Codex/OpenAI-code backend surfaces on context_length_exceeded.
-		const overflowMsg = makeAssistantMessage({
+		const stderrOutput: string[] = [];
+		installImmediateStderrMock(stderrOutput);
+		installImmediateStdoutMock();
+		const exitSpy = vi.spyOn(process, "exit").mockImplementation(() => undefined as never);
+		const overflow = makeAssistantMessage({
 			stopReason: "error",
 			errorMessage:
 				"Codex error event: Your input exceeds the context window of this model. Please adjust your input and try again. (code=context_length_exceeded)",
 			content: [],
 		});
 
-		const session = createMockSession([overflowMsg], { contextWindow: 272000, autoCompactionEnabled: true });
-		await runPrintMode(session, { mode: "text" });
+		await runPrintMode(createMockSession([overflow], { contextWindow: 272000, autoCompactionEnabled: true }), {
+			mode: "text",
+		});
 
-		const stderrText = stderrOutput.join("");
-		// Actionable guidance replaces the opaque provider crash line.
-		expect(stderrText).toContain("Context window exhausted");
-		expect(stderrText).toContain("larger-context model");
-		// Raw provider detail is preserved for debugging.
-		expect(stderrText).toContain("context_length_exceeded");
-		// Distinct exit code so text-mode automation can detect context exhaustion.
-		expect(exitSpy).toHaveBeenCalledWith(CONTEXT_OVERFLOW_EXIT_CODE);
-		expect(exitSpy).not.toHaveBeenCalledWith(1);
+		expect(CONTEXT_OVERFLOW_EXIT_CODE).toBe(78);
+		expect(stderrOutput.join("")).toContain("Context window exhausted");
+		expect(stderrOutput.join("")).toContain("context_length_exceeded");
+		expect(process.exitCode).toBe(78);
+		expect(exitSpy).not.toHaveBeenCalled();
 	});
 
-	it("tells the operator to enable auto-compaction when it is disabled", async () => {
+	it("waits for a backpressured stderr write before disposal while retaining status 1", async () => {
 		const { runPrintMode } = await import("../src/modes/print-mode");
-
-		const overflowMsg = makeAssistantMessage({
-			stopReason: "error",
-			errorMessage: "prompt is too long: 300000 tokens > 272000 maximum",
-			content: [],
+		const stderrOutput: string[] = [];
+		let stderrQuiesced = false;
+		let stderrQuiescedWhenDisposed: boolean | undefined;
+		vi.spyOn(process.stderr, "write").mockImplementation((...args: unknown[]) => {
+			stderrOutput.push(String(args[0]));
+			queueMicrotask(() => {
+				stderrQuiesced = true;
+				invokeWriteCallback(args);
+			});
+			return false;
+		});
+		installImmediateStdoutMock();
+		const exitSpy = vi.spyOn(process, "exit").mockImplementation(() => undefined as never);
+		const tracking = createPrintModeTrackingSession({
+			messages: [makeAssistantMessage({ stopReason: "error", errorMessage: "temporary failure", content: [] })],
+			onDispose: () => {
+				stderrQuiescedWhenDisposed = stderrQuiesced;
+			},
 		});
 
-		const session = createMockSession([overflowMsg], { contextWindow: 272000, autoCompactionEnabled: false });
-		await runPrintMode(session, { mode: "text" });
+		await runPrintMode(tracking.session, { mode: "text" });
 
-		const stderrText = stderrOutput.join("");
-		expect(stderrText).toContain("automatic compaction is disabled");
+		expect(stderrOutput.join("")).toContain("temporary failure");
+		expect(stderrQuiescedWhenDisposed).toBe(true);
+		expect(process.exitCode).toBe(1);
+		expect(exitSpy).not.toHaveBeenCalled();
 	});
 
-	it("still exits 1 with the raw message for non-overflow errors", async () => {
+	it("keeps context-overflow terminal handling out of JSON mode", async () => {
 		const { runPrintMode, CONTEXT_OVERFLOW_EXIT_CODE } = await import("../src/modes/print-mode");
-
-		const errorMsg = makeAssistantMessage({
-			stopReason: "error",
-			errorMessage: "Internal server error (status=500)",
-			content: [],
-		});
-
-		const session = createMockSession([errorMsg], { contextWindow: 272000, autoCompactionEnabled: true });
-		await runPrintMode(session, { mode: "text" });
-
-		const stderrText = stderrOutput.join("");
-		expect(stderrText).toContain("Internal server error");
-		expect(stderrText).not.toContain("Context window exhausted");
-		expect(exitSpy).toHaveBeenCalledWith(1);
-		expect(exitSpy).not.toHaveBeenCalledWith(CONTEXT_OVERFLOW_EXIT_CODE);
-	});
-
-	it("scope boundary: JSON mode does not apply the context-overflow exit code", async () => {
-		const { runPrintMode, CONTEXT_OVERFLOW_EXIT_CODE } = await import("../src/modes/print-mode");
-
-		// Same terminal overflow message, but JSON mode streams events and never runs
-		// the text-mode terminal-error branch, so the exit code is intentionally not applied.
-		const overflowMsg = makeAssistantMessage({
+		const stderrOutput: string[] = [];
+		installImmediateStderrMock(stderrOutput);
+		installImmediateStdoutMock();
+		const overflow = makeAssistantMessage({
 			stopReason: "error",
 			errorMessage:
 				"Codex error event: Your input exceeds the context window of this model. (code=context_length_exceeded)",
 			content: [],
 		});
 
-		const session = createMockSession([overflowMsg], { contextWindow: 272000, autoCompactionEnabled: true });
-		await runPrintMode(session, { mode: "json" });
+		await runPrintMode(createMockSession([overflow], { contextWindow: 272000, autoCompactionEnabled: true }), {
+			mode: "json",
+		});
 
-		const stderrText = stderrOutput.join("");
-		expect(stderrText).not.toContain("Context window exhausted");
-		expect(exitSpy).not.toHaveBeenCalledWith(CONTEXT_OVERFLOW_EXIT_CODE);
+		expect(stderrOutput.join("")).not.toContain("Context window exhausted");
+		expect(process.exitCode).not.toBe(CONTEXT_OVERFLOW_EXIT_CODE);
+	});
+
+	it("does not install a text-mode session listener", async () => {
+		const { runPrintMode } = await import("../src/modes/print-mode");
+		installImmediateStderrMock([]);
+		installImmediateStdoutMock();
+		const tracking = createPrintModeTrackingSession({
+			messages: [makeAssistantMessage({ content: [{ type: "text", text: "text only" }] })],
+		});
+
+		await runPrintMode(tracking.session, { mode: "text" });
+
+		expect(tracking.lifecycle).toEqual(["dispose:start", "dispose:end"]);
+		expect(tracking.unsubscribeCount()).toBe(0);
+	});
+
+	it("continues JSON event processing after a callback EPIPE and disposes before unsubscribing", async () => {
+		const { runPrintMode } = await import("../src/modes/print-mode");
+		installImmediateStderrMock([]);
+		const tracking = createPrintModeTrackingSession({
+			header: { type: "session", id: "header" },
+			events: [
+				{ type: "message_update", id: "first" },
+				{ type: "message_update", id: "second" },
+			],
+		});
+		const output: string[] = [];
+		let writeCount = 0;
+		const writeSpy = vi.spyOn(process.stdout, "write").mockImplementation((...args: unknown[]) => {
+			writeCount += 1;
+			output.push(String(args[0]));
+			invokeWriteCallback(args, writeCount === 2 ? stdoutError("EPIPE") : undefined);
+			return true;
+		});
+
+		await runPrintMode(tracking.session, { mode: "json", initialMessage: "continue" });
+
+		expect(tracking.prompt).toHaveBeenCalledTimes(1);
+		expect(tracking.lifecycle).toEqual([
+			"subscribe",
+			"prompt:start",
+			"emit:message_update",
+			"emit:message_update",
+			"prompt:end",
+			"dispose:start",
+			"dispose:end",
+			"unsubscribe",
+		]);
+		expect(writeSpy).toHaveBeenCalledTimes(2);
+		expect(output).toEqual(['{"type":"session","id":"header"}\n', '{"type":"message_update","id":"first"}\n']);
+		expect(tracking.dispose).toHaveBeenCalledTimes(1);
+	});
+
+	it("continues JSON event processing after an owned stdout EPIPE event", async () => {
+		const { runPrintMode } = await import("../src/modes/print-mode");
+		installImmediateStderrMock([]);
+		const tracking = createPrintModeTrackingSession({
+			header: { type: "session", id: "header" },
+			events: [
+				{ type: "message_update", id: "first" },
+				{ type: "message_update", id: "second" },
+			],
+		});
+		let writeCount = 0;
+		const writeSpy = vi.spyOn(process.stdout, "write").mockImplementation((...args: unknown[]) => {
+			writeCount += 1;
+			if (writeCount === 2) process.stdout.emit("error", stdoutError("EPIPE"));
+			else invokeWriteCallback(args);
+			return true;
+		});
+
+		await runPrintMode(tracking.session, { mode: "json", initialMessage: "continue" });
+
+		expect(tracking.prompt).toHaveBeenCalledTimes(1);
+		expect(tracking.lifecycle.filter(entry => entry === "emit:message_update")).toHaveLength(2);
+		expect(writeSpy).toHaveBeenCalledTimes(2);
+		expect(tracking.dispose).toHaveBeenCalledTimes(1);
+	});
+
+	it("propagates a non-pipe stdout callback failure after session disposal", async () => {
+		const { runPrintMode } = await import("../src/modes/print-mode");
+		installImmediateStderrMock([]);
+		const failure = new Error("stdout callback failed");
+		const tracking = createPrintModeTrackingSession({
+			messages: [makeAssistantMessage({ content: [{ type: "text", text: "draft" }] })],
+		});
+		vi.spyOn(process.stdout, "write").mockImplementation((...args: unknown[]) => {
+			invokeWriteCallback(args, failure);
+			return true;
+		});
+
+		await expect(runPrintMode(tracking.session, { mode: "text" })).rejects.toBe(failure);
+
+		expect(tracking.dispose).toHaveBeenCalledTimes(1);
+	});
+
+	it("propagates a non-pipe stdout EventEmitter failure after session disposal", async () => {
+		const { runPrintMode } = await import("../src/modes/print-mode");
+		installImmediateStderrMock([]);
+		const failure = new Error("stdout event failed");
+		const tracking = createPrintModeTrackingSession({
+			messages: [makeAssistantMessage({ content: [{ type: "text", text: "draft" }] })],
+		});
+		vi.spyOn(process.stdout, "write").mockImplementation(() => {
+			process.stdout.emit("error", failure);
+			return true;
+		});
+
+		await expect(runPrintMode(tracking.session, { mode: "text" })).rejects.toBe(failure);
+
+		expect(tracking.dispose).toHaveBeenCalledTimes(1);
+	});
+
+	it("keeps the JSON subscriber through disposal-time output and late stdout errors", async () => {
+		const { runPrintMode } = await import("../src/modes/print-mode");
+		installImmediateStderrMock([]);
+		const tracking = createPrintModeTrackingSession({
+			disposeEvents: [{ type: "session_disposed", id: "final" }],
+		});
+		const output: string[] = [];
+		vi.spyOn(process.stdout, "write").mockImplementation((...args: unknown[]) => {
+			const chunk = String(args[0]);
+			output.push(chunk);
+			if (chunk.includes("session_disposed")) process.stdout.emit("error", stdoutError("EPIPE"));
+			else invokeWriteCallback(args);
+			return true;
+		});
+
+		await runPrintMode(tracking.session, { mode: "json" });
+
+		expect(output).toContain('{"type":"session_disposed","id":"final"}\n');
+		expect(tracking.lifecycle).toEqual([
+			"subscribe",
+			"dispose:start",
+			"emit:session_disposed",
+			"dispose:end",
+			"unsubscribe",
+		]);
+		expect(tracking.dispose).toHaveBeenCalledTimes(1);
+	});
+
+	it("does not suppress ERR_STREAM_DESTROYED before an EPIPE has latched", async () => {
+		const { runPrintMode } = await import("../src/modes/print-mode");
+		installImmediateStderrMock([]);
+		const destroyed = stdoutError("ERR_STREAM_DESTROYED");
+		const tracking = createPrintModeTrackingSession({
+			messages: [makeAssistantMessage({ content: [{ type: "text", text: "draft" }] })],
+		});
+		vi.spyOn(process.stdout, "write").mockImplementation(() => {
+			throw destroyed;
+		});
+
+		await expect(runPrintMode(tracking.session, { mode: "text" })).rejects.toBe(destroyed);
+
+		expect(tracking.dispose).toHaveBeenCalledTimes(1);
+	});
+
+	it("suppresses a destroyed-stream error only after an owned EPIPE latches", async () => {
+		const { runPrintMode } = await import("../src/modes/print-mode");
+		installImmediateStderrMock([]);
+		const tracking = createPrintModeTrackingSession({
+			messages: [makeAssistantMessage({ content: [{ type: "text", text: "draft" }] })],
+			onDispose: () => {
+				process.stdout.emit("error", stdoutError("ERR_STREAM_DESTROYED"));
+			},
+		});
+		vi.spyOn(process.stdout, "write").mockImplementation(() => {
+			throw stdoutError("EPIPE");
+		});
+
+		await runPrintMode(tracking.session, { mode: "text" });
+
+		expect(tracking.dispose).toHaveBeenCalledTimes(1);
+	});
+
+	it("preserves both a stdout failure and a disposal failure", async () => {
+		const { runPrintMode } = await import("../src/modes/print-mode");
+		installImmediateStderrMock([]);
+		const writeFailure = new Error("stdout write failed");
+		const disposeFailure = new Error("dispose failed");
+		const tracking = createPrintModeTrackingSession({
+			messages: [makeAssistantMessage({ content: [{ type: "text", text: "draft" }] })],
+			disposeError: disposeFailure,
+		});
+		vi.spyOn(process.stdout, "write").mockImplementation(() => {
+			throw writeFailure;
+		});
+
+		let caught: unknown;
+		try {
+			await runPrintMode(tracking.session, { mode: "text" });
+		} catch (error) {
+			caught = error;
+		}
+
+		expect(caught).toBeInstanceOf(AggregateError);
+		expect((caught as AggregateError).errors).toEqual([writeFailure, disposeFailure]);
+		expect(tracking.dispose).toHaveBeenCalledTimes(1);
+	});
+
+	it("removes only the stdout listener it owns", async () => {
+		const { runPrintMode } = await import("../src/modes/print-mode");
+		installImmediateStderrMock([]);
+		const externalListener = () => {};
+		process.stdout.on("error", externalListener);
+		const listenerCount = process.stdout.listenerCount("error");
+		installImmediateStdoutMock();
+
+		try {
+			await runPrintMode(createPrintModeTrackingSession().session, { mode: "text" });
+			expect(process.stdout.listenerCount("error")).toBe(listenerCount);
+			expect(process.stdout.listeners("error")).toContain(externalListener);
+		} finally {
+			process.stdout.removeListener("error", externalListener);
+		}
 	});
 });

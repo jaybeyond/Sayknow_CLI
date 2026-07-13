@@ -39,6 +39,8 @@ interface RpcHarness {
 	nextFrame(timeoutMs?: number): Promise<Frame>;
 	send(command: object | string): void;
 	closeStdin(): Promise<void>;
+	closeStdout(): Promise<void>;
+
 	kill(): void;
 }
 
@@ -88,6 +90,11 @@ function findResponse(frames: Frame[], id: string): Frame {
 	return frame;
 }
 
+async function readBytesIfPresent(filePath: string): Promise<Uint8Array | undefined> {
+	const file = Bun.file(filePath);
+	return (await file.exists()) ? new Uint8Array(await file.arrayBuffer()) : undefined;
+}
+
 function spawnRpcServer(options: { cwd?: string; sessionDir?: string } = {}): RpcHarness {
 	const proc = Bun.spawn(
 		[
@@ -132,6 +139,11 @@ function spawnRpcServer(options: { cwd?: string; sessionDir?: string } = {}): Rp
 				if (timer) clearTimeout(timer);
 			}
 		},
+		async closeStdout(): Promise<void> {
+			const closed = lines.return?.(undefined);
+			if (closed) await closed;
+		},
+
 		send(command: object | string): void {
 			const line = typeof command === "string" ? command : JSON.stringify(command);
 			proc.stdin.write(`${line}\n`);
@@ -214,6 +226,23 @@ describe("skc --mode rpc red-team stdio lifecycle", () => {
 		}
 	}, 30_000);
 
+	it("terminalizes quietly after stdout closes without waiting for stdin EOF", async () => {
+		const harness = spawnRpcServer();
+		try {
+			expect(await harness.nextFrame()).toEqual({ type: "ready" });
+			await harness.closeStdout();
+			harness.send({ id: "trigger-epipe", type: "get_state" });
+			const exitCode = await Promise.race([
+				harness.proc.exited,
+				Bun.sleep(10_000).then(() => Promise.reject(new Error("RPC waited for stdin EOF after stdout closed"))),
+			]);
+			expect(exitCode).toBe(0);
+			expect((await harness.stderrText).trim()).toBe("");
+		} finally {
+			harness.kill();
+		}
+	}, 30_000);
+
 	it("flushes durable session state on EOF and reloads it in a new RPC process", async () => {
 		const marker = "RPC_PERSISTENCE_MARKER";
 		const firstRun = await driveRpcServer([
@@ -244,6 +273,20 @@ describe("skc --mode rpc red-team stdio lifecycle", () => {
 		expect(findResponse(secondRun.frames, "switch")).toMatchObject({ success: true, data: { cancelled: false } });
 	}, 30_000);
 
+	it("drains ordered mutation responses before immediate stdin EOF", async () => {
+		const result = await driveRpcServer([
+			{ id: "first-name", type: "set_session_name", name: "first" },
+			{ id: "second-name", type: "set_session_name", name: "second" },
+		]);
+		expect(result.exitCode, result.stderr).toBe(0);
+		const firstIndex = result.frames.findIndex(frame => frame.type === "response" && frame.id === "first-name");
+		const secondIndex = result.frames.findIndex(frame => frame.type === "response" && frame.id === "second-name");
+		expect(firstIndex).toBeGreaterThanOrEqual(0);
+		expect(secondIndex).toBeGreaterThan(firstIndex);
+		expect(findResponse(result.frames, "first-name")).toMatchObject({ success: true, command: "set_session_name" });
+		expect(findResponse(result.frames, "second-name")).toMatchObject({ success: true, command: "set_session_name" });
+	}, 30_000);
+
 	it("survives a malformed JSONL frame and accepts the next command", async () => {
 		const result = await driveRpcServer([
 			"{ definitely not json",
@@ -263,6 +306,76 @@ describe("skc --mode rpc red-team stdio lifecycle", () => {
 		});
 		expect(result.stderr.trim()).toBe("");
 	}, 30_000);
+
+	it("rejects malformed raw default selectors without mutating durable bytes or losing stdio service", async () => {
+		const harness = spawnRpcServer();
+		const malformed = [
+			{ id: "bad-missing-provider", type: "set_default_model_selection", modelId: "rpc-test-model" },
+			{ id: "bad-numeric-model", type: "set_default_model_selection", provider: "rpc-test", modelId: 42 },
+			{ id: "bad-blank-provider", type: "set_default_model_selection", provider: " ", modelId: "rpc-test-model" },
+			{
+				id: "bad-invalid-level",
+				type: "set_default_model_selection",
+				provider: "rpc-test",
+				modelId: "rpc-test-model",
+				thinkingLevel: "extreme",
+			},
+			{
+				id: "bad-inherit-level",
+				type: "set_default_model_selection",
+				provider: "rpc-test",
+				modelId: "rpc-test-model",
+				thinkingLevel: "inherit",
+			},
+			{
+				id: "bad-unknown-model",
+				type: "set_default_model_selection",
+				provider: "rpc-test",
+				modelId: "missing",
+			},
+		] as const;
+		try {
+			// Given: startup is complete and both durable files have post-ready baselines.
+			expect(await harness.nextFrame()).toEqual({ type: "ready" });
+			harness.send({ id: "baseline-state", type: "get_state" });
+			const initialState = await harness.nextFrame();
+			expect(initialState).toMatchObject({ id: "baseline-state", command: "get_state", success: true });
+			const sessionFile = frameData<{ sessionFile?: string }>(initialState).sessionFile;
+			if (!sessionFile) throw new Error("Expected a session file after initial get_state");
+			const configFile = path.join(agentDir, "config.yml");
+			const configBaseline = await readBytesIfPresent(configFile);
+			const sessionBaseline = await readBytesIfPresent(sessionFile);
+
+			for (const [index, command] of malformed.entries()) {
+				// When: each raw mutation is fully answered before the fast-lane survival probe is sent.
+				harness.send(command);
+				const failure = await harness.nextFrame();
+
+				// Then: the error is correlated to the mutation rather than parse, and service remains usable.
+				expect(failure).toMatchObject({
+					id: command.id,
+					type: "response",
+					command: "set_default_model_selection",
+					success: false,
+				});
+				expect(failure.command).not.toBe("parse");
+				expect(JSON.stringify(failure.error)).not.toContain("Unknown command");
+				harness.send({ id: `state-after-${index}`, type: "get_state" });
+				expect(await harness.nextFrame()).toMatchObject({
+					id: `state-after-${index}`,
+					command: "get_state",
+					success: true,
+				});
+				expect(await readBytesIfPresent(configFile)).toEqual(configBaseline);
+				expect(await readBytesIfPresent(sessionFile)).toEqual(sessionBaseline);
+			}
+		} finally {
+			await harness.closeStdin();
+			const exited = await Promise.race([harness.proc.exited.then(() => true), Bun.sleep(5_000).then(() => false)]);
+			if (!exited) harness.kill();
+			await harness.proc.exited;
+		}
+	}, 45_000);
 
 	it("runs independent child sessions concurrently without state bleed", async () => {
 		const alphaCwd = path.join(workspace, "alpha");

@@ -14,10 +14,12 @@ const line = (id: number, method = "data") => `${JSON.stringify({ jsonrpc: "2.0"
 
 function deferred<T = void>() {
 	let resolve!: (v: T) => void;
-	const promise = new Promise<T>(r => {
-		resolve = r;
+	let reject!: (reason?: unknown) => void;
+	const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+		resolve = resolvePromise;
+		reject = rejectPromise;
 	});
-	return { promise, resolve };
+	return { promise, resolve, reject };
 }
 
 /** Controllable async-iterable stdin: push frames, then close() to signal EOF. */
@@ -178,19 +180,141 @@ describe("pumpCoordinatorMcpStream — EOF drain", () => {
 });
 
 describe("pumpCoordinatorMcpStream — writer robustness", () => {
-	it("treats a writeLine failure as terminal without unhandled rejection or chain poisoning", async () => {
+	it("quietly terminalizes on a coded structural EPIPE without waiting for input EOF", async () => {
 		let writeCalls = 0;
+		const epipe = Object.assign(new Error("peer closed"), { code: "EPIPE" });
 		const writeLine = () => {
 			writeCalls += 1;
-			throw new Error("EPIPE");
+			throw epipe;
 		};
 		const handler = async (req: Rpc): Promise<Rpc> => ({ jsonrpc: "2.0", id: req.id ?? null, result: {} });
 		const ch = channel();
+		const pump = pumpCoordinatorMcpStream(handler as never, ch, writeLine);
+		ch.push(line(1));
+		await expect(
+			Promise.race([pump, Bun.sleep(100).then(() => Promise.reject(new Error("pump waited for EOF")))]),
+		).resolves.toBeUndefined();
+		expect(writeCalls).toBe(1); // terminalized after the first failed owned-sink write
+	});
+
+	it("does not promote queued side-effecting work after the peer closes", async () => {
+		const gate = deferred();
+		const dispatched: Array<string | number | null | undefined> = [];
+		const epipe = Object.assign(new Error("peer closed"), { code: "EPIPE" });
+		const handler = async (req: Rpc): Promise<Rpc> => {
+			dispatched.push(req.id);
+			if (req.id === 1) await gate.promise;
+			return { jsonrpc: "2.0", id: req.id ?? null, result: {} };
+		};
+		const ch = channel();
+		const pump = pumpCoordinatorMcpStream(
+			handler as never,
+			ch,
+			() => {
+				throw epipe;
+			},
+			{ maxDataConcurrency: 1 },
+		);
+		ch.push(line(1));
+		ch.push(line(2));
+		await tick();
+		expect(dispatched).toEqual([1]);
+		gate.resolve();
+		await pump;
+		expect(dispatched).toEqual([1]);
+	});
+
+	it("suppresses writes from already-running work after a coded peer closure", async () => {
+		const first = deferred();
+		const second = deferred();
+		let writeCalls = 0;
+		const epipe = Object.assign(new Error("peer closed"), { code: "EPIPE" });
+		const handler = async (req: Rpc): Promise<Rpc> => {
+			if (req.id === 1) await first.promise;
+			else await second.promise;
+			return { jsonrpc: "2.0", id: req.id ?? null, result: {} };
+		};
+		const ch = channel();
+		const pump = pumpCoordinatorMcpStream(
+			handler as never,
+			ch,
+			() => {
+				writeCalls += 1;
+				throw epipe;
+			},
+			{ maxDataConcurrency: 2 },
+		);
+		ch.push(line(1));
+		ch.push(line(2));
+		await tick();
+		first.resolve();
+		await tick();
+		second.resolve();
+		await pump;
+		expect(writeCalls).toBe(1);
+	});
+
+	it("propagates non-pipe writer faults", async () => {
+		const failure = Object.assign(new Error("write failed"), { code: "EIO" });
+		const handler = async (req: Rpc): Promise<Rpc> => ({ jsonrpc: "2.0", id: req.id ?? null, result: {} });
+		const ch = channel();
+		const pump = pumpCoordinatorMcpStream(handler as never, ch, () => {
+			throw failure;
+		});
+		ch.push(line(1));
+		await expect(pump).rejects.toBe(failure);
+	});
+
+	it("propagates a deferred asynchronous writer failure", async () => {
+		const failure = Object.assign(new Error("write failed"), { code: "EIO" });
+		const completion = deferred<void>();
+		const handler = async (req: Rpc): Promise<Rpc> => ({ jsonrpc: "2.0", id: req.id ?? null, result: {} });
+		const ch = channel();
+		const pump = pumpCoordinatorMcpStream(handler as never, ch, () => completion.promise);
+		ch.push(line(1));
+		await tick();
+		completion.reject(failure);
+		await expect(pump).rejects.toBe(failure);
+	});
+
+	it("bounds a never-settling writer and suppresses queued late emissions", async () => {
+		const firstWrite = deferred<void>();
+		let writeCalls = 0;
+		const handler = async (req: Rpc): Promise<Rpc> => ({ jsonrpc: "2.0", id: req.id ?? null, result: {} });
+		const ch = channel();
+		const pump = pumpCoordinatorMcpStream(
+			handler as never,
+			ch,
+			() => {
+				writeCalls += 1;
+				return firstWrite.promise;
+			},
+			{ maxDataConcurrency: 2, drainTimeoutMs: 20 },
+		);
 		ch.push(line(1));
 		ch.push(line(2));
 		ch.close();
-		await expect(pumpCoordinatorMcpStream(handler as never, ch, writeLine)).resolves.toBeUndefined();
-		expect(writeCalls).toBe(1); // closed after the first failure; no write-after-close
+		await expect(
+			Promise.race([
+				pump,
+				Bun.sleep(250).then(() => Promise.reject(new Error("pump waited for a never-settling write"))),
+			]),
+		).resolves.toBeUndefined();
+		expect(writeCalls).toBe(1);
+		firstWrite.resolve();
+		await tick();
+		expect(writeCalls).toBe(1);
+	});
+
+	it("does not treat ERR_STREAM_DESTROYED as a peer closure before terminality is proven", async () => {
+		const failure = Object.assign(new Error("destroyed"), { code: "ERR_STREAM_DESTROYED" });
+		const handler = async (req: Rpc): Promise<Rpc> => ({ jsonrpc: "2.0", id: req.id ?? null, result: {} });
+		const ch = channel();
+		const pump = pumpCoordinatorMcpStream(handler as never, ch, () => {
+			throw failure;
+		});
+		ch.push(line(1));
+		await expect(pump).rejects.toBe(failure);
 	});
 });
 

@@ -22,6 +22,7 @@ const EXPECTED_RPC_COMMAND_TYPES: readonly RpcCommand["type"][] = [
 	"get_pending_workflow_gates",
 	"set_capabilities",
 	"set_model",
+	"set_default_model_selection",
 	"cycle_model",
 	"get_available_models",
 	"set_thinking_level",
@@ -95,6 +96,7 @@ describe("agent-wire RPC command scopes", () => {
 		expect(scopeForRpcCommand("export_html")).toBe("export");
 		expect(scopeForRpcCommand("switch_session")).toBe("session");
 		expect(scopeForRpcCommand("set_model")).toBe("model");
+		expect(scopeForRpcCommand("set_default_model_selection")).toBe("model");
 		expect(scopeForRpcCommand("get_messages")).toBe("message:read");
 		expect(scopeForRpcCommand("set_todos")).toBe("control");
 		expect(scopeForRpcCommand("workflow_gate_response")).toBe("control");

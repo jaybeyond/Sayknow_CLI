@@ -12,6 +12,7 @@ export const COORDINATOR_MCP_TOOL_NAMES = [
 	"skc_coordinator_watch_events",
 	"skc_coordinator_register_session",
 	"skc_coordinator_start_session",
+	"skc_coordinator_stop_session",
 	"skc_coordinator_send_prompt",
 	"skc_coordinator_submit_question_answer",
 	"skc_coordinator_read_turn",

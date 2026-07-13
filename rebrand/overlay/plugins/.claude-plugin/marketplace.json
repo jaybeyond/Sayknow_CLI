@@ -5,14 +5,14 @@
   },
   "metadata": {
     "description": "SKC delegation plugin",
-    "version": "0.3.12"
+    "version": "0.3.14"
   },
   "plugins": [
     {
       "name": "sayknow-cli",
       "source": "./sayknow-cli",
       "description": "Delegate SKC planning/execution/team workflows via coordinator MCP.",
-      "version": "0.3.12",
+      "version": "0.3.14",
       "author": {
         "name": "Sayknow-CLI"
       },

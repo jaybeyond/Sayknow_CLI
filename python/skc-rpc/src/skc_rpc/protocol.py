@@ -19,6 +19,7 @@ StopReason: TypeAlias = Literal["stop", "length", "toolUse", "error", "aborted"]
 NotifyType: TypeAlias = Literal["info", "warning", "error"]
 WidgetPlacement: TypeAlias = Literal["aboveEditor", "belowEditor"]
 TodoStatus: TypeAlias = Literal["pending", "in_progress", "completed", "abandoned"]
+ContextUsageSource: TypeAlias = Literal["provider_anchor", "heuristic", "unknown"]
 WorkflowGateKind: TypeAlias = Literal["question", "approval", "execution"]
 ExtensionUiMethod: TypeAlias = Literal[
     "select",
@@ -54,6 +55,7 @@ _STOP_REASON_VALUES: Final[frozenset[str]] = frozenset({"stop", "length", "toolU
 _NOTIFY_TYPE_VALUES: Final[frozenset[str]] = frozenset({"info", "warning", "error"})
 _WIDGET_PLACEMENT_VALUES: Final[frozenset[str]] = frozenset({"aboveEditor", "belowEditor"})
 _TODO_STATUS_VALUES: Final[frozenset[str]] = frozenset({"pending", "in_progress", "completed", "abandoned"})
+_CONTEXT_USAGE_SOURCE_VALUES: Final[frozenset[str]] = frozenset({"provider_anchor", "heuristic", "unknown"})
 _EXTENSION_UI_METHOD_VALUES: Final[frozenset[str]] = frozenset(
     {
         "select",
@@ -688,6 +690,7 @@ class ContextUsage:
     tokens: int | None
     context_window: int
     percent: float | None
+    source: ContextUsageSource
 
 
 @dataclass(slots=True, frozen=True)
@@ -1306,6 +1309,14 @@ def _parse_context_usage(payload: JsonValue | None) -> ContextUsage | None:
         tokens=None if raw_tokens is None else int(raw_tokens),
         context_window=int(payload.get("contextWindow", 0)),
         percent=None if raw_percent is None else float(raw_percent),
+        source=cast(
+            ContextUsageSource,
+            _require_literal(
+                payload.get("source", "heuristic"),
+                _CONTEXT_USAGE_SOURCE_VALUES,
+                field="contextUsage.source",
+            ),
+        ),
     )
 
 

@@ -2,7 +2,9 @@ import { randomUUID } from "node:crypto";
 import * as nodeFs from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { isKnownSinkPeerClosedError } from "@sayknow-cli/utils";
 import { VERSION } from "@sayknow-cli/utils/dirs";
+
 import {
 	COORDINATOR_MCP_PROTOCOL_VERSION,
 	COORDINATOR_MCP_SERVER_NAME,
@@ -29,7 +31,7 @@ import {
 	replaceOwnerGenerationSync,
 	type TmuxServerProof,
 } from "../skc-runtime/tmux-owner-isolation";
-
+import { forceCloseSkcTmuxSession } from "../skc-runtime/tmux-sessions";
 import {
 	type CoordinatorModelProfileLoader,
 	loadCoordinatorModelProfiles,
@@ -44,6 +46,7 @@ import {
 	coordinatorNamespacePath,
 	requireCoordinatorMutation,
 } from "./policy";
+import { createSessionReaper, type ReapableSession, type SessionReaper } from "./session-reaper";
 
 export type { CoordinatorToolName };
 export { COORDINATOR_MCP_PROTOCOL_VERSION, COORDINATOR_MCP_SERVER_NAME, COORDINATOR_MCP_TOOL_NAMES };
@@ -62,6 +65,16 @@ interface JsonRpcResponse {
 	id: string | number | null;
 	result?: JsonRpcResult;
 	error?: { code: number; message: string; data?: unknown };
+}
+
+function sinkErrorCode(error: unknown): string | undefined {
+	if (error === null || (typeof error !== "object" && typeof error !== "function")) return undefined;
+	try {
+		const code = Reflect.get(error, "code");
+		return typeof code === "string" ? code : undefined;
+	} catch {
+		return undefined;
+	}
 }
 
 interface SessionStartInput {
@@ -121,6 +134,12 @@ interface CoordinatorServices {
 	listSessions?: () => unknown[] | Promise<unknown[]>;
 	startSession?: (input: SessionStartInput) => unknown | Promise<unknown>;
 	commandRunner?: CommandRunner;
+	forceCloseSession?: (
+		sessionName: string,
+		env: NodeJS.ProcessEnv,
+		expectedSessionId?: string,
+		expectedStateFile?: string,
+	) => Promise<unknown>;
 	ownerIsolationProbe?: OwnerIsolationProbe;
 	resolveModelProfiles?: CoordinatorModelProfileLoader;
 }
@@ -240,6 +259,7 @@ interface CoordinatorSessionState {
 type CoordinatorEventKind =
 	| "session.registered"
 	| "session.started"
+	| "session.reaped"
 	| "session.state_changed"
 	| "turn.queued"
 	| "turn.delivering"
@@ -377,6 +397,26 @@ function toolSchema(name: CoordinatorToolName): {
 					allow_mutation: allowMutation,
 				},
 				required: ["cwd", "allow_mutation"],
+			},
+		};
+	}
+	if (name === "skc_coordinator_stop_session") {
+		return {
+			name,
+			description:
+				"Reap a coordinator delegate-created (ephemeral) session: terminate its owner via the owner-proof forceCloseSkcTmuxSession, then purge its state files only on verified termination. Never touches non-ephemeral (user-registered) sessions unless force is set AND the force-stop capability is enabled.",
+			inputSchema: {
+				type: "object",
+				properties: {
+					session_id: sessionId,
+					force: {
+						type: "boolean",
+						description: "Reap a non-ephemeral session; requires the SKC_COORDINATOR_MCP_FORCE_STOP capability.",
+					},
+					reason: { type: "string", description: "Optional audit reason recorded on the session.reaped event." },
+					allow_mutation: allowMutation,
+				},
+				required: ["session_id", "allow_mutation"],
 			},
 		};
 	}
@@ -868,6 +908,7 @@ const COORDINATOR_SESSION_STATES = new Set<CoordinatorSessionStateValue>([
 const COORDINATOR_EVENT_KINDS = new Set<CoordinatorEventKind>([
 	"session.registered",
 	"session.started",
+	"session.reaped",
 	"session.state_changed",
 	"turn.queued",
 	"turn.delivering",
@@ -3284,6 +3325,103 @@ export function createCoordinatorMcpServer(options: CoordinatorMcpServerOptions 
 	function sessionFile(sessionId: unknown): string {
 		return path.join(namespaceDir, "sessions", `${safeExternalId("session", sessionId)}.json`);
 	}
+	const forceCloseSession =
+		services.forceCloseSession ??
+		((name: string, targetEnv: NodeJS.ProcessEnv, expectedSessionId?: string, expectedStateFile?: string) =>
+			forceCloseSkcTmuxSession(name, targetEnv, expectedSessionId, expectedStateFile));
+
+	// Reap a coordinator delegate-created (ephemeral) session. Addresses the #2034 review:
+	//  - terminates via the owner-proof forceCloseSkcTmuxSession (pid + native session_id +
+	//    generation + server_key + start_time verified atomically) — never a raw process.kill,
+	//    so a recycled PID can never signal a foreign process.
+	//  - re-validates ephemeral + no-active-turn AT kill time under a per-session lock, closing
+	//    the select→kill TOCTOU and races with concurrent send_prompt / delegate / stop.
+	//  - purges state files ONLY on verified termination; on failure the record is kept for retry
+	//    and no session.reaped event is emitted (honest audit, no worse leak).
+	async function reapSession(
+		rawId: unknown,
+		opts: { force?: boolean; reason?: string } = {},
+	): Promise<{ ok: boolean; reason?: string; killed: boolean; active_turn_id?: string; detail?: string }> {
+		const id = safeExternalId("session", rawId);
+		return await withSessionMutation(`${namespaceDir}::${id}`, async () => {
+			const record = asRecord(await readJsonFile(sessionFile(id)));
+			if (!record) return { ok: false, reason: "unknown_session", killed: false };
+			if (record.ephemeral !== true && opts.force !== true) {
+				return { ok: false, reason: "not_ephemeral", killed: false };
+			}
+			const activeTurn = await readActiveTurn(namespaceDir, id);
+			if (activeTurn) {
+				return { ok: false, reason: "active_turn", killed: false, active_turn_id: activeTurn.turn_id };
+			}
+			const tmuxSession = optionalString(record.tmux_session) ?? optionalString(record.tmuxSession);
+			let killed = false;
+			if (tmuxSession) {
+				// Production delegate records persist the owner state-file path as `runtimeStateFile`
+				// (see startTmuxSession). Read that so the owner-proof close is actually bound to the
+				// recorded state-file identity; `sessionStateFile` is only a compatibility fallback for
+				// any externally-registered record that used the older key.
+				const expectedStateFile =
+					optionalString(record.runtimeStateFile) ?? optionalString(record.sessionStateFile) ?? undefined;
+				try {
+					await forceCloseSession(tmuxSession, env, undefined, expectedStateFile);
+					killed = true;
+				} catch (err) {
+					return {
+						ok: false,
+						reason: "terminate_failed",
+						detail: err instanceof Error ? err.message : String(err),
+						killed: false,
+					};
+				}
+			}
+			// Purge the session record FIRST so a partial rm failure can never re-list → re-reap →
+			// emit a duplicate session.reaped. `killed` is honest: false when nothing was signalled.
+			await fs.rm(sessionFile(id), { force: true });
+			await appendCoordinatorEvent(namespaceDir, {
+				kind: "session.reaped",
+				sessionId: id,
+				summary: `Session ${id} reaped${opts.reason ? ` (${opts.reason})` : ""}`,
+				metadata: { reason: opts.reason ?? null, force: opts.force === true, killed },
+			});
+			await fs.rm(sessionStateFile(namespaceDir, id), { force: true });
+			await fs.rm(activeTurnFile(namespaceDir, id), { force: true });
+			return { ok: true, killed };
+		});
+	}
+
+	const sessionReaper: SessionReaper = createSessionReaper(
+		{
+			listSessions: async (): Promise<ReapableSession[]> => {
+				const out: ReapableSession[] = [];
+				for (const raw of await listSessions()) {
+					try {
+						const rec = asRecord(raw);
+						if (rec?.ephemeral !== true) continue;
+						const sid = optionalString(rec.session_id);
+						if (!sid) continue;
+						const activeTurn = await readActiveTurn(namespaceDir, sid);
+						const state = await readSessionState(namespaceDir, sid);
+						const stamp = optionalString(state?.updated_at) ?? optionalString(rec.created_at);
+						const lastActivityMs = stamp ? Date.parse(stamp) : 0;
+						out.push({
+							sessionId: sid,
+							ephemeral: true,
+							hasActiveTurn: activeTurn !== null,
+							lastActivityMs: Number.isFinite(lastActivityMs) ? lastActivityMs : 0,
+						});
+					} catch {
+						// A single corrupt session/state file must not abort the whole sweep — skip it.
+					}
+				}
+				return out;
+			},
+			reapSession: async (sid: string): Promise<void> => {
+				await reapSession(sid, { reason: "idle_reaper" });
+			},
+			now: () => Date.now(),
+		},
+		{ idleTtlMs: config.sessionIdleTtlMs, sweepIntervalMs: config.sessionSweepIntervalMs },
+	);
 	async function compensateFailedOwnerStart(
 		session: Record<string, unknown>,
 		ownerTransaction: {
@@ -4024,6 +4162,9 @@ export function createCoordinatorMcpServer(options: CoordinatorMcpServerOptions 
 						commit?: () => void;
 						rollback?: () => Promise<"cleaned" | "failed" | "unverifiable">;
 					} | null;
+					// Delegate-created sessions are ephemeral: the idle reaper may reclaim them once
+					// idle past the TTL with no active turn. User-registered sessions are never flagged.
+					session.ephemeral = true;
 					try {
 						if (mpresetResolution.mpreset) session.mpreset = mpresetResolution.mpreset;
 						await writeJsonFile(sessionFile(session.session_id), session);
@@ -4133,6 +4274,28 @@ export function createCoordinatorMcpServer(options: CoordinatorMcpServerOptions 
 					}
 				}
 				return base;
+			}
+			if (name === "skc_coordinator_stop_session") {
+				requireCoordinatorMutation(config, "sessions", args);
+				const sessionId = safeExternalId("session", args.session_id);
+				const forceRequested = args.force === true;
+				// force is a capability distinct from allow_mutation: reaping a non-ephemeral
+				// (user-registered) session requires SKC_COORDINATOR_MCP_FORCE_STOP to be enabled.
+				if (forceRequested && !config.forceStopEnabled) {
+					return { ok: false, reason: "force_not_authorized", session_id: sessionId, killed: false };
+				}
+				const result = await reapSession(sessionId, {
+					force: forceRequested,
+					reason: optionalString(args.reason) ?? "stop_session",
+				});
+				return {
+					ok: result.ok,
+					session_id: sessionId,
+					killed: result.killed,
+					...(result.reason ? { reason: result.reason } : {}),
+					...(result.active_turn_id ? { active_turn_id: result.active_turn_id } : {}),
+					...(result.detail ? { detail: result.detail } : {}),
+				};
 			}
 			if (name === "skc_coordinator_start_session") {
 				requireCoordinatorMutation(config, "sessions", args);
@@ -4592,7 +4755,7 @@ export function createCoordinatorMcpServer(options: CoordinatorMcpServerOptions 
 		};
 	}
 
-	return { config, callTool, handleJsonRpc, handle: handleJsonRpc };
+	return { config, callTool, handleJsonRpc, handle: handleJsonRpc, reapSession, sessionReaper };
 }
 
 function legacyToolResult(payload: unknown): {
@@ -4678,11 +4841,10 @@ export interface PumpCoordinatorOptions {
  *    answerable even while data handlers saturate.
  *  - Data handlers are capped at `maxDataConcurrency`; excess is queued up to
  *    `maxQueueDepth`, then rejected as `server_busy` (bounded memory / fanout).
- *  - `writeLine` failures move the writer to a terminal closed state instead of
- *    poisoning the serialized write chain or escaping as an unhandled rejection;
- *    no writes happen after close.
- *  - On EOF the pump drains in-flight handlers (bounded by `drainTimeoutMs`) and
- *    flushes queued writes before returning, so shutdown never races live work.
+ *  - A coded local `EPIPE` terminalizes writer and dispatch together; other
+ *    writer faults reject the pump without poisoning the serialized write chain.
+ *  - On EOF or a closed peer the pump drains already-running handlers (bounded
+ *    by `drainTimeoutMs`) and never promotes queued work.
  *  - Byte chunks are decoded with a streaming decoder so multibyte characters
  *    split across chunks are not corrupted.
  */
@@ -4694,45 +4856,81 @@ export async function pumpCoordinatorMcpStream(
 ): Promise<void> {
 	const maxDataConcurrency = Math.max(1, options.maxDataConcurrency ?? 32);
 	const maxQueueDepth = Math.max(0, options.maxQueueDepth ?? 256);
-	const drainTimeoutMs = Math.max(0, options.drainTimeoutMs ?? 30_000);
+	const drainTimeoutMs = Math.max(1, options.drainTimeoutMs ?? 30_000);
 
-	let writeClosed = false;
+	let writerState: "open" | "terminalizing" | "closed" = "open";
 	let draining = false;
 	let writeChain: Promise<void> = Promise.resolve();
 	const inFlight = new Set<Promise<void>>();
 	let activeData = 0;
 	const dataQueue: JsonRpcRequest[] = [];
+	const peerClosed = Promise.withResolvers<void>();
+	const writerFailure = Promise.withResolvers<never>();
+	void writerFailure.promise.catch(() => {});
+	const inputIterator = input[Symbol.asyncIterator]();
+	let inputDetached = false;
+	let fatalWriterFailure: { value: unknown } | undefined;
 
-	const emit = (response: JsonRpcResponse): void => {
+	const detachInput = (): void => {
+		if (inputDetached) return;
+		inputDetached = true;
+		const detached = inputIterator.return?.();
+		if (detached) void detached.catch(() => {});
+	};
+	const terminalizePeer = (): void => {
+		if (writerState !== "open") return;
+		writerState = "terminalizing";
+		draining = true;
+		dataQueue.length = 0;
+		detachInput();
+		peerClosed.resolve();
+	};
+	const failWriter = (failure: unknown): void => {
+		if (writerState === "closed") return;
+		writerState = "closed";
+		draining = true;
+		dataQueue.length = 0;
+		detachInput();
+		fatalWriterFailure = { value: failure };
+
+		writerFailure.reject(failure);
+	};
+	const isExpectedPeerClosure = (failure: unknown): boolean =>
+		isKnownSinkPeerClosedError(failure) && sinkErrorCode(failure) === "EPIPE";
+
+	const emit = (response: JsonRpcResponse): Promise<void> => {
 		writeChain = writeChain.then(async () => {
-			if (writeClosed) return;
+			if (writerState !== "open") return;
 			try {
 				await writeLine(`${JSON.stringify(response)}\n`);
-			} catch {
-				writeClosed = true; // terminal writer error: stop, but never poison the chain
+			} catch (failure) {
+				if (isExpectedPeerClosure(failure)) terminalizePeer();
+				else failWriter(failure);
 			}
 		});
+		return writeChain;
 	};
 
 	const launch = (request: JsonRpcRequest, control: boolean): void => {
 		const task = (async () => {
+			let response: JsonRpcResponse;
 			try {
-				emit(await handleJsonRpc(request));
-			} catch (err) {
-				emit({
+				response = await handleJsonRpc(request);
+			} catch (failure) {
+				response = {
 					jsonrpc: "2.0",
 					id: request.id ?? null,
-					error: { code: -32603, message: publicCoordinatorError(err) },
-				});
-			} finally {
-				if (!control) {
-					activeData -= 1;
-					if (!draining) {
-						const next = dataQueue.shift();
-						if (next) {
-							activeData += 1;
-							launch(next, false);
-						}
+					error: { code: -32603, message: publicCoordinatorError(failure) },
+				};
+			}
+			await emit(response);
+			if (!control) {
+				activeData -= 1;
+				if (!draining && writerState === "open") {
+					const next = dataQueue.shift();
+					if (next) {
+						activeData += 1;
+						launch(next, false);
 					}
 				}
 			}
@@ -4742,6 +4940,7 @@ export async function pumpCoordinatorMcpStream(
 	};
 
 	const dispatch = (request: JsonRpcRequest): void => {
+		if (writerState !== "open") return;
 		// Notifications (no id) get no response; the coordinator has no side-effecting ones.
 		if (request.id === undefined || request.id === null) return;
 		if (request.method === "ping") {
@@ -4757,61 +4956,90 @@ export async function pumpCoordinatorMcpStream(
 			dataQueue.push(request);
 			return;
 		}
-		emit({
+		void emit({
 			jsonrpc: "2.0",
 			id: request.id,
 			error: { code: -32000, message: "server_busy: coordinator request queue is full" },
 		});
 	};
 
+	const drainInFlightAndWrites = async (): Promise<void> => {
+		let timer: NodeJS.Timeout | undefined;
+		const timeout = new Promise<"timed_out">(resolve => {
+			timer = setTimeout(() => resolve("timed_out"), drainTimeoutMs);
+			(timer as { unref?: () => void }).unref?.();
+		});
+		const drain = async (): Promise<"drained"> => {
+			while (true) {
+				if (inFlight.size > 0) await Promise.allSettled([...inFlight]);
+				const writes = writeChain;
+				await writes;
+				if (inFlight.size === 0 && writes === writeChain) return "drained";
+			}
+		};
+		try {
+			if ((await Promise.race([drain(), timeout])) === "timed_out") {
+				writerState = "closed";
+				draining = true;
+				dataQueue.length = 0;
+				detachInput();
+			}
+		} finally {
+			if (timer) clearTimeout(timer);
+		}
+	};
+
 	const decoder = new TextDecoder();
 	let buffer = "";
-	for await (const chunk of input) {
-		buffer += typeof chunk === "string" ? chunk : decoder.decode(chunk, { stream: true });
-		let newline = buffer.indexOf("\n");
-		while (newline >= 0) {
-			const line = buffer.slice(0, newline).trim();
-			buffer = buffer.slice(newline + 1);
-			if (line.length > 0) {
-				let request: JsonRpcRequest | null = null;
-				try {
-					request = JSON.parse(line) as JsonRpcRequest;
-				} catch {
-					request = null; // ignore malformed frames rather than crashing the loop
+	let inputFailure: unknown;
+	try {
+		while (writerState === "open") {
+			const next = await Promise.race([inputIterator.next(), peerClosed.promise, writerFailure.promise]);
+			if (!next || next.done) break;
+			buffer += typeof next.value === "string" ? next.value : decoder.decode(next.value, { stream: true });
+			let newline = buffer.indexOf("\n");
+			while (newline >= 0 && writerState === "open") {
+				const line = buffer.slice(0, newline).trim();
+				buffer = buffer.slice(newline + 1);
+				if (line.length > 0) {
+					let request: JsonRpcRequest | null = null;
+					try {
+						request = JSON.parse(line) as JsonRpcRequest;
+					} catch {
+						request = null; // ignore malformed frames rather than crashing the loop
+					}
+					if (request) dispatch(request);
 				}
-				if (request) dispatch(request);
+				newline = buffer.indexOf("\n");
 			}
-			newline = buffer.indexOf("\n");
 		}
+	} catch (failure) {
+		inputFailure = failure;
 	}
 
-	// EOF: stop promoting queued work, then drain in-flight handlers under a bound.
+	// Input EOF or a closed peer stops promotion. One deadline bounds both the
+	// active handlers and the serialized writes they have already queued.
 	draining = true;
-	if (inFlight.size > 0) {
-		const drain = Promise.allSettled(Array.from(inFlight)).then(() => undefined);
-		if (drainTimeoutMs > 0) {
-			let timer: ReturnType<typeof setTimeout> | undefined;
-			const timeout = new Promise<void>(resolve => {
-				timer = setTimeout(resolve, drainTimeoutMs);
-				(timer as { unref?: () => void }).unref?.();
-			});
-			await Promise.race([drain, timeout]);
-			if (timer) clearTimeout(timer);
-		} else {
-			await drain;
-		}
-	}
-	await writeChain;
+	dataQueue.length = 0;
+	await drainInFlightAndWrites();
+	if (fatalWriterFailure) throw fatalWriterFailure.value;
+	if (inputFailure !== undefined) throw inputFailure;
+	writerState = "closed";
 }
 
 export async function runCoordinatorMcpStdio(options: CoordinatorMcpServerOptions = {}): Promise<void> {
 	const server = createCoordinatorMcpServer(options);
-	await pumpCoordinatorMcpStream(
-		request => server.handleJsonRpc(request),
-		process.stdin,
-		line =>
-			new Promise<void>((resolve, reject) => {
-				process.stdout.write(line, err => (err ? reject(err) : resolve()));
-			}),
-	);
+	server.sessionReaper.start(); // background idle-reap of ephemeral delegate sessions
+	try {
+		await pumpCoordinatorMcpStream(
+			request => server.handleJsonRpc(request),
+			process.stdin,
+			line =>
+				new Promise<void>((resolve, reject) => {
+					process.stdout.write(line, err => (err ? reject(err) : resolve()));
+				}),
+		);
+	} finally {
+		server.sessionReaper.stop();
+	}
 }

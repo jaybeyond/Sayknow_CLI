@@ -4,7 +4,7 @@
  * Commands are sent as JSON lines on stdin.
  * Responses and events are emitted as JSON lines on stdout.
  */
-import type { AgentMessage, AgentToolResult, ThinkingLevel } from "@sayknow-cli/agent-core";
+import type { AgentMessage, AgentToolResult, ResolvedThinkingLevel, ThinkingLevel } from "@sayknow-cli/agent-core";
 import type { CompactionResult } from "@sayknow-cli/agent-core/compaction";
 import type { Effort, ImageContent, Model } from "@sayknow-cli/ai";
 import type { BashResult } from "../../exec/bash-executor";
@@ -38,6 +38,13 @@ export type RpcCommand =
 
 	// Model
 	| { id?: string; type: "set_model"; provider: string; modelId: string }
+	| {
+			id?: string;
+			type: "set_default_model_selection";
+			provider: string;
+			modelId: string;
+			thinkingLevel?: ResolvedThinkingLevel;
+	  }
 	| { id?: string; type: "cycle_model" }
 	| { id?: string; type: "get_available_models" }
 
@@ -157,6 +164,13 @@ export type RpcResponse =
 			command: "set_model";
 			success: true;
 			data: Model;
+	  }
+	| {
+			id?: string;
+			type: "response";
+			command: "set_default_model_selection";
+			success: true;
+			data: { provider: string; modelId: string; thinkingLevel: ResolvedThinkingLevel };
 	  }
 	| {
 			id?: string;

@@ -17,7 +17,7 @@
  	},
  };
  
-@@ -152,7 +153,7 @@
+@@ -156,7 +157,7 @@
  			break;
  	}
  
@@ -26,7 +26,7 @@
  	const showUsage = ctx.session.settings.get("goal.statusInFooter") === true;
  	if (showUsage && goal) {
  		parts.push(formatGoalUsage(goal.tokensUsed));
-@@ -163,11 +164,11 @@
+@@ -167,11 +168,11 @@
  const modeSegment: StatusLineSegment = {
  	id: "mode",
  	render(ctx) {
@@ -40,7 +40,7 @@
  			const content = withIcon(theme.icon.plan, label);
  			const color = plan.paused ? "warning" : "accent";
  			return { content: theme.fg(color, content), visible: true };
-@@ -390,6 +391,20 @@
+@@ -397,6 +398,20 @@
  		const content = withIcon(theme.icon.context, theme.fg(color, text));
  
  		return { content, visible: true };
@@ -52,7 +52,7 @@
 +	render(ctx) {
 +		const pct = ctx.contextPercent;
 +		const window = ctx.contextWindow;
-+		if (!window) return { content: "", visible: false };
++		if (!window || pct === null) return { content: "", visible: false };
 +		const width = 10;
 +		const filled = Math.min(width, Math.max(0, Math.round((pct / 100) * width)));
 +		const bar = "█".repeat(filled) + "░".repeat(width - filled);
@@ -61,7 +61,7 @@
  	},
  };
  
-@@ -562,6 +577,7 @@
+@@ -569,6 +584,7 @@
  	token_total: tokenTotalSegment,
  	token_rate: tokenRateSegment,
  	cost: costSegment,

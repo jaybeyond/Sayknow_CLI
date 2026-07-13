@@ -273,11 +273,13 @@ export interface ExtensionUIContext {
 // ============================================================================
 
 export interface ContextUsage {
-	/** Estimated context tokens, or null if unknown (e.g. right after compaction, before next LLM response). */
+	/** Context tokens, or null if unknown (e.g. right after compaction, before next LLM response). */
 	tokens: number | null;
 	contextWindow: number;
 	/** Context usage as percentage of context window, or null if tokens is unknown. */
 	percent: number | null;
+	/** Provenance: "provider_anchor" = anchored on provider-reported usage (+ heuristic trailing delta); "heuristic" = no provider anchor available, full estimate; "unknown" = post-compaction, no post-compaction provider response yet. */
+	source: "provider_anchor" | "heuristic" | "unknown";
 }
 
 export interface CompactOptions {

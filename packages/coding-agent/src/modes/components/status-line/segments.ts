@@ -115,9 +115,13 @@ const modelSegment: StatusLineSegment = {
 		if (opts.showContextPercent !== false && ctx.contextPctSegmentActive !== true) {
 			const pct = ctx.contextPercent;
 			const window = ctx.contextWindow;
-			if (window > 0 && Number.isFinite(pct)) {
-				const color = getContextUsageThemeColor(getContextUsageLevel(pct, window));
-				content += `${theme.sep.dot}${theme.fg(color, `${pct.toFixed(1)}%`)}`;
+			if (window > 0) {
+				if (typeof pct === "number" && Number.isFinite(pct)) {
+					const color = getContextUsageThemeColor(getContextUsageLevel(pct, window));
+					content += `${theme.sep.dot}${theme.fg(color, `${pct.toFixed(1)}%`)}`;
+				} else {
+					content += `${theme.sep.dot}${theme.fg("statusLineContext", "?")}`;
+				}
 			}
 		}
 
@@ -383,11 +387,14 @@ const contextPctSegment: StatusLineSegment = {
 	render(ctx) {
 		const pct = ctx.contextPercent;
 		const window = ctx.contextWindow;
+		const knownPct = typeof pct === "number" && Number.isFinite(pct) ? pct : undefined;
 
 		const autoIcon = ctx.autoCompactEnabled && theme.icon.auto ? ` ${theme.icon.auto}` : "";
-		const text = `${pct.toFixed(1)}%/${formatNumber(window)}${autoIcon}`;
-
-		const color = getContextUsageThemeColor(getContextUsageLevel(pct, window));
+		const text = `${knownPct === undefined ? "?" : `${knownPct.toFixed(1)}%`}/${formatNumber(window)}${autoIcon}`;
+		const color =
+			knownPct === undefined
+				? "statusLineContext"
+				: getContextUsageThemeColor(getContextUsageLevel(knownPct, window));
 		const content = withIcon(theme.icon.context, theme.fg(color, text));
 
 		return { content, visible: true };
@@ -399,7 +406,7 @@ const contextBarSegment: StatusLineSegment = {
 	render(ctx) {
 		const pct = ctx.contextPercent;
 		const window = ctx.contextWindow;
-		if (!window) return { content: "", visible: false };
+		if (!window || pct === null) return { content: "", visible: false };
 		const width = 10;
 		const filled = Math.min(width, Math.max(0, Math.round((pct / 100) * width)));
 		const bar = "█".repeat(filled) + "░".repeat(width - filled);

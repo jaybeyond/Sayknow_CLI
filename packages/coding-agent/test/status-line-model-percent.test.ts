@@ -65,6 +65,15 @@ describe("model segment inline context percentage", () => {
 		expect(rendered).toContain("Sonnet");
 	});
 
+	it("renders an unknown provider context snapshot as a question mark", () => {
+		const ctx = makeCtx({ contextPercent: null, contextWindow: 200_000 });
+		const model = Bun.stripANSI(renderSegment("model", ctx).content);
+		const contextPct = Bun.stripANSI(renderSegment("context_pct", ctx).content);
+
+		expect(model).toContain("?");
+		expect(contextPct).toContain("?/200K");
+	});
+
 	it("can be disabled with segmentOptions.model.showContextPercent: false", () => {
 		const ctx = makeCtx({
 			contextPercent: 42.5,

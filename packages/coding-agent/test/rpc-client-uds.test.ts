@@ -3,12 +3,13 @@ import { mkdir, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import * as net from "node:net";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
-import type { AgentEvent } from "@sayknow-cli/agent-core";
+import { type AgentEvent, ThinkingLevel } from "@sayknow-cli/agent-core";
 import {
 	defineRpcClientTool,
 	RpcClient,
 	type RpcSessionEventListener,
 } from "@sayknow-cli/coding-agent/modes/rpc/rpc-client";
+import { YAML } from "bun";
 import { AGENT_WIRE_EVENT_TYPES } from "../src/modes/shared/agent-wire/event-contract";
 import { AgentWireFrameSequencer, toAgentWireEventFrame } from "../src/modes/shared/agent-wire/event-envelope";
 import type { AgentSessionEvent } from "../src/session/agent-session";
@@ -31,6 +32,26 @@ const fixtureModelsYaml = `providers:
           output: 0
           cacheRead: 0
           cacheWrite: 0
+`;
+
+const defaultSelectionModelsYaml = `providers:
+  rpc-test:
+    auth: none
+    api: openai-responses
+    baseUrl: http://127.0.0.1:9/v1
+    models:
+      - id: rpc-test-a
+        contextWindow: 100000
+        maxTokens: 4096
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
+      - id: rpc-test-b
+        contextWindow: 100000
+        maxTokens: 4096
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
+      - id: rpc-test-c
+        contextWindow: 100000
+        maxTokens: 4096
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
 `;
 
 let workspace: string;
@@ -94,6 +115,64 @@ function spawnRpc(socketPath: string) {
 }
 
 describe("RpcClient UDS transport", () => {
+	test("sets a durable default model through the real UDS server", async () => {
+		await writeFile(path.join(agentDir, "models.yml"), defaultSelectionModelsYaml);
+		const socketPath = path.join(workspace, "rpc-client-default-selection.sock");
+		const proc = Bun.spawn(
+			[
+				"bun",
+				cliEntry,
+				"--mode",
+				"rpc",
+				"--provider",
+				"rpc-test",
+				"--model",
+				"rpc-test-a",
+				"--session-dir",
+				path.join(workspace, "default-selection-sessions"),
+				"--listen",
+				socketPath,
+			],
+			{
+				cwd: workspace,
+				env: { ...cliEnv.env, SKC_HARNESS_STATE_ROOT: workspace, NO_COLOR: "1", PI_NOTIFICATIONS: "off" },
+				stdin: "ignore",
+				stdout: "pipe",
+				stderr: "pipe",
+			},
+		);
+		const stderrText = new Response(proc.stderr).text();
+		const client = new RpcClient({ transport: "uds", socketPath });
+		try {
+			await waitForSocket(socketPath);
+			await client.start();
+			expect((await client.getState()).model).toMatchObject({ provider: "rpc-test", id: "rpc-test-a" });
+
+			const selection = await client.setDefaultModelSelection("rpc-test", "rpc-test-b", ThinkingLevel.Off);
+
+			expect(selection).toEqual({
+				provider: "rpc-test",
+				modelId: "rpc-test-b",
+				thinkingLevel: ThinkingLevel.Off,
+			});
+			expect(YAML.parse(await Bun.file(path.join(agentDir, "config.yml")).text())).toMatchObject({
+				modelRoles: { default: "rpc-test/rpc-test-b:off" },
+			});
+			expect(await client.getState()).toMatchObject({
+				model: { provider: "rpc-test", id: "rpc-test-b" },
+				thinkingLevel: ThinkingLevel.Off,
+			});
+		} finally {
+			client.stop();
+			proc.kill();
+			await proc.exited;
+			expect(Bun.spawnSync(["kill", "-0", String(proc.pid)]).exitCode).not.toBe(0);
+			expect(await Bun.file(socketPath).exists()).toBe(false);
+			expect((await stderrText).trim()).toBe("");
+			await rm(workspace, { recursive: true, force: true });
+		}
+	}, 45_000);
+
 	test("connects to rpc-mode UDS, correlates requests, checks pending-gate replay API, and leaves server alive on close", async () => {
 		const socketPath = path.join(workspace, "rpc.sock");
 		const proc = spawnRpc(socketPath);

@@ -13,6 +13,7 @@ export const BRIDGE_CLIENT_COMMAND_TYPES = [
 	"set_capabilities",
 	"workflow_gate_response",
 	"set_model",
+	"set_default_model_selection",
 	"cycle_model",
 	"get_available_models",
 	"set_thinking_level",

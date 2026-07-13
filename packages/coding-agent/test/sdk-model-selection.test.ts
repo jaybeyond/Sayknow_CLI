@@ -4,7 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { Effort, getBundledModel, type Model } from "@sayknow-cli/ai";
 import { ModelRegistry } from "@sayknow-cli/coding-agent/config/model-registry";
-import { Settings } from "@sayknow-cli/coding-agent/config/settings";
+import { resetSettingsForTest, Settings } from "@sayknow-cli/coding-agent/config/settings";
 import { createAgentSession } from "@sayknow-cli/coding-agent/sdk";
 import { AuthStorage } from "@sayknow-cli/coding-agent/session/auth-storage";
 import { SessionManager } from "@sayknow-cli/coding-agent/session/session-manager";
@@ -18,6 +18,7 @@ describe("createAgentSession deferred model pattern resolution", () => {
 	let modelRegistry: ModelRegistry;
 
 	beforeEach(async () => {
+		resetSettingsForTest();
 		tempDir = path.join(os.tmpdir(), `pi-sdk-model-selection-${Snowflake.next()}`);
 		fs.mkdirSync(tempDir, { recursive: true });
 		authStorage = await AuthStorage.create(path.join(tempDir, "testauth.db"));
@@ -26,6 +27,7 @@ describe("createAgentSession deferred model pattern resolution", () => {
 	});
 
 	afterEach(() => {
+		resetSettingsForTest();
 		authStorage?.close();
 		if (tempDir && fs.existsSync(tempDir)) {
 			fs.rmSync(tempDir, { recursive: true, force: true });
@@ -62,15 +64,45 @@ describe("createAgentSession deferred model pattern resolution", () => {
 						defaultLevel: Effort.Low,
 					},
 				},
+				{
+					id: "runtime-global-b",
+					name: "Runtime Global B",
+					reasoning: true,
+					input: ["text"],
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+					contextWindow: 128000,
+					maxTokens: 8192,
+					thinking: {
+						minLevel: Effort.Minimal,
+						maxLevel: Effort.High,
+						mode: "effort",
+						defaultLevel: Effort.Low,
+					},
+				},
+				{
+					id: "runtime-policy-c",
+					name: "Runtime Policy C",
+					reasoning: true,
+					input: ["text"],
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+					contextWindow: 128000,
+					maxTokens: 8192,
+					thinking: {
+						minLevel: Effort.Minimal,
+						maxLevel: Effort.High,
+						mode: "effort",
+						defaultLevel: Effort.Low,
+					},
+				},
 			],
 		});
 	}
 
-	function buildSessionOptions(modelPattern: string) {
+	function buildSessionOptions(modelPattern?: string, sessionManager: SessionManager = SessionManager.inMemory()) {
 		return {
 			cwd: tempDir,
 			agentDir: tempDir,
-			sessionManager: SessionManager.inMemory(),
+			sessionManager,
 			disableExtensionDiscovery: true,
 			extensions: [],
 			skills: [],
@@ -86,6 +118,74 @@ describe("createAgentSession deferred model pattern resolution", () => {
 			modelPattern,
 		};
 	}
+
+	test("uses the machine-global default selector and its effective suffix for a fresh session", async () => {
+		// Given a durable machine-global B selector
+		await Bun.write(
+			path.join(tempDir, "config.yml"),
+			"modelRoles:\n  default: runtime-provider/runtime-global-b:high\n",
+		);
+		const settings = await Settings.init({ cwd: tempDir, agentDir: tempDir });
+
+		// When a fresh session starts without an explicit model
+		const { session } = await createAgentSession({ ...buildSessionOptions(), settings });
+
+		// Then it consumes both the global model and effective thinking suffix
+		expect(settings.getGlobal("modelRoles")).toEqual({
+			default: "runtime-provider/runtime-global-b:high",
+		});
+		expect(session.model?.id).toBe("runtime-global-b");
+		expect(session.thinkingLevel).toBe(Effort.High);
+		await session.dispose();
+	});
+
+	test("uses project default role C instead of machine-global B for a fresh session", async () => {
+		// Given global B and a project-scoped C override
+		await Bun.write(
+			path.join(tempDir, "config.yml"),
+			"modelRoles:\n  default: runtime-provider/runtime-global-b:high\n",
+		);
+		await Bun.write(
+			path.join(tempDir, ".skc", "config.yml"),
+			"modelRoles:\n  default: runtime-provider/runtime-policy-c:low\n",
+		);
+		const settings = await Settings.init({ cwd: tempDir, agentDir: tempDir });
+
+		// When a fresh project session starts without an explicit model
+		const { session } = await createAgentSession({ ...buildSessionOptions(), settings });
+
+		// Then project C and its suffix outrank global B
+		expect(settings.getGlobal("modelRoles")).toEqual({
+			default: "runtime-provider/runtime-global-b:high",
+		});
+		expect(settings.getModelRole("default")).toBe("runtime-provider/runtime-policy-c:low");
+		expect(session.model?.id).toBe("runtime-policy-c");
+		expect(session.thinkingLevel).toBe(Effort.Low);
+		await session.dispose();
+	});
+
+	test("restores resumed transcript C instead of machine-global B", async () => {
+		// Given global B and a resumed transcript that records C with medium thinking
+		await Bun.write(
+			path.join(tempDir, "config.yml"),
+			"modelRoles:\n  default: runtime-provider/runtime-global-b:high\n",
+		);
+		const settings = await Settings.init({ cwd: tempDir, agentDir: tempDir });
+		const sessionManager = SessionManager.inMemory(tempDir);
+		sessionManager.appendModelChange("runtime-provider/runtime-policy-c", "default");
+		sessionManager.appendThinkingLevelChange(Effort.Medium);
+
+		// When the recorded transcript resumes without an explicit model
+		const { session } = await createAgentSession({ ...buildSessionOptions(undefined, sessionManager), settings });
+
+		// Then transcript C and its recorded thinking level outrank global B
+		expect(settings.getGlobal("modelRoles")).toEqual({
+			default: "runtime-provider/runtime-global-b:high",
+		});
+		expect(session.model?.id).toBe("runtime-policy-c");
+		expect(session.thinkingLevel).toBe(Effort.Medium);
+		await session.dispose();
+	});
 
 	test("resolves explicit modelPattern after runtime providers are available", async () => {
 		const { session, modelFallbackMessage } = await createAgentSession(

@@ -296,6 +296,7 @@ export class Agent {
 		pendingToolCalls: new Set<string>(),
 		error: undefined,
 	};
+	#contextRevision = 0;
 
 	#listeners = new Set<(e: AgentEvent) => void>();
 	#abortController?: AbortController;
@@ -640,6 +641,10 @@ export class Agent {
 		return this.#state;
 	}
 
+	get contextRevision(): number {
+		return this.#contextRevision;
+	}
+
 	get appendOnlyContext(): AppendOnlyContextManager | undefined {
 		return this.#appendOnlyContext;
 	}
@@ -822,10 +827,12 @@ export class Agent {
 	// State mutators
 	setSystemPrompt(v: string[]) {
 		this.#state.systemPrompt = v;
+		this.#contextRevision++;
 	}
 
 	setModel(m: Model) {
 		this.#state.model = m;
+		this.#contextRevision++;
 	}
 
 	setThinkingLevel(l: Effort | undefined) {
@@ -858,10 +865,12 @@ export class Agent {
 
 	setTools(t: AgentTool<any>[]) {
 		this.#state.tools = t;
+		this.#contextRevision++;
 	}
 
 	replaceMessages(ms: AgentMessage[]) {
 		this.#state.messages = ms.slice();
+		this.#contextRevision++;
 	}
 
 	appendMessage(m: AgentMessage) {
@@ -869,18 +878,28 @@ export class Agent {
 		// N is O(N+M), not O(M*N). Consumers read state.messages fresh; run() snapshots
 		// via slice() at the API boundary, so no caller relies on per-append array identity.
 		this.#state.messages.push(m);
+		this.#contextRevision++;
 	}
 
 	popMessage(): AgentMessage | undefined {
 		const messages = this.#state.messages.slice(0, -1);
 		const removed = this.#state.messages.at(-1);
 		this.#state.messages = messages;
+		this.#contextRevision++;
 
 		if (removed && this.#state.streamMessage === removed) {
 			this.#state.streamMessage = null;
 		}
 
 		return removed;
+	}
+
+	/**
+	 * For callers that mutate committed messages or the system prompt in place
+	 * outside Agent-owned mutators.
+	 */
+	touchContext(): void {
+		this.#contextRevision++;
 	}
 
 	/**
@@ -1056,6 +1075,7 @@ export class Agent {
 
 	clearMessages() {
 		this.#state.messages = [];
+		this.#contextRevision++;
 	}
 
 	abort() {
@@ -1094,6 +1114,7 @@ export class Agent {
 
 	reset() {
 		this.#state.messages = [];
+		this.#contextRevision++;
 		this.#state.isStreaming = false;
 		this.#state.streamMessage = null;
 		this.#state.pendingToolCalls = new Set<string>();

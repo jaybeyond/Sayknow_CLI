@@ -9,7 +9,14 @@ import { getKeybindings } from "./keybindings";
 import { isKeyRelease } from "./keys";
 import { renderMetrics } from "./metrics";
 import type { Terminal } from "./terminal";
-import { ImageProtocol, setCellDimensions, setTerminalImageProtocol, TERMINAL } from "./terminal-capabilities";
+import {
+	ImageProtocol,
+	isImageProtocolForced,
+	isUnderTerminalMultiplexer,
+	setCellDimensions,
+	setTerminalImageProtocol,
+	TERMINAL,
+} from "./terminal-capabilities";
 import {
 	Ellipsis,
 	extractSegments,
@@ -217,7 +224,6 @@ function isTermuxSession(env: Record<string, string | undefined> = Bun.env): boo
 	return Boolean(env.TERMUX_VERSION);
 }
 
-const SKC_TMUX_LAUNCHED_ENV = "SKC_TMUX_LAUNCHED";
 const DISABLED_ENV_VALUES = new Set(["0", "false", "off", "no"]);
 const TRUTHY_ENV_VALUES = new Set(["1", "true", "yes", "on", "y"]);
 
@@ -231,25 +237,38 @@ function envFlagEnabled(value: string | undefined): boolean {
 	return normalized !== undefined && TRUTHY_ENV_VALUES.has(normalized);
 }
 
-function termLooksMultiplexed(value: string | undefined): boolean {
-	const term = value?.trim().toLowerCase() ?? "";
-	return term.startsWith("tmux") || term.startsWith("screen");
-}
-
 function isWindowsTerminalSession(env: Record<string, string | undefined> = Bun.env): boolean {
 	return envIsEnabled(env.WT_SESSION) || env.TERM_PROGRAM === "Windows_Terminal";
 }
 
-/** Detect terminal multiplexers where scrollback clearing and height-change redraws are hostile. */
+/**
+ * Detect terminal multiplexers where scrollback clearing and height-change
+ * redraws are hostile. Delegates to the shared capability predicate so the
+ * renderer and graphics-protocol selection agree on what counts as a
+ * multiplexed host.
+ */
 function isMultiplexerSession(env: Record<string, string | undefined> = Bun.env): boolean {
-	return Boolean(
-		envIsEnabled(env.TMUX) ||
-			envIsEnabled(env.TMUX_PANE) ||
-			envIsEnabled(env.STY) ||
-			envIsEnabled(env.ZELLIJ) ||
-			envIsEnabled(env[SKC_TMUX_LAUNCHED_ENV]) ||
-			termLooksMultiplexed(env.TERM),
-	);
+	return isUnderTerminalMultiplexer(env as NodeJS.ProcessEnv);
+}
+
+/**
+ * Startup sixel capability probe policy (pure; exported for tests):
+ * - Never probe when PI_FORCE_IMAGE_PROTOCOL is set — an explicit
+ *   configuration (including "off") is authoritative.
+ * - Never probe inside a terminal multiplexer: tmux advertises DA1 ";4"
+ *   whenever it was compiled with sixel support, regardless of whether the
+ *   attached client terminal can render sixel, so a positive reply is not
+ *   end-to-end evidence. Graphics under a multiplexer are strictly opt-in
+ *   via PI_FORCE_IMAGE_PROTOCOL=sixel.
+ * - Probe Windows Terminal (>=1.22 renders sixel but exposes no env marker).
+ */
+export function shouldProbeSixelCapability(
+	env: NodeJS.ProcessEnv = Bun.env,
+	platform: NodeJS.Platform = process.platform,
+): boolean {
+	if (isImageProtocolForced()) return false;
+	if (isUnderTerminalMultiplexer(env)) return false;
+	return platform === "win32" && Boolean(env.WT_SESSION?.trim());
 }
 
 function useLegacyMultiplexerFullRender(env: Record<string, string | undefined> = Bun.env): boolean {
@@ -1008,8 +1027,7 @@ export class TUI extends Container {
 
 	#querySixelSupport(): void {
 		if (TERMINAL.imageProtocol) return;
-		if (process.platform !== "win32") return;
-		if (!Bun.env.WT_SESSION) return;
+		if (!this.#isSixelProbeCandidate()) return;
 		if (!process.stdin.isTTY || !process.stdout.isTTY) return;
 
 		this.#clearSixelProbeState();
@@ -1021,6 +1039,10 @@ export class TUI extends Container {
 		this.#sixelProbeTimeout = setTimeout(() => {
 			this.#finishSixelProbe(false);
 		}, 250);
+	}
+
+	#isSixelProbeCandidate(): boolean {
+		return shouldProbeSixelCapability();
 	}
 
 	#handleSixelProbeInput(data: string): InputListenerResult {
@@ -1049,11 +1071,15 @@ export class TUI extends Container {
 
 			if (useDa && this.#sixelProbePendingDa) {
 				this.#sixelProbePendingDa = false;
-				const attributes = (match[1] ?? "")
+				const params = (match[1] ?? "")
 					.split(";")
 					.map(value => Number.parseInt(value, 10))
 					.filter(value => Number.isFinite(value));
-				const hasSixelAttribute = attributes.includes(4);
+				// The first DA1 parameter is the device/operating class (e.g. 1,
+				// 62, 64), not an extension attribute: `CSI ?4;6c` identifies a
+				// VT132, it does not advertise sixel. Only the parameters after
+				// the class carry attributes like 4 (sixel graphics).
+				const hasSixelAttribute = params.slice(1).includes(4);
 				if (hasSixelAttribute) {
 					this.#sixelProbePendingGraphics = false;
 					probeOutcome = true;
@@ -1062,8 +1088,11 @@ export class TUI extends Container {
 				}
 			} else if (!useDa && this.#sixelProbePendingGraphics) {
 				this.#sixelProbePendingGraphics = false;
+				// XTSMGRAPHICS reply is `CSI ? 2 ; Ps ; ... S` where Ps=0 means
+				// success and 1/2/3 are errors (tmux answers our unsupported
+				// read with `CSI ?2;3;0S`). Only a success reply proves sixel.
 				const status = Number.parseInt(match[1] ?? "", 10);
-				const supportsSixel = !Number.isNaN(status) && status !== 0;
+				const supportsSixel = status === 0;
 				if (supportsSixel) {
 					this.#sixelProbePendingDa = false;
 					probeOutcome = true;

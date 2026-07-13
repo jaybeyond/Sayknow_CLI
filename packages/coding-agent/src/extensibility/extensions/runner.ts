@@ -484,7 +484,7 @@ export class ExtensionRunner {
 			abort: () => this.#abortFn(),
 			hasPendingMessages: () => this.#hasPendingMessagesFn(),
 			shutdown: () => this.#shutdownHandler(),
-			getSystemPrompt: () => this.#getSystemPromptFn(),
+			getSystemPrompt: () => [...this.#getSystemPromptFn()],
 			hasQueuedMessages: () => this.#hasPendingMessagesFn(), // deprecated alias
 			workflowGate: this.#getWorkflowGateFn(),
 		};

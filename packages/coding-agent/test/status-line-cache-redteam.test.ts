@@ -240,6 +240,7 @@ describe("StatusLineComponent cache red-team coverage", () => {
 		let sessionName = "cache-redteam-session";
 		let jobSnapshot = { running: [] as Array<{ id: string; metadata?: Record<string, unknown> }> };
 		const assistant = { role: "assistant", content: "hello", timestamp: 1_000, usage: { output: 20 } };
+		let contextTokens = 1_000;
 		const session = makeSession({
 			messages: [{ role: "user", content: "hello" }, assistant],
 			state: {
@@ -253,6 +254,12 @@ describe("StatusLineComponent cache red-team coverage", () => {
 			},
 			isStreaming: true,
 			getAsyncJobSnapshot: () => jobSnapshot,
+			getContextUsage: () => ({
+				tokens: contextTokens,
+				contextWindow: 100_000,
+				percent: (contextTokens / 100_000) * 100,
+				source: "heuristic",
+			}),
 		}) as AgentSession & { isStreaming: boolean };
 		const component = makeComponent(session);
 		component.setSessionStartTime(now - 2_000);
@@ -282,8 +289,7 @@ describe("StatusLineComponent cache red-team coverage", () => {
 			await tick();
 		});
 		await expectMutationChanges("usage/context breakdown", () => {
-			session.messages.push({ role: "user", content: "expanded context".repeat(30) } as never);
-			session.state.messages.push({ role: "user", content: "expanded context".repeat(30) } as never);
+			contextTokens = 4_000;
 		});
 		await expectMutationChanges("TPS/streaming", () => {
 			assistant.usage.output = 400;

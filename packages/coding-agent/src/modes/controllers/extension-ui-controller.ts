@@ -579,7 +579,7 @@ export class ExtensionUiController {
 						shutdown: () => {
 							// Signal shutdown request
 						},
-						getSystemPrompt: () => this.ctx.session.systemPrompt,
+						getSystemPrompt: () => [...this.ctx.session.systemPrompt],
 					});
 				} catch (err) {
 					this.showToolError(registeredTool.definition.name, err instanceof Error ? err.message : String(err));

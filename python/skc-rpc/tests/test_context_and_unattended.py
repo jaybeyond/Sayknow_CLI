@@ -19,7 +19,12 @@ class TestContextUsage(unittest.TestCase):
                 "steeringMode": "all",
                 "followUpMode": "all",
                 "interruptMode": "wait",
-                "contextUsage": {"tokens": 1234, "contextWindow": 200000, "percent": 0.6},
+                "contextUsage": {
+                    "tokens": 1234,
+                    "contextWindow": 200000,
+                    "percent": 0.6,
+                    "source": "provider_anchor",
+                },
             }
         )
         self.assertIsInstance(state.context_usage, ContextUsage)
@@ -27,6 +32,7 @@ class TestContextUsage(unittest.TestCase):
         self.assertEqual(state.context_usage.tokens, 1234)
         self.assertEqual(state.context_usage.context_window, 200000)
         self.assertAlmostEqual(state.context_usage.percent, 0.6)
+        self.assertEqual(state.context_usage.source, "provider_anchor")
 
     def test_session_state_context_usage_absent(self) -> None:
         state = parse_session_state({"sessionId": "s1"})
@@ -36,7 +42,12 @@ class TestContextUsage(unittest.TestCase):
         state = parse_session_state(
             {
                 "sessionId": "s1",
-                "contextUsage": {"tokens": None, "contextWindow": 200000, "percent": None},
+                "contextUsage": {
+                    "tokens": None,
+                    "contextWindow": 200000,
+                    "percent": None,
+                    "source": "unknown",
+                },
             }
         )
         self.assertIsInstance(state.context_usage, ContextUsage)
@@ -44,6 +55,31 @@ class TestContextUsage(unittest.TestCase):
         self.assertIsNone(state.context_usage.tokens)
         self.assertEqual(state.context_usage.context_window, 200000)
         self.assertIsNone(state.context_usage.percent)
+        self.assertEqual(state.context_usage.source, "unknown")
+
+    def test_session_state_context_usage_defaults_source_for_older_binaries(self) -> None:
+        state = parse_session_state(
+            {
+                "sessionId": "s1",
+                "contextUsage": {"tokens": 1234, "contextWindow": 200000, "percent": 0.6},
+            }
+        )
+        assert state.context_usage is not None
+        self.assertEqual(state.context_usage.source, "heuristic")
+
+    def test_session_state_rejects_invalid_context_usage_source(self) -> None:
+        with self.assertRaises(ValueError):
+            parse_session_state(
+                {
+                    "sessionId": "s1",
+                    "contextUsage": {
+                        "tokens": 1234,
+                        "contextWindow": 200000,
+                        "percent": 0.6,
+                        "source": "invalid",
+                    },
+                }
+            )
 
 
 class TestUnattendedAccepted(unittest.TestCase):

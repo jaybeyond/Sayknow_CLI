@@ -45,6 +45,7 @@ const ORDERED_COMMANDS: RpcCommand["type"][] = [
 	"handoff",
 	"login",
 	"set_model",
+	"set_default_model_selection",
 	"cycle_model",
 	"set_todos",
 	"set_session_name",
@@ -78,6 +79,7 @@ describe("RPC fast-lane classification (#606, issue 13)", () => {
 		for (const type of ORDERED_COMMANDS) {
 			expect(isFastLaneRpcCommand(type)).toBe(false);
 		}
+		expect(ORDERED_COMMANDS).toContain("set_default_model_selection");
 	});
 
 	test("the cancellation set is exactly the three abort commands", () => {
@@ -208,6 +210,40 @@ describe("createRpcCommandScheduler ordering behavior", () => {
 		// The setter applies strictly AFTER the earlier queued prompt, so the prompt
 		// runs under the pre-setter mode (arrival-order / causal semantics preserved).
 		expect(order).toEqual(["bash", "prompt", "set_thinking_level"]);
+	});
+
+	test("set_default_model_selection waits behind a blocked mutation while a fast-lane read proceeds", async () => {
+		const order: string[] = [];
+		const predecessor = Promise.withResolvers<void>();
+		const tracked: Promise<void>[] = [];
+		const run = async (command: RpcCommand): Promise<void> => {
+			if (command.type === "set_model") {
+				order.push("set_model:start");
+				await predecessor.promise;
+				order.push("set_model:end");
+				return;
+			}
+			order.push(command.type);
+		};
+		const { dispatch } = createRpcCommandScheduler(run, task => {
+			tracked.push(task);
+		});
+
+		try {
+			dispatch({ type: "set_model", provider: "p", modelId: "before" });
+			dispatch({ type: "set_default_model_selection", provider: "p", modelId: "after" });
+			dispatch({ type: "get_state" });
+			await flushMicrotasks();
+
+			expect(order).toEqual(["get_state", "set_model:start"]);
+
+			predecessor.resolve();
+			await Promise.all(tracked);
+			expect(order).toEqual(["get_state", "set_model:start", "set_model:end", "set_default_model_selection"]);
+		} finally {
+			predecessor.resolve();
+			await Promise.allSettled(tracked);
+		}
 	});
 
 	test("every dispatched task is tracked for shutdown draining", async () => {

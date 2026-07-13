@@ -1,9 +1,10 @@
 --- a/packages/coding-agent/test/sdk-model-selection.test.ts
 +++ b/packages/coding-agent/test/sdk-model-selection.test.ts
-@@ -196,6 +196,47 @@
+@@ -295,7 +295,48 @@
+ 			authStorage.close();
  		}
  	});
- 
++
 +	test("cold start prefers the most-recently-used model over catalog order", async () => {
 +		// Regression: with no configured default role and no session to restore,
 +		// createAgentSession falls back to the available model set. That set comes
@@ -16,7 +17,7 @@
 +			getModelUsageOrder: () => [mru],
 +			recordModelUsage: () => {},
 +		} as unknown as ReturnType<Settings["getStorage"]>);
-+
+ 
 +		const { session } = await createAgentSession({
 +			cwd: tempDir,
 +			agentDir: tempDir,

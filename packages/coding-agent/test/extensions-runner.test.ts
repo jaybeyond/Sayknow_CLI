@@ -713,6 +713,77 @@ describe("ExtensionRunner", () => {
 		});
 	});
 
+	describe("system prompt boundary", () => {
+		it("returns a defensive copy so extension mutation cannot touch the live prompt", async () => {
+			const extCode = `
+				export default function(pi) {
+					pi.on("session_start", async (_event, ctx) => {
+						const prompt = ctx.getSystemPrompt();
+						if (prompt[0] !== "base prompt block") {
+							throw new Error("expected the live prompt content");
+						}
+						prompt[0] = "mutated-by-extension";
+						prompt.push("appended-by-extension");
+					});
+				}
+			`;
+			const explicitExtensionPath = path.join(tempDir.path(), "system-prompt-mutation.ts");
+			fs.writeFileSync(explicitExtensionPath, extCode);
+
+			const livePrompt = ["base prompt block", "second block"];
+			const result = await loadTestExtensions([explicitExtensionPath]);
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+			runner.initialize(
+				{
+					sendMessage: () => {},
+					sendUserMessage: () => {},
+					appendEntry: () => {},
+					setLabel: () => {},
+					getActiveTools: () => [],
+					getAllTools: () => [],
+					setActiveTools: async () => {},
+					getCommands: () => [],
+					setModel: async () => false,
+					getThinkingLevel: () => undefined,
+					setThinkingLevel: () => {},
+					getSessionName: () => sessionManager.getSessionName(),
+					setSessionName: async () => {},
+				},
+				{
+					getModel: () => undefined,
+					isIdle: () => true,
+					abort: () => {},
+					hasPendingMessages: () => false,
+					shutdown: () => {},
+					getContextUsage: () => undefined,
+					compact: async () => {},
+					getSystemPrompt: () => livePrompt,
+				},
+			);
+
+			const errors: Array<{ extensionPath: string; event: string; error: string }> = [];
+			runner.onError(err => {
+				errors.push(err);
+			});
+
+			await runner.emit({ type: "session_start" });
+
+			expect(errors).toEqual([]);
+			expect(livePrompt).toEqual(["base prompt block", "second block"]);
+
+			// The command context inherits the same defensive-copy getter.
+			const commandPrompt = runner.createCommandContext().getSystemPrompt();
+			commandPrompt[0] = "mutated-via-command-context";
+			expect(livePrompt).toEqual(["base prompt block", "second block"]);
+		});
+	});
+
 	describe("session name API", () => {
 		it("lets extensions read and set the session name after initialization", async () => {
 			const extCode = `

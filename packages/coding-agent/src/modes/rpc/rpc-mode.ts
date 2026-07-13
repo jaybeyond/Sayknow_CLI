@@ -11,7 +11,7 @@
  * - Extension UI: Extension UI requests are emitted, client responds with extension_ui_response
  */
 
-import { $pickenv, logger, readLines, Snowflake } from "@sayknow-cli/utils";
+import { $pickenv, isKnownSinkPeerClosedError, logger, readLines, Snowflake } from "@sayknow-cli/utils";
 import type {
 	ExtensionUIContext,
 	ExtensionUIDialogOptions,
@@ -64,7 +64,18 @@ type RpcOutput = (
 		| RpcHostUriRequest
 		| RpcHostUriCancelRequest
 		| object,
-) => void;
+) => Promise<void>;
+type StdioTransportState = "open" | "terminalizing" | "closed";
+
+function sinkErrorCode(error: unknown): string | undefined {
+	if (error === null || (typeof error !== "object" && typeof error !== "function")) return undefined;
+	try {
+		const code = Reflect.get(error, "code");
+		return typeof code === "string" ? code : undefined;
+	} catch {
+		return undefined;
+	}
+}
 
 function parseValueDialogResponse(
 	response: RpcExtensionUIResponse,
@@ -150,16 +161,23 @@ export function isFastLaneRpcCommand(type: RpcCommand["type"]): boolean {
 export function createRpcCommandScheduler(
 	run: (command: RpcCommand) => Promise<void>,
 	track: (task: Promise<void>) => void,
-): { dispatch: (command: RpcCommand) => void } {
+): { dispatch: (command: RpcCommand) => void; close: () => void } {
 	let orderedChain: Promise<void> = Promise.resolve();
+	let accepting = true;
 	return {
 		dispatch(command: RpcCommand): void {
+			if (!accepting) return;
 			if (isFastLaneRpcCommand(command.type)) {
 				track(run(command));
 				return;
 			}
-			orderedChain = orderedChain.then(() => run(command));
+			orderedChain = orderedChain.then(async () => {
+				if (accepting) await run(command);
+			});
 			track(orderedChain);
+		},
+		close(): void {
+			accepting = false;
 		},
 	};
 }
@@ -283,18 +301,94 @@ export async function runRpcMode(
 	// may write there.
 	process.env.PI_NOTIFICATIONS = "off";
 
-	// Frames go to a swappable sink: stdout for stdio, the active client socket for a
-	// persistent --listen (UDS) server. Defaults to stdout, so the stdio path is unchanged.
-	let frameSink = (line: string): void => {
-		process.stdout.write(line);
+	// Frames route to stdout for stdio and to the active client for --listen. A
+	// socket server begins with no peer, so it must never leak frames to stdout.
+	const noopSink = (_line: string): void => {};
+	let stdioTransportState: StdioTransportState = options?.listen ? "closed" : "open";
+	let beginStdioTerminalization: (() => void) | undefined;
+	const stdioFatalFailure = Promise.withResolvers<never>();
+	void stdioFatalFailure.promise.catch(() => {});
+	let hasStdioWriteFailure = false;
+	let stdioWriteFailure: unknown;
+	let stdioPeerClosed = false;
+	const pendingStdioWrites = new Set<{
+		completion: Promise<void>;
+		settle: (failed: boolean, failure?: unknown) => void;
+	}>();
+	const settlePendingStdioWrites = (failed: boolean, failure?: unknown): void => {
+		for (const pending of [...pendingStdioWrites]) pending.settle(failed, failure);
 	};
-	const output = (obj: RpcResponse | RpcExtensionUIRequest | object) => {
-		frameSink(`${JSON.stringify(obj)}\n`);
+	const waitForStdioWrites = async (): Promise<void> => {
+		while (pendingStdioWrites.size > 0) {
+			await Promise.allSettled([...pendingStdioWrites].map(pending => pending.completion));
+		}
 	};
-	// stdio announces readiness immediately; the UDS server announces it per client connection.
-	if (!options?.listen) {
-		output({ type: "ready" });
-	}
+	const handleStdioWriteFailure = (failure: unknown): boolean => {
+		const code = sinkErrorCode(failure);
+		if (
+			isKnownSinkPeerClosedError(failure) &&
+			(code === "EPIPE" || (stdioPeerClosed && code === "ERR_STREAM_DESTROYED"))
+		) {
+			stdioPeerClosed = true;
+			if (stdioTransportState === "open") stdioTransportState = "terminalizing";
+			settlePendingStdioWrites(false);
+			beginStdioTerminalization?.();
+			return false;
+		}
+		if (!hasStdioWriteFailure) {
+			hasStdioWriteFailure = true;
+			stdioWriteFailure = failure;
+			stdioTransportState = "terminalizing";
+			stdioFatalFailure.reject(failure);
+			settlePendingStdioWrites(true, failure);
+			beginStdioTerminalization?.();
+		}
+		return true;
+	};
+	const onStdioError = (failure: Error): void => {
+		handleStdioWriteFailure(failure);
+	};
+	if (!options?.listen) process.stdout.on("error", onStdioError);
+	const writeStdioFrame = (line: string): Promise<void> => {
+		if (stdioTransportState !== "open") return Promise.resolve();
+		const completion = Promise.withResolvers<void>();
+		let settled = false;
+		let pending: { completion: Promise<void>; settle: (failed: boolean, failure?: unknown) => void };
+		pending = {
+			completion: completion.promise,
+			settle: (failed, failure) => {
+				if (settled) return;
+				settled = true;
+				pendingStdioWrites.delete(pending);
+				if (failed) completion.reject(failure);
+				else completion.resolve();
+			},
+		};
+		pendingStdioWrites.add(pending);
+		try {
+			process.stdout.write(line, writeError => {
+				if (settled) return;
+				if (writeError) pending.settle(handleStdioWriteFailure(writeError), writeError);
+				else pending.settle(false);
+			});
+		} catch (failure) {
+			pending.settle(handleStdioWriteFailure(failure), failure);
+		}
+		return completion.promise;
+	};
+	let frameSink: (line: string) => void | Promise<void> = options?.listen ? noopSink : writeStdioFrame;
+	const output: RpcOutput = obj => {
+		if (!options?.listen && stdioTransportState !== "open") return Promise.resolve();
+		let emission: Promise<void>;
+		try {
+			emission = Promise.resolve(frameSink(`${JSON.stringify(obj)}\n`));
+		} catch (failure) {
+			emission = Promise.reject(failure);
+			if (!options?.listen) handleStdioWriteFailure(failure);
+		}
+		void emission.catch(() => {});
+		return emission;
+	};
 	const emitRpcTitles = shouldEmitRpcTitles();
 	const rpcCapabilities = { compactMessageUpdate: false };
 	const decodeError = (err: unknown): string => (err instanceof Error ? err.message : String(err));
@@ -341,7 +435,9 @@ export async function runRpcMode(
 	const unattendedControlPlane = new UnattendedSessionControlPlane({
 		runId: session.sessionId,
 		sessionId: session.sessionId,
-		emitFrame: gate => output(gate),
+		emitFrame: gate => {
+			void output(gate);
+		},
 		store: gateStore,
 		audit: recordAudit,
 		providerSupportsTokenCostMetrics: modelSupportsTokenCostMetrics(session.model),
@@ -350,45 +446,71 @@ export async function runRpcMode(
 			return { tokens: stats.tokens.total, costUsd: stats.cost };
 		},
 	});
-	unattendedControlPlane
-		.recover()
-		.catch(err =>
-			output(error(undefined, "workflow_gate_recover", err instanceof Error ? err.message : String(err))),
-		);
+	unattendedControlPlane.recover().catch(err => {
+		void output(error(undefined, "workflow_gate_recover", err instanceof Error ? err.message : String(err)));
+	});
 	session.setWorkflowGateEmitter(unattendedControlPlane);
 
 	// Shutdown request flag (wrapped in object to allow mutation with const)
 	const shutdownState = { requested: false };
-	let shutdownStarted = false;
+	let detachStdioInput: (() => void) | undefined;
+	let closeCommandScheduler: (() => void) | undefined;
+	let shutdownPromise: Promise<never> | undefined;
+	let shutdownExitCode = 0;
+	let suppressShutdownProtocolOutput = false;
+	let shutdownDispatchStopped = false;
 	// Tracks in-flight non-blocking command handlers so shutdown can drain them.
 	const inFlightCommands = new Set<Promise<void>>();
-	async function shutdown(exitCode: number, reason: string): Promise<never> {
-		if (shutdownStarted) {
-			process.exit(exitCode);
+	function shutdown(
+		exitCode: number,
+		reason: string,
+		suppressProtocolOutput = false,
+		stopDispatch = true,
+	): Promise<never> {
+		shutdownExitCode = Math.max(shutdownExitCode, exitCode);
+		suppressShutdownProtocolOutput ||= suppressProtocolOutput;
+		if (stopDispatch && !shutdownDispatchStopped) {
+			shutdownDispatchStopped = true;
+			closeCommandScheduler?.();
+			detachStdioInput?.();
 		}
-		shutdownStarted = true;
-		// Let in-flight non-blocking commands (bash/compact/handoff) finish and emit
-		// their responses before teardown, bounded so a never-resolving login cannot
-		// wedge shutdown (issue 13).
-		if (inFlightCommands.size > 0) {
-			await Promise.race([Promise.allSettled([...inFlightCommands]), Bun.sleep(5000)]);
-		}
-		await unregisterRpcSession(session.sessionId).catch(() => {});
-		hostToolBridge.rejectAllPending(`${reason} before host tool execution completed`);
-		hostUriBridge.clear(`${reason} before host URI request completed`);
-		try {
-			await session.sessionManager.ensureOnDisk();
-		} catch (err) {
-			output(error(undefined, "shutdown", decodeError(err)));
-			process.exit(1);
-		}
-		try {
-			await session.dispose();
-		} catch (err) {
-			output(error(undefined, "shutdown", decodeError(err)));
-			process.exit(1);
-		}
-		process.exit(exitCode);
+		if (shutdownPromise) return shutdownPromise;
+		shutdownPromise = (async () => {
+			// Let in-flight non-blocking commands (bash/compact/handoff) finish and emit
+			// their responses before teardown, bounded so a never-resolving login cannot
+			// wedge shutdown (issue 13).
+			if (inFlightCommands.size > 0) {
+				await Promise.race([Promise.allSettled([...inFlightCommands]), Bun.sleep(5000)]);
+			}
+			if (!options?.listen) await waitForStdioWrites();
+			await unregisterRpcSession(session.sessionId).catch(() => {});
+			hostToolBridge.rejectAllPending(`${reason} before host tool execution completed`);
+			hostUriBridge.clear(`${reason} before host URI request completed`);
+			let cleanupFailure: unknown;
+			try {
+				await session.sessionManager.ensureOnDisk();
+			} catch (failure) {
+				cleanupFailure = failure;
+			}
+			try {
+				await session.dispose();
+			} catch (failure) {
+				if (cleanupFailure === undefined) cleanupFailure = failure;
+			}
+			if (cleanupFailure !== undefined && !suppressShutdownProtocolOutput) {
+				await output(error(undefined, "shutdown", decodeError(cleanupFailure))).catch(() => {});
+			}
+			if (!options?.listen) {
+				await waitForStdioWrites();
+				process.stdout.removeListener("error", onStdioError);
+				stdioTransportState = "closed";
+			}
+			const terminalFailure = hasStdioWriteFailure ? stdioWriteFailure : cleanupFailure;
+			const finalExitCode = terminalFailure !== undefined || hasStdioWriteFailure ? 1 : shutdownExitCode;
+			process.exit(finalExitCode);
+			return await new Promise<never>(() => {});
+		})();
+		return shutdownPromise;
 	}
 
 	/**
@@ -397,7 +519,7 @@ export async function runRpcMode(
 	class RpcExtensionUIContext implements ExtensionUIContext {
 		constructor(
 			private pendingRequests: Map<string, PendingExtensionRequest>,
-			private output: (obj: RpcResponse | RpcExtensionUIRequest | object) => void,
+			private output: RpcOutput,
 		) {}
 
 		/** Helper for dialog methods with signal/timeout support */
@@ -665,17 +787,38 @@ export async function runRpcMode(
 	// fast-lane command reach a long-running `bash`/`compact`/`handoff`/`login`
 	// instead of being head-of-line-blocked behind it (issue 13).
 	const runCommand = async (command: RpcCommand): Promise<void> => {
+		let response: RpcResponse;
 		try {
-			output(await handleCommand(command));
+			response = await handleCommand(command);
 		} catch (err) {
-			output(error(command.id, command.type, decodeError(err)));
+			response = error(command.id, command.type, decodeError(err));
 		}
+		await output(response);
 	};
 	const trackCommand = (task: Promise<void>): void => {
 		inFlightCommands.add(task);
-		void task.finally(() => inFlightCommands.delete(task));
+		void task.then(
+			() => inFlightCommands.delete(task),
+			() => inFlightCommands.delete(task),
+		);
 	};
-	const { dispatch: dispatchCommand } = createRpcCommandScheduler(runCommand, trackCommand);
+	const scheduler = createRpcCommandScheduler(runCommand, trackCommand);
+	const dispatchCommand = scheduler.dispatch;
+	closeCommandScheduler = scheduler.close;
+	let stdioTerminalizationStarted = false;
+	beginStdioTerminalization = () => {
+		if (options?.listen || stdioTerminalizationStarted) return;
+		stdioTerminalizationStarted = true;
+		closeCommandScheduler?.();
+		detachStdioInput?.();
+		void session.abort({ timeoutMs: 5000, cause: "internal", silent: true }).catch(() => {});
+		void shutdown(
+			hasStdioWriteFailure ? 1 : 0,
+			hasStdioWriteFailure ? "RPC stdout write failed" : "RPC stdout peer disconnected",
+			true,
+		).catch(() => {});
+	};
+	if (stdioTransportState !== "open") beginStdioTerminalization();
 
 	/**
 	 * Check if shutdown was requested and perform shutdown if so.
@@ -690,17 +833,24 @@ export async function runRpcMode(
 	// persistent UDS server so both transports use the same command surface.
 	const inputDecoder = new TextDecoder("utf-8", { fatal: false });
 	async function handleInboundLine(text: string): Promise<void> {
+		if (!options?.listen && stdioTransportState !== "open") return;
 		let parsed: unknown;
+		let parseFailure: RpcResponse | undefined;
 		try {
 			parsed = JSON.parse(text);
 		} catch (err) {
-			output(error(undefined, "parse", `Failed to parse command: ${decodeError(err)}`));
+			parseFailure = error(undefined, "parse", `Failed to parse command: ${decodeError(err)}`);
+		}
+		if (parseFailure) {
+			output(parseFailure);
 			return;
 		}
+
+		let response: RpcResponse | undefined;
 		try {
 			if ((parsed as RpcExtensionUIResponse).type === "extension_ui_response") {
-				const response = parsed as RpcExtensionUIResponse;
-				pendingExtensionRequests.get(response.id)?.resolve(response);
+				const extensionResponse = parsed as RpcExtensionUIResponse;
+				pendingExtensionRequests.get(extensionResponse.id)?.resolve(extensionResponse);
 				return;
 			}
 			if (isRpcHostToolResult(parsed)) {
@@ -722,22 +872,21 @@ export async function runRpcMode(
 				const requested = Array.isArray(command.capabilities) ? command.capabilities : [];
 				const acceptedCapabilities = requested.filter(capability => capability === "compact_message_update");
 				rpcCapabilities.compactMessageUpdate = acceptedCapabilities.includes("compact_message_update");
-				output(
-					rpcSuccess(command.id, "set_capabilities", {
-						acceptedCapabilities,
-						unsupported: requested.filter(capability => capability !== "compact_message_update"),
-					}),
-				);
-				return;
+				response = rpcSuccess(command.id, "set_capabilities", {
+					acceptedCapabilities,
+					unsupported: requested.filter(capability => capability !== "compact_message_update"),
+				});
+			} else {
+				// Ordered commands run through a serial chain to preserve causal order; the
+				// reader never blocks, so cancellation commands stay responsive even while a
+				// long command is in flight (issue 13).
+				dispatchCommand(parsed as RpcCommand);
+				await checkShutdownRequested();
 			}
-			// Ordered commands run through a serial chain to preserve causal order; the
-			// reader never blocks, so cancellation commands stay responsive even while a
-			// long command is in flight (issue 13).
-			dispatchCommand(parsed as RpcCommand);
-			await checkShutdownRequested();
 		} catch (err) {
-			output(error(undefined, "parse", `Failed to parse command: ${decodeError(err)}`));
+			response = error(undefined, "parse", `Failed to parse command: ${decodeError(err)}`);
 		}
+		if (response) output(response);
 	}
 
 	// Persistent UDS server (issue 09): keep the AgentSession alive across client
@@ -757,9 +906,24 @@ export async function runRpcMode(
 			endpoint: socketPath,
 		}).catch(() => {});
 
-		const noopSink = (_line: string): void => {};
-		let currentSocket: object | undefined;
+		let currentSocket: Bun.Socket | undefined;
 		let buf = "";
+		const detachCurrentSocket = (socket: Bun.Socket): void => {
+			if (socket !== currentSocket) return;
+			currentSocket = undefined;
+			frameSink = noopSink;
+		};
+		const socketIsLocallyTerminal = (socket: Bun.Socket): boolean => socket.readyState <= 0;
+		const handleSocketFailure = (socket: Bun.Socket, failure: unknown): void => {
+			if (socket !== currentSocket) return;
+			const code = sinkErrorCode(failure);
+			const peerClosed =
+				isKnownSinkPeerClosedError(failure) &&
+				(code === "EPIPE" || (code === "ERR_STREAM_DESTROYED" && socketIsLocallyTerminal(socket)));
+			detachCurrentSocket(socket);
+			if (peerClosed) return;
+			void shutdown(1, "RPC socket output failed", true).catch(() => {});
+		};
 		const server = Bun.listen({
 			unix: socketPath,
 			socket: {
@@ -767,9 +931,23 @@ export async function runRpcMode(
 					currentSocket = socket;
 					buf = "";
 					frameSink = (line: string) => {
-						socket.write(line);
+						if (socket !== currentSocket) return;
+						try {
+							const written = socket.write(line);
+							if (written >= 0) return;
+							if (socketIsLocallyTerminal(socket)) {
+								detachCurrentSocket(socket);
+								return;
+							}
+							handleSocketFailure(
+								socket,
+								Object.assign(new Error("RPC socket write failed"), { code: "ERR_STREAM_DESTROYED" }),
+							);
+						} catch (failure) {
+							handleSocketFailure(socket, failure);
+						}
 					};
-					output({ type: "ready" });
+					void output({ type: "ready" });
 				},
 				data(socket, data) {
 					if (socket !== currentSocket) return;
@@ -783,12 +961,11 @@ export async function runRpcMode(
 					}
 				},
 				close(socket) {
-					if (socket === currentSocket) {
-						currentSocket = undefined;
-						frameSink = noopSink;
-					}
+					detachCurrentSocket(socket);
 				},
-				error() {},
+				error(socket, failure) {
+					handleSocketFailure(socket, failure);
+				},
 			},
 		});
 		await verifyRpcSocketAfterListen(socketPath);
@@ -816,13 +993,37 @@ export async function runRpcMode(
 
 	// Listen for JSONL input using Bun's stdin. Parse frame-by-frame so a malformed
 	// command reports a parse error without poisoning the whole long-lived RPC session.
-	for await (const line of readLines(Bun.stdin.stream())) {
-		const text = inputDecoder.decode(line).trim();
-		if (!text) continue;
-		await handleInboundLine(text);
+	const inputLines = readLines(Bun.stdin.stream());
+	const inputIterator = inputLines[Symbol.asyncIterator]();
+	detachStdioInput = () => {
+		const detached = inputIterator.return?.(undefined);
+		if (detached) void detached.catch(() => {});
+	};
+	let inputFailure: unknown;
+	try {
+		await output({ type: "ready" });
+		while (stdioTransportState === "open") {
+			const next = await Promise.race([inputIterator.next(), stdioFatalFailure.promise]);
+			if (next.done) break;
+			const text = inputDecoder.decode(next.value).trim();
+			if (text) await handleInboundLine(text);
+		}
+	} catch (failure) {
+		inputFailure = failure;
+	} finally {
+		detachStdioInput = undefined;
 	}
-
-	// stdin closed — RPC client is gone, flush durable state and exit cleanly
-	await shutdown(0, "RPC client disconnected");
-	throw new Error("RPC shutdown returned unexpectedly");
+	if (inputFailure !== undefined) {
+		return await shutdown(
+			1,
+			hasStdioWriteFailure ? "RPC stdout write failed" : "RPC stdin failed",
+			hasStdioWriteFailure,
+		);
+	}
+	if (stdioTransportState === "open") return await shutdown(0, "RPC client disconnected", false, false);
+	return await shutdown(
+		hasStdioWriteFailure ? 1 : 0,
+		hasStdioWriteFailure ? "RPC stdout write failed" : "RPC stdout peer disconnected",
+		true,
+	);
 }

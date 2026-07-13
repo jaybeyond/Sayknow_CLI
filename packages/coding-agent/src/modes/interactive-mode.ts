@@ -21,6 +21,7 @@ import {
 	getRenderCacheRetainedBytes,
 	Loader,
 	Markdown,
+	onImageProtocolChanged,
 	ProcessTerminal,
 	Spacer,
 	Text,
@@ -388,6 +389,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	#baseReservedSlashCommandNames: Set<string> = new Set();
 	#cleanupUnsubscribe?: () => void;
 	#subprocessTeardownUnsubscribe?: () => void;
+	#petProtocolUnsubscribe?: () => void;
 	readonly #version: string;
 	readonly #changelogMarkdown: string | undefined;
 	#planModePreviousTools: string[] | undefined;
@@ -618,6 +620,18 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.ui.setFocus(this.editor);
 		this.petWidget = this.#createPetWidget(this.editor);
 		this.petWidget.setMode(settings.get("pet.mode"));
+		// The async sixel capability probe can enable graphics after the saved
+		// pet mode was applied and dropped (no protocol yet at startup).
+		// Re-apply the configured mode when capability arrives so the pet
+		// appears without the user re-running /pet.
+		this.#petProtocolUnsubscribe?.();
+		this.#petProtocolUnsubscribe = onImageProtocolChanged(protocol => {
+			if (!protocol) return;
+			const saved = settings.get("pet.mode");
+			if (saved !== "off" && this.petWidget && this.petWidget.mode === "off") {
+				this.petWidget.setMode(saved);
+			}
+		});
 
 		this.#inputController.setupKeyHandlers();
 		this.#inputController.setupEditorSubmitHandler();
@@ -2075,6 +2089,8 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	stop(): void {
+		this.#petProtocolUnsubscribe?.();
+		this.#petProtocolUnsubscribe = undefined;
 		this.petWidget?.dispose();
 		this.petWidget = undefined;
 		if (this.loadingAnimation) {

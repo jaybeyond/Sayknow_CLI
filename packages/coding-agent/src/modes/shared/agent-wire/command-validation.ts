@@ -18,6 +18,7 @@ function stringField(value: Record<string, unknown>, key: string): boolean {
 }
 
 const THINKING_LEVELS = new Set(["inherit", "off", "minimal", "low", "medium", "high", "xhigh", "max"]);
+const RESOLVED_THINKING_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
 const TODO_STATUSES = new Set(["pending", "in_progress", "completed", "abandoned"]);
 
 function optionalBoolean(value: unknown): boolean {
@@ -136,6 +137,15 @@ export function isRpcCommand(value: unknown): value is RpcCommand {
 			);
 		case "set_model":
 			return stringField(value, "provider") && stringField(value, "modelId");
+		case "set_default_model_selection":
+			return (
+				typeof value.provider === "string" &&
+				value.provider.trim().length > 0 &&
+				typeof value.modelId === "string" &&
+				value.modelId.trim().length > 0 &&
+				(value.thinkingLevel === undefined ||
+					(typeof value.thinkingLevel === "string" && RESOLVED_THINKING_LEVELS.has(value.thinkingLevel)))
+			);
 		case "set_thinking_level":
 			return typeof value.level === "string" && THINKING_LEVELS.has(value.level);
 		case "set_steering_mode":

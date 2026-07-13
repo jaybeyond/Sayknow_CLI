@@ -2217,14 +2217,14 @@ export class AcpAgent implements Agent {
 		const sessionId = record.session.sessionId;
 
 		const contextUsage = record.session.getContextUsage();
-		if (contextUsage) {
+		if (contextUsage?.tokens != null) {
 			const usageStats = record.session.sessionManager.getUsageStatistics();
 			await this.#connection.sessionUpdate({
 				sessionId,
 				update: {
 					sessionUpdate: "usage_update",
 					size: contextUsage.contextWindow,
-					used: contextUsage.tokens ?? 0,
+					used: contextUsage.tokens,
 					cost: usageStats.cost > 0 ? { amount: usageStats.cost, currency: "USD" } : undefined,
 				},
 			});

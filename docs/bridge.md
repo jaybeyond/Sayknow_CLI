@@ -178,6 +178,7 @@ endpoint matrix, the default handshake advertises no accepted scopes.
 | `get_pending_workflow_gates` | `message:read` |
 | `set_capabilities` | `control` |
 | `set_model` | `model` |
+| `set_default_model_selection` | `model` |
 | `cycle_model` | `model` |
 | `get_available_models` | `model` |
 | `set_thinking_level` | `model` |

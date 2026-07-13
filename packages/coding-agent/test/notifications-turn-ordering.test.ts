@@ -32,7 +32,12 @@ type Frame = {
 	cwd?: string;
 };
 
-type TestContextUsage = { tokens: number | null; contextWindow: number };
+type TestContextUsage = {
+	tokens: number | null;
+	contextWindow: number;
+	percent: number | null;
+	source: "provider_anchor" | "heuristic" | "unknown";
+};
 type TestModel = { id?: string };
 
 const tempDirs: string[] = [];
@@ -73,7 +78,9 @@ async function setup(options: { contextUsage?: TestContextUsage | false; model?:
 			getCwd: () => cwd,
 		},
 		getContextUsage: () =>
-			options.contextUsage === false ? undefined : (options.contextUsage ?? { tokens: 12, contextWindow: 100 }),
+			options.contextUsage === false
+				? undefined
+				: (options.contextUsage ?? { tokens: 12, contextWindow: 100, percent: 12, source: "provider_anchor" }),
 		getModel: () => (options.model === false ? undefined : (options.model ?? { id: "test-model" })),
 	} as never;
 

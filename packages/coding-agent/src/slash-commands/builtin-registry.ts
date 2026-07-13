@@ -3,7 +3,15 @@ import * as path from "node:path";
 import { ThinkingLevel } from "@sayknow-cli/agent-core";
 import { type Model, modelsAreEqual } from "@sayknow-cli/ai";
 import { getOAuthProviders } from "@sayknow-cli/ai/utils/oauth";
-import { isPetMode, PET_MODE_IDS, PET_SKIN_IDS, PET_SKINS, Spacer, Text } from "@sayknow-cli/tui";
+import {
+	isPetMode,
+	isUnderTerminalMultiplexer,
+	PET_MODE_IDS,
+	PET_SKIN_IDS,
+	PET_SKINS,
+	Spacer,
+	Text,
+} from "@sayknow-cli/tui";
 import { setProjectDir } from "@sayknow-cli/utils";
 import { jobElapsedMs } from "../async";
 import { materializeActiveModelProfileAssignments } from "../config/model-profile-activation";
@@ -580,7 +588,9 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 			}
 			if (arg !== "off" && !SayknowPetWidget.pixelProtocol()) {
 				ctx.showStatus(
-					"Sayknow pet needs a sixel/kitty-graphics terminal (Windows Terminal 1.22+, kitty, Ghostty, WezTerm)",
+					isUnderTerminalMultiplexer()
+						? "Sayknow pet: graphics are suppressed inside tmux/screen/zellij — escapes are not forwarded end-to-end. Run skc outside the multiplexer in a sixel/kitty-graphics terminal, or set PI_FORCE_IMAGE_PROTOCOL=sixel when your multiplexer+client chain renders sixel."
+						: "Sayknow pet needs a sixel/kitty-graphics terminal (Windows Terminal 1.22+, kitty, Ghostty, WezTerm)",
 					{ dim: true },
 				);
 			} else if (isPetMode(arg)) {

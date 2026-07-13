@@ -1,7 +1,7 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import { getBundledModel } from "@sayknow-cli/ai";
-import { TempDir } from "@sayknow-cli/utils";
+import { postmortem, TempDir } from "@sayknow-cli/utils";
 import type { Args } from "../src/cli/args";
 import { Settings } from "../src/config/settings";
 import { SETTINGS_SCHEMA } from "../src/config/settings-schema";
@@ -280,6 +280,44 @@ describe("startup update contract", () => {
 			}
 		}
 	}, 30_000);
+
+	it("preserves print-mode status and does not dispose the session twice", async () => {
+		using tempDir = TempDir.createSync("@skc-print-exit-");
+		const authStorage = await AuthStorage.create(path.join(tempDir.path(), "auth.db"));
+		const originalNoTitle = Bun.env.PI_NO_TITLE;
+		const originalExitCode = process.exitCode;
+		let disposeCalls = 0;
+		const quitSpy = vi.spyOn(postmortem, "quit").mockResolvedValue(undefined);
+		const sessionResult = fakeSessionResult();
+		sessionResult.session.dispose = async () => {
+			disposeCalls += 1;
+		};
+
+		try {
+			process.exitCode = 0;
+			await runRootCommand(rootArgs({ mode: "text" }), [], {
+				createAgentSession: async () => sessionResult,
+				discoverAuthStorage: async () => authStorage,
+				settings: Settings.isolated({ "marketplace.autoUpdate": "off", "startup.checkUpdate": false }),
+				initTheme: async () => {},
+				readPipedInput: async () => undefined,
+				runStartupCredentialAutoImportIfNeeded: async () => undefined,
+				runPrintMode: async session => {
+					process.exitCode = 78;
+					await session.dispose();
+				},
+			});
+
+			expect(disposeCalls).toBe(1);
+			expect(quitSpy).toHaveBeenCalledWith(78);
+		} finally {
+			vi.restoreAllMocks();
+			process.exitCode = originalExitCode ?? 0;
+			authStorage.close();
+			if (originalNoTitle === undefined) delete Bun.env.PI_NO_TITLE;
+			else Bun.env.PI_NO_TITLE = originalNoTitle;
+		}
+	});
 
 	it("runs the real root and interactive-mode path without awaiting the version check", async () => {
 		using tempDir = TempDir.createSync("@skc-startup-interactive-");
