@@ -47,7 +47,8 @@
     ".github/workflows/ci.yml",
     ".github/actions/build-native/action.yml",
     "scripts/check-rust-scope.ts",
-    "scripts/ci-release-publish.ts"
+    "scripts/ci-release-publish.ts",
+    "scripts/release-evidence.ts"
   ],
   "regenerate": [
     "bun.lock",

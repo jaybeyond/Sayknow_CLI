@@ -1,0 +1,11 @@
+--- a/scripts/release-evidence.ts
++++ b/scripts/release-evidence.ts
+@@ -909,7 +909,7 @@ export function assertStableFinalization(input: StableFinalizationInput): void {
+ 	const expected = validateExpectedEvidence(input.expected);
+ 	const final = validateFinalEvidence(input.final);
+ 	if (!stableVersionPattern.test(input.version)) fail("stable finalization version must be exact X.Y.Z");
+-	if (input.tag !== `v${input.version}`) fail("stable finalization tag must be the exact vX.Y.Z tag");
++	if (input.tag !== `v${input.version}` && input.tag !== `sayknow-v${input.version}`) fail("stable finalization tag must be the exact vX.Y.Z tag or sayknow-v equivalent");
+ 	if (!sourceCommitPattern.test(input.sourceCommit)) fail("stable finalization sourceCommit must be a lowercase commit SHA");
+ 	if (expected.release_version !== input.version || final.release_version !== input.version) {
+ 		fail("stable finalization version does not match evidence");
