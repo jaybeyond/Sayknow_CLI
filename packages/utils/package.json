@@ -31,7 +31,7 @@
 		"fmt": "biome format --write ."
 	},
 	"dependencies": {
-		"@sayknow-cli/natives": "^0.3.15",
+		"@sayknow-cli/natives": "catalog:",
 		"beautiful-mermaid": "catalog:",
 		"handlebars": "catalog:",
 		"winston": "catalog:",

@@ -38,8 +38,8 @@
 		"fmt": "biome format --write ."
 	},
 	"dependencies": {
-		"@sayknow-cli/natives": "^0.3.15",
-		"@sayknow-cli/utils": "^0.3.15",
+		"@sayknow-cli/natives": "catalog:",
+		"@sayknow-cli/utils": "catalog:",
 		"lru-cache": "catalog:",
 		"marked": "catalog:"
 	},

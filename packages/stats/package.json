@@ -37,8 +37,8 @@
 		"fmt": "biome format --write ."
 	},
 	"dependencies": {
-		"@sayknow-cli/ai": "^0.3.15",
-		"@sayknow-cli/utils": "^0.3.15",
+		"@sayknow-cli/ai": "catalog:",
+		"@sayknow-cli/utils": "catalog:",
 		"@tailwindcss/node": "catalog:",
 		"chart.js": "catalog:",
 		"date-fns": "catalog:",
