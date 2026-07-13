@@ -40,8 +40,6 @@ if (docsDir === undefined) {
 const glob = new Glob("**/*.md");
 const entries: string[] = [];
 for await (const relativePath of glob.scan(docsDir)) {
-	// Maintainer-only doc: never embed it in the shipped docs index.
-	if (relativePath.endsWith("FORK_MAINTENANCE.md")) continue;
 	entries.push(relativePath.split(path.sep).join("/"));
 }
 entries.sort();
