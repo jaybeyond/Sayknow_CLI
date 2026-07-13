@@ -45,6 +45,7 @@
     "packages/coding-agent/scripts/build-binary.ts",
     "packages/coding-agent/scripts/compile-args.ts",
     ".github/workflows/ci.yml",
+    ".github/actions/build-native/action.yml",
     "scripts/check-rust-scope.ts"
   ],
   "regenerate": [

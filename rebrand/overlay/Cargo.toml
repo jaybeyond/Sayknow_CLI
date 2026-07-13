@@ -22,6 +22,10 @@ codegen-units = 1
 strip = true
 panic = "abort"
 
+[profile.dist]
+inherits = "release"
+panic = "unwind"
+strip = "debuginfo"
 [profile.ci]
 inherits = "release"
 # Override release's panic = "abort": the pi-natives blocking-task catch_unwind
