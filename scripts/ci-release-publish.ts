@@ -807,7 +807,14 @@ export async function publishRetainedPackage(
 		}
 		throw new Error(`npm publish failed for ${record.name}@${record.version}: ${publish.output || `exit ${publish.exitCode ?? "unknown"}`}`);
 	}
-	const observed = await operations.observe(record, retainedTarball);
+	// npm registry read replicas can lag a freshly published version by several
+	// seconds; poll briefly before declaring the publish unverifiable so a
+	// transient propagation delay does not abort the multi-package release sweep.
+	let observed = await operations.observe(record, retainedTarball);
+	for (let attempt = 0; observed === undefined && attempt < 24; attempt++) {
+		await new Promise((resolve) => setTimeout(resolve, Bun.env.NODE_ENV === "test" ? 0 : 5000));
+		observed = await operations.observe(record, retainedTarball);
+	}
 	if (observed === undefined) throw new Error(`Registry did not expose ${record.name}@${record.version} after publish`);
 	assertExactRegistryObservation(record, observed);
 	return observed;
