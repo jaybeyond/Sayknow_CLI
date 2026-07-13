@@ -1,7 +1,7 @@
 {
 	"type": "module",
 	"name": "@sayknow-cli/ai",
-	"version": "0.3.14",
+	"version": "0.3.15",
 	"description": "Unified LLM API with automatic model discovery and provider configuration",
 	"homepage": "https://sayknow-cli.com",
 	"author": "jaybeyond",
@@ -43,7 +43,7 @@
 	"dependencies": {
 		"@anthropic-ai/sdk": "catalog:",
 		"@bufbuild/protobuf": "catalog:",
-		"@sayknow-cli/utils": "catalog:",
+		"@sayknow-cli/utils": "^0.3.15",
 		"openai": "catalog:",
 		"partial-json": "catalog:",
 		"zod": "catalog:"

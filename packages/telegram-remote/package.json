@@ -2,7 +2,7 @@
 	"type": "module",
 	"private": true,
 	"name": "@sayknow-cli/telegram-remote",
-	"version": "0.3.14",
+	"version": "0.3.15",
 	"description": "v0 Telegram operator remote for Sayknow-CLI sessions: a tiny, safe command + bounded-read gateway over the Coordinator MCP. Lifecycle and observation only; not a remote cockpit.",
 	"author": "jaybeyond",
 	"license": "MIT",
