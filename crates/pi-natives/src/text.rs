@@ -14,7 +14,7 @@ use napi::{JsString, bindgen_prelude::*};
 use napi_derive::napi;
 use smallvec::{SmallVec, smallvec};
 use unicode_segmentation::UnicodeSegmentation;
-use unicode_width::UnicodeWidthChar;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 const MIN_TAB_WIDTH: u32 = 1;
 const MAX_TAB_WIDTH: u32 = 16;
@@ -386,6 +386,11 @@ const fn ascii_cell_width_u16(u: u16, tab_width: usize) -> usize {
 
 #[inline]
 fn char_width_corrected(c: char) -> Option<usize> {
+	// U+3164 is East Asian Wide and xterm-compatible terminals occupy two
+	// cells for it even though unicode-width treats the filler as zero-width.
+	if c == '\u{3164}' {
+		return Some(2);
+	}
 	UnicodeWidthChar::width(c)
 }
 
@@ -394,6 +399,18 @@ fn grapheme_width_str(g: &str, tab_width: usize) -> usize {
 	if g == "\t" {
 		return tab_width;
 	}
+	// `unicode-segmentation` emits CRLF as a single grapheme, but
+	// `UnicodeWidthStr::width("\r\n") == 1` disagrees with this module's
+	// zero-width control-character policy (the ASCII fast path assigns CR and
+	// LF width 0 via `ascii_cell_width_u16`). Without this correction an
+	// unrelated non-ASCII character in the same segment would route CRLF
+	// through the grapheme path and flip its width from 0 to 1, making the
+	// width primitive context-dependent (e.g. `visibleWidth("한\r\n")`). Handle
+	// it before `UnicodeWidthStr` while leaving VS16/modifier/keycap/ZWJ
+	// grapheme handling intact.
+	if g == "\r\n" {
+		return 0;
+	}
 	let mut it = g.chars();
 	let Some(c0) = it.next() else {
 		return 0;
@@ -401,19 +418,12 @@ fn grapheme_width_str(g: &str, tab_width: usize) -> usize {
 	if it.next().is_none() {
 		return char_width_corrected(c0).unwrap_or(0);
 	}
-	if g.contains('\u{200d}') {
-		return g
-			.chars()
-			.filter_map(char_width_corrected)
-			.max()
-			.unwrap_or(0);
-	}
-	// Multi-char grapheme: sum per-char widths. Conjoining Hangul jamo are
-	// kept in grapheme clusters by unicode-segmentation, and their summed
-	// width matches the NFC syllable width terminals render.
-	g.chars()
-		.map(|c| char_width_corrected(c).unwrap_or(0))
-		.sum()
+	// unicode-width's string state machine handles VS16 presentation,
+	// emoji modifiers, ZWJ sequences, and conjoining Hangul jamo as complete
+	// graphemes. Preserve the terminal-specific U+3164 correction because the
+	// crate treats Hangul Filler as zero-width.
+	let filler_correction = g.chars().filter(|c| *c == '\u{3164}').count() * 2;
+	UnicodeWidthStr::width(g) + filler_correction
 }
 
 thread_local! {
@@ -1448,6 +1458,69 @@ mod tests {
 		assert_eq!(visible_width_u16(&to_u16("a\tb"), DEFAULT_TAB_WIDTH), 1 + DEFAULT_TAB_WIDTH + 1);
 		assert_eq!(visible_width_u16(&to_u16("👨‍👩‍👧‍👦"), DEFAULT_TAB_WIDTH), 2);
 		assert_eq!(visible_width_u16(&to_u16("abcd👨‍👩‍👧‍👦wxyz"), DEFAULT_TAB_WIDTH), 10);
+	}
+
+	#[test]
+	fn test_emoji_grapheme_width() {
+		for emoji in ["❤️", "☑️", "↔️", "1️⃣", "👍🏽"] {
+			assert_eq!(visible_width_u16(&to_u16(emoji), DEFAULT_TAB_WIDTH), 2);
+		}
+		assert_eq!(truncate_string_for_test("❤️X", 2), "❤️");
+		assert_eq!(truncate_string_for_test("👍🏽X", 2), "👍🏽");
+	}
+
+	#[test]
+	fn test_hangul_filler_width() {
+		assert_eq!(visible_width_u16(&to_u16("\u{3164}"), DEFAULT_TAB_WIDTH), 2);
+		assert_eq!(truncate_string_for_test("\u{3164}X", 2), "\u{3164}");
+	}
+
+	#[test]
+	fn test_crlf_zero_width_scalar_batch_parity() {
+		// CR and LF are zero-width under the ASCII fast path. The grapheme path
+		// (triggered by any non-ASCII scalar in the same segment) must agree so
+		// the width primitive stays context-independent.
+		assert_eq!(visible_width_u16(&to_u16("\r\n"), DEFAULT_TAB_WIDTH), 0);
+
+		// Korean (한글) and CJK ideographs are East Asian Wide (2 cells each);
+		// the adjacent CRLF must contribute 0 in every position.
+		let cases = [
+			("한\r\n", 2),
+			("\r\n한", 2),
+			("한\r\n글", 4),
+			("가\r나\n다", 6),
+			("字\r\n漢", 4),
+			("한字\r\n漢글", 8),
+			("한\r\n\r\n글", 4),
+		];
+		for (case, expected) in cases {
+			let scalar = visible_width_u16(&to_u16(case), DEFAULT_TAB_WIDTH);
+			let batch = visible_widths(vec![case.to_string()], DEFAULT_TAB_WIDTH as u32);
+			assert_eq!(scalar, expected, "scalar width mismatch for {case:?}");
+			assert_eq!(batch, vec![expected as u32], "batch width mismatch for {case:?}");
+			// The non-ASCII CRLF result must match the pure-ASCII CRLF policy:
+			// removing the CR/LF scalars leaves exactly `expected` cells.
+			let stripped = case.replace(['\r', '\n'], "");
+			assert_eq!(
+				visible_width_u16(&to_u16(&stripped), DEFAULT_TAB_WIDTH),
+				expected,
+				"CR/LF must be zero-width for {case:?}"
+			);
+		}
+	}
+
+	#[test]
+	fn test_crlf_preserves_grapheme_correctness() {
+		// The CRLF correction must not regress VS16/modifier/keycap/ZWJ widths,
+		// including when a CRLF sits next to complex graphemes.
+		let cases = [("❤️\r\n", 2), ("👍🏽\r\n", 2), ("1️⃣\r\n", 2), ("👨‍👩‍👧‍👦\r\n", 2), ("한\r\n👨‍👩‍👧‍👦", 4)];
+		for (case, expected) in cases {
+			assert_eq!(
+				visible_width_u16(&to_u16(case), DEFAULT_TAB_WIDTH),
+				expected,
+				"grapheme width regressed for {case:?}"
+			);
+		}
 	}
 
 	#[test]

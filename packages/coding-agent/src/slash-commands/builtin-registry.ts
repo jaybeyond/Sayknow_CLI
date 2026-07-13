@@ -3,7 +3,7 @@ import * as path from "node:path";
 import { ThinkingLevel } from "@sayknow-cli/agent-core";
 import { type Model, modelsAreEqual } from "@sayknow-cli/ai";
 import { getOAuthProviders } from "@sayknow-cli/ai/utils/oauth";
-import { Spacer, Text } from "@sayknow-cli/tui";
+import { isPetMode, PET_MODE_IDS, PET_SKIN_IDS, PET_SKINS, Spacer, Text } from "@sayknow-cli/tui";
 import { setProjectDir } from "@sayknow-cli/utils";
 import { jobElapsedMs } from "../async";
 import { materializeActiveModelProfileAssignments } from "../config/model-profile-activation";
@@ -23,8 +23,20 @@ import { clearPluginRootsAndCaches, resolveActiveProjectRegistryPath } from "../
 import { td } from "../i18n";
 import { resolveMemoryBackend } from "../memory-backend";
 import { DynamicBorder } from "../modes/components/dynamic-border";
+import { SayknowPetWidget } from "../modes/components/sayknow-pet-widget";
 import { theme } from "../modes/theme/theme";
 import type { InteractiveModeContext } from "../modes/types";
+import {
+	buildNotificationStatusReport,
+	checkNotificationHealth,
+	formatNotificationHealthReport,
+	formatNotificationRecoveryReport,
+	formatNotificationStatusReport,
+	formatNotificationTestResult,
+	recoverNotifications,
+	sendNotificationTest,
+} from "../notifications/notification-service";
+import { computeCacheMissCostSummary, formatCacheMissSummaryLines } from "../session/cache-economics";
 import { formatModelOnboardingGuidance } from "../setup/model-onboarding-guidance";
 import {
 	addApiCompatibleProvider,
@@ -37,7 +49,7 @@ import { getDisplayChangelogEntries } from "../utils/changelog";
 import { buildContextReportText } from "./helpers/context-report";
 import { buildFastStatusReport } from "./helpers/fast-status-report";
 import { formatDuration } from "./helpers/format";
-import { commandConsumed, errorMessage, parseSlashCommand, usage } from "./helpers/parse";
+import { commandConsumed, errorMessage, parseSlashCommand, parseSubcommand, usage } from "./helpers/parse";
 import { handleSshAcp } from "./helpers/ssh";
 import { buildUsageReportText } from "./helpers/usage-report";
 import type {
@@ -472,6 +484,66 @@ const shutdownHandlerTui = (_command: ParsedSlashCommand, runtime: TuiSlashComma
 
 const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 	{
+		name: "notify",
+		priority: 30,
+		description: "Notification status, health, test, recovery, and session on/off",
+		acpDescription: "Notification status, health, test, recovery, and session on/off",
+		subcommands: [
+			{ name: "on", description: "Enable notifications for this session" },
+			{ name: "off", description: "Disable notifications for this session" },
+			{ name: "status", description: "Show notification configuration (no secrets)" },
+			{ name: "health", description: "Config, daemon-ownership and endpoint health" },
+			{ name: "test", description: "Send a test notification", usage: "[message]" },
+			{ name: "recovery", description: "Clear dead-owner locks and stale endpoint files" },
+			{ name: "setup", description: "How to pair a Telegram bot (run in a terminal)" },
+		],
+		inlineHint: "[on|off|status|health|test|recovery|setup]",
+		acpInputHint: "[on|off|status|health|test|recovery|setup]",
+		allowArgs: true,
+		handle: async (command, runtime) => {
+			const { verb, rest } = parseSubcommand(command.args);
+			const action = verb || "status";
+			// `on`/`off` are session-local runtime controls owned by the
+			// notifications extension command (`api.registerCommand("notify")`),
+			// which holds the live per-session server/disable state. Pass them
+			// through untouched — never consume them — so this builtin cannot
+			// shadow that control. Everything below is config/service diagnostics
+			// the extension does not implement, so the builtin owns them exclusively
+			// (and the extension therefore never consumes them).
+			if (action === "on" || action === "off") {
+				return { prompt: command.text };
+			}
+			const stateRoot = path.join(runtime.cwd, ".skc", "state");
+			switch (action) {
+				case "status":
+					await runtime.output(formatNotificationStatusReport(buildNotificationStatusReport(runtime.settings)));
+					return commandConsumed();
+				case "health": {
+					const report = await checkNotificationHealth({ settings: runtime.settings, stateRoot });
+					await runtime.output(formatNotificationHealthReport(report));
+					return commandConsumed();
+				}
+				case "test": {
+					const result = await sendNotificationTest({ settings: runtime.settings, text: rest || undefined });
+					await runtime.output(formatNotificationTestResult(result));
+					return commandConsumed();
+				}
+				case "recovery": {
+					const report = await recoverNotifications({ settings: runtime.settings, stateRoot });
+					await runtime.output(formatNotificationRecoveryReport(report));
+					return commandConsumed();
+				}
+				case "setup":
+					return usage(
+						"Run `skc notify setup` in a terminal to pair a Telegram bot token with a private chat (interactive; requires a TTY).",
+						runtime,
+					);
+				default:
+					return usage(`Usage: /notify [on|off|status|health|test|recovery|setup] (got "${action}")`, runtime);
+			}
+		},
+	},
+	{
 		name: "settings",
 		priority: 40,
 		description: "Open settings and preferences",
@@ -486,6 +558,39 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 		handleTui: (_command, runtime) => {
 			runtime.ctx.showThemeSelector();
 			runtime.ctx.editor.setText("");
+		},
+	},
+	{
+		name: "pet",
+		description: "Sayknow pet living beside the composer",
+		subcommands: [
+			{ name: "off", description: "Hide the pet" },
+			...PET_SKIN_IDS.map(id => ({ name: id, description: PET_SKINS[id].description })),
+		],
+		inlineHint: `[${PET_MODE_IDS.join("|")}]`,
+		allowArgs: true,
+		handleTui: (command, runtime) => {
+			const ctx = runtime.ctx;
+			const raw = command.args?.trim().toLowerCase() ?? "";
+			const arg = raw === "on" ? "red" : raw;
+			if (!arg) {
+				ctx.showPetSelector();
+				ctx.editor.setText("");
+				return;
+			}
+			if (arg !== "off" && !SayknowPetWidget.pixelProtocol()) {
+				ctx.showStatus(
+					"Sayknow pet needs a sixel/kitty-graphics terminal (Windows Terminal 1.22+, kitty, Ghostty, WezTerm)",
+					{ dim: true },
+				);
+			} else if (isPetMode(arg)) {
+				ctx.setPetMode(arg);
+				const name = arg === "off" ? "Sayknow pet hidden" : `${PET_SKINS[arg].label} is here`;
+				ctx.showStatus(name);
+			} else {
+				ctx.showStatus(`Usage: /pet [${PET_MODE_IDS.join("|")}]`, { dim: true });
+			}
+			ctx.editor.setText("");
 		},
 	},
 	{
@@ -821,13 +926,42 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 		allowArgs: true,
 		handle: async (command, runtime) => {
 			if (!command.args || command.args === "info") {
-				await runtime.output(
-					[
-						`Session: ${runtime.session.sessionId}`,
-						`Title: ${runtime.session.sessionName}`,
-						`CWD: ${runtime.cwd}`,
-					].join("\n"),
-				);
+				const stats = runtime.session.getSessionStats();
+				const lines = [
+					`Session: ${runtime.session.sessionId}`,
+					`Title: ${runtime.session.sessionName}`,
+					`CWD: ${runtime.cwd}`,
+					"",
+					"Tokens",
+					`Input: ${stats.tokens.input.toLocaleString()}`,
+					`Output: ${stats.tokens.output.toLocaleString()}`,
+				];
+				if (stats.tokens.cacheRead > 0) {
+					lines.push(`Cache Read: ${stats.tokens.cacheRead.toLocaleString()}`);
+				}
+				if (stats.tokens.cacheWrite > 0) {
+					lines.push(`Cache Write: ${stats.tokens.cacheWrite.toLocaleString()}`);
+				}
+				lines.push(`Total: ${stats.tokens.total.toLocaleString()}`);
+				if (stats.cost > 0 || stats.premiumRequests > 0) {
+					lines.push("", "Cost");
+					if (stats.cost > 0) {
+						lines.push(`Total: ${stats.cost.toFixed(4)}`);
+					}
+					if (stats.premiumRequests > 0) {
+						lines.push(`Premium Requests: ${stats.premiumRequests.toLocaleString()}`);
+					}
+				}
+				const cacheMissSummary = stats.costBreakdown
+					? computeCacheMissCostSummary(stats.tokens, {
+							kind: "persisted-aggregate",
+							costBreakdown: stats.costBreakdown,
+						})
+					: undefined;
+				if (cacheMissSummary) {
+					lines.push("", "Cache Miss Cost", ...formatCacheMissSummaryLines(cacheMissSummary));
+				}
+				await runtime.output(lines.join("\n"));
 				return commandConsumed();
 			}
 			if (command.args === "delete") {

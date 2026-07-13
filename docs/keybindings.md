@@ -47,6 +47,7 @@ Set an action to an empty array to disable it:
 | `app.clipboard.copyLine` | `Alt+Shift+L` | Copy the current line |
 | `app.clipboard.copyPrompt` | `Alt+Shift+C` | Copy the whole prompt |
 | `app.stt.toggle` | `Alt+H` | Toggle speech-to-text recording |
+| `app.irc.sidebar.toggle` | `Alt+I` | Toggle IRC sidebar |
 
 Older unqualified action names are migrated when `keybindings.json` is loaded, but new docs and new configs should use the namespaced action IDs above.
 
@@ -158,6 +159,7 @@ Authoritative inventory of the keybinding registry, one row per action. Generate
 | `app.plan.toggle` | `alt+shift+p` | |
 | `app.history.search` | `ctrl+r` | |
 | `app.stt.toggle` | `alt+h` | |
+| `app.irc.sidebar.toggle` | `alt+i` | |
 
 ### Global engine context (`tui.global.*`)
 

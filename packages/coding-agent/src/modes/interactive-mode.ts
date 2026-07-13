@@ -85,6 +85,8 @@ import type { EvalExecutionComponent } from "./components/eval-execution";
 import type { HookEditorComponent } from "./components/hook-editor";
 import type { HookInputComponent } from "./components/hook-input";
 import type { HookSelectorComponent } from "./components/hook-selector";
+import { IrcSplitViewComponent } from "./components/irc-sidebar";
+import { type PetMode, SayknowPetWidget } from "./components/sayknow-pet-widget";
 import { StatusLineComponent } from "./components/status-line";
 import type { ToolExecutionHandle } from "./components/tool-execution";
 import {
@@ -100,6 +102,7 @@ import { InputController } from "./controllers/input-controller";
 import { SelectorController } from "./controllers/selector-controller";
 import { SSHCommandController } from "./controllers/ssh-command-controller";
 import { TodoCommandController } from "./controllers/todo-command-controller";
+import { IrcObservationLedger } from "./irc-observation-ledger";
 import { JobsObserver } from "./jobs-observer";
 import { OAuthManualInputManager } from "./oauth-manual-input";
 import { SessionObserverRegistry } from "./session-observer-registry";
@@ -115,13 +118,42 @@ import {
 	onThemeChange,
 	theme,
 } from "./theme/theme";
-import type { CompactionQueuedMessage, InteractiveModeContext, SubmittedUserInput, TodoItem, TodoPhase } from "./types";
-import { addChatChild, UiHelpers } from "./utils/ui-helpers";
+import type {
+	CompactionQueuedMessage,
+	InteractiveModeContext,
+	IrcArrivalSnapshot,
+	SubmittedUserInput,
+	TodoItem,
+	TodoPhase,
+	TranscriptRebuildPolicy,
+} from "./types";
+import type { ParsedIrcMessage } from "./utils/irc-message";
+import { addChatChild, prepareTranscriptRebuild, UiHelpers } from "./utils/ui-helpers";
 
 const INTERACTIVE_ABORT_CLEANUP_TIMEOUT_MS = 5_000;
 const COMPOSER_NEWLINE_HINT = process.platform === "win32" ? "Alt+Enter/Ctrl+J" : "Shift+Enter/Ctrl+J";
 export const DEFAULT_COMPOSER_PLACEHOLDER = `Type your message... ${COMPOSER_NEWLINE_HINT}: New line · Ctrl+C: Clear · Ctrl+R: Search history · Shift+Tab: Reasoning`;
 const WELCOME_RESERVED_CONTAINER_CHILD_LIMIT = 8;
+
+const IRC_SIDEBAR_TOGGLE_SHADOWING_ACTIONS: readonly AppKeybinding[] = [
+	"app.plan.toggle",
+	"app.session.new",
+	"app.session.tree",
+	"app.session.fork",
+	"app.session.resume",
+	"app.message.followUp",
+	"app.stt.toggle",
+	"app.clipboard.copyLine",
+	"app.session.observe",
+	"app.jobs.open",
+	"app.tool.backgroundFold",
+];
+
+export function getWelcomeTranscriptReservedRows(chatContainer: Container, width: number): number {
+	return chatContainer.children.length === 0 || chatContainer.children.length > WELCOME_RESERVED_CONTAINER_CHILD_LIMIT
+		? 0
+		: chatContainer.render(width).length;
+}
 const FRIENDLY_KEY_PARTS: Record<string, string> = {
 	alt: "Alt",
 	cmd: "Cmd",
@@ -281,6 +313,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	keybindings: KeybindingsManager;
 	agent: Agent;
 	historyStorage?: HistoryStorage;
+	readonly ircLedger = new IrcObservationLedger();
 
 	ui: TUI;
 	chatContainer: Container;
@@ -292,6 +325,8 @@ export class InteractiveMode implements InteractiveModeContext {
 	editorContainer: Container;
 	hookWidgetContainerAbove: Container;
 	hookWidgetContainerBelow: Container;
+	petFloorContainer: Container = new Container();
+	petWidget: SayknowPetWidget | undefined;
 	statusLine: StatusLineComponent;
 
 	isInitialized = false;
@@ -388,6 +423,9 @@ export class InteractiveMode implements InteractiveModeContext {
 	#eventBus?: EventBus;
 	#eventBusUnsubscribers: Array<() => void> = [];
 	#welcomeComponent?: WelcomeComponent;
+	#ircSplitView: IrcSplitViewComponent;
+	#ircSidebarAvailable = false;
+	#ircSidebarRequestedVisible = false;
 
 	constructor(
 		session: AgentSession,
@@ -424,6 +462,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.ui = new TUI(new ProcessTerminal(), settings.get("showHardwareCursor"));
 		this.ui.setClearOnShrink(settings.get("clearOnShrink"));
 		this.chatContainer = new Container();
+		this.#ircSplitView = new IrcSplitViewComponent(this.chatContainer, this.ircLedger, () => theme);
 		this.pendingMessagesContainer = new Container();
 		this.statusContainer = new Container();
 		this.todoContainer = new Container();
@@ -443,6 +482,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.#syncEditorMaxHeight();
 			this.updateEditorChrome();
 			this.editor.invalidate();
+			this.#invalidateIrcSidebarRender();
 			this.ui.requestResizeRender();
 		};
 		process.stdout.on("resize", this.#resizeHandler);
@@ -562,7 +602,9 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.#welcomeComponent.playIntro(() => this.ui.requestRender());
 		}
 
-		this.ui.addChild(this.chatContainer);
+		this.ui.addChild(this.#ircSplitView);
+		this.ui.setViewportAnchorComponent(this.#ircSplitView);
+
 		this.ui.addChild(this.pendingMessagesContainer);
 		this.ui.addChild(this.statusContainer);
 		this.ui.addChild(this.todoContainer);
@@ -570,9 +612,12 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.ui.addChild(this.statusLine); // Main status rail + hook statuses; composer chrome is rendered by the editor.
 		this.ui.addChild(this.hookWidgetContainerAbove);
 		this.ui.addChild(this.editorContainer);
+		this.ui.addChild(this.petFloorContainer);
 		this.ui.addChild(this.hookWidgetContainerBelow);
 		this.ui.setBottomPinnedComponent(this.statusLine);
 		this.ui.setFocus(this.editor);
+		this.petWidget = this.#createPetWidget(this.editor);
+		this.petWidget.setMode(settings.get("pet.mode"));
 
 		this.#inputController.setupKeyHandlers();
 		this.#inputController.setupEditorSubmitHandler();
@@ -610,6 +655,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.updateEditorChrome();
 		this.#syncEditorMaxHeight();
 		this.isInitialized = true;
+		this.#syncIrcSidebarAvailabilityFromSettings();
 		this.ui.requestRender(true);
 
 		// GitHub star reminder (interactive-only). Register the decline-driven
@@ -875,7 +921,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 		if (!submission.customType) {
 			this.pendingImages = submission.images ? [...submission.images] : [];
-			this.rebuildChatFromMessages();
+			this.rebuildChatFromMessages("reconcile-same-transcript");
 			this.editor.setText(submission.text);
 		}
 		this.updateEditorChrome();
@@ -951,8 +997,9 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	#getWelcomeReservedRows(width: number): number {
+		const transcriptRows = getWelcomeTranscriptReservedRows(this.chatContainer, width);
+
 		const transientRows = [
-			this.chatContainer,
 			this.pendingMessagesContainer,
 			this.statusContainer,
 			this.todoContainer,
@@ -966,7 +1013,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.hookWidgetContainerBelow,
 		].reduce((rows, component) => rows + component.render(width).length, 0);
 
-		return transientRows + pinnedRows;
+		return transcriptRows + transientRows + pinnedRows;
 	}
 
 	#renderShortContainerRowsForWelcomeReservation(width: number, container: Container): number {
@@ -1018,7 +1065,42 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.editor.setTopBorder(undefined);
 	}
 
-	rebuildChatFromMessages(): void {
+	setPetMode(mode: PetMode): void {
+		this.petWidget?.setMode(mode);
+		settings.set("pet.mode", mode);
+		this.ui.requestRender();
+	}
+
+	previewPetMode(mode: PetMode): void {
+		this.petWidget?.previewMode(mode);
+		this.ui.requestRender();
+	}
+
+	restoreComposer(): void {
+		if (this.petWidget) {
+			this.petWidget.remountComposer();
+		} else {
+			this.editorContainer.clear();
+			this.editorContainer.addChild(this.editor);
+		}
+		this.ui.setFocus(this.editor);
+	}
+
+	#createPetWidget(editor: CustomEditor): SayknowPetWidget {
+		return new SayknowPetWidget({
+			ui: this.ui,
+			editor,
+			editorContainer: this.editorContainer,
+			floorContainer: this.petFloorContainer,
+			isWorking: () => this.loadingAnimation !== undefined,
+			getComposerBottomOffset: () =>
+				this.petFloorContainer.render(this.ui.terminal.columns).length +
+				this.hookWidgetContainerBelow.render(this.ui.terminal.columns).length,
+		});
+	}
+
+	rebuildChatFromMessages(policy: TranscriptRebuildPolicy): void {
+		prepareTranscriptRebuild(this.ui, policy);
 		this.chatContainer.clear();
 		const context = this.session.buildDisplaySessionContext();
 		this.renderSessionContext(context);
@@ -1993,6 +2075,8 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	stop(): void {
+		this.petWidget?.dispose();
+		this.petWidget = undefined;
 		if (this.loadingAnimation) {
 			this.loadingAnimation.stop();
 			this.loadingAnimation = undefined;
@@ -2124,10 +2208,16 @@ export class InteractiveMode implements InteractiveModeContext {
 		nextEditor.setText(previousText);
 		previousEditor.dispose();
 
+		const petMode = this.petWidget?.mode ?? settings.get("pet.mode");
+		this.petWidget?.dispose();
+
 		this.editorContainer.clear();
 		this.editor = nextEditor;
 		this.editorContainer.addChild(nextEditor);
 		this.ui.setFocus(nextEditor);
+
+		this.petWidget = this.#createPetWidget(nextEditor);
+		this.petWidget.setMode(petMode);
 
 		this.#inputController.setupKeyHandlers();
 		this.#inputController.setupEditorSubmitHandler();
@@ -2285,13 +2375,32 @@ export class InteractiveMode implements InteractiveModeContext {
 		return this.#uiHelpers.addMessageToChat(message, options);
 	}
 
+	addLiveIrcObservationToChat(message: ParsedIrcMessage, arrival: IrcArrivalSnapshot): Component[] {
+		return this.#uiHelpers.addLiveIrcObservationToChat(message, arrival);
+	}
+	removeRenderedIrcInlineComponents(observationId: string): readonly Component[] | undefined {
+		return this.#uiHelpers.removeRenderedIrcInlineComponents(observationId);
+	}
+	resetRenderedIrcInlineComponents(): readonly (readonly Component[])[] {
+		return this.#uiHelpers.resetRenderedIrcInlineComponents();
+	}
+
 	renderSessionContext(
 		sessionContext: SessionContext,
 		options?: { updateFooter?: boolean; populateHistory?: boolean },
 	): void {
 		this.#uiHelpers.renderSessionContext(sessionContext, options);
+		this.#eventController.reconcileIrcExpiryTimers(this.#uiHelpers.getRenderedIrcInlineComponents());
 	}
 
+	rebuildInitialMessages(
+		policy: TranscriptRebuildPolicy,
+		prebuiltContext?: SessionContext,
+		options?: { preserveExistingChat?: boolean },
+	): void {
+		prepareTranscriptRebuild(this.ui, policy);
+		this.#uiHelpers.renderInitialMessages(prebuiltContext, options);
+	}
 	renderInitialMessages(prebuiltContext?: SessionContext, options?: { preserveExistingChat?: boolean }): void {
 		this.#uiHelpers.renderInitialMessages(prebuiltContext, options);
 	}
@@ -2302,6 +2411,10 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	findLastAssistantMessage(): AssistantMessage | undefined {
 		return this.#uiHelpers.findLastAssistantMessage();
+	}
+
+	getAssistantViewportAnchorId(message: AssistantMessage): string {
+		return this.#uiHelpers.assistantViewportAnchorId(message);
 	}
 
 	extractAssistantText(message: AssistantMessage): string {
@@ -2554,6 +2667,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#selectorController.showThemeSelector();
 	}
 
+	showPetSelector(): void {
+		this.#selectorController.showPetSelector();
+	}
+
 	showHistorySearch(): void {
 		this.#selectorController.showHistorySearch();
 	}
@@ -2667,6 +2784,65 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	setToolsExpanded(expanded: boolean): void {
 		this.#inputController.setToolsExpanded(expanded);
+	}
+
+	#resolveEffectiveIrcSidebarToggleKey(): string | null {
+		for (const key of this.keybindings.getKeys("app.irc.sidebar.toggle")) {
+			if (this.editor.hasActionKey(key)) continue;
+			const shadowed = IRC_SIDEBAR_TOGGLE_SHADOWING_ACTIONS.some(action =>
+				this.keybindings.getKeys(action).includes(key),
+			);
+			if (!shadowed) return key;
+		}
+		return null;
+	}
+
+	captureIrcArrivalSnapshot(): IrcArrivalSnapshot {
+		return {
+			panelVisible: this.#ircSplitView.effectiveSidebarVisible(this.ui.terminal.columns),
+			panelRequestedVisible: this.#ircSidebarRequestedVisible,
+			sidebarAvailable: this.#ircSidebarAvailable,
+			resolvedToggleKey: this.#resolveEffectiveIrcSidebarToggleKey(),
+		};
+	}
+	toggleIrcSidebar(): void {
+		if (
+			!this.#ircSidebarAvailable ||
+			this.settings.get("irc.enabled") !== true ||
+			this.settings.get("irc.sidebar.enabled") !== true
+		)
+			return;
+		this.#ircSidebarRequestedVisible = !this.#ircSidebarRequestedVisible;
+		this.#ircSplitView.setVisible(this.#ircSidebarRequestedVisible);
+		this.#invalidateIrcSidebarRender();
+		this.ui.requestRender();
+	}
+
+	applyIrcSidebarAvailability(enabled: boolean): void {
+		this.#ircSidebarAvailable = enabled;
+		this.#ircSplitView.setVisible(enabled && this.#ircSidebarRequestedVisible);
+		this.#invalidateIrcSidebarRender();
+		this.ui.requestRender();
+	}
+
+	#syncIrcSidebarAvailabilityFromSettings(): void {
+		this.applyIrcSidebarAvailability(
+			this.settings.get("irc.enabled") === true && this.settings.get("irc.sidebar.enabled") === true,
+		);
+	}
+
+	resetIrcSidebarSession(): void {
+		this.ircLedger.reset();
+		this.#eventController.resetIrcObservations();
+		this.#ircSidebarRequestedVisible = false;
+		this.#ircSplitView.setVisible(false);
+		this.#uiHelpers.resetIrcSidebarHint();
+		this.#syncIrcSidebarAvailabilityFromSettings();
+	}
+
+	#invalidateIrcSidebarRender(): void {
+		clearRenderCache();
+		this.#ircSplitView.invalidate();
 	}
 
 	toggleThinkingBlockVisibility(): void {

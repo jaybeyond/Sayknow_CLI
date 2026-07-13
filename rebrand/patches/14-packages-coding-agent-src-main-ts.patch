@@ -8,7 +8,7 @@
  import { BUNDLED_GROK_BUILD_EXTENSION_ID, getBundledGrokBuildExtensionFactory } from "./defaults/skc-grok-cli";
  import { initializeWithSettings } from "./discovery";
  import { exportFromFile } from "./export/html";
-@@ -864,6 +865,8 @@
+@@ -1090,6 +1091,8 @@
  
  	// Initialize discovery system with settings for provider persistence
  	logger.time("initializeWithSettings", initializeWithSettings, settingsInstance);

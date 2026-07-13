@@ -98,6 +98,82 @@ export const CURSOR_MARKER = "\x1b_pi:c\x07";
 
 export { visibleWidth };
 
+/** Durable source identifier for a semantically anchored viewport row. */
+export type ViewportAnchorId = string;
+
+export interface ViewportAnchorRow {
+	id: ViewportAnchorId;
+	graphemeStart: number;
+	graphemeEnd: number;
+	cellStart: number;
+	cellEnd: number;
+}
+
+export interface ViewportAnchorRender {
+	lines: string[];
+	anchors: Array<ViewportAnchorRow | null>;
+}
+
+export interface ViewportAnchorProvider extends Component {
+	renderWithViewportAnchors(width: number): ViewportAnchorRender;
+}
+
+export interface ViewportAnchorSource {
+	id: ViewportAnchorId;
+}
+
+export interface ViewportAnchorSourceRenderer extends Component {
+	renderWithViewportAnchorSource(width: number, source: ViewportAnchorSource): ViewportAnchorRender;
+}
+
+export function isViewportAnchorProvider(component: Component): component is ViewportAnchorProvider {
+	if (!("renderWithViewportAnchors" in component) || typeof component.renderWithViewportAnchors !== "function") {
+		return false;
+	}
+	return !(
+		component instanceof Container &&
+		component.renderWithViewportAnchors === Container.prototype.renderWithViewportAnchors &&
+		component.render !== Container.prototype.render
+	);
+}
+
+export function isViewportAnchorSourceRenderer(component: Component): component is ViewportAnchorSourceRenderer {
+	return (
+		"renderWithViewportAnchorSource" in component && typeof component.renderWithViewportAnchorSource === "function"
+	);
+}
+
+export function renderComponentWithViewportAnchors(component: Component, width: number): ViewportAnchorRender {
+	if (isViewportAnchorProvider(component)) {
+		const rendered = component.renderWithViewportAnchors(width);
+		if (rendered.anchors.length !== rendered.lines.length) {
+			throw new Error(
+				`Viewport anchor provider returned ${rendered.anchors.length} anchors for ${rendered.lines.length} lines`,
+			);
+		}
+		return rendered;
+	}
+	const lines = component.render(width);
+	return { lines, anchors: lines.map(() => null) };
+}
+
+export function renderComponentWithViewportAnchorSource(
+	component: Component,
+	width: number,
+	source: ViewportAnchorSource,
+): ViewportAnchorRender {
+	if (!isViewportAnchorSourceRenderer(component)) {
+		throw new TypeError("Viewport anchor sources require renderer-owned row metadata");
+	}
+	const rendered = component.renderWithViewportAnchorSource(width, source);
+	if (rendered.anchors.length !== rendered.lines.length) {
+		throw new Error(
+			`Viewport anchor source renderer returned ${rendered.anchors.length} anchors for ${rendered.lines.length} lines`,
+		);
+	}
+	return rendered;
+}
+
 /**
  * Anchor position for overlays
  */
@@ -212,6 +288,17 @@ function useViewportRepaintPath(terminal: Terminal): boolean {
 	});
 }
 
+function allowsHostNeutralOverflowRepaint(
+	terminal: Terminal,
+	env: Record<string, string | undefined> = Bun.env,
+): boolean {
+	return (
+		terminal.isProcessTerminal === true &&
+		!isTermuxSession(env) &&
+		!(isMultiplexerSession(env) && useLegacyMultiplexerFullRender(env))
+	);
+}
+
 function shouldPreserveScrollbackOnFullClear(terminal: Terminal): boolean {
 	return isViewportSensitiveHost(Bun.env, process.platform, terminal.isProcessTerminal === true);
 }
@@ -271,9 +358,10 @@ export interface OverlayHandle {
 /**
  * Container - a component that contains other components
  */
-export class Container implements Component {
+export class Container implements ViewportAnchorProvider {
 	children: Component[] = [];
 	#disposed = false;
+	#viewportAnchorSources = new Map<Component, ViewportAnchorSource>();
 
 	addChild(component: Component): void {
 		this.children.push(component);
@@ -283,6 +371,7 @@ export class Container implements Component {
 		const index = this.children.indexOf(component);
 		if (index !== -1) {
 			this.children.splice(index, 1);
+			this.#viewportAnchorSources.delete(component);
 			component.dispose?.();
 		}
 	}
@@ -292,45 +381,62 @@ export class Container implements Component {
 		const index = this.children.indexOf(component);
 		if (index !== -1) {
 			this.children.splice(index, 1);
+			this.#viewportAnchorSources.delete(component);
 		}
 	}
 
 	clear(): void {
-		for (const child of this.children) {
-			child.dispose?.();
-		}
+		for (const child of this.children) child.dispose?.();
 		this.children = [];
+		this.#viewportAnchorSources.clear();
 	}
 
 	/** Remove all children without disposing them (for detach-then-readd reuse). */
 	detachAll(): void {
 		this.children = [];
+		this.#viewportAnchorSources.clear();
+	}
+
+	/** Registers a direct child as eligible for semantic viewport anchoring. */
+	setViewportAnchorSource(component: Component, source: ViewportAnchorSource | null): void {
+		if (source !== null && !isViewportAnchorSourceRenderer(component)) {
+			throw new TypeError("Viewport anchor sources require renderer-owned row metadata");
+		}
+		if (source === null) this.#viewportAnchorSources.delete(component);
+		else this.#viewportAnchorSources.set(component, source);
 	}
 
 	dispose(): void {
 		if (this.#disposed) return;
 		this.#disposed = true;
-		for (const child of this.children) {
-			child.dispose?.();
-		}
+		for (const child of this.children) child.dispose?.();
+		this.#viewportAnchorSources.clear();
 	}
 
 	invalidate(): void {
-		for (const child of this.children) {
-			child.invalidate?.();
-		}
+		for (const child of this.children) child.invalidate?.();
 	}
 
 	render(width: number): string[] {
+		return this.renderWithViewportAnchors(width).lines;
+	}
+
+	renderWithViewportAnchors(width: number): ViewportAnchorRender {
 		width = Math.max(1, width);
 		const lines: string[] = [];
+		const anchors: Array<ViewportAnchorRow | null> = [];
 		for (const child of this.children) {
-			const childLines = safeRenderComponent(child, width, "container-child");
-			for (let i = 0; i < childLines.length; i++) {
-				lines.push(childLines[i]);
+			const source = this.#viewportAnchorSources.get(child);
+			const rendered =
+				source === undefined
+					? safeRenderComponentWithViewportAnchors(child, width, "container-child")
+					: safeRenderComponentWithViewportAnchorSource(child, width, source, "container-anchor-child");
+			for (let index = 0; index < rendered.lines.length; index++) {
+				lines.push(rendered.lines[index]);
+				anchors.push(rendered.anchors[index] ?? null);
 			}
 		}
-		return lines;
+		return { lines, anchors };
 	}
 }
 
@@ -348,23 +454,58 @@ const reportedRenderErrors = new Set<string>();
  * command such as `/background`). Isolate the failure: log it once, emit a
  * visible fallback line, and keep rendering the rest of the tree.
  */
+function renderFailure(component: Component, where: string, err: unknown): string[] {
+	const name = component?.constructor?.name ?? "Component";
+	const key = `${where}:${name}:${err instanceof Error ? err.message : String(err)}`;
+	if (!reportedRenderErrors.has(key)) {
+		if (reportedRenderErrors.size >= MAX_REPORTED_RENDER_ERRORS) reportedRenderErrors.clear();
+		reportedRenderErrors.add(key);
+		logger.error("Component render failed; emitting fallback line", {
+			where,
+			component: name,
+			error: err instanceof Error ? err.message : String(err),
+			stack: err instanceof Error ? err.stack : undefined,
+		});
+	}
+	return [`[render error: ${name}]`];
+}
+
+let viewportAnchorRenderFailureCount = 0;
+
 function safeRenderComponent(component: Component, width: number, where: string): string[] {
 	try {
 		return component.render(width);
 	} catch (err) {
-		const name = component?.constructor?.name ?? "Component";
-		const key = `${where}:${name}:${err instanceof Error ? err.message : String(err)}`;
-		if (!reportedRenderErrors.has(key)) {
-			if (reportedRenderErrors.size >= MAX_REPORTED_RENDER_ERRORS) reportedRenderErrors.clear();
-			reportedRenderErrors.add(key);
-			logger.error("Component render failed; emitting fallback line", {
-				where,
-				component: name,
-				error: err instanceof Error ? err.message : String(err),
-				stack: err instanceof Error ? err.stack : undefined,
-			});
-		}
-		return [`[render error: ${name}]`];
+		return renderFailure(component, where, err);
+	}
+}
+
+function safeRenderComponentWithViewportAnchors(
+	component: Component,
+	width: number,
+	where: string,
+): ViewportAnchorRender {
+	try {
+		return renderComponentWithViewportAnchors(component, width);
+	} catch (err) {
+		viewportAnchorRenderFailureCount += 1;
+		const lines = renderFailure(component, where, err);
+		return { lines, anchors: lines.map(() => null) };
+	}
+}
+
+function safeRenderComponentWithViewportAnchorSource(
+	component: Component,
+	width: number,
+	source: ViewportAnchorSource,
+	where: string,
+): ViewportAnchorRender {
+	try {
+		return renderComponentWithViewportAnchorSource(component, width, source);
+	} catch (err) {
+		viewportAnchorRenderFailureCount += 1;
+		const lines = renderFailure(component, where, err);
+		return { lines, anchors: lines.map(() => null) };
 	}
 }
 
@@ -372,6 +513,18 @@ type LineNormalizationCacheEntry = {
 	normalized: string;
 	terminated: string;
 	width: number | undefined;
+};
+
+type ViewportAnchorFrame = {
+	startRow: number;
+	anchors: Array<ViewportAnchorRow | null>;
+};
+
+type ManualViewportAnchor = {
+	id: ViewportAnchorId;
+	graphemeIndex: number;
+	cellOffset: number;
+	desiredScreenRow: number;
 };
 
 type TuiRenderCounterSnapshot = {
@@ -386,6 +539,7 @@ type TuiRenderCounterSnapshot = {
 export class TUI extends Container {
 	terminal: Terminal;
 	#previousLines: string[] = [];
+	#latestRenderedLines: string[] = [];
 	/**
 	 * Raw (pre-normalization) lines from the previous frame, kept only when the
 	 * virtual-viewport flag is on. Used to detect whether the off-screen prefix is
@@ -418,6 +572,11 @@ export class TUI extends Container {
 	#hardwareCursorRow = 0; // Actual terminal cursor row (may differ due to IME positioning)
 	#viewportTopRow = 0; // Content row currently mapped to screen row 0
 	#manualViewportTop: number | undefined;
+	#viewportAnchorComponent: Component | null = null;
+	#viewportAnchorFrame: ViewportAnchorFrame | null = null;
+	#manualViewportAnchor: ManualViewportAnchor | null = null;
+	#manualViewportFallbackAnchors: ManualViewportAnchor[] = [];
+	#reconcileMissingViewportAnchor = false;
 	#lastCursorPosition: { row: number; col: number } | null = null;
 	#sixelProbePendingDa = false;
 	#sixelProbePendingGraphics = false;
@@ -555,15 +714,100 @@ export class TUI extends Container {
 		this.#bottomPinnedComponent = component;
 		this.requestRender();
 	}
+
+	/** Register the direct child whose rows are eligible for semantic viewport anchoring. */
+	setViewportAnchorComponent(component: Component | null): void {
+		if (component !== null && !isViewportAnchorProvider(component)) {
+			throw new TypeError("Viewport anchor components must provide renderer-owned row metadata");
+		}
+		if (this.#viewportAnchorComponent === component) return;
+		this.#viewportAnchorComponent = component;
+		this.#viewportAnchorFrame = null;
+	}
+
+	/** Clear manual viewport ownership before replacing the transcript identity namespace. */
+	resetViewportAnchorIntent(): void {
+		this.#manualViewportTop = undefined;
+		this.#manualViewportAnchor = null;
+		this.#manualViewportFallbackAnchors = [];
+		this.#reconcileMissingViewportAnchor = false;
+		this.#viewportAnchorFrame = null;
+	}
+
+	/** Allow one semantic-neighbor reconciliation after a definitive same-transcript rebuild. */
+	prepareViewportAnchorForTranscriptRebuild(): void {
+		if (this.#manualViewportAnchor !== null) this.#reconcileMissingViewportAnchor = true;
+	}
+
 	scrollViewportPages(direction: -1 | 1): boolean {
 		const height = this.terminal.rows;
 		const width = this.terminal.columns;
 		if (height <= 0 || width <= 0 || this.#previousLines.length === 0) return false;
 		const maxViewportTop = Math.max(0, this.#previousLines.length - height);
-		const currentViewportTop = Math.max(0, Math.min(maxViewportTop, this.#manualViewportTop ?? this.#viewportTopRow));
-		const pageStep = Math.max(1, height - 1);
-		const targetViewportTop = Math.max(0, Math.min(maxViewportTop, currentViewportTop + direction * pageStep));
-
+		let currentViewportTop = Math.max(0, Math.min(maxViewportTop, this.#manualViewportTop ?? this.#viewportTopRow));
+		const frame = this.#viewportAnchorFrame;
+		if (this.#manualViewportAnchor !== null) {
+			if (frame === null) return false;
+			const resolvedViewportTop = this.#resolveManualAnchor(frame);
+			if (resolvedViewportTop === null) return false;
+			currentViewportTop = Math.max(0, Math.min(maxViewportTop, resolvedViewportTop));
+		}
+		const targetViewportTop = Math.max(
+			0,
+			Math.min(maxViewportTop, currentViewportTop + direction * Math.max(1, height - 1)),
+		);
+		if (frame !== null) {
+			const desiredScreenRow = this.#manualViewportAnchor?.desiredScreenRow ?? (direction < 0 ? 0 : height - 1);
+			const targetRow = targetViewportTop + desiredScreenRow - frame.startRow;
+			let selected: { row: number; anchor: ViewportAnchorRow } | undefined;
+			const firstCandidateRow = Math.max(0, targetViewportTop - frame.startRow);
+			const lastCandidateRow = Math.min(frame.anchors.length, targetViewportTop + height - frame.startRow);
+			for (let row = firstCandidateRow; row < lastCandidateRow; row++) {
+				const anchor = frame.anchors[row];
+				if (anchor === null) continue;
+				if (
+					selected === undefined ||
+					Math.abs(row - targetRow) < Math.abs(selected.row - targetRow) ||
+					(Math.abs(row - targetRow) === Math.abs(selected.row - targetRow) &&
+						(direction < 0 ? row < selected.row : row > selected.row))
+				)
+					selected = { row, anchor };
+			}
+			if (selected === undefined) {
+				if (this.#manualViewportAnchor !== null) return false;
+			} else {
+				this.#manualViewportAnchor = {
+					id: selected.anchor.id,
+					graphemeIndex:
+						direction < 0
+							? selected.anchor.graphemeStart
+							: Math.max(selected.anchor.graphemeStart, selected.anchor.graphemeEnd - 1),
+					cellOffset:
+						direction < 0
+							? selected.anchor.cellStart
+							: Math.max(selected.anchor.cellStart, selected.anchor.cellEnd - 1),
+					desiredScreenRow: selected.row + frame.startRow - targetViewportTop,
+				};
+				const fallbacks: ManualViewportAnchor[] = [];
+				for (let row = firstCandidateRow; row < lastCandidateRow; row++) {
+					const anchor = frame.anchors[row];
+					if (anchor === null || row === selected.row) continue;
+					fallbacks.push({
+						id: anchor.id,
+						graphemeIndex:
+							direction < 0 ? anchor.graphemeStart : Math.max(anchor.graphemeStart, anchor.graphemeEnd - 1),
+						cellOffset: direction < 0 ? anchor.cellStart : Math.max(anchor.cellStart, anchor.cellEnd - 1),
+						desiredScreenRow: row + frame.startRow - targetViewportTop,
+					});
+				}
+				fallbacks.sort(
+					(a, b) =>
+						Math.abs(a.desiredScreenRow - this.#manualViewportAnchor!.desiredScreenRow) -
+						Math.abs(b.desiredScreenRow - this.#manualViewportAnchor!.desiredScreenRow),
+				);
+				this.#manualViewportFallbackAnchors = fallbacks;
+			}
+		}
 		this.#manualViewportTop = targetViewportTop;
 		return this.#repaintViewportFromLines(
 			this.#previousLines,
@@ -572,6 +816,7 @@ export class TUI extends Container {
 			targetViewportTop,
 			null,
 			"manual viewport scroll",
+			this.#manualViewportAnchor !== null,
 		);
 	}
 
@@ -579,16 +824,22 @@ export class TUI extends Container {
 		if (this.#manualViewportTop === undefined) return false;
 		const height = this.terminal.rows;
 		const width = this.terminal.columns;
-		const liveViewportTop = Math.max(0, this.#previousLines.length - height);
+		const liveLines = this.#latestRenderedLines;
+		const liveViewportTop = Math.max(0, liveLines.length - height);
 		this.#manualViewportTop = undefined;
-		return this.#repaintViewportFromLines(
-			this.#previousLines,
+		this.#manualViewportAnchor = null;
+		this.#manualViewportFallbackAnchors = [];
+		this.#reconcileMissingViewportAnchor = false;
+		const repainted = this.#repaintViewportFromLines(
+			liveLines,
 			width,
 			height,
 			liveViewportTop,
 			this.#lastCursorPosition,
 			"manual viewport follow live",
 		);
+		if (repainted) this.#previousLines = liveLines;
+		return repainted;
 	}
 
 	/**
@@ -926,6 +1177,7 @@ export class TUI extends Container {
 		// focus/listener state is intentionally preserved so input routing survives
 		// a resume.
 		this.#previousLines = [];
+		this.#latestRenderedLines = [];
 		this.#previousRaw = [];
 		this.#lineNormalizationCache.clear();
 		this.#lineTruncationCache.clear();
@@ -962,6 +1214,7 @@ export class TUI extends Container {
 			// A forced full redraw supersedes any queued input-priority render.
 			this.#inputRenderPending = false;
 			this.#previousLines = [];
+			this.#latestRenderedLines = [];
 			this.#previousRaw = [];
 			this.#lineNormalizationCache.clear();
 			this.#lineTruncationCache.clear();
@@ -1547,7 +1800,11 @@ export class TUI extends Container {
 		return lines;
 	}
 
-	#padBeforeBottomPinnedComponent(lines: string[], height: number): string[] {
+	#padBeforeBottomPinnedComponent(
+		lines: string[],
+		height: number,
+		renderedChildren: Map<Component, string[]>,
+	): string[] {
 		const component = this.#bottomPinnedComponent;
 		if (component === null || lines.length >= height) return lines;
 
@@ -1562,7 +1819,7 @@ export class TUI extends Container {
 
 		let pinnedLineCount = 0;
 		for (let i = pinnedStart; i < this.children.length; i++) {
-			pinnedLineCount += safeRenderComponent(this.children[i], this.terminal.columns, "pinned").length;
+			pinnedLineCount += (renderedChildren.get(this.children[i]) ?? []).length;
 		}
 
 		const blankRows = height - lines.length;
@@ -1571,6 +1828,55 @@ export class TUI extends Container {
 		padded.splice(insertAt, 0, ...Array.from({ length: blankRows }, () => ""));
 		return padded;
 	}
+	#resolveManualAnchor(frame: ViewportAnchorFrame): number | null {
+		const anchor = this.#manualViewportAnchor;
+		if (anchor === null) return null;
+		const row = frame.anchors.findIndex(
+			candidate =>
+				candidate !== null &&
+				candidate.id === anchor.id &&
+				candidate.graphemeStart <= anchor.graphemeIndex &&
+				anchor.graphemeIndex < candidate.graphemeEnd &&
+				candidate.cellStart <= anchor.cellOffset &&
+				anchor.cellOffset < candidate.cellEnd,
+		);
+		return row < 0 ? null : Math.max(0, frame.startRow + row - anchor.desiredScreenRow);
+	}
+
+	#resolvePreparedManualAnchor(frame: ViewportAnchorFrame): number | null {
+		const previous = this.#manualViewportAnchor;
+		for (const fallback of this.#manualViewportFallbackAnchors) {
+			this.#manualViewportAnchor = fallback;
+			const resolved = this.#resolveManualAnchor(frame);
+			if (resolved !== null) return resolved;
+		}
+		const targetRow = Math.max(
+			0,
+			Math.min(
+				frame.anchors.length - 1,
+				(this.#manualViewportTop ?? 0) + (previous?.desiredScreenRow ?? 0) - frame.startRow,
+			),
+		);
+		let selectedRow = -1;
+		for (let distance = 0; distance < frame.anchors.length; distance++) {
+			for (const row of [targetRow - distance, targetRow + distance]) {
+				if (row < 0 || row >= frame.anchors.length || frame.anchors[row] === null) continue;
+				selectedRow = row;
+				break;
+			}
+			if (selectedRow >= 0) break;
+		}
+		const selected = selectedRow >= 0 ? frame.anchors[selectedRow] : null;
+		if (selected === null) return null;
+		this.#manualViewportAnchor = {
+			id: selected.id,
+			graphemeIndex: selected.graphemeStart,
+			cellOffset: selected.cellStart,
+			desiredScreenRow: previous?.desiredScreenRow ?? 0,
+		};
+		return this.#resolveManualAnchor(frame);
+	}
+
 	#repaintViewportFromLines(
 		lines: string[],
 		width: number,
@@ -1578,9 +1884,10 @@ export class TUI extends Container {
 		viewportTop: number,
 		cursorPos: { row: number; col: number } | null,
 		reason: string,
+		allowPastLiveBottom = false,
 	): boolean {
 		if (height <= 0 || width <= 0) return false;
-		const maxViewportTop = Math.max(0, lines.length - height);
+		const maxViewportTop = Math.max(0, lines.length - (allowPastLiveBottom ? 1 : height));
 		const nextViewportTop = Math.max(0, Math.min(maxViewportTop, viewportTop));
 		const currentScreenRow = Math.max(0, Math.min(height - 1, this.#hardwareCursorRow - this.#viewportTopRow));
 		let buffer = "\x1b[?2026h";
@@ -1642,13 +1949,27 @@ export class TUI extends Container {
 			return targetScreenRow - currentScreenRow;
 		};
 
-		// Render all components to get new lines
+		// Render direct children once so the registered transcript component retains row ownership.
 		const renderTreeStart = renderMetrics.now();
-		let newLines = this.render(width);
+		const renderedLines: string[] = [];
+		const renderedChildren = new Map<Component, string[]>();
+		let anchorFrame: ViewportAnchorFrame | null = null;
+		const anchorRenderFailureCountBefore = viewportAnchorRenderFailureCount;
+		for (const child of this.children) {
+			const rendered = safeRenderComponentWithViewportAnchors(child, width, "tui-child");
+			renderedChildren.set(child, rendered.lines);
+			if (child === this.#viewportAnchorComponent && rendered.anchors.some(anchor => anchor !== null)) {
+				anchorFrame = { startRow: renderedLines.length, anchors: rendered.anchors };
+			}
+			for (const line of rendered.lines) renderedLines.push(line);
+		}
+		const anchorRenderFailed = viewportAnchorRenderFailureCount !== anchorRenderFailureCountBefore;
+		let newLines = renderedLines;
+		this.#viewportAnchorFrame = anchorFrame;
 		if (renderMetrics.enabled) renderMetrics.recordHelper("renderTree", renderMetrics.now() - renderTreeStart);
 
 		if (this.#bottomPinnedComponent !== null && height > 0) {
-			newLines = this.#padBeforeBottomPinnedComponent(newLines, height);
+			newLines = this.#padBeforeBottomPinnedComponent(newLines, height, renderedChildren);
 		}
 
 		// Composite overlays into the rendered lines (before differential compare)
@@ -1719,20 +2040,78 @@ export class TUI extends Container {
 			renderMetrics.recordLineCount("measured", total - diffStart);
 			if (usedWindowNormalize) renderMetrics.recordLineCount("offscreenScan", diffStart);
 		}
+		this.#latestRenderedLines = newLines;
 
 		if (this.#manualViewportTop !== undefined) {
-			const maxViewportTop = Math.max(0, newLines.length - height);
-			const nextViewportTop = Math.max(0, Math.min(maxViewportTop, this.#manualViewportTop));
+			let resolvedAnchorTop = anchorFrame === null ? null : this.#resolveManualAnchor(anchorFrame);
+			if (
+				this.#manualViewportAnchor !== null &&
+				resolvedAnchorTop === null &&
+				this.#reconcileMissingViewportAnchor
+			) {
+				resolvedAnchorTop = anchorFrame === null ? null : this.#resolvePreparedManualAnchor(anchorFrame);
+				this.#reconcileMissingViewportAnchor = false;
+				if (resolvedAnchorTop === null) {
+					this.#manualViewportAnchor = null;
+					this.#manualViewportFallbackAnchors = [];
+				}
+			}
+			if (this.#manualViewportAnchor !== null && resolvedAnchorTop === null) {
+				if (anchorRenderFailed) {
+					// Keep semantic intent armed for recovery, but render the diagnostic frame
+					// instead of masking a provider failure behind stale transcript content.
+					this.#repaintViewportFromLines(
+						newLines,
+						width,
+						height,
+						this.#manualViewportTop,
+						null,
+						"failed semantic viewport render",
+						true,
+					);
+					this.#previousLines = newLines;
+					this.#previousWidth = width;
+					this.#previousHeight = height;
+					return;
+				}
+				// A formerly valid semantic target is temporarily absent (provider removal,
+				// replacement, eviction, or object deletion). Keep the last resolved frame
+				// instead of silently reinterpreting manual intent as a numeric viewport.
+				const retainedLines = this.#previousLines.length > 0 ? this.#previousLines : newLines;
+				this.#repaintViewportFromLines(
+					retainedLines,
+					width,
+					height,
+					this.#manualViewportTop,
+					null,
+					"unresolved semantic viewport render",
+					true,
+				);
+				this.#previousWidth = width;
+				this.#previousHeight = height;
+				return;
+			}
+			const nextViewportTop = resolvedAnchorTop ?? this.#manualViewportTop;
+			if (
+				this.#previousWidth === width &&
+				this.#previousHeight === height &&
+				nextViewportTop === this.#manualViewportTop &&
+				newLines.length === this.#previousLines.length &&
+				newLines.every((line, index) => line === this.#previousLines[index])
+			) {
+				return;
+			}
 			this.#manualViewportTop = nextViewportTop;
-			const repaintCursorPos = null;
+			this.#reconcileMissingViewportAnchor = false;
 			if (
 				this.#repaintViewportFromLines(
 					newLines,
 					width,
 					height,
 					nextViewportTop,
-					repaintCursorPos,
+					null,
 					"manual viewport render",
+					this.#manualViewportAnchor !== null,
 				)
 			) {
 				this.#previousLines = newLines;
@@ -1878,7 +2257,11 @@ export class TUI extends Container {
 		// Configurable via setClearOnShrink() or PI_CLEAR_ON_SHRINK=0 env var
 		if (this.#clearOnShrink && newLines.length < this.#previousLines.length && this.overlayStack.length === 0) {
 			logRedraw(`clearOnShrink (prev=${this.#previousLines.length}, new=${newLines.length})`);
-			if (useViewportRepaintPath(this.terminal)) {
+			if (
+				useViewportRepaintPath(this.terminal) ||
+				((this.#previousLines.length > height || newLines.length > height) &&
+					allowsHostNeutralOverflowRepaint(this.terminal))
+			) {
 				viewportRepaint(`clearOnShrink (prev=${this.#previousLines.length}, new=${newLines.length})`);
 			} else {
 				fullRender(true, "clearOnShrink");
@@ -1981,7 +2364,12 @@ export class TUI extends Container {
 		// back to live.
 		if (firstChanged < prevViewportTop) {
 			logRedraw(`firstChanged < viewportTop (${firstChanged} < ${prevViewportTop})`);
-			if (useViewportRepaintPath(this.terminal)) {
+			if (
+				useViewportRepaintPath(this.terminal) ||
+				(newLines.length <= this.#previousLines.length &&
+					(this.#previousLines.length > height || newLines.length > height) &&
+					allowsHostNeutralOverflowRepaint(this.terminal))
+			) {
 				viewportRepaint(`firstChanged < viewportTop (${firstChanged} < ${prevViewportTop})`);
 				return;
 			}
@@ -2163,11 +2551,30 @@ export class TUI extends Container {
 		return { seq, toRow: targetRow };
 	}
 
+	/**
+	 * Register an emitter whose escape payload is appended to every render
+	 * write (inside its own synchronized-output block, cursor saved/restored).
+	 * Used for absolute-positioned overlays such as pixel-image pets that live
+	 * outside the line-based component model. Return null to emit nothing.
+	 */
+	setPostRenderEmitter(emitter: (() => string | null) | undefined): void {
+		this.#postRenderEmitter = emitter;
+	}
+
+	#postRenderEmitter: (() => string | null) | undefined;
+
 	#writeRenderBufferAndReanchorImeCursor(
 		buffer: string,
 		cursorPos: { row: number; col: number } | null,
 		totalLines: number,
 	): boolean {
+		const overlay = this.#postRenderEmitter?.();
+		if (overlay) {
+			// DECSC/DECRC keep the hardware cursor stable; the dedicated
+			// synchronized block prevents visible tearing while the overlay
+			// area is cleared and redrawn.
+			buffer += `\x1b[?2026h\x1b7${overlay}\x1b8\x1b[?2026l`;
+		}
 		if (!this.#writeTerminal(buffer)) return false;
 		if (!this.#imeCursorActive) return true;
 		return this.#writeCursorPosition(cursorPos, totalLines);

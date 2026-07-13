@@ -154,7 +154,7 @@ describe("release bump set equals publish set", () => {
 		for await (const rel of glob.scan(repoRoot)) {
 			const manifest = (await Bun.file(path.join(repoRoot, rel)).json()) as PackageManifest;
 			if (manifest.private === true) continue;
-			bumpableDirs.add(path.dirname(rel));
+			bumpableDirs.add(path.dirname(rel).replaceAll(path.sep, "/"));
 		}
 
 		// ci-release-publish.ts publishes exactly the dirs in its exported `packages` array.

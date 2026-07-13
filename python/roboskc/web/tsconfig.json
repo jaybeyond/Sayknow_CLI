@@ -14,9 +14,7 @@
     "jsxImportSource": "solid-js",
     "noEmit": true,
     "isolatedModules": true,
-    "esModuleInterop": true,
     "skipLibCheck": true,
-    "allowSyntheticDefaultImports": true,
     "useDefineForClassFields": true,
     "types": ["vite/client", "bun"]
   },

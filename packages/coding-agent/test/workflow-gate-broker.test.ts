@@ -63,6 +63,63 @@ describe("WorkflowGateBroker", () => {
 		expect(audit.some(e => e.event === "gate_response_accepted")).toBe(true);
 	});
 
+	it("preserves acknowledgement policy updates made before advance", async () => {
+		const dir = mkdtempSync(path.join(tmpdir(), "gate-ack-policy-"));
+		const file = path.join(dir, "gates.json");
+		const store = new FileGateStore(file);
+		let broker: WorkflowGateBroker;
+		broker = new WorkflowGateBroker("run-ack-policy", store, {
+			finalizeAccepted: async record => {
+				if (record.ackPolicy?.kind !== "telegram_selected_v1") throw new Error("missing Telegram policy");
+				broker.updateAckPolicy(record.gate.gate_id, {
+					...record.ackPolicy,
+					state: "delivered",
+					outcome: { status: "delivered", messageId: 42 },
+					updatedAt: "terminal",
+				});
+			},
+		});
+		const gate = broker.openGate({ stage: "deep-interview", kind: "question", schema: { type: "string" } });
+		await broker.resolve(
+			{ gate_id: gate.gate_id, answer: "yes" },
+			{
+				semanticDisposition: "commit",
+				resolutionOrigin: { kind: "telegram_notification", interactionActionId: "interaction-1" },
+				ackPolicy: {
+					kind: "telegram_selected_v1",
+					commitKey: "commit-1",
+					actionId: "interaction-1",
+					state: "pending",
+					updatedAt: "pending",
+				},
+			},
+		);
+		expect(store.get(gate.gate_id)).toMatchObject({
+			advanced: true,
+			ackPolicy: {
+				kind: "telegram_selected_v1",
+				state: "delivered",
+				outcome: { status: "delivered", messageId: 42 },
+			},
+		});
+		const reopened = new FileGateStore(file).get(gate.gate_id);
+		expect(reopened).toMatchObject({
+			status: "accepted",
+			advanced: true,
+			answer: "yes",
+			semanticDisposition: "commit",
+			resolutionOrigin: { kind: "telegram_notification", interactionActionId: "interaction-1" },
+			resolution: { gate_id: gate.gate_id, status: "accepted" },
+			ackPolicy: {
+				kind: "telegram_selected_v1",
+				commitKey: "commit-1",
+				actionId: "interaction-1",
+				state: "delivered",
+				outcome: { status: "delivered", messageId: 42 },
+			},
+		});
+	});
+
 	it("leaves the gate pending on an invalid answer", async () => {
 		const { broker, advanced } = makeBroker();
 		const gate = broker.openGate({
@@ -110,6 +167,32 @@ describe("WorkflowGateBroker", () => {
 		const b2 = new WorkflowGateBroker("run-xyz", new FileGateStore(file));
 		const res = await b2.resolve({ gate_id: gate.gate_id, answer: "an answer" });
 		expect(res.status).toBe("accepted");
+	});
+
+	it("serializes live resolution with recovery so advance runs after finalization exactly once", async () => {
+		const store = new MemoryGateStore();
+		const finalizationStarted = Promise.withResolvers<void>();
+		const releaseFinalization = Promise.withResolvers<void>();
+		let advances = 0;
+		const broker = new WorkflowGateBroker("run-concurrent-recovery", store, {
+			finalizeAccepted: async () => {
+				finalizationStarted.resolve();
+				await releaseFinalization.promise;
+			},
+			advance: () => {
+				advances++;
+			},
+		});
+		const gate = broker.openGate({ stage: "ralplan", kind: "approval", schema: { type: "string" } });
+		const resolving = broker.resolve({ gate_id: gate.gate_id, answer: "approve" });
+		await finalizationStarted.promise;
+		const recovering = broker.recover();
+		await Promise.resolve();
+		expect(advances).toBe(0);
+		releaseFinalization.resolve();
+		await expect(resolving).resolves.toMatchObject({ status: "accepted" });
+		await expect(recovering).resolves.toEqual([]);
+		expect(advances).toBe(1);
 	});
 
 	it("recover() advances accepted-but-not-advanced gates exactly once", async () => {

@@ -1,5 +1,16 @@
 import type { AssistantMessage, ImageContent, Usage } from "@sayknow-cli/ai";
-import { type Component, Container, Image, ImageProtocol, Markdown, Spacer, TERMINAL, Text } from "@sayknow-cli/tui";
+import {
+	type Component,
+	Container,
+	Image,
+	ImageProtocol,
+	isViewportAnchorSourceRenderer,
+	Markdown,
+	Spacer,
+	TERMINAL,
+	Text,
+	type ViewportAnchorSource,
+} from "@sayknow-cli/tui";
 import { formatNumber } from "@sayknow-cli/utils";
 import { settings } from "../../config/settings";
 import { renderDeepInterviewAssistantText } from "../../deep-interview/render-middleware";
@@ -62,6 +73,7 @@ interface AssistantMessageUpdateOptions {
 type AssistantChildDescriptor = {
 	key: string;
 	component: Component;
+	anchorSource?: ViewportAnchorSource;
 };
 
 /**
@@ -81,21 +93,29 @@ export class AssistantMessageComponent extends Container {
 	#contentBlockKeys = new WeakMap<object, string>();
 	#nextContentBlockKey = 0;
 	#reusableChildren = new WeakSet<Component>();
-
+	#viewportAnchorId?: string;
 	constructor(
 		message?: AssistantMessage,
 		private hideThinkingBlock = false,
 		private readonly onImageUpdate?: () => void,
+		viewportAnchorId?: string,
 	) {
 		super();
+		this.#viewportAnchorId = viewportAnchorId;
 
-		// Container for text/thinking content
 		this.#contentContainer = new Container();
 		this.addChild(this.#contentContainer);
 
 		if (message) {
 			this.updateContent(message);
 		}
+	}
+
+	#contentAnchorSource(
+		index: number,
+		kind: "text" | "thinking" | "thinking-hidden",
+	): ViewportAnchorSource | undefined {
+		return this.#viewportAnchorId ? { id: `${this.#viewportAnchorId}:content:${index}:${kind}` } : undefined;
 	}
 
 	override invalidate(): void {
@@ -288,6 +308,12 @@ export class AssistantMessageComponent extends Container {
 	}
 
 	#reconcileChildren(descriptors: AssistantChildDescriptor[]): void {
+		for (const child of this.#contentContainer.children) this.#contentContainer.setViewportAnchorSource(child, null);
+		for (const descriptor of descriptors) {
+			if (descriptor.anchorSource && isViewportAnchorSourceRenderer(descriptor.component)) {
+				this.#contentContainer.setViewportAnchorSource(descriptor.component, descriptor.anchorSource);
+			}
+		}
 		const nextChildren = descriptors.map(descriptor => descriptor.component);
 		if (
 			nextChildren.length === this.#contentContainer.children.length &&
@@ -346,6 +372,7 @@ export class AssistantMessageComponent extends Container {
 				descriptors.push({
 					key: `${blockKey}:text`,
 					component: this.#renderTextBlock(content, streaming && i === activeContentIndex),
+					anchorSource: this.#contentAnchorSource(i, "text"),
 				});
 			} else if (content.type === "thinking" && content.thinking.trim()) {
 				// Add spacing only when another visible assistant content block follows.
@@ -358,11 +385,13 @@ export class AssistantMessageComponent extends Container {
 							`${blockKey}:thinking-hidden`,
 							() => new Text(theme.italic(theme.fg("thinkingText", "Thinking...")), 1, 0),
 						),
+						anchorSource: this.#contentAnchorSource(i, "thinking-hidden"),
 					});
 				} else {
 					descriptors.push({
 						key: `${blockKey}:thinking`,
 						component: this.#renderThinkingBlock(content, streaming && i === activeContentIndex),
+						anchorSource: this.#contentAnchorSource(i, "thinking"),
 					});
 				}
 				if (visibleContentAfter[i]) {

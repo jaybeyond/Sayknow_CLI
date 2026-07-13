@@ -9,7 +9,11 @@ import type { GoalModeState } from "@sayknow-cli/coding-agent/goals/state";
 import { AgentSession } from "@sayknow-cli/coding-agent/session/agent-session";
 import { AuthStorage } from "@sayknow-cli/coding-agent/session/auth-storage";
 import { SessionManager } from "@sayknow-cli/coding-agent/session/session-manager";
-import { TempDir } from "@sayknow-cli/utils";
+import {
+	SKC_COORDINATOR_SESSION_ID_ENV,
+	SKC_COORDINATOR_SESSION_STATE_FILE_ENV,
+} from "@sayknow-cli/coding-agent/skc-runtime/session-state-sidecar";
+import { logger, TempDir } from "@sayknow-cli/utils";
 import { createAssistantMessage } from "./helpers/agent-session-setup";
 
 describe("AgentSession active goal reminders", () => {
@@ -233,5 +237,40 @@ describe("AgentSession active goal reminders", () => {
 
 		expect(continueSpy).not.toHaveBeenCalled();
 		expect(developerReminderCount()).toBe(0);
+	});
+	it("contains background coordinator state persistence failures without leaking sidecar data", async () => {
+		const stateFile = path.join(tempDir.path(), "corrupt-runtime-state.json");
+		await Bun.write(stateFile, '{"private_payload":"must-not-reach-logs"}');
+		const previousStateFile = process.env[SKC_COORDINATOR_SESSION_STATE_FILE_ENV];
+		const previousSessionId = process.env[SKC_COORDINATOR_SESSION_ID_ENV];
+		process.env[SKC_COORDINATOR_SESSION_STATE_FILE_ENV] = stateFile;
+		process.env[SKC_COORDINATOR_SESSION_ID_ENV] = session.sessionId;
+		const deliveredEvents: string[] = [];
+		session.subscribe(event => deliveredEvents.push(event.type));
+		let resolveWarning: (() => void) | undefined;
+		const warningLogged = new Promise<void>(resolve => {
+			resolveWarning = resolve;
+		});
+		const warnSpy = vi.spyOn(logger, "warn").mockImplementation((message, metadata) => {
+			if (message === "Failed to persist coordinator runtime state" && metadata?.event === "turn_start")
+				resolveWarning?.();
+		});
+
+		try {
+			session.agent.emitExternalEvent({ type: "turn_start" });
+			expect(deliveredEvents).toEqual(["turn_start"]);
+			await Promise.race([
+				warningLogged,
+				Bun.sleep(1_000).then(() => {
+					throw new Error("Timed out waiting for coordinator runtime-state failure containment");
+				}),
+			]);
+			expect(warnSpy).toHaveBeenCalledWith("Failed to persist coordinator runtime state", { event: "turn_start" });
+		} finally {
+			if (previousStateFile === undefined) delete process.env[SKC_COORDINATOR_SESSION_STATE_FILE_ENV];
+			else process.env[SKC_COORDINATOR_SESSION_STATE_FILE_ENV] = previousStateFile;
+			if (previousSessionId === undefined) delete process.env[SKC_COORDINATOR_SESSION_ID_ENV];
+			else process.env[SKC_COORDINATOR_SESSION_ID_ENV] = previousSessionId;
+		}
 	});
 });

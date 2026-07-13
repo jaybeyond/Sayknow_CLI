@@ -1,7 +1,7 @@
 {
 	"type": "module",
 	"name": "@sayknow-cli/ai",
-	"version": "0.3.12",
+	"version": "0.3.13",
 	"description": "Unified LLM API with automatic model discovery and provider configuration",
 	"homepage": "https://sayknow-cli.com",
 	"author": "jaybeyond",

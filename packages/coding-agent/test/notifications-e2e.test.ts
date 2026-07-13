@@ -8,7 +8,7 @@
  *   registerAsk -> action_needed broadcast -> reference client renders to
  *   (fake) Telegram with an inline keyboard -> button tap (fake getUpdates
  *   callback_query) -> reference client sends `reply` over WS -> server forwards
- *   it to the host (onReply) -> resolveClient -> action_resolved broadcast.
+ *   it to the host (onReply) -> resolveClaim -> action_resolved broadcast.
  */
 
 import { expect, test } from "bun:test";
@@ -68,26 +68,41 @@ test("e2e: ask -> Telegram -> button tap -> reply -> resolved", async () => {
 	// ---- real server + host gate-resolution simulation ----
 	const stateRoot = `/tmp/notif-e2e-${process.pid}-${Date.now()}`;
 	const srv = new NotificationServer("e2e", "tok", stateRoot, true);
-	let forwarded: { id: string; answerJson: string } | undefined;
+	let forwarded: { id: string; answerJson: string; replyReceiptId: string } | undefined;
+	let forwardedCount = 0;
 	srv.onReply((_err, reply) => {
 		if (!reply) return;
-		forwarded = { id: reply.id, answerJson: reply.answerJson };
+		forwarded = { id: reply.id, answerJson: reply.answerJson, replyReceiptId: reply.replyReceiptId };
+		forwardedCount++;
 		// Simulate the host resolving the real gate, then confirming.
-		srv.resolveClient(reply.id, reply.answerJson, reply.idempotencyKey ?? undefined);
+		srv.resolveClaim(reply.replyReceiptId, reply.answerJson, reply.idempotencyKey ?? undefined);
 	});
 	const ep = await srv.start();
 	expect(ep.url).toContain("ws://127.0.0.1:");
 
 	// ---- real reference client (real WS to the server; fake Telegram) ----
 	const endpointFile = `${stateRoot}/notifications/e2e.json`;
+	let clientError: unknown;
 	const clientDone = runTelegramReferenceClient({
 		botToken: "x",
 		chatId: "1",
 		endpointFile,
 		fetchImpl: fakeFetch,
-	}).catch(() => {});
+	}).catch(error => {
+		clientError = error;
+	});
+	const observer = new WebSocket(`${ep.url}/?token=tok`);
+	let resolvedBroadcast = false;
+	await new Promise<void>((resolve, reject) => {
+		observer.addEventListener("open", () => resolve());
+		observer.addEventListener("error", () => reject(new Error("observer WS error")));
+	});
+	observer.addEventListener("message", event => {
+		const message = JSON.parse(String(event.data)) as { type?: string; id?: string };
+		if (message.type === "action_resolved" && message.id === "qa-ask-1") resolvedBroadcast = true;
+	});
 
-	await waitFor(() => srv.clientCount() >= 1, 4000, "reference client WS connect");
+	await waitFor(() => srv.clientCount() >= 2, 4000, "reference and observer WS connect");
 
 	srv.registerAsk(
 		JSON.stringify({
@@ -109,13 +124,25 @@ test("e2e: ask -> Telegram -> button tap -> reply -> resolved", async () => {
 	await waitFor(() => forwarded !== undefined, 4000, "reply forwarded to host");
 	expect(forwarded?.id).toBe("qa-ask-1");
 	expect(forwarded?.answerJson).toBe("0"); // option index 0 = "Yes"
+	await waitFor(() => resolvedBroadcast, 4000, "resolved broadcast");
+	const callbackData = (askMsg?.reply_markup as { inline_keyboard?: Array<Array<{ callback_data: string }>> })
+		.inline_keyboard?.[0]?.[0]?.callback_data;
+	if (!callbackData) throw new Error("missing callback data");
+	pendingUpdates.push({
+		update_id: updateId++,
+		callback_query: { id: "cq-replay", data: callbackData, message: { chat: { id: 1 } } },
+	});
+	await sleep(100);
+	expect(forwardedCount).toBe(1);
 
 	// idle ping path
 	srv.noteIdle(JSON.stringify({ id: "idle-1", kind: "idle", sessionId: "e2e", summary: "went idle" }));
 	await waitFor(() => sent.some(m => String(m.text).includes("went idle")), 4000, "idle ping delivered");
 
 	srv.stop();
+	observer.close();
 	await clientDone;
+	expect(clientError).toBeUndefined();
 }, 30000);
 
 test("interactive ask answered remotely via answer source (no RPC)", async () => {
@@ -133,7 +160,7 @@ test("interactive ask answered remotely via answer source (no RPC)", async () =>
 		if (!p) return;
 		pending.delete(reply.id);
 		const idx = Number(JSON.parse(reply.answerJson));
-		srv.resolveClient(reply.id, reply.answerJson, reply.idempotencyKey ?? undefined);
+		srv.resolveClaim(reply.replyReceiptId, reply.answerJson, reply.idempotencyKey ?? undefined);
 		p.resolve(p.options[idx]);
 	});
 	const ep = await srv.start();
@@ -186,7 +213,7 @@ test("ask frames are exempt from redaction so they stay readable and answerable"
 		if (!reply) return;
 		const idx = Number(JSON.parse(reply.answerJson));
 		resolvedLabel = options[idx];
-		srv.resolveClient(reply.id, reply.answerJson, reply.idempotencyKey ?? undefined);
+		srv.resolveClaim(reply.replyReceiptId, reply.answerJson, reply.idempotencyKey ?? undefined);
 	});
 	const ep = await srv.start();
 	const ws = new WebSocket(`${ep.url}/?token=tok`);

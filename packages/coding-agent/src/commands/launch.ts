@@ -15,17 +15,22 @@ import { prepareLaunchWorktree } from "../skc-runtime/launch-worktree";
 import {
 	SKC_COORDINATOR_SESSION_ID_ENV,
 	SKC_COORDINATOR_SESSION_STATE_FILE_ENV,
+	SKC_TMUX_OWNER_GENERATION_ENV,
 } from "../skc-runtime/session-state-sidecar";
 
-async function persistCoordinatorLaunchFailure(error: unknown, cwd: string): Promise<void> {
-	const stateFile = process.env[SKC_COORDINATOR_SESSION_STATE_FILE_ENV]?.trim();
+export async function persistCoordinatorLaunchFailure(
+	error: unknown,
+	cwd: string,
+	env: NodeJS.ProcessEnv = process.env,
+): Promise<void> {
+	const stateFile = env[SKC_COORDINATOR_SESSION_STATE_FILE_ENV]?.trim();
 	if (!stateFile) return;
 	const message = error instanceof Error ? error.message : String(error);
 	const code = message.split(":", 1)[0] || "launch_failed";
 	const now = new Date().toISOString();
 	const payload = {
 		schema_version: 1,
-		session_id: process.env[SKC_COORDINATOR_SESSION_ID_ENV]?.trim() || null,
+		session_id: env[SKC_COORDINATOR_SESSION_ID_ENV]?.trim() || null,
 		state: "errored",
 		ready_for_input: false,
 		updated_at: now,
@@ -45,6 +50,9 @@ async function persistCoordinatorLaunchFailure(error: unknown, cwd: string): Pro
 			truncated: false,
 		},
 		error: { code, message, recoverable: true },
+		...(env[SKC_COORDINATOR_SESSION_ID_ENV]?.trim()
+			? { owner_generation: env[SKC_TMUX_OWNER_GENERATION_ENV] ?? null }
+			: {}),
 	};
 	await fs.mkdir(path.dirname(stateFile), { recursive: true });
 	await Bun.write(stateFile, `${JSON.stringify(payload, null, 2)}\n`);

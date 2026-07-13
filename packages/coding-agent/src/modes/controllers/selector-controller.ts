@@ -2,7 +2,7 @@ import { ThinkingLevel } from "@sayknow-cli/agent-core";
 import { getOAuthProviders } from "@sayknow-cli/ai/utils/oauth";
 import type { OAuthProvider } from "@sayknow-cli/ai/utils/oauth/types";
 import type { Component, OverlayHandle } from "@sayknow-cli/tui";
-import { Input, Loader, Spacer, Text } from "@sayknow-cli/tui";
+import { Input, isPetMode, Loader, Spacer, Text } from "@sayknow-cli/tui";
 import { getAgentDbPath, getProjectDir } from "@sayknow-cli/utils";
 import {
 	activateModelProfile,
@@ -71,11 +71,13 @@ import { HistorySearchComponent } from "../components/history-search";
 import { JobsOverlayComponent } from "../components/jobs-overlay";
 import { ModelSelectorComponent } from "../components/model-selector";
 import { OAuthSelectorComponent } from "../components/oauth-selector";
+import { PetSelectorComponent } from "../components/pet-selector";
 import { PluginSelectorComponent } from "../components/plugin-selector";
 import {
 	type ProviderOnboardingAction,
 	ProviderOnboardingSelectorComponent,
 } from "../components/provider-onboarding-selector";
+import type { PetMode } from "../components/sayknow-pet-widget";
 import { SessionObserverOverlayComponent } from "../components/session-observer-overlay";
 import { SessionSelectorComponent } from "../components/session-selector";
 import { SettingsSelectorComponent } from "../components/settings-selector";
@@ -155,9 +157,15 @@ export class SelectorController {
 	 */
 	showSelector(create: (done: () => void) => { component: Component; focus: Component }): void {
 		const done = () => {
-			this.ctx.editorContainer.clear();
-			this.ctx.editorContainer.addChild(this.ctx.editor);
-			this.ctx.ui.setFocus(this.ctx.editor);
+			// Prefer the pet-aware composer restore (InteractiveMode.restoreComposer); fall back
+			// to a plain editor swap for contexts that predate it (e.g. lightweight test doubles).
+			if (typeof this.ctx.restoreComposer === "function") {
+				this.ctx.restoreComposer();
+			} else {
+				this.ctx.editorContainer.clear();
+				this.ctx.editorContainer.addChild(this.ctx.editor);
+				this.ctx.ui.setFocus(this.ctx.editor);
+			}
 		};
 		const { component, focus } = create(done);
 		this.ctx.editorContainer.clear();
@@ -400,6 +408,9 @@ export class SelectorController {
 								this.#refreshThemeUi();
 							});
 						},
+						onPetPreview: mode => {
+							this.ctx.previewPetMode(mode as PetMode);
+						},
 						onStatusLinePreview: previewSettings => {
 							// Update status line with preview settings
 							this.ctx.statusLine.updateSettings({
@@ -474,6 +485,29 @@ export class SelectorController {
 		});
 	}
 
+	showPetSelector(): void {
+		const stored = settings.get("pet.mode");
+		const initial: PetMode = isPetMode(stored) ? stored : "off";
+		this.showSelector(done => {
+			// Live-preview via previewMode (no editor re-mount, so the overlay stays);
+			// Enter commits + persists, Esc restores the initial skin.
+			const selector = new PetSelectorComponent(
+				initial,
+				mode => {
+					this.ctx.setPetMode(mode);
+					done();
+				},
+				() => {
+					this.ctx.previewPetMode(initial);
+					done();
+				},
+				mode => {
+					this.ctx.previewPetMode(mode);
+				},
+			);
+			return { component: selector, focus: selector.getSelectList() };
+		});
+	}
 	showHistorySearch(): void {
 		const historyStorage = this.ctx.historyStorage;
 		if (!historyStorage) return;
@@ -612,8 +646,7 @@ export class SelectorController {
 						child.setHideThinkingBlock(value as boolean);
 					}
 				}
-				this.ctx.chatContainer.clear();
-				this.ctx.rebuildChatFromMessages();
+				this.ctx.rebuildChatFromMessages("reconcile-same-transcript");
 				break;
 			case "theme": {
 				setTheme(value as string, true).then(result => {
@@ -626,6 +659,12 @@ export class SelectorController {
 				});
 				break;
 			}
+			case "pet.mode":
+				// The settings submenu already persisted the value; apply it to the live
+				// widget via previewMode (the settings overlay is still open, so a full
+				// re-mount would tear it down — restoreComposer re-mounts on close).
+				this.ctx.previewPetMode(value as PetMode);
+				break;
 			case "symbolPreset": {
 				setSymbolPreset(value as "unicode" | "nerd" | "ascii").then(() => {
 					this.ctx.statusLine.invalidate();
@@ -697,6 +736,12 @@ export class SelectorController {
 				this.ctx.ui.requestRender();
 				break;
 			}
+			case "irc.enabled":
+			case "irc.sidebar.enabled":
+				this.ctx.applyIrcSidebarAvailability(
+					this.ctx.settings.get("irc.enabled") === true && this.ctx.settings.get("irc.sidebar.enabled") === true,
+				);
+				break;
 
 			// Provider settings - update runtime preferences
 			case "providers.webSearch":
@@ -1075,9 +1120,9 @@ export class SelectorController {
 						this.ctx.ui.requestRender();
 						return;
 					}
+					this.ctx.resetIrcSidebarSession();
 
-					this.ctx.chatContainer.clear();
-					this.ctx.renderInitialMessages();
+					this.ctx.rebuildInitialMessages("replace-identity");
 					this.ctx.editor.setText(result.selectedText);
 					done();
 					this.ctx.showStatus("Branched to new session");
@@ -1187,8 +1232,7 @@ export class SelectorController {
 						}
 
 						// Update UI — pass the context built by navigateTree to skip a second O(N) walk.
-						this.ctx.chatContainer.clear();
-						this.ctx.renderInitialMessages(result.sessionContext);
+						this.ctx.rebuildInitialMessages("reconcile-same-transcript", result.sessionContext);
 						await this.ctx.reloadTodos();
 						if (result.editorText && !this.ctx.editor.getText().trim()) {
 							this.ctx.editor.setText(result.editorText);
@@ -1289,6 +1333,8 @@ export class SelectorController {
 		if (!detached) {
 			return false;
 		}
+		this.ctx.resetIrcSidebarSession();
+
 		this.#refreshSessionTerminalTitle();
 
 		this.#clearTransientSessionUi();
@@ -1296,23 +1342,24 @@ export class SelectorController {
 		this.ctx.statusLine.setSessionStartTime(Date.now());
 		this.ctx.updateEditorTopBorder();
 		this.ctx.updateEditorBorderColor();
-		this.ctx.renderInitialMessages();
+		this.ctx.rebuildInitialMessages("replace-identity");
 		await this.ctx.reloadTodos();
 		this.ctx.ui.requestRender();
 		return true;
 	}
 
 	async handleResumeSession(sessionPath: string): Promise<void> {
+		const previousSessionId = this.ctx.sessionManager.getSessionId();
 		this.#clearTransientSessionUi();
 
 		// Switch session via AgentSession (emits hook and tool session events)
-		await this.ctx.session.switchSession(sessionPath);
+		if (!(await this.ctx.session.switchSession(sessionPath))) return;
+		const switchingToDifferentSession = previousSessionId !== this.ctx.sessionManager.getSessionId();
+		if (switchingToDifferentSession) this.ctx.resetIrcSidebarSession();
 		this.#refreshSessionTerminalTitle();
 		this.ctx.updateEditorBorderColor();
 
-		// Clear and re-render the chat
-		this.ctx.chatContainer.clear();
-		this.ctx.renderInitialMessages();
+		this.ctx.rebuildInitialMessages(switchingToDifferentSession ? "replace-identity" : "reconcile-same-transcript");
 		await this.ctx.reloadTodos();
 		this.ctx.showStatus("Resumed session");
 	}

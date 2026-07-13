@@ -7,6 +7,7 @@
 import { Args, type CliConfig, Command, type CommandEntry, Flags, run } from "@sayknow-cli/utils/cli";
 import { APP_NAME, formatBunRuntimeError, MIN_BUN_VERSION, VERSION } from "@sayknow-cli/utils/dirs";
 import { runFixtureReport } from "./cli/fixture-report";
+import { isTmuxOwnerIsolationCliArgv, runTmuxOwnerIsolationCliFromStdin } from "./skc-runtime/tmux-owner-isolation-cli";
 
 if (Bun.semver.order(Bun.version, MIN_BUN_VERSION) < 0) {
 	process.stderr.write(
@@ -80,9 +81,13 @@ async function installRuntimeGlobals(): Promise<void> {
 	const { warnIfMacOSNoFileLimitTooLow } = await import("./cli/nofile-limit");
 	warnIfMacOSNoFileLimitTooLow();
 
-	// Strip macOS malloc-stack-logging env vars before any subprocess is spawned.
-	// Otherwise every child bun process (subagents, plugin installs, ptree spawns,
-	// etc.) prints a `MallocStackLogging: can't turn off …` warning to stderr.
+	// Secondary in-process scrub of the macOS malloc-stack-logging vars. The real
+	// boundary is the darwin re-exec guard at the top of runCli(): Bun snapshots the
+	// spawn-default environment at startup, so deleting these here does NOT clean the
+	// env children inherit by default — it only tidies `process.env` for code that
+	// reads it directly. Kept as belt-and-braces for the rare re-exec-unavailable
+	// fallback; managed spawns already use filterProcessEnv and the native PTY lane
+	// strips them independently.
 	delete process.env.MallocStackLogging;
 	delete process.env.MallocStackLoggingNoCompact;
 }
@@ -260,8 +265,49 @@ async function runSmokeTest(): Promise<void> {
 	process.stdout.write("smoke-test: ok\n");
 }
 
+/** Normalize the sole `skc resume` alias into the value-less launch intent. */
+export function normalizeResumeAlias(argv: readonly string[]): string[] {
+	return argv.length === 1 && argv[0] === "resume" ? ["--resume"] : [...argv];
+}
+
+/** Apply the same default-launch routing used by runCli after root fast paths. */
+export function routeRootArgv(argv: readonly string[]): string[] {
+	const normalizedArgv = normalizeResumeAlias(argv);
+	const first = normalizedArgv[0];
+	return first === "--help" || first === "-h" || first === "--version" || first === "-v" || first === "help"
+		? normalizedArgv
+		: isSubcommand(first)
+			? normalizedArgv
+			: ["launch", ...normalizedArgv];
+}
+
 /** Run the CLI with the given argv (no `process.argv` prefix). */
 export async function runCli(argv: string[]): Promise<void> {
+	// macOS malloc-env launch boundary. Re-exec once with a scrubbed environment
+	// BEFORE any fast path or subprocess spawn, so the startup env snapshot Bun hands
+	// to every child lane (Bun.spawn defaults, node:child_process, native PTY, tmux
+	// owner, plugin installs, subagents) is clean. This runs ahead of the
+	// tmux-owner-isolation and notify-daemon fast paths so those lanes execute inside
+	// the already-scrubbed process too. The cheap inline predicate keeps the common
+	// (uncontaminated / non-darwin) path free of extra module loads; the guard module
+	// (MACOS_MALLOC_ENV_VARS / SKC_MALLOC_ENV_REEXEC) loads only when a re-exec is due.
+	if (
+		process.platform === "darwin" &&
+		process.env.SKC_MALLOC_ENV_REEXEC === undefined &&
+		(process.env.MallocStackLogging !== undefined || process.env.MallocStackLoggingNoCompact !== undefined)
+	) {
+		const { reexecWithScrubbedMallocEnv } = await import("./cli/malloc-env-guard");
+		const code = await reexecWithScrubbedMallocEnv();
+		if (code !== null) {
+			process.exitCode = code;
+			return;
+		}
+		// Re-exec could not be spawned; fall through and run in this process.
+	}
+	if (isTmuxOwnerIsolationCliArgv(argv)) {
+		await runTmuxOwnerIsolationCliFromStdin();
+		return;
+	}
 	if (isNotifyDaemonInternalFastPath(argv)) {
 		await runNotifyDaemonInternalFastPath(argv);
 		return;
@@ -302,13 +348,7 @@ export async function runCli(argv: string[]): Promise<void> {
 	await installRuntimeGlobals();
 	// --help and --version are handled by run() directly, don't rewrite those.
 	// Everything else that isn't a known subcommand routes to "launch".
-	const first = argv[0];
-	const runArgv =
-		first === "--help" || first === "-h" || first === "--version" || first === "-v" || first === "help"
-			? argv
-			: isSubcommand(first)
-				? argv
-				: ["launch", ...argv];
+	const runArgv = routeRootArgv(argv);
 	return run({ bin: APP_NAME, version: VERSION, argv: runArgv, commands, help: showHelp });
 }
 

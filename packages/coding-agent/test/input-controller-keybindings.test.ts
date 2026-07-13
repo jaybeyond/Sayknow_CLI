@@ -42,7 +42,11 @@ type FakeEditor = {
 	clearCustomKeyHandlers(): void;
 };
 
-async function createContext(options?: { busyPromptMode?: "steer" | "queue"; followUpKeys?: string[] }) {
+async function createContext(options?: {
+	busyPromptMode?: "steer" | "queue";
+	followUpKeys?: string[];
+	ircSidebarToggleKeys?: string[];
+}) {
 	let editorText = "";
 	const keyMap: Record<string, string[]> = {
 		"app.model.selectTemporary": ["ctrl+y"],
@@ -50,6 +54,7 @@ async function createContext(options?: { busyPromptMode?: "steer" | "queue"; fol
 		"app.message.queue": ["alt+enter"],
 		"app.message.followUp": options?.followUpKeys ?? [],
 		"app.message.dequeue": ["alt+up", "alt+down"],
+		"app.irc.sidebar.toggle": options?.ircSidebarToggleKeys ?? ["alt+i"],
 	};
 
 	const setActionKeys = vi.fn();
@@ -59,6 +64,7 @@ async function createContext(options?: { busyPromptMode?: "steer" | "queue"; fol
 	const handleBashCommand = vi.fn(async () => {});
 	const showStatus = vi.fn();
 	const onInputCallback = vi.fn();
+	const toggleIrcSidebar = vi.fn();
 	const startPendingSubmission = vi.fn(
 		(input: {
 			text: string;
@@ -231,6 +237,7 @@ async function createContext(options?: { busyPromptMode?: "steer" | "queue"; fol
 		showUserMessageSelector: vi.fn(),
 		showSessionSelector: vi.fn(),
 		handleSTTToggle: vi.fn(),
+		toggleIrcSidebar,
 		showDebugSelector: vi.fn(),
 		showHistorySearch: vi.fn(),
 		toggleThinkingBlockVisibility: vi.fn(),
@@ -261,6 +268,7 @@ async function createContext(options?: { busyPromptMode?: "steer" | "queue"; fol
 			getQueuedMessageEntries,
 			removeQueuedMessageForEditing,
 			moveQueuedMessageForEditing,
+			toggleIrcSidebar,
 		},
 		queues: {
 			compactionQueuedMessages,
@@ -292,6 +300,39 @@ describe("InputController keybinding setup", () => {
 
 		expect(spies.showModelSelector).toHaveBeenNthCalledWith(1, { temporaryOnly: true });
 		expect(spies.showModelSelector).toHaveBeenNthCalledWith(2);
+	});
+
+	it("registers the default IRC sidebar shortcut and consumes its dispatch", async () => {
+		const { InputController, ctx, editor, spies } = await createContext();
+		const controller = new InputController(ctx);
+
+		controller.setupKeyHandlers();
+
+		const registration = (editor.setCustomKeyHandler as ReturnType<typeof vi.fn>).mock.calls.find(
+			([key]) => key === "alt+i",
+		);
+		expect(registration).toBeDefined();
+		const handler = registration?.[1] as () => boolean;
+
+		expect(handler()).toBe(true);
+		expect(spies.toggleIrcSidebar).toHaveBeenCalledTimes(1);
+	});
+
+	it("registers remapped IRC sidebar shortcuts", async () => {
+		const { InputController, ctx, editor } = await createContext({ ircSidebarToggleKeys: ["ctrl+alt+i"] });
+		const controller = new InputController(ctx);
+
+		controller.setupKeyHandlers();
+
+		expect(editor.setCustomKeyHandler).toHaveBeenCalledWith("ctrl+alt+i", expect.any(Function));
+		expect(editor.setCustomKeyHandler).not.toHaveBeenCalledWith("alt+i", expect.any(Function));
+	});
+
+	it("does not register a sidebar handler when its binding is explicitly empty", async () => {
+		const { InputController, ctx, editor } = await createContext({ ircSidebarToggleKeys: [] });
+		new InputController(ctx).setupKeyHandlers();
+
+		expect(editor.setCustomKeyHandler).not.toHaveBeenCalledWith("alt+i", expect.any(Function));
 	});
 
 	it("registers an explicit queue action separately from immediate submit", async () => {

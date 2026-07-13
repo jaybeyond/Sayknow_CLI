@@ -198,6 +198,21 @@ against the paired `notifications.telegram.chatId`. If BotFather does not show
 after setup reported `threaded=verified`, the daemon routes notifications to the
 normal (flat) paired private chat and posts a one-time nudge to enable Threaded
 Mode rather than dropping them.
+
+### Ask-control capability negotiation
+
+The production Telegram multiplexer is
+`packages/coding-agent/src/notifications/telegram-daemon.ts`. It already sends a
+protocol-v3 ClientHello with `ask_controls_v1` and `ask_selected_ack_v1`. The
+generic `packages/coding-agent/src/notifications/managed-daemon.ts` is
+liveness-only: it advertises `client_ping_pong` but is intentionally
+non-capable for controlled asks.
+
+Telegram navigation controls appear only after `ask_controls_v1` is negotiated
+on that session connection. A non-capable or older third-party client receives
+the non-actionable `action_unavailable` diagnostic instead of a controlled ask
+with stripped option buttons, so it cannot be left with unusable controls.
+
 Flat private chat is notification-only plus inline ask buttons. It is not a
 free-text chat surface: replies typed as normal messages and session commands such
 as `/verbose`, `/lean`, `/verbosity`, and `/redact` require Threaded Mode/topic
@@ -295,6 +310,15 @@ falls back to flat delivery in the paired private chat and posts a one-time nudg
 that points to @BotFather > Bot Settings > Threads Settings. Flat fallback is
 limited to outbound notifications and inline ask buttons; free-text replies and
 session commands require Threaded Mode/topic routing.
+
+### Third-party or older client lacks ask controls
+
+A custom client that omits ClientHello, or sends one without `ask_controls_v1`,
+will still receive ordinary empty-controls asks but receives
+`action_unavailable` for controlled asks after the short Hello grace or explicit
+non-capable negotiation. Upgrade it to send
+`{ "type": "hello", "protocolVersion": 3, "capabilities": ["ask_controls_v1"] }`
+on each WebSocket open; reconnecting starts a new negotiation.
 
 ### Telegram 409 conflict
 

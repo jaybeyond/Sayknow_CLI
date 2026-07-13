@@ -1,6 +1,6 @@
 import type { AgentMessage } from "@sayknow-cli/agent-core";
 import type { AssistantMessage, ImageContent, Message } from "@sayknow-cli/ai";
-import { type Component, Spacer, Text, TruncatedText } from "@sayknow-cli/tui";
+import { type Component, Spacer, Text, TruncatedText, type TUI, truncateToWidth } from "@sayknow-cli/tui";
 import { settings } from "../../config/settings";
 import { resolveSubskillActivationForSkillInvocation } from "../../extensibility/skc-plugins";
 import { buildSkillPromptMessage, parseSkillInvocations } from "../../extensibility/skills";
@@ -21,17 +21,69 @@ import { SkillMessageComponent } from "../../modes/components/skill-message";
 import { ToolExecutionComponent } from "../../modes/components/tool-execution";
 import { UserMessageComponent } from "../../modes/components/user-message";
 import { theme } from "../../modes/theme/theme";
-import type { CompactionQueuedMessage, InteractiveModeContext } from "../../modes/types";
+import type {
+	CompactionQueuedMessage,
+	InteractiveModeContext,
+	IrcArrivalSnapshot,
+	TranscriptRebuildPolicy,
+} from "../../modes/types";
 import {
 	type CustomMessage,
 	isSilentAbort,
 	SKILL_PROMPT_MESSAGE_TYPE,
 	type SkillPromptDetails,
 } from "../../session/messages";
-import type { SessionContext } from "../../session/session-manager";
+import {
+	associateSessionMessageViewportAnchorId,
+	getSessionMessageEntryId,
+	getSessionMessageViewportAnchorId,
+	type SessionContext,
+} from "../../session/session-manager";
 import { formatBytes, formatDuration } from "../../tools/render-utils";
 import { buildAbortDisplayMessage } from "./abort-message";
+import {
+	formatIrcMessageBlock,
+	isIrcCustomType,
+	type ParsedIrcMessage,
+	parseIrcMessage,
+	projectIrcText,
+} from "./irc-message";
 
+export type { TranscriptRebuildPolicy } from "../../modes/types";
+
+const IRC_INLINE_MAX_RENDER_ROWS = 2_048;
+const IRC_INLINE_MAX_SOURCE_UTF8_BYTES = 64 * 1_024;
+const IRC_INLINE_ELISION = "  … message elided …";
+
+class BoundedIrcTextComponent implements Component {
+	#text: Text;
+	#sourceTruncated: boolean;
+
+	constructor(text: string, sourceTruncated: boolean) {
+		this.#text = new Text(text, 0, 0);
+		this.#sourceTruncated = sourceTruncated;
+	}
+
+	render(width: number): string[] {
+		const rendered = this.#text.render(width);
+		if (!this.#sourceTruncated && rendered.length <= IRC_INLINE_MAX_RENDER_ROWS) return rendered;
+		const lines = rendered.slice(0, IRC_INLINE_MAX_RENDER_ROWS);
+		const marker = truncateToWidth(theme.fg("dim", IRC_INLINE_ELISION), width);
+		if (lines.length === 0) return [marker];
+		if (this.#sourceTruncated && rendered.length < IRC_INLINE_MAX_RENDER_ROWS) lines.push(marker);
+		else lines[lines.length - 1] = marker;
+		return lines;
+	}
+
+	invalidate(): void {
+		this.#text.invalidate();
+	}
+}
+
+export function prepareTranscriptRebuild(ui: TUI, policy: TranscriptRebuildPolicy): void {
+	if (policy === "replace-identity") ui.resetViewportAnchorIntent();
+	else ui.prepareViewportAnchorForTranscriptRebuild();
+}
 type TextBlock = { type: "text"; text: string };
 interface RenderInitialMessagesOptions {
 	preserveExistingChat?: boolean;
@@ -119,8 +171,18 @@ function getChatChildTime(component: Component): number {
 	return chatChildAddedAt.get(component) ?? Date.now();
 }
 
+function stableSemanticIdPart(value: string): string {
+	let hash = 0xcbf29ce484222325n;
+	for (const char of value) {
+		hash ^= BigInt(char.codePointAt(0)!);
+		hash = BigInt.asUintN(64, hash * 0x100000001b3n);
+	}
+	return hash.toString(36);
+}
+
 export function addChatChild(ctx: InteractiveModeContext, component: Component): void {
 	ctx.chatContainer.addChild(component);
+
 	chatChildAddedAt.set(component, Date.now());
 	trimChatChildren(ctx);
 }
@@ -187,7 +249,113 @@ export function trimChatChildren(ctx: InteractiveModeContext): void {
 }
 
 export class UiHelpers {
+	#renderedIrcInlineComponents = new Map<string, readonly Component[]>();
+	#viewportAnchorOccurrences = new WeakMap<object, { base: string; epoch: number; id: string }>();
+	#nextViewportAnchorOccurrence = new Map<string, number>();
+	#viewportAnchorOccurrenceEpoch = 0;
+	#ircSidebarHintShown = false;
+
 	constructor(private ctx: InteractiveModeContext) {}
+
+	#resetViewportAnchorOccurrencePass(): void {
+		this.#viewportAnchorOccurrenceEpoch += 1;
+		this.#nextViewportAnchorOccurrence.clear();
+	}
+
+	#viewportAnchorOccurrenceId(message: object, base: string): string {
+		const existing = this.#viewportAnchorOccurrences.get(message);
+		if (existing?.base === base && existing.epoch === this.#viewportAnchorOccurrenceEpoch) return existing.id;
+		const occurrence = this.#nextViewportAnchorOccurrence.get(base) ?? 0;
+		this.#nextViewportAnchorOccurrence.set(base, occurrence + 1);
+		const id = `${base}:occurrence:${occurrence}`;
+		this.#viewportAnchorOccurrences.set(message, {
+			base,
+			epoch: this.#viewportAnchorOccurrenceEpoch,
+			id,
+		});
+		return id;
+	}
+
+	assistantViewportAnchorId(message: AssistantMessage): string {
+		const semanticId = getSessionMessageViewportAnchorId(message);
+		if (semanticId) return semanticId;
+		const entryId = getSessionMessageEntryId(message);
+		if (entryId) return `assistant:entry:${entryId}`;
+		const base = `assistant:${message.api}:${message.provider}:${message.model}:${message.timestamp}`;
+		const id = this.#viewportAnchorOccurrenceId(message, base);
+		associateSessionMessageViewportAnchorId(message, id);
+		return id;
+	}
+
+	#userViewportAnchorId(message: Extract<Message, { role: "user" }>): string {
+		const semanticId = getSessionMessageViewportAnchorId(message);
+		if (semanticId) return semanticId;
+		const entryId = getSessionMessageEntryId(message);
+		if (entryId) return `user:entry:${entryId}`;
+		const base = `user:local:${message.timestamp}:${stableSemanticIdPart(JSON.stringify(message.content))}`;
+		const id = this.#viewportAnchorOccurrenceId(message, base);
+		associateSessionMessageViewportAnchorId(message, id);
+		return id;
+	}
+
+	getRenderedIrcInlineComponents(): Map<string, readonly Component[]> {
+		return this.#renderedIrcInlineComponents;
+	}
+
+	removeRenderedIrcInlineComponents(observationId: string): readonly Component[] | undefined {
+		const components = this.#renderedIrcInlineComponents.get(observationId);
+		this.#renderedIrcInlineComponents.delete(observationId);
+		return components;
+	}
+
+	resetRenderedIrcInlineComponents(): readonly (readonly Component[])[] {
+		const components = [...this.#renderedIrcInlineComponents.values()];
+		this.#renderedIrcInlineComponents.clear();
+		return components;
+	}
+
+	#addIrcObservationToChat(message: ParsedIrcMessage, sidebarHint?: string): Component[] {
+		const bodyProjection = projectIrcText(message.text, IRC_INLINE_MAX_SOURCE_UTF8_BYTES);
+		const block = formatIrcMessageBlock({ ...message, text: bodyProjection.text });
+		const components: Component[] = [];
+		const header = `${theme.fg("accent", `[IRC] ${block.sender} → ${block.recipient} · ${block.time}`)}${sidebarHint ? theme.fg("dim", sidebarHint) : ""}`;
+		const headerComponent = new Text(header, 1, 0);
+		addChatChild(this.ctx, headerComponent);
+		components.push(headerComponent);
+		if (block.bodyLines.length > 0 || bodyProjection.truncated) {
+			const bodyComponent = new BoundedIrcTextComponent(
+				theme.fg("muted", `  ${block.bodyLines.join("\n  ")}`),
+				bodyProjection.truncated,
+			);
+			addChatChild(this.ctx, bodyComponent);
+			components.push(bodyComponent);
+		}
+		return components;
+	}
+
+	addLiveIrcObservationToChat(message: ParsedIrcMessage, arrival: IrcArrivalSnapshot): Component[] {
+		// Requested-open panels that merely yielded at narrow widths must not
+		// advertise the toggle key: pressing it would close the pending request.
+		const showSidebarHint =
+			!arrival.panelVisible &&
+			!arrival.panelRequestedVisible &&
+			arrival.sidebarAvailable &&
+			Boolean(arrival.resolvedToggleKey) &&
+			!this.#ircSidebarHintShown;
+		if (showSidebarHint) this.#ircSidebarHintShown = true;
+		return this.#addIrcObservationToChat(
+			message,
+			showSidebarHint ? ` · ${arrival.resolvedToggleKey} opens sidebar` : undefined,
+		);
+	}
+
+	addRebuiltIrcObservationToChat(message: ParsedIrcMessage): Component[] {
+		return this.#addIrcObservationToChat(message);
+	}
+
+	resetIrcSidebarHint(): void {
+		this.#ircSidebarHintShown = false;
+	}
 
 	/** Extract text content from a user message */
 	getUserMessageText(message: Message): string {
@@ -306,50 +474,9 @@ export class UiHelpers {
 						addChatChild(this.ctx, component);
 						break;
 					}
-					if (
-						message.customType === "irc:incoming" ||
-						message.customType === "irc:autoreply" ||
-						message.customType === "irc:relay"
-					) {
-						const details = (
-							message as CustomMessage<{
-								from?: string;
-								to?: string;
-								message?: string;
-								reply?: string;
-								body?: string;
-								kind?: "message" | "reply";
-							}>
-						).details;
-						let arrow: string;
-						let body: string;
-						if (message.customType === "irc:incoming") {
-							const peer = details?.from ?? "?";
-							body = details?.message ?? "";
-							arrow = `⇦ ${peer}`;
-						} else if (message.customType === "irc:autoreply") {
-							const peer = details?.to ?? "?";
-							body = details?.reply ?? "";
-							arrow = `⇨ ${peer}`;
-						} else {
-							const from = details?.from ?? "?";
-							const to = details?.to ?? "?";
-							body = details?.body ?? "";
-							arrow = `${from} ⇨ ${to}`;
-						}
-						const components: Component[] = [];
-						const header = `${theme.fg("accent", `[IRC] ${arrow}`)}`;
-						const headerComponent = new Text(header, 1, 0);
-						addChatChild(this.ctx, headerComponent);
-						components.push(headerComponent);
-						if (body) {
-							for (const line of body.split("\n")) {
-								const lineComponent = new Text(theme.fg("muted", `  ${line}`), 0, 0);
-								addChatChild(this.ctx, lineComponent);
-								components.push(lineComponent);
-							}
-						}
-						return components;
+					if (message.role === "custom" && isIrcCustomType(message.customType)) {
+						const parsed = parseIrcMessage(message);
+						if (parsed) return this.addRebuiltIrcObservationToChat(parsed);
 					}
 					if (message.customType === "subagent:steer" || message.customType === "subagent:steer:relay") {
 						const details = (
@@ -423,7 +550,11 @@ export class UiHelpers {
 				const textContent = this.ctx.getUserMessageText(message);
 				if (textContent) {
 					const isSynthetic = message.role === "developer" ? true : (message.synthetic ?? false);
-					const userComponent = new UserMessageComponent(textContent, isSynthetic);
+					const userComponent = new UserMessageComponent(
+						textContent,
+						isSynthetic,
+						message.role === "user" && !isSynthetic ? this.#userViewportAnchorId(message) : undefined,
+					);
 					addChatChild(this.ctx, userComponent);
 					if (options?.populateHistory && message.role === "user" && !isSynthetic) {
 						this.ctx.editor.addToHistory(textContent);
@@ -432,8 +563,11 @@ export class UiHelpers {
 				break;
 			}
 			case "assistant": {
-				const assistantComponent = new AssistantMessageComponent(message, this.ctx.hideThinkingBlock, () =>
-					this.ctx.ui.requestRender(),
+				const assistantComponent = new AssistantMessageComponent(
+					message,
+					this.ctx.hideThinkingBlock,
+					() => this.ctx.ui.requestRender(),
+					this.assistantViewportAnchorId(message),
 				);
 				addChatChild(this.ctx, assistantComponent);
 				break;
@@ -471,12 +605,35 @@ export class UiHelpers {
 		const readToolCallArgs = new Map<string, Record<string, unknown>>();
 		const readToolCallAssistantComponents = new Map<string, AssistantMessageComponent>();
 		const deferredMessages: AgentMessage[] = [];
+		const persistedIrcObservationIds = new Set<string>();
+		const now = Date.now();
+		this.#resetViewportAnchorOccurrencePass();
+		this.#renderedIrcInlineComponents.clear();
 		for (const message of sessionContext.messages) {
 			// Defer compaction summaries so they render at the bottom (visible after scroll)
 			if (message.role === "compactionSummary") {
 				deferredMessages.push(message);
 				continue;
 			}
+			if (message.role === "custom" && isIrcCustomType(message.customType)) {
+				const parsed = parseIrcMessage(message);
+				if (parsed) {
+					persistedIrcObservationIds.add(parsed.observationId);
+					const record = this.ctx.ircLedger.getRecord(parsed.observationId);
+					if (
+						record &&
+						(record.mode === "persistent" || now < record.expiresAt!) &&
+						!this.#renderedIrcInlineComponents.has(record.observationId)
+					) {
+						this.#renderedIrcInlineComponents.set(
+							record.observationId,
+							this.addRebuiltIrcObservationToChat(record),
+						);
+					}
+				}
+				continue;
+			}
+
 			// Assistant messages need special handling for tool calls
 			if (message.role === "assistant") {
 				this.ctx.addMessageToChat(message);
@@ -626,6 +783,15 @@ export class UiHelpers {
 		// Render deferred messages (compaction summaries) at the bottom so they're visible
 		for (const message of deferredMessages) {
 			this.ctx.addMessageToChat(message, options);
+		}
+		for (const record of this.ctx.ircLedger.getInlineProjection(now)) {
+			if (
+				persistedIrcObservationIds.has(record.observationId) ||
+				this.#renderedIrcInlineComponents.has(record.observationId)
+			) {
+				continue;
+			}
+			this.#renderedIrcInlineComponents.set(record.observationId, this.addRebuiltIrcObservationToChat(record));
 		}
 
 		this.ctx.pendingTools.clear();

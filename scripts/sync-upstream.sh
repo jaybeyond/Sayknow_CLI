@@ -56,7 +56,8 @@ else echo "ok"; fi
 echo -n "G2 idempotence … "
 SNAP="$(mktemp -d)/snap"; cp -R "$WT" "$SNAP"
 bun scripts/apply-rebrand.ts "$WT" --apply >/dev/null 2>&1
-if diff -rq "$SNAP" "$WT" -x .git >/dev/null 2>&1; then echo "ok"; else echo "FAIL (second apply changed files)"; fail=1; fi
+# target/ and node_modules/ are build/dependency output, not fork source — exclude from the idempotence check.
+if diff -rq "$SNAP" "$WT" -x .git -x node_modules -x target >/dev/null 2>&1; then echo "ok"; else echo "FAIL (second apply changed files)"; fail=1; fi
 rm -rf "$SNAP"
 
 # G3 — typecheck.

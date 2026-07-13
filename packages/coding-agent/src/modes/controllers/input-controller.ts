@@ -331,6 +331,13 @@ export class InputController {
 		// Wire up extension shortcuts
 		this.registerExtensionShortcuts();
 
+		for (const key of this.ctx.keybindings.getKeys("app.irc.sidebar.toggle")) {
+			this.ctx.editor.setCustomKeyHandler(key, () => {
+				this.ctx.toggleIrcSidebar();
+				return true;
+			});
+		}
+
 		const planModeKeys = this.ctx.keybindings.getKeys("app.plan.toggle");
 		for (const key of planModeKeys) {
 			this.ctx.editor.setCustomKeyHandler(key, () => void this.ctx.handlePlanModeCommand());
@@ -1344,8 +1351,7 @@ export class InputController {
 		if (this.ctx.streamingComponent) {
 			this.ctx.chatContainer.detachChild(this.ctx.streamingComponent);
 		}
-		this.ctx.chatContainer.clear();
-		this.ctx.rebuildChatFromMessages();
+		this.ctx.rebuildChatFromMessages("reconcile-same-transcript");
 
 		// If streaming, re-add the streaming component with updated visibility and re-render
 		if (this.ctx.streamingComponent && this.ctx.streamingMessage) {

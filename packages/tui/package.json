@@ -1,7 +1,7 @@
 {
 	"type": "module",
 	"name": "@sayknow-cli/tui",
-	"version": "0.3.12",
+	"version": "0.3.13",
 	"description": "Terminal User Interface library with differential rendering for efficient text-based applications",
 	"homepage": "https://sayknow-cli.com",
 	"author": "jaybeyond",

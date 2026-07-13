@@ -39,10 +39,13 @@ function readJson(rel: string): Record<string, unknown> {
 }
 
 const delegateTools = COORDINATOR_MCP_TOOL_NAMES.filter(name => name.startsWith("skc_delegate_"));
+const delegateToolSet = new Set<string>(delegateTools);
 gate(
 	"delegate tools in contract",
 	delegateTools.length === 3 &&
-		["skc_delegate_plan", "skc_delegate_execute", "skc_delegate_team"].every(t => delegateTools.includes(t)),
+		["skc_delegate_plan", "skc_delegate_execute", "skc_delegate_team"].every(tool =>
+			delegateToolSet.has(tool),
+		),
 	`found: ${delegateTools.join(", ") || "none"}`,
 );
 

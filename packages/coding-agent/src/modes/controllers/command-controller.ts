@@ -40,6 +40,7 @@ import { buildHotkeysMarkdown } from "../../modes/utils/hotkeys-markdown";
 import { buildToolsMarkdown } from "../../modes/utils/tools-markdown";
 import type { AsyncJobSnapshotItem } from "../../session/agent-session";
 import type { AuthStorage } from "../../session/auth-storage";
+import { computeCacheMissCostSummary, formatCacheMissSummaryLines } from "../../session/cache-economics";
 import type { NewSessionOptions } from "../../session/session-manager";
 import { outputMeta } from "../../tools/output-meta";
 import { resolveToCwd, stripOuterDoubleQuotes } from "../../tools/path-utils";
@@ -48,6 +49,7 @@ import { getDisplayChangelogEntries } from "../../utils/changelog";
 import { copyToClipboard } from "../../utils/clipboard";
 import { openPath } from "../../utils/open";
 import { setSessionTerminalTitle } from "../../utils/title-generator";
+import { prepareTranscriptRebuild } from "../utils/ui-helpers";
 
 function showMarkdownPanel(ctx: InteractiveModeContext, title: string, markdown: string): void {
 	ctx.chatContainer.addChild(new Spacer(1));
@@ -425,6 +427,24 @@ export class CommandController {
 			if (normalizedPremiumRequests > 0) {
 				info += `${theme.fg("dim", "Premium Requests:")} ${normalizedPremiumRequests.toLocaleString()}\n`;
 			}
+		}
+		const cacheMissSummary = stats.costBreakdown
+			? computeCacheMissCostSummary(stats.tokens, {
+					kind: "persisted-aggregate",
+					costBreakdown: stats.costBreakdown,
+				})
+			: undefined;
+		if (cacheMissSummary) {
+			info += `\n${theme.bold("Cache Miss Cost")}`;
+			for (const line of formatCacheMissSummaryLines(cacheMissSummary)) {
+				const separator = line.indexOf(":");
+				if (separator === -1) {
+					info += `\n${line}`;
+				} else {
+					info += `\n${theme.fg("dim", `${line.slice(0, separator)}:`)}${line.slice(separator + 1)}`;
+				}
+			}
+			info += `\n`;
 		}
 
 		if (this.ctx.lspServers && this.ctx.lspServers.length > 0) {
@@ -911,6 +931,8 @@ export class CommandController {
 			}
 		}
 		if (!(await this.ctx.session.newSession(options))) return;
+		this.ctx.resetIrcSidebarSession();
+
 		this.ctx.resetObserverRegistry();
 		setSessionTerminalTitle(this.ctx.sessionManager.getSessionName(), this.ctx.sessionManager.getCwd());
 
@@ -920,6 +942,7 @@ export class CommandController {
 		this.ctx.updateEditorBorderColor();
 		this.ctx.ui.requestRender();
 
+		prepareTranscriptRebuild(this.ctx.ui, "replace-identity");
 		this.ctx.chatContainer.clear();
 		this.ctx.pendingMessagesContainer.clear();
 		this.ctx.compactionQueuedMessages = [];
@@ -958,6 +981,7 @@ export class CommandController {
 		this.ctx.updateEditorBorderColor();
 		this.ctx.ui.requestRender();
 
+		prepareTranscriptRebuild(this.ctx.ui, "replace-identity");
 		this.ctx.chatContainer.clear();
 		this.ctx.pendingMessagesContainer.clear();
 		this.ctx.compactionQueuedMessages = [];
@@ -996,6 +1020,7 @@ export class CommandController {
 			this.ctx.showError("Fork failed (session not persisted or cancelled)");
 			return;
 		}
+		this.ctx.resetIrcSidebarSession();
 
 		this.ctx.statusLine.invalidate();
 		this.ctx.updateEditorTopBorder();
@@ -1219,7 +1244,7 @@ export class CommandController {
 					: undefined;
 			await this.ctx.session.compact(instructions, options);
 
-			this.ctx.rebuildChatFromMessages();
+			this.ctx.rebuildChatFromMessages("reconcile-same-transcript");
 
 			this.ctx.statusLine.invalidate();
 			this.ctx.updateEditorTopBorder();
@@ -1279,9 +1304,10 @@ export class CommandController {
 				this.ctx.showError("Handoff cancelled");
 				return;
 			}
+			this.ctx.resetIrcSidebarSession();
 
 			// Rebuild chat from the new session (which now contains the handoff document)
-			this.ctx.rebuildChatFromMessages();
+			this.ctx.rebuildChatFromMessages("replace-identity");
 
 			this.ctx.statusLine.invalidate();
 			this.ctx.updateEditorTopBorder();

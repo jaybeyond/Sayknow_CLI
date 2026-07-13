@@ -19,7 +19,7 @@ pub mod lifecycle;
 pub mod protocol;
 pub mod server;
 
-pub use actions::{ActionRegistry, ReplyClassification, ReplyOutcome};
+pub use actions::{ActionIdentity, ActionRegistry, ReplyClassification, ReplyOutcome};
 pub use control_server::{ControlServerConfig, ControlServerHandle, start_control};
 pub use discovery::{
 	ControlEndpointRecord, EndpointRecord, clean_stale, control_endpoint_path, endpoint_path,
@@ -33,7 +33,8 @@ pub use lifecycle::{
 	SessionLifecycleError, SessionResume, SessionResumeResponse, SessionResumeTarget,
 };
 pub use protocol::{
-	ActionKind, ActionNeeded, ActionResolved, AnswerSelector, ClientMessage, RejectReason, Reply,
-	ReplyAnswer, ReplyRejected, ResolvedBy, ServerMessage, Verbosity,
+	ActionKind, ActionNeeded, ActionResolved, ActionUnavailable, ActionUnavailableReason,
+	AnswerSelector, ClientMessage, RejectReason, Reply, ReplyAnswer, ReplyRejected, ResolvedBy,
+	ServerMessage, Verbosity,
 };
-pub use server::{ServerConfig, ServerHandle, start};
+pub use server::{PushFrameError, ServerConfig, ServerHandle, start};

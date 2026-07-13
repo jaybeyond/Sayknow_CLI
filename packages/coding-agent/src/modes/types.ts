@@ -26,11 +26,15 @@ import type { EvalExecutionComponent } from "./components/eval-execution";
 import type { HookEditorComponent } from "./components/hook-editor";
 import type { HookInputComponent } from "./components/hook-input";
 import type { HookSelectorComponent } from "./components/hook-selector";
+import type { PetMode } from "./components/sayknow-pet-widget";
 import type { StatusLineComponent } from "./components/status-line";
 import type { ToolExecutionHandle } from "./components/tool-execution";
+import type { IrcObservationLedger } from "./irc-observation-ledger";
 import type { OAuthManualInputManager } from "./oauth-manual-input";
 import type { Theme } from "./theme/theme";
+import type { ParsedIrcMessage } from "./utils/irc-message";
 
+export type TranscriptRebuildPolicy = "replace-identity" | "reconcile-same-transcript";
 export type CompactionQueuedMessage = {
 	text: string;
 	mode: "steer" | "followUp";
@@ -60,6 +64,14 @@ export type TodoPhase = {
 	tasks: TodoItem[];
 };
 
+export type IrcArrivalSnapshot = Readonly<{
+	panelVisible: boolean;
+	/** User-requested open state; may be true while the panel yields at narrow widths. */
+	panelRequestedVisible: boolean;
+	sidebarAvailable: boolean;
+	resolvedToggleKey: string | null;
+}>;
+
 export interface InteractiveModeContext {
 	// UI access
 	ui: TUI;
@@ -84,6 +96,7 @@ export interface InteractiveModeContext {
 	mcpManager?: MCPManager;
 	lspServers?: LspStartupServerInfo[];
 
+	readonly ircLedger: IrcObservationLedger;
 	// State
 	isInitialized: boolean;
 	isBackgrounded: boolean;
@@ -163,6 +176,11 @@ export interface InteractiveModeContext {
 	setWorkingMessage(message?: string): void;
 	applyPendingWorkingMessage(): void;
 	ensureLoadingAnimation(): void;
+	setPetMode(mode: PetMode): void;
+	/** Live-preview a pet skin during a selector without persisting. */
+	previewPetMode(mode: PetMode): void;
+	/** Re-mount the composer (pet-aware) after an overlay/selector closes. */
+	restoreComposer(): void;
 	startPendingSubmission(input: {
 		text: string;
 		images?: ImageContent[];
@@ -187,21 +205,34 @@ export interface InteractiveModeContext {
 	withLocalSubmission<T>(text: string, fn: () => Promise<T>, options?: { imageCount?: number }): Promise<T>;
 	isKnownSlashCommand(text: string): boolean;
 	addMessageToChat(message: AgentMessage, options?: { populateHistory?: boolean }): Component[];
+	addLiveIrcObservationToChat(message: ParsedIrcMessage, arrival: IrcArrivalSnapshot): Component[];
+	removeRenderedIrcInlineComponents(observationId: string): readonly Component[] | undefined;
+	resetRenderedIrcInlineComponents(): readonly (readonly Component[])[];
 	renderSessionContext(
 		sessionContext: SessionContext,
 		options?: { updateFooter?: boolean; populateHistory?: boolean },
 	): void;
-	renderInitialMessages(prebuiltContext?: SessionContext, options?: { preserveExistingChat?: boolean }): void;
+	rebuildInitialMessages(
+		policy: TranscriptRebuildPolicy,
+		prebuiltContext?: SessionContext,
+		options?: { preserveExistingChat?: boolean },
+	): void;
 	getUserMessageText(message: Message): string;
+	getAssistantViewportAnchorId?(message: AssistantMessage): string;
 	findLastAssistantMessage(): AssistantMessage | undefined;
 	extractAssistantText(message: AssistantMessage): string;
 	updateEditorTopBorder(): void;
 	updateEditorBorderColor(): void;
-	rebuildChatFromMessages(): void;
+	rebuildChatFromMessages(policy: TranscriptRebuildPolicy): void;
 	setTodos(todos: TodoItem[] | TodoPhase[]): void;
 	reloadTodos(): Promise<void>;
 	toggleTodoExpansion(): void;
 
+	// IRC sidebar
+	toggleIrcSidebar(): void;
+	captureIrcArrivalSnapshot(): IrcArrivalSnapshot;
+	applyIrcSidebarAvailability(enabled: boolean): void;
+	resetIrcSidebarSession(): void;
 	// Command handling
 	handleExportCommand(text: string): Promise<void>;
 	handleShareCommand(): Promise<void>;
@@ -242,6 +273,7 @@ export interface InteractiveModeContext {
 	// Selector handling
 	showSettingsSelector(): void;
 	showThemeSelector(): void;
+	showPetSelector(): void;
 	showHistorySearch(): void;
 	showExtensionsDashboard(): void;
 	showAgentsDashboard(): void;

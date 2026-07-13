@@ -1,10 +1,12 @@
 import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import type { TextContent, UserMessage } from "@sayknow-cli/ai";
 import { EventController } from "@sayknow-cli/coding-agent/modes/controllers/event-controller";
+import { IrcObservationLedger } from "@sayknow-cli/coding-agent/modes/irc-observation-ledger";
 import { initTheme } from "@sayknow-cli/coding-agent/modes/theme/theme";
 import type { InteractiveModeContext } from "@sayknow-cli/coding-agent/modes/types";
 import { UiHelpers } from "@sayknow-cli/coding-agent/modes/utils/ui-helpers";
 import type { CustomMessage } from "@sayknow-cli/coding-agent/session/messages";
+
 import { Container } from "@sayknow-cli/tui";
 
 beforeAll(() => {
@@ -234,14 +236,28 @@ function createIrcContext() {
 		updateEditorTopBorder: vi.fn(),
 		ui: { requestRender },
 		chatContainer,
+		settings: { get: () => true },
+		captureIrcArrivalSnapshot: () => ({
+			panelVisible: true,
+			panelRequestedVisible: true,
+			sidebarAvailable: true,
+			resolvedToggleKey: "Alt+I",
+		}),
+		ircLedger: new IrcObservationLedger(),
 		session: {},
 	} as unknown as InteractiveModeContext;
 	const helpers = new UiHelpers(ctx);
+	ctx.removeRenderedIrcInlineComponents = observationId => helpers.removeRenderedIrcInlineComponents(observationId);
+	ctx.resetRenderedIrcInlineComponents = () => helpers.resetRenderedIrcInlineComponents();
 	const addMessageToChat: InteractiveModeContext["addMessageToChat"] = vi.fn((message, options) =>
 		helpers.addMessageToChat(message, options),
 	);
 	ctx.addMessageToChat = addMessageToChat;
-	return { ctx, chatContainer, requestRender, addMessageToChat };
+	const addLiveIrcObservationToChat: InteractiveModeContext["addLiveIrcObservationToChat"] = vi.fn(
+		(message, arrival) => helpers.addLiveIrcObservationToChat(message, arrival),
+	);
+	ctx.addLiveIrcObservationToChat = addLiveIrcObservationToChat;
+	return { ctx, chatContainer, requestRender, addMessageToChat, addLiveIrcObservationToChat };
 }
 
 describe("EventController IRC expiry", () => {
@@ -272,13 +288,13 @@ describe("EventController IRC expiry", () => {
 	it("does not schedule duplicate expiry for duplicate IRC events", async () => {
 		vi.useFakeTimers();
 		const message = createIrcMessage(2);
-		const { ctx, chatContainer, addMessageToChat } = createIrcContext();
+		const { ctx, chatContainer, addLiveIrcObservationToChat } = createIrcContext();
 		const controller = new EventController(ctx);
 
 		await controller.handleEvent({ type: "irc_message", message });
 		await controller.handleEvent({ type: "irc_message", message });
 
-		expect(addMessageToChat).toHaveBeenCalledTimes(1);
+		expect(addLiveIrcObservationToChat).toHaveBeenCalledTimes(1);
 		expect(chatContainer.children).toHaveLength(2);
 		vi.advanceTimersByTime(10_000);
 		expect(chatContainer.children).toHaveLength(0);

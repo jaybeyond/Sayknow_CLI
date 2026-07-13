@@ -1,9 +1,10 @@
 import { describe, expect, it } from "bun:test";
+import * as path from "node:path";
 
 function runBunEval(script: string) {
 	const result = Bun.spawnSync({
 		cmd: [process.execPath, "-e", script],
-		cwd: process.cwd(),
+		cwd: path.join(import.meta.dir, ".."),
 		stdout: "pipe",
 		stderr: "pipe",
 	});

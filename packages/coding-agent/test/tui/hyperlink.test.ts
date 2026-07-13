@@ -1,5 +1,7 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "bun:test";
 import { resetSettingsForTest, Settings, settings } from "@sayknow-cli/coding-agent/config/settings";
+import { LocalProtocolHandler } from "@sayknow-cli/coding-agent/internal-urls";
+import { AgentRegistry } from "@sayknow-cli/coding-agent/registry/agent-registry";
 import { fileHyperlink, isHyperlinkEnabled, tryResolveInternalUrlSync } from "@sayknow-cli/coding-agent/tui/hyperlink";
 import * as terminalCaps from "@sayknow-cli/tui";
 
@@ -27,15 +29,21 @@ function setHyperlinkMode(mode: "off" | "auto" | "always"): void {
 
 beforeAll(async () => {
 	resetSettingsForTest();
+	LocalProtocolHandler.resetOverrideForTests();
+	AgentRegistry.resetGlobalForTests();
 	await Settings.init({ inMemory: true });
 });
 
 afterAll(() => {
 	resetSettingsForTest();
+	LocalProtocolHandler.resetOverrideForTests();
+	AgentRegistry.resetGlobalForTests();
 });
 
 afterEach(() => {
 	settings.clearOverride("tui.hyperlinks");
+	LocalProtocolHandler.resetOverrideForTests();
+	AgentRegistry.resetGlobalForTests();
 	if (ORIGINAL_NO_COLOR === undefined) {
 		delete Bun.env.NO_COLOR;
 	} else {

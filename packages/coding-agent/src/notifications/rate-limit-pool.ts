@@ -32,11 +32,15 @@ export interface RateLimitItem<T = unknown> {
 	/** Priority lane. */
 	lane: RateLimitLane;
 	/**
-	 * Optional coalesce key. Submitting another item with the same
-	 * `(sessionId, lane, coalesceKey)` replaces the queued payload with the
-	 * newer one instead of enqueuing a duplicate (used for live edits).
+	 * Optional coalesce key. Submitting another unidentifiable item with the
+	 * same `(sessionId, lane, coalesceKey)` replaces the queued payload with
+	 * the newer one instead of enqueuing a duplicate (used for live edits).
 	 */
 	coalesceKey?: string;
+	/** Optional stable identifier for exact queued-item removal. Identified items never coalesce. */
+	itemId?: string;
+	/** Absolute Unix timestamp in ms. The item expires when `now >= deadlineAt`. */
+	deadlineAt?: number;
 	/** Opaque payload the caller maps to an actual Telegram send. */
 	payload: T;
 }
@@ -54,6 +58,14 @@ export interface RateLimitPoolOptions {
 interface QueuedItem<T> {
 	item: RateLimitItem<T>;
 	seq: number;
+}
+
+/** The deterministic result of draining queued work at a point in time. */
+export interface RateLimitDrainResult<T = unknown> {
+	/** Items granted a token and ready to send. */
+	granted: RateLimitItem<T>[];
+	/** Items removed because their absolute deadline has elapsed. */
+	expired: RateLimitItem<T>[];
 }
 
 /**
@@ -100,16 +112,19 @@ export class RateLimitPool<T = unknown> {
 	}
 
 	/**
-	 * Submit an item. If it carries a `coalesceKey` matching a queued item in
-	 * the same `(sessionId, lane)`, the queued payload is replaced (latest
-	 * wins) and FIFO position is preserved; otherwise it is appended.
+	 * Submit an item. Unidentified items with a `coalesceKey` matching a queued
+	 * item in the same `(sessionId, lane)` replace its payload (latest wins)
+	 * while preserving FIFO position; identified items are always appended.
 	 */
 	submit(item: RateLimitItem<T>): void {
 		const queue = this.lanes.get(item.lane);
 		if (!queue) throw new Error(`unknown rate-limit lane: ${item.lane}`);
-		if (item.coalesceKey !== undefined) {
+		if (item.itemId === undefined && item.coalesceKey !== undefined) {
 			const existing = queue.find(
-				q => q.item.sessionId === item.sessionId && q.item.coalesceKey === item.coalesceKey,
+				q =>
+					q.item.itemId === undefined &&
+					q.item.sessionId === item.sessionId &&
+					q.item.coalesceKey === item.coalesceKey,
 			);
 			if (existing) {
 				existing.item = item;
@@ -120,12 +135,21 @@ export class RateLimitPool<T = unknown> {
 	}
 
 	/**
-	 * Grant as many queued items as tokens allow at `nowMs`. Items are selected
-	 * by lane priority, then round-robin across sessions within a lane (so no
-	 * single session monopolises a lane), consuming one token each.
+	 * Grant as many queued items as tokens allow at `nowMs`. This compatibility
+	 * wrapper discards items that expired during the drain.
 	 */
 	drain(nowMs: number = this.now()): RateLimitItem<T>[] {
+		return this.drainWithExpired(nowMs).granted;
+	}
+
+	/**
+	 * Deterministically expire elapsed-deadline items, then grant as many live
+	 * items as tokens allow. Expired items never consume tokens or receive a
+	 * grant; both result lists preserve their deterministic queue ordering.
+	 */
+	drainWithExpired(nowMs: number = this.now()): RateLimitDrainResult<T> {
 		this.refill(nowMs);
+		const expired = this.removeWhere(item => item.deadlineAt !== undefined && item.deadlineAt <= nowMs);
 		const granted: RateLimitItem<T>[] = [];
 		while (this.tokens >= 1) {
 			const next = this.takeNext();
@@ -133,7 +157,7 @@ export class RateLimitPool<T = unknown> {
 			this.tokens -= 1;
 			granted.push(next);
 		}
-		return granted;
+		return { granted, expired };
 	}
 
 	/** Remove queued items matching `predicate` without consuming tokens. Returns removed items in lane/FIFO order. */
@@ -153,6 +177,16 @@ export class RateLimitPool<T = unknown> {
 			queue.length = write;
 		}
 		return removed;
+	}
+
+	/** Remove exactly one queued item by its stable id without consuming a token. */
+	removeById(itemId: string): RateLimitItem<T> | undefined {
+		for (const lane of LANE_PRIORITY) {
+			const queue = this.lanes.get(lane)!;
+			const index = queue.findIndex(queued => queued.item.itemId === itemId);
+			if (index >= 0) return queue.splice(index, 1)[0]!.item;
+		}
+		return undefined;
 	}
 
 	private refill(nowMs: number): void {

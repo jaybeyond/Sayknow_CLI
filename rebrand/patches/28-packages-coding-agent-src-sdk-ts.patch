@@ -16,7 +16,7 @@
  	formatModelString,
  	parseModelPattern,
  	parseModelString,
-@@ -1671,7 +1673,28 @@
+@@ -1718,7 +1720,28 @@
  			// Re-resolve the allowed set: extension factories above may have
  			// registered providers/models that weren't visible at startup.
  			const fallbackCandidates = await resolveAllowedModels(modelRegistry, settings, modelMatchPreferences);
@@ -46,7 +46,7 @@
  				if (await hasModelApiKey(candidate)) {
  					model = candidate;
  					break;
-@@ -2120,16 +2143,7 @@
+@@ -2168,16 +2191,7 @@
  			.map(name => toolRegistry.get(name))
  			.filter((tool): tool is AgentTool => tool !== undefined)
  			// AgentSession tool wrapping is not installed until after Agent construction.

@@ -2,6 +2,8 @@ import { afterEach, describe, expect, it } from "bun:test";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { RenderResultOptions } from "@sayknow-cli/agent-core";
+import { type IrcSidebarTheme, IrcSplitViewComponent } from "@sayknow-cli/coding-agent/modes/components/irc-sidebar";
+import { IrcObservationLedger } from "@sayknow-cli/coding-agent/modes/irc-observation-ledger";
 import { getThemeByName, setThemeInstance } from "@sayknow-cli/coding-agent/modes/theme/theme";
 import { bashToolRenderer } from "@sayknow-cli/coding-agent/tools/bash";
 import { ImageProtocol, TERMINAL } from "@sayknow-cli/tui";
@@ -12,6 +14,12 @@ type MutableTerminalInfo = {
 };
 
 const terminal = TERMINAL as unknown as MutableTerminalInfo;
+
+const sidebarTheme = {
+	fg: (_color: "dim" | "accent", text: string) => text,
+	bold: (text: string) => text,
+	boxSharp: { vertical: "|" },
+} satisfies IrcSidebarTheme;
 
 describe("bashToolRenderer", () => {
 	const originalProtocol = TERMINAL.imageProtocol;
@@ -116,6 +124,27 @@ describe("bashToolRenderer", () => {
 
 		expect(lines.filter(line => line === sixel)).toHaveLength(1);
 		expect(lines.some(line => line.includes("ctrl+o to expand"))).toBe(false);
+	});
+	it("replaces SIXEL output with bordered text while rendered through the visible IRC split", async () => {
+		terminal.imageProtocol = ImageProtocol.Sixel;
+		const theme = await getThemeByName("red-octopus");
+		expect(theme).toBeDefined();
+		const sixel = "\x1bPqabc\x1b\\";
+		const component = bashToolRenderer.renderResult(
+			{ content: [{ type: "text", text: sixel }], details: {}, isError: false },
+			{ expanded: true, isPartial: false },
+			theme!,
+			{ command: "echo sixel" },
+		);
+		const split = new IrcSplitViewComponent(component, new IrcObservationLedger(), sidebarTheme);
+
+		expect(split.render(160).join("\n")).toContain(sixel);
+		split.setVisible(true);
+		const visible = split.render(160).join("\n");
+		expect(visible.match(/\[SIXEL image hidden while IRC sidebar is visible\]/g)).toHaveLength(1);
+		expect(visible).not.toContain("\x1bP");
+		split.setVisible(false);
+		expect(split.render(160).join("\n")).toContain(sixel);
 	});
 
 	it("highlights every line of a multi-line bash command in renderResult", async () => {

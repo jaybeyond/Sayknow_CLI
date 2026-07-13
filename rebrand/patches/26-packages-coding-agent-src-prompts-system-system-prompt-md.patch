@@ -14,7 +14,7 @@
  </skc-runtime>
  {{/unless}}
  
-@@ -278,31 +275,27 @@
+@@ -279,31 +276,27 @@
  
  {{#unless subagent}}
  <soul>

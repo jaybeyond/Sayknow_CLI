@@ -6,6 +6,14 @@ import { parseDaemonArgs, runDaemonCommand } from "../src/cli/daemon-cli";
 import { Settings } from "../src/config/settings";
 import { createBuiltInDaemonControllers, selectDaemonControllers } from "../src/daemon/builtin";
 import type { BuiltInDaemonController, DaemonOperationResult, DaemonStatus } from "../src/daemon/control-types";
+import {
+	DAEMON_ACTION_ALIASES,
+	formatDaemonResult,
+	formatDaemonStatus,
+	OWNERSHIP_MISMATCH_MESSAGE,
+	ownershipMismatchRecovery,
+	resolveDaemonAction,
+} from "../src/daemon/operator-contract";
 import { resolveSkcRuntimeSpawnInfo } from "../src/daemon/runtime";
 import { tokenFingerprint } from "../src/notifications/config";
 import { daemonPaths } from "../src/notifications/telegram-daemon";
@@ -134,6 +142,80 @@ describe("parseDaemonArgs", () => {
 	test("defaults to status and ignores non-daemon argv", () => {
 		expect(parseDaemonArgs(["notify", "status"])).toBeUndefined();
 		expect(parseDaemonArgs(["daemon"])?.action).toBe("status");
+	});
+
+	test("resolves the restart alias to reload and parses --verbose/-v", () => {
+		expect(parseDaemonArgs(["daemon", "restart"])?.action).toBe("reload");
+		expect(parseDaemonArgs(["daemon", "restart", "telegram"])?.kinds).toEqual(["telegram"]);
+		expect(parseDaemonArgs(["daemon", "status", "--verbose"])?.verbose).toBe(true);
+		expect(parseDaemonArgs(["daemon", "status", "-v"])?.verbose).toBe(true);
+		expect(parseDaemonArgs(["daemon", "status"])?.verbose).toBe(false);
+	});
+});
+
+describe("daemon operator contract", () => {
+	test("resolveDaemonAction maps canonical verbs and the restart alias", () => {
+		expect(resolveDaemonAction("status")).toBe("status");
+		expect(resolveDaemonAction("reload")).toBe("reload");
+		expect(resolveDaemonAction("restart")).toBe("reload");
+		expect(DAEMON_ACTION_ALIASES.restart).toBe("reload");
+		expect(resolveDaemonAction("bogus")).toBeUndefined();
+		expect(resolveDaemonAction(undefined)).toBeUndefined();
+	});
+
+	test("formatDaemonStatus stays concise by default and expands under verbose", () => {
+		const status: DaemonStatus = {
+			kind: "telegram",
+			configured: true,
+			health: "running",
+			pid: 7,
+			ownerId: "o1",
+			startedAt: 0,
+			heartbeatAt: 0,
+			roots: ["/a", "/b"],
+			rootCount: 2,
+			runtime: { mode: "source", execPath: "/usr/bin/node", reloadPicksUpSourceEdits: true },
+		};
+		const concise = formatDaemonStatus(status);
+		expect(concise).toBe("telegram: running (pid 7, owner o1, 2 roots)");
+		expect(concise).not.toContain("/a");
+
+		const verbose = formatDaemonStatus(status, { verbose: true });
+		expect(verbose).toContain("runtime: source (/usr/bin/node)");
+		expect(verbose).toContain("roots: 2");
+		expect(verbose).toContain("- /a");
+		expect(verbose).toContain("- /b");
+	});
+
+	test("formatDaemonStatus reports an unconfigured daemon without runtime noise", () => {
+		const status: DaemonStatus = {
+			kind: "telegram",
+			configured: false,
+			health: "not_configured",
+			runtime: { mode: "source", execPath: "/usr/bin/node", reloadPicksUpSourceEdits: true },
+		};
+		expect(formatDaemonStatus(status)).toBe("telegram: not configured");
+	});
+
+	test("formatDaemonResult renders the ownership-mismatch recovery steps", () => {
+		const recovery = ownershipMismatchRecovery();
+		expect(recovery.reason).toBe("ownership_mismatch");
+		expect(recovery.steps.length).toBeGreaterThan(0);
+
+		const result: DaemonOperationResult = {
+			kind: "telegram",
+			action: "reload",
+			ok: false,
+			warnings: [],
+			message: OWNERSHIP_MISMATCH_MESSAGE,
+			recovery,
+		};
+		const rendered = formatDaemonResult(result);
+		expect(rendered).toContain("telegram reload: failed");
+		expect(rendered).toContain(OWNERSHIP_MISMATCH_MESSAGE);
+		expect(rendered).toContain("to recover:");
+		expect(rendered).toContain("1. ");
+		for (const step of recovery.steps) expect(rendered).toContain(step);
 	});
 });
 
@@ -495,6 +577,35 @@ describe("runDaemonCommand", () => {
 		);
 		expect(out).toContain("telegram reload: ok");
 		expect(out).toContain("reloaded telegram daemon");
+	});
+
+	test("a refused reload surfaces recovery guidance and exits non-zero", async () => {
+		const prevExit = process.exitCode;
+		const status: DaemonStatus = {
+			kind: "telegram",
+			configured: true,
+			health: "stopped",
+			runtime: { mode: "source", execPath: "/usr/bin/node", reloadPicksUpSourceEdits: true },
+		};
+		const result: DaemonOperationResult = {
+			kind: "telegram",
+			action: "reload",
+			ok: false,
+			warnings: [],
+			message: OWNERSHIP_MISMATCH_MESSAGE,
+			recovery: ownershipMismatchRecovery(),
+		};
+		const out = await captureStdout(() =>
+			runDaemonCommand(
+				{ action: "reload", kinds: ["telegram"], all: false, json: false, force: false },
+				{ controllers: [fakeController(status, result)] },
+			),
+		);
+		expect(out).toContain("telegram reload: failed");
+		expect(out).toContain("to recover:");
+		expect(process.exitCode).toBe(1);
+		// Reset so this expected non-zero exitCode does not leak into the runner's exit status.
+		process.exitCode = typeof prevExit === "number" ? prevExit : 0;
 	});
 });
 

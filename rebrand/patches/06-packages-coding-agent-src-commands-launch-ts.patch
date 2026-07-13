@@ -1,6 +1,6 @@
 --- a/packages/coding-agent/src/commands/launch.ts
 +++ b/packages/coding-agent/src/commands/launch.ts
-@@ -51,7 +51,7 @@
+@@ -59,7 +59,7 @@
  }
  
  export default class Index extends Command {

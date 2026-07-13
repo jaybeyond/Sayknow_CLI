@@ -8,7 +8,7 @@
  import { resolveLocalUrlToPath } from "../internal-urls";
  import { getLspStartupWarningMessage, LSP_STARTUP_EVENT_CHANNEL, type LspStartupEvent } from "../lsp/startup-events";
  import {
-@@ -1560,7 +1561,7 @@
+@@ -1642,7 +1643,7 @@
  	#getPlanReviewHelpText(): string {
  		const externalEditorKey = this.keybindings.getDisplayString("app.editor.external");
  		if (!externalEditorKey) {
@@ -17,7 +17,7 @@
  		}
  		return `up/down navigate  enter select  ${externalEditorKey.toLowerCase()} open in editor  esc cancel`;
  	}
-@@ -2738,13 +2739,8 @@
+@@ -2914,13 +2915,8 @@
  		this.#extensionUiController.hideHookSelector();
  	}
  

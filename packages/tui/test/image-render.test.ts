@@ -5,6 +5,7 @@ import {
 	encodeKittyTransmit,
 	getCellDimensions,
 	ImageProtocol,
+	isTerminalGraphicsFallbackActive,
 	isWindowsTerminalPreviewSixelSupported,
 	kittyImageId,
 	renderImage,
@@ -12,6 +13,7 @@ import {
 	setCellDimensions,
 	setKittyTransmitWriter,
 	TERMINAL,
+	withTerminalGraphicsFallback,
 } from "@sayknow-cli/tui/terminal-capabilities";
 
 type MutableTerminalInfo = {
@@ -172,6 +174,91 @@ describe("terminal image rendering", () => {
 		expect(result).not.toBeNull();
 		expect(result?.rows).toBe(2);
 		expect(result?.sequence.startsWith("\x1bP")).toBe(true);
+	});
+
+	it("uses textual image fallback only within scoped graphics fallback", () => {
+		terminal.imageProtocol = ImageProtocol.Sixel;
+		const image = new Image(
+			BASE64_ONE_PIXEL_PNG,
+			"image/png",
+			{ fallbackColor: text => text },
+			{ maxWidthCells: 10, maxHeightCells: 2, refetch: () => BASE64_ONE_PIXEL_PNG },
+			SQUARE_DIMENSIONS,
+		);
+
+		expect(image.render(20).join("\n")).toContain("\x1bP");
+		const fallbackLines = withTerminalGraphicsFallback(() => image.render(20));
+		expect(fallbackLines.join("\n")).toContain("[image/png");
+		expect(fallbackLines.join("\n")).not.toContain("\x1bP");
+		expect(image.render(20).join("\n")).toContain("\x1bP");
+	});
+
+	it("restores nested graphics fallback state after exceptions", () => {
+		expect(isTerminalGraphicsFallbackActive()).toBe(false);
+		expect(() =>
+			withTerminalGraphicsFallback(() =>
+				withTerminalGraphicsFallback(() => {
+					expect(isTerminalGraphicsFallbackActive()).toBe(true);
+					throw new Error("expected");
+				}),
+			),
+		).toThrow("expected");
+		expect(isTerminalGraphicsFallbackActive()).toBe(false);
+	});
+
+	it("permits kitty images inside an opted-in graphics fallback scope", () => {
+		terminal.imageProtocol = ImageProtocol.Kitty;
+		const image = new Image(
+			BASE64_ONE_PIXEL_PNG,
+			"image/png",
+			{ fallbackColor: text => text },
+			{ maxWidthCells: 10, maxHeightCells: 2, refetch: () => BASE64_ONE_PIXEL_PNG },
+			SQUARE_DIMENSIONS,
+		);
+
+		// Plain fallback scope still suppresses kitty.
+		const suppressed = withTerminalGraphicsFallback(() => image.render(20));
+		expect(suppressed.join("\n")).toContain("[image/png");
+		expect(suppressed.join("\n")).not.toContain("\x1b_G");
+
+		// Opted-in scope renders the cursor-neutral kitty placement.
+		const permitted = withTerminalGraphicsFallback(() => image.render(20), { allowCursorNeutralImages: true });
+		expect(permitted.join("\n")).toContain("\x1b_G");
+
+		// Outside any scope, unchanged.
+		expect(image.render(20).join("\n")).toContain("\x1b_G");
+	});
+
+	it("keeps cursor-advancing protocols suppressed in an opted-in fallback scope", () => {
+		terminal.imageProtocol = ImageProtocol.Sixel;
+		const image = new Image(
+			BASE64_ONE_PIXEL_PNG,
+			"image/png",
+			{ fallbackColor: text => text },
+			{ maxWidthCells: 10, maxHeightCells: 2, refetch: () => BASE64_ONE_PIXEL_PNG },
+			SQUARE_DIMENSIONS,
+		);
+
+		const permitted = withTerminalGraphicsFallback(() => image.render(20), { allowCursorNeutralImages: true });
+		expect(permitted.join("\n")).toContain("[image/png");
+		expect(permitted.join("\n")).not.toContain("\x1bP");
+	});
+
+	it("revokes cursor-neutral permission in nested scopes that do not opt in", () => {
+		terminal.imageProtocol = ImageProtocol.Kitty;
+		const image = new Image(
+			BASE64_ONE_PIXEL_PNG,
+			"image/png",
+			{ fallbackColor: text => text },
+			{ maxWidthCells: 10, maxHeightCells: 2, refetch: () => BASE64_ONE_PIXEL_PNG },
+			SQUARE_DIMENSIONS,
+		);
+
+		const lines = withTerminalGraphicsFallback(() => withTerminalGraphicsFallback(() => image.render(20)), {
+			allowCursorNeutralImages: true,
+		});
+		expect(lines.join("\n")).toContain("[image/png");
+		expect(lines.join("\n")).not.toContain("\x1b_G");
 	});
 
 	it("Image component places the kitty escape on the first row without cursor-up", () => {

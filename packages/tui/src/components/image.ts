@@ -3,6 +3,8 @@ import {
 	type ImageDimensions,
 	ImageProtocol,
 	imageFallback,
+	isCursorNeutralImagePermittedInFallback,
+	isTerminalGraphicsFallbackActive,
 	kittyImageId,
 	renderImage,
 	TERMINAL,
@@ -40,7 +42,8 @@ export class Image implements Component {
 
 	#cachedLines?: string[];
 	#cachedWidth?: number;
-	// Kitty graphics: content-derived image id + per-instance placement id.
+	#cachedFallbackActive?: boolean;
+	#cachedProtocol?: ImageProtocol | null;
 	// Computed lazily so non-kitty terminals never pay the hash cost.
 	#kittyImageId?: number;
 	readonly #kittyPlacementId = allocatePlacementId();
@@ -62,6 +65,8 @@ export class Image implements Component {
 	invalidate(): void {
 		this.#cachedLines = undefined;
 		this.#cachedWidth = undefined;
+		this.#cachedFallbackActive = undefined;
+		this.#cachedProtocol = undefined;
 	}
 
 	get retainedBase64DataForTest(): string | undefined {
@@ -81,7 +86,19 @@ export class Image implements Component {
 	}
 
 	render(width: number): string[] {
-		if (this.#cachedLines && this.#cachedWidth === width) {
+		// Kitty placements are cursor-neutral, so an opted-in fallback scope
+		// (e.g. the IRC split) can still render them safely; iTerm2/SIXEL
+		// advance the cursor and stay suppressed.
+		const graphicsSuppressed =
+			isTerminalGraphicsFallbackActive() &&
+			!(TERMINAL.imageProtocol === ImageProtocol.Kitty && isCursorNeutralImagePermittedInFallback());
+		const protocol = TERMINAL.imageProtocol;
+		if (
+			this.#cachedLines &&
+			this.#cachedWidth === width &&
+			this.#cachedFallbackActive === graphicsSuppressed &&
+			this.#cachedProtocol === protocol
+		) {
 			return this.#cachedLines;
 		}
 
@@ -90,12 +107,12 @@ export class Image implements Component {
 
 		let lines: string[];
 
-		if (TERMINAL.imageProtocol) {
+		if (protocol && !graphicsSuppressed) {
 			const base64Data = this.#getBase64Data();
 			if (!base64Data) {
 				lines = this.#fallbackLines();
 			} else {
-				if (TERMINAL.imageProtocol === ImageProtocol.Kitty) {
+				if (protocol === ImageProtocol.Kitty) {
 					this.#kittyImageId ??= kittyImageId(base64Data);
 				}
 				const result = renderImage(base64Data, this.#dimensions, {
@@ -139,6 +156,8 @@ export class Image implements Component {
 
 		this.#cachedLines = lines;
 		this.#cachedWidth = width;
+		this.#cachedFallbackActive = graphicsSuppressed;
+		this.#cachedProtocol = protocol;
 
 		return lines;
 	}

@@ -26,7 +26,7 @@
  	MODEL_ONBOARDING_API_PROVIDER_COMMAND,
  	MODEL_ONBOARDING_PROVIDER_PRESET_COMMAND,
  	MODEL_ONBOARDING_SETUP_COMMAND,
-@@ -142,6 +135,10 @@
+@@ -144,6 +137,10 @@
  export class SelectorController {
  	constructor(private ctx: InteractiveModeContext) {}
  
@@ -37,7 +37,7 @@
  	async #refreshOAuthProviderAuthState(): Promise<void> {
  		const oauthProviders = getOAuthProviders();
  		await Promise.all(
-@@ -279,7 +276,7 @@
+@@ -287,7 +284,7 @@
  					const profile = await this.ctx.session.modelRegistry.saveCustomModelProfile(input.name, input.profile);
  					await this.ctx.session.modelRegistry.refresh("offline");
  					await this.ctx.notifyConfigChanged?.();
@@ -46,7 +46,7 @@
  					done();
  					this.ctx.ui.requestRender();
  				} catch (err) {
-@@ -300,106 +297,6 @@
+@@ -308,106 +305,6 @@
  			);
  			return { component: wizard, focus: wizard };
  		});
@@ -153,7 +153,7 @@
  	}
  
  	showCustomProviderWizard(): void {
-@@ -875,17 +772,22 @@
+@@ -920,17 +817,22 @@
  				this.ctx.session.scopedModels,
  				async selection => {
  					try {
@@ -184,7 +184,7 @@
  							return;
  						}
  						if (selection.kind === "profile") {
-@@ -1486,11 +1388,33 @@
+@@ -1533,11 +1435,33 @@
  	}
  
  	async #handleOAuthLogin(providerId: string): Promise<void> {
@@ -219,7 +219,7 @@
  				onAuth: (info: { url: string; instructions?: string }) => {
  					this.ctx.chatContainer.addChild(new Spacer(1));
  					this.ctx.chatContainer.addChild(new Text(theme.fg("dim", info.url), 1, 0));
-@@ -1544,8 +1468,14 @@
+@@ -1591,8 +1515,14 @@
  			await this.#handlePostLoginModelProfileRecommendation(providerId);
  			this.ctx.ui.requestRender();
  		} catch (error: unknown) {
@@ -235,7 +235,7 @@
  			if (useManualInput) {
  				manualInput.clear(`Manual OAuth input cleared for ${providerId}`);
  			}
-@@ -1600,7 +1530,7 @@
+@@ -1647,7 +1577,7 @@
  			}
  		}
  

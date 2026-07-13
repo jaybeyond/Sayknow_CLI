@@ -1093,6 +1093,17 @@ function emitAbortedAssistantMessage(
 }
 
 /**
+ * Match a tool against the model-visible call name. Tools emitted via OpenAI's
+ * custom-tool path (e.g. `apply_patch` on GPT-5) arrive under their wire-level
+ * name, which may differ from the harness-internal `name`, so dispatch and any
+ * "is this tool callable" check must consider both. Internal `name` takes
+ * precedence when a caller needs a single match.
+ */
+function toolMatchesCallName(tool: { name: string; customWireName?: string }, callName: string): boolean {
+	return tool.name === callName || (tool.customWireName !== undefined && tool.customWireName === callName);
+}
+
+/**
  * Execute tool calls from an assistant message.
  */
 async function executeToolCalls(
@@ -1273,7 +1284,22 @@ async function executeToolCalls(
 							`Re-issue the call with complete arguments, splitting the work into smaller steps if needed.`,
 					);
 				}
-				if (!tool) throw new Error(`Tool ${toolCall.name} not found`);
+				if (!tool) {
+					// A discoverable tool that hasn't been activated yet resolves to
+					// undefined here. The model often "remembers" such a tool (e.g.
+					// `task`) from earlier context and calls it by name without first
+					// re-discovering it. Point it at tool discovery so it can activate
+					// the tool and retry instead of giving up on the capability. The
+					// base wording stays byte-for-byte stable for downstream consumers;
+					// the period and hint are appended only when discovery is callable.
+					const base = `Tool ${toolCall.name} not found`;
+					const hasToolDiscovery = tools?.some(t => toolMatchesCallName(t, "search_tool_bm25")) ?? false;
+					throw new Error(
+						hasToolDiscovery
+							? `${base}. If you are unsure whether this tool exists or how to use it, call \`search_tool_bm25\` to discover and activate the matching tool, then retry.`
+							: base,
+					);
+				}
 
 				let effectiveArgs: Record<string, unknown>;
 				try {

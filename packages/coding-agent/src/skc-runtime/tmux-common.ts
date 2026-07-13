@@ -14,6 +14,9 @@ export const SKC_TMUX_BRANCH_SLUG_OPTION = "@skc-branch-slug";
 export const SKC_TMUX_PROJECT_OPTION = "@skc-project";
 export const SKC_TMUX_SESSION_ID_OPTION = "@skc-session-id";
 export const SKC_TMUX_SESSION_STATE_FILE_OPTION = "@skc-session-state-file";
+export const SKC_TMUX_OWNER_GENERATION_OPTION = "@skc-owner-generation";
+export const SKC_TMUX_OWNER_SERVER_KEY_OPTION = "@skc-owner-server-key";
+
 export const SKC_TMUX_VERSION_OPTION = "@skc-version";
 export const SKC_PSMUX_PROFILE_FORCE_ENV = "SKC_PSMUX_PROFILE_FORCE";
 
@@ -158,15 +161,13 @@ export function buildSkcTmuxRequiredProfileCommands(
 		project?: string | null;
 		sessionId?: string | null;
 		sessionStateFile?: string | null;
+		ownerGeneration?: string | null;
+		ownerServerKey?: string | null;
 		version?: string | null;
 	} = {},
 ): SkcTmuxProfileCommand[] {
-	const commands: SkcTmuxProfileCommand[] = [
-		{
-			description: "mark SKC tmux ownership",
-			args: ["set-option", "-t", target, SKC_TMUX_PROFILE_OPTION, SKC_TMUX_PROFILE_VALUE],
-		},
-	];
+	const commands: SkcTmuxProfileCommand[] = [];
+
 	if (metadata.branch)
 		commands.push({
 			description: "record SKC branch identity",
@@ -192,11 +193,26 @@ export function buildSkcTmuxRequiredProfileCommands(
 			description: "record SKC session state marker",
 			args: ["set-option", "-t", target, SKC_TMUX_SESSION_STATE_FILE_OPTION, metadata.sessionStateFile],
 		});
+	if (metadata.ownerGeneration)
+		commands.push({
+			description: "record SKC owner generation",
+			args: ["set-option", "-t", target, SKC_TMUX_OWNER_GENERATION_OPTION, metadata.ownerGeneration],
+		});
+	if (metadata.ownerServerKey)
+		commands.push({
+			description: "record SKC owner server key",
+			args: ["set-option", "-t", target, SKC_TMUX_OWNER_SERVER_KEY_OPTION, metadata.ownerServerKey],
+		});
+
 	if (metadata.version)
 		commands.push({
 			description: "record SKC version identity",
 			args: ["set-option", "-t", target, SKC_TMUX_VERSION_OPTION, metadata.version],
 		});
+	commands.push({
+		description: "mark SKC tmux ownership",
+		args: ["set-option", "-t", target, SKC_TMUX_PROFILE_OPTION, SKC_TMUX_PROFILE_VALUE],
+	});
 	return commands;
 }
 
@@ -219,6 +235,8 @@ export function buildSkcTmuxProfileCommands(
 		project?: string | null;
 		sessionId?: string | null;
 		sessionStateFile?: string | null;
+		ownerGeneration?: string | null;
+		ownerServerKey?: string | null;
 		version?: string | null;
 	} = {},
 	opts: { platform?: NodeJS.Platform; tmuxCommand?: string } = {},
@@ -260,7 +278,8 @@ export function buildSkcTmuxProfileCommands(
 		tmuxName.endsWith("/pmux") ||
 		tmuxName.endsWith("\\psmux") ||
 		tmuxName.endsWith("\\pmux");
-	const dropUx = isPsmuxClass && !envDisabled(env[SKC_PSMUX_PROFILE_FORCE_ENV]);
+	const forcePsmuxProfile = env[SKC_PSMUX_PROFILE_FORCE_ENV] === "true" || env[SKC_PSMUX_PROFILE_FORCE_ENV] === "1";
+	const dropUx = isPsmuxClass && !forcePsmuxProfile;
 	if (dropUx) {
 		return commands.filter(command => {
 			const flag = command.args[0];

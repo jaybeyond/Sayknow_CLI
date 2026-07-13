@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { type Component, TUI } from "@sayknow-cli/tui";
+import { type Component, renderMetrics, TUI } from "@sayknow-cli/tui";
 import {
 	__textHelperPerfCounters,
 	Ellipsis,
@@ -76,6 +76,21 @@ describe("text utils", () => {
 			lines.map(line => truncateToWidth(line, 8, Ellipsis.Omit)),
 		);
 		expect(visibleWidths(lines)).toEqual(lines.map(line => visibleWidth(line)));
+	});
+
+	it("records batched visible-width work when render metrics are enabled", () => {
+		const wasEnabled = renderMetrics.enabled;
+		renderMetrics.reset();
+		renderMetrics.enable();
+		try {
+			expect(visibleWidths(["한글", "❤️", "👍🏽"])).toEqual([4, 2, 2]);
+			const helper = renderMetrics.snapshot().helperStats["text.visibleWidths"];
+			expect(helper?.count).toBe(1);
+			expect(helper?.totalMs).toBeGreaterThanOrEqual(0);
+		} finally {
+			renderMetrics.reset();
+			if (!wasEnabled) renderMetrics.disable();
+		}
 	});
 
 	it("invalidates the cached tab width automatically", () => {

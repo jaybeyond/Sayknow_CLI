@@ -47,6 +47,7 @@ import { persistTaskTokenLog, taskTokenLogFromUsage } from "./token-log";
 import {
 	type AgentDefinition,
 	type AgentProgress,
+	hasCompleteUsageCostBreakdown,
 	MAX_OUTPUT_BYTES,
 	MAX_OUTPUT_LINES,
 	type ModelSubstitutionWarning,
@@ -86,8 +87,8 @@ function normalizeModelPatterns(value: string | string[] | undefined): string[] 
 		.filter(Boolean);
 }
 
-function renderIrcPeerRoster(selfId: string): string {
-	const peers = AgentRegistry.global()
+function renderIrcPeerRoster(agentRegistry: AgentRegistry, selfId: string): string {
+	const peers = agentRegistry
 		.list()
 		.filter(ref => ref.id !== selfId && (ref.status === "running" || ref.status === "idle"));
 	if (peers.length === 0) return "- (no other live agents)";
@@ -151,6 +152,8 @@ export interface ExecutorOptions {
 	authStorage?: AuthStorage;
 	modelRegistry?: ModelRegistry;
 	settings?: Settings;
+	/** Parent session's registry; shared by child sessions for IRC routing and roster visibility. */
+	agentRegistry?: AgentRegistry;
 	/**
 	 * Live service-tier intent of the parent session (`AgentSession.serviceTier`),
 	 * used as the inherited tier when `task.serviceTier === "inherit"`. Passing the
@@ -705,6 +708,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				: agent.spawns.join(",");
 
 	const lspEnabled = enableLsp ?? true;
+	const agentRegistry = options.agentRegistry ?? AgentRegistry.global();
 	const ircEnabled = options.ircAvailable === true;
 	const contextFileForPrompt = ircEnabled ? undefined : options.contextFile;
 	const skipPythonPreflight = Array.isArray(toolNames) && !toolNames.includes("eval");
@@ -743,6 +747,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 	};
 	let hasUsage = false;
+	let usageCostBreakdownComplete = true;
 
 	const requestAbort = (reason: AbortReason) => {
 		if (reason === "timeout") {
@@ -1109,6 +1114,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 						const usageRecord = messageUsage as Record<string, unknown>;
 						const costRecord = (messageUsage as { cost?: Record<string, unknown> }).cost;
 						hasUsage = true;
+						usageCostBreakdownComplete &&= hasCompleteUsageCostBreakdown(usageRecord);
 						accumulatedUsage.input += getNumberField(usageRecord, "input") ?? 0;
 						accumulatedUsage.output += getNumberField(usageRecord, "output") ?? 0;
 						accumulatedUsage.cacheRead += getNumberField(usageRecord, "cacheRead") ?? 0;
@@ -1382,7 +1388,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 							worktree: worktree ?? "",
 							outputSchema: normalizedOutputSchema,
 							contextFile: contextFileForPrompt,
-							ircPeers: ircEnabled ? renderIrcPeerRoster(id) : "",
+							ircPeers: ircEnabled ? renderIrcPeerRoster(agentRegistry, id) : "",
 							ircSelfId: ircEnabled ? id : "",
 							forkContext: forkContextNotice,
 						});
@@ -1411,6 +1417,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					parentTaskPrefix: id,
 					agentId: id,
 					agentDisplayName: agent.name,
+					agentRosterLabel: options.description,
 					bashAllowedPrefixes: agent.bashAllowedPrefixes,
 					enableLsp: lspEnabled,
 					skipPythonPreflight,
@@ -1418,6 +1425,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					localProtocolOptions: options.localProtocolOptions,
 					telemetry: subagentTelemetry,
 					forkContextSeed: options.forkContextSeed,
+					agentRegistry,
 					shouldPause: () => pauseRequested,
 				}),
 			);
@@ -1866,6 +1874,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		abortReason: finalAbortReason,
 		paused,
 		usage: hasUsage ? accumulatedUsage : undefined,
+		usageCostBreakdownComplete: hasUsage && usageCostBreakdownComplete ? true : undefined,
 		outputPath,
 		extractedToolData: progress.extractedToolData,
 		retryFailure: progress.retryFailure,

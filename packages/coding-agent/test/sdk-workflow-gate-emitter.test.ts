@@ -9,6 +9,7 @@ import type { OpenGateInput } from "@sayknow-cli/coding-agent/modes/shared/agent
 import { createAgentSession } from "@sayknow-cli/coding-agent/sdk";
 import { Settings } from "../src/config/settings";
 import { SessionManager } from "../src/session/session-manager";
+import { registerWorkflowGateEmitterListener } from "../src/tools/ask-answer-registry";
 
 /**
  * G011 regression: the SDK-built ToolSession MUST forward getWorkflowGateEmitter
@@ -39,6 +40,10 @@ describe("SDK ToolSession forwards getWorkflowGateEmitter (G011 real wiring)", (
 		});
 		try {
 			const received: OpenGateInput[] = [];
+			let publishedEmitter: WorkflowGateEmitter | undefined;
+			const disposeEmitterListener = registerWorkflowGateEmitterListener(session.sessionId, emitter => {
+				publishedEmitter = emitter;
+			});
 			const emitter: WorkflowGateEmitter = {
 				isUnattended: () => true,
 				emitGate: input => {
@@ -47,6 +52,8 @@ describe("SDK ToolSession forwards getWorkflowGateEmitter (G011 real wiring)", (
 				},
 			};
 			session.setWorkflowGateEmitter(emitter);
+			expect(publishedEmitter).toBe(emitter);
+			disposeEmitterListener();
 			expect(session.getWorkflowGateEmitter()).toBe(emitter);
 
 			const askTool = session.getToolByName("ask");
@@ -72,7 +79,7 @@ describe("SDK ToolSession forwards getWorkflowGateEmitter (G011 real wiring)", (
 		} finally {
 			await session.dispose();
 		}
-	});
+	}, 15_000);
 	it("late-registers ask when a headless session receives an unattended workflow gate emitter", async () => {
 		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "skc-g011-headless-"));
 		tempDirs.push(tempDir);
@@ -130,5 +137,5 @@ describe("SDK ToolSession forwards getWorkflowGateEmitter (G011 real wiring)", (
 		} finally {
 			await session.dispose();
 		}
-	});
+	}, 15_000);
 });

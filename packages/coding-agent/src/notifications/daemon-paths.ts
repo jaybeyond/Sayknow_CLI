@@ -1,5 +1,13 @@
 import * as path from "node:path";
 
+/**
+ * Owner heartbeat freshness window. A daemon ownership record older than this
+ * (without a live pid) is considered stale. Lives here, in the lightweight
+ * paths module, so secret-safe consumers (e.g. the notification service) can
+ * reuse it without importing the heavy daemon runtime.
+ */
+export const HEARTBEAT_TTL_MS = 20_000;
+
 export interface DaemonPaths {
 	dir: string;
 	lock: string;

@@ -32,7 +32,7 @@
 +	return `Model profile "${profileName}" requires credentials for: ${providers.join(", ")}. Run /login and configure the missing provider(s), then retry.`;
  }
  
- function resolveModelProfileName(profileName: string, profiles: ReadonlyMap<string, unknown>): string {
+ export function resolveModelProfileName(profileName: string, profiles: ReadonlyMap<string, unknown>): string {
 @@ -252,7 +252,6 @@
  		const available = formatAvailableProfileNames(profiles);
  		throw new Error(`Unknown model profile "${options.profileName}". Available profiles: ${available}`);

@@ -70,6 +70,11 @@ export interface HookSelectorOptions {
 	 * completion behavior as the main prompt editor.
 	 */
 	autocompleteProvider?: AutocompleteProvider;
+	/**
+	 * Maps raw single-key accelerators to option labels. Unset maps preserve
+	 * the legacy selector key handling exactly.
+	 */
+	acceleratorMap?: Readonly<Record<string, string>>;
 }
 
 class OutlinedList extends Container {
@@ -352,6 +357,7 @@ export class HookSelectorComponent extends Container {
 	#baseHelpText: string;
 	#tui: TUI | undefined;
 	#autocompleteProvider: AutocompleteProvider | undefined;
+	#acceleratorMap: Readonly<Record<string, string>> | undefined;
 	constructor(
 		title: string,
 		options: string[],
@@ -376,6 +382,7 @@ export class HookSelectorComponent extends Container {
 		this.#clarificationInput = opts?.clarificationInput;
 		this.#tui = opts?.tui;
 		this.#autocompleteProvider = opts?.autocompleteProvider;
+		this.#acceleratorMap = opts?.acceleratorMap;
 
 		this.addChild(new DynamicBorder());
 		this.addChild(new Spacer(1));
@@ -501,6 +508,11 @@ export class HookSelectorComponent extends Container {
 		}
 		if (this.#inlineEditor) {
 			this.#handleInputModeKey(keyData, this.#inlineEditor);
+			return;
+		}
+		const acceleratedOption = this.#acceleratorMap?.[keyData.toLowerCase()];
+		if (acceleratedOption && this.#options.includes(acceleratedOption)) {
+			this.#onSelectCallback(acceleratedOption);
 			return;
 		}
 		if (matchesKey(keyData, "up") || keyData === "k") {

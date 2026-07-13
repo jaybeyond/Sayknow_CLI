@@ -53,6 +53,48 @@ export function isNotificationSuppressed(): boolean {
 	return value === "off" || value === "0" || value === "false";
 }
 
+let terminalGraphicsFallbackDepth = 0;
+let cursorNeutralImageAllowedDepth = 0;
+
+export interface TerminalGraphicsFallbackOptions {
+	/**
+	 * Permit cursor-neutral image escapes (kitty `a=p,C=1` placements) to render
+	 * inside this fallback scope. Cursor-advancing protocols (iTerm2/SIXEL)
+	 * remain suppressed. A nested scope without this option revokes the
+	 * permission for its own subtree.
+	 */
+	allowCursorNeutralImages?: boolean;
+}
+
+/**
+ * Synchronously suppress terminal graphics while rendering a text-only surface.
+ * Nested scopes remain active until the outermost scope exits.
+ */
+export function withTerminalGraphicsFallback<T>(fn: () => T, options?: TerminalGraphicsFallbackOptions): T {
+	terminalGraphicsFallbackDepth++;
+	const allow = options?.allowCursorNeutralImages === true;
+	if (allow) cursorNeutralImageAllowedDepth++;
+	try {
+		return fn();
+	} finally {
+		if (allow) cursorNeutralImageAllowedDepth--;
+		terminalGraphicsFallbackDepth--;
+	}
+}
+
+/** Returns whether terminal graphics are currently suppressed by a render scope. */
+export function isTerminalGraphicsFallbackActive(): boolean {
+	return terminalGraphicsFallbackDepth > 0;
+}
+
+/**
+ * Returns whether cursor-neutral image escapes may render despite an active
+ * graphics-fallback scope. True only when every active fallback scope opted in.
+ */
+export function isCursorNeutralImagePermittedInFallback(): boolean {
+	return terminalGraphicsFallbackDepth > 0 && cursorNeutralImageAllowedDepth === terminalGraphicsFallbackDepth;
+}
+
 function getForcedImageProtocol(): ImageProtocol | null | undefined {
 	const raw = $env.PI_FORCE_IMAGE_PROTOCOL?.trim().toLowerCase();
 	if (!raw) return undefined;

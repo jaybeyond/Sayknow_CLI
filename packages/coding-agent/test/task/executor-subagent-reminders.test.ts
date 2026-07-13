@@ -3,11 +3,13 @@ import { AgentBusyError, type AgentTelemetryConfig, type Tracer } from "@sayknow
 import { type AssistantMessage, Effort, type Model } from "@sayknow-cli/ai";
 import { Settings } from "../../src/config/settings";
 import type { ExtensionActions, LoadExtensionsResult } from "../../src/extensibility/extensions/types";
+import { AgentRegistry } from "../../src/registry/agent-registry";
 import type { CreateAgentSessionResult } from "../../src/sdk";
 import * as sdkModule from "../../src/sdk";
 import type { AgentSession, AgentSessionEvent, ForkContextSeed, PromptOptions } from "../../src/session/agent-session";
 import type { AuthStorage } from "../../src/session/auth-storage";
 import { runSubprocess, SUBAGENT_WARNING_MISSING_YIELD } from "../../src/task/executor";
+
 import type { AgentDefinition } from "../../src/task/types";
 import { EventBus } from "../../src/utils/event-bus";
 
@@ -311,6 +313,38 @@ describe("runSubprocess yield reminders", () => {
 		const systemPrompt = systemPromptBuilder(["system", "now"]);
 
 		expect(systemPrompt.join("\n")).toContain("Use IRC for live coordination.");
+	});
+
+	it("uses the parent registry for the child session and static IRC peers", async () => {
+		const session = createMockSession(({ emit }) => {
+			emit({
+				type: "tool_execution_end",
+				toolCallId: "tool-registry",
+				toolName: "yield",
+				result: {
+					content: [{ type: "text", text: "Result submitted." }],
+					details: { status: "success", data: {} },
+				},
+				isError: false,
+			});
+		});
+		const createAgentSessionSpy = mockCreateAgentSession(session);
+		const parentRegistry = new AgentRegistry();
+		const otherRegistry = new AgentRegistry();
+		parentRegistry.register({ id: "0-Main", displayName: "parent", kind: "main", session: null });
+		parentRegistry.register({ id: "1-ParentPeer", displayName: "parent peer", kind: "sub", session: null });
+		otherRegistry.register({ id: "2-OtherPeer", displayName: "other peer", kind: "sub", session: null });
+
+		await runSubprocess({ ...baseOptions, id: "3-Child", ircAvailable: true, agentRegistry: parentRegistry });
+
+		const childOptions = createAgentSessionSpy.mock.calls[0]?.[0];
+		expect(childOptions?.agentRegistry).toBe(parentRegistry);
+		const systemPromptBuilder = childOptions?.systemPrompt;
+		expect(systemPromptBuilder).toBeFunction();
+		if (typeof systemPromptBuilder !== "function") throw new Error("Expected system prompt builder");
+		const systemPrompt = systemPromptBuilder(["system", "now"]).join("\n");
+		expect(systemPrompt).toContain("1-ParentPeer");
+		expect(systemPrompt).not.toContain("2-OtherPeer");
 	});
 
 	it("sends reminder prompt when subagent stops without yield", async () => {

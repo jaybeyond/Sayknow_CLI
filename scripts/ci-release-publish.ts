@@ -17,6 +17,7 @@
  */
 
 import * as fs from "node:fs/promises";
+import * as os from "node:os";
 import * as path from "node:path";
 import { $ } from "bun";
 
@@ -27,7 +28,7 @@ interface PublishPackage {
 	preBuild?: readonly (readonly string[])[];
 	/** Extra entries to splice into `files`. */
 	extraFiles?: readonly string[];
-	/** Extra tsgo invocations beyond `tsconfig.publish.json`. */
+	/** Extra TypeScript declaration configs beyond `tsconfig.publish.json`. */
 	extraTypeConfigs?: readonly string[];
 	/** Native addon filename prefixes staged into a per-platform optional package. */
 	nativePrefixes?: readonly string[];
@@ -37,7 +38,8 @@ type JsonValue = string | number | boolean | null | JsonObject | JsonValue[];
 interface JsonObject {
 	[key: string]: JsonValue;
 }
-interface PackageManifest extends JsonObject {
+interface PackageManifest {
+	[key: string]: JsonValue | undefined;
 	name?: string;
 	version?: string;
 	private?: boolean;
@@ -45,6 +47,7 @@ interface PackageManifest extends JsonObject {
 
 const repoRoot = path.join(import.meta.dir, "..");
 const isDryRun = process.argv.includes("--dry-run");
+const isTypeCheck = process.argv.includes("--check-types");
 const nativePlatformPackages: readonly PublishPackage[] = [
 	{ dir: "packages/natives-darwin-arm64", kind: "native-platform", nativePrefixes: ["pi_natives.darwin-arm64"] },
 	{ dir: "packages/natives-darwin-x64", kind: "native-platform", nativePrefixes: ["pi_natives.darwin-x64"] },
@@ -233,6 +236,34 @@ async function stageNativePlatformArtifacts(pkg: PublishPackage): Promise<void> 
 	}
 }
 
+async function emitTypeDeclarations(pkg: PublishPackage, temporaryRoot?: string): Promise<void> {
+	const pkgDir = path.join(repoRoot, pkg.dir);
+	const configs = ["tsconfig.publish.json", ...(pkg.extraTypeConfigs ?? [])];
+	for (const config of configs) {
+		if (temporaryRoot === undefined) {
+			await $`bun x tsc -p ${config}`.cwd(pkgDir);
+			continue;
+		}
+		const outputName = path.basename(config, path.extname(config));
+		const outputDir = path.join(temporaryRoot, pkg.dir.replaceAll(/[\\/]/g, "__"), outputName);
+		await fs.mkdir(outputDir, { recursive: true });
+		await $`bun x tsc -p ${config} --outDir ${outputDir}`.cwd(pkgDir);
+	}
+}
+
+async function checkTypeDeclarations(): Promise<void> {
+	const temporaryRoot = await fs.mkdtemp(path.join(os.tmpdir(), "sayknow-cli-types-"));
+	try {
+		for (const pkg of packages) {
+			if (pkg.kind !== "typescript") continue;
+			await emitTypeDeclarations(pkg, temporaryRoot);
+			console.log(`Checked declarations (${pkg.dir})`);
+		}
+	} finally {
+		await fs.rm(temporaryRoot, { recursive: true, force: true });
+	}
+}
+
 async function preparePackage(pkg: PublishPackage): Promise<PackageManifest> {
 	const pkgDir = path.join(repoRoot, pkg.dir);
 	if (pkg.kind === "native-platform") {
@@ -245,17 +276,13 @@ async function preparePackage(pkg: PublishPackage): Promise<PackageManifest> {
 	for (const argv of pkg.preBuild ?? []) {
 		await $`${argv}`.cwd(pkgDir);
 	}
-	await $`bun x tsgo -p tsconfig.publish.json`.cwd(pkgDir);
-	for (const cfg of pkg.extraTypeConfigs ?? []) {
-		await $`bun x tsgo -p ${cfg}`.cwd(pkgDir);
-	}
+	await emitTypeDeclarations(pkg);
 	return rewriteManifest(pkgDir, pkg.extraFiles ?? []);
 }
 
 async function readPackageManifest(pkgDir: string): Promise<PackageManifest> {
 	return (await Bun.file(path.join(pkgDir, "package.json")).json()) as PackageManifest;
 }
-
 
 async function publishPackage(pkg: PublishPackage): Promise<void> {
 	const pkgDir = path.join(repoRoot, pkg.dir);
@@ -286,6 +313,13 @@ async function publishPackage(pkg: PublishPackage): Promise<void> {
 }
 
 async function main(): Promise<void> {
+	if (isTypeCheck) {
+		await checkTypeDeclarations();
+		return;
+	}
+	if (!isDryRun) {
+		await checkTypeDeclarations();
+	}
 	for (const pkg of packages) {
 		await publishPackage(pkg);
 	}

@@ -47,6 +47,15 @@ export interface DaemonOperationOptions {
 	spawnIfStopped?: boolean;
 }
 
+export interface DaemonRecovery {
+	/** Machine-readable recovery category for automation branching. */
+	reason: "ownership_mismatch";
+	/** One-line human summary of why the operation could not proceed. */
+	summary: string;
+	/** Ordered, copy-pasteable remediation steps. */
+	steps: string[];
+}
+
 export interface DaemonOperationResult {
 	kind: DaemonKind;
 	action: Exclude<DaemonAction, "list">;
@@ -55,6 +64,8 @@ export interface DaemonOperationResult {
 	after?: DaemonStatus;
 	warnings: string[];
 	message: string;
+	/** Present when the operation was refused with an actionable recovery path (e.g. ownership mismatch). */
+	recovery?: DaemonRecovery;
 }
 
 export interface BuiltInDaemonController {

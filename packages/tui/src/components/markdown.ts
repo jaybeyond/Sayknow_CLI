@@ -3,7 +3,14 @@ import { Marked, marked, type Token, Tokenizer, type Tokens } from "marked";
 import type { SymbolTheme } from "../symbols";
 import { TERMINAL } from "../terminal-capabilities";
 import type { Component } from "../tui";
-import { applyBackgroundToLine, padding, replaceTabs, visibleWidth, wrapTextWithAnsi } from "../utils";
+import {
+	applyBackgroundToLine,
+	padding,
+	replaceTabs,
+	type ViewportAnchorSpan,
+	visibleWidth,
+	wrapTextWithAnsi,
+} from "../utils";
 
 const STRICT_STRIKETHROUGH_REGEX = /^(~~)(?=[^\s~])((?:\\.|[^\\])*?(?:\\.|[^\s~\\]))\1(?=[^~]|$)/;
 
@@ -39,11 +46,26 @@ markdownParser.setOptions({
 // (Rust FFI) work for content/layout combinations already seen this session.
 
 const RENDER_CACHE_MAX = 256; // sane cap: ~256 distinct message × width combos
-const renderCache = new LRUCache<string, { source: string; lines: string[] }>({ max: RENDER_CACHE_MAX });
+const renderCache = new LRUCache<
+	string,
+	{ source: string; lines: string[]; anchorSpans?: Array<ViewportAnchorSpan | null> }
+>({
+	max: RENDER_CACHE_MAX,
+});
 const PARSE_CACHE_MAX = 128;
 const parseCache = new LRUCache<string, { source: string; tokens: Token[] }>({ max: PARSE_CACHE_MAX });
 const MARKDOWN_STREAM_THROTTLE_MS = 64;
 let markdownNow = (): number => performance.now();
+
+// Viewport anchor offsets are numbered over each top-level token's width-invariant
+// source-text span (scaled to leave room for content rows) instead of the
+// width-dependent rendered glyph stream. HR fill length, per-row blockquote
+// prefixes, and boxed/raw table topology all change the rendered glyph count with
+// width; source-text spans do not, so anchors resolve to the same content after a
+// topology-changing reflow (#2031). The scale guarantees each content row a
+// positive, non-overlapping sub-span even when a token wraps into more rows than
+// its source has characters.
+const ANCHOR_SOURCE_SCALE = 1 << 16;
 
 /** Test-only clock seam for streaming throttle tests. */
 export function __setMarkdownNowForTest(now: (() => number) | undefined): void {
@@ -59,6 +81,14 @@ const highlightCache = new LRUCache<string, string[]>({ max: HIGHLIGHT_CACHE_MAX
 function renderedLinesBytes(lines: readonly string[]): number {
 	let bytes = 0;
 	for (const line of lines) bytes += Buffer.byteLength(line, "utf8");
+	return bytes;
+}
+
+function anchorSpansBytes(spans: readonly (ViewportAnchorSpan | null)[]): number {
+	let bytes = spans.length * 8; // Array element references
+	for (const span of spans) {
+		if (span) bytes += 4 * 8; // Four numeric offsets
+	}
 	return bytes;
 }
 
@@ -108,6 +138,7 @@ export function getRenderCacheRetainedBytes(): number {
 	for (const entry of renderCache.values()) {
 		bytes += Buffer.byteLength(entry.source, "utf8");
 		bytes += renderedLinesBytes(entry.lines);
+		if (entry.anchorSpans) bytes += anchorSpansBytes(entry.anchorSpans);
 	}
 	for (const entry of parseCache.values()) bytes += Buffer.byteLength(entry.source, "utf8");
 	for (const lines of highlightCache.values()) bytes += renderedLinesBytes(lines);
@@ -235,6 +266,7 @@ export class Markdown implements Component {
 	#cachedText?: string;
 	#cachedWidth?: number;
 	#cachedLines?: string[];
+	#cachedAnchorSpans?: Array<ViewportAnchorSpan | null>;
 
 	#streaming = false;
 	#lastFullParseAt = 0;
@@ -310,6 +342,7 @@ export class Markdown implements Component {
 		this.#cachedText = undefined;
 		this.#cachedWidth = undefined;
 		this.#cachedLines = undefined;
+		this.#cachedAnchorSpans = undefined;
 	}
 
 	#exceedsHighlightCap(code: string): boolean {
@@ -354,20 +387,35 @@ export class Markdown implements Component {
 	}
 
 	render(width: number): string[] {
+		return this.#render(width, false).lines;
+	}
+
+	#render(width: number, includeAnchors: boolean): { lines: string[]; spans?: Array<ViewportAnchorSpan | null> } {
 		// L1: per-instance cache — fastest path for repeated renders of the same
 		// instance at the same width (e.g. resize debounce, repeated redraws).
-		if (this.#cachedLines && this.#cachedText === this.#text && this.#cachedWidth === width) {
-			return this.#cachedLines;
+		if (
+			this.#cachedLines &&
+			this.#cachedText === this.#text &&
+			this.#cachedWidth === width &&
+			(!includeAnchors || this.#cachedAnchorSpans !== undefined)
+		) {
+			return { lines: this.#cachedLines, spans: this.#cachedAnchorSpans };
 		}
 
 		// Calculate available width for content (subtract horizontal padding)
 		const contentWidth = Math.max(1, width - this.#paddingX * 2);
 
-		if (this.#streaming && this.#cachedLines && this.#cachedWidth === width && this.#lastFullParseAt > 0) {
+		if (
+			this.#streaming &&
+			this.#cachedLines &&
+			this.#cachedWidth === width &&
+			this.#lastFullParseAt > 0 &&
+			(!includeAnchors || this.#cachedAnchorSpans !== undefined)
+		) {
 			const elapsedMs = markdownNow() - this.#lastFullParseAt;
 			if (elapsedMs < MARKDOWN_STREAM_THROTTLE_MS) {
 				this.#armStaleThrottleTimer(MARKDOWN_STREAM_THROTTLE_MS - elapsedMs);
-				return this.#cachedLines;
+				return { lines: this.#cachedLines, spans: this.#cachedAnchorSpans };
 			}
 		}
 
@@ -378,7 +426,8 @@ export class Markdown implements Component {
 			this.#cachedText = this.#text;
 			this.#cachedWidth = width;
 			this.#cachedLines = result;
-			return result;
+			this.#cachedAnchorSpans = includeAnchors ? [] : undefined;
+			return { lines: result, spans: this.#cachedAnchorSpans };
 		}
 
 		// Replace tabs with 3 spaces for consistent rendering
@@ -395,12 +444,17 @@ export class Markdown implements Component {
 		const headingProbe = this.#theme.heading("");
 		const cacheKey = `${contentKey}\x00${width}\x00${this.#paddingX}\x00${this.#paddingY}\x00${this.#codeBlockIndent}\x00${objectId(this.#theme)}\x00${this.#defaultTextStyle ? objectId(this.#defaultTextStyle) : -1}\x00${TERMINAL.imageProtocol ?? ""}\x00${TERMINAL.hyperlinks ? 1 : 0}\x00${bgColorProbe}\x00${headingProbe}`;
 		const cached = renderCache.get(cacheKey);
-		if (cached !== undefined && cached.source === normalizedText) {
+		if (
+			cached !== undefined &&
+			cached.source === normalizedText &&
+			(!includeAnchors || cached.anchorSpans !== undefined)
+		) {
 			// Populate L1 so subsequent calls from this instance are O(1) map lookup.
 			this.#cachedText = this.#text;
 			this.#cachedWidth = width;
 			this.#cachedLines = cached.lines;
-			return cached.lines;
+			this.#cachedAnchorSpans = cached.anchorSpans;
+			return { lines: cached.lines, spans: cached.anchorSpans };
 		}
 
 		// Parse markdown to marked tokens. Parse cache is width/theme independent,
@@ -417,23 +471,105 @@ export class Markdown implements Component {
 			parseCache.set(contentKey, { source: normalizedText, tokens });
 		}
 
-		// Convert tokens to styled terminal output
+		// Convert tokens to styled terminal output. When anchoring, record each
+		// top-level token's rendered-line range plus a width-invariant source-text
+		// span (cumulative marked-token `raw` lengths) so viewport anchors are
+		// numbered over stable source identities instead of the rendered glyph
+		// stream (#2031).
 		const renderedLines: string[] = [];
+		const tokenBoundaries: Array<{ start: number; end: number; srcLo: number; srcHi: number; units: number[] }> = [];
+		let srcOffset = 0;
 
 		for (let i = 0; i < tokens.length; i++) {
 			const token = tokens[i];
 			const nextToken = tokens[i + 1];
-			const tokenLines = this.#renderToken(token, contentWidth, nextToken?.type);
+			const tokenStart = renderedLines.length;
+			const units: number[] | undefined = includeAnchors ? [] : undefined;
+			const tokenLines = this.#renderToken(token, contentWidth, nextToken?.type, undefined, units);
 			renderedLines.push(...tokenLines);
+			if (includeAnchors) {
+				const rawLength = "raw" in token && typeof token.raw === "string" ? token.raw.length : 0;
+				const srcLo = srcOffset;
+				srcOffset += Math.max(1, rawLength);
+				// units must align 1:1 with the token's rendered lines; if a renderer
+				// path emitted none, treat the whole token as a single unit.
+				const lineUnits =
+					units && units.length === tokenLines.length ? units : new Array<number>(tokenLines.length).fill(0);
+				tokenBoundaries.push({
+					start: tokenStart,
+					end: renderedLines.length,
+					srcLo,
+					srcHi: srcOffset,
+					units: lineUnits,
+				});
+			}
 		}
 
-		// Wrap lines (NO padding, NO background yet)
-		const wrappedLines: string[] = [];
-		for (const line of renderedLines) {
-			if (TERMINAL.isImageLine(line)) {
-				wrappedLines.push(line);
-			} else {
-				wrappedLines.push(...wrapTextIfNeeded(line, contentWidth));
+		let wrappedLines: string[];
+		let wrappedSpans: Array<ViewportAnchorSpan | null> | undefined;
+		if (includeAnchors) {
+			wrappedLines = [];
+			const spans: Array<ViewportAnchorSpan | null> = [];
+			for (const boundary of tokenBoundaries) {
+				// Number this token's width-invariant source-text band [lo, hi) over its
+				// source units — width-invariant structural spans (a list item, a table
+				// row, a blockquote child block; a simple token is one unit) — rather than
+				// over the width-dependent count of final content rows. Each unit reserves
+				// a fixed sub-band, so an earlier unit's rows no longer move when a *later*
+				// unit of the same top-level token rewraps into more rows. That
+				// within-token drift was the P2 the first #2031 pass reintroduced: a
+				// page-down anchor pinned to list item 1 (or a table header) slid into item
+				// 2 (or a data row) once the later unit rewrapped, because every unit shared
+				// one content-row count the later unit inflated.
+				const lo = boundary.srcLo * ANCHOR_SOURCE_SCALE;
+				const hi = boundary.srcHi * ANCHOR_SOURCE_SCALE;
+				const lineCount = boundary.end - boundary.start;
+				// Wrap the token's rendered lines exactly as the plain path does (so the
+				// emitted `lines` stay byte-identical to render()), recording each wrapped
+				// row's source unit and its position in `wrappedLines`.
+				const firstWrapped = wrappedLines.length;
+				const rowUnit: number[] = [];
+				let unitCount = 1;
+				for (let li = 0; li < lineCount; li++) {
+					const renderedLine = renderedLines[boundary.start + li];
+					const unit = boundary.units[li];
+					if (unit + 1 > unitCount) unitCount = unit + 1;
+					const lineWrapped = TERMINAL.isImageLine(renderedLine)
+						? [renderedLine]
+						: wrapTextIfNeeded(renderedLine, contentWidth);
+					for (const w of lineWrapped) {
+						wrappedLines.push(w);
+						spans.push(null);
+						rowUnit.push(unit);
+					}
+				}
+				// Blank, decoration-only whitespace, and image rows carry no anchor.
+				const contentRowsByUnit: number[][] = Array.from({ length: unitCount }, () => []);
+				for (let j = 0; j < rowUnit.length; j++) {
+					const globalIdx = firstWrapped + j;
+					const line = wrappedLines[globalIdx];
+					if (!TERMINAL.isImageLine(line) && Bun.stripANSI(line).trim().length > 0) {
+						contentRowsByUnit[rowUnit[j]].push(globalIdx);
+					}
+				}
+				for (let u = 0; u < unitCount; u++) {
+					const unitLo = lo + Math.floor((u * (hi - lo)) / unitCount);
+					const unitHi = u === unitCount - 1 ? hi : lo + Math.floor(((u + 1) * (hi - lo)) / unitCount);
+					const rows = contentRowsByUnit[u];
+					const count = rows.length;
+					for (let c = 0; c < count; c++) {
+						const start = unitLo + Math.floor((c * (unitHi - unitLo)) / count);
+						const end = c === count - 1 ? unitHi : unitLo + Math.floor(((c + 1) * (unitHi - unitLo)) / count);
+						spans[rows[c]] = { graphemeStart: start, graphemeEnd: end, cellStart: start, cellEnd: end };
+					}
+				}
+			}
+			wrappedSpans = spans;
+		} else {
+			wrappedLines = [];
+			for (const line of renderedLines) {
+				if (TERMINAL.isImageLine(line)) wrappedLines.push(line);
+				else wrappedLines.push(...wrapTextIfNeeded(line, contentWidth));
 			}
 		}
 
@@ -470,21 +606,42 @@ export class Markdown implements Component {
 			emptyLines.push(line);
 		}
 
-		// Combine top padding, content, and bottom padding
 		const rawResult = [...emptyLines, ...contentLines, ...emptyLines];
+		const rawAnchorSpans = wrappedSpans && [
+			...emptyLines.map(() => null),
+			...wrappedSpans,
+			...emptyLines.map(() => null),
+		];
 		const result = rawResult.length > 0 ? rawResult : [""];
+		const anchorSpans = rawResult.length > 0 ? rawAnchorSpans : wrappedSpans ? [null] : undefined;
 
 		// Update L1 per-instance cache
 		this.#cachedText = this.#text;
 		this.#cachedWidth = width;
 		this.#cachedLines = result;
+		this.#cachedAnchorSpans = anchorSpans;
 		this.#lastFullParseAt = markdownNow();
 
 		// Update L2 module-level LRU so future instances with the same key skip
 		// the marked.lexer + highlightCode (Rust FFI) work entirely.
-		renderCache.set(cacheKey, { source: normalizedText, lines: result });
+		renderCache.set(cacheKey, { source: normalizedText, lines: result, ...(anchorSpans ? { anchorSpans } : {}) });
 
-		return result;
+		return { lines: result, spans: anchorSpans };
+	}
+
+	renderWithViewportAnchorSource(
+		width: number,
+		source: { id: string },
+	): {
+		lines: string[];
+		anchors: Array<({ id: string } & ViewportAnchorSpan) | null>;
+	} {
+		const { lines, spans } = this.#render(width, true);
+		if (!spans) throw new Error("Viewport anchor source render completed without row spans");
+		return {
+			lines,
+			anchors: spans.map(span => (span ? { id: source.id, ...span } : null)),
+		};
 	}
 
 	/**
@@ -570,7 +727,13 @@ export class Markdown implements Component {
 		};
 	}
 
-	#renderToken(token: Token, width: number, nextTokenType?: string, styleContext?: InlineStyleContext): string[] {
+	#renderToken(
+		token: Token,
+		width: number,
+		nextTokenType?: string,
+		styleContext?: InlineStyleContext,
+		units?: number[],
+	): string[] {
 		const lines: string[] = [];
 
 		switch (token.type) {
@@ -628,7 +791,7 @@ export class Markdown implements Component {
 			}
 
 			case "list": {
-				const listLines = this.#renderList(token as ListToken, 0, styleContext);
+				const listLines = this.#renderList(token as ListToken, 0, styleContext, units);
 				lines.push(...listLines);
 				// Don't add spacing after lists if a space token follows
 				// (the space token will handle it)
@@ -636,7 +799,7 @@ export class Markdown implements Component {
 			}
 
 			case "table": {
-				const tableLines = this.#renderTable(token as TableToken, width, nextTokenType, styleContext);
+				const tableLines = this.#renderTable(token as TableToken, width, nextTokenType, styleContext, units);
 				lines.push(...tableLines);
 				break;
 			}
@@ -662,28 +825,40 @@ export class Markdown implements Component {
 				const quoteContentWidth = Math.max(1, width - 2);
 				const quoteTokens = token.tokens || [];
 				const renderedQuoteLines: string[] = [];
+				// Track which source child block produced each rendered quote line so the
+				// anchor band can be numbered over width-invariant child units rather than
+				// the width-dependent count of wrapped quote lines.
+				const quoteLineUnit: number[] = [];
 
 				for (let i = 0; i < quoteTokens.length; i++) {
 					const quoteToken = quoteTokens[i];
 					const nextQuoteToken = quoteTokens[i + 1];
-					renderedQuoteLines.push(
-						...this.#renderToken(quoteToken, quoteContentWidth, nextQuoteToken?.type, quoteInlineStyleContext),
+					const childLines = this.#renderToken(
+						quoteToken,
+						quoteContentWidth,
+						nextQuoteToken?.type,
+						quoteInlineStyleContext,
 					);
+					for (let c = 0; c < childLines.length; c++) quoteLineUnit.push(i);
+					renderedQuoteLines.push(...childLines);
 				}
 
 				while (renderedQuoteLines.length > 0 && renderedQuoteLines[renderedQuoteLines.length - 1] === "") {
 					renderedQuoteLines.pop();
+					quoteLineUnit.pop();
 				}
 
-				for (const quoteLine of renderedQuoteLines) {
-					const styledLine = applyQuoteStyle(quoteLine);
+				for (let q = 0; q < renderedQuoteLines.length; q++) {
+					const styledLine = applyQuoteStyle(renderedQuoteLines[q]);
 					const wrappedLines = wrapTextIfNeeded(styledLine, quoteContentWidth);
 					for (const wrappedLine of wrappedLines) {
 						lines.push(this.#theme.quoteBorder(`${this.#theme.symbols.quoteBorder} `) + wrappedLine);
+						units?.push(quoteLineUnit[q]);
 					}
 				}
 				if (nextTokenType && nextTokenType !== "space") {
 					lines.push(""); // Add spacing after blockquotes (unless space token follows)
+					units?.push(quoteTokens.length > 0 ? quoteTokens.length - 1 : 0);
 				}
 				break;
 			}
@@ -717,6 +892,9 @@ export class Markdown implements Component {
 				}
 		}
 
+		// Anchor units: lines a token emitted without an explicit unit (simple
+		// single-unit tokens, trailing spacing) inherit the last unit, default 0.
+		if (units) while (units.length < lines.length) units.push(units.length ? units[units.length - 1] : 0);
 		return lines;
 	}
 
@@ -820,7 +998,7 @@ export class Markdown implements Component {
 	/**
 	 * Render a list with proper nesting support
 	 */
-	#renderList(token: ListToken, depth: number, styleContext?: InlineStyleContext): string[] {
+	#renderList(token: ListToken, depth: number, styleContext?: InlineStyleContext, units?: number[]): string[] {
 		const lines: string[] = [];
 		const indent = "  ".repeat(depth);
 		// Use the list's start property (defaults to 1 for ordered lists)
@@ -863,6 +1041,9 @@ export class Markdown implements Component {
 			} else {
 				lines.push(indent + this.#theme.listBullet(bullet));
 			}
+			// Anchor units: every rendered line of this top-level item (including any
+			// nested list lines) belongs to one width-invariant unit — the item index.
+			if (units) while (units.length < lines.length) units.push(i);
 		}
 
 		return lines;
@@ -942,6 +1123,7 @@ export class Markdown implements Component {
 		availableWidth: number,
 		nextTokenType?: string,
 		styleContext?: InlineStyleContext,
+		units?: number[],
 	): string[] {
 		const lines: string[] = [];
 		const numCols = token.header.length;
@@ -1082,6 +1264,9 @@ export class Markdown implements Component {
 		const separatorCells = columnWidths.map(w => h.repeat(w));
 		const separatorLine = `${t.teeRight}${h}${separatorCells.join(`${h}${t.cross}${h}`)}${h}${t.teeLeft}`;
 		lines.push(separatorLine);
+		// Anchor units: the whole header block (top border + header rows + separator)
+		// is unit 0; each source data row is its own width-invariant unit below.
+		if (units) while (units.length < lines.length) units.push(0);
 
 		// Render rows with wrapping
 		for (let rowIndex = 0; rowIndex < token.rows.length; rowIndex++) {
@@ -1103,6 +1288,7 @@ export class Markdown implements Component {
 			if (rowIndex < token.rows.length - 1) {
 				lines.push(separatorLine);
 			}
+			if (units) while (units.length < lines.length) units.push(rowIndex + 1);
 		}
 
 		// Render bottom border
@@ -1112,6 +1298,7 @@ export class Markdown implements Component {
 		if (nextTokenType && nextTokenType !== "space") {
 			lines.push(""); // Add spacing after table
 		}
+		if (units) while (units.length < lines.length) units.push(token.rows.length);
 		return lines;
 	}
 }

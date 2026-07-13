@@ -123,6 +123,11 @@ export class CustomEditor extends Editor {
 		this.#actionKeys.set(action, [...keys]);
 	}
 
+	/** Returns whether a built-in editor action consumes this configured key before custom handlers. */
+	hasActionKey(key: KeyId): boolean {
+		return [...this.#actionKeys.values()].some(keys => keys.includes(key));
+	}
+
 	#matchesAction(data: string, action: ConfigurableEditorAction): boolean {
 		const keys = this.#actionKeys.get(action);
 		if (!keys) return false;

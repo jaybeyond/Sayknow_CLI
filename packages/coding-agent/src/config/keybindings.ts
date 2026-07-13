@@ -52,6 +52,7 @@ interface AppKeybindings {
 	"app.plan.toggle": true;
 	"app.history.search": true;
 	"app.stt.toggle": true;
+	"app.irc.sidebar.toggle": true;
 }
 
 export type AppKeybinding = keyof AppKeybindings;
@@ -213,6 +214,10 @@ export const KEYBINDINGS = {
 	"app.stt.toggle": {
 		defaultKeys: "alt+h",
 		description: "Toggle speech-to-text",
+	},
+	"app.irc.sidebar.toggle": {
+		defaultKeys: "alt+i",
+		description: "Toggle IRC sidebar",
 	},
 } as const satisfies KeybindingDefinitions;
 

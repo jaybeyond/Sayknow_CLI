@@ -84,7 +84,7 @@ const SPECIAL_CASES: ReadonlyArray<readonly [string, string]> = [
 // carries it into the output (toolingOnly) so the fork can re-sync; the codemod
 // must never rewrite it (that would corrupt patches and break idempotence on the
 // G2 gate, which re-applies to the assembled tree).
-const SKIP_DIRS = new Set([".git", "node_modules", "dist", "build", "coverage", ".turbo", "rebrand"]);
+const SKIP_DIRS = new Set([".git", "node_modules", "dist", "build", "coverage", ".turbo", "target", "rebrand"]);
 const SKIP_FILES = new Set(["bun.lock", "Cargo.lock", ".git"]);
 // Fork-owned overlay docs that intentionally RETAIN upstream attribution
 // (they reference/build upon gajae-code, MIT, and the CHANGELOG records "synced

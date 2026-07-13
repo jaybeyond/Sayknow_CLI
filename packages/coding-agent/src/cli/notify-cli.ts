@@ -7,9 +7,19 @@ import { createInterface } from "node:readline/promises";
 import { APP_NAME } from "@sayknow-cli/utils/dirs";
 import chalk from "chalk";
 import type { Settings } from "../config/settings";
-import { getNotificationConfig, maskToken } from "../notifications/config";
+import { maskToken } from "../notifications/config";
+import {
+	buildNotificationStatusReport,
+	checkNotificationHealth,
+	formatNotificationHealthReport,
+	formatNotificationRecoveryReport,
+	formatNotificationStatusReport,
+	formatNotificationTestResult,
+	recoverNotifications,
+	sendNotificationTest,
+} from "../notifications/notification-service";
 
-export type NotifyAction = "setup" | "status" | "daemon-internal";
+export type NotifyAction = "setup" | "status" | "health" | "test" | "recovery" | "daemon-internal";
 
 export interface NotifyCommandArgs {
 	action: NotifyAction;
@@ -18,6 +28,8 @@ export interface NotifyCommandArgs {
 	token?: string;
 	chatId?: string;
 	redact?: boolean;
+	probe?: boolean;
+	message?: string;
 }
 
 export interface NotifyCommandDeps {
@@ -93,6 +105,19 @@ export function parseNotifyArgs(args: string[]): NotifyCommandArgs | undefined {
 			redact: rest.includes("--redact"),
 		};
 	}
+	if (action === "health" || action === "test" || action === "recovery") {
+		const rest = args.slice(2);
+		const flag = (name: string): string | undefined => {
+			const i = rest.indexOf(name);
+			return i >= 0 ? rest[i + 1] : undefined;
+		};
+		return {
+			action,
+			rawArgs: rest,
+			probe: rest.includes("--probe"),
+			message: flag("--message"),
+		};
+	}
 	if (action === "daemon-internal") {
 		return {
 			action,
@@ -116,6 +141,15 @@ export async function runNotifyCommand(cmd: NotifyCommandArgs, deps: NotifyComma
 			return;
 		case "status":
 			await runStatus(deps);
+			return;
+		case "health":
+			await runHealth(deps, cmd);
+			return;
+		case "test":
+			await runTest(deps, cmd);
+			return;
+		case "recovery":
+			await runRecovery(deps);
 			return;
 		case "daemon-internal": {
 			const m = await import("../notifications/telegram-daemon-cli");
@@ -411,18 +445,40 @@ async function verifyThreadedMode(
 
 async function runStatus(deps: NotifyCommandDeps): Promise<void> {
 	const settings = await getSettings(deps);
-	const cfg = getNotificationConfig(settings);
+	const report = buildNotificationStatusReport(settings);
 	process.stdout.write(
-		`${chalk.bold("Notifications")}\n` +
-			`  enabled: ${cfg.enabled}\n` +
-			`  telegram.botToken: ${maskToken(cfg.botToken)}\n` +
-			`  telegram.chatId: ${cfg.chatId ?? "(unset)"}\n` +
-			`  discord.botToken: ${maskToken(cfg.discord.botToken)}\n` +
-			`  discord.channelId: ${cfg.discord.channelId ?? "(unset)"}\n` +
-			`  slack.botToken: ${maskToken(cfg.slack.botToken)}\n` +
-			`  slack.channelId: ${cfg.slack.channelId ?? "(unset)"}\n` +
-			`  redact: ${cfg.redact}\n`,
+		`${chalk.bold("Notifications")}\n${formatNotificationStatusReport(report).split("\n").slice(1).join("\n")}\n`,
 	);
+}
+
+async function runHealth(deps: NotifyCommandDeps, cmd: NotifyCommandArgs): Promise<void> {
+	const settings = await getSettings(deps);
+	const report = await checkNotificationHealth({
+		settings,
+		probe: cmd.probe,
+		deps: { fetchImpl: deps.fetchImpl, apiBase: deps.apiBase },
+	});
+	process.stdout.write(`${formatNotificationHealthReport(report)}\n`);
+	if (report.overall === "error" && deps.setExitCode) deps.setExitCode(1);
+	else if (report.overall === "error") process.exitCode = 1;
+}
+
+async function runTest(deps: NotifyCommandDeps, cmd: NotifyCommandArgs): Promise<void> {
+	const settings = await getSettings(deps);
+	const result = await sendNotificationTest({
+		settings,
+		text: cmd.message,
+		deps: { fetchImpl: deps.fetchImpl, apiBase: deps.apiBase },
+	});
+	process.stdout.write(`${formatNotificationTestResult(result)}\n`);
+	if (!result.ok && deps.setExitCode) deps.setExitCode(1);
+	else if (!result.ok) process.exitCode = 1;
+}
+
+async function runRecovery(deps: NotifyCommandDeps): Promise<void> {
+	const settings = await getSettings(deps);
+	const report = await recoverNotifications({ settings });
+	process.stdout.write(`${formatNotificationRecoveryReport(report)}\n`);
 }
 
 async function waitForPrivateChat(
@@ -514,15 +570,23 @@ ${chalk.bold("Usage:")}
   ${APP_NAME} notify setup
   ${APP_NAME} notify setup --token <botToken> --chat-id <chatId> [--redact]
   ${APP_NAME} notify status
+  ${APP_NAME} notify health [--probe]
+  ${APP_NAME} notify test [--message <text>]
+  ${APP_NAME} notify recovery
 
 ${chalk.bold("Subcommands:")}
   setup     Pair a Telegram bot token with a private chat and verify Threaded Mode capability
   status    Show notification configuration without secrets
+  health    Report config, daemon-ownership and endpoint health (--probe adds a Telegram reachability check)
+  test      Send a one-off test notification through the configured Telegram adapter
+  recovery  Clear dead-owner daemon locks and stale per-session endpoint files (never touches a live owner)
 
 ${chalk.bold("Examples:")}
   ${APP_NAME} notify setup
-  ${APP_NAME} notify setup --token <botToken> --chat-id <chatId> [--redact]
   ${APP_NAME} notify status
+  ${APP_NAME} notify health --probe
+  ${APP_NAME} notify test --message "hello from skc"
+  ${APP_NAME} notify recovery
 
 ${chalk.bold("Threaded Mode:")}
   SKC uses Telegram private-chat topics for per-session threads. Setup verifies the bot

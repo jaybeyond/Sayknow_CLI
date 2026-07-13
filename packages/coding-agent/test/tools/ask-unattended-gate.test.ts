@@ -198,4 +198,40 @@ describe("ask tool unattended gate emission (G011)", () => {
 		// The attended guard prevents gate emission; the interactive path is used instead.
 		expect(received).toHaveLength(0);
 	});
+
+	it("preserves empty Next semantics for unattended multi-question asks", async () => {
+		let call = 0;
+		const emitter = new StubEmitter(() => (call++ === 0 ? { selected: [] } : { selected: ["yes"] }));
+		const tool = new AskTool(createSession(emitter));
+		const result = await tool.execute(
+			"call-empty-next",
+			{
+				questions: [
+					{ id: "first", question: "Choose any", multi: true, options: [{ label: "alpha" }] },
+					{ id: "second", question: "Proceed?", options: [{ label: "yes" }] },
+				],
+			},
+			undefined,
+			undefined,
+			createHeadlessContext(),
+		);
+		expect(emitter.received[0]?.context?.stage_state).toMatchObject({
+			question_id: "first",
+			multi: true,
+			allow_empty: true,
+			navigation_label: "Next",
+		});
+		const firstAnswerBranch = emitter.received[0]?.schema.anyOf?.[0] as {
+			properties?: { selected?: { minItems?: number } };
+		};
+		expect(firstAnswerBranch.properties?.selected?.minItems).toBe(0);
+		expect(emitter.received[1]?.context?.stage_state).toMatchObject({
+			question_id: "second",
+			navigation_label: "Done",
+		});
+		expect(result.details?.results?.[0]?.selectedOptions).toEqual([]);
+		expect(result.details?.results?.[0]?.customInput).toBeUndefined();
+		expect(result.details?.results?.[1]?.selectedOptions).toEqual(["yes"]);
+		expect(result.details?.results?.[1]?.customInput).toBeUndefined();
+	});
 });

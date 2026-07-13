@@ -16,9 +16,11 @@ import type {
 	DaemonHealth,
 	DaemonOperationOptions,
 	DaemonOperationResult,
+	DaemonRecovery,
 	DaemonRuntimeInfo,
 	DaemonStatus,
 } from "../daemon/control-types";
+import { OWNERSHIP_MISMATCH_MESSAGE, ownershipMismatchRecovery } from "../daemon/operator-contract";
 import { resolveSkcRuntimeSpawnInfo } from "../daemon/runtime";
 import { getNotificationConfig, isTelegramConfigured, tokenFingerprint } from "./config";
 import {
@@ -230,8 +232,9 @@ export class TelegramDaemonController implements BuiltInDaemonController {
 		before: DaemonStatus | undefined,
 		after: DaemonStatus | undefined,
 		warnings: string[],
+		recovery?: DaemonRecovery,
 	): DaemonOperationResult {
-		return { kind: this.kind, action, ok, before, after, message, warnings };
+		return { kind: this.kind, action, ok, before, after, message, warnings, recovery };
 	}
 
 	async reload(opts: DaemonOperationOptions = {}): Promise<DaemonOperationResult> {
@@ -271,6 +274,17 @@ export class TelegramDaemonController implements BuiltInDaemonController {
 			);
 			warnings.push(...spawned.warnings);
 			const after = await this.status();
+			if (spawned.result === "blocked") {
+				return this.result(
+					action,
+					false,
+					OWNERSHIP_MISMATCH_MESSAGE,
+					before,
+					after,
+					warnings,
+					ownershipMismatchRecovery(),
+				);
+			}
 			return this.result(
 				action,
 				spawned.result === "owner_spawned",
@@ -360,9 +374,20 @@ export class TelegramDaemonController implements BuiltInDaemonController {
 		} else if (after.ownerId && after.ownerId === oldOwnerId) {
 			warnings.push("owner id unchanged after reload");
 		}
+		if (spawned.result === "blocked") {
+			return this.result(
+				action,
+				false,
+				OWNERSHIP_MISMATCH_MESSAGE,
+				before,
+				after,
+				warnings,
+				ownershipMismatchRecovery(),
+			);
+		}
 		return this.result(
 			action,
-			spawned.result !== "disabled" && spawned.result !== "blocked",
+			spawned.result !== "disabled",
 			`reloaded telegram daemon (${spawned.result})`,
 			before,
 			after,

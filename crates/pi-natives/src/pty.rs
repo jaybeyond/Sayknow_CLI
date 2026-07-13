@@ -467,6 +467,50 @@ impl Drop for WindowsOpenptyAttempt {
 	}
 }
 
+/// Remove the macOS malloc-stack-logging debug vars from a PTY child command.
+///
+/// macOS libmalloc prints `MallocStackLogging: …` to any TTY-attached process
+/// that inherits these vars, and PTY children always have a TTY stderr, so a
+/// contaminated parent would flood the terminal once per child. Applied after
+/// any caller-supplied env so explicit forwarding cannot reintroduce them.
+/// No-op off macOS (the vars are simply absent).
+fn scrub_macos_malloc_stack_logging_env(cmd: &mut CommandBuilder) {
+	cmd.env_remove("MallocStackLogging");
+	cmd.env_remove("MallocStackLoggingNoCompact");
+}
+
+/// Build the PTY child command from a run config.
+///
+/// portable-pty's `CommandBuilder` snapshots the live parent environ, so the
+/// malloc-env scrub here also protects direct SDK/embedder consumers that never
+/// pass through the CLI re-exec guard. Kept as one builder so production and
+/// tests spawn from the exact same command.
+fn build_pty_command(config: &PtyRunConfig) -> CommandBuilder {
+	let shell = config.shell.as_deref().unwrap_or("sh");
+	let mut cmd = CommandBuilder::new(shell);
+	// Use shell-appropriate command execution flags
+	let lower = shell.to_lowercase();
+	if lower.ends_with("cmd.exe") || lower.ends_with("cmd") {
+		cmd.arg("/c");
+	} else if lower.contains("powershell") || lower.contains("pwsh") {
+		cmd.arg("-Command");
+	} else {
+		// sh/bash/zsh/fish etc.
+		cmd.arg("-lc");
+	}
+	cmd.arg(&config.command);
+	if let Some(cwd) = config.cwd.as_ref() {
+		cmd.cwd(cwd);
+	}
+	if let Some(env) = config.env.as_ref() {
+		for (key, value) in env {
+			cmd.env(key, value);
+		}
+	}
+	scrub_macos_malloc_stack_logging_env(&mut cmd);
+	cmd
+}
+
 fn run_pty_sync(
 	config: PtyRunConfig,
 	on_chunk: Option<ThreadsafeFunction<String>>,
@@ -530,27 +574,7 @@ fn run_pty_sync(
 			.map_err(|err| Error::from_reason(format!("Failed to open PTY: {err}")))?
 	};
 
-	let shell = config.shell.as_deref().unwrap_or("sh");
-	let mut cmd = CommandBuilder::new(shell);
-	// Use shell-appropriate command execution flags
-	let lower = shell.to_lowercase();
-	if lower.ends_with("cmd.exe") || lower.ends_with("cmd") {
-		cmd.arg("/c");
-	} else if lower.contains("powershell") || lower.contains("pwsh") {
-		cmd.arg("-Command");
-	} else {
-		// sh/bash/zsh/fish etc.
-		cmd.arg("-lc");
-	}
-	cmd.arg(&config.command);
-	if let Some(cwd) = config.cwd.as_ref() {
-		cmd.cwd(cwd);
-	}
-	if let Some(env) = config.env.as_ref() {
-		for (key, value) in env {
-			cmd.env(key, value);
-		}
-	}
+	let cmd = build_pty_command(&config);
 	ct.heartbeat()
 		.map_err(|err| Error::from_reason(format!("PTY setup cancelled before spawn: {err}")))?;
 
@@ -911,6 +935,32 @@ mod tests {
 			rows:    24,
 			shell:   Some("sh".to_string()),
 		}
+	}
+
+	#[test]
+	fn build_pty_command_scrubs_macos_malloc_stack_logging_env() {
+		let mut env = std::collections::HashMap::new();
+		env.insert("MallocStackLogging".to_string(), "1".to_string());
+		env.insert("MallocStackLoggingNoCompact".to_string(), "1".to_string());
+		env.insert("KEEP_ME".to_string(), "value".to_string());
+		let mut config = test_config("true");
+		config.env = Some(env);
+
+		let cmd = build_pty_command(&config);
+
+		assert!(
+			cmd.get_env("MallocStackLogging").is_none(),
+			"MallocStackLogging must be scrubbed even when explicitly forwarded",
+		);
+		assert!(
+			cmd.get_env("MallocStackLoggingNoCompact").is_none(),
+			"MallocStackLoggingNoCompact must be scrubbed even when explicitly forwarded",
+		);
+		assert_eq!(
+			cmd.get_env("KEEP_ME"),
+			Some(std::ffi::OsStr::new("value")),
+			"unrelated forwarded env vars must be preserved",
+		);
 	}
 
 	#[cfg(unix)]

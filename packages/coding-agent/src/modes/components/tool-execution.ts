@@ -8,6 +8,7 @@ import {
 	Image,
 	ImageProtocol,
 	imageFallback,
+	isTerminalGraphicsFallbackActive,
 	registerAnimationCallback,
 	Spacer,
 	TERMINAL,
@@ -33,7 +34,7 @@ import {
 import { formatExpandHint, replaceTabs, resolveImageOptions, truncateToWidth } from "../../tools/render-utils";
 import { toolRenderers } from "../../tools/renderers";
 import { renderStatusLine } from "../../tui";
-import { sanitizeWithOptionalSixelPassthrough } from "../../utils/sixel";
+import { containsSixelSequence, getSixelLineMask, sanitizeWithOptionalSixelPassthrough } from "../../utils/sixel";
 import { renderDiff } from "./diff";
 
 function ensureInvalidate(component: unknown): Component {
@@ -42,6 +43,23 @@ function ensureInvalidate(component: unknown): Component {
 		c.invalidate = () => {};
 	}
 	return c as Component;
+}
+
+const SIXEL_FALLBACK_PLACEHOLDER = "[SIXEL image hidden while IRC sidebar is visible]";
+
+function replaceSixelOutputForGraphicsFallback(text: string): string {
+	const lines = text.split("\n");
+	const sixelLineMask = getSixelLineMask(lines);
+	if (!sixelLineMask.some(Boolean)) return text;
+
+	return lines
+		.flatMap((line, index) => {
+			if (!sixelLineMask[index]) return [line];
+			return index === 0 || !sixelLineMask[index - 1] || containsSixelSequence(line)
+				? [SIXEL_FALLBACK_PLACEHOLDER]
+				: [];
+		})
+		.join("\n");
 }
 
 function cloneToolArgs<T>(args: T): T {
@@ -169,7 +187,14 @@ export class ToolExecutionComponent extends Container {
 		isError?: boolean;
 		details?: any;
 	};
-	#textOutputCache?: { content: unknown; showImages: boolean; terminalImageProtocol: unknown; output: string };
+	#textOutputCache?: {
+		content: unknown;
+		showImages: boolean;
+		terminalImageProtocol: unknown;
+		graphicsFallbackActive: boolean;
+		output: string;
+	};
+	#displayBuiltWithGraphicsFallback: boolean | undefined;
 	// Edit preview state
 	#editMode?: EditMode;
 	#editDiffPreview?: PerFileDiffPreview[];
@@ -441,6 +466,13 @@ export class ToolExecutionComponent extends Container {
 		this.#updateDisplay();
 	}
 
+	override render(width: number): string[] {
+		if (this.#displayBuiltWithGraphicsFallback !== isTerminalGraphicsFallbackActive()) {
+			this.#updateDisplay();
+		}
+		return super.render(width);
+	}
+
 	#updateDisplay(): void {
 		// Set background based on state
 		const bgFn = this.#isPartial
@@ -685,6 +717,7 @@ export class ToolExecutionComponent extends Container {
 				}
 			}
 		}
+		this.#displayBuiltWithGraphicsFallback = isTerminalGraphicsFallbackActive();
 	}
 
 	#getCallArgsForRender(): any {
@@ -761,11 +794,13 @@ export class ToolExecutionComponent extends Container {
 
 		const content = this.#result.content;
 		const terminalImageProtocol = TERMINAL.imageProtocol;
+		const graphicsFallbackActive = isTerminalGraphicsFallbackActive();
 		const cached = this.#textOutputCache;
 		if (
 			cached?.content === content &&
 			cached.showImages === this.#showImages &&
-			cached.terminalImageProtocol === terminalImageProtocol
+			cached.terminalImageProtocol === terminalImageProtocol &&
+			cached.graphicsFallbackActive === graphicsFallbackActive
 		) {
 			return cached.output;
 		}
@@ -773,8 +808,8 @@ export class ToolExecutionComponent extends Container {
 		const textParts: string[] = [];
 		for (const block of content ?? []) {
 			if (block.type !== "text") continue;
-			const text = block.text || "";
-			textParts.push(sanitizeWithOptionalSixelPassthrough(text, sanitizeText));
+			const text = sanitizeWithOptionalSixelPassthrough(block.text || "", sanitizeText);
+			textParts.push(graphicsFallbackActive ? replaceSixelOutputForGraphicsFallback(text) : text);
 		}
 		let output = textParts.join("\n");
 
@@ -789,7 +824,13 @@ export class ToolExecutionComponent extends Container {
 			output = output ? `${output}\n${imageIndicators}` : imageIndicators;
 		}
 
-		this.#textOutputCache = { content, showImages: this.#showImages, terminalImageProtocol, output };
+		this.#textOutputCache = {
+			content,
+			showImages: this.#showImages,
+			terminalImageProtocol,
+			graphicsFallbackActive,
+			output,
+		};
 		return output;
 	}
 

@@ -1,5 +1,6 @@
 import { beforeAll, describe, expect, test, vi } from "bun:test";
 import type { AgentMessage } from "@sayknow-cli/agent-core";
+import { IrcObservationLedger } from "@sayknow-cli/coding-agent/modes/irc-observation-ledger";
 import { initTheme } from "@sayknow-cli/coding-agent/modes/theme/theme";
 import type { InteractiveModeContext } from "@sayknow-cli/coding-agent/modes/types";
 import { UiHelpers } from "@sayknow-cli/coding-agent/modes/utils/ui-helpers";
@@ -20,6 +21,7 @@ function createInitialRenderHarness(): { ctx: InteractiveModeContext; helpers: U
 	let helpers: UiHelpers;
 	const ctx = {
 		chatContainer: new Container(),
+		ircLedger: new IrcObservationLedger(),
 		pendingMessagesContainer: new Container(),
 		pendingBashComponents: [],
 		pendingPythonComponents: [],
@@ -111,6 +113,7 @@ describe("InteractiveMode.showStatus", () => {
 	test("preserves optimistic user signatures when rebuilding transcript state", () => {
 		const ctx = {
 			chatContainer: new Container(),
+			ircLedger: new IrcObservationLedger(),
 			pendingTools: new Map(),
 			ui: { requestRender: vi.fn() },
 			optimisticUserMessageSignature: "hello\u00001",

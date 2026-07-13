@@ -1,0 +1,30 @@
+{
+	"name": "@sayknow-cli/natives-darwin-x64",
+	"version": "0.3.12",
+	"description": "Darwin x64 native addon for @sayknow-cli/natives",
+	"type": "module",
+	"homepage": "https://sayknow-cli.com",
+	"author": "jaybeyond",
+	"license": "MIT",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/jaybeyond/Sayknow_CLI.git",
+		"directory": "packages/natives-darwin-x64"
+	},
+	"bugs": {
+		"url": "https://github.com/jaybeyond/Sayknow_CLI/issues"
+	},
+	"os": [
+		"darwin"
+	],
+	"cpu": [
+		"x64"
+	],
+	"files": [
+		"native",
+		"README.md"
+	],
+	"exports": {
+		"./package.json": "./package.json"
+	}
+}

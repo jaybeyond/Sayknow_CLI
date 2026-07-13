@@ -37,6 +37,8 @@ function sessionLine(overrides: {
 	project?: string;
 	sessionId?: string;
 	sessionStateFile?: string;
+	ownerGeneration?: string;
+	nativeSessionId?: string;
 }): string {
 	return [
 		overrides.name,
@@ -52,6 +54,9 @@ function sessionLine(overrides: {
 		overrides.project ?? "",
 		overrides.sessionId ?? "",
 		overrides.sessionStateFile ?? "",
+		overrides.ownerGeneration ?? "generation-1",
+		"",
+		overrides.nativeSessionId ?? "$1",
 	].join("\t");
 }
 
@@ -127,12 +132,19 @@ describe("tmux GC safety", () => {
 		expect(calls).not.toContainEqual(["tmux-test", "kill-session", "-t", "=unrelated_orphan"]);
 	});
 
-	it("prunes detached pane-less sessions only when their runtime marker is terminal", async () => {
+	it("classifies terminal detached sessions but refuses prune without exact server proof", async () => {
 		spyOn(Date, "now").mockReturnValue(1_800_000_000_000);
 		const stateFile = "/tmp/skc-terminal-marker.json";
 		await Bun.write(
 			stateFile,
-			JSON.stringify({ schema_version: 1, session_id: "session-1", state: "completed", cwd: project }),
+			JSON.stringify({
+				schema_version: 1,
+				session_id: "session-1",
+				state: "completed",
+				cwd: project,
+				workdir: project,
+				session_file: null,
+			}),
 		);
 		const calls: string[][] = [];
 		const spawnSyncSpy = spyOn(Bun, "spawnSync") as unknown as SpawnSyncSpy;
@@ -152,12 +164,14 @@ describe("tmux GC safety", () => {
 					}),
 				);
 			}
+			if (cmd.includes("display-message") && cmd.at(-1) === "#{session_id}") return spawnResult(0, "$1\n");
 			if (cmd.includes("show-options")) {
 				const option = cmd.at(-1);
 				if (option === "@skc-profile") return spawnResult(0, "1\n");
 				if (option === "@skc-project") return spawnResult(0, `${project}\n`);
 				if (option === "@skc-branch") return spawnResult(0, "main\n");
 				if (option === "@skc-session-id") return spawnResult(0, "session-1\n");
+				if (option === "@skc-owner-generation") return spawnResult(0, "generation-1\n");
 				if (option === "@skc-session-state-file") return spawnResult(0, `${stateFile}\n`);
 			}
 			return spawnResult(0, "");
@@ -172,8 +186,11 @@ describe("tmux GC safety", () => {
 				removable: true,
 				reason: "terminal_runtime_marker_detached_idle_session",
 			});
-			expect(await tmuxSessionsGcAdapter.prune(record!, ctx())).toEqual({ removed: true });
-			expect(calls).toContainEqual(["tmux-test", "kill-session", "-t", "=sayknow_cli_done"]);
+			expect(await tmuxSessionsGcAdapter.prune(record!, ctx())).toEqual({
+				removed: false,
+				error: "skc_tmux_owner_isolation_server_unverifiable",
+			});
+			expect(calls).not.toContainEqual(["tmux-test", "kill-session", "-t", "=sayknow_cli_done"]);
 		} finally {
 			await fs.rm(stateFile, { force: true });
 		}
@@ -235,7 +252,14 @@ describe("tmux GC safety", () => {
 		const stateFile = "/tmp/skc-terminal-attached-marker.json";
 		await Bun.write(
 			stateFile,
-			JSON.stringify({ schema_version: 1, session_id: "session-1", state: "completed", cwd: project }),
+			JSON.stringify({
+				schema_version: 1,
+				session_id: "session-1",
+				state: "completed",
+				cwd: project,
+				workdir: project,
+				session_file: null,
+			}),
 		);
 		const calls: string[][] = [];
 		const spawnSyncSpy = spyOn(Bun, "spawnSync") as unknown as SpawnSyncSpy;
@@ -288,6 +312,8 @@ describe("tmux GC safety", () => {
 				session_id: "race-session",
 				state: "completed",
 				cwd: "/tmp/missing-skc-project",
+				workdir: "/tmp/missing-skc-project",
+				session_file: null,
 			}),
 		);
 		const calls: string[][] = [];
@@ -311,12 +337,14 @@ describe("tmux GC safety", () => {
 					}),
 				);
 			}
+			if (cmd.includes("display-message") && cmd.at(-1) === "#{session_id}") return spawnResult(0, "$1\n");
 			if (cmd.includes("show-options")) {
 				const option = cmd.at(-1);
 				if (option === "@skc-profile") return spawnResult(0, "1\n");
 				if (option === "@skc-project") return spawnResult(0, "/tmp/missing-skc-project\n");
 				if (option === "@skc-branch") return spawnResult(0, "stale\n");
 				if (option === "@skc-session-id") return spawnResult(0, "race-session\n");
+				if (option === "@skc-owner-generation") return spawnResult(0, "generation-1\n");
 				if (option === "@skc-session-state-file") return spawnResult(0, `${stateFile}\n`);
 				return spawnResult(0, "\n");
 			}
@@ -352,6 +380,8 @@ describe("tmux GC safety", () => {
 				session_id: "final-race-session",
 				state: "completed",
 				cwd: "/tmp/missing-skc-project",
+				workdir: "/tmp/missing-skc-project",
+				session_file: null,
 			}),
 		);
 		const calls: string[][] = [];
@@ -375,12 +405,14 @@ describe("tmux GC safety", () => {
 					}),
 				);
 			}
+			if (cmd.includes("display-message") && cmd.at(-1) === "#{session_id}") return spawnResult(0, "$1\n");
 			if (cmd.includes("show-options")) {
 				const option = cmd.at(-1);
 				if (option === "@skc-profile") return spawnResult(0, "1\n");
 				if (option === "@skc-project") return spawnResult(0, "/tmp/missing-skc-project\n");
 				if (option === "@skc-branch") return spawnResult(0, "stale\n");
 				if (option === "@skc-session-id") return spawnResult(0, "final-race-session\n");
+				if (option === "@skc-owner-generation") return spawnResult(0, "generation-1\n");
 				if (option === "@skc-session-state-file") return spawnResult(0, `${stateFile}\n`);
 				return spawnResult(0, "\n");
 			}
@@ -416,6 +448,8 @@ describe("tmux GC safety", () => {
 				session_id: "final-pane-race-session",
 				state: "completed",
 				cwd: "/tmp/missing-skc-project",
+				workdir: "/tmp/missing-skc-project",
+				session_file: null,
 			}),
 		);
 		const calls: string[][] = [];
@@ -440,12 +474,14 @@ describe("tmux GC safety", () => {
 					}),
 				);
 			}
+			if (cmd.includes("display-message") && cmd.at(-1) === "#{session_id}") return spawnResult(0, "$1\n");
 			if (cmd.includes("show-options")) {
 				const option = cmd.at(-1);
 				if (option === "@skc-profile") return spawnResult(0, "1\n");
 				if (option === "@skc-project") return spawnResult(0, "/tmp/missing-skc-project\n");
 				if (option === "@skc-branch") return spawnResult(0, "stale\n");
 				if (option === "@skc-session-id") return spawnResult(0, "final-pane-race-session\n");
+				if (option === "@skc-owner-generation") return spawnResult(0, "generation-1\n");
 				if (option === "@skc-session-state-file") return spawnResult(0, `${stateFile}\n`);
 				return spawnResult(0, "\n");
 			}

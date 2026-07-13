@@ -43,6 +43,13 @@ SKC session (upstream)                          your client (anywhere)
   and a token is present.
 - **tmux-agnostic.** The endpoint behaves identically with or without tmux.
 
+### N-API action emission
+
+`NotificationServer#pushFrame(frameJson)` rejects (throws for) every `ActionNeeded`
+frame. Emit asks with `registerAsk(...)` and idle notifications with `noteIdle(...)`
+instead, so action delivery remains capability-gated per connection.
+
+
 ## Endpoint discovery
 
 A running session writes a discovery file at:
@@ -123,17 +130,31 @@ or `timeout`.
 Reasons: `already_answered`, `unknown_action`, `invalid_answer`,
 `resolver_unavailable`, `idempotency_conflict`, `unauthorized`.
 
-The frames above are the minimal contract every client implements. Threaded
-clients (like the managed Telegram daemon) may also receive optional
-server → client frames they can render or ignore: `identity_header` (one-time
-per-session repo/branch/machine header), `context_update` (last message, task,
-goal, token usage, model, diff), `turn_stream` (live/finalized turn output),
+`action_unavailable` — a controlled ask cannot be presented on this connection:
+
+```json
+{ "type": "action_unavailable", "id": "wg_run_stage_1", "sessionId": "sess-1",
+  "reason": "missing_capability", "requiredCapabilities": ["ask_controls_v1"] }
+```
+
+This frame is diagnostic and non-actionable: do not render it as an ask or
+attempt a `reply` for it.
+
+The minimal contract depends on the asks a client handles. A client that handles
+only ordinary asks (those with empty `controls`) needs `action_needed`,
+`action_resolved`, and `reply_rejected`, and may omit `hello`. A client that
+wants controlled asks **MUST** send a ClientHello on socket open with
+`{ "type": "hello", "protocolVersion": 3, "capabilities": ["ask_controls_v1"] }`
+and handle `action_unavailable` as a non-actionable diagnostic. Threaded clients
+(like the managed Telegram daemon) may also receive optional server → client
+frames they can render or ignore: `identity_header` (one-time per-session
+repo/branch/machine header), `context_update` (last message, task, goal, token
+usage, model, diff), `turn_stream` (live/finalized turn output),
 `image_attachment` (agent-produced images), `activity` (busy/idle, drives the
 typing indicator), `inbound_ack` (delivery state of an injected user message),
 `session_closed` (endpoint teardown; threaded clients may delete/archive the
 remote conversation), `config_update` (current verbosity/redact), `hello`
-(server capability/version), and `pong`. A minimal client only needs
-`action_needed`, `action_resolved`, and `reply_rejected`.
+(server capability/version), and `pong`.
 
 ### Client → server
 
@@ -147,15 +168,17 @@ remote conversation), `config_update` (current verbosity/redact), `hello`
 
 - a number — zero-based option index (`0` = first option);
 - a string — an option label, or free text;
-- an object — `{ "selected": [0, "Maybe"], "custom": "..." }` for multi-select.
+- an object — `{ "selected": [0, "Maybe"], "custom": "..." }` for multi-select;
+- an object — `{ "controlId": "navigation_forward" }` to commit a controlled
+  multi-select only when that navigation control was presented as enabled.
 
 Optional `idempotencyKey` makes retries safe: the same key + same body re-acks;
 the same key + different body is rejected with `idempotency_conflict`.
 
-Threaded clients may also send optional client → server frames: `user_message`
-(inject/steer a turn with free text), `config_command` (toggle verbosity/redact
-in-thread), `hello` (capability/version), and `ping`. A minimal client only
-needs `reply`.
+Clients may also send optional client → server frames: `user_message` (inject/steer
+a turn with free text), `config_command` (toggle verbosity/redact in-thread),
+`ping`, and `hello` (capability/version). A ClientHello is optional for ordinary
+empty-controls asks, but is required for controlled asks as specified below.
 
 ## Answer semantics
 
@@ -171,7 +194,60 @@ A remote reply answers a pending ask in **both** modes — RPC is not required:
 In both modes the first valid reply wins; later replies get `already_answered`.
 Idle pings are notify-only.
 
+### Controlled-ask capability negotiation (protocol v3)
+
+Protocol v3 adds optional `ask_controls_v1` and `ask_selected_ack_v1`
+capabilities. A controlled ask carries both `options` and non-empty `controls`:
+
+```json
+{ "type": "action_needed", "id": "wg_run_stage_1", "kind": "ask",
+  "sessionId": "sess-1", "question": "Choose all that apply",
+  "options": ["A", "B"],
+  "controls": [{ "id": "navigation_forward", "kind": "navigation", "label": "Done", "enabled": false }] }
+```
+
+Controls are typed data. Clients must return
+`{"controlId":"navigation_forward"}` rather than infer a control from an
+option label.
+
+Clients that want controlled asks **MUST** send this ClientHello immediately in
+their WebSocket `open` handler:
+
+```json
+{ "type": "hello", "protocolVersion": 3, "capabilities": ["ask_controls_v1"] }
+```
+
+The server sends its ServerHello before it processes a ClientHello. A controlled
+ask is deferred while the connection awaits that Hello. After the approximately
+one-second Hello grace expires, or after a negotiated Hello lacks
+`ask_controls_v1`, the server sends exactly one non-actionable
+`action_unavailable`; it never sends a stripped `action_needed` frame with option
+buttons. A later ClientHello that adds `ask_controls_v1` may upgrade that
+connection to the full `action_needed` presentation.
+
+Capabilities are monotonic for one connection: repeated ClientHellos can add
+capabilities but cannot remove an already-advertised capability or retract a
+full presentation. Disconnecting and reconnecting starts a fresh negotiation
+with no capabilities or delivery state. Ordinary asks with empty `controls`
+retain their existing immediate delivery and reply behavior for Hello-less and
+older clients.
+
+### Protocol v3 semantic acknowledgement
+
+A remote reply is first **claimed** by the native server. The host retains the raw reply JSON, idempotency key, and reply receipt id, then resolves or closes that claim only after ask/gate semantic settlement. Invalid input terminally closes that interaction; a retry is a fresh action id, never a reopened claim.
+
+Managed Telegram clients may receive `ask_selected_ack_request` and return one correlated `ask_selected_ack_result`. Requests are `mode:"live"` (the current pending action on the authenticated session connection) or `mode:"recovery"` (the persisted session topic only). Recovery neither recreates an ask, keyboard, alias, nor reply route; a missing persisted topic is `failed/route_missing`. `ask_selected_ack_cancel` removes an exact queued request or aborts an in-flight attempt. The request/result/cancel correlation is `requestId` plus `commitKey` and is authorized by the authenticated WebSocket connection and endpoint generation; acknowledgement frames carry no second token.
+
+The managed daemon sends the literal `Selected!` at most once per generation/commit key, on its `ask` rate-limit lane, with an absolute 8-second deadline and no application retry. A response is `delivered` only with Telegram `{ok:true,result.message_id:number}`; explicit rejection is `failed`, and timeout/network/in-flight abort uncertainty is `unknown`. Callback-query acknowledgement remains independent. The durable workflow answer is exactly-once; visible Telegram delivery is not.
+
+Every accepted workflow-gate origin, including generic RPC/bridge winners, invokes canonical gate-presentation cleanup before continuation. Generic origins have no Telegram acknowledgement policy. Cancellation, shutdown, and endpoint replacement cancel retained interactions and acknowledgement work. A connection loss before dispatch is definitive `failed/session_closed`; after successful request-frame dispatch but before a correlated result it is `unknown/origin_disconnected`—the host does not infer whether Telegram was called.
+
 ## Minimal client example
+
+This copyable example advertises `ask_controls_v1`, so it can receive and
+complete controlled asks. An ordinary client that handles only empty-controls
+asks omits the `open` handler and ClientHello, and keeps only the numeric
+ordinary-ask branch below.
 
 ```js
 import { readFileSync } from "node:fs";
@@ -182,19 +258,73 @@ const { url, token } = JSON.parse(
 );
 
 const ws = new WebSocket(`${url}/?token=${encodeURIComponent(token)}`);
+let currentControlledAsk;
+
+function sendOptionReply(id, index) {
+  ws.send(JSON.stringify({ type: "reply", id, answer: index, token }));
+}
+
+function commitControlledMultiSelect() {
+  const ask = currentControlledAsk;
+  const navigation = ask?.controls?.find(
+    (control) =>
+      control.id === "navigation_forward" &&
+      control.kind === "navigation" &&
+      control.enabled,
+  );
+  if (!navigation) return;
+
+  ws.send(JSON.stringify({
+    type: "reply",
+    id: ask.id,
+    answer: { controlId: "navigation_forward" },
+    token,
+  }));
+}
+
+ws.on("open", () => {
+  if (ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({
+      type: "hello",
+      protocolVersion: 3,
+      capabilities: ["ask_controls_v1"],
+    }));
+  }
+});
 
 ws.on("message", (data) => {
   const msg = JSON.parse(data.toString());
   if (msg.type === "action_needed" && msg.kind === "ask") {
-    // present msg.question / msg.options to the human, then:
-    ws.send(JSON.stringify({ type: "reply", id: msg.id, answer: 0, token }));
+    if (msg.controls?.length) {
+      currentControlledAsk = msg;
+      // Present msg.question / msg.options / msg.controls to the human.
+      // An option click calls sendOptionReply(msg.id, index). For a controlled
+      // multi-select, that numeric reply only toggles and is non-terminal.
+      // Wait for the fresh action_needed frame, then call
+      // commitControlledMultiSelect() only from its enabled navigation control.
+      return;
+    }
+
+    // Ordinary ask (`controls: []`): the minimal no-Hello client replies normally.
+    sendOptionReply(msg.id, 0);
   } else if (msg.type === "action_resolved") {
-    // mark this action as no longer answerable in your UI
+    if (currentControlledAsk?.id === msg.id) currentControlledAsk = undefined;
+    // Mark this action as no longer answerable in your UI.
   } else if (msg.type === "reply_rejected") {
-    // e.g. reason === "already_answered" → the ask was answered elsewhere
+    // e.g. reason === "already_answered" → the ask was answered elsewhere.
+  } else if (msg.type === "action_unavailable") {
+    // Diagnostic only: do not fabricate an ask or option buttons.
   }
 });
 ```
+
+`sendOptionReply(msg.id, index)` has the numeric option/toggle shape
+`{ type:"reply", id, answer:index, token }`. The enabled navigation control
+uses the distinct typed commit shape
+`{ type:"reply", id, answer:{ controlId:"navigation_forward" }, token }`.
+Do not send that commit against the pre-toggle action id: a multi-select option
+toggle reissues the action, and the enabled navigation control on the latest
+frame commits the selection.
 
 Swap `ws` for a Telegram bot's long-poll loop, a Discord gateway client, or a
 Slack socket-mode app — the contract above is all you implement.
@@ -246,6 +376,18 @@ notification endpoint shuts down, so it disappears from the topic list. A resume
 session creates a fresh topic before sending again. The bot must be allowed to
 delete messages in that chat; without that permission, deletion is best-effort and
 delivery continues.
+
+Per-session topics are titled `{repo}/{branch} - {title}` by default (falling back
+to `{repo}/{branch}`, then the session title, then `SKC <id>` when identity is
+missing). Set `notifications.telegram.topics.nameTemplate` to reorder or reshape
+that title — for example `"{title} · {repo}/{branch}"` puts the session title
+first so concurrent sessions on the same checkout stay distinguishable in the
+sidebar. The template supports the `{repo}`, `{branch}`, and `{title}`
+placeholders; unknown placeholders are left verbatim. The template is applied
+only when every placeholder it references has a value for that session — otherwise
+the daemon falls back to the built-in composition, so provisional and identity-less
+topics never render with dangling separators. Leaving the setting unset preserves
+the default naming exactly.
 
 ### Singleton poller and trust model
 

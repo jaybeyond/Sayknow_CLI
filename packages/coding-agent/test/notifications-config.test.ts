@@ -37,11 +37,15 @@ const BASE_CFG: NotificationConfig = {
 	},
 	redact: false,
 	verbosity: "lean",
+	sessionScope: "all",
 	rich: {
 		enabled: true,
 	},
 	richDraft: {
 		enabled: false,
+	},
+	topics: {
+		nameTemplate: undefined,
 	},
 	idleTimeoutMs: 60000,
 };
@@ -51,6 +55,10 @@ const GLOBAL_CFG: NotificationConfig = {
 	enabled: true,
 	botToken: "1234567890:abc",
 	chatId: "chat-1",
+};
+const PRIMARY_GLOBAL_CFG: NotificationConfig = {
+	...GLOBAL_CFG,
+	sessionScope: "primary",
 };
 const tempDirs: string[] = [];
 
@@ -90,11 +98,15 @@ describe("notifications config", () => {
 			},
 			redact: true,
 			verbosity: "lean",
+			sessionScope: "all",
 			rich: {
 				enabled: true,
 			},
 			richDraft: {
 				enabled: false,
+			},
+			topics: {
+				nameTemplate: undefined,
 			},
 			idleTimeoutMs: 1234,
 		});
@@ -233,6 +245,77 @@ describe("notifications config", () => {
 				currentAgentType: "executor",
 			}),
 		).toBe(false);
+	});
+
+	test("getNotificationConfig reads sessionScope", () => {
+		expect(getNotificationConfig(Settings.isolated()).sessionScope).toBe("all");
+		expect(getNotificationConfig(Settings.isolated({ "notifications.sessionScope": "primary" })).sessionScope).toBe(
+			"primary",
+		);
+		// Unknown / malformed values fall back to the behavior-preserving default.
+		expect(getNotificationConfig(Settings.isolated({ "notifications.sessionScope": "all" })).sessionScope).toBe(
+			"all",
+		);
+	});
+
+	test("sessionScope=primary suppresses SKC-spawned children but preserves everything else", () => {
+		// Default scope "all": a spawned child still registers (fully behavior-preserving).
+		expect(shouldRegisterNotificationsExtension({ cfg: GLOBAL_CFG, env: {}, spawnedBySkc: true })).toBe(true);
+		// scope "primary": a spawned child is suppressed.
+		expect(shouldRegisterNotificationsExtension({ cfg: PRIMARY_GLOBAL_CFG, env: {}, spawnedBySkc: true })).toBe(
+			false,
+		);
+		// scope "primary": a user-opened session (no marker) is unaffected.
+		expect(shouldRegisterNotificationsExtension({ cfg: PRIMARY_GLOBAL_CFG, env: {}, spawnedBySkc: false })).toBe(
+			true,
+		);
+		expect(shouldRegisterNotificationsExtension({ cfg: PRIMARY_GLOBAL_CFG, env: {} })).toBe(true);
+	});
+
+	test("explicit /session_create opt-in outranks sessionScope=primary suppression", () => {
+		// SKC_NOTIFICATIONS=1 is exactly what Telegram /session_create and cold
+		// /session_resume launch with, so their bidirectional topic survives.
+		expect(
+			shouldRegisterNotificationsExtension({
+				cfg: PRIMARY_GLOBAL_CFG,
+				env: { SKC_NOTIFICATIONS: "1" },
+				spawnedBySkc: true,
+			}),
+		).toBe(true);
+		expect(
+			shouldRegisterNotificationsExtension({
+				cfg: PRIMARY_GLOBAL_CFG,
+				env: { SKC_NOTIFICATIONS_TOKEN: "legacy-token" },
+				spawnedBySkc: true,
+			}),
+		).toBe(true);
+		// Hard opt-out and /notify off equivalents still outrank the marker.
+		expect(
+			shouldRegisterNotificationsExtension({
+				cfg: PRIMARY_GLOBAL_CFG,
+				env: { SKC_NOTIFICATIONS: "0" },
+				spawnedBySkc: true,
+			}),
+		).toBe(false);
+		expect(
+			shouldRegisterNotificationsExtension({
+				cfg: PRIMARY_GLOBAL_CFG,
+				env: { SKC_NOTIFY: "off" },
+				spawnedBySkc: true,
+			}),
+		).toBe(false);
+		// A spawned child that is also a subagent stays suppressed regardless.
+		expect(
+			shouldRegisterNotificationsExtension({
+				cfg: PRIMARY_GLOBAL_CFG,
+				env: {},
+				spawnedBySkc: true,
+				taskDepth: 1,
+			}),
+		).toBe(false);
+		// Without any configured adapter, a marker under primary is still off (no
+		// spurious enable, and global auto-on is never reached).
+		expect(shouldRegisterNotificationsExtension({ cfg: BASE_CFG, env: {}, spawnedBySkc: true })).toBe(false);
 	});
 	test("settings-enabled subagent sessions do not register the notifications extension", async () => {
 		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "skc-notifications-subagent-"));
@@ -390,6 +473,80 @@ describe("notifications config", () => {
 			} else {
 				process.env.SKC_NOTIFICATIONS = previous;
 			}
+			resetSettingsForTest();
+		}
+	}, 30000);
+
+	test("sessionScope=primary suppresses a SKC-spawned child endpoint end to end and consumes the marker", async () => {
+		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "skc-notifications-spawned-"));
+		tempDirs.push(cwd);
+		const previousNotif = process.env.SKC_NOTIFICATIONS;
+		const previousSpawn = process.env.SKC_SPAWNED_BY_SESSION;
+		delete process.env.SKC_NOTIFICATIONS;
+		delete process.env.SKC_SPAWNED_BY_SESSION;
+		const adapterSettings = (scope: "all" | "primary"): Settings =>
+			Settings.isolated({
+				"notifications.enabled": true,
+				"notifications.discord.botToken": "discord-token",
+				"notifications.discord.channelId": "discord-channel",
+				"notifications.sessionScope": scope,
+			});
+		const primarySettings = adapterSettings("primary");
+		const allSettings = adapterSettings("all");
+		const disposers: Array<() => Promise<void>> = [];
+		const spawn = async (settings: Settings) =>
+			createAgentSession({
+				cwd,
+				agentDir: cwd,
+				sessionManager: SessionManager.inMemory(cwd),
+				settings,
+				model: getBundledModel("openai", "gpt-4o-mini"),
+				disableExtensionDiscovery: true,
+				extensions: [],
+				skills: [],
+				contextFiles: [],
+				promptTemplates: [],
+				slashCommands: [],
+				enableMCP: false,
+				enableLsp: false,
+			});
+		const endpointFor = (sessionId: string): string =>
+			path.join(cwd, ".skc", "state", "notifications", `${sessionId}.json`);
+		try {
+			resetSettingsForTest();
+			await Settings.init({ inMemory: true, cwd, agentDir: cwd });
+
+			// 1. Spawned child under primary: suppressed, and the marker is consumed.
+			process.env.SKC_SPAWNED_BY_SESSION = "parent-abc";
+			const suppressed = await spawn(primarySettings);
+			disposers.push(() => suppressed.session.dispose());
+			expect(process.env.SKC_SPAWNED_BY_SESSION).toBeUndefined();
+
+			// 2. Spawned child under the default "all" scope still registers.
+			process.env.SKC_SPAWNED_BY_SESSION = "parent-abc";
+			const preserved = await spawn(allSettings);
+			disposers.push(() => preserved.session.dispose());
+
+			// 3. Spawned child under primary WITH explicit opt-in keeps its endpoint.
+			process.env.SKC_SPAWNED_BY_SESSION = "parent-abc";
+			process.env.SKC_NOTIFICATIONS = "1";
+			const optedIn = await spawn(primarySettings);
+			disposers.push(() => optedIn.session.dispose());
+			delete process.env.SKC_NOTIFICATIONS;
+
+			await suppressed.session.extensionRunner?.emit({ type: "session_start" });
+			await preserved.session.extensionRunner?.emit({ type: "session_start" });
+			await optedIn.session.extensionRunner?.emit({ type: "session_start" });
+
+			expect(fs.existsSync(endpointFor(suppressed.session.sessionId))).toBe(false);
+			expect(fs.existsSync(endpointFor(preserved.session.sessionId))).toBe(true);
+			expect(fs.existsSync(endpointFor(optedIn.session.sessionId))).toBe(true);
+		} finally {
+			await Promise.all(disposers.reverse().map(dispose => dispose()));
+			if (previousNotif === undefined) delete process.env.SKC_NOTIFICATIONS;
+			else process.env.SKC_NOTIFICATIONS = previousNotif;
+			if (previousSpawn === undefined) delete process.env.SKC_SPAWNED_BY_SESSION;
+			else process.env.SKC_SPAWNED_BY_SESSION = previousSpawn;
 			resetSettingsForTest();
 		}
 	}, 30000);

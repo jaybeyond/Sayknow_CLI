@@ -5,8 +5,12 @@ import * as path from "node:path";
 import { type AssistantMessage, getBundledModel } from "@sayknow-cli/ai";
 import type { Rule } from "@sayknow-cli/coding-agent/capability/rule";
 import { Settings } from "@sayknow-cli/coding-agent/config/settings";
+import type { ExtensionFactory } from "@sayknow-cli/coding-agent/extensibility/extensions";
+import { LocalProtocolHandler, resolveLocalUrlToPath } from "@sayknow-cli/coding-agent/internal-urls";
+import { AgentRegistry } from "@sayknow-cli/coding-agent/registry/agent-registry";
 import { createAgentSession } from "@sayknow-cli/coding-agent/sdk";
 import { SecretObfuscator } from "@sayknow-cli/coding-agent/secrets";
+import type { AgentSession } from "@sayknow-cli/coding-agent/session/agent-session";
 import { SessionManager } from "@sayknow-cli/coding-agent/session/session-manager";
 import { getSessionsDir, Snowflake } from "@sayknow-cli/utils";
 
@@ -57,6 +61,8 @@ describe("createAgentSession session storage isolation", () => {
 	const tempDirs: string[] = [];
 
 	afterEach(async () => {
+		LocalProtocolHandler.resetOverrideForTests();
+		AgentRegistry.resetGlobalForTests();
 		for (const tempDir of tempDirs.splice(0)) {
 			fs.rmSync(tempDir, { recursive: true, force: true });
 		}
@@ -93,6 +99,103 @@ describe("createAgentSession session storage isolation", () => {
 		} finally {
 			await session.dispose();
 		}
+	});
+
+	it("releases each session's owned local:// override on dispose", async () => {
+		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `pi-sdk-local-protocol-${Snowflake.next()}-`));
+		tempDirs.push(tempDir);
+		const cwd = path.join(tempDir, "project");
+		const agentDir = path.join(tempDir, "agent");
+		const firstArtifactsDir = path.join(tempDir, "first-artifacts");
+		const secondArtifactsDir = path.join(tempDir, "second-artifacts");
+		fs.mkdirSync(cwd, { recursive: true });
+		const sessionOptions = {
+			cwd,
+			agentDir,
+			settings: Settings.isolated(),
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+		};
+		let firstSession: AgentSession | undefined;
+		let secondSession: AgentSession | undefined;
+		try {
+			firstSession = (
+				await createAgentSession({
+					...sessionOptions,
+					localProtocolOptions: {
+						getArtifactsDir: () => firstArtifactsDir,
+						getSessionId: () => "first-local-session",
+					},
+				})
+			).session;
+			expect(resolveLocalUrlToPath("local://note.md", LocalProtocolHandler.resolveOptions()!)).toBe(
+				path.join(firstArtifactsDir, "local", "note.md"),
+			);
+
+			secondSession = (
+				await createAgentSession({
+					...sessionOptions,
+					localProtocolOptions: {
+						getArtifactsDir: () => secondArtifactsDir,
+						getSessionId: () => "second-local-session",
+					},
+				})
+			).session;
+			expect(resolveLocalUrlToPath("local://note.md", LocalProtocolHandler.resolveOptions()!)).toBe(
+				path.join(secondArtifactsDir, "local", "note.md"),
+			);
+
+			await secondSession.dispose();
+			secondSession = undefined;
+			expect(resolveLocalUrlToPath("local://note.md", LocalProtocolHandler.resolveOptions()!)).toBe(
+				path.join(firstArtifactsDir, "local", "note.md"),
+			);
+			await firstSession.dispose();
+			firstSession = undefined;
+			expect(LocalProtocolHandler.resolveOptions()).toBeUndefined();
+		} finally {
+			await secondSession?.dispose();
+			await firstSession?.dispose();
+		}
+	});
+
+	it("releases an owned local:// override when startup fails", async () => {
+		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `pi-sdk-local-protocol-failure-${Snowflake.next()}-`));
+		tempDirs.push(tempDir);
+		const cwd = path.join(tempDir, "project");
+		const agentDir = path.join(tempDir, "agent");
+		const artifactsDir = path.join(tempDir, "artifacts");
+		fs.mkdirSync(cwd, { recursive: true });
+		const throwingExtension: ExtensionFactory = () => {
+			throw new Error("simulated local protocol startup failure");
+		};
+
+		await expect(
+			createAgentSession({
+				cwd,
+				agentDir,
+				settings: Settings.isolated(),
+				disableExtensionDiscovery: true,
+				extensions: [throwingExtension],
+				skills: [],
+				contextFiles: [],
+				promptTemplates: [],
+				slashCommands: [],
+				enableMCP: false,
+				enableLsp: false,
+				localProtocolOptions: {
+					getArtifactsDir: () => artifactsDir,
+					getSessionId: () => "failed-local-session",
+				},
+			}),
+		).rejects.toThrow("simulated local protocol startup failure");
+
+		expect(LocalProtocolHandler.resolveOptions()).toBeUndefined();
 	});
 	it("wires the discovered TTSR manager into the created session", async () => {
 		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `pi-sdk-ttsr-${Snowflake.next()}-`));

@@ -1,100 +1,260 @@
-// G004 real-tmux smoke: exercises forceCloseSkcTmuxSession against LIVE tmux
-// sessions (tmux 3.6a). Proves the wrapper hard-kills SKC-managed live panes
-// (where remove refuses), refuses non-SKC sessions, and enforces session-id
-// matching. Produces durable evidence; not part of the unit suite.
+// G004 real-tmux smoke: exercises forceCloseSkcTmuxSession refusal boundaries
+// against live tmux sessions. Generation-bound successful TERM/verdict/cleanup is
+// covered by the issue evidence harness; this smoke proves incomplete and non-SKC
+// live owners are never hard-killed.
 import assert from "node:assert";
+import { randomUUID } from "node:crypto";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 
 import {
 	buildSkcTmuxExactOptionTarget,
+	buildSkcTmuxExactSessionTarget,
 	buildSkcTmuxProfileCommands,
 	resolveSkcTmuxCommand,
 } from "../src/skc-runtime/tmux-common";
 import { forceCloseSkcTmuxSession, removeSkcTmuxSession, statusSkcTmuxSession } from "../src/skc-runtime/tmux-sessions";
 
-const tmux = resolveSkcTmuxCommand(process.env);
+const runId = randomUUID().slice(0, 8);
+const suffix = `${process.pid}-${runId}`;
+const privateTmpdir = mkdtempSync(path.join(tmpdir(), "g4-"));
+chmodSync(privateTmpdir, 0o700);
+const socket = `g4-${runId}`;
+const wrapper = path.join(privateTmpdir, "tmux-private.sh");
+const scopeUnit = `skc-g004-${suffix}.scope`;
+const tmuxBootstrapEnv: NodeJS.ProcessEnv = {
+	...process.env,
+	TMUX: "",
+	TMUX_PANE: "",
+	TMUX_TMPDIR: privateTmpdir,
+};
+const tmuxBinary = resolveSkcTmuxCommand(tmuxBootstrapEnv);
+const privateEnv: NodeJS.ProcessEnv = {
+	...tmuxBootstrapEnv,
+	SKC_TMUX_COMMAND: wrapper,
+};
+let scopeRunner: Bun.Subprocess<"ignore", "ignore", "pipe"> | null = null;
 
-function sh(args: string[]): { code: number; err: string } {
-	const r = Bun.spawnSync([tmux, ...args], { stdout: "pipe", stderr: "pipe" });
-	return { code: r.exitCode, err: r.stderr.toString().trim() };
+function shellQuote(value: string): string {
+	return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+function bounded(value: string): string {
+	return value.trim().slice(0, 512) || "no diagnostic";
+}
+
+function sh(args: string[]): { code: number; out: string; err: string } {
+	try {
+		const r = Bun.spawnSync([wrapper, ...args], { env: privateEnv, stdout: "pipe", stderr: "pipe" });
+		return { code: r.exitCode, out: r.stdout.toString().trim(), err: r.stderr.toString().trim() };
+	} catch (error) {
+		return { code: -1, out: "", err: bounded(String(error)) };
+	}
 }
 
 function makeRawSession(name: string): void {
 	const r = sh(["new-session", "-d", "-s", name, "sleep 600"]);
-	if (r.code !== 0) throw new Error(`failed to create tmux session ${name}: ${r.err}`);
+	if (r.code !== 0) throw new Error(`failed to create private tmux session ${name}: ${bounded(r.err)}`);
 }
 
 function tagAsSkc(name: string, sessionId?: string): void {
-	const target = buildSkcTmuxExactOptionTarget(name);
-	for (const cmd of buildSkcTmuxProfileCommands(target, process.env, { sessionId })) {
+	const target = buildSkcTmuxExactOptionTarget(name, { env: privateEnv });
+	for (const cmd of buildSkcTmuxProfileCommands(target, privateEnv, { sessionId })) {
 		const r = sh(cmd.args);
-		if (r.code !== 0) throw new Error(`failed to tag ${name} (${cmd.description}): ${r.err}`);
+		if (r.code !== 0) throw new Error(`failed to tag ${name} (${cmd.description}): ${bounded(r.err)}`);
 	}
 }
 
 function exists(name: string): boolean {
-	return sh(["has-session", "-t", `=${name}`]).code === 0;
+	return sh(["has-session", "-t", buildSkcTmuxExactSessionTarget(name, { env: privateEnv })]).code === 0;
 }
 
-function killQuiet(name: string): void {
-	sh(["kill-session", "-t", `=${name}`]);
+function isPrivateSessionAbsent(name: string): boolean {
+	const result = sh(["has-session", "-t", buildSkcTmuxExactSessionTarget(name, { env: privateEnv })]);
+	return result.code !== 0 && /(?:no server running|can't find session|no sessions)/i.test(result.err);
 }
 
-const suffix = `${process.pid}-${Date.now()}`;
+function privateServerPid(session: string): number | null {
+	const result = sh([
+		"display-message",
+		"-p",
+		"-t",
+		buildSkcTmuxExactOptionTarget(session, { env: privateEnv }),
+		"#{pid}",
+	]);
+	const pid = Number.parseInt(result.out, 10);
+	return result.code === 0 && Number.isSafeInteger(pid) && pid > 0 ? pid : null;
+}
+
+function scopeIsActive(): boolean {
+	return (
+		Bun.spawnSync(["systemctl", "--user", "is-active", "--quiet", scopeUnit], { stdout: "ignore", stderr: "ignore" })
+			.exitCode === 0
+	);
+}
+
+function serverIsProvenInScope(session: string): boolean {
+	const pid = privateServerPid(session);
+	if (pid == null) return false;
+	const controlGroup = Bun.spawnSync(
+		["systemctl", "--user", "show", scopeUnit, "--property=ControlGroup", "--value"],
+		{ stdout: "pipe", stderr: "ignore" },
+	);
+	const group = controlGroup.stdout.toString().trim();
+	if (controlGroup.exitCode !== 0 || !group.startsWith("/")) return false;
+	try {
+		return readFileSync(`/proc/${pid}/cgroup`, "utf8")
+			.split("\n")
+			.some(line => line.endsWith(group));
+	} catch {
+		return false;
+	}
+}
+
+async function makeFirstPrivateSession(name: string): Promise<void> {
+	if (process.platform !== "linux") {
+		makeRawSession(name);
+		return;
+	}
+	try {
+		scopeRunner = Bun.spawn(
+			[
+				"systemd-run",
+				"--user",
+				"--quiet",
+				"--collect",
+				`--setenv=TMUX_TMPDIR=${privateTmpdir}`,
+				"--scope",
+				`--unit=${scopeUnit}`,
+				wrapper,
+				"new-session",
+				"-d",
+				"-s",
+				name,
+				"sleep 600",
+			],
+			{ env: privateEnv, stdout: "ignore", stderr: "pipe" },
+		);
+	} catch (error) {
+		throw new Error(`failed to provision private user scope ${scopeUnit}: ${bounded(String(error))}`);
+	}
+	for (let attempt = 0; attempt < 50; attempt += 1) {
+		if (scopeIsActive() && exists(name) && serverIsProvenInScope(name)) return;
+		await Bun.sleep(50);
+	}
+	throw new Error(`failed to provision a proven private user scope ${scopeUnit}`);
+}
+
+async function cleanupOwnedResources(names: string[]): Promise<void> {
+	const failures: string[] = [];
+	for (const name of names) {
+		const result = sh(["kill-session", "-t", buildSkcTmuxExactSessionTarget(name, { env: privateEnv })]);
+		if (result.code !== 0 && !isPrivateSessionAbsent(name)) failures.push(`session ${name}: ${bounded(result.err)}`);
+	}
+	const server = sh(["kill-server"]);
+	if (server.code !== 0) {
+		const probe = sh(["list-sessions"]);
+		if (!/(?:no server running|failed to connect to server|error connecting to)/i.test(probe.err))
+			failures.push(`server: ${bounded(server.err)}`);
+	}
+	if (process.platform === "linux") {
+		const stop = Bun.spawnSync(["systemctl", "--user", "stop", scopeUnit], { stdout: "pipe", stderr: "pipe" });
+		const state = Bun.spawnSync(
+			["systemctl", "--user", "show", scopeUnit, "--property=ActiveState", "--property=LoadState", "--value"],
+			{ stdout: "pipe", stderr: "pipe" },
+		);
+		const states = state.stdout.toString().trim().split("\n");
+		const scopeAbsent = state.exitCode === 0 && (states.includes("inactive") || states.includes("not-found"));
+		if (stop.exitCode !== 0 && !scopeAbsent) failures.push(`scope stop: ${bounded(stop.stderr.toString())}`);
+		if (!scopeAbsent)
+			failures.push(`scope remains present: ${bounded(state.stderr.toString() || state.stdout.toString())}`);
+		if (scopeRunner != null) {
+			const exited = await Promise.race([scopeRunner.exited.then(() => true), Bun.sleep(3_000).then(() => false)]);
+			if (!exited) {
+				try {
+					scopeRunner.kill();
+				} catch (error) {
+					failures.push(`scope runner: ${bounded(String(error))}`);
+				}
+				const killed = await Promise.race([
+					scopeRunner.exited.then(() => true),
+					Bun.sleep(1_000).then(() => false),
+				]);
+				if (!killed) failures.push("scope runner did not exit after scope cleanup");
+			}
+		}
+	}
+	try {
+		rmSync(privateTmpdir, { recursive: true });
+	} catch (error) {
+		if (existsSync(privateTmpdir)) failures.push(`temporary directory: ${bounded(String(error))}`);
+	}
+	if (existsSync(privateTmpdir)) failures.push("temporary directory remains present");
+	if (failures.length > 0) throw new Error(`g004 cleanup incomplete: ${failures.join("; ")}`);
+}
+
 const live = `skc_g004live_${suffix}`;
 const raw = `g004raw_${suffix}`;
 const mism = `skc_g004mism_${suffix}`;
-const cleanup: string[] = [live, raw, mism];
+const cleanup = [live, raw, mism];
 
 try {
-	// 1. SKC-managed LIVE session: remove refuses, force-close hard-kills.
-	makeRawSession(live);
+	writeFileSync(wrapper, `#!/bin/sh\nexec ${shellQuote(tmuxBinary)} -L ${shellQuote(socket)} "$@"\n`, { mode: 0o700 });
+	chmodSync(wrapper, 0o700);
+
+	// 1. Incompletely tagged LIVE session: remove refuses and force-close fails closed.
+	await makeFirstPrivateSession(live);
 	tagAsSkc(live, "sess-g004");
-	const status = statusSkcTmuxSession(live);
+	const status = statusSkcTmuxSession(live, privateEnv);
 	assert.equal(status.profile, "1", "session must be recognized as SKC-managed");
 	assert.ok(status.panePids.length > 0, "session must have a live pane (sleep)");
-	console.log(`[g004] live SKC session up: ${live} panePids=${status.panePids.length}`);
+	process.stdout.write(`[g004] incomplete SKC session up: ${live} panePids=${status.panePids.length}\n`);
 
 	let removeRefused = false;
 	try {
-		removeSkcTmuxSession(live);
+		removeSkcTmuxSession(live, privateEnv);
 	} catch (e) {
 		removeRefused = /skc_tmux_session_live/.test(String(e));
 	}
 	assert.ok(removeRefused, "removeSkcTmuxSession must REFUSE a live pane");
-	console.log("[g004] remove refused live session (expected)");
 
-	const closed = forceCloseSkcTmuxSession(live, process.env, "sess-g004");
-	assert.equal(closed.name, live);
-	assert.ok(!exists(live), "force-close must hard-kill the live SKC session");
-	console.log("[g004] force-close hard-killed the live SKC session (id-matched)");
+	let ownerUnverifiable = false;
+	try {
+		await forceCloseSkcTmuxSession(live, privateEnv, "sess-g004");
+	} catch (e) {
+		ownerUnverifiable = /skc_tmux_owner_unverifiable/.test(String(e));
+	}
+	assert.ok(ownerUnverifiable, "force-close must refuse incomplete owner provenance");
+	assert.ok(exists(live), "incompletely tagged session must be left untouched");
+	process.stdout.write("[g004] force-close refused incomplete owner provenance (expected)\n");
 
 	// 2. Non-SKC (untagged) session: force-close must refuse.
 	makeRawSession(raw);
 	let notManaged = false;
 	try {
-		forceCloseSkcTmuxSession(raw, process.env);
+		await forceCloseSkcTmuxSession(raw, privateEnv);
 	} catch (e) {
-		notManaged = /skc_tmux_session_(not_managed|not_found)/.test(String(e));
+		notManaged = /skc_tmux_session_(not_managed|not_found|untagged)/.test(String(e));
 	}
 	assert.ok(notManaged, "force-close must refuse a non-SKC tmux session");
 	assert.ok(exists(raw), "non-SKC session must be left untouched");
-	killQuiet(raw);
-	console.log("[g004] force-close refused + preserved non-SKC session (expected)");
+	process.stdout.write("[g004] force-close refused + preserved non-SKC session (expected)\n");
 
 	// 3. SKC session with a MISMATCHED expected session id: must refuse.
 	makeRawSession(mism);
 	tagAsSkc(mism, "sess-real");
 	let idMismatch = false;
 	try {
-		forceCloseSkcTmuxSession(mism, process.env, "sess-WRONG");
+		await forceCloseSkcTmuxSession(mism, privateEnv, "sess-WRONG");
 	} catch (e) {
 		idMismatch = /skc_tmux_session_id_mismatch/.test(String(e));
 	}
 	assert.ok(idMismatch, "force-close must refuse on session-id mismatch");
 	assert.ok(exists(mism), "mismatched session must be left untouched");
-	console.log("[g004] force-close refused on session-id mismatch (expected)");
-
-	console.log("[g004] PASS: forceCloseSkcTmuxSession verified against live tmux");
+	process.stdout.write("[g004] force-close refused on session-id mismatch (expected)\n");
 } finally {
-	for (const name of cleanup) killQuiet(name);
+	await cleanupOwnedResources(cleanup);
 }
+
+process.stdout.write("[g004] PASS: forceCloseSkcTmuxSession refusal boundaries verified against live tmux\n");

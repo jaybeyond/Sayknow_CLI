@@ -12,7 +12,6 @@ export declare class ComputerController {
   keypress(expectedEpoch: number | undefined | null, keys: Array<string>): void
   wait(expectedEpoch: number | undefined | null, ms: number): void
 }
-
 /**
  * Long-lived macOS appearance observer.
  *
@@ -173,19 +172,37 @@ export declare class NotificationServer {
    */
   resolveLocal(id: string, answerJson?: string | undefined | null): void
   /**
-   * Resolve an action answered by a remote client, after TS resolved the real
-   * gate. `answer_json` is an optional JSON `ReplyAnswer`.
+   * Resolve an unclaimed legacy action. Forward-mode replies are
+   * receipt-bound and must use `resolveClaim` instead.
    *
    * # Errors
-   * Fails if not started or `answer_json` is invalid.
+   * Fails if not started, `answer_json` is invalid, or the action is claimed.
    */
   resolveClient(id: string, answerJson?: string | undefined | null, idempotencyKey?: string | undefined | null): void
+  /** Resolve a reply claim after durable semantic settlement. */
+  resolveClaim(replyReceiptId: string, answerJson?: string | undefined | null, idempotencyKey?: string | undefined | null): void
+  /** Close an invalid claim terminally. Retrying must use a fresh action id. */
+  closeClaimInvalid(replyReceiptId: string, reason: string): void
+  /** Cancel a claim as part of abort or shutdown cleanup. */
+  cancelClaim(replyReceiptId: string, reason: string): void
   /**
-   * Reject a forwarded reply after TS failed to resolve its gate. `reason` is
-   * one of the protocol reject reasons (default `invalid_answer`).
+   * Unicast an origin-bound live acknowledgement and resolve with its exact
+   * correlated terminal outcome (or native timeout evidence).
+   */
+  requestAskSelectedAck(replyReceiptId: string, requestJson: string): Promise<AskSelectedAckOutcomeEvent>
+  /**
+   * Select one current capable participant for a recovery acknowledgement and
+   * resolve with its exact terminal outcome.
+   */
+  requestRecoveredAskSelectedAck(requestJson: string): Promise<AskSelectedAckOutcomeEvent>
+  /** Correlate and terminalize an acknowledgement request. */
+  cancelAskSelectedAck(requestId: string, commitKey: string, reason: string): AskSelectedAckOutcomeEvent
+  /**
+   * Reject an unclaimed legacy reply. Claimed forward-mode replies must use
+   * `closeClaimInvalid` with the exact receipt.
    *
    * # Errors
-   * Fails if not started.
+   * Fails if not started or the action is claimed.
    */
   reject(id: string, reason?: string | undefined | null): void
   /**
@@ -298,7 +315,7 @@ export declare class Shell {
  * `packages/natives/native/index.js` (which derives the name from
  * `package.json#version`).
  */
-export declare function __piNativesV0_3_12(): void
+export declare function __piNativesV0_3_13(): void
 
 /**
  * Apply conservative pre-execution rewrites to a bash command.
@@ -308,6 +325,13 @@ export declare function __piNativesV0_3_12(): void
  * `pi_shell::fixup`. Synchronous and cheap (one parse pass over the input).
  */
 export declare function applyBashFixups(command: string): BashFixupResult
+
+/** Typed terminal acknowledgement result returned by acknowledgement promises. */
+export interface AskSelectedAckOutcomeEvent {
+  status: string
+  messageId?: number
+  reason?: string
+}
 
 /**
  * Apply ast-grep rewrite rules to matching files; honors `dryRun` and returns
@@ -1479,6 +1503,8 @@ export interface ReplyEvent {
   answerJson: string
   /** Optional idempotency key supplied by the client. */
   idempotencyKey?: string
+  /** One-shot receipt binding this callback to the atomically claimed reply. */
+  replyReceiptId: string
 }
 
 /**

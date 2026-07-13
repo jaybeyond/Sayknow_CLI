@@ -150,7 +150,7 @@
  		}),
  		{ id: "plugins", label: `${theme.icon.package} Plugins` },
  	];
-@@ -773,13 +785,15 @@
+@@ -775,13 +787,15 @@
  		}
  
  		const currentValue = this.#getCurrentValue(def);
@@ -168,7 +168,7 @@
  					currentValue: currentValue ? "true" : "false",
  					values: ["true", "false"],
  				};
-@@ -787,8 +801,8 @@
+@@ -789,8 +803,8 @@
  			case "enum":
  				return {
  					id: def.path,
@@ -179,7 +179,7 @@
  					currentValue: currentValue as string,
  					values: [...def.values],
  				};
-@@ -796,8 +810,8 @@
+@@ -798,8 +812,8 @@
  			case "submenu":
  				return {
  					id: def.path,
@@ -190,7 +190,7 @@
  					currentValue: this.#getSubmenuCurrentValue(def.path, currentValue),
  					submenu: (cv, done) => this.#createSubmenu(def, cv, done),
  				};
-@@ -805,8 +819,8 @@
+@@ -807,8 +821,8 @@
  			case "text":
  				return {
  					id: def.path,
@@ -201,7 +201,7 @@
  					currentValue: (currentValue as string) ?? "",
  					submenu: (cv, done) => this.#createTextInput(def, cv, done),
  				};
-@@ -932,9 +946,9 @@
+@@ -942,9 +956,9 @@
  		const getPreview = isThemeSetting ? this.callbacks.getStatusLinePreview : undefined;
  
  		return new SelectSubmenu(
@@ -214,7 +214,7 @@
  			currentValue,
  			value => {
  				this.#setSettingValue(def.path, value);
-@@ -964,8 +978,8 @@
+@@ -974,8 +988,8 @@
  			done(value);
  		};
  		return new TextInputSubmenu(
@@ -225,7 +225,7 @@
  			currentValue,
  			value => {
  				// Empty string clears the setting; undefined-typed string settings
-@@ -1072,20 +1086,13 @@
+@@ -1082,20 +1096,13 @@
  	#buildItemsForTab(defs: SettingDef[], tabId: SettingTab): SettingItem[] {
  		const items = this.#buildItemsForDefs(defs);
  		if (tabId === "appearance") {

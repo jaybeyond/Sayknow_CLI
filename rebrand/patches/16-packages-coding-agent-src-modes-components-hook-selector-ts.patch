@@ -8,7 +8,7 @@
  import { getEditorTheme, getMarkdownTheme, theme } from "../../modes/theme/theme";
  import {
  	matchesAppExternalEditor,
-@@ -425,7 +426,7 @@
+@@ -432,7 +433,7 @@
  		this.#inputArea = new Container();
  		this.addChild(this.#inputArea);
  		this.addChild(new Spacer(1));

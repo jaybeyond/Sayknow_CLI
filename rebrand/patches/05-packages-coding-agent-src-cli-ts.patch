@@ -1,6 +1,6 @@
 --- a/packages/coding-agent/src/cli.ts
 +++ b/packages/coding-agent/src/cli.ts
-@@ -27,7 +27,6 @@
+@@ -28,7 +28,6 @@
  	{ name: "codex-native-hook", load: () => import("./commands/codex-native-hook").then(m => m.default) },
  	{ name: "state", load: () => import("./commands/state").then(m => m.default) },
  	{ name: "setup", load: () => import("./commands/setup").then(m => m.default) },
@@ -8,7 +8,7 @@
  	{ name: "skills", load: () => import("./commands/skills").then(m => m.default) },
  	{ name: "session", load: () => import("./commands/session").then(m => m.default) },
  	{ name: "harness", load: () => import("./commands/harness").then(m => m.default) },
-@@ -56,6 +55,7 @@
+@@ -57,6 +56,7 @@
  	{ name: "plugin", load: () => import("./commands/plugin").then(m => m.default) },
  	{ name: "completion", load: () => import("./commands/completion").then(m => m.default) },
  	{ name: "launch", load: () => import("./commands/launch").then(m => m.default) },
@@ -16,7 +16,7 @@
  ];
  
  async function showHelp(config: CliConfig): Promise<void> {
-@@ -145,7 +145,7 @@
+@@ -150,7 +150,7 @@
  }
  
  export class RootHelpCommand extends Command {

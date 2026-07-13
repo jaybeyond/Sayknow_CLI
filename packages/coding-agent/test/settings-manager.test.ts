@@ -363,4 +363,49 @@ describe("Settings", () => {
 			expect(compaction.maintenancePruningMinSavingsTokens).toBe(12000);
 		});
 	});
+	describe("IRC sidebar default", () => {
+		it("materializes irc.sidebar.enabled=true when the setting is omitted", () => {
+			const settings = Settings.isolated();
+			expect(settings.get("irc.sidebar.enabled")).toBe(true);
+		});
+
+		it("preserves an explicit false value across restart", async () => {
+			await writeSettings({ irc: { sidebar: { enabled: false } } });
+			let settings = await Settings.init({ cwd: projectDir, agentDir });
+			expect(settings.get("irc.sidebar.enabled")).toBe(false);
+
+			resetSettingsForTest();
+			settings = await Settings.init({ cwd: projectDir, agentDir });
+			expect(settings.get("irc.sidebar.enabled")).toBe(false);
+		});
+
+		it("lets project settings override the user default", async () => {
+			await writeSettings({ irc: { sidebar: { enabled: true } } });
+			await Bun.write(
+				path.join(getProjectAgentDir(projectDir), "settings.json"),
+				JSON.stringify({ irc: { sidebar: { enabled: false } } }),
+			);
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			expect(settings.get("irc.sidebar.enabled")).toBe(false);
+		});
+
+		it("falls back without overwriting a corrupt project value", async () => {
+			await writeSettings({ irc: { sidebar: { enabled: false } } });
+			const projectSettingsPath = path.join(getProjectAgentDir(projectDir), "settings.json");
+			await Bun.write(projectSettingsPath, '{"irc":{"sidebar":{"enabled":');
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			expect(settings.get("irc.sidebar.enabled")).toBe(false);
+			expect(await Bun.file(projectSettingsPath).text()).toBe('{"irc":{"sidebar":{"enabled":');
+		});
+
+		it("keeps the generated JSON schema default in sync with the settings source", async () => {
+			const schema = JSON.parse(
+				await Bun.file(new URL("../../../schemas/config.schema.json", import.meta.url)).text(),
+			);
+			const sidebarDefault = schema?.properties?.irc?.properties?.sidebar?.properties?.enabled?.default;
+			expect(sidebarDefault).toBe(true);
+		});
+	});
 });

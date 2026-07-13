@@ -116,3 +116,19 @@
 - The main UI may show IRC relays for conversations it was not part of, but those relay records are explicitly display-only.
 - Because reply generation snapshots in-flight assistant text, a recipient can answer based on partially streamed context.
 - Direct self-messaging is rejected by resolving the target as unavailable.
+
+## Sidebar
+
+- `irc.sidebar.enabled` defaults to `true`: the read-only sidebar is available when `irc.enabled` is also enabled, but starts closed. `app.irc.sidebar.toggle` (default `Alt+I`, remappable) opens or hides it.
+- The sidebar retains the active runtime UI session's IRC observations only. It is not written to disk or restored into another session. Each arrival decides its inline lifetime once: arrivals while the panel is visible expire 10 seconds after observation; arrivals while it is closed persist inline. Later toggles do not change that decision.
+- An eligible first live inline arrival while the sidebar is closed shows a one-time hint using the resolved toggle key (for example, `Alt+I opens sidebar`). Rebuilds do not show or consume this hint.
+- When open, the transcript/sidebar split targets 70:30. The sidebar keeps a 30-column minimum only while the transcript can retain at least half the usable width; below that boundary the sidebar yields completely and the transcript renders full width. Retained sidebar messages are Discord-style blocks: `sender → recipient · HH:mm`, followed by the retained body with a two-column indent and one blank row between messages. Sender and recipient display fields are normalized and bounded to 256 UTF-8 bytes at complete grapheme boundaries.
+- The sidebar retains at most 10,000 observations and 16 MiB of UTF-8 message payload per runtime UI session, evicting the oldest observations first. An individual observation larger than the 16 MiB budget is omitted rather than truncated or admitted by evicting the rest of the backlog. Replay suppression tracks at most 100,000 unique observation identities and then fails closed for unseen arrivals until the runtime UI instance ends, preventing forgotten identities from resurrecting across eviction or fork cleanup while keeping memory bounded. Both inline transcript and sidebar body rendering independently materialize at most 2,048 rows from a bounded 64 KiB UTF-8 source projection, preferring recent retained content and showing explicit message/backlog elision markers when necessary. The bounded, runtime-only, read-only backlog does not affect welcome-screen row reservation, which counts transcript rows only.
+- While the sidebar is visible, Kitty terminals keep rendering real images in the transcript (Kitty placements are cursor-neutral and compose safely with the split). Cursor-advancing protocols — iTerm2 inline images and raw SIXEL sequences — are represented by compact text placeholders so they cannot corrupt the split. Hiding the sidebar restores normal rendering for every protocol.
+- A successful `/fork` starts a new logical UI session: it clears the sidebar ledger, hides the panel, and resets roster-delivery state. Failed or cancelled forks preserve the current runtime sidebar state.
+
+## Hidden peer roster reminders
+
+When the live peer roster changes, an eligible model turn receives one hidden single-line reminder listing stable agent ids and roster labels. The initial empty roster produces no reminder; a later transition to empty does. Running/idle status changes alone do not count as a roster change.
+
+Normal turns, IRC auto-replies, and `/btw` ephemeral turns share one atomic roster claim. At most one concurrent turn receives a changed roster; successful completion commits that delivery, while failed or aborted turns release it for a later retry. These reminders are context-only and never appear in the transcript or persisted history.

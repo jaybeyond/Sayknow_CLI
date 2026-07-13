@@ -1,7 +1,9 @@
+import * as crypto from "node:crypto";
 import * as fs from "node:fs";
+
 import * as os from "node:os";
 import * as path from "node:path";
-import type { AgentMessage } from "@sayknow-cli/agent-core";
+import { type AgentMessage, canContinuePersistedHistory } from "@sayknow-cli/agent-core";
 import type {
 	ImageContent,
 	Message,
@@ -61,7 +63,15 @@ import {
 	sanitizeRehydratedOpenAIResponsesAssistantMessage,
 	stripInternalDetailsFields,
 } from "./messages";
-import type { SessionStorage, SessionStorageWriter } from "./session-storage";
+import type {
+	SessionStorage,
+	SessionStorageSnapshot,
+	SessionStorageStat,
+	SessionStorageWriter,
+	SessionStorageWriterCloseState,
+	VerifiedSessionDeleteResult,
+	VerifiedSessionDeleteTarget,
+} from "./session-storage";
 import { FileSessionStorage, MemorySessionStorage } from "./session-storage";
 
 export const CURRENT_SESSION_VERSION = 3;
@@ -143,6 +153,53 @@ export interface SessionMessageEntry extends SessionEntryBase {
 	 *  content-addressed blobs after compaction. The marker is entry-level session
 	 *  metadata (not a message field) so strict message types stay intact. */
 	evictedContent?: EvictedContentMarker;
+}
+
+const sessionMessageEntryIds = new WeakMap<object, string>();
+const sessionMessageViewportAnchorIds = new WeakMap<object, string>();
+const sessionMessageObservationIds = new WeakMap<object, string>();
+
+export function associateSessionMessageEntryId(message: AgentMessage, entryId: string): void {
+	sessionMessageEntryIds.set(message, entryId);
+}
+
+export function getSessionMessageEntryId(message: AgentMessage): string | undefined {
+	return sessionMessageEntryIds.get(message);
+}
+
+export function associateSessionMessageObservationId(message: AgentMessage, observationId: string): string {
+	const existing = sessionMessageObservationIds.get(message);
+	if (existing) return existing;
+	sessionMessageObservationIds.set(message, observationId);
+	return observationId;
+}
+
+export function getSessionMessageObservationId(message: AgentMessage): string | undefined {
+	return sessionMessageObservationIds.get(message);
+}
+
+export function associateSessionMessageViewportAnchorId(message: AgentMessage, anchorId: string): void {
+	sessionMessageViewportAnchorIds.set(message, anchorId);
+}
+
+export function getSessionMessageViewportAnchorId(message: AgentMessage): string | undefined {
+	return sessionMessageViewportAnchorIds.get(message);
+}
+
+export function transferSessionMessageIdentity(source: AgentMessage[], target: AgentMessage[]): void {
+	if (source.length !== target.length) {
+		throw new Error(
+			`Cannot transfer session message identity across ${source.length} source and ${target.length} target messages`,
+		);
+	}
+	for (let index = 0; index < source.length; index++) {
+		const entryId = getSessionMessageEntryId(source[index]);
+		if (entryId) associateSessionMessageEntryId(target[index], entryId);
+		const observationId = getSessionMessageObservationId(source[index]);
+		if (observationId) associateSessionMessageObservationId(target[index], observationId);
+		const anchorId = getSessionMessageViewportAnchorId(source[index]);
+		if (anchorId) associateSessionMessageViewportAnchorId(target[index], anchorId);
+	}
 }
 
 export interface ThinkingLevelChangeEntry extends SessionEntryBase {
@@ -332,6 +389,48 @@ export interface SessionContext {
 	modeData?: Record<string, unknown>;
 }
 
+/** Immutable fingerprint captured during read-only resume inspection. */
+export interface ResumeSessionIdentity {
+	canonicalPath: string;
+	sessionId: string;
+	dev: bigint;
+	ino: bigint;
+	size: number;
+	mtimeMs: number;
+	mtimeNs: bigint;
+	sha256: string;
+}
+
+export interface ResumeTailResumable {
+	kind: "resumable";
+	identity: ResumeSessionIdentity;
+}
+
+export interface ResumeTailTerminal {
+	kind: "terminal";
+	identity: ResumeSessionIdentity;
+}
+
+export interface ResumeTailError {
+	kind: "error";
+	reason: "missing" | "malformed" | "unstable" | "read-failed";
+}
+
+export type ResumeTailInspection = ResumeTailResumable | ResumeTailTerminal | ResumeTailError;
+
+export interface StrictSessionOpenSuccess {
+	kind: "opened";
+	manager: SessionManager;
+}
+
+export interface StrictSessionOpenFailure {
+	kind: "error";
+	reason: ResumeTailError["reason"] | "identity-mismatch";
+}
+
+/** Result of opening an inspected session without create-or-rewrite fallback. */
+export type StrictSessionOpenResult = StrictSessionOpenSuccess | StrictSessionOpenFailure;
+
 export interface SessionInfo {
 	path: string;
 	id: string;
@@ -348,6 +447,56 @@ export interface SessionInfo {
 	firstMessage: string;
 	allMessagesText: string;
 }
+// =============================================================================
+// Strict ACP authorization inventory (fail-closed, never partial authority)
+// =============================================================================
+
+/** Kind of failure surfaced by strict scoped inventory. Any failure grants zero authority. */
+export type StrictInventoryFailureKind =
+	| "root"
+	| "scan"
+	| "lstat"
+	| "read"
+	| "parse"
+	| "stat"
+	| "header"
+	| "cwd"
+	| "containment"
+	| "identity";
+
+/** Sanitized strict-inventory failure. Never carries raw file content. */
+export interface StrictInventoryFailure {
+	kind: StrictInventoryFailureKind;
+	message: string;
+	path?: string;
+}
+
+/** One exact-identity candidate suitable for ACP authorization binding. */
+export interface StrictInventoryCandidate {
+	/** Canonical absolute transcript path. */
+	path: string;
+	/** Session id parsed from the header. */
+	id: string;
+	/** Canonical cwd parsed from the header. */
+	cwd: string;
+	/** Descriptor-bound transcript identity (dev, ino, ...). */
+	identity: SessionStorageStat;
+}
+
+/**
+ * Strict inventory result. `complete` carries the full validated candidate set;
+ * `failure` carries every sanitized failure and grants zero page/cursor/authority.
+ * A failure result is never reduced to a partial candidate set.
+ */
+export type StrictInventoryResult =
+	| { kind: "complete"; candidates: StrictInventoryCandidate[] }
+	| { kind: "failure"; failures: StrictInventoryFailure[] };
+
+/** Certainty-aware close outcome for strict ACP disposal. */
+export type SessionManagerCloseOutcome =
+	| { kind: "closed" }
+	| { kind: "close_failed_retryable"; error: Error }
+	| { kind: "close_unknown"; error: Error };
 
 export type ReadonlySessionManager = Pick<
 	SessionManager,
@@ -517,6 +666,17 @@ function getDefaultSessionDirName(cwd: string): { encodedDirName: string; resolv
 	return { encodedDirName, resolvedCwd };
 }
 
+/** Default and legacy directory candidates for maintenance-free resume discovery. */
+function getReadOnlyDefaultSessionDirs(cwd: string, sessionsRoot: string = getSessionsDir()): string[] {
+	const { encodedDirName, resolvedCwd } = getDefaultSessionDirName(cwd);
+	const canonicalCwd = resolveEquivalentPath(resolvedCwd);
+	return [
+		path.join(sessionsRoot, encodedDirName),
+		path.join(sessionsRoot, encodeLegacyAbsoluteSessionDirName(canonicalCwd)),
+		path.join(sessionsRoot, encodeLegacyAbsoluteSessionDirName(resolvedCwd)),
+	].filter((dir, index, dirs) => dirs.indexOf(dir) === index);
+}
+
 /**
  * Migrate old `--<home-encoded>-*--` session dirs to the new `-*` format.
  * Runs once per sessions root on first access, best-effort.
@@ -602,6 +762,7 @@ export function buildSessionContext(
 	entries: SessionEntry[],
 	leafId?: string | null,
 	byId?: Map<string, SessionEntry>,
+	sessionIdentityNamespace = "legacy-session",
 ): SessionContext {
 	// Build uuid index if not available
 	if (!byId) {
@@ -747,18 +908,29 @@ export function buildSessionContext(
 
 	const appendMessage = (entry: SessionEntry) => {
 		if (entry.type === "message") {
+			associateSessionMessageEntryId(entry.message, entry.id);
 			messages.push(entry.message);
 		} else if (entry.type === "custom_message") {
-			messages.push(
-				createCustomMessage(
-					entry.customType,
-					entry.content,
-					entry.display,
-					entry.details,
-					entry.timestamp,
-					entry.attribution,
-				),
+			const message = createCustomMessage(
+				entry.customType,
+				entry.content,
+				entry.display,
+				entry.details,
+				entry.timestamp,
+				entry.attribution,
 			);
+			associateSessionMessageEntryId(message, entry.id);
+			const persistedObservationId =
+				entry.details && typeof entry.details === "object" && !Array.isArray(entry.details)
+					? (entry.details as Record<string, unknown>).observationId
+					: undefined;
+			associateSessionMessageObservationId(
+				message,
+				typeof persistedObservationId === "string"
+					? persistedObservationId
+					: `session:${sessionIdentityNamespace}:entry:${entry.id}`,
+			);
+			messages.push(message);
 		} else if (entry.type === "branch_summary" && entry.summary) {
 			messages.push(createBranchSummaryMessage(entry.summary, entry.fromId, entry.timestamp));
 		}
@@ -836,9 +1008,11 @@ export function buildSessionContext(
 }
 
 function cloneSessionContext(context: SessionContext): SessionContext {
+	const messages = cloneJsonSemantic(context.messages);
+	transferSessionMessageIdentity(context.messages, messages);
 	return {
 		...context,
-		messages: cloneJsonSemantic(context.messages),
+		messages,
 		models: { ...context.models },
 		injectedTtsrRules: [...context.injectedTtsrRules],
 		injectedTtsrRuleRecords: context.injectedTtsrRuleRecords?.map(record => ({ ...record })),
@@ -968,6 +1142,212 @@ export async function loadEntriesFromFile(
 	}
 
 	return entries;
+}
+
+function sameResumeIdentity(left: ResumeSessionIdentity, right: ResumeSessionIdentity): boolean {
+	return (
+		left.canonicalPath === right.canonicalPath &&
+		left.sessionId === right.sessionId &&
+		left.dev === right.dev &&
+		left.ino === right.ino &&
+		left.size === right.size &&
+		left.mtimeMs === right.mtimeMs &&
+		left.mtimeNs === right.mtimeNs &&
+		left.sha256 === right.sha256
+	);
+}
+
+function sameResumeStat(left: SessionStorageStat, right: SessionStorageStat): boolean {
+	return (
+		left.isFile &&
+		right.isFile &&
+		left.dev === right.dev &&
+		left.ino === right.ino &&
+		left.size === right.size &&
+		left.mtimeMs === right.mtimeMs &&
+		left.mtimeNs === right.mtimeNs
+	);
+}
+
+interface ResumeInspectionSnapshot {
+	identity: ResumeSessionIdentity;
+	entries: FileEntry[];
+	context: SessionContext;
+	migrationApplied: boolean;
+}
+
+function resumeReadFailure(error: unknown, storage: SessionStorage, path: string): ResumeTailError {
+	let missing = isEnoent(error);
+	if (!missing) {
+		try {
+			missing = !storage.existsSync(path);
+		} catch {
+			// Preserve the primary read/stat failure when existence cannot be checked.
+		}
+	}
+	return { kind: "error", reason: missing ? "missing" : "read-failed" };
+}
+
+function hasStrictSessionSchema(entries: FileEntry[]): boolean {
+	for (const entry of entries) {
+		const value = entry as unknown as Record<string, unknown>;
+		if (typeof value.type !== "string") return false;
+		if (value.type === "session") {
+			if (typeof value.id !== "string" || typeof value.cwd !== "string" || typeof value.timestamp !== "string")
+				return false;
+			continue;
+		}
+		if (
+			typeof value.id !== "string" ||
+			(value.parentId !== null && typeof value.parentId !== "string") ||
+			typeof value.timestamp !== "string"
+		) {
+			return false;
+		}
+		switch (value.type) {
+			case "message": {
+				if (typeof value.message !== "object" || value.message === null) return false;
+				const message = value.message as Record<string, unknown>;
+				if (typeof message.role !== "string") return false;
+				break;
+			}
+			case "model_change":
+				if (
+					typeof value.model !== "string" &&
+					!(typeof value.provider === "string" && typeof value.modelId === "string")
+				)
+					return false;
+				break;
+			case "compaction":
+				if (
+					typeof value.summary !== "string" ||
+					typeof value.firstKeptEntryId !== "string" ||
+					typeof value.tokensBefore !== "number"
+				)
+					return false;
+				break;
+			case "branch_summary":
+				if (typeof value.fromId !== "string" || typeof value.summary !== "string") return false;
+				break;
+			case "custom":
+				if (typeof value.customType !== "string") return false;
+				break;
+			case "custom_message":
+				if (
+					typeof value.customType !== "string" ||
+					(typeof value.content !== "string" && !Array.isArray(value.content)) ||
+					typeof value.display !== "boolean"
+				)
+					return false;
+				break;
+			case "label":
+				if (typeof value.targetId !== "string" || (value.label !== undefined && typeof value.label !== "string"))
+					return false;
+				break;
+			case "ttsr_injection":
+				if (!Array.isArray(value.injectedRules) || !value.injectedRules.every(rule => typeof rule === "string"))
+					return false;
+				break;
+			case "mcp_tool_selection":
+				if (
+					!Array.isArray(value.selectedToolNames) ||
+					!value.selectedToolNames.every(name => typeof name === "string")
+				)
+					return false;
+				break;
+			case "session_init":
+				if (
+					typeof value.systemPrompt !== "string" ||
+					typeof value.task !== "string" ||
+					!Array.isArray(value.tools) ||
+					!value.tools.every(tool => typeof tool === "string")
+				)
+					return false;
+				break;
+			case "mode_change":
+				if (typeof value.mode !== "string") return false;
+				break;
+			case "thinking_level_change":
+				if (
+					value.thinkingLevel !== undefined &&
+					value.thinkingLevel !== null &&
+					typeof value.thinkingLevel !== "string"
+				)
+					return false;
+				break;
+			case "service_tier_change":
+				if (value.serviceTier !== null && typeof value.serviceTier !== "string") return false;
+				break;
+			default:
+				return false;
+		}
+	}
+	return true;
+}
+
+function inspectResumeSessionFile(
+	filePath: string,
+	storage: SessionStorage,
+): ResumeInspectionSnapshot | ResumeTailError {
+	const canonicalPath = resolveEquivalentPath(path.resolve(filePath));
+	let before: SessionStorageStat;
+	try {
+		before = storage.statSync(canonicalPath);
+	} catch (error) {
+		return resumeReadFailure(error, storage, canonicalPath);
+	}
+	if (!before.isFile || !storage.readSnapshotSync) {
+		return { kind: "error", reason: "read-failed" };
+	}
+
+	let bytes: Uint8Array;
+	let snapshot: SessionStorageStat;
+	let after: SessionStorageStat;
+	try {
+		const readSnapshot = storage.readSnapshotSync(canonicalPath);
+		bytes = readSnapshot.bytes;
+		snapshot = readSnapshot.stat;
+		after = storage.statSync(canonicalPath);
+	} catch (error) {
+		return resumeReadFailure(error, storage, canonicalPath);
+	}
+	if (!sameResumeStat(before, snapshot) || !sameResumeStat(snapshot, after)) {
+		return { kind: "error", reason: "unstable" };
+	}
+
+	try {
+		const content = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+		for (const line of content.split(/\r?\n/)) {
+			if (line.length === 0) continue;
+			JSON.parse(line);
+		}
+		const entries = parseSessionEntries(content);
+		const header = entries[0] as SessionHeader | undefined;
+		if (header?.type !== "session" || typeof header.id !== "string") {
+			return { kind: "error", reason: "malformed" };
+		}
+		const migrationApplied = migrateToCurrentVersion(entries);
+		if (!hasStrictSessionSchema(entries)) return { kind: "error", reason: "malformed" };
+		const context = buildSessionContext(
+			entries.filter((entry): entry is SessionEntry => entry.type !== "session"),
+			undefined,
+			undefined,
+			header.id,
+		);
+		const identity: ResumeSessionIdentity = {
+			canonicalPath,
+			sessionId: header.id,
+			dev: snapshot.dev,
+			ino: snapshot.ino,
+			size: snapshot.size,
+			mtimeMs: snapshot.mtimeMs,
+			mtimeNs: snapshot.mtimeNs,
+			sha256: crypto.createHash("sha256").update(bytes).digest("hex"),
+		};
+		return { identity, entries, context, migrationApplied };
+	} catch {
+		return { kind: "error", reason: "malformed" };
+	}
 }
 
 /**
@@ -1605,11 +1985,13 @@ function cloneJsonSemantic<T>(value: T): T {
 }
 
 function cloneAgentMessage<T extends AgentMessage>(message: T): T {
-	return {
+	const cloned = {
 		...message,
 		...("content" in message ? { content: cloneJsonSemantic(message.content) } : {}),
 		...("providerPayload" in message ? { providerPayload: cloneJsonSemantic(message.providerPayload) } : {}),
-	};
+	} as T;
+	transferSessionMessageIdentity([message], [cloned]);
+	return cloned;
 }
 
 function cloneSessionEntry(entry: SessionEntry): SessionEntry {
@@ -2196,6 +2578,7 @@ class NdjsonFileWriter {
 	#error: Error | undefined;
 	#pendingWrites: Promise<void> = Promise.resolve();
 	#onError: ((err: Error) => void) | undefined;
+	#closeDrained = false;
 
 	constructor(storage: SessionStorage, path: string, options?: { flags?: "a" | "w"; onError?: (err: Error) => void }) {
 		this.#onError = options?.onError;
@@ -2289,35 +2672,61 @@ class NdjsonFileWriter {
 		}
 	}
 
-	/** Close the writer, flushing all data. */
+	/** Close the writer, flushing all data. Retryable across certified pre-dispatch failures. */
 	async close(): Promise<void> {
-		if (this.#closed || this.#closing) return;
+		// Terminal (confirmed closed or quarantined close_unknown): no further attempts.
+		if (this.#closed) return;
+		// Re-entry guard: once a fresh attempt has started draining, block concurrent
+		// close() calls. A retry after a certified pre-dispatch failure has #closing
+		// reset and #closeDrained set, so it re-enters to actually re-dispatch the
+		// underlying OS close — the wrapper must NOT mark itself closed on a retryable
+		// failure, and must allow a genuine later retry.
+		if (this.#closing) return;
+
 		this.#closing = true;
 
-		let closeError: Error | undefined;
-		try {
-			await this.flush();
-		} catch (err) {
-			closeError = toError(err);
-		}
-
-		try {
-			await this.#pendingWrites;
-		} catch (err) {
-			if (!closeError) closeError = toError(err);
+		let drainError: Error | undefined;
+		// Only drain once: a retry after a pre-dispatch failure has already flushed
+		// pending writes, and the underlying writer rejects further flushes while in
+		// the retryable state. Re-draining would mask the close retry with that error.
+		if (!this.#closeDrained) {
+			try {
+				await this.flush();
+			} catch (err) {
+				drainError = toError(err);
+			}
+			try {
+				await this.#pendingWrites;
+			} catch (err) {
+				if (!drainError) drainError = toError(err);
+			}
+			this.#closeDrained = true;
 		}
 
 		try {
 			await this.#writer.close();
 		} catch (err) {
-			const endErr = this.#recordError(err);
-			if (!closeError) closeError = endErr;
+			if (this.#writer.getCloseState() === "close_failed_retryable") {
+				// Certified pre-dispatch failure: the numeric fd is still owned and a
+				// later retry is safe. Do NOT mark the wrapper closed, do NOT poison
+				// #error (the retry must still be able to flush/close), and reset
+				// #closing so the retry can actually re-dispatch. Surface the failure —
+				// a partial close is never reported as success.
+				this.#closing = false;
+				throw toError(err);
+			}
+			// close_unknown (quarantined) or other dispatched failure: terminal. Record
+			// the error and mark the wrapper closed so no retry/finalizer touches the
+			// uncertain fd again.
+			this.#closed = true;
+			throw this.#recordError(err);
 		}
 
+		// Confirmed closed (underlying close succeeded).
 		this.#closed = true;
 
-		if (!closeError && this.#error) closeError = this.#error;
-		if (closeError) throw closeError;
+		if (drainError) throw drainError;
+		if (this.#error) throw this.#error;
 	}
 
 	/** Check if there's a stored error. */
@@ -2325,16 +2734,49 @@ class NdjsonFileWriter {
 		return this.#error;
 	}
 
-	/** True while the writer accepts new writes (not closing or closed). */
+	/**
+	 * True only while the writer accepts new writes. A retryable close failure
+	 * leaves the wrapper non-terminal but the underlying fd rejects writes, so
+	 * callers route appends around it rather than through it.
+	 */
 	isOpen(): boolean {
-		return !this.#closed && !this.#closing;
+		if (this.#closed || this.#closing) return false;
+		return this.#writer.getCloseState() === "open";
 	}
 
+	/**
+	 * Truthful synchronous close used by the atomic-rewrite path: dispatches the
+	 * underlying close synchronously and throws on failure so a close failure is
+	 * observable BEFORE the rename step. No fire-and-forget: the old suppression
+	 * (`close().catch(() => {})`) let a rename proceed on an unclosed file.
+	 */
 	closeSync(): void {
 		if (this.#closed) return;
+		if (this.#closing) return;
+		// The sync path's writeSync bypasses the async queue, so #pendingWrites is
+		// not applicable; the caller has already issued every writeSync before this.
+		try {
+			this.#writer.closeSync();
+		} catch (err) {
+			if (this.#writer.getCloseState() === "close_failed_retryable") {
+				// Retryable: keep the wrapper open for the cleanup retry in the caller's
+				// catch block; surface the failure so the rename is skipped.
+				throw toError(err);
+			}
+			this.#closed = true;
+			throw this.#recordError(err);
+		}
 		this.#closed = true;
-		this.#closing = true;
-		this.#writer.close().catch(() => {});
+	}
+
+	/** Certainty-aware close state of the underlying storage writer. */
+	getCloseState(): SessionStorageWriterCloseState {
+		return this.#writer.getCloseState();
+	}
+
+	/** Stored error for a non-success underlying close state. */
+	getCloseError(): Error | undefined {
+		return this.#writer.getCloseError();
 	}
 }
 
@@ -2921,6 +3363,26 @@ export class SessionManager {
 		await this.setSessionFile(sessionFile);
 	}
 
+	async #hydrateExistingSession(sessionFile: string, entries: FileEntry[], migrationApplied: boolean): Promise<void> {
+		const header = entries[0] as SessionHeader;
+		this.#sessionFile = path.resolve(sessionFile);
+		this.#sessionId = header.id;
+		this.#sessionName = header.title;
+		this.#titleSource = header.titleSource;
+		this.#needsFullRewriteOnNextPersist = migrationApplied;
+		await resolveBlobRefsInEntries(entries, this.#blobStore);
+		this.#fileEntries = entries;
+		this.#resetResidentTextBlobStore();
+		this.#fileEntries = this.#fileEntries.map(entry =>
+			prepareEntryForResidentSync(entry, this.#residentBlobStores()),
+		);
+		this.sanitizeLoadedOpenAIResponsesReplayMetadata();
+		this.#buildIndex();
+		this.#bumpAllRevisions();
+		this.#flushed = true;
+		this.#ensuredOnDisk = true;
+	}
+
 	/** Initialize with a new session (used by factory methods) */
 	#initNewSession(): void {
 		this.#newSessionSync();
@@ -3446,7 +3908,15 @@ export class SessionManager {
 			writer.closeSync();
 			this.#replaceSessionFileSync(tempPath, this.#sessionFile);
 		} catch (err) {
-			writer.closeSync();
+			// closeSync is now truthful and may throw; wrap the best-effort cleanup so
+			// the original error (write/close failure) is the one surfaced, not the
+			// cleanup failure. The rename above was already skipped because closeSync
+			// threw before it.
+			try {
+				writer.closeSync();
+			} catch {
+				// Best-effort cleanup of the temp writer's descriptor.
+			}
 			void this.storage.unlink(tempPath).catch(() => {});
 			throw toError(err);
 		}
@@ -3543,6 +4013,73 @@ export class SessionManager {
 		});
 		this.#disposeResidentTextBlobStore();
 		if (this.#persistError) throw this.#persistError;
+	}
+	/** Flush while open, then strictly close; retryable close skips the invalid second flush. */
+	async flushAndCloseStrict(): Promise<SessionManagerCloseOutcome> {
+		if (this.#persistWriter?.getCloseState() !== "close_failed_retryable") {
+			await this.flush();
+		}
+		return this.closeStrict();
+	}
+
+	/**
+	 * Strictly flush and close the persist writer, returning the certainty-aware close
+	 * outcome without manufacturing success. The existing {@link close} path is
+	 * preserved for best-effort callers; this seam lets strict ACP disposal prove
+	 * writer closure before any destructive operation.
+	 */
+	async closeStrict(): Promise<SessionManagerCloseOutcome> {
+		let outcome: SessionManagerCloseOutcome = { kind: "closed" };
+		await this.#queuePersistTask(async () => {
+			const writer = this.#persistWriter;
+			if (!writer) {
+				this.#flushed = true;
+				return;
+			}
+			try {
+				await writer.close();
+			} catch {
+				// Outcome is captured from the underlying writer's close state below.
+			}
+			outcome = this.#closeOutcomeFromWriter(writer);
+			if (outcome.kind === "closed") {
+				this.#flushed = true;
+				// Confirmed closed: release writer ownership.
+				this.#persistWriter = undefined;
+				this.#persistWriterPath = undefined;
+			} else if (outcome.kind === "close_unknown") {
+				// Quarantined (terminal): release ownership so no retry/finalizer
+				// touches the uncertain fd again.
+				this.#persistWriter = undefined;
+				this.#persistWriterPath = undefined;
+			}
+			// close_failed_retryable: RETAIN the writer so a later closeStrict() call
+			// can actually re-dispatch the OS close (ownership stays proven). The
+			// wrapper must not manufacture success or surrender a retryable fd.
+		});
+		// Only tear down the resident blob store on a terminal outcome; a retryable
+		// close leaves the session live for a genuine retry.
+		if (!this.#persistWriter) {
+			this.#disposeResidentTextBlobStore();
+		}
+		return outcome;
+	}
+
+	#closeOutcomeFromWriter(writer: NdjsonFileWriter): SessionManagerCloseOutcome {
+		const state = writer.getCloseState();
+		const error = writer.getCloseError();
+		switch (state) {
+			case "closed":
+				return { kind: "closed" };
+			case "close_failed_retryable":
+				return { kind: "close_failed_retryable", error: error ?? new Error("Writer close failed before dispatch") };
+			case "close_unknown":
+				return { kind: "close_unknown", error: error ?? new Error("Writer close outcome is unknown") };
+			default:
+				// "open" should not occur after close() returned, but treat defensively as
+				// a non-quiescent terminal state rather than confirmed closed.
+				return { kind: "close_unknown", error: error ?? new Error("Writer close did not dispatch") };
+		}
 	}
 
 	getCwd(): string {
@@ -3874,7 +4411,10 @@ export class SessionManager {
 			timestamp: new Date().toISOString(),
 			message,
 		};
+		associateSessionMessageEntryId(message, entry.id);
 		this.#appendEntry(entry);
+		const residentEntry = this.#byId.get(entry.id);
+		if (residentEntry?.type === "message") transferSessionMessageIdentity([message], [residentEntry.message]);
 		return entry.id;
 	}
 
@@ -4067,7 +4607,15 @@ export class SessionManager {
 		display: boolean,
 		details?: T,
 		attribution: MessageAttribution = "agent",
+		observationId?: string,
 	): string {
+		const entryId = generateId(this.#byId);
+		const stableObservationId =
+			observationId ?? (customType.startsWith("irc:") ? `session:${this.#sessionId}:entry:${entryId}` : undefined);
+		const persistedDetails =
+			stableObservationId && details && typeof details === "object" && !Array.isArray(details)
+				? ({ ...details, observationId: stableObservationId } as T)
+				: details;
 		const entry: CustomMessageEntry<T> = {
 			type: "custom_message",
 			customType,
@@ -4076,9 +4624,9 @@ export class SessionManager {
 			// Drop AgentSession-internal transient fields (allowlist in
 			// `INTERNAL_DETAILS_FIELDS`) before disk persistence. Single
 			// chokepoint covers every CustomMessage write path.
-			details: stripInternalDetailsFields(details),
+			details: stripInternalDetailsFields(persistedDetails),
 			attribution,
-			id: generateId(this.#byId),
+			id: entryId,
 			parentId: this.#leafId,
 			timestamp: new Date().toISOString(),
 		};
@@ -4496,7 +5044,12 @@ export class SessionManager {
 			return cloneSessionContext(cached);
 		}
 		this.#pathOnlyContextBuildCount++;
-		const context = buildSessionContext(this.#getActivePathEntriesForProviderContext(), this.#leafId);
+		const context = buildSessionContext(
+			this.#getActivePathEntriesForProviderContext(),
+			this.#leafId,
+			undefined,
+			this.#sessionId,
+		);
 		this.#sessionContextCache = new WeakRef(context);
 		this.#sessionContextEntryRevision = this.#entryRevision;
 		this.#sessionContextLeafRevision = this.#leafRevision;
@@ -4546,6 +5099,9 @@ export class SessionManager {
 			this.#residentBlobStoresForColdRehydrate(),
 		);
 		if (rehydrated !== materialized) this.#coldSpillReadCount += this.#countColdSpillPayloads(entry);
+		if (entry.type === "message" && rehydrated.type === "message") {
+			transferSessionMessageIdentity([entry.message], [rehydrated.message]);
+		}
 		return rehydrated;
 	}
 
@@ -4938,6 +5494,71 @@ export class SessionManager {
 	}
 
 	/**
+	 * List sessions for the resume picker without recovery or other maintenance writes.
+	 */
+	static async listForResumePickerReadOnly(
+		cwd: string,
+		sessionDir?: string,
+		storage: SessionStorage = new FileSessionStorage(),
+	): Promise<SessionInfo[]> {
+		const dirs = sessionDir ? [sessionDir] : getReadOnlyDefaultSessionDirs(cwd);
+		try {
+			const files = new Set<string>();
+			for (const dir of dirs) {
+				for (const filePath of storage.listFilesSync(dir, "*.jsonl")) files.add(filePath);
+			}
+			return await collectSessionsFromFiles([...files], storage);
+		} catch {
+			return [];
+		}
+	}
+
+	/** Inspect a selected session without acquiring write-capable ownership. */
+	static async inspectSessionTailReadOnly(
+		filePath: string,
+		storage: SessionStorage = new FileSessionStorage(),
+	): Promise<ResumeTailInspection> {
+		const inspected = inspectResumeSessionFile(filePath, storage);
+		if ("kind" in inspected) return inspected;
+		return canContinuePersistedHistory(inspected.context.messages)
+			? { kind: "resumable", identity: inspected.identity }
+			: { kind: "terminal", identity: inspected.identity };
+	}
+
+	/**
+	 * Main startup code MUST retain the consented inspection identity and branch on
+	 * the returned discriminant; an error result never creates, rewrites, or adopts
+	 * the selected path. Breadcrumb ownership begins only after `kind: "opened"`.
+	 */
+	static async openExistingStrict(
+		identity: ResumeSessionIdentity,
+		sessionDir?: string,
+		storage: SessionStorage = new FileSessionStorage(),
+	): Promise<StrictSessionOpenResult> {
+		const inspected = inspectResumeSessionFile(identity.canonicalPath, storage);
+		if ("kind" in inspected) return inspected;
+		if (!sameResumeIdentity(identity, inspected.identity)) {
+			return { kind: "error", reason: "identity-mismatch" };
+		}
+		const entries = structuredClone(inspected.entries) as FileEntry[];
+		const header = entries[0] as SessionHeader;
+		const dir = sessionDir ?? path.resolve(identity.canonicalPath, "..");
+		const manager = new SessionManager(header.cwd || getProjectDir(), dir, true, storage);
+		await manager.#hydrateExistingSession(identity.canonicalPath, entries, inspected.migrationApplied);
+		const ownershipInspection = inspectResumeSessionFile(identity.canonicalPath, storage);
+		if ("kind" in ownershipInspection) {
+			await manager.close();
+			return ownershipInspection;
+		}
+		if (!sameResumeIdentity(identity, ownershipInspection.identity)) {
+			await manager.close();
+			return { kind: "error", reason: "identity-mismatch" };
+		}
+		writeTerminalBreadcrumb(manager.cwd, identity.canonicalPath);
+		return { kind: "opened", manager };
+	}
+
+	/**
 	 * Continue the most recent session, or create new if none.
 	 * @param cwd Working directory
 	 * @param sessionDir Optional session directory. If omitted, uses default (~/.skc/agent/sessions/<encoded-cwd>/).
@@ -5014,4 +5635,153 @@ export class SessionManager {
 			return [];
 		}
 	}
+	/**
+	 * Strict raw scoped inventory for ACP authorization. Enumerates the scoped
+	 * session directory without suppressing any root/scan/lstat/read/parse/stat/
+	 * header/cwd/containment/identity failure. A failure result carries every
+	 * sanitized failure and grants zero authority — it is never reduced to a
+	 * partial candidate set. Display/global {@link list} behavior is unaffected.
+	 */
+	static inventorySessionsStrict(
+		cwd: string,
+		options?: { sessionDir?: string; storage?: SessionStorage },
+	): StrictInventoryResult {
+		const storage = options?.storage ?? new FileSessionStorage();
+		const dir = options?.sessionDir ?? SessionManager.getDefaultSessionDir(cwd, undefined, storage);
+		if (!storage.listFilesStrictSync) {
+			return {
+				kind: "failure",
+				failures: [{ kind: "scan", message: "Strict scoped session scan is unavailable", path: dir }],
+			};
+		}
+		const strictScan = storage.listFilesStrictSync.bind(storage);
+
+		let files: string[];
+		try {
+			files = strictScan(dir, "*.jsonl");
+		} catch (err) {
+			const code = (err as NodeJS.ErrnoException)?.code;
+			// Only a confirmed ENOENT proves the scoped root is genuinely absent,
+			// which is a complete (zero-candidate) inventory. Any other root/scan
+			// error (EACCES/EIO/EPERM/ENOTDIR/...) is fail-closed: it must never
+			// reduce to authoritative absence and grants zero authority. The
+			// forgiving existsSync preflight is intentionally absent — fs.existsSync
+			// collapses EACCES/EIO/EPERM onto a false return and would let a
+			// permission-denied root masquerade as a confirmed-empty directory.
+			if (code === "ENOENT") {
+				return { kind: "complete", candidates: [] };
+			}
+			void err;
+			const failureKind: StrictInventoryFailureKind =
+				code === "EACCES" || code === "EPERM" || code === "ENOTDIR" ? "root" : "scan";
+			return {
+				kind: "failure",
+				failures: [
+					{
+						kind: failureKind,
+						message:
+							failureKind === "root"
+								? "Scoped session root could not be inspected"
+								: "Scoped session directory scan failed",
+						path: dir,
+					},
+				],
+			};
+		}
+
+		const failures: StrictInventoryFailure[] = [];
+		const candidates: StrictInventoryCandidate[] = [];
+		for (const file of files) {
+			const candidate = inventoryReadCandidate(storage, file, cwd, dir);
+			if ("failures" in candidate) {
+				failures.push(...candidate.failures);
+				continue;
+			}
+			candidates.push(candidate.candidate);
+		}
+		if (failures.length > 0) {
+			return { kind: "failure", failures };
+		}
+		return { kind: "complete", candidates };
+	}
+
+	/**
+	 * Propagate the storage-layer verified hard delete bound to exact identity evidence.
+	 * Never performs ID lookup or first-match selection; the caller supplies the exact
+	 * authorization target captured from a complete strict inventory.
+	 */
+	async deleteSessionVerified(target: VerifiedSessionDeleteTarget): Promise<VerifiedSessionDeleteResult> {
+		if (!this.storage.deleteSessionVerified) {
+			throw new Error("Storage backend does not support verified session deletion");
+		}
+		return this.storage.deleteSessionVerified(target);
+	}
+}
+const strictInventoryDecoder = new TextDecoder("utf-8", { fatal: false });
+
+/** Strictly read + validate one scoped session candidate. Never suppresses a failure. */
+function inventoryReadCandidate(
+	storage: SessionStorage,
+	file: string,
+	expectedCwd: string,
+	sessionDir: string,
+): { candidate: StrictInventoryCandidate } | { failures: StrictInventoryFailure[] } {
+	const failures: StrictInventoryFailure[] = [];
+	const resolvedFile = path.resolve(file);
+	if (!pathIsWithin(path.resolve(sessionDir), resolvedFile)) {
+		return {
+			failures: [{ kind: "containment", message: "Candidate is outside the scoped session directory", path: file }],
+		};
+	}
+	if (!storage.readSnapshotSync) {
+		return { failures: [{ kind: "read", message: "Storage backend cannot read exact bytes", path: file }] };
+	}
+	let snapshot: SessionStorageSnapshot;
+	try {
+		snapshot = storage.readSnapshotSync(file);
+	} catch (err) {
+		const code = (err as NodeJS.ErrnoException)?.code;
+		if (code === "ELOOP" || code === "SYMLINK") {
+			failures.push({ kind: "lstat", message: "Candidate is a symlink", path: file });
+		} else {
+			failures.push({ kind: "read", message: "Candidate could not be read", path: file });
+		}
+		return { failures };
+	}
+	if (!snapshot.stat.isFile) {
+		failures.push({ kind: "lstat", message: "Candidate is not a regular file", path: file });
+		return { failures };
+	}
+	const newline = snapshot.bytes.indexOf(0x0a);
+	const headerBytes = newline === -1 ? snapshot.bytes : snapshot.bytes.subarray(0, newline);
+	let header: Record<string, unknown> | undefined;
+	try {
+		const text = strictInventoryDecoder.decode(headerBytes).trim();
+		const value: unknown = text ? JSON.parse(text) : undefined;
+		header = typeof value === "object" && value !== null ? (value as Record<string, unknown>) : undefined;
+	} catch {
+		header = undefined;
+	}
+	if (!header) {
+		failures.push({ kind: "parse", message: "Candidate header is not valid JSON", path: file });
+		return { failures };
+	}
+	if (header.type !== "session") {
+		failures.push({ kind: "header", message: "Candidate header is not a session header", path: file });
+		return { failures };
+	}
+	if (typeof header.id !== "string" || header.id.length === 0) {
+		failures.push({ kind: "identity", message: "Candidate header is missing a session id", path: file });
+		return { failures };
+	}
+	if (typeof header.cwd !== "string") {
+		failures.push({ kind: "cwd", message: "Candidate header is missing a cwd", path: file });
+		return { failures };
+	}
+	const canonicalHeaderCwd = resolveEquivalentPath(header.cwd);
+	if (canonicalHeaderCwd !== resolveEquivalentPath(expectedCwd)) {
+		failures.push({ kind: "cwd", message: "Candidate cwd does not match the scoped workspace", path: file });
+		return { failures };
+	}
+	return { candidate: { path: resolvedFile, id: header.id, cwd: header.cwd, identity: snapshot.stat } };
 }

@@ -15,6 +15,7 @@
  * RPC server can route `negotiate_unattended` + `workflow_gate_response` here.
  */
 import type { Model } from "@sayknow-cli/ai";
+import type { AskSelectedAckOutcome } from "../../../tools";
 import type {
 	RpcCommand,
 	RpcUnattendedAccepted,
@@ -30,7 +31,53 @@ import {
 	type UnattendedAuditEvent,
 	UnattendedRunController,
 } from "./unattended-run-controller";
-import { type GateStore, MemoryGateStore, type OpenGateInput, WorkflowGateBroker } from "./workflow-gate-broker";
+import {
+	type GateStore,
+	MemoryGateStore,
+	type OpenGateInput,
+	type PersistedAckPolicy,
+	type PersistedGate,
+	type PersistedSemanticDisposition,
+	WorkflowGateBroker,
+} from "./workflow-gate-broker";
+
+export interface WorkflowGateTerminalController {
+	completeGateInteractions(gateId: string): void | Promise<void>;
+	cancelGateInteractions(gateId: string, reason: string): void | Promise<void>;
+}
+
+export interface WorkflowGateTerminalEvent {
+	gateId: string;
+	kind: "accepted" | "cancelled";
+	origin?: "rpc" | "bridge" | "other" | "telegram_notification";
+	reason?: string;
+}
+
+export interface NotificationGateResolutionOptions {
+	interactionActionId: string;
+	replyReceiptId: string;
+	answerJson: string;
+	idempotencyKey?: string;
+	requestSelectedAck(input: {
+		replyReceiptId: string;
+		actionId: string;
+		commitKey: string;
+		daemonDeadlineAt: number;
+		hostTimeoutMs: number;
+	}): Promise<AskSelectedAckOutcome>;
+	resolveClaim(): void;
+	closeClaimInvalid(reason: string): void;
+}
+
+export interface AskSelectedAckRecoveryParticipant {
+	requestRecoveredAskSelectedAck(input: {
+		sessionId: string;
+		actionId: string;
+		commitKey: string;
+		deadlineAt: number;
+		hostTimeoutMs: number;
+	}): Promise<AskSelectedAckOutcome>;
+}
 
 /**
  * RPC commands that perform agent/tool work and therefore consume one unit of the
@@ -66,7 +113,13 @@ export interface WorkflowGateEmitter {
 	 */
 	onGateEmitted?(listener: (gate: RpcWorkflowGate) => void): () => void;
 	resolveGate?(response: RpcWorkflowGateResponse): Promise<RpcWorkflowGateResolution>;
+	resolveGateFromNotification?(
+		response: RpcWorkflowGateResponse,
+		options: NotificationGateResolutionOptions,
+	): Promise<RpcWorkflowGateResolution>;
+	registerGateTerminalController?(controller: WorkflowGateTerminalController): () => void;
 	listPendingGates?(): RpcWorkflowGate[];
+	setAckRecoveryParticipant?(participant: AskSelectedAckRecoveryParticipant | null): void;
 }
 
 export interface UnattendedSessionOptions {
@@ -91,6 +144,12 @@ export class UnattendedSessionControlPlane implements RpcUnattendedControlPlane,
 	readonly #pending = new Map<string, { resolve: (answer: unknown) => void; reject: (err: Error) => void }>();
 	readonly #earlyAnswers = new Map<string, unknown>();
 	readonly #gateListeners = new Set<(gate: RpcWorkflowGate) => void>();
+	#terminalController: WorkflowGateTerminalController | undefined;
+	#brokerReady = false;
+	#recoveryPromise: Promise<void> | undefined;
+	#disposed = false;
+	#recoveryParticipant: AskSelectedAckRecoveryParticipant | undefined;
+	#participantReady = Promise.withResolvers<void>();
 
 	constructor(private readonly opts: UnattendedSessionOptions) {}
 
@@ -106,6 +165,38 @@ export class UnattendedSessionControlPlane implements RpcUnattendedControlPlane,
 
 	get controller(): UnattendedRunController | undefined {
 		return this.#controller;
+	}
+
+	registerGateTerminalController(controller: WorkflowGateTerminalController): () => void {
+		if (this.#terminalController && this.#terminalController !== controller) {
+			throw new Error("a workflow gate terminal controller is already registered");
+		}
+		this.#terminalController = controller;
+		return () => {
+			if (this.#terminalController === controller) this.#terminalController = undefined;
+		};
+	}
+
+	setAckRecoveryParticipant(participant: AskSelectedAckRecoveryParticipant | null): void {
+		this.#recoveryParticipant = participant ?? undefined;
+		if (participant) this.#participantReady.resolve();
+		void this.startRecoveryOnce();
+	}
+
+	async #completeGateInteractions(gateId: string): Promise<void> {
+		try {
+			await this.#terminalController?.completeGateInteractions(gateId);
+		} catch (error) {
+			this.opts.audit?.({ event: "gate_interaction_completion_failed", gate_id: gateId, error: String(error) });
+		}
+	}
+
+	async #cancelGateInteractions(gateId: string, reason: string): Promise<void> {
+		try {
+			await this.#terminalController?.cancelGateInteractions(gateId, reason);
+		} catch (error) {
+			this.opts.audit?.({ event: "gate_interaction_cancellation_failed", gate_id: gateId, error: String(error) });
+		}
 	}
 
 	negotiate(declaration: RpcUnattendedDeclaration): RpcUnattendedAccepted {
@@ -140,7 +231,11 @@ export class UnattendedSessionControlPlane implements RpcUnattendedControlPlane,
 				// openGate returns and the caller starts awaiting.
 				this.#earlyAnswers.set(gate.gate_id, answer);
 			},
+			finalizeAccepted: record => this.#finalizeAcceptedGate(record),
 		});
+		this.#brokerReady = true;
+		void this.startRecoveryOnce();
+
 		return {
 			run_id: this.opts.runId,
 			actor: controller.actor,
@@ -190,10 +285,201 @@ export class UnattendedSessionControlPlane implements RpcUnattendedControlPlane,
 	}
 
 	resolveGate(response: RpcWorkflowGateResponse): Promise<RpcWorkflowGateResolution> {
+		if (this.#disposed) return Promise.reject(new Error("unattended session is disposed"));
 		if (!this.#broker) {
 			return Promise.reject(new Error("workflow gates are not available until unattended mode is negotiated"));
 		}
 		return this.#broker.resolve(response);
+	}
+
+	async resolveGateFromNotification(
+		response: RpcWorkflowGateResponse,
+		options: NotificationGateResolutionOptions,
+	): Promise<RpcWorkflowGateResolution> {
+		let claimSettled = false;
+		const resolveClaim = () => {
+			if (claimSettled) return;
+			claimSettled = true;
+			try {
+				options.resolveClaim();
+			} catch (error) {
+				this.opts.audit?.({
+					event: "notification_claim_resolution_failed",
+					gate_id: response.gate_id,
+					error: String(error),
+				});
+			}
+		};
+		const closeClaimInvalid = (reason: string) => {
+			if (claimSettled) return;
+			claimSettled = true;
+			try {
+				options.closeClaimInvalid(reason);
+			} catch (error) {
+				this.opts.audit?.({
+					event: "notification_claim_close_failed",
+					gate_id: response.gate_id,
+					error: String(error),
+				});
+			}
+		};
+		if (this.#disposed) {
+			closeClaimInvalid("unattended_session_disposed");
+			throw new Error("unattended session is disposed");
+		}
+		if (!this.#broker) {
+			closeClaimInvalid("workflow_gate_unavailable");
+			throw new Error("workflow gates are not available until unattended mode is negotiated");
+		}
+		try {
+			JSON.parse(options.answerJson);
+		} catch {
+			closeClaimInvalid("invalid_structured_answer");
+			return {
+				gate_id: response.gate_id,
+				status: "rejected",
+				answer_hash: "",
+				resolved_at: new Date().toISOString(),
+				error: this.#broker.validationError(response.gate_id, "json_parse", "invalid structured answer"),
+			};
+		}
+		let disposition: PersistedSemanticDisposition;
+		try {
+			disposition = this.#broker.classifyDisposition(response.gate_id, response.answer);
+		} catch (error) {
+			closeClaimInvalid(error instanceof Error ? error.message : "invalid_answer");
+			return {
+				gate_id: response.gate_id,
+				status: "rejected",
+				answer_hash: "",
+				resolved_at: new Date().toISOString(),
+				error: this.#broker.validationError(
+					response.gate_id,
+					"semantic_disposition",
+					error instanceof Error ? error.message : "invalid answer",
+				),
+			};
+		}
+
+		const commitKey = `${response.gate_id}:${options.idempotencyKey ?? options.replyReceiptId}`;
+		const ackPolicy: PersistedAckPolicy =
+			disposition === "commit"
+				? {
+						kind: "telegram_selected_v1",
+						commitKey,
+						actionId: options.interactionActionId,
+						state: "pending",
+						updatedAt: new Date().toISOString(),
+					}
+				: { kind: "none", reason: "semantic_noncommit" };
+		let resolution: RpcWorkflowGateResolution;
+		try {
+			resolution = await this.#broker.resolve(response, {
+				resolutionOrigin: { kind: "telegram_notification", interactionActionId: options.interactionActionId },
+				ackPolicy,
+				semanticDisposition: disposition,
+
+				beforeAdvance: async () => {
+					if (ackPolicy.kind === "telegram_selected_v1") {
+						this.#broker?.updateAckPolicy(response.gate_id, {
+							...ackPolicy,
+							state: "attempt_started",
+							updatedAt: new Date().toISOString(),
+						});
+						let outcome: AskSelectedAckOutcome;
+						try {
+							outcome = await options.requestSelectedAck({
+								replyReceiptId: options.replyReceiptId,
+								actionId: options.interactionActionId,
+								commitKey,
+								daemonDeadlineAt: Date.now() + 8_000,
+								hostTimeoutMs: 10_000,
+							});
+						} catch {
+							outcome = { status: "unknown", reason: "host_timeout" };
+						}
+						this.#broker?.updateAckPolicy(response.gate_id, {
+							...ackPolicy,
+							state: outcome.status,
+							outcome,
+							updatedAt: new Date().toISOString(),
+						});
+					}
+					resolveClaim();
+				},
+			});
+		} catch (error) {
+			closeClaimInvalid(error instanceof Error ? error.message : "invalid_answer");
+			throw error;
+		}
+		if (resolution.status === "accepted") resolveClaim();
+		else closeClaimInvalid(resolution.error?.code ?? "invalid_answer");
+		return resolution;
+	}
+
+	async startRecoveryOnce(options: { participantGraceMs?: number } = {}): Promise<void> {
+		if (this.#disposed || !this.#brokerReady) return;
+		if (this.#recoveryPromise) return this.#recoveryPromise;
+		this.#recoveryPromise = (async () => {
+			if (!this.#recoveryParticipant) {
+				const grace = options.participantGraceMs ?? 2_000;
+				await Promise.race([
+					this.#participantReady.promise,
+					new Promise<void>(resolve => setTimeout(resolve, grace)),
+				]);
+			}
+			if (!this.#disposed) await this.#broker?.recover();
+		})();
+		return this.#recoveryPromise;
+	}
+
+	async #finalizeAcceptedGate(record: PersistedGate): Promise<void> {
+		const policy = record.ackPolicy;
+		if (policy?.kind === "telegram_selected_v1" && policy.state === "pending") {
+			let outcome: AskSelectedAckOutcome;
+			const participant = this.#recoveryParticipant;
+			if (!participant || !this.opts.sessionId) {
+				outcome = { status: "failed", reason: "no_participant" };
+			} else {
+				this.#broker?.updateAckPolicy(record.gate.gate_id, {
+					...policy,
+					state: "attempt_started",
+					updatedAt: new Date().toISOString(),
+				});
+				try {
+					outcome = await participant.requestRecoveredAskSelectedAck({
+						sessionId: this.opts.sessionId,
+						actionId: policy.actionId,
+						commitKey: policy.commitKey,
+						deadlineAt: Date.now() + 8_000,
+						hostTimeoutMs: 10_000,
+					});
+				} catch {
+					outcome = { status: "unknown", reason: "host_timeout" };
+				}
+			}
+			this.#broker?.updateAckPolicy(record.gate.gate_id, {
+				...policy,
+				state: outcome.status,
+				outcome,
+				updatedAt: new Date().toISOString(),
+			});
+		}
+		if (policy?.kind === "telegram_selected_v1" && policy.state === "attempt_started") {
+			this.#broker?.updateAckPolicy(record.gate.gate_id, {
+				...policy,
+				state: "unknown",
+				outcome: { status: "unknown", reason: "shutdown" },
+				updatedAt: new Date().toISOString(),
+			});
+		}
+		await this.#completeGateInteractions(record.gate.gate_id);
+	}
+
+	dispose(reason = "session_shutdown"): void {
+		this.#disposed = true;
+		for (const gateId of this.#pending.keys()) void this.#cancelGateInteractions(gateId, reason);
+		this.#rejectAllPending(new Error(`unattended session disposed: ${reason}`));
 	}
 
 	listPendingGates(): import("../../rpc/rpc-types").RpcWorkflowGate[] {
@@ -206,6 +492,7 @@ export class UnattendedSessionControlPlane implements RpcUnattendedControlPlane,
 	}
 
 	emitGate(input: OpenGateInput): Promise<unknown> {
+		if (this.#disposed) return Promise.reject(new Error("unattended session is disposed"));
 		if (!this.#broker) {
 			return Promise.reject(new Error("cannot emit a workflow gate before unattended mode is negotiated"));
 		}

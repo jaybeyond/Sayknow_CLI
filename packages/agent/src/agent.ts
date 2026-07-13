@@ -54,6 +54,16 @@ function assertUserImagePlaceholdersHavePayload(messages: readonly AgentMessage[
 }
 
 /**
+ * Whether persisted history ends at a point where a new model turn can resume.
+ * Assistant-ended histories require an in-memory queued message and are handled
+ * separately by `Agent.continue()`.
+ */
+export function canContinuePersistedHistory(messages: readonly AgentMessage[]): boolean {
+	const lastMessage = messages.at(-1);
+	return lastMessage !== undefined && lastMessage.role !== "assistant";
+}
+
+/**
  * Default convertToLlm: Keep only LLM-compatible messages, convert attachments.
  */
 function defaultConvertToLlm(messages: AgentMessage[]): Message[] {
@@ -1169,6 +1179,10 @@ export class Agent {
 			}
 
 			throw new Error("Cannot continue from message role: assistant");
+		}
+
+		if (!canContinuePersistedHistory(messages)) {
+			throw new Error("No messages to continue from");
 		}
 
 		await this.#runLoop(undefined);

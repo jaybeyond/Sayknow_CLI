@@ -50,6 +50,29 @@ describe("notifications daemon config reachability (rich)", () => {
 		const cfg = cfgFromRaw({ notifications: { telegram: { richFinal: { enabled: false, topicId: "9001" } } } });
 		expect(cfg.rich).toEqual({ enabled: true });
 	});
+
+	test("topics.nameTemplate reaches getNotificationConfig from a raw YAML object", () => {
+		const cfg = cfgFromRaw({
+			notifications: {
+				enabled: true,
+				telegram: {
+					botToken: "123456:secret",
+					chatId: "42",
+					topics: { nameTemplate: "{title} · {repo}/{branch}" },
+				},
+			},
+		});
+		expect(cfg.topics.nameTemplate).toBe("{title} · {repo}/{branch}");
+	});
+
+	test("missing topics.nameTemplate is undefined", () => {
+		expect(cfgFromRaw({ notifications: { enabled: true } }).topics.nameTemplate).toBeUndefined();
+	});
+
+	test("a non-string nameTemplate is coerced away", () => {
+		const cfg = cfgFromRaw({ notifications: { telegram: { topics: { nameTemplate: 42 } } } });
+		expect(cfg.topics.nameTemplate).toBeUndefined();
+	});
 });
 
 describe("lightweight daemon settings set() persists via lock + partial merge", () => {

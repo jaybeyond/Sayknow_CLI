@@ -34,6 +34,7 @@ You can reach other live agents via the `irc` tool. Your id is `{{ircSelfId}}`. 
 {{ircPeers}}
 
 Use `irc` only when you need a quick answer from a peer; do not use it for long-form content. Address peers by id or use `"all"` to broadcast.
+Use `irc` to DM `0-Main` on unexpected state instead of guessing; coordinate before changing shared files.
 {{/if}}
 [/COOP]
 

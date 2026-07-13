@@ -1,7 +1,7 @@
 {
 	"type": "module",
 	"name": "@sayknow-cli/bridge-client",
-	"version": "0.3.12",
+	"version": "0.3.13",
 	"description": "TypeScript client SDK for the SKC backend bridge protocol",
 	"homepage": "https://sayknow-cli.com",
 	"author": "jaybeyond",
@@ -23,7 +23,7 @@
 	"types": "./src/index.ts",
 	"scripts": {
 		"check": "biome check . && bun run check:types",
-		"check:types": "tsgo -p tsconfig.json --noEmit",
+		"check:types": "tsc -p tsconfig.json --noEmit",
 		"lint": "biome lint .",
 		"test": "bun test",
 		"fix": "biome check --write --unsafe .",

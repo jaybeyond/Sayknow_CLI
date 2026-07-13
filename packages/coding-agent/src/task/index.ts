@@ -34,12 +34,14 @@ import {
 	type ForkContextMode,
 	type ForkContextPolicy,
 	getTaskSchema,
+	hasCompleteAggregateUsageCostBreakdown,
 	type SingleResult,
 	type TaskItem,
 	type TaskParams,
 	type TaskToolDetails,
 	type TaskToolSchemaInstance,
 } from "./types";
+
 // Import review tools for side effects (registers subagent tool handlers)
 import "../tools/review";
 import type { LocalProtocolOptions } from "../internal-urls";
@@ -53,6 +55,7 @@ import { getTaskIdValidationError, validateAllocatedTaskId } from "./id";
 import { AgentOutputManager } from "./output-manager";
 import { mapWithConcurrencyLimit, Semaphore } from "./parallel";
 import { assertNoRawTaskFields, buildTaskReceipt, buildTaskRoiSummary } from "./receipt";
+
 import { renderResult, renderCall as renderTaskCall } from "./render";
 import { reconcileSpawnRoi } from "./roi-reconciliation";
 import { getTaskSimpleModeCapabilities, type TaskSimpleMode } from "./simple-mode";
@@ -1316,6 +1319,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 						},
 						authStorage: this.session.authStorage,
 						modelRegistry: this.session.modelRegistry,
+						agentRegistry: this.session.agentRegistry,
 						settings: this.session.settings,
 						inheritedServiceTier: this.session.serviceTier,
 						contextFiles,
@@ -1379,6 +1383,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 						},
 						authStorage: this.session.authStorage,
 						modelRegistry: this.session.modelRegistry,
+						agentRegistry: this.session.agentRegistry,
 						settings: this.session.settings,
 						inheritedServiceTier: this.session.serviceTier,
 						contextFiles,
@@ -1529,6 +1534,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			// Aggregate usage from executor results (already accumulated incrementally)
 			const aggregatedUsage = createUsageTotals();
 			let hasAggregatedUsage = false;
+
 			for (const result of results) {
 				if (result.usage) {
 					addUsageTotals(aggregatedUsage, result.usage);
@@ -1734,6 +1740,8 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				results: receipts,
 				totalDurationMs: totalDuration,
 				usage: hasAggregatedUsage ? aggregatedUsage : undefined,
+				usageCostBreakdownComplete:
+					hasAggregatedUsage && hasCompleteAggregateUsageCostBreakdown(results) ? true : undefined,
 				forkContextClonedTokens: forkContextClonedTokens > 0 ? forkContextClonedTokens : undefined,
 				roiSummary,
 				roiReconciliation,

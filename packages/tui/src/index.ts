@@ -11,6 +11,7 @@ export * from "./components/image";
 export * from "./components/input";
 export * from "./components/loader";
 export * from "./components/markdown";
+export * from "./components/sayknow-pet";
 export * from "./components/select-list";
 export * from "./components/settings-list";
 export * from "./components/spacer";

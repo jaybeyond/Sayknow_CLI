@@ -1,6 +1,6 @@
 --- a/packages/coding-agent/src/config/settings-schema.ts
 +++ b/packages/coding-agent/src/config/settings-schema.ts
-@@ -37,7 +37,8 @@
+@@ -38,7 +38,8 @@
  	| "editing"
  	| "tools"
  	| "tasks"
@@ -10,7 +10,7 @@
  
  /** Tab display metadata - icon is resolved via theme.symbol() */
  export type TabMetadata = { label: string; icon: `tab.${string}` };
-@@ -53,6 +54,7 @@
+@@ -54,6 +55,7 @@
  	"tools",
  	"tasks",
  	"providers",
@@ -18,7 +18,7 @@
  ];
  
  /** Tab display metadata - icon is a symbol key from theme.ts (tab.*) */
-@@ -66,6 +68,7 @@
+@@ -67,6 +69,7 @@
  	tools: { label: "Tools", icon: "tab.tools" },
  	tasks: { label: "Tasks", icon: "tab.tasks" },
  	providers: { label: "Providers", icon: "tab.providers" },
@@ -26,7 +26,7 @@
  };
  
  /** Status line segment identifiers */
-@@ -84,6 +87,7 @@
+@@ -85,6 +88,7 @@
  	| "token_total"
  	| "token_rate"
  	| "cost"
@@ -34,7 +34,7 @@
  	| "context_pct"
  	| "context_total"
  	| "time_spent"
-@@ -409,7 +413,7 @@
+@@ -416,7 +420,7 @@
  	// Theme
  	"theme.dark": {
  		type: "string",
@@ -43,7 +43,7 @@
  		ui: {
  			tab: "appearance",
  			label: "Dark Theme",
-@@ -445,6 +449,27 @@
+@@ -452,6 +456,27 @@
  		},
  	},
  
@@ -71,7 +71,7 @@
  	colorBlindMode: {
  		type: "boolean",
  		default: false,
-@@ -1230,7 +1255,7 @@
+@@ -1257,7 +1282,7 @@
  
  	"starReminder.enabled": {
  		type: "boolean",
@@ -80,7 +80,7 @@
  		ui: {
  			tab: "interaction",
  			label: "GitHub Star Reminder",
-@@ -3196,6 +3221,183 @@
+@@ -3233,6 +3258,183 @@
  	"thinkingBudgets.xhigh": { type: "number", default: 32768 },
  
  	"thinkingBudgets.max": { type: "number", default: 65536 },
@@ -264,7 +264,7 @@
  } as const;
  
  // ═══════════════════════════════════════════════════════════════════════════
-@@ -3430,6 +3632,35 @@
+@@ -3470,6 +3672,35 @@
  	daemon: {
  		idleTimeoutMs: number;
  	};
@@ -300,7 +300,7 @@
  }
  
  /** Map group prefix -> typed settings interface */
-@@ -3450,6 +3681,7 @@
+@@ -3490,6 +3721,7 @@
  	modelTags: ModelTagsSettings;
  	cycleOrder: string[];
  	shellMinimizer: ShellMinimizerSettings;
