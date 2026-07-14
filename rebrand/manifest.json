@@ -48,7 +48,8 @@
     ".github/actions/build-native/action.yml",
     "scripts/check-rust-scope.ts",
     "scripts/ci-release-publish.ts",
-    "scripts/release-evidence.ts"
+    "scripts/release-evidence.ts",
+    "packages/tui/src/tui.ts"
   ],
   "regenerate": [
     "bun.lock",

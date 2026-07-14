@@ -2182,16 +2182,25 @@ export class TUI extends Container {
 			this.#previousHeight = height;
 		};
 
-		const viewportRepaint = (reason: string): void => {
+		const viewportRepaint = (reason: string, absoluteClear = false): void => {
 			this.#fullRedrawCount += 1;
 			if (renderMetrics.enabled) renderMetrics.recordFullRedraw(reason);
 			const nextViewportTop = Math.max(0, newLines.length - height);
-			const currentScreenRow = Math.max(0, Math.min(height - 1, hardwareCursorRow - prevViewportTop));
 			let buffer = "\x1b[?2026h";
-			if (currentScreenRow > 0) {
-				buffer += `\x1b[${currentScreenRow}A`;
+			if (absoluteClear) {
+				// A width reflow under a terminal multiplexer re-wraps the on-screen rows to
+				// the new width before SIGWINCH fires, so cursor-relative row math (from the
+				// old width) lands on the wrong physical row and corrupts the repaint. Clear
+				// the visible screen and repaint from absolute home; skip 3J so scrollback
+				// history is preserved.
+				buffer += "\x1b[2J\x1b[H";
+			} else {
+				const currentScreenRow = Math.max(0, Math.min(height - 1, hardwareCursorRow - prevViewportTop));
+				if (currentScreenRow > 0) {
+					buffer += `\x1b[${currentScreenRow}A`;
+				}
+				buffer += "\r";
 			}
-			buffer += "\r";
 			for (let screenRow = 0; screenRow < height; screenRow++) {
 				if (screenRow > 0) buffer += "\r\n";
 				buffer += "\x1b[2K";
@@ -2253,13 +2262,22 @@ export class TUI extends Container {
 
 		// Width changes always need a full re-render because wrapping changes.
 		if (widthChanged) {
+			// A forced render (requestRender(true)) resets #previousWidth to -1: that is a
+			// *fake* width change (the terminal never reflowed), so it keeps the cheap
+			// cursor-relative repaint. A *real* width change (a valid prior width that
+			// differs) means the multiplexer already re-wrapped the on-screen rows,
+			// invalidating cursor-relative row math, so it needs the absolute clear.
+			const realWidthChange = this.#previousWidth > 0 && this.#previousWidth !== width;
 			logRedraw(`terminal width changed (${this.#previousWidth} -> ${width})`);
 			if (useViewportRepaintPath(this.terminal)) {
 				// In viewport-repaint sessions a full replay can either pile the transcript
 				// back onto scrollback (tmux/screen) or visibly jump to the transcript top
-				// (Windows Terminal). Repaint the viewport only, mirroring the height-change
-				// branch and neutralizing fake width changes from requestRender(true).
-				viewportRepaint(`terminal width changed (${this.#previousWidth} -> ${width})`);
+				// (Windows Terminal). For a real width change the reflow invalidates
+				// cursor-relative math, so clear the visible screen and repaint the viewport
+				// from absolute home (absoluteClear) — fixing the corruption without replaying
+				// the whole transcript (no scrollback storm). A fake (force) width change
+				// keeps the in-place relative repaint.
+				viewportRepaint(`terminal width changed (${this.#previousWidth} -> ${width})`, realWidthChange);
 			} else {
 				fullRender(true, "terminal width changed");
 			}
