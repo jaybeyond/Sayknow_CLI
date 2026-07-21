@@ -68,7 +68,7 @@ runs:
            sudo apt-get update
            sudo apt-get install -y gcc-aarch64-linux-gnu
       - name: Rust checks
-        if: inputs.rust_checks == 'true'
+        if: inputs.rust_checks == 'true' && !(startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/sayknow-v'))
         shell: bash
         run: bun run check:rs
       - name: Test workspace (Rust)

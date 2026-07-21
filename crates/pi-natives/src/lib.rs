@@ -57,7 +57,6 @@ pub mod text;
 pub(crate) mod utils;
 pub mod workspace;
 
-
 use napi_derive::napi;
 
 /// Version sentinel — exists solely so the JS loader can prove at load time
