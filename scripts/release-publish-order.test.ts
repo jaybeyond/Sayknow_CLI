@@ -58,6 +58,15 @@ function canonicalEvidenceRecords(): PackageEvidenceRecord[] {
 	return PUBLIC_PACKAGE_DEFINITIONS.map(evidenceRecord);
 }
 
+function workflowJob(workflow: string, name: string): string {
+	const marker = `   ${name}:`;
+	const start = workflow.indexOf(marker);
+	if (start === -1) throw new Error(`Missing workflow job ${name}`);
+	const remainder = workflow.slice(start + marker.length);
+	const nextJob = remainder.search(/\n   [a-z][a-z0-9_]*:/u);
+	return workflow.slice(start, nextJob === -1 ? workflow.length : start + marker.length + nextJob);
+}
+
 describe("unscoped sayknow-cli package publication", () => {
 	test("manifest exposes skc and depends on the scoped CLI package", async () => {
 		const aliasManifest = await readManifest("packages/sayknow-cli");
@@ -92,11 +101,14 @@ describe("unscoped sayknow-cli package publication", () => {
 
 	test("release publish order publishes the alias after its scoped dependency", async () => {
 		const releaseScript = await Bun.file(path.join(repoRoot, "scripts/ci-release-publish.ts")).text();
+		const bridgeClientIndex = releaseScript.indexOf('dir: "packages/bridge-client"');
 		const codingAgentIndex = releaseScript.indexOf('dir: "packages/coding-agent"');
 		const aliasIndex = releaseScript.indexOf('dir: "packages/sayknow-cli"');
 
 		expect(codingAgentIndex).toBeGreaterThan(-1);
 		expect(aliasIndex).toBeGreaterThan(codingAgentIndex);
+		expect(bridgeClientIndex).toBeGreaterThan(-1);
+		expect(bridgeClientIndex).toBeLessThan(codingAgentIndex);
 	});
 
 	test("native platform packages publish before the stable loader package", () => {
@@ -291,6 +303,7 @@ describe("immutable stable release contracts", () => {
 		const evidencedDirs = PUBLIC_PACKAGE_DEFINITIONS.map(definition => definition.dir).sort();
 
 		expect(PUBLIC_PACKAGE_DEFINITIONS).toHaveLength(14);
+		expect(publishPackages).toHaveLength(14);
 		expect(publishedDirs).toEqual(evidencedDirs);
 	});
 
@@ -416,7 +429,48 @@ describe("native release binary coverage", () => {
 		expect(workflow).toContain("binary_path: packages/coding-agent/binaries/skc-darwin-x64");
 		expect(workflow).toContain("{ os: macos-14, platform: darwin, arch: arm64 }");
 		expect(workflow).toContain("target_id: darwin-arm64");
-		expect(workflow).toContain("pattern: pi-natives-${{ matrix.platform }}-${{ matrix.arch }}*-h${{ needs.rust-hash.outputs.hash }}");
+		expect(workflow).toContain("pattern: pi-natives-${{ matrix.platform }}-${{ matrix.arch }}*");
+	});
+
+	test("tag publication builds natives + binaries then publishes npm and the GitHub Release", async () => {
+		const workflow = await Bun.file(path.join(repoRoot, ".github/workflows/ci.yml")).text();
+		const native = workflowJob(workflow, "native");
+		const binaries = workflowJob(workflow, "binaries");
+		const publish = workflowJob(workflow, "publish");
+
+		// Tag-only jobs are self-contained: no dependency on a separate main CI run.
+		for (const job of [native, binaries, publish]) {
+			expect(job).toContain("if: ${{ startsWith(github.ref, 'refs/tags/v') }}");
+		}
+		expect(workflow).not.toContain("release_source_verify");
+		expect(workflow).not.toContain("verify exact source SHA passed a successful main CI run");
+
+		// Binaries wait on natives; publish waits on both.
+		expect(binaries).toContain("needs: [native]");
+		expect(publish).toContain("needs: [native, binaries]");
+
+		// Publish uses the proven evidence-based publish script in one job.
+		expect(publish).toContain("--prepare-evidence --evidence-dir");
+		expect(publish).toContain("--publish-from-evidence");
+		expect(publish).toContain("--release-serialization-key sayknow-production-release");
+		expect(publish).toContain("NPM_TOKEN: ${{ secrets.NPM_TOKEN }}");
+
+		// Publish cuts the GitHub Release directly (no separate draft/finalize dance).
+		expect(publish).toContain("softprops/action-gh-release");
+		expect(publish).toContain("draft: false");
+		expect(publish).toContain("files: release-binaries/skc-*");
+
+		// The paranoid multi-job evidence/verify chain is gone.
+		for (const removed of [
+			"release_github_draft",
+			"release_npm_expected",
+			"release_github_final_evidence",
+			"release_github_verify",
+			"release_github_finalize",
+			"release_verify_only",
+		]) {
+			expect(workflow).not.toContain(`${removed}:`);
+		}
 	});
 
 	test("linux native platform packages declare their glibc requirement", async () => {
@@ -447,7 +501,9 @@ describe("native release binary coverage", () => {
 	test("install tarball smoke includes linux x64 optional natives package", async () => {
 		const installer = await Bun.file(path.join(repoRoot, "scripts/install-tests/run-ci.sh")).text();
 		expect(installer).toContain("stage_linux_x64_optional_package");
-		expect(installer).toContain("for pkg in utils natives-linux-x64 natives ai agent tui stats coding-agent sayknow-cli");
+		expect(installer).toContain(
+			"for pkg in utils natives-linux-x64 natives ai agent bridge-client tui stats coding-agent sayknow-cli",
+		);
 		expect(installer).toContain("@sayknow-cli/natives-linux-x64");
 		expect(installer).toContain("sayknow-cli-natives-[0-9]*.tgz");
 	});

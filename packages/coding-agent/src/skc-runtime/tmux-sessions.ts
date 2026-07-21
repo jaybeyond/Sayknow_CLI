@@ -3,6 +3,7 @@ import * as crypto from "node:crypto";
 import * as fsSync from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { readLinuxProcStartTime, readLinuxProcStartTimeSync } from "./linux-proc";
 import { resolveSkcTmuxBinary } from "./psmux-detect";
 import { tmuxRuntimeSessionPath } from "./session-layout";
 import {
@@ -49,6 +50,7 @@ import {
 	type TmuxOwnerIsolationExecutionResult,
 	type TmuxServerProof,
 } from "./tmux-owner-isolation";
+import { buildWindowsPowerShellInnerCommand } from "./windows-powershell-command";
 
 export interface SkcTmuxSessionStatus {
 	name: string;
@@ -127,6 +129,10 @@ export interface ForceCloseOwnerDependencies {
 
 const FORCE_CLOSE_VERDICT_TIMEOUT_MS = 5_000;
 const FORCE_CLOSE_VERDICT_POLL_MS = 50;
+
+export interface CreateSkcTmuxSessionOptions {
+	platform?: NodeJS.Platform;
+}
 
 export type CreateOwnerIsolationTestDependencies = {
 	probe?: Partial<OwnerIsolationProbeSync>;
@@ -354,15 +360,19 @@ export function statusSkcTmuxSession(sessionName: string, env: NodeJS.ProcessEnv
 	throw new Error(`skc_tmux_session_not_found:${sessionName}`);
 }
 
-export function createSkcTmuxSession(env: NodeJS.ProcessEnv = process.env): SkcTmuxSessionStatus {
-	const tmuxCommand = resolveSkcTmuxCommand(env);
+export function createSkcTmuxSession(
+	env: NodeJS.ProcessEnv = process.env,
+	options: CreateSkcTmuxSessionOptions = {},
+): SkcTmuxSessionStatus {
+	const platform = options.platform ?? process.platform;
+	const tmuxCommand = resolveSkcTmuxCommand(env, platform);
 	const sessionName = buildSkcTmuxSessionName(env);
 	const cwd = process.cwd();
 	const sessionId = env[SKC_COORDINATOR_SESSION_ID_ENV]?.trim() || sessionName;
 	const stateFile =
 		env[SKC_COORDINATOR_SESSION_STATE_FILE_ENV]?.trim() ||
 		tmuxRuntimeSessionPath(cwd, env.SKC_SESSION_ID?.trim() || sessionId, buildSkcTmuxSessionSlug(sessionName));
-	const stateDir = path.dirname(stateFile);
+	const stateDir = (platform === "win32" ? path.win32 : path).dirname(stateFile);
 	const generation = crypto.randomUUID();
 	const childEnvironment: Record<string, string> = {
 		SKC_TMUX_LAUNCHED: "1",
@@ -373,12 +383,9 @@ export function createSkcTmuxSession(env: NodeJS.ProcessEnv = process.env): SkcT
 		[SKC_COORDINATOR_SESSION_STATE_FILE_ENV]: stateFile,
 	};
 	const shellQuote = (value: string): string => `'${value.replace(/'/g, `'\\''`)}'`;
-	const powershellQuote = (value: string): string => `'${value.replace(/'/g, "''")}'`;
 	const command =
-		process.platform === "win32"
-			? `${Object.entries(childEnvironment)
-					.map(([name, value]) => `$env:${name} = ${powershellQuote(value)}`)
-					.join("; ")}; skc`
+		platform === "win32"
+			? buildWindowsPowerShellInnerCommand({ command: ["skc"], environment: childEnvironment })
 			: `exec env ${Object.entries(childEnvironment)
 					.map(([name, value]) => `${name}=${shellQuote(value)}`)
 					.join(" ")} skc`;
@@ -388,11 +395,11 @@ export function createSkcTmuxSession(env: NodeJS.ProcessEnv = process.env): SkcT
 		"-d",
 		"-s",
 		sessionName,
-		...(process.platform === "win32" ? [] : ["-P", "-F", "#{session_id}"]),
+		...(platform === "win32" ? [] : ["-P", "-F", "#{session_id}"]),
 		command,
 	];
 	function probeTmuxServer(tmuxCommand: string, env: NodeJS.ProcessEnv): TmuxServerProof {
-		if (process.platform !== "linux") {
+		if (platform !== "linux") {
 			return {
 				state: "safe",
 				pid: 1,
@@ -414,14 +421,10 @@ export function createSkcTmuxSession(env: NodeJS.ProcessEnv = process.env): SkcT
 		const pid = Number(result.stdout.toString().trim());
 		if (!Number.isSafeInteger(pid) || pid <= 0) return { state: "unverifiable" };
 		try {
-			const stat = fsSync.readFileSync(`/proc/${pid}/stat`, "utf8");
-			const startTime = stat
-				.slice(stat.lastIndexOf(")") + 2)
-				.trim()
-				.split(/\s+/)[19];
+			const startTime = readLinuxProcStartTimeSync(pid);
 			if (!startTime) return { state: "unverifiable" };
 			const cgroup = classifyCgroup({
-				platform: process.platform,
+				platform,
 				cgroupText: fsSync.readFileSync(`/proc/${pid}/cgroup`, "utf8"),
 			});
 			return {
@@ -484,7 +487,7 @@ export function createSkcTmuxSession(env: NodeJS.ProcessEnv = process.env): SkcT
 				}
 			}),
 	};
-	if (resolveSkcTmuxBinary({ env }).isPsmux)
+	if (resolveSkcTmuxBinary({ env, platform }).isPsmux)
 		throw new Error("skc_tmux_owner_isolation_native_session_identity_unavailable");
 
 	const baseline = captureOwnerGenerationBaselineSync(stateDir, sessionId);
@@ -492,7 +495,7 @@ export function createSkcTmuxSession(env: NodeJS.ProcessEnv = process.env): SkcT
 		{
 			schema_version: 1,
 			op: "plan",
-			platform: process.platform,
+			platform,
 			session_id: sessionId,
 			owner_generation: generation,
 			baseline,
@@ -744,11 +747,7 @@ function requireSafeTmuxServerForMutation(
 	const pid = Number(result.stdout.toString().trim());
 	if (!Number.isSafeInteger(pid) || pid <= 0) throw new Error("skc_tmux_owner_isolation_server_unverifiable");
 	try {
-		const stat = fsSync.readFileSync(`/proc/${pid}/stat`, "utf8");
-		const startTime = stat
-			.slice(stat.lastIndexOf(")") + 2)
-			.trim()
-			.split(/\s+/)[19];
+		const startTime = readLinuxProcStartTimeSync(pid);
 		const cgroup = classifyCgroup({
 			platform: process.platform,
 			cgroupText: fsSync.readFileSync(`/proc/${pid}/cgroup`, "utf8"),
@@ -961,17 +960,7 @@ export function removeSkcTmuxSession(
 }
 
 async function readProcessStartTime(pid: number): Promise<string | null> {
-	try {
-		const stat = await fs.readFile(`/proc/${pid}/stat`, "utf8");
-		const close = stat.lastIndexOf(")");
-		const fields = stat
-			.slice(close + 2)
-			.trim()
-			.split(/\s+/);
-		return fields[19] ?? null;
-	} catch {
-		return null;
-	}
+	return readLinuxProcStartTime(pid);
 }
 
 async function readCurrentGeneration(stateDir: string, sessionId: string): Promise<string | null> {

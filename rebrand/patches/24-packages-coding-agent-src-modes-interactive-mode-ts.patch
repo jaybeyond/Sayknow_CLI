@@ -1,0 +1,18 @@
+--- a/packages/coding-agent/src/modes/interactive-mode.ts
++++ b/packages/coding-agent/src/modes/interactive-mode.ts
+@@ -2177,13 +2177,8 @@
+ 		this.#extensionUiController.hideHookSelector();
+ 	}
+ 
+-	showHookInput(
+-		title: string,
+-		placeholder?: string,
+-		dialogOptions?: ExtensionUIDialogOptions,
+-		inputOptions?: { readonly initialValue?: string },
+-	): Promise<string | undefined> {
+-		return this.#extensionUiController.showHookInput(title, placeholder, dialogOptions, inputOptions);
++	showHookInput(title: string, placeholder?: string): Promise<string | undefined> {
++		return this.#extensionUiController.showHookInput(title, placeholder);
+ 	}
+ 
+ 	hideHookInput(): void {

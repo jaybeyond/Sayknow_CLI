@@ -21,27 +21,9 @@ import type {
 	ClientBridgePermissionToolCall,
 	ClientBridgeTerminalHandle,
 } from "../../session/client-bridge";
+import { resolveAcpPermissionMode } from "./permission-mode";
 
-type AcpPermissionMode = "auto" | "prompt" | "always-allow";
-
-const ACP_PERMISSION_MODE_ENV = "SKC_ACP_PERMISSION_MODE";
-
-function parseAcpPermissionMode(value: unknown): AcpPermissionMode {
-	if (value === "auto" || value === "prompt" || value === "always-allow") return value;
-	return "prompt";
-}
-
-/** Client metadata is authoritative; the process environment is only a fallback when that field is absent. */
-function resolveAcpPermissionMode(clientCapabilities: ClientCapabilities | undefined): AcpPermissionMode {
-	const meta = clientCapabilities?._meta;
-	if (typeof meta === "object" && meta !== null) {
-		const skc = (meta as { skc?: unknown }).skc;
-		if (typeof skc === "object" && skc !== null && "permissionHandling" in skc) {
-			return parseAcpPermissionMode((skc as { permissionHandling?: unknown }).permissionHandling);
-		}
-	}
-	return parseAcpPermissionMode(process.env[ACP_PERMISSION_MODE_ENV]);
-}
+export { type AcpPermissionMode, resolveAcpPermissionMode } from "./permission-mode";
 
 export function createAcpClientBridge(
 	connection: AgentSideConnection,

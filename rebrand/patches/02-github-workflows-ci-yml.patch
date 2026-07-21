@@ -1,0 +1,92 @@
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -3,7 +3,7 @@
+ on:
+    push:
+       branches: [main]
+-      tags: ["v*"]
++      tags: ["v*", "sayknow-v*"]
+    pull_request:
+       branches: [main]
+ 
+@@ -13,7 +13,7 @@
+ concurrency:
+    # Release tags never cancel; ordinary CI is cancellable per ref.
+    group: ci-${{ github.ref }}
+-   cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/v') }}
++   cancel-in-progress: ${{ !(startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/sayknow-v')) }}
+ 
+ jobs:
+    # ---------------------------------------------------------------------------
+@@ -21,7 +21,7 @@
+    # These never run on tags — a tag is cut from an already-green main.
+    # ---------------------------------------------------------------------------
+    check:
+-      if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
++      if: ${{ !(startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/sayknow-v')) }}
+       runs-on: ubuntu-22.04
+       timeout-minutes: 20
+       steps:
+@@ -49,7 +49,7 @@
+    # keeps the stable branch-protection status name.
+    # ---------------------------------------------------------------------------
+    main_plan:
+-      if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
++      if: ${{ !(startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/sayknow-v')) }}
+       runs-on: ubuntu-22.04
+       timeout-minutes: 10
+       env:
+@@ -70,7 +70,7 @@
+            run: bun scripts/ci-dev-affected.ts --matrix-json
+ 
+    main_native:
+-      if: ${{ !startsWith(github.ref, 'refs/tags/v') && needs.main_plan.outputs.has_native == 'true' }}
++      if: ${{ !(startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/sayknow-v')) && needs.main_plan.outputs.has_native == 'true' }}
+       needs: [main_plan]
+       runs-on: ubuntu-22.04
+       timeout-minutes: 30
+@@ -111,7 +111,7 @@
+ 
+    main_shards:
+       name: test-shard / ${{ matrix.key }}
+-      if: ${{ always() && !startsWith(github.ref, 'refs/tags/v') && needs.main_plan.outputs.has_tasks == 'true' && needs.main_native.result != 'failure' && needs.main_native.result != 'cancelled' }}
++      if: ${{ always() && !(startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/sayknow-v')) && needs.main_plan.outputs.has_tasks == 'true' && needs.main_native.result != 'failure' && needs.main_native.result != 'cancelled' }}
+       needs: [main_plan, main_native]
+       runs-on: ubuntu-22.04
+       timeout-minutes: ${{ matrix.rust && 90 || 60 }}
+@@ -165,7 +165,7 @@
+ 
+    # Branch protection must keep requiring this stable aggregate status.
+    test:
+-      if: ${{ always() && !startsWith(github.ref, 'refs/tags/v') }}
++      if: ${{ always() && !(startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/sayknow-v')) }}
+       needs: [main_plan, main_native, main_shards]
+       runs-on: ubuntu-22.04
+       timeout-minutes: 5
+@@ -186,7 +186,7 @@
+    # Release. Self-contained — no dependency on a separate main CI run.
+    # ---------------------------------------------------------------------------
+    native:
+-      if: ${{ startsWith(github.ref, 'refs/tags/v') }}
++      if: ${{ (startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/sayknow-v')) }}
+       timeout-minutes: 90
+       runs-on: ${{ matrix.os }}
+       strategy:
+@@ -212,7 +212,7 @@
+               save_cache: "true"
+ 
+    binaries:
+-      if: ${{ startsWith(github.ref, 'refs/tags/v') }}
++      if: ${{ (startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/sayknow-v')) }}
+       needs: [native]
+       timeout-minutes: 60
+       runs-on: ${{ matrix.os }}
+@@ -272,7 +272,7 @@
+               path: ${{ matrix.binary_path }}
+ 
+    publish:
+-      if: ${{ startsWith(github.ref, 'refs/tags/v') }}
++      if: ${{ (startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/sayknow-v')) }}
+       needs: [native, binaries]
+       timeout-minutes: 45
+       runs-on: ubuntu-22.04

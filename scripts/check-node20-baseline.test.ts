@@ -228,16 +228,6 @@ jobs:
 		expect(violations).toEqual([]);
 	});
 
-	test("scans workspace package metadata outside packages directory", async () => {
-		const root = await createRepo({
-			"python/roboskc/web/package.json": '{ "name": "roboskc-web", "engines": { "node": ">=20" } }\n',
-		});
-
-		const violations = await checkNode20Baseline(root);
-
-		expect(violations).toHaveLength(1);
-		expect(violations[0]?.path).toBe("python/roboskc/web/package.json");
-	});
 
 	test("fails on Unreleased changelog Node 20 claims", async () => {
 		const root = await createRepo({

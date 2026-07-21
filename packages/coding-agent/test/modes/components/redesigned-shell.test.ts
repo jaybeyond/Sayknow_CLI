@@ -14,7 +14,7 @@ import { resolveWelcomeLogoMode } from "@sayknow-cli/coding-agent/modes/interact
 import { getEditorTheme, initTheme } from "@sayknow-cli/coding-agent/modes/theme/theme";
 import type { AgentSession } from "@sayknow-cli/coding-agent/session/agent-session";
 import { type TUI, visibleWidth } from "@sayknow-cli/tui";
-import { StatusLineComponent } from "../../../src/modes/components/status-line";
+import { StatusLineComponent } from "../../../src/modes/components/tool-status-header";
 
 function createFooterSession(): AgentSession {
 	return {

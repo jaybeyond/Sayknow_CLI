@@ -1,4 +1,5 @@
-import { afterEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+
 import { Settings } from "@sayknow-cli/coding-agent/config/settings";
 import * as evalIndex from "@sayknow-cli/coding-agent/eval";
 import * as pyKernel from "@sayknow-cli/coding-agent/eval/py/kernel";
@@ -28,11 +29,48 @@ const mockResult = {
 	displayOutputs: [],
 };
 
+const ENV_KEYS = ["SKC_PY", "PI_PY", "PI_JS"] as const;
+
+function snapshotEnv(): Map<string, string | undefined> {
+	return new Map(ENV_KEYS.map(key => [key, Bun.env[key]]));
+}
+
+function restoreEnv(snapshot: Map<string, string | undefined>): void {
+	for (const key of ENV_KEYS) {
+		const value = snapshot.get(key);
+		if (value === undefined) delete Bun.env[key];
+		else Bun.env[key] = value;
+	}
+}
+
+function clearEnv(): void {
+	for (const key of ENV_KEYS) delete Bun.env[key];
+}
+
 describe("EvalTool language dispatch", () => {
-	afterEach(() => {
-		vi.restoreAllMocks();
+	let previousEnv = new Map<string, string | undefined>();
+
+	beforeEach(() => {
+		previousEnv = snapshotEnv();
+		clearEnv();
 	});
 
+	afterEach(() => {
+		restoreEnv(previousEnv);
+		vi.restoreAllMocks();
+	});
+	it("restores a pre-existing SKC_PY value after cleanup", () => {
+		const suiteEnv = snapshotEnv();
+		try {
+			Bun.env.SKC_PY = "hostile-value";
+			const testEnv = snapshotEnv();
+			delete Bun.env.SKC_PY;
+			restoreEnv(testEnv);
+			expect(String(Bun.env.SKC_PY)).toBe("hostile-value");
+		} finally {
+			restoreEnv(suiteEnv);
+		}
+	});
 	it('dispatches to the JS backend when cell.language === "js"', async () => {
 		const jsExecuteSpy = vi.spyOn(evalIndex.jsBackend, "execute").mockResolvedValue(mockResult);
 		const pythonExecuteSpy = vi.spyOn(evalIndex.pythonBackend, "execute");
@@ -90,12 +128,32 @@ describe("EvalTool language dispatch", () => {
 		).rejects.toThrow(/eval\.py = false/);
 	});
 
+	it("rejects py cells when SKC_PY selects JavaScript only", async () => {
+		Bun.env.SKC_PY = "js";
+		const tool = new EvalTool(makeSession());
+		await expect(
+			tool.execute("call-py-env-disabled", {
+				cells: [{ language: "py", code: "print('hi')" }],
+			}),
+		).rejects.toThrow(/eval\.py = false/);
+	});
+
 	it("rejects js cells when eval.js is disabled", async () => {
 		const settings = Settings.isolated();
 		settings.set("eval.js", false);
 		const tool = new EvalTool(makeSession(settings));
 		await expect(
 			tool.execute("call-js-disabled", {
+				cells: [{ language: "js", code: "const x = 1;" }],
+			}),
+		).rejects.toThrow(/eval\.js = false/);
+	});
+
+	it("rejects js cells when SKC_PY selects Python only", async () => {
+		Bun.env.SKC_PY = "py";
+		const tool = new EvalTool(makeSession());
+		await expect(
+			tool.execute("call-js-env-disabled", {
 				cells: [{ language: "js", code: "const x = 1;" }],
 			}),
 		).rejects.toThrow(/eval\.js = false/);

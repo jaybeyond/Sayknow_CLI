@@ -231,6 +231,33 @@ describe("AsyncJobManager subagent pause/resume/queue", () => {
 		await manager.dispose({ timeoutMs: 500 });
 	});
 
+	test("a fenced queued owner remains queued while a later foreign owner resumes", async () => {
+		const { manager, completions } = makeManager({ maxRunningJobs: 1 });
+		installResumeRunner(manager);
+		const a = spawnControllable(manager, "A", "owner-a");
+		expect(manager.pauseSubagent("A").ok).toBe(true);
+		a.release();
+		await manager.waitForAll();
+		const c = spawnControllable(manager, "C", "owner-c");
+		expect(manager.pauseSubagent("C").ok).toBe(true);
+		c.release();
+		await manager.waitForAll();
+		const b = spawnControllable(manager, "B", "owner-b");
+		expect(manager.resumeSubagent("A").queued).toBe(true);
+		expect(manager.resumeSubagent("C").queued).toBe(true);
+		const lease = manager.beginOwnerSubagentShutdown("owner-a")!;
+		expect(manager.resumeSubagent("A")).toMatchObject({ ok: false, reason: "owner_shutdown_in_progress" });
+		b.release();
+		await manager.waitForAll();
+		expect(manager.getSubagentRecord("A")?.status).toBe("queued");
+		expect(manager.getSubagentRecord("C")?.status).toBe("completed");
+		expect(completions.map(completion => completion.text)).toContain("resumed:C");
+		const proof = await manager.cancelAndProveOwnerSubagents(lease, { timeoutMs: 50 });
+		expect(proof).toMatchObject({ confirmed: true, terminalIds: ["A"], unresolvedIds: [] });
+		manager.finishOwnerSubagentShutdown(lease, "release");
+		await manager.dispose({ timeoutMs: 500 });
+	});
+
 	test("cancelSubagent on a paused subagent marks cancelled but keeps the record (AC10)", async () => {
 		const { manager } = makeManager();
 		const a = spawnControllable(manager, "A");
@@ -258,6 +285,41 @@ describe("AsyncJobManager subagent pause/resume/queue", () => {
 		const res = manager.resumeSubagent("E");
 		expect(res.ok).toBe(false);
 		expect(res.reason).toBe("context_unavailable");
+		await manager.dispose({ timeoutMs: 500 });
+	});
+
+	test("resume whose runner job throws marks the subagent failed and delivers the error", async () => {
+		// Backs the task resume-runner fix: a resumed subprocess that aborted or
+		// exited non-zero throws, so the resumed job must end `failed` (not
+		// `completed`), and the error text must be delivered to the leader.
+		const { manager, completions } = makeManager();
+		manager.registerResumeDescriptor({
+			subagentId: "R",
+			ownerId: "owner-1",
+			data: { sessionFile: "/tmp/R.jsonl" },
+		});
+		manager.setResumeRunner(subagentId =>
+			manager.register(
+				"task",
+				subagentId,
+				async (): Promise<SubagentRunOutcome> => {
+					throw new Error("resumed subagent failed");
+				},
+				{
+					id: "R-resume",
+					ownerId: "owner-1",
+					metadata: { subagent: { id: subagentId, agent: "planner", agentSource: "bundled" } },
+				},
+			),
+		);
+
+		const res = manager.resumeSubagent("R", { ownerId: "owner-1" }, "revision");
+		expect(res.ok).toBe(true);
+		await manager.waitForAll();
+		await manager.drainDeliveries({ timeoutMs: 500 });
+
+		expect(manager.getSubagentRecord("R", { ownerId: "owner-1" })?.status).toBe("failed");
+		expect(completions.some(completion => completion.text.includes("resumed subagent failed"))).toBe(true);
 		await manager.dispose({ timeoutMs: 500 });
 	});
 

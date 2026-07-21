@@ -12,7 +12,7 @@ It focuses on current implementation behavior, including fallback paths and cave
 - [`../src/modes/components/session-selector.ts`](../packages/coding-agent/src/modes/components/session-selector.ts)
 - [`../src/modes/controllers/selector-controller.ts`](../packages/coding-agent/src/modes/controllers/selector-controller.ts)
 - [`../src/main.ts`](../packages/coding-agent/src/main.ts)
-- [`../src/sdk.ts`](../packages/coding-agent/src/sdk.ts)
+- [`../src/sdk/session.ts`](../packages/coding-agent/src/sdk/session.ts)
 - [`../src/modes/interactive-mode.ts`](../packages/coding-agent/src/modes/interactive-mode.ts)
 - [`../src/modes/utils/ui-helpers.ts`](../packages/coding-agent/src/modes/utils/ui-helpers.ts)
 
@@ -20,27 +20,26 @@ It focuses on current implementation behavior, including fallback paths and cave
 
 ### Directory scope
 
-`SessionManager` stores sessions under a cwd-scoped directory by default:
+The default managed scope is `~/.skc/agent/sessions/v2-<identity-digest>/`, where the digest is derived from the native canonical workspace identity rather than a path-string substitution. It is collision-resistant, but the digest is not a public injective identity or an authentication credential. POSIX aliases and supported Windows local aliases for the same directory resolve to the same scope; UNC/network workspaces are rejected as unsupported.
 
-- `~/.skc/agent/sessions/--<cwd-encoded>--/*.jsonl`
+`SessionManager.list(cwd, sessionDir?)` reads the selected directory unless an explicit `sessionDir` is provided. The public readonly SDK API is `resolveManagedSessionScope()` followed by `listManagedSessionCandidates()` from `@sayknow-cli/coding-agent/sdk`; both are versioned by `SESSION_DIRECTORY_API_VERSION` (currently `1`). The resolver/listing API creates, migrates, and deletes nothing. Listing reports validated v2 and legacy candidates, invalid candidates, and a foreign count instead of treating arbitrary files as owned sessions.
 
-`SessionManager.list(cwd, sessionDir?)` reads only that directory unless an explicit `sessionDir` is provided.
+Default writes are v2-only. Legacy discovery/migration is lazy, validates identity before use, and follows `session.directoryMigration` (`copy-retain` by default; `disabled` to opt out); no automatic legacy cleanup occurs.
 
 ### Two listing paths with different payloads
 
 There are two different listing pipelines:
 
 1. `getRecentSessions(sessionDir, limit)` (welcome/summary view)
-   - Reads only a 4KB prefix (`readTextPrefix(..., 4096)`) from each file.
-   - Parses header + earliest user text preview.
+   - Reads a bounded 4KB prefix plus bounded trailing v4 header patches from each file.
+   - Parses header metadata, applicable tail patches, and the earliest user text preview.
    - Returns lightweight `RecentSessionInfo` with lazy `name` and `timeAgo` getters.
    - Sorts by file `mtime` descending.
 
 2. `SessionManager.list(...)` / `SessionManager.listAll()` (resume pickers and ID matching)
-   - Reads full session files.
-   - Builds `SessionInfo` objects (`id`, `cwd`, `title`, `messageCount`, `firstMessage`, `allMessagesText`, timestamps).
-   - Drops sessions with zero `message` entries.
-   - Sorts by `modified` descending.
+   - Reads a bounded 4KB prefix plus at most 16KB of trailing v4 header patches for file-backed sessions.
+   - Builds `SessionInfo` objects from bounded metadata and preview extraction; buried patches outside the tail budget deliberately fall back to line-1 header metadata.
+   - Drops sessions with zero `message` entries and sorts by `modified` descending.
 
 ### Metadata fallback behavior
 
@@ -97,12 +96,12 @@ No match -> throws error (`Session "..." not found.`).
 
 Handled after initial session-manager construction:
 
-1. list local sessions with `SessionManager.list(cwd, parsed.sessionDir)`
+1. list local candidates through the bounded read-only resume-picker path
 2. if empty: print `No sessions found` and exit early
-3. open TUI picker (`selectSession`)
-4. if canceled: print `No session selected` and exit early
-5. if selected: `SessionManager.open(selectedPath)`
-
+3. open the TUI picker; cancellation returns silently and exits without writes
+4. inspect the selected transcript read-only and confirm resumable tail state when required
+5. strictly open the approved identity, rechecking ownership before any replay-sanitization persistence
+6. publish the terminal breadcrumb only after strict-open sanitation succeeds, then continue startup from the opened manager
 ### `--continue`
 
 Uses `SessionManager.continueRecent(...)` directly (breadcrumb-first behavior above).
@@ -121,7 +120,7 @@ Uses `SessionManager.continueRecent(...)` directly (breadcrumb-first behavior ab
 
 Flow:
 
-1. fetch sessions from current session dir via `SessionManager.list(currentCwd, currentSessionDir)`
+1. fetch sessions from the current session directory via `SessionManager.listForResumePickerReadOnly(currentCwd, currentSessionDir)`
 2. mount `SessionSelectorComponent` in editor area using `showSelector(...)`
 3. callbacks:
    - select -> close selector and call `handleResumeSession(sessionPath)`
@@ -213,7 +212,7 @@ So visible conversation/todo state is rebuilt from the new session file.
 
 ### Cancellation paths
 
-- CLI picker cancel -> returns `null`, caller prints `No session selected`, process exits early.
+- CLI picker cancel -> returns `null`; bare resume exits silently without writes.
 - Interactive picker cancel -> editor restored, no session change.
 - Hook cancellation (`session_before_switch`) -> `switchSession()` returns `false`.
 

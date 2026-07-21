@@ -16,7 +16,7 @@ import { resetSettingsForTest, Settings, settings } from "@sayknow-cli/coding-ag
 import { EventController } from "@sayknow-cli/coding-agent/modes/controllers/event-controller";
 import { initTheme } from "@sayknow-cli/coding-agent/modes/theme/theme";
 import type { InteractiveModeContext } from "@sayknow-cli/coding-agent/modes/types";
-import { completionNotifyDisabledByEnv } from "@sayknow-cli/coding-agent/notifications/config";
+import { completionNotifyDisabledByEnv } from "@sayknow-cli/coding-agent/sdk/bus/config";
 import { TERMINAL } from "@sayknow-cli/tui";
 
 type NotifyProc = Bun.Subprocess<"ignore", "ignore", "ignore">;

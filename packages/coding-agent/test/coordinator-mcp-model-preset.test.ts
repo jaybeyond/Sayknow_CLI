@@ -1,23 +1,19 @@
 import { describe, expect, it } from "bun:test";
-import { type ModelProfileDefinition, mergeModelProfiles } from "../src/config/model-profiles";
 import {
+	type CoordinatorModelProfile,
 	type CoordinatorModelProfileLoader,
 	CoordinatorModelProfileRegistryError,
 	resolveCoordinatorMpreset,
 } from "../src/coordinator-mcp/model-preset";
 
-const builtinLoader: CoordinatorModelProfileLoader = () => mergeModelProfiles();
+const builtinLoader: CoordinatorModelProfileLoader = () =>
+	new Map<string, CoordinatorModelProfile>([["codex-eco", { name: "codex-eco" }]]);
 
-function customProfile(name: string): ModelProfileDefinition {
-	return {
-		name,
-		requiredProviders: [],
-		modelMapping: { default: "custom/model" },
-		source: "user",
-	};
+function customProfile(name: string): CoordinatorModelProfile {
+	return { name };
 }
 
-function loaderWithProfiles(...profiles: ModelProfileDefinition[]): CoordinatorModelProfileLoader {
+function loaderWithProfiles(...profiles: CoordinatorModelProfile[]): CoordinatorModelProfileLoader {
 	return () => new Map(profiles.map(profile => [profile.name, profile]));
 }
 

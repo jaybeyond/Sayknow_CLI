@@ -127,17 +127,17 @@ describe("generateFileMentionMessages duplicate suppression + inline cap (Findin
 
 	test("inline cap truncates large mentions below the configured limit", async () => {
 		const cwd = await createTempDir();
-		const big = `${Array.from({ length: 5000 }, (_, i) => `line ${i} ${"x".repeat(40)}`).join("\n")}`;
+		const big = "x".repeat(15 * 1024);
 		await Bun.write(path.join(cwd, "big.txt"), big);
 
 		const capped = files(await generateFileMentionMessages(["big.txt"], cwd, { maxInlineBytes: 4 * 1024 }));
 		expect(Buffer.byteLength(capped[0]?.content ?? "", "utf-8")).toBeLessThan(6 * 1024);
 
-		// Default cap is below the 50KB read-tool cap.
-		expect(DEFAULT_FILE_MENTION_INLINE_BYTES).toBeLessThan(50 * 1024);
+		expect(DEFAULT_FILE_MENTION_INLINE_BYTES).toBe(10 * 1024);
 		const defaulted = files(await generateFileMentionMessages(["big.txt"], cwd));
-		expect(Buffer.byteLength(defaulted[0]?.content ?? "", "utf-8")).toBeLessThanOrEqual(
-			DEFAULT_FILE_MENTION_INLINE_BYTES + 2048,
-		);
+		const content = defaulted[0]?.content ?? "";
+		const inlineBody = content.split("\n\n[Line 1 is", 1)[0] ?? "";
+		expect(Buffer.byteLength(inlineBody, "utf-8")).toBeLessThanOrEqual(DEFAULT_FILE_MENTION_INLINE_BYTES);
+		expect(inlineBody).toHaveLength(DEFAULT_FILE_MENTION_INLINE_BYTES);
 	});
 });

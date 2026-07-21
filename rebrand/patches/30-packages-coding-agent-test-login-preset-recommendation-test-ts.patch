@@ -1,6 +1,6 @@
 --- a/packages/coding-agent/test/login-preset-recommendation.test.ts
 +++ b/packages/coding-agent/test/login-preset-recommendation.test.ts
-@@ -177,7 +177,7 @@
+@@ -182,7 +182,7 @@
  		await login(ctx, "ollama");
  
  		expect(ctx.showHookConfirm).not.toHaveBeenCalled();
@@ -9,7 +9,7 @@
  		expect(session.setModelTemporaryCalls).toEqual([]);
  	});
  
-@@ -190,7 +190,7 @@
+@@ -195,7 +195,7 @@
  		await login(ctx, "minimax");
  
  		expect(ctx.showHookConfirm).not.toHaveBeenCalled();

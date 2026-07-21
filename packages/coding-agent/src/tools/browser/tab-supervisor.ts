@@ -5,6 +5,13 @@ import type { ToolSession } from "../../sdk";
 import { expandPath } from "../path-utils";
 import { ToolAbortError, ToolError } from "../tool-errors";
 import { pickElectronTarget } from "./attach";
+import {
+	consumeDeadTabRecovery,
+	discardDeadTabRecovery,
+	isDeadTabRecoveryLive,
+	peekDeadTabRecovery,
+	registerDeadTabRecovery,
+} from "./dead-tab-recovery";
 import { type BrowserHandle, type BrowserKindTag, holdBrowser, releaseBrowser } from "./registry";
 import type {
 	ReadyInfo,
@@ -12,7 +19,6 @@ import type {
 	RunResultOk,
 	SessionSnapshot,
 	Transferable,
-	Transport,
 	WorkerInbound,
 	WorkerInitPayload,
 	WorkerOutbound,
@@ -31,8 +37,8 @@ interface WorkerHandle {
 	send(msg: WorkerInbound, transferList?: Transferable[]): void;
 	onMessage(handler: (msg: WorkerOutbound) => void): () => void;
 	onError(handler: (error: Error) => void): () => void;
+	onClose(handler: () => void): () => void;
 	terminate(): Promise<void>;
-	readonly mode: "worker" | "inline";
 }
 
 export type DialogPolicy = "accept" | "dismiss";
@@ -55,6 +61,8 @@ export interface TabSession {
 	pending: Map<string, PendingRun>;
 	dialogPolicy?: DialogPolicy;
 	kindTag: BrowserKindTag;
+	/** Immutable inputs needed to recreate this worker after an unexpected exit. */
+	recoveryOpts: AcquireTabOptions;
 	/** Session that acquired this tab; used for session-scoped teardown (F13). */
 	ownerId?: string;
 	/** Unix-ms timestamp of the last acquire/run activity; drives GC idle + LRU ordering. */
@@ -73,6 +81,10 @@ export interface AcquireTabOptions {
 	dialogs?: DialogPolicy;
 	/** Owning session id so dispose can release only this session's tabs (F13). */
 	ownerId?: string;
+	/** Internal recovery-only target id; makes a headless replacement attach, not open a page. */
+	recoveryTargetId?: string;
+	/** Recovery fence: replacement must not overwrite a tab installed after dead teardown. */
+	requireVacantName?: boolean;
 }
 
 export interface AcquireTabResult {
@@ -98,7 +110,26 @@ export interface ReleaseTabOptions {
 }
 
 const tabs = new Map<string, TabSession>();
+const recoveringTabs = new Map<string, { ownerId: string | undefined; promise: Promise<TabSession> }>();
+let afterWorkerInitializationForTest: ((name: string) => void) | undefined;
+let workerFactoryForTest: (() => Promise<WorkerHandle>) | undefined;
+let workerInitializerForTest:
+	| ((worker: WorkerHandle, payload: WorkerInitPayload, timeoutMs: number) => Promise<ReadyInfo>)
+	| undefined;
 const GRACE_MS = 750;
+const TAB_WORKER_MODE = "native-free";
+
+function startupError(stage: string): ToolError {
+	return new ToolError(
+		`Tab worker startup failed (stage=${stage}, mode=${TAB_WORKER_MODE}, platform=${process.platform}).`,
+	);
+}
+
+interface DeadTabDescriptor {
+	tab: TabSession;
+	browser: BrowserHandle;
+	opts: AcquireTabOptions;
+}
 
 /**
  * Remaining time (ms) until an absolute teardown deadline, or +Infinity when no deadline
@@ -127,7 +158,7 @@ async function awaitWithinBudget(op: Promise<unknown>, remainingMs: number, labe
 		logger.debug("close teardown budget already spent; detaching step", { label });
 		return false;
 	}
-	let timer: ReturnType<typeof setTimeout> | undefined;
+	let timer: NodeJS.Timeout | undefined;
 	const timedOut = new Promise<boolean>(resolve => {
 		timer = setTimeout(() => resolve(false), remainingMs);
 	});
@@ -156,6 +187,46 @@ function beginRelease(tab: TabSession): boolean {
 	return true;
 }
 
+async function withTemporaryBrowserHold<T>(browser: BrowserHandle, work: () => Promise<T>): Promise<T> {
+	holdBrowser(browser);
+	try {
+		return await work();
+	} finally {
+		await releaseBrowser(browser, { kill: false });
+	}
+}
+
+/** Test-only: exercise the same hold-transfer primitive used by replacement recovery. */
+export async function withTemporaryBrowserHoldForTest<T>(browser: BrowserHandle, work: () => Promise<T>): Promise<T> {
+	return await withTemporaryBrowserHold(browser, work);
+}
+
+/** Test-only: close exactly the target belonging to the supplied dead session. */
+export async function closeOrphanTargetForTest(tab: TabSession): Promise<void> {
+	await closeOrphanTarget(tab);
+}
+
+function recoveryPromiseForOwner(name: string, ownerId: string | undefined): Promise<TabSession> | undefined {
+	const existing = recoveringTabs.get(name);
+	if (!existing || existing.ownerId !== ownerId) return undefined;
+	return existing.promise;
+}
+
+/** Test-only: install an in-flight recovery and observe owner isolation. */
+export function __setRecoveringTabForTest(
+	name: string,
+	ownerId: string | undefined,
+	promise: Promise<TabSession>,
+): void {
+	recoveringTabs.set(name, { ownerId, promise });
+}
+
+export function recoveryPromiseForOwnerForTest(
+	name: string,
+	ownerId: string | undefined,
+): Promise<TabSession> | undefined {
+	return recoveryPromiseForOwner(name, ownerId);
+}
 /** Read-only, GC-facing projection of a live tab. Never exposes the mutable `tabs` map. */
 export interface TabGcSnapshot {
 	name: string;
@@ -193,14 +264,14 @@ export function listTabsForGc(): TabGcSnapshot[] {
  */
 export async function releaseTabIfGcEligible(name: string, policy: BrowserGcEligibilityPolicy): Promise<boolean> {
 	const tab = tabs.get(name);
-	if (!tab) return false;
-	if (tab.releasing) return false;
-	if (tab.state !== "alive") return false;
+	if (!tab || tab.releasing) return false;
+	if (tab.state === "dead") {
+		if (recoveringTabs.has(name) || isDeadTabRecoveryLive(name, policy.now())) return false;
+		return await releaseDeadTabForRecovery(name, tab, tab.ownerId);
+	}
 	if (tab.pending.size !== 0) return false;
 	if (tab.kindTag !== "headless" && tab.kindTag !== "spawned") return false;
 	if (policy.now() - tab.lastUsedAt <= policy.idleMs) return false;
-	// All predicates passed synchronously; releaseTab applies the shared begin-release guard
-	// on the same microtask, so no other code runs between the check and the state transition.
 	return await releaseTab(name, { kill: false });
 }
 
@@ -212,6 +283,36 @@ export function setTabForTest(tab: TabSession): void {
 /** Test-only: clear the tab registry between cases. */
 export function clearTabsForTest(): void {
 	tabs.clear();
+	recoveringTabs.clear();
+	afterWorkerInitializationForTest = undefined;
+	workerFactoryForTest = undefined;
+	workerInitializerForTest = undefined;
+}
+
+export function __setAfterWorkerInitializationForTest(callback: ((name: string) => void) | undefined): void {
+	afterWorkerInitializationForTest = callback;
+}
+export function __setAcquireTabWorkerDepsForTest(
+	factory: (() => Promise<WorkerHandle>) | undefined,
+	initializer:
+		| ((worker: WorkerHandle, payload: WorkerInitPayload, timeoutMs: number) => Promise<ReadyInfo>)
+		| undefined,
+): void {
+	workerFactoryForTest = factory;
+	workerInitializerForTest = initializer;
+}
+
+async function initializeAcquireWorker(
+	worker: WorkerHandle,
+	payload: WorkerInitPayload,
+	timeoutMs: number,
+): Promise<ReadyInfo> {
+	return await (workerInitializerForTest?.(worker, payload, timeoutMs) ??
+		initializeTabWorker(worker, payload, timeoutMs));
+}
+
+async function spawnAcquireWorker(): Promise<WorkerHandle> {
+	return await (workerFactoryForTest?.() ?? spawnTabWorker());
 }
 
 export async function acquireTab(
@@ -220,6 +321,9 @@ export async function acquireTab(
 	opts: AcquireTabOptions,
 ): Promise<AcquireTabResult> {
 	const existing = tabs.get(name);
+	if (opts.requireVacantName && existing)
+		throw new ToolError(`Tab ${JSON.stringify(name)} was replaced during recovery.`);
+	let replacementHold = false;
 	if (existing) {
 		if (existing.browser === browser && existing.state === "alive") {
 			if (opts.dialogs !== undefined && opts.dialogs !== existing.dialogPolicy) {
@@ -240,58 +344,89 @@ export async function acquireTab(
 				return { tab: tabs.get(name)!, created: false };
 			}
 		} else {
-			await releaseTab(name, { kill: false });
+			if (existing.browser === browser) {
+				holdBrowser(browser);
+				replacementHold = true;
+			}
+			try {
+				await releaseTab(name, { kill: false });
+			} catch (error) {
+				if (replacementHold) await releaseBrowser(browser, { kill: false });
+				throw error;
+			}
 		}
 	}
 
-	const initPayload = await buildInitPayload(browser, opts);
-	let worker = await spawnTabWorker();
-	let info: ReadyInfo;
+	let initPayload: WorkerInitPayload;
 	try {
-		info = await initializeTabWorker(worker, initPayload, opts.timeoutMs + GRACE_MS);
+		initPayload = await buildInitPayload(browser, opts);
 	} catch (error) {
-		// `BuildMessage`-class failures arrive asynchronously via the worker's `error` event,
-		// after `spawnTabWorker`'s synchronous try/catch has already returned. Fall back to
-		// the inline worker here so module-resolution failures don't poison every tab open.
-		await worker.terminate().catch(() => undefined);
-		if (worker.mode === "inline") {
-			if (browser.refCount === 0) await releaseBrowser(browser, { kill: false });
-			throw error;
-		}
-		logger.warn("Tab worker init failed; retrying with inline tab worker (no sync-loop guard)", {
-			error: error instanceof Error ? error.message : String(error),
-		});
-		worker = await spawnInlineWorker();
-		try {
-			info = await initializeTabWorker(worker, initPayload, opts.timeoutMs + GRACE_MS);
-		} catch (inlineError) {
-			await worker.terminate().catch(() => undefined);
-			if (browser.refCount === 0) await releaseBrowser(browser, { kill: false });
-			const finalError = new ToolError(
-				`Failed to start browser tab worker (inline fallback also failed): ${inlineError instanceof Error ? inlineError.message : String(inlineError)}`,
-			);
-			(finalError as { cause?: unknown }).cause = error;
-			throw finalError;
-		}
+		if (replacementHold) await releaseBrowser(browser, { kill: false });
+		throw error;
 	}
-
-	holdBrowser(browser);
-	const tab: TabSession = {
-		name,
-		browser,
-		targetId: info.targetId,
-		worker,
-		state: "alive",
-		info,
-		pending: new Map(),
-		dialogPolicy: opts.dialogs,
-		kindTag: browser.kind.kind,
-		ownerId: opts.ownerId,
-		lastUsedAt: Date.now(),
+	let worker: WorkerHandle;
+	try {
+		worker = await spawnAcquireWorker();
+	} catch {
+		if (replacementHold) await releaseBrowser(browser, { kill: false });
+		else if (browser.refCount === 0) await releaseBrowser(browser, { kill: false });
+		throw startupError("spawn");
+	}
+	let registeredTab: TabSession | undefined;
+	let startupFailure: Error | undefined;
+	let browserHeld = false;
+	const observeFailure = (error: Error): void => {
+		if (registeredTab) markTabDead(registeredTab, error);
+		else startupFailure ??= error;
 	};
-	worker.onMessage(msg => handleTabMessage(tab, msg));
-	tabs.set(name, tab);
-	return { tab, created: true };
+	const unlistenLifetimeMessages = worker.onMessage(msg => {
+		if (msg.type === "closed") observeFailure(startupError("protocol-closed"));
+	});
+	const unlistenLifetimeErrors = worker.onError(() => observeFailure(startupError("error")));
+	const unlistenLifetimeClose = worker.onClose(() => observeFailure(startupError("physical-close")));
+	try {
+		const info = await initializeAcquireWorker(worker, initPayload, opts.timeoutMs + GRACE_MS);
+		afterWorkerInitializationForTest?.(name);
+		if (startupFailure) throw startupFailure;
+		if (opts.requireVacantName && tabs.has(name))
+			throw new ToolError(`Tab ${JSON.stringify(name)} was replaced during recovery.`);
+
+		holdBrowser(browser);
+		browserHeld = true;
+		if (replacementHold) {
+			await releaseBrowser(browser, { kill: false });
+			replacementHold = false;
+		}
+		if (startupFailure) throw startupFailure;
+
+		const tab: TabSession = {
+			name,
+			browser,
+			targetId: info.targetId,
+			worker,
+			state: "alive",
+			info,
+			pending: new Map(),
+			dialogPolicy: opts.dialogs,
+			kindTag: browser.kind.kind,
+			ownerId: opts.ownerId,
+			lastUsedAt: Date.now(),
+			recoveryOpts: freezeRecoveryOptions(opts),
+		};
+		registeredTab = tab;
+		worker.onMessage(msg => handleTabMessage(tab, msg));
+		tabs.set(name, tab);
+		return { tab, created: true };
+	} catch (error) {
+		unlistenLifetimeMessages();
+		unlistenLifetimeErrors();
+		unlistenLifetimeClose();
+		await worker.terminate().catch(() => undefined);
+		if (browserHeld) await releaseBrowser(browser, { kill: false });
+		if (replacementHold) await releaseBrowser(browser, { kill: false });
+		else if (!browserHeld && browser.refCount === 0) await releaseBrowser(browser, { kill: false });
+		throw error;
+	}
 }
 
 export async function runInTab(name: string, opts: RunInTabOptions): Promise<RunResultOk> {
@@ -307,8 +442,9 @@ async function runInTabWithSnapshot(
 	opts: { code: string; timeoutMs: number; signal?: AbortSignal; session?: ToolSession },
 	snapshot: SessionSnapshot,
 ): Promise<RunResultOk> {
-	const tab = tabs.get(name);
-	if (!tab || tab.state === "dead") throw new ToolError(`Tab ${JSON.stringify(name)} is not alive. Reopen it.`);
+	let tab = tabs.get(name);
+	if (tab?.state === "dead") tab = await recoverDeadTab(name, opts.session);
+	if (tab?.state !== "alive") throw new ToolError(`Tab ${JSON.stringify(name)} is not alive. Reopen it.`);
 	if (tab.pending.size > 0) throw new ToolError(`Tab ${JSON.stringify(name)} is busy`);
 	tab.lastUsedAt = Date.now();
 	const id = Snowflake.next();
@@ -340,6 +476,82 @@ async function runInTabWithSnapshot(
 		tab.pending.delete(id);
 	}
 }
+function markTabDead(tab: TabSession, error: Error): void {
+	if (tabs.get(tab.name) !== tab || tab.state !== "alive" || tab.releasing) return;
+	tab.state = "dead";
+	const closeError = new ToolError(`Browser tab worker stopped: ${error.message}`);
+	for (const pending of tab.pending.values()) pending.reject(closeError);
+	tab.pending.clear();
+	registerDeadTabRecovery(tab.name, tab.ownerId, Object.freeze({ tab, browser: tab.browser, opts: tab.recoveryOpts }));
+}
+function freezeRecoveryOptions(opts: AcquireTabOptions): AcquireTabOptions {
+	return Object.freeze({
+		...opts,
+		signal: undefined,
+		viewport: opts.viewport ? Object.freeze({ ...opts.viewport }) : undefined,
+	});
+}
+
+async function recoverDeadTab(name: string, session: ToolSession | undefined): Promise<TabSession | undefined> {
+	const ownerId = session?.getSessionId?.() ?? undefined;
+	const existing = recoveryPromiseForOwner(name, ownerId);
+	if (existing) return await existing;
+	if (recoveringTabs.has(name)) return undefined;
+	const peeked = peekDeadTabRecovery<DeadTabDescriptor>(name, ownerId);
+	if (peeked.status !== "consumed" || !peeked.descriptor) return undefined;
+	const descriptor = peeked.descriptor;
+	const consumed = consumeDeadTabRecovery<DeadTabDescriptor>(name, ownerId);
+	if (consumed.status === "owner_mismatch") return undefined;
+	if (consumed.status === "expired_or_missing") {
+		await releaseDeadTabForRecovery(name, descriptor.tab, ownerId);
+		return undefined;
+	}
+	const recovery = withTemporaryBrowserHold(descriptor.browser, async (): Promise<TabSession> => {
+		if (!(await releaseDeadTabForRecovery(name, descriptor.tab, ownerId, true))) {
+			throw new ToolError(`Tab ${JSON.stringify(name)} is not alive. Reopen it.`);
+		}
+		try {
+			return (
+				await acquireTab(name, descriptor.browser, {
+					...descriptor.opts,
+					recoveryTargetId: descriptor.tab.targetId,
+					requireVacantName: true,
+				})
+			).tab;
+		} catch (error) {
+			if (descriptor.tab.kindTag === "headless") await closeOrphanTarget(descriptor.tab).catch(() => undefined);
+			throw error;
+		}
+	});
+	recoveringTabs.set(name, { ownerId, promise: recovery });
+	try {
+		return await recovery;
+	} finally {
+		if (recoveringTabs.get(name)?.promise === recovery) recoveringTabs.delete(name);
+	}
+}
+
+/**
+ * Claim and release exactly the dead tab that produced a recovery descriptor. Every
+ * predicate and the release election run synchronously before teardown can await.
+ */
+export async function releaseDeadTabForRecovery(
+	name: string,
+	expected: TabSession,
+	ownerId: string | undefined,
+	preserveHeadlessTarget = false,
+): Promise<boolean> {
+	if (
+		tabs.get(name) !== expected ||
+		expected.state !== "dead" ||
+		expected.ownerId !== ownerId ||
+		!beginRelease(expected)
+	) {
+		return false;
+	}
+	await releaseClaimedTab(expected, { kill: false }, false, preserveHeadlessTarget);
+	return true;
+}
 
 export async function releaseTab(name: string, opts: ReleaseTabOptions = {}): Promise<boolean> {
 	const tab = tabs.get(name);
@@ -351,9 +563,19 @@ export async function releaseTab(name: string, opts: ReleaseTabOptions = {}): Pr
 		logger.debug("releaseTab: already releasing", { name });
 		return false;
 	}
-	const wasAlive = tab.state === "alive";
+	await releaseClaimedTab(tab, opts, tab.state === "alive");
+	return true;
+}
+
+async function releaseClaimedTab(
+	tab: TabSession,
+	opts: ReleaseTabOptions,
+	wasAlive: boolean,
+	preserveHeadlessTarget = false,
+): Promise<void> {
 	tab.state = "dead";
-	const closeError = new ToolError(`Tab ${JSON.stringify(name)} was closed`);
+	discardDeadTabRecovery(tab.name);
+	const closeError = new ToolError(`Tab ${JSON.stringify(tab.name)} was closed`);
 	for (const [id, pending] of tab.pending) {
 		try {
 			tab.worker.send({ type: "abort", id });
@@ -371,19 +593,29 @@ export async function releaseTab(name: string, opts: ReleaseTabOptions = {}): Pr
 			forced = true;
 		}
 	}
-	await awaitWithinBudget(tab.worker.terminate(), remainingBudget(deadlineAt), "worker.terminate");
-	if (forced && tab.kindTag === "headless") {
-		await awaitWithinBudget(closeOrphanTarget(tab), remainingBudget(deadlineAt), "closeOrphanTarget");
+	try {
+		await awaitWithinBudget(
+			Promise.resolve().then(() => tab.worker.terminate()),
+			remainingBudget(deadlineAt),
+			"worker.terminate",
+		);
+		if (!preserveHeadlessTarget && (forced || !wasAlive) && tab.kindTag === "headless") {
+			await awaitWithinBudget(
+				Promise.resolve().then(() => closeOrphanTarget(tab)),
+				remainingBudget(deadlineAt),
+				"closeOrphanTarget",
+			);
+		}
+	} finally {
+		await awaitWithinBudget(
+			Promise.resolve().then(() => releaseBrowser(tab.browser, { kill: opts.kill ?? false })),
+			remainingBudget(deadlineAt),
+			"releaseBrowser",
+		);
+		// Only delete if the map still holds THIS tab: a same-name reacquire during our async
+		// teardown may have installed a fresh tab that we must not evict.
+		if (tabs.get(tab.name) === tab) tabs.delete(tab.name);
 	}
-	await awaitWithinBudget(
-		releaseBrowser(tab.browser, { kill: opts.kill ?? false }),
-		remainingBudget(deadlineAt),
-		"releaseBrowser",
-	);
-	// Only delete if the map still holds THIS tab: a same-name reacquire during our async
-	// teardown may have installed a fresh tab that we must not evict.
-	if (tabs.get(name) === tab) tabs.delete(name);
-	return true;
 }
 
 export async function releaseAllTabs(opts: ReleaseTabOptions = {}): Promise<number> {
@@ -404,12 +636,18 @@ export async function releaseTabsForOwner(
 	opts: ReleaseTabOptions = {},
 ): Promise<number> {
 	if (!ownerId) return 0;
-	const names = [...tabs.entries()].filter(([, tab]) => tab.ownerId === ownerId).map(([name]) => name);
+	const ownedTabs = [...tabs.values()].filter(tab => tab.ownerId === ownerId);
 	let count = 0;
-	for (const name of names) {
-		if (await releaseTab(name, opts)) count++;
+	for (const tab of ownedTabs) {
+		if (await releaseOwnedTab(tab, ownerId, opts)) count++;
 	}
 	return count;
+}
+
+async function releaseOwnedTab(expected: TabSession, ownerId: string, opts: ReleaseTabOptions): Promise<boolean> {
+	if (tabs.get(expected.name) !== expected || expected.ownerId !== ownerId || !beginRelease(expected)) return false;
+	await releaseClaimedTab(expected, opts, expected.state === "alive");
+	return true;
 }
 
 export async function dropHeadlessTabs(): Promise<void> {
@@ -421,12 +659,22 @@ async function buildInitPayload(browser: BrowserHandle, opts: AcquireTabOptions)
 	const safeDir = getPuppeteerDir();
 	const browserWSEndpoint = browser.browser.wsEndpoint();
 	if (!browserWSEndpoint) throw new ToolError("Browser websocket endpoint is unavailable");
+	if (opts.recoveryTargetId) {
+		return {
+			mode: "attach",
+			browserWSEndpoint,
+			safeDir,
+			targetId: opts.recoveryTargetId,
+			dialogs: opts.dialogs,
+		};
+	}
 	if (browser.kind.kind === "headless") {
 		return {
 			mode: "headless",
 			browserWSEndpoint,
 			safeDir,
 			viewport: opts.viewport,
+			...(browser.geo ? { geo: browser.geo } : {}),
 			dialogs: opts.dialogs,
 			url: opts.url,
 			waitUntil: opts.waitUntil,
@@ -442,6 +690,12 @@ async function buildInitPayload(browser: BrowserHandle, opts: AcquireTabOptions)
 		targetId,
 		dialogs: opts.dialogs,
 	};
+}
+export async function buildInitPayloadForTest(
+	browser: BrowserHandle,
+	opts: AcquireTabOptions,
+): Promise<WorkerInitPayload> {
+	return await buildInitPayload(browser, opts);
 }
 
 function handleTabMessage(tab: TabSession, msg: WorkerOutbound): void {
@@ -530,13 +784,17 @@ async function forceKillTab(name: string, reason: string): Promise<void> {
 	if (!tab) return;
 	if (!beginRelease(tab)) return;
 	tab.state = "dead";
+	discardDeadTabRecovery(name);
 	const error = new ToolError(reason);
 	for (const pending of tab.pending.values()) pending.reject(error);
 	tab.pending.clear();
-	await tab.worker.terminate().catch(() => undefined);
-	if (tab.kindTag === "headless") await closeOrphanTarget(tab);
-	await releaseBrowser(tab.browser, { kill: false });
-	if (tabs.get(name) === tab) tabs.delete(name);
+	try {
+		await tab.worker.terminate().catch(() => undefined);
+		if (tab.kindTag === "headless") await closeOrphanTarget(tab).catch(() => undefined);
+	} finally {
+		await releaseBrowser(tab.browser, { kill: false }).catch(() => undefined);
+		if (tabs.get(name) === tab) tabs.delete(name);
+	}
 }
 
 async function closeOrphanTarget(tab: TabSession): Promise<void> {
@@ -624,22 +882,14 @@ async function raceWithTimeout<T>(
 }
 
 async function spawnTabWorker(): Promise<WorkerHandle> {
-	try {
-		const worker = isCompiledBinary()
-			? new Worker("./packages/coding-agent/src/tools/browser/tab-worker-entry.ts", { type: "module" })
-			: new Worker(new URL("./tab-worker-entry.ts", import.meta.url).href, { type: "module" });
-		return wrapBunWorker(worker);
-	} catch (err) {
-		logger.warn("Bun Worker spawn failed; using inline tab worker (no sync-loop guard)", {
-			error: err instanceof Error ? err.message : String(err),
-		});
-		return spawnInlineWorker();
-	}
+	const worker = isCompiledBinary()
+		? new Worker("./packages/coding-agent/src/tools/browser/tab-worker-entry.ts", { type: "module" })
+		: new Worker(new URL("./tab-worker-entry.ts", import.meta.url).href, { type: "module" });
+	return wrapBunWorker(worker);
 }
 
 function wrapBunWorker(worker: Worker): WorkerHandle {
 	return {
-		mode: "worker",
 		send(msg, transferList) {
 			worker.postMessage(msg, { transfer: transferList ?? [] });
 		},
@@ -649,9 +899,8 @@ function wrapBunWorker(worker: Worker): WorkerHandle {
 			return () => worker.removeEventListener("message", wrap);
 		},
 		onError(handler) {
-			const onError = (event: ErrorEvent): void => handler(errorFromWorkerEvent(event));
-			const onMessageError = (event: MessageEvent): void =>
-				handler(new ToolError(`Tab worker message error: ${String(event.data)}`));
+			const onError = (): void => handler(startupError("error"));
+			const onMessageError = (): void => handler(startupError("messageerror"));
 			worker.addEventListener("error", onError);
 			worker.addEventListener("messageerror", onMessageError);
 			return () => {
@@ -659,46 +908,14 @@ function wrapBunWorker(worker: Worker): WorkerHandle {
 				worker.removeEventListener("messageerror", onMessageError);
 			};
 		},
+		onClose(handler) {
+			const onClose = (): void => handler();
+			worker.addEventListener("close", onClose);
+			return () => worker.removeEventListener("close", onClose);
+		},
 		async terminate() {
 			worker.terminate();
 		},
-	};
-}
-
-/**
- * Inline fallback for environments where Bun cannot compile or spawn the worker
- * entry. This preserves normal browser behavior but cannot interrupt synchronous
- * infinite loops because user code runs on the main thread.
- */
-async function spawnInlineWorker(): Promise<WorkerHandle> {
-	const hostListeners = new Set<(message: WorkerOutbound) => void>();
-	const workerListeners = new Set<(message: WorkerInbound) => void>();
-	const workerTransport: Transport = {
-		send: msg =>
-			queueMicrotask(() => {
-				for (const listener of hostListeners) listener(msg as WorkerOutbound);
-			}),
-		onMessage: handler => {
-			const typed = handler as (message: WorkerInbound) => void;
-			workerListeners.add(typed);
-			return () => workerListeners.delete(typed);
-		},
-		close: () => {},
-	};
-	const { WorkerCore } = await import("./tab-worker");
-	new WorkerCore(workerTransport);
-	return {
-		mode: "inline",
-		send: msg =>
-			queueMicrotask(() => {
-				for (const listener of workerListeners) listener(msg);
-			}),
-		onMessage: handler => {
-			hostListeners.add(handler);
-			return () => hostListeners.delete(handler);
-		},
-		onError: () => () => {},
-		async terminate() {},
 	};
 }
 
@@ -707,21 +924,60 @@ async function initializeTabWorker(
 	payload: WorkerInitPayload,
 	timeoutMs: number,
 ): Promise<ReadyInfo> {
-	const { promise, resolve, reject } = Promise.withResolvers<ReadyInfo>();
+	type StartupPhase = "await-bootstrap" | "bootstrap-confirmed" | "await-init";
+	let phase: StartupPhase = "await-bootstrap";
+	const { promise: bootstrap, resolve: bootstrapReady, reject: rejectBootstrap } = Promise.withResolvers<void>();
+	const { promise: initialized, resolve: ready, reject: rejectInitialized } = Promise.withResolvers<ReadyInfo>();
+	void initialized.catch(() => undefined);
+	const fail = (stage: string): void => {
+		const error = startupError(stage);
+		rejectBootstrap(error);
+		rejectInitialized(error);
+	};
 	const unlisten = worker.onMessage(msg => {
-		if (msg.type === "ready") resolve(msg.info);
-		else if (msg.type === "init-failed") reject(errorFromPayload(msg.error));
-		else if (msg.type === "log") logWorkerMessage(msg);
+		if (msg.type === "log") {
+			logWorkerMessage(msg);
+			return;
+		}
+		if (phase === "await-bootstrap") {
+			if (msg.type === "bootstrap-ready" && msg.version === 1 && msg.mode === TAB_WORKER_MODE) {
+				phase = "bootstrap-confirmed";
+				bootstrapReady();
+			} else if (msg.type === "bootstrap-failed") {
+				fail("bootstrap");
+			} else if (msg.type === "closed") {
+				fail("protocol-closed");
+			} else {
+				fail("protocol-phase");
+			}
+			return;
+		}
+		if (phase !== "await-init") {
+			fail("protocol-phase");
+			return;
+		}
+		if (msg.type === "ready") {
+			ready(msg.info);
+		} else if (msg.type === "init-failed") {
+			fail("init");
+		} else if (msg.type === "closed") {
+			fail("protocol-closed");
+		} else {
+			fail("protocol-phase");
+		}
 	});
-	const unlistenError = worker.onError(error => {
-		reject(new ToolError(`Tab worker failed during startup: ${error.message}`));
-	});
+	const unlistenError = worker.onError(() => fail("error"));
+	const unlistenClose = worker.onClose(() => fail("physical-close"));
 	try {
+		worker.send({ type: "bootstrap", version: 1, mode: TAB_WORKER_MODE });
+		await raceWithTimeout(bootstrap, timeoutMs, startupError("bootstrap-timeout").message);
+		phase = "await-init";
 		worker.send({ type: "init", payload });
-		return await raceWithTimeout(promise, timeoutMs, "Timed out initializing browser tab worker");
+		return await raceWithTimeout(initialized, timeoutMs, startupError("init-timeout").message);
 	} finally {
 		unlisten();
 		unlistenError();
+		unlistenClose();
 	}
 }
 
@@ -731,10 +987,4 @@ export function initializeTabWorkerForTest(
 	timeoutMs: number,
 ): Promise<ReadyInfo> {
 	return initializeTabWorker(worker, payload, timeoutMs);
-}
-
-function errorFromWorkerEvent(event: ErrorEvent): Error {
-	if (event.error instanceof Error) return event.error;
-	if (event.message) return new Error(event.message);
-	return new Error("Unknown tab worker error");
 }

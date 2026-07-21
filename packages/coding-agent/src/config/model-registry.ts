@@ -61,6 +61,7 @@ import {
 	type ProviderAuthMode,
 	type ProviderDiscovery,
 } from "./models-config-schema";
+import { type ModelSelectorValue } from "./model-selector-value";
 import { type Settings, settings } from "./settings";
 
 export type { CanonicalModelIndex, CanonicalModelRecord, CanonicalModelVariant, ModelEquivalenceConfig };
@@ -1010,10 +1011,10 @@ export class ModelRegistry {
 	#modelBindingsTargetSettings: Settings | undefined;
 	#appliedModelBindingRoles = new Set<string>();
 	#appliedAgentModelBindingOverrides = new Set<string>();
-	#modelBindingRoleBaselines = new Map<string, string | undefined>();
-	#agentModelBindingBaselines = new Map<string, string | undefined>();
-	#lastAppliedModelBindingRoles = new Map<string, string>();
-	#lastAppliedAgentModelBindingOverrides = new Map<string, string>();
+	#modelBindingRoleBaselines = new Map<string, ModelSelectorValue | undefined>();
+	#agentModelBindingBaselines = new Map<string, ModelSelectorValue | undefined>();
+	#lastAppliedModelBindingRoles = new Map<string, ModelSelectorValue>();
+	#lastAppliedAgentModelBindingOverrides = new Map<string, ModelSelectorValue>();
 	#configError: ConfigError | undefined = undefined;
 	#modelsConfigFile: ConfigFile<ModelsConfig>;
 	#lastStaticLoadMtime: number | null = null;

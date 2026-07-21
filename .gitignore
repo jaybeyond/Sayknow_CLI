@@ -75,18 +75,11 @@ pi-*.html
 # Generated files
 packages/coding-agent/src/internal-urls/docs-index.generated.ts
 /runs/
-python/skc-rpc/src/skc_rpc.egg-info/
 # parallel-agent worktrees
 .wt/
 CPU*.md
 packages/coding-agent/binaries/
 
-# roboskc runtime state
-python/roboskc/data/
-python/roboskc/.cache/
-python/roboskc/src/roboskc/static/
-python/roboskc/web/dist/
-python/roboskc/.env
 .release-040-artifacts/
 
 # OMC orchestration runtime state

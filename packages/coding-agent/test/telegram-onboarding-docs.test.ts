@@ -10,7 +10,7 @@ async function readRepoFile(...segments: string[]): Promise<string> {
 describe("Telegram onboarding docs", () => {
 	it("documents the supported fallback when BotFather lacks Threaded Mode settings", async () => {
 		const onboarding = await readRepoFile("docs", "telegram-onboarding.md");
-		const sdk = await readRepoFile("docs", "notifications-sdk.md");
+		const sdk = await readRepoFile("docs", "sdk.md");
 
 		expect(onboarding).toContain("If BotFather's **Bot Settings** menu does not show **Threads Settings** or");
 		expect(onboarding).toContain("do not treat that as a setup blocker");
@@ -30,5 +30,32 @@ describe("Telegram onboarding docs", () => {
 		expect(sdk).toContain("@BotFather > Bot\nSettings > Threads Settings");
 		expect(sdk).toContain("Do not pair a group, supergroup, or channel to work around a missing BotFather\nmenu");
 		expect(sdk.toLowerCase()).not.toContain("mini" + "app");
+	});
+
+	it("documents Settings and CLI parity without weakening notification safety", async () => {
+		const onboarding = await readRepoFile("docs", "telegram-onboarding.md");
+		const sdk = await readRepoFile("docs", "sdk.md");
+
+		expect(onboarding).toContain("open `/settings` and select the\n**Notifications** tab");
+		expect(onboarding).toContain(
+			"refresh or probe health, send a test notification, recover dead-owner\n  artifacts, and reconnect the Telegram runtime",
+		);
+		expect(onboarding).toContain("Telegram credentials and all `notifications.*` values are **global-only**");
+		expect(onboarding).toContain(
+			"project config files are ignored, and runtime notification overrides\nare rejected",
+		);
+		expect(onboarding).toContain("`SKC_NOTIFY=off`, `0`, or `false`");
+		expect(onboarding).toContain("`SKC_NOTIFICATIONS=1` or `SKC_NOTIFICATIONS_TOKEN`");
+		expect(onboarding).toContain("SKC performs zero `getUpdates` discovery polls");
+		expect(onboarding).toContain("does not poll, kill, reload, or take over the\nowner");
+		expect(onboarding).toContain("The raw token is never printed by SKC status/setup output after it is stored");
+		expect(onboarding).toContain(
+			"`skc notify setup`, `skc notify status`, `skc notify health`, `skc notify\ntest`, and `skc notify recovery`",
+		);
+
+		expect(sdk).toContain("The recommended interactive path is `/settings` → **Notifications**");
+		expect(sdk).toContain("`skc notify setup` remains the authoritative CLI fallback for headless and");
+		expect(sdk).toContain("Project notification keys are\nignored and runtime notification overrides are rejected");
+		expect(sdk).toContain("A foreign or unknown owner is never killed, reloaded, or taken over");
 	});
 });

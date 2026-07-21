@@ -28,14 +28,14 @@ Main `skc` CLI and product runtime.
 
 - `packages/coding-agent/package.json` exposes the `skc` binary at `src/cli.ts` and the SDK/barrel entrypoint at `src/index.ts`.
 - `packages/coding-agent/src/cli.ts` is the executable bootstrap. It registers CLI commands such as `setup`, `deep-interview`, `ralplan`, `ultragoal`, `team`, and the default launch path.
-- `packages/coding-agent/src/main.ts` adapts CLI options into session creation and dispatches interactive, print, RPC, RPC-UI, ACP, and Bridge modes.
-- `packages/coding-agent/src/sdk.ts` assembles settings, model registry, auth, workspace/context discovery, skills, rules, tools, system prompt, and the underlying `@sayknow-cli/agent-core` agent.
+- `packages/coding-agent/src/main.ts` adapts CLI options into session creation and dispatches interactive, print, and ACP modes; external machine clients use the SDK WebSocket interface.
+- `packages/coding-agent/src/sdk/session.ts` assembles settings, model registry, auth, workspace/context discovery, skills, rules, tools, system prompt, and the underlying `@sayknow-cli/agent-core` agent.
 - `packages/coding-agent/src/tools/index.ts` is the built-in tool registry for file/code/runtime tools such as read, bash, edit, AST tools, eval, find/search, LSP, browser, task/subagent, recipe, IRC, todo, web search, and write. Memory backends are private integrations, not public coding-harness tools.
 - `packages/coding-agent/src/defaults/skc-defaults.ts` embeds and installs the default workflow skills.
 - `packages/coding-agent/src/task/agents.ts` embeds bundled task-agent prompts. The public contract is `executor`, `architect`, `planner`, and `critic`; other bundled prompts are internal/runtime utilities.
 - `packages/coding-agent/src/coordinator/contract.ts` defines the transport-neutral third-party coordinator contract used by `skc mcp-serve coordinator`, `skc coordinator`, and `skc setup hermes`.
 - `packages/coding-agent/src/coordinator-mcp/server.ts` implements the outward MCP adapter for bot/coordinator integrations, including session start/register, turn state, question answering, status reports, and artifact reads.
-- `docs/external-control-readiness.md` classifies the public external-control surfaces: Coordinator MCP for multi-session control planes, RPC stdio for subprocess workers, ACP for editor/ACP clients, and Bridge HTTPS as experimental/fail-closed protocol scaffolding.
+- `docs/external-control-readiness.md` classifies the public external-control surfaces: SDK WebSocket for live session control, Coordinator MCP for multi-session control planes, and ACP for editor/ACP clients. `docs/bot-integration.md` is the end-to-end guide for external controller authors.
 
 ### `packages/ai/`
 
@@ -102,28 +102,15 @@ Private benchmark package for TypeScript edit tasks.
 
 ## Python packages
 
-### `python/skc-rpc/`
+### External machine interfaces
 
-Typed Python client for `skc --mode rpc`.
-
-- `python/skc-rpc/pyproject.toml` packages `skc-rpc` for Python 3.11+.
-- `python/skc-rpc/README.md` documents the process-backed stdio client, typed command methods, startup flags, event listeners, todo seeding, host-owned tools, and host-owned URI schemes.
-- `docs/bot-integration.md` is the practical entry guide for generic external controller and bot authors; it ties together coordinator MCP, RPC stdio, bridge limitations, visible tmux fallback, provider-independent smokes, errors, and artifact/report consumption.
-
-### `python/roboskc/`
-
-Self-hosted GitHub triage/fix bot that drives `skc --mode rpc`.
-
-- `python/roboskc/AGENTS.md` is the authoritative local contract for this subtree.
-- `python/roboskc/pyproject.toml` packages `roboskc` for Python 3.11+ with FastAPI, httpx, pydantic settings, Click, and `skc-rpc`.
-- `python/roboskc/README.md` documents the webhook-to-worktree-to-skc flow, GitHub sidecar trust boundary, persistent per-issue sessions, and audit trail.
-- Important modules include `src/server.py`, `src/queue.py`, `src/tasks.py`, `src/worker.py`, `src/host_tools.py`, `src/sandbox.py`, `src/github_client.py`, `src/github_events.py`, `src/db.py`, and `src/config.py`.
+External machine clients use the SDK WebSocket interface documented in `docs/sdk.md`. Coordinator MCP supplies multi-session orchestration, while ACP remains the stdio editor protocol. The former Python RPC client and bot integration paths were removed with the RPC ingress mode.
 
 ## Runtime flow
 
-A normal CLI session starts in `packages/coding-agent/src/cli.ts`, routes through command handling, then reaches `packages/coding-agent/src/main.ts`. `main.ts` converts CLI/runtime settings into `CreateAgentSessionOptions` and calls `createAgentSession()` in `packages/coding-agent/src/sdk.ts`.
+A normal CLI session starts in `packages/coding-agent/src/cli.ts`, routes through command handling, then reaches `packages/coding-agent/src/main.ts`. `main.ts` converts CLI/runtime settings into `CreateAgentSessionOptions` and calls `createAgentSession()` in `packages/coding-agent/src/sdk/session.ts`.
 
-The SDK builds the session context, loads the default skills, creates built-in tools, resolves model/auth state through `@sayknow-cli/ai`, constructs the system prompt, and instantiates `@sayknow-cli/agent-core`. The agent loop streams model events, executes tools, records tool results, and hands state back to the selected mode: interactive TUI, print, RPC, RPC-UI, ACP, or Bridge.
+The SDK builds the session context, loads the default skills, creates built-in tools, resolves model/auth state through `@sayknow-cli/ai`, constructs the system prompt, and instantiates `@sayknow-cli/agent-core`. The agent loop streams model events, executes tools, records tool results, and hands state back to the selected interactive TUI, print, or ACP mode while exposing external control through the SDK WebSocket interface.
 
 ## Verification and gates
 

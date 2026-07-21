@@ -1,14 +1,14 @@
 --- a/packages/coding-agent/src/slash-commands/builtin-registry.ts
 +++ b/packages/coding-agent/src/slash-commands/builtin-registry.ts
-@@ -28,6 +28,7 @@
- 	parseModelString,
+@@ -21,6 +21,7 @@
+ 	splitSelectorThinkingSuffix,
  } from "../config/model-resolver";
  import { clearPluginRootsAndCaches, resolveActiveProjectRegistryPath } from "../discovery/helpers.js";
 +import { td } from "../i18n";
  import { resolveMemoryBackend } from "../memory-backend";
  import { DynamicBorder } from "../modes/components/dynamic-border";
- import { SayknowPetWidget } from "../modes/components/sayknow-pet-widget";
-@@ -1652,7 +1653,10 @@
+ import { theme } from "../modes/theme/theme";
+@@ -1722,7 +1723,10 @@
  export const BUILTIN_SLASH_COMMAND_DEFS: ReadonlyArray<BuiltinSlashCommand> = ACTIVE_BUILTIN_SLASH_COMMAND_REGISTRY.map(
  	command => ({
  		name: command.name,

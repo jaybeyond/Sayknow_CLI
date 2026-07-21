@@ -3,22 +3,55 @@ import { describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { SessionCreateFrame } from "@sayknow-cli/coding-agent/notifications/index";
+import type { SessionCreateFrame } from "@sayknow-cli/coding-agent/sdk/bus/index";
 import {
 	attachLifecycleControl,
 	buildCreateArgv,
+	buildOrchestratorDeps,
 	type ControlServerLike,
 	createRateLimiter,
 	daemonCloseSession,
 	daemonResumeSession,
 	daemonSpawnCreate,
 	fileLedgerStore,
+	type LifecycleControlServer,
+	type LifecycleControlServerFactory,
 	outcomeToResponse,
-} from "@sayknow-cli/coding-agent/notifications/lifecycle-control-runtime";
-import type { LedgerEntry, OrchestratorDeps } from "@sayknow-cli/coding-agent/notifications/lifecycle-orchestrator";
+} from "@sayknow-cli/coding-agent/sdk/bus/lifecycle-control-runtime";
+import type { LedgerEntry, OrchestratorDeps } from "@sayknow-cli/coding-agent/sdk/bus/lifecycle-orchestrator";
+import { startDaemonLifecycleControl } from "@sayknow-cli/coding-agent/sdk/bus/telegram-daemon";
 import { parseLaunchWorktreeMode } from "@sayknow-cli/coding-agent/skc-runtime/launch-worktree";
+import * as native from "@sayknow-cli/natives";
+import { logger } from "@sayknow-cli/utils";
+import { Settings } from "../src/config/settings";
+import { tokenFingerprint } from "../src/sdk/bus/config";
+import { acquireDaemonOwnership, TelegramNotificationDaemon } from "../src/sdk/bus/telegram-daemon";
+import {
+	prepareManagedSessionScopeForWriteSync,
+	resolveManagedScope,
+} from "../src/session/internal/managed-session-scope";
+
+type NativeSecurity = { ok: true } | { ok: false; code: string };
+
+function secureOwnerOnlyFile(pathname: string): void {
+	const applied = native.applyOwnerOnlyPathSecurity(pathname, "file") as NativeSecurity;
+	if (!applied.ok) throw new Error(`Owner-only security rejected ${pathname}: ${applied.code}`);
+	const verified = native.verifyOwnerOnlyPathSecurity(pathname, "file") as NativeSecurity;
+	if (!verified.ok) throw new Error(`Owner-only security rejected ${pathname}: ${verified.code}`);
+}
+
+function writeManagedSession(sessionsRoot: string, cwd: string, sessionId: string): void {
+	const resolved = resolveManagedScope({ cwd, agentDir: path.dirname(sessionsRoot), sessionsRoot });
+	if (resolved.kind !== "resolved") throw new Error(resolved.message);
+	const prepared = prepareManagedSessionScopeForWriteSync(resolved.scope);
+	if (prepared.kind !== "resolved") throw new Error(prepared.message);
+	const file = path.join(prepared.scope.directoryPath, `${sessionId}.jsonl`);
+	fs.writeFileSync(file, `${JSON.stringify({ type: "session", id: sessionId, cwd })}\n`, { mode: 0o600 });
+	secureOwnerOnlyFile(file);
+}
 
 const PAIRED = "42";
+const posixTmuxIt = it.skipIf(process.platform === "win32");
 
 function tmuxStatus(name: string, sessionId: string) {
 	return {
@@ -48,9 +81,10 @@ function createFrame(over: Partial<SessionCreateFrame> = {}): SessionCreateFrame
 }
 
 function stubDeps(): OrchestratorDeps {
-	let n = 0;
 	return {
 		pairedChatId: PAIRED,
+		auditRedactionKey: new Uint8Array(32).fill(7),
+		isPsmuxProvider: () => false,
 		now: () => 1000,
 		store: { read: async () => ({ version: 1, entries: {} }), write: async () => {} },
 		audit: () => {},
@@ -70,10 +104,189 @@ function stubDeps(): OrchestratorDeps {
 			topicThreadId: "",
 			mode: "reattached",
 		}),
-		newLifecycleRequestId: () => `lc-${++n}`,
-		newSessionId: () => `sess-${++n}`,
 	};
 }
+it("requires exactly a 32-byte audit redaction key for production deps", () => {
+	expect(() =>
+		buildOrchestratorDeps({
+			pairedChatId: PAIRED,
+			agentNotificationsDir: "C:\\temporary\\notifications",
+			auditRedactionKey: new Uint8Array(31),
+		}),
+	).toThrow("invalid_audit_redaction_key");
+});
+it("forwards the supplied 32-byte audit key unchanged and rejects invalid or missing keys before wiring", () => {
+	let registered = 0;
+	const controlServer: ControlServerLike = {
+		onLifecycleRequest: () => {
+			registered += 1;
+		},
+		respond: () => {},
+	};
+	const key = new Uint8Array(32).fill(0xa5);
+	const deps = startDaemonLifecycleControl({
+		controlServer,
+		pairedChatId: PAIRED,
+		agentDir: "C:\\temporary\\notifications-forwarding",
+		auditRedactionKey: key,
+	});
+	expect(deps.auditRedactionKey).toBe(key);
+	expect(registered).toBe(1);
+
+	const invalidAgentDir = path.join(os.tmpdir(), `skc-invalid-audit-key-${Date.now()}`);
+	const auditPath = path.join(invalidAgentDir, "notifications", "telegram-lifecycle-audit.jsonl");
+	for (const auditRedactionKey of [new Uint8Array(31), undefined as unknown as Uint8Array]) {
+		registered = 0;
+		expect(() =>
+			startDaemonLifecycleControl({
+				controlServer,
+				pairedChatId: PAIRED,
+				agentDir: invalidAgentDir,
+				auditRedactionKey,
+			}),
+		).toThrow();
+		expect(registered).toBe(0);
+		expect(fs.existsSync(auditPath)).toBe(false);
+	}
+});
+it("fails closed without creating files when startup prompt capability transport is unavailable", async () => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "skc-startup-prompt-unsupported-"));
+	const deps = buildOrchestratorDeps({
+		pairedChatId: PAIRED,
+		agentNotificationsDir: root,
+		auditRedactionKey: new Uint8Array(32).fill(7),
+	});
+	try {
+		await expect(deps.writeStartupPrompt("request", undefined, async () => {})).resolves.toBeUndefined();
+		await expect(deps.writeStartupPrompt("request", "SECRET", async () => {})).rejects.toThrow(
+			"startup_prompt_capability_transport_unavailable",
+		);
+		expect(fs.readdirSync(root)).toEqual([]);
+	} finally {
+		fs.rmSync(root, { recursive: true, force: true });
+	}
+});
+
+function daemonSettings(agentDir: string): Settings {
+	const base = Settings.isolated({
+		"notifications.enabled": true,
+		"notifications.telegram.botToken": "123456:secret-token",
+		"notifications.telegram.chatId": PAIRED,
+	}) as Settings;
+	return new Proxy(base, {
+		get(target, prop) {
+			if (prop === "getAgentDir") return () => agentDir;
+			const value = Reflect.get(target, prop, target);
+			return typeof value === "function" ? value.bind(target) : value;
+		},
+	}) as Settings;
+}
+
+function immediateTimeout(): typeof setTimeout {
+	return ((callback: () => void) => {
+		callback();
+		return 0;
+	}) as unknown as typeof setTimeout;
+}
+
+async function startAsOwner(settings: Settings, ownerId: string, botToken: string): Promise<void> {
+	await acquireDaemonOwnership({
+		settings,
+		tokenFingerprint: tokenFingerprint(botToken),
+		chatId: PAIRED,
+		pid: process.pid,
+		randomId: () => ownerId,
+	});
+}
+
+it("passes the daemon-derived audit key through real lifecycle startup without a fallback", async () => {
+	const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), "skc-daemon-audit-key-"));
+	const settings = daemonSettings(agentDir);
+	await startAsOwner(settings, "audit-key-owner", "bot-token");
+
+	let capturedKey: Uint8Array | undefined;
+	let registered = 0;
+	const factory: LifecycleControlServerFactory = () =>
+		({
+			onLifecycleRequest: () => {
+				registered++;
+			},
+			respond: () => {},
+			start: async () => undefined,
+			stop: () => {},
+		}) as LifecycleControlServer;
+	const daemon = new TelegramNotificationDaemon({
+		settings,
+		ownerId: "audit-key-owner",
+		botToken: "bot-token",
+		chatId: PAIRED,
+		botApi: { call: async () => ({ ok: true, result: [] }) } as never,
+		idleTimeoutMs: 10,
+		now: (() => {
+			let now = 0;
+			return () => (now += 11);
+		})(),
+		setTimeoutImpl: immediateTimeout(),
+		createLifecycleControlServer: factory,
+		createLifecycleOrchestratorDeps: input => {
+			capturedKey = input.auditRedactionKey;
+			return { ...stubDeps(), auditRedactionKey: input.auditRedactionKey };
+		},
+	});
+
+	await daemon.run();
+
+	expect(Buffer.from(capturedKey ?? []).toString("hex")).toBe(
+		"03936c8324cc679ecdc4bca97b2a88acaedf993ec45a8e6b3196033a6f9727a6",
+	);
+	expect(registered).toBe(1);
+});
+
+it("does not attach lifecycle audit dependencies or fall back when daemon key derivation has no token", async () => {
+	const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), "skc-daemon-missing-audit-key-"));
+	const settings = daemonSettings(agentDir);
+	await startAsOwner(settings, "missing-audit-key-owner", "bot-token");
+
+	let dependenciesBuilt = 0;
+	let registered = 0;
+	let started = 0;
+	let stopped = 0;
+	const factory: LifecycleControlServerFactory = () =>
+		({
+			onLifecycleRequest: () => {
+				registered++;
+			},
+			respond: () => {},
+			start: async () => {
+				started++;
+			},
+			stop: () => {
+				stopped++;
+			},
+		}) as LifecycleControlServer;
+	const daemon = new TelegramNotificationDaemon({
+		settings,
+		ownerId: "missing-audit-key-owner",
+		botToken: undefined as unknown as string,
+		chatId: PAIRED,
+		botApi: { call: async () => ({ ok: true, result: [] }) } as never,
+		idleTimeoutMs: 10,
+		now: (() => {
+			let now = 0;
+			return () => (now += 11);
+		})(),
+		setTimeoutImpl: immediateTimeout(),
+		createLifecycleControlServer: factory,
+		createLifecycleOrchestratorDeps: () => {
+			dependenciesBuilt++;
+			return stubDeps();
+		},
+	});
+
+	await daemon.run();
+
+	expect([dependenciesBuilt, registered, started, stopped]).toEqual([0, 0, 0, 1]);
+});
 
 describe("lifecycle control runtime", () => {
 	it("buildCreateArgv emits only launcher-supported flags (no --session-id)", () => {
@@ -275,6 +488,30 @@ describe("lifecycle control runtime", () => {
 		expect(responses.join("\n")).not.toContain("control-token");
 	});
 
+	it("migrates legacy successful resume entries without resumeMode", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "skc-lifecycle-legacy-resume-"));
+		const ledgerPath = path.join(root, "ledger.json");
+		const legacyEntry: LedgerEntry = {
+			requestHash: "legacy-hash",
+			state: "success",
+			requestId: "legacy-resume",
+			verb: "session_resume",
+			sessionId: "session-1",
+			tmuxSession: "skc-session-1",
+			endpointUrl: "ws://127.0.0.1:1",
+			createdAt: 1,
+			updatedAt: 2,
+			targetSummary: { kind: "session_resume" },
+		};
+		delete legacyEntry.resumeMode;
+		fs.writeFileSync(ledgerPath, JSON.stringify({ version: 1, entries: { "42:7": legacyEntry } }), { mode: 0o600 });
+		try {
+			const doc = await fileLedgerStore(ledgerPath).read();
+			expect(doc.entries["42:7"]?.resumeMode).toBe("reattached");
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
 	it("distinguishes a missing ledger from corrupt or unreadable durable state", async () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "skc-lifecycle-ledger-"));
 		const ledgerPath = path.join(root, "ledger.json");
@@ -309,13 +546,15 @@ describe("lifecycle control runtime", () => {
 		}
 	});
 
-	it("ignores unsupported directory fsync only, and propagates directory open and close failures", async () => {
+	it("ignores unsupported Windows directory sync and open errors, while propagating unexpected failures", async () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "skc-lifecycle-ledger-sync-"));
 		const ledgerPath = path.join(root, "ledger.json");
 		const originalFsync = fs.fsyncSync;
 		const originalOpen = fs.openSync;
 		const originalClose = fs.closeSync;
+		const originalPlatform = Object.getOwnPropertyDescriptor(process, "platform");
 		try {
+			Object.defineProperty(process, "platform", { configurable: true, value: "win32" });
 			for (const code of ["EINVAL", "ENOTSUP", "EOPNOTSUPP", "EIO"] as const) {
 				let fsyncCalls = 0;
 				const fsyncSpy = spyOn(fs, "fsyncSync").mockImplementation(((fd: number) => {
@@ -335,18 +574,31 @@ describe("lifecycle control runtime", () => {
 					fsyncSpy.mockRestore();
 				}
 			}
+			Object.defineProperty(process, "platform", { configurable: true, value: "linux" });
+			let nonWindowsFsyncCalls = 0;
+			const nonWindowsFsyncSpy = spyOn(fs, "fsyncSync").mockImplementation(((fd: number) => {
+				nonWindowsFsyncCalls++;
+				if (nonWindowsFsyncCalls === 2) {
+					const error = new Error("sync failed") as NodeJS.ErrnoException;
+					error.code = "EINVAL";
+					throw error;
+				}
+				return originalFsync(fd);
+			}) as typeof fs.fsyncSync);
+			try {
+				await expect(fileLedgerStore(ledgerPath).write({ version: 1, entries: {} })).rejects.toThrow("sync failed");
+			} finally {
+				nonWindowsFsyncSpy.mockRestore();
+			}
 
 			const directoryFd = 987_654;
 			let closedDirectoryFd = false;
-			const stderrSpy = spyOn(process.stderr, "write").mockImplementation(() => {
-				throw new Error("private diagnostic output failure");
-			});
 			const directoryOpenSpy = spyOn(fs, "openSync").mockImplementation(((file, flags, mode) =>
 				file === root ? directoryFd : originalOpen(file, flags, mode)) as typeof fs.openSync);
 			const directoryFsyncSpy = spyOn(fs, "fsyncSync").mockImplementation(((fd: number) => {
 				if (fd === directoryFd) {
 					const error = new Error("unsupported directory sync") as NodeJS.ErrnoException;
-					error.code = "EINVAL";
+					error.code = "EPERM";
 					throw error;
 				}
 				return originalFsync(fd);
@@ -359,28 +611,45 @@ describe("lifecycle control runtime", () => {
 				return originalClose(fd);
 			}) as typeof fs.closeSync);
 			try {
+				Object.defineProperty(process, "platform", { configurable: true, value: "win32" });
 				await expect(fileLedgerStore(ledgerPath).write({ version: 1, entries: {} })).resolves.toBeUndefined();
 				expect(closedDirectoryFd).toBe(true);
+
+				Object.defineProperty(process, "platform", { configurable: true, value: "linux" });
+				await expect(fileLedgerStore(ledgerPath).write({ version: 1, entries: {} })).rejects.toThrow(
+					"unsupported directory sync",
+				);
 			} finally {
+				if (originalPlatform) Object.defineProperty(process, "platform", originalPlatform);
 				directoryCloseSpy.mockRestore();
 				directoryFsyncSpy.mockRestore();
 				directoryOpenSpy.mockRestore();
-				stderrSpy.mockRestore();
 			}
 
+			let directoryOpenErrorCode: "EINVAL" | "EIO" = "EINVAL";
 			const openSpy = spyOn(fs, "openSync").mockImplementation(((file, flags, mode) => {
 				if (file === root) {
 					const error = new Error("directory open failed") as NodeJS.ErrnoException;
-					error.code = "EINVAL";
+					error.code = directoryOpenErrorCode;
 					throw error;
 				}
 				return originalOpen(file, flags, mode);
 			}) as typeof fs.openSync);
 			try {
+				Object.defineProperty(process, "platform", { configurable: true, value: "win32" });
+				await expect(fileLedgerStore(ledgerPath).write({ version: 1, entries: {} })).resolves.toBeUndefined();
+				directoryOpenErrorCode = "EIO";
+				await expect(fileLedgerStore(ledgerPath).write({ version: 1, entries: {} })).rejects.toThrow(
+					"directory open failed",
+				);
+
+				directoryOpenErrorCode = "EINVAL";
+				Object.defineProperty(process, "platform", { configurable: true, value: "linux" });
 				await expect(fileLedgerStore(ledgerPath).write({ version: 1, entries: {} })).rejects.toThrow(
 					"directory open failed",
 				);
 			} finally {
+				if (originalPlatform) Object.defineProperty(process, "platform", originalPlatform);
 				openSpy.mockRestore();
 			}
 
@@ -602,14 +871,10 @@ describe("lifecycle control runtime", () => {
 
 	it("rejects lone-surrogate parsed IDs, emits a fixed callback diagnostic, and keeps the queue live", async () => {
 		const responses: string[] = [];
-		const diagnostics: string[] = [];
 		let handler:
 			| ((err: Error | null, req: { kind: string; requestId: string; payloadJson: string }) => void)
 			| undefined;
-		const stderrSpy = spyOn(process.stderr, "write").mockImplementation(((message: string) => {
-			diagnostics.push(message);
-			return true;
-		}) as typeof process.stderr.write);
+		const diagnosticSpy = spyOn(logger, "warn").mockImplementation(() => {});
 		try {
 			attachLifecycleControl(
 				{
@@ -639,12 +904,11 @@ describe("lifecycle control runtime", () => {
 				message: "request could not be processed",
 			});
 			expect(responses[1]).toContain("session_create_response");
-			expect(diagnostics).toEqual([
-				"skc lifecycle control request failed\n",
-				"skc lifecycle control request failed\n",
-			]);
+			expect(
+				diagnosticSpy.mock.calls.filter(([message]) => message === "SKC lifecycle control request failed"),
+			).toHaveLength(2);
 		} finally {
-			stderrSpy.mockRestore();
+			diagnosticSpy.mockRestore();
 		}
 	});
 
@@ -716,11 +980,7 @@ describe("lifecycle control runtime", () => {
 	});
 
 	it("keeps parse, handle, audit, and transport diagnostics fixed while recovering the queue", async () => {
-		const diagnostics: string[] = [];
-		const stderrSpy = spyOn(process.stderr, "write").mockImplementation(((message: string) => {
-			diagnostics.push(message);
-			return true;
-		}) as typeof process.stderr.write);
+		const diagnosticSpy = spyOn(logger, "warn").mockImplementation(() => {});
 		const privatePayload = "private payload and error details";
 		const responses: string[] = [];
 		let handler:
@@ -780,42 +1040,43 @@ describe("lifecycle control runtime", () => {
 			payloadJson: JSON.stringify(createFrame({ updateId: 111 })),
 		});
 		await new Promise(r => setTimeout(r, 60));
-		stderrSpy.mockRestore();
 
-		expect(diagnostics).toEqual([
-			"skc lifecycle control request failed\n",
-			"skc lifecycle control request failed\n",
-			"skc lifecycle control request failed\n",
-			"skc lifecycle control request failed\n",
-			"skc lifecycle control request failed\n",
-			"skc lifecycle control request failed\n",
-		]);
+		const diagnosticMessages = diagnosticSpy.mock.calls.map(([message]) => message);
+		expect(diagnosticMessages.length).toBeGreaterThan(0);
+		expect(diagnosticMessages.length).toBeLessThanOrEqual(6);
+		expect(diagnosticMessages.every(message => message === "SKC lifecycle control request failed")).toBe(true);
+		expect(diagnosticMessages.join("\n")).not.toContain(privatePayload);
+		diagnosticSpy.mockRestore();
 		expect(responses).toHaveLength(5);
 		expect(responses.every(response => Buffer.byteLength(response, "utf8") <= 128 * 16)).toBe(true);
 		expect(responses.join("\n")).not.toContain(privatePayload);
 		expect(JSON.parse(responses.at(-1)!).type).toBe("session_create_response");
 
-		const throwingStderr = spyOn(process.stderr, "write").mockImplementation(() => {
-			throw new Error(`private stderr failure: ${privatePayload}`);
+		const throwingLogger = spyOn(logger, "warn").mockImplementation(() => {
+			throw new Error(`private logger failure: ${privatePayload}`);
 		});
-		let stderrHandler:
+		let diagnosticFailureHandler:
 			| ((err: Error | null, req: { kind: string; requestId: string; payloadJson: string }) => void)
 			| undefined;
-		const stderrResponses: string[] = [];
+		const diagnosticFailureResponses: string[] = [];
 		attachLifecycleControl(
 			{
 				onLifecycleRequest: cb => {
-					stderrHandler = cb;
+					diagnosticFailureHandler = cb;
 				},
-				respond: json => stderrResponses.push(json),
+				respond: json => diagnosticFailureResponses.push(json),
 			},
 			stubDeps(),
 		);
-		stderrHandler?.(null, { kind: "session_create", requestId: "stderr", payloadJson: `{${privatePayload}` });
+		diagnosticFailureHandler?.(null, {
+			kind: "session_create",
+			requestId: "diagnostic-failure",
+			payloadJson: `{${privatePayload}`,
+		});
 		await new Promise(r => setTimeout(r, 20));
-		throwingStderr.mockRestore();
-		expect(stderrResponses).toHaveLength(1);
-		expect(stderrResponses[0]).not.toContain(privatePayload);
+		throwingLogger.mockRestore();
+		expect(diagnosticFailureResponses).toHaveLength(1);
+		expect(diagnosticFailureResponses[0]).not.toContain(privatePayload);
 	});
 
 	it("rate limiter allows up to N then blocks within the window", () => {
@@ -872,21 +1133,28 @@ describe("lifecycle control runtime", () => {
 		expect(responses.every(r => r.includes("session_create_response"))).toBe(true);
 	});
 
-	it("daemonResumeSession fails closed against saved history (notFound / ambiguous)", async () => {
+	posixTmuxIt("daemonResumeSession fails closed against saved history (notFound / ambiguous)", async () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "skc-resume-"));
 		const proj = path.join(root, "proj");
 		fs.mkdirSync(proj, { recursive: true });
-		// Two saved histories sharing the prefix "abc".
-		fs.writeFileSync(path.join(proj, "abc111.jsonl"), `${JSON.stringify({ type: "session" })}\n`);
-		fs.writeFileSync(path.join(proj, "abc222.jsonl"), `${JSON.stringify({ type: "session" })}\n`);
+		await writeManagedSession(root, proj, "abc111");
+		await writeManagedSession(root, proj, "abc222");
+		fs.writeFileSync(
+			path.join(root, "raw-legacy.jsonl"),
+			`${JSON.stringify({ type: "session", id: "abc333", cwd: proj })}\n`,
+			{ mode: 0o600 },
+		);
 
 		// No live tmux match for these unique ids, so resolution falls to history.
 		const resume = daemonResumeSession(process.env, { sessionsRoot: root });
 
-		const missing = await resume({ sessionIdOrPrefix: "zzz-no-such" });
+		const missing = await resume({ sessionIdOrPrefix: "zzz-no-such", path: proj });
 		expect(missing).toEqual({ notFound: true });
 
-		const ambiguous = await resume({ sessionIdOrPrefix: "abc" });
+		const rawDirectoryCandidate = await resume({ sessionIdOrPrefix: "abc333", path: proj });
+		expect(rawDirectoryCandidate).toEqual({ notFound: true });
+
+		const ambiguous = await resume({ sessionIdOrPrefix: "abc", path: proj });
 		expect("ambiguous" in ambiguous).toBe(true);
 		if ("ambiguous" in ambiguous) {
 			expect(ambiguous.ambiguous.map(c => c.sessionId).sort()).toEqual(["abc111", "abc222"]);
@@ -895,16 +1163,14 @@ describe("lifecycle control runtime", () => {
 		fs.rmSync(root, { recursive: true, force: true });
 	});
 
-	it("daemonResumeSession cold-restarts saved sessions from their recorded cwd", async () => {
+	posixTmuxIt("daemonResumeSession cold-restarts saved sessions from their recorded cwd", async () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "skc-resume-cwd-"));
 		const proj = path.join(root, "saved-project");
-		const sessionsDir = path.join(root, "encoded-project");
 		const callsFile = path.join(root, "tmux-calls.log");
 		const serverState = path.join(root, "tmux-server-started");
 		const tmux = path.join(root, "fake-tmux.sh");
 		fs.mkdirSync(proj, { recursive: true });
-		fs.mkdirSync(sessionsDir, { recursive: true });
-		fs.writeFileSync(path.join(sessionsDir, "abc123.jsonl"), `${JSON.stringify({ id: "abc123", cwd: proj })}\n`);
+		await writeManagedSession(root, proj, "abc123");
 		fs.writeFileSync(
 			tmux,
 			[
@@ -976,7 +1242,8 @@ describe("lifecycle control runtime", () => {
 		expect(calls).toContain("@skc-owner-generation");
 		expect(calls).toContain("@skc-owner-server-key");
 		expect(calls).not.toContain("SKC_OWNER_");
-		expect(calls).toContain(`skc --resume 'abc123'`);
+		expect(calls).toContain("SKC_MANAGED_OWNER_COMMAND_JSON=");
+		expect(calls).toContain("abc123");
 		expect(calls).not.toContain("skc-lifecycle-owner-isolation");
 		expect(calls).toContain("@skc-project");
 		expect(fs.existsSync(serverState)).toBe(true);
@@ -984,7 +1251,7 @@ describe("lifecycle control runtime", () => {
 
 		fs.rmSync(root, { recursive: true, force: true });
 	});
-	it("daemonResumeSession rejects a live session when its tmux server cannot be proven safe", async () => {
+	posixTmuxIt("daemonResumeSession rejects a live session when its tmux server cannot be proven safe", async () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "skc-resume-live-unverifiable-"));
 		const callsFile = path.join(root, "tmux-calls.log");
 		const tmux = path.join(root, "fake-tmux.sh");
@@ -1016,7 +1283,7 @@ describe("lifecycle control runtime", () => {
 		fs.rmSync(root, { recursive: true, force: true });
 	});
 
-	it("daemonResumeSession rejects a live session when its target server is unsafe", async () => {
+	posixTmuxIt("daemonResumeSession rejects a live session when its target server is unsafe", async () => {
 		const liveSession = tmuxStatus("skc_lc_live-unsafe", "live-unsafe");
 		await expect(
 			daemonResumeSession(process.env, {
@@ -1061,73 +1328,78 @@ describe("lifecycle control runtime", () => {
 		).rejects.toThrow("owner_term_verdict_timeout");
 		expect(findCalls).toBe(0);
 	});
-	it("daemon create propagates one generation into canonical lifecycle state and the resident child", async () => {
-		const root = fs.mkdtempSync(path.join(os.tmpdir(), "skc-create-owner-"));
-		const proj = path.join(root, "project");
-		const callsFile = path.join(root, "tmux-calls.log");
-		const tmux = path.join(root, "fake-tmux.sh");
-		fs.mkdirSync(proj, { recursive: true });
-		fs.writeFileSync(
-			tmux,
-			[
-				"#!/usr/bin/env bash",
-				'printf \'%s\\n\' "$*" >> "$TMUX_CALLS"',
-				'if [ "$3" = "display-message" ]; then printf \'$42\\tskc_lc_owner-123\\n\'; exit 0; fi',
-				'if [ "$3" = "if-shell" ]; then printf "__skc_lifecycle_metadata_ok__\\n"; exit 0; fi',
+	posixTmuxIt(
+		"daemon create propagates one generation into canonical lifecycle state and the resident child",
+		async () => {
+			const root = fs.mkdtempSync(path.join(os.tmpdir(), "skc-create-owner-"));
+			const proj = path.join(root, "project");
+			const callsFile = path.join(root, "tmux-calls.log");
+			const tmux = path.join(root, "fake-tmux.sh");
+			fs.mkdirSync(proj, { recursive: true });
+			fs.writeFileSync(
+				tmux,
+				[
+					"#!/usr/bin/env bash",
+					'printf \'%s\\n\' "$*" >> "$TMUX_CALLS"',
+					'if [ "$3" = "display-message" ]; then printf \'$42\\tskc_lc_owner-123\\n\'; exit 0; fi',
+					'if [ "$3" = "if-shell" ]; then printf "__skc_lifecycle_metadata_ok__\\n"; exit 0; fi',
 
-				'if [ "$1" = "new-session" ]; then printf \'$42\\n\'; fi',
-				"exit 0",
-				"",
-			].join("\n"),
-		);
-		fs.chmodSync(tmux, 0o755);
-		let probeCalls = 0;
-		const result = await daemonSpawnCreate(
-			{ ...process.env, SKC_TMUX_COMMAND: tmux, TMUX_CALLS: callsFile },
-			{
-				ownerIsolationProbe: {
-					readCallerCgroup: async () => "/skc-lifecycle-test.scope\n",
-					probeServer: async () =>
-						++probeCalls === 1
-							? { state: "absent" }
-							: {
-									state: "safe",
-									pid: process.pid,
-									startTime: "1",
-									cgroup: { classification: "safe", scope: "/skc-lifecycle-test.scope" },
-									sessionNames: ["skc_lc_owner-123"],
-								},
+					'if [ "$1" = "new-session" ]; then printf \'$42\\n\'; fi',
+					"exit 0",
+					"",
+				].join("\n"),
+			);
+			fs.chmodSync(tmux, 0o755);
+			let probeCalls = 0;
+			const result = await daemonSpawnCreate(
+				{ ...process.env, SKC_TMUX_COMMAND: tmux, TMUX_CALLS: callsFile },
+				{
+					ownerIsolationProbe: {
+						readCallerCgroup: async () => "/skc-lifecycle-test.scope\n",
+						probeServer: async () =>
+							++probeCalls === 1
+								? { state: "absent" }
+								: {
+										state: "safe",
+										pid: process.pid,
+										startTime: "1",
+										cgroup: { classification: "safe", scope: "/skc-lifecycle-test.scope" },
+										sessionNames: ["skc_lc_owner-123"],
+									},
+					},
 				},
-			},
-		)(createFrame({ target: { kind: "existing_path", path: proj } }), {
-			lifecycleRequestId: "lc-owner",
-			intendedSessionId: "owner-123",
-		});
+			)(createFrame({ target: { kind: "existing_path", path: proj } }), {
+				lifecycleRequestId: "lc-owner",
+				intendedSessionId: "owner-123",
+			});
 
-		expect(probeCalls).toBe(8);
-		expect(result.sessionStateFile).toBe(
-			path.join(proj, ".skc", "_session-owner-123", "runtime", "tmux-sessions", "skc-lc-owner-123.json"),
-		);
-		const generation = JSON.parse(
-			fs.readFileSync(
-				path.join(path.dirname(result.sessionStateFile!), "owner-123", "owner-lifecycle", "generation.json"),
-				"utf8",
-			),
-		).generation;
-		expect(generation).toMatch(/^[0-9a-f-]{36}$/);
-		const calls = fs.readFileSync(callsFile, "utf8");
-		expect(calls).toContain(`SKC_TMUX_OWNER_GENERATION='${generation}'`);
-		expect(calls).toContain(`SKC_TMUX_OWNER_STATE_DIR='${path.dirname(result.sessionStateFile!)}'`);
-		expect(calls).toContain("SKC_TMUX_OWNER_SERVER_KEY='default'");
-		expect(calls).toContain("@skc-owner-generation");
-		expect(calls).toContain("@skc-owner-server-key");
-		expect(calls).not.toContain("SKC_OWNER_");
-		expect(calls).toContain(`SKC_COORDINATOR_SESSION_STATE_FILE='${result.sessionStateFile}'`);
-		expect(calls).not.toContain("skc-lifecycle-owner-isolation");
-		fs.rmSync(root, { recursive: true, force: true });
-	});
+			expect(probeCalls).toBe(8);
+			expect(result.sessionStateFile).toBe(
+				path.join(proj, ".skc", "_session-owner-123", "runtime", "tmux-sessions", "skc-lc-owner-123.json"),
+			);
+			const generation = JSON.parse(
+				fs.readFileSync(
+					path.join(path.dirname(result.sessionStateFile!), "owner-123", "owner-lifecycle", "generation.json"),
+					"utf8",
+				),
+			).generation;
+			expect(generation).toMatch(/^[0-9a-f-]{36}$/);
+			const calls = fs.readFileSync(callsFile, "utf8");
+			expect(calls).toContain(`SKC_TMUX_OWNER_GENERATION='${generation}'`);
+			expect(calls).toContain(`SKC_TMUX_OWNER_STATE_DIR='${path.dirname(result.sessionStateFile!)}'`);
+			expect(calls).toContain("SKC_TMUX_OWNER_SERVER_KEY='default'");
+			expect(calls).toMatch(/SKC_MANAGED_OWNER_RUN_ID='[0-9a-f-]{36}'/i);
+			expect(calls).toMatch(/SKC_MANAGED_OWNER_INCARNATION='[0-9a-f-]{36}'/i);
+			expect(calls).toContain("@skc-owner-generation");
+			expect(calls).toContain("@skc-owner-server-key");
+			expect(calls).not.toContain("SKC_OWNER_");
+			expect(calls).toContain(`SKC_COORDINATOR_SESSION_STATE_FILE='${result.sessionStateFile}'`);
+			expect(calls).not.toContain("skc-lifecycle-owner-isolation");
+			fs.rmSync(root, { recursive: true, force: true });
+		},
+	);
 
-	it("cleans the immutable spawned session after post-spawn generation proof fails", async () => {
+	posixTmuxIt("cleans the immutable spawned session after post-spawn generation proof fails", async () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "skc-lifecycle-stale-generation-"));
 		const project = path.join(root, "project");
 		const tmux = path.join(root, "fake-tmux.sh");
@@ -1208,7 +1480,7 @@ describe("lifecycle control runtime", () => {
 		}
 	});
 
-	it("fails create when required tmux owner metadata cannot be written", async () => {
+	posixTmuxIt("fails create when required tmux owner metadata cannot be written", async () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "skc-create-metadata-failure-"));
 		const proj = path.join(root, "project");
 		const tmux = path.join(root, "fake-tmux.sh");
@@ -1254,191 +1526,188 @@ describe("lifecycle control runtime", () => {
 		).rejects.toThrow("skc_lifecycle_metadata_write_failed");
 		fs.rmSync(root, { recursive: true, force: true });
 	});
-	it("refuses unsafe or unverifiable servers before daemon create or cold-resume can mutate tmux", async () => {
-		const root = fs.mkdtempSync(path.join(os.tmpdir(), "skc-pre-mutation-refusal-"));
-		const project = path.join(root, "project");
-		const sessions = path.join(root, "sessions");
-		const callsFile = path.join(root, "tmux-calls.log");
-		const tmux = path.join(root, "fake-tmux.sh");
-		fs.mkdirSync(project, { recursive: true });
-		fs.mkdirSync(sessions, { recursive: true });
-		fs.writeFileSync(
-			path.join(sessions, "resume-123.jsonl"),
-			`${JSON.stringify({ id: "resume-123", cwd: project })}\n`,
-		);
-		fs.writeFileSync(tmux, ["#!/usr/bin/env bash", 'printf "%s\\n" "$*" >> "$TMUX_CALLS"', "exit 0", ""].join("\n"));
-		fs.chmodSync(tmux, 0o755);
-		try {
-			for (const state of ["unsafe", "unverifiable"] as const) {
-				const probe = {
-					readCallerCgroup: async () => "/skc-lifecycle-test.scope\n",
-					probeServer: async () => ({ state }),
-				};
+	posixTmuxIt(
+		"refuses unsafe or unverifiable servers before daemon create or cold-resume can mutate tmux",
+		async () => {
+			const root = fs.mkdtempSync(path.join(os.tmpdir(), "skc-pre-mutation-refusal-"));
+			const project = path.join(root, "project");
+			const callsFile = path.join(root, "tmux-calls.log");
+			const tmux = path.join(root, "fake-tmux.sh");
+			fs.mkdirSync(project, { recursive: true });
+			await writeManagedSession(root, project, "resume-123");
+			fs.writeFileSync(
+				tmux,
+				["#!/usr/bin/env bash", 'printf "%s\\n" "$*" >> "$TMUX_CALLS"', "exit 0", ""].join("\n"),
+			);
+			fs.chmodSync(tmux, 0o755);
+			try {
+				for (const state of ["unsafe", "unverifiable"] as const) {
+					const probe = {
+						readCallerCgroup: async () => "/skc-lifecycle-test.scope\n",
+						probeServer: async () => ({ state }),
+					};
+					await expect(
+						daemonSpawnCreate(
+							{ ...process.env, SKC_TMUX_COMMAND: tmux, TMUX_CALLS: callsFile },
+							{ ownerIsolationProbe: probe },
+						)(createFrame({ target: { kind: "existing_path", path: project } }), {
+							lifecycleRequestId: `create-${state}`,
+							intendedSessionId: `create-${state}`,
+						}),
+					).rejects.toThrow(`skc_lifecycle_owner_server_${state}`);
+					const uncreatedPlainDir = path.join(root, `plain-${state}`);
+					await expect(
+						daemonSpawnCreate(
+							{ ...process.env, SKC_TMUX_COMMAND: tmux, TMUX_CALLS: callsFile },
+							{ ownerIsolationProbe: probe },
+						)(createFrame({ target: { kind: "plain_dir", path: uncreatedPlainDir } }), {
+							lifecycleRequestId: `plain-${state}`,
+							intendedSessionId: `plain-${state}`,
+						}),
+					).rejects.toThrow(`skc_lifecycle_owner_server_${state}`);
+					expect(fs.existsSync(uncreatedPlainDir)).toBe(false);
+					await expect(
+						daemonResumeSession(
+							{ ...process.env, SKC_TMUX_COMMAND: tmux, TMUX_CALLS: callsFile },
+							{ sessionsRoot: root, listSessions: () => [], ownerIsolationProbe: probe },
+						)({ sessionIdOrPrefix: "resume-123", path: project }),
+					).rejects.toThrow(`skc_lifecycle_owner_server_${state}`);
+				}
+				expect(fs.existsSync(callsFile) ? fs.readFileSync(callsFile, "utf8") : "").toBe("");
+			} finally {
+				fs.rmSync(root, { recursive: true, force: true });
+			}
+		},
+	);
+
+	posixTmuxIt(
+		"writes no create ownership tags when a replacement server reuses the native session before the guarded metadata queue",
+		async () => {
+			const root = fs.mkdtempSync(path.join(os.tmpdir(), "skc-required-metadata-"));
+			const project = path.join(root, "project");
+			const callsFile = path.join(root, "tmux-calls.log");
+			const tmux = path.join(root, "fake-tmux.sh");
+			fs.mkdirSync(project, { recursive: true });
+			fs.writeFileSync(
+				tmux,
+				[
+					"#!/usr/bin/env bash",
+					'printf "%s\\n" "$*" >> "$TMUX_CALLS"',
+					'if [ "$3" = "display-message" ]; then printf \'$42\\tskc_lc_metadata-refusal\\n\'; exit 0; fi',
+					'if [ "$1" = "new-session" ]; then printf \'$42\\n\'; exit 0; fi',
+					'if [ "$3" = "if-shell" ]; then printf "__skc_lifecycle_metadata_refused__\\n"; exit 0; fi',
+					"exit 0",
+					"",
+				].join("\n"),
+			);
+			fs.chmodSync(tmux, 0o755);
+			let probeCalls = 0;
+			try {
 				await expect(
 					daemonSpawnCreate(
 						{ ...process.env, SKC_TMUX_COMMAND: tmux, TMUX_CALLS: callsFile },
-						{ ownerIsolationProbe: probe },
+						{
+							ownerIsolationProbe: {
+								readCallerCgroup: async () => "/skc-lifecycle-test.scope\n",
+								probeServer: async () => {
+									probeCalls++;
+									return {
+										state: "safe" as const,
+										pid: probeCalls > 6 ? process.pid + 1 : process.pid,
+										startTime: "1",
+										cgroup: { classification: "safe" as const },
+										sessionNames: ["skc_lc_metadata-refusal"],
+									};
+								},
+							},
+						},
 					)(createFrame({ target: { kind: "existing_path", path: project } }), {
-						lifecycleRequestId: `create-${state}`,
-						intendedSessionId: `create-${state}`,
+						lifecycleRequestId: "metadata-refusal",
+						intendedSessionId: "metadata-refusal",
 					}),
-				).rejects.toThrow(`skc_lifecycle_owner_server_${state}`);
-				const uncreatedPlainDir = path.join(root, `plain-${state}`);
-				await expect(
-					daemonSpawnCreate(
-						{ ...process.env, SKC_TMUX_COMMAND: tmux, TMUX_CALLS: callsFile },
-						{ ownerIsolationProbe: probe },
-					)(createFrame({ target: { kind: "plain_dir", path: uncreatedPlainDir } }), {
-						lifecycleRequestId: `plain-${state}`,
-						intendedSessionId: `plain-${state}`,
-					}),
-				).rejects.toThrow(`skc_lifecycle_owner_server_${state}`);
-				expect(fs.existsSync(uncreatedPlainDir)).toBe(false);
+				).rejects.toThrow("skc_lifecycle_cleanup_uncertain");
+				const calls = fs.readFileSync(callsFile, "utf8").trim().split("\n");
+				const guarded = calls.filter(call => call.startsWith("-L default if-shell "));
+				expect(guarded).toHaveLength(1);
+				expect(calls.filter(call => call.startsWith("set-option "))).toEqual([]);
+				expect(calls.filter(call => call === "-L default kill-session -t =$42")).toEqual([]);
+				expect(guarded[0]).toContain(`#{pid},${process.pid}`);
+				expect(guarded[0]).toContain("#{session_id},$42");
+				expect(guarded[0]).toContain("#{session_name},skc_lc_metadata-refusal");
+			} finally {
+				fs.rmSync(root, { recursive: true, force: true });
+			}
+		},
+	);
+
+	posixTmuxIt(
+		"writes no cold-resume ownership tags when a replacement server reuses the native session before metadata",
+		async () => {
+			const root = fs.mkdtempSync(path.join(os.tmpdir(), "skc-cold-resume-metadata-"));
+			const project = path.join(root, "project");
+			const callsFile = path.join(root, "tmux-calls.log");
+			const tmux = path.join(root, "fake-tmux.sh");
+			fs.mkdirSync(project, { recursive: true });
+			await writeManagedSession(root, project, "resume-replacement");
+			fs.writeFileSync(
+				tmux,
+				[
+					"#!/usr/bin/env bash",
+					'printf "%s\\n" "$*" >> "$TMUX_CALLS"',
+					'if [ "$3" = "display-message" ]; then printf \'$42\\tskc_lc_resume-replacement\\n\'; exit 0; fi',
+					'if [ "$1" = "new-session" ]; then printf \'$42\\n\'; exit 0; fi',
+					"# Simulate the replacement server rejecting the guarded predicates before any tag command executes.",
+					'if [ "$3" = "if-shell" ]; then printf "__skc_lifecycle_metadata_refused__\\n"; exit 0; fi',
+					"exit 0",
+					"",
+				].join("\n"),
+			);
+			fs.chmodSync(tmux, 0o755);
+			let probeCalls = 0;
+			try {
 				await expect(
 					daemonResumeSession(
 						{ ...process.env, SKC_TMUX_COMMAND: tmux, TMUX_CALLS: callsFile },
-						{ sessionsRoot: root, listSessions: () => [], ownerIsolationProbe: probe },
-					)({ sessionIdOrPrefix: "resume-123" }),
-				).rejects.toThrow(`skc_lifecycle_owner_server_${state}`);
+						{
+							sessionsRoot: root,
+							listSessions: () => [],
+							ownerIsolationProbe: {
+								readCallerCgroup: async () => "/skc-lifecycle-test.scope\n",
+								probeServer: async () => {
+									probeCalls++;
+									return {
+										state: "safe" as const,
+										pid: probeCalls > 6 ? process.pid + 1 : process.pid,
+										startTime: "1",
+										cgroup: { classification: "safe" as const },
+										sessionNames: ["skc_lc_resume-replacement"],
+									};
+								},
+							},
+						},
+					)({ sessionIdOrPrefix: "resume-replacement", path: project }),
+				).rejects.toThrow("skc_lifecycle_cleanup_uncertain");
+				const calls = fs.readFileSync(callsFile, "utf8").trim().split("\n");
+				const guarded = calls.filter(call => call.startsWith("-L default if-shell "));
+				expect(guarded).toHaveLength(1);
+				expect(guarded[0]).toContain(`#{pid},${process.pid}`);
+				expect(guarded[0]).toContain("#{session_id},$42");
+				expect(guarded[0]).toContain("#{session_name},skc_lc_resume-replacement");
+				expect(calls.filter(call => call.startsWith("set-option "))).toEqual([]);
+				expect(calls.filter(call => call === "-L default kill-session -t =$42")).toEqual([]);
+			} finally {
+				fs.rmSync(root, { recursive: true, force: true });
 			}
-			expect(fs.existsSync(callsFile) ? fs.readFileSync(callsFile, "utf8") : "").toBe("");
-		} finally {
-			fs.rmSync(root, { recursive: true, force: true });
-		}
-	});
+		},
+	);
 
-	it("writes no create ownership tags when a replacement server reuses the native session before the guarded metadata queue", async () => {
-		const root = fs.mkdtempSync(path.join(os.tmpdir(), "skc-required-metadata-"));
-		const project = path.join(root, "project");
-		const callsFile = path.join(root, "tmux-calls.log");
-		const tmux = path.join(root, "fake-tmux.sh");
-		fs.mkdirSync(project, { recursive: true });
-		fs.writeFileSync(
-			tmux,
-			[
-				"#!/usr/bin/env bash",
-				'printf "%s\\n" "$*" >> "$TMUX_CALLS"',
-				'if [ "$3" = "display-message" ]; then printf \'$42\\tskc_lc_metadata-refusal\\n\'; exit 0; fi',
-				'if [ "$1" = "new-session" ]; then printf \'$42\\n\'; exit 0; fi',
-				'if [ "$3" = "if-shell" ]; then printf "__skc_lifecycle_metadata_refused__\\n"; exit 0; fi',
-				"exit 0",
-				"",
-			].join("\n"),
-		);
-		fs.chmodSync(tmux, 0o755);
-		let probeCalls = 0;
-		try {
-			await expect(
-				daemonSpawnCreate(
-					{ ...process.env, SKC_TMUX_COMMAND: tmux, TMUX_CALLS: callsFile },
-					{
-						ownerIsolationProbe: {
-							readCallerCgroup: async () => "/skc-lifecycle-test.scope\n",
-							probeServer: async () => {
-								probeCalls++;
-								return {
-									state: "safe" as const,
-									pid: probeCalls > 6 ? process.pid + 1 : process.pid,
-									startTime: "1",
-									cgroup: { classification: "safe" as const },
-									sessionNames: ["skc_lc_metadata-refusal"],
-								};
-							},
-						},
-					},
-				)(createFrame({ target: { kind: "existing_path", path: project } }), {
-					lifecycleRequestId: "metadata-refusal",
-					intendedSessionId: "metadata-refusal",
-				}),
-			).rejects.toThrow("skc_lifecycle_cleanup_uncertain");
-			const calls = fs.readFileSync(callsFile, "utf8").trim().split("\n");
-			const guarded = calls.filter(call => call.startsWith("-L default if-shell "));
-			expect(guarded).toHaveLength(1);
-			expect(calls.filter(call => call.startsWith("set-option "))).toEqual([]);
-			expect(calls.filter(call => call === "-L default kill-session -t =$42")).toEqual([]);
-			expect(guarded[0]).toContain(`#{pid},${process.pid}`);
-			expect(guarded[0]).toContain("#{session_id},$42");
-			expect(guarded[0]).toContain("#{session_name},skc_lc_metadata-refusal");
-		} finally {
-			fs.rmSync(root, { recursive: true, force: true });
-		}
-	});
-
-	it("writes no cold-resume ownership tags when a replacement server reuses the native session before metadata", async () => {
-		const root = fs.mkdtempSync(path.join(os.tmpdir(), "skc-cold-resume-metadata-"));
-		const project = path.join(root, "project");
-		const history = path.join(root, "history");
-		const callsFile = path.join(root, "tmux-calls.log");
-		const tmux = path.join(root, "fake-tmux.sh");
-		fs.mkdirSync(project, { recursive: true });
-		fs.mkdirSync(history, { recursive: true });
-		fs.writeFileSync(
-			path.join(history, "resume-replacement.jsonl"),
-			`${JSON.stringify({ id: "resume-replacement", cwd: project })}\n`,
-		);
-		fs.writeFileSync(
-			tmux,
-			[
-				"#!/usr/bin/env bash",
-				'printf "%s\\n" "$*" >> "$TMUX_CALLS"',
-				'if [ "$3" = "display-message" ]; then printf \'$42\\tskc_lc_resume-replacement\\n\'; exit 0; fi',
-				'if [ "$1" = "new-session" ]; then printf \'$42\\n\'; exit 0; fi',
-				"# Simulate the replacement server rejecting the guarded predicates before any tag command executes.",
-				'if [ "$3" = "if-shell" ]; then printf "__skc_lifecycle_metadata_refused__\\n"; exit 0; fi',
-				"exit 0",
-				"",
-			].join("\n"),
-		);
-		fs.chmodSync(tmux, 0o755);
-		let probeCalls = 0;
-		try {
-			await expect(
-				daemonResumeSession(
-					{ ...process.env, SKC_TMUX_COMMAND: tmux, TMUX_CALLS: callsFile },
-					{
-						sessionsRoot: root,
-						listSessions: () => [],
-						ownerIsolationProbe: {
-							readCallerCgroup: async () => "/skc-lifecycle-test.scope\n",
-							probeServer: async () => {
-								probeCalls++;
-								return {
-									state: "safe" as const,
-									pid: probeCalls > 6 ? process.pid + 1 : process.pid,
-									startTime: "1",
-									cgroup: { classification: "safe" as const },
-									sessionNames: ["skc_lc_resume-replacement"],
-								};
-							},
-						},
-					},
-				)({ sessionIdOrPrefix: "resume-replacement" }),
-			).rejects.toThrow("skc_lifecycle_cleanup_uncertain");
-			const calls = fs.readFileSync(callsFile, "utf8").trim().split("\n");
-			const guarded = calls.filter(call => call.startsWith("-L default if-shell "));
-			expect(guarded).toHaveLength(1);
-			expect(guarded[0]).toContain(`#{pid},${process.pid}`);
-			expect(guarded[0]).toContain("#{session_id},$42");
-			expect(guarded[0]).toContain("#{session_name},skc_lc_resume-replacement");
-			expect(calls.filter(call => call.startsWith("set-option "))).toEqual([]);
-			expect(calls.filter(call => call === "-L default kill-session -t =$42")).toEqual([]);
-		} finally {
-			fs.rmSync(root, { recursive: true, force: true });
-		}
-	});
-
-	it("refuses psmux before create or cold-resume can mutate lifecycle state", async () => {
+	posixTmuxIt("refuses psmux before create or cold-resume can mutate lifecycle state", async () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "skc-lifecycle-psmux-"));
 		const project = path.join(root, "project");
-		const sessions = path.join(root, "sessions");
 		const psmux = path.join(root, "psmux");
 		const plain = path.join(root, "plain");
 		fs.mkdirSync(project, { recursive: true });
-		fs.mkdirSync(sessions, { recursive: true });
-		fs.writeFileSync(
-			path.join(sessions, "resume-123.jsonl"),
-			`${JSON.stringify({ id: "resume-123", cwd: project })}\n`,
-		);
+		await writeManagedSession(root, project, "resume-123");
 		fs.writeFileSync(psmux, "#!/usr/bin/env bash\nexit 99\n");
 		fs.chmodSync(psmux, 0o755);
 		const env = { ...process.env, SKC_TMUX_COMMAND: psmux, SKC_PSMUX_COMMAND: psmux };
@@ -1459,6 +1728,19 @@ describe("lifecycle control runtime", () => {
 					},
 				})({
 					sessionIdOrPrefix: "resume-123",
+					path: project,
+				}),
+			).rejects.toThrow("skc_lifecycle_psmux_unsupported");
+			expect(listSessionsCalled).toBe(false);
+			await expect(
+				daemonResumeSession(env, {
+					sessionsRoot: root,
+					listSessions: () => {
+						listSessionsCalled = true;
+						return [];
+					},
+				})({
+					sessionIdOrPrefix: "resume-123",
 				}),
 			).rejects.toThrow("skc_lifecycle_psmux_unsupported");
 			expect(listSessionsCalled).toBe(false);
@@ -1469,60 +1751,63 @@ describe("lifecycle control runtime", () => {
 		}
 	});
 
-	it("rejects missing or noisy native receipts with cleanup uncertainty and no generation publication", async () => {
-		const root = fs.mkdtempSync(path.join(os.tmpdir(), "skc-lifecycle-receipt-"));
-		const project = path.join(root, "project");
-		const tmux = path.join(root, "fake-tmux.sh");
-		const calls = path.join(root, "calls.log");
-		fs.mkdirSync(project, { recursive: true });
-		fs.writeFileSync(
-			tmux,
-			[
-				"#!/usr/bin/env bash",
-				'printf "%s\\n" "$*" >> "$TMUX_CALLS"',
-				'if [ "$3" = "display-message" ]; then printf \'$43\\tskc_lc_receipt-123\\n\'; exit 0; fi',
+	posixTmuxIt(
+		"rejects missing or noisy native receipts with cleanup uncertainty and no generation publication",
+		async () => {
+			const root = fs.mkdtempSync(path.join(os.tmpdir(), "skc-lifecycle-receipt-"));
+			const project = path.join(root, "project");
+			const tmux = path.join(root, "fake-tmux.sh");
+			const calls = path.join(root, "calls.log");
+			fs.mkdirSync(project, { recursive: true });
+			fs.writeFileSync(
+				tmux,
+				[
+					"#!/usr/bin/env bash",
+					'printf "%s\\n" "$*" >> "$TMUX_CALLS"',
+					'if [ "$3" = "display-message" ]; then printf \'$43\\tskc_lc_receipt-123\\n\'; exit 0; fi',
 
-				'if [ "$1" = "new-session" ]; then printf "$RECEIPT"; fi',
-				"exit 0",
-				"",
-			].join("\n"),
-		);
-		fs.chmodSync(tmux, 0o755);
-		try {
-			for (const receipt of ["", "$42\n", " $42\n", "$42\n\n", "$42\nnoise"]) {
-				fs.rmSync(calls, { force: true });
-				await expect(
-					daemonSpawnCreate(
-						{ ...process.env, SKC_TMUX_COMMAND: tmux, TMUX_CALLS: calls, RECEIPT: receipt },
-						{
-							ownerIsolationProbe: {
-								readCallerCgroup: async () => "/skc-lifecycle-test.scope\n",
-								probeServer: async () => ({
-									state: "safe" as const,
-									pid: process.pid,
-									startTime: "1",
-									cgroup: { classification: "safe" as const },
-									sessionNames: ["skc_lc_receipt-123"],
-								}),
+					'if [ "$1" = "new-session" ]; then printf "$RECEIPT"; fi',
+					"exit 0",
+					"",
+				].join("\n"),
+			);
+			fs.chmodSync(tmux, 0o755);
+			try {
+				for (const receipt of ["", "$42\n", " $42\n", "$42\n\n", "$42\nnoise"]) {
+					fs.rmSync(calls, { force: true });
+					await expect(
+						daemonSpawnCreate(
+							{ ...process.env, SKC_TMUX_COMMAND: tmux, TMUX_CALLS: calls, RECEIPT: receipt },
+							{
+								ownerIsolationProbe: {
+									readCallerCgroup: async () => "/skc-lifecycle-test.scope\n",
+									probeServer: async () => ({
+										state: "safe" as const,
+										pid: process.pid,
+										startTime: "1",
+										cgroup: { classification: "safe" as const },
+										sessionNames: ["skc_lc_receipt-123"],
+									}),
+								},
 							},
-						},
-					)(createFrame({ target: { kind: "existing_path", path: project } }), {
-						lifecycleRequestId: "receipt",
-						intendedSessionId: "receipt-123",
-					}),
-				).rejects.toThrow("skc_lifecycle_cleanup_uncertain");
-				const logged = fs.readFileSync(calls, "utf8");
-				expect(logged).toContain("new-session");
-				expect(logged).not.toContain("kill-session");
-				expect(logged).not.toContain("set-option");
+						)(createFrame({ target: { kind: "existing_path", path: project } }), {
+							lifecycleRequestId: "receipt",
+							intendedSessionId: "receipt-123",
+						}),
+					).rejects.toThrow("skc_lifecycle_cleanup_uncertain");
+					const logged = fs.readFileSync(calls, "utf8");
+					expect(logged).toContain("new-session");
+					expect(logged).not.toContain("kill-session");
+					expect(logged).not.toContain("set-option");
+				}
+				expect(fs.existsSync(path.join(project, ".skc"))).toBe(false);
+			} finally {
+				fs.rmSync(root, { recursive: true, force: true });
 			}
-			expect(fs.existsSync(path.join(project, ".skc"))).toBe(false);
-		} finally {
-			fs.rmSync(root, { recursive: true, force: true });
-		}
-	});
+		},
+	);
 
-	it("combines required metadata failure with cleanup preproof or guarded-mutation uncertainty", async () => {
+	posixTmuxIt("combines required metadata failure with cleanup preproof or guarded-mutation uncertainty", async () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "skc-lifecycle-cleanup-"));
 		const project = path.join(root, "project");
 		const tmux = path.join(root, "fake-tmux.sh");
@@ -1589,63 +1874,66 @@ describe("lifecycle control runtime", () => {
 		}
 	});
 
-	it("refuses cleanup when a replacement arrives between external preproof and the guarded mutation", async () => {
-		const root = fs.mkdtempSync(path.join(os.tmpdir(), "skc-lifecycle-cleanup-replacement-"));
-		const project = path.join(root, "project");
-		const tmux = path.join(root, "fake-tmux.sh");
-		const calls = path.join(root, "calls.log");
-		fs.mkdirSync(project, { recursive: true });
-		fs.writeFileSync(
-			tmux,
-			[
-				"#!/usr/bin/env bash",
-				'printf "%s\\n" "$*" >> "$TMUX_CALLS"',
-				'if [ "$3" = "display-message" ]; then printf \'$42\\tskc_lc_cleanup-replacement\\n\'; exit 0; fi',
-				'if [ "$1" = "new-session" ]; then printf \'$42\\n\'; exit 0; fi',
-				"# The external proof passed, but the replacement server rejects cleanup atomically.",
-				'if [[ "$*" == *"__skc_lifecycle_cleanup_ok__"* ]]; then printf "__skc_lifecycle_cleanup_refused__\\n"; exit 0; fi',
-				'if [ "$3" = "if-shell" ]; then printf "__skc_lifecycle_metadata_refused__\\n"; exit 0; fi',
-				"exit 0",
-				"",
-			].join("\n"),
-		);
-		fs.chmodSync(tmux, 0o755);
-		try {
-			await expect(
-				daemonSpawnCreate(
-					{ ...process.env, SKC_TMUX_COMMAND: tmux, TMUX_CALLS: calls },
-					{
-						ownerIsolationProbe: {
-							readCallerCgroup: async () => "/skc-lifecycle-test.scope\n",
-							probeServer: async () => ({
-								state: "safe" as const,
-								pid: process.pid,
-								startTime: "1",
-								cgroup: { classification: "safe" as const },
-								sessionNames: ["skc_lc_cleanup-replacement"],
-							}),
-						},
-					},
-				)(createFrame({ target: { kind: "existing_path", path: project } }), {
-					lifecycleRequestId: "cleanup-replacement",
-					intendedSessionId: "cleanup-replacement",
-				}),
-			).rejects.toThrow("skc_lifecycle_cleanup_uncertain");
-			const logged = fs.readFileSync(calls, "utf8").trim().split("\n");
-			const guarded = logged.filter(
-				call => call.startsWith("-L default if-shell ") && call.includes("__skc_lifecycle_cleanup_ok__"),
+	posixTmuxIt(
+		"refuses cleanup when a replacement arrives between external preproof and the guarded mutation",
+		async () => {
+			const root = fs.mkdtempSync(path.join(os.tmpdir(), "skc-lifecycle-cleanup-replacement-"));
+			const project = path.join(root, "project");
+			const tmux = path.join(root, "fake-tmux.sh");
+			const calls = path.join(root, "calls.log");
+			fs.mkdirSync(project, { recursive: true });
+			fs.writeFileSync(
+				tmux,
+				[
+					"#!/usr/bin/env bash",
+					'printf "%s\\n" "$*" >> "$TMUX_CALLS"',
+					'if [ "$3" = "display-message" ]; then printf \'$42\\tskc_lc_cleanup-replacement\\n\'; exit 0; fi',
+					'if [ "$1" = "new-session" ]; then printf \'$42\\n\'; exit 0; fi',
+					"# The external proof passed, but the replacement server rejects cleanup atomically.",
+					'if [[ "$*" == *"__skc_lifecycle_cleanup_ok__"* ]]; then printf "__skc_lifecycle_cleanup_refused__\\n"; exit 0; fi',
+					'if [ "$3" = "if-shell" ]; then printf "__skc_lifecycle_metadata_refused__\\n"; exit 0; fi',
+					"exit 0",
+					"",
+				].join("\n"),
 			);
-			expect(guarded).toHaveLength(1);
-			expect(guarded[0]).toContain(`#{pid},${process.pid}`);
-			expect(guarded[0]).toContain("#{session_id},$42");
-			expect(guarded[0]).toContain("#{session_name},skc_lc_cleanup-replacement");
-			expect(logged).not.toContain("-L default kill-session -t =$42");
-		} finally {
-			fs.rmSync(root, { recursive: true, force: true });
-		}
-	});
+			fs.chmodSync(tmux, 0o755);
+			try {
+				await expect(
+					daemonSpawnCreate(
+						{ ...process.env, SKC_TMUX_COMMAND: tmux, TMUX_CALLS: calls },
+						{
+							ownerIsolationProbe: {
+								readCallerCgroup: async () => "/skc-lifecycle-test.scope\n",
+								probeServer: async () => ({
+									state: "safe" as const,
+									pid: process.pid,
+									startTime: "1",
+									cgroup: { classification: "safe" as const },
+									sessionNames: ["skc_lc_cleanup-replacement"],
+								}),
+							},
+						},
+					)(createFrame({ target: { kind: "existing_path", path: project } }), {
+						lifecycleRequestId: "cleanup-replacement",
+						intendedSessionId: "cleanup-replacement",
+					}),
+				).rejects.toThrow("skc_lifecycle_cleanup_uncertain");
+				const logged = fs.readFileSync(calls, "utf8").trim().split("\n");
+				const guarded = logged.filter(
+					call => call.startsWith("-L default if-shell ") && call.includes("__skc_lifecycle_cleanup_ok__"),
+				);
+				expect(guarded).toHaveLength(1);
+				expect(guarded[0]).toContain(`#{pid},${process.pid}`);
+				expect(guarded[0]).toContain("#{session_id},$42");
+				expect(guarded[0]).toContain("#{session_name},skc_lc_cleanup-replacement");
+				expect(logged).not.toContain("-L default kill-session -t =$42");
+			} finally {
+				fs.rmSync(root, { recursive: true, force: true });
+			}
+		},
+	);
 
-	it("does not publish generation when the tmux server changes during metadata writes", async () => {
+	posixTmuxIt("does not publish generation when the tmux server changes during metadata writes", async () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "skc-lifecycle-metadata-race-"));
 		const project = path.join(root, "project");
 		const tmux = path.join(root, "fake-tmux.sh");

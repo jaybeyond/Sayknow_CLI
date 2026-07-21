@@ -1,319 +1,265 @@
-import { describe, expect, it } from "bun:test";
-import { spawnSync } from "node:child_process";
+import { afterEach, describe, expect, it } from "bun:test";
+import { createHash } from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { buildCoordinatorMcpConfig, coordinatorNamespacePath } from "../../src/coordinator-mcp/policy";
 import { createCoordinatorMcpServer } from "../../src/coordinator-mcp/server";
+import { writeBrokerDiscovery } from "../../src/sdk/broker/discovery";
+import type { SdkClient } from "../../src/sdk/client/client";
 
-async function withTempRoot(run: (root: string) => Promise<void>): Promise<void> {
-	const root = await fs.mkdtemp(path.join(os.tmpdir(), "skc-coord-stop-"));
-	try {
-		await run(root);
-	} finally {
-		await fs.rm(root, { recursive: true, force: true });
-	}
+const tempDirs: string[] = [];
+
+afterEach(async () => {
+	await Promise.all(tempDirs.splice(0).map(dir => fs.rm(dir, { recursive: true, force: true })));
+});
+
+type BrokerControl = { operation: string; input: Record<string, unknown>; idempotencyKey?: string };
+
+const ENDPOINT_GENERATION = 1;
+const ENDPOINT_MTIME_MS = 1;
+
+function endpointIncarnation(sessionId: string): string {
+	return createHash("sha256")
+		.update(
+			JSON.stringify({
+				endpointGeneration: ENDPOINT_GENERATION,
+				endpointMtimeMs: ENDPOINT_MTIME_MS,
+				pid: process.pid,
+				sessionId,
+			}),
+		)
+		.digest("hex");
 }
 
-type MakeOpts = { forceStop?: boolean; forceClose?: (name: string) => Promise<unknown> };
+async function createServer(
+	root: string,
+	options: { forceStop?: boolean; closeFails?: boolean; closeFailures?: number } = {},
+) {
+	const stateRoot = path.join(root, ".skc", "coordinator-state");
+	const agentDir = path.join(root, "agent-global");
+	const controls: BrokerControl[] = [];
+	let closeAttempts = 0;
+	const closedSessionIds = new Set<string>();
 
-function baseEnv(root: string, forceStop?: boolean): Record<string, string> {
+	async function brokerSessions(): Promise<Array<Record<string, unknown>>> {
+		const sessionsDir = path.join(stateRoot, "local", "repo", "sessions");
+		const entries = await fs.readdir(sessionsDir).catch(() => []);
+		const sessions = await Promise.all(
+			entries
+				.filter(entry => entry.endsWith(".json"))
+				.map(async entry => {
+					const session = JSON.parse(await fs.readFile(path.join(sessionsDir, entry), "utf8")) as {
+						session_id?: unknown;
+					};
+					const sessionId = typeof session.session_id === "string" ? session.session_id : "";
+					return {
+						sessionId,
+						locator: { repo: root },
+						live: true,
+						endpointGeneration: ENDPOINT_GENERATION,
+						pid: process.pid,
+						endpointMtimeMs: ENDPOINT_MTIME_MS,
+					};
+				}),
+		);
+		return sessions.filter(session => !closedSessionIds.has(session.sessionId as string));
+	}
+	await writeBrokerDiscovery(agentDir, {
+		version: 1,
+		protocolVersion: 3,
+		packageGeneration: "test",
+		ownerId: "test",
+		pid: process.pid,
+		host: "127.0.0.1",
+		port: 1,
+		url: "ws://sdk.example.test",
+		token: "test-token",
+		startedAt: Date.now(),
+		heartbeatAt: Date.now(),
+	});
+	const server = createCoordinatorMcpServer({
+		env: {
+			SKC_COORDINATOR_MCP_WORKDIR_ROOTS: root,
+			SKC_COORDINATOR_MCP_STATE_ROOT: stateRoot,
+			SKC_COORDINATOR_MCP_MUTATIONS: "sessions",
+			SKC_COORDINATOR_MCP_PROFILE: "local",
+			SKC_COORDINATOR_MCP_REPO: "repo",
+			...(options.forceStop ? { SKC_COORDINATOR_MCP_FORCE_STOP: "1" } : {}),
+		},
+		services: {
+			getAgentDir: () => agentDir,
+			connectSdk: async () =>
+				({
+					global: async (
+						operation: string,
+						input: Record<string, unknown>,
+						opts: { idempotencyKey?: string } = {},
+					) => {
+						controls.push({ operation, input, idempotencyKey: opts.idempotencyKey });
+						if (operation === "session.list") return { ok: true, result: { sessions: await brokerSessions() } };
+						if (operation === "session.close") {
+							closeAttempts += 1;
+							if (options.closeFails || closeAttempts <= (options.closeFailures ?? 0))
+								return { ok: false, error: { code: "close_refused", message: "SDK refused close" } };
+							closedSessionIds.add(String(input.sessionId));
+						}
+						return { ok: true, result: { sessionId: input.sessionId } };
+					},
+					close: async () => {},
+				}) as unknown as SdkClient,
+		},
+	});
 	return {
-		SKC_COORDINATOR_MCP_WORKDIR_ROOTS: root,
-		SKC_COORDINATOR_MCP_MUTATIONS: "sessions,questions,reports",
-		SKC_COORDINATOR_MCP_STATE_ROOT: path.join(root, ".state"),
-		SKC_COORDINATOR_MCP_PROFILE: "stop-controller",
-		SKC_COORDINATOR_MCP_REPO: "repo-stop",
-		...(forceStop ? { SKC_COORDINATOR_MCP_FORCE_STOP: "1" } : {}),
+		server,
+		controls,
+		sessionFile: (id: string) => path.join(stateRoot, "local", "repo", "sessions", `${id}.json`),
 	};
 }
 
-function makeServer(root: string, opts: MakeOpts = {}) {
-	let n = 0;
-	const calls: string[] = [];
-	const env = baseEnv(root, opts.forceStop);
-	const server = createCoordinatorMcpServer({
-		env,
-		services: {
-			startSession: async (input: {
-				cwd: string;
-				sessionId: string;
-				launchId: string;
-				readinessMarkerFile: string;
-			}) => {
-				n += 1;
-				// dev's refactored start flow requires the runtime readiness marker + launch metadata
-				// (assertSessionReadinessAuthority + awaitRuntimeReadiness) before the turn is delivered.
-				await Bun.write(
-					input.readinessMarkerFile,
-					`${JSON.stringify({
-						schema_version: 1,
-						session_id: input.sessionId,
-						launch_id: input.launchId,
-						state: "ready_for_input",
-						event: "interactive_input_ready",
-						source: "skc_interactive_runtime",
-						ready_for_input: true,
-						created_at: "2026-07-11T00:00:00.000Z",
-					})}\n`,
-				);
-				return {
-					name: input.sessionId,
-					cwd: input.cwd,
-					createdAt: new Date().toISOString(),
-					tmux_session: `tmux-stop-sess-${n}`,
-					sessionId: input.sessionId,
-					launchId: input.launchId,
-					readinessMarkerFile: input.readinessMarkerFile,
-				};
-			},
-			// Owner-proof termination is injected: the real forceCloseSkcTmuxSession is exercised only
-			// by the Linux-only integration test; here we drive success/failure deterministically.
-			forceCloseSession: async (name: string) => {
-				calls.push(name);
-				return opts.forceClose ? opts.forceClose(name) : {};
-			},
-		},
-	});
-	return { server, env, calls: () => calls };
+async function tempRoot(): Promise<string> {
+	const root = await fs.mkdtemp(path.join(os.tmpdir(), "skc-coordinator-stop-"));
+	tempDirs.push(root);
+	return root;
 }
 
-/** Write an idle ephemeral session (no active turn) directly, matching a completed delegate worker. */
-async function writeEphemeralSession(env: Record<string, string>, id: string): Promise<void> {
-	const ns = coordinatorNamespacePath(buildCoordinatorMcpConfig(env));
-	await fs.mkdir(path.join(ns, "sessions"), { recursive: true });
-	await fs.writeFile(
-		path.join(ns, "sessions", `${id}.json`),
+async function writeSession(
+	file: string,
+	root: string,
+	id: string,
+	overrides: Record<string, unknown> = {},
+): Promise<void> {
+	await fs.mkdir(path.dirname(file), { recursive: true });
+	await Bun.write(
+		file,
 		JSON.stringify({
 			session_id: id,
-			ephemeral: true,
-			tmux_session: `tmux-${id}`,
-			created_at: new Date().toISOString(),
+			cwd: root,
+			created_at: new Date(Date.now() - 31 * 60_000).toISOString(),
+			broker_workspace: await fs.realpath(root),
+			endpoint_generation: ENDPOINT_GENERATION,
+			endpoint_incarnation: endpointIncarnation(id),
+			...overrides,
 		}),
 	);
 }
 
-describe("skc_coordinator_stop_session", () => {
-	it("refuses non-ephemeral without force, and never signals termination", async () => {
-		await withTempRoot(async root => {
-			const { server, calls } = makeServer(root);
-			const started = await server.callTool("skc_coordinator_start_session", { cwd: root, allow_mutation: true });
-			const id = String((started.session as { session_id: string }).session_id);
-			const refused = await server.callTool("skc_coordinator_stop_session", {
-				session_id: id,
-				allow_mutation: true,
-			});
-			expect(refused).toMatchObject({ ok: false, reason: "not_ephemeral", killed: false });
-			expect(calls()).toEqual([]);
-		});
+describe("skc_coordinator_stop_session SDK lifecycle", () => {
+	it("refuses a non-ephemeral session without force and never invokes lifecycle close", async () => {
+		const root = await tempRoot();
+		const { server, controls, sessionFile } = await createServer(root);
+		await writeSession(sessionFile("registered"), root, "registered");
+
+		expect(
+			await server.callTool("skc_coordinator_stop_session", { session_id: "registered", allow_mutation: true }),
+		).toMatchObject({ ok: false, reason: "not_ephemeral", closed: false });
+		expect(controls).toEqual([]);
 	});
 
-	it("refuses force when the force-stop capability is disabled", async () => {
-		await withTempRoot(async root => {
-			const { server, calls } = makeServer(root, { forceStop: false });
-			const started = await server.callTool("skc_coordinator_start_session", { cwd: root, allow_mutation: true });
-			const id = String((started.session as { session_id: string }).session_id);
-			const denied = await server.callTool("skc_coordinator_stop_session", {
-				session_id: id,
+	it("requires the force-stop capability before closing a non-ephemeral session", async () => {
+		const root = await tempRoot();
+		const { server, controls, sessionFile } = await createServer(root);
+		await writeSession(sessionFile("registered"), root, "registered");
+
+		expect(
+			await server.callTool("skc_coordinator_stop_session", {
+				session_id: "registered",
 				force: true,
 				allow_mutation: true,
-			});
-			expect(denied).toMatchObject({ ok: false, reason: "force_not_authorized", killed: false });
-			expect(calls()).toEqual([]);
-		});
+			}),
+		).toMatchObject({ ok: false, reason: "force_not_authorized", closed: false });
+		expect(controls).toEqual([]);
 	});
 
-	it("reaps an idle ephemeral session and purges only after verified termination", async () => {
-		await withTempRoot(async root => {
-			const { server, env, calls } = makeServer(root);
-			await writeEphemeralSession(env, "idle-eph");
-			const reaped = await server.callTool("skc_coordinator_stop_session", {
-				session_id: "idle-eph",
-				allow_mutation: true,
-			});
-			expect(reaped).toMatchObject({ ok: true, killed: true });
-			expect(calls().length).toBe(1); // owner-proof termination invoked exactly once
-			const status = await server.callTool("skc_coordinator_read_status", { session_id: "idle-eph" });
-			expect(status.session ?? null).toBeNull(); // purged
-		});
-	});
+	it("closes an idle ephemeral session through the SDK broker and removes only coordinator metadata", async () => {
+		const root = await tempRoot();
+		const { server, controls, sessionFile } = await createServer(root);
+		await writeSession(sessionFile("ephemeral"), root, "ephemeral", { ephemeral: true });
 
-	it("force-reaps a non-ephemeral session when the capability is enabled", async () => {
-		await withTempRoot(async root => {
-			const { server, calls } = makeServer(root, { forceStop: true });
-			const started = await server.callTool("skc_coordinator_start_session", { cwd: root, allow_mutation: true });
-			const id = String((started.session as { session_id: string }).session_id);
-			const reaped = await server.callTool("skc_coordinator_stop_session", {
-				session_id: id,
-				force: true,
-				allow_mutation: true,
-			});
-			expect(reaped).toMatchObject({ ok: true, killed: true });
-			expect(calls().length).toBe(1);
-		});
-	});
-
-	it("keeps the record for retry when termination fails (no purge, no false reaped event)", async () => {
-		await withTempRoot(async root => {
-			const { server, env } = makeServer(root, {
-				forceClose: async () => {
-					throw new Error("skc_tmux_owner_generation_mismatch:x");
-				},
-			});
-			await writeEphemeralSession(env, "wedged-eph");
-			const failed = await server.callTool("skc_coordinator_stop_session", {
-				session_id: "wedged-eph",
-				allow_mutation: true,
-			});
-			expect(failed).toMatchObject({ ok: false, reason: "terminate_failed", killed: false });
-			// Record survives so a later sweep can retry — never orphan a live tmux session.
-			const status = await server.callTool("skc_coordinator_read_status", { session_id: "wedged-eph" });
-			expect(status.session ?? null).not.toBeNull();
-		});
-	});
-
-	it("refuses to reap a session with an active turn (kill-time TOCTOU guard)", async () => {
-		await withTempRoot(async root => {
-			const { server, calls } = makeServer(root);
-			// A delegate leaves an active turn; the reaper must not kill mid-turn.
-			const d = await server.callTool("skc_delegate_execute", { task: "x", cwd: root, allow_mutation: true });
-			const id = String((d as { session_id: string }).session_id);
-			const blocked = await server.callTool("skc_coordinator_stop_session", {
-				session_id: id,
-				allow_mutation: true,
-			});
-			expect(blocked).toMatchObject({ ok: false, reason: "active_turn", killed: false });
-			expect(calls()).toEqual([]); // never signalled
-		});
-	});
-
-	it("returns unknown_session for a missing id", async () => {
-		await withTempRoot(async root => {
-			const { server } = makeServer(root);
-			const missing = await server.callTool("skc_coordinator_stop_session", {
-				session_id: "nope",
-				allow_mutation: true,
-			});
-			expect(missing).toMatchObject({ ok: false, reason: "unknown_session", killed: false });
-		});
-	});
-});
-
-// Real-tmux safety: exercises the REAL forceCloseSkcTmuxSession (no injection) to prove the
-// owner-proof path refuses a foreign/non-SKC tmux session and the reaper keeps the record rather
-// than orphaning it — the core #2034 blocker (raw process.kill / PID-reuse) is gone.
-const tmuxBin = Bun.which("tmux");
-describe.skipIf(!tmuxBin)("stop_session real-tmux owner safety", () => {
-	it("real owner-proof termination refuses a foreign non-SKC session; it survives and the record is kept", async () => {
-		await withTempRoot(async root => {
-			const env = baseEnv(root);
-			// No forceCloseSession injection → the REAL forceCloseSkcTmuxSession runs.
-			const server = createCoordinatorMcpServer({ env });
-			const foreign = `verify-foreign-${Date.now()}`;
-			spawnSync("tmux", ["new-session", "-d", "-s", foreign, "sleep", "600"]);
-			try {
-				expect(spawnSync("tmux", ["has-session", "-t", foreign]).status).toBe(0);
-				// A coordinator ephemeral record that (mistakenly) points at the foreign session.
-				const ns = coordinatorNamespacePath(buildCoordinatorMcpConfig(env));
-				await fs.mkdir(path.join(ns, "sessions"), { recursive: true });
-				await fs.writeFile(
-					path.join(ns, "sessions", "eph-foreign.json"),
-					JSON.stringify({
-						session_id: "eph-foreign",
-						ephemeral: true,
-						tmux_session: foreign,
-						created_at: new Date().toISOString(),
-					}),
-				);
-
-				const res = await server.callTool("skc_coordinator_stop_session", {
-					session_id: "eph-foreign",
-					allow_mutation: true,
-				});
-				// Owner-proof refuses a non-SKC session → no kill, record kept for inspection/retry.
-				expect(res).toMatchObject({ ok: false, reason: "terminate_failed", killed: false });
-				expect(spawnSync("tmux", ["has-session", "-t", foreign]).status).toBe(0); // foreign survives
-				const status = await server.callTool("skc_coordinator_read_status", { session_id: "eph-foreign" });
-				expect(status.session ?? null).not.toBeNull(); // record kept
-			} finally {
-				spawnSync("tmux", ["kill-session", "-t", foreign]);
-			}
-		});
-	});
-});
-
-// BLOCKER 2 (#2044): the delegate reuse turn-activation now runs under the same per-session
-// withSessionMutation lock as the reaper/stop_session. A session the reaper already reaped can no
-// longer be silently reused (lost work), and no turn/state file is orphaned onto a killed session.
-describe("reaper ↔ delegate-reuse composition", () => {
-	it("a reaped session cleanly rejects a subsequent reused delegate and leaves no orphaned files", async () => {
-		await withTempRoot(async root => {
-			const { server, env } = makeServer(root);
-			await writeEphemeralSession(env, "eph");
-			const reaped = await server.callTool("skc_coordinator_stop_session", {
-				session_id: "eph",
-				allow_mutation: true,
-			});
-			expect(reaped).toMatchObject({ ok: true });
-
-			// Reusing the reaped session id must fail closed — not dispatch work into a killed lane.
-			const reused = await server.callTool("skc_delegate_execute", {
-				session_id: "eph",
-				task: "x",
-				cwd: root,
-				allow_mutation: true,
-			});
-			expect(reused).toMatchObject({ ok: false, reason: "unknown_session" });
-
-			const ns = coordinatorNamespacePath(buildCoordinatorMcpConfig(env));
-			const files = await fs.readdir(path.join(ns, "sessions")).catch(() => [] as string[]);
-			expect(files).not.toContain("eph.json"); // no orphaned session record
-		});
-	});
-});
-
-// The owner-proof close must be bound to the state-file identity the record actually persists.
-// startTmuxSession stores that path under `runtimeStateFile`; reading the non-existent
-// `sessionStateFile` key left expectedStateFile undefined for every real delegate record, making
-// the binding inert. This asserts the reaper forwards the recorded runtimeStateFile.
-describe("owner state-file identity binding", () => {
-	it("forwards the record's persisted runtimeStateFile to forceCloseSession (production record shape)", async () => {
-		await withTempRoot(async root => {
-			const captured: { stateFile?: string; sid?: string } = {};
-			const env = baseEnv(root);
-			const server = createCoordinatorMcpServer({
-				env,
-				services: {
-					forceCloseSession: async (_name: string, _env: NodeJS.ProcessEnv, sid?: string, stateFile?: string) => {
-						captured.sid = sid;
-						captured.stateFile = stateFile;
-						return {};
-					},
-				},
-			});
-			const runtimeStateFile = path.join(root, ".state", "runtime-marker.json");
-			const ns = coordinatorNamespacePath(buildCoordinatorMcpConfig(env));
-			await fs.mkdir(path.join(ns, "sessions"), { recursive: true });
-			// A completed delegate worker, exactly as production persists it: the owner state-file path
-			// is on `runtimeStateFile`, and there is no `sessionStateFile` key.
-			await fs.writeFile(
-				path.join(ns, "sessions", "prod-eph.json"),
-				JSON.stringify({
-					session_id: "prod-eph",
-					ephemeral: true,
-					tmux_session: "tmux-prod-eph",
-					runtimeStateFile,
-					created_at: new Date().toISOString(),
+		expect(
+			await server.callTool("skc_coordinator_stop_session", { session_id: "ephemeral", allow_mutation: true }),
+		).toMatchObject({ ok: true, closed: true, session_id: "ephemeral" });
+		expect(controls.filter(control => control.operation === "session.close")).toEqual([
+			expect.objectContaining({
+				input: expect.objectContaining({
+					sessionId: "ephemeral",
+					endpointGeneration: ENDPOINT_GENERATION,
+					endpointIncarnation: endpointIncarnation("ephemeral"),
 				}),
-			);
+				idempotencyKey: `coordinator-reap:ephemeral:${endpointIncarnation("ephemeral")}`,
+			}),
+		]);
+		expect(await Bun.file(sessionFile("ephemeral")).exists()).toBe(false);
+	});
 
-			const reaped = await server.callTool("skc_coordinator_stop_session", {
-				session_id: "prod-eph",
-				allow_mutation: true,
-			});
-			expect(reaped).toMatchObject({ ok: true, killed: true });
-			// Discriminating: with the old `record.sessionStateFile` read this was undefined.
-			expect(captured.stateFile).toBe(runtimeStateFile);
-		});
+	it("retains coordinator metadata when the SDK broker cannot verify closure", async () => {
+		const root = await tempRoot();
+		const { server, sessionFile } = await createServer(root, { closeFails: true });
+		await writeSession(sessionFile("wedged"), root, "wedged", { ephemeral: true });
+
+		expect(
+			await server.callTool("skc_coordinator_stop_session", { session_id: "wedged", allow_mutation: true }),
+		).toMatchObject({ ok: false, reason: "close_failed", detail: "close_refused", closed: false });
+		expect(await Bun.file(sessionFile("wedged")).exists()).toBe(true);
+	});
+
+	it("does not close a session with an active durable turn", async () => {
+		const root = await tempRoot();
+		const { server, controls, sessionFile } = await createServer(root);
+		const sessionId = "active";
+		const turnId = "turn-00000000-0000-4000-8000-000000000001";
+		await writeSession(sessionFile(sessionId), root, sessionId, { ephemeral: true });
+		const namespaceDir = path.dirname(path.dirname(sessionFile(sessionId)));
+		await fs.mkdir(path.join(namespaceDir, "turns"), { recursive: true });
+		await fs.mkdir(path.join(namespaceDir, "active-turns"), { recursive: true });
+		await Bun.write(
+			path.join(namespaceDir, "active-turns", `${sessionId}.json`),
+			JSON.stringify({ session_id: sessionId, turn_id: turnId }),
+		);
+		await Bun.write(
+			path.join(namespaceDir, "turns", `${turnId}.json`),
+			JSON.stringify({ session_id: sessionId, turn_id: turnId, status: "active" }),
+		);
+
+		expect(
+			await server.callTool("skc_coordinator_stop_session", { session_id: sessionId, allow_mutation: true }),
+		).toMatchObject({ ok: false, reason: "active_turn", active_turn_id: turnId, closed: false });
+		expect(controls).toEqual([]);
+	});
+
+	it("sweeps only idle ephemeral coordinator records", async () => {
+		const root = await tempRoot();
+		const { server, controls, sessionFile } = await createServer(root);
+		await writeSession(sessionFile("idle"), root, "idle", { ephemeral: true });
+		await writeSession(sessionFile("registered"), root, "registered");
+
+		expect(await server.sessionReaper.sweepOnce()).toBe(1);
+		expect(controls.filter(control => control.operation === "session.close")).toEqual([
+			expect.objectContaining({
+				input: expect.objectContaining({
+					sessionId: "idle",
+					endpointGeneration: ENDPOINT_GENERATION,
+					endpointIncarnation: endpointIncarnation("idle"),
+				}),
+				idempotencyKey: `coordinator-reap:idle:${endpointIncarnation("idle")}`,
+			}),
+		]);
+		expect(await Bun.file(sessionFile("idle")).exists()).toBe(false);
+		expect(await Bun.file(sessionFile("registered")).exists()).toBe(true);
+	});
+
+	it("reuses the close idempotency key when the idle reaper retries", async () => {
+		const root = await tempRoot();
+		const { server, controls, sessionFile } = await createServer(root, { closeFailures: 1 });
+		await writeSession(sessionFile("retry"), root, "retry", { ephemeral: true });
+
+		expect(await server.sessionReaper.sweepOnce()).toBe(0);
+		expect(await Bun.file(sessionFile("retry")).exists()).toBe(true);
+		expect(await server.sessionReaper.sweepOnce()).toBe(1);
+		const closeRequests = controls.filter(control => control.operation === "session.close");
+		expect(closeRequests).toHaveLength(2);
+		expect(closeRequests.map(control => control.idempotencyKey)).toEqual([
+			`coordinator-reap:retry:${endpointIncarnation("retry")}`,
+			`coordinator-reap:retry:${endpointIncarnation("retry")}`,
+		]);
 	});
 });

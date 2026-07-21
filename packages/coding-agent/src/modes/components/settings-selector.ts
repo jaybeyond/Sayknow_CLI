@@ -1,6 +1,7 @@
 import { ThinkingLevel, type ThinkingLevel as ThinkingLevelValue } from "@sayknow-cli/agent-core";
 import type { Effort } from "@sayknow-cli/ai";
 import {
+	type Component,
 	Container,
 	Input,
 	matchesKey,
@@ -26,11 +27,16 @@ import { getCurrentThemeName, getSelectListTheme, getSettingsListTheme, theme } 
 import { matchesAppInterrupt } from "../../modes/utils/keybinding-matchers";
 import { getTabBarTheme } from "../shared";
 import { DynamicBorder } from "./dynamic-border";
+import {
+	type NotificationsEditorOperations,
+	NotificationsSettingsEditorComponent,
+} from "./notifications-settings-editor";
+import { createPetSelectItems, getPetUnavailableWarning, isPetAvailable } from "./pet-capability";
 import { handleInputOrEscape, PluginSettingsComponent } from "./plugin-settings";
 import { getSettingsForTab, type SettingDef } from "./settings-defs";
-import type { StatusLineSegmentOptions } from "./status-line";
 import { getPreset } from "./status-line/presets";
 import { ALL_SEGMENT_IDS } from "./status-line/segments";
+import type { StatusLineSegmentOptions } from "./tool-status-header";
 
 // Settings UI strings are translated by deterministic keys derived from the
 // setting path; English (the schema value) is the fallback. Keys match those
@@ -673,6 +679,10 @@ export interface SettingsRuntimeContext {
 	availableModelProfiles: string[];
 	/** Working directory for plugins tab */
 	cwd: string;
+	/** Whether this terminal can render the pet overlay. */
+	petAvailable?: boolean;
+	/** Terminal environment used to select unavailable-pet guidance. Omitted in production to use Bun.env. */
+	terminalEnv?: NodeJS.ProcessEnv;
 }
 
 /** Status line settings subset for preview */
@@ -696,6 +706,13 @@ export interface SettingsCallbacks {
 	onThemePreviewCancel?: (theme: string) => void | Promise<void>;
 	/** Called to live-preview the sayknow pet skin while browsing the pet setting. */
 	onPetPreview?: (mode: string) => void;
+	/**
+	 * Commit a pet mode through the shared result-returning policy. The policy
+	 * rechecks capability immediately before mutation and owns persistence, so
+	 * the settings surface never persists `pet.mode` ahead of acceptance.
+	 * Returns whether the commit was accepted.
+	 */
+	onPetCommit?: (mode: string) => boolean;
 	/** Called for status line preview while configuring */
 	onStatusLinePreview?: (settings: StatusLinePreviewSettings) => void;
 	/** Get current rendered status line for inline preview */
@@ -714,6 +731,7 @@ export class SettingsSelectorComponent extends Container {
 	#tabBar: TabBar;
 	#currentList: SettingsList | null = null;
 	#pluginComponent: PluginSettingsComponent | null = null;
+	#notificationsEditor: NotificationsSettingsEditorComponent | null = null;
 	#statusPreviewContainer: Container | null = null;
 	#statusPreviewText: Text | null = null;
 	#currentTabId: SettingTab | "plugins" = "appearance";
@@ -722,6 +740,7 @@ export class SettingsSelectorComponent extends Container {
 	constructor(
 		private readonly context: SettingsRuntimeContext,
 		private readonly callbacks: SettingsCallbacks,
+		private readonly notificationsOperations?: NotificationsEditorOperations,
 	) {
 		super();
 
@@ -733,6 +752,7 @@ export class SettingsSelectorComponent extends Container {
 		this.#tabBar.onTabChange = () => {
 			this.#switchToTab(this.#tabBar.getActiveTab().id as SettingTab | "plugins");
 		};
+
 		this.addChild(this.#tabBar);
 
 		// Spacer after tab bar
@@ -746,6 +766,9 @@ export class SettingsSelectorComponent extends Container {
 	}
 
 	#switchToTab(tabId: SettingTab | "plugins"): void {
+		if (this.#currentTabId === "notifications" && tabId !== "notifications" && !this.#disposeNotificationsEditor()) {
+			return;
+		}
 		this.#currentTabId = tabId;
 
 		// Remove current content
@@ -769,12 +792,24 @@ export class SettingsSelectorComponent extends Container {
 
 		if (tabId === "plugins") {
 			this.#showPluginsTab();
+		} else if (tabId === "notifications") {
+			this.#showNotificationsTab();
 		} else {
 			this.#showSettingsTab(tabId);
 		}
 
 		// Re-add bottom border
 		this.addChild(bottomBorder);
+	}
+
+	#disposeNotificationsEditor(): boolean {
+		const editor = this.#notificationsEditor;
+		if (!editor) return true;
+		if (editor.navigationLocked) return false;
+		editor.dispose();
+		this.removeChild(editor);
+		this.#notificationsEditor = null;
+		return true;
 	}
 
 	/**
@@ -871,6 +906,14 @@ export class SettingsSelectorComponent extends Container {
 		if (def.path === "statusLine.preset") {
 			options = options.filter(option => option.value !== "custom");
 		}
+		let description = tSettingDesc(def);
+		if (def.path === "pet.mode") {
+			const petAvailable = this.context.petAvailable ?? isPetAvailable();
+			options = createPetSelectItems(options, currentValue, petAvailable);
+			// Unsupported terminals must see the same actionable guidance the
+			// startup notice and /pet show, not only dimmed option descriptions.
+			if (!petAvailable) description = getPetUnavailableWarning(this.context.terminalEnv);
+		}
 		// Preview handlers
 		let onPreview: ((value: string) => void | Promise<void>) | undefined;
 		let onPreviewCancel: (() => void) | undefined;
@@ -957,10 +1000,18 @@ export class SettingsSelectorComponent extends Container {
 
 		return new SelectSubmenu(
 			tSettingLabel(def),
-			tSettingDesc(def),
+			description,
 			tSettingOptions(def.path, options),
 			currentValue,
 			value => {
+				if (def.path === "pet.mode") {
+					// The shared pet commit policy rechecks capability immediately
+					// before mutation and persists only on acceptance; the settings
+					// surface must not persist ahead of that result.
+					const accepted = this.callbacks.onPetCommit?.(value) ?? false;
+					done(accepted ? value : undefined);
+					return;
+				}
 				this.#setSettingValue(def.path, value);
 				this.callbacks.onChange(def.path, value);
 				done(value);
@@ -1019,6 +1070,14 @@ export class SettingsSelectorComponent extends Container {
 		} else {
 			settings.set(path, value as never);
 		}
+	}
+
+	#showNotificationsTab(): void {
+		if (!this.notificationsOperations) return;
+		this.#notificationsEditor = new NotificationsSettingsEditorComponent(this.notificationsOperations, {
+			onCancel: () => this.callbacks.onCancel(),
+		});
+		this.addChild(this.#notificationsEditor);
 	}
 
 	/**
@@ -1178,21 +1237,39 @@ export class SettingsSelectorComponent extends Container {
 		this.addChild(this.#pluginComponent);
 	}
 
-	getFocusComponent(): SettingsList | PluginSettingsComponent {
-		// Return the current focusable component - one of these will always be set
-		return (this.#currentList || this.#pluginComponent)!;
+	getFocusComponent(): Component {
+		return (this.#currentList || this.#pluginComponent || this.#notificationsEditor)!;
+	}
+
+	override dispose(): void {
+		if (this.#notificationsEditor?.navigationLocked) return;
+		this.#notificationsEditor?.dispose();
+		this.#notificationsEditor = null;
+		super.dispose();
 	}
 
 	handleInput(data: string): void {
+		const tabNavigation =
+			matchesKey(data, "tab") ||
+			matchesKey(data, "shift+tab") ||
+			matchesKey(data, "left") ||
+			matchesKey(data, "right");
+		if (this.#notificationsEditor && this.#currentTabId === "notifications") {
+			if (tabNavigation) {
+				if (this.#notificationsEditor.navigationLocked) {
+					this.#notificationsEditor.handleInput(data);
+					return;
+				}
+				this.#tabBar.handleInput(data);
+				return;
+			}
+			this.#notificationsEditor.handleInput(data);
+			return;
+		}
+
 		// Handle tab switching — but NOT when a text input is active, since
 		// arrow keys must reach the cursor and Tab must not switch tabs.
-		if (
-			!this.#textInputActive &&
-			(matchesKey(data, "tab") ||
-				matchesKey(data, "shift+tab") ||
-				matchesKey(data, "left") ||
-				matchesKey(data, "right"))
-		) {
+		if (!this.#textInputActive && tabNavigation) {
 			this.#tabBar.handleInput(data);
 			return;
 		}

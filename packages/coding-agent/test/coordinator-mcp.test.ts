@@ -1,18 +1,31 @@
-import { afterEach, describe, expect, it, spyOn } from "bun:test";
+import { describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import CoordinatorCommand from "../src/commands/coordinator";
-import McpServeCommand from "../src/commands/mcp-serve";
+import { getAgentDir, setAgentDir } from "@sayknow-cli/utils";
+import McpServe, {
+	buildCoordinatorCheckPayload,
+	type CoordinatorBrokerObservation,
+	formatCoordinatorCheckPayload,
+	probeCoordinatorBrokerCheck,
+} from "../src/commands/mcp-serve";
 import {
 	COORDINATOR_MCP_PROTOCOL_VERSION,
 	COORDINATOR_MCP_SERVER_NAME,
 	COORDINATOR_MCP_TOOL_NAMES,
 } from "../src/coordinator/contract";
-import { createCoordinatorSafetyPolicy } from "../src/coordinator-mcp/safety";
+import {
+	assertCloseAdmission,
+	coordinatorStatePaths,
+	createSessionTransaction,
+	initializeCoordinatorNamespace,
+	withNamespaceRegistry,
+} from "../src/coordinator-mcp/question-state";
 import { createCoordinatorMcpServer, handleCoordinatorMcpRequest } from "../src/coordinator-mcp/server";
-
-const ORIGINAL_STDOUT_WRITE = process.stdout.write.bind(process.stdout);
+import { brokerDiscoveryPath, brokerProcessIncarnation, writeBrokerDiscovery } from "../src/sdk/broker/discovery";
+import { brokerOwnerForTest } from "../src/sdk/broker/ensure";
+import { UnsupportedStateVersionError } from "../src/sdk/broker/state-version";
+import { SDK_MCP_TOOL_NAMES } from "../src/sdk/mcp/server";
 
 async function withTempRoot(run: (root: string) => Promise<void>): Promise<void> {
 	const root = await fs.mkdtemp(path.join(os.tmpdir(), "skc-coordinator-mcp-"));
@@ -23,629 +36,374 @@ async function withTempRoot(run: (root: string) => Promise<void>): Promise<void>
 	}
 }
 
-type LaunchInput = {
-	cwd: string;
-	sessionId: string;
-	launchId: string;
-	readinessMarkerFile: string;
-};
-
-async function writeReadyMarker(input: LaunchInput): Promise<void> {
-	await Bun.write(
-		input.readinessMarkerFile,
-		`${JSON.stringify({
-			schema_version: 1,
-			session_id: input.sessionId,
-			launch_id: input.launchId,
-			state: "ready_for_input",
-			event: "interactive_input_ready",
-			source: "skc_interactive_runtime",
-			ready_for_input: true,
-			created_at: "2026-07-11T00:00:00.000Z",
-		})}\n`,
-	);
-}
-
-async function readyStart<T extends Record<string, unknown>>(
-	input: LaunchInput,
-	result: T,
-): Promise<T & { sessionId: string; launchId: string; readinessMarkerFile: string }> {
-	await writeReadyMarker(input);
-	return {
-		...result,
-		sessionId: input.sessionId,
-		launchId: input.launchId,
-		readinessMarkerFile: input.readinessMarkerFile,
-	};
-}
-
-async function runCommand(argv: string[]): Promise<string> {
-	let output = "";
-	const writeSpy = spyOn(process.stdout, "write").mockImplementation((chunk: string | Uint8Array) => {
-		output += chunk.toString();
+async function captureMcpServeCheck(argv: string[]): Promise<string> {
+	let stdout = "";
+	const write = process.stdout.write;
+	const exitCode = process.exitCode;
+	process.stdout.write = ((chunk: string | Uint8Array) => {
+		stdout += typeof chunk === "string" ? chunk : Buffer.from(chunk).toString();
 		return true;
-	});
+	}) as typeof process.stdout.write;
 	try {
-		const command = new McpServeCommand(argv, { bin: "skc", version: "0.0.0-test", commands: new Map() });
-		await command.run();
-		return output;
+		await new McpServe(argv, { bin: "skc", version: "test", commands: new Map() }).run();
+		return stdout;
 	} finally {
-		writeSpy.mockRestore();
+		process.stdout.write = write;
+		process.exitCode = exitCode;
 	}
 }
 
-async function runHermesCommand(argv: string[]): Promise<string> {
-	let output = "";
-	const writeSpy = spyOn(process.stdout, "write").mockImplementation((chunk: string | Uint8Array) => {
-		output += chunk.toString();
-		return true;
-	});
+async function withAgentDir<T>(agentDir: string, run: () => Promise<T>): Promise<T> {
+	const previous = getAgentDir();
+	setAgentDir(agentDir);
 	try {
-		const command = new CoordinatorCommand(argv, { bin: "skc", version: "0.0.0-test", commands: new Map() });
-		await command.run();
-		return output;
+		return await run();
 	} finally {
-		writeSpy.mockRestore();
+		setAgentDir(previous);
 	}
 }
 
-afterEach(() => {
-	process.stdout.write = ORIGINAL_STDOUT_WRITE;
-	process.exitCode = 0;
-});
-
-describe("skc mcp-serve coordinator", () => {
-	it("exposes a checkable Hermes MCP command and rejects unknown subcommands as JSON", async () => {
-		const ok = JSON.parse(await runCommand(["coordinator", "--check", "--json"]));
-		expect(ok).toEqual({
-			ok: true,
-			server: { name: COORDINATOR_MCP_SERVER_NAME, protocolVersion: COORDINATOR_MCP_PROTOCOL_VERSION },
-			readOnly: true,
-			tools: [...COORDINATOR_MCP_TOOL_NAMES],
-		});
-
-		const rejected = JSON.parse(await runCommand(["bogus", "--json"]));
-		expect(rejected).toEqual({ ok: false, reason: "unknown_mcp_serve_subcommand", subcommand: "bogus" });
-		expect(process.exitCode).toBe(1);
-		process.exitCode = 0;
-	});
-
-	it("exposes the same Hermes contract through the read-only CLI adapter", async () => {
-		const ok = JSON.parse(await runHermesCommand(["--json"]));
-		expect(ok).toEqual({
-			ok: true,
-			server: { name: COORDINATOR_MCP_SERVER_NAME, protocolVersion: COORDINATOR_MCP_PROTOCOL_VERSION },
-			readOnly: true,
-			tools: [...COORDINATOR_MCP_TOOL_NAMES],
-		});
-
-		const tools = JSON.parse(await runHermesCommand(["tools", "--json"]));
-		expect(tools).toEqual({ ok: true, tools: [...COORDINATOR_MCP_TOOL_NAMES] });
-	});
-
-	it("implements initialize, tools/list, and read-only mutating rejection", async () => {
-		const env = { SKC_COORDINATOR_MCP_REPO: "repo-a" };
-		const initialize = await handleCoordinatorMcpRequest({ jsonrpc: "2.0", id: 1, method: "initialize" }, { env });
-		expect(initialize).toEqual({
-			jsonrpc: "2.0",
-			id: 1,
-			result: {
-				protocolVersion: "2024-11-05",
-				capabilities: { tools: {}, prompts: {}, resources: {} },
-				serverInfo: { name: "skc-coordinator-mcp", version: expect.any(String) },
-			},
-		});
-
-		const listed = await handleCoordinatorMcpRequest({ jsonrpc: "2.0", id: 2, method: "tools/list" }, { env });
-		expect(listed.result.tools.map((tool: { name: string }) => tool.name)).toContain("skc_coordinator_report_status");
-		const prompts = await handleCoordinatorMcpRequest({ jsonrpc: "2.0", id: 20, method: "prompts/list" }, { env });
-		expect(prompts.result.prompts).toEqual([]);
-
-		const resources = await handleCoordinatorMcpRequest(
-			{ jsonrpc: "2.0", id: 21, method: "resources/list" },
-			{ env },
-		);
-		expect(resources.result.resources).toEqual([]);
-
-		const called = await handleCoordinatorMcpRequest(
-			{
-				jsonrpc: "2.0",
-				id: 3,
-				method: "tools/call",
-				params: { name: "skc_coordinator_start_session", arguments: { cwd: process.cwd(), allow_mutation: true } },
-			},
-			{ env },
-		);
-		const payload = JSON.parse(called.result.content[0].text);
-		expect(payload).toEqual({ ok: false, reason: "coordinator_mutation_class_disabled" });
-	});
-
-	it("requires startup mutation class and per-call allow_mutation for mutating tools", async () => {
+describe("canonical SDK coordinator compatibility handler", () => {
+	it("serves initialization and the canonical tool inventory", async () => {
 		await withTempRoot(async root => {
-			let created = false;
-			const env = {
-				SKC_COORDINATOR_MCP_WORKDIR_ROOTS: root,
-				SKC_COORDINATOR_MCP_ENABLE_MUTATION_CLASSES: "session",
-				SKC_COORDINATOR_MCP_STATE_ROOT: path.join(root, ".state"),
-			};
-			const missingPerCall = await handleCoordinatorMcpRequest(
-				{
-					jsonrpc: "2.0",
-					id: 1,
-					method: "tools/call",
-					params: { name: "skc_coordinator_start_session", arguments: { cwd: root } },
-				},
-				{
-					env,
-					createSession: () => {
-						created = true;
-						return {
-							name: "x",
-							cwd: root,
-							attached: false,
-							windows: 1,
-							panes: 1,
-							bindings: "root",
-							createdAt: "now",
-						};
-					},
-				},
+			const env = { SKC_COORDINATOR_MCP_WORKDIR_ROOTS: root };
+			const initialized = await handleCoordinatorMcpRequest(
+				{ jsonrpc: "2.0", id: 1, method: "initialize" },
+				{ env },
 			);
-			expect(JSON.parse(missingPerCall.result.content[0].text)).toEqual({
-				ok: false,
-				reason: "coordinator_mutation_call_not_allowed",
-			});
-
-			const allowedServer = createCoordinatorMcpServer({
-				env: { ...env, SKC_COORDINATOR_MCP_STATE_ROOT: path.join(root, ".state-allowed") },
-				services: {
-					startSession: async input => {
-						created = true;
-						return {
-							sessionId: input.sessionId,
-							launchId: input.launchId,
-							readinessMarkerFile: input.readinessMarkerFile,
-							name: input.sessionId,
-							attached: false,
-							windows: 1,
-							panes: 1,
-							bindings: "root",
-							cwd: input.cwd,
-							createdAt: "2026-07-11T00:00:00.000Z",
-						};
-					},
+			expect(initialized).toMatchObject({
+				jsonrpc: "2.0",
+				id: 1,
+				result: {
+					protocolVersion: COORDINATOR_MCP_PROTOCOL_VERSION,
+					serverInfo: { name: COORDINATOR_MCP_SERVER_NAME, version: expect.any(String) },
+					capabilities: { tools: {}, prompts: {}, resources: {} },
 				},
 			});
-			const allowedPayload = await allowedServer.callTool("skc_coordinator_start_session", {
-				cwd: root,
-				allow_mutation: true,
-			});
-			expect(created).toBe(true);
-			expect(allowedPayload).toMatchObject({
-				ok: true,
-				session: {
-					session_id: expect.stringMatching(/^skc-coordinator-/),
-					name: expect.stringMatching(/^skc-coordinator-/),
-					attached: false,
-					windows: 1,
-					panes: 1,
-					bindings: "root",
-					created_at: "2026-07-11T00:00:00.000Z",
-					createdAt: "2026-07-11T00:00:00.000Z",
-					origin: "coordinator_created",
-					launch_id: expect.any(String),
-					readiness_marker_file: expect.any(String),
-				},
-				session_state: {
-					session_id: expect.stringMatching(/^skc-coordinator-/),
-					state: "booting",
-					ready_for_input: false,
-				},
-			});
-		});
-	});
-
-	it("canonicalizes workdir roots and rejects traversal plus symlink escapes", async () => {
-		await withTempRoot(async root => {
-			const outside = await fs.mkdtemp(path.join(os.tmpdir(), "skc-coordinator-outside-"));
-			try {
-				const link = path.join(root, "escape");
-				await fs.symlink(outside, link);
-				const policy = await createCoordinatorSafetyPolicy({
-					env: { SKC_COORDINATOR_MCP_WORKDIR_ROOTS: root },
-				});
-				expect(await policy.resolveWorkdir(path.join(root, "..", path.basename(root)))).toBe(root);
-				await expect(policy.resolveWorkdir(path.join(root, "..", path.basename(outside)))).rejects.toThrow(
-					"workdir_outside_allowed_roots",
-				);
-				await expect(policy.resolveWorkdir(link)).rejects.toThrow("workdir_outside_allowed_roots");
-			} finally {
-				await fs.rm(outside, { recursive: true, force: true });
-			}
-		});
-	});
-
-	it("bounds artifact reads and denies unsafe roots", async () => {
-		await withTempRoot(async root => {
-			const artifact = path.join(root, "artifact.txt");
-			await Bun.write(artifact, "🙂🙂abcdef");
-			const byteCap = 5;
-			const env = {
-				SKC_COORDINATOR_MCP_WORKDIR_ROOTS: root,
-				SKC_COORDINATOR_MCP_ARTIFACT_MAX_BYTES: String(byteCap),
-			};
-			const server = await createCoordinatorMcpServer({ env });
-			const read = await server.callTool("skc_coordinator_read_artifact", { path: artifact });
-			expect(read.ok).toBe(true);
-			expect(read.path).toBe(artifact);
-			expect(read.bytes).toBeLessThanOrEqual(byteCap);
-			expect(read.truncated).toBe(true);
-			expect(Buffer.byteLength(String(read.text))).toBeLessThanOrEqual(byteCap);
-			await expect(
-				server.callTool("skc_coordinator_read_artifact", { path: path.join(os.tmpdir(), "missing.txt") }),
-			).resolves.toEqual({
-				ok: false,
-				reason: "coordinator_artifact_outside_allowed_roots",
-			});
-		});
-	});
-
-	it("runs a generic controller lifecycle smoke without provider credentials or local config", async () => {
-		await withTempRoot(async root => {
-			const stateRoot = path.join(root, ".state");
-			const artifact = path.join(root, "result.txt");
-			await Bun.write(artifact, "generic controller evidence");
-			const env = {
-				SKC_COORDINATOR_MCP_WORKDIR_ROOTS: root,
-				SKC_COORDINATOR_MCP_MUTATIONS: "sessions,questions,reports",
-				SKC_COORDINATOR_MCP_STATE_ROOT: stateRoot,
-				SKC_COORDINATOR_MCP_PROFILE: "generic-controller",
-				SKC_COORDINATOR_MCP_REPO: "repo-a",
-			};
-			const server = await createCoordinatorMcpServer({
-				env,
-				services: {
-					startSession: async input =>
-						await readyStart(input, {
-							name: input.sessionId,
-							cwd: input.cwd,
-							createdAt: "now",
-						}),
-				},
-			});
-
-			const listed = await server.handleJsonRpc({ jsonrpc: "2.0", id: 1, method: "tools/list" });
+			const listed = await handleCoordinatorMcpRequest({ jsonrpc: "2.0", id: 2, method: "tools/list" }, { env });
 			expect(listed.result.tools.map((tool: { name: string }) => tool.name)).toEqual([
 				...COORDINATOR_MCP_TOOL_NAMES,
 			]);
-			for (const tool of listed.result.tools as Array<{ name: string; inputSchema: { type?: string } }>) {
-				expect(tool.inputSchema.type).toBe("object");
-			}
-
-			const deniedStart = await server.callTool("skc_coordinator_start_session", { cwd: root });
-			expect(deniedStart).toEqual({ ok: false, reason: "coordinator_mutation_call_not_allowed" });
-
-			const started = await server.callTool("skc_coordinator_start_session", {
-				cwd: root,
-				allow_mutation: true,
-			});
-			const sessionId = String((started.session as { session_id: string }).session_id);
-			expect(started).toMatchObject({
-				ok: true,
-				session: { session_id: sessionId, cwd: root },
-				session_state: { state: "booting" },
-			});
-
-			const sent = await server.callTool("skc_coordinator_send_prompt", {
-				session_id: sessionId,
-				prompt: "Run a mocked generic controller task.",
-				allow_mutation: true,
-			});
-			expect(sent).toMatchObject({
-				ok: true,
-				session_id: sessionId,
-				status: "active",
-			});
-			const turnId = String(sent.turn_id);
-
-			const activeConflict = await server.callTool("skc_coordinator_send_prompt", {
-				session_id: sessionId,
-				prompt: "Second prompt should be protected.",
-				allow_mutation: true,
-			});
-			expect(activeConflict).toMatchObject({ ok: false, reason: "active_turn_exists", active_turn_id: turnId });
-
-			const queued = await server.callTool("skc_coordinator_send_prompt", {
-				session_id: sessionId,
-				prompt: "Queued follow-up.",
-				queue: true,
-				allow_mutation: true,
-			});
-			expect(queued).toMatchObject({ ok: true, status: "queued", queued: true, active_turn_id: turnId });
-
-			const questionDir = path.join(stateRoot, "generic-controller", "repo-a", "questions");
-			await fs.mkdir(questionDir, { recursive: true });
-			await Bun.write(
-				path.join(questionDir, "question-1.json"),
-				JSON.stringify({
-					question_id: "question-1",
-					session_id: sessionId,
-					turn_id: turnId,
-					status: "pending",
-				}),
+			const promptTool = listed.result.tools.find(
+				(tool: { name: string }) => tool.name === "skc_coordinator_send_prompt",
 			);
-			const questionAnswer = await server.callTool("skc_coordinator_submit_question_answer", {
-				session_id: sessionId,
-				turn_id: turnId,
-				question_id: "question-1",
-				answer: { decision: "approve" },
-				allow_mutation: true,
-			});
-			expect(questionAnswer).toMatchObject({ ok: true, question: { status: "answered" } });
+			expect(promptTool.inputSchema.required).toEqual(expect.arrayContaining(["idempotency_key", "allow_mutation"]));
+		});
+	});
 
-			const reported = await server.callTool("skc_coordinator_report_status", {
-				session_id: sessionId,
-				turn_id: turnId,
-				status: "completed",
-				summary: "Mocked lifecycle completed.",
-				evidence_paths: [artifact],
-				allow_mutation: true,
-			});
-			expect(reported).toMatchObject({
-				ok: true,
-				turn: { status: "completed", final_response: { text: "Mocked lifecycle completed." } },
-				promoted_turn: { status: "active" },
-			});
-
-			const readTurn = await server.callTool("skc_coordinator_read_turn", {
-				session_id: sessionId,
-				turn_id: turnId,
-			});
-			expect(readTurn).toMatchObject({ ok: true, turn: { status: "completed" } });
-
-			const reports = await server.callTool("skc_coordinator_read_coordination_status");
-			expect(reports.ok).toBe(true);
-			expect((reports.reports as Array<{ status?: string }>).some(report => report.status === "completed")).toBe(
-				true,
+	it("requires the complete public question-answer correlation tuple", async () => {
+		await withTempRoot(async root => {
+			const response = await handleCoordinatorMcpRequest(
+				{ jsonrpc: "2.0", id: 3, method: "tools/list" },
+				{ env: { SKC_COORDINATOR_MCP_WORKDIR_ROOTS: root } },
 			);
+			const tool = response.result.tools.find(
+				(candidate: { name: string }) => candidate.name === "skc_coordinator_submit_question_answer",
+			);
+			expect(tool.inputSchema.required).toEqual(
+				expect.arrayContaining([
+					"session_id",
+					"turn_id",
+					"question_id",
+					"answer_binding",
+					"answer",
+					"idempotency_key",
+					"allow_mutation",
+				]),
+			);
+		});
+	});
+
+	it("preserves mutation authorization and read-only artifact boundaries", async () => {
+		await withTempRoot(async root => {
+			const artifact = path.join(root, "result.txt");
+			await Bun.write(artifact, "coordinator artifact");
+			const server = createCoordinatorMcpServer({
+				env: {
+					SKC_COORDINATOR_MCP_WORKDIR_ROOTS: root,
+					SKC_COORDINATOR_MCP_MUTATIONS: "sessions",
+				},
+			});
+			expect(
+				await server.callTool("skc_coordinator_start_session", { cwd: root, idempotency_key: "start-1" }),
+			).toEqual({ ok: false, reason: "coordinator_mutation_call_not_allowed:sessions" });
+			expect(await server.callTool("skc_coordinator_read_artifact", { path: artifact })).toMatchObject({
+				ok: true,
+				text: "coordinator artifact",
+			});
+			expect(await server.callTool("skc_coordinator_read_artifact", { path: os.tmpdir() })).toEqual({
+				ok: false,
+				reason: "artifact_outside_allowed_roots",
+			});
 		});
 	});
 });
 
-describe("coordinator delegate tools", () => {
-	const delegateNames = ["skc_delegate_plan", "skc_delegate_execute", "skc_delegate_team"] as const;
+describe("coordinator and hermes check contract", () => {
+	const discovery = {
+		version: 1,
+		protocolVersion: 3,
+		packageGeneration: "test-generation",
+		ownerId: "owner-secret",
+		pid: 987654321,
+		incarnation: "incarnation-secret",
+		host: "127.0.0.1",
+		port: 54321,
+		url: "ws://127.0.0.1:54321/secret-token",
+		token: "secret-token",
+		startedAt: 1,
+		heartbeatAt: 2,
+	} as const;
 
-	function delegateEnv(root: string, stateRoot: string, mutations = "sessions") {
-		return {
-			SKC_COORDINATOR_MCP_WORKDIR_ROOTS: root,
-			SKC_COORDINATOR_MCP_MUTATIONS: mutations,
-			SKC_COORDINATOR_MCP_STATE_ROOT: stateRoot,
-			SKC_COORDINATOR_MCP_PROFILE: "delegate",
-			SKC_COORDINATOR_MCP_REPO: "repo-a",
-		};
-	}
+	it("builds the frozen additive, redacted coordinator and hermes JSON payload", async () => {
+		const coordinator = await buildCoordinatorCheckPayload({ readBrokerDiscovery: async () => discovery });
+		const hermes = await buildCoordinatorCheckPayload({ readBrokerDiscovery: async () => discovery });
 
-	function delegateServices() {
-		return {
-			startSession: async (input: LaunchInput) =>
-				await readyStart(input, {
-					name: input.sessionId,
-					cwd: input.cwd,
-					createdAt: "now",
-				}),
-		};
-	}
+		expect(coordinator).toEqual(hermes);
+		expect(coordinator).toEqual({
+			ok: true,
+			server: { name: COORDINATOR_MCP_SERVER_NAME, protocolVersion: COORDINATOR_MCP_PROTOCOL_VERSION },
+			readOnly: true,
+			tools: [...COORDINATOR_MCP_TOOL_NAMES],
+			catalog: { ready: true, reason: null },
+			broker: {
+				discovery_status: "ready",
+				reason: null,
+				operational_ready: null,
+				bootstrap_supported: true,
+				bootstrap_attempted: false,
+			},
+		});
+		const serialized = JSON.stringify(coordinator);
+		for (const secret of [
+			discovery.url,
+			discovery.token,
+			discovery.ownerId,
+			discovery.incarnation,
+			String(discovery.pid),
+			String(discovery.port),
+		])
+			expect(serialized).not.toContain(secret);
+	});
 
-	it("lists the three delegate tools in tools/list without provider credentials", async () => {
+	it("classifies every raw discovery result without exposing errors", async () => {
+		const cases: Array<{
+			name: string;
+			readBrokerDiscovery: () => Promise<typeof discovery | null>;
+			expected: CoordinatorBrokerObservation;
+		}> = [
+			{
+				name: "unavailable",
+				readBrokerDiscovery: async () => null,
+				expected: { discovery_status: "unavailable", reason: "absent_or_invalid" },
+			},
+			{
+				name: "unsupported state version",
+				readBrokerDiscovery: async () => {
+					throw new UnsupportedStateVersionError("/private/broker.json", 99);
+				},
+				expected: { discovery_status: "error", reason: "unsupported_state_version" },
+			},
+			{
+				name: "access denied",
+				readBrokerDiscovery: async () => {
+					throw Object.assign(new Error("/private/broker.json"), { code: "EACCES" });
+				},
+				expected: { discovery_status: "error", reason: "discovery_access_denied" },
+			},
+			{
+				name: "permission denied",
+				readBrokerDiscovery: async () => {
+					throw Object.assign(new Error("/private/broker.json"), { code: "EPERM" });
+				},
+				expected: { discovery_status: "error", reason: "discovery_access_denied" },
+			},
+			{
+				name: "read failure",
+				readBrokerDiscovery: async () => {
+					throw new Error("private failure detail");
+				},
+				expected: { discovery_status: "error", reason: "discovery_read_failed" },
+			},
+		];
+
+		for (const testCase of cases) {
+			const observation = await probeCoordinatorBrokerCheck({ readBrokerDiscovery: testCase.readBrokerDiscovery });
+			expect(observation, testCase.name).toEqual(testCase.expected);
+			expect(JSON.stringify(formatCoordinatorCheckPayload(observation))).not.toContain("/private/broker.json");
+		}
+	});
+
+	it("observes discovery once without attempting bootstrap or transport work", async () => {
+		let reads = 0;
+		const payload = await buildCoordinatorCheckPayload({
+			agentDir: "/private/agent-dir",
+			readBrokerDiscovery: async agentDir => {
+				reads++;
+				expect(agentDir).toBe("/private/agent-dir");
+				return null;
+			},
+		});
+
+		expect(reads).toBe(1);
+		expect(payload.broker).toEqual({
+			discovery_status: "unavailable",
+			reason: "absent_or_invalid",
+			operational_ready: null,
+			bootstrap_supported: true,
+			bootstrap_attempted: false,
+		});
+	});
+});
+
+describe("mcp serve check command compatibility", () => {
+	it("keeps coordinator and hermes JSON additive, SDK JSON stable, and human checks discovery-free", async () => {
 		await withTempRoot(async root => {
-			const server = await createCoordinatorMcpServer({ env: { SKC_COORDINATOR_MCP_WORKDIR_ROOTS: root } });
-			const listed = await server.handleJsonRpc({ jsonrpc: "2.0", id: 1, method: "tools/list" });
-			const names = (listed.result.tools as Array<{ name: string }>).map(tool => tool.name);
-			for (const delegate of delegateNames) {
-				expect(names).toContain(delegate);
+			const agentDir = path.join(root, "broker-path-sentinel-authority-error-sentinel");
+			await withAgentDir(agentDir, async () => {
+				expect(await Bun.file(brokerDiscoveryPath(agentDir)).exists()).toBe(false);
+				const coordinator = JSON.parse(await captureMcpServeCheck(["coordinator", "--check", "--json"]));
+				const hermes = JSON.parse(await captureMcpServeCheck(["hermes", "--check", "--json"]));
+				const sdk = JSON.parse(await captureMcpServeCheck(["sdk", "--check", "--json"]));
+
+				expect(coordinator).toEqual(hermes);
+				expect(coordinator).toEqual({
+					ok: true,
+					server: { name: COORDINATOR_MCP_SERVER_NAME, protocolVersion: COORDINATOR_MCP_PROTOCOL_VERSION },
+					readOnly: true,
+					tools: [...COORDINATOR_MCP_TOOL_NAMES],
+					catalog: { ready: true, reason: null },
+					broker: {
+						discovery_status: "unavailable",
+						reason: "absent_or_invalid",
+						operational_ready: null,
+						bootstrap_supported: true,
+						bootstrap_attempted: false,
+					},
+				});
+				expect(sdk).toEqual({
+					ok: true,
+					server: { name: "skc-sdk-mcp" },
+					readOnly: false,
+					tools: [...SDK_MCP_TOOL_NAMES],
+				});
+				await fs.mkdir(brokerDiscoveryPath(agentDir), { recursive: true });
+				expect(await captureMcpServeCheck(["coordinator", "--check"])).toBe(
+					`server: ${COORDINATOR_MCP_SERVER_NAME}\ntools: ${COORDINATOR_MCP_TOOL_NAMES.length}\n`,
+				);
+				expect(await captureMcpServeCheck(["hermes", "--check"])).toBe(
+					`server: ${COORDINATOR_MCP_SERVER_NAME}\ntools: ${COORDINATOR_MCP_TOOL_NAMES.length}\n`,
+				);
+				expect(await captureMcpServeCheck(["sdk", "--check"])).toBe(
+					`server: skc-sdk-mcp\ntools: ${SDK_MCP_TOOL_NAMES.length}\n`,
+				);
+				expect(brokerOwnerForTest(agentDir)).toBeUndefined();
+				for (const output of [JSON.stringify(coordinator), JSON.stringify(hermes), JSON.stringify(sdk)]) {
+					expect(output).not.toContain(agentDir);
+					expect(output).not.toContain("authority-error-sentinel");
+				}
+			});
+		});
+	});
+
+	it("reads a valid broker discovery without mutating its portable file snapshot", async () => {
+		await withTempRoot(async root => {
+			const agentDir = path.join(root, "agent-dir");
+			const incarnation = brokerProcessIncarnation(process.pid);
+			if (!incarnation) throw new Error("Test process incarnation is unavailable.");
+			await writeBrokerDiscovery(agentDir, {
+				version: 1,
+				protocolVersion: 3,
+				packageGeneration: "snapshot-test",
+				ownerId: "authority-sentinel",
+				pid: process.pid,
+				incarnation,
+				host: "127.0.0.1",
+				port: 54321,
+				url: "ws://127.0.0.1:54321/error-sentinel",
+				token: "token-sentinel",
+				startedAt: Date.now(),
+				heartbeatAt: Date.now(),
+			});
+			const discoveryFile = brokerDiscoveryPath(agentDir);
+			const bytes = await fs.readFile(discoveryFile);
+			const before = await fs.stat(discoveryFile);
+
+			await withAgentDir(agentDir, async () => {
+				const output = await captureMcpServeCheck(["coordinator", "--check", "--json"]);
+				expect(JSON.parse(output)).toMatchObject({
+					ok: true,
+					broker: { discovery_status: "ready", reason: null },
+				});
+				for (const sentinel of [agentDir, "authority-sentinel", "error-sentinel", "token-sentinel"])
+					expect(output).not.toContain(sentinel);
+			});
+
+			const after = await fs.stat(discoveryFile);
+			expect(await fs.readFile(discoveryFile)).toEqual(bytes);
+			expect(after.size).toBe(before.size);
+			expect(after.mtimeMs).toBe(before.mtimeMs);
+			if (before.mode !== 0) expect(after.mode).toBe(before.mode);
+			if (before.dev !== 0 && before.ino !== 0) {
+				expect(after.dev).toBe(before.dev);
+				expect(after.ino).toBe(before.ino);
 			}
+			expect(brokerOwnerForTest(agentDir)).toBeUndefined();
 		});
 	});
+});
 
-	it("rejects delegate when startup mutation class is disabled", async () => {
+describe("coordinator question-state direct contracts", () => {
+	it("persists the creation-session snapshot and rejects post-close admissions", async () => {
 		await withTempRoot(async root => {
-			const stateRoot = path.join(root, ".state");
-			const server = await createCoordinatorMcpServer({
-				env: {
-					SKC_COORDINATOR_MCP_WORKDIR_ROOTS: root,
-					SKC_COORDINATOR_MCP_STATE_ROOT: stateRoot,
-					SKC_COORDINATOR_MCP_PROFILE: "delegate",
-					SKC_COORDINATOR_MCP_REPO: "repo-a",
+			const paths = coordinatorStatePaths(path.join(root, "state"), "namespace-2550");
+			await initializeCoordinatorNamespace(paths);
+			const session = {
+				schema_version: 1 as const,
+				namespace_id: "namespace-2550",
+				session_id: "session-2550",
+				cwd: root,
+				created_at: "2026-07-17T00:00:00.000Z",
+				updated_at: "2026-07-17T00:00:00.000Z",
+				mpreset: null,
+				source: "coordinator",
+				model: null,
+				tmux: { session: null, window: null, pane: null },
+				broker: {
+					workspace: root,
+					endpoint_url: "ws://private.example.test",
+					endpoint_generation: 1,
+					endpoint_incarnation: "incarnation-1",
 				},
-				services: delegateServices(),
+				ephemeral: false,
+				visible: true,
+			};
+			const transaction = await createSessionTransaction(paths, {
+				kind: "register",
+				session,
+				initial_state: "ready_for_input",
+				initial_events: [],
 			});
-			const denied = await server.callTool("skc_delegate_plan", {
-				cwd: root,
-				task: "Plan it",
-				allow_mutation: true,
+			expect(transaction.canonical.session).toEqual(session);
+			await withNamespaceRegistry(paths, async registry => {
+				registry.deletions["close-2550"] = {
+					deletion_id: "close-2550",
+					session_id: session.session_id,
+					endpoint_incarnation: session.broker.endpoint_incarnation,
+					operation_id: "operation-2550",
+					key_digest: "key",
+					request_digest: "request",
+					close_key: "close",
+					phase: "intent",
+					cleanup: { wal: false, turns: false, reports: false, session: false, events: false },
+					authority_digest: "authority",
+					created_at: session.created_at,
+					updated_at: session.updated_at,
+				};
+				expect(() => assertCloseAdmission(registry, transaction)).toThrow("session_closing");
+				registry.deletions["close-2550"].phase = "completed";
+				expect(() => assertCloseAdmission(registry, transaction)).toThrow("session_closing");
 			});
-			expect(denied).toEqual({ ok: false, reason: "coordinator_mutation_class_disabled" });
-		});
-	});
-
-	it("rejects delegate when per-call allow_mutation is missing", async () => {
-		await withTempRoot(async root => {
-			const stateRoot = path.join(root, ".state");
-			const server = await createCoordinatorMcpServer({
-				env: delegateEnv(root, stateRoot),
-				services: delegateServices(),
-			});
-			const denied = await server.callTool("skc_delegate_execute", { cwd: root, task: "Run it" });
-			expect(denied).toEqual({ ok: false, reason: "coordinator_mutation_call_not_allowed" });
-		});
-	});
-
-	it("rejects delegate when no workdir roots are configured", async () => {
-		await withTempRoot(async root => {
-			const stateRoot = path.join(root, ".state");
-			const server = await createCoordinatorMcpServer({
-				env: {
-					SKC_COORDINATOR_MCP_MUTATIONS: "sessions",
-					SKC_COORDINATOR_MCP_STATE_ROOT: stateRoot,
-					SKC_COORDINATOR_MCP_PROFILE: "delegate",
-					SKC_COORDINATOR_MCP_REPO: "repo-a",
-				},
-				services: delegateServices(),
-			});
-			const denied = await server.callTool("skc_delegate_plan", { cwd: root, task: "x", allow_mutation: true });
-			expect(denied).toEqual({ ok: false, reason: "coordinator_workdir_roots_required" });
-		});
-	});
-
-	it("rejects delegate when cwd is outside allowed roots", async () => {
-		await withTempRoot(async root => {
-			const stateRoot = path.join(root, ".state");
-			const server = await createCoordinatorMcpServer({
-				env: delegateEnv(root, stateRoot),
-				services: delegateServices(),
-			});
-			const denied = await server.callTool("skc_delegate_plan", {
-				cwd: os.tmpdir(),
-				task: "x",
-				allow_mutation: true,
-			});
-			expect(denied.ok).toBe(false);
-			expect(String(denied.reason)).toContain("coordinator_workdir_outside_allowed_roots");
-		});
-	});
-
-	it("rejects delegate when neither task nor prompt is provided", async () => {
-		await withTempRoot(async root => {
-			const stateRoot = path.join(root, ".state");
-			const server = await createCoordinatorMcpServer({
-				env: delegateEnv(root, stateRoot),
-				services: delegateServices(),
-			});
-			const denied = await server.callTool("skc_delegate_plan", { cwd: root, allow_mutation: true });
-			expect(denied).toEqual({ ok: false, reason: "task_required" });
-		});
-	});
-
-	it("starts a fresh session and sends a workflow-tagged turn", async () => {
-		await withTempRoot(async root => {
-			const stateRoot = path.join(root, ".state");
-			const server = await createCoordinatorMcpServer({
-				env: delegateEnv(root, stateRoot),
-				services: delegateServices(),
-			});
-			const result = await server.callTool("skc_delegate_plan", {
-				cwd: root,
-				task: "Draft a plan for the parser.",
-				allow_mutation: true,
-			});
-			expect(result).toMatchObject({
-				ok: true,
-				workflow: "plan",
-				tool_name: "skc_delegate_plan",
-				session_id: expect.stringMatching(/^skc-coordinator-/),
-				status: "active",
-			});
-			expect(String((result.turn as { prompt?: { text?: string } }).prompt?.text)).toContain("/skill:ralplan");
-			expect(String((result.turn as { prompt?: { text?: string } }).prompt?.text)).toContain(
-				"Draft a plan for the parser.",
-			);
-		});
-	});
-
-	it("returns session_cwd_mismatch when reusing a session from a different cwd", async () => {
-		await withTempRoot(async root => {
-			const stateRoot = path.join(root, ".state");
-			const sub = path.join(root, "sub");
-			await fs.mkdir(sub, { recursive: true });
-			const server = await createCoordinatorMcpServer({
-				env: delegateEnv(root, stateRoot),
-				services: delegateServices(),
-			});
-			const fresh = await server.callTool("skc_delegate_plan", {
-				cwd: root,
-				task: "First task.",
-				allow_mutation: true,
-			});
-			const sessionId = String(fresh.session_id);
-			const mismatch = await server.callTool("skc_delegate_execute", {
-				cwd: sub,
-				session_id: sessionId,
-				task: "Different cwd should be rejected.",
-				allow_mutation: true,
-			});
-			expect(mismatch).toEqual({ ok: false, reason: "session_cwd_mismatch", session_id: sessionId });
-		});
-	});
-
-	it("protects an active turn and supports queue and force on reuse", async () => {
-		await withTempRoot(async root => {
-			const stateRoot = path.join(root, ".state");
-			const server = await createCoordinatorMcpServer({
-				env: delegateEnv(root, stateRoot),
-				services: delegateServices(),
-			});
-			const first = await server.callTool("skc_delegate_plan", { cwd: root, task: "First.", allow_mutation: true });
-			const sessionId = String(first.session_id);
-			const turnId = String(first.turn_id);
-
-			const conflict = await server.callTool("skc_delegate_execute", {
-				cwd: root,
-				session_id: sessionId,
-				task: "Second.",
-				allow_mutation: true,
-			});
-			expect(conflict).toMatchObject({ ok: false, reason: "active_turn_exists", active_turn_id: turnId });
-
-			const queued = await server.callTool("skc_delegate_execute", {
-				cwd: root,
-				session_id: sessionId,
-				task: "Queued.",
-				queue: true,
-				allow_mutation: true,
-			});
-			expect(queued).toMatchObject({ ok: true, status: "queued", queued: true, active_turn_id: turnId });
-		});
-	});
-
-	it("appends a delegation.started event visible and filterable via watch_events", async () => {
-		await withTempRoot(async root => {
-			const stateRoot = path.join(root, ".state");
-			const server = await createCoordinatorMcpServer({
-				env: delegateEnv(root, stateRoot),
-				services: delegateServices(),
-			});
-			await server.callTool("skc_delegate_team", { cwd: root, task: "Parallel work.", allow_mutation: true });
-			const events = await server.callTool("skc_coordinator_watch_events", {
-				event_types: ["delegation.started"],
-				timeout_ms: 0,
-			});
-			expect(events.ok).toBe(true);
-			const kinds = (events.events as Array<{ kind: string; metadata?: Record<string, unknown> }>).map(e => e.kind);
-			expect(kinds).toContain("delegation.started");
-			const delegation = (events.events as Array<{ kind: string; metadata?: Record<string, unknown> }>).find(
-				e => e.kind === "delegation.started",
-			);
-			expect(delegation?.metadata).toMatchObject({ workflow: "team", tool_name: "skc_delegate_team" });
-		});
-	});
-	it("surfaces a bounded timeout from await_completion when the turn stays active", async () => {
-		await withTempRoot(async root => {
-			const stateRoot = path.join(root, ".state");
-			const server = await createCoordinatorMcpServer({
-				env: delegateEnv(root, stateRoot),
-				services: delegateServices(),
-			});
-			const result = await server.callTool("skc_delegate_execute", {
-				cwd: root,
-				task: "Long task.",
-				allow_mutation: true,
-				await_completion: true,
-				timeout_ms: 0,
-			});
-			expect(result.ok).toBe(false);
-			expect(result.awaited).toBe(true);
-			expect(result.timed_out).toBe(true);
-			expect(result.reason).toBe("timeout");
 		});
 	});
 });

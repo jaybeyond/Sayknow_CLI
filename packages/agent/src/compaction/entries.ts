@@ -95,6 +95,12 @@ export interface MCPToolSelectionEntry extends SessionEntryBase {
 	selectedToolNames: string[];
 }
 
+export interface DiscoveredBuiltinToolSelectionEntry extends SessionEntryBase {
+	type: "discovered_builtin_tool_selection";
+	/** Discoverable built-in tool names selected for visibility in discovery mode. */
+	selectedToolNames: string[];
+}
+
 export interface SessionInitEntry extends SessionEntryBase {
 	type: "session_init";
 	/** Full system prompt sent to the model */
@@ -115,6 +121,17 @@ export interface ModeChangeEntry extends SessionEntryBase {
 	data?: Record<string, unknown>;
 }
 
+export interface ConfiguredModelChainEntry extends SessionEntryBase {
+	type: "configured_model_chain";
+	role: string;
+	entries: readonly string[];
+	origin: string;
+	identity?: string;
+	explicitHead: boolean;
+	/** Whether this entry removes the configured chain for its role. */
+	cleared?: boolean;
+}
+
 export interface CustomCompactionSessionEntries {}
 
 export type SessionEntry =
@@ -129,8 +146,10 @@ export type SessionEntry =
 	| LabelEntry
 	| TtsrInjectionEntry
 	| MCPToolSelectionEntry
+	| DiscoveredBuiltinToolSelectionEntry
 	| SessionInitEntry
 	| ModeChangeEntry
+	| ConfiguredModelChainEntry
 	| CustomCompactionSessionEntries[keyof CustomCompactionSessionEntries];
 
 export interface ReadonlySessionManager {

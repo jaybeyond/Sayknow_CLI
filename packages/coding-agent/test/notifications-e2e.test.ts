@@ -1,5 +1,5 @@
 /**
- * Deterministic end-to-end QA of the notifications SDK.
+ * Deterministic end-to-end QA of the Sayknow-CLI SDK notification transport.
  *
  * Drives the REAL stack — napi `NotificationServer` (Rust WS core) + real
  * WebSocket + the real Telegram reference client — with only Telegram's HTTP API
@@ -17,8 +17,8 @@ import { expect, test } from "bun:test";
 // freshly-built NotificationServer. The relative path targets this workspace's own
 // built `packages/natives/native` (which CI rebuilds), so the e2e exercises the real core.
 import { NotificationServer } from "../../natives/native/index.js";
-import { notificationActionPayload } from "../src/notifications/helpers";
-import { runTelegramReferenceClient } from "../src/notifications/telegram-reference";
+import { notificationActionPayload } from "../src/sdk/bus/helpers";
+import { runTelegramReferenceClient } from "../src/sdk/bus/telegram-reference";
 
 const sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms));
 function jsonResponse(body: unknown): Response {
@@ -81,7 +81,7 @@ test("e2e: ask -> Telegram -> button tap -> reply -> resolved", async () => {
 	expect(ep.url).toContain("ws://127.0.0.1:");
 
 	// ---- real reference client (real WS to the server; fake Telegram) ----
-	const endpointFile = `${stateRoot}/notifications/e2e.json`;
+	const endpointFile = `${stateRoot}/sdk/e2e.json`;
 	let clientError: unknown;
 	const clientDone = runTelegramReferenceClient({
 		botToken: "x",
@@ -145,11 +145,10 @@ test("e2e: ask -> Telegram -> button tap -> reply -> resolved", async () => {
 	expect(clientError).toBeUndefined();
 }, 30000);
 
-test("interactive ask answered remotely via answer source (no RPC)", async () => {
-	// Mirrors what the notifications extension's AskAnswerSource does, against the
-	// real server: a pending interactive ask is registered repliable and resolved
-	// by a remote reply mapped to the chosen option label — proving asks can be
-	// answered remotely without RPC/unattended mode.
+test("interactive ask answered remotely via SDK answer source", async () => {
+	// Mirrors the SDK bus AskAnswerSource against the real server: a pending
+	// interactive ask is registered repliable and resolved by a remote SDK reply
+	// mapped to the chosen option label.
 	const stateRoot = `/tmp/notif-e2e-ans-${process.pid}-${Date.now()}`;
 	const srv = new NotificationServer("ans", "tok", stateRoot, true);
 
@@ -261,3 +260,77 @@ test("ask frames are exempt from redaction so they stay readable and answerable"
 	ws.close();
 	srv.stop();
 }, 30000);
+
+test("arbitrated native ask lets a generic claim win exactly once over a direct retirement and ignores stale replies", async () => {
+	const sessionId = `arbitrated-${process.pid}-${Date.now()}`;
+	const token = "tok";
+	const srv = new NotificationServer(sessionId, token, `/tmp/${sessionId}`, true);
+	let forwarded: { receiptId: string; answerJson: string } | undefined;
+	let forwardedCount = 0;
+	srv.onReply((_error, reply) => {
+		if (!reply) return;
+		forwardedCount++;
+		forwarded = { receiptId: reply.replyReceiptId, answerJson: reply.answerJson };
+	});
+	const endpoint = await srv.start();
+	const ws = new WebSocket(`${endpoint.url}/?token=${token}`);
+	let actionsSeen = 0;
+	let terminals = 0;
+	ws.addEventListener("message", event => {
+		const frame = JSON.parse(String(event.data)) as { type?: string; id?: string; kind?: string };
+		if (frame.type === "action_needed" && frame.kind === "ask") actionsSeen++;
+		if (frame.type === "action_resolved") terminals++;
+	});
+	await new Promise<void>((resolve, reject) => {
+		ws.addEventListener("open", () => resolve(), { once: true });
+		ws.addEventListener("error", () => reject(new Error("ws error")), { once: true });
+	});
+	try {
+		const lease = srv.registerArbitratedAsk(
+			JSON.stringify({
+				id: "arbitrated-ask",
+				kind: "ask",
+				sessionId,
+				question: "Which path wins?",
+				options: ["generic", "direct"],
+			}),
+			true,
+		);
+		await waitFor(() => actionsSeen === 1, 4_000, "arbitrated ask action");
+		ws.send(JSON.stringify({ type: "reply", id: "arbitrated-ask", answer: 0, token }));
+		await waitFor(() => forwarded !== undefined, 4_000, "generic reply claim");
+
+		// The native generic claim owns this exact lease, so direct workflow control
+		// cannot retire it and create a second terminal path.
+		expect(srv.retireIfUnclaimed(lease)).toEqual({ status: "claimed" });
+		srv.resolveClaim(forwarded!.receiptId, forwarded!.answerJson);
+		await waitFor(() => terminals === 1, 4_000, "single action terminal");
+
+		// A delayed duplicate of the old generic action cannot create an orphan receipt
+		// or emit another terminal after the receipt-bound resolution above.
+		ws.send(JSON.stringify({ type: "reply", id: "arbitrated-ask", answer: 1, token }));
+		await sleep(100);
+		expect(forwardedCount).toBe(1);
+		expect(terminals).toBe(1);
+
+		const directLease = srv.registerArbitratedAsk(
+			JSON.stringify({
+				id: "direct-retired-ask",
+				kind: "ask",
+				sessionId,
+				question: "Can a stale reply revive this?",
+				options: ["no"],
+			}),
+			true,
+		);
+		await waitFor(() => actionsSeen === 2, 4_000, "direct-retired ask action");
+		expect(srv.retireIfUnclaimed(directLease)).toEqual({ status: "retired" });
+		ws.send(JSON.stringify({ type: "reply", id: "direct-retired-ask", answer: 0, token }));
+		await sleep(100);
+		expect(forwardedCount).toBe(1);
+		expect(terminals).toBe(2);
+	} finally {
+		ws.close();
+		srv.stop();
+	}
+}, 30_000);

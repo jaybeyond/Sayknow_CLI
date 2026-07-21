@@ -2,8 +2,15 @@ import { afterEach, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { createNotificationsExtension } from "../src/notifications/index";
-import { readEndpoint } from "../src/notifications/telegram-reference";
+import { createNotificationsExtension } from "../src/sdk/bus/index";
+import { readEndpoint } from "../src/sdk/bus/telegram-reference";
+import {
+	cleanupFixtureRoots,
+	createNotificationFixtureRoot,
+	type FixtureRootCleanup,
+	isolatedNotificationSettings,
+	registerNotificationRuntime,
+} from "./helpers/notification-settings";
 
 /**
  * Regression for the text-before-ask ordering bug: the assistant text that
@@ -27,6 +34,7 @@ type Frame = {
 	type: string;
 	text?: string;
 	verbosity?: "lean" | "verbose";
+	redact?: boolean;
 	tokenUsage?: string;
 	model?: string;
 	cwd?: string;
@@ -40,15 +48,21 @@ type TestContextUsage = {
 };
 type TestModel = { id?: string };
 
-const tempDirs: string[] = [];
+const cleanupRoots: FixtureRootCleanup[] = [];
 const openSockets: WebSocket[] = [];
-afterEach(() => {
+afterEach(async () => {
 	for (const ws of openSockets.splice(0)) ws.close();
-	for (const dir of tempDirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
+	await cleanupFixtureRoots(cleanupRoots);
 });
 
 /** Boot the notifications extension against a real NotificationServer + WS client. */
-async function setup(options: { contextUsage?: TestContextUsage | false; model?: TestModel | false } = {}): Promise<{
+async function setup(
+	options: {
+		contextUsage?: TestContextUsage | false;
+		model?: TestModel | false;
+		readNotificationDiffStat?: (cwd: string) => Promise<string | undefined>;
+	} = {},
+): Promise<{
 	handlers: Map<string, Handler>;
 	ctx: unknown;
 	frames: Frame[];
@@ -64,10 +78,15 @@ async function setup(options: { contextUsage?: TestContextUsage | false; model?:
 		registerCommand: () => {},
 		sendUserMessage: () => {},
 	} as never;
-	createNotificationsExtension(api);
 
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "skc-notif-order-"));
-	tempDirs.push(cwd);
+	const agentDir = path.join(cwd, ".skc", "agent");
+	const cleanup = await createNotificationFixtureRoot(cwd, agentDir);
+	cleanupRoots.push(cleanup);
+	createNotificationsExtension(api, {
+		settings: isolatedNotificationSettings(agentDir),
+		readNotificationDiffStat: options.readNotificationDiffStat,
+	});
 	const sid = `order-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 	const ctx = {
 		cwd,
@@ -83,10 +102,16 @@ async function setup(options: { contextUsage?: TestContextUsage | false; model?:
 				: (options.contextUsage ?? { tokens: 12, contextWindow: 100, percent: 12, source: "provider_anchor" }),
 		getModel: () => (options.model === false ? undefined : (options.model ?? { id: "test-model" })),
 	} as never;
+	registerNotificationRuntime(cleanup, {
+		key: `notification-session:${sid}`,
+		shutdown: async () => {
+			await handlers.get("session_shutdown")?.({ type: "session_shutdown" }, ctx);
+		},
+	});
 
 	await handlers.get("session_start")!({ type: "session_start" }, ctx);
 
-	const endpointFile = path.join(cwd, ".skc", "state", "notifications", `${sid}.json`);
+	const endpointFile = path.join(cwd, ".skc", "state", "sdk", `${sid}.json`);
 	await waitFor(() => fs.existsSync(endpointFile), 4000, "endpoint file");
 	const { url, token } = readEndpoint(endpointFile);
 
@@ -222,6 +247,35 @@ test("inbound /verbose and /lean update runtime verbosity and confirmation polic
 	}
 }, 30000);
 
+test("drops an asynchronous context update completed after redaction changes", async () => {
+	const prevEnv = process.env.SKC_NOTIFICATIONS;
+	process.env.SKC_NOTIFICATIONS = "1";
+	try {
+		const diffEntered = Promise.withResolvers<void>();
+		const releaseDiff = Promise.withResolvers<string | undefined>();
+		const { handlers, ctx, frames, ws, token, sid } = await setup({
+			readNotificationDiffStat: async () => {
+				diffEntered.resolve();
+				return await releaseDiff.promise;
+			},
+		});
+		ws.send(JSON.stringify({ type: "config_command", sessionId: sid, token, verbosity: "verbose" }));
+		await waitFor(() => frames.some(f => f.type === "config_update" && f.verbosity === "verbose"));
+		await handlers.get("agent_end")!({ type: "agent_end" }, ctx);
+		await diffEntered.promise;
+
+		ws.send(JSON.stringify({ type: "config_command", sessionId: sid, token, redact: true }));
+		await waitFor(() => frames.some(f => f.type === "config_update" && f.redact === true));
+		releaseDiff.resolve("1 file changed");
+		await sleep(100);
+
+		expect(frames.some(f => f.type === "context_update")).toBe(false);
+	} finally {
+		if (prevEnv === undefined) delete process.env.SKC_NOTIFICATIONS;
+		else process.env.SKC_NOTIFICATIONS = prevEnv;
+	}
+}, 30000);
+
 test("verbose idle context includes compact cwd without usage metadata", async () => {
 	const prevEnv = process.env.SKC_NOTIFICATIONS;
 	process.env.SKC_NOTIFICATIONS = "1";
@@ -275,7 +329,7 @@ test("session shutdown emits session_closed before stopping the endpoint", async
 //
 // The emit site tags each turn_stream with a `finalAnswer` bit (false for the
 // pre-ask lead-in, true at turn_end). The Rust wire struct `TurnStream`
-// (crates/skc-notifications/src/protocol.rs) carries it as an optional
+// (crates/skc-sdk/src/protocol.rs) carries it as an optional
 // `final_answer` (serialized `finalAnswer`), so the bit is asserted here at the
 // WS-observable level; the `finalAnswer` -> `richMarkdown` mapping itself is
 // verified at the pure-renderer level in notifications-threaded-render.test.ts.

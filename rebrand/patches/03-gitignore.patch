@@ -1,0 +1,9 @@
+--- a/.gitignore
++++ b/.gitignore
+@@ -81,3 +81,6 @@
+ packages/coding-agent/binaries/
+ 
+ .release-040-artifacts/
++
++# OMC orchestration runtime state
++.omc/

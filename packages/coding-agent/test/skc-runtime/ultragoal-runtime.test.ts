@@ -11,7 +11,10 @@ import {
 	sessionUltragoalDir,
 } from "@sayknow-cli/coding-agent/skc-runtime/session-layout";
 import { reconcileWorkflowSkillState } from "@sayknow-cli/coding-agent/skc-runtime/state-runtime";
-import { validateCompletionReceipt } from "@sayknow-cli/coding-agent/skc-runtime/ultragoal-guard";
+import {
+	validateCompletionReceipt,
+	verifyUltragoalDurableCompletionState,
+} from "@sayknow-cli/coding-agent/skc-runtime/ultragoal-guard";
 
 import {
 	addUltragoalSubgoal,
@@ -919,6 +922,25 @@ describe("ultragoal CLI replay validation", () => {
 			]),
 		);
 	});
+
+	it("rejects empty or nonce-matching replay invariants and retains equality for negative-only assertions", async () => {
+		const cases: Array<{ invariants: Record<string, unknown>[]; message: string }> = [
+			{ invariants: [{ type: "regex", value: "[\\s\\S]*" }], message: "meaningful positive" },
+			{ invariants: [{ type: "regex", value: "[^]*" }], message: "meaningful positive" },
+			{ invariants: [{ type: "regex", value: "^" }], message: "meaningful positive" },
+			{ invariants: [{ type: "regex", value: "(?:)" }], message: "meaningful positive" },
+			{ invariants: [{ type: "substring", value: " \t" }], message: "non-empty string" },
+			{ invariants: [{ type: "not_substring", value: "missing" }], message: "stdout did not match" },
+		];
+		for (const entry of cases) {
+			const root = await tempDir();
+			const error = await expectRejectedExecutorQa(
+				root,
+				cliExecutorQa([cliReplayArtifact({ recordedStdout: "different\n", invariants: entry.invariants })]),
+			);
+			expect(error).toContain(entry.message);
+		}
+	});
 });
 
 describe("native SKC ultragoal runtime", () => {
@@ -1273,6 +1295,164 @@ describe("native SKC ultragoal runtime", () => {
 		expect(
 			validateCompletionReceipt({ plan, ledger, goal: plan.goals[2]!, receiptKind: "final-aggregate" }).state,
 		).toBe("active_stale_receipt");
+	});
+
+	it("hydrates a reviewed validation-batch final recovery and rejects stale, wrong, and multiple replacements", async () => {
+		const prepareRecovery = async () => {
+			const root = await batchTempDir();
+			await writeStructuralArtifacts(root);
+			let plan = await createUltragoalPlan({
+				cwd: root,
+				brief: "@goal: A\na\n@goal: B\nb\n@goal: C\nc\n@goal: D\nd",
+				validationBatches: [
+					{ schemaVersion: 1, batchId: "VB001", memberIds: ["G002", "G003", "G004"], finalGoalId: "G004" },
+				],
+			});
+			await startNextUltragoalGoal({ cwd: root });
+			plan = await checkpointUltragoalGoal({
+				cwd: root,
+				goalId: "G001",
+				status: "complete",
+				evidence: "g001 complete",
+				qualityGateJson: passingQualityGate(),
+			});
+			await startNextUltragoalGoal({ cwd: root });
+			plan = await checkpointUltragoalGoal({
+				cwd: root,
+				goalId: "G002",
+				status: "complete",
+				evidence: "g002 deferred",
+				qualityGateJson: deferredBatchGate("G002", plan.goals[1]!.validationBatch!),
+			});
+			await startNextUltragoalGoal({ cwd: root });
+			plan = await checkpointUltragoalGoal({
+				cwd: root,
+				goalId: "G003",
+				status: "complete",
+				evidence: "g003 deferred",
+				qualityGateJson: deferredBatchGate("G003", plan.goals[2]!.validationBatch!),
+			});
+			await startNextUltragoalGoal({ cwd: root });
+			await runNativeUltragoalCommand(
+				[
+					"record-review-blockers",
+					"--goal-id",
+					"G004",
+					"--title",
+					"Replacement",
+					"--objective",
+					"Resolve the reviewed final.",
+					"--evidence",
+					"The original final was reviewed and superseded.",
+				],
+				root,
+			);
+			await addUltragoalSubgoal({
+				cwd: root,
+				title: "Aggregate final",
+				objective: "Produce final aggregate evidence.",
+				evidence: "Aggregate evidence is required after replacement.",
+				rationale: "Keep aggregate evidence after the replacement receipt.",
+			});
+			await startNextUltragoalGoal({ cwd: root });
+			await checkpointUltragoalGoal({
+				cwd: root,
+				goalId: "G005",
+				status: "complete",
+				evidence: "replacement verified",
+				qualityGateJson: passingQualityGate(),
+			});
+			await startNextUltragoalGoal({ cwd: root });
+			await checkpointUltragoalGoal({
+				cwd: root,
+				goalId: "G006",
+				status: "complete",
+				evidence: "aggregate verified",
+				qualityGateJson: passingQualityGate(),
+			});
+			await checkpointUltragoalGoal({
+				cwd: root,
+				goalId: "G004",
+				status: "active",
+				evidence: "reopened after aggregate receipt",
+			});
+			return root;
+		};
+		const recoveryGate = (replacementGoalId: string) =>
+			JSON.stringify({
+				...JSON.parse(passingQualityGate()),
+				validationBatchClose: {
+					schemaVersion: 1,
+					kind: "review-blocker-replacement-close",
+					replacementGoalId,
+					coverageEvidence: "The reviewed replacement and cumulative batch validation are covered.",
+				},
+			});
+
+		const validRoot = await prepareRecovery();
+		const closed = await checkpointUltragoalGoal({
+			cwd: validRoot,
+			goalId: "G004",
+			status: "complete",
+			evidence: "hydrated normal batch close",
+			qualityGateJson: recoveryGate("G005"),
+		});
+		expect(closed.goals[3]?.completionVerification?.validationBatch).toMatchObject({
+			role: "batch-close",
+			batchId: "VB001",
+			finalGoalId: "G004",
+		});
+		const closeLedger = (await readUltragoalLedger(validRoot)).at(-1);
+		expect((closeLedger?.qualityGateJson as Record<string, unknown>).validationBatchClose).toMatchObject({
+			kind: "validation-batch-close",
+			memberIds: ["G002", "G003", "G004"],
+		});
+
+		const wrongRoot = await prepareRecovery();
+		await expect(
+			checkpointUltragoalGoal({
+				cwd: wrongRoot,
+				goalId: "G004",
+				status: "complete",
+				evidence: "wrong replacement",
+				qualityGateJson: recoveryGate("G006"),
+			}),
+		).rejects.toThrow("exactly the declared replacement");
+
+		const staleRoot = await prepareRecovery();
+		const staleGoalsPath = path.join(sessionUltragoalDir(staleRoot, TEST_SESSION_ID), "goals.json");
+		const stalePlan = JSON.parse(await Bun.file(staleGoalsPath).text());
+		stalePlan.goals[4].updatedAt = new Date(Date.now() + 1_000).toISOString();
+		await fs.writeFile(staleGoalsPath, `${JSON.stringify(stalePlan, null, 2)}\n`);
+		await expect(
+			checkpointUltragoalGoal({
+				cwd: staleRoot,
+				goalId: "G004",
+				status: "complete",
+				evidence: "stale replacement",
+				qualityGateJson: recoveryGate("G005"),
+			}),
+		).rejects.toThrow("replacement close Ultragoal G005 receipt generation is stale.");
+
+		const multipleRoot = await prepareRecovery();
+		const multiplePlanPath = path.join(sessionUltragoalDir(multipleRoot, TEST_SESSION_ID), "goals.json");
+		const multiplePlan = JSON.parse(await Bun.file(multiplePlanPath).text());
+		multiplePlan.goals.push({
+			...multiplePlan.goals[4],
+			id: "G007",
+			status: "pending",
+			steering: { kind: "review_blocker", blockedGoalId: "G004" },
+		});
+		await fs.writeFile(multiplePlanPath, `${JSON.stringify(multiplePlan, null, 2)}\n`);
+		await expect(
+			checkpointUltragoalGoal({
+				cwd: multipleRoot,
+				goalId: "G004",
+				status: "complete",
+				evidence: "multiple replacements",
+				qualityGateJson: recoveryGate("G005"),
+			}),
+		).rejects.toThrow("exactly the declared replacement");
 	});
 
 	it("validation batch idempotent replay rejects stale durable metadata before early return", async () => {
@@ -2828,7 +3008,360 @@ describe("native SKC ultragoal runtime", () => {
 		expect(await Bun.file(goalsPath).text()).toBe(goalsAfterFinal);
 	});
 
-	it("uses per-goal receipts when repairing a non-final goal after aggregate completion (#1777)", async () => {
+	it("re-mints a final-aggregate receipt when goals are appended after aggregate completion", async () => {
+		const root = await tempDir();
+		await createUltragoalPlan({ cwd: root, brief: "Ship the fix" });
+		await startNextUltragoalGoal({ cwd: root });
+		const afterFirst = await checkpointUltragoalGoal({
+			cwd: root,
+			goalId: "G001",
+			status: "complete",
+			evidence: "first goal verified",
+			qualityGateJson: await passingLiveQualityGate(root),
+		});
+		expect(afterFirst.goals[0]?.completionVerification?.receiptKind).toBe("final-aggregate");
+
+		await addUltragoalSubgoal({
+			cwd: root,
+			title: "Appended stage",
+			objective: "Complete the appended stage.",
+			evidence: "The run gained a new required goal after aggregate completion.",
+			rationale: "Cover final-aggregate re-minting after an append staled the prior receipt.",
+		});
+		await startNextUltragoalGoal({ cwd: root });
+		const afterAppended = await checkpointUltragoalGoal({
+			cwd: root,
+			goalId: "G002",
+			status: "complete",
+			evidence: "appended goal verified",
+			qualityGateJson: await passingLiveQualityGate(root),
+		});
+
+		// Appending G002 staled G001's final-aggregate receipt by design. The
+		// closing checkpoint must mint a fresh final-aggregate receipt instead of
+		// deferring to the stale one, which would leave the run permanently
+		// unable to satisfy the final-aggregate completion guard.
+		expect(afterAppended.goals[1]?.completionVerification?.receiptKind).toBe("final-aggregate");
+
+		const plan = await readUltragoalPlan(root);
+		if (!plan) throw new Error("missing ultragoal plan");
+		const ledger = await readUltragoalLedger(root);
+		expect(
+			validateCompletionReceipt({ plan, ledger, goal: plan.goals[1]!, receiptKind: "final-aggregate" }).state,
+		).toBe("active_verified_complete");
+		const durable = await verifyUltragoalDurableCompletionState({ cwd: root, sessionId: TEST_SESSION_ID });
+		expect(durable.state).toBe("active_verified_complete");
+	});
+
+	it("re-mints the receipt on identical-evidence replay after a goal-tagged ledger event staled it", async () => {
+		const root = await tempDir();
+		await createUltragoalPlan({ cwd: root, brief: "Ship the fix" });
+		await startNextUltragoalGoal({ cwd: root });
+		await checkpointUltragoalGoal({
+			cwd: root,
+			goalId: "G001",
+			status: "complete",
+			evidence: "first goal verified",
+			qualityGateJson: await passingLiveQualityGate(root),
+		});
+		const classified = await runNativeUltragoalCommand(
+			[
+				"classify-blocker",
+				"--classification",
+				"resolvable",
+				"--evidence",
+				"post-completion audit note tagged to the completed goal",
+				"--goal-id",
+				"G001",
+			],
+			root,
+		);
+		expect(classified.status).toBe(0);
+
+		// The goal-tagged blocker_classified event stales the recorded receipt.
+		const staleDurable = await verifyUltragoalDurableCompletionState({ cwd: root, sessionId: TEST_SESSION_ID });
+		expect(staleDurable.state).not.toBe("active_verified_complete");
+		const checkpointsBefore = (await readUltragoalLedger(root)).filter(
+			event => event.event === "goal_checkpointed",
+		).length;
+
+		// Different evidence stays rejected on complete goals; the identical
+		// evidence replay must re-verify and mint a fresh receipt instead of
+		// no-opping on the stale one (which would be unrepairable forever).
+		const replayed = await checkpointUltragoalGoal({
+			cwd: root,
+			goalId: "G001",
+			status: "complete",
+			evidence: "first goal verified",
+			qualityGateJson: await passingLiveQualityGate(root),
+		});
+		expect(replayed.goals[0]?.completionVerification?.receiptKind).toBe("final-aggregate");
+		expect((await readUltragoalLedger(root)).filter(event => event.event === "goal_checkpointed")).toHaveLength(
+			checkpointsBefore + 1,
+		);
+		const durable = await verifyUltragoalDurableCompletionState({ cwd: root, sessionId: TEST_SESSION_ID });
+		expect(durable.state).toBe("active_verified_complete");
+
+		// A further identical-evidence replay of the now-fresh receipt is a
+		// pure no-op resolved against the receipt's own (latest) checkpoint
+		// event, never the oldest duplicate.
+		const receiptIdAfterRemint = replayed.goals[0]?.completionVerification?.receiptId;
+		const again = await checkpointUltragoalGoal({
+			cwd: root,
+			goalId: "G001",
+			status: "complete",
+			evidence: "first goal verified",
+			qualityGateJson: await passingLiveQualityGate(root),
+		});
+		expect(again.goals[0]?.completionVerification?.receiptId).toBe(receiptIdAfterRemint);
+		expect((await readUltragoalLedger(root)).filter(event => event.event === "goal_checkpointed")).toHaveLength(
+			checkpointsBefore + 1,
+		);
+	});
+
+	it("rejects identical-evidence replay when the goal row changed after receipt verification", async () => {
+		const root = await tempDir();
+		await createUltragoalPlan({ cwd: root, brief: "Ship the fix" });
+		await startNextUltragoalGoal({ cwd: root });
+		await checkpointUltragoalGoal({
+			cwd: root,
+			goalId: "G001",
+			status: "complete",
+			evidence: "first goal verified",
+			qualityGateJson: await passingLiveQualityGate(root),
+		});
+		const goalsPath = path.join(sessionUltragoalDir(root, TEST_SESSION_ID), "goals.json");
+		const saved = JSON.parse(await Bun.file(goalsPath).text());
+		saved.goals[0].updatedAt = new Date(Date.now() + 1000).toISOString();
+		await fs.writeFile(goalsPath, `${JSON.stringify(saved, null, 2)}\n`);
+
+		// A mutated complete row is neither a clean no-op nor a repairable
+		// context-stale replay; it must fail loud instead of silently
+		// laundering the inconsistency.
+		await expect(
+			checkpointUltragoalGoal({
+				cwd: root,
+				goalId: "G001",
+				status: "complete",
+				evidence: "first goal verified",
+				qualityGateJson: await passingLiveQualityGate(root),
+			}),
+		).rejects.toThrow("changed after its completion receipt was verified");
+	});
+
+	it("rejects a superseded final-aggregate receipt whose forged basis is mirrored onto the ledger event generation", async () => {
+		const root = await tempDir();
+		await createUltragoalPlan({ cwd: root, brief: "Ship the fix" });
+		await startNextUltragoalGoal({ cwd: root });
+		await checkpointUltragoalGoal({
+			cwd: root,
+			goalId: "G001",
+			status: "complete",
+			evidence: "first goal verified",
+			qualityGateJson: await passingLiveQualityGate(root),
+		});
+		await addUltragoalSubgoal({
+			cwd: root,
+			title: "Appended stage",
+			objective: "Complete the appended stage.",
+			evidence: "The run gained a new required goal after aggregate completion.",
+			rationale: "Red-team: forged superseded receipt provenance must be rejected.",
+		});
+		await startNextUltragoalGoal({ cwd: root });
+		await checkpointUltragoalGoal({
+			cwd: root,
+			goalId: "G002",
+			status: "complete",
+			evidence: "appended goal verified",
+			qualityGateJson: await passingLiveQualityGate(root),
+		});
+
+		// Coordinated tamper: forge the goals-row basis and generation of
+		// G001's superseded final-aggregate receipt, and mirror ONLY the
+		// generation onto its ledger checkpoint event. Field-selective ledger
+		// matching would accept this as verified provenance.
+		const goalsPath = path.join(sessionUltragoalDir(root, TEST_SESSION_ID), "goals.json");
+		const saved = JSON.parse(await Bun.file(goalsPath).text());
+		const forgedReceipt = saved.goals[0].completionVerification;
+		forgedReceipt.basis.planHashBeforeCheckpoint = "forged";
+		forgedReceipt.planGeneration = hashStructuredValue(forgedReceipt.basis);
+		await fs.writeFile(goalsPath, `${JSON.stringify(saved, null, 2)}\n`);
+		const ledgerPath = path.join(sessionUltragoalDir(root, TEST_SESSION_ID), "ledger.jsonl");
+		const rewritten = (await Bun.file(ledgerPath).text())
+			.split("\n")
+			.filter(line => line.trim())
+			.map(line => {
+				const event = JSON.parse(line);
+				if (event.eventId === forgedReceipt.checkpointLedgerEventId) {
+					event.completionVerification.planGeneration = forgedReceipt.planGeneration;
+				}
+				return JSON.stringify(event);
+			});
+		await fs.writeFile(ledgerPath, `${rewritten.join("\n")}\n`);
+
+		const plan = await readUltragoalPlan(root);
+		if (!plan) throw new Error("missing ultragoal plan");
+		const ledger = await readUltragoalLedger(root);
+		expect(
+			validateCompletionReceipt({ plan, ledger, goal: plan.goals[1]!, receiptKind: "final-aggregate" }).state,
+		).not.toBe("active_verified_complete");
+		const durable = await verifyUltragoalDurableCompletionState({ cwd: root, sessionId: TEST_SESSION_ID });
+		expect(durable.state).not.toBe("active_verified_complete");
+	});
+
+	async function completedValidationBatchPlan(root: string) {
+		await writeStructuralArtifacts(root);
+		let plan = await createUltragoalPlan({
+			cwd: root,
+			brief: "@goal: A\na\n@goal: B\nb\n@goal: C\nc",
+			validationBatches: [
+				{ schemaVersion: 1, batchId: "VB001", memberIds: ["G001", "G002", "G003"], finalGoalId: "G003" },
+			],
+		});
+		await startNextUltragoalGoal({ cwd: root });
+		plan = await checkpointUltragoalGoal({
+			cwd: root,
+			goalId: "G001",
+			status: "complete",
+			evidence: "g001 deferred",
+			qualityGateJson: deferredBatchGate("G001", plan.goals[0]!.validationBatch!),
+		});
+		await startNextUltragoalGoal({ cwd: root });
+		plan = await checkpointUltragoalGoal({
+			cwd: root,
+			goalId: "G002",
+			status: "complete",
+			evidence: "g002 deferred",
+			qualityGateJson: deferredBatchGate("G002", plan.goals[1]!.validationBatch!),
+		});
+		await startNextUltragoalGoal({ cwd: root });
+		plan = await checkpointUltragoalGoal({
+			cwd: root,
+			goalId: "G003",
+			status: "complete",
+			evidence: "batch close",
+			qualityGateJson: batchCloseGate(plan),
+		});
+		expect(plan.goals[2]?.completionVerification?.receiptKind).toBe("final-aggregate");
+		return plan;
+	}
+
+	it("keeps per-goal deferred receipts when replaying a context-staled validation batch member", async () => {
+		const root = await batchTempDir();
+		const plan = await completedValidationBatchPlan(root);
+
+		const classified = await runNativeUltragoalCommand(
+			[
+				"classify-blocker",
+				"--classification",
+				"resolvable",
+				"--evidence",
+				"post-completion audit note tagged to the completed member",
+				"--goal-id",
+				"G001",
+			],
+			root,
+		);
+		expect(classified.status).toBe(0);
+
+		// The goal-tagged event stales G001's deferred receipt AND the batch
+		// aggregate close. The member's re-verification replay must stay a
+		// per-goal deferred receipt; minting final-aggregate on a non-final
+		// batch member would poison subsequent batch-close repair.
+		const replayed = await checkpointUltragoalGoal({
+			cwd: root,
+			goalId: "G001",
+			status: "complete",
+			evidence: "g001 deferred",
+			qualityGateJson: deferredBatchGate("G001", plan.goals[0]!.validationBatch!),
+		});
+		const memberReceipt = replayed.goals[0]?.completionVerification;
+		expect(memberReceipt?.receiptKind).toBe("per-goal");
+		expect(memberReceipt?.validationBatch?.role).toBe("deferred-member");
+	});
+
+	it("no-ops repeated identical-evidence batch close replays after a re-mint", async () => {
+		const root = await batchTempDir();
+		const plan = await completedValidationBatchPlan(root);
+		const classified = await runNativeUltragoalCommand(
+			[
+				"classify-blocker",
+				"--classification",
+				"resolvable",
+				"--evidence",
+				"post-completion audit note tagged to the batch final",
+				"--goal-id",
+				"G003",
+			],
+			root,
+		);
+		expect(classified.status).toBe(0);
+
+		// First replay re-verifies the staled close and appends a second
+		// same-status, same-evidence checkpoint event.
+		const reclosed = await checkpointUltragoalGoal({
+			cwd: root,
+			goalId: "G003",
+			status: "complete",
+			evidence: "batch close",
+			qualityGateJson: batchCloseGate(plan),
+		});
+		const recloseReceiptId = reclosed.goals[2]?.completionVerification?.receiptId;
+		const checkpointsAfterReclose = (await readUltragoalLedger(root)).filter(
+			event => event.event === "goal_checkpointed",
+		).length;
+
+		// The next replay must resolve the receipt against ITS OWN checkpoint
+		// event (the latest duplicate) and no-op, not compare against the
+		// oldest duplicate and throw.
+		const again = await checkpointUltragoalGoal({
+			cwd: root,
+			goalId: "G003",
+			status: "complete",
+			evidence: "batch close",
+			qualityGateJson: batchCloseGate(plan),
+		});
+		expect(again.goals[2]?.completionVerification?.receiptId).toBe(recloseReceiptId);
+		expect((await readUltragoalLedger(root)).filter(event => event.event === "goal_checkpointed")).toHaveLength(
+			checkpointsAfterReclose,
+		);
+	});
+
+	it("verifies completion of a goal appended after a closed validation batch", async () => {
+		const root = await batchTempDir();
+		await completedValidationBatchPlan(root);
+
+		// Appending a goal stales the batch aggregate close by design. The
+		// appended goal's completion must still be able to close the run: the
+		// old batch close stands as ledger-anchored historical evidence for
+		// the deferred members.
+		await addUltragoalSubgoal({
+			cwd: root,
+			title: "Appended stage",
+			objective: "Complete the appended stage.",
+			evidence: "The batch run gained a new required goal after closing.",
+			rationale: "Cover post-close appends regaining a fresh final-aggregate receipt.",
+		});
+		await startNextUltragoalGoal({ cwd: root });
+		const appended = await checkpointUltragoalGoal({
+			cwd: root,
+			goalId: "G004",
+			status: "complete",
+			evidence: "appended goal verified",
+			qualityGateJson: await passingLiveQualityGate(root),
+		});
+		expect(appended.goals[3]?.completionVerification?.receiptKind).toBe("final-aggregate");
+
+		const plan = await readUltragoalPlan(root);
+		if (!plan) throw new Error("missing ultragoal plan");
+		const ledger = await readUltragoalLedger(root);
+		expect(
+			validateCompletionReceipt({ plan, ledger, goal: plan.goals[3]!, receiptKind: "final-aggregate" }).state,
+		).toBe("active_verified_complete");
+		const durable = await verifyUltragoalDurableCompletionState({ cwd: root, sessionId: TEST_SESSION_ID });
+		expect(durable.state).toBe("active_verified_complete");
+	});
+	it("re-mints the final-aggregate receipt when repairing a non-final goal after aggregate completion (#1777)", async () => {
 		for (const repairStatus of ["active", "failed"] as const) {
 			const root = await tempDir();
 			await createUltragoalPlan({ cwd: root, brief: "Ship the fix" });
@@ -2874,15 +3407,22 @@ describe("native SKC ultragoal runtime", () => {
 				qualityGateJson: await passingLiveQualityGate(root),
 			});
 
-			expect(repaired.goals[0]?.completionVerification?.receiptKind).toBe("per-goal");
+			// The hand-edited repair staled G002's final-aggregate receipt (its
+			// plan generation covers every required goal). The repair checkpoint
+			// closes the run again, so it must re-mint the final-aggregate
+			// receipt; a per-goal receipt would leave the run with no fresh
+			// final-aggregate receipt forever.
+			expect(repaired.goals[0]?.completionVerification?.receiptKind).toBe("final-aggregate");
 			expect(
 				validateCompletionReceipt({
 					plan: repaired,
 					ledger: await readUltragoalLedger(root),
 					goal: repaired.goals[0]!,
-					receiptKind: "per-goal",
+					receiptKind: "final-aggregate",
 				}).state,
 			).toBe("active_verified_complete");
+			const durable = await verifyUltragoalDurableCompletionState({ cwd: root, sessionId: TEST_SESSION_ID });
+			expect(durable.state).toBe("active_verified_complete");
 		}
 	});
 

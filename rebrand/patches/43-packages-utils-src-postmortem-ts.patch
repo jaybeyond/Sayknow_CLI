@@ -1,0 +1,42 @@
+--- a/packages/utils/src/postmortem.ts
++++ b/packages/utils/src/postmortem.ts
+@@ -203,6 +203,25 @@
+ 	const stackLines = stack.split("\n").slice(1);
+ 	const formattedStack = stackLines.length > 0 ? `\n${stackLines.join("\n")}` : "";
+ 	return `\n[${label}] ${name}: ${message}${formattedStack}\n`;
++}
++
++/**
++ * True for terminal/pipe/disk write failures (EIO, EPIPE, EBADF, …) on the write side.
++ * Covers external-volume stalls and terminal hangups that surface as a late uncaught
++ * exception mid-shutdown — a benign artifact upstream's stdout-EPIPE classifier misses.
++ * Only write-side syscalls match so genuine read/logic bugs are never masked.
++ */
++function isBenignIoWriteError(err: unknown): boolean {
++	if (!err || typeof err !== "object") return false;
++	const { code, syscall } = err as { code?: unknown; syscall?: unknown };
++	const isIoCode =
++		code === "EIO" ||
++		code === "EPIPE" ||
++		code === "EBADF" ||
++		code === "ENXIO" ||
++		code === "ENOTTY" ||
++		code === "ECONNRESET";
++	return isIoCode && (syscall === undefined || syscall === "write" || syscall === "writev");
+ }
+ 
+ async function exitQuietlyForAttributableStdoutEpipe(reason: Reason): Promise<void> {
+@@ -216,6 +235,13 @@
+ }
+ 
+ async function handleFatalError(label: string, reason: unknown, cleanupReason: Reason): Promise<void> {
++	if (cleanupStage !== "idle" && isBenignIoWriteError(reason)) {
++		logger.debug("Ignoring benign terminal I/O write error during shutdown", {
++			code: (reason as { code?: unknown }).code,
++			syscall: (reason as { syscall?: unknown }).syscall,
++		});
++		return;
++	}
+ 	if (stdoutEpipeClassifier.isAttributableProcessStdoutEpipe(reason)) {
+ 		await exitQuietlyForAttributableStdoutEpipe(cleanupReason);
+ 		return;

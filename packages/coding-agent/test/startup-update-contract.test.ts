@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import { getBundledModel } from "@sayknow-cli/ai";
 import { postmortem, TempDir } from "@sayknow-cli/utils";
-import type { Args } from "../src/cli/args";
+import { type Args, parseArgs } from "../src/cli/args";
 import { Settings } from "../src/config/settings";
 import { SETTINGS_SCHEMA } from "../src/config/settings-schema";
 import {
@@ -13,23 +13,20 @@ import {
 	type StartupUpdateRoute,
 } from "../src/main";
 import type { InteractiveMode } from "../src/modes/interactive-mode";
-import type { CreateAgentSessionResult } from "../src/sdk";
+import type { CreateAgentSessionOptions, CreateAgentSessionResult } from "../src/sdk";
 import type { AgentSession } from "../src/session/agent-session";
 import { AuthStorage } from "../src/session/auth-storage";
 import { EventBus } from "../src/utils/event-bus";
 
 const alternateRoutes: Array<{
 	name: StartupUpdateRoute;
-	parsed: { print?: boolean; mode?: "text" | "json" | "rpc" | "rpc-ui" | "acp" | "bridge" };
+	parsed: { print?: boolean; mode?: "text" | "json" | "acp" };
 	autoPrint: boolean;
 }> = [
 	{ name: "print", parsed: { print: true }, autoPrint: false },
 	{ name: "text", parsed: { mode: "text" }, autoPrint: false },
-	{ name: "json", parsed: { mode: "json" }, autoPrint: false },
-	{ name: "rpc", parsed: { mode: "rpc" }, autoPrint: false },
-	{ name: "rpc-ui", parsed: { mode: "rpc-ui" }, autoPrint: false },
+	{ name: "text", parsed: { mode: "json" }, autoPrint: false },
 	{ name: "acp", parsed: { mode: "acp" }, autoPrint: false },
-	{ name: "bridge", parsed: { mode: "bridge" }, autoPrint: false },
 	{ name: "text", parsed: {}, autoPrint: true },
 ];
 
@@ -225,16 +222,27 @@ describe("startup update contract", () => {
 			name: string;
 			args: Partial<Args>;
 			pipedInput?: string;
-			expectedRunner: "acp" | "bridge" | "print" | "rpc";
+			expectedRunner: "acp" | "print";
+			expectedInitialMessage?: string;
 		}> = [
 			{ name: "print", args: { print: true }, expectedRunner: "print" },
 			{ name: "text", args: { mode: "text" }, expectedRunner: "print" },
 			{ name: "json", args: { mode: "json" }, expectedRunner: "print" },
-			{ name: "rpc", args: { mode: "rpc" }, expectedRunner: "rpc" },
-			{ name: "rpc-ui", args: { mode: "rpc-ui" }, expectedRunner: "rpc" },
 			{ name: "acp", args: { mode: "acp" }, expectedRunner: "acp" },
-			{ name: "bridge", args: { mode: "bridge" }, expectedRunner: "bridge" },
-			{ name: "auto-print", args: {}, pipedInput: "piped prompt", expectedRunner: "print" },
+			{
+				name: "auto-print",
+				args: {},
+				pipedInput: "piped prompt",
+				expectedRunner: "print",
+				expectedInitialMessage: "piped prompt",
+			},
+			{
+				name: "positional-auto-print",
+				args: { messages: ["hello"] },
+				pipedInput: "pipe context",
+				expectedRunner: "print",
+				expectedInitialMessage: "pipe context\nhello",
+			},
 		];
 
 		for (const testCase of cases) {
@@ -243,9 +251,19 @@ describe("startup update contract", () => {
 			const originalNoTitle = Bun.env.PI_NO_TITLE;
 			let checks = 0;
 			const runners: string[] = [];
+			let pipedInputReads = 0;
+			let sessionOptions: CreateAgentSessionOptions | undefined;
+			let initialMessage: string | undefined;
 			try {
-				await runRootCommand(rootArgs(testCase.args), [], {
-					createAgentSession: async () => fakeSessionResult(),
+				const parsed =
+					testCase.expectedRunner === "acp"
+						? ({ messages: [], fileArgs: [], unknownFlags: new Map(), ...testCase.args } satisfies Args)
+						: rootArgs(testCase.args);
+				await runRootCommand(parsed, [], {
+					createAgentSession: async options => {
+						sessionOptions = options;
+						return fakeSessionResult();
+					},
 					discoverAuthStorage: async () => authStorage,
 					settings: Settings.isolated({ "marketplace.autoUpdate": "off", "startup.checkUpdate": true }),
 					suppressProcessExit: true,
@@ -256,23 +274,28 @@ describe("startup update contract", () => {
 						},
 					},
 					initTheme: async () => {},
-					readPipedInput: async () => testCase.pipedInput,
+					readPipedInput: async () => {
+						pipedInputReads += 1;
+						return testCase.pipedInput;
+					},
 					runStartupCredentialAutoImportIfNeeded: async () => undefined,
 					runAcpMode: async () => {
 						runners.push("acp");
 					},
-					runRpcMode: async () => {
-						runners.push("rpc");
-					},
-					runBridgeMode: async () => {
-						runners.push("bridge");
-					},
-					runPrintMode: async () => {
+					runPrintMode: async (_session, options) => {
 						runners.push("print");
+						initialMessage = options.initialMessage;
 					},
 				});
 				expect(checks, testCase.name).toBe(0);
 				expect(runners, testCase.name).toEqual([testCase.expectedRunner]);
+				expect(pipedInputReads, testCase.name).toBe(testCase.expectedRunner === "acp" ? 0 : 1);
+				expect(initialMessage, testCase.name).toBe(testCase.expectedInitialMessage);
+				if (testCase.expectedRunner === "print") {
+					expect(sessionOptions?.sdkHostModeSupported, testCase.name).toBe(false);
+				} else {
+					expect(sessionOptions, testCase.name).toBeUndefined();
+				}
 			} finally {
 				authStorage.close();
 				if (originalNoTitle === undefined) delete Bun.env.PI_NO_TITLE;
@@ -281,13 +304,92 @@ describe("startup update contract", () => {
 		}
 	}, 30_000);
 
-	it("preserves print-mode status and does not dispose the session twice", async () => {
+	it("forwards CLI model and thinking to SDK-backed ACP startup controls", async () => {
+		using tempDir = TempDir.createSync("@skc-acp-startup-options-");
+		const authStorage = await AuthStorage.create(path.join(tempDir.path(), "auth.db"));
+		const originalNoTitle = Bun.env.PI_NO_TITLE;
+		let options: { agentDir?: string; startupOptions?: { modelId?: string; thinkingLevel?: string } } | undefined;
+		try {
+			await runRootCommand(
+				{
+					messages: [],
+					fileArgs: [],
+					unknownFlags: new Map(),
+					mode: "acp",
+					model: `${testModel.provider}/${testModel.id}`,
+					thinking: "high" as Args["thinking"],
+				},
+				[],
+				{
+					discoverAuthStorage: async () => authStorage,
+					settings: Settings.isolated({ "marketplace.autoUpdate": "off", "startup.checkUpdate": true }),
+					suppressProcessExit: true,
+					initTheme: async () => {},
+					readPipedInput: async () => undefined,
+					runStartupCredentialAutoImportIfNeeded: async () => undefined,
+					runAcpMode: async input => {
+						options = input;
+					},
+				},
+			);
+			expect(options?.startupOptions).toEqual({
+				modelId: `${testModel.provider}/${testModel.id}`,
+				thinkingLevel: "high",
+			});
+		} finally {
+			authStorage.close();
+			if (originalNoTitle === undefined) delete Bun.env.PI_NO_TITLE;
+			else Bun.env.PI_NO_TITLE = originalNoTitle;
+		}
+	});
+	it("forwards CLI --mcp-config as mcpConfigPath to local SDK session startup", async () => {
+		using tempDir = TempDir.createSync("@skc-mcp-config-startup-options-");
+		const authStorage = await AuthStorage.create(path.join(tempDir.path(), "auth.db"));
+		const configPath = path.join(tempDir.path(), "explicit-mcp.json");
+		let sessionOptions: CreateAgentSessionOptions | undefined;
+		try {
+			await runRootCommand(
+				parseArgs([
+					"--mode",
+					"text",
+					"--mcp-config",
+					configPath,
+					"--no-session",
+					"--no-skills",
+					"--no-rules",
+					"--no-tools",
+					"--no-lsp",
+				]),
+				[],
+				{
+					createAgentSession: async options => {
+						sessionOptions = options;
+						return fakeSessionResult();
+					},
+					discoverAuthStorage: async () => authStorage,
+					settings: Settings.isolated({ "marketplace.autoUpdate": "off", "startup.checkUpdate": false }),
+					suppressProcessExit: true,
+					initTheme: async () => {},
+					readPipedInput: async () => undefined,
+					runStartupCredentialAutoImportIfNeeded: async () => undefined,
+					runPrintMode: async () => {},
+				},
+			);
+
+			expect(sessionOptions?.mcpConfigPath).toBe(configPath);
+			expect(sessionOptions?.mcpManager).toBeUndefined();
+		} finally {
+			authStorage.close();
+		}
+	});
+
+	it("preserves print-mode status, cleans up owners, and does not dispose the session twice", async () => {
 		using tempDir = TempDir.createSync("@skc-print-exit-");
 		const authStorage = await AuthStorage.create(path.join(tempDir.path(), "auth.db"));
 		const originalNoTitle = Bun.env.PI_NO_TITLE;
 		const originalExitCode = process.exitCode;
 		let disposeCalls = 0;
-		const quitSpy = vi.spyOn(postmortem, "quit").mockResolvedValue(undefined);
+		const cleanupSpy = vi.spyOn(postmortem, "cleanup").mockResolvedValue(undefined);
 		const sessionResult = fakeSessionResult();
 		sessionResult.session.dispose = async () => {
 			disposeCalls += 1;
@@ -309,13 +411,159 @@ describe("startup update contract", () => {
 			});
 
 			expect(disposeCalls).toBe(1);
-			expect(quitSpy).toHaveBeenCalledWith(78);
+			expect(cleanupSpy).toHaveBeenCalledTimes(1);
+			expect(process.exitCode).toBe(78);
 		} finally {
 			vi.restoreAllMocks();
 			process.exitCode = originalExitCode ?? 0;
 			authStorage.close();
 			if (originalNoTitle === undefined) delete Bun.env.PI_NO_TITLE;
 			else Bun.env.PI_NO_TITLE = originalNoTitle;
+		}
+	});
+	it("cleans up noninteractive owners when print mode rejects", async () => {
+		using tempDir = TempDir.createSync("@skc-print-failure-");
+		const authStorage = await AuthStorage.create(path.join(tempDir.path(), "auth.db"));
+		const originalNoTitle = Bun.env.PI_NO_TITLE;
+		const printFailure = new Error("print failed");
+		const cleanupSpy = vi.spyOn(postmortem, "cleanup").mockResolvedValue(undefined);
+		try {
+			await expect(
+				runRootCommand(rootArgs({ mode: "text" }), [], {
+					createAgentSession: async () => fakeSessionResult(),
+					discoverAuthStorage: async () => authStorage,
+					settings: Settings.isolated({ "marketplace.autoUpdate": "off", "startup.checkUpdate": false }),
+					initTheme: async () => {},
+					readPipedInput: async () => undefined,
+					runStartupCredentialAutoImportIfNeeded: async () => undefined,
+					runPrintMode: async () => {
+						throw printFailure;
+					},
+				}),
+			).rejects.toBe(printFailure);
+			expect(cleanupSpy).toHaveBeenCalledTimes(1);
+		} finally {
+			vi.restoreAllMocks();
+			authStorage.close();
+			if (originalNoTitle === undefined) delete Bun.env.PI_NO_TITLE;
+			else Bun.env.PI_NO_TITLE = originalNoTitle;
+		}
+	});
+	it("disposes the interactive session before rethrowing a startup failure", async () => {
+		using tempDir = TempDir.createSync("@skc-interactive-startup-failure-");
+		const authStorage = await AuthStorage.create(path.join(tempDir.path(), "auth.db"));
+		const startupFailure = new Error("interactive startup failed");
+		const sessionResult = fakeSessionResult();
+		let disposeCalls = 0;
+		sessionResult.session.dispose = async () => {
+			await Promise.resolve();
+			disposeCalls += 1;
+		};
+
+		try {
+			await expect(
+				runRootCommand(rootArgs(), [], {
+					createAgentSession: async () => sessionResult,
+					discoverAuthStorage: async () => authStorage,
+					settings: Settings.isolated({ "marketplace.autoUpdate": "off", "startup.checkUpdate": false }),
+					initTheme: async () => {},
+					readPipedInput: async () => undefined,
+					stdinIsTTY: true,
+					runStartupCredentialAutoImportIfNeeded: async () => undefined,
+					getChangelogForDisplay: async () => {
+						throw startupFailure;
+					},
+				}),
+			).rejects.toBe(startupFailure);
+			expect(disposeCalls).toBe(1);
+		} finally {
+			authStorage.close();
+		}
+	});
+	it("disposes the session before propagating an RLM post-create error", async () => {
+		using tempDir = TempDir.createSync("@skc-rlm-post-create-failure-");
+		const authStorage = await AuthStorage.create(path.join(tempDir.path(), "auth.db"));
+		const hookFailure = new Error("RLM post-create failed");
+		const sessionResult = fakeSessionResult();
+		const events: string[] = [];
+		let disposeCalls = 0;
+		sessionResult.session.dispose = async () => {
+			events.push("dispose");
+			disposeCalls += 1;
+			throw new Error("cleanup failure");
+		};
+
+		try {
+			await runRootCommand(rootArgs({ mode: "text" }), [], {
+				createAgentSession: async () => sessionResult,
+				discoverAuthStorage: async () => authStorage,
+				settings: Settings.isolated({ "marketplace.autoUpdate": "off", "startup.checkUpdate": false }),
+				initTheme: async () => {},
+				readPipedInput: async () => undefined,
+				runStartupCredentialAutoImportIfNeeded: async () => undefined,
+				rlmPreset: {
+					applyOptions: () => {},
+					onSessionCreated: async () => {
+						events.push("hook");
+						throw hookFailure;
+					},
+				},
+			}).then(
+				() => {
+					throw new Error("Expected RLM post-create hook to reject");
+				},
+				error => {
+					events.push("observed");
+					expect(error).toBe(hookFailure);
+				},
+			);
+
+			expect(events).toEqual(["hook", "dispose", "observed"]);
+			expect(disposeCalls).toBe(1);
+		} finally {
+			authStorage.close();
+		}
+	});
+
+	it("disposes the interactive session before PI_TIMING=x exits", async () => {
+		using tempDir = TempDir.createSync("@skc-interactive-timing-exit-");
+		const authStorage = await AuthStorage.create(path.join(tempDir.path(), "auth.db"));
+		const originalTiming = Bun.env.PI_TIMING;
+		const timingExit = new Error("timing exit");
+		const sessionResult = fakeSessionResult();
+		let disposed = false;
+		let disposeCalls = 0;
+		sessionResult.session.dispose = async () => {
+			await Promise.resolve();
+			disposed = true;
+			disposeCalls += 1;
+		};
+		const exitSpy = vi.spyOn(process, "exit").mockImplementation((): never => {
+			if (!disposed) throw new Error("PI_TIMING=x exited before session disposal");
+			throw timingExit;
+		});
+
+		try {
+			Bun.env.PI_TIMING = "x";
+			await expect(
+				runRootCommand(rootArgs(), [], {
+					createAgentSession: async () => sessionResult,
+					discoverAuthStorage: async () => authStorage,
+					settings: Settings.isolated({ "marketplace.autoUpdate": "off", "startup.checkUpdate": false }),
+					initTheme: async () => {},
+					readPipedInput: async () => undefined,
+					stdinIsTTY: true,
+					runStartupCredentialAutoImportIfNeeded: async () => undefined,
+					getChangelogForDisplay: async () => undefined,
+				}),
+			).rejects.toBe(timingExit);
+			expect(exitSpy).toHaveBeenCalledWith(0);
+			expect(disposeCalls).toBe(1);
+		} finally {
+			exitSpy.mockRestore();
+			if (originalTiming === undefined) delete Bun.env.PI_TIMING;
+			else Bun.env.PI_TIMING = originalTiming;
+			authStorage.close();
 		}
 	});
 
@@ -343,6 +591,7 @@ describe("startup update contract", () => {
 				},
 				initTheme: async () => {},
 				readPipedInput: async () => undefined,
+				stdinIsTTY: true,
 				runStartupCredentialAutoImportIfNeeded: async () => undefined,
 				getChangelogForDisplay: async () => {
 					events.push("changelog-start");
@@ -413,6 +662,7 @@ describe("startup update contract", () => {
 						},
 						initTheme: async () => {},
 						readPipedInput: async () => undefined,
+						stdinIsTTY: true,
 						runStartupCredentialAutoImportIfNeeded: async () => undefined,
 						getChangelogForDisplay: async () => undefined,
 						createInteractiveMode: () =>
@@ -436,6 +686,101 @@ describe("startup update contract", () => {
 			}
 		}
 	}, 15_000);
+	it("reaches login recovery before a credentialless default profile can abort startup", async () => {
+		using tempDir = TempDir.createSync("@skc-auth-bootstrap-");
+		const authStorage = await AuthStorage.create(path.join(tempDir.path(), "auth.db"));
+		const stop = new Error("stop auth bootstrap harness");
+		const parsed = parseArgs(["login", "openai-codex"]);
+		const settings = Settings.isolated({
+			"marketplace.autoUpdate": "off",
+			"startup.checkUpdate": false,
+			"modelProfile.default": "codex-medium",
+		});
+		let initialized = false;
+
+		try {
+			await expect(
+				runRootCommand(parsed, [], {
+					createAgentSession: async () => fakeSessionResult(),
+					discoverAuthStorage: async () => authStorage,
+					settings,
+					initTheme: async () => {},
+					readPipedInput: async () => undefined,
+					stdinIsTTY: true,
+					runStartupCredentialAutoImportIfNeeded: async () => undefined,
+					getChangelogForDisplay: async () => undefined,
+					createInteractiveMode: () =>
+						({
+							init: async () => {
+								initialized = true;
+							},
+							showNewVersionNotification: () => {},
+							renderInitialMessages: () => {},
+							editor: { setText: () => {} },
+							showOAuthSelector: async (mode: string, provider?: string) => {
+								expect(mode).toBe("login");
+								expect(provider).toBe("openai-codex");
+							},
+							handleBackgroundCommand: () => {},
+							showError: () => {},
+							getUserInput: async () => {
+								throw stop;
+							},
+						}) as unknown as InteractiveMode,
+				}),
+			).rejects.toBe(stop);
+			expect(initialized).toBe(true);
+			expect(parsed.messages).toEqual(["/login openai-codex"]);
+			expect(parsed.authBootstrap).toBe(true);
+			expect(settings.get("modelProfile.default")).toBe("codex-medium");
+		} finally {
+			authStorage.close();
+		}
+	});
+	it("keeps credential validation active for noninteractive login-shaped input", async () => {
+		using tempDir = TempDir.createSync("@skc-auth-bootstrap-text-");
+		const authStorage = await AuthStorage.create(path.join(tempDir.path(), "auth.db"));
+		const settings = Settings.isolated({
+			"marketplace.autoUpdate": "off",
+			"startup.checkUpdate": false,
+			"modelProfile.default": "codex-medium",
+		});
+		const parsed = parseArgs(["--mode", "text", "login", "openai-codex"]);
+		let printModeStarted = false;
+		const exit = new Error("exit 1");
+		const exitSpy = vi.spyOn(process, "exit").mockImplementation((): never => {
+			throw exit;
+		});
+		const stderr: string[] = [];
+		const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation((chunk: string | Uint8Array) => {
+			stderr.push(typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8"));
+			return true;
+		});
+
+		try {
+			await expect(
+				runRootCommand(parsed, [], {
+					createAgentSession: async () => fakeSessionResult(),
+					discoverAuthStorage: async () => authStorage,
+					settings,
+					initTheme: async () => {},
+					readPipedInput: async () => undefined,
+					runStartupCredentialAutoImportIfNeeded: async () => undefined,
+					runPrintMode: async () => {
+						printModeStarted = true;
+					},
+				}),
+			).rejects.toBe(exit);
+			expect(exitSpy).toHaveBeenCalledWith(1);
+			expect(printModeStarted).toBe(false);
+			expect(settings.get("modelProfile.default")).toBe("codex-medium");
+			expect(stderr.join("")).toContain('Model profile "codex-medium" requires credentials for: openai-codex');
+		} finally {
+			stderrSpy.mockRestore();
+			exitSpy.mockRestore();
+			authStorage.close();
+		}
+	});
 	it("keeps updater and default-installer APIs outside startup wiring", async () => {
 		const source = await Bun.file(new URL("../src/main.ts", import.meta.url)).text();
 

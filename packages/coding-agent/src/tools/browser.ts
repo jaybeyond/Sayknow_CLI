@@ -233,6 +233,12 @@ export class BrowserTool implements AgentTool<typeof browserSchema, BrowserToolD
 						}
 					: undefined,
 				appArgs: params.app?.args,
+				profileReuse:
+					(this.session.settings.get("browser.profileReuse") as "auto" | "opt-in" | undefined) ?? "auto",
+				geo: {
+					timezone: this.session.settings.get("browser.geo.timezone") as string | undefined,
+					locale: this.session.settings.get("browser.geo.locale") as string | undefined,
+				},
 				signal,
 			}),
 		);

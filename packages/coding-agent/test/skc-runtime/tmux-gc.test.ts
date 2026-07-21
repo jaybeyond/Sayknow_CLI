@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, spyOn, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import type { GcContext } from "@sayknow-cli/coding-agent/skc-runtime/gc-runtime";
 import { tmuxSessionsGcAdapter } from "@sayknow-cli/coding-agent/skc-runtime/tmux-gc";
+import { __setMutationServerProofForTests } from "@sayknow-cli/coding-agent/skc-runtime/tmux-sessions";
 
 const env = { SKC_TMUX_COMMAND: "tmux-test" };
 const project = "/tmp/skc-project";
@@ -63,6 +64,7 @@ function sessionLine(overrides: {
 describe("tmux GC safety", () => {
 	afterEach(() => {
 		vi.restoreAllMocks();
+		__setMutationServerProofForTests(null);
 	});
 
 	it("classifies attached/live tagged sessions with stale metadata as non-removable and does not prune", async () => {
@@ -147,6 +149,7 @@ describe("tmux GC safety", () => {
 			}),
 		);
 		const calls: string[][] = [];
+		__setMutationServerProofForTests(() => ({ pid: 1, startTime: "test" }));
 		const spawnSyncSpy = spyOn(Bun, "spawnSync") as unknown as SpawnSyncSpy;
 		spawnSyncSpy.mockImplementation((cmd: string[]) => {
 			calls.push(cmd);
@@ -188,7 +191,7 @@ describe("tmux GC safety", () => {
 			});
 			expect(await tmuxSessionsGcAdapter.prune(record!, ctx())).toEqual({
 				removed: false,
-				error: "skc_tmux_owner_isolation_server_unverifiable",
+				error: "skc_tmux_cleanup_target_changed",
 			});
 			expect(calls).not.toContainEqual(["tmux-test", "kill-session", "-t", "=sayknow_cli_done"]);
 		} finally {

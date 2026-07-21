@@ -7,25 +7,23 @@ source: "forked from upstream team skill and rebranded for SKC"
 
 # Team Skill
 
+## Purpose & Principles
+
 `$team` is the tmux-based multi-worker execution mode for SKC. It starts real SKC worker CLI sessions by splitting the current tmux leader window and coordinates them through `.skc/_session-{sessionid}/state/team/...` files plus CLI team interop (`skc team api ...`) and state files.
 
 This skill is operationally sensitive. Treat it as an operator workflow, not a generic prompt pattern. In SKC App or plain outside-tmux sessions, do not present `$team` / `skc team` as directly available; launch SKC CLI from shell first, or stay on the nearest app-safe surface until the user explicitly wants the tmux runtime.
-
-## Corrupt current-session state recovery
-
-When team detects its own current-session state is corrupt, tampered, unreadable, or stale on resume, run `skc state clear --force --mode team` before reseeding or restarting. Scope the clear to the current session via `--session-id`, the command payload, or `SKC_SESSION_ID`; it clears only team state for that session and never clears other skills or sessions.
-
-## Team vs Native Subagents
 
 - Use **SKC native subagents** for bounded, in-session parallelism where one leader thread can fan out a few independent subtasks and wait for them directly.
 - Use **`skc team`** when you need durable visible tmux workers, shared task state, worker mailbox files, worktrees, explicit lifecycle control, or long-running execution that must survive beyond one local reasoning burst.
 - Native subagents can complement team execution, but they do **not** replace the tmux team runtime's stateful coordination contract.
 
-## What This Skill Must Do
-
-## GPT-5.5 Guidance Alignment
-
 Use the shared workflow guidance pattern: outcome-first framing, concise visible updates for multi-step work, local overrides for the active workflow branch, validation proportional to risk, explicit stop rules, and automatic continuation for safe reversible steps. Ask only for material, destructive, credentialed, external-production, or preference-dependent branches.
+
+## Corrupt current-session state recovery
+
+When team detects its own current-session state is corrupt, tampered, unreadable, or stale on resume, run `skc state clear --force --mode team` before reseeding or restarting. Scope the clear to the current session via `--session-id`, the command payload, or `SKC_SESSION_ID`; it clears only team state for that session and never clears other skills or sessions.
+
+## What This Skill Must Do
 
 When user triggers `$team`, the agent must:
 
@@ -203,6 +201,22 @@ sleep 30 && skc team monitor <team-name>
 ```
 The mutating monitor path also performs bounded liveness recovery: expired task claims, stale heartbeat claims, and missing recorded worker panes are requeued instead of leaving work permanently `in_progress`.
 
+### Opt-in stalled-worker continuation
+
+`SKC_TEAM_AUTO_CONTINUE_STALLED_WORKERS=1` enables a separate, default-off monitor-only nudge for a stalled live worker. It is considered only when the team is running (not dry-run), the worker heartbeat is stale (using `SKC_TEAM_HEARTBEAT_STALE_MS`, default `120000` ms), and all of these checks pass:
+
+- The recorded pane id is a non-leader `%<number>` pane that tmux currently reports in the recorded `tmux_target` as that same pane id; no other pane is targeted.
+- Shutdown authority is proven absent; valid-present and invalid/unreadable records veto continuation without suppressing normal stale-claim recovery.
+- Lifecycle is `ready` or `working`, and worker status is a structurally valid non-terminal state (not `draining`, `failed`, or `unknown`).
+- One current non-terminal task is `in_progress`, assigned to and claimed by that worker; the stored claim record exactly matches its owner, token, and lease.
+- The lease remains valid through the entire next hold interval.
+
+The policy has at most two attempts per immutable incident: attempt 1 reserves a 30-second hold, then attempt 2 reserves a 120-second hold only after attempt 1 was recorded as sent and its hold elapsed. A retry still requires the heartbeat to be stale and every fence above to pass. Reservations and outcomes are create-without-clobber journal records keyed to the incident identity; a pre-existing reservation, an unknown/missing/non-sent outcome after restart, or a second-attempt record fails closed rather than sending again.
+
+Each eligible attempt sends only the fixed continuation prompt to that verified recorded worker pane, followed by Enter. It does not replay provider output or a prior prompt, inspect or inject dynamic pane content, cross pane boundaries, kill or relaunch workers, create/split panes, or extend/rewrite claims. This bounded nudge is not automatic recovery for a dead, shutdown, reassigned, terminal, or lease-expired worker. When it cannot act, use `skc team status <team-name>` / `skc team monitor <team-name>` and the documented state evidence; manual pane intervention remains the last-resort fallback.
+
+Continuation input is unsupported on psmux and native Windows send-keys fallback transports: the fixed prompt is not dispatched there because equivalent literal-input semantics are not proven. Startup's existing empty-pane worker command fallback is separate and unchanged.
+
 ## Operational Commands
 
 ```bash
@@ -311,10 +325,10 @@ Worker protocol:
 Useful runtime env vars:
 
 - `SKC_TMUX_COMMAND` / `SKC_TEAM_TMUX_COMMAND`
-  - tmux binary/name override (default `tmux` on POSIX, `psmux` / `pmux` / `tmux` on native Windows when one of those resolves on PATH). `SKC_TMUX_COMMAND` applies to every SKC tmux flow; `SKC_TEAM_TMUX_COMMAND` is honored as an alias by the team path. Both resolve through the same resolver, so the team leader and `skc session ...` always target the same multiplexer. These values are executable path/name overrides, not shell command lines; do not include flags such as `psmux -L <namespace>` in the env var.
-  - Native Windows psmux support: psmux is the supported tmux-compatible multiplexer for native Windows `skc --tmux`, `skc session`, and `skc team`. Psmux can be exposed as `psmux.exe` or as its `tmux.exe`/`pmux.exe` aliases. SKC probes `psmux` / `pmux` / `tmux` on Windows PATH, picks the first that resolves, and treats that binary as the multiplexer. Worker commands on Windows are emitted with PowerShell-safe `$env:VAR = 'value';` assignments so psmux's ConPTY panes inherit `SKC_TEAM_*` correctly.
-  - Multiplexer detection knobs (Windows): `SKC_PSMUX_COMMAND` forces a wrapper to be treated as psmux, `SKC_PSMUX_DETECTION=off` skips detection, `SKC_PSMUX_FORCE_DETECT=1` re-probes every call. The mouse / set-clipboard / mode-style UX profile is filtered out for psmux; the `@skc-profile` ownership tag and branch / project / session identity markers still round-trip and are required for `skc session` and `skc team`.
-  - Windows psmux namespace boundary: psmux `-c <path>` cwd/start-directory flags do not isolate the server namespace; psmux uses the tmux-compatible global `-L <namespace>` flag for isolated server instances. SKC does not currently expose structured runtime `-L` support, because launch, `skc session`, and `skc team` must all carry the same namespace prefix together. If you need isolated psmux servers, start `psmux -L <namespace>` yourself before `skc --tmux` and let SKC attach to it; do not pass `-L` through `SKC_TMUX_COMMAND`.
+  - tmux executable override (default `tmux` on POSIX; `psmux` / `pmux` / `tmux` resolution on native Windows). `SKC_TMUX_COMMAND` applies to every SKC tmux flow; `SKC_TEAM_TMUX_COMMAND` is honored as a team-path alias. Values are executable paths/names, not shell command lines.
+  - Native Windows psmux boundary: a generic-banner `tmux.exe` alias is classified by matching its executable identity with resolved `psmux.exe` / `pmux.exe` companions. Unresolved or conflicting identity evidence fails closed with `skc_tmux_provider_ambiguous`; `SKC_PSMUX_COMMAND` must resolve to the same executable identity as the selected alias.
+  - Managed psmux session creation, attachment, lifecycle mutation, and team startup remain unsupported because psmux cannot provide the immutable native session identity required by the owner-isolation contract. Use WSL or verified native tmux for live team workers.
+  - Windows psmux namespace boundary: psmux uses the tmux-compatible global `-L <namespace>` flag for server isolation, but SKC does not accept flags in `SKC_TMUX_COMMAND` or expose structured runtime `-L` support.
 - `SKC_TEAM_WORKER_COMMAND`
   - worker command override (default resolves to active SKC entrypoint or `skc`)
 - `SKC_TEAM_STATE_ROOT`

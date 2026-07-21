@@ -64,7 +64,7 @@
 - `packages/coding-agent/src/system-prompt.ts`
 - `packages/coding-agent/src/system-prompt.ts:raw`
 - `packages/coding-agent/src/system-prompt.ts:300-601:raw`
-- `packages/coding-agent/src/sdk.ts:1790-1900:raw`
+- `packages/coding-agent/src/sdk/session.ts:1790-1900:raw`
 - `packages/coding-agent/src/task/executor.ts`
 - `packages/coding-agent/src/task/executor.ts:1351-1400:raw`
 - `packages/coding-agent/src/goals/runtime.ts:raw`
@@ -96,8 +96,8 @@
 - `alwaysApplyRules|skills\.length|rules\.length` in `['packages/coding-agent/src/prompts']`
 - `customSystemPromptTemplate|git:` in `['packages/coding-agent/src/system-prompt.ts', 'packages/coding-agent/src']`
 - `alwaysApplyRules|dateTime|{{skills|skills\.length` in `['packages/coding-agent/src']`
-- `<skills>|<rules>|rule://` in `['packages/coding-agent/src/prompts', 'packages/coding-agent/src/system-prompt.ts', 'packages/coding-agent/src/sdk.ts']`
-- `Skills are specialized|alwaysApply|<skill name=` in `['packages/coding-agent/src/session', 'packages/coding-agent/src/sdk.ts', 'packages/coding-agent/src/extensibility/skills']`
+- `<skills>|<rules>|rule://` in `['packages/coding-agent/src/prompts', 'packages/coding-agent/src/system-prompt.ts', 'packages/coding-agent/src/sdk/session.ts']`
+- `Skills are specialized|alwaysApply|<skill name=` in `['packages/coding-agent/src/session', 'packages/coding-agent/src/sdk/session.ts', 'packages/coding-agent/src/extensibility/skills']`
 - `\{\{(?!#|/|else)` in `['packages/coding-agent/src/prompts/system/project-prompt.md']`
 - `Skills are specialized|<skills>|skill name=|Rules are local constraints` in `['packages/coding-agent/src']`
 - `subagentSystemPromptTemplate|submitReminderTemplate|retryCount|maxRetries|forkContext|ircPeers|contextFile|outputSchema|worktree` in `['packages/coding-agent/src/task/executor.ts']`
@@ -116,17 +116,17 @@
 - `ANTHROPIC_MODEL` in `['packages/coding-agent/src']`
 - `independentMode` in `['packages/coding-agent/src/prompts', 'packages/coding-agent/src/task']`
 - `filteredSkills|skills:|rules:` in `['packages/coding-agent/src/system-prompt.ts']`
-- `skill.*description|<available-skills>|availableSkills|renderSkill|skillList` in `['packages/coding-agent/src/sdk.ts', 'packages/coding-agent/src/session/agent-session.ts']`
+- `skill.*description|<available-skills>|availableSkills|renderSkill|skillList` in `['packages/coding-agent/src/sdk/session.ts', 'packages/coding-agent/src/session/agent-session.ts']`
 - `skills|rules|alwaysApply` in `['packages/coding-agent/src/prompts/system/project-prompt.md', 'packages/coding-agent/src/prompts/system/system-prompt.md']`
 - `export function render|noEscape|compile` in `['packages/utils/src/prompt.ts']`
 - `dateTime|default_metric_name` in `['packages/coding-agent/src/prompts', 'packages/coding-agent/src/autoresearch/prompt.md', 'packages/coding-agent/src/autoresearch/prompt-setup.md']`
 - `baseline_run_number|metric_unit|asi_summary|has_asi_summary|has_deviations|run_number|status|metric_display|description` in `['packages/coding-agent/src/autoresearch/prompt.md']`
 - `^<soul>|^</soul>|^## Scope of Freedom|^<communication>|^<completion-contract>|^<workflow>|^<tools>|^</tools>|^<repo-safety>|^<identity>|^<authority>|^<skc-runtime>|^</skc-runtime>` in `['packages/coding-agent/src/prompts/system/system-prompt.md']`
 - `todo|eager` in `['packages/coding-agent/src/task/executor.ts']`
-- `alwaysApply|always-apply|Rules are local|rule://` in `['packages/coding-agent/src/session/agent-session.ts', 'packages/coding-agent/src/sdk.ts']`
-- `prompt-templates` in `['packages/coding-agent/src/sdk.ts', 'packages/coding-agent/src/task/executor.ts', 'packages/coding-agent/src/task/index.ts']`
+- `alwaysApply|always-apply|Rules are local|rule://` in `['packages/coding-agent/src/session/agent-session.ts', 'packages/coding-agent/src/sdk/session.ts']`
+- `prompt-templates` in `['packages/coding-agent/src/sdk/session.ts', 'packages/coding-agent/src/task/executor.ts', 'packages/coding-agent/src/task/index.ts']`
 - `AGENTS\.md|GEMINI\.md|QWEN\.md|\.cursorrules|CONTEXT_FILE|fileNames|candidates` in `['packages/coding-agent/src/capability/context-file.ts']`
 - `buildActivePrompt|goal_context|goalRuntime\.build` in `['packages/coding-agent/src']`
 - `alwaysApply|always_apply|always-apply` in `['packages/coding-agent/src/session', 'packages/coding-agent/src/rulebook', 'packages/coding-agent/src/ttsr']`
 - `\{\{#if skills|\{\{#list skills|\{\{#each skills|\{\{#if rules|\{\{#if alwaysApplyRules` in `['packages/coding-agent/src/prompts']`
-- `Scan descriptions|specialized knowledge|skill://` in `['packages/coding-agent/src/session/agent-session.ts', 'packages/coding-agent/src/sdk.ts', 'packages/coding-agent/src/extensibility/skills.ts']`
+- `Scan descriptions|specialized knowledge|skill://` in `['packages/coding-agent/src/session/agent-session.ts', 'packages/coding-agent/src/sdk/session.ts', 'packages/coding-agent/src/extensibility/skills']`

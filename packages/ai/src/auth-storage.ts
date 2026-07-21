@@ -775,7 +775,9 @@ export class AuthStorage {
 	 */
 	static async create(dbPath: string, options: AuthStorageOptions = {}): Promise<AuthStorage> {
 		const store = await SqliteAuthCredentialStore.open(dbPath);
-		return new AuthStorage(store, options);
+		const storage = new AuthStorage(store, options);
+		await storage.reload();
+		return storage;
 	}
 
 	/**
@@ -854,6 +856,7 @@ export class AuthStorage {
 	 */
 	setRuntimeApiKey(provider: string, apiKey: string): void {
 		this.#runtimeOverrides.set(provider, apiKey);
+		this.#bumpGeneration("set-runtime-api-key");
 	}
 
 	/**
@@ -877,7 +880,12 @@ export class AuthStorage {
 	 * Remove a runtime API key override.
 	 */
 	removeRuntimeApiKey(provider: string): void {
-		this.#runtimeOverrides.delete(provider);
+		if (this.#runtimeOverrides.delete(provider)) this.#bumpGeneration("remove-runtime-api-key");
+	}
+
+	/** Whether a provider is currently authenticated by a runtime API-key override. */
+	hasRuntimeApiKey(provider: string): boolean {
+		return Boolean(this.#runtimeOverrides.get(provider));
 	}
 
 	/**
@@ -892,13 +900,14 @@ export class AuthStorage {
 	 */
 	setConfigApiKey(provider: string, apiKey: string): void {
 		this.#configOverrides.set(provider, apiKey);
+		this.#bumpGeneration("set-config-api-key");
 	}
 
 	/**
 	 * Remove a single config-sourced API key override.
 	 */
 	removeConfigApiKey(provider: string): void {
-		this.#configOverrides.delete(provider);
+		if (this.#configOverrides.delete(provider)) this.#bumpGeneration("remove-config-api-key");
 	}
 
 	/**
@@ -906,7 +915,9 @@ export class AuthStorage {
 	 * re-parsing `models.yml` so removed entries actually disappear.
 	 */
 	clearConfigApiKeys(): void {
+		if (this.#configOverrides.size === 0) return;
 		this.#configOverrides.clear();
+		this.#bumpGeneration("clear-config-api-keys");
 	}
 
 	/**
@@ -2067,7 +2078,11 @@ export class AuthStorage {
 		});
 	}
 
-	async #fetchUsageUncached(request: UsageRequestDescriptor, timeoutMs?: number): Promise<UsageReport | null> {
+	async #fetchUsageUncached(
+		request: UsageRequestDescriptor,
+		timeoutMs?: number,
+		logDetails: boolean = true,
+	): Promise<UsageReport | null> {
 		const resolver = this.#usageProviderResolver;
 		if (!resolver) return null;
 
@@ -2105,10 +2120,12 @@ export class AuthStorage {
 						credential: refreshedCredential,
 					};
 				} catch (error) {
-					this.#usageLogger?.debug("Usage credential refresh failed, using original credential", {
-						provider: request.provider,
-						error: String(error),
-					});
+					if (logDetails) {
+						this.#usageLogger?.debug("Usage credential refresh failed, using original credential", {
+							provider: request.provider,
+							error: String(error),
+						});
+					}
 				}
 			}
 		}
@@ -2118,18 +2135,24 @@ export class AuthStorage {
 		try {
 			return await providerImpl.fetchUsage(params, {
 				fetch: this.#usageFetch,
-				logger: this.#usageLogger,
+				logger: logDetails ? this.#usageLogger : undefined,
 			});
 		} catch (error) {
-			logger.debug("AuthStorage usage fetch failed", {
-				provider: request.provider,
-				error: String(error),
-			});
+			if (logDetails) {
+				logger.debug("AuthStorage usage fetch failed", {
+					provider: request.provider,
+					error: String(error),
+				});
+			}
 			return null;
 		}
 	}
 
-	async #fetchUsageCached(request: UsageRequestDescriptor, timeoutMs?: number): Promise<UsageReport | null> {
+	async #fetchUsageCached(
+		request: UsageRequestDescriptor,
+		timeoutMs?: number,
+		logDetails: boolean = true,
+	): Promise<UsageReport | null> {
 		const cacheKey = this.#buildUsageReportCacheKey(request);
 		const now = Date.now();
 		const cached = this.#usageCache.get<UsageReport | null>(cacheKey);
@@ -2142,7 +2165,7 @@ export class AuthStorage {
 		if (inFlight) return inFlight;
 
 		const promise = (async () => {
-			const report = await this.#fetchUsageUncached(request, timeoutMs);
+			const report = await this.#fetchUsageUncached(request, timeoutMs, logDetails);
 			const ttlJitter = USAGE_REPORT_TTL_MS * (Math.random() * 0.5 - 0.25);
 			if (report !== null) {
 				// Success: stagger per-credential cache expiry so all accounts don't
@@ -2385,6 +2408,8 @@ export class AuthStorage {
 		baseUrlResolver?: (provider: Provider) => string | undefined;
 		/** Caller's cancel signal; only rejects this caller, never the shared upstream fetch. */
 		signal?: AbortSignal;
+		/** Disable provider/account/error logging for secret-safe control surfaces. */
+		logDetails?: boolean;
 	}): Promise<UsageReport[] | null> {
 		// Caller override > store-level hook > local per-credential fan-out.
 		// `RemoteAuthCredentialStore` implements the store hook so a gateway
@@ -2413,9 +2438,11 @@ export class AuthStorage {
 		const requests = this.#collectUsageRequests(options);
 		if (requests.length === 0) return [];
 
-		this.#usageLogger?.debug("Usage fetch requested", {
-			providers: [...new Set(requests.map(request => request.provider))].sort(),
-		});
+		if (options?.logDetails !== false) {
+			this.#usageLogger?.debug("Usage fetch requested", {
+				providers: [...new Set(requests.map(request => request.provider))].sort(),
+			});
+		}
 
 		// Per-credential caching with jitter lives in #fetchUsageCached, so we
 		// don't store the aggregated result here — doing so locks the widget to
@@ -2428,39 +2455,45 @@ export class AuthStorage {
 		if (inFlight) return inFlight;
 
 		const promise = (async () => {
-			for (const request of requests) {
-				this.#usageLogger?.debug("Usage fetch queued", {
-					provider: request.provider,
-					credentialType: request.credential.type,
-					baseUrl: request.baseUrl,
-					accountId: request.credential.accountId,
-					email: request.credential.email,
-				});
+			if (options?.logDetails !== false) {
+				for (const request of requests) {
+					this.#usageLogger?.debug("Usage fetch queued", {
+						provider: request.provider,
+						credentialType: request.credential.type,
+						baseUrl: request.baseUrl,
+						accountId: request.credential.accountId,
+						email: request.credential.email,
+					});
+				}
 			}
 
 			const results = await Promise.all(
-				requests.map(request => this.#fetchUsageCached(request, this.#usageRequestTimeoutMs)),
+				requests.map(request =>
+					this.#fetchUsageCached(request, this.#usageRequestTimeoutMs, options?.logDetails !== false),
+				),
 			);
 			const reports = results.filter((report): report is UsageReport => report !== null);
 			const deduped = this.#dedupeUsageReports(reports);
 			// no outer cache write — see comment above.
 			const resolved = deduped;
-			this.#usageLogger?.debug("Usage fetch resolved", {
-				reports: resolved.map(report => {
-					const accountLabel =
-						this.#getUsageReportMetadataValue(report, "email") ??
-						this.#getUsageReportMetadataValue(report, "accountId") ??
-						this.#getUsageReportMetadataValue(report, "account") ??
-						this.#getUsageReportMetadataValue(report, "user") ??
-						this.#getUsageReportMetadataValue(report, "username") ??
-						this.#getUsageReportScopeAccountId(report);
-					return {
-						provider: report.provider,
-						limits: report.limits.length,
-						account: accountLabel,
-					};
-				}),
-			});
+			if (options?.logDetails !== false) {
+				this.#usageLogger?.debug("Usage fetch resolved", {
+					reports: resolved.map(report => {
+						const accountLabel =
+							this.#getUsageReportMetadataValue(report, "email") ??
+							this.#getUsageReportMetadataValue(report, "accountId") ??
+							this.#getUsageReportMetadataValue(report, "account") ??
+							this.#getUsageReportMetadataValue(report, "user") ??
+							this.#getUsageReportMetadataValue(report, "username") ??
+							this.#getUsageReportScopeAccountId(report);
+						return {
+							provider: report.provider,
+							limits: report.limits.length,
+							account: accountLabel,
+						};
+					}),
+				});
+			}
 			return resolved;
 		})().finally(() => {
 			this.#usageReportsInFlight.delete(cacheKey);

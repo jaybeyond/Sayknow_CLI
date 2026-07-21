@@ -1,20 +1,59 @@
 import * as path from "node:path";
 import { getAgentDir } from "@sayknow-cli/utils";
-import { resolveModelProfileName } from "../config/model-profile-activation";
-import { type ModelProfileDefinition, mergeModelProfiles } from "../config/model-profiles";
-import { ModelsConfigFile } from "../config/model-registry";
+import { YAML } from "bun";
+import { ModelsConfigSchema } from "../config/models-config-schema";
 
 /**
- * Loads the merged built-in + custom model-profile registry the way the `skc`
- * CLI resolves `--mpreset`, so coordinator MCP launches select the same
- * authoritative profile the spawned child will activate. Custom profiles live
- * in the shared models config, which the child inherits, so both sides agree.
+ * The coordinator runs in the shipped MCP process and must stay outside the
+ * session host import graph. Keep this identity catalog in the coordinator
+ * boundary; profile activation and model registry code belong to that host.
+ */
+const BUILTIN_MODEL_PROFILE_NAMES = [
+	"codex-eco",
+	"codex-medium",
+	"codex-pro",
+	"opencodego",
+	"claude-opus",
+	"claude-fable",
+	"glm-eco",
+	"glm-medium",
+	"glm-pro",
+	"kimi-coding-plan-eco",
+	"kimi-coding-plan-medium",
+	"kimi-coding-plan-pro",
+	"mimo-eco",
+	"mimo-medium",
+	"mimo-pro",
+	"grok-eco",
+	"grok-medium",
+	"grok-pro",
+	"grok-build-pro",
+	"cursor-eco",
+	"cursor-medium",
+	"cursor-pro",
+	"minimax-eco",
+	"minimax-medium",
+	"minimax-pro",
+	"opus-codex",
+	"codex-opencodego",
+	"fable-opus-codex",
+] as const;
+
+export interface CoordinatorModelProfile {
+	name: string;
+}
+
+/**
+ * Loads the merged built-in + custom model-profile names from `models.yml`
+ * without loading the session-host model registry. The child still owns
+ * profile activation; this validates the selection before session creation.
  */
 export type CoordinatorModelProfileLoader = () =>
-	| Map<string, ModelProfileDefinition>
-	| Promise<Map<string, ModelProfileDefinition>>;
+	| Map<string, CoordinatorModelProfile>
+	| Promise<Map<string, CoordinatorModelProfile>>;
 
 const MAX_ECHOED_MPRESET_LENGTH = 128;
+const LEGACY_MODEL_PROFILE_ALIASES: ReadonlyMap<string, string> = new Map([["codex-standard", "codex-medium"]]);
 
 /**
  * Thrown by the default loader when `models.yml` exists but is invalid or
@@ -30,18 +69,33 @@ export class CoordinatorModelProfileRegistryError extends Error {
 	}
 }
 
-export const loadCoordinatorModelProfiles: CoordinatorModelProfileLoader = () => {
-	const configFile = ModelsConfigFile.relocate(path.join(getAgentDir(), "models.yml"));
-	configFile.invalidate();
-	const loaded = configFile.tryLoad();
-	// A present-but-invalid config must fail closed; absence (`value` undefined
-	// with a non-error status) is fine and yields the built-in profiles only.
-	if (loaded.status === "error") throw new CoordinatorModelProfileRegistryError(loaded.error);
-	return mergeModelProfiles(loaded.value?.profiles);
+function builtInCoordinatorModelProfiles(): Map<string, CoordinatorModelProfile> {
+	return new Map(BUILTIN_MODEL_PROFILE_NAMES.map(name => [name, { name }]));
+}
+
+export const loadCoordinatorModelProfiles: CoordinatorModelProfileLoader = async () => {
+	const modelsFile = Bun.file(path.join(getAgentDir(), "models.yml"));
+	if (!(await modelsFile.exists())) return builtInCoordinatorModelProfiles();
+	try {
+		const parsed = YAML.parse(await modelsFile.text());
+		const config = ModelsConfigSchema.safeParse(parsed);
+		if (!config.success) throw config.error;
+		const profiles = builtInCoordinatorModelProfiles();
+		for (const name of Object.keys(config.data.profiles ?? {})) profiles.set(name, { name });
+		return profiles;
+	} catch (error) {
+		throw new CoordinatorModelProfileRegistryError(error);
+	}
 };
 
-function sortedProfileNames(profiles: ReadonlyMap<string, ModelProfileDefinition>): string[] {
+function sortedProfileNames(profiles: ReadonlyMap<string, CoordinatorModelProfile>): string[] {
 	return [...profiles.keys()].sort((left, right) => left.localeCompare(right));
+}
+
+function resolveCoordinatorModelProfileName(profileName: string, profiles: ReadonlyMap<string, unknown>): string {
+	if (profiles.has(profileName)) return profileName;
+	const replacement = LEGACY_MODEL_PROFILE_ALIASES.get(profileName);
+	return replacement && profiles.has(replacement) ? replacement : profileName;
 }
 
 export type CoordinatorMpresetResolution =
@@ -68,7 +122,7 @@ export async function resolveCoordinatorMpreset(
 	if (raw === undefined || raw === null) return { ok: true, mpreset: null };
 	const requested = typeof raw === "string" ? raw.trim() : "";
 	const echoed = requested.slice(0, MAX_ECHOED_MPRESET_LENGTH);
-	let profiles: Map<string, ModelProfileDefinition>;
+	let profiles: Map<string, CoordinatorModelProfile>;
 	try {
 		profiles = await loadProfiles();
 	} catch (error) {
@@ -87,7 +141,7 @@ export async function resolveCoordinatorMpreset(
 			available_profiles: sortedProfileNames(profiles),
 		};
 	}
-	const canonical = resolveModelProfileName(requested, profiles);
+	const canonical = resolveCoordinatorModelProfileName(requested, profiles);
 	if (!profiles.has(canonical)) {
 		return {
 			ok: false,

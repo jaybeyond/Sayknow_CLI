@@ -9,8 +9,9 @@
  */
 
 import type { ToolCall, ToolResultMessage } from "@sayknow-cli/ai";
+import { sanitizeText } from "@sayknow-cli/utils";
 import type { AgentMessage } from "../types";
-import { estimateEntryTokens } from "./compaction";
+import { estimateEntryTokens, estimateTextTokensHeuristic } from "./compaction";
 import type { SessionEntry, SessionMessageEntry } from "./entries";
 
 export interface PruneConfig {
@@ -48,6 +49,7 @@ export interface PruneResult {
 }
 
 const DIGEST_NOTICE_TOKEN_CAP_MULTIPLIER = 1.25;
+const ERROR_DIGEST_NOTICE_MIN_CHARS = 240;
 
 function createGenericPrunedNotice(tokens: number): string {
 	return `[Output truncated - ${tokens} tokens]`;
@@ -66,6 +68,17 @@ function firstErrorLine(text: string): string | undefined {
 		?.trim();
 }
 
+function firstNonEmptyLine(text: string): string | undefined {
+	return text
+		.split(/\r?\n/)
+		.find(line => line.trim().length > 0)
+		?.trim();
+}
+
+function lastNonEmptyLine(text: string): string | undefined {
+	return text.trim().split(/\r?\n/).filter(Boolean).at(-1)?.trim();
+}
+
 function truncateField(value: string, maxLength: number): string {
 	if (value.length <= maxLength) return value;
 	if (maxLength <= 1) return "…";
@@ -74,7 +87,7 @@ function truncateField(value: string, maxLength: number): string {
 
 function resultDigest(message: ToolResultMessage): string | undefined {
 	const toolName = message.toolName.toLowerCase();
-	const text = firstTextContent(message);
+	const text = sanitizeText(firstTextContent(message));
 	if (toolName === "bash") {
 		const details = message as { details?: { exitCode?: unknown } };
 		const exitCode =
@@ -99,7 +112,12 @@ function resultDigest(message: ToolResultMessage): string | undefined {
 				.join("; ") || "search digest unavailable"
 		);
 	}
-	return undefined;
+	if (message.isError !== true) return undefined;
+	if (text.trim().length === 0) return "error=tool result failed without text";
+	const error = firstErrorLine(text);
+	if (error) return `error=${error}`;
+	const summary = firstNonEmptyLine(text) ?? lastNonEmptyLine(text);
+	return summary ? `summary=${summary}` : undefined;
 }
 
 function createPrunedNotice(tokens: number, message?: ToolResultMessage): string {
@@ -110,7 +128,9 @@ function createPrunedNotice(tokens: number, message?: ToolResultMessage): string
 	const maxTokens = Math.max(genericTokens, Math.floor(genericTokens * DIGEST_NOTICE_TOKEN_CAP_MULTIPLIER));
 	const prefix = `[Output truncated - ${tokens} tokens; `;
 	const suffix = "]";
-	const maxChars = Math.max(0, maxTokens * 4 - prefix.length - suffix.length);
+	const digestChars = maxTokens * 4 - prefix.length - suffix.length;
+	const maxChars =
+		message?.isError === true ? Math.max(ERROR_DIGEST_NOTICE_MIN_CHARS, digestChars) : Math.max(0, digestChars);
 	return `${prefix}${truncateField(digest, maxChars)}${suffix}`;
 }
 
@@ -122,8 +142,7 @@ function getToolResultMessage(entry: SessionEntry): ToolResultMessage | undefine
 }
 
 function estimatePrunedSavings(tokens: number, notice: string): number {
-	const noticeTokens = Math.ceil(notice.length / 4);
-	return Math.max(0, tokens - noticeTokens);
+	return tokens - estimateTextTokensHeuristic(notice);
 }
 
 export interface AssistantArgumentPruneResult {
@@ -267,6 +286,56 @@ function readBasePath(path: string): string {
 	return base;
 }
 
+type ReadLineRange = { start: number; end: number };
+
+const DEFAULT_READ_LINE_LIMIT = 500;
+
+/** Parse trailing read selectors using the read tool's actual bounded default. */
+function readLineRanges(path: string): ReadLineRange[] {
+	let target = path;
+	let raw = false;
+	while (/:(?:raw|conflicts)$/.test(target)) {
+		raw ||= target.endsWith(":raw");
+		target = target.replace(/:(?:raw|conflicts)$/, "");
+	}
+	const match = target.match(/:(\d+(?:[-+]\d+)?(?:,\d+(?:[-+]\d+)?)*)$/);
+	if (!match) return raw ? [{ start: 1, end: Number.POSITIVE_INFINITY }] : [];
+	return match[1].split(",").flatMap(part => {
+		const range = part.match(/^(\d+)(?:([-+])(\d+))?$/);
+		if (!range) return [];
+		const start = Number(range[1]);
+		const end =
+			range[2] === "+"
+				? start + Number(range[3]) - 1
+				: range[2] === "-"
+					? Number(range[3])
+					: start + DEFAULT_READ_LINE_LIMIT - 1;
+		return start > 0 && end >= start ? [{ start, end }] : [];
+	});
+}
+
+function strictlyContainsReadRange(container: ReadLineRange, contained: ReadLineRange): boolean {
+	return (
+		container.start <= contained.start &&
+		container.end >= contained.end &&
+		(container.start < contained.start || container.end > contained.end)
+	);
+}
+
+function readSupersedesRead(
+	later: ToolCall,
+	earlier: ToolCall,
+	lineRangesByCall: ReadonlyMap<ToolCall, ReadLineRange[]>,
+): boolean {
+	const laterRanges = lineRangesByCall.get(later);
+	const earlierRanges = lineRangesByCall.get(earlier);
+	return (
+		laterRanges?.length === 1 &&
+		earlierRanges?.length === 1 &&
+		strictlyContainsReadRange(laterRanges[0], earlierRanges[0])
+	);
+}
+
 /**
  * Stable identity for "the same logical lookup": same tool re-targeting the
  * same subject. A later result with the same key supersedes earlier ones.
@@ -275,9 +344,23 @@ function readBasePath(path: string): string {
  * (`skip`) and result-shaping flags (`i`, `gitignore`): a later page or a
  * differently-shaped search complements earlier output, it does not replace it.
  */
+const IDEMPOTENT_BASH_COMMAND =
+	/^(?:(?:bun|npm|pnpm|yarn)\s+(?:run\s+)?(?:test|build)\b|git\s+status\b|cargo\s+build\b|(?:make|just)\s+build\b)/;
+
+function normalizedIdempotentBashCommand(call: ToolCall): string | undefined {
+	if (call.name !== "bash") return undefined;
+	const command = call.arguments.command;
+	if (typeof command !== "string") return undefined;
+	const normalized = command.trim().replace(/\s+/g, " ");
+	if (/[;&|]/.test(normalized) || !IDEMPOTENT_BASH_COMMAND.test(normalized)) return undefined;
+	return JSON.stringify([normalized, typeof call.arguments.cwd === "string" ? call.arguments.cwd : undefined]);
+}
+
 function toolTargetKey(call: ToolCall): string | undefined {
 	const path = toolCallPath(call);
 	if (path !== undefined) return JSON.stringify([call.name, "path", path]);
+	const command = normalizedIdempotentBashCommand(call);
+	if (command !== undefined) return JSON.stringify([call.name, "command", command]);
 	const pattern = call.arguments.pattern;
 	if (typeof pattern === "string" && pattern.length > 0) {
 		const paths = call.arguments.paths;
@@ -372,8 +455,9 @@ function buildStalenessIndex(entries: SessionEntry[]): StalenessIndex {
 		}
 	}
 
+	type ResultMeta = { key?: string; call: ToolCall; message: ToolResultMessage };
 	const lastResultIndexByKey = new Map<string, number>();
-	const resultMeta = new Map<number, { key?: string; call: ToolCall; message: ToolResultMessage }>();
+	const resultMeta = new Map<number, ResultMeta>();
 	const lastEditIndexByPath = new Map<string, number>();
 
 	for (let i = 0; i < entries.length; i++) {
@@ -432,6 +516,31 @@ function buildStalenessIndex(entries: SessionEntry[]): StalenessIndex {
 			for (const lookupPath of lookupPaths) {
 				const editIndex = lastEditIndexByPath.get(lookupPath);
 				if (editIndex !== undefined && editIndex > index) {
+					staleResultIndices.add(index);
+					break;
+				}
+			}
+		}
+	}
+
+	const readsByBasePath = new Map<string, Array<[number, ResultMeta]>>();
+	const lineRangesByCall = new Map<ToolCall, ReadLineRange[]>();
+	for (const [index, meta] of resultMeta) {
+		if (meta.call.name !== "read") continue;
+		const path = toolCallPath(meta.call);
+		if (!path) continue;
+		lineRangesByCall.set(meta.call, readLineRanges(path));
+		const basePath = readBasePath(path);
+		const group = readsByBasePath.get(basePath);
+		if (group) group.push([index, meta]);
+		else readsByBasePath.set(basePath, [[index, meta]]);
+	}
+	for (const reads of readsByBasePath.values()) {
+		if (reads.length < 2) continue;
+		for (let earlier = 0; earlier < reads.length - 1; earlier++) {
+			const [index, meta] = reads[earlier];
+			for (let later = earlier + 1; later < reads.length; later++) {
+				if (readSupersedesRead(reads[later][1].call, meta.call, lineRangesByCall)) {
 					staleResultIndices.add(index);
 					break;
 				}
@@ -580,11 +689,17 @@ function collectToolOutputPruneCandidates(
 		}
 
 		const notice = createPrunedNotice(tokens, message);
+		const savings = estimatePrunedSavings(tokens, notice);
+		const errorNoticeGrows = message.isError === true && notice.length > firstTextContent(message).length;
+		if (savings <= 0 || errorNoticeGrows) {
+			accumulatedTokens += tokens;
+			continue;
+		}
 		candidates.push({
 			entry: entry as SessionMessageEntry,
 			tokens,
 			notice,
-			savings: estimatePrunedSavings(tokens, notice),
+			savings,
 		});
 		accumulatedTokens += tokens;
 	}
@@ -596,6 +711,13 @@ function collectToolOutputPruneCandidates(
 	return { candidates, tokensSaved };
 }
 
+function minimumSavings(config: PruneConfig, options: PruneToolOutputsOptions = {}): number {
+	const relaxedMinimum = options.relaxedMinimum;
+	return typeof relaxedMinimum === "number" && Number.isFinite(relaxedMinimum)
+		? Math.min(config.minimumSavings, Math.max(0, relaxedMinimum))
+		: config.minimumSavings;
+}
+
 /**
  * Estimate the token savings {@link pruneToolOutputs} would achieve, without
  * mutating any entry. Returns 0 savings when below the configured minimum so the
@@ -604,9 +726,10 @@ function collectToolOutputPruneCandidates(
 export function estimateToolOutputPruneSavings(
 	entries: SessionEntry[],
 	config: PruneConfig = DEFAULT_PRUNE_CONFIG,
+	options: PruneToolOutputsOptions = {},
 ): { prunableCount: number; tokensSaved: number } {
 	const { candidates, tokensSaved } = collectToolOutputPruneCandidates(entries, config);
-	if (tokensSaved < config.minimumSavings || candidates.length === 0) {
+	if (tokensSaved < minimumSavings(config, options) || candidates.length === 0) {
 		return { prunableCount: 0, tokensSaved: 0 };
 	}
 	return { prunableCount: candidates.length, tokensSaved };
@@ -630,10 +753,20 @@ export function shouldRunMaintenancePrune(args: {
 	return args.estimatedSavings > args.cacheEpochResetCost;
 }
 
-export function pruneToolOutputs(entries: SessionEntry[], config: PruneConfig = DEFAULT_PRUNE_CONFIG): PruneResult {
-	const { candidates, tokensSaved } = collectToolOutputPruneCandidates(entries, config);
+export interface PruneToolOutputsOptions {
+	/** Lower the usual minimum only when the caller is already over its compaction threshold. */
+	relaxedMinimum?: number;
+}
 
-	if (tokensSaved < config.minimumSavings || candidates.length === 0) {
+export function pruneToolOutputs(
+	entries: SessionEntry[],
+	config: PruneConfig = DEFAULT_PRUNE_CONFIG,
+	options: PruneToolOutputsOptions = {},
+): PruneResult {
+	const { candidates, tokensSaved } = collectToolOutputPruneCandidates(entries, config);
+	const minimum = minimumSavings(config, options);
+
+	if (tokensSaved < minimum || candidates.length === 0) {
 		return { prunedCount: 0, tokensSaved: 0, prunedEntries: [] };
 	}
 

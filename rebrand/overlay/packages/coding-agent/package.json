@@ -1,7 +1,7 @@
 {
 	"type": "module",
 	"name": "@sayknow-cli/coding-agent",
-	"version": "0.3.14",
+	"version": "0.3.16",
 	"description": "Sayknow-CLI CLI with read, bash, edit, write tools and session management",
 	"homepage": "https://sayknow-cli.com",
 	"author": "jaybeyond",
@@ -97,6 +97,24 @@
 		".": {
 			"types": "./src/index.ts",
 			"import": "./src/index.ts"
+		},
+		"./sdk": {
+			"types": "./src/sdk/index.ts",
+			"import": "./src/sdk/index.ts"
+		},
+		"./sdk/models": null,
+		"./sdk/models.js": null,
+		"./sdk/lifecycle-session": null,
+		"./sdk/lifecycle-session.js": null,
+		"./sdk/startup-capability": null,
+		"./sdk/startup-capability.js": null,
+		"./sdk/bus": {
+			"types": "./src/sdk/bus/index.ts",
+			"import": "./src/sdk/bus/index.ts"
+		},
+		"./sdk/bus/*": {
+			"types": "./src/sdk/bus/*.ts",
+			"import": "./src/sdk/bus/*.ts"
 		},
 		"./mcp": null,
 		"./mcp/*": null,

@@ -7,7 +7,7 @@ const roots: string[] = [];
 const sessions: Array<{ name: string; socket: string }> = [];
 const createScript = path.join(import.meta.dir, "create.sh");
 const postmortemScript = path.join(import.meta.dir, "postmortem.sh");
-const promptScript = path.join(import.meta.dir, "prompt.sh");
+const harnessOwnerScript = path.join(import.meta.dir, "harness-tmux-owner-start.sh");
 
 async function executable(file: string, content: string) {
 	await fs.mkdir(path.dirname(file), { recursive: true });
@@ -28,7 +28,7 @@ async function worktree(root: string) {
 }
 
 function env(overrides: Record<string, string>) {
-	return { ...process.env, SKC_SESSION_SKIP_ROUTER: "1", SKC_SESSION_MONITOR_DISABLE: "1", ...overrides };
+	return { ...process.env, SKC_SESSION_MONITOR_DISABLE: "1", ...overrides };
 }
 
 async function fixture(root: string, mode = "direct", runner = "sleep 30") {
@@ -213,6 +213,8 @@ afterEach(async () => {
 describe("skc-session create public owner lifecycle", () => {
 	test("rejects missing binaries, directories, git worktrees, and detached branches", async () => {
 		const root = await fs.mkdtemp(path.join(os.tmpdir(), "skc-create-validation-")); roots.push(root);
+		const legacyRoutingArgs = Bun.spawnSync(["bash", createScript, "x", root, "channel", "@mention"], { stderr: "pipe" });
+		expect(legacyRoutingArgs.exitCode).toBe(2); expect(legacyRoutingArgs.stderr.toString()).toContain("<session-name> <worktree-path>");
 		const missing = Bun.spawnSync(["bash", createScript, "x", root], { env: env({ SKC_BIN: "/definitely-not-a-skc-executable" }), stderr: "pipe" });
 		expect(missing.exitCode).toBe(1); expect(missing.stderr.toString()).toContain("skc not found");
 		const binary = await fixture(root);
@@ -298,10 +300,10 @@ describe("skc-session create public owner lifecycle", () => {
 		expect(await Bun.file(path.join(state, "started.json")).exists()).toBe(true);
 	});
 
-	test("fails closed for malformed plans before any router registration", async () => {
-		const root = await fs.mkdtemp(path.join(os.tmpdir(), "skc-create-invalid-plan-")); roots.push(root);
-		const dir = await worktree(root); const bad = path.join(root, "bad-skc"); const router = path.join(root, "router");
-		await executable(bad, `#!/usr/bin/env python3
+test("fails closed for malformed plans before creating an owner", async () => {
+	const root = await fs.mkdtemp(path.join(os.tmpdir(), "skc-create-invalid-plan-")); roots.push(root);
+	const dir = await worktree(root); const bad = path.join(root, "bad-skc"); const name = `invalid-plan-${Date.now()}`;
+	await executable(bad, `#!/usr/bin/env python3
 import json, os, sys
 request = json.load(sys.stdin)
 if request.get("op") == "publish_generation":
@@ -312,10 +314,10 @@ if request.get("op") == "publish_generation":
 else:
     print("{}")
 `);
-		await executable(router, `#!/usr/bin/env bash\ntouch ${path.join(root, "router-called")}\n`);
-		const result = Bun.spawnSync(["bash", createScript, "bad", dir], { env: env({ SKC_BIN: bad, SKC_SESSION_ROUTER: router, SKC_SESSION_SKIP_ROUTER: "0" }), stderr: "pipe" });
-		expect(result.exitCode).toBe(1); expect(result.stderr.toString()).toContain("plan response rejected"); expect(await Bun.file(path.join(root, "router-called")).exists()).toBe(false);
-	});
+	const result = Bun.spawnSync(["bash", createScript, name, dir], { env: env({ SKC_BIN: bad }), stderr: "pipe" });
+	expect(result.exitCode).toBe(1); expect(result.stderr.toString()).toContain("plan response rejected");
+	expect(Bun.spawnSync(["tmux", "-L", `skc-${name}`, "has-session", "-t", `=${name}`], { stdout: "pipe", stderr: "pipe" }).exitCode).not.toBe(0);
+});
 
 	test("runner classifies terminal runtime completion as normal cleanup", async () => {
 		const root = await fs.mkdtemp(path.join(os.tmpdir(), "skc-create-completed-")); roots.push(root);
@@ -347,68 +349,29 @@ test("runner ignores a stale prompt acceptance marker from another generation", 
 	expect(await Bun.file(path.join(state, "final.json")).json()).toMatchObject({ owner_exit_reason: "owner_exited_before_prompt_acceptance", prompt_accepted: false, worktree_changed_since_baseline: true });
 });
 
-test("uses public lifecycle markers only and excludes all private capture mechanisms", async () => {
-	const [create, postmortem, prompt] = await Promise.all([Bun.file(createScript).text(), Bun.file(postmortemScript).text(), Bun.file(promptScript).text()]);
-	for (const forbidden of ["pane.log", "pipe-pane", "capture-pane", "turnEvidence", "TURN_EVIDENCE", "pane-text"]) {
-		expect(create).not.toContain(forbidden); expect(postmortem).not.toContain(forbidden); expect(prompt).not.toContain(forbidden);
+test("ships only human-visible tmux lifecycle helpers", async () => {
+	const [create, postmortem, harnessOwner] = await Promise.all([
+		Bun.file(createScript).text(),
+		Bun.file(postmortemScript).text(),
+		Bun.file(harnessOwnerScript).text(),
+	]);
+	expect(await Bun.file(path.join(import.meta.dir, "prompt.sh")).exists()).toBe(false);
+	expect(await Bun.file(path.join(import.meta.dir, "tail.sh")).exists()).toBe(false);
+	for (const forbidden of ["load-buffer", "paste-buffer", "send-keys", "capture-pane", "pipe-pane", "turnEvidence", "TURN_EVIDENCE", "pane-text"]) {
+		expect(create).not.toContain(forbidden);
+		expect(postmortem).not.toContain(forbidden);
+		expect(harnessOwner).not.toContain(forbidden);
 	}
-	expect(create).toContain('"op": "plan"'); expect(create).toContain('"op":"observe_terminal"'); expect(postmortem).toContain("skc_session_write_public_marker");
-	expect(prompt).toContain('kind": "prompt_accepted"'); expect(prompt).toContain("public started marker");
-});
-
-	test("monitor disable leaves no monitor owner session and router registration keeps caller options", async () => {
-		const root = await fs.mkdtemp(path.join(os.tmpdir(), "skc-create-router-")); roots.push(root);
-		const dir = await worktree(root); const state = path.join(root, "state"); const log = path.join(root, "router.log"); const timeoutLog = path.join(root, "timeout.log"); const bin = await fixture(root); const router = path.join(root, "router"); const timeout = path.join(root, "bin", "timeout");
-		await executable(router, `#!/usr/bin/env bash\nprintf '%s\\n' "$*" > ${log}\n`);
-		await executable(timeout, "#!/usr/bin/env bash\nprintf '%s\\n' \"$*\" >\"$SKC_FIXTURE_TIMEOUT_LOG\"\nexec /usr/bin/timeout \"$@\"\n");
-		const name = `router-${Date.now()}`; sessions.push({ name, socket: `skc-${name}` });
-		expect(Bun.spawnSync(["bash", createScript, name, dir, "C1", "@team"], { env: env({ SKC_BIN: bin, SKC_SESSION_STATE_DIR: state, SKC_SESSION_ROUTER: router, SKC_SESSION_SKIP_ROUTER: "0", SKC_SESSION_STALE_MINUTES: "17", SKC_FIXTURE_TIMEOUT_LOG: timeoutLog, PATH: `${path.join(root, "bin")}:${process.env.PATH}` }) }).exitCode).toBe(0);
-		expect(await Bun.file(log).text()).toContain("--stale-minutes 17");
-		expect(await Bun.file(timeoutLog).text()).toStartWith("10s ");
-		expect(Bun.spawnSync(["tmux", "-L", `skc-${name}`, "has-session", "-t", `${name}-owner-monitor`]).exitCode).not.toBe(0);
-	});
-
-test("records router watch failures without failing creation", async () => {
-	const root = await fs.mkdtemp(path.join(os.tmpdir(), "skc-watch-failure-")); roots.push(root);
-	const dir = await worktree(root); const state = path.join(root, "state"); const bin = await fixture(root); const router = path.join(root, "router");
-	await executable(router, "#!/usr/bin/env bash\nexit 37\n");
-	const name = `watch-failure-${Date.now()}`; sessions.push({ name, socket: `skc-${name}` });
-	const created = Bun.spawnSync(["bash", createScript, name, dir], { env: env({ SKC_BIN: bin, SKC_SESSION_STATE_DIR: state, SKC_SESSION_ROUTER: router, SKC_SESSION_SKIP_ROUTER: "0" }), stderr: "pipe" });
-	expect(created.exitCode).toBe(0);
-	const generation = ((await Bun.file(path.join(state, name, "owner-lifecycle", "generation.json")).json()) as { generation: string }).generation;
-	const canonicalPath = path.join(state, name, "owner-lifecycle", `router-failure-${generation}-watch_registration.json`);
-	const canonical = await Bun.file(canonicalPath).json() as Record<string, unknown>;
-	expect(canonical).toEqual({ schema_version: 1, kind: "router_failure", session_id: name, owner_generation: generation, boundary: "watch_registration", exit_code: 37 });
-	expect(await Bun.file(path.join(state, "router-failure.json")).json()).toEqual(canonical);
-});
-
-test("bounds a blocking router watch through timeout and publishes its current immutable failure receipt", async () => {
-	const root = await fs.mkdtemp(path.join(os.tmpdir(), "skc-watch-timeout-")); roots.push(root);
-	const dir = await worktree(root); const state = path.join(root, "state"); const bin = await fixture(root); const router = path.join(root, "router"); const timeout = path.join(root, "bin", "timeout"); const timeoutLog = path.join(root, "timeout.log");
-	await executable(router, "#!/usr/bin/env bash\nsleep 30\n");
-	await executable(timeout, "#!/usr/bin/env bash\nprintf '%s\\n' \"$*\" >>\"$SKC_FIXTURE_TIMEOUT_LOG\"\nexec /usr/bin/timeout \"$@\"\n");
-	const name = `watch-timeout-${Date.now()}`; sessions.push({ name, socket: `skc-${name}` });
-	const startedAt = Date.now();
-	const created = Bun.spawnSync(["bash", createScript, name, dir], { env: env({ SKC_BIN: bin, SKC_SESSION_STATE_DIR: state, SKC_SESSION_ROUTER: router, SKC_SESSION_SKIP_ROUTER: "0", SKC_SESSION_TEST_ROUTER_WATCH_TIMEOUT_SECONDS: "1", SKC_FIXTURE_TIMEOUT_LOG: timeoutLog, PATH: `${path.join(root, "bin")}:${process.env.PATH}` }), stderr: "pipe" });
-	const elapsed = Date.now() - startedAt;
-	expect(created.exitCode).toBe(0);
-	expect(elapsed).toBeGreaterThanOrEqual(750); expect(elapsed).toBeLessThan(5000);
-	expect(await Bun.file(timeoutLog).text()).toStartWith("1s ");
-	const generation = ((await Bun.file(path.join(state, name, "owner-lifecycle", "generation.json")).json()) as { generation: string }).generation;
-	const canonicalPath = path.join(state, name, "owner-lifecycle", `router-failure-${generation}-watch_registration.json`);
-	const canonical = await Bun.file(canonicalPath).json() as Record<string, unknown>;
-	expect(canonical).toEqual({ schema_version: 1, kind: "router_failure", session_id: name, owner_generation: generation, boundary: "watch_registration", exit_code: 124 });
-	expect(await Bun.file(path.join(state, "router-failure.json")).json()).toEqual(canonical);
-});
-test("rejects test router watch deadlines outside the production-safe bound", async () => {
-	const root = await fs.mkdtemp(path.join(os.tmpdir(), "skc-watch-timeout-bound-")); roots.push(root);
-	const dir = await worktree(root); const bin = await fixture(root);
-	for (const duration of ["0", "11", "one"]) {
-		const result = Bun.spawnSync(["bash", createScript, `watch-bound-${duration}`, dir], { env: env({ SKC_BIN: bin, SKC_SESSION_TEST_ROUTER_WATCH_TIMEOUT_SECONDS: duration }), stderr: "pipe" });
-		expect(result.exitCode).toBe(1);
-		expect(result.stderr.toString()).toContain("SKC_SESSION_TEST_ROUTER_WATCH_TIMEOUT_SECONDS must be an integer from 1 through 10");
+	for (const forbidden of ["clawhip", "router", "SKC_SESSION_ROUTER", "SKC_SESSION_CHANNEL", "SKC_SESSION_KEYWORDS", "tmux watch", "--channel", "--mention", "--keywords"]) {
+		expect(create).not.toContain(forbidden);
 	}
+	expect(create).toContain("Usage: $0 <session-name> <worktree-path>");
+	expect(create).toContain('"op": "plan"');
+	expect(create).toContain('"op":"observe_terminal"');
+	expect(postmortem).toContain("skc_session_write_public_marker");
+	expect(harnessOwner).toContain("MACHINE_CONTROL=Coordinator MCP, ACP, or Sayknow-CLI SDK");
 });
+
 test("passes branch and coordinator identity to the raw owner without private lifecycle payloads", async () => {
 	const root = await fs.mkdtemp(path.join(os.tmpdir(), "skc-create-owner-env-")); roots.push(root);
 	const dir = await worktree(root); const state = path.join(root, "state");
@@ -423,73 +386,20 @@ sleep 2`;
 	expect(await Bun.file(path.join(state, "owner-env.json")).json()).toEqual({ SKC_COORDINATOR_SESSION_ID: name, SKC_COORDINATOR_SESSION_BRANCH: "session-test", SKC_COORDINATOR_SESSION_STATE_FILE: path.join(state, "runtime-state.json"), SKC_SESSION_STATE_DIR: state });
 });
 
-test("prompt requires a public started marker and records a payload-free acceptance marker in the isolated socket", async () => {
-	const root = await fs.mkdtemp(path.join(os.tmpdir(), "skc-create-prompt-")); roots.push(root);
-	const dir = await worktree(root); const state = path.join(root, "state"); const bin = await fixture(root); const name = `prompt-${Date.now()}`; sessions.push({ name, socket: `skc-${name}` });
-	expect(Bun.spawnSync(["bash", createScript, name, dir], { env: env({ SKC_BIN: bin, SKC_SESSION_STATE_DIR: state }) }).exitCode).toBe(0);
-	const secret = "private prompt must not be persisted";
-	const submitted = Bun.spawnSync(["bash", promptScript, name, secret], { env: { ...process.env, SKC_SESSION_STATE_DIR: state }, stdout: "pipe", stderr: "pipe" });
-	expect(submitted.exitCode).toBe(0); expect(submitted.stdout.toString()).not.toContain(secret);
-	const marker = await Bun.file(path.join(state, "prompt-accepted.json")).json() as Record<string, unknown>;
-expect(marker).toMatchObject({ schema_version: 1, kind: "prompt_accepted", session_id: name, worktree_baseline_dirty: false, owner_generation: expect.any(String) });
-	expect(JSON.stringify(marker)).not.toContain(secret);
-});
-
-test("prompt deletes its private buffer when paste fails", async () => {
-	const root = await fs.mkdtemp(path.join(os.tmpdir(), "skc-create-prompt-paste-failure-")); roots.push(root);
-	const dir = await worktree(root); const state = path.join(root, "state"); const bin = await fixture(root); const name = `prompt-paste-${Date.now()}`; sessions.push({ name, socket: `skc-${name}` });
-	expect(Bun.spawnSync(["bash", createScript, name, dir], { env: env({ SKC_BIN: bin, SKC_SESSION_STATE_DIR: state }) }).exitCode).toBe(0);
-	const log = path.join(root, "tmux.log"); const tmux = path.join(root, "tmux"); const secret = "private prompt paste failure";
-	await executable(tmux, `#!/usr/bin/env bash\nprintf '%s\\n' "$*" >> ${log}\nfor arg in "$@"; do [[ "$arg" == paste-buffer ]] && exit 23; done\nexec /usr/bin/tmux "$@"\n`);
-	const result = Bun.spawnSync(["bash", promptScript, name, secret], { env: { ...process.env, SKC_SESSION_STATE_DIR: state, SKC_SESSION_TMUX_BIN: tmux }, stdout: "pipe", stderr: "pipe" });
-	expect(result.exitCode).not.toBe(0);
-	expect(await Bun.file(log).text()).toContain("delete-buffer");
-	expect(result.stdout.toString() + result.stderr.toString()).not.toContain(secret);
-});
-
-test("prompt deletes a private buffer when its load client fails after creating it", async () => {
-	const root = await fs.mkdtemp(path.join(os.tmpdir(), "skc-create-prompt-load-failure-")); roots.push(root);
-	const dir = await worktree(root); const state = path.join(root, "state"); const bin = await fixture(root); const name = `prompt-load-${Date.now()}`; sessions.push({ name, socket: `skc-${name}` });
-	expect(Bun.spawnSync(["bash", createScript, name, dir], { env: env({ SKC_BIN: bin, SKC_SESSION_STATE_DIR: state }) }).exitCode).toBe(0);
-	const log = path.join(root, "tmux.log"); const tmux = path.join(root, "tmux"); const secret = "private prompt load failure";
-	await executable(tmux, `#!/usr/bin/env bash\nprintf '%s\\n' "$*" >> ${log}\nfor arg in "$@"; do [[ "$arg" == load-buffer ]] && { /usr/bin/tmux "$@"; exit 23; }; done\nexec /usr/bin/tmux "$@"\n`);
-	const result = Bun.spawnSync(["bash", promptScript, name, secret], { env: { ...process.env, SKC_SESSION_STATE_DIR: state, SKC_SESSION_TMUX_BIN: tmux }, stdout: "pipe", stderr: "pipe" });
-	expect(result.exitCode).not.toBe(0);
-	const calls = await Bun.file(log).text();
-	expect(calls).toContain("load-buffer"); expect(calls).toContain("delete-buffer"); expect(calls).not.toContain("paste-buffer");
-	expect(result.stdout.toString() + result.stderr.toString()).not.toContain(secret);
-});
-
-test("prompt fails when private buffer deletion fails on the reachable isolated server", async () => {
-	const root = await fs.mkdtemp(path.join(os.tmpdir(), "skc-create-prompt-delete-failure-")); roots.push(root);
-	const dir = await worktree(root); const state = path.join(root, "state"); const bin = await fixture(root); const name = `prompt-delete-${Date.now()}`; sessions.push({ name, socket: `skc-${name}` });
-	expect(Bun.spawnSync(["bash", createScript, name, dir], { env: env({ SKC_BIN: bin, SKC_SESSION_STATE_DIR: state }) }).exitCode).toBe(0);
-	const log = path.join(root, "tmux.log"); const tmux = path.join(root, "tmux"); const secret = "private prompt delete failure";
-	await executable(tmux, `#!/usr/bin/env bash\nprintf '%s\\n' "$*" >> ${log}\nfor arg in "$@"; do [[ "$arg" == paste-buffer ]] && exit 23; [[ "$arg" == delete-buffer ]] && exit 24; done\nexec /usr/bin/tmux "$@"\n`);
-	const result = Bun.spawnSync(["bash", promptScript, name, secret], { env: { ...process.env, SKC_SESSION_STATE_DIR: state, SKC_SESSION_TMUX_BIN: tmux }, stdout: "pipe", stderr: "pipe" });
-	expect(result.exitCode).not.toBe(0);
-	const calls = await Bun.file(log).text();
-	expect(calls).toContain("delete-buffer"); expect(calls).toContain("has-session");
-	expect(result.stderr.toString()).toContain("failed to delete private prompt buffer");
-	expect(result.stdout.toString() + result.stderr.toString()).not.toContain(secret);
-});
 
 test("records one generation-bound recovery only after a prior incident replacement is started", async () => {
 	const root = await fs.mkdtemp(path.join(os.tmpdir(), "skc-create-replacement-")); roots.push(root);
-	const dir = await worktree(root); const state = path.join(root, "state"); const bin = await fixture(root); const router = path.join(root, "router"); const log = path.join(root, "router.log");
+	const dir = await worktree(root); const state = path.join(root, "state"); const bin = await fixture(root);
 	const name = `replacement-${Date.now()}`; const socket = `skc-${name}`; sessions.push({ name, socket });
 	await fs.mkdir(state, { recursive: true });
 	await fs.mkdir(path.join(state, name, "owner-lifecycle"), { recursive: true });
 	await Bun.write(path.join(state, name, "owner-lifecycle", "incident-prior-generation.json"), JSON.stringify({ schema_version: 1, session_id: name, generation: "prior-generation", dedupe_key: `owner-loss:${name}:prior-generation`, classification: "unexpected_owner_loss" }));
 	await Bun.write(path.join(state, "incident.json"), JSON.stringify({ schema_version: 1, kind: "owner_incident", session_id: name, owner_generation: "prior-generation", incident_dedupe: `${name}:prior-generation` }));
-	await executable(router, `#!/usr/bin/env bash\nprintf '%s\\n' "$*" >> ${log}\n`);
-	const created = Bun.spawnSync(["bash", createScript, name, dir, "C-recovery"], { env: env({ SKC_BIN: bin, SKC_SESSION_STATE_DIR: state, SKC_SESSION_ROUTER: router, SKC_SESSION_SKIP_ROUTER: "0" }), stderr: "pipe" });
+	const created = Bun.spawnSync(["bash", createScript, name, dir], { env: env({ SKC_BIN: bin, SKC_SESSION_STATE_DIR: state }), stderr: "pipe" });
 	if (created.exitCode !== 0) throw new Error(created.stderr.toString());
 	const recovery = await Bun.file(path.join(state, "recovery.json")).json() as Record<string, string>;
 	expect(recovery).toMatchObject({ kind: "owner_recovered", session_id: name, prior_owner_generation: "prior-generation", prior_incident_dedupe: `${name}:prior-generation` });
 	expect(recovery.owner_generation).not.toBe("prior-generation");
-	const routerCalls = await Bun.file(log).text();
-	expect(routerCalls.match(/tmux recovered/g)).toHaveLength(1);
 });
 
 test("reconciles an immediately replaced missing owner before publishing the next generation", async () => {
@@ -561,27 +471,17 @@ test("retries a generation-bound failed create without synthesizing owner loss o
 
 test("does not recover an incident again in a third generation when a canonical recovery exists", async () => {
 	const root = await fs.mkdtemp(path.join(os.tmpdir(), "skc-create-third-recovery-")); roots.push(root);
-	const dir = await worktree(root); const state = path.join(root, "state"); const bin = await fixture(root); const router = path.join(root, "router"); const log = path.join(root, "router.log");
+	const dir = await worktree(root); const state = path.join(root, "state"); const bin = await fixture(root);
 	const name = `third-recovery-${Date.now()}`; sessions.push({ name, socket: `skc-${name}` }); const lifecycle = path.join(state, name, "owner-lifecycle");
 	await fs.mkdir(lifecycle, { recursive: true });
 	await Bun.write(path.join(lifecycle, "incident-first.json"), JSON.stringify({ schema_version: 1, session_id: name, generation: "first", dedupe_key: `owner-loss:${name}:first`, classification: "unexpected_owner_loss" }));
 	await Bun.write(path.join(state, "incident.json"), JSON.stringify({ schema_version: 1, kind: "owner_incident", session_id: name, owner_generation: "first", incident_dedupe: `${name}:first` }));
 	await Bun.write(path.join(lifecycle, "recovery-second.json"), JSON.stringify({ schema_version: 1, kind: "owner_recovered", session_id: name, owner_generation: "second", prior_owner_generation: "first", prior_incident_dedupe: `${name}:first` }));
-	await executable(router, `#!/usr/bin/env bash\nprintf '%s\\n' "$*" >> ${log}\n`);
-	expect(Bun.spawnSync(["bash", createScript, name, dir, "C-third"], { env: env({ SKC_BIN: bin, SKC_SESSION_STATE_DIR: state, SKC_SESSION_ROUTER: router, SKC_SESSION_SKIP_ROUTER: "0" }) }).exitCode).toBe(0);
+	expect(Bun.spawnSync(["bash", createScript, name, dir], { env: env({ SKC_BIN: bin, SKC_SESSION_STATE_DIR: state }) }).exitCode).toBe(0);
 	expect(await Bun.file(path.join(state, "recovery.json")).exists()).toBe(false);
 	expect(await Bun.file(path.join(state, "incident.json")).exists()).toBe(false);
-	expect((await Bun.file(log).text()).match(/tmux recovered/g)).toBeNull();
 });
 
-test("prompt fails closed without a started marker and does not expose prompt text", async () => {
-	const root = await fs.mkdtemp(path.join(os.tmpdir(), "skc-create-prompt-marker-")); roots.push(root);
-	const state = path.join(root, "state"); await fs.mkdir(state, { recursive: true });
-	const secret = "do not disclose this prompt";
-	const result = Bun.spawnSync(["bash", promptScript, "missing", secret], { env: { ...process.env, SKC_SESSION_STATE_DIR: state }, stdout: "pipe", stderr: "pipe" });
-	expect(result.exitCode).toBe(1); expect(result.stderr.toString()).toContain("no public started marker");
-	expect(result.stdout.toString() + result.stderr.toString()).not.toContain(secret);
-});
 	test("does not accept a terminal runtime record from another session", async () => {
 		const root = await fs.mkdtemp(path.join(os.tmpdir(), "skc-create-mismatch-")); roots.push(root);
 		const dir = await worktree(root); const state = path.join(root, "state");
@@ -697,10 +597,9 @@ skc_session_write_vanished_json() { : >"$1"; }
 
 	test("monitor writes immutable verdict and incident markers after owner loss without claiming recovery", async () => {
 		const root = await fs.mkdtemp(path.join(os.tmpdir(), "skc-create-monitor-")); roots.push(root);
-		const dir = await worktree(root); const state = path.join(root, "state"); const bin = await fixture(root); const router = path.join(root, "router"); const log = path.join(root, "incident.log");
-		await executable(router, `#!/usr/bin/env bash\nprintf '%s\\n' "$*" >> ${log}\n`);
+		const dir = await worktree(root); const state = path.join(root, "state"); const bin = await fixture(root);
 		const name = `monitor-${Date.now()}`; const socket = `skc-${name}`; sessions.push({ name, socket });
-		expect(Bun.spawnSync(["bash", createScript, name, dir, "C-monitor"], { env: { ...env({ SKC_BIN: bin, SKC_SESSION_STATE_DIR: state, SKC_SESSION_ROUTER: router }), SKC_SESSION_MONITOR_DISABLE: "0", SKC_SESSION_MONITOR_INTERVAL: "1" } }).exitCode).toBe(0);
+		expect(Bun.spawnSync(["bash", createScript, name, dir], { env: { ...env({ SKC_BIN: bin, SKC_SESSION_STATE_DIR: state }), SKC_SESSION_MONITOR_DISABLE: "0", SKC_SESSION_MONITOR_INTERVAL: "1" } }).exitCode).toBe(0);
 		Bun.spawnSync(["tmux", "-L", socket, "kill-session", "-t", name], { stdout: "pipe", stderr: "pipe" });
 		await waitFor(path.join(state, "incident.json"), 8_000);
 		expect(await Bun.file(path.join(state, "verdict.json")).json()).toMatchObject({ classification: "unexpected_owner_loss" });
@@ -712,10 +611,8 @@ skc_session_write_vanished_json() { : >"$1"; }
 			generation: generation.generation,
 			dedupe_key: `owner-loss:${name}:${generation.generation}`,
 		});
-		await waitFor(log);
-		expect(await Bun.file(log).text()).toContain("tmux stale --session");
 		expect(await Bun.file(path.join(state, "recovery.json")).exists()).toBe(false);
-		const recovered = Bun.spawnSync(["bash", createScript, name, dir, "C-recovered"], {
+		const recovered = Bun.spawnSync(["bash", createScript, name, dir], {
 			env: env({ SKC_BIN: bin, SKC_SESSION_STATE_DIR: state }),
 			stdout: "pipe",
 			stderr: "pipe",
@@ -1176,19 +1073,4 @@ test("keeps owner status while exposing canonical-collision and alias publicatio
 	}
 }, 20_000);
 
-test("records nonfatal recovery and stale-owner router notification failures", async () => {
-	const root = await fs.mkdtemp(path.join(os.tmpdir(), "skc-router-notification-failure-")); roots.push(root);
-	const dir = await worktree(root); const state = path.join(root, "state"); const bin = await fixture(root); const router = path.join(root, "router"); const name = `router-failure-${Date.now()}`; const socket = `skc-${name}`; sessions.push({ name, socket });
-	await executable(router, "#!/usr/bin/env bash\nexit 37\n");
-	const lifecycle = path.join(state, name, "owner-lifecycle"); await fs.mkdir(lifecycle, { recursive: true });
-	await Bun.write(path.join(lifecycle, "incident-prior.json"), JSON.stringify({ schema_version: 1, session_id: name, generation: "prior", dedupe_key: `owner-loss:${name}:prior`, classification: "unexpected_owner_loss" }));
-	await Bun.write(path.join(state, "incident.json"), JSON.stringify({ schema_version: 1, kind: "owner_incident", session_id: name, owner_generation: "prior", incident_dedupe: `${name}:prior` }));
-	const created = Bun.spawnSync(["bash", createScript, name, dir, "C-router"], { env: { ...env({ SKC_BIN: bin, SKC_SESSION_STATE_DIR: state, SKC_SESSION_ROUTER: router, SKC_SESSION_SKIP_ROUTER: "0" }), SKC_SESSION_MONITOR_DISABLE: "0", SKC_SESSION_MONITOR_INTERVAL: "1" }, stderr: "pipe" });
-	expect(created.exitCode).toBe(0);
-	const generation = ((await Bun.file(path.join(lifecycle, "generation.json")).json()) as { generation: string }).generation;
-	expect(await Bun.file(path.join(lifecycle, `router-failure-${generation}-recovery_notification.json`)).json()).toMatchObject({ kind: "router_failure", boundary: "recovery_notification", exit_code: 37, owner_generation: generation });
-	expect(Bun.spawnSync(["tmux", "-L", socket, "kill-session", "-t", name], { stdout: "pipe", stderr: "pipe" }).exitCode).toBe(0);
-	await waitFor(path.join(lifecycle, `router-failure-${generation}-stale_owner_notification.json`), 9_000);
-	expect(await Bun.file(path.join(lifecycle, `router-failure-${generation}-stale_owner_notification.json`)).json()).toMatchObject({ kind: "router_failure", boundary: "stale_owner_notification", exit_code: 37, owner_generation: generation });
-}, 20_000);
 });

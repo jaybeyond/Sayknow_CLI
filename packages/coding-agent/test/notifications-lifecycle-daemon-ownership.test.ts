@@ -4,11 +4,15 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 import { Settings } from "../src/config/settings";
-import type {
-	LifecycleControlServer,
-	LifecycleControlServerFactory,
-} from "../src/notifications/lifecycle-control-runtime";
-import { acquireDaemonOwnership, daemonPaths, TelegramNotificationDaemon } from "../src/notifications/telegram-daemon";
+import { tokenFingerprint } from "../src/sdk/bus/config";
+import type { LifecycleControlServer, LifecycleControlServerFactory } from "../src/sdk/bus/lifecycle-control-runtime";
+import {
+	acquireDaemonOwnership,
+	DAEMON_GENERATION,
+	daemonPaths,
+	readDaemonState,
+	TelegramNotificationDaemon,
+} from "../src/sdk/bus/telegram-daemon";
 
 function tempAgentDir(): string {
 	return fs.mkdtempSync(path.join(os.tmpdir(), "skc-lifecycle-owner-test-"));
@@ -80,7 +84,7 @@ function controlSpy(): ControlSpy {
 async function ownByOther(s: Settings, ownerId: string): Promise<void> {
 	await acquireDaemonOwnership({
 		settings: s,
-		tokenFingerprint: "fp",
+		tokenFingerprint: tokenFingerprint("tok"),
 		chatId: "42",
 		pid: process.pid,
 		randomId: () => ownerId,
@@ -161,4 +165,17 @@ describe("daemon lifecycle-control ownership (G008)", () => {
 			}
 		}
 	});
+});
+test("persists the current generation for an acquired owner so a current daemon attaches without restart", async () => {
+	const agentDir = tempAgentDir();
+	const s = settings(agentDir);
+	const acquired = await acquireDaemonOwnership({
+		settings: s,
+		tokenFingerprint: tokenFingerprint("tok"),
+		chatId: "42",
+		pid: process.pid,
+		randomId: () => "current-generation-owner",
+	});
+	expect(acquired.acquired).toBe(true);
+	expect((await readDaemonState(s))?.generation).toBe(DAEMON_GENERATION);
 });

@@ -7,6 +7,7 @@ export interface CompileArgOptions {
 	externals?: string[];
 }
 
+
 export const compileAutoloadDisableFlags = [
 	"--no-compile-autoload-bunfig",
 	"--no-compile-autoload-dotenv",
@@ -26,7 +27,8 @@ export const releaseEntrypoints = [
 	"./packages/coding-agent/src/tools/browser/tab-worker-entry.ts",
 	"./packages/coding-agent/src/eval/js/worker-entry.ts",
 	"./packages/natives/native/index.js",
-	"./packages/coding-agent/src/notifications/telegram-daemon-cli.ts",
+	"./packages/coding-agent/src/sdk/bus/telegram-daemon-cli.ts",
+	"./packages/coding-agent/src/sdk/bus/chat-daemon-cli.ts",
 	// Hidden Telegram Remote gateway entrypoint. `skc telegram start` self-spawns
 	// `skc telegram __gateway`, which dynamic-imports this bundled entry.
 	"./packages/telegram-remote/src/index.ts",
@@ -44,7 +46,8 @@ export const devEntrypoints = [
 	"../stats/src/sync-worker.ts",
 	"./src/tools/browser/tab-worker-entry.ts",
 	"./src/eval/js/worker-entry.ts",
-	"./src/notifications/telegram-daemon-cli.ts",
+	"./src/sdk/bus/telegram-daemon-cli.ts",
+	"./src/sdk/bus/chat-daemon-cli.ts",
 	"../telegram-remote/src/index.ts",
 ];
 

@@ -169,7 +169,7 @@ describe("TtsrManager disabled behavior", () => {
 			alwaysApply: true,
 		});
 
-		// Mirrors sdk.ts discovery bucketing: addRule(false) must not turn conditional-only rules into rulebook rules.
+		// Mirrors sdk/session.ts discovery bucketing: addRule(false) must not turn conditional-only rules into rulebook rules.
 		const { rulebookRules, alwaysApplyRules } = bucketRulesWithTtsrDisabled([
 			conditionalOnly,
 			conditionalWithDescription,

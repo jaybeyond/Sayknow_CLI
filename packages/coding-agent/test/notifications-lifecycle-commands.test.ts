@@ -8,7 +8,7 @@ import {
 	normalizeLifecyclePath,
 	parseLifecycleCommand,
 	validateLifecycleTarget,
-} from "@sayknow-cli/coding-agent/notifications/lifecycle-commands";
+} from "@sayknow-cli/coding-agent/sdk/bus/lifecycle-commands";
 
 describe("lifecycle command parser (G009)", () => {
 	it("detects lifecycle command text", () => {
@@ -201,6 +201,7 @@ describe("lifecycle command parser (G009)", () => {
 			"close_refused",
 			"not_found",
 			"terminal_uncertain",
+			"unsupported_platform",
 		] as const;
 		for (const reason of reasons) {
 			const out = formatLifecycleOutcome({
@@ -235,6 +236,34 @@ describe("lifecycle command parser (G009)", () => {
 		});
 		expect(amb).toContain("a");
 		expect(amb).toContain("b");
+	});
+	it("formats unsupported platform with the exact safe lifecycle copy", () => {
+		const output = formatLifecycleOutcome({
+			type: "session_lifecycle_error",
+			requestId: "request-1",
+			status: "error",
+			reason: "unsupported_platform",
+			message: "ignored",
+		});
+		expect(output).toBe(
+			"Remote session lifecycle is unavailable on this psmux host because SKC cannot prove immutable session identity. No lifecycle action was performed. Use a local SKC terminal with a supported tmux provider.",
+		);
+		expect(output).not.toContain("request-1");
+		expect(output).not.toContain("chat");
+		expect(output).not.toContain("token");
+		expect(output).not.toContain("/");
+	});
+
+	it("preserves legacy ambiguous candidate path output", () => {
+		const output = formatLifecycleOutcome({
+			type: "session_lifecycle_error",
+			requestId: "r",
+			status: "error",
+			reason: "ambiguous_target",
+			message: "multiple",
+			candidates: [{ sessionId: "a", path: "/legacy/path" }],
+		});
+		expect(output).toBe("❓ Multiple sessions match — reply with the exact id:\n• a (/legacy/path)");
 	});
 
 	it("parses --mpreset for all create target kinds (space-separated)", () => {

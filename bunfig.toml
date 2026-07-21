@@ -13,11 +13,9 @@ saveTextLockfile = true
 ".lark" = "text"
 
 [test]
-# bun test does NOT honor .gitignore; prune roboskc's repo clones and
-# scratch dirs so a root-level `bun test` doesn't walk into them.
+preload = ["./scripts/test-preload.ts"]
 pathIgnorePatterns = [
   "**/node_modules/**",
-  "python/roboskc/data/**",
   ".wt/**",
   ".worktrees/**",
 ]

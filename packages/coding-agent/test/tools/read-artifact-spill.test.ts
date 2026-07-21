@@ -48,8 +48,12 @@ function textOf(result: { content: Array<{ type: string; text?: string }> }): st
 }
 
 describe("read-tool artifact spill (Finding 4)", () => {
-	it("keeps the read spill rollout default off", () => {
-		expect(getDefault("tools.readArtifactSpillThreshold")).toBe(0);
+	it("uses the receipt-by-default read spill settings", () => {
+		expect(getDefault("tools.readArtifactSpillThreshold")).toBe(256);
+		expect(getDefault("read.receiptBudgetLines")).toBe(50);
+		expect(getDefault("read.receiptBudgetBytes")).toBe(10);
+		expect(getDefault("read.summaryMaxBytes")).toBe(20);
+		expect(getDefault("tools.fileMentionInlineBytes")).toBe(10);
 	});
 
 	let testDir: string;
@@ -88,10 +92,10 @@ describe("read-tool artifact spill (Finding 4)", () => {
 			}),
 		);
 
-		const result = await tool.execute("r1", { path: bigFile }, undefined, undefined, ctx);
+		const result = await tool.execute("r1", { path: `${bigFile}:1-900` }, undefined, undefined, ctx);
 		const text = textOf(result);
 
-		// Bounded inline text (well below the full file) + artifact reference.
+		// Bounded inline text (well below the full explicit range) + artifact reference.
 		expect(Buffer.byteLength(text, "utf-8")).toBeLessThan(fullBytes);
 		expect(result.details?.meta?.truncation?.artifactId).toBeDefined();
 		expect(text).toContain("artifact://");
@@ -119,8 +123,13 @@ describe("read-tool artifact spill (Finding 4)", () => {
 
 	it("leaves reads within the read threshold inline (no spill)", async () => {
 		const tool = wrapToolWithMetaNotice(new ReadTool(createSession(testDir)));
-		// Default read threshold is off, leaving the 80KB read fully inline.
-		const ctx = createContext(Settings.isolated({ "tools.maxInlineResultBytes": 0 }));
+		// The 256 KB default threshold leaves the 80 KB read inline.
+		const ctx = createContext(
+			Settings.isolated({
+				"tools.readArtifactSpillThreshold": 256,
+				"tools.maxInlineResultBytes": 0,
+			}),
+		);
 
 		const result = await tool.execute("r3", { path: bigFile }, undefined, undefined, ctx);
 

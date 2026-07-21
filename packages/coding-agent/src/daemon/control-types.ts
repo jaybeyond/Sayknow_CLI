@@ -6,7 +6,7 @@
  * a richer registry is intentionally deferred until a second kind exists.
  */
 
-export type DaemonKind = "telegram";
+export type DaemonKind = "telegram" | "discord" | "slack";
 
 export type DaemonAction = "list" | "status" | "stop" | "reload";
 

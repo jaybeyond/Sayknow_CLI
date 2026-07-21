@@ -7,18 +7,17 @@
 // SKC-tagged tmux session and a `session_close` frame into a real hard-close,
 // with idempotent re-ack. Not part of the unit suite.
 import assert from "node:assert";
-import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { SessionCloseFrame, SessionCreateFrame } from "../src/notifications/index";
+import type { SessionCloseFrame, SessionCreateFrame } from "../src/sdk/bus/index";
 import {
 	type AuditEvent,
 	handleLifecycleRequest,
 	type LedgerDoc,
 	type LedgerStore,
 	type OrchestratorDeps,
-} from "../src/notifications/lifecycle-orchestrator";
+} from "../src/sdk/bus/lifecycle-orchestrator";
 import {
 	buildSkcTmuxExactOptionTarget,
 	buildSkcTmuxProfileCommands,
@@ -61,6 +60,8 @@ const store: LedgerStore = {
 const auditLines: AuditEvent[] = [];
 const deps: OrchestratorDeps = {
 	pairedChatId: "42",
+	auditRedactionKey: new Uint8Array(32).fill(5),
+	isPsmuxProvider: () => false,
 	now: () => Date.now(),
 	store,
 	audit: e => {
@@ -103,8 +104,6 @@ const deps: OrchestratorDeps = {
 		return { processGone: !exists(target.tmuxSession ?? "") };
 	},
 	resumeSession: async () => ({ ambiguous: [] }),
-	newLifecycleRequestId: () => `lc-${crypto.randomUUID()}`,
-	newSessionId: () => `s${crypto.randomUUID().slice(0, 8)}`,
 };
 
 const createFrame: SessionCreateFrame = {

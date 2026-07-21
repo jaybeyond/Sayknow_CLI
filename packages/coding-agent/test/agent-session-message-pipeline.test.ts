@@ -195,6 +195,107 @@ describe("AgentSession message pipeline", () => {
 		await Bun.sleep(0);
 	});
 
+	it("forwards stop reasons and reasoning summaries to extension handlers", async () => {
+		const extensionEmit = vi.fn(async () => {});
+		const session = new AgentSession({
+			agent: createAgent(),
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			modelRegistry: {} as never,
+			extensionRunner: {
+				emit: extensionEmit,
+				hasHandlers: (eventType: string) => eventType === "reasoning_summary_end",
+			} as never,
+		});
+		sessions.push(session);
+
+		session.agent.emitExternalEvent({ type: "agent_end", messages: [], stopReason: "cancelled" } as never);
+		session.agent.emitExternalEvent({
+			type: "message_update",
+			message: createAssistantMessage("summary") as never,
+			assistantMessageEvent: {
+				type: "reasoning_summary_end",
+				contentIndex: 0,
+				content: "safe summary",
+				partial: createAssistantMessage("summary"),
+			},
+		} as never);
+		await Bun.sleep(0);
+		await Bun.sleep(0);
+
+		expect(extensionEmit).toHaveBeenCalledWith({ type: "agent_end", messages: [], stopReason: "cancelled" });
+		expect(extensionEmit).toHaveBeenCalledWith(
+			expect.objectContaining({
+				type: "reasoning_summary_end",
+				contentIndex: 0,
+				content: "safe summary",
+			}),
+			expect.any(Function),
+		);
+	});
+
+	it("drains pre-terminal reasoning summaries through slow extension handlers and drops post-terminal updates", async () => {
+		const firstStarted = Promise.withResolvers<void>();
+		const releaseFirst = Promise.withResolvers<void>();
+		const secondDelivered = Promise.withResolvers<void>();
+		const delivered: string[] = [];
+		const extensionEmit = vi.fn(async (event: { type: string; content?: string }) => {
+			if (event.type !== "reasoning_summary_end") return;
+			delivered.push(event.content ?? "");
+			if (event.content === "first") {
+				firstStarted.resolve();
+				await releaseFirst.promise;
+			} else if (event.content === "second") {
+				secondDelivered.resolve();
+			}
+		});
+		const session = new AgentSession({
+			agent: createAgent(),
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			modelRegistry: {} as never,
+			extensionRunner: {
+				emit: extensionEmit,
+				hasHandlers: (eventType: string) => eventType === "reasoning_summary_end",
+			} as never,
+		});
+		sessions.push(session);
+		const terminalObserved = Promise.withResolvers<void>();
+		session.subscribe(event => {
+			if (event.type === "turn_end") terminalObserved.resolve();
+		});
+
+		const emitSummaryEnd = (content: string) =>
+			session.agent.emitExternalEvent({
+				type: "message_update",
+				message: createAssistantMessage(content) as never,
+				assistantMessageEvent: {
+					type: "reasoning_summary_end",
+					contentIndex: 0,
+					content,
+					partial: createAssistantMessage(content),
+				},
+			} as never);
+
+		session.agent.emitExternalEvent({ type: "turn_start" });
+		emitSummaryEnd("first");
+		await firstStarted.promise;
+		emitSummaryEnd("second");
+		session.agent.emitExternalEvent({
+			type: "turn_end",
+			message: createAssistantMessage("final"),
+			toolResults: [],
+		} as never);
+		await terminalObserved.promise;
+		releaseFirst.resolve();
+		await secondDelivered.promise;
+
+		emitSummaryEnd("after-terminal");
+		await Promise.resolve();
+
+		expect(delivered).toEqual(["first", "second"]);
+	});
+
 	it("caches listener snapshots and preserves mutation-during-emit safety", async () => {
 		const session = new AgentSession({
 			agent: createAgent(),
@@ -289,6 +390,66 @@ describe("AgentSession message pipeline", () => {
 		expect(extensionEmit).toHaveBeenCalledTimes(1);
 		expect(__agentSessionPerfCounters.messageUpdateExtensionQueues).toBe(1);
 		expect(__sessionStateSidecarPerfCounters.persistFromEventCalls).toBe(0);
+	});
+
+	it("stops in-flight message_update dispatch between handlers after the turn changes", async () => {
+		const { promise, resolve } = Promise.withResolvers<void>();
+		let blockedFirstUpdate = true;
+		const started: string[] = [];
+		const notificationsDelivered: string[] = [];
+		const extensionEmit = vi.fn(
+			async (event: { type: string; message?: { content?: unknown } }, continueWhile?: () => boolean) => {
+				if (event.type !== "message_update") return;
+				const content = JSON.stringify(event.message);
+				started.push(content);
+				if (blockedFirstUpdate) {
+					blockedFirstUpdate = false;
+					await promise;
+				}
+				if (continueWhile && !continueWhile()) return;
+				notificationsDelivered.push(content);
+			},
+		);
+		const session = new AgentSession({
+			agent: createAgent(),
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			modelRegistry: {} as never,
+			extensionRunner: {
+				emit: extensionEmit,
+				hasHandlers: (eventType: string) => eventType === "message_update",
+			} as never,
+		});
+		sessions.push(session);
+
+		session.agent.emitExternalEvent({ type: "turn_start" });
+		await Bun.sleep(0);
+		session.agent.emitExternalEvent({
+			type: "message_update",
+			message: createAssistantMessage("turn-one-started") as never,
+			assistantMessageEvent: { type: "text_delta", delta: "turn-one-started" },
+		} as never);
+		for (let i = 0; i < 20 && started.length === 0; i++) await Bun.sleep(1);
+		expect(started).toHaveLength(1);
+		expect(started[0]).toContain("turn-one-started");
+
+		session.agent.emitExternalEvent({
+			type: "message_update",
+			message: createAssistantMessage("turn-one-stale") as never,
+			assistantMessageEvent: { type: "text_delta", delta: "turn-one-stale" },
+		} as never);
+		session.agent.emitExternalEvent({
+			type: "turn_end",
+			message: createAssistantMessage("turn-one-final"),
+			toolResults: [],
+		} as never);
+		session.agent.emitExternalEvent({ type: "turn_start" });
+		await Bun.sleep(10);
+		resolve();
+		await Bun.sleep(10);
+
+		expect(started).toHaveLength(1);
+		expect(notificationsDelivered).toEqual([]);
 	});
 
 	it("red-team: listener snapshot rebuilds only on subscription mutations, not emits", async () => {
@@ -670,5 +831,271 @@ describe("AgentSession message pipeline", () => {
 		expect(customMessages[0]?.customType).toBe("irc:incoming");
 		expect(customMessages[0]?.content).toContain("ping");
 		expect(agent.state.messages.at(-1)).toBe(customMessages[0]);
+	});
+	it("settles public agent_end before a slow extension handler finishes", async () => {
+		const extensionStarted = Promise.withResolvers<void>();
+		const releaseExtension = Promise.withResolvers<void>();
+		const session = new AgentSession({
+			agent: createAgent(),
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			modelRegistry: {} as never,
+			extensionRunner: {
+				emit: async (event: { type: string }) => {
+					if (event.type !== "agent_end") return;
+					extensionStarted.resolve();
+					await releaseExtension.promise;
+				},
+				hasHandlers: (eventType: string) => eventType === "agent_end",
+			} as never,
+		});
+		sessions.push(session);
+		const publicAgentEnd = Promise.withResolvers<void>();
+		session.subscribe(event => {
+			if (event.type === "agent_end") publicAgentEnd.resolve();
+		});
+		const assistant = createAssistantMessage("done");
+
+		session.agent.emitExternalEvent({ type: "message_end", message: assistant });
+		session.agent.emitExternalEvent({ type: "agent_end", messages: [assistant] });
+		const idle = session.waitForIdle();
+		await extensionStarted.promise;
+		await idle;
+		await publicAgentEnd.promise;
+
+		releaseExtension.resolve();
+	});
+	it("publishes accepted agent_end before prompt settlement after a subscriber abort", async () => {
+		const model: Model = {
+			id: "terminal-settlement-model",
+			name: "terminal-settlement-model",
+			provider: "mock",
+			api: "mock",
+			baseUrl: "mock://",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 200_000,
+			maxTokens: 32_768,
+		};
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["system prompt"], messages: [], tools: [] },
+			streamFn: () => {
+				const stream = new AssistantMessageEventStream();
+				queueMicrotask(() => {
+					stream.push({ type: "start", partial: createAssistantMessage("") });
+					stream.push({ type: "done", reason: "stop", message: createAssistantMessage("done") });
+				});
+				return stream;
+			},
+		});
+		const session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			modelRegistry: { getApiKey: async () => "test-key" } as never,
+		});
+		sessions.push(session);
+		const events: AgentSessionEvent[] = [];
+		let abort: Promise<void> | undefined;
+		session.subscribe(event => {
+			events.push(event);
+			if (event.type === "message_end" && event.message.role === "assistant") abort ??= session.abort();
+		});
+
+		await session.prompt("hello");
+		await abort;
+		await session.waitForIdle();
+
+		const agentEnds = events.filter(event => event.type === "agent_end");
+		expect(agentEnds).toHaveLength(1);
+		expect(agentEnds[0]).not.toMatchObject({ stopReason: "cancelled" });
+		expect(events.at(-1)?.type).toBe("agent_end");
+	});
+	it("isolates throwing subscribers from terminal settlement and later events", async () => {
+		const session = new AgentSession({
+			agent: createAgent(),
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			modelRegistry: {} as never,
+		});
+		sessions.push(session);
+		const agentEnds: AgentSessionEvent[] = [];
+		session.subscribe(event => {
+			if (event.type === "agent_end") throw new Error("subscriber failed");
+		});
+		session.subscribe(event => {
+			if (event.type === "agent_end") agentEnds.push(event);
+		});
+
+		const first = createAssistantMessage("first");
+		session.agent.emitExternalEvent({ type: "message_end", message: first });
+		session.agent.emitExternalEvent({ type: "agent_end", messages: [first] });
+		await session.waitForIdle();
+
+		const second = createAssistantMessage("second");
+		session.agent.emitExternalEvent({ type: "message_end", message: second });
+		session.agent.emitExternalEvent({ type: "agent_end", messages: [second] });
+		await session.waitForIdle();
+
+		expect(agentEnds).toHaveLength(2);
+	});
+	it("holds prompt settlement until worker integration is durable", async () => {
+		const integrationStarted = Promise.withResolvers<void>();
+		const releaseIntegration = Promise.withResolvers<void>();
+		let integrationRequests = 0;
+		let failIntegration = false;
+		let neverSettle = false;
+		let integrationAborted = false;
+		const model: Model = {
+			id: "worker-integration-model",
+			name: "worker-integration-model",
+			provider: "mock",
+			api: "mock",
+			baseUrl: "mock://",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 200_000,
+			maxTokens: 32_768,
+		};
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["system prompt"], messages: [], tools: [] },
+			streamFn: () => {
+				const stream = new AssistantMessageEventStream();
+				queueMicrotask(() => {
+					stream.push({ type: "start", partial: createAssistantMessage("") });
+					stream.push({ type: "done", reason: "stop", message: createAssistantMessage("done") });
+				});
+				return stream;
+			},
+		});
+		const session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			modelRegistry: { getApiKey: async () => "test-key" } as never,
+			workerIntegrationRequest: signal => {
+				integrationRequests++;
+				if (failIntegration) throw new Error("worker integration failed");
+				integrationStarted.resolve();
+				if (neverSettle) {
+					return new Promise<void>(resolve => {
+						signal.addEventListener("abort", () => {
+							integrationAborted = true;
+							resolve();
+						});
+					});
+				}
+				return releaseIntegration.promise;
+			},
+			workerIntegrationTimeoutMs: 10,
+		});
+		sessions.push(session);
+		const events: AgentSessionEvent[] = [];
+		session.subscribe(event => events.push(event));
+
+		let promptResolved = false;
+		const prompt = session.prompt("hello").then(() => {
+			promptResolved = true;
+		});
+		await integrationStarted.promise;
+		await Bun.sleep(0);
+		expect(promptResolved).toBe(false);
+		expect(events.some(event => event.type === "agent_end")).toBe(false);
+
+		releaseIntegration.resolve();
+		await prompt;
+		expect(events.filter(event => event.type === "agent_end")).toHaveLength(1);
+		expect(integrationRequests).toBe(1);
+
+		failIntegration = true;
+		await session.prompt("again");
+		await session.waitForIdle();
+		expect(events.filter(event => event.type === "agent_end")).toHaveLength(2);
+		expect(integrationRequests).toBe(2);
+
+		failIntegration = false;
+		await session.prompt("third time");
+		await session.waitForIdle();
+		expect(events.filter(event => event.type === "agent_end")).toHaveLength(3);
+		expect(integrationRequests).toBe(3);
+
+		neverSettle = true;
+		await session.prompt("hung integration");
+		await session.waitForIdle();
+		expect(integrationAborted).toBe(true);
+		expect(events.filter(event => event.type === "agent_end")).toHaveLength(4);
+
+		neverSettle = false;
+		await session.prompt("available after integration timeout");
+		await session.waitForIdle();
+		expect(events.filter(event => event.type === "agent_end")).toHaveLength(5);
+	});
+	it("drains deferred agent_end extension delivery before session shutdown", async () => {
+		const extensionStarted = Promise.withResolvers<void>();
+		const releaseExtension = Promise.withResolvers<void>();
+		const extensionEvents: string[] = [];
+		const model: Model = {
+			id: "shutdown-drain-model",
+			name: "shutdown-drain-model",
+			provider: "mock",
+			api: "mock",
+			baseUrl: "mock://",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 200_000,
+			maxTokens: 32_768,
+		};
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["system prompt"], messages: [], tools: [] },
+			streamFn: () => {
+				const stream = new AssistantMessageEventStream();
+				queueMicrotask(() => {
+					stream.push({ type: "start", partial: createAssistantMessage("") });
+					stream.push({ type: "done", reason: "stop", message: createAssistantMessage("done") });
+				});
+				return stream;
+			},
+		});
+		const session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			modelRegistry: { getApiKey: async () => "test-key" } as never,
+			extensionRunner: {
+				emit: async (event: { type: string }) => {
+					extensionEvents.push(event.type);
+					if (event.type !== "agent_end") return;
+					extensionStarted.resolve();
+					await releaseExtension.promise;
+				},
+				hasHandlers: (eventType: string) => eventType === "agent_end" || eventType === "session_shutdown",
+				emitBeforeAgentStart: async () => ({}),
+			} as never,
+		});
+		sessions.push(session);
+
+		const prompt = session.prompt("hello");
+		await extensionStarted.promise;
+		await prompt;
+		let idleResolved = false;
+		const idle = session.waitForIdle().then(() => {
+			idleResolved = true;
+		});
+		await Bun.sleep(0);
+		expect(idleResolved).toBe(true);
+		const disposed = session.dispose();
+		await Bun.sleep(0);
+		expect(extensionEvents.at(-1)).toBe("agent_end");
+
+		releaseExtension.resolve();
+		await disposed;
+		await idle;
+		expect(extensionEvents.at(-1)).toBe("session_shutdown");
 	});
 });

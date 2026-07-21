@@ -1,4 +1,5 @@
 import * as path from "node:path";
+import { activeSnapshotPath, assertNonEmptySkcSessionId, modeStatePath } from "../skc-runtime/session-layout";
 import { CANONICAL_SKC_WORKFLOW_SKILLS, type CanonicalSkcWorkflowSkill, SKILL_ACTIVE_STATE_FILE } from "./active-state";
 import { WORKFLOW_STATE_RECEIPT_FRESH_MS, WORKFLOW_STATE_RECEIPT_VERSION } from "./workflow-state-version";
 
@@ -51,46 +52,8 @@ export interface AuditEntry {
 	paths: string[];
 }
 
-function safeString(value: unknown): string {
-	return typeof value === "string" ? value : "";
-}
-
-function encodePathSegment(value: string): string {
-	return encodeURIComponent(value).replaceAll(".", "%2E");
-}
-
 export function workflowModeStateFileName(skill: CanonicalSkcWorkflowSkill): string {
 	return `${skill}-state.json`;
-}
-
-export function workflowStateStoragePath(cwd: string, skill: CanonicalSkcWorkflowSkill, sessionId?: string): string {
-	const normalizedSessionId = safeString(sessionId).trim();
-	if (normalizedSessionId) {
-		return path.join(
-			cwd,
-			".skc",
-			"state",
-			"sessions",
-			encodePathSegment(normalizedSessionId),
-			workflowModeStateFileName(skill),
-		);
-	}
-	return path.join(cwd, ".skc", "state", workflowModeStateFileName(skill));
-}
-
-export function workflowActiveStatePath(cwd: string, sessionId?: string): string {
-	const normalizedSessionId = safeString(sessionId).trim();
-	if (normalizedSessionId) {
-		return path.join(
-			cwd,
-			".skc",
-			"state",
-			"sessions",
-			encodePathSegment(normalizedSessionId),
-			SKILL_ACTIVE_STATE_FILE,
-		);
-	}
-	return path.join(cwd, ".skc", "state", SKILL_ACTIVE_STATE_FILE);
 }
 
 export function buildWorkflowStateReceipt(input: {
@@ -98,10 +61,12 @@ export function buildWorkflowStateReceipt(input: {
 	skill: CanonicalSkcWorkflowSkill;
 	owner: WorkflowStateMutationOwner;
 	command: string;
-	sessionId?: string;
+	sessionId: string;
 	nowIso?: string;
 	mutationId?: string;
 }): WorkflowStateReceipt {
+	assertNonEmptySkcSessionId(input.sessionId, "buildWorkflowStateReceipt");
+	const cwd = path.resolve(input.cwd);
 	const mutatedAt = input.nowIso ?? new Date().toISOString();
 	const freshUntil = new Date(Date.parse(mutatedAt) + WORKFLOW_STATE_RECEIPT_FRESH_MS).toISOString();
 	return {
@@ -109,8 +74,8 @@ export function buildWorkflowStateReceipt(input: {
 		skill: input.skill,
 		owner: input.owner,
 		command: input.command,
-		state_path: workflowActiveStatePath(input.cwd, input.sessionId),
-		storage_path: workflowStateStoragePath(input.cwd, input.skill, input.sessionId),
+		state_path: activeSnapshotPath(cwd, input.sessionId),
+		storage_path: modeStatePath(cwd, input.sessionId, input.skill),
 		mutated_at: mutatedAt,
 		fresh_until: freshUntil,
 		status: "fresh",

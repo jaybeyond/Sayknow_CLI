@@ -9,6 +9,7 @@ import { Args, type CliConfig, Command, type CommandEntry, Flags, run } from "@s
 import { APP_NAME, formatBunRuntimeError, MIN_BUN_VERSION, VERSION } from "@sayknow-cli/utils/dirs";
 import { runFixtureReport } from "./cli/fixture-report";
 import { isTmuxOwnerIsolationCliArgv, runTmuxOwnerIsolationCliFromStdin } from "./skc-runtime/tmux-owner-isolation-cli";
+import { smokeTestTabWorker } from "./tools/browser/tab-worker-smoke";
 
 if (Bun.semver.order(Bun.version, MIN_BUN_VERSION) < 0) {
 	process.stderr.write(
@@ -40,6 +41,7 @@ export const commands: CommandEntry[] = [
 	{ name: "config", load: () => import("./commands/config").then(m => m.default) },
 	{ name: "stats", load: () => import("./commands/stats").then(m => m.default) },
 	{ name: "notify", load: () => import("./commands/notify").then(m => m.default) },
+	{ name: "sdk", load: () => import("./commands/sdk").then(m => m.default) },
 	{ name: "daemon", load: () => import("./commands/daemon").then(m => m.default) },
 	{ name: "web-search", aliases: ["q"], load: () => import("./commands/web-search").then(m => m.default) },
 	{ name: "local-provider", load: () => import("./commands/local-provider").then(m => m.default) },
@@ -123,6 +125,19 @@ async function runNotifyDaemonInternalFastPath(argv: string[]): Promise<void> {
 	await runNotifyCommand(cmd);
 }
 
+function isChatDaemonInternalFastPath(argv: string[]): boolean {
+	return argv[0] === "daemon" && (argv[1] === "discord-internal" || argv[1] === "slack-internal");
+}
+
+async function runChatDaemonInternalFastPath(argv: string[]): Promise<void> {
+	const action = argv[1];
+	if (action !== "discord-internal" && action !== "slack-internal") {
+		throw new Error("invalid chat daemon internal fast path");
+	}
+	const { runChatDaemonInternal } = await import("./sdk/bus/chat-daemon-cli");
+	await runChatDaemonInternal(action === "discord-internal" ? "discord" : "slack", argv.slice(2));
+}
+
 function rootFixtureArg(argv: string[]): { present: boolean; id: string | undefined } {
 	for (let i = 0; i < argv.length; i++) {
 		const arg = argv[i];
@@ -175,10 +190,11 @@ export class RootHelpCommand extends Command {
 		}),
 		"system-prompt": Flags.string({ description: "System prompt (default: coding assistant prompt)" }),
 		"append-system-prompt": Flags.string({ description: "Append text or file contents to the system prompt" }),
+		"mcp-config": Flags.string({ description: "Tools-only MCP config file (absolute path)" }),
 		"allow-home": Flags.boolean({ description: "Allow starting in ~ without auto-switching to a temp dir" }),
 		mode: Flags.string({
-			description: "Output mode: text (default), json, rpc, acp, rpc-ui, or bridge",
-			options: ["text", "json", "rpc", "acp", "rpc-ui", "bridge"],
+			description: "Output mode: text (default), json, or acp",
+			options: ["text", "json", "acp"],
 		}),
 		print: Flags.boolean({ char: "p", description: "Non-interactive mode: process prompt and exit" }),
 		continue: Flags.boolean({ char: "c", description: "Continue previous session" }),
@@ -237,16 +253,15 @@ function isSubcommand(first: string | undefined): boolean {
 }
 
 /**
- * Smoke-test entry. Spawns the stats sync worker, pings it, exits.
+ * Smoke-test entry. Spawns the stats sync worker and the browser tab worker, then verifies their protocol.
  *
- * Purpose: catch the silent worker-load regressions that hit compiled
- * binaries (issues #1011 and #1027). Neither `--version` nor
- * `stats --summary` actually spawns a Worker on a fresh install — the
- * sync path early-returns when no session files exist. This probe is the
- * minimal end-to-end test that proves `new Worker(...)` resolves and the
- * bundled worker module evaluates successfully. Wired into
- * `scripts/install-tests/run-ci.sh` so binary / source-link / tarball
- * installs all exercise it on every CI run.
+ * Purpose: catch silent compiled-worker load regressions (issues #1011,
+ * #1027, and #2598). Neither `--version` nor `stats --summary` spawns both
+ * worker entries on a fresh install. This probe proves each bundled worker
+ * module resolves and evaluates; the tab-worker probe also completes its
+ * bootstrap/closed protocol without launching a browser. Wired into
+ * `scripts/install-tests/run-ci.sh` so binary / source-link / tarball installs
+ * exercise it on every CI run.
  */
 async function runSmokeTest(): Promise<void> {
 	const { smokeTestSyncWorker } = await import("@sayknow-cli/stats");
@@ -263,6 +278,7 @@ async function runSmokeTest(): Promise<void> {
 	if (typeof h02ScoreSequenceFuzzy !== "function" || typeof h01FindBestFuzzyMatch !== "function") {
 		throw new Error("smoke-test: native fuzzy exports missing from embedded addon");
 	}
+	await smokeTestTabWorker();
 	process.stdout.write("smoke-test: ok\n");
 }
 
@@ -311,6 +327,10 @@ export async function runCli(argv: string[]): Promise<void> {
 	}
 	if (isNotifyDaemonInternalFastPath(argv)) {
 		await runNotifyDaemonInternalFastPath(argv);
+		return;
+	}
+	if (isChatDaemonInternalFastPath(argv)) {
+		await runChatDaemonInternalFastPath(argv);
 		return;
 	}
 	if (argv[0] === "--smoke-test") {

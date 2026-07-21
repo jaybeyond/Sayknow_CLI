@@ -1,27 +1,58 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { getBundledModel } from "@sayknow-cli/ai";
-import { resetSettingsForTest, Settings } from "../src/config/settings";
+import { logger } from "@sayknow-cli/utils";
+import { YAML } from "bun";
+import { withFileLock } from "../src/config/file-lock";
+import {
+	NotificationSettingsOverrideError,
+	resetSettingsForTest,
+	type SettingPath,
+	Settings,
+} from "../src/config/settings";
+import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "../src/extensibility/extensions";
+import { createAgentSession } from "../src/sdk";
+import { brokerOwnerForTest } from "../src/sdk/broker/ensure";
 import {
 	buildRedactedAction,
 	completionNotifyDisabledByEnv,
 	getNotificationConfig,
+	isDiscordConfigured,
 	isGloballyConfigured,
+	isNotificationHostEligible,
+	isNotificationStreamingEnabled,
 	isSessionNotificationsEnabled,
+	isSlackConfigured,
 	isTelegramConfigured,
 	maskToken,
 	type NotificationConfig,
 	type RedactableAction,
 	sessionTag,
 	shouldRegisterNotificationsExtension,
+	telegramActivationIdentity,
 	tokenFingerprint,
-} from "../src/notifications/config";
-import { createNotificationsExtension } from "../src/notifications/index";
-import { daemonPaths } from "../src/notifications/telegram-daemon";
-import { createAgentSession } from "../src/sdk";
+} from "../src/sdk/bus/config";
+import { createNotificationsExtension } from "../src/sdk/bus/index";
+import { daemonPaths, ensureTelegramDaemonRunning, renewDaemonHeartbeat } from "../src/sdk/bus/telegram-daemon";
+import {
+	createLightweightDaemonSettings,
+	loadLightweightDaemonSettings,
+	runDaemonInternal,
+} from "../src/sdk/bus/telegram-daemon-cli";
+import {
+	attachLifecycleStartupCapability,
+	SdkStartupCapability,
+	SdkStartupRollbackTracker,
+} from "../src/sdk/startup-capability";
 import { SessionManager } from "../src/session/session-manager";
+import { cleanupFixtureRoot } from "./helpers/fixture-broker-cleanup";
+import {
+	createNotificationFixtureRoot,
+	isolatedNotificationSettings,
+	registerNotificationRuntime,
+} from "./helpers/notification-settings";
 
 const BASE_CFG: NotificationConfig = {
 	enabled: false,
@@ -29,11 +60,16 @@ const BASE_CFG: NotificationConfig = {
 	chatId: undefined,
 	discord: {
 		botToken: undefined,
-		channelId: undefined,
+		applicationId: undefined,
+		guildId: undefined,
+		parentChannelId: undefined,
 	},
 	slack: {
 		botToken: undefined,
+		appToken: undefined,
+		workspaceId: undefined,
 		channelId: undefined,
+		authorizedUserId: undefined,
 	},
 	redact: false,
 	verbosity: "lean",
@@ -44,10 +80,19 @@ const BASE_CFG: NotificationConfig = {
 	richDraft: {
 		enabled: false,
 	},
+	toolActivity: {
+		enabled: true,
+	},
+	streaming: {
+		enabled: true,
+	},
 	topics: {
 		nameTemplate: undefined,
 	},
 	idleTimeoutMs: 60000,
+	btw: {
+		enabled: true,
+	},
 };
 
 const GLOBAL_CFG: NotificationConfig = {
@@ -61,10 +106,66 @@ const PRIMARY_GLOBAL_CFG: NotificationConfig = {
 	sessionScope: "primary",
 };
 const tempDirs: string[] = [];
+const MALFORMED_NOTIFICATION_LEAVES: ReadonlyArray<readonly [SettingPath, unknown]> = [
+	["notifications.enabled", "invalid"],
+	["notifications.telegram.botToken", 42],
+	["notifications.telegram.chatId", 42],
+	["notifications.telegram.activation", []],
+	["notifications.telegram.btw.enabled", "invalid"],
+	["notifications.telegram.rich.enabled", "invalid"],
+	["notifications.telegram.richDraft.enabled", "invalid"],
+	["notifications.telegram.toolActivity.enabled", "invalid"],
+	["notifications.telegram.streaming.enabled", "invalid"],
+	["notifications.telegram.topics.nameTemplate", 42],
+	["notifications.discord.botToken", 42],
+	["notifications.discord.applicationId", 42],
+	["notifications.discord.guildId", 42],
+	["notifications.discord.parentChannelId", 42],
+	["notifications.slack.botToken", 42],
+	["notifications.slack.appToken", 42],
+	["notifications.slack.workspaceId", 42],
+	["notifications.slack.channelId", 42],
+	["notifications.slack.authorizedUserId", 42],
+	["notifications.redact", "invalid"],
+	["notifications.verbosity", "invalid"],
+	["notifications.sessionScope", "invalid"],
+	["notifications.daemon.idleTimeoutMs", 0],
+];
 
-afterEach(() => {
-	for (const dir of tempDirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
-});
+function notificationRawConfigAtPath(pathName: SettingPath, value: unknown): Record<string, unknown> {
+	const rawConfig: Record<string, unknown> = {};
+	const segments = pathName.split(".");
+	let cursor = rawConfig;
+	for (const segment of segments.slice(0, -1)) {
+		const child: Record<string, unknown> = {};
+		cursor[segment] = child;
+		cursor = child;
+	}
+	cursor[segments.at(-1)!] = value;
+	return rawConfig;
+}
+
+afterEach(async () => {
+	for (const dir of tempDirs) await brokerOwnerForTest(dir)?.stop();
+	if (process.platform === "win32") {
+		Bun.gc(true);
+		await Bun.sleep(50);
+	}
+	for (const dir of tempDirs.splice(0)) {
+		for (let attempt = 0; ; attempt++) {
+			try {
+				fs.rmSync(dir, { recursive: true, force: true });
+				break;
+			} catch (error) {
+				const code =
+					error && typeof error === "object" && "code" in error ? (error as { code?: unknown }).code : undefined;
+				if (process.platform !== "win32" || (code !== "EBUSY" && code !== "EPERM") || attempt >= 100) throw error;
+				Bun.gc(true);
+				await Bun.sleep(100);
+			}
+		}
+	}
+}, 15_000);
 
 describe("notifications config", () => {
 	test("getNotificationConfig reads defaults", () => {
@@ -76,10 +177,17 @@ describe("notifications config", () => {
 			"notifications.enabled": true,
 			"notifications.telegram.botToken": "token-1",
 			"notifications.telegram.chatId": "chat-1",
+			"notifications.telegram.btw.enabled": true,
+			"notifications.telegram.streaming.enabled": false,
 			"notifications.discord.botToken": "discord-token",
-			"notifications.discord.channelId": "discord-channel",
+			"notifications.discord.applicationId": "discord-app",
+			"notifications.discord.guildId": "discord-guild",
+			"notifications.discord.parentChannelId": "discord-parent",
 			"notifications.slack.botToken": "slack-token",
+			"notifications.slack.appToken": "slack-app-token",
+			"notifications.slack.workspaceId": "slack-workspace",
 			"notifications.slack.channelId": "slack-channel",
+			"notifications.slack.authorizedUserId": "slack-user",
 			"notifications.redact": true,
 			"notifications.daemon.idleTimeoutMs": 1234,
 		});
@@ -90,19 +198,33 @@ describe("notifications config", () => {
 			chatId: "chat-1",
 			discord: {
 				botToken: "discord-token",
-				channelId: "discord-channel",
+				applicationId: "discord-app",
+				guildId: "discord-guild",
+				parentChannelId: "discord-parent",
 			},
 			slack: {
 				botToken: "slack-token",
+				appToken: "slack-app-token",
+				workspaceId: "slack-workspace",
 				channelId: "slack-channel",
+				authorizedUserId: "slack-user",
 			},
 			redact: true,
 			verbosity: "lean",
 			sessionScope: "all",
+			btw: {
+				enabled: true,
+			},
 			rich: {
 				enabled: true,
 			},
 			richDraft: {
+				enabled: false,
+			},
+			toolActivity: {
+				enabled: true,
+			},
+			streaming: {
 				enabled: false,
 			},
 			topics: {
@@ -112,7 +234,790 @@ describe("notifications config", () => {
 		});
 	});
 
-	test("isGloballyConfigured is true when enabled with any complete adapter", () => {
+	test("getNotificationConfig validates and projects durable Telegram activation markers", () => {
+		const identity = telegramActivationIdentity("token-1", "chat-1");
+		const settings = Settings.isolated({
+			"notifications.telegram.botToken": "token-1",
+			"notifications.telegram.chatId": "chat-1",
+			"notifications.telegram.activation": {
+				[identity]: {
+					identity,
+					state: "inactive",
+					reason: "saved_inactive",
+					updatedAt: "2026-01-01T00:00:00.000Z",
+				},
+				malformed: { identity: "different", state: "inactive" },
+			},
+		});
+
+		expect(getNotificationConfig(settings).activation).toEqual({
+			[identity]: {
+				identity,
+				state: "inactive",
+				reason: "saved_inactive",
+				updatedAt: "2026-01-01T00:00:00.000Z",
+			},
+		});
+	});
+
+	test("full Settings and the lightweight daemon resolve the same global notification snapshot", () => {
+		const activationIdentity = telegramActivationIdentity("telegram-token", "telegram-chat");
+		const globalSettings = {
+			"notifications.enabled": true,
+			"notifications.telegram.botToken": "telegram-token",
+			"notifications.telegram.chatId": "telegram-chat",
+			"notifications.telegram.activation": {
+				[activationIdentity]: {
+					identity: activationIdentity,
+					state: "inactive" as const,
+					reason: "saved_inactive" as const,
+					updatedAt: "2026-01-01T00:00:00.000Z",
+				},
+				malformed: { identity: "different", state: "inactive" },
+			},
+			"notifications.telegram.btw.enabled": true,
+			"notifications.telegram.rich.enabled": false,
+			"notifications.telegram.richDraft.enabled": true,
+			"notifications.telegram.toolActivity.enabled": false,
+			"notifications.telegram.streaming.enabled": false,
+			"notifications.telegram.topics.nameTemplate": "{repo}/{branch}",
+			"notifications.discord.botToken": "discord-token",
+			"notifications.discord.applicationId": "discord-application",
+			"notifications.discord.guildId": "discord-guild",
+			"notifications.discord.parentChannelId": "discord-parent",
+			"notifications.slack.botToken": "slack-token",
+			"notifications.slack.appToken": "slack-app-token",
+			"notifications.slack.workspaceId": "slack-workspace",
+			"notifications.slack.channelId": "slack-channel",
+			"notifications.slack.authorizedUserId": "slack-user",
+			"notifications.redact": true,
+			"notifications.verbosity": "verbose" as const,
+			"notifications.sessionScope": "primary" as const,
+			"notifications.daemon.idleTimeoutMs": 1234,
+		};
+		const settings = Settings.isolated(globalSettings);
+		const lightweight = createLightweightDaemonSettings({
+			agentDir: "/tmp/skc-notification-snapshot",
+			rawConfig: {
+				notifications: {
+					enabled: true,
+					telegram: {
+						botToken: "telegram-token",
+						chatId: "telegram-chat",
+						activation: {
+							[activationIdentity]: {
+								identity: activationIdentity,
+								state: "inactive",
+								reason: "saved_inactive",
+								updatedAt: "2026-01-01T00:00:00.000Z",
+							},
+							malformed: { identity: "different", state: "inactive" },
+						},
+						btw: { enabled: true },
+						rich: { enabled: false },
+						richDraft: { enabled: true },
+						toolActivity: { enabled: false },
+						streaming: { enabled: false },
+						topics: { nameTemplate: "{repo}/{branch}" },
+					},
+					discord: {
+						botToken: "discord-token",
+						applicationId: "discord-application",
+						guildId: "discord-guild",
+						parentChannelId: "discord-parent",
+					},
+					slack: {
+						botToken: "slack-token",
+						appToken: "slack-app-token",
+						workspaceId: "slack-workspace",
+						channelId: "slack-channel",
+						authorizedUserId: "slack-user",
+					},
+					redact: true,
+					verbosity: "verbose",
+					sessionScope: "primary",
+					daemon: { idleTimeoutMs: 1234 },
+				},
+			},
+		});
+
+		expect(settings.getNotificationSettingsSnapshot()).toEqual(lightweight.getNotificationSettingsSnapshot());
+		expect(getNotificationConfig(settings)).toEqual(getNotificationConfig(lightweight));
+		const emptySettings = Settings.isolated({
+			"notifications.telegram.botToken": "",
+			"notifications.telegram.chatId": "",
+			"notifications.telegram.topics.nameTemplate": "",
+		});
+		const emptyLightweight = createLightweightDaemonSettings({
+			agentDir: "/tmp/skc-notification-empty-parity",
+			rawConfig: {
+				notifications: {
+					telegram: {
+						botToken: "",
+						chatId: "",
+						topics: { nameTemplate: "" },
+					},
+				},
+			},
+		});
+		expect(emptySettings.getNotificationSettingsSnapshot()).toEqual(
+			emptyLightweight.getNotificationSettingsSnapshot(),
+		);
+	});
+	test("streaming defaults and malformed values have full and lightweight parity", () => {
+		const settings = Settings.isolated();
+		const lightweight = createLightweightDaemonSettings({
+			agentDir: "/tmp/skc-notification-streaming-default",
+			rawConfig: {},
+		});
+		expect(settings.getNotificationSettingsSnapshot().telegram.streaming.enabled).toBe(true);
+		expect(lightweight.getNotificationSettingsSnapshot().telegram.streaming.enabled).toBe(true);
+
+		for (const rawConfig of [
+			{ notifications: { telegram: { streaming: true } } },
+			{ notifications: { telegram: { streaming: { enabled: "invalid" } } } },
+		]) {
+			expect(() =>
+				createLightweightDaemonSettings({ agentDir: "/tmp/skc-notification-streaming-invalid", rawConfig }),
+			).toThrow("skc_notify_daemon_invalid_configuration");
+		}
+	});
+
+	test("streaming env overrides and durable Telegram activation have explicit precedence", () => {
+		const activeTelegram = GLOBAL_CFG;
+		const inactiveTelegram: NotificationConfig = {
+			...GLOBAL_CFG,
+			streaming: { enabled: false },
+		};
+		const genericOnly: NotificationConfig = { ...BASE_CFG, enabled: true };
+		const inactiveTelegramIdentity = telegramActivationIdentity(GLOBAL_CFG.botToken!, GLOBAL_CFG.chatId!);
+		const blockedTelegram: NotificationConfig = {
+			...GLOBAL_CFG,
+			activation: {
+				[inactiveTelegramIdentity]: {
+					identity: inactiveTelegramIdentity,
+					state: "inactive",
+					reason: "saved_inactive",
+					updatedAt: "2026-01-01T00:00:00.000Z",
+				},
+			},
+		};
+
+		expect(isNotificationStreamingEnabled({ cfg: activeTelegram, env: {} })).toBe(true);
+		expect(isNotificationStreamingEnabled({ cfg: inactiveTelegram, env: {} })).toBe(false);
+		expect(isNotificationStreamingEnabled({ cfg: blockedTelegram, env: {} })).toBe(false);
+		expect(isNotificationStreamingEnabled({ cfg: genericOnly, env: {} })).toBe(false);
+		expect(isNotificationStreamingEnabled({ cfg: genericOnly, env: { SKC_NOTIFICATIONS_STREAM: "1" } })).toBe(true);
+		for (const value of ["0", "off", "false"]) {
+			expect(isNotificationStreamingEnabled({ cfg: activeTelegram, env: { SKC_NOTIFICATIONS_STREAM: value } })).toBe(
+				false,
+			);
+		}
+		expect(
+			isNotificationStreamingEnabled({ cfg: activeTelegram, env: { SKC_NOTIFICATIONS_STREAM: "unknown" } }),
+		).toBe(true);
+	});
+	test("full Settings and lightweight daemon reject the same malformed notification leaves", () => {
+		for (const [pathName, value] of MALFORMED_NOTIFICATION_LEAVES) {
+			const rawConfig = notificationRawConfigAtPath(pathName, value);
+
+			expect(() => Settings.isolated({ [pathName]: value }).getNotificationSettingsSnapshot()).toThrow(
+				"skc_notify_daemon_invalid_configuration",
+			);
+			expect(() =>
+				createLightweightDaemonSettings({
+					agentDir: "/tmp/skc-notification-malformed-parity",
+					rawConfig,
+				}).getNotificationSettingsSnapshot(),
+			).toThrow("skc_notify_daemon_invalid_configuration");
+		}
+	});
+	test("full Settings loaded from config.yml fails closed for malformed notification settings", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "skc-btw-settings-"));
+		tempDirs.push(root);
+
+		const rawConfigs: unknown[] = [
+			true,
+			null,
+			{ notifications: true },
+			{ notifications: { telegram: [] } },
+			{ notifications: { telegram: { btw: true } } },
+			{ notifications: { telegram: { activation: true } } },
+			{ notifications: { telegram: { rich: true } } },
+			{ notifications: { telegram: { richDraft: true } } },
+			{ notifications: { telegram: { toolActivity: true } } },
+			{ notifications: { telegram: { streaming: true } } },
+			{ notifications: { telegram: { topics: true } } },
+			{ notifications: { discord: [] } },
+			{ notifications: { slack: [] } },
+			{ notifications: { daemon: true } },
+			...MALFORMED_NOTIFICATION_LEAVES.map(([pathName, value]) => notificationRawConfigAtPath(pathName, value)),
+		];
+		for (const [index, rawConfig] of rawConfigs.entries()) {
+			const agentDir = path.join(root, `agent-${index}`);
+			fs.mkdirSync(agentDir, { recursive: true });
+			fs.writeFileSync(path.join(agentDir, "config.yml"), `${JSON.stringify(rawConfig)}\n`);
+
+			const settings = await Settings.loadForScope({ cwd: root, agentDir });
+			try {
+				expect(() => settings.getNotificationSettingsSnapshot()).toThrow("skc_notify_daemon_invalid_configuration");
+				expect(() =>
+					createLightweightDaemonSettings({ agentDir, rawConfig }).getNotificationSettingsSnapshot(),
+				).toThrow("skc_notify_daemon_invalid_configuration");
+				if (index === 0) {
+					let daemonConstructed = false;
+					class UnexpectedDaemon {
+						constructor() {
+							daemonConstructed = true;
+						}
+						async run(): Promise<void> {}
+						requestStop(): void {}
+					}
+					await expect(
+						runDaemonInternal(["--agent-dir", agentDir, "--owner-id", "owner"], {
+							SettingsImpl: { init: async () => settings },
+							DaemonImpl: UnexpectedDaemon,
+						}),
+					).rejects.toThrow("skc_notify_daemon_invalid_configuration");
+					expect(daemonConstructed).toBe(false);
+				}
+			} finally {
+				await settings.flush();
+				settings.getStorage()?.close();
+			}
+		}
+	}, 30_000);
+	test("Settings revalidates malformed notification config after direct repairs only", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "skc-notification-direct-repair-"));
+		tempDirs.push(root);
+		const agentDir = path.join(root, "agent");
+		fs.mkdirSync(agentDir, { recursive: true });
+		fs.writeFileSync(
+			path.join(agentDir, "config.yml"),
+			`${JSON.stringify({ notifications: { enabled: "invalid", redact: "invalid" } })}\n`,
+		);
+
+		const settings = await Settings.loadForScope({ cwd: root, agentDir });
+		try {
+			expect(() => settings.getNotificationSettingsSnapshot()).toThrow("skc_notify_daemon_invalid_configuration");
+
+			settings.set("theme.dark", "red-octopus");
+			expect(() => settings.getNotificationSettingsSnapshot()).toThrow("skc_notify_daemon_invalid_configuration");
+
+			settings.set("notifications.enabled", true);
+			expect(() => settings.getNotificationSettingsSnapshot()).toThrow("skc_notify_daemon_invalid_configuration");
+
+			settings.unset("notifications.redact");
+			expect(settings.getNotificationSettingsSnapshot()).toMatchObject({ enabled: true, redact: false });
+		} finally {
+			await settings.flush();
+			settings.getStorage()?.close();
+		}
+	});
+	test("Settings preserves coercible malformed notification siblings through direct partial repairs", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "skc-notification-direct-coercible-repair-"));
+		tempDirs.push(root);
+		const agentDir = path.join(root, "agent");
+		fs.mkdirSync(agentDir, { recursive: true });
+		const configPath = path.join(agentDir, "config.yml");
+		fs.writeFileSync(
+			configPath,
+			`${JSON.stringify({ notifications: { enabled: "true", daemon: { idleTimeoutMs: "60000" } } })}\n`,
+		);
+
+		const settings = await Settings.loadForScope({ cwd: root, agentDir });
+		try {
+			settings.set("notifications.enabled", true);
+			expect(() => settings.getNotificationSettingsSnapshot()).toThrow("skc_notify_daemon_invalid_configuration");
+			await settings.flush();
+			expect(YAML.parse(fs.readFileSync(configPath, "utf8"))).toMatchObject({
+				notifications: { enabled: true, daemon: { idleTimeoutMs: "60000" } },
+			});
+		} finally {
+			settings.getStorage()?.close();
+		}
+
+		const partiallyRepaired = await Settings.loadForScope({ cwd: root, agentDir });
+		try {
+			expect(() => partiallyRepaired.getNotificationSettingsSnapshot()).toThrow(
+				"skc_notify_daemon_invalid_configuration",
+			);
+			partiallyRepaired.set("notifications.daemon.idleTimeoutMs", 60_000);
+			expect(partiallyRepaired.getNotificationSettingsSnapshot()).toMatchObject({
+				enabled: true,
+				idleTimeoutMs: 60_000,
+			});
+			await partiallyRepaired.flush();
+		} finally {
+			partiallyRepaired.getStorage()?.close();
+		}
+
+		const repaired = await Settings.loadForScope({ cwd: root, agentDir });
+		try {
+			expect(repaired.getNotificationSettingsSnapshot()).toMatchObject({ enabled: true, idleTimeoutMs: 60_000 });
+		} finally {
+			await repaired.flush();
+			repaired.getStorage()?.close();
+		}
+	});
+	test("Settings preserves coercible malformed notification siblings through atomic partial repairs", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "skc-notification-atomic-coercible-repair-"));
+		tempDirs.push(root);
+		const agentDir = path.join(root, "agent");
+		fs.mkdirSync(agentDir, { recursive: true });
+		const configPath = path.join(agentDir, "config.yml");
+		fs.writeFileSync(
+			configPath,
+			`${JSON.stringify({ notifications: { enabled: "true", daemon: { idleTimeoutMs: "60000" } } })}\n`,
+		);
+
+		const settings = await Settings.loadForScope({ cwd: root, agentDir });
+		try {
+			await settings.commitAtomicBatch([{ path: "notifications.enabled", op: "set", value: true }]);
+			expect(() => settings.getNotificationSettingsSnapshot()).toThrow("skc_notify_daemon_invalid_configuration");
+			await settings.flush();
+			expect(YAML.parse(fs.readFileSync(configPath, "utf8"))).toMatchObject({
+				notifications: { enabled: true, daemon: { idleTimeoutMs: "60000" } },
+			});
+		} finally {
+			settings.getStorage()?.close();
+		}
+
+		const partiallyRepaired = await Settings.loadForScope({ cwd: root, agentDir });
+		try {
+			expect(() => partiallyRepaired.getNotificationSettingsSnapshot()).toThrow(
+				"skc_notify_daemon_invalid_configuration",
+			);
+			await partiallyRepaired.commitAtomicBatch([
+				{ path: "notifications.daemon.idleTimeoutMs", op: "set", value: 60_000 },
+			]);
+			expect(partiallyRepaired.getNotificationSettingsSnapshot()).toMatchObject({
+				enabled: true,
+				idleTimeoutMs: 60_000,
+			});
+			await partiallyRepaired.flush();
+		} finally {
+			partiallyRepaired.getStorage()?.close();
+		}
+
+		const repaired = await Settings.loadForScope({ cwd: root, agentDir });
+		try {
+			expect(repaired.getNotificationSettingsSnapshot()).toMatchObject({ enabled: true, idleTimeoutMs: 60_000 });
+		} finally {
+			await repaired.flush();
+			repaired.getStorage()?.close();
+		}
+	});
+	test("Settings recomputes notification validation after a blocked older save replays a direct repair", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "skc-notification-replay-validation-"));
+		tempDirs.push(root);
+		const agentDir = path.join(root, "agent");
+		const configPath = path.join(agentDir, "config.yml");
+		fs.mkdirSync(agentDir, { recursive: true });
+		fs.writeFileSync(configPath, `${JSON.stringify({ notifications: { enabled: "true" } })}\n`);
+
+		const settings = await Settings.loadForScope({ cwd: root, agentDir });
+		const lockAcquired = Promise.withResolvers<void>();
+		const releaseLock = Promise.withResolvers<void>();
+		const lock = withFileLock(configPath, async () => {
+			lockAcquired.resolve();
+			await releaseLock.promise;
+		});
+		await lockAcquired.promise;
+		try {
+			settings.set("theme.dark", "red-octopus");
+			const firstFlush = settings.flushOrThrow();
+			await Promise.resolve();
+			settings.set("notifications.enabled", true);
+			releaseLock.resolve();
+			await lock;
+			await firstFlush;
+
+			expect(settings.getNotificationSettingsSnapshot()).toMatchObject({ enabled: true });
+			await settings.flushOrThrow();
+			expect(settings.getNotificationSettingsSnapshot()).toMatchObject({ enabled: true });
+		} finally {
+			releaseLock.resolve();
+			await lock;
+			settings.getStorage()?.close();
+		}
+	});
+	test("Settings clears malformed-root gating only after a notification repair", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "skc-notification-root-repair-"));
+		tempDirs.push(root);
+		const agentDir = path.join(root, "agent");
+		fs.mkdirSync(agentDir, { recursive: true });
+		fs.writeFileSync(path.join(agentDir, "config.yml"), "true\n");
+
+		const settings = await Settings.loadForScope({ cwd: root, agentDir });
+		try {
+			expect(() => settings.getNotificationSettingsSnapshot()).toThrow("skc_notify_daemon_invalid_configuration");
+
+			settings.set("theme.dark", "red-octopus");
+			expect(() => settings.getNotificationSettingsSnapshot()).toThrow("skc_notify_daemon_invalid_configuration");
+
+			settings.set("notifications.enabled", true);
+			expect(settings.getNotificationSettingsSnapshot().enabled).toBe(true);
+		} finally {
+			await settings.flush();
+			settings.getStorage()?.close();
+		}
+	});
+
+	test("Settings atomic notification repairs revalidate and restore fail-closed state", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "skc-notification-atomic-repair-"));
+		tempDirs.push(root);
+		const agentDir = path.join(root, "agent");
+		fs.mkdirSync(agentDir, { recursive: true });
+		fs.writeFileSync(
+			path.join(agentDir, "config.yml"),
+			`${JSON.stringify({ notifications: { enabled: "invalid" } })}\n`,
+		);
+
+		const settings = await Settings.loadForScope({ cwd: root, agentDir });
+		try {
+			expect(() => settings.getNotificationSettingsSnapshot()).toThrow("skc_notify_daemon_invalid_configuration");
+
+			const receipt = await settings.commitAtomicBatch([{ path: "notifications.enabled", op: "set", value: true }]);
+			expect(settings.getNotificationSettingsSnapshot().enabled).toBe(true);
+
+			expect(await receipt.restore()).toMatchObject({ status: "restored" });
+			expect(() => settings.getNotificationSettingsSnapshot()).toThrow("skc_notify_daemon_invalid_configuration");
+		} finally {
+			await settings.flush();
+			settings.getStorage()?.close();
+		}
+	});
+	test("ordinary saves fence notification validation restores after an external different-path repair", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "skc-notification-save-fence-"));
+		tempDirs.push(root);
+		const agentDir = path.join(root, "agent");
+		const configPath = path.join(agentDir, "config.yml");
+		fs.mkdirSync(agentDir, { recursive: true });
+		fs.writeFileSync(configPath, `${JSON.stringify({ notifications: { redact: "invalid" } })}\n`);
+
+		const settings = await Settings.loadForScope({ cwd: root, agentDir });
+		try {
+			const receipt = await settings.commitAtomicBatch([
+				{ path: "notifications.enabled", op: "set", value: "invalid" },
+			]);
+			fs.writeFileSync(configPath, `${JSON.stringify({ notifications: { enabled: "invalid", redact: true } })}\n`);
+
+			settings.set("theme.dark", "red-octopus");
+			await settings.flushOrThrow();
+			expect(await receipt.restore()).toMatchObject({ status: "restored" });
+			expect(settings.getNotificationSettingsSnapshot()).toMatchObject({ enabled: false, redact: true });
+		} finally {
+			await settings.flush();
+			settings.getStorage()?.close();
+		}
+	});
+	test("in-memory atomic repairs restore their prior notification validation state", async () => {
+		const settings = Settings.isolated({ "notifications.enabled": "invalid" });
+		expect(() => settings.getNotificationSettingsSnapshot()).toThrow("skc_notify_daemon_invalid_configuration");
+
+		const receipt = await settings.commitAtomicBatch([{ path: "notifications.enabled", op: "set", value: true }]);
+		expect(settings.getNotificationSettingsSnapshot().enabled).toBe(true);
+
+		expect(await receipt.restore()).toMatchObject({ status: "restored" });
+		expect(() => settings.getNotificationSettingsSnapshot()).toThrow("skc_notify_daemon_invalid_configuration");
+	});
+	test("newer notification mutations reparse instead of restoring a stale receipt state", async () => {
+		const settings = Settings.isolated();
+		const receipt = await settings.commitAtomicBatch([
+			{ path: "notifications.enabled", op: "set", value: "invalid" },
+		]);
+		expect(() => settings.getNotificationSettingsSnapshot()).toThrow("skc_notify_daemon_invalid_configuration");
+
+		settings.set("notifications.redact", true);
+		expect(await receipt.restore()).toMatchObject({ status: "restored" });
+		expect(settings.getNotificationSettingsSnapshot()).toMatchObject({ enabled: false, redact: true });
+
+		const conflictingReceipt = await settings.commitAtomicBatch([
+			{ path: "notifications.enabled", op: "set", value: "invalid" },
+		]);
+		settings.set("notifications.enabled", true);
+		expect(await conflictingReceipt.restore()).toMatchObject({ status: "conflict" });
+		expect(settings.getNotificationSettingsSnapshot()).toMatchObject({ enabled: true, redact: true });
+	});
+
+	test("with-current atomic repairs preserve partial notification validation", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "skc-notification-current-repair-"));
+		tempDirs.push(root);
+		const agentDir = path.join(root, "agent");
+		fs.mkdirSync(agentDir, { recursive: true });
+		fs.writeFileSync(
+			path.join(agentDir, "config.yml"),
+			`${JSON.stringify({ notifications: { enabled: "invalid", redact: "invalid" } })}\n`,
+		);
+
+		const settings = await Settings.loadForScope({ cwd: root, agentDir });
+		try {
+			const receipt = await settings.commitAtomicBatchWithCurrent(() => [
+				{ path: "notifications.enabled", op: "set", value: true },
+			]);
+			expect(() => settings.getNotificationSettingsSnapshot()).toThrow("skc_notify_daemon_invalid_configuration");
+
+			settings.unset("notifications.redact");
+			expect(settings.getNotificationSettingsSnapshot()).toMatchObject({ enabled: true, redact: false });
+
+			expect(await receipt.restore()).toMatchObject({ status: "restored" });
+			expect(() => settings.getNotificationSettingsSnapshot()).toThrow("skc_notify_daemon_invalid_configuration");
+		} finally {
+			await settings.flush();
+			settings.getStorage()?.close();
+		}
+	});
+	test("with-current repair does not restore stale validation after a concurrent different notification repair", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "skc-notification-current-concurrent-repair-"));
+		tempDirs.push(root);
+		const agentDir = path.join(root, "agent");
+		fs.mkdirSync(agentDir, { recursive: true });
+		fs.writeFileSync(
+			path.join(agentDir, "config.yml"),
+			`${JSON.stringify({ notifications: { enabled: "invalid" } })}\n`,
+		);
+
+		const settings = await Settings.loadForScope({ cwd: root, agentDir });
+		const builderEntered = Promise.withResolvers<void>();
+		const continueBuilder = Promise.withResolvers<void>();
+		try {
+			const pendingReceipt = settings.commitAtomicBatchWithCurrent(async () => {
+				builderEntered.resolve();
+				await continueBuilder.promise;
+				return [{ path: "notifications.redact", op: "set", value: true }];
+			});
+			await builderEntered.promise;
+			settings.set("notifications.enabled", true);
+			continueBuilder.resolve();
+
+			const receipt = await pendingReceipt;
+			expect(settings.getNotificationSettingsSnapshot()).toMatchObject({ enabled: true, redact: true });
+			expect(await receipt.restore()).toMatchObject({ status: "restored" });
+			expect(settings.getNotificationSettingsSnapshot()).toMatchObject({ enabled: true, redact: false });
+		} finally {
+			await settings.flush();
+			settings.getStorage()?.close();
+		}
+	});
+	test("with-current same-value notification mutations still fence validation rollback", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "skc-notification-current-same-value-"));
+		tempDirs.push(root);
+		const agentDir = path.join(root, "agent");
+		fs.mkdirSync(agentDir, { recursive: true });
+		fs.writeFileSync(
+			path.join(agentDir, "config.yml"),
+			`${JSON.stringify({ notifications: { enabled: true, redact: "invalid" } })}\n`,
+		);
+
+		const settings = await Settings.loadForScope({ cwd: root, agentDir });
+		const builderEntered = Promise.withResolvers<void>();
+		const continueBuilder = Promise.withResolvers<void>();
+		try {
+			const pendingReceipt = settings.commitAtomicBatchWithCurrent(async () => {
+				builderEntered.resolve();
+				await continueBuilder.promise;
+				return [{ path: "notifications.enabled", op: "set", value: true }];
+			});
+			await builderEntered.promise;
+			settings.set("notifications.enabled", true);
+			continueBuilder.resolve();
+
+			const receipt = await pendingReceipt;
+			expect(() => settings.getNotificationSettingsSnapshot()).toThrow("skc_notify_daemon_invalid_configuration");
+			expect(await receipt.restore()).toMatchObject({ status: "restored" });
+			expect(() => settings.getNotificationSettingsSnapshot()).toThrow("skc_notify_daemon_invalid_configuration");
+		} finally {
+			await settings.flush();
+			settings.getStorage()?.close();
+		}
+	});
+	test("with-current atomic notification repair rejects malformed roots without normalizing durable YAML", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "skc-notification-current-malformed-root-"));
+		tempDirs.push(root);
+		const agentDir = path.join(root, "agent");
+		const configPath = path.join(agentDir, "config.yml");
+		fs.mkdirSync(agentDir, { recursive: true });
+		fs.writeFileSync(configPath, "true\n");
+
+		const settings = await Settings.loadForScope({ cwd: root, agentDir });
+		try {
+			await expect(
+				settings.commitAtomicBatchWithCurrent(() => [{ path: "notifications.enabled", op: "set", value: true }]),
+			).rejects.toThrow("malformed root");
+			expect(fs.readFileSync(configPath, "utf8")).toBe("true\n");
+		} finally {
+			await settings.flush();
+			settings.getStorage()?.close();
+		}
+
+		const reloaded = await Settings.loadForScope({ cwd: root, agentDir });
+		try {
+			expect(() => reloaded.getNotificationSettingsSnapshot()).toThrow("skc_notify_daemon_invalid_configuration");
+			expect(fs.readFileSync(configPath, "utf8")).toBe("true\n");
+		} finally {
+			await reloaded.flush();
+			reloaded.getStorage()?.close();
+		}
+	}, 15_000);
+	test("atomic notification repairs reject externally malformed roots under the file lock", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "skc-notification-atomic-external-root-"));
+		tempDirs.push(root);
+		const agentDir = path.join(root, "agent");
+		const configPath = path.join(agentDir, "config.yml");
+		fs.mkdirSync(agentDir, { recursive: true });
+		fs.writeFileSync(configPath, `${JSON.stringify({ notifications: { enabled: true } })}\n`);
+
+		const settings = await Settings.loadForScope({ cwd: root, agentDir });
+		try {
+			fs.writeFileSync(configPath, "null\n");
+			await expect(
+				settings.commitAtomicBatch([{ path: "notifications.enabled", op: "set", value: false }]),
+			).rejects.toThrow("malformed root");
+			expect(fs.readFileSync(configPath, "utf8")).toBe("null\n");
+
+			fs.writeFileSync(configPath, "[]\n");
+			await expect(
+				settings.commitAtomicBatchWithCurrent(() => [{ path: "notifications.enabled", op: "set", value: false }]),
+			).rejects.toThrow("malformed root");
+			expect(fs.readFileSync(configPath, "utf8")).toBe("[]\n");
+		} finally {
+			settings.getStorage()?.close();
+		}
+	});
+	test("atomic notification receipt restore rejects externally malformed roots under the file lock", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "skc-notification-restore-external-root-"));
+		tempDirs.push(root);
+		const agentDir = path.join(root, "agent");
+		const configPath = path.join(agentDir, "config.yml");
+		fs.mkdirSync(agentDir, { recursive: true });
+		fs.writeFileSync(configPath, `${JSON.stringify({ notifications: { enabled: true } })}\n`);
+
+		const settings = await Settings.loadForScope({ cwd: root, agentDir });
+		try {
+			const receipt = await settings.commitAtomicBatch([{ path: "notifications.enabled", op: "unset" }]);
+			fs.writeFileSync(configPath, "null\n");
+
+			await expect(receipt.restore()).rejects.toThrow("malformed root");
+			expect(fs.readFileSync(configPath, "utf8")).toBe("null\n");
+		} finally {
+			settings.getStorage()?.close();
+		}
+	});
+	test("full Settings rejects invalid or inaccessible config.yml like lightweight loading", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "skc-btw-settings-load-"));
+		tempDirs.push(root);
+
+		const fixtures =
+			process.platform === "win32"
+				? (["notifications: [\n"] as const)
+				: (["notifications: [\n", "directory"] as const);
+		for (const [index, fixture] of fixtures.entries()) {
+			const agentDir = path.join(root, `agent-${index}`);
+			const configPath = path.join(agentDir, "config.yml");
+			fs.mkdirSync(agentDir, { recursive: true });
+			if (fixture === "directory") {
+				fs.mkdirSync(configPath);
+			} else {
+				fs.writeFileSync(configPath, fixture);
+			}
+
+			await expect(Settings.loadForScope({ cwd: root, agentDir })).rejects.toThrow();
+			await expect(loadLightweightDaemonSettings(agentDir)).rejects.toThrow();
+		}
+
+		const agentDir = path.join(root, "missing-config");
+		fs.mkdirSync(agentDir, { recursive: true });
+		const settings = await Settings.loadForScope({ cwd: root, agentDir });
+		try {
+			expect(settings.getNotificationSettingsSnapshot().telegram.btw.enabled).toBe(true);
+			expect(
+				(await loadLightweightDaemonSettings(agentDir)).getNotificationSettingsSnapshot().telegram.btw.enabled,
+			).toBe(true);
+		} finally {
+			settings.getStorage()?.close();
+		}
+	});
+
+	test("project notification settings are ignored without leaking credentials", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "skc-sdk-project-boundary-"));
+		tempDirs.push(root);
+		const agentDir = path.join(root, "agent");
+		const projectDir = path.join(root, "project");
+		const projectSettingsPath = path.join(projectDir, ".skc", "settings.json");
+		const projectToken = "project-secret-token";
+		fs.mkdirSync(path.dirname(projectSettingsPath), { recursive: true });
+		fs.mkdirSync(agentDir, { recursive: true });
+		fs.writeFileSync(
+			path.join(agentDir, "config.yml"),
+			`notifications:\n  enabled: true\n  telegram:\n    botToken: global-token\n    chatId: global-chat\n`,
+		);
+		fs.writeFileSync(
+			projectSettingsPath,
+			JSON.stringify({
+				notifications: {
+					enabled: false,
+					telegram: { botToken: projectToken, chatId: "project-chat", btw: { enabled: true } },
+					terminalBell: true,
+					bellOnComplete: false,
+				},
+			}),
+		);
+		const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {});
+
+		try {
+			resetSettingsForTest();
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			expect(getNotificationConfig(settings)).toMatchObject({
+				enabled: true,
+				botToken: "global-token",
+				chatId: "global-chat",
+			});
+			expect(settings.get("notifications.terminalBell")).toBe(true);
+			expect(settings.get("notifications.bellOnComplete")).toBe(false);
+
+			const warnings = warnSpy.mock.calls.filter(
+				call => call[0] === "Settings: ignoring project notification settings",
+			);
+			expect(warnings).toHaveLength(1);
+			expect(warnings[0]?.[1]).toEqual({ path: projectSettingsPath });
+			expect(JSON.stringify(warnings)).not.toContain(projectToken);
+		} finally {
+			warnSpy.mockRestore();
+			resetSettingsForTest();
+		}
+	});
+
+	test("runtime notification overrides are rejected without exposing their value", () => {
+		const settings = Settings.isolated({
+			"notifications.enabled": true,
+			"notifications.telegram.botToken": "global-token",
+			"notifications.telegram.chatId": "global-chat",
+		});
+		const runtimeToken = "runtime-secret-token";
+		let thrown: unknown;
+
+		try {
+			settings.override("notifications.telegram.botToken", runtimeToken);
+		} catch (error) {
+			thrown = error;
+		}
+
+		expect(thrown).toBeInstanceOf(NotificationSettingsOverrideError);
+		expect(String(thrown)).not.toContain(runtimeToken);
+		expect(JSON.stringify(thrown)).not.toContain(runtimeToken);
+		expect(getNotificationConfig(settings)).toMatchObject({ botToken: "global-token", chatId: "global-chat" });
+	});
+
+	test("runtime terminal bell overrides remain session-local", () => {
+		const settings = Settings.isolated();
+		settings.override("notifications.terminalBell", true);
+		settings.override("notifications.bellOnAsk", false);
+		expect(settings.get("notifications.terminalBell")).toBe(true);
+		expect(settings.get("notifications.bellOnAsk")).toBe(false);
+	});
+
+	test("isGloballyConfigured requires a complete non-blank adapter", () => {
 		expect(isGloballyConfigured(GLOBAL_CFG)).toBe(true);
 		expect(isGloballyConfigured({ ...GLOBAL_CFG, enabled: false })).toBe(false);
 		expect(isGloballyConfigured({ ...GLOBAL_CFG, botToken: undefined })).toBe(false);
@@ -129,27 +1034,44 @@ describe("notifications config", () => {
 				chatId: "\t",
 			}),
 		).toBe(false);
-		expect(
-			isGloballyConfigured({
-				...BASE_CFG,
-				enabled: true,
-				discord: { botToken: "discord-token", channelId: "discord-channel" },
-			}),
-		).toBe(true);
-		expect(
-			isGloballyConfigured({
-				...BASE_CFG,
-				enabled: true,
-				slack: { botToken: "slack-token", channelId: "slack-channel" },
-			}),
-		).toBe(true);
-		expect(
-			isGloballyConfigured({
-				...BASE_CFG,
-				enabled: true,
-				discord: { botToken: "discord-token", channelId: undefined },
-			}),
-		).toBe(false);
+
+		const discord: NotificationConfig = {
+			...BASE_CFG,
+			enabled: true,
+			discord: {
+				botToken: "discord-token",
+				applicationId: "discord-application",
+				guildId: "discord-guild",
+				parentChannelId: "discord-parent",
+			},
+		};
+		const slack: NotificationConfig = {
+			...BASE_CFG,
+			enabled: true,
+			slack: {
+				botToken: "slack-token",
+				appToken: "slack-app-token",
+				workspaceId: "slack-workspace",
+				channelId: "slack-channel",
+				authorizedUserId: "slack-user",
+			},
+		};
+
+		expect(isDiscordConfigured(discord)).toBe(true);
+		expect(isDiscordConfigured({ ...discord, discord: { ...discord.discord, guildId: " " } })).toBe(false);
+		expect(isDiscordConfigured({ ...discord, discord: { ...discord.discord, parentChannelId: undefined } })).toBe(
+			false,
+		);
+		expect(isSlackConfigured(slack)).toBe(true);
+		expect(isSlackConfigured({ ...slack, slack: { ...slack.slack, appToken: "\t" } })).toBe(false);
+		expect(isSlackConfigured({ ...slack, slack: { ...slack.slack, workspaceId: undefined } })).toBe(false);
+		expect(isGloballyConfigured(discord)).toBe(true);
+		expect(isGloballyConfigured(slack)).toBe(true);
+		expect(isGloballyConfigured({ ...discord, enabled: false })).toBe(false);
+		expect(isGloballyConfigured({ ...discord, discord: { botToken: "discord-token" } })).toBe(false);
+		expect(isGloballyConfigured({ ...slack, slack: { botToken: "slack-token", appToken: "slack-app-token" } })).toBe(
+			false,
+		);
 	});
 
 	test("isTelegramConfigured rejects blank Telegram credentials even when another adapter is configured", () => {
@@ -158,7 +1080,7 @@ describe("notifications config", () => {
 			enabled: true,
 			botToken: " ",
 			chatId: "\t",
-			discord: { botToken: "discord-token", channelId: "discord-channel" },
+			discord: { botToken: "discord-token", applicationId: "app", guildId: "guild", parentChannelId: "parent" },
 		};
 
 		expect(isGloballyConfigured(mixedAdapterCfg)).toBe(true);
@@ -195,6 +1117,22 @@ describe("notifications config", () => {
 
 		expect(isSessionNotificationsEnabled({ cfg: GLOBAL_CFG, env: {}, sessionDisabled: false })).toBe(true);
 		expect(isSessionNotificationsEnabled({ cfg: BASE_CFG, env: {}, sessionDisabled: false })).toBe(false);
+		expect(
+			isSessionNotificationsEnabled({
+				cfg: PRIMARY_GLOBAL_CFG,
+				env: {},
+				sessionDisabled: false,
+				spawnedBySkc: true,
+			}),
+		).toBe(false);
+		expect(
+			isSessionNotificationsEnabled({
+				cfg: PRIMARY_GLOBAL_CFG,
+				env: { SKC_NOTIFICATIONS: "1" },
+				sessionDisabled: false,
+				spawnedBySkc: true,
+			}),
+		).toBe(true);
 	});
 
 	test("shouldRegisterNotificationsExtension applies registration precedence", () => {
@@ -245,6 +1183,32 @@ describe("notifications config", () => {
 				currentAgentType: "executor",
 			}),
 		).toBe(false);
+	});
+
+	test("isNotificationHostEligible preserves hard-off, subagent, and primary-scope precedence", () => {
+		const primary = { ...PRIMARY_GLOBAL_CFG, sessionScope: "primary" as const };
+		expect(isNotificationHostEligible({ env: { SKC_NOTIFY: "off", SKC_NOTIFICATIONS: "1" } })).toBe(false);
+		expect(isNotificationHostEligible({ env: { SKC_NOTIFICATIONS: "1" }, taskDepth: 1 })).toBe(false);
+		expect(isNotificationHostEligible({ env: { SKC_NOTIFICATIONS: "0" } })).toBe(false);
+		expect(isNotificationHostEligible({ env: {}, hostModeSupported: false })).toBe(false);
+		expect(isNotificationHostEligible({ env: {}, sessionScope: primary.sessionScope, spawnedBySkc: true })).toBe(
+			false,
+		);
+		expect(
+			isNotificationHostEligible({
+				env: { SKC_NOTIFICATIONS: "1" },
+				sessionScope: primary.sessionScope,
+				spawnedBySkc: true,
+			}),
+		).toBe(true);
+		expect(
+			isNotificationHostEligible({
+				env: { SKC_NOTIFICATIONS_TOKEN: "explicit-token" },
+				sessionScope: primary.sessionScope,
+				spawnedBySkc: true,
+			}),
+		).toBe(true);
+		expect(isNotificationHostEligible({ env: {} })).toBe(true);
 	});
 
 	test("getNotificationConfig reads sessionScope", () => {
@@ -318,30 +1282,32 @@ describe("notifications config", () => {
 		expect(shouldRegisterNotificationsExtension({ cfg: BASE_CFG, env: {}, spawnedBySkc: true })).toBe(false);
 	});
 	test("settings-enabled subagent sessions do not register the notifications extension", async () => {
-		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "skc-notifications-subagent-"));
-		tempDirs.push(cwd);
+		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "skc-sdk-subagent-"));
+		const agentDir = path.join(cwd, ".skc", "agent");
+		const cleanup = await createNotificationFixtureRoot(cwd, agentDir);
 		const previous = process.env.SKC_NOTIFICATIONS;
 		delete process.env.SKC_NOTIFICATIONS;
-		const settings = Settings.isolated({
+		const settings = isolatedNotificationSettings(agentDir, {
 			"notifications.enabled": true,
 			"notifications.telegram.botToken": " ",
 			"notifications.telegram.chatId": "\t",
 			"notifications.discord.botToken": "discord-token",
-			"notifications.discord.channelId": "discord-channel",
+			"notifications.discord.applicationId": "discord-app",
+			"notifications.discord.guildId": "discord-guild",
+			"notifications.discord.parentChannelId": "discord-parent",
 		});
-
-		const disposers: Array<() => Promise<void>> = [];
 
 		try {
 			resetSettingsForTest();
-			await Settings.init({ inMemory: true, cwd, agentDir: cwd });
+			await Settings.init({ inMemory: true, cwd, agentDir });
 			const topLevel = await createAgentSession({
 				cwd,
-				agentDir: cwd,
+				agentDir,
 				sessionManager: SessionManager.inMemory(cwd),
 				settings,
 				model: getBundledModel("openai", "gpt-4o-mini"),
 				disableExtensionDiscovery: true,
+				ensureNotificationProviderDaemon: async () => "attached",
 				extensions: [],
 				skills: [],
 				contextFiles: [],
@@ -350,11 +1316,17 @@ describe("notifications config", () => {
 				enableMCP: false,
 				enableLsp: false,
 			});
-			disposers.push(() => topLevel.session.dispose());
+			registerNotificationRuntime(cleanup, {
+				key: "top-level",
+				shutdown: async () => {
+					await topLevel.session.extensionRunner?.emit({ type: "session_shutdown" });
+				},
+				dispose: () => topLevel.session.dispose(),
+			});
 
 			const subagent = await createAgentSession({
 				cwd,
-				agentDir: cwd,
+				agentDir,
 				sessionManager: SessionManager.inMemory(cwd),
 				settings,
 				model: getBundledModel("openai", "gpt-4o-mini"),
@@ -368,10 +1340,16 @@ describe("notifications config", () => {
 				enableLsp: false,
 				taskDepth: 1,
 			});
-			disposers.push(() => subagent.session.dispose());
+			registerNotificationRuntime(cleanup, {
+				key: "subagent",
+				shutdown: async () => {
+					await subagent.session.extensionRunner?.emit({ type: "session_shutdown" });
+				},
+				dispose: () => subagent.session.dispose(),
+			});
 			const parentPrefixSubagent = await createAgentSession({
 				cwd,
-				agentDir: cwd,
+				agentDir,
 				sessionManager: SessionManager.inMemory(cwd),
 				settings,
 				model: getBundledModel("openai", "gpt-4o-mini"),
@@ -385,10 +1363,16 @@ describe("notifications config", () => {
 				enableLsp: false,
 				parentTaskPrefix: "0-Sub",
 			});
-			disposers.push(() => parentPrefixSubagent.session.dispose());
+			registerNotificationRuntime(cleanup, {
+				key: "parent-prefix-subagent",
+				shutdown: async () => {
+					await parentPrefixSubagent.session.extensionRunner?.emit({ type: "session_shutdown" });
+				},
+				dispose: () => parentPrefixSubagent.session.dispose(),
+			});
 			const agentTypeOnlySubagent = await createAgentSession({
 				cwd,
-				agentDir: cwd,
+				agentDir,
 				sessionManager: SessionManager.inMemory(cwd),
 				settings,
 				model: getBundledModel("openai", "gpt-4o-mini"),
@@ -402,15 +1386,27 @@ describe("notifications config", () => {
 				enableLsp: false,
 				currentAgentType: "executor",
 			});
-			disposers.push(() => agentTypeOnlySubagent.session.dispose());
+			registerNotificationRuntime(cleanup, {
+				key: "agent-type-only-subagent",
+				shutdown: async () => {
+					await agentTypeOnlySubagent.session.extensionRunner?.emit({ type: "session_shutdown" });
+				},
+				dispose: () => agentTypeOnlySubagent.session.dispose(),
+			});
 			const explicitExtensionSubagent = await createAgentSession({
 				cwd,
-				agentDir: cwd,
+				agentDir,
 				sessionManager: SessionManager.inMemory(cwd),
 				settings,
 				model: getBundledModel("openai", "gpt-4o-mini"),
 				disableExtensionDiscovery: true,
-				extensions: [api => createNotificationsExtension(api, { settings })],
+				extensions: [
+					api =>
+						createNotificationsExtension(api, {
+							settings,
+							ensureProviderDaemon: async () => "attached",
+						}),
+				],
 				skills: [],
 				contextFiles: [],
 				promptTemplates: [],
@@ -419,45 +1415,39 @@ describe("notifications config", () => {
 				enableLsp: false,
 				taskDepth: 1,
 			});
-			disposers.push(() => explicitExtensionSubagent.session.dispose());
+			registerNotificationRuntime(cleanup, {
+				key: "explicit-extension-subagent",
+				shutdown: async () => {
+					await explicitExtensionSubagent.session.extensionRunner?.emit({ type: "session_shutdown" });
+				},
+				dispose: () => explicitExtensionSubagent.session.dispose(),
+			});
 			await topLevel.session.extensionRunner?.emit({ type: "session_start" });
 			await subagent.session.extensionRunner?.emit({ type: "session_start" });
 			await parentPrefixSubagent.session.extensionRunner?.emit({ type: "session_start" });
 			await agentTypeOnlySubagent.session.extensionRunner?.emit({ type: "session_start" });
 			await explicitExtensionSubagent.session.extensionRunner?.emit({ type: "session_start" });
-			const topLevelEndpoint = path.join(
-				cwd,
-				".skc",
-				"state",
-				"notifications",
-				`${topLevel.session.sessionId}.json`,
-			);
-			const subagentEndpoint = path.join(
-				cwd,
-				".skc",
-				"state",
-				"notifications",
-				`${subagent.session.sessionId}.json`,
-			);
+			const topLevelEndpoint = path.join(cwd, ".skc", "state", "sdk", `${topLevel.session.sessionId}.json`);
+			const subagentEndpoint = path.join(cwd, ".skc", "state", "sdk", `${subagent.session.sessionId}.json`);
 			const parentPrefixSubagentEndpoint = path.join(
 				cwd,
 				".skc",
 				"state",
-				"notifications",
+				"sdk",
 				`${parentPrefixSubagent.session.sessionId}.json`,
 			);
 			const agentTypeOnlySubagentEndpoint = path.join(
 				cwd,
 				".skc",
 				"state",
-				"notifications",
+				"sdk",
 				`${agentTypeOnlySubagent.session.sessionId}.json`,
 			);
 			const explicitExtensionSubagentEndpoint = path.join(
 				cwd,
 				".skc",
 				"state",
-				"notifications",
+				"sdk",
 				`${explicitExtensionSubagent.session.sessionId}.json`,
 			);
 			expect(fs.existsSync(topLevelEndpoint)).toBe(true);
@@ -467,7 +1457,7 @@ describe("notifications config", () => {
 			expect(fs.existsSync(explicitExtensionSubagentEndpoint)).toBe(false);
 			expect(fs.existsSync(daemonPaths(cwd).roots)).toBe(false);
 		} finally {
-			await Promise.all(disposers.reverse().map(dispose => dispose()));
+			await cleanupFixtureRoot(cleanup);
 			if (previous === undefined) {
 				delete process.env.SKC_NOTIFICATIONS;
 			} else {
@@ -477,30 +1467,203 @@ describe("notifications config", () => {
 		}
 	}, 30000);
 
-	test("sessionScope=primary suppresses a SKC-spawned child endpoint end to end and consumes the marker", async () => {
-		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "skc-notifications-spawned-"));
-		tempDirs.push(cwd);
-		const previousNotif = process.env.SKC_NOTIFICATIONS;
-		const previousSpawn = process.env.SKC_SPAWNED_BY_SESSION;
-		delete process.env.SKC_NOTIFICATIONS;
-		delete process.env.SKC_SPAWNED_BY_SESSION;
-		const adapterSettings = (scope: "all" | "primary"): Settings =>
-			Settings.isolated({
+	describe("embedded provider readiness startup", () => {
+		const providerSettings = (agentDir: string) =>
+			isolatedNotificationSettings(agentDir, {
 				"notifications.enabled": true,
 				"notifications.discord.botToken": "discord-token",
-				"notifications.discord.channelId": "discord-channel",
+				"notifications.discord.applicationId": "discord-app",
+				"notifications.discord.guildId": "discord-guild",
+				"notifications.discord.parentChannelId": "discord-parent",
+			});
+
+		test("rejects ordinary session_start after provider readiness fails without publishing an endpoint", async () => {
+			const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "skc-provider-readiness-failure-"));
+			const agentDir = path.join(cwd, ".skc", "agent");
+			const cleanup = await createNotificationFixtureRoot(cwd, agentDir);
+			const settings = providerSettings(agentDir);
+			let session: Awaited<ReturnType<typeof createAgentSession>>["session"] | undefined;
+			try {
+				resetSettingsForTest();
+				await Settings.init({ inMemory: true, cwd, agentDir });
+				session = (
+					await createAgentSession({
+						cwd,
+						agentDir,
+						sessionManager: SessionManager.inMemory(cwd),
+						settings,
+						model: getBundledModel("openai", "gpt-4o-mini"),
+						disableExtensionDiscovery: true,
+						ensureNotificationProviderDaemon: async () => {
+							throw new Error("provider readiness denied");
+						},
+						extensions: [],
+						skills: [],
+						contextFiles: [],
+						promptTemplates: [],
+						slashCommands: [],
+						enableMCP: false,
+						enableLsp: false,
+					})
+				).session;
+				const runner = session.extensionRunner;
+				if (!runner) throw new Error("notifications extension runner was not registered");
+				const endpoint = path.join(cwd, ".skc", "state", "sdk", `${session.sessionId}.json`);
+
+				const errors: string[] = [];
+				const unsubscribe = runner.onError(error => errors.push(error.error));
+				await runner.emit({ type: "session_start" });
+				unsubscribe();
+				expect(errors).toContain("notifications: SDK startup failed: provider readiness denied");
+				expect(fs.existsSync(endpoint)).toBe(false);
+			} finally {
+				await session?.extensionRunner?.emit({ type: "session_shutdown" });
+				session?.dispose();
+				await cleanupFixtureRoot(cleanup);
+				resetSettingsForTest();
+			}
+		}, 30000);
+
+		test("removes a readiness-failed runtime with rollback proof so /notify on retries a real startup", async () => {
+			const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "skc-provider-readiness-retry-"));
+			const agentDir = path.join(cwd, ".skc", "agent");
+			const cleanup = await createNotificationFixtureRoot(cwd, agentDir);
+			const settings = providerSettings(agentDir);
+			const handlers = new Map<string, (event: unknown, ctx: ExtensionContext) => Promise<void> | void>();
+			let notify: { handler(args: string, ctx: ExtensionCommandContext): Promise<void> | void } | undefined;
+			let providerReady = false;
+			const rollback = new SdkStartupRollbackTracker();
+			const capability = new SdkStartupCapability(rollback);
+			const api = {
+				on(event: string, handler: (event: unknown, ctx: ExtensionContext) => Promise<void> | void) {
+					handlers.set(event, handler);
+				},
+				registerCommand(
+					name: string,
+					command: { handler(args: string, ctx: ExtensionCommandContext): Promise<void> | void },
+				) {
+					if (name === "notify") notify = command;
+				},
+			} as unknown as ExtensionAPI;
+			attachLifecycleStartupCapability(api, capability);
+			const context = {
+				cwd,
+				sessionManager: {
+					getSessionId: () => "provider-readiness-retry",
+					getSessionName: () => "provider readiness retry",
+				},
+				ui: { notify: () => {} },
+			} as unknown as ExtensionCommandContext;
+			const endpoint = path.join(cwd, ".skc", "state", "sdk", "provider-readiness-retry.json");
+			createNotificationsExtension(api, {
+				settings,
+				ensureProviderDaemon: async () => {
+					if (!providerReady) throw new Error("provider readiness denied");
+				},
+			});
+			const sessionStart = handlers.get("session_start");
+			const sessionShutdown = handlers.get("session_shutdown");
+			if (!sessionStart || !sessionShutdown || !notify)
+				throw new Error("notifications extension did not register its command handlers");
+			try {
+				await sessionStart({}, context);
+				expect(await capability.promise).toMatchObject({
+					status: "failed",
+					failure: { message: "provider readiness denied" },
+				});
+				expect(fs.existsSync(endpoint)).toBe(false);
+				expect(rollback.result).toMatchObject({
+					runtimeRemoved: true,
+					hostStopped: true,
+					brokerRegistrationReleased: true,
+				});
+
+				providerReady = true;
+				await notify.handler("on", context);
+				expect(fs.existsSync(endpoint)).toBe(true);
+			} finally {
+				await sessionShutdown({}, context);
+				await cleanupFixtureRoot(cleanup);
+				resetSettingsForTest();
+			}
+		}, 30000);
+
+		test("waits for provider readiness before publishing the embedded session endpoint", async () => {
+			const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "skc-provider-readiness-success-"));
+			const agentDir = path.join(cwd, ".skc", "agent");
+			const cleanup = await createNotificationFixtureRoot(cwd, agentDir);
+			const settings = providerSettings(agentDir);
+			let session: Awaited<ReturnType<typeof createAgentSession>>["session"] | undefined;
+			let endpoint = "";
+			try {
+				resetSettingsForTest();
+				await Settings.init({ inMemory: true, cwd, agentDir });
+				session = (
+					await createAgentSession({
+						cwd,
+						agentDir,
+						sessionManager: SessionManager.inMemory(cwd),
+						settings,
+						model: getBundledModel("openai", "gpt-4o-mini"),
+						disableExtensionDiscovery: true,
+						ensureNotificationProviderDaemon: async () => {
+							expect(fs.existsSync(endpoint)).toBe(false);
+						},
+						extensions: [],
+						skills: [],
+						contextFiles: [],
+						promptTemplates: [],
+						slashCommands: [],
+						enableMCP: false,
+						enableLsp: false,
+					})
+				).session;
+				const runner = session.extensionRunner;
+				if (!runner) throw new Error("notifications extension runner was not registered");
+				endpoint = path.join(cwd, ".skc", "state", "sdk", `${session.sessionId}.json`);
+
+				await runner.emit({ type: "session_start" });
+				expect(fs.existsSync(endpoint)).toBe(true);
+			} finally {
+				await session?.extensionRunner?.emit({ type: "session_shutdown" });
+				session?.dispose();
+				await cleanupFixtureRoot(cleanup);
+				resetSettingsForTest();
+			}
+		}, 30000);
+	});
+
+	test("sessionScope=primary keeps a canonical SDK endpoint while suppressing SKC-spawned child delivery", async () => {
+		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "skc-sdk-notif-spawned-"));
+		const agentDir = path.join(cwd, ".skc", "agent");
+		const cleanup = await createNotificationFixtureRoot(cwd, agentDir);
+		const previousNotif = process.env.SKC_NOTIFICATIONS;
+		const previousSpawn = process.env.SKC_SPAWNED_BY_SESSION;
+		const previousToken = process.env.SKC_NOTIFICATIONS_TOKEN;
+		const previousCompletionNotify = process.env.SKC_NOTIFY;
+		delete process.env.SKC_NOTIFICATIONS;
+		delete process.env.SKC_SPAWNED_BY_SESSION;
+		delete process.env.SKC_NOTIFICATIONS_TOKEN;
+		delete process.env.SKC_NOTIFY;
+		const adapterSettings = (scope: "all" | "primary"): Settings =>
+			isolatedNotificationSettings(agentDir, {
+				"notifications.enabled": true,
+				"notifications.discord.botToken": "discord-token",
+				"notifications.discord.applicationId": "discord-application",
+				"notifications.discord.guildId": "discord-guild",
+				"notifications.discord.parentChannelId": "discord-channel",
 				"notifications.sessionScope": scope,
 			});
 		const primarySettings = adapterSettings("primary");
 		const allSettings = adapterSettings("all");
-		const disposers: Array<() => Promise<void>> = [];
 		const spawn = async (settings: Settings) =>
 			createAgentSession({
 				cwd,
-				agentDir: cwd,
+				agentDir,
 				sessionManager: SessionManager.inMemory(cwd),
 				settings,
 				model: getBundledModel("openai", "gpt-4o-mini"),
+				ensureNotificationProviderDaemon: async () => "attached",
 				disableExtensionDiscovery: true,
 				extensions: [],
 				skills: [],
@@ -510,44 +1673,234 @@ describe("notifications config", () => {
 				enableMCP: false,
 				enableLsp: false,
 			});
-		const endpointFor = (sessionId: string): string =>
-			path.join(cwd, ".skc", "state", "notifications", `${sessionId}.json`);
+		const endpointFor = (sessionId: string): string => path.join(cwd, ".skc", "state", "sdk", `${sessionId}.json`);
 		try {
 			resetSettingsForTest();
-			await Settings.init({ inMemory: true, cwd, agentDir: cwd });
+			await Settings.init({ inMemory: true, cwd, agentDir });
 
-			// 1. Spawned child under primary: suppressed, and the marker is consumed.
+			// 1. A spawned child under primary keeps the mandatory SDK endpoint,
+			// while the session-scoped delivery guard above suppresses notifications.
 			process.env.SKC_SPAWNED_BY_SESSION = "parent-abc";
 			const suppressed = await spawn(primarySettings);
-			disposers.push(() => suppressed.session.dispose());
+			registerNotificationRuntime(cleanup, {
+				key: "suppressed",
+				shutdown: async () => {
+					await suppressed.session.extensionRunner?.emit({ type: "session_shutdown" });
+				},
+				dispose: () => suppressed.session.dispose(),
+			});
 			expect(process.env.SKC_SPAWNED_BY_SESSION).toBeUndefined();
 
 			// 2. Spawned child under the default "all" scope still registers.
 			process.env.SKC_SPAWNED_BY_SESSION = "parent-abc";
 			const preserved = await spawn(allSettings);
-			disposers.push(() => preserved.session.dispose());
+			registerNotificationRuntime(cleanup, {
+				key: "preserved",
+				shutdown: async () => {
+					await preserved.session.extensionRunner?.emit({ type: "session_shutdown" });
+				},
+				dispose: () => preserved.session.dispose(),
+			});
 
 			// 3. Spawned child under primary WITH explicit opt-in keeps its endpoint.
 			process.env.SKC_SPAWNED_BY_SESSION = "parent-abc";
 			process.env.SKC_NOTIFICATIONS = "1";
 			const optedIn = await spawn(primarySettings);
-			disposers.push(() => optedIn.session.dispose());
+			registerNotificationRuntime(cleanup, {
+				key: "opted-in",
+				shutdown: async () => {
+					await optedIn.session.extensionRunner?.emit({ type: "session_shutdown" });
+				},
+				dispose: () => optedIn.session.dispose(),
+			});
+			delete process.env.SKC_NOTIFICATIONS;
+
+			// 4. The legacy explicit token has the same primary-scope override.
+			process.env.SKC_SPAWNED_BY_SESSION = "parent-abc";
+			process.env.SKC_NOTIFICATIONS_TOKEN = "legacy-token";
+			const tokenOptedIn = await spawn(primarySettings);
+			registerNotificationRuntime(cleanup, {
+				key: "token-opted-in",
+				shutdown: async () => {
+					await tokenOptedIn.session.extensionRunner?.emit({ type: "session_shutdown" });
+				},
+				dispose: () => tokenOptedIn.session.dispose(),
+			});
+			delete process.env.SKC_NOTIFICATIONS_TOKEN;
+
+			// 5. Notification hard-offs suppress delivery but keep the canonical SDK endpoint.
+			process.env.SKC_NOTIFY = "off";
+			const completionOptedOut = await spawn(allSettings);
+			registerNotificationRuntime(cleanup, {
+				key: "completion-opted-out",
+				shutdown: async () => {
+					await completionOptedOut.session.extensionRunner?.emit({ type: "session_shutdown" });
+				},
+				dispose: () => completionOptedOut.session.dispose(),
+			});
+			delete process.env.SKC_NOTIFY;
+			process.env.SKC_NOTIFICATIONS = "0";
+			const notificationsOptedOut = await spawn(allSettings);
+			registerNotificationRuntime(cleanup, {
+				key: "notifications-opted-out",
+				shutdown: async () => {
+					await notificationsOptedOut.session.extensionRunner?.emit({ type: "session_shutdown" });
+				},
+				dispose: () => notificationsOptedOut.session.dispose(),
+			});
 			delete process.env.SKC_NOTIFICATIONS;
 
 			await suppressed.session.extensionRunner?.emit({ type: "session_start" });
 			await preserved.session.extensionRunner?.emit({ type: "session_start" });
 			await optedIn.session.extensionRunner?.emit({ type: "session_start" });
+			await tokenOptedIn.session.extensionRunner?.emit({ type: "session_start" });
+			await completionOptedOut.session.extensionRunner?.emit({ type: "session_start" });
+			await notificationsOptedOut.session.extensionRunner?.emit({ type: "session_start" });
 
-			expect(fs.existsSync(endpointFor(suppressed.session.sessionId))).toBe(false);
+			expect(fs.existsSync(endpointFor(suppressed.session.sessionId))).toBe(true);
 			expect(fs.existsSync(endpointFor(preserved.session.sessionId))).toBe(true);
 			expect(fs.existsSync(endpointFor(optedIn.session.sessionId))).toBe(true);
+			expect(fs.existsSync(endpointFor(tokenOptedIn.session.sessionId))).toBe(true);
+			expect(fs.existsSync(endpointFor(completionOptedOut.session.sessionId))).toBe(true);
+			expect(fs.existsSync(endpointFor(notificationsOptedOut.session.sessionId))).toBe(true);
 		} finally {
-			await Promise.all(disposers.reverse().map(dispose => dispose()));
+			await cleanupFixtureRoot(cleanup);
 			if (previousNotif === undefined) delete process.env.SKC_NOTIFICATIONS;
 			else process.env.SKC_NOTIFICATIONS = previousNotif;
 			if (previousSpawn === undefined) delete process.env.SKC_SPAWNED_BY_SESSION;
 			else process.env.SKC_SPAWNED_BY_SESSION = previousSpawn;
+			if (previousToken === undefined) delete process.env.SKC_NOTIFICATIONS_TOKEN;
+			else process.env.SKC_NOTIFICATIONS_TOKEN = previousToken;
+			if (previousCompletionNotify === undefined) delete process.env.SKC_NOTIFY;
+			else process.env.SKC_NOTIFY = previousCompletionNotify;
 			resetSettingsForTest();
+		}
+	}, 60000);
+	test("never-registered notifications extension captures no command or daemon artifacts", () => {
+		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "skc-notification-unregistered-"));
+		const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), "skc-notification-agent-"));
+		tempDirs.push(cwd, agentDir);
+		const sessionId = "session-unregistered";
+		let notify: { handler(args: string, ctx: ExtensionCommandContext): Promise<void> | void } | undefined;
+		const api = {
+			registerCommand(
+				name: string,
+				command: { handler(args: string, ctx: ExtensionCommandContext): Promise<void> | void },
+			) {
+				if (name === "notify") notify = command;
+			},
+		} as unknown as ExtensionAPI;
+		const extensionShouldRegister = shouldRegisterNotificationsExtension({ cfg: BASE_CFG, env: {} });
+
+		expect(extensionShouldRegister).toBe(false);
+		if (extensionShouldRegister) createNotificationsExtension(api);
+		expect(notify).toBeUndefined();
+		expect(fs.existsSync(path.join(cwd, ".skc", "state", "sdk", `${sessionId}.json`))).toBe(false);
+		expect(fs.existsSync(daemonPaths(agentDir).roots)).toBe(false);
+	});
+	test("captured /notify on uses the production daemon ensurer once and awaits SDK endpoint shutdown", async () => {
+		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "skc-notification-command-"));
+		const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), "skc-notification-agent-"));
+		tempDirs.push(cwd, agentDir);
+		const sessionId = "session-command";
+		const settings = new Proxy(
+			Settings.isolated({
+				"notifications.enabled": false,
+				"notifications.telegram.botToken": "123456:temporary-test-token",
+				"notifications.telegram.chatId": "temporary-chat",
+			}),
+			{
+				get(target, prop) {
+					if (prop === "getAgentDir") return () => agentDir;
+					const value = Reflect.get(target, prop, target);
+					return typeof value === "function" ? value.bind(target) : value;
+				},
+			},
+		) as Settings;
+		const handlers = new Map<string, (event: unknown, ctx: ExtensionContext) => Promise<void> | void>();
+		let notify: { handler(args: string, ctx: ExtensionCommandContext): Promise<void> | void } | undefined;
+		let spawns = 0;
+		const api = {
+			on(event: string, handler: (event: unknown, ctx: ExtensionContext) => Promise<void> | void) {
+				handlers.set(event, handler);
+			},
+			registerCommand(
+				name: string,
+				command: { handler(args: string, ctx: ExtensionCommandContext): Promise<void> | void },
+			) {
+				if (name === "notify") notify = command;
+			},
+		} as unknown as ExtensionAPI;
+		const context = {
+			cwd,
+			sessionManager: {
+				getSessionId: () => sessionId,
+				getSessionName: () => "command harness",
+			},
+			ui: { notify: () => {} },
+		} as unknown as ExtensionCommandContext;
+
+		createNotificationsExtension(api, {
+			settings,
+			ensureTelegramDaemon: input => {
+				let ownerId: string | undefined;
+				return ensureTelegramDaemonRunning(input, {
+					pid: 4242,
+					pidAlive: pid => pid === 4242 || pid === 4243,
+					pidIncarnation: pid => `linux:${pid}`,
+					spawn: (_command, args) => {
+						ownerId = args[args.indexOf("--owner-id") + 1];
+						spawns++;
+						return { pid: 4243, unref() {} };
+					},
+					sleep: async () => {
+						if (!ownerId) throw new Error("Telegram daemon spawn did not provide an owner ID");
+						await renewDaemonHeartbeat({
+							settings,
+							ownerId,
+							acquisitionId: ownerId,
+							pid: 4243,
+							pidIncarnation: pid => `linux:${pid}`,
+						});
+					},
+					waitStepMs: 1,
+					readinessTimeoutMs: 100,
+				});
+			},
+		});
+
+		const endpoint = path.join(cwd, ".skc", "state", "sdk", `${sessionId}.json`);
+		const roots = daemonPaths(agentDir).roots;
+		const sessionStart = handlers.get("session_start");
+		const sessionShutdown = handlers.get("session_shutdown");
+		if (!sessionStart || !sessionShutdown || !notify)
+			throw new Error("notifications extension did not register its command handlers");
+		let shutdownCompleted = false;
+		try {
+			await sessionStart({}, context);
+			expect(fs.existsSync(endpoint)).toBe(true);
+			expect(fs.existsSync(roots)).toBe(false);
+
+			settings.set("notifications.enabled", true);
+			await notify.handler("on", context);
+			expect(fs.existsSync(endpoint)).toBe(true);
+			expect(fs.existsSync(roots)).toBe(true);
+			const registeredRoots = JSON.parse(fs.readFileSync(roots, "utf8")) as { roots: string[] };
+			expect(registeredRoots.roots).toEqual([path.join(cwd, ".skc", "state")]);
+			expect(spawns).toBe(1);
+
+			await notify.handler("on", context);
+			expect(fs.existsSync(endpoint)).toBe(true);
+			expect((JSON.parse(fs.readFileSync(roots, "utf8")) as { roots: string[] }).roots).toEqual([
+				path.join(cwd, ".skc", "state"),
+			]);
+			expect(spawns).toBe(1);
+
+			await sessionShutdown({}, context);
+			shutdownCompleted = true;
+			expect(fs.existsSync(endpoint)).toBe(false);
+		} finally {
+			if (!shutdownCompleted) await sessionShutdown({}, context);
 		}
 	}, 30000);
 

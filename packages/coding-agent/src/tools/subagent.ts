@@ -17,6 +17,10 @@ const MAX_LIST_LIMIT = 50;
 const RECEIPT_PREVIEW_WIDTH = 280;
 const PREVIEW_WIDTH = 2_000;
 const FULL_PREVIEW_WIDTH = 12_000;
+const RECEIPT_PREVIEW_BYTES = 1_024;
+const PREVIEW_BYTES = 8_192;
+const FULL_PREVIEW_BYTES = 49_152;
+
 const STEER_QUEUED_GUIDANCE =
 	"The steer message is queued for the subagent's next steering boundary and has not necessarily taken effect yet.";
 
@@ -80,8 +84,17 @@ export interface SubagentSnapshot {
 	modelFellBack?: boolean;
 }
 
+export type SubagentAwaitOutcome = "completed" | "timed_out" | "interrupted";
+
+const AWAIT_INTERRUPTED_GUIDANCE =
+	"Await interrupted; this subagent continues. Inspect its current state or cancel it only when necessary.";
+
 export interface SubagentToolDetails {
 	subagents: SubagentSnapshot[];
+	/** Await outcome for a live await receipt; omitted when no wait was started. */
+	awaitOutcome?: SubagentAwaitOutcome;
+	/** True only when the parent await was interrupted; the child was not cancelled. */
+	interrupted?: true;
 }
 
 export class SubagentTool implements AgentTool<typeof subagentSchema, SubagentToolDetails> {
@@ -214,6 +227,8 @@ export class SubagentTool implements AgentTool<typeof subagentSchema, SubagentTo
 				if (!result.ok && result.reason === "context_unavailable") throw new ToolError("context unavailable");
 				if (!result.ok && result.reason === "not_found") {
 					missing.push(this.#missingSnapshot(id, "not_found", "No visible detached subagent matches this id."));
+				} else if (!result.ok) {
+					throw new ToolError(`Failed to resume subagent ${record.subagentId}: ${result.reason ?? "unknown"}.`);
 				} else {
 					records.push(manager.getSubagentRecord(record.subagentId, ownerFilter) ?? record);
 				}
@@ -370,35 +385,50 @@ export class SubagentTool implements AgentTool<typeof subagentSchema, SubagentTo
 		// the viewport (the source of the await-panel repaint storms).
 		emitIfChanged(true);
 
-		let timedOut = false;
+		let awaitOutcome: SubagentAwaitOutcome;
+		const { promise: timeoutPromise, resolve: resolveTimeout } = Promise.withResolvers<SubagentAwaitOutcome>();
+		const timeoutTimer = setTimeout(() => resolveTimeout("timed_out"), timeoutMs);
+		const completionPromise = Promise.all(runningJobs.map(job => job.promise)).then(() => "completed" as const);
+		let onAbort: (() => void) | undefined;
 		try {
-			const completionPromise = Promise.all(runningJobs.map(job => job.promise));
-			const timeoutPromise = Bun.sleep(timeoutMs).then(() => {
-				timedOut = true;
-			});
 			if (signal) {
-				const { promise: abortPromise, resolve: abortResolve } = Promise.withResolvers<void>();
-				const onAbort = () => abortResolve();
-				signal.addEventListener("abort", onAbort, { once: true });
-				try {
-					await Promise.race([completionPromise, timeoutPromise, abortPromise]);
-				} finally {
-					signal.removeEventListener("abort", onAbort);
-				}
+				const { promise: abortPromise, resolve: resolveAbort } = Promise.withResolvers<SubagentAwaitOutcome>();
+				onAbort = () => resolveAbort("interrupted");
+				if (signal.aborted) onAbort();
+				else signal.addEventListener("abort", onAbort, { once: true });
+				awaitOutcome = await Promise.race([completionPromise, timeoutPromise, abortPromise]);
 			} else {
-				await Promise.race([completionPromise, timeoutPromise]);
+				awaitOutcome = await Promise.race([completionPromise, timeoutPromise]);
 			}
 		} finally {
-			manager.unwatchJobs(watchedJobIds);
+			clearTimeout(timeoutTimer);
+			if (signal && onAbort) signal.removeEventListener("abort", onAbort);
 			if (progressTimer) clearInterval(progressTimer);
 		}
+		if (awaitOutcome !== "interrupted") {
+			const terminalWatchedJobIds = watchedJobIds.filter(jobId => {
+				const status = manager.getJob(jobId)?.status;
+				return status === "completed" || status === "failed" || status === "cancelled";
+			});
+			manager.acknowledgeDeliveries(terminalWatchedJobIds);
+		}
+		manager.unwatchJobs(watchedJobIds);
 
-		return await this.#buildRecordResult(manager, records, {
-			title: "Subagent await",
-			notFoundIds,
-			timedOut,
+		const finalRecords = this.#visibleRecordsByIds(
+			manager,
+			records.map(record => record.subagentId),
+			ownerFilter,
+		);
+		const finalNotFoundIds = [...new Set([...notFoundIds, ...records.map(record => record.subagentId)])].filter(
+			id => !finalRecords.some(record => record.subagentId === id),
+		);
+		return await this.#buildRecordResult(manager, finalRecords, {
+			title: awaitOutcome === "interrupted" ? "Subagent await interrupted" : "Subagent await",
+			notFoundIds: finalNotFoundIds,
+			timedOut: awaitOutcome === "timed_out",
 			verbosity: params.verbosity ?? "receipt",
 			attachLiveProgress: true,
+			awaitOutcome,
 		});
 	}
 
@@ -516,6 +546,7 @@ export class SubagentTool implements AgentTool<typeof subagentSchema, SubagentTo
 			timedOut?: boolean;
 			verbosity?: SubagentParams["verbosity"];
 			attachLiveProgress?: boolean;
+			awaitOutcome?: SubagentAwaitOutcome;
 		},
 	): Promise<AgentToolResult<SubagentToolDetails>> {
 		const verifiedOutputIds = await this.#verifiedOutputIds(records);
@@ -530,18 +561,34 @@ export class SubagentTool implements AgentTool<typeof subagentSchema, SubagentTo
 		for (const id of options.notFoundIds ?? []) {
 			snapshots.push(this.#missingSnapshot(id, "not_found", "No visible detached subagent matches this id."));
 		}
-		manager.acknowledgeDeliveries(
-			snapshots
-				.filter(
-					s =>
-						s.status !== "running" && s.status !== "paused" && s.status !== "queued" && s.status !== "not_found",
-				)
-				.map(s => s.jobId),
-		);
-		return this.#buildSnapshotResult(snapshots, options.title);
+		if (options.awaitOutcome !== "interrupted") {
+			manager.acknowledgeDeliveries(
+				snapshots
+					.filter(
+						s =>
+							s.status !== "running" &&
+							s.status !== "paused" &&
+							s.status !== "queued" &&
+							s.status !== "not_found",
+					)
+					.map(s => s.jobId),
+			);
+		}
+		if (options.awaitOutcome === "interrupted") {
+			for (const snapshot of snapshots) {
+				if (snapshot.status === "running" || snapshot.status === "paused" || snapshot.status === "queued") {
+					snapshot.guidance = AWAIT_INTERRUPTED_GUIDANCE;
+				}
+			}
+		}
+		return this.#buildSnapshotResult(snapshots, options.title, options.awaitOutcome);
 	}
 
-	#buildSnapshotResult(snapshots: SubagentSnapshot[], title: string): AgentToolResult<SubagentToolDetails> {
+	#buildSnapshotResult(
+		snapshots: SubagentSnapshot[],
+		title: string,
+		awaitOutcome?: SubagentAwaitOutcome,
+	): AgentToolResult<SubagentToolDetails> {
 		const lines = [`## ${title} (${snapshots.length})`, ""];
 		for (const snapshot of snapshots) {
 			lines.push(`### ${snapshot.id} — ${snapshot.status}`);
@@ -571,7 +618,11 @@ export class SubagentTool implements AgentTool<typeof subagentSchema, SubagentTo
 		}
 		return {
 			content: [{ type: "text", text: lines.join("\n").trimEnd() }],
-			details: { subagents: snapshots },
+			details: {
+				subagents: snapshots,
+				...(awaitOutcome ? { awaitOutcome } : {}),
+				...(awaitOutcome === "interrupted" ? { interrupted: true } : {}),
+			},
 		};
 	}
 
@@ -738,7 +789,40 @@ function isSubagentJob(job: AsyncJob): boolean {
 }
 
 function sanitizeText(text: string, width: number): string {
-	return truncateToWidth(replaceTabs(text), width, Ellipsis.Unicode);
+	return capCodePointsAndBytes(
+		truncateToWidth(replaceTabs(text), width, Ellipsis.Unicode),
+		width,
+		previewByteCap(width),
+	);
+}
+
+function previewByteCap(width: number): number {
+	return width === FULL_PREVIEW_WIDTH
+		? FULL_PREVIEW_BYTES
+		: width === PREVIEW_WIDTH
+			? PREVIEW_BYTES
+			: RECEIPT_PREVIEW_BYTES;
+}
+
+export function capCodePointsAndBytes(text: string, maxCodePoints: number, maxBytes: number): string {
+	const ellipsis = "…";
+	const collapsed = text.replace(/…{2,}$/u, ellipsis);
+	const codePoints = [...collapsed];
+	if (codePoints.length <= maxCodePoints && Buffer.byteLength(collapsed) <= maxBytes) return collapsed;
+
+	const source = collapsed.endsWith(ellipsis) ? collapsed.slice(0, -ellipsis.length) : collapsed;
+	const ellipsisBytes = Buffer.byteLength(ellipsis);
+	let preview = "";
+	let previewBytes = 0;
+	let previewCodePoints = 0;
+	for (const codePoint of source) {
+		const codePointBytes = Buffer.byteLength(codePoint);
+		if (previewCodePoints + 1 + 1 > maxCodePoints || previewBytes + codePointBytes + ellipsisBytes > maxBytes) break;
+		preview += codePoint;
+		previewBytes += codePointBytes;
+		previewCodePoints++;
+	}
+	return `${preview}${ellipsis}`;
 }
 
 function previewJobOutput(
@@ -754,7 +838,11 @@ function previewJobOutput(
 	const width =
 		verbosity === "full" ? FULL_PREVIEW_WIDTH : verbosity === "preview" ? PREVIEW_WIDTH : RECEIPT_PREVIEW_WIDTH;
 	const normalized = replaceTabs(source.text);
-	const preview = truncateToWidth(normalized, width, Ellipsis.Unicode);
+	const preview = capCodePointsAndBytes(
+		truncateToWidth(normalized, width, Ellipsis.Unicode),
+		width,
+		previewByteCap(width),
+	);
 	return { type: source.type, preview, truncated: preview !== normalized };
 }
 
@@ -778,8 +866,15 @@ function previewJobOutput(
  * countdown ticking is sacrificed by design; every real transition still changes
  * the signature.
  */
-export function subagentAwaitRenderedStateSignature(subagents: readonly SubagentSnapshot[]): string {
-	return JSON.stringify(subagents.map(canonicalizeSnapshotForSignature));
+export function subagentAwaitRenderedStateSignature(
+	subagents: readonly SubagentSnapshot[],
+	receipt?: Pick<SubagentToolDetails, "awaitOutcome" | "interrupted">,
+): string {
+	return JSON.stringify({
+		awaitOutcome: receipt?.awaitOutcome ?? null,
+		interrupted: receipt?.interrupted === true,
+		subagents: subagents.map(canonicalizeSnapshotForSignature),
+	});
 }
 
 function canonicalizeSnapshotForSignature(snapshot: SubagentSnapshot): unknown {

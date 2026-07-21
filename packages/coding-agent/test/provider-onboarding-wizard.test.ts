@@ -4,7 +4,10 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { AuthStorage, SqliteAuthCredentialStore } from "@sayknow-cli/ai";
 import { ModelRegistry } from "@sayknow-cli/coding-agent/config/model-registry";
-import { CustomProviderWizardComponent } from "@sayknow-cli/coding-agent/modes/components/custom-provider-wizard";
+import {
+	CustomProviderWizardComponent,
+	type CustomProviderWizardSubmit,
+} from "@sayknow-cli/coding-agent/modes/components/custom-provider-wizard";
 import {
 	type ProviderOnboardingAction,
 	ProviderOnboardingSelectorComponent,
@@ -92,6 +95,62 @@ describe("provider onboarding wizard", () => {
 		]);
 	});
 
+	it("ignores duplicate Enter while a submit is pending and permits retry after rejection", async () => {
+		const submissions: CustomProviderWizardSubmit[] = [];
+		const deferred = Promise.withResolvers<void>();
+		const wizard = new CustomProviderWizardComponent(
+			input => {
+				submissions.push(input);
+				return submissions.length === 1 ? deferred.promise : undefined;
+			},
+			() => undefined,
+		);
+
+		driveEnvWizard(wizard);
+		wizard.handleInput("\n");
+		wizard.handleInput("\n");
+		expect(submissions).toHaveLength(1);
+
+		deferred.reject(new Error("submit failed"));
+		await deferred.promise.catch(() => undefined);
+		wizard.handleInput("\n");
+		expect(submissions).toHaveLength(2);
+	});
+
+	it("preserves literal credentials for force confirmation and clears them on completion", () => {
+		const submissions: CustomProviderWizardSubmit[] = [];
+		const wizard = new CustomProviderWizardComponent(
+			input => submissions.push(input),
+			() => undefined,
+		);
+
+		wizard.handleInput("\n");
+		typeText(wizard, "literal-provider");
+		wizard.handleInput("\n");
+		typeText(wizard, "https://api.example.com/v1");
+		wizard.handleInput("\n");
+		wizard.handleInput("\x1b[B");
+		wizard.handleInput("\n");
+		typeText(wizard, "literal-secret");
+		expect(visibleText(wizard)).not.toContain("literal-secret");
+		wizard.handleInput("\n");
+		typeText(wizard, "literal-model");
+		wizard.handleInput("\n");
+		wizard.handleInput("\n");
+		wizard.setSubmitError("Provider setup failed: Provider 'literal-provider' already exists.");
+		wizard.handleInput("\x1b[B");
+		wizard.handleInput("\n");
+
+		expect(submissions).toEqual([
+			expect.objectContaining({ apiKey: "literal-secret", apiKeyEnv: undefined, force: false }),
+			expect.objectContaining({ apiKey: "literal-secret", apiKeyEnv: undefined, force: true }),
+		]);
+
+		wizard.complete();
+		wizard.handleInput("\n");
+		expect(submissions.at(-1)).toEqual(expect.objectContaining({ apiKey: "", force: true }));
+	});
+
 	it("requires explicit force confirmation before overwrite", () => {
 		const submissions: unknown[] = [];
 		const wizard = new CustomProviderWizardComponent(
@@ -120,28 +179,42 @@ describe("provider onboarding wizard", () => {
 		try {
 			const authStorage = new AuthStorage(store);
 			const registry = new ModelRegistry(authStorage, path.join(tempAgentDir, "models.yml"));
-			let refreshedMode: string | undefined;
+			const refreshModes: (string | undefined)[] = [];
 			const originalRefresh = registry.refresh.bind(registry);
 			registry.refresh = async mode => {
-				refreshedMode = mode;
+				refreshModes.push(mode);
 				await originalRefresh(mode);
 			};
 			let configChanged = false;
 			const ctx = createControllerContext(registry, () => {
 				configChanged = true;
 			});
+			const successStatus = [
+				"Provider 'live-provider' configured as openai-compatible.",
+				"Models: live-model",
+				"Base URL: https://api.example.com/v1",
+				"API key: CUST…_KEY (environment variable)",
+				`Config: ${path.join(tempAgentDir!, "models.yml")}`,
+			].join("\n");
+			const { promise: completion, resolve: resolveCompletion } = Promise.withResolvers<void>();
+			ctx.showStatus = message => {
+				ctx.statuses.push(message);
+				if (message === successStatus) {
+					resolveCompletion();
+				}
+			};
 			const controller = new SelectorController(ctx);
 
 			controller.showCustomProviderWizard();
 			const wizard = ctx.ui.focused as CustomProviderWizardComponent;
 			driveEnvWizard(wizard, { providerId: "live-provider", model: "live-model" });
 			wizard.handleInput("\n");
-			await Bun.sleep(20);
+			await completion;
 
-			expect(refreshedMode).toBe("offline");
+			expect(refreshModes).toEqual(["offline"]);
 			expect(configChanged).toBe(true);
 			expect(registry.find("live-provider", "live-model")).toBeDefined();
-			expect(ctx.statuses.join("\n")).toContain("Provider 'live-provider' configured");
+			expect(ctx.statuses).toEqual([successStatus]);
 		} finally {
 			store.close();
 		}

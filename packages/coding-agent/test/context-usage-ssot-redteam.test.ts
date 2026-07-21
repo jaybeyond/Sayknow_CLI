@@ -1,5 +1,4 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
-import type { AgentSideConnection, PromptRequest, SessionNotification } from "@agentclientprotocol/sdk";
 import { Agent, type AgentMessage } from "@sayknow-cli/agent-core";
 import { calculateContextTokens, estimateMessageTokensHeuristic } from "@sayknow-cli/agent-core/compaction";
 import { type AssistantMessage, getBundledModel, type Model, type Usage } from "@sayknow-cli/ai";
@@ -8,18 +7,17 @@ import { ModelRegistry } from "@sayknow-cli/coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@sayknow-cli/coding-agent/config/settings";
 import type { ExtensionRunner } from "@sayknow-cli/coding-agent/extensibility/extensions/runner";
 import type { ContextUsage } from "@sayknow-cli/coding-agent/extensibility/extensions/types";
-import { AcpAgent } from "@sayknow-cli/coding-agent/modes/acp/acp-agent";
 import { initTheme, theme } from "@sayknow-cli/coding-agent/modes/theme/theme";
 import {
 	computeContextBreakdown,
 	computeNonMessageTokens,
 	renderContextUsage,
 } from "@sayknow-cli/coding-agent/modes/utils/context-usage";
-import { AgentSession, type AgentSessionEvent } from "@sayknow-cli/coding-agent/session/agent-session";
+import { AgentSession } from "@sayknow-cli/coding-agent/session/agent-session";
 import { AuthStorage } from "@sayknow-cli/coding-agent/session/auth-storage";
 import { convertToLlm } from "@sayknow-cli/coding-agent/session/messages";
 import { SessionManager } from "@sayknow-cli/coding-agent/session/session-manager";
-import { StatusLineComponent } from "../src/modes/components/status-line";
+import { StatusLineComponent } from "../src/modes/components/tool-status-header";
 
 const contextWindow = 200_000;
 const sessions: AgentSession[] = [];
@@ -162,76 +160,6 @@ const testModel: Model = {
 	maxTokens: 8_192,
 };
 
-class ZeroUsageAcpSession {
-	readonly sessionManager = SessionManager.inMemory();
-	readonly sessionId = this.sessionManager.getSessionId();
-	readonly agent = { sessionId: this.sessionId, waitForIdle: async () => this.waitForIdle() };
-	readonly customCommands: [] = [];
-	readonly extensionRunner = undefined;
-	readonly skills: [] = [];
-	readonly skillsSettings = { enableSkillCommands: false };
-	readonly contextUsage: ContextUsage = {
-		tokens: 0,
-		contextWindow,
-		percent: 0,
-		source: "provider_anchor",
-	};
-	readonly #listeners = new Set<(event: AgentSessionEvent) => void>();
-	isStreaming = false;
-	queuedMessageCount = 0;
-	model: Model | undefined = testModel;
-	thinkingLevel: string | undefined;
-	systemPrompt = "system";
-
-	get settings(): Settings {
-		return Settings.instance;
-	}
-
-	get sessionName(): string {
-		return this.sessionManager.getSessionName() ?? "redteam-session";
-	}
-
-	getAvailableModels(): Model[] {
-		return [testModel];
-	}
-
-	getAvailableThinkingLevels(): readonly string[] {
-		return [];
-	}
-
-	getPlanModeState(): undefined {
-		return undefined;
-	}
-
-	setClientBridge(_bridge: unknown): void {}
-
-	async refreshMCPTools(_tools: unknown[]): Promise<void> {}
-
-	subscribe(listener: (event: AgentSessionEvent) => void): () => void {
-		this.#listeners.add(listener);
-		return () => this.#listeners.delete(listener);
-	}
-
-	getContextUsage(): ContextUsage {
-		return this.contextUsage;
-	}
-
-	async prompt(_text: string): Promise<void> {
-		this.isStreaming = true;
-		const assistant = createAssistant({ usage: createUsage(1) });
-		for (const listener of this.#listeners) {
-			listener({ type: "agent_end", messages: [assistant] } as AgentSessionEvent);
-		}
-		this.isStreaming = false;
-	}
-
-	async waitForIdle(): Promise<void> {}
-
-	async drainAsyncJobDeliveriesForAcp(): Promise<boolean> {
-		return false;
-	}
-}
-
 beforeAll(async () => {
 	resetSettingsForTest();
 	await Settings.init({ inMemory: true });
@@ -347,38 +275,6 @@ describe("context usage SSOT red-team probes", () => {
 		}
 		expect(heuristic.source).toBe("heuristic");
 		expect(providerAnchor.source).toBe("provider_anchor");
-	});
-
-	it("emits ACP usage_update for a known zero-token snapshot", async () => {
-		const updates: SessionNotification[] = [];
-		const abortController = new AbortController();
-		const connection = {
-			sessionUpdate: async (notification: SessionNotification) => {
-				updates.push(notification);
-			},
-			signal: abortController.signal,
-			closed: Promise.withResolvers<void>().promise,
-		} as unknown as AgentSideConnection;
-		const session = new ZeroUsageAcpSession();
-		const agent = new AcpAgent(connection, async () => session as unknown as AgentSession);
-
-		try {
-			const created = await agent.newSession({ cwd: process.cwd(), mcpServers: [] });
-			await agent.prompt({
-				sessionId: created.sessionId,
-				prompt: [{ type: "text", text: "zero usage" }],
-			} as PromptRequest);
-
-			const usageUpdate = updates.find(update => update.update.sessionUpdate === "usage_update");
-			expect(usageUpdate).toBeDefined();
-			expect(usageUpdate?.update).toMatchObject({
-				sessionUpdate: "usage_update",
-				size: contextWindow,
-				used: 0,
-			});
-		} finally {
-			abortController.abort();
-		}
 	});
 
 	it("retains only heuristic deltas after a provider anchor", async () => {

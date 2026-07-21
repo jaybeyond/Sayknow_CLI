@@ -53,7 +53,7 @@ const boundedGateGroups: Record<string, readonly (readonly string[])[]> = {
 	["bun", "test", "packages/coding-agent/test/skc-runtime/state-token-thrift.test.ts"],
 	// Lane H read-only doctor: imports only the native-free state-runtime module.
 	["bun", "test", "packages/coding-agent/test/skc-runtime/state-doctor.test.ts"],
-	// NOTE: deep-interview-mutation-guard, skc-skill-state-hooks, and skill-active-state
+	// NOTE: workflow-mutation-guard, skc-skill-state-hooks, and skill-active-state
 	// load the @sayknow-cli/natives addon transitively via the tool/hook runtime, so they
 	// run in the heavier "Affected path validation" job rather than this native-free gate.
 	],

@@ -1,6 +1,6 @@
 --- a/packages/tui/src/components/editor.ts
 +++ b/packages/tui/src/components/editor.ts
-@@ -935,7 +935,11 @@
+@@ -937,7 +937,11 @@
  			let hasCursor = layoutLine.hasCursor && layoutLine.cursorPos !== undefined;
  			const marker = emitCursorMarker ? CURSOR_MARKER : "";
  

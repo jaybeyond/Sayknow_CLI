@@ -2,13 +2,13 @@
 +++ b/packages/coding-agent/test/model-preset-landing-redteam-qa.test.ts
 @@ -2,6 +2,7 @@
  import { Effort, type Model } from "@sayknow-cli/ai";
- import type { ModelProfileDefinition } from "@sayknow-cli/coding-agent/config/model-profiles";
+ import { BUILTIN_MODEL_PROFILES, type ModelProfileDefinition } from "@sayknow-cli/coding-agent/config/model-profiles";
  import { Settings } from "@sayknow-cli/coding-agent/config/settings";
 +import { setLanguage } from "@sayknow-cli/coding-agent/i18n/index";
  import {
  	ModelSelectorComponent,
  	type ModelSelectorSelection,
-@@ -151,6 +152,11 @@
+@@ -184,6 +185,11 @@
  
  describe("preset landing adversarial QA", () => {
  	beforeAll(async () => {
@@ -20,7 +20,7 @@
  		testTheme = await getThemeByName("red-octopus");
  		installTestTheme();
  	});
-@@ -163,16 +169,16 @@
+@@ -196,16 +202,16 @@
  		selector.handleInput("\x1b[B");
  		selector.handleInput("\n"); // preview first expanded profile
  		selector.handleInput("\n"); // scope menu
@@ -41,7 +41,7 @@
  		expect(text).toContain("Codex Eco");
  
  		selector.handleInput("\x1b");
-@@ -193,10 +199,10 @@
+@@ -226,10 +232,10 @@
  		selector.handleInput("\n");
  		selector.handleInput("g");
  		const text = normalizeRenderedText(selector.render(260).join("\n"));
@@ -55,7 +55,7 @@
  	});
  
  	test("up/down wraps at landing boundaries and Browse all preserves model role menu", async () => {
-@@ -204,7 +210,7 @@
+@@ -237,7 +243,7 @@
  		await rendered(selector);
  		selector.handleInput("\x1b[A");
  		let text = normalizeRenderedText(selector.render(260).join("\n"));
@@ -64,7 +64,7 @@
  		selector.handleInput("\x1b[B");
  		text = normalizeRenderedText(selector.render(260).join("\n"));
  		expect(text).toContain("CODEX");
-@@ -212,22 +218,22 @@
+@@ -245,22 +251,22 @@
  		selector.handleInput("\n");
  		selector.handleInput("\n");
  		text = normalizeRenderedText(selector.render(260).join("\n"));
@@ -94,7 +94,7 @@
  		const selections: ModelSelectorSelection[] = [];
  		const comboSelector = createSelector({
  			authenticatedProviders: ["openai-codex"],
-@@ -241,19 +247,27 @@
+@@ -274,19 +280,27 @@
  		comboSelector.handleInput("\x1b[B"); // MINIMAX group
  		comboSelector.handleInput("\x1b[B"); // COMBOS group
  		comboSelector.handleInput("\n");
@@ -130,7 +130,7 @@
  	});
  
  	test("COMBOS group stays available when at least one combo is usable", async () => {
-@@ -317,7 +331,7 @@
+@@ -380,7 +394,7 @@
  		selector.handleInput("\x1b[B"); // cross boundary into MINIMAX group
  		const headerLabel = cursorRowLabel(selector);
  		expect(headerLabel).toContain("MINIMAX");

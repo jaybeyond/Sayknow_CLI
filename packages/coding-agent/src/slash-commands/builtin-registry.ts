@@ -3,15 +3,7 @@ import * as path from "node:path";
 import { ThinkingLevel } from "@sayknow-cli/agent-core";
 import { type Model, modelsAreEqual } from "@sayknow-cli/ai";
 import { getOAuthProviders } from "@sayknow-cli/ai/utils/oauth";
-import {
-	isPetMode,
-	isUnderTerminalMultiplexer,
-	PET_MODE_IDS,
-	PET_SKIN_IDS,
-	PET_SKINS,
-	Spacer,
-	Text,
-} from "@sayknow-cli/tui";
+import { PET_SKINS, type PetMode, Spacer, Text } from "@sayknow-cli/tui";
 import { setProjectDir } from "@sayknow-cli/utils";
 import { jobElapsedMs } from "../async";
 import { materializeActiveModelProfileAssignments } from "../config/model-profile-activation";
@@ -26,14 +18,18 @@ import {
 	formatModelSelectorValue,
 	parseModelPattern,
 	parseModelString,
+	splitSelectorThinkingSuffix,
 } from "../config/model-resolver";
 import { clearPluginRootsAndCaches, resolveActiveProjectRegistryPath } from "../discovery/helpers.js";
 import { td } from "../i18n";
 import { resolveMemoryBackend } from "../memory-backend";
 import { DynamicBorder } from "../modes/components/dynamic-border";
-import { SayknowPetWidget } from "../modes/components/sayknow-pet-widget";
 import { theme } from "../modes/theme/theme";
-import type { InteractiveModeContext } from "../modes/types";
+import {
+	type ComposerSubmissionOptions,
+	canApplyComposerSubmission,
+	type InteractiveModeContext,
+} from "../modes/types";
 import {
 	buildNotificationStatusReport,
 	checkNotificationHealth,
@@ -43,7 +39,7 @@ import {
 	formatNotificationTestResult,
 	recoverNotifications,
 	sendNotificationTest,
-} from "../notifications/notification-service";
+} from "../sdk/bus/notification-service";
 import { computeCacheMissCostSummary, formatCacheMissSummaryLines } from "../session/cache-economics";
 import { formatModelOnboardingGuidance } from "../setup/model-onboarding-guidance";
 import {
@@ -72,7 +68,29 @@ import type {
 export type { BuiltinSlashCommand, SubcommandDef } from "./types";
 
 /** TUI-specific runtime accepted by `executeBuiltinSlashCommand`. */
-export type BuiltinSlashCommandRuntime = TuiSlashCommandRuntime;
+export type BuiltinSlashCommandRuntime = TuiSlashCommandRuntime & {
+	composer?: ComposerSubmissionOptions;
+};
+
+function canClearComposer(runtime: BuiltinSlashCommandRuntime): boolean {
+	return canApplyComposerSubmission(runtime.composer, runtime.ctx.editor);
+}
+
+const PET_COMMAND_OPTIONS: ReadonlyArray<{ name: string; mode: PetMode; description: string }> = [
+	{ name: "off", mode: "off", description: "Hide the pet" },
+	{ name: "RedSayknow", mode: "red", description: PET_SKINS.red.description },
+	{ name: "BlueSayknow", mode: "blue", description: PET_SKINS.blue.description },
+];
+const PET_COMMAND_HINT = `[${PET_COMMAND_OPTIONS.map(option => option.name).join("|")}]`;
+/**
+ * Deprecated inputs kept accepted for compatibility (`/pet on|red|blue`).
+ * Display, completion, and inline hints stay canonical (`PET_COMMAND_OPTIONS`).
+ */
+const PET_COMMAND_DEPRECATED_INPUTS: Readonly<Record<string, PetMode>> = {
+	on: "red",
+	red: "red",
+	blue: "blue",
+};
 
 type SkcModelBatchAssignmentTargetId = "all-role-agents" | "all-targets";
 type ParsedModelCommandArgs =
@@ -237,12 +255,9 @@ function parseModelCommandArgs(args: string): ParsedModelCommandArgs {
 
 function splitExplicitThinkingSelector(selector: string): { baseSelector: string; thinkingLevel?: ThinkingLevel } {
 	const trimmed = selector.trim();
-	const colonIndex = trimmed.lastIndexOf(":");
-	if (colonIndex === -1) {
-		return { baseSelector: trimmed };
-	}
-	const thinkingLevel = parseThinkingLevel(trimmed.slice(colonIndex + 1));
-	return thinkingLevel ? { baseSelector: trimmed.slice(0, colonIndex), thinkingLevel } : { baseSelector: trimmed };
+	const { selector: baseSelector, thinkingLevel } = splitSelectorThinkingSuffix(trimmed);
+	// Preserve the whole selector when the trailing suffix is not a valid thinking level.
+	return thinkingLevel ? { baseSelector, thinkingLevel } : { baseSelector: trimmed };
 }
 
 interface ModelCommandSelection {
@@ -571,34 +586,29 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 	{
 		name: "pet",
 		description: "Sayknow pet living beside the composer",
-		subcommands: [
-			{ name: "off", description: "Hide the pet" },
-			...PET_SKIN_IDS.map(id => ({ name: id, description: PET_SKINS[id].description })),
-		],
-		inlineHint: `[${PET_MODE_IDS.join("|")}]`,
+		subcommands: PET_COMMAND_OPTIONS.map(option => ({ name: option.name, description: option.description })),
+		inlineHint: PET_COMMAND_HINT,
 		allowArgs: true,
 		handleTui: (command, runtime) => {
 			const ctx = runtime.ctx;
 			const raw = command.args?.trim().toLowerCase() ?? "";
-			const arg = raw === "on" ? "red" : raw;
-			if (!arg) {
+			const arg =
+				PET_COMMAND_OPTIONS.find(option => option.name.toLowerCase() === raw)?.mode ??
+				PET_COMMAND_DEPRECATED_INPUTS[raw];
+			if (!raw) {
 				ctx.showPetSelector();
 				ctx.editor.setText("");
 				return;
 			}
-			if (arg !== "off" && !SayknowPetWidget.pixelProtocol()) {
-				ctx.showStatus(
-					isUnderTerminalMultiplexer()
-						? "Sayknow pet: graphics are suppressed inside tmux/screen/zellij — escapes are not forwarded end-to-end. Run skc outside the multiplexer in a sixel/kitty-graphics terminal, or set PI_FORCE_IMAGE_PROTOCOL=sixel when your multiplexer+client chain renders sixel."
-						: "Sayknow pet needs a sixel/kitty-graphics terminal (Windows Terminal 1.22+, kitty, Ghostty, WezTerm)",
-					{ dim: true },
-				);
-			} else if (isPetMode(arg)) {
-				ctx.setPetMode(arg);
-				const name = arg === "off" ? "Sayknow pet hidden" : `${PET_SKINS[arg].label} is here`;
-				ctx.showStatus(name);
+			if (arg) {
+				// The shared commit policy rechecks capability, persists only on
+				// acceptance, and surfaces the actionable warning on rejection.
+				if (ctx.setPetMode(arg)) {
+					const name = arg === "off" ? "Sayknow pet hidden" : `${PET_SKINS[arg].label} is here`;
+					ctx.showStatus(name);
+				}
 			} else {
-				ctx.showStatus(`Usage: /pet [${PET_MODE_IDS.join("|")}]`, { dim: true });
+				ctx.showStatus(`Usage: /pet ${PET_COMMAND_HINT}`, { dim: true });
 			}
 			ctx.editor.setText("");
 		},
@@ -624,7 +634,7 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 			// — including the first-time `/goal set <objective>` case where goal
 			// mode was not yet active. A previous `wasGoalModeEnabled` guard dropped
 			// that first-time case from history (up/down-arrow recall).
-			await runtime.ctx.handleGoalModeCommand(command.args || undefined);
+			await runtime.ctx.goalModeController.handleCommand(command.args || undefined);
 			if (command.args) {
 				runtime.ctx.editor.addToHistory(command.text);
 			}
@@ -696,6 +706,7 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 						await runtime.session.setModel(selection.model, "default", {
 							selector: selection.selector,
 							thinkingLevel: existingDefaultThinkingLevel,
+							cause: "user-selection",
 						});
 						if (existingDefaultThinkingLevel) {
 							runtime.session.setThinkingLevel(existingDefaultThinkingLevel);
@@ -1043,6 +1054,20 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 		},
 		handleTui: async (_command, runtime) => {
 			await runtime.ctx.handleJobsCommand();
+			runtime.ctx.editor.setText("");
+		},
+	},
+	{
+		name: "transcript",
+		description: "Browse the current session transcript",
+		acpDescription: "Browse the current session transcript",
+		handle: async (_command, runtime) => {
+			await runtime.output("Transcript browsing is available in the interactive TUI.");
+			return commandConsumed();
+		},
+		handleTui: (_command, runtime) => {
+			if (runtime.ctx.isTranscriptViewerOpen()) return;
+			runtime.ctx.showTranscriptViewer();
 			runtime.ctx.editor.setText("");
 		},
 	},
@@ -1412,6 +1437,42 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 		},
 	},
 	{
+		name: "handoff",
+		priority: 71,
+		description: "Generate a handoff and continue in a new session",
+		acpDescription: "Generate a handoff document and start a new session",
+		inlineHint: "[focus instructions]",
+		acpInputHint: "[focus instructions]",
+		allowArgs: true,
+		handle: async (command, runtime) => {
+			let result: Awaited<ReturnType<typeof runtime.session.handoff>>;
+			try {
+				result = await runtime.session.handoff(command.args || undefined);
+			} catch (err) {
+				// Handoff precondition failures (nothing to hand off, streaming),
+				// cancellation, and provider errors propagate as plain Errors; the
+				// switch is non-destructive so the current session is unchanged.
+				return usage(`Handoff failed: ${errorMessage(err)}; current session is unchanged.`, runtime);
+			}
+			if (!result) {
+				return usage(
+					"Handoff not created (cancelled or nothing to hand off); current session is unchanged.",
+					runtime,
+				);
+			}
+			await runtime.output(
+				result.savedPath
+					? `Handoff created; new session started. Handoff document saved to: ${result.savedPath}`
+					: "Handoff created; new session started with handoff context.",
+			);
+			return commandConsumed();
+		},
+		handleTui: async (command, runtime) => {
+			runtime.ctx.editor.setText("");
+			await runtime.ctx.handleHandoffCommand(command.args || undefined);
+		},
+	},
+	{
 		name: "contribute-pr",
 		aliases: ["contribution-prep"],
 		description: "Dump redacted session context and spawn a fresh contribute-pr worker",
@@ -1441,6 +1502,15 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 		description: "Resume a previous session",
 		handleTui: (_command, runtime) => {
 			runtime.ctx.showSessionSelector();
+			runtime.ctx.editor.setText("");
+		},
+	},
+	{
+		name: "sessions",
+		priority: 91,
+		description: "Show all persisted sessions (read-only)",
+		handleTui: (_command, runtime) => {
+			runtime.ctx.showSessionsDashboard();
 			runtime.ctx.editor.setText("");
 		},
 	},
@@ -1689,7 +1759,9 @@ export async function executeBuiltinSlashCommand(
 		const diagnostic = formatUnknownBuiltinSlashCommandDiagnostic(parsed.name);
 		if (!diagnostic) return false;
 		runtime.ctx.showError(diagnostic);
-		runtime.ctx.editor.setText("");
+		if (canClearComposer(runtime)) {
+			runtime.ctx.editor.setText("");
+		}
 		return true;
 	}
 	if (parsed.args.length > 0 && !command.allowArgs) {
@@ -1704,7 +1776,9 @@ export async function executeBuiltinSlashCommand(
 		const ctx = runtime.ctx;
 		const adapted = toSlashCommandRuntime(runtime);
 		const result = await command.handle(parsed, adapted);
-		ctx.editor.setText("");
+		if (canClearComposer(runtime)) {
+			ctx.editor.setText("");
+		}
 		if (result && typeof result === "object" && "prompt" in result) return result.prompt;
 		return true;
 	}

@@ -1,9 +1,11 @@
+import * as path from "node:path";
 import { ThinkingLevel } from "@sayknow-cli/agent-core";
 import { getOAuthProviders } from "@sayknow-cli/ai/utils/oauth";
 import type { OAuthProvider } from "@sayknow-cli/ai/utils/oauth/types";
-import type { Component, OverlayHandle } from "@sayknow-cli/tui";
+import type { Component, OverlayHandle, SlashCommand } from "@sayknow-cli/tui";
 import { Input, isPetMode, Loader, Spacer, Text } from "@sayknow-cli/tui";
-import { getAgentDbPath, getProjectDir } from "@sayknow-cli/utils";
+import { getAgentDbPath, getProjectDir, logger, VERSION } from "@sayknow-cli/utils";
+import { type AppKeybinding, formatKeyHints } from "../../config/keybindings";
 import {
 	activateModelProfile,
 	materializeActiveModelProfileAssignment,
@@ -12,6 +14,7 @@ import {
 import { formatModelProfileDisplayLabel, recommendModelProfileForProvider } from "../../config/model-profiles";
 import { SKC_MODEL_ASSIGNMENT_TARGETS, type SkcModelAssignmentTargetId } from "../../config/model-registry";
 import { formatModelSelectorValue } from "../../config/model-resolver";
+import { selectorHead } from "../../config/model-selector-value";
 import type { ModelProfileConfig } from "../../config/models-config-schema";
 import { type Settings, settings } from "../../config/settings";
 import { DebugSelectorComponent } from "../../debug";
@@ -37,10 +40,50 @@ import {
 	theme,
 } from "../../modes/theme/theme";
 import type { InteractiveModeContext, OAuthSelectorOptions } from "../../modes/types";
+import { getNotificationConfig, isTelegramConfigured, maskToken } from "../../sdk/bus/config";
+import {
+	clearTelegramActivationMarker,
+	createTelegramActivationMarker,
+	observedTelegramActivationMarker,
+	persistTelegramActivationMarker,
+	proposedTelegramIdentity,
+	reconcileCommittedTelegramConfiguration,
+	removeTelegramConfiguration,
+	saveTelegramInactive,
+} from "../../sdk/bus/notification-orchestration";
+import {
+	buildNotificationStatusReport,
+	checkNotificationHealth,
+	recoverNotifications,
+	sanitizeDiagnostic,
+	sendNotificationTest,
+} from "../../sdk/bus/notification-service";
+import type { NotificationSessionStatus } from "../../sdk/bus/session-control";
+import {
+	ensureTelegramDaemonRunningDetailed,
+	readDaemonState,
+	unregisterNotificationRoot,
+} from "../../sdk/bus/telegram-daemon";
+import { TelegramDaemonController } from "../../sdk/bus/telegram-daemon-control";
+import { runTelegramSetup, type TelegramSetupPreflight } from "../../sdk/bus/telegram-setup";
 import { type SessionInfo, SessionManager } from "../../session/session-manager";
+import { getTreeForInternalRead } from "../../session/session-manager-internal";
+
 import { FileSessionStorage } from "../../session/session-storage";
 import {
+	CREDENTIAL_AUTO_IMPORT_DISCOVERY_WARNING,
+	CREDENTIAL_AUTO_IMPORT_PERSISTENCE_WARNING,
+	CREDENTIAL_AUTO_IMPORT_REFRESH_WARNING,
+	CREDENTIAL_AUTO_IMPORT_RETRY_WARNING,
 	CREDENTIAL_AUTO_IMPORT_ROTATION_WARNING,
+	CREDENTIAL_AUTO_IMPORT_STATE_UNREADABLE_WARNING,
+	type CredentialAutoImportStateReadResult,
+	type CredentialAutoImportStateStore,
+	createCredentialAutoImportStateStore,
+	formatCredentialAutoImportCandidateLabel,
+	formatCredentialAutoImportPrompt,
+	isCredentialAutoImportStateResolvedForVersion,
+	logCredentialAutoImportFailures,
 	runExternalCredentialAutoImport,
 } from "../../setup/credential-auto-import";
 import { filterAutoImportOAuthCredentials, formatDiscoverySummary } from "../../setup/credential-import";
@@ -58,9 +101,15 @@ import {
 	setSearchFallbackProviders,
 	setSearchHardTimeoutMs,
 } from "../../tools";
+import { copyToClipboard } from "../../utils/clipboard";
 import { setSessionTerminalTitle } from "../../utils/title-generator";
 import { AgentDashboard } from "../components/agent-dashboard";
 import { AssistantMessageComponent } from "../components/assistant-message";
+import {
+	type CommandPaletteAction,
+	CommandPaletteComponent,
+	type CommandPaletteEntry,
+} from "../components/command-palette";
 import {
 	CustomModelPresetWizardComponent,
 	type CustomModelPresetWizardSubmit,
@@ -70,8 +119,18 @@ import { ExtensionDashboard } from "../components/extensions";
 import { HistorySearchComponent } from "../components/history-search";
 import { JobsOverlayComponent } from "../components/jobs-overlay";
 import { ModelSelectorComponent } from "../components/model-selector";
+import type {
+	NotificationsEditorOperations,
+	PreparedTelegramConfiguration,
+} from "../components/notifications-settings-editor";
 import { OAuthSelectorComponent } from "../components/oauth-selector";
+import { isPetAvailable } from "../components/pet-capability";
 import { PetSelectorComponent } from "../components/pet-selector";
+import {
+	type PlanPreviewOptions,
+	PlanPreviewOverlay,
+	type PlanPreviewResult,
+} from "../components/plan-preview-overlay";
 import { PluginSelectorComponent } from "../components/plugin-selector";
 import {
 	type ProviderOnboardingAction,
@@ -80,15 +139,20 @@ import {
 import type { PetMode } from "../components/sayknow-pet-widget";
 import { SessionObserverOverlayComponent } from "../components/session-observer-overlay";
 import { SessionSelectorComponent } from "../components/session-selector";
+import { dashboardSessions, SessionsDashboardComponent } from "../components/sessions-dashboard";
 import { SettingsSelectorComponent } from "../components/settings-selector";
-import type { StatusLineSettings } from "../components/status-line";
+import { TasksPaneComponent } from "../components/tasks-pane";
 import { ThemeSelectorComponent } from "../components/theme-selector";
 import { ThinkingSelectorComponent } from "../components/thinking-selector";
 import { ToolExecutionComponent } from "../components/tool-execution";
+import type { StatusLineSettings } from "../components/tool-status-header";
+import { TranscriptViewerOverlay, transcriptViewerEntries } from "../components/transcript-viewer-overlay";
 import { TreeSelectorComponent } from "../components/tree-selector";
 import { UserMessageSelectorComponent } from "../components/user-message-selector";
 import type { JobsObserver } from "../jobs-observer";
 import type { SessionObserverRegistry } from "../session-observer-registry";
+import type { TasksAggregator } from "../tasks-aggregator";
+import type { TranscriptItemRegistry } from "../transcript-item-registry";
 
 const CALLBACK_SERVER_PROVIDERS = new Set<string>([
 	"anthropic",
@@ -134,8 +198,590 @@ function formatProviderOnboardingCommandGuide(): string {
 	].join("\n");
 }
 
+export interface NotificationsEditorAdapterContext {
+	settings: Settings;
+	session: Pick<InteractiveModeContext["session"], "notificationSessionController">;
+	sessionManager: Pick<InteractiveModeContext["sessionManager"], "getCwd" | "getSessionId">;
+	notifyConfigChanged?: () => Promise<void> | void;
+}
+
+export interface NotificationsEditorOperationDependencies {
+	getNotificationConfig: typeof getNotificationConfig;
+	maskToken: typeof maskToken;
+	buildNotificationStatusReport: typeof buildNotificationStatusReport;
+	checkNotificationHealth: typeof checkNotificationHealth;
+	sendNotificationTest: typeof sendNotificationTest;
+	recoverNotifications: typeof recoverNotifications;
+	sanitizeDiagnostic: typeof sanitizeDiagnostic;
+	ensureTelegramDaemonRunningDetailed: typeof ensureTelegramDaemonRunningDetailed;
+	runTelegramSetup: typeof runTelegramSetup;
+	proposedTelegramIdentity: typeof proposedTelegramIdentity;
+	reconcileCommittedTelegramConfiguration: typeof reconcileCommittedTelegramConfiguration;
+	saveTelegramInactive: typeof saveTelegramInactive;
+	removeTelegramConfiguration: typeof removeTelegramConfiguration;
+	unregisterNotificationRoot: typeof unregisterNotificationRoot;
+	reloadTelegramDaemon(settings: Settings): Promise<{ ok: boolean; message: string }>;
+	restartTelegramDaemon(settings: Settings): Promise<{ ok: boolean; message: string }>;
+	stopTelegramDaemon(settings: Settings): Promise<{
+		ok: boolean;
+		message: string;
+		before?: { health?: string };
+	}>;
+}
+
+const notificationEditorOperationDependencies: NotificationsEditorOperationDependencies = {
+	getNotificationConfig,
+	maskToken,
+	buildNotificationStatusReport,
+	checkNotificationHealth,
+	sendNotificationTest,
+	recoverNotifications,
+	sanitizeDiagnostic,
+	ensureTelegramDaemonRunningDetailed,
+	runTelegramSetup,
+	proposedTelegramIdentity,
+	reconcileCommittedTelegramConfiguration,
+	saveTelegramInactive,
+	removeTelegramConfiguration,
+	unregisterNotificationRoot,
+	reloadTelegramDaemon: async settings =>
+		await new TelegramDaemonController(settings).reload({ spawnIfStopped: false }),
+	restartTelegramDaemon: async settings =>
+		await new TelegramDaemonController(settings).reload({ spawnIfStopped: true }),
+	stopTelegramDaemon: async settings => await new TelegramDaemonController(settings).stop(),
+};
+
+function unavailableNotificationSessionStatus(): NotificationSessionStatus {
+	return {
+		eligible: false,
+		locallyEnabled: true,
+		effectiveEnabled: false,
+		running: false,
+		environment: "off",
+	};
+}
+
+function unavailableNotificationSessionResult() {
+	return { outcome: "disabled" as const, status: unavailableNotificationSessionStatus() };
+}
+
+function notificationOperationError(
+	services: NotificationsEditorOperationDependencies,
+	error: unknown,
+	token?: string,
+): Error {
+	return new Error(
+		services.sanitizeDiagnostic(error instanceof Error ? error.message : "Notification operation failed.", token),
+	);
+}
+
+/**
+ * Concrete service adapter for the direct Notifications settings tab. Secrets remain in this closure's
+ * WeakMap and are never exposed through the editor's safe draft contract.
+ */
+export function createNotificationsEditorOperations(
+	ctx: NotificationsEditorAdapterContext,
+	overrides: Partial<NotificationsEditorOperationDependencies> = {},
+): NotificationsEditorOperations {
+	const services = { ...notificationEditorOperationDependencies, ...overrides };
+	const drafts = new WeakMap<PreparedTelegramConfiguration, string>();
+	const sessionContext = () => ({ sessionManager: ctx.sessionManager });
+	const notifyAfterDurableCommit = async (): Promise<void> => {
+		await ctx.notifyConfigChanged?.();
+	};
+	const reconnect = async () =>
+		await services.ensureTelegramDaemonRunningDetailed({
+			settings: ctx.settings,
+			cwd: ctx.sessionManager.getCwd(),
+			sessionId: ctx.sessionManager.getSessionId(),
+		});
+	const telegramSetupPreflight = async (): Promise<TelegramSetupPreflight> => {
+		const storedChatId = services.getNotificationConfig(ctx.settings).chatId;
+		try {
+			const state = await readDaemonState(ctx.settings);
+			const validPid = Number.isSafeInteger(state?.pid) && (state?.pid ?? 0) > 0;
+			if (!state || !validPid) return { storedChatId };
+			let live = false;
+			try {
+				process.kill(state.pid, 0);
+				live = true;
+			} catch (error) {
+				live = (error as NodeJS.ErrnoException).code === "EPERM";
+			}
+			return live
+				? {
+						storedChatId,
+						daemon: {
+							live,
+							tokenFingerprint: typeof state.tokenFingerprint === "string" ? state.tokenFingerprint : undefined,
+							chatId: typeof state.chatId === "string" && state.chatId.trim() ? state.chatId.trim() : undefined,
+						},
+					}
+				: { storedChatId };
+		} catch {
+			return { storedChatId };
+		}
+	};
+
+	return {
+		loadState: async () => {
+			const config = services.getNotificationConfig(ctx.settings);
+			return {
+				status: services.buildNotificationStatusReport(ctx.settings),
+				session:
+					ctx.session.notificationSessionController?.query(sessionContext()) ??
+					unavailableNotificationSessionStatus(),
+				preferences: {
+					redact: config.redact,
+					verbosity: config.verbosity,
+					sessionScope: config.sessionScope,
+					richEnabled: config.rich.enabled,
+					richDraftEnabled: config.richDraft.enabled,
+					toolActivityEnabled: config.toolActivity.enabled,
+					streamingEnabled: config.streaming.enabled,
+				},
+			};
+		},
+
+		refreshHealth: async ({ probe, signal }) => {
+			if (signal?.aborted) throw new Error("Notification health refresh cancelled.");
+			try {
+				const input: Parameters<typeof checkNotificationHealth>[0] & { signal?: AbortSignal } = {
+					settings: ctx.settings,
+					stateRoot: path.join(ctx.sessionManager.getCwd(), ".skc", "state"),
+					probe,
+					signal,
+				};
+				const report = await services.checkNotificationHealth(input);
+				if (signal?.aborted) throw new Error("Notification health refresh cancelled.");
+				const token = services.getNotificationConfig(ctx.settings).botToken;
+				return {
+					...report,
+					checks: report.checks.map(check => ({
+						...check,
+						detail: services.sanitizeDiagnostic(check.detail, token),
+					})),
+					reachability: {
+						...report.reachability,
+						detail: services.sanitizeDiagnostic(report.reachability.detail, token),
+					},
+				};
+			} catch (error) {
+				throw notificationOperationError(services, error, services.getNotificationConfig(ctx.settings).botToken);
+			}
+		},
+
+		sendTest: async () => {
+			try {
+				const result = await services.sendNotificationTest({ settings: ctx.settings });
+				return {
+					...result,
+					detail: services.sanitizeDiagnostic(
+						result.detail,
+						services.getNotificationConfig(ctx.settings).botToken,
+					),
+				};
+			} catch (error) {
+				throw notificationOperationError(services, error, services.getNotificationConfig(ctx.settings).botToken);
+			}
+		},
+
+		recover: async () => {
+			try {
+				const result = await services.recoverNotifications({
+					settings: ctx.settings,
+					stateRoot: path.join(ctx.sessionManager.getCwd(), ".skc", "state"),
+				});
+				return {
+					...result,
+					daemon: {
+						...result.daemon,
+						detail: services.sanitizeDiagnostic(
+							result.daemon.detail,
+							services.getNotificationConfig(ctx.settings).botToken,
+						),
+					},
+				};
+			} catch (error) {
+				throw notificationOperationError(services, error, services.getNotificationConfig(ctx.settings).botToken);
+			}
+		},
+
+		reconnect: async () => {
+			try {
+				const result = await reconnect();
+				const controller = ctx.session.notificationSessionController;
+				if (result === "blocked_identity") {
+					await controller?.enterBlockedRuntime(sessionContext());
+				} else if (result === "spawned" || result === "reloaded" || result === "attached") {
+					await controller?.clearBlockedRuntime(sessionContext());
+					await controller?.reconcileCurrentSession(sessionContext());
+				}
+				return result;
+			} catch (error) {
+				throw notificationOperationError(services, error, services.getNotificationConfig(ctx.settings).botToken);
+			}
+		},
+
+		preflightProposedIdentity: async (input, signal) => {
+			const token = input.token.consume();
+			const unknownIdentity = { status: "unknown" as const };
+			if (!token.trim()) {
+				return {
+					status: "error",
+					identity: unknownIdentity,
+					message: "Telegram bot token is required.",
+				};
+			}
+			try {
+				const setup = await services.runTelegramSetup({
+					token,
+					chatId: input.chatId,
+					preflight: await telegramSetupPreflight(),
+					revalidatePreflight: async () => await telegramSetupPreflight(),
+					interactive: false,
+					signal,
+					deps: { fetchImpl: globalThis.fetch },
+				});
+				if (!setup.ok) {
+					return {
+						status: setup.status === "aborted" ? "aborted" : setup.status === "cancelled" ? "cancelled" : "error",
+						identity: unknownIdentity,
+						message: services.sanitizeDiagnostic(setup.detail, token),
+					};
+				}
+				if (signal.aborted) {
+					return {
+						status: "aborted",
+						identity: unknownIdentity,
+						message: "Telegram setup cancelled.",
+					};
+				}
+				const identity = await services.proposedTelegramIdentity({
+					settings: ctx.settings,
+					botToken: token,
+					chatId: setup.chatId,
+					chatDisplay: setup.chatId,
+				});
+				if (signal.aborted) {
+					return {
+						status: "aborted",
+						identity,
+						message: "Telegram setup cancelled.",
+					};
+				}
+				const draft: PreparedTelegramConfiguration = {
+					chatId: setup.chatId,
+					tokenMask: services.maskToken(token),
+					tokenFingerprint: setup.tokenFingerprint,
+					richEnabled: input.richEnabled,
+					richDraftEnabled: input.richDraftEnabled,
+					streamingEnabled: input.streamingEnabled,
+				};
+				drafts.set(draft, token);
+				const pairingMessage =
+					setup.pairingSource === "discovered"
+						? "Telegram private chat discovered and validated."
+						: setup.pairingSource === "reused"
+							? "Stored Telegram private chat validated without polling."
+							: "Supplied Telegram private chat validated.";
+				return {
+					status: "ready",
+					identity,
+					draft,
+					pairingSource: setup.pairingSource,
+					message:
+						identity.status === "foreign" || identity.status === "unknown"
+							? `${pairingMessage} Activation is blocked by the current daemon identity.`
+							: pairingMessage,
+				};
+			} catch (error) {
+				return {
+					status: signal.aborted ? "aborted" : "error",
+					identity: unknownIdentity,
+					message: signal.aborted
+						? "Telegram setup cancelled."
+						: services.sanitizeDiagnostic(
+								error instanceof Error ? error.message : "Telegram setup failed.",
+								token,
+							),
+				};
+			}
+		},
+
+		commitConfigure: async draft => {
+			const token = drafts.get(draft);
+			if (!token) throw new Error("The Telegram setup draft expired. Re-enter the masked bot token.");
+			try {
+				const inactiveMarkerToClear = observedTelegramActivationMarker(ctx.settings, token, draft.chatId);
+				const receipt = await ctx.settings.commitAtomicBatch([
+					{ path: "notifications.enabled", op: "set", value: true },
+					{ path: "notifications.telegram.botToken", op: "set", value: token },
+					{ path: "notifications.telegram.chatId", op: "set", value: draft.chatId },
+					{ path: "notifications.telegram.rich.enabled", op: "set", value: draft.richEnabled },
+					{ path: "notifications.telegram.richDraft.enabled", op: "set", value: draft.richDraftEnabled },
+					{ path: "notifications.telegram.streaming.enabled", op: "set", value: draft.streamingEnabled },
+				]);
+				drafts.delete(draft);
+				const activationMarker = createTelegramActivationMarker({
+					botToken: token,
+					chatId: draft.chatId,
+					state: "blocked",
+					reason: "identity_mismatch",
+				});
+				const controller = ctx.session.notificationSessionController;
+				const activation = await services.reconcileCommittedTelegramConfiguration({
+					receipt,
+					inactiveMarkerToClear,
+					activation: {
+						controller: controller
+							? {
+									enterBlockedRuntime: async () => await controller.enterBlockedRuntime(sessionContext()),
+									clearBlockedRuntime: async () => await controller.clearBlockedRuntime(sessionContext()),
+									reconcileCurrentSession: async () =>
+										await controller.reconcileCurrentSession(sessionContext()),
+								}
+							: {
+									enterBlockedRuntime: async () => undefined,
+									clearBlockedRuntime: async () => undefined,
+									reconcileCurrentSession: async () => undefined,
+								},
+						reconnect,
+						persistInactive: async marker => await persistTelegramActivationMarker(ctx.settings, marker),
+						clearInactive: async marker => await clearTelegramActivationMarker(ctx.settings, marker),
+						marker: activationMarker,
+					},
+				});
+				await notifyAfterDurableCommit();
+				if (activation.status === "blocked_identity") {
+					return {
+						status: "blocked_identity" as const,
+						receipt,
+						message: services.sanitizeDiagnostic(activation.message, token),
+						restore: async () => {
+							const restored = await activation.restore();
+							if (restored.status === "restored" || restored.status === "still_blocked") {
+								await notifyAfterDurableCommit();
+							}
+							return restored;
+						},
+						retainCommitted: () => activation.retainCommitted(),
+					};
+				}
+				return {
+					status: "saved" as const,
+					receipt,
+					message: services.sanitizeDiagnostic("Telegram configuration saved and reconciled.", token),
+				};
+			} catch (error) {
+				throw notificationOperationError(services, error, token);
+			}
+		},
+
+		saveInactive: async draft => {
+			const token = drafts.get(draft);
+			if (!token) throw new Error("The Telegram setup draft expired. Re-enter the masked bot token.");
+			try {
+				const result = await services.saveTelegramInactive({
+					settings: ctx.settings,
+					botToken: token,
+					chatId: draft.chatId,
+				});
+				drafts.delete(draft);
+				await notifyAfterDurableCommit();
+				return {
+					status: "saved_inactive" as const,
+					receipt: result.receipt,
+					message: "Telegram configuration saved inactive; no runtime activation was requested.",
+				};
+			} catch (error) {
+				throw notificationOperationError(services, error, token);
+			}
+		},
+
+		discardConfigureDraft: draft => {
+			drafts.delete(draft);
+		},
+
+		enableGlobally: async () => {
+			try {
+				const receipt = await ctx.settings.commitAtomicBatch([
+					{ path: "notifications.enabled", op: "set", value: true },
+				]);
+				await notifyAfterDurableCommit();
+				return { receipt, message: "Global notifications enabled using stored configuration." };
+			} catch (error) {
+				throw notificationOperationError(services, error, services.getNotificationConfig(ctx.settings).botToken);
+			}
+		},
+
+		disableGlobally: async () => {
+			try {
+				const receipt = await ctx.settings.commitAtomicBatch([
+					{ path: "notifications.enabled", op: "set", value: false },
+				]);
+				await notifyAfterDurableCommit();
+				return { receipt, message: "Global notifications disabled." };
+			} catch (error) {
+				throw notificationOperationError(services, error, services.getNotificationConfig(ctx.settings).botToken);
+			}
+		},
+
+		removeTelegram: async () => {
+			const controller = ctx.session.notificationSessionController;
+			let runtimePrepared = false;
+			try {
+				const result = await services.removeTelegramConfiguration({
+					settings: ctx.settings,
+					removal: {
+						stopAndUnregister: async () => {
+							if (controller) await controller.enterBlockedRuntime(sessionContext());
+							runtimePrepared = true;
+							const unregistered = await services.unregisterNotificationRoot({
+								settings: ctx.settings,
+								cwd: ctx.sessionManager.getCwd(),
+								sessionId: ctx.sessionManager.getSessionId(),
+							});
+							if (unregistered.remainingRoots === 0) {
+								const stopped = await new TelegramDaemonController(ctx.settings).stop();
+								if (!stopped.ok) throw new Error(stopped.message);
+							}
+						},
+					},
+				});
+				if (runtimePrepared && controller) {
+					await controller.clearBlockedRuntime(sessionContext());
+					await controller.reconcileCurrentSession(sessionContext());
+				}
+				await notifyAfterDurableCommit();
+				return {
+					receipt: result.receipt,
+					globallyDisabled: result.globallyDisabled,
+					message: result.globallyDisabled
+						? "Telegram configuration removed and global notifications disabled."
+						: "Telegram configuration removed; Discord or Slack configuration was preserved.",
+				};
+			} catch (error) {
+				if (runtimePrepared) {
+					const restored = await reconnect();
+					if (restored !== "blocked_identity" && controller) {
+						await controller.clearBlockedRuntime(sessionContext());
+						await controller.reconcileCurrentSession(sessionContext());
+					}
+				}
+				throw notificationOperationError(services, error, services.getNotificationConfig(ctx.settings).botToken);
+			}
+		},
+
+		setSessionLocal: async enabled => {
+			const controller = ctx.session.notificationSessionController;
+			if (!controller) return unavailableNotificationSessionResult();
+			try {
+				return await controller.setLocalEnabled(sessionContext(), enabled);
+			} catch (error) {
+				throw notificationOperationError(services, error, services.getNotificationConfig(ctx.settings).botToken);
+			}
+		},
+
+		commitPreferences: async preferences => {
+			let daemonWasRunningForDisable = false;
+			try {
+				const before = services.getNotificationConfig(ctx.settings);
+				const disablingToolActivity =
+					isTelegramConfigured(before) && before.toolActivity.enabled && !preferences.toolActivityEnabled;
+				if (disablingToolActivity) {
+					const stopped = await services.stopTelegramDaemon(ctx.settings);
+					if (!stopped.ok)
+						throw new Error(
+							`Notification preferences were not saved because daemon stop failed: ${stopped.message}`,
+						);
+					daemonWasRunningForDisable = stopped.before?.health === "running";
+				}
+
+				let receipt: Awaited<ReturnType<typeof ctx.settings.commitAtomicBatch>>;
+				try {
+					receipt = await ctx.settings.commitAtomicBatch([
+						{ path: "notifications.redact", op: "set", value: preferences.redact },
+						{ path: "notifications.verbosity", op: "set", value: preferences.verbosity },
+						{ path: "notifications.sessionScope", op: "set", value: preferences.sessionScope },
+						{ path: "notifications.telegram.rich.enabled", op: "set", value: preferences.richEnabled },
+						{ path: "notifications.telegram.richDraft.enabled", op: "set", value: preferences.richDraftEnabled },
+						{ path: "notifications.telegram.streaming.enabled", op: "set", value: preferences.streamingEnabled },
+						{
+							path: "notifications.telegram.toolActivity.enabled",
+							op: "set",
+							value: preferences.toolActivityEnabled,
+						},
+					]);
+				} catch (error) {
+					if (daemonWasRunningForDisable) {
+						try {
+							const restarted = await services.restartTelegramDaemon(ctx.settings);
+							if (!restarted.ok) throw new Error(restarted.message);
+						} catch (restartError) {
+							const commitMessage = error instanceof Error ? error.message : String(error);
+							const restartMessage = restartError instanceof Error ? restartError.message : String(restartError);
+							throw new Error(
+								`Notification preference commit failed (${commitMessage}) and daemon restart failed (${restartMessage}).`,
+								{ cause: new AggregateError([error, restartError]) },
+							);
+						}
+					}
+					throw error;
+				}
+
+				const config = services.getNotificationConfig(ctx.settings);
+				if (isTelegramConfigured(config)) {
+					const reload = daemonWasRunningForDisable
+						? await services.restartTelegramDaemon(ctx.settings)
+						: await services.reloadTelegramDaemon(ctx.settings);
+					if (!reload.ok)
+						throw new Error(`Notification preferences were saved, but daemon reload failed: ${reload.message}`);
+				}
+				await notifyAfterDurableCommit();
+				return { receipt, message: "Notification preferences saved atomically." };
+			} catch (error) {
+				throw notificationOperationError(services, error, services.getNotificationConfig(ctx.settings).botToken);
+			}
+		},
+
+		reconcileCurrentSession: async () => {
+			const controller = ctx.session.notificationSessionController;
+			if (!controller) return unavailableNotificationSessionResult();
+			try {
+				return await controller.reconcileCurrentSession(sessionContext());
+			} catch (error) {
+				throw notificationOperationError(services, error, services.getNotificationConfig(ctx.settings).botToken);
+			}
+		},
+	};
+}
+
 export class SelectorController {
-	constructor(private ctx: InteractiveModeContext) {}
+	#transcriptViewerOpen = false;
+	#transcriptViewer?: TranscriptViewerOverlay;
+	#sessionsDashboardOpen = false;
+	#sessionsDashboard?: SessionsDashboardComponent;
+	#tasksPane?: TasksPaneComponent;
+	#closeTasksPane?: () => void;
+
+	#credentialAutoImportStateStore?: CredentialAutoImportStateStore;
+
+	constructor(
+		private ctx: InteractiveModeContext,
+		credentialAutoImportStateStore?: CredentialAutoImportStateStore,
+		private readonly clipboard: (text: string) => void = copyToClipboard,
+	) {
+		this.#credentialAutoImportStateStore = credentialAutoImportStateStore;
+	}
+
+	isTranscriptViewerOpen(): boolean {
+		return this.#transcriptViewerOpen;
+	}
+	refreshTranscriptViewer(identityMap?: ReadonlyMap<string, string>): void {
+		this.#transcriptViewer?.refresh(identityMap);
+		this.ctx.ui.requestRender();
+	}
 
 	/** At most one OAuth login may run at a time (fixed callback ports, single
 	 *  manual-input slot). Holds the active login's provider + abort handle. */
@@ -174,6 +820,52 @@ export class SelectorController {
 		this.ctx.ui.requestRender();
 	}
 
+	showCommandPalette(
+		commands: SlashCommand[],
+		actions: CommandPaletteAction[],
+		executeSlashCommand: (name: string) => Promise<void>,
+	): void {
+		const seenCommands = new Set<string>();
+		const entries: CommandPaletteEntry[] = [
+			...actions.map(action => ({
+				id: `action:${action.id}`,
+				label: action.label,
+				description: action.id,
+				keybinding: formatKeyHints(this.ctx.keybindings.getKeys(action.id as AppKeybinding)) || undefined,
+				searchText: action.id,
+				handler: action.handler,
+			})),
+			...commands
+				.filter(command => {
+					if (seenCommands.has(command.name)) return false;
+					seenCommands.add(command.name);
+					return true;
+				})
+				.map(command => ({
+					id: `command:${command.name}`,
+					label: `/${command.name}`,
+					description: command.description ?? "Slash command",
+					searchText: command.name,
+					handler: () => executeSlashCommand(command.name),
+				})),
+		];
+
+		this.showSelector(done => {
+			const selector = new CommandPaletteComponent(
+				entries,
+				entry => {
+					done();
+					void Promise.resolve()
+						.then(() => entry.handler?.())
+						.catch(error => {
+							this.ctx.showError(error instanceof Error ? error.message : String(error));
+						});
+				},
+				done,
+			);
+			return { component: selector, focus: selector };
+		});
+	}
 	showProviderOnboarding(): void {
 		this.showSelector(done => {
 			const selector = new ProviderOnboardingSelectorComponent(
@@ -316,6 +1008,7 @@ export class SelectorController {
 					await this.ctx.session.modelRegistry.refresh("offline");
 					await this.ctx.notifyConfigChanged?.();
 					this.ctx.showStatus(formatProviderSetupResult(result));
+					wizard.complete();
 					done();
 					this.ctx.ui.requestRender();
 				} catch (err) {
@@ -325,7 +1018,7 @@ export class SelectorController {
 			};
 			wizard = new CustomProviderWizardComponent(
 				input => {
-					void submit(input);
+					return submit(input);
 				},
 				() => {
 					done();
@@ -382,6 +1075,8 @@ export class SelectorController {
 	showSettingsSelector(): void {
 		getAvailableThemes().then(availableThemes => {
 			this.showSelector(done => {
+				const notificationsOperations = createNotificationsEditorOperations(this.ctx);
+
 				const selector = new SettingsSelectorComponent(
 					{
 						availableThinkingLevels: [...this.ctx.session.getAvailableThinkingLevels()],
@@ -437,6 +1132,7 @@ export class SelectorController {
 							this.ctx.ui.requestRender();
 						},
 					},
+					notificationsOperations,
 				);
 				return { component: selector, focus: selector };
 			});
@@ -504,6 +1200,7 @@ export class SelectorController {
 				mode => {
 					this.ctx.previewPetMode(mode);
 				},
+				isPetAvailable(),
 			);
 			return { component: selector, focus: selector.getSelectList() };
 		});
@@ -557,7 +1254,7 @@ export class SelectorController {
 		const dashboard = await AgentDashboard.create(getProjectDir(), this.ctx.settings, this.ctx.ui.terminal.rows, {
 			modelRegistry: this.ctx.session.modelRegistry,
 			activeModelPattern,
-			defaultModelPattern,
+			defaultModelPattern: selectorHead(defaultModelPattern),
 		});
 		this.showSelector(done => {
 			dashboard.onClose = () => {
@@ -844,7 +1541,13 @@ export class SelectorController {
 						const { model, role, thinkingLevel, selector: selectedSelector } = selection;
 						if (role === null) {
 							// Temporary: update agent state but don't persist to settings
-							await this.ctx.session.setModelTemporary(model, thinkingLevel);
+							await this.ctx.session.setModelTemporary(model, thinkingLevel, {
+								cause: "temporary-operation",
+								reason: "other",
+							});
+							this.ctx.session.setDefaultFallbackRuntimeModel(
+								selectedSelector ?? formatModelSelectorValue(`${model.provider}/${model.id}`, thinkingLevel),
+							);
 							this.ctx.statusLine.invalidate();
 							this.ctx.updateEditorBorderColor();
 							this.ctx.showStatus(`Temporary model: ${selectedSelector ?? model.id}`);
@@ -876,6 +1579,7 @@ export class SelectorController {
 								await this.ctx.session.setModel(model, "default", {
 									selector: defaultSelector,
 									thinkingLevel,
+									cause: "user-selection",
 								});
 								if (thinkingLevel && thinkingLevel !== ThinkingLevel.Inherit) {
 									this.ctx.session.setThinkingLevel(thinkingLevel);
@@ -887,20 +1591,13 @@ export class SelectorController {
 								assignments,
 							});
 							if (!materializedProfile) {
-								const overrides = this.ctx.settings.get("task.agentModelOverrides");
-								const nextOverrides = { ...overrides };
-								let writesOverrides = false;
 								for (const targetRole of targetRoles) {
 									const target = SKC_MODEL_ASSIGNMENT_TARGETS[targetRole];
 									if (target.settingsPath === "modelRoles") {
 										this.ctx.settings.setModelRole(targetRole, value);
 									} else {
-										nextOverrides[targetRole] = value;
-										writesOverrides = true;
+										this.ctx.settings.setAgentModelOverride(targetRole, value);
 									}
-								}
-								if (writesOverrides) {
-									this.ctx.settings.set("task.agentModelOverrides", nextOverrides);
 								}
 							}
 							modelSelector.refreshRoleAssignments({
@@ -928,6 +1625,7 @@ export class SelectorController {
 							await this.ctx.session.setModel(model, role, {
 								selector: selectedSelector,
 								thinkingLevel,
+								cause: "user-selection",
 							});
 							const value = formatModelSelectorValue(
 								selectedSelector ?? `${model.provider}/${model.id}`,
@@ -971,10 +1669,7 @@ export class SelectorController {
 								if (target.settingsPath === "modelRoles") {
 									this.ctx.settings.setModelRole(role, value);
 								} else {
-									this.ctx.settings.set("task.agentModelOverrides", {
-										...this.ctx.settings.get("task.agentModelOverrides"),
-										[role]: value,
-									});
+									this.ctx.settings.setAgentModelOverride(role, value);
 								}
 							}
 							modelSelector.refreshRoleAssignments({
@@ -1137,7 +1832,7 @@ export class SelectorController {
 	}
 
 	showTreeSelector(): void {
-		const tree = this.ctx.sessionManager.getTree();
+		const tree = getTreeForInternalRead(this.ctx.sessionManager);
 		const realLeafId = this.ctx.sessionManager.getLeafId();
 
 		if (tree.length === 0) {
@@ -1263,7 +1958,7 @@ export class SelectorController {
 	}
 
 	async showSessionSelector(): Promise<void> {
-		const sessions = await SessionManager.list(
+		const sessions = await SessionManager.listForResumePickerReadOnly(
 			this.ctx.sessionManager.getCwd(),
 			this.ctx.sessionManager.getSessionDir(),
 		);
@@ -1285,9 +1980,9 @@ export class SelectorController {
 					if (!(await this.#detachActiveSessionBeforeDeletion(session.path))) {
 						return false;
 					}
-					const storage = new FileSessionStorage();
 					try {
-						await storage.deleteSessionWithArtifacts(session.path);
+						await this.#deleteSession(session.path);
+
 						return true;
 					} catch (err) {
 						throw new Error(`Failed to delete session: ${err instanceof Error ? err.message : String(err)}`, {
@@ -1323,6 +2018,15 @@ export class SelectorController {
 		setSessionTerminalTitle(sessionManager.getSessionName?.(), sessionManager.getCwd());
 	}
 
+	async #deleteSession(sessionPath: string): Promise<void> {
+		const sessionManager = this.ctx.sessionManager as { dropSession?: (path: string) => Promise<void> };
+		if (sessionManager.dropSession) {
+			await sessionManager.dropSession(sessionPath);
+			return;
+		}
+		await new FileSessionStorage().deleteSessionWithArtifacts(sessionPath);
+	}
+
 	async #detachActiveSessionBeforeDeletion(sessionPath: string): Promise<boolean> {
 		const currentSessionFile = this.ctx.sessionManager.getSessionFile();
 		if (currentSessionFile !== sessionPath) {
@@ -1351,9 +2055,12 @@ export class SelectorController {
 	async handleResumeSession(sessionPath: string): Promise<void> {
 		const previousSessionId = this.ctx.sessionManager.getSessionId();
 		this.#clearTransientSessionUi();
+		const migrationPolicy =
+			this.ctx.settings?.get("session.directoryMigration") === "disabled" ? "disabled" : "copy-retain";
+		const writableSessionPath = await SessionManager.prepareManagedCandidateForWrite(sessionPath, migrationPolicy);
 
 		// Switch session via AgentSession (emits hook and tool session events)
-		if (!(await this.ctx.session.switchSession(sessionPath))) return;
+		if (!(await this.ctx.session.switchSession(writableSessionPath))) return;
 		const switchingToDifferentSession = previousSessionId !== this.ctx.sessionManager.getSessionId();
 		if (switchingToDifferentSession) this.ctx.resetIrcSidebarSession();
 		this.#refreshSessionTerminalTitle();
@@ -1398,8 +2105,7 @@ export class SelectorController {
 			return;
 		}
 
-		// Delete the session file and artifacts directory
-		await storage.deleteSessionWithArtifacts(sessionFile);
+		await this.#deleteSession(sessionFile);
 
 		// Show session selector
 		this.ctx.showStatus("Current session transcript and artifacts deleted");
@@ -1584,34 +2290,113 @@ export class SelectorController {
 			options?.allowExternalCredentialDiscovery === true &&
 			options.trigger === "bare-login"
 		) {
-			const preview = await runExternalCredentialAutoImport({
-				authStorage: {
-					importCredentialIfAbsent: async () => ({
-						inserted: false,
-						reason: "skipped-existing",
-						provider: "",
-						entries: [],
-					}),
-				},
-				trigger: "bare-login",
-				discover: options.externalCredentialDiscover,
-			});
-			const result = preview.discovery ?? { importable: [], skipped: [], environment: [] };
-			const candidates = filterAutoImportOAuthCredentials(result.importable);
-			if (candidates.length > 0) {
-				const confirmed = await this.ctx.showHookConfirm(
-					`Import ${candidates.length} external credential(s)?`,
-					`${formatDiscoverySummary({ ...result, importable: candidates }).join("\n")}\n\n${CREDENTIAL_AUTO_IMPORT_ROTATION_WARNING}`,
-				);
-				if (confirmed) {
-					const summary = await runExternalCredentialAutoImport({
-						authStorage: this.ctx.session.modelRegistry.authStorage,
-						trigger: "bare-login",
-						discover: options.externalCredentialDiscover,
-					});
-					externalCredentialCandidates = summary.imported;
-					if (externalCredentialCandidates.length > 0) {
-						await this.ctx.session.modelRegistry.refresh("offline");
+			const stateStore =
+				this.#credentialAutoImportStateStore ??
+				createCredentialAutoImportStateStore(this.ctx.settings.getAgentDir());
+			let stateRead: CredentialAutoImportStateReadResult | undefined;
+			try {
+				stateRead = await stateStore.read();
+			} catch {
+				logger.warn("Credential auto-import state read failed", { classification: "state-read-failed" });
+				stateRead = { state: {}, problems: [], unreadable: true };
+			}
+			if (stateRead?.unreadable === true) {
+				logger.warn("Credential auto-import state unavailable", { classification: "state-unreadable" });
+				this.ctx.showWarning(CREDENTIAL_AUTO_IMPORT_STATE_UNREADABLE_WARNING);
+			} else if (stateRead && !isCredentialAutoImportStateResolvedForVersion(stateRead.state, VERSION)) {
+				const preview = await runExternalCredentialAutoImport({
+					authStorage: {
+						importCredentialIfAbsent: async () => ({
+							inserted: false,
+							reason: "skipped-existing",
+							provider: "",
+							entries: [],
+						}),
+					},
+					trigger: "bare-login",
+					discover: options.externalCredentialDiscover,
+				});
+				if (!preview.discovered) {
+					this.ctx.showWarning(CREDENTIAL_AUTO_IMPORT_DISCOVERY_WARNING);
+				} else {
+					const result = preview.discovery ?? { importable: [], skipped: [], environment: [] };
+					const candidates = filterAutoImportOAuthCredentials(result.importable);
+					const previewSourceFailures = preview.failures.filter(failure => failure.credential === undefined);
+					if (candidates.length === 0 && previewSourceFailures.length > 0) {
+						this.ctx.showWarning(CREDENTIAL_AUTO_IMPORT_DISCOVERY_WARNING);
+					} else if (candidates.length > 0) {
+						const confirmed = await this.ctx.showHookConfirm(
+							`Import ${candidates.length} external credential(s)?`,
+							`${formatCredentialAutoImportPrompt(candidates)}\n\n${CREDENTIAL_AUTO_IMPORT_ROTATION_WARNING}`,
+						);
+						if (!confirmed) {
+							let persisted = false;
+							try {
+								persisted = await stateStore.write({ initialImportResolution: "declined" });
+							} catch {
+								logger.warn("Credential auto-import state persistence failed", {
+									classification: "state-write-failed",
+								});
+							}
+							if (!persisted) this.ctx.showWarning(CREDENTIAL_AUTO_IMPORT_PERSISTENCE_WARNING);
+						} else {
+							const summary = await runExternalCredentialAutoImport({
+								authStorage: this.ctx.session.modelRegistry.authStorage,
+								trigger: "bare-login",
+								discover: options.externalCredentialDiscover,
+							});
+							if (!summary.discovered) {
+								logCredentialAutoImportFailures("bare-login", summary.failures);
+								this.ctx.showWarning(CREDENTIAL_AUTO_IMPORT_RETRY_WARNING);
+							} else {
+								const secondResult = summary.discovery ?? { importable: [], skipped: [], environment: [] };
+								const secondCandidates = filterAutoImportOAuthCredentials(secondResult.importable);
+								const secondSourceFailures = summary.failures.filter(
+									failure => failure.credential === undefined,
+								);
+								const handledCandidates = summary.imported.length + summary.skipped.length > 0;
+								if (handledCandidates || (secondCandidates.length === 0 && secondSourceFailures.length === 0)) {
+									let persisted = false;
+									try {
+										persisted = await stateStore.write({
+											initialImportResolution: "accepted",
+											lastImportVersion: VERSION,
+										});
+									} catch {
+										logger.warn("Credential auto-import state persistence failed", {
+											classification: "state-write-failed",
+										});
+									}
+									if (!persisted) this.ctx.showWarning(CREDENTIAL_AUTO_IMPORT_PERSISTENCE_WARNING);
+									externalCredentialCandidates = summary.imported.map(credential => ({
+										...credential,
+										source: formatCredentialAutoImportCandidateLabel(credential),
+									}));
+									if (!handledCandidates) {
+										this.ctx.showStatus("External credentials were no longer available to import.");
+									}
+									if (summary.imported.length > 0) {
+										try {
+											await this.ctx.session.modelRegistry.refresh("offline");
+										} catch {
+											logger.warn("Credential auto-import refresh failed", {
+												classification: "refresh-failed",
+											});
+											this.ctx.showWarning(CREDENTIAL_AUTO_IMPORT_REFRESH_WARNING);
+										}
+									}
+									if (handledCandidates && summary.failures.length > 0) {
+										logCredentialAutoImportFailures("bare-login", summary.failures);
+										this.ctx.showWarning(CREDENTIAL_AUTO_IMPORT_RETRY_WARNING);
+									}
+								} else if (secondCandidates.length > 0 && summary.failures.length > 0) {
+									logCredentialAutoImportFailures("bare-login", summary.failures);
+									this.ctx.showWarning(CREDENTIAL_AUTO_IMPORT_RETRY_WARNING);
+								} else {
+									this.ctx.showWarning(CREDENTIAL_AUTO_IMPORT_DISCOVERY_WARNING);
+								}
+							}
+						}
 					}
 				}
 			}
@@ -1688,6 +2473,94 @@ export class SelectorController {
 		this.ctx.ui.requestRender();
 	}
 
+	async showSessionsDashboard(): Promise<void> {
+		if (this.#sessionsDashboardOpen) {
+			if (this.#sessionsDashboard) this.ctx.ui.setFocus(this.#sessionsDashboard);
+			return;
+		}
+		this.#sessionsDashboardOpen = true;
+		try {
+			const sessions = dashboardSessions(await SessionManager.listAll());
+			let overlayHandle: OverlayHandle | undefined;
+			const dashboard = new SessionsDashboardComponent(
+				sessions,
+				() => {
+					this.#sessionsDashboardOpen = false;
+					this.#sessionsDashboard = undefined;
+					overlayHandle?.hide();
+					this.ctx.ui.setFocus(this.ctx.editor);
+					this.ctx.ui.requestRender();
+				},
+				() => this.ctx.ui.requestRender(),
+			);
+			this.#sessionsDashboard = dashboard;
+			overlayHandle = this.ctx.ui.showOverlay(dashboard, {
+				anchor: "bottom-center",
+				width: "100%",
+				maxHeight: "100%",
+				margin: 0,
+			});
+			this.ctx.ui.setFocus(dashboard);
+			this.ctx.ui.requestRender();
+		} catch (error) {
+			this.#sessionsDashboardOpen = false;
+			throw error;
+		}
+	}
+
+	showTranscriptViewer(registry: TranscriptItemRegistry): void {
+		if (this.#transcriptViewerOpen) return;
+		this.#transcriptViewerOpen = true;
+		let overlayHandle: OverlayHandle | undefined;
+		const viewer = new TranscriptViewerOverlay({
+			title: "Transcript",
+			getEntries: () => transcriptViewerEntries(registry),
+			onClose: () => {
+				this.#transcriptViewerOpen = false;
+				this.#transcriptViewer = undefined;
+				overlayHandle?.hide();
+				this.ctx.ui.setFocus(this.ctx.editor);
+				this.ctx.ui.requestRender(true);
+			},
+			requestRender: () => this.ctx.ui.requestRender(),
+			copyToClipboard: this.clipboard,
+		});
+		this.#transcriptViewer = viewer;
+		overlayHandle = this.ctx.ui.showOverlay(viewer, {
+			anchor: "bottom-center",
+			width: "100%",
+			maxHeight: "100%",
+			margin: 0,
+		});
+		this.ctx.ui.setFocus(viewer);
+		this.ctx.ui.requestRender();
+	}
+
+	showPlanPreview(content: string | null, options?: PlanPreviewOptions): Promise<PlanPreviewResult> {
+		return new Promise(resolve => {
+			let overlayHandle: OverlayHandle | undefined;
+			const overlay = new PlanPreviewOverlay(
+				content,
+				result => {
+					overlayHandle?.hide();
+					this.ctx.ui.setFocus(this.ctx.editor);
+					this.ctx.ui.requestRender(true);
+					resolve(result);
+				},
+				() => this.ctx.ui.requestRender(),
+				options,
+			);
+			overlayHandle = this.ctx.ui.showOverlay(overlay, {
+				anchor: "bottom-center",
+				width: "100%",
+				maxHeight: "100%",
+				margin: 0,
+			});
+			this.ctx.ui.setFocus(overlay);
+			this.ctx.ui.requestRender();
+		});
+	}
+
 	/**
 	 * Jobs overlay: navigate ongoing monitor + cron jobs (Monitors then Crons,
 	 * newest-first), drill into per-type detail, and cancel/delete with a y/N
@@ -1712,6 +2585,36 @@ export class SelectorController {
 		this.ctx.editorContainer.clear();
 		this.ctx.editorContainer.addChild(overlay);
 		this.ctx.ui.setFocus(overlay.getFocus());
+		this.ctx.ui.requestRender();
+	}
+
+	showTasksPane(aggregator: TasksAggregator): void {
+		if (this.#closeTasksPane) {
+			this.#closeTasksPane();
+			return;
+		}
+		let unsubscribe: (() => void) | undefined;
+		const close = () => {
+			unsubscribe?.();
+			this.#tasksPane = undefined;
+			this.#closeTasksPane = undefined;
+			this.ctx.editorContainer.clear();
+			this.ctx.editorContainer.addChild(this.ctx.editor);
+			this.ctx.ui.setFocus(this.ctx.editor);
+			this.ctx.ui.requestRender();
+		};
+		this.#closeTasksPane = close;
+		this.#tasksPane = new TasksPaneComponent(aggregator, {
+			close,
+			requestRender: () => {
+				if (this.#tasksPane) this.ctx.ui.setFocus(this.#tasksPane.getFocus());
+				this.ctx.ui.requestRender();
+			},
+		});
+		unsubscribe = aggregator.onChange(() => this.#tasksPane?.refresh());
+		this.ctx.editorContainer.clear();
+		this.ctx.editorContainer.addChild(this.#tasksPane);
+		this.ctx.ui.setFocus(this.#tasksPane.getFocus());
 		this.ctx.ui.requestRender();
 	}
 }

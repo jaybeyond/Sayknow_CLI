@@ -1,0 +1,115 @@
+--- a/packages/coding-agent/src/config/model-profile-activation.ts
++++ b/packages/coding-agent/src/config/model-profile-activation.ts
+@@ -5,7 +5,6 @@
+ import {
+ 	aggregateModelProfileRequiredProviders,
+ 	formatAvailableProfileNames,
+-	formatModelProfileDisplayLabel,
+ 	resolveProfileBindings,
+ } from "./model-profiles";
+ import {
+@@ -61,7 +60,7 @@
+ export interface PreparedModelProfileActivation {
+ 	profileName: string;
+ 	session: ModelProfileActivationSession & { setModelTemporary: AgentSession["setModelTemporary"] };
+-	settings: Pick<Settings, "clearOverride" | "get" | "getGlobal" | "override" | "set" | "unset" | "flush">;
++	settings: Pick<Settings, "get" | "override" | "set" | "flush">;
+ 	previousModel: Model<Api> | undefined;
+ 	previousThinkingLevel: ThinkingLevel | undefined;
+ 	previousAgentModelOverrides: Record<string, ModelSelectorValue>;
+@@ -354,7 +353,7 @@
+ 		const available = formatAvailableProfileNames(profiles);
+ 		throw new Error(`Unknown model profile "${options.profileName}". Available profiles: ${available}`);
+ 	}
+-	const profileLabel = formatModelProfileDisplayLabel(profile);
++	const profileLabel = options.profileName;
+ 
+ 	const requiredProviders = aggregateModelProfileRequiredProviders(profile.requiredProviders, profile);
+ 	const alternativeGroups = profile.alternativeProviderGroups ?? [];
+@@ -590,86 +589,8 @@
+ 		}
+ 		throw error;
+ 	}
+-}
+-
+-export interface MaterializeModelProfileForDeletionResult {
+-	modelRoles: Record<string, ModelSelectorValue>;
+-	agentModelOverrides: Record<string, ModelSelectorValue>;
+-	previousModelRoles: Record<string, ModelSelectorValue>;
+-	previousAgentModelOverrides: Record<string, ModelSelectorValue>;
+-	previousDefaultProfile: string | undefined;
+-	previousPersistedDefaultProfile: string | undefined;
+-	previousActiveModelProfile: string | undefined;
+ }
+ 
+-export async function materializeModelProfileForDeletion(
+-	options: PrepareModelProfileActivationOptions & {
+-		settings: Pick<Settings, "clearOverride" | "flush" | "get" | "getGlobal" | "override" | "set" | "unset">;
+-	},
+-): Promise<MaterializeModelProfileForDeletionResult> {
+-	const prepared = await prepareModelProfileActivation(options);
+-	const previousDefaultProfile = prepared.settings.get("modelProfile.default");
+-	const previousPersistedDefaultProfile = prepared.settings.getGlobal("modelProfile.default");
+-	const nextModelRoles = {
+-		...prepared.previousModelRoles,
+-		...(prepared.defaultChain.length > 0
+-			? {
+-					default: prepared.defaultChain.length === 1 ? prepared.defaultChain[0] : [...prepared.defaultChain],
+-				}
+-			: {}),
+-		...prepared.modelRoles,
+-	};
+-	const nextAgentModelOverrides = {
+-		...prepared.previousAgentModelOverrides,
+-		...prepared.agentModelOverrides,
+-	};
+-
+-	try {
+-		prepared.settings.set("modelRoles", nextModelRoles);
+-		prepared.settings.set("task.agentModelOverrides", nextAgentModelOverrides);
+-		prepared.settings.unset("modelProfile.default");
+-		prepared.settings.clearOverride("modelProfile.default");
+-		prepared.settings.override("modelRoles", nextModelRoles);
+-		prepared.settings.override("task.agentModelOverrides", nextAgentModelOverrides);
+-		prepared.session.setActiveModelProfile?.(undefined);
+-		await prepared.settings.flush();
+-	} catch (error) {
+-		prepared.settings.set("modelRoles", prepared.previousModelRoles);
+-		prepared.settings.set("task.agentModelOverrides", prepared.previousAgentModelOverrides);
+-		prepared.settings.set("modelProfile.default", previousPersistedDefaultProfile);
+-		prepared.settings.override("modelRoles", prepared.previousModelRoles);
+-		prepared.settings.override("task.agentModelOverrides", prepared.previousAgentModelOverrides);
+-		prepared.settings.override("modelProfile.default", previousDefaultProfile);
+-		prepared.session.setActiveModelProfile?.(prepared.previousActiveModelProfile);
+-		throw error;
+-	}
+-
+-	return {
+-		modelRoles: nextModelRoles,
+-		agentModelOverrides: nextAgentModelOverrides,
+-		previousModelRoles: prepared.previousModelRoles,
+-		previousAgentModelOverrides: prepared.previousAgentModelOverrides,
+-		previousDefaultProfile,
+-		previousPersistedDefaultProfile,
+-		previousActiveModelProfile: prepared.previousActiveModelProfile,
+-	};
+-}
+-
+-export async function restoreMaterializedModelProfileForDeletion(options: {
+-	settings: Pick<Settings, "flush" | "override" | "set">;
+-	session: Pick<ModelProfileActivationSession, "setActiveModelProfile">;
+-	snapshot: MaterializeModelProfileForDeletionResult;
+-}): Promise<void> {
+-	options.settings.set("modelRoles", options.snapshot.previousModelRoles);
+-	options.settings.set("task.agentModelOverrides", options.snapshot.previousAgentModelOverrides);
+-	options.settings.set("modelProfile.default", options.snapshot.previousPersistedDefaultProfile);
+-	options.settings.override("modelRoles", options.snapshot.previousModelRoles);
+-	options.settings.override("task.agentModelOverrides", options.snapshot.previousAgentModelOverrides);
+-	options.settings.override("modelProfile.default", options.snapshot.previousDefaultProfile);
+-	options.session.setActiveModelProfile?.(options.snapshot.previousActiveModelProfile);
+-	await options.settings.flush();
+-}
+-
+ export async function activateModelProfile(
+ 	options: PrepareModelProfileActivationOptions,
+ 	applyOptions: ApplyModelProfileActivationOptions = {},

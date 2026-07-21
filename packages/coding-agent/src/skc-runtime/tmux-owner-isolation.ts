@@ -11,7 +11,9 @@ import * as fsSync from "node:fs";
 import * as fs from "node:fs/promises";
 
 import * as path from "node:path";
+import { openRecoveryFsRoot } from "@sayknow-cli/natives";
 import { isCompiledBinary } from "@sayknow-cli/utils/env";
+import { parseLinuxProcStartTime } from "./linux-proc";
 
 export const TMUX_OWNER_ISOLATION_SCHEMA_VERSION = 1;
 export const TMUX_OWNER_ISOLATION_MAX_LINE_BYTES = 16 * 1024;
@@ -86,7 +88,10 @@ export function classifyCgroup(input: { platform: NodeJS.Platform; cgroupText?: 
 			diagnostic: "service_cgroup_inheritance",
 		};
 	const scope = paths.find(value => /(?:^|\/)(?:user|session|app|init|skc)[^/]*\.scope(?:\/|$)/.test(value));
-	if (scope) return { classification: "safe", scope };
+	const vteScope = paths.find(value =>
+		/^\/user\.slice\/user-(\d+)\.slice\/user@\1\.service(?:\/[^/]+)*\/vte-spawn-[A-Za-z0-9_.-]+\.scope$/.test(value),
+	);
+	if (scope || vteScope) return { classification: "safe", scope: scope ?? vteScope };
 	if (paths.every(value => value === "/")) return { classification: "safe", scope: "/" };
 	return {
 		classification: "unverifiable",
@@ -96,14 +101,7 @@ export function classifyCgroup(input: { platform: NodeJS.Platform; cgroupText?: 
 
 export function ownerProcessStartTime(platform: NodeJS.Platform, stat: string | null): string | null {
 	if (platform !== "linux") return "not_applicable";
-	if (!stat) return null;
-	const close = stat.lastIndexOf(")");
-	if (close < 0) return null;
-	const startTime = stat
-		.slice(close + 2)
-		.trim()
-		.split(/\s+/)[19];
-	return startTime && /^\d+$/.test(startTime) ? startTime : null;
+	return parseLinuxProcStartTime(stat);
 }
 
 export interface TmuxServerProof {
@@ -309,7 +307,7 @@ function validArgv(argv: unknown): argv is string[] {
 	);
 }
 
-function isSafeServerProof(
+export function isSafeServerProof(
 	server: TmuxServerProof,
 	platform: NodeJS.Platform = "linux",
 ): server is TmuxServerProof & {
@@ -326,6 +324,17 @@ function isSafeServerProof(
 		nonEmpty(server.startTime) &&
 		(server.cgroup?.classification === "safe" ||
 			(platform !== "linux" && server.cgroup?.classification === "not_applicable"))
+	);
+}
+
+/** Compares the stable identity fields of independently observed tmux servers. */
+export function sameServerIdentity(left: TmuxServerProof, right: TmuxServerProof): boolean {
+	return (
+		left.pid === right.pid &&
+		left.startTime === right.startTime &&
+		left.cgroup?.classification === right.cgroup?.classification &&
+		left.cgroup?.scope === right.cgroup?.scope &&
+		left.cgroup?.diagnostic === right.cgroup?.diagnostic
 	);
 }
 /**
@@ -1038,6 +1047,122 @@ function sameOwnerGenerationBaseline(left: OwnerGenerationBaseline, right: Owner
 	);
 }
 
+export interface ManagedOwnerPredecessorEvidence {
+	generation: string;
+	sessionId: string;
+	runId: string;
+	incarnation: string;
+	predecessorToken: string;
+}
+
+function exactManagedOwnerJson(authority: ReturnType<typeof openRecoveryFsRoot>, name: string): unknown {
+	const first = authority.read(name, 64 * 1024);
+	if (!first.ok || !first.data) throw new Error("managed_owner_replacement_evidence_unavailable");
+	const second = authority.read(name, 64 * 1024);
+	if (
+		!second.ok ||
+		!second.data ||
+		Buffer.compare(Buffer.from(first.data), Buffer.from(second.data)) !== 0 ||
+		JSON.stringify(first.identity) !== JSON.stringify(second.identity)
+	)
+		throw new Error("managed_owner_replacement_evidence_changed");
+	const content = Buffer.from(first.data).toString("utf8");
+	if (!content.endsWith("\n") || content.indexOf("\n") !== content.length - 1)
+		throw new Error("managed_owner_replacement_evidence_untrusted");
+	return JSON.parse(content);
+}
+
+/** Resolve one SIGABRT predecessor from the retained exact prior-generation root. */
+export function resolveManagedOwnerPredecessorSync(
+	stateDir: string,
+	sessionId: string,
+	baseline: OwnerGenerationBaseline,
+): ManagedOwnerPredecessorEvidence | undefined {
+	if (baseline.state === "absent") return undefined;
+	const root = lifecyclePaths(stateDir, sessionId, baseline.generation).root;
+	let entries: string[];
+	try {
+		entries = fsSync.readdirSync(root);
+	} catch {
+		throw new Error("managed_owner_replacement_evidence_unavailable");
+	}
+	const bindings = new Set<string>();
+	const receipts = new Set<string>();
+	for (const entry of entries) {
+		const binding = /^child-([^/]+)\.binding\.json$/.exec(entry);
+		const receipt = /^sigabrt-([^/]+)\.receipt\.json$/.exec(entry);
+		if (entry.startsWith("child-") && !binding) throw new Error("managed_owner_replacement_evidence_untrusted");
+		if (entry.startsWith("sigabrt-") && !receipt) throw new Error("managed_owner_replacement_evidence_untrusted");
+		if (binding) bindings.add(binding[1]!);
+		if (receipt) receipts.add(receipt[1]!);
+	}
+	if (bindings.size === 0 && receipts.size === 0) return undefined;
+	const tokens = [...bindings].filter(token => receipts.has(token));
+	if (tokens.length !== 1 || receipts.size !== 1) throw new Error("managed_owner_replacement_evidence_ambiguous");
+	const predecessorToken = tokens[0]!;
+	if (!/^[A-Za-z0-9._-]+$/.test(predecessorToken)) throw new Error("managed_owner_replacement_evidence_untrusted");
+	const authority = openRecoveryFsRoot(root);
+	try {
+		const binding = exactManagedOwnerJson(authority, `child-${predecessorToken}.binding.json`) as Record<
+			string,
+			unknown
+		>;
+		const receipt = exactManagedOwnerJson(authority, `sigabrt-${predecessorToken}.receipt.json`) as Record<
+			string,
+			unknown
+		>;
+		const command = binding.command;
+		const runId = binding.run_id;
+		const incarnation = binding.endpoint_incarnation;
+		const commandDigest =
+			Array.isArray(command) && command.length > 0 && command.every(value => typeof value === "string" && value)
+				? crypto.createHash("sha256").update(JSON.stringify(command)).digest("hex")
+				: "";
+		const valid =
+			binding.schema_version === 2 &&
+			binding.generation === baseline.generation &&
+			binding.session_id === sessionId &&
+			typeof runId === "string" &&
+			runId.length > 0 &&
+			typeof incarnation === "string" &&
+			incarnation.length > 0 &&
+			binding.child_token === predecessorToken &&
+			binding.command_sha256 === commandDigest &&
+			typeof binding.supervisor_pid === "number" &&
+			Number.isSafeInteger(binding.supervisor_pid) &&
+			binding.supervisor_pid > 0 &&
+			typeof binding.supervisor_start_time === "string" &&
+			typeof binding.created_at === "string" &&
+			receipt.schema_version === 2 &&
+			receipt.generation === binding.generation &&
+			receipt.session_id === binding.session_id &&
+			receipt.run_id === runId &&
+			receipt.endpoint_incarnation === incarnation &&
+			receipt.child_token === binding.child_token &&
+			receipt.command_sha256 === binding.command_sha256 &&
+			receipt.supervisor_pid === binding.supervisor_pid &&
+			receipt.supervisor_start_time === binding.supervisor_start_time &&
+			typeof receipt.child_pid === "number" &&
+			Number.isSafeInteger(receipt.child_pid) &&
+			receipt.child_pid > 0 &&
+			typeof receipt.child_start_time === "string" &&
+			typeof receipt.received_at === "string" &&
+			(receipt.exit_code === null || Number.isSafeInteger(receipt.exit_code)) &&
+			receipt.signal === "SIGABRT" &&
+			receipt.signal_number === 6;
+		if (!valid) throw new Error("managed_owner_replacement_evidence_untrusted");
+		return {
+			generation: baseline.generation,
+			sessionId,
+			runId,
+			incarnation,
+			predecessorToken,
+		};
+	} finally {
+		authority.close();
+	}
+}
+
 export async function captureOwnerGenerationBaseline(
 	stateDir: string,
 	sessionId: string,
@@ -1521,7 +1646,7 @@ export function isValidOwnerIntent(intent: unknown, request?: ObserveTerminalReq
 		intent.generation === request.owner_generation &&
 		intent.session_id === request.session_id &&
 		intent.server_key === request.socket_key &&
-		intent.dispatch_id === request.operator_dispatch_id &&
+		(request.operator_dispatch_id === undefined || intent.dispatch_id === request.operator_dispatch_id) &&
 		request.signal === "SIGTERM"
 	);
 }

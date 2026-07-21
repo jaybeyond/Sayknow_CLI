@@ -160,11 +160,11 @@ async function resolveMentionPath(
 }
 
 /**
- * Default inline cap for auto-read file mentions, deliberately below the
- * read-tool cap (`DEFAULT_MAX_BYTES`, 50KB) so an incidental `@path` mention
- * injects a smaller snippet than an explicit `read`. Overridable per call.
+ * Default inline cap for auto-read file mentions, aligned with the read-tool's
+ * 10 KiB bare-read receipt so an incidental `@path` mention injects a bounded
+ * snippet. Overridable per call.
  */
-export const DEFAULT_FILE_MENTION_INLINE_BYTES = 20 * 1024;
+export const DEFAULT_FILE_MENTION_INLINE_BYTES = 10 * 1024;
 
 function buildTextOutput(textContent: string, maxInlineBytes?: number): { output: string; lineCount: number } {
 	const cap = maxInlineBytes && maxInlineBytes > 0 ? maxInlineBytes : DEFAULT_FILE_MENTION_INLINE_BYTES;

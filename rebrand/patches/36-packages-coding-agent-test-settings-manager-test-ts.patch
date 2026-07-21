@@ -1,6 +1,6 @@
 --- a/packages/coding-agent/test/settings-manager.test.ts
 +++ b/packages/coding-agent/test/settings-manager.test.ts
-@@ -291,14 +291,14 @@
+@@ -327,14 +327,14 @@
  			await writeSettings({ theme: "dark" });
  
  			let settings = await Settings.init({ cwd: projectDir, agentDir });
@@ -17,7 +17,7 @@
  			expect(settings.get("theme.light")).toBe("blue-octopus");
  		});
  
-@@ -307,7 +307,7 @@
+@@ -343,7 +343,7 @@
  
  			const settings = await Settings.init({ cwd: projectDir, agentDir });
  

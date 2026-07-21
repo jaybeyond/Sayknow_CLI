@@ -1,0 +1,154 @@
+services:
+  # ───────────────────────────────────────────────────────────────────────────
+  # roboskc orchestrator
+  #
+  # NOTE: `env_file:` is INTENTIONALLY ABSENT. We never want the gh-proxy's
+  # PAT (`GITHUB_TOKEN` in .env) to leak into this container's environment.
+  # Every variable below is an explicit allowlist; compose still reads `.env`
+  # for `${VAR}` interpolation, but only the keys listed here flow into the
+  # container. Adding a new secret means an explicit compose-level decision
+  # about which container is allowed to see it.
+  # ───────────────────────────────────────────────────────────────────────────
+  roboskc:
+    build:
+      # pi root: gives the web-builder stage access to the workspace
+      # bun.lock + catalog (web/package.json refs `catalog:` versions).
+      # python/roboskc/data and pi-root excludes are filtered via
+      # Dockerfile.roboskc.dockerignore at the context root.
+      context: ../..
+      dockerfile: Dockerfile.roboskc
+      args:
+        # Tag of the pre-built pi-base image produced by `bun run pi:image`
+        # (sources: pi root /Dockerfile). Override per-environment as needed.
+        PI_BASE: sayknow-cli/pi:dev
+    image: roboskc:dev
+    container_name: roboskc
+    # Phase B (graceful shutdown): gives the orchestrator at least
+    # ROBSKC_SHUTDOWN_DRAIN_TIMEOUT_SECONDS + ROBSKC_SHUTDOWN_KILL_TIMEOUT_SECONDS
+    # before SIGKILL. Defaults: 25 + 5 = 30s.
+    stop_grace_period: 30s
+    restart: unless-stopped
+    environment:
+      # --- gh-proxy channel ---
+      # The orchestrator NEVER holds GITHUB_TOKEN; it talks to the sibling
+      # gh-proxy container over the internal-only network.
+      ROBSKC_GH_PROXY_URL: http://gh-proxy:8081
+      ROBSKC_GH_PROXY_HMAC_KEY: ${ROBSKC_GH_PROXY_HMAC_KEY:?ROBSKC_GH_PROXY_HMAC_KEY must be set in .env}
+
+      # --- webhook + identity ---
+      GITHUB_WEBHOOK_SECRET: ${GITHUB_WEBHOOK_SECRET:?GITHUB_WEBHOOK_SECRET must be set in .env}
+      ROBSKC_BOT_LOGIN: ${ROBSKC_BOT_LOGIN:?ROBSKC_BOT_LOGIN must be set in .env}
+      ROBSKC_GIT_AUTHOR_NAME: ${ROBSKC_GIT_AUTHOR_NAME:-}
+      ROBSKC_GIT_AUTHOR_EMAIL: ${ROBSKC_GIT_AUTHOR_EMAIL:?ROBSKC_GIT_AUTHOR_EMAIL must be set in .env}
+      ROBSKC_REPO_ALLOWLIST: ${ROBSKC_REPO_ALLOWLIST:?ROBSKC_REPO_ALLOWLIST must be set in .env}
+      ROBSKC_MAINTAINER_LOGINS: ${ROBSKC_MAINTAINER_LOGINS:-}
+      ROBSKC_REVIEWER_BOTS: ${ROBSKC_REVIEWER_BOTS:-}
+
+      # --- model selection ---
+      ROBSKC_MODEL: ${ROBSKC_MODEL:-anthropic/claude-sonnet-4-6}
+      ROBSKC_PROVIDER: ${ROBSKC_PROVIDER:-}
+      ROBSKC_THINKING: ${ROBSKC_THINKING:-high}
+
+      # --- runtime tuning ---
+      ROBSKC_MAX_CONCURRENCY: ${ROBSKC_MAX_CONCURRENCY:-8}
+      ROBSKC_TASK_TIMEOUT_SECONDS: ${ROBSKC_TASK_TIMEOUT_SECONDS:-2400}
+      ROBSKC_TASK_TIMEOUT_HARD_GRACE_SECONDS: ${ROBSKC_TASK_TIMEOUT_HARD_GRACE_SECONDS:-60}
+      ROBSKC_REQUEST_TIMEOUT_SECONDS: ${ROBSKC_REQUEST_TIMEOUT_SECONDS:-120}
+      ROBSKC_RATE_LIMIT_WINDOW_SECONDS: ${ROBSKC_RATE_LIMIT_WINDOW_SECONDS:-3600}
+      ROBSKC_RATE_LIMIT_DEFAULT: ${ROBSKC_RATE_LIMIT_DEFAULT:-3}
+      ROBSKC_RATE_LIMIT_CONTRIBUTOR: ${ROBSKC_RATE_LIMIT_CONTRIBUTOR:-10}
+      ROBSKC_RATE_LIMIT_UNLIMITED: ${ROBSKC_RATE_LIMIT_UNLIMITED:-}
+      ROBSKC_QUESTION_AUTOCLOSE_ENABLED: ${ROBSKC_QUESTION_AUTOCLOSE_ENABLED:-true}
+      ROBSKC_QUESTION_AUTOCLOSE_HOURS: ${ROBSKC_QUESTION_AUTOCLOSE_HOURS:-4}
+      ROBSKC_QUESTION_AUTOCLOSE_SCAN_SECONDS: ${ROBSKC_QUESTION_AUTOCLOSE_SCAN_SECONDS:-60}
+      ROBSKC_REPLAY_TOKEN: ${ROBSKC_REPLAY_TOKEN:-}
+
+      # --- container-fixed paths ---
+      ROBSKC_SKC_COMMAND: skc
+      ROBSKC_WORKSPACE_ROOT: /data/workspaces
+      ROBSKC_SQLITE_PATH: /data/roboskc.sqlite
+      ROBSKC_LOG_DIR: /data/logs
+      ROBSKC_BIND_HOST: ${ROBSKC_BIND_HOST:-0.0.0.0}
+      ROBSKC_BIND_PORT: ${ROBSKC_BIND_PORT:-8080}
+      PI_ROOT: /work/pi
+    depends_on:
+      gh-proxy:
+        condition: service_started
+    # Resolve `llm-gateway.internal` (used in /srv/agent-home/.skc/agent/models.yml) to the
+    # Docker host. The actual gateway listens on 127.0.0.1:4000 on the host;
+    # `host-gateway` is Docker's alias for the host bridge IP.
+    extra_hosts:
+      - "llm-gateway.internal:host-gateway"
+    networks:
+      - default
+      - roboskc_internal
+    volumes:
+      - ${PI_ROOT:-../..}:/work/pi:ro
+      - roboskc_data:/data
+      # Host agent config is mounted read-only under /srv/agent-home-stage
+      # with host-controlled permissions. The entrypoint copies it into
+      # root-owned, world-readable files under /srv/agent-home; the agent
+      # subprocess runs with HOME=/srv/agent-home, so ~/.skc and ~/.agent
+      # resolve there without exposing mutable host mounts.
+      - ${HOME}/.skc/agent/models.container.yml:/srv/agent-home-stage/.skc/agent/models.yml:ro
+      - ${HOME}/.agent/AGENT.md:/srv/agent-home-stage/.agent/AGENTS.md:ro
+      - ${HOME}/.agent/rules:/srv/agent-home-stage/.agent/rules:ro
+    ports:
+      - "0.0.0.0:6543:8080"
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # gh-proxy
+  #
+  # The only container that ever holds GITHUB_TOKEN. Reachable only from the
+  # orchestrator on the internal-only network — no host port mapping. Every
+  # request must carry a valid HMAC signature (ROBSKC_GH_PROXY_HMAC_KEY).
+  # `env_file:` is INTENTIONALLY ABSENT for the same reason: the explicit
+  # allowlist below is the only place where any var lands in this container.
+  # ───────────────────────────────────────────────────────────────────────────
+  gh-proxy:
+    image: roboskc:dev
+    container_name: gh-proxy
+    restart: unless-stopped
+    command: ["python", "-m", "roboskc.proxy", "serve"]
+    environment:
+      # PAT: lives ONLY here. The orchestrator's compose block refuses to
+      # let this var into its container.
+      GITHUB_TOKEN: ${GITHUB_TOKEN:?GITHUB_TOKEN must be set in .env}
+      # Shared with the orchestrator: HMAC verification key.
+      ROBSKC_GH_PROXY_HMAC_KEY: ${ROBSKC_GH_PROXY_HMAC_KEY:?ROBSKC_GH_PROXY_HMAC_KEY must be set in .env}
+      # The proxy reuses the SandboxManager pool layout under /data/workspaces.
+      ROBSKC_WORKSPACE_ROOT: /data/workspaces
+      ROBSKC_SQLITE_PATH: /data/roboskc.sqlite
+      ROBSKC_LOG_DIR: /data/logs
+      # Bind on the internal network only.
+      ROBSKC_GH_PROXY_BIND_HOST: 0.0.0.0
+      ROBSKC_GH_PROXY_BIND_PORT: 8081
+      # Settings still requires these on construction; the proxy never uses
+      # them but the validator runs the same code path as the orchestrator.
+      GITHUB_WEBHOOK_SECRET: ${GITHUB_WEBHOOK_SECRET:?GITHUB_WEBHOOK_SECRET must be set in .env}
+      ROBSKC_BOT_LOGIN: ${ROBSKC_BOT_LOGIN:?ROBSKC_BOT_LOGIN must be set in .env}
+      ROBSKC_GIT_AUTHOR_EMAIL: ${ROBSKC_GIT_AUTHOR_EMAIL:?ROBSKC_GIT_AUTHOR_EMAIL must be set in .env}
+      ROBSKC_REPO_ALLOWLIST: ${ROBSKC_REPO_ALLOWLIST:?ROBSKC_REPO_ALLOWLIST must be set in .env}
+    networks:
+      # `default` gives gh-proxy outbound NAT to api.github.com; `roboskc_internal`
+      # is how the orchestrator reaches it. No `ports:` mapping → still
+      # unreachable from the host or any sibling project.
+      - default
+      - roboskc_internal
+    volumes:
+      # Shared workspace pool/worktrees so the proxy can drive git operations
+      # against the same per-issue worktrees the orchestrator builds.
+      - roboskc_data:/data
+
+networks:
+  # External-facing bridge: webhook ingress (8080) and the orchestrator's
+  # outbound path to the host LLM gateway via extra_hosts.
+  default: {}
+  # Orchestrator <-> gh-proxy only. internal: true means no egress and no
+  # ingress from outside the compose project.
+  roboskc_internal:
+    internal: true
+
+volumes:
+  # Docker-managed Linux volume so UID/GID permissions on /data are enforced.
+  roboskc_data: {}

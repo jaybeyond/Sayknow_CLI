@@ -3,7 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { getConfigRootDir, setAgentDir } from "@sayknow-cli/utils";
-import { runConfigCommand } from "../src/cli/config-cli";
+import { inspectConfigFile, runConfigCommand } from "../src/cli/config-cli";
 import { resetSettingsForTest } from "../src/config/settings";
 
 let testAgentDir = "";
@@ -125,6 +125,26 @@ describe("config CLI schema coverage", () => {
 			key: "compaction.idleTimeoutSeconds",
 			type: "number",
 			value: 600,
+		});
+	});
+
+	it("reports invalid settings through config doctor JSON", async () => {
+		await Bun.write(
+			path.join(testAgentDir, "config.yml"),
+			"configSchemaVersion: 1\nnotifications:\n  enabled: invalid\n",
+		);
+		resetSettingsForTest();
+		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+
+		await runConfigCommand({ action: "doctor", flags: { json: true } });
+
+		const report = JSON.parse(String(logSpy.mock.calls.at(-1)?.[0])) as {
+			issues: Array<{ path: string; kind: string; detail: string }>;
+		};
+		expect(report.issues).toContainEqual({
+			path: "notifications.enabled",
+			kind: "invalid",
+			detail: "Expected boolean.",
 		});
 	});
 
@@ -264,4 +284,23 @@ describe("config CLI schema coverage", () => {
 			expect(getPayload.value).toBe(secret);
 		});
 	});
+});
+
+describe("config doctor", () => {
+	it("reports typoed settings from a fixture config", async () => {
+		const configPath = path.join(testAgentDir, "config.yml");
+		await fs.writeFile(configPath, "compaction:\n  enabled: true\n  enabld: false\n");
+		const report = await inspectConfigFile(configPath);
+		expect(report.unknownKeys).toContain("compaction.enabld");
+	});
+});
+
+it("redacts invalid secret settings in doctor output", async () => {
+	const configPath = path.join(testAgentDir, "config.yml");
+	const secret = "doctor-secret-token";
+	await fs.writeFile(configPath, `notifications:\n  telegram:\n    botToken: [${secret}]\n`);
+
+	const report = await inspectConfigFile(configPath);
+	expect(report.invalidValues).toContainEqual({ path: "notifications.telegram.botToken", value: "<redacted>" });
+	expect(JSON.stringify(report)).not.toContain(secret);
 });

@@ -44,6 +44,7 @@ export const en = {
 	"settings.tab.tasks": "Tasks",
 	"settings.tab.providers": "Providers",
 	"settings.tab.integrations": "Integrations",
+	"settings.tab.notifications": "Notifications",
 
 	// ── Language setting ──
 	"settings.language.label": "Language",

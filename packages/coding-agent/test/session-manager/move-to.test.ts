@@ -7,13 +7,32 @@ import {
 	loadEntriesFromFile,
 	type SessionHeader,
 	SessionManager,
+	syncSessionMoveDirectory,
 } from "@sayknow-cli/coding-agent/session/session-manager";
 import { stripOuterDoubleQuotes } from "@sayknow-cli/coding-agent/tools/path-utils";
-import { getConfigRootDir, setAgentDir } from "@sayknow-cli/utils";
+import { getConfigRootDir, getSessionsDir, setAgentDir } from "@sayknow-cli/utils";
+import { resolveManagedScope } from "../../src/session/internal/managed-session-scope";
+import { makeAssistantMessage } from "./helpers";
+
+it("does not open or fsync a source parent directory on Windows after a committed move", async () => {
+	let opens = 0;
+	let syncs = 0;
+	let closes = 0;
+	await syncSessionMoveDirectory("C:\\sessions", "win32", async () => {
+		opens++;
+		return {
+			sync: async () => {
+				syncs++;
+			},
+			close: async () => {
+				closes++;
+			},
+		};
+	});
+	expect({ opens, syncs, closes }).toEqual({ opens: 0, syncs: 0, closes: 0 });
+});
 
 // -- helpers ----------------------------------------------------------------
-
-import { makeAssistantMessage } from "./helpers";
 
 function getHeader(entries: unknown[]): SessionHeader | undefined {
 	return entries.find(
@@ -31,6 +50,17 @@ function hasAssistantEntry(entries: unknown[]): boolean {
 			"message" in e &&
 			(e as any).message?.role === "assistant",
 	);
+}
+
+function managedDirectoryName(cwd: string): string {
+	const sessionsRoot = getSessionsDir();
+	const resolved = resolveManagedScope({
+		cwd,
+		agentDir: path.resolve(sessionsRoot, ".."),
+		sessionsRoot,
+	});
+	if (resolved.kind !== "resolved") throw new Error(resolved.message);
+	return resolved.scope.directoryName;
 }
 
 // -- stripOuterDoubleQuotes tests -------------------------------------------
@@ -108,7 +138,144 @@ describe("SessionManager.moveTo", () => {
 		const entries = await loadEntriesFromFile(newFile);
 		const header = getHeader(entries);
 		expect(header?.cwd).toBe(path.resolve(cwdB));
+		expect(JSON.parse(fs.readFileSync(newFile, "utf8").split("\n", 1)[0]!).cwd).toBe(path.resolve(cwdB));
 		expect(hasAssistantEntry(entries)).toBe(true);
+		const reopened = await SessionManager.open(newFile);
+		expect(reopened.getCwd()).toBe(path.resolve(cwdB));
+		await reopened.close();
+	});
+
+	it("does not replace an existing destination transcript", async () => {
+		const session = SessionManager.create(cwdA);
+		session.appendMessage({ role: "user", content: "source", timestamp: 1 });
+		session.appendMessage(makeAssistantMessage());
+		await session.flush();
+		const sourceFile = session.getSessionFile()!;
+		const destinationDir = SessionManager.getDefaultSessionDir(cwdB);
+		const destinationFile = path.join(destinationDir, path.basename(sourceFile));
+		fs.writeFileSync(destinationFile, "unrelated destination\n");
+
+		await expect(session.moveTo(cwdB)).rejects.toThrow();
+		expect(fs.readFileSync(destinationFile, "utf8")).toBe("unrelated destination\n");
+		expect(fs.existsSync(sourceFile)).toBe(true);
+	});
+
+	it("detaches the active session before deleting its transcript", async () => {
+		const session = SessionManager.create(cwdA);
+		session.appendMessage({ role: "user", content: "delete me", timestamp: 1 });
+		session.appendMessage(makeAssistantMessage());
+		await session.flush();
+
+		const activeFile = session.getSessionFile();
+		if (!activeFile) throw new Error("Expected active session file");
+		await session.dropSession(activeFile);
+
+		expect(fs.existsSync(activeFile)).toBe(false);
+		expect(session.getSessionFile()).not.toBe(activeFile);
+	});
+
+	it("deletes detached sessions and artifacts from an explicit session directory", async () => {
+		const explicitDir = path.join(testAgentDir, "explicit-sessions");
+		const session = SessionManager.create(cwdA, explicitDir);
+		session.appendMessage({ role: "user", content: "delete explicit", timestamp: 1 });
+		await session.flush();
+		const sessionFile = session.getSessionFile();
+		if (!sessionFile) throw new Error("Expected explicit session file");
+		const { path: artifactPath } = await session.allocateArtifactPath("bash");
+		if (!artifactPath) throw new Error("Expected explicit artifact path");
+		await fsp.writeFile(artifactPath, "artifact");
+
+		await session.dropSession(sessionFile);
+
+		expect(fs.existsSync(sessionFile)).toBe(false);
+		expect(fs.existsSync(path.dirname(artifactPath))).toBe(false);
+		expect(session.getSessionFile()).not.toBe(sessionFile);
+	});
+
+	it("uses retained copy publication when a managed move cannot rename across devices", async () => {
+		const session = SessionManager.create(cwdA);
+		session.appendMessage({ role: "user", content: "source", timestamp: 1 });
+		session.appendMessage(makeAssistantMessage());
+		await session.flush();
+		const sourceFile = session.getSessionFile()!;
+		const artifactId = await session.saveArtifact("authoritative artifact", "bash");
+		if (!artifactId) throw new Error("Expected artifact id");
+		const artifactPath = path.join(sourceFile.slice(0, -6), `${artifactId}.bash.log`);
+
+		const destinationFile = path.join(SessionManager.getDefaultSessionDir(cwdB), path.basename(sourceFile));
+		await session.moveTo(cwdB);
+
+		expect(fs.existsSync(sourceFile)).toBe(false);
+		expect(fs.existsSync(destinationFile)).toBe(true);
+		expect(await fsp.readFile(path.join(destinationFile.slice(0, -6), path.basename(artifactPath)), "utf8")).toBe(
+			"authoritative artifact",
+		);
+	});
+
+	it("uses atomic rename without requiring hard-link support on the same device", async () => {
+		const session = SessionManager.create(cwdA);
+		session.appendMessage({ role: "user", content: "rename first", timestamp: 1 });
+		session.appendMessage(makeAssistantMessage());
+		await session.flush();
+		const originalLink = fs.promises.link;
+		let linkCalls = 0;
+		fs.promises.link = async () => {
+			linkCalls++;
+			const error = new Error("hard links disabled") as NodeJS.ErrnoException;
+			error.code = "EPERM";
+			throw error;
+		};
+		try {
+			await session.moveTo(cwdB);
+		} finally {
+			fs.promises.link = originalLink;
+		}
+		expect(linkCalls).toBe(0);
+		expect(session.getCwd()).toBe(cwdB);
+		expect(fs.existsSync(session.getSessionFile()!)).toBe(true);
+	});
+
+	it("preserves complete nested artifact topology on a same-device move", async () => {
+		const session = SessionManager.create(cwdA);
+		session.appendMessage({ role: "user", content: "source", timestamp: 1 });
+		session.appendMessage(makeAssistantMessage());
+		await session.flush();
+		const sourceFile = session.getSessionFile()!;
+		const artifactId = await session.saveArtifact("top-level artifact", "bash");
+		if (!artifactId) throw new Error("Expected artifact id");
+		const artifactPath = path.join(sourceFile.slice(0, -6), `${artifactId}.bash.log`);
+		const sourceArtifacts = path.dirname(artifactPath);
+		await fsp.mkdir(path.join(sourceArtifacts, "nested", "empty"), { recursive: true, mode: 0o700 });
+		await fsp.writeFile(path.join(sourceArtifacts, "nested", "payload.txt"), "nested artifact", { mode: 0o600 });
+
+		await session.moveTo(cwdB);
+
+		const destinationFile = session.getSessionFile()!;
+		const destinationArtifacts = destinationFile.slice(0, -6);
+		expect(fs.existsSync(sourceFile)).toBe(false);
+		expect(fs.existsSync(sourceArtifacts)).toBe(false);
+		expect(await fsp.readFile(path.join(destinationArtifacts, path.basename(artifactPath)), "utf8")).toBe(
+			"top-level artifact",
+		);
+		expect(await fsp.readFile(path.join(destinationArtifacts, "nested", "payload.txt"), "utf8")).toBe(
+			"nested artifact",
+		);
+		expect((await fsp.stat(path.join(destinationArtifacts, "nested", "empty"))).isDirectory()).toBe(true);
+	});
+
+	it("moves an artifact directory without pre-creating the copy destination", async () => {
+		const session = SessionManager.create(cwdA);
+		const sourceFile = session.getSessionFile()!;
+		const artifactId = await session.saveArtifact("artifact", "bash");
+		if (!artifactId) throw new Error("Expected artifact id");
+		const artifactPath = path.join(sourceFile.slice(0, -6), `${artifactId}.bash.log`);
+
+		await session.moveTo(cwdB);
+
+		const destinationFile = session.getSessionFile();
+		if (!destinationFile) throw new Error("Expected destination session file");
+		const destinationArtifact = path.join(destinationFile.slice(0, -6), path.basename(artifactPath));
+		expect(await fsp.readFile(destinationArtifact, "utf8")).toBe("artifact");
 	});
 
 	it("succeeds on fresh session without ENOENT, then deferred persistence works", async () => {
@@ -174,6 +341,14 @@ describe("SessionManager.moveTo", () => {
 
 		const newFile = session.getSessionFile()!;
 		expect(fs.existsSync(newFile)).toBe(true);
+		expect(path.dirname(newFile)).toBe(path.join(getSessionsDir(), managedDirectoryName(cwdB)));
+		const reopened = await SessionManager.open(newFile);
+		try {
+			expect(reopened.getCwd()).toBe(path.resolve(cwdB));
+			expect(reopened.getSessionFile()).toBe(newFile);
+		} finally {
+			await reopened.close();
+		}
 
 		const entries = await loadEntriesFromFile(newFile);
 		const header = getHeader(entries);
@@ -197,6 +372,14 @@ describe("SessionManager.moveTo", () => {
 
 		const newFile = session.getSessionFile()!;
 		expect(fs.existsSync(newFile)).toBe(true);
+		expect(path.dirname(newFile)).toBe(path.join(getSessionsDir(), managedDirectoryName(cwdB)));
+		const reopened = await SessionManager.open(newFile);
+		try {
+			expect(reopened.getCwd()).toBe(path.resolve(cwdB));
+			expect(reopened.getSessionFile()).toBe(newFile);
+		} finally {
+			await reopened.close();
+		}
 
 		// Rewrite must have run (hadSessionFile=true) even though #flushed was reset
 		const entries = await loadEntriesFromFile(newFile);
@@ -206,15 +389,15 @@ describe("SessionManager.moveTo", () => {
 
 	it("moves artifact dir independently when session file does not exist", async () => {
 		const session = SessionManager.create(cwdA);
-		// Allocate an artifact — creates dir via ArtifactManager
-		const { path: artifactPath } = await session.allocateArtifactPath("bash");
-		if (!artifactPath) throw new Error("Expected artifact path");
+		const oldFile = session.getSessionFile()!;
+		const artifactId = await session.saveArtifact("artifact", "bash");
+		if (!artifactId) throw new Error("Expected artifact id");
+		const artifactPath = path.join(oldFile.slice(0, -6), `${artifactId}.bash.log`);
 
 		const oldArtifactDir = path.dirname(artifactPath);
 		expect(fs.existsSync(oldArtifactDir)).toBe(true);
 
 		// No messages — session file doesn't exist
-		const oldFile = session.getSessionFile()!;
 		expect(fs.existsSync(oldFile)).toBe(false);
 
 		await session.moveTo(cwdB);

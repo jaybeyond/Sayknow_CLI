@@ -2,8 +2,8 @@ import { describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { daemonPaths } from "../src/notifications/daemon-paths";
-import { ReplySentStore, type ReplySentStoreFs } from "../src/notifications/reply-sent-store";
+import { daemonPaths } from "../src/sdk/bus/daemon-paths";
+import { ReplySentStore, type ReplySentStoreFs } from "../src/sdk/bus/reply-sent-store";
 
 const INDEX_FILENAME = "telegram-rich-sent-index.json";
 

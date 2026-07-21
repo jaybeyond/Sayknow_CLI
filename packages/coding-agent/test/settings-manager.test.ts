@@ -1,16 +1,27 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { Effort } from "@sayknow-cli/ai";
-import { resetSettingsForTest, Settings } from "@sayknow-cli/coding-agent/config/settings";
-import { getCustomThemesDir, getProjectAgentDir, Snowflake } from "@sayknow-cli/utils";
+import { onAppendOnlyModeChanged, resetSettingsForTest, Settings } from "@sayknow-cli/coding-agent/config/settings";
+import { getCustomThemesDir, getProjectAgentDir, logger, Snowflake } from "@sayknow-cli/utils";
 import { YAML } from "bun";
+import { withFileLock } from "../src/config/file-lock";
+import { createLightweightDaemonSettings } from "../src/sdk/bus/telegram-daemon-cli";
 
 describe("Settings", () => {
 	let testDir: string;
 	let agentDir: string;
 	let projectDir: string;
+
+	const removeTestDir = () => {
+		try {
+			fs.rmSync(testDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+		} catch (error) {
+			if (process.platform === "win32" && (error as NodeJS.ErrnoException).code === "EBUSY") return;
+			throw error;
+		}
+	};
 
 	beforeEach(() => {
 		// Reset global singleton so each test gets a fresh instance
@@ -22,7 +33,7 @@ describe("Settings", () => {
 		projectDir = path.join(testDir, "project");
 
 		if (fs.existsSync(testDir)) {
-			fs.rmSync(testDir, { recursive: true });
+			removeTestDir();
 		}
 		fs.mkdirSync(agentDir, { recursive: true });
 		fs.mkdirSync(getProjectAgentDir(projectDir), { recursive: true });
@@ -45,7 +56,32 @@ describe("Settings", () => {
 
 	afterEach(() => {
 		if (fs.existsSync(testDir)) {
-			fs.rmSync(testDir, { recursive: true });
+			removeTestDir();
+		}
+	});
+
+	it("does not log setting override values when initialization options differ", async () => {
+		const initialSecret = "initial-settings-secret";
+		const requestedSecret = "requested-settings-secret";
+		const warning = vi.spyOn(logger, "warn").mockImplementation(() => {});
+		try {
+			await Settings.init({
+				inMemory: true,
+				cwd: projectDir,
+				overrides: { "auth.broker.token": initialSecret },
+			});
+			await Settings.init({
+				inMemory: true,
+				cwd: projectDir,
+				overrides: { "auth.broker.token": requestedSecret },
+			});
+
+			const logged = JSON.stringify(warning.mock.calls);
+			expect(logged).not.toContain(initialSecret);
+			expect(logged).not.toContain(requestedSecret);
+			expect(logged).toContain("auth.broker.token");
+		} finally {
+			warning.mockRestore();
 		}
 	});
 
@@ -345,6 +381,18 @@ describe("Settings", () => {
 		});
 	});
 
+	it("migrates ask.timeout milliseconds once and records schema version one", async () => {
+		await writeSettings({ ask: { timeout: 30_000 } });
+		let settings = await Settings.init({ cwd: projectDir, agentDir });
+		expect(settings.get("ask.timeout")).toBe(30);
+		expect((await readSettings()).configSchemaVersion).toBe(1);
+
+		resetSettingsForTest();
+		settings = await Settings.init({ cwd: projectDir, agentDir });
+		expect(settings.get("ask.timeout")).toBe(30);
+		expect((await readSettings()).ask).toEqual({ timeout: 30 });
+	});
+
 	describe("below-threshold maintenance pruning defaults (Finding 13)", () => {
 		it("keeps maintenance pruning off by default (evidence-gated) with a high min-savings floor", () => {
 			const settings = Settings.isolated();
@@ -407,5 +455,117 @@ describe("Settings", () => {
 			const sidebarDefault = schema?.properties?.irc?.properties?.sidebar?.properties?.enabled?.default;
 			expect(sidebarDefault).toBe(true);
 		});
+	});
+	describe("causally ordered atomic persistence", () => {
+		it("persists a later durable batch after an earlier ordinary set", async () => {
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			settings.set("notifications.redact", true);
+			await settings.commitAtomicBatch([{ path: "notifications.redact", op: "set", value: false }]);
+
+			expect(settings.get("notifications.redact")).toBe(false);
+			expect((await readSettings()).notifications).toEqual({ redact: false });
+		});
+
+		it("keeps a later ordinary set live and persists it after an earlier durable batch", async () => {
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			const batch = settings.commitAtomicBatch([{ path: "notifications.redact", op: "set", value: false }]);
+			settings.set("notifications.redact", true);
+
+			expect(settings.get("notifications.redact")).toBe(true);
+			await batch;
+			await settings.flushOrThrow();
+			expect((await readSettings()).notifications).toEqual({ redact: true });
+		});
+
+		it("exposes an ordinary set and hook before disk completion without reentrant flush deadlock", async () => {
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			const hookValues: string[] = [];
+			const unsubscribe = onAppendOnlyModeChanged(value => {
+				hookValues.push(value);
+				void settings.flush();
+			});
+			try {
+				settings.set("provider.appendOnlyContext", "on");
+				expect(settings.get("provider.appendOnlyContext")).toBe("on");
+				expect(hookValues).toEqual(["on"]);
+				await settings.flushOrThrow();
+			} finally {
+				unsubscribe();
+			}
+
+			expect((await readSettings()).provider).toEqual({ appendOnlyContext: "on" });
+		});
+
+		it("unsets a path immediately and persists an explicit YAML deletion", async () => {
+			await writeSettings({ modelProfile: { default: "saved-profile" } });
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			settings.unset("modelProfile.default");
+
+			expect(settings.getGlobal("modelProfile.default")).toBeUndefined();
+			await settings.flushOrThrow();
+			expect((await readSettings()).modelProfile).toEqual({});
+		});
+
+		it("does not let an older persistence completion clobber a newer live revision", async () => {
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			let releaseLock!: () => void;
+			let enteredLock!: () => void;
+			const lockEntered = new Promise<void>(resolve => {
+				enteredLock = resolve;
+			});
+			const lockRelease = new Promise<void>(resolve => {
+				releaseLock = resolve;
+			});
+			const heldLock = withFileLock(getConfigPath(), async () => {
+				enteredLock();
+				await lockRelease;
+			});
+			await lockEntered;
+
+			settings.set("notifications.redact", true);
+			const firstFlush = settings.flush();
+			await Promise.resolve();
+			settings.set("notifications.redact", false);
+			releaseLock();
+			await heldLock;
+			await firstFlush;
+			await settings.flushOrThrow();
+
+			expect(settings.get("notifications.redact")).toBe(false);
+			expect((await readSettings()).notifications).toEqual({ redact: false });
+		});
+
+		it("serializes a lightweight daemon write with a full Settings write", async () => {
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			const daemon = createLightweightDaemonSettings({ agentDir, rawConfig: {} }) as unknown as {
+				set(path: string, value: unknown): Promise<void>;
+			};
+			settings.set("defaultThinkingLevel", Effort.High);
+
+			await Promise.all([settings.flushOrThrow(), daemon.set("notifications.telegram.rich.enabled", false)]);
+			expect(await readSettings()).toMatchObject({
+				defaultThinkingLevel: Effort.High,
+				notifications: { telegram: { rich: { enabled: false } } },
+			});
+		});
+	});
+
+	it("loads the managed session migration policy from scoped settings", async () => {
+		await writeSettings({ session: { directoryMigration: "disabled" } });
+		const scoped = await Settings.loadForScope({ cwd: projectDir, agentDir });
+		expect(scoped.get("session.directoryMigration")).toBe("disabled");
+		expect(Settings.isolated().get("session.directoryMigration")).toBe("copy-retain");
+	});
+
+	it("rejects invalid managed session migration overrides", () => {
+		const invalid = Settings.isolated({ "session.directoryMigration": "merge" });
+		expect(invalid.get("session.directoryMigration")).toBe("copy-retain");
+	});
+
+	it("keeps the generated schema migration enum and default in sync", async () => {
+		const schema = JSON.parse(await Bun.file(new URL("../../../schemas/config.schema.json", import.meta.url)).text());
+		const migration = schema?.properties?.session?.properties?.directoryMigration;
+		expect(migration?.default).toBe("copy-retain");
+		expect(migration?.enum).toEqual(["copy-retain", "disabled"]);
 	});
 });

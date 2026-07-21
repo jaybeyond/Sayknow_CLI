@@ -3,6 +3,7 @@ import * as fsSync from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { buildWindowsPowerShellInnerCommand } from "@sayknow-cli/coding-agent/skc-runtime/launch-tmux";
 import {
 	__setBinaryResolverForTests,
 	clearPsmuxDetectionCache,
@@ -439,8 +440,9 @@ describe("SKC tmux session management", () => {
 		}
 	});
 
-	it("fails closed before creating or tagging when the target server proof is unavailable", () => {
+	it("fails closed before tagging when native session identity is unavailable", () => {
 		const calls: string[][] = [];
+		injectSafeAbsentToSafeOwnerProof();
 		const spawnSyncSpy = spyOn(Bun, "spawnSync") as unknown as SpawnSyncSpy;
 		spawnSyncSpy.mockImplementation((cmd: string[]) => {
 			calls.push(cmd);
@@ -449,9 +451,9 @@ describe("SKC tmux session management", () => {
 		});
 
 		expect(() => createSkcTmuxSession({ SKC_TMUX_COMMAND: "tmux" })).toThrow(
-			"skc_tmux_owner_isolation_server_unverifiable",
+			"skc_tmux_owner_isolation_native_session_identity_unavailable",
 		);
-		expect(calls.some(cmd => cmd.includes("new-session"))).toBe(false);
+		expect(calls.some(cmd => cmd.includes("new-session"))).toBe(true);
 		expect(calls.some(cmd => cmd.includes("set-option") || cmd.includes("set-window-option"))).toBe(false);
 	});
 	it("rejects psmux before creating or tagging a managed session", async () => {
@@ -480,6 +482,77 @@ describe("SKC tmux session management", () => {
 		} finally {
 			__setBinaryResolverForTests(null);
 		}
+	});
+	it("builds a BOM-free encoded command for psmux with literal PowerShell values and arguments", () => {
+		const encoded = buildWindowsPowerShellInnerCommand({
+			command: ["C:\\Program Files\\SKC\\O'Brien\\skc.exe"],
+			args: ["--resume", "operator's session", "--label=O'Brien"],
+			environment: {
+				SKC_PSMUX_COMMAND: "C:\\Program Files\\O'Brien\\psmux.exe",
+				SKC_TEST_VALUE: "operator's value",
+			},
+		});
+		const encodedMatch = encoded.match(/-EncodedCommand\s+(\S+)/);
+		expect(encodedMatch).not.toBeNull();
+		if (!encodedMatch) throw new Error("expected PowerShell encoded command");
+
+		const decoded = Buffer.from(encodedMatch[1], "base64");
+		expect(decoded[0]).not.toBe(0xff);
+		expect(decoded[1]).not.toBe(0xfe);
+		const script = decoded.toString("utf16le");
+		expect(script[0]).toBe("$");
+		expect(script).toContain("$env:SKC_PSMUX_COMMAND = 'C:\\Program Files\\O''Brien\\psmux.exe'");
+		expect(script).toContain("$env:SKC_TEST_VALUE = 'operator''s value'");
+		expect(script).toContain(
+			"& 'C:\\Program Files\\SKC\\O''Brien\\skc.exe' '--resume' 'operator''s session' '--label=O''Brien'",
+		);
+	});
+
+	it("passes the shared encoded command to injected win32 session creation", () => {
+		let plannedArgv: string[] | undefined;
+		__setCreateOwnerIsolationForTests({
+			execute: plan => {
+				if (!plan.ok) throw new Error("expected owner-isolation plan");
+				plannedArgv = plan.execution.argv;
+				return { ok: false, code: "scope_bootstrap_failed", diagnostic: "test-stop" };
+			},
+		});
+		const stateFile = "C:\\Users\\O'Brien\\runtime-state.json";
+		expect(() =>
+			createSkcTmuxSession(
+				{
+					SKC_PSMUX_DETECTION: "off",
+					SKC_TMUX_COMMAND: "tmux",
+					SKC_TMUX_SESSION: "psmux-session",
+					SKC_COORDINATOR_SESSION_ID: "operator's session",
+					SKC_COORDINATOR_SESSION_STATE_FILE: stateFile,
+				},
+				{ platform: "win32" },
+			),
+		).toThrow("skc_tmux_owner_isolation_scope_bootstrap_failed:test-stop");
+		expect(plannedArgv?.slice(0, -1)).toEqual(["tmux", "new-session", "-d", "-s", "psmux-session"]);
+
+		const innerCommand = plannedArgv?.at(-1);
+		const encodedMatch = innerCommand?.match(/-EncodedCommand\s+(\S+)/);
+		expect(encodedMatch).not.toBeNull();
+		if (!encodedMatch) throw new Error("expected session new-command encoded command");
+		const script = Buffer.from(encodedMatch[1], "base64").toString("utf16le");
+		const generation = script.match(/\$env:SKC_TMUX_OWNER_GENERATION = '([^']+)'/)?.[1];
+		expect(generation).toBeDefined();
+		if (!generation) throw new Error("expected generated owner identity");
+		expect(innerCommand).toBe(
+			buildWindowsPowerShellInnerCommand({
+				command: ["skc"],
+				environment: {
+					SKC_TMUX_LAUNCHED: "1",
+					SKC_TMUX_OWNER_GENERATION: generation,
+					SKC_TMUX_OWNER_STATE_DIR: "C:\\Users\\O'Brien",
+					SKC_TMUX_OWNER_SERVER_KEY: "tmux",
+					SKC_COORDINATOR_SESSION_ID: "operator's session",
+					SKC_COORDINATOR_SESSION_STATE_FILE: stateFile,
+				},
+			}),
+		);
 	});
 	it("refuses psmux before attach-session mutation", () => {
 		__setBinaryResolverForTests(candidate => (candidate === "psmux" ? "/fake/psmux" : null));

@@ -1,7 +1,12 @@
 import { describe, expect, it } from "bun:test";
+import { createHash } from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import {
+	createDeepInterviewIntentManifest,
+	reviewDeepInterviewIntent,
+} from "@sayknow-cli/coding-agent/skc-runtime/deep-interview-state";
 import {
 	activeSnapshotPath,
 	modeStatePath,
@@ -118,6 +123,83 @@ describe("skc state handoff", () => {
 		});
 	});
 
+	it("bounds referenced legacy specs before a deep-interview handoff mutates workflow state", async () => {
+		const writeLegacyCaller = async (cwd: string, spec: string) => {
+			const specPath = path.join(cwd, "legacy-spec.md");
+			const callerPath = modeStatePath(cwd, TEST_SESSION_ID, "deep-interview");
+			await fs.writeFile(specPath, spec, "utf-8");
+			await writeJson(callerPath, {
+				skill: "deep-interview",
+				version: WORKFLOW_STATE_VERSION,
+				active: true,
+				current_phase: "handoff",
+				spec_path: specPath,
+				state: { rounds: [] },
+			});
+			return callerPath;
+		};
+
+		await withTempCwd(async cwd => {
+			await writeLegacyCaller(cwd, "😀".repeat(100_000));
+			const exact = await runNativeStateCommand(
+				["handoff", "--mode", "deep-interview", "--to", "ralplan", "--json"],
+				cwd,
+			);
+			expect(exact.status).toBe(0);
+		});
+
+		await withTempCwd(async cwd => {
+			const callerPath = await writeLegacyCaller(cwd, "😀".repeat(100_001));
+			const before = await fs.readFile(callerPath, "utf-8");
+			const rejected = await runNativeStateCommand(
+				["handoff", "--mode", "deep-interview", "--to", "ralplan", "--json"],
+				cwd,
+			);
+			expect(rejected.status).toBe(1);
+			expect(rejected.stderr).toContain("persisted deep-interview spec exceeds max length 100000");
+			expect(await fs.readFile(callerPath, "utf-8")).toBe(before);
+			await expect(fs.access(modeStatePath(cwd, TEST_SESSION_ID, "ralplan"))).rejects.toThrow();
+			await expect(fs.access(activeSnapshotPath(cwd, TEST_SESSION_ID))).rejects.toThrow();
+			await expect(fs.access(path.join(sessionStateDir(cwd, TEST_SESSION_ID), "transactions"))).rejects.toThrow();
+		});
+	});
+
+	it("serializes a handoff with a concurrent state write to the callee mode-state", async () => {
+		await withTempCwd(async cwd => {
+			const callerPath = modeStatePath(cwd, TEST_SESSION_ID, "deep-interview");
+			const calleePath = modeStatePath(cwd, TEST_SESSION_ID, "ralplan");
+			await writeJson(callerPath, {
+				skill: "deep-interview",
+				version: WORKFLOW_STATE_VERSION,
+				active: true,
+				current_phase: "interviewing",
+				updated_at: "2026-01-01T00:00:00.000Z",
+			});
+			await writeJson(calleePath, {
+				skill: "ralplan",
+				version: WORKFLOW_STATE_VERSION,
+				active: false,
+				current_phase: "planner",
+				updated_at: "2026-01-01T00:00:00.000Z",
+			});
+
+			const [handoff, write] = await Promise.all([
+				runNativeStateCommand(["handoff", "--mode", "deep-interview", "--to", "ralplan", "--json"], cwd),
+				runNativeStateCommand(
+					["write", "--mode", "ralplan", "--input", '{"current_phase":"planner","concurrent":true}', "--json"],
+					cwd,
+				),
+			]);
+
+			expect(handoff.status).toBe(0);
+			expect(write.status).toBe(0);
+			const callee = await readJson(calleePath);
+			expect(callee?.state_revision).toBe(2);
+			expect(callee?.skill).toBe("ralplan");
+			expect(callee?.version).toBe(WORKFLOW_STATE_VERSION);
+		});
+	});
+
 	it("normalizes legacy caller and callee envelopes to v2 during handoff", async () => {
 		await withTempCwd(async cwd => {
 			const callerPath = modeStatePath(cwd, TEST_SESSION_ID, "deep-interview");
@@ -168,6 +250,68 @@ describe("skc state handoff", () => {
 			expect(callee?.active).toBe(true);
 			expect(callee?.current_phase).toBe("planner");
 			expect(callee?.handoff_from).toBe("deep-interview");
+		});
+	});
+
+	it("fails closed on missing or stale locked intent at shared handoff", async () => {
+		await withTempCwd(async cwd => {
+			const callerPath = modeStatePath(cwd, TEST_SESSION_ID, "deep-interview");
+			await writeJson(callerPath, {
+				skill: "deep-interview",
+				version: WORKFLOW_STATE_VERSION,
+				active: true,
+				current_phase: "handoff",
+				state: { intent_contract_required: true, rounds: [] },
+			});
+			const missing = await runNativeStateCommand(
+				["handoff", "--mode", "deep-interview", "--to", "ralplan", "--json"],
+				cwd,
+			);
+			expect(missing.status).toBe(2);
+			expect(missing.stderr).toContain("requires a locked Round 0 intent contract");
+			const runtimeMissing = await runNativeStateCommand(
+				["handoff", "--mode", "deep-interview", "--to", "made-up-skill", "--json"],
+				cwd,
+			);
+			expect(runtimeMissing.status).toBe(2);
+			expect(runtimeMissing.stderr).toContain("requires a locked Round 0 intent contract");
+			const unchanged = await readJson(callerPath);
+			expect(unchanged?.active).toBe(true);
+		});
+
+		await withTempCwd(async cwd => {
+			const callerPath = modeStatePath(cwd, TEST_SESSION_ID, "deep-interview");
+			const answerHash = "a".repeat(64);
+			const items = [{ id: "artifact:report", category: "artifact" as const, statement: "Produce report" }];
+			const contract = createDeepInterviewIntentManifest(items, { round: 0, answer_hash: answerHash });
+			const review = reviewDeepInterviewIntent(contract, items, {
+				status: "not_required",
+				supporting_substitutions: [],
+			});
+			const specPath = path.join(cwd, "intent-spec.md");
+			const content = "# Intent\nartifact:report\n";
+			await fs.writeFile(specPath, content, "utf-8");
+			await writeJson(callerPath, {
+				skill: "deep-interview",
+				version: WORKFLOW_STATE_VERSION,
+				active: true,
+				current_phase: "handoff",
+				spec_path: specPath,
+				spec_sha256: createHash("sha256").update(content).digest("hex"),
+				state: {
+					intent_contract_required: true,
+					intent_contract: contract,
+					intent_review: review,
+					rounds: [{ round: 0, answer_hash: answerHash }],
+				},
+			});
+			await fs.writeFile(specPath, `${content}tampered\n`, "utf-8");
+			const stale = await runNativeStateCommand(
+				["handoff", "--mode", "deep-interview", "--to", "ralplan", "--json"],
+				cwd,
+			);
+			expect(stale.status).toBe(2);
+			expect(stale.stderr).toContain("spec hash mismatch");
 		});
 	});
 
@@ -355,6 +499,40 @@ describe("skc state handoff", () => {
 			);
 			expect(result.status).toBe(2);
 			expect(result.stderr).toContain("caller is not active");
+		});
+	});
+
+	it("completes promptly when the handoff cwd equals process.cwd() (no self-locked active-state)", async () => {
+		await withTempCwd(async cwd => {
+			// Regression: handleHandoff must not hold the `skill-active-state.json`
+			// lock across the inner rebuild, which re-locks the same file. That
+			// self-contention only manifests when the handoff cwd is also the
+			// process cwd (the real CLI case) — otherwise the outer lock resolves
+			// against process.cwd() and lands on a different, unused path.
+			const priorCwd = process.cwd();
+			await writeJson(modeStatePath(cwd, TEST_SESSION_ID, "deep-interview"), {
+				skill: "deep-interview",
+				version: 1,
+				active: true,
+				current_phase: "interviewing",
+			});
+			process.chdir(cwd);
+			try {
+				const started = Date.now();
+				const result = await runNativeStateCommand(
+					["handoff", "--mode", "deep-interview", "--to", "ralplan", "--json"],
+					cwd,
+				);
+				const elapsed = Date.now() - started;
+				expect(result.status).toBe(0);
+				// A self-locked rebuild would exhaust 50 retries (~5s) before failing.
+				expect(elapsed).toBeLessThan(3000);
+				const callee = await readJson(modeStatePath(cwd, TEST_SESSION_ID, "ralplan"));
+				expect(callee?.active).toBe(true);
+				expect(callee?.handoff_from).toBe("deep-interview");
+			} finally {
+				process.chdir(priorCwd);
+			}
 		});
 	});
 

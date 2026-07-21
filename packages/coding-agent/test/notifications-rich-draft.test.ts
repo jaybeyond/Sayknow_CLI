@@ -3,17 +3,17 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { Settings } from "../src/config/settings";
-import { markdownToTelegramHtml } from "../src/notifications/html-format";
+import { markdownToTelegramHtml } from "../src/sdk/bus/html-format";
 import {
 	buildRichDraft,
 	DRAFT_DEBOUNCE_MS,
 	DraftStreamState,
 	deliverDraft,
 	shouldStreamDraft,
-} from "../src/notifications/rich-draft";
-import type { BotApi } from "../src/notifications/telegram-daemon";
-import { TelegramNotificationDaemon } from "../src/notifications/telegram-daemon";
-import { renderThreadedFrame, type ThreadedSend } from "../src/notifications/threaded-render";
+} from "../src/sdk/bus/rich-draft";
+import type { BotApi } from "../src/sdk/bus/telegram-daemon";
+import { TelegramNotificationDaemon } from "../src/sdk/bus/telegram-daemon";
+import { renderThreadedFrame, type ThreadedSend } from "../src/sdk/bus/threaded-render";
 
 // ===========================================================================
 // Pure helpers

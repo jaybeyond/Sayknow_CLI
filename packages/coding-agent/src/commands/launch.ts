@@ -11,7 +11,7 @@ import { parseArgs } from "../cli/args";
 import { runRootCommand } from "../main";
 import { prepareAcpTerminalAuthArgs } from "../modes/acp/terminal-auth";
 import { launchDefaultTmuxIfNeeded } from "../skc-runtime/launch-tmux";
-import { prepareLaunchWorktree } from "../skc-runtime/launch-worktree";
+import { type PreparedLaunchWorktree, prepareLaunchWorktree } from "../skc-runtime/launch-worktree";
 import {
 	SKC_COORDINATOR_SESSION_ID_ENV,
 	SKC_COORDINATOR_SESSION_STATE_FILE_ENV,
@@ -105,12 +105,15 @@ export default class Index extends Command {
 		"append-system-prompt": Flags.string({
 			description: "Append text or file contents to the system prompt",
 		}),
+		"mcp-config": Flags.string({
+			description: "Tools-only MCP config file (absolute path)",
+		}),
 		"allow-home": Flags.boolean({
 			description: "Allow starting in ~ without auto-switching to a temp dir",
 		}),
 		mode: Flags.string({
-			description: "Output mode: text (default), json, rpc, acp, rpc-ui, or bridge",
-			options: ["text", "json", "rpc", "acp", "rpc-ui", "bridge"],
+			description: "Output mode: text (default), json, or acp",
+			options: ["text", "json", "acp"],
 		}),
 		print: Flags.boolean({
 			char: "p",
@@ -125,7 +128,8 @@ export default class Index extends Command {
 			description: "Resume a session (by ID prefix, path, or picker if omitted)",
 		}),
 		"session-dir": Flags.string({
-			description: "Directory for session storage and lookup",
+			description:
+				"Explicit session storage directory and lookup override (default uses managed v2 workspace scope)",
 		}),
 		"no-session": Flags.boolean({
 			description: "Don't save session (ephemeral)",
@@ -196,7 +200,8 @@ export default class Index extends Command {
 		`# Pin a stored credential for this session\n  ${APP_NAME} --credential email:me@example.com`,
 		`# Activate a model profile for this session\n  ${APP_NAME} --mpreset codex-medium`,
 		`# Persist a model profile as the default\n  ${APP_NAME} --mpreset opencodego --default`,
-		`# Export a session file to HTML\n  ${APP_NAME} --export ~/.skc/agent/sessions/--path--/session.jsonl`,
+		`# Export a session file to HTML\n  ${APP_NAME} --export ~/.skc/agent/sessions/v2-<scope>/session.jsonl`,
+		`# Use an explicit session storage directory\n  ${APP_NAME} --session-dir ./sessions`,
 	];
 
 	static strict = false;
@@ -209,7 +214,7 @@ export default class Index extends Command {
 			return;
 		}
 
-		let launch: ReturnType<typeof prepareLaunchWorktree>;
+		let launch: PreparedLaunchWorktree;
 		try {
 			launch = prepareLaunchWorktree(process.cwd(), args);
 		} catch (error) {

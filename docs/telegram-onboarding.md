@@ -1,8 +1,10 @@
 # Telegram notification onboarding
 
-This guide documents the current bundled Telegram notification setup path from
-Sayknow-CLI source. It is for the managed reference client used by
-`skc notify setup`, not a separate remote-control product.
+This guide documents the bundled Telegram notification setup path from Sayknow-CLI
+source. In an interactive SKC session, use `/settings` → **Notifications** as the
+recommended path; `skc notify` remains the authoritative headless and automation
+fallback. It is for the managed reference client, not a separate remote-control
+product.
 
 ## What you are setting up
 
@@ -10,7 +12,7 @@ Sayknow-CLI notifications are a loopback WebSocket SDK plus a managed Telegram
 reference daemon:
 
 - each SKC session publishes a local notification endpoint under
-  `.skc/state/notifications/<sessionId>.json`;
+  `.skc/state/sdk/<sessionId>.json`;
 - the managed Telegram daemon scans those endpoints, connects to them, and sends
   action-needed events to the configured Telegram chat;
 - replies and inline button taps route back to the exact session/action through
@@ -33,9 +35,27 @@ username ending in `bot`, then copy the token BotFather returns. Treat the token
 like a password: do not paste it into logs, screenshots, issues, or shell history
 that other people can read.
 
-## 2. Run the interactive setup wizard
+## 2. Configure from `/settings` (recommended)
 
-From any terminal where `skc` is installed:
+In an eligible running SKC session, open `/settings` and select the
+**Notifications** tab. It provides the interactive Telegram setup/reconfigure
+flow and the operational controls in one place:
+
+- Enable globally with stored credentials or disable globally;
+- turn notifications on or off for the current session only;
+- refresh or probe health, send a test notification, recover dead-owner
+  artifacts, and reconnect the Telegram runtime;
+- remove Telegram credentials without removing configured Discord or Slack
+  adapters.
+
+Telegram token entry is a masked setup field. After entry, the token is never
+prefilled, rendered, or shown by the tab; status and health use a masked value.
+The tab also guides the BotFather Threaded Mode check and private-chat pairing.
+
+### CLI setup fallback
+
+`skc notify setup` retains the same setup workflow for terminal-driven setup and
+automation:
 
 ```sh
 skc notify setup
@@ -108,7 +128,12 @@ Notifications enabled. botToken=1234…(len N) chatId=123456789 threaded=verifie
 
 The raw token is never printed by SKC status/setup output after it is stored.
 
-## 3. Non-interactive setup
+## 3. Non-interactive setup and CLI operations
+
+For headless provisioning, scripts, and automation, the authoritative commands
+remain `skc notify setup`, `skc notify status`, `skc notify health`, `skc notify
+test`, and `skc notify recovery`. The `/settings` tab does not replace these CLI
+subcommands.
 
 For scripts or CI-style local provisioning, pass the bot token and known private
 chat id explicitly. Non-interactive runs cannot prompt for the BotFather toggle,
@@ -146,29 +171,63 @@ It uses the same masking helper as setup (`first 4 chars + … + length`), so it
 safe to paste into a support thread if the chat id itself is not sensitive in
 your environment.
 
-## 5. What setup writes
+## 5. Global configuration, adapters, and precedence
 
-`skc notify setup` writes these settings through the SKC Settings layer:
+Telegram credentials and all `notifications.*` values are **global-only**. SKC
+reads them from the user/global agent config with schema defaults; notification
+keys from project config files are ignored, and runtime notification overrides
+are rejected. A project cannot supply, shadow, or disable an outbound
+notification identity.
+
+`skc notify setup` writes these global Telegram settings through the SKC Settings
+layer:
 
 - `notifications.enabled = true`
 - `notifications.telegram.botToken = <token>`
 - `notifications.telegram.chatId = <paired chat id>`
 - `notifications.redact = true` only when `--redact` was passed
+- `notifications.telegram.streaming.enabled = true` by default; set it to `false` to disable durable live Telegram assistant-output updates globally. `SKC_NOTIFICATIONS_STREAM=1` forces process-local streaming, while `0`, `off`, or `false` forces it off.
 
-At runtime, notifications are considered globally configured only when all of
-these are present:
+A complete global configuration is `notifications.enabled` plus at least one
+complete adapter. Telegram needs its bot token and private-chat id; Discord and
+Slack each need their own credential and destination. Removing Telegram in
+`/settings` is adapter-local: it preserves a complete Discord or Slack adapter
+and global enablement, and disables global notifications only when Telegram was
+the last complete adapter.
 
-- `notifications.enabled`
-- `notifications.telegram.botToken`
-- `notifications.telegram.chatId`
 
-Environment/session precedence from `packages/coding-agent/src/notifications/config.ts`:
+Three lifecycle gates keep SDK hosting, setup, and managed delivery separate:
 
-1. `SKC_NOTIFICATIONS=0` is a hard opt-out.
-2. Local `/notify off` disables only the current session.
-3. `SKC_NOTIFICATIONS=1` or `SKC_NOTIFICATIONS_TOKEN` enables the legacy explicit path.
-4. A complete global setup enables notifications automatically.
-5. Otherwise notifications stay off.
+1. An eligible host receives the dormant notification control surface. `SKC_NOTIFY=off`,
+   `0`, or `false` is a hard process opt-out; unsupported hosts and
+   helper/subagent sessions are also ineligible.
+2. Every eligible top-level session hosts its local SDK endpoint by default,
+   independently of notification configuration. `SKC_SDK_DISABLE=1` opts out of
+   SDK hosting for that session.
+3. A managed Telegram daemon is ensured only for a complete global Telegram
+   configuration with managed delivery enabled. Discord-only, Slack-only, and
+   environment-only sessions do not start a Telegram daemon.
+
+Environment/session precedence for managed delivery is implemented in
+`packages/coding-agent/src/sdk/bus/config.ts`:
+
+For a SKC-spawned child, `notifications.sessionScope=primary` suppresses managed
+notification delivery to avoid duplicate topics; `all` permits it.
+`SKC_NOTIFICATIONS=1` or `SKC_NOTIFICATIONS_TOKEN` explicitly opts that child in,
+but never overrides a hard opt-out or a helper/subagent exclusion.
+
+Managed-delivery precedence is highest first; it does not change independently
+hosted SDK endpoints:
+
+1. `SKC_NOTIFY=off`, `0`, or `false` prevents the notification control surface
+   for that process.
+2. `SKC_NOTIFICATIONS=0` is a hard managed-delivery opt-out.
+3. Local `/notify off` disables managed delivery only for the current session.
+4. `SKC_NOTIFICATIONS=1` or `SKC_NOTIFICATIONS_TOKEN` enables the legacy
+   explicit managed-delivery path.
+5. A complete global configuration enables managed delivery automatically.
+6. Otherwise managed delivery stays off; the SDK endpoint remains hosted unless
+   `SKC_SDK_DISABLE=1` is set.
 
 ## 6. Start or reuse sessions
 
@@ -178,14 +237,31 @@ After setup, start SKC normally:
 skc --tmux
 ```
 
-or use any other supported SKC launch mode. When the notification extension is
-registered, the session writes its endpoint discovery file and ensures the
-Telegram daemon is running.
+or use any other supported SKC launch mode. Every eligible top-level session
+writes its SDK endpoint unless `SKC_SDK_DISABLE=1`; when managed Telegram
+delivery is configured and enabled, it also ensures the Telegram daemon is running.
 
-The daemon is a singleton per bot token/chat pair. Telegram allows only one
-active `getUpdates` long-poll owner for a bot token, so SKC keeps a local daemon
-lock/state file and makes later sessions attach to the fresh owner instead of
-starting a second poller. This avoids Telegram `409 Conflict` failures.
+The managed daemon is a singleton per bot token/chat pair. Telegram allows only
+one active `getUpdates` long-poll owner for a bot token, so SKC keeps a local
+daemon lock/state file and makes later sessions attach to the fresh owner instead
+of starting a second poller. This avoids Telegram `409 Conflict` failures.
+
+### Same-token and foreign-owner safety
+
+Setup and reconfigure never compete with a live same-token daemon. When a live
+owner already has the stored paired chat, SKC reuses it after non-polling
+validation. If that owner has no stored chat or the chat changes, provide a
+validated private chat id; SKC performs zero `getUpdates` discovery polls. For a
+foreign or unknown owner, setup does not poll, kill, reload, or take over the
+owner; the default is to cancel before writing configuration.
+
+For a Telegram-only setup, an explicit **Save inactive for later** choice may
+store the credentials with notifications disabled. That choice is unavailable
+when a complete Discord or Slack adapter is active, because globally disabling
+notifications would affect that adapter. A post-save identity race similarly
+stops the current session before reporting that activation is blocked; the
+foreign daemon remains untouched, and the editor offers an explicit restore or
+retain-configuration choice.
 
 ## 7. Use the Telegram chat
 
@@ -202,9 +278,9 @@ Mode rather than dropping them.
 ### Ask-control capability negotiation
 
 The production Telegram multiplexer is
-`packages/coding-agent/src/notifications/telegram-daemon.ts`. It already sends a
+`packages/coding-agent/src/sdk/bus/telegram-daemon.ts`. It already sends a
 protocol-v3 ClientHello with `ask_controls_v1` and `ask_selected_ack_v1`. The
-generic `packages/coding-agent/src/notifications/managed-daemon.ts` is
+generic `packages/coding-agent/src/sdk/bus/managed-daemon.ts` is
 liveness-only: it advertises `client_ping_pong` but is intentionally
 non-capable for controlled asks.
 
@@ -239,6 +315,11 @@ The managed daemon can render:
 - activity/typing indicators;
 - inbound delivery acknowledgements.
 
+Tool activity updates such as `⚙ read — ok` are enabled by default. Send
+`/toolactivity off` in the paired private chat to suppress them globally, or
+`/toolactivity on` to restore them. The toggle is durable, works without a connected session, and
+is also available under `/settings` → **Notifications** → **Preferences**.
+
 Reply paths:
 
 - tap an inline button on an ask notification;
@@ -249,6 +330,37 @@ Reply paths:
   - `/lean`
   - `/verbosity <lean|verbose>`
   - `/redact <on|off>`
+  - `/btw <question>` is available only in an authorized, known private-session
+    topic. It uses the current session context in an isolated side turn and never
+    injects or persists either a user or assistant message in the main session
+    history, so it can run while the main session is busy. It accepts no
+    attachments; `/btw` with an attachment returns `Usage: /btw <question>`.
+    Foreign bot-command suffixes are silently ignored.
+
+    Each logical session permits at most two concurrent side questions. The host
+    deadline is 120 seconds and cancels the actual provider work. Operational
+    responses are: `Usage: /btw <question>` for an empty question; `Telegram
+    /btw is disabled in local settings.` when disabled; `Restart this SKC session
+    to enable /btw.` when the connected session does not support side turns; `Two
+    /btw questions are already running. Wait for one to finish.` when busy; `This
+    /btw question timed out after 120 seconds. Send it again to retry.` on
+    timeout; `This /btw question stopped because the SKC session closed or
+    changed. Reopen it and try again.` when stopped; and `This /btw question
+    failed. Send it again to retry.` on failure.
+
+    A transient reconnect to the exact session may deliver a result once.
+    Graceful SKC or daemon shutdown cancels side questions. Crashes or identity
+    changes do not promise delivery, and stale results are fenced.
+    `/btw` rich replies use Telegram Bot API 10.1 Markdown only. An eligible,
+    complete structured Markdown reply is sent once as
+    `{rich_message:{markdown,skip_entity_detection:true}}`, correlated to the
+    source message in the same topic; SKC does not send native `blocks` or
+    `media`. Eligibility is conservative: valid Unicode; at most 32,768 scalars,
+    131,072 UTF-8 bytes, 500 blocks, 16 nesting levels, and 20 table columns.
+    Tables and math use Telegram's 10.1 Markdown support. Ineligible content and
+    a definite rich rejection use the existing correlated HTML delivery.
+    Ambiguous rich outcomes never retry or fall back; `/rich off` keeps HTML-only
+    behavior.
 - send paired-chat lifecycle commands from the Telegram command menu or by typing:
   - `/session_create path <dir>`
   - `/session_create worktree <repo> <branch>`
@@ -260,23 +372,40 @@ Reply paths:
 The removed legacy `/answer <session-tag> <answer>` flow is not the primary UX;
 Telegram topic routing identifies the target session when the configured chat
 supports it.
+### `/btw` operational rollback
+
+`notifications.telegram.btw.enabled` defaults to `true` and is the local kill
+switch. Disabling it consumes `/btw` without forwarding it to the session. To
+roll back, restart the Telegram daemon, and probe health:
+
+```sh
+skc config set notifications.telegram.btw.enabled false
+skc daemon restart telegram --json
+skc notify health --probe
+```
 
 ## 8. Local `/notify` inside a session
 
-Inside a running SKC session:
+Inside a running SKC session, `/notify` controls the current session only; it
+does not edit global config or credentials:
 
 - `/notify status` reports current session notification status without secrets;
 - `/notify off` disables the current session endpoint and removes its discovery
   record without changing global setup;
-- `/notify on` re-enables the current session when global setup is complete and
-  `SKC_NOTIFICATIONS=0` is not forcing opt-out.
+- `/notify on` re-enables the current session when a complete global
+  configuration or explicit environment path is available, unless
+  `SKC_NOTIFICATIONS=0` is forcing opt-out.
+
+Neither command changes `SKC_NOTIFY` or `SKC_NOTIFICATIONS` precedence. A
+process with `SKC_NOTIFY=off`, `0`, or `false` has no notification control
+surface to override.
 
 ## 9. Debug-only manual bridge
 
 The manual Telegram CLI remains a reference/debug tool:
 
 ```sh
-bun run packages/coding-agent/src/notifications/telegram-cli.ts --bot-token "$BOT_TOKEN"
+bun run packages/coding-agent/src/sdk/bus/telegram-cli.ts --bot-token "$BOT_TOKEN"
 ```
 
 If a fresh managed daemon already owns the same bot token and paired chat, the
@@ -322,8 +451,10 @@ on each WebSocket open; reconnecting starts a new negotiation.
 
 ### Telegram 409 conflict
 
-Only one `getUpdates` poller can own a bot token. Stop any old manual bridge or
-external bot process using the same token, then let SKC's managed daemon own it.
+Only one `getUpdates` poller can own a bot token. SKC never takes over a fresh
+foreign or unknown owner. If you own the other process, stop or reconfigure it,
+then use `skc notify health`, `skc notify recovery`, or `skc notify reconnect`;
+recovery removes only dead-owner artifacts and never touches a live owner.
 
 ### A session does not send notifications
 
@@ -332,7 +463,7 @@ Check, in order:
 1. `skc notify status`
 2. `SKC_NOTIFICATIONS` is not set to `0`
 3. the session has not run `/notify off`
-4. the repo has `.skc/state/notifications/<sessionId>.json`
+4. the repo has `.skc/state/sdk/<sessionId>.json`
 5. the managed daemon state is fresh under the SKC agent notifications directory
 
 Do not paste endpoint discovery files into public issues; they contain the

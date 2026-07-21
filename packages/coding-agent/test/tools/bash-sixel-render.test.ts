@@ -85,7 +85,7 @@ describe("bashToolRenderer", () => {
 			{ content: [{ type: "text", text: "" }], details: { timeoutSeconds: 120 }, isError: false },
 			{ expanded: false, isPartial: false, renderContext: { timeout: 1200 } },
 			uiTheme,
-			{ command: "python3 scripts/edit-benchmark.py", timeout: 1200 },
+			{ command: "sleep 1200", timeout: 1200 },
 		);
 		const rendered = sanitizeText(component.render(120).join("\n"));
 		expect(rendered).toContain("Timeout: 120s");

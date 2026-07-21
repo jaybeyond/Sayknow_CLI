@@ -6,13 +6,15 @@ import { type AssistantMessage, getBundledModel } from "@sayknow-cli/ai";
 import type { Rule } from "@sayknow-cli/coding-agent/capability/rule";
 import { Settings } from "@sayknow-cli/coding-agent/config/settings";
 import type { ExtensionFactory } from "@sayknow-cli/coding-agent/extensibility/extensions";
-import { LocalProtocolHandler, resolveLocalUrlToPath } from "@sayknow-cli/coding-agent/internal-urls";
+import { LocalProtocolHandler, resolveLocalRoot, resolveLocalUrlToPath } from "@sayknow-cli/coding-agent/internal-urls";
 import { AgentRegistry } from "@sayknow-cli/coding-agent/registry/agent-registry";
 import { createAgentSession } from "@sayknow-cli/coding-agent/sdk";
-import { SecretObfuscator } from "@sayknow-cli/coding-agent/secrets";
+import { createSecretObfuscator } from "@sayknow-cli/coding-agent/secrets";
 import type { AgentSession } from "@sayknow-cli/coding-agent/session/agent-session";
 import { SessionManager } from "@sayknow-cli/coding-agent/session/session-manager";
 import { getSessionsDir, Snowflake } from "@sayknow-cli/utils";
+import { discoverAuthStorage } from "../src/sdk/session";
+import { AgentStorage } from "../src/session/agent-storage";
 
 function createTtsrRule(name: string): Rule {
 	return {
@@ -31,7 +33,6 @@ function createTtsrRule(name: string): Rule {
 }
 
 const SECRET_ENV_PATTERNS = /(?:KEY|SECRET|TOKEN|PASSWORD|PASS|AUTH|CREDENTIAL|PRIVATE|OAUTH)(?:_|$)/i;
-
 async function withClearedSecretEnv<T>(run: () => Promise<T>): Promise<T> {
 	const removed: Array<[string, string]> = [];
 	for (const [name, value] of Object.entries(process.env)) {
@@ -63,6 +64,10 @@ describe("createAgentSession session storage isolation", () => {
 	afterEach(async () => {
 		LocalProtocolHandler.resetOverrideForTests();
 		AgentRegistry.resetGlobalForTests();
+		if (process.platform === "win32") {
+			Bun.gc(true);
+			await Bun.sleep(50);
+		}
 		for (const tempDir of tempDirs.splice(0)) {
 			fs.rmSync(tempDir, { recursive: true, force: true });
 		}
@@ -100,6 +105,48 @@ describe("createAgentSession session storage isolation", () => {
 			await session.dispose();
 		}
 	});
+	it("keeps settings storage usable while default sessions dispose independently", async () => {
+		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `pi-sdk-shared-storage-${Snowflake.next()}-`));
+		tempDirs.push(tempDir);
+		const cwd = path.join(tempDir, "project");
+		const agentDir = path.join(tempDir, "agent");
+		fs.mkdirSync(cwd, { recursive: true });
+
+		const settingsStorage = await AgentStorage.open(path.join(agentDir, "agent.db"));
+		const options = {
+			cwd,
+			agentDir,
+			settings: Settings.isolated(),
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+		};
+		const first = await createAgentSession(options);
+		const second = await createAgentSession(options);
+		try {
+			await first.session.dispose();
+			await first.session.dispose();
+
+			settingsStorage.recordModelUsage("test/shared");
+			expect(settingsStorage.getModelUsageOrder()).toContain("test/shared");
+			await second.session.modelRegistry.authStorage.reload();
+
+			const laterStorage = await discoverAuthStorage(agentDir);
+			try {
+				await laterStorage.reload();
+			} finally {
+				laterStorage.close();
+			}
+		} finally {
+			await first.session.dispose();
+			await second.session.dispose();
+			settingsStorage.close();
+		}
+	}, 20_000);
 
 	it("releases each session's owned local:// override on dispose", async () => {
 		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `pi-sdk-local-protocol-${Snowflake.next()}-`));
@@ -150,11 +197,86 @@ describe("createAgentSession session storage isolation", () => {
 				path.join(secondArtifactsDir, "local", "note.md"),
 			);
 
+			// Dispose the first (bottom-of-stack) override while the second remains installed;
+			// only the first session's override may be removed and the second must still resolve.
+			await firstSession.dispose();
+			firstSession = undefined;
+			expect(resolveLocalUrlToPath("local://note.md", LocalProtocolHandler.resolveOptions()!)).toBe(
+				path.join(secondArtifactsDir, "local", "note.md"),
+			);
+
+			// Disposing the remaining second override restores the default/fallback resolution.
+			await secondSession.dispose();
+			secondSession = undefined;
+			expect(LocalProtocolHandler.resolveOptions()).toBeUndefined();
+
+			// Managed-destination sessions retain their owner-only external skc-local root.
+			expect(
+				resolveLocalRoot({
+					getArtifactsDir: () => firstArtifactsDir,
+					isManagedDestination: () => true,
+					getSessionId: () => "managed-owner-session",
+				}),
+			).toBe(path.join(os.tmpdir(), "skc-local", "managed-owner-session"));
+		} finally {
+			await secondSession?.dispose();
+			await firstSession?.dispose();
+		}
+	});
+
+	it("restores the previous session's local:// override when the top override is disposed (LIFO)", async () => {
+		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `pi-sdk-local-protocol-lifo-${Snowflake.next()}-`));
+		tempDirs.push(tempDir);
+		const cwd = path.join(tempDir, "project");
+		const agentDir = path.join(tempDir, "agent");
+		const firstArtifactsDir = path.join(tempDir, "first-artifacts");
+		const secondArtifactsDir = path.join(tempDir, "second-artifacts");
+		fs.mkdirSync(cwd, { recursive: true });
+		const sessionOptions = {
+			cwd,
+			agentDir,
+			settings: Settings.isolated(),
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+		};
+		let firstSession: AgentSession | undefined;
+		let secondSession: AgentSession | undefined;
+		try {
+			firstSession = (
+				await createAgentSession({
+					...sessionOptions,
+					localProtocolOptions: {
+						getArtifactsDir: () => firstArtifactsDir,
+						getSessionId: () => "first-local-session",
+					},
+				})
+			).session;
+			secondSession = (
+				await createAgentSession({
+					...sessionOptions,
+					localProtocolOptions: {
+						getArtifactsDir: () => secondArtifactsDir,
+						getSessionId: () => "second-local-session",
+					},
+				})
+			).session;
+			expect(resolveLocalUrlToPath("local://note.md", LocalProtocolHandler.resolveOptions()!)).toBe(
+				path.join(secondArtifactsDir, "local", "note.md"),
+			);
+
+			// Dispose the top-of-stack (second) override; the previous (first) override must be restored.
 			await secondSession.dispose();
 			secondSession = undefined;
 			expect(resolveLocalUrlToPath("local://note.md", LocalProtocolHandler.resolveOptions()!)).toBe(
 				path.join(firstArtifactsDir, "local", "note.md"),
 			);
+
+			// Disposing the last remaining override restores the default/fallback resolution.
 			await firstSession.dispose();
 			firstSession = undefined;
 			expect(LocalProtocolHandler.resolveOptions()).toBeUndefined();
@@ -230,7 +352,7 @@ describe("createAgentSession session storage isolation", () => {
 	});
 	it("shows redaction guidance only when secrets are actually loaded", async () => {
 		await withClearedSecretEnv(async () => {
-			const redactionGuidance = "redacted as `#XXXX#` tokens";
+			const redactionGuidance = "redacted as versioned `#SKC1_…#` tokens";
 			const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `pi-sdk-secrets-${Snowflake.next()}-`));
 			tempDirs.push(tempDir);
 			const cwd = path.join(tempDir, "project");
@@ -281,7 +403,7 @@ describe("createAgentSession session storage isolation", () => {
 			const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 			if (!model) throw new Error("Expected anthropic model");
 
-			const obfuscator = new SecretObfuscator([{ type: "plain", content: "sdk-secret-token-123456" }]);
+			const obfuscator = createSecretObfuscator([{ type: "plain", content: "sdk-secret-token-123456" }]);
 			const initialManager = SessionManager.create(cwd, path.join(agentDir, "sessions"));
 			initialManager.appendMessage({
 				role: "assistant",
@@ -304,6 +426,8 @@ describe("createAgentSession session storage isolation", () => {
 			const sessionFile = initialManager.getSessionFile();
 			if (!sessionFile) throw new Error("Expected persisted session file");
 			await initialManager.close();
+			const transcript = fs.readFileSync(sessionFile, "utf8");
+			expect(transcript).not.toContain("sdk-secret-token-123456");
 
 			const resumedManager = await SessionManager.open(sessionFile, path.dirname(sessionFile));
 			const { session } = await createAgentSession({

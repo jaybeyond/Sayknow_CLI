@@ -46,6 +46,7 @@ export type WorkerInitPayload =
 			browserWSEndpoint: string;
 			safeDir: string;
 			viewport?: { width: number; height: number; deviceScaleFactor?: number };
+			geo?: { readonly timezone?: string; readonly locale?: string };
 			dialogs?: "accept" | "dismiss";
 			url?: string;
 			waitUntil?: "load" | "domcontentloaded" | "networkidle0" | "networkidle2";
@@ -62,6 +63,7 @@ export type WorkerInitPayload =
 export type ToolReply = { ok: true; value: unknown } | { ok: false; error: RunErrorPayload };
 
 export type WorkerInbound =
+	| { type: "bootstrap"; version: 1; mode: "native-free" }
 	| { type: "init"; payload: WorkerInitPayload }
 	| { type: "run"; id: string; name: string; code: string; timeoutMs: number; session: SessionSnapshot }
 	| { type: "abort"; id: string }
@@ -90,6 +92,8 @@ export interface RunErrorPayload {
 }
 
 export type WorkerOutbound =
+	| { type: "bootstrap-ready"; version: 1; mode: "native-free" }
+	| { type: "bootstrap-failed"; error: string }
 	| { type: "ready"; info: ReadyInfo }
 	| { type: "init-failed"; error: RunErrorPayload }
 	| { type: "result"; id: string; ok: true; payload: RunResultOk }

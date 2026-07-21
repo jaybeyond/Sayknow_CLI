@@ -1,14 +1,27 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+
 import { disposeAllKernelSessions, executePython } from "@sayknow-cli/coding-agent/eval/py/executor";
 import type {
 	KernelExecuteOptions,
 	KernelExecuteResult,
 	KernelShutdownResult,
 } from "@sayknow-cli/coding-agent/eval/py/kernel";
-import { PythonKernel } from "@sayknow-cli/coding-agent/eval/py/kernel";
+import { checkPythonKernelAvailability, PythonKernel } from "@sayknow-cli/coding-agent/eval/py/kernel";
 import { TempDir } from "@sayknow-cli/utils";
 
 const originalStart = PythonKernel.start;
+
+function snapshotEnv(keys: readonly string[]): Map<string, string | undefined> {
+	return new Map(keys.map(key => [key, Bun.env[key]]));
+}
+
+function restoreEnv(keys: readonly string[], snapshot: Map<string, string | undefined>): void {
+	for (const key of keys) {
+		const value = snapshot.get(key);
+		if (value === undefined) delete Bun.env[key];
+		else Bun.env[key] = value;
+	}
+}
 
 const OK_RESULT: KernelExecuteResult = {
 	status: "ok",
@@ -62,9 +75,20 @@ async function waitForExit(pid: number, timeoutMs = 3000): Promise<boolean> {
 }
 
 describe("python eval lifecycle", () => {
+	const envKeys = ["PI_PYTHON_SKIP_CHECK"] as const;
+	let previousEnv = new Map<string, string | undefined>();
+
+	beforeEach(() => {
+		previousEnv = snapshotEnv(envKeys);
+	});
+
 	afterEach(async () => {
 		PythonKernel.start = originalStart;
-		await disposeAllKernelSessions();
+		try {
+			await disposeAllKernelSessions();
+		} finally {
+			restoreEnv(envKeys, previousEnv);
+		}
 	});
 
 	it("coalesces concurrent first acquires for the same session into one kernel", async () => {
@@ -201,5 +225,88 @@ describe("python eval lifecycle", () => {
 			}
 			await unrelated.exited.catch(() => undefined);
 		}
+	});
+});
+describe("python kernel env-var dual-read (SKC_* preferred, PI_* fallback)", () => {
+	// `checkPythonKernelAvailability` short-circuits on `isBunTestRuntime()`
+	// (NODE_ENV/BUN_ENV === "test"), which would mask the skip-check branch.
+	// These tests neutralize the test-runtime guard inside a scoped window and
+	// restore it in finally so the real SKC/PI skip-check branch is exercised.
+	const envKeys = [
+		"SKC_PYTHON_SKIP_CHECK",
+		"PI_PYTHON_SKIP_CHECK",
+		"SKC_PYTHON_IPC_TRACE",
+		"PI_PYTHON_IPC_TRACE",
+		"NODE_ENV",
+		"BUN_ENV",
+	] as const;
+	let previousEnv = new Map<string, string | undefined>();
+
+	function clearSkipEnv(): void {
+		for (const key of envKeys) delete Bun.env[key];
+	}
+
+	function neutralizeTestRuntime(): void {
+		// Force isBunTestRuntime() false so the skip-check env var is the
+		// sole gate, not the test-runtime short-circuit.
+		delete Bun.env.NODE_ENV;
+		delete Bun.env.BUN_ENV;
+	}
+
+	beforeEach(() => {
+		previousEnv = snapshotEnv(envKeys);
+	});
+
+	afterEach(() => {
+		restoreEnv(envKeys, previousEnv);
+	});
+
+	it("restores pre-existing environment values after cleanup", () => {
+		const suiteEnv = snapshotEnv(envKeys);
+		try {
+			for (const key of envKeys) Bun.env[key] = `hostile-${key}`;
+			const testEnv = snapshotEnv(envKeys);
+			clearSkipEnv();
+			restoreEnv(envKeys, testEnv);
+			for (const key of envKeys) expect(Bun.env[key]).toBe(`hostile-${key}`);
+		} finally {
+			restoreEnv(envKeys, suiteEnv);
+		}
+	});
+	it("honors SKC_PYTHON_SKIP_CHECK=1 and returns ok without spawning Python", async () => {
+		clearSkipEnv();
+		neutralizeTestRuntime();
+		Bun.env.SKC_PYTHON_SKIP_CHECK = "1";
+		using tempDir = TempDir.createSync("@skc-python-skipcheck-skc-");
+		const availability = await checkPythonKernelAvailability(tempDir.path());
+		expect(availability.ok).toBe(true);
+	});
+
+	it("still honors legacy PI_PYTHON_SKIP_CHECK=1 as a fallback", async () => {
+		clearSkipEnv();
+		neutralizeTestRuntime();
+		Bun.env.PI_PYTHON_SKIP_CHECK = "1";
+		using tempDir = TempDir.createSync("@skc-python-skipcheck-pi-");
+		const availability = await checkPythonKernelAvailability(tempDir.path());
+		expect(availability.ok).toBe(true);
+	});
+
+	it("OR semantics: SKC=0 with PI=1 still skips the check", async () => {
+		clearSkipEnv();
+		neutralizeTestRuntime();
+		Bun.env.SKC_PYTHON_SKIP_CHECK = "0";
+		Bun.env.PI_PYTHON_SKIP_CHECK = "1";
+		using tempDir = TempDir.createSync("@skc-python-skipcheck-or-");
+		const availability = await checkPythonKernelAvailability(tempDir.path());
+		expect(availability.ok).toBe(true);
+	});
+
+	it("accepts truthy tokens true/yes for SKC_PYTHON_SKIP_CHECK (case-insensitive)", async () => {
+		clearSkipEnv();
+		neutralizeTestRuntime();
+		Bun.env.SKC_PYTHON_SKIP_CHECK = "YES";
+		using tempDir = TempDir.createSync("@skc-python-skipcheck-yes-");
+		const availability = await checkPythonKernelAvailability(tempDir.path());
+		expect(availability.ok).toBe(true);
 	});
 });

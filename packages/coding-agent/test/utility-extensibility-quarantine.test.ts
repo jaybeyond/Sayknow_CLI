@@ -37,7 +37,6 @@ describe("SKC utility extensibility quarantine", () => {
 			"todo",
 			"branch",
 			"fork",
-			"handoff",
 			"force",
 			// `quit` stays a non-standalone command: `/quit` is a TUI alias of
 			// `/exit`, verified in slash-command-builtin-registry.test.ts.
@@ -49,6 +48,10 @@ describe("SKC utility extensibility quarantine", () => {
 		// `/changelog` was restored as a first-class built-in (see CHANGELOG
 		// Unreleased), so it is intentionally no longer in the removed set above.
 		expect(registry).toContain(`name: "changelog"`);
+		// `/handoff` was restored as a first-class built-in for issue #2736
+		// (generate a handoff document and continue in a new session), so it is
+		// intentionally no longer in the removed set above.
+		expect(registry).toContain(`name: "handoff"`);
 		expect(registry).toContain(`name: "ssh"`);
 		expect(registry).toContain(`name: "provider"`);
 		expect(await Bun.file(srcPath("slash-commands", "helpers", "marketplace-manager.ts")).exists()).toBe(false);
@@ -71,7 +74,7 @@ describe("SKC utility extensibility quarantine", () => {
 	});
 
 	it("does not default-discover skills, extensions, custom commands, custom tools, plugins, or marketplaces", async () => {
-		const sdk = await source("sdk.ts");
+		const sdk = await source("sdk", "session.ts");
 		const main = await source("main.ts");
 		const settingsSchema = await source("config", "settings-schema.ts");
 

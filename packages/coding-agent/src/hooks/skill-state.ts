@@ -13,6 +13,7 @@ import {
 	writeGuardedWorkflowEnvelopeAtomic,
 } from "../skc-runtime/state-writer";
 import { isUltragoalBypassPrompt, verifyUltragoalDurableCompletionState } from "../skc-runtime/ultragoal-guard";
+import { getSkillManifest } from "../skc-runtime/workflow-manifest";
 import {
 	readVisibleSkillActiveState as readCanonicalVisibleSkillActiveState,
 	type SkillActiveEntry,
@@ -20,6 +21,7 @@ import {
 	syncSkillActiveState,
 } from "../skill-state/active-state";
 import { initialPhaseForSkill } from "../skill-state/initial-phase";
+import { readWorkflowGuardContext } from "../skill-state/workflow-mutation-guard";
 
 // Re-export for existing callers and tests that imported it from this module.
 export { initialPhaseForSkill };
@@ -531,7 +533,6 @@ function isTerminalModeState(state: ModeState | null): boolean {
  * declared it is ready to chain but has not yet been demoted/cleared, so it
  * must keep blocking until the chain (or an explicit clear) removes it.
  */
-const STOP_RELEASING_PHASES = ["complete", "completed", "failed", "cancelled", "canceled", "inactive"] as const;
 
 /**
  * Handoff workflows must never stop silently — they always have to offer the
@@ -553,13 +554,13 @@ function isHandoffRequiredSkill(skill: SkcWorkflowSkill): boolean {
  * mode-state preserves the historical fail-open behavior so a broken state file
  * cannot lock a session.
  */
-function modeStateReleasesStop(state: ModeState | null, handoffRequired: boolean): boolean {
+function modeStateReleasesStop(state: ModeState | null, handoffRequired: boolean, skill: SkcWorkflowSkill): boolean {
 	if (!state) return !handoffRequired;
 	if (state.active !== true) return true;
 	const phase = String(state.current_phase ?? "")
 		.trim()
 		.toLowerCase();
-	if ((STOP_RELEASING_PHASES as readonly string[]).includes(phase)) return true;
+	if (getSkillManifest(skill).stopReleasingPhases.includes(phase)) return true;
 	if (!handoffRequired && phase === "handoff") return true;
 	return false;
 }
@@ -743,12 +744,21 @@ function buildHandoffModeStateRecoveryMessage(skill: SkcWorkflowSkill, phase: st
 }
 
 function buildHandoffForceAskMessage(skill: SkcWorkflowSkill, phase: string, statePath: string): string {
+	if (skill === "deep-interview" && phase.trim().toLowerCase() === "interviewing") {
+		return `SKC deep-interview is still interviewing and must not stop (${statePath}). Continue the active round immediately: score and persist an answered round, then report progress. Use the ask tool for the next question. Only stop after crystallizing, recording a handoff, or explicitly cancelling the workflow. ${buildHandoffStopReleaseGuidance(skill)}`;
+	}
 	return `SKC handoff skill "${skill}" must not stop without offering a next step (phase: ${phase}; state: ${statePath}). ${buildHandoffStopReleaseGuidance(skill)}`;
 }
 
 export async function buildSkillStopOutput(input: StopHookInput): Promise<Record<string, unknown> | null> {
-	const resolvedSessionId = await resolveBoundarySessionId(input.cwd, input.sessionId);
-	const skillState = await readVisibleSkillActiveState(input.cwd, resolvedSessionId, input.stateDir);
+	const guardContext = await readWorkflowGuardContext(input.cwd, {
+		sessionId: input.sessionId,
+		threadId: input.threadId,
+	});
+	const resolvedSessionId = guardContext.sessionId;
+	if (!resolvedSessionId) return null;
+	const skillState = guardContext.activeState;
+
 	const activeEntries = listActiveSkills(skillState)
 		.filter(isWorkflowActiveEntry)
 		.filter(entry =>
@@ -757,11 +767,7 @@ export async function buildSkillStopOutput(input: StopHookInput): Promise<Record
 	if (!skillState || activeEntries.length === 0) return null;
 
 	for (const entry of activeEntries) {
-		const modeState = await readValidatedJsonFile<ModeState>(
-			modeStatePath(input.cwd, entry.skill, resolvedSessionId),
-			"mode-state",
-			ModeStateSchema,
-		);
+		const modeState = guardContext.modeStates.get(entry.skill) ?? null;
 		const handoffRequired = isHandoffRequiredSkill(entry.skill);
 		if (!modeState && handoffRequired) {
 			const phase = String(entry.phase ?? skillState.phase ?? "active");
@@ -784,7 +790,7 @@ export async function buildSkillStopOutput(input: StopHookInput): Promise<Record
 				systemMessage: rescueMessage,
 			};
 		}
-		if (modeStateReleasesStop(modeState, handoffRequired)) {
+		if (modeStateReleasesStop(modeState, handoffRequired, entry.skill)) {
 			// A mode-state that claims it releases the Stop block must agree with
 			// authoritative durable state. If a stale/incoherent mode-state would
 			// release while the plan/ledger still shows pending work, block instead

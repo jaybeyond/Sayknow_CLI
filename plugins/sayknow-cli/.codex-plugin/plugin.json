@@ -1,6 +1,6 @@
 {
   "name": "sayknow-cli",
-  "version": "0.3.16",
+  "version": "0.3.14",
   "description": "Delegate Codex tasks to SKC workflows through coordinator MCP.",
   "skills": "./skills/",
   "mcpServers": "./.codex.mcp.json"

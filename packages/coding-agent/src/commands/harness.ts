@@ -16,11 +16,18 @@ import * as path from "node:path";
 import { Args, Command, Flags } from "@sayknow-cli/utils/cli";
 import { classifyRecovery } from "../harness-control-plane/classifier";
 import { callEndpoint, EndpointUnreachableError } from "../harness-control-plane/control-endpoint";
+import {
+	type CompletedTerminalEvent,
+	isOwnerLivenessBlocker,
+	needsVanishedOwnerBlock,
+	OWNER_STARTUP_BLOCKER,
+	reconcileOwnerLifecycle,
+} from "../harness-control-plane/lifecycle-reconciliation";
 import { type ResolvedOwner, RuntimeOwner, resolveOwner, resolveOwnerLive } from "../harness-control-plane/owner";
 import { preserveDirtyWorktree } from "../harness-control-plane/preserve";
 import { RECEIPT_SPOOL_DIR_ENV } from "../harness-control-plane/receipt-spool";
 import { buildReceipt, requiresVanishBeforeAction, type VanishEvidence } from "../harness-control-plane/receipts";
-import { SayknowCliRpc } from "../harness-control-plane/rpc-adapter";
+import { createSdkSessionTransport, spawnNormalHarnessSession } from "../harness-control-plane/sdk-transport";
 import { classifyLeaseStatus, readLease } from "../harness-control-plane/session-lease";
 import { buildResponse, buildStateView, submitUnavailableReason } from "../harness-control-plane/state-machine";
 import {
@@ -31,7 +38,6 @@ import {
 	rememberHarnessSessionRoot,
 	resolveHarnessRoot,
 	resolveHarnessSessionRoot,
-	sessionPaths,
 	writeReceiptImmutable,
 	writeSessionState,
 } from "../harness-control-plane/storage";
@@ -47,7 +53,7 @@ import {
 	type SessionHandle,
 	type SessionState,
 } from "../harness-control-plane/types";
-import { SPAWN_PROVENANCE_ENV } from "../notifications/config";
+import { SPAWN_PROVENANCE_ENV } from "../sdk/bus/config";
 import {
 	SKC_TMUX_OWNER_GENERATION_ENV,
 	SKC_TMUX_OWNER_SERVER_KEY_ENV,
@@ -59,12 +65,14 @@ import {
 	classifyCgroup,
 	isExactScopedBootstrapSuccessReceipt,
 	isOwnerGenerationBaselineCurrentSync,
+	isSafeServerProof,
 	type OwnerGenerationBaseline,
 	type OwnerIsolationProbe,
 	observeOwnerTerminal,
 	ownerProcessStartTime,
 	planTmuxOwnerIsolation,
 	replaceOwnerGenerationSync,
+	sameServerIdentity,
 	type TmuxServerProof,
 } from "../skc-runtime/tmux-owner-isolation";
 
@@ -251,12 +259,6 @@ function ownerLiveFor(_state: SessionState): boolean {
 
 function pushUnique(out: string[], value: unknown): void {
 	if (typeof value === "string" && !out.includes(value)) out.push(value);
-}
-
-interface CompletedTerminalEvent {
-	cursor: number;
-	createdAt: string;
-	kind: string;
 }
 
 function completedTerminalEvent(events: EventEnvelope[]): CompletedTerminalEvent | null {
@@ -462,73 +464,21 @@ function updateStateWithRestoredOwner(state: SessionState, leasePath: string, re
 	state.updatedAt = nowIso();
 }
 
-function isOwnerLivenessBlocker(blocker: string): boolean {
-	return blocker === "detached-owner-not-live" || blocker.startsWith("owner-vanished:");
-}
-
-async function reconcileCompletedOwnerExited(
+async function reconcileLifecycle(
 	root: string,
 	state: SessionState,
 	observation: Observation,
 	completedTerminal: CompletedTerminalEvent | null,
+	startupBlocked = false,
 ): Promise<SessionState> {
-	if (!completedTerminal || observation.ownerLive || observation.gitDelta !== "clean") return state;
-	if (state.lifecycle === "completed" || state.lifecycle === "retired") return state;
-	state.lifecycle = "completed";
-	state.blockers = state.blockers.filter(blocker => !isOwnerLivenessBlocker(blocker));
-	state.updatedAt = nowIso();
-	await writeSessionState(root, state);
-	return state;
-}
-
-function needsVanishedOwnerBlock(
-	state: SessionState,
-	observation: Observation,
-	completedTerminal: CompletedTerminalEvent | null,
-): boolean {
-	if (observation.ownerLive || state.lifecycle !== "observing") return false;
-	if (completedTerminal || observation.observedSignals.includes("completed")) return false;
-	return observation.observedSignals.some(
-		signal => signal === "prompt-accepted" || signal === "tool-call" || signal === "streaming",
-	);
-}
-
-async function markVanishedOwnerBlocked(
-	root: string,
-	state: SessionState,
-	observation: Observation,
-	completedTerminal: CompletedTerminalEvent | null,
-): Promise<SessionState> {
-	if (!needsVanishedOwnerBlock(state, observation, completedTerminal)) return state;
-	const blocker = `owner-vanished:${observation.gitDelta}`;
-	state.lifecycle = "blocked";
-	state.blockers = state.blockers.includes(blocker) ? state.blockers : [...state.blockers, blocker];
-	state.updatedAt = nowIso();
-	await writeSessionState(root, state);
-	return state;
-}
-
-const OWNER_STARTUP_BLOCKER = "owner-died-before-first-prompt";
-
-/**
- * Persist an explicit startup blocker when an owner started, reported live, but died before
- * accepting the first prompt. This makes the failure an actionable lifecycle state instead of a
- * silent `owner-not-live` gate, so observe/recover surface it and recover can respawn the owner.
- */
-async function markStartupOwnerBlocked(
-	root: string,
-	state: SessionState,
-	ownerExit: OwnerExitEvidence,
-): Promise<SessionState> {
-	if (!ownerExit.startupBlocker) return state;
-	if (state.lifecycle === "completed" || state.lifecycle === "retired") return state;
-	state.lifecycle = "blocked";
-	state.blockers = state.blockers.includes(OWNER_STARTUP_BLOCKER)
-		? state.blockers
-		: [...state.blockers, OWNER_STARTUP_BLOCKER];
-	state.updatedAt = nowIso();
-	await writeSessionState(root, state);
-	return state;
+	return reconcileOwnerLifecycle({
+		state,
+		observation,
+		completedTerminal,
+		startupBlocked,
+		persist: async nextState => writeSessionState(root, nextState),
+		nowIso,
+	});
 }
 
 function resolveRetryBudget(input: Record<string, unknown>): RetryBudget {
@@ -546,6 +496,8 @@ interface OwnerSpawnResult {
 	socketKey: string | null;
 	fallbackReason: string | null;
 	blockerReason: string | null;
+	/** Exact-PID reap proof for a direct detached-owner child declared not-live (no orphan). */
+	detachedOwnerReaped?: { pid: number; verified: boolean } | null;
 }
 
 function shellQuote(value: string): string {
@@ -558,29 +510,6 @@ function isBoundedNoServerDiagnostic(stderr: Uint8Array): boolean {
 		diagnostic.length > 0 &&
 		diagnostic.length <= 512 &&
 		/^(?:no server running on |failed to connect to server|error connecting to )/i.test(diagnostic.trim())
-	);
-}
-
-function sameServerIdentity(left: TmuxServerProof, right: TmuxServerProof): boolean {
-	return (
-		left.pid === right.pid &&
-		left.startTime === right.startTime &&
-		left.cgroup?.classification === right.cgroup?.classification &&
-		left.cgroup?.scope === right.cgroup?.scope &&
-		left.cgroup?.diagnostic === right.cgroup?.diagnostic
-	);
-}
-
-function isSafeServerProof(proof: TmuxServerProof): boolean {
-	return (
-		proof.state === "safe" &&
-		typeof proof.pid === "number" &&
-		Number.isSafeInteger(proof.pid) &&
-		proof.pid > 0 &&
-		typeof proof.startTime === "string" &&
-		proof.startTime.length > 0 &&
-		(proof.cgroup?.classification === "safe" ||
-			(process.platform !== "linux" && proof.cgroup?.classification === "not_applicable"))
 	);
 }
 
@@ -630,6 +559,12 @@ function scopedBootstrapReceipt(stdout: Uint8Array): ScopedBootstrapReceipt | nu
 	}
 }
 
+function ownerIsolationPlatform(): NodeJS.Platform {
+	return process.platform === "linux" || process.env.SKC_HARNESS_TEST_ASSUME_LINUX_OWNER_ISOLATION !== "1"
+		? process.platform
+		: "linux";
+}
+
 function portableProcessStartTime(pid: number): string | null {
 	if (process.platform === "linux") return null;
 	const configured = process.env.SKC_HARNESS_PROCESS_START_COMMAND;
@@ -644,7 +579,11 @@ function portableProcessStartTime(pid: number): string | null {
 			return null;
 		}
 	}
-	const result = Bun.spawnSync([...command, String(pid)], { stdout: "pipe", stderr: "ignore" });
+	const result = Bun.spawnSync([...command, String(pid)], {
+		stdout: "pipe",
+		stderr: "ignore",
+		env: { ...process.env, LC_ALL: "C", LANG: "C" },
+	});
 	if (result.exitCode !== 0) return null;
 	const value = result.stdout.toString();
 	const line = value.endsWith("\n") ? value.slice(0, -1) : value;
@@ -801,36 +740,40 @@ export default class Harness extends Command {
 	/** Detached owner daemon (spawned by `start --detach`). Runs until retired or signalled. */
 	async #runOwner(root: string, input: Record<string, unknown>, flagSession: string | undefined): Promise<void> {
 		const sessionId = requireSessionId(input, flagSession);
-		const sessionDir = sessionPaths(root, sessionId).skcSessionDir;
-		// Optional rpc command override (tests / non-default hosts); defaults to `skc --mode rpc`.
-		const override = process.env.SKC_HARNESS_RPC_COMMAND;
-		const command = override ? (JSON.parse(override) as string[]) : undefined;
-		// Mark the RPC owner as a SKC-spawned child (canonical provenance marker)
-		// so `notifications.sessionScope = "primary"` suppresses its notification
-		// endpoint/topic; default `all` preserves historical auto-on behavior.
-		const rpc = new SayknowCliRpc({
-			sessionDir,
-			command,
-			env: { ...process.env, [SPAWN_PROVENANCE_ENV]: sessionId },
-		});
-		const owner = new RuntimeOwner({ root, sessionId, rpc });
+		const state = await loadState(root, sessionId);
+		const previousSpawnProvenance = process.env[SPAWN_PROVENANCE_ENV];
+		process.env[SPAWN_PROVENANCE_ENV] = sessionId;
+		let transport: Awaited<ReturnType<typeof createSdkSessionTransport>>;
+		try {
+			transport = await createSdkSessionTransport({
+				repo: state.handle.workspace,
+				sessionId,
+				spawn: () => spawnNormalHarnessSession(state.handle.workspace, sessionId),
+			});
+		} finally {
+			if (previousSpawnProvenance === undefined) delete process.env[SPAWN_PROVENANCE_ENV];
+			else process.env[SPAWN_PROVENANCE_ENV] = previousSpawnProvenance;
+		}
+		const owner = new RuntimeOwner({ root, sessionId, transport });
 		const info = await owner.start();
 		writeJson({ ok: true, owner: info });
 		await new Promise<void>(resolve => {
 			const stop = (): void => {
 				clearInterval(timer);
+				process.removeListener("SIGTERM", stop);
+				process.removeListener("SIGINT", stop);
 				resolve();
 			};
-			const timer = setInterval(async () => {
-				const resolved = await resolveOwner(root, sessionId);
-				if (!resolved.live) stop();
+			const timer = setInterval(() => {
+				void resolveOwner(root, sessionId).then(resolved => {
+					if (!resolved.live) stop();
+				});
 			}, 500);
 			timer.unref?.();
 			process.on("SIGTERM", stop);
 			process.on("SIGINT", stop);
 		});
 		await owner.stop();
-		process.exit(0);
 	}
 
 	#buildOwnerCommand(sessionId: string): string[] {
@@ -841,7 +784,7 @@ export default class Harness extends Command {
 	}
 
 	async #waitForOwner(root: string, sessionId: string): Promise<boolean> {
-		for (let i = 0; i < 100; i++) {
+		for (let i = 0; i < 160; i++) {
 			const owner = await resolveOwner(root, sessionId);
 			if (owner.live && owner.socketPath) {
 				try {
@@ -855,6 +798,38 @@ export default class Harness extends Command {
 		}
 		return false;
 	}
+	/**
+	 * Reap an exact detached-owner child the parent spawned but declared not-live. The parent
+	 * owns this PID's lifecycle (it spawned it), so shutdown is exact-owner scoped: SIGTERM, a
+	 * bounded grace wait, then SIGKILL, then verify the SAME PID exited via its exit promise.
+	 * Never name-based — the spawned Subprocess pins the exact owner identity, so a not-live
+	 * declaration must not orphan a daemon the parent brought into being.
+	 */
+	async #reapDetachedOwner(
+		child: Bun.Subprocess<"ignore", "ignore", "ignore">,
+	): Promise<{ pid: number; verified: boolean }> {
+		// A resolved exit promise proves the PID is gone; a rejection is NOT proof of exit (it may
+		// surface an error observing the subprocess), so map it to false and let the SIGKILL
+		// escalation + cleanup-uncertain surfacing handle the uncertainty.
+		const exited = child.exited.then(
+			() => true,
+			() => false,
+		);
+		const send = (signal: NodeJS.Signals): void => {
+			try {
+				child.kill(signal);
+			} catch {
+				// Kill may fail if the child already exited; the exited race below is authoritative.
+			}
+		};
+		send("SIGTERM");
+		let verified = await Promise.race([exited, Bun.sleep(2000).then(() => false)]);
+		if (!verified) {
+			send("SIGKILL");
+			verified = await Promise.race([exited, Bun.sleep(1000).then(() => false)]);
+		}
+		return { pid: child.pid, verified };
+	}
 
 	async #harnessOwnerIsolationProbe(tmuxCommand: string): Promise<OwnerIsolationProbe> {
 		return {
@@ -862,6 +837,7 @@ export default class Harness extends Command {
 				process.env.SKC_HARNESS_TEST_CALLER_CGROUP ??
 				(await fs.readFile("/proc/self/cgroup", "utf8").catch(() => null)),
 			probeServer: async (socketKey, tmuxControlArgv): Promise<TmuxServerProof> => {
+				const platform = ownerIsolationPlatform();
 				if (!socketKey || socketKey.length > 128) return { state: "unverifiable" };
 				const controlArgv = tmuxControlArgv ?? [tmuxCommand, "-L", socketKey];
 				if (controlArgv.length < 3 || controlArgv[0] !== tmuxCommand || !controlArgv.includes("-L")) {
@@ -878,20 +854,16 @@ export default class Harness extends Command {
 				if (!Number.isSafeInteger(pid) || pid <= 0) return { state: "unverifiable" };
 				const cgroupText =
 					process.env.SKC_HARNESS_TEST_SERVER_CGROUP ??
-					(process.platform === "linux"
-						? await fs.readFile(`/proc/${pid}/cgroup`, "utf8").catch(() => null)
-						: null);
+					(platform === "linux" ? await fs.readFile(`/proc/${pid}/cgroup`, "utf8").catch(() => null) : null);
 				const testStartTime = process.env.SKC_HARNESS_TEST_SERVER_START_TIME;
 				const stat =
-					testStartTime || process.platform !== "linux"
+					testStartTime || platform !== "linux"
 						? null
 						: await fs.readFile(`/proc/${pid}/stat`, "utf8").catch(() => null);
-				const cgroup = classifyCgroup({ platform: process.platform, cgroupText });
+				const cgroup = classifyCgroup({ platform, cgroupText });
 				const startTime =
 					testStartTime ??
-					(process.platform === "linux"
-						? ownerProcessStartTime(process.platform, stat)
-						: portableProcessStartTime(pid));
+					(platform === "linux" ? ownerProcessStartTime(platform, stat) : portableProcessStartTime(pid));
 				if (!startTime) return { state: "unverifiable", pid, cgroup };
 				return {
 					state:
@@ -941,7 +913,9 @@ export default class Harness extends Command {
 		proof: TmuxServerProof | null,
 		probeServer: OwnerIsolationProbe["probeServer"],
 	): Promise<void> {
-		if (!nativeSessionId || !proof || !isSafeServerProof(proof)) throw new Error("tmux-owner-cleanup_uncertain");
+		if (!nativeSessionId || !proof || !isSafeServerProof(proof, ownerIsolationPlatform()))
+			throw new Error("tmux-owner-cleanup_uncertain");
+
 		if (!(await this.#nativeSessionBoundToName(tmuxCommand, socketKey, nativeSessionId, sessionName)))
 			throw new Error("tmux-owner-cleanup_uncertain");
 		const current = await probeServer(socketKey, [tmuxCommand, "-L", socketKey]);
@@ -996,7 +970,8 @@ export default class Harness extends Command {
 		} catch {
 			return { started: false, sessionName, socketKey, reason: "tmux-owner-generation_unverifiable" };
 		}
-		if (process.platform !== "linux" && !portableProcessStartTime(process.pid))
+		const platform = ownerIsolationPlatform();
+		if (platform !== "linux" && !portableProcessStartTime(process.pid))
 			return { started: false, sessionName, socketKey, reason: "tmux-owner-generation_unverifiable" };
 		await fs.mkdir(path.join(ownerStateDir, sessionId, "owner-lifecycle"), { recursive: true, mode: 0o700 });
 		const ownerGeneration = randomUUID();
@@ -1008,10 +983,10 @@ export default class Harness extends Command {
 		];
 		if (process.env[RECEIPT_SPOOL_DIR_ENV])
 			envAssignments.push(`${RECEIPT_SPOOL_DIR_ENV}=${shellQuote(process.env[RECEIPT_SPOOL_DIR_ENV])}`);
-		if (process.env.SKC_HARNESS_RPC_COMMAND)
-			envAssignments.push(`SKC_HARNESS_RPC_COMMAND=${shellQuote(process.env.SKC_HARNESS_RPC_COMMAND)}`);
 		if (process.env.SKC_HARNESS_TEST_NODE_MODULES)
 			envAssignments.push(`SKC_HARNESS_TEST_NODE_MODULES=${shellQuote(process.env.SKC_HARNESS_TEST_NODE_MODULES)}`);
+		if (process.env.SKC_SDK_DISABLE)
+			envAssignments.push(`SKC_SDK_DISABLE=${shellQuote(process.env.SKC_SDK_DISABLE)}`);
 		const shellCommand = `exec env ${envAssignments.join(" ")} ${this.#buildOwnerCommand(sessionId).map(shellQuote).join(" ")}`;
 		const probe = await this.#harnessOwnerIsolationProbe(tmuxCommand);
 		const probeServer = probe.probeServer;
@@ -1036,7 +1011,7 @@ export default class Harness extends Command {
 			{
 				schema_version: 1,
 				op: "plan",
-				platform: process.platform,
+				platform,
 				session_id: sessionId,
 				owner_generation: ownerGeneration,
 				baseline,
@@ -1096,7 +1071,7 @@ export default class Harness extends Command {
 		const postSpawnServer = await probeServer(socketKey, [tmuxCommand, "-L", socketKey]);
 		cleanupProof = postSpawnServer;
 		if (postSpawnServer.state === "unsafe") return fail("tmux-owner-server_unsafe");
-		if (!isSafeServerProof(postSpawnServer)) return fail("tmux-owner-server_unverifiable");
+		if (!isSafeServerProof(postSpawnServer, ownerIsolationPlatform())) return fail("tmux-owner-server_unverifiable");
 		if (
 			scopedReceipt &&
 			(scopedReceipt.sessionName !== sessionName ||
@@ -1216,6 +1191,7 @@ export default class Harness extends Command {
 				...(process.env.SKC_HARNESS_TEST_NODE_MODULES
 					? { SKC_HARNESS_TEST_NODE_MODULES: process.env.SKC_HARNESS_TEST_NODE_MODULES }
 					: {}),
+				...(process.env.SKC_SDK_DISABLE ? { SKC_SDK_DISABLE: process.env.SKC_SDK_DISABLE } : {}),
 			},
 			stdout: "ignore",
 			stderr: "ignore",
@@ -1223,6 +1199,7 @@ export default class Harness extends Command {
 		});
 		child.unref();
 		const live = await this.#waitForOwner(root, sessionId);
+		const detachedOwnerReaped = live ? null : await this.#reapDetachedOwner(child);
 		return {
 			live,
 			runtime: "detached",
@@ -1230,6 +1207,7 @@ export default class Harness extends Command {
 			socketKey: null,
 			fallbackReason,
 			blockerReason: live ? null : "detached-owner-not-live",
+			...(detachedOwnerReaped ? { detachedOwnerReaped } : {}),
 		};
 	}
 
@@ -1274,7 +1252,7 @@ export default class Harness extends Command {
 			base: typeof input.base === "string" ? input.base : null,
 			issueOrPr: preflight.normalizedIssueOrPr,
 			processHandle: { kind: "runtime-owner", ownerId: null, pid: null },
-			rpcHandle: { kind: "rpc-subprocess", pid: null, sessionDir: `${root}/sessions/${sessionId}/skc-session` },
+			sdkHandle: { kind: "sdk-session-endpoint", sessionId },
 			ownerHandle: { leasePath, endpoint: null, heartbeatAt: null },
 			routerHandle: { kind: "default-in-owner", policy: "default-fallback", eventsPath },
 			viewportHandle: { kind: "event-monitor", tmuxSessionName: null, viewOnly: true },
@@ -1299,6 +1277,7 @@ export default class Harness extends Command {
 		let ownerFallbackReason: string | null = null;
 		let ownerBlockerReason: string | null = null;
 		let ownerSocketKey: string | null = null;
+		let ownerDetachedReaped: { pid: number; verified: boolean } | null = null;
 		if (input.detach === true) {
 			const ownerSpawn = await this.#spawnDetachedOwner(root, sessionId, workspace);
 			ownerLive = ownerSpawn.live;
@@ -1306,6 +1285,7 @@ export default class Harness extends Command {
 			ownerFallbackReason = ownerSpawn.fallbackReason;
 			ownerBlockerReason = ownerSpawn.blockerReason;
 			ownerSocketKey = ownerSpawn.socketKey;
+			ownerDetachedReaped = ownerSpawn.detachedOwnerReaped ?? null;
 			handle.viewportHandle = {
 				kind: "event-monitor",
 				tmuxSessionName: ownerSpawn.tmuxSessionName,
@@ -1330,7 +1310,13 @@ export default class Harness extends Command {
 		// A live endpoint never proves a failed tmux launch safe: preserve the isolation/provenance blocker.
 		if (ownerBlockerReason) {
 			state.lifecycle = "blocked";
-			state.blockers = [...state.blockers, ownerBlockerReason];
+			// `detached-owner-not-live` is the lifecycle status; an unverified reap (the exact
+			// spawned child never confirmed exit after SIGKILL) is a stronger, distinct signal that
+			// must not be masked by the not-live blocker alone.
+			const ownerBlockers = [ownerBlockerReason];
+			if (ownerDetachedReaped && !ownerDetachedReaped.verified)
+				ownerBlockers.push("detached-owner-cleanup-uncertain");
+			state.blockers = [...state.blockers, ...ownerBlockers];
 			state.handle = handle;
 			state.updatedAt = nowIso();
 			await writeSessionState(root, state);
@@ -1346,6 +1332,7 @@ export default class Harness extends Command {
 					...(ownerSocketKey ? { tmuxOwnerSocketKey: ownerSocketKey } : {}),
 					...(ownerFallbackReason ? { ownerFallbackReason } : {}),
 					...(ownerBlockerReason ? { reason: ownerBlockerReason } : {}),
+					...(ownerDetachedReaped ? { detachedOwnerReaped: ownerDetachedReaped } : {}),
 				},
 				!ownerBlockerReason,
 			),
@@ -1384,14 +1371,10 @@ export default class Harness extends Command {
 		let state = await loadState(root, sessionId);
 		const ownerLive = ownerLiveFor(state);
 		const { observation, completedTerminalEvent } = await buildObservation(root, state, ownerLive);
-		state = await reconcileCompletedOwnerExited(root, state, observation, completedTerminalEvent);
 		const vanishedOwnerBlock = needsVanishedOwnerBlock(state, observation, completedTerminalEvent);
-		state = await markVanishedOwnerBlocked(root, state, observation, completedTerminalEvent);
-		// Build owner-exit evidence whenever the owner is gone so a startup death (owner started,
-		// reported live, then died before the first prompt) is detectable, not just vanish/completion.
 		const ownerExit = !ownerLive ? await buildOwnerExitEvidence(root, state) : null;
 		const startupBlocked = ownerExit?.startupBlocker ?? false;
-		if (ownerExit && startupBlocked) state = await markStartupOwnerBlocked(root, state, ownerExit);
+		state = await reconcileLifecycle(root, state, observation, completedTerminalEvent, startupBlocked);
 		const includeOwnerExit = Boolean(ownerExit && (vanishedOwnerBlock || completedTerminalEvent || startupBlocked));
 		writeJson(
 			buildResponse(state, ownerLive, {
@@ -1425,12 +1408,7 @@ export default class Harness extends Command {
 			if (!observation) {
 				const built = await buildObservation(root, stateView, ownerLive);
 				observation = built.observation;
-				stateView = await markVanishedOwnerBlocked(
-					root,
-					stateView,
-					built.observation,
-					built.completedTerminalEvent,
-				);
+				stateView = await reconcileLifecycle(root, stateView, built.observation, built.completedTerminalEvent);
 			}
 		}
 		if (!observation) throw new Error("classify_requires_observation_or_session");
@@ -1491,7 +1469,14 @@ export default class Harness extends Command {
 		const ownerExit = await buildOwnerExitEvidence(root, state);
 		// An owner that started, reported live, then died before accepting the first prompt is a
 		// startup blocker, not a healthy `owner-not-live` gate — persist it and report it as such.
-		if (ownerExit.startupBlocker) state = await markStartupOwnerBlocked(root, state, ownerExit);
+		const built = await buildObservation(root, state, false);
+		state = await reconcileLifecycle(
+			root,
+			state,
+			built.observation,
+			built.completedTerminalEvent,
+			ownerExit.startupBlocker,
+		);
 		const reason = ownerExit.startupBlocker ? ownerExit.reason : "owner-not-live";
 		writeJson(
 			buildResponse(
@@ -1557,7 +1542,7 @@ export default class Harness extends Command {
 		let state = await loadState(root, sessionId);
 		const beforeExit = await buildOwnerExitEvidence(root, state);
 		const { observation, completedTerminalEvent } = await buildObservation(root, state, false);
-		state = await markVanishedOwnerBlocked(root, state, observation, completedTerminalEvent);
+		state = await reconcileLifecycle(root, state, observation, completedTerminalEvent);
 		const decision = classifyRecovery({
 			observation: { ...observation, lifecycle: state.lifecycle },
 			retryBudget: budget,

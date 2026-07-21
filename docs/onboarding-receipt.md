@@ -16,7 +16,7 @@
 - `packages/coding-agent/package.json`
 - `packages/coding-agent/src/cli.ts`
 - `packages/coding-agent/src/main.ts`
-- `packages/coding-agent/src/sdk.ts`
+- `packages/coding-agent/src/sdk/session.ts`
 - `packages/coding-agent/src/defaults/skc-defaults.ts`
 - `packages/coding-agent/src/task/agents.ts`
 - `packages/coding-agent/test/default-skc-definitions.test.ts`

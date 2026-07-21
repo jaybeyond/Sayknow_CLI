@@ -1,0 +1,28 @@
+--- a/packages/coding-agent/scripts/compile-args.ts
++++ b/packages/coding-agent/scripts/compile-args.ts
+@@ -7,6 +7,7 @@
+ 	externals?: string[];
+ }
+ 
++
+ export const compileAutoloadDisableFlags = [
+ 	"--no-compile-autoload-bunfig",
+ 	"--no-compile-autoload-dotenv",
+@@ -28,6 +29,9 @@
+ 	"./packages/natives/native/index.js",
+ 	"./packages/coding-agent/src/sdk/bus/telegram-daemon-cli.ts",
+ 	"./packages/coding-agent/src/sdk/bus/chat-daemon-cli.ts",
++	// Hidden Telegram Remote gateway entrypoint. `skc telegram start` self-spawns
++	// `skc telegram __gateway`, which dynamic-imports this bundled entry.
++	"./packages/telegram-remote/src/index.ts",
+ 	// NOTE: models.json must NOT be listed here — `bun build --compile` does not
+ 	// emit `.json` extra entrypoints into the bunfs. It is embedded via the
+ 	// `with { type: "file" }` import in packages/ai/src/models.ts instead.
+@@ -44,6 +48,7 @@
+ 	"./src/eval/js/worker-entry.ts",
+ 	"./src/sdk/bus/telegram-daemon-cli.ts",
+ 	"./src/sdk/bus/chat-daemon-cli.ts",
++	"../telegram-remote/src/index.ts",
+ ];
+ 
+ export function buildReleaseCompileArgs(target: string, outfile: string): string[] {

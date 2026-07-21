@@ -4,9 +4,7 @@
 #
 # Stages:
 #   natives-builder — Rust + Bun → pi_natives.linux-<arch>.node
-#   wheel-builder   — skc_rpc Python wheel
-#   pi-base         — python + bun + natives + skc_rpc
-#                     + /usr/local/bin/skc shim
+#   pi-base         — python + bun + natives + /usr/local/bin/skc shim
 #   pi-dev          — pi-base + build toolchain (build-essential, rustup)
 #   pi-runtime      — pi-base + pi source + bun install      (DEFAULT, runnable)
 #
@@ -18,9 +16,6 @@
 #     docker run --rm sayknow-cli/pi:dev --help
 #     docker run --rm -it -v "$PWD":/work sayknow-cli/pi:dev cli    # interactive skc
 #
-# Consume as a base in another Dockerfile (see Dockerfile.roboskc):
-#     ARG PI_BASE=sayknow-cli/pi:dev
-#     FROM ${PI_BASE} AS pi-base
 ###############################################################################
 
 ARG BUN_VERSION=1.3.14
@@ -54,7 +49,6 @@ COPY --parents \
     Cargo.toml Cargo.lock rust-toolchain.toml \
     packages/*/package.json \
     packages/tsconfig.workspace.json \
-    python/roboskc/web/package.json \
     crates/*/Cargo.toml \
     /pi/
 
@@ -79,27 +73,12 @@ RUN --mount=type=cache,target=/root/.cargo/registry \
     cp packages/natives/native/pi_natives.linux-*.node /out/
 
 ############################
-# 2) wheel-builder — skc-rpc wheel
-############################
-FROM python:3.12-slim-bookworm AS wheel-builder
-
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends git \
-    && rm -rf /var/lib/apt/lists/*
-
-RUN pip install --upgrade pip build
-
-WORKDIR /src
-COPY python/skc-rpc /src
-RUN python -m build --wheel --outdir /out
 
 ############################
-# 3) pi-base — python + bun + natives + skc_rpc + skc shim
+# 2) pi-base — python + bun + natives + skc shim
 #
-# Sharable runtime base. Derived images (pi-runtime below, Dockerfile.roboskc)
-# extend this and overlay their own source tree. Default PI_ROOT=/work/pi is
-# friendly to derived images that mount a host pi checkout there; pi-runtime
-# overrides it to /pi because its source is baked in.
+# Sharable runtime base. `pi-runtime` below uses this stage and overrides
+# `PI_ROOT` to `/pi` because its source is baked in.
 ############################
 FROM python:3.12-slim-bookworm AS pi-base
 
@@ -124,9 +103,6 @@ RUN curl -fsSL https://bun.sh/install | bash -s "bun-v${BUN_VERSION}" \
 # pi-natives addon: pi's loader probes /opt/bun/bin as a fallback path.
 COPY --from=natives-builder /out/pi_natives.linux-*.node /opt/bun/bin/
 
-# skc-rpc Python wheel.
-COPY --from=wheel-builder /out/*.whl /tmp/wheels/
-RUN pip install /tmp/wheels/skc_rpc-*.whl && rm -rf /tmp/wheels
 
 # `skc` shim — runs the coding-agent CLI against $PI_ROOT via Bun. Derived
 # images override PI_ROOT to point at wherever their pi source lives.
@@ -183,7 +159,6 @@ COPY --parents \
     tsconfig.base.json tsconfig.json \
     packages/*/package.json \
     packages/tsconfig.workspace.json \
-    python/roboskc/web/package.json \
     /pi/
 
 RUN bun install --frozen-lockfile --ignore-scripts

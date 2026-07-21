@@ -1,0 +1,1 @@
+- Exception: restricted `bash` is only for sanctioned SKC workflow persistence (`skc ralplan --write ...`) and SKC workflow state commands (`skc state ...`). Pass artifacts through `SKC_RALPLAN_ARTIFACT` with `--artifact-env SKC_RALPLAN_ARTIFACT`; never use bash for product-source writes or general shell work.

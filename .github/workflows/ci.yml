@@ -6,148 +6,24 @@ on:
       tags: ["v*", "sayknow-v*"]
    pull_request:
       branches: [main]
-   workflow_dispatch:
-      inputs:
-         release_mode:
-            description: "Release operation mode"
-            type: choice
-            options: [sandbox, verify_only, production]
-            default: sandbox
-         release_tag:
-            description: "Exact stable release tag for manual sandbox, verification, or production"
-            type: string
-            required: false
-         skip_npm:
-            description: "Skip npm publish; stable finalization and website sync remain ineligible"
-            type: boolean
-            default: false
-
 
 permissions:
-   actions: read
-   contents: read
+   contents: write
 
 concurrency:
-   # Production tags and manual production retries share one non-cancelling lane
-   # before any release job can mutate npm or finalize a GitHub Release. Other CI
-   # retains the prior cancellable per-workflow, per-ref lane.
-   group: ${{ (startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.release_mode == 'production')) && 'production-release' || format('{0}-{1}', github.workflow, github.ref) }}
-   cancel-in-progress: ${{ !(startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.release_mode == 'production')) }}
+   # Release tags never cancel; ordinary CI is cancellable per ref.
+   group: ci-${{ github.ref }}
+   cancel-in-progress: ${{ !(startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/sayknow-v')) }}
 
 jobs:
-   # Compute a stable hash of every input that affects the native cdylib output,
-   # then look for any prior successful main run that already uploaded the linux-x64
-   # artifacts for this hash. If found, test jobs reuse those artifacts instead of
-   # rebuilding them on non-release commits. The non-tag native_linux job is skipped
-   # in that case, so the canary's retention window (see build-native action) is the
-   # effective TTL of a cache hit before main rebuilds anyway.
-   rust-hash:
-      timeout-minutes: 15
-      if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
-      runs-on: ubuntu-22.04
-      outputs:
-         hash: ${{ steps.compute.outputs.hash }}
-         run-id: ${{ steps.find.outputs.run-id }}
-      steps:
-         - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
-         - name: Compute rust source hash
-           id: compute
-           shell: bash
-           run: |
-              hash=$(find crates Cargo.toml Cargo.lock rust-toolchain.toml \
-                      packages/natives/scripts packages/natives/package.json \
-                      scripts/ci-build-native.ts scripts/host-detect.ts \
-                      -type f -print0 \
-                    | sort -z \
-                    | xargs -0 sha256sum \
-                    | sha256sum \
-                    | cut -c1-16)
-              echo "hash=$hash" >> "$GITHUB_OUTPUT"
-              echo "Rust source hash: $hash"
-         - name: Find prior main build with matching hash
-           id: find
-           env:
-              GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-           shell: bash
-           run: |
-              hash="${{ steps.compute.outputs.hash }}"
-              # Canary artifact: native_linux builds baseline + modern together,
-              # so the modern artifact's presence on any prior main run implies
-              # both linux x64 test artifacts are cached and downloadable.
-              canary="pi-natives-linux-x64-modern-h${hash}"
-              run_id=""
-              for candidate in $(gh run list \
-                  --workflow=ci.yml --branch=main --status=success --event=push \
-                  --limit=20 --json databaseId --jq='.[].databaseId'); do
-                if gh api "/repos/${{ github.repository }}/actions/runs/$candidate/artifacts?per_page=100" \
-                    --jq ".artifacts[] | select(.name == \"$canary\") | select(.expired == false) | .id" \
-                    | grep -q .; then
-                  run_id="$candidate"
-                  break
-                fi
-              done
-              if [ -n "$run_id" ]; then
-                echo "Reusing native artifacts from run $run_id"
-              else
-                echo "No cached native artifacts for hash $hash; native job will rebuild."
-              fi
-              echo "run-id=$run_id" >> "$GITHUB_OUTPUT"
-
-   # Single conservative changed-path relevance decision, shared by the
-   # expensive PR jobs below via needs.relevance.outputs.relevant. Fail-open:
-   # non-pull_request events, a missing base SHA, or any error => relevant=true.
-   relevance:
-      name: relevance
-      timeout-minutes: 10
-      if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
-      runs-on: ubuntu-22.04
-      outputs:
-         relevant: ${{ steps.relevance.outputs.relevant }}
-      steps:
-         - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
-         - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6  # v2
-           with:
-              bun-version: "1.3"
-         - name: Check changed-path relevance
-           id: relevance
-           env:
-              GITHUB_BASE_SHA: ${{ github.event.pull_request.base.sha }}
-           run: bun scripts/ci-job-relevance.ts
-
-   # Branch protection must add the always-present `skc-state-gates` status as required.
-   skc-state-gates:
-      name: skc-state-gates
-      if: ${{ !(startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/sayknow-v')) && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
-      runs-on: ubuntu-22.04
-      timeout-minutes: 15
-      env:
-         GITHUB_EVENT_BEFORE: ${{ github.event.before }}
-         GITHUB_BASE_SHA: ${{ github.event.pull_request.base.sha }}
-      steps:
-         - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
-           with:
-              fetch-depth: 0
-         - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4
-           with:
-              node-version: "24"
-         - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6  # v2
-           with:
-              bun-version: "1.3"
-         - name: Cache bun dependencies
-           uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4
-           with:
-              path: ~/.bun/install/cache
-              key: bun-${{ runner.os }}-${{ hashFiles('**/bun.lock') }}
-         - run: bun install --frozen-lockfile
-         - name: Run SKC state gates
-           run: bun scripts/ci-skc-state-gates.ts
-
-   # Fast lint + type check (no Rust, no native build needed)
+   # ---------------------------------------------------------------------------
+   # PR + main branch: lint/typecheck (native-free) and the test suite.
+   # These never run on tags — a tag is cut from an already-green main.
+   # ---------------------------------------------------------------------------
    check:
-      timeout-minutes: 30
-      needs: [relevance]
-      if: ${{ !(startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/sayknow-v')) && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+      if: ${{ !(startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/sayknow-v')) }}
       runs-on: ubuntu-22.04
+      timeout-minutes: 20
       steps:
          - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
          - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4
@@ -155,389 +31,200 @@ jobs:
               node-version: "24"
          - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6  # v2
            with:
-              bun-version: "1.3"
+              bun-version: "1.3.14"
          - name: Cache bun dependencies
            uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4
            with:
               path: ~/.bun/install/cache
-              key: bun-${{ runner.os }}-${{ hashFiles('**/bun.lock') }}
-         - if: needs.relevance.outputs.relevant == 'true'
-           run: bun install --frozen-lockfile
-         - name: Type check workspace
-           if: needs.relevance.outputs.relevant == 'true'
+              key: bun-1.3.14-${{ runner.os }}-${{ hashFiles('**/bun.lock') }}
+         - run: bun install --frozen-lockfile
+         - name: Lint and type check (native-free)
            run: bun run ci:check:full
 
-   # Linux x64 baseline + modern: required by `test`, so it runs on every PR
-   # unless rust-hash found a cached run. Tags always rebuild for fresh artifacts.
-   native_linux:
-      timeout-minutes: 60
-      needs: [rust-hash, relevance]
-      if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) &&
-         ((startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/sayknow-v')) || needs.rust-hash.outputs.run-id == '') }}
+   # ---------------------------------------------------------------------------
+   # PR + main branch: sharded full test suite. Unlike dev CI (changed-path
+   # affected), Main CI runs the COMPLETE task union via CI_FORCE_FULL. Long-tail
+   # tasks are sub-split (coding-agent tests 16-way, rust-test 4 nextest
+   # partitions) so no single shard dominates wall-time. The `test` aggregate job
+   # keeps the stable branch-protection status name.
+   # ---------------------------------------------------------------------------
+   main_plan:
+      if: ${{ !(startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/sayknow-v')) }}
       runs-on: ubuntu-22.04
-      strategy:
-         fail-fast: false
-         matrix:
-            include:
-               - { variant: baseline, rust_checks: true }
-               - { variant: modern }
-      steps:
-         - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
-         - uses: ./.github/actions/build-native
-           if: needs.relevance.outputs.relevant == 'true'
-           with:
-              hash: ${{ needs.rust-hash.outputs.hash }}
-              platform: linux
-              arch: x64
-              variant: ${{ matrix.variant }}
-              rust_checks: ${{ matrix.rust_checks && 'true' || 'false' }}
-              save_cache: ${{ github.event_name == 'push' && ((github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev') || (startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/sayknow-v'))) }}
-
-   # Windows-latest smoke for the `bun install -g sayknow-cli` runtime path
-   # (issue #525): build the win32-x64 native addon, then exercise the bun-run
-   # CLI surface a native install hits — bun + skc version, help, `skc team
-   # --help`, and the native/worker smoke probe. Runs on PRs and branch pushes
-   # so Windows regressions surface before release; release tags already run the
-   # Windows release-binary smoke in the publishing gate.
-   windows_smoke:
-      timeout-minutes: 60
-      needs: [relevance]
-      if: ${{ !(startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/sayknow-v')) && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
-      runs-on: windows-latest
+      timeout-minutes: 10
+      env:
+         CI_FORCE_FULL: "1"
+         CI_CODING_AGENT_TEST_SHARDS: "16"
+         CI_RUST_TEST_PARTITIONS: "4"
+      outputs:
+         matrix: ${{ steps.plan.outputs.matrix }}
+         has_tasks: ${{ steps.plan.outputs.has_tasks }}
+         has_native: ${{ steps.plan.outputs.has_native }}
       steps:
          - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
          - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6  # v2
            with:
-              bun-version: "1.3"
-         - uses: dtolnay/rust-toolchain@5b842231ba77f5c045dba54ac5560fed2db780e2  # nightly
-           if: needs.relevance.outputs.relevant == 'true'
+              bun-version: "1.3.14"
+         - name: Compute full Main CI task matrix
+           id: plan
+           run: bun scripts/ci-dev-affected.ts --matrix-json
+
+   main_native:
+      if: ${{ !(startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/sayknow-v')) && needs.main_plan.outputs.has_native == 'true' }}
+      needs: [main_plan]
+      runs-on: ubuntu-22.04
+      timeout-minutes: 30
+      steps:
+         - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+         - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4
            with:
-              toolchain: nightly-2026-04-29
-         - name: Prepend rustup toolchain bin to PATH
-           if: needs.relevance.outputs.relevant == 'true'
-           shell: bash
-           run: |
-              toolchain_bin="$(dirname "$(rustup which cargo)")"
-              echo "$toolchain_bin" >> "$GITHUB_PATH"
-         - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
-           if: needs.relevance.outputs.relevant == 'true'
+              node-version: "24"
+         - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6  # v2
            with:
-              shared-key: windows-smoke-win32-x64
-              cache-on-failure: true
-              save-if: ${{ github.event_name == 'push' && (github.ref == 'refs/heads/main' || (startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/sayknow-v'))) }}
-              cache-workspace-crates: true
+              bun-version: "1.3.14"
          - name: Cache bun dependencies
-           if: needs.relevance.outputs.relevant == 'true'
            uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4
            with:
               path: ~/.bun/install/cache
-              key: bun-${{ runner.os }}-${{ hashFiles('**/bun.lock') }}
-         - if: needs.relevance.outputs.relevant == 'true'
-           run: bun install --frozen-lockfile
-         - name: Build native addon (win32-x64 baseline)
-           if: needs.relevance.outputs.relevant == 'true'
+              key: bun-1.3.14-${{ runner.os }}-${{ hashFiles('**/bun.lock') }}
+         - run: bun install --frozen-lockfile
+         - name: Build native addon (linux-x64 baseline + modern)
            env:
-              TARGET_PLATFORM: win32
+              TARGET_PLATFORM: linux
               TARGET_ARCH: x64
-              TARGET_VARIANTS: baseline
+              TARGET_VARIANTS: baseline modern
            run: bun run ci:build:native
-         - name: Smoke bun + skc CLI (source runtime)
-           if: needs.relevance.outputs.relevant == 'true'
-           shell: pwsh
+         - name: Verify required native addon variants
            run: |
-              bun --version
-              bun packages/coding-agent/src/cli.ts --version
-              bun packages/coding-agent/src/cli.ts --help
-              bun packages/coding-agent/src/cli.ts team --help
-              bun packages/coding-agent/src/cli.ts --smoke-test
+              test -f packages/natives/native/pi_natives.linux-x64-baseline.node
+              test -f packages/natives/native/pi_natives.linux-x64-modern.node
+         - name: Upload native addon(s)
+           uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+           with:
+              name: main-native-${{ github.run_id }}
+              path: |
+                 packages/natives/native/pi_natives.linux-x64-baseline.node
+                 packages/natives/native/pi_natives.linux-x64-modern.node
+              if-no-files-found: error
+              retention-days: 1
+              overwrite: true
 
-   # Remaining platforms only ship in release tags; PRs and main never build them.
-   native_release:
-      timeout-minutes: 90
-      needs: [rust-hash]
+   main_shards:
+      name: test-shard / ${{ matrix.key }}
+      if: ${{ always() && !(startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/sayknow-v')) && needs.main_plan.outputs.has_tasks == 'true' && needs.main_native.result != 'failure' && needs.main_native.result != 'cancelled' }}
+      needs: [main_plan, main_native]
+      runs-on: ubuntu-22.04
+      timeout-minutes: ${{ matrix.rust && 90 || 60 }}
+      strategy:
+         fail-fast: false
+         max-parallel: 16
+         matrix: ${{ fromJSON(needs.main_plan.outputs.matrix) }}
+      env:
+         CI_FORCE_FULL: "1"
+         CI_CODING_AGENT_TEST_SHARDS: "16"
+         CI_RUST_TEST_PARTITIONS: "4"
+         AFFECTED_TASK_KEY: ${{ matrix.key }}
+      steps:
+         - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+         - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4
+           with:
+              node-version: "24"
+         - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6  # v2
+           with:
+              bun-version: "1.3.14"
+         - uses: dtolnay/rust-toolchain@5b842231ba77f5c045dba54ac5560fed2db780e2  # nightly
+           if: ${{ matrix.rust }}
+           with:
+              toolchain: nightly-2026-04-29
+         - uses: taiki-e/install-action@56545b37b57562edd73171cb6c62cc509db4c34e  # v2
+           if: ${{ matrix.nextest }}
+           with:
+              tool: nextest@0.9.137
+         - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+           if: ${{ matrix.rust }}
+           with:
+              shared-key: main-rust-linux-x64
+              save-if: ${{ github.ref == 'refs/heads/main' }}
+              cache-workspace-crates: true
+         - name: Cache bun dependencies
+           uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4
+           with:
+              path: ~/.bun/install/cache
+              key: bun-1.3.14-${{ runner.os }}-${{ hashFiles('**/bun.lock') }}
+         - run: bun install --frozen-lockfile
+         - name: Download native addon(s)
+           if: ${{ matrix.native }}
+           uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
+           with:
+              name: main-native-${{ github.run_id }}
+              path: packages/natives/native
+         - name: Run task shard
+           env:
+              GITHUB_ACTIONS: ""
+           run: bun scripts/ci-dev-affected.ts --task="$AFFECTED_TASK_KEY"
+
+   # Branch protection must keep requiring this stable aggregate status.
+   test:
+      if: ${{ always() && !(startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/sayknow-v')) }}
+      needs: [main_plan, main_native, main_shards]
+      runs-on: ubuntu-22.04
+      timeout-minutes: 5
+      steps:
+         - name: Fail closed unless every shard succeeded
+           run: |
+              plan='${{ needs.main_plan.result }}'
+              native='${{ needs.main_native.result }}'
+              shards='${{ needs.main_shards.result }}'
+              echo "main_plan=$plan main_native=$native main_shards=$shards"
+              test "$plan" = success
+              case "$native" in success|skipped) ;; *) echo "native gate failed"; exit 1;; esac
+              test "$shards" = success
+
+   # ---------------------------------------------------------------------------
+   # Tag (vX.Y.Z) only: build native addons for every published platform,
+   # build the standalone binaries, then publish to npm and cut the GitHub
+   # Release. Self-contained — no dependency on a separate main CI run.
+   # ---------------------------------------------------------------------------
+   native:
       if: ${{ (startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/sayknow-v')) }}
+      timeout-minutes: 90
+      runs-on: ${{ matrix.os }}
       strategy:
          fail-fast: false
          matrix:
             include:
+               - { os: ubuntu-22.04, platform: linux, arch: x64, variant: baseline, rust_checks: true }
+               - { os: ubuntu-22.04, platform: linux, arch: x64, variant: modern }
                - { os: ubuntu-22.04, platform: linux, arch: arm64, target: aarch64-unknown-linux-gnu }
                - { os: macos-14, platform: darwin, arch: arm64 }
                - { os: macos-15-intel, platform: darwin, arch: x64, variant: baseline }
                - { os: windows-latest, platform: win32, arch: x64, variant: baseline }
-      runs-on: ${{ matrix.os }}
       steps:
          - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
          - uses: ./.github/actions/build-native
            with:
-              hash: ${{ needs.rust-hash.outputs.hash }}
+              hash: ${{ github.sha }}
               platform: ${{ matrix.platform }}
               arch: ${{ matrix.arch }}
               variant: ${{ matrix.variant }}
               target: ${{ matrix.target }}
-              save_cache: ${{ github.event_name == 'push' && ((github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev') || (startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/sayknow-v'))) }}
+              rust_checks: ${{ matrix.rust_checks && 'true' || 'false' }}
+              save_cache: "true"
 
-   test:
-      runs-on: ubuntu-22.04
-      needs: [native_linux, rust-hash, relevance]
-      if: ${{ !cancelled() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) &&
-         !(startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/sayknow-v')) && needs.native_linux.result != 'failure' }}
+   binaries:
+      if: ${{ (startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/sayknow-v')) }}
+      needs: [native]
       timeout-minutes: 60
-      # Fork: the expanded suite (telegram-remote/coordinator process-spawning tests)
-      # reproducibly exhausts the standard runner (~47min "lost communication"). Keep the
-      # signal but do not block the release on it — check/install_methods/native/brand gates
-      # remain hard-required. Revisit via test sharding or a larger runner.
-      continue-on-error: true
-      steps:
-         - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
-         - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4
-           with:
-              node-version: "24"
-         - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6  # v2
-           with:
-              bun-version: "1.3"
-         - name: Cache bun dependencies
-           uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4
-           with:
-              path: ~/.bun/install/cache
-              key: bun-${{ runner.os }}-${{ hashFiles('**/bun.lock') }}
-         - name: Install system deps
-           if: needs.relevance.outputs.relevant == 'true'
-           run: bash scripts/ci-install-system-deps.sh
-         - if: needs.relevance.outputs.relevant == 'true'
-           run: bun install --frozen-lockfile
-         - name: Resolve native source run
-           if: needs.relevance.outputs.relevant == 'true'
-           id: source
-           shell: bash
-           run: |
-              if [ "${{ needs.native_linux.result }}" = "success" ]; then
-                echo "run-id=${{ github.run_id }}" >> "$GITHUB_OUTPUT"
-              else
-                echo "run-id=${{ needs.rust-hash.outputs.run-id }}" >> "$GITHUB_OUTPUT"
-              fi
-         - name: Download native addons
-           if: needs.relevance.outputs.relevant == 'true'
-           uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
-           with:
-              pattern: pi-natives-linux-x64-*-h${{ needs.rust-hash.outputs.hash }}
-              path: packages/natives/native
-              merge-multiple: true
-              run-id: ${{ steps.source.outputs.run-id }}
-              github-token: ${{ secrets.GITHUB_TOKEN }}
-         - name: Test workspace (TS)
-           if: needs.relevance.outputs.relevant == 'true'
-           env:
-              # Bun's `bun test` emits `::group::`/`::endgroup::` per file under
-              # GHA. `--workspaces` prefixes each output line with `<pkg> test: `,
-              # which breaks GHA's column-0 parsing and leaks the markers as
-              # literal text. Unset for this step only — the annotations would be
-              # equally broken by the prefix, so we lose nothing.
-              GITHUB_ACTIONS: ""
-           run: bun run test:ts
-         - name: CLI smoke test
-           if: needs.relevance.outputs.relevant == 'true'
-           run: bun run ci:test:smoke
-
-   install_methods:
-      timeout-minutes: 45
-      needs: [relevance]
-      if: ${{ !(startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/sayknow-v')) && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
-      runs-on: ubuntu-22.04
-      steps:
-         - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
-         - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6  # v2
-           with:
-              bun-version: "1.3"
-         - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4
-           if: needs.relevance.outputs.relevant == 'true'
-           with:
-              node-version: "24"
-         - uses: dtolnay/rust-toolchain@5b842231ba77f5c045dba54ac5560fed2db780e2  # nightly
-           if: needs.relevance.outputs.relevant == 'true'
-           with:
-              toolchain: nightly-2026-04-29
-         - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
-           if: needs.relevance.outputs.relevant == 'true'
-           with:
-              shared-key: install-methods-linux-x64
-              cache-on-failure: true
-              save-if: ${{ github.event_name == 'push' && ((github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev') ||
-                 (startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/sayknow-v'))) }}
-              cache-workspace-crates: true
-         - name: Cache bun dependencies
-           if: needs.relevance.outputs.relevant == 'true'
-           uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4
-           with:
-              path: ~/.bun/install/cache
-              key: bun-${{ runner.os }}-${{ hashFiles('**/bun.lock') }}
-         - name: Install system deps
-           if: needs.relevance.outputs.relevant == 'true'
-           run: bash scripts/ci-install-system-deps.sh
-         - if: needs.relevance.outputs.relevant == 'true'
-           run: bun install --frozen-lockfile
-         - name: Install method smoke tests
-           if: needs.relevance.outputs.relevant == 'true'
-           run: bun run ci:test:install-methods
-
-   release_context:
-      name: release context
-      if: ${{ startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/sayknow-v') || github.event_name == 'workflow_dispatch' }}
-      runs-on: ubuntu-22.04
-      timeout-minutes: 10
-      outputs:
-         mode: ${{ steps.context.outputs.mode }}
-         tag: ${{ steps.context.outputs.tag }}
-         version: ${{ steps.context.outputs.version }}
-         source-sha: ${{ steps.context.outputs.source-sha }}
-         stable: ${{ steps.context.outputs.stable }}
-         skip-npm: ${{ steps.context.outputs.skip-npm }}
-         production-enabled: ${{ steps.context.outputs.production-enabled }}
-      steps:
-         - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
-           with:
-              fetch-depth: 0
-         - name: Validate release mode and immutable tag
-           id: context
-           env:
-              RELEASE_MODE: ${{ github.event_name == 'push' && 'production' || inputs.release_mode }}
-              RELEASE_TAG: ${{ github.event_name == 'push' && github.ref_name || inputs.release_tag }}
-              SKIP_NPM: ${{ github.event_name == 'workflow_dispatch' && inputs.skip_npm || 'false' }}
-              PRODUCTION_ENABLED: ${{ vars.RELEASE_SYNC_PRODUCTION_ENABLED }}
-           shell: bash
-           run: |
-              set -euo pipefail
-              case "$RELEASE_MODE" in
-                 sandbox|verify_only|production) ;;
-                 *) echo "Invalid release mode: $RELEASE_MODE"; exit 1 ;;
-              esac
-              if [[ ! "$RELEASE_TAG" =~ ^(sayknow-)?v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-                 if [ "${GITHUB_EVENT_NAME}" = "push" ]; then
-                    {
-                       echo "stable=false"
-                       echo "mode=$RELEASE_MODE"
-                       echo "skip-npm=$SKIP_NPM"
-                       echo "production-enabled=false"
-                    } >> "$GITHUB_OUTPUT"
-                    exit 0
-                 fi
-                 echo "release_tag must be an exact stable vX.Y.Z tag"
-                 exit 1
-              fi
-              if [ "$RELEASE_MODE" = "production" ] && [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ] && [ "$GITHUB_REF" != "refs/tags/$RELEASE_TAG" ]; then
-                 echo "Manual production runs must dispatch from the supplied release_tag ref"
-                 exit 1
-              fi
-              source_sha="$(git rev-parse "$RELEASE_TAG^{commit}")"
-              if [[ ! "$source_sha" =~ ^[0-9a-f]{40}$ ]]; then
-                 echo "Release tag did not peel to a commit"
-                 exit 1
-              fi
-              if [ "$RELEASE_MODE" = "production" ] && [ "$PRODUCTION_ENABLED" != "true" ]; then
-                 echo "Production release writes are disabled until the sandbox matrix passes."
-                 production_enabled=false
-              else
-                 production_enabled=true
-              fi
-              {
-                 echo "mode=$RELEASE_MODE"
-                 echo "tag=$RELEASE_TAG"
-                 echo "version=${RELEASE_TAG##*v}"
-                 echo "source-sha=$source_sha"
-                 echo "stable=true"
-                 echo "skip-npm=$SKIP_NPM"
-                 echo "production-enabled=$production_enabled"
-              } >> "$GITHUB_OUTPUT"
-
-   release_source_verify:
-      name: verify exact source SHA passed a successful main CI run
-      if: ${{ !cancelled() && needs.release_context.outputs.stable == 'true' }}
-      needs: [release_context]
-      runs-on: ubuntu-22.04
-      timeout-minutes: 10
-      outputs:
-         verified-main-run-id: ${{ steps.verify.outputs.verified-main-run-id }}
-      permissions:
-         actions: read
-         contents: read
-      steps:
-         - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
-           with:
-              ref: ${{ needs.release_context.outputs.tag }}
-              fetch-depth: 0
-         - name: Prove the immutable tag commit passed CI on main
-           id: verify
-           env:
-              GH_TOKEN: ${{ github.token }}
-              RELEASE_TAG: ${{ needs.release_context.outputs.tag }}
-              SOURCE_SHA: ${{ needs.release_context.outputs.source-sha }}
-           shell: bash
-           run: |
-              set -euo pipefail
-              test "$(git rev-parse "$RELEASE_TAG^{commit}")" = "$SOURCE_SHA"
-              successful_runs="$(gh api --method GET "/repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?branch=main&event=push&status=completed&per_page=100&head_sha=$SOURCE_SHA")"
-              verified_main_run_id="$(jq -r --arg source_sha "$SOURCE_SHA" '
-                 [.workflow_runs[]?
-                  | select(.head_sha == $source_sha and .head_branch == "main" and .event == "push" and .conclusion == "success")
-                  | .id] | first // empty
-              ' <<<"$successful_runs")"
-              if [ -z "$verified_main_run_id" ]; then
-                 echo "Release source SHA $SOURCE_SHA has no successful main CI run."
-                 exit 1
-              fi
-              verified_run="$(gh api "/repos/${GITHUB_REPOSITORY}/actions/runs/$verified_main_run_id")"
-              jq -e --arg source_sha "$SOURCE_SHA" --argjson run_id "$verified_main_run_id" '
-                 .id == $run_id and .head_sha == $source_sha and .head_branch == "main" and .event == "push" and .conclusion == "success"
-              ' <<<"$verified_run" >/dev/null
-              echo "verified-main-run-id=$verified_main_run_id" >> "$GITHUB_OUTPUT"
-
-   release_binary:
-      timeout-minutes: 60
-      if: ${{ always() && (startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/sayknow-v')) && !cancelled() &&
-         needs.native_linux.result == 'success' && needs.native_release.result ==
-         'success' && (needs.check.result == 'success' || needs.check.result == 'skipped') }}
-      needs: [check, native_linux, native_release, rust-hash]
+      runs-on: ${{ matrix.os }}
       strategy:
          fail-fast: false
          matrix:
             include:
-               - {
-                    os: ubuntu-22.04,
-                    platform: linux,
-                    arch: x64,
-                    target_id: linux-x64,
-                    binary_path: packages/coding-agent/binaries/skc-linux-x64,
-                 }
-               - {
-                    os: ubuntu-24.04-arm,
-                    platform: linux,
-                    arch: arm64,
-                    target_id: linux-arm64,
-                    binary_path: packages/coding-agent/binaries/skc-linux-arm64,
-                 }
-               - {
-                    os: macos-14,
-                    platform: darwin,
-                    arch: arm64,
-                    target_id: darwin-arm64,
-                    binary_path: packages/coding-agent/binaries/skc-darwin-arm64,
-                 }
-               - {
-                    os: macos-15-intel,
-                    platform: darwin,
-                    arch: x64,
-                    target_id: darwin-x64,
-                    binary_path: packages/coding-agent/binaries/skc-darwin-x64,
-                 }
-               - {
-                    os: windows-latest,
-                    platform: win32,
-                    arch: x64,
-                    target_id: win32-x64,
-                    binary_path: packages/coding-agent/binaries/skc-windows-x64.exe,
-                 }
-      runs-on: ${{ matrix.os }}
-      permissions:
-         contents: read
+               - { os: ubuntu-22.04, platform: linux, arch: x64, target_id: linux-x64, binary_path: packages/coding-agent/binaries/skc-linux-x64 }
+               - { os: ubuntu-24.04-arm, platform: linux, arch: arm64, target_id: linux-arm64, binary_path: packages/coding-agent/binaries/skc-linux-arm64 }
+               - { os: macos-14, platform: darwin, arch: arm64, target_id: darwin-arm64, binary_path: packages/coding-agent/binaries/skc-darwin-arm64 }
+               - { os: macos-15-intel, platform: darwin, arch: x64, target_id: darwin-x64, binary_path: packages/coding-agent/binaries/skc-darwin-x64 }
+               - { os: windows-latest, platform: win32, arch: x64, target_id: win32-x64, binary_path: packages/coding-agent/binaries/skc-windows-x64.exe }
       steps:
          - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
          - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4
@@ -545,17 +232,17 @@ jobs:
               node-version: "24"
          - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6  # v2
            with:
-              bun-version: "1.3"
+              bun-version: "1.3.14"
          - name: Cache bun dependencies
            uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4
            with:
               path: ~/.bun/install/cache
-              key: bun-${{ runner.os }}-${{ hashFiles('**/bun.lock') }}
+              key: bun-1.3.14-${{ runner.os }}-${{ hashFiles('**/bun.lock') }}
          - run: bun install --frozen-lockfile
          - name: Download native addon(s)
            uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
            with:
-              pattern: pi-natives-${{ matrix.platform }}-${{ matrix.arch }}*-h${{ needs.rust-hash.outputs.hash }}
+              pattern: pi-natives-${{ matrix.platform }}-${{ matrix.arch }}*
               path: packages/natives/native
               merge-multiple: true
          - name: Build release binary
@@ -584,426 +271,60 @@ jobs:
               name: skc-binary-${{ matrix.target_id }}
               path: ${{ matrix.binary_path }}
 
-   release_sandbox_disabled:
-      name: sandbox release gate
-      if: ${{ needs.release_context.outputs.mode == 'sandbox' }}
-      needs: [release_context]
-      runs-on: ubuntu-22.04
-      timeout-minutes: 5
-      permissions: {}
-      steps:
-         - name: Fail closed until the dedicated sandbox release workflow is configured
-           shell: bash
-           run: |
-              echo "Sandbox publishing is intentionally disabled until sandbox-only registry, App, credential, and schema contracts are provisioned."
-              exit 1
-
-   release_verify_only:
-      name: verify draft release evidence
-      if: ${{ needs.release_context.outputs.mode == 'verify_only' && needs.release_context.outputs.stable == 'true' }}
-      needs: [release_context]
-      runs-on: ubuntu-22.04
-      timeout-minutes: 15
-      permissions:
-         contents: read
-      steps:
-         - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
-           with:
-              ref: ${{ needs.release_context.outputs.tag }}
-              fetch-depth: 0
-         - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6  # v2
-           with:
-              bun-version: "1.3"
-         - name: Verify draft release assets without publishing or finalizing
-           env:
-              GH_TOKEN: ${{ github.token }}
-              RELEASE_TAG: ${{ needs.release_context.outputs.tag }}
-              RELEASE_VERSION: ${{ needs.release_context.outputs.version }}
-              SOURCE_SHA: ${{ needs.release_context.outputs.source-sha }}
-           shell: bash
-           run: |
-              set -euo pipefail
-              release="$(gh release view "$RELEASE_TAG" --json isDraft,isPrerelease,assets)"
-              jq -e '.isDraft == true and .isPrerelease == false' <<<"$release" >/dev/null
-              for asset in skc-linux-x64 skc-linux-arm64 skc-darwin-arm64 skc-darwin-x64 skc-windows-x64.exe sayknow-release-packages-expected-v1.json sayknow-release-packages-v1.json; do
-                 jq -e --arg asset "$asset" '[.assets[].name] | index($asset) != null' <<<"$release" >/dev/null
-              done
-              evidence_dir="$RUNNER_TEMP/sayknow-release-evidence"
-              mkdir -p "$evidence_dir"
-              gh release download "$RELEASE_TAG" --pattern sayknow-release-packages-expected-v1.json --pattern sayknow-release-packages-v1.json --dir "$evidence_dir"
-              bun scripts/release-evidence.ts --verify-stable-finalization \
-                 --expected-evidence "$evidence_dir/sayknow-release-packages-expected-v1.json" \
-                 --final-evidence "$evidence_dir/sayknow-release-packages-v1.json" \
-                 --tag "$RELEASE_TAG" \
-                 --version "$RELEASE_VERSION" \
-                 --source-commit "$SOURCE_SHA"
-
-   release_github_draft:
-      timeout-minutes: 30
-      if: ${{ always() && !cancelled() && needs.release_context.outputs.mode == 'production' && needs.release_context.outputs.production-enabled == 'true' && needs.release_context.outputs.stable == 'true' && needs.release_binary.result == 'success' && needs.release_source_verify.result == 'success' }}
-      needs: [release_binary, release_context, release_source_verify]
-      runs-on: ubuntu-22.04
-      permissions:
-         actions: read
-         contents: write
-      steps:
-         - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
-           with:
-              ref: ${{ needs.release_context.outputs.tag }}
-         - name: Download verified release binaries
-           uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
-           with:
-              pattern: skc-binary-*
-              path: packages/coding-agent/binaries
-              merge-multiple: true
-         - name: Refuse to reopen an already-finalized stable release
-           env:
-              GH_TOKEN: ${{ github.token }}
-              RELEASE_TAG: ${{ needs.release_context.outputs.tag }}
-           shell: bash
-           run: |
-              set -euo pipefail
-              release_status="$(curl --silent --show-error --output release.json --write-out '%{http_code}' \
-                 --header "Accept: application/vnd.github+json" \
-                 --header "Authorization: Bearer $GH_TOKEN" \
-                 "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/tags/${RELEASE_TAG}")"
-              case "$release_status" in
-                 200) jq -e '.draft == true and .prerelease == false' release.json >/dev/null ;;
-                 404) echo "No release exists yet; creating the immutable draft." ;;
-                 *) echo "Release lookup failed with HTTP $release_status; refusing to create or mutate a release."; exit 1 ;;
-              esac
-         - name: Create or retain draft GitHub Release
-           uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65  # v2
-           with:
-              tag_name: ${{ needs.release_context.outputs.tag }}
-              draft: true
-              prerelease: false
-              files: |
-                 packages/coding-agent/binaries/skc-*
-              generate_release_notes: true
-
-   release_npm_expected:
+   publish:
+      if: ${{ (startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/sayknow-v')) }}
+      needs: [native, binaries]
       timeout-minutes: 45
-      if: ${{ !cancelled() && needs.release_github_draft.result == 'success' && needs.release_source_verify.result == 'success' && needs.release_context.outputs.skip-npm != 'true' }}
-      needs: [release_github_draft, release_context, release_source_verify, rust-hash]
       runs-on: ubuntu-22.04
       permissions:
-         actions: read
          contents: write
       steps:
          - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
-           with:
-              ref: ${{ needs.release_context.outputs.tag }}
-              fetch-depth: 0
          - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4
            with:
               node-version: "24"
          - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6  # v2
            with:
-              bun-version: "1.3"
+              bun-version: "1.3.14"
          - name: Cache bun dependencies
            uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4
            with:
               path: ~/.bun/install/cache
-              key: bun-${{ runner.os }}-${{ hashFiles('**/bun.lock') }}
+              key: bun-1.3.14-${{ runner.os }}-${{ hashFiles('**/bun.lock') }}
          - run: bun install --frozen-lockfile
-         - name: Download native addons
+         - name: Download all native addons
            uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
            with:
-              pattern: pi-natives-*-h${{ needs.rust-hash.outputs.hash }}
+              pattern: pi-natives-*
               path: packages/natives/native
               merge-multiple: true
-         - name: Restore source-bound retained evidence or reproduce it against the immutable draft asset
-           env:
-              GH_TOKEN: ${{ github.token }}
-              RELEASE_TAG: ${{ needs.release_context.outputs.tag }}
-              SOURCE_SHA: ${{ needs.release_context.outputs.source-sha }}
-              VERIFIED_MAIN_RUN_ID: ${{ needs.release_source_verify.outputs.verified-main-run-id }}
-           shell: bash
-           run: |
-              set -euo pipefail
-              evidence_dir="$RUNNER_TEMP/sayknow-release-evidence"
-              existing_dir="$RUNNER_TEMP/sayknow-release-existing"
-              expected_asset="sayknow-release-packages-expected-v1.json"
-              mkdir -p "$evidence_dir" "$existing_dir"
-              release="$(gh release view "$RELEASE_TAG" --json isDraft,isPrerelease,assets)"
-              jq -e '.isDraft == true and .isPrerelease == false' <<<"$release" >/dev/null
-              expected_asset_present="$(jq -r --arg asset "$expected_asset" 'any(.assets[]; .name == $asset)' <<<"$release")"
-              artifact_name="sayknow-release-evidence-$RELEASE_TAG-$SOURCE_SHA"
-              artifacts="$(gh api "/repos/${GITHUB_REPOSITORY}/actions/artifacts?name=$artifact_name&per_page=100")"
-              artifact_record="$(jq -c --arg source_sha "$SOURCE_SHA" '
-                 [.artifacts[] | select(.expired == false and .workflow_run.head_sha == $source_sha)]
-                 | sort_by(.created_at) | last // null
-              ' <<<"$artifacts")"
-              if [ "$artifact_record" != null ]; then
-                 artifact_id="$(jq -r '.id' <<<"$artifact_record")"
-                 artifact_run_id="$(jq -r '.workflow_run.id' <<<"$artifact_record")"
-                 gh api "/repos/${GITHUB_REPOSITORY}/actions/artifacts/$artifact_id/zip" > "$RUNNER_TEMP/release-evidence.zip"
-                 unzip -q "$RUNNER_TEMP/release-evidence.zip" -d "$evidence_dir"
-                 jq -e --arg tag "$RELEASE_TAG" --arg source_sha "$SOURCE_SHA" --argjson retained_run_id "$artifact_run_id" '
-                    .schema_version == 1 and .tag == $tag and .source_sha == $source_sha and .retained_in_run_id == $retained_run_id
-                 ' "$evidence_dir/evidence-provenance.json" >/dev/null
-                 evidence_verified_run_id="$(jq -r '.source_verification_run_id' "$evidence_dir/evidence-provenance.json")"
-                 if [[ ! "$evidence_verified_run_id" =~ ^[1-9][0-9]*$ ]]; then
-                    echo "Retained evidence has an invalid successful-main-CI run provenance."
-                    exit 1
-                 fi
-                 verified_run="$(gh api "/repos/${GITHUB_REPOSITORY}/actions/runs/$evidence_verified_run_id")"
-                 jq -e --arg source_sha "$SOURCE_SHA" --argjson run_id "$evidence_verified_run_id" '
-                    .id == $run_id and .head_sha == $source_sha and .head_branch == "main" and .event == "push" and .conclusion == "success"
-                 ' <<<"$verified_run" >/dev/null
-                 if [ ! -f "$evidence_dir/$expected_asset" ] || [ ! -d "$evidence_dir/tarballs" ]; then
-                    echo "Retained evidence artifact is missing required immutable contents."
-                    exit 1
-                 fi
-              else
-                 rm -rf "$evidence_dir"
-                 mkdir -p "$evidence_dir"
-                 bun scripts/ci-release-publish.ts --prepare-evidence --evidence-dir "$evidence_dir"
-                 jq -cn \
-                    --arg tag "$RELEASE_TAG" \
-                    --arg source_sha "$SOURCE_SHA" \
-                    --argjson retained_in_run_id "$GITHUB_RUN_ID" \
-                    --argjson source_verification_run_id "$VERIFIED_MAIN_RUN_ID" \
-                    '{retained_in_run_id: $retained_in_run_id, schema_version: 1, source_sha: $source_sha, source_verification_run_id: $source_verification_run_id, tag: $tag}' \
-                    | jq -S . > "$evidence_dir/evidence-provenance.json"
-              fi
-              if [ "$expected_asset_present" = true ]; then
-                 gh release download "$RELEASE_TAG" --pattern "$expected_asset" --dir "$existing_dir"
-                 cmp "$existing_dir/$expected_asset" "$evidence_dir/$expected_asset"
-              else
-                 echo "Draft release has no expected evidence asset; uploading the reproduced immutable asset."
-                 gh release upload "$RELEASE_TAG" "$evidence_dir/$expected_asset"
-              fi
-         - name: Retain exact source-bound expected evidence and tarballs for resume
-           uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
-           with:
-              name: sayknow-release-evidence-${{ needs.release_context.outputs.tag }}-${{ needs.release_context.outputs.source-sha }}
-              path: ${{ runner.temp }}/sayknow-release-evidence
-              if-no-files-found: error
-              retention-days: 90
-
-   release_npm_publish:
-      timeout-minutes: 45
-      if: ${{ !cancelled() && needs.release_npm_expected.result == 'success' && needs.release_source_verify.result == 'success' && needs.release_context.outputs.skip-npm != 'true' }}
-      needs: [release_npm_expected, release_context, release_source_verify]
-      runs-on: ubuntu-22.04
-      permissions:
-         actions: read
-         contents: read
-      steps:
-         - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
-           with:
-              ref: ${{ needs.release_context.outputs.tag }}
-         - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4
-           with:
-              node-version: "24"
-         - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6  # v2
-           with:
-              bun-version: "1.3"
-         - name: Cache bun dependencies
-           uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4
-           with:
-              path: ~/.bun/install/cache
-              key: bun-${{ runner.os }}-${{ hashFiles('**/bun.lock') }}
-         - run: bun install --frozen-lockfile
-         - name: Download source-bound expected evidence and tarballs
-           uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
-           with:
-              name: sayknow-release-evidence-${{ needs.release_context.outputs.tag }}-${{ needs.release_context.outputs.source-sha }}
-              path: ${{ runner.temp }}/sayknow-release-evidence
-         - name: Publish or verify every retained package tarball with an ephemeral npm credential
+         - name: Publish packages to npm
            env:
               NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
            shell: bash
            run: |
               set -euo pipefail
-              npm_config="$(mktemp "$RUNNER_TEMP/sayknow-release-npmrc.XXXXXX")"
+              evidence_dir="$RUNNER_TEMP/release-evidence"
+              mkdir -p "$evidence_dir"
+              bun scripts/ci-release-publish.ts --prepare-evidence --evidence-dir "$evidence_dir"
+              npm_config="$(mktemp "$RUNNER_TEMP/npmrc.XXXXXX")"
               trap 'rm -f "$npm_config"' EXIT
               printf "//registry.npmjs.org/:_authToken=%s\n" "$NPM_TOKEN" > "$npm_config"
               NPM_CONFIG_USERCONFIG="$npm_config" NODE_AUTH_TOKEN="$NPM_TOKEN" \
-                 bun scripts/ci-release-publish.ts --publish-from-evidence --evidence-dir "$RUNNER_TEMP/sayknow-release-evidence" --release-serialization-key sayknow-production-release
-         - name: Retain final evidence for the separate GitHub upload job
-           uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
-           with:
-              name: sayknow-release-final-evidence-${{ needs.release_context.outputs.tag }}-${{ needs.release_context.outputs.source-sha }}
-              path: ${{ runner.temp }}/sayknow-release-evidence/sayknow-release-packages-v1.json
-              if-no-files-found: error
-              retention-days: 90
-
-   release_github_final_evidence:
-      timeout-minutes: 15
-      if: ${{ !cancelled() && needs.release_npm_publish.result == 'success' && needs.release_source_verify.result == 'success' }}
-      needs: [release_npm_publish, release_context, release_source_verify]
-      runs-on: ubuntu-22.04
-      permissions:
-         actions: read
-         contents: write
-      steps:
-         - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
-           with:
-              ref: ${{ needs.release_context.outputs.tag }}
-              fetch-depth: 0
-         - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6  # v2
-           with:
-              bun-version: "1.3"
-         - name: Download the final evidence emitted by the npm-only job
+                 bun scripts/ci-release-publish.ts --publish-from-evidence \
+                    --evidence-dir "$evidence_dir" \
+                    --release-serialization-key sayknow-production-release
+         - name: Download release binaries
            uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
            with:
-              name: sayknow-release-final-evidence-${{ needs.release_context.outputs.tag }}-${{ needs.release_context.outputs.source-sha }}
-              path: ${{ runner.temp }}/sayknow-release-final-evidence
-         - name: Verify and upload immutable final evidence only when the draft lacks it
-           env:
-              GH_TOKEN: ${{ github.token }}
-              RELEASE_TAG: ${{ needs.release_context.outputs.tag }}
-              RELEASE_VERSION: ${{ needs.release_context.outputs.version }}
-              SOURCE_SHA: ${{ needs.release_context.outputs.source-sha }}
-           shell: bash
-           run: |
-              set -euo pipefail
-              evidence_dir="$RUNNER_TEMP/sayknow-release-final-evidence"
-              existing_dir="$RUNNER_TEMP/sayknow-release-existing-final"
-              expected_asset="sayknow-release-packages-expected-v1.json"
-              final_asset="sayknow-release-packages-v1.json"
-              mkdir -p "$existing_dir"
-              release="$(gh release view "$RELEASE_TAG" --json isDraft,isPrerelease,assets)"
-              jq -e '.isDraft == true and .isPrerelease == false' <<<"$release" >/dev/null
-              expected_asset_present="$(jq -r --arg asset "$expected_asset" 'any(.assets[]; .name == $asset)' <<<"$release")"
-              final_asset_present="$(jq -r --arg asset "$final_asset" 'any(.assets[]; .name == $asset)' <<<"$release")"
-              if [ "$expected_asset_present" != true ]; then
-                 echo "Draft release is confirmed missing required expected evidence."
-                 exit 1
-              fi
-              gh release download "$RELEASE_TAG" --pattern "$expected_asset" --dir "$evidence_dir"
-              bun scripts/release-evidence.ts --verify-stable-finalization \
-                 --expected-evidence "$evidence_dir/$expected_asset" \
-                 --final-evidence "$evidence_dir/$final_asset" \
-                 --tag "$RELEASE_TAG" \
-                 --version "$RELEASE_VERSION" \
-                 --source-commit "$SOURCE_SHA"
-              if [ "$final_asset_present" = true ]; then
-                 gh release download "$RELEASE_TAG" --pattern "$final_asset" --dir "$existing_dir"
-                 cmp "$existing_dir/$final_asset" "$evidence_dir/$final_asset"
-              else
-                 echo "Draft release has no final evidence asset; uploading the verified immutable asset."
-                 gh release upload "$RELEASE_TAG" "$evidence_dir/$final_asset"
-              fi
-
-   release_github_verify:
-      timeout-minutes: 15
-      if: ${{ !cancelled() && needs.release_github_final_evidence.result == 'success' && needs.release_source_verify.result == 'success' }}
-      needs: [release_github_final_evidence, release_context, release_source_verify]
-      runs-on: macos-14
-      permissions:
-         contents: read
-      steps:
-         - name: Verify the draft holds every required binary and final evidence asset
-           env:
-              GH_TOKEN: ${{ github.token }}
-              RELEASE_TAG: ${{ needs.release_context.outputs.tag }}
-           shell: bash
-           run: |
-              set -euo pipefail
-              release="$(gh release view "$RELEASE_TAG" --json isDraft,isPrerelease,assets)"
-              jq -e '.isDraft == true and .isPrerelease == false' <<<"$release" >/dev/null
-              for asset in skc-linux-x64 skc-linux-arm64 skc-darwin-arm64 skc-darwin-x64 skc-windows-x64.exe sayknow-release-packages-expected-v1.json sayknow-release-packages-v1.json; do
-                 jq -e --arg asset "$asset" '[.assets[].name] | index($asset) != null' <<<"$release" >/dev/null
-              done
-         - name: Download and verify the published macOS arm64 binary from the draft
-           env:
-              GH_TOKEN: ${{ github.token }}
-              RELEASE_TAG: ${{ needs.release_context.outputs.tag }}
-           shell: bash
-           run: |
-              set -euo pipefail
-              gh release download "$RELEASE_TAG" --pattern skc-darwin-arm64 --dir .
-              chmod +x skc-darwin-arm64
-              codesign -dv ./skc-darwin-arm64
-              runtime_dir="$(mktemp -d)"
-              HOME="$runtime_dir/home" XDG_DATA_HOME="$runtime_dir/xdg" ./skc-darwin-arm64 --version
-
-   release_github_finalize:
-      name: Finalize stable GitHub Release
-      timeout-minutes: 15
-      if: ${{ !cancelled() && needs.release_npm_publish.result == 'success' && needs.release_github_final_evidence.result == 'success' && needs.release_github_verify.result == 'success' && needs.release_source_verify.result == 'success' && needs.release_context.outputs.skip-npm != 'true' }}
-      needs: [release_npm_publish, release_github_final_evidence, release_github_verify, release_context, release_source_verify]
-      runs-on: ubuntu-22.04
-      outputs:
-         release-id: ${{ steps.finalize.outputs.release-id }}
-      permissions:
-         contents: write
-      steps:
-         - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+              pattern: skc-binary-*
+              path: release-binaries
+              merge-multiple: true
+         - name: Create GitHub Release
+           uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65  # v2
            with:
-              ref: ${{ needs.release_context.outputs.tag }}
-              fetch-depth: 0
-         - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6  # v2
-           with:
-              bun-version: "1.3"
-         - name: Verify exact release evidence and finalize the stable release last
-           id: finalize
-           env:
-              GH_TOKEN: ${{ github.token }}
-              RELEASE_TAG: ${{ needs.release_context.outputs.tag }}
-              RELEASE_VERSION: ${{ needs.release_context.outputs.version }}
-              SOURCE_SHA: ${{ needs.release_context.outputs.source-sha }}
-           shell: bash
-           run: |
-              set -euo pipefail
-              evidence_dir="$RUNNER_TEMP/sayknow-release-published-evidence"
-              expected_asset="sayknow-release-packages-expected-v1.json"
-              final_asset="sayknow-release-packages-v1.json"
-              mkdir -p "$evidence_dir"
-              release="$(gh release view "$RELEASE_TAG" --json isDraft,isPrerelease,databaseId,assets)"
-              jq -e '.isDraft == true and .isPrerelease == false' <<<"$release" >/dev/null
-              for asset in "$expected_asset" "$final_asset"; do
-                 jq -e --arg asset "$asset" 'any(.assets[]; .name == $asset)' <<<"$release" >/dev/null
-              done
-              gh release download "$RELEASE_TAG" --pattern "$expected_asset" --pattern "$final_asset" --dir "$evidence_dir"
-              bun scripts/release-evidence.ts --verify-stable-finalization \
-                 --expected-evidence "$evidence_dir/$expected_asset" \
-                 --final-evidence "$evidence_dir/$final_asset" \
-                 --tag "$RELEASE_TAG" \
-                 --version "$RELEASE_VERSION" \
-                 --source-commit "$SOURCE_SHA"
-              gh release edit "$RELEASE_TAG" --draft=false --prerelease=false
-              echo "release-id=$(jq -r '.databaseId' <<<"$release")" >> "$GITHUB_OUTPUT"
-
-   release_website_hint:
-      name: warning-only website release sync hint
-      if: ${{ always() && needs.release_github_finalize.result == 'success' }}
-      needs: [release_github_finalize, release_context]
-      continue-on-error: true
-      runs-on: ubuntu-22.04
-      timeout-minutes: 10
-      environment: website-release-sync-trigger
-      permissions:
-         contents: read
-      steps:
-         - name: Mint the dedicated Trigger App token
-           id: trigger-token
-           uses: actions/create-github-app-token@a8d616148505b5069dccd32f177bb87d7f39123b  # v2.1.1
-           with:
-              app-id: ${{ secrets.GJ_RELEASE_SYNC_TRIGGER_APP_ID }}
-              private-key: ${{ secrets.GJ_RELEASE_SYNC_TRIGGER_PRIVATE_KEY }}
-              owner: jaybeyond
-              repositories: sayknow-cli-website
-         - name: Dispatch the website's authoritative resolver as a latency hint
-           env:
-              GH_TOKEN: ${{ steps.trigger-token.outputs.token }}
-              RELEASE_ID: ${{ needs.release_github_finalize.outputs.release-id }}
-              RELEASE_TAG: ${{ needs.release_context.outputs.tag }}
-              SOURCE_SHA: ${{ needs.release_context.outputs.source-sha }}
-           shell: bash
-           run: |
-              set -euo pipefail
-              release_hint="$(jq -cn \
-                 --arg commit "$SOURCE_SHA" \
-                 --argjson release_id "$RELEASE_ID" \
-                 --arg source_run_url "https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
-                 --arg tag "$RELEASE_TAG" \
-                 '{commit: $commit, release_id: $release_id, source_run_url: $source_run_url, tag: $tag}')"
-              gh workflow run sync-release.yml \
-                 --repo jaybeyond/Sayknow_CLI-website \
-                 --ref main \
-                 -f release_hint="$release_hint"
+              tag_name: ${{ github.ref_name }}
+              draft: false
+              prerelease: false
+              generate_release_notes: true
+              files: release-binaries/skc-*

@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { getBundledModel } from "@sayknow-cli/ai";
 import { Settings } from "@sayknow-cli/coding-agent/config/settings";
+import type { CustomTool } from "@sayknow-cli/coding-agent/extensibility/custom-tools/types";
 import { createAgentSession, type ExtensionFactory } from "@sayknow-cli/coding-agent/sdk";
 import { AuthStorage } from "@sayknow-cli/coding-agent/session/auth-storage";
 import { SessionManager } from "@sayknow-cli/coding-agent/session/session-manager";
@@ -32,14 +33,38 @@ const toolActivationExtension: ExtensionFactory = pi => {
 	});
 };
 
-async function createMinimalSession(tempDirs: string[], settings: Settings, toolNames?: string[]) {
+function createMcpCustomTool(name: string, serverName: string, mcpToolName: string): CustomTool {
+	return {
+		name,
+		label: `${serverName}/${mcpToolName}`,
+		description: `Tool ${mcpToolName} from ${serverName}`,
+		mcpServerName: serverName,
+		mcpToolName,
+		parameters: z.object({}),
+		async execute() {
+			return { content: [{ type: "text", text: name }] };
+		},
+	} as CustomTool;
+}
+
+async function createMinimalSession(
+	tempDirs: string[],
+	settings: Settings,
+	toolNames?: string[],
+	sessionManager = SessionManager.inMemory(),
+	customTools?: CustomTool[],
+) {
 	const tempDir = path.join(os.tmpdir(), `pi-sdk-goal-tool-${Snowflake.next()}`);
 	tempDirs.push(tempDir);
 	fs.mkdirSync(tempDir, { recursive: true });
+	// Recipe discovery probes project task runners (including `cargo metadata`) and is
+	// outside this activation contract. Keep the focused harness process-free and
+	// cover recipe discovery in its dedicated suite.
+	settings.override("recipe.enabled", false);
 	return createAgentSession({
 		cwd: tempDir,
 		agentDir: tempDir,
-		sessionManager: SessionManager.inMemory(),
+		sessionManager,
 		settings,
 		model: getBundledModel("openai", "gpt-4o-mini"),
 		disableExtensionDiscovery: true,
@@ -50,7 +75,10 @@ async function createMinimalSession(tempDirs: string[], settings: Settings, tool
 		slashCommands: [],
 		enableMCP: false,
 		enableLsp: false,
+		notificationHostModeSupported: false,
+		sdkHostModeSupported: false,
 		toolNames,
+		customTools,
 	});
 }
 
@@ -75,6 +103,202 @@ describe("createAgentSession defaultInactive tool activation", () => {
 			expect(session.getAllToolNames()).toContain("goal");
 			expect(session.getActiveToolNames()).toContain("goal");
 			expect(session.systemPrompt.join("\n")).toContain("goal");
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	it("persists activated built-ins when MCP discovery is disabled", async () => {
+		const sessionManager = SessionManager.inMemory();
+		const { session } = await createMinimalSession(
+			tempDirs,
+			Settings.isolated({ "tools.discoveryMode": "all", "tools.essentialOverride": ["read", "bash", "edit"] }),
+			undefined,
+			sessionManager,
+		);
+
+		try {
+			expect(await session.activateDiscoveredTools(["find"])).toEqual(["find"]);
+			expect(sessionManager.buildSessionContext().selectedDiscoveredBuiltinToolNames).toEqual(["find"]);
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	it("persists explicit new-session domain authority, including empty clears", async () => {
+		const namedManager = SessionManager.inMemory();
+		const { session: namedSession } = await createMinimalSession(
+			tempDirs,
+			Settings.isolated({ "tools.discoveryMode": "all", "tools.essentialOverride": ["read", "bash", "edit"] }),
+			["read", "find", "mcp__docs_search"],
+			namedManager,
+			[createMcpCustomTool("mcp__docs_search", "docs", "search")],
+		);
+		try {
+			expect(namedManager.buildSessionContext()).toMatchObject({
+				hasPersistedMCPToolSelection: true,
+				selectedMCPToolNames: ["mcp__docs_search"],
+				hasPersistedDiscoveredBuiltinToolSelection: true,
+				selectedDiscoveredBuiltinToolNames: ["find"],
+			});
+		} finally {
+			await namedSession.dispose();
+		}
+
+		const clearedManager = SessionManager.inMemory();
+		const { session: clearedSession } = await createMinimalSession(
+			tempDirs,
+			Settings.isolated({ "tools.discoveryMode": "all" }),
+			[],
+			clearedManager,
+			[createMcpCustomTool("mcp__docs_search", "docs", "search")],
+		);
+		try {
+			expect(clearedManager.buildSessionContext()).toMatchObject({
+				hasPersistedMCPToolSelection: true,
+				selectedMCPToolNames: [],
+				hasPersistedDiscoveredBuiltinToolSelection: true,
+				selectedDiscoveredBuiltinToolNames: [],
+			});
+		} finally {
+			await clearedSession.dispose();
+		}
+	});
+
+	it("does not persist essential built-ins as constructor discovery authority", async () => {
+		const sessionManager = SessionManager.inMemory();
+		const { session } = await createMinimalSession(
+			tempDirs,
+			Settings.isolated({ "tools.discoveryMode": "all", "tools.essentialOverride": ["read", "bash", "edit"] }),
+			["read"],
+			sessionManager,
+		);
+		try {
+			expect(session.getActiveToolNames()).toContain("read");
+			expect(sessionManager.buildSessionContext()).toMatchObject({
+				hasPersistedDiscoveredBuiltinToolSelection: false,
+				selectedDiscoveredBuiltinToolNames: undefined,
+			});
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	it("keeps configured MCP defaults when resuming a built-in-only selection", async () => {
+		const sessionManager = SessionManager.inMemory();
+		sessionManager.appendDiscoveredBuiltinToolSelection(["find"]);
+		const { session } = await createMinimalSession(
+			tempDirs,
+			Settings.isolated({
+				"mcp.discoveryMode": true,
+				"mcp.discoveryDefaultServers": ["docs"],
+				"tools.discoveryMode": "all",
+				"tools.essentialOverride": ["read", "bash", "edit"],
+			}),
+			undefined,
+			sessionManager,
+			[createMcpCustomTool("mcp__docs_search", "docs", "search")],
+		);
+
+		try {
+			expect(sessionManager.buildSessionContext().hasPersistedMCPToolSelection).toBe(false);
+			expect(session.getSelectedMCPToolNames()).toEqual(["mcp__docs_search"]);
+			expect(session.getActiveToolNames()).toContain("mcp__docs_search");
+			expect(session.getActiveToolNames()).toContain("find");
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	it("restores constructor selections rather than persisted startup selections in metadata-free history", async () => {
+		const sessionManager = SessionManager.inMemory();
+		const targetEntryId = sessionManager.appendMessage({
+			role: "user",
+			content: "before persisted tool selections",
+			timestamp: Date.now(),
+		});
+		sessionManager.appendMCPToolSelection(["mcp__persisted_search"]);
+		sessionManager.appendDiscoveredBuiltinToolSelection([]);
+		const { session } = await createMinimalSession(
+			tempDirs,
+			Settings.isolated({ "tools.discoveryMode": "all", "tools.essentialOverride": ["read", "bash", "edit"] }),
+			["read", "mcp__constructor_search", "find"],
+			sessionManager,
+			[
+				createMcpCustomTool("mcp__constructor_search", "constructor", "search"),
+				createMcpCustomTool("mcp__persisted_search", "persisted", "search"),
+			],
+		);
+
+		try {
+			expect(session.getSelectedMCPToolNames()).toEqual(["mcp__persisted_search"]);
+			expect(session.getSelectedDiscoveredToolNames()).toEqual(["mcp__persisted_search"]);
+
+			const result = await session.branch(targetEntryId);
+
+			expect(result.cancelled).toBe(false);
+			expect(session.getSelectedMCPToolNames()).toEqual(["mcp__constructor_search"]);
+			expect(session.getSelectedDiscoveredToolNames()).toEqual(["mcp__constructor_search", "find"]);
+			expect(session.getActiveToolNames()).toEqual(expect.arrayContaining(["mcp__constructor_search", "find"]));
+			expect(session.getActiveToolNames()).not.toContain("mcp__persisted_search");
+			expect(session.getActiveToolNames()).not.toContain("search");
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	it("restores an activated discoverable built-in on the first resumed turn", async () => {
+		const sessionManager = SessionManager.inMemory();
+		const targetEntryId = sessionManager.appendMessage({
+			role: "user",
+			content: "before selection-only activation",
+			timestamp: Date.now(),
+		});
+		sessionManager.appendDiscoveredBuiltinToolSelection(["find"]);
+		const { session } = await createMinimalSession(
+			tempDirs,
+			Settings.isolated({ "tools.discoveryMode": "all", "tools.essentialOverride": ["read", "bash", "edit"] }),
+			undefined,
+			sessionManager,
+		);
+
+		try {
+			expect(session.getActiveToolNames()).toContain("find");
+			expect(session.systemPrompt.join("\n")).toContain("find");
+			expect(session.getSelectedDiscoveredToolNames()).toContain("find");
+			const result = await session.branch(targetEntryId);
+			expect(result.cancelled).toBe(false);
+			expect(session.getSelectedDiscoveredToolNames()).not.toContain("find");
+			expect(session.getActiveToolNames()).not.toContain("find");
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	it("keeps a restored now-essential built-in active as baseline rather than discovery authority", async () => {
+		const sessionManager = SessionManager.inMemory();
+		const targetEntryId = sessionManager.appendMessage({
+			role: "user",
+			content: "before selection",
+			timestamp: Date.now(),
+		});
+		sessionManager.appendDiscoveredBuiltinToolSelection(["find"]);
+		const { session } = await createMinimalSession(
+			tempDirs,
+			Settings.isolated({ "tools.discoveryMode": "all" }),
+			undefined,
+			sessionManager,
+		);
+
+		try {
+			expect(session.getSelectedDiscoveredToolNames()).not.toContain("find");
+			expect(session.getActiveToolNames()).toContain("find");
+			expect(session.systemPrompt.join("\n")).toContain("find");
+			const result = await session.branch(targetEntryId);
+			expect(result.cancelled).toBe(false);
+			expect(session.getSelectedDiscoveredToolNames()).not.toContain("find");
+			expect(session.getActiveToolNames()).toContain("find");
+			expect(session.systemPrompt.join("\n")).toContain("find");
 		} finally {
 			await session.dispose();
 		}
@@ -110,7 +334,7 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		const { session } = await createAgentSession({
 			cwd: tempDir,
 			agentDir: tempDir,
-			sessionManager: SessionManager.inMemory(),
+			sessionManager: SessionManager.inMemory(tempDir),
 			settings: Settings.isolated(),
 			model: getBundledModel("openai", "gpt-4o-mini"),
 			disableExtensionDiscovery: true,
@@ -144,7 +368,7 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		const { session } = await createAgentSession({
 			cwd: tempDir,
 			agentDir: tempDir,
-			sessionManager: SessionManager.inMemory(),
+			sessionManager: SessionManager.inMemory(tempDir),
 			settings: Settings.isolated(),
 			model: getBundledModel("openai", "gpt-4o-mini"),
 			disableExtensionDiscovery: true,
@@ -176,7 +400,7 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		const { session, mcpManager } = await createAgentSession({
 			cwd: tempDir,
 			agentDir: tempDir,
-			sessionManager: SessionManager.inMemory(),
+			sessionManager: SessionManager.inMemory(tempDir),
 			settings: Settings.isolated({
 				"astGrep.enabled": true,
 				"astEdit.enabled": true,
@@ -224,7 +448,7 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		const { session } = await createAgentSession({
 			cwd: tempDir,
 			agentDir: tempDir,
-			sessionManager: SessionManager.inMemory(),
+			sessionManager: SessionManager.inMemory(tempDir),
 			settings: Settings.isolated({ "edit.mode": "vim" }),
 			model: getBundledModel("openai", "gpt-4o-mini"),
 			disableExtensionDiscovery: true,
@@ -276,7 +500,7 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		const { session } = await createAgentSession({
 			cwd: tempDir,
 			agentDir: tempDir,
-			sessionManager: SessionManager.inMemory(),
+			sessionManager: SessionManager.inMemory(tempDir),
 			settings,
 			authStorage,
 			model: baseModel,

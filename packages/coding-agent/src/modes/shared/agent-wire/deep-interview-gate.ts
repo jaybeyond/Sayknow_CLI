@@ -7,28 +7,33 @@
  * back into the exact QuestionResult shape the human path produces, so ambiguity
  * scoring/state updates proceed identically whether a human or an agent answers.
  *
- * This is the pure mapping primitive. Routing the ask tool through it (instead of
- * the interactive select/editor UI) when an unattended controller + gate broker
- * are attached is wired with the transport in #321 and exercised by #323.
+ * This is the pure mapping primitive used by SDK-native workflow gate emitters.
  */
-import type { RpcJsonSchema, RpcWorkflowGateKind, RpcWorkflowStage } from "../../rpc/rpc-types";
+
+import { isDeepInterviewAskQuestion } from "../../../deep-interview/render-middleware";
+import {
+	assertDeepInterviewInputWithinLimit,
+	MAX_USER_RESPONSE_LENGTH,
+} from "../../../skc-runtime/deep-interview-state";
 import type { OpenGateInput } from "./workflow-gate-broker";
+import {
+	type AskGateDeepInterviewState,
+	buildAskGateAnswerSchema,
+	buildAskGateStageState as buildCanonicalAskGateStageState,
+	type WorkflowGateKind,
+	type WorkflowStage,
+} from "./workflow-gate-types";
 
-/** "Other (type your own)" sentinel, mirroring the interactive ask tool. */
-export const GATE_OTHER_OPTION = "Other (type your own)";
-
-/** Optional structured deep-interview round metadata supplied by the agent. */
-export interface AskGateDeepInterviewState {
-	round_id?: string;
-	round: number;
-	component: string;
-	dimension: string;
-	ambiguity: number;
-}
+export {
+	type AskGateDeepInterviewState,
+	buildAskGateAnswerSchema,
+	GATE_OTHER_OPTION,
+	validateAskGateStageState,
+} from "./workflow-gate-types";
 
 export interface AskGateWorkflowGateMeta {
-	stage: RpcWorkflowStage;
-	kind: RpcWorkflowGateKind;
+	stage: WorkflowStage;
+	kind: WorkflowGateKind;
 }
 
 export interface AskGateQuestion {
@@ -96,7 +101,7 @@ function deepInterviewQuestionState(questionText: string): Record<string, unknow
 	const state: Record<string, unknown> = {};
 	if (roundMatch) {
 		const round = Number(roundMatch[1]);
-		if (Number.isFinite(round)) state.round = round;
+		if (Number.isSafeInteger(round) && round >= 0) state.round = round;
 		const mode = roundMatch[2]?.trim();
 		if (mode) {
 			state.mode = mode;
@@ -104,8 +109,9 @@ function deepInterviewQuestionState(questionText: string): Record<string, unknow
 			if (normalized.includes("topology")) state.topology_gate = true;
 			if (/(contrarian|simplifier|ontologist)/u.test(normalized)) state.challenge_mode = normalized;
 		}
-		const ambiguity = roundMatch[3]?.trim();
-		if (ambiguity) state.ambiguity = ambiguity;
+		const rawAmbiguity = roundMatch[3]?.trim();
+		const ambiguity = rawAmbiguity === "" || rawAmbiguity === undefined ? Number.NaN : Number(rawAmbiguity);
+		if (Number.isFinite(ambiguity) && ambiguity >= 0 && ambiguity <= 1) state.ambiguity = ambiguity;
 	}
 	if (/Round\s+0\s+\|\s+Topology confirmation/im.test(questionText)) {
 		state.round = 0;
@@ -115,91 +121,35 @@ function deepInterviewQuestionState(questionText: string): Record<string, unknow
 	return state;
 }
 
-function questionAnswerSchema(question: AskGateQuestion, labels: string[]): RpcJsonSchema {
-	const multi = question.multi ?? false;
-	const selectedItems: RpcJsonSchema = { type: "string", enum: labels };
-	const selectedBase: RpcJsonSchema = { type: "array", items: selectedItems, uniqueItems: true };
-	const selectedOnly: RpcJsonSchema = {
-		...selectedBase,
-		minItems: question.allowEmpty ? 0 : 1,
-		...(multi ? {} : { maxItems: 1 }),
-	};
-	const selectedWithOther: RpcJsonSchema = {
-		...selectedBase,
-		...(multi ? {} : { maxItems: 0 }),
-	};
-	return {
-		type: "object",
-		properties: {
-			selected: selectedBase,
-			other: { type: "boolean", description: "set true to provide a free-text answer in `custom`" },
-			custom: {
-				type: "string",
-				minLength: 1,
-				pattern: "\\S",
-				description: "free-text answer; required when `other` is true",
-			},
-			action: {
-				type: "string",
-				enum: ["answer", "clarify"],
-				description: "set to `clarify` to ask about the choices without answering the round",
-			},
-			question: {
-				type: "string",
-				minLength: 1,
-				pattern: "\\S",
-				description: "clarification question; required when action is `clarify`",
-			},
+/** Build and validate exact producer-compatible `stage_state` metadata for one ask question. */
+export function buildAskGateStageState(question: AskGateQuestion, labels: string[]): Record<string, unknown> {
+	return buildCanonicalAskGateStageState(
+		{
+			id: question.id,
+			multi: question.multi,
+			allowEmpty: question.allowEmpty,
+			navigationLabel: question.navigationLabel,
+			deepInterview: question.deepInterview,
+			fallbackState: deepInterviewQuestionState(question.question),
 		},
-		additionalProperties: false,
-		anyOf: [
-			{
-				type: "object",
-				properties: { selected: selectedOnly, other: { const: false }, action: { const: "answer" } },
-				required: ["selected"],
-				additionalProperties: false,
-			},
-			{
-				type: "object",
-				properties: {
-					selected: selectedWithOther,
-					other: { const: true },
-					custom: { type: "string", minLength: 1, pattern: "\\S" },
-					action: { const: "answer" },
-				},
-				required: ["selected", "other", "custom"],
-				additionalProperties: false,
-			},
-			{
-				type: "object",
-				properties: {
-					action: { const: "clarify" },
-					question: { type: "string", minLength: 1, pattern: "\\S" },
-				},
-				required: ["action", "question"],
-				additionalProperties: false,
-			},
-		],
-	};
-}
-
-/** Build `stage_state` round metadata from the structured param (authoritative when present). */
-function structuredDeepInterviewState(meta: AskGateDeepInterviewState): Record<string, unknown> {
-	const state: Record<string, unknown> = {
-		deep_interview_metadata: true,
-		round: meta.round,
-		component: meta.component,
-		dimension: meta.dimension,
-		ambiguity: meta.ambiguity,
-	};
-	if (meta.round_id !== undefined) state.round_id = meta.round_id;
-	return state;
+		labels,
+	);
 }
 
 /** Build the `workflow_gate` open-input for one ask question. */
 export function questionToGate(question: AskGateQuestion): OpenGateInput {
 	const labels = question.options.map(o => o.label);
-	const schema = questionAnswerSchema(question, labels);
+	const schema = buildAskGateAnswerSchema(
+		{
+			multi: question.multi,
+			allowEmpty: question.allowEmpty,
+			customMaxLength:
+				question.deepInterview || isDeepInterviewAskQuestion(question.question)
+					? MAX_USER_RESPONSE_LENGTH
+					: undefined,
+		},
+		labels,
+	);
 	return {
 		stage: question.workflowGate?.stage ?? "deep-interview",
 		kind: question.workflowGate?.kind ?? "question",
@@ -212,18 +162,7 @@ export function questionToGate(question: AskGateQuestion): OpenGateInput {
 		context: {
 			title: question.question,
 			prompt: question.question,
-			stage_state: {
-				question_id: question.id,
-				multi: question.multi ?? false,
-				options: labels,
-				other_option: GATE_OTHER_OPTION,
-				clarification_action: "clarify",
-				allow_empty: question.allowEmpty === true,
-				navigation_label: question.navigationLabel,
-				...(question.deepInterview
-					? structuredDeepInterviewState(question.deepInterview)
-					: deepInterviewQuestionState(question.question)),
-			},
+			stage_state: buildAskGateStageState(question, labels),
 		},
 	};
 }
@@ -305,6 +244,12 @@ export function gateAnswerToResult(question: AskGateQuestion, answer: unknown): 
 	if (other && (answer.custom === undefined || answer.custom.trim() === "")) {
 		throw new DeepInterviewGateError("missing_custom", "custom text is required when `other` is true");
 	}
+	if (
+		other &&
+		(question.deepInterview || isDeepInterviewAskQuestion(question.question)) &&
+		answer.custom !== undefined
+	)
+		assertDeepInterviewInputWithinLimit(answer.custom, MAX_USER_RESPONSE_LENGTH, "user_response");
 	return {
 		id: question.id,
 		question: question.question,
@@ -337,6 +282,15 @@ export function classifyAskGateDisposition(
 		multi: (state as Record<string, unknown>).multi === true,
 		allowEmpty: (state as Record<string, unknown>).allow_empty === true,
 	};
+	if (
+		(state as Record<string, unknown>).deep_interview_metadata === true &&
+		typeof (answer as Record<string, unknown>)?.custom === "string"
+	)
+		assertDeepInterviewInputWithinLimit(
+			(answer as Record<string, unknown>).custom as string,
+			MAX_USER_RESPONSE_LENGTH,
+			"user_response",
+		);
 	if (typeof answer === "object" && answer !== null && (answer as Record<string, unknown>).action === "clarify") {
 		gateAnswerToResult(question, answer);
 		return "resolve_without_commit";

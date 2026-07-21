@@ -11,6 +11,7 @@ import * as z from "zod/v4";
 import { getFileReadCache } from "../edit/file-read-cache";
 import { isNotebookPath, readEditableNotebookText } from "../edit/notebook";
 import type { RenderResultOptions } from "../extensibility/custom-tools/types";
+import { getActiveSkills } from "../extensibility/skills";
 import { formatHashLine, formatHashLines, formatLineHash, HL_BODY_SEP } from "../hashline/hash";
 import { InternalUrlRouter } from "../internal-urls";
 import { parseInternalUrl } from "../internal-urls/parse";
@@ -53,6 +54,7 @@ import {
 	type ReadUrlToolDetails,
 	renderReadUrlCall,
 	renderReadUrlResult,
+	wrapUntrustedContent,
 } from "./fetch";
 import { applyListLimit } from "./list-limit";
 import {
@@ -94,6 +96,8 @@ const CONVERTIBLE_EXTENSIONS = new Set([".pdf", ".doc", ".docx", ".ppt", ".pptx"
 
 const MAX_SUMMARY_BYTES = 2 * 1024 * 1024;
 const MAX_SUMMARY_LINES = 20_000;
+const RAW_COLLECTOR_MAX_BYTES = MAX_SUMMARY_BYTES;
+
 /**
  * Per-line column cap for file reads. Lines wider than the value of
  * `tools.outputMaxColumns` are ellipsis-truncated at display time; the file
@@ -191,6 +195,14 @@ function formatSummaryElisionFooter(readPath: string, elidedSpans: number, elide
 	const lineWord = elidedLines === 1 ? "line" : "lines";
 	const linePart = elidedLines > 0 ? `${elidedLines} ${lineWord} across ` : "";
 	return `[${linePart}${elidedSpans} elided ${spanWord}; read ${readPath}:raw or a line range like ${readPath}:1-9999 for verbatim content]`;
+}
+
+function formatReceiptFooter(readPath: string, shownLines: number, totalLines: number, shownBytes: number): string {
+	return `[Showing first ${shownLines} of ${totalLines} lines (~${Math.ceil(shownBytes / 1024)} KiB); re-read ${readPath}:1-${totalLines} or ${readPath}:raw for the full file]`;
+}
+
+function formatSummaryCapFooter(readPath: string, maxBytes: number, totalLines: number): string {
+	return `[Summary truncated at ${Math.ceil(maxBytes / 1024)} KiB; re-read ${readPath}:raw or ${readPath}:1-${totalLines} for the full source]`;
 }
 const READ_CHUNK_SIZE = 8 * 1024;
 
@@ -487,6 +499,38 @@ const readSchema = z
 
 export type ReadToolInput = z.infer<typeof readSchema>;
 
+const UNSAFE_SUMMARY_PATH =
+	/(?:\b(?:https?|wss?):\/\/|\b(?:api[-_ ]?key|access[-_ ]?token|bearer|secret|password)\b|\b(?:sk|pk|rk)-[A-Za-z0-9_-]{12,})/i;
+
+/** Project paths and output sizes without exposing read content or remote URLs. */
+export function summarizeReadToolActivity(kind: "args" | "result", value: unknown): string | undefined {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+	const record = value as Record<string, unknown>;
+	if (kind === "args") {
+		const readPath = record.path;
+		if (
+			typeof readPath !== "string" ||
+			readPath.length === 0 ||
+			readPath.length > 100 ||
+			UNSAFE_SUMMARY_PATH.test(readPath)
+		) {
+			return undefined;
+		}
+		return readPath;
+	}
+	if (!Array.isArray(record.content)) return undefined;
+	const text = record.content
+		.filter(
+			(block): block is { type: unknown; text: unknown } =>
+				typeof block === "object" && block !== null && "type" in block && "text" in block,
+		)
+		.filter(block => block.type === "text" && typeof block.text === "string")
+		.map(block => block.text as string)
+		.join("\n");
+	const lines = text.length === 0 ? 0 : text.split("\n").length;
+	return `${lines} lines, ${Buffer.byteLength(text, "utf-8")} bytes`;
+}
+
 export interface ReadToolDetails {
 	kind?: "file" | "url";
 	truncation?: TruncationResult;
@@ -499,6 +543,9 @@ export interface ReadToolDetails {
 	method?: string;
 	notes?: string[];
 	meta?: OutputMeta;
+	/** Whether this explicit content read may be spilled by output metadata. */
+	spillEligible?: boolean;
+
 	/** Raw text + start line for user-visible TUI rendering, set when content is text-like.
 	 * Mirrors the same lines the model receives but without hashline/line-number prefixes,
 	 * so the TUI can render the file content with its own gutter without re-parsing the formatted text. */
@@ -667,6 +714,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 	readonly parameters = readSchema;
 	readonly nonAbortable = true;
 	readonly strict = true;
+	readonly safeSummary = summarizeReadToolActivity;
 
 	readonly #autoResizeImages: boolean;
 	readonly #defaultLimit: number;
@@ -782,12 +830,16 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		options: {
 			details?: ReadToolDetails;
 			sourcePath?: string;
+			spillEligible?: boolean;
+			receiptPath?: string;
 			sourceUrl?: string;
 			sourceInternal?: string;
 			entityLabel: string;
 			ignoreResultLimits?: boolean;
+			resultByteCeiling?: number;
 			raw?: boolean;
 			immutable?: boolean;
+			wrapUntrusted?: boolean;
 		},
 	): AgentToolResult<ReadToolDetails> {
 		const displayMode = resolveFileDisplayMode(this.session, { raw: options.raw, immutable: options.immutable });
@@ -836,9 +888,30 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		}
 
 		const endLine = endLineExpanded;
-		const selectedContent = allLines.slice(startLine, endLine).join("\n");
+		let selectedContent = allLines.slice(startLine, endLine).join("\n");
+
+		if (options.receiptPath) {
+			const budgetLines = this.session.settings.get("read.receiptBudgetLines");
+			const budgetBytes = this.session.settings.get("read.receiptBudgetBytes") * 1024;
+			const receiptLines: string[] = [];
+			let bytes = 0;
+			for (const line of allLines) {
+				const lineBytes = Buffer.byteLength(line, "utf-8") + (receiptLines.length > 0 ? 1 : 0);
+				if (receiptLines.length >= budgetLines || bytes + lineBytes > budgetBytes) break;
+				receiptLines.push(line);
+				bytes += lineBytes;
+			}
+			selectedContent = receiptLines.join("\n");
+		}
 		const userLimitedLines = limit !== undefined ? endLine - startLine : undefined;
-		const truncation = ignoreResultLimits ? noTruncResult(selectedContent) : truncateHead(selectedContent);
+		const truncation = ignoreResultLimits
+			? noTruncResult(selectedContent)
+			: truncateHead(
+					selectedContent,
+					options.resultByteCeiling === undefined
+						? undefined
+						: { maxBytes: options.resultByteCeiling, maxLines: Number.MAX_SAFE_INTEGER },
+				);
 
 		const shouldAddHashLines = displayMode.hashLines;
 		const shouldAddLineNumbers = shouldAddHashLines ? false : displayMode.lineNumbers;
@@ -892,8 +965,12 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		} else {
 			outputText = formatText(truncation.content, startLineDisplay);
 		}
+		if (options.receiptPath && (truncation.truncated || countTextLines(selectedContent) < totalLines)) {
+			outputText += `\n\n${formatReceiptFooter(options.receiptPath, countTextLines(selectedContent), totalLines, Buffer.byteLength(selectedContent, "utf-8"))}`;
+		}
 
-		resultBuilder.text(outputText);
+		details.spillEligible = options.spillEligible === true && selectedContent.length > 0;
+		resultBuilder.text(options.wrapUntrusted ? wrapUntrustedContent(outputText) : outputText);
 		if (truncationInfo) {
 			resultBuilder.truncation(truncationInfo.result, truncationInfo.options);
 		}
@@ -952,6 +1029,8 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		}
 		const finalText =
 			notices.length > 0 ? (outputText ? `${outputText}\n${notices.join("\n")}` : notices.join("\n")) : outputText;
+		details.spillEligible = parts.length > 0;
+
 		resultBuilder.text(finalText);
 		return resultBuilder.done();
 	}
@@ -971,6 +1050,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		signal: AbortSignal | undefined,
 	): Promise<{
 		outputText: string;
+		contentLineCount: number;
 		columnTruncated: number;
 		bridgeResult?: AgentToolResult<ReadToolDetails>;
 	}> {
@@ -992,7 +1072,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 					const firstText = bridgeResult.content.find((c): c is TextContent => c.type === "text");
 					if (firstText) firstText.text = `${notice}\n${firstText.text}`;
 				}
-				return { outputText: "", columnTruncated: 0, bridgeResult };
+				return { outputText: "", contentLineCount: 0, columnTruncated: 0, bridgeResult };
 			} catch (error) {
 				logger.warn("ACP fs readTextFile failed; falling back to disk", { path: absolutePath, error });
 			}
@@ -1005,6 +1085,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		const blocks: string[] = [];
 		const notices: string[] = [];
 		let columnTruncated = 0;
+		let contentLineCount = 0;
 
 		for (const range of ranges) {
 			const rangeStart = range.startLine - 1; // 0-indexed
@@ -1039,6 +1120,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 				}
 			}
 
+			contentLineCount += collectedLines.length;
 			if (collectedLines.length > 0) {
 				getFileReadCache(this.session).recordContiguous(absolutePath, range.startLine, collectedLines);
 			}
@@ -1051,7 +1133,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		if (notices.length > 0) {
 			outputText = outputText ? `${outputText}\n${notices.join("\n")}` : notices.join("\n");
 		}
-		return { outputText, columnTruncated };
+		return { outputText, contentLineCount, columnTruncated };
 	}
 
 	async #readArchiveDirectory(
@@ -1334,6 +1416,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		displayText: string;
 		elidedSpans: number;
 		elidedLines: number;
+		capped: boolean;
 	} {
 		const displayMode = resolveFileDisplayMode(this.session);
 		const shouldAddHashLines = displayMode.hashLines;
@@ -1393,17 +1476,19 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 
 		const modelParts: string[] = [];
 		const displayParts: string[] = [];
+		const capBytes = this.session.settings.get("read.summaryMaxBytes") * 1024;
+		let usedBytes = 0;
 		let elidedSpans = 0;
 		let elidedLines = 0;
+		let capDropped = false;
 		for (const unit of units) {
+			let model: string;
+			let display: string;
+			let implicitElidedLines = 0;
 			if (unit.kind === "elided") {
-				modelParts.push("...");
-				displayParts.push("...");
-				elidedSpans++;
-				elidedLines += unit.endLine - unit.startLine + 1;
-				continue;
-			}
-			if (unit.kind === "merged") {
+				model = display = "...";
+				implicitElidedLines = unit.endLine - unit.startLine + 1;
+			} else if (unit.kind === "merged") {
 				const formatted = formatMergedBraceLine(
 					unit.startLine,
 					unit.endLine,
@@ -1412,18 +1497,39 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 					shouldAddHashLines,
 					shouldAddLineNumbers,
 				);
-				modelParts.push(formatted.model);
-				displayParts.push(formatted.display);
+				model = formatted.model;
+				display = formatted.display;
+				implicitElidedLines = Math.max(0, unit.endLine - unit.startLine - 1);
+			} else {
+				model = formatSingleLine(unit.line, unit.text, shouldAddHashLines, shouldAddLineNumbers);
+				display = unit.text;
+			}
+			const separatorBytes = modelParts.length > 0 ? 1 : 0;
+			if (usedBytes + separatorBytes + Buffer.byteLength(model, "utf-8") > capBytes) {
+				capDropped = true;
 				elidedSpans++;
-				// Merged brace pair encloses (start+1)..(end-1) as elided.
-				elidedLines += Math.max(0, unit.endLine - unit.startLine - 1);
+				elidedLines += unit.kind === "line" ? 1 : unit.endLine - unit.startLine + 1;
 				continue;
 			}
-			modelParts.push(formatSingleLine(unit.line, unit.text, shouldAddHashLines, shouldAddLineNumbers));
-			displayParts.push(unit.text);
+			usedBytes += separatorBytes + Buffer.byteLength(model, "utf-8");
+			modelParts.push(model);
+			displayParts.push(display);
+			if (unit.kind === "elided" || unit.kind === "merged") {
+				elidedSpans++;
+				elidedLines += implicitElidedLines;
+			}
 		}
-
-		return { text: modelParts.join("\n"), displayText: displayParts.join("\n"), elidedSpans, elidedLines };
+		if (capDropped) {
+			modelParts.push("…");
+			displayParts.push("…");
+		}
+		return {
+			text: modelParts.join("\n"),
+			displayText: displayParts.join("\n"),
+			elidedSpans,
+			elidedLines,
+			capped: capDropped,
+		};
 	}
 
 	async execute(
@@ -1469,6 +1575,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 					sourceUrl: cached.details.finalUrl,
 					entityLabel: "URL output",
 					immutable: true,
+					wrapUntrusted: true,
 				});
 			}
 			return executeReadUrl(this.session, { path: parsedUrlTarget.path, raw: parsedUrlTarget.raw }, signal);
@@ -1479,8 +1586,13 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		// off the URL and surfaced via parseSel rather than confusing handlers.
 		const internalRouter = InternalUrlRouter.instance();
 		if (internalRouter.canHandle(readPath)) {
-			const internalTarget = splitInternalUrlSel(readPath);
+			const internalTarget = splitInternalUrlSel(readPath, {
+				activeSkillNames: getActiveSkills().map(skill => skill.name),
+			});
 			const parsed = parseSel(internalTarget.sel);
+			if (internalTarget.sel !== undefined && parsed.kind === "none") {
+				throw new ToolError(`Invalid internal URL selector "${internalTarget.sel}".`);
+			}
 			return this.#handleInternalUrl(internalTarget.path, parsed, signal);
 		}
 
@@ -1613,25 +1725,38 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 				details: { resolvedPath: absolutePath },
 				sourcePath: absolutePath,
 				entityLabel: "notebook",
+				spillEligible: parsed.kind !== "none",
+				resultByteCeiling:
+					parsed.kind !== "none"
+						? Math.max(
+								RAW_COLLECTOR_MAX_BYTES,
+								this.session.settings.get("tools.readArtifactSpillThreshold") * 1024,
+							)
+						: undefined,
+				receiptPath: parsed.kind === "none" ? localReadPath : undefined,
 			});
 		} else if (shouldConvertWithMarkit) {
-			// Convert document via markit.
 			const result = await convertFileWithMarkit(absolutePath, signal);
 			if (result.ok) {
-				// Apply truncation to converted content
-				const truncation = truncateHead(result.content);
-				const outputText = truncation.content;
-
-				details = { truncation };
-				sourcePath = absolutePath;
-				truncationInfo = { result: truncation, options: { direction: "head", startLine: 1 } };
-
-				content = [{ type: "text", text: outputText }];
-			} else if (result.error) {
-				content = [{ type: "text", text: `[Cannot read ${ext} file: ${result.error || "conversion failed"}]` }];
-			} else {
-				content = [{ type: "text", text: `[Cannot read ${ext} file: conversion failed]` }];
+				const { offset, limit } = selToOffsetLimit(parsed);
+				return this.#buildInMemoryTextResult(result.content, offset, limit, {
+					details: { resolvedPath: absolutePath },
+					sourcePath: absolutePath,
+					entityLabel: "converted document",
+					raw: isRawSelector(parsed),
+					spillEligible: parsed.kind !== "none",
+					resultByteCeiling:
+						parsed.kind !== "none"
+							? Math.max(
+									RAW_COLLECTOR_MAX_BYTES,
+									this.session.settings.get("tools.readArtifactSpillThreshold") * 1024,
+								)
+							: undefined,
+					receiptPath: parsed.kind === "none" ? localReadPath : undefined,
+				});
 			}
+			content = [{ type: "text", text: `[Cannot read ${ext} file: ${result.error || "conversion failed"}]` }];
+			details = { spillEligible: false };
 		} else {
 			if (
 				parsed.kind === "none" &&
@@ -1646,8 +1771,22 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 						renderedSummary.elidedSpans,
 						renderedSummary.elidedLines,
 					);
-					const modelText = footer ? `${renderedSummary.text}\n\n${footer}` : renderedSummary.text;
+					const summaryTotalLines = Math.max(...summary.segments.map(segment => segment.endLine));
+					const modelText = [
+						renderedSummary.text,
+						footer,
+						renderedSummary.capped
+							? formatSummaryCapFooter(
+									localReadPath,
+									this.session.settings.get("read.summaryMaxBytes") * 1024,
+									summaryTotalLines,
+								)
+							: "",
+					]
+						.filter(Boolean)
+						.join("\n\n");
 					details = {
+						spillEligible: false,
 						displayContent: { text: renderedSummary.displayText, startLine: 1 },
 						summary: {
 							lines: countTextLines(renderedSummary.text),
@@ -1674,7 +1813,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 					if (multiResult.bridgeResult) return multiResult.bridgeResult;
 					content = [{ type: "text", text: multiResult.outputText }];
 					sourcePath = absolutePath;
-					details = {};
+					details = { spillEligible: multiResult.contentLineCount > 0 };
 					if (multiResult.columnTruncated > 0) {
 						columnTruncated = multiResult.columnTruncated;
 					}
@@ -1714,13 +1853,25 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 					const startLine = requestedStart - leadingContext;
 					const startLineDisplay = startLine + 1;
 
+					const isBareReceipt = parsed.kind === "none" && !content;
+					const rawSelector = isRawSelector(parsed);
 					const DEFAULT_LIMIT = this.#defaultLimit;
-					const effectiveLimit = limit ?? DEFAULT_LIMIT;
-					const maxLinesToCollect = Math.min(effectiveLimit + leadingContext + trailingContext, DEFAULT_MAX_LINES);
-					const selectedLineLimit = effectiveLimit + leadingContext + trailingContext;
-					// Scale byte budget with line limit so the configured line count actually fits.
-					// Assume ~512 bytes/line average; never go below the shared default.
-					const maxBytesForRead = Math.max(DEFAULT_MAX_BYTES, maxLinesToCollect * 512);
+					const effectiveLimit = rawSelector ? Number.MAX_SAFE_INTEGER : (limit ?? DEFAULT_LIMIT);
+					const receiptBudgetBytes = this.session.settings.get("read.receiptBudgetBytes") * 1024;
+					const maxLinesToCollect = rawSelector
+						? Number.MAX_SAFE_INTEGER
+						: isBareReceipt
+							? this.session.settings.get("read.receiptBudgetLines")
+							: Math.min(effectiveLimit + leadingContext + trailingContext, DEFAULT_MAX_LINES);
+					const selectedLineLimit = rawSelector ? null : effectiveLimit + leadingContext + trailingContext;
+					const maxBytesForRead = rawSelector
+						? Math.max(
+								RAW_COLLECTOR_MAX_BYTES,
+								this.session.settings.get("tools.readArtifactSpillThreshold") * 1024,
+							)
+						: isBareReceipt
+							? receiptBudgetBytes
+							: Math.max(DEFAULT_MAX_BYTES, maxLinesToCollect * 512);
 
 					const streamResult = await streamLinesFromFile(
 						absolutePath,
@@ -1757,7 +1908,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 					// verbatim bytes for paste-back-into-tool workflows. Total byte/line
 					// counts in `truncation` keep reflecting the source, not the trimmed
 					// view — column truncation surfaces separately via `.limits()`.
-					const rawSelector = isRawSelector(parsed);
+
 					const shouldAddHashLines = !rawSelector && displayMode.hashLines;
 					const maxColumns = resolveOutputMaxColumns(this.session.settings);
 					if (!rawSelector && !shouldAddHashLines && maxColumns > 0) {
@@ -1819,7 +1970,8 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 								firstLineBytes,
 							)}, exceeds ${formatBytes(maxBytesForRead)} limit. Unable to display a valid UTF-8 snippet.]`;
 						}
-						details = { truncation };
+						details = { truncation, spillEligible: !isBareReceipt && collectedLines.length > 0 };
+
 						sourcePath = absolutePath;
 						truncationInfo = {
 							result: truncation,
@@ -1827,7 +1979,8 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 						};
 					} else if (truncation.truncated) {
 						outputText = formatText(truncation.content, startLineDisplay);
-						details = { truncation };
+						details = { truncation, spillEligible: !isBareReceipt && collectedLines.length > 0 };
+
 						sourcePath = absolutePath;
 						truncationInfo = {
 							result: truncation,
@@ -1839,13 +1992,21 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 
 						outputText = formatText(truncation.content, startLineDisplay);
 						outputText += `\n\n[${remaining} more lines in file. Use :${nextOffset} to continue]`;
-						details = {};
+						details = { spillEligible: !isBareReceipt && collectedLines.length > 0 };
+
 						sourcePath = absolutePath;
 					} else {
 						// No truncation, no user limit exceeded
 						outputText = formatText(truncation.content, startLineDisplay);
-						details = {};
+						details = { spillEligible: !isBareReceipt && collectedLines.length > 0 };
+
 						sourcePath = absolutePath;
+					}
+					if (isBareReceipt && (truncation.truncated || collectedLines.length < totalFileLines)) {
+						outputText += `\n\n${formatReceiptFooter(localReadPath, collectedLines.length, totalFileLines, collectedBytes)}`;
+					}
+					if (rawSelector && truncation.truncated) {
+						outputText += `\n\n[Raw read capped at ${formatBytes(maxBytesForRead)} of ${formatBytes(fileSize)}; re-read a line range to narrow the view]`;
 					}
 
 					if (capturedDisplayContent) {
@@ -2073,23 +2234,23 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		}
 		throwIfAborted(signal);
 
-		const output = tree.totalLines <= 1 ? "(empty directory)" : tree.rendered;
-		const truncation = truncateHead(output, { maxLines: Number.MAX_SAFE_INTEGER });
-		const details: ReadToolDetails = {
-			isDirectory: true,
-			resolvedPath: tree.rootPath,
-		};
-
-		const resultBuilder = toolResult(details).text(truncation.content).sourcePath(tree.rootPath);
-		if (tree.truncated) {
-			resultBuilder.limits({ resultLimit: 1 });
+		const receiptLines = this.session.settings.get("read.receiptBudgetLines");
+		const receiptBytes = this.session.settings.get("read.receiptBudgetBytes") * 1024;
+		const sourceLines = tree.totalLines <= 1 ? ["(empty directory)"] : tree.rendered.split("\n");
+		const bodyLines: string[] = [];
+		let bodyBytes = 0;
+		for (const line of sourceLines) {
+			const bytes = Buffer.byteLength(line, "utf-8") + (bodyLines.length > 0 ? 1 : 0);
+			if (bodyLines.length >= receiptLines || bodyBytes + bytes > receiptBytes) break;
+			bodyLines.push(line);
+			bodyBytes += bytes;
 		}
-		if (truncation.truncated) {
-			resultBuilder.truncation(truncation, { direction: "head" });
-			details.truncation = truncation;
+		let output = bodyLines.join("\n");
+		if (bodyLines.length < sourceLines.length || tree.truncated) {
+			output += `\n\n[Listing truncated at ${bodyLines.length} lines / ${Math.ceil(bodyBytes / 1024)} KiB; read a deeper subpath (e.g. ${absolutePath}/<subdir>) to narrow the view]`;
 		}
-
-		return resultBuilder.done();
+		const details: ReadToolDetails = { isDirectory: true, spillEligible: false, resolvedPath: tree.rootPath };
+		return toolResult(details).text(output).sourcePath(tree.rootPath).done();
 	}
 }
 

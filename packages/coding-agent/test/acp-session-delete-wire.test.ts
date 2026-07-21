@@ -30,6 +30,14 @@ import {
 	type RequestPermissionResponse,
 	type SessionNotification,
 } from "@agentclientprotocol/sdk";
+import { startFixtureBrokerWithLeaseForTest } from "../src/sdk/broker/ensure";
+import {
+	cleanupFixtureRoots,
+	createFixtureRootCleanup,
+	type FixtureRootCleanup,
+	registerFixtureRuntime,
+	withFixtureBrokerEnvironment,
+} from "./helpers/fixture-broker-cleanup";
 
 /** Minimal host→client callback impl for the SDK callbacks. */
 class OracleClient implements Client {
@@ -47,10 +55,9 @@ class OracleClient implements Client {
 type AcpProc = Bun.Subprocess<"pipe", "pipe", "pipe">;
 
 const repoRoot = path.resolve(import.meta.dir, "..", "..", "..");
-const cleanupRoots: string[] = [];
+const cleanupRoots: FixtureRootCleanup[] = [];
 /** Bounded stderr retention cap (bytes) kept for failure diagnostics. */
 const STDERR_CAP = 64 * 1024;
-let activeOracle: Oracle | undefined;
 
 /** Wrap the child's stdin sink as a `WritableStream` for `ndJsonStream`. */
 function subprocessInput(proc: AcpProc): WritableStream<Uint8Array> {
@@ -101,23 +108,10 @@ async function teardown(oracle: Oracle): Promise<void> {
 			`ACP subprocess did not exit after SIGKILL; refusing to remove owned root.\n[child stderr tail]\n${oracle.stderrTail()}`,
 		);
 	}
-	// Finish draining stderr so the pipe is fully consumed before cleanup. The
-	// reader resolves once the child's stderr fd closes after exit; a retained
-	// reader/drain failure is rethrown here, blocking root removal.
-	await oracle.drainStderr();
 }
 
 afterEach(async () => {
-	if (activeOracle) {
-		const oracle = activeOracle;
-		activeOracle = undefined;
-		// Confirm child exit + finish the stderr drain BEFORE removing any owned
-		// root, so a stuck child fails the test instead of being orphaned.
-		await teardown(oracle);
-	}
-	for (const root of cleanupRoots.splice(0)) {
-		await fs.promises.rm(root, { recursive: true, force: true });
-	}
+	await cleanupFixtureRoots(cleanupRoots);
 });
 
 /**
@@ -163,7 +157,6 @@ interface Oracle {
 /** Spawn the real ACP subprocess and wire the SDK client to its stdio. */
 async function spawnOracle(): Promise<Oracle> {
 	const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), "skc-acp-delete-wire-"));
-	cleanupRoots.push(root);
 	const env = buildChildEnv(root);
 
 	// Create every owned directory up front so the child finds writable roots.
@@ -181,6 +174,11 @@ async function spawnOracle(): Promise<Oracle> {
 
 	const workspace = path.join(root, "workspace");
 	await fs.promises.mkdir(workspace, { recursive: true });
+
+	const agentDir = path.join(root, "agent");
+	const started = await withFixtureBrokerEnvironment(() => startFixtureBrokerWithLeaseForTest({ agentDir, env }));
+	const cleanup = createFixtureRootCleanup(root, agentDir, started.lease);
+	cleanupRoots.push(cleanup);
 
 	const proc = Bun.spawn(["bun", "packages/coding-agent/src/cli.ts", "--mode", "acp", "--no-extensions"], {
 		cwd: repoRoot,
@@ -244,7 +242,12 @@ async function spawnOracle(): Promise<Oracle> {
 			}
 		},
 	};
-	activeOracle = oracle;
+	registerFixtureRuntime(cleanup, {
+		key: "acp-subprocess",
+		requiredOwner: "runtime-and-broker",
+		shutdown: () => teardown(oracle),
+		dispose: () => oracle.drainStderr(),
+	});
 	return oracle;
 }
 
@@ -287,9 +290,13 @@ describe("ACP session/delete wire oracle (real subprocess stdio)", () => {
 			const listBefore = await connection.listSessions({ cwd: workspace });
 			expect(listBefore.sessions.map(session => session.sessionId)).toContain(sessionId);
 
-			// Exactly one session transcript exists under the isolated root.
+			// Exactly one persisted session transcript exists; broker index logs are not transcripts.
 			const transcripts = await Array.fromAsync(
-				new Bun.Glob("**/*.jsonl").scan({ cwd: root, absolute: true, onlyFiles: true }),
+				new Bun.Glob("**/*.jsonl").scan({
+					cwd: path.join(root, "agent", "sessions"),
+					absolute: true,
+					onlyFiles: true,
+				}),
 			);
 			expect(transcripts).toHaveLength(1);
 			const sessionPath = transcripts[0]!;

@@ -5,11 +5,17 @@
  */
 
 import { createHash } from "node:crypto";
-import * as fs from "node:fs/promises";
 import path from "node:path";
-import type { AgentEvent, AgentIdentity, AgentTelemetryConfig, ThinkingLevel } from "@sayknow-cli/agent-core";
+import type {
+	AgentEvent,
+	AgentIdentity,
+	AgentMessage,
+	AgentTelemetryConfig,
+	ThinkingLevel,
+} from "@sayknow-cli/agent-core";
 import { recordHandoff, resolveTelemetry } from "@sayknow-cli/agent-core";
-import type { ServiceTier } from "@sayknow-cli/ai";
+import { estimateMessageTokensHeuristic } from "@sayknow-cli/agent-core/compaction";
+import type { Message, Model, ServiceTier } from "@sayknow-cli/ai";
 import { type JsonSchemaValidationIssue, validateJsonSchemaValue } from "@sayknow-cli/ai/utils/schema";
 import { logger, prompt, untilAborted } from "@sayknow-cli/utils";
 import { AsyncJobManager } from "../async";
@@ -25,6 +31,7 @@ import { buildSkillPromptMessage, type Skill } from "../extensibility/skills";
 import type { HindsightSessionState } from "../hindsight/state";
 import type { LocalProtocolOptions } from "../internal-urls";
 import subagentSystemPromptTemplate from "../prompts/system/subagent-system-prompt.md" with { type: "text" };
+import subagentUserPromptTemplate from "../prompts/system/subagent-user-prompt.md" with { type: "text" };
 import submitReminderTemplate from "../prompts/system/subagent-yield-reminder.md" with { type: "text" };
 import { AgentRegistry } from "../registry/agent-registry";
 import { createAgentSession, discoverAuthStorage } from "../sdk";
@@ -42,6 +49,7 @@ import { ToolAbortError } from "../tools/tool-errors";
 import type { EventBus } from "../utils/event-bus";
 import { buildNamedToolChoiceResult } from "../utils/tool-choice";
 import type { WorkspaceTree } from "../workspace-tree";
+import { validateAllocatedTaskId } from "./id";
 import { subprocessToolRegistry } from "./subprocess-tool-registry";
 import { persistTaskTokenLog, taskTokenLogFromUsage } from "./token-log";
 import {
@@ -87,6 +95,11 @@ function normalizeModelPatterns(value: string | string[] | undefined): string[] 
 		.filter(Boolean);
 }
 
+function getSubagentCanonicalScope(parentSessionId: string | undefined, subagentId: string): string | undefined {
+	if (!parentSessionId) return undefined;
+	return JSON.stringify(["subagent-canonical", parentSessionId, subagentId]);
+}
+
 function renderIrcPeerRoster(agentRegistry: AgentRegistry, selfId: string): string {
 	const peers = agentRegistry
 		.list()
@@ -107,6 +120,51 @@ function getReportFindingKey(value: unknown): string | null {
 		return null;
 	}
 	return `${filePath}:${lineStart}:${lineEnd}:${priority ?? ""}:${title}`;
+}
+
+const FORK_CONTEXT_MINIMUM_RESERVED_OUTPUT_TOKENS = 4_096;
+const FORK_CONTEXT_FIXED_PROMPT_AND_TOOL_OVERHEAD_TOKENS = 4_096;
+
+export function trimForkContextSeedForModel(seed: ForkContextSeed, model: Model | undefined): ForkContextSeed {
+	const contextWindow = model?.contextWindow;
+	if (!contextWindow || contextWindow <= 0) return seed;
+	const reservedOutputTokens = Math.max(
+		FORK_CONTEXT_MINIMUM_RESERVED_OUTPUT_TOKENS,
+		model && Number.isFinite(model.maxTokens) ? Math.max(0, Math.trunc(model.maxTokens)) : 0,
+	);
+	const ceiling = Math.max(
+		0,
+		Math.trunc(contextWindow) - reservedOutputTokens - FORK_CONTEXT_FIXED_PROMPT_AND_TOOL_OVERHEAD_TOKENS,
+	);
+	const maxTokens = Math.min(seed.metadata.maxTokens, ceiling);
+	const skippedReasons = { ...seed.metadata.skippedReasons };
+	let skippedMessages = seed.metadata.skippedMessages;
+	let approximateTokens = 0;
+	const messages: Message[] = [];
+	for (let i = seed.messages.length - 1; i >= 0; i--) {
+		const message = seed.messages[i]!;
+		const tokens = estimateMessageTokensHeuristic(message);
+		if (maxTokens <= 0 || approximateTokens + tokens > maxTokens) {
+			skippedMessages++;
+			skippedReasons["child-context-ceiling"] = (skippedReasons["child-context-ceiling"] ?? 0) + 1;
+			continue;
+		}
+		messages.unshift(message);
+		approximateTokens += tokens;
+	}
+	return {
+		...seed,
+		messages,
+		agentMessages: messages.map(message => structuredClone(message) as AgentMessage),
+		metadata: {
+			...seed.metadata,
+			includedMessages: messages.length,
+			skippedMessages,
+			approximateTokens,
+			maxTokens,
+			skippedReasons,
+		},
+	};
 }
 
 /** Options for subagent execution */
@@ -169,6 +227,7 @@ export interface ExecutorOptions {
 	 * artifacts directory (no per-subagent subdir).
 	 */
 	parentArtifactManager?: ArtifactManager;
+	managedPersistence?: ManagedTaskPersistence;
 	parentHindsightSessionState?: HindsightSessionState;
 	/**
 	 * Parent agent's OpenTelemetry configuration. When defined, the subagent's
@@ -182,6 +241,49 @@ export interface ExecutorOptions {
 	/** Skills to autoload via sendCustomMessage before the first prompt */
 	autoloadSkills?: Skill[];
 	forkContextSeed?: ForkContextSeed;
+}
+
+export class ManagedTaskPersistence {
+	readonly #artifacts: ArtifactManager;
+	readonly #taskId: string;
+
+	constructor(artifacts: ArtifactManager, taskId: string) {
+		this.#artifacts = artifacts;
+		this.#taskId = validateAllocatedTaskId(taskId);
+		if (!artifacts.getManagedSubtreeRootAuthority())
+			throw new Error("Managed task persistence authority is unavailable");
+	}
+
+	async openSession(): Promise<SessionManager> {
+		const store = this.#artifacts.getManagedStore();
+		if (!store) throw new Error("Managed task persistence authority is unavailable");
+		this.#artifacts.assertManagedBinding();
+		const sessionFile = path.join(this.#artifacts.dir, `${this.#taskId}.jsonl`);
+		const session = await SessionManager.openNestedManaged(
+			sessionFile,
+			SessionManager.nestedManagedDestination(store, this.#artifacts.dir),
+			store,
+		);
+		this.#artifacts.assertManagedBinding();
+		return session;
+	}
+
+	async publishOutput(rawOutput: string, metadata: Uint8Array): Promise<void> {
+		await this.#artifacts.publishManagedOutputGeneration(
+			`${this.#taskId}.md.selector.json`,
+			`${this.#taskId}.md`,
+			Buffer.from(rawOutput, "utf8"),
+			metadata,
+		);
+	}
+}
+
+export function createManagedTaskPersistence(artifacts: ArtifactManager, taskId: string): ManagedTaskPersistence {
+	return new ManagedTaskPersistence(artifacts, taskId);
+}
+
+export function renderSubagentUserPrompt(assignment: string, independentMode: boolean): string {
+	return prompt.render(subagentUserPromptTemplate, { assignment: assignment.trim(), independentMode });
 }
 
 function parseStringifiedJson(value: unknown): unknown {
@@ -826,7 +928,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				task,
 				assignment,
 				progress: { ...progress },
-				sessionFile: subtaskSessionFile,
+				sessionFile: null,
 			});
 		}
 		lastProgressEmitMs = Date.now();
@@ -914,19 +1016,24 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		progress.recentOutput = [];
 	};
 
+	const forwardSubagentEvent = (
+		event: AgentEvent | Extract<AgentSessionEvent, { type: "model_fallback_switched" }>,
+	) => {
+		if (!options.eventBus) return;
+		options.eventBus.emit(TASK_SUBAGENT_EVENT_CHANNEL, {
+			index,
+			agent: agent.name,
+			agentSource: agent.source,
+			task,
+			assignment,
+			event,
+		});
+	};
+
 	const processEvent = (event: AgentEvent) => {
 		if (resolved) return;
 
-		if (options.eventBus) {
-			options.eventBus.emit(TASK_SUBAGENT_EVENT_CHANNEL, {
-				index,
-				agent: agent.name,
-				agentSource: agent.source,
-				task,
-				assignment,
-				event,
-			});
-		}
+		forwardSubagentEvent(event);
 
 		const now = Date.now();
 		let flushProgress = false;
@@ -1227,6 +1334,8 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			}
 			checkAbort();
 
+			const canonicalChildScope = getSubagentCanonicalScope(options.parentSessionId, options.subagentId ?? id);
+
 			const {
 				model,
 				thinkingLevel: resolvedThinkingLevel,
@@ -1234,6 +1343,9 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				authFallbackUsed,
 				requestedModel,
 				fallbackReason,
+				activeIndex,
+				parentFallbackSelector,
+				skips,
 			} = await awaitAbortable(
 				resolveModelOverrideWithAuthFallback(
 					modelPatterns,
@@ -1241,6 +1353,8 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					modelRegistry,
 					settings,
 					options.parentSessionId,
+					{ managedFallback: true },
+					canonicalChildScope,
 				),
 			);
 			if (model) {
@@ -1272,14 +1386,21 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			if (model?.contextWindow && model.contextWindow > 0) {
 				progress.contextWindow = model.contextWindow;
 			}
+			const forkContextSeed = options.forkContextSeed
+				? trimForkContextSeedForModel(options.forkContextSeed, model)
+				: undefined;
 			const effectiveThinkingLevel = explicitThinkingLevel
 				? resolvedThinkingLevel
 				: (thinkingLevel ?? resolvedThinkingLevel);
 			effectiveThinkingLevelForWarning = effectiveThinkingLevel;
 
-			const sessionManager = sessionFile
-				? await awaitAbortable(SessionManager.open(sessionFile))
-				: SessionManager.inMemory(worktree ?? cwd);
+			const sessionManager = options.managedPersistence
+				? await awaitAbortable(options.managedPersistence.openSession())
+				: sessionFile
+					? await awaitAbortable(
+							SessionManager.open(sessionFile, SessionManager.explicitDestination(path.dirname(sessionFile))),
+						)
+					: SessionManager.inMemory(worktree ?? cwd);
 			if (options.parentArtifactManager) {
 				sessionManager.adoptArtifactManager(options.parentArtifactManager);
 			}
@@ -1345,8 +1466,8 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			const { normalized: normalizedOutputSchema } = normalizeSchema(outputSchema);
 
 			const forkContextNotice =
-				options.forkContextSeed && options.forkContextSeed.metadata.includedMessages > 0
-					? `This subagent was started with a forked snapshot of the parent conversation. Included ${options.forkContextSeed.metadata.includedMessages} message(s), skipped ${options.forkContextSeed.metadata.skippedMessages}, approximately ${options.forkContextSeed.metadata.approximateTokens} tokens. The snapshot is not live.${ircEnabled ? " Use IRC for live coordination." : " Rely on the explicit assignment and supplied context for coordination."}`
+				forkContextSeed && forkContextSeed.metadata.includedMessages > 0
+					? `This subagent was started with a forked snapshot of the parent conversation. Included ${forkContextSeed.metadata.includedMessages} message(s), skipped ${forkContextSeed.metadata.skippedMessages}, approximately ${forkContextSeed.metadata.approximateTokens} tokens. The snapshot is not live.${ircEnabled ? " Use IRC for live coordination." : " Rely on the explicit assignment and supplied context for coordination."}`
 					: "";
 
 			const agentSubskillBlock = await buildAgentSubskillInjection({
@@ -1383,7 +1504,11 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					workspaceTree: options.workspaceTree,
 					systemPrompt: defaultPrompt => {
 						const subagentPrompt = prompt.render(subagentSystemPromptTemplate, {
-							agent: agent.systemPrompt,
+							agent: prompt.render(agent.systemPrompt, {
+								ultragoalRedTeam: /ultragoal\s+completion\s+(?:qa|red-team)|executorQa/i.test(
+									options.assignment ?? task,
+								),
+							}),
 							context: options.context?.trim() ?? "",
 							worktree: worktree ?? "",
 							outputSchema: normalizedOutputSchema,
@@ -1424,13 +1549,28 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					enableMCP,
 					localProtocolOptions: options.localProtocolOptions,
 					telemetry: subagentTelemetry,
-					forkContextSeed: options.forkContextSeed,
+					forkContextSeed,
 					agentRegistry,
 					shouldPause: () => pauseRequested,
 				}),
 			);
 
 			activeSession = session;
+			// Each subagent invocation owns a fresh controller; its configured chain
+			// is scoped to this child session and never shares parent sticky state.
+			// Auth-aware resolution can substitute the parent model only after every
+			// override entry was unavailable. Rebase the controller to that concrete
+			// parent selector so its request is never charged to override index zero.
+			session.setConfiguredModelChain(
+				"default",
+				parentFallbackSelector ? [parentFallbackSelector] : modelPatterns,
+				"subagent",
+				agent.name,
+				true,
+			);
+			if (activeIndex !== undefined && !parentFallbackSelector) {
+				session.seedDefaultFallbackResolution(activeIndex, skips);
+			}
 			const liveSubagentId = options.subagentId ?? id;
 			const manager = AsyncJobManager.instance();
 			if (manager) {
@@ -1460,7 +1600,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					agentSource: agent.source,
 					description: options.description,
 					status: "started",
-					sessionFile: subtaskSessionFile,
+					sessionFile: null,
 					index,
 				});
 			}
@@ -1508,12 +1648,14 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 							pendingExtensionMessages.push(sendPromise);
 						},
 						sendUserMessage: (content, options) => {
-							const sendPromise = session.sendUserMessage(content, options).catch(e => {
+							const send = session.sendUserMessage(content, options);
+							const observedSend = send.catch(e => {
 								logger.error("Extension sendUserMessage failed", {
 									error: e instanceof Error ? e.message : String(e),
 								});
 							});
-							pendingExtensionMessages.push(sendPromise);
+							pendingExtensionMessages.push(observedSend);
+							return send;
 						},
 						appendEntry: (customType, data) => {
 							session.sessionManager.appendCustomEntry(customType, data);
@@ -1523,12 +1665,28 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 						},
 						getActiveTools: () => session.getActiveToolNames(),
 						getAllTools: () => session.getAllToolNames(),
+						resolveTool: name => {
+							const tool = session.getToolByName(name);
+							return tool
+								? { safeSummary: tool.safeSummary, safeSummaryFields: tool.safeSummaryFields }
+								: undefined;
+						},
 						setActiveTools: (toolNames: string[]) =>
 							session.setActiveToolsByName(toolNames.filter(name => !parentOwnedToolNames.has(name))),
 						getCommands: () => getSessionSlashCommands(session),
 						setModel: model => runExtensionSetModel(session, model),
 						getThinkingLevel: () => session.thinkingLevel,
-						setThinkingLevel: level => session.setThinkingLevel(level),
+						setThinkingLevel: (level, persist) => session.setThinkingLevel(level, persist),
+						getThinkingVisibility: () => session.getThinkingVisibility(),
+						setThinkingVisibility: (visibility, persist) => session.setThinkingVisibility(visibility, persist),
+						cycleThinkingLevel: () => session.cycleThinkingLevel(),
+						setThinkingLevelForControl: (level, persist) => session.setThinkingLevelForControl(level, persist),
+						setThinkingVisibilityForControl: (visibility, persist) =>
+							session.setThinkingVisibilityForControl(visibility, persist),
+						setModelTemporaryForControl: (model, expectedSessionId) =>
+							session.setModelTemporaryForControl(model, expectedSessionId),
+						fetchUsageReportsForControl: () => session.fetchUsageReportsForControl(),
+						getThinkingScopeForControl: () => session.getThinkingScopeForControl(),
 						getSessionName: () => session.sessionManager.getSessionName(),
 						setSessionName: async name => {
 							await session.sessionManager.setSessionName(name, "user");
@@ -1539,10 +1697,25 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 						isIdle: () => !session.isStreaming,
 						abort: () => session.abort(),
 						hasPendingMessages: () => session.queuedMessageCount > 0,
+						getPendingMessageCounts: () => session.pendingMessageCounts,
+						getTranscript: () => session.getTranscript(),
+						getTranscriptBody: entryId => session.getTranscriptBody(entryId),
+						getGoalState: () => session.getGoalModeState(),
+						getTodoState: () => session.getTodoPhases(),
+						getQueuedMessages: () => session.getQueuedMessageEntries(),
+						getActiveTools: () => session.getActiveToolNames(),
+						getAllTools: () => session.getAllToolNames(),
+						resolveTool: name => {
+							const tool = session.getToolByName(name);
+							return tool
+								? { safeSummary: tool.safeSummary, safeSummaryFields: tool.safeSummaryFields }
+								: undefined;
+						},
 						shutdown: () => {},
 						getContextUsage: () => session.getContextUsage(),
 						getSystemPrompt: () => session.systemPrompt,
 						compact: instructionsOrOptions => runExtensionCompact(session, instructionsOrOptions),
+						clearContext: () => session.clearContext(),
 					},
 				);
 				extensionRunner.onError(err => {
@@ -1579,6 +1752,10 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 						};
 					}
 					scheduleProgress(true);
+					return;
+				}
+				if (event.type === "model_fallback_switched") {
+					forwardSubagentEvent(event);
 					return;
 				}
 				if (isAgentEvent(event)) {
@@ -1782,37 +1959,38 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 	// Write output artifact (input and jsonl already written in real-time)
 	// Compute output metadata for agent:// URL integration
 	let outputMeta: { lineCount: number; charCount: number; byteSize?: number; sha256?: string } | undefined;
-	let outputPath: string | undefined;
-	if (options.artifactsDir) {
-		const candidateOutputPath = path.join(options.artifactsDir, `${id}.md`);
+	// Never overwrite the artifact with empty output: a failed/no-op resume leg
+	// carries no new information and must preserve the previous retained output.
+	if (options.artifactsDir && rawOutput.length > 0) {
+		const managedPersistence = options.managedPersistence;
 		try {
-			await Bun.write(candidateOutputPath, rawOutput);
 			const byteSize = Buffer.byteLength(rawOutput, "utf8");
 			const lineCount = rawOutput.split("\n").length;
 			const sha256 = createHash("sha256").update(rawOutput).digest("hex");
 			const createdAt = new Date().toISOString();
-			await Bun.write(
-				`${candidateOutputPath}.meta.json`,
+			if (!managedPersistence) await Bun.write(path.join(options.artifactsDir, `${id}.md`), rawOutput);
+			const metadataBytes = Buffer.from(
 				JSON.stringify({ id, kind: "agent-output", sizeBytes: byteSize, lineCount, sha256, createdAt }, null, 2),
+				"utf8",
 			);
-			outputPath = candidateOutputPath;
+			if (managedPersistence) await managedPersistence.publishOutput(rawOutput, metadataBytes);
+			else await Bun.write(path.join(options.artifactsDir, `${id}.md.meta.json`), metadataBytes);
 			outputMeta = {
 				lineCount,
 				charCount: rawOutput.length,
 				byteSize,
 				sha256,
 			};
-		} catch {
-			// Output or metadata write failed: never advertise an unverifiable
-			// artifact. Best-effort remove any orphaned `.md`/sidecar so a later
-			// agent:// read cannot serve unverified content. Non-fatal.
-			outputPath = undefined;
-			outputMeta = undefined;
-			try {
-				await fs.rm(candidateOutputPath, { force: true });
-				await fs.rm(`${candidateOutputPath}.meta.json`, { force: true });
-			} catch {
-				// best-effort cleanup; ignore
+		} catch (error) {
+			if (!managedPersistence) {
+				// A missing sidecar keeps a partial immutable output invisible to agent://.
+				outputMeta = undefined;
+			} else {
+				const message = error instanceof Error ? error.message : String(error);
+				stderr = `${stderr}${stderr ? "\n" : ""}Managed output publication failed: ${message}`;
+				exitCode = 1;
+				paused = false;
+				progress.retryFailure = { attempt: 0, errorMessage: `Managed output publication failed: ${message}` };
 			}
 		}
 	}
@@ -1845,7 +2023,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			agentSource: agent.source,
 			description: options.description,
 			status: progress.status as "completed" | "failed" | "aborted" | "paused",
-			sessionFile: subtaskSessionFile,
+			sessionFile: null,
 			index,
 		});
 	}
@@ -1875,7 +2053,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		paused,
 		usage: hasUsage ? accumulatedUsage : undefined,
 		usageCostBreakdownComplete: hasUsage && usageCostBreakdownComplete ? true : undefined,
-		outputPath,
+		outputPath: undefined,
 		extractedToolData: progress.extractedToolData,
 		retryFailure: progress.retryFailure,
 		outputMeta,

@@ -3,14 +3,12 @@ import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { resolveOwner } from "../../src/harness-control-plane/owner";
-import { readLease } from "../../src/harness-control-plane/session-lease";
 import { type PlanRequest, planTmuxOwnerIsolationSync } from "../../src/skc-runtime/tmux-owner-isolation";
-import { createHarnessCliEnv, type HarnessCliEnv } from "./cli-workspace-env";
+import { createHarnessCliEnvWithFixtureBroker, type HarnessCliBrokerFixture } from "./cli-workspace-env";
 
 const repoRoot = path.resolve(import.meta.dir, "..", "..", "..", "..");
 const cliEntry = path.join(repoRoot, "packages", "coding-agent", "src", "cli.ts");
 const SID = "d";
-const FAKE_RPC = path.join(import.meta.dir, "fixtures", "fake-rpc.ts");
 
 function gitInit(dir: string): void {
 	const run = (args: string[]): void => {
@@ -26,8 +24,70 @@ function gitInit(dir: string): void {
 let root: string;
 let workspace: string;
 let tmuxCommand: string;
-let rpcCommandEnv: string;
-let cliEnv: HarnessCliEnv;
+
+let cliEnv: HarnessCliBrokerFixture;
+
+let sdkServer: ReturnType<typeof Bun.serve>;
+let disableSdkHost = false;
+
+async function startSdkFixture(): Promise<void> {
+	sdkServer = Bun.serve<{ token: string }>({
+		port: 0,
+		fetch(req, server) {
+			if (server.upgrade(req, { data: { token: "test-token" } })) return undefined;
+			return new Response("Not found", { status: 404 });
+		},
+		websocket: {
+			open(ws) {
+				ws.send(JSON.stringify({ type: "hello", connectionId: "fixture" }));
+			},
+			message(ws, message) {
+				const frame = JSON.parse(String(message)) as Record<string, unknown>;
+				const id = frame.id as string;
+				if (frame.type === "query_request") {
+					const item =
+						frame.query === "session.metadata"
+							? { sessionId: SID, name: "Fixture", cwd: workspace, kind: "main" }
+							: frame.query === "session.last_assistant"
+								? { text: "" }
+								: { usage: {}, isStreaming: false, steeringQueueDepth: 0, followupQueueDepth: 0 };
+					ws.send(
+						JSON.stringify({
+							type: "query_response",
+							id,
+							ok: true,
+							page: { items: [item], complete: true, revision: "1" },
+						}),
+					);
+					return;
+				}
+				if (frame.type === "event_replay") {
+					ws.send(
+						JSON.stringify({ type: "event_replay_result", id, ok: true, events: [], generation: 1, lastSeq: 0 }),
+					);
+					return;
+				}
+				if (frame.type === "control_request") {
+					ws.send(
+						JSON.stringify({
+							type: "control_response",
+							id,
+							ok: true,
+							result: { commandId: "fixture-command", accepted: true },
+						}),
+					);
+					for (const type of ["agent_start", "tool_execution_start", "agent_end"])
+						ws.send(JSON.stringify({ type: "event", payload: { type } }));
+				}
+			},
+		},
+	});
+	await mkdir(path.join(workspace, ".skc", "state", "sdk"), { recursive: true });
+	await writeFile(
+		path.join(workspace, ".skc", "state", "sdk", `${SID}.json`),
+		JSON.stringify({ url: `ws://127.0.0.1:${sdkServer.port}`, token: "test-token" }),
+	);
+}
 
 async function createFakeTmuxBin(rootDir: string, options: { skipOwnerLaunch?: boolean } = {}): Promise<string> {
 	const binDir = path.join(rootDir, ".test-bin");
@@ -72,7 +132,8 @@ async function createFakeTmuxBin(rootDir: string, options: { skipOwnerLaunch?: b
 	      fi
 	    done
 	    cmd="${"$"}{@: -1}"
-	    ${options.skipOwnerLaunch ? "sleep 120 >/dev/null 2>&1 &" : '(cd "$cwd" && bash -lc "$cmd") >/dev/null 2>&1 &'}
+    ${options.skipOwnerLaunch ? "sleep 2 >/dev/null 2>&1 &" : '(cd "$cwd" && bash -lc "$cmd") >/dev/null 2>&1 &'}
+
     printf '%s\n' "${"$"}!" > "$state"
     printf '%s\n' "${"$"}!" > ${JSON.stringify(lastServerStatePath)}
 	    native_receipt='$1'; printf '%s\n' "\${SKC_HARNESS_TEST_NATIVE_RECEIPT-$native_receipt}"
@@ -106,9 +167,14 @@ async function runHarness(
 		env: {
 			...cliEnv.env,
 			SKC_HARNESS_STATE_ROOT: root,
-			// Drive the REAL SayknowCliRpc against a protocol fixture (no shipped fake seam).
-			SKC_HARNESS_RPC_COMMAND: rpcCommandEnv,
+			// The fake tmux server is a child of this test process, not a real systemd scope.
+			// Keep normal lifecycle cases independent of the runner's caller cgroup; the scoped
+			// bootstrap failure case below explicitly overrides this fixture value.
+			SKC_HARNESS_TEST_CALLER_CGROUP: "/\n",
+			SKC_HARNESS_TEST_SERVER_CGROUP: "/\n",
+
 			SKC_TMUX_COMMAND: tmuxCommand,
+			...(disableSdkHost ? { SKC_SDK_DISABLE: "1" } : {}),
 			...env,
 		},
 		stdout: "pipe",
@@ -127,43 +193,40 @@ async function runHarness(
 
 const sleep = (ms: number): Promise<void> => new Promise(r => setTimeout(r, ms));
 
+async function retireLiveFixtureOwner(): Promise<void> {
+	let owner = await resolveOwner(root, SID);
+	if (!owner.live) return;
+	const retired = await runHarness(["retire", "--session", SID]);
+	if (retired.code !== 0 || (retired.json?.evidence as Record<string, unknown>).retired !== true)
+		throw new Error("Fixture owner retirement failed; preserving fixture roots for retry.");
+	for (let i = 0; i < 80 && owner.live; i++) {
+		await sleep(50);
+		owner = await resolveOwner(root, SID);
+	}
+	if (owner.live) throw new Error("Fixture owner remained live after retirement; preserving fixture roots for retry.");
+}
+
 beforeEach(async () => {
 	// Short paths keep the AF_UNIX socket path under the sun_path limit.
 	root = await mkdtemp(path.join(tmpdir(), "h"));
 	workspace = await mkdtemp(path.join(tmpdir(), "hw"));
-	cliEnv = createHarnessCliEnv(repoRoot);
+	cliEnv = await createHarnessCliEnvWithFixtureBroker(repoRoot, root);
 	tmuxCommand = await createFakeTmuxBin(root);
-	rpcCommandEnv = JSON.stringify(["bun", FAKE_RPC]);
+
+	disableSdkHost = false;
+	await startSdkFixture();
 });
 
 afterEach(async () => {
-	cliEnv.cleanup();
-	const serverPid = await readFile(path.join(root, "tmux-server.pid"), "utf8")
-		.then(value => Number(value.trim()))
-		.catch(error => {
-			if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
-			throw error;
-		});
-	if (serverPid !== null && Number.isSafeInteger(serverPid) && serverPid > 0) {
-		try {
-			process.kill(serverPid, "SIGTERM");
-		} catch (error) {
-			if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
-		}
-	}
-	const lease = await readLease(root, SID).catch(error => {
-		if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+	try {
+		await retireLiveFixtureOwner();
+		sdkServer.stop(true);
+		await cliEnv.cleanup();
+		await rm(workspace, { recursive: true, force: true });
+	} catch (error) {
+		sdkServer.stop(true);
 		throw error;
-	});
-	if (lease?.pid) {
-		try {
-			process.kill(lease.pid, "SIGTERM");
-		} catch (error) {
-			if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
-		}
 	}
-	await rm(root, { recursive: true, force: true });
-	await rm(workspace, { recursive: true, force: true });
 });
 
 describe.skipIf(process.platform !== "linux")("skc harness start --detach (detached owner lifecycle, B1)", () => {
@@ -236,20 +299,6 @@ describe.skipIf(process.platform !== "linux")("skc harness start --detach (detac
 		expect(after.live).toBe(false);
 	}, 60_000);
 
-	it("injects the SKC spawn-provenance marker into the detached RPC owner", async () => {
-		// fake-rpc records the SKC_SPAWNED_BY_SESSION value it was spawned with; a
-		// non-empty marker proves #runOwner tags the detached owner's RPC child so
-		// notifications.sessionScope=primary can suppress it.
-		const recordPath = path.join(root, "owner-spawn-marker");
-		const started = await runHarness(
-			["start", "--input", JSON.stringify({ harness: "sayknow-cli", workspace, sessionId: SID, detach: true })],
-			{ SKC_FAKE_RPC_ENV_RECORD: recordPath },
-		);
-		expect(started.code).toBe(0);
-		expect((started.json?.state as Record<string, unknown>).ownerLive).toBe(true);
-		expect(await readFile(recordPath, "utf8")).toBe(SID);
-	}, 60_000);
-
 	it("blocks without a detached fallback when tmux starts but never routes the owner", async () => {
 		tmuxCommand = await createFakeTmuxBin(root, { skipOwnerLaunch: true });
 		const started = await runHarness([
@@ -261,55 +310,48 @@ describe.skipIf(process.platform !== "linux")("skc harness start --detach (detac
 		const evidence = started.json?.evidence as Record<string, unknown>;
 		expect(evidence.ownerRuntime).toBe("manual");
 		expect(evidence.ownerFallbackReason).toBe(
-			"tmux new-session exited 0 but owner endpoint did not become routable; owner cleaned",
+			"tmux new-session owner endpoint not routable; exact cleanup or reconciliation uncertain",
 		);
-		expect(evidence.reason).toBe("tmux-owner-endpoint-not-routable");
+		expect(evidence.reason).toBe("tmux-owner-endpoint-cleanup-uncertain");
 		expect((started.json?.state as Record<string, unknown>).ownerLive).toBe(false);
-		expect((started.json?.state as Record<string, unknown>).blockers).toContain("tmux-owner-endpoint-not-routable");
+		expect((started.json?.state as Record<string, unknown>).blockers).toContain(
+			"tmux-owner-endpoint-cleanup-uncertain",
+		);
 		const lifecycle = path.join(root, SID, "owner-lifecycle");
 		const generation = (await Bun.file(path.join(lifecycle, "generation.json")).json()) as { generation: string };
-		expect(await Bun.file(path.join(lifecycle, `verdict-${generation.generation}.json`)).json()).toMatchObject({
-			generation: generation.generation,
-			session_id: SID,
-			classification: "unexpected_owner_loss",
-			reason: "terminal_observation",
-		});
+		expect(await Bun.file(path.join(lifecycle, `verdict-${generation.generation}.json`)).exists()).toBe(false);
 	}, 60_000);
 
 	it("reports blocked only after detached owner endpoint remains unavailable", async () => {
 		tmuxCommand = path.join(root, "missing-tmux");
-		const originalRpcCommandEnv = rpcCommandEnv;
-		rpcCommandEnv = "{";
-		try {
-			const started = await runHarness([
-				"start",
-				"--input",
-				JSON.stringify({ harness: "sayknow-cli", workspace, sessionId: SID, detach: true }),
-			]);
-			expect(started.code).toBe(1);
-			expect(started.json?.ok).toBe(false);
-			const state = started.json?.state as Record<string, unknown>;
-			const evidence = started.json?.evidence as Record<string, unknown>;
-			expect(state.lifecycle).toBe("blocked");
-			expect(state.ownerLive).toBe(false);
-			expect(state.blockers).toContain("detached-owner-not-live");
-			expect(evidence.ownerRuntime).toBe("detached");
-			expect(evidence.reason).toBe("detached-owner-not-live");
+		disableSdkHost = true;
+		await rm(path.join(workspace, ".skc", "state", "sdk", `${SID}.json`), { force: true });
+		const started = await runHarness([
+			"start",
+			"--input",
+			JSON.stringify({ harness: "sayknow-cli", workspace, sessionId: SID, detach: true }),
+		]);
+		expect(started.code).toBe(1);
+		expect(started.json?.ok).toBe(false);
+		const state = started.json?.state as Record<string, unknown>;
+		const evidence = started.json?.evidence as Record<string, unknown>;
+		expect(state.lifecycle).toBe("blocked");
+		expect(state.ownerLive).toBe(false);
+		expect(state.blockers).toContain("detached-owner-not-live");
+		expect(evidence.ownerRuntime).toBe("detached");
+		expect(evidence.reason).toBe("detached-owner-not-live");
 
-			const submit = await runHarness(["submit", "--session", SID, "--input", JSON.stringify({ prompt: "go" })]);
-			expect(submit.code).toBe(1);
-			expect(submit.json?.ok).toBe(false);
-			expect((submit.json?.state as Record<string, unknown>).ownerLive).toBe(false);
-			expect((submit.json?.evidence as Record<string, unknown>).accepted).toBe(false);
-			expect((submit.json?.evidence as Record<string, unknown>).reason).toBe("owner-not-live");
-			expect(submit.json?.nextAllowedActions).toContainEqual({
-				verb: "submit",
-				available: false,
-				reason: "lifecycle-blocked",
-			});
-		} finally {
-			rpcCommandEnv = originalRpcCommandEnv;
-		}
+		const submit = await runHarness(["submit", "--session", SID, "--input", JSON.stringify({ prompt: "go" })]);
+		expect(submit.code).toBe(1);
+		expect(submit.json?.ok).toBe(false);
+		expect((submit.json?.state as Record<string, unknown>).ownerLive).toBe(false);
+		expect((submit.json?.evidence as Record<string, unknown>).accepted).toBe(false);
+		expect((submit.json?.evidence as Record<string, unknown>).reason).toBe("owner-not-live");
+		expect(submit.json?.nextAllowedActions).toContainEqual({
+			verb: "submit",
+			available: false,
+			reason: "lifecycle-blocked",
+		});
 	}, 60_000);
 	it("fails closed without detached fallback when scoped bootstrap fails", async () => {
 		const systemdRun = path.join(root, ".test-bin", "systemd-run");

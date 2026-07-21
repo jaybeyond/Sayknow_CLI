@@ -25,13 +25,33 @@ Does not cover `/tree` UI rendering behavior beyond semantics that affect sessio
 
 ## On-Disk Layout
 
-Default session file location:
+Default managed session file location:
 
 ```text
-~/.skc/agent/sessions/--<cwd-encoded>--/<timestamp>_<sessionId>.jsonl
+~/.skc/agent/sessions/v2-<52-char-base32-sha256>/<timestamp>_<sessionId>.jsonl
 ```
 
-`<cwd-encoded>` is derived from the working directory by stripping leading slash and replacing `/`, `\\`, and `:` with `-`.
+The `v2-…` component is a fixed-width SHA-256/base32 digest of the native canonical workspace identity (identity version 1); it is **not** a reversible or injective user-facing encoding. The binding file `.skc-managed-session-scope.v2.json` records the canonical identity and digest. Existing bindings must be regular, canonically encoded files that agree with the resolved identity; a mismatch or unsafe path fails closed.
+
+Identity is platform-specific:
+
+- POSIX paths and supported local aliases that resolve to the same native directory identity share the same v2 scope.
+- On Windows, equivalent supported local path spellings (including drive-letter/case aliases) resolve through the native identity API before the scope is derived.
+- UNC/network workspaces are unsupported and return a `network_unsupported` resolution result; no SMB share is needed or assumed by this design.
+
+The default managed writer creates new data only in v2 scopes. It never writes new legacy-layout data. `--session-dir` is an explicit storage/lookup override and is not a request to derive the default managed scope.
+
+### Legacy migration and retention
+
+Legacy encoded directories are discovered only after validating each candidate's header and workspace identity. With `session.directoryMigration: "copy-retain"` (the default), an eligible legacy session is copied into the v2 scope without replacing an existing destination; the legacy source is retained. Set `session.directoryMigration: "disabled"` to leave legacy candidates unmigrated. Migration is lazy and guarded by a managed lock, binding checks, no-follow/owner-only path checks, and source identity validation; conflicts, unsafe artifacts, or changed sources fail rather than guessing.
+
+Migration does not automatically clean up legacy files, copied files, locks, artifacts, or abandoned data. A migration tombstone records a completed/retired source so repeated scans do not reinterpret it as a new migration request; it is not evidence that the old data was deleted. Artifact copying is bounded and rejects symlinks, hard links, excessive depth, file count, or size.
+
+### Security boundary
+
+Managed storage enforces owner-only directory/file security and refuses unsafe symlinks or malformed bindings on the paths it verifies. This is a local storage-integrity boundary, not authentication, authorization, encryption, or a guarantee against a hostile concurrent local actor/race outside the verified operations. Callers must still protect the agent directory and session contents.
+
+On Linux filesystems where the exact POSIX ACL xattr operation returns `ENOTSUP`/`EOPNOTSUPP`, SKC treats that result only as proof that the filesystem cannot store that ACL attribute. The ACL gate still requires the same opened object to pass effective-owner, exact `0700` directory or `0600` file mode, safe-type, no-follow traversal, and identity/replacement checks. Permission denial, I/O errors, present or malformed ACL data, and unknown results remain failures. Managed descriptors use close-on-exec and are not delegated as authority to subprocesses. This compatibility rule does not change explicit `--session-dir`, macOS ACL, or Windows DACL policy.
 
 Blob store location:
 
@@ -52,15 +72,15 @@ Breadcrumb content is two lines: original cwd, then session file path. `continue
 Session files are JSONL: one JSON object per line.
 
 - Line 1 is always the session header (`type: "session"`).
-- Remaining lines are `SessionEntry` values.
-- Entries are append-only at runtime; branch navigation moves a pointer (`leafId`) rather than mutating existing entries.
+- Remaining lines are `SessionEntry` values or v4/v5 append-only patch records. `header_patch` records update header metadata and `entry_patch` records replace a message payload when replay metadata is sanitized.
+- Entries and patch records are append-only at runtime; branch navigation moves a pointer (`leafId`) rather than mutating existing entries.
 
 ### Header (`SessionHeader`)
 
 ```json
 {
   "type": "session",
-  "version": 3,
+  "version": 5,
   "id": "1f9d2a6b9c0d1234",
   "timestamp": "2026-02-16T10:20:30.000Z",
   "cwd": "/work/pi",
@@ -106,6 +126,7 @@ All non-header entries include:
 - `session_init`
 - `mode_change`
 - `mcp_tool_selection`
+- `discovered_builtin_tool_selection`
 
 ### `message`
 
@@ -288,6 +309,21 @@ Extension-provided message that does participate in LLM context. `content` can b
 }
 ```
 
+### `discovered_builtin_tool_selection`
+
+```json
+{
+  "type": "discovered_builtin_tool_selection",
+  "id": "e2f3g4h5",
+  "parentId": "d2e3f4a5",
+  "timestamp": "2026-02-16T10:28:31.000Z",
+  "selectedToolNames": ["search_tool_bm25"],
+  "mutationCorrelationId": "4c2b9c60-20d7-4a18-8d2a-8edc1f892b89"
+}
+```
+
+`selectedToolNames` is the explicit discovered built-in selection. `mutationCorrelationId` is optional and correlates adjacent MCP and discovered built-in selection records from one mutation.
+
 ### `session_init`
 
 ```json
@@ -318,7 +354,7 @@ Extension-provided message that does participate in LLM context. `content` can b
 
 ## Versioning and Migration
 
-Current session version: `3`.
+Current session version: `5`.
 
 ### v1 -> v2
 
@@ -336,12 +372,32 @@ Applied when header `version < 3`:
 - For `message` entries: rewrites legacy `message.role === "hookMessage"` to `"custom"`.
 - Sets header `version = 3`.
 
+### v3 -> v4
+
+Applied when header `version < 4`:
+
+- Sets header `version = 4`.
+- Introduces append-only `header_patch` and `entry_patch` records.
+
+### v4 -> v5
+
+Applied when header `version < 5`:
+
+- Sets header `version = 5`.
+- Separates MCP (`mcp_tool_selection`) and discovered built-in (`discovered_builtin_tool_selection`) selection authority. The legacy v4 combined built-in field remains readable.
+- Patch records replay for v4 and v5 transcripts. Headers with a version greater than 5 are rejected before replay.
+
 ### Migration Trigger and Persistence
 
-- Migrations run during session load (`setSessionFile`).
-- If any migration ran, the entire file is rewritten to disk immediately.
-- Migration mutates in-memory entries first, then persists rewritten JSONL.
+- v1-v4 transcripts remain readable without mutation during read-only inspection and strict resume selection. Patch records replay for v4 and v5 transcripts; headers with a version greater than 5 are rejected before replay.
+- Mutable loads migrate v1-v4 entries in memory but do not rewrite on read. Migration and the complete v5 rewrite are deferred until the first authorized persistence.
+- v5 sessions load without a migration rewrite. Once v5 data exists, do not roll back to a v4 writer: v4 writers cannot preserve v5 selection authority.
 
+### Discovery selection authority
+
+MCP and discovered built-in authority are independent. Constructor `toolNames` establishes authority only for the domain it names; currently essential built-ins remain baseline policy and never become discovered-built-in authority. A list containing only non-essential built-ins does not suppress configured or exact-config MCP defaults, and a list containing only MCP tools does not suppress built-in baselines. An explicit empty list clears both applicable domains. Explicit new-session names and empty clears are persisted as separate domain entries; omitted selections, essential baselines, and configured/exact baselines are not authoritative and are not persisted. Resume reconstructs state without appending authority entries.
+
+A combined activation appends an MCP entry first and a discovered-built-in entry second. Both entries carry the same optional `mutationCorrelationId`; older entries without this field remain valid.
 ## Load and Compatibility Behavior
 
 `loadEntriesFromFile(path)` behavior:

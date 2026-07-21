@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import {
 	InternalUrlRouter,
+	initializeLocalRoot,
 	LocalProtocolHandler,
 	resolveLocalRoot,
 	resolveLocalUrlToPath,
@@ -19,6 +20,118 @@ async function withTempDir<T>(fn: (dir: string) => Promise<T>): Promise<T> {
 		await fs.rm(dir, { recursive: true, force: true });
 	}
 }
+
+async function withLocalRoot<T>(sessionId: string, fn: (root: string) => Promise<T>): Promise<T> {
+	const root = resolveLocalRoot({ getSessionId: () => sessionId });
+	await fs.rm(root, { recursive: true, force: true });
+	await fs.mkdir(root, { recursive: true });
+
+	try {
+		return await fn(root);
+	} finally {
+		await fs.rm(root, { recursive: true, force: true });
+	}
+}
+
+function localOptions(sessionId: string, artifactsDir: string) {
+	return { getArtifactsDir: () => artifactsDir, isManagedDestination: () => true, getSessionId: () => sessionId };
+}
+
+it("keeps explicit local roots under artifacts while managed roots stay external", async () => {
+	await withTempDir(async artifactsDir => {
+		const sessionId = `routing-${path.basename(artifactsDir)}`;
+		expect(resolveLocalRoot({ getArtifactsDir: () => artifactsDir, getSessionId: () => sessionId })).toBe(
+			path.join(artifactsDir, "local"),
+		);
+		expect(
+			resolveLocalRoot({
+				getArtifactsDir: () => artifactsDir,
+				isManagedDestination: () => true,
+				getSessionId: () => sessionId,
+			}),
+		).toBe(path.join(os.tmpdir(), "skc-local", sessionId));
+	});
+});
+it("migrates opaque managed legacy topology, retires exactly once, and verifies the marker", async () => {
+	const sessionId = `managed-${crypto.randomUUID()}`;
+	const snapshot = { rootDev: "1", rootIno: "2", entries: [] } as never;
+	let captures = 0;
+	let retired = 0;
+	await withLocalRoot(sessionId, async localRoot => {
+		LocalProtocolHandler.setOverride({
+			getSessionId: () => sessionId,
+			getManagedLegacyLocalMigrationSource: () => ({
+				capture: async () => {
+					captures++;
+					return {
+						snapshot,
+						entries: [
+							{ relativePath: "", kind: "directory" },
+							{ relativePath: "nested", kind: "directory" },
+							{ relativePath: "empty", kind: "directory" },
+							{
+								relativePath: "nested/legacy.json",
+								kind: "file",
+								bytes: Buffer.from('{"legacy":true}'),
+								sha256: "600bfa81b1561fa6281505a8630327ec94da208976f36c142c781b0b46a95725",
+							},
+						],
+					};
+				},
+				retire: expected => {
+					expect(expected).toBe(snapshot);
+					retired++;
+				},
+			}),
+		});
+		await initializeLocalRoot(LocalProtocolHandler.resolveOptions()!);
+		expect(await fs.readFile(path.join(localRoot, "nested", "legacy.json"), "utf8")).toBe('{"legacy":true}');
+		expect((await fs.lstat(path.join(localRoot, "empty"))).isDirectory()).toBe(true);
+		expect(await fs.readFile(path.join(localRoot, ".skc-local-legacy-migrated-v1"), "utf8")).toBe("verified\n");
+		await initializeLocalRoot(LocalProtocolHandler.resolveOptions()!);
+		expect({ captures, retired }).toEqual({ captures: 1, retired: 1 });
+	});
+});
+
+it("rolls back managed migration publication on a destination collision without retiring the source", async () => {
+	const sessionId = `managed-collision-${crypto.randomUUID()}`;
+	const snapshot = { rootDev: "1", rootIno: "2", entries: [] } as never;
+	let retired = 0;
+	await withLocalRoot(sessionId, async localRoot => {
+		await fs.writeFile(path.join(localRoot, "second"), "existing");
+		const options = {
+			getSessionId: () => sessionId,
+			getManagedLegacyLocalMigrationSource: () => ({
+				capture: async () => ({
+					snapshot,
+					entries: [
+						{ relativePath: "", kind: "directory" as const },
+						{
+							relativePath: "first",
+							kind: "file" as const,
+							bytes: Buffer.from("first"),
+							sha256: "a7937b64b8caa58f03721bb6bacf5c78cb235febe0e70b1b84cd99541461a08e",
+						},
+						{
+							relativePath: "second",
+							kind: "file" as const,
+							bytes: Buffer.from("second"),
+							sha256: "16367aacb67a4a017c8da8ab95682ccb390863780f7114dda0a0e0c55644c7c4",
+						},
+					],
+				}),
+				retire: () => retired++,
+			}),
+		};
+		await expect(initializeLocalRoot(options)).rejects.toThrow("destination is ambiguous");
+		await expect(fs.lstat(path.join(localRoot, "first"))).rejects.toMatchObject({ code: "ENOENT" });
+		expect(await fs.readFile(path.join(localRoot, "second"), "utf8")).toBe("existing");
+		expect(retired).toBe(0);
+		await expect(fs.lstat(path.join(localRoot, ".skc-local-legacy-migrated-v1"))).rejects.toMatchObject({
+			code: "ENOENT",
+		});
+	});
+});
 
 describe("LocalProtocolHandler", () => {
 	beforeEach(() => {
@@ -114,85 +227,134 @@ describe("LocalProtocolHandler", () => {
 		expect(LocalProtocolHandler.resolveOptions()).toBeUndefined();
 	});
 
-	it("lists files at local://", async () => {
-		await withTempDir(async tempDir => {
-			const artifactsDir = path.join(tempDir, "artifacts");
+	it("migrates verified legacy artifacts/local content into external scratch exactly once", async () => {
+		await withTempDir(async artifactsDir => {
+			const sessionId = `external-${path.basename(artifactsDir)}`;
 			await fs.mkdir(path.join(artifactsDir, "local"), { recursive: true });
-			await Bun.write(path.join(artifactsDir, "local", "handoff.json"), '{"ok":true}');
 
-			LocalProtocolHandler.setOverride({
-				getArtifactsDir: () => artifactsDir,
-				getSessionId: () => "session-a",
+			await Bun.write(path.join(artifactsDir, "local", "legacy.json"), '{"legacy":true}');
+
+			await withLocalRoot(sessionId, async localRoot => {
+				await Bun.write(path.join(localRoot, "handoff.json"), '{"ok":true}');
+				LocalProtocolHandler.setOverride(localOptions(sessionId, artifactsDir));
+				const resource = await InternalUrlRouter.instance().resolve("local://");
+
+				expect(localRoot).toBe(path.join(os.tmpdir(), "skc-local", sessionId));
+				expect(resource.sourcePath).toBe(localRoot);
+				expect(resource.content).toContain("handoff.json");
+				expect(resource.content).toContain("legacy.json");
+				expect(resource.sourcePath?.startsWith(`${path.resolve(artifactsDir)}${path.sep}`)).toBe(false);
+				await expect(fs.lstat(path.join(artifactsDir, "local"))).rejects.toMatchObject({ code: "ENOENT" });
+				expect((await InternalUrlRouter.instance().resolve("local://legacy.json")).content).toBe('{"legacy":true}');
 			});
-			const router = InternalUrlRouter.instance();
-			const resource = await router.resolve("local://");
-
-			expect(resource.contentType).toBe("text/markdown");
-			expect(resource.content).toContain("handoff.json");
 		});
 	});
 
-	it("reads a local file from session local root", async () => {
+	it("fails closed when legacy local migration contains a symlink", async () => {
+		if (process.platform === "win32") return;
+		await withTempDir(async artifactsDir => {
+			const sessionId = `legacy-symlink-${path.basename(artifactsDir)}`;
+			const legacy = path.join(artifactsDir, "local");
+			await fs.mkdir(legacy, { recursive: true });
+			await fs.symlink(path.join(artifactsDir, "outside"), path.join(legacy, "linked"));
+			LocalProtocolHandler.setOverride(localOptions(sessionId, artifactsDir));
+			await expect(InternalUrlRouter.instance().resolve("local://")).rejects.toThrow(
+				"Unsafe legacy local:// migration source",
+			);
+		});
+	});
+
+	it("isolates local roots by session identity", async () => {
 		await withTempDir(async tempDir => {
-			const artifactsDir = path.join(tempDir, "artifacts");
-			const localFile = path.join(artifactsDir, "local", "subtasks", "trace.txt");
-			await fs.mkdir(path.dirname(localFile), { recursive: true });
-			await Bun.write(localFile, "trace");
+			const sessionA = `session-a-${path.basename(tempDir)}`;
+			const sessionB = `session-b-${path.basename(tempDir)}`;
+			await withLocalRoot(sessionA, async rootA => {
+				await withLocalRoot(sessionB, async rootB => {
+					await Bun.write(path.join(rootA, "trace.txt"), "trace");
+					expect(rootA).not.toBe(rootB);
 
-			LocalProtocolHandler.setOverride({
-				getArtifactsDir: () => artifactsDir,
-				getSessionId: () => "session-b",
+					LocalProtocolHandler.setOverride(localOptions(sessionA, path.join(tempDir, "artifacts-a")));
+					expect((await InternalUrlRouter.instance().resolve("local://trace.txt")).content).toBe("trace");
+
+					LocalProtocolHandler.setOverride(localOptions(sessionB, path.join(tempDir, "artifacts-b")));
+					const listing = await InternalUrlRouter.instance().resolve("local://");
+					expect(listing.content).toContain("(empty)");
+				});
 			});
-			const router = InternalUrlRouter.instance();
-			const resource = await router.resolve("local://subtasks/trace.txt");
-
-			expect(resource.content).toBe("trace");
-			expect(resource.contentType).toBe("text/plain");
 		});
 	});
 
 	it("blocks path traversal attempts", async () => {
 		await withTempDir(async tempDir => {
-			LocalProtocolHandler.setOverride({
-				getArtifactsDir: () => path.join(tempDir, "artifacts"),
-				getSessionId: () => "session-c",
+			const sessionId = `session-c-${path.basename(tempDir)}`;
+			await withLocalRoot(sessionId, async () => {
+				LocalProtocolHandler.setOverride(localOptions(sessionId, path.join(tempDir, "artifacts")));
+				const router = InternalUrlRouter.instance();
+				await expect(router.resolve("local://../secret.txt")).rejects.toThrow(
+					"Path traversal (..) is not allowed in local:// URLs",
+				);
+				await expect(router.resolve("local://%2E%2E/secret.txt")).rejects.toThrow(
+					"Path traversal (..) is not allowed in local:// URLs",
+				);
 			});
-			const router = InternalUrlRouter.instance();
-			await expect(router.resolve("local://../secret.txt")).rejects.toThrow(
-				"Path traversal (..) is not allowed in local:// URLs",
-			);
-			await expect(router.resolve("local://%2E%2E/secret.txt")).rejects.toThrow(
-				"Path traversal (..) is not allowed in local:// URLs",
-			);
 		});
 	});
 
-	it("uses session id fallback root when artifacts dir is unavailable", async () => {
-		const root = resolveLocalRoot({ getSessionId: () => "session-fallback", getArtifactsDir: () => null });
-		expect(root).toContain(path.join("skc-local", "session-fallback"));
-		expect(resolveLocalUrlToPath("local://memo.txt", { getSessionId: () => "session-fallback" })).toBe(
-			path.join(root, "memo.txt"),
-		);
+	it("resolves a stable external path before initialization", async () => {
+		const options = {
+			getSessionId: () => "session/fallback",
+			getArtifactsDir: () => null,
+		};
+		const root = resolveLocalRoot(options);
+		expect(root).toBe(path.join(os.tmpdir(), "skc-local", "session_fallback"));
+		expect(resolveLocalUrlToPath("local://memo.txt", options)).toBe(path.join(root, "memo.txt"));
+		await initializeLocalRoot(options);
+		expect(resolveLocalUrlToPath("local://memo.txt", options)).toBe(path.join(root, "memo.txt"));
 	});
 
 	it("blocks symlink escapes outside local root", async () => {
 		if (process.platform === "win32") return;
 
 		await withTempDir(async tempDir => {
-			const artifactsDir = path.join(tempDir, "artifacts");
-			const localRoot = path.join(artifactsDir, "local");
-			const outsideDir = path.join(tempDir, "outside");
-			await fs.mkdir(localRoot, { recursive: true });
-			await fs.mkdir(outsideDir, { recursive: true });
-			await Bun.write(path.join(outsideDir, "secret.txt"), "secret");
-			await fs.symlink(outsideDir, path.join(localRoot, "linked"));
+			const sessionId = `session-d-${path.basename(tempDir)}`;
+			await withLocalRoot(sessionId, async localRoot => {
+				const outsideDir = path.join(tempDir, "outside");
+				await fs.mkdir(localRoot, { recursive: true });
+				await fs.mkdir(outsideDir, { recursive: true });
+				await Bun.write(path.join(outsideDir, "secret.txt"), "secret");
+				await fs.symlink(outsideDir, path.join(localRoot, "linked"));
 
-			LocalProtocolHandler.setOverride({
-				getArtifactsDir: () => artifactsDir,
-				getSessionId: () => "session-d",
+				LocalProtocolHandler.setOverride(localOptions(sessionId, path.join(tempDir, "artifacts")));
+				await expect(InternalUrlRouter.instance().resolve("local://linked/secret.txt")).rejects.toThrow(
+					"local:// URL escapes local root",
+				);
 			});
-			const router = InternalUrlRouter.instance();
-			await expect(router.resolve("local://linked/secret.txt")).rejects.toThrow("local:// URL escapes local root");
+		});
+	});
+
+	it("rejects symlinked and colliding session roots", async () => {
+		if (process.platform === "win32") return;
+
+		await withTempDir(async tempDir => {
+			const symlinkSession = `symlink-${path.basename(tempDir)}`;
+			const collisionSession = `collision-${path.basename(tempDir)}`;
+			const outsideDir = path.join(tempDir, "outside");
+			await fs.mkdir(outsideDir, { recursive: true });
+
+			await withLocalRoot(symlinkSession, async symlinkRoot => {
+				await fs.rm(symlinkRoot, { recursive: true, force: true });
+
+				await fs.symlink(outsideDir, symlinkRoot);
+				LocalProtocolHandler.setOverride(localOptions(symlinkSession, path.join(tempDir, "artifacts")));
+				await expect(InternalUrlRouter.instance().resolve("local://")).rejects.toThrow("Unsafe local:// root");
+			});
+
+			await withLocalRoot(collisionSession, async collisionRoot => {
+				await fs.rm(collisionRoot, { recursive: true, force: true });
+				await fs.writeFile(collisionRoot, "not a directory");
+				LocalProtocolHandler.setOverride(localOptions(collisionSession, path.join(tempDir, "artifacts")));
+				await expect(InternalUrlRouter.instance().resolve("local://")).rejects.toThrow("Unsafe local:// root");
+			});
 		});
 	});
 });

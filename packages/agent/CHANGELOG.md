@@ -2,6 +2,29 @@
 
 ## [Unreleased]
 
+## [0.11.3] - 2026-07-19
+
+### Fixed
+- Pre-compaction pruning now preserves bounded, actionable error evidence instead of discarding it, while enforcing exact positive-savings admission and accounting so a prune is only applied when it demonstrably reduces context cost (#2635).
+
+## [0.11.1] - 2026-07-16
+
+### Fixed
+
+- Hardened the managed fallback attempt snapshot: staged agent events and assistant partials were cloned with a bare `structuredClone`, so a single non-cloneable value in a staged payload (e.g. a live `Headers` inside `transportFailure`) threw `DataCloneError` ("The object can not be cloned."), masked the real provider outcome, and deterministically failed every attempt until the fallback chain exhausted. The snapshot now degrades to a cycle-aware sanitizing deep clone that always returns a detached, JSON-serializable value (unsupported leaves become placeholders), so event-time replay semantics are preserved and no local snapshot failure can masquerade as a provider attempt failure. Byte accounting in the provisional buffer measures the raw event before the snapshot duplicates it (over-limit payloads are rejected pre-clone), re-measures degraded snapshots so the retained sanitized form is what gets accounted, and uses the sanitized detached form as the cycle-safe estimator for cyclic payloads.
+- Enforced the managed fallback authority boundary for local staging failures: `ManagedAttemptBufferOverflowError` no longer carries a synthetic provider-like `503` status, so exceeding the provisional event buffer limit (like any other local snapshot failure) is non-retryable, never converts into `transportFailure { kind: "transport", status: 503 }` evidence, and never rotates or consumes the model fallback chain — it surfaces as an explicit local error instead. Only original typed provider transport facts may authorize provider fallback.
+- Added a bounded, neutralize-only `invalid_prompt` circuit breaker to the agent loop (#2282). A poisoned-history rejection (`Request blocked (code=invalid_prompt)`) is a deterministic content fault: re-sending the same history re-triggers it, so uncontrolled session auto-retry would burn its budget re-poisoning the model. On the first `invalid_prompt` of a run, leaked reserved control tokens are neutralized in place across history (no item is ever dropped). If that changes the outgoing bytes, the turn is resent exactly once with the repaired history; if neutralization cannot change anything, the run fails fast immediately with no resend. The repaired history is persisted for a clean resume, the breaker fires at most once per run (budget = one repaired resend), and it is scoped to the non-managed session path since managed fallback owns its own retry policy.
+
+## [0.10.2] - 2026-07-14
+
+### Fixed
+
+- Extended the gpt-5.6 `Request blocked (code=invalid_prompt)` fix to the compaction paths that bypass the streaming transport. Remote OpenAI compaction (`/responses/compact`, `compaction.remoteEnabled` default on — the "remote compact task" in openai/codex#32028) built its native `input` from reasoning signatures, verbatim history items, and message/tool text without neutralizing leaked Harmony control-token markers (e.g. `<|channel|>analysis`), so gpt-5.6 rejected the compaction request and, on retry, could escalate to account-level blocking. `requestOpenAiRemoteCompaction` now neutralizes reserved control tokens across the whole outgoing `input`, and the generic `requestRemoteCompaction` prompt/systemPrompt are neutralized too. Local summarization was already covered by the streaming-transport request-boundary fix.
+
+### Changed
+
+- `AgentLoopConfig.maintainContext` now receives a required cancellation-aware lifecycle (`signal`, `awaitEventDrain(invocationSignal)`). Agent loops compose the run and maintenance-invocation signals and pass that single signal to EventStream's FIFO consumer-drain barrier, so cancellation removes the pending drain at its owner instead of racing an orphaned wait.
+
 ## [0.10.0] - 2026-07-12
 
 ### Fixed

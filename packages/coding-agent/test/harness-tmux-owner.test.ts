@@ -2,18 +2,20 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { access, chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
-import { readLease } from "../src/harness-control-plane/session-lease";
+import { resolveOwner } from "../src/harness-control-plane/owner";
 import { planTmuxOwnerIsolation } from "../src/skc-runtime/tmux-owner-isolation";
-import { createHarnessCliEnv, type HarnessCliEnv } from "./harness-control-plane/cli-workspace-env";
+import {
+	createHarnessCliEnvWithFixtureBroker,
+	type HarnessCliBrokerFixture,
+} from "./harness-control-plane/cli-workspace-env";
 
 const repoRoot = path.resolve(import.meta.dir, "..", "..", "..");
 const cliEntry = path.join(repoRoot, "packages", "coding-agent", "src", "cli.ts");
-const fakeRpc = path.join(import.meta.dir, "harness-control-plane", "fixtures", "fake-rpc.ts");
 const sessionId = "tmux-owner-test";
 
 let root: string;
 let workspace: string;
-let cliEnv: HarnessCliEnv;
+let cliEnv: HarnessCliBrokerFixture;
 
 async function createUnverifiableTmux(): Promise<{ command: string; log: string }> {
 	const bin = path.join(root, "bin");
@@ -63,10 +65,12 @@ async function createScopedHarnessSeam(): Promise<{
 	state=${JSON.stringify(serverStateDir)}/"$socket.pid"
 	case "${"$"}{1:-}" in
 	  display-message)
-	    if [ ! -f "$state" ] && [ "\${SKC_HARNESS_TEST_SWAP_SERVER:-}" = "1" ]; then sleep 1000 & printf '%s\n' "$!" > "$state"; fi
+    if [ ! -f "$state" ] && [ "\${SKC_HARNESS_TEST_SWAP_SERVER:-}" = "1" ]; then sleep 2 & printf '%s\n' "$!" > "$state"; fi
+
 	    if [ "\${SKC_HARNESS_TEST_SCOPED_REPLACE:-}" = "1" ] && [[ "${"$"}{!#}" == *'#{session_id}'*'#{session_name}'* ]] && [ ! -f "$state.swap" ]; then
 	      [ -f "$state" ] && kill "$(cat "$state")" 2>/dev/null || true
-	      sleep 1000 & printf '%s\n' "$!" > "$state"
+	      sleep 2 & printf '%s\n' "$!" > "$state"
+
 	      : > "$state.swap"
 	    fi
 	    if [ -f "$state" ]; then
@@ -137,7 +141,11 @@ async function runHarness(
 			env: {
 				...cliEnv.env,
 				SKC_HARNESS_STATE_ROOT: root,
-				SKC_HARNESS_RPC_COMMAND: JSON.stringify(["bun", fakeRpc]),
+				SKC_HARNESS_TEST_ASSUME_LINUX_OWNER_ISOLATION: "1",
+				// The owner process must not inherit the test runner's ambient tmux client:
+				// its startup title update would target that shared server instead of the
+				// private -L socket exercised by this fixture.
+				TMUX: "",
 				SKC_TMUX_COMMAND: tmuxCommand,
 				...env,
 			},
@@ -154,26 +162,49 @@ async function runHarness(
 	return JSON.parse(output) as Record<string, unknown>;
 }
 
+const OWNER_EXIT_TIMEOUT_MS = 5_000;
+
+async function retireLiveFixtureOwner(): Promise<void> {
+	let owner = await resolveOwner(root, sessionId);
+	if (!owner.live) return;
+	const proc = Bun.spawn(["bun", cliEntry, "harness", "retire", "--session", sessionId], {
+		cwd: workspace,
+		env: {
+			...cliEnv.env,
+			SKC_HARNESS_STATE_ROOT: root,
+			SKC_HARNESS_TEST_ASSUME_LINUX_OWNER_ISOLATION: "1",
+			TMUX: "",
+		},
+		stdout: "pipe",
+		stderr: "pipe",
+	});
+	const [output, stderr, exitCode] = await Promise.all([
+		new Response(proc.stdout).text(),
+		new Response(proc.stderr).text(),
+		proc.exited,
+	]);
+	const retired = output.trim() ? (JSON.parse(output) as { evidence?: { retired?: unknown } }) : undefined;
+	if (exitCode !== 0 || retired?.evidence?.retired !== true)
+		throw new Error(`Fixture owner retirement failed: ${stderr || output}`);
+	for (let i = 0; i < 100 && owner.live; i++) {
+		await Bun.sleep(50);
+		owner = await resolveOwner(root, sessionId);
+	}
+	if (owner.live)
+		throw new Error(
+			`Fixture owner remained live after ${OWNER_EXIT_TIMEOUT_MS}ms; preserving fixture roots for retry.`,
+		);
+}
+
 beforeEach(async () => {
 	root = await mkdtemp(path.join(tmpdir(), "harness-tmux-owner-"));
 	workspace = await mkdtemp(path.join(tmpdir(), "harness-tmux-workspace-"));
-	cliEnv = createHarnessCliEnv(repoRoot);
+	cliEnv = await createHarnessCliEnvWithFixtureBroker(repoRoot, root);
 });
 
 afterEach(async () => {
-	const lease = await readLease(root, sessionId).catch(error => {
-		if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
-		throw error;
-	});
-	if (lease?.pid) {
-		try {
-			process.kill(lease.pid, "SIGTERM");
-		} catch (error) {
-			if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
-		}
-	}
-	cliEnv.cleanup();
-	await rm(root, { recursive: true, force: true });
+	await retireLiveFixtureOwner();
+	await cliEnv.cleanup();
 	await rm(workspace, { recursive: true, force: true });
 });
 
@@ -260,7 +291,7 @@ describe("HarnessCommand tmux-resident owner startup", () => {
 		const seam = await createScopedHarnessSeam();
 		const result = await runHarness(seam.tmuxCommand, 0, {
 			SKC_HARNESS_TEST_CALLER_CGROUP: "/\n",
-			SKC_HARNESS_TEST_SERVER_CGROUP: process.platform === "linux" ? "/skc-owner-test.scope\n" : "",
+			SKC_HARNESS_TEST_SERVER_CGROUP: "/skc-owner-test.scope\n",
 			SKC_HARNESS_TEST_SERVER_START_TIME: "1",
 			PATH: `${seam.path}:${process.env.PATH ?? ""}`,
 		});
@@ -291,7 +322,7 @@ describe("HarnessCommand tmux-resident owner startup", () => {
 		const seam = await createScopedHarnessSeam();
 		const result = await runHarness(seam.tmuxCommand, 1, {
 			SKC_HARNESS_TEST_CALLER_CGROUP: "0::/user.slice/user-1.service\n",
-			SKC_HARNESS_TEST_SERVER_CGROUP: process.platform === "linux" ? "/skc-owner-test.scope\n" : "",
+			SKC_HARNESS_TEST_SERVER_CGROUP: "/skc-owner-test.scope\n",
 			SKC_HARNESS_TEST_SERVER_START_TIME: "1",
 			SKC_HARNESS_TEST_BOOTSTRAP_RECEIPT: receipt,
 			PATH: `${seam.path}:${process.env.PATH ?? ""}`,
@@ -311,7 +342,7 @@ describe("HarnessCommand tmux-resident owner startup", () => {
 		const seam = await createScopedHarnessSeam();
 		const result = await runHarness(seam.tmuxCommand, 1, {
 			SKC_HARNESS_TEST_CALLER_CGROUP: "/\n",
-			SKC_HARNESS_TEST_SERVER_CGROUP: process.platform === "linux" ? "/skc-owner-test.scope\n" : "",
+			SKC_HARNESS_TEST_SERVER_CGROUP: "/skc-owner-test.scope\n",
 			SKC_HARNESS_TEST_SERVER_START_TIME: "1",
 			SKC_HARNESS_TEST_NATIVE_RECEIPT: nativeReceipt,
 			PATH: `${seam.path}:${process.env.PATH ?? ""}`,
@@ -326,29 +357,16 @@ describe("HarnessCommand tmux-resident owner startup", () => {
 		const result = await runHarness(seam.tmuxCommand, 1, {
 			SKC_HARNESS_TEST_SWAP_SERVER: "1",
 			SKC_HARNESS_TEST_CALLER_CGROUP: "/\n",
-			SKC_HARNESS_TEST_SERVER_CGROUP: process.platform === "linux" ? "/skc-owner-test.scope\n" : "",
+			SKC_HARNESS_TEST_SERVER_CGROUP: "/skc-owner-test.scope\n",
 			SKC_HARNESS_TEST_SERVER_START_TIME: "1",
 			PATH: `${seam.path}:${process.env.PATH ?? ""}`,
 		});
 		const evidence = result.evidence as Record<string, unknown>;
-		const calls = (await readFile(seam.log, "utf8")).trim().split("\n").filter(Boolean);
-		const socket = calls
-			.map(call => call.match(/(?:^|\s)-L\s+(\S+)/)?.[1])
-			.find((value): value is string => Boolean(value));
 
+		const calls = (await readFile(seam.log, "utf8")).trim().split("\n").filter(Boolean);
 		expect(evidence.ownerRuntime).toBe("manual");
 		expect(evidence.ownerFallbackReason).toBe("tmux-owner-server_race:tmux-owner-cleanup_uncertain");
 		expect(calls.some(call => call.includes("kill-session"))).toBe(false);
-		if (socket) {
-			const pid = Number((await readFile(path.join(seam.serverStateDir, `${socket}.pid`), "utf8")).trim());
-			if (Number.isSafeInteger(pid) && pid > 0) {
-				try {
-					process.kill(pid, "SIGTERM");
-				} catch (error) {
-					if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
-				}
-			}
-		}
 	});
 
 	it("fails a scoped same-name replacement race without name-based cleanup", async () => {
@@ -356,7 +374,7 @@ describe("HarnessCommand tmux-resident owner startup", () => {
 		const result = await runHarness(seam.tmuxCommand, 1, {
 			SKC_HARNESS_TEST_SCOPED_REPLACE: "1",
 			SKC_HARNESS_TEST_CALLER_CGROUP: "0::/user.slice/user-1.service\n",
-			SKC_HARNESS_TEST_SERVER_CGROUP: process.platform === "linux" ? "/skc-owner-test.scope\n" : "",
+			SKC_HARNESS_TEST_SERVER_CGROUP: "/skc-owner-test.scope\n",
 			SKC_HARNESS_TEST_SERVER_START_TIME: "1",
 			PATH: `${seam.path}:${process.env.PATH ?? ""}`,
 		});
@@ -365,18 +383,13 @@ describe("HarnessCommand tmux-resident owner startup", () => {
 			reason: "tmux-owner-server_race:tmux-owner-cleanup_uncertain",
 		});
 		expect(calls.some(call => call.includes("kill-session"))).toBe(false);
-		const socket = calls.map(call => call.match(/(?:^|\s)-L\s+(\S+)/)?.[1]).find(Boolean);
-		if (socket) {
-			const pid = Number((await readFile(path.join(seam.serverStateDir, `${socket}.pid`), "utf8")).trim());
-			if (Number.isSafeInteger(pid) && pid > 0) process.kill(pid, "SIGTERM");
-		}
 	});
 
 	it("rejects a scoped receipt whose server identity differs from the post-spawn proof", async () => {
 		const seam = await createScopedHarnessSeam();
 		const result = await runHarness(seam.tmuxCommand, 1, {
 			SKC_HARNESS_TEST_CALLER_CGROUP: "0::/user.slice/user-1.service\n",
-			SKC_HARNESS_TEST_SERVER_CGROUP: process.platform === "linux" ? "/skc-owner-test.scope\n" : "",
+			SKC_HARNESS_TEST_SERVER_CGROUP: "/skc-owner-test.scope\n",
 			SKC_HARNESS_TEST_SERVER_START_TIME: "1",
 			SKC_HARNESS_TEST_BOOTSTRAP_RECEIPT:
 				'{"schema_version":1,"ok":true,"code":"bootstrapped","native_session_id":"$1","server_pid":1,"server_start_time":"wrong","session_name":"sayknow_cli_harness_tmux-owner-test"}',
@@ -392,7 +405,7 @@ describe("HarnessCommand tmux-resident owner startup", () => {
 		const seam = await createScopedHarnessSeam();
 		const result = await runHarness(seam.tmuxCommand, 1, {
 			SKC_HARNESS_TEST_CALLER_CGROUP: "0::/user.slice/user-1.service\n",
-			SKC_HARNESS_TEST_SERVER_CGROUP: process.platform === "linux" ? "/skc-owner-test.scope\n" : "",
+			SKC_HARNESS_TEST_SERVER_CGROUP: "/skc-owner-test.scope\n",
 			SKC_HARNESS_TEST_SERVER_START_TIME: "1",
 			SKC_HARNESS_TEST_KILL_FAIL: "1",
 			SKC_HARNESS_TEST_BOOTSTRAP_RECEIPT:
@@ -414,7 +427,7 @@ describe("HarnessCommand tmux-resident owner startup", () => {
 		);
 		const result = await runHarness(seam.tmuxCommand, 1, {
 			SKC_HARNESS_TEST_CALLER_CGROUP: "0::/user.slice/user-1.service\n",
-			SKC_HARNESS_TEST_SERVER_CGROUP: process.platform === "linux" ? "/skc-owner-test.scope\n" : "",
+			SKC_HARNESS_TEST_SERVER_CGROUP: "/skc-owner-test.scope\n",
 			SKC_HARNESS_TEST_SERVER_START_TIME: "1",
 			SKC_HARNESS_TEST_REPLACE_GENERATION: "1",
 			PATH: `${seam.path}:${process.env.PATH ?? ""}`,
@@ -433,4 +446,23 @@ describe("HarnessCommand tmux-resident owner startup", () => {
 		expect((result.state as Record<string, unknown>).ownerLive).toBe(true);
 		await expect(access(path.join(root, sessionId, "owner-lifecycle", "generation.json"))).rejects.toThrow();
 	});
+	it("reaps the exact detached-owner child (no orphan) when it never becomes live", async () => {
+		// missing-tmux routes to the direct detached-owner fallback; disabling SDK hosting makes the
+		// spawned __owner child fail transport creation, so it never publishes a live lease. The
+		// parent must not orphan that exact child: reap the PID it spawned and verify bounded exit
+		// (exact-owner scoped, never a name-based broad kill, never a leftover daemon).
+		const result = await runHarness(path.join(root, "missing-tmux"), 1, { SKC_SDK_DISABLE: "1" });
+		const evidence = result.evidence as Record<string, unknown>;
+
+		expect(evidence.ownerRuntime).toBe("detached");
+		expect(evidence.ownerFallbackReason).toBe("tmux-unavailable");
+		expect((result.state as Record<string, unknown>).ownerLive).toBe(false);
+		const reaped = evidence.detachedOwnerReaped as { pid: number; verified: boolean };
+		expect(reaped).toBeDefined();
+		expect(Number.isSafeInteger(reaped.pid)).toBe(true);
+		expect(reaped.pid).toBeGreaterThan(0);
+		// `verified` derives from the child's authoritative exit promise (recycle-proof), proving
+		// the exact spawned owner was reaped within the bounded grace before the parent returned.
+		expect(reaped.verified).toBe(true);
+	}, 60_000);
 });

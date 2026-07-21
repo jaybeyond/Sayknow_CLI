@@ -4,6 +4,7 @@ import { TASK_SIMPLE_MODES } from "../task/simple-mode";
 import { getThinkingLevelMetadata } from "../thinking-metadata";
 import { EDIT_MODES } from "../utils/edit-mode";
 import { CONFIGURABLE_SEARCH_PROVIDER_IDS } from "../web/search/types";
+import type { ModelSelectorValue } from "./model-selector-value";
 
 const THINKING_EFFORTS = ["minimal", "low", "medium", "high", "xhigh", "max"] as readonly Effort[];
 const DEFAULT_THINKING_LEVELS = ["off", ...THINKING_EFFORTS] as const;
@@ -39,6 +40,7 @@ export type SettingTab =
 	| "tools"
 	| "tasks"
 	| "providers"
+	| "notifications"
 	| "integrations";
 
 /** Tab display metadata - icon is resolved via theme.symbol() */
@@ -55,6 +57,7 @@ export const SETTING_TABS: SettingTab[] = [
 	"tools",
 	"tasks",
 	"providers",
+	"notifications",
 	"integrations",
 ];
 
@@ -69,6 +72,7 @@ export const TAB_METADATA: Record<SettingTab, { label: string; icon: `tab.${stri
 	tools: { label: "Tools", icon: "tab.tools" },
 	tasks: { label: "Tasks", icon: "tab.tasks" },
 	providers: { label: "Providers", icon: "tab.providers" },
+	notifications: { label: "Notifications", icon: "tab.providers" },
 	integrations: { label: "Integrations", icon: "tab.integrations" },
 };
 
@@ -113,6 +117,11 @@ interface UiBase {
 	description: string;
 	/** Condition function name - setting only shown when true */
 	condition?: string;
+	/**
+	 * Persistence owner for settings which must not use the generic immediate
+	 * settings-list write path.
+	 */
+	editing?: "notification-atomic";
 }
 
 interface UiBoolean extends UiBase {}
@@ -175,9 +184,14 @@ interface ArrayDef<T> {
 	ui?: UiBase;
 }
 
+interface RecordValueDef {
+	type: "model-selector-value";
+}
+
 interface RecordDef<T> {
 	type: "record";
 	default: Record<string, T>;
+	valueSchema?: RecordValueDef;
 	ui?: UiBase;
 }
 
@@ -205,7 +219,8 @@ export interface ModelTagsSettings {
 // Typed defaults for array/record settings — named constants avoid `as` casts
 // under `as const` while still letting SettingValue infer the correct element type.
 const EMPTY_STRING_ARRAY: string[] = [];
-const EMPTY_STRING_RECORD: Record<string, string> = {};
+const EMPTY_MODEL_SELECTOR_RECORD: Record<string, ModelSelectorValue> = {};
+const MODEL_SELECTOR_VALUE_SCHEMA = { type: "model-selector-value" } as const;
 const DEFAULT_CYCLE_ORDER: string[] = ["default"];
 const EMPTY_MODEL_TAGS_RECORD: ModelTagsSettings = {};
 const HINDSIGHT_RECALL_TYPES_DEFAULT: string[] = ["world", "experience"];
@@ -259,28 +274,107 @@ export const SETTINGS_SCHEMA = {
 	// per-machine overrides remain trivial.
 	"auth.broker.url": { type: "string", default: undefined },
 	"auth.broker.token": { type: "string", default: undefined },
+	"session.directoryMigration": {
+		type: "enum",
+		values: ["copy-retain", "disabled"] as const,
+		default: "copy-retain",
+	},
 
 	// Notifications (shared daemon with Telegram/Discord/Slack presentation adapters)
 	"notifications.enabled": { type: "boolean", default: false },
-	"notifications.telegram.botToken": { type: "string", default: undefined },
+	"notifications.telegram.botToken": {
+		type: "string",
+		default: undefined,
+		validate: (value: unknown) => typeof value === "string",
+	},
 	"notifications.telegram.chatId": { type: "string", default: undefined },
-	"notifications.telegram.rich.enabled": { type: "boolean", default: true },
-	"notifications.telegram.richDraft.enabled": { type: "boolean", default: false },
+	"notifications.telegram.activation": { type: "record", default: {} as Record<string, unknown> },
+	"notifications.telegram.btw.enabled": { type: "boolean", default: true },
+	"notifications.telegram.streaming.enabled": { type: "boolean", default: true },
+	"notifications.telegram.rich.enabled": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "notifications",
+			label: "Telegram Rich Messages",
+			description: "Format Telegram notifications with rich message content.",
+			editing: "notification-atomic",
+		},
+	},
+	"notifications.telegram.richDraft.enabled": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "notifications",
+			label: "Telegram Rich Drafts",
+			description: "Include rich draft updates in Telegram notifications.",
+			editing: "notification-atomic",
+		},
+	},
+	"notifications.telegram.toolActivity.enabled": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "notifications",
+			label: "Telegram Tool Activity",
+			description: "Send Telegram updates for tool starts and completions.",
+			editing: "notification-atomic",
+		},
+	},
 	"notifications.telegram.topics.nameTemplate": { type: "string", default: undefined },
 	"notifications.discord.botToken": { type: "string", default: undefined },
+	"notifications.discord.applicationId": { type: "string", default: undefined },
+	"notifications.discord.guildId": { type: "string", default: undefined },
+	"notifications.discord.parentChannelId": { type: "string", default: undefined },
 	"notifications.discord.channelId": { type: "string", default: undefined },
 	"notifications.slack.botToken": { type: "string", default: undefined },
+	"notifications.slack.appToken": { type: "string", default: undefined },
+	"notifications.slack.workspaceId": { type: "string", default: undefined },
 	"notifications.slack.channelId": { type: "string", default: undefined },
-	"notifications.redact": { type: "boolean", default: false },
+	"notifications.slack.authorizedUserId": { type: "string", default: undefined },
+	"notifications.redact": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "notifications",
+			label: "Redact Notification Content",
+			description: "Redact sensitive content before notifications are delivered.",
+			editing: "notification-atomic",
+		},
+	},
 	"notifications.verbosity": {
 		type: "string",
 		default: "lean",
 		validate: (value: string) => value === "lean" || value === "verbose",
+		ui: {
+			tab: "notifications",
+			label: "Notification Verbosity",
+			description: "Choose concise or detailed notification messages.",
+			options: [
+				{ value: "lean", label: "Lean", description: "Send concise notification messages" },
+				{ value: "verbose", label: "Verbose", description: "Send detailed notification messages" },
+			],
+			editing: "notification-atomic",
+		},
 	},
 	"notifications.sessionScope": {
 		type: "string",
 		default: "all",
 		validate: (value: string) => value === "all" || value === "primary",
+		ui: {
+			tab: "notifications",
+			label: "Notification Session Scope",
+			description: "Send notifications from all sessions or only the primary session.",
+			options: [
+				{ value: "all", label: "All Sessions", description: "Allow eligible sessions" },
+				{
+					value: "primary",
+					label: "Primary Session",
+					description: "Limit automatic notifications to the primary session",
+				},
+			],
+			editing: "notification-atomic",
+		},
 	},
 	"notifications.daemon.idleTimeoutMs": {
 		type: "number",
@@ -389,7 +483,7 @@ export const SETTINGS_SCHEMA = {
 
 	disabledExtensions: { type: "array", default: DEFAULT_DISABLED_EXTENSIONS },
 
-	modelRoles: { type: "record", default: EMPTY_STRING_RECORD },
+	modelRoles: { type: "record", default: EMPTY_MODEL_SELECTOR_RECORD, valueSchema: MODEL_SELECTOR_VALUE_SCHEMA },
 	"modelProfile.default": {
 		type: "string",
 		default: undefined,
@@ -599,20 +693,30 @@ export const SETTINGS_SCHEMA = {
 			],
 		},
 	},
+	"tools.preAdmissionArtifactSpill": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "tools",
+			label: "Pre-admission artifact spill",
+			description:
+				"Experimental opt-in: save oversized tool results before provider context construction, retaining a UTF-8-safe head, tail, digest, and artifact receipt inline",
+		},
+	},
 
 	"tools.readArtifactSpillThreshold": {
 		type: "number",
-		default: 0,
+		default: 256,
 		ui: {
 			tab: "tools",
-			label: "Experimental read-tool artifact spill threshold (KB)",
+			label: "Read artifact spill threshold (KB)",
 			description:
-				"Advanced opt-in only: combined-size cap for `read` output across all requested ranges. Above this the full output is saved as an artifact and a bounded head+tail snippet is kept inline. Live layofflabs/gpt-5.5 medium evidence on 2026-07-07 found no token savings and a lower cache-hit rate at 50 KB, so normal coding sessions should leave this Off unless intentionally measuring large-read behavior.",
+				"Explicit large reads above this combined size are saved as an artifact with a bounded head-and-tail snippet inline. Bare reads, directories, and converted-document receipts remain inline.",
 			options: [
-				{ value: "0", label: "Off", description: "Default; no read-specific spill (backstop only)" },
+				{ value: "0", label: "Off", description: "No read-specific spill (backstop only)" },
 				{ value: "50", label: "50 KB", description: "~12.5K tokens" },
 				{ value: "100", label: "100 KB", description: "~25K tokens" },
-				{ value: "256", label: "256 KB", description: "~64K tokens" },
+				{ value: "256", label: "256 KB", description: "Default; ~64K tokens" },
 				{ value: "512", label: "512 KB", description: "~128K tokens" },
 				{ value: "1000", label: "1 MB", description: "~250K tokens" },
 			],
@@ -621,17 +725,17 @@ export const SETTINGS_SCHEMA = {
 
 	"tools.fileMentionInlineBytes": {
 		type: "number",
-		default: 20,
+		default: 10,
 		ui: {
 			tab: "tools",
 			label: "File-mention inline cap (KB)",
 			description:
-				"Inline byte cap for auto-read `@path` file mentions, deliberately below the read-tool cap so an incidental mention injects a smaller snippet than an explicit read. The full file is still available via the read tool.",
+				"Inline byte cap for auto-read `@path` file mentions, aligned with the 10 KiB bare-read receipt so incidental mentions stay within the same bounded context budget. The full file is still available via the read tool.",
 			options: [
 				{ value: "5", label: "5 KB", description: "~1.25K tokens" },
-				{ value: "10", label: "10 KB", description: "~2.5K tokens" },
-				{ value: "20", label: "20 KB", description: "Default; ~5K tokens" },
-				{ value: "50", label: "50 KB", description: "~12.5K tokens (matches read cap)" },
+				{ value: "10", label: "10 KB", description: "Default; ~2.5K tokens" },
+				{ value: "20", label: "20 KB", description: "~5K tokens" },
+				{ value: "50", label: "50 KB", description: "~12.5K tokens (matches bare-read receipt)" },
 			],
 		},
 	},
@@ -1070,6 +1174,12 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"fallback.maxAttempts": {
+		type: "number",
+		default: 3,
+		validate: (value: number) => Number.isInteger(value) && value > 0,
+	},
+
 	// Retries
 	"retry.enabled": { type: "boolean", default: true },
 
@@ -1098,7 +1208,7 @@ export const SETTINGS_SCHEMA = {
 			tab: "model",
 			label: "Max Retry Delay",
 			description:
-				"Maximum wait between retries, in ms. When the provider asks us to wait longer than this and no credential or model fallback succeeds, the request fails fast instead of sleeping (e.g. 3-hour Anthropic rate-limit windows).",
+				"Maximum wait between retries, in ms. Legacy retries clamp provider Retry-After hints to this value; managed fallback honors typed Retry-After hints even when they exceed it.",
 		},
 	},
 	"retry.requestMaxRetries": {
@@ -1145,6 +1255,15 @@ export const SETTINGS_SCHEMA = {
 	// Interaction
 	// ────────────────────────────────────────────────────────────────────────
 
+	"mouse.enabled": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "interaction",
+			label: "Mouse Support",
+			description: "Enable SGR mouse wheel scrolling and overlay row selection. Disabled in tmux and screen.",
+		},
+	},
 	// Conversation flow
 	steeringMode: {
 		type: "enum",
@@ -1473,7 +1592,19 @@ export const SETTINGS_SCHEMA = {
 		ui: {
 			tab: "context",
 			label: "Save Handoff Docs",
-			description: "Save generated handoff documents to markdown files for the auto-handoff flow",
+			description:
+				"Save auto-triggered handoff documents as session artifacts (resolvable artifact:// URIs); manual /handoff does not save",
+		},
+	},
+
+	"compaction.handoffPromptExtension": {
+		type: "string",
+		default: "",
+		ui: {
+			tab: "context",
+			label: "Handoff Prompt Extension",
+			description:
+				"Extra guidance appended to the default handoff-generation prompt for both manual /handoff and auto-handoff. It supplements, and never replaces, the built-in safety- and continuity-critical instructions.",
 		},
 	},
 
@@ -1931,6 +2062,51 @@ export const SETTINGS_SCHEMA = {
 				{ value: "500", label: "500 lines" },
 				{ value: "1000", label: "1000 lines" },
 				{ value: "5000", label: "5000 lines" },
+			],
+		},
+	},
+	"read.receiptBudgetLines": {
+		type: "number",
+		default: 50,
+		ui: {
+			tab: "editing",
+			label: "Read Receipt Line Budget",
+			description: "Maximum lines included in a bare read receipt before a selector footer is shown",
+			options: [
+				{ value: "25", label: "25 lines" },
+				{ value: "50", label: "50 lines", description: "Default" },
+				{ value: "100", label: "100 lines" },
+				{ value: "200", label: "200 lines" },
+			],
+		},
+	},
+	"read.receiptBudgetBytes": {
+		type: "number",
+		default: 10,
+		ui: {
+			tab: "editing",
+			label: "Read Receipt Byte Budget (KB)",
+			description: "Maximum UTF-8 body size for a bare read receipt before a selector footer is shown",
+			options: [
+				{ value: "5", label: "5 KB", description: "~1.25K tokens" },
+				{ value: "10", label: "10 KB", description: "Default; ~2.5K tokens" },
+				{ value: "20", label: "20 KB", description: "~5K tokens" },
+				{ value: "50", label: "50 KB", description: "~12.5K tokens" },
+			],
+		},
+	},
+	"read.summaryMaxBytes": {
+		type: "number",
+		default: 20,
+		ui: {
+			tab: "editing",
+			label: "Read Summary Size Budget (KB)",
+			description: "Maximum UTF-8 size for a structural read summary before additional units are elided",
+			options: [
+				{ value: "10", label: "10 KB", description: "~2.5K tokens" },
+				{ value: "20", label: "20 KB", description: "Default; ~5K tokens" },
+				{ value: "50", label: "50 KB", description: "~12.5K tokens" },
+				{ value: "100", label: "100 KB", description: "~25K tokens" },
 			],
 		},
 	},
@@ -2412,6 +2588,39 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"browser.profileReuse": {
+		type: "string",
+		default: "auto",
+		validate: (value: string) => value === "auto" || value === "opt-in",
+		ui: {
+			tab: "tools",
+			label: "Profile reuse posture",
+			description:
+				"'auto' (default): when a usable real Chrome profile is available, the browser tool uses an isolated copy of it (cookies/session/cache) for stronger stealth, warns, and falls back to synthetic. 'opt-in': stay synthetic unless a real profile is explicitly requested.",
+		},
+	},
+
+	"browser.geo.timezone": {
+		type: "string",
+		default: undefined,
+		ui: {
+			tab: "tools",
+			label: "Geo timezone override",
+			description:
+				"Optional IANA timezone (e.g. 'America/New_York') for headless sessions. Default unset preserves the real timezone. Only set this to a value coherent with your egress (e.g. a proxy region); an incoherent timezone increases bot detection.",
+		},
+	},
+	"browser.geo.locale": {
+		type: "string",
+		default: undefined,
+		ui: {
+			tab: "tools",
+			label: "Geo locale override",
+			description:
+				"Optional UI locale (e.g. 'en-US') for headless sessions. Default unset preserves the real locale. Only set this coherently with your egress region.",
+		},
+	},
+
 	"browser.gc.enabled": {
 		type: "boolean",
 		default: true,
@@ -2672,6 +2881,15 @@ export const SETTINGS_SCHEMA = {
 	// Tasks
 	// ────────────────────────────────────────────────────────────────────────
 
+	"tasksPane.defaultVisible": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "tasks",
+			label: "Tasks Pane Visible By Default",
+			description: "Open the unified tasks pane when the interactive UI starts",
+		},
+	},
 	// Plan mode
 	"plan.enabled": {
 		type: "boolean",
@@ -2935,7 +3153,8 @@ export const SETTINGS_SCHEMA = {
 
 	"task.agentModelOverrides": {
 		type: "record",
-		default: {} as Record<string, string>,
+		default: {} as Record<string, ModelSelectorValue>,
+		valueSchema: MODEL_SELECTOR_VALUE_SCHEMA,
 	},
 
 	"tasks.todoClearDelay": {
@@ -3498,6 +3717,122 @@ export function getEnumValues(path: SettingPath): readonly string[] | undefined 
 	return "values" in def ? (def.values as readonly string[]) : undefined;
 }
 
+export const CONFIG_SCHEMA_VERSION = 1;
+
+export type SettingsSchemaIssue = {
+	path: string;
+	kind: "unknown" | "invalid" | "coerced" | "pending-migration";
+	detail: string;
+};
+
+export type SettingsSchemaReport = { issues: SettingsSchemaIssue[]; valid: boolean };
+
+function schemaValueAtPath(value: Record<string, unknown>, path: string): unknown {
+	let current: unknown = value;
+	for (const segment of path.split(".")) {
+		if (!current || typeof current !== "object" || Array.isArray(current)) return undefined;
+		current = (current as Record<string, unknown>)[segment];
+	}
+	return current;
+}
+
+function schemaSetAtPath(value: Record<string, unknown>, path: string, next: unknown): void {
+	const segments = path.split(".");
+	let current = value;
+	for (const segment of segments.slice(0, -1)) {
+		const child = current[segment];
+		if (!child || typeof child !== "object" || Array.isArray(child)) current[segment] = {};
+		current = current[segment] as Record<string, unknown>;
+	}
+	current[segments.at(-1)!] = next;
+}
+
+function schemaPaths(value: Record<string, unknown>, prefix = ""): string[] {
+	const paths: string[] = [];
+	for (const [key, child] of Object.entries(value)) {
+		const path = prefix ? `${prefix}.${key}` : key;
+		const definition = SETTINGS_SCHEMA[path as SettingPath];
+		// Records intentionally accept user-defined keys; validate their entries below.
+		if (definition?.type === "record") {
+			paths.push(path);
+		} else if (child && typeof child === "object" && !Array.isArray(child)) {
+			paths.push(...schemaPaths(child as Record<string, unknown>, path));
+		} else {
+			paths.push(path);
+		}
+	}
+	return paths;
+}
+
+function validSettingValue(definition: (typeof SETTINGS_SCHEMA)[SettingPath], value: unknown): boolean {
+	return (
+		(definition.type === "boolean" && typeof value === "boolean") ||
+		(definition.type === "string" && typeof value === "string") ||
+		(definition.type === "number" &&
+			typeof value === "number" &&
+			Number.isFinite(value) &&
+			(!("validate" in definition) || !definition.validate || definition.validate(value))) ||
+		(definition.type === "enum" &&
+			typeof value === "string" &&
+			(definition.values as readonly string[]).includes(value)) ||
+		(definition.type === "array" && Array.isArray(value)) ||
+		(definition.type === "record" && !!value && typeof value === "object" && !Array.isArray(value))
+	);
+}
+
+/** Coerce supported scalar legacy values and report unknown or invalid settings without dropping them. */
+export function reconcileSettingsSchema(raw: Record<string, unknown>): {
+	settings: Record<string, unknown>;
+	report: SettingsSchemaReport;
+} {
+	const settings = structuredClone(raw);
+	const issues: SettingsSchemaIssue[] = [];
+	const knownPaths = new Set(Object.keys(SETTINGS_SCHEMA));
+	for (const path of schemaPaths(settings)) {
+		if (path === "configSchemaVersion" || knownPaths.has(path)) continue;
+		if (![...knownPaths].some(known => known.startsWith(`${path}.`))) {
+			issues.push({ path, kind: "unknown", detail: "Setting is not recognized by this version." });
+		}
+	}
+	for (const path of Object.keys(SETTINGS_SCHEMA) as SettingPath[]) {
+		const value = schemaValueAtPath(settings, path);
+		if (value === undefined) continue;
+		const definition = SETTINGS_SCHEMA[path];
+		let next = value;
+		if (definition.type === "boolean" && (value === "true" || value === "false")) next = value === "true";
+		if (
+			definition.type === "number" &&
+			typeof value === "string" &&
+			value.trim() !== "" &&
+			Number.isFinite(Number(value))
+		) {
+			next = Number(value);
+		}
+		if (next !== value) {
+			schemaSetAtPath(settings, path, next);
+			issues.push({ path, kind: "coerced", detail: `Coerced ${typeof value} to ${definition.type}.` });
+		}
+		if (!validSettingValue(definition, next))
+			issues.push({ path, kind: "invalid", detail: `Expected ${definition.type}.` });
+		if (
+			definition.type === "record" &&
+			"valueSchema" in definition &&
+			definition.valueSchema &&
+			validSettingValue(definition, next)
+		) {
+			for (const [key, entry] of Object.entries(next as Record<string, unknown>)) {
+				if (
+					definition.valueSchema.type === "model-selector-value" &&
+					!(typeof entry === "string" || (Array.isArray(entry) && entry.every(item => typeof item === "string")))
+				) {
+					issues.push({ path: `${path}.${key}`, kind: "invalid", detail: "Expected model-selector-value." });
+				}
+			}
+		}
+	}
+	return { settings, report: { issues, valid: !issues.some(issue => issue.kind === "invalid") } };
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Derived Types from Schema
 // ═══════════════════════════════════════════════════════════════════════════
@@ -3523,6 +3858,7 @@ export interface CompactionSettings {
 	reserveTokens: number;
 	keepRecentTokens: number;
 	handoffSaveToDisk: boolean;
+	handoffPromptExtension: string;
 	autoContinue: boolean;
 	remoteEnabled: boolean;
 	remoteEndpoint: string | undefined;
@@ -3650,10 +3986,19 @@ export interface NotificationsSettings {
 	telegram: {
 		botToken: string | undefined;
 		chatId: string | undefined;
+		btw: {
+			enabled: boolean;
+		};
 		rich: {
 			enabled: boolean;
 		};
 		richDraft: {
+			enabled: boolean;
+		};
+		toolActivity: {
+			enabled: boolean;
+		};
+		streaming: {
 			enabled: boolean;
 		};
 		topics: {
@@ -3662,13 +4007,19 @@ export interface NotificationsSettings {
 	};
 	discord: {
 		botToken: string | undefined;
-		channelId: string | undefined;
+		applicationId: string | undefined;
+		guildId: string | undefined;
+		parentChannelId: string | undefined;
 	};
 	slack: {
 		botToken: string | undefined;
+		appToken: string | undefined;
+		workspaceId: string | undefined;
 		channelId: string | undefined;
 	};
 	redact: boolean;
+	verbosity: "lean" | "verbose";
+	sessionScope: "all" | "primary";
 	daemon: {
 		idleTimeoutMs: number;
 	};
@@ -3717,7 +4068,7 @@ export interface GroupTypeMap {
 	statusLine: StatusLineSettings;
 	thinkingBudgets: ThinkingBudgetsSettings;
 	stt: SttSettings;
-	modelRoles: Record<string, string>;
+	modelRoles: Record<string, ModelSelectorValue>;
 	modelTags: ModelTagsSettings;
 	cycleOrder: string[];
 	shellMinimizer: ShellMinimizerSettings;

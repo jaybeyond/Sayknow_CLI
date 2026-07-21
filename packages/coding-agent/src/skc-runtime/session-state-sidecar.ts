@@ -3,7 +3,8 @@ import * as fsSync from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { AssistantMessage } from "@sayknow-cli/ai";
-import { postmortem } from "@sayknow-cli/utils";
+import { normalizePathForComparison, postmortem } from "@sayknow-cli/utils";
+import { withFileLock } from "../config/file-lock";
 import { sessionRuntimeDir } from "./session-layout";
 import {
 	isValidOwnerIntent,
@@ -76,11 +77,21 @@ export interface RuntimeStateContext {
 	sessionId: string;
 	cwd: string;
 	sessionFile?: string | null;
+	/** Optional platform seam for deterministic cross-platform path identity checks. */
+	platform?: NodeJS.Platform;
 	branch?: string | null;
 	/** Public-safe owner metadata used to persist the canonical terminal verdict. */
 	ownerTerminal?: OwnerTerminalContext | null;
 	/** Internal fail-closed marker set only when managed owner metadata is malformed or missing. */
 	ownerTerminalMetadataInvalid?: boolean;
+}
+
+interface RuntimeStateIdentity {
+	sessionId: string;
+	cwd: string;
+	workdir: string;
+	sessionFile: string | null;
+	platform: NodeJS.Platform;
 }
 
 interface RuntimeStateSidecarPayload {
@@ -201,27 +212,27 @@ export async function persistCoordinatorRuntimeInputReady(): Promise<RuntimeInpu
 	}
 }
 
-function sameResolvedPath(left: string, right: string): boolean {
-	return path.resolve(left) === path.resolve(right);
+function sameResolvedPath(left: string, right: string, platform: NodeJS.Platform = process.platform): boolean {
+	return normalizePathForComparison(left, platform) === normalizePathForComparison(right, platform);
 }
 
-function normalizedIdentity(context: Pick<RuntimeStateContext, "sessionId" | "cwd" | "sessionFile">): {
-	sessionId: string;
-	cwd: string;
-	workdir: string;
-	sessionFile: string | null;
-} {
+function normalizedIdentity(
+	context: Pick<RuntimeStateContext, "sessionId" | "cwd" | "sessionFile" | "platform">,
+): RuntimeStateIdentity {
 	const explicitStateFile = process.env[SKC_COORDINATOR_SESSION_STATE_FILE_ENV]?.trim();
 	const sessionId = explicitStateFile
 		? process.env[SKC_COORDINATOR_SESSION_ID_ENV]?.trim() || context.sessionId.trim()
 		: context.sessionId.trim();
 	const cwd = context.cwd.trim();
+	const platform = context.platform ?? process.platform;
+	const pathApi = platform === "win32" ? path.win32 : path;
 	if (!sessionId || !cwd) throw new PreviousRuntimeStateReadError();
 	return {
 		sessionId,
-		cwd: path.resolve(cwd),
-		workdir: path.resolve(cwd),
-		sessionFile: context.sessionFile == null ? null : path.resolve(context.sessionFile),
+		cwd: pathApi.resolve(cwd),
+		workdir: pathApi.resolve(cwd),
+		sessionFile: context.sessionFile == null ? null : pathApi.resolve(context.sessionFile),
+		platform,
 	};
 }
 
@@ -268,7 +279,10 @@ export async function readTerminalRuntimeStateMarker(input: {
 	sessionId?: string | null;
 	cwd?: string | null;
 	sessionFile?: string | null;
+	platform?: NodeJS.Platform;
 }): Promise<TerminalRuntimeStateStatus> {
+	const platform = input.platform ?? process.platform;
+	const pathApi = platform === "win32" ? path.win32 : path;
 	const stateFile = input.stateFile?.trim();
 	const sessionId = input.sessionId?.trim();
 	const cwd = input.cwd?.trim();
@@ -287,15 +301,18 @@ export async function readTerminalRuntimeStateMarker(input: {
 	if (!validRuntimeStateMarker(value)) return { terminal: false, reason: "invalid_state_marker" };
 	const payload = value;
 	if (payload.session_id !== sessionId) return { terminal: false, reason: "session_id_mismatch" };
-	if (!sameResolvedPath(payload.cwd as string, cwd) || !sameResolvedPath(payload.workdir as string, cwd))
+	if (
+		!sameResolvedPath(payload.cwd as string, cwd, platform) ||
+		!sameResolvedPath(payload.workdir as string, cwd, platform)
+	)
 		return { terminal: false, reason: "cwd_mismatch" };
-	const sessionFile = input.sessionFile == null ? null : path.resolve(input.sessionFile);
+	const sessionFile = input.sessionFile == null ? null : pathApi.resolve(input.sessionFile);
 	if (
 		payload.session_file !== sessionFile &&
 		!(
 			typeof payload.session_file === "string" &&
 			typeof sessionFile === "string" &&
-			sameResolvedPath(payload.session_file, sessionFile)
+			sameResolvedPath(payload.session_file, sessionFile, platform)
 		)
 	)
 		return { terminal: false, reason: "session_file_mismatch" };
@@ -484,41 +501,35 @@ function rememberWrittenPayload(stateFile: string, payload: Record<string, unkno
 		lastPayloadByStateFile.delete(stateFile);
 	}
 }
-function shouldPreserveTerminalPayload(
-	previous: RuntimeStateSidecarPayload,
-	input: { sessionId: string; cwd: string; sessionFile: string | null },
-): boolean {
+function shouldPreserveTerminalPayload(previous: RuntimeStateSidecarPayload, input: RuntimeStateIdentity): boolean {
 	if (!validRuntimeStateMarker(previous)) return false;
 	if (previous.state !== "completed" && previous.state !== "errored") return false;
 	const source = previous.final_response?.source;
 	if (source !== "agent_end" && source !== "launch_error") return false;
 	return (
 		previous.session_id === input.sessionId &&
-		sameResolvedPath(previous.cwd as string, input.cwd) &&
-		sameResolvedPath(previous.workdir as string, input.cwd) &&
+		sameResolvedPath(previous.cwd as string, input.cwd, input.platform) &&
+		sameResolvedPath(previous.workdir as string, input.cwd, input.platform) &&
 		(previous.session_file === input.sessionFile ||
 			(typeof previous.session_file === "string" &&
 				typeof input.sessionFile === "string" &&
-				sameResolvedPath(previous.session_file, input.sessionFile)))
+				sameResolvedPath(previous.session_file, input.sessionFile, input.platform)))
 	);
 }
 
-function assertPreviousRuntimeStateIdentity(
-	previous: Record<string, unknown>,
-	input: { sessionId: string; cwd: string; sessionFile: string | null },
-): void {
+function assertPreviousRuntimeStateIdentity(previous: Record<string, unknown>, input: RuntimeStateIdentity): void {
 	if (Object.keys(previous).length === 0) return;
 	if (
 		previous.session_id !== input.sessionId ||
 		typeof previous.cwd !== "string" ||
 		typeof previous.workdir !== "string" ||
-		!sameResolvedPath(previous.cwd, input.cwd) ||
-		!sameResolvedPath(previous.workdir, input.cwd) ||
+		!sameResolvedPath(previous.cwd, input.cwd, input.platform) ||
+		!sameResolvedPath(previous.workdir, input.cwd, input.platform) ||
 		(previous.session_file !== input.sessionFile &&
 			!(
 				typeof previous.session_file === "string" &&
 				typeof input.sessionFile === "string" &&
-				sameResolvedPath(previous.session_file, input.sessionFile)
+				sameResolvedPath(previous.session_file, input.sessionFile, input.platform)
 			))
 	)
 		throw new PreviousRuntimeStateReadError();
@@ -724,117 +735,15 @@ async function writeStateFileSync(stateFile: string, payload: Record<string, unk
 	await writeStateFile(stateFile, payload);
 }
 
-interface StateFileLockOwner {
-	pid: number;
-	start_time: string;
-	token: string;
-}
-
-function processStartTime(pid: number): string | null {
+async function withStateFileLock<T>(stateFile: string, operation: () => Promise<T>): Promise<T> {
 	try {
-		const stat = fsSync.readFileSync(`/proc/${pid}/stat`, "utf8");
-		const close = stat.lastIndexOf(")");
-		const fields = stat
-			.slice(close + 1)
-			.trim()
-			.split(/\s+/);
-		return fields[19] ?? null;
-	} catch {
-		return null;
-	}
-}
-
-function validLockOwner(value: unknown): value is StateFileLockOwner {
-	if (!value || typeof value !== "object") return false;
-	const owner = value as Partial<StateFileLockOwner>;
-	return (
-		typeof owner.pid === "number" &&
-		Number.isSafeInteger(owner.pid) &&
-		owner.pid > 0 &&
-		typeof owner.start_time === "string" &&
-		typeof owner.token === "string" &&
-		owner.token.length > 0
-	);
-}
-
-function lockOwnerIsAlive(value: unknown): boolean {
-	if (!validLockOwner(value)) return false;
-	const owner = value;
-	try {
-		process.kill(owner.pid, 0);
+		return await withFileLock(stateFile, operation, { staleMs: 30_000, retries: 12_000, retryDelayMs: 5 });
 	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code === "ESRCH") return false;
-		return true;
-	}
-	const currentStartTime = processStartTime(owner.pid);
-	return currentStartTime === null || currentStartTime === owner.start_time;
-}
-
-async function reclaimStaleStateFileLock(lockFile: string): Promise<void> {
-	let raw: string;
-	try {
-		raw = await fs.readFile(lockFile, "utf8");
-	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+		if (error instanceof Error && error.message.startsWith("Failed to acquire lock")) {
+			throw new PreviousRuntimeStateReadError();
+		}
 		throw error;
 	}
-	let owner: unknown;
-	try {
-		owner = JSON.parse(raw);
-	} catch {
-		owner = null;
-	}
-	if (!validLockOwner(owner)) {
-		const stat = await fs.stat(lockFile);
-		if (Date.now() - stat.mtimeMs < 30_000) return;
-	} else if (lockOwnerIsAlive(owner)) return;
-	try {
-		if ((await fs.readFile(lockFile, "utf8")) === raw) await fs.rm(lockFile);
-	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-	}
-}
-
-async function withStateFileLock<T>(stateFile: string, operation: () => Promise<T>): Promise<T> {
-	const lockFile = `${stateFile}.lock`;
-	const owner: StateFileLockOwner = {
-		pid: process.pid,
-		start_time: processStartTime(process.pid) ?? "unknown",
-		token: randomUUID(),
-	};
-	await fs.mkdir(path.dirname(stateFile), { recursive: true });
-	for (let attempt = 0; attempt < 12_000; attempt++) {
-		let handle: fs.FileHandle | undefined;
-		try {
-			handle = await fs.open(lockFile, "wx");
-			try {
-				await handle.writeFile(JSON.stringify(owner));
-			} catch (error) {
-				await handle.close().catch(() => undefined);
-				handle = undefined;
-				await fs.rm(lockFile, { force: true }).catch(() => undefined);
-				throw error;
-			}
-			const outcome = await operation().then(
-				value => ({ ok: true as const, value }),
-				error => ({ ok: false as const, error }),
-			);
-			await handle.close();
-			try {
-				if ((await fs.readFile(lockFile, "utf8")) === JSON.stringify(owner)) await fs.rm(lockFile);
-			} catch (error) {
-				if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-			}
-			if (!outcome.ok) throw outcome.error;
-			return outcome.value;
-		} catch (error) {
-			if (handle) throw error;
-			if ((error as { code?: unknown }).code !== "EEXIST") throw error;
-			await reclaimStaleStateFileLock(lockFile);
-			await Bun.sleep(5);
-		}
-	}
-	throw new PreviousRuntimeStateReadError();
 }
 
 function coordinatorTransactionLockFile(stateFile: string): string {
@@ -1112,7 +1021,7 @@ export async function persistCoordinatorRuntimeStateFromPostmortem(
 						if (shouldPreserveTerminalPayload(previous as RuntimeStateSidecarPayload, identity)) return;
 						// The immutable owner verdict remains in its lifecycle artifact; never replace a
 						// complete agent terminal payload merely to mirror that verdict here.
-						if (process.platform === "linux" && context.ownerTerminalMetadataInvalid) {
+						if (context.ownerTerminalMetadataInvalid) {
 							await persistInvalidOwnerTerminalMetadata(
 								reason,
 								context,
@@ -1122,7 +1031,7 @@ export async function persistCoordinatorRuntimeStateFromPostmortem(
 							);
 							return;
 						}
-						if (process.platform === "linux" && context.ownerTerminal) {
+						if (context.ownerTerminal) {
 							await persistCoordinatorRuntimeStateFromOwnerTerminalPostmortem(
 								reason,
 								context,

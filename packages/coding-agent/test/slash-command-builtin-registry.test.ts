@@ -1,4 +1,6 @@
-import { describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
+import { BUILTIN_SLASH_COMMANDS } from "@sayknow-cli/coding-agent/extensibility/slash-commands";
+import { initTheme } from "@sayknow-cli/coding-agent/modes/theme/theme";
 import type { InteractiveModeContext } from "@sayknow-cli/coding-agent/modes/types";
 import {
 	BUILTIN_SLASH_COMMAND_DEFS,
@@ -6,6 +8,18 @@ import {
 	executeBuiltinSlashCommand,
 	lookupBuiltinSlashCommand,
 } from "@sayknow-cli/coding-agent/slash-commands/builtin-registry";
+import { ImageProtocol, TERMINAL } from "@sayknow-cli/tui";
+
+const mutableTerminal = TERMINAL as unknown as { imageProtocol: ImageProtocol | null };
+const originalImageProtocol = mutableTerminal.imageProtocol;
+
+beforeAll(async () => {
+	await initTheme(false, undefined, undefined, "red-octopus", "blue-octopus");
+});
+
+afterEach(() => {
+	mutableTerminal.imageProtocol = originalImageProtocol;
+});
 
 function createTuiRuntime() {
 	const handleCopyCommand = vi.fn();
@@ -41,11 +55,77 @@ function createClearTuiRuntime() {
 }
 
 describe("builtin /pet slash command", () => {
-	it("exposes off plus the registry-driven skin choices", () => {
+	it("exposes the named Sayknow choices", () => {
 		const petCommand = BUILTIN_SLASH_COMMAND_DEFS.find(command => command.name === "pet");
 
-		expect(petCommand?.subcommands?.map(command => command.name)).toEqual(["off", "red", "blue"]);
-		expect(petCommand?.inlineHint).toBe("[off|red|blue]");
+		expect(petCommand?.subcommands?.map(command => command.name)).toEqual(["off", "RedSayknow", "BlueSayknow"]);
+		expect(petCommand?.inlineHint).toBe("[off|RedSayknow|BlueSayknow]");
+	});
+
+	it("maps named Sayknow commands to their internal modes", async () => {
+		mutableTerminal.imageProtocol = ImageProtocol.Kitty;
+		const setPetMode = vi.fn((_mode: string) => true);
+		const setText = vi.fn();
+		const showStatus = vi.fn();
+		const ctx = { setPetMode, showStatus, editor: { setText } } as unknown as InteractiveModeContext;
+		const runtime = { ctx, handleBackgroundCommand: () => undefined };
+
+		expect(await executeBuiltinSlashCommand("/pet redsayknow", runtime)).toBe(true);
+		expect(await executeBuiltinSlashCommand("/pet BlueSayknow", runtime)).toBe(true);
+
+		expect(setPetMode.mock.calls.map(call => call[0])).toEqual(["red", "blue"]);
+	});
+
+	it("keeps deprecated on/red/blue inputs accepted while display stays canonical", async () => {
+		mutableTerminal.imageProtocol = ImageProtocol.Kitty;
+		const setPetMode = vi.fn((_mode: string) => true);
+		const showStatus = vi.fn();
+		const ctx = { setPetMode, showStatus, editor: { setText: vi.fn() } } as unknown as InteractiveModeContext;
+
+		for (const token of ["red", "blue", "on"]) {
+			expect(
+				await executeBuiltinSlashCommand(`/pet ${token}`, { ctx, handleBackgroundCommand: () => undefined }),
+			).toBe(true);
+		}
+
+		// Deprecated inputs still commit, mapped to their canonical modes.
+		expect(setPetMode.mock.calls.map(call => call[0])).toEqual(["red", "blue", "red"]);
+		// The public surface stays canonical: no deprecated names in subcommands.
+		const petCommand = BUILTIN_SLASH_COMMAND_DEFS.find(command => command.name === "pet");
+		expect(petCommand?.subcommands?.map(command => command.name)).toEqual(["off", "RedSayknow", "BlueSayknow"]);
+
+		// Unknown tokens still fall through to usage guidance.
+		expect(await executeBuiltinSlashCommand("/pet purple", { ctx, handleBackgroundCommand: () => undefined })).toBe(
+			true,
+		);
+		expect(showStatus).toHaveBeenLastCalledWith("Usage: /pet [off|RedSayknow|BlueSayknow]", { dim: true });
+		expect(setPetMode).toHaveBeenCalledTimes(3);
+	});
+
+	it("suppresses the success status when the shared commit policy rejects", async () => {
+		mutableTerminal.imageProtocol = null;
+		const setPetMode = vi.fn((_mode: string) => false);
+		const showStatus = vi.fn();
+		const ctx = { setPetMode, showStatus, editor: { setText: vi.fn() } } as unknown as InteractiveModeContext;
+
+		expect(
+			await executeBuiltinSlashCommand("/pet RedSayknow", { ctx, handleBackgroundCommand: () => undefined }),
+		).toBe(true);
+		// The commit policy owns the rejection warning; the handler must not
+		// claim success or bypass the policy with its own capability check.
+		expect(setPetMode).toHaveBeenCalledWith("red");
+		expect(showStatus).not.toHaveBeenCalled();
+	});
+
+	it("completes named pets case-insensitively", async () => {
+		const petCommand = BUILTIN_SLASH_COMMANDS.find(command => command.name === "pet");
+
+		for (const prefix of ["r", "R", "ReD"]) {
+			const completions = await petCommand?.getArgumentCompletions?.(prefix);
+			expect(completions?.map(item => item.label)).toEqual(["RedSayknow"]);
+		}
+
+		expect(petCommand?.getInlineHint?.("ReD")).toBe("Sayknow");
 	});
 });
 describe("builtin /copy slash command", () => {
@@ -185,8 +265,11 @@ function createGoalTuiRuntime(goalModeEnabled: boolean) {
 	const addToHistory = vi.fn();
 	const setText = vi.fn();
 	const ctx = {
-		goalModeEnabled,
-		handleGoalModeCommand,
+		goalModeController: {
+			enabled: goalModeEnabled,
+			paused: false,
+			handleCommand: handleGoalModeCommand,
+		},
 		editor: { addToHistory, setText },
 	} as unknown as InteractiveModeContext;
 
@@ -240,5 +323,51 @@ describe("builtin /exit shutdown command", () => {
 		expect(exitCommand?.handle).toBeUndefined();
 		// The alias is not advertised as its own autocomplete/help entry.
 		expect(BUILTIN_SLASH_COMMAND_DEFS.some(command => command.name === "quit")).toBe(false);
+	});
+});
+
+function createHandoffTuiRuntime() {
+	const handleHandoffCommand = vi.fn(async (_focus?: string) => {});
+	const setText = vi.fn();
+	const ctx = {
+		handleHandoffCommand,
+		editor: { setText },
+	} as unknown as InteractiveModeContext;
+
+	return {
+		runtime: { ctx, handleBackgroundCommand: () => undefined },
+		handleHandoffCommand,
+		setText,
+	};
+}
+
+describe("builtin /handoff slash command", () => {
+	it("is discoverable with focus-instruction completion metadata", () => {
+		const handoffCommand = BUILTIN_SLASH_COMMAND_DEFS.find(command => command.name === "handoff");
+
+		expect(handoffCommand).toBeDefined();
+		expect(handoffCommand?.description).toBe("Generate a handoff and continue in a new session");
+		expect(handoffCommand?.inlineHint).toBe("[focus instructions]");
+		expect(handoffCommand?.priority).toBe(71);
+	});
+
+	it("dispatches zero-argument /handoff to the handoff controller path", async () => {
+		const { runtime, handleHandoffCommand, setText } = createHandoffTuiRuntime();
+
+		const result = await executeBuiltinSlashCommand("/handoff", runtime);
+
+		expect(result).toBe(true);
+		expect(handleHandoffCommand).toHaveBeenCalledWith(undefined);
+		expect(setText).toHaveBeenCalledWith("");
+	});
+
+	it("passes focus instructions through to the handoff controller", async () => {
+		const { runtime, handleHandoffCommand, setText } = createHandoffTuiRuntime();
+
+		const result = await executeBuiltinSlashCommand("/handoff preserve failing test name", runtime);
+
+		expect(result).toBe(true);
+		expect(handleHandoffCommand).toHaveBeenCalledWith("preserve failing test name");
+		expect(setText).toHaveBeenCalledWith("");
 	});
 });

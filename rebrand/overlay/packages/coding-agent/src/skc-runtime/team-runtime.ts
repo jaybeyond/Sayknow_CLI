@@ -129,6 +129,7 @@ export type SkcTeamWorktreeMode =
 	| { enabled: true; detached: true; name: null }
 	| { enabled: true; detached: false; name: string };
 
+import type { SkcTeamMailboxDeliveryTransport } from "./team-store";
 export interface SkcTeamConfig {
 	team_name: string;
 	display_name: string;
@@ -151,6 +152,7 @@ export interface SkcTeamConfig {
 	team_state_root: string;
 	workers: SkcTeamWorker[];
 	created_at: string;
+	skc_session_id?: string;
 	updated_at: string;
 }
 
@@ -256,6 +258,10 @@ export interface SkcTeamStartOptions {
 	cwd?: string;
 	env?: NodeJS.ProcessEnv;
 	dryRun?: boolean;
+	/** Per-team mailbox delivery transport override (sdk vs pane). */
+	mailboxDeliveryTransport?: SkcTeamMailboxDeliveryTransport;
+	/** Platform override for testability; defaults to process.platform. */
+	platform?: NodeJS.Platform;
 }
 
 export interface SkcTeamApiClaimResult {
@@ -438,13 +444,13 @@ export interface SkcTeamTraceEvent {
 	evidence_refs?: string[];
 	data?: Record<string, unknown>;
 }
-interface WorkerStatusFile {
+export interface WorkerStatusFile {
 	state: SkcWorkerStatusState;
 	current_task_id?: string;
 	reason?: string;
 	updated_at: string;
 }
-interface WorkerHeartbeatFile {
+export interface WorkerHeartbeatFile {
 	pid: number;
 	last_turn_at: string;
 	turn_count: number;

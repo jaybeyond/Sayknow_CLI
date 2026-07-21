@@ -1,3 +1,4 @@
+import { ThinkingLevel } from "@sayknow-cli/agent-core";
 import type { Component, OverlayHandle, TUI } from "@sayknow-cli/tui";
 import { Container, Spacer, Text } from "@sayknow-cli/tui";
 import { logger } from "@sayknow-cli/utils";
@@ -23,6 +24,9 @@ import { HookInputComponent } from "../../modes/components/hook-input";
 import { HookSelectorComponent } from "../../modes/components/hook-selector";
 import { getAvailableThemesWithPaths, getThemeByName, setTheme, type Theme, theme } from "../../modes/theme/theme";
 import type { InteractiveModeContext } from "../../modes/types";
+import { createReadonlySessionManager } from "../../session/session-manager";
+import { parseThinkingLevel } from "../../thinking";
+import type { TodoPhase } from "../../tools/todo-write";
 import { setSessionTerminalTitle, setTerminalTitle } from "../../utils/title-generator";
 import { applyInjectedUserSubmission } from "../utils/injected-user-submission";
 import { classifyHookSelectorBellEvent, ringTerminalBell } from "../utils/terminal-bell";
@@ -49,6 +53,252 @@ export class ExtensionUiController {
 		this.#activeHookCustomOverlay = undefined;
 		component?.dispose?.();
 		overlay?.hide();
+	}
+
+	captureSessionUiCleanup(): () => void {
+		const terminalInputUnsubscribers = [...this.#extensionTerminalInputUnsubscribers];
+		const widgetsAbove = [...this.#hookWidgetsAbove.entries()];
+		const widgetsBelow = [...this.#hookWidgetsBelow.entries()];
+		const activeHookCustomComponent = this.#activeHookCustomComponent;
+		const activeHookCustomOverlay = this.#activeHookCustomOverlay;
+		return () => {
+			for (const unsubscribe of terminalInputUnsubscribers) {
+				unsubscribe();
+				this.#extensionTerminalInputUnsubscribers.delete(unsubscribe);
+			}
+			let widgetsChanged = false;
+			for (const [key, widget] of widgetsAbove) {
+				if (this.#hookWidgetsAbove.get(key) !== widget) continue;
+				this.#hookWidgetsAbove.delete(key);
+				widget.dispose?.();
+				widgetsChanged = true;
+			}
+			for (const [key, widget] of widgetsBelow) {
+				if (this.#hookWidgetsBelow.get(key) !== widget) continue;
+				this.#hookWidgetsBelow.delete(key);
+				widget.dispose?.();
+				widgetsChanged = true;
+			}
+			if (
+				this.#activeHookCustomComponent === activeHookCustomComponent &&
+				this.#activeHookCustomOverlay === activeHookCustomOverlay
+			) {
+				this.#clearActiveHookCustom();
+			}
+			if (widgetsChanged) this.#rebuildHookWidgets();
+		};
+	}
+
+	#sdkControl = async (operation: string, input: Record<string, unknown>): Promise<unknown> => {
+		const session = this.ctx.session;
+		switch (operation) {
+			case "model.set": {
+				const selector = typeof input.id === "string" ? input.id : "";
+				const slashIndex = selector.indexOf("/");
+				const model =
+					slashIndex > 0
+						? session.modelRegistry.find(selector.slice(0, slashIndex), selector.slice(slashIndex + 1))
+						: undefined;
+				const thinkingLevel =
+					typeof input.thinkingLevel === "string" ? parseThinkingLevel(input.thinkingLevel) : undefined;
+				if (!model || !thinkingLevel || thinkingLevel === ThinkingLevel.Inherit)
+					throw Object.assign(new Error("model.set requires a valid model id and concrete thinkingLevel."), {
+						code: "invalid_input",
+					});
+				return await session.setDefaultModelSelection(model, thinkingLevel);
+			}
+			case "todo.replace": {
+				const phases = input.items;
+				if (
+					!Array.isArray(phases) ||
+					!phases.every(phase => {
+						if (!phase || typeof phase !== "object") return false;
+						const candidate = phase as { name?: unknown; tasks?: unknown };
+						return (
+							typeof candidate.name === "string" &&
+							Array.isArray(candidate.tasks) &&
+							candidate.tasks.every(task => {
+								if (!task || typeof task !== "object") return false;
+								const item = task as { content?: unknown; status?: unknown };
+								return (
+									typeof item.content === "string" &&
+									["pending", "in_progress", "completed", "abandoned"].includes(String(item.status))
+								);
+							})
+						);
+					})
+				)
+					throw Object.assign(new Error("todo.replace requires TodoPhase items."), { code: "invalid_input" });
+				session.setTodoPhases(phases as TodoPhase[]);
+				return { replaced: session.getTodoPhases() };
+			}
+			case "permission_mode.set": {
+				const requested = input.mode;
+				const mode =
+					requested === "allow" || requested === "always-allow"
+						? "allow"
+						: requested === "deny" || requested === "always-deny"
+							? "deny"
+							: requested === "prompt"
+								? "prompt"
+								: undefined;
+				if (!mode)
+					throw Object.assign(new Error("permission_mode.set requires prompt, allow, or deny."), {
+						code: "invalid_input",
+					});
+				session.setSdkPermissionMode(mode);
+				return { changed: true, mode: session.sdkPermissionMode };
+			}
+			case "bash.execute": {
+				if (typeof input.cmd !== "string" || input.cmd.trim() === "")
+					throw Object.assign(new Error("bash.execute requires a command."), { code: "invalid_input" });
+				const result = await session.executeBash(input.cmd, undefined, { excludeFromContext: true });
+				return {
+					exitCode: result.exitCode,
+					cancelled: result.cancelled,
+					output: result.output,
+					truncated: result.truncated,
+				};
+			}
+			case "bash.abort":
+				if (!session.isBashRunning) return { aborted: false };
+				session.abortBash();
+				return { aborted: true };
+			case "retry.last":
+				if (!(await session.retry()))
+					throw Object.assign(new Error("There is no failed or interrupted turn to retry."), {
+						code: "nothing_to_retry",
+					});
+				return { retried: true };
+			case "retry.now":
+				if (!session.isRetrying)
+					throw Object.assign(new Error("No retry backoff is pending."), { code: "retry_not_pending" });
+				session.retryNow();
+				return { retried: true, immediate: true };
+			case "bash.background":
+				if (!session.requestForegroundBashBackground())
+					throw Object.assign(new Error("The active bash command cannot be moved to a managed background job."), {
+						code: "not_foldable",
+					});
+				return { backgrounded: true };
+			case "compaction.auto.set":
+				session.setAutoCompactionEnabled(input.on === true);
+				return { changed: true };
+			case "retry.auto.set":
+				session.setAutoRetryEnabled(input.on === true);
+				return { changed: true };
+			case "retry.abort":
+				session.abortRetry();
+				return { aborted: true };
+			case "session.new":
+				return { created: await session.newSession() };
+			case "session.fork":
+				return { session: await session.fork() };
+			case "session.resume":
+				return { resumed: await session.switchSession(String(input.id)) };
+			case "session.close":
+				await session.sessionManager.flush();
+				return { closed: true };
+			case "session.switch":
+				return { switched: await session.switchSession(String(input.id)) };
+			case "session.branch":
+				try {
+					return await session.branch(String(input.entryId));
+				} catch (error) {
+					throw Object.assign(new Error(error instanceof Error ? error.message : "Branch entry was not found."), {
+						code: "resource_gone",
+					});
+				}
+			case "session.rename":
+				return { renamed: await session.setSessionName(String(input.name), "user") };
+			case "session.handoff":
+				try {
+					return {
+						handoff: await session.handoff(
+							typeof input.target === "string"
+								? input.target
+								: typeof input.instructions === "string"
+									? input.instructions
+									: undefined,
+						),
+					};
+				} catch (error) {
+					const typed = error as { code?: unknown; handoffDocument?: unknown };
+					const handoffDocument =
+						typeof typed?.handoffDocument === "string" ? { handoffDocument: typed.handoffDocument } : undefined;
+					// Preserve a safe typed code (e.g. transient `busy`) so clients keep
+					// correct retry/backoff semantics; only synthesize invalid_request for
+					// otherwise-untyped failures.
+					const code = typed?.code === "busy" ? "busy" : "invalid_request";
+					throw Object.assign(
+						new Error(error instanceof Error ? error.message : "Handoff is unavailable for the current state."),
+						{ code },
+						handoffDocument,
+					);
+				}
+			case "session.export_html":
+				try {
+					return { path: await session.exportToHtml(typeof input.path === "string" ? input.path : undefined) };
+				} catch (error) {
+					throw Object.assign(
+						new Error(
+							error instanceof Error ? error.message : "Session export is unavailable for the current state.",
+						),
+						{ code: "invalid_request" },
+					);
+				}
+			case "runtime.reload":
+				await session.reload();
+				return { reloaded: true };
+			case "service_tier.set":
+				session.setServiceTier(input.tier as never);
+				return { changed: true };
+			case "queue.message.remove": {
+				const removed = session.removeQueuedMessageForEditing(String(input.id));
+				if (removed === undefined)
+					throw Object.assign(new Error("Queued message was not found."), { code: "resource_gone" });
+				return { removed };
+			}
+			case "queue.message.move": {
+				const id = String(input.id);
+				const moved =
+					input.before !== undefined
+						? session.moveQueuedMessageForEditing(id, "up")
+						: session.moveQueuedMessageForEditing(id, "down");
+				if (!moved) throw Object.assign(new Error("Queue position is invalid."), { code: "invalid_position" });
+				return { moved };
+			}
+			case "queue.message.update": {
+				const id = String(input.id);
+				const old = session.removeQueuedMessageForEditing(id);
+				const patch = input.patch as { text?: unknown };
+				if (old === undefined || typeof patch?.text !== "string")
+					throw Object.assign(new Error("Queued message update is invalid."), { code: "invalid_message" });
+				await session.sendUserMessage(patch.text, { deliverAs: id.startsWith("steer:") ? "steer" : "followUp" });
+				return { updated: true };
+			}
+			case "extension.set_enabled": {
+				const id = String(input.id);
+				const disabled = [...(session.settings.get("disabledExtensions") ?? [])];
+				const on = input.on === true;
+				const next = on ? disabled.filter(value => value !== id) : [...new Set([...disabled, id])];
+				session.settings.set("disabledExtensions", next);
+				return { changed: true, enabled: on };
+			}
+			case "session.delete":
+				await session.sessionManager.dropSession(String(input.id));
+				return { deleted: true };
+			case "session.cwd.move":
+				await session.sessionManager.moveTo(String(input.path));
+				return { moved: true, cwd: session.sessionManager.getCwd() };
+			default:
+				throw Object.assign(new Error(`${operation} has no AgentSession implementation.`), { code: "unavailable" });
+		}
+	};
+
+	/** Re-mount the pet-aware composer after a transient hook UI closes. */
+	#restoreComposerEditor(): void {
+		this.ctx.restoreComposer();
 	}
 
 	/**
@@ -120,15 +370,29 @@ export class ExtensionUiController {
 			},
 			getActiveTools: () => this.ctx.session.getActiveToolNames(),
 			getAllTools: () => this.ctx.session.getAllToolNames(),
+			resolveTool: name => {
+				const tool = this.ctx.session.getToolByName(name);
+				return tool ? { safeSummary: tool.safeSummary, safeSummaryFields: tool.safeSummaryFields } : undefined;
+			},
 			setActiveTools: toolNames => this.ctx.session.setActiveToolsByName(toolNames),
 			setModel: async model => {
 				const key = await this.ctx.session.modelRegistry.getApiKey(model);
 				if (!key) return false;
-				await this.ctx.session.setModel(model);
+				await this.ctx.session.setModel(model, "default", { cause: "user-selection" });
 				return true;
 			},
 			getThinkingLevel: () => this.ctx.session.thinkingLevel,
-			setThinkingLevel: level => this.ctx.session.setThinkingLevel(level),
+			setThinkingLevel: (level, persist) => this.ctx.session.setThinkingLevel(level, persist),
+			getThinkingVisibility: () => this.ctx.session.getThinkingVisibility(),
+			setThinkingVisibility: (visibility, persist) => this.ctx.session.setThinkingVisibility(visibility, persist),
+			cycleThinkingLevel: () => this.ctx.session.cycleThinkingLevel(),
+			setThinkingLevelForControl: (level, persist) => this.ctx.session.setThinkingLevelForControl(level, persist),
+			setThinkingVisibilityForControl: (visibility, persist) =>
+				this.ctx.session.setThinkingVisibilityForControl(visibility, persist),
+			setModelTemporaryForControl: (model, expectedSessionId) =>
+				this.ctx.session.setModelTemporaryForControl(model, expectedSessionId),
+			fetchUsageReportsForControl: () => this.ctx.session.fetchUsageReportsForControl(),
+			getThinkingScopeForControl: () => this.ctx.session.getThinkingScopeForControl(),
 			getCommands: () => getSessionSlashCommands(this.ctx.session),
 			getSessionName: () => this.ctx.sessionManager.getSessionName(),
 			setSessionName: name => this.#updateSessionName(name),
@@ -138,6 +402,19 @@ export class ExtensionUiController {
 			isIdle: () => !this.ctx.session.isStreaming,
 			abort: () => this.ctx.session.abort(),
 			hasPendingMessages: () => this.ctx.session.queuedMessageCount > 0,
+			getPendingMessageCounts: () => this.ctx.session.pendingMessageCounts,
+			getTranscript: () => this.ctx.session.getTranscript(),
+			getTranscriptBody: entryId => this.ctx.session.getTranscriptBody(entryId),
+			getGoalState: () => this.ctx.session.getGoalModeState(),
+			getTodoState: () => this.ctx.session.getTodoPhases(),
+			getQueuedMessages: () => this.ctx.session.getQueuedMessageEntries(),
+			getActiveTools: () => this.ctx.session.getActiveToolNames(),
+			getAllTools: () => this.ctx.session.getAllToolNames(),
+			resolveTool: name => {
+				const tool = this.ctx.session.getToolByName(name);
+				return tool ? { safeSummary: tool.safeSummary, safeSummaryFields: tool.safeSummaryFields } : undefined;
+			},
+
 			shutdown: () => {
 				// Defer the actual teardown to the main loop, which calls
 				// `checkShutdownRequested()` at idle boundaries so any queued
@@ -147,6 +424,38 @@ export class ExtensionUiController {
 			getContextUsage: () => this.ctx.session.getContextUsage(),
 			compact: instructionsOrOptions => this.#compactSession(instructionsOrOptions),
 			getSystemPrompt: () => this.ctx.session.systemPrompt,
+			clearContext: () => this.ctx.session.clearContext(),
+			cycleModel: () => this.ctx.session.cycleModel(),
+			cycleThinkingLevel: () => this.ctx.session.cycleThinkingLevel(),
+			setQueueMode: (kind, mode) => {
+				if (kind === "steering" && (mode === "all" || mode === "one-at-a-time")) {
+					this.ctx.session.setSteeringMode(mode);
+					return true;
+				}
+				if (kind === "follow_up" && (mode === "all" || mode === "one-at-a-time")) {
+					this.ctx.session.setFollowUpMode(mode);
+					return true;
+				}
+				if (kind === "interrupt" && (mode === "immediate" || mode === "wait")) {
+					this.ctx.session.setInterruptMode(mode);
+					return true;
+				}
+				return false;
+			},
+			invokeSkill: (name, args) => this.ctx.session.invokeSkill(name, args),
+			setPlanMode: on => this.ctx.session.setSdkPlanMode(on),
+			operateGoal: (op, objective) => this.ctx.session.operateGoal(op, objective),
+			getSkillState: () =>
+				this.ctx.session.skills.map(skill => ({ name: skill.name, description: skill.description })),
+			getConfigItems: () => ({
+				steeringMode: this.ctx.session.steeringMode,
+				followUpMode: this.ctx.session.followUpMode,
+				interruptMode: this.ctx.session.interruptMode,
+			}),
+			getBranchCandidates: () => this.ctx.sessionManager.getTree(),
+			getExtensions: () => this.ctx.session.extensionRunner?.getExtensionPaths() ?? [],
+			setSdkPermissionProvider: provider => this.ctx.session.setSdkPermissionProvider(provider),
+			sdkControl: this.#sdkControl,
 		};
 		const commandActions: ExtensionCommandContextActions = {
 			getContextUsage: () => this.ctx.session.getContextUsage(),
@@ -161,36 +470,30 @@ export class ExtensionUiController {
 				this.ctx.showStatus("Reloaded session");
 			},
 			newSession: async options => {
-				// Stop any loading animation
+				const cleanupPreviousSessionUi = this.captureSessionUiCleanup();
+				const success = await this.ctx.session.newSession({ parentSession: options?.parentSession });
+				if (!success) {
+					return { cancelled: true };
+				}
+				cleanupPreviousSessionUi();
+
 				if (this.ctx.loadingAnimation) {
 					this.ctx.loadingAnimation.stop();
 					this.ctx.loadingAnimation = undefined;
 				}
 				this.ctx.statusContainer.clear();
-
-				// Create new session
-				this.clearExtensionTerminalInputListeners();
-				this.clearHookWidgets();
-				const success = await this.ctx.session.newSession({ parentSession: options?.parentSession });
-				if (!success) {
-					return { cancelled: true };
-				}
 				this.ctx.resetIrcSidebarSession();
-
 				setSessionTerminalTitle(this.ctx.sessionManager.getSessionName(), this.ctx.sessionManager.getCwd());
 
-				// Call setup callback if provided
 				if (options?.setup) {
 					await options.setup(this.ctx.sessionManager);
 				}
 
-				// Reset and update status line
 				this.ctx.statusLine.invalidate();
 				this.ctx.statusLine.setSessionStartTime(Date.now());
 				this.ctx.updateEditorTopBorder();
 				this.ctx.ui.requestRender();
 
-				// Clear UI state
 				prepareTranscriptRebuild(this.ctx.ui, "replace-identity");
 				this.ctx.chatContainer.clear();
 				this.ctx.pendingMessagesContainer.clear();
@@ -369,15 +672,29 @@ export class ExtensionUiController {
 			},
 			getActiveTools: () => this.ctx.session.getActiveToolNames(),
 			getAllTools: () => this.ctx.session.getAllToolNames(),
+			resolveTool: name => {
+				const tool = this.ctx.session.getToolByName(name);
+				return tool ? { safeSummary: tool.safeSummary, safeSummaryFields: tool.safeSummaryFields } : undefined;
+			},
 			setActiveTools: toolNames => this.ctx.session.setActiveToolsByName(toolNames),
 			setModel: async model => {
 				const key = await this.ctx.session.modelRegistry.getApiKey(model);
 				if (!key) return false;
-				await this.ctx.session.setModel(model);
+				await this.ctx.session.setModel(model, "default", { cause: "user-selection" });
 				return true;
 			},
 			getThinkingLevel: () => this.ctx.session.thinkingLevel,
 			setThinkingLevel: (level, persist) => this.ctx.session.setThinkingLevel(level, persist),
+			getThinkingVisibility: () => this.ctx.session.getThinkingVisibility(),
+			setThinkingVisibility: (visibility, persist) => this.ctx.session.setThinkingVisibility(visibility, persist),
+			cycleThinkingLevel: () => this.ctx.session.cycleThinkingLevel(),
+			setThinkingLevelForControl: (level, persist) => this.ctx.session.setThinkingLevelForControl(level, persist),
+			setThinkingVisibilityForControl: (visibility, persist) =>
+				this.ctx.session.setThinkingVisibilityForControl(visibility, persist),
+			setModelTemporaryForControl: (model, expectedSessionId) =>
+				this.ctx.session.setModelTemporaryForControl(model, expectedSessionId),
+			fetchUsageReportsForControl: () => this.ctx.session.fetchUsageReportsForControl(),
+			getThinkingScopeForControl: () => this.ctx.session.getThinkingScopeForControl(),
 			getCommands: () => getSessionSlashCommands(this.ctx.session),
 			getSessionName: () => this.ctx.sessionManager.getSessionName(),
 			setSessionName: name => this.#updateSessionName(name),
@@ -387,6 +704,19 @@ export class ExtensionUiController {
 			isIdle: () => !this.ctx.session.isStreaming,
 			abort: () => this.ctx.session.abort(),
 			hasPendingMessages: () => this.ctx.session.queuedMessageCount > 0,
+			getPendingMessageCounts: () => this.ctx.session.pendingMessageCounts,
+			getTranscript: () => this.ctx.session.getTranscript(),
+			getTranscriptBody: entryId => this.ctx.session.getTranscriptBody(entryId),
+			getGoalState: () => this.ctx.session.getGoalModeState(),
+			getTodoState: () => this.ctx.session.getTodoPhases(),
+			getQueuedMessages: () => this.ctx.session.getQueuedMessageEntries(),
+			getActiveTools: () => this.ctx.session.getActiveToolNames(),
+			getAllTools: () => this.ctx.session.getAllToolNames(),
+			resolveTool: name => {
+				const tool = this.ctx.session.getToolByName(name);
+				return tool ? { safeSummary: tool.safeSummary, safeSummaryFields: tool.safeSummaryFields } : undefined;
+			},
+
 			shutdown: () => {
 				// Defer the actual teardown to the main loop, which calls
 				// `checkShutdownRequested()` at idle boundaries so any queued
@@ -396,6 +726,35 @@ export class ExtensionUiController {
 			getContextUsage: () => this.ctx.session.getContextUsage(),
 			compact: instructionsOrOptions => this.#compactSession(instructionsOrOptions),
 			getSystemPrompt: () => this.ctx.session.systemPrompt,
+			clearContext: () => this.ctx.session.clearContext(),
+			cycleModel: () => this.ctx.session.cycleModel(),
+			cycleThinkingLevel: () => this.ctx.session.cycleThinkingLevel(),
+			setQueueMode: (kind, mode) => {
+				if (kind === "steering" && (mode === "all" || mode === "one-at-a-time")) {
+					this.ctx.session.setSteeringMode(mode);
+					return true;
+				}
+				if (kind === "follow_up" && (mode === "all" || mode === "one-at-a-time")) {
+					this.ctx.session.setFollowUpMode(mode);
+					return true;
+				}
+				if (kind === "interrupt" && (mode === "immediate" || mode === "wait")) {
+					this.ctx.session.setInterruptMode(mode);
+					return true;
+				}
+				return false;
+			},
+			getSkillState: () =>
+				this.ctx.session.skills.map(skill => ({ name: skill.name, description: skill.description })),
+			getConfigItems: () => ({
+				steeringMode: this.ctx.session.steeringMode,
+				followUpMode: this.ctx.session.followUpMode,
+				interruptMode: this.ctx.session.interruptMode,
+			}),
+			getBranchCandidates: () => this.ctx.sessionManager.getTree(),
+			getExtensions: () => this.ctx.session.extensionRunner?.getExtensionPaths() ?? [],
+			setSdkPermissionProvider: provider => this.ctx.session.setSdkPermissionProvider(provider),
+			sdkControl: this.#sdkControl,
 		};
 		const commandActions: ExtensionCommandContextActions = {
 			getContextUsage: () => this.ctx.session.getContextUsage(),
@@ -416,28 +775,24 @@ export class ExtensionUiController {
 				if (this.ctx.isBackgrounded) {
 					return { cancelled: true };
 				}
-				// Stop any loading animation
+				const cleanupPreviousSessionUi = this.captureSessionUiCleanup();
+				const success = await this.ctx.session.newSession({ parentSession: options?.parentSession });
+				if (!success) {
+					return { cancelled: true };
+				}
+				cleanupPreviousSessionUi();
+
 				if (this.ctx.loadingAnimation) {
 					this.ctx.loadingAnimation.stop();
 					this.ctx.loadingAnimation = undefined;
 				}
 				this.ctx.statusContainer.clear();
-
-				// Create new session
-				this.clearExtensionTerminalInputListeners();
-				this.clearHookWidgets();
-				const success = await this.ctx.session.newSession({ parentSession: options?.parentSession });
-				if (!success) {
-					return { cancelled: true };
-				}
 				this.ctx.resetIrcSidebarSession();
 
-				// Call setup callback if provided
 				if (options?.setup) {
 					await options.setup(this.ctx.sessionManager);
 				}
 
-				// Clear UI state
 				prepareTranscriptRebuild(this.ctx.ui, "replace-identity");
 				this.ctx.chatContainer.clear();
 				this.ctx.pendingMessagesContainer.clear();
@@ -567,11 +922,25 @@ export class ExtensionUiController {
 						compact: instructionsOrOptions => this.#compactSession(instructionsOrOptions),
 						hasUI: !this.ctx.isBackgrounded,
 						cwd: this.ctx.sessionManager.getCwd(),
-						sessionManager: this.ctx.session.sessionManager,
+						sessionManager: createReadonlySessionManager(this.ctx.session.sessionManager),
 						modelRegistry: this.ctx.session.modelRegistry,
 						model: this.ctx.session.model,
 						isIdle: () => !this.ctx.session.isStreaming,
 						hasPendingMessages: () => this.ctx.session.queuedMessageCount > 0,
+						getPendingMessageCounts: () => this.ctx.session.pendingMessageCounts,
+						getTranscript: () => this.ctx.session.getTranscript(),
+						getTranscriptBody: entryId => this.ctx.session.getTranscriptBody(entryId),
+						getGoalState: () => this.ctx.session.getGoalModeState(),
+						getTodoState: () => this.ctx.session.getTodoPhases(),
+						getQueuedMessages: () => this.ctx.session.getQueuedMessageEntries(),
+						getActiveTools: () => this.ctx.session.getActiveToolNames(),
+						getAllTools: () => this.ctx.session.getAllToolNames(),
+						resolveTool: name => {
+							const tool = this.ctx.session.getToolByName(name);
+							return tool
+								? { safeSummary: tool.safeSummary, safeSummaryFields: tool.safeSummaryFields }
+								: undefined;
+						},
 						hasQueuedMessages: () => this.ctx.session.queuedMessageCount > 0,
 						abort: () => {
 							this.ctx.session.abort();
@@ -580,6 +949,44 @@ export class ExtensionUiController {
 							// Signal shutdown request
 						},
 						getSystemPrompt: () => [...this.ctx.session.systemPrompt],
+						cycleModel: () => this.ctx.session.cycleModel(),
+						cycleThinkingLevel: () => this.ctx.session.cycleThinkingLevel(),
+						setQueueMode: (kind, mode) => {
+							if (kind === "steering" && (mode === "all" || mode === "one-at-a-time")) {
+								this.ctx.session.setSteeringMode(mode);
+								return true;
+							}
+							if (kind === "follow_up" && (mode === "all" || mode === "one-at-a-time")) {
+								this.ctx.session.setFollowUpMode(mode);
+								return true;
+							}
+							if (kind === "interrupt" && (mode === "immediate" || mode === "wait")) {
+								this.ctx.session.setInterruptMode(mode);
+								return true;
+							}
+							return false;
+						},
+						getSkillState: () =>
+							this.ctx.session.skills.map(skill => ({ name: skill.name, description: skill.description })),
+						getConfigItems: () => ({
+							steeringMode: this.ctx.session.steeringMode,
+							followUpMode: this.ctx.session.followUpMode,
+							interruptMode: this.ctx.session.interruptMode,
+						}),
+						getBranchCandidates: () => this.ctx.sessionManager.getTree(),
+						getExtensions: () => this.ctx.session.extensionRunner?.getExtensionPaths() ?? [],
+						getArtifact: () => undefined,
+						getJobs: () => undefined,
+						sdkBindings: () => [
+							"cycleModel",
+							"cycleThinkingLevel",
+							"setQueueMode",
+							"getSkillState",
+							"getConfigItems",
+							"getBranchCandidates",
+							"getExtensions",
+						],
+						clearContext: () => this.ctx.session.clearContext(),
 					});
 				} catch (err) {
 					this.showToolError(registeredTool.definition.name, err instanceof Error ? err.message : String(err));
@@ -724,8 +1131,7 @@ export class ExtensionUiController {
 	 */
 	hideHookSelector(): void {
 		this.ctx.hookSelector?.dispose();
-		this.ctx.editorContainer.clear();
-		this.ctx.editorContainer.addChild(this.ctx.editor);
+		this.#restoreComposerEditor();
 		this.ctx.hookSelector = undefined;
 		this.ctx.ui.setFocus(this.ctx.editor);
 		this.ctx.ui.requestRender();
@@ -785,8 +1191,7 @@ export class ExtensionUiController {
 	 */
 	hideHookInput(): void {
 		this.ctx.hookInput?.dispose();
-		this.ctx.editorContainer.clear();
-		this.ctx.editorContainer.addChild(this.ctx.editor);
+		this.#restoreComposerEditor();
 		this.ctx.hookInput = undefined;
 		this.ctx.ui.setFocus(this.ctx.editor);
 		this.ctx.ui.requestRender();
@@ -835,8 +1240,7 @@ export class ExtensionUiController {
 	 * Hide the hook editor.
 	 */
 	hideHookEditor(): void {
-		this.ctx.editorContainer.clear();
-		this.ctx.editorContainer.addChild(this.ctx.editor);
+		this.#restoreComposerEditor();
 		this.ctx.hookEditor = undefined;
 		this.ctx.ui.setFocus(this.ctx.editor);
 		this.ctx.ui.requestRender();
@@ -879,8 +1283,7 @@ export class ExtensionUiController {
 			closed = true;
 			this.#clearActiveHookCustom();
 			if (!options?.overlay) {
-				this.ctx.editorContainer.clear();
-				this.ctx.editorContainer.addChild(this.ctx.editor);
+				this.#restoreComposerEditor();
 				this.ctx.editor.setText(savedText);
 			}
 			this.ctx.ui.setFocus(this.ctx.editor);
@@ -980,9 +1383,10 @@ export class ExtensionUiController {
 		// (queueSteer/queueFollowUp push synchronously) before refreshing pending display.
 		const send = this.ctx.session.sendUserMessage(content, options);
 		applyInjectedUserSubmission(this.ctx, { content, queued });
-		send.catch((err: unknown) => {
+		void send.catch((err: unknown) => {
 			this.ctx.showError(`Extension sendUserMessage failed: ${err instanceof Error ? err.message : String(err)}`);
 		});
+		return send;
 	};
 
 	#applyCustomMessageDisplay(wasStreaming: boolean, shouldDisplay: boolean | undefined): void {

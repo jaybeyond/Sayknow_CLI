@@ -16,9 +16,9 @@ import { ToolExecutionComponent } from "../../modes/components/tool-execution";
 import { TtsrNotificationComponent } from "../../modes/components/ttsr-notification";
 import { getSymbolTheme, theme } from "../../modes/theme/theme";
 import type { InteractiveModeContext, TodoPhase } from "../../modes/types";
-import { completionNotifyDisabledByEnv } from "../../notifications/config";
-import { summaryFromMessage } from "../../notifications/helpers";
 import type { PlanApprovalDetails } from "../../plan-mode/approved-plan";
+import { completionNotifyDisabledByEnv } from "../../sdk/bus/config";
+import { summaryFromMessage } from "../../sdk/bus/helpers";
 import type { AgentSessionEvent } from "../../session/agent-session";
 import { type CustomMessage, isSilentAbort, readPendingDisplayTag } from "../../session/messages";
 import { transferSessionMessageIdentity } from "../../session/session-manager";
@@ -135,14 +135,13 @@ export class EventController {
 			auto_compaction_end: e => this.#handleAutoCompactionEnd(e),
 			auto_retry_start: e => this.#handleAutoRetryStart(e),
 			auto_retry_end: e => this.#handleAutoRetryEnd(e),
-			retry_fallback_applied: e => this.#handleRetryFallbackApplied(e),
-			retry_fallback_succeeded: e => this.#handleRetryFallbackSucceeded(e),
 			ttsr_triggered: e => this.#handleTtsrTriggered(e),
 			todo_reminder: e => this.#handleTodoReminder(e),
 			todo_auto_clear: e => this.#handleTodoAutoClear(e),
 			irc_message: e => this.#handleIrcMessage(e),
 			subagent_steer_message: e => this.#handleSubagentSteerMessage(e),
 			notice: e => this.#handleNotice(e),
+			model_fallback_switched: e => this.#handleModelFallbackSwitched(e),
 			thinking_level_changed: async () => {},
 			goal_updated: async () => {},
 		} satisfies AgentSessionEventHandlers;
@@ -239,6 +238,7 @@ export class EventController {
 
 		const run = this.#handlers[event.type] as (e: AgentSessionEvent) => Promise<void>;
 		await run(event);
+		if (this.ctx.isTranscriptViewerOpen?.()) this.ctx.refreshTranscriptViewer?.();
 	}
 
 	async #handleAgentStart(_event: Extract<AgentSessionEvent, { type: "agent_start" }>): Promise<void> {
@@ -494,6 +494,14 @@ export class EventController {
 		this.#renderedCustomMessages.add(signature);
 		this.#resetReadGroup();
 		this.ctx.addMessageToChat(event.message);
+		this.ctx.ui.requestRender();
+	}
+
+	async #handleModelFallbackSwitched(
+		event: Extract<AgentSessionEvent, { type: "model_fallback_switched" }>,
+	): Promise<void> {
+		this.ctx.showStatus(`Fallback model: ${event.from} → ${event.to}`);
+		this.ctx.statusLine.invalidate();
 		this.ctx.ui.requestRender();
 	}
 
@@ -795,7 +803,7 @@ export class EventController {
 			if (details?.sourceToolName === "plan_approval" && details.action === "apply") {
 				const planDetails = details.sourceResultDetails as PlanApprovalDetails | undefined;
 				if (planDetails) {
-					await this.ctx.handlePlanApproval(planDetails);
+					await this.ctx.planModeController.handleApproval(planDetails);
 				}
 			}
 		}
@@ -812,7 +820,7 @@ export class EventController {
 			this.ctx.streamingComponent = undefined;
 			this.ctx.streamingMessage = undefined;
 		}
-		await this.ctx.flushPendingModelSwitch();
+		await this.ctx.planModeController.flushPendingModelSwitch();
 		for (const toolCallId of Array.from(this.ctx.pendingTools.keys())) {
 			if (!this.#backgroundToolCallIds.has(toolCallId)) {
 				this.ctx.pendingTools.delete(toolCallId);
@@ -975,18 +983,6 @@ export class EventController {
 			this.ctx.showError(`Retry failed after ${event.attempt} attempts: ${event.finalError || "Unknown error"}`);
 		}
 		this.ctx.ui.requestRender();
-	}
-
-	async #handleRetryFallbackApplied(
-		event: Extract<AgentSessionEvent, { type: "retry_fallback_applied" }>,
-	): Promise<void> {
-		this.ctx.showWarning(`Fallback: ${event.from} -> ${event.to}`);
-	}
-
-	async #handleRetryFallbackSucceeded(
-		event: Extract<AgentSessionEvent, { type: "retry_fallback_succeeded" }>,
-	): Promise<void> {
-		this.ctx.showStatus(`Fallback succeeded on ${event.model}`);
 	}
 
 	async #handleTtsrTriggered(event: Extract<AgentSessionEvent, { type: "ttsr_triggered" }>): Promise<void> {

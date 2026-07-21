@@ -1,6 +1,6 @@
 --- a/packages/tui/src/terminal.ts
 +++ b/packages/tui/src/terminal.ts
-@@ -33,6 +33,43 @@
+@@ -34,6 +34,43 @@
  // Track if a terminal was ever started (for emergency restore logic)
  let terminalEverStarted = false;
  
@@ -44,7 +44,7 @@
  const STD_INPUT_HANDLE = -10;
  const ENABLE_VIRTUAL_TERMINAL_INPUT = 0x0200;
  /**
-@@ -41,6 +78,9 @@
+@@ -42,6 +79,9 @@
   */
  export function emergencyTerminalRestore(): void {
  	try {
@@ -54,7 +54,7 @@
  		const terminal = activeTerminal;
  		if (terminal) {
  			terminal.stop();
-@@ -224,6 +264,10 @@
+@@ -256,6 +296,10 @@
  		// Register for emergency cleanup
  		activeTerminal = this;
  		terminalEverStarted = true;
@@ -65,7 +65,7 @@
  
  		// Save previous state and enable raw mode
  		this.#wasRaw = process.stdin.isRaw || false;
-@@ -783,6 +827,11 @@
+@@ -819,6 +863,11 @@
  		}
  	}
  

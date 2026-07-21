@@ -45,6 +45,44 @@ type InputListener = (data: string) => InputListenerResult;
 /**
  * Component interface - all components must implement this
  */
+export type MouseEvent = {
+	kind: "wheel" | "click";
+	direction?: -1 | 1;
+	button?: 0;
+	/** Terminal cell coordinates, one-based. */
+	x: number;
+	y: number;
+	/** Focused-overlay cell coordinates, one-based when dispatched to an overlay. */
+	localX?: number;
+	localY?: number;
+};
+
+type OverlayMouseBounds = {
+	row: number;
+	col: number;
+	width: number;
+	height: number;
+	termWidth: number;
+	termHeight: number;
+};
+
+/** Parse xterm SGR mouse reports. Drag and button-release reports are ignored. */
+export function parseSgrMouseEvent(data: string): MouseEvent | undefined {
+	const match = data.match(/^\x1b\[<(\d+);(\d+);(\d+)([Mm])$/);
+	if (!match) return undefined;
+	const button = Number(match[1]);
+	const x = Number(match[2]);
+	const y = Number(match[3]);
+	const terminator = match[4];
+	if (![button, x, y].every(Number.isSafeInteger) || x < 1 || y < 1) return undefined;
+
+	if (button & 32 || terminator === "m") return undefined;
+	if (button === 64) return { kind: "wheel", direction: -1, x, y };
+	if (button === 65) return { kind: "wheel", direction: 1, x, y };
+	if (button === 0) return { kind: "click", button, x, y };
+	return undefined;
+}
+
 export interface Component {
 	/**
 	 * Render the component to lines for the given viewport width
@@ -57,6 +95,9 @@ export interface Component {
 	 * Optional handler for keyboard input when component has focus
 	 */
 	handleInput?(data: string): void;
+
+	/** Optional handler for terminal mouse events when component has focus. */
+	handleMouse?(event: MouseEvent): void;
 
 	/**
 	 * If true, component receives key release events (Kitty protocol).
@@ -279,31 +320,41 @@ function isViewportSensitiveHost(
 	env: Record<string, string | undefined>,
 	platform: NodeJS.Platform,
 	includeNativeWindows: boolean,
+	includeProcessTerminal: boolean,
 ): boolean {
-	return isMultiplexerSession(env) || isWindowsTerminalSession(env) || (includeNativeWindows && platform === "win32");
+	return (
+		isMultiplexerSession(env) ||
+		isWindowsTerminalSession(env) ||
+		includeProcessTerminal ||
+		(includeNativeWindows && platform === "win32")
+	);
 }
 /**
  * True when repainting only the live viewport is safer than clearing/replaying
- * the full transcript. Native Windows console hosts are included even when
- * WT_SESSION is absent because PowerShell/ConPTY launch chains can drop terminal
- * identity variables while keeping the same scroll-jump behavior.
+ * the full transcript. Real process terminals are viewport-sensitive because
+ * their native scrollback position is not observable by the renderer. Native
+ * Windows console hosts are also recognized from platform identity when that
+ * process-terminal capability is unavailable.
  */
 export function shouldUseViewportRepaintForHost(
 	env: Record<string, string | undefined> = Bun.env,
 	platform: NodeJS.Platform = process.platform,
-	options: { includeNativeWindows?: boolean } = {},
+	options: { includeNativeWindows?: boolean; includeProcessTerminal?: boolean } = {},
 ): boolean {
 	const multiplexed = isMultiplexerSession(env);
 	const includeNativeWindows = options.includeNativeWindows ?? true;
+	const includeProcessTerminal = options.includeProcessTerminal ?? false;
 	return (
-		isViewportSensitiveHost(env, platform, includeNativeWindows) &&
+		isViewportSensitiveHost(env, platform, includeNativeWindows, includeProcessTerminal) &&
 		!(multiplexed && useLegacyMultiplexerFullRender(env))
 	);
 }
 
 function useViewportRepaintPath(terminal: Terminal): boolean {
+	if (terminal.isProcessTerminal !== true) return false;
 	return shouldUseViewportRepaintForHost(Bun.env, process.platform, {
-		includeNativeWindows: terminal.isProcessTerminal === true,
+		includeNativeWindows: true,
+		includeProcessTerminal: true,
 	});
 }
 
@@ -319,7 +370,8 @@ function allowsHostNeutralOverflowRepaint(
 }
 
 function shouldPreserveScrollbackOnFullClear(terminal: Terminal): boolean {
-	return isViewportSensitiveHost(Bun.env, process.platform, terminal.isProcessTerminal === true);
+	if (terminal.isProcessTerminal !== true) return false;
+	return isViewportSensitiveHost(Bun.env, process.platform, true, true);
 }
 
 /**
@@ -618,6 +670,7 @@ export class TUI extends Container {
 	#stopped = false;
 	#terminalUnavailable = false;
 	#bottomPinnedComponent: Component | null = null;
+	#pendingTerminalCleanup: Array<{ payload: string; onDelivered?: () => void }> = [];
 
 	#unsubscribeTabWidthChange?: () => void;
 	static #renderCounters: TuiRenderCounterSnapshot = {
@@ -661,9 +714,14 @@ export class TUI extends Container {
 		options?: OverlayOptions;
 		preFocus: Component | null;
 		hidden: boolean;
+		mouseBounds?: OverlayMouseBounds;
 	}[] = [];
 
-	constructor(terminal: Terminal, showHardwareCursor?: boolean) {
+	constructor(
+		terminal: Terminal,
+		showHardwareCursor?: boolean,
+		private readonly options: { enableMouse?: boolean } = {},
+	) {
 		super();
 		this.terminal = terminal;
 		if (showHardwareCursor !== undefined) {
@@ -756,6 +814,50 @@ export class TUI extends Container {
 	/** Allow one semantic-neighbor reconciliation after a definitive same-transcript rebuild. */
 	prepareViewportAnchorForTranscriptRebuild(): void {
 		if (this.#manualViewportAnchor !== null) this.#reconcileMissingViewportAnchor = true;
+	}
+
+	/** Reveal a semantic viewport anchor without changing the rendered content width. */
+	revealViewportAnchor(id: ViewportAnchorId, alignment: "top" | "center" | "bottom"): boolean {
+		const height = this.terminal.rows;
+		const width = this.terminal.columns;
+		const frame = this.#viewportAnchorFrame;
+		if (height <= 0 || width <= 0 || this.#previousLines.length === 0 || frame === null) return false;
+
+		const selectedRow = frame.anchors.findIndex(anchor => anchor?.id === id);
+		const selected = selectedRow < 0 ? null : frame.anchors[selectedRow];
+		if (selected === null) return false;
+
+		const desiredScreenRow = alignment === "top" ? 0 : alignment === "center" ? Math.floor(height / 2) : height - 1;
+		const targetViewportTop = Math.max(0, frame.startRow + selectedRow - desiredScreenRow);
+		this.#manualViewportAnchor = {
+			id: selected.id,
+			graphemeIndex: selected.graphemeStart,
+			cellOffset: selected.cellStart,
+			desiredScreenRow,
+		};
+		const firstCandidateRow = Math.max(0, targetViewportTop - frame.startRow);
+		const lastCandidateRow = Math.min(frame.anchors.length, targetViewportTop + height - frame.startRow);
+		const fallbacks: ManualViewportAnchor[] = [];
+		for (let row = firstCandidateRow; row < lastCandidateRow; row++) {
+			const anchor = frame.anchors[row];
+			if (anchor === null || row === selectedRow) continue;
+			fallbacks.push({
+				id: anchor.id,
+				graphemeIndex: anchor.graphemeStart,
+				cellOffset: anchor.cellStart,
+				desiredScreenRow: row + frame.startRow - targetViewportTop,
+			});
+		}
+		fallbacks.sort(
+			(a, b) =>
+				Math.abs(a.desiredScreenRow - this.#manualViewportAnchor!.desiredScreenRow) -
+				Math.abs(b.desiredScreenRow - this.#manualViewportAnchor!.desiredScreenRow),
+		);
+		this.#manualViewportFallbackAnchors = fallbacks;
+		this.#manualViewportTop = this.#viewportTopRow;
+		this.#reconcileMissingViewportAnchor = false;
+		this.requestRender();
+		return true;
 	}
 
 	scrollViewportPages(direction: -1 | 1): boolean {
@@ -866,7 +968,8 @@ export class TUI extends Container {
 	 * Returns a handle to control the overlay's visibility.
 	 */
 	showOverlay(component: Component, options?: OverlayOptions): OverlayHandle {
-		const entry = { component, options, preFocus: this.#focusedComponent, hidden: false };
+		const entry = { component, options, preFocus: this.#focusedComponent, hidden: false, mouseBounds: undefined };
+
 		this.overlayStack.push(entry);
 		// Only focus if overlay is actually visible
 		if (this.#isOverlayVisible(entry)) {
@@ -880,6 +983,8 @@ export class TUI extends Container {
 			hide: () => {
 				const index = this.overlayStack.indexOf(entry);
 				if (index !== -1) {
+					entry.mouseBounds = undefined;
+
 					this.overlayStack.splice(index, 1);
 					// Restore focus if this overlay had focus
 					if (this.#focusedComponent === component) {
@@ -893,6 +998,8 @@ export class TUI extends Container {
 			setHidden: (hidden: boolean) => {
 				if (entry.hidden === hidden) return;
 				entry.hidden = hidden;
+				entry.mouseBounds = undefined;
+
 				// Update focus when hiding/showing
 				if (hidden) {
 					// If this overlay had focus, move focus to next visible or preFocus
@@ -916,6 +1023,7 @@ export class TUI extends Container {
 	hideOverlay(): void {
 		const overlay = this.overlayStack.pop();
 		if (!overlay) return;
+		overlay.mouseBounds = undefined;
 		// Find topmost visible overlay, or fall back to preFocus
 		const topVisible = this.#getTopmostVisibleOverlay();
 		this.setFocus(topVisible?.component ?? overlay.preFocus);
@@ -950,11 +1058,13 @@ export class TUI extends Container {
 	override invalidate(): void {
 		super.invalidate();
 		for (const overlay of this.overlayStack) overlay.component.invalidate?.();
+		for (const overlay of this.overlayStack) overlay.mouseBounds = undefined;
 	}
 
 	start(): void {
 		this.#stopped = false;
 		this.#terminalUnavailable = false;
+		this.terminal.setMouseEnabled?.(this.options.enableMouse === true);
 		this.terminal.start(
 			data => this.#handleInput(data),
 			() => {
@@ -962,6 +1072,7 @@ export class TUI extends Container {
 				this.requestResizeRender();
 			},
 		);
+		this.flushTerminalCleanup();
 		this.#hideCursor();
 		this.#querySixelSupport();
 		this.#queryCellSize();
@@ -1171,6 +1282,7 @@ export class TUI extends Container {
 	}
 
 	stop(): void {
+		this.flushTerminalCleanup();
 		this.#clearSixelProbeState();
 		this.#stopped = true;
 		if (this.#renderTimer) {
@@ -1229,7 +1341,7 @@ export class TUI extends Container {
 	 * `PI_TUI_LEGACY_MULTIPLEXER_FULL_RENDER=1` to restore the legacy tmux redraw.
 	 */
 	requestResizeRender(): void {
-		this.requestRender(!useViewportRepaintPath(this.terminal) && !isTermuxSession(), "resize");
+		this.requestRender(!useViewportRepaintPath(this.terminal), "resize");
 	}
 
 	requestRender(force = false, source = "unknown"): void {
@@ -1356,6 +1468,44 @@ export class TUI extends Container {
 			}
 			data = current;
 		}
+
+		const mouse = parseSgrMouseEvent(data);
+		if (mouse) {
+			// Coordinates outside the current terminal cannot name a visible cell.
+			if (mouse.x > this.terminal.columns || mouse.y > this.terminal.rows) return;
+			if (mouse.kind === "wheel") this.scrollViewportPages(mouse.direction!);
+			else {
+				const focusedOverlay = this.overlayStack.find(o => o.component === this.#focusedComponent);
+				if (focusedOverlay) {
+					if (!this.#isOverlayVisible(focusedOverlay)) {
+						focusedOverlay.mouseBounds = undefined;
+						return;
+					}
+					const bounds = focusedOverlay.mouseBounds;
+					if (bounds?.termWidth !== this.terminal.columns || bounds.termHeight !== this.terminal.rows) {
+						return;
+					}
+
+					if (
+						!bounds ||
+						mouse.x < bounds.col + 1 ||
+						mouse.x > bounds.col + bounds.width ||
+						mouse.y < bounds.row + 1 ||
+						mouse.y > bounds.row + bounds.height
+					)
+						return;
+					this.#focusedComponent?.handleMouse?.({
+						...mouse,
+						localX: mouse.x - bounds.col,
+						localY: mouse.y - bounds.row,
+					});
+				} else this.#focusedComponent?.handleMouse?.(mouse);
+			}
+			this.requestRender(false, "mouse");
+			return;
+		}
+		// SGR-looking reports, including malformed reports, are terminal controls.
+		if (data.startsWith("\x1b[<")) return;
 
 		// Consume terminal cell size responses without blocking unrelated input.
 		if (this.#consumeCellSizeResponse(data)) {
@@ -1556,6 +1706,7 @@ export class TUI extends Container {
 	#compositeOverlays(lines: string[], termWidth: number, termHeight: number): string[] {
 		if (this.overlayStack.length === 0) return lines;
 		const result = [...lines];
+		for (const entry of this.overlayStack) entry.mouseBounds = undefined;
 
 		// Pre-render all visible overlays and calculate positions
 		const rendered: { overlayLines: string[]; row: number; col: number; w: number }[] = [];
@@ -1583,6 +1734,7 @@ export class TUI extends Container {
 			const { row, col } = this.#resolveOverlayLayout(options, overlayLines.length, termWidth, termHeight);
 
 			rendered.push({ overlayLines, row, col, w: width });
+			entry.mouseBounds = { row, col, width, height: overlayLines.length, termWidth, termHeight };
 			minLinesNeeded = Math.max(minLinesNeeded, row + overlayLines.length);
 		}
 
@@ -2292,11 +2444,9 @@ export class TUI extends Container {
 				viewportRepaint(`terminal height changed (${this.#previousHeight} -> ${height})`);
 				return;
 			}
-			if (!isTermuxSession() && !isMultiplexerSession()) {
-				logRedraw(`terminal height changed (${this.#previousHeight} -> ${height})`);
-				fullRender(true, "terminal height changed");
-				return;
-			}
+			logRedraw(`terminal height changed (${this.#previousHeight} -> ${height})`);
+			fullRender(true, "terminal height changed");
+			return;
 		}
 
 		// Content shrunk below the previous render and no overlays - re-render to clear empty rows
@@ -2351,8 +2501,8 @@ export class TUI extends Container {
 		}
 
 		const nextLiveViewportTop = Math.max(0, newLines.length - height);
-		if (firstChanged >= newLines.length && nextLiveViewportTop !== prevViewportTop) {
-			viewportRepaint(`tail shrink changed viewport top (${prevViewportTop} -> ${nextLiveViewportTop})`);
+		if (newLines.length < this.#previousLines.length && nextLiveViewportTop !== prevViewportTop) {
+			viewportRepaint(`content contraction changed viewport top (${prevViewportTop} -> ${nextLiveViewportTop})`);
 			return;
 		}
 		// All changes are in deleted lines (nothing to render, just clear)
@@ -2596,6 +2746,22 @@ export class TUI extends Container {
 		}
 
 		return { seq, toRow: targetRow };
+	}
+
+	/** Retain terminal cleanup until a write succeeds, even after its component is disposed. */
+	queueTerminalCleanup(payload: string, onDelivered?: () => void): void {
+		this.#pendingTerminalCleanup.push({ payload, onDelivered });
+		this.flushTerminalCleanup();
+	}
+
+	/** Retry queued terminal cleanup after terminal recovery or before shutdown. */
+	flushTerminalCleanup(): void {
+		while (this.#pendingTerminalCleanup.length > 0) {
+			const pending = this.#pendingTerminalCleanup[0];
+			if (!this.#writeTerminal(pending.payload)) return;
+			this.#pendingTerminalCleanup.shift();
+			pending.onDelivered?.();
+		}
 	}
 
 	/**

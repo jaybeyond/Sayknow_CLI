@@ -3,10 +3,12 @@ import { Effort, type Model } from "@sayknow-cli/ai";
 import {
 	expandRoleAlias,
 	findInitialModel,
+	managedCursorFallbackUnavailableReason,
 	parseModelPattern,
 	parseModelString,
 	resolveAgentModelPatterns,
 	resolveCliModel,
+	resolveModelChainWithAuth,
 	resolveModelFromString,
 	resolveModelOverride,
 	resolveModelRoleValue,
@@ -14,6 +16,42 @@ import {
 	restoreModelFromSession,
 } from "@sayknow-cli/coding-agent/config/model-resolver";
 import { Settings } from "@sayknow-cli/coding-agent/config/settings";
+
+test("rejects Cursor transports from retryable managed fallback chains at resolution", () => {
+	const cursor = { ...mockModels[0], api: "cursor-agent", provider: "cursor" } as Model;
+	expect(managedCursorFallbackUnavailableReason(cursor, "cursor/claude-4-sonnet")).toBe(
+		"Cursor model cursor/claude-4-sonnet requires provider-side tool execution and cannot be used in a retryable fallback chain",
+	);
+	expect(managedCursorFallbackUnavailableReason(mockModels[0], "anthropic/claude-sonnet-4-5")).toBeUndefined();
+});
+
+test("skips a Cursor chain head during managed auth-aware resolution", async () => {
+	const cursor = { ...mockModels[0], api: "cursor-agent", provider: "cursor" } as Model;
+	const resolution = await resolveModelChainWithAuth(
+		["cursor/claude-sonnet-4-5", "openai/gpt-4o"],
+		{ getAvailable: () => [cursor, mockModels[1]], getApiKey: async () => "key" } as never,
+		undefined,
+		undefined,
+		{ managedFallback: true },
+	);
+	expect(resolution.model).toBe(mockModels[1]);
+	expect(resolution.activeIndex).toBe(1);
+	expect(resolution.skips[0]?.reason).toContain("cannot be used in a retryable fallback chain");
+});
+
+test("does not skip a Cursor single-entry selection when managed fallback is requested", async () => {
+	const cursor = { ...mockModels[0], api: "cursor-agent", provider: "cursor" } as Model;
+	const resolution = await resolveModelChainWithAuth(
+		["cursor/claude-sonnet-4-5"],
+		{ getAvailable: () => [cursor], getApiKey: async () => "key" } as never,
+		undefined,
+		undefined,
+		{ managedFallback: true },
+	);
+	expect(resolution.model).toBe(cursor);
+	expect(resolution.activeIndex).toBe(0);
+	expect(resolution.skips).toEqual([]);
+});
 
 // Mock models for testing
 const mockModels: Model<"anthropic-messages">[] = [
@@ -376,13 +414,12 @@ describe("parseModelPattern", () => {
 			expect(result.warning).toContain("random");
 		});
 
-		test("qwen3-coder:exacto:high:random returns model with undefined thinking level and warning", () => {
+		test("does not recursively consume multiple suffixes", () => {
 			const result = parseModelPattern("qwen/qwen3-coder:exacto:high:random", allModels);
-			expect(result.model?.id).toBe("qwen/qwen3-coder:exacto");
+			expect(result.model).toBeUndefined();
 			expect(result.thinkingLevel).toBeUndefined();
 			expect(result.explicitThinkingLevel).toBe(false);
-			expect(result.warning).toContain("Invalid thinking level");
-			expect(result.warning).toContain("random");
+			expect(result.warning).toBeUndefined();
 		});
 	});
 
@@ -433,6 +470,21 @@ describe("parseModelPattern", () => {
 			});
 			expect(result.model?.provider).toBe("github-copilot");
 			expect(result.model?.id).toBe("anthropic/claude-sonnet-4.5");
+		});
+
+		test("forwards session identity for canonical resolution", () => {
+			let sessionId: string | undefined;
+			const result = resolveModelRoleValue("claude-sonnet-4-5", canonicalVariantModels, {
+				modelRegistry: {
+					resolveCanonicalModel: (_canonicalId, options) => {
+						sessionId = options?.sessionId;
+						return canonicalVariantModels[0];
+					},
+				},
+				sessionId: "stable-session-id",
+			});
+			expect(result.model).toBe(canonicalVariantModels[0]);
+			expect(sessionId).toBe("stable-session-id");
 		});
 	});
 });
@@ -696,7 +748,7 @@ describe("resolveCliModel", () => {
 		expect(result.error).toContain("No models available");
 	});
 
-	test("resolves provider-prefixed fuzzy patterns (openrouter/qwen -> openrouter model)", () => {
+	test("fails closed for provider-qualified patterns that do not exactly match", () => {
 		const registry = {
 			getAll: () => allModels,
 		} as unknown as Parameters<typeof resolveCliModel>[0]["modelRegistry"];
@@ -706,9 +758,8 @@ describe("resolveCliModel", () => {
 			modelRegistry: registry,
 		});
 
-		expect(result.error).toBeUndefined();
-		expect(result.model?.provider).toBe("openrouter");
-		expect(result.model?.id).toBe("qwen/qwen3-coder:exacto");
+		expect(result.model).toBeUndefined();
+		expect(result.error).toContain('Model "openrouter/qwen" not found');
 	});
 
 	test("prefers decomposed provider+id over flat id match when ambiguous", () => {
@@ -897,6 +948,16 @@ describe("OpenAI Codex default resolution", () => {
 	});
 });
 
+test("restores only an exact available provider/model candidate", async () => {
+	const fallback = mockModels[0];
+	const result = await restoreModelFromSession("openai", "saved", undefined, false, {
+		getAvailable: () => [fallback],
+		getApiKey: async () => "key",
+	});
+
+	expect(result.model).toBe(fallback);
+	expect(result.fallbackMessage).toContain("model no longer exists");
+});
 describe("expandRoleAlias", () => {
 	test("expands pi/default to the configured default role", () => {
 		const settings = Settings.isolated();

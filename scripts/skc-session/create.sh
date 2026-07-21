@@ -7,28 +7,15 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=postmortem.sh
 source "$SCRIPT_DIR/postmortem.sh"
 
-SESSION="${1:?Usage: $0 <session-name> <worktree-path> [channel-id] [mention]}"
-WORKDIR="${2:?Usage: $0 <session-name> <worktree-path> [channel-id] [mention]}"
-CHANNEL="${3:-}"
-MENTION="${4:-}"
+[[ $# -eq 2 ]] || { echo "Usage: $0 <session-name> <worktree-path>" >&2; exit 2; }
+SESSION="$1"
+WORKDIR="$2"
 SKC_BIN="${SKC_BIN-$(command -v skc || true)}"
-SKC_FLAGS="${SKC_SESSION_FLAGS:-}"
-ROUTER_BIN="${SKC_SESSION_ROUTER:-$(command -v clawhip || true)}"
 TMUX_BIN="${SKC_SESSION_TMUX_BIN:-tmux}"
 STATE_DIR="${SKC_SESSION_STATE_DIR:-$WORKDIR/.skc-session-state/$SESSION}"
 RUNTIME_STATE_JSON="$STATE_DIR/runtime-state.json"
 SOCKET_KEY="skc-${SESSION//[^A-Za-z0-9_.-]/_}"
 MONITOR_SESSION="${SESSION}-owner-monitor"
-# Production always uses a ten-second router watch deadline. Tests may shorten it,
-# but cannot disable or extend the deadline.
-ROUTER_WATCH_TIMEOUT_SECONDS=10
-if [[ -v SKC_SESSION_TEST_ROUTER_WATCH_TIMEOUT_SECONDS ]]; then
-  ROUTER_WATCH_TIMEOUT_SECONDS="$SKC_SESSION_TEST_ROUTER_WATCH_TIMEOUT_SECONDS"
-  if [[ ! "$ROUTER_WATCH_TIMEOUT_SECONDS" =~ ^([1-9]|10)$ ]]; then
-    echo "SKC_SESSION_TEST_ROUTER_WATCH_TIMEOUT_SECONDS must be an integer from 1 through 10" >&2
-    exit 1
-  fi
-fi
 
 
 shell_join() { printf '%q ' "$@"; }
@@ -688,7 +675,7 @@ for handled_signal in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
     signal.signal(handled_signal, forward)
 
 started_at = now()
-command = [os.environ["SKC_SESSION_SKC_BIN"], *os.environ.get("SKC_SESSION_FLAGS", "").split()]
+command = [os.environ["SKC_SESSION_SKC_BIN"]]
 try:
     child = subprocess.Popen(command, cwd=os.environ["SKC_SESSION_WORKDIR"])
     status = child.wait()
@@ -715,7 +702,7 @@ raise SystemExit(exit_code)
 SUPERVISOR
 chmod 700 "$STATE_DIR/supervisor.py"
 
-LAUNCH=(env "SKC_SESSION_NAME=$SESSION" "SKC_SESSION_WORKDIR=$WORKDIR" "SKC_SESSION_BRANCH=$BRANCH" "SKC_SESSION_STATE_DIR=$STATE_DIR" "SKC_SESSION_OWNER_GENERATION=$OWNER_GENERATION" "SKC_SESSION_RUNTIME_FRESH_AFTER=$CREATED_AT" "SKC_SESSION_STARTED_JSON=$STATE_DIR/started.json" "SKC_SESSION_TERMINAL_JSON=$STATE_DIR/terminal.json" "SKC_SESSION_TERMINAL_CANONICAL_JSON=$LIFECYCLE_DIR/terminal-$OWNER_GENERATION.json" "SKC_SESSION_FINAL_JSON=$STATE_DIR/final.json" "SKC_SESSION_FINAL_CANONICAL_JSON=$LIFECYCLE_DIR/final-$OWNER_GENERATION.json" "SKC_SESSION_GENERATION_JSON=$GENERATION_JSON" "SKC_COORDINATOR_SESSION_ID=$SESSION" "SKC_COORDINATOR_SESSION_BRANCH=$BRANCH" "SKC_COORDINATOR_SESSION_STATE_FILE=$RUNTIME_STATE_JSON" "SKC_TMUX_OWNER_GENERATION=$OWNER_GENERATION" "SKC_TMUX_OWNER_STATE_DIR=$STATE_DIR" "SKC_TMUX_OWNER_SERVER_KEY=$SOCKET_KEY" "SKC_SESSION_PROMPT_ACCEPTED_JSON=$STATE_DIR/prompt-accepted.json" "SKC_SESSION_WORKTREE_BASELINE_DIRTY=$WORKTREE_BASELINE_DIRTY" "SKC_SESSION_SKC_BIN=$SKC_BIN" "SKC_SESSION_FLAGS=$SKC_FLAGS" "SKC_SESSION_RUNNER_SH=$STATE_DIR/runner.sh" "SKC_SESSION_POSTMORTEM_SH=$SCRIPT_DIR/postmortem.sh" python3 "$STATE_DIR/supervisor.py")
+LAUNCH=(env "SKC_SESSION_NAME=$SESSION" "SKC_SESSION_WORKDIR=$WORKDIR" "SKC_SESSION_BRANCH=$BRANCH" "SKC_SESSION_STATE_DIR=$STATE_DIR" "SKC_SESSION_OWNER_GENERATION=$OWNER_GENERATION" "SKC_SESSION_RUNTIME_FRESH_AFTER=$CREATED_AT" "SKC_SESSION_STARTED_JSON=$STATE_DIR/started.json" "SKC_SESSION_TERMINAL_JSON=$STATE_DIR/terminal.json" "SKC_SESSION_TERMINAL_CANONICAL_JSON=$LIFECYCLE_DIR/terminal-$OWNER_GENERATION.json" "SKC_SESSION_FINAL_JSON=$STATE_DIR/final.json" "SKC_SESSION_FINAL_CANONICAL_JSON=$LIFECYCLE_DIR/final-$OWNER_GENERATION.json" "SKC_SESSION_GENERATION_JSON=$GENERATION_JSON" "SKC_COORDINATOR_SESSION_ID=$SESSION" "SKC_COORDINATOR_SESSION_BRANCH=$BRANCH" "SKC_COORDINATOR_SESSION_STATE_FILE=$RUNTIME_STATE_JSON" "SKC_TMUX_OWNER_GENERATION=$OWNER_GENERATION" "SKC_TMUX_OWNER_STATE_DIR=$STATE_DIR" "SKC_TMUX_OWNER_SERVER_KEY=$SOCKET_KEY" "SKC_SESSION_PROMPT_ACCEPTED_JSON=$STATE_DIR/prompt-accepted.json" "SKC_SESSION_WORKTREE_BASELINE_DIRTY=$WORKTREE_BASELINE_DIRTY" "SKC_SESSION_SKC_BIN=$SKC_BIN" "SKC_SESSION_RUNNER_SH=$STATE_DIR/runner.sh" "SKC_SESSION_POSTMORTEM_SH=$SCRIPT_DIR/postmortem.sh" python3 "$STATE_DIR/supervisor.py")
 LAUNCH_SHELL="$(shell_join "${LAUNCH[@]}")"
 TMUX_ARGV=("$TMUX_BIN" -L "$SOCKET_KEY" new-session -d -P -F '#{session_id}' -s "$SESSION" -c "$WORKDIR" -n skc "$LAUNCH_SHELL")
 PLAN_LINE="$(python3 - "$SESSION" "$OWNER_GENERATION" "$WORKDIR" "$STATE_DIR" "$SOCKET_KEY" "$GENERATION_BASELINE_JSON" "${TMUX_ARGV[@]}" <<'PY'
@@ -918,42 +905,8 @@ finally:
     except FileNotFoundError: pass
 PY
 )"
-RECOVERY_CREATED=0
-RECOVERY_DEDUPE=""
 if [[ "$RECOVERY_RESULT" == 1:* ]]; then
-  RECOVERY_CREATED=1
-  RECOVERY_DEDUPE="${RECOVERY_RESULT#1:}"
   skc_session_publish_current_alias "$LIFECYCLE_DIR/recovery-$OWNER_GENERATION.json" "$STATE_DIR/recovery.json" "$GENERATION_JSON" "$SESSION" "$OWNER_GENERATION" owner_recovered || { echo "failed to publish recovery lifecycle alias" >&2; exit 1; }
-fi
-if [[ "$RECOVERY_CREATED" == 1 && "${SKC_SESSION_SKIP_ROUTER:-0}" != 1 && -n "$ROUTER_BIN" && -n "$CHANNEL" ]]; then
-  set +e
-  "$ROUTER_BIN" tmux recovered --session "$SESSION" --generation "$OWNER_GENERATION" --prior-dedupe "$RECOVERY_DEDUPE" --channel "$CHANNEL" >/dev/null 2>&1
-  recovery_router_rc=$?
-  set -e
-  if [[ "$recovery_router_rc" -ne 0 ]]; then
-    echo "router recovery notification failed; tmux session is still running" >&2
-    if python3 - "$LIFECYCLE_DIR/router-failure-$OWNER_GENERATION-recovery_notification.json" "$SESSION" "$OWNER_GENERATION" "$recovery_router_rc" <<'PY'
-
-import json, os, sys
-path, session, generation, rc = sys.argv[1:]
-record = {"schema_version":1,"kind":"router_failure","session_id":session,"owner_generation":generation,"boundary":"recovery_notification","exit_code":int(rc)}
-temporary = f"{path}.{os.getpid()}.tmp"
-try:
-    with open(temporary, "x", encoding="utf-8") as handle: json.dump(record, handle, separators=(",", ":")); handle.write("\n")
-    os.link(temporary, path)
-except FileExistsError:
-    with open(path, encoding="utf-8") as handle:
-        if json.load(handle) != record: raise
-finally:
-    try: os.unlink(temporary)
-    except FileNotFoundError: pass
-PY
-    then
-      skc_session_publish_current_alias "$LIFECYCLE_DIR/router-failure-$OWNER_GENERATION-recovery_notification.json" "$STATE_DIR/router-failure.json" "$GENERATION_JSON" "$SESSION" "$OWNER_GENERATION" router_failure || echo "router recovery failure receipt publication unavailable" >&2
-    else
-      echo "router recovery failure receipt unavailable" >&2
-    fi
-  fi
 fi
 
 cat >"$STATE_DIR/monitor.sh" <<'MONITOR'
@@ -1036,75 +989,16 @@ if [[ "$classification" == unexpected_owner_loss ]]; then
   within_recovery_deadline || exit 1
   skc_session_publish_current_alias "$SKC_SESSION_INCIDENT_CANONICAL_JSON" "$SKC_SESSION_INCIDENT_JSON" "$SKC_SESSION_GENERATION_JSON" "$SKC_SESSION_NAME" "$SKC_SESSION_OWNER_GENERATION" owner_incident || exit 1
   within_recovery_deadline || exit 1
-  if [[ -n "${SKC_SESSION_ROUTER_BIN:-}" && -n "${SKC_SESSION_CHANNEL:-}" ]]; then
-    set +e
-    "$SKC_SESSION_ROUTER_BIN" tmux stale --session "$SKC_SESSION_NAME" --pane missing --minutes 0 --last-line "SKC owner lifecycle incident recorded" --channel "$SKC_SESSION_CHANNEL" >/dev/null 2>&1
-    stale_router_rc=$?
-    set -e
-    if [[ "$stale_router_rc" -ne 0 ]]; then
-      echo "router stale-owner notification failed" >&2
-      python3 - "$SKC_SESSION_STATE_DIR/$SKC_SESSION_NAME/owner-lifecycle/router-failure-$SKC_SESSION_OWNER_GENERATION-stale_owner_notification.json" "$SKC_SESSION_NAME" "$SKC_SESSION_OWNER_GENERATION" "$stale_router_rc" <<'PY'
-import json, os, sys
-path, session, generation, rc = sys.argv[1:]
-record = {"schema_version":1,"kind":"router_failure","session_id":session,"owner_generation":generation,"boundary":"stale_owner_notification","exit_code":int(rc)}
-temporary = f"{path}.{os.getpid()}.tmp"
-try:
-    with open(temporary, "x", encoding="utf-8") as handle: json.dump(record, handle, separators=(",", ":")); handle.write("\n")
-    os.link(temporary, path)
-except FileExistsError:
-    with open(path, encoding="utf-8") as handle:
-        if json.load(handle) != record: raise
-finally:
-    try: os.unlink(temporary)
-    except FileNotFoundError: pass
-PY
-      skc_session_publish_current_alias "$SKC_SESSION_STATE_DIR/$SKC_SESSION_NAME/owner-lifecycle/router-failure-$SKC_SESSION_OWNER_GENERATION-stale_owner_notification.json" "$SKC_SESSION_STATE_DIR/router-failure.json" "$SKC_SESSION_GENERATION_JSON" "$SKC_SESSION_NAME" "$SKC_SESSION_OWNER_GENERATION" router_failure || echo "router stale-owner failure receipt publication unavailable" >&2
-    fi
-  fi
 fi
 MONITOR
 chmod +x "$STATE_DIR/monitor.sh"
 CREATION_BOUNDARY=monitor
 
 if [[ "${SKC_SESSION_MONITOR_DISABLE:-0}" != 1 ]]; then
-  MONITOR_LAUNCH=(env "SKC_SESSION_NAME=$SESSION" "SKC_SESSION_WORKDIR=$WORKDIR" "SKC_SESSION_OWNER_GENERATION=$OWNER_GENERATION" "SKC_SESSION_STATE_DIR=$STATE_DIR" "SKC_SESSION_SOCKET_KEY=$SOCKET_KEY" "SKC_SESSION_TMUX_BIN=$TMUX_BIN" "SKC_SESSION_SKC_BIN=$SKC_BIN" "SKC_SESSION_POSTMORTEM_SH=$SCRIPT_DIR/postmortem.sh" "SKC_SESSION_GENERATION_JSON=$GENERATION_JSON" "SKC_SESSION_VERDICT_JSON=$STATE_DIR/verdict.json" "SKC_SESSION_VERDICT_CANONICAL_JSON=$LIFECYCLE_DIR/verdict-$OWNER_GENERATION.json" "SKC_SESSION_VANISHED_JSON=$STATE_DIR/vanished.json" "SKC_SESSION_VANISHED_CANONICAL_JSON=$LIFECYCLE_DIR/vanished-$OWNER_GENERATION.json" "SKC_SESSION_INCIDENT_JSON=$STATE_DIR/incident.json" "SKC_SESSION_INCIDENT_CANONICAL_JSON=$LIFECYCLE_DIR/incident-$OWNER_GENERATION.json" "SKC_SESSION_ROUTER_BIN=$ROUTER_BIN" "SKC_SESSION_CHANNEL=$CHANNEL" "SKC_SESSION_MONITOR_INTERVAL=${SKC_SESSION_MONITOR_INTERVAL:-5}" bash "$STATE_DIR/monitor.sh")
+  MONITOR_LAUNCH=(env "SKC_SESSION_NAME=$SESSION" "SKC_SESSION_WORKDIR=$WORKDIR" "SKC_SESSION_OWNER_GENERATION=$OWNER_GENERATION" "SKC_SESSION_STATE_DIR=$STATE_DIR" "SKC_SESSION_SOCKET_KEY=$SOCKET_KEY" "SKC_SESSION_TMUX_BIN=$TMUX_BIN" "SKC_SESSION_SKC_BIN=$SKC_BIN" "SKC_SESSION_POSTMORTEM_SH=$SCRIPT_DIR/postmortem.sh" "SKC_SESSION_GENERATION_JSON=$GENERATION_JSON" "SKC_SESSION_VERDICT_JSON=$STATE_DIR/verdict.json" "SKC_SESSION_VERDICT_CANONICAL_JSON=$LIFECYCLE_DIR/verdict-$OWNER_GENERATION.json" "SKC_SESSION_VANISHED_JSON=$STATE_DIR/vanished.json" "SKC_SESSION_VANISHED_CANONICAL_JSON=$LIFECYCLE_DIR/vanished-$OWNER_GENERATION.json" "SKC_SESSION_INCIDENT_JSON=$STATE_DIR/incident.json" "SKC_SESSION_INCIDENT_CANONICAL_JSON=$LIFECYCLE_DIR/incident-$OWNER_GENERATION.json" "SKC_SESSION_MONITOR_INTERVAL=${SKC_SESSION_MONITOR_INTERVAL:-5}" bash "$STATE_DIR/monitor.sh")
   "$TMUX_BIN" -L "$SOCKET_KEY" new-session -d -s "$MONITOR_SESSION" -c "$WORKDIR" -n owner-monitor "$(shell_join "${MONITOR_LAUNCH[@]}")" || { echo "owner monitor creation failed" >&2; exit 1; }
   ROLLBACK_MONITOR_CREATED=1
   record_rollback_identity monitor_session "$MONITOR_SESSION" ROLLBACK_MONITOR_NATIVE_ID ROLLBACK_MONITOR_SERVER_PID ROLLBACK_MONITOR_SERVER_START_TIME ROLLBACK_MONITOR_SESSION_NAME || { echo "owner monitor rollback identity receipt failed" >&2; exit 1; }
-fi
-if [[ "${SKC_SESSION_SKIP_ROUTER:-0}" != 1 && -n "$ROUTER_BIN" ]]; then
-  KEYWORDS="${SKC_SESSION_KEYWORDS:-/skill:deep-interview,/skill:ralplan,skc ultragoal,skc team,deep-interview,ralplan,ultragoal,team,Ask 1 questions,Ask questions,Deep Interview · Round,Question}"
-  WATCH_ARGS=(tmux watch --session "$SESSION" --stale-minutes "${SKC_SESSION_STALE_MINUTES:-60}" --format compact)
-  [[ -n "$KEYWORDS" ]] && WATCH_ARGS+=(--keywords "$KEYWORDS")
-  [[ -n "$CHANNEL" ]] && WATCH_ARGS+=(--channel "$CHANNEL")
-  [[ -n "$MENTION" ]] && WATCH_ARGS+=(--mention "$MENTION")
-  set +e
-  timeout "${ROUTER_WATCH_TIMEOUT_SECONDS}s" "$ROUTER_BIN" "${WATCH_ARGS[@]}"
-  watch_rc=$?
-  set -e
-  if [[ "$watch_rc" -ne 0 ]]; then
-    echo "router watch registration failed for $SESSION (rc=$watch_rc); tmux session is still running" >&2
-    if python3 - "$LIFECYCLE_DIR/router-failure-$OWNER_GENERATION-watch_registration.json" "$SESSION" "$OWNER_GENERATION" "$watch_rc" <<'PY'
-import json, os, sys
-path, session, generation, rc = sys.argv[1:]
-record = {"schema_version":1,"kind":"router_failure","session_id":session,"owner_generation":generation,"boundary":"watch_registration","exit_code":int(rc)}
-temporary = f"{path}.{os.getpid()}.tmp"
-try:
-    with open(temporary, "x", encoding="utf-8") as handle: json.dump(record, handle, separators=(",", ":")); handle.write("\n")
-    os.link(temporary, path)
-except FileExistsError:
-    with open(path, encoding="utf-8") as handle:
-        if json.load(handle) != record: raise
-finally:
-    try: os.unlink(temporary)
-    except FileNotFoundError: pass
-PY
-    then
-      skc_session_publish_current_alias "$LIFECYCLE_DIR/router-failure-$OWNER_GENERATION-watch_registration.json" "$STATE_DIR/router-failure.json" "$GENERATION_JSON" "$SESSION" "$OWNER_GENERATION" router_failure || echo "router watch failure receipt publication unavailable" >&2
-    else
-      echo "router watch failure receipt unavailable" >&2
-    fi
-  fi
 fi
 CREATION_COMPLETE=1
 ROLLBACK_ARMED=0
@@ -1114,5 +1008,4 @@ exec 9>&-
 unset SKC_SESSION_TRANSITION_LOCK_HELD
 printf 'created SKC session: %s\n' "$SESSION"
 printf '  workdir: %s\n  branch: %s\n  state: %s\n' "$WORKDIR" "$BRANCH" "$STATE_DIR"
-printf '  markers: creation-state.json started.json prompt-accepted.json terminal.json final.json verdict.json incident.json recovery.json\n'
-printf '  prompt: SKC_SESSION_STATE_DIR=%q SKC_SESSION_TMUX_SOCKET=%q %q %q @/path/to/prompt.md\n' "$STATE_DIR" "$SOCKET_KEY" "$SCRIPT_DIR/prompt.sh" "$SESSION"
+printf '  markers: creation-state.json started.json terminal.json final.json verdict.json incident.json recovery.json\n'

@@ -41,13 +41,22 @@ mod platform {
 			if pid <= 0 {
 				return None;
 			}
-			let pidfd = open_pidfd(pid)?;
 			let start_time = read_start_time(pid)?;
-			Some(Self { pid, pidfd, start_time })
+			let pidfd = open_pidfd(pid)?;
+			if !start_time_observations_match(start_time, read_start_time(pid)) {
+				return None;
+			}
+			let process = Self { pid, pidfd, start_time };
+			(process.status() == ProcessStatus::Running).then_some(process)
 		}
 
 		pub const fn pid(&self) -> i32 {
 			self.pid
+		}
+
+		/// Kernel-derived identity evidence for this exact process incarnation.
+		pub fn incarnation(&self) -> String {
+			format!("linux:{}", self.start_time)
 		}
 
 		pub fn children(&self) -> Vec<Self> {
@@ -237,6 +246,10 @@ mod platform {
 		rest.split_whitespace().nth(19)?.parse().ok()
 	}
 
+	fn start_time_observations_match(before: u64, after: Option<u64>) -> bool {
+		after == Some(before)
+	}
+
 	fn read_process_state(pid: i32) -> Option<char> {
 		// `/proc/[pid]/stat` field 3 is the process state. The comm field
 		// (between parens) may itself contain spaces and parens, so locate the
@@ -302,6 +315,18 @@ mod platform {
 		}
 		matches
 	}
+
+	#[cfg(test)]
+	mod tests {
+		use super::start_time_observations_match;
+
+		#[test]
+		fn from_pid_rejects_mismatched_start_time_observations() {
+			assert!(start_time_observations_match(42, Some(42)));
+			assert!(!start_time_observations_match(42, Some(43)));
+			assert!(!start_time_observations_match(42, None));
+		}
+	}
 }
 
 #[cfg(target_os = "macos")]
@@ -343,6 +368,11 @@ mod platform {
 
 		pub const fn pid(&self) -> i32 {
 			self.pid
+		}
+
+		/// Kernel-derived identity evidence for this exact process incarnation.
+		pub fn incarnation(&self) -> String {
+			format!("darwin:{}:{}", self.start_tvsec, self.start_tvusec)
 		}
 
 		pub fn children(&self) -> Vec<Self> {
@@ -859,6 +889,11 @@ mod platform {
 			self.pid
 		}
 
+		/// Kernel-derived identity evidence for this exact process incarnation.
+		pub fn incarnation(&self) -> String {
+			format!("windows:{}", self.creation_time)
+		}
+
 		pub fn parent_pid(&self) -> Option<i32> {
 			process_basic_information(self.handle.as_raw())
 				.and_then(|info| i32::try_from(info.inherited_from_unique_process_id).ok())
@@ -1278,6 +1313,14 @@ impl Process {
 		self.inner.pid()
 	}
 
+	/// Kernel-derived identity evidence for this exact process incarnation.
+	///
+	/// The opaque value is stable for the lifetime of the kernel process object
+	/// and changes when the operating system recycles a PID.
+	pub fn incarnation(&self) -> String {
+		self.inner.incarnation()
+	}
+
 	/// Parent process id for this process, when available.
 	pub fn ppid(&self) -> Option<i32> {
 		self.inner.parent_pid()
@@ -1286,6 +1329,23 @@ impl Process {
 	/// Launch arguments for this process.
 	pub fn args(&self) -> Vec<String> {
 		self.inner.args()
+	}
+
+	/// Send `signal` only to this pinned root process.
+	///
+	/// Linux delivers through the owned pidfd and Windows through the owned
+	/// process handle, so PID reuse cannot redirect the signal. Darwin has no
+	/// equivalent stable kernel authority and deliberately fails closed.
+	pub fn signal_root(&self, signal: i32) -> bool {
+		#[cfg(target_os = "macos")]
+		{
+			let _ = signal;
+			false
+		}
+		#[cfg(not(target_os = "macos"))]
+		{
+			self.inner.kill(signal)
+		}
 	}
 
 	/// Send `signal` to this process and its descendants, children first.

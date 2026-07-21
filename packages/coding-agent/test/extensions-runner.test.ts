@@ -32,10 +32,14 @@ describe("ExtensionRunner", () => {
 		modelRegistry = new ModelRegistry(authStorage);
 	});
 
-	afterEach(() => {
+	afterEach(async () => {
 		testSetExtensionHandlerTimeoutMs(EXTENSION_HANDLER_TIMEOUT_MS);
 		authStorage.close();
-		tempDir.removeSync();
+		if (process.platform === "win32") {
+			Bun.gc(true);
+			await Bun.sleep(50);
+		}
+		await tempDir.remove();
 	});
 
 	const loadTestExtensions = async (configuredPaths: string[] = []) => {
@@ -55,6 +59,35 @@ describe("ExtensionRunner", () => {
 			errors: result.errors.filter(error => isTestScoped(error.path)),
 		};
 	};
+
+	describe("safe tool resolver", () => {
+		it("exposes only tool safe-summary metadata through extension context", () => {
+			const safeSummary = (kind: "args" | "result", value: unknown) =>
+				kind === "args" ? `safe:${String(value)}` : undefined;
+			const resolver = vi.fn((name: string) =>
+				name === "safe-tool"
+					? { safeSummary, safeSummaryFields: { args: ["path"], result: ["status"] } }
+					: undefined,
+			);
+			const runner = new ExtensionRunner(
+				[],
+				{ flagValues: new Map(), pendingProviderRegistrations: [] } as never,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+			runner.initialize({} as never, { resolveTool: resolver } as never);
+
+			const ctx = runner.createContext();
+			expect(ctx.resolveTool("safe-tool")).toEqual({
+				safeSummary,
+				safeSummaryFields: { args: ["path"], result: ["status"] },
+			});
+			expect(ctx.resolveTool("unknown-tool")).toBeUndefined();
+			expect(resolver).toHaveBeenCalledWith("safe-tool");
+			expect(resolver).toHaveBeenCalledWith("unknown-tool");
+		});
+	});
 
 	describe("shortcut conflicts", () => {
 		it("warns when extension shortcut conflicts with built-in", async () => {
@@ -747,11 +780,20 @@ describe("ExtensionRunner", () => {
 					setLabel: () => {},
 					getActiveTools: () => [],
 					getAllTools: () => [],
+					resolveTool: () => undefined,
 					setActiveTools: async () => {},
 					getCommands: () => [],
 					setModel: async () => false,
 					getThinkingLevel: () => undefined,
 					setThinkingLevel: () => {},
+					getThinkingVisibility: () => "visible",
+					setThinkingVisibility: () => {},
+					cycleThinkingLevel: () => undefined,
+					setThinkingLevelForControl: async () => {},
+					setThinkingVisibilityForControl: async () => {},
+					setModelTemporaryForControl: async () => false,
+					fetchUsageReportsForControl: async () => null,
+					getThinkingScopeForControl: () => "global config",
 					getSessionName: () => sessionManager.getSessionName(),
 					setSessionName: async () => {},
 				},
@@ -815,11 +857,20 @@ describe("ExtensionRunner", () => {
 					setLabel: () => {},
 					getActiveTools: () => [],
 					getAllTools: () => [],
+					resolveTool: () => undefined,
 					setActiveTools: async () => {},
 					getCommands: () => [],
 					setModel: async () => false,
 					getThinkingLevel: () => undefined,
 					setThinkingLevel: () => {},
+					getThinkingVisibility: () => "visible",
+					setThinkingVisibility: () => {},
+					cycleThinkingLevel: () => undefined,
+					setThinkingLevelForControl: async () => {},
+					setThinkingVisibilityForControl: async () => {},
+					setModelTemporaryForControl: async () => false,
+					fetchUsageReportsForControl: async () => null,
+					getThinkingScopeForControl: () => "global config",
 					getSessionName: () => sessionManager.getSessionName(),
 					setSessionName: async name => {
 						await sessionManager.setSessionName(name);
@@ -841,6 +892,71 @@ describe("ExtensionRunner", () => {
 
 			expect(sessionManager.getSessionName()).toBe("Named by extension");
 			expect(sessionManager.getHeader()?.title).toBe("Named by extension");
+		});
+
+		it("routes counted pending-message queues without exposing side-turn execution", async () => {
+			const extCode = `
+				export default function(pi) {
+					pi.on("session_start", () => {});
+				}
+			`;
+			const explicitExtensionPath = path.join(tempDir.path(), "pending-counts.ts");
+			fs.writeFileSync(explicitExtensionPath, extCode);
+			const result = await loadTestExtensions([explicitExtensionPath]);
+			const runtimeActions = {
+				sendMessage: () => {},
+				sendUserMessage: () => {},
+				appendEntry: () => {},
+				setLabel: () => {},
+				getActiveTools: () => [],
+				getAllTools: () => [],
+				resolveTool: () => undefined,
+				setActiveTools: async () => {},
+				getCommands: () => [],
+				setModel: async () => false,
+				getThinkingLevel: () => undefined,
+				setThinkingLevel: () => {},
+				getThinkingVisibility: () => "visible" as const,
+				setThinkingVisibility: () => {},
+				cycleThinkingLevel: () => undefined,
+				setThinkingLevelForControl: async () => {},
+				setThinkingVisibilityForControl: async () => {},
+				setModelTemporaryForControl: async () => false,
+				fetchUsageReportsForControl: async () => null,
+				getThinkingScopeForControl: () => "global config" as const,
+				getSessionName: () => undefined,
+				setSessionName: async () => {},
+			};
+			const baseContextActions = {
+				getModel: () => undefined,
+				isIdle: () => true,
+				abort: () => {},
+				hasPendingMessages: () => true,
+				shutdown: () => {},
+				getContextUsage: () => undefined,
+				compact: async () => {},
+				getSystemPrompt: () => [],
+			};
+
+			// Wired: the counted provider is surfaced verbatim on the created context.
+			const wired = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+			const earlyContext = wired.createContext();
+			expect("runEphemeralTurn" in earlyContext).toBe(false);
+			wired.initialize(runtimeActions, {
+				...baseContextActions,
+				getPendingMessageCounts: () => ({ steering: 2, followUp: 1, nextTurn: 3 }),
+			});
+			expect(wired.createContext().getPendingMessageCounts()).toEqual({ steering: 2, followUp: 1, nextTurn: 3 });
+
+			// Omitted: every initialize applies the explicit zero fallback, never a stale provider.
+			wired.initialize(runtimeActions, baseContextActions);
+			expect(wired.createContext().getPendingMessageCounts()).toEqual({ steering: 0, followUp: 0, nextTurn: 0 });
 		});
 
 		it("keeps session naming unavailable during extension load", async () => {
@@ -1134,11 +1250,20 @@ describe("ExtensionRunner", () => {
 					setLabel: () => {},
 					getActiveTools: () => [],
 					getAllTools: () => [],
+					resolveTool: () => undefined,
 					setActiveTools: async () => {},
 					getCommands: () => [],
 					setModel: async () => false,
 					getThinkingLevel: () => undefined,
 					setThinkingLevel: () => {},
+					getThinkingVisibility: () => "visible",
+					setThinkingVisibility: () => {},
+					cycleThinkingLevel: () => undefined,
+					setThinkingLevelForControl: async () => {},
+					setThinkingVisibilityForControl: async () => {},
+					setModelTemporaryForControl: async () => false,
+					fetchUsageReportsForControl: async () => null,
+					getThinkingScopeForControl: () => "global config",
 					getSessionName: () => sessionManager.getSessionName(),
 					setSessionName: async () => {},
 				},

@@ -1,6 +1,6 @@
 /**
  * Single source of truth for append-only context-mode resolution and manager
- * construction. Both the initial session build (`sdk.ts`) and the runtime
+ * construction. Both the initial session build (`sdk/session.ts`) and the runtime
  * model/setting-change path (`agent-session.ts`), plus the status UI, resolve
  * through here so the auto allowlist and prefix-reset diagnostics never drift.
  */

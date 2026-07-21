@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mapAnswerToGate } from "../src/notifications/index";
+import { mapAnswerToGate } from "../src/sdk/bus";
 
 const options = ["alpha", "beta", "gamma"];
 

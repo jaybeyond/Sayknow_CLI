@@ -4,6 +4,58 @@ Sayknow-CLI is a rebranded fork of [gajae-code](https://github.com/Yeachan-Heo/g
 This file tracks the **fork's own releases**; upstream's full feature history lives
 in that project. Each release notes the upstream version it is built on.
 
+
+## [0.4.0] — 2026-07-21
+
+### Changed
+
+- Synced onto upstream **gajae-code v0.11.6** (from v0.6.0), a 5-minor-version jump
+  bringing v0.7–v0.11 evolution: managed chat daemon (#2782, #2785, #2786), Telegram
+  lock auto-reconciliation (#2781), compiled startup import-cycle fix (#2779), legacy
+  daemon tombstone reclamation (#2780), nextest CI hardening (#2777), and the new
+  `/handoff` slash command (#2746).
+- Rebrand layer regenerated via `extract-fork-layer`: **485 overlay files** (was 188) —
+  captures fork-owned content in `notifications/`, `modes/rpc/`, `modes/bridge/`,
+  `modes/shared/agent-wire/`, `python/skc-rpc/`, and `crates/skc-notifications/` that
+  prior extractions had missed.
+- CI workflow: `sayknow-v*` tag prefix now drives every release-gated job
+  (`native`, `binaries`, `publish`) via a global prefix check.
+- `crates/pi-natives` overlay now ships the fork's actual `skc-notifications` path
+  dep instead of the codemod-renamed `skc-sdk` straggler.
+
+### Added
+
+- **SDK subpath exports.** `@sayknow-cli/coding-agent/sdk` and `./sdk/bus/*` are now
+  declared in `package.json#exports`, matching upstream's `sdk/` directory split.
+- **MRU-aware model fallback** ported from old `sdk.ts` into `sdk/session.ts`:
+  when no model is explicitly selected, the fallback ranks candidates by
+  most-recently-used, then each provider's curated default, then catalog order
+  (was first-catalog-match, which cold-started users on ancient models).
+- **i18n: settings tabs.** New `settings.tab.notifications` key; the
+  `td()`-wrapped setting label/description/options helpers in `settings-selector.ts`
+  cover all tabs including `integrations` and `notifications`.
+- **Team runtime fork extensions** now declared in `SkcTeamStartOptions` /
+  `SkcTeamConfig`: `mailboxDeliveryTransport`, `skc_session_id`, `platform`.
+  `WorkerHeartbeatFile` / `WorkerStatusFile` are now properly exported from
+  `team-runtime.ts`.
+
+### Removed
+
+- **Dead patches dropped** from the rebrand manifest:
+  - `ci-release-publish.ts` patch — superseded by upstream's richer retry loop
+    (`visibilityRetries`, `isTransientVisibilityError`).
+  - `sdk.ts` `guardToolForUltragoalAsk` simplification — upstream expanded the
+    signature with `UltragoalAskGuardContext`; the fork's single-arg form is obsolete.
+  - `interactive-mode.ts` `getPlanReviewHelpText` `t("nav.hint")` — the function was
+    removed upstream when plan review moved to `plan-preview-overlay.ts`.
+
+### Known issues (test debt)
+
+- 67 test errors remain from upstream API drift (`model-profile-activation`,
+  `model-registry`, `sdk-*`, etc.). All product code typechecks clean (0 src errors)
+  and brand/i18n/welcome suites pass (40/40). Test mock migration is filed as a
+  follow-up.
+
 ## [0.3.0] — 2026-06-23
 
 ### Changed

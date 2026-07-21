@@ -4,7 +4,7 @@ import * as path from "node:path";
 import { pathToFileURL } from "node:url";
 import * as util from "node:util";
 
-import { logger } from "@sayknow-cli/utils";
+import * as logger from "@sayknow-cli/utils/logger";
 
 import { ToolError } from "../../../tools/tool-errors";
 import { createHelpers, type HelperBundle } from "./helpers";

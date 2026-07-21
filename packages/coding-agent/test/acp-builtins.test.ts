@@ -498,6 +498,7 @@ describe("ACP builtin slash commands", () => {
 
 		expect(result).toEqual({ consumed: true });
 		expect(setModelSpy).toHaveBeenCalledWith(available[0], "default", {
+			cause: "user-selection",
 			selector: "anthropic/claude-3-5-sonnet",
 			thinkingLevel: undefined,
 		});
@@ -517,6 +518,7 @@ describe("ACP builtin slash commands", () => {
 
 		expect(result).toEqual({ consumed: true });
 		expect(setModelSpy).toHaveBeenCalledWith(available[0], "default", {
+			cause: "user-selection",
 			selector: "anthropic/claude-3-5-sonnet",
 			thinkingLevel: "low",
 		});
@@ -534,6 +536,7 @@ describe("ACP builtin slash commands", () => {
 
 		expect(result).toEqual({ consumed: true });
 		expect(setModelSpy).toHaveBeenCalledWith(available[0], "default", {
+			cause: "user-selection",
 			selector: "anthropic/claude-3-5-sonnet",
 			thinkingLevel: "low",
 		});
@@ -861,7 +864,6 @@ describe("ACP builtin slash commands", () => {
 			"/btw hi",
 			"/new",
 			"/drop",
-			"/handoff",
 			"/fork",
 		];
 		for (const cmd of fallthroughCommands) {
@@ -1109,6 +1111,42 @@ describe("wave 3 commands", () => {
 		expect(result).toEqual({ consumed: true });
 		expect(compactCalled).toBe(true);
 		expect(output[0]).toContain("Compaction complete.");
+	});
+
+	// /handoff
+	it("/handoff: reports success without a saved path for a manual handoff", async () => {
+		// Manual ACP/TUI handoff never passes autoTriggered, so production never
+		// returns a savedPath here; only automatic handoff can save to disk.
+		const { output, session, runtime } = createRuntime();
+		let receivedInstr: string | undefined = "unset";
+		session.handoff = async (instr?: string) => {
+			receivedInstr = instr;
+			return { document: "## Goal\nContinue", savedPath: undefined };
+		};
+		const result = await executeAcpBuiltinSlashCommand("/handoff preserve failing test", runtime);
+		expect(result).toEqual({ consumed: true });
+		expect(receivedInstr).toBe("preserve failing test");
+		expect(output[0]).toContain("Handoff created");
+		expect(output[0]).not.toContain("saved to");
+	});
+
+	it("/handoff: surfaces a usage notice when nothing is handed off", async () => {
+		const { output, session, runtime } = createRuntime();
+		session.handoff = async (_instr?: string) => undefined;
+		const result = await executeAcpBuiltinSlashCommand("/handoff", runtime);
+		expect(result).toEqual({ consumed: true });
+		expect(output[0]).toContain("Handoff not created");
+	});
+
+	it("/handoff: surfaces a non-destructive usage notice when handoff throws", async () => {
+		const { output, session, runtime } = createRuntime();
+		session.handoff = async (_instr?: string) => {
+			throw new Error("Cannot hand off while a response is streaming; wait for it to finish or abort it first.");
+		};
+		const result = await executeAcpBuiltinSlashCommand("/handoff", runtime);
+		expect(result).toEqual({ consumed: true });
+		expect(output[0]).toContain("Handoff failed");
+		expect(output[0]).toContain("current session is unchanged");
 	});
 });
 

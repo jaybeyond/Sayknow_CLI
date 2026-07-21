@@ -1,0 +1,257 @@
+--- a/packages/coding-agent/src/modes/components/settings-selector.ts
++++ b/packages/coding-agent/src/modes/components/settings-selector.ts
+@@ -22,6 +22,7 @@
+ 	StatusLineSeparatorStyle,
+ } from "../../config/settings-schema";
+ import { SETTING_TABS, TAB_METADATA } from "../../config/settings-schema";
++import { t, td } from "../../i18n";
+ import { getCurrentThemeName, getSelectListTheme, getSettingsListTheme, theme } from "../../modes/theme/theme";
+ import { matchesAppInterrupt } from "../../modes/utils/keybinding-matchers";
+ import { getTabBarTheme } from "../shared";
+@@ -37,6 +38,25 @@
+ import { ALL_SEGMENT_IDS } from "./status-line/segments";
+ import type { StatusLineSegmentOptions } from "./tool-status-header";
+ 
++// Settings UI strings are translated by deterministic keys derived from the
++// setting path; English (the schema value) is the fallback. Keys match those
++// generated into i18n/messages/<lang>.settings.ts.
++function tSettingLabel(def: SettingDef): string {
++	return def.label ? td(`set:${def.path}:l`, def.label) : def.label;
++}
++function tSettingDesc(def: SettingDef): string {
++	return def.description ? td(`set:${def.path}:d`, def.description) : def.description;
++}
++function tSettingOptions<T extends { value: string; label?: string; description?: string }>(
++	path: string,
++	options: ReadonlyArray<T>,
++): T[] {
++	return options.map(o => ({
++		...o,
++		label: o.label ? td(`set:${path}:o:${o.value}:l`, o.label) : o.label,
++		description: o.description ? td(`set:${path}:o:${o.value}:d`, o.description) : o.description,
++	}));
++}
+ /**
+  * A submenu component for selecting from a list of options.
+  */
+@@ -184,10 +204,6 @@
+ 	{ value: "24h", label: "24h" },
+ 	{ value: "12h", label: "12h" },
+ ];
+-const USAGE_MODE_OPTIONS: SelectItem[] = [
+-	{ value: "used", label: "Used" },
+-	{ value: "remaining", label: "Remaining" },
+-];
+ const USAGE_MODE_VALUES = ["used", "remaining"] as const;
+ type UsageMode = (typeof USAGE_MODE_VALUES)[number];
+ 
+@@ -204,7 +220,6 @@
+ 		path: base?.path || overrides?.path ? { ...(base?.path ?? {}), ...(overrides?.path ?? {}) } : undefined,
+ 		git: base?.git || overrides?.git ? { ...(base?.git ?? {}), ...(overrides?.git ?? {}) } : undefined,
+ 		time: base?.time || overrides?.time ? { ...(base?.time ?? {}), ...(overrides?.time ?? {}) } : undefined,
+-		usage: base?.usage || overrides?.usage ? { ...(base?.usage ?? {}), ...(overrides?.usage ?? {}) } : undefined,
+ 	};
+ }
+ 
+@@ -266,6 +281,8 @@
+ class StatusLineCustomEditor extends Container {
+ 	#list!: SettingsList;
+ 	#draft: StatusLineDraft;
++	#currentWidthPreviewText!: Text;
++	#narrowWidthPreviewText!: Text;
+ 	#previewHighlightSegment: StatusLineSegmentId | undefined;
+ 
+ 	constructor(
+@@ -297,6 +314,13 @@
+ 		this.clear();
+ 		this.addChild(new Text(theme.bold(theme.fg("accent", "Status Line Custom Editor")), 0, 0));
+ 		this.addChild(new Spacer(1));
++		this.addChild(new Text(theme.fg("muted", "Current width preview:"), 0, 0));
++		this.#currentWidthPreviewText = new Text(this.#statusLinePreview(), 0, 0);
++		this.addChild(this.#currentWidthPreviewText);
++		this.addChild(new Text(theme.fg("muted", "Narrow width preview:"), 0, 0));
++		this.#narrowWidthPreviewText = new Text(this.#statusLinePreview(40), 0, 0);
++		this.addChild(this.#narrowWidthPreviewText);
++		this.addChild(new Spacer(1));
+ 		this.#list = new SettingsList(
+ 			this.#items(),
+ 			14,
+@@ -304,17 +328,27 @@
+ 			(id, value) => this.#handleChange(id, value),
+ 			() => this.#cancel(),
+ 			item => this.#setSelectedItem(item),
+-			2,
+ 		);
+ 		this.addChild(this.#list);
+ 	}
+ 
+ 	#refresh(): void {
++		this.#refreshPreview();
+ 		this.#list.setItems(this.#items());
+ 	}
++
++	#refreshPreview(): void {
++		this.#currentWidthPreviewText.setText(this.#statusLinePreview());
++		this.#narrowWidthPreviewText.setText(this.#statusLinePreview(40));
++	}
++
++	#statusLinePreview(width?: number): string {
++		return this.callbacks.getStatusLinePreview?.(width) ?? theme.fg("dim", "(preview not available)");
++	}
+ 	#setSelectedItem(item: SettingItem | undefined): void {
+ 		this.#previewHighlightSegment = this.#highlightSegmentForItem(item);
+ 		this.#preview();
++		this.#refreshPreview();
+ 	}
+ 
+ 	#highlightSegmentForItem(item: SettingItem | undefined): StatusLineSegmentId | undefined {
+@@ -400,22 +434,6 @@
+ 					},
+ 				);
+ 			}
+-			if (id === "usage") {
+-				items.push({
+-					id: "option.usage.mode",
+-					label: "Usage: mode",
+-					currentValue: this.#draft.segmentOptions.usage?.mode ?? "used",
+-					submenu: (currentValue, done) =>
+-						new SelectSubmenu(
+-							"Usage mode",
+-							"Show used quota or remaining quota in the usage segment.",
+-							USAGE_MODE_OPTIONS,
+-							currentValue,
+-							done,
+-							() => done(),
+-						),
+-				});
+-			}
+ 		}
+ 
+ 		items.push(
+@@ -580,12 +598,6 @@
+ 			case "time.showSeconds":
+ 				this.#draft.segmentOptions.time = { ...(this.#draft.segmentOptions.time ?? {}), showSeconds: bool };
+ 				break;
+-			case "usage.mode":
+-				this.#draft.segmentOptions.usage = {
+-					...(this.#draft.segmentOptions.usage ?? {}),
+-					mode: value === "remaining" ? "remaining" : "used",
+-				};
+-				break;
+ 		}
+ 	}
+ 
+@@ -646,7 +658,7 @@
+ 		...SETTING_TABS.map(id => {
+ 			const meta = TAB_METADATA[id];
+ 			const icon = theme.symbol(meta.icon as Parameters<typeof theme.symbol>[0]);
+-			return { id, label: `${icon} ${meta.label}` };
++			return { id, label: `${icon} ${t(`settings.tab.${id}`)}` };
+ 		}),
+ 		{ id: "plugins", label: `${theme.icon.package} Plugins` },
+ 	];
+@@ -810,13 +822,15 @@
+ 		}
+ 
+ 		const currentValue = this.#getCurrentValue(def);
++		const label = tSettingLabel(def);
++		const description = tSettingDesc(def);
+ 
+ 		switch (def.type) {
+ 			case "boolean":
+ 				return {
+ 					id: def.path,
+-					label: def.label,
+-					description: def.description,
++					label,
++					description,
+ 					currentValue: currentValue ? "true" : "false",
+ 					values: ["true", "false"],
+ 				};
+@@ -824,8 +838,8 @@
+ 			case "enum":
+ 				return {
+ 					id: def.path,
+-					label: def.label,
+-					description: def.description,
++					label,
++					description,
+ 					currentValue: currentValue as string,
+ 					values: [...def.values],
+ 				};
+@@ -833,8 +847,8 @@
+ 			case "submenu":
+ 				return {
+ 					id: def.path,
+-					label: def.label,
+-					description: def.description,
++					label,
++					description,
+ 					currentValue: this.#getSubmenuCurrentValue(def.path, currentValue),
+ 					submenu: (cv, done) => this.#createSubmenu(def, cv, done),
+ 				};
+@@ -842,8 +856,8 @@
+ 			case "text":
+ 				return {
+ 					id: def.path,
+-					label: def.label,
+-					description: def.description,
++					label,
++					description,
+ 					currentValue: (currentValue as string) ?? "",
+ 					submenu: (cv, done) => this.#createTextInput(def, cv, done),
+ 				};
+@@ -892,7 +906,7 @@
+ 		if (def.path === "statusLine.preset") {
+ 			options = options.filter(option => option.value !== "custom");
+ 		}
+-		let description = def.description;
++		let description = tSettingDesc(def);
+ 		if (def.path === "pet.mode") {
+ 			const petAvailable = this.context.petAvailable ?? isPetAvailable();
+ 			options = createPetSelectItems(options, currentValue, petAvailable);
+@@ -985,9 +999,9 @@
+ 		const getPreview = isThemeSetting ? this.callbacks.getStatusLinePreview : undefined;
+ 
+ 		return new SelectSubmenu(
+-			def.label,
++			tSettingLabel(def),
+ 			description,
+-			options,
++			tSettingOptions(def.path, options),
+ 			currentValue,
+ 			value => {
+ 				if (def.path === "pet.mode") {
+@@ -1025,8 +1039,8 @@
+ 			done(value);
+ 		};
+ 		return new TextInputSubmenu(
+-			def.label,
+-			def.description,
++			tSettingLabel(def),
++			tSettingDesc(def),
+ 			currentValue,
+ 			value => {
+ 				// Empty string clears the setting; undefined-typed string settings
+@@ -1141,20 +1155,13 @@
+ 	#buildItemsForTab(defs: SettingDef[], tabId: SettingTab): SettingItem[] {
+ 		const items = this.#buildItemsForDefs(defs);
+ 		if (tabId === "appearance") {
+-			const customEditorCallbacks: SettingsCallbacks = {
+-				...this.callbacks,
+-				onStatusLinePreview: previewSettings => {
+-					this.callbacks.onStatusLinePreview?.(previewSettings);
+-					this.#updateStatusPreview();
+-				},
+-			};
+ 			const customEditorItem: SettingItem = {
+ 				id: STATUS_LINE_CUSTOM_EDITOR_ID,
+ 				label: "Status Line Custom Editor",
+ 				description:
+ 					"Edit custom status line segments, placement, separator, and typed segment options with live previews.",
+ 				currentValue: "open",
+-				submenu: (_currentValue, done) => new StatusLineCustomEditor(customEditorCallbacks, done),
++				submenu: (_currentValue, done) => new StatusLineCustomEditor(this.callbacks, done),
+ 			};
+ 			const presetIndex = items.findIndex(item => item.id === "statusLine.preset");
+ 			if (presetIndex >= 0) {

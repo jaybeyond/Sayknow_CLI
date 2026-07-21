@@ -12,7 +12,7 @@ import {
 	runTelegramReferenceClient,
 	sendTelegramHtmlChunks,
 	telegramUpdateToReply,
-} from "../src/notifications/telegram-reference";
+} from "../src/sdk/bus/telegram-reference";
 
 describe("telegram reference client helpers", () => {
 	test("callback data round-trips and stays within 64 bytes", () => {

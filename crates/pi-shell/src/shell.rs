@@ -1227,6 +1227,8 @@ fn should_skip_env_var(key: &str) -> bool {
 		"BASH_ENV"
 			| "ENV"
 			| "HISTFILE"
+			| "SKC_SESSION_FILE"
+			| "SKC_MANAGED_OWNER_TRANSCRIPT_PATH"
 			| "HISTTIMEFORMAT"
 			| "HISTCMD"
 			| "PS0"
