@@ -93,6 +93,11 @@ impl Process {
 	pub const fn pid(&self) -> i32 {
 		self.inner.pid()
 	}
+	/// Kernel-derived identity evidence for this exact process incarnation.
+	#[napi(getter)]
+	pub fn incarnation(&self) -> String {
+		self.inner.incarnation()
+	}
 
 	/// Parent process id for this process, when available.
 	#[napi(getter)]

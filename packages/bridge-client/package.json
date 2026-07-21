@@ -1,7 +1,7 @@
 {
 	"type": "module",
 	"name": "@sayknow-cli/bridge-client",
-	"version": "0.4.2",
+	"version": "0.4.3",
 	"description": "Transport-only v3 SDK WebSocket client",
 	"homepage": "https://sayknow-cli.com",
 	"author": "jaybeyond and Sayknow-CLI Contributors",

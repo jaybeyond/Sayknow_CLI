@@ -5,6 +5,31 @@ This file tracks the **fork's own releases**; upstream's full feature history li
 in that project. Each release notes the upstream version it is built on.
 
 
+## [0.4.3] — 2026-07-21
+
+### Fixed (cross-platform native publish)
+
+- **pi-natives ps.rs: restore `Process.incarnation` getter.** The fork's
+  `crates/pi-natives/src/ps.rs` predated upstream v0.11.x's
+  `#[napi(getter)] incarnation` method; the chat/telegram daemon control
+  runtimes (`sdk/bus/{chat,telegram}-daemon-control.ts`) read
+  `processRef.incarnation` for ownership authority, so typecheck failed
+  with `Property 'incarnation' does not exist on type 'Process'`.
+- **sdk/bus/index.ts: use `NotificationServer.stop()` instead of `stopAndWait()`.**
+  The fork's `NotificationServer` (notifications.rs) is synchronous and
+  pre-upstream-split; the v0.11.x TS calls `stopAndWait()` which is the
+  upstream async variant. TODO(port): add `stop_and_wait` to
+  pi-natives/src/notifications.rs when the daemon API is ported forward.
+
+### Strategy change
+
+v0.4.3 is published entirely by CI (no local `bun publish`). v0.4.2's
+release hit an integrity-evidence conflict because the darwin-arm64
+subpackage was published both locally (from a Mac-built .node) and from
+CI (from a CI-built .node) with different SRI hashes; `ci-release-publish`
+correctly rejected the second one. For v0.4.3 all 9 main packages + 5
+platform subpackages publish from a single CI run.
+
 ## [0.4.2] — 2026-07-21
 
 ### Fixed (post-0.4.0 publish)
