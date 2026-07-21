@@ -45,15 +45,18 @@ pub use pi_ast::language;
 pub mod power;
 
 pub mod iso;
+pub mod path_identity;
 pub mod prof;
 pub mod ps;
 pub mod pty;
+pub mod recovery_fs;
 pub mod shell;
 pub mod summary;
 pub mod task;
 pub mod text;
 pub(crate) mod utils;
 pub mod workspace;
+
 
 use napi_derive::napi;
 

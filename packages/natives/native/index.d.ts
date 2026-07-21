@@ -126,26 +126,10 @@ export declare class NotificationServer {
   /** Register the reply callback. Must be called before [`Self::start`]. */
   onReply(callback: (err: null | Error, reply: ReplyEvent) => void): void
   /**
-   * Register the authenticated inbound-message callback (free-text,
-   * side-question request/cancel, and in-thread config/control commands).
-   * Must be called before [`Self::start`].
+   * Register the inbound-message callback (free-text injections and in-thread
+   * config commands). Must be called before [`Self::start`].
    */
   onInbound(callback: (err: null | Error, msg: InboundEvent) => void): void
-  /**
-   * Register the raw v3 SDK frame callback. Must be called before
-   * [`Self::start`].
-   */
-  onSdkFrame(callback: (err: null | Error, frame: SdkFrameEvent) => void): void
-  /**
-   * Register the negotiated-capabilities callback. Must be called before
-   * [`Self::start`].
-   */
-  onNegotiatedCapabilities(callback: (err: null | Error, connectionId: string, capabilities: string[]) => void): void
-  /**
-   * Register the connection-close callback. Must be called before
-   * [`Self::start`].
-   */
-  onConnectionClose(callback: (err: null | Error, connectionId: string) => void): void
   /**
    * Bind the loopback endpoint and start serving. Resolves with the bound
    * endpoint info once the socket is bound.
@@ -157,32 +141,12 @@ export declare class NotificationServer {
   /**
    * Broadcast an `action_needed` ask. `needed_json` is a JSON `ActionNeeded`.
    *
-   * `repliable` should be `true` only when an SDK workflow-gate resolver is
-   * available.
+   * `repliable` should be `true` only in unattended/RPC mode.
    *
    * # Errors
    * Fails if not started or `needed_json` is invalid.
    */
   registerAsk(neededJson: string, repliable: boolean): void
-  /**
-   * Register a correlated workflow-gate ask. `workflow_json` must be an
-   * `action_needed` wire frame carrying a nonempty `workflowGateId`.
-   */
-  registerWorkflowGateAsk(workflowJson: string, repliable: boolean): void
-  /**
-   * Register an ask and return an opaque in-process capability. Pass it
-   * unchanged to [`Self::retire_if_unclaimed`]; do not construct, persist,
-   * inspect, or treat it as workflow-gate authority. A supplied
-   * `workflowGateId` is preserved.
-   */
-  registerArbitratedAsk(neededJson: string, repliable: boolean): PresentationLease
-  /**
-   * Atomically terminalize the exact presentation named by an opaque lease.
-   * The typed status proves whether it retired, was already terminal, was
-   * claimed, or became stale without exposing claims, receipts, registration
-   * state, or workflow-gate authority.
-   */
-  retireIfUnclaimed(lease: PresentationLease): RetireIfUnclaimedResult
   /**
    * Broadcast an ephemeral `action_needed` idle ping. `needed_json` is JSON
    * `ActionNeeded`.
@@ -194,31 +158,13 @@ export declare class NotificationServer {
   /**
    * Broadcast an ephemeral threaded-session frame. `frame_json` is a JSON
    * `ServerMessage` (e.g. `identity_header`, `context_update`, `turn_stream`,
-   * `ephemeral_turn_result`, `image_attachment`, `session_closed`,
-   * `config_update`, `hello`). Not buffered for replay.
+   * `image_attachment`, `session_closed`, `config_update`, `hello`). Not
+   * buffered for replay.
    *
    * # Errors
    * Fails if not started or `frame_json` is not a valid `ServerMessage`.
    */
   pushFrame(frameJson: string): void
-  /**
-   * Broadcast a TypeScript-constructed turn frame without re-parsing JSON.
-   * External frames must continue through [`Self::push_frame`] for serde
-   * validation.
-   */
-  pushTurnStreamUnchecked(sessionId: string, phase: string, text: string, finalAnswer?: boolean | undefined | null, messageRef?: string | undefined | null): void
-  /**
-   * Broadcast a file attachment from raw N-API bytes, encoding the unchanged
-   * base64 wire field only in Rust.
-   */
-  pushFileAttachmentUnchecked(sessionId: string, name: string, mime: string | undefined | null, data: Buffer, caption?: string | undefined | null): void
-  /**
-   * Return counters guarding the known-good frame crossing against
-   * regressions.
-   */
-  knownGoodFrameStats(): KnownGoodFrameStats
-  /** Send a validated, bounded JSON envelope to one connected v3 SDK client. */
-  sendTo(connectionId: string, json: string): void
   /**
    * Publish a replayable `session_ready` readiness signal. `ready_json` is a
    * JSON `SessionReady`. Unlike [`Self::push_frame`], this frame is buffered
@@ -231,10 +177,11 @@ export declare class NotificationServer {
    */
   pushSessionReady(readyJson: string): void
   /**
-   * Resolve a legacy/non-arbitrated action locally (the CLI/TUI answered).
-   * Arbitrated presentations require their opaque exact lease to be passed to
-   * [`Self::retire_if_unclaimed`], so an id-only local resolution fails
-   * closed.
+   * Resolve an action locally (the CLI/TUI answered). `answer_json` is an
+   * optional JSON `ReplyAnswer`.
+   *
+   * # Errors
+   * Fails if not started or `answer_json` is invalid.
    */
   resolveLocal(id: string, answerJson?: string | undefined | null): void
   /**
@@ -272,7 +219,7 @@ export declare class NotificationServer {
    */
   reject(id: string, reason?: string | undefined | null): void
   /**
-   * Update whether the SDK workflow-gate resolver is currently available.
+   * Update whether the unattended gate resolver is currently available.
    *
    * # Errors
    * Fails if not started.
@@ -282,8 +229,6 @@ export declare class NotificationServer {
   clientCount(): number
   /** Stop the server (idempotent) and remove the endpoint discovery file. */
   stop(): void
-  /** Stop the server and resolve only after all native socket owners exit. */
-  stopAndWait(): Promise<void>
 }
 
 /** Stable process reference. */
@@ -294,21 +239,10 @@ export declare class Process {
   static fromPath(path: string): Array<Process>
   /** Operating-system process identifier for this process reference. */
   get pid(): number
-  /** Kernel-derived identity evidence for this exact process incarnation. */
-  get incarnation(): string
   /** Parent process id for this process, when available. */
   get ppid(): number | null
   /** Launch arguments for this process. */
   args(): Array<string>
-  /**
-   * Send `signal` only to this pinned process reference.
-   *
-   * On Linux this uses the owned pidfd; on Windows it uses the owned process
-   * handle. It deliberately never discovers descendants or signals a process
-   * group. Returns `false` when the pinned process has already exited or the
-   * operating system rejects delivery.
-   */
-  signalRoot(signal: number): boolean
   /**
    * Send `signal` to this process and its descendants, children first.
    *
@@ -1198,51 +1132,26 @@ export interface HtmlToMarkdownOptions {
 }
 
 /**
- * An authenticated inbound message forwarded to the TypeScript host: free-text
- * injection, ephemeral side-question request/cancel, in-thread config command,
- * or deterministic control command.
+ * An inbound message forwarded to the TypeScript host: a free-text injection,
+ * in-thread config command, or deterministic control command.
  */
 export interface InboundEvent {
-  /**
-   * Inbound kind (`user_message`, `ephemeral_turn`,
-   * `ephemeral_turn_cancel`, `config_command`, or `control_command`).
-   */
+  /** Inbound kind (`user_message`, `config_command`, or `control_command`). */
   kind: string
-  /**
-   * Server-authenticated identity of the WebSocket connection that delivered
-   * this event.
-   */
-  connectionId: string
   /** The session this inbound belongs to. */
   sessionId: string
-  /** Free-text body (`user_message` or `ephemeral_turn` only). */
+  /** Free-text body (`user_message` only). */
   text?: string
-  /**
-   * Telegram update id for dedupe (`user_message`, `ephemeral_turn`, or
-   * `ephemeral_turn_cancel` only).
-   */
+  /** Telegram update id for dedupe (`user_message` only). */
   updateId?: number
-  /**
-   * Originating thread/topic id (`user_message`, `ephemeral_turn`, or
-   * `ephemeral_turn_cancel` only).
-   */
+  /** Originating thread/topic id (`user_message` only). */
   threadId?: string
-  /**
-   * Originating Telegram message id (`ephemeral_turn` and
-   * `ephemeral_turn_cancel` only).
-   */
-  messageId?: number
   /** Requested verbosity `"lean"|"verbose"` (`config_command` only). */
   verbosity?: string
   /** Requested redaction state (`config_command` only). */
   redact?: boolean
-  /**
-   * Client-generated request id (`ephemeral_turn`, `ephemeral_turn_cancel`,
-   * or `control_command` only).
-   */
+  /** Client-generated request id (`control_command` only). */
   requestId?: string
-  /** Cancellation reason (`ephemeral_turn_cancel` only). */
-  reason?: string
   /** JSON-encoded command payload (`control_command` only). */
   commandJson?: string
   /**
@@ -1392,19 +1301,6 @@ export declare enum KeyEventType {
   Repeat = 2,
   /** Key release event. */
   Release = 3
-}
-
-/** Observable counters for the internal known-good N-API frame lane. */
-export interface KnownGoodFrameStats {
-  /** Frames constructed as `TurnStream` without parsing a JSON string. */
-  knownGoodTurnStreamFrames: number
-  /** JSON serde parses of externally supplied `turn_stream` frames. */
-  turnStreamSerdeValidationParses: number
-  /**
-   * Base64 characters encoded in Rust for `file_attachment` frames (the JS
-   * side crosses raw `Buffer` bytes and never allocates the base64 string).
-   */
-  fileAttachmentRustBase64Chars: number
 }
 
 /** A lifecycle request forwarded to the TypeScript daemon for orchestration. */
@@ -1853,18 +1749,6 @@ export declare function parseKey(data: string, kittyProtocolActive: boolean): st
  */
 export declare function parseKittySequence(data: string): ParsedKittyResult | null
 
-/**
- * Opaque in-process presentation capability.
- *
- * Returned by [`NotificationServer::register_arbitrated_ask`]. Pass it
- * unchanged to [`NotificationServer::retire_if_unclaimed`]; do not construct,
- * persist, inspect, or treat it as workflow-gate authority.
- */
-export interface PresentationLease {
-  actionId: string
-  registrationEpoch: number
-}
-
 /** Current state of a process reference. */
 export declare enum ProcessStatus {
   /** The referenced process is still running. */
@@ -1961,10 +1845,7 @@ export declare function renameNoReplacePath(sourcePath: string, destinationPath:
 
 /** A client reply forwarded to the TypeScript host for gate resolution. */
 export interface ReplyEvent {
-  /**
-   * The transient action/presentation id being answered. This is not the
-   * durable workflow gate id.
-   */
+  /** The transient action/presentation id being answered, not a durable gate id. */
   id: string
   /** JSON-encoded `ReplyAnswer` (number, string, or `{selected,custom}`). */
   answerJson: string
@@ -1979,17 +1860,6 @@ export interface ReplyEvent {
  * publication.
  */
 export declare function retainBrokerPublication(agentDir: string): NativeRetainedBrokerPublication
-
-/** Public status of exact direct retirement. Claims and receipts remain native. */
-export interface RetireIfUnclaimedResult {
-  status: 'retired' | 'already_terminal' | 'claimed' | 'stale'
-}
-
-/** A raw v3 SDK frame paired with its actual WebSocket connection id. */
-export interface SdkFrameEvent {
-  connectionId: string
-  json: string
-}
 
 /**
  * Search content for a pattern (one-shot, compiles pattern each time).

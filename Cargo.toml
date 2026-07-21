@@ -186,6 +186,7 @@ async-trait = "0.1"
 dashmap = "6.1"
 parking_lot = "0.12.5"
 rayon = "1.12"
+sha2 = "0.10"
 tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["full"] }
 

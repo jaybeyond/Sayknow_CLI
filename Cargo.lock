@@ -2338,7 +2338,7 @@ dependencies = [
 
 [[package]]
 name = "pi-ast"
-version = "0.3.16"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "ast-grep-core",
@@ -2406,7 +2406,7 @@ dependencies = [
 
 [[package]]
 name = "pi-iso"
-version = "0.3.16"
+version = "0.4.0"
 dependencies = [
  "async-trait",
  "libc",
@@ -2418,7 +2418,7 @@ dependencies = [
 
 [[package]]
 name = "pi-natives"
-version = "0.3.16"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "arboard",
@@ -2449,6 +2449,7 @@ dependencies = [
  "regex",
  "serde",
  "serde_json",
+ "sha2",
  "similar 3.1.1",
  "skc-notifications",
  "smallvec",
@@ -2464,7 +2465,7 @@ dependencies = [
 
 [[package]]
 name = "pi-shell"
-version = "0.3.16"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "brush-builtins",
@@ -2992,6 +2993,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "sha2"
+version = "0.10.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a7507d819769d01a365ab707794a4084392c824f54a7a6a7862f8c3d0892b283"
+dependencies = [
+ "cfg-if",
+ "cpufeatures 0.2.17",
+ "digest",
+]
+
+[[package]]
 name = "shared_library"
 version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3052,7 +3064,7 @@ checksum = "8ee5873ec9cce0195efcb7a4e9507a04cd49aec9c83d0389df45b1ef7ba2e649"
 
 [[package]]
 name = "skc-notifications"
-version = "0.3.16"
+version = "0.4.0"
 dependencies = [
  "futures-util",
  "libc",
