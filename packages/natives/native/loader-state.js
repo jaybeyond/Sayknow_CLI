@@ -130,7 +130,8 @@ export function resolveLoaderCandidates({
 	versionedDir,
 	userDataDir,
 }) {
-	const sourceNativeDirs = [nativeDir, platformNativeDir].filter(dir => typeof dir === "string" && dir.length > 0);
+	const nestedPlatformNativeDir = path.join(nativeDir, "..", "node_modules", "@sayknow-cli", `natives-${process.platform}-${process.arch}`, "native");
+	const sourceNativeDirs = [nativeDir, platformNativeDir, nestedPlatformNativeDir].filter(dir => typeof dir === "string" && dir.length > 0);
 	const baseReleaseCandidates = addonFilenames.flatMap(filename => [
 		...sourceNativeDirs.map(dir => path.join(dir, filename)),
 		path.join(execDir, filename),

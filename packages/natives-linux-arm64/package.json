@@ -1,6 +1,6 @@
 {
 	"name": "@sayknow-cli/natives-linux-arm64",
-	"version": "0.4.0",
+	"version": "0.4.2",
 	"description": "Linux arm64 native addon for @sayknow-cli/natives",
 	"type": "module",
 	"homepage": "https://sayknow-cli.com",

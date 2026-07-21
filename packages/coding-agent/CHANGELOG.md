@@ -5,6 +5,32 @@ This file tracks the **fork's own releases**; upstream's full feature history li
 in that project. Each release notes the upstream version it is built on.
 
 
+## [0.4.2] — 2026-07-21
+
+### Fixed (post-0.4.0 publish)
+
+- **Native loader: nested node_modules fallback.** Bun's `-g` install creates a
+  nested layout where each workspace package owns its own `node_modules/`. The
+  loader's single hardcoded platform-subpackage path
+  (`../../natives-<platform>/native`) assumed npm's flat hoist, so `bun install
+  -g sayknow-cli` could not resolve the .node and crashed at startup with
+  `Failed to load pi_natives native addon`. Added a third candidate path that
+  covers `natives/node_modules/@sayknow-cli/natives-<platform>/native`.
+- **Catalog resolution via `bun install`.** v0.4.0 was published with stale
+  `bun.lock` workspace versions (still pinned to 0.3.16), so `bun publish`
+  resolved `catalog:` deps to 0.3.16 and the umbrella ended up depending on
+  the previous release's `@sayknow-cli/coding-agent`. v0.4.2 republishes after
+  regenerating `bun.lock` from the bumped catalog (0.4.2 everywhere).
+- **Native version sentinel.** Rebuilt `pi_natives.darwin-arm64.node` after the
+  version bump so it exposes `__piNativesV0_4_2` (the v0.4.0 binary's
+  `__piNativesV0_4_0` failed the loader's release-match check).
+
+### Deprecated (on npm)
+
+- `sayknow-cli@0.4.0` and `@sayknow-cli/*@0.4.0` — broken catalog: resolution.
+- `sayknow-cli@0.4.1` and `@sayknow-cli/*@0.4.1` — loader missing nested
+  `node_modules` fallback.
+
 ## [0.4.0] — 2026-07-21
 
 ### Changed
