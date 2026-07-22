@@ -5,6 +5,29 @@ This file tracks the **fork's own releases**; upstream's full feature history li
 in that project. Each release notes the upstream version it is built on.
 
 
+## [0.4.4] — 2026-07-22
+
+### Fixed (workflow arbitration native)
+
+- **Port `skc-notifications` to upstream v0.11.6 and switch pi-natives to
+  `sdk.rs`.** 0.4.x synced upstream's coding-agent, whose SDK bus requires the
+  native `NotificationServer` arbitration API (`registerArbitratedAsk`,
+  `retireIfUnclaimed`, `stopAndWait`). But the fork's `skc-notifications` crate
+  was stuck at upstream v0.9.1, so `crates/pi-natives/src/sdk.rs` (restored from
+  v0.11.6) could not compile against it and was dropped from `lib.rs`. The
+  shipped `notifications.rs` `NotificationServer` lacked the arbitration
+  methods, so every SDK session startup threw `NativeRuntimeCompatibilityError`
+  ("required workflow arbitration methods are missing") — extensions failed to
+  load and no session could start on 0.4.1–0.4.3.
+- Upgrades `crates/skc-notifications` v0.9.1 → v0.11.6 (adds the
+  `broker_protocol`/`control`/`query`/`reverse` modules and the `hmac` workspace
+  dependency), wires `mod sdk;` and retires `notifications.rs`. This restores
+  the arbitration API **and** the SKC v3 SDK connection lane
+  (`onSdkFrame`/`sendTo`/`onConnectionClose`/`registerWorkflowGateAsk`/
+  `pushTurnStreamUnchecked`), which was also dead in 0.4.1–0.4.3. No native
+  method that the fork already relied on is removed (`sdk.rs`'s
+  `NotificationServer` is a strict superset of `notifications.rs`).
+
 ## [0.4.3] — 2026-07-21
 
 ### Fixed (cross-platform native publish)

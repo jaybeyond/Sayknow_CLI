@@ -1,4 +1,4 @@
-//! Session lifecycle control protocol for the SKC notifications SDK.
+//! Session lifecycle control protocol for the Sayknow-CLI SDK.
 //!
 //! This is the wire contract for remote session **create / close / resume**,
 //! issued by the daemon-owned control client (e.g. the bundled Telegram daemon)
@@ -84,7 +84,8 @@ pub struct SessionCreate {
 	pub token:                String,
 	/// Where the session should run.
 	pub target:               SessionCreateTarget,
-	/// Reference to the daemon-written, once-consumed startup-prompt file.
+	/// Reserved for a future capability transport; any supplied value is
+	/// rejected before lifecycle acceptance.
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub startup_prompt_ref:   Option<String>,
 }
@@ -122,7 +123,8 @@ pub struct SessionResume {
 	pub token:              String,
 	/// Which session to resume.
 	pub target:             SessionResumeTarget,
-	/// Optional follow-up prompt reference for a cold restart.
+	/// Reserved for a future capability transport; any supplied value is
+	/// rejected before lifecycle acceptance.
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub startup_prompt_ref: Option<String>,
 }
@@ -276,6 +278,9 @@ pub enum LifecycleErrorReason {
 	NotFound,
 	/// Side effects may have occurred but success could not be confirmed.
 	TerminalUncertain,
+	/// This host cannot prove the immutable session identity needed for remote
+	/// lifecycle control.
+	UnsupportedPlatform,
 }
 
 /// A candidate returned with an [`LifecycleErrorReason::AmbiguousTarget`]
@@ -331,7 +336,7 @@ impl LifecycleClientMessage {
 	/// The control token carried by an authenticated lifecycle request, if any.
 	///
 	/// Returns `None` for [`LifecycleClientMessage::Unknown`], which carries no
-	/// fields and is always treated as unauthorized.
+	/// fields and is ignored as a forward-compatible no-op by the ingress.
 	#[must_use]
 	pub fn token(&self) -> Option<&str> {
 		match self {
@@ -459,6 +464,23 @@ mod tests {
 		assert_eq!(json["type"], "session_lifecycle_error");
 		assert_eq!(json["reason"], "ambiguous_target");
 		assert_eq!(json["candidates"][0]["sessionId"], "sess-a");
+		assert_eq!(round_trip(&err), err);
+	}
+
+	#[test]
+	fn unsupported_platform_lifecycle_error_round_trips() {
+		let err = LifecycleServerMessage::SessionLifecycleError(SessionLifecycleError {
+			request_id: "lc_psmux".into(),
+			status:     LifecycleStatus::Error,
+			reason:     LifecycleErrorReason::UnsupportedPlatform,
+			message:    "Remote session lifecycle is unavailable on this psmux host because SKC \
+			             cannot prove immutable session identity. No lifecycle action was performed. \
+			             Use a local SKC terminal with a supported tmux provider."
+				.into(),
+			candidates: Vec::new(),
+		});
+		let json = serde_json::to_value(&err).expect("serialize");
+		assert_eq!(json["reason"], "unsupported_platform");
 		assert_eq!(round_trip(&err), err);
 	}
 

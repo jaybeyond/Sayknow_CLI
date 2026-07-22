@@ -1,6 +1,6 @@
-//! SKC Notifications SDK core.
+//! Sayknow-CLI SDK core.
 //!
-//! A small, transport-agnostic core for the notifications SDK:
+//! A small, transport-agnostic core for the Sayknow-CLI SDK:
 //!
 //! - [`protocol`] defines the JSON wire contract ([`protocol::ServerMessage`] /
 //!   [`protocol::ClientMessage`]) that third-party clients implement.
@@ -13,13 +13,24 @@
 //! without native build tooling or sockets.
 
 pub mod actions;
+pub mod broker_protocol;
+pub mod control;
 pub mod control_server;
 pub mod discovery;
 pub mod lifecycle;
 pub mod protocol;
+pub mod query;
+pub mod reverse;
 pub mod server;
 
 pub use actions::{ActionIdentity, ActionRegistry, ReplyClassification, ReplyOutcome};
+pub use broker_protocol::{
+	BrokerClientFrame, BrokerError, BrokerHello, BrokerOperation, BrokerRequest, BrokerResponse,
+	BrokerServerFrame, PROTOCOL_MAJOR,
+};
+pub use control::{
+	ControlClientFrame, ControlError, ControlRequest, ControlResponse, ControlServerFrame,
+};
 pub use control_server::{ControlServerConfig, ControlServerHandle, start_control};
 pub use discovery::{
 	ControlEndpointRecord, EndpointRecord, clean_stale, control_endpoint_path, endpoint_path,
@@ -37,4 +48,16 @@ pub use protocol::{
 	AnswerSelector, ClientMessage, RejectReason, Reply, ReplyAnswer, ReplyRejected, ResolvedBy,
 	ServerMessage, Verbosity,
 };
-pub use server::{PushFrameError, ServerConfig, ServerHandle, start};
+pub use query::{
+	CursorEnvelope, QueryClientFrame, QueryError, QueryPage, QueryRequest, QueryResponse,
+	QueryServerFrame,
+};
+pub use reverse::{
+	LeaseRelease, LeaseState, ProviderHeartbeat, RegisterProvider, RegisterProviderResult,
+	ReverseCapability, ReverseClientFrame, ReverseError, ReverseRequest, ReverseResponse,
+	ReverseServerFrame,
+};
+pub use server::{
+	CapabilityUpdate, PushFrameError, ServerConfig, ServerHandle, WorkflowGateRegistrationError,
+	start,
+};
