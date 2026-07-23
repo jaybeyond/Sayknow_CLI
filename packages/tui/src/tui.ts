@@ -1283,9 +1283,12 @@ export class TUI extends Container {
 		if (!TERMINAL.imageProtocol) {
 			return;
 		}
-		// Query terminal for cell size in pixels: CSI 16 t
-		// Response format: CSI 6 ; height ; width t
-		this.#writeTerminal("\x1b[16t");
+		// Query terminal for cell size in pixels: CSI 16 t → CSI 6 ; height ; width t.
+		// Under tmux, wrap it in the DCS passthrough envelope so the OUTER terminal
+		// reports its real cell size; tmux otherwise answers with a wrong value,
+		// which oversizes the sixel pet and pushes it out of bounds (freezing its
+		// animation because the overflowing position resolves to null).
+		this.#writeTerminal(wrapTmuxPassthrough("\x1b[16t"));
 	}
 
 	stop(): void {

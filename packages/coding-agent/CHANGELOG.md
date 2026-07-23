@@ -5,6 +5,20 @@ This file tracks the **fork's own releases**; upstream's full feature history li
 in that project. Each release notes the upstream version it is built on.
 
 
+## [0.4.6] — 2026-07-23
+
+### Fixed (Sayknow Pet sizing/animation under tmux)
+
+- **Wrap the terminal cell-pixel-size query (`CSI 16 t`) in tmux's DCS
+  passthrough envelope.** Under tmux the query was answered by tmux itself with
+  a wrong cell size, so the sixel pet was encoded far too large — it overflowed
+  the composer and its animation froze (the oversized sprite resolved to an
+  out-of-bounds position, so each animation frame's overlay payload became
+  `null` and never redrew). The outer terminal now reports its real cell size,
+  so the pet renders at its intended 2-row height and animates. Only affected
+  tmux + a sixel terminal (the 0.4.5 pet-in-tmux path); non-multiplexed
+  rendering was already correct.
+
 ## [0.4.5] — 2026-07-23
 
 ### Added (Sayknow Pet in tmux)

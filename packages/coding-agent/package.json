@@ -1,7 +1,7 @@
 {
 	"type": "module",
 	"name": "@sayknow-cli/coding-agent",
-	"version": "0.4.5",
+	"version": "0.4.6",
 	"description": "Sayknow-CLI CLI with read, bash, edit, write tools and session management",
 	"homepage": "https://sayknow-cli.com",
 	"author": "jaybeyond",
