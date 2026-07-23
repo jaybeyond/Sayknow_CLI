@@ -1,12 +1,15 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import {
 	ImageProtocol,
+	isSixelMultiplexerEnabled,
 	isUnderTerminalMultiplexer,
+	isUnderTmux,
 	onImageProtocolChanged,
 	setTerminalImageProtocol,
 	shouldProbeSixelCapability,
 	TERMINAL,
 	TUI,
+	wrapTmuxPassthrough,
 } from "@sayknow-cli/tui";
 import { VirtualTerminal } from "./virtual-terminal";
 
@@ -157,20 +160,37 @@ describe("TUI SIXEL capability probe", () => {
 		tui.stop();
 	});
 
-	it("does not probe under tmux even when DA1 advertises sixel", () => {
+	it("probes under tmux and trusts the outer terminal's sixel DA1 via passthrough", () => {
 		probeSetup();
 		delete Bun.env.WT_SESSION;
+		delete Bun.env.SKC_SIXEL_MULTIPLEXER;
 		Bun.env.TMUX = "/tmp/tmux-1000/default,1234,0";
 
 		const terminal = new VirtualTerminal(80, 24);
 		const tui = new TUI(terminal);
 		tui.start();
-		// tmux emits DA1 ";4" whenever compiled with sixel support, regardless
-		// of the attached client's capabilities — not end-to-end evidence.
+		// The query is passthrough-wrapped to the outer terminal, so its DA1 ";4"
+		// sixel attribute is genuine end-to-end evidence — sixel is enabled.
+		terminal.sendInput("\x1b[?1;2;4c");
+
+		expect(TERMINAL.imageProtocol).toBe(ImageProtocol.Sixel);
+		tui.stop();
+	});
+
+	it("stays off under tmux when the SKC_SIXEL_MULTIPLEXER kill-switch is set", () => {
+		probeSetup();
+		delete Bun.env.WT_SESSION;
+		Bun.env.TMUX = "/tmp/tmux-1000/default,1234,0";
+		Bun.env.SKC_SIXEL_MULTIPLEXER = "0";
+
+		const terminal = new VirtualTerminal(80, 24);
+		const tui = new TUI(terminal);
+		tui.start();
 		terminal.sendInput("\x1b[?1;2;4c");
 
 		expect(TERMINAL.imageProtocol).toBeNull();
 		tui.stop();
+		delete Bun.env.SKC_SIXEL_MULTIPLEXER;
 	});
 
 	it("does not probe when PI_FORCE_IMAGE_PROTOCOL is explicitly off", () => {
@@ -221,11 +241,23 @@ describe("shouldProbeSixelCapability", () => {
 		expect(shouldProbeSixelCapability({ TERM: "xterm-256color" }, "linux")).toBe(false);
 	});
 
-	it("never probes inside a terminal multiplexer", () => {
+	it("probes under tmux via passthrough, but not screen/zellij", () => {
 		delete Bun.env.PI_FORCE_IMAGE_PROTOCOL;
-		expect(shouldProbeSixelCapability({ WT_SESSION: "s", TMUX: "/tmp/t,1,0" }, "win32")).toBe(false);
-		expect(shouldProbeSixelCapability({ WT_SESSION: "s", TERM: "tmux-256color" }, "win32")).toBe(false);
-		expect(shouldProbeSixelCapability({ WT_SESSION: "s", SKC_TMUX_LAUNCHED: "1" }, "win32")).toBe(false);
+		// tmux forwards the passthrough-wrapped probe to the outer terminal.
+		expect(shouldProbeSixelCapability({ TMUX: "/tmp/t,1,0" }, "linux")).toBe(true);
+		expect(shouldProbeSixelCapability({ TERM: "tmux-256color" }, "linux")).toBe(true);
+		expect(shouldProbeSixelCapability({ SKC_TMUX_LAUNCHED: "1" }, "linux")).toBe(true);
+		// screen/zellij have no DCS passthrough envelope → graphics stay off.
+		expect(shouldProbeSixelCapability({ STY: "1234.pts-0.host" }, "linux")).toBe(false);
+		expect(shouldProbeSixelCapability({ ZELLIJ: "session" }, "linux")).toBe(false);
+		expect(shouldProbeSixelCapability({ TERM: "screen-256color" }, "linux")).toBe(false);
+	});
+
+	it("respects the SKC_SIXEL_MULTIPLEXER kill-switch under tmux", () => {
+		delete Bun.env.PI_FORCE_IMAGE_PROTOCOL;
+		expect(shouldProbeSixelCapability({ TMUX: "/tmp/t,1,0", SKC_SIXEL_MULTIPLEXER: "0" }, "linux")).toBe(false);
+		expect(shouldProbeSixelCapability({ TMUX: "/tmp/t,1,0", SKC_SIXEL_MULTIPLEXER: "off" }, "linux")).toBe(false);
+		expect(shouldProbeSixelCapability({ TMUX: "/tmp/t,1,0", SKC_SIXEL_MULTIPLEXER: "1" }, "linux")).toBe(true);
 	});
 
 	it("treats an explicit PI_FORCE_IMAGE_PROTOCOL as authoritative", () => {
@@ -279,5 +311,40 @@ describe("onImageProtocolChanged", () => {
 		unsubscribe();
 		setTerminalImageProtocol(ImageProtocol.Kitty);
 		expect(seen).toEqual([ImageProtocol.Sixel, null]);
+	});
+});
+
+describe("tmux passthrough helpers", () => {
+	it("isUnderTmux detects tmux only, not screen/zellij", () => {
+		expect(isUnderTmux({ TMUX: "/tmp/t,1,0" })).toBe(true);
+		expect(isUnderTmux({ TMUX_PANE: "%3" })).toBe(true);
+		expect(isUnderTmux({ SKC_TMUX_LAUNCHED: "1" })).toBe(true);
+		expect(isUnderTmux({ TERM: "tmux-256color" })).toBe(true);
+		expect(isUnderTmux({ STY: "1234.pts-0.host" })).toBe(false);
+		expect(isUnderTmux({ ZELLIJ: "session" })).toBe(false);
+		expect(isUnderTmux({ TERM: "screen-256color" })).toBe(false);
+		expect(isUnderTmux({ TERM: "xterm-256color" })).toBe(false);
+	});
+
+	it("isSixelMultiplexerEnabled defaults on and honors the kill-switch", () => {
+		expect(isSixelMultiplexerEnabled({})).toBe(true);
+		expect(isSixelMultiplexerEnabled({ SKC_SIXEL_MULTIPLEXER: "1" })).toBe(true);
+		expect(isSixelMultiplexerEnabled({ SKC_SIXEL_MULTIPLEXER: "0" })).toBe(false);
+		expect(isSixelMultiplexerEnabled({ SKC_SIXEL_MULTIPLEXER: "off" })).toBe(false);
+		expect(isSixelMultiplexerEnabled({ SKC_SIXEL_MULTIPLEXER: "false" })).toBe(false);
+	});
+
+	it("wrapTmuxPassthrough wraps + doubles ESC under tmux, no-ops otherwise", () => {
+		const sixel = "\x1bPq#0;2;0;0;0#0~~@@\x1b\\";
+		const wrapped = wrapTmuxPassthrough(sixel, { TMUX: "/tmp/t,1,0" });
+		expect(wrapped.startsWith("\x1bPtmux;")).toBe(true);
+		expect(wrapped.endsWith("\x1b\\")).toBe(true);
+		// every inner ESC is doubled
+		expect(wrapped).toBe(`\x1bPtmux;${sixel.replaceAll("\x1b", "\x1b\x1b")}\x1b\\`);
+		// not under tmux → identity
+		expect(wrapTmuxPassthrough(sixel, { TERM: "xterm-256color" })).toBe(sixel);
+		expect(wrapTmuxPassthrough(sixel, { ZELLIJ: "session" })).toBe(sixel);
+		// empty payload is never wrapped
+		expect(wrapTmuxPassthrough("", { TMUX: "/tmp/t,1,0" })).toBe("");
 	});
 });

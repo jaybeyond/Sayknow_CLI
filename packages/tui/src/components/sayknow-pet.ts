@@ -392,6 +392,11 @@ export function buildSayknowPixelFrames(options: {
 	kittyImageId?: number;
 	/** Color skin for the sprite palette (default "red"). */
 	skin?: PetSkinId;
+	/**
+	 * Optional wrapper applied to each encoded sixel frame (e.g. tmux DCS
+	 * passthrough). Identity when omitted. Never applied to kitty frames.
+	 */
+	wrapSixel?: (frame: string) => string;
 }): SayknowPixelFrames {
 	const targetRows = options.targetRows ?? 2;
 	const gridSize = 16;
@@ -416,7 +421,7 @@ export function buildSayknowPixelFrames(options: {
 	for (const name of Object.keys(PIXEL_GRIDS) as SayknowPixelFrameName[]) {
 		frames[name] =
 			options.protocol === "sixel"
-				? encodeGridSixel(PIXEL_GRIDS[name], scale, topPaddingPx, palette)
+				? (options.wrapSixel ?? (frame => frame))(encodeGridSixel(PIXEL_GRIDS[name], scale, topPaddingPx, palette))
 				: encodeGridKitty(
 						PIXEL_GRIDS[name],
 						scale,

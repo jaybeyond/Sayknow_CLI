@@ -143,6 +143,45 @@ export function isImageProtocolForced(): boolean {
 	return getForcedImageProtocol() !== undefined;
 }
 
+const SIXEL_MULTIPLEXER_DISABLED_ENV_VALUES = new Set(["0", "off", "false", "no"]);
+
+/**
+ * Returns whether the sixel-through-multiplexer path (passthrough-wrapped probe
+ * + DCS passthrough render) is enabled. On by default; set SKC_SIXEL_MULTIPLEXER=0
+ * to force the pre-0.4.5 behavior (graphics unconditionally off under tmux).
+ */
+export function isSixelMultiplexerEnabled(env: NodeJS.ProcessEnv = Bun.env): boolean {
+	const raw = env.SKC_SIXEL_MULTIPLEXER?.trim().toLowerCase();
+	return raw === undefined || raw === "" || !SIXEL_MULTIPLEXER_DISABLED_ENV_VALUES.has(raw);
+}
+
+/**
+ * Returns whether the process runs under tmux specifically. Only tmux implements
+ * the DCS passthrough envelope (`\ePtmux;…\e\\`) that forwards graphics escapes to
+ * the outer terminal, so sixel graphics stay suppressed under screen/zellij.
+ */
+export function isUnderTmux(env: NodeJS.ProcessEnv = Bun.env): boolean {
+	if (
+		multiplexerEnvEnabled(env.TMUX) ||
+		multiplexerEnvEnabled(env.TMUX_PANE) ||
+		multiplexerEnvEnabled(env.SKC_TMUX_LAUNCHED)
+	)
+		return true;
+	return (env.TERM?.trim().toLowerCase() ?? "").startsWith("tmux");
+}
+
+/**
+ * Wrap raw terminal escape bytes in tmux's DCS passthrough envelope so tmux
+ * forwards them verbatim to the outer terminal (requires `allow-passthrough on`,
+ * which SKC-launched tmux sessions set automatically). Each ESC in the payload is
+ * doubled per the tmux protocol. Returns the payload unchanged when not under
+ * tmux, so non-multiplexed, screen, and zellij paths are untouched.
+ */
+export function wrapTmuxPassthrough(payload: string, env: NodeJS.ProcessEnv = Bun.env): string {
+	if (!payload || !isUnderTmux(env)) return payload;
+	return `\x1bPtmux;${payload.replaceAll("\x1b", "\x1b\x1b")}\x1b\\`;
+}
+
 function parseMajorMinorVersion(versionRaw?: string): { major: number; minor: number } | null {
 	if (!versionRaw) return null;
 	const match = /^(\d+)\.(\d+)/u.exec(versionRaw.trim());
@@ -767,8 +806,10 @@ export function renderImage(
 			const targetWidthPx = Math.max(1, fit.columns * cellDims.widthPx);
 			const targetHeightPx = Math.max(1, fit.rows * cellDims.heightPx);
 			const decoded = new Uint8Array(Buffer.from(base64Data, "base64"));
-			const sequence = encodeSixel(decoded, targetWidthPx, targetHeightPx);
-			return { sequence, rows: fit.rows };
+			const raster = encodeSixel(decoded, targetWidthPx, targetHeightPx);
+			// Under tmux, forward the raster to the outer terminal via the DCS
+			// passthrough envelope (no-op when not under tmux).
+			return { sequence: wrapTmuxPassthrough(raster), rows: fit.rows };
 		} catch {
 			return null;
 		}

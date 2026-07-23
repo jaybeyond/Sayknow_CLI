@@ -246,6 +246,13 @@ export function buildSkcTmuxProfileCommands(
 	commands.push(
 		{ description: "enable tmux clipboard integration", args: ["set-option", "-t", target, "set-clipboard", "on"] },
 		{
+			// Forward DCS passthrough (sixel graphics / Sayknow Pet) to the outer
+			// terminal. `-pq` scopes it to this session's pane (never the global
+			// server state) and stays quiet on tmux < 3.3 where the option is unknown.
+			description: "allow DCS passthrough for sixel graphics",
+			args: ["set-option", "-pq", "-t", target, "allow-passthrough", "on"],
+		},
+		{
 			description: "make copy-mode selection readable",
 			args: ["set-window-option", "-t", target, "mode-style", "fg=colour231,bg=colour60"],
 		},

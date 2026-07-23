@@ -14,6 +14,7 @@ import {
 	type SayknowPixelFrameName,
 	type SayknowPixelFrames,
 	type TUI,
+	wrapTmuxPassthrough,
 } from "@sayknow-cli/tui";
 import type { CustomEditor } from "./custom-editor";
 import { getPetPixelProtocol } from "./pet-capability";
@@ -280,6 +281,9 @@ export class SayknowPetWidget {
 			sixelTopPaddingPx: protocol === "sixel" ? PET_SIXEL_DROP_PX : 0,
 			kittyCellYOffsetPx: protocol === "kitty" ? petKittyDropPx(cell.heightPx) : 0,
 			kittyImageId: protocol === "kitty" ? this.#kittyImageId : undefined,
+			// Forward the pet's sixel raster through tmux's DCS passthrough envelope
+			// when under tmux (no-op otherwise), so the outer terminal renders it.
+			wrapSixel: wrapTmuxPassthrough,
 		});
 		this.#framedEditor.setReserve(this.#pixel.columns + PET_SIDE_MARGIN);
 	}

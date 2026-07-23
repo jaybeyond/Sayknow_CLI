@@ -5,6 +5,29 @@ This file tracks the **fork's own releases**; upstream's full feature history li
 in that project. Each release notes the upstream version it is built on.
 
 
+## [0.4.5] — 2026-07-23
+
+### Added (Sayknow Pet in tmux)
+
+- **Auto-enable the Sayknow Pet (and inline sixel graphics) under tmux when the
+  outer terminal genuinely supports sixel.** Previously graphics were
+  unconditionally suppressed under any multiplexer because tmux advertises
+  compile-time sixel support (`DA1 ";4"`) regardless of the attached terminal,
+  and no code emitted the DCS passthrough envelope. Now:
+  - The startup sixel capability probe runs under tmux with its DA1 +
+    XTSMGRAPHICS queries wrapped in tmux's `\ePtmux;…\e\\` passthrough envelope,
+    so the **outer** terminal answers — a positive reply is genuine end-to-end
+    evidence, not tmux's unreliable self-report. screen/zellij (no passthrough
+    envelope) stay suppressed.
+  - Sixel render output (pet frames + inline images) is wrapped in the same
+    passthrough envelope under tmux.
+  - SKC-launched tmux sessions set `allow-passthrough on` (pane-scoped, quiet on
+    tmux < 3.3) automatically.
+  - Probe-gated and safe: terminals that do not actually render sixel through
+    tmux (e.g. Ghostty, which uses the kitty protocol and has no sixel) never
+    activate it, so no garbage escapes are emitted. Set `SKC_SIXEL_MULTIPLEXER=0`
+    to force the pre-0.4.5 behavior (graphics off under tmux).
+
 ## [0.4.4] — 2026-07-22
 
 ### Fixed (workflow arbitration native)

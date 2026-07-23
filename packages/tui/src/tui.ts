@@ -12,10 +12,13 @@ import type { Terminal } from "./terminal";
 import {
 	ImageProtocol,
 	isImageProtocolForced,
+	isSixelMultiplexerEnabled,
 	isUnderTerminalMultiplexer,
+	isUnderTmux,
 	setCellDimensions,
 	setTerminalImageProtocol,
 	TERMINAL,
+	wrapTmuxPassthrough,
 } from "./terminal-capabilities";
 import {
 	Ellipsis,
@@ -296,11 +299,10 @@ function isMultiplexerSession(env: Record<string, string | undefined> = Bun.env)
  * Startup sixel capability probe policy (pure; exported for tests):
  * - Never probe when PI_FORCE_IMAGE_PROTOCOL is set — an explicit
  *   configuration (including "off") is authoritative.
- * - Never probe inside a terminal multiplexer: tmux advertises DA1 ";4"
- *   whenever it was compiled with sixel support, regardless of whether the
- *   attached client terminal can render sixel, so a positive reply is not
- *   end-to-end evidence. Graphics under a multiplexer are strictly opt-in
- *   via PI_FORCE_IMAGE_PROTOCOL=sixel.
+ * - Under tmux, probe when the sixel-multiplexer path is enabled (default): the
+ *   query is DCS-passthrough wrapped so the OUTER terminal answers, not tmux's
+ *   unreliable compile-time DA1, making a positive reply genuine end-to-end
+ *   evidence. screen/zellij have no passthrough envelope, so graphics stay off.
  * - Probe Windows Terminal (>=1.22 renders sixel but exposes no env marker).
  */
 export function shouldProbeSixelCapability(
@@ -308,7 +310,7 @@ export function shouldProbeSixelCapability(
 	platform: NodeJS.Platform = process.platform,
 ): boolean {
 	if (isImageProtocolForced()) return false;
-	if (isUnderTerminalMultiplexer(env)) return false;
+	if (isUnderTerminalMultiplexer(env)) return isUnderTmux(env) && isSixelMultiplexerEnabled(env);
 	return platform === "win32" && Boolean(env.WT_SESSION?.trim());
 }
 
@@ -1145,11 +1147,16 @@ export class TUI extends Container {
 		this.#sixelProbePendingDa = true;
 		this.#sixelProbePendingGraphics = true;
 		this.#sixelProbeUnsubscribe = this.addInputListener(data => this.#handleSixelProbeInput(data));
-		if (!this.#writeTerminal("\x1b[c")) return;
-		if (!this.#writeTerminal("\x1b[?2;1;0S")) return;
-		this.#sixelProbeTimeout = setTimeout(() => {
-			this.#finishSixelProbe(false);
-		}, 250);
+		// Under tmux, wrap the DA1 + XTSMGRAPHICS queries in the DCS passthrough
+		// envelope so the outer terminal answers instead of tmux itself. Round-trip
+		// through the outer terminal is slower, so allow a longer settle window.
+		if (!this.#writeTerminal(wrapTmuxPassthrough("\x1b[c\x1b[?2;1;0S"))) return;
+		this.#sixelProbeTimeout = setTimeout(
+			() => {
+				this.#finishSixelProbe(false);
+			},
+			isUnderTmux() ? 600 : 250,
+		);
 	}
 
 	#isSixelProbeCandidate(): boolean {
