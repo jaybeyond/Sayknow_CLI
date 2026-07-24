@@ -4,6 +4,7 @@ import {
 	type Component,
 	type Container,
 	getCellDimensions,
+	isUnderTmux,
 	PARA_PARA_STEPS,
 	PET_SKINS,
 	type PetMode,
@@ -281,9 +282,6 @@ export class SayknowPetWidget {
 			sixelTopPaddingPx: protocol === "sixel" ? PET_SIXEL_DROP_PX : 0,
 			kittyCellYOffsetPx: protocol === "kitty" ? petKittyDropPx(cell.heightPx) : 0,
 			kittyImageId: protocol === "kitty" ? this.#kittyImageId : undefined,
-			// Forward the pet's sixel raster through tmux's DCS passthrough envelope
-			// when under tmux (no-op otherwise), so the outer terminal renders it.
-			wrapSixel: wrapTmuxPassthrough,
 		});
 		this.#framedEditor.setReserve(this.#pixel.columns + PET_SIDE_MARGIN);
 	}
@@ -493,6 +491,7 @@ export class SayknowPetWidget {
 		this.#frameCleanupAwaitingAck = false;
 		const { x, y } = pos;
 		let out = "";
+		const positioned = `\x1b[${y + 1};${x + 1}H${pixel.frames[this.#frame]}`;
 
 		if (pixel.protocol === "sixel") {
 			const footprint = { x, y, columns: pixel.columns, rows: pixel.rasterRows };
@@ -501,13 +500,21 @@ export class SayknowPetWidget {
 			}
 			if (clearPet) out += this.#clearSixelFootprint(footprint);
 			this.#lastSixelFootprint = footprint;
-		} else {
-			// A kitty frame emitted below (re)places the image, so cleanup is
-			// pending again even if a narrow-terminal pass consumed it earlier.
-			this.#kittyCleanupPending = true;
+			// Under tmux the sixel is forwarded to the OUTER terminal via passthrough
+			// and advances its cursor; the frame's surrounding \x1b7/\x1b8 only reach
+			// tmux, so the outer terminal never restores and scrolls the viewport on
+			// every animation frame. Wrap save-cursor + position + sixel + restore-
+			// cursor as one passthrough unit so the outer cursor returns and nothing
+			// scrolls. The footprint clears above stay tmux-level so tmux repaints the
+			// vacated cells.
+			out += isUnderTmux() ? wrapTmuxPassthrough(`\x1b7${positioned}\x1b8`) : positioned;
+			return out;
 		}
 
-		out += `\x1b[${y + 1};${x + 1}H${pixel.frames[this.#frame]}`;
+		// A kitty frame (re)places the image cursor-neutrally, so cleanup is pending
+		// again even if a narrow-terminal pass consumed it earlier.
+		this.#kittyCleanupPending = true;
+		out += positioned;
 		return out;
 	}
 }

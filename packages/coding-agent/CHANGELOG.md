@@ -5,6 +5,21 @@ This file tracks the **fork's own releases**; upstream's full feature history li
 in that project. Each release notes the upstream version it is built on.
 
 
+## [0.4.7] — 2026-07-24
+
+### Fixed (Sayknow Pet scroll under tmux)
+
+- **Wrap the pet's sixel draw (save-cursor + position + sixel + restore-cursor)
+  in a single tmux DCS passthrough unit.** The pet uses `DECSC`/`DECRC`
+  (`\x1b7`/`\x1b8`) to stay cursor-neutral, but those bytes were emitted outside
+  the passthrough envelope, so only tmux saw them — the outer terminal received
+  just the cursor-advancing sixel via passthrough, never restored its cursor,
+  and scrolled the whole viewport up on every animation frame (leaving the pet
+  pinned in place). The save/restore now travels with the sixel through
+  passthrough, so the outer cursor returns and nothing scrolls. The footprint
+  clears stay tmux-level so tmux still repaints the vacated cells. Only affected
+  tmux + a sixel terminal.
+
 ## [0.4.6] — 2026-07-23
 
 ### Fixed (Sayknow Pet sizing/animation under tmux)
