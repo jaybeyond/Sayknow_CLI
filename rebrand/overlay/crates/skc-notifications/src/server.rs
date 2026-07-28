@@ -1922,13 +1922,14 @@ mod tests {
 
 	fn ask(id: &str) -> ActionNeeded {
 		ActionNeeded {
-			id:         id.into(),
-			kind:       ActionKind::Ask,
-			session_id: "s".into(),
-			question:   Some("Proceed?".into()),
-			options:    Some(vec!["Yes".into(), "No".into()]),
-			controls:   vec![],
-			summary:    None,
+			id:                id.into(),
+			kind:              ActionKind::Ask,
+			session_id:        "s".into(),
+			question:          Some("Proceed?".into()),
+			options:           Some(vec!["Yes".into(), "No".into()]),
+			recommended_index: None,
+			controls:          vec![],
+			summary:           None,
 		}
 	}
 
@@ -1945,13 +1946,14 @@ mod tests {
 
 	fn idle(id: &str) -> ActionNeeded {
 		ActionNeeded {
-			id:         id.into(),
-			kind:       ActionKind::Idle,
-			session_id: "s".into(),
-			question:   None,
-			options:    None,
-			controls:   vec![],
-			summary:    Some("idle".into()),
+			id:                id.into(),
+			kind:              ActionKind::Idle,
+			session_id:        "s".into(),
+			question:          None,
+			options:           None,
+			recommended_index: None,
+			controls:          vec![],
+			summary:           Some("idle".into()),
 		}
 	}
 

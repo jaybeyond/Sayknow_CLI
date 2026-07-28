@@ -3,6 +3,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { Glob } from "bun";
+import { isEmbeddableDoc } from "../../../scripts/docs-index-contract";
 
 async function pathExists(candidate: string): Promise<boolean> {
 	try {
@@ -37,17 +38,11 @@ if (docsDir === undefined) {
 	process.exit(1);
 }
 
-// Fork-maintenance docs describe how the rebrand pipeline itself works and must
-// quote upstream's brand tokens verbatim. They are not product documentation, so
-// bundling them would both mislead users and leak those tokens into the generated
-// index (which the sync residual-token gate then flags).
-const EXCLUDED_DOCS = new Set(["FORK_MAINTENANCE.md"]);
-
 const glob = new Glob("**/*.md");
 const entries: string[] = [];
 for await (const relativePath of glob.scan(docsDir)) {
 	const rel = relativePath.split(path.sep).join("/");
-	if (EXCLUDED_DOCS.has(rel)) continue;
+	if (!isEmbeddableDoc(rel)) continue;
 	entries.push(rel);
 }
 entries.sort();

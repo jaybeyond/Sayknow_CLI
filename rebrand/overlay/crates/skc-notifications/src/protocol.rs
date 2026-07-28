@@ -123,25 +123,47 @@ pub struct ActionNeeded {
 	/// Ephemeral presentation/action id and the sole generic reply authority.
 	/// Durable workflow correlation, when present, is carried separately on the
 	/// correlated wire envelope.
-	pub id:         String,
+	pub id:                String,
 	/// Whether this is an answerable ask or a notify-only idle ping.
-	pub kind:       ActionKind,
+	pub kind:              ActionKind,
 	/// The session this action belongs to.
-	pub session_id: String,
+	pub session_id:        String,
 	/// The ask question text (present for `ask`).
 	#[serde(default, skip_serializing_if = "Option::is_none")]
-	pub question:   Option<String>,
+	pub question:          Option<String>,
 	/// The selectable options for an ask (present for `ask` when offered).
 	#[serde(default, skip_serializing_if = "Option::is_none")]
-	pub options:    Option<Vec<String>>,
+	pub options:           Option<Vec<String>>,
+	/// Optional zero-based display hint for the recommended raw option.
+	///
+	/// This is presentation metadata only: malformed wire values fail closed so
+	/// clients can still answer using the authoritative [`Self::options`] list.
+	#[serde(
+		default,
+		deserialize_with = "deserialize_recommended_index",
+		skip_serializing_if = "Option::is_none"
+	)]
+	pub recommended_index: Option<u32>,
 	/// Typed deterministic controls. Senders emit controls only after this
 	/// connection has negotiated [`capabilities::ASK_CONTROLS_V1`]; non-capable
 	/// or timed-out connections receive `action_unavailable` instead.
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
-	pub controls:   Vec<AskControl>,
+	pub controls:          Vec<AskControl>,
 	/// A short summary (e.g. truncated last assistant message for `idle`).
 	#[serde(default, skip_serializing_if = "Option::is_none")]
-	pub summary:    Option<String>,
+	pub summary:           Option<String>,
+}
+
+/// Decode the recommended-option hint without letting a malformed value reject
+/// the whole action. The list in [`ActionNeeded::options`] stays authoritative,
+/// so a bad hint degrades to "no hint" instead of dropping an answerable ask on
+/// the floor.
+fn deserialize_recommended_index<'de, D>(deserializer: D) -> Result<Option<u32>, D::Error>
+where
+	D: Deserializer<'de>,
+{
+	let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+	Ok(value.and_then(|value| value.as_u64().and_then(|index| u32::try_from(index).ok())))
 }
 
 /// A correlated workflow-gate presentation. The embedded action retains the
@@ -1213,13 +1235,14 @@ mod tests {
 	#[test]
 	fn correlated_action_needed_roundtrips_without_changing_legacy_reader() {
 		let action = ActionNeeded {
-			id:         "presentation-1".into(),
-			kind:       ActionKind::Ask,
-			session_id: "session-1".into(),
-			question:   Some("Proceed?".into()),
-			options:    Some(vec!["Yes".into(), "No".into()]),
-			controls:   vec![],
-			summary:    None,
+			id:                "presentation-1".into(),
+			kind:              ActionKind::Ask,
+			session_id:        "session-1".into(),
+			question:          Some("Proceed?".into()),
+			options:           Some(vec!["Yes".into(), "No".into()]),
+			recommended_index: None,
+			controls:          vec![],
+			summary:           None,
 		};
 		let raw = serialize_workflow_gate_action_needed(&action, "gate-1").unwrap();
 		let correlated = decode_workflow_gate_action_needed(&raw)
@@ -1241,13 +1264,14 @@ mod tests {
 	#[test]
 	fn action_needed_ask_serializes_camelcase_with_snake_type() {
 		let msg = ServerMessage::ActionNeeded(ActionNeeded {
-			id:         "wg_run_stage_1".into(),
-			kind:       ActionKind::Ask,
-			session_id: "sess-1".into(),
-			question:   Some("Proceed?".into()),
-			options:    Some(vec!["Yes".into(), "No".into()]),
-			controls:   vec![],
-			summary:    None,
+			id:                "wg_run_stage_1".into(),
+			kind:              ActionKind::Ask,
+			session_id:        "sess-1".into(),
+			question:          Some("Proceed?".into()),
+			options:           Some(vec!["Yes".into(), "No".into()]),
+			recommended_index: None,
+			controls:          vec![],
+			summary:           None,
 		});
 		let v: serde_json::Value = serde_json::to_value(&msg).unwrap();
 		assert_eq!(v["type"], "action_needed");
@@ -1262,18 +1286,19 @@ mod tests {
 	#[test]
 	fn controlled_action_needed_wire_shape_roundtrips() {
 		let msg = ServerMessage::ActionNeeded(ActionNeeded {
-			id:         "a1".into(),
-			kind:       ActionKind::Ask,
-			session_id: "sess-1".into(),
-			question:   Some("Proceed?".into()),
-			options:    Some(vec!["Yes".into(), "No".into()]),
-			controls:   vec![AskControl {
+			id:                "a1".into(),
+			kind:              ActionKind::Ask,
+			session_id:        "sess-1".into(),
+			question:          Some("Proceed?".into()),
+			options:           Some(vec!["Yes".into(), "No".into()]),
+			recommended_index: None,
+			controls:          vec![AskControl {
 				id:      "navigation_forward".into(),
 				kind:    "navigation".into(),
 				label:   "Continue".into(),
 				enabled: true,
 			}],
-			summary:    None,
+			summary:           None,
 		});
 		let raw = serde_json::to_string(&msg).unwrap();
 		assert_eq!(
@@ -1301,13 +1326,14 @@ mod tests {
 	#[test]
 	fn idle_action_omits_ask_fields() {
 		let msg = ServerMessage::ActionNeeded(ActionNeeded {
-			id:         "idle-sess-1-7".into(),
-			kind:       ActionKind::Idle,
-			session_id: "sess-1".into(),
-			question:   None,
-			options:    None,
-			controls:   vec![],
-			summary:    Some("done refactoring".into()),
+			id:                "idle-sess-1-7".into(),
+			kind:              ActionKind::Idle,
+			session_id:        "sess-1".into(),
+			question:          None,
+			options:           None,
+			recommended_index: None,
+			controls:          vec![],
+			summary:           Some("done refactoring".into()),
 		});
 		let v = serde_json::to_value(&msg).unwrap();
 		assert_eq!(v["kind"], "idle");
@@ -1319,13 +1345,14 @@ mod tests {
 	#[test]
 	fn action_needed_omits_empty_controls() {
 		let msg = ServerMessage::ActionNeeded(ActionNeeded {
-			id:         "a1".into(),
-			kind:       ActionKind::Ask,
-			session_id: "sess-1".into(),
-			question:   Some("Proceed?".into()),
-			options:    Some(vec!["Yes".into()]),
-			controls:   vec![],
-			summary:    None,
+			id:                "a1".into(),
+			kind:              ActionKind::Ask,
+			session_id:        "sess-1".into(),
+			question:          Some("Proceed?".into()),
+			options:           Some(vec!["Yes".into()]),
+			recommended_index: None,
+			controls:          vec![],
+			summary:           None,
 		});
 		let value = serde_json::to_value(msg).unwrap();
 		assert!(value.get("controls").is_none());
