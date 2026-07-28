@@ -170,7 +170,7 @@ export function parseNotificationSettingsSnapshot(rawConfig?: unknown): Notifica
 				enabled: notificationSettingsBoolean(richDraft.enabled, false),
 			},
 			toolActivity: {
-				enabled: notificationSettingsBoolean(toolActivity.enabled, true),
+				enabled: notificationSettingsBoolean(toolActivity.enabled, false),
 			},
 			streaming: {
 				enabled: notificationSettingsBoolean(streaming.enabled, true),
@@ -540,6 +540,8 @@ export interface RedactableAction {
 	question?: string;
 	options?: string[];
 	summary?: string;
+	/** Optional zero-based recommendation into the authoritative raw options. */
+	recommendedIndex?: number;
 }
 
 /**
@@ -563,6 +565,12 @@ export function buildRedactedAction(
 	// Asks stay fully readable/answerable even under redaction.
 	if (action.kind === "ask") return action;
 
-	const { summary: _summary, question: _question, options: _options, ...base } = action;
+	const {
+		summary: _summary,
+		question: _question,
+		options: _options,
+		recommendedIndex: _recommendedIndex,
+		...base
+	} = action;
 	return base;
 }

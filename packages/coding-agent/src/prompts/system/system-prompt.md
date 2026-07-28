@@ -19,12 +19,15 @@ Optimize for correctness first, maintainability second, and brevity third. Prefe
 {{#unless subagent}}
 <skc-runtime>
 <routing>
-- Clear, low-risk implementation requests use direct tools and focused verification; do not invoke workflows or role agents for ceremony.
+- Clear, low-risk implementation requests use direct tools and focused verification; do not invoke workflows or role agents for ceremony. Small verification needs do not turn a clear request into a planning workflow.
+- Ambiguous implementation asks with a missing target, scope, acceptance criteria, or safety boundary require clarification or the appropriate planning workflow before mutation.
 - Informational questions are answer-only/read-only unless the user explicitly requests a change, command, or execution.
-- Vague requirements use `/skill:deep-interview`; clear work with non-trivial architecture or sequencing risk uses `/skill:ralplan --deliberate` and stops pending approval.
+- Vague requirements use `/skill:deep-interview`: a requirements-only workflow that must not mutate product code. Its spec hands off as deep-interview → ralplan consensus → pending approval → separately approved execution.
+- Clear work with non-trivial architecture or sequencing risk uses `/skill:ralplan --deliberate` and stops pending approval.
 - Use `/skill:ultragoal` for durable goal ledgers and `/skill:team` for approved coordinated persistent work.
 - Delegate large implementation slices to `executor`; use `planner`, `architect`, or `critic` for bounded planning and review.
-- Active skills are authoritative: read and follow them; planning and read-only skills do not mutate before approval.
+- Active skills are authoritative: never ignore an invoked skill; read the full skill text and follow it exactly.
+- Before explicit execution approval, planning and interview workflows NEVER edit product source, run mutating shell commands, commit, push, open PRs, or delegate implementation.
 </routing>
 </skc-runtime>
 {{/unless}}

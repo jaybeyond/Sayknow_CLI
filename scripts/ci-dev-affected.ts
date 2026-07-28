@@ -15,6 +15,16 @@ const PYTHON_DEV_SETUP =
 // Declared here (before the top-level `await main()`) so it is initialized for
 // every CLI mode despite top-level await halting later module statements.
 const NATIVE_BUILD_KEYS: ReadonlySet<string> = new Set(["native-build", "native-linux-x64"]);
+
+// Behavioral-owner tests cover entrypoint contracts whose names intentionally do
+// not follow the source-file basename convention. They supplement, rather than
+// replace, direct-basename test selection and owner fallback tasks.
+const BEHAVIORAL_OWNER_TESTS: Readonly<Record<string, readonly string[]>> = {
+	"artifacts/architecture-2383-eval.json": ["packages/ai/test/anthropic-cache-eval.integration.test.ts"],
+	"crates/pi-natives/src/path_identity.rs": ["packages/natives/test/path-identity-posix.test.ts"],
+	"packages/coding-agent/src/main.ts": ["packages/coding-agent/test/startup-update-contract.test.ts"],
+};
+
 export interface PackageManifest {
 	name?: string;
 	scripts?: Record<string, string>;
@@ -35,6 +45,48 @@ export interface Task {
 	description: string;
 	command: readonly string[];
 	cwd?: string;
+	capabilities?: TaskCapabilities;
+	phase?: "legacy" | "native-producer" | "ts-build" | "cargo-build" | "python";
+}
+
+export interface TaskCapabilities {
+	rust: boolean;
+	nextest: boolean;
+	nativeConsumer: boolean;
+	nativeProducer: boolean;
+}
+
+export interface TsInventoryUnit {
+	id: string;
+	name: string;
+	dir: string;
+	nativeConsumer: boolean;
+	nativeProducer: boolean;
+}
+
+export interface CargoInventoryUnit {
+	id: string;
+	name: string;
+	manifestPath: string;
+	supported: true;
+	nativeAddonSource: boolean;
+}
+
+export interface CargoWorkspaceEmergency {
+	id: "cargo-workspace-emergency";
+	key: "cargo-build:emergency:workspace";
+	identity: "emergency:cargo-workspace:root";
+	command: readonly ["cargo", "build", "--workspace"];
+	cwd: ".";
+	capabilities: TaskCapabilities;
+	allowedReasons: readonly ["cargo-name-ambiguity"];
+}
+
+export interface BuildInventory {
+	schemaVersion: 1;
+	typescript: readonly TsInventoryUnit[];
+	cargo: readonly CargoInventoryUnit[];
+	emergency: { cargoWorkspaceBuild?: CargoWorkspaceEmergency };
 }
 
 // Machine-readable descriptor for one planned task, emitted by `--matrix-json`
@@ -115,6 +167,49 @@ export function resolvePlanMode(): PlanMode {
 // Resolve the plan for the current changed paths and CI mode. PR mode builds the
 // targeted plan from a filesystem index of test files (for source→test mapping);
 // push mode reuses the broad affected planner unchanged.
+// Main CI full mode: emit the complete task union regardless of changed paths so
+// every check runs on `main`, and short-circuit the changed-path / canonical-plan
+// machinery entirely. It is deterministic, so the planner and every shard resolve
+// the identical plan without a shared plan artifact.
+export function planFullTasks(packages: readonly WorkspacePackage[]): Task[] {
+	const tasks = new Map<string, Task>();
+	addNativeBuild(tasks);
+	addWorkspaceTestTasks(tasks, packages);
+	add(tasks, "rust-check", "Rust check", ["bun", "run", "check:rs"]);
+	addRustTestTasks(tasks);
+	add(tasks, "cli-smoke", "SKC CLI smoke test", ["bun", "run", "ci:test:smoke"]);
+	addPythonTasks(tasks);
+	add(tasks, "runtime-check", "Runtime checks (needs native addon)", ["bun", "run", "check:runtime"], resolvePackageCwd("packages/coding-agent"));
+	// root-check (ci:check:full) is intentionally omitted: Main CI runs it in the
+	// dedicated native-free `check` job, so emitting it here would double-run it.
+	return Array.from(tasks.values());
+}
+
+// Emit the rust-test task, split into nextest partitions when configured. Each
+// partition shards the test set (not a repeated full run) via `cargo nextest run
+// --partition count:i/N`, wired through run-rs-task.ts.
+function addRustTestTasks(tasks: Map<string, Task>): void {
+	const partitions = rustTestPartitions();
+	if (partitions <= 1) {
+		add(tasks, "rust-test", "Rust tests", ["bun", "run", "test:rs"]);
+		return;
+	}
+	for (let index = 1; index <= partitions; index++) {
+		add(
+			tasks,
+			`rust-test:partition-${index}-of-${partitions}`,
+			`Rust tests partition ${index}/${partitions}`,
+			["bun", "scripts/run-rs-task.ts", "test:rs", `count:${index}/${partitions}`],
+		);
+	}
+}
+
+
+function addPythonTasks(tasks: Map<string, Task>): void {
+	add(tasks, "python-check", "Python SDK type check", ["bun", "run", "check:py-sdk"], undefined, { rust: false, nextest: false, nativeConsumer: false, nativeProducer: false }, "python");
+	add(tasks, "python-test", "Python SDK tests", ["bun", "run", "test:py-sdk"], undefined, { rust: false, nextest: false, nativeConsumer: true, nativeProducer: false }, "python");
+	add(tasks, "python-build-smoke", "Python SDK build smoke", ["bun", "run", "ci:test:py-sdk-build"], undefined, { rust: false, nextest: false, nativeConsumer: false, nativeProducer: false }, "python");
+}
 async function resolvePlannedTasks(paths: readonly string[]): Promise<Task[]> {
 	const packages = await getWorkspacePackages();
 	if (resolvePlanMode() === "pr") {
@@ -178,6 +273,8 @@ function isNativeBuildKey(key: string): boolean {
 // build task, so the shard can always download the artifact built once upstream.
 function taskNeedsNative(key: string): boolean {
 	return (
+		key === "python-test" ||
+		key === "root-test" ||
 		key === "root-check" ||
 		key === "root-test" ||
 		key === "cli-smoke" ||
@@ -209,10 +306,81 @@ export function describeTasks(tasks: readonly Task[]): TaskMatrixEntry[] {
 
 // `--matrix-json` prints the planned tasks as a JSON array on stdout (consumed
 // by tests and for debugging). Under GitHub Actions it also appends the dev-ci
-// planner outputs: `matrix` (the shard include list, excluding native-build
-// tasks), `has_tasks`, `has_native`, and the resolved `changed_paths` so every
-// downstream job reuses the planner's exact diff via CI_DEV_CHANGED_PATHS
-// instead of re-resolving the base ref on each runner.
+// planner outputs: `matrix`, `has_tasks`, `has_native`, and the canonical Darwin
+// smoke flag. Downstream jobs reuse the planner's exact diff via
+// CI_DEV_CHANGED_PATHS instead of re-resolving the base ref on each runner.
+// Paths that affect the compiled tab-worker smoke graph. Keep this authoritative
+// predicate in the planner: dev-ci consumes its emitted flag rather than copying
+// path checks into individual jobs.
+export function isDarwinArm64TabWorkerSmokePath(changedPath: string): boolean {
+	// The compiled worker recursively loads browser, eval, scraper, and utility
+	// helpers. Directory ownership is deliberately conservative so a newly-added
+	// helper in those graph roots cannot silently bypass the Darwin smoke.
+	return changedPath.startsWith("packages/coding-agent/src/tools/browser/") ||
+		changedPath.startsWith("packages/coding-agent/src/tools/puppeteer/") ||
+		changedPath.startsWith("packages/coding-agent/src/eval/js/") ||
+		changedPath.startsWith("packages/coding-agent/src/web/scrapers/") ||
+		changedPath.startsWith("packages/coding-agent/src/utils/") ||
+		changedPath.startsWith("packages/utils/src/") ||
+		changedPath === "packages/coding-agent/src/tools/tool-errors.ts" ||
+		changedPath === "packages/coding-agent/src/tools/path-utils.ts" ||
+		changedPath === "packages/coding-agent/src/cli.ts" ||
+		changedPath === "packages/coding-agent/scripts/build-binary.ts" ||
+		changedPath === "packages/coding-agent/scripts/compile-args.ts" ||
+		changedPath.startsWith("packages/natives/") ||
+		changedPath === "scripts/ci-build-native.ts";
+}
+
+export function needsDarwinArm64TabWorkerSmoke(paths: readonly string[]): boolean {
+	return paths.some(isDarwinArm64TabWorkerSmokePath);
+}
+
+// Paths whose Windows drive-letter vs Volume-GUID canonicalization and Bun
+// `node:fs` resident-cache write semantics the fix governs. On Ubuntu the
+// windows-canonical-path regression suite is skipped by `describe.skipIf`, so a
+// Linux shard cannot verify the ENOENT fix; dev-ci consumes this emitted flag to
+// run and require the windows-latest job whenever any of these change.
+export function isWindowsSessionPathRegressionPath(changedPath: string): boolean {
+	return changedPath === "packages/coding-agent/src/session/internal/managed-session-scope.ts" ||
+		changedPath === "packages/coding-agent/src/session/blob-store.ts" ||
+		changedPath === "packages/coding-agent/src/session/session-manager.ts" ||
+		changedPath === "packages/coding-agent/test/session-manager/windows-canonical-path.test.ts";
+}
+
+export function needsWindowsSessionPathRegression(paths: readonly string[]): boolean {
+	return paths.some(isWindowsSessionPathRegressionPath);
+}
+
+// Main CI full mode: emit a lean matrix from the deterministic full plan. It
+// deliberately skips the dev source-sha/checkout asserts, the canonical plan
+// artifact, plan digest, and the Darwin smoke flag — Main CI re-derives the same
+// full plan on every shard and gates on a simple aggregate job, not evidence
+// receipts.
+async function emitFullMatrix(): Promise<void> {
+	const tasks = planFullTasks(await getWorkspacePackages());
+	const entries = describeTasks(tasks);
+	console.log(JSON.stringify(entries));
+
+	const githubOutput = process.env.GITHUB_OUTPUT;
+	if (!githubOutput) return;
+	const shards = tasks
+		.filter(task => task.capabilities?.nativeProducer !== true && task.phase !== "python")
+		.map(task => {
+			const entry = describeTasks([task])[0]!;
+			return { key: entry.key, identity: entry.identity, description: entry.description, native: entry.native, rust: entry.rust, nextest: entry.nextest };
+		});
+	const hasNative = entries.some(entry => entry.nativeBuild);
+	const hasPython = tasks.some(task => task.phase === "python");
+	const lines = [
+		`matrix=${JSON.stringify({ include: shards })}`,
+		`has_tasks=${shards.length > 0}`,
+		`has_native=${hasNative}`,
+		`has_python=${hasPython}`,
+		"",
+	];
+	await fs.appendFile(githubOutput, lines.join("\n"));
+}
+
 async function emitMatrix(): Promise<void> {
 	const paths = await getChangedPaths();
 	const mode = resolvePlanMode();
@@ -222,17 +390,26 @@ async function emitMatrix(): Promise<void> {
 	console.log(JSON.stringify(entries));
 
 	const githubOutput = process.env.GITHUB_OUTPUT;
-	if (!githubOutput) {
-		return;
-	}
-	const shards = entries
-		.filter(entry => !entry.nativeBuild)
-		.map(entry => ({ key: entry.key, description: entry.description, native: entry.native, rust: entry.rust }));
+	if (!githubOutput) return;
+	const shards = tasks
+		.filter(task => task.capabilities?.nativeProducer !== true && task.phase !== "python")
+		.map(task => {
+			const entry = describeTasks([task])[0]!;
+			return { key: entry.key, identity: entry.identity, description: entry.description, native: entry.native, rust: entry.rust, nextest: entry.nextest };
+		});
 	const hasNative = entries.some(entry => entry.nativeBuild);
+	const hasPython = tasks.some(task => task.phase === "python");
+	const hasDarwinArm64TabWorkerSmoke = needsDarwinArm64TabWorkerSmoke(paths);
+	const hasWindowsSessionPath = needsWindowsSessionPathRegression(paths);
 	const lines = [
 		`matrix=${JSON.stringify({ include: shards })}`,
 		`has_tasks=${shards.length > 0}`,
 		`has_native=${hasNative}`,
+		`has_python=${hasPython}`,
+		`has_darwin_arm64_tab_worker_smoke=${hasDarwinArm64TabWorkerSmoke}`,
+		`has_windows_session_path=${hasWindowsSessionPath}`,
+		`plan_digest=${digest}`,
+		`plan_source_sha=${sourceSha}`,
 		`plan_mode=${mode}`,
 		"changed_paths<<__SKC_PATHS_EOF__",
 		...paths,
@@ -468,13 +645,9 @@ export function planTasks(paths: readonly string[], packages: readonly Workspace
 		add(tasks, "release-publish-dry-run", "Release publish dry-run", ["bun", "scripts/ci-release-publish.ts", "--dry-run"]);
 	}
 
-	if (pythonChanged) {
-		add(tasks, "python-lint", "Python lint", pythonLintCommand());
-		add(tasks, "python-test", "Python tests", pythonTestCommand());
-	}
-	if (webChanged) {
-		add(tasks, "roboskc-web-typecheck", "roboskc web typecheck", packageScriptCommand("typecheck"), resolvePackageCwd("python/roboskc/web"));
-		add(tasks, "roboskc-web-build", "roboskc web build", packageScriptCommand("build"), resolvePackageCwd("python/roboskc/web"));
+	if (paths.some(isPythonPath)) {
+		addPythonTasks(tasks);
+		addNativeBuild(tasks);
 	}
 	if (rustChanged) {
 		add(tasks, "rust-check", "Rust check", ["bun", "run", "check:rs"]);
@@ -488,7 +661,8 @@ export function planTasks(paths: readonly string[], packages: readonly Workspace
 	}
 	if (paths.some(isWorkflowOrScriptPath)) {
 		add(tasks, "affected-dry-run", "Affected CI selector self-check", ["bun", "scripts/ci-dev-affected.ts", "--dry-run"]);
-		add(tasks, "affected-selftest", "Affected CI selector unit tests", ["bun", "test", "scripts/ci-dev-affected.test.ts"]);
+		add(tasks, "affected-selftest", "Affected CI selector unit tests", ["bun", "test", "scripts/ci-dev-affected.test.ts", "scripts/dev-ci-guard-topology.test.ts"]);
+		add(tasks, "workflow-permissions", "Workflow permission policy regression", ["bun", "test", "scripts/check-workflow-permissions.test.ts", "scripts/release-policy.test.ts"]);
 		if (paths.some(isWorkflowPath)) {
 			add(tasks, "workflow-yaml-parse", "Workflow YAML parse check", ["bun", "scripts/check-workflow-yaml.ts"]);
 		}
@@ -500,7 +674,7 @@ export function planTasks(paths: readonly string[], packages: readonly Workspace
 // PR-mode targeted planner. For each changed path it emits the smallest safe set
 // of tasks instead of the broad affected suite:
 //   - docs/changelog-only -> nothing expensive
-//   - workflow / CI harness scripts -> yaml-parse + ci-selftest + ci-dry-run
+//   - workflow / CI harness scripts -> yaml-parse + ci-selftest + ci-dry-run + permission check
 //   - a changed test file -> run exactly that test file (test:<path>)
 //   - a source file with a directly-named test -> run that test file only
 //   - a source file with no mapped test -> owning package check + relevant smoke
@@ -519,6 +693,7 @@ export function planTargetedTasks(paths: readonly string[], packages: readonly W
 	const fullWorkspace = relevant.some(isFullWorkspacePath) && !isRootPackageReleaseHarnessOnly(relevant);
 	let needCiSelftest = false;
 	let needYamlParse = false;
+	let needPermissionCheck = false;
 
 	if (fullWorkspace) {
 		add(tasks, "root-check", "Root TypeScript/tooling check", ["bun", "run", "check:ts"]);
@@ -531,10 +706,12 @@ export function planTargetedTasks(paths: readonly string[], packages: readonly W
 		if (isWorkflowPath(changedPath)) {
 			needYamlParse = true;
 			needCiSelftest = true;
+			needPermissionCheck = true;
 			continue;
 		}
 		if (isCiHarnessScriptPath(changedPath)) {
 			needCiSelftest = true;
+			needPermissionCheck = true;
 			continue;
 		}
 		if (isPythonPath(changedPath)) {
@@ -550,6 +727,13 @@ export function planTargetedTasks(paths: readonly string[], packages: readonly W
 		if (isRustPath(changedPath)) {
 			add(tasks, "rust-check", "Rust check", ["bun", "run", "check:rs"]);
 			add(tasks, "rust-test", "Rust tests", ["bun", "run", "test:rs"]);
+			for (const testFile of behavioralTestsFor(changedPath)) {
+				addTestFileTask(tasks, testFile);
+			}
+			continue;
+		}
+		if (isPythonPath(changedPath)) {
+			addPythonTasks(tasks);
 			continue;
 		}
 		if (isInstallPath(changedPath)) {
@@ -596,6 +780,9 @@ export function planTargetedTasks(paths: readonly string[], packages: readonly W
 	}
 	if (needYamlParse) {
 		add(tasks, "yaml-parse", "Workflow YAML parse check", ["bun", "scripts/check-workflow-yaml.ts"]);
+	}
+	if (needPermissionCheck) {
+		add(tasks, "workflow-permissions", "Workflow permission policy regression", ["bun", "test", "scripts/check-workflow-permissions.test.ts", "scripts/release-policy.test.ts"]);
 	}
 
 	ensureNativeBuild(tasks);
@@ -650,7 +837,7 @@ function isTestFilePath(changedPath: string): boolean {
 }
 
 function isCiHarnessScriptPath(changedPath: string): boolean {
-	return changedPath === "scripts/ci-dev-affected.ts" || changedPath === "scripts/ci-dev-affected.test.ts" || changedPath === "scripts/check-workflow-yaml.ts";
+	return changedPath === "scripts/ci-dev-affected.ts" || changedPath === "scripts/ci-dev-affected.test.ts" || changedPath === "scripts/dev-ci-guard-topology.test.ts" || changedPath === "scripts/check-workflow-yaml.ts" || changedPath === "scripts/check-workflow-permissions.ts" || changedPath === "scripts/check-workflow-permissions.test.ts";
 }
 
 function isWebPath(changedPath: string): boolean {
@@ -666,9 +853,17 @@ function addNativeBuild(tasks: Map<string, Task>): void {
 	add(tasks, "native-linux-x64", "Build linux x64 native addons", ["bash", "-lc", 'TARGET_VARIANTS="baseline modern" bun scripts/ci-build-native.ts']);
 }
 
-function add(tasks: Map<string, Task>, key: string, description: string, command: readonly string[], cwd?: string): void {
+function add(
+	tasks: Map<string, Task>,
+	key: string,
+	description: string,
+	command: readonly string[],
+	cwd?: string,
+	capabilities?: TaskCapabilities,
+	phase?: Task["phase"],
+): void {
 	if (!tasks.has(key)) {
-		tasks.set(key, { key, description, command, cwd });
+		tasks.set(key, { key, description, command, cwd, capabilities, phase });
 	}
 }
 
@@ -780,6 +975,10 @@ function isPythonPath(changedPath: string): boolean {
 	return changedPath.startsWith("python/roboskc/") && !changedPath.startsWith("python/roboskc/web/") && !isPythonStaticAssetPath(changedPath);
 }
 
+function isPythonPath(changedPath: string): boolean {
+	return changedPath.startsWith("python/skc-sdk/");
+}
+
 function isRustPath(changedPath: string): boolean {
 	const fileName = path.basename(changedPath);
 	return (
@@ -816,7 +1015,15 @@ function isWorkflowPath(changedPath: string): boolean {
 }
 
 function isWorkflowHarnessPath(changedPath: string): boolean {
-	return isWorkflowPath(changedPath) || changedPath === "scripts/ci-dev-affected.ts" || changedPath === "scripts/check-workflow-yaml.ts";
+	return (
+		isWorkflowPath(changedPath) ||
+		changedPath === "scripts/ci-dev-affected.ts" ||
+		changedPath === "scripts/ci-dev-affected.test.ts" ||
+		changedPath === "scripts/dev-ci-guard-topology.test.ts" ||
+		changedPath === "scripts/check-workflow-yaml.ts" ||
+		changedPath === "scripts/check-workflow-permissions.ts" ||
+		changedPath === "scripts/check-workflow-permissions.test.ts"
+	);
 }
 
 function isToolingScriptPath(changedPath: string): boolean {
@@ -849,4 +1056,454 @@ export async function runCommand(command: readonly string[], cwd: string): Promi
 		stderr: "inherit",
 	});
 	return proc.exited;
+}
+
+function serializeTasks(tasks: readonly Task[]): Task[] {
+	return tasks.map(task => {
+		const cwd = task.cwd ? path.relative(repoRoot, task.cwd) || "." : ".";
+		return {
+			key: task.key,
+			identity: canonicalTaskIdentity(task),
+			description: task.description,
+			command: task.command,
+			cwd,
+			capabilities: task.capabilities ?? {
+				rust: taskNeedsRust(task.key),
+				nextest: isRustTestKey(task.key),
+				nativeConsumer: taskNeedsNative(task.key),
+				nativeProducer: isNativeBuildKey(task.key),
+			},
+			phase: task.phase ?? "legacy",
+		};
+	});
+}
+
+function canonicalTaskIdentity(task: Task): string {
+	const cwd = task.cwd ? path.relative(repoRoot, task.cwd) || "." : ".";
+	return task.identity ?? `legacy:${toBase64Url(task.key)}:${toBase64Url(cwd)}`;
+}
+
+export interface AffectedAggregateResults {
+	plan: string;
+	native: string;
+	shards: string;
+	python: string;
+	windowsDoctor: string;
+	windowsDoctorRequired: string;
+	windowsNativeToolchain: string;
+	windowsNativeToolchainRequired: string;
+	telegramGuard: string;
+	telegramGuardRequired: string;
+	telegramWindows: string;
+	telegramWindowsRequired: string;
+	hasNative: string;
+	hasTasks: string;
+	hasPython: string;
+	darwinArm64TabWorkerSmoke: string;
+	darwinArm64TabWorkerSmokeRequired: string;
+}
+
+export function validateAffectedAggregate(results: AffectedAggregateResults): void {
+	if (results.plan !== "success") throw new Error("planner did not succeed");
+	if (results.hasNative !== "true" && results.hasNative !== "false") throw new Error(`planner emitted invalid has_native=${results.hasNative}`);
+	if (results.hasTasks !== "true" && results.hasTasks !== "false") throw new Error(`planner emitted invalid has_tasks=${results.hasTasks}`);
+	if (results.hasPython !== "true" && results.hasPython !== "false") throw new Error(`planner emitted invalid has_python=${results.hasPython}`);
+	if (results.native !== (results.hasNative === "true" ? "success" : "skipped")) throw new Error(results.hasNative === "true" ? "required native build did not succeed" : "unplanned native build was not skipped");
+	if (results.shards !== (results.hasTasks === "true" ? "success" : "skipped")) throw new Error(results.hasTasks === "true" ? "required affected shards did not succeed" : "unplanned affected shards were not skipped");
+	if (results.python !== (results.hasPython === "true" ? "success" : "skipped")) throw new Error(results.hasPython === "true" ? "required Python matrix did not succeed" : "unplanned Python matrix was not skipped");
+	if (results.windowsDoctorRequired !== "true" && results.windowsDoctorRequired !== "false") throw new Error(`planner emitted invalid windows_doctor_required=${results.windowsDoctorRequired}`);
+	if (results.windowsDoctor !== (results.windowsDoctorRequired === "true" ? "success" : "skipped")) throw new Error(results.windowsDoctorRequired === "true" ? "required Windows dev:doctor did not succeed" : "unplanned Windows dev:doctor was not skipped");
+	if (results.windowsNativeToolchainRequired !== "true" && results.windowsNativeToolchainRequired !== "false") throw new Error(`planner emitted invalid windows_native_toolchain_required=${results.windowsNativeToolchainRequired}`);
+	if (results.windowsNativeToolchain !== (results.windowsNativeToolchainRequired === "true" ? "success" : "skipped")) throw new Error(results.windowsNativeToolchainRequired === "true" ? "required Windows native build toolchain check did not succeed" : "unplanned Windows native build toolchain check was not skipped");
+	if (results.darwinArm64TabWorkerSmokeRequired !== "true" && results.darwinArm64TabWorkerSmokeRequired !== "false") throw new Error(`planner emitted invalid darwin_arm64_tab_worker_smoke_required=${results.darwinArm64TabWorkerSmokeRequired}`);
+	if (results.darwinArm64TabWorkerSmoke !== (results.darwinArm64TabWorkerSmokeRequired === "true" ? "success" : "skipped")) throw new Error(results.darwinArm64TabWorkerSmokeRequired === "true" ? "required Darwin arm64 tab-worker smoke did not succeed" : "unplanned Darwin arm64 tab-worker smoke was not skipped");
+	if (results.telegramGuardRequired !== "true" && results.telegramGuardRequired !== "false") throw new Error(`planner emitted invalid telegram_guard_required=${results.telegramGuardRequired}`);
+	if (results.telegramGuard !== (results.telegramGuardRequired === "true" ? "success" : "skipped")) throw new Error(results.telegramGuardRequired === "true" ? "required Telegram daemon generation guard did not succeed" : "unplanned Telegram daemon generation guard was not skipped");
+	if (results.telegramWindowsRequired !== "true" && results.telegramWindowsRequired !== "false") throw new Error(`planner emitted invalid telegram_windows_required=${results.telegramWindowsRequired}`);
+	if (results.telegramWindows !== (results.telegramWindowsRequired === "true" ? "success" : "skipped")) throw new Error(results.telegramWindowsRequired === "true" ? "required Windows Telegram daemon safety did not succeed" : "unplanned Windows Telegram daemon safety was not skipped");
+}
+
+async function validateAggregate(): Promise<void> {
+	const results: AffectedAggregateResults = {
+		plan: Bun.env.CI_DEV_PLAN_RESULT?.trim() || "",
+		native: Bun.env.CI_DEV_NATIVE_RESULT?.trim() || "",
+		shards: Bun.env.CI_DEV_SHARDS_RESULT?.trim() || "",
+		python: Bun.env.CI_DEV_PYTHON_RESULT?.trim() || "",
+		windowsDoctor: Bun.env.CI_DEV_WINDOWS_DOCTOR_RESULT?.trim() || "",
+		windowsDoctorRequired: Bun.env.CI_DEV_WINDOWS_DOCTOR_REQUIRED?.trim() || "",
+		windowsNativeToolchain: Bun.env.CI_DEV_WINDOWS_NATIVE_TOOLCHAIN_RESULT?.trim() || "",
+		windowsNativeToolchainRequired: Bun.env.CI_DEV_WINDOWS_NATIVE_TOOLCHAIN_REQUIRED?.trim() || "",
+		telegramGuard: Bun.env.CI_DEV_TELEGRAM_GUARD_RESULT?.trim() || "",
+		telegramGuardRequired: Bun.env.CI_DEV_TELEGRAM_GUARD_REQUIRED?.trim() || "",
+		telegramWindows: Bun.env.CI_DEV_TELEGRAM_WINDOWS_RESULT?.trim() || "",
+		telegramWindowsRequired: Bun.env.CI_DEV_TELEGRAM_WINDOWS_REQUIRED?.trim() || "",
+		hasNative: Bun.env.CI_DEV_HAS_NATIVE?.trim() || "",
+		hasTasks: Bun.env.CI_DEV_HAS_TASKS?.trim() || "",
+		hasPython: Bun.env.CI_DEV_HAS_PYTHON?.trim() || "",
+		darwinArm64TabWorkerSmoke: Bun.env.CI_DEV_DARWIN_ARM64_TAB_WORKER_SMOKE_RESULT?.trim() || "",
+		darwinArm64TabWorkerSmokeRequired: Bun.env.CI_DEV_DARWIN_ARM64_TAB_WORKER_SMOKE_REQUIRED?.trim() || "",
+	};
+
+
+	console.log(`affected-plan: ${results.plan}`);
+	console.log(`affected-native: ${results.native}`);
+	console.log(`affected-shards: ${results.shards}`);
+	console.log(`affected-python-matrix: ${results.python}`);
+	console.log(`planned native work: ${results.hasNative}`);
+	console.log(`planned shard work: ${results.hasTasks}`);
+	console.log(`planned Python work: ${results.hasPython}`);
+	console.log(`windows-dev-doctor: ${results.windowsDoctor}`);
+	console.log(`planned Windows dev:doctor: ${results.windowsDoctorRequired}`);
+	console.log(`windows-native-build-toolchain: ${results.windowsNativeToolchain}`);
+	console.log(`planned Windows native build toolchain: ${results.windowsNativeToolchainRequired}`);
+	console.log(`darwin-arm64 tab-worker smoke: ${results.darwinArm64TabWorkerSmoke}`);
+	console.log(`planned Darwin arm64 tab-worker smoke: ${results.darwinArm64TabWorkerSmokeRequired}`);
+	console.log(`telegram-daemon-generation: ${results.telegramGuard}`);
+	console.log(`planned Telegram daemon generation: ${results.telegramGuardRequired}`);
+	console.log(`windows-telegram-daemon-safety: ${results.telegramWindows}`);
+	console.log(`planned Windows Telegram daemon safety: ${results.telegramWindowsRequired}`);
+	validateAffectedAggregate(results);
+	const tasks = await loadCanonicalPlan();
+	if (!tasks) throw new Error("affected-plan-invalid: aggregate requires a canonical plan");
+	validatePlanCapabilities(tasks, results, Bun.env.CI_DEV_PLAN_MODE?.trim() || resolvePlanMode());
+	console.log("Affected path validation: all required shards passed");
+}
+
+function validatePlanCapabilities(tasks: readonly Task[], results: Pick<AffectedAggregateResults, "hasNative" | "hasTasks" | "hasPython">, mode: string): void {
+	if (mode !== "pr" && mode !== "push") throw new Error("affected-plan-invalid: invalid plan mode");
+	const expectedHasNative = String(tasks.some(task => task.capabilities?.nativeProducer === true));
+	const expectedHasTasks = String(tasks.some(task => task.capabilities?.nativeProducer !== true && task.phase !== "python"));
+	const expectedHasPython = String(tasks.some(task => task.phase === "python"));
+	if (results.hasNative !== expectedHasNative || results.hasTasks !== expectedHasTasks || results.hasPython !== expectedHasPython) throw new Error("affected-plan-invalid: plan capability flags mismatch");
+}
+
+const AFFECTED_EVIDENCE_MANIFEST = ".ci-dev-affected-evidence.json";
+const AFFECTED_EVIDENCE_RECEIPT = ".ci-dev-affected-evidence.receipt.json";
+const AFFECTED_PLAN_NAME = ".ci-dev-affected-plan.json";
+const AFFECTED_SHARD_DIR = ".ci-dev-shard-receipts";
+const SHA256 = /^[a-f0-9]{64}$/;
+const SOURCE_SHA = /^[a-f0-9]{40}$/;
+
+type EvidenceChild = { name: string; sha256: string };
+type EvidenceTask = { key: string; identity: string };
+type ReplayScope = { repository: string; workflow: string; runId: string };
+type AffectedEvidenceManifest = {
+	schemaVersion: 1; subject: "ci-dev-affected-evidence"; sourceSha: string; planDigest: string; planMode: PlanMode;
+	replayScope: ReplayScope; aggregateResults: AffectedAggregateResults; taskIdentities: EvidenceTask[]; childEvidence: EvidenceChild[];
+};
+type DetachedEvidenceReceipt = {
+	schemaVersion: 1; subject: "ci-dev-affected-evidence"; manifestSha256: string; sourceSha: string; planDigest: string; replayScope: ReplayScope;
+};
+
+function sha256(value: string | Uint8Array): string { return new Bun.CryptoHasher("sha256").update(value).digest("hex"); }
+function canonicalEvidence(value: object): string { return `${JSON.stringify(value)}\n`; }
+function evidenceRoot(): string { return path.resolve(requiredEnv("CI_DEV_EVIDENCE_ROOT")); }
+function evidenceError(reason: string): Error { return new Error(`affected-evidence-invalid: ${reason}`); }
+function exactKeys(value: Record<string, unknown>, keys: readonly string[], reason: string): void {
+	if (Object.keys(value).length !== keys.length || Object.keys(value).some(key => !keys.includes(key))) throw evidenceError(reason);
+}
+function requiredEnv(name: string): string { const value = Bun.env[name]?.trim(); if (!value) throw evidenceError(`missing ${name}`); return value; }
+
+function isMissingError(error: unknown): boolean { return typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT"; }
+async function checkedEvidencePath(root: string, relative: string, finalKind: "file" | "directory"): Promise<string> {
+	const resolvedRoot = path.resolve(root);
+	const target = path.resolve(resolvedRoot, relative);
+	if (!target.startsWith(`${resolvedRoot}${path.sep}`)) throw evidenceError("path escaped staging root");
+	let rootStat: import("node:fs").Stats;
+	try { rootStat = await fs.lstat(resolvedRoot); } catch (error) { if (isMissingError(error)) throw evidenceError("missing staging root"); throw error; }
+	if (rootStat.isSymbolicLink()) throw evidenceError("symlink staging root");
+	if (!rootStat.isDirectory()) throw evidenceError("non-directory staging root");
+	let current = resolvedRoot;
+	for (const piece of path.relative(resolvedRoot, target).split(path.sep)) {
+		current = path.join(current, piece);
+		let stat: import("node:fs").Stats;
+		try { stat = await fs.lstat(current); } catch (error) { if (isMissingError(error)) throw evidenceError("missing evidence object"); throw error; }
+		if (stat.isSymbolicLink()) throw evidenceError("symlink evidence object");
+		const final = current === target;
+		if (final ? (finalKind === "file" ? !stat.isFile() : !stat.isDirectory()) : !stat.isDirectory()) {
+			throw evidenceError(final ? `non-${finalKind} evidence object` : "non-directory evidence parent");
+		}
+	}
+	return target;
+}
+async function readEvidenceBytes(root: string, relative: string): Promise<Uint8Array> { return new Uint8Array(await fs.readFile(await checkedEvidencePath(root, relative, "file"))); }
+function decodeEvidenceJson(raw: Uint8Array): string { try { return new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(raw); } catch { throw evidenceError("malformed UTF-8 evidence"); } }
+async function readEvidenceFile(root: string, relative: string): Promise<string> { return decodeEvidenceJson(await readEvidenceBytes(root, relative)); }
+async function checkEvidenceDirectory(root: string, relative: string): Promise<string> { return checkedEvidencePath(root, relative, "directory"); }
+
+function expectedEvidenceTasks(tasks: readonly Task[]): EvidenceTask[] {
+	return tasks.filter(task => task.capabilities?.nativeProducer !== true && task.phase !== "python").map(task => ({ key: task.key, identity: canonicalTaskIdentity(task) }));
+}
+function expectedEvidenceNames(tasks: readonly Task[]): string[] {
+	return [AFFECTED_PLAN_NAME, ...expectedEvidenceTasks(tasks).map((_, index) => `${AFFECTED_SHARD_DIR}/${index}.json`)];
+}
+function canonicalReplayScope(): ReplayScope {
+	return { repository: requiredEnv("GITHUB_REPOSITORY"), workflow: requiredEnv("GITHUB_WORKFLOW"), runId: requiredEnv("GITHUB_RUN_ID") };
+}
+function aggregateFromEnv(): AffectedAggregateResults {
+	return {
+		plan: requiredEnv("CI_DEV_PLAN_RESULT"),
+		native: requiredEnv("CI_DEV_NATIVE_RESULT"),
+		shards: requiredEnv("CI_DEV_SHARDS_RESULT"),
+		python: requiredEnv("CI_DEV_PYTHON_RESULT"),
+		windowsDoctor: requiredEnv("CI_DEV_WINDOWS_DOCTOR_RESULT"),
+		windowsDoctorRequired: requiredEnv("CI_DEV_WINDOWS_DOCTOR_REQUIRED"),
+		windowsNativeToolchain: requiredEnv("CI_DEV_WINDOWS_NATIVE_TOOLCHAIN_RESULT"),
+		windowsNativeToolchainRequired: requiredEnv("CI_DEV_WINDOWS_NATIVE_TOOLCHAIN_REQUIRED"),
+		telegramGuard: requiredEnv("CI_DEV_TELEGRAM_GUARD_RESULT"),
+		telegramGuardRequired: requiredEnv("CI_DEV_TELEGRAM_GUARD_REQUIRED"),
+		telegramWindows: requiredEnv("CI_DEV_TELEGRAM_WINDOWS_RESULT"),
+		telegramWindowsRequired: requiredEnv("CI_DEV_TELEGRAM_WINDOWS_REQUIRED"),
+		hasNative: requiredEnv("CI_DEV_HAS_NATIVE"),
+		hasTasks: requiredEnv("CI_DEV_HAS_TASKS"),
+		hasPython: requiredEnv("CI_DEV_HAS_PYTHON"),
+		darwinArm64TabWorkerSmoke: requiredEnv("CI_DEV_DARWIN_ARM64_TAB_WORKER_SMOKE_RESULT"),
+		darwinArm64TabWorkerSmokeRequired: requiredEnv("CI_DEV_DARWIN_ARM64_TAB_WORKER_SMOKE_REQUIRED"),
+	};
+}
+function parseAggregate(value: unknown): AffectedAggregateResults {
+	if (!isRecord(value)) throw evidenceError("malformed aggregate results");
+	exactKeys(
+		value,
+		[
+			"plan",
+			"native",
+			"shards",
+			"windowsDoctor",
+			"python",
+			"windowsDoctorRequired",
+			"windowsNativeToolchain",
+			"windowsNativeToolchainRequired",
+			"telegramGuard",
+			"telegramGuardRequired",
+			"telegramWindows",
+			"telegramWindowsRequired",
+			"hasNative",
+			"hasTasks",
+			"hasPython",
+			"darwinArm64TabWorkerSmoke",
+			"darwinArm64TabWorkerSmokeRequired",
+		],
+		"unexpected aggregate results field",
+	);
+	if (!Object.values(value).every(isString)) throw evidenceError("malformed aggregate results");
+	return {
+		plan: value.plan as string,
+		native: value.native as string,
+		shards: value.shards as string,
+		python: value.python as string,
+		windowsDoctor: value.windowsDoctor as string,
+		windowsDoctorRequired: value.windowsDoctorRequired as string,
+		windowsNativeToolchain: value.windowsNativeToolchain as string,
+		windowsNativeToolchainRequired: value.windowsNativeToolchainRequired as string,
+		telegramGuard: value.telegramGuard as string,
+		telegramGuardRequired: value.telegramGuardRequired as string,
+		telegramWindows: value.telegramWindows as string,
+		telegramWindowsRequired: value.telegramWindowsRequired as string,
+		hasNative: value.hasNative as string,
+		hasTasks: value.hasTasks as string,
+		hasPython: value.hasPython as string,
+		darwinArm64TabWorkerSmoke: value.darwinArm64TabWorkerSmoke as string,
+		darwinArm64TabWorkerSmokeRequired: value.darwinArm64TabWorkerSmokeRequired as string,
+	};
+}
+function parseReplayScope(value: unknown): ReplayScope {
+	if (!isRecord(value)) throw evidenceError("malformed replay scope");
+	exactKeys(value, ["repository", "workflow", "runId"], "unexpected replay scope field");
+	if (!isString(value.repository) || !isString(value.workflow) || !isString(value.runId) || !value.repository || !value.workflow || !value.runId) throw evidenceError("malformed replay scope");
+	return { repository: value.repository, workflow: value.workflow, runId: value.runId };
+}
+function parseEvidenceTasks(value: unknown): EvidenceTask[] {
+	if (!Array.isArray(value)) throw evidenceError("malformed task identities");
+	return value.map(entry => { if (!isRecord(entry)) throw evidenceError("malformed task identity"); exactKeys(entry, ["key", "identity"], "unexpected task identity field"); if (!isString(entry.key) || !isString(entry.identity) || !entry.key || !entry.identity) throw evidenceError("malformed task identity"); return { key: entry.key, identity: entry.identity }; });
+}
+function parseEvidenceChildren(value: unknown): EvidenceChild[] {
+	if (!Array.isArray(value)) throw evidenceError("malformed child evidence");
+	return value.map(entry => { if (!isRecord(entry)) throw evidenceError("malformed child evidence"); exactKeys(entry, ["name", "sha256"], "unexpected child evidence field"); if (!isString(entry.name) || !isString(entry.sha256) || !SHA256.test(entry.sha256)) throw evidenceError("malformed child evidence"); return { name: entry.name, sha256: entry.sha256 }; });
+}
+function parseCanonicalManifest(raw: string): AffectedEvidenceManifest {
+	let decoded: unknown; try { decoded = JSON.parse(raw); } catch { throw evidenceError("malformed manifest"); }
+	if (!isRecord(decoded)) throw evidenceError("malformed manifest");
+	exactKeys(decoded, ["schemaVersion", "subject", "sourceSha", "planDigest", "planMode", "replayScope", "aggregateResults", "taskIdentities", "childEvidence"], "unexpected manifest field");
+	if (decoded.schemaVersion !== 1 || decoded.subject !== "ci-dev-affected-evidence" || !isString(decoded.sourceSha) || !SOURCE_SHA.test(decoded.sourceSha) || !isString(decoded.planDigest) || !SHA256.test(decoded.planDigest) || (decoded.planMode !== "pr" && decoded.planMode !== "push")) throw evidenceError("malformed manifest");
+	const manifest: AffectedEvidenceManifest = { schemaVersion: 1, subject: "ci-dev-affected-evidence", sourceSha: decoded.sourceSha, planDigest: decoded.planDigest, planMode: decoded.planMode, replayScope: parseReplayScope(decoded.replayScope), aggregateResults: parseAggregate(decoded.aggregateResults), taskIdentities: parseEvidenceTasks(decoded.taskIdentities), childEvidence: parseEvidenceChildren(decoded.childEvidence) };
+	if (raw !== canonicalEvidence(manifest)) throw evidenceError("non-canonical manifest bytes");
+	return manifest;
+}
+function parseCanonicalReceipt(raw: string): DetachedEvidenceReceipt {
+	let decoded: unknown; try { decoded = JSON.parse(raw); } catch { throw evidenceError("malformed receipt"); }
+	if (!isRecord(decoded)) throw evidenceError("malformed receipt");
+	exactKeys(decoded, ["schemaVersion", "subject", "manifestSha256", "sourceSha", "planDigest", "replayScope"], "unexpected receipt field");
+	if (decoded.schemaVersion !== 1 || decoded.subject !== "ci-dev-affected-evidence" || !isString(decoded.manifestSha256) || !SHA256.test(decoded.manifestSha256) || !isString(decoded.sourceSha) || !SOURCE_SHA.test(decoded.sourceSha) || !isString(decoded.planDigest) || !SHA256.test(decoded.planDigest)) throw evidenceError("malformed receipt");
+	const receipt: DetachedEvidenceReceipt = { schemaVersion: 1, subject: "ci-dev-affected-evidence", manifestSha256: decoded.manifestSha256, sourceSha: decoded.sourceSha, planDigest: decoded.planDigest, replayScope: parseReplayScope(decoded.replayScope) };
+	if (raw !== canonicalEvidence(receipt)) throw evidenceError("non-canonical receipt bytes");
+	return receipt;
+}
+
+async function readValidatedEvidencePlan(root: string): Promise<{ tasks: Task[]; raw: Uint8Array; mode: PlanMode }> {
+	const raw = await readEvidenceBytes(root, AFFECTED_PLAN_NAME);
+	let decoded: unknown; try { decoded = JSON.parse(decodeEvidenceJson(raw)); } catch { throw evidenceError("malformed canonical plan"); }
+	if (!isRecord(decoded) || (decoded.mode !== "pr" && decoded.mode !== "push")) throw evidenceError("malformed canonical plan");
+	const planPath = path.join(root, AFFECTED_PLAN_NAME);
+	const original = Bun.env.CI_DEV_AFFECTED_PLAN;
+	Bun.env.CI_DEV_AFFECTED_PLAN = planPath;
+	try { const tasks = await loadCanonicalPlan(); if (!tasks) throw evidenceError("missing canonical plan"); return { tasks, raw, mode: decoded.mode }; }
+	finally { if (original === undefined) delete Bun.env.CI_DEV_AFFECTED_PLAN; else Bun.env.CI_DEV_AFFECTED_PLAN = original; }
+}
+async function collectChildEvidence(root: string, tasks: readonly Task[]): Promise<EvidenceChild[]> {
+	const expected = expectedEvidenceNames(tasks);
+	const shardTasks = expectedEvidenceTasks(tasks);
+	if (shardTasks.length === 0) {
+		try { await fs.lstat(path.join(root, AFFECTED_SHARD_DIR)); throw evidenceError("unexpected shard receipt directory"); } catch (error) { if (error instanceof Error && error.message.startsWith("affected-evidence-invalid")) throw error; if (!isMissingError(error)) throw error; }
+	} else {
+		const directory = await checkEvidenceDirectory(root, AFFECTED_SHARD_DIR);
+		const entries = await fs.readdir(directory);
+		if (entries.length !== shardTasks.length || entries.some(entry => !/^\d+\.json$/.test(entry))) throw evidenceError("shard receipt set does not match canonical plan");
+	}
+	const children: EvidenceChild[] = [];
+	for (const [index, name] of expected.entries()) {
+		const rawBytes = await readEvidenceBytes(root, name);
+		const raw = decodeEvidenceJson(rawBytes);
+		if (index > 0) {
+			let value: unknown; try { value = JSON.parse(raw); } catch { throw evidenceError("malformed shard receipt"); }
+			const expectedTask = shardTasks[index - 1]!;
+			if (!isRecord(value) || Object.keys(value).length !== 2 || value.key !== expectedTask.key || value.identity !== expectedTask.identity) throw evidenceError("shard receipt set does not match canonical plan");
+		}
+		children.push({ name, sha256: sha256(rawBytes) });
+	}
+	return children;
+}
+async function writeAffectedEvidence(): Promise<void> {
+	const root = evidenceRoot();
+	const { tasks, raw: planRaw, mode: planMode } = await readValidatedEvidencePlan(root);
+	const results = aggregateFromEnv(); validateAffectedAggregate(results);
+	const digest = requiredEnv("CI_DEV_PLAN_DIGEST");
+	const mode = requiredEnv("CI_DEV_PLAN_MODE");
+	if (mode !== "pr" && mode !== "push") throw evidenceError("invalid CI_DEV_PLAN_MODE");
+	if (mode !== planMode) throw evidenceError("plan mode mismatch");
+	validatePlanCapabilities(tasks, results, mode);
+	if (sha256(planRaw) !== digest) throw evidenceError("plan digest mismatch");
+	const manifestPath = path.join(root, AFFECTED_EVIDENCE_MANIFEST); const receiptPath = path.join(root, AFFECTED_EVIDENCE_RECEIPT);
+	for (const target of [manifestPath, receiptPath]) { try { await fs.lstat(target); throw evidenceError("evidence target already exists"); } catch (error) { if (error instanceof Error && error.message.startsWith("affected-evidence-invalid")) throw error; if (!isMissingError(error)) throw error; } }
+	const manifest: AffectedEvidenceManifest = { schemaVersion: 1, subject: "ci-dev-affected-evidence", sourceSha: requiredEnv("CI_DEV_SOURCE_SHA"), planDigest: digest, planMode: mode, replayScope: canonicalReplayScope(), aggregateResults: results, taskIdentities: expectedEvidenceTasks(tasks), childEvidence: await collectChildEvidence(root, tasks) };
+	let wroteManifest = false;
+	try {
+		await fs.writeFile(manifestPath, canonicalEvidence(manifest), { flag: "wx" }); wroteManifest = true;
+		const finalized = await readEvidenceBytes(root, AFFECTED_EVIDENCE_MANIFEST);
+		if (Bun.env.CI_DEV_INJECT_EVIDENCE_POST_MANIFEST_FAILURE === "true") throw evidenceError("injected post-manifest failure");
+		const receipt: DetachedEvidenceReceipt = { schemaVersion: 1, subject: "ci-dev-affected-evidence", manifestSha256: sha256(finalized), sourceSha: manifest.sourceSha, planDigest: manifest.planDigest, replayScope: manifest.replayScope };
+		await fs.writeFile(receiptPath, canonicalEvidence(receipt), { flag: "wx" });
+		console.log(`affected evidence produced: ${manifest.childEvidence.length} child evidence file(s)`);
+	} catch (error) { if (wroteManifest) await fs.rm(manifestPath, { force: true }); throw error; }
+}
+async function validateAffectedEvidence(): Promise<void> {
+	const root = evidenceRoot();
+	const receiptRaw = await readEvidenceFile(root, AFFECTED_EVIDENCE_RECEIPT);
+	const manifestBytes = await readEvidenceBytes(root, AFFECTED_EVIDENCE_MANIFEST);
+	const manifestRaw = decodeEvidenceJson(manifestBytes);
+	const receipt = parseCanonicalReceipt(receiptRaw);
+	if (receipt.manifestSha256 !== sha256(manifestBytes)) throw evidenceError("manifest digest mismatch");
+	const manifest = parseCanonicalManifest(manifestRaw);
+	const { tasks, raw: planRaw, mode: planMode } = await readValidatedEvidencePlan(root);
+	const expectedReplay = canonicalReplayScope(); const expectedSource = requiredEnv("CI_DEV_SOURCE_SHA"); const expectedDigest = requiredEnv("CI_DEV_PLAN_DIGEST");
+	if (manifest.sourceSha !== expectedSource || receipt.sourceSha !== expectedSource || manifest.planDigest !== expectedDigest || receipt.planDigest !== expectedDigest || JSON.stringify(manifest.replayScope) !== JSON.stringify(expectedReplay) || JSON.stringify(receipt.replayScope) !== JSON.stringify(expectedReplay)) throw evidenceError("replay binding mismatch");
+	if (manifest.planMode !== requiredEnv("CI_DEV_PLAN_MODE") || manifest.planMode !== planMode || sha256(planRaw) !== expectedDigest) throw evidenceError("plan binding mismatch");
+	validateAffectedAggregate(manifest.aggregateResults);
+	const liveAggregate = aggregateFromEnv();
+	if (JSON.stringify(manifest.aggregateResults) !== JSON.stringify(liveAggregate)) throw evidenceError("aggregate result mismatch");
+	validatePlanCapabilities(tasks, liveAggregate, manifest.planMode);
+	const expectedTasks = expectedEvidenceTasks(tasks);
+	if (JSON.stringify(manifest.taskIdentities) !== JSON.stringify(expectedTasks)) throw evidenceError("task identity mismatch");
+	const children = await collectChildEvidence(root, tasks);
+	if (JSON.stringify(manifest.childEvidence) !== JSON.stringify(children)) throw evidenceError("child evidence mismatch");
+	console.log(`affected evidence validated: ${children.length} child evidence file(s)`);
+}
+
+async function validateShardReceipts(): Promise<void> {
+	const tasks = await loadCanonicalPlan();
+	if (!tasks) throw new Error("affected-plan-invalid: shard receipt validation requires a canonical plan");
+	const expected = tasks
+		.filter(task => task.capabilities?.nativeProducer !== true && task.phase !== "python")
+		.map(task => ({ key: task.key, identity: canonicalTaskIdentity(task) }))
+		.sort((left, right) => left.key.localeCompare(right.key));
+	const receiptDir = path.resolve(repoRoot, Bun.env.CI_DEV_SHARD_RECEIPTS?.trim() || ".ci-dev-shard-receipts");
+	const actual: Array<{ key: string; identity: string }> = [];
+	for await (const entry of new Bun.Glob("*.json").scan({ cwd: receiptDir })) {
+		const value = await Bun.file(path.join(receiptDir, entry)).json();
+		if (!isRecord(value) || !isString(value.key) || !isString(value.identity) || Object.keys(value).length !== 2) throw new Error("affected-plan-invalid: malformed shard receipt");
+		actual.push({ key: value.key, identity: value.identity });
+	}
+	actual.sort((left, right) => left.key.localeCompare(right.key));
+	if (JSON.stringify(actual) !== JSON.stringify(expected)) throw new Error("affected-plan-invalid: shard receipt set does not match canonical plan");
+}
+
+async function loadCanonicalPlan(): Promise<Task[] | null> {
+	const planFile = Bun.env.CI_DEV_AFFECTED_PLAN?.trim();
+	if (!planFile) return null;
+	let rawPlan: string;
+	let decoded: unknown;
+	try {
+		rawPlan = await Bun.file(planFile).text();
+		decoded = JSON.parse(rawPlan);
+	} catch {
+		throw new Error("affected-plan-invalid: cannot read canonical plan");
+	}
+	if (!isRecord(decoded) || decoded.schemaVersion !== 1 || !isString(decoded.sourceSha) || (decoded.mode !== "pr" && decoded.mode !== "push") || !Array.isArray(decoded.paths) || !decoded.paths.every(isString) || !Array.isArray(decoded.tasks)) throw new Error("affected-plan-invalid: malformed canonical plan");
+	if (Object.keys(decoded).length !== 5 || Object.keys(decoded).some(key => !["schemaVersion", "sourceSha", "mode", "paths", "tasks"].includes(key))) throw new Error("affected-plan-invalid: unexpected top-level field");
+	const decodedPaths = decoded.paths as string[];
+	const paths = normalizeChangedPaths(decodedPaths);
+	if (paths.length !== decodedPaths.length || paths.some((entry, index) => entry !== decodedPaths[index])) throw new Error("affected-plan-invalid: paths are not canonical");
+	const expectedSha = Bun.env.CI_DEV_PLAN_SOURCE_SHA?.trim();
+	const expectedDigest = Bun.env.CI_DEV_PLAN_DIGEST?.trim();
+	if (!expectedSha || !expectedDigest) throw new Error("affected-plan-invalid: missing expected digest or source SHA");
+	if (decoded.sourceSha !== expectedSha) throw new Error("affected-plan-invalid: source SHA mismatch");
+	const checkedOut = await $`git rev-parse HEAD`.cwd(repoRoot).quiet().nothrow();
+	if (checkedOut.exitCode !== 0 || checkedOut.stdout.toString().trim() !== expectedSha) throw new Error("affected-plan-invalid: checked-out SHA mismatch");
+	const actual = new Bun.CryptoHasher("sha256").update(rawPlan).digest("hex");
+	if (actual !== expectedDigest) throw new Error("affected-plan-invalid: digest mismatch");
+	const tasks = decoded.tasks.map(deserializeTask);
+	if (
+		new Set(tasks.map(task => task.key)).size !== tasks.length ||
+		new Set(tasks.map(task => task.identity)).size !== tasks.length
+	) throw new Error("affected-plan-invalid: duplicate task key or identity");
+	const matrixKey = Bun.env.CI_DEV_MATRIX_KEY?.trim();
+	if (matrixKey) {
+		const task = tasks.find(candidate => candidate.key === matrixKey);
+		if (!task || !task.capabilities) throw new Error("affected-plan-invalid: matrix task mismatch");
+		if (task.capabilities.rust !== (Bun.env.CI_DEV_MATRIX_RUST === "true") || task.capabilities.nextest !== (Bun.env.CI_DEV_MATRIX_NEXTEST === "true") || task.capabilities.nativeConsumer !== (Bun.env.CI_DEV_MATRIX_NATIVE === "true")) throw new Error("affected-plan-invalid: matrix capabilities mismatch");
+	}
+	return tasks;
+}
+function deserializeTask(value: unknown): Task {
+	if (!isRecord(value) || !isString(value.key) || !isString(value.description) || !Array.isArray(value.command) || !value.command.every(isString) || (value.cwd !== undefined && !isString(value.cwd))) throw new Error("affected-plan-invalid: malformed task");
+	assertTaskKeys(value);
+	if (!isString(value.identity) || value.identity.length === 0) throw new Error("affected-plan-invalid: missing task identity");
+	const capabilities = value.capabilities;
+	if (!isRecord(capabilities) || typeof capabilities.rust !== "boolean" || typeof capabilities.nextest !== "boolean" || typeof capabilities.nativeConsumer !== "boolean" || typeof capabilities.nativeProducer !== "boolean") throw new Error("affected-plan-invalid: missing task capabilities");
+	assertExactKeys(capabilities, ["rust", "nextest", "nativeConsumer", "nativeProducer"], "task capabilities");
+	if (value.cwd !== undefined && value.cwd !== ".") normalizeInventoryPath(value.cwd);
+	const phase = value.phase;
+	if (phase !== "legacy" && phase !== "native-producer" && phase !== "ts-build" && phase !== "cargo-build" && phase !== "python") throw new Error("affected-plan-invalid: missing task phase");
+	return {
+		key: value.key,
+		identity: value.identity,
+		description: value.description,
+		command: value.command,
+		cwd: isString(value.cwd) ? path.resolve(repoRoot, value.cwd) : undefined,
+		capabilities: {
+			rust: capabilities.rust as boolean,
+			nextest: capabilities.nextest as boolean,
+			nativeConsumer: capabilities.nativeConsumer as boolean,
+			nativeProducer: capabilities.nativeProducer as boolean,
+		},
+		phase,
+	};
+}
+function assertTaskKeys(value: Record<string, unknown>): void {
+	const allowed = ["key", "identity", "description", "command", "cwd", "capabilities", "phase"];
+	if (Object.keys(value).some(key => !allowed.includes(key))) throw new Error("affected-plan-invalid: malformed task");
+}
+
+if (import.meta.main) {
+	await main();
 }

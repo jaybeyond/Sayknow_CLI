@@ -1,7 +1,8 @@
-import { describe, expect, it } from "bun:test";
+import { beforeEach, describe, expect, it } from "bun:test";
 import type Anthropic from "@anthropic-ai/sdk";
 import { streamAnthropic } from "@sayknow-cli/ai/providers/anthropic";
-import type { AssistantMessage, Context, Model, UserMessage } from "@sayknow-cli/ai/types";
+import type { AssistantMessage, Context, Model, Tool, UserMessage } from "@sayknow-cli/ai/types";
+import { clearToolChoiceIncapabilityRegistryForTests } from "@sayknow-cli/ai/utils/tool-choice-capability";
 
 const model: Model<"anthropic-messages"> = {
 	api: "anthropic-messages",
@@ -87,6 +88,43 @@ function createAnthropicThinking400(): MockAnthropicRequest {
 	};
 }
 
+// Real captured session failure (2026-07-23): the cited block index points into
+// HISTORY, not the latest assistant message.
+function createAnthropicSignatureInvalid400(): MockAnthropicRequest {
+	return {
+		async withResponse() {
+			const error = new Error(
+				'400 {"type":"error","error":{"type":"invalid_request_error","message":"messages.5.content.24: Invalid `signature` in `thinking` block"}}',
+			);
+			(error as { status?: number }).status = 400;
+			throw error;
+		},
+	};
+}
+
+function makeSignedAssistant(suffix: string, text: string): AssistantMessage {
+	return {
+		role: "assistant",
+		content: [
+			{ type: "thinking", thinking: `thinking ${suffix}`, thinkingSignature: `sig_${suffix}` },
+			{ type: "text", text },
+		],
+		api: "anthropic-messages",
+		provider: "anthropic",
+		model: model.id,
+		usage: {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 0,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		},
+		stopReason: "stop",
+		timestamp: Date.now(),
+	};
+}
+
 describe("Anthropic thinking replay repair retry", () => {
 	it("retries once without latest assistant thinking blocks after the Anthropic 400 invariant error", async () => {
 		const user: UserMessage = {
@@ -138,6 +176,75 @@ describe("Anthropic thinking replay repair retry", () => {
 		expect(JSON.stringify(requestBodies[1])).toContain("visible answer");
 	});
 
+	it("retries once with thinking dropped from EVERY assistant turn after the invalid-signature 400", async () => {
+		const user: UserMessage = {
+			role: "user",
+			content: "first",
+			timestamp: Date.now(),
+		};
+		const context: Context = {
+			messages: [
+				user,
+				makeSignedAssistant("early", "early answer"),
+				{ ...user, content: "second", timestamp: Date.now() + 1 },
+				makeSignedAssistant("late", "late answer"),
+				{ ...user, content: "next prompt", timestamp: Date.now() + 2 },
+			],
+		};
+		const requestBodies: unknown[] = [];
+		let attempt = 0;
+		const create = ((body: unknown) => {
+			requestBodies.push(body);
+			attempt += 1;
+			return (attempt === 1 ? createAnthropicSignatureInvalid400() : createSuccessfulRequest()) as never;
+		}) as unknown as Anthropic["messages"]["create"];
+		const client = { messages: { create } } as Anthropic;
+
+		const result = await streamAnthropic(model, context, { client }).result();
+
+		expect(result.stopReason).toBe("stop");
+		expect(result.content).toEqual([{ type: "text", text: "recovered" }]);
+		expect(requestBodies).toHaveLength(2);
+		const firstBody = JSON.stringify(requestBodies[0]);
+		expect(firstBody).toContain("sig_early");
+		expect(firstBody).toContain("sig_late");
+		// The repaired replay must drop the HISTORICAL signed block, not only the
+		// latest one — a latest-only repair would resend sig_early and 400 again.
+		const secondBody = JSON.stringify(requestBodies[1]);
+		expect(secondBody).not.toContain("sig_early");
+		expect(secondBody).not.toContain("sig_late");
+		expect(secondBody).toContain("early answer");
+		expect(secondBody).toContain("late answer");
+	});
+
+	it("stops after exactly two requests when the invalid-signature 400 persists", async () => {
+		const user: UserMessage = {
+			role: "user",
+			content: "first",
+			timestamp: Date.now(),
+		};
+		const context: Context = {
+			messages: [
+				user,
+				makeSignedAssistant("early", "early answer"),
+				{ ...user, content: "next prompt", timestamp: Date.now() + 1 },
+			],
+		};
+		const requestBodies: unknown[] = [];
+		const create = ((body: unknown) => {
+			requestBodies.push(body);
+			return createAnthropicSignatureInvalid400() as never;
+		}) as unknown as Anthropic["messages"]["create"];
+		const client = { messages: { create } } as Anthropic;
+
+		const result = await streamAnthropic(model, context, { client }).result();
+
+		expect(result.stopReason).toBe("error");
+		expect(result.errorStatus).toBe(400);
+		expect(result.errorMessage).toContain("Invalid `signature`");
+		expect(requestBodies).toHaveLength(2);
+	});
+
 	it("does not retry or scrub history for non-matching Anthropic 400 errors", async () => {
 		const user: UserMessage = {
 			role: "user",
@@ -183,5 +290,84 @@ describe("Anthropic thinking replay repair retry", () => {
 		expect(result.errorMessage).toContain("max_tokens is too low");
 		expect(requestBodies).toHaveLength(1);
 		expect(JSON.stringify(requestBodies[0])).toContain("synthetic_sig");
+	});
+
+	describe("cumulative degradation across fallbacks", () => {
+		beforeEach(() => clearToolChoiceIncapabilityRegistryForTests());
+
+		const tool: Tool = {
+			name: "read",
+			description: "Read",
+			parameters: { type: "object", properties: {}, additionalProperties: false },
+		};
+
+		const createForcedToolChoice400 = (): MockAnthropicRequest => ({
+			async withResponse() {
+				const error = new Error("400 invalid_request_error: tool_choice is not supported by this model");
+				(error as { status?: number }).status = 400;
+				throw error;
+			},
+		});
+
+		const makeContext = (): Context => ({
+			messages: [
+				{ role: "user", content: "first", timestamp: Date.now() },
+				makeSignedAssistant("history", "history answer"),
+				{ role: "user", content: "next prompt", timestamp: Date.now() + 1 },
+			],
+			tools: [tool],
+		});
+
+		it("keeps thinking repair active when a later forced-tool_choice fallback rebuilds params", async () => {
+			const requestBodies: unknown[] = [];
+			let attempt = 0;
+			const create = ((body: unknown) => {
+				requestBodies.push(body);
+				attempt += 1;
+				if (attempt === 1) return createAnthropicSignatureInvalid400() as never;
+				if (attempt === 2) return createForcedToolChoice400() as never;
+				return createSuccessfulRequest() as never;
+			}) as unknown as Anthropic["messages"]["create"];
+			const client = { messages: { create } } as Anthropic;
+
+			const result = await streamAnthropic(model, makeContext(), { client, toolChoice: "any" }).result();
+
+			expect(result.stopReason).toBe("stop");
+			expect(requestBodies).toHaveLength(3);
+			// Signature repair activates on attempt 2; the forced-tool_choice fallback
+			// rebuild (attempt 3) must not reintroduce the dropped signature, and must
+			// drop the forced tool_choice.
+			expect(JSON.stringify(requestBodies[1])).not.toContain("sig_history");
+			const thirdBody = JSON.stringify(requestBodies[2]);
+			expect(thirdBody).not.toContain("sig_history");
+			expect(thirdBody).not.toContain("tool_choice");
+			expect((requestBodies[2] as { tool_choice?: unknown }).tool_choice).toBeUndefined();
+			expect(thirdBody).toContain("history answer");
+		});
+
+		it("keeps forced-tool_choice drop active when a later signature repair rebuilds params", async () => {
+			const requestBodies: unknown[] = [];
+			let attempt = 0;
+			const create = ((body: unknown) => {
+				requestBodies.push(body);
+				attempt += 1;
+				if (attempt === 1) return createForcedToolChoice400() as never;
+				if (attempt === 2) return createAnthropicSignatureInvalid400() as never;
+				return createSuccessfulRequest() as never;
+			}) as unknown as Anthropic["messages"]["create"];
+			const client = { messages: { create } } as Anthropic;
+
+			const result = await streamAnthropic(model, makeContext(), { client, toolChoice: "any" }).result();
+
+			expect(result.stopReason).toBe("stop");
+			expect(requestBodies).toHaveLength(3);
+			// Forced tool_choice is dropped from attempt 2 onward; the signature-repair
+			// rebuild (attempt 3) must not reintroduce it, and must drop the signature.
+			expect((requestBodies[1] as { tool_choice?: unknown }).tool_choice).toBeUndefined();
+			const thirdBody = JSON.stringify(requestBodies[2]);
+			expect(thirdBody).not.toContain("sig_history");
+			expect((requestBodies[2] as { tool_choice?: unknown }).tool_choice).toBeUndefined();
+			expect(thirdBody).toContain("history answer");
+		});
 	});
 });

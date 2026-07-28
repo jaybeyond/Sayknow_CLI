@@ -27,7 +27,20 @@
 
 import { describe, expect, it } from "bun:test";
 import * as path from "node:path";
-import { detectCompiledBinary, getAddonFilenames, resolveLoaderCandidates } from "../native/loader-state.js";
+import {
+	detectCompiledBinary,
+	embeddedAddonIsAuthoritative,
+	getAddonFilenames,
+	getOptionalPackageNames,
+	loadFromCandidates,
+	loadNative,
+	resolveLoaderCandidates,
+	resolveOptionalPackageNativeDirs,
+} from "../native/loader-state.js";
+
+function validateCurrentSentinel(bindings: Record<string, unknown>) {
+	if (typeof bindings.__piNativesVCurrent !== "function") throw new Error("missing current version sentinel");
+}
 
 describe("issue 823: standalone-binary native loader path resolution", () => {
 	it("detects compiled-binary mode from embedded-addon presence when env and url markers are absent", () => {
@@ -114,6 +127,34 @@ describe("issue 823: standalone-binary native loader path resolution", () => {
 		// (potentially-missing) build-host nativeDir path from the bundled module location.
 		expect(candidates.indexOf(versionedModern)).toBeLessThan(candidates.indexOf(buildHostModern));
 	});
+	it("does not trust user or cache candidates after a matching embedded artifact is incompatible", () => {
+		const context = {
+			isCompiledBinary: true,
+			platformTag: "linux-x64",
+			packageVersion: "14.5.2",
+		};
+		expect(
+			embeddedAddonIsAuthoritative(context, {
+				platformTag: "linux-x64",
+				version: "14.5.2",
+				files: [],
+			}),
+		).toBe(true);
+		const embedded = "/cache/embedded.node";
+		const userCache = "/home/u/.local/bin/pi_natives.linux-x64-modern.node";
+		const loaded = loadFromCandidates({
+			candidates: [embedded],
+			requireCandidate: candidate => {
+				if (candidate === embedded) return { stale: true };
+				throw new Error(`unexpected fallback ${candidate}`);
+			},
+			validateCandidate: validateCurrentSentinel,
+			describeCandidate: candidate => candidate,
+		});
+		expect(loaded.bindings).toBeNull();
+		expect(loaded.errors).toEqual([`${embedded}: missing current version sentinel`]);
+		expect(loaded.errors.join("\n")).not.toContain(userCache);
+	});
 
 	it("does not probe user-data candidates when running outside a standalone binary", () => {
 		const versionedDir = "/home/u/.skc/natives/14.5.2";
@@ -128,5 +169,287 @@ describe("issue 823: standalone-binary native loader path resolution", () => {
 		});
 		expect(candidates).not.toContain(path.join(versionedDir, "pi_natives.linux-x64-baseline.node"));
 		expect(candidates).not.toContain(path.join(userDataDir, "pi_natives.linux-x64-baseline.node"));
+	});
+
+	it("prefers host optional package candidates before legacy bundled candidates", () => {
+		const optionalNativeDir = "/repo/node_modules/@sayknow-cli/natives-linux-x64/native";
+		const nativeDir = "/repo/node_modules/@sayknow-cli/natives/native";
+		const candidates = resolveLoaderCandidates({
+			addonFilenames: getAddonFilenames({ tag: "linux-x64", arch: "x64", variant: "modern" }),
+			isCompiledBinary: false,
+			stageFromNodeModules: false,
+			optionalPackageNativeDirs: [optionalNativeDir],
+			nativeDir,
+			execDir: "/usr/bin",
+			versionedDir: "/home/u/.skc/natives/14.5.2",
+			userDataDir: "/home/u/.local/bin",
+		});
+
+		const optionalModern = path.join(optionalNativeDir, "pi_natives.linux-x64-modern.node");
+		const optionalBaseline = path.join(optionalNativeDir, "pi_natives.linux-x64-baseline.node");
+		const legacyModern = path.join(nativeDir, "pi_natives.linux-x64-modern.node");
+		expect(candidates).toContain(optionalModern);
+		expect(candidates).toContain(legacyModern);
+		expect(candidates.indexOf(optionalModern)).toBeLessThan(candidates.indexOf(legacyModern));
+		expect(candidates.indexOf(optionalBaseline)).toBeLessThan(candidates.indexOf(legacyModern));
+	});
+
+	it("resolves only the current host optional package directory when installed", () => {
+		const packageNames = getOptionalPackageNames("darwin-arm64");
+		expect(packageNames).toEqual(["@sayknow-cli/natives-darwin-arm64"]);
+
+		const dirs = resolveOptionalPackageNativeDirs({
+			packageNames,
+			requireResolve: id => {
+				if (id === "@sayknow-cli/natives-darwin-arm64/package.json") {
+					return "/repo/node_modules/@sayknow-cli/natives-darwin-arm64/package.json";
+				}
+				throw new Error(`missing ${id}`);
+			},
+		});
+
+		expect(dirs).toEqual(["/repo/node_modules/@sayknow-cli/natives-darwin-arm64/native"]);
+		expect(getOptionalPackageNames("freebsd-x64")).toEqual([]);
+	});
+	it("prefers the current workspace addon over a stale optional package addon", () => {
+		const localDir = "/repo/packages/natives/native";
+		const optionalDir = "/repo/node_modules/@sayknow-cli/natives-linux-x64/native";
+		const filename = "pi_natives.linux-x64-modern.node";
+		const local = path.join(localDir, filename);
+		const optional = path.join(optionalDir, filename);
+		const candidates = resolveLoaderCandidates({
+			addonFilenames: [filename],
+			isCompiledBinary: false,
+			isWorkspaceLoad: true,
+			optionalPackageNativeDirs: [optionalDir],
+			nativeDir: localDir,
+			execDir: "/usr/bin",
+			versionedDir: "/home/u/.skc/natives/14.5.2",
+			userDataDir: "/home/u/.local/bin",
+		});
+		const loaded = loadFromCandidates({
+			candidates,
+			requireCandidate: candidate =>
+				candidate === local ? { __piNativesVCurrent: () => undefined } : { __piNativesVStale: () => undefined },
+			validateCandidate: validateCurrentSentinel,
+			describeCandidate: candidate => candidate,
+		});
+
+		expect(candidates.indexOf(local)).toBeLessThan(candidates.indexOf(optional));
+		expect(loaded.bindings).toEqual({ __piNativesVCurrent: expect.any(Function) });
+		expect(loaded.errors).toEqual([]);
+	});
+
+	it("keeps workspace precedence when local and optional addons have the same sentinel", () => {
+		const local = "/repo/packages/natives/native/pi_natives.linux-x64.node";
+		const optional = "/repo/node_modules/@sayknow-cli/natives-linux-x64/native/pi_natives.linux-x64.node";
+		const attempted: string[] = [];
+		const loaded = loadFromCandidates({
+			candidates: [local, optional],
+			requireCandidate: candidate => {
+				attempted.push(candidate);
+				return { __piNativesVCurrent: () => undefined };
+			},
+			validateCandidate: validateCurrentSentinel,
+			describeCandidate: candidate => candidate,
+		});
+
+		expect(loaded.bindings).toEqual({ __piNativesVCurrent: expect.any(Function) });
+		expect(attempted).toEqual([local]);
+	});
+
+	it("continues from a stale optional addon to a current local addon", () => {
+		const optional = "/repo/node_modules/@sayknow-cli/natives-linux-x64/native/pi_natives.linux-x64.node";
+		const local = "/repo/packages/natives/native/pi_natives.linux-x64.node";
+		const loaded = loadFromCandidates({
+			candidates: [optional, local],
+			requireCandidate: candidate =>
+				candidate === local ? { __piNativesVCurrent: () => undefined } : { __piNativesVStale: () => undefined },
+			validateCandidate: validateCurrentSentinel,
+			describeCandidate: candidate => candidate,
+		});
+
+		expect(loaded.bindings).toEqual({ __piNativesVCurrent: expect.any(Function) });
+		expect(loaded.errors).toEqual([`${optional}: missing current version sentinel`]);
+	});
+
+	it("falls back to a matching optional addon when no local addon is available", () => {
+		const local = "/repo/packages/natives/native/pi_natives.linux-x64.node";
+		const optional = "/repo/node_modules/@sayknow-cli/natives-linux-x64/native/pi_natives.linux-x64.node";
+		const loaded = loadFromCandidates({
+			candidates: [local, optional],
+			requireCandidate: candidate => {
+				if (candidate === optional) return { __piNativesVCurrent: () => undefined };
+				throw new Error("not found");
+			},
+			validateCandidate: validateCurrentSentinel,
+			describeCandidate: candidate => candidate,
+		});
+
+		expect(loaded.bindings).toEqual({ __piNativesVCurrent: expect.any(Function) });
+		expect(loaded.errors).toEqual([`${local}: not found`]);
+	});
+
+	it("loads a matching optional addon", () => {
+		const optional = "/repo/node_modules/@sayknow-cli/natives-linux-x64/native/pi_natives.linux-x64.node";
+		const loaded = loadFromCandidates({
+			candidates: [optional],
+			requireCandidate: () => ({ __piNativesVCurrent: () => undefined }),
+			validateCandidate: validateCurrentSentinel,
+			describeCandidate: candidate => candidate,
+		});
+
+		expect(loaded.bindings).toEqual({ __piNativesVCurrent: expect.any(Function) });
+		expect(loaded.errors).toEqual([]);
+	});
+
+	it("aggregates diagnostics when every candidate has an incompatible sentinel", () => {
+		const staleOptional = "/repo/node_modules/@sayknow-cli/natives-linux-x64/native/pi_natives.linux-x64.node";
+		const staleLegacy = "/usr/bin/pi_natives.linux-x64.node";
+		const loaded = loadFromCandidates({
+			candidates: [staleOptional, staleLegacy],
+			requireCandidate: () => ({ __piNativesVStale: () => undefined }),
+			validateCandidate: validateCurrentSentinel,
+			describeCandidate: candidate => candidate,
+		});
+
+		expect(loaded.bindings).toBeNull();
+		expect(loaded.errors).toEqual([
+			`${staleOptional}: missing current version sentinel`,
+			`${staleLegacy}: missing current version sentinel`,
+		]);
+	});
+
+	it("continues from an incompatible modern addon to a current baseline addon", () => {
+		const modern = "/repo/packages/natives/native/pi_natives.linux-x64-modern.node";
+		const baseline = "/repo/packages/natives/native/pi_natives.linux-x64-baseline.node";
+		const loaded = loadFromCandidates({
+			candidates: [modern, baseline],
+			requireCandidate: candidate =>
+				candidate === baseline ? { __piNativesVCurrent: () => undefined } : { __piNativesVStale: () => undefined },
+			validateCandidate: validateCurrentSentinel,
+			describeCandidate: candidate => candidate,
+		});
+
+		expect(loaded.bindings).toEqual({ __piNativesVCurrent: expect.any(Function) });
+		expect(loaded.errors).toEqual([`${modern}: missing current version sentinel`]);
+	});
+
+	it("continues from an embedded candidate without the publish sentinel to a compatible fallback", () => {
+		const modern = "/cache/pi_natives.linux-x64-modern.node";
+		const baseline = "/cache/pi_natives.linux-x64-baseline.node";
+		const loaded = loadFromCandidates({
+			candidates: [modern, baseline],
+			requireCandidate: candidate =>
+				candidate === baseline
+					? { __piNativesVCurrent: (): void => undefined, __piNativesPublishOutcomeV1: (): void => undefined }
+					: { __piNativesVCurrent: (): void => undefined },
+			validateCandidate: bindings => {
+				validateCurrentSentinel(bindings);
+				if (typeof bindings.__piNativesPublishOutcomeV1 !== "function")
+					throw new Error("missing publish outcome sentinel");
+			},
+			describeCandidate: candidate => candidate,
+		});
+		expect(loaded.bindings).toEqual({
+			__piNativesVCurrent: expect.any(Function),
+			__piNativesPublishOutcomeV1: expect.any(Function),
+		});
+		expect(loaded.errors).toEqual([`${modern}: missing publish outcome sentinel`]);
+	});
+
+	it("loads an embedded baseline through loadNative when the preferred embedded modern artifact lacks a required sentinel", () => {
+		const modern = "/cache/pi_natives.linux-x64-modern.node";
+		const baseline = "/cache/pi_natives.linux-x64-baseline.node";
+		const attempted: string[] = [];
+		let stageCalls = 0;
+		const bindings = loadNative({
+			context: {
+				isCompiledBinary: true,
+				platformTag: "linux-x64",
+				addonLabel: "linux-x64 (modern)",
+				addonFilenames: [],
+				versionedDir: "/cache",
+				candidates: ["/filesystem-fallback.node"],
+			},
+			extractEmbeddedAddons: () => [modern, baseline],
+			stageNodeModulesAddon: () => {
+				stageCalls++;
+				return "/staged-filesystem-fallback.node";
+			},
+			requireCandidate: candidate => {
+				attempted.push(candidate);
+				return candidate === baseline
+					? { __piNativesVCurrent: (): void => undefined, __piNativesPublishOutcomeV1: (): void => undefined }
+					: { __piNativesVCurrent: (): void => undefined };
+			},
+			validateCandidate: value => {
+				validateCurrentSentinel(value);
+				if (typeof value.__piNativesPublishOutcomeV1 !== "function")
+					throw new Error("missing publish outcome sentinel");
+			},
+		});
+		expect(bindings).toEqual({
+			__piNativesVCurrent: expect.any(Function),
+			__piNativesPublishOutcomeV1: expect.any(Function),
+		});
+		expect(attempted).toEqual([modern, baseline]);
+		expect(stageCalls).toBe(0);
+	});
+	it("loads only the embedded baseline on a non-AVX2 x64 context", () => {
+		const baseline = "/cache/pi_natives.linux-x64-baseline.node";
+		const attempted: string[] = [];
+		const bindings = loadNative({
+			context: {
+				isCompiledBinary: true,
+				platformTag: "linux-x64",
+				addonLabel: "linux-x64 (baseline)",
+				addonFilenames: [],
+				versionedDir: "/cache",
+				candidates: ["/filesystem-fallback.node"],
+				selectedVariant: "baseline",
+			},
+			extractEmbeddedAddons: ctx => {
+				expect(ctx.selectedVariant).toBe("baseline");
+				return [baseline];
+			},
+			stageNodeModulesAddon: () => {
+				throw new Error("non-AVX2 embedded baseline must not stage a fallback");
+			},
+			requireCandidate: candidate => {
+				attempted.push(candidate);
+				if (candidate !== baseline) throw new Error(`unexpected candidate ${candidate}`);
+				return { __piNativesVCurrent: (): void => undefined, __piNativesPublishOutcomeV1: (): void => undefined };
+			},
+			validateCandidate: value => {
+				validateCurrentSentinel(value);
+				if (typeof value.__piNativesPublishOutcomeV1 !== "function")
+					throw new Error("missing publish outcome sentinel");
+			},
+		});
+		expect(bindings).toEqual({
+			__piNativesVCurrent: expect.any(Function),
+			__piNativesPublishOutcomeV1: expect.any(Function),
+		});
+		expect(attempted).toEqual([baseline]);
+	});
+
+	it("preserves Windows staging ahead of package candidates", () => {
+		const filename = "pi_natives.win32-x64-baseline.node";
+		const versionedDir = "C:\\Users\\u\\AppData\\Local\\skc\\14.5.2";
+		const optionalDir = "C:\\repo\\node_modules\\@sayknow-cli\\natives-win32-x64\\native";
+		const candidates = resolveLoaderCandidates({
+			addonFilenames: [filename],
+			isCompiledBinary: false,
+			stageFromNodeModules: true,
+			optionalPackageNativeDirs: [optionalDir],
+			nativeDir: "C:\\repo\\node_modules\\@sayknow-cli\\natives\\native",
+			execDir: "C:\\skc",
+			versionedDir,
+			userDataDir: "C:\\Users\\u\\AppData\\Local\\skc",
+		});
+
+		expect(candidates[0]).toBe(path.join(versionedDir, filename));
+		expect(candidates.indexOf(path.join(optionalDir, filename))).toBeGreaterThan(0);
 	});
 });

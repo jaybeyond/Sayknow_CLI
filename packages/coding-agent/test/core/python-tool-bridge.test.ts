@@ -31,16 +31,12 @@ function makeSession(tools: Map<string, AgentTool>): ToolSession {
 	return { getToolByName: (name: string) => tools.get(name) } as unknown as ToolSession;
 }
 
-async function call(
-	info: { url: string; token: string },
-	body: Record<string, unknown>,
-	overrides?: { token?: string },
-): Promise<Response> {
+async function call(info: { url: string }, capability: string, body: Record<string, unknown>): Promise<Response> {
 	return await fetch(`${info.url}/v1/tool`, {
 		method: "POST",
 		headers: {
 			"Content-Type": "application/json",
-			Authorization: `Bearer ${overrides?.token ?? info.token}`,
+			Authorization: `Bearer ${capability}`,
 		},
 		body: JSON.stringify(body),
 	});
@@ -58,9 +54,10 @@ describe("Python tool bridge HTTP server", () => {
 		});
 		const session = makeSession(new Map([["read", readTool]]));
 		const info = await ensurePyToolBridge();
-		const unregister = registerPyToolBridge("test-session-1", { toolSession: session });
+		const capability = crypto.randomUUID();
+		const unregister = registerPyToolBridge("test-session-1", capability, { toolSession: session });
 		try {
-			const res = await call(info, {
+			const res = await call(info, capability, {
 				session: "test-session-1",
 				name: "read",
 				args: { path: "foo.ts", _i: "py prelude" },
@@ -76,13 +73,10 @@ describe("Python tool bridge HTTP server", () => {
 		}
 	});
 
-	it("returns ok=false when no session is registered for the given id", async () => {
+	it("rejects an unregistered capability", async () => {
 		const info = await ensurePyToolBridge();
-		const res = await call(info, { session: "missing", name: "read", args: {} });
-		expect(res.status).toBe(200);
-		const body = (await res.json()) as { ok: boolean; error?: string };
-		expect(body.ok).toBe(false);
-		expect(typeof body.error).toBe("string");
+		const res = await call(info, crypto.randomUUID(), { session: "missing", name: "read", args: {} });
+		expect(res.status).toBe(403);
 	});
 
 	it("surfaces tool errors as ok=false with the error message", async () => {
@@ -99,9 +93,10 @@ describe("Python tool bridge HTTP server", () => {
 				}) as unknown as AgentTool,
 		} as unknown as ToolSession;
 		const info = await ensurePyToolBridge();
-		const unregister = registerPyToolBridge("err-session", { toolSession: session });
+		const capability = crypto.randomUUID();
+		const unregister = registerPyToolBridge("err-session", capability, { toolSession: session });
 		try {
-			const res = await call(info, { session: "err-session", name: "boom", args: {} });
+			const res = await call(info, capability, { session: "err-session", name: "boom", args: {} });
 			expect(res.status).toBe(200);
 			const body = await res.json();
 			expect(body).toEqual({ ok: false, error: "kapow" });
@@ -112,14 +107,121 @@ describe("Python tool bridge HTTP server", () => {
 
 	it("rejects requests with a bad bearer token", async () => {
 		const info = await ensurePyToolBridge();
-		const res = await call(info, { session: "anything", name: "read", args: {} }, { token: "wrong" });
+		const res = await call(info, "wrong", { session: "anything", name: "read", args: {} });
 		expect(res.status).toBe(403);
+	});
+
+	it("rejects missing, empty, and whitespace bearer credentials before lookup", async () => {
+		const info = await ensurePyToolBridge();
+		for (const authorization of [null, "Bearer ", "Bearer    ", "Bearer invalid capability"]) {
+			const headers = new Headers({ "Content-Type": "application/json" });
+			if (authorization !== null) headers.set("Authorization", authorization);
+			const res = await fetch(`${info.url}/v1/tool`, {
+				method: "POST",
+				headers,
+				body: JSON.stringify({ session: "anything", name: "read", args: {} }),
+			});
+			expect(res.status).toBe(403);
+		}
+	});
+
+	it("rejects empty and whitespace registration capabilities", () => {
+		const session = makeSession(new Map());
+		for (const capability of ["", " ", "\t", "invalid capability"]) {
+			expect(() => registerPyToolBridge("invalid-registration", capability, { toolSession: session })).toThrow(
+				"canonical bearer token",
+			);
+		}
 	});
 
 	it("returns 400 when body is missing required fields", async () => {
 		const info = await ensurePyToolBridge();
-		const res = await call(info, { name: "read" });
-		expect(res.status).toBe(400);
+		const capability = crypto.randomUUID();
+		const unregister = registerPyToolBridge("validation-session", capability, {
+			toolSession: makeSession(new Map()),
+		});
+		try {
+			const res = await call(info, capability, { name: "read" });
+			expect(res.status).toBe(400);
+		} finally {
+			unregister();
+		}
+	});
+
+	it("authenticates before parsing the request body", async () => {
+		const info = await ensurePyToolBridge();
+		const res = await fetch(`${info.url}/v1/tool`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json", Authorization: "Bearer wrong" },
+			body: "not-json",
+		});
+		expect(res.status).toBe(403);
+	});
+
+	it("does not let one session capability select another registered session", async () => {
+		const callsA: FakeCall[] = [];
+		const callsB: FakeCall[] = [];
+		const capabilityA = crypto.randomUUID();
+		const capabilityB = crypto.randomUUID();
+		const info = await ensurePyToolBridge();
+		const unregisterA = registerPyToolBridge("session-a", capabilityA, {
+			toolSession: makeSession(
+				new Map([["read", makeFakeTool("read", callsA, { content: [{ type: "text", text: "A" }] })]]),
+			),
+		});
+		const unregisterB = registerPyToolBridge("session-b", capabilityB, {
+			toolSession: makeSession(
+				new Map([["read", makeFakeTool("read", callsB, { content: [{ type: "text", text: "B" }] })]]),
+			),
+		});
+		try {
+			const crossSession = await call(info, capabilityA, { session: "session-b", name: "read", args: {} });
+			expect(crossSession.status).toBe(403);
+			expect(callsA).toHaveLength(0);
+			expect(callsB).toHaveLength(0);
+
+			const ownSession = await call(info, capabilityB, { session: "session-b", name: "read", args: {} });
+			expect(ownSession.status).toBe(200);
+			expect(await ownSession.json()).toEqual({ ok: true, value: "B" });
+			expect(callsB).toHaveLength(1);
+		} finally {
+			unregisterA();
+			unregisterB();
+		}
+	});
+
+	it("invalidates unregistered capabilities and accepts a rotated capability", async () => {
+		const calls: FakeCall[] = [];
+		const session = makeSession(
+			new Map([["read", makeFakeTool("read", calls, { content: [{ type: "text", text: "ok" }] })]]),
+		);
+		const info = await ensurePyToolBridge();
+		const staleCapability = crypto.randomUUID();
+		const unregisterStale = registerPyToolBridge("rotation-session", staleCapability, { toolSession: session });
+		unregisterStale();
+
+		const rotatedCapability = crypto.randomUUID();
+		const unregisterRotated = registerPyToolBridge("rotation-session", rotatedCapability, {
+			toolSession: session,
+		});
+		try {
+			const stale = await call(info, staleCapability, {
+				session: "rotation-session",
+				name: "read",
+				args: {},
+			});
+			expect(stale.status).toBe(403);
+
+			const rotated = await call(info, rotatedCapability, {
+				session: "rotation-session",
+				name: "read",
+				args: {},
+			});
+			expect(rotated.status).toBe(200);
+			expect(calls).toHaveLength(1);
+		} finally {
+			unregisterRotated();
+		}
 	});
 
 	it("invokes emitStatus alongside the tool result", async () => {
@@ -130,12 +232,13 @@ describe("Python tool bridge HTTP server", () => {
 		const session = makeSession(new Map([["read", readTool]]));
 		const info = await ensurePyToolBridge();
 		const statusEvents: Array<{ op: string }> = [];
-		const unregister = registerPyToolBridge("status-session", {
+		const capability = crypto.randomUUID();
+		const unregister = registerPyToolBridge("status-session", capability, {
 			toolSession: session,
 			emitStatus: event => statusEvents.push(event),
 		});
 		try {
-			const res = await call(info, {
+			const res = await call(info, capability, {
 				session: "status-session",
 				name: "read",
 				args: { path: "foo.ts" },

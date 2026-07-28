@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-07-28
+
+## [0.11.8] - 2026-07-23
+
+### Fixed
+
+- Restricted the local dashboard API to its exact loopback authority and same-origin browser requests, with POST-only bounded session sync.
+
+## [0.11.7] - 2026-07-22
+
+### Fixed
+
+- Compiled dashboard assets now remain in a validated in-memory archive map instead of being materialized in a predictable shared temporary cache.
+
 ## [0.5.1] - 2026-06-14
 
 - Version aligned with the 0.5.1 monorepo release; no functional changes in this package.

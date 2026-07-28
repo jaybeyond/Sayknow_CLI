@@ -14,23 +14,28 @@ export type AgentSource = "bundled" | "user" | "project";
 export type ForkContextPolicy = "forbidden" | "allowed";
 export type ForkContextMode = "none" | "receipt" | "last-turn" | "bounded" | "full";
 
-const parseNumber = (value: string | undefined, defaultValue: number): number => {
-	if (value) {
-		try {
-			const number = Number.parseInt(value, 10);
-			if (!Number.isNaN(number) && number > 0) {
-				return number;
-			}
-		} catch {}
+const parsePositiveIntegerEnvironment = (keys: string[], defaultValue: number): number => {
+	for (const key of keys) {
+		const value = $env[key];
+		if (!value || value.trim().length === 0) continue;
+		if (!/^\d+$/.test(value)) return defaultValue;
+		const number = Number(value);
+		return Number.isSafeInteger(number) && number > 0 ? number : defaultValue;
 	}
 	return defaultValue;
 };
 
 /** Maximum output bytes per agent */
-export const MAX_OUTPUT_BYTES = parseNumber($env.PI_TASK_MAX_OUTPUT_BYTES, 500_000);
+export const MAX_OUTPUT_BYTES = parsePositiveIntegerEnvironment(
+	["SKC_TASK_MAX_OUTPUT_BYTES", "PI_TASK_MAX_OUTPUT_BYTES"],
+	500_000,
+);
 
 /** Maximum output lines per agent */
-export const MAX_OUTPUT_LINES = parseNumber($env.PI_TASK_MAX_OUTPUT_LINES, 5000);
+export const MAX_OUTPUT_LINES = parsePositiveIntegerEnvironment(
+	["SKC_TASK_MAX_OUTPUT_LINES", "PI_TASK_MAX_OUTPUT_LINES"],
+	5000,
+);
 
 /** EventBus channel for raw subagent events */
 export const TASK_SUBAGENT_EVENT_CHANNEL = "task:subagent:event";
@@ -74,16 +79,40 @@ const spawnPlanSchema = z
 	})
 	.describe("justification required before spawning more than four tasks");
 
+const repositoryBindingSchema = z
+	.object({
+		schema: z.literal("skc.repository_binding.v1"),
+		worktreeRoot: z.string().min(1).describe("canonical git worktree root"),
+		commonDir: z.string().min(1).nullable().describe("git common dir, or null outside a git checkout"),
+		relativeSubdir: z.string().min(1).optional().describe("optional repo-relative subdirectory; not an absolute cwd"),
+		displayPath: z.string().min(1).optional().describe("human-facing path; never used for authority"),
+		head: z.string().min(1).optional(),
+		branch: z.string().min(1).optional(),
+	})
+	.strict()
+	.describe("authoritative repository identity for multi-repo fail-closed spawn");
+
 const createTaskItemSchema = (_contextEnabled: boolean) =>
 	z.object({
 		id: z.string().max(48).refine(isValidTaskId, TASK_ID_DESCRIPTION).describe("filesystem-safe task identifier"),
 		description: z.string().describe("ui label, not seen by subagent"),
 		assignment: z.string().describe(assignmentDescription),
+		executionMode: z
+			.enum(["default", "ultragoal-red-team"])
+			.optional()
+			.describe(
+				"typed executor mode: default keeps ordinary executor behavior; ultragoal-red-team injects the Ultragoal QA/red-team prompt fragment. Prefer this over free-form assignment text (#2698).",
+			),
 		inheritContext: z
 			.enum(["none", "receipt", "last-turn", "bounded", "full"])
 			.optional()
 			.describe(
 				"fork-context mode: none/omitted copies no parent context; receipt copies a minimal receipt-sized snapshot; last-turn copies only the latest exchange; bounded copies the bounded default snapshot; full copies a larger sanitized snapshot up to the configured/model token cap",
+			),
+		repositoryBinding: repositoryBindingSchema
+			.optional()
+			.describe(
+				"authoritative repository identity; omitted items are stamped from session cwd before discovery/spawn and still fail closed on sibling drift",
 			),
 	});
 
@@ -267,6 +296,9 @@ export interface AgentProgress {
 		attempt: number;
 		maxAttempts: number;
 		unbounded?: boolean;
+		kind: "first_event_timeout" | "idle_stream_stall" | "provider_error";
+		provider?: string;
+		lastProviderProgressAtMs?: number;
 		delayMs: number;
 		errorMessage: string;
 		startedAtMs: number;
@@ -353,6 +385,19 @@ export interface SingleResult {
 	 * never changes the actual mode selection).
 	 */
 	forkContextAdvisory?: { recommendedMode: ForkContextMode; reasons: string[] };
+	/**
+	 * Resolved repository identity used for this task after pre-discovery stamping
+	 * and fail-closed validation (#2901).
+	 */
+	repositoryBinding?: {
+		schema: "skc.repository_binding.v1";
+		worktreeRoot: string;
+		commonDir: string | null;
+		relativeSubdir?: string;
+		displayPath?: string;
+		head?: string;
+		branch?: string;
+	};
 }
 
 /** True only for complete, factual five-bucket cost accounting. */

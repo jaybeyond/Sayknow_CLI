@@ -159,6 +159,7 @@ For common MiniMax and GLM/zAI setup, prefer the provider presets so the OpenAI-
 skc setup provider --preset minimax
 skc setup provider --preset minimax-cn
 skc setup provider --preset glm
+skc setup provider --preset alibaba-token-plan
 ```
 
 The same presets are available inside the TUI:
@@ -167,9 +168,10 @@ The same presets are available inside the TUI:
 /provider add --preset minimax
 /provider add --preset glm
 /provider add zai
+/provider add --preset alibaba-token-plan
 ```
 
-Presets only write `models.yml` entries that reference documented environment variable names (`MINIMAX_CODE_API_KEY`, `MINIMAX_CODE_CN_API_KEY`, or `ZAI_API_KEY`); they do not store or validate real credentials. The GLM preset aliases (`glm`, `zai`, `z-ai`) write an OpenAI-compatible custom provider named `glm-proxy` and do not replace the first-class `zai` provider.
+Presets only write `models.yml` entries that reference documented environment variable names (`MINIMAX_CODE_API_KEY`, `MINIMAX_CODE_CN_API_KEY`, `ZAI_API_KEY`, or `ALIBABA_TOKEN_PLAN_API_KEY`); they do not store or validate real credentials. The GLM preset aliases (`glm`, `zai`, `z-ai`) write an OpenAI-compatible custom provider named `glm-proxy` and do not replace the first-class `zai` provider. The Alibaba Token Plan preset (aliases: alibaba, token-plan) writes an OpenAI-compatible custom provider named alibaba-token-plan with per-model API routing (qwen3.8-max-preview uses openai-responses; glm-5.2 and deepseek-v4-pro use openai-completions).
 
 ## Model profiles (`--mpreset`)
 
@@ -196,11 +198,11 @@ Built-in profiles are grouped by provider mix and tier:
 
 - `codex-{eco,medium,pro}` — all roles on `openai-codex/gpt-5.5`, differing only by per-role reasoning effort
 - `opencodego` — single OpenCode Go preset (Kimi default, DeepSeek executor/architect, Qwen planner, MiMo critic)
-- `claude-opus` — Anthropic OAuth preset centered on `claude-opus-4-8`
+- `claude-opus` — Anthropic OAuth preset centered on `claude-opus-5`
 - Single-provider tiers: `glm-{eco,medium,pro}`, `kimi-coding-plan-{eco,medium,pro}`, `mimo-{eco,medium,pro}`, `grok-{eco,medium,pro}`, `cursor-{eco,medium,pro}`, `minimax-{eco,medium,pro}`
 - Combos: `opus-codex` (Claude main agent with Codex support roles), `codex-opencodego` (Codex orchestrator/architect with OpenCode Go workers)
 
-The `eco` tier favors cheaper/faster defaults, `medium` matches normal production defaults, and `pro` raises reasoning for architect, critic, and planner roles. Effort suffixes are clamped to each model's supported thinking range at preview and activation time (for example `codex-eco`'s executor `:minimal` resolves to effective `low` on `gpt-5.5`). Single-provider tiers pin each provider's current flagship (`zai/glm-5.2`, `kimi-code/kimi-k2.7-code`, `xiaomi/mimo-v2.5-pro`, `xai/grok-4.3`, `cursor/composer-1.5`, `minimax-code/minimax-m3`). User-defined profiles override built-ins by exact profile name.
+The `eco`, `medium`, and `pro` Codex profile mappings are current product judgments: Eco assigns Terra low/Luna low/Luna high/Terra xhigh/Terra high to default/executor/planner/critic/architect; Medium assigns Sol low/Terra low/Terra high/Sol xhigh/Sol high; and Pro assigns Sol medium/Terra medium/Sol high/Sol max/Sol xhigh. `opus-codex` retains the Medium Codex executor, critic, and architect roles but uses `anthropic/claude-sonnet-5` for planner; `codex-opencodego` retains the Medium Codex default and architect roles; and `fable-opus-codex` uses the Pro Codex executor and architect roles with `anthropic/claude-opus-5:medium` for planner. The descriptive repeated local exact-edit evidence informs only selected executor-style TypeScript tasks; it does not evaluate or prove default, planner, architect, or critic performance. See [GPT-5.6 Codex preset benchmark](./gpt-5.6-codex-preset-benchmark.md). Effort suffixes are clamped to each model's supported thinking range at preview and activation time. Single-provider tiers pin each provider's current flagship (`zai/glm-5.2`, `kimi-code/kimi-k2.7-code`, `xiaomi/mimo-v2.5-pro`, `xai/grok-4.3`, `cursor/composer-1.5`, `minimax-code/minimax-m3`). User-defined profiles override built-ins by exact profile name.
 
 
 Use `skc --mpreset <name>` to activate a profile for the current session only. Activation hard-blocks when any provider listed in `required_providers` lacks credentials. Add `--default` to persist the selected profile as `modelProfile.default` in `config.yml`, so it applies at startup:
@@ -274,6 +276,25 @@ providers:
 ```
 
 Use provider-level `headers` for proxy-required headers. Keep the provider `api` set to `openai-completions` when the proxy exposes Chat Completions-compatible `/v1/chat/completions` semantics. `auth: apiKey` sends the resolved token as bearer auth; use `auth: none` only for trusted local/no-auth endpoints.
+
+`input` is the model modality list SKC uses to decide whether image content is forwarded. When a custom model omits `input`, SKC defaults to `[text]` (unless a bundled model with the same id contributes a reference). Vision-capable upstream models therefore need an explicit `input: [text, image]`; otherwise `read`/tool images are stripped before the request and replaced with `[image omitted: model does not support vision]`, even if the remote model can see images.
+
+```yaml
+providers:
+  ali:
+    baseUrl: https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1
+    apiKeyEnv: ALI_API_KEY
+    api: openai-completions
+    auth: apiKey
+    models:
+      # id-only → text-only; images will be omitted
+      - id: some-text-model
+      # vision-capable hosted model must declare image input
+      - id: qwen3.8-max-preview
+        name: Qwen3.8 Max Preview
+        reasoning: true
+        input: [text, image]
+```
 
 `requestTransform` and `wireModelId` remain supported for request-body shaping, but they are not needed for ordinary OpenAI-compatible proxies whose local model id is already the upstream wire id. Unknown config keys fail validation before a provider request is sent.
 

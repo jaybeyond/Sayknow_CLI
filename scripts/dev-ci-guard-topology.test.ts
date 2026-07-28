@@ -116,6 +116,7 @@ describe("dev-ci Telegram daemon generation guard topology", () => {
 		expect(windowsContract.run).toContain("--test-name-pattern");
 		expect(windowsContract.run).toContain("incarnation|captured-owner|owner-lock");
 		expect(windowsContract.run).toContain("heartbeat fails closed");
+		expect(windowsContract.run).toContain("Windows production preflight");
 		expect(windowsContract.run).toContain("parent-format|transition lock");
 		expect(windowsContract.run).toContain("runDaemonInternal rewrites persisted owner pid");
 	});

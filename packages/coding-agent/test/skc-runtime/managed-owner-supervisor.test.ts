@@ -23,13 +23,9 @@ const admissionModule = path.join(
 	"managed-owner-admission.ts",
 );
 
-async function runSupervisor(
-	stateDir: string,
-	command: string[],
-	env: Record<string, string> = {},
-): Promise<{ exitCode: number; stdout: string; stderr: string }> {
+function startSupervisor(stateDir: string, command: string[], env: Record<string, string> = {}) {
 	const script = `import { runManagedOwnerSupervisor } from ${JSON.stringify(supervisorModule)}; await runManagedOwnerSupervisor();`;
-	const child = Bun.spawn({
+	return Bun.spawn({
 		cmd: [process.execPath, "-e", script],
 		cwd: repoRoot,
 		stdout: "pipe",
@@ -45,12 +41,30 @@ async function runSupervisor(
 			...env,
 		},
 	});
+}
+async function runSupervisor(
+	stateDir: string,
+	command: string[],
+	env: Record<string, string> = {},
+): Promise<{ exitCode: number; stdout: string; stderr: string }> {
+	const child = startSupervisor(stateDir, command, env);
 	const [stdout, stderr, exitCode] = await Promise.all([
 		new Response(child.stdout).text(),
 		new Response(child.stderr).text(),
 		child.exited,
 	]);
 	return { exitCode, stdout, stderr };
+}
+async function waitForFile(file: string): Promise<void> {
+	for (let attempt = 0; attempt < 100; attempt += 1) {
+		try {
+			await fs.access(file);
+			return;
+		} catch {
+			await Bun.sleep(20);
+		}
+	}
+	throw new Error(`timed_out_waiting_for_${path.basename(file)}`);
 }
 
 function fastSigabrtCommand(): string[] {
@@ -101,6 +115,36 @@ describe("managed owner supervisor", () => {
 			expect(result.exitCode).toBe(23);
 			const root = lifecyclePaths(stateDir, "session-2681", "generation-2681").root;
 			expect((await fs.readdir(root)).some(file => file.startsWith("sigabrt-"))).toBe(false);
+		} finally {
+			await fs.rm(stateDir, { recursive: true, force: true });
+		}
+	});
+	it("relays one SIGTERM to its exact child and waits for child cleanup", async () => {
+		const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "skc-managed-owner-"));
+		const readyFile = path.join(stateDir, "child-ready");
+		const cleanupFile = path.join(stateDir, "child-cleanup.json");
+		try {
+			const childScript = `import { writeFile } from "node:fs/promises";
+let signals = 0;
+process.on("SIGTERM", () => {
+	signals += 1;
+	void writeFile(process.env.CLEANUP_FILE!, JSON.stringify({ signals })).then(() => {
+		setTimeout(() => process.exit(0), 300);
+	});
+});
+await writeFile(process.env.READY_FILE!, "ready");
+setInterval(() => {}, 1_000);`;
+			const supervisor = startSupervisor(stateDir, [process.execPath, "-e", childScript], {
+				READY_FILE: readyFile,
+				CLEANUP_FILE: cleanupFile,
+			});
+			await waitForFile(readyFile);
+			process.kill(supervisor.pid, "SIGTERM");
+			await waitForFile(cleanupFile);
+			expect(() => process.kill(supervisor.pid, 0)).not.toThrow();
+			process.kill(supervisor.pid, "SIGTERM");
+			expect(await supervisor.exited).toBe(0);
+			expect(JSON.parse(await fs.readFile(cleanupFile, "utf8"))).toEqual({ signals: 1 });
 		} finally {
 			await fs.rm(stateDir, { recursive: true, force: true });
 		}

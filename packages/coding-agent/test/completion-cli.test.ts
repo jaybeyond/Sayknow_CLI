@@ -118,6 +118,15 @@ describe("SKC inshellisense completion spec", () => {
 			expect(findSubcommand(spec, command), command).toBeDefined();
 		}
 		expect(names(findSubcommand(spec, "web-search")!.name)).toContain("q");
+		// Root help must advertise the real Effort enum — not the retired `ultra` token.
+		expect(findOption(spec.options, "--thinking")?.args?.suggestions).toEqual([
+			"minimal",
+			"low",
+			"medium",
+			"high",
+			"xhigh",
+			"max",
+		]);
 		expect(findOption(spec.options, "--tmux")).toBeDefined();
 		expect(findOption(spec.options, "--model")?.args).toEqual({ name: "value" });
 		expect(findOption(spec.options, "--resume")?.args).toEqual({ name: "value" });

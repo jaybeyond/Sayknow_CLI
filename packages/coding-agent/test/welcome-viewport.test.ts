@@ -1,7 +1,7 @@
 import { afterEach, beforeAll, describe, expect, it } from "bun:test";
 import { stripVTControlCharacters } from "node:util";
 import { visibleWidth } from "@sayknow-cli/tui";
-import { WelcomeComponent } from "../src/modes/components/welcome";
+import { resolveWelcomeIntroTickMs, WelcomeComponent } from "../src/modes/components/welcome";
 import { getThemeByName, setThemeInstance } from "../src/modes/theme/theme";
 
 const originalBuildChannel = process.env.SKC_BUILD_CHANNEL;
@@ -17,6 +17,14 @@ beforeAll(async () => {
 	const theme = await getThemeByName("red-octopus");
 	if (!theme) throw new Error("Failed to load red-octopus theme");
 	setThemeInstance(theme);
+});
+
+describe("welcome intro cadence", () => {
+	it("reduces frame pressure only for native Windows multiplexers", () => {
+		expect(resolveWelcomeIntroTickMs("win32", "psmux,1,0")).toBe(100);
+		expect(resolveWelcomeIntroTickMs("win32", "")).toBe(33);
+		expect(resolveWelcomeIntroTickMs("linux", "tmux,1,0")).toBe(33);
+	});
 });
 
 function stripRenderControls(line: string): string {
@@ -66,6 +74,28 @@ describe("WelcomeComponent viewport sizing", () => {
 		for (const line of lines) {
 			expect(visibleWidth(line)).toBe(200);
 		}
+	});
+
+	it("reserves the composer gutter for normal and one-row welcome layouts", () => {
+		const normal = new WelcomeComponent("1.2.3", "test-model", "test-provider", [], [], "ascii", {
+			rightGutterWidth: 1,
+		});
+		for (const line of normal.render(100).map(stripRenderControls)) {
+			expect(visibleWidth(line)).toBe(100);
+			expect(line.endsWith(" ")).toBe(true);
+			expect(visibleWidth(line.trimEnd())).toBe(99);
+		}
+
+		const constrained = new WelcomeComponent("1.2.3", "test-model", "test-provider", [], [], "ascii", {
+			rightGutterWidth: 1,
+			getViewportRows: () => 1,
+			getReservedBottomRows: () => 0,
+		});
+		const lines = constrained.render(100).map(stripRenderControls);
+		expect(lines).toHaveLength(1);
+		expect(visibleWidth(lines[0]!)).toBe(100);
+		expect(lines[0]!.endsWith(" ")).toBe(true);
+		expect(visibleWidth(lines[0]!.trimEnd())).toBe(99);
 	});
 
 	it("renders the build label from metadata instead of defaulting to dev", () => {
@@ -204,8 +234,12 @@ describe("WelcomeComponent viewport sizing", () => {
 	});
 
 	it("packs Flow keys across the available section width", () => {
-		const narrow = new WelcomeComponent("1.2.3", "test-model", "test-provider", [], [], "ascii");
-		const wide = new WelcomeComponent("1.2.3", "test-model", "test-provider", [], [], "ascii");
+		const narrow = new WelcomeComponent("1.2.3", "test-model", "test-provider", [], [], "ascii", {
+			keyDisplayContext: { platform: "linux" },
+		});
+		const wide = new WelcomeComponent("1.2.3", "test-model", "test-provider", [], [], "ascii", {
+			keyDisplayContext: { platform: "linux" },
+		});
 
 		const narrowFlowRows = flowKeyContentRows(narrow.render(70));
 		const wideFlowRows = flowKeyContentRows(wide.render(160));
@@ -213,18 +247,24 @@ describe("WelcomeComponent viewport sizing", () => {
 
 		expect(wideFlowRows.length).toBeLessThan(narrowFlowRows.length);
 		expect(wideText).toContain("/ commands");
-		expect(wideText).toContain("ctrl+c clear");
+		expect(wideText).toContain("Ctrl+C clear");
 	});
 
-	it("does not advertise Alt+Enter as newline when it is the queue shortcut", () => {
-		const welcome = new WelcomeComponent("1.2.3", "test-model", "test-provider", [], [], "ascii");
+	it.each([
+		["darwin", ["⌃L model", "⇧⇥ reasoning", "⇥ complete", "⌃J newline", "⌃C clear"]],
+		["win32", ["Ctrl+L model", "Shift+Tab reasoning", "Tab complete", "Alt+Enter newline", "Ctrl+C clear"]],
+		["linux", ["Ctrl+L model", "Shift+Tab reasoning", "Tab complete", "Ctrl+J newline", "Ctrl+C clear"]],
+	] as const)("renders platform-aware canonical Flow keys for %s", (platform, expected) => {
+		const welcome = new WelcomeComponent("1.2.3", "test-model", "test-provider", [], [], "ascii", {
+			keyDisplayContext: { platform },
+		});
 		const flowText = flowKeyContentRows(welcome.render(160)).join("\n");
 
-		if (process.platform === "win32") {
-			expect(flowText).toContain("alt+enter newline");
-		} else {
-			expect(flowText).toContain("ctrl+j newline");
-			expect(flowText).not.toContain("alt+enter newline");
+		let previousIndex = -1;
+		for (const label of expected) {
+			const index = flowText.indexOf(label);
+			expect(index).toBeGreaterThan(previousIndex);
+			previousIndex = index;
 		}
 	});
 

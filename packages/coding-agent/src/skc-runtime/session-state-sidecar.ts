@@ -911,15 +911,11 @@ async function operatorDispatchIdForOwner(
 	}
 }
 
-async function persistCoordinatorRuntimeStateFromOwnerTerminalPostmortem(
+async function observeOwnerTerminalPostmortem(
 	reason: postmortem.Reason,
-	context: RuntimeStateContext,
-	stateFile: string,
+	owner: OwnerTerminalContext,
 	sessionId: string,
-	previous: Record<string, unknown>,
-): Promise<void> {
-	const owner = context.ownerTerminal;
-	if (!owner) return;
+): Promise<OwnerVerdict | null> {
 	try {
 		const now = new Date().toISOString();
 		const observation: Omit<ObserveTerminalRequest, "operator_dispatch_id"> = {
@@ -937,10 +933,27 @@ async function persistCoordinatorRuntimeStateFromOwnerTerminalPostmortem(
 			reason: "process_postmortem",
 		};
 		const operatorDispatchId = await operatorDispatchIdForOwner(owner, observation);
-		const verdict = await observeOwnerTerminal({
+		return await observeOwnerTerminal({
 			...observation,
 			...(operatorDispatchId ? { operator_dispatch_id: operatorDispatchId } : {}),
 		});
+	} catch {
+		return null;
+	}
+}
+
+async function persistCoordinatorRuntimeStateFromOwnerTerminalPostmortem(
+	context: RuntimeStateContext,
+	stateFile: string,
+	sessionId: string,
+	previous: Record<string, unknown>,
+	verdict: OwnerVerdict | null,
+): Promise<void> {
+	const owner = context.ownerTerminal;
+	if (!owner) return;
+	try {
+		if (!verdict) throw new Error("owner terminal verdict unavailable");
+		const now = new Date().toISOString();
 		const expected = verdict.classification === "expected_operator_shutdown";
 		const state: RuntimeState = expected ? "completed" : "errored";
 		const payload = {
@@ -1009,6 +1022,9 @@ export async function persistCoordinatorRuntimeStateFromPostmortem(
 	const stateFile = runtimeStateFileForContext(context);
 	if (!stateFile) return;
 	const identity = normalizedIdentity(context);
+	const ownerTerminalVerdict = context.ownerTerminal
+		? await observeOwnerTerminalPostmortem(reason, context.ownerTerminal, identity.sessionId)
+		: null;
 	await serializeStateFileWrite(
 		stateFile,
 		async () =>
@@ -1033,11 +1049,11 @@ export async function persistCoordinatorRuntimeStateFromPostmortem(
 						}
 						if (context.ownerTerminal) {
 							await persistCoordinatorRuntimeStateFromOwnerTerminalPostmortem(
-								reason,
 								context,
 								stateFile,
 								identity.sessionId,
 								previous,
+								ownerTerminalVerdict,
 							);
 							return;
 						}

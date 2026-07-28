@@ -1,4 +1,6 @@
-Schedule a prompt to fire on a recurring cron schedule, or one-shot at the next match. Cron tasks let you re-run a prompt automatically on an interval — poll a deployment, babysit a PR, check back on a long-running build, or remind yourself to do something later in the session.
+Schedule a prompt to fire on a recurring cron schedule, or one-shot at the next match. Cron tasks re-run an agent prompt automatically on an interval when every firing is allowed to produce a normal assistant response, such as a reminder or a scheduled status report.
+
+Cron is not a silent polling primitive. Every firing starts an agent turn, and hiding the injected cron message does not hide that turn's assistant response. For ongoing logs, file watching, or PR/CI polling that should report only meaningful state changes, use `monitor` with a script that writes a line only when there is an event to process, and set `persistent: true` so the monitor survives the first emitted event. Do not schedule a cron prompt that asks the agent to suppress routine polls; prompt wording cannot make a cron-triggered assistant turn reliably silent.
 
 Use a single `op` field to select the operation:
 

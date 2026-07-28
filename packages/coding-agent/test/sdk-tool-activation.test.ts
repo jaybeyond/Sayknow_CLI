@@ -11,6 +11,15 @@ import { SessionManager } from "@sayknow-cli/coding-agent/session/session-manage
 import { Snowflake } from "@sayknow-cli/utils";
 import * as z from "zod/v4";
 
+const authStorages: AuthStorage[] = [];
+
+async function createIsolatedAuthStorage(tempDir: string): Promise<AuthStorage> {
+	const authDir = fs.mkdtempSync(path.join(tempDir, "auth-"));
+	const authStorage = await AuthStorage.create(path.join(authDir, "auth.db"));
+	authStorages.push(authStorage);
+	return authStorage;
+}
+
 const toolActivationExtension: ExtensionFactory = pi => {
 	pi.registerTool({
 		name: "default_inactive_tool",
@@ -61,10 +70,12 @@ async function createMinimalSession(
 	// outside this activation contract. Keep the focused harness process-free and
 	// cover recipe discovery in its dedicated suite.
 	settings.override("recipe.enabled", false);
+	const authStorage = await createIsolatedAuthStorage(tempDir);
 	return createAgentSession({
 		cwd: tempDir,
 		agentDir: tempDir,
 		sessionManager,
+		authStorage,
 		settings,
 		model: getBundledModel("openai", "gpt-4o-mini"),
 		disableExtensionDiscovery: true,
@@ -84,14 +95,13 @@ async function createMinimalSession(
 
 describe("createAgentSession defaultInactive tool activation", () => {
 	const tempDirs: string[] = [];
-	const authStorages: AuthStorage[] = [];
 
 	afterEach(() => {
-		for (const tempDir of tempDirs.splice(0)) {
-			fs.rmSync(tempDir, { recursive: true, force: true });
-		}
 		for (const authStorage of authStorages.splice(0)) {
 			authStorage.close();
+		}
+		for (const tempDir of tempDirs.splice(0)) {
+			fs.rmSync(tempDir, { recursive: true, force: true });
 		}
 		vi.restoreAllMocks();
 	});
@@ -334,6 +344,7 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		const { session } = await createAgentSession({
 			cwd: tempDir,
 			agentDir: tempDir,
+			authStorage: await createIsolatedAuthStorage(tempDir),
 			sessionManager: SessionManager.inMemory(tempDir),
 			settings: Settings.isolated(),
 			model: getBundledModel("openai", "gpt-4o-mini"),
@@ -368,6 +379,7 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		const { session } = await createAgentSession({
 			cwd: tempDir,
 			agentDir: tempDir,
+			authStorage: await createIsolatedAuthStorage(tempDir),
 			sessionManager: SessionManager.inMemory(tempDir),
 			settings: Settings.isolated(),
 			model: getBundledModel("openai", "gpt-4o-mini"),
@@ -400,6 +412,7 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		const { session, mcpManager } = await createAgentSession({
 			cwd: tempDir,
 			agentDir: tempDir,
+			authStorage: await createIsolatedAuthStorage(tempDir),
 			sessionManager: SessionManager.inMemory(tempDir),
 			settings: Settings.isolated({
 				"astGrep.enabled": true,
@@ -448,6 +461,7 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		const { session } = await createAgentSession({
 			cwd: tempDir,
 			agentDir: tempDir,
+			authStorage: await createIsolatedAuthStorage(tempDir),
 			sessionManager: SessionManager.inMemory(tempDir),
 			settings: Settings.isolated({ "edit.mode": "vim" }),
 			model: getBundledModel("openai", "gpt-4o-mini"),

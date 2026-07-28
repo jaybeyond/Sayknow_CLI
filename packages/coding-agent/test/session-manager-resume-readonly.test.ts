@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -7,6 +7,7 @@ import {
 	createReadonlySessionManager,
 	parseSessionEntries,
 	type ResumeSessionIdentity,
+	resolveResumableSession,
 	SessionManager,
 	type StrictSessionOpenResult,
 	sessionArtifactCapability,
@@ -18,12 +19,17 @@ import {
 	type SessionStorageStat,
 	type SessionStorageWriter,
 } from "@sayknow-cli/coding-agent/session/session-storage";
-import { getSessionsDir } from "@sayknow-cli/utils";
+import * as native from "@sayknow-cli/natives";
+import { getSessionsDir, getTerminalSessionsDir } from "@sayknow-cli/utils";
+import { resolveManagedScope } from "../src/session/internal/managed-session-scope";
+import { ManagedSessionDescendantStore } from "../src/session/internal/managed-session-storage";
 
 const tempDirs: string[] = [];
 
 afterEach(async () => {
+	vi.restoreAllMocks();
 	for (const dir of tempDirs.splice(0)) await fs.promises.rm(dir, { recursive: true, force: true });
+	vi.restoreAllMocks();
 });
 
 function makeTempDir(): string {
@@ -81,7 +87,7 @@ class FixedMtimeStorage extends WriteTrackingStorage {
 	}
 }
 
-class HandoffMutationStorage extends MemorySessionStorage {
+class PostHydrationDigestMutationStorage extends FixedMtimeStorage {
 	reads = 0;
 
 	constructor(private readonly replacement: string) {
@@ -91,7 +97,8 @@ class HandoffMutationStorage extends MemorySessionStorage {
 	override readSnapshotSync(filePath: string): SessionStorageSnapshot {
 		const snapshot = super.readSnapshotSync(filePath);
 		this.reads++;
-		if (this.reads === 2) queueMicrotask(() => super.writeTextSync(filePath, this.replacement));
+		if (this.reads === 2)
+			queueMicrotask(() => MemorySessionStorage.prototype.writeTextSync.call(this, filePath, this.replacement));
 		return snapshot;
 	}
 }
@@ -167,6 +174,28 @@ class ReplaceDuringFinalAuthorityInspectionStorage extends FileSessionStorage {
 			fs.renameSync(this.replacementPath, this.sourcePath);
 	}
 }
+class ForeignDestinationAfterAbsenceStorage extends ReplaceDuringFinalAuthorityInspectionStorage {
+	#injected = false;
+
+	constructor(
+		replacementPath: string,
+		sourcePath: string,
+		private readonly destinationDir: string,
+		private readonly foreignFile: string,
+	) {
+		super(replacementPath, sourcePath);
+	}
+
+	override existsSync(filePath: string): boolean {
+		const exists = super.existsSync(filePath);
+		if (!this.#injected && path.resolve(filePath) === path.resolve(this.destinationDir) && !exists) {
+			this.#injected = true;
+			fs.mkdirSync(this.destinationDir);
+			fs.writeFileSync(path.join(this.destinationDir, this.foreignFile), "foreign");
+		}
+		return exists;
+	}
+}
 
 function expectStrictFailure(
 	result: StrictSessionOpenResult,
@@ -196,7 +225,59 @@ function sessionText(id: string, role: "user" | "assistant" = "user"): string {
 	return `${JSON.stringify(header)}\n${JSON.stringify(message)}\n`;
 }
 
+function sanitizableSessionText(id: string): string {
+	const header = { type: "session", id, timestamp: new Date(0).toISOString(), cwd: "/cwd", version: 5 };
+	const message = {
+		type: "message",
+		id: "message",
+		parentId: null,
+		timestamp: new Date(0).toISOString(),
+		message: {
+			role: "assistant",
+			content: [{ type: "thinking", thinking: "stale reasoning", thinkingSignature: "stale-signature" }],
+			provider: "openai",
+			model: "test",
+			timestamp: 0,
+			providerPayload: { type: "openaiResponsesHistory", provider: "openai", items: [] },
+			usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: { total: 0 } },
+		},
+	};
+	return `${JSON.stringify(header)}\n${JSON.stringify(message)}\n`;
+}
+
 describe("SessionManager read-only resume", () => {
+	it("keeps strict managed read resolution fail-closed on ACL verification failure", () => {
+		const root = makeTempDir();
+		const cwd = path.join(root, "workspace");
+		const agentDir = path.join(root, "agent");
+		const sessionsRoot = path.join(agentDir, "sessions");
+		fs.mkdirSync(cwd);
+		fs.mkdirSync(sessionsRoot, { recursive: true });
+
+		const initial = resolveManagedScope({ cwd, agentDir, sessionsRoot });
+		if (initial.kind === "error") throw new Error(`Expected initial scope resolution: ${initial.message}`);
+		fs.mkdirSync(initial.scope.directoryPath);
+
+		const apply = vi.spyOn(native, "applyOwnerOnlyPathSecurity");
+		const repair = vi.spyOn(native, "repairOwnerOnlyPathSecurityExpected");
+		const verify = vi.spyOn(native, "verifyOwnerOnlyPathSecurity").mockReturnValue({
+			ok: false,
+			code: "acl_verify_failed",
+		});
+		const resolved = resolveManagedScope({ cwd, agentDir, sessionsRoot });
+		expect(() => SessionManager.getDefaultSessionDirReadOnly(cwd, agentDir)).toThrow(
+			"Could not resolve managed session scope: The managed scope security could not be verified.",
+		);
+
+		expect(resolved).toEqual({
+			kind: "error",
+			code: "binding_invalid",
+			message: "The managed scope security could not be verified.",
+		});
+		expect(verify).toHaveBeenCalledWith(initial.scope.directoryPath, "directory");
+		expect(apply).not.toHaveBeenCalled();
+		expect(repair).not.toHaveBeenCalled();
+	});
 	it("lists and inspects without maintenance writes, then strictly opens the approved identity", async () => {
 		const storage = new WriteTrackingStorage();
 		const filePath = "/sessions/resume.jsonl";
@@ -214,6 +295,42 @@ describe("SessionManager read-only resume", () => {
 		if (opened.kind === "error") throw new Error("Expected strict open success");
 		expect(opened.manager.getSessionId()).toBe("session-a");
 		expect(storage.writes).toBe(0);
+	});
+
+	it("adopts strict inspection entries without cloning the hydrated transcript", async () => {
+		const storage = new WriteTrackingStorage();
+		const filePath = "/sessions/adopted.jsonl";
+		storage.writeTextSync(filePath, sessionText("session-a"));
+		const inspection = await SessionManager.inspectSessionTailReadOnly(filePath, storage);
+		if (inspection.kind === "error") throw new Error("Expected resumable inspection");
+
+		const clone = vi.spyOn(globalThis, "structuredClone");
+		const opened = await SessionManager.openExistingStrict(inspection.identity, "/sessions", storage);
+		expect(opened.kind).toBe("opened");
+		expect(clone).not.toHaveBeenCalled();
+		if (opened.kind === "opened") await opened.manager.close();
+	});
+	it("keeps adopted strict entries isolated from public entry aliases", async () => {
+		const storage = new WriteTrackingStorage();
+		const filePath = "/sessions/adopted-isolation.jsonl";
+		storage.writeTextSync(filePath, sessionText("session-a"));
+		const inspection = await SessionManager.inspectSessionTailReadOnly(filePath, storage);
+		if (inspection.kind === "error") throw new Error("Expected resumable inspection");
+
+		const opened = await SessionManager.openExistingStrict(inspection.identity, "/sessions", storage);
+		if (opened.kind === "error") throw new Error("Expected strict open");
+		const exposed = opened.manager.getEntries();
+		const message = exposed.find(entry => entry.type === "message");
+		if (message?.type !== "message" || !("content" in message.message))
+			throw new Error("Expected adopted message entry");
+		(message.message as { content: string }).content = "mutated public alias";
+
+		expect(opened.manager.getEntries().find(entry => entry.type === "message")).toMatchObject({
+			type: "message",
+			message: { content: "resume" },
+		});
+		expect(storage.readTextSync(filePath)).toBe(sessionText("session-a"));
+		await opened.manager.close();
 	});
 
 	it("opens an immutable v4 patch fixture with its final header and message state", async () => {
@@ -296,7 +413,7 @@ describe("SessionManager read-only resume", () => {
 		expect(storage.writes).toBe(0);
 		expect(fs.readFileSync(filePath, "utf-8")).toBe(replacement);
 	});
-	it("removes a newly created fork directory when final source authority changes", async () => {
+	it("removes its private fork staging directory when final source authority changes", async () => {
 		const root = makeTempDir();
 		const sourcePath = path.join(root, "source.jsonl");
 		const replacementPath = path.join(root, "replacement.jsonl");
@@ -305,6 +422,7 @@ describe("SessionManager read-only resume", () => {
 		fs.mkdirSync(targetCwd);
 		fs.writeFileSync(sourcePath, sessionText("session-a"));
 		fs.writeFileSync(replacementPath, sessionText("session-b"));
+
 		const storage = new ReplaceDuringFinalAuthorityInspectionStorage(replacementPath, sourcePath);
 		const captured = SessionManager.captureTranscriptStrict(sourcePath, storage);
 		if (captured.kind !== "captured") throw new Error("Expected strict transcript capture");
@@ -314,6 +432,151 @@ describe("SessionManager read-only resume", () => {
 			reason: "identity-mismatch",
 		});
 		expect(fs.existsSync(destinationDir)).toBe(false);
+	});
+	it("disposes staging resident history blobs before publishing an explicit strict fork", async () => {
+		const root = makeTempDir();
+		const sourcePath = path.join(root, "source.jsonl");
+		const destinationDir = path.join(root, "destination-sessions");
+		const targetCwd = path.join(root, "target");
+		const history = "x".repeat(1025);
+		fs.mkdirSync(targetCwd);
+		fs.writeFileSync(sourcePath, sessionText("session-a").replace("resume", history));
+
+		const captured = SessionManager.captureTranscriptStrict(sourcePath);
+		if (captured.kind !== "captured") throw new Error("Expected strict transcript capture");
+		const forked = await SessionManager.forkFromCaptured(captured.snapshot, targetCwd, destinationDir);
+		if (forked.kind !== "forked") throw new Error("Expected strict fork success");
+		const artifactsDir = forked.manager.getArtifactsDir();
+		if (!artifactsDir) throw new Error("Expected strict fork artifacts");
+		const residentCacheDir = path.join(artifactsDir, "resident-cache");
+
+		try {
+			expect(forked.manager.getSessionDir()).toBe(destinationDir);
+			expect(forked.manager.getEntries()).toMatchObject([
+				{ type: "message", message: { role: "user", content: history } },
+			]);
+			expect(fs.readdirSync(residentCacheDir)).toHaveLength(1);
+		} finally {
+			await forked.manager.close();
+		}
+		expect(fs.readdirSync(residentCacheDir)).toEqual([]);
+	});
+	it.skipIf(process.platform !== "linux")(
+		"does not publish a strict fork when staged tree durability fails",
+		async () => {
+			const root = makeTempDir();
+			const sourcePath = path.join(root, "source.jsonl");
+			const destinationDir = path.join(root, "destination-sessions");
+			const targetCwd = path.join(root, "target");
+			fs.mkdirSync(targetCwd);
+			fs.writeFileSync(sourcePath, sessionText("session-a"));
+			const fsync = fs.fsyncSync;
+			let stagedTreeSyncAttempted = false;
+			const failStagedTreeFsync = vi.spyOn(fs, "fsyncSync").mockImplementation(descriptor => {
+				const stagedDirectory = fs.fstatSync(descriptor).isDirectory();
+				const pathname = fs.readlinkSync(`/proc/self/fd/${descriptor}`);
+				if (stagedDirectory && pathname.includes(".fork-staging-")) {
+					stagedTreeSyncAttempted = true;
+					throw new Error("injected staged-tree fsync failure");
+				}
+				return fsync(descriptor);
+			});
+			try {
+				const captured = SessionManager.captureTranscriptStrict(sourcePath);
+				if (captured.kind !== "captured") throw new Error("Expected strict transcript capture");
+				await expect(SessionManager.forkFromCaptured(captured.snapshot, targetCwd, destinationDir)).rejects.toThrow(
+					"injected staged-tree fsync failure",
+				);
+				expect(stagedTreeSyncAttempted).toBe(true);
+				expect(fs.existsSync(destinationDir)).toBe(false);
+			} finally {
+				failStagedTreeFsync.mockRestore();
+			}
+		},
+	);
+	it("rejects a replaced strict-fork staging root without deleting committed evidence", async () => {
+		const root = makeTempDir();
+		const sourcePath = path.join(root, "source.jsonl");
+		const destinationDir = path.join(root, "destination-sessions");
+		const publishedEvidenceDir = path.join(root, "published-evidence");
+		const targetCwd = path.join(root, "target");
+		fs.mkdirSync(targetCwd);
+		fs.writeFileSync(sourcePath, sessionText("session-a"));
+		const renameNoReplacePath = native.renameNoReplacePath;
+		const rename = vi.spyOn(native, "renameNoReplacePath").mockImplementation((source, destination) => {
+			const result = renameNoReplacePath(source, destination);
+			if (result.ok && String(source).includes(".fork-staging-")) {
+				fs.renameSync(String(destination), publishedEvidenceDir);
+				fs.mkdirSync(String(destination));
+				fs.writeFileSync(path.join(String(destination), "foreign.txt"), "foreign");
+			}
+			return result;
+		});
+		try {
+			const captured = SessionManager.captureTranscriptStrict(sourcePath);
+			if (captured.kind !== "captured") throw new Error("Expected strict transcript capture");
+			await expect(SessionManager.forkFromCaptured(captured.snapshot, targetCwd, destinationDir)).rejects.toThrow(
+				"fork_destination_terminal_identity_changed",
+			);
+			expect(fs.readFileSync(path.join(destinationDir, "foreign.txt"), "utf8")).toBe("foreign");
+			expect(fs.readdirSync(publishedEvidenceDir).some(entry => entry.endsWith(".jsonl"))).toBe(true);
+		} finally {
+			rename.mockRestore();
+		}
+	});
+	it("preserves published strict-fork evidence when parent durability fails", async () => {
+		const root = makeTempDir();
+		const sourcePath = path.join(root, "source.jsonl");
+		const destinationDir = path.join(root, "destination-sessions");
+		const targetCwd = path.join(root, "target");
+		fs.mkdirSync(targetCwd);
+		fs.writeFileSync(sourcePath, sessionText("session-a"));
+		const open = fs.promises.open;
+		let durabilityAttempted = false;
+		fs.promises.open = (async (...args: Parameters<typeof fs.promises.open>) => {
+			if (String(args[0]) === path.dirname(destinationDir) && args[1] === "r") {
+				durabilityAttempted = true;
+				throw new Error("parent durability failed");
+			}
+			return await open(...args);
+		}) as typeof fs.promises.open;
+		try {
+			const captured = SessionManager.captureTranscriptStrict(sourcePath);
+			if (captured.kind !== "captured") throw new Error("Expected strict transcript capture");
+			await expect(SessionManager.forkFromCaptured(captured.snapshot, targetCwd, destinationDir)).rejects.toThrow(
+				"parent durability failed",
+			);
+			expect(durabilityAttempted).toBe(true);
+			expect(fs.readdirSync(destinationDir).some(entry => entry.endsWith(".jsonl"))).toBe(true);
+		} finally {
+			fs.promises.open = open;
+		}
+	});
+	it("preserves a foreign destination injected after absence observation when strict fork authority fails", async () => {
+		const root = makeTempDir();
+		const sourcePath = path.join(root, "source.jsonl");
+		const replacementPath = path.join(root, "replacement.jsonl");
+		const destinationDir = path.join(root, "destination-sessions");
+		const targetCwd = path.join(root, "target");
+		const foreignFile = "foreign.txt";
+		fs.mkdirSync(targetCwd);
+		fs.writeFileSync(sourcePath, sessionText("session-a"));
+		fs.writeFileSync(replacementPath, sessionText("session-b"));
+
+		const storage = new ForeignDestinationAfterAbsenceStorage(
+			replacementPath,
+			sourcePath,
+			destinationDir,
+			foreignFile,
+		);
+		const captured = SessionManager.captureTranscriptStrict(sourcePath, storage);
+		if (captured.kind !== "captured") throw new Error("Expected strict transcript capture");
+
+		expect(await SessionManager.forkFromCaptured(captured.snapshot, targetCwd, destinationDir)).toEqual({
+			kind: "error",
+			reason: "identity-mismatch",
+		});
+		expect(fs.readFileSync(path.join(destinationDir, foreignFile), "utf8")).toBe("foreign");
 	});
 
 	it("fails closed with typed reasons for replacement, malformed, deletion, and unstable reads", async () => {
@@ -360,19 +623,51 @@ describe("SessionManager read-only resume", () => {
 		expect(storage.writes).toBe(0);
 	});
 
-	it("revalidates identity after async hydration before ownership", async () => {
+	it("rejects post-hydration same-identity byte mutations at the final SHA fence", async () => {
 		const filePath = "/sessions/handoff.jsonl";
-		const storage = new HandoffMutationStorage(sessionText("session-a", "assistant"));
-		storage.writeTextSync(filePath, sessionText("session-a"));
+		const original = sessionText("session-a");
+		const mutated = original.replace("resume", "resumf");
+		expect(mutated.length).toBe(original.length);
+		const storage = new PostHydrationDigestMutationStorage(mutated);
+		storage.writeTextSync(filePath, original);
 		const inspection = await SessionManager.inspectSessionTailReadOnly(filePath, storage);
 		if (inspection.kind === "error") throw new Error("Expected inspection identity");
+		const before = storage.statSync(filePath);
 
+		storage.writes = 0;
 		expectStrictFailure(
 			await SessionManager.openExistingStrict(inspection.identity, "/sessions", storage),
 			"identity-mismatch",
 		);
 		expect(storage.reads).toBe(3);
-		expect(storage.readTextSync(filePath)).toContain('"role":"assistant"');
+		expect(storage.statSync(filePath)).toMatchObject({
+			dev: before.dev,
+			ino: before.ino,
+			size: before.size,
+			mtimeMs: before.mtimeMs,
+			mtimeNs: before.mtimeNs,
+		});
+		expect(storage.readTextSync(filePath)).toBe(mutated);
+		expect(storage.writes).toBe(0);
+	});
+	it("does not sanitize or write a breadcrumb when final authority rejects sanitizable history", async () => {
+		const filePath = "/sessions/sanitizable-handoff.jsonl";
+		const original = sanitizableSessionText("session-a");
+		const replacement = original.replace("stale reasoning", "fresh reasoning");
+		expect(replacement.length).toBe(original.length);
+		const storage = new PostHydrationDigestMutationStorage(replacement);
+		storage.writeTextSync(filePath, original);
+		const inspection = await SessionManager.inspectSessionTailReadOnly(filePath, storage);
+		if (inspection.kind === "error") throw new Error("Expected inspection identity");
+
+		storage.writes = 0;
+		expectStrictFailure(
+			await SessionManager.openExistingStrict(inspection.identity, "/sessions", storage),
+			"identity-mismatch",
+		);
+		expect(storage.readTextSync(filePath)).toBe(replacement);
+		expect(storage.readTextSync(filePath)).toContain("stale-signature");
+		expect(storage.writes).toBe(0);
 	});
 
 	it("fails closed on invalid UTF-8 instead of parsing replacement text", async () => {
@@ -685,8 +980,8 @@ describe("readonly session artifact authority", () => {
 
 		expect("saveArtifact" in readonly).toBe(false);
 		const capability = sessionArtifactCapability(readonly);
-		expect(capability).toBeDefined();
-		const artifactId = await capability?.saveArtifact("full SDK tool output", "sdk-tool");
+		if (!capability) throw new Error("Expected artifact capability");
+		const artifactId = await capability.saveArtifact("full SDK tool output", "sdk-tool");
 		expect(artifactId).toBeDefined();
 		if (artifactId) {
 			const artifactPath = await manager.getArtifactPath(artifactId);
@@ -718,19 +1013,258 @@ describe("CLI session picker deletion scope", () => {
 });
 
 describe("active managed picker root", () => {
-	it("lists from a custom agent root instead of the process-global root", async () => {
+	it("shares a custom managed root between default picker inventory and strict-open preparation", async () => {
 		const root = makeTempDir();
 		const agentDir = path.join(root, "custom-agent");
 		const cwd = path.join(root, "workspace");
 		fs.mkdirSync(cwd, { recursive: true });
-		const sessionDir = SessionManager.getDefaultSessionDir(cwd, agentDir);
-		const manager = SessionManager.create(cwd, sessionDir);
+		const destination = SessionManager.managedDestination(cwd, agentDir);
+		const manager = SessionManager.create(cwd, destination);
 		manager.appendMessage({ role: "user", content: "custom root", timestamp: 1 });
 		await manager.ensureOnDisk();
 		await manager.flush();
+		const sessionFile = manager.getSessionFile();
+		if (!sessionFile) throw new Error("Expected managed session file");
 
-		const listed = await SessionManager.listForResumePickerReadOnly(cwd, sessionDir);
-
+		const listed = await SessionManager.listManagedForResumePickerReadOnly(cwd, agentDir);
 		expect(listed.map(session => session.id)).toContain(manager.getSessionId());
+		const resolvedById = await resolveResumableSession(manager.getSessionId(), cwd, undefined, undefined, agentDir);
+		expect(resolvedById).toMatchObject({ scope: "local", session: { path: sessionFile } });
+		const inspection = await SessionManager.inspectSessionTailReadOnly(sessionFile);
+		if (inspection.kind === "error") throw new Error("Expected resumable inspection");
+		const opened = await SessionManager.openExistingStrict(inspection.identity, destination);
+		expect(opened.kind).toBe("opened");
+		if (opened.kind === "error") throw new Error("Expected strict open");
+		await opened.manager.close();
+	});
+	it("does not let an outside terminal breadcrumb override an explicit resume directory", async () => {
+		const root = makeTempDir();
+		const cwd = path.join(root, "workspace");
+		const explicitDirectory = path.join(root, "explicit");
+		const outsideDirectory = path.join(root, "outside");
+		fs.mkdirSync(cwd, { recursive: true });
+		fs.mkdirSync(explicitDirectory);
+		const outside = SessionManager.create(cwd, SessionManager.explicitDestination(outsideDirectory));
+		outside.appendMessage({ role: "user", content: "outside", timestamp: 1 });
+		await outside.ensureOnDisk();
+		await outside.flush();
+		const outsideFile = outside.getSessionFile();
+		if (!outsideFile) throw new Error("Expected outside session file");
+		await outside.close();
+		const originalTmux = process.env.TMUX;
+		const originalPane = process.env.TMUX_PANE;
+		const pane = `%explicit-resume-${Date.now()}-${Math.random()}`;
+		const breadcrumbFile = path.join(getTerminalSessionsDir(), `tmux-${pane}`);
+		process.env.TMUX = "/tmp/test-tmux,1,0";
+		process.env.TMUX_PANE = pane;
+		try {
+			fs.mkdirSync(getTerminalSessionsDir(), { recursive: true });
+			fs.symlinkSync(
+				outsideDirectory,
+				path.join(explicitDirectory, "escape"),
+				process.platform === "win32" ? "junction" : "dir",
+			);
+			fs.writeFileSync(
+				breadcrumbFile,
+				`${cwd}\n${path.join(explicitDirectory, "escape", path.basename(outsideFile))}\n`,
+			);
+			const resumed = await SessionManager.continueRecent(
+				cwd,
+				SessionManager.explicitDestination(explicitDirectory),
+			);
+			try {
+				expect(resumed.getSessionFile()).not.toBe(outsideFile);
+				expect(resumed.getSessionDir()).toBe(explicitDirectory);
+			} finally {
+				await resumed.close();
+			}
+		} finally {
+			fs.rmSync(breadcrumbFile, { force: true });
+			if (originalTmux === undefined) delete process.env.TMUX;
+			else process.env.TMUX = originalTmux;
+			if (originalPane === undefined) delete process.env.TMUX_PANE;
+			else process.env.TMUX_PANE = originalPane;
+		}
+	});
+	it("uses manager-bound picker inventory for explicit-only and managed legacy candidates", async () => {
+		const root = makeTempDir();
+		const agentDir = path.join(root, "custom-agent");
+		const cwd = path.join(root, "workspace");
+		const sessionsRoot = path.join(agentDir, "sessions");
+		fs.mkdirSync(cwd, { recursive: true });
+		const destination = SessionManager.managedDestination(cwd, agentDir);
+		const manager = SessionManager.create(cwd, destination);
+		manager.appendMessage({ role: "user", content: "current", timestamp: 1 });
+		await manager.ensureOnDisk();
+		await manager.flush();
+		const currentPath = manager.getSessionFile();
+		if (!currentPath) throw new Error("Expected managed current transcript");
+		await manager.close();
+
+		const legacyDirectory = path.join(
+			sessionsRoot,
+			`--${path
+				.resolve(cwd)
+				.replace(/^[/\\]/, "")
+				.replace(/[/\\:]/g, "-")}--`,
+		);
+		const legacyPath = path.join(legacyDirectory, "legacy.jsonl");
+		fs.mkdirSync(legacyDirectory, { recursive: true });
+		fs.writeFileSync(legacyPath, sessionText("legacy").replace('"cwd":"/cwd"', `"cwd":${JSON.stringify(cwd)}`));
+
+		const explicitManager = SessionManager.create(cwd, SessionManager.explicitDestination(destination.directory));
+		const explicit = await explicitManager.listForResumePickerReadOnly();
+		expect(explicit.map(session => session.path)).toEqual([currentPath]);
+
+		const managed = await manager.listForResumePickerReadOnly();
+		expect(managed.map(session => session.path)).toEqual(expect.arrayContaining([currentPath, legacyPath]));
+	});
+	it("rejects a replacement after managed preparation before strict adoption", async () => {
+		const root = makeTempDir();
+		const cwd = path.join(root, "workspace");
+		const agentDir = path.join(root, "agent");
+		fs.mkdirSync(cwd, { recursive: true });
+		const manager = SessionManager.create(cwd, SessionManager.managedDestination(cwd, agentDir));
+		manager.appendMessage({ role: "user", content: "original", timestamp: 1 });
+		await manager.ensureOnDisk();
+		await manager.flush();
+		const sessionFile = manager.getSessionFile();
+		if (!sessionFile) throw new Error("Expected session file");
+		const inspection = await SessionManager.inspectSessionTailReadOnly(sessionFile);
+		if (inspection.kind === "error") throw new Error("Expected session inspection");
+		const preparedPath = await manager.prepareManagedCandidateForStrictAdoption(
+			sessionFile,
+			"copy-retain",
+			inspection.identity,
+		);
+		const replacement = path.join(root, "replacement.jsonl");
+		fs.writeFileSync(replacement, fs.readFileSync(preparedPath));
+		fs.renameSync(replacement, preparedPath);
+		await expect(manager.setSessionFile(preparedPath)).rejects.toThrow("changed before strict adoption");
+		await manager.close();
+	});
+	it("rejects source identity drift at the final prepared migration receipt publication guard", async () => {
+		const root = makeTempDir();
+		const agentDir = path.join(root, "agent");
+		const cwd = path.join(root, "workspace");
+		const sessionsRoot = path.join(agentDir, "sessions");
+		const legacyDirectory = path.join(
+			sessionsRoot,
+			`--${path
+				.resolve(cwd)
+				.replace(/^[/\\]/, "")
+				.replace(/[/\\:]/g, "-")}--`,
+		);
+		const legacyPath = path.join(legacyDirectory, "legacy.jsonl");
+		const replacementPath = path.join(root, "same-bytes-replacement.jsonl");
+		fs.mkdirSync(cwd, { recursive: true });
+		const destination = SessionManager.managedDestination(cwd, agentDir);
+		fs.mkdirSync(legacyDirectory, { recursive: true });
+		fs.writeFileSync(legacyPath, sessionText("legacy").replace('"cwd":"/cwd"', `"cwd":${JSON.stringify(cwd)}`));
+		const inspection = await SessionManager.inspectSessionTailReadOnly(legacyPath);
+		if (inspection.kind === "error") throw new Error("Expected legacy inspection");
+		fs.writeFileSync(replacementPath, fs.readFileSync(legacyPath));
+		const protocolRoot = path.join(destination.directory, ".skc-managed-session-internal");
+		const before = {
+			receipts: fs.readdirSync(path.join(protocolRoot, "receipts")),
+			tombstones: fs.readdirSync(path.join(protocolRoot, "tombstones")),
+		};
+		const assertBound = ManagedSessionDescendantStore.prototype.assertBound;
+		let publicationGuards = 0;
+		vi.spyOn(ManagedSessionDescendantStore.prototype, "assertBound").mockImplementation(function (
+			this: ManagedSessionDescendantStore,
+		) {
+			assertBound.call(this);
+			const stack = new Error().stack ?? "";
+			if (
+				stack.includes("publishManagedFileNoReplace") &&
+				stack.includes("assertPublicationConsent") &&
+				++publicationGuards === 2
+			)
+				fs.renameSync(replacementPath, legacyPath);
+		});
+
+		expectStrictFailure(
+			await SessionManager.openExistingStrict(inspection.identity, destination),
+			"identity-mismatch",
+		);
+		expect(publicationGuards).toBe(2);
+		expect(fs.readdirSync(path.join(protocolRoot, "receipts"))).toEqual(before.receipts);
+		expect(fs.readdirSync(path.join(protocolRoot, "tombstones"))).toEqual(before.tombstones);
+		expect(fs.existsSync(path.join(destination.directory, path.basename(legacyPath)))).toBe(false);
+		expect(fs.existsSync(path.join(destination.directory, path.basename(legacyPath).slice(0, -6)))).toBe(false);
+	});
+
+	it("keeps an explicit resume destination explicit without managed preparation or migration", async () => {
+		const root = makeTempDir();
+		const explicitDirectory = path.join(root, "explicit");
+		const selectedPath = path.join(explicitDirectory, "selected.jsonl");
+		fs.mkdirSync(explicitDirectory);
+		fs.writeFileSync(selectedPath, sessionText("explicit"));
+		const inspection = await SessionManager.inspectSessionTailReadOnly(selectedPath);
+		if (inspection.kind === "error") throw new Error("Expected explicit inspection");
+		const prepare = vi.spyOn(SessionManager, "prepareManagedCandidateForWrite");
+
+		const opened = await SessionManager.openExistingStrict(
+			inspection.identity,
+			SessionManager.explicitDestination(explicitDirectory),
+		);
+
+		expect(opened.kind).toBe("opened");
+		if (opened.kind === "opened") await opened.manager.close();
+		expect(prepare).not.toHaveBeenCalled();
+		expect(fs.existsSync(path.join(explicitDirectory, ".skc-managed-session-scope.v2.json"))).toBe(false);
+		expect(fs.existsSync(path.join(explicitDirectory, ".skc-managed-session-internal"))).toBe(false);
+	});
+
+	it("fails closed at the final migration seam when captured managed authority is replaced", async () => {
+		const root = makeTempDir();
+		const agentDir = path.join(root, "custom-agent");
+		const cwd = path.join(root, "workspace");
+		const sessionsRoot = path.join(agentDir, "sessions");
+		const legacyDirectory = path.join(
+			sessionsRoot,
+			`--${path
+				.resolve(cwd)
+				.replace(/^[/\\]/, "")
+				.replace(/[/\\:]/g, "-")}--`,
+		);
+		const legacyPath = path.join(legacyDirectory, "legacy.jsonl");
+		fs.mkdirSync(cwd, { recursive: true });
+		const destination = SessionManager.managedDestination(cwd, agentDir);
+		fs.mkdirSync(legacyDirectory, { recursive: true });
+		fs.writeFileSync(legacyPath, sessionText("legacy").replace('"cwd":"/cwd"', `"cwd":${JSON.stringify(cwd)}`));
+		const candidateBefore = fs.readFileSync(legacyPath);
+		const protocolRoot = path.join(destination.directory, ".skc-managed-session-internal");
+		const bindingPath = path.join(destination.directory, ".skc-managed-session-scope.v2.json");
+		const bindingBefore = fs.readFileSync(bindingPath);
+		const receiptsBefore = fs.readdirSync(path.join(protocolRoot, "receipts"));
+		const tombstonesBefore = fs.readdirSync(path.join(protocolRoot, "tombstones"));
+		const displacedAgentDir = path.join(root, "displaced-agent");
+		const assertBound = ManagedSessionDescendantStore.prototype.assertBound;
+		let assertions = 0;
+		vi.spyOn(ManagedSessionDescendantStore.prototype, "assertBound").mockImplementation(function (
+			this: ManagedSessionDescendantStore,
+		) {
+			assertBound.call(this);
+			assertions++;
+			if (assertions === 5) {
+				fs.renameSync(agentDir, displacedAgentDir);
+				fs.cpSync(displacedAgentDir, agentDir, { recursive: true });
+			}
+		});
+
+		await expect(
+			SessionManager.prepareManagedCandidateForWrite(legacyPath, "copy-retain", destination),
+		).rejects.toThrow("Managed descendant root binding changed");
+
+		expect(assertions).toBe(5);
+		expect(fs.readFileSync(legacyPath)).toEqual(candidateBefore);
+		expect(fs.readFileSync(bindingPath)).toEqual(bindingBefore);
+		expect(fs.readdirSync(path.join(protocolRoot, "receipts"))).toEqual(receiptsBefore);
+		expect(fs.readdirSync(path.join(protocolRoot, "tombstones"))).toEqual(tombstonesBefore);
+		expect(fs.existsSync(path.join(destination.directory, path.basename(legacyPath)))).toBe(false);
+		expect(fs.existsSync(path.join(destination.directory, path.basename(legacyPath).slice(0, -6)))).toBe(false);
+		expect(fs.existsSync(path.join(legacyDirectory, ".skc-managed-session-scope.v2.json"))).toBe(false);
 	});
 });

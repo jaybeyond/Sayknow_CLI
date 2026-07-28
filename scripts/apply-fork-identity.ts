@@ -18,12 +18,9 @@
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { PACKAGE_VERSION_EXCEPTIONS, packageName } from "./fork-version-neutral";
 
 const SKIP_DIRS = new Set([".git", "node_modules", "dist", "build", "coverage", ".turbo", "target"]);
-const PACKAGE_VERSION_EXCEPTIONS = new Set([
-	"@sayknow-cli/orchestration-token-benchmark",
-	"@sayknow-cli/typescript-edit-benchmark",
-]);
 
 
 interface Identity {
@@ -47,10 +44,6 @@ function findPackageJsons(root: string, out: string[]): void {
 	if (fs.existsSync(webPj)) out.push(webPj);
 }
 
-function packageName(text: string): string | undefined {
-	const match = text.match(/"name"\s*:\s*"([^"]+)"/);
-	return match?.[1];
-}
 /** Replace ONLY the first top-level `"version": "..."` (package.json convention). */
 function stampPackageVersion(text: string, version: string): string {
 	return text.replace(/("version"\s*:\s*")[^"]*(")/, `$1${version}$2`);

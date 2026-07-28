@@ -1,19 +1,20 @@
 import { describe, expect, it } from "bun:test";
 import {
 	parseLinuxProcStartTime,
+	parseLinuxProcTtyDevice,
+	probeLinuxProcPid,
+	probeLinuxProcPidSync,
 	readLinuxProcStartTime,
 	readLinuxProcStartTimeSync,
 } from "@sayknow-cli/coding-agent/skc-runtime/linux-proc";
 
 /**
- * Build a `/proc/<pid>/stat`-shaped string with a configurable comm field and
- * a start-time token (field 22) at index 19 after the closing paren. The comm
- * field is wrapped in parentheses and may itself contain spaces/parens; the
- * parser must anchor on the *last* `)`.
+ * Build a `/proc/<pid>/stat`-shaped string with configurable identity fields.
+ * The comm field is wrapped in parentheses and may itself contain spaces/parens;
+ * the parser must anchor on the *last* `)`.
  */
-function procStat(comm: string, field22: string, extraAfterClose = ""): string {
-	// Fields 3..22 (indices 0..19 after the closing paren). Field 22 is index 19.
-	const fields = ["S", ...Array.from({ length: 18 }, () => "0"), field22];
+function procStat(comm: string, field22: string, ttyDevice = "0", extraAfterClose = "", state = "S"): string {
+	const fields = [state, "0", "0", "0", ttyDevice, ...Array.from({ length: 14 }, () => "0"), field22];
 	return `1 (${comm}) ${fields.join(" ")}${extraAfterClose}`;
 }
 
@@ -23,7 +24,6 @@ describe("parseLinuxProcStartTime", () => {
 	});
 
 	it("anchors on the last closing paren when comm contains parens and spaces", () => {
-		// comm = "foo ) bar baz" — the parser must skip the inner `)` and use the last one.
 		expect(parseLinuxProcStartTime(procStat("foo ) bar baz", "99999"))).toBe("99999");
 	});
 
@@ -42,8 +42,7 @@ describe("parseLinuxProcStartTime", () => {
 	});
 
 	it("returns null when field 22 is absent (too few trailing fields)", () => {
-		// Only 19 trailing fields (indices 0..18) — field 22 (index 19) is missing.
-		const shortFields = ["S", ...Array.from({ length: 17 }, () => "0")];
+		const shortFields = ["S", "0", "0", "0", "0", ...Array.from({ length: 13 }, () => "0")];
 		expect(parseLinuxProcStartTime(`1 (owner) ${shortFields.join(" ")}`)).toBeNull();
 	});
 
@@ -55,61 +54,104 @@ describe("parseLinuxProcStartTime", () => {
 	it("rejects malformed record boundaries and fields", () => {
 		expect(parseLinuxProcStartTime(`x${procStat("owner", "1234")}`)).toBeNull();
 		expect(parseLinuxProcStartTime(procStat("owner", "1234").replace(") ", ")"))).toBeNull();
-		expect(parseLinuxProcStartTime(procStat("owner", "1234").replace(") S", ") Q"))).toBeNull();
+		expect(parseLinuxProcStartTime(procStat("owner", "1234").replace(") S", ") 1"))).toBeNull();
 		expect(parseLinuxProcStartTime(`${procStat("owner", "1234")}\nsecond record`)).toBeNull();
 		expect(parseLinuxProcStartTime(`${procStat("owner", "1234")}\0`)).toBeNull();
 	});
 
 	it("accepts a single terminal newline and fields after field 22", () => {
-		expect(parseLinuxProcStartTime(`${procStat("owner", "1234", " 99 100")}\n`)).toBe("1234");
+		expect(parseLinuxProcStartTime(`${procStat("owner", "1234", "0", " 99 100")}\n`)).toBe("1234");
 	});
 
 	it("parses a large numeric start time", () => {
 		expect(parseLinuxProcStartTime(procStat("tmux", "18446744073709551615"))).toBe("18446744073709551615");
 	});
+
+	it("accepts every single-letter Linux process state code", () => {
+		for (const state of ["K", "W", "x"]) {
+			expect(parseLinuxProcStartTime(procStat("owner", "1234", "0", "", state))).toBe("1234");
+		}
+	});
+});
+
+describe("parseLinuxProcTtyDevice", () => {
+	it("parses field 7 from a valid stat string", () => {
+		expect(parseLinuxProcTtyDevice(procStat("owner", "1234", "2049"))).toBe("2049");
+	});
+});
+
+describe("probeLinuxProcPidSync", () => {
+	it("returns an explicit unsupported result on non-Linux platforms", () => {
+		if (process.platform === "linux") return;
+		expect(probeLinuxProcPidSync(process.pid)).toEqual({ kind: "unverifiable", reason: "unsupported_platform" });
+	});
+
+	it("returns a live identity for the current PID on Linux", () => {
+		if (process.platform !== "linux") return;
+		const probe = probeLinuxProcPidSync(process.pid);
+		expect(probe.kind).toBe("live");
+		if (probe.kind !== "live") return;
+		expect(probe.startTime).toMatch(/^\d+$/);
+		expect(probe.ttyDevice).toMatch(/^-?\d+$/);
+	});
+
+	it("returns an explicit invalid-pid result", () => {
+		expect(probeLinuxProcPidSync(0)).toEqual({ kind: "unverifiable", reason: "invalid_pid" });
+		expect(probeLinuxProcPidSync(-1)).toEqual({ kind: "unverifiable", reason: "invalid_pid" });
+		expect(probeLinuxProcPidSync(Number.NaN)).toEqual({ kind: "unverifiable", reason: "invalid_pid" });
+	});
+
+	it("returns absent for a PID whose /proc entry cannot be read", () => {
+		if (process.platform !== "linux") return;
+		expect(probeLinuxProcPidSync(2_147_483_647)).toEqual({ kind: "absent" });
+	});
+});
+
+describe("probeLinuxProcPid", () => {
+	it("returns an explicit unsupported result on non-Linux platforms", async () => {
+		if (process.platform === "linux") return;
+		expect(await probeLinuxProcPid(process.pid)).toEqual({ kind: "unverifiable", reason: "unsupported_platform" });
+	});
+
+	it("returns a live identity for the current PID on Linux", async () => {
+		if (process.platform !== "linux") return;
+		const probe = await probeLinuxProcPid(process.pid);
+		expect(probe.kind).toBe("live");
+		if (probe.kind !== "live") return;
+		expect(probe.startTime).toMatch(/^\d+$/);
+		expect(probe.ttyDevice).toMatch(/^-?\d+$/);
+	});
+
+	it("returns an explicit invalid-pid result", async () => {
+		expect(await probeLinuxProcPid(0)).toEqual({ kind: "unverifiable", reason: "invalid_pid" });
+		expect(await probeLinuxProcPid(-1)).toEqual({ kind: "unverifiable", reason: "invalid_pid" });
+	});
 });
 
 describe("readLinuxProcStartTimeSync", () => {
 	it("returns null on non-Linux platforms", () => {
-		if (process.platform === "linux") return; // not applicable here
+		if (process.platform === "linux") return;
 		expect(readLinuxProcStartTimeSync(process.pid)).toBeNull();
 	});
 
 	it("returns a non-null numeric start time for the current PID on Linux", () => {
-		if (process.platform !== "linux") return; // skipped on non-Linux
+		if (process.platform !== "linux") return;
 		const startTime = readLinuxProcStartTimeSync(process.pid);
 		expect(startTime).not.toBeNull();
 		expect(startTime).toMatch(/^\d+$/);
-	});
-
-	it("returns null for an invalid PID", () => {
-		expect(readLinuxProcStartTimeSync(0)).toBeNull();
-		expect(readLinuxProcStartTimeSync(-1)).toBeNull();
-		expect(readLinuxProcStartTimeSync(Number.NaN)).toBeNull();
-	});
-
-	it("returns null for a PID whose /proc entry cannot be read", () => {
-		if (process.platform !== "linux") return; // skipped on non-Linux
-		// PID 2147483647 is effectively guaranteed not to exist / be unreadable.
-		expect(readLinuxProcStartTimeSync(2_147_483_647)).toBeNull();
 	});
 });
 
 describe("readLinuxProcStartTime", () => {
 	it("returns null on non-Linux platforms", async () => {
-		if (process.platform === "linux") return; // not applicable here
+		if (process.platform === "linux") return;
 		expect(await readLinuxProcStartTime(process.pid)).toBeNull();
 	});
 
 	it("returns a non-null numeric start time for the current PID on Linux", async () => {
-		if (process.platform !== "linux") return; // skipped on non-Linux
+		if (process.platform !== "linux") return;
 		const startTime = await readLinuxProcStartTime(process.pid);
 		expect(startTime).not.toBeNull();
 		expect(startTime).toMatch(/^\d+$/);
-	});
-
-	it("returns null for an invalid PID", async () => {
-		expect(await readLinuxProcStartTime(0)).toBeNull();
-		expect(await readLinuxProcStartTime(-1)).toBeNull();
 	});
 });

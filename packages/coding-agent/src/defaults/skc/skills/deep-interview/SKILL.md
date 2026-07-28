@@ -78,30 +78,65 @@ If this raw bundled skill is loaded by SKC's native skill loader through `/skill
 
 ## Corrupt current-session state recovery
 
-When deep-interview detects its own current-session state is corrupt, tampered, unreadable, or stale on resume, run `skc state clear --force --mode deep-interview` before reseeding or restarting. Scope the clear to the current session via `--session-id`, the command payload, or `SKC_SESSION_ID`; it clears only deep-interview state for that session and never clears other skills or sessions.
+When deep-interview detects its own current-session state is corrupt, tampered, unreadable, or stale on resume, run `skc deep-interview clear --force` before reseeding or restarting. Scope the clear to the current session via `--session-id` or `SKC_SESSION_ID`; it clears only deep-interview state for that session and never clears other skills or sessions.
 
 ## Phase 0: Resolve Ambiguity Threshold (blocking prerequisite)
 
 Complete this phase before Phase 1, before brownfield exploration, before SKC state persistence, before Round 0, and before any ambiguity scoring. Do not continue if the resolved threshold and source are unknown.
 
-1. **Read threshold settings in precedence order**:
-   - User settings: `[$SKC_CONFIG_DIR|~/.skc]/settings.json`
-   - Project settings: `./.skc/settings.json` (overrides user settings)
-2. **Resolve threshold and source**:
-   - Read `skc.deepInterview.ambiguityThreshold` from both files when present.
-   - Use the project value when valid; otherwise use the user value when valid; otherwise use the default `0.05`.
-   - Set these run variables exactly: `<resolvedThreshold>`, `<resolvedThresholdPercent>`, and `<resolvedThresholdSource>` (for example `./.skc/settings.json`, `[$SKC_CONFIG_DIR|~/.skc]/settings.json`, or `default`).
-3. **Emit the required first line to the user before any other interview announcement**:
+1. **Prefer pre-resolved native state**:
+   - First inspect active deep-interview state with `skc deep-interview read --json`.
+   - If state contains a finite numeric `threshold` and a non-empty `threshold_source`, use those values, set `<resolvedThreshold>`, `<resolvedThresholdPercent>`, and `<resolvedThresholdSource>`, and skip optional settings-file reads. This is the normal `/skill:deep-interview` path because the native hook already resolved settings quietly before loading the skill.
+2. **Only if native state lacks a resolved threshold, read threshold settings in runtime precedence order**:
+   - YAML config first: read the **single** modern config path the environment selects — `$SKC_CODING_AGENT_DIR/config.yml` when `SKC_CODING_AGENT_DIR` is set, else `$SKC_CONFIG_DIR/agent/config.yml` when `SKC_CONFIG_DIR` is set, else `~/.skc/agent/config.yml`. Do not cascade through the other YAML locations when the selected one is absent or invalid.
+   - Then JSON settings: project settings `./.skc/settings.json`, then user settings `[$SKC_CONFIG_DIR|~/.skc]/settings.json`.
+   - Read `skc.deepInterview.ambiguityThreshold` only from files that are known to exist; optional config/settings-file absence is expected and must not be surfaced as failed `Read` calls.
+   - Do not probe arbitrary ancestor candidates such as `../../.skc/settings.json`; use the current project `.skc/settings.json` and user settings only.
+3. **Resolve threshold and source**:
+   - Use the first valid configured value in the precedence order above; otherwise use the mode default when a resolution flag was passed: `--quick` = `0.6`, `--standard` = `0.5`, `--deep` = `0.35`; with no resolution flag, use the base default `0.05`.
+   - Set these run variables exactly: `<resolvedThreshold>`, `<resolvedThresholdPercent>`, and `<resolvedThresholdSource>` (for example `SKC_CODING_AGENT_DIR/config.yml`, `$SKC_CONFIG_DIR/agent/config.yml`, `~/.skc/agent/config.yml`, `./.skc/settings.json`, `[$SKC_CONFIG_DIR|~/.skc]/settings.json`, or the selected mode default).
+4. **Emit the required first line to the user before any other interview announcement**:
 
 ```
 Deep Interview threshold: <resolvedThresholdPercent> (source: <resolvedThresholdSource>)
 ```
 
-4. **Carry threshold source forward mechanically**:
+5. **Carry threshold source forward mechanically**:
    - Substitute `<resolvedThreshold>`, `<resolvedThresholdPercent>`, and `<resolvedThresholdSource>` throughout the remaining instructions before continuing.
-   - Include `threshold_source` in the first `skc state write` payload and preserve it on later state updates; do not edit `.skc/_session-{sessionid}/state` files directly unless an explicit force override is active.
+   - Include `threshold_source` in the first `skc deep-interview write` payload and preserve it on later state updates; do not edit `.skc/_session-{sessionid}/state` files directly unless an explicit force override is active.
    - Include both threshold and source in the final spec metadata.
 - Read any `language` object from active deep-interview state and carry `language.instruction` forward mechanically. If absent, default to English unless `{{ARGUMENTS}}` makes another user/session language obvious or the user explicitly requests another language. Do not add language-specific special cases.
+
+## Phase 0.5: Suitability Gate
+
+Run this gate after the Phase 0 threshold marker and before Phase 1, brownfield exploration, `skc deep-interview write`, Round 0, ambiguity scoring, or spec writing.
+
+If the user request appended after this skill as the final `User:` line is already clear, bounded, low-risk, and asks for a quick fix, single change, known file/symbol edit, explicit command, or direct answer:
+
+1. **Stop deep-interview immediately**:
+   - First inspect current-session state with `skc deep-interview read --json` (include `--session-id <current-session-id>` when available).
+   - Clear through `skc deep-interview clear --force --json` only when the state is a newly seeded empty interview: no recorded `rounds`, no `spec_path`, no `handoff_from`, no final/pending spec, and no user-confirmed topology.
+   - If state already contains rounds, a spec path, handoff metadata, pending approval, or confirmed topology, do not clear it. Preserve the active interview and ask the user whether to continue, cancel, or explicitly clear the workflow.
+   - Do not initialize deep-interview state.
+   - Do not run Round 0.
+   - Do not write a pending-approval spec.
+   - Do not hand off to `ralplan`, `ultragoal`, `team`, or a role agent.
+2. **Return the request to direct implementation**:
+   - Say briefly that deep-interview is unnecessary because the request is already clear and small.
+   - State the direct implementation path the normal coding agent should take.
+   - If the user explicitly insists on deep-interview anyway, continue to Phase 1.
+
+This gate exists to prevent deep-interview from making easy problems harder. A small verification need does not make a request interview-worthy.
+
+## Phase 0.75: Optional Trace Pre-Step
+
+Run this phase only when the active deep-interview state or invocation indicates `--trace` / `state.trace.enabled === true`. It is a pre-interview research step, not an implementation phase.
+
+1. Read the native trace summary from active deep-interview state (`trace`, `state.trace`, or `state.trace_summary`). The native seed must have produced this summary before any interview question.
+2. Treat the summary as compact evidence: project hints, relevant paths, and path-level findings only. Do not expand it by dumping raw files, raw logs, or unbounded command output.
+3. Store or preserve it under `state.trace_summary` and fold it into `codebase_context` with citations to the summarized paths.
+4. Use trace findings to influence Round 0 topology, Phase 2 question targeting, requirement wording, acceptance criteria, and final Technical Context. Normal no-trace interviews must behave exactly as before.
+5. If `--trace` was requested but no valid bounded summary exists, increment `architect_failures` or record an internal audit note, then continue with the normal no-trace path without surfacing tool noise.
 
 ## Phase 1: Initialize
 
@@ -130,7 +165,7 @@ Deep Interview threshold: <resolvedThresholdPercent> (source: <resolvedThreshold
    - Preferred: pass the spec markdown **inline** to the native deep-interview write command (`--write … --spec "<markdown>"`) — no scratch file is needed. The CLI is the only sanctioned writer for `.skc/_session-{sessionid}/specs`.
    - Only if a spec is too large to pass inline, stage it with the `write` tool to a system temp directory (`os.tmpdir()`/`$TMPDIR`, `/tmp`, `/var/tmp`) outside the project tree, then pass that path to `--spec`. The planning phase-boundary block tolerates these neutral temp writes; never stage interview artifacts inside the repo or under `.skc/`, and do not improvise repo-relative scratch files.
 
-4. **Initialize state** via `skc state write`:
+4. **Initialize state** via `skc deep-interview write --input '<json>'`:
 
 ```json
 {
@@ -147,6 +182,7 @@ Deep Interview threshold: <resolvedThresholdPercent> (source: <resolvedThreshold
     "threshold": <resolvedThreshold>,
     "threshold_source": "<resolvedThresholdSource>",
     "language": "<existing language object from active state, if present>",
+    "trace_summary": "<bounded trace summary when --trace is active, else null>",
     "codebase_context": null,
     "topology": {
       "status": "pending|confirmed|legacy_missing",
@@ -206,6 +242,8 @@ Is that topology right? Should any component be added, removed, merged, split, o
 
 Options should include contextually relevant choices such as **Looks right**, **Add/remove/merge components**, **Defer one or more components**, plus free-text, translated/localized according to `language.instruction` when present. This is the only pre-scoring question and preserves the one-question-per-round rule.
 
+The Round 0 `ask` call MUST include `deepInterview.round = 0`, `deepInterview.component = "review-topology"`, `deepInterview.dimension = "topology"`, `deepInterview.intent_contract.items` containing the exact displayed locked-intent items, and `deepInterview.intent_contract.confirmation_options` listing only the displayed affirmative labels that lock the proposal (normally **Looks right**). The runtime recorder canonicalizes and locks this contract only when the user selects one of those labels; correction, deferral, free-text, and clarification answers never lock the pre-question proposal. Do not manually copy raw free text into intent evidence, and do not continue if this required recorder write fails.
+
 3. **Lock topology into state** after the answer. Store a normalized component list and confirmation timestamp:
 
 ```json
@@ -240,6 +278,10 @@ Options should include contextually relevant choices such as **Looks right**, **
   }
 }
 ```
+
+In the same Round 0 answer, the runtime recorder persists `state.intent_contract` version 1 from `deepInterview.intent_contract.items`. It contains the four exact categories `artifact`, `surface`, `integration`, and `constraint`; every item has a unique category-prefixed ID (for example `surface:review`) and a bounded non-empty statement. The recorder canonically sorts items, persists the full SHA-256 manifest digest, and binds confirmation to a redacted answer-hash reference. The confirmation answer locks this manifest before Round 1; later prose, inferred implementation detail, raw answer content, or a regenerated digest cannot replace it.
+
+Before spec persistence, include every preserved locked ID literally in the final spec. Additions and clarifications need no extra question; the runtime derives and persists a `not_required` review when every locked ID remains. For any proposed missing locked ID, ask one intent-review question through `ask` and include `deepInterview.intent_review` with the proposed `observed_items`, every `supporting_substitution`, and the exact `approval_options` labels that count as approval. The runtime recorder writes `pending` when the user does not approve and writes `approved` only when an approval option is selected, binding the review to the recorder-generated answer hash without storing raw answer text. Approved reductions require every removed ID to map to an observed replacement ID. Spec persistence and handoff fail closed for missing, pending, malformed, stale, or unrecorded reduction review evidence. Intent review approves only that output reduction and never authorizes execution or ralplan handoff.
 
 4. **Legacy state migration:** When resuming an existing `deep-interview` state file that lacks `topology`, treat it as `"status": "legacy_missing"`. If no final `spec_path` exists yet, run Round 0 before the next ambiguity scoring pass and then continue with the existing transcript. If a final spec already exists, do not rewrite history; note in any handoff that topology was not captured for that legacy interview.
 
@@ -306,6 +348,8 @@ After applying `language.instruction` to the visible question, options, and gene
 
 When calling `ask`, SHOULD include optional structured metadata so the runtime can record the round without manual state writes: `deepInterview.round_id?`, `deepInterview.round`, `deepInterview.component`, `deepInterview.dimension`, and `deepInterview.ambiguity`. Keep this metadata aligned with the visible Round/Component/Targeting/Ambiguity line; if metadata cannot be supplied, the legacy formatted question text remains the fallback.
 
+If the `ask` tool returns `clarificationQuestion`, treat it as a non-answer about the displayed choices. Answer the clarification briefly from the current interview context, then call `ask` again with the exact original question, options, and `deepInterview.*` metadata. A clarification bypasses Step 2b′ auto-answer, Step 2b″ free-text refine, Step 2c ambiguity scoring, Step 2d progress reporting, and Step 2e state updates; it must not be recorded as a round answer. This does not violate the one-question-per-round rule because the round remains unresolved until the user submits a real listed option or `Other` answer.
+
 ### Step 2b′: Auto-Answer Opted-Out Questions
 
 After the `ask` tool resolves and before ambiguity scoring, if the user opts out of answering the current question or explicitly asks the agent to decide, load `auto-answer-uncertain.md` as an internal `kind: "skill-fragment"` prompt for a fork-context architect. Pass the opted-out question, prompt-safe transcript summary, locked topology, current scores/gaps, and any auto-research candidates used for the round. The architect must return exactly one decisive answer with rationale, confidence, and explicit uncertainty. Validate the response shape before using it; if valid, record it as the tentative answer for scoring, append the round number to `auto_answered_rounds`, and mark the transcript answer as architect-assisted.
@@ -314,7 +358,7 @@ Auto-answer has a clarity cap: unless the architect confidence is `high` and unc
 
 ### Step 2b″: Refine Free-Text Answers
 
-When the user's answer is free-text that carries reasoning, constraints, or scope decisions, do not forward it to scoring as a lossy one-line label. First structure it into a compact interpretation using the canonical sections — **Decision**, **Reasoning**, **Constraints (user-stated)**, **Out of scope (user-stated)**, and **Codebase context (verified)** (omit empty sections) — then confirm with exactly one `ask` that nothing is lost or misrepresented. Apply `language.instruction` when present.
+When the user's answer is free-text that carries reasoning, constraints, or scope decisions, do not forward it to scoring as a lossy one-line label. First structure it into a compact interpretation using the canonical sections — **Decision**, **Reasoning**, **Constraints (user-stated)**, **Out of scope (user-stated)**, and **Codebase context (verified)** (omit empty sections). Then confirm with exactly one `ask` that nothing is lost or misrepresented: the `ask` question body MUST render the full structured interpretation — every non-empty canonical section, verbatim — before the confirmation prompt. The user is approving that specific interpretation, so it must be visible inside the question body; never ask "does this capture it?" / "이 해석이 맞아?" without first displaying the interpretation itself. A confirmation `ask` whose body omits the interpretation it is asking about is a hard error: re-issue it with the interpretation shown. Apply `language.instruction` when present.
 
 Offer options such as **Send as-is**, **Add a constraint**, **Mark something out of scope**, **Add context**, and **Rewrite**, plus free-text. If the user picks anything other than "Send as-is", collect the exact missing text with one follow-up `ask` (never infer it from the option label), fold it into the structured interpretation, and re-confirm. Do not advance to scoring while the user is still saying something is missing.
 
@@ -337,6 +381,17 @@ Ambiguity-raising triggers:
 - **D scope expansion**: the answer adds a component, entity, constraint, deliverable, or integration not already covered or explicitly deferred.
 
 Use **mechanism A** for every ambiguity rise: a trigger LOWERS the affected component/dimension clarity score, and the existing weighted formula raises ambiguity. There is **no separate penalty term**; ambiguity remains bounded by the same greenfield/brownfield formula.
+
+**Deterministic ambiguity floor (runtime-enforced).** The runtime independently computes a code-level floor from persisted state and clamps every reported ambiguity to `max(reported, floor)` at write time — the scorer cannot under-report below what code can objectively measure:
+
+- `+0.10` per established fact marked `disputed` that has no `superseded_by` resolution (contradiction pressure)
+- `+0.05` per active topology component whose goal/constraints/criteria clarity is still unscored (gap pressure — persist `topology.components[].clarity_scores` every round or the floor blocks convergence)
+- `+0.05 × (auto-answered rounds / scored rounds)` (assumption dilution)
+
+Cooperate with the floor rather than fight it:
+- Replacing an already-scored answer for the same round (a retraction/pivot) automatically marks that round's established facts as disputed; ambiguity rises mechanically even when no trigger is reported. Treat a floor-driven rise as trigger evidence and score the affected dimensions accordingly.
+- A disputed fact keeps the floor at or above `0.10` — above the default threshold — so convergence is blocked until the dispute is resolved: either the user re-confirms the original fact (set `disputed: false`) or the superseding decision is recorded as a new established fact and the old fact gets `superseded_by: <new fact id>`. Never delete the contradicted fact.
+- When the effective score was clamped upward, the persisted round carries `reported_ambiguity` (your raw score) and `ambiguity_floor`; report the floor and its dominant cause in the Step 2d table instead of pretending the raw score held.
 
 The rise is SILENT: no modal, no forced-resolution step, and no dedicated conflict UI. Surface it through the normal per-round report and by targeting the next question at the affected component/dimension.
 
@@ -401,6 +456,7 @@ Respond as JSON. Include an additional "ontology" key containing the entities ar
 
 Greenfield: `ambiguity = 1 - (goal × 0.40 + constraints × 0.30 + criteria × 0.30)`
 Brownfield: `ambiguity = 1 - (goal × 0.35 + constraints × 0.25 + criteria × 0.25 + context × 0.15)`
+Brownfield adds the 15% Context Clarity dimension (Goal/Constraint/Criteria become 35/25/25) because safely modifying existing code requires understanding the system being changed.
 
 **Calculate ontology stability:**
 
@@ -433,6 +489,7 @@ Round {n} complete.
 | Success Criteria | {s} | {w} | {s*w} | {gap or "Clear"} |
 | Context (brownfield) | {s} | {w} | {s*w} | {gap or "Clear"} |
 | **Ambiguity** | | | **{prior_score}% -> {score}% {up|down|flat}** | {if up: trigger name such as "A direct contradiction"} |
+| **Floor** (only when clamped) | | | **{floor}%** | {dominant cause: disputed fact / unscored component / auto-answer dilution} |
 
 **Topology:** Targeted {target_component_name} | Active: {active_component_count} | Deferred: {deferred_component_count} | Next rotation after: {last_targeted_component_id}
 
@@ -447,18 +504,84 @@ Round {n} complete.
 
 Apply `language.instruction` when present before showing this progress report so status text, gaps, and next-target phrasing stay in the preserved session language.
 
-Then apply the self-proofread once to narrative status text, generated prose cells, gaps, and next-target phrasing; preserve only table structure, fixed status labels, scores, weights, component ids, and trigger tokens.
+Then apply the self-proofread once (DIPP-5) to narrative status text, generated prose cells, gaps, and next-target phrasing; preserve only table structure, fixed status labels, scores, weights, component ids, and trigger tokens.
 
 ### Step 2e: Update State
 
-Update state in two phases. The `ask` answer is first recorded by the runtime as an `answered` shell. Scoring then enriches the same round record to `scored` with global scores, per-component `topology.components[].clarity_scores`, `topology.components[].weakest_dimension`, trigger metadata, established-facts changes, ontology snapshot, `topology.last_targeted_component_id`, `auto_researched_rounds`, `auto_answered_rounds`, and `architect_failures`. When `deepInterview` ask metadata is present, no manual per-round `skc state write` is required for the answer shell; only scoring enrichment/state maintenance remains. When metadata is absent, use the legacy `skc state write` path to persist the new round and never patch `.skc/_session-{sessionid}/state` directly unless an explicit force override is active.
+Update state in two phases. The `ask` answer is first recorded by the runtime as an `answered` shell. Scoring then enriches the same round record to `scored` with global scores, per-component `topology.components[].clarity_scores`, `topology.components[].weakest_dimension`, trigger metadata, established-facts changes, ontology snapshot, `topology.last_targeted_component_id`, `auto_researched_rounds`, `auto_answered_rounds`, and `architect_failures`. When `deepInterview` ask metadata is present, no manual per-round write is required for the answer shell; only scoring enrichment/state maintenance remains. For scoring enrichment and state maintenance, use the native `skc deep-interview` surface and keep every payload **incremental**: stage only the delta for the current round (`stage --for record-round` with just the one round record carrying its `round_key`; the runtime merges it into the existing transcript by durable key), only the changed facts (`--for update-facts`; facts merge losslessly by `id` — a one-fact patch never erases prior facts), or only the changed maintenance fields (`--for merge-state`). Never resend the whole `rounds` array or the full state envelope — earlier rounds are already persisted, resending them is wasteful and racy, and the merge preserves them without your copy. Optionally dry-run with `check`, then commit with `apply`; for a simple immediate update, `skc deep-interview write --input '<json>'` is the one-shot equivalent (incremental merge; add `--reset` only when deliberately replacing state — the locked intent contract survives a reset). Ambiguity is **runtime-owned**: `apply`/`write` derive `current_ambiguity` from the latest scored round and clamp it to the deterministic floor; report the round's scores and your raw `ambiguity` on the round record, then read the effective value back from the command output (`current_ambiguity`/`result_ambiguity`) instead of hand-setting `state.current_ambiguity`. The session resolves from `SKC_SESSION_ID` automatically; exactly one draft is pending at a time, and a revision conflict at `apply` invalidates the draft with typed recovery — re-stage the same small delta against current state, never do revision arithmetic. Never patch `.skc/_session-{sessionid}/state` directly unless an explicit force override is active.
 Also recompute and persist `ambiguity_milestone` each round (detect band transitions for the Phase 3 panel), and persist `auto_answer_streak`, `refined_rounds`, `lateral_reviews`, and `lateral_panel_failures` alongside the existing fields.
 
-### Step 2f: Check Soft Limits
+#### Delta payload schemas
 
-- **Round 3+**: Allow early exit if user says "enough", "let's go", "build it"
-- **Round 10**: Show soft warning: "We're at 10 rounds. Current ambiguity: {score}%. Continue or proceed with current clarity?"
-- **Round 100**: Hard cap: "Maximum interview rounds reached. Proceeding with current clarity level ({score}%)."
+Every staged/write payload is one JSON object `{"state": { …delta only… }}`. Envelope lifecycle keys (`current_phase`, `active`, `skill`, `version`, `state_revision`, `receipt`, `updated_at`, `last_applied_draft_id`) are runtime-owned — if included they are stripped and reported back as `ignored_runtime_owned_keys`, never persisted. `state.intent_contract` and `state.intent_review` are recorder-owned: only the Round 0 / intent-review `ask` recorder can write them (they carry canonical digests and answer-hash bindings you cannot fabricate); a payload carrying them is stripped the same way — never hand-construct an intent contract.
+
+**`stage --for record-round`** — exactly one round record, merged into the transcript by `round_key`:
+
+```json
+{
+  "state": {
+    "rounds": [
+      {
+        "round": <n>,
+        "round_key": "<durable key from the answered shell>",
+        "lifecycle": "scored",
+        "ambiguity": <raw 0..1 score>,
+        "scores": { "goal": 0.9, "constraints": 0.8, "criteria": 0.9, "context": 0.85 },
+        "weakest_component_id": "<component id>",
+        "weakest_dimension": "goal|constraints|criteria|context",
+        "component_scores": { "<component-id>": { "goal": 0.9, "constraints": 0.8, "criteria": 0.9, "context": 0.85, "gaps": { } } },
+        "structured_scorer_output": { },
+        "ontology": { },
+        "ontology_stability": { }
+      }
+    ]
+  }
+}
+```
+
+Include only the one round being enriched; identity fields (`question_text`, `answer_hash`) already persisted on the shell never need resending — the merge preserves them and never downgrades `scored` back to `answered`.
+
+**`stage --for update-facts`** — only the changed fact records, merged field-wise by `id`:
+
+```json
+{
+  "state": {
+    "established_facts": [
+      { "id": "<fact-id>", "statement": "<fact>", "round": <n>, "disputed": false }
+    ]
+  }
+}
+```
+
+To dispute: send `{ "id": "<fact-id>", "disputed": true }`. To supersede: send `{ "id": "<old-id>", "disputed": false, "superseded_by": "<new-id>" }` plus the new fact record. A delta can never hard-delete a fact — unaddressed facts survive verbatim, so never resend the full facts array.
+
+**`stage --for merge-state`** — only the changed maintenance fields (shallow-merged into `state`; `null` deletes a key):
+
+```json
+{
+  "state": {
+    "ambiguity_milestone": "<band>",
+    "auto_answer_streak": <n>,
+    "refined_rounds": [<n>],
+    "lateral_reviews": [ { "round": <n>, "personas": [], "findings": "<summary>" } ],
+    "topology": { "components": [ … ], "last_targeted_component_id": "<id>" }
+  }
+}
+```
+
+`topology` and other object fields replace whole — include the full object when changing any part of it; `rounds` and `established_facts` are the only keyed-merge collections.
+
+**`write --input`** — same `{"state":{…}}` shape and same merge semantics as a staged `merge-state` apply, committed in one step. `write --reset --input` replaces the whole `state` with the payload (the locked `intent_contract` is re-attached automatically); use it only for deliberate re-initialization.
+
+### Step 2f: Check Tiered Confirmation Cadence
+
+Confirmation cadence is tiered by round, adopted from ouroboros's ooo interview, while the hard safety cap is retained:
+
+- **Rounds 1-3 (auto-continue)**: minimum context gathering — proceed to the next question without a "continue?" prompt.
+- **Rounds 4-15 (ask to continue)**: after each round, ask "Continue, or proceed with current clarity ({score}%)?" so the user controls depth.
+- **Rounds 16+ (diminishing-returns warning)**: keep asking "Continue?" but prefix a diminishing-returns warning: "We're at {n} rounds (ambiguity: {score}%); each further round yields less. Continue or proceed?"
+- **Round 3+ early exit**: still allow immediate exit if the user says "enough", "let's go", "build it".
+- **Round 100 (hard cap)**: "Maximum interview rounds reached. Proceeding with current clarity level ({score}%)." The tiered cadence never removes this hard safety cap.
 
 ## Phase 3: Lateral Review Panel (milestone-triggered)
 
@@ -495,7 +618,7 @@ When ambiguity ≤ threshold (or hard cap / early exit):
 
 **4a. Closure / Acceptance Guard.** Even when ambiguity ≤ threshold, do not treat the math as completion. Run an independent readiness audit from the full main-session perspective (including explore findings, established facts, and triggers the scorer may not have fully weighed). Confirm every active topology component has goal/constraint/criteria coverage, no unresolved or disputed trigger remains on a path that matters, and no low-confidence auto-answer is standing in for user-confirmed truth above the clarity cap. If a material gap exists, explicitly override the gate to the user — "The math says ready, but I am not accepting it yet because {gap}" — and ask the single highest-impact follow-up, returning to Phase 2. Record any override in `state.closure_overrides`.
 
-**4b. Restate gate.** Once closure passes, collapse the agreed answers into ONE sentence goal that covers every active component, and confirm it with a single `ask`: "If someone read only this line, would they reach the same outcome you have in mind?" Offer **Yes, crystallize**, **Adjust wording**, and **Missing scope**, plus free-text, applying `language.instruction` when present. Because this gate has options, it MUST go through `ask`: do not print the Restate question and options as assistant prose with `Question:`/`Options:` labels. If the Restate gate was already printed that way, immediately call `ask` with the same question/options before accepting or waiting for any answer. On "Adjust wording" / "Missing scope", collect the exact correction with one follow-up `ask`, route it back through Step 2c scoring and established-facts maintenance (a correction can change ambiguity), then re-run closure and ask the Restate gate again. Cap at two loops; if alignment is not reached, return to Phase 2 with a targeted question instead of forcing a goal line. Persist the confirmed line as `state.restated_goal`.
+**4b. Restate gate.** Once closure passes, collapse the agreed answers into ONE sentence goal that covers every active component, and confirm it with a single `ask` whose body MUST begin by stating that one-sentence goal verbatim, followed by: "If someone read only this line, would they reach the same outcome you have in mind?" The goal line must be visible inside the `ask` body; never ask the confirmation without first displaying the collapsed goal it refers to. Offer **Yes, crystallize**, **Adjust wording**, and **Missing scope**, plus free-text, applying `language.instruction` when present. Because this gate has options, it MUST go through `ask`: do not print the Restate question and options as assistant prose with `Question:`/`Options:` labels. If the Restate gate was already printed that way, immediately call `ask` with the same question/options before accepting or waiting for any answer. On "Adjust wording" / "Missing scope", collect the exact correction with one follow-up `ask`, route it back through Step 2c scoring and established-facts maintenance (a correction can change ambiguity), then re-run closure and ask the Restate gate again. Cap at two loops; if alignment is not reached, return to Phase 2 with a targeted question instead of forcing a goal line. Persist the confirmed line as `state.restated_goal`.
 
 1. **Generate the specification** using opus model with the prompt-safe transcript. If the full interview transcript or initial context is too large, include the summary plus all concrete decisions, acceptance criteria, unresolved gaps, and ontology snapshots; never overflow the prompt with raw oversized context.
    - Apply `language.instruction` when present so user-facing prose in the spec preserves the session language; keep code identifiers, file paths, commands, JSON/settings keys, and quoted source text unchanged.
@@ -647,10 +770,10 @@ After the spec is written, mark it `pending approval` and present execution opti
 
 ### Phase 5b: Handoff before chain
 
-Before invoking `/skill:ralplan`, `/skill:team`, or `/skill:ultragoal`, the final spec must already be persisted through the native deep-interview write command. For ordinary user-selected handoff, mark deep-interview ready for the skill tool's chain guard:
+Before invoking `/skill:ralplan`, `/skill:team`, or `/skill:ultragoal`, the final spec must already be persisted through the native deep-interview write command (`skc deep-interview --write --stage final …`). That command itself moves the workflow to the `handoff` phase, so no separate state write is needed for the skill tool's chain guard. Verify readiness with:
 
 ```
-skc state deep-interview write --input '{"current_phase":"handoff"}' --json
+skc deep-interview read --json
 ```
 
 For a preselected deliberate ralplan path, prefer the single sanctioned bridge command instead:
@@ -695,7 +818,7 @@ Skipping any stage is possible but reduces quality assurance:
 - Use `read/search/find exploration or a bounded read-only planner/architect subagent` for brownfield codebase exploration (run BEFORE asking user about codebase)
 - Use opus model (temperature 0.1) for ambiguity scoring — consistency is critical
 - Round 0 topology confirmation happens before ambiguity scoring; Phase 2 scoring must honor locked topology and rotate targeting across active components when more than one is present
-- Use `skc state write` / `skc state read` for interview state persistence; the initial and subsequent deep-interview state payloads must include `threshold_source` alongside `threshold`; do not edit `.skc/_session-{sessionid}/state` directly without force override.
+- Use `skc deep-interview write` / `skc deep-interview read` for interview state persistence; the initial and subsequent deep-interview state payloads must include `threshold_source` alongside `threshold`; do not edit `.skc/_session-{sessionid}/state` directly without force override. For incremental scoring/maintenance updates, prefer the staged-transition verbs (`stage --for <transition> --input '<json>'`, `check`, `apply`, `discard`) — stage only the current delta (one round record by `round_key`, changed facts, or changed fields), never the whole transcript; `write` is incremental by default and replaces only with an explicit `--reset`; the session is inherited from `SKC_SESSION_ID`, revision CAS is runtime-owned, and the effective `current_ambiguity` is derived and clamped by the CLI at `apply`/`write` — read it from the command output rather than setting it yourself.
 - Use the SKC workflow CLI to save the final spec at `.skc/_session-{sessionid}/specs/deep-interview-{slug}.md` exactly; do not use `write`, `edit`, or `ast_edit` directly on `.skc/` paths without force override.
 - Use public SKC workflow entrypoints to bridge to ralplan, ultragoal, or team only after explicit execution approval — never implement directly. Implementation handoff defaults to ultragoal; reserve team for when tmux-based interactive worker parallelization is genuinely required.
 - The lateral-review panel spawns read-only persona subagents (Task tool) in parallel with independent context; it is an assist layer, never an executor and never the completion authority
@@ -837,7 +960,7 @@ Optional settings in `.skc/settings.json`:
 
 ## Resume
 
-If interrupted, run `/skill:deep-interview` again. The skill resumes from SKC workflow state via `skc state read`; do not read or edit `.skc/_session-{sessionid}/state` files directly unless an explicit force override is active.
+If interrupted, run `/skill:deep-interview` again. The skill resumes from SKC workflow state via `skc deep-interview read`; do not read or edit `.skc/_session-{sessionid}/state` files directly unless an explicit force override is active.
 
 ## Integration with staged team routing
 

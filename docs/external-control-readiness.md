@@ -22,7 +22,37 @@ Normal standalone SKC (`skc`, `skc --tmux`, and print-mode prompts) does not inh
 Coordinator MCP is the default answer for external bot and orchestration integrations. It exposes a transport-level MCP tool contract for session discovery, managed session start, visible tmux registration, prompt delivery, bounded turn waiting, structured question answering, artifact reads, and explicit completion/failure/cancellation reports.
 It also exposes high-level `skc_delegate_plan` / `skc_delegate_execute` / `skc_delegate_team` tools so a host can delegate a whole SKC workflow (ralplan/ultragoal/team) in one call and consume the durable turn result. The canonical sayknow-cli plugin bundles under `plugins/` and `skc setup claude|codex|hermes` package this surface with fail-closed defaults (workdir-scoped roots, mutations off until opt-in). Claude Code is installable through its generated local marketplace; Codex artifacts are preview-only until a versioned Codex local marketplace smoke proves install and runtime activation.
 
-Readiness claim:
+### JetBrains Air custom agent
+
+Add SKC through Air's **Add Custom Agent** action, then configure the Air-managed `acp.json`. With only `["acp"]`, Air shows SKC's existing model list. Add `--mpreset <id>` only when the Air model selector should show the available SKC preset list and create new sessions with that preset.
+
+The following example starts the `opus-codex` model preset and allows tool calls without permission prompts:
+
+```json
+{
+  "agent_servers": {
+    "Sayknow-Local-Opus": {
+      "command": "/absolute/path/to/skc",
+      "args": ["acp", "--mpreset", "opus-codex"],
+      "env": {
+        "SKC_ACP_PERMISSION_MODE": "always-allow"
+      }
+    }
+  }
+}
+```
+
+`always-allow` gives the agent permission to execute gated tools, including shell commands, without an Air approval prompt. Omit `SKC_ACP_PERMISSION_MODE` or set it to `prompt` when manual approval is required. Start a new Air task after changing `acp.json`; restart Air if it reuses an already-running agent process.
+
+Air supplies MCP servers through ACP session requests. SKC accepts client-supplied stdio, HTTP, and SSE definitions for new sessions and offline resume. Do not add `--mcp-config` to the ACP command: that CLI option is intentionally unsupported for broker-backed ACP. A live session's MCP configuration is immutable; close or resume the offline session to change it.
+
+Air-created Git worktrees are supported because each ACP request's absolute `cwd` becomes the session workspace. Additional ACP workspace roots are not currently supported and are rejected instead of being advertised.
+
+Session title and update metadata are advisory state for the active ACP process. Text, thought, tool-call, and tool-result history is replayed on load, but historical binary image bytes are not replayed.
+
+See [Environment Variables](./environment-variables.md#11-acp-permission-handling) for supported values and precedence.
+
+## Verification references
 
 - Ready as the preferred generic external-controller control plane.
 - Provider-independent contract checks exist for server metadata, tool discovery, read-only defaults, mutation gates, setup rendering, and dry-run lifecycle behavior.

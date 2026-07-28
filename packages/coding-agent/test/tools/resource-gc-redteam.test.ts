@@ -44,12 +44,20 @@ function baseDeps(over: Partial<ResourceGcDeps> = {}): ResourceGcDeps {
 	return {
 		now: () => NOW,
 		rssBytes: () => 1,
+		memorySnapshot: async () => ({
+			hardCapBytes: 1024 * 1024 * 1024,
+			totalUsageBytes: 1,
+			parentBytes: 1,
+			source: "host",
+		}),
+		runGc: vi.fn(),
 		logWarn: vi.fn(),
 		listTabs: () => [],
 		releaseTab: vi.fn(async () => true),
 		cleanupScreenshots: vi.fn(async () => ({ scanned: 0, removed: 0 })),
 		screenshotArmed: () => false,
 		...over,
+		monotonicNow: over.monotonicNow ?? over.now ?? (() => NOW),
 	};
 }
 

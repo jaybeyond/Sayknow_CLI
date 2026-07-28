@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { pathToFileURL } from "node:url";
-import { $flag, filterProcessEnv, parseEnvFile, parseShellEnvFile } from "../src/env";
+import { $flag, $pickenvpos, $pickflag, filterProcessEnv, parseEnvFile, parseShellEnvFile } from "../src/env";
 
 const tempDirs: string[] = [];
 
@@ -341,5 +341,77 @@ describe("$flag", () => {
 	it("returns the default when the variable is unset", () => {
 		expect($flag(NAME)).toBe(false);
 		expect($flag(NAME, true)).toBe(true);
+	});
+});
+
+describe("$pickflag", () => {
+	const SKC_NAME = "__SKC_UTILS_PICKFLAG_PROBE";
+	const PI_NAME = "__PI_UTILS_PICKFLAG_PROBE";
+	afterEach(() => {
+		delete process.env[SKC_NAME];
+		delete process.env[PI_NAME];
+	});
+
+	it("prefers the SKC-first key when both are set", () => {
+		process.env[SKC_NAME] = "1";
+		process.env[PI_NAME] = "0";
+		expect($pickflag(SKC_NAME, PI_NAME)).toBe(true);
+	});
+
+	it("lets a falsy SKC value win over a truthy PI value (first set key decides)", () => {
+		process.env[SKC_NAME] = "0";
+		process.env[PI_NAME] = "1";
+		expect($pickflag(SKC_NAME, PI_NAME)).toBe(false);
+	});
+
+	it("falls back to the PI key when the SKC key is unset", () => {
+		process.env[PI_NAME] = "true";
+		expect($pickflag(SKC_NAME, PI_NAME)).toBe(true);
+	});
+
+	it("returns false when neither key is set", () => {
+		expect($pickflag(SKC_NAME, PI_NAME)).toBe(false);
+	});
+
+	it("applies TRUTHY case-insensitive matching per matched key", () => {
+		process.env[SKC_NAME] = "YES";
+		expect($pickflag(SKC_NAME, PI_NAME)).toBe(true);
+		process.env[SKC_NAME] = "enabled";
+		expect($pickflag(SKC_NAME, PI_NAME)).toBe(false);
+	});
+});
+
+describe("$pickenvpos", () => {
+	const SKC_NAME = "__SKC_UTILS_PICKENVPOS_PROBE";
+	const PI_NAME = "__PI_UTILS_PICKENVPOS_PROBE";
+	afterEach(() => {
+		delete process.env[SKC_NAME];
+		delete process.env[PI_NAME];
+	});
+
+	it("prefers a positive SKC-first value when both are set", () => {
+		process.env[SKC_NAME] = "7";
+		process.env[PI_NAME] = "9";
+		expect($pickenvpos([SKC_NAME, PI_NAME], 100)).toBe(7);
+	});
+
+	it("falls back to the PI key when the SKC key is unset", () => {
+		process.env[PI_NAME] = "42";
+		expect($pickenvpos([SKC_NAME, PI_NAME], 100)).toBe(42);
+	});
+
+	it("returns the default when neither key is set", () => {
+		expect($pickenvpos([SKC_NAME, PI_NAME], 100)).toBe(100);
+	});
+
+	it("returns the default when the only set value is invalid", () => {
+		process.env[SKC_NAME] = "not-a-number";
+		expect($pickenvpos([SKC_NAME, PI_NAME], 100)).toBe(100);
+	});
+
+	it("skips a set-but-invalid SKC key and falls through to a valid PI key", () => {
+		process.env[SKC_NAME] = "-5";
+		process.env[PI_NAME] = "3";
+		expect($pickenvpos([SKC_NAME, PI_NAME], 100)).toBe(3);
 	});
 });

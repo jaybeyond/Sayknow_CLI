@@ -35,6 +35,49 @@ import { SdkClient } from "@sayknow-cli/bridge-client";
 
 `@sayknow-cli/coding-agent/sdk` remains a compatibility re-export of this same `SdkClient` class and associated types, so both entry points preserve class identity. The package is a client for the documented v3 transport only: it does not restore the historical BridgeClient backend protocol, handshake/commands/SSE endpoints, or any direct host-control path.
 
+## Migration from the removed RPC mode
+
+The retired `--mode rpc`, `rpc-ui`, and `bridge` modes are removed. The SDK v3
+WebSocket endpoint is now the canonical external control/query bus.
+
+| Retired RPC commands | SDK v3 control/query operations |
+| --- | --- |
+| `prompt`, `steer`, `follow_up`, `abort` | `turn.prompt`, `turn.steer`, `turn.follow_up`, `turn.abort` |
+| Model, thinking, queue, retry, and compaction controls | `model.*`, `thinking.*`, `queue.*`, `retry.*`, and `compaction.*` |
+| Session and transcript queries | `session.*`, `transcript.*`, `context.get`, and `session.stats` |
+| Workflow-gate response | `workflow.gate_answer` |
+
+See the [RPC-to-SDK v3 parity audit](./sdk-rpc-parity-audit.md) for the full
+matrix, partial equivalents, and evidence.
+
+For a local non-WebSocket transport, run one of these commands:
+
+```sh
+skc sdk serve --stdio
+```
+
+```sh
+skc sdk serve --socket <path>
+```
+
+It relays the identical SDK v3 frames over stdio or a Unix socket. Socket
+clients send an authentication preface and the socket is mode `0600`; stdio is
+one parent-owned connection.
+
+Python clients install the `skc_sdk` package from `python/skc-sdk`:
+
+```sh
+python -m pip install ./python/skc-sdk
+```
+
+Import `SdkClient` with `from skc_sdk import SdkClient`, then use
+`SdkClient.connect_ws`, `SdkClient.connect_socket`, or `SdkClient.connect_stdio`.
+The client supplies `reply.token` for replies.
+
+Phase 2 still does **not** provide unattended negotiation, a cross-process
+reattach/registry, or a renderer-grade full event stream. No event-plane parity
+is claimed; see the audit's [ranked Phase-2 register](./sdk-rpc-parity-audit.md#ranked-phase-2-follow-up-register--not-implemented).
+
 ## Architecture
 
 ```
@@ -121,7 +164,7 @@ JSON text frames. Field names are `camelCase`; the `type` discriminator is
 ```json
 { "type": "action_needed", "id": "act_9e31", "kind": "ask",
   "sessionId": "sess-1", "workflowGateId": "wg_run_stage_1",
-  "question": "Proceed?", "options": ["Yes", "No"] }
+  "question": "Proceed?", "options": ["Yes", "No"], "recommendedIndex": 1 }
 ```
 
 ```json
@@ -137,6 +180,7 @@ JSON text frames. Field names are `camelCase`; the `type` discriminator is
 - `id` is an opaque, transient presentation/action ID. It is the **only** authority accepted by generic `reply.id`; use it only with the current authenticated endpoint. It is not a durable workflow ID.
 - `workflowGateId?: string` is optional, additive SDK v3 correlation metadata, present only for the active presentation of a durable workflow gate. When present, it equals that gate's Q12 `gate_id`. Its public correlation key is `(sessionId, workflowGateId)` at the current authenticated endpoint; it never authorizes generic `reply`.
 - `kind: "ask"` is answerable in interactive/TUI and SDK workflow-gate sessions. `kind: "idle"` is notify-only and ephemeral (not replayed to clients that connect later). Ordinary asks and idle frames omit `workflowGateId`.
+- `recommendedIndex?: number` is optional, zero-based display metadata for `options`. Clients must validate that it is an in-range integer and ignore malformed values. Raw option labels and reply indices remain authoritative; never decorate submitted answers or infer a recommendation from position. The additive field is wire-compatible, but Rust consumers constructing the public `ActionNeeded` struct by literal must provide `recommended_index: None` when no recommendation exists.
 - This corrects the pre-v3 documentation invariant that `action_needed.id == gate_id`: they are deliberately different values. Clients must not preserve that invariant, infer a relationship from question/options/order, or retain private route, claim, receipt, epoch, token, or endpoint-generation maps.
 
 `action_resolved` — a pending action is now terminal and **non-repliable**:
@@ -239,6 +283,90 @@ as a `model.set` input.
 Malformed reasoning descriptors are not client-recoverable catalog data. The
 query returns the SDK's safe `internal` error rather than exposing a partially
 formed row or descriptor details.
+
+## Prompt acceptance and reconciliation (Q26)
+
+`turn.prompt` returns `{ accepted: true, commandId, turnId, clientRef? }` only after
+its asynchronous preflight accepts the prompt. This acknowledgement is not a
+process-durable terminal result. The authoritative public reconciliation query is
+`Q26` / `turn.prompt_status`, scoped to the same live session runtime.
+
+Callers that must recover from a lost acknowledgement should assign one fresh
+`clientRef` (a trimmed, non-empty string of at most 128 characters) to each logical
+prompt. Reconnect to the same session endpoint and query with exactly one selector:
+
+```json
+{ "type": "query_request", "query": "turn.prompt_status",
+  "input": { "clientRef": "request-018f" } }
+```
+
+or:
+
+```json
+{ "type": "query_request", "query": "turn.prompt_status",
+  "input": { "commandId": "command-id", "turnId": "turn-id" } }
+```
+
+The result status is `accepted`, `in_flight`, `terminal_ok`, `failed`, or
+`unknown`. Known records include `acceptedAt`; in-flight and terminal records add
+`startedAt` and/or `terminalAt`; failed records add a bounded sanitized
+`error.code` and `error.message`. Cursors, partial generated-ID pairs, mixed
+selectors, and extra selector fields are rejected.
+
+Reconciliation state survives client disconnect/reconnect. With the session-private
+durable store (`.sdk-reconciliation/`), accepted and terminal prompt records also
+survive **SKC session-process restart** for the same session identity within
+capacity/TTL, subject to crash-consistent fsync. Active records that were not
+terminal at death are settled as `failed` with `error.code = process_restart`
+(reconciliation incomplete — not proof of agent failure). Eviction or absence still
+returns honest `unknown`; that means the prior outcome is unknowable, not that
+execution did not occur. Active records are capped at 128 per kind and are never aged
+into terminal. Terminal records are retained for 15 minutes, capped at 256 per kind,
+and evicted oldest-terminal first.
+
+`turn.prompt` remains ordered and non-idempotent. Its envelope `idempotencyKey`
+does not replay a response or produce `idempotency_conflict`. A retained duplicate
+`clientRef` fails before execution with `client_ref_conflict`, but callers must not
+reuse a `clientRef` as a retry mechanism: after eviction the same value can identify
+a new prompt while the old outcome remains unknown.
+
+## Skill invoke reconciliation (Q28)
+
+`skill.invoke` accepts optional `clientRef` and returns an early accepted receipt
+`{ accepted: true, commandId, turnId, clientRef?, name, path, lineCount?, args? }` after
+durable/preflight accept (SDK control path), not after skill completion. Query prior
+status with `Q28` / `skill.invoke_status` using the same selectors as Q26. Kind-scoped
+indexes mean prompt and skill `clientRef` values never collide. Same capacity/TTL and
+process_restart settlement rules as prompt reconciliation apply.
+
+## Model profile discovery and validation (Q27)
+
+`Q27` / `models.profiles.list` pages the effective model-profile catalog owned by
+the attached session. Rows are sorted by exact ID and contain only:
+
+```json
+{ "id": "codex-medium", "displayName": "codex-medium", "source": "builtin" }
+```
+
+`source` is `builtin` or `configured`. Profiles from `<agentDir>/models.yml`
+override built-ins with the same exact ID, including their display label. Profile
+IDs are not trimmed, case-folded, sanitized, or restricted to safe-token names;
+discover the exact ID and send it unchanged. The retired `codex-standard` alias is
+fallback-only and never shadows a configured profile with that exact ID.
+
+Q27 uses retained-revision, connection-bound pagination. Continue an issued cursor
+to finish its stable snapshot; a fresh cursorless query observes the current
+registry. The query accepts no root, path, or selector input. An invalid or
+unreadable `models.yml` fails closed with `model_profile_registry_error` rather
+than returning a plausible built-ins-only catalog.
+
+Broker `session.create`, `session.fork`, and `session.resume` validate `modelPreset`
+before spawning against the same `<broker.settings.agentDir>/models.yml` authority
+that the child receives through `SKC_AGENT_DIR` / `SKC_CODING_AGENT_DIR`. Unknown
+IDs return `unknown_model_profile`. Both typed errors include bounded `details`
+with `requestedProfile` where applicable, whole exact `availableProfiles` entries
+that fit the detail budget, and `discoveryQuery: "models.profiles.list"`. The
+discovery pointer is authoritative when the bounded error cannot include every ID.
 
 ## Answer semantics
 
@@ -464,9 +592,11 @@ Supported reply paths:
   topic identifies the session, so no session tag is needed).
 
 In threaded mode the user can also adjust per-session behaviour with in-thread
-config commands: `/verbose`, `/lean`, `/verbosity <lean|verbose>`, and
-`/redact <on|off>`. The legacy `/answer <session-tag> <answer>` command is
-removed — replies are routed by the topic they arrive in.
+config commands: `/verbose` (per-tool-turn assistant text), `/lean` (settled
+assistant answer at idle plus immediate ask lead-ins; the default),
+`/verbosity <lean|verbose>`, and `/redact <on|off>`. The legacy
+`/answer <session-tag> <answer>` command is removed — replies are routed by the
+topic they arrive in.
 
 Flat fallback keeps outbound notifications and inline-button answers working, but
 plain free-text never guesses from the global pending-ask set. Free-text replies

@@ -6,7 +6,7 @@ export type ControlInput = Record<string, unknown>;
  * AgentSession and its controllers without exposing those concrete types here.
  */
 export interface ControlSurface {
-	prompt(text: string, images?: ControlValue): Promise<ControlValue> | ControlValue;
+	prompt(text: string, images?: ControlValue, clientRef?: string): Promise<ControlValue> | ControlValue;
 	steer(text: string): Promise<ControlValue> | ControlValue;
 	followUp(text: string): Promise<ControlValue> | ControlValue;
 	abort(): Promise<ControlValue> | ControlValue;
@@ -19,11 +19,12 @@ export interface ControlSurface {
 		idempotencyKey?: string,
 	): Promise<ControlValue> | ControlValue;
 	approvePlan(id: string, choice: ControlValue, expectedSessionId?: string): Promise<ControlValue> | ControlValue;
-	invokeSkill(name: string, args: ControlValue): Promise<ControlValue> | ControlValue;
+	invokeSkill(name: string, args: ControlValue, clientRef?: string): Promise<ControlValue> | ControlValue;
 	setPlanMode(on: boolean): Promise<ControlValue> | ControlValue;
 	operateGoal(op: string, objective?: string): Promise<ControlValue> | ControlValue;
 	replaceTodo(items: ControlValue): Promise<ControlValue> | ControlValue;
 	setModel(id: string, thinkingLevel?: ControlValue): Promise<ControlValue> | ControlValue;
+	setModelProfile(id: string): Promise<ControlValue> | ControlValue;
 	cycleModel(): Promise<ControlValue> | ControlValue;
 	setThinking(level: ControlValue): Promise<ControlValue> | ControlValue;
 	cycleThinking(): Promise<ControlValue> | ControlValue;

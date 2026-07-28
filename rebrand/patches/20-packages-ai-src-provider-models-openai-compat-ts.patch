@@ -1,0 +1,20 @@
+--- a/packages/ai/src/provider-models/openai-compat.ts
++++ b/packages/ai/src/provider-models/openai-compat.ts
+@@ -1801,7 +1801,7 @@
+ }
+ 
+ function inferCopilotApi(modelId: string): Api {
+-	if (/^claude-(haiku|sonnet|opus)-(?:4|5)([.-]|$)/.test(modelId)) {
++	if (/^claude-(haiku|sonnet|opus)-4([.-]|$)/.test(modelId)) {
+ 		return "anthropic-messages";
+ 	}
+ 	if (modelId.startsWith("gpt-5") || modelId.startsWith("oswe")) {
+@@ -2230,7 +2230,7 @@
+ 
+ const COPILOT_API_RESOLUTION_RULES: readonly ApiResolutionRule[] = [
+ 	{
+-		matches: modelId => /^claude-(haiku|sonnet|opus)-(?:4|5)([.-]|$)/.test(modelId),
++		matches: modelId => /^claude-(haiku|sonnet|opus)-4([.-]|$)/.test(modelId),
+ 		resolved: { api: "anthropic-messages", baseUrl: COPILOT_BASE_URL },
+ 	},
+ 	{

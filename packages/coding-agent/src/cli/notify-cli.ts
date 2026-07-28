@@ -7,7 +7,6 @@ import { createInterface } from "node:readline/promises";
 import { APP_NAME } from "@sayknow-cli/utils/dirs";
 import chalk from "chalk";
 import { Settings, type SettingsAtomicPatch } from "../config/settings";
-import { isProcessIncarnation, processIncarnation } from "../sdk/broker/process-incarnation";
 import { type EnsureChatDaemonResult, ensureDiscordDaemon, ensureSlackDaemon } from "../sdk/bus/chat-daemon-control";
 import { getNotificationConfig, maskToken, tokenFingerprint } from "../sdk/bus/config";
 import {
@@ -33,7 +32,7 @@ import {
 import {
 	type EnsureTelegramDaemonDetailedResult,
 	ensureTelegramDaemonRunningDetailed,
-	readDaemonState,
+	resolveTelegramSetupPreflight,
 } from "../sdk/bus/telegram-daemon";
 import { runDaemonInternal } from "../sdk/bus/telegram-daemon-cli";
 import {
@@ -414,6 +413,7 @@ async function runTelegramSetup(cmd: NotifyCommandArgs, deps: NotifyCommandDeps)
 								settings,
 								cwd: process.cwd(),
 								sessionId: `notify-cli-${process.pid}`,
+								registerRoot: false,
 							}),
 				persistInactive: async marker => await persistTelegramActivationMarker(settings, marker),
 				clearInactive: async marker => await clearTelegramActivationMarker(settings, marker),
@@ -458,42 +458,10 @@ function proposedIdentityFromSetupPreflight(
 
 async function resolveSetupPreflight(settings: Settings, deps: NotifyCommandDeps): Promise<TelegramSetupPreflight> {
 	if (deps.setupPreflight) return deps.setupPreflight;
-	const cfg = getNotificationConfig(settings);
-	try {
-		const state = await readDaemonState(settings);
-		if (!state) return { storedChatId: cfg.chatId };
-		const validPid = Number.isSafeInteger(state.pid) && state.pid > 0;
-		if (!validPid || !(deps.setupPidAlive ?? daemonPidAlive)(state.pid)) return { storedChatId: cfg.chatId };
-		const persistedIncarnation = state.incarnation;
-		const currentIncarnation = (deps.setupPidIncarnation ?? processIncarnation)(state.pid);
-		if (
-			!isProcessIncarnation(persistedIncarnation) ||
-			!isProcessIncarnation(currentIncarnation) ||
-			persistedIncarnation !== currentIncarnation
-		)
-			return { storedChatId: cfg.chatId };
-		return {
-			storedChatId: cfg.chatId,
-			daemon: {
-				live: true,
-				tokenFingerprint: typeof state.tokenFingerprint === "string" ? state.tokenFingerprint : undefined,
-				chatId: typeof state.chatId === "string" ? state.chatId : undefined,
-			},
-		};
-	} catch {
-		// A state read failure is not proof of a live daemon; proceed normally. The
-		// daemon's own 409 handling remains the backstop against poller contention.
-		return { storedChatId: cfg.chatId };
-	}
-}
-
-function daemonPidAlive(pid: number): boolean {
-	try {
-		process.kill(pid, 0);
-		return true;
-	} catch (error) {
-		return (error as NodeJS.ErrnoException).code === "EPERM";
-	}
+	return await resolveTelegramSetupPreflight(settings, {
+		pidAlive: deps.setupPidAlive,
+		pidIncarnation: deps.setupPidIncarnation,
+	});
 }
 
 type TokenPromptInput = NodeJS.ReadStream & {

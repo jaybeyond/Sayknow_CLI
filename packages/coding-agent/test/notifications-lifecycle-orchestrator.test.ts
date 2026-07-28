@@ -627,6 +627,81 @@ describe("lifecycle orchestrator", () => {
 		expect(out.status).toBe("ok");
 		expect(closeCalls).toBe(1);
 	});
+	it("fails closed when close cannot confirm process disappearance", async () => {
+		let closeCalls = 0;
+		const {
+			deps: d,
+			audit,
+			store,
+		} = deps({
+			closeSession: async () => {
+				closeCalls++;
+				return { processGone: false };
+			},
+		});
+		const frame: SessionCloseFrame = {
+			type: "session_close",
+			requestId: "lc_c_uncertain",
+			updateId: 303,
+			chatId: PAIRED,
+			token: "control-token",
+			target: { sessionId: "sess-1", tmuxSession: "skc-1" },
+			force: true,
+		};
+
+		const out = await handleLifecycleRequest(frame, d);
+
+		expect(out).toMatchObject({ status: "error", reason: "terminal_uncertain" });
+		expect(closeCalls).toBe(1);
+		expect((await store.read()).entries[`${PAIRED}:303`]).toMatchObject({
+			state: "terminal_uncertain",
+			reason: "terminal_uncertain",
+			sessionId: "sess-1",
+		});
+		expect(audit.at(-1)).toMatchObject({ event: "terminal_uncertain", reason: "terminal_uncertain" });
+		expect(await handleLifecycleRequest(frame, d)).toMatchObject({ status: "error", reason: "terminal_uncertain" });
+		expect(closeCalls).toBe(1);
+	});
+
+	it("normalizes historical false close success without redispatching", async () => {
+		const frame: SessionCloseFrame = {
+			type: "session_close",
+			requestId: "lc_c_historical_false",
+			updateId: 304,
+			chatId: PAIRED,
+			token: "control-token",
+			target: { sessionId: "sess-1", tmuxSession: "skc-1" },
+			force: true,
+		};
+		const { deps: d, store } = deps({
+			store: memStore({
+				version: 1,
+				entries: {
+					[`${PAIRED}:304`]: {
+						requestHash: requestHash(frame),
+						state: "success",
+						requestId: frame.requestId,
+						verb: "session_close",
+						createdAt: 1,
+						updatedAt: 1,
+						targetSummary: { sessionId: "sess-1" },
+						sessionId: "sess-1",
+						processGone: false,
+					},
+				},
+			}),
+			closeSession: async () => {
+				throw new Error("historical false success must not redispatch");
+			},
+		});
+
+		expect(await handleLifecycleRequest(frame, d)).toMatchObject({ status: "error", reason: "terminal_uncertain" });
+		expect((await store.read()).entries[`${PAIRED}:304`]).toMatchObject({
+			state: "terminal_uncertain",
+			reason: "terminal_uncertain",
+		});
+		expect((await store.read()).entries[`${PAIRED}:304`]?.processGone).toBeUndefined();
+	});
 
 	it("records close failures as close_refused diagnostics, not spawn failures", async () => {
 		const {

@@ -9,6 +9,7 @@ import {
 	buildAnthropicClientOptions,
 	buildAnthropicHeaders,
 	buildAnthropicSystemBlocks,
+	claudeCodeEntrypoint,
 	claudeCodeVersion,
 	generateClaudeCloakingUserId,
 	isClaudeCloakingUserId,
@@ -115,6 +116,13 @@ describe("Anthropic request fingerprint alignment", () => {
 			extraInstructions: ["Use citations when possible"],
 			cacheControl: { type: "ephemeral" },
 		});
+
+		const billingHeader = blocks?.[0]?.text;
+		expect(billingHeader).toMatch(
+			new RegExp(
+				`^x-anthropic-billing-header: cc_version=${claudeCodeVersion}\\.[0-9a-f]{3}; cc_entrypoint=${claudeCodeEntrypoint}; cch=[0-9a-f]{5};$`,
+			),
+		);
 
 		expect(blocks).toBeDefined();
 		// Earlier blocks must NOT carry cache_control; a single trailing breakpoint covers them all.
@@ -1133,6 +1141,35 @@ describe("Anthropic request fingerprint alignment", () => {
 		expect(payload.temperature).toBeUndefined();
 		expect(payload.top_p).toBeUndefined();
 		expect(payload.top_k).toBeUndefined();
+		expect(payload.thinking).toEqual({ type: "adaptive", display: "summarized" });
+		expect(payload.output_config).toEqual({ effort: "high" });
+	});
+
+	it("requests summarized adaptive thinking for Fable 5 (issue #2791)", async () => {
+		const payload = (await captureAnthropicPayload(
+			{
+				...ANTHROPIC_MODEL,
+				id: "claude-fable-5",
+				name: "Anthropic Fable 5",
+				thinking: {
+					mode: "anthropic-adaptive",
+					minLevel: Effort.Minimal,
+					maxLevel: Effort.XHigh,
+				},
+			},
+			{
+				systemPrompt: ["Stay concise."],
+				messages: [{ role: "user", content: "Hi", timestamp: Date.now() }],
+			},
+			{
+				thinkingEnabled: true,
+				reasoning: Effort.High,
+			},
+		)) as {
+			thinking?: { type?: string; display?: string };
+			output_config?: { effort?: string };
+		};
+
 		expect(payload.thinking).toEqual({ type: "adaptive", display: "summarized" });
 		expect(payload.output_config).toEqual({ effort: "high" });
 	});

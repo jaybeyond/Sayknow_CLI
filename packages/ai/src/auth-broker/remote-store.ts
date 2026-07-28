@@ -14,6 +14,8 @@ import {
 	type AuthCredentialIfAbsentResult,
 	type AuthCredentialSnapshotEntry,
 	type AuthCredentialStore,
+	assertCanonicalMCPOAuthBinding,
+	type MCPOAuthRefreshClient,
 	type OAuthCredential,
 	REMOTE_REFRESH_SENTINEL,
 	type StoredAuthCredential,
@@ -510,6 +512,29 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 			projectId: refreshed.projectId,
 			enterpriseUrl: refreshed.enterpriseUrl,
 		};
+	}
+
+	async refreshMCPOAuthCredential(
+		credentialId: number,
+		credential: OAuthCredential,
+		client: MCPOAuthRefreshClient,
+		signal?: AbortSignal,
+	): Promise<OAuthCredential> {
+		const { entry } = await this.#client.refreshMCPCredential(credentialId, client, signal);
+		if (entry.credential.type !== "oauth") {
+			throw new Error(`Broker returned non-OAuth credential for id=${credentialId}`);
+		}
+		assertCanonicalMCPOAuthBinding(credential.mcpBinding);
+		assertCanonicalMCPOAuthBinding(entry.credential.mcpBinding);
+		if (
+			entry.credential.mcpBinding.resourceOrigin !== credential.mcpBinding.resourceOrigin ||
+			entry.credential.mcpBinding.tokenEndpoint !== credential.mcpBinding.tokenEndpoint
+		) {
+			throw new Error("Broker returned mismatched MCP OAuth credential binding");
+		}
+		this.#applyCredentialEntry(entry);
+		this.#maybeRefreshSnapshot("MCP credential refresh");
+		return entry.credential;
 	}
 
 	/**

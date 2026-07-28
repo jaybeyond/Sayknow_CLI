@@ -1,0 +1,32 @@
+--- a/packages/coding-agent/README.md
++++ b/packages/coding-agent/README.md
+@@ -89,7 +89,7 @@
+ 
+ ## Memory backends
+ 
+-The agent supports three mutually-exclusive memory backends, selected via the `memory.backend` setting (Settings → Memory tab, or `~/.skc/agent/config.yml`):
++The agent supports three mutually-exclusive memory backends, selected via the `memory.backend` setting (Settings → Memory tab, or `~/.skc/config.yml`):
+ 
+ - `off` (default) — no memory subsystem runs.
+ - `local` — existing rollout-summarisation pipeline; writes `memory_summary.md` and consolidated artifacts under the agent dir.
+@@ -108,18 +108,6 @@
+ 
+ Switching backends mid-session is honoured on the next system-prompt rebuild and the next `/memory` slash command. Existing users with `memories.enabled = true|false` are migrated to `memory.backend = "local"|"off"` exactly once on first launch.
+ 
+-## Red-claw TUI theme
++## Blue-octopus TUI theme
+ 
+-The interactive TUI defaults to the bundled `red-octopus` crustacean theme for dark terminals and the bundled `blue-octopus` theme for light-appearance terminals, with matching welcome/icon assets. Three additional bundled migration themes — `claude-code`, `codex`, and `opencode` — mirror the look of those tools for easy eye-migration and are selectable from Settings or `/theme`. Explicit user theme settings still win; set `theme.dark: red-octopus` and `theme.light: blue-octopus` in `~/.skc/agent/config.yml` to pin them.
+-
+-### Welcome banner fonts on Windows Terminal
+-
+-The startup logo defaults to rounded Unicode box drawing. Windows Terminal can render it correctly when the selected profile font has the needed box-drawing glyphs; recommended choices are `Cascadia Mono` or `Cascadia Mono Nerd Font`. In Windows Terminal Settings, set the profile font face to one of those fonts, or add it to the profile JSON:
+-
+-```json
+-"font": {
+-  "face": "Cascadia Mono"
+-}
+-```
+-
+-For terminals or fonts with broken rounded corners, set `startup.welcomeBannerMode` in `~/.skc/agent/config.yml` to one of `unicode`, `square`, or `ascii`. `square` keeps a Unicode-looking logo using square corners (`┌ ┐ └ ┘`) while `ascii` uses only `+`, `-`, and `|`.
++The interactive TUI defaults to the bundled `blue-octopus` cephalopod theme for both dark and light terminals, with the bundled `red-octopus` theme as a warm, high-contrast alternate and matching welcome/icon assets. Three additional bundled migration themes — `claude-code`, `codex`, and `opencode` — mirror the look of those tools for easy eye-migration and are selectable from Settings or `/theme`. Explicit user theme settings still win; set `theme.dark: red-octopus` and `theme.light: blue-octopus` in `~/.skc/agent/config.yml` to pin them.

@@ -5,9 +5,17 @@
  * lightweight CLI runner from pi-utils.
  */
 import "@sayknow-cli/utils/postmortem";
+import { THINKING_EFFORTS } from "@sayknow-cli/ai";
 import { Args, type CliConfig, Command, type CommandEntry, Flags, run } from "@sayknow-cli/utils/cli";
 import { APP_NAME, formatBunRuntimeError, MIN_BUN_VERSION, VERSION } from "@sayknow-cli/utils/dirs";
+import { loadNative as loadNativeBindings } from "../../natives/native/loader-state.js";
 import { runFixtureReport } from "./cli/fixture-report";
+import { admitManagedOwnerBeforeCli, completeManagedOwnerRecovery } from "./skc-runtime/managed-owner-admission";
+import {
+	isManagedOwnerSupervisorArgv,
+	MANAGED_OWNER_CHILD_TOKEN_ENV,
+	runManagedOwnerSupervisor,
+} from "./skc-runtime/managed-owner-supervisor";
 import { isTmuxOwnerIsolationCliArgv, runTmuxOwnerIsolationCliFromStdin } from "./skc-runtime/tmux-owner-isolation-cli";
 import { smokeTestTabWorker } from "./tools/browser/tab-worker-smoke";
 
@@ -56,6 +64,7 @@ export const commands: CommandEntry[] = [
 	{ name: "migrate", load: () => import("./commands/migrate").then(m => m.default) },
 	{ name: "rlm", load: () => import("./commands/rlm").then(m => m.default) },
 	{ name: "update", load: () => import("./commands/update").then(m => m.default) },
+	{ name: "read", load: () => import("./commands/read").then(m => m.default) },
 	{ name: "plugin", load: () => import("./commands/plugin").then(m => m.default) },
 	{ name: "completion", load: () => import("./commands/completion").then(m => m.default) },
 	{ name: "launch", load: () => import("./commands/launch").then(m => m.default) },
@@ -112,6 +121,36 @@ Options:
 `);
 }
 
+export function interactiveBootstrapText(
+	argv: readonly string[],
+	stdinIsTTY = process.stdin.isTTY,
+	stdoutIsTTY = process.stdout.isTTY,
+): string | undefined {
+	if (!stdinIsTTY || !stdoutIsTTY || argv[0] !== "launch") return undefined;
+	for (let index = 1; index < argv.length; index++) {
+		const arg = argv[index];
+		if (
+			arg === "--print" ||
+			arg?.startsWith("--print=") ||
+			arg === "-p" ||
+			arg === "--export" ||
+			arg?.startsWith("--export=") ||
+			arg === "--list-models" ||
+			arg?.startsWith("--list-models=") ||
+			arg === "--mode" ||
+			arg?.startsWith("--mode=") ||
+			arg === "--help" ||
+			arg?.startsWith("--help=") ||
+			arg === "-h" ||
+			arg === "--version" ||
+			arg?.startsWith("--version=") ||
+			arg === "-v"
+		)
+			return undefined;
+	}
+	return "\u001b[?25h\u001b[38;5;45mSKC\u001b[0m warming workspace\r\n\r\n> ";
+}
+
 function isNotifyDaemonInternalFastPath(argv: string[]): boolean {
 	return argv[0] === "notify" && argv[1] === "daemon-internal";
 }
@@ -136,6 +175,46 @@ async function runChatDaemonInternalFastPath(argv: string[]): Promise<void> {
 	}
 	const { runChatDaemonInternal } = await import("./sdk/bus/chat-daemon-cli");
 	await runChatDaemonInternal(action === "discord-internal" ? "discord" : "slack", argv.slice(2));
+}
+
+type MemoryGuardNativeSmokeLoad = () => Record<string, unknown>;
+type WindowsJobMemoryProbeResult = Record<string, unknown> & { kind: string };
+type MemoryGuardNativeSmokeReceipt = {
+	api: "memory_guard_windows_job_probe_v1";
+	source: "pi_natives";
+	result: WindowsJobMemoryProbeResult;
+};
+
+export function isMemoryGuardNativeSmokeFastPath(argv: readonly string[]): boolean {
+	return (
+		argv.length === 3 && argv[0] === "internal" && argv[1] === "memory-guard-native-smoke" && argv[2] === "--json"
+	);
+}
+
+function parseWindowsJobMemoryProbeResult(value: unknown): WindowsJobMemoryProbeResult {
+	if (!value || typeof value !== "object") {
+		throw new Error("memory-guard-native-smoke: native probe returned a non-object result");
+	}
+	const result = value as Record<string, unknown>;
+	if (typeof result.kind !== "string") {
+		throw new Error("memory-guard-native-smoke: native probe result is missing a string kind tag");
+	}
+	return result as WindowsJobMemoryProbeResult;
+}
+
+export function runMemoryGuardNativeSmokeFastPath(
+	options: { loadNative?: MemoryGuardNativeSmokeLoad; writeStdout?: (text: string) => void } = {},
+): void {
+	const probe = (options.loadNative ?? loadNativeBindings)().probeWindowsJobMemory;
+	if (typeof probe !== "function") {
+		throw new Error("memory-guard-native-smoke: probeWindowsJobMemory export missing from native addon");
+	}
+	const receipt: MemoryGuardNativeSmokeReceipt = {
+		api: "memory_guard_windows_job_probe_v1",
+		source: "pi_natives",
+		result: parseWindowsJobMemoryProbeResult((probe as () => unknown)()),
+	};
+	(options.writeStdout ?? (text => process.stdout.write(text)))(`${JSON.stringify(receipt)}\n`);
 }
 
 function rootFixtureArg(argv: string[]): { present: boolean; id: string | undefined } {
@@ -208,8 +287,8 @@ export class RootHelpCommand extends Command {
 		tmux: Flags.boolean({ description: "Launch interactive startup inside tmux" }),
 		tools: Flags.string({ description: "Comma-separated list of tools to enable (default: all)" }),
 		thinking: Flags.string({
-			description: "Set thinking level: ultra, high, medium, low",
-			options: ["ultra", "high", "medium", "low"],
+			description: `Set thinking level: ${THINKING_EFFORTS.join(", ")}`,
+			options: [...THINKING_EFFORTS],
 		}),
 		hook: Flags.string({ description: "Load a hook/extension file (can be used multiple times)", multiple: true }),
 		extension: Flags.string({
@@ -287,9 +366,34 @@ export function normalizeResumeAlias(argv: readonly string[]): string[] {
 	return argv.length === 1 && argv[0] === "resume" ? ["--resume"] : [...argv];
 }
 
+function routeLegacyRootArgv(argv: readonly string[]): string[] | undefined {
+	if (argv[0] === "coordinator-mcp") return ["mcp-serve", "coordinator", ...argv.slice(1)];
+	if (argv[0] !== "--team") return undefined;
+	const sizeValues: string[] = [];
+	const remaining: string[] = [];
+	for (let index = 1; index < argv.length; index++) {
+		const arg = argv[index] ?? "";
+		if (arg === "--team-size") {
+			sizeValues.push(argv[index + 1] ?? "");
+			index++;
+		} else if (arg.startsWith("--team-size=")) {
+			sizeValues.push(arg.slice("--team-size=".length));
+		} else {
+			remaining.push(arg);
+		}
+	}
+	const size = sizeValues[0];
+	if (sizeValues.length !== 1 || !size || !/^[1-9]\d*$/.test(size)) {
+		return ["team", "0", "invalid legacy --team-size"];
+	}
+	return ["team", size, ...remaining];
+}
+
 /** Apply the same default-launch routing used by runCli after root fast paths. */
 export function routeRootArgv(argv: readonly string[]): string[] {
 	const normalizedArgv = normalizeResumeAlias(argv);
+	const legacyArgv = routeLegacyRootArgv(normalizedArgv);
+	if (legacyArgv) return legacyArgv;
 	const first = normalizedArgv[0];
 	return first === "--help" || first === "-h" || first === "--version" || first === "-v" || first === "help"
 		? normalizedArgv
@@ -321,9 +425,25 @@ export async function runCli(argv: string[]): Promise<void> {
 		}
 		// Re-exec could not be spawned; fall through and run in this process.
 	}
+	if (isMemoryGuardNativeSmokeFastPath(argv)) {
+		runMemoryGuardNativeSmokeFastPath();
+		return;
+	}
 	if (isTmuxOwnerIsolationCliArgv(argv)) {
 		await runTmuxOwnerIsolationCliFromStdin();
 		return;
+	}
+	if (isManagedOwnerSupervisorArgv(argv)) {
+		await runManagedOwnerSupervisor();
+		return;
+	}
+	if (process.env[MANAGED_OWNER_CHILD_TOKEN_ENV] !== undefined) {
+		const admission = await admitManagedOwnerBeforeCli();
+		if (admission.kind === "blocked") return;
+		if (admission.kind === "recovery") {
+			await completeManagedOwnerRecovery(admission.context);
+			return;
+		}
 	}
 	if (isNotifyDaemonInternalFastPath(argv)) {
 		await runNotifyDaemonInternalFastPath(argv);
@@ -348,11 +468,9 @@ export async function runCli(argv: string[]): Promise<void> {
 		process.exitCode = await runFixtureReport(id);
 		return;
 	}
-	if (isStatsHelpFastPath(argv)) {
-		showStatsFastHelp();
-		return;
-	}
-	if (hasRootHelpFlag(argv)) {
+	const normalizedArgv = normalizeResumeAlias(argv);
+	const legacyArgv = routeLegacyRootArgv(normalizedArgv);
+	if (!legacyArgv && hasRootHelpFlag(normalizedArgv)) {
 		const { renderRootHelp } = await import("@sayknow-cli/utils/cli");
 		const { getExtraHelpText } = await import("./cli/fast-help");
 		renderRootHelp({ bin: APP_NAME, version: VERSION, commands: new Map([["launch", RootHelpCommand]]) });
@@ -362,14 +480,18 @@ export async function runCli(argv: string[]): Promise<void> {
 		}
 		return;
 	}
-	if (hasRootVersionFlag(argv)) {
+	if (!legacyArgv && hasRootVersionFlag(normalizedArgv)) {
 		process.stdout.write(`${APP_NAME}/${VERSION}\n`);
 		return;
 	}
+	const runArgv = legacyArgv ?? routeRootArgv(normalizedArgv);
+	if (isStatsHelpFastPath(runArgv)) {
+		showStatsFastHelp();
+		return;
+	}
+	const bootstrap = interactiveBootstrapText(runArgv);
+	if (bootstrap) process.stdout.write(bootstrap);
 	await installRuntimeGlobals();
-	// --help and --version are handled by run() directly, don't rewrite those.
-	// Everything else that isn't a known subcommand routes to "launch".
-	const runArgv = routeRootArgv(argv);
 	return run({ bin: APP_NAME, version: VERSION, argv: runArgv, commands, help: showHelp });
 }
 

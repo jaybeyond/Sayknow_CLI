@@ -46,11 +46,112 @@ export type ApiKeyCredential = {
 	key: string;
 };
 
+export interface MCPOAuthBinding {
+	/** Exact HTTP(S) origin of the MCP resource endpoint. */
+	resourceOrigin: string;
+	/** Exact canonical HTTP(S) token endpoint used to create and refresh the credential. */
+	tokenEndpoint: string;
+}
+
+function resolveCanonicalHttpUrl(value: string): URL | undefined {
+	try {
+		const parsed = new URL(value);
+		if (
+			(parsed.protocol !== "http:" && parsed.protocol !== "https:") ||
+			parsed.username !== "" ||
+			parsed.password !== "" ||
+			parsed.hash !== ""
+		) {
+			return undefined;
+		}
+		return parsed;
+	} catch {
+		return undefined;
+	}
+}
+
+export function resolveMCPOAuthResourceOrigin(value: string): string | undefined {
+	return resolveCanonicalHttpUrl(value)?.origin;
+}
+
+export function resolveMCPOAuthTokenEndpoint(value: string): string | undefined {
+	return resolveCanonicalHttpUrl(value)?.href;
+}
+
+export function isCanonicalMCPOAuthBinding(binding: MCPOAuthBinding): boolean {
+	return (
+		resolveMCPOAuthResourceOrigin(binding.resourceOrigin) === binding.resourceOrigin &&
+		resolveMCPOAuthTokenEndpoint(binding.tokenEndpoint) === binding.tokenEndpoint
+	);
+}
+
+export function assertCanonicalMCPOAuthBinding(
+	binding: MCPOAuthBinding | undefined,
+): asserts binding is MCPOAuthBinding {
+	if (!binding || !isCanonicalMCPOAuthBinding(binding)) {
+		throw new Error("Invalid MCP OAuth credential binding");
+	}
+}
+
 export type OAuthCredential = {
 	type: "oauth";
+	/** Present only for credentials created by runtime MCP OAuth. */
+	mcpBinding?: MCPOAuthBinding;
 } & OAuthCredentials;
 
 export type AuthCredential = ApiKeyCredential | OAuthCredential;
+
+export interface MCPOAuthRefreshClient {
+	clientId?: string;
+	clientSecret?: string;
+}
+
+async function refreshBoundMCPOAuthCredential(
+	credential: OAuthCredential,
+	client: MCPOAuthRefreshClient = {},
+	signal?: AbortSignal,
+): Promise<OAuthCredentials> {
+	const binding = credential.mcpBinding;
+	assertCanonicalMCPOAuthBinding(binding);
+	const params = new URLSearchParams({
+		grant_type: "refresh_token",
+		refresh_token: credential.refresh,
+	});
+	if (client.clientId) params.set("client_id", client.clientId);
+	if (client.clientSecret) params.set("client_secret", client.clientSecret);
+
+	const response = await fetch(binding.tokenEndpoint, {
+		method: "POST",
+		headers: { "Content-Type": "application/x-www-form-urlencoded" },
+		body: params.toString(),
+		redirect: "manual",
+		signal,
+	});
+	if (response.status >= 300 && response.status < 400) {
+		throw new Error(`MCP OAuth refresh rejected redirect response (${response.status})`);
+	}
+	if (!response.ok) throw new Error(`MCP OAuth refresh failed (${response.status})`);
+	const payload: unknown = await response.json();
+	if (!payload || typeof payload !== "object") throw new Error("MCP OAuth refresh returned an invalid payload");
+	const data = payload as { access_token?: unknown; refresh_token?: unknown; expires_in?: unknown };
+	if (typeof data.access_token !== "string" || data.access_token.length === 0) {
+		throw new Error("MCP OAuth refresh returned an invalid access token");
+	}
+	if (data.refresh_token !== undefined && typeof data.refresh_token !== "string") {
+		throw new Error("MCP OAuth refresh returned an invalid refresh token");
+	}
+	if (
+		data.expires_in !== undefined &&
+		(typeof data.expires_in !== "number" || !Number.isFinite(data.expires_in) || data.expires_in < 0)
+	) {
+		throw new Error("MCP OAuth refresh returned an invalid expiry");
+	}
+	return {
+		access: data.access_token,
+		refresh: data.refresh_token || credential.refresh,
+		expires: Date.now() + (data.expires_in ?? 3600) * 1000,
+	};
+}
 
 export type AuthCredentialEntry = AuthCredential | AuthCredential[];
 
@@ -230,6 +331,13 @@ export interface AuthCredentialStore {
 		credential: OAuthCredential,
 		signal?: AbortSignal,
 	): Promise<OAuthCredentials>;
+	/** Broker-backed MCP refresh using the broker's stored token endpoint and refresh secret. */
+	refreshMCPOAuthCredential?(
+		credentialId: number,
+		credential: OAuthCredential,
+		client: MCPOAuthRefreshClient,
+		signal?: AbortSignal,
+	): Promise<OAuthCredential>;
 	/**
 	 * Optional async pre-read hook invoked after AuthStorage selects a stored
 	 * credential but before it returns that credential for an outbound request.
@@ -632,7 +740,9 @@ function authCredentialEquals(left: AuthCredential, right: AuthCredential): bool
 		left.accountId === right.accountId &&
 		left.email === right.email &&
 		left.projectId === right.projectId &&
-		left.enterpriseUrl === right.enterpriseUrl
+		left.enterpriseUrl === right.enterpriseUrl &&
+		left.mcpBinding?.resourceOrigin === right.mcpBinding?.resourceOrigin &&
+		left.mcpBinding?.tokenEndpoint === right.mcpBinding?.tokenEndpoint
 	);
 }
 
@@ -1587,9 +1697,9 @@ export class AuthStorage {
 				});
 				break;
 			}
-			case "alibaba-coding-plan": {
-				const { loginAlibabaCodingPlan } = await import("./utils/oauth/alibaba-coding-plan");
-				const apiKey = await loginAlibabaCodingPlan(ctrl);
+			case "alibaba-token-plan": {
+				const { loginAlibabaTokenPlan } = await import("./utils/oauth/alibaba-token-plan");
+				const apiKey = await loginAlibabaTokenPlan(ctrl);
 				await saveApiKeyCredential(apiKey);
 				return;
 			}
@@ -1885,6 +1995,18 @@ export class AuthStorage {
 			case "zenmux": {
 				const { loginZenMux } = await import("./utils/oauth/zenmux");
 				const apiKey = await loginZenMux(ctrl);
+				await saveApiKeyCredential(apiKey);
+				return;
+			}
+			case "bizrouter": {
+				const { loginBizRouter } = await import("./utils/oauth/bizrouter");
+				const apiKey = await loginBizRouter(ctrl);
+				await saveApiKeyCredential(apiKey);
+				return;
+			}
+			case "opengateway": {
+				const { loginOpenGateway } = await import("./utils/oauth/opengateway");
+				const apiKey = await loginOpenGateway(ctrl);
 				await saveApiKeyCredential(apiKey);
 				return;
 			}
@@ -2398,9 +2520,12 @@ export class AuthStorage {
 		if (storeHook) {
 			return storeHook(provider, credential, options?.signal);
 		}
-		return this.#fetchUsageCached(
-			this.#buildUsageRequestForOauth(provider, credential, options?.baseUrl),
-			options?.timeoutMs ?? this.#usageRequestTimeoutMs,
+		return raceUsageWithSignal(
+			this.#fetchUsageCached(
+				this.#buildUsageRequestForOauth(provider, credential, options?.baseUrl),
+				options?.timeoutMs ?? this.#usageRequestTimeoutMs,
+			),
+			options?.signal,
 		);
 	}
 
@@ -2452,7 +2577,7 @@ export class AuthStorage {
 		const cacheKey = this.#buildUsageReportsCacheKey(requests);
 
 		const inFlight = this.#usageReportsInFlight.get(cacheKey);
-		if (inFlight) return inFlight;
+		if (inFlight) return raceUsageWithSignal(inFlight, options?.signal);
 
 		const promise = (async () => {
 			if (options?.logDetails !== false) {
@@ -2500,7 +2625,7 @@ export class AuthStorage {
 		});
 
 		this.#usageReportsInFlight.set(cacheKey, promise);
-		return promise;
+		return raceUsageWithSignal(promise, options?.signal);
 	}
 
 	/**
@@ -2751,7 +2876,7 @@ export class AuthStorage {
 				const blockedUntil = this.#getCredentialBlockedUntil(args.providerKey, selection.index);
 				if (blockedUntil !== undefined) return { selection, usage: null, usageChecked: false, blockedUntil };
 				const usage = await this.#getUsageReport(args.provider, selection.credential, {
-					...args.options,
+					baseUrl: args.options?.baseUrl,
 					timeoutMs: this.#usageRequestTimeoutMs,
 				});
 				return { selection, usage, usageChecked: true, blockedUntil: undefined as number | undefined };
@@ -2764,16 +2889,21 @@ export class AuthStorage {
 		// path so memory drops immediately.
 		const timer = setTimeout(() => timeoutSignal.resolve(null), usageTimeout);
 		timer.unref?.();
-		const usageResults = await Promise.race([usagePromise, timeoutSignal.promise]).then(result => {
-			clearTimeout(timer);
-			return (
-				result ??
-				args.order.map(idx => {
-					const selection = args.credentials[idx];
-					return selection ? { selection, usage: null, usageChecked: false, blockedUntil: undefined } : null;
-				})
+		let resolvedUsageResults: Awaited<typeof usagePromise> | null;
+		try {
+			resolvedUsageResults = await raceUsageWithSignal(
+				Promise.race([usagePromise, timeoutSignal.promise]),
+				args.options?.signal,
 			);
-		});
+		} finally {
+			clearTimeout(timer);
+		}
+		const usageResults =
+			resolvedUsageResults ??
+			args.order.map(idx => {
+				const selection = args.credentials[idx];
+				return selection ? { selection, usage: null, usageChecked: true, blockedUntil: undefined } : null;
+			});
 
 		for (let orderPos = 0; orderPos < usageResults.length; orderPos += 1) {
 			const result = usageResults[orderPos];
@@ -3009,6 +3139,8 @@ export class AuthStorage {
 		const overrideRefresh = this.#refreshOAuthCredentialOverride ?? storeRefresh;
 		if (overrideRefresh && credentialId !== undefined) {
 			refreshPromise = overrideRefresh(provider, credentialId, credential, signal);
+		} else if (credential.mcpBinding) {
+			refreshPromise = refreshBoundMCPOAuthCredential(credential, {}, signal);
 		} else {
 			const customProvider = getOAuthProvider(provider);
 			if (customProvider) {
@@ -3202,10 +3334,38 @@ export class AuthStorage {
 			return { apiKey: result.apiKey, credential: updated };
 		} catch (error) {
 			const errorMsg = String(error);
+			// Peer-rotation recovery runs before ANY failure classification: a
+			// concurrent process may have rotated the refresh token, which
+			// invalidates the snapshot token we just attempted. Re-read the row —
+			// if the persisted refresh token changed, the peer's rotation succeeded
+			// and we pick up the fresh credential instead of disabling (definitive
+			// path) or temp-blocking (transient path) a row that is actually
+			// healthy. This matters for providers whose invalid-grant response does
+			// not match the definitive regex below (e.g. Kimi's 400 "The provided
+			// authorization grant is invalid"): with short-lived access tokens and
+			// multiple skc processes sharing the store, the stale-snapshot failure
+			// would otherwise be misclassified as transient and the credential
+			// temp-blocked on every rotation race.
+			const attemptedCredentialId = this.#getStoredCredentials(provider)[selection.index]?.id;
+			if (attemptedCredentialId !== undefined) {
+				const latestRow = this.#store.listAuthCredentials(provider).find(row => row.id === attemptedCredentialId);
+				const latestCredential = latestRow?.credential;
+				if (latestCredential?.type === "oauth" && latestCredential.refresh !== selection.credential.refresh) {
+					logger.debug("OAuth refresh race detected; another process rotated token first", {
+						provider,
+						index: selection.index,
+						credentialId: attemptedCredentialId,
+					});
+					await this.reload();
+					return this.#resolveOAuthSelection(provider, sessionId, options);
+				}
+			}
 			// Only remove credentials for definitive auth failures
 			// Keep credentials for transient errors (network, 5xx) and block temporarily
 			const isDefinitiveFailure =
-				/invalid_grant|invalid_token|revoked|unauthorized|expired.*refresh|refresh.*expired/i.test(errorMsg) ||
+				/invalid_grant|grant is invalid|invalid_token|revoked|unauthorized|expired.*refresh|refresh.*expired/i.test(
+					errorMsg,
+				) ||
 				(/\b(401|403)\b/.test(errorMsg) && !/timeout|network|fetch failed|ECONNREFUSED/i.test(errorMsg));
 
 			logger.warn("OAuth token refresh failed", {
@@ -3216,27 +3376,6 @@ export class AuthStorage {
 			});
 
 			if (isDefinitiveFailure) {
-				// The credential at this index may have been rotated by another process between
-				// our in-memory snapshot and the refresh attempt: Anthropic rotates refresh
-				// tokens on every use, so the peer's success leaves our stored token invalid.
-				// Re-read the row from disk before marking it disabled — if the persisted
-				// refresh token has changed, the peer rotation succeeded and we should pick
-				// up the new credential instead of soft-deleting the row that the peer just
-				// updated.
-				const credentialId = this.#getStoredCredentials(provider)[selection.index]?.id;
-				if (credentialId !== undefined) {
-					const latestRow = this.#store.listAuthCredentials(provider).find(row => row.id === credentialId);
-					const latestCredential = latestRow?.credential;
-					if (latestCredential?.type === "oauth" && latestCredential.refresh !== selection.credential.refresh) {
-						logger.debug("OAuth refresh race detected; another process rotated token first", {
-							provider,
-							index: selection.index,
-							credentialId,
-						});
-						await this.reload();
-						return this.#resolveOAuthSelection(provider, sessionId, options);
-					}
-				}
 				// Permanently disable invalid credentials with an explicit cause for inspection/debugging.
 				// Use a CAS-style disable conditioned on the row still containing the stale credential
 				// we tried to refresh, so a peer rotation that lands between the pre-check above and
@@ -3518,14 +3657,18 @@ export class AuthStorage {
 	 * refresh attempt, which is required for providers that rotate refresh tokens
 	 * on every successful refresh.
 	 */
-	async refreshCredentialById(id: number, signal?: AbortSignal): Promise<AuthCredentialSnapshotEntry> {
+	async refreshCredentialById(
+		id: number,
+		signal?: AbortSignal,
+		mcpClient: MCPOAuthRefreshClient = {},
+	): Promise<AuthCredentialSnapshotEntry> {
 		const existing = this.#oauthRefreshInFlight.get(id);
 		if (existing) return raceCredentialRefreshWithSignal(existing, signal);
 
 		const promise = (async () => {
 			this.#bumpGeneration("credential-refresh-start");
 			try {
-				return await this.#forceRefreshCredentialByIdUnshared(id, signal);
+				return await this.#forceRefreshCredentialByIdUnshared(id, signal, mcpClient);
 			} catch (error) {
 				this.#bumpGeneration("credential-refresh-failure");
 				throw error;
@@ -3549,7 +3692,32 @@ export class AuthStorage {
 		return this.refreshCredentialById(id, signal);
 	}
 
-	async #forceRefreshCredentialByIdUnshared(id: number, signal?: AbortSignal): Promise<AuthCredentialSnapshotEntry> {
+	/** Force-refresh the first OAuth credential stored for a provider. */
+	async forceRefreshOAuthCredential(
+		provider: string,
+		expected: OAuthCredential,
+		client: MCPOAuthRefreshClient = {},
+		signal?: AbortSignal,
+	): Promise<OAuthCredential> {
+		const storageProvider = resolveOAuthStorageProvider(provider);
+		const target = this.#getStoredCredentials(storageProvider).find(
+			entry => entry.credential === expected || authCredentialEquals(entry.credential, expected),
+		);
+		if (target?.credential.type !== "oauth") {
+			throw new Error(`No OAuth credential found for provider=${storageProvider}`);
+		}
+		const entry = await this.refreshCredentialById(target.id, signal, client);
+		if (entry.credential.type !== "oauth") {
+			throw new Error(`Credential ${target.id} is not OAuth`);
+		}
+		return entry.credential;
+	}
+
+	async #forceRefreshCredentialByIdUnshared(
+		id: number,
+		signal?: AbortSignal,
+		mcpClient: MCPOAuthRefreshClient = {},
+	): Promise<AuthCredentialSnapshotEntry> {
 		for (const [provider, entries] of this.#data) {
 			const index = entries.findIndex(entry => entry.id === id);
 			if (index === -1) continue;
@@ -3560,7 +3728,27 @@ export class AuthStorage {
 			// Pass a clone with expires=0 so the cached not-yet-expired short-circuit
 			// in #refreshOAuthCredential doesn't suppress the requested refresh.
 			const stale: OAuthCredential = { ...target.credential, expires: 0 };
-			const refreshed = await this.#refreshOAuthCredential(provider as Provider, stale, id, signal);
+			let refreshed: OAuthCredentials;
+			if (target.credential.mcpBinding) {
+				assertCanonicalMCPOAuthBinding(target.credential.mcpBinding);
+				const remoteRefresh = this.#store.refreshMCPOAuthCredential?.bind(this.#store);
+				const refreshedCredential = remoteRefresh
+					? await remoteRefresh(id, stale, mcpClient, signal)
+					: {
+							type: "oauth" as const,
+							...(await refreshBoundMCPOAuthCredential(stale, mcpClient, signal)),
+							mcpBinding: target.credential.mcpBinding,
+						};
+				if (
+					refreshedCredential.mcpBinding?.resourceOrigin !== target.credential.mcpBinding.resourceOrigin ||
+					refreshedCredential.mcpBinding.tokenEndpoint !== target.credential.mcpBinding.tokenEndpoint
+				) {
+					throw new Error("Refreshed MCP OAuth credential binding mismatch");
+				}
+				refreshed = refreshedCredential;
+			} else {
+				refreshed = await this.#refreshOAuthCredential(provider as Provider, stale, id, signal);
+			}
 			const updated: OAuthCredential = {
 				type: "oauth",
 				access: refreshed.access,
@@ -3570,6 +3758,7 @@ export class AuthStorage {
 				email: refreshed.email ?? target.credential.email,
 				projectId: refreshed.projectId ?? target.credential.projectId,
 				enterpriseUrl: refreshed.enterpriseUrl ?? target.credential.enterpriseUrl,
+				mcpBinding: target.credential.mcpBinding,
 			};
 			this.#replaceCredentialAt(provider, index, updated);
 			return {

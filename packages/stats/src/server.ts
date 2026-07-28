@@ -1,5 +1,4 @@
 import * as fs from "node:fs/promises";
-import * as os from "node:os";
 import * as path from "node:path";
 import { $ } from "bun";
 import {
@@ -14,7 +13,9 @@ import {
 	getTotalMessageCount,
 	syncAllSessions,
 } from "./aggregator";
+import { createCompiledClientAssetHandler } from "./compiled-client-assets";
 import embeddedClientArchiveTxt from "./embedded-client.generated.txt";
+import type { DashboardStats } from "./types";
 
 const getEmbeddedClientArchive = (() => {
 	const txt = embeddedClientArchiveTxt.replaceAll(/[\s\r\n]/g, "").trim();
@@ -29,58 +30,24 @@ const IS_BUN_COMPILED =
 	import.meta.url.includes("$bunfs") ||
 	import.meta.url.includes("~BUN") ||
 	import.meta.url.includes("%7EBUN");
+const compiledClientAssets = createCompiledClientAssetHandler(() => getEmbeddedClientArchive?.() ?? null);
 
-const COMPILED_CLIENT_DIR_ROOT = path.join(os.tmpdir(), "skc-stats-client");
-let compiledClientDirPromise: Promise<string> | null = null;
-
-function sanitizeArchivePath(archivePath: string): string | null {
-	const normalized = archivePath.replaceAll("\\", "/").replace(/^\.\//, "");
-	if (!normalized || normalized === ".") return null;
-	if (normalized.includes("..") || path.isAbsolute(normalized)) return null;
-	return normalized;
+interface SyncResult {
+	processed: number;
+	files: number;
 }
 
-async function extractEmbeddedClientArchive(archiveBytes: Buffer, outputDir: string): Promise<void> {
-	const archive = new Bun.Archive(archiveBytes);
-	const files = await archive.files();
-	const extractRoot = path.resolve(outputDir);
-
-	for (const [archivePath, file] of files) {
-		const sanitizedPath = sanitizeArchivePath(archivePath);
-		if (!sanitizedPath) continue;
-		const destinationPath = path.resolve(extractRoot, sanitizedPath);
-		if (!destinationPath.startsWith(extractRoot + path.sep)) {
-			throw new Error(`Archive entry escapes extraction directory: ${archivePath}`);
-		}
-		await Bun.write(destinationPath, file);
-	}
+export interface StatsServerOptions {
+	getDashboardStats?: (range?: string | null) => Promise<DashboardStats>;
+	syncAllSessions?: () => Promise<SyncResult>;
+	getTotalMessageCount?: () => Promise<number>;
 }
 
-async function getCompiledClientDir(): Promise<string> {
-	if (!IS_BUN_COMPILED) return STATIC_DIR;
-	if (compiledClientDirPromise) return compiledClientDirPromise;
-
-	const archiveBytes = getEmbeddedClientArchive?.();
-	if (!archiveBytes) {
-		throw new Error("Compiled stats client bundle missing. Rebuild binary with embedded stats assets.");
-	}
-
-	compiledClientDirPromise = (async () => {
-		const bundleHash = Bun.hash(archiveBytes).toString(16);
-		const outputDir = path.join(COMPILED_CLIENT_DIR_ROOT, bundleHash);
-		const markerPath = path.join(outputDir, "index.html");
-		try {
-			const marker = await fs.stat(markerPath);
-			if (marker.isFile()) return outputDir;
-		} catch {}
-
-		await fs.rm(outputDir, { recursive: true, force: true });
-		await fs.mkdir(outputDir, { recursive: true });
-		await extractEmbeddedClientArchive(archiveBytes, outputDir);
-		return outputDir;
-	})();
-
-	return compiledClientDirPromise;
+interface ApiContext {
+	getDashboardStats: (range?: string | null) => Promise<DashboardStats>;
+	syncAllSessions: () => Promise<SyncResult>;
+	getTotalMessageCount: () => Promise<number>;
+	syncInProgress: boolean;
 }
 
 async function getLatestMtime(dir: string): Promise<number> {
@@ -167,7 +134,7 @@ const ensureClientBuild = async () => {
 /**
  * Handle API requests.
  */
-async function handleApi(req: Request): Promise<Response> {
+async function handleApi(req: Request, context: ApiContext): Promise<Response> {
 	const url = new URL(req.url);
 	const path = url.pathname;
 
@@ -175,7 +142,7 @@ async function handleApi(req: Request): Promise<Response> {
 	const range = url.searchParams.get("range");
 
 	if (path === "/api/stats") {
-		const stats = await getDashboardStats(range);
+		const stats = await context.getDashboardStats(range);
 		return Response.json(stats);
 	}
 
@@ -212,17 +179,17 @@ async function handleApi(req: Request): Promise<Response> {
 	}
 
 	if (path === "/api/stats/models") {
-		const stats = await getDashboardStats(range);
+		const stats = await context.getDashboardStats(range);
 		return Response.json(stats.byModel);
 	}
 
 	if (path === "/api/stats/folders") {
-		const stats = await getDashboardStats(range);
+		const stats = await context.getDashboardStats(range);
 		return Response.json(stats.byFolder);
 	}
 
 	if (path === "/api/stats/timeseries") {
-		const stats = await getDashboardStats(range);
+		const stats = await context.getDashboardStats(range);
 		return Response.json(stats.timeSeries);
 	}
 
@@ -235,21 +202,70 @@ async function handleApi(req: Request): Promise<Response> {
 	}
 
 	if (path === "/api/sync") {
-		const result = await syncAllSessions();
-		const count = await getTotalMessageCount();
-		return Response.json({ ...result, totalMessages: count });
+		if (context.syncInProgress) {
+			return Response.json({ error: "Sync already in progress" }, { status: 409 });
+		}
+		context.syncInProgress = true;
+		try {
+			const result = await context.syncAllSessions();
+			const count = await context.getTotalMessageCount();
+			return Response.json({ ...result, totalMessages: count });
+		} finally {
+			context.syncInProgress = false;
+		}
 	}
 
 	return new Response("Not Found", { status: 404 });
+}
+
+function forbidden(): Response {
+	return new Response("Forbidden", { status: 403 });
+}
+
+function methodNotAllowed(allowedMethod: "GET" | "POST"): Response {
+	return new Response("Method Not Allowed", { status: 405, headers: { Allow: allowedMethod } });
+}
+
+function validateApiRequest(req: Request, url: URL, boundPort: number): Response | null {
+	const authority = req.headers.get("Host");
+	const allowedAuthorities =
+		boundPort === 80
+			? new Set(["localhost", "localhost:80", "127.0.0.1", "127.0.0.1:80"])
+			: new Set([`localhost:${boundPort}`, `127.0.0.1:${boundPort}`]);
+	if (!authority || !allowedAuthorities.has(authority)) return forbidden();
+
+	if (url.protocol !== "http:" || (url.hostname !== "localhost" && url.hostname !== "127.0.0.1")) {
+		return forbidden();
+	}
+
+	const requestPort = url.port ? Number.parseInt(url.port, 10) : 80;
+	if (requestPort !== boundPort) return forbidden();
+
+	const origin = req.headers.get("Origin");
+	if (origin !== null) {
+		try {
+			const parsedOrigin = new URL(origin);
+			if (parsedOrigin.origin !== origin || origin !== url.origin) return forbidden();
+		} catch {
+			return forbidden();
+		}
+	}
+
+	const allowedMethod = url.pathname === "/api/sync" ? "POST" : "GET";
+	if (req.method !== allowedMethod) return methodNotAllowed(allowedMethod);
+	if (url.pathname === "/api/sync" && origin === null) return forbidden();
+
+	return null;
 }
 
 /**
  * Handle static file requests.
  */
 async function handleStatic(requestPath: string): Promise<Response> {
-	const staticDir = IS_BUN_COMPILED ? await getCompiledClientDir() : STATIC_DIR;
+	if (IS_BUN_COMPILED) return await compiledClientAssets.response(requestPath);
+
 	const filePath = requestPath === "/" ? "/index.html" : requestPath;
-	const fullPath = path.join(staticDir, filePath);
+	const fullPath = path.join(STATIC_DIR, filePath);
 
 	const file = Bun.file(fullPath);
 	if (await file.exists()) {
@@ -257,7 +273,7 @@ async function handleStatic(requestPath: string): Promise<Response> {
 	}
 
 	// SPA fallback
-	const index = Bun.file(path.join(staticDir, "index.html"));
+	const index = Bun.file(path.join(STATIC_DIR, "index.html"));
 	if (await index.exists()) {
 		return new Response(index);
 	}
@@ -268,52 +284,43 @@ async function handleStatic(requestPath: string): Promise<Response> {
 /**
  * Start the HTTP server.
  */
-export async function startServer(port = 3847): Promise<{ port: number; stop: () => void }> {
+export async function startServer(
+	port = 3847,
+	options: StatsServerOptions = {},
+): Promise<{ port: number; stop: () => void }> {
 	await ensureClientBuild();
+	const apiContext: ApiContext = {
+		getDashboardStats: options.getDashboardStats ?? getDashboardStats,
+		syncAllSessions: options.syncAllSessions ?? syncAllSessions,
+		getTotalMessageCount: options.getTotalMessageCount ?? getTotalMessageCount,
+		syncInProgress: false,
+	};
 
 	const server = Bun.serve({
 		hostname: "127.0.0.1",
 		port,
 		async fetch(req) {
-			const url = new URL(req.url);
+			let url: URL;
+			try {
+				url = new URL(req.url);
+			} catch {
+				return forbidden();
+			}
 			const path = url.pathname;
 
-			// CORS headers for local development
-			const corsHeaders = {
-				"Access-Control-Allow-Origin": "*",
-				"Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-				"Access-Control-Allow-Headers": "Content-Type",
-			};
-
-			if (req.method === "OPTIONS") {
-				return new Response(null, { headers: corsHeaders });
+			if (path.startsWith("/api/")) {
+				const policyResponse = validateApiRequest(req, url, server.port ?? port);
+				if (policyResponse) return policyResponse;
 			}
 
 			try {
-				let response: Response;
-
 				if (path.startsWith("/api/")) {
-					response = await handleApi(req);
-				} else {
-					response = await handleStatic(path);
+					return await handleApi(req, apiContext);
 				}
-
-				// Add CORS headers to all responses
-				const headers = new Headers(response.headers);
-				for (const [key, value] of Object.entries(corsHeaders)) {
-					headers.set(key, value);
-				}
-
-				return new Response(response.body, {
-					status: response.status,
-					headers,
-				});
+				return await handleStatic(path);
 			} catch (error) {
 				console.error("Server error:", error);
-				return Response.json(
-					{ error: error instanceof Error ? error.message : "Unknown error" },
-					{ status: 500, headers: corsHeaders },
-				);
+				return Response.json({ error: error instanceof Error ? error.message : "Unknown error" }, { status: 500 });
 			}
 		},
 	});

@@ -1,11 +1,13 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { Agent } from "@sayknow-cli/agent-core";
 import { getBundledModel } from "@sayknow-cli/ai";
+import { AsyncJobManager } from "@sayknow-cli/coding-agent/async/job-manager";
 import { ModelRegistry } from "@sayknow-cli/coding-agent/config/model-registry";
 import { Settings } from "@sayknow-cli/coding-agent/config/settings";
+import * as internalUrls from "@sayknow-cli/coding-agent/internal-urls";
 import { AgentSession } from "@sayknow-cli/coding-agent/session/agent-session";
 import { AuthStorage } from "@sayknow-cli/coding-agent/session/auth-storage";
 import { SessionManager } from "@sayknow-cli/coding-agent/session/session-manager";
@@ -25,6 +27,7 @@ describe("AgentSession newSession clears todo artifacts", () => {
 	let session: AgentSession;
 	let sessionManager: SessionManager;
 	let authStorage: AuthStorage | undefined;
+	let ownerManager: AsyncJobManager | undefined;
 
 	beforeEach(async () => {
 		tempDir = path.join(os.tmpdir(), `pi-new-session-todos-test-${Snowflake.next()}`);
@@ -62,6 +65,7 @@ describe("AgentSession newSession clears todo artifacts", () => {
 			sessionManager,
 			settings,
 			modelRegistry,
+			agentId: "new-session-todos-owner",
 		});
 
 		// Must subscribe to enable session persistence hooks
@@ -74,6 +78,10 @@ describe("AgentSession newSession clears todo artifacts", () => {
 		}
 		authStorage?.close();
 		authStorage = undefined;
+		await ownerManager?.dispose({ timeoutMs: 100 });
+		ownerManager = undefined;
+		AsyncJobManager.setInstance(undefined);
+		vi.restoreAllMocks();
 		if (tempDir && fs.existsSync(tempDir)) {
 			fs.rmSync(tempDir, { recursive: true });
 		}
@@ -122,5 +130,99 @@ describe("AgentSession newSession clears todo artifacts", () => {
 		expect(result.cancelled).toBe(false);
 		expect(result.selectedText).toBe("start task");
 		expect(session.getTodoPhases()).toHaveLength(0);
+	});
+
+	describe("AgentSession /new successor readiness", () => {
+		function localPath(name: string): string {
+			return internalUrls.resolveLocalUrlToPath(`local://${name}`, {
+				getArtifactsDir: () => sessionManager.getArtifactsDir(),
+				getSessionId: () => sessionManager.getSessionId(),
+			});
+		}
+
+		async function assertReadinessBoundary(useOwnerLease: boolean): Promise<void> {
+			if (useOwnerLease) {
+				ownerManager = new AsyncJobManager({ onJobComplete: async () => {} });
+				AsyncJobManager.setInstance(ownerManager);
+			}
+			const predecessor = {
+				id: session.sessionId,
+				file: session.sessionFile,
+				artifacts: sessionManager.getArtifactsDir(),
+				workflowGate: session.getWorkflowGateEmitter(),
+			};
+			const predecessorMarker = localPath("predecessor-ready.txt");
+			fs.writeFileSync(predecessorMarker, "predecessor");
+			const entered = Promise.withResolvers<void>();
+			const release = Promise.withResolvers<void>();
+			const initializeLocalRoot = internalUrls.initializeLocalRoot;
+			const readiness = vi.spyOn(internalUrls, "initializeLocalRoot").mockImplementationOnce(async options => {
+				entered.resolve();
+				await release.promise;
+				return await initializeLocalRoot(options);
+			});
+			try {
+				const transition = session.newSession();
+				await entered.promise;
+
+				expect(session.sessionId).toBe(predecessor.id);
+				expect(session.sessionFile).toBe(predecessor.file);
+				expect(sessionManager.getArtifactsDir()).toBe(predecessor.artifacts);
+				expect(session.getWorkflowGateEmitter()).toBe(predecessor.workflowGate);
+				expect(localPath("predecessor-ready.txt")).toBe(predecessorMarker);
+				expect(fs.readFileSync(predecessorMarker, "utf8")).toBe("predecessor");
+
+				release.resolve();
+				await expect(transition).resolves.toBe(true);
+				expect(session.sessionId).not.toBe(predecessor.id);
+				expect(session.sessionFile).not.toBe(predecessor.file);
+				expect(sessionManager.getArtifactsDir()).not.toBe(predecessor.artifacts);
+				expect(session.getWorkflowGateEmitter()).not.toBe(predecessor.workflowGate);
+				const successorPath = localPath("successor-ready.txt");
+				expect(fs.existsSync(path.dirname(successorPath))).toBe(true);
+			} finally {
+				release.resolve();
+				readiness.mockRestore();
+			}
+		}
+
+		it("does not publish a normal /new successor before its local root is ready", async () => {
+			await assertReadinessBoundary(false);
+		});
+
+		it("does not publish an owner-lease /new successor before its local root is ready", async () => {
+			await assertReadinessBoundary(true);
+		});
+
+		it("retains predecessor todos and executable queues after local readiness fails, then retries", async () => {
+			session.setTodoPhases([
+				{ name: "Retry", tasks: [{ content: "preserve predecessor", status: "in_progress" }] },
+			]);
+			session.queueDeferredMessageForTests(
+				{
+					role: "custom",
+					customType: "test",
+					content: "predecessor executable queue",
+					display: false,
+					timestamp: Date.now(),
+				},
+				false,
+			);
+			const beforeId = session.sessionId;
+			const beforeFile = session.sessionFile;
+			const beforeTodos = session.getTodoPhases();
+			const beforeQueue = session.getPendingNextTurnMessagesForTests();
+			vi.spyOn(internalUrls, "initializeLocalRoot").mockRejectedValueOnce(new Error("new readiness boom"));
+
+			await expect(session.newSession()).rejects.toThrow("new readiness boom");
+			expect(session.sessionId).toBe(beforeId);
+			expect(session.sessionFile).toBe(beforeFile);
+			expect(session.getTodoPhases()).toEqual(beforeTodos);
+			expect(session.getPendingNextTurnMessagesForTests()).toEqual(beforeQueue);
+
+			await expect(session.newSession()).resolves.toBe(true);
+			expect(session.sessionId).not.toBe(beforeId);
+			expect(session.getTodoPhases()).toHaveLength(0);
+		});
 	});
 });

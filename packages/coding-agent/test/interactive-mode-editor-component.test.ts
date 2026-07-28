@@ -3,6 +3,7 @@ import * as path from "node:path";
 import { stripVTControlCharacters } from "node:util";
 import { Agent } from "@sayknow-cli/agent-core";
 import type { AssistantMessage } from "@sayknow-cli/ai";
+import { formatKeyHint, formatKeyHints, type KeyDisplayContext } from "@sayknow-cli/coding-agent/config/keybindings";
 import { resetSettingsForTest, Settings, settings } from "@sayknow-cli/coding-agent/config/settings";
 import { initTheme, theme } from "@sayknow-cli/coding-agent/modes/theme/theme";
 import { CURSOR_MARKER, ImageProtocol, setTerminalImageProtocol, TERMINAL, Text, visibleWidth } from "@sayknow-cli/tui";
@@ -30,6 +31,10 @@ function forceTerminalSize(mode: InteractiveMode, columns: number, rows: number)
 	Object.defineProperty(mode.ui.terminal, "columns", { configurable: true, get: () => columns });
 	Object.defineProperty(mode.ui.terminal, "rows", { configurable: true, get: () => rows });
 }
+
+const injectedKeyDisplayContext: KeyDisplayContext = {
+	platform: process.platform === "darwin" ? "win32" : "darwin",
+};
 
 describe("InteractiveMode.setEditorComponent", () => {
 	let tempDir: TempDir;
@@ -65,7 +70,16 @@ describe("InteractiveMode.setEditorComponent", () => {
 			settings: Settings.isolated(),
 			modelRegistry,
 		});
-		mode = new InteractiveMode(session, "test");
+		mode = new InteractiveMode(
+			session,
+			"test",
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			injectedKeyDisplayContext,
+		);
 	});
 
 	afterEach(async () => {
@@ -98,6 +112,20 @@ describe("InteractiveMode.setEditorComponent", () => {
 			mode: "none",
 		});
 		expect(reconcile).toHaveBeenCalledTimes(1);
+	});
+
+	it("reports output revision changes while chrome-only editor reflow reports no output mutation", async () => {
+		await mode.init();
+		const report = vi.spyOn(mode.ui, "setViewportOutputSource");
+
+		mode.recordVisibleTranscriptMutation();
+		expect(report).toHaveBeenCalledTimes(1);
+		expect(report.mock.calls[0]?.[0]).toMatchObject({ revision: 1n });
+
+		report.mockClear();
+		mode.editor.setText("draft that changes editor chrome only");
+		mode.updateEditorChrome();
+		expect(report).not.toHaveBeenCalled();
 	});
 
 	it("renders an idle extension custom message through the real rebuild boundary", async () => {
@@ -421,8 +449,9 @@ describe("InteractiveMode.setEditorComponent", () => {
 		).toBe(true);
 	});
 	function expectedNewlineShortcutHint(): string {
-		const shortcut = process.platform === "win32" ? "Alt+Enter/Ctrl+J" : "Shift+Enter/Ctrl+J";
-		return `${shortcut}: New line`;
+		const newlineKeys =
+			injectedKeyDisplayContext.platform === "win32" ? ["alt+enter", "ctrl+j"] : ["shift+enter", "ctrl+j"];
+		return `${formatKeyHints(newlineKeys, injectedKeyDisplayContext)}: New line`;
 	}
 
 	it("keeps the composer right border inside a trailing gutter for CJK input", () => {
@@ -439,36 +468,88 @@ describe("InteractiveMode.setEditorComponent", () => {
 		expect(promptLine!).toContain("이전 커밋들");
 	});
 
-	function expectedQueueShortcutHint(): string {
-		const shortcut = process.platform === "win32" || process.platform === "darwin" ? "Alt+Q" : "Alt+Enter";
-		return `${shortcut}: Queue`;
+	function expectedQueueShortcutHint(action = "Queue"): string {
+		const shortcut = mode.keybindings.getKeys("app.message.queue")[0];
+		if (!shortcut) throw new Error("Expected a queue message keybinding");
+		return `${formatKeyHint(shortcut, injectedKeyDisplayContext)}: ${action}`;
+	}
+	function expectedSubmitShortcutHint(action = "Steer"): string {
+		const shortcut = mode.keybindings.getDisplayString("tui.input.submit", injectedKeyDisplayContext);
+		if (!shortcut) throw new Error("Expected a submit keybinding");
+		return `${shortcut}: ${action}`;
 	}
 
-	it("shows busy steering and queueing hints only while work is active", () => {
-		let rendered = mode.editor.render(160).map(stripRenderControls).join("\n");
+	it("keeps common shortcut discovery in the composer and shows actionable busy delivery hints", () => {
+		let rendered = mode.editor.render(300).map(stripRenderControls).join("\n");
 		expect(rendered).toContain("Type your message...");
 		expect(rendered).toContain(expectedNewlineShortcutHint());
-		expect(rendered).toContain("Ctrl+C: Clear");
-		expect(rendered).toContain("Ctrl+R: Search history");
-		expect(rendered).toContain("Shift+Tab: Reasoning");
-		expect(rendered).not.toContain("Enter: Steer");
-		expect(rendered).not.toContain(expectedQueueShortcutHint());
+		expect(rendered).toContain(`${formatKeyHint("ctrl+c", injectedKeyDisplayContext)}: Clear`);
+		expect(rendered).toContain(`${formatKeyHint("ctrl+r", injectedKeyDisplayContext)}: History`);
+		expect(rendered).toContain(`${formatKeyHint("shift+tab", injectedKeyDisplayContext)}: Thinking`);
+		expect(rendered).not.toContain(expectedSubmitShortcutHint());
+		expect(rendered).toContain(expectedQueueShortcutHint("Queue (busy)"));
+		const narrowRendered = mode.editor.render(80).map(stripRenderControls).join("\n");
+		expect(narrowRendered).toContain(expectedQueueShortcutHint("Queue (busy)"));
 
 		(session.agent as unknown as { state: { isStreaming: boolean } }).state.isStreaming = true;
 		mode.updateEditorChrome();
 
-		rendered = mode.editor.render(160).map(stripRenderControls).join("\n");
+		rendered = mode.editor.render(300).map(stripRenderControls).join("\n");
 		expect(rendered).toContain("Type your message...");
-		expect(rendered).toContain("Enter: Steer");
+		expect(rendered).toContain(expectedSubmitShortcutHint());
 		expect(rendered).toContain(expectedQueueShortcutHint());
 
 		(session.agent as unknown as { state: { isStreaming: boolean } }).state.isStreaming = false;
 		mode.updateEditorChrome();
 
-		rendered = mode.editor.render(160).map(stripRenderControls).join("\n");
+		rendered = mode.editor.render(300).map(stripRenderControls).join("\n");
 		expect(rendered).toContain("Type your message...");
-		expect(rendered).not.toContain("Enter: Steer");
-		expect(rendered).not.toContain(expectedQueueShortcutHint());
+		expect(rendered).not.toContain(expectedSubmitShortcutHint());
+		expect(rendered).toContain(expectedQueueShortcutHint("Queue (busy)"));
+	});
+	it("uses the effective submit binding in busy hints and omits it when unbound", () => {
+		(session.agent as unknown as { state: { isStreaming: boolean } }).state.isStreaming = true;
+		mode.keybindings.setUserBindings({ "tui.input.submit": "ctrl+enter" });
+		mode.updateEditorChrome();
+
+		let rendered = mode.editor.render(300).map(stripRenderControls).join("\n");
+		const remappedSubmit = mode.keybindings.getDisplayString("tui.input.submit", injectedKeyDisplayContext);
+		expect(rendered).toContain(`${remappedSubmit}: Steer`);
+		expect(rendered).toContain(expectedQueueShortcutHint());
+
+		mode.keybindings.setUserBindings({
+			"tui.input.submit": [],
+			"app.message.queue": [],
+			"app.message.followUp": [],
+		});
+		mode.updateEditorChrome();
+
+		rendered = mode.editor.render(300).map(stripRenderControls).join("\n");
+		expect(rendered).not.toContain(": Steer");
+		expect(rendered).toContain(`${formatKeyHint("shift+tab", injectedKeyDisplayContext)}: Thinking`);
+		expect(rendered).not.toContain(": Queue");
+		expect(rendered).toContain("Type your message...");
+	});
+	it("propagates the injected non-host key display context to the composed TUI surfaces", async () => {
+		vi.spyOn(mode.ui, "start").mockImplementation(() => {});
+		forceTerminalSize(mode, 160, 40);
+		await mode.init();
+
+		const composer = mode.editor.render(300).map(stripRenderControls).join("\n");
+		const welcome = mode.ui.render(160).map(stripRenderControls).join("\n");
+		expect(composer).toContain(expectedNewlineShortcutHint());
+		expect(composer).toContain(mode.keybindings.getDisplayString("app.model.select", injectedKeyDisplayContext));
+		expect(welcome).toContain(`${formatKeyHint("ctrl+c", injectedKeyDisplayContext)} clear`);
+
+		mode.statusLine.setActionRegistry(
+			{
+				all: () => [{ id: "app.model.select", title: "Select model", domains: ["composer"] }],
+				isAvailable: () => true,
+			} as never,
+			() => mode.keybindings,
+		);
+		const status = mode.statusLine.render(500).map(stripRenderControls).join("\n");
+		expect(status).not.toContain(mode.keybindings.getDisplayString("app.model.select", injectedKeyDisplayContext));
 	});
 
 	it("renders the composer directly below the status line without hook widgets", async () => {
@@ -537,6 +618,19 @@ describe("InteractiveMode.setEditorComponent", () => {
 			);
 			expect(lines.join("\n")).not.toContain("Type your message...");
 		}
+	});
+
+	it("keeps the focused composer visible at constrained terminal height", async () => {
+		vi.spyOn(mode.ui, "start").mockImplementation(() => {});
+		forceTerminalSize(mode, 48, 3);
+		await mode.init();
+		mode.editor.focused = true;
+		mode.editor.setText("keep this focused draft visible");
+
+		const rendered = mode.ui.render(48).map(stripRenderControls);
+		expect(rendered.join("\n")).toContain("keep this focused draft visible");
+		expect(rendered.some(line => line.trimEnd().startsWith("╭"))).toBe(true);
+		expect(rendered.some(line => line.trimEnd().endsWith("╯"))).toBe(true);
 	});
 
 	it("keeps the default prompt prefix while reflecting shell modes in border color", () => {

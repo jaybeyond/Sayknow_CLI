@@ -36,7 +36,7 @@ const cronSchema = z
 			.string()
 			.optional()
 			.describe(
-				"(op=create, required) Prompt to inject between turns when the cron fires. May reference slash commands (e.g. '/review-pr 1234') or natural-language instructions.",
+				"(op=create, required) Prompt to inject between turns when the cron fires. Every firing starts a normal agent turn whose response may be visible; use a persistent monitor, not cron, for ongoing polling that should emit only on state changes.",
 			),
 		recurring: z
 			.boolean()

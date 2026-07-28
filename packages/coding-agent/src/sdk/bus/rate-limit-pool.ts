@@ -116,6 +116,14 @@ export class RateLimitPool<T = unknown> {
 		return total;
 	}
 
+	/** Whether any queued item currently matches the predicate. */
+	someQueued(predicate: (item: RateLimitItem<T>) => boolean): boolean {
+		for (const queue of this.lanes.values()) {
+			if (queue.some(entry => predicate(entry.item))) return true;
+		}
+		return false;
+	}
+
 	/** Current available token count (after refill at `now`). */
 	availableTokens(nowMs: number = this.now()): number {
 		this.refill(nowMs);

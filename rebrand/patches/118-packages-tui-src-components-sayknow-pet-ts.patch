@@ -1,0 +1,258 @@
+--- a/packages/tui/src/components/sayknow-pet.ts
++++ b/packages/tui/src/components/sayknow-pet.ts
+@@ -1,8 +1,8 @@
+ /**
+  * ┌─ SAYKNOW PET SPRITE SPEC ────────────────────────────────────────────────┐
+- * The pet is a 16×16 pixel sprite drawn beside the composer. Everything here is
+- * data: no PNGs, no assets — each frame is 16 strings of 16 chars, encoded to a
+- * sixel or kitty escape at runtime. Author a new frame by drawing a grid.
++ * The pet is a 16×16 pixel octopus drawn beside the composer. Everything here
++ * is data: no PNGs, no assets — each frame is 16 strings of 16 chars, encoded
++ * to a sixel or kitty escape at runtime. Author a new frame by drawing a grid.
+  *
+  * GRID RULES
+  * - Exactly 16 rows × 16 columns. Only PALETTE keys below are valid chars.
+@@ -10,18 +10,19 @@
+  *   snug beside the input box (the widget reserves +1 column of slack).
+  *
+  * PALETTE (char → role) — see PALETTE for exact RGB:
+- *   .=transparent  K=dark outline  R=body red  r=red highlight
+- *   V=visor screen G=visor glow(green)  H=satgat straw  h=satgat brim
+- *   b=belly tan    A=antenna
++ *   .=transparent  K=dark outline  R=mantle body  r=body highlight
++ *   W=eye white    V=pupil         G=eye sparkle  b=underside
++ *   w=tear         H h A=reserved (unused by the octopus art)
+  *
+  * FRAME CATALOG (SayknowPixelFrameName → PIXEL_GRIDS):
+  *   base    idle rest; also the dance "drop/settle" beat
+  *   gazeL   eyes glance left    ┐ idle loop (see sayknow-pet-widget IDLE_LOOP)
+  *   gazeR   eyes glance right   │
+- *   flicker visor blink         ┘
+- *   flex    both claws up + `^^`; dance accent + random idle flex burst
+- *   danceL  left claw up + `><` + feet step left   ┐ work loop (PARA_PARA_STEPS)
+- *   danceR  right claw up + `^^` + feet step right  ┘
++ *   flicker eyes blink          ┘
++ *   flex    sparkly "yay" eyes; dance accent + random idle flex burst
++ *   danceL  tentacles sway left   ┐ work loop (PARA_PARA_STEPS)
++ *   danceR  tentacles sway right  ┘
++ *   cry1..3 a tear trails from the outer eye corners (BlueOcto sob)
+  *
+  * RENDERING: buildSayknowPixelFrames({ protocol, cellWidthPx, cellHeightPx,
+  * targetRows: 2 }) scales the art to 2 terminal rows and encodes each frame
+@@ -56,125 +57,81 @@
+ 
+ const RED_PALETTE: Palette = {
+ 	".": null, // transparent
+-	K: [74, 20, 8], // outline dark
+-	R: [229, 72, 46], // body
++	K: [74, 20, 8], // outline (dark)
++	R: [229, 72, 46], // mantle body
+ 	r: [255, 122, 82], // body highlight
+-	V: [14, 22, 14], // visor screen (dark)
+-	G: [61, 245, 146], // visor glow green
+-	H: [232, 180, 90], // satgat straw
+-	h: [169, 117, 47], // satgat brim
+-	b: [216, 154, 74], // belly tan
+-	A: [196, 60, 30], // antenna
+-	w: [200, 230, 255], // tear (BlueSayknow sob)
++	W: [240, 244, 250], // eye white
++	V: [24, 18, 16], // pupil
++	G: [255, 214, 128], // eye sparkle
++	b: [255, 150, 120], // underside
++	H: [232, 180, 90], // reserved
++	h: [169, 117, 47], // reserved
++	A: [196, 60, 30], // reserved
++	w: [200, 230, 255], // tear (BlueOcto sob)
+ };
+-// BlueSayknow recolors the crab to match the "blue-octopus" theme (crabShell body, claw
+-// highlight, deep-ocean outline, azure belly, foam tears); the straw hat and green
+-// are shared across skins.
++// BlueOcto recolors the octopus for the blue-octopus theme: ocean outline, a bright
++// mantle, azure highlight and foam tears. Reserved hat keys are shared but unused.
+ const BLUE_PALETTE: Palette = {
+ 	...RED_PALETTE,
+ 	K: [7, 38, 74], // deep ocean (outline)
+-	R: [47, 155, 255], // crabShell (body)
+-	r: [94, 200, 255], // claw (highlight)
+-	b: [125, 211, 252], // azure (belly)
+-	A: [37, 120, 200], // muted blue (antenna)
++	R: [47, 155, 255], // mantle body
++	r: [94, 200, 255], // highlight
++	W: [240, 246, 252], // eye white
++	V: [10, 22, 40], // pupil
++	G: [188, 244, 255], // eye sparkle
++	b: [125, 211, 252], // azure (underside)
++	A: [37, 120, 200], // reserved
+ 	w: [230, 247, 255], // foam (tear)
+ };
+ 
+-// ------------------------------------------------------------------------
+-// Real-pixel frames (codex-pets style): the same grids encoded as terminal
+-// image escapes, for absolute-positioned overlay rendering. No PNG round
+-// trip — sixel and kitty raw-RGBA are generated straight from the grids.
+-// ------------------------------------------------------------------------
++// 16x16 octopus grids used by the pixel pet -------------------------------
++const mix = (base: string[], rowOverrides: Record<number, string>): string[] =>
++	base.map((row, i) => rowOverrides[i] ?? row);
+ 
+-// 16x16 full-body grids used by the pixel pet -----------------------------
+ // biome-ignore format: pixel grid stays one row per line
+ const F0 = [
+-	"..A.........A...",
+-	"...A..HHHH..A...",
+-	"....AHHHHHHA....",
+-	".HHHHHHHHHHHHHH.",
+-	".hhhhhhhhhhhhhh.",
+-	"....KRRRRRRK....",
+-	".KK.KGGVVGGK.KK.",
+-	"KRRKKVVVVVVKKRRK",
+-	"KRrRKRRRRRRKRrRK",
+-	".KRRKKRbbRKKRRK.",
+-	".....KRbbRK.....",
+-	".....KRbbRK.....",
+-	".....KRRRRK.....",
+-	"....KRRRRRRK....",
+-	"...KRrK..KrRK...",
+-	"...K......K.....",
+-];
+-
+-// Eye-only gaze frames: identical body, only visor row 6 changes.
+-const FL = F0.map((row, i) => (i === 6 ? ".KK.KGGVGGVK.KK." : row));
+-const FR = F0.map((row, i) => (i === 6 ? ".KK.KVGGVGGK.KK." : row));
+-// Visor flicker (blink).
+-const FF = F0.map((row, i) => {
+-	if (i === 6) return ".KK.KVVVVVVK.KK.";
+-	if (i === 7) return "KRRKKVGVVGVKKRRK";
+-	return row;
+-});
+-
+-// Both round claws raised with a three-pixel-tall ^ ^ victory face (the dance's
+-// "both arms up" beat). Shares base's body and feet so the sequence stays planted.
+-// biome-ignore format: pixel grid stays one row per line
+-const FX = [
+-	"..A.........A...",
+-	"...A..HHHH..A...",
+-	"....AHHHHHHA....",
+-	".HHHHHHHHHHHHHH.",
+-	".hhhhhhhhhhhhhh.",
+-	".KK.KRRRRRRK.KK.",
+-	"KRRKKVGVVGVKKRRK",
+-	"KRrRKGVGGVGKRrRK",
+-	".KRRKVVVVVVKRRK.",
+-	"....KKRbbRKK....",
+-	".....KRbbRK.....",
+-	".....KRbbRK.....",
+-	".....KRRRRK.....",
+-	"....KRRRRRRK....",
+-	"...KRrK..KrRK...",
+-	"...K......K.....",
++	"................",
++	".....KKKKKK.....",
++	"...KKRRRRRRKK...",
++	"..KRRRRRRRRRRK..",
++	".KRRRRRRRRRRRRK.",
++	".KRRRRRRRRRRRRK.",
++	"KRRWWRRRRRRWWRRK",
++	"KRRWVRRRRRRVWRRK",
++	"KRRRRRRrrRRRRRRK",
++	".KRRRRRRRRRRRRK.",
++	".KRRRRRRRRRRRRK.",
++	"KRRKKRRKKRRKKRRK",
++	"KRRKKRRKKRRKKRRK",
++	".RK.KRK.KRK.KRR.",
++	".K...K...K...K..",
++	"................",
+ ];
+ 
+-// Para-para dance: pump the round claws up one at a time (left then right) while
+-// stepping the feet the opposite way, with cute faces (danceL ">< ", danceR "^ ^"),
+-// so the arms bob AND the legs shuffle side to side while working.
+-const DL = F0.map((row, i) => {
+-	if (i === 5) return ".KK.KRRRRRRK....";
+-	if (i === 6) return "KRRKKGVVVGVK.KK.";
+-	if (i === 7) return "KRrRKVGVGVVKKRRK";
+-	if (i === 8) return ".KRRKGVVVGVKRrRK";
+-	if (i === 9) return "....KKRbbRKKRRK.";
+-	if (i === 13) return "...KRRRRRRK.....";
+-	if (i === 14) return "..KRrK..KrRK....";
+-	if (i === 15) return "..K......K......";
+-	return row;
++// Eyes glance by shifting the pupils inside the eye whites (row 7).
++const FL = mix(F0, { 7: "KRRVWRRRRRRVWRRK" });
++const FR = mix(F0, { 7: "KRRWVRRRRRRWVRRK" });
++// Blink: both eyes squeeze shut.
++const FF = mix(F0, { 6: "KRRRRRRRRRRRRRRK", 7: "KRRKKRRRRRRKKRRK" });
++// Flex accent: sparkly "yay" eyes.
++const FX = mix(F0, { 7: "KRRGVRRRRRRVGRRK" });
++// Para-para work dance: sway every tentacle one column left, then right.
++const DL = mix(F0, {
++	11: "RRKKRRKKRRKKRRK.",
++	12: "RRKKRRKKRRKKRRK.",
++	13: "RK.KRK.KRK.KRR..",
++	14: "K...K...K...K...",
+ });
+-const DR = F0.map((row, i) => {
+-	if (i === 5) return "....KRRRRRRK.KK.";
+-	if (i === 6) return ".KK.KVGVVGVKKRRK";
+-	if (i === 7) return "KRRKKGVGGVGKRrRK";
+-	if (i === 8) return "KRrRKVVVVVVKRRK.";
+-	if (i === 9) return ".KRRKKRbbRKK....";
+-	if (i === 13) return ".....KRRRRRRK...";
+-	if (i === 14) return "....KRrK..KrRK..";
+-	if (i === 15) return "....K......K....";
+-	return row;
++const DR = mix(F0, {
++	11: ".KRRKKRRKKRRKKRR",
++	12: ".KRRKKRRKKRRKKRR",
++	13: "..RK.KRK.KRK.KRR",
++	14: "..K...K...K...K.",
+ });
+-
+-// BlueSayknow's idle sob: a squeezed `>< ` visor (arms down, unlike RedSayknow's flex)
+-// with a light tear that falls diagonally outward across the three frames.
+-const CRY_FACE: Record<number, string> = {
+-	6: ".KK.KGVVVGVK.KK.",
+-	7: "KRRKKVGVGVVKKRRK",
+-	8: "KRrRKGVVVGVKRrRK",
+-};
+-const CR1 = F0.map((row, i) => CRY_FACE[i] ?? (i === 10 ? "....wKRbbRKw...." : row));
+-const CR2 = F0.map((row, i) => CRY_FACE[i] ?? (i === 11 ? "...w.KRbbRK.w..." : row));
+-const CR3 = F0.map((row, i) => CRY_FACE[i] ?? (i === 12 ? "..w..KRRRRK..w.." : row));
++// BlueOcto idle sob: a tear trails down from the outer eye corners.
++const CR1 = mix(F0, { 8: "KRRwRRrrRRRRwRRK" });
++const CR2 = mix(F0, { 9: ".KRwRRRRRRRRwRK." });
++const CR3 = mix(F0, { 10: ".KRwRRRRRRRRwRK." });
+ 
+ /** Logical pixel-pet frame names shared by the overlay state machine. */
+ export type SayknowPixelFrameName =
+@@ -226,7 +183,7 @@
+ /** Everything that defines a pet skin: identity, UI copy, colors and behavior. */
+ export interface PetSkin {
+ 	id: PetSkinId;
+-	/** Selector/settings label, e.g. "RedSayknow". */
++	/** Selector/settings label, e.g. "RedOctopus". */
+ 	label: string;
+ 	/** One-line selector/settings description. */
+ 	description: string;
+@@ -239,8 +196,8 @@
+ export const PET_SKINS: Record<PetSkinId, PetSkin> = {
+ 	red: {
+ 		id: "red",
+-		label: "RedSayknow",
+-		description: "The Red Crab, who likes to work-out.",
++		label: "RedOctopus",
++		description: "The red octopus, who loves to work out.",
+ 		palette: RED_PALETTE,
+ 		burst: {
+ 			intro: PARA_PARA_STEPS,
+@@ -249,8 +206,8 @@
+ 	},
+ 	blue: {
+ 		id: "blue",
+-		label: "BlueSayknow",
+-		description: "The Blue Crab, who wants to rest.",
++		label: "BlueOctopus",
++		description: "The blue octopus, who wants to rest.",
+ 		palette: BLUE_PALETTE,
+ 		burst: {
+ 			intro: PARA_PARA_STEPS,

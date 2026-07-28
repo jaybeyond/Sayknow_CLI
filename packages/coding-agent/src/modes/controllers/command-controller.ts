@@ -10,12 +10,12 @@ import {
 	type UsageLimit,
 	type UsageReport,
 } from "@sayknow-cli/ai";
-import { Loader, Markdown, padding, Spacer, Text, visibleWidth } from "@sayknow-cli/tui";
+import { type Keybinding, Loader, Markdown, padding, Spacer, Text, visibleWidth } from "@sayknow-cli/tui";
 import { formatDuration, Snowflake, setProjectDir } from "@sayknow-cli/utils";
-import { $ } from "bun";
 import { resolveAppendOnlyMode } from "../../append-only-mode";
 import { jobElapsedMs } from "../../async";
 import { reset as resetCapabilities } from "../../capability";
+import type { KeybindingsManager } from "../../config/keybindings";
 import { clearClaudePluginRootsCache } from "../../discovery/helpers";
 import { loadCustomShare } from "../../export/custom-share";
 import type { CompactOptions } from "../../extensibility/extensions/types";
@@ -36,7 +36,7 @@ import { EvalExecutionComponent } from "../../modes/components/eval-execution";
 import { getMarkdownTheme, getSymbolTheme, theme } from "../../modes/theme/theme";
 import type { InteractiveModeContext } from "../../modes/types";
 import { computeContextBreakdown, renderContextUsage } from "../../modes/utils/context-usage";
-import { buildHotkeysMarkdown } from "../../modes/utils/hotkeys-markdown";
+import { buildHotkeysMarkdown, formatHotkeyMarkdownCode } from "../../modes/utils/hotkeys-markdown";
 import { buildToolsMarkdown } from "../../modes/utils/tools-markdown";
 import type { AsyncJobSnapshotItem } from "../../session/agent-session";
 import type { AuthStorage } from "../../session/auth-storage";
@@ -59,6 +59,43 @@ function showMarkdownPanel(ctx: InteractiveModeContext, title: string, markdown:
 	ctx.chatContainer.addChild(new Markdown(markdown.trim(), 1, 1, getMarkdownTheme()));
 	ctx.chatContainer.addChild(new DynamicBorder());
 	ctx.ui.requestRender();
+}
+
+export function buildHelpMarkdown(keybindings: Pick<KeybindingsManager, "getAccessibleDisplayString">): string {
+	const displayKey = (action: Keybinding): string => keybindings.getAccessibleDisplayString(action) || "Disabled";
+	const sessionNewKey = formatHotkeyMarkdownCode(displayKey("app.session.new"));
+	const selectModelKey = formatHotkeyMarkdownCode(displayKey("app.model.select"));
+	const queueMessageKey = formatHotkeyMarkdownCode(displayKey("app.message.queue"));
+	const dequeueMessageKey = formatHotkeyMarkdownCode(displayKey("app.message.dequeue"));
+	const autocompleteNavigationKeys = formatHotkeyMarkdownCode(
+		`${displayKey("tui.select.up")}/${displayKey("tui.select.down")}`,
+		false,
+	);
+	const autocompleteConfirmKeys = formatHotkeyMarkdownCode(
+		`${displayKey("tui.input.submit")}/${displayKey("tui.input.tab")}`,
+		false,
+	);
+
+	return [
+		"**Beginner actions**",
+		"",
+		"| Action | How |",
+		"|---|---|",
+		`| Start a fresh session | ${sessionNewKey} or \`/new\` |`,
+		"| Resume another session | `/resume` |",
+		"| Show session details | `/session info` |",
+		"| Delete current session transcript/artifacts | `/session delete` |",
+		`| Select a model | \`/model\` or ${selectModelKey} |`,
+		`| Queue a message for the next turn | ${queueMessageKey} |`,
+		`| Select or edit a queued message | ${dequeueMessageKey} |`,
+		"| Show all shortcuts | `?` on an empty prompt or `/hotkeys` |",
+		"",
+		"**Finding commands**",
+		"",
+		`- Type \`/\` to browse slash commands, then use ${autocompleteNavigationKeys} and ${autocompleteConfirmKeys}.`,
+		"- Type `#` to browse prompt actions like starting a session, pasting an image, or moving the cursor.",
+		"- Type `!` for shell commands and `$` for Python snippets.",
+	].join("\n");
 }
 
 export class CommandController {
@@ -120,21 +157,34 @@ export class CommandController {
 	}
 
 	async handleShareCommand(): Promise<void> {
-		const tmpFile = path.join(os.tmpdir(), `${Snowflake.next()}.html`);
-		const cleanupTempFile = async () => {
-			try {
-				await fs.rm(tmpFile, { force: true });
-			} catch {
-				// Ignore cleanup errors
-			}
-		};
+		let tempDir: string | undefined;
 		try {
-			await this.ctx.session.exportToHtml(tmpFile);
-		} catch (error: unknown) {
-			this.ctx.showError(`Failed to export session: ${error instanceof Error ? error.message : "Unknown error"}`);
-			return;
+			let tmpFile: string;
+			try {
+				tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "skc-share-"));
+				if (process.platform !== "win32") await fs.chmod(tempDir, 0o700);
+				tmpFile = path.join(tempDir, "session.html");
+				const file = await fs.open(tmpFile, "wx", 0o600);
+				await file.close();
+				await this.ctx.session.exportToHtml(tmpFile);
+				if (process.platform !== "win32") await fs.chmod(tmpFile, 0o600);
+			} catch (error: unknown) {
+				this.ctx.showError(`Failed to export session: ${error instanceof Error ? error.message : "Unknown error"}`);
+				return;
+			}
+			await this.#shareExport(tmpFile);
+		} finally {
+			if (tempDir) {
+				try {
+					await fs.rm(tempDir, { recursive: true, force: true });
+				} catch {
+					// Ignore cleanup errors
+				}
+			}
 		}
+	}
 
+	async #shareExport(tmpFile: string): Promise<void> {
 		try {
 			const customShare = await loadCustomShare();
 			if (customShare) {
@@ -149,7 +199,6 @@ export class CommandController {
 					this.ctx.editorContainer.clear();
 					this.ctx.editorContainer.addChild(this.ctx.editor);
 					this.ctx.ui.setFocus(this.ctx.editor);
-					await cleanupTempFile();
 				};
 
 				try {
@@ -176,20 +225,22 @@ export class CommandController {
 				}
 			}
 		} catch (err) {
-			await cleanupTempFile();
 			this.ctx.showError(err instanceof Error ? err.message : String(err));
 			return;
 		}
 
 		try {
-			const authResult = await $`gh auth status`.quiet().nothrow();
-			if (authResult.exitCode !== 0) {
-				await cleanupTempFile();
+			const authProcess = Bun.spawn(["gh", "auth", "status"], {
+				env: process.env,
+				stdin: "ignore",
+				stdout: "ignore",
+				stderr: "ignore",
+			});
+			if ((await authProcess.exited) !== 0) {
 				this.ctx.showError("GitHub CLI is not logged in. Run 'gh auth login' first.");
 				return;
 			}
 		} catch {
-			await cleanupTempFile();
 			this.ctx.showError("GitHub CLI (gh) is not installed. Install it from https://cli.github.com/");
 			return;
 		}
@@ -205,27 +256,40 @@ export class CommandController {
 			this.ctx.editorContainer.clear();
 			this.ctx.editorContainer.addChild(this.ctx.editor);
 			this.ctx.ui.setFocus(this.ctx.editor);
-			await cleanupTempFile();
 		};
 
-		loader.onAbort = () => {
-			void restoreEditor();
-			this.ctx.showStatus("Share cancelled");
-		};
-
+		let cancellationRequested = false;
 		try {
-			const result = await $`gh gist create --public=false ${tmpFile}`.quiet().nothrow();
-			if (loader.signal.aborted) return;
+			const gistProcess = Bun.spawn(["gh", "gist", "create", "--public=false", tmpFile], {
+				env: process.env,
+				stdin: "ignore",
+				stdout: "pipe",
+				stderr: "pipe",
+				signal: loader.signal,
+			});
+			loader.onAbort = () => {
+				cancellationRequested = gistProcess.exitCode === null;
+			};
+			const stdoutPromise = new Response(gistProcess.stdout).text();
+			const stderrPromise = new Response(gistProcess.stderr).text();
+			const exitCode = await gistProcess.exited;
+			const [stdout, stderr] = await Promise.all([stdoutPromise, stderrPromise]);
+
+			if (cancellationRequested) {
+				await restoreEditor();
+				this.ctx.showStatus("Share cancelled");
+				return;
+			}
 
 			await restoreEditor();
 
-			if (result.exitCode !== 0) {
-				const errorMsg = result.stderr.toString("utf-8").trim() || "Unknown error";
+			if (exitCode !== 0) {
+				const errorMsg = stderr.trim() || "Unknown error";
 				this.ctx.showError(`Failed to create gist: ${errorMsg}`);
 				return;
 			}
 
-			const gistUrl = result.stdout.toString("utf-8").trim();
+			const gistUrl = stdout.trim();
 			const gistId = gistUrl.split("/").pop();
 			if (!gistId) {
 				this.ctx.showError("Failed to parse gist ID from gh output");
@@ -236,10 +300,12 @@ export class CommandController {
 			this.ctx.showStatus(`Share URL: ${previewUrl}\nGist: ${gistUrl}`);
 			this.openInBrowser(previewUrl);
 		} catch (error: unknown) {
-			if (!loader.signal.aborted) {
-				await restoreEditor();
-				this.ctx.showError(`Failed to create gist: ${error instanceof Error ? error.message : "Unknown error"}`);
+			await restoreEditor();
+			if (cancellationRequested) {
+				this.ctx.showStatus("Share cancelled");
+				return;
 			}
+			this.ctx.showError(`Failed to create gist: ${error instanceof Error ? error.message : "Unknown error"}`);
 		}
 	}
 
@@ -577,26 +643,7 @@ export class CommandController {
 	}
 
 	handleHelpCommand(): void {
-		const sessionNewKey = this.ctx.keybindings.getDisplayString("app.session.new") || "/new";
-		const markdown = [
-			"**Beginner actions**",
-			"",
-			"| Action | How |",
-			"|---|---|",
-			`| Start a fresh session | \`${sessionNewKey}\` or \`/new\` |`,
-			"| Resume another session | `/resume` |",
-			"| Show session details | `/session info` |",
-			"| Delete current session transcript/artifacts | `/session delete` |",
-			"| Select a model | `/model` or `Ctrl+L` |",
-			"| Show all shortcuts | `?` on an empty prompt or `/hotkeys` |",
-			"",
-			"**Finding commands**",
-			"",
-			"- Type `/` to browse slash commands, then use arrows and Enter/Tab.",
-			"- Type `#` to browse prompt actions like starting a session, pasting an image, or moving the cursor.",
-			"- Type `!` for shell commands and `$` for Python snippets.",
-		].join("\n");
-		showMarkdownPanel(this.ctx, "SKC Help", markdown);
+		showMarkdownPanel(this.ctx, "SKC Help", buildHelpMarkdown(this.ctx.keybindings));
 	}
 
 	handleToolsCommand(): void {

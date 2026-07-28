@@ -1,0 +1,24 @@
+--- a/packages/coding-agent/src/modes/components/hook-editor.ts
++++ b/packages/coding-agent/src/modes/components/hook-editor.ts
+@@ -96,17 +96,14 @@
+ 			return;
+ 		}
+ 
+-		// Submit on Enter and Ctrl+Enter encodings. On Windows, raw LF is reserved for
+-		// terminal newline mappings (Shift+Enter/Ctrl+J); plain Enter reports CR.
+-		if (
+-			!isWindowsRawLfNewlineInput(keyData) &&
+-			(matchesKey(keyData, "enter") || matchesKey(keyData, "return") || matchesKey(keyData, "ctrl+enter"))
+-		) {
++		// Submit on plain Enter encodings. On Windows, raw LF is reserved for terminal
++		// newline mappings (Shift+Enter/Ctrl+J/Ctrl+Enter); plain Enter reports CR.
++		if (!isWindowsRawLfNewlineInput(keyData) && (matchesKey(keyData, "enter") || matchesKey(keyData, "return"))) {
+ 			this.#onSubmitCallback(this.#editor.getText());
+ 			return;
+ 		}
+ 
+-		// Let Editor handle newline-producing variants (Shift+Enter, Ctrl+J, Alt+Enter, etc.)
++		// Let Editor handle modified newline-producing variants (Shift+Enter, Ctrl+Enter, Alt+Enter, etc.)
+ 		this.#editor.handleInput(keyData);
+ 	}
+ 

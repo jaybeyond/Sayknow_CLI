@@ -8,6 +8,7 @@ import type { PlanModeState } from "../../src/plan-mode/state";
 import type { CreateAgentSessionOptions, CreateAgentSessionResult } from "../../src/sdk";
 import * as sdkModule from "../../src/sdk";
 import type { AgentSession, AgentSessionEvent, PromptOptions } from "../../src/session/agent-session";
+import * as repositoryBindingModule from "../../src/skc-runtime/repository-binding";
 import { TaskTool } from "../../src/task";
 import * as discoveryModule from "../../src/task/discovery";
 import type { AgentDefinition, TaskParams } from "../../src/task/types";
@@ -163,6 +164,14 @@ function mockIsolation(): void {
 	vi.spyOn(worktreeModule, "ensureIsolation").mockResolvedValue(isolationHandle);
 	vi.spyOn(worktreeModule, "captureDeltaPatch").mockResolvedValue({ rootPatch: "", nestedPatches: [] });
 	vi.spyOn(worktreeModule, "cleanupIsolation").mockResolvedValue();
+	const binding: repositoryBindingModule.RepositoryBinding = {
+		schema: "skc.repository_binding.v1",
+		worktreeRoot: "/repo",
+		commonDir: null,
+		displayPath: "/repo",
+	};
+	vi.spyOn(repositoryBindingModule, "resolveTaskRepositoryBinding").mockResolvedValue(binding);
+	vi.spyOn(repositoryBindingModule, "assertExecutionRootMatchesRepositoryBinding").mockResolvedValue(binding);
 }
 
 describe("subagent LSP availability", () => {

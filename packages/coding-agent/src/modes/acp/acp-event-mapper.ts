@@ -197,21 +197,30 @@ export function mapAgentSessionEventToAcpSessionUpdates(
 			return [toSessionNotification(sessionId, update)];
 		}
 		case "tool_execution_end": {
-			const resultContent = [...extractDiffToolCallContent(event.result), ...extractToolCallContent(event.result)];
-			const content = mergeToolUpdateContent(
-				buildToolStartContent(event.toolName, getToolExecutionEndArgs(event, options)),
-				resultContent,
-			);
+			const args = getToolExecutionEndArgs(event, options);
+			const resultContent = [
+				...extractDiffToolCallContent(event.result, options.cwd),
+				...extractToolCallContent(event.result),
+			];
+			const content = mergeToolUpdateContent(buildToolStartContent(event.toolName, args), resultContent);
 			const update: SessionUpdate = {
 				sessionUpdate: "tool_call_update",
 				toolCallId: event.toolCallId,
 				status: event.isError ? "failed" : "completed",
 				rawOutput: event.result,
 			};
+			if (event.isError) {
+				// Failure is carried by `status`; `kind` stays the tool's real category so
+				// clients keep the icon/treatment established by the initial `tool_call`.
+				update.title = `Failed: ${buildToolTitle(event.toolName, args, undefined)}`;
+			}
 			if (content.length > 0) {
 				update.content = content;
 			}
-			const locations = extractToolLocationsFromResult(event.result, options.cwd);
+			const locations = mergeToolLocations(
+				extractToolLocations(args, options.cwd),
+				extractToolLocationsFromResult(event.result, options.cwd),
+			);
 			if (locations.length > 0) {
 				update.locations = locations;
 			}
@@ -295,14 +304,83 @@ export function mapAgentSessionEventToAcpSessionUpdates(
 			return [toSessionNotification(sessionId, { sessionUpdate: "session_info_update", _meta: meta })];
 		}
 		case "auto_retry_start":
+			return [
+				toSessionNotification(sessionId, {
+					sessionUpdate: "session_info_update",
+					_meta: {
+						skcPhase: "retrying",
+						skcRetryState: "waiting",
+						skcRetryAttempt: event.attempt,
+						skcRetryMaxAttempts: event.maxAttempts,
+						skcRetryDelayMs: event.delayMs,
+						skcRetryErrorMessage: event.errorMessage,
+						skcRetryUnbounded: event.unbounded ?? false,
+						running: true,
+						skcRunning: true,
+					},
+				}),
+			];
 		case "auto_retry_end":
+			return [
+				toSessionNotification(sessionId, {
+					sessionUpdate: "session_info_update",
+					_meta: {
+						skcPhase: event.success ? "responding" : "retry_failed",
+						skcRetryState: event.success ? "succeeded" : "failed",
+						skcRetryAttempt: event.attempt,
+						...(event.finalError ? { skcRetryFinalError: event.finalError } : {}),
+						running: true,
+						skcRunning: true,
+					},
+				}),
+			];
 		case "ttsr_triggered":
+			return [
+				toSessionNotification(sessionId, {
+					sessionUpdate: "session_info_update",
+					_meta: {
+						skcTtsrTriggered: true,
+						skcTtsrRuleCount: event.rules.length,
+					},
+				}),
+			];
 		case "irc_message":
 		case "subagent_steer_message":
-		case "notice":
-		case "thinking_level_changed":
-		case "goal_updated":
 			return [];
+		case "notice":
+			return [
+				toSessionNotification(sessionId, {
+					sessionUpdate: "agent_thought_chunk",
+					content: {
+						type: "text",
+						text: `[${event.level}${event.source ? `:${event.source}` : ""}] ${event.message}\n`,
+					},
+				}),
+			];
+		case "thinking_level_changed":
+			return [
+				toSessionNotification(sessionId, {
+					sessionUpdate: "session_info_update",
+					_meta: { skcThinkingLevel: event.thinkingLevel ?? "off" },
+				}),
+			];
+		case "goal_updated":
+			return [
+				toSessionNotification(sessionId, {
+					sessionUpdate: "session_info_update",
+					_meta: {
+						skcGoalActive: event.goal !== null,
+						...(event.goal
+							? {
+									skcGoalId: event.goal.id,
+									skcGoalStatus: event.goal.status,
+									skcGoalObjective: event.goal.objective,
+								}
+							: {}),
+						...(event.state ? { skcGoalModeState: event.state } : {}),
+					},
+				}),
+			];
 		default:
 			return assertNeverAcp(event);
 	}
@@ -547,6 +625,19 @@ function mergeToolUpdateContent(startContent: ToolCallContent[], resultContent: 
 	return merged;
 }
 
+function mergeToolLocations(...groups: ToolCallLocation[][]): ToolCallLocation[] {
+	const locations: ToolCallLocation[] = [];
+	const seen = new Set<string>();
+	for (const group of groups) {
+		for (const location of group) {
+			if (seen.has(location.path)) continue;
+			seen.add(location.path);
+			locations.push(location);
+		}
+	}
+	return locations;
+}
+
 function isCommandToolName(toolName: string): boolean {
 	return toolName === "bash" || toolName === "shell" || toolName === "exec";
 }
@@ -626,7 +717,7 @@ function extractToolLocationsFromResult(result: unknown, cwd?: string): ToolCall
 }
 
 /** Emit a `diff` ToolCallContent for each per-file edit result that carries oldText/newText. */
-function extractDiffToolCallContent(result: unknown): ToolCallContent[] {
+function extractDiffToolCallContent(result: unknown, cwd?: string): ToolCallContent[] {
 	if (typeof result !== "object" || result === null) return [];
 	const details = (result as { details?: unknown }).details;
 	if (typeof details !== "object" || details === null) return [];
@@ -634,13 +725,13 @@ function extractDiffToolCallContent(result: unknown): ToolCallContent[] {
 	const perFile = (details as { perFileResults?: unknown }).perFileResults;
 	const entries: unknown[] = Array.isArray(perFile) ? perFile : [details];
 	for (const entry of entries) {
-		const block = buildDiffContent(entry);
+		const block = buildDiffContent(entry, cwd);
 		if (block) blocks.push(block);
 	}
 	return blocks;
 }
 
-function buildDiffContent(entry: unknown): ToolCallContent | undefined {
+function buildDiffContent(entry: unknown, cwd?: string): ToolCallContent | undefined {
 	if (typeof entry !== "object" || entry === null) return undefined;
 	const candidate = entry as { path?: unknown; oldText?: unknown; newText?: unknown; isError?: unknown };
 	if (candidate.isError === true) return undefined;
@@ -651,7 +742,8 @@ function buildDiffContent(entry: unknown): ToolCallContent | undefined {
 	if (oldText === undefined && newText === undefined) return undefined;
 	return {
 		type: "diff",
-		path,
+		// `Diff.path` is specified as an absolute path, same as ToolCallLocation.
+		path: toAcpLocationPath(path, cwd),
 		oldText: oldText ?? null,
 		newText: newText ?? "",
 	};
@@ -772,7 +864,9 @@ function toToolCallContent(value: unknown): ToolCallContent | undefined {
 				resourceLinkContent.mimeType = mimeType;
 			}
 			const size = extractNumberProperty<ResourceLinkLikeContent>(value, "size");
-			if (size !== undefined) {
+			// `ResourceLink.size` is a byte count typed as int64; drop fractional, negative,
+			// or non-representable values rather than emitting a block clients must reject.
+			if (size !== undefined && Number.isSafeInteger(size) && size >= 0) {
 				resourceLinkContent.size = size;
 			}
 			return {

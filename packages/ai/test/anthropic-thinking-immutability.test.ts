@@ -1,5 +1,9 @@
 import { describe, expect, it } from "bun:test";
-import { convertAnthropicMessages } from "@sayknow-cli/ai/providers/anthropic";
+import {
+	convertAnthropicMessages,
+	isAnthropicThinkingBlockMutationError,
+	isAnthropicThinkingSignatureInvalidError,
+} from "@sayknow-cli/ai/providers/anthropic";
 import type { AssistantMessage, Model, ToolResultMessage, UserMessage } from "@sayknow-cli/ai/types";
 
 const model: Model<"anthropic-messages"> = {
@@ -225,5 +229,140 @@ describe("Anthropic thinking replay immutability", () => {
 			{ role: "assistant", content: [{ type: "text", text: "visible answer" }] },
 			{ role: "user", content: "Continue." },
 		]);
+	});
+
+	it("drops thinking across every assistant turn for signature-invalid replay repair", () => {
+		const makeAssistant = (suffix: string, text: string): AssistantMessage => ({
+			role: "assistant",
+			content: [
+				{ type: "thinking", thinking: `thinking ${suffix}`, thinkingSignature: `sig_${suffix}` },
+				{ type: "redactedThinking", data: `redacted-${suffix}` },
+				{ type: "text", text },
+			],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: model.id,
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "stop",
+			timestamp: Date.now(),
+		});
+		const userA: UserMessage = { role: "user", content: "first", timestamp: Date.now() };
+		const userB: UserMessage = { role: "user", content: "second", timestamp: Date.now() };
+
+		const params = convertAnthropicMessages(
+			[userA, makeAssistant("early", "early answer"), userB, makeAssistant("late", "late answer")],
+			model,
+			false,
+			{ repairAllAssistantThinking: true },
+		);
+
+		expect(params).toEqual([
+			{ role: "user", content: "first" },
+			{ role: "assistant", content: [{ type: "text", text: "early answer" }] },
+			{ role: "user", content: "second" },
+			{ role: "assistant", content: [{ type: "text", text: "late answer" }] },
+			{ role: "user", content: "Continue." },
+		]);
+	});
+
+	it("keeps cross-model thinking as text during signature-invalid replay repair", () => {
+		const userA: UserMessage = { role: "user", content: "first", timestamp: Date.now() };
+		const userB: UserMessage = { role: "user", content: "second", timestamp: Date.now() };
+		// Replayed history from a DIFFERENT Anthropic model: its thinking was never
+		// sent as a signed block by this model, so it degrades to plain text and
+		// cannot be the signature failure — repair must not delete it.
+		const crossModelAssistant: AssistantMessage = {
+			role: "assistant",
+			content: [
+				{ type: "thinking", thinking: "important prior reasoning", thinkingSignature: "sig_other_model" },
+				{ type: "text", text: "cross-model answer" },
+			],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-opus-4-1",
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "stop",
+			timestamp: Date.now(),
+		};
+		const sameModelAssistant: AssistantMessage = {
+			...crossModelAssistant,
+			model: model.id,
+			content: [
+				{ type: "thinking", thinking: "same-model thinking", thinkingSignature: "sig_same_model" },
+				{ type: "text", text: "same-model answer" },
+			],
+		};
+
+		const params = convertAnthropicMessages([userA, crossModelAssistant, userB, sameModelAssistant], model, false, {
+			repairAllAssistantThinking: true,
+		});
+
+		expect(params).toEqual([
+			{ role: "user", content: "first" },
+			{
+				role: "assistant",
+				content: [
+					{ type: "text", text: "important prior reasoning" },
+					{ type: "text", text: "cross-model answer" },
+				],
+			},
+			{ role: "user", content: "second" },
+			{ role: "assistant", content: [{ type: "text", text: "same-model answer" }] },
+			{ role: "user", content: "Continue." },
+		]);
+	});
+});
+
+describe("Anthropic thinking replay 400 classification", () => {
+	const status400 = (message: string): Error => Object.assign(new Error(message), { status: 400 });
+	// Captured from a real session failure (2026-07-23): a historical thinking block
+	// whose signature no longer validates fails the whole request.
+	const signatureInvalidMessage =
+		'400 {"type":"error","error":{"type":"invalid_request_error","message":"messages.5.content.24: Invalid `signature` in `thinking` block"},"request_id":"req_011CdHzaxJ77hsR8hX9U6QBH"}';
+	const latestMutationMessage =
+		'400 {"type":"error","error":{"type":"invalid_request_error","message":"The `thinking` blocks in the latest assistant message cannot be modified. These blocks must remain as they were in the original response."}}';
+
+	it("classifies the invalid-signature 400 variant", () => {
+		const error = status400(signatureInvalidMessage);
+		expect(isAnthropicThinkingSignatureInvalidError(error)).toBe(true);
+		// The latest-message repair matcher must NOT claim this variant: its repair
+		// scope (latest assistant only) cannot fix a historical block.
+		expect(isAnthropicThinkingBlockMutationError(error)).toBe(false);
+	});
+
+	it("keeps the latest-message mutation variant on the targeted matcher", () => {
+		const error = status400(latestMutationMessage);
+		expect(isAnthropicThinkingBlockMutationError(error)).toBe(true);
+		expect(isAnthropicThinkingSignatureInvalidError(error)).toBe(false);
+	});
+
+	it("requires HTTP 400 for the invalid-signature match", () => {
+		const error = Object.assign(new Error(signatureInvalidMessage.replace(/^400 /, "500 ")), { status: 500 });
+		expect(isAnthropicThinkingSignatureInvalidError(error)).toBe(false);
+	});
+
+	it("rejects non-Error inputs and unrelated thinking-config 400s", () => {
+		expect(isAnthropicThinkingSignatureInvalidError(undefined)).toBe(false);
+		expect(isAnthropicThinkingSignatureInvalidError("Invalid `signature` in `thinking` block")).toBe(false);
+		// A thinking-related 400 without a signature complaint must not trigger the
+		// all-history thinking drop.
+		const budgetError = status400(
+			'400 {"type":"error","error":{"type":"invalid_request_error","message":"thinking.budget_tokens: Input should be greater than or equal to 1024"}}',
+		);
+		expect(isAnthropicThinkingSignatureInvalidError(budgetError)).toBe(false);
 	});
 });

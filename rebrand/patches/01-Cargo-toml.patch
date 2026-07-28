@@ -1,0 +1,53 @@
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -8,7 +8,7 @@
+ edition = "2024"
+ license = "MIT"
+ authors = ["jaybeyond"]
+-homepage = "https://sayknow-cli.com/"
++homepage = "https://github.com/jaybeyond/Sayknow_CLI/"
+ repository = "https://github.com/jaybeyond/Sayknow_CLI"
+ 
+ [patch.crates-io]
+@@ -26,7 +26,6 @@
+ inherits = "release"
+ panic = "unwind"
+ strip = "debuginfo"
+-
+ [profile.ci]
+ inherits = "release"
+ # Override release's panic = "abort": the pi-natives blocking-task catch_unwind
+@@ -187,6 +186,8 @@
+ dashmap = "6.1"
+ parking_lot = "0.12.5"
+ rayon = "1.12"
++hmac = "0.12"
++sha2 = "0.10"
+ tokio = { version = "1", features = ["full"] }
+ tokio-util = { version = "0.7", features = ["full"] }
+ 
+@@ -233,8 +234,6 @@
+ # Hashing
+ # ──────────────────────────────────────────────────────────────────────────────
+ xxhash-rust = { version = "0.8", features = ["xxh32", "xxh64"] }
+-hmac = "0.12"
+-sha2 = "0.10"
+ 
+ # ──────────────────────────────────────────────────────────────────────────────
+ # Memory Management & Allocators
+@@ -253,6 +252,7 @@
+    "Win32_Storage_FileSystem",
+    "Win32_Storage_ProjectedFileSystem",
+    "Win32_System_Com",
++   "Win32_System_LibraryLoader",
+    "Win32_System_IO",
+    "Win32_System_JobObjects",
+    "Win32_System_Ioctl",
+@@ -297,6 +297,7 @@
+ inferno = { version = "0.12", default-features = false }
+ syntect = { version = "5.3", default-features = false, features = [
+    "default-syntaxes",
++   "default-themes",
+    "regex-fancy",
+ ] }
+ 

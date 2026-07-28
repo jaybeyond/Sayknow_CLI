@@ -1,0 +1,6 @@
+{
+  "text": "Show what the read tool will return for a path or URL\n\nUSAGE\n  $ skc read [PATH] [FLAGS]\n\nARGUMENTS\n  PATH   Path or URL to read (append :sel for line ranges or raw mode, e.g. src/foo.ts:50-100)\n\nFLAGS\n      --truncation=<value>  Which end of an over-budget result to keep\n\nEXAMPLES\n  skc read src/foo.ts\n  skc read src/foo.ts --truncation head\n  skc read src/foo.ts:50-100\n  skc read src/foo.ts:raw\n  skc read https://example.com\n  skc read path/to/archive.zip:dir/file.ts\n  skc read path/to/db.sqlite:users:42\n",
+  "displayContent": null,
+  "truncation": null,
+  "meta": null
+}

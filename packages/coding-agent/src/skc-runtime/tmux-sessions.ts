@@ -3,6 +3,7 @@ import * as crypto from "node:crypto";
 import * as fsSync from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { Process } from "@sayknow-cli/natives";
 import { readLinuxProcStartTime, readLinuxProcStartTimeSync } from "./linux-proc";
 import { resolveSkcTmuxBinary } from "./psmux-detect";
 import { tmuxRuntimeSessionPath } from "./session-layout";
@@ -43,6 +44,7 @@ import {
 	lifecyclePaths,
 	type OwnerIsolationProbeSync,
 	type OwnerVerdict,
+	observeOwnerTerminal,
 	type PlanResponse,
 	planTmuxOwnerIsolationSync,
 	replaceOwnerGenerationSync,
@@ -963,6 +965,14 @@ async function readProcessStartTime(pid: number): Promise<string | null> {
 	return readLinuxProcStartTime(pid);
 }
 
+function exactManagedOwnerSupervisor(supervisorPid: number, supervisorStartTime: string): Process {
+	const supervisor = Process.fromPid(supervisorPid);
+	if (!supervisor) throw new Error("managed_owner_supervisor_unverifiable");
+	if (process.platform === "linux" && supervisor.incarnation !== `linux:${supervisorStartTime}`)
+		throw new Error("managed_owner_supervisor_incarnation_mismatch");
+	return supervisor;
+}
+
 async function readCurrentGeneration(stateDir: string, sessionId: string): Promise<string | null> {
 	try {
 		const value: unknown = JSON.parse(
@@ -1016,12 +1026,12 @@ async function requireUnchangedOwnerForCompatibilityCleanup(
 	initialServer: { pid: number; startTime: string },
 	listPanePids: (sessionName: string, env: NodeJS.ProcessEnv) => number[],
 	readStartTime: (pid: number) => Promise<string | null>,
-): Promise<void> {
+): Promise<boolean> {
 	try {
 		const currentNativeSessionId = readNativeTmuxSessionId(nativeSessionId, env);
 		if (!currentNativeSessionId) {
 			if (readNativeTmuxSessionId(sessionName, env)) throw new Error(`skc_tmux_owner_changed:${sessionName}`);
-			return;
+			return false;
 		}
 		const currentServer = requireSafeTmuxServerForMutation(resolveSkcTmuxCommand(env), env);
 		const panePids = listPanePids(nativeSessionId, env);
@@ -1054,10 +1064,11 @@ async function requireUnchangedOwnerForCompatibilityCleanup(
 				: null,
 		].filter((value): value is string => value !== null);
 		if (mismatches.length > 0) throw new Error(`skc_tmux_owner_changed:${sessionName}:${mismatches.join(",")}`);
+		return true;
 	} catch (error) {
 		if (!readNativeTmuxSessionId(nativeSessionId, env)) {
 			if (readNativeTmuxSessionId(sessionName, env)) throw new Error(`skc_tmux_owner_changed:${sessionName}`);
-			return;
+			return false;
 		}
 		if (error instanceof Error && error.message.startsWith(`skc_tmux_owner_changed:${sessionName}`))
 			throw new Error(`skc_tmux_owner_changed:${sessionName}`);
@@ -1152,6 +1163,7 @@ export async function forceCloseSkcTmuxSession(
 	const now = deps.now ?? (() => new Date());
 	const sleep = deps.sleep ?? (ms => Bun.sleep(ms));
 	const dispatchId = crypto.randomUUID();
+	let operatorVerdict: Promise<OwnerVerdict> | null = null;
 	await closeExactTmuxOwner(
 		{
 			stateDir: identity.stateDir,
@@ -1169,12 +1181,37 @@ export async function forceCloseSkcTmuxSession(
 			sendSigterm: async pid => {
 				if ((await (deps.readProcessStartTime ?? readProcessStartTime)(pid)) !== identity.startTime)
 					throw new Error("owner_pid_identity_mismatch");
-				(deps.signalTerm ?? (target => process.kill(target, "SIGTERM")))(pid);
+				if (deps.signalTerm) {
+					deps.signalTerm(pid);
+				} else {
+					const supervisor = exactManagedOwnerSupervisor(pid, identity.startTime);
+					if (!supervisor.signalRoot(15)) throw new Error("managed_owner_supervisor_signal_failed");
+					operatorVerdict = supervisor
+						.waitForExit({ timeoutMs: FORCE_CLOSE_VERDICT_TIMEOUT_MS - 500 })
+						.then(async exited => {
+							if (!exited) throw new Error("managed_owner_supervisor_exit_timeout");
+							return await observeOwnerTerminal({
+								schema_version: 1,
+								op: "observe_terminal",
+								session_id: identity.sessionId,
+								owner_generation: identity.generation,
+								state_dir: identity.stateDir,
+								socket_key: identity.socketKey,
+								observer: "raw_monitor",
+								observed_at: now().toISOString(),
+								signal: "SIGTERM",
+								exit_code: null,
+								exit_kind: "exact_owner_exit_observed",
+								reason: "operator_observed_owner_exit",
+								operator_dispatch_id: dispatchId,
+							});
+						});
+				}
 			},
 
-			waitForVerdict: () => waitForExpectedVerdict(identity, sleep, now),
+			waitForVerdict: () => operatorVerdict ?? waitForExpectedVerdict(identity, sleep, now),
 			cleanupSession: async () => {
-				await requireUnchangedOwnerForCompatibilityCleanup(
+				const cleanupRequired = await requireUnchangedOwnerForCompatibilityCleanup(
 					session.name,
 					nativeSessionId,
 					env,
@@ -1184,6 +1221,7 @@ export async function forceCloseSkcTmuxSession(
 					deps.listPanePids ?? readExactSessionPanePids,
 					deps.readProcessStartTime ?? readProcessStartTime,
 				);
+				if (!cleanupRequired) return;
 				if (deps.cleanupSession) deps.cleanupSession(nativeSessionId, env);
 				else
 					runGuardedTmuxSessionCommand(
@@ -1192,6 +1230,7 @@ export async function forceCloseSkcTmuxSession(
 						initialServer.pid,
 						env,
 						`kill-session -t '${nativeSessionId}'`,
+						identity.generation,
 					);
 			},
 		},

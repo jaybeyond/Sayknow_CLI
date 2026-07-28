@@ -16,6 +16,7 @@ import {
 	type ToolResultMessage,
 	type TSchema,
 	transportFailureFacts,
+	type UserMessage,
 	validateToolArguments,
 	zodToWireSchema,
 } from "@sayknow-cli/ai";
@@ -32,6 +33,7 @@ import {
 	shouldMitigateHarmonyLeak,
 	signalListLabel,
 } from "./harmony-leak";
+import repeatedToolFailureRecoveryPrompt from "./prompts/repeated-tool-failure-recovery.md" with { type: "text" };
 import { type AgentRunCoverage, type AgentRunSummary, ToolCallBlockedError } from "./run-collector";
 import {
 	type AgentTelemetry,
@@ -100,6 +102,17 @@ class ManagedAttemptSnapshotError extends Error {
 const managedAttemptTextEncoder = new TextEncoder();
 
 const ABORTED: unique symbol = Symbol("agent-loop-aborted");
+
+/**
+ * Terminal bound for argument-validation loops: how many CONSECUTIVE turns may
+ * consist entirely of malformed tool calls before the run stops.
+ *
+ * The one-shot tools-free recovery turn fires first; this is the deterministic
+ * backstop for a model that keeps emitting unusable calls after it. Counted per
+ * turn rather than per argument signature so a model rotating invalid shapes is
+ * bounded too.
+ */
+const MAX_CONSECUTIVE_MALFORMED_TURNS = 5;
 function managedContextOverflow(message: AssistantMessage, config: AgentLoopConfig): boolean {
 	const transportFailure = managedTransportFailure(message);
 	// Managed empty-stop responses may be repaired by the managed shell below; only
@@ -644,14 +657,24 @@ function managedAssistantEventSnapshot(event: AssistantMessageEvent, message: As
 		return contentIndex as number;
 	};
 	if (type === "start") return { type, partial: message };
-	if (type === "text_start" || type === "thinking_start" || type === "toolcall_start")
+	if (
+		type === "text_start" ||
+		type === "thinking_start" ||
+		type === "reasoning_summary_start" ||
+		type === "toolcall_start"
+	)
 		return { type, contentIndex: indexed(), partial: message };
-	if (type === "text_delta" || type === "thinking_delta" || type === "toolcall_delta") {
+	if (
+		type === "text_delta" ||
+		type === "thinking_delta" ||
+		type === "reasoning_summary_delta" ||
+		type === "toolcall_delta"
+	) {
 		const delta = managedProperty(snapshot, "delta");
 		if (typeof delta !== "string") throw new ManagedAttemptSnapshotError();
 		return { type, contentIndex: indexed(), delta, partial: message };
 	}
-	if (type === "text_end" || type === "thinking_end") {
+	if (type === "text_end" || type === "thinking_end" || type === "reasoning_summary_end") {
 		const content = managedProperty(snapshot, "content");
 		if (typeof content !== "string") throw new ManagedAttemptSnapshotError();
 		return { type, contentIndex: indexed(), content, partial: message };
@@ -1237,6 +1260,21 @@ async function runLoopBody(
 	// Fires at most one repaired resend per run for the poisoned-history
 	// `invalid_prompt` circuit breaker below.
 	let invalidPromptRepairAttempted = false;
+	let previousMalformedToolSignatures = new Set<string>();
+	const recoveryState: {
+		pending: boolean;
+		inserted: boolean;
+		syntheticMessage?: UserMessage;
+	} = { pending: false, inserted: false };
+	let malformedToolRecoveryAttempted = false;
+	// Deterministic terminal circuit breaker for argument-validation loops.
+	//
+	// Counts CONSECUTIVE turns whose tool calls were all malformed, regardless of
+	// whether the arguments repeat. Signature-based "repeated" detection alone is
+	// not a bound: a model that rotates invalid argument shapes never trips it, so
+	// the loop could run forever. Any turn that produces a non-malformed batch
+	// resets the counter, so healthy runs are unaffected.
+	let consecutiveMalformedTurns = 0;
 
 	// Outer loop: continues when queued follow-up messages arrive after agent would stop
 	while (true) {
@@ -1321,6 +1359,15 @@ async function runLoopBody(
 								attemptTransaction.stageAssistantMessageEvent(partial, event),
 						}
 					: config;
+				if (recoveryState.pending && !recoveryState.inserted) {
+					recoveryState.syntheticMessage = {
+						role: "user",
+						content: repeatedToolFailureRecoveryPrompt,
+						synthetic: true,
+						timestamp: Date.now(),
+					};
+					recoveryState.inserted = true;
+				}
 				message = await streamAssistantResponse(
 					currentContext,
 					attemptConfig,
@@ -1331,6 +1378,9 @@ async function runLoopBody(
 					stepCounter,
 					streamFn,
 					harmonyRetryAttempt,
+					recoveryState.pending && recoveryState.syntheticMessage
+						? { syntheticMessage: recoveryState.syntheticMessage }
+						: undefined,
 				);
 				const detection = detectHarmonyLeakInAssistantMessage(message);
 				if (detection && shouldMitigateHarmonyLeak(config.model, detection)) {
@@ -1483,6 +1533,7 @@ async function runLoopBody(
 			if (config.fallbackManaged && message.stopReason !== "error" && message.stopReason !== "aborted") {
 				await config.onManagedAttemptAccepted?.();
 			}
+			const wasRecoveryAttempt = recoveryState.pending;
 
 			if (message.stopReason === "error" || message.stopReason === "aborted") {
 				// Create placeholder tool results for any tool calls in the aborted message
@@ -1517,24 +1568,65 @@ async function runLoopBody(
 			hasMoreToolCalls = toolCalls.length > 0;
 
 			const toolResults: ToolResultMessage[] = [];
+			let repeatedMalformedToolCall = false;
 			if (hasMoreToolCalls) {
-				const executionResult = await executeToolCalls(
-					currentContext,
-					message,
-					loopSignal,
-					stream,
-					config,
-					telemetry,
-					invokeAgentSpan,
-				);
+				if (wasRecoveryAttempt) {
+					for (const toolCall of toolCalls) {
+						const result = createAbortedToolResult(
+							toolCall,
+							stream,
+							"error",
+							"Tool calls are disabled during repeated malformed tool-call recovery.",
+						);
+						currentContext.messages.push(result);
+						newMessages.push(result);
+						toolResults.push(result);
+						recordSkippedTool(telemetry, {
+							toolCallId: toolCall.id,
+							toolName: toolCall.name,
+							status: "skipped",
+						});
+					}
+				} else {
+					const executionResult = await executeToolCalls(
+						currentContext,
+						message,
+						loopSignal,
+						stream,
+						config,
+						telemetry,
+						invokeAgentSpan,
+					);
 
-				toolResults.push(...executionResult.toolResults);
-				steeringMessagesFromExecution = executionResult.steeringMessages;
+					toolResults.push(...executionResult.toolResults);
+					steeringMessagesFromExecution = executionResult.steeringMessages;
 
-				for (const result of toolResults) {
-					currentContext.messages.push(result);
-					newMessages.push(result);
+					const malformedSignatures = executionResult.malformedToolCallSignatures;
+					const allToolCallsMalformed =
+						toolResults.length > 0 && malformedSignatures.length === toolResults.length;
+					if (allToolCallsMalformed) {
+						consecutiveMalformedTurns += 1;
+						const uniqueMalformedSignatures = new Set(malformedSignatures);
+						repeatedMalformedToolCall =
+							uniqueMalformedSignatures.size < malformedSignatures.length ||
+							[...uniqueMalformedSignatures].some(signature => previousMalformedToolSignatures.has(signature));
+						previousMalformedToolSignatures = uniqueMalformedSignatures;
+					} else {
+						consecutiveMalformedTurns = 0;
+						previousMalformedToolSignatures = new Set();
+					}
+
+					for (const result of toolResults) {
+						currentContext.messages.push(result);
+						newMessages.push(result);
+					}
 				}
+			}
+
+			if (wasRecoveryAttempt) {
+				recoveryState.pending = false;
+				recoveryState.inserted = false;
+				recoveryState.syntheticMessage = undefined;
 			}
 
 			stream.push({ type: "turn_end", message, toolResults });
@@ -1547,6 +1639,27 @@ async function runLoopBody(
 			if (pendingMessages.length > 0) continue;
 			if (config.shouldPause?.()) {
 				stream.push(buildAgentEndEvent(newMessages, telemetry, stepCounter.count, "paused"));
+				stream.end(newMessages);
+				return;
+			}
+			if (repeatedMalformedToolCall && !malformedToolRecoveryAttempted) {
+				recoveryState.pending = true;
+				recoveryState.inserted = false;
+				recoveryState.syntheticMessage = undefined;
+				malformedToolRecoveryAttempted = true;
+			} else if (consecutiveMalformedTurns >= MAX_CONSECUTIVE_MALFORMED_TURNS) {
+				// Deterministic terminal circuit breaker. The one-shot recovery turn
+				// above already had its chance; if the model is still emitting only
+				// malformed tool calls after it, the run cannot make progress and must
+				// stop rather than burn the provider budget. Terminates on consecutive
+				// count, not argument signatures, so rotating invalid shapes are bounded
+				// too.
+				message.stopReason = "error";
+				const breakerMessage = `Stopping after ${consecutiveMalformedTurns} consecutive turns of malformed tool calls; the model did not produce a usable tool call or answer.`;
+				message.errorMessage = message.errorMessage
+					? `${message.errorMessage} | ${breakerMessage}`
+					: breakerMessage;
+				stream.push(buildAgentEndEvent(newMessages, telemetry, stepCounter.count));
 				stream.end(newMessages);
 				return;
 			}
@@ -1605,6 +1718,7 @@ async function streamAssistantResponse(
 	stepCounter: StepCounter,
 	streamFn?: StreamFn,
 	harmonyRetryAttempt = 0,
+	recoveryMode?: { syntheticMessage: UserMessage },
 ): Promise<AssistantMessage> {
 	// Apply context transform if configured (AgentMessage[] → AgentMessage[])
 	let messages = context.messages;
@@ -1629,7 +1743,24 @@ async function streamAssistantResponse(
 			tools: normalizeTools(context.tools, !!config.intentTracing),
 		};
 	}
-
+	if (recoveryMode) {
+		if (config.appendOnlyContext) {
+			const syntheticMessages = normalizeMessagesForProvider(
+				await config.convertToLlm([recoveryMode.syntheticMessage]),
+				config.model,
+			);
+			llmContext = { ...llmContext, messages: [...llmContext.messages, ...syntheticMessages], tools: [] };
+		} else {
+			llmContext = {
+				...llmContext,
+				messages: normalizeMessagesForProvider(
+					await config.convertToLlm([...messages, recoveryMode.syntheticMessage]),
+					config.model,
+				),
+				tools: [],
+			};
+		}
+	}
 	const streamFunction = streamFn || streamSimple;
 
 	// Resolve API key (important for expiring tokens) — do this before resolving
@@ -1644,7 +1775,7 @@ async function streamAssistantResponse(
 
 	const resolvedMetadata = config.metadataResolver ? config.metadataResolver(config.model.provider) : config.metadata;
 
-	const dynamicToolChoice = config.getToolChoice?.();
+	const dynamicToolChoice = recoveryMode ? undefined : config.getToolChoice?.();
 	const dynamicReasoning = config.getReasoning?.();
 	const harmonyMitigationEnabled = isHarmonyLeakMitigationTarget(config.model);
 	const harmonyAbortController = harmonyMitigationEnabled ? new AbortController() : undefined;
@@ -1655,7 +1786,7 @@ async function streamAssistantResponse(
 		: signal;
 	const effectiveTemperature =
 		harmonyRetryAttempt > 0 && config.temperature !== undefined ? config.temperature + 0.05 : config.temperature;
-	const effectiveToolChoice = dynamicToolChoice ?? config.toolChoice;
+	const effectiveToolChoice = recoveryMode ? "none" : (dynamicToolChoice ?? config.toolChoice);
 	const effectiveReasoning = dynamicReasoning ?? config.reasoning;
 
 	const chatStepNumber = stepCounter.count;
@@ -1900,7 +2031,11 @@ async function executeToolCalls(
 	config: AgentLoopConfig,
 	telemetry: AgentTelemetry | undefined,
 	invokeAgentSpan: Span | undefined,
-): Promise<{ toolResults: ToolResultMessage[]; steeringMessages?: AgentMessage[] }> {
+): Promise<{
+	toolResults: ToolResultMessage[];
+	steeringMessages?: AgentMessage[];
+	malformedToolCallSignatures: string[];
+}> {
 	const tools = currentContext.tools;
 	const {
 		getSteeringMessages,
@@ -1941,6 +2076,7 @@ async function executeToolCalls(
 		skipped: false,
 		toolResultMessage: undefined as ToolResultMessage | undefined,
 		resultEmitted: false,
+		argumentValidationFailed: false,
 	}));
 
 	const checkSteering = async (): Promise<void> => {
@@ -2060,6 +2196,7 @@ async function executeToolCalls(
 		await runInActiveSpan(toolSpan, async () => {
 			try {
 				if (toolCall.incompleteArguments) {
+					record.argumentValidationFailed = true;
 					// The provider flagged this call's argument JSON as truncated
 					// (the model hit its output-token limit mid-call). Executing the
 					// best-effort partial parse would run the tool on wrong input, so
@@ -2094,6 +2231,7 @@ async function executeToolCalls(
 					if (tool.lenientArgValidation) {
 						effectiveArgs = argsForExecution;
 					} else {
+						record.argumentValidationFailed = true;
 						throw validationError;
 					}
 				}
@@ -2245,7 +2383,12 @@ async function executeToolCalls(
 		}
 	}
 
-	return { toolResults: emittedToolResults, steeringMessages };
+	const malformedToolCallSignatures = records.flatMap(record =>
+		record.argumentValidationFailed && record.toolResultMessage?.isError
+			? [`${record.toolCall.name}:${JSON.stringify(record.toolCall.arguments)}`]
+			: [],
+	);
+	return { toolResults: emittedToolResults, steeringMessages, malformedToolCallSignatures };
 }
 
 /**

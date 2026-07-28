@@ -1,0 +1,169 @@
+--- a/packages/ai/test/model-thinking.test.ts
++++ b/packages/ai/test/model-thinking.test.ts
+@@ -1,5 +1,4 @@
+ import { describe, expect, it } from "bun:test";
+-import { THINKING_CONTROL_MODES } from "@sayknow-cli/ai";
+ import {
+ 	applyGeneratedModelPolicies,
+ 	clampThinkingLevelForModel,
+@@ -10,7 +9,7 @@
+ 	mapEffortToGoogleThinkingLevel,
+ 	requireSupportedEffort,
+ } from "@sayknow-cli/ai/model-thinking";
+-import type { Api, Model, Provider, ThinkingControlMode } from "@sayknow-cli/ai/types";
++import type { Api, Model, Provider } from "@sayknow-cli/ai/types";
+ 
+ function createModel<TApi extends Api>(overrides: {
+ 	id: string;
+@@ -32,14 +31,6 @@
+ 	});
+ }
+ 
+-describe("thinking control modes", () => {
+-	it("exports the canonical runtime vocabulary without duplicates", () => {
+-		const modes: readonly ThinkingControlMode[] = THINKING_CONTROL_MODES;
+-		expect(modes).toEqual(["effort", "budget", "google-level", "anthropic-adaptive", "anthropic-budget-effort"]);
+-		expect(new Set(modes).size).toBe(modes.length);
+-	});
+-});
+-
+ describe("model thinking metadata", () => {
+ 	it("stores supported efforts for Codex mini in model metadata", () => {
+ 		const model = createModel({
+@@ -116,16 +107,10 @@
+ 			api: "anthropic-messages",
+ 			provider: "anthropic",
+ 		});
+-		const sonnet5 = createModel({
+-			id: "claude-sonnet-5",
+-			api: "anthropic-messages",
+-			provider: "anthropic",
+-		});
+ 
+ 		expect(opus45.thinking?.mode).toBe("anthropic-budget-effort");
+ 		expect(opus46.thinking?.mode).toBe("anthropic-adaptive");
+ 		expect(sonnet46.thinking?.mode).toBe("anthropic-adaptive");
+-		expect(sonnet5.thinking?.mode).toBe("anthropic-adaptive");
+ 		expect(opus46.thinking).toEqual({
+ 			mode: "anthropic-adaptive",
+ 			minLevel: Effort.Minimal,
+@@ -137,11 +122,6 @@
+ 			minLevel: Effort.Minimal,
+ 			maxLevel: Effort.High,
+ 		});
+-		expect(sonnet5.thinking).toEqual({
+-			mode: "anthropic-adaptive",
+-			minLevel: Effort.Minimal,
+-			maxLevel: Effort.High,
+-		});
+ 		// Older Opus adaptive models expose max but not the newer xhigh literal.
+ 		expect(() => mapEffortToAnthropicAdaptiveEffort(opus46, Effort.XHigh)).toThrow(/not supported/);
+ 		expect(mapEffortToAnthropicAdaptiveEffort(opus46, Effort.Max)).toBe("max");
+@@ -153,7 +133,6 @@
+ 		expect(mapEffortToAnthropicAdaptiveEffort(opus47Bedrock, Effort.Max)).toBe("max");
+ 		expect(() => mapEffortToAnthropicAdaptiveEffort(sonnet46, Effort.XHigh)).toThrow(/not supported/);
+ 		expect(() => mapEffortToAnthropicAdaptiveEffort(sonnet46, Effort.Max)).toThrow(/not supported/);
+-		expect(mapEffortToAnthropicAdaptiveEffort(sonnet5, Effort.High)).toBe("high");
+ 	});
+ 
+ 	it("classifies Fable 5 as adaptive thinking with xhigh support (discovery metadata regression)", () => {
+@@ -410,74 +389,6 @@
+ 		expect(models[2]?.applyPatchToolType).toBeUndefined();
+ 		expect(models[3]?.applyPatchToolType).toBeUndefined();
+ 	});
+-
+-	it("stores GPT-5.6 Sol/Terra/Luna effort metadata through max", () => {
+-		const models = [
+-			createModel({
+-				id: "gpt-5.6-sol",
+-				api: "openai-responses",
+-				provider: "openai",
+-			}),
+-			createModel({
+-				id: "gpt-5.6-terra",
+-				api: "openai-codex-responses",
+-				provider: "openai-codex",
+-			}),
+-			createModel({
+-				id: "gpt-5.6-luna",
+-				api: "openai-responses",
+-				provider: "openai",
+-			}),
+-			createModel({
+-				id: "gpt-5.6",
+-				api: "openai-responses",
+-				provider: "openai",
+-			}),
+-		];
+-
+-		for (const model of models) {
+-			expect(model.thinking).toEqual({
+-				mode: "effort",
+-				minLevel: Effort.Low,
+-				maxLevel: Effort.Max,
+-			});
+-			expect(requireSupportedEffort(model, Effort.Max)).toBe(Effort.Max);
+-			expect(() => requireSupportedEffort(model, Effort.Minimal)).toThrow(
+-				/Supported efforts: low, medium, high, xhigh, max/,
+-			);
+-		}
+-	});
+-
+-	it("caps only Codex product GPT-5.6 tiers at the 272K prompt budget", () => {
+-		const models: Model<Api>[] = [
+-			{
+-				...createModel({ id: "gpt-5.6-sol", api: "openai-codex-responses", provider: "openai-codex" }),
+-				contextWindow: 1_050_000,
+-				maxTokens: 128000,
+-			},
+-			{
+-				...createModel({ id: "gpt-5.6-terra", api: "openai-responses", provider: "openai" }),
+-				contextWindow: 1_050_000,
+-				maxTokens: 128000,
+-			},
+-			{
+-				...createModel({ id: "gpt-5.6-luna", api: "openai-codex-responses", provider: "custom" }),
+-				contextWindow: 200_000,
+-				maxTokens: 128000,
+-			},
+-			{
+-				...createModel({ id: "gpt-5.6-codex", api: "openai-codex-responses", provider: "openai-codex" }),
+-				contextWindow: 373_000,
+-				maxTokens: 128000,
+-			},
+-		];
+-
+-		applyGeneratedModelPolicies(models);
+-
+-		expect(models.map(model => model.contextWindow)).toEqual([272_000, 1_050_000, 200_000, 272_000]);
+-		expect(models[0]?.applyPatchToolType).toBe("freeform");
+-		expect(models[1]?.applyPatchToolType).toBe("freeform");
+-	});
+ });
+ 
+ describe("model thinking runtime helpers", () => {
+@@ -567,24 +478,6 @@
+ 		);
+ 	});
+ 
+-	it("uses Kimi K3's discrete low, high, and max efforts", () => {
+-		const model = createModel({
+-			id: "k3",
+-			api: "openai-completions",
+-			provider: "kimi-code",
+-		});
+-
+-		expect(model.thinking).toEqual({
+-			mode: "effort",
+-			minLevel: Effort.Low,
+-			maxLevel: Effort.Max,
+-			levels: [Effort.Low, Effort.High, Effort.Max],
+-			defaultLevel: Effort.High,
+-		});
+-		expect(requireSupportedEffort(model, Effort.Max)).toBe(Effort.Max);
+-		expect(() => requireSupportedEffort(model, Effort.Medium)).toThrow(/Supported efforts: low, high, max/);
+-	});
+-
+ 	it("derives binary-thinking fallback from resolved compat when catalog compat is partial", () => {
+ 		const model = enrichModelThinking({
+ 			id: "qwen/qwen3-32b",

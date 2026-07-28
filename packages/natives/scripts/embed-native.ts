@@ -1,6 +1,11 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { type BuildSidecar, type CandidateAddon, verifyDefaultLanguageSet } from "./embed-guard";
+import {
+	type BuildSidecar,
+	type CandidateAddon,
+	missingRequiredFunctions,
+	verifyDefaultLanguageSet,
+} from "./embed-guard";
 
 export type EmbeddedAddonVariant = CandidateAddon["variant"];
 
@@ -32,6 +37,12 @@ const stubContent = `
 /** @type {EmbeddedAddon|null} */
 export const embeddedAddon = null;
 `;
+
+const requiredAddonExports = ["nativeBuildInfo", "probeWindowsJobMemory"] as const;
+
+export function missingRequiredAddonExports(bindings: Record<string, unknown>): string[] {
+	return missingRequiredFunctions(bindings, requiredAddonExports);
+}
 
 export function parseEmbedVariants(value: string | undefined): Set<EmbeddedAddonVariant> | null {
 	if (!value) {
@@ -119,14 +130,23 @@ async function embedNative(): Promise<void> {
 	for (const candidate of candidates) {
 		const candidatePath = path.join(nativeDir, candidate.filename);
 		if (await fileExists(candidatePath)) {
+			const nativeBindings =
+				platformTag === hostPlatformTag ? (require(candidatePath) as Record<string, unknown>) : undefined;
 			await verifyDefaultLanguageSet(candidate, candidatePath, {
 				platformTag,
 				hostPlatformTag,
 				readBuildSidecar,
-				loadNativeAddon: candidatePath =>
-					require(candidatePath) as { nativeBuildInfo?: () => { languageSet?: string } },
+				loadNativeAddon: () => nativeBindings as { nativeBuildInfo?: () => { languageSet?: string } },
 				warn: message => console.warn(message),
 			});
+			if (nativeBindings) {
+				const missingExports = missingRequiredAddonExports(nativeBindings);
+				if (missingExports.length > 0) {
+					throw new Error(
+						`Embedded addon candidate ${candidate.filename} is missing required exports: ${missingExports.join(", ")}`,
+					);
+				}
+			}
 			available.push(candidate);
 		}
 	}

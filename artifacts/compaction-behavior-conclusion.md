@@ -41,12 +41,14 @@ red-team-hardened via artifacts/g002-root-cause-qa-report.json).
 - `bun test packages/coding-agent/test/compaction.test.ts
   agent-session-context-usage-ssot.test.ts context-usage-ssot-redteam.test.ts
   agent-session-midrun-compaction.test.ts agent-session-midrun-maintenance.test.ts`
-  → **92 pass, 0 fail** (2 skip). Note: during this audit, two
-  compaction.test.ts tests intermittently failed because Bun resolved the
-  `@sayknow-cli/agent-core/compaction/compaction` workspace alias to the PARENT
-  checkout (~/Documents/Workspace/sayknow-cli) instead of this worktree,
-  running an older implementation. Fixed with a one-line worktree-relative
-  import in the test file (the only tracked-file change of this audit).
+  → **Claimed at authoring time: 92 pass / 0 fail (2 skip).** Independent QA
+  replay in `artifacts/g003-conclusion-qa-report.json` recorded **77 pass /
+  2 skip / 2 fail** on the same named suite when Bun resolved the
+  `@sayknow-cli/agent-core/compaction` workspace alias to a parent checkout
+  instead of this worktree (older implementation). Treat the QA report as the
+  reproducible truth for that window; do not cite the 92/0 figure without
+  re-running on a clean worktree. The worktree-relative import fix was the
+  only tracked-file change of that audit.
 - Post-fix measurement: mined evidence shows estimated-vs-provider anchoring
   is SSOT-based (estimates anchor on `calculateContextTokens` of provider
   usage) and no premature-trigger cluster exists (16/228 premature records,

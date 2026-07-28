@@ -105,6 +105,287 @@ describe("createAgentSession session storage isolation", () => {
 			await session.dispose();
 		}
 	});
+	it("records cleanup_pending when managed legacy-local retirement is durably retained", async () => {
+		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `skc-sdk-local-resume-${Snowflake.next()}-`));
+		tempDirs.push(tempDir);
+		const cwd = path.join(tempDir, "project");
+		const agentDir = path.join(tempDir, "agent");
+		fs.mkdirSync(cwd, { recursive: true });
+
+		const destination = SessionManager.managedDestination(cwd, agentDir);
+		const initialManager = SessionManager.create(cwd, destination);
+		initialManager.appendMessage({ role: "user", content: "legacy local migration", timestamp: Date.now() });
+		await initialManager.flush();
+		const sessionFile = initialManager.getSessionFile();
+		if (!sessionFile) throw new Error("Expected persisted managed session path");
+		await initialManager.close();
+
+		const resumedManager = await SessionManager.open(sessionFile, destination);
+		const artifactsDir = resumedManager.getArtifactsDir();
+		if (!artifactsDir) throw new Error("Expected resumed managed artifacts path");
+		const legacyLocalRoot = path.join(artifactsDir, "local");
+		fs.mkdirSync(legacyLocalRoot, { recursive: true, mode: 0o700 });
+		fs.writeFileSync(path.join(legacyLocalRoot, "resume.md"), "preserved", { mode: 0o600 });
+		const { session } = await createAgentSession({
+			cwd,
+			agentDir,
+			sessionManager: resumedManager,
+			settings: Settings.isolated(),
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+		});
+
+		try {
+			const localOptions = {
+				getArtifactsDir: () => resumedManager.getArtifactsDir(),
+				isManagedDestination: () => resumedManager.isManagedDestination(),
+				getManagedLegacyLocalMigrationSource: () => resumedManager.getManagedLegacyLocalMigrationSource(),
+				getSessionId: () => resumedManager.getSessionId(),
+			};
+			const resumedPath = resolveLocalUrlToPath("local://resume.md", localOptions);
+			expect(resumedPath).toBe(path.join(resolveLocalRoot(localOptions), "resume.md"));
+			expect(fs.readFileSync(resumedPath, "utf8")).toBe("preserved");
+			expect(
+				fs.readFileSync(path.join(resolveLocalRoot(localOptions), ".skc-local-legacy-migrated-v1"), "utf8"),
+			).toBe("cleanup_pending\n");
+		} finally {
+			await session.dispose();
+		}
+	}, 20_000);
+
+	it("migrates a switched managed session's legacy local:// root before resolution (#2925)", async () => {
+		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `skc-sdk-local-switch-${Snowflake.next()}-`));
+		tempDirs.push(tempDir);
+		const cwd = path.join(tempDir, "project");
+		const agentDir = path.join(tempDir, "agent");
+		fs.mkdirSync(cwd, { recursive: true });
+
+		const destination = SessionManager.managedDestination(cwd, agentDir);
+
+		// Session A — start here so createAgentSession initializes A's local root only.
+		const sessionA = SessionManager.create(cwd, destination);
+		sessionA.appendMessage({ role: "user", content: "session A", timestamp: Date.now() });
+		await sessionA.flush();
+		const sessionAFile = sessionA.getSessionFile();
+		if (!sessionAFile) throw new Error("Expected session A path");
+		await sessionA.close();
+
+		// Session B — carry a legacy artifacts/local tree that needs verified migration.
+		const sessionB = SessionManager.create(cwd, destination);
+		sessionB.appendMessage({ role: "user", content: "session B", timestamp: Date.now() });
+		await sessionB.flush();
+		const sessionBFile = sessionB.getSessionFile();
+		if (!sessionBFile) throw new Error("Expected session B path");
+		const sessionBArtifacts = sessionB.getArtifactsDir();
+		if (!sessionBArtifacts) throw new Error("Expected session B artifacts path");
+		const legacyLocalRoot = path.join(sessionBArtifacts, "local");
+		fs.mkdirSync(legacyLocalRoot, { recursive: true, mode: 0o700 });
+		fs.writeFileSync(path.join(legacyLocalRoot, "switched.md"), "switched-bytes", { mode: 0o600 });
+		await sessionB.close();
+
+		const managerA = await SessionManager.open(sessionAFile, destination);
+		const { session } = await createAgentSession({
+			cwd,
+			agentDir,
+			sessionManager: managerA,
+			settings: Settings.isolated(),
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+		});
+
+		try {
+			expect(await session.switchSession(sessionBFile)).toBe(true);
+
+			const localOptions = {
+				getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
+				isManagedDestination: () => session.sessionManager.isManagedDestination(),
+				getManagedLegacyLocalMigrationSource: () => session.sessionManager.getManagedLegacyLocalMigrationSource(),
+				getSessionId: () => session.sessionManager.getSessionId(),
+			};
+			const resolved = resolveLocalUrlToPath("local://switched.md", localOptions);
+			expect(resolved).toBe(path.join(resolveLocalRoot(localOptions), "switched.md"));
+			expect(fs.readFileSync(resolved, "utf8")).toBe("switched-bytes");
+			// Legacy source retired after verified migration (marker may be verified or cleanup_pending).
+			expect(fs.existsSync(path.join(legacyLocalRoot, "switched.md"))).toBe(false);
+			const marker = fs.readFileSync(
+				path.join(resolveLocalRoot(localOptions), ".skc-local-legacy-migrated-v1"),
+				"utf8",
+			);
+			expect(marker === "verified\n" || marker === "cleanup_pending\n").toBe(true);
+		} finally {
+			await session.dispose();
+		}
+	}, 30_000);
+	it("initializes the successor local:// root after newSession before resolution (#2925 follow-up)", async () => {
+		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `skc-sdk-local-new-${Snowflake.next()}-`));
+		tempDirs.push(tempDir);
+		const cwd = path.join(tempDir, "project");
+		const agentDir = path.join(tempDir, "agent");
+		fs.mkdirSync(cwd, { recursive: true });
+
+		const destination = SessionManager.managedDestination(cwd, agentDir);
+		const manager = SessionManager.create(cwd, destination);
+		const { session } = await createAgentSession({
+			cwd,
+			agentDir,
+			sessionManager: manager,
+			settings: Settings.isolated(),
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+		});
+
+		try {
+			expect(await session.newSession()).toBe(true);
+
+			// The successor is a managed session with a session file, so the
+			// synchronous resolver fails closed until verified legacy migration
+			// ran for the *new* session identity — /new must await it like
+			// cold start (#2797) and /resume (#2925).
+			const localOptions = {
+				getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
+				isManagedDestination: () => session.sessionManager.isManagedDestination(),
+				getManagedLegacyLocalMigrationSource: () => session.sessionManager.getManagedLegacyLocalMigrationSource(),
+				getSessionId: () => session.sessionManager.getSessionId(),
+			};
+			const resolved = resolveLocalUrlToPath("local://fresh.md", localOptions);
+			expect(resolved).toBe(path.join(resolveLocalRoot(localOptions), "fresh.md"));
+			const marker = fs.readFileSync(
+				path.join(resolveLocalRoot(localOptions), ".skc-local-legacy-migrated-v1"),
+				"utf8",
+			);
+			expect(marker === "verified\n" || marker === "absent\n" || marker === "cleanup_pending\n").toBe(true);
+
+			// Identity is only public after readiness: public getters resolve immediately
+			// against the gated successor (A11). Repeated /new + fork are covered in
+			// session-manager prepare/commit unit tests without extension session_switch
+			// startup (which can retain identity-rotation work across rotations).
+		} finally {
+			await session.dispose();
+		}
+	}, 30_000);
+
+	it("gates the successor local:// root before publishing the new session identity", async () => {
+		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `skc-sdk-local-order-${Snowflake.next()}-`));
+		tempDirs.push(tempDir);
+		const cwd = path.join(tempDir, "project");
+		const agentDir = path.join(tempDir, "agent");
+		fs.mkdirSync(cwd, { recursive: true });
+
+		const destination = SessionManager.managedDestination(cwd, agentDir);
+		const manager = SessionManager.create(cwd, destination);
+		const { session } = await createAgentSession({
+			cwd,
+			agentDir,
+			sessionManager: manager,
+			settings: Settings.isolated(),
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+		});
+
+		try {
+			const predecessorSessionId = manager.getSessionId();
+			// Intercept agent-identity publication and assert the successor's marker
+			// already exists at each publication, so the agent, workflow-gate emitter,
+			// and hooks never observe an ungated root.
+			//
+			// Scope: agent-identity publication after readiness. With #3138, the
+			// manager keeps public getters on the predecessor until commit after
+			// initializeLocalRoot(prepared), so agent publish cannot observe an
+			// ungated root.
+			const observations: Array<{ sessionId: string; markerExists: boolean }> = [];
+			const agentState = session.agent as unknown as { sessionId: string | undefined };
+			let publishedSessionId = agentState.sessionId;
+			Object.defineProperty(session.agent, "sessionId", {
+				configurable: true,
+				get: () => publishedSessionId,
+				set: (value: string | undefined) => {
+					publishedSessionId = value;
+					if (value && value !== predecessorSessionId) {
+						observations.push({
+							sessionId: value,
+							markerExists: fs.existsSync(
+								path.join(
+									resolveLocalRoot({
+										getArtifactsDir: () => manager.getArtifactsDir(),
+										isManagedDestination: () => manager.isManagedDestination(),
+										getSessionId: () => value,
+									}),
+									".skc-local-legacy-migrated-v1",
+								),
+							),
+						});
+					}
+				},
+			});
+
+			expect(await session.newSession()).toBe(true);
+			const successorSessionId = manager.getSessionId();
+			expect(successorSessionId).not.toBe(predecessorSessionId);
+			expect(observations.length).toBeGreaterThan(0);
+			expect(observations.filter(o => !o.markerExists)).toEqual([]);
+			expect(observations.at(0)?.sessionId).toBe(successorSessionId);
+		} finally {
+			await session.dispose();
+		}
+	}, 30_000);
+
+	it("initializes a default local root without shadowing an explicit owner", async () => {
+		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `skc-sdk-local-owner-${Snowflake.next()}-`));
+		tempDirs.push(tempDir);
+		const cwd = path.join(tempDir, "project");
+		const agentDir = path.join(tempDir, "agent");
+		fs.mkdirSync(cwd, { recursive: true });
+		const owned = {
+			getArtifactsDir: () => path.join(tempDir, "owned-artifacts"),
+			getSessionId: () => "owned-local-session",
+		};
+		const disposeOwned = LocalProtocolHandler.installOverride(owned);
+
+		let session: AgentSession | undefined;
+		try {
+			session = (
+				await createAgentSession({
+					cwd,
+					agentDir,
+					settings: Settings.isolated(),
+					disableExtensionDiscovery: true,
+					skills: [],
+					contextFiles: [],
+					promptTemplates: [],
+					slashCommands: [],
+					enableMCP: false,
+					enableLsp: false,
+				})
+			).session;
+			expect(LocalProtocolHandler.resolveOptions()).toBe(owned);
+			await session.dispose();
+			session = undefined;
+			expect(LocalProtocolHandler.resolveOptions()).toBe(owned);
+		} finally {
+			await session?.dispose();
+			disposeOwned();
+		}
+	});
 	it("keeps settings storage usable while default sessions dispose independently", async () => {
 		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `pi-sdk-shared-storage-${Snowflake.next()}-`));
 		tempDirs.push(tempDir);

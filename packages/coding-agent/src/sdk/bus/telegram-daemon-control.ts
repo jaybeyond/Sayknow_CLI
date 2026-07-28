@@ -25,9 +25,11 @@ import type {
 import { OWNERSHIP_MISMATCH_MESSAGE, ownershipMismatchRecovery } from "../../daemon/operator-contract";
 import { resolveSkcRuntimeSpawnInfo } from "../../daemon/runtime";
 import { isProcessIncarnation } from "../broker/process-incarnation";
+
 import { getNotificationConfig, isTelegramConfigured, tokenFingerprint } from "./config";
 import { exactUnlinkNotificationFile, readNotificationEndpointFile } from "./notification-service";
 import {
+	type AttestedLegacyDaemonOwner,
 	confirmTelegramDaemonSpawn,
 	type DaemonState,
 	daemonPaths,
@@ -35,8 +37,10 @@ import {
 	isCurrentCompatibleOwner,
 	isFreshLiveOwner,
 	isSignalableMatchingOwner,
+	readAttestedLegacyDaemonOwner,
 	readDaemonRoots,
 	readDaemonState,
+	readOwnerFreshnessSnapshot,
 	spawnTelegramDaemonOwner,
 	type TelegramDaemonDeps,
 	type TelegramDaemonFs,
@@ -109,16 +113,19 @@ export async function clearTelegramControlRequest(
 
 export interface DaemonProcessReference {
 	incarnation: string;
+	/** Whether the platform delivers the requested signal cooperatively or as a hard termination. */
+	termination: "cooperative" | "hard";
 	signalRoot(signal: NodeJS.Signals): void;
 }
 
-function defaultProcessReference(pid: number, platform = os.platform()): DaemonProcessReference | undefined {
+export function defaultProcessReference(pid: number, platform = os.platform()): DaemonProcessReference | undefined {
 	try {
 		const processRef = Process.fromPid(pid);
 		if (!processRef || !isProcessIncarnation(processRef.incarnation)) return undefined;
 		const incarnation = processRef.incarnation;
 		return {
 			incarnation,
+			termination: platform === "win32" ? "hard" : "cooperative",
 			signalRoot: signal => {
 				const nativeSignal = os.constants.signals[signal];
 				if (nativeSignal === undefined) throw new Error(`Unsupported signal: ${signal}`);
@@ -178,8 +185,8 @@ function defaultPidAlive(pid: number): boolean {
 	try {
 		process.kill(pid, 0);
 		return true;
-	} catch {
-		return false;
+	} catch (error) {
+		return (error as NodeJS.ErrnoException).code !== "ESRCH";
 	}
 }
 
@@ -190,7 +197,6 @@ export class TelegramDaemonController implements BuiltInDaemonController {
 	private readonly now: () => number;
 	private readonly processReference: (pid: number) => DaemonProcessReference | undefined;
 	private readonly waitStepMs: number;
-
 	constructor(
 		private readonly settings: Settings,
 		private readonly deps: TelegramDaemonControlDeps = {},
@@ -219,7 +225,8 @@ export class TelegramDaemonController implements BuiltInDaemonController {
 		if (!configured) {
 			return { kind: this.kind, configured: false, health: "not_configured", runtime };
 		}
-		const state = await readDaemonState(this.settings, this.fsImpl);
+		const snapshot = await readOwnerFreshnessSnapshot({ settings: this.settings, fs: this.fsImpl });
+		const state = snapshot.state;
 		const roots = await readDaemonRoots(this.settings, this.fsImpl);
 		const health: DaemonHealth =
 			!state || state.stoppedAt !== undefined || !this.pidAlive(state.pid)
@@ -231,6 +238,7 @@ export class TelegramDaemonController implements BuiltInDaemonController {
 							chatId: cfg.chatId as string,
 							pidAlive: this.pidAlive,
 							pidIncarnation: this.deps.pidIncarnation,
+							effectiveHeartbeatAt: snapshot.effectiveHeartbeatAt,
 						})
 					? "running"
 					: "stale";
@@ -241,7 +249,7 @@ export class TelegramDaemonController implements BuiltInDaemonController {
 			pid: state?.pid,
 			ownerId: state?.ownerId,
 			startedAt: state?.startedAt,
-			heartbeatAt: state?.heartbeatAt,
+			heartbeatAt: snapshot.effectiveHeartbeatAt,
 			roots,
 			rootCount: roots.length,
 			runtime,
@@ -315,31 +323,28 @@ export class TelegramDaemonController implements BuiltInDaemonController {
 		tokenFingerprint: string,
 		chatId: string,
 		signal: NodeJS.Signals,
-	): Promise<"signaled" | "already_gone" | "ownership_changed"> {
+	): Promise<"signaled" | "already_gone" | "ownership_changed" | "hard_termination"> {
 		const current = await readDaemonState(this.settings, this.fsImpl);
-		// The signal is a privileged action: immediately before sending it, prove the
-		// complete state record is still the exact captured owner. A malformed record,
-		// configuration mutation, or successor using a reused PID is never signalable.
-		if (
-			!hasSafeDaemonStateShape(current) ||
-			current.ownerId !== captured.ownerId ||
-			current.acquisitionId !== captured.acquisitionId ||
-			current.pid !== captured.pid ||
-			current.generation !== captured.generation ||
-			current.incarnation !== captured.incarnation ||
-			current.tokenFingerprint !== captured.tokenFingerprint ||
-			current.chatId !== captured.chatId ||
-			current.tokenFingerprint !== tokenFingerprint ||
-			current.chatId !== chatId
-		)
-			return "ownership_changed";
-		// A matching captured owner that exited between the request and recheck has
-		// completed the handoff. A live owner with changed or unavailable provenance
-		// remains ambiguous and must not be treated as stopped.
+
+		const modernCurrentMatches =
+			hasSafeDaemonStateShape(current) &&
+			current.ownerId === captured.ownerId &&
+			current.acquisitionId === captured.acquisitionId &&
+			current.pid === captured.pid &&
+			current.generation === captured.generation &&
+			current.incarnation === captured.incarnation &&
+			current.tokenFingerprint === captured.tokenFingerprint &&
+			current.chatId === captured.chatId &&
+			current.tokenFingerprint === tokenFingerprint &&
+			current.chatId === chatId;
+		// The signal is privileged: the persisted record must still be the exact
+		// modern owner. Legacy generation-3 records remain migration evidence only;
+		// this controller never upgrades or signals them.
+		if (!modernCurrentMatches) return "ownership_changed";
 		if (!this.pidAlive(captured.pid)) return "already_gone";
 		if (
 			!isSignalableMatchingOwner({
-				state: current,
+				state: modernCurrentMatches ? current : captured,
 				tokenFingerprint,
 				chatId,
 				pidAlive: this.pidAlive,
@@ -352,6 +357,69 @@ export class TelegramDaemonController implements BuiltInDaemonController {
 		// the exit-and-reuse window between ordinary provenance checks and signaling.
 		// Its identity must still be the exact persisted incarnation before use.
 		if (!processRef || processRef.incarnation !== captured.incarnation) return "ownership_changed";
+		if (signal === "SIGTERM" && processRef.termination === "hard") return "hard_termination";
+		try {
+			processRef.signalRoot(signal);
+		} catch {
+			return "already_gone";
+		}
+		return "signaled";
+	}
+
+	#currentConfigurationMatches(tokenFingerprintValue: string, chatId: string): boolean {
+		const current = getNotificationConfig(this.settings);
+		return (
+			isTelegramConfigured(current) &&
+			tokenFingerprint(current.botToken) === tokenFingerprintValue &&
+			current.chatId === chatId
+		);
+	}
+
+	async #signalAttestedLegacyOwner(
+		captured: AttestedLegacyDaemonOwner,
+		tokenFingerprint: string,
+		chatId: string,
+		signal: NodeJS.Signals,
+	): Promise<"signaled" | "already_gone" | "ownership_changed" | "hard_termination"> {
+		if (!this.#currentConfigurationMatches(tokenFingerprint, chatId)) return "ownership_changed";
+		const current = await readAttestedLegacyDaemonOwner({
+			settings: this.settings,
+			fs: this.fsImpl,
+			now: this.now,
+			pidIncarnation: this.deps.pidIncarnation,
+			tokenFingerprint,
+			chatId,
+		});
+		if (
+			!current ||
+			current.state.pid !== captured.state.pid ||
+			current.state.ownerId !== captured.state.ownerId ||
+			current.state.startedAt !== captured.state.startedAt ||
+			current.incarnation !== captured.incarnation
+		)
+			return "ownership_changed";
+		if (!this.pidAlive(captured.state.pid)) return "already_gone";
+		const processRef = this.processReference(captured.state.pid);
+		if (!processRef || processRef.incarnation !== captured.incarnation) return "ownership_changed";
+		const rechecked = await readAttestedLegacyDaemonOwner({
+			settings: this.settings,
+			fs: this.fsImpl,
+			now: this.now,
+			pidIncarnation: this.deps.pidIncarnation,
+			tokenFingerprint,
+			chatId,
+		});
+		if (
+			!rechecked ||
+			rechecked.state.pid !== current.state.pid ||
+			rechecked.state.ownerId !== current.state.ownerId ||
+			rechecked.state.startedAt !== current.state.startedAt ||
+			rechecked.incarnation !== current.incarnation ||
+			!this.#currentConfigurationMatches(tokenFingerprint, chatId) ||
+			!this.pidAlive(captured.state.pid)
+		)
+			return "ownership_changed";
+		if (signal === "SIGTERM" && processRef.termination === "hard") return "hard_termination";
 		try {
 			processRef.signalRoot(signal);
 		} catch {
@@ -376,7 +444,10 @@ export class TelegramDaemonController implements BuiltInDaemonController {
 		return this.stopOrReload("reload", opts);
 	}
 
-	async reloadForGenerationUpgrade(opts: DaemonOperationOptions = {}): Promise<TelegramGenerationReloadResult> {
+	async reloadForGenerationUpgrade(
+		opts: DaemonOperationOptions = {},
+		attestedLegacyUpgrade = false,
+	): Promise<TelegramGenerationReloadResult> {
 		// A generation upgrade MUST replace an incompatible older-generation owner to
 		// avoid a permanent single-poller deadlock. Unlike a manual `skc daemon
 		// reload`, this automatic path force-escalates to SIGKILL when the old owner
@@ -384,7 +455,7 @@ export class TelegramDaemonController implements BuiltInDaemonController {
 		// self-recovers instead of failing closed and asking the operator to rerun
 		// with --force. The SIGKILL remains fenced to the still-live, still-matching
 		// captured owner (same ownerId + pid), so a fresh replacement is never killed.
-		const operation = await this.stopOrReload("reload", { ...opts, force: true });
+		const operation = await this.stopOrReload("reload", { ...opts, force: true }, attestedLegacyUpgrade);
 		if (!operation.ok) return { outcome: "failed", operation };
 		const after = await this.status();
 		return after.health === "running" ? { outcome: "ready", operation } : { outcome: "failed", operation };
@@ -394,7 +465,11 @@ export class TelegramDaemonController implements BuiltInDaemonController {
 		return this.stopOrReload("stop", opts);
 	}
 
-	private async stopOrReload(action: "stop" | "reload", opts: DaemonOperationOptions): Promise<DaemonOperationResult> {
+	private async stopOrReload(
+		action: "stop" | "reload",
+		opts: DaemonOperationOptions,
+		attestedLegacyUpgrade = false,
+	): Promise<DaemonOperationResult> {
 		const before = await this.status();
 		const warnings: string[] = [];
 		if (before.runtime.warning) warnings.push(before.runtime.warning);
@@ -408,7 +483,18 @@ export class TelegramDaemonController implements BuiltInDaemonController {
 		const gracefulTimeoutMs = opts.gracefulTimeoutMs ?? DEFAULT_GRACEFUL_TIMEOUT_MS;
 		const killTimeoutMs = opts.killTimeoutMs ?? DEFAULT_KILL_TIMEOUT_MS;
 
-		const state = await readDaemonState(this.settings, this.fsImpl);
+		const ownerSnapshot = await readOwnerFreshnessSnapshot({ settings: this.settings, fs: this.fsImpl });
+		const state = ownerSnapshot.state;
+		const attestedLegacyOwner = attestedLegacyUpgrade
+			? await readAttestedLegacyDaemonOwner({
+					settings: this.settings,
+					fs: this.fsImpl,
+					now: this.now,
+					pidIncarnation: this.deps.pidIncarnation,
+					tokenFingerprint: fp,
+					chatId,
+				})
+			: undefined;
 		const replaceableLiveOwner =
 			(action === "reload" &&
 				state !== undefined &&
@@ -419,6 +505,7 @@ export class TelegramDaemonController implements BuiltInDaemonController {
 					chatId,
 					pidAlive: this.pidAlive,
 					pidIncarnation: this.deps.pidIncarnation,
+					effectiveHeartbeatAt: ownerSnapshot.effectiveHeartbeatAt,
 				}) &&
 				isSignalableMatchingOwner({
 					state,
@@ -427,6 +514,7 @@ export class TelegramDaemonController implements BuiltInDaemonController {
 					pidAlive: this.pidAlive,
 					pidIncarnation: this.deps.pidIncarnation,
 				})) ||
+			(action === "reload" && attestedLegacyOwner !== undefined && this.pidAlive(attestedLegacyOwner.state.pid)) ||
 			// A physically-live matching owner whose heartbeat is stale (hung) may be
 			// past-TTL yet still holding the poller. Autostart/generation-upgrade reloads
 			// stay conservative and refuse it, but an explicit `reload --force` must be
@@ -483,16 +571,18 @@ export class TelegramDaemonController implements BuiltInDaemonController {
 		}
 
 		// Running owner: capture identity, request cooperative stop, signal, wait.
-		if (
-			!hasSafeDaemonStateShape(state) ||
-			!isSignalableMatchingOwner({
+		const modernCapturedOwner =
+			hasSafeDaemonStateShape(state) &&
+			isSignalableMatchingOwner({
 				state,
 				tokenFingerprint: fp,
 				chatId,
 				pidAlive: this.pidAlive,
 				pidIncarnation: this.deps.pidIncarnation,
 			})
-		) {
+				? state
+				: undefined;
+		if (!modernCapturedOwner && !attestedLegacyOwner) {
 			return this.result(
 				action,
 				false,
@@ -502,7 +592,7 @@ export class TelegramDaemonController implements BuiltInDaemonController {
 				warnings,
 			);
 		}
-		const capturedOwner = state;
+		const capturedOwner = modernCapturedOwner ?? attestedLegacyOwner!.state;
 		const oldOwnerId = capturedOwner.ownerId;
 		const oldPid = capturedOwner.pid;
 		const requestId = this.deps.randomId?.() ?? `${this.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
@@ -511,7 +601,21 @@ export class TelegramDaemonController implements BuiltInDaemonController {
 			{ version: 1, requestId, action, ownerId: oldOwnerId, pid: oldPid, createdAt: this.now() },
 			this.fsImpl,
 		);
-		if ((await this.signalCapturedOwner(capturedOwner, fp, chatId, "SIGTERM")) === "ownership_changed") {
+		const signalResult = attestedLegacyOwner
+			? await this.#signalAttestedLegacyOwner(attestedLegacyOwner, fp, chatId, "SIGTERM")
+			: await this.signalCapturedOwner(modernCapturedOwner!, fp, chatId, "SIGTERM");
+		if (signalResult === "hard_termination") {
+			await this.clearOwnRequest(requestId);
+			return this.result(
+				action,
+				false,
+				"telegram daemon has hard process authority; refusing cooperative SIGTERM",
+				before,
+				await this.status(),
+				warnings,
+			);
+		}
+		if (signalResult === "ownership_changed") {
 			await this.clearOwnRequest(requestId);
 			return this.result(
 				action,
@@ -529,7 +633,8 @@ export class TelegramDaemonController implements BuiltInDaemonController {
 		let dead = await this.waitForPidDeath(oldPid, gracefulTimeoutMs);
 		if (!dead) {
 			// Old pid still alive after the cooperative SIGTERM. Inspect current ownership.
-			const current = await readDaemonState(this.settings, this.fsImpl);
+			const currentSnapshot = await readOwnerFreshnessSnapshot({ settings: this.settings, fs: this.fsImpl });
+			const current = currentSnapshot.state;
 			const changedToLiveOwner =
 				current !== undefined &&
 				current.ownerId !== oldOwnerId &&
@@ -540,6 +645,7 @@ export class TelegramDaemonController implements BuiltInDaemonController {
 					chatId,
 					pidAlive: this.pidAlive,
 					pidIncarnation: this.deps.pidIncarnation,
+					effectiveHeartbeatAt: currentSnapshot.effectiveHeartbeatAt,
 				});
 			if (changedToLiveOwner) {
 				await this.clearOwnRequest(requestId);
@@ -559,7 +665,9 @@ export class TelegramDaemonController implements BuiltInDaemonController {
 			// the captured owner/pid still matches, so we never kill a different owner.
 			const stillSameOwner = current !== undefined && current.ownerId === oldOwnerId && current.pid === oldPid;
 			if (opts.force && stillSameOwner) {
-				const killResult = await this.signalCapturedOwner(capturedOwner, fp, chatId, "SIGKILL");
+				const killResult = attestedLegacyOwner
+					? await this.#signalAttestedLegacyOwner(attestedLegacyOwner, fp, chatId, "SIGKILL")
+					: await this.signalCapturedOwner(modernCapturedOwner!, fp, chatId, "SIGKILL");
 				// Kill only a still-live matching owner; an owner that exited between the
 				// graceful timeout and this recheck ("already_gone") is confirmed dead by
 				// waitForPidDeath, while a real ownership change stays fenced.
@@ -585,11 +693,23 @@ export class TelegramDaemonController implements BuiltInDaemonController {
 			return this.result(action, true, "stopped telegram daemon", before, after, warnings);
 		}
 
+		if (!this.#currentConfigurationMatches(fp, chatId)) {
+			const after = await this.status();
+			return this.result(
+				action,
+				false,
+				"telegram notification configuration changed during reload; refusing to spawn",
+				before,
+				after,
+				warnings,
+			);
+		}
 		const { spawned, ready } = await this.spawnAndWait(roots, fp, chatId);
 		warnings.push(...spawned.warnings);
 		const after = await this.status();
 		if (spawned.result === "attached") {
-			const attachedState = await readDaemonState(this.settings, this.fsImpl);
+			const attachedSnapshot = await readOwnerFreshnessSnapshot({ settings: this.settings, fs: this.fsImpl });
+			const attachedState = attachedSnapshot.state;
 			if (
 				!isCurrentCompatibleOwner({
 					state: attachedState,
@@ -598,6 +718,7 @@ export class TelegramDaemonController implements BuiltInDaemonController {
 					chatId,
 					pidAlive: this.pidAlive,
 					pidIncarnation: this.deps.pidIncarnation,
+					effectiveHeartbeatAt: attachedSnapshot.effectiveHeartbeatAt,
 				})
 			) {
 				return this.result(

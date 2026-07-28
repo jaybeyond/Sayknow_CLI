@@ -1178,16 +1178,25 @@ export function outcomeToResponse(frame: SessionLifecycleRequest, outcome: Lifec
 	if (frame.type === "session_close") {
 		if (typeof e.sessionId !== "string" || typeof e.processGone !== "boolean")
 			throw new Error("invalid close success ledger entry");
+		if (!e.processGone) {
+			return {
+				type: "session_lifecycle_error",
+				requestId: frame.requestId,
+				status: "error",
+				reason: "terminal_uncertain",
+				message: "close did not confirm process termination",
+			};
+		}
 		return {
 			type: "session_close_response",
 			requestId: frame.requestId,
 			status: "ok",
 			sessionId: e.sessionId,
-			processGone: e.processGone,
+			processGone: true,
 			historyPreserved: true,
 			// The killed session's per-session endpoint record is reaped by the
 			// daemon's dead-PID scan (scanRoots), so it is effectively stale.
-			endpointStale: e.processGone,
+			endpointStale: true,
 		};
 	}
 	if (

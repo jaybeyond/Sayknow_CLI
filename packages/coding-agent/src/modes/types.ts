@@ -32,6 +32,7 @@ import type { ToolExecutionHandle } from "./components/tool-execution";
 import type { StatusLineComponent } from "./components/tool-status-header";
 import type { IrcObservationLedger } from "./irc-observation-ledger";
 import type { OAuthManualInputManager } from "./oauth-manual-input";
+import type { PromptSuggestionController } from "./prompt-suggestion-controller";
 import type { Theme } from "./theme/theme";
 import type { ParsedIrcMessage } from "./utils/irc-message";
 
@@ -156,6 +157,8 @@ export interface InteractiveModeContext {
 	skillCommands: Map<string, Skill>;
 	oauthManualInput: OAuthManualInputManager;
 	todoPhases: TodoPhase[];
+	/** Ghost-text next-prompt prediction; absent in ACP/lightweight test contexts. */
+	promptSuggestion?: PromptSuggestionController;
 
 	// Lifecycle
 	init(): Promise<void>;
@@ -245,6 +248,8 @@ export interface InteractiveModeContext {
 	getAssistantViewportAnchorId?(message: AssistantMessage): string;
 	findLastAssistantMessage(): AssistantMessage | undefined;
 	extractAssistantText(message: AssistantMessage): string;
+	/** Records one semantic visible-transcript mutation for the sticky viewport. */
+	recordVisibleTranscriptMutation?(): void;
 	updateEditorTopBorder(): void;
 	updateEditorBorderColor(): void;
 	rebuildChatFromMessages(policy: TranscriptRebuildPolicy): void;
@@ -338,6 +343,7 @@ export interface InteractiveModeContext {
 	handleBackgroundCommand(): void;
 	handleImagePaste(): Promise<boolean>;
 	handleBtwCommand(question: string): Promise<void>;
+	handleBtwFollowUp(question: string): Promise<"accepted" | "busy" | "closed" | "rejected">;
 	hasActiveBtw(): boolean;
 	handleBtwEscape(): boolean;
 	cycleThinkingLevel(): void;

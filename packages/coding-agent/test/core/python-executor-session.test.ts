@@ -1,12 +1,20 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import { disposeAllKernelSessions, executePython } from "@sayknow-cli/coding-agent/eval/py/executor";
 import * as pythonKernel from "@sayknow-cli/coding-agent/eval/py/kernel";
+import { disposePyToolBridge } from "@sayknow-cli/coding-agent/eval/py/tool-bridge";
+import type { ToolSession } from "@sayknow-cli/coding-agent/tools";
 
 class FakeKernel {
+	#onExecute?: () => Promise<void>;
 	executeCalls = 0;
 	shutdownCalls = 0;
 	alive = true;
-	constructor(private readonly shouldThrow: boolean = false) {}
+	constructor(
+		private readonly shouldThrow: boolean = false,
+		onExecute?: () => Promise<void>,
+	) {
+		this.#onExecute = onExecute;
+	}
 
 	isAlive(): boolean {
 		return this.alive;
@@ -14,6 +22,7 @@ class FakeKernel {
 
 	async execute(): Promise<{ status: "ok"; cancelled: false; timedOut: false; stdinRequested: false }> {
 		this.executeCalls += 1;
+		await this.#onExecute?.();
 		if (this.shouldThrow) {
 			this.alive = false;
 			throw new Error("kernel crashed");
@@ -36,6 +45,7 @@ describe("executePython session lifecycle", () => {
 	afterEach(async () => {
 		vi.restoreAllMocks();
 		await disposeAllKernelSessions();
+		await disposePyToolBridge();
 	});
 
 	it("restarts session when kernel is not alive", async () => {
@@ -98,6 +108,58 @@ describe("executePython session lifecycle", () => {
 		});
 
 		expect(startSpy).toHaveBeenCalledTimes(2);
+		expect(kernel1.shutdownCalls).toBe(1);
+		expect(kernel2.executeCalls).toBe(1);
+	});
+
+	it("rotates the session capability when replacing a dead kernel automatically", async () => {
+		const kernel1 = new FakeKernel();
+		const bridgeEnvironments: Array<Record<string, string | undefined>> = [];
+		const kernel2 = new FakeKernel(false, async () => {
+			const bridgeUrl = bridgeEnvironments[1]!.PI_TOOL_BRIDGE_URL;
+			const firstCapability = bridgeEnvironments[0]!.PI_TOOL_BRIDGE_CAPABILITY;
+			const rotatedCapability = bridgeEnvironments[1]!.PI_TOOL_BRIDGE_CAPABILITY;
+			const callBridge = async (capability: string): Promise<Response> =>
+				await fetch(`${bridgeUrl}/v1/tool`, {
+					method: "POST",
+					headers: { "Content-Type": "application/json", Authorization: `Bearer ${capability}` },
+					body: JSON.stringify({}),
+				});
+			expect((await callBridge(firstCapability!)).status).toBe(403);
+			expect((await callBridge(rotatedCapability!)).status).toBe(400);
+		});
+		const starts = [kernel1, kernel2];
+		vi.spyOn(pythonKernel, "checkPythonKernelAvailability").mockResolvedValue({ ok: true });
+		vi.spyOn(pythonKernel.PythonKernel, "start").mockImplementation(async options => {
+			bridgeEnvironments.push(options.env ?? {});
+			const next = starts.shift();
+			if (!next) throw new Error("No kernel available");
+			return next as unknown as pythonKernel.PythonKernel;
+		});
+		const toolSession = { getToolByName: () => undefined } as unknown as ToolSession;
+
+		await executePython("print('one')", {
+			cwd: "/tmp",
+			sessionId: "bridge-session",
+			kernelMode: "session",
+			toolSession,
+		});
+		kernel1.alive = false;
+		await executePython("print('two')", {
+			cwd: "/tmp",
+			sessionId: "bridge-session",
+			kernelMode: "session",
+			toolSession,
+		});
+
+		expect(bridgeEnvironments).toHaveLength(2);
+		const firstCapability = bridgeEnvironments[0]!.PI_TOOL_BRIDGE_CAPABILITY;
+		const rotatedCapability = bridgeEnvironments[1]!.PI_TOOL_BRIDGE_CAPABILITY;
+		expect(firstCapability).toBeString();
+		expect(rotatedCapability).toBeString();
+		expect(rotatedCapability).not.toBe(firstCapability);
+		expect(bridgeEnvironments[0]!.PI_TOOL_BRIDGE_TOKEN).toBeUndefined();
+		expect(bridgeEnvironments[0]!.PI_TOOL_BRIDGE_SESSION).toBe("bridge-session");
 		expect(kernel1.shutdownCalls).toBe(1);
 		expect(kernel2.executeCalls).toBe(1);
 	});

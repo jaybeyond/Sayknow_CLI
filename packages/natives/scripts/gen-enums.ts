@@ -209,12 +209,20 @@ function applyPathIdentityTypes(dts: string): string {
 			'export declare function applyOwnerOnlyFdSecurity(path: string, kind: "directory" | "file", callerFd: number): NativeOwnerOnlySecurityResult',
 		)
 		.replace(
+			/^export declare function verifyOwnerOnlyPathSecurityExpected\([^\n]*$/m,
+			'export declare function verifyOwnerOnlyPathSecurityExpected(path: string, kind: "directory" | "file", expectedDev: bigint, expectedIno: bigint): NativeOwnerOnlySecurityResult',
+		)
+		.replace(
 			/^export declare function verifyOwnerOnlyPathSecurity\([^\n]*$/m,
 			'export declare function verifyOwnerOnlyPathSecurity(path: string, kind: "directory" | "file"): NativeOwnerOnlySecurityResult',
 		)
 		.replace(
 			/^export declare function verifyOwnerOnlyFdSecurity\([^\n]*$/m,
 			'export declare function verifyOwnerOnlyFdSecurity(path: string, kind: "directory" | "file", callerFd: number): NativeOwnerOnlySecurityResult',
+		)
+		.replace(
+			/^export declare function repairOwnerOnlyPathSecurityExpected\([^\n]*$/m,
+			'export declare function repairOwnerOnlyPathSecurityExpected(path: string, kind: "directory" | "file", expectedDev: bigint, expectedIno: bigint): NativeOwnerOnlySecurityResult',
 		)
 		.replace(/export interface NativeCanonicalDirectoryIdentity \{[\s\S]*?\n\}/, identity)
 		.replace(
@@ -259,8 +267,18 @@ function buildGeneratedBlock(dts: string): string {
 
 function patchCompatibilityDeclarations(dts: string): string {
 	let patched = dts;
-	if (!/^export declare class ComputerController\b/m.test(patched)) {
-		patched = patched.replace("/* eslint-disable */\n", `/* eslint-disable */\n${COMPUTER_CONTROLLER_DECLARATION}`);
+	if (!patched.includes("macOS computer-use controller")) {
+		if (/^export declare class ComputerController \{[\s\S]*?\n\}/m.test(patched)) {
+			patched = patched.replace(
+				/^export declare class ComputerController \{[\s\S]*?\n\}/m,
+				COMPUTER_CONTROLLER_DECLARATION.trim(),
+			);
+		} else {
+			patched = patched.replace(
+				"/* eslint-disable */\n",
+				`/* eslint-disable */\n${COMPUTER_CONTROLLER_DECLARATION}`,
+			);
+		}
 	}
 	return patched
 		.replace(

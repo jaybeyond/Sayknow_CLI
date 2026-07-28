@@ -275,30 +275,32 @@ describe("CLI help load order", () => {
 		await fs.mkdir(xdg, { recursive: true });
 		await fs.mkdir(agentDir, { recursive: true });
 
-		const proc = Bun.spawn([process.execPath, cliEntry, "--tmux", "--version"], {
-			cwd: repoRoot,
-			stdout: "pipe",
-			stderr: "pipe",
-			env: {
-				...process.env,
-				HOME: home,
-				XDG_CONFIG_HOME: xdg,
-				XDG_DATA_HOME: xdg,
-				PI_CODING_AGENT_DIR: agentDir,
-				PI_NO_TITLE: "1",
-				NO_COLOR: "1",
-			},
-		});
+		for (const versionFlag of ["--version", "-v"]) {
+			const proc = Bun.spawn([process.execPath, cliEntry, "--tmux", versionFlag], {
+				cwd: repoRoot,
+				stdout: "pipe",
+				stderr: "pipe",
+				env: {
+					...process.env,
+					HOME: home,
+					XDG_CONFIG_HOME: xdg,
+					XDG_DATA_HOME: xdg,
+					PI_CODING_AGENT_DIR: agentDir,
+					PI_NO_TITLE: "1",
+					NO_COLOR: "1",
+				},
+			});
 
-		const [stdout, stderr, exitCode] = await Promise.all([
-			readStream(proc.stdout as ReadableStream<Uint8Array>),
-			readStream(proc.stderr as ReadableStream<Uint8Array>),
-			proc.exited,
-		]);
+			const [stdout, stderr, exitCode] = await Promise.all([
+				readStream(proc.stdout as ReadableStream<Uint8Array>),
+				readStream(proc.stderr as ReadableStream<Uint8Array>),
+				proc.exited,
+			]);
 
-		expect(exitCode).toBe(0);
-		expect(stdout).toMatch(/^skc\/\d+\.\d+\.\d+\n$/);
-		expect(stderr).toBe("");
+			expect(exitCode).toBe(0);
+			expect(stdout).toMatch(/^skc\/\d+\.\d+\.\d+\n$/);
+			expect(stderr).toBe("");
+		}
 	}, 15_000);
 	it("package bin wrapper executes CLI help when imported by a Bun global shim", async () => {
 		if (Bun.semver.order(Bun.version, "1.3.14") < 0) {
@@ -343,4 +345,51 @@ ${stderr}`;
 		expect(stdout).toContain("USAGE");
 		expect(combined).not.toContain("Bun is a fast JavaScript runtime");
 	}, 15_000);
+});
+
+const argsPath = path.join(repoRoot, "packages", "coding-agent", "src", "cli", "args.ts");
+const fastHelpPath = path.join(repoRoot, "packages", "coding-agent", "src", "cli", "fast-help.ts");
+
+describe("CLI help single source of truth", () => {
+	it("cli.ts sources help from fast-help.ts, not args.ts", async () => {
+		const cliSource = await Bun.file(cliEntry).text();
+
+		// Root help is rendered via the live fast-help module; the dead
+		// args.ts help exports must not be on the import path.
+		expect(cliSource).toContain('import("./cli/fast-help")');
+		expect(cliSource).not.toContain('import("./cli/args")');
+	});
+
+	it("fast-help.ts is the live help SSOT and renders the retained sections", async () => {
+		const fastHelpSource = await Bun.file(fastHelpPath).text();
+
+		// fast-help.ts owns the live help export that cli.ts calls.
+		expect(fastHelpSource).toContain("export function getExtraHelpText");
+
+		// Every section fast-help.ts emits must be present so the live --help
+		// output keeps the documented command/env/tool surface.
+		expect(fastHelpSource).toContain("Commands:");
+		expect(fastHelpSource).toContain("Environment Variables:");
+		expect(fastHelpSource).toContain("Available Tools (default-enabled unless noted):");
+		expect(fastHelpSource).toContain("Useful Commands:");
+	});
+
+	it("fast-help.ts never emits the stale pre-rebrand tagline", async () => {
+		const fastHelpSource = await Bun.file(fastHelpPath).text();
+
+		// The old product name tagline must not leak into live help output.
+		expect(fastHelpSource).not.toContain("red-octopus");
+	});
+
+	it("args.ts no longer carries the dead duplicate help exports or stale tagline", async () => {
+		const argsSource = await Bun.file(argsPath).text();
+
+		// The dead getExtraHelpText/printHelp duplicates could drift silently from
+		// fast-help.ts; they must be gone, along with the stale tagline they held
+		// and the chalk/import bindings only they used.
+		expect(argsSource).not.toContain("export function getExtraHelpText");
+		expect(argsSource).not.toContain("export function printHelp");
+		expect(argsSource).not.toContain("red-octopus");
+		expect(argsSource).not.toContain("chalk");
+	});
 });

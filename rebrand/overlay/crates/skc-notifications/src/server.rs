@@ -625,6 +625,62 @@ impl ServerHandle {
 		Ok(())
 	}
 
+	/// Push a frame and wait for each connected client to acknowledge delivery.
+	///
+	/// [`ServerHandle::push_frame`] is fire-and-forget over the broadcast
+	/// channel, so a caller cannot tell whether anything actually reached a
+	/// socket. This variant delivers per-connection and awaits the delivery
+	/// receipts, which is what the SDK needs before it may treat a frame as
+	/// observed by the peer.
+	///
+	/// Returns `Ok(false)` when there is no connected client, when a
+	/// connection's command channel is gone, or when `wait` elapses before
+	/// every receipt lands.
+	///
+	/// # Errors
+	/// Returns [`PushFrameError::ActionNeededProhibited`] for `ActionNeeded`.
+	pub async fn push_frame_and_wait(
+		&self,
+		msg: ServerMessage,
+		wait: Duration,
+	) -> Result<bool, PushFrameError> {
+		if matches!(msg, ServerMessage::ActionNeeded(_)) {
+			return Err(PushFrameError::ActionNeededProhibited);
+		}
+		let senders = self
+			.state
+			.connections
+			.lock()
+			.values()
+			.map(|connection| connection.tx.clone())
+			.collect::<Vec<_>>();
+		if senders.is_empty() {
+			return Ok(false);
+		}
+		let mut receipts = Vec::with_capacity(senders.len());
+		for sender in senders {
+			let (delivered_tx, delivered_rx) = oneshot::channel();
+			if sender
+				.send(DirectCommand::Deliver(Box::new(msg.clone()), Some(delivered_tx)))
+				.is_err()
+			{
+				return Ok(false);
+			}
+			receipts.push(delivered_rx);
+		}
+		let delivered = timeout(wait, async move {
+			for receipt in receipts {
+				if !matches!(receipt.await, Ok(true)) {
+					return false;
+				}
+			}
+			true
+		})
+		.await
+		.unwrap_or(false);
+		Ok(delivered)
+	}
+
 	/// Publish a session-readiness signal: buffer it (so late-connecting clients
 	/// see it on connect) and broadcast it to currently-connected clients.
 	///

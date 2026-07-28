@@ -313,7 +313,7 @@ export const SETTINGS_SCHEMA = {
 	},
 	"notifications.telegram.toolActivity.enabled": {
 		type: "boolean",
-		default: true,
+		default: false,
 		ui: {
 			tab: "notifications",
 			label: "Telegram Tool Activity",
@@ -505,6 +505,16 @@ export const SETTINGS_SCHEMA = {
 		type: "number",
 		default: 0.05,
 		validate: (value: number) => Number.isFinite(value) && value > 0 && value <= 1,
+	},
+	"skc.ralplan.maxIterations": {
+		type: "number",
+		default: 5,
+		validate: (value: number) => Number.isInteger(value) && value >= 1 && value <= 20,
+	},
+	"skc.ralplan.maxReviewPassesPerLane": {
+		type: "number",
+		default: 1,
+		validate: (value: number) => Number.isInteger(value) && value >= 1 && value <= 10,
 	},
 
 	// ────────────────────────────────────────────────────────────────────────
@@ -844,6 +854,15 @@ export const SETTINGS_SCHEMA = {
 	"statusLine.showSkillHud": {
 		type: "boolean",
 		default: true,
+	},
+	"statusLine.showActionHints": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "appearance",
+			label: "Status Line Action Hints",
+			description: "Show contextual keyboard shortcuts in the status line",
+		},
 	},
 
 	"statusLine.leftSegments": { type: "array", default: [] as StatusLineSegmentId[] },
@@ -1261,7 +1280,8 @@ export const SETTINGS_SCHEMA = {
 		ui: {
 			tab: "interaction",
 			label: "Mouse Support",
-			description: "Enable SGR mouse wheel scrolling and overlay row selection. Disabled in tmux and screen.",
+			description:
+				"Enable SKC session scrolling, drag-to-copy text selection, and overlay row selection with the mouse. Disabled by default to preserve native terminal or tmux scrollback and selection.",
 		},
 	},
 	// Conversation flow
@@ -1358,6 +1378,16 @@ export const SETTINGS_SCHEMA = {
 			tab: "interaction",
 			label: "Emoji Autocomplete",
 			description: "Suggest emojis from `:name:` shortcodes and expand text emoticons like `:D` or `:-)`",
+		},
+	},
+	promptSuggestions: {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "interaction",
+			label: "Prompt Suggestions",
+			description:
+				"Predict your likely next prompt after each turn (smol-model call) and show it as ghost text; Tab accepts",
 		},
 	},
 
@@ -2055,7 +2085,8 @@ export const SETTINGS_SCHEMA = {
 		ui: {
 			tab: "editing",
 			label: "Default Read Limit",
-			description: "Default number of lines returned when agent calls read without a limit",
+			description:
+				"Default collection/selection limit for read operations; bare local receipts use the separate 50-line / 10 KiB receipt budgets",
 			options: [
 				{ value: "200", label: "200 lines" },
 				{ value: "300", label: "300 lines" },
@@ -2092,6 +2123,22 @@ export const SETTINGS_SCHEMA = {
 				{ value: "10", label: "10 KB", description: "Default; ~2.5K tokens" },
 				{ value: "20", label: "20 KB", description: "~5K tokens" },
 				{ value: "50", label: "50 KB", description: "~12.5K tokens" },
+			],
+		},
+	},
+	"read.truncation": {
+		type: "enum",
+		values: ["head", "last", "both"] as const,
+		default: "last",
+		ui: {
+			tab: "editing",
+			label: "Read Truncation",
+			description:
+				"Configured default direction for routes that support directional truncation; bare local and archive reads use this value (factory default: last), while explicit truncation always wins",
+			options: [
+				{ value: "head", label: "Head", description: "Keep the first N lines" },
+				{ value: "last", label: "Last", description: "Keep the last N lines (default)" },
+				{ value: "both", label: "Both", description: "Keep the start and the end, elide the middle" },
 			],
 		},
 	},
@@ -2477,9 +2524,9 @@ export const SETTINGS_SCHEMA = {
 		default: false,
 		ui: {
 			tab: "tools",
-			label: "Insane Search Fallback",
+			label: "Insane Search Fallback (Compatibility)",
 			description:
-				"Opt in to the vendored insane-search escalation for blocked public URL reads (403/WAF/JS-gated). Off by default. Requires preinstalled python3 + curl_cffi (and node + playwright/stealth for the browser phase); changes network posture by enabling TLS/browser impersonation for public pages.",
+				"Compatibility-only preference. Remote renderer fallback stays disabled because it cannot preserve validated per-hop network routing.",
 		},
 	},
 
@@ -2659,6 +2706,47 @@ export const SETTINGS_SCHEMA = {
 			label: "Resource GC Sweep Interval (ms)",
 			description: "How often the resource GC sweeps browser tabs and stale screenshot directories.",
 		},
+	},
+	"memoryGuard.enabled": {
+		type: "boolean",
+		default: false,
+	},
+	"memoryGuard.checkIntervalMs": {
+		type: "number",
+		default: 30_000,
+		validate: (value: number) => Number.isFinite(value) && value > 0,
+	},
+	"memoryGuard.gcThresholdPercent": {
+		type: "number",
+		default: 70,
+		validate: (value: number) => Number.isFinite(value) && value >= 0 && value <= 100,
+	},
+	"memoryGuard.restartThresholdPercent": {
+		type: "number",
+		default: 85,
+		validate: (value: number) => Number.isFinite(value) && value >= 0 && value <= 100,
+	},
+	"memoryGuard.restartThresholdWindowMs": {
+		type: "number",
+		default: 90_000,
+		validate: (value: number) => Number.isFinite(value) && value > 0,
+	},
+	"memoryGuard.cooldownMs": {
+		type: "number",
+		default: 600_000,
+		validate: (value: number) => Number.isFinite(value) && value >= 0,
+	},
+	"memoryGuard.parentReserveMb": {
+		type: "number",
+		default: 1024,
+		validate: (value: number) =>
+			Number.isFinite(value) && value >= 0 && value <= Number.MAX_SAFE_INTEGER / (1024 * 1024),
+	},
+	"memoryGuard.policyLimitMb": {
+		type: "number",
+		default: 0,
+		validate: (value: number) =>
+			Number.isFinite(value) && value >= 0 && value <= Number.MAX_SAFE_INTEGER / (1024 * 1024),
 	},
 
 	"computer.enabled": {
@@ -3316,23 +3404,69 @@ export const SETTINGS_SCHEMA = {
 	},
 	"providers.image": {
 		type: "enum",
-		values: ["auto", "openai", "gemini", "openrouter", "antigravity"] as const,
+		values: ["auto", "openai", "gemini", "openrouter", "antigravity", "alibaba", "custom"] as const,
 		default: "auto",
 		ui: {
 			tab: "providers",
-			label: "Image Provider",
-			description: "Provider for image generation tool",
+			label: "Image Generation",
+			description: "Provider and model for image generation tool",
 			options: [
 				{
 					value: "auto",
 					label: "Auto",
-					description: "Priority: GPT model image tool > Antigravity > OpenRouter > Gemini",
+					description: "Priority: GPT model image tool > Antigravity > OpenRouter > Gemini > Alibaba",
 				},
-				{ value: "openai", label: "OpenAI", description: "Uses the active GPT Responses/Codex model" },
+				{ value: "openai", label: "OpenAI", description: "Uses gpt-image-2 via OpenAI Responses/Codex" },
 				{ value: "gemini", label: "Gemini", description: "Requires GEMINI_API_KEY" },
 				{ value: "openrouter", label: "OpenRouter", description: "Requires OPENROUTER_API_KEY" },
 				{ value: "antigravity", label: "Antigravity", description: "Requires login with google-antigravity" },
+				{
+					value: "alibaba",
+					label: "Alibaba Bailian",
+					description: "Requires ALIBABA_TOKEN_PLAN_API_KEY (wan2.7-image via Token Plan)",
+				},
+				{
+					value: "custom",
+					label: "Custom",
+					description: "OpenAI-compatible endpoint (set providers.imageCustomUrl)",
+				},
 			],
+		},
+	},
+	"providers.imageModel": {
+		type: "string",
+		default: undefined,
+		ui: {
+			tab: "providers",
+			label: "Image Model",
+			description: "Override the default image generation model for the selected provider",
+		},
+	},
+	"providers.imageCustomUrl": {
+		type: "string",
+		default: undefined,
+		ui: {
+			tab: "providers",
+			label: "Image Custom URL",
+			description: "Base URL for custom OpenAI-compatible image endpoint",
+		},
+	},
+	"providers.imageCustomKey": {
+		type: "string",
+		default: undefined,
+		ui: {
+			tab: "providers",
+			label: "Image Custom API Key",
+			description: "API key for custom OpenAI-compatible image endpoint",
+		},
+	},
+	"providers.imageCustomKeyEnv": {
+		type: "string",
+		default: undefined,
+		ui: {
+			tab: "providers",
+			label: "Image Custom API Key Env",
+			description: "Environment variable name holding the API key for custom image endpoint",
 		},
 	},
 
@@ -3943,6 +4077,7 @@ export interface StatusLineSettings {
 	maxRows: number;
 	showHookStatus: boolean;
 	showSkillHud: boolean;
+	showActionHints: boolean;
 	leftSegments: StatusLineSegmentId[];
 	rightSegments: StatusLineSegmentId[];
 	segmentOptions: Record<string, unknown>;
@@ -3979,6 +4114,17 @@ export interface ShellMinimizerSettings {
 	only: string[];
 	except: string[];
 	maxCaptureBytes: number;
+}
+
+export interface MemoryGuardSettings {
+	enabled: boolean;
+	checkIntervalMs: number;
+	gcThresholdPercent: number;
+	restartThresholdPercent: number;
+	restartThresholdWindowMs: number;
+	cooldownMs: number;
+	parentReserveMb: number;
+	policyLimitMb: number;
 }
 
 export interface NotificationsSettings {
@@ -4068,6 +4214,7 @@ export interface GroupTypeMap {
 	statusLine: StatusLineSettings;
 	thinkingBudgets: ThinkingBudgetsSettings;
 	stt: SttSettings;
+	memoryGuard: MemoryGuardSettings;
 	modelRoles: Record<string, ModelSelectorValue>;
 	modelTags: ModelTagsSettings;
 	cycleOrder: string[];

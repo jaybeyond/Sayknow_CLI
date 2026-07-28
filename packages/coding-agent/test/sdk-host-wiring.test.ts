@@ -15,6 +15,15 @@ import type {
 	ExtensionContextActions,
 	ExtensionUIContext,
 } from "../src/extensibility/extensions/types";
+
+async function firePreflightAccept(options?: {
+	onPreflightAccepted?: () => void;
+	onPreflightAcceptCommit?: () => void | Promise<void>;
+}): Promise<void> {
+	if (options?.onPreflightAcceptCommit) await options.onPreflightAcceptCommit();
+	else options?.onPreflightAccepted?.();
+}
+
 import { ExtensionUiController } from "../src/modes/controllers/extension-ui-controller";
 import { buildAskGateAnswerSchema as buildDeepInterviewAskGateAnswerSchema } from "../src/modes/shared/agent-wire/deep-interview-gate";
 import {
@@ -33,6 +42,9 @@ import { brokerOwnerForTest } from "../src/sdk/broker/ensure";
 import { SessionIndex } from "../src/sdk/broker/session-index";
 import { createNotificationsExtension, PresentationArbiter } from "../src/sdk/bus";
 import { getTelegramFileSink } from "../src/sdk/bus/attachment-registry";
+import { getNotificationConfig } from "../src/sdk/bus/config";
+import { NotificationSessionController } from "../src/sdk/bus/session-control";
+import * as telegramDaemon from "../src/sdk/bus/telegram-daemon";
 import { SessionSdkHost } from "../src/sdk/host";
 import {
 	attachLifecycleStartupCapability,
@@ -111,6 +123,13 @@ function start(
 	commands = new Map<string, { handler: (args: string, ctx: unknown) => Promise<void> }>(),
 	lifecycle?: { startupCapability: SdkStartupCapability; lifecycleRequired: true },
 	autoStart = true,
+	ensureTelegramDaemon?: (input: {
+		settings: Settings;
+		cwd: string;
+		sessionId: string;
+		onRegistered?: (registration: telegramDaemon.RegisterNotificationRootResult) => void;
+	}) => Promise<"attached">,
+	controller?: NotificationSessionController,
 ): Map<string, (event: unknown, context: unknown) => unknown> {
 	const handlers = new Map<string, (event: unknown, context: unknown) => unknown>();
 	const api = {
@@ -124,8 +143,15 @@ function start(
 			options?: Parameters<ExtensionActions["sendUserMessage"]>[1],
 		) => {
 			if (forwardPreflightCallbacks) return Promise.resolve(sendUserMessage(content, options));
-			const { onPreflightAccepted, ...delivery } = options ?? {};
+			const { onPreflightAccepted, onPreflightAcceptCommit, ...delivery } = options ?? {};
 			const submission = sendUserMessage(content, Object.keys(delivery).length > 0 ? delivery : undefined);
+			// Prefer awaitable durable fence; fall back to legacy sync accept for older mocks.
+			if (onPreflightAcceptCommit) {
+				return Promise.resolve(onPreflightAcceptCommit()).then(() => {
+					onPreflightAccepted?.();
+					return submission;
+				});
+			}
 			onPreflightAccepted?.();
 			return Promise.resolve(submission);
 		},
@@ -134,9 +160,28 @@ function start(
 	const effectiveSettings =
 		settings ??
 		(lifecycle ? ({ get: () => undefined, getAgentDir: () => ctx.cwd } as unknown as Settings) : undefined);
-	createNotificationsExtension(api, effectiveSettings ? { settings: effectiveSettings } : undefined);
+	createNotificationsExtension(
+		api,
+		effectiveSettings ? { settings: effectiveSettings, ensureTelegramDaemon, controller } : undefined,
+	);
 	if (autoStart) void handlers.get("session_start")?.({ type: "session_start" }, ctx);
 	return handlers;
+}
+
+function telegramSettings(agentDir: string, configured: boolean): Settings {
+	const settings = Settings.isolated({
+		"notifications.enabled": true,
+		...(configured
+			? { "notifications.telegram.botToken": "123456:token", "notifications.telegram.chatId": "42" }
+			: {}),
+	}) as Settings;
+	return new Proxy(settings, {
+		get(target, prop) {
+			if (prop === "getAgentDir") return () => agentDir;
+			const value = Reflect.get(target, prop, target);
+			return typeof value === "function" ? value.bind(target) : value;
+		},
+	}) as Settings;
 }
 
 function context(
@@ -433,6 +478,123 @@ test("lifecycle cleanup fences same-id startup and preserves proven owner releas
 	}
 }, 60_000);
 
+test("Telegram root release failure is retained and retried through lifecycle shutdown", async () => {
+	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "skc-sdk-telegram-root-retry-"));
+	dirs.push(cwd);
+	const sessionId = `telegram-root-retry-${Date.now()}`;
+	const settings = telegramSettings(path.join(cwd, "agent"), true);
+	const capability = new SdkStartupCapability(new SdkStartupRollbackTracker());
+	const unregisterImpl = telegramDaemon.unregisterNotificationRoot;
+	let unregisterAttempts = 0;
+	const unregister = spyOn(telegramDaemon, "unregisterNotificationRoot").mockImplementation(async input => {
+		unregisterAttempts++;
+		// Fail the first owner-release attempt for the live registration token.
+		if (unregisterAttempts === 1) throw new Error("roots write failed");
+		return await unregisterImpl(input);
+	});
+	const errorSpy = spyOn(logger, "error").mockImplementation(() => {});
+	try {
+		const sessionContext = context(cwd, sessionId);
+		const handlers = start(
+			sessionContext,
+			settings,
+			() => {},
+			false,
+			new Map(),
+			{ startupCapability: capability, lifecycleRequired: true },
+			false,
+			async input => {
+				const registration = await telegramDaemon.registerNotificationRoot(input);
+				input.onRegistered?.(registration);
+				return "attached";
+			},
+		);
+		// Await full start+reconcile so shutdown uses the final replacement token only.
+		await handlers.get("session_start")!({ type: "session_start" }, sessionContext);
+		await expect(capability.promise).resolves.toEqual({ status: "started" });
+		const rootsFile = telegramDaemon.daemonPaths(settings.getAgentDir()).roots;
+		expect(JSON.parse(fs.readFileSync(rootsFile, "utf8")).sessions[sessionId]).toBe(path.join(cwd, ".skc", "state"));
+		await handlers.get("session_shutdown")!({ type: "session_shutdown" }, sessionContext);
+		// First shutdown retains the failed owner release (exactly one attempt).
+		expect(unregister).toHaveBeenCalledTimes(1);
+		expect(unregister.mock.calls[0]?.[0].registrationToken).toEqual(expect.any(String));
+		expect(
+			errorSpy.mock.calls.some(([message]) =>
+				String(message).includes(`SDK notification runtime ${sessionId} owner release failed`),
+			),
+		).toBe(true);
+		expect(JSON.parse(fs.readFileSync(rootsFile, "utf8")).sessions[sessionId]).toBe(path.join(cwd, ".skc", "state"));
+		// Explicit later lifecycle shutdown retries the retained release and succeeds.
+		await handlers.get("session_shutdown")!({ type: "session_shutdown" }, sessionContext);
+		expect(unregister).toHaveBeenCalledTimes(2);
+		expect(unregister.mock.calls[1]?.[0].registrationToken).toBe(unregister.mock.calls[0]?.[0].registrationToken);
+		expect(JSON.parse(fs.readFileSync(rootsFile, "utf8")).sessions[sessionId]).toBeUndefined();
+		expect(JSON.parse(fs.readFileSync(rootsFile, "utf8"))).toEqual({
+			version: 1,
+			roots: [],
+			managedRoots: [],
+			sessions: {},
+			registrationTokens: {},
+		});
+		await expect(
+			handlers.get("session_shutdown")!({ type: "session_shutdown" }, sessionContext),
+		).resolves.toBeUndefined();
+		expect(unregister).toHaveBeenCalledTimes(2);
+	} finally {
+		unregister.mockRestore();
+		errorSpy.mockRestore();
+	}
+}, 60_000);
+
+test("Telegram root ownership is recorded when reconciliation configures Telegram after startup", async () => {
+	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "skc-sdk-telegram-root-reconcile-"));
+	dirs.push(cwd);
+	const sessionId = `telegram-root-reconcile-${Date.now()}`;
+	const settings = telegramSettings(path.join(cwd, "agent"), false);
+	const controller = new NotificationSessionController({
+		eligible: true,
+		getConfig: () => getNotificationConfig(settings),
+	});
+	const capability = new SdkStartupCapability(new SdkStartupRollbackTracker());
+	let registrations = 0;
+	const sessionContext = context(cwd, sessionId);
+	const handlers = start(
+		sessionContext,
+		settings,
+		() => {},
+		false,
+		new Map(),
+		{ startupCapability: capability, lifecycleRequired: true },
+		true,
+		async input => {
+			registrations++;
+			const registration = await telegramDaemon.registerNotificationRoot(input);
+			input.onRegistered?.(registration);
+			return "attached";
+		},
+		controller,
+	);
+	await expect(capability.promise).resolves.toEqual({ status: "started" });
+	expect(registrations).toBe(0);
+	settings.set("notifications.telegram.botToken", "123456:token");
+	settings.set("notifications.telegram.chatId", "42");
+	await expect(controller.reconcileCurrentSession(sessionContext as never)).resolves.toMatchObject({
+		outcome: "started",
+	});
+	const rootsFile = telegramDaemon.daemonPaths(settings.getAgentDir()).roots;
+	expect(JSON.parse(fs.readFileSync(rootsFile, "utf8")).sessions[sessionId]).toBe(path.join(cwd, ".skc", "state"));
+	await expect(
+		handlers.get("session_shutdown")!({ type: "session_shutdown" }, sessionContext),
+	).resolves.toBeUndefined();
+	expect(JSON.parse(fs.readFileSync(rootsFile, "utf8"))).toEqual({
+		version: 1,
+		roots: [],
+		managedRoots: [],
+		sessions: {},
+		registrationTokens: {},
+	});
+}, 60_000);
+
 test("production SDK host starts exactly one instrumented server (no duplicate auto-host)", async () => {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "skc-sdk-single-host-"));
 	dirs.push(cwd);
@@ -525,10 +687,36 @@ test("session_start swallows startup plus owner-release failure without surfacin
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "skc-sdk-startup-cleanup-double-failure-"));
 	dirs.push(cwd);
 	const sessionId = `startup-cleanup-double-failure-${Date.now()}`;
-	const serverStart = spyOn(NotificationServer.prototype, "start").mockRejectedValueOnce(
-		new Error("server start failed"),
-	);
-	const hostStop = spyOn(SessionSdkHost.prototype, "stop").mockRejectedValueOnce(new Error("host stop failed"));
+	// `mockRejectedValueOnce` on a shared prototype is a one-shot global: a peer
+	// test scheduled concurrently in the same shard can consume the single
+	// rejection, after which this test's own `start`/`stop` resolve, startup
+	// never sets `suppressExtensionError`, and the error surfaces. Scope the
+	// rejection to this test's first call instead so shard composition cannot
+	// steal it.
+	let serverStartRejected = false;
+	const serverStartImpl = NotificationServer.prototype.start;
+	const serverStart = spyOn(NotificationServer.prototype, "start").mockImplementation(async function (
+		this: NotificationServer,
+		...args: Parameters<NotificationServer["start"]>
+	) {
+		if (!serverStartRejected) {
+			serverStartRejected = true;
+			throw new Error("server start failed");
+		}
+		return await serverStartImpl.apply(this, args);
+	});
+	let hostStopRejected = false;
+	const hostStopImpl = SessionSdkHost.prototype.stop;
+	const hostStop = spyOn(SessionSdkHost.prototype, "stop").mockImplementation(async function (
+		this: SessionSdkHost,
+		...args: Parameters<SessionSdkHost["stop"]>
+	) {
+		if (!hostStopRejected) {
+			hostStopRejected = true;
+			throw new Error("host stop failed");
+		}
+		return await hostStopImpl.apply(this, args);
+	});
 	const errorSpy = spyOn(logger, "error").mockImplementation(() => {});
 	let restored = false;
 	try {
@@ -1367,6 +1555,35 @@ test("SDK host directly delivers correlated lifecycle frames for an accepted pro
 		},
 		sessionContext,
 	);
+	await handlers.get("tool_execution_start")?.(
+		{
+			type: "tool_execution_start",
+			toolCallId: "tool-read-1",
+			toolName: "read",
+			args: { path: "README.md" },
+		},
+		sessionContext,
+	);
+	await handlers.get("tool_execution_update")?.(
+		{
+			type: "tool_execution_update",
+			toolCallId: "tool-read-1",
+			toolName: "read",
+			args: { path: "README.md" },
+			partialResult: { content: [{ type: "text", text: "reading" }] },
+		},
+		sessionContext,
+	);
+	await handlers.get("tool_execution_end")?.(
+		{
+			type: "tool_execution_end",
+			toolCallId: "tool-read-1",
+			toolName: "read",
+			result: { content: [{ type: "text", text: "# Sayknow-CLI" }] },
+			isError: false,
+		},
+		sessionContext,
+	);
 	socket.send(
 		JSON.stringify({
 			type: "control_request",
@@ -1383,11 +1600,24 @@ test("SDK host directly delivers correlated lifecycle frames for an accepted pro
 		ok: false,
 		error: { code: "busy" },
 	});
-	await handlers.get("agent_end")?.({ type: "agent_end" }, sessionContext);
+	await handlers.get("agent_end")?.(
+		{
+			type: "agent_end",
+			messages: [
+				{
+					role: "assistant",
+					content: [{ type: "text", text: "final answer" }],
+					stopReason: "stop",
+				},
+			],
+		} as never,
+		sessionContext,
+	);
 	await waitFor(
 		() => frames.some(frame => frame.type === "agent_start") && frames.some(frame => frame.type === "agent_end"),
 		"correlated accepted prompt lifecycle",
 	);
+	expect(frames.find(frame => frame.type === "agent_end")).toMatchObject({ finalText: "final answer" });
 	await waitFor(
 		() =>
 			frames.some(
@@ -1398,6 +1628,13 @@ test("SDK host directly delivers correlated lifecycle frames for an accepted pro
 						?.assistantMessageEvent?.delta === "hi",
 			),
 		"correlated assistant message event",
+	);
+	await waitFor(
+		() =>
+			frames.some(frame => frame.type === "event" && frame.kind === "tool_execution_start") &&
+			frames.some(frame => frame.type === "event" && frame.kind === "tool_execution_update") &&
+			frames.some(frame => frame.type === "event" && frame.kind === "tool_execution_end"),
+		"correlated tool lifecycle events",
 	);
 	observer.send(JSON.stringify({ type: "event_replay", id: "observer-replay", sinceSeq: 0 }));
 	await waitFor(
@@ -1419,6 +1656,15 @@ test("SDK host directly delivers correlated lifecycle frames for an accepted pro
 	]);
 	expect(observerFrames.some(frame => frame.type === "agent_start" || frame.type === "agent_end")).toBe(false);
 	expect(observerFrames.some(frame => frame.type === "event" && frame.kind === "message_update")).toBe(false);
+	expect(
+		observerFrames.some(
+			frame =>
+				frame.type === "event" &&
+				(frame.kind === "tool_execution_start" ||
+					frame.kind === "tool_execution_update" ||
+					frame.kind === "tool_execution_end"),
+		),
+	).toBe(false);
 	expect(observerReplay.events?.some(frame => frame.kind === "message_update")).toBe(false);
 	await handlers.get("session_shutdown")?.({ type: "session_shutdown" }, sessionContext);
 });
@@ -1432,8 +1678,8 @@ test("SDK host buffers synchronous pre-ack start and end until after acknowledge
 	handlers = start(
 		sessionContext,
 		undefined,
-		(_content, options) => {
-			options?.onPreflightAccepted?.();
+		async (_content, options) => {
+			await firePreflightAccept(options);
 			void handlers.get("agent_start")?.({ type: "agent_start" }, sessionContext);
 			void handlers.get("agent_end")?.({ type: "agent_end" }, sessionContext);
 		},
@@ -1490,8 +1736,8 @@ test("SDK host buffers synchronous pre-ack accepted failure until after acknowle
 	handlers = start(
 		sessionContext,
 		undefined,
-		(_content, options) => {
-			options?.onPreflightAccepted?.();
+		async (_content, options) => {
+			await firePreflightAccept(options);
 			void handlers.get("agent_start")?.({ type: "agent_start" }, sessionContext);
 			throw Object.assign(new Error("synchronous accepted failure"), { code: "unavailable" });
 		},
@@ -1540,7 +1786,7 @@ test("SDK host buffers synchronous pre-ack accepted failure until after acknowle
 			type: "agent_failed",
 			sessionId,
 			...correlation,
-			error: { code: "unavailable", message: "synchronous accepted failure" },
+			error: { code: "unavailable", message: "Prompt submission failed." },
 		}),
 	]);
 	await handlers.get("session_shutdown")?.({ type: "session_shutdown" }, sessionContext);
@@ -1637,7 +1883,7 @@ test("SDK host serializes concurrent prompt admission and replays correlated lif
 			submissions.push(String(content));
 			preflightStarted.resolve();
 			await releasePreflight.promise;
-			options?.onPreflightAccepted?.();
+			await firePreflightAccept(options);
 		},
 		true,
 	);
@@ -1788,7 +2034,7 @@ test("SDK host delivers accepted prompt failures after their acknowledgement", a
 		type: "agent_failed",
 		commandId: acknowledgement.result?.commandId,
 		turnId: acknowledgement.result?.turnId,
-		error: { code: "unavailable", message: "prompt failed after preflight" },
+		error: { code: "unavailable", message: "Prompt submission failed." },
 	});
 	await handlers.get("session_shutdown")?.({ type: "session_shutdown" }, context(cwd, sessionId));
 });
@@ -1814,7 +2060,7 @@ test("SDK host terminalizes a cancelled preflight and releases prompt authority"
 					throw Object.assign(new Error("Prompt preflight was cancelled before execution."), { code: "busy" });
 				}
 			}
-			options?.onPreflightAccepted?.();
+			await firePreflightAccept(options);
 		},
 		true,
 	);
@@ -1881,7 +2127,9 @@ test("SDK host terminalizes a never-resolving preflight on abort and fences late
 		undefined,
 		async (content, options) => {
 			if (content !== "never resolve") return;
-			latePreflightAccepted = options?.onPreflightAccepted;
+			latePreflightAccepted = options?.onPreflightAcceptCommit
+				? () => void options.onPreflightAcceptCommit?.()
+				: options?.onPreflightAccepted;
 			preflightStarted.resolve();
 			await neverPreflight.promise;
 		},
@@ -1961,7 +2209,7 @@ test("SDK host abort-and-prompt cancels a never-resolving preflight before repla
 				preflightStarted.resolve();
 				await neverPreflight.promise;
 			}
-			options?.onPreflightAccepted?.();
+			await firePreflightAccept(options);
 		},
 		true,
 	);
@@ -2040,9 +2288,9 @@ test("SDK host waits for asynchronous abort unwind before delivering an abort-an
 	const handlers = start(
 		sessionContext,
 		undefined,
-		(content, options) => {
+		async (content, options) => {
 			deliveries.push([content, options]);
-			options?.onPreflightAccepted?.();
+			await firePreflightAccept(options);
 		},
 		true,
 	);
@@ -2142,7 +2390,7 @@ test("SDK session switches rotate endpoint authority before publishing the repla
 });
 
 for (const eventType of ["session_switch", "session_branch"] as const) {
-	test(`SDK ${eventType} rotation swallows a retained owner-release failure without surfacing an extension error`, async () => {
+	test(`SDK ${eventType} rotation fails closed when predecessor release is uncertain`, async () => {
 		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), `skc-sdk-rotate-fail-${eventType}-`));
 		dirs.push(cwd);
 		const sessionA = `rotate-fail-a-${Date.now()}`;
@@ -2166,62 +2414,31 @@ for (const eventType of ["session_switch", "session_branch"] as const) {
 		// Fail A's owner release exactly once so the rotate-time stopSession(prevId)
 		// throws the retained-retry AggregateError.
 		const stop = spyOn(SessionSdkHost.prototype, "stop").mockRejectedValueOnce(new Error("host stop failed"));
-		const errorSpy = spyOn(logger, "error").mockImplementation(() => {});
 		try {
-			const handlers = start(ctx);
+			const startupCapability = new SdkStartupCapability();
+			const handlers = start(ctx, undefined, () => {}, false, new Map(), {
+				startupCapability,
+				lifecycleRequired: true,
+			});
+			await expect(startupCapability.promise).resolves.toEqual({ status: "started" });
 			const endpointAPath = path.join(cwd, ".skc", "state", "sdk", `${sessionA}.json`);
 			await waitFor(() => fs.existsSync(endpointAPath), "session A endpoint");
 
 			activeSessionId = sessionB;
-			// Drive the rotation handler through a real ExtensionRunner so the onError
-			// seam proves the swallowed failure is not surfaced as a red extension error.
-			const rotationExt = {
-				path: "test-rotation-ext",
-				handlers: new Map([
-					[
-						eventType,
-						[
-							async () => {
-								await handlers.get(eventType)!(
-									{
-										type: eventType,
-										reason: "new",
-										previousSessionFile: path.join(cwd, "sessions", `ts_${sessionA}.jsonl`),
-									},
-									ctx,
-								);
-							},
-						],
-					],
-				]),
+			// A retained predecessor cleanup must fail closed and rethrow before any
+			// successor endpoint can publish.
+			const rotationEvent = {
+				type: eventType,
+				reason: "new",
+				previousSessionFile: path.join(cwd, "sessions", `ts_${sessionA}.jsonl`),
 			};
-			const runner = new ExtensionRunner([rotationExt as never], {} as never, cwd, {} as never, {} as never);
-			runner.initialize({} as never, {} as never);
-			const surfaced: Array<{ event: string }> = [];
-			runner.onError(error => surfaced.push(error));
-			await expect(
-				runner.emit({
-					type: eventType,
-					reason: "new",
-					previousSessionFile: path.join(cwd, "sessions", `ts_${sessionA}.jsonl`),
-				} as never),
-			).resolves.toBeUndefined();
-			expect(surfaced).toEqual([]);
+			await expect(handlers.get(eventType)!(rotationEvent, ctx)).rejects.toThrow(
+				`SDK notification runtime ${sessionA} owner release failed`,
+			);
 
-			// Rotation still publishes B and retires A despite the swallowed failure.
+			// The failed predecessor release quarantines B: no successor endpoint is published.
 			const endpointBPath = path.join(cwd, ".skc", "state", "sdk", `${sessionB}.json`);
-			await waitFor(() => !fs.existsSync(endpointAPath) && fs.existsSync(endpointBPath), "rotated session endpoint");
-
-			// The failure is logged at error severity with the shared prefix and A's
-			// identity, never surfaced as a red extension error.
-			const breadcrumbs = errorSpy.mock.calls.map(args => String(args[0]));
-			expect(
-				breadcrumbs.some(
-					message =>
-						message.startsWith("notifications: SDK notification runtime cleanup failed: ") &&
-						message.includes(`SDK notification runtime ${sessionA} owner release failed`),
-				),
-			).toBe(true);
+			expect(fs.existsSync(endpointBPath)).toBe(false);
 
 			// With the mock restored, A's retained cleanup can still complete.
 			stop.mockRestore();
@@ -2235,7 +2452,6 @@ for (const eventType of ["session_switch", "session_branch"] as const) {
 			await handlers.get("session_shutdown")?.({ type: "session_shutdown" }, ctx);
 		} finally {
 			stop.mockRestore();
-			errorSpy.mockRestore();
 		}
 	});
 }
@@ -3082,6 +3298,94 @@ test("Q12 records the runtime-turn correlation before a workflow gate is exposed
 		detachTerminalController();
 	}
 });
+test("workflow gate recommendation projection marks only one exact hint without changing raw options", async () => {
+	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "skc-sdk-workflow-gate-recommendation-"));
+	dirs.push(cwd);
+	const sessionId = `workflow-gate-recommendation-${Date.now()}`;
+	let emitGate:
+		| ((gate: { gate_id: string; options: Array<Record<string, unknown>>; context: Record<string, unknown> }) => void)
+		| undefined;
+	let terminalController: { completeGateInteractions: (gateId: string) => unknown } | undefined;
+	const workflowGate = {
+		supportsRemoteGateAnswers: () => true,
+		onGateEmitted: (listener: typeof emitGate) => {
+			emitGate = listener;
+			return () => {};
+		},
+		registerGateTerminalController: (controller: typeof terminalController) => {
+			terminalController = controller;
+			return () => {};
+		},
+		resolveGate: async () => undefined,
+		recoverAcceptedGates: async () => [],
+		lookupCompletedResolution: () => undefined,
+		prepareTerminalization: () => undefined,
+		clearPreparedTerminalization: () => {},
+		resolveGateFromNotification: async (response: { gate_id: string }, interaction: { resolveClaim: () => void }) => {
+			interaction.resolveClaim();
+			terminalController?.completeGateInteractions(response.gate_id);
+			return { status: "accepted" };
+		},
+	} as unknown as WorkflowGateEmitter;
+	process.env.SKC_NOTIFICATIONS = "1";
+	const handlers = start(context(cwd, sessionId, "main", {}, workflowGate));
+	const endpointFile = path.join(cwd, ".skc", "state", "sdk", `${sessionId}.json`);
+	await waitFor(() => fs.existsSync(endpointFile), "SDK endpoint");
+	const endpoint = JSON.parse(fs.readFileSync(endpointFile, "utf8")) as { url: string; token: string };
+	const socket = new WebSocket(`${endpoint.url}/?token=${encodeURIComponent(endpoint.token)}`);
+	sockets.push(socket);
+	const frames: Record<string, unknown>[] = [];
+	socket.addEventListener("message", event => frames.push(JSON.parse(String(event.data))));
+	await new Promise<void>((resolve, reject) => {
+		socket.addEventListener("open", () => resolve(), { once: true });
+		socket.addEventListener("error", () => reject(new Error("WS error")), { once: true });
+	});
+	const cases = [
+		{ name: "all undefined", descriptions: [undefined, undefined], recommendedIndex: undefined },
+		{ name: "one exact", descriptions: [undefined, "recommended"], recommendedIndex: 1 },
+		{ name: "duplicate exact", descriptions: ["recommended", "recommended"], recommendedIndex: undefined },
+		{ name: "nonexact variants", descriptions: ["Recommended", "recommended "], recommendedIndex: undefined },
+		{ name: "exact plus another defined", descriptions: ["recommended", "other"], recommendedIndex: undefined },
+	] as const;
+	try {
+		for (const [index, fixture] of cases.entries()) {
+			const options = fixture.descriptions.map((description, optionIndex) => ({
+				value: `value-${index}-${optionIndex}`,
+				label: `Option ${index}-${optionIndex}`,
+				...(description === undefined ? {} : { description }),
+			}));
+			const rawOptions = structuredClone(options);
+			const gateId = `recommendation-gate-${index}`;
+			emitGate?.({ gate_id: gateId, options, context: { prompt: fixture.name } });
+			await waitFor(
+				() => frames.some(frame => frame.type === "action_needed" && frame.workflowGateId === gateId),
+				`${fixture.name} workflow gate presentation`,
+			);
+			const action = frames.findLast(frame => frame.type === "action_needed" && frame.workflowGateId === gateId);
+			expect(action?.options).toEqual(options.map(option => option.label));
+			if (fixture.recommendedIndex === undefined) expect(action).not.toHaveProperty("recommendedIndex");
+			else expect(action).toMatchObject({ recommendedIndex: fixture.recommendedIndex });
+			expect(options).toEqual(rawOptions);
+			socket.send(
+				JSON.stringify({
+					type: "reply",
+					id: action?.id,
+					answer: 0,
+					token: endpoint.token,
+				}),
+			);
+			await waitFor(
+				() => frames.some(frame => frame.type === "action_resolved" && frame.id === action?.id),
+				`${fixture.name} workflow gate terminal`,
+			);
+		}
+	} finally {
+		await handlers.get("session_shutdown")!(
+			{ type: "session_shutdown" },
+			context(cwd, sessionId, "main", {}, workflowGate),
+		);
+	}
+}, 60_000);
 
 test("SDK host discovers, answers, and advances a durable workflow gate", async () => {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "skc-sdk-host-workflow-gate-"));
@@ -3188,7 +3492,7 @@ test("SDK host discovers, answers, and advances a durable workflow gate", async 
 		stage: "ralplan",
 		kind: "approval",
 		schema: { type: "string", enum: ["approve"] },
-		options: [{ value: "approve", label: "Approve" }],
+		options: [{ value: "approve", label: "Approve", description: "recommended" }],
 	});
 	await waitFor(() => gateId !== failedDirectPriorGateId, "failed-direct workflow gate");
 	const failedDirectGateId = gateId;
@@ -3196,6 +3500,7 @@ test("SDK host discovers, answers, and advances a durable workflow gate", async 
 		frames.filter(frame => frame.type === "action_needed" && frame.workflowGateId === failedDirectGateId);
 	await waitFor(() => actionFramesForGate().length === 1, "initial failed-direct presentation");
 	const initialActionId = String(actionFramesForGate()[0]?.id);
+	expect(actionFramesForGate()[0]).toMatchObject({ options: ["Approve"], recommendedIndex: 0 });
 	expect(
 		await request("failed-direct", {
 			type: "control_request",
@@ -3208,6 +3513,7 @@ test("SDK host discovers, answers, and advances a durable workflow gate", async 
 	await waitFor(() => actionFramesForGate().length >= 2, "reissued failed-direct presentation");
 	const reissuedActionId = String(actionFramesForGate().at(-1)?.id);
 	expect(reissuedActionId).not.toBe(initialActionId);
+	expect(actionFramesForGate().at(-1)).toMatchObject({ options: ["Approve"], recommendedIndex: 0 });
 	expect(
 		await emitter.resolveGateFromNotification!(
 			{ gate_id: failedDirectGateId, answer: "approve", idempotency_key: "failed-direct-generic" },
@@ -3230,7 +3536,10 @@ test("SDK host discovers, answers, and advances a durable workflow gate", async 
 		stage: "ralplan",
 		kind: "approval",
 		schema: { type: "string", enum: ["approve"] },
-		options: [{ value: "approve", label: "Approve" }],
+		options: [
+			{ value: "approve", label: "Approve", description: "recommended" },
+			{ value: "cancel", label: "Cancel", description: "unexpected" },
+		],
 	});
 	await waitFor(() => gateId !== nextPriorGateId, "post-reissue workflow gate");
 	const nextGateId = gateId;
@@ -3239,6 +3548,8 @@ test("SDK host discovers, answers, and advances a durable workflow gate", async 
 		"post-reissue presentation",
 	);
 	const nextAction = frames.findLast(frame => frame.type === "action_needed" && frame.workflowGateId === nextGateId);
+	expect(nextAction).toMatchObject({ options: ["Approve", "Cancel"] });
+	expect(nextAction).not.toHaveProperty("recommendedIndex");
 	expect(
 		await emitter.resolveGateFromNotification!(
 			{ gate_id: nextGateId, answer: "approve", idempotency_key: "post-reissue-generic" },
@@ -3289,26 +3600,50 @@ test("session teardown drains admitted direct gate resolution before detaching i
 	dirs.push(cwd);
 	const sessionId = `direct-resolution-drain-${Date.now()}`;
 	const emitter = new BrokerWorkflowGateEmitter(sessionId, new FileGateStore(path.join(cwd, "gates.json")));
-	const resolution = Promise.withResolvers<{ status: "accepted" }>();
+	const resolution = Promise.withResolvers<void>();
+	const preDrainBarrier = Promise.withResolvers<void>();
+	const sessionClosedDrained = Promise.withResolvers<void>();
+	const terminalized = Promise.withResolvers<void>();
+	const events: string[] = [];
+	let controllerAttached = false;
 	let resolutionStarted = false;
-	let controllerDetached = false;
-	const registerController = spyOn(emitter, "registerGateTerminalController").mockImplementation(() => () => {
-		controllerDetached = true;
+	const originalRegisterController = emitter.registerGateTerminalController!.bind(emitter);
+	const originalResolveGate = emitter.resolveGate!.bind(emitter);
+	const originalPushFrameAndWait = NotificationServer.prototype.pushFrameAndWait;
+	const registerController = spyOn(emitter, "registerGateTerminalController").mockImplementation(controller => {
+		const detach = originalRegisterController(controller);
+		controllerAttached = true;
+		return () => {
+			events.push("controller-detached");
+			controllerAttached = false;
+			detach();
+		};
 	});
 	const resolveGate = spyOn(emitter, "resolveGate").mockImplementation(async response => {
 		resolutionStarted = true;
 		await resolution.promise;
-		return {
-			status: "accepted",
-			gate_id: response.gate_id,
-			answer_hash: "fixture",
-			resolved_at: new Date().toISOString(),
-		};
+		const resolved = await originalResolveGate(response);
+		events.push("gate-terminalized");
+		terminalized.resolve();
+		return resolved;
+	});
+	const pushFrameAndWait = spyOn(NotificationServer.prototype, "pushFrameAndWait").mockImplementation(async function (
+		this: NotificationServer,
+		frame,
+		timeout,
+	) {
+		const delivered = await originalPushFrameAndWait.call(this, frame, timeout);
+		if ((JSON.parse(frame) as { type?: unknown }).type === "session_closed") {
+			sessionClosedDrained.resolve();
+			await preDrainBarrier.promise;
+		}
+		return delivered;
 	});
 	process.env.SKC_NOTIFICATIONS = "1";
 	const sessionContext = context(cwd, sessionId, "main", {}, emitter);
 	const handlers = start(sessionContext);
 	const endpointFile = path.join(cwd, ".skc", "state", "sdk", `${sessionId}.json`);
+	let shutdown: Promise<unknown> | undefined;
 	try {
 		await waitFor(() => fs.existsSync(endpointFile), "SDK endpoint");
 		const endpoint = JSON.parse(fs.readFileSync(endpointFile, "utf8")) as { url: string; token: string };
@@ -3322,7 +3657,11 @@ test("session teardown drains admitted direct gate resolution before detaching i
 		emitter.onGateEmitted!(gate => {
 			gateId = gate.gate_id;
 		});
-		void emitter.emitGate({ stage: "ralplan", kind: "approval", schema: { type: "string" } }).catch(() => {});
+		const gateContinuation = emitter.emitGate({
+			stage: "ralplan",
+			kind: "approval",
+			schema: { type: "string" },
+		});
 		await waitFor(() => gateId !== "", "workflow gate");
 		socket.send(
 			JSON.stringify({
@@ -3339,13 +3678,23 @@ test("session teardown drains admitted direct gate resolution before detaching i
 			}),
 		);
 		await waitFor(() => resolutionStarted, "direct gate resolution");
-		const shutdown = handlers.get("session_shutdown")!({ type: "session_shutdown" }, sessionContext);
-		await Bun.sleep(0);
-		expect(controllerDetached).toBe(false);
-		resolution.resolve({ status: "accepted" });
+		shutdown = Promise.resolve(handlers.get("session_shutdown")!({ type: "session_shutdown" }, sessionContext));
+		await sessionClosedDrained.promise;
+		expect(controllerAttached).toBe(true);
+		preDrainBarrier.resolve();
+		await new Promise<void>(resolve => setImmediate(resolve));
+		expect(controllerAttached).toBe(true);
+		resolution.resolve();
+		expect(await gateContinuation).toBe("approve");
+		await terminalized.promise;
+		expect(controllerAttached).toBe(true);
 		await shutdown;
-		expect(controllerDetached).toBe(true);
+		expect(events).toEqual(["gate-terminalized", "controller-detached"]);
 	} finally {
+		preDrainBarrier.resolve();
+		resolution.resolve();
+		await shutdown?.catch(() => {});
+		pushFrameAndWait.mockRestore();
 		resolveGate.mockRestore();
 		registerController.mockRestore();
 	}
@@ -3424,7 +3773,7 @@ test("SDK host omits direct workflow controls for a legacy workflow-gate emitter
 	dirs.push(cwd);
 	const sessionId = `legacy-workflow-gate-${Date.now()}`;
 	const legacyEmitter = {
-		isUnattended: () => true,
+		supportsRemoteGateAnswers: () => true,
 		emitGate: async () => undefined,
 		resolveGate: async () => ({
 			gate_id: "legacy-gate",
@@ -3490,26 +3839,29 @@ test("PresentationArbiter serializes ordinary and workflow asks, fences queued c
 		},
 	} as never;
 	const arbiter = new PresentationArbiter(server, () => false, "test");
-	const gate = (gateId: string, multi = false) => ({
+	const gate = (gateId: string, multi = false, recommendedIndex?: number) => ({
 		gateId,
 		...(gateId.startsWith("workflow") ? { workflowGateId: gateId } : {}),
 		sessionId: "session",
 		question: gateId,
 		options: ["one", "two"],
+		...(recommendedIndex === undefined ? {} : { recommendedIndex }),
 		controls: [],
 		multi,
 		allowEmpty: false,
 		selectedOptions: [],
 	});
-	arbiter.retain(gate("ordinary"));
-	arbiter.retain(gate("workflow-first", true));
+	arbiter.retain(gate("ordinary", false, 1));
+	arbiter.retain(gate("workflow-first", true, 0));
 	await Bun.sleep(PresentationArbiter.retryBaseDelayMs + 10);
 	expect(publications.map(action => action.workflowGateId)).toEqual([undefined]);
+	expect(publications[0]).toMatchObject({ options: ["one", "two"], recommendedIndex: 1 });
 	arbiter.complete("ordinary");
 	expect(publications.map(action => action.workflowGateId)).toEqual([undefined, "workflow-first"]);
 	const firstActionId = publications[1]!.id as string;
 	expect(arbiter.toggle(firstActionId, "one")).toBe(true);
 	expect(publications).toHaveLength(3);
+	expect(publications[2]).toMatchObject({ options: ["one", "two"], recommendedIndex: 0 });
 	arbiter.retain(gate("workflow-second"));
 	const queued = arbiter.prepareDirectControl("workflow-second");
 	expect(queued).toEqual({ status: "queued", ordinal: 1 });
@@ -3980,4 +4332,609 @@ test("AC2/AC8: SDK host completes successful session mutations over its live Web
 		ok: true,
 		page: { items: [{ "ui.theme": "dark" }] },
 	});
+});
+
+test("turn.prompt_status reconciles an accepted prompt across client reconnect without duplicate execution", async () => {
+	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "skc-sdk-prompt-reconcile-"));
+	dirs.push(cwd);
+	const sessionId = `sdk-prompt-reconcile-${Date.now()}`;
+	const sessionContext = context(cwd, sessionId);
+	const deliveries: unknown[] = [];
+	const handlers = start(sessionContext, undefined, (content: unknown) => {
+		deliveries.push(content);
+	});
+	const endpointFile = path.join(cwd, ".skc", "state", "sdk", `${sessionId}.json`);
+	await waitFor(() => fs.existsSync(endpointFile), "SDK endpoint");
+	const endpoint = JSON.parse(fs.readFileSync(endpointFile, "utf8")) as { url: string; token: string };
+	const connect = async () => {
+		const frames: Record<string, unknown>[] = [];
+		const socket = new WebSocket(`${endpoint.url}/?token=${encodeURIComponent(endpoint.token)}`);
+		sockets.push(socket);
+		socket.addEventListener("message", event => frames.push(JSON.parse(String(event.data))));
+		await new Promise<void>((resolve, reject) => {
+			socket.addEventListener("open", () => resolve(), { once: true });
+			socket.addEventListener("error", () => reject(new Error("WS error")), { once: true });
+		});
+		const request = async (command: Record<string, unknown>): Promise<Record<string, unknown>> => {
+			const requestId = String(command.id);
+			socket.send(JSON.stringify(command));
+			const responseType = command.type === "query_request" ? "query_response" : "control_response";
+			await waitFor(
+				() => frames.some(frame => frame.type === responseType && frame.id === requestId),
+				`${requestId} response`,
+			);
+			return frames.find(frame => frame.type === responseType && frame.id === requestId)!;
+		};
+		return { socket, frames, request };
+	};
+
+	const first = await connect();
+	first.socket.send(
+		JSON.stringify({
+			type: "control_request",
+			id: "prompt-reconcile",
+			operation: "turn.prompt",
+			input: { text: "reconcile me", clientRef: "recon-ref-1" },
+			idempotencyKey: "recon-ik-1",
+		}),
+	);
+	await waitFor(() => deliveries.length === 1, "prompt accepted before acknowledgement loss");
+
+	// Simulate client-process death without consuming the control response. The
+	// caller retained only its fresh clientRef, not the generated IDs.
+	await closeSocket(first.socket);
+	await handlers.get("agent_start")?.({ type: "agent_start" }, sessionContext);
+
+	// Reconnect: clientRef recovers the canonical generated pair, which then
+	// reconciles identically through the generated-ID selector.
+	const second = await connect();
+	const byRef = await second.request({
+		type: "query_request",
+		id: "status-ref",
+		query: "turn.prompt_status",
+		input: { clientRef: "recon-ref-1" },
+	});
+	expect(byRef).toMatchObject({ ok: true, result: { status: "in_flight", clientRef: "recon-ref-1" } });
+	const { commandId, turnId } = (byRef.result ?? {}) as { commandId: string; turnId: string };
+	expect(typeof commandId).toBe("string");
+	expect(typeof turnId).toBe("string");
+	const byPair = await second.request({
+		type: "query_request",
+		id: "status-pair",
+		query: "turn.prompt_status",
+		input: { commandId, turnId },
+	});
+	expect(byPair).toMatchObject({
+		ok: true,
+		result: { status: "in_flight", commandId, turnId, clientRef: "recon-ref-1" },
+	});
+	const wrongPair = await second.request({
+		type: "query_request",
+		id: "status-wrong-pair",
+		query: "turn.prompt_status",
+		input: { commandId, turnId: "turn-other" },
+	});
+	expect(wrongPair).toMatchObject({ ok: true, result: { status: "unknown" } });
+
+	// A retained duplicate clientRef is rejected before execution (safe non-replay).
+	const duplicate = await second.request({
+		type: "control_request",
+		id: "prompt-duplicate-ref",
+		operation: "turn.prompt",
+		input: { text: "duplicate", clientRef: "recon-ref-1" },
+	});
+	expect(duplicate).toMatchObject({ ok: false, error: { code: "client_ref_conflict" } });
+
+	await handlers.get("agent_end")?.({ type: "agent_end" }, sessionContext);
+	const terminal = await second.request({
+		type: "query_request",
+		id: "status-terminal",
+		query: "turn.prompt_status",
+		input: { commandId, turnId },
+	});
+	expect(terminal).toMatchObject({ ok: true, result: { status: "terminal_ok" } });
+
+	// Exactly one execution happened across the whole reconnect/reconcile flow.
+	expect(deliveries).toHaveLength(1);
+	await handlers.get("session_shutdown")?.({ type: "session_shutdown" }, sessionContext);
+});
+
+test("ordered turn.prompt ignores envelope idempotencyKey: no replay and no idempotency_conflict", async () => {
+	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "skc-sdk-prompt-ordered-"));
+	dirs.push(cwd);
+	const sessionId = `sdk-prompt-ordered-${Date.now()}`;
+	const sessionContext = context(cwd, sessionId);
+	const deliveries: unknown[] = [];
+	const handlers = start(sessionContext, undefined, (content: unknown) => {
+		deliveries.push(content);
+	});
+	const endpointFile = path.join(cwd, ".skc", "state", "sdk", `${sessionId}.json`);
+	await waitFor(() => fs.existsSync(endpointFile), "SDK endpoint");
+	const endpoint = JSON.parse(fs.readFileSync(endpointFile, "utf8")) as { url: string; token: string };
+	const frames: Record<string, unknown>[] = [];
+	const socket = new WebSocket(`${endpoint.url}/?token=${encodeURIComponent(endpoint.token)}`);
+	sockets.push(socket);
+	socket.addEventListener("message", event => frames.push(JSON.parse(String(event.data))));
+	await new Promise<void>((resolve, reject) => {
+		socket.addEventListener("open", () => resolve(), { once: true });
+		socket.addEventListener("error", () => reject(new Error("WS error")), { once: true });
+	});
+	const prompt = async (id: string, text: string, clientRef?: string) => {
+		socket.send(
+			JSON.stringify({
+				type: "control_request",
+				id,
+				operation: "turn.prompt",
+				input: { text, ...(clientRef ? { clientRef } : {}) },
+				idempotencyKey: "same-envelope-key",
+			}),
+		);
+		await waitFor(() => frames.some(frame => frame.type === "control_response" && frame.id === id), `${id} response`);
+		return frames.find(frame => frame.type === "control_response" && frame.id === id)!;
+	};
+
+	const first = await prompt("ordered-1", "first ordered prompt", "ordered-ref-1");
+	expect(first).toMatchObject({ ok: true, result: { accepted: true } });
+	const firstIds = first.result as { commandId: string; turnId: string };
+	await handlers.get("agent_start")?.({ type: "agent_start" }, sessionContext);
+	await handlers.get("agent_end")?.({ type: "agent_end" }, sessionContext);
+
+	// Same envelope idempotencyKey with different input: a NEW ordered execution,
+	// not a replay of the first response and not an idempotency_conflict.
+	const second = await prompt("ordered-2", "second ordered prompt", "ordered-ref-2");
+	expect(second).toMatchObject({ ok: true, result: { accepted: true } });
+	const secondIds = second.result as { commandId: string; turnId: string };
+	expect(secondIds.commandId).not.toBe(firstIds.commandId);
+	expect(secondIds.turnId).not.toBe(firstIds.turnId);
+	await handlers.get("agent_start")?.({ type: "agent_start" }, sessionContext);
+	await handlers.get("agent_end")?.({ type: "agent_end" }, sessionContext);
+
+	// Same key AND same input still executes anew (ordered, never replayed).
+	const third = await prompt("ordered-3", "first ordered prompt", "ordered-ref-3");
+	expect(third).toMatchObject({ ok: true, result: { accepted: true } });
+	expect(((third.result ?? {}) as { commandId?: string }).commandId).not.toBe(firstIds.commandId);
+	await handlers.get("agent_start")?.({ type: "agent_start" }, sessionContext);
+	await handlers.get("agent_end")?.({ type: "agent_end" }, sessionContext);
+
+	expect(deliveries).toHaveLength(3);
+	await handlers.get("session_shutdown")?.({ type: "session_shutdown" }, sessionContext);
+});
+
+test("turn.prompt_status validates selectors and rejects invalid clientRef input", async () => {
+	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "skc-sdk-prompt-validation-"));
+	dirs.push(cwd);
+	const sessionId = `sdk-prompt-validation-${Date.now()}`;
+	const sessionContext = context(cwd, sessionId);
+	const handlers = start(sessionContext);
+	const endpointFile = path.join(cwd, ".skc", "state", "sdk", `${sessionId}.json`);
+	await waitFor(() => fs.existsSync(endpointFile), "SDK endpoint");
+	const endpoint = JSON.parse(fs.readFileSync(endpointFile, "utf8")) as { url: string; token: string };
+	const frames: Record<string, unknown>[] = [];
+	const socket = new WebSocket(`${endpoint.url}/?token=${encodeURIComponent(endpoint.token)}`);
+	sockets.push(socket);
+	socket.addEventListener("message", event => frames.push(JSON.parse(String(event.data))));
+	await new Promise<void>((resolve, reject) => {
+		socket.addEventListener("open", () => resolve(), { once: true });
+		socket.addEventListener("error", () => reject(new Error("WS error")), { once: true });
+	});
+	const request = async (command: Record<string, unknown>): Promise<Record<string, unknown>> => {
+		const requestId = String(command.id);
+		socket.send(JSON.stringify(command));
+		const responseType = command.type === "query_request" ? "query_response" : "control_response";
+		await waitFor(
+			() => frames.some(frame => frame.type === responseType && frame.id === requestId),
+			`${requestId} response`,
+		);
+		return frames.find(frame => frame.type === responseType && frame.id === requestId)!;
+	};
+
+	expect(
+		await request({ type: "query_request", id: "q-partial", query: "turn.prompt_status", input: { commandId: "c" } }),
+	).toMatchObject({ ok: false, error: { code: "invalid_request" } });
+	expect(
+		await request({
+			type: "query_request",
+			id: "q-both",
+			query: "turn.prompt_status",
+			input: { commandId: "c", turnId: "t", clientRef: "r" },
+		}),
+	).toMatchObject({ ok: false, error: { code: "invalid_request" } });
+	expect(await request({ type: "query_request", id: "q-none", query: "turn.prompt_status", input: {} })).toMatchObject(
+		{ ok: false, error: { code: "invalid_request" } },
+	);
+	expect(
+		await request({
+			type: "query_request",
+			id: "q-cursor",
+			query: "turn.prompt_status",
+			input: { clientRef: "r" },
+			cursor: "x",
+		}),
+	).toMatchObject({ ok: false, error: { code: "invalid_request" } });
+	expect(
+		await request({
+			type: "query_request",
+			id: "q-unknown",
+			query: "turn.prompt_status",
+			input: { clientRef: "absent" },
+		}),
+	).toMatchObject({ ok: true, result: { status: "unknown" } });
+
+	for (const [id, clientRef] of [
+		["bad-empty", ""],
+		["bad-blank", "   "],
+		["bad-long", "x".repeat(129)],
+	] as const) {
+		const response = await request({
+			type: "control_request",
+			id,
+			operation: "turn.prompt",
+			input: { text: "bad ref", clientRef },
+		});
+		expect(response).toMatchObject({ ok: false, error: { code: "invalid_input" } });
+	}
+	await handlers.get("session_shutdown")?.({ type: "session_shutdown" }, sessionContext);
+});
+
+test("clientRef admission reservation is released when a submission is rejected before acceptance", async () => {
+	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "skc-sdk-prompt-release-"));
+	dirs.push(cwd);
+	const sessionId = `sdk-prompt-release-${Date.now()}`;
+	const sessionContext = context(cwd, sessionId);
+	const deliveries: string[] = [];
+	const handlers = start(
+		sessionContext,
+		undefined,
+		async (
+			content: unknown,
+			options:
+				| { onPreflightAccepted?: () => void; onPreflightAcceptCommit?: () => void | Promise<void> }
+				| undefined,
+		) => {
+			const text = String(content);
+			deliveries.push(text);
+			if (text === "doomed preflight")
+				return Promise.reject(Object.assign(new Error("submission lost"), { code: "unavailable" }));
+			await firePreflightAccept(options);
+			return Promise.resolve();
+		},
+		true,
+	);
+	const endpointFile = path.join(cwd, ".skc", "state", "sdk", `${sessionId}.json`);
+	await waitFor(() => fs.existsSync(endpointFile), "SDK endpoint");
+	const endpoint = JSON.parse(fs.readFileSync(endpointFile, "utf8")) as { url: string; token: string };
+	const frames: Record<string, unknown>[] = [];
+	const socket = new WebSocket(`${endpoint.url}/?token=${encodeURIComponent(endpoint.token)}`);
+	sockets.push(socket);
+	socket.addEventListener("message", event => frames.push(JSON.parse(String(event.data))));
+	await new Promise<void>((resolve, reject) => {
+		socket.addEventListener("open", () => resolve(), { once: true });
+		socket.addEventListener("error", () => reject(new Error("WS error")), { once: true });
+	});
+	const prompt = async (id: string, text: string, clientRef: string) => {
+		socket.send(
+			JSON.stringify({ type: "control_request", id, operation: "turn.prompt", input: { text, clientRef } }),
+		);
+		await waitFor(() => frames.some(frame => frame.type === "control_response" && frame.id === id), `${id} response`);
+		return frames.find(frame => frame.type === "control_response" && frame.id === id)!;
+	};
+
+	// The rejected submission must release its admission reservation...
+	const doomed = await prompt("release-1", "doomed preflight", "release-ref");
+	expect(doomed.ok).toBe(false);
+	// ...so the same clientRef can be admitted again for a fresh prompt.
+	const freed = await prompt("release-2", "freed retry", "release-ref");
+	expect(freed).toMatchObject({ ok: true, result: { accepted: true } });
+	// And the rejected attempt left no reconciliation record behind.
+	socket.send(
+		JSON.stringify({
+			type: "query_request",
+			id: "release-status",
+			query: "turn.prompt_status",
+			input: { clientRef: "release-ref" },
+		}),
+	);
+	await waitFor(
+		() => frames.some(frame => frame.type === "query_response" && frame.id === "release-status"),
+		"release status response",
+	);
+	const status = frames.find(frame => frame.type === "query_response" && frame.id === "release-status")!;
+	expect(status).toMatchObject({ ok: true, result: { status: "accepted" } });
+	await handlers.get("session_shutdown")?.({ type: "session_shutdown" }, sessionContext);
+});
+
+test("busy rejection releases the clientRef admission so a same-ref retry succeeds after the turn", async () => {
+	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "skc-sdk-prompt-busy-release-"));
+	dirs.push(cwd);
+	const sessionId = `sdk-prompt-busy-release-${Date.now()}`;
+	const sessionContext = context(cwd, sessionId);
+	const handlers = start(sessionContext);
+	const endpointFile = path.join(cwd, ".skc", "state", "sdk", `${sessionId}.json`);
+	await waitFor(() => fs.existsSync(endpointFile), "SDK endpoint");
+	const endpoint = JSON.parse(fs.readFileSync(endpointFile, "utf8")) as { url: string; token: string };
+	const frames: Record<string, unknown>[] = [];
+	const socket = new WebSocket(`${endpoint.url}/?token=${encodeURIComponent(endpoint.token)}`);
+	sockets.push(socket);
+	socket.addEventListener("message", event => frames.push(JSON.parse(String(event.data))));
+	await new Promise<void>((resolve, reject) => {
+		socket.addEventListener("open", () => resolve(), { once: true });
+		socket.addEventListener("error", () => reject(new Error("WS error")), { once: true });
+	});
+	const prompt = async (id: string, text: string, clientRef: string) => {
+		socket.send(
+			JSON.stringify({ type: "control_request", id, operation: "turn.prompt", input: { text, clientRef } }),
+		);
+		await waitFor(() => frames.some(frame => frame.type === "control_response" && frame.id === id), `${id} response`);
+		return frames.find(frame => frame.type === "control_response" && frame.id === id)!;
+	};
+
+	// Occupy the session with a running turn.
+	const first = await prompt("busy-first", "occupy the session", "busy-ref-first");
+	expect(first.ok).toBe(true);
+	await handlers.get("agent_start")?.({ type: "agent_start" }, sessionContext);
+
+	// While busy, the same clientRef admission is rejected but must not linger.
+	const rejected = await prompt("busy-rejected", "rejected while busy", "busy-ref-retry");
+	expect(rejected).toMatchObject({ ok: false, error: { code: "busy" } });
+
+	await handlers.get("agent_end")?.({ type: "agent_end" }, sessionContext);
+
+	// After the turn, the same clientRef is admissible again (no phantom reservation).
+	const retry = await prompt("busy-retry", "retry after idle", "busy-ref-retry");
+	expect(retry).toMatchObject({ ok: true, result: { accepted: true } });
+	await handlers.get("agent_start")?.({ type: "agent_start" }, sessionContext);
+	await handlers.get("agent_end")?.({ type: "agent_end" }, sessionContext);
+	await handlers.get("session_shutdown")?.({ type: "session_shutdown" }, sessionContext);
+});
+
+test("accepted-then-failed submission retains its reconciliation record and blocks ref reuse", async () => {
+	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "skc-sdk-prompt-accepted-failure-"));
+	dirs.push(cwd);
+	const sessionId = `sdk-prompt-accepted-failure-${Date.now()}`;
+	const sessionContext = context(cwd, sessionId);
+	const handlers = start(
+		sessionContext,
+		undefined,
+		async (
+			_content: unknown,
+			options:
+				| { onPreflightAccepted?: () => void; onPreflightAcceptCommit?: () => void | Promise<void> }
+				| undefined,
+		) => {
+			await firePreflightAccept(options);
+			throw Object.assign(new Error("synchronous accepted failure"), { code: "unavailable" });
+		},
+		true,
+	);
+	const endpointFile = path.join(cwd, ".skc", "state", "sdk", `${sessionId}.json`);
+	await waitFor(() => fs.existsSync(endpointFile), "SDK endpoint");
+	const endpoint = JSON.parse(fs.readFileSync(endpointFile, "utf8")) as { url: string; token: string };
+	const frames: Record<string, unknown>[] = [];
+	const socket = new WebSocket(`${endpoint.url}/?token=${encodeURIComponent(endpoint.token)}`);
+	sockets.push(socket);
+	socket.addEventListener("message", event => frames.push(JSON.parse(String(event.data))));
+	await new Promise<void>((resolve, reject) => {
+		socket.addEventListener("open", () => resolve(), { once: true });
+		socket.addEventListener("error", () => reject(new Error("WS error")), { once: true });
+	});
+	const request = async (command: Record<string, unknown>): Promise<Record<string, unknown>> => {
+		const requestId = String(command.id);
+		socket.send(JSON.stringify(command));
+		const responseType = command.type === "query_request" ? "query_response" : "control_response";
+		await waitFor(
+			() => frames.some(frame => frame.type === responseType && frame.id === requestId),
+			`${requestId} response`,
+		);
+		return frames.find(frame => frame.type === responseType && frame.id === requestId)!;
+	};
+
+	// The prompt is accepted at preflight, then fails synchronously after acceptance.
+	const ack = await request({
+		type: "control_request",
+		id: "accepted-failure",
+		operation: "turn.prompt",
+		input: { text: "accepted then failed", clientRef: "accepted-failure-ref" },
+	});
+	expect(ack.ok).toBe(true);
+	await waitFor(() => frames.some(frame => frame.type === "agent_failed"), "correlated agent_failed frame");
+	const failedFrame = frames.find(frame => frame.type === "agent_failed");
+	expect(failedFrame).toMatchObject({
+		error: { code: "unavailable", message: "Prompt submission failed." },
+	});
+
+	// The reconciliation record is retained with the failed outcome, not released.
+	const status = await request({
+		type: "query_request",
+		id: "accepted-failure-status",
+		query: "turn.prompt_status",
+		input: { clientRef: "accepted-failure-ref" },
+	});
+	expect(status).toMatchObject({
+		ok: true,
+		result: { status: "failed", error: { code: "unavailable" } },
+	});
+
+	// Reusing the ref conflicts while the record is retained.
+	const duplicate = await request({
+		type: "control_request",
+		id: "accepted-failure-duplicate",
+		operation: "turn.prompt",
+		input: { text: "duplicate", clientRef: "accepted-failure-ref" },
+	});
+	expect(duplicate).toMatchObject({ ok: false, error: { code: "client_ref_conflict" } });
+	await handlers.get("session_shutdown")?.({ type: "session_shutdown" }, sessionContext);
+});
+
+test("long-running prompt settles terminally after the delivery buffer expires", async () => {
+	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "skc-sdk-prompt-longrun-"));
+	dirs.push(cwd);
+	const sessionId = `sdk-prompt-longrun-${Date.now()}`;
+	const sessionContext = context(cwd, sessionId);
+	const handlers = start(sessionContext);
+	const endpointFile = path.join(cwd, ".skc", "state", "sdk", `${sessionId}.json`);
+	await waitFor(() => fs.existsSync(endpointFile), "SDK endpoint");
+	const endpoint = JSON.parse(fs.readFileSync(endpointFile, "utf8")) as { url: string; token: string };
+	const frames: Record<string, unknown>[] = [];
+	const socket = new WebSocket(`${endpoint.url}/?token=${encodeURIComponent(endpoint.token)}`);
+	sockets.push(socket);
+	socket.addEventListener("message", event => frames.push(JSON.parse(String(event.data))));
+	await new Promise<void>((resolve, reject) => {
+		socket.addEventListener("open", () => resolve(), { once: true });
+		socket.addEventListener("error", () => reject(new Error("WS error")), { once: true });
+	});
+	const request = async (command: Record<string, unknown>): Promise<Record<string, unknown>> => {
+		const requestId = String(command.id);
+		socket.send(JSON.stringify(command));
+		const responseType = command.type === "query_request" ? "query_response" : "control_response";
+		await waitFor(
+			() => frames.some(frame => frame.type === responseType && frame.id === requestId),
+			`${requestId} response`,
+		);
+		return frames.find(frame => frame.type === responseType && frame.id === requestId)!;
+	};
+
+	const ack = await request({
+		type: "control_request",
+		id: "long-prompt",
+		operation: "turn.prompt",
+		input: { text: "long running turn", clientRef: "long-ref" },
+	});
+	expect(ack.ok).toBe(true);
+	// Expire the transient delivery buffer before lifecycle start, then trigger
+	// cleanup through an unrelated follow-up acceptance. The authoritative pending
+	// correlation must remain queued for the original tracked prompt.
+	const realNow = Date.now;
+	let followUpIds: { commandId: string; turnId: string } | undefined;
+	try {
+		Date.now = () => realNow() + 6 * 60_000;
+		const followUp = await request({
+			type: "control_request",
+			id: "delivery-expiry-trigger",
+			operation: "turn.follow_up",
+			input: { text: "trigger delivery cleanup" },
+		});
+		expect(followUp).toMatchObject({ ok: true, result: { accepted: true } });
+		const result = followUp.result as { commandId: string; turnId: string };
+		followUpIds = { commandId: result.commandId, turnId: result.turnId };
+	} finally {
+		Date.now = realNow;
+	}
+	const untrackedFollowUp = await request({
+		type: "query_request",
+		id: "follow-up-untracked",
+		query: "turn.prompt_status",
+		input: followUpIds,
+	});
+	expect(untrackedFollowUp).toMatchObject({ ok: true, result: { status: "unknown" } });
+	await handlers.get("agent_start")?.({ type: "agent_start" }, sessionContext);
+	const inFlight = await request({
+		type: "query_request",
+		id: "long-inflight",
+		query: "turn.prompt_status",
+		input: { clientRef: "long-ref" },
+	});
+	expect(inFlight).toMatchObject({ ok: true, result: { status: "in_flight" } });
+	await handlers.get("agent_end")?.(
+		{
+			type: "agent_end",
+			messages: [
+				{
+					role: "assistant",
+					stopReason: "error",
+					errorMessage: "private prompt /home/alice secret-token",
+				},
+			],
+		},
+		sessionContext,
+	);
+
+	// Authoritative settlement fired at lifecycle ingress even though the delivery
+	// buffer expired, and the provider error is retained only as a safe failed code.
+	const settled = await request({
+		type: "query_request",
+		id: "long-settled",
+		query: "turn.prompt_status",
+		input: { clientRef: "long-ref" },
+	});
+	expect(settled).toMatchObject({
+		ok: true,
+		result: { status: "failed", error: { code: "agent_error", message: "Prompt submission failed." } },
+	});
+	await handlers.get("session_shutdown")?.({ type: "session_shutdown" }, sessionContext);
+});
+
+test("identical clientRefs in separate session runtimes stay isolated", async () => {
+	const cwdA = fs.mkdtempSync(path.join(os.tmpdir(), "skc-sdk-session-a-"));
+	const cwdB = fs.mkdtempSync(path.join(os.tmpdir(), "skc-sdk-session-b-"));
+	dirs.push(cwdA, cwdB);
+	const sessionA = `sdk-session-a-${Date.now()}`;
+	const sessionB = `sdk-session-b-${Date.now()}`;
+	const contextA = context(cwdA, sessionA);
+	const contextB = context(cwdB, sessionB);
+	const handlersA = start(contextA);
+	const handlersB = start(contextB);
+	const endpointFileA = path.join(cwdA, ".skc", "state", "sdk", `${sessionA}.json`);
+	const endpointFileB = path.join(cwdB, ".skc", "state", "sdk", `${sessionB}.json`);
+	await waitFor(() => fs.existsSync(endpointFileA) && fs.existsSync(endpointFileB), "SDK endpoints");
+	const connect = async (endpointFile: string) => {
+		const endpoint = JSON.parse(fs.readFileSync(endpointFile, "utf8")) as { url: string; token: string };
+		const frames: Record<string, unknown>[] = [];
+		const socket = new WebSocket(`${endpoint.url}/?token=${encodeURIComponent(endpoint.token)}`);
+		sockets.push(socket);
+		socket.addEventListener("message", event => frames.push(JSON.parse(String(event.data))));
+		await new Promise<void>((resolve, reject) => {
+			socket.addEventListener("open", () => resolve(), { once: true });
+			socket.addEventListener("error", () => reject(new Error("WS error")), { once: true });
+		});
+		return async (command: Record<string, unknown>): Promise<Record<string, unknown>> => {
+			const requestId = String(command.id);
+			socket.send(JSON.stringify(command));
+			const responseType = command.type === "query_request" ? "query_response" : "control_response";
+			await waitFor(
+				() => frames.some(frame => frame.type === responseType && frame.id === requestId),
+				`${requestId} response`,
+			);
+			return frames.find(frame => frame.type === responseType && frame.id === requestId)!;
+		};
+	};
+	const requestA = await connect(endpointFileA);
+	const requestB = await connect(endpointFileB);
+
+	// The same clientRef may independently exist in both runtimes.
+	const ackA = await requestA({
+		type: "control_request",
+		id: "a-prompt",
+		operation: "turn.prompt",
+		input: { text: "session A prompt", clientRef: "shared-ref" },
+	});
+	expect(ackA.ok).toBe(true);
+	const ackB = await requestB({
+		type: "control_request",
+		id: "b-prompt",
+		operation: "turn.prompt",
+		input: { text: "session B prompt", clientRef: "shared-ref" },
+	});
+	expect(ackB.ok).toBe(true);
+	const idsA = ackA.result as { commandId: string; turnId: string };
+	const idsB = ackB.result as { commandId: string; turnId: string };
+	expect(idsB.commandId).not.toBe(idsA.commandId);
+
+	// Session B never sees session A's record: each runtime answers only for itself.
+	const statusB = await requestB({
+		type: "query_request",
+		id: "b-status",
+		query: "turn.prompt_status",
+		input: { clientRef: "shared-ref" },
+	});
+	expect(statusB).toMatchObject({ ok: true, result: { status: "accepted", commandId: idsB.commandId } });
+	const crossPair = await requestB({
+		type: "query_request",
+		id: "b-cross-pair",
+		query: "turn.prompt_status",
+		input: { commandId: idsA.commandId, turnId: idsA.turnId },
+	});
+	expect(crossPair).toMatchObject({ ok: true, result: { status: "unknown" } });
+
+	await handlersA.get("session_shutdown")?.({ type: "session_shutdown" }, contextA);
+	await handlersB.get("session_shutdown")?.({ type: "session_shutdown" }, contextB);
 });

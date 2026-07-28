@@ -291,14 +291,18 @@ async function updateChangelogsForRelease(version: string): Promise<void> {
 			continue;
 		}
 
-		// Only create version entry if [Unreleased] has content
-		if (hasUnreleasedContent(content)) {
+		// Remove stale empty version entries before inserting the new release entry.
+		// A release with no unreleased notes still needs a semver heading: the
+		// embedded changelog must identify the version shipped by the package.
+		const unreleasedHasContent = hasUnreleasedContent(content);
+		content = removeEmptyVersionEntries(content);
+
+		if (unreleasedHasContent) {
 			content = content.replace("## [Unreleased]", `## [${version}] - ${date}`);
 			content = content.replace(/^(# Changelog\n\n)/, `$1## [Unreleased]\n\n`);
+		} else {
+			content = content.replace("## [Unreleased]", `## [Unreleased]\n\n## [${version}] - ${date}`);
 		}
-
-		// Clean up any existing empty version entries
-		content = removeEmptyVersionEntries(content);
 
 		await Bun.write(changelog, content);
 		console.log(`  Updated ${changelog}`);

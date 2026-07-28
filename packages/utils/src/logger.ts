@@ -410,7 +410,10 @@ function printModuleLoadSummary(loads: Span[], depth: number, lines: string[]): 
 	}
 	const wall = unionEnd > unionStart ? unionEnd - unionStart : 0;
 	lines.push(`${childIndent}(modules): ${loads.length} loaded, wall ${fmtMs(wall)}, sum ${fmtMs(totalSelf)}`);
-	const showAll = process.env.PI_TIMING === "full";
+	// Resolve SKC-first with PI fallback inline (no ./env import) so this
+	// foundational logger stays off the env module's dependency graph, which the
+	// tab-worker native-free runtime contract (issue-2598-repro) walks.
+	const showAll = (process.env.SKC_TIMING?.trim() || process.env.PI_TIMING?.trim()) === "full";
 	const sorted = [...loads].sort((a, b) => durationOf(b) - durationOf(a));
 	const visible = showAll ? sorted : sorted.slice(0, MODULE_LOAD_VERBOSE_TOP);
 	for (const span of visible) {

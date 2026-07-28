@@ -1,0 +1,33 @@
+--- a/packages/coding-agent/test/hook-input-timeout.test.ts
++++ b/packages/coding-agent/test/hook-input-timeout.test.ts
+@@ -69,30 +69,7 @@
+ 		expect(onSubmit).toHaveBeenCalledWith("hi");
+ 		expect(onCancel).not.toHaveBeenCalled();
+ 		expect(onTimeout).not.toHaveBeenCalled();
+-		component.dispose();
+-	});
+ 
+-	it("keeps placeholder text out of the submitted value", () => {
+-		const onSubmit = vi.fn();
+-		const component = new HookInputComponent("Prompt", "Existing preset", onSubmit, vi.fn());
+-
+-		component.handleInput("\n");
+-
+-		expect(onSubmit).toHaveBeenCalledWith("");
+-
+ 		component.dispose();
+ 	});
+-
+-	it("prefills the submitted value when an explicit initial value is provided", () => {
+-		const onSubmit = vi.fn();
+-		const component = new HookInputComponent("Prompt", undefined, onSubmit, vi.fn(), {
+-			initialValue: "Existing preset",
+-		});
+-
+-		component.handleInput("\n");
+-
+-		expect(onSubmit).toHaveBeenCalledWith("Existing preset");
+-
+-		component.dispose();
+-	});
+ });

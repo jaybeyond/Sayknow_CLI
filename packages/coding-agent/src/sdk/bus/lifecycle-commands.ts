@@ -49,6 +49,49 @@ const USAGE = [
 	"/session_recent [create|resume]",
 ].join("\n");
 
+function tokenizeLifecycleCommand(value: string): string[] | undefined {
+	const tokens: string[] = [];
+	let token = "";
+	let quote: '"' | "'" | undefined;
+	let started = false;
+	for (let index = 0; index < value.length; index++) {
+		const character = value[index]!;
+		if (character === "\\") {
+			const next = value[index + 1];
+			if (next !== undefined && (next === "\\" || next === '"' || next === "'" || /\s/u.test(next))) {
+				token += next;
+				index++;
+			} else token += character;
+			started = true;
+			continue;
+		}
+		if (quote) {
+			if (character === quote) quote = undefined;
+			else token += character;
+			started = true;
+			continue;
+		}
+		if (character === '"' || character === "'") {
+			quote = character;
+			started = true;
+			continue;
+		}
+		if (/\s/u.test(character)) {
+			if (started) {
+				tokens.push(token);
+				token = "";
+				started = false;
+			}
+			continue;
+		}
+		token += character;
+		started = true;
+	}
+	if (quote) return undefined;
+	if (started) tokens.push(token);
+	return tokens;
+}
+
 /** True when the text begins with any /session_* token, regardless of addressability. */
 export function isLifecycleCommandLikeText(text: string | undefined): boolean {
 	if (!text) return false;
@@ -98,8 +141,10 @@ export function parseLifecycleCommand(
 	text: string | undefined,
 	ctx: { chatType?: string; botUsername?: string } = {},
 ): ParsedLifecycleCommand {
+	const tokens = tokenizeLifecycleCommand((text ?? "").trim());
+	if (!tokens) return { kind: "usage", message: USAGE };
+	const [rawCommand, ...args] = tokens;
 	const raw = (text ?? "").trim();
-	const [rawCommand, ...args] = raw.split(/\s+/);
 	const command = normalizeLifecycleCommandToken(rawCommand ?? "", ctx);
 	if (command === undefined) return { kind: "none" };
 
@@ -140,9 +185,8 @@ export function parseLifecycleCommand(
 
 	// /session_create <kind> ... [--mpreset <profile>]
 	const { positional, modelPreset } = extractModelPreset(args);
-	if (modelPreset !== undefined && !isSafeIdentifier(modelPreset)) {
+	if (modelPreset !== undefined && modelPreset.length === 0)
 		return { kind: "reject", reason: "invalid_target", message: `Invalid model preset name.\n\n${USAGE}` };
-	}
 	const kind = positional[0];
 	if (kind === "path") {
 		if (positional.length !== 2) return { kind: "usage", message: USAGE };
@@ -238,11 +282,12 @@ function isSafeBranch(value: string): boolean {
 /**
  * Map a lifecycle response/error to a user-facing Telegram message (G010).
  *
- * Only derives text from sessionId, mode, reason, a safe message, and candidate
- * {sessionId,path} — never a token or prompt. Each error reason gets tailored,
- * actionable copy; an "in progress" pending response is surfaced distinctly.
+ * Only derives text from sessionId, mode, reason, a safe message, the originating
+ * lifecycle verb, and candidate {sessionId,path} — never a token or prompt. Each
+ * error reason gets tailored, actionable copy; an "in progress" pending response
+ * is surfaced distinctly.
  */
-export function formatLifecycleOutcome(r: SessionLifecycleResponse): string {
+export function formatLifecycleOutcome(r: SessionLifecycleResponse, verb?: LifecycleCommandVerb): string {
 	switch (r.type) {
 		case "session_create_response":
 			return `\u{1f680} Launching session ${r.sessionId} in tmux. It will appear once ready \u2014 check /session_recent.`;
@@ -282,9 +327,17 @@ export function formatLifecycleOutcome(r: SessionLifecycleResponse): string {
 		case "unsupported_platform":
 			return "Remote session lifecycle is unavailable on this psmux host because SKC cannot prove immutable session identity. No lifecycle action was performed. Use a local SKC terminal with a supported tmux provider.";
 		case "terminal_uncertain":
-			return /in progress/i.test(r.message)
-				? "\u23f3 That request is already in progress \u2014 hold on."
-				: "\u26a0\ufe0f Outcome uncertain. Check /session_recent before retrying so you don't double-spawn.";
+			if (/in progress/i.test(r.message)) return "\u23f3 That request is already in progress \u2014 hold on.";
+			switch (verb) {
+				case "session_create":
+					return "\u26a0\ufe0f Create outcome uncertain. The session may already be starting \u2014 check /session_recent before retrying to avoid starting it twice.";
+				case "session_close":
+					return "\u26a0\ufe0f Close outcome uncertain. The session may already be closed \u2014 check /session_recent before retrying.";
+				case "session_resume":
+					return "\u26a0\ufe0f Resume outcome uncertain. The session may already be reattached or restarting \u2014 check /session_recent before retrying.";
+				default:
+					return "\u26a0\ufe0f Outcome uncertain. Check /session_recent before retrying.";
+			}
 		default:
 			return `\u26a0\ufe0f ${r.reason}: ${r.message}`;
 	}

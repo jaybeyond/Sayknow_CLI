@@ -1,5 +1,5 @@
 import { encodeSixel } from "@sayknow-cli/natives";
-import { $env } from "@sayknow-cli/utils";
+import { $env, $pickenv } from "@sayknow-cli/utils";
 
 export enum ImageProtocol {
 	Kitty = "\x1b_G",
@@ -125,7 +125,7 @@ export function isCursorNeutralImagePermittedInFallback(): boolean {
 }
 
 function getForcedImageProtocol(): ImageProtocol | null | undefined {
-	const raw = $env.PI_FORCE_IMAGE_PROTOCOL?.trim().toLowerCase();
+	const raw = $pickenv("SKC_FORCE_IMAGE_PROTOCOL", "PI_FORCE_IMAGE_PROTOCOL")?.trim().toLowerCase();
 	if (!raw) return undefined;
 	if (raw === "kitty") return ImageProtocol.Kitty;
 	if (raw === "iterm2" || raw === "iterm") return ImageProtocol.Iterm2;
@@ -180,6 +180,46 @@ export function isUnderTmux(env: NodeJS.ProcessEnv = Bun.env): boolean {
 export function wrapTmuxPassthrough(payload: string, env: NodeJS.ProcessEnv = Bun.env): string {
 	if (!payload || !isUnderTmux(env)) return payload;
 	return `\x1bPtmux;${payload.replaceAll("\x1b", "\x1b\x1b")}\x1b\\`;
+}
+
+/**
+ * Returns whether tmux itself claims the sixel capability for the attached client.
+ *
+ * This is the difference between tmux *owning* the graphic and tmux *not knowing it
+ * exists*. tmux 3.4+ parses sixel into its own screen model (`screen_write_sixelimage`)
+ * and re-renders it via `tty_cmd_sixelimage`, so scrolling, clearing, resizing, and
+ * copy-mode all behave. It only does that when `terminal-features` advertises `sixel`
+ * for the client's terminal.
+ *
+ * Without the feature the graphic must be smuggled past tmux with DCS passthrough —
+ * and then tmux can never erase what it never recorded, which is exactly how the pet
+ * leaves sixel residue behind: the erase (`ECH`) reaches tmux's cell buffer while the
+ * pixels live in the outer terminal's image plane.
+ *
+ * The answer is cached: it is a per-client property that cannot change without a
+ * re-attach, and the probe shells out to tmux.
+ */
+let tmuxSixelOwnershipCache: boolean | undefined;
+export function tmuxOwnsSixel(env: NodeJS.ProcessEnv = Bun.env): boolean {
+	if (!isUnderTmux(env)) return false;
+	if (tmuxSixelOwnershipCache !== undefined) return tmuxSixelOwnershipCache;
+	try {
+		const probe = Bun.spawnSync({
+			cmd: [env.SKC_TMUX_COMMAND?.trim() || "tmux", "display", "-p", "#{client_termfeatures}"],
+			stdout: "pipe",
+			stderr: "ignore",
+		});
+		const features = probe.success ? new TextDecoder().decode(probe.stdout).trim().split(",") : [];
+		tmuxSixelOwnershipCache = features.includes("sixel");
+	} catch {
+		tmuxSixelOwnershipCache = false;
+	}
+	return tmuxSixelOwnershipCache;
+}
+
+/** Testing seam: drop the cached tmux sixel-ownership answer. */
+export function resetTmuxSixelOwnershipCache(): void {
+	tmuxSixelOwnershipCache = undefined;
 }
 
 function parseMajorMinorVersion(versionRaw?: string): { major: number; minor: number } | null {

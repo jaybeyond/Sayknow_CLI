@@ -1,0 +1,125 @@
+--- a/packages/tui/src/components/settings-list.ts
++++ b/packages/tui/src/components/settings-list.ts
+@@ -33,7 +33,6 @@
+ 	#onChange: (id: string, newValue: string) => void;
+ 	#onCancel: () => void;
+ 	#onSelectionChange?: (item: SettingItem | undefined) => void;
+-	#descriptionRows: number;
+ 
+ 	// Submenu state
+ 	#submenuComponent: Component | null = null;
+@@ -46,7 +45,6 @@
+ 		onChange: (id: string, newValue: string) => void,
+ 		onCancel: () => void,
+ 		onSelectionChange?: (item: SettingItem | undefined) => void,
+-		descriptionRows = 0,
+ 	) {
+ 		this.#items = items;
+ 		this.#maxVisible = maxVisible;
+@@ -54,18 +52,9 @@
+ 		this.#onChange = onChange;
+ 		this.#onCancel = onCancel;
+ 		this.#onSelectionChange = onSelectionChange;
+-		this.#descriptionRows = Math.max(0, descriptionRows);
+ 		this.#notifySelectionChange();
+ 	}
+ 
+-	#clampSelectedIndex(): void {
+-		if (this.#items.length === 0) {
+-			this.#selectedIndex = 0;
+-			return;
+-		}
+-		this.#selectedIndex = Math.max(0, Math.min(this.#selectedIndex, this.#items.length - 1));
+-	}
+-
+ 	/** Update an item's currentValue */
+ 	updateValue(id: string, newValue: string): void {
+ 		const item = this.#items.find(i => i.id === id);
+@@ -83,7 +72,11 @@
+ 	 */
+ 	setItems(items: SettingItem[]): void {
+ 		this.#items = items;
+-		this.#clampSelectedIndex();
++		if (this.#items.length === 0) {
++			this.#selectedIndex = 0;
++		} else if (this.#selectedIndex >= this.#items.length) {
++			this.#selectedIndex = this.#items.length - 1;
++		}
+ 		this.#notifySelectionChange();
+ 	}
+ 
+@@ -120,11 +113,7 @@
+ 		const endIndex = Math.min(startIndex + this.#maxVisible, this.#items.length);
+ 
+ 		// Calculate max label width for alignment
+-		const maxLabelWidth = Math.min(
+-			30,
+-			Math.max(0, width - 12),
+-			Math.max(...this.#items.map(item => visibleWidth(item.label))),
+-		);
++		const maxLabelWidth = Math.min(30, Math.max(...this.#items.map(item => visibleWidth(item.label))));
+ 
+ 		// Render visible items
+ 		for (let i = startIndex; i < endIndex; i++) {
+@@ -136,15 +125,13 @@
+ 			const prefixWidth = visibleWidth(prefix);
+ 
+ 			// Pad label to align values
+-			const labelPadded =
+-				truncateToWidth(item.label, maxLabelWidth, Ellipsis.Omit) +
+-				padding(Math.max(0, maxLabelWidth - visibleWidth(item.label)));
++			const labelPadded = item.label + padding(Math.max(0, maxLabelWidth - visibleWidth(item.label)));
+ 			const labelText = this.#theme.label(labelPadded, isSelected);
+ 
+ 			// Calculate space for value
+ 			const separator = "  ";
+ 			const usedWidth = prefixWidth + maxLabelWidth + visibleWidth(separator);
+-			const valueMaxWidth = Math.max(0, width - usedWidth - 2);
++			const valueMaxWidth = width - usedWidth - 2;
+ 
+ 			const valueText = this.#theme.value(
+ 				truncateToWidth(item.currentValue, valueMaxWidth, Ellipsis.Omit),
+@@ -160,19 +147,10 @@
+ 			lines.push(this.#theme.hint(truncateToWidth(scrollText, width - 2, Ellipsis.Omit)));
+ 		}
+ 
+-		// Add description for selected item. Some hosts reserve a fixed
+-		// description area so keyboard navigation does not resize the TUI when
+-		// moving between described and undescribed rows.
++		// Add description for selected item
+ 		const selectedItem = this.#items[this.#selectedIndex];
+-		if (this.#descriptionRows > 0) {
++		if (selectedItem?.description) {
+ 			lines.push("");
+-			const wrappedDesc = selectedItem?.description ? wrapTextWithAnsi(selectedItem.description, width - 4) : [];
+-			for (let i = 0; i < this.#descriptionRows; i++) {
+-				const line = wrappedDesc[i] ?? "";
+-				lines.push(line ? this.#theme.description(`  ${line}`) : "");
+-			}
+-		} else if (selectedItem?.description) {
+-			lines.push("");
+ 			const wrappedDesc = wrapTextWithAnsi(selectedItem.description, width - 4);
+ 			for (const line of wrappedDesc) {
+ 				lines.push(this.#theme.description(`  ${line}`));
+@@ -196,13 +174,6 @@
+ 
+ 		// Main list input handling
+ 		const kb = getKeybindings();
+-		if (this.#items.length === 0) {
+-			if (kb.matches(data, "tui.select.cancel")) {
+-				this.#onCancel();
+-			}
+-			return;
+-		}
+-
+ 		if (kb.matches(data, "tui.select.up")) {
+ 			this.#selectedIndex = this.#selectedIndex === 0 ? this.#items.length - 1 : this.#selectedIndex - 1;
+ 			this.#notifySelectionChange();
+@@ -245,7 +216,6 @@
+ 		// Restore selection to the item that opened the submenu
+ 		if (this.#submenuItemIndex !== null) {
+ 			this.#selectedIndex = this.#submenuItemIndex;
+-			this.#clampSelectedIndex();
+ 			this.#submenuItemIndex = null;
+ 			this.#notifySelectionChange();
+ 		}

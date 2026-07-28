@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -34,9 +34,11 @@ import {
 	releaseChatDaemonOwnership,
 } from "../src/sdk/bus/chat-daemon-control";
 import { tokenFingerprint } from "../src/sdk/bus/config";
-import { DAEMON_GENERATION, daemonPaths, renewDaemonHeartbeat } from "../src/sdk/bus/telegram-daemon";
+import { DAEMON_GENERATION, daemonPaths, renewDaemonHeartbeat, SERVING_EPOCH } from "../src/sdk/bus/telegram-daemon";
 import {
 	clearTelegramControlRequest,
+	type DaemonProcessReference,
+	defaultProcessReference,
 	readTelegramControlRequest,
 	TelegramDaemonController,
 	writeTelegramControlRequest,
@@ -44,9 +46,13 @@ import {
 import { TopicRegistry } from "../src/sdk/bus/topic-registry";
 
 const BOT_TOKEN = "123456:secret-token";
-function testProcessReference(signalRoot: (pid: number, value: NodeJS.Signals) => void) {
+function testProcessReference(
+	signalRoot: (pid: number, value: NodeJS.Signals) => void,
+): (pid: number) => DaemonProcessReference {
 	return (pid: number) => ({
 		incarnation: "linux:100",
+		termination: "cooperative",
+
 		signalRoot: (value: NodeJS.Signals) => signalRoot(pid, value),
 	});
 }
@@ -116,6 +122,7 @@ function freshState(extra: Partial<Record<string, unknown>> = {}): Record<string
 		acquisitionId: "old",
 		ownershipPhase: "ready",
 		generation: DAEMON_GENERATION,
+		servingEpoch: SERVING_EPOCH,
 		...extra,
 	};
 }
@@ -405,7 +412,9 @@ describe("TelegramDaemonController.status", () => {
 	test("reports running for a fresh live owner and stopped for a dead one", async () => {
 		const agentDir = tempAgentDir();
 		const s = settings(agentDir);
-		writeState(agentDir, freshState());
+		const state = freshState();
+		writeState(agentDir, state);
+		writeOwnershipLock(agentDir, state);
 
 		const running = await new TelegramDaemonController(s, {
 			pidAlive: () => true,
@@ -440,10 +449,104 @@ describe("Telegram daemon PID provenance fencing", () => {
 });
 
 describe("TelegramDaemonController.reload", () => {
-	test("cooperatively stops the old owner and spawns a fresh one", async () => {
+	test.each([
+		"unused",
+		"state-mismatch",
+		"lock-mismatch",
+		"stale-heartbeat",
+	])("rejects %s legacy migration sidecar evidence without signaling or spawning", async evidenceKind => {
+		const agentDir = tempAgentDir();
+		const s = settings(agentDir);
+		const paths = daemonPaths(agentDir);
+		const pid = process.pid;
+		const incarnation = processIncarnation(pid);
+		if (!incarnation) throw new Error(`Unable to determine process incarnation for pid ${pid}`);
+		const state = {
+			pid,
+			ownerId: "legacy-owner",
+			tokenFingerprint: tokenFingerprint(BOT_TOKEN),
+			chatId: "42",
+			startedAt: 1_000,
+			heartbeatAt: Date.now(),
+			roots: [],
+			version: 1,
+			generation: 3,
+		};
+		writeState(agentDir, state);
+		fs.writeFileSync(paths.lock, evidenceKind === "lock-mismatch" ? "mutated-lock" : "");
+
+		const stat = fs.statSync(paths.lock);
+		fs.writeFileSync(
+			`${paths.state}.legacy-migration.json`,
+			JSON.stringify({
+				stateDigest: evidenceKind === "unused" ? "unused" : "mismatched",
+
+				lock: { size: 0, mtimeMs: stat.mtimeMs, dev: stat.dev, ino: stat.ino, ctimeMs: stat.ctimeMs },
+				pid,
+				incarnation,
+				heartbeatAt: evidenceKind === "stale-heartbeat" ? 0 : state.heartbeatAt,
+
+				observedAt: evidenceKind === "stale-heartbeat" ? 0 : Date.now(),
+
+				tokenFingerprint: state.tokenFingerprint,
+				chatId: "42",
+			}),
+		);
+		let referenceCalls = 0;
+		let spawnCalls = 0;
+		const result = await new TelegramDaemonController(s, {
+			pidAlive: candidatePid => candidatePid === pid,
+			processReference: () => {
+				referenceCalls++;
+				return { incarnation, termination: "cooperative", signalRoot: () => undefined };
+			},
+			spawn: () => {
+				spawnCalls++;
+				return { unref() {} };
+			},
+		}).reload();
+		expect(result.ok).toBe(false);
+		expect(referenceCalls).toBe(0);
+		expect(spawnCalls).toBe(0);
+	});
+	test("hard Windows authority refuses cooperative controller replacement", async () => {
+		const reference = defaultProcessReference(process.pid, "win32");
+		expect(reference).toMatchObject({ termination: "hard" });
+
 		const agentDir = tempAgentDir();
 		const s = settings(agentDir);
 		const state = freshState({ generation: DAEMON_GENERATION - 1 });
+		writeState(agentDir, state);
+		writeOwnershipLock(agentDir, state);
+		const signals: NodeJS.Signals[] = [];
+		let spawns = 0;
+		const result = await new TelegramDaemonController(s, {
+			pidAlive: pid => pid === 999,
+			pidIncarnation: () => "linux:100",
+			processReference: () => ({
+				incarnation: "linux:100",
+				termination: "hard",
+				signalRoot: signal => signals.push(signal),
+			}),
+			spawn: () => {
+				spawns++;
+				return { unref() {} };
+			},
+		}).reload();
+		expect(result.ok).toBe(false);
+		expect(result.message).toContain("hard process authority");
+		expect(signals).toEqual([]);
+		expect(spawns).toBe(0);
+		expect(await readTelegramControlRequest(s)).toBeUndefined();
+	});
+
+	test.each([
+		["an immediately preceding generation", { generation: DAEMON_GENERATION - 1 }],
+		["a fully-provenanced generation-absent predecessor", { generation: undefined }],
+	] as const)("cooperatively stops %s and spawns a fresh one", async (_description, predecessor) => {
+		const agentDir = tempAgentDir();
+		const s = settings(agentDir);
+		const state = freshState(predecessor);
 		writeState(agentDir, state);
 		writeOwnershipLock(agentDir, state);
 
@@ -492,8 +595,9 @@ describe("TelegramDaemonController.reload", () => {
 	test("reload accepts a successor only when its PID incarnation still matches", async () => {
 		const agentDir = tempAgentDir();
 		const s = settings(agentDir);
-		writeState(agentDir, freshState({ generation: DAEMON_GENERATION - 1 }));
-		fs.writeFileSync(daemonPaths(agentDir).lock, "");
+		const predecessor = freshState({ generation: DAEMON_GENERATION - 1 });
+		writeState(agentDir, predecessor);
+		writeOwnershipLock(agentDir, predecessor);
 		let oldAlive = true;
 		let published = false;
 		const result = await new TelegramDaemonController(s, {
@@ -504,10 +608,14 @@ describe("TelegramDaemonController.reload", () => {
 				if (published) return;
 				published = true;
 				oldAlive = false;
-				writeState(
-					agentDir,
-					freshState({ pid: 1001, incarnation: "linux:101", ownerId: "next", acquisitionId: "next" }),
-				);
+				const successor = freshState({
+					pid: 1001,
+					incarnation: "linux:101",
+					ownerId: "next",
+					acquisitionId: "next",
+				});
+				writeState(agentDir, successor);
+				writeOwnershipLock(agentDir, successor);
 			},
 			waitStepMs: 1,
 		}).reload({ gracefulTimeoutMs: 5 });
@@ -585,8 +693,9 @@ describe("TelegramDaemonController.reload", () => {
 	test("does not escalate or kill when ownership changes mid-wait", async () => {
 		const agentDir = tempAgentDir();
 		const s = settings(agentDir);
-		writeState(agentDir, freshState());
-		fs.writeFileSync(daemonPaths(agentDir).lock, "");
+		const state = freshState();
+		writeState(agentDir, state);
+		writeOwnershipLock(agentDir, state);
 
 		const alive = new Set<number>([999, process.pid, 1000]);
 		const signals: Array<[number, string]> = [];
@@ -600,7 +709,9 @@ describe("TelegramDaemonController.reload", () => {
 			sleep: async () => {
 				if (!mutated) {
 					mutated = true;
-					writeState(agentDir, freshState({ ownerId: "newer", pid: 1000 }));
+					const successor = freshState({ ownerId: "newer", pid: 1000 });
+					writeState(agentDir, successor);
+					writeOwnershipLock(agentDir, successor);
 				}
 			},
 			waitStepMs: 1,
@@ -616,8 +727,9 @@ describe("TelegramDaemonController.reload", () => {
 	test("without --force, an unresponsive old daemon is not killed or replaced", async () => {
 		const agentDir = tempAgentDir();
 		const s = settings(agentDir);
-		writeState(agentDir, freshState());
-		fs.writeFileSync(daemonPaths(agentDir).lock, "");
+		const state = freshState();
+		writeState(agentDir, state);
+		writeOwnershipLock(agentDir, state);
 		const alive = new Set<number>([999, process.pid]);
 		const signals: Array<[number, string]> = [];
 		let spawnCalls = 0;
@@ -834,7 +946,9 @@ describe("renewDaemonHeartbeat steal-lock contention", () => {
 	test("recovers when the steal lock is briefly held then released (bind-vs-heartbeat race)", async () => {
 		const agentDir = tempAgentDir();
 		const s = settings(agentDir);
-		writeState(agentDir, freshState({ heartbeatAt: 1 }));
+		const owner = freshState({ heartbeatAt: 1 });
+		writeState(agentDir, owner);
+		writeOwnershipLock(agentDir, owner);
 		const paths = daemonPaths(agentDir);
 		// A concurrent lifecycle op (e.g. bindProvisionalDaemonPid) holds the steal lock,
 		// releasing it after the first retry sleep.
@@ -1067,6 +1181,7 @@ describe.each([
 				currentIncarnation = successor;
 				return {
 					incarnation,
+					termination: "cooperative",
 					signalRoot: signal => {
 						stableSignals.push(signal);
 						oldOwnerAlive = false;
@@ -1090,6 +1205,17 @@ describe.each([
 });
 
 describe("Darwin default daemon signaling", () => {
+	test("default Darwin authority rechecks incarnation before numeric signaling", () => {
+		const kill = spyOn(process, "kill").mockImplementation(() => true);
+		try {
+			const reference = defaultProcessReference(process.pid, "darwin");
+			expect(reference).toBeDefined();
+			reference?.signalRoot("SIGTERM");
+			expect(kill).toHaveBeenCalledWith(process.pid, "SIGTERM");
+		} finally {
+			kill.mockRestore();
+		}
+	});
 	test("Telegram refuses Darwin TERM/KILL without opening the native numeric-PID signal path", async () => {
 		const agentDir = tempAgentDir();
 		const s = settings(agentDir);
@@ -2629,7 +2755,16 @@ describe("topic registry reload persistence", () => {
 		const registry = new TopicRegistry();
 		registry.load({
 			topics: {
-				S1: { topicId: "100", identitySent: true, name: "repo/main - title", createdAt: 1 },
+				S1: {
+					topicId: "100",
+					identitySent: true,
+					name: "repo/main - title",
+					createdAt: 1,
+					chatId: "42",
+					endpointKey: "ws://reload",
+					endpointDigest: "reload-digest",
+					endpointGeneration: 1,
+				},
 			},
 		});
 		// identitySent must survive so a reloaded daemon does not re-emit the header.

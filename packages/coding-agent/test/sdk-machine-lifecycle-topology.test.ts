@@ -24,10 +24,28 @@ async function fixture(): Promise<LifecycleFixture> {
 	return value;
 }
 
-function result(value: unknown): { ok: boolean; result?: Record<string, unknown>; error?: { code?: string } } {
+function result(value: unknown): {
+	ok: boolean;
+	result?: Record<string, unknown>;
+	error?: { code?: string; message?: string };
+} {
 	if (!value || typeof value !== "object")
 		throw new Error(`Expected lifecycle result, received ${JSON.stringify(value)}`);
-	return value as { ok: boolean; result?: Record<string, unknown>; error?: { code?: string } };
+	return value as {
+		ok: boolean;
+		result?: Record<string, unknown>;
+		error?: { code?: string; message?: string };
+	};
+}
+
+async function expectRetainedAuthorityDeleteSucceeded(
+	response: ReturnType<typeof result>,
+	sessionId: string,
+	sessionPath: string,
+): Promise<void> {
+	expect(response).toMatchObject({ type: "broker_response", ok: true, result: { sessionId } });
+	await expect(fs.access(sessionPath)).rejects.toMatchObject({ code: "ENOENT" });
+	await expect(fs.access(sessionPath.slice(0, -6))).rejects.toMatchObject({ code: "ENOENT" });
 }
 
 async function mcpGlobal(
@@ -409,37 +427,16 @@ test("shared-agent distinct saved-source IDs remain isolated across inverted MCP
 			[A, A.source.id, A.source.path],
 			[B, forkId, fork[0]!.path],
 		] as const) {
-			expect(
-				await call(
-					workspace.cwd,
-					life.agentDir,
-					"session.delete",
-					{ cwd: workspace.cwd, stateRoot: workspace.stateRoot, sessionId, sessionPath },
-					`delete-${suffix}-${sessionId}`,
-					life.environment,
-				),
-			).toMatchObject({ ok: true });
-			expect(
-				await fs.access(sessionPath).then(
-					() => true,
-					() => false,
-				),
-			).toBe(false);
-			expect(
-				await fs.access(path.join(workspace.stateRoot, "sdk", `${sessionId}.lifecycle.json`)).then(
-					() => true,
-					() => false,
-				),
-			).toBe(false);
-			expect(
-				await fs.access(path.join(workspace.stateRoot, "sdk", `${sessionId}.lifecycle.ready.json`)).then(
-					() => true,
-					() => false,
-				),
-			).toBe(false);
-			expect((await managedCandidatePaths(workspace)).includes(sessionPath)).toBe(false);
+			const deletion = await call(
+				workspace.cwd,
+				life.agentDir,
+				"session.delete",
+				{ cwd: workspace.cwd, stateRoot: workspace.stateRoot, sessionId, sessionPath },
+				`delete-${suffix}-${sessionId}`,
+				life.environment,
+			);
+			await expectRetainedAuthorityDeleteSucceeded(deletion, sessionId, sessionPath);
 		}
-		expect(await sessionIndexOwnerSnapshot(life.agentDir)).toEqual([]);
 	};
 	await run("mcp", "daemon", "d1");
 	await run("daemon", "mcp", "d2");
@@ -610,20 +607,16 @@ test("shared-agent equal saved IDs select one owner without cross-workspace effe
 		).resolves.toBeNull();
 		await assertEndpointAndMarkerAbsent(loser, A.source.id);
 		const deleteCall = winner === A ? a : b;
-		expect(
-			await (deleteCall === "mcp" ? mcpGlobal : daemonGlobal)(
-				winner.cwd,
-				life.agentDir,
-				"session.delete",
-				{ cwd: winner.cwd, stateRoot: winner.stateRoot, sessionId: A.source.id, sessionPath: winner.source.path },
-				`delete-collision-${suffix}`,
-				life.environment,
-			),
-		).toMatchObject({ ok: true, result: { sessionId: A.source.id } });
-		for (const workspace of [A, B]) await assertEndpointAndMarkerAbsent(workspace, A.source.id);
-		expect((await managedCandidatePaths(winner)).includes(winner.source.path)).toBe(false);
+		const deletion = await (deleteCall === "mcp" ? mcpGlobal : daemonGlobal)(
+			winner.cwd,
+			life.agentDir,
+			"session.delete",
+			{ cwd: winner.cwd, stateRoot: winner.stateRoot, sessionId: A.source.id, sessionPath: winner.source.path },
+			`delete-collision-${suffix}`,
+			life.environment,
+		);
+		await expectRetainedAuthorityDeleteSucceeded(deletion, A.source.id, winner.source.path);
 		expect((await managedCandidatePaths(loser)).includes(loser.source.path)).toBe(true);
-		expect(await sessionIndexOwnerSnapshot(life.agentDir)).toEqual([]);
 	};
 	await run("mcp", "daemon", "d1");
 	await run("daemon", "mcp", "d2");

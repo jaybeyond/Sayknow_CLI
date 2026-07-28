@@ -71,6 +71,46 @@ function isRetiredBundledModel(model: Pick<Model, "provider" | "id">): boolean {
 	return RETIRED_BUNDLED_MODEL_KEYS.has(`${model.provider}/${model.id}`);
 }
 
+/**
+ * Inject dedicated image generation models into providers that support them.
+ * gpt-image-2 is registered under openai and openai-codex so the image
+ * generation tool can route through a dedicated model instead of the active
+ * chat model. These entries are image-only and should be excluded from the
+ * chat model browser UI.
+ */
+export function injectImageGenerationModels(models: Model[]): void {
+	const imageModelBase = {
+		id: "gpt-image-2",
+		name: "GPT Image 2",
+		reasoning: false,
+		input: ["text"],
+		output: ["text", "image"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 128_000,
+		maxTokens: 16_384,
+	} satisfies Omit<Model, "api" | "provider" | "baseUrl">;
+	const hasOpenAI = models.some(m => m.provider === "openai" && m.id === "gpt-image-2");
+	if (!hasOpenAI) {
+		const openAIImageModel: Model<"openai-responses"> = {
+			...imageModelBase,
+			api: "openai-responses",
+			provider: "openai",
+			baseUrl: "",
+		};
+		models.push(openAIImageModel);
+	}
+	const hasCodex = models.some(m => m.provider === "openai-codex" && m.id === "gpt-image-2");
+	if (!hasCodex) {
+		const codexImageModel: Model<"openai-codex-responses"> = {
+			...imageModelBase,
+			api: "openai-codex-responses",
+			provider: "openai-codex",
+			baseUrl: "",
+		};
+		models.push(codexImageModel);
+	}
+}
+
 async function resolveProviderApiKey(providerId: string, catalog: CatalogDiscoveryConfig): Promise<string | undefined> {
 	for (const envVar of catalog.envVars) {
 		const value = $env[envVar as keyof typeof $env];
@@ -241,14 +281,54 @@ function applyCodexPricingFallback(models: readonly Model[]): Model[] {
 	});
 }
 
-// Catalog sources occasionally omit image input for Claude Opus 4.8 variants
+// Catalog sources occasionally omit image input for recent Claude Opus variants
 // (e.g. kilo/venice "-fast" entries) even though every Claude Opus model is
 // vision-capable. Correct those so capability advertising stays consistent
 // across providers. Runs after the dynamic merge so it survives regeneration.
+//
+// The list is an explicit allowlist of reviewed generations rather than a
+// `claude-opus-*` prefix match: a future generation must be reviewed before we
+// assert capabilities for it. `claude-opus-vision.test.ts` imports this list and
+// fails when the catalog bundles a newer Opus generation than any declared here.
+export const VISION_CORRECTED_CLAUDE_OPUS_GENERATIONS: readonly number[] = [4.8, 5];
+
+/**
+ * Known separator-less generation aliases. Upstream normally writes
+ * `claude-opus-4-5`, but a few catalogs collapse it to `claude-opus-45`. This is
+ * an explicit list so a future two-digit major (`claude-opus-10`) is read as
+ * generation 10 rather than silently as 1.0.
+ */
+const COMPACT_CLAUDE_OPUS_ALIASES: Readonly<Record<string, number>> = {
+	"41": 4.1,
+	"45": 4.5,
+	"46": 4.6,
+	"47": 4.7,
+	"48": 4.8,
+};
+
+/**
+ * Extract the Claude Opus generation from a model id, ignoring provider
+ * prefixes, region prefixes, and trailing aliases or date suffixes:
+ * `claude-opus-4-8` and `anthropic.claude-opus-4-8` -> 4.8, `claude-opus-5-fast`
+ * -> 5, `claude-opus-45` -> 4.5, `claude-opus-4-20250514` -> 4,
+ * `claude-opus-10` -> 10. Returns undefined when the id is not a Claude Opus
+ * model.
+ */
+export function claudeOpusGeneration(modelId: string): number | undefined {
+	const match = modelId
+		.toLowerCase()
+		.replace(/\./g, "-")
+		.match(/claude-opus-(\d+)(?:-(\d)(?![\d]))?/);
+	if (!match) return undefined;
+	const [, major, minor] = match;
+	if (minor !== undefined) return Number(major) + Number(minor) / 10;
+	return COMPACT_CLAUDE_OPUS_ALIASES[major] ?? Number(major);
+}
+
 function applyClaudeOpusVisionCorrections(models: readonly Model[]): Model[] {
 	return models.map(model => {
-		const normalizedId = model.id.toLowerCase().replace(/\./g, "-");
-		if (!normalizedId.includes("claude-opus-4-8")) {
+		const generation = claudeOpusGeneration(model.id);
+		if (generation === undefined || !VISION_CORRECTED_CLAUDE_OPUS_GENERATIONS.includes(generation)) {
 			return model;
 		}
 		if (model.input.includes("image")) {
@@ -419,6 +499,7 @@ async function generateModels() {
 	allModels = applyClaudeOpusVisionCorrections(allModels);
 	applyGeneratedModelPolicies(allModels);
 	linkOpenAIPromotionTargets(allModels);
+	injectImageGenerationModels(allModels);
 
 	// Group by provider and sort each provider's models
 	const providers: Record<string, Record<string, Model>> = {};
@@ -466,5 +547,6 @@ Model Statistics:`);
 	}
 }
 
-// Run the generator
-generateModels().catch(console.error);
+if (import.meta.main) {
+	generateModels().catch(console.error);
+}

@@ -1,7 +1,7 @@
 {
 	"type": "module",
 	"name": "@sayknow-cli/coding-agent",
-	"version": "0.4.7",
+	"version": "0.5.0",
 	"description": "Sayknow-CLI CLI with read, bash, edit, write tools and session management",
 	"homepage": "https://sayknow-cli.com",
 	"author": "jaybeyond",
@@ -306,10 +306,6 @@
 		"./extensibility/custom-commands/bundled/ci-green": {
 			"types": "./src/extensibility/custom-commands/bundled/ci-green/index.ts",
 			"import": "./src/extensibility/custom-commands/bundled/ci-green/index.ts"
-		},
-		"./extensibility/custom-commands/bundled/review": {
-			"types": "./src/extensibility/custom-commands/bundled/review/index.ts",
-			"import": "./src/extensibility/custom-commands/bundled/review/index.ts"
 		},
 		"./extensibility/custom-tools": {
 			"types": "./src/extensibility/custom-tools/index.ts",

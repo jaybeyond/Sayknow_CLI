@@ -5,6 +5,8 @@
  * without maintaining persistent connections.
  */
 import { logger } from "@sayknow-cli/utils";
+import { cancelMCPStream, MCP_HTTP_TIMEOUT_MS, MCP_MAX_CONTENT_BYTES, readMCPResponseText } from "./content-limits";
+import { redactMCPDiagnosticValue, redactMCPEndpoint } from "./redaction";
 
 /** Parse SSE response format (lines starting with "data: ") */
 export function parseSSE(text: string): unknown {
@@ -22,6 +24,15 @@ export function parseSSE(text: string): unknown {
 		return JSON.parse(text);
 	} catch {
 		return null;
+	}
+}
+
+async function translateMCPTimeout<T>(operation: Promise<T>, signal: AbortSignal): Promise<T> {
+	try {
+		return await operation;
+	} catch (error) {
+		if (signal.aborted && error === signal.reason) throw new Error("MCP request timed out");
+		throw error;
 	}
 }
 
@@ -57,26 +68,32 @@ export async function callMCP<T = unknown>(
 		params: params ?? {},
 	};
 
-	const response = await fetch(url, {
-		method: "POST",
-		headers: {
-			"Content-Type": "application/json",
-			Accept: "application/json, text/event-stream",
-		},
-		body: JSON.stringify(body),
-	});
+	const signal = AbortSignal.timeout(MCP_HTTP_TIMEOUT_MS);
+	const response = await translateMCPTimeout(
+		fetch(url, {
+			method: "POST",
+			headers: { "Content-Type": "application/json", Accept: "application/json, text/event-stream" },
+			body: JSON.stringify(body),
+			signal,
+		}),
+		signal,
+	);
 
 	if (!response.ok) {
+		cancelMCPStream(response.body);
 		const errorMsg = `MCP request failed: ${response.status} ${response.statusText}`;
-		logger.error(errorMsg, { url, method, params });
+		logger.error(errorMsg, { url: redactMCPEndpoint(url), method, params: redactMCPDiagnosticValue(params) });
 		throw new Error(errorMsg);
 	}
 
-	const text = await response.text();
+	const text = await translateMCPTimeout(readMCPResponseText(response, MCP_MAX_CONTENT_BYTES, false, signal), signal);
 	const result = parseSSE(text) as JsonRpcResponse<T> | null;
 
 	if (!result) {
-		logger.error("Failed to parse MCP response", { url, method, responseText: text.slice(0, 500) });
+		logger.error("Failed to parse MCP response", {
+			url: redactMCPEndpoint(url),
+			method,
+		});
 		throw new Error("Failed to parse MCP response");
 	}
 

@@ -2,6 +2,22 @@
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-07-28
+
+## [0.11.11] - 2026-07-26
+
+### Fixed
+
+- Managed runs now release their logical-run ownership before terminal observers are notified, so terminal overflow recovery cannot leave a stale owner behind.
+- The OpenAI remote-compaction endpoint is now resolved from trusted environment sources only. `OPENAI_BASE_URL` was read through the merged view that includes the caller's `cwd/.env`, so a repository could redirect compaction requests that carry the OpenAI credential; it now uses the non-project resolver, leaving shell and user-level configuration unchanged.
+- Repeated malformed tool calls now get one tool-free recovery response, preventing argument-validation loops from ending without an answer while leaving ordinary execution-error retries unchanged. The recovery turn commits its assistant to the durable context, forces `toolChoice: "none"` alongside an empty tool list without consuming a queued tool choice, and never executes a tool call it did not advertise. Its recovery prompt is request-only, so append-only tool prefixes stay stable and the durable message log is unchanged.
+- Argument-validation loops now reach a deterministic terminal state. If a model keeps emitting only malformed tool calls after the one-shot recovery turn, the run stops with an explanatory error instead of calling the provider indefinitely. The bound counts consecutive all-malformed turns rather than repeated argument signatures, so a model rotating invalid argument shapes is bounded too; any healthy tool turn resets it.
+
+## [0.11.8] - 2026-07-23
+
+### Fixed
+
+- Managed model fallback now accepts `reasoning_summary_start`, `reasoning_summary_delta`, and `reasoning_summary_end` assistant events instead of failing them as local snapshot errors.
 ## [0.11.3] - 2026-07-19
 
 ### Fixed

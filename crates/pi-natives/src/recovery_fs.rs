@@ -4,6 +4,8 @@
 //! [`open_recovery_fs_root`]. Relative names are walked one component at a
 //! time without following symlinks, and regular files must be single-linked.
 
+#[cfg(all(test, target_os = "linux"))]
+use std::{cell::RefCell, collections::VecDeque};
 #[cfg(target_os = "linux")]
 use std::{
 	ffi::CString,
@@ -21,14 +23,115 @@ use parking_lot::Mutex;
 #[cfg(target_os = "linux")]
 use sha2::{Digest, Sha256};
 
+#[cfg(target_os = "linux")]
 const MAX_CONTENT_BYTES: u64 = 1024 * 1024;
+#[cfg(target_os = "linux")]
 const MAX_MANAGED_CONTENT_BYTES: u64 = 64 * 1024 * 1024;
+#[cfg(target_os = "linux")]
 const MAX_MANAGED_TREE_DEPTH: usize = 32;
-const MAX_MANAGED_TREE_FILES: u64 = 10_000;
+#[cfg(target_os = "linux")]
+const MAX_MANAGED_TREE_FILES: u64 = 50_000;
+// Entries include files and directories. Leave room for the artifact directory,
+// nested directories, and managed transcript, binding, and receipt metadata
+// while preserving the TypeScript artifact-file limit.
+#[cfg(target_os = "linux")]
+const MAX_MANAGED_TREE_ENTRIES: u64 = 60_000;
+#[cfg(target_os = "linux")]
 const MAX_MANAGED_TREE_TOTAL_BYTES: u64 = 512 * 1024 * 1024;
 
 #[cfg(target_os = "linux")]
 static MANAGED_REPLACEMENT_ID: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(all(test, target_os = "linux"))]
+#[derive(Clone, Copy)]
+enum RetainedPublishFault {
+	Rename(i32),
+	Sync(Option<i32>),
+	PostRenameSnapshot(&'static str),
+}
+
+#[cfg(all(test, target_os = "linux"))]
+thread_local! {
+	static RETAINED_PUBLISH_FAULTS: RefCell<VecDeque<RetainedPublishFault>> = const { RefCell::new(VecDeque::new()) };
+}
+
+#[cfg(all(test, target_os = "linux"))]
+fn set_retained_publish_faults(faults: impl IntoIterator<Item = RetainedPublishFault>) {
+	RETAINED_PUBLISH_FAULTS
+		.with(|configured| *configured.borrow_mut() = faults.into_iter().collect());
+}
+
+#[cfg(all(test, target_os = "linux"))]
+fn take_retained_publish_fault(rename: bool) -> Option<Option<i32>> {
+	RETAINED_PUBLISH_FAULTS.with(|configured| {
+		let mut configured = configured.borrow_mut();
+		match configured.front().copied() {
+			Some(RetainedPublishFault::Rename(code)) if rename => {
+				configured.pop_front();
+				Some(Some(code))
+			},
+			Some(RetainedPublishFault::Sync(code)) if !rename => {
+				configured.pop_front();
+				Some(code)
+			},
+			_ => None,
+		}
+	})
+}
+
+#[cfg(all(test, target_os = "linux"))]
+fn take_post_rename_snapshot_fault() -> Option<&'static str> {
+	RETAINED_PUBLISH_FAULTS.with(|configured| {
+		let mut configured = configured.borrow_mut();
+		match configured.front().copied() {
+			Some(RetainedPublishFault::PostRenameSnapshot(code)) => {
+				configured.pop_front();
+				Some(code)
+			},
+			_ => None,
+		}
+	})
+}
+
+#[cfg(target_os = "linux")]
+fn renameat2_no_replace(
+	source_parent: &File,
+	source_name: &CString,
+	destination_parent: &File,
+	destination_name: &CString,
+) -> std::io::Result<()> {
+	#[cfg(test)]
+	if let Some(Some(code)) = take_retained_publish_fault(true) {
+		return Err(std::io::Error::from_raw_os_error(code));
+	}
+	// SAFETY: both parents own valid fds and both names are live NUL-terminated
+	// strings for this syscall.
+	let result = unsafe {
+		libc::syscall(
+			libc::SYS_renameat2,
+			source_parent.as_raw_fd(),
+			source_name.as_ptr(),
+			destination_parent.as_raw_fd(),
+			destination_name.as_ptr(),
+			libc::RENAME_NOREPLACE,
+		)
+	};
+	if result == 0 {
+		Ok(())
+	} else {
+		Err(std::io::Error::last_os_error())
+	}
+}
+
+#[cfg(target_os = "linux")]
+fn sync_parent(parent: &File) -> std::io::Result<()> {
+	#[cfg(test)]
+	if let Some(code) = take_retained_publish_fault(false) {
+		return code
+			.map_or_else(|| parent.sync_all(), |code| Err(std::io::Error::from_raw_os_error(code)));
+	}
+	parent.sync_all()
+}
 
 #[napi(object)]
 #[derive(PartialEq, Eq)]
@@ -50,11 +153,62 @@ pub struct RecoveryFsResult {
 	pub data:     Option<Uint8Array>,
 }
 
+/// Fail-closed outcome for a removal whose detached object remains retained.
+/// `recovery_path` identifies evidence only; it grants no authority to replay
+/// or delete the retained object.
+#[napi(object)]
+pub struct RecoveryFsRetainedCleanupResult {
+	pub ok:            bool,
+	pub code:          Option<String>,
+	pub recovery_path: Option<String>,
+	pub identity:      Option<RecoveryFsIdentity>,
+	pub tree_snapshot: Option<crate::path_identity::NativeDirectoryTreeSnapshot>,
+}
+
+impl RecoveryFsRetainedCleanupResult {
+	fn failure(code: &str) -> Self {
+		Self {
+			ok:            false,
+			code:          Some(code.to_owned()),
+			recovery_path: None,
+			identity:      None,
+			tree_snapshot: None,
+		}
+	}
+
+	#[cfg(target_os = "linux")]
+	fn retained_file(recovery_path: String, identity: RecoveryFsIdentity) -> Self {
+		Self {
+			ok:            false,
+			code:          Some("cleanup_pending".to_owned()),
+			recovery_path: Some(recovery_path),
+			identity:      Some(identity),
+			tree_snapshot: None,
+		}
+	}
+
+	#[cfg(target_os = "linux")]
+	fn retained_tree(
+		recovery_path: String,
+		tree_snapshot: crate::path_identity::NativeDirectoryTreeSnapshot,
+	) -> Self {
+		Self {
+			ok:            false,
+			code:          Some("cleanup_pending".to_owned()),
+			recovery_path: Some(recovery_path),
+			identity:      None,
+			tree_snapshot: Some(tree_snapshot),
+		}
+	}
+}
+
 impl RecoveryFsResult {
+	#[cfg(target_os = "linux")]
 	const fn success(identity: RecoveryFsIdentity) -> Self {
 		Self { ok: true, code: None, identity: Some(identity), data: None }
 	}
 
+	#[cfg(target_os = "linux")]
 	fn data(identity: RecoveryFsIdentity, data: Vec<u8>) -> Self {
 		Self {
 			ok:       true,
@@ -67,6 +221,218 @@ impl RecoveryFsResult {
 	fn failure(code: &str) -> Self {
 		Self { ok: false, code: Some(code.to_owned()), identity: None, data: None }
 	}
+}
+
+/// Bounded, path-free diagnostic evidence for one retained publication.
+#[napi(object)]
+#[derive(Clone)]
+pub struct RecoveryFsPublishSyncFailure {
+	pub phase:       String,
+	pub parent_role: String,
+	pub os_code:     Option<i32>,
+	pub kind:        String,
+}
+
+#[cfg(target_os = "linux")]
+enum RetainedPublishError {
+	Code(&'static str),
+	PostMutationCode(&'static str),
+	SyncFailures(Vec<RecoveryFsPublishSyncFailure>),
+}
+
+#[cfg(target_os = "linux")]
+impl From<&'static str> for RetainedPublishError {
+	fn from(code: &'static str) -> Self {
+		Self::Code(code)
+	}
+}
+
+/// Bounded, path-free diagnostic evidence for one retained publication.
+#[napi(object)]
+pub struct RecoveryFsPublishDiagnostic {
+	pub schema_version:   u32,
+	pub collection_state: String,
+	pub os_code:          Option<i32>,
+	pub sync_failures:    Option<Vec<RecoveryFsPublishSyncFailure>>,
+}
+
+/// Explicit mutation and durability outcome for retained no-replace
+/// publication.
+#[napi(object)]
+pub struct RecoveryFsPublishResult {
+	pub ok:               bool,
+	pub code:             Option<String>,
+	pub identity:         Option<RecoveryFsIdentity>,
+	pub mutation_state:   String,
+	pub durability_state: String,
+	pub reason:           String,
+	pub primitive:        String,
+	pub phase:            String,
+	pub diagnostic:       RecoveryFsPublishDiagnostic,
+}
+
+impl RecoveryFsPublishResult {
+	#[cfg(target_os = "linux")]
+	fn success(identity: RecoveryFsIdentity) -> Self {
+		Self::result(true, None, Some(identity), "committed", "proven", "none", "complete", None)
+	}
+
+	fn failure(
+		mutation_state: &str,
+		durability_state: &str,
+		reason: &str,
+		phase: &str,
+		code: &str,
+		os_code: Option<i32>,
+	) -> Self {
+		Self::result(
+			false,
+			Some(code.to_owned()),
+			None,
+			mutation_state,
+			durability_state,
+			reason,
+			phase,
+			os_code,
+		)
+	}
+
+	fn result(
+		ok: bool,
+		code: Option<String>,
+		identity: Option<RecoveryFsIdentity>,
+		mutation_state: &str,
+		durability_state: &str,
+		reason: &str,
+		phase: &str,
+		os_code: Option<i32>,
+	) -> Self {
+		Self {
+			ok,
+			code,
+			identity,
+			mutation_state: mutation_state.to_owned(),
+			durability_state: durability_state.to_owned(),
+			reason: reason.to_owned(),
+			primitive: "renameat2_noreplace".to_owned(),
+			phase: phase.to_owned(),
+			diagnostic: RecoveryFsPublishDiagnostic {
+				schema_version: 1,
+				collection_state: if os_code.is_some() {
+					"partial"
+				} else {
+					"complete"
+				}
+				.to_owned(),
+				os_code,
+				sync_failures: None,
+			},
+		}
+	}
+}
+
+#[cfg(target_os = "linux")]
+fn publish_preflight_failure(code: &'static str) -> RecoveryFsPublishResult {
+	let (reason, phase) = match code {
+		"already_exists" => ("destination_exists", "preflight"),
+		"atomic_unavailable" => ("atomic_unavailable", "rename"),
+		"cross_device" => ("cross_device", "rename"),
+		"permission_denied" => ("permission_denied", "preflight"),
+		"invalid_request" => ("invalid_request", "preflight"),
+		"identity_mismatch" => ("identity_violation", "preflight"),
+		_ => ("io_failure", "preflight"),
+	};
+	RecoveryFsPublishResult::failure("not_committed", "not_attempted", reason, phase, code, None)
+}
+
+#[cfg(target_os = "linux")]
+fn publish_post_mutation_failure(code: &'static str, phase: &str) -> RecoveryFsPublishResult {
+	let reason = if code == "fsync_failed" {
+		"durability_not_provable"
+	} else if code == "identity_mismatch" {
+		"identity_violation"
+	} else {
+		"io_failure"
+	};
+	RecoveryFsPublishResult::failure("committed", "not_provable", reason, phase, code, None)
+}
+
+#[cfg(target_os = "linux")]
+fn publish_post_mutation_sync_failures(
+	failures: Vec<RecoveryFsPublishSyncFailure>,
+) -> RecoveryFsPublishResult {
+	let phase = failures
+		.first()
+		.map_or("source_parent_sync", |failure| failure.phase.as_str());
+	let os_code = failures.first().and_then(|failure| failure.os_code);
+	let mut result = RecoveryFsPublishResult::failure(
+		"committed",
+		"not_provable",
+		"durability_not_provable",
+		phase,
+		"fsync_failed",
+		os_code,
+	);
+	"partial".clone_into(&mut result.diagnostic.collection_state);
+	result.diagnostic.sync_failures = Some(failures);
+	result
+}
+
+#[cfg(target_os = "linux")]
+fn sync_failure(
+	phase: &str,
+	parent_role: &str,
+	error: &std::io::Error,
+) -> RecoveryFsPublishSyncFailure {
+	let os_code = error.raw_os_error();
+	let kind = match os_code {
+		Some(code) if code == libc::ENOTSUP || code == libc::EOPNOTSUPP => "unsupported",
+		Some(libc::EACCES | libc::EPERM) => "permission",
+		Some(libc::EIO) => "io",
+		_ => "other",
+	};
+	RecoveryFsPublishSyncFailure {
+		phase: phase.to_owned(),
+		parent_role: parent_role.to_owned(),
+		os_code,
+		kind: kind.to_owned(),
+	}
+}
+
+#[cfg(target_os = "linux")]
+fn collect_parent_sync_failures(
+	source_parent: &File,
+	destination_parent: &File,
+	shared: bool,
+	mut sync: impl FnMut(&File) -> std::io::Result<()>,
+) -> Result<(), RetainedPublishError> {
+	let source_role = if shared { "shared" } else { "source" };
+	let mut failures = Vec::with_capacity(2);
+	if let Err(error) = sync(source_parent) {
+		failures.push(sync_failure("source_parent_sync", source_role, &error));
+	}
+	if !shared && let Err(error) = sync(destination_parent) {
+		failures.push(sync_failure("destination_parent_sync", "destination", &error));
+	}
+	if failures.is_empty() {
+		Ok(())
+	} else {
+		Err(RetainedPublishError::SyncFailures(failures))
+	}
+}
+
+#[cfg(target_os = "linux")]
+fn sync_distinct_parents(
+	source_parent: &File,
+	destination_parent: &File,
+	shared: bool,
+) -> Result<(), RetainedPublishError> {
+	collect_parent_sync_failures(source_parent, destination_parent, shared, sync_parent)
+}
+
+#[cfg(target_os = "linux")]
+fn publish_unknown_failure(code: &'static str, phase: &str) -> RecoveryFsPublishResult {
+	RecoveryFsPublishResult::failure("unknown", "not_provable", "unknown", phase, code, None)
 }
 
 /// Retained trusted-root authority for Linux recovery artifacts.
@@ -329,10 +695,10 @@ impl RecoveryFsRoot {
 		expected_mtime_ns: String,
 		expected_ctime_ns: String,
 		expected_sha256: String,
-	) -> RecoveryFsResult {
+	) -> RecoveryFsRetainedCleanupResult {
 		#[cfg(target_os = "linux")]
 		{
-			with_root_and_recovery(&self.root, &self.recovery, |root, recovery| {
+			with_root_and_recovery_cleanup(&self.root, &self.recovery, |root, recovery| {
 				remove_managed(
 					root,
 					recovery,
@@ -357,7 +723,7 @@ impl RecoveryFsRoot {
 				expected_ctime_ns,
 				expected_sha256,
 			);
-			RecoveryFsResult::failure("unsupported_platform")
+			RecoveryFsRetainedCleanupResult::failure("unsupported_platform")
 		}
 	}
 
@@ -390,10 +756,10 @@ impl RecoveryFsRoot {
 		expected_mtime_ns: String,
 		expected_ctime_ns: String,
 		expected_sha256: String,
-	) -> RecoveryFsResult {
+	) -> RecoveryFsPublishResult {
 		#[cfg(target_os = "linux")]
 		{
-			with_root(&self.root, |root| {
+			with_root_publish(&self.root, |root| {
 				rename_managed_file_no_replace(
 					root,
 					&source_relative_path,
@@ -419,7 +785,14 @@ impl RecoveryFsRoot {
 				expected_ctime_ns,
 				expected_sha256,
 			);
-			RecoveryFsResult::failure("unsupported_platform")
+			RecoveryFsPublishResult::failure(
+				"not_committed",
+				"not_attempted",
+				"atomic_unavailable",
+				"preflight",
+				"unsupported_platform",
+				None,
+			)
 		}
 	}
 
@@ -466,10 +839,10 @@ impl RecoveryFsRoot {
 		source_relative_path: String,
 		destination_relative_path: String,
 		expected: crate::path_identity::NativeDirectoryTreeSnapshot,
-	) -> RecoveryFsResult {
+	) -> RecoveryFsPublishResult {
 		#[cfg(target_os = "linux")]
 		{
-			with_root(&self.root, |root| {
+			with_root_publish(&self.root, |root| {
 				rename_managed_tree_no_replace(
 					root,
 					&source_relative_path,
@@ -481,7 +854,14 @@ impl RecoveryFsRoot {
 		#[cfg(not(target_os = "linux"))]
 		{
 			let _ = (source_relative_path, destination_relative_path, expected);
-			RecoveryFsResult::failure("unsupported_platform")
+			RecoveryFsPublishResult::failure(
+				"not_committed",
+				"not_attempted",
+				"atomic_unavailable",
+				"preflight",
+				"unsupported_platform",
+				None,
+			)
 		}
 	}
 
@@ -491,17 +871,17 @@ impl RecoveryFsRoot {
 		&self,
 		relative_path: String,
 		expected: crate::path_identity::NativeDirectoryTreeSnapshot,
-	) -> RecoveryFsResult {
+	) -> RecoveryFsRetainedCleanupResult {
 		#[cfg(target_os = "linux")]
 		{
-			with_root_and_recovery(&self.root, &self.recovery, |root, recovery| {
+			with_root_and_recovery_cleanup(&self.root, &self.recovery, |root, recovery| {
 				remove_managed_tree(root, recovery, &relative_path, &expected)
 			})
 		}
 		#[cfg(not(target_os = "linux"))]
 		{
 			let _ = (relative_path, expected);
-			RecoveryFsResult::failure("unsupported_platform")
+			RecoveryFsRetainedCleanupResult::failure("unsupported_platform")
 		}
 	}
 
@@ -513,17 +893,24 @@ impl RecoveryFsRoot {
 		&self,
 		source_relative_path: String,
 		destination_relative_path: String,
-	) -> RecoveryFsResult {
+	) -> RecoveryFsPublishResult {
 		#[cfg(target_os = "linux")]
 		{
-			with_root(&self.root, |root| {
+			with_root_publish(&self.root, |root| {
 				install(root, &source_relative_path, &destination_relative_path)
 			})
 		}
 		#[cfg(not(target_os = "linux"))]
 		{
 			let _ = (source_relative_path, destination_relative_path);
-			RecoveryFsResult::failure("unsupported_platform")
+			RecoveryFsPublishResult::failure(
+				"not_committed",
+				"not_attempted",
+				"atomic_unavailable",
+				"preflight",
+				"unsupported_platform",
+				None,
+			)
 		}
 	}
 
@@ -754,6 +1141,41 @@ fn with_root(
 		|| RecoveryFsResult::failure("closed"),
 		|root| operation(root).unwrap_or_else(RecoveryFsResult::failure),
 	)
+}
+
+#[cfg(target_os = "linux")]
+fn with_root_publish(
+	root: &Mutex<Option<File>>,
+	operation: impl FnOnce(&File) -> RecoveryFsPublishResult,
+) -> RecoveryFsPublishResult {
+	let guard = root.lock();
+	guard.as_ref().map_or_else(
+		|| {
+			RecoveryFsPublishResult::failure(
+				"not_committed",
+				"not_attempted",
+				"io_failure",
+				"preflight",
+				"closed",
+				None,
+			)
+		},
+		operation,
+	)
+}
+
+#[cfg(target_os = "linux")]
+fn with_root_and_recovery_cleanup(
+	root: &Mutex<Option<File>>,
+	recovery: &Mutex<Option<File>>,
+	operation: impl FnOnce(&File, Option<&File>) -> Result<RecoveryFsRetainedCleanupResult, &'static str>,
+) -> RecoveryFsRetainedCleanupResult {
+	let root_guard = root.lock();
+	let Some(root) = root_guard.as_ref() else {
+		return RecoveryFsRetainedCleanupResult::failure("closed");
+	};
+	let recovery_guard = recovery.lock();
+	operation(root, recovery_guard.as_ref()).unwrap_or_else(RecoveryFsRetainedCleanupResult::failure)
 }
 
 #[cfg(target_os = "linux")]
@@ -1259,8 +1681,8 @@ fn recovery_directory(root: &File, external: Option<&File>) -> Result<File, &'st
 	if let Some(external) = external {
 		return external.try_clone().map_err(|_| "io_error");
 	}
-	ensure_managed_directory(root, ".gjc-recovery")?;
-	open_existing_directory(root, ".gjc-recovery")
+	ensure_managed_directory(root, ".skc-recovery")?;
+	open_existing_directory(root, ".skc-recovery")
 }
 
 #[cfg(target_os = "linux")]
@@ -1274,54 +1696,112 @@ fn rename_managed_file_no_replace(
 	mtime_ns: &str,
 	ctime_ns: &str,
 	sha256: &str,
-) -> Result<RecoveryFsResult, &'static str> {
-	use std::os::fd::AsRawFd;
+) -> RecoveryFsPublishResult {
+	match rename_managed_file_no_replace_inner(
+		root,
+		source,
+		destination,
+		dev,
+		ino,
+		size,
+		mtime_ns,
+		ctime_ns,
+		sha256,
+	) {
+		Ok(result) => result.identity.map_or_else(
+			|| publish_post_mutation_failure("identity_mismatch", "terminal_identity"),
+			RecoveryFsPublishResult::success,
+		),
+		Err(RetainedPublishError::SyncFailures(failures)) => {
+			publish_post_mutation_sync_failures(failures)
+		},
+		Err(RetainedPublishError::Code("rollback_unavailable")) => {
+			publish_post_mutation_failure("rollback_unavailable", "terminal_identity")
+		},
+		Err(RetainedPublishError::Code("interrupted")) => {
+			publish_unknown_failure("interrupted", "rename")
+		},
+		Err(RetainedPublishError::Code(
+			code @ ("already_exists" | "atomic_unavailable" | "cross_device" | "permission_denied"
+			| "invalid_request"),
+		)) => publish_preflight_failure(code),
+		Err(RetainedPublishError::PostMutationCode(code)) => {
+			publish_post_mutation_failure(code, "terminal_identity")
+		},
+		Err(RetainedPublishError::Code(code)) => publish_unknown_failure(code, "terminal_identity"),
+	}
+}
+
+#[cfg(target_os = "linux")]
+fn rename_managed_file_no_replace_inner(
+	root: &File,
+	source: &str,
+	destination: &str,
+	dev: &str,
+	ino: &str,
+	size: &str,
+	mtime_ns: &str,
+	ctime_ns: &str,
+	sha256: &str,
+) -> Result<RecoveryFsResult, RetainedPublishError> {
 	let source_file = open_existing(root, source, false)?;
 	crate::path_identity::platform::verify_created_owner_only_file(&source_file)?;
 	if !same_expected(&source_file, dev, ino, size, mtime_ns, ctime_ns, sha256)? {
-		return Err("identity_mismatch");
+		return Err("identity_mismatch".into());
 	}
 
 	let (source_parent, source_name) = open_parent(root, source)?;
 	let (destination_parent, destination_name) = open_parent(root, destination)?;
-	// SAFETY: both parents are retained descriptors, names are validated, and
-	// RENAME_NOREPLACE is atomic.
-	let result = unsafe {
-		libc::syscall(
-			libc::SYS_renameat2,
-			source_parent.as_raw_fd(),
-			source_name.as_ptr(),
-			destination_parent.as_raw_fd(),
-			destination_name.as_ptr(),
-			libc::RENAME_NOREPLACE,
-		)
-	};
-	if result != 0 {
-		return Err(match std::io::Error::last_os_error().raw_os_error() {
-			Some(libc::EEXIST) => "already_exists",
-			Some(libc::ENOSYS | libc::EINVAL) => "atomic_unavailable",
-			_ => "io_error",
-		});
+	let result =
+		renameat2_no_replace(&source_parent, &source_name, &destination_parent, &destination_name);
+	if let Err(error) = result {
+		return Err(
+			match error.raw_os_error() {
+				Some(libc::EEXIST) => "already_exists",
+				Some(libc::ENOSYS) => "atomic_unavailable",
+				// The retained syscall uses fixed, validated descriptors, names, and flags.
+				// EINVAL still cannot prove that this filesystem lacks RENAME_NOREPLACE;
+				// retain it as an invalid request rather than weakening no-overwrite authority.
+				Some(libc::EINVAL) => "invalid_request",
+				Some(libc::EXDEV) => "cross_device",
+				Some(libc::EACCES | libc::EPERM) => "permission_denied",
+				Some(libc::EINTR) => "interrupted",
+				_ => "io_error",
+			}
+			.into(),
+		);
 	}
-	let moved_file = open_existing(root, destination, false)?;
-	crate::path_identity::platform::verify_created_owner_only_file(&moved_file)?;
-	let moved = regular_identity(&moved_file)?;
-	if !same_expected_after_rename(&moved_file, dev, ino, size, mtime_ns, sha256)? {
-		return Err("rollback_unavailable");
+	// The namespace mutation is authoritative immediately after renameat2 returns
+	// success. Every following failure is therefore committed-but-unproven.
+	let moved_file = open_existing(root, destination, false).map_err(|_| "rollback_unavailable")?;
+	crate::path_identity::platform::verify_created_owner_only_file(&moved_file)
+		.map_err(|_| "rollback_unavailable")?;
+	let moved = regular_identity(&moved_file).map_err(|_| "rollback_unavailable")?;
+	if !same_expected_after_rename(&moved_file, dev, ino, size, mtime_ns, sha256)
+		.map_err(|_| "rollback_unavailable")?
+	{
+		return Err("rollback_unavailable".into());
 	}
 	let terminal =
-		statat(&destination_parent, &destination_name).map_err(|_| "identity_mismatch")?;
+		statat(&destination_parent, &destination_name).map_err(|_| "rollback_unavailable")?;
 	if terminal.st_dev.to_string() != moved.dev || terminal.st_ino.to_string() != moved.ino {
-		return Err("rollback_unavailable");
+		return Err("rollback_unavailable".into());
 	}
-	if source_parent.sync_all().is_err() || destination_parent.sync_all().is_err() {
-		return Err("rollback_unavailable");
-	}
-	let after = regular_identity(&moved_file)?;
+	let source_parent_identity = identity(&source_parent).map_err(|_| "rollback_unavailable")?;
+	let destination_parent_identity =
+		identity(&destination_parent).map_err(|_| "rollback_unavailable")?;
+	sync_distinct_parents(
+		&source_parent,
+		&destination_parent,
+		source_parent_identity.dev == destination_parent_identity.dev
+			&& source_parent_identity.ino == destination_parent_identity.ino,
+	)?;
+	let after = regular_identity(&moved_file).map_err(|_| "rollback_unavailable")?;
 	let named_after =
-		statat(&destination_parent, &destination_name).map_err(|_| "identity_mismatch")?;
-	crate::path_identity::platform::verify_created_owner_only_file(&moved_file)?;
-	let after_digest = digest_hex(&moved_file)?;
+		statat(&destination_parent, &destination_name).map_err(|_| "rollback_unavailable")?;
+	crate::path_identity::platform::verify_created_owner_only_file(&moved_file)
+		.map_err(|_| "rollback_unavailable")?;
+	let after_digest = digest_hex(&moved_file).map_err(|_| "rollback_unavailable")?;
 	if after.dev != moved.dev
 		|| after.ino != moved.ino
 		|| after.size != moved.size
@@ -1335,7 +1815,7 @@ fn rename_managed_file_no_replace(
 		|| stat_mtime_ns(&named_after).to_string() != moved.mtime_ns
 		|| stat_ctime_ns(&named_after).to_string() != moved.ctime_ns
 	{
-		return Err("rollback_unavailable");
+		return Err("rollback_unavailable".into());
 	}
 	Ok(RecoveryFsResult::success(moved))
 }
@@ -1351,7 +1831,7 @@ fn remove_managed(
 	expected_mtime_ns: &str,
 	expected_ctime_ns: &str,
 	expected_sha256: &str,
-) -> Result<RecoveryFsResult, &'static str> {
+) -> Result<RecoveryFsRetainedCleanupResult, &'static str> {
 	use std::os::fd::AsRawFd;
 	let (source_parent, name) = open_parent(root, relative_path)?;
 	let authorized = open_existing(root, relative_path, false)?;
@@ -1368,7 +1848,7 @@ fn remove_managed(
 	}
 	let authorized_identity = regular_identity(&authorized)?;
 	let quarantine = CString::new(format!(
-		".gjc-managed-remove-{}-{}",
+		".skc-managed-remove-{}-{}",
 		std::process::id(),
 		MANAGED_REPLACEMENT_ID.fetch_add(1, Ordering::Relaxed)
 	))
@@ -1441,9 +1921,12 @@ fn remove_managed(
 	{
 		return Err("identity_mismatch");
 	}
-	// Canonical absence is committed. The verified quarantine remains recoverable
-	// evidence; deleting it would reopen an unprovable name race.
-	Ok(RecoveryFsResult::success(authorized_identity))
+	// Canonical absence is durable, but cleanup is deliberately not replayed:
+	// the verified quarantine is evidence only, not a deletion capability.
+	Ok(RecoveryFsRetainedCleanupResult::retained_file(
+		format!(".skc-recovery/{quarantined_relative}"),
+		terminal_identity,
+	))
 }
 
 #[cfg(target_os = "linux")]
@@ -1544,7 +2027,7 @@ fn replace_managed(
 	let candidate = (0..16)
 		.find_map(|_| {
 			let name = format!(
-				".gjc-managed-replace-{}-{}",
+				".skc-managed-replace-{}-{}",
 				std::process::id(),
 				MANAGED_REPLACEMENT_ID.fetch_add(1, Ordering::Relaxed)
 			);
@@ -1644,38 +2127,78 @@ fn replace_managed(
 }
 
 #[cfg(target_os = "linux")]
-fn install(root: &File, source: &str, destination: &str) -> Result<RecoveryFsResult, &'static str> {
-	use std::os::fd::AsRawFd;
+fn install(root: &File, source: &str, destination: &str) -> RecoveryFsPublishResult {
+	match install_inner(root, source, destination) {
+		Ok(result) => result.identity.map_or_else(
+			|| publish_post_mutation_failure("identity_mismatch", "terminal_identity"),
+			RecoveryFsPublishResult::success,
+		),
+		Err(RetainedPublishError::SyncFailures(failures)) => {
+			publish_post_mutation_sync_failures(failures)
+		},
+		Err(RetainedPublishError::Code("post_mutation_identity_mismatch")) => {
+			publish_post_mutation_failure("identity_mismatch", "terminal_identity")
+		},
+		Err(RetainedPublishError::Code("interrupted")) => {
+			publish_unknown_failure("interrupted", "rename")
+		},
+		Err(RetainedPublishError::Code(
+			code @ ("already_exists" | "atomic_unavailable" | "cross_device" | "permission_denied"
+			| "invalid_request"),
+		)) => publish_preflight_failure(code),
+		Err(RetainedPublishError::PostMutationCode(code)) => {
+			publish_post_mutation_failure(code, "terminal_identity")
+		},
+		Err(RetainedPublishError::Code(code)) => publish_unknown_failure(code, "terminal_identity"),
+	}
+}
+
+#[cfg(target_os = "linux")]
+fn install_inner(
+	root: &File,
+	source: &str,
+	destination: &str,
+) -> Result<RecoveryFsResult, RetainedPublishError> {
 	let source_file = open_existing(root, source, false)?;
 	let source_identity = regular_identity(&source_file)?;
 	let (source_parent, source_name) = open_parent(root, source)?;
 	let (destination_parent, destination_name) = open_parent(root, destination)?;
-	// SAFETY: both parents own valid fds and both names are live NUL-terminated
-	// strings for this syscall.
-	let result = unsafe {
-		libc::syscall(
-			libc::SYS_renameat2,
-			source_parent.as_raw_fd(),
-			source_name.as_ptr(),
-			destination_parent.as_raw_fd(),
-			destination_name.as_ptr(),
-			libc::RENAME_NOREPLACE,
-		)
-	};
-	if result != 0 {
-		return Err(match std::io::Error::last_os_error().raw_os_error() {
-			Some(libc::EEXIST) => "already_exists",
-			Some(libc::ENOSYS | libc::EINVAL) => "atomic_unavailable",
-			_ => "io_error",
-		});
+	let result =
+		renameat2_no_replace(&source_parent, &source_name, &destination_parent, &destination_name);
+	if let Err(error) = result {
+		return Err(
+			match error.raw_os_error() {
+				Some(libc::EEXIST) => "already_exists",
+				Some(libc::ENOSYS) => "atomic_unavailable",
+				Some(libc::EINVAL) => "invalid_request",
+				Some(libc::EXDEV) => "cross_device",
+				Some(libc::EACCES | libc::EPERM) => "permission_denied",
+				Some(libc::EINTR) => "interrupted",
+				_ => "io_error",
+			}
+			.into(),
+		);
 	}
-	let installed = open_existing(root, destination, false)?;
-	let installed_identity = regular_identity(&installed)?;
+	// The rename has committed; all following verification failures are durability
+	// proof failures, never a new pre-mutation classification.
+	let installed =
+		open_existing(root, destination, false).map_err(|_| "post_mutation_identity_mismatch")?;
+	let installed_identity =
+		regular_identity(&installed).map_err(|_| "post_mutation_identity_mismatch")?;
 	if installed_identity.dev != source_identity.dev || installed_identity.ino != source_identity.ino
 	{
-		return Err("identity_mismatch");
+		return Err("post_mutation_identity_mismatch".into());
 	}
-	destination_parent.sync_all().map_err(|_| "fsync_failed")?;
+	let source_parent_identity =
+		identity(&source_parent).map_err(|_| "post_mutation_identity_mismatch")?;
+	let destination_parent_identity =
+		identity(&destination_parent).map_err(|_| "post_mutation_identity_mismatch")?;
+	sync_distinct_parents(
+		&source_parent,
+		&destination_parent,
+		source_parent_identity.dev == destination_parent_identity.dev
+			&& source_parent_identity.ino == destination_parent_identity.ino,
+	)?;
 	Ok(RecoveryFsResult::success(installed_identity))
 }
 
@@ -1777,7 +2300,7 @@ fn snapshot_tree_fd(
 	entries: &mut Vec<crate::path_identity::NativeDirectoryTreeEntry>,
 ) -> Result<(), &'static str> {
 	budget.entries = budget.entries.checked_add(1).ok_or("content_too_large")?;
-	if budget.entries > MAX_MANAGED_TREE_FILES {
+	if budget.entries > MAX_MANAGED_TREE_ENTRIES {
 		return Err("content_too_large");
 	}
 	if depth > MAX_MANAGED_TREE_DEPTH {
@@ -1804,7 +2327,7 @@ fn snapshot_tree_fd(
 	entries.push(tree_entry(relative.to_owned(), &stat, "directory", None));
 	for bytes in tree_names(fd)? {
 		let name = CString::new(bytes).map_err(|_| "io_error")?;
-		if is_authority_root && name.as_bytes() == b".gjc-recovery" {
+		if is_authority_root && name.as_bytes() == b".skc-recovery" {
 			// SAFETY: fd is retained and O_DIRECTORY|O_NOFOLLOW binds only the reserved
 			// recovery namespace.
 			let recovery_fd = unsafe {
@@ -2011,6 +2534,18 @@ fn snapshot_managed_tree(
 }
 
 #[cfg(target_os = "linux")]
+fn snapshot_managed_tree_after_rename(
+	root: &File,
+	relative_path: &str,
+) -> Result<crate::path_identity::NativeDirectoryTreeResult, &'static str> {
+	#[cfg(test)]
+	if let Some(code) = take_post_rename_snapshot_fault() {
+		return Err(code);
+	}
+	snapshot_managed_tree(root, relative_path)
+}
+
+#[cfg(target_os = "linux")]
 fn tree_matches_after_rename(
 	actual: &crate::path_identity::NativeDirectoryTreeSnapshot,
 	expected: &crate::path_identity::NativeDirectoryTreeSnapshot,
@@ -2040,61 +2575,97 @@ fn rename_managed_tree_no_replace(
 	source: &str,
 	destination: &str,
 	expected: &crate::path_identity::NativeDirectoryTreeSnapshot,
-) -> Result<RecoveryFsResult, &'static str> {
+) -> RecoveryFsPublishResult {
+	match rename_managed_tree_no_replace_inner(root, source, destination, expected) {
+		Ok(result) => result.identity.map_or_else(
+			|| publish_post_mutation_failure("identity_mismatch", "terminal_identity"),
+			RecoveryFsPublishResult::success,
+		),
+		Err(RetainedPublishError::SyncFailures(failures)) => {
+			publish_post_mutation_sync_failures(failures)
+		},
+		Err(RetainedPublishError::Code("rollback_unavailable")) => {
+			publish_post_mutation_failure("rollback_unavailable", "terminal_identity")
+		},
+		Err(RetainedPublishError::Code("interrupted")) => {
+			publish_unknown_failure("interrupted", "rename")
+		},
+		Err(RetainedPublishError::Code(
+			code @ ("already_exists" | "atomic_unavailable" | "cross_device" | "permission_denied"
+			| "invalid_request"),
+		)) => publish_preflight_failure(code),
+		Err(RetainedPublishError::PostMutationCode(code)) => {
+			publish_post_mutation_failure(code, "terminal_identity")
+		},
+		Err(RetainedPublishError::Code(code)) => publish_unknown_failure(code, "terminal_identity"),
+	}
+}
+
+#[cfg(target_os = "linux")]
+fn rename_managed_tree_no_replace_inner(
+	root: &File,
+	source: &str,
+	destination: &str,
+	expected: &crate::path_identity::NativeDirectoryTreeSnapshot,
+) -> Result<RecoveryFsResult, RetainedPublishError> {
 	let before = snapshot_managed_tree(root, source)?
 		.snapshot
 		.ok_or("io_error")?;
 	if &before != expected {
-		return Err("identity_mismatch");
+		return Err("identity_mismatch".into());
 	}
 	let (source_parent, source_name) = open_parent(root, source)?;
 	let (destination_parent, destination_name) = open_parent(root, destination)?;
-	// SAFETY: both parents are retained, names are validated, and RENAME_NOREPLACE
-	// is atomic.
-	if unsafe {
-		libc::syscall(
-			libc::SYS_renameat2,
-			source_parent.as_raw_fd(),
-			source_name.as_ptr(),
-			destination_parent.as_raw_fd(),
-			destination_name.as_ptr(),
-			libc::RENAME_NOREPLACE,
-		)
-	} != 0
+	if let Err(error) =
+		renameat2_no_replace(&source_parent, &source_name, &destination_parent, &destination_name)
 	{
-		return Err(match std::io::Error::last_os_error().raw_os_error() {
-			Some(libc::EEXIST) => "already_exists",
-			Some(libc::ENOSYS | libc::EINVAL) => "atomic_unavailable",
-			_ => "io_error",
-		});
+		return Err(
+			match error.raw_os_error() {
+				Some(libc::EEXIST) => "already_exists",
+				Some(libc::ENOSYS) => "atomic_unavailable",
+				Some(libc::EINVAL) => "invalid_request",
+				Some(libc::EXDEV) => "cross_device",
+				Some(libc::EACCES | libc::EPERM) => "permission_denied",
+				Some(libc::EINTR) => "interrupted",
+				_ => "io_error",
+			}
+			.into(),
+		);
 	}
-	let post_mutation = (|| -> Result<RecoveryFsIdentity, &'static str> {
-		let after = snapshot_managed_tree(root, destination)?
+	let post_mutation = (|| -> Result<RecoveryFsIdentity, RetainedPublishError> {
+		let after = snapshot_managed_tree_after_rename(root, destination)?
 			.snapshot
 			.ok_or("io_error")?;
 		if !tree_matches_after_rename(&after, expected) {
-			return Err("identity_mismatch");
+			return Err("identity_mismatch".into());
 		}
-		source_parent.sync_all().map_err(|_| "fsync_failed")?;
-		destination_parent.sync_all().map_err(|_| "fsync_failed")?;
-		let terminal = snapshot_managed_tree(root, destination)?
+		let source_parent_identity = identity(&source_parent)?;
+		let destination_parent_identity = identity(&destination_parent)?;
+		sync_distinct_parents(
+			&source_parent,
+			&destination_parent,
+			source_parent_identity.dev == destination_parent_identity.dev
+				&& source_parent_identity.ino == destination_parent_identity.ino,
+		)?;
+		let terminal = snapshot_managed_tree_after_rename(root, destination)?
 			.snapshot
 			.ok_or("io_error")?;
 		if terminal != after {
-			return Err("identity_mismatch");
+			return Err("identity_mismatch".into());
 		}
 		let destination_root = open_existing_directory(root, destination)?;
 		let destination_identity = identity(&destination_root)?;
 		if destination_identity.dev != expected.root_dev
 			|| destination_identity.ino != expected.root_ino
 		{
-			return Err("identity_mismatch");
+			return Err("identity_mismatch".into());
 		}
 		Ok(destination_identity)
 	})();
 	match post_mutation {
 		Ok(identity) => Ok(RecoveryFsResult::success(identity)),
-		Err(_) => Err("rollback_unavailable"),
+		Err(RetainedPublishError::Code(code)) => Err(RetainedPublishError::PostMutationCode(code)),
+		Err(error) => Err(error),
 	}
 }
 
@@ -2104,7 +2675,7 @@ fn remove_managed_tree(
 	recovery: Option<&File>,
 	relative_path: &str,
 	expected: &crate::path_identity::NativeDirectoryTreeSnapshot,
-) -> Result<RecoveryFsResult, &'static str> {
+) -> Result<RecoveryFsRetainedCleanupResult, &'static str> {
 	use std::os::fd::AsRawFd;
 	let snapshot = snapshot_managed_tree(root, relative_path)?
 		.snapshot
@@ -2112,10 +2683,10 @@ fn remove_managed_tree(
 	if &snapshot != expected {
 		return Err("identity_mismatch");
 	}
-	let root_identity = identity(root)?;
+	identity(root)?;
 	let (source_parent, name) = open_parent(root, relative_path)?;
 	let quarantine = CString::new(format!(
-		".gjc-managed-tree-remove-{}-{}",
+		".skc-managed-tree-remove-{}-{}",
 		std::process::id(),
 		MANAGED_REPLACEMENT_ID.fetch_add(1, Ordering::Relaxed)
 	))
@@ -2152,8 +2723,313 @@ fn remove_managed_tree(
 	if terminal != verified_snapshot {
 		return Err("identity_mismatch");
 	}
-	// Canonical absence is durable. The verified quarantine remains as recoverable
-	// cleanup evidence; deleting descendants here would reopen a destructive race
-	// with a concurrent same-UID actor.
-	Ok(RecoveryFsResult::success(root_identity))
+	// Canonical absence is durable, but cleanup is deliberately not replayed:
+	// the verified quarantine is evidence only, not a deletion capability.
+	Ok(RecoveryFsRetainedCleanupResult::retained_tree(format!(".skc-recovery/{detached}"), terminal))
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+	use super::*;
+
+	fn failures(result: Result<(), RetainedPublishError>) -> Vec<RecoveryFsPublishSyncFailure> {
+		match result {
+			Err(RetainedPublishError::SyncFailures(failures)) => failures,
+			_ => panic!("expected retained parent sync failure evidence"),
+		}
+	}
+
+	#[test]
+	fn retained_parent_sync_evidence_records_source_destination_and_error_kinds() {
+		let parent = File::open("/").expect("root directory must be openable");
+		let mut calls = 0;
+		let source_only = failures(collect_parent_sync_failures(&parent, &parent, false, |_| {
+			calls += 1;
+			if calls == 1 {
+				Err(std::io::Error::from_raw_os_error(libc::EIO))
+			} else {
+				Ok(())
+			}
+		}));
+		assert_eq!(source_only.len(), 1);
+		assert_eq!(source_only[0].parent_role, "source");
+		assert_eq!(source_only[0].phase, "source_parent_sync");
+		assert_eq!(source_only[0].kind, "io");
+		assert_eq!(source_only[0].os_code, Some(libc::EIO));
+
+		let mut calls = 0;
+		let destination_only =
+			failures(collect_parent_sync_failures(&parent, &parent, false, |_| {
+				calls += 1;
+				if calls == 1 {
+					Ok(())
+				} else {
+					Err(std::io::Error::from_raw_os_error(libc::EACCES))
+				}
+			}));
+		assert_eq!(destination_only.len(), 1);
+		assert_eq!(destination_only[0].parent_role, "destination");
+		assert_eq!(destination_only[0].phase, "destination_parent_sync");
+		assert_eq!(destination_only[0].kind, "permission");
+
+		let mut calls = 0;
+		let both = failures(collect_parent_sync_failures(&parent, &parent, false, |_| {
+			calls += 1;
+			Err(std::io::Error::from_raw_os_error(if calls == 1 { libc::EIO } else { libc::ENOTSUP }))
+		}));
+		assert_eq!(both.len(), 2);
+		assert_eq!(both[1].kind, "unsupported");
+	}
+
+	#[test]
+	fn shared_parent_sync_is_attempted_once_and_reports_a_shared_role() {
+		let parent = File::open("/").expect("root directory must be openable");
+		let mut calls = 0;
+		let shared = failures(collect_parent_sync_failures(&parent, &parent, true, |_| {
+			calls += 1;
+			Err(std::io::Error::from_raw_os_error(libc::EIO))
+		}));
+		assert_eq!(calls, 1);
+		assert_eq!(shared.len(), 1);
+		assert_eq!(shared[0].parent_role, "shared");
+		assert_eq!(shared[0].phase, "source_parent_sync");
+	}
+
+	use std::{
+		fs,
+		path::PathBuf,
+		time::{SystemTime, UNIX_EPOCH},
+	};
+
+	struct TempDir(PathBuf);
+
+	impl TempDir {
+		fn new() -> Self {
+			let path = std::env::temp_dir().join(format!(
+				"pi-recovery-fs-fault-test-{}-{}",
+				std::process::id(),
+				SystemTime::now()
+					.duration_since(UNIX_EPOCH)
+					.expect("clock before epoch")
+					.as_nanos(),
+			));
+			fs::create_dir(&path).expect("create temporary root");
+			Self(path)
+		}
+
+		fn root(&self) -> File {
+			File::open(&self.0).expect("open temporary root")
+		}
+	}
+
+	impl Drop for TempDir {
+		fn drop(&mut self) {
+			let _ = fs::remove_dir_all(&self.0);
+		}
+	}
+
+	fn managed_file(root: &File, path: &str, contents: &[u8]) -> RecoveryFsIdentity {
+		create(root, path, contents, MAX_MANAGED_CONTENT_BYTES)
+			.expect("create managed source")
+			.identity
+			.expect("managed source identity")
+	}
+
+	fn file_digest(contents: &[u8]) -> String {
+		hex_digest(Sha256::digest(contents).into())
+	}
+
+	fn assert_unsynced(result: &RecoveryFsPublishResult, role: &str, failures: usize) {
+		assert!(!result.ok);
+		assert_eq!(result.code.as_deref(), Some("fsync_failed"));
+		assert_eq!(result.mutation_state, "committed");
+		assert_eq!(result.durability_state, "not_provable");
+		assert_eq!(result.reason, "durability_not_provable");
+		let evidence = result
+			.diagnostic
+			.sync_failures
+			.as_ref()
+			.expect("sync evidence");
+		assert_eq!(evidence.len(), failures);
+		assert_eq!(evidence[0].parent_role, role);
+	}
+
+	#[test]
+	fn retained_publication_faults_preserve_committed_file_tree_and_install_contents() {
+		let source_contents = b"source-only";
+		for (faults, role, failures) in [
+			(
+				vec![RetainedPublishFault::Sync(Some(libc::EIO)), RetainedPublishFault::Sync(None)],
+				"source",
+				1,
+			),
+			(
+				vec![RetainedPublishFault::Sync(None), RetainedPublishFault::Sync(Some(libc::EACCES))],
+				"destination",
+				1,
+			),
+			(
+				vec![
+					RetainedPublishFault::Sync(Some(libc::EIO)),
+					RetainedPublishFault::Sync(Some(libc::EACCES)),
+				],
+				"source",
+				2,
+			),
+		] {
+			let temporary = TempDir::new();
+			let root = temporary.root();
+			ensure_managed_directory(&root, "source-parent").expect("create source parent");
+			ensure_managed_directory(&root, "destination-parent").expect("create destination parent");
+			let identity = managed_file(&root, "source-parent/source", source_contents);
+			set_retained_publish_faults(faults);
+			let result = rename_managed_file_no_replace(
+				&root,
+				"source-parent/source",
+				"destination-parent/destination",
+				&identity.dev,
+				&identity.ino,
+				&identity.size,
+				&identity.mtime_ns,
+				&identity.ctime_ns,
+				&file_digest(source_contents),
+			);
+			assert_unsynced(&result, role, failures);
+			assert!(!temporary.0.join("source-parent/source").exists());
+			assert_eq!(
+				fs::read(temporary.0.join("destination-parent/destination"))
+					.expect("read committed destination"),
+				source_contents
+			);
+		}
+
+		let temporary = TempDir::new();
+		let root = temporary.root();
+		let source = b"install";
+		managed_file(&root, "source", source);
+		set_retained_publish_faults([RetainedPublishFault::Sync(Some(libc::EIO))]);
+		let result = install(&root, "source", "destination");
+		assert_unsynced(&result, "shared", 1);
+		assert!(!temporary.0.join("source").exists());
+		assert_eq!(
+			fs::read(temporary.0.join("destination")).expect("read committed install"),
+			source
+		);
+
+		let temporary = TempDir::new();
+		let root = temporary.root();
+		ensure_managed_directory(&root, "source").expect("create source tree");
+		managed_file(&root, "source/receipt", b"tree");
+		let expected = snapshot_managed_tree(&root, "source")
+			.expect("snapshot source tree")
+			.snapshot
+			.expect("source tree snapshot");
+		set_retained_publish_faults([RetainedPublishFault::Sync(Some(libc::EIO))]);
+		let result = rename_managed_tree_no_replace(&root, "source", "destination", &expected);
+		assert_unsynced(&result, "shared", 1);
+		assert!(!temporary.0.join("source").exists());
+		assert_eq!(
+			fs::read(temporary.0.join("destination/receipt")).expect("read committed tree"),
+			b"tree"
+		);
+	}
+
+	#[test]
+	fn retained_tree_post_rename_snapshot_failures_remain_committed_not_provable() {
+		for (fault, reason) in [
+			(RetainedPublishFault::PostRenameSnapshot("io_error"), "io_failure"),
+			(RetainedPublishFault::PostRenameSnapshot("identity_mismatch"), "identity_violation"),
+		] {
+			let temporary = TempDir::new();
+			let root = temporary.root();
+			ensure_managed_directory(&root, "source").expect("create source tree");
+			managed_file(&root, "source/receipt", b"tree");
+			let expected = snapshot_managed_tree(&root, "source")
+				.expect("snapshot source tree")
+				.snapshot
+				.expect("source tree snapshot");
+			set_retained_publish_faults([fault]);
+			let result = rename_managed_tree_no_replace(&root, "source", "destination", &expected);
+			assert!(!result.ok);
+			assert_eq!(
+				result.code.as_deref(),
+				Some(match fault {
+					RetainedPublishFault::PostRenameSnapshot(code) => code,
+					_ => unreachable!("post-rename snapshot fault"),
+				})
+			);
+			assert_eq!(result.mutation_state, "committed");
+			assert_eq!(result.durability_state, "not_provable");
+			assert_eq!(result.reason, reason);
+			assert!(!temporary.0.join("source").exists());
+			assert_eq!(
+				fs::read(temporary.0.join("destination/receipt")).expect("read committed tree"),
+				b"tree"
+			);
+		}
+	}
+
+	#[test]
+	fn retained_publication_rename_faults_are_unknown_or_preflight_without_loss() {
+		for (fault, mutation_state, durability_state, reason, code) in [
+			(libc::EINTR, "unknown", "not_provable", "unknown", "interrupted"),
+			(libc::EXDEV, "not_committed", "not_attempted", "cross_device", "cross_device"),
+			(libc::EACCES, "not_committed", "not_attempted", "permission_denied", "permission_denied"),
+		] {
+			let temporary = TempDir::new();
+			let root = temporary.root();
+			managed_file(&root, "source", b"authoritative-source");
+			set_retained_publish_faults([RetainedPublishFault::Rename(fault)]);
+			let result = install(&root, "source", "destination");
+			assert!(!result.ok);
+			assert_eq!(result.code.as_deref(), Some(code));
+			assert_eq!(result.mutation_state, mutation_state);
+			assert_eq!(result.durability_state, durability_state);
+			assert_eq!(result.reason, reason);
+			assert_eq!(
+				fs::read(temporary.0.join("source")).expect("source remains authoritative"),
+				b"authoritative-source"
+			);
+			assert!(!temporary.0.join("destination").exists());
+		}
+	}
+
+	#[test]
+	fn retained_publish_faults_are_thread_local_under_concurrent_installs() {
+		let first = std::thread::spawn(|| {
+			let temporary = TempDir::new();
+			let root = temporary.root();
+			managed_file(&root, "source", b"first");
+			set_retained_publish_faults([RetainedPublishFault::Sync(Some(libc::EIO))]);
+			let result = install(&root, "source", "destination");
+			(
+				result
+					.diagnostic
+					.sync_failures
+					.expect("first sync evidence")[0]
+					.os_code,
+				fs::read(temporary.0.join("destination")).expect("first committed destination"),
+			)
+		});
+		let second = std::thread::spawn(|| {
+			let temporary = TempDir::new();
+			let root = temporary.root();
+			managed_file(&root, "source", b"second");
+			set_retained_publish_faults([RetainedPublishFault::Sync(Some(libc::EACCES))]);
+			let result = install(&root, "source", "destination");
+			(
+				result
+					.diagnostic
+					.sync_failures
+					.expect("second sync evidence")[0]
+					.os_code,
+				fs::read(temporary.0.join("destination")).expect("second committed destination"),
+			)
+		});
+		assert_eq!(first.join().expect("first install thread"), (Some(libc::EIO), b"first".to_vec()));
+		assert_eq!(
+			second.join().expect("second install thread"),
+			(Some(libc::EACCES), b"second".to_vec())
+		);
+	}
 }

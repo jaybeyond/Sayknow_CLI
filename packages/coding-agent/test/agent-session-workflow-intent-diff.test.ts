@@ -156,8 +156,10 @@ describe("AgentSession workflow intent-diff tracking", () => {
 		await session.prompt("I'm not sure what this product should be, don't assume the requirements");
 		await session.prompt("create a durable goal ledger for this multi-step release");
 		await session.prompt("create a durable goal ledger for this production release");
+		await session.prompt("use ultragoal to track this release");
+		await session.prompt("ultragoal로 이 작업 처리해줘");
 
-		const [deepInterview, ultragoal, productionUltragoal] = workflowIntentEntries();
+		const [deepInterview, ultragoal, productionUltragoal, namedUltragoal, koreanUltragoal] = workflowIntentEntries();
 		expect(deepInterview?.data).toMatchObject({
 			route: "deep-interview",
 			recommendedSkill: "deep-interview",
@@ -176,6 +178,60 @@ describe("AgentSession workflow intent-diff tracking", () => {
 			recommendedInvocation: "/skill:ultragoal",
 			directTracking: "not-direct",
 			rootCausePhase: { status: "active", triggers: ["high-risk transition"] },
+		});
+		expect(namedUltragoal?.data).toMatchObject({
+			route: "ultragoal",
+			recommendedSkill: "ultragoal",
+		});
+		expect(koreanUltragoal?.data).toMatchObject({
+			route: "ultragoal",
+			recommendedSkill: "ultragoal",
+		});
+	});
+
+	it("keeps questions about ultragoal behavior on the direct path", async () => {
+		await session.prompt("How many consensus rounds does ultragoal run, and can I limit them?");
+		await session.prompt(
+			"ultragoal 같은거 쓰면 합의 몇번이나 하게 되어 있음? 끝도 없이 하는 경우도 있는거 같은데 제약 할수 있는 옵션 있음?",
+		);
+
+		const entries = workflowIntentEntries();
+		expect(entries).toHaveLength(2);
+
+		for (const entry of entries) {
+			expect(entry.data).toMatchObject({
+				route: "direct",
+				directTracking: "custom-entry-only",
+			});
+		}
+	});
+
+	it("distinguishes slash-command invocations from questions that mention the command", async () => {
+		await session.prompt("How many consensus rounds does /skill:ultragoal run, and can I limit them?");
+		await session.prompt("/skill:ultragoal");
+
+		const [question, invocation] = workflowIntentEntries();
+		expect(question?.data).toMatchObject({
+			route: "direct",
+			directTracking: "custom-entry-only",
+		});
+		expect(invocation?.data).toMatchObject({
+			route: "ultragoal",
+			recommendedSkill: "ultragoal",
+			recommendedInvocation: "/skill:ultragoal",
+			directTracking: "not-direct",
+		});
+	});
+
+	it("routes Korean object-particle ultragoal requests to the durable workflow", async () => {
+		await session.prompt("ultragoal을 사용해줘");
+
+		const [entry] = workflowIntentEntries();
+		expect(entry?.data).toMatchObject({
+			route: "ultragoal",
+			recommendedSkill: "ultragoal",
+			recommendedInvocation: "/skill:ultragoal",
+			directTracking: "not-direct",
 		});
 	});
 

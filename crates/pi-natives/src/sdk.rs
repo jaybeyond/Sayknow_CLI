@@ -1,10 +1,10 @@
-//! N-API surface for the Gajae-Code SDK.
+//! N-API surface for the Sayknow-CLI SDK.
 //!
 //! Wraps [`skc_notifications`] so the TypeScript extension can host a
 //! per-session loopback WebSocket notification server in-process. The server
 //! runs in **forward mode**: accepted client replies are handed back to
 //! TypeScript (via the [`NotificationServer::on_reply`] callback) so TS
-//! resolves the real GJC workflow gate, then calls
+//! resolves the real SKC workflow gate, then calls
 //! [`NotificationServer::resolve_client`] — guaranteeing `action_resolved` is
 //! only broadcast after a genuine resolution.
 //!
@@ -14,8 +14,15 @@
 use std::{
 	path::PathBuf,
 	sync::atomic::{AtomicU64, Ordering},
+	time::Duration,
 };
 
+use napi::{
+	bindgen_prelude::*,
+	threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode},
+};
+use napi_derive::napi;
+use parking_lot::Mutex;
 use skc_notifications::{
 	ActionIdentity, ActionNeeded, ClientMessage, ControlServerConfig, ControlServerHandle,
 	LifecycleClientMessage, LifecycleServerMessage, ReplyAnswer, ServerConfig, ServerHandle,
@@ -26,12 +33,6 @@ use skc_notifications::{
 	},
 	start_control,
 };
-use napi::{
-	bindgen_prelude::*,
-	threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode},
-};
-use napi_derive::napi;
-use parking_lot::Mutex;
 
 fn saturating_increment(counter: &AtomicU64) {
 	let _ = counter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| value.checked_add(1));
@@ -223,7 +224,7 @@ impl NotificationServer {
 	/// Create a server for `session_id` authenticated by `token`.
 	///
 	/// `state_root` (when given) is where the endpoint discovery file is written
-	/// (e.g. `<repo>/.gjc/state`). `resolver_available` defaults to `true`.
+	/// (e.g. `<repo>/.skc/state`). `resolver_available` defaults to `true`.
 	#[napi(constructor)]
 	#[must_use]
 	pub fn new(
@@ -343,8 +344,10 @@ impl NotificationServer {
 		let inbound_rx = handle.take_inbound_receiver();
 		if let (Some(tsfn), Some(mut rx)) = (inbound_tsfn, inbound_rx) {
 			let task = napi::tokio::spawn(async move {
-				while let Some(skc_notifications::server::InboundMessage { connection_id, message: msg }) =
-					rx.recv().await
+				while let Some(skc_notifications::server::InboundMessage {
+					connection_id,
+					message: msg,
+				}) = rx.recv().await
 				{
 					let event = match msg {
 						ClientMessage::UserMessage(u) => InboundEvent {
@@ -600,6 +603,22 @@ impl NotificationServer {
 			.map_err(|error| Error::from_reason(error.to_string()))
 	}
 
+	/// Deliver a frame through every authenticated connection and wait for each
+	/// socket writer to settle within `timeout_ms`.
+	#[napi]
+	pub async fn push_frame_and_wait(&self, frame_json: String, timeout_ms: u32) -> Result<bool> {
+		let msg: ServerMessage = serde_json::from_str(&frame_json)
+			.map_err(|e| Error::from_reason(format!("invalid frame json: {e}")))?;
+		if matches!(msg, ServerMessage::TurnStream(_)) {
+			saturating_increment(&self.turn_stream_serde_validation_parses);
+		}
+		let handle = self.with_handle(Clone::clone)?;
+		handle
+			.push_frame_and_wait(msg, Duration::from_millis(u64::from(timeout_ms)))
+			.await
+			.map_err(|error| Error::from_reason(error.to_string()))
+	}
+
 	/// Broadcast a TypeScript-constructed turn frame without re-parsing JSON.
 	/// External frames must continue through [`Self::push_frame`] for serde
 	/// validation.
@@ -786,10 +805,10 @@ impl NotificationServer {
 		reply_receipt_id: String,
 		request_json: String,
 	) -> Result<AskSelectedAckOutcomeEvent> {
-		let request: skc_notifications::protocol::AskSelectedAckRequest = serde_json::from_str(&request_json)
-			.map_err(|e| {
-			Error::from_reason(format!("invalid live acknowledgement request: {e}"))
-		})?;
+		let request: skc_notifications::protocol::AskSelectedAckRequest =
+			serde_json::from_str(&request_json).map_err(|e| {
+				Error::from_reason(format!("invalid live acknowledgement request: {e}"))
+			})?;
 		if !matches!(request, skc_notifications::protocol::AskSelectedAckRequest::Live { .. }) {
 			return Err(Error::from_reason("requestAskSelectedAck requires mode=live"));
 		}
@@ -807,10 +826,10 @@ impl NotificationServer {
 		&self,
 		request_json: String,
 	) -> Result<AskSelectedAckOutcomeEvent> {
-		let request: skc_notifications::protocol::AskSelectedAckRequest = serde_json::from_str(&request_json)
-			.map_err(|e| {
-			Error::from_reason(format!("invalid recovery acknowledgement request: {e}"))
-		})?;
+		let request: skc_notifications::protocol::AskSelectedAckRequest =
+			serde_json::from_str(&request_json).map_err(|e| {
+				Error::from_reason(format!("invalid recovery acknowledgement request: {e}"))
+			})?;
 		if !matches!(request, skc_notifications::protocol::AskSelectedAckRequest::Recovery { .. }) {
 			return Err(Error::from_reason("requestRecoveredAskSelectedAck requires mode=recovery"));
 		}
@@ -832,7 +851,8 @@ impl NotificationServer {
 		let reason = serde_json::from_value(serde_json::Value::String(reason)).map_err(|e| {
 			Error::from_reason(format!("invalid acknowledgement cancellation reason: {e}"))
 		})?;
-		let cancel = skc_notifications::protocol::AskSelectedAckCancel { request_id, commit_key, reason };
+		let cancel =
+			skc_notifications::protocol::AskSelectedAckCancel { request_id, commit_key, reason };
 		let handle = self.handle()?;
 		Ok(handle.cancel_ask_selected_ack(cancel).into())
 	}
@@ -1142,12 +1162,15 @@ fn ensure_not_current_arbitrated_presentation(
 
 #[cfg(test)]
 mod tests {
-	use super::{ActionIdentity, PresentationLease, ensure_not_current_arbitrated_presentation};
+	use super::{
+		ActionIdentity, PresentationLease, ensure_not_current_arbitrated_presentation, parse_needed,
+	};
 
 	#[test]
 	fn ephemeral_turn_mapping_preserves_question_and_tuple_without_token() {
-		let event =
-			super::ephemeral_turn_event("connection-1".to_owned(), skc_notifications::protocol::EphemeralTurn {
+		let event = super::ephemeral_turn_event(
+			"connection-1".to_owned(),
+			skc_notifications::protocol::EphemeralTurn {
 				session_id: "session".to_owned(),
 				token:      "secret".to_owned(),
 				request_id: "btw:123e4567-e89b-42d3-a456-426614174000".to_owned(),
@@ -1155,7 +1178,8 @@ mod tests {
 				message_id: 9,
 				thread_id:  "11".to_owned(),
 				question:   "What changed?".to_owned(),
-			});
+			},
+		);
 		assert_eq!(event.connection_id, "connection-1");
 		assert_eq!(event.kind, "ephemeral_turn");
 		assert_eq!(event.session_id, "session");
@@ -1205,6 +1229,38 @@ mod tests {
 			.expect_err("exact arbitrated presentation must reject id-only resolution");
 			assert!(error.reason.contains(method));
 		}
+	}
+	#[test]
+	fn register_ask_input_preserves_recommended_index_and_legacy_omission() {
+		let needed = parse_needed(
+			r#"{"id":"a1","kind":"ask","sessionId":"session","options":["Yes","No"],"recommendedIndex":4294967295}"#,
+		)
+		.expect("valid N-API registerAsk input");
+		assert_eq!(needed.recommended_index, Some(u32::MAX));
+		let roundtrip = serde_json::to_string(&needed).unwrap();
+		assert!(roundtrip.contains(r#""recommendedIndex":4294967295"#));
+		assert_eq!(parse_needed(&roundtrip).unwrap().recommended_index, Some(u32::MAX));
+
+		let legacy =
+			parse_needed(r#"{"id":"legacy","kind":"ask","sessionId":"session","options":["Yes"]}"#)
+				.expect("legacy N-API registerAsk input");
+		assert_eq!(legacy.recommended_index, None);
+		assert!(
+			!serde_json::to_string(&legacy)
+				.unwrap()
+				.contains("recommendedIndex")
+		);
+	}
+
+	#[test]
+	fn register_ask_input_drops_malformed_recommended_index_but_rejects_required_field_failure() {
+		for malformed in ["null", "1.5", "-1", r#""1""#, "true", "[]", "{}", "4294967296"] {
+			let input = format!(
+				r#"{{"id":"a1","kind":"ask","sessionId":"session","options":["Yes"],"recommendedIndex":{malformed}}}"#
+			);
+			assert_eq!(parse_needed(&input).unwrap().recommended_index, None, "{malformed}");
+		}
+		assert!(parse_needed(r#"{"kind":"ask","sessionId":"session"}"#).is_err());
 	}
 
 	#[test]

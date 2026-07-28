@@ -282,7 +282,24 @@ export class ExtensionUiController {
 				const disabled = [...(session.settings.get("disabledExtensions") ?? [])];
 				const on = input.on === true;
 				const next = on ? disabled.filter(value => value !== id) : [...new Set([...disabled, id])];
-				session.settings.set("disabledExtensions", next);
+				if (!session.settings.canWriteDurableConfig()) {
+					throw Object.assign(
+						new Error(
+							"Cannot change settings while config.yml has invalid YAML syntax. Repair config.yml and reload settings.",
+						),
+						{ code: "invalid_request" },
+					);
+				}
+				try {
+					session.settings.set("disabledExtensions", next);
+				} catch (error) {
+					if (!session.settings.canWriteDurableConfig()) {
+						throw Object.assign(new Error(error instanceof Error ? error.message : String(error)), {
+							code: "invalid_request",
+						});
+					}
+					throw error;
+				}
 				return { changed: true, enabled: on };
 			}
 			case "session.delete":
@@ -426,6 +443,7 @@ export class ExtensionUiController {
 			getSystemPrompt: () => this.ctx.session.systemPrompt,
 			clearContext: () => this.ctx.session.clearContext(),
 			cycleModel: () => this.ctx.session.cycleModel(),
+			setModelProfile: name => this.ctx.session.activateModelProfileForControl(name),
 			cycleThinkingLevel: () => this.ctx.session.cycleThinkingLevel(),
 			setQueueMode: (kind, mode) => {
 				if (kind === "steering" && (mode === "all" || mode === "one-at-a-time")) {
@@ -442,16 +460,12 @@ export class ExtensionUiController {
 				}
 				return false;
 			},
-			invokeSkill: (name, args) => this.ctx.session.invokeSkill(name, args),
+			invokeSkill: (name, args, options) => this.ctx.session.invokeSkill(name, args, options),
 			setPlanMode: on => this.ctx.session.setSdkPlanMode(on),
 			operateGoal: (op, objective) => this.ctx.session.operateGoal(op, objective),
 			getSkillState: () =>
 				this.ctx.session.skills.map(skill => ({ name: skill.name, description: skill.description })),
-			getConfigItems: () => ({
-				steeringMode: this.ctx.session.steeringMode,
-				followUpMode: this.ctx.session.followUpMode,
-				interruptMode: this.ctx.session.interruptMode,
-			}),
+			getConfigItems: () => this.ctx.session.getSdkConfigItems(),
 			getBranchCandidates: () => this.ctx.sessionManager.getTree(),
 			getExtensions: () => this.ctx.session.extensionRunner?.getExtensionPaths() ?? [],
 			setSdkPermissionProvider: provider => this.ctx.session.setSdkPermissionProvider(provider),
@@ -728,6 +742,7 @@ export class ExtensionUiController {
 			getSystemPrompt: () => this.ctx.session.systemPrompt,
 			clearContext: () => this.ctx.session.clearContext(),
 			cycleModel: () => this.ctx.session.cycleModel(),
+			setModelProfile: name => this.ctx.session.activateModelProfileForControl(name),
 			cycleThinkingLevel: () => this.ctx.session.cycleThinkingLevel(),
 			setQueueMode: (kind, mode) => {
 				if (kind === "steering" && (mode === "all" || mode === "one-at-a-time")) {
@@ -746,11 +761,7 @@ export class ExtensionUiController {
 			},
 			getSkillState: () =>
 				this.ctx.session.skills.map(skill => ({ name: skill.name, description: skill.description })),
-			getConfigItems: () => ({
-				steeringMode: this.ctx.session.steeringMode,
-				followUpMode: this.ctx.session.followUpMode,
-				interruptMode: this.ctx.session.interruptMode,
-			}),
+			getConfigItems: () => this.ctx.session.getSdkConfigItems(),
 			getBranchCandidates: () => this.ctx.sessionManager.getTree(),
 			getExtensions: () => this.ctx.session.extensionRunner?.getExtensionPaths() ?? [],
 			setSdkPermissionProvider: provider => this.ctx.session.setSdkPermissionProvider(provider),

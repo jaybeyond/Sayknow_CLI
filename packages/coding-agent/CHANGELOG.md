@@ -5,6 +5,103 @@ This file tracks the **fork's own releases**; upstream's full feature history li
 in that project. Each release notes the upstream version it is built on.
 
 
+## [0.5.0] — 2026-07-28
+
+Built on upstream **gajae-code v0.12.0** (previous fork release tracked v0.11.6).
+
+### Security (inherited from upstream v0.12.0)
+
+Every path below trusted the caller's `cwd/.env`, so **opening a hostile repository
+was enough** to trigger it. All now resolve through the non-project resolver
+(launching shell plus SKC/user-owned files); shell and user configuration are
+unchanged.
+
+- **Provider base URLs** — `<PROVIDER>_BASE_URL` is derived generically, so a planted
+  `.env` could redirect authenticated traffic for *every* provider.
+- **Browser launch overrides** — could pick the browser binary, route all traffic
+  through an attacker proxy, and disable certificate validation.
+- **Spawned command overrides** (`SKC_SDK_SESSION_COMMAND`,
+  `SKC_HARNESS_PROCESS_START_COMMAND`) — chose which binary those paths execute.
+- **Smithery origin / API base / API key** — the auth session the user is sent to,
+  and the credential sent with every call.
+- **Native skill hook config dirs** — could point the hook at a directory the repo
+  ships and inject its own `skills.customDirectories`, bypassing escalation guards.
+
+Also: **memory consolidation now redacts GitHub tokens.** The scrubber covered AWS
+ids, JWTs, and keyword-prefixed keys, but `ghp_` / `gho_` / `github_pat_` carry none
+of those markers, so a token reached `MEMORY.md` and `memory_summary.md` verbatim —
+and that summary is injected into every later session.
+
+### Changed (upstream replaced two surfaces the fork had ported)
+
+- The typed deep-interview **draft** CLI was reverted upstream and replaced with a
+  staged-transition surface (`stage --for <transition> --input '<json>'`, `check`,
+  `apply`, `discard`; one pending draft per session, no `--draft-id`). The fork
+  follows upstream here rather than keeping a surface upstream retired.
+- The fork's `absoluteClear` multiplexer width-reflow repair is superseded by
+  upstream's width-settle repair, which runs once per settled width sequence
+  instead of once per SIGWINCH. Upstream's implementation is kept.
+
+### Fixed (Sayknow Pet leaves sixel residue under tmux)
+
+- **Give tmux ownership of the pet's sixel instead of smuggling it past tmux.**
+  The pet was drawn with DCS passthrough, which writes pixels straight into the
+  outer terminal's image plane, while the erase was an `ECH` that only ever
+  reached tmux's cell buffer. tmux never recorded the image, so nothing could
+  remove it — every frame stacked another vertical band above the pet.
+
+  This is the same root cause behind the oversize/frozen animation (0.4.6) and
+  the viewport scroll (0.4.7): tmux's screen model and the real screen disagreed.
+  Those releases each patched the *draw* path; the *erase* path was never
+  revisited, so the residue survived all three fixes.
+
+  SKC-launched sessions now append `terminal-features ,*:sixel`, and the widget
+  sends the frame directly whenever tmux claims sixel. tmux 3.4+ parses it into
+  its own screen model (`screen_write_sixelimage`) and re-renders it, so the
+  existing erase actually deletes the image and scroll/resize/copy-mode stay
+  consistent. Passthrough remains only as the fallback for terminals or tmux
+  builds that do not claim sixel.
+
+### Fixed (rebrand leakage)
+
+- **Stop creating `.gjc-*` paths.** `recovery_fs` and `path_identity` still wrote
+  `.gjc-recovery`, `.gjc-managed-remove-*`, and `.gjc-exact-unlink-*` on disk: the
+  rename never reached them, so recovery state landed under an upstream-branded
+  directory name. 24 residual tokens are gone and the sync pipeline now fails the
+  build instead of shipping them.
+
+### Fixed (fork pipeline)
+
+The fork layer is regenerated as `gen-tree(upstream tag) = codemod + deletions +
+overlay + patches + identity`. Five defects made that identity false:
+
+- **Overlay swallowed upstream changes.** 66 upstream-owned files were carried as
+  whole-file overlays, so every upstream edit to them was silently discarded —
+  including `packages/tui`'s `node-pty` dependency. Ownership is now decided by
+  the base tree: present upstream ⇒ patch, absent ⇒ overlay (45 → 134 patches).
+- **Release versions leaked into patch context.** A version bump invalidated the
+  context lines of unrelated hunks, so patches rejected on every release. Version
+  text is now neutralized on both sides of extraction and restored by the identity
+  stamp.
+- **Deletions were unrepresentable.** Upstream files the fork drops (`crates/skc-sdk`
+  and others) reappeared on each sync; they are now declared and replayed.
+- **Binary assets were declared as patches**, producing unappliable
+  "Binary files differ" stubs. They are demoted to overlay automatically.
+- **The codemod never converged.** Overlay and patch payloads carry upstream text
+  that the single first pass cannot see, so the idempotence gate could not pass.
+
+`gen-tree` also refuses to run against the fork repo itself — an empty argument
+previously codemodded and version-stamped the working tree in place.
+
+### Added (ported from upstream)
+
+- `ServerHandle::push_frame_and_wait` in `skc-notifications`, so the SDK can await
+  per-connection delivery receipts instead of fire-and-forget broadcast.
+- `Process.signalRoot` napi binding for pinned single-process signalling.
+- Worker integration attempts accept an `AbortSignal` and bail between git probes.
+- The deep-interview staged-transition surface (`stage`, `check`, `apply`, `discard`,
+  `initialize-context`, `confirm-topology`).
+
 ## [0.4.7] — 2026-07-24
 
 ### Fixed (Sayknow Pet scroll under tmux)

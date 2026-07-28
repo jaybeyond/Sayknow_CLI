@@ -127,12 +127,15 @@ test("postmortem teardown emits session_closed to connected clients", async () =
 
 		// Simulate the postmortem signal path (SIGHUP/SIGTERM/fatal error).
 		await cleanup!(postmortem.Reason.SIGTERM);
+		await cleanup!(postmortem.Reason.SIGTERM);
 
 		await waitFor(
 			() => frames.some(f => f.type === "session_closed" && f.sessionId === harness.sid),
 			4000,
 			"session_closed frame",
 		);
+		await sleep(100);
+		expect(frames.filter(f => f.type === "session_closed" && f.sessionId === harness.sid)).toHaveLength(1);
 	});
 }, 20000);
 

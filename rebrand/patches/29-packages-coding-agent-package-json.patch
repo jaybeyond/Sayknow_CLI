@@ -1,0 +1,179 @@
+--- a/packages/coding-agent/package.json
++++ b/packages/coding-agent/package.json
+@@ -4,7 +4,10 @@
+ 	"version": "0.0.0-forkver",
+ 	"description": "Sayknow-CLI CLI with read, bash, edit, write tools and session management",
+ 	"homepage": "https://sayknow-cli.com",
+-	"author": "jaybeyond and Sayknow-CLI Contributors",
++	"author": "jaybeyond",
++	"contributors": [
++		"Mario Zechner"
++	],
+ 	"license": "MIT",
+ 	"repository": {
+ 		"type": "git",
+@@ -30,11 +33,9 @@
+ 	"scripts": {
+ 		"build": "bun scripts/build-binary.ts",
+ 		"check": "biome check . && bun run check:types",
+-		"check:runtime": "bun run generate-hotkeys-docs --check && bun run verify:sdk-canonicalization",
+-		"check:types": "tsc -p tsconfig.json --noEmit",
++		"check:types": "tsgo -p tsconfig.json --noEmit",
+ 		"lint": "biome lint .",
+-		"test": "bun test",
+-		"generate-hotkeys-docs": "bun scripts/generate-hotkeys-docs.ts",
++		"test": "bun test --isolate",
+ 		"bench:context": "bun run bench/context-optimization.bench.ts",
+ 		"generate-schemas": "bun ../../scripts/generate-json-schemas.ts",
+ 		"check:schemas": "bun ../../scripts/generate-json-schemas.ts --check",
+@@ -45,9 +46,7 @@
+ 		"prepack": "bun scripts/generate-docs-index.ts",
+ 		"generate-template": "bun scripts/generate-template.ts",
+ 		"install:defaults": "bun src/cli.ts setup defaults",
+-		"verify:insane-vendor": "bun scripts/verify-insane-vendor.ts",
+-		"verify:sdk-canonicalization": "bun scripts/verify-skc-sdk-canonicalization.ts",
+-		"check:sdk-closure": "bun ../../scripts/telegram-daemon-generation-guard.ts --validate-current-tree && bun test ../../scripts/telegram-daemon-generation-guard.test.ts && bun scripts/generate-sdk-operation-inventory.ts --check && bun scripts/generate-sdk-adapter-parity-manifest.ts --check && bun scripts/run-test-manifest.ts test/manifests/sdk-adapter-parity-v1.json && bun scripts/generate-telegram-baseline-manifest.ts --check && bun scripts/run-test-manifest.ts test/manifests/telegram-baseline-v1.json && bun test test/sdk-downgrade-rollback.test.ts test/sdk-downgrade-unknown-version.test.ts && bun scripts/verify-skc-sdk-canonicalization.ts --self-test && bun scripts/verify-skc-sdk-canonicalization.ts && bun scripts/verify-skc-sdk-rename.ts"
++		"verify:insane-vendor": "bun scripts/verify-insane-vendor.ts"
+ 	},
+ 	"dependencies": {
+ 		"@agentclientprotocol/sdk": "catalog:",
+@@ -56,7 +55,6 @@
+ 		"@sayknow-cli/stats": "catalog:",
+ 		"@sayknow-cli/agent-core": "catalog:",
+ 		"@sayknow-cli/ai": "catalog:",
+-		"@sayknow-cli/bridge-client": "catalog:",
+ 		"@sayknow-cli/natives": "catalog:",
+ 		"@sayknow-cli/tui": "catalog:",
+ 		"@sayknow-cli/utils": "catalog:",
+@@ -70,16 +68,12 @@
+ 		"linkedom": "catalog:",
+ 		"lru-cache": "catalog:",
+ 		"markit-ai": "catalog:",
+-		"marked": "catalog:",
+ 		"puppeteer-core": "catalog:",
+ 		"turndown": "catalog:",
+ 		"turndown-plugin-gfm": "catalog:",
+ 		"zod": "catalog:"
+ 	},
+ 	"devDependencies": {
+-		"@babel/traverse": "catalog:",
+-		"@babel/types": "catalog:",
+-		"@types/babel__traverse": "catalog:",
+ 		"@types/bun": "catalog:",
+ 		"@types/ws": "catalog:"
+ 	},
+@@ -93,11 +87,7 @@
+ 		"examples",
+ 		"README.md",
+ 		"CHANGELOG.md",
+-		"vendor",
+-		"!vendor/insane-search/engine/tests/**",
+-		"!src/export/html/template.html",
+-		"!src/export/html/template.css",
+-		"!src/export/html/template.js"
++		"vendor"
+ 	],
+ 	"exports": {
+ 		"./cli": {
+@@ -108,23 +98,6 @@
+ 			"types": "./src/index.ts",
+ 			"import": "./src/index.ts"
+ 		},
+-		"./mcp": null,
+-		"./mcp/*": null,
+-		"./runtime-mcp": null,
+-		"./runtime-mcp/*": null,
+-		"./commands/skc-runtime-bridge": null,
+-		"./capability/mcp": null,
+-		"./config/mcp-schema": null,
+-		"./discovery/mcp-json": null,
+-		"./exa": null,
+-		"./exa/*": null,
+-		"./exa/mcp-client": null,
+-		"./internal-urls/mcp-protocol": null,
+-		"./modes/components/runtime-mcp-add-wizard": null,
+-		"./modes/controllers/runtime-mcp-command-controller": null,
+-		"./slash-commands/helpers/mcp": null,
+-		"./session/session-manager-internal": null,
+-		"./session/session-manager-internal.js": null,
+ 		"./sdk": {
+ 			"types": "./src/sdk/index.ts",
+ 			"import": "./src/sdk/index.ts"
+@@ -143,13 +116,21 @@
+ 			"types": "./src/sdk/bus/*.ts",
+ 			"import": "./src/sdk/bus/*.ts"
+ 		},
+-		"./session/internal/*": null,
+-		"./config/model-auth": null,
+-		"./config/model-auth.js": null,
+-		"./config/model-bindings-applier": null,
+-		"./config/model-bindings-applier.js": null,
+-		"./config/model-discovery-manager": null,
+-		"./config/model-discovery-manager.js": null,
++		"./mcp": null,
++		"./mcp/*": null,
++		"./runtime-mcp": null,
++		"./runtime-mcp/*": null,
++		"./commands/skc-runtime-bridge": null,
++		"./capability/mcp": null,
++		"./config/mcp-schema": null,
++		"./discovery/mcp-json": null,
++		"./exa": null,
++		"./exa/*": null,
++		"./exa/mcp-client": null,
++		"./internal-urls/mcp-protocol": null,
++		"./modes/components/runtime-mcp-add-wizard": null,
++		"./modes/controllers/runtime-mcp-command-controller": null,
++		"./slash-commands/helpers/mcp": null,
+ 		"./*": {
+ 			"types": "./src/*.ts",
+ 			"import": "./src/*.ts"
+@@ -170,14 +151,6 @@
+ 			"types": "./src/capability/*.ts",
+ 			"import": "./src/capability/*.ts"
+ 		},
+-		"./cli/worktree-cli": {
+-			"types": "./src/cli/worktree-cli.ts",
+-			"import": "./src/cli/worktree-cli.ts"
+-		},
+-		"./cli/worktree-cli.js": {
+-			"types": "./src/cli/worktree-cli.ts",
+-			"import": "./src/cli/worktree-cli.ts"
+-		},
+ 		"./cli/*": {
+ 			"types": "./src/cli/*.ts",
+ 			"import": "./src/cli/*.ts"
+@@ -194,14 +167,6 @@
+ 		"./commands/ultraqa": null,
+ 		"./commands/ultrawork": null,
+ 		"./commands/performance-goal": null,
+-		"./commands/worktree": {
+-			"types": "./src/commands/worktree.ts",
+-			"import": "./src/commands/worktree.ts"
+-		},
+-		"./commands/worktree.js": {
+-			"types": "./src/commands/worktree.ts",
+-			"import": "./src/commands/worktree.ts"
+-		},
+ 		"./commands/*": {
+ 			"types": "./src/commands/*.ts",
+ 			"import": "./src/commands/*.ts"
+@@ -442,7 +407,6 @@
+ 			"types": "./src/hindsight/*.ts",
+ 			"import": "./src/hindsight/*.ts"
+ 		},
+-		"./modes/shared/agent-wire/*": null,
+ 		"./modes": {
+ 			"types": "./src/modes/index.ts",
+ 			"import": "./src/modes/index.ts"
+@@ -487,6 +451,10 @@
+ 			"types": "./src/modes/controllers/*.ts",
+ 			"import": "./src/modes/controllers/*.ts"
+ 		},
++		"./modes/rpc/*": {
++			"types": "./src/modes/rpc/*.ts",
++			"import": "./src/modes/rpc/*.ts"
++		},
+ 		"./modes/theme/*": {
+ 			"types": "./src/modes/theme/*.ts",
+ 			"import": "./src/modes/theme/*.ts"

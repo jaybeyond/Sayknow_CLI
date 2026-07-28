@@ -1,6 +1,6 @@
 import type { AgentMessage } from "@sayknow-cli/agent-core";
 import type { AssistantMessage, ImageContent, Message } from "@sayknow-cli/ai";
-import { type Component, Spacer, Text, TruncatedText, type TUI, truncateToWidth } from "@sayknow-cli/tui";
+import { type Component, Loader, Spacer, Text, TruncatedText, type TUI, truncateToWidth } from "@sayknow-cli/tui";
 import { settings } from "../../config/settings";
 import { resolveSubskillActivationForSkillInvocation } from "../../extensibility/skc-plugins";
 import { buildSkillPromptMessage, parseSkillInvocations } from "../../extensibility/skills";
@@ -85,6 +85,99 @@ class BoundedIrcTextComponent implements Component {
 export function prepareTranscriptRebuild(ui: TUI, policy: TranscriptRebuildPolicy): void {
 	if (policy === "replace-identity") ui.resetViewportAnchorIntent();
 	else ui.prepareViewportAnchorForTranscriptRebuild();
+}
+
+export const RESUME_PROGRESS_COMMIT_TIMEOUT_MS = 250;
+
+export interface ResumeProgressLease {
+	readonly committed: Promise<boolean>;
+	clear(): void;
+}
+
+/**
+ * Mount a resume loader on the live status rail and wait for its render generation
+ * to commit before session I/O begins. The commit is advisory: a stopped or
+ * unavailable terminal resolves false and callers continue without blocking.
+ *
+ * Fail open (no-op lease, committed=false) when the status rail or UI lacks the
+ * child-mutation/render-commit surface required to mount progress. Headless and
+ * minimal controller contexts keep resume/migration semantics; full interactive
+ * TUI containers retain progress-before-switch.
+ */
+export function acquireResumeProgressLease(
+	ctx: Pick<InteractiveModeContext, "ui" | "statusContainer">,
+): ResumeProgressLease {
+	if (!canMountResumeProgressLease(ctx)) {
+		return {
+			committed: Promise.resolve(false),
+			clear(): void {},
+		};
+	}
+
+	const statusContainer = ctx.statusContainer as ResumeProgressStatusSurface;
+	const ui = ctx.ui as ResumeProgressUiSurface;
+	const loader = new Loader(
+		ui,
+		spinner => theme?.fg?.("accent", spinner) ?? spinner,
+		message => theme?.fg?.("muted", message) ?? message,
+		"Resuming session…",
+	);
+	statusContainer.addChild(loader);
+	const generation = ui.requestRenderWithGeneration(false, "resume-progress");
+	let active = true;
+	const committed = ui.waitForRenderCommit(generation, RESUME_PROGRESS_COMMIT_TIMEOUT_MS).catch(() => false);
+	return {
+		committed,
+		clear(): void {
+			if (!active) return;
+			active = false;
+			if (statusContainer.children.includes(loader)) statusContainer.removeChild(loader);
+			else loader.stop();
+			ui.requestRender(false, "resume-progress-clear");
+		},
+	};
+}
+
+type ResumeProgressStatusSurface = {
+	addChild: (child: Component) => void;
+	removeChild: (child: Component) => void;
+	children: Component[];
+};
+
+type ResumeProgressUiSurface = InteractiveModeContext["ui"] & {
+	requestRenderWithGeneration: (force?: boolean, source?: string) => number;
+	waitForRenderCommit: (generation: number, timeoutMs?: number) => Promise<boolean>;
+	requestRender: (force?: boolean, source?: string) => void;
+};
+
+function canMountResumeProgressLease(ctx: Pick<InteractiveModeContext, "ui" | "statusContainer">): boolean {
+	const status = ctx.statusContainer as
+		| Partial<{
+				addChild: unknown;
+				removeChild: unknown;
+				children: unknown;
+		  }>
+		| null
+		| undefined;
+	const ui = ctx.ui as
+		| Partial<{
+				requestRenderWithGeneration: unknown;
+				waitForRenderCommit: unknown;
+				requestRender: unknown;
+		  }>
+		| null
+		| undefined;
+
+	return (
+		!!status &&
+		typeof status.addChild === "function" &&
+		typeof status.removeChild === "function" &&
+		Array.isArray(status.children) &&
+		!!ui &&
+		typeof ui.requestRenderWithGeneration === "function" &&
+		typeof ui.waitForRenderCommit === "function" &&
+		typeof ui.requestRender === "function"
+	);
 }
 type TextBlock = { type: "text"; text: string };
 interface RenderInitialMessagesOptions {
@@ -922,9 +1015,11 @@ export class UiHelpers {
 				const queuedText = theme.fg("dim", `${entry.label}: ${entry.message}`);
 				this.ctx.pendingMessagesContainer.addChild(new TruncatedText(queuedText, 1, 0));
 			}
-			const dequeueKey = this.ctx.keybindings.getDisplayString("app.message.dequeue") || "Alt+Up/Alt+Down";
-			const hintText = theme.fg("dim", `${theme.tree.hook} ${dequeueKey} to select/edit/reorder`);
-			this.ctx.pendingMessagesContainer.addChild(new TruncatedText(hintText, 1, 0));
+			const dequeueKey = this.ctx.keybindings.getDisplayString("app.message.dequeue");
+			if (dequeueKey) {
+				const hintText = theme.fg("dim", `${theme.tree.hook} ${dequeueKey} to select/edit/reorder`);
+				this.ctx.pendingMessagesContainer.addChild(new TruncatedText(hintText, 1, 0));
+			}
 		}
 	}
 

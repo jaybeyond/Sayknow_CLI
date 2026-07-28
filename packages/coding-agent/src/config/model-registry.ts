@@ -33,7 +33,7 @@ const DEFAULT_LOCAL_TOKEN = "lm-studio-local";
 
 import { registerOAuthProvider, unregisterOAuthProviders } from "@sayknow-cli/ai/utils/oauth";
 import type { OAuthCredentials, OAuthLoginCallbacks } from "@sayknow-cli/ai/utils/oauth/types";
-import { $pickenv, isRecord, logger } from "@sayknow-cli/utils";
+import { $pickCredentialEnv, isRecord, logger } from "@sayknow-cli/utils";
 import { parseModelString, resolveProviderModelReference } from "../config/model-resolver";
 import { isValidThemeColor, type ThemeColor } from "../modes/theme/theme";
 import type { AuthStorage, OAuthCredential } from "../session/auth-storage";
@@ -52,6 +52,7 @@ import {
 	type ModelProfileDefinition,
 	mergeModelProfiles,
 } from "./model-profiles";
+import type { ModelSelectorValue } from "./model-selector-value";
 import {
 	type ModelOverride,
 	type ModelProfileConfig,
@@ -61,7 +62,6 @@ import {
 	type ProviderAuthMode,
 	type ProviderDiscovery,
 } from "./models-config-schema";
-import { type ModelSelectorValue } from "./model-selector-value";
 import { type Settings, settings } from "./settings";
 
 export type { CanonicalModelIndex, CanonicalModelRecord, CanonicalModelVariant, ModelEquivalenceConfig };
@@ -438,8 +438,20 @@ function getProviderBaseUrlEnvKeys(provider: string): string[] {
 	return keys;
 }
 
+/**
+ * Provider base URL from the environment, trusted sources only.
+ *
+ * The result is baked into the provider override and reaches `model.baseUrl`,
+ * which the provider resolvers use as the request endpoint that carries the
+ * provider credential. `$env` (and therefore `$pickenv`) merges the caller's
+ * `cwd/.env`, so reading it there would let repository content redirect
+ * authenticated traffic for any provider — including re-admitting a redirect
+ * that the provider-level resolvers already reject. Resolve it the same way
+ * provider credentials are: launching shell plus SKC/user-owned `.env` files,
+ * never the project `.env`.
+ */
 function resolveProviderBaseUrlFromEnv(provider: string): string | undefined {
-	return $pickenv(...getProviderBaseUrlEnvKeys(provider));
+	return $pickCredentialEnv(...getProviderBaseUrlEnvKeys(provider));
 }
 
 function normalizeLocalOpenAICompatBaseUrl(baseUrl: string): string {
@@ -2613,6 +2625,13 @@ export class ModelRegistry {
 		return this.#keylessProviders.has(model.provider) || this.authStorage.hasAuth(model.provider);
 	}
 
+	/**
+	 * Check whether auth is configured for a provider.
+	 */
+	hasConfiguredProviderAuth(provider: string): boolean {
+		return this.#keylessProviders.has(provider) || this.authStorage.hasAuth(provider);
+	}
+
 	getDiscoverableProviders(): string[] {
 		const disabledProviders = getDisabledProviderIdsFromSettings();
 		return this.#discoverableProviders
@@ -2663,7 +2682,7 @@ export class ModelRegistry {
 	async getApiKey(
 		model: Model<Api>,
 		sessionId?: string,
-		options: { credentialSelector?: AuthCredentialSelector } = {},
+		options: { credentialSelector?: AuthCredentialSelector; signal?: AbortSignal } = {},
 	): Promise<string | undefined> {
 		if (this.#keylessProviders.has(model.provider) && !this.authStorage.hasAuth(model.provider)) {
 			return kNoAuth;
@@ -2672,6 +2691,7 @@ export class ModelRegistry {
 			baseUrl: model.baseUrl,
 			modelId: model.id,
 			credentialSelector: options.credentialSelector,
+			signal: options.signal,
 		});
 	}
 

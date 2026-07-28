@@ -18,6 +18,7 @@ import { parseInternalUrl } from "@sayknow-cli/coding-agent/internal-urls/parse"
 import { SkillProtocolHandler } from "@sayknow-cli/coding-agent/internal-urls/skill-protocol";
 import { getBundledAgent } from "@sayknow-cli/coding-agent/task/agents";
 import { discoverAgents } from "@sayknow-cli/coding-agent/task/discovery";
+import { checkBashAllowedPrefixes } from "@sayknow-cli/coding-agent/tools/bash-allowed-prefixes";
 import { prompt } from "@sayknow-cli/utils";
 
 const tempRoots: string[] = [];
@@ -241,7 +242,19 @@ describe("default SKC definitions", () => {
 			expect(agent?.tools).toContain("bash");
 			expect(agent?.tools).not.toContain("edit");
 			expect(agent?.tools).not.toContain("write");
-			expect(agent?.bashAllowedPrefixes).toEqual(["skc ralplan --write", "skc state"]);
+			expect(agent?.bashAllowedPrefixes).toEqual([
+				"skc ralplan --write",
+				"skc state",
+				"git status",
+				"git log",
+				"git show",
+				"git diff",
+				"git blame",
+				"git rev-parse",
+				"git ls-files",
+			]);
+			expect(agent?.tools).toContain("web_search");
+			expect(agent?.tools).toContain("irc");
 		}
 		for (const agent of [executor, architect, planner, critic]) {
 			expect(agent?.model).toBeUndefined();
@@ -252,6 +265,48 @@ describe("default SKC definitions", () => {
 		expect(planner?.systemPrompt).toContain("you do not implement");
 		expect(critic?.systemPrompt).toContain("OKAY");
 		expect(critic?.systemPrompt).toContain("REJECT");
+	});
+	it("allows read-only git and blocks mutating git for role agents through the real prefix check", () => {
+		const allowed = [
+			"git status",
+			"git log --oneline -20",
+			"git log -p src/a.ts",
+			"git show HEAD^",
+			"git diff",
+			"git diff 'HEAD~1'",
+			"git blame src/foo.ts",
+			"git rev-parse HEAD",
+			"git ls-files",
+			"skc ralplan --write --stage architect --stage_n 1 --artifact 'verdict'",
+		];
+		const blocked = [
+			"git commit -m x",
+			"git push",
+			"git push --force origin main",
+			"git reset --hard",
+			"git checkout .",
+			"git branch -D main",
+			"git config user.name x",
+			"git status; rm -rf .skc",
+			"rm -rf .skc",
+			"echo verdict",
+		];
+
+		for (const name of ["architect", "planner", "critic"] as const) {
+			const prefixes = getBundledAgent(name)?.bashAllowedPrefixes;
+			expect(prefixes).toBeDefined();
+
+			for (const command of allowed) {
+				expect({ name, command, ...checkBashAllowedPrefixes(command, prefixes) }).toMatchObject({
+					allowed: true,
+				});
+			}
+			for (const command of blocked) {
+				expect({ name, command, ...checkBashAllowedPrefixes(command, prefixes) }).toMatchObject({
+					allowed: false,
+				});
+			}
+		}
 	});
 	it("renders shared ralplan partials while keeping the default executor prompt unchanged", () => {
 		const executor = getBundledAgent("executor");
@@ -390,6 +445,30 @@ Project executor override body.
 		expect(ultragoal).toContain("red-team lane depends on architect fixes");
 	});
 
+	it("documents same-domain subagent reuse and terminal-critic resumption for token efficiency", async () => {
+		const ultragoal = await Bun.file(
+			path.join(repoRoot, "packages", "coding-agent", "src", "defaults", "skc", "skills", "ultragoal", "SKILL.md"),
+		).text();
+
+		// Same-domain executor/architect reuse instead of fresh spawns.
+		expect(ultragoal).toContain("### Subagent reuse and resumption (token efficiency)");
+		expect(ultragoal).toContain("resume the prior subagent instead of freshly spawning");
+		expect(ultragoal).toContain("Reuse is domain-scoped");
+		expect(ultragoal).toContain("stale cross-domain context is a liability");
+		expect(ultragoal).toContain("Resumption never weakens gates");
+		expect(ultragoal).toContain("not rubber-stamp its earlier verdict");
+
+		// Fallback routing mirrors the existing subagent resume outcomes.
+		expect(ultragoal).toContain(
+			"`context_unavailable`, `not_found`, `no_runner`, or `resume_failed` → fresh spawn fallback",
+		);
+
+		// Terminal critic resumption on iteration.
+		expect(ultragoal).toContain("resume the prior terminal-critic subagent when resumable");
+		expect(ultragoal).toContain("a prior `ITERATE` is never carried forward as pre-judged");
+		expect(ultragoal).toContain("fall back to a fresh `critic` spawn with the full context bundle");
+	});
+
 	it("routes simple clear implementation requests directly without contradictory workflow escalation", async () => {
 		const systemPrompt = await Bun.file(
 			path.join(repoRoot, "packages", "coding-agent", "src", "prompts", "system", "system-prompt.md"),
@@ -398,14 +477,32 @@ Project executor override body.
 		const decomposition = extractPromptSection(systemPrompt, "decomposition");
 
 		expect(routing).toContain("Clear, low-risk implementation requests use direct tools");
+		expect(routing).toContain("Small verification needs do not turn a clear request into a planning workflow");
+		expect(routing).toContain(
+			"Ambiguous implementation asks with a missing target, scope, acceptance criteria, or safety boundary",
+		);
 		expect(routing).toContain("Informational questions are answer-only/read-only");
 		expect(routing).toContain("Vague requirements use `/skill:deep-interview`");
+		expect(routing).toContain("requirements-only workflow that must not mutate product code");
 		expect(routing).toContain("`/skill:ralplan --deliberate`");
 		expect(routing).toContain("`/skill:ultragoal`");
 		expect(routing).toContain("`/skill:team`");
 		expect(routing).toContain("Delegate large implementation slices to `executor`");
-		expect(routing.split("\n").filter(line => line.startsWith("-"))).toHaveLength(6);
+		expect(routing).toContain("read the full skill text and follow it exactly");
+		expect(routing).toContain(
+			"Before explicit execution approval, planning and interview workflows NEVER edit product source",
+		);
+		expect(routing.split("\n").filter(line => line.startsWith("-"))).toHaveLength(9);
 		expect(decomposition).toMatch(/skip it for one-step or obvious two-step fixes/i);
+	});
+
+	it("honors explicit ultragoal/team naming as ralplan execution approval", async () => {
+		const ralplan = await Bun.file(
+			path.join(repoRoot, "packages", "coding-agent", "src", "defaults", "skc", "skills", "ralplan", "SKILL.md"),
+		).text();
+		expect(ralplan).toContain("explicit-execution exception");
+		expect(ralplan).toContain("counts as opting into execution for that skill");
+		expect(ralplan).toContain("skip the re-ask and proceed to step 9");
 	});
 
 	it("documents leader-owned Ultragoal checkpoints for Team bridge workers", async () => {
@@ -441,7 +538,14 @@ Project executor override body.
 		expect(content).toContain("`skc ralplan` is a native CLI");
 		expect(content).toContain("Direct `.skc/` file edits are forbidden unless an explicit force override is active");
 		expect(content).toContain("do not edit `.skc/_session-{sessionid}/state` directly without force override");
-		expect(content).toContain("skc state clear --force --mode deep-interview");
+		expect(content).toContain("skc deep-interview clear --force");
+		expect(content).toContain("skc deep-interview read --json");
+		expect(content).toContain("skc deep-interview write --input");
+		expect(content).toContain("`--reset` only when deliberately replacing state");
+		expect(content).not.toContain("skc state read");
+		expect(content).not.toContain("skc state write");
+		expect(content).not.toContain("skc state clear");
+		expect(content).not.toContain("skc state deep-interview");
 		expect(content).toContain("default `0.05`");
 		expect(content).toContain("language.instruction");
 		expect(content).toContain(
@@ -463,7 +567,6 @@ Project executor override body.
 			"Skill(",
 			"sayknow-cli:",
 			"/sayknow-cli",
-			"skc deep-interview",
 		]) {
 			expect(content).not.toContain(forbidden);
 		}

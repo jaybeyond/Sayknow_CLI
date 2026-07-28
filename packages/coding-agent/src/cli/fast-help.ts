@@ -84,7 +84,7 @@ Environment Variables:
   SKC_LAUNCH_POLICY           - Launch policy for --tmux startup: tmux or direct
   SKC_TMUX_SESSION            - Explicit tmux session name override for --tmux startup
   SKC_TMUX_PROFILE            - Apply SKC tmux scroll/mouse/clipboard profile to --tmux sessions (set 0/off to skip)
-  SKC_MOUSE                   - Mouse-wheel scroll in --tmux sessions (set 0/off to let the host terminal scroll)
+  SKC_MOUSE                   - Apply tmux copy-mode mouse capture in --tmux sessions (set 0/off to skip)
 
   For complete environment variable reference, see:
   docs/environment-variables.md

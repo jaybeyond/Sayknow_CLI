@@ -1,7 +1,9 @@
 import { createHash, randomBytes } from "node:crypto";
+import type { BigIntStats } from "node:fs";
 import * as fs from "node:fs/promises";
 import path from "node:path";
 import type { NativeDirectoryTreeSnapshot } from "@sayknow-cli/natives";
+import type { ModelProfileErrorDetails } from "../../config/model-profile-contract";
 import {
 	type DirectoryMigrationPolicy,
 	listManagedSessionCandidates,
@@ -141,6 +143,7 @@ export type BrokerResponse =
 			error: {
 				code: BrokerErrorCode;
 				message: string;
+				details?: ModelProfileErrorDetails;
 				endpoint?: "unavailable";
 				cleanup?: BrokerCleanupEvidence;
 			};
@@ -362,6 +365,7 @@ type BrokerLockSnapshot = {
 	ownerId?: string;
 	pid: number;
 	identity: string;
+	lockIdentity: string;
 };
 
 const BROKER_PUBLICATION_CADENCE_MS = 5_000;
@@ -415,7 +419,7 @@ export class Broker {
 	#lockRecordPath(): string {
 		return path.join(this.#lock, BROKER_LOCK_RECORD);
 	}
-	#lockSnapshot(raw: string): BrokerLockSnapshot {
+	async #lockSnapshot(raw: string, lockIdentity: string): Promise<BrokerLockSnapshot> {
 		try {
 			const lock = JSON.parse(raw) as { ownerId?: unknown; pid?: unknown };
 			if (
@@ -425,32 +429,37 @@ export class Broker {
 				Number.isInteger(lock.pid) &&
 				lock.pid > 0
 			)
-				return { ownerId: lock.ownerId, pid: lock.pid, identity: `owner:${lock.ownerId}` };
+				return { ownerId: lock.ownerId, pid: lock.pid, identity: `owner:${lock.ownerId}`, lockIdentity };
 		} catch {}
-		return { pid: 0, identity: `contents:${createHash("sha256").update(raw).digest("hex")}` };
+		return { pid: 0, identity: `contents:${createHash("sha256").update(raw).digest("hex")}`, lockIdentity };
 	}
 	async #readLock(): Promise<BrokerLockSnapshot | null> {
+		let lock: BigIntStats;
 		try {
-			return this.#lockSnapshot(await fs.readFile(this.#lockRecordPath(), "utf8"));
-		} catch (e) {
-			const code = (e as NodeJS.ErrnoException).code;
-			if (code === "ENOTDIR") {
-				try {
-					return this.#lockSnapshot(await fs.readFile(this.#lock, "utf8"));
-				} catch (legacyError) {
-					if ((legacyError as NodeJS.ErrnoException).code === "ENOENT") return null;
-					throw legacyError;
-				}
-			}
-			if (code !== "ENOENT") throw e;
-		}
-		try {
-			const lock = await fs.stat(this.#lock);
-			return lock.isDirectory() ? { pid: 0, identity: `directory:${lock.dev}:${lock.ino}` } : null;
+			lock = await fs.lstat(this.#lock, { bigint: true });
 		} catch (e) {
 			if ((e as NodeJS.ErrnoException).code === "ENOENT") return null;
 			throw e;
 		}
+		const lockIdentity = `${lock.dev}:${lock.ino}`;
+		let raw: string;
+		try {
+			raw = lock.isDirectory()
+				? await fs.readFile(path.join(this.#lock, BROKER_LOCK_RECORD), "utf8")
+				: await fs.readFile(this.#lock, "utf8");
+		} catch (e) {
+			if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
+			raw = "";
+		}
+		try {
+			const current = await fs.lstat(this.#lock, { bigint: true });
+			if (`${current.dev}:${current.ino}` !== lockIdentity || current.isDirectory() !== lock.isDirectory())
+				return null;
+		} catch (e) {
+			if ((e as NodeJS.ErrnoException).code === "ENOENT") return null;
+			throw e;
+		}
+		return this.#lockSnapshot(raw, lockIdentity);
 	}
 	async #createLock(): Promise<void> {
 		await fs.mkdir(this.#lock, { mode: 0o700 });
@@ -478,13 +487,18 @@ export class Broker {
 	}
 	async #reclaimStaleLock(snapshot: BrokerLockSnapshot): Promise<void> {
 		const current = await this.#readLock();
-		if (!current || current.identity !== snapshot.identity || (current.pid > 0 && isPidAlive(current.pid))) return;
+		if (
+			!current ||
+			current.identity !== snapshot.identity ||
+			current.lockIdentity !== snapshot.lockIdentity ||
+			(current.pid > 0 && isPidAlive(current.pid))
+		)
+			return;
 
-		// Keep the tombstone: its immutable-owner-derived pathname prevents a contender
-		// holding an old snapshot from renaming a newly-created directory lock.
+		// Snapshot validation and the deterministic instance suffix protect successor locks.
 		const tombstone = path.join(
 			path.dirname(this.#lock),
-			`.broker.lock.stale-${createHash("sha256").update(snapshot.identity).digest("hex")}`,
+			`.broker.lock.stale-${createHash("sha256").update(snapshot.lockIdentity).digest("hex")}`,
 		);
 		try {
 			await fs.rename(this.#lock, tombstone);

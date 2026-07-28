@@ -453,10 +453,10 @@ if "__skc_prelude_loaded__" not in globals():
 
     if all(
         _k in os.environ
-        for _k in ("PI_TOOL_BRIDGE_URL", "PI_TOOL_BRIDGE_TOKEN", "PI_TOOL_BRIDGE_SESSION")
+        for _k in ("PI_TOOL_BRIDGE_URL", "PI_TOOL_BRIDGE_CAPABILITY", "PI_TOOL_BRIDGE_SESSION")
     ):
         tool = _ToolProxy(
             os.environ["PI_TOOL_BRIDGE_URL"],
-            os.environ["PI_TOOL_BRIDGE_TOKEN"],
+            os.environ["PI_TOOL_BRIDGE_CAPABILITY"],
             os.environ["PI_TOOL_BRIDGE_SESSION"],
         )

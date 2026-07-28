@@ -8,10 +8,7 @@ import {
 	buildSkcTmuxExactOptionTarget,
 	buildSkcTmuxProfileCommands,
 } from "@sayknow-cli/coding-agent/skc-runtime/tmux-common";
-import {
-	observeOwnerTerminal,
-	replaceOwnerGeneration,
-} from "@sayknow-cli/coding-agent/skc-runtime/tmux-owner-isolation";
+import { replaceOwnerGeneration } from "@sayknow-cli/coding-agent/skc-runtime/tmux-owner-isolation";
 import {
 	forceCloseSkcTmuxSession,
 	listSkcTmuxSessions,
@@ -81,7 +78,45 @@ describe.skipIf(!isLinux || !tmux || !userScopeAvailable)("tmux exact owner clos
 		const siblingSessionName = `skc_sibling_${crypto.randomUUID().slice(0, 8)}`;
 		const sessionId = crypto.randomUUID();
 		const generation = crypto.randomUUID();
+		const runId = crypto.randomUUID();
+		const incarnation = crypto.randomUUID();
 		await fs.mkdir(tmuxTmpDir);
+		const stateFile = path.join(stateDir, "marker");
+		const childScript = path.join(stateDir, "managed-child.ts");
+		const supervisorScript = path.join(stateDir, "managed-supervisor.ts");
+		const childReadyFile = path.join(stateDir, "managed-child-ready");
+		await fs.writeFile(
+			stateFile,
+			JSON.stringify({
+				schema_version: 1,
+				session_id: sessionId,
+				state: "completed",
+				cwd: stateDir,
+				workdir: stateDir,
+				session_file: null,
+				final_response: { source: "agent_end", text: "terminal evidence" },
+			}),
+		);
+		await fs.writeFile(
+			childScript,
+			`import { writeFile } from "node:fs/promises";
+import { registerCoordinatorRuntimeStateFinalizer } from ${JSON.stringify(path.resolve(import.meta.dir, "../../src/skc-runtime/session-state-sidecar.ts"))};
+registerCoordinatorRuntimeStateFinalizer({ sessionId: ${JSON.stringify(sessionId)}, cwd: ${JSON.stringify(stateDir)}, sessionFile: null });
+await writeFile(${JSON.stringify(childReadyFile)}, JSON.stringify({ launched: process.env.SKC_TMUX_LAUNCHED, generation: process.env.SKC_TMUX_OWNER_GENERATION, stateDir: process.env.SKC_TMUX_OWNER_STATE_DIR, socketKey: process.env.SKC_TMUX_OWNER_SERVER_KEY }));
+setInterval(() => {}, 1_000);
+`,
+		);
+		await fs.writeFile(
+			supervisorScript,
+			`import { writeFile } from "node:fs/promises";
+import { runManagedOwnerSupervisor } from ${JSON.stringify(path.resolve(import.meta.dir, "../../src/skc-runtime/managed-owner-supervisor.ts"))};
+try {
+	await runManagedOwnerSupervisor();
+} catch (error) {
+	await writeFile(${JSON.stringify(path.join(stateDir, "supervisor-error"))}, String(error));
+	throw error;
+}`,
+		);
 		await fs.writeFile(tmuxWrapper, `#!/usr/bin/env sh\nexec ${tmux} -L "$SKC_TEST_TMUX_SOCKET" "$@"\n`, {
 			mode: 0o700,
 		});
@@ -90,9 +125,17 @@ describe.skipIf(!isLinux || !tmux || !userScopeAvailable)("tmux exact owner clos
 			SKC_TMUX_COMMAND: tmuxWrapper,
 			SKC_TEST_TMUX_SOCKET: socketName,
 			TMUX_TMPDIR: tmuxTmpDir,
+			SKC_TMUX_LAUNCHED: "1",
+			SKC_TMUX_OWNER_GENERATION: generation,
+			SKC_TMUX_OWNER_STATE_DIR: stateDir,
+			SKC_TMUX_OWNER_SERVER_KEY: sessionName,
+			SKC_COORDINATOR_SESSION_STATE_FILE: stateFile,
+			SKC_COORDINATOR_SESSION_ID: sessionId,
+			SKC_MANAGED_OWNER_RUN_ID: runId,
+			SKC_MANAGED_OWNER_INCARNATION: incarnation,
+			SKC_MANAGED_OWNER_COMMAND_JSON: JSON.stringify([process.execPath, childScript]),
 		};
 		isolatedServers.push({ env, stateDir, scopeName });
-		const stateFile = path.join(stateDir, "marker");
 		const created = Bun.spawnSync(
 			[
 				systemdRun!,
@@ -106,13 +149,30 @@ describe.skipIf(!isLinux || !tmux || !userScopeAvailable)("tmux exact owner clos
 				"-d",
 				"-s",
 				sessionName,
-				"sh",
-				"-c",
-				"trap 'exit 0' TERM; while :; do sleep 1; done",
+				`exec "${process.execPath}" "${supervisorScript}" 2>"${path.join(stateDir, "supervisor-stderr")}"`,
 			],
 			{ stdout: "pipe", stderr: "pipe", env },
 		);
 		if (created.exitCode !== 0) throw new Error(created.stderr.toString());
+		for (let attempt = 0; attempt < 150 && !fsSync.existsSync(childReadyFile); attempt += 1) await Bun.sleep(20);
+		if (!fsSync.existsSync(childReadyFile)) {
+			const errorFile = path.join(stateDir, "supervisor-error");
+			throw new Error(
+				`managed owner child did not become ready: ${
+					fsSync.existsSync(errorFile)
+						? fsSync.readFileSync(errorFile, "utf8")
+						: fsSync.existsSync(path.join(stateDir, "supervisor-stderr"))
+							? fsSync.readFileSync(path.join(stateDir, "supervisor-stderr"), "utf8")
+							: `files=${fsSync.readdirSync(stateDir).join(",")}`
+				}`,
+			);
+		}
+		expect(JSON.parse(await fs.readFile(childReadyFile, "utf8"))).toEqual({
+			launched: "1",
+			generation,
+			stateDir,
+			socketKey: sessionName,
+		});
 		const target = buildSkcTmuxExactOptionTarget(sessionName, { env });
 		await replaceOwnerGeneration(stateDir, sessionId, generation);
 		for (const command of buildSkcTmuxProfileCommands(
@@ -159,7 +219,7 @@ describe.skipIf(!isLinux || !tmux || !userScopeAvailable)("tmux exact owner clos
 				.stdout.toString()
 				.trim(),
 		);
-		let termSent = false;
+		expect(fsSync.readFileSync(`/proc/${panePid}/cmdline`, "utf8")).toContain(supervisorScript);
 		await forceCloseSkcTmuxSession(sessionName, env, sessionId, stateFile, {
 			resolveOwner: async () => ({
 				sessionId,
@@ -170,46 +230,22 @@ describe.skipIf(!isLinux || !tmux || !userScopeAvailable)("tmux exact owner clos
 				startTime: procStartTime(panePid),
 			}),
 			readProcessStartTime: async pid => procStartTime(pid),
-			signalTerm: pid => {
-				termSent = true;
-				process.kill(pid, "SIGTERM");
-			},
-			sleep: async () => {
-				await waitForProcessExit(panePid);
-				expect(() => process.kill(panePid, 0)).toThrow(/ESRCH/);
-				// The target remains until the verified close path cleans it up; the
-				// sibling proves cleanup is exact rather than server-wide.
-				expect(hasSession(sessionName).exitCode).toBe(0);
-				expect(hasSession(siblingSessionName).exitCode).toBe(0);
-				const intent = JSON.parse(
-					await fs.readFile(
-						path.join(stateDir, sessionId, "owner-lifecycle", `intent-${generation}.json`),
-						"utf8",
-					),
-				);
-				const verdict = await observeOwnerTerminal({
-					schema_version: 1,
-					op: "observe_terminal",
-					session_id: sessionId,
-					owner_generation: generation,
-					state_dir: stateDir,
-					socket_key: sessionName,
-					observer: "sidecar",
-					observed_at: new Date().toISOString(),
-					signal: "SIGTERM",
-					exit_code: null,
-					exit_kind: "exit",
-					reason: "integration",
-					operator_dispatch_id: intent.dispatch_id,
-				});
-				await fs.writeFile(
-					path.join(stateDir, "verdict.json"),
-					JSON.stringify({ ...verdict, owner_generation: generation }),
-				);
-			},
 		});
-		expect(termSent).toBe(true);
+		await waitForProcessExit(panePid);
+		expect(() => process.kill(panePid, 0)).toThrow(/ESRCH/);
 		expect(hasSession(sessionName).exitCode).not.toBe(0);
 		expect(hasSession(siblingSessionName).exitCode).toBe(0);
-	});
+		const verdict = JSON.parse(
+			await fs.readFile(path.join(stateDir, sessionId, "owner-lifecycle", `verdict-${generation}.json`), "utf8"),
+		);
+		expect(verdict).toMatchObject({
+			classification: "expected_operator_shutdown",
+			observer: "sidecar",
+			signal: "SIGTERM",
+		});
+		expect(JSON.parse(await fs.readFile(stateFile, "utf8"))).toMatchObject({
+			state: "completed",
+			final_response: { source: "agent_end", text: "terminal evidence" },
+		});
+	}, 10_000);
 });

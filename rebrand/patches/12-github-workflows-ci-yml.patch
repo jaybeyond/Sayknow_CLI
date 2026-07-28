@@ -1,0 +1,101 @@
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -3,7 +3,7 @@
+ on:
+    push:
+       branches: [main]
+-      tags: ["v*"]
++      tags: ["v*", "sayknow-v*"]
+    pull_request:
+       branches: [main]
+    workflow_dispatch:
+@@ -23,7 +23,7 @@
+ concurrency:
+    # Release tags never cancel; ordinary CI is cancellable per ref.
+    group: ci-${{ github.ref }}-${{ github.event_name == 'workflow_dispatch' && inputs.rehearsal || 'event' }}
+-   cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/v') }}
++   cancel-in-progress: ${{ !(startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/sayknow-v')) }}
+ 
+ jobs:
+    # ---------------------------------------------------------------------------
+@@ -31,7 +31,7 @@
+    # These never run on tags — a tag is cut from an already-green main.
+    # ---------------------------------------------------------------------------
+    check:
+-      if: ${{ !startsWith(github.ref, 'refs/tags/v') && (github.event_name != 'workflow_dispatch' || inputs.rehearsal == 'main-nontag') }}
++      if: ${{ !(startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/sayknow-v')) && (github.event_name != 'workflow_dispatch' || inputs.rehearsal == 'main-nontag') }}
+       runs-on: ubuntu-22.04
+       timeout-minutes: 20
+       steps:
+@@ -59,7 +59,7 @@
+    # keeps the stable branch-protection status name.
+    # ---------------------------------------------------------------------------
+    main_plan:
+-      if: ${{ !startsWith(github.ref, 'refs/tags/v') && (github.event_name != 'workflow_dispatch' || inputs.rehearsal == 'main-nontag') }}
++      if: ${{ !(startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/sayknow-v')) && (github.event_name != 'workflow_dispatch' || inputs.rehearsal == 'main-nontag') }}
+       runs-on: ubuntu-22.04
+       timeout-minutes: 10
+       env:
+@@ -81,7 +81,7 @@
+            run: bun scripts/ci-dev-affected.ts --matrix-json
+ 
+    main_native:
+-      if: ${{ !startsWith(github.ref, 'refs/tags/v') && (github.event_name != 'workflow_dispatch' || inputs.rehearsal == 'main-nontag') && needs.main_plan.outputs.has_native == 'true' }}
++      if: ${{ !(startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/sayknow-v')) && (github.event_name != 'workflow_dispatch' || inputs.rehearsal == 'main-nontag') && needs.main_plan.outputs.has_native == 'true' }}
+       needs: [main_plan]
+       runs-on: ubuntu-22.04
+       timeout-minutes: 30
+@@ -123,7 +123,7 @@
+    main_python_matrix:
+       name: Python SDK / ${{ matrix.python-version }}
+       needs: [main_plan, main_native]
+-      if: ${{ always() && !startsWith(github.ref, 'refs/tags/v') && (github.event_name != 'workflow_dispatch' || inputs.rehearsal == 'main-nontag') && needs.main_plan.outputs.has_python == 'true' && needs.main_native.result != 'failure' && needs.main_native.result != 'cancelled' }}
++      if: ${{ always() && !(startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/sayknow-v')) && (github.event_name != 'workflow_dispatch' || inputs.rehearsal == 'main-nontag') && needs.main_plan.outputs.has_python == 'true' && needs.main_native.result != 'failure' && needs.main_native.result != 'cancelled' }}
+       runs-on: ubuntu-22.04
+       timeout-minutes: 30
+       strategy:
+@@ -153,7 +153,7 @@
+ 
+    main_shards:
+       name: test-shard / ${{ matrix.key }}
+-      if: ${{ always() && !startsWith(github.ref, 'refs/tags/v') && (github.event_name != 'workflow_dispatch' || inputs.rehearsal == 'main-nontag') && needs.main_plan.outputs.has_tasks == 'true' && needs.main_native.result != 'failure' && needs.main_native.result != 'cancelled' }}
++      if: ${{ always() && !(startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/sayknow-v')) && (github.event_name != 'workflow_dispatch' || inputs.rehearsal == 'main-nontag') && needs.main_plan.outputs.has_tasks == 'true' && needs.main_native.result != 'failure' && needs.main_native.result != 'cancelled' }}
+       needs: [main_plan, main_native]
+       runs-on: ubuntu-22.04
+       timeout-minutes: ${{ matrix.rust && 90 || 60 }}
+@@ -207,7 +207,7 @@
+ 
+    # Branch protection must keep requiring this stable aggregate status.
+    test:
+-      if: ${{ always() && !startsWith(github.ref, 'refs/tags/v') && (github.event_name != 'workflow_dispatch' || inputs.rehearsal == 'main-nontag') }}
++      if: ${{ always() && !(startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/sayknow-v')) && (github.event_name != 'workflow_dispatch' || inputs.rehearsal == 'main-nontag') }}
+       needs: [main_plan, main_native, main_python_matrix, main_shards]
+       runs-on: ubuntu-22.04
+       timeout-minutes: 5
+@@ -230,7 +230,7 @@
+    # and cuts the GitHub Release; rehearsals stop after binary verification.
+    # ---------------------------------------------------------------------------
+    native:
+-      if: ${{ startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.rehearsal == 'tag-build-verify') }}
++      if: ${{ (startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/sayknow-v')) || (github.event_name == 'workflow_dispatch' && inputs.rehearsal == 'tag-build-verify') }}
+       timeout-minutes: 90
+       runs-on: ${{ matrix.os }}
+       strategy:
+@@ -256,7 +256,7 @@
+               save_cache: "true"
+ 
+    binaries:
+-      if: ${{ startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.rehearsal == 'tag-build-verify') }}
++      if: ${{ (startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/sayknow-v')) || (github.event_name == 'workflow_dispatch' && inputs.rehearsal == 'tag-build-verify') }}
+       needs: [native]
+       timeout-minutes: 60
+       runs-on: ${{ matrix.os }}
+@@ -337,7 +337,7 @@
+               path: ${{ matrix.binary_path }}
+ 
+    publish:
+-      if: ${{ startsWith(github.ref, 'refs/tags/v') && github.event_name != 'workflow_dispatch' }}
++      if: ${{ (startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/sayknow-v')) && github.event_name != 'workflow_dispatch' }}
+       needs: [native, binaries]
+       timeout-minutes: 45
+       runs-on: ubuntu-22.04

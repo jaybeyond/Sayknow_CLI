@@ -8,23 +8,25 @@
 //!   file. Binary entries surface as `diff: None`.
 //! - **Plain mode.** No `.git`; we walk both trees in parallel, short-circuit
 //!   on `(size, mtime-truncated-to-seconds)` equality, and emit a unified diff
-//!   for each surviving pair via `similar`. NUL within the first 8 KiB
-//!   classifies the file as binary → `diff: None`.
+//!   for each surviving pair via `similar`. Directory-relative no-follow opens
+//!   are anchored to retained root handles and verify each regular file against
+//!   its indexed identity; symlinks are represented by their link payload
+//!   without following them. NUL within the first 8 KiB classifies a regular
+//!   file as binary → `diff: None`. A symlink-involved change that cannot be
+//!   represented as text fails closed.
 //!
 //! Per the PAL contract: for binary files we don't materialize the bytes
 //! in the patch — callers that want them read directly from `merged`
 //! (for `Added`/`Modified`) or `lower` (for `Removed`).
 
-use std::{
-	collections::BTreeMap,
-	fs::Metadata,
-	path::{Path, PathBuf},
-	time::SystemTime,
-};
+use std::path::{Path, PathBuf};
 
 use tokio::process::Command;
 
-use crate::{IsoError, IsoResult};
+use crate::{
+	IsoError, IsoResult,
+	plain_tree::{PlainEntry, PlainTree, index_tree},
+};
 
 /// Captured changes between a `lower` baseline and a `merged` view.
 #[derive(Debug, Clone, Default)]
@@ -60,7 +62,9 @@ impl Diff {
 ///
 /// `path` is relative to `merged`. `diff = None` means the file is binary
 /// or otherwise text-unrepresentable — copy the contents from the merged
-/// tree if you need them (or skip if you only care about text).
+/// tree if you need them (or skip if you only care about text). Plain-mode
+/// symlink changes always carry a text diff; unrepresentable link changes
+/// return an error instead of this copy-by-path signal.
 #[derive(Debug, Clone)]
 pub struct FileChange {
 	pub path: PathBuf,
@@ -270,20 +274,26 @@ fn walk_diff_blocking(lower: &Path, merged: &Path) -> IsoResult<Diff> {
 
 	let mut files: Vec<FileChange> = Vec::new();
 
-	for (rel, m_meta) in &merged_index {
-		match lower_index.get(rel) {
-			None => files.push(plain_change(merged, rel, ChangeKind::Added, None)?),
+	for (rel, m_meta) in &merged_index.entries {
+		match lower_index.entries.get(rel) {
+			None => files.push(plain_change(rel, ChangeKind::Added, &merged_index, m_meta, None)?),
 			Some(l_meta) => {
-				if metas_equal(l_meta, m_meta) {
+				if l_meta.content_hint_eq(m_meta) {
 					continue;
 				}
-				files.push(plain_change(merged, rel, ChangeKind::Modified, Some(lower))?);
+				files.push(plain_change(
+					rel,
+					ChangeKind::Modified,
+					&merged_index,
+					m_meta,
+					Some((&lower_index, l_meta)),
+				)?);
 			},
 		}
 	}
-	for rel in lower_index.keys() {
-		if !merged_index.contains_key(rel) {
-			files.push(plain_change(lower, rel, ChangeKind::Removed, None)?);
+	for (rel, l_meta) in &lower_index.entries {
+		if !merged_index.entries.contains_key(rel) {
+			files.push(plain_change(rel, ChangeKind::Removed, &lower_index, l_meta, None)?);
 		}
 	}
 
@@ -291,105 +301,65 @@ fn walk_diff_blocking(lower: &Path, merged: &Path) -> IsoResult<Diff> {
 	Ok(Diff { files })
 }
 
-fn metas_equal(a: &Metadata, b: &Metadata) -> bool {
-	if a.len() != b.len() {
-		return false;
-	}
-	match (a.modified(), b.modified()) {
-		(Ok(ma), Ok(mb)) => systime_eq(ma, mb),
-		_ => false,
-	}
-}
-
-fn systime_eq(a: SystemTime, b: SystemTime) -> bool {
-	// Filesystems carry mtime at different resolutions (HFS+ seconds, APFS
-	// nanos, FAT 2 seconds). Compare at second granularity so a metadata-
-	// preserving copy that flushed through a coarse layer doesn't look
-	// modified.
-	let to_secs = |t: SystemTime| {
-		t.duration_since(SystemTime::UNIX_EPOCH)
-			.map_or(0, |d| d.as_secs())
-	};
-	to_secs(a) == to_secs(b)
-}
-
-fn index_tree(root: &Path) -> IsoResult<BTreeMap<PathBuf, Metadata>> {
-	let mut out = BTreeMap::new();
-	if !root.exists() {
-		return Ok(out);
-	}
-	walk(root, root, &mut out)?;
-	Ok(out)
-}
-
-fn walk(root: &Path, dir: &Path, out: &mut BTreeMap<PathBuf, Metadata>) -> IsoResult<()> {
-	let entries = std::fs::read_dir(dir)
-		.map_err(|err| IsoError::other(format!("read_dir {}: {err}", dir.display())))?;
-	for entry in entries {
-		let entry =
-			entry.map_err(|err| IsoError::other(format!("dir entry in {}: {err}", dir.display())))?;
-		let path = entry.path();
-		let meta = entry
-			.metadata()
-			.map_err(|err| IsoError::other(format!("metadata {}: {err}", path.display())))?;
-		if meta.is_symlink() {
-			let rel = path.strip_prefix(root).unwrap_or(&path).to_path_buf();
-			out.insert(rel, meta);
-			continue;
-		}
-		if meta.is_dir() {
-			walk(root, &path, out)?;
-			continue;
-		}
-		let rel = path.strip_prefix(root).unwrap_or(&path).to_path_buf();
-		out.insert(rel, meta);
-	}
-	Ok(())
-}
-
 /// Build a [`FileChange`] for an entry observed by [`walk_diff_blocking`].
 ///
-/// `op == Modified` requires `peer_root = Some(lower)` so we can read the
-/// counterpart; `Added`/`Removed` only need the side we already know about.
+/// `op == Modified` requires `peer` so we can read the counterpart;
+/// `Added`/`Removed` only need the side we already know about.
 fn plain_change(
-	side: &Path,
 	rel: &Path,
 	op: ChangeKind,
-	peer_root: Option<&Path>,
+	tree: &PlainTree,
+	entry: &PlainEntry,
+	peer: Option<(&PlainTree, &PlainEntry)>,
 ) -> IsoResult<FileChange> {
-	let full = side.join(rel);
-	let primary = std::fs::read(&full)
-		.map_err(|err| IsoError::other(format!("read {}: {err}", full.display())))?;
-	if looks_binary(&primary) {
-		return Ok(FileChange { path: rel.to_path_buf(), op, diff: None });
-	}
-	let (old_bytes, new_bytes) = match op {
-		ChangeKind::Added => (Vec::new(), primary),
-		ChangeKind::Removed => (primary, Vec::new()),
+	let primary = tree.read(rel)?;
+	let primary_is_symlink = entry.is_symlink();
+	let (old_bytes, new_bytes, old_is_symlink, new_is_symlink) = match op {
+		ChangeKind::Added => (Vec::new(), primary, false, primary_is_symlink),
+		ChangeKind::Removed => (primary, Vec::new(), primary_is_symlink, false),
 		ChangeKind::Modified => {
-			let peer = peer_root.expect("modified change requires peer root");
-			let peer_full = peer.join(rel);
-			let peer_bytes = std::fs::read(&peer_full)
-				.map_err(|err| IsoError::other(format!("read {}: {err}", peer_full.display())))?;
-			if looks_binary(&peer_bytes) {
-				return Ok(FileChange { path: rel.to_path_buf(), op, diff: None });
-			}
-			(peer_bytes, primary)
+			let (peer_tree, peer_entry) = peer.expect("modified change requires peer metadata");
+			let peer_bytes = peer_tree.read(rel)?;
+			(peer_bytes, primary, peer_entry.is_symlink(), primary_is_symlink)
 		},
 	};
+	let symlink_involved = old_is_symlink || new_is_symlink;
+	if looks_binary(&old_bytes) || looks_binary(&new_bytes) {
+		if symlink_involved {
+			return Err(unrepresentable_symlink(rel));
+		}
+		return Ok(FileChange { path: rel.to_path_buf(), op, diff: None });
+	}
 	let (Ok(old_text), Ok(new_text)) =
 		(std::str::from_utf8(&old_bytes), std::str::from_utf8(&new_bytes))
 	else {
+		if symlink_involved {
+			return Err(unrepresentable_symlink(rel));
+		}
 		return Ok(FileChange { path: rel.to_path_buf(), op, diff: None });
 	};
 	Ok(FileChange {
 		path: rel.to_path_buf(),
 		op,
-		diff: Some(render_unified(rel, op, old_text, new_text)),
+		diff: Some(render_unified(rel, op, old_text, new_text, old_is_symlink, new_is_symlink)),
 	})
 }
 
-fn render_unified(rel: &Path, op: ChangeKind, old: &str, new: &str) -> String {
+fn unrepresentable_symlink(rel: &Path) -> IsoError {
+	IsoError::other(format!(
+		"plain-diff symlink change is not text-representable: {}",
+		rel.display()
+	))
+}
+
+fn render_unified(
+	rel: &Path,
+	op: ChangeKind,
+	old: &str,
+	new: &str,
+	old_is_symlink: bool,
+	new_is_symlink: bool,
+) -> String {
 	let rel_str = rel.to_string_lossy();
 	let (from_label, to_label) = match op {
 		ChangeKind::Added => (String::from("/dev/null"), format!("b/{rel_str}")),
@@ -401,10 +371,14 @@ fn render_unified(rel: &Path, op: ChangeKind, old: &str, new: &str) -> String {
 	let _ = writeln!(out, "diff --git a/{rel_str} b/{rel_str}");
 	match op {
 		ChangeKind::Added => {
-			let _ = writeln!(out, "new file mode 100644");
+			let _ = writeln!(out, "new file mode {}", plain_mode(new_is_symlink));
 		},
 		ChangeKind::Removed => {
-			let _ = writeln!(out, "deleted file mode 100644");
+			let _ = writeln!(out, "deleted file mode {}", plain_mode(old_is_symlink));
+		},
+		ChangeKind::Modified if old_is_symlink != new_is_symlink => {
+			let _ = writeln!(out, "old mode {}", plain_mode(old_is_symlink));
+			let _ = writeln!(out, "new mode {}", plain_mode(new_is_symlink));
 		},
 		ChangeKind::Modified => {},
 	}
@@ -418,6 +392,10 @@ fn render_unified(rel: &Path, op: ChangeKind, old: &str, new: &str) -> String {
 		out.push('\n');
 	}
 	out
+}
+
+const fn plain_mode(is_symlink: bool) -> &'static str {
+	if is_symlink { "120000" } else { "100644" }
 }
 
 fn looks_binary(bytes: &[u8]) -> bool {

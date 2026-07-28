@@ -1,6 +1,9 @@
 import { createHash } from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+// Subpath import keeps this module native-free for the skc-state-gates shards:
+// the package barrel pulls procmgr/ptree → @sayknow-cli/natives.
+import * as logger from "@sayknow-cli/utils/logger";
 import type { WorkflowHudSummary } from "../skill-state/active-state";
 import {
 	applyHandoffToActiveState,
@@ -265,7 +268,21 @@ async function describeStaleClearState(
 	return undefined;
 }
 
-async function readJsonFile(filePath: string): Promise<Record<string, unknown> | null> {
+/**
+ * Route a workflow-state warning through the TUI-safe centralized file logger
+ * (console transport off by default) so interactive sessions never paint raw
+ * bytes into the alternate-screen stream (#3002). CLI command handlers may also
+ * collect the warning via an `onWarning` sink to surface it on the structured
+ * {@link StateCommandResult.stderr} channel, so `skc state` automation still
+ * distinguishes corrupt state from absent state.
+ */
+function emitStateWarning(warning: string, context?: Record<string, unknown>): void {
+	logger.warn(warning, context);
+}
+
+type StateWarningSink = (warning: string) => void;
+
+async function readJsonFile(filePath: string, onWarning?: StateWarningSink): Promise<Record<string, unknown> | null> {
 	try {
 		const raw = await fs.readFile(filePath, "utf-8");
 		const parsed = JSON.parse(raw);
@@ -276,18 +293,22 @@ async function readJsonFile(filePath: string): Promise<Record<string, unknown> |
 	} catch (error) {
 		const err = error as NodeJS.ErrnoException;
 		if (err.code === "ENOENT") return null;
-		process.stderr.write(`WARNING: failed to read ${filePath}; ignoring corrupt state: ${err.message}\n`);
+		const warning = `WARNING: failed to read ${filePath}; ignoring corrupt state: ${err.message}`;
+		emitStateWarning(warning, { filePath, error: err.message });
+		onWarning?.(warning);
 		return null;
 	}
 }
 
-async function readJsonValue(filePath: string): Promise<unknown | null> {
+async function readJsonValue(filePath: string, onWarning?: StateWarningSink): Promise<unknown | null> {
 	try {
 		return JSON.parse(await fs.readFile(filePath, "utf-8"));
 	} catch (error) {
 		const err = error as NodeJS.ErrnoException;
 		if (err.code === "ENOENT") return null;
-		process.stderr.write(`WARNING: failed to read ${filePath}; ignoring corrupt state: ${err.message}\n`);
+		const warning = `WARNING: failed to read ${filePath}; ignoring corrupt state: ${err.message}`;
+		emitStateWarning(warning, { filePath, error: err.message });
+		onWarning?.(warning);
 		return null;
 	}
 }
@@ -836,7 +857,8 @@ function buildHudForMode(
 					: typeof payload.mode === "string"
 						? (payload.mode as string)
 						: undefined;
-			const verdict = typeof payload.verdict === "string" ? (payload.verdict as string) : undefined;
+			const rawVerdict = payload.last_review_verdict ?? payload.verdict;
+			const verdict = typeof rawVerdict === "string" ? rawVerdict : undefined;
 			const iteration = typeof payload.iteration === "number" ? (payload.iteration as number) : undefined;
 			const pendingApproval = payload.pending_approval === true || stage === "final";
 			return buildRalplanHudSummary({
@@ -1101,21 +1123,30 @@ export async function readWorkflowStateJson(
 	cwd: string,
 	skill: CanonicalSkcWorkflowSkill,
 	sessionId?: string,
+	onWarning?: StateWarningSink,
 ): Promise<Record<string, unknown>> {
 	const session = await resolveSkcSessionForRead(cwd, {
 		payloadSessionId: sessionId,
 		envSessionId: process.env.SKC_SESSION_ID,
 	});
-	return (await readJsonFile(modeStateFile(cwd, skill, session.skcSessionId))) ?? {};
+	return (await readJsonFile(modeStateFile(cwd, skill, session.skcSessionId), onWarning)) ?? {};
 }
 
 async function handleRead(args: readonly string[], cwd: string): Promise<StateCommandResult> {
 	const selectors = await resolveSelectors(args, cwd, "read");
 	const mode = selectors.mode ?? (await inferModeFromActiveState(cwd, selectors.skcSessionId));
 	const fields = parseFieldsFlag(args);
+	// Corrupt-state warnings are TUI-safe file-logged inside the readers; the CLI
+	// path also surfaces them on the command result so `skc state read`
+	// automation can tell corrupt state from absent state (#3002).
+	const warnings: string[] = [];
+	const warningStderr = (): Pick<StateCommandResult, "stderr"> =>
+		warnings.length ? { stderr: warnings.map(warning => `${warning}\n`).join("") } : {};
 	if (mode) {
 		const filePath = modeStateFile(cwd, mode, selectors.skcSessionId);
-		const existing = await readWorkflowStateJson(cwd, mode, selectors.skcSessionId);
+		const existing = await readWorkflowStateJson(cwd, mode, selectors.skcSessionId, warning =>
+			warnings.push(warning),
+		);
 		const envelope = { skill: mode, state: existing, storage_path: filePath };
 		const manifest = getSkillManifest(mode);
 		if (fields) {
@@ -1125,6 +1156,7 @@ async function handleRead(args: readonly string[], cwd: string): Promise<StateCo
 				stdout: hasFlag(args, "--json")
 					? `${JSON.stringify(projected, null, 2)}\n`
 					: renderStateMarkdown(mode, projected, manifest),
+				...warningStderr(),
 			};
 		}
 		if (hasFlag(args, "--compact")) {
@@ -1134,6 +1166,7 @@ async function handleRead(args: readonly string[], cwd: string): Promise<StateCo
 				stdout: hasFlag(args, "--json")
 					? `${JSON.stringify(compact, null, 2)}\n`
 					: renderStateMarkdown(mode, envelope, manifest),
+				...warningStderr(),
 			};
 		}
 		return {
@@ -1141,12 +1174,13 @@ async function handleRead(args: readonly string[], cwd: string): Promise<StateCo
 			stdout: hasFlag(args, "--json")
 				? `${JSON.stringify(envelope, null, 2)}\n`
 				: renderStateMarkdown(mode, envelope, manifest),
+			...warningStderr(),
 		};
 	}
 	const filePath = activeStateFile(cwd, selectors.skcSessionId);
-	const existingRaw = await readJsonValue(filePath);
+	const existingRaw = await readJsonValue(filePath, warning => warnings.push(warning));
 	const existing = isPlainObject(existingRaw) ? existingRaw : null;
-	return { status: 0, stdout: `${JSON.stringify(existing ?? {}, null, 2)}\n` };
+	return { status: 0, stdout: `${JSON.stringify(existing ?? {}, null, 2)}\n`, ...warningStderr() };
 }
 
 async function handleStatus(args: readonly string[], cwd: string): Promise<StateCommandResult> {
@@ -1159,7 +1193,8 @@ async function handleStatus(args: readonly string[], cwd: string): Promise<State
 		);
 	}
 	const filePath = modeStateFile(cwd, mode, selectors.skcSessionId);
-	const existing = await readWorkflowStateJson(cwd, mode, selectors.skcSessionId);
+	const warnings: string[] = [];
+	const existing = await readWorkflowStateJson(cwd, mode, selectors.skcSessionId, warning => warnings.push(warning));
 	const summary = buildStateStatusSummary(
 		mode,
 		{ skill: mode, state: existing, storage_path: filePath },
@@ -1169,6 +1204,7 @@ async function handleStatus(args: readonly string[], cwd: string): Promise<State
 	return {
 		status: 0,
 		stdout: hasFlag(args, "--json") ? `${JSON.stringify(summary, null, 2)}\n` : renderStateStatusLine(summary),
+		...(warnings.length ? { stderr: warnings.map(warning => `${warning}\n`).join("") } : {}),
 	};
 }
 
@@ -1603,7 +1639,7 @@ async function handleHandoffUnlocked(args: readonly string[], cwd: string): Prom
 			toPhase: "handoff",
 		});
 		await updateWorkflowTransactionJournal(cwd, sessionId, mutationId, { steps: ["caller-mode-state"] });
-		if (callerWrite.warning) process.stderr.write(`${callerWrite.warning}\n`);
+		if (callerWrite.warning) emitStateWarning(callerWrite.warning);
 		const stampedCallerReceipt = isPlainObject(callerWrite.stamped.receipt) ? callerWrite.stamped.receipt : {};
 		await syncSkillActiveState({
 			cwd,
@@ -1646,6 +1682,7 @@ async function handleHandoffUnlocked(args: readonly string[], cwd: string): Prom
 					active_state: activeStateFile(cwd, sessionId),
 				},
 			}),
+			...(callerWrite.warning ? { stderr: `${callerWrite.warning}\n` } : {}),
 		};
 	}
 
@@ -1746,7 +1783,7 @@ async function handleHandoffUnlocked(args: readonly string[], cwd: string): Prom
 	);
 	const stampedCallerReceipt = isPlainObject(callerWrite.stamped.receipt) ? callerWrite.stamped.receipt : {};
 	const stampedCalleeReceipt = isPlainObject(calleeWrite.stamped.receipt) ? calleeWrite.stamped.receipt : {};
-	for (const warning of warnings) process.stderr.write(`${warning}\n`);
+	for (const warning of warnings) emitStateWarning(warning);
 	if (process.env.SKC_STATE_HANDOFF_FAIL_AFTER_CALLER === mutationId) {
 		throw new StateCommandError(1, `injected handoff failure after caller write for ${mutationId}`);
 	}
@@ -1818,6 +1855,7 @@ async function handleHandoffUnlocked(args: readonly string[], cwd: string): Prom
 				active_state: activeStateFile(cwd, sessionId),
 			},
 		}),
+		...(warnings.length ? { stderr: warnings.map(warning => `${warning}\n`).join("") } : {}),
 	};
 }
 

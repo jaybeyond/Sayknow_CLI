@@ -4,6 +4,281 @@ Sayknow-CLI is a rebranded fork of [gajae-code](https://github.com/Yeachan-Heo/g
 This file tracks the **fork's own releases**; upstream's full feature history lives
 in that project. Each release notes the upstream version it is built on.
 
+
+## [0.5.0] — 2026-07-28
+
+Built on upstream **gajae-code v0.12.0** (previous fork release tracked v0.11.6).
+
+### Security (inherited from upstream v0.12.0)
+
+Every path below trusted the caller's `cwd/.env`, so **opening a hostile repository
+was enough** to trigger it. All now resolve through the non-project resolver
+(launching shell plus SKC/user-owned files); shell and user configuration are
+unchanged.
+
+- **Provider base URLs** — `<PROVIDER>_BASE_URL` is derived generically, so a planted
+  `.env` could redirect authenticated traffic for *every* provider.
+- **Browser launch overrides** — could pick the browser binary, route all traffic
+  through an attacker proxy, and disable certificate validation.
+- **Spawned command overrides** (`SKC_SDK_SESSION_COMMAND`,
+  `SKC_HARNESS_PROCESS_START_COMMAND`) — chose which binary those paths execute.
+- **Smithery origin / API base / API key** — the auth session the user is sent to,
+  and the credential sent with every call.
+- **Native skill hook config dirs** — could point the hook at a directory the repo
+  ships and inject its own `skills.customDirectories`, bypassing escalation guards.
+
+Also: **memory consolidation now redacts GitHub tokens.** The scrubber covered AWS
+ids, JWTs, and keyword-prefixed keys, but `ghp_` / `gho_` / `github_pat_` carry none
+of those markers, so a token reached `MEMORY.md` and `memory_summary.md` verbatim —
+and that summary is injected into every later session.
+
+### Changed (upstream replaced two surfaces the fork had ported)
+
+- The typed deep-interview **draft** CLI was reverted upstream and replaced with a
+  staged-transition surface (`stage --for <transition> --input '<json>'`, `check`,
+  `apply`, `discard`; one pending draft per session, no `--draft-id`). The fork
+  follows upstream here rather than keeping a surface upstream retired.
+- The fork's `absoluteClear` multiplexer width-reflow repair is superseded by
+  upstream's width-settle repair, which runs once per settled width sequence
+  instead of once per SIGWINCH. Upstream's implementation is kept.
+
+### Fixed (Sayknow Pet leaves sixel residue under tmux)
+
+- **Give tmux ownership of the pet's sixel instead of smuggling it past tmux.**
+  The pet was drawn with DCS passthrough, which writes pixels straight into the
+  outer terminal's image plane, while the erase was an `ECH` that only ever
+  reached tmux's cell buffer. tmux never recorded the image, so nothing could
+  remove it — every frame stacked another vertical band above the pet.
+
+  This is the same root cause behind the oversize/frozen animation (0.4.6) and
+  the viewport scroll (0.4.7): tmux's screen model and the real screen disagreed.
+  Those releases each patched the *draw* path; the *erase* path was never
+  revisited, so the residue survived all three fixes.
+
+  SKC-launched sessions now append `terminal-features ,*:sixel`, and the widget
+  sends the frame directly whenever tmux claims sixel. tmux 3.4+ parses it into
+  its own screen model (`screen_write_sixelimage`) and re-renders it, so the
+  existing erase actually deletes the image and scroll/resize/copy-mode stay
+  consistent. Passthrough remains only as the fallback for terminals or tmux
+  builds that do not claim sixel.
+
+### Fixed (rebrand leakage)
+
+- **Stop creating `.gjc-*` paths.** `recovery_fs` and `path_identity` still wrote
+  `.gjc-recovery`, `.gjc-managed-remove-*`, and `.gjc-exact-unlink-*` on disk: the
+  rename never reached them, so recovery state landed under an upstream-branded
+  directory name. 24 residual tokens are gone and the sync pipeline now fails the
+  build instead of shipping them.
+
+### Fixed (fork pipeline)
+
+The fork layer is regenerated as `gen-tree(upstream tag) = codemod + deletions +
+overlay + patches + identity`. Five defects made that identity false:
+
+- **Overlay swallowed upstream changes.** 66 upstream-owned files were carried as
+  whole-file overlays, so every upstream edit to them was silently discarded —
+  including `packages/tui`'s `node-pty` dependency. Ownership is now decided by
+  the base tree: present upstream ⇒ patch, absent ⇒ overlay (45 → 134 patches).
+- **Release versions leaked into patch context.** A version bump invalidated the
+  context lines of unrelated hunks, so patches rejected on every release. Version
+  text is now neutralized on both sides of extraction and restored by the identity
+  stamp.
+- **Deletions were unrepresentable.** Upstream files the fork drops (`crates/skc-sdk`
+  and others) reappeared on each sync; they are now declared and replayed.
+- **Binary assets were declared as patches**, producing unappliable
+  "Binary files differ" stubs. They are demoted to overlay automatically.
+- **The codemod never converged.** Overlay and patch payloads carry upstream text
+  that the single first pass cannot see, so the idempotence gate could not pass.
+
+`gen-tree` also refuses to run against the fork repo itself — an empty argument
+previously codemodded and version-stamped the working tree in place.
+
+### Added (ported from upstream)
+
+- `ServerHandle::push_frame_and_wait` in `skc-notifications`, so the SDK can await
+  per-connection delivery receipts instead of fire-and-forget broadcast.
+- `Process.signalRoot` napi binding for pinned single-process signalling.
+- Worker integration attempts accept an `AbortSignal` and bail between git probes.
+- The deep-interview staged-transition surface (`stage`, `check`, `apply`, `discard`,
+  `initialize-context`, `confirm-topology`).
+
+## [0.4.7] — 2026-07-24
+
+### Fixed (Sayknow Pet scroll under tmux)
+
+- **Wrap the pet's sixel draw (save-cursor + position + sixel + restore-cursor)
+  in a single tmux DCS passthrough unit.** The pet uses `DECSC`/`DECRC`
+  (`\x1b7`/`\x1b8`) to stay cursor-neutral, but those bytes were emitted outside
+  the passthrough envelope, so only tmux saw them — the outer terminal received
+  just the cursor-advancing sixel via passthrough, never restored its cursor,
+  and scrolled the whole viewport up on every animation frame (leaving the pet
+  pinned in place). The save/restore now travels with the sixel through
+  passthrough, so the outer cursor returns and nothing scrolls. The footprint
+  clears stay tmux-level so tmux still repaints the vacated cells. Only affected
+  tmux + a sixel terminal.
+
+## [0.4.6] — 2026-07-23
+
+### Fixed (Sayknow Pet sizing/animation under tmux)
+
+- **Wrap the terminal cell-pixel-size query (`CSI 16 t`) in tmux's DCS
+  passthrough envelope.** Under tmux the query was answered by tmux itself with
+  a wrong cell size, so the sixel pet was encoded far too large — it overflowed
+  the composer and its animation froze (the oversized sprite resolved to an
+  out-of-bounds position, so each animation frame's overlay payload became
+  `null` and never redrew). The outer terminal now reports its real cell size,
+  so the pet renders at its intended 2-row height and animates. Only affected
+  tmux + a sixel terminal (the 0.4.5 pet-in-tmux path); non-multiplexed
+  rendering was already correct.
+
+## [0.4.5] — 2026-07-23
+
+### Added (Sayknow Pet in tmux)
+
+- **Auto-enable the Sayknow Pet (and inline sixel graphics) under tmux when the
+  outer terminal genuinely supports sixel.** Previously graphics were
+  unconditionally suppressed under any multiplexer because tmux advertises
+  compile-time sixel support (`DA1 ";4"`) regardless of the attached terminal,
+  and no code emitted the DCS passthrough envelope. Now:
+  - The startup sixel capability probe runs under tmux with its DA1 +
+    XTSMGRAPHICS queries wrapped in tmux's `\ePtmux;…\e\\` passthrough envelope,
+    so the **outer** terminal answers — a positive reply is genuine end-to-end
+    evidence, not tmux's unreliable self-report. screen/zellij (no passthrough
+    envelope) stay suppressed.
+  - Sixel render output (pet frames + inline images) is wrapped in the same
+    passthrough envelope under tmux.
+  - SKC-launched tmux sessions set `allow-passthrough on` (pane-scoped, quiet on
+    tmux < 3.3) automatically.
+  - Probe-gated and safe: terminals that do not actually render sixel through
+    tmux (e.g. Ghostty, which uses the kitty protocol and has no sixel) never
+    activate it, so no garbage escapes are emitted. Set `SKC_SIXEL_MULTIPLEXER=0`
+    to force the pre-0.4.5 behavior (graphics off under tmux).
+
+## [0.4.4] — 2026-07-22
+
+### Fixed (workflow arbitration native)
+
+- **Port `skc-notifications` to upstream v0.11.6 and switch pi-natives to
+  `sdk.rs`.** 0.4.x synced upstream's coding-agent, whose SDK bus requires the
+  native `NotificationServer` arbitration API (`registerArbitratedAsk`,
+  `retireIfUnclaimed`, `stopAndWait`). But the fork's `skc-notifications` crate
+  was stuck at upstream v0.9.1, so `crates/pi-natives/src/sdk.rs` (restored from
+  v0.11.6) could not compile against it and was dropped from `lib.rs`. The
+  shipped `notifications.rs` `NotificationServer` lacked the arbitration
+  methods, so every SDK session startup threw `NativeRuntimeCompatibilityError`
+  ("required workflow arbitration methods are missing") — extensions failed to
+  load and no session could start on 0.4.1–0.4.3.
+- Upgrades `crates/skc-notifications` v0.9.1 → v0.11.6 (adds the
+  `broker_protocol`/`control`/`query`/`reverse` modules and the `hmac` workspace
+  dependency), wires `mod sdk;` and retires `notifications.rs`. This restores
+  the arbitration API **and** the SKC v3 SDK connection lane
+  (`onSdkFrame`/`sendTo`/`onConnectionClose`/`registerWorkflowGateAsk`/
+  `pushTurnStreamUnchecked`), which was also dead in 0.4.1–0.4.3. No native
+  method that the fork already relied on is removed (`sdk.rs`'s
+  `NotificationServer` is a strict superset of `notifications.rs`).
+
+## [0.4.3] — 2026-07-21
+
+### Fixed (cross-platform native publish)
+
+- **pi-natives ps.rs: restore `Process.incarnation` getter.** The fork's
+  `crates/pi-natives/src/ps.rs` predated upstream v0.11.x's
+  `#[napi(getter)] incarnation` method; the chat/telegram daemon control
+  runtimes (`sdk/bus/{chat,telegram}-daemon-control.ts`) read
+  `processRef.incarnation` for ownership authority, so typecheck failed
+  with `Property 'incarnation' does not exist on type 'Process'`.
+- **sdk/bus/index.ts: use `NotificationServer.stop()` instead of `stopAndWait()`.**
+  The fork's `NotificationServer` (notifications.rs) is synchronous and
+  pre-upstream-split; the v0.11.x TS calls `stopAndWait()` which is the
+  upstream async variant. TODO(port): add `stop_and_wait` to
+  pi-natives/src/notifications.rs when the daemon API is ported forward.
+
+### Strategy change
+
+v0.4.3 is published entirely by CI (no local `bun publish`). v0.4.2's
+release hit an integrity-evidence conflict because the darwin-arm64
+subpackage was published both locally (from a Mac-built .node) and from
+CI (from a CI-built .node) with different SRI hashes; `ci-release-publish`
+correctly rejected the second one. For v0.4.3 all 9 main packages + 5
+platform subpackages publish from a single CI run.
+
+## [0.4.2] — 2026-07-21
+
+### Fixed (post-0.4.0 publish)
+
+- **Native loader: nested node_modules fallback.** Bun's `-g` install creates a
+  nested layout where each workspace package owns its own `node_modules/`. The
+  loader's single hardcoded platform-subpackage path
+  (`../../natives-<platform>/native`) assumed npm's flat hoist, so `bun install
+  -g sayknow-cli` could not resolve the .node and crashed at startup with
+  `Failed to load pi_natives native addon`. Added a third candidate path that
+  covers `natives/node_modules/@sayknow-cli/natives-<platform>/native`.
+- **Catalog resolution via `bun install`.** v0.4.0 was published with stale
+  `bun.lock` workspace versions (still pinned to 0.3.16), so `bun publish`
+  resolved `catalog:` deps to 0.3.16 and the umbrella ended up depending on
+  the previous release's `@sayknow-cli/coding-agent`. v0.4.2 republishes after
+  regenerating `bun.lock` from the bumped catalog (0.4.2 everywhere).
+- **Native version sentinel.** Rebuilt `pi_natives.darwin-arm64.node` after the
+  version bump so it exposes `__piNativesV0_4_2` (the v0.4.0 binary's
+  `__piNativesV0_4_0` failed the loader's release-match check).
+
+### Deprecated (on npm)
+
+- `sayknow-cli@0.4.0` and `@sayknow-cli/*@0.4.0` — broken catalog: resolution.
+- `sayknow-cli@0.4.1` and `@sayknow-cli/*@0.4.1` — loader missing nested
+  `node_modules` fallback.
+
+## [0.4.0] — 2026-07-21
+
+### Changed
+
+- Synced onto upstream **gajae-code v0.11.6** (from v0.6.0), a 5-minor-version jump
+  bringing v0.7–v0.11 evolution: managed chat daemon (#2782, #2785, #2786), Telegram
+  lock auto-reconciliation (#2781), compiled startup import-cycle fix (#2779), legacy
+  daemon tombstone reclamation (#2780), nextest CI hardening (#2777), and the new
+  `/handoff` slash command (#2746).
+- Rebrand layer regenerated via `extract-fork-layer`: **485 overlay files** (was 188) —
+  captures fork-owned content in `notifications/`, `modes/rpc/`, `modes/bridge/`,
+  `modes/shared/agent-wire/`, `python/skc-rpc/`, and `crates/skc-notifications/` that
+  prior extractions had missed.
+- CI workflow: `sayknow-v*` tag prefix now drives every release-gated job
+  (`native`, `binaries`, `publish`) via a global prefix check.
+- `crates/pi-natives` overlay now ships the fork's actual `skc-notifications` path
+  dep instead of the codemod-renamed `skc-sdk` straggler.
+
+### Added
+
+- **SDK subpath exports.** `@sayknow-cli/coding-agent/sdk` and `./sdk/bus/*` are now
+  declared in `package.json#exports`, matching upstream's `sdk/` directory split.
+- **MRU-aware model fallback** ported from old `sdk.ts` into `sdk/session.ts`:
+  when no model is explicitly selected, the fallback ranks candidates by
+  most-recently-used, then each provider's curated default, then catalog order
+  (was first-catalog-match, which cold-started users on ancient models).
+- **i18n: settings tabs.** New `settings.tab.notifications` key; the
+  `td()`-wrapped setting label/description/options helpers in `settings-selector.ts`
+  cover all tabs including `integrations` and `notifications`.
+- **Team runtime fork extensions** now declared in `SkcTeamStartOptions` /
+  `SkcTeamConfig`: `mailboxDeliveryTransport`, `skc_session_id`, `platform`.
+  `WorkerHeartbeatFile` / `WorkerStatusFile` are now properly exported from
+  `team-runtime.ts`.
+
+### Removed
+
+- **Dead patches dropped** from the rebrand manifest:
+  - `ci-release-publish.ts` patch — superseded by upstream's richer retry loop
+    (`visibilityRetries`, `isTransientVisibilityError`).
+  - `sdk.ts` `guardToolForUltragoalAsk` simplification — upstream expanded the
+    signature with `UltragoalAskGuardContext`; the fork's single-arg form is obsolete.
+  - `interactive-mode.ts` `getPlanReviewHelpText` `t("nav.hint")` — the function was
+    removed upstream when plan review moved to `plan-preview-overlay.ts`.
+
+### Known issues (test debt)
+
+- 67 test errors remain from upstream API drift (`model-profile-activation`,
+  `model-registry`, `sdk-*`, etc.). All product code typechecks clean (0 src errors)
+  and brand/i18n/welcome suites pass (40/40). Test mock migration is filed as a
+  follow-up.
+
 ## [0.3.0] — 2026-06-23
 
 ### Changed

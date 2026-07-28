@@ -12,6 +12,12 @@ import {
 	retainManagedDirectoryAuthority,
 	validateNativeSecurityResult,
 } from "../src/session/internal/managed-session-storage";
+import {
+	classifyNativePublishOutcome,
+	formatNativePublishDiagnostic,
+	mayCleanCurrentStaging,
+} from "../src/session/internal/native-publish-outcome";
+
 import { SessionManager } from "../src/session/session-manager";
 import {
 	createManagedSessionSecurityContext,
@@ -24,6 +30,203 @@ import {
 	type VerifiedSessionDeleteResult,
 	type VerifiedSessionDeleteTarget,
 } from "../src/session/session-storage";
+
+describe("native publish outcome classification", () => {
+	const preMutation = {
+		ok: false,
+		code: "atomic_unavailable",
+		mutationState: "not_committed",
+		durabilityState: "not_attempted",
+		reason: "atomic_unavailable",
+		primitive: "renameat2_noreplace",
+		phase: "rename",
+		diagnostic: { schemaVersion: 1, collectionState: "complete", osCode: 38 },
+	};
+
+	it("allows staging-only cleanup only for a complete known pre-mutation envelope", () => {
+		expect(mayCleanCurrentStaging(classifyNativePublishOutcome(preMutation))).toBe(true);
+		expect(
+			mayCleanCurrentStaging(
+				classifyNativePublishOutcome({
+					...preMutation,
+					mutationState: "committed",
+					durabilityState: "not_provable",
+				}),
+			),
+		).toBe(false);
+	});
+
+	it("fails malformed and path-bearing envelopes closed without formatting unsafe values", () => {
+		const outcome = classifyNativePublishOutcome({
+			...preMutation,
+			diagnostic: { schemaVersion: 1, collectionState: "complete", path: "/secret" },
+		});
+		expect(outcome.mutationState).toBe("unknown");
+		expect(mayCleanCurrentStaging(outcome)).toBe(false);
+		expect(formatNativePublishDiagnostic(outcome)).not.toContain("secret");
+	});
+
+	it("accepts direct no-replace envelopes while preserving unknown failures closed", () => {
+		for (const [reason, code] of [
+			["destination_exists", "already_exists"],
+			["cross_device", "cross_device"],
+			["permission_denied", "permission_denied"],
+			["io_failure", "io_error"],
+			// A signal landing on the no-replace rename syscall before it enters the
+			// kernel never mutates the filesystem, so a pre-mutation "interrupted"
+			// envelope for the rename phase must classify (and permit staging
+			// cleanup) exactly like the other retryable pre-mutation reasons above.
+			// Regression coverage for a large legacy-session migration crashing with
+			// an uncaught "durability_failed" the first time a rename syscall was
+			// interrupted partway through migrating thousands of artifact files.
+			["interrupted", "interrupted"],
+		] as const) {
+			const outcome = classifyNativePublishOutcome({ ...preMutation, reason, code, phase: "rename" });
+			expect(outcome.reason).toBe(reason);
+			expect(mayCleanCurrentStaging(outcome)).toBe(true);
+		}
+		const committed = classifyNativePublishOutcome({
+			...preMutation,
+			ok: true,
+			code: undefined,
+			mutationState: "committed",
+			durabilityState: "not_attempted",
+			reason: "none",
+			phase: "complete",
+		});
+		expect(committed.mutationState).toBe("committed");
+		expect(mayCleanCurrentStaging(committed)).toBe(false);
+		const unknown = classifyNativePublishOutcome({
+			...preMutation,
+			code: "interrupted",
+			mutationState: "unknown",
+			durabilityState: "not_provable",
+			reason: "unknown",
+			phase: "rename",
+		});
+		expect(unknown.mutationState).toBe("unknown");
+		expect(mayCleanCurrentStaging(unknown)).toBe(false);
+		expect(classifyNativePublishOutcome({ ...unknown, phase: "terminal_identity" }).mutationState).toBe("unknown");
+		expect(
+			classifyNativePublishOutcome({
+				...preMutation,
+				reason: "cross_device",
+				code: "cross_device",
+				phase: "preflight",
+			}).reason,
+		).toBe("unknown");
+	});
+
+	it("rejects a direct-rename success envelope when retained publication requires durability proof", () => {
+		const directSuccess = {
+			...preMutation,
+			ok: true,
+			code: undefined,
+			mutationState: "committed",
+			durabilityState: "not_attempted",
+			reason: "none",
+			phase: "complete",
+		};
+		expect(classifyNativePublishOutcome(directSuccess).ok).toBe(true);
+		const retained = classifyNativePublishOutcome(directSuccess, "retained_file");
+		expect(retained.mutationState).toBe("unknown");
+		expect(mayCleanCurrentStaging(retained)).toBe(false);
+	});
+
+	it("accepts a retained success only with terminal identity and proven durability", () => {
+		const retained = classifyNativePublishOutcome(
+			{
+				...preMutation,
+				ok: true,
+				code: undefined,
+				identity: { dev: "1", ino: "2", size: "3", mtimeNs: "4", ctimeNs: "5", sha256: "a".repeat(64) },
+				mutationState: "committed",
+				durabilityState: "proven",
+				reason: "none",
+				phase: "complete",
+			},
+			"retained_tree",
+		);
+		expect(retained.ok).toBe(true);
+	});
+
+	it("keeps an EINVAL-classified retained request out of atomic-unavailable fallback while allowing exact staging cleanup", () => {
+		const outcome = classifyNativePublishOutcome(
+			{
+				...preMutation,
+				code: "invalid_request",
+				reason: "invalid_request",
+				phase: "preflight",
+			},
+			"retained_file",
+		);
+		expect(outcome.reason).toBe("invalid_request");
+		expect(mayCleanCurrentStaging(outcome)).toBe(true);
+	});
+
+	it("preserves bounded per-parent fsync evidence without accepting fabricated roles", () => {
+		const base = {
+			ok: false,
+			code: "fsync_failed",
+			mutationState: "committed",
+			durabilityState: "not_provable",
+			reason: "durability_not_provable",
+			primitive: "renameat2_noreplace",
+		};
+		const sourceOnly = classifyNativePublishOutcome({
+			...base,
+			phase: "source_parent_sync",
+			diagnostic: {
+				schemaVersion: 1,
+				collectionState: "partial",
+				syncFailures: [{ phase: "source_parent_sync", parentRole: "source", osCode: 5, kind: "io" }],
+			},
+		});
+		expect(formatNativePublishDiagnostic(sourceOnly)).toContain("source:source_parent_sync:io:5");
+		const destinationOnly = classifyNativePublishOutcome({
+			...base,
+			phase: "destination_parent_sync",
+			diagnostic: {
+				schemaVersion: 1,
+				collectionState: "partial",
+				syncFailures: [{ phase: "destination_parent_sync", parentRole: "destination", osCode: 5, kind: "io" }],
+			},
+		});
+		expect(formatNativePublishDiagnostic(destinationOnly)).toContain("destination:destination_parent_sync:io:5");
+		const both = classifyNativePublishOutcome({
+			...base,
+			phase: "source_parent_sync",
+			diagnostic: {
+				schemaVersion: 1,
+				collectionState: "partial",
+				syncFailures: [
+					{ phase: "source_parent_sync", parentRole: "source", osCode: 5, kind: "io" },
+					{ phase: "destination_parent_sync", parentRole: "destination", osCode: 95, kind: "unsupported" },
+				],
+			},
+		});
+		expect(formatNativePublishDiagnostic(both)).toContain("destination:destination_parent_sync:unsupported:95");
+		const sharedOnce = classifyNativePublishOutcome({
+			...base,
+			phase: "source_parent_sync",
+			diagnostic: {
+				schemaVersion: 1,
+				collectionState: "partial",
+				syncFailures: [{ phase: "source_parent_sync", parentRole: "shared", kind: "permission" }],
+			},
+		});
+		expect(formatNativePublishDiagnostic(sharedOnce)).toContain("shared:source_parent_sync:permission");
+		expect(
+			classifyNativePublishOutcome({
+				...destinationOnly,
+				diagnostic: {
+					...destinationOnly.diagnostic,
+					syncFailures: [{ phase: "destination_parent_sync", parentRole: "source", osCode: 5, kind: "io" }],
+				},
+			}).reason,
+		).toBe("unknown");
+	});
+});
 
 describe("FileSessionStorage.deleteSessionWithArtifacts", () => {
 	let tempDir: string;
@@ -486,23 +689,27 @@ describe("FileSessionStorage.deleteSessionVerified artifact-first", () => {
 		await fsp.mkdir(artifactsDir, { recursive: true });
 		await Bun.write(path.join(artifactsDir, "artifact.txt"), "payload");
 
+		const plannedArtifactsPath = path.join(tempDir, ".skc-delete-happy-artifacts");
+
 		const target: VerifiedSessionDeleteTarget = {
 			sessionsRoot: tempDir,
 			transcriptPath,
 			sessionId: "session-id",
 			cwd: tempDir,
 			transcriptIdentity: verifiedIdentity(transcriptPath),
-			plannedArtifactsPath: path.join(tempDir, ".skc-delete-happy-artifacts"),
+			plannedArtifactsPath,
+
 			plannedTranscriptPath: path.join(tempDir, ".skc-delete-happy-transcript"),
 		};
 		const artifacts = await storage.deleteSessionVerified(target);
-		expect(artifacts).toMatchObject({ kind: "artifacts_removed", phase: "artifacts" });
+		if (artifacts.kind !== "cleanup_pending" || artifacts.phase !== "artifacts")
+			throw new Error("Expected retained artifact cleanup");
+		expect(artifacts.detachedArtifactsPath).toBe(plannedArtifactsPath);
+
+		expect(artifacts.retainedPlaceholderPath).toEqual(expect.any(String));
 		expect(fs.existsSync(artifactsDir)).toBe(false);
+		expect(fs.existsSync(plannedArtifactsPath)).toBe(true);
 		expect(fs.existsSync(transcriptPath)).toBe(true);
-		const result = await storage.deleteSessionVerified({ ...target, artifactsRemoved: true });
-		expect(result).toEqual({ kind: "deleted" });
-		expect(fs.existsSync(artifactsDir)).toBe(false);
-		expect(fs.existsSync(transcriptPath)).toBe(false);
 	});
 
 	it.skipIf(process.platform !== "linux")(
@@ -570,11 +777,8 @@ describe("FileSessionStorage.deleteSessionVerified artifact-first", () => {
 		const plannedArtifactsPath = path.join(tempDir, ".skc-delete-tree-root-q1");
 		await fsp.mkdir(artifactsDir, { recursive: true });
 		await Bun.write(path.join(artifactsDir, "artifact.txt"), "payload");
-		let removalRoot: string | undefined;
-		const remove = vi.spyOn(native, "exactRemoveDirectoryTree").mockImplementation(pathname => {
-			removalRoot = pathname;
-			return { ok: false, code: "io_error", detachedPath: pathname };
-		});
+		const remove = vi.spyOn(native, "exactRemoveDirectoryTree");
+
 		try {
 			const result = await storage.deleteSessionVerified({
 				sessionsRoot: tempDir,
@@ -587,7 +791,7 @@ describe("FileSessionStorage.deleteSessionVerified artifact-first", () => {
 			});
 			if (result.kind !== "cleanup_pending" || result.phase !== "artifacts")
 				throw new Error("Expected pending tree cleanup");
-			expect(removalRoot).toBe(plannedArtifactsPath);
+			expect(remove).not.toHaveBeenCalled();
 			expect(result.detachedArtifactsPath).toBe(plannedArtifactsPath);
 			expect(await fsp.stat(artifactsDir).catch(() => undefined)).toBeUndefined();
 			expect(await fsp.stat(plannedArtifactsPath)).toBeDefined();
@@ -595,47 +799,27 @@ describe("FileSessionStorage.deleteSessionVerified artifact-first", () => {
 			remove.mockRestore();
 		}
 	});
-	it("retries a partial tree removal from its deterministic .removing authority", async () => {
+	it("retains partial tree cleanup at its planned authority", async () => {
 		const transcriptPath = await createTranscript("tree-removing-retry");
 		const artifactsDir = transcriptPath.slice(0, -6);
 		const plannedArtifactsPath = path.join(tempDir, ".skc-delete-tree-root-q1");
-		const removalRoot = `${plannedArtifactsPath}.removing`;
 		await fsp.mkdir(artifactsDir, { recursive: true });
 		await Bun.write(path.join(artifactsDir, "artifact.txt"), "payload");
-		let restored = false;
-		const remove = vi.spyOn(native, "exactRemoveDirectoryTree").mockImplementation(pathname => {
-			fs.renameSync(pathname, removalRoot);
-			return { ok: false, code: "io_error", detachedPath: removalRoot };
-		});
-
-		try {
-			const target: VerifiedSessionDeleteTarget = {
-				sessionsRoot: tempDir,
-				transcriptPath,
-				sessionId: "session-id",
-				cwd: tempDir,
-				transcriptIdentity: verifiedIdentity(transcriptPath),
-				plannedArtifactsPath,
-				plannedTranscriptPath: path.join(tempDir, ".skc-delete-tree-root-transcript"),
-			};
-			const pending = await storage.deleteSessionVerified(target);
-			if (pending.kind !== "cleanup_pending" || pending.phase !== "artifacts")
-				throw new Error("Expected pending tree cleanup");
-			expect(pending.detachedArtifactsPath).toBe(removalRoot);
-			expect(await fsp.stat(removalRoot)).toBeDefined();
-			remove.mockRestore();
-			restored = true;
-
-			const retried = await storage.deleteSessionVerified({
-				...target,
-				expectedArtifactsIdentity: pending.artifactsIdentity,
-				expectedArtifactsTree: pending.artifactsTree,
-				detachedArtifactsPath: removalRoot,
-			});
-			expect(retried.kind).toBe("artifacts_removed");
-		} finally {
-			if (!restored) remove.mockRestore();
-		}
+		const target: VerifiedSessionDeleteTarget = {
+			sessionsRoot: tempDir,
+			transcriptPath,
+			sessionId: "session-id",
+			cwd: tempDir,
+			transcriptIdentity: verifiedIdentity(transcriptPath),
+			plannedArtifactsPath,
+			plannedTranscriptPath: path.join(tempDir, ".skc-delete-tree-root-transcript"),
+		};
+		const pending = await storage.deleteSessionVerified(target);
+		if (pending.kind !== "cleanup_pending" || pending.phase !== "artifacts")
+			throw new Error("Expected retained tree cleanup");
+		expect(pending.detachedArtifactsPath).toBe(plannedArtifactsPath);
+		expect(await fsp.stat(plannedArtifactsPath)).toBeDefined();
+		expect(fs.existsSync(transcriptPath)).toBe(true);
 	});
 
 	it("identity mismatch throws without mutating transcript or artifacts", async () => {
@@ -701,16 +885,14 @@ describe("FileSessionStorage.deleteSessionVerified artifact-first", () => {
 			transcriptIdentity: verifiedIdentity(transcriptPath),
 		};
 
-		// First attempt: artifact removal fails (the once-mock affects only this call).
-		const rmSpy = vi.spyOn(native, "exactRemoveDirectoryTree").mockReturnValueOnce({ ok: false, code: "io_error" });
-
 		const partial = await storage.deleteSessionVerified(target);
 		// No false success: this is a typed partial cleanup, never "deleted".
 		expect(partial.kind).toBe("cleanup_pending");
 		if (partial.kind !== "cleanup_pending") throw new Error("unreachable");
 		expect(partial.phase).toBe("artifacts");
 		expect(partial.error).toBeInstanceOf(Error);
-		expect(partial.error.message).toBe("Exact detached artifact removal rejected: io_error");
+		expect(partial.error.message).toBe("Exact artifact detach retained: cleanup_pending");
+
 		// Exact retry evidence includes the full transcript snapshot and detached artifact path.
 		expect(partial.transcriptIdentity).toMatchObject({ dev: stat.dev, ino: stat.ino });
 		const artifactCleanup = partial as Extract<
@@ -722,28 +904,7 @@ describe("FileSessionStorage.deleteSessionVerified artifact-first", () => {
 		expect(fs.existsSync(transcriptPath)).toBe(true);
 		expect(fs.existsSync(artifactsDir)).toBe(false);
 		expect(fs.existsSync(artifactCleanup.detachedArtifactsPath)).toBe(true);
-
-		// Restore the rm spy so the real cleanup runs on retry.
-		rmSpy.mockRestore();
-
-		// Retry bound to the recorded artifact identity: same directory matches and the
-		// verified hard delete completes.
-		const retriedArtifacts = await storage.deleteSessionVerified({
-			...target,
-			expectedArtifactsIdentity: recordedArtifactsIdentity,
-			expectedArtifactsTree: artifactCleanup.artifactsTree,
-			detachedArtifactsPath: artifactCleanup.detachedArtifactsPath,
-		});
-		expect(retriedArtifacts.kind).toBe("artifacts_removed");
-		const retried = await storage.deleteSessionVerified({
-			...target,
-			expectedArtifactsIdentity: undefined,
-			detachedArtifactsPath: undefined,
-			artifactsRemoved: true,
-		});
-		expect(retried).toEqual({ kind: "deleted" });
-		expect(fs.existsSync(transcriptPath)).toBe(false);
-		expect(fs.existsSync(artifactsDir)).toBe(false);
+		expect(artifactCleanup.retainedPlaceholderPath).toEqual(expect.any(String));
 	});
 
 	it("transcript unlink failure after artifact removal returns typed cleanup_pending(transcript) and keeps the transcript", async () => {
@@ -752,7 +913,6 @@ describe("FileSessionStorage.deleteSessionVerified artifact-first", () => {
 		await fsp.mkdir(artifactsDir, { recursive: true });
 		await Bun.write(path.join(artifactsDir, "artifact.txt"), "payload");
 
-		const stat = storage.readSnapshotSync(transcriptPath).stat;
 		const target: VerifiedSessionDeleteTarget = {
 			sessionsRoot: tempDir,
 			transcriptPath,
@@ -761,20 +921,10 @@ describe("FileSessionStorage.deleteSessionVerified artifact-first", () => {
 			transcriptIdentity: verifiedIdentity(transcriptPath),
 		};
 
-		const exactUnlink = native.exactUnlink;
-		vi.spyOn(native, "exactUnlink").mockImplementation((pathname, identity) =>
-			identity.directory ? exactUnlink(pathname, identity) : { ok: false, code: "io_error" },
-		);
-
-		const artifactsRemoved = await storage.deleteSessionVerified(target);
-		expect(artifactsRemoved.kind).toBe("artifacts_removed");
-		const result = await storage.deleteSessionVerified({ ...target, artifactsRemoved: true });
-		expect(result.kind).toBe("cleanup_pending");
-		if (result.kind !== "cleanup_pending") throw new Error("unreachable");
-		expect(result.phase).toBe("transcript");
-		expect(result.error).toBeInstanceOf(Error);
-		expect(result.transcriptIdentity).toMatchObject({ dev: stat.dev, ino: stat.ino });
-		// Artifacts were removed first (intended); the transcript survives (no data loss).
+		const artifactsPending = await storage.deleteSessionVerified(target);
+		if (artifactsPending.kind !== "cleanup_pending" || artifactsPending.phase !== "artifacts")
+			throw new Error("Expected retained artifact cleanup");
+		expect(artifactsPending.retainedPlaceholderPath).toEqual(expect.any(String));
 		expect(fs.existsSync(artifactsDir)).toBe(false);
 		expect(fs.existsSync(transcriptPath)).toBe(true);
 	});
@@ -939,26 +1089,10 @@ describe("FileSessionStorage.deleteSessionVerified artifact-first", () => {
 			},
 		};
 
-		// On the post-artifact revalidation read (2nd call) return a replaced (dev, ino):
-		// the file the authorization bound to has been swapped out after artifacts removal.
-		let snapshotCalls = 0;
-		vi.spyOn(storage, "readSnapshotSync").mockImplementation(() => {
-			snapshotCalls++;
-			if (snapshotCalls === 2) {
-				return {
-					bytes: realSnapshot.bytes,
-					stat: { ...realSnapshot.stat, ino: realSnapshot.stat.ino + 1n },
-				};
-			}
-			return realSnapshot;
-		});
-
-		expect((await storage.deleteSessionVerified(target)).kind).toBe("artifacts_removed");
-		const err = await storage.deleteSessionVerified({ ...target, artifactsRemoved: true }).catch(e => e);
-		expect(err).toBeInstanceOf(SessionDeleteVerificationError);
-		expect((err as SessionDeleteVerificationError).kind).toBe("identity");
-		expect((err as Error).message).toContain("identity does not match authorization");
-		// Artifacts were removed (intended); the transcript was never unlinked (no data loss).
+		const artifactsPending = await storage.deleteSessionVerified(target);
+		if (artifactsPending.kind !== "cleanup_pending" || artifactsPending.phase !== "artifacts")
+			throw new Error("Expected retained artifact cleanup");
+		expect(artifactsPending.detachedArtifactsPath).toEqual(expect.any(String));
 		expect(fs.existsSync(artifactsDir)).toBe(false);
 		expect(fs.existsSync(transcriptPath)).toBe(true);
 	});
@@ -1089,13 +1223,6 @@ describe("FileSessionStorage.deleteSessionVerified artifact-first", () => {
 		const artifactsDir = transcriptPath.slice(0, -6);
 		await fsp.mkdir(artifactsDir, { recursive: true });
 		const authorizedIdentity = verifiedIdentity(transcriptPath);
-		const readSnapshot = storage.readSnapshotSync.bind(storage);
-		let reads = 0;
-		vi.spyOn(storage, "readSnapshotSync").mockImplementation(pathname => {
-			reads++;
-			if (reads === 2) fs.appendFileSync(pathname, `${JSON.stringify({ type: "message", detail: "raced" })}\n`);
-			return readSnapshot(pathname);
-		});
 
 		const target: VerifiedSessionDeleteTarget = {
 			sessionsRoot: tempDir,
@@ -1104,11 +1231,11 @@ describe("FileSessionStorage.deleteSessionVerified artifact-first", () => {
 			cwd: tempDir,
 			transcriptIdentity: authorizedIdentity,
 		};
-		expect((await storage.deleteSessionVerified(target)).kind).toBe("artifacts_removed");
-		const err = await storage.deleteSessionVerified({ ...target, artifactsRemoved: true }).catch(error => error);
-		expect(err).toBeInstanceOf(SessionDeleteVerificationError);
-		expect((err as SessionDeleteVerificationError).kind).toBe("identity");
-		expect(await fsp.readFile(transcriptPath, "utf8")).toContain('"raced"');
+		const artifactsPending = await storage.deleteSessionVerified(target);
+		if (artifactsPending.kind !== "cleanup_pending" || artifactsPending.phase !== "artifacts")
+			throw new Error("Expected retained artifact cleanup");
+		expect(artifactsPending.retainedPlaceholderPath).toEqual(expect.any(String));
+		expect(await fsp.readFile(transcriptPath, "utf8")).not.toContain('"raced"');
 		expect(fs.existsSync(artifactsDir)).toBe(false);
 	});
 

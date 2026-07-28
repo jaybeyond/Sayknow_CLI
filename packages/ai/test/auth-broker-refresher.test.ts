@@ -92,6 +92,31 @@ describe("AuthBrokerRefresher", () => {
 		expect(refreshSpy).not.toHaveBeenCalled();
 	});
 
+	test("does not sweep MCP-bound credentials without transient client metadata", async () => {
+		const now = 1_700_000_000_000;
+		store!.replaceAuthCredentialsForProvider("mcp_oauth_bound", [
+			{
+				type: "oauth",
+				access: "old",
+				refresh: "client-authenticated-refresh",
+				expires: now + 60_000,
+				mcpBinding: {
+					resourceOrigin: "https://mcp.example",
+					tokenEndpoint: "https://auth.example/token",
+				},
+			},
+		]);
+		const fetchSpy = vi.spyOn(globalThis, "fetch");
+		storage = new AuthStorage(store!);
+		await storage.reload();
+		const refresher = new AuthBrokerRefresher({ storage, refreshSkewMs: 5 * 60_000, now: () => now });
+
+		await refresher.tick();
+
+		expect(fetchSpy).not.toHaveBeenCalled();
+		expect(storage.exportSnapshot().credentials).toHaveLength(1);
+	});
+
 	test("disables credentials on definitive failure (invalid_grant)", async () => {
 		const now = 1_700_000_000_000;
 		store!.saveOAuth("anthropic", {

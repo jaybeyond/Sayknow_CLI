@@ -6,7 +6,13 @@ import * as path from "node:path";
 import "../../src/tools/renderers";
 import { Settings } from "../../src/config/settings";
 import { ReadTool } from "../../src/tools/read";
-import { parseSqlitePathCandidates, parseSqliteSelector, renderTable } from "../../src/tools/sqlite-reader";
+import {
+	enforceSqliteQueryOnly,
+	executeReadQuery,
+	parseSqlitePathCandidates,
+	parseSqliteSelector,
+	renderTable,
+} from "../../src/tools/sqlite-reader";
 import { WriteTool } from "../../src/tools/write";
 
 const hostileSqliteSchemaName = "SqlItE_hostile_fixture";
@@ -259,6 +265,56 @@ describe("SQLite tool support", () => {
 		});
 		expect(parseSqliteSelector("", "q=SELECT+1")).toEqual({ kind: "raw", sql: "SELECT 1" });
 	});
+
+	it("accepts exactly one explicit SELECT statement for raw reads", async () => {
+		const result = await readTool.execute("sqlite-raw-select", {
+			path: `${sqlitePath}?${new URLSearchParams({ q: "SELECT name FROM users WHERE id = 1;" })}`,
+		});
+		expect(getText(result)).toContain("Alice");
+		expect(parseSqliteSelector("", new URLSearchParams({ q: "SELECT ';' AS value" }).toString())).toEqual({
+			kind: "raw",
+			sql: "SELECT ';' AS value",
+		});
+	});
+
+	it("rejects non-SELECT and compound raw statements before execution", async () => {
+		const escapedPath = path.join(tmpDir, "escaped.sqlite");
+		for (const sql of [
+			"WITH rows AS (SELECT 1) SELECT * FROM rows",
+			"VALUES (1)",
+			"PRAGMA table_info(users)",
+			`ATTACH DATABASE '${escapedPath}' AS escaped`,
+			"VACUUM",
+			"CREATE TABLE escaped(value TEXT)",
+			"INSERT INTO users (name, email, status, created) VALUES ('X', 'x@example.com', 'active', 7)",
+			"UPDATE users SET name = 'X'",
+			"DELETE FROM users",
+			"SELECT 1; DELETE FROM users",
+			"SELECT 1\0; DELETE FROM users",
+			"-- comment\nSELECT 1",
+			"SELECT 1 /* comment */",
+		]) {
+			await expect(
+				readTool.execute("sqlite-raw-rejected", {
+					path: `${sqlitePath}?${new URLSearchParams({ q: sql })}`,
+				}),
+			).rejects.toThrow(/exactly one explicit SELECT/i);
+		}
+		expect(await fs.exists(escapedPath)).toBe(false);
+		expect(readUserCount(sqlitePath)).toBe(6);
+	});
+
+	it("rechecks raw query invariants at execution and enables query-only defense", () => {
+		const db = new Database(sqlitePath, { strict: true });
+		try {
+			expect(() => executeReadQuery(db, "DELETE FROM users")).toThrow(/exactly one explicit SELECT/i);
+			enforceSqliteQueryOnly(db);
+			expect(() => db.run("DELETE FROM users")).toThrow(/read.?only/i);
+		} finally {
+			db.close();
+		}
+		expect(readUserCount(sqlitePath)).toBe(6);
+	});
 	it("requires complete decimal integers for SQLite pagination", () => {
 		for (const value of ["2.5", "2rows", "2e1", "0x10"]) {
 			expect(() => parseSqliteSelector("users", `limit=${value}`)).toThrow(
@@ -507,12 +563,12 @@ describe("SQLite tool support", () => {
 		).rejects.toThrow(/comments or statement terminators/i);
 	});
 
-	it("rejects mutating raw queries on the readonly connection", async () => {
+	it("rejects mutating raw queries at the selector boundary", async () => {
 		await expect(
 			readTool.execute("sqlite-raw-write", {
 				path: `${sqlitePath}?q=INSERT+INTO+users+(name,email,status,created)+VALUES+('X','x@example.com','active',7)`,
 			}),
-		).rejects.toThrow(/readonly/i);
+		).rejects.toThrow(/exactly one explicit SELECT/i);
 	});
 
 	it("rejects table names that do not exist instead of interpolating them", async () => {

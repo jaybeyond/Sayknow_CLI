@@ -8,6 +8,7 @@ import { createMockModel } from "@sayknow-cli/ai/providers/mock";
 import { ModelRegistry } from "@sayknow-cli/coding-agent/config/model-registry";
 import { Settings } from "@sayknow-cli/coding-agent/config/settings";
 import { ExtensionRunner, loadExtensions } from "@sayknow-cli/coding-agent/extensibility/extensions";
+import * as internalUrls from "@sayknow-cli/coding-agent/internal-urls";
 import { AgentSession, type AgentSessionEvent } from "@sayknow-cli/coding-agent/session/agent-session";
 import { AuthStorage } from "@sayknow-cli/coding-agent/session/auth-storage";
 import { SessionManager } from "@sayknow-cli/coding-agent/session/session-manager";
@@ -20,6 +21,15 @@ describe("AgentSession handoff", () => {
 	let authStorage: AuthStorage;
 	let modelRegistry: ModelRegistry;
 	let events: AgentSessionEvent[];
+
+	async function waitFor(predicate: () => boolean, timeoutMs = 2_000): Promise<void> {
+		const deadline = Date.now() + timeoutMs;
+		while (Date.now() < deadline) {
+			if (predicate()) return;
+			await Bun.sleep(10);
+		}
+		throw new Error("Timed out waiting for handoff maintenance observation");
+	}
 
 	beforeEach(async () => {
 		tempDir = TempDir.createSync("@pi-handoff-");
@@ -487,7 +497,9 @@ describe("AgentSession handoff", () => {
 
 		session.agent.emitExternalEvent({ type: "message_end", message: assistantMessage });
 		session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMessage] });
-		await Bun.sleep(20);
+		await waitFor(
+			() => handoffSpy.mock.calls.length === 1 && events.some(event => event.type === "auto_compaction_end"),
+		);
 
 		expect(handoffSpy).toHaveBeenCalledTimes(1);
 		const endEvents = events.filter(event => event.type === "auto_compaction_end");
@@ -672,6 +684,23 @@ describe("AgentSession handoff", () => {
 		}
 	});
 
+	it("keeps the predecessor active when successor local readiness fails, then retries", async () => {
+		const handoffText = "## Goal\nContinue from here";
+		vi.spyOn(compactionModule, "generateHandoff").mockResolvedValue(handoffText);
+		const beforeId = session.sessionId;
+		const beforeFile = session.sessionFile;
+		vi.spyOn(internalUrls, "initializeLocalRoot").mockRejectedValueOnce(new Error("local readiness boom"));
+
+		await expect(session.handoff()).rejects.toThrow("local readiness boom");
+		expect(session.sessionId).toBe(beforeId);
+		expect(session.sessionFile).toBe(beforeFile);
+		expect(sessionManager.getBranch().filter(entry => entry.type === "custom_message")).toHaveLength(0);
+
+		const result = await session.handoff();
+		expect(result?.document).toBe(handoffText);
+		expect(session.sessionId).not.toBe(beforeId);
+	});
+
 	it("is non-destructive when the post-generation switch fails: session stays active and document is retained", async () => {
 		const handoffText = "## Goal\nContinue from here";
 		vi.spyOn(compactionModule, "generateHandoff").mockResolvedValue(handoffText);
@@ -679,8 +708,8 @@ describe("AgentSession handoff", () => {
 		const beforeFile = session.sessionFile;
 		const beforeMessageCount = session.agent.state.messages.length;
 
-		// Force a failure in the injection step, after the session switch has begun.
-		const appendSpy = vi.spyOn(sessionManager, "appendCustomMessageEntry").mockImplementationOnce(() => {
+		// Force a failure in staged injection before successor adoption.
+		const appendSpy = vi.spyOn(sessionManager, "appendPreparedCustomMessageEntry").mockImplementationOnce(() => {
 			throw new Error("inject boom");
 		});
 
@@ -714,19 +743,20 @@ describe("AgentSession handoff", () => {
 
 	it.each([
 		[
-			"newSession throws before mutating (partial-switch guard)",
-			() => vi.spyOn(sessionManager, "newSession").mockRejectedValueOnce(new Error("newSession boom")),
+			"prepareNewSession throws before mutating (partial-switch guard)",
+			() => vi.spyOn(sessionManager, "prepareNewSession").mockRejectedValueOnce(new Error("newSession boom")),
 			"newSession boom",
 		],
 		[
-			"ensureOnDisk throws after the switch (persistence failure)",
-			() => vi.spyOn(sessionManager, "ensureOnDisk").mockRejectedValueOnce(new Error("ensure boom")),
+			"staged persistence throws before successor adoption",
+			() =>
+				vi.spyOn(sessionManager, "ensurePreparedNewSessionOnDisk").mockRejectedValueOnce(new Error("ensure boom")),
 			"ensure boom",
 		],
 		[
-			"display rebuild throws after persistence (post-ensureOnDisk, orphan cleanup)",
+			"staged display rebuild throws before successor adoption",
 			() =>
-				vi.spyOn(session, "buildDisplaySessionContext").mockImplementationOnce(() => {
+				vi.spyOn(session, "buildPreparedDisplaySessionContext").mockImplementationOnce(() => {
 					throw new Error("display boom");
 				}),
 			"display boom",
@@ -775,10 +805,19 @@ describe("AgentSession handoff", () => {
 			throw new Error("post-commit boom");
 		});
 
-		const result = await session.handoff();
+		let caught: unknown;
+		try {
+			await session.handoff();
+		} catch (error) {
+			caught = error;
+		}
 
-		// Post-commit failure is retained, not rolled back: the handoff succeeded.
-		expect(result?.document).toBe(handoffText);
+		// Post-commit failure is surfaced explicitly while retaining the successor.
+		expect(caught).toBeInstanceOf(Error);
+		expect((caught as { code?: string }).code).toBe("handoff_committed_degraded");
+		expect((caught as { handoffDocument?: string }).handoffDocument).toBe(handoffText);
+		expect((caught as Error).cause).toBeInstanceOf(Error);
+		expect(((caught as Error).cause as Error).message).toContain("post-commit boom");
 		expect(session.sessionId).not.toBe(beforeId);
 		expect(
 			sessionManager.getBranch().filter(entry => entry.type === "custom_message" && entry.customType === "handoff"),

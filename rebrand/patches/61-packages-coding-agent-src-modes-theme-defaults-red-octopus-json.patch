@@ -1,0 +1,89 @@
+--- a/packages/coding-agent/src/modes/theme/defaults/red-octopus.json
++++ b/packages/coding-agent/src/modes/theme/defaults/red-octopus.json
+@@ -17,8 +17,8 @@
+ 		"toolSuccessBg": "#23272e",
+ 		"toolErrorBg": "#2e2525",
+ 		"customMsgBg": "#2a2530",
+-		"crabShell": "#ff3b30",
+-		"claw": "#ff6a3d",
++		"octoMantle": "#ff3b30",
++		"tentacle": "#ff6a3d",
+ 		"deepRed": "#7f1d1d",
+ 		"coral": "#ff8a65",
+ 		"sand": "#ffd7a8",
+@@ -38,7 +38,7 @@
+ 		"diffRemovalRed": "#d84a4a"
+ 	},
+ 	"colors": {
+-		"accent": "claw",
++		"accent": "tentacle",
+ 		"border": "deepRed",
+ 		"borderAccent": "brandRed",
+ 		"borderMuted": "dimShell",
+@@ -54,7 +54,7 @@
+ 		"userMessageText": "shell",
+ 		"customMessageBg": "mantle",
+ 		"customMessageText": "shell",
+-		"customMessageLabel": "claw",
++		"customMessageLabel": "tentacle",
+ 		"toolPendingBg": "mantle",
+ 		"toolSuccessBg": "#14221c",
+ 		"toolErrorBg": "#331313",
+@@ -69,7 +69,7 @@
+ 		"mdQuote": "mutedShell",
+ 		"mdQuoteBorder": "deepRed",
+ 		"mdHr": "dimShell",
+-		"mdListBullet": "claw",
++		"mdListBullet": "tentacle",
+ 		"toolDiffAdded": "kelp",
+ 		"toolDiffRemoved": "diffRemovalRed",
+ 		"toolDiffContext": "mutedShell",
+@@ -80,19 +80,19 @@
+ 		"syntaxVariable": "foam",
+ 		"syntaxString": "coral",
+ 		"syntaxNumber": "seafoam",
+-		"syntaxType": "claw",
++		"syntaxType": "tentacle",
+ 		"syntaxOperator": "mutedShell",
+ 		"syntaxPunctuation": "dimShell",
+ 		"thinkingOff": "dimShell",
+ 		"thinkingMinimal": "mutedShell",
+ 		"thinkingLow": "coral",
+-		"thinkingMedium": "claw",
+-		"thinkingHigh": "crabShell",
++		"thinkingMedium": "tentacle",
++		"thinkingHigh": "octoMantle",
+ 		"thinkingXhigh": "dangerRed",
+-		"bashMode": "claw",
++		"bashMode": "tentacle",
+ 		"statusLineBg": "deepRed",
+ 		"statusLineSep": "dimShell",
+-		"statusLineModel": "claw",
++		"statusLineModel": "tentacle",
+ 		"statusLinePath": "coral",
+ 		"statusLineGitClean": "kelp",
+ 		"statusLineGitDirty": "sand",
+@@ -102,8 +102,8 @@
+ 		"statusLineDirty": "sand",
+ 		"statusLineUntracked": "diffRemovalRed",
+ 		"statusLineOutput": "foam",
+-		"statusLineCost": "claw",
+-		"statusLineSubagents": "crabShell",
++		"statusLineCost": "tentacle",
++		"statusLineSubagents": "octoMantle",
+ 		"pythonMode": "sand"
+ 	},
+ 	"export": {
+@@ -114,9 +114,9 @@
+ 	"symbols": {
+ 		"preset": "unicode",
+ 		"overrides": {
+-			"icon.pi": "\ud83e\udd80",
+-			"icon.agents": "\ud83e\udd9e",
+-			"status.running": "\ud83e\udd80",
++			"icon.pi": "\ud83d\udc19",
++			"icon.agents": "\ud83e\udd91",
++			"status.running": "\ud83c\udf0a",
+ 			"md.bullet": "\u25b8"
+ 		}
+ 	}

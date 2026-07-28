@@ -60,6 +60,7 @@ type WizardStep =
  */
 export interface MCPAddWizardOAuthResult {
 	credentialId: string;
+	tokenEndpoint: string;
 	clientId?: string;
 	clientSecret?: string;
 }
@@ -122,6 +123,7 @@ export class MCPAddWizard extends Container {
 	#onCancelCallback: () => void;
 	#onOAuthCallback:
 		| ((
+				endpointUrl: string,
 				authUrl: string,
 				tokenUrl: string,
 				clientId: string,
@@ -141,6 +143,7 @@ export class MCPAddWizard extends Container {
 		onComplete: (name: string, config: MCPServerConfig, scope: Scope) => void,
 		onCancel: () => void,
 		onOAuth?: (
+			endpointUrl: string,
 			authUrl: string,
 			tokenUrl: string,
 			clientId: string,
@@ -1189,6 +1192,7 @@ export class MCPAddWizard extends Container {
 		try {
 			// Call OAuth handler
 			const oauthResult = await this.#onOAuthCallback(
+				this.#state.url,
 				this.#state.oauthAuthUrl,
 				this.#state.oauthTokenUrl,
 				this.#state.oauthClientId,
@@ -1200,6 +1204,7 @@ export class MCPAddWizard extends Container {
 			// Store credential ID + any dynamically-registered client credentials,
 			// so the final mcp.json entry persists everything needed for refresh.
 			this.#state.oauthCredentialId = oauthResult.credentialId;
+			this.#state.oauthTokenUrl = oauthResult.tokenEndpoint;
 			if (oauthResult.clientId) this.#state.oauthClientId = oauthResult.clientId;
 			if (oauthResult.clientSecret) this.#state.oauthClientSecret = oauthResult.clientSecret;
 

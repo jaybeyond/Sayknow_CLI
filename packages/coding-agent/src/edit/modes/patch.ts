@@ -44,6 +44,7 @@ import {
 	restoreLineEndings,
 	stripBom,
 } from "../normalize";
+import { withEditPathMutation } from "../path-mutation-lock";
 import { readEditFileText, serializeEditFileText } from "../read-file";
 import type { EditToolDetails, LspBatchRequest } from "../renderer";
 import {
@@ -93,6 +94,15 @@ export interface ApplyPatchOptions {
 	fuzzyThreshold?: number;
 	allowFuzzy?: boolean;
 	fs?: FileSystem;
+	/**
+	 * When false, skip durable cross-process file locks (in-process path mutex
+	 * still serializes). Defaults to true only for the real `defaultFileSystem`
+	 * (or when `fs` is omitted). Disk-backed adapters that are not
+	 * `defaultFileSystem` (notably production `LspFileSystem` via
+	 * `executePatchSingle`) MUST pass `crossProcessLock: true` explicitly —
+	 * object identity is not a durable-lock capability probe.
+	 */
+	crossProcessLock?: boolean;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1409,13 +1419,29 @@ function applyHunksToContent(
 
 /**
  * Apply a patch operation to the filesystem.
+ *
+ * Concurrent mutations of the same absolute path are serialized (in-process always;
+ * cross-process file lock when using the real filesystem) so disjoint concurrent
+ * edits cannot silently overwrite each other (#2900).
  */
 export async function applyPatch(input: PatchInput, options: ApplyPatchOptions): Promise<ApplyPatchResult> {
-	return applyNormalizedPatch(input, options);
+	const resolvePath = (p: string): string => resolveToCwd(p, options.cwd);
+	const absolutePath = resolvePath(input.path);
+	const mutationPaths = [absolutePath];
+	if (input.rename) {
+		const destPath = resolvePath(input.rename);
+		if (destPath !== absolutePath) mutationPaths.push(destPath);
+	}
+	const usingDefaultFs = options.fs === undefined || options.fs === defaultFileSystem;
+	// dryRun/preview must stay read-only: never create durable `<path>.lock` dirs
+	// (would fail on read-only parents and mutate the FS during preview) (#2900 review).
+	const crossProcess = options.dryRun === true ? false : (options.crossProcessLock ?? usingDefaultFs);
+	return withEditPathMutation(mutationPaths, () => applyNormalizedPatch(input, options), { crossProcess });
 }
 
 /**
  * Apply a normalized patch operation to the filesystem.
+ * Caller must already hold path mutation rights when concurrent writers exist.
  * @internal
  */
 async function applyNormalizedPatch(input: PatchInput, options: ApplyPatchOptions): Promise<ApplyPatchResult> {
@@ -1514,6 +1540,12 @@ async function applyNormalizedPatch(input: PatchInput, options: ApplyPatchOption
 	const isMove = Boolean(input.rename) && destPath !== absolutePath;
 
 	if (!dryRun) {
+		// Commit-time CAS: reject if another writer mutated the file after our
+		// authoritative read (e.g. a process that did not take the path lock).
+		const commitContent = await readExistingPatchFile(fs, absolutePath, input.path);
+		if (commitContent !== originalContent) {
+			throw new ApplyPatchError(`concurrent edit conflict: file changed since read: ${input.path}`);
+		}
 		if (isMove) {
 			const parentDir = path.dirname(destPath);
 			if (parentDir && parentDir !== ".") {
@@ -1735,11 +1767,16 @@ export async function executePatchSingle(
 
 	const input: PatchInput = { path: resolvedPath, op, rename: resolvedRename, diff };
 	const patchFileSystem = new LspFileSystem(writethrough, signal, batchRequest, beginDeferredDiagnosticsForPath);
+	// Production edit path uses LspFileSystem (disk-backed writethrough), which is
+	// not `defaultFileSystem` by object identity. Force durable cross-process
+	// locking so multi-process agents cannot silently race past the path mutex
+	// (#2900 review: do not infer lock capability from FileSystem identity).
 	const result = await applyPatch(input, {
 		cwd: session.cwd,
 		fs: patchFileSystem,
 		fuzzyThreshold,
 		allowFuzzy,
+		crossProcessLock: true,
 	});
 
 	// Post-write verification: only meaningful for in-place updates where the

@@ -1,0 +1,63 @@
+--- a/scripts/verify-skc-ui-redesign.ts
++++ b/scripts/verify-skc-ui-redesign.ts
+@@ -65,22 +65,20 @@
+ 		isRecord(blueOctopus.colors);
+ 
+ 	return {
+-		name: "red-octopus/blue-octopus theme defaults and semantic token split",
++		name: "blue-octopus default (dark + light) with red-octopus alternate, semantic token split",
+ 		passed:
+-			settings.includes('default: "red-octopus"') &&
+ 			settings.includes('default: "blue-octopus"') &&
+-			themeRuntime.includes('autoDarkTheme: string = "red-octopus"') &&
++			themeRuntime.includes('autoDarkTheme: string = "blue-octopus"') &&
+ 			themeRuntime.includes('autoLightTheme: string = "blue-octopus"') &&
+ 			retainedBuiltIns &&
+-			resolveColor(colors.accent, vars) === resolveColor(vars.claw, vars) &&
++			resolveColor(colors.accent, vars) === resolveColor(vars.tentacle, vars) &&
+ 			resolveColor(colors.error, vars) === resolveColor(vars.dangerRed, vars) &&
+ 			resolveColor(colors.warning, vars) === resolveColor(vars.warningAmber, vars) &&
+ 			resolveColor(colors.toolDiffRemoved, vars) === resolveColor(vars.diffRemovalRed, vars) &&
+ 			semanticFindings.length === 0,
+ 		details: [
+-			`settings default red-octopus: ${settings.includes('default: "red-octopus"')}`,
+ 			`settings default blue-octopus: ${settings.includes('default: "blue-octopus"')}`,
+-			`runtime autoDarkTheme red-octopus: ${themeRuntime.includes('autoDarkTheme: string = "red-octopus"')}`,
++			`runtime autoDarkTheme blue-octopus: ${themeRuntime.includes('autoDarkTheme: string = "blue-octopus"')}`,
+ 			`runtime autoLightTheme blue-octopus: ${themeRuntime.includes('autoLightTheme: string = "blue-octopus"')}`,
+ 			`expected built-in themes (${expectedBuiltIns.join(", ")}): ${retainedBuiltIns}`,
+ 			`semantic collisions: ${semanticFindings.join("; ") || "<none>"}`,
+@@ -168,21 +166,21 @@
+ 	const packageReadme = await readText("packages/coding-agent/README.md");
+ 	const themeDoc = await readText("docs/theme.md");
+ 	return {
+-		name: "public docs current SKC crustacean theme direction",
++		name: "public docs current SKC cephalopod theme direction",
+ 		passed:
+-			rootReadme.includes("default dark TUI identity is the SKC red-octopus theme") &&
+-			rootReadme.includes("light-appearance terminals default to the bundled blue-octopus theme") &&
+-			packageReadme.includes("defaults to the bundled `red-octopus`") &&
+-			packageReadme.includes("bundled `blue-octopus` theme") &&
+-			themeDoc.includes('theme.dark = "red-octopus"') &&
++			rootReadme.includes("default TUI identity is the SKC **blue-octopus** theme") &&
++			rootReadme.includes("for both dark and light terminals") &&
++			packageReadme.includes("defaults to the bundled `blue-octopus`") &&
++			packageReadme.includes("`red-octopus`") &&
++			themeDoc.includes('theme.dark = "blue-octopus"') &&
+ 			themeDoc.includes('theme.light = "blue-octopus"'),
+ 		details: [
+-			`README SKC red-octopus default: ${rootReadme.includes("default dark TUI identity is the SKC red-octopus theme")}`,
+-			`README blue-octopus light default: ${rootReadme.includes("light-appearance terminals default to the bundled blue-octopus theme")}`,
+-			`package README default red-octopus: ${packageReadme.includes("defaults to the bundled `red-octopus`")}`,
+-			`package README default blue-octopus: ${packageReadme.includes("bundled `blue-octopus` theme")}`,
+-			`theme docs default red-octopus: ${themeDoc.includes('theme.dark = "red-octopus"')}`,
+-			`theme docs default blue-octopus: ${themeDoc.includes('theme.light = "blue-octopus"')}`,
++			`README blue-octopus default: ${rootReadme.includes("default TUI identity is the SKC **blue-octopus** theme")}`,
++			`README both dark and light: ${rootReadme.includes("for both dark and light terminals")}`,
++			`package README default blue-octopus: ${packageReadme.includes("defaults to the bundled `blue-octopus`")}`,
++			`package README red-octopus alternate: ${packageReadme.includes("`red-octopus`")}`,
++			`theme docs default dark blue-octopus: ${themeDoc.includes('theme.dark = "blue-octopus"')}`,
++			`theme docs default light blue-octopus: ${themeDoc.includes('theme.light = "blue-octopus"')}`,
+ 		],
+ 	};
+ }

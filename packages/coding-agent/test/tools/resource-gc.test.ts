@@ -11,6 +11,8 @@ import {
 	__resetResourceGcForTest,
 	__runResourceGcTickForTest,
 	__runResourceGcTimerCallbackForTest,
+	__sampleLinuxCgroupHierarchyForTest,
+	__selectMemoryPressureDomainForTest,
 	__setResourceGcDepsForTest,
 	__setResourceGcSchedulerNowForTest,
 	type ResourceGcDeps,
@@ -41,12 +43,20 @@ function baseDeps(over: Partial<ResourceGcDeps> = {}): ResourceGcDeps {
 	return {
 		now: () => NOW,
 		rssBytes: () => 1,
+		memorySnapshot: async () => ({
+			hardCapBytes: 1024 * MB,
+			totalUsageBytes: 1,
+			parentBytes: 1,
+			source: "host",
+		}),
+		runGc: vi.fn(),
 		logWarn: vi.fn(),
 		listTabs: () => [],
 		releaseTab: vi.fn(async () => true),
 		cleanupScreenshots: vi.fn(async () => ({ scanned: 0, removed: 0 })),
 		screenshotArmed: () => false,
 		...over,
+		monotonicNow: over.monotonicNow ?? over.now ?? (() => NOW),
 	};
 }
 
@@ -109,10 +119,480 @@ function controlledReleases(): { releaseTab: Mock<ResourceGcDeps["releaseTab"]>;
 	};
 }
 
+describe("Linux cgroup memory sampling", () => {
+	function mountLine(id: number, root: string, mountPoint: string, fsType: "cgroup" | "cgroup2" = "cgroup2"): string {
+		const superOptions = fsType === "cgroup" ? "rw,memory" : "rw";
+		return `${id} 1 0:${id} ${root} ${mountPoint} rw - ${fsType} cgroup ${superOptions}`;
+	}
+
+	function writeCounters(directory: string, limit: string, usage: string): void {
+		fs.mkdirSync(directory, { recursive: true });
+		fs.writeFileSync(path.join(directory, "memory.max"), limit);
+		fs.writeFileSync(path.join(directory, "memory.current"), usage);
+	}
+
+	it("fails over from an unreadable containing mount to a later compatible mount", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "skc-cgroup-failover-"));
+		try {
+			const first = path.join(root, "first");
+			const second = path.join(root, "second");
+			fs.mkdirSync(first);
+			writeCounters(path.join(second, "app"), "1000", "700");
+			const mountInfo = [mountLine(31, "/", first), mountLine(32, "/", second)].join("\n");
+
+			await expect(
+				__sampleLinuxCgroupHierarchyForTest(mountInfo, "/app", "cgroup2", 4000, 100),
+			).resolves.toMatchObject({
+				hardCapBytes: 1000,
+				totalUsageBytes: 700,
+				parentBytes: 100,
+				source: "linux_cgroup_v2",
+			});
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("compares pressure across every compatible containing mount", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "skc-cgroup-multi-mount-"));
+		try {
+			const narrow = path.join(root, "narrow");
+			const broad = path.join(root, "broad");
+			writeCounters(narrow, "1000", "100");
+			writeCounters(path.join(broad, "app"), "1000", "100");
+			writeCounters(broad, "2000", "1900");
+			const mountInfo = [mountLine(38, "/app", narrow), mountLine(39, "/", broad)].join("\n");
+
+			await expect(
+				__sampleLinuxCgroupHierarchyForTest(mountInfo, "/app", "cgroup2", 5000, 50),
+			).resolves.toMatchObject({
+				hardCapBytes: 2000,
+				totalUsageBytes: 1900,
+			});
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("preserves distinct ancestor chains that resolve to the same leaf path", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "skc-cgroup-shared-leaf-"));
+		try {
+			const broad = path.join(root, "shared");
+			const leaf = path.join(broad, "parent", "child");
+			writeCounters(leaf, "1000", "100");
+			writeCounters(broad, "2000", "1900");
+			const mountInfo = [mountLine(42, "/parent/child", leaf), mountLine(43, "/", broad)].join("\n");
+
+			await expect(
+				__sampleLinuxCgroupHierarchyForTest(mountInfo, "/parent/child", "cgroup2", 5000, 50),
+			).resolves.toMatchObject({
+				hardCapBytes: 2000,
+				totalUsageBytes: 1900,
+			});
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+	it("uses the namespace-relative fallback after containment candidates are exhausted", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "skc-cgroup-namespace-"));
+		try {
+			const mountPoint = path.join(root, "memory");
+			writeCounters(path.join(mountPoint, "app"), "2000", "600");
+			const mountInfo = mountLine(41, "/docker/container-id", mountPoint);
+
+			await expect(
+				__sampleLinuxCgroupHierarchyForTest(mountInfo, "/app", "cgroup2", 5000, 100),
+			).resolves.toMatchObject({
+				hardCapBytes: 2000,
+				totalUsageBytes: 600,
+				parentBytes: 100,
+				source: "linux_cgroup_v2",
+			});
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("samples the mount root and selects the ancestor nearest to pressure", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "skc-cgroup-ancestor-"));
+		try {
+			const mountPoint = path.join(root, "memory");
+			const child = path.join(mountPoint, "parent", "child");
+			writeCounters(child, "1000", "100");
+			writeCounters(path.join(mountPoint, "parent"), "2000", "1900");
+			writeCounters(mountPoint, "3000", "600");
+			await expect(
+				__sampleLinuxCgroupHierarchyForTest(mountLine(45, "/", mountPoint), "/parent/child", "cgroup2", 5000, 50),
+			).resolves.toMatchObject({
+				hardCapBytes: 2000,
+				totalUsageBytes: 1900,
+				parentBytes: 50,
+				source: "linux_cgroup_v2",
+			});
+
+			writeCounters(child, "max", "100");
+			writeCounters(path.join(mountPoint, "parent"), "max", "200");
+			writeCounters(mountPoint, "1500", "1200");
+			await expect(
+				__sampleLinuxCgroupHierarchyForTest(mountLine(46, "/", mountPoint), "/parent/child", "cgroup2", 5000, 50),
+			).resolves.toMatchObject({
+				hardCapBytes: 1500,
+				totalUsageBytes: 1200,
+			});
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+	it("selects ancestor pressure against the configured policy cap", () => {
+		expect(
+			__selectMemoryPressureDomainForTest(
+				{
+					hardCapBytes: 1000,
+					totalUsageBytes: 600,
+					parentBytes: 50,
+					source: "linux_cgroup_v2",
+					domains: [
+						{ hardCapBytes: 1000, totalUsageBytes: 600, source: "linux_cgroup_v2" },
+						{ hardCapBytes: 8000, totalUsageBytes: 4000, source: "linux_cgroup_v2" },
+					],
+				},
+				2000,
+			),
+		).toMatchObject({
+			hardCapBytes: 8000,
+			totalUsageBytes: 4000,
+		});
+	});
+
+	it("ignores zero and malformed counters while preserving valid unlimited usage", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "skc-cgroup-counters-"));
+		try {
+			const invalidMount = path.join(root, "invalid");
+			writeCounters(path.join(invalidMount, "app"), "0", "malformed");
+			writeCounters(invalidMount, "not-a-number", "0");
+			await expect(
+				__sampleLinuxCgroupHierarchyForTest(mountLine(51, "/", invalidMount), "/app", "cgroup2", 5000, 100),
+			).resolves.toBeNull();
+
+			const unlimitedMount = path.join(root, "unlimited");
+			writeCounters(path.join(unlimitedMount, "app"), "max", "900");
+			await expect(
+				__sampleLinuxCgroupHierarchyForTest(mountLine(52, "/", unlimitedMount), "/app", "cgroup2", 5000, 100),
+			).resolves.toMatchObject({
+				hardCapBytes: 5000,
+				totalUsageBytes: 900,
+				parentBytes: 100,
+				source: "linux_cgroup_v2",
+			});
+			const zeroMount = path.join(root, "zero");
+			writeCounters(path.join(zeroMount, "app"), "0", "0");
+			await expect(
+				__sampleLinuxCgroupHierarchyForTest(mountLine(53, "/", zeroMount), "/app", "cgroup2", 5000, 100),
+			).resolves.toBeNull();
+			const clampedMount = path.join(root, "clamped");
+			writeCounters(path.join(clampedMount, "app"), "9000", "4500");
+			await expect(
+				__sampleLinuxCgroupHierarchyForTest(mountLine(54, "/", clampedMount), "/app", "cgroup2", 5000, 100),
+			).resolves.toMatchObject({
+				hardCapBytes: 5000,
+				totalUsageBytes: 4500,
+			});
+
+			const v1Mount = path.join(root, "v1");
+			const v1Directory = path.join(v1Mount, "app");
+			fs.mkdirSync(v1Directory, { recursive: true });
+			fs.writeFileSync(path.join(v1Directory, "memory.limit_in_bytes"), "9223372036854771712");
+			fs.writeFileSync(path.join(v1Directory, "memory.usage_in_bytes"), "800");
+			await expect(
+				__sampleLinuxCgroupHierarchyForTest(mountLine(55, "/", v1Mount, "cgroup"), "/app", "cgroup", 5000, 100),
+			).resolves.toMatchObject({
+				hardCapBytes: 5000,
+				totalUsageBytes: 800,
+			});
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+});
 describe("resource GC controller", () => {
 	afterEach(() => {
 		__resetResourceGcForTest();
+		vi.useRealTimers();
 		vi.restoreAllMocks();
+	});
+
+	it("applies enabled memory policy to GC and sustained restart advisory telemetry", async () => {
+		const settings = Settings.isolated({
+			"memoryGuard.enabled": true,
+			"memoryGuard.policyLimitMb": 100,
+			"memoryGuard.gcThresholdPercent": 70,
+			"memoryGuard.restartThresholdPercent": 85,
+			"memoryGuard.restartThresholdWindowMs": 90_000,
+			"memoryGuard.cooldownMs": 600_000,
+			"browser.gc.enabled": false,
+			"computer.screenshotGc.enabled": false,
+		});
+		registerResourceGcSession({ sessionId: "s1", settings });
+
+		let now = NOW;
+		let rss = 75 * MB;
+		const runGc = vi.fn();
+		const logWarn = vi.fn();
+		const deps = baseDeps({
+			now: () => now,
+			rssBytes: () => rss,
+			memorySnapshot: async () => ({
+				hardCapBytes: 200 * MB,
+				totalUsageBytes: rss,
+				parentBytes: rss,
+				source: "host",
+			}),
+			runGc,
+			logWarn,
+		});
+
+		await sweepOnce(deps);
+		await sweepOnce(deps);
+		expect(runGc).toHaveBeenCalledTimes(1);
+
+		rss = 60 * MB;
+		now += 30_000;
+		await sweepOnce(deps);
+		rss = 90 * MB;
+		now += 30_000;
+		await sweepOnce(deps);
+		now += 90_000;
+		await sweepOnce(deps);
+
+		expect(runGc).toHaveBeenCalledTimes(2);
+		expect(logWarn).toHaveBeenCalledWith(
+			"Memory guard: restart threshold sustained",
+			expect.objectContaining({ sessionId: "s1", effectiveLimitBytes: 100 * MB }),
+		);
+		settings.set("memoryGuard.enabled", false);
+		settings.set("memoryGuard.enabled", true);
+		await sweepOnce(deps);
+		expect(runGc).toHaveBeenCalledTimes(3);
+		now += 90_000;
+		await sweepOnce(deps);
+		expect(logWarn.mock.calls.filter(call => call[0].includes("restart threshold sustained"))).toHaveLength(2);
+	});
+
+	it("does not sample or mutate guard state before the configured check interval", async () => {
+		const settings = Settings.isolated({
+			"memoryGuard.enabled": true,
+			"memoryGuard.checkIntervalMs": 5_000,
+			"memoryGuard.policyLimitMb": 100,
+			"memoryGuard.gcThresholdPercent": 70,
+			"browser.gc.enabled": false,
+			"computer.screenshotGc.enabled": false,
+		});
+		registerResourceGcSession({ sessionId: "interval-guard", settings });
+
+		let monotonicNow = 0;
+		let usageBytes = 90 * MB;
+		const memorySnapshot = vi.fn(async () => ({
+			hardCapBytes: 100 * MB,
+			totalUsageBytes: usageBytes,
+			parentBytes: 10 * MB,
+			source: "linux_cgroup_v2" as const,
+		}));
+		const runGc = vi.fn();
+		const deps = baseDeps({
+			monotonicNow: () => monotonicNow,
+			memorySnapshot,
+			runGc,
+		});
+
+		await sweepOnce(deps);
+		usageBytes = 10 * MB;
+		monotonicNow = 1_000;
+		await sweepOnce(deps);
+
+		expect(memorySnapshot).toHaveBeenCalledTimes(1);
+		expect(runGc).toHaveBeenCalledTimes(1);
+
+		monotonicNow = 5_000;
+		await sweepOnce(deps);
+		expect(memorySnapshot).toHaveBeenCalledTimes(2);
+	});
+
+	it("uses monotonic time for sustained restart windows when wall time moves backward", async () => {
+		const settings = Settings.isolated({
+			"memoryGuard.enabled": true,
+			"memoryGuard.checkIntervalMs": 1_000,
+			"memoryGuard.policyLimitMb": 100,
+			"memoryGuard.gcThresholdPercent": 70,
+			"memoryGuard.restartThresholdPercent": 85,
+			"memoryGuard.restartThresholdWindowMs": 5_000,
+			"memoryGuard.cooldownMs": 60_000,
+			"browser.gc.enabled": false,
+			"computer.screenshotGc.enabled": false,
+		});
+		registerResourceGcSession({ sessionId: "monotonic-guard", settings });
+
+		let wallNow = 100_000;
+		let monotonicNow = 0;
+		const logWarn = vi.fn();
+		const deps = baseDeps({
+			now: () => wallNow,
+			monotonicNow: () => monotonicNow,
+			logWarn,
+			memorySnapshot: async () => ({
+				hardCapBytes: 100 * MB,
+				totalUsageBytes: 90 * MB,
+				parentBytes: 10 * MB,
+				source: "linux_cgroup_v2",
+			}),
+		});
+
+		await sweepOnce(deps);
+		wallNow = -100_000;
+		monotonicNow = 5_000;
+		await sweepOnce(deps);
+
+		expect(logWarn).toHaveBeenCalledWith(
+			"Memory guard: restart threshold sustained",
+			expect.objectContaining({ sessionId: "monotonic-guard" }),
+		);
+	});
+
+	it("keeps positive fractional sweep intervals schedulable", () => {
+		const unregister = registerResourceGcSession({
+			sessionId: "fractional",
+			settings: gcSettings(500.5),
+		});
+		expect(__getResourceGcStateForTest().timerActive).toBe(true);
+		unregister();
+	});
+
+	it("uses aggregate domain usage and runs process-wide GC once for concurrent sessions", async () => {
+		const settings = Settings.isolated({
+			"memoryGuard.enabled": true,
+			"memoryGuard.policyLimitMb": 100,
+			"memoryGuard.gcThresholdPercent": 70,
+			"browser.gc.enabled": false,
+			"computer.screenshotGc.enabled": false,
+		});
+		registerResourceGcSession({ sessionId: "s1", settings });
+		registerResourceGcSession({ sessionId: "s2", settings });
+		const runGc = vi.fn();
+		await sweepOnce(
+			baseDeps({
+				runGc,
+				memorySnapshot: async () => ({
+					hardCapBytes: 100 * MB,
+					totalUsageBytes: 90 * MB,
+					parentBytes: 10 * MB,
+					source: "linux_cgroup_v2",
+				}),
+			}),
+		);
+		expect(runGc).toHaveBeenCalledTimes(1);
+	});
+
+	it("routes eligible team worker pressure through the registered session adapter", async () => {
+		const settings = Settings.isolated({
+			"memoryGuard.enabled": true,
+			"memoryGuard.policyLimitMb": 100,
+			"memoryGuard.parentReserveMb": 10,
+			"memoryGuard.restartThresholdWindowMs": 0,
+			"browser.gc.enabled": false,
+			"computer.screenshotGc.enabled": false,
+		});
+		let cwd = "/workspace";
+		registerResourceGcSession({ sessionId: "team-session", settings, cwd: () => cwd });
+		const applyTeamWorkerGuard = vi.fn(async () => undefined);
+		let monotonicNow = 0;
+		const deps = baseDeps({
+			monotonicNow: () => monotonicNow,
+			memorySnapshot: async () => ({
+				hardCapBytes: 100 * MB,
+				totalUsageBytes: 100 * MB,
+				parentBytes: 5 * MB,
+				source: "linux_cgroup_v2",
+			}),
+			listTeamWorkers: async () => [{ workerId: "team-a/worker-1", bytes: 95 * MB, accepted: true }],
+			applyTeamWorkerGuard,
+		});
+		await sweepOnce(deps);
+		cwd = "/moved-workspace";
+		monotonicNow = 30_000;
+		await sweepOnce(deps);
+		expect(applyTeamWorkerGuard).toHaveBeenCalledWith(
+			"/moved-workspace",
+			"team-session",
+			"team-a/worker-1",
+			expect.any(Number),
+			"worker-pressure:team-session:0",
+		);
+	});
+
+	it("runs at most one worker replacement per shared pressure snapshot", async () => {
+		const settings = Settings.isolated({
+			"memoryGuard.enabled": true,
+			"memoryGuard.policyLimitMb": 100,
+			"memoryGuard.parentReserveMb": 10,
+			"memoryGuard.restartThresholdWindowMs": 0,
+			"browser.gc.enabled": false,
+			"computer.screenshotGc.enabled": false,
+		});
+		registerResourceGcSession({ sessionId: "shared-a", settings, cwd: "/workspace/a" });
+		registerResourceGcSession({ sessionId: "shared-b", settings, cwd: "/workspace/b" });
+		const applyTeamWorkerGuard = vi.fn(
+			async (_cwd: string, _sessionId: string, _workerId: string, _excessBytes: number, _incidentId: string) =>
+				undefined,
+		);
+		let monotonicNow = 0;
+		const deps = baseDeps({
+			monotonicNow: () => monotonicNow,
+			memorySnapshot: async () => ({
+				hardCapBytes: 100 * MB,
+				totalUsageBytes: 100 * MB,
+				parentBytes: 5 * MB,
+				source: "linux_cgroup_v2",
+			}),
+			listTeamWorkers: async (_cwd, sessionId) => [
+				{ workerId: `${sessionId}/worker-1`, bytes: 95 * MB, accepted: true },
+			],
+			applyTeamWorkerGuard,
+		});
+		await sweepOnce(deps);
+		monotonicNow = 30_000;
+		await sweepOnce(deps);
+		expect(applyTeamWorkerGuard).toHaveBeenCalledTimes(1);
+		monotonicNow = 60_000;
+		await sweepOnce(deps);
+		expect(applyTeamWorkerGuard).toHaveBeenCalledTimes(2);
+		expect(applyTeamWorkerGuard.mock.calls[1]?.[1]).toBe("shared-b");
+	});
+	it("schedules an enabled guard at its configured check interval", async () => {
+		const clock = controlledScheduler();
+		const runGc = vi.fn();
+		__setResourceGcDepsForTest({
+			runGc,
+			memorySnapshot: async () => ({
+				hardCapBytes: 100 * MB,
+				totalUsageBytes: 90 * MB,
+				parentBytes: 10 * MB,
+				source: "linux_cgroup_v2",
+			}),
+		});
+		registerResourceGcSession({
+			sessionId: "fast-memory-check",
+			settings: Settings.isolated({
+				"resourceGc.sweepIntervalMs": 30_000,
+				"memoryGuard.enabled": true,
+				"memoryGuard.checkIntervalMs": 5_000,
+				"memoryGuard.policyLimitMb": 100,
+				"browser.gc.enabled": false,
+				"computer.screenshotGc.enabled": false,
+			}),
+		});
+		await clock.advance(4_999);
+		expect(runGc).not.toHaveBeenCalled();
+		await clock.advance(1);
+		expect(runGc).toHaveBeenCalledTimes(1);
 	});
 
 	it("idle sweep evicts idle tabs oldest-first and spares recent ones", async () => {
@@ -290,11 +770,13 @@ describe("resource GC controller", () => {
 		});
 		registerResourceGcSession({ sessionId: "s1", settings });
 
+		const enteredRelease = Promise.withResolvers<void>();
 		let resolveRelease: (() => void) | undefined;
 		const releaseTab = vi.fn(
 			() =>
 				new Promise<boolean>(resolve => {
 					resolveRelease = () => resolve(true);
+					enteredRelease.resolve();
 				}),
 		);
 		__setResourceGcDepsForTest({
@@ -303,7 +785,7 @@ describe("resource GC controller", () => {
 		});
 
 		const first = __runResourceGcTickForTest(); // enters sweep, blocks on releaseTab
-		await Promise.resolve();
+		await enteredRelease.promise;
 		await __runResourceGcTickForTest(); // guard: returns immediately
 		expect(releaseTab).toHaveBeenCalledTimes(1);
 
@@ -430,9 +912,47 @@ describe("resource GC monotonic scheduler", () => {
 		expect(vi.getTimerCount()).toBe(1);
 		await clock.advance(70);
 		expect(releaseTab).toHaveBeenCalledTimes(1);
-		expect(__getResourceGcStateForTest().pendingDeadline).toBe(1200);
+		expect(__getResourceGcStateForTest().pendingDeadline).toBe(1120);
 		unregisterSlow();
 		unregisterEqual();
+		unregisterFast();
+		expectSchedulerStopped();
+	});
+
+	it("reschedules an active session after live memory-guard cadence changes", () => {
+		controlledScheduler();
+		const settings = gcSettings(30_000);
+		const unregister = registerResourceGcSession({ sessionId: "live-policy", settings });
+		expect(__getResourceGcStateForTest().pendingDeadline).toBe(31_000);
+
+		settings.set("memoryGuard.enabled", true);
+		settings.set("memoryGuard.checkIntervalMs", 5_000);
+
+		expect(__getResourceGcStateForTest()).toMatchObject({
+			pendingDeadline: 6_000,
+			timerActive: true,
+		});
+		expect(vi.getTimerCount()).toBe(1);
+		unregister();
+		expectSchedulerStopped();
+	});
+
+	it("preserves an earlier shared deadline when another session changes cadence", async () => {
+		const clock = controlledScheduler();
+		const fast = gcSettings(100);
+		const changing = gcSettings(1_000);
+		const unregisterFast = registerResourceGcSession({ sessionId: "unchanged-fast", settings: fast });
+		const originalOwner = __getResourceGcStateForTest().pendingOwner;
+		await clock.advance(90);
+		const unregisterChanging = registerResourceGcSession({ sessionId: "changing-slow", settings: changing });
+
+		changing.set("resourceGc.sweepIntervalMs", 500);
+
+		expect(__getResourceGcStateForTest()).toMatchObject({
+			pendingDeadline: 1_100,
+			pendingOwner: originalOwner,
+		});
+		unregisterChanging();
 		unregisterFast();
 		expectSchedulerStopped();
 	});
@@ -452,7 +972,7 @@ describe("resource GC monotonic scheduler", () => {
 		expect(__getResourceGcStateForTest().pendingDeadline).toBe(1100);
 		await clock.advance(50);
 		expect(releaseTab).toHaveBeenCalledTimes(1);
-		expect(__getResourceGcStateForTest().pendingDeadline).toBe(2100);
+		expect(__getResourceGcStateForTest().pendingDeadline).toBe(2000);
 		unregisterSlow();
 		expectSchedulerStopped();
 	});

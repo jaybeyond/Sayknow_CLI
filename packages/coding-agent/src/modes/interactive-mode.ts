@@ -16,7 +16,14 @@ import {
 import { APP_NAME, adjustHsv, getProjectDir, logger, postmortem } from "@sayknow-cli/utils";
 import chalk from "chalk";
 import { AsyncJobManager } from "../async";
-import { type AppKeybinding, KeybindingsManager } from "../config/keybindings";
+import {
+	type AppKeybinding,
+	defaultMessageQueueKeysForPlatform,
+	formatKeyHint,
+	formatKeyHints,
+	KeybindingsManager,
+	type KeyDisplayContext,
+} from "../config/keybindings";
 import { isSettingsInitialized, type Settings, settings } from "../config/settings";
 import { DEFAULT_SKC_DEFINITION_NAMES } from "../defaults/skc-defaults";
 import type {
@@ -41,6 +48,7 @@ import type { SessionContext, SessionManager } from "../session/session-manager"
 import { getRecentSessions, getSessionMessageEntryId } from "../session/session-manager";
 import type { LspStartupServerInfo } from "../tools";
 import { formatPhaseDisplayName } from "../tools/todo-write";
+import { copyToClipboard } from "../utils/clipboard";
 import type { EventBus } from "../utils/event-bus";
 import { getSessionAccentAnsi, getSessionAccentHex } from "../utils/session-color";
 import { popTerminalTitle, pushTerminalTitle, setSessionTerminalTitle } from "../utils/title-generator";
@@ -52,7 +60,7 @@ import type { EvalExecutionComponent } from "./components/eval-execution";
 import type { HookEditorComponent } from "./components/hook-editor";
 import type { HookInputComponent } from "./components/hook-input";
 import type { HookSelectorComponent } from "./components/hook-selector";
-import { IrcSplitViewComponent } from "./components/irc-sidebar";
+import { computeIrcSplitWidths, getIrcSidebarSemanticToken, IrcSplitViewComponent } from "./components/irc-sidebar";
 import {
 	getPetUnavailableWarning,
 	isPetAvailable,
@@ -64,6 +72,7 @@ import type { ToolExecutionHandle } from "./components/tool-execution";
 import { StatusLineComponent } from "./components/tool-status-header";
 import { composeToolText } from "./components/tool-transcript-format";
 import {
+	type RecentSession,
 	WelcomeComponent,
 	type WelcomeLogoMode,
 	type LspServerInfo as WelcomeLspServerInfo,
@@ -83,6 +92,7 @@ import { TodoCommandController } from "./controllers/todo-command-controller";
 import { IrcObservationLedger } from "./irc-observation-ledger";
 import { JobsObserver } from "./jobs-observer";
 import { OAuthManualInputManager } from "./oauth-manual-input";
+import { PromptSuggestionController } from "./prompt-suggestion-controller";
 import { SessionObserverRegistry } from "./session-observer-registry";
 import { interruptHint } from "./shared";
 import { shouldShowExtensionCommand } from "./slash-command-visibility";
@@ -105,9 +115,60 @@ import {
 import type { ParsedIrcMessage } from "./utils/irc-message";
 import { addChatChild, prepareTranscriptRebuild, UiHelpers } from "./utils/ui-helpers";
 
-const COMPOSER_NEWLINE_HINT = process.platform === "win32" ? "Alt+Enter/Ctrl+J" : "Shift+Enter/Ctrl+J";
-export const DEFAULT_COMPOSER_PLACEHOLDER = `Type your message... ${COMPOSER_NEWLINE_HINT}: New line · Ctrl+C: Clear · Ctrl+R: Search history · Shift+Tab: Reasoning`;
+function buildComposerPlaceholder(
+	keybindings: Pick<KeybindingsManager, "getDisplayString">,
+	context: KeyDisplayContext,
+	options: { readonly busy: boolean; readonly busyPromptMode: "steer" | "queue" },
+): string {
+	const parts: string[] = [];
+	const submitKey = options.busy ? keybindings.getDisplayString("tui.input.submit", context) : "";
+	if (submitKey) {
+		const submitAction = options.busyPromptMode === "steer" ? "Steer" : "Queue";
+		parts.push(`${submitKey}: ${submitAction}`);
+	}
+
+	const queueKey = keybindings.getDisplayString("app.message.queue", context);
+	const submitQueues = options.busy && options.busyPromptMode === "queue" && submitKey;
+	if (queueKey && !submitQueues) parts.push(`${queueKey}: ${options.busy ? "Queue" : "Queue (busy)"}`);
+
+	const actionHints = [
+		["app.thinking.cycle", "Thinking"],
+		["app.model.select", "Model"],
+		["app.history.search", "History"],
+	] as const;
+	for (const [id, label] of actionHints) {
+		const key = keybindings.getDisplayString(id, context);
+		if (key) parts.push(`${key}: ${label}`);
+	}
+
+	const newlineKeys = context.platform === "win32" ? ["alt+enter", "ctrl+j"] : ["shift+enter", "ctrl+j"];
+	parts.push(`${formatKeyHints(newlineKeys, context)}: New line`, `${formatKeyHint("ctrl+c", context)}: Clear`);
+	return `Type your message... ${parts.join(" · ")}`;
+}
+
+export function getDefaultComposerPlaceholder(
+	context: KeyDisplayContext = { platform: process.platform },
+	keybindings?: Pick<KeybindingsManager, "getDisplayString">,
+): string {
+	const effectiveKeybindings =
+		keybindings ??
+		KeybindingsManager.inMemory({
+			"app.message.queue": defaultMessageQueueKeysForPlatform(context.platform),
+		});
+	return buildComposerPlaceholder(effectiveKeybindings, context, { busy: false, busyPromptMode: "steer" });
+}
+
+export const DEFAULT_COMPOSER_PLACEHOLDER = getDefaultComposerPlaceholder();
+
+export function getComposerPlaceholder(
+	keybindings: Pick<KeybindingsManager, "getDisplayString">,
+	context: KeyDisplayContext,
+	options: { readonly busy: boolean; readonly busyPromptMode: "steer" | "queue" },
+): string {
+	return buildComposerPlaceholder(keybindings, context, options);
+}
 const WELCOME_RESERVED_CONTAINER_CHILD_LIMIT = 8;
+const COMPOSER_RIGHT_GUTTER_WIDTH = 1;
 
 const IRC_SIDEBAR_TOGGLE_SHADOWING_ACTIONS: readonly AppKeybinding[] = [
 	"app.plan.toggle",
@@ -127,23 +188,6 @@ export function getWelcomeTranscriptReservedRows(chatContainer: Container, width
 	return chatContainer.children.length === 0 || chatContainer.children.length > WELCOME_RESERVED_CONTAINER_CHILD_LIMIT
 		? 0
 		: chatContainer.render(width).length;
-}
-const FRIENDLY_KEY_PARTS: Record<string, string> = {
-	alt: "Alt",
-	cmd: "Cmd",
-	command: "Cmd",
-	ctrl: "Ctrl",
-	enter: "Enter",
-	meta: process.platform === "darwin" ? "Command" : "Meta",
-	option: "Option",
-	shift: "Shift",
-};
-
-function formatShortcutForPlaceholder(key: string): string {
-	return key
-		.split("+")
-		.map(part => FRIENDLY_KEY_PARTS[part.toLowerCase()] ?? (part.length === 1 ? part.toUpperCase() : part))
-		.join("+");
 }
 
 const HINT_SHIMMER_PALETTE: ShimmerPalette = {
@@ -169,9 +213,9 @@ function configureDefaultComposerChrome(editor: CustomEditor): void {
 	editor.setClosedBorderBox(true);
 	editor.setPromptGutter(undefined);
 	editor.setInputPrefix(getDefaultInputPrefix());
-	editor.setPlaceholder(DEFAULT_COMPOSER_PLACEHOLDER);
+	editor.setPlaceholder(getDefaultComposerPlaceholder());
 	editor.setPaddingX(1);
-	editor.setRightGutterWidth(1);
+	editor.setRightGutterWidth(COMPOSER_RIGHT_GUTTER_WIDTH);
 	editor.setTopBorder(undefined);
 }
 
@@ -264,6 +308,10 @@ export interface InteractiveModeOptions {
 	initialMessages?: string[];
 }
 
+export function selectShutdownDraft(editorText: string, hasActiveBtw: boolean): string {
+	return hasActiveBtw ? "" : editorText;
+}
+
 export class InteractiveMode implements InteractiveModeContext {
 	session: AgentSession;
 	sessionManager: SessionManager;
@@ -336,6 +384,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	fileSlashCommands: Set<string> = new Set();
 	skillCommands: Map<string, Skill> = new Map();
 	oauthManualInput: OAuthManualInputManager = new OAuthManualInputManager();
+	promptSuggestion: PromptSuggestionController;
 
 	#baseSlashCommands: SlashCommand[] = [];
 	#resolvedSlashCommands: SlashCommand[] = [];
@@ -347,6 +396,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	#petUnavailableWarningDisposer?: () => void;
 	readonly #version: string;
 	readonly #changelogMarkdown: string | undefined;
+	readonly #keyDisplayContext: KeyDisplayContext;
 
 	readonly lspServers: LspStartupServerInfo[] | undefined = undefined;
 	mcpManager?: import("../runtime-mcp").MCPManager;
@@ -366,6 +416,9 @@ export class InteractiveMode implements InteractiveModeContext {
 	#sttController: SttModeController | undefined;
 	#resizeHandler?: () => void;
 	#observerRegistry: SessionObserverRegistry;
+	#viewportOutputRevision = 0n;
+	#viewportOutputIdentity: string;
+
 	#transcriptRegistry = new TranscriptItemRegistry();
 
 	/** Direct controller capabilities for consumers that coordinate mode transitions. */
@@ -394,6 +447,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		lspServers: LspStartupServerInfo[] | undefined = undefined,
 		mcpManager?: import("../runtime-mcp").MCPManager,
 		eventBus?: EventBus,
+		keyDisplayContext: KeyDisplayContext = { platform: process.platform },
 	) {
 		this.session = session;
 		this.sessionManager = session.sessionManager;
@@ -432,6 +486,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.lspServers = lspServers;
 		this.mcpManager = mcpManager;
 		this.#eventBus = eventBus;
+		this.#keyDisplayContext = keyDisplayContext;
+		this.#viewportOutputIdentity = `session:${this.sessionManager.getSessionId()}`;
+
+		this.keybindings.setDisplayContext(this.#keyDisplayContext);
 		const thisMode = this;
 		this.#goalModeController = new GoalModeController({
 			session: this.session,
@@ -503,6 +561,14 @@ export class InteractiveMode implements InteractiveModeContext {
 
 		this.ui = new TUI(new ProcessTerminal(), settings.get("showHardwareCursor"), {
 			enableMouse: settings.get("mouse.enabled"),
+			copySelection: async text => {
+				try {
+					await copyToClipboard(text);
+					this.showStatus("Selection copied to clipboard");
+				} catch (error) {
+					this.showError(`Failed to copy selection: ${error instanceof Error ? error.message : String(error)}`);
+				}
+			},
 		});
 		this.ui.setClearOnShrink(settings.get("clearOnShrink"));
 		this.chatContainer = new Container();
@@ -513,6 +579,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.btwContainer = new Container();
 		this.editor = new CustomEditor(getEditorTheme());
 		configureDefaultComposerChrome(this.editor);
+		this.editor.setPlaceholder(this.#getComposerPlaceholder());
 		this.editor.setUseTerminalCursor(this.ui.getShowHardwareCursor());
 		this.editor.setAutocompleteMaxVisible(settings.get("autocompleteMaxVisible"));
 		this.editor.onAutocompleteCancel = () => {
@@ -540,7 +607,11 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.hookWidgetContainerBelow = new Container();
 		this.editorContainer = new Container();
 		this.editorContainer.addChild(this.editor);
-		this.statusLine = new StatusLineComponent(session, { version: this.#version, focusDomain: "composer" });
+		this.statusLine = new StatusLineComponent(session, {
+			version: this.#version,
+			focusDomain: "composer",
+			keyDisplayContext: this.#keyDisplayContext,
+		});
 		this.statusLine.setAutoCompactEnabled(session.autoCompactionEnabled);
 
 		this.hideThinkingBlock = settings.get("hideThinkingBlock");
@@ -576,6 +647,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#selectorController = new SelectorController(this);
 		this.#inputController = new InputController(this);
 		this.statusLine.setActionRegistry(this.#inputController.actionRegistry, () => this.keybindings);
+		this.promptSuggestion = new PromptSuggestionController(this);
 		this.#observerRegistry = new SessionObserverRegistry();
 	}
 
@@ -596,6 +668,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (this.isInitialized) return;
 
 		this.keybindings = logger.time("InteractiveMode.init:keybindings", () => KeybindingsManager.create());
+		this.keybindings.setDisplayContext(this.#keyDisplayContext);
 
 		// Register session manager flush for signal handlers (SIGINT, SIGTERM, SIGHUP)
 		this.#cleanupUnsubscribe = postmortem.register("session-manager-flush", () => this.sessionManager.flush());
@@ -618,15 +691,9 @@ export class InteractiveMode implements InteractiveModeContext {
 		const modelName = this.session.model?.name ?? "Unknown";
 		const providerName = this.session.model?.provider ?? "Unknown";
 
-		// Get recent sessions
-		const recentSessions = await logger.time("InteractiveMode.init:recentSessions", () =>
-			getRecentSessions(this.sessionManager.getSessionDir()).then(sessions =>
-				sessions.map(s => ({
-					name: s.name,
-					timeAgo: s.timeAgo,
-				})),
-			),
-		);
+		// Session history is display-only. Never hold the editor and keyboard behind
+		// transcript I/O; populate the welcome trail after the interactive surface exists.
+		const recentSessions: RecentSession[] = [];
 
 		const startupQuiet = settings.get("startup.quiet");
 		const welcomeLogoMode = resolveWelcomeLogoMode(settings.get("startup.welcomeBannerMode"));
@@ -652,7 +719,9 @@ export class InteractiveMode implements InteractiveModeContext {
 					getViewportRows: () => this.ui.terminal.rows,
 					getReservedBottomRows: getWelcomeReservedBottomRows,
 					changelogMarkdown: this.#changelogMarkdown,
+					rightGutterWidth: COMPOSER_RIGHT_GUTTER_WIDTH,
 					collapseChangelog: settings.get("collapseChangelog"),
+					keyDisplayContext: this.#keyDisplayContext,
 				},
 			);
 
@@ -674,6 +743,11 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.ui.addChild(this.hookWidgetContainerBelow);
 		this.ui.setBottomPinnedComponent(this.statusLine);
 		this.ui.setFocus(this.editor);
+		this.ui.setViewportOutputSource({
+			identity: this.#viewportOutputIdentity,
+			revision: this.#viewportOutputRevision,
+		});
+
 		this.petWidget?.dispose();
 		this.petWidget = this.#createPetWidget(this.editor);
 		const configuredPetMode = settings.get("pet.mode");
@@ -706,6 +780,12 @@ export class InteractiveMode implements InteractiveModeContext {
 
 		this.#inputController.setupKeyHandlers();
 		this.#inputController.setupEditorSubmitHandler();
+		this.editor.onViewportPageScroll = direction => {
+			this.ui.scrollViewportPages(direction);
+		};
+		this.editor.onViewportFollowLive = () => {
+			this.ui.followLiveViewport();
+		};
 
 		// Wire observer registry to EventBus
 		if (this.#eventBus) {
@@ -749,6 +829,31 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (this.settings.get("tasksPane.defaultVisible")) this.showTasksPane();
 		this.#syncIrcSidebarAvailabilityFromSettings();
 		this.ui.requestRender(true);
+		if (this.#welcomeComponent) {
+			const welcomeComponent = this.#welcomeComponent;
+			const recentSessionsTimer = setTimeout(() => {
+				void logger
+					.time("InteractiveMode.init:recentSessions", () =>
+						getRecentSessions(this.sessionManager.getSessionDir()),
+					)
+					.then(sessions => {
+						if (this.#welcomeComponent !== welcomeComponent) return;
+						welcomeComponent.setRecentSessions(
+							sessions.map(session => ({
+								name: session.name,
+								timeAgo: session.timeAgo,
+							})),
+						);
+						this.ui.requestRender();
+					})
+					.catch(error => {
+						logger.debug("Failed to load recent sessions for welcome screen", {
+							error: error instanceof Error ? error.message : String(error),
+						});
+					});
+			}, 0);
+			recentSessionsTimer.unref?.();
+		}
 
 		// GitHub star reminder (interactive-only). Register the decline-driven
 		// injection contributor and schedule the launch nudge after the first
@@ -802,7 +907,9 @@ export class InteractiveMode implements InteractiveModeContext {
 		// Set up theme file watcher
 		onThemeChange(() => {
 			clearRenderCache();
+			this.#ircSplitView.invalidateTheme();
 			configureDefaultComposerChrome(this.editor);
+			this.editor.setPlaceholder(this.#getComposerPlaceholder());
 			this.ui.invalidate();
 			this.updateEditorChrome();
 			this.ui.requestRender();
@@ -1021,25 +1128,11 @@ export class InteractiveMode implements InteractiveModeContext {
 		return this.session.isStreaming || this.session.isCompacting;
 	}
 
-	#getFirstKeyForAction(action: AppKeybinding): string | undefined {
-		return this.keybindings.getKeys(action)[0];
-	}
-
-	#getMessageQueueShortcut(): string | undefined {
-		const preferredAction: AppKeybinding =
-			process.platform === "darwin" ? "app.message.followUp" : "app.message.queue";
-		const fallbackAction: AppKeybinding =
-			process.platform === "darwin" ? "app.message.queue" : "app.message.followUp";
-		return this.#getFirstKeyForAction(preferredAction) ?? this.#getFirstKeyForAction(fallbackAction);
-	}
-
 	#getComposerPlaceholder(): string {
-		if (!this.#isPromptDeliveryBusy()) return DEFAULT_COMPOSER_PLACEHOLDER;
-		const enterAction = this.settings.get("busyPromptMode") === "steer" ? "Steer" : "Queue";
-		const parts = [`Enter: ${enterAction}`];
-		const queueKey = this.#getMessageQueueShortcut();
-		if (queueKey) parts.push(`${formatShortcutForPlaceholder(queueKey)}: Queue`);
-		return `${DEFAULT_COMPOSER_PLACEHOLDER} · ${parts.join(" · ")}`;
+		return getComposerPlaceholder(this.keybindings, this.#keyDisplayContext, {
+			busy: this.#isPromptDeliveryBusy(),
+			busyPromptMode: this.settings.get("busyPromptMode"),
+		});
 	}
 
 	#getWelcomeReservedRows(width: number): number {
@@ -1056,6 +1149,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.statusLine,
 			this.hookWidgetContainerAbove,
 			this.editorContainer,
+			this.petFloorContainer,
 			this.hookWidgetContainerBelow,
 		].reduce((rows, component) => rows + component.render(width).length, 0);
 
@@ -1123,8 +1217,22 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.ui.requestRender();
 			return false;
 		}
+		if (!settings.canWriteDurableConfig()) {
+			this.showError(
+				"Cannot change settings while config.yml has invalid YAML syntax. Repair config.yml and reload settings.",
+			);
+			return false;
+		}
+		try {
+			settings.set("pet.mode", mode);
+		} catch (error) {
+			if (!settings.canWriteDurableConfig()) {
+				this.showError(error instanceof Error ? error.message : String(error));
+				return false;
+			}
+			throw error;
+		}
 		apply(mode);
-		settings.set("pet.mode", mode);
 		this.ui.requestRender();
 		return true;
 	}
@@ -1322,19 +1430,20 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (this.#isShuttingDown) return;
 		this.#isShuttingDown = true;
 
-		// Snapshot the editor before any teardown empties it. Persisting the draft
-		// here covers Ctrl+D shutdown with non-empty text; for /exit the editor is
-		// already cleared so saveDraft("") just removes any stale sidecar.
-		const draftText = this.editor.getText();
+		// `/btw` owns the shared composer while its panel is open. Never persist a
+		// side-chat draft or pending side-chat images into the main-session draft.
+		const hadActiveBtw = this.#btwController.hasOpenPanel();
+		const draftText = selectShutdownDraft(this.editor.getText(), hadActiveBtw);
+		if (hadActiveBtw) this.pendingImages = [];
+		this.#btwController.dispose();
 
-		// Flush pending session writes before shutdown
+		// Flush pending session writes before shutdown.
 		await this.sessionManager.flush();
 		try {
 			await this.sessionManager.saveDraft(draftText);
 		} catch (err) {
 			logger.warn("Failed to save session draft", { error: String(err) });
 		}
-		this.#btwController.dispose();
 
 		// Emit shutdown event to hooks
 		this.session.setSdkPlanModeHandler(null);
@@ -1393,6 +1502,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			: new CustomEditor(getEditorTheme());
 
 		configureDefaultComposerChrome(nextEditor);
+		nextEditor.setPlaceholder(this.#getComposerPlaceholder());
 		nextEditor.setUseTerminalCursor(this.ui.getShowHardwareCursor());
 		nextEditor.setAutocompleteMaxVisible(this.settings.get("autocompleteMaxVisible"));
 		nextEditor.onAutocompleteCancel = () => {
@@ -1421,6 +1531,12 @@ export class InteractiveMode implements InteractiveModeContext {
 
 		this.#inputController.setupKeyHandlers();
 		this.#inputController.setupEditorSubmitHandler();
+		this.editor.onViewportPageScroll = direction => {
+			this.ui.scrollViewportPages(direction);
+		};
+		this.editor.onViewportFollowLive = () => {
+			this.ui.followLiveViewport();
+		};
 
 		void this.refreshSlashCommandState().catch(error => {
 			logger.warn("Failed to refresh slash command state for custom editor", { error: String(error) });
@@ -1569,6 +1685,21 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	isKnownSlashCommand(text: string): boolean {
 		return this.#uiHelpers.isKnownSlashCommand(text);
+	}
+
+	/** Advances the sticky-viewport source only for semantic transcript output. */
+	recordVisibleTranscriptMutation(): void {
+		const identity = `session:${this.sessionManager.getSessionId()}`;
+		if (identity !== this.#viewportOutputIdentity) {
+			this.#viewportOutputIdentity = identity;
+			this.#viewportOutputRevision = 0n;
+		} else {
+			this.#viewportOutputRevision += 1n;
+		}
+		this.ui.setViewportOutputSource({
+			identity: this.#viewportOutputIdentity,
+			revision: this.#viewportOutputRevision,
+		});
 	}
 
 	addMessageToChat(message: AgentMessage, options?: { populateHistory?: boolean }): Component[] {
@@ -2025,7 +2156,11 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	hasActiveBtw(): boolean {
-		return this.#btwController.hasActiveRequest();
+		return this.#btwController.hasOpenPanel();
+	}
+
+	handleBtwFollowUp(question: string): Promise<"accepted" | "busy" | "closed" | "rejected"> {
+		return this.#btwController.submitFollowUp(question);
 	}
 
 	handleBtwEscape(): boolean {
@@ -2094,12 +2229,18 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	resetIrcSidebarSession(): void {
-		this.ircLedger.reset();
+		const sidebarVisible = this.#ircSplitView.effectiveSidebarVisible(this.ui.terminal.columns);
+		const rightWidth = computeIrcSplitWidths(this.ui.terminal.columns).rightWidth;
+		const beforeToken = sidebarVisible ? getIrcSidebarSemanticToken(this.ircLedger, rightWidth) : "";
+		this.ircLedger.reset({ retireCurrentSessionIdentities: true });
+		this.#ircSplitView.resetSource();
+		const afterToken = sidebarVisible ? getIrcSidebarSemanticToken(this.ircLedger, rightWidth) : "";
 		this.#eventController.resetIrcObservations();
 		this.#ircSidebarRequestedVisible = false;
 		this.#ircSplitView.setVisible(false);
 		this.#uiHelpers.resetIrcSidebarHint();
 		this.#syncIrcSidebarAvailabilityFromSettings();
+		if (sidebarVisible && beforeToken !== afterToken) this.recordVisibleTranscriptMutation();
 	}
 
 	#invalidateIrcSidebarRender(): void {

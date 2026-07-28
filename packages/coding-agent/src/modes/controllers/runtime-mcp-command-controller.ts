@@ -4,6 +4,7 @@
  * Handles /mcp subcommands for managing MCP servers.
  */
 import * as path from "node:path";
+import { resolveMCPOAuthResourceOrigin, resolveMCPOAuthTokenEndpoint } from "@sayknow-cli/ai";
 import { Spacer, Text } from "@sayknow-cli/tui";
 import { getMCPConfigPath, getProjectDir } from "@sayknow-cli/utils";
 import type { SourceMeta } from "../../capability/types";
@@ -61,6 +62,7 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string)
  */
 interface OAuthFlowResult {
 	credentialId: string;
+	tokenEndpoint: string;
 	clientId?: string;
 	clientSecret?: string;
 }
@@ -423,6 +425,7 @@ export class MCPCommandController {
 						try {
 							const oauthClientSecret = finalConfig.oauth?.clientSecret ?? "";
 							const oauthResult = await this.#handleOAuthFlow(
+								finalConfig.url,
 								oauth.authorizationUrl,
 								oauth.tokenUrl,
 								oauth.clientId ?? finalConfig.oauth?.clientId ?? "",
@@ -439,7 +442,7 @@ export class MCPCommandController {
 								auth: {
 									type: "oauth",
 									credentialId: oauthResult.credentialId,
-									tokenUrl: oauth.tokenUrl,
+									tokenUrl: oauthResult.tokenEndpoint,
 									clientId: persistedClientId,
 									clientSecret: persistedClientSecret,
 								},
@@ -480,8 +483,15 @@ export class MCPCommandController {
 				done();
 				this.#handleWizardCancel();
 			},
-			async (authUrl: string, tokenUrl: string, clientId: string, clientSecret: string, scopes: string) => {
-				return await this.#handleOAuthFlow(authUrl, tokenUrl, clientId, clientSecret, scopes);
+			async (
+				endpointUrl: string,
+				authUrl: string,
+				tokenUrl: string,
+				clientId: string,
+				clientSecret: string,
+				scopes: string,
+			) => {
+				return await this.#handleOAuthFlow(endpointUrl, authUrl, tokenUrl, clientId, clientSecret, scopes);
 			},
 			async (config: MCPServerConfig) => {
 				return await this.#handleTestConnection(config);
@@ -503,6 +513,7 @@ export class MCPCommandController {
 	 * Handle OAuth authentication flow for MCP server
 	 */
 	async #handleOAuthFlow(
+		endpointUrl: string,
 		authUrl: string,
 		tokenUrl: string,
 		clientId: string,
@@ -514,11 +525,13 @@ export class MCPCommandController {
 	): Promise<OAuthFlowResult> {
 		const authStorage = this.ctx.session.modelRegistry.authStorage;
 		let parsedAuthUrl: URL;
+		const resourceOrigin = resolveMCPOAuthResourceOrigin(endpointUrl);
+		const tokenEndpoint = resolveMCPOAuthTokenEndpoint(tokenUrl);
+		if (!resourceOrigin || !tokenEndpoint) throw new Error("Invalid MCP OAuth configuration.");
 
 		// Validate OAuth URLs
 		try {
 			parsedAuthUrl = new URL(authUrl);
-			new URL(tokenUrl);
 		} catch (_error) {
 			throw new Error(
 				`Invalid OAuth URLs. Please check:\n  Authorization URL: ${authUrl}\n  Token URL: ${tokenUrl}`,
@@ -533,7 +546,7 @@ export class MCPCommandController {
 			const flow = new MCPOAuthFlow(
 				{
 					authorizationUrl: authUrl,
-					tokenUrl: tokenUrl,
+					tokenUrl: tokenEndpoint,
 					clientId: resolvedClientId,
 					clientSecret: resolvedClientSecret,
 					scopes: scopes || undefined,
@@ -618,6 +631,10 @@ export class MCPCommandController {
 			const oauthCredential: OAuthCredential = {
 				type: "oauth",
 				...credentials,
+				mcpBinding: {
+					resourceOrigin,
+					tokenEndpoint,
+				},
 			};
 
 			// Store under a synthetic provider name
@@ -625,6 +642,7 @@ export class MCPCommandController {
 
 			return {
 				credentialId,
+				tokenEndpoint,
 				clientId: flow.resolvedClientId,
 				clientSecret: flow.registeredClientSecret,
 			};
@@ -1328,6 +1346,10 @@ export class MCPCommandController {
 				this.ctx.showError(`Server "${name}" is disabled. Run /mcp enable ${name} first.`);
 				return;
 			}
+			if (found.config.type !== "http" && found.config.type !== "sse") {
+				this.ctx.showError(`Server "${name}" does not use a remote MCP transport.`);
+				return;
+			}
 
 			const currentAuth = (found.config as MCPServerConfig & { auth?: MCPAuthConfig }).auth;
 			if (currentAuth?.type === "oauth") {
@@ -1341,6 +1363,7 @@ export class MCPCommandController {
 			this.#showMessage(["", theme.fg("muted", `Reauthorizing "${name}"...`), ""].join("\n"));
 
 			const oauthResult = await this.#handleOAuthFlow(
+				found.config.url,
 				oauth.authorizationUrl,
 				oauth.tokenUrl,
 				oauth.clientId ?? found.config.oauth?.clientId ?? "",
@@ -1359,7 +1382,7 @@ export class MCPCommandController {
 				auth: {
 					type: "oauth",
 					credentialId: oauthResult.credentialId,
-					tokenUrl: oauth.tokenUrl,
+					tokenUrl: oauthResult.tokenEndpoint,
 					clientId: persistedClientId,
 					clientSecret: persistedClientSecret,
 				},

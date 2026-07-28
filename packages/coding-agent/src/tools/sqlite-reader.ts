@@ -272,6 +272,7 @@ const COMMENT_OR_TERMINATOR_ERROR =
 	"SQLite 'where' clause must not contain comments or statement terminators; use '?q=SELECT ...' for raw SQL";
 const FORBIDDEN_KEYWORD_ERROR =
 	"SQLite 'where' clause must not contain LIMIT/OFFSET/UNION/INTERSECT/EXCEPT/ATTACH/DETACH/PRAGMA; use '?q=SELECT ...' for raw SQL";
+const RAW_QUERY_ERROR = "SQLite raw queries must contain exactly one explicit SELECT statement";
 
 /**
  * Scans a `where=` clause character-by-character, tracking single- and double-quoted
@@ -363,6 +364,66 @@ function validateWhereClause(where: string | undefined): string | undefined {
 	return trimmed;
 }
 
+/**
+ * Keep raw reads deliberately narrower than SQLite's full grammar. Comments are
+ * rejected, and a statement terminator is accepted only as the final
+ * non-whitespace character. Quoted semicolons remain ordinary query data.
+ */
+export function validateSqliteReadQuery(sql: string): string {
+	const trimmed = sql.trim();
+	if (!/^SELECT\b/i.test(trimmed)) {
+		throw new ToolError(RAW_QUERY_ERROR);
+	}
+
+	let quoteEnd: "'" | '"' | "`" | "]" | null = null;
+	for (let index = 0; index < trimmed.length; index++) {
+		const char = trimmed[index];
+		const next = trimmed[index + 1];
+		if (char === "\0") {
+			throw new ToolError(RAW_QUERY_ERROR);
+		}
+
+		if (quoteEnd) {
+			if (char === quoteEnd) {
+				if (quoteEnd !== "]" && next === quoteEnd) {
+					index += 1;
+				} else {
+					quoteEnd = null;
+				}
+			}
+			continue;
+		}
+
+		if (char === "'" || char === '"' || char === "`") {
+			quoteEnd = char;
+			continue;
+		}
+		if (char === "[") {
+			quoteEnd = "]";
+			continue;
+		}
+		if ((char === "-" && next === "-") || (char === "/" && next === "*") || (char === "*" && next === "/")) {
+			throw new ToolError(RAW_QUERY_ERROR);
+		}
+		if (char === ";" && trimmed.slice(index + 1).trim().length > 0) {
+			throw new ToolError(RAW_QUERY_ERROR);
+		}
+	}
+
+	if (quoteEnd) {
+		throw new ToolError(RAW_QUERY_ERROR);
+	}
+	return trimmed;
+}
+
+export function enforceSqliteQueryOnly(db: Database): void {
+	db.run("PRAGMA query_only = ON");
+	const enabled = db.prepare<{ query_only: number }, []>("PRAGMA query_only").get()?.query_only;
+	if (enabled !== 1) {
+		throw new ToolError("SQLite read connection could not enable query-only mode");
+	}
+}
+
 function normalizeWriteValue(value: unknown, column: string): SqliteBinding {
 	if (value === null) return null;
 	if (
@@ -444,10 +505,7 @@ export function parseSqliteSelector(subPath: string, queryString: string): Sqlit
 		if (normalizedSubPath || otherKeys.length > 0) {
 			throw new ToolError("SQLite raw queries cannot be combined with table selectors or pagination");
 		}
-		if (!rawQuery.trim()) {
-			throw new ToolError("SQLite query parameter 'q' cannot be empty");
-		}
-		return { kind: "raw", sql: rawQuery };
+		return { kind: "raw", sql: validateSqliteReadQuery(rawQuery) };
 	}
 
 	if (!normalizedSubPath) {
@@ -602,7 +660,7 @@ export function executeReadQuery(
 	sql: string,
 	maxRows: number = MAX_RAW_QUERY_ROWS,
 ): { columns: string[]; rows: Record<string, unknown>[]; truncated: boolean } {
-	const statement = db.prepare<SqliteRow, []>(sql);
+	const statement = db.prepare<SqliteRow, []>(validateSqliteReadQuery(sql));
 	if (statement.paramsCount > 0) {
 		throw new ToolError("SQLite raw queries do not support bound parameters");
 	}

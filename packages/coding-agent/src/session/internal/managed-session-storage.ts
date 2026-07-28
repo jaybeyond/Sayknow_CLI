@@ -12,20 +12,107 @@ import {
 	openRecoveryFsRoot,
 	type RecoveryFsRoot,
 	renameNoReplacePath,
+	repairOwnerOnlyPathSecurityExpected,
 	snapshotDirectoryTree,
 	verifyOwnerOnlyFdSecurity,
 	verifyOwnerOnlyPathSecurity,
+	verifyOwnerOnlyPathSecurityExpected,
 } from "@sayknow-cli/natives";
+import {
+	classifyNativePublishOutcome,
+	formatNativePublishDiagnostic,
+	mayCleanCurrentStaging,
+	type NativePublishOutcome,
+} from "./native-publish-outcome";
 
 export const MANAGED_ARTIFACT_MAX_DEPTH = 32;
-export const MANAGED_ARTIFACT_MAX_FILES = 10_000;
+export const MANAGED_ARTIFACT_MAX_FILES = 50_000;
 export const MANAGED_ARTIFACT_MAX_FILE_BYTES = 64 * 1024 * 1024;
 export const MANAGED_ARTIFACT_MAX_TOTAL_BYTES = 512 * 1024 * 1024;
+export const MANAGED_ARTIFACT_COPY_BATCH_SIZE = 256;
 const LOCK_LEASE_MS = 60_000;
 const LOCK_HEARTBEAT_MS = 10_000;
 const LOCK_WAIT_MS = 5_000;
 
 const LOCK_STALE_RECHECK_MS = 100;
+export class ManagedPublishError extends Error {
+	readonly classification:
+		| "destination_conflict"
+		| "atomic_unavailable"
+		| "invalid_request"
+		| "durability_not_provable"
+		| "identity_mismatch"
+		| "io_error"
+		| "durability_failed";
+	readonly diagnostic: string;
+
+	constructor(classification: ManagedPublishError["classification"], outcome: NativePublishOutcome) {
+		super(classification);
+		this.name = "ManagedPublishError";
+		this.classification = classification;
+		this.diagnostic = formatNativePublishDiagnostic(outcome);
+	}
+}
+
+function publishFailure(outcome: NativePublishOutcome): ManagedPublishError {
+	const classification =
+		outcome.reason === "destination_exists"
+			? "destination_conflict"
+			: outcome.reason === "atomic_unavailable"
+				? "atomic_unavailable"
+				: outcome.reason === "invalid_request"
+					? "invalid_request"
+					: outcome.reason === "durability_not_provable"
+						? "durability_not_provable"
+						: outcome.reason === "identity_violation"
+							? "identity_mismatch"
+							: outcome.reason === "io_failure"
+								? "io_error"
+								: "durability_failed";
+	return new ManagedPublishError(classification, outcome);
+}
+
+/** A same-filesystem rename updates the moved root's ctime but no other tree identity. */
+function sameDirectoryTreeSnapshotAfterRename(
+	left: NativeDirectoryTreeSnapshot,
+	right: NativeDirectoryTreeSnapshot,
+): boolean {
+	return (
+		left.rootDev === right.rootDev &&
+		left.rootIno === right.rootIno &&
+		left.entries.length === right.entries.length &&
+		left.entries.every((entry, index) => {
+			const other = right.entries[index];
+			return (
+				other !== undefined &&
+				entry.relativePath === other.relativePath &&
+				entry.kind === other.kind &&
+				entry.dev === other.dev &&
+				entry.ino === other.ino &&
+				entry.size === other.size &&
+				entry.mtimeNs === other.mtimeNs &&
+				(entry.relativePath === "" || entry.ctimeNs === other.ctimeNs) &&
+				entry.sha256 === other.sha256
+			);
+		})
+	);
+}
+
+class ManagedTreeMoveOutcomeError extends Error {
+	constructor(
+		message: string,
+		readonly stagingCleanupSafe: boolean,
+	) {
+		super(message);
+	}
+}
+
+/** Cleanup is safe only when the native move reports that it did not commit. */
+export function mayCleanManagedTreeStaging(error: unknown): boolean {
+	return !(error instanceof ManagedTreeMoveOutcomeError) || error.stagingCleanupSafe;
+}
+
+export type ManagedSessionSecurityPolicy = "default" | "windows-existing-verify-first";
 
 export type ManagedStorageFailure =
 	| "migration_busy"
@@ -34,7 +121,10 @@ export type ManagedStorageFailure =
 	| "destination_conflict"
 	| "source_changed"
 	| "unsafe_artifacts"
+	| "artifact_capacity_exceeded"
 	| "durability_failed"
+	| "atomic_unavailable"
+	| "durability_not_provable"
 	| "migration_retired"
 	| "managed_storage_unsupported";
 
@@ -92,6 +182,9 @@ export function validateNativeSecurityResult(
 				(result.attribute !== "access" && result.attribute !== "default")
 			) {
 				throw new Error("Malformed ACL security failure evidence");
+			}
+			if (operation === "verify" && result.operation !== "query") {
+				throw new Error("Verify failure unexpectedly reports ACL mutation");
 			}
 		} else if (result.operation !== undefined || result.attribute !== undefined) {
 			throw new Error("Unexpected ACL fields on owner-only security failure");
@@ -179,6 +272,40 @@ export interface ManagedDirectoryRoot {
 	readonly ino: bigint;
 }
 
+/**
+ * Establish the first managed directory beneath a potentially shared ancestor.
+ * The ancestor is used only to create the managed chain; every component from
+ * `configuredRoot` downward is independently type, symlink, owner, mode, and
+ * ACL checked. This deliberately does not impose owner-only policy on `/tmp`.
+ */
+export function prepareManagedDirectoryRoot(
+	configuredRoot: string,
+	policy: ManagedSessionSecurityPolicy = "default",
+): ManagedDirectoryRoot {
+	const target = path.resolve(configuredRoot);
+	const missing: string[] = [];
+	let existing = target;
+	for (;;) {
+		try {
+			assertSafeDirectory(existing);
+			break;
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+			const parent = path.dirname(existing);
+			if (parent === existing) throw new Error(`Managed root is unavailable: ${configuredRoot}`);
+			missing.unshift(path.basename(existing));
+			existing = parent;
+		}
+	}
+	let current = fs.realpathSync.native(existing);
+	for (const component of missing) {
+		current = path.join(current, component);
+		const created = ensureDirectoryComponent(current);
+		secureManagedDirectory(current, created, policy);
+	}
+	if (missing.length === 0) secureManagedDirectory(current, false, policy);
+	return managedDirectoryRoot(current);
+}
 export function managedDirectoryRoot(configuredRoot: string): ManagedDirectoryRoot {
 	const canonicalPath = fs.realpathSync.native(configuredRoot);
 	const stat = fs.lstatSync(canonicalPath, { bigint: true });
@@ -216,14 +343,16 @@ export function retainManagedDirectoryAuthority(
 	}
 }
 
-function ensureDirectoryComponent(pathname: string): void {
+function ensureDirectoryComponent(pathname: string): boolean {
+	let created = false;
 	try {
 		fs.mkdirSync(pathname, { mode: 0o700 });
+		created = true;
 	} catch (error) {
 		if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
 	}
 	assertSafeDirectory(pathname);
-	secure(pathname, "directory");
+	return created;
 }
 
 export function assertManagedDirectoryRoot(root: ManagedDirectoryRoot): void {
@@ -263,10 +392,66 @@ function secure(pathname: string, kind: "directory" | "file"): void {
 	if (!verified.ok) throw securityError(pathname, verified);
 }
 
+function windowsExistingVerifyFirst(policy: ManagedSessionSecurityPolicy): boolean {
+	return process.platform === "win32" && policy === "windows-existing-verify-first";
+}
+
+function assertManagedPathIdentity(pathname: string, kind: "directory" | "file", expected: fs.BigIntStats): void {
+	const current = fs.lstatSync(pathname, { bigint: true });
+	if (current.isSymbolicLink()) throw new Error("reparse_point");
+	const expectedKind = kind === "directory" ? current.isDirectory() : current.isFile();
+	if (!expectedKind) throw new Error(kind === "directory" ? "not_directory" : "not_file");
+	if (current.dev !== expected.dev || current.ino !== expected.ino) throw new Error("identity_mismatch");
+}
+
+function verifyExistingManagedPathSecurity(
+	pathname: string,
+	kind: "directory" | "file",
+	expected: fs.BigIntStats,
+): void {
+	const verified = validateNativeSecurityResult(
+		verifyOwnerOnlyPathSecurityExpected(pathname, kind, expected.dev, expected.ino),
+		"verify",
+		kind,
+	);
+	assertManagedPathIdentity(pathname, kind, expected);
+	if (!verified.ok) throw securityError(pathname, verified);
+}
+
+function secureExistingManagedDirectory(pathname: string, kind: "directory" | "file"): void {
+	const named = fs.lstatSync(pathname, { bigint: true });
+	const safeKind = kind === "directory" ? named.isDirectory() : named.isFile();
+	if (!safeKind || named.isSymbolicLink()) throw new Error(`Unsafe managed ${kind}: ${pathname}`);
+	const verified = validateNativeSecurityResult(
+		verifyOwnerOnlyPathSecurityExpected(pathname, kind, named.dev, named.ino),
+		"verify",
+		kind,
+	);
+	assertManagedPathIdentity(pathname, kind, named);
+	if (verified.ok) return;
+	if (verified.code !== "acl_verify_failed") throw securityError(pathname, verified);
+	const repaired = validateNativeSecurityResult(
+		repairOwnerOnlyPathSecurityExpected(pathname, kind, named.dev, named.ino),
+		"verify",
+		kind,
+	);
+	if (!repaired.ok) throw securityError(pathname, repaired);
+	assertManagedPathIdentity(pathname, kind, named);
+}
+
+function secureManagedDirectory(pathname: string, created: boolean, policy: ManagedSessionSecurityPolicy): void {
+	if (!created && windowsExistingVerifyFirst(policy)) {
+		secureExistingManagedDirectory(pathname, "directory");
+		return;
+	}
+	secure(pathname, "directory");
+}
+
 /** Internal retained-root capability for one managed descendant subtree. */
 export class ManagedSessionDescendantStore {
 	readonly #root: ManagedDirectoryRoot;
 	readonly #baseDir: string;
+	readonly #policy: ManagedSessionSecurityPolicy;
 	readonly #authority: RecoveryFsRoot | undefined;
 	readonly #authorityBaseDir: string;
 	readonly #subtreeRoot: ManagedDirectoryRoot;
@@ -275,32 +460,31 @@ export class ManagedSessionDescendantStore {
 		root: ManagedDirectoryRoot,
 		baseDir: string,
 		retained?: { authority: RecoveryFsRoot; authorityBaseDir: string },
+		policy?: ManagedSessionSecurityPolicy,
 	) {
-		assertManagedDirectoryRoot(root);
 		managedRelativePath(root, baseDir);
+
 		this.#root = root;
 		this.#baseDir = path.resolve(baseDir);
+		this.#policy = policy ?? "default";
 		this.#authorityBaseDir = retained?.authorityBaseDir ?? this.#baseDir;
 		if (retained) {
 			const relative = path.relative(retained.authorityBaseDir, this.#baseDir).split(path.sep).join("/");
 			const captured = retained.authority.snapshotManagedTree(relative);
 			if (!captured.ok || !captured.snapshot)
 				throw new Error(captured.code ?? "Managed subtree identity unavailable");
-			const subtreeStat = fs.lstatSync(this.#baseDir, { bigint: true });
-			if (
-				captured.snapshot.rootDev !== subtreeStat.dev.toString() ||
-				captured.snapshot.rootIno !== subtreeStat.ino.toString()
-			)
-				throw new Error("Managed descendant root identity changed");
 			this.#subtreeRoot = Object.freeze({
 				canonicalPath: this.#baseDir,
-				dev: subtreeStat.dev,
-				ino: subtreeStat.ino,
+				dev: BigInt(captured.snapshot.rootDev),
+				ino: BigInt(captured.snapshot.rootIno),
 			});
 			this.#authority = retained.authority;
+			this.#assertBound();
+
 			return;
 		}
-		ensureManagedDirectory(this.#baseDir, root);
+		assertManagedDirectoryRoot(root);
+		ensureManagedDirectory(this.#baseDir, root, this.#policy);
 		const subtreeStat = fs.lstatSync(this.#baseDir, { bigint: true });
 		this.#subtreeRoot = Object.freeze({ canonicalPath: this.#baseDir, dev: subtreeStat.dev, ino: subtreeStat.ino });
 		if (process.platform === "linux") {
@@ -332,19 +516,28 @@ export class ManagedSessionDescendantStore {
 		return this.#subtreeRoot;
 	}
 
+	get securityPolicy(): ManagedSessionSecurityPolicy {
+		return this.#policy;
+	}
+
 	deriveSubtree(relativePath: string): ManagedSessionDescendantStore {
 		const child = this.ensureDirectory(relativePath);
 		const resolved = this.#resolve(relativePath);
-		if (!this.#authority) return new ManagedSessionDescendantStore(this.#root, resolved);
+		if (!this.#authority) return new ManagedSessionDescendantStore(this.#root, resolved, undefined, this.#policy);
 		const retainedChild = this.#authority.retainManagedDirectory(
 			this.#relative(resolved),
 			child.dev.toString(),
 			child.ino.toString(),
 		);
-		return new ManagedSessionDescendantStore(this.#root, resolved, {
-			authority: retainedChild,
-			authorityBaseDir: resolved,
-		});
+		return new ManagedSessionDescendantStore(
+			this.#root,
+			resolved,
+			{
+				authority: retainedChild,
+				authorityBaseDir: resolved,
+			},
+			this.#policy,
+		);
 	}
 
 	retainAuthority(): RecoveryFsRoot | undefined {
@@ -371,12 +564,19 @@ export class ManagedSessionDescendantStore {
 				return;
 			}
 		} else {
-			const verified = validateNativeSecurityResult(
-				verifyOwnerOnlyPathSecurity(this.#baseDir, "directory"),
-				"verify",
-				"directory",
-			);
-			if (!verified.ok) throw securityError(this.#baseDir, verified);
+			const named = fs.lstatSync(this.#baseDir, { bigint: true });
+			if (!named.isDirectory() || named.isSymbolicLink())
+				throw new Error(`Unsafe managed directory: ${this.#baseDir}`);
+			if (windowsExistingVerifyFirst(this.#policy))
+				verifyExistingManagedPathSecurity(this.#baseDir, "directory", named);
+			else {
+				const verified = validateNativeSecurityResult(
+					verifyOwnerOnlyPathSecurity(this.#baseDir, "directory"),
+					"verify",
+					"directory",
+				);
+				if (!verified.ok) throw securityError(this.#baseDir, verified);
+			}
 		}
 		this.#assertBound();
 	}
@@ -421,7 +621,7 @@ export class ManagedSessionDescendantStore {
 				ino: BigInt(ensured.identity.ino),
 			});
 		}
-		ensureManagedDirectory(this.#resolve(relativePath), this.#root);
+		ensureManagedDirectory(this.#resolve(relativePath), this.#root, this.#policy);
 		const named = fs.lstatSync(this.#resolve(relativePath), { bigint: true });
 		return Object.freeze({ canonicalPath: this.#resolve(relativePath), dev: named.dev, ino: named.ino });
 	}
@@ -434,13 +634,13 @@ export class ManagedSessionDescendantStore {
 			this.#assertBound();
 			return;
 		}
-		await publishManagedFileNoReplace(resolved, bytes, undefined, this.#root);
+		await publishManagedFileNoReplace(resolved, bytes, undefined, this.#root, this.#policy);
 	}
 
 	publishNoReplaceSync(relativePath: string, bytes: Uint8Array): void {
 		const resolved = this.#resolve(relativePath);
 		if (!this.#authority) {
-			publishManagedFileNoReplaceSync(resolved, bytes, this.#root);
+			publishManagedFileNoReplaceSync(resolved, bytes, this.#root, this.#policy);
 			this.#assertBound();
 			return;
 		}
@@ -453,7 +653,7 @@ export class ManagedSessionDescendantStore {
 		this.#assertBound();
 		const resolved = this.#resolve(relativePath);
 		if (!this.#authority) {
-			await replaceManagedFile(resolved, bytes, this.#subtreeRoot);
+			await replaceManagedFile(resolved, bytes, this.#subtreeRoot, this.#policy);
 			this.#assertBound();
 			return;
 		}
@@ -466,7 +666,7 @@ export class ManagedSessionDescendantStore {
 		this.#assertBound();
 		const resolved = this.#resolve(relativePath);
 		if (!this.#authority) {
-			replaceManagedFileSync(resolved, bytes, this.#subtreeRoot);
+			replaceManagedFileSync(resolved, bytes, this.#subtreeRoot, this.#policy);
 			this.#assertBound();
 			return;
 		}
@@ -477,7 +677,7 @@ export class ManagedSessionDescendantStore {
 	appendSync(relativePath: string, bytes: Uint8Array): void {
 		this.#assertBound();
 		const resolved = this.#resolve(relativePath);
-		const existing = this.readExpected(relativePath);
+		let existing = this.readExpected(relativePath);
 		if (!existing) throw new Error("managed_append_missing");
 		if (this.#authority) {
 			const appended = this.#authority.appendManaged(
@@ -494,20 +694,49 @@ export class ManagedSessionDescendantStore {
 			this.#assertBound();
 			return;
 		}
+		// On Darwin, the first write-append open can change only ctime (e.g. com.apple.provenance)
+		// while leaving dev/ino/size/mtime/content intact. Allow one bounded refresh+retry for that
+		// transition only; any other identity change or a second ctime transition stays fail-closed.
+		// See https://github.com/jaybeyond/Sayknow_CLI/issues/2944
 		let fd: number | undefined;
+		let darwinCtimeRefreshConsumed = false;
 		try {
-			fd = fs.openSync(resolved, fs.constants.O_WRONLY | fs.constants.O_APPEND | fs.constants.O_NOFOLLOW);
-			const before = identity(fs.fstatSync(fd, { bigint: true }));
-			if (!sameIdentity(before, existing.identity)) throw new Error("identity_mismatch");
-			secureFileDescriptor(resolved, fd, "verify");
-			let offset = 0;
-			while (offset < bytes.byteLength) offset += fs.writeSync(fd, bytes, offset, bytes.byteLength - offset);
-			fs.fsyncSync(fd);
-			secureFileDescriptor(resolved, fd, "verify");
-			const after = identity(fs.fstatSync(fd, { bigint: true }));
-			const named = identity(fs.lstatSync(resolved, { bigint: true }));
-			if (!sameIdentity(after, named) || after.dev !== before.dev || after.ino !== before.ino)
-				throw new Error("identity_mismatch");
+			for (;;) {
+				fd = fs.openSync(resolved, fs.constants.O_WRONLY | fs.constants.O_APPEND | fs.constants.O_NOFOLLOW);
+				const before = identity(fs.fstatSync(fd, { bigint: true }));
+				if (!sameIdentity(before, existing.identity)) {
+					const allowDarwinCtimeRefresh =
+						process.platform === "darwin" &&
+						!darwinCtimeRefreshConsumed &&
+						isCtimeOnlyIdentityMismatch(before, existing.identity);
+					if (!allowDarwinCtimeRefresh) throw new Error("identity_mismatch");
+					fs.closeSync(fd);
+					fd = undefined;
+					darwinCtimeRefreshConsumed = true;
+					const original = existing;
+					const refreshed = this.readExpected(relativePath);
+					if (
+						!refreshed ||
+						!sameStableIdentityIgnoringCtime(refreshed.identity, original.identity) ||
+						refreshed.identity.sha256 !== original.identity.sha256 ||
+						!refreshed.bytes.equals(original.bytes)
+					) {
+						throw new Error("identity_mismatch");
+					}
+					existing = refreshed;
+					continue;
+				}
+				secureFileDescriptor(resolved, fd, "verify");
+				let offset = 0;
+				while (offset < bytes.byteLength) offset += fs.writeSync(fd, bytes, offset, bytes.byteLength - offset);
+				fs.fsyncSync(fd);
+				secureFileDescriptor(resolved, fd, "verify");
+				const after = identity(fs.fstatSync(fd, { bigint: true }));
+				const named = identity(fs.lstatSync(resolved, { bigint: true }));
+				if (!sameIdentity(after, named) || after.dev !== before.dev || after.ino !== before.ino)
+					throw new Error("identity_mismatch");
+				break;
+			}
 		} finally {
 			if (fd !== undefined) fs.closeSync(fd);
 		}
@@ -528,6 +757,7 @@ export class ManagedSessionDescendantStore {
 		if (!created.ok) throw new Error(created.code ?? "managed_publish_failed");
 		if (!created.identity) throw new Error("managed_publish_identity_unavailable");
 		let captured: ReturnType<RecoveryFsRoot["readManaged"]> | undefined;
+		let published: unknown;
 		try {
 			captured = this.#authority.readManaged(temporary);
 			if (!captured.ok || !captured.identity || !captured.data)
@@ -553,7 +783,7 @@ export class ManagedSessionDescendantStore {
 				digest,
 			);
 			if (!synced.ok) throw new Error(synced.code ?? "managed_publish_fsync_failed");
-			const published = this.#authority.renameManagedFileNoReplace(
+			published = this.#authority.renameManagedFileNoReplace(
 				temporary,
 				relative,
 				captured.identity.dev,
@@ -563,35 +793,14 @@ export class ManagedSessionDescendantStore {
 				captured.identity.ctimeNs,
 				digest,
 			);
-			if (!published.ok)
-				throw new Error(
-					published.code === "already_exists"
-						? "destination_conflict"
-						: (published.code ?? "managed_publish_failed"),
-				);
+			const outcome = classifyNativePublishOutcome(published, "retained_file");
+			if (!outcome.ok) throw publishFailure(outcome);
 		} catch (error) {
-			if (captured?.ok && captured.identity && captured.data) {
-				const digest = captured.identity.sha256 ?? createHash("sha256").update(captured.data).digest("hex");
-				const installed = this.#authority.readManaged(relative);
-				if (
-					installed.ok &&
-					installed.identity &&
-					installed.data &&
-					installed.identity.dev === captured.identity.dev &&
-					installed.identity.ino === captured.identity.ino &&
-					(installed.identity.sha256 ?? createHash("sha256").update(installed.data).digest("hex")) === digest
-				) {
-					const removed = this.#authority.removeManaged(
-						relative,
-						installed.identity.dev,
-						installed.identity.ino,
-						installed.identity.size,
-						installed.identity.mtimeNs,
-						installed.identity.ctimeNs,
-						digest,
-					);
-					if (!removed.ok) throw new Error(removed.code ?? "managed_publish_reconcile_failed");
-				}
+			// A committed or unknown native outcome is evidence, not authorization to
+			// probe or remove the destination. Only a validated pre-mutation result
+			// may clean this operation's still-named staging object.
+			const outcome = captured ? classifyNativePublishOutcome(published, "retained_file") : undefined;
+			if (captured?.ok && captured.identity && captured.data && outcome && mayCleanCurrentStaging(outcome)) {
 				const staged = this.#authority.readManaged(temporary);
 				if (
 					staged.ok &&
@@ -609,7 +818,8 @@ export class ManagedSessionDescendantStore {
 						staged.identity.ctimeNs,
 						staged.identity.sha256 ?? createHash("sha256").update(staged.data).digest("hex"),
 					);
-					if (!removed.ok) throw new Error(removed.code ?? "managed_publish_reconcile_failed");
+					if (!removed.ok && removed.code !== "cleanup_pending")
+						throw new Error(removed.code ?? "managed_publish_reconcile_failed");
 				}
 			}
 			throw error;
@@ -682,7 +892,17 @@ export class ManagedSessionDescendantStore {
 				sha256: expected.identity.sha256,
 				quarantineName: `.skc-remove-${process.pid}-${randomUUID()}`,
 			});
-			if (!removed.ok) throw new Error(removed.code ?? "managed_remove_failed");
+			if (
+				!removed.ok &&
+				!(
+					removed.code === "cleanup_pending" &&
+					(removed.detachedPath ??
+						removed.retainedSuccessorPath ??
+						removed.retainedPlaceholderPath ??
+						removed.retainedUnknownPath) !== undefined
+				)
+			)
+				throw new Error(removed.code ?? "managed_remove_failed");
 			this.#assertBound();
 			return;
 		}
@@ -695,7 +915,8 @@ export class ManagedSessionDescendantStore {
 			expected.identity.ctimeNs.toString(),
 			expected.identity.sha256,
 		);
-		if (!removed.ok) throw new Error(removed.code ?? "managed_remove_failed");
+		if (!removed.ok && !(removed.code === "cleanup_pending" && removed.recoveryPath !== undefined))
+			throw new Error(removed.code ?? "managed_remove_failed");
 		this.#assertBound();
 	}
 	/** Read and remove one managed descendant through retained authority. */
@@ -719,7 +940,8 @@ export class ManagedSessionDescendantStore {
 				existing.identity.ctimeNs,
 				existing.identity.sha256 ?? createHash("sha256").update(existing.data).digest("hex"),
 			);
-			if (!removed.ok) throw new Error(removed.code ?? "managed_consume_failed");
+			if (!removed.ok && !(removed.code === "cleanup_pending" && removed.recoveryPath !== undefined))
+				throw new Error(removed.code ?? "managed_consume_failed");
 			this.#assertBound();
 			return existing.data;
 		}
@@ -805,92 +1027,31 @@ export class ManagedSessionDescendantStore {
 		sourceRelativePath: string,
 		destinationRelativePath: string,
 		expected: NativeDirectoryTreeSnapshot,
-	): void {
+	): NativeDirectoryTreeSnapshot {
 		this.#assertBound();
-		if (!this.#authority) {
-			const source = this.#resolve(sourceRelativePath);
-			const destination = this.#resolve(destinationRelativePath);
-			if (fs.existsSync(destination)) throw new Error("already_exists");
-			let destinationSnapshot: NativeDirectoryTreeSnapshot | undefined;
-			try {
-				this.ensureDirectory(destinationRelativePath);
-				destinationSnapshot = this.captureTree(destinationRelativePath);
-				for (const entry of expected.entries) {
-					if (entry.relativePath === "") continue;
-					const target = path.posix.join(destinationRelativePath.replaceAll(path.sep, "/"), entry.relativePath);
-					if (entry.kind === "directory") {
-						this.ensureDirectory(target);
-						destinationSnapshot = this.captureTree(destinationRelativePath);
-						continue;
-					}
-					const sourceEntry = this.readExpected(
-						path.posix.join(sourceRelativePath.replaceAll(path.sep, "/"), entry.relativePath),
-					);
-					if (
-						!sourceEntry ||
-						sourceEntry.identity.dev.toString() !== entry.dev ||
-						sourceEntry.identity.ino.toString() !== entry.ino ||
-						sourceEntry.identity.size.toString() !== entry.size ||
-						sourceEntry.identity.mtimeNs.toString() !== entry.mtimeNs ||
-						sourceEntry.identity.sha256 !== entry.sha256
-					)
-						throw new Error("artifact_source_changed");
-					this.publishNoReplaceSync(target, sourceEntry.bytes);
-					destinationSnapshot = this.captureTree(destinationRelativePath);
-				}
-				destinationSnapshot = this.captureTree(destinationRelativePath);
-				const comparable = (tree: NativeDirectoryTreeSnapshot) =>
-					tree.entries.map(entry => ({
-						relativePath: entry.relativePath,
-						kind: entry.kind,
-						size: entry.size,
-						sha256: entry.sha256,
-					}));
-				if (JSON.stringify(comparable(destinationSnapshot)) !== JSON.stringify(comparable(expected)))
-					throw new Error("artifact_destination_mismatch");
-				const terminalSource = snapshotDirectoryTree(source);
-				if (
-					!terminalSource.ok ||
-					!terminalSource.snapshot ||
-					JSON.stringify(terminalSource.snapshot) !== JSON.stringify(expected)
+		const moved = this.#authority
+			? this.#authority.renameManagedTreeNoReplace(
+					this.#relative(this.#resolve(sourceRelativePath)),
+					this.#relative(this.#resolve(destinationRelativePath)),
+					expected,
 				)
-					throw new Error("artifact_source_changed");
-				const retired = exactRemoveDirectoryTree(source, expected);
-				if (!retired.ok) throw new Error(retired.code ?? "managed_remove_failed");
-			} catch (error) {
-				if (destinationSnapshot) {
-					const removed = exactRemoveDirectoryTree(destination, destinationSnapshot);
-					if (!removed.ok) throw new Error(removed.code ?? "managed_publish_reconcile_failed");
-				}
-				throw error;
-			}
-			this.#assertBound();
-			return;
-		}
-		const moved = this.#authority.renameManagedTreeNoReplace(
-			this.#relative(this.#resolve(sourceRelativePath)),
-			this.#relative(this.#resolve(destinationRelativePath)),
-			expected,
-		);
-		if (!moved.ok) {
-			try {
-				const installed = this.captureTree(destinationRelativePath);
-				const comparable = (tree: NativeDirectoryTreeSnapshot) =>
-					tree.entries.map(entry => ({
-						relativePath: entry.relativePath,
-						kind: entry.kind,
-						size: entry.size,
-						sha256: entry.sha256,
-					}));
-				if (JSON.stringify(comparable(installed)) !== JSON.stringify(comparable(expected)))
-					throw new Error("managed_publish_reconcile_failed");
-				this.removeTreeExpected(destinationRelativePath, installed);
-			} catch (error) {
-				if (!(error instanceof Error) || error.message !== "not_found") throw error;
-			}
-			throw new Error(moved.code ?? "managed_move_failed");
-		}
+			: renameNoReplacePath(this.#resolve(sourceRelativePath), this.#resolve(destinationRelativePath));
+		const outcome = classifyNativePublishOutcome(moved, this.#authority ? "retained_tree" : "direct_rename");
+		if (!outcome.ok)
+			throw new ManagedTreeMoveOutcomeError(publishFailure(outcome).message, mayCleanCurrentStaging(outcome));
+		const movedSnapshot = this.#authority
+			? this.#authority.snapshotManagedTree(this.#relative(this.#resolve(destinationRelativePath)))
+			: snapshotDirectoryTree(this.#resolve(destinationRelativePath));
+		if (
+			!movedSnapshot.ok ||
+			!movedSnapshot.snapshot ||
+			!sameDirectoryTreeSnapshotAfterRename(movedSnapshot.snapshot, expected)
+		)
+			throw new ManagedTreeMoveOutcomeError("artifact_destination_mismatch", false);
+		if (!this.#authority) fsyncDirectory(this.#baseDir);
+
 		this.#assertBound();
+		return movedSnapshot.snapshot;
 	}
 
 	removeTreeExpected(relativePath: string, expected: NativeDirectoryTreeSnapshot): void {
@@ -1018,6 +1179,24 @@ function sameIdentity(left: ManagedFileSnapshot["identity"], right: ManagedFileS
 	);
 }
 
+/** Content/path identity that remains meaningful across a Darwin write-open ctime-only transition. */
+function sameStableIdentityIgnoringCtime(
+	left: ManagedFileSnapshot["identity"],
+	right: ManagedFileSnapshot["identity"],
+): boolean {
+	return (
+		left.dev === right.dev && left.ino === right.ino && left.size === right.size && left.mtimeNs === right.mtimeNs
+	);
+}
+
+/** True when observed identity matches expected on every field except ctimeNs. */
+function isCtimeOnlyIdentityMismatch(
+	observed: ManagedFileSnapshot["identity"],
+	expected: ManagedFileSnapshot["identity"],
+): boolean {
+	return sameStableIdentityIgnoringCtime(observed, expected) && observed.ctimeNs !== expected.ctimeNs;
+}
+
 function parseLock(pathname: string): LockRecord | undefined {
 	try {
 		const stat = fs.lstatSync(pathname);
@@ -1060,25 +1239,43 @@ function sameFileIdentity(left: fs.BigIntStats, right: fs.BigIntStats): boolean 
 }
 
 /** Create a managed directory and fail closed unless its owner-only mode/ACL verifies. */
-export function ensureManagedDirectory(pathname: string, root?: ManagedDirectoryRoot): void {
+export function ensureManagedDirectory(
+	pathname: string,
+	root?: ManagedDirectoryRoot,
+	policy: ManagedSessionSecurityPolicy = "default",
+): void {
 	if (!root) {
+		let existed = false;
+		try {
+			const named = fs.lstatSync(pathname);
+			existed = true;
+			if (!named.isDirectory() || named.isSymbolicLink()) throw new Error(`Unsafe managed directory: ${pathname}`);
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+		}
 		fs.mkdirSync(pathname, { recursive: true, mode: 0o700 });
 		assertSafeDirectory(pathname);
-		secure(pathname, "directory");
+		if (existed && windowsExistingVerifyFirst(policy)) secureExistingManagedDirectory(pathname, "directory");
+		else secure(pathname, "directory");
 		return;
 	}
 	ensureManagedRoot(root);
+	const components = managedRelativePath(root, pathname);
+	if (components.length === 0) {
+		if (windowsExistingVerifyFirst(policy)) secureExistingManagedDirectory(root.canonicalPath, "directory");
+		return;
+	}
 	let current = root.canonicalPath;
-	for (const component of managedRelativePath(root, pathname)) {
+	if (windowsExistingVerifyFirst(policy)) secureExistingManagedDirectory(current, "directory");
+	else secure(current, "directory");
+	for (const component of components) {
 		// Re-inspect the captured root or already-secured descendant before every
 		// descent; a replaced component cannot grant authority to the next one.
 		if (current === root.canonicalPath) assertManagedDirectoryRoot(root);
-		else {
-			assertSafeDirectory(current);
-			secure(current, "directory");
-		}
+		else assertSafeDirectory(current);
 		current = path.join(current, component);
-		ensureDirectoryComponent(current);
+		const created = ensureDirectoryComponent(current);
+		secureManagedDirectory(current, created, policy);
 	}
 }
 
@@ -1123,15 +1320,17 @@ export async function publishManagedFileNoReplace(
 	bytes: Uint8Array,
 	assertOwned?: () => void,
 	root?: ManagedDirectoryRoot,
+	policy: ManagedSessionSecurityPolicy = "default",
 ): Promise<void> {
 	const parent = path.dirname(destination);
-	ensureManagedDirectory(parent, root);
+	ensureManagedDirectory(parent, root, policy);
 	const staging = path.join(parent, `.${path.basename(destination)}.${randomUUID()}.staging`);
 	let fd: number | undefined;
 	let stagingIdentity: { dev: bigint; ino: bigint } | undefined;
-	let stagingSnapshot: ManagedFileSnapshot | undefined;
-	let committed = false;
 	let failure: unknown;
+	let outcome: NativePublishOutcome | undefined;
+	let renameAttempted = false;
+
 	try {
 		assertOwned?.();
 		fd = fs.openSync(
@@ -1146,17 +1345,13 @@ export async function publishManagedFileNoReplace(
 		secureFileDescriptor(staging, fd, "verify");
 		const staged = fs.fstatSync(fd, { bigint: true });
 		stagingIdentity = { dev: staged.dev, ino: staged.ino };
-		stagingSnapshot = {
-			bytes: Buffer.from(bytes),
-			identity: identity(staged, createHash("sha256").update(bytes).digest("hex")),
-		};
 		assertOwned?.();
 
-		const published = renameNoReplacePath(staging, destination);
-		if (!published.ok) {
-			if (published.code === "quarantine_collision") throw new Error("destination_conflict");
-			throw new Error("durability_failed");
-		}
+		renameAttempted = true;
+		outcome = classifyNativePublishOutcome(renameNoReplacePath(staging, destination));
+
+		if (!outcome.ok) throw publishFailure(outcome);
+
 		const named = fs.lstatSync(destination, { bigint: true });
 		if (
 			!named.isFile() ||
@@ -1171,25 +1366,12 @@ export async function publishManagedFileNoReplace(
 		fd = undefined;
 
 		fsyncDirectory(parent);
-		committed = true;
 	} catch (error) {
 		failure = error;
 	} finally {
 		if (fd !== undefined) fs.closeSync(fd);
-		if (!committed && stagingSnapshot) {
-			try {
-				const installed = captureManagedFileNoFollow(destination);
-				if (
-					installed.identity.dev === stagingSnapshot.identity.dev &&
-					installed.identity.ino === stagingSnapshot.identity.ino &&
-					installed.identity.sha256 === stagingSnapshot.identity.sha256
-				)
-					await unlinkManagedFileVerified(destination, installed.identity);
-			} catch (error) {
-				if ((error as NodeJS.ErrnoException).code !== "ENOENT") failure ??= error;
-			}
-		}
-		if (stagingIdentity) {
+
+		if (stagingIdentity && (!renameAttempted || (outcome && mayCleanCurrentStaging(outcome)))) {
 			await fsp
 				.lstat(staging, { bigint: true })
 				.then(stat => {
@@ -1208,15 +1390,16 @@ export function publishManagedFileNoReplaceSync(
 	destination: string,
 	bytes: Uint8Array,
 	root?: ManagedDirectoryRoot,
+	policy: ManagedSessionSecurityPolicy = "default",
 ): void {
 	const parent = path.dirname(destination);
-	ensureManagedDirectory(parent, root);
+	ensureManagedDirectory(parent, root, policy);
 	const staging = path.join(parent, `.${path.basename(destination)}.${randomUUID()}.staging`);
 	let fd: number | undefined;
 	let stagingIdentity: { dev: bigint; ino: bigint } | undefined;
-	let stagingSnapshot: ManagedFileSnapshot | undefined;
-	let committed = false;
 	let failure: unknown;
+	let outcome: NativePublishOutcome | undefined;
+
 	try {
 		fd = fs.openSync(
 			staging,
@@ -1230,16 +1413,10 @@ export function publishManagedFileNoReplaceSync(
 		secureFileDescriptor(staging, fd, "verify");
 		const staged = fs.fstatSync(fd, { bigint: true });
 		stagingIdentity = { dev: staged.dev, ino: staged.ino };
-		stagingSnapshot = {
-			bytes: Buffer.from(bytes),
-			identity: identity(staged, createHash("sha256").update(bytes).digest("hex")),
-		};
 
-		const published = renameNoReplacePath(staging, destination);
-		if (!published.ok) {
-			if (published.code === "quarantine_collision") throw new Error("destination_conflict");
-			throw new Error("durability_failed");
-		}
+		outcome = classifyNativePublishOutcome(renameNoReplacePath(staging, destination));
+		if (!outcome.ok) throw publishFailure(outcome);
+
 		const named = fs.lstatSync(destination, { bigint: true });
 		if (!named.isFile() || named.isSymbolicLink() || named.dev !== staged.dev || named.ino !== staged.ino) {
 			throw new Error("destination_identity_changed");
@@ -1248,35 +1425,12 @@ export function publishManagedFileNoReplaceSync(
 		fs.closeSync(fd);
 		fd = undefined;
 		fsyncDirectory(parent);
-		committed = true;
 	} catch (error) {
 		failure = error;
 	} finally {
 		if (fd !== undefined) fs.closeSync(fd);
 	}
-	if (stagingIdentity) {
-		if (!committed && stagingSnapshot) {
-			try {
-				const installed = captureManagedFileNoFollow(destination);
-				if (
-					installed.identity.dev === stagingSnapshot.identity.dev &&
-					installed.identity.ino === stagingSnapshot.identity.ino &&
-					installed.identity.sha256 === stagingSnapshot.identity.sha256
-				) {
-					const removed = exactUnlink(destination, {
-						dev: installed.identity.dev,
-						ino: installed.identity.ino,
-						size: BigInt(installed.identity.size),
-						mtimeNs: installed.identity.mtimeNs,
-						sha256: installed.identity.sha256,
-						quarantineName: `.skc-remove-${process.pid}-${randomUUID()}`,
-					});
-					if (!removed.ok) failure ??= new Error(removed.code ?? "managed_publish_reconcile_failed");
-				}
-			} catch (error) {
-				if ((error as NodeJS.ErrnoException).code !== "ENOENT") failure ??= error;
-			}
-		}
+	if (stagingIdentity && outcome && mayCleanCurrentStaging(outcome)) {
 		try {
 			const named = fs.lstatSync(staging, { bigint: true });
 			if (named.dev !== stagingIdentity.dev || named.ino !== stagingIdentity.ino) {
@@ -1291,9 +1445,14 @@ export function publishManagedFileNoReplaceSync(
 }
 
 /** Replace one managed regular file while retaining the secured staging fd through publication. */
-export function replaceManagedFileSync(destination: string, bytes: Uint8Array, root: ManagedDirectoryRoot): void {
+export function replaceManagedFileSync(
+	destination: string,
+	bytes: Uint8Array,
+	root: ManagedDirectoryRoot,
+	policy: ManagedSessionSecurityPolicy = "default",
+): void {
 	const parent = path.dirname(destination);
-	ensureManagedDirectory(parent, root);
+	ensureManagedDirectory(parent, root, policy);
 	const staging = path.join(parent, `.${path.basename(destination)}.${randomUUID()}.replacement`);
 	let fd: number | undefined;
 	let stagedIdentity: { dev: bigint; ino: bigint } | undefined;
@@ -1338,8 +1497,9 @@ export async function replaceManagedFile(
 	destination: string,
 	bytes: Uint8Array,
 	root: ManagedDirectoryRoot,
+	policy: ManagedSessionSecurityPolicy = "default",
 ): Promise<void> {
-	replaceManagedFileSync(destination, bytes, root);
+	replaceManagedFileSync(destination, bytes, root, policy);
 }
 
 /** Copy the exact bytes captured from one no-follow source descriptor. */
@@ -1348,11 +1508,12 @@ export async function copyManagedFileNoReplace(
 	destination: string,
 	snapshot = captureManagedFileNoFollow(source),
 	root?: ManagedDirectoryRoot,
+	policy: ManagedSessionSecurityPolicy = "default",
 ): Promise<void> {
 	const named = captureManagedFileNoFollow(source);
 	if (!sameIdentity(snapshot.identity, named.identity) || !snapshot.bytes.equals(named.bytes))
 		throw new Error("source_changed");
-	await publishManagedFileNoReplace(destination, snapshot.bytes, undefined, root);
+	await publishManagedFileNoReplace(destination, snapshot.bytes, undefined, root, policy);
 	const destinationSnapshot = captureManagedFileNoFollow(destination);
 	if (!destinationSnapshot.bytes.equals(snapshot.bytes)) throw new Error("durability_failed");
 }
@@ -1362,8 +1523,9 @@ export async function acquireManagedLock(
 	locksDirectory: string,
 	name: string,
 	root?: ManagedDirectoryRoot,
+	policy: ManagedSessionSecurityPolicy = "default",
 ): Promise<ManagedStorageLock> {
-	ensureManagedDirectory(locksDirectory, root);
+	ensureManagedDirectory(locksDirectory, root, policy);
 	const lockPath = path.join(locksDirectory, `${name}.lock`);
 	const deadline = Date.now() + LOCK_WAIT_MS;
 	let staleObservedAt: number | undefined;
@@ -1478,8 +1640,20 @@ export async function acquireManagedLock(
 	}
 }
 
+export interface ManagedArtifactTreeLimits {
+	maxFiles?: number;
+	maxTotalBytes?: number;
+}
+
 /** Bounds a no-follow artifact tree before it can be copied or deleted. */
-export function validateManagedArtifactTree(root: string): void {
+export function validateManagedArtifactTree(root: string, limits: ManagedArtifactTreeLimits = {}): void {
+	const clampLimit = (limit: number | undefined, maximum: number): number => {
+		if (limit === undefined) return maximum;
+		if (!Number.isFinite(limit) || !Number.isInteger(limit) || limit <= 0) throw new Error("unsafe_artifacts");
+		return Math.min(limit, maximum);
+	};
+	const maxFiles = clampLimit(limits.maxFiles, MANAGED_ARTIFACT_MAX_FILES);
+	const maxTotalBytes = clampLimit(limits.maxTotalBytes, MANAGED_ARTIFACT_MAX_TOTAL_BYTES);
 	let files = 0;
 	let bytes = 0;
 	const visit = (directory: string, depth: number): void => {
@@ -1496,8 +1670,7 @@ export function validateManagedArtifactTree(root: string): void {
 			if (!stat.isFile() || stat.size > MANAGED_ARTIFACT_MAX_FILE_BYTES) throw new Error("unsafe_artifacts");
 			files++;
 			bytes += stat.size;
-			if (files > MANAGED_ARTIFACT_MAX_FILES || bytes > MANAGED_ARTIFACT_MAX_TOTAL_BYTES)
-				throw new Error("unsafe_artifacts");
+			if (files > maxFiles || bytes > maxTotalBytes) throw new Error("artifact_capacity_exceeded");
 		}
 	};
 	const rootStat = fs.lstatSync(root);
@@ -1513,7 +1686,10 @@ export function fsyncManagedArtifactTree(root: string): NativeDirectoryTreeSnaps
 		const stat = fs.lstatSync(pathname);
 		if (stat.isSymbolicLink()) throw new Error("unsafe_artifacts");
 		if (stat.isFile()) {
-			const fd = fs.openSync(pathname, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+			const fd = fs.openSync(
+				pathname,
+				(process.platform === "win32" ? fs.constants.O_WRONLY : fs.constants.O_RDONLY) | fs.constants.O_NOFOLLOW,
+			);
 			try {
 				fs.fsyncSync(fd);
 			} finally {

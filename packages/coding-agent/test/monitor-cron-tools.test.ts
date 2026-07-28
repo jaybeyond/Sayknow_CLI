@@ -349,6 +349,14 @@ describe("Cron tools", () => {
 		expect(cron.parameters.safeParse({ op: "bogus" }).success).toBe(false);
 	});
 
+	it("routes silent recurring polling to monitor instead of cron", () => {
+		const { cron } = makeTools();
+		expect(cron.description).toContain("Cron is not a silent polling primitive");
+		expect(cron.description).toContain("use `monitor`");
+		expect(cron.description).toContain("set `persistent: true`");
+		expect(cron.description).toContain("Do not schedule a cron prompt that asks the agent to suppress routine polls");
+	});
+
 	it("schedules a recurring task, lists it with human schedule, and returns an 8-character id", async () => {
 		const { create, list } = makeTools();
 		const result = expectText(

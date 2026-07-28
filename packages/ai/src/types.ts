@@ -114,7 +114,7 @@ export interface ThinkingConfig {
 }
 
 export type KnownProvider =
-	| "alibaba-coding-plan"
+	| "alibaba-token-plan"
 	| "amazon-bedrock"
 	| "azure-openai"
 	| "anthropic"
@@ -147,6 +147,8 @@ export type KnownProvider =
 	| "minimax"
 	| "opencode-go"
 	| "opencode-zen"
+	| "opengateway"
+	| "bizrouter"
 	| "synthetic"
 	| "cloudflare-ai-gateway"
 	| "huggingface"
@@ -709,10 +711,15 @@ export type TSchema = ZodType | TJsonSchema;
 /** Resolve parameter types for tool execution / handlers. */
 export type Static<S> = S extends ZodType ? z.infer<S> : S extends { static: infer T } ? T : unknown;
 
+export type RawArgumentRejectionCode =
+	| "ask-intent-review-requires-positive-round"
+	| "ask-intent-contract-requires-non-empty-authority"
+	| "ask-deep-interview-metadata-requires-deep-interview-gate";
+
 export type RawArgumentValidationResult =
 	| { outcome: "passthrough" }
 	| { outcome: "accept"; arguments: ToolCall["arguments"] }
-	| { outcome: "reject" };
+	| { outcome: "reject"; code?: RawArgumentRejectionCode };
 
 export interface Tool<TParameters extends TSchema = TSchema> {
 	name: string;

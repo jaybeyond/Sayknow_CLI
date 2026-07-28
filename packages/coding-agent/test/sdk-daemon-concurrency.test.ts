@@ -232,8 +232,183 @@ describe("ConversationStore", () => {
 		expect(await store.read("mapping")).toEqual(record(1));
 		expect(fs.calls.some(call => call.startsWith("sync:/agent/sdk/daemons/discord/conversations.json."))).toBe(true);
 	});
-});
+	class DirectoryBarrierFs extends MemoryConversationStoreFs {
+		directoryOpenError?: Error;
+		directorySyncError?: Error;
+		directoryCloseError?: Error;
 
+		override async open(file: string, flags: string) {
+			if (file === "/agent/sdk/daemons/discord" && this.directoryOpenError) throw this.directoryOpenError;
+			const handle = await super.open(file, flags);
+			if (file !== "/agent/sdk/daemons/discord") return handle;
+			return {
+				...handle,
+				sync: async () => {
+					await handle.sync();
+					if (this.directorySyncError) throw this.directorySyncError;
+				},
+				close: async () => {
+					await handle.close();
+					if (this.directoryCloseError) throw this.directoryCloseError;
+				},
+			};
+		}
+	}
+
+	function barrierError(message: string, code?: string): Error {
+		return code === undefined ? new Error(message) : Object.assign(new Error(message), { code });
+	}
+
+	test("tolerates unsupported Windows parent open and sync errors after durable temp sync and rename", async () => {
+		for (const code of ["EINVAL", "ENOTSUP", "EOPNOTSUPP", "EPERM"]) {
+			for (const phase of ["open", "sync"] as const) {
+				const fs = new DirectoryBarrierFs();
+				const error = barrierError(`${phase} ${code}`, code);
+				fs[phase === "open" ? "directoryOpenError" : "directorySyncError"] = error;
+				const store = new ConversationStore<TestConversation>({
+					agentDir: "/agent",
+					kind: "discord",
+					fs,
+					now: () => 5,
+					platform: "win32",
+				});
+				await expect(store.write("mapping", undefined, record(1))).resolves.toBe(true);
+				const tempSync = fs.calls.findIndex(call =>
+					call.startsWith("sync:/agent/sdk/daemons/discord/conversations.json."),
+				);
+				const rename = fs.calls.findIndex(call => call.startsWith("rename:"));
+				expect(tempSync).toBeGreaterThanOrEqual(0);
+				expect(rename).toBeGreaterThan(tempSync);
+				if (phase === "sync") {
+					const parentSync = fs.calls.indexOf("sync:/agent/sdk/daemons/discord");
+					const parentClose = fs.calls.indexOf("close:/agent/sdk/daemons/discord");
+					expect(parentSync).toBeGreaterThan(rename);
+					expect(parentClose).toBeGreaterThan(parentSync);
+				}
+			}
+		}
+	});
+
+	test("rejects parent open and sync errors without supported Windows codes", async () => {
+		for (const phase of ["open", "sync"] as const) {
+			const fs = new DirectoryBarrierFs();
+			const error = barrierError(`no code ${phase}`);
+			fs[phase === "open" ? "directoryOpenError" : "directorySyncError"] = error;
+			const store = new ConversationStore<TestConversation>({
+				agentDir: "/agent",
+				kind: "discord",
+				fs,
+				platform: "win32",
+			});
+			await expect(store.write("mapping", undefined, record(1))).rejects.toBe(error);
+			const tempSync = fs.calls.findIndex(call =>
+				call.startsWith("sync:/agent/sdk/daemons/discord/conversations.json."),
+			);
+			const rename = fs.calls.findIndex(call => call.startsWith("rename:"));
+			expect(rename).toBeGreaterThan(tempSync);
+			if (phase === "sync") expect(fs.calls).toContain("close:/agent/sdk/daemons/discord");
+		}
+	});
+
+	test("rejects EACCES parent open and sync errors on Windows", async () => {
+		for (const phase of ["open", "sync"] as const) {
+			const fs = new DirectoryBarrierFs();
+			const error = barrierError(`access ${phase}`, "EACCES");
+			fs[phase === "open" ? "directoryOpenError" : "directorySyncError"] = error;
+			const store = new ConversationStore<TestConversation>({
+				agentDir: "/agent",
+				kind: "discord",
+				fs,
+				platform: "win32",
+			});
+			await expect(store.write("mapping", undefined, record(1))).rejects.toBe(error);
+			const tempSync = fs.calls.findIndex(call =>
+				call.startsWith("sync:/agent/sdk/daemons/discord/conversations.json."),
+			);
+			expect(fs.calls.findIndex(call => call.startsWith("rename:"))).toBeGreaterThan(tempSync);
+			if (phase === "sync") expect(fs.calls).toContain("close:/agent/sdk/daemons/discord");
+		}
+	});
+
+	test("rejects unsupported Linux parent open and sync errors", async () => {
+		for (const code of ["EINVAL", "ENOTSUP", "EOPNOTSUPP", "EPERM"]) {
+			for (const phase of ["open", "sync"] as const) {
+				const fs = new DirectoryBarrierFs();
+				const error = barrierError(`linux ${phase} ${code}`, code);
+				fs[phase === "open" ? "directoryOpenError" : "directorySyncError"] = error;
+				const store = new ConversationStore<TestConversation>({
+					agentDir: "/agent",
+					kind: "discord",
+					fs,
+					platform: "linux",
+				});
+				await expect(store.write("mapping", undefined, record(1))).rejects.toBe(error);
+				const tempSync = fs.calls.findIndex(call =>
+					call.startsWith("sync:/agent/sdk/daemons/discord/conversations.json."),
+				);
+				const rename = fs.calls.findIndex(call => call.startsWith("rename:"));
+				expect(tempSync).toBeGreaterThanOrEqual(0);
+				expect(rename).toBeGreaterThan(tempSync);
+				if (phase === "sync") {
+					const parentSync = fs.calls.indexOf("sync:/agent/sdk/daemons/discord");
+					const parentClose = fs.calls.indexOf("close:/agent/sdk/daemons/discord");
+					expect(parentSync).toBeGreaterThan(rename);
+					expect(parentClose).toBeGreaterThan(parentSync);
+				}
+			}
+		}
+	});
+
+	test("rejects parent close errors", async () => {
+		const fs = new DirectoryBarrierFs();
+		const error = barrierError("close failed", "EIO");
+		fs.directoryCloseError = error;
+		const store = new ConversationStore<TestConversation>({
+			agentDir: "/agent",
+			kind: "discord",
+			fs,
+			platform: "win32",
+		});
+		await expect(store.write("mapping", undefined, record(1))).rejects.toBe(error);
+	});
+
+	test("rejects parent close errors after tolerating supported Windows parent sync errors", async () => {
+		const fs = new DirectoryBarrierFs();
+		const syncError = barrierError("sync unsupported", "EPERM");
+		const closeError = barrierError("close failed", "EIO");
+		fs.directorySyncError = syncError;
+		fs.directoryCloseError = closeError;
+		const store = new ConversationStore<TestConversation>({
+			agentDir: "/agent",
+			kind: "discord",
+			fs,
+			platform: "win32",
+		});
+		await expect(store.write("mapping", undefined, record(1))).rejects.toBe(closeError);
+		expect(fs.calls).toContain("close:/agent/sdk/daemons/discord");
+	});
+	test("aggregates unexpected parent sync and close errors", async () => {
+		const fs = new DirectoryBarrierFs();
+		const syncError = barrierError("sync failed", "EIO");
+		const closeError = barrierError("close failed", "EIO");
+		fs.directorySyncError = syncError;
+		fs.directoryCloseError = closeError;
+		const store = new ConversationStore<TestConversation>({
+			agentDir: "/agent",
+			kind: "discord",
+			fs,
+			platform: "win32",
+		});
+		await expect(store.write("mapping", undefined, record(1))).rejects.toMatchObject({
+			errors: [syncError, closeError],
+		});
+		const rename = fs.calls.findIndex(call => call.startsWith("rename:"));
+		const parentSync = fs.calls.indexOf("sync:/agent/sdk/daemons/discord");
+		const parentClose = fs.calls.indexOf("close:/agent/sdk/daemons/discord");
+		expect(parentSync).toBeGreaterThan(rename);
+		expect(parentClose).toBeGreaterThan(parentSync);
+	});
+});
 describe("ChatEffectJournal", () => {
 	test("keeps provider payloads out of mappings while replaying the protected journal after restart", async () => {
 		const fs = new MemoryConversationStoreFs();

@@ -10,6 +10,7 @@ import { loadExtensions } from "@sayknow-cli/coding-agent/extensibility/extensio
 import { ExtensionRunner } from "@sayknow-cli/coding-agent/extensibility/extensions/runner";
 import { AgentSession, type AgentSessionEvent } from "@sayknow-cli/coding-agent/session/agent-session";
 import { AuthStorage } from "@sayknow-cli/coding-agent/session/auth-storage";
+import { FallbackChainController } from "@sayknow-cli/coding-agent/session/fallback-chain-controller";
 import { SessionManager } from "@sayknow-cli/coding-agent/session/session-manager";
 import { getProjectAgentDir, logger, TempDir, withTimeout } from "@sayknow-cli/utils";
 
@@ -93,8 +94,9 @@ describe("AgentSession auto-compaction continuation", () => {
 			sessionManager,
 			modelRegistry,
 		);
-		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
-		if (!model) throw new Error("Expected built-in anthropic model to exist");
+		const bundledModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!bundledModel) throw new Error("Expected built-in anthropic model to exist");
+		const model = { ...bundledModel, contextWindow: 200_000 };
 		const agent = new Agent({ initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] } });
 		sessionManager.appendMessage({ role: "user", content: "hello", timestamp: Date.now() });
 		session = new AgentSession({
@@ -325,6 +327,7 @@ describe("AgentSession auto-compaction continuation", () => {
 			display: false,
 			timestamp: Date.now(),
 		});
+		const resetAttemptBudgetSpy = vi.spyOn(FallbackChainController.prototype, "resetAttemptBudget");
 		const continueSpy = vi.spyOn(session.agent, "continue").mockResolvedValue();
 		const compactionFinished = Promise.withResolvers<void>();
 		const events: string[] = [];
@@ -349,6 +352,7 @@ describe("AgentSession auto-compaction continuation", () => {
 
 		expect(continueSpy).not.toHaveBeenCalled();
 		expect(events.filter(type => type === "agent_end")).toHaveLength(1);
+		expect(resetAttemptBudgetSpy).not.toHaveBeenCalled();
 	});
 
 	it("threshold queued-followup continuation suppresses predecessor terminal readiness", async () => {
@@ -360,7 +364,10 @@ describe("AgentSession auto-compaction continuation", () => {
 			timestamp: Date.now(),
 		});
 		const warnSpy = vi.spyOn(logger, "warn");
-		const continueSpy = vi.spyOn(session.agent, "continue").mockResolvedValue();
+		const resetAttemptBudgetSpy = vi.spyOn(FallbackChainController.prototype, "resetAttemptBudget");
+		const continueSpy = vi.spyOn(session.agent, "continue").mockImplementation(async options => {
+			options?.onRunAccepted?.();
+		});
 		const promptSpy = vi.spyOn(session.agent, "prompt").mockResolvedValue();
 		const events: string[] = [];
 		session.subscribe(event => events.push(event.type));
@@ -369,6 +376,7 @@ describe("AgentSession auto-compaction continuation", () => {
 		await advancePostPrompt(200);
 		await session.waitForIdle();
 		expect(continueSpy).toHaveBeenCalledTimes(1);
+		expect(resetAttemptBudgetSpy).toHaveBeenCalledTimes(1);
 		expect(promptSpy).not.toHaveBeenCalled();
 		expect(events.filter(type => type === "agent_end")).toHaveLength(0);
 		expect(warnSpy.mock.calls.some(call => JSON.stringify(call).includes("AgentBusyError"))).toBe(false);

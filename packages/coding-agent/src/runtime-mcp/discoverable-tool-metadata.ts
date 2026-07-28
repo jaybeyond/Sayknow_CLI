@@ -7,10 +7,10 @@
  * the new symbols under the legacy names so existing call sites still compile.
  */
 export type {
+	DiscoverableTool as DiscoverableMCPTool,
 	DiscoverableToolSearchDocument as DiscoverableMCPSearchDocument,
 	DiscoverableToolSearchIndex as DiscoverableMCPSearchIndex,
 	DiscoverableToolSearchResult as DiscoverableMCPSearchResult,
-	DiscoverableTool as DiscoverableMCPTool,
 	DiscoverableToolServerSummary as DiscoverableMCPToolServerSummary,
 	DiscoverableToolSummary as DiscoverableMCPToolSummary,
 } from "../tool-discovery/tool-index";

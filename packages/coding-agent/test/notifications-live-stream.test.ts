@@ -12,6 +12,7 @@ import { TelegramDaemonController } from "../src/sdk/bus/telegram-daemon-control
 import { readEndpoint } from "../src/sdk/bus/telegram-reference";
 import { renderThreadedFrame } from "../src/sdk/bus/threaded-render";
 import {
+	cleanupFixtureRoot,
 	cleanupFixtureRoots,
 	createNotificationFixtureRoot,
 	type FixtureRootCleanup,
@@ -69,7 +70,7 @@ async function waitFor(pred: () => boolean, ms = 4000, label = "condition"): Pro
 }
 
 type Handler = (event: unknown, ctx: unknown) => unknown;
-type Frame = { type: string; phase?: string; text?: string; messageRef?: string };
+type Frame = { type: string; connectionId?: string; phase?: string; text?: string; messageRef?: string };
 
 const cleanupRoots: FixtureRootCleanup[] = [];
 const openSockets: WebSocket[] = [];
@@ -100,6 +101,49 @@ function setEnv(over: Partial<Record<(typeof envKeys)[number], string>>): void {
 	for (const k of envKeys) delete process.env[k];
 	for (const [k, v] of Object.entries(over)) process.env[k] = v;
 }
+class FixtureEndpointNotReadyError extends Error {
+	constructor() {
+		super("fixture endpoint closed before SDK hello");
+		this.name = "FixtureEndpointNotReadyError";
+	}
+}
+
+async function abandonEndpointGeneration(abandon: () => Promise<void>, failure: unknown): Promise<void> {
+	try {
+		await abandon();
+	} catch (cleanupError) {
+		throw new AggregateError(
+			[failure, cleanupError],
+			"Fixture endpoint generation failed before readiness and cleanup also failed.",
+		);
+	}
+}
+
+async function replaceAbandonedEndpoint<T>(
+	abandon: () => Promise<void>,
+	startReplacement: () => Promise<T>,
+	failure: unknown,
+): Promise<T> {
+	await abandonEndpointGeneration(abandon, failure);
+	return startReplacement();
+}
+
+test("abandons a premature endpoint generation before handing out its replacement", async () => {
+	const events = ["start:1"];
+	const generation = await replaceAbandonedEndpoint(
+		async () => {
+			events.push("abandon:1");
+		},
+		async () => {
+			events.push("start:2");
+			return 2;
+		},
+		new FixtureEndpointNotReadyError(),
+	);
+
+	expect(generation).toBe(2);
+	expect(events).toEqual(["start:1", "abandon:1", "start:2"]);
+});
 
 async function bootSession(
 	settingsOverrides: Record<string, unknown> = {},
@@ -110,6 +154,7 @@ async function bootSession(
 			sessionId: string;
 		}) => Promise<EnsureDaemonResult>;
 	} = {},
+	replacePrematureEndpoint = true,
 ): Promise<{
 	handlers: Map<string, Handler>;
 	ctx: NotificationSessionContext;
@@ -135,7 +180,12 @@ async function bootSession(
 			`notifications:\n  enabled: true\n  daemon:\n    idleTimeoutMs: 20\n  telegram:\n    botToken: ${JSON.stringify(botToken)}\n    chatId: ${JSON.stringify(chatId)}\n`,
 		);
 	}
-	const settings = isolatedNotificationSettings(agentDir, settingsOverrides);
+	// Live streaming and per-turn finals are verbose-mode contracts. Lean defers
+	// settled answers to agent_end and suppresses live frames (#2863).
+	const settings = isolatedNotificationSettings(agentDir, {
+		"notifications.verbosity": "verbose",
+		...settingsOverrides,
+	});
 	const controller = new NotificationSessionController({
 		eligible: true,
 		getConfig: () => getNotificationConfig(settings),
@@ -173,16 +223,65 @@ async function bootSession(
 	const frames: Frame[] = [];
 	const ws = new WebSocket(`${url}/?token=${encodeURIComponent(token)}`);
 	openSockets.push(ws);
-	ws.addEventListener("message", ev => frames.push(JSON.parse(String((ev as MessageEvent).data))));
-	await new Promise<void>((resolve, reject) => {
-		ws.addEventListener("open", () => resolve());
-		ws.addEventListener("error", () => reject(new Error("ws error")));
+	const ready = Promise.withResolvers<void>();
+	let readySettled = false;
+	const rejectBeforeHello = (): void => {
+		if (readySettled) return;
+		readySettled = true;
+		ready.reject(new FixtureEndpointNotReadyError());
+	};
+	ws.addEventListener("message", event => {
+		const frame = JSON.parse(String((event as MessageEvent).data)) as Frame;
+		frames.push(frame);
+		if (readySettled || frame.type !== "hello" || !frame.connectionId) return;
+		readySettled = true;
+		ready.resolve();
 	});
-	await sleep(250);
+	ws.addEventListener("error", rejectBeforeHello);
+	ws.addEventListener("close", rejectBeforeHello);
+	try {
+		await ready.promise;
+	} catch (error) {
+		const socketIndex = openSockets.indexOf(ws);
+		if (socketIndex >= 0) openSockets.splice(socketIndex, 1);
+		try {
+			ws.close();
+		} catch {}
+		const abandon = async (): Promise<void> => {
+			await cleanupFixtureRoot(cleanup);
+			const cleanupIndex = cleanupRoots.indexOf(cleanup);
+			if (cleanupIndex >= 0) cleanupRoots.splice(cleanupIndex, 1);
+		};
+		if (!(error instanceof FixtureEndpointNotReadyError) || !replacePrematureEndpoint) {
+			await abandonEndpointGeneration(abandon, error);
+			throw error;
+		}
+		return replaceAbandonedEndpoint(abandon, () => bootSession(settingsOverrides, options, false), error);
+	}
 	return { handlers, ctx, frames, settings, controller };
 }
 
 const assistant = (content: string) => ({ type: "message_update", message: { role: "assistant", content } });
+
+test("lean suppresses live frames even when streaming is enabled", async () => {
+	setEnv({ SKC_NOTIFICATIONS: "1", SKC_NOTIFICATIONS_STREAM: "1", SKC_NOTIFICATIONS_STREAM_INTERVAL_MS: "1" });
+	const { handlers, ctx, frames } = await bootSession({ "notifications.verbosity": "lean" });
+	const streams = () => frames.filter(f => f.type === "turn_stream");
+
+	await handlers.get("message_update")!(assistant("partial while tools run"), ctx);
+	await handlers.get("turn_end")!(
+		{ type: "turn_end", turnIndex: 0, message: { role: "assistant", content: "partial while tools run" } },
+		ctx,
+	);
+	await sleep(200);
+	expect(streams().some(f => f.phase === "live")).toBe(false);
+	expect(streams().some(f => f.phase === "finalized")).toBe(false);
+
+	await handlers.get("agent_end")!({ type: "agent_end" }, ctx);
+	await waitFor(() => streams().some(f => f.phase === "finalized"), 3000, "settled lean frame");
+	expect(streams().filter(f => f.phase === "finalized")).toHaveLength(1);
+	expect(streams().find(f => f.phase === "finalized")!.text).toContain("partial while tools run");
+}, 15_000);
 
 test("message_update emits a live turn_stream whose messageRef matches the finalized turn", async () => {
 	setEnv({ SKC_NOTIFICATIONS: "1", SKC_NOTIFICATIONS_STREAM: "1", SKC_NOTIFICATIONS_STREAM_INTERVAL_MS: "100000" });

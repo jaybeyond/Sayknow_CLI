@@ -1,20 +1,49 @@
 import * as crypto from "node:crypto";
-import * as os from "node:os";
 import * as path from "node:path";
+import { getConfigRootDir } from "@sayknow-cli/utils";
 import type { WorkflowHudSummary } from "../skill-state/active-state";
 import { buildUltragoalHudSummary as buildWorkflowUltragoalHudSummary } from "../skill-state/workflow-hud";
 import { renderCliWriteReceipt } from "./cli-write-receipt";
 import { DEFAULT_ULTRAGOAL_OBJECTIVE } from "./goal-mode-request";
 import {
+	assertCwdMatchesRepositoryBinding,
+	captureRepositoryBinding,
+	parseRepositoryBinding,
+	type RepositoryBinding,
+} from "./repository-binding";
+import {
+	CRITIC_GATE_HARD_STOP_EVENT,
+	CRITIC_GATE_OVERRIDE_EVENT,
+	CRITIC_VERDICT_EVENT,
+	type CriticVerdict,
+	computeCriticVerdictPlanGeneration,
 	computeUltragoalPlanGeneration,
+	countNonOkayTerminalCriticVerdicts,
+	finalAggregateReceiptMissingCriticOkay,
 	findFreshBatchCloseReceipt,
 	findLedgerReceiptEvent,
+	isCleanPauseCriticVerdictShape,
 	requiredUltragoalGoals,
+	TERMINAL_CRITIC_CEILING,
+	terminalCriticCeilingReached,
+	terminalCriticGateOverridden,
+	terminalCriticHardStopReached,
 	validateDeferredMemberReceiptFresh,
 	validateReceiptFreshBase,
 } from "./ultragoal-receipt-freshness";
 
-export { computeUltragoalPlanGeneration, receiptRelevantGoals } from "./ultragoal-receipt-freshness";
+export {
+	CRITIC_GATE_HARD_STOP_EVENT,
+	CRITIC_GATE_OVERRIDE_EVENT,
+	CRITIC_VERDICT_EVENT,
+	type CriticVerdict,
+	computeUltragoalPlanGeneration,
+	countTerminalCriticVerdicts,
+	receiptRelevantGoals,
+	TERMINAL_CRITIC_CEILING,
+	terminalCriticCeilingReached,
+	terminalCriticGateOverridden,
+} from "./ultragoal-receipt-freshness";
 
 import { sessionUltragoalDir, skcRoot } from "./session-layout";
 import {
@@ -170,6 +199,8 @@ export interface UltragoalPlan {
 	skcObjective: string;
 	skcObjectiveAliases?: string[];
 	goals: UltragoalGoal[];
+	/** Authoritative repository identity for multi-repo fail-closed spawn (#2901). */
+	repositoryBinding?: RepositoryBinding;
 	createdAt: string;
 	updatedAt: string;
 	[key: string]: unknown;
@@ -427,7 +458,6 @@ export const DEFAULT_ULTRAGOAL_NUDGE_BUDGET = 10;
 export function countUltragoalNudges(ledger: readonly UltragoalLedgerEvent[], goalId: string): number {
 	return ledger.filter(event => event.event === "nudge" && event.goalId === goalId).length;
 }
-
 function parseNudgeBudgetValue(value: unknown): number | null {
 	return typeof value === "number" && Number.isFinite(value) && Number.isInteger(value) && value >= 0 ? value : null;
 }
@@ -461,8 +491,7 @@ export async function resolveUltragoalNudgeBudget(cwd: string): Promise<{ budget
 	const projectPath = path.join(skcRoot(cwd), "settings.json");
 	const project = await readSettingsNudgeBudget(projectPath);
 	if (project !== null) return { budget: project, source: projectPath };
-	const userDir = process.env.SKC_CONFIG_DIR?.trim() || path.join(os.homedir(), ".skc");
-	const userPath = path.join(userDir, "settings.json");
+	const userPath = path.join(getConfigRootDir(), "settings.json");
 	const user = await readSettingsNudgeBudget(userPath);
 	if (user !== null) return { budget: user, source: userPath };
 	return { budget: DEFAULT_ULTRAGOAL_NUDGE_BUDGET, source: "default" };
@@ -1328,6 +1357,10 @@ function normalizePlan(raw: unknown): UltragoalPlan {
 				(value): value is string => typeof value === "string" && value.trim().length > 0,
 			)
 		: undefined;
+	let repositoryBinding: RepositoryBinding | undefined;
+	if (record.repositoryBinding !== undefined) {
+		repositoryBinding = parseRepositoryBinding(record.repositoryBinding);
+	}
 	return {
 		version: 1,
 		brief,
@@ -1337,6 +1370,7 @@ function normalizePlan(raw: unknown): UltragoalPlan {
 		goals,
 		createdAt,
 		updatedAt,
+		...(repositoryBinding ? { repositoryBinding } : {}),
 		...(typeof record.state_revision === "number" && Number.isFinite(record.state_revision)
 			? { state_revision: record.state_revision }
 			: {}),
@@ -1537,12 +1571,16 @@ export async function createUltragoalPlan(input: {
 		goal.validationBatch = validationBatchByGoalId.get(goal.id);
 		validateValidationBatchPipelineExclusion(goal);
 	}
+	const repositoryBinding = await captureRepositoryBinding(input.cwd, {
+		displayPath: input.cwd,
+	});
 	const plan: UltragoalPlan = {
 		version: 1,
 		brief,
 		skcGoalMode: input.skcGoalMode ?? "aggregate",
 		skcObjective: DEFAULT_ULTRAGOAL_OBJECTIVE,
 		goals,
+		repositoryBinding,
 		createdAt: now,
 		updatedAt: now,
 	};
@@ -1618,6 +1656,50 @@ export function getUltragoalRunCompletionState(
 	};
 }
 
+/**
+ * Discriminated next-action for `complete-goals` handoff (#2903).
+ * `none` is reserved for genuine completion; `execute-goal` always carries a goal.
+ */
+export type UltragoalCompleteNextActionKind =
+	| "none"
+	| "execute-goal"
+	| "retry-failed"
+	| "resolve-blockers"
+	| "final-aggregate-receipt";
+
+export type UltragoalCompleteNextAction = {
+	kind: UltragoalCompleteNextActionKind;
+	goal?: UltragoalGoal;
+	blockedGoals?: UltragoalGoal[];
+	failedGoals?: UltragoalGoal[];
+};
+
+/**
+ * Resolve the actionable next step after scheduling / complete-goals.
+ * Blocked and review_blocked goals remain unschedulable; they surface as
+ * `resolve-blockers` instead of a contradictory `execute-goal` without goal_id.
+ */
+export function resolveUltragoalCompleteNextAction(
+	plan: UltragoalPlan,
+	options: { retryFailed?: boolean; selectedGoal?: UltragoalGoal } = {},
+): UltragoalCompleteNextAction {
+	const state = getUltragoalRunCompletionState(plan, { retryFailed: options.retryFailed });
+	// Genuine completion keeps next_action=`none` (historical complete-goals contract).
+	// final-aggregate-receipt is reserved for a future dedicated handoff; do not remap
+	// allComplete here so aggregate runs still finish with `none` / complete text.
+	if (state.allComplete) return { kind: "none" };
+	const goal = options.selectedGoal ?? state.nextGoal;
+	if (goal) return { kind: "execute-goal", goal };
+	const blockedGoals = state.incompleteGoals.filter(
+		item => item.status === "blocked" || item.status === "review_blocked",
+	);
+	if (blockedGoals.length > 0) return { kind: "resolve-blockers", blockedGoals };
+	const failedGoals = state.incompleteGoals.filter(item => item.status === "failed");
+	if (failedGoals.length > 0) return { kind: "retry-failed", failedGoals };
+	// Incomplete but not schedulable (unexpected statuses): still actionable, not "none".
+	return { kind: "resolve-blockers", blockedGoals: state.incompleteGoals };
+}
+
 export async function startNextUltragoalGoal(input: {
 	cwd: string;
 	retryFailed?: boolean;
@@ -1626,11 +1708,27 @@ export async function startNextUltragoalGoal(input: {
 	plan: UltragoalPlan;
 	goal?: UltragoalGoal;
 	allComplete: boolean;
+	nextAction: UltragoalCompleteNextAction;
 }> {
 	const plan = await readUltragoalPlan(input.cwd, input.sessionId);
 	if (!plan) throw new Error("No ultragoal plan found. Run `skc ultragoal create-goals --brief ...` first.");
-	const goal = chooseNextGoal(plan, input.retryFailed === true);
-	if (!goal) return { plan, allComplete: getUltragoalRunCompletionState(plan).allComplete };
+	// Fail closed: delegated execution requires stamped repository authority (#2901).
+	if (!plan.repositoryBinding) {
+		throw new Error(
+			"Ultragoal plan is missing repositoryBinding; recreate goals so the plan is bound to an authoritative repository identity.",
+		);
+	}
+	await assertCwdMatchesRepositoryBinding(input.cwd, plan.repositoryBinding);
+	const retryFailed = input.retryFailed === true;
+	const goal = chooseNextGoal(plan, retryFailed);
+	if (!goal) {
+		const state = getUltragoalRunCompletionState(plan, { retryFailed });
+		return {
+			plan,
+			allComplete: state.allComplete,
+			nextAction: resolveUltragoalCompleteNextAction(plan, { retryFailed }),
+		};
+	}
 	if (goal.status !== "active") {
 		const now = new Date().toISOString();
 		goal.status = "active";
@@ -1640,7 +1738,12 @@ export async function startNextUltragoalGoal(input: {
 		await writePlan(input.cwd, plan, input.sessionId);
 		await appendLedger(input.cwd, { event: "goal_started", goalId: goal.id }, input.sessionId);
 	}
-	return { plan, goal, allComplete: false };
+	return {
+		plan,
+		goal,
+		allComplete: false,
+		nextAction: { kind: "execute-goal", goal },
+	};
 }
 
 async function readStructuredValue(cwd: string, value: string): Promise<unknown> {
@@ -2514,12 +2617,23 @@ async function validateCompletionQualityGate(
 	} = {},
 ): Promise<void> {
 	const batchMode = options.goal?.validationBatch;
+	const receiptKind =
+		options.plan && options.goal && options.ledger
+			? chooseReceiptKind(options.plan, options.ledger, options.goal, "complete")
+			: undefined;
+	const isFinalAggregate = receiptKind === "final-aggregate";
 	if (batchMode && options.goal && options.goal.id !== batchMode.finalGoalId) {
 		validateDeferredCompletionQualityGate(gate, options.goal, batchMode, options.changeSet);
 		return;
 	}
 	if (batchMode && options.goal && options.goal.id === batchMode.finalGoalId) {
-		const allowedKeys = new Set(["architectReview", "executorQa", "iteration", "validationBatchClose"]);
+		const allowedKeys = new Set([
+			"architectReview",
+			"executorQa",
+			"iteration",
+			"validationBatchClose",
+			"criticReview",
+		]);
 		const unsupportedKeys = Object.keys(gate).filter(key => !allowedKeys.has(key));
 		if (unsupportedKeys.length > 0)
 			throw new Error(`qualityGate contains unsupported keys: ${unsupportedKeys.join(", ")}`);
@@ -2534,8 +2648,8 @@ async function validateCompletionQualityGate(
 	}
 	const allowedKeys = new Set(
 		batchMode
-			? ["architectReview", "executorQa", "iteration", "validationBatchClose"]
-			: ["architectReview", "executorQa", "iteration"],
+			? ["architectReview", "executorQa", "iteration", "validationBatchClose", "criticReview"]
+			: ["architectReview", "executorQa", "iteration", "criticReview"],
 	);
 	const unsupportedKeys = Object.keys(gate).filter(key => !allowedKeys.has(key));
 	if (unsupportedKeys.length > 0) {
@@ -2546,6 +2660,25 @@ async function validateCompletionQualityGate(
 	const iteration = qualityGateObject(gate.iteration);
 	if (!architectReview || !executorQa || !iteration) {
 		throw new Error("qualityGate requires architectReview, executorQa, and iteration objects");
+	}
+	if (isFinalAggregate) {
+		if (
+			options.ledger &&
+			terminalCriticCeilingReached(options.ledger) &&
+			!terminalCriticGateOverridden(options.ledger)
+		) {
+			throw new Error(
+				"checkpoint --status complete blocked: terminal-critic ceiling reached; requires human/leader skc ultragoal record-critic-gate-override before completion",
+			);
+		}
+		const criticReview = qualityGateObject(gate.criticReview);
+		if (criticReview?.verdict !== "OKAY") {
+			throw new Error(
+				"checkpoint --status complete (final aggregate) requires criticReview with verdict OKAY, non-empty evidence, and empty blockers",
+			);
+		}
+		requireNonEmptyString(criticReview.evidence, "criticReview.evidence");
+		requireEmptyBlockers(criticReview.blockers, "criticReview.blockers");
 	}
 	if (
 		architectReview.architectureStatus !== CLEAN_ARCHITECT_STATUS ||
@@ -2958,8 +3091,13 @@ export async function checkpointUltragoalGoal(input: {
 	// receipt, the replay is a genuine re-verification: it must run the full
 	// quality gate and mint a fresh receipt, otherwise a completed goal with a
 	// context-staled receipt can never be repaired (different evidence is
-	// rejected on complete goals by design). A mutated goal row keeps the
-	// fail-loud tamper handling in the idempotent branch below.
+	// rejected on complete goals by design). A final-aggregate receipt whose
+	// recorded checkpoint gate lacks a clean criticReview OKAY is likewise
+	// repair-eligible: it is not "stale", but the completion guard rejects it
+	// forever (active_missing_critic_verdict), so a no-op replay would leave
+	// the run permanently unable to complete even after the terminal critic
+	// records OKAY. A mutated goal row keeps the fail-loud tamper handling in
+	// the idempotent branch below.
 	const staleCompleteReceiptReplay =
 		input.status === "complete" &&
 		goal.status === "complete" &&
@@ -2967,13 +3105,14 @@ export async function checkpointUltragoalGoal(input: {
 		Boolean(matchingIdempotentEvent) &&
 		(!goal.completionVerification ||
 			(goal.completionVerification.verifiedAt === goal.updatedAt &&
-				validateReceiptFreshBase({
+				(validateReceiptFreshBase({
 					plan,
 					ledger: ledgerBefore,
 					goal,
 					receipt: goal.completionVerification,
 					receiptKind: goal.completionVerification.receiptKind,
-				}) !== null));
+				}) !== null ||
+					finalAggregateReceiptMissingCriticOkay(ledgerBefore, goal.completionVerification))));
 	if (
 		goal.status === input.status &&
 		goal.evidence === evidence &&
@@ -3550,10 +3689,10 @@ export async function recordUltragoalReviewBlockers(input: {
 export type UltragoalBlockerClassification = "human_blocked" | "resolvable";
 
 /**
- * Record an audited blocker triage classification in the durable ledger. A
- * `human_blocked` classification is the only thing that authorizes
- * `goal({"op":"pause"})` while an Ultragoal run is active; `resolvable` is an
- * audit note and never unblocks pause.
+ * Record an audited blocker triage classification in the durable ledger. Pause
+ * requires the latest `blocker_classified` event to be `human_blocked` and a
+ * later clean pause terminal critic verdict bound to that classification; `resolvable`
+ * is an audit note and never unblocks pause.
  */
 export async function recordUltragoalBlockerClassification(input: {
 	cwd: string;
@@ -3572,6 +3711,130 @@ export async function recordUltragoalBlockerClassification(input: {
 		...(input.goalId?.trim() ? { goalId: input.goalId.trim() } : {}),
 		evidence,
 	});
+}
+
+export async function recordUltragoalCriticVerdict(input: {
+	cwd: string;
+	terminus: "completion" | "pause";
+	verdict: CriticVerdict;
+	evidence: string;
+	blockers?: string[];
+	goalId?: string;
+	classificationEventId?: string;
+}): Promise<UltragoalLedgerEvent> {
+	const evidence = input.evidence.trim();
+	if (!evidence) throw new Error("record-critic-verdict --evidence is required");
+	if (input.terminus !== "completion" && input.terminus !== "pause") {
+		throw new Error('record-critic-verdict --terminus must be "completion" or "pause"');
+	}
+	if (input.verdict !== "OKAY" && input.verdict !== "ITERATE" && input.verdict !== "REJECT") {
+		throw new Error("record-critic-verdict --verdict must be OKAY, ITERATE, or REJECT");
+	}
+	const blockers = stringArray(input.blockers ?? []);
+	if (!blockers) throw new Error("record-critic-verdict --blockers-json must be a JSON string array");
+	if (input.terminus === "completion" && input.verdict === "OKAY" && blockers.length > 0) {
+		throw new Error("OKAY critic verdict must have empty blockers");
+	}
+	const classificationEventId = input.classificationEventId?.trim();
+	if (input.terminus === "pause" && !classificationEventId) {
+		throw new Error("record-critic-verdict --classification-event-id is required for pause verdicts");
+	}
+	const resolvedSessionId = resolveSkcSessionForWrite(input.cwd, {
+		envSessionId: process.env.SKC_SESSION_ID,
+	}).skcSessionId;
+	const paths = getUltragoalPaths(input.cwd, resolvedSessionId);
+	return withWorkflowStateLock(
+		paths.ledgerPath,
+		async () => {
+			const plan = await readUltragoalPlan(input.cwd, resolvedSessionId);
+			if (!plan) throw new Error("record-critic-verdict requires an active ultragoal plan");
+			const ledger = await readUltragoalLedger(input.cwd, resolvedSessionId);
+			if (input.terminus === "pause") {
+				const latestClassification = [...ledger].reverse().find(event => event.event === "blocker_classified");
+				if (
+					latestClassification?.classification !== "human_blocked" ||
+					latestClassification.eventId !== classificationEventId
+				) {
+					throw new Error(
+						"record-critic-verdict pause requires --classification-event-id to name the latest human_blocked classification",
+					);
+				}
+			}
+			const planGeneration = computeCriticVerdictPlanGeneration(plan);
+			if (
+				input.terminus === "pause" &&
+				input.verdict === "OKAY" &&
+				!isCleanPauseCriticVerdictShape(
+					{
+						event: CRITIC_VERDICT_EVENT,
+						terminus: input.terminus,
+						verdict: input.verdict,
+						evidence,
+						blockers,
+						planGeneration,
+						classificationEventId,
+					},
+					planGeneration,
+					classificationEventId!,
+				)
+			) {
+				throw new Error("OKAY critic verdict must have empty blockers");
+			}
+			const criticVerdict = await appendLedger(
+				input.cwd,
+				{
+					event: CRITIC_VERDICT_EVENT,
+					terminus: input.terminus,
+					verdict: input.verdict,
+					evidence,
+					blockers,
+					planGeneration,
+					...(classificationEventId ? { classificationEventId } : {}),
+					...(input.goalId?.trim() ? { goalId: input.goalId.trim() } : {}),
+				},
+				resolvedSessionId,
+			);
+			const updatedLedger = [...ledger, criticVerdict];
+			const count = countNonOkayTerminalCriticVerdicts(updatedLedger);
+			if (count >= TERMINAL_CRITIC_CEILING && !terminalCriticHardStopReached(updatedLedger)) {
+				await appendLedger(
+					input.cwd,
+					{
+						event: CRITIC_GATE_HARD_STOP_EVENT,
+						planGeneration,
+						reason: "Terminal critic verdict ceiling reached.",
+						count,
+					},
+					resolvedSessionId,
+				);
+			}
+			return criticVerdict;
+		},
+		{ cwd: input.cwd },
+	);
+}
+
+export async function recordUltragoalCriticGateOverride(input: {
+	cwd: string;
+	evidence: string;
+}): Promise<UltragoalLedgerEvent> {
+	const evidence = input.evidence.trim();
+	if (!evidence) throw new Error("record-critic-gate-override --evidence is required");
+	const resolvedSessionId = resolveSkcSessionForWrite(input.cwd, {
+		envSessionId: process.env.SKC_SESSION_ID,
+	}).skcSessionId;
+	const paths = getUltragoalPaths(input.cwd, resolvedSessionId);
+	return withWorkflowStateLock(
+		paths.ledgerPath,
+		async () => {
+			const ledger = await readUltragoalLedger(input.cwd, resolvedSessionId);
+			if (!terminalCriticHardStopReached(ledger)) {
+				throw new Error("record-critic-gate-override requires a durably recorded terminal critic hard stop");
+			}
+			return appendLedger(input.cwd, { event: CRITIC_GATE_OVERRIDE_EVENT, evidence }, resolvedSessionId);
+		},
+		{ cwd: input.cwd },
+	);
 }
 
 type UltragoalReviewMode = "review-only" | "review-start";
@@ -3972,7 +4235,7 @@ function renderUltragoalHelp(args: readonly string[]): string | null {
 			"  $ skc ultragoal classify-blocker --classification <human_blocked|resolvable> --evidence <text> [FLAGS]",
 			"",
 			"FLAGS",
-			"      --classification=<value>     Required. human_blocked authorizes pause only as the latest ledger event; resolvable never authorizes pause",
+			"      --classification=<value>     Required. human_blocked must be the latest blocker_classified event; pause also requires a later bound clean pause terminal critic OKAY verdict; resolvable never authorizes pause",
 			"      --evidence=<value>           Required. Specific blocker evidence; must name the human-only dependency for human_blocked",
 			"      --goal-id=<value>            Optional durable .skc/ultragoal goal id, e.g. G001",
 			"      --json                       Output a machine-readable receipt",
@@ -3983,6 +4246,44 @@ function renderUltragoalHelp(args: readonly string[]): string | null {
 			"",
 		].join("\n");
 	}
+	if (subject === "record-critic-verdict") {
+		return [
+			"Run native SKC Ultragoal workflow commands",
+			"",
+			"USAGE",
+			"  $ skc ultragoal record-critic-verdict --terminus <completion|pause> --verdict <OKAY|ITERATE|REJECT> --evidence <text> [--blockers-json <json>] [--goal-id <id>] [--classification-event-id <id>]",
+			"",
+			"FLAGS",
+			"      --terminus=<value>           Required. completion or pause",
+			"      --verdict=<value>            Required. OKAY, ITERATE, or REJECT",
+			"      --evidence=<value>           Required. Specific evidence supporting the verdict",
+			"      --blockers-json=<value>      Optional JSON string array of blockers",
+			"      --goal-id=<value>            Optional durable .skc/ultragoal goal id, e.g. G001",
+			"      --classification-event-id=<id> Required for pause verdicts; binds the human_blocked classification",
+			"      --json                       Output a machine-readable receipt",
+			"",
+			"EXAMPLES",
+			'  $ skc ultragoal record-critic-verdict --terminus completion --verdict OKAY --evidence "all final-aggregate checkpoint evidence is current"',
+			"",
+		].join("\n");
+	}
+	if (subject === "record-critic-gate-override") {
+		return [
+			"Run native SKC Ultragoal workflow commands",
+			"",
+			"USAGE",
+			"  $ skc ultragoal record-critic-gate-override --evidence <text> [--json]",
+			"",
+			"FLAGS",
+			"      --evidence=<value>           Required. Human/leader authorization evidence for the terminal-critic ceiling override",
+			"      --json                       Output a machine-readable receipt",
+			"",
+			"EXAMPLES",
+			'  $ skc ultragoal record-critic-gate-override --evidence "leader approved another terminal attempt after reviewing all five findings"',
+			"",
+		].join("\n");
+	}
+
 	return [
 		"Run native SKC Ultragoal workflow commands",
 		"",
@@ -3998,11 +4299,14 @@ function renderUltragoalHelp(args: readonly string[]): string | null {
 		"  steer",
 		"  record-review-blockers",
 		"  classify-blocker",
+		"  record-critic-verdict",
+		"  record-critic-gate-override",
+
 		"  start-pipeline-overlap",
 		"  join-pipeline-overlap",
 		"  rebaseline-pipeline-overlap",
 		"",
-		"Run `skc ultragoal checkpoint --help`, `skc ultragoal review --help`, or `skc ultragoal classify-blocker --help` for command-specific requirements.",
+		"Run `skc ultragoal checkpoint --help`, `skc ultragoal review --help`, `skc ultragoal classify-blocker --help`, `skc ultragoal record-critic-verdict --help`, or `skc ultragoal record-critic-gate-override --help` for command-specific requirements.",
 		"",
 	].join("\n");
 }
@@ -4021,31 +4325,111 @@ function renderStatus(summary: UltragoalStatusSummary, json: boolean): string {
 	return renderUltragoalStatusMarkdown(summary);
 }
 
+function summarizeBlockedGoalForHandoff(goal: UltragoalGoal): {
+	id: string;
+	status: UltragoalGoalStatus;
+	evidence?: string;
+} {
+	const evidence = typeof goal.evidence === "string" && goal.evidence.trim() ? goal.evidence.trim() : undefined;
+	return {
+		id: goal.id,
+		status: goal.status,
+		...(evidence ? { evidence } : {}),
+	};
+}
+
 function renderCompleteHandoff(
-	result: { plan: UltragoalPlan; goal?: UltragoalGoal; allComplete: boolean },
+	result: {
+		plan: UltragoalPlan;
+		goal?: UltragoalGoal;
+		allComplete: boolean;
+		nextAction?: UltragoalCompleteNextAction;
+	},
 	json: boolean,
 	cwd: string,
 ): string {
+	const nextAction =
+		result.nextAction ??
+		resolveUltragoalCompleteNextAction(result.plan, {
+			selectedGoal: result.goal,
+		});
+	const goalsPath = getUltragoalPaths(cwd, currentUltragoalSessionId(cwd)).goalsPath;
+
 	if (json) {
-		return renderCliWriteReceipt({
+		const receipt: Record<string, unknown> = {
 			ok: true,
 			all_complete: result.allComplete,
-			next_action: result.allComplete ? "none" : "execute-goal",
-			goal_id: result.goal?.id,
-			goal_status: result.goal?.status,
+			next_action: nextAction.kind,
 			skc_objective: result.plan.skcObjective,
-			goals_path: getUltragoalPaths(cwd, currentUltragoalSessionId(cwd)).goalsPath,
-		});
+			goals_path: goalsPath,
+		};
+		if (nextAction.kind === "execute-goal" && nextAction.goal) {
+			receipt.goal_id = nextAction.goal.id;
+			receipt.goal_status = nextAction.goal.status;
+		}
+		if (nextAction.kind === "resolve-blockers" && nextAction.blockedGoals) {
+			receipt.blocked_goals = nextAction.blockedGoals.map(summarizeBlockedGoalForHandoff);
+			receipt.blocked_goal_ids = nextAction.blockedGoals.map(goal => goal.id);
+			receipt.recovery_hints = [
+				"skc ultragoal classify-blocker --help",
+				"skc ultragoal record-review-blockers --help",
+				"skc ultragoal steer --kind add_subgoal --help",
+				"skc ultragoal steer --kind mark_blocked_superseded --help",
+			];
+		}
+		if (nextAction.kind === "retry-failed" && nextAction.failedGoals) {
+			receipt.failed_goal_ids = nextAction.failedGoals.map(goal => goal.id);
+			receipt.recovery_hints = ["skc ultragoal complete-goals --retry-failed"];
+		}
+		if (nextAction.kind === "final-aggregate-receipt") {
+			receipt.recovery_hints = [
+				"Finalize the aggregate completion receipt before treating the ultragoal run as closed.",
+			];
+		}
+		return renderCliWriteReceipt(receipt);
 	}
-	if (result.allComplete) return "ultragoal complete all=true\n";
-	if (!result.goal) return "ultragoal next-action=none\n";
-	return [
-		`ultragoal next-action=execute-goal goal-id=${result.goal.id}`,
-		`objective=${result.goal.objective}`,
-		`skc-objective=${result.plan.skcObjective}`,
-		"checkpoint requires=architectReview:CLEAR+APPROVE,executorQa:passed",
-		"",
-	].join("\n");
+
+	if (nextAction.kind === "none" || (result.allComplete && nextAction.kind !== "final-aggregate-receipt")) {
+		return "ultragoal complete all=true\n";
+	}
+	if (nextAction.kind === "final-aggregate-receipt") {
+		return [
+			"ultragoal next-action=final-aggregate-receipt",
+			"hint=finalize the aggregate completion receipt before treating the run as closed",
+			"",
+		].join("\n");
+	}
+	if (nextAction.kind === "execute-goal" && nextAction.goal) {
+		return [
+			`ultragoal next-action=execute-goal goal-id=${nextAction.goal.id}`,
+			`objective=${nextAction.goal.objective}`,
+			`skc-objective=${result.plan.skcObjective}`,
+			"checkpoint requires=architectReview:CLEAR+APPROVE,executorQa:passed",
+			"",
+		].join("\n");
+	}
+	if (nextAction.kind === "resolve-blockers" && nextAction.blockedGoals && nextAction.blockedGoals.length > 0) {
+		const ids = nextAction.blockedGoals.map(goal => goal.id).join(",");
+		const statuses = nextAction.blockedGoals.map(goal => `${goal.id}:${goal.status}`).join(",");
+		return [
+			"ultragoal next-action=resolve-blockers",
+			`blocked-goal-ids=${ids}`,
+			`blocked-statuses=${statuses}`,
+			"hint=resolve blockers via classify-blocker / record-review-blockers / steer --kind add_subgoal (or audited mark_blocked_superseded); blocked goals stay unschedulable",
+			"",
+		].join("\n");
+	}
+	if (nextAction.kind === "retry-failed" && nextAction.failedGoals && nextAction.failedGoals.length > 0) {
+		const ids = nextAction.failedGoals.map(goal => goal.id).join(",");
+		return [
+			"ultragoal next-action=retry-failed",
+			`failed-goal-ids=${ids}`,
+			"hint=run `skc ultragoal complete-goals --retry-failed` after the failure is addressed",
+			"",
+		].join("\n");
+	}
+	// Fail closed: never claim complete or execute-goal without a goal id.
+	return "ultragoal next-action=resolve-blockers\nhint=no schedulable goal; inspect goals.json and ledger\n";
 }
 function renderCheckpointContinuation(
 	result: UltragoalCheckpointContinuation,
@@ -4354,8 +4738,53 @@ async function dispatchUltragoalCommand(args: string[], cwd: string): Promise<Ul
 								ok: true,
 								event: "blocker_classified",
 								classification: event.classification,
+								event_id: event.eventId,
 							})
-						: `Recorded blocker classification: ${String(event.classification)}.\n`,
+						: `Recorded blocker classification: ${String(event.classification)} event-id=${String(event.eventId)}.\n`,
+				};
+			}
+			case "record-critic-verdict": {
+				const blockersJson = flagValue(args, "--blockers-json");
+				const blockers =
+					blockersJson === undefined ? undefined : stringArray(await readStructuredValue(cwd, blockersJson));
+				if (blockersJson !== undefined && !blockers) {
+					throw new Error("record-critic-verdict --blockers-json must be a JSON string array");
+				}
+				const event = await recordUltragoalCriticVerdict({
+					cwd,
+					terminus: (flagValue(args, "--terminus") ?? "") as "completion" | "pause",
+					verdict: (flagValue(args, "--verdict") ?? "") as CriticVerdict,
+					evidence: flagValue(args, "--evidence") ?? "",
+					blockers: blockers ?? undefined,
+					goalId: flagValue(args, "--goal-id"),
+					classificationEventId: flagValue(args, "--classification-event-id"),
+				});
+				return {
+					status: 0,
+					stdout: json
+						? renderCliWriteReceipt({
+								ok: true,
+								event: CRITIC_VERDICT_EVENT,
+								terminus: event.terminus,
+								verdict: event.verdict,
+							})
+						: `Recorded critic verdict: ${String(event.verdict)} (${String(event.terminus)}).\n`,
+				};
+			}
+			case "record-critic-gate-override": {
+				const event = await recordUltragoalCriticGateOverride({
+					cwd,
+					evidence: flagValue(args, "--evidence") ?? "",
+				});
+				return {
+					status: 0,
+					stdout: json
+						? renderCliWriteReceipt({
+								ok: true,
+								event: CRITIC_GATE_OVERRIDE_EVENT,
+								event_id: event.eventId,
+							})
+						: `Recorded terminal critic gate override event-id=${String(event.eventId)}.\n`,
 				};
 			}
 			case "start-pipeline-overlap": {
@@ -4435,6 +4864,8 @@ const RECONCILE_COMMANDS = new Set([
 	"record-review-blockers",
 	"review",
 	"classify-blocker",
+	"record-critic-verdict",
+	"record-critic-gate-override",
 	"start-pipeline-overlap",
 	"join-pipeline-overlap",
 	"rebaseline-pipeline-overlap",

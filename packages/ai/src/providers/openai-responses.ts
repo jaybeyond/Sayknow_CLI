@@ -1,11 +1,4 @@
-import {
-	$credentialEnv,
-	$env,
-	$inheritedEnv,
-	extractHttpStatusFromError,
-	logger,
-	structuredCloneJSON,
-} from "@sayknow-cli/utils";
+import { $credentialEnv, extractHttpStatusFromError, logger, structuredCloneJSON } from "@sayknow-cli/utils";
 import OpenAI from "openai";
 import type {
 	Tool as OpenAITool,
@@ -130,6 +123,7 @@ export interface OpenAIResponsesOptions extends StreamOptions {
 }
 
 const OPENAI_RESPONSES_PROVIDER_SESSION_STATE_PREFIX = "openai-responses:";
+const ALIBABA_TOKEN_PLAN_FIRST_EVENT_TIMEOUT_MS = 300_000;
 const OPENAI_RESPONSES_FIRST_EVENT_TIMEOUT_MESSAGE =
 	"OpenAI responses stream timed out while waiting for the first event";
 const OPENAI_DEFAULT_BASE_URL = "https://api.openai.com/v1";
@@ -158,12 +152,23 @@ function resolveOpenAIProviderBaseUrl(
 	authCredentialType: "api_key" | "oauth" | undefined,
 ): string {
 	if (authCredentialType === "oauth") return OPENAI_DEFAULT_BASE_URL;
-	const envBaseUrl = $inheritedEnv("OPENAI_BASE_URL") ?? $env.OPENAI_BASE_URL?.trim();
+	// Trusted sources only: this base URL becomes the request endpoint that carries
+	// the OpenAI credential, and `$env` merges the caller's `cwd/.env`, so reading it
+	// there would let repository content redirect authenticated traffic.
+	const envBaseUrl = $credentialEnv("OPENAI_BASE_URL");
 	const configuredBaseUrl = baseUrl?.trim();
 	if (envBaseUrl && (!configuredBaseUrl || isDefaultOpenAIBaseUrl(configuredBaseUrl))) {
 		return envBaseUrl;
 	}
 	return configuredBaseUrl || envBaseUrl || OPENAI_DEFAULT_BASE_URL;
+}
+
+/** Test seam: the provider base URL as resolved from trusted env. */
+export function resolveOpenAIProviderBaseUrlForTest(
+	baseUrl: string | undefined,
+	authCredentialType: "api_key" | "oauth" | undefined,
+): string {
+	return resolveOpenAIProviderBaseUrl(baseUrl, authCredentialType);
 }
 
 const OPENAI_RESPONSES_PROGRESS_EVENT_TYPES = new Set([
@@ -330,8 +335,10 @@ export const streamOpenAIResponses: StreamFunction<"openai-responses"> = (
 				await notifyProviderResponse(options, response, model, request_id);
 				return data;
 			});
+			const firstEventFallbackMs =
+				model.provider === "alibaba-token-plan" ? ALIBABA_TOKEN_PLAN_FIRST_EVENT_TIMEOUT_MS : undefined;
 			const firstEventWatchdog = createWatchdog(
-				options?.streamFirstEventTimeoutMs ?? getStreamFirstEventTimeoutMs(idleTimeoutMs),
+				options?.streamFirstEventTimeoutMs ?? getStreamFirstEventTimeoutMs(idleTimeoutMs, firstEventFallbackMs),
 				() => abortTracker.abortLocally(firstEventTimeoutAbortError),
 			);
 			if (premiumRequestsTotal !== undefined) output.usage.premiumRequests = premiumRequestsTotal;

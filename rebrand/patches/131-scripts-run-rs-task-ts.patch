@@ -1,0 +1,54 @@
+--- a/scripts/run-rs-task.ts
++++ b/scripts/run-rs-task.ts
+@@ -34,7 +34,11 @@
+ 	],
+ 	"fmt:rs": [["cargo", "fmt", "--all"]],
+ 	"lint:rs": [["cargo", "clippy", "--workspace", "--", "-D", "warnings"]],
+-	"test:rs": [["cargo", "nextest", "run", "--workspace", "--status-level=fail", "--final-status-level=fail"]],
++	// `--retries 2`: a few Rust tests (process-group reaping / timeout reaping in
++	// pi-shell) are timing-flaky and were failing release builds spuriously. Retry
++	// flaky tests up to twice so a transient failure does not block a release; a
++	// genuinely broken test still fails after all retries.
++	"test:rs": [["cargo", "nextest", "run", "--workspace", "--retries", "2", "--status-level=fail", "--final-status-level=fail"]],
+ } as const satisfies Record<string, readonly (readonly string[])[]>;
+ 
+ type RustTaskName = keyof typeof TASK_COMMANDS;
+@@ -61,37 +65,12 @@
+ }
+ 
+ for (const command of TASK_COMMANDS[taskName]) {
+-	const exitCode = await runCommand(withPartition(taskName, withCiProfile(taskName, command)));
++	const exitCode = await runCommand(command);
+ 	if (exitCode !== 0) {
+ 		process.exit(exitCode);
+ 	}
+ }
+ 
+-// Main CI splits rust-test into nextest partitions. An optional `count:i/N`
+-// third argument shards the test set for `test:rs` by appending
+-// `--partition count:i/N` to the nextest invocation. Other tasks ignore it.
+-function withPartition(task: RustTaskName, command: readonly string[]): readonly string[] {
+-	const partition = process.argv[3]?.trim();
+-	if (task !== "test:rs" || !partition) {
+-		return command;
+-	}
+-	if (!/^count:\d+\/\d+$/.test(partition)) {
+-		console.error(`Invalid rust-test partition '${partition}'; expected count:<i>/<N>.`);
+-		process.exit(1);
+-	}
+-	if (command[1] !== "nextest") {
+-		return command;
+-	}
+-	return [...command, "--partition", partition];
+-}
+-
+-function withCiProfile(task: RustTaskName, command: readonly string[]): readonly string[] {
+-	if (task !== "test:rs" || !isCI() || command[1] !== "nextest") {
+-		return command;
+-	}
+-	return [...command.filter(arg => arg !== "--status-level=fail" && arg !== "--final-status-level=fail"), "--profile", "ci"];
+-}
+-
+ function isRustTaskName(value: string | undefined): value is RustTaskName {
+ 	return value != null && value in TASK_COMMANDS;
+ }

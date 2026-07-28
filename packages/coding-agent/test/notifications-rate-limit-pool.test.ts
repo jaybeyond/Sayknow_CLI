@@ -131,4 +131,16 @@ describe("RateLimitPool", () => {
 		expect(pool.pending).toBe(1);
 		expect(pool.drain(60_000).map(i => i.payload)).toEqual([]);
 	});
+	test("detects a queued coalesced successor without mutating the queue", () => {
+		const pool = new RateLimitPool<string>({ capacity: 1, refillPerSec: 0, now: () => 0 });
+		pool.submit(item("s1", "live", "latest", "preview"));
+
+		expect(
+			pool.someQueued(
+				queued => queued.sessionId === "s1" && queued.lane === "live" && queued.coalesceKey === "preview",
+			),
+		).toBe(true);
+		expect(pool.someQueued(queued => queued.sessionId === "missing")).toBe(false);
+		expect(pool.pending).toBe(1);
+	});
 });

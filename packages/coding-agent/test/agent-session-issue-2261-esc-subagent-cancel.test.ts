@@ -104,16 +104,17 @@ describe("AgentSession Issue #2261 /new owner-subagent cancellation", () => {
 	});
 
 	it("shares one transition promise for concurrent /new requests and permits a later retry", async () => {
-		const newSession = vi.spyOn(sessionManager, "newSession");
+		// AgentSession rotates identity via prepare+commit (#3138), not SessionManager.newSession.
+		const prepare = vi.spyOn(sessionManager, "prepareNewSession");
 		const first = session.newSession();
 		const second = session.newSession();
 
 		expect(second).toBe(first);
 		await expect(first).resolves.toBe(true);
-		expect(newSession).toHaveBeenCalledTimes(1);
+		expect(prepare).toHaveBeenCalledTimes(1);
 
 		await expect(session.newSession()).resolves.toBe(true);
-		expect(newSession).toHaveBeenCalledTimes(2);
+		expect(prepare).toHaveBeenCalledTimes(2);
 	});
 
 	it("fails closed with the actionable notice and retains identity when owned-child proof is not confirmed", async () => {
@@ -189,9 +190,11 @@ describe("AgentSession Issue #2261 /new owner-subagent cancellation", () => {
 		const previous = session.sessionFile;
 		if (!previous) throw new Error("Expected a persisted session file");
 		const order: string[] = [];
-		vi.spyOn(sessionManager, "newSession").mockImplementation(async options => {
+		// Identity publication is commitPreparedNewSession (#3138); drop must run after it.
+		const originalCommit = sessionManager.commitPreparedNewSession.bind(sessionManager);
+		vi.spyOn(sessionManager, "commitPreparedNewSession").mockImplementation(prepared => {
 			order.push("new");
-			return await SessionManager.prototype.newSession.call(sessionManager, options);
+			return originalCommit(prepared);
 		});
 		vi.spyOn(sessionManager, "dropSession").mockImplementation(async () => {
 			order.push("drop");
@@ -205,8 +208,10 @@ describe("AgentSession Issue #2261 /new owner-subagent cancellation", () => {
 	it("commits the lease when identity changes before a later initialization error", async () => {
 		const ownerManager = installOwnerManager();
 		const finishShutdown = vi.spyOn(ownerManager, "finishOwnerSubagentShutdown");
-		vi.spyOn(sessionManager, "newSession").mockImplementation(async options => {
-			await SessionManager.prototype.newSession.call(sessionManager, options);
+		// Post-commit, pre-return failure: identity already published via prepare+commit.
+		const originalCommit = sessionManager.commitPreparedNewSession.bind(sessionManager);
+		vi.spyOn(sessionManager, "commitPreparedNewSession").mockImplementation(prepared => {
+			originalCommit(prepared);
 			throw new Error("post-identity failure");
 		});
 

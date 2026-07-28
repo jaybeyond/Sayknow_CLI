@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { bindPluginMcpToPublicNetwork } from "../../runtime-mcp/plugin-network-boundary";
 import { loadCustomTools } from "../custom-tools/loader";
 import type { CustomTool } from "../custom-tools/types";
 import { loadEffectiveSkcPluginRegistry, registryPathForScope } from "./registry";
@@ -330,7 +331,7 @@ export async function buildPluginMcpConfigs(input: { cwd: string }): Promise<{
 					// resolution path expands ${env:...}/shell templates, which would let
 					// a third-party bundle exfiltrate host secrets. Plugin-bundle MCP
 					// servers connect without bundle-declared headers.
-					configs[m.name] = { type: cfg.transport, url: cfg.url };
+					configs[m.name] = bindPluginMcpToPublicNetwork({ type: cfg.transport, url: url.toString() });
 				}
 			} catch (error) {
 				quarantine.push({

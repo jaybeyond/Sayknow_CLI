@@ -70,6 +70,7 @@ function createRegistry(profiles: Iterable<[string, ModelProfileDefinition]> = [
 		getError: () => undefined,
 		getAvailable: () => [...models],
 		getAll: () => [...models],
+		hasConfiguredProviderAuth: () => false,
 		getProviders: () => [],
 		getCanonicalModels: () => [],
 		getDiscoverableProviders: () => [],

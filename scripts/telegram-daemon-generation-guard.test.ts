@@ -11,6 +11,8 @@ const stableEntries = (value: Record<string, string>) => JSON.stringify(Object.e
 
 const telegramContract = "packages/coding-agent/src/sdk/bus/telegram-daemon-contract.ts";
 const telegramDaemon = "packages/coding-agent/src/sdk/bus/telegram-daemon.ts";
+const telegramControl = "packages/coding-agent/src/sdk/bus/telegram-daemon-control.ts";
+
 const chatControl = "packages/coding-agent/src/sdk/bus/chat-daemon-control.ts";
 const chatCli = "packages/coding-agent/src/sdk/bus/chat-daemon-cli.ts";
 const config = "packages/coding-agent/src/sdk/bus/config.ts";
@@ -47,10 +49,18 @@ const telegramHandoffHelpers = [
 	"ownershipLockMatchesState",
 	"ownershipLockMatchesMetadata",
 	"ownershipLockIsReclaimable",
+	"isParentDaemonState",
+	"isGenerationAbsentParentDaemonState",
+	"isGeneration3ReleaseDaemonState",
 	"isLegacyParentDaemonState",
+	"legacyOwnershipLockMatchesHandoffState",
+	"historicalStateSerializer",
 	"legacyParentHandoffDecision",
+	"unlinkOwnershipLockExactly",
 	"rebindOwnershipLock",
 	"rollbackOwnershipLockRebind",
+	"retireProvisionalDaemonOwnership",
+	"confirmTelegramDaemonSpawn",
 ] as const;
 const chatTakeoverHelpers = [
 	"identityFor",
@@ -66,11 +76,63 @@ const chatConfigHelpers = {
 	discord: ["getNotificationConfig", "notificationConfigFromFile", "isDiscordConfigured", "tokenFingerprint"],
 	slack: ["getNotificationConfig", "notificationConfigFromFile", "isSlackConfigured", "tokenFingerprint"],
 } as const;
+const telegramToolActivityDeclarations = {
+	[config]: ["parseNotificationSettingsSnapshot"],
+	[telegramDaemon]: [
+		"TOOL_ACTIVITY_CAPABILITY",
+		"toolActivityOwner",
+		"toolActivityAuthorityIsCurrent",
+		"toolActivityDeliveryIsCurrent",
+		"handleSessionMessage",
+		"processTelegramUpdate",
+	],
+} as const;
 const helperInventory = {
 	telegram: { [telegramContract]: ["DAEMON_GENERATION"], [telegramDaemon]: [...telegramHandoffHelpers] },
 	discord: { [chatControl]: ["CHAT_DAEMON_GENERATIONS.discord", ...chatTakeoverHelpers] },
 	slack: { [chatControl]: ["CHAT_DAEMON_GENERATIONS.slack", ...chatTakeoverHelpers] },
 } as const;
+
+const nativeAuthoritySources = {
+	"crates/pi-natives/src/path_identity.rs": [
+		"retain_broker_publication",
+		"canonical_existing_directory_identity",
+		"apply_owner_only_path_security",
+		"verify_owner_only_path_security",
+		"verify_owner_only_path_security_expected",
+		"repair_owner_only_path_security_expected",
+		"apply_owner_only_fd_security",
+		"verify_owner_only_fd_security",
+		"exact_unlink",
+		"exact_restore",
+		"rename_no_replace_path",
+		"snapshot_directory_tree",
+		"exact_remove_directory_tree",
+	],
+	"crates/pi-natives/src/ps.rs": ["napi impl Process"],
+	"crates/pi-shell/src/process.rs": ["impl Process", "kill_process_group", "current_descendant_pids", "add_new_descendants"],
+	"packages/natives/native/index.d.ts": ["Process"],
+	"packages/coding-agent/src/sdk/broker/process-incarnation.ts": ["isProcessIncarnation", "processIncarnation"],
+} as const;
+
+function nativeAuthorityFiles(): Array<[string, string]> {
+	return [
+		[
+			"crates/pi-natives/src/path_identity.rs",
+			[
+				...nativeAuthoritySources["crates/pi-natives/src/path_identity.rs"].map(name => `pub fn ${name}() {}`),
+				`mod platform {\n${nativeAuthoritySources["crates/pi-natives/src/path_identity.rs"].map(name => `\tpub(super) fn ${name}() {}`).join("\n")}\n}`,
+			].join("\n"),
+		],
+		["crates/pi-natives/src/ps.rs", "#[napi]\nimpl Process {}"],
+		[
+			"crates/pi-shell/src/process.rs",
+			"impl Process { pub fn incarnation(&self) {} }\npub fn kill_process_group() {}\npub fn current_descendant_pids() {}\npub fn add_new_descendants() {}",
+		],
+		["packages/natives/native/index.d.ts", "export declare class Process {}"],
+		["packages/coding-agent/src/sdk/broker/process-incarnation.ts", "export function isProcessIncarnation() {}\nexport function processIncarnation() {}"],
+	];
+}
 
 function helperFiles(input: { telegramGeneration: number; discordGeneration: number; slackGeneration: number }): Map<string, string> {
 	return new Map([
@@ -83,6 +145,7 @@ function helperFiles(input: { telegramGeneration: number; discordGeneration: num
 				...chatTakeoverHelpers.map(name => `export function ${name}() { return "${name}"; }`),
 			].join("\n"),
 		],
+		...nativeAuthorityFiles(),
 	]);
 }
 
@@ -153,6 +216,7 @@ function files(input: {
 				`class ChatDaemonController { classify() { return "compatible"; } async operate() { ${input.chatLifecycle ?? ""} } }`,
 			].join("\n"),
 		],
+		...nativeAuthorityFiles(),
 	]);
 }
 
@@ -217,6 +281,42 @@ test("requires mapped generation bumps for Telegram lease, chat CLI, and configu
 		if (helper.family === "telegram") expect(bumped.telegramGenerationBumped).toBe(true);
 		else expect(bumped.chatGenerationBumped[helper.family]).toBe(true);
 	}
+});
+
+test("requires a Telegram bump for tool-activity defaults and delivery admission policy", () => {
+	for (const [file, declarations] of Object.entries(telegramToolActivityDeclarations)) {
+		for (const name of declarations) {
+			const missing = mappedHelperMutation({ family: "telegram", file, name, generationBumped: false });
+			expect(missing.protectedChanges).toContain(`telegram:${file}:${name}`);
+			expect(missing.telegramGenerationBumped).toBe(false);
+			expect(mappedHelperMutation({ family: "telegram", file, name, generationBumped: true }).telegramGenerationBumped).toBe(true);
+		}
+	}
+});
+
+test("detects restoring tool activity to default-on and bypassing daemon admission", () => {
+	const policyInventory = {
+		telegram: {
+			[config]: ["parseNotificationSettingsSnapshot"],
+			[telegramDaemon]: ["handleSessionMessage"],
+		},
+		discord: {},
+		slack: {},
+	} as const;
+	const base = files({ telegramGeneration: 6 });
+	const head = files({ telegramGeneration: 6 });
+	base.set(config, "export function parseNotificationSettingsSnapshot() { return { toolActivity: { enabled: false } }; }");
+	head.set(config, "export function parseNotificationSettingsSnapshot() { return { toolActivity: { enabled: true } }; }");
+	base.set(telegramDaemon, "export class TelegramDaemon { handleSessionMessage() { return this.opts.toolActivity?.enabled === true; } }");
+	head.set(telegramDaemon, "export class TelegramDaemon { handleSessionMessage() { return true; } }");
+	const missing = evaluate(base, head, policyInventory);
+	expect(missing.protectedChanges).toEqual(
+		expect.arrayContaining([
+			`telegram:${config}:parseNotificationSettingsSnapshot`,
+			`telegram:${telegramDaemon}:handleSessionMessage`,
+		]),
+	);
+	expect(missing.telegramGenerationBumped).toBe(false);
 });
 
 	test("requires a bump for the affected chat kind, not the other kind", () => {
@@ -314,6 +414,66 @@ test("requires mapped generation bumps for Telegram lease, chat CLI, and configu
 		head.set("scripts/telegram-daemon-generation-guard.ts", "export const GUARD_CONTRACT_VERSION = 3;\nexport const policy = false;");
 		expect(decide(base, head).guardContractBumped).toBe(true);
 	});
+	test("evaluates a contract-bumped head-only protected authority against the base inventory", () => {
+		const baseInventory = {
+			telegram: { [telegramContract]: ["DAEMON_GENERATION"], [telegramDaemon]: ["acquireDaemonOwnership"] },
+			discord: {},
+			slack: {},
+		} as const;
+		const headInventory = {
+			telegram: { [telegramContract]: ["DAEMON_GENERATION"], [telegramDaemon]: ["acquireDaemonOwnership", "renewDaemonHeartbeat"] },
+			discord: {},
+			slack: {},
+		} as const;
+		const base = new Map<string, string>([
+			[telegramContract, "export const DAEMON_GENERATION = 20;"],
+			[telegramDaemon, "export function acquireDaemonOwnership() { return true; }"],
+			[guardScript, "export const GUARD_CONTRACT_VERSION = 22;"],
+			[manifestScript, JSON.stringify({ contractVersion: 22, inventory: baseInventory, digests: {} })],
+		]);
+		const head = new Map<string, string>([
+			[telegramContract, "export const DAEMON_GENERATION = 21;"],
+			[telegramDaemon, "export function acquireDaemonOwnership() { return true; }\nexport function renewDaemonHeartbeat() { return false; }"],
+			[guardScript, "export const GUARD_CONTRACT_VERSION = 23;"],
+			[manifestScript, JSON.stringify({ contractVersion: 23, inventory: headInventory, digests: {} })],
+		]);
+		const result = evaluate(base, head, headInventory, baseInventory);
+		expect(result.protectedChanges).toContain(`telegram:${telegramDaemon}:renewDaemonHeartbeat`);
+		expect(result.malformedDeclarations).toEqual([]);
+		expect(result.guardContractBumped).toBe(true);
+		expect(result.telegramGenerationBumped).toBe(true);
+	});
+	test("treats a base-only protected declaration removal as a generation-fenced change", () => {
+		const removedFile = "packages/coding-agent/src/sdk/bus/removed-daemon-authority.ts";
+		const baseInventory = {
+			telegram: { [telegramContract]: ["DAEMON_GENERATION"], [removedFile]: ["removeDaemonAuthority"] },
+			discord: {},
+			slack: {},
+		} as const;
+		const headInventory = {
+			telegram: { [telegramContract]: ["DAEMON_GENERATION"] },
+			discord: {},
+			slack: {},
+		} as const;
+		const base = new Map<string, string>([
+			[telegramContract, "export const DAEMON_GENERATION = 20;"],
+			[removedFile, "export function removeDaemonAuthority() { return true; }"],
+			[guardScript, "export const GUARD_CONTRACT_VERSION = 22;"],
+			[manifestScript, JSON.stringify({ contractVersion: 22, inventory: baseInventory, digests: {} })],
+		]);
+		const head = new Map<string, string>([
+			[telegramContract, "export const DAEMON_GENERATION = 20;"],
+			[guardScript, "export const GUARD_CONTRACT_VERSION = 23;"],
+			[manifestScript, JSON.stringify({ contractVersion: 23, inventory: headInventory, digests: {} })],
+		]);
+		const unbumped = evaluate(base, head, headInventory, baseInventory);
+		expect(unbumped.protectedChanges).toContain(`telegram:${removedFile}:removeDaemonAuthority`);
+		expect(unbumped.malformedDeclarations).toEqual([]);
+		expect(unbumped.guardContractBumped).toBe(true);
+		expect(unbumped.telegramGenerationBumped).toBe(false);
+		head.set(telegramContract, "export const DAEMON_GENERATION = 21;");
+		expect(evaluate(base, head, headInventory, baseInventory).telegramGenerationBumped).toBe(true);
+	});
 
 	test("only bootstraps when the guard is absent and rejects duplicate inventory symbols", () => {
 		const base = files({ telegramGeneration: 4, telegramOwnership: "return true;" });
@@ -368,52 +528,102 @@ test("requires mapped generation bumps for Telegram lease, chat CLI, and configu
 		}
 	});
 
-	test("requires mapped family generation bumps for native lifecycle authority changes", () => {
-		const sources = [
-			["crates/pi-natives/src/path_identity.rs", ["telegram", "discord", "slack"]],
-			["crates/pi-natives/src/ps.rs", ["telegram", "discord", "slack"]],
-			["crates/pi-shell/src/process.rs", ["telegram", "discord", "slack"]],
-			["packages/natives/native/index.d.ts", ["telegram", "discord", "slack"]],
-			["packages/coding-agent/src/sdk/broker/process-incarnation.ts", ["telegram", "discord", "slack"]],
-		] as const;
-		for (const [source, families] of sources) {
-			const base = files({ telegramGeneration: 6, discordGeneration: 4, slackGeneration: 4 });
-			const head = files({ telegramGeneration: 6, discordGeneration: 4, slackGeneration: 4 });
-			base.set(source, "authority: base");
-			head.set(source, "authority: head");
-			const missingBumps = decide(base, head);
-			expect(missingBumps.nativeAuthorityChanges).toEqual(families.map(family => `${family}:${source}:authority`));
-			expect(missingBumps.telegramGenerationBumped).toBe(false);
-			for (const family of ["discord", "slack"] as const) expect(missingBumps.chatGenerationBumped[family]).toBe(false);
+test("ignores unrelated text in a shared native authority source", () => {
+	const source = "packages/coding-agent/src/sdk/broker/process-incarnation.ts";
+	const base = files({ telegramGeneration: 6, discordGeneration: 4, slackGeneration: 4 });
+	const head = new Map(base);
+	head.set(source, `${head.get(source)}\n// unrelated diagnostic text`);
+	const result = decide(base, head);
+	expect(result.nativeAuthorityChanges).toEqual([]);
+	expect(result.telegramGenerationBumped).toBe(false);
+	expect(result.chatGenerationBumped).toEqual({ discord: false, slack: false });
+});
 
-			const bumped = files({
-				telegramGeneration: families.includes("telegram") ? 7 : 6,
-				discordGeneration: families.includes("discord") ? 5 : 4,
-				slackGeneration: families.includes("slack") ? 5 : 4,
-			});
-			bumped.set(source, "authority: head");
-			const verified = decide(base, bumped);
-			if (families.includes("telegram")) expect(verified.telegramGenerationBumped).toBe(true);
-			for (const family of ["discord", "slack"] as const) {
-				if (families.includes(family)) expect(verified.chatGenerationBumped[family]).toBe(true);
-			}
-		}
+test("requires every mapped generation bump for a protected native authority declaration", () => {
+	const source = "packages/coding-agent/src/sdk/broker/process-incarnation.ts";
+	const base = files({ telegramGeneration: 6, discordGeneration: 4, slackGeneration: 4 });
+	const head = new Map(base);
+	head.set(source, (head.get(source) ?? "").replace("function processIncarnation() {}", "function processIncarnation() { return undefined; }"));
+	const result = decide(base, head);
+	expect(result.nativeAuthorityChanges).toEqual(["telegram:" + source + ":authority", "discord:" + source + ":authority", "slack:" + source + ":authority"]);
+	expect(result.telegramGenerationBumped).toBe(false);
+	expect(result.chatGenerationBumped).toEqual({ discord: false, slack: false });
+});
+
+test("accepts a protected native authority declaration change after every required generation bump", () => {
+	const source = "packages/coding-agent/src/sdk/broker/process-incarnation.ts";
+	const base = files({ telegramGeneration: 6, discordGeneration: 4, slackGeneration: 4 });
+	const head = files({ telegramGeneration: 7, discordGeneration: 5, slackGeneration: 5 });
+	head.set(source, (head.get(source) ?? "").replace("function processIncarnation() {}", "function processIncarnation() { return undefined; }"));
+	const result = decide(base, head);
+	expect(result.nativeAuthorityChanges).toEqual(["telegram:" + source + ":authority", "discord:" + source + ":authority", "slack:" + source + ":authority"]);
+	expect(result.telegramGenerationBumped).toBe(true);
+	expect(result.chatGenerationBumped).toEqual({ discord: true, slack: true });
+});
+test("fails closed when a protected native authority declaration is missing or malformed", () => {
+	const source = "packages/coding-agent/src/sdk/broker/process-incarnation.ts";
+	const base = files({ telegramGeneration: 6, discordGeneration: 4, slackGeneration: 4 });
+	const missing = new Map(base);
+	missing.set(source, "export function isProcessIncarnation() {}");
+	expect(decide(base, missing).malformedDeclarations).toContain(source + ":authority");
+	const malformed = new Map(base);
+	malformed.set(source, "export function isProcessIncarnation() {}\nexport function processIncarnation( {");
+	expect(decide(base, malformed).malformedDeclarations).toContain(source + ":authority");
+});
+	test("hashes restricted native path implementations behind public wrappers", () => {
+		const source = "crates/pi-natives/src/path_identity.rs";
+		const base = files({ telegramGeneration: 6, discordGeneration: 4, slackGeneration: 4 });
+		const head = new Map(base);
+		head.set(
+			source,
+			(head.get(source) ?? "").replace(
+				"pub(super) fn apply_owner_only_path_security() {}",
+				"pub(super) fn apply_owner_only_path_security() { let changed = true; }",
+			),
+		);
+		expect(decide(base, head).nativeAuthorityChanges).toEqual([
+			"telegram:" + source + ":authority",
+			"discord:" + source + ":authority",
+			"slack:" + source + ":authority",
+		]);
 	});
 
-	test("does not require generation bumps when native lifecycle authorities are unchanged", () => {
+	test("hashes core Process methods used by daemon control", () => {
+		const source = "crates/pi-shell/src/process.rs";
 		const base = files({ telegramGeneration: 6, discordGeneration: 4, slackGeneration: 4 });
-		const head = files({ telegramGeneration: 6, discordGeneration: 4, slackGeneration: 4 });
-		for (const source of [
-			"crates/pi-natives/src/path_identity.rs",
-			"crates/pi-natives/src/ps.rs",
-			"crates/pi-shell/src/process.rs",
-			"packages/natives/native/index.d.ts",
-			"packages/coding-agent/src/sdk/broker/process-incarnation.ts",
-		]) {
-			base.set(source, "same authority");
-			head.set(source, "same authority");
-		}
-		expect(decide(base, head).nativeAuthorityChanges).toEqual([]);
+		const head = new Map(base);
+		head.set(source, (head.get(source) ?? "").replace("pub fn incarnation(&self) {}", "pub fn incarnation(&self) { let changed = true; }"));
+		expect(decide(base, head).nativeAuthorityChanges).toEqual([
+			"telegram:" + source + ":authority",
+			"discord:" + source + ":authority",
+			"slack:" + source + ":authority",
+		]);
+	});
+
+	test("hashes every Rust platform implementation and lexes declaration braces", () => {
+		const source = "crates/pi-shell/src/process.rs";
+		const platformSource = [
+			"impl Process {}",
+			"#[cfg(unix)] pub fn kill_process_group() { let normal = \"}\"; let raw = r###\"{ not a body }\"###; let byte = br#\"} not a body {\"#; let character = '{'; /* { nested /* } */ still comment } */ // }\n return 1; }",
+			"#[cfg(windows)] pub fn kill_process_group() { return 2; }",
+			"pub fn current_descendant_pids() { return 3; }",
+			"pub fn add_new_descendants() { return 4; }",
+		].join("\n");
+		const base = files({ telegramGeneration: 6, discordGeneration: 4, slackGeneration: 4 });
+		base.set(source, platformSource);
+		const commentOnly = new Map(base);
+		commentOnly.set(source, platformSource.replace("// }", "// { }"));
+		expect(decide(base, commentOnly).nativeAuthorityChanges).toEqual([]);
+		const changed = new Map(base);
+		changed.set(source, platformSource.replace("return 1;", "return 9;"));
+		expect(decide(base, changed).nativeAuthorityChanges).toEqual([
+			"telegram:" + source + ":authority",
+			"discord:" + source + ":authority",
+			"slack:" + source + ":authority",
+		]);
+		const malformed = new Map(base);
+		malformed.set(source, platformSource.replace('r###"{ not a body }"###', 'r###"{ unterminated'));
+		expect(decide(base, malformed).malformedDeclarations).toContain(source + ":authority");
 	});
 
 	test("semantic manifest rejects duplicate, moved, and narrowed inventories", () => {
@@ -427,14 +637,33 @@ test("requires mapped generation bumps for Telegram lease, chat CLI, and configu
 		delete moved.telegram[telegramContract];
 		expect(() => validateManifest({ contractVersion: GUARD_CONTRACT_VERSION, inventory: moved })).toThrow("does not match the protected inventory");
 		const narrowed = mutableInventory();
-		narrowed.telegram[telegramDaemon]!.pop();
+		narrowed.telegram[telegramDaemon] = narrowed.telegram[telegramDaemon]!.filter(name => name !== "writeJsonAtomic");
 		expect(() => validateManifest({ contractVersion: GUARD_CONTRACT_VERSION, inventory: narrowed })).toThrow("Telegram owner-lock handoff primitives");
 	});
 
-	test("rejects inventories missing required Telegram lease, chat CLI, or provider configuration authorities", () => {
+	test("rejects inventories missing required Telegram lifecycle, lease, tool-activity, chat CLI, or provider configuration authorities", () => {
+		for (const symbol of ["validBotToken", "requestStop", "startLifecycleControl", "run"] as const) {
+			const telegram = mutableInventory();
+			telegram.telegram[telegramDaemon] = telegram.telegram[telegramDaemon]!.filter(name => name !== symbol);
+			expect(() => validateInventory(telegram)).toThrow("Telegram authentication and lifecycle primitives");
+		}
 		const telegram = mutableInventory();
 		telegram.telegram[telegramDaemon] = telegram.telegram[telegramDaemon]!.filter(name => name !== "writeJsonAtomic");
 		expect(() => validateInventory(telegram)).toThrow("Telegram owner-lock handoff primitives");
+		for (const [file, declarations] of Object.entries(telegramToolActivityDeclarations)) {
+			for (const symbol of declarations) {
+				const toolActivity = mutableInventory();
+				const remaining = toolActivity.telegram[file]!.filter(name => name !== symbol);
+				if (remaining.length === 0) delete toolActivity.telegram[file];
+				else toolActivity.telegram[file] = remaining;
+				expect(() => validateInventory(toolActivity)).toThrow("Telegram tool-activity configuration and delivery policy");
+			}
+		}
+		for (const symbol of ["DaemonProcessReference", "defaultProcessReference"] as const) {
+			const processAuthority = mutableInventory();
+			processAuthority.telegram[telegramControl] = processAuthority.telegram[telegramControl]!.filter(name => name !== symbol);
+			expect(() => validateInventory(processAuthority)).toThrow("Telegram process termination authority");
+		}
 		const cli = mutableInventory();
 		cli.discord[chatCli] = cli.discord[chatCli]!.filter(name => name !== "ownerPid");
 		expect(() => validateInventory(cli)).toThrow("chat CLI ownership primitives");
@@ -461,16 +690,28 @@ test("requires mapped generation bumps for Telegram lease, chat CLI, and configu
 				"waitForTelegramDaemonReady",
 				"hasSafeDaemonStateShape",
 				"isPhysicalMatchingOwner",
+				"validBotToken",
+				"requestStop",
+				"startLifecycleControl",
+				"run",
 				"writeJsonAtomic",
 				"ownershipLockMatchesState",
 				"ownershipLockMatchesMetadata",
 				"ownershipLockIsReclaimable",
 				"isLegacyParentDaemonState",
 				"legacyParentHandoffDecision",
+				"isParentDaemonState",
+				"isGenerationAbsentParentDaemonState",
+				"isGeneration3ReleaseDaemonState",
+				"legacyOwnershipLockMatchesHandoffState",
+				"historicalStateSerializer",
+				"unlinkOwnershipLockExactly",
+				"retireProvisionalDaemonOwnership",
+				"confirmTelegramDaemonSpawn",
 			]),
 		);
-		const control = protectedInventory.telegram["packages/coding-agent/src/sdk/bus/telegram-daemon-control.ts"] ?? [];
-		expect(control).toContain("signalCapturedOwner");
+		const control = protectedInventory.telegram[telegramControl] ?? [];
+		expect(control).toEqual(expect.arrayContaining(["DaemonProcessReference", "defaultProcessReference", "signalCapturedOwner"]));
 		for (const family of ["discord", "slack"] as const) {
 			const chat = protectedInventory[family][chatControl] ?? [];
 			expect(chat).toEqual(

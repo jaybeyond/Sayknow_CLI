@@ -1824,7 +1824,7 @@ describe("AskTool deep-interview recorder persistence", () => {
 		);
 
 		const gateEmitter = {
-			isUnattended: () => true,
+			supportsRemoteGateAnswers: () => true,
 			emitGate: vi.fn(async () => ({ selected: ["Timeline"] })),
 		};
 		await new AskTool(

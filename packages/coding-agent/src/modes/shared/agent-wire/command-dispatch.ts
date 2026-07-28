@@ -219,9 +219,9 @@ export async function dispatchRpcCommand(
 			case "set_host_tools": {
 				const tools = normalizeHostToolDefinitions(command.tools);
 				const rpcTools = hostToolRegistry.setTools(tools);
-			// TODO(upstream-v0.11): AgentSession.refreshRpcHostTools was removed; the host-tool
-			// registry already holds the updated set via hostToolRegistry.setTools above.
-			void rpcTools;
+				// TODO(upstream-v0.11): AgentSession.refreshRpcHostTools was removed; the host-tool
+				// registry already holds the updated set via hostToolRegistry.setTools above.
+				void rpcTools;
 				return rpcSuccess(id, "set_host_tools", { toolNames: tools.map(tool => tool.name) });
 			}
 

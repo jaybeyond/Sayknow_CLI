@@ -1,10 +1,15 @@
 import * as os from "node:os";
+import * as path from "node:path";
 
 import { formatDimensionNote, type ResizedImage } from "../../utils/image-resize";
 
 function shortenPath(filePath: string): string {
 	const home = os.homedir();
-	return home && filePath.startsWith(home) ? `~${filePath.slice(home.length)}` : filePath;
+	if (!home) return filePath;
+	// Require a separator boundary so a sibling that shares the home prefix
+	// (e.g. "/home/woodyx/x" for home "/home/woody") is not corrupted into "~x/x".
+	const boundary = home.endsWith(path.sep) ? home : home + path.sep;
+	return filePath === home || filePath.startsWith(boundary) ? `~${filePath.slice(home.length)}` : filePath;
 }
 
 export function formatScreenshot(opts: {

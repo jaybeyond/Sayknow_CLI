@@ -309,6 +309,21 @@ export async function handleLifecycleRequest(
 
 	// 4. Durable idempotency.
 	const doc = await deps.store.read();
+	const existing = doc.entries[key];
+	if (
+		frame.type === "session_close" &&
+		existing?.verb === "session_close" &&
+		existing.requestHash === hash &&
+		existing.state === "success" &&
+		typeof existing.sessionId === "string" &&
+		existing.processGone === false
+	) {
+		existing.state = "terminal_uncertain";
+		existing.reason = "terminal_uncertain";
+		existing.updatedAt = deps.now();
+		delete existing.processGone;
+		await deps.store.write(doc);
+	}
 	const dup = classifyDuplicate(doc.entries[key], hash);
 	switch (dup.kind) {
 		case "conflict":
@@ -394,12 +409,28 @@ export async function handleLifecycleRequest(
 
 		if (frame.type === "session_close") {
 			const closed = await deps.closeSession(frame.target);
+			if (!closed.processGone) {
+				Object.assign(entry, {
+					state: "terminal_uncertain",
+					updatedAt: deps.now(),
+					reason: "terminal_uncertain",
+					sessionId: frame.target.sessionId,
+					tmuxSession: frame.target.tmuxSession,
+				});
+				await deps.store.write(doc);
+				await deps.audit({ ...baseAudit, event: "terminal_uncertain", reason: "terminal_uncertain" });
+				return {
+					status: "error",
+					reason: "terminal_uncertain",
+					message: "session_close could not confirm process disappearance; manual check",
+				};
+			}
 			Object.assign(entry, {
 				state: "success",
 				updatedAt: deps.now(),
 				sessionId: frame.target.sessionId,
 				tmuxSession: frame.target.tmuxSession,
-				processGone: closed.processGone,
+				processGone: true,
 			});
 			await deps.store.write(doc);
 			await deps.audit({ ...baseAudit, event: "success" });

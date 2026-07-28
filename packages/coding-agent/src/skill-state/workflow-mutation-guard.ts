@@ -35,17 +35,31 @@ function planningPhaseBlockMessage(skill: CanonicalSkcWorkflowSkill): string {
 }
 
 const BLOCKED_TOOL_NAMES = new Set(["edit", "write", "ast_edit", "bash"]);
+/**
+ * Only `/dev/null` is exempt. `/dev/stdout`, `/dev/stderr`, and `/dev/fd/<n>` are descriptor
+ * aliases: `exec 1<>src/product.ts; printf x >/dev/stdout` reaches a real repository file
+ * through a rebound descriptor, so they must stay blocked.
+ */
+const DEVICE_SINK_PATHS = new Set(["/dev/null"]);
+/** Bash write forms the plain `>`/`>>` scanner misses: clobber, dup-to-path, and read-write open. */
+const BASH_EXTENDED_WRITE_RE = /(?:>\||<>|>&(?![\s;&|]*(?:\d+|-)(?:[\s;&|]|$)))\s*([^\s;&|]+)/g;
+/** Descriptor rebinding is not statically resolvable; any `exec` redirection forces a fail-closed verdict. */
+const BASH_EXEC_REDIRECT_RE = /(?:^|[;&|\n])\s*(?:sudo\s+)?exec\b[^;&|\n]*[<>]/i;
+
 const ARCHIVE_OR_SQLITE_BASE_RE = /^(.+?\.(?:tar\.gz|sqlite3|sqlite|db3|zip|tgz|tar|db))(?:$|:)/i;
 const INTERNAL_SCHEME_RE = /^[a-z][a-z0-9+.-]*:\/\//i;
 const VIM_FILE_SWITCH_RE = /^\s*:(?:e|e!|edit|edit!)(?:\s+([^<\r\n]+))?(?:<CR>|\r|\n|$)/i;
 const BASH_MUTATION_COMMAND_RE =
-	/(?:^|[;&|\n])\s*(?:\w+=[^\s]+\s+)*(?:sudo\s+)?(?:tee|touch|rm|mkdir|cp|mv|install|truncate)\b([^;&|\n]*)|(?:^|[^<>])(?:>>?|\d>>?)\s*([^\s;&|]+)/gi;
+	/(?:^|[;&|\n])\s*(?:\w+=[^\s]+\s+)*(?:sudo\s+)?(?:[^\s;&|]*\/)?(?:tee|touch|rm|mkdir|cp|mv|install|truncate)\b([^;&|\n]*)|(?:^|[^<>])(?:>>?|\d>>?)\s*([^\s;&|]+)/gi;
 const BASH_IN_PLACE_MUTATION_COMMAND_RE = /(?:^|[;&|\n])\s*(?:\w+=[^\s]+\s+)*(?:sudo\s+)?(?:sed|perl)\b([^;&|\n]*)/gi;
 const BASH_OPAQUE_INTERPRETER_WRITE_RE =
 	/(?:^|[;&|\n])\s*(?:\w+=[^\s]+\s+)*(?:sudo\s+)?(?:python3?|node|ruby)\b[^;&|\n]*(?:-c|-e)\b[^;&|\n]*(?:open\s*\(|writeFile(?:Sync)?\s*\(|\.write\s*\()/i;
 const BASH_HEREDOC_OPAQUE_INTERPRETER_WRITE_RE =
 	/(?:^|[;&|\n])\s*(?:\w+=[^\s]+\s+)*(?:sudo\s+)?(?:python3?|node|ruby)\b[^;&|\n]*(?:<<[-]?\s*['"]?\w+['"]?)[\s\S]*(?:open\s*\(|writeFile(?:Sync)?\s*\(|\.write\s*\()/i;
-const BASH_DD_OUTPUT_RE = /(?:^|[;&|\n])\s*(?:\w+=[^\s]+\s+)*(?:sudo\s+)?dd\b([^;&|\n]*)/gi;
+const BASH_DD_OUTPUT_RE = /(?:^|[;&|\n])\s*(?:\w+=[^\s]+\s+)*(?:sudo\s+)?(?:[^\s;&|]*\/)?dd\b([^;&|\n]*)/gi;
+/** Literal `sh|bash|zsh -c '<script>'` payloads whose nested script must also be scanned. */
+const BASH_NESTED_SHELL_RE =
+	/(?:^|[;&|\n])\s*(?:\w+=[^\s]+\s+)*(?:sudo\s+)?(?:[^\s;&|]*\/)?(?:ba|z|da)?sh\s+(?:-[A-Za-z]+\s+)*-[A-Za-z]*c\s+(?:(')([^']*)'|(")([^"]*)")/g;
 
 type ToolWithEditMode = AgentTool & {
 	mode?: unknown;
@@ -66,6 +80,12 @@ export interface WorkflowMutationGuardInput {
 interface ExtractedTargets {
 	paths: string[];
 	unknown: boolean;
+	/**
+	 * Set when a bash command was recognized as performing a filesystem write.
+	 * During a planning phase an unrecognized bash command is allowed (reading
+	 * and inspection must not be blocked); only a recognized mutation blocks.
+	 */
+	explicitMutation?: boolean;
 }
 
 export interface WorkflowMutationDecision {
@@ -371,7 +391,34 @@ function cleanShellWord(value: string): string {
 	return value.replace(/^['"]|['"]$/g, "");
 }
 
-function extractBashTargets(args: unknown): ExtractedTargets {
+/**
+ * Blank out single-quoted spans so shell metacharacters inside a literal
+ * argument value (e.g. `--value 'uses `x`; a > b'`) are not misread as
+ * redirections or separators. Single quotes suppress every expansion in POSIX
+ * shells, so their contents are always inert data. Double-quoted spans are left
+ * intact because they still expand `$(...)` and backticks.
+ */
+function maskSingleQuotedSpans(command: string): string {
+	let masked = "";
+	let inSingle = false;
+	for (const character of command) {
+		if (character === "'") {
+			inSingle = !inSingle;
+			masked += character;
+			continue;
+		}
+		masked += inSingle && character !== "\n" ? " " : character;
+	}
+	// An unbalanced quote means the parse is unreliable; keep the original text
+	// so the scanner stays fail-closed rather than blind.
+	return inSingle ? command : masked;
+}
+
+function isDeviceSinkPath(value: string): boolean {
+	return DEVICE_SINK_PATHS.has(cleanShellWord(value));
+}
+
+function extractBashTargets(args: unknown, depth = 0): ExtractedTargets {
 	const record = getRecord(args);
 	const command = safeString(record?.command);
 	const targets: ExtractedTargets = { paths: [], unknown: false };
@@ -379,32 +426,74 @@ function extractBashTargets(args: unknown): ExtractedTargets {
 		targets.unknown = true;
 		return targets;
 	}
+	// A literal `sh|bash|zsh -c '<script>'` payload is a real command list. Its
+	// mutations never match the top-level patterns, so recurse into it; anything
+	// deeper than a bounded depth is not statically analyzable and fails closed.
+	for (const match of command.matchAll(BASH_NESTED_SHELL_RE)) {
+		if (depth >= 2) {
+			targets.explicitMutation = true;
+			targets.unknown = true;
+			break;
+		}
+		const nested = extractBashTargets({ command: match[2] ?? match[4] ?? "" }, depth + 1);
+		for (const nestedPath of nested.paths) addPath(targets, nestedPath);
+		if (nested.unknown) targets.unknown = true;
+		if (nested.explicitMutation) targets.explicitMutation = true;
+	}
+	// Nested scripts were read from the raw text above; every scanner below works
+	// on the masked view so quoted argument data cannot look like a redirection.
+	const scanned = maskSingleQuotedSpans(command);
 	if (BASH_OPAQUE_INTERPRETER_WRITE_RE.test(command) || BASH_HEREDOC_OPAQUE_INTERPRETER_WRITE_RE.test(command)) {
+		targets.explicitMutation = true;
 		targets.unknown = true;
 	}
-	for (const match of command.matchAll(BASH_DD_OUTPUT_RE)) {
-		const parts = shellWords(match[1] ?? "").map(cleanShellWord);
-		const output = parts.find(part => part.startsWith("of="));
-		if (output) addPath(targets, output.slice(3));
-		else targets.unknown = true;
+	// `exec 1<>file` rebinds a descriptor, so a later `>/dev/null` may not reach the device at all.
+	if (BASH_EXEC_REDIRECT_RE.test(scanned)) {
+		targets.explicitMutation = true;
+		targets.unknown = true;
 	}
-	for (const match of command.matchAll(BASH_IN_PLACE_MUTATION_COMMAND_RE)) {
+	for (const match of scanned.matchAll(BASH_EXTENDED_WRITE_RE)) {
+		targets.explicitMutation = true;
+		const cleaned = cleanShellWord(match[1] ?? "");
+		if (!cleaned) targets.unknown = true;
+		else if (!isDeviceSinkPath(cleaned)) addPath(targets, cleaned);
+	}
+	for (const match of scanned.matchAll(BASH_DD_OUTPUT_RE)) {
+		targets.explicitMutation = true;
+		const parts = shellWords(match[1] ?? "").map(cleanShellWord);
+		// Every `of=` counts: GNU dd honors the last one, so `of=/dev/null of=real.ts` writes real.ts.
+		const outputs = parts.filter(part => part.startsWith("of="));
+		if (outputs.length === 0) targets.unknown = true;
+		for (const output of outputs) {
+			const outputPath = cleanShellWord(output.slice(3));
+			if (!outputPath) targets.unknown = true;
+			else if (!isDeviceSinkPath(outputPath)) addPath(targets, outputPath);
+		}
+	}
+	for (const match of scanned.matchAll(BASH_IN_PLACE_MUTATION_COMMAND_RE)) {
 		const parts = shellWords(match[1] ?? "").map(cleanShellWord);
 		const hasInPlaceFlag = parts.some(part => /^-.*i/.test(part));
 		if (!hasInPlaceFlag) continue;
+		targets.explicitMutation = true;
 		const target = [...parts].reverse().find(part => part && !part.startsWith("-"));
 		if (target) addPath(targets, target);
 		else targets.unknown = true;
 	}
-	for (const match of command.matchAll(BASH_MUTATION_COMMAND_RE)) {
+	for (const match of scanned.matchAll(BASH_MUTATION_COMMAND_RE)) {
+		targets.explicitMutation = true;
 		const redirected = match[2]?.trim();
 		if (redirected) {
-			addPath(targets, cleanShellWord(redirected));
+			const cleaned = cleanShellWord(redirected);
+			// A capture that dequotes to nothing (e.g. `>" src.ts"`) is a truncated parse, not a safe no-op.
+			if (!cleaned) targets.unknown = true;
+			else if (!isDeviceSinkPath(cleaned)) addPath(targets, cleaned);
 			continue;
 		}
 		const parts = shellWords(match[1] ?? "");
 		const commandName = match[0]
-			?.match(/(?:^|[;&|\n])\s*(?:\w+=[^\s]+\s+)*(?:sudo\s+)?(tee|touch|rm|mkdir|cp|mv|install|truncate)\b/i)?.[1]
+			?.match(
+				/(?:^|[;&|\n])\s*(?:\w+=[^\s]+\s+)*(?:sudo\s+)?(?:[^\s;&|]*\/)?(tee|touch|rm|mkdir|cp|mv|install|truncate)\b/i,
+			)?.[1]
 			?.toLowerCase();
 		const targetParts =
 			commandName === "cp" || commandName === "mv" || commandName === "install" || commandName === "truncate"
@@ -632,7 +721,10 @@ export async function getWorkflowMutationDecision(
 	}
 	if (input.forceOverride) return { blocked: false, targets: [] };
 	const message = planningPhaseBlockMessage(planning.skill);
-	if (targets.unknown) {
+	// Bash during a planning phase blocks only when a filesystem mutation was
+	// actually recognized. Inspection, reads, and CLI invocations the scanner does
+	// not model stay usable; other tools keep failing closed on unknown targets.
+	if (targets.unknown && (input.tool.name !== "bash" || targets.explicitMutation)) {
 		return {
 			blocked: true,
 			message,

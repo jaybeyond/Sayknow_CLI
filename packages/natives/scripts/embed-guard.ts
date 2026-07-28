@@ -23,6 +23,16 @@ export interface VerifyDefaultLanguageSetOptions {
 	warn: (message: string) => void;
 }
 
+export function missingRequiredFunctions(bindings: Record<string, unknown>, required: readonly string[]): string[] {
+	return required.filter(symbol => typeof bindings[symbol] !== "function");
+}
+
+export function assertRequiredSymbols(source: string, required: readonly string[]): void {
+	for (const symbol of required) {
+		if (!source.includes(symbol)) throw new Error(`napi build did not generate the required binding: ${symbol}`);
+	}
+}
+
 function assertDefaultLanguageSet(filename: string, languageSet: string | undefined, source: string): void {
 	if (languageSet !== "default") {
 		throw new Error(

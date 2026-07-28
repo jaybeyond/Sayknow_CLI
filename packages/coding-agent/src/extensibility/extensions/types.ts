@@ -290,6 +290,18 @@ export interface ExtensionTranscriptEntry {
 	textSummary: string;
 	ts: string;
 	body?: string;
+	/**
+	 * Durable, image-free message blocks used by rich transcript consumers such
+	 * as ACP replay. Binary image payloads intentionally remain unavailable.
+	 */
+	content?: Array<
+		| { type: "text"; text: string }
+		| { type: "thinking"; thinking: string }
+		| { type: "toolCall"; id: string; name: string; arguments: unknown }
+	>;
+	toolCallId?: string;
+	toolName?: string;
+	isError?: boolean;
 }
 
 export interface ContextUsage {
@@ -361,6 +373,7 @@ export interface ExtensionContext {
 	resolveTool(name: string): Pick<Tool, "safeSummary" | "safeSummaryFields"> | undefined;
 	/** Session control seams used by the SDK host. */
 	cycleModel(): Promise<{ model: Model; thinkingLevel: ThinkingLevel | undefined } | undefined>;
+	setModelProfile?(name: string): Promise<boolean>;
 	cycleThinkingLevel(): ThinkingLevel | undefined;
 	setQueueMode(kind: "steering" | "follow_up" | "interrupt", mode: unknown): boolean;
 	getSkillState(): unknown;
@@ -379,7 +392,15 @@ export interface ExtensionContext {
 
 	getJobs(): unknown;
 	/** Typed skill and mode controls exposed to the SDK host. */
-	invokeSkill?(name: string, args?: string): Promise<unknown>;
+	invokeSkill?(
+		name: string,
+		args?: string,
+		options?: {
+			onPreflightAccepted?: () => void;
+			onPreflightAcceptCommit?: () => void | Promise<void>;
+			onSkillPrepared?: (meta: { name: string; path: string; lineCount?: number; cleanedArgs?: string }) => void;
+		},
+	): Promise<unknown>;
 	setPlanMode?(on: boolean): unknown;
 	operateGoal?(op: "create" | "get" | "resume" | "pause" | "complete" | "drop", objective?: string): Promise<unknown>;
 
@@ -1122,7 +1143,11 @@ export interface ExtensionAPI {
 	/** Send a user message to the agent, or queue it when deliverAs is set. */
 	sendUserMessage(
 		content: string | (TextContent | ImageContent)[],
-		options?: { deliverAs?: "steer" | "followUp"; onPreflightAccepted?: () => void },
+		options?: {
+			deliverAs?: "steer" | "followUp";
+			onPreflightAccepted?: () => void;
+			onPreflightAcceptCommit?: () => void | Promise<void>;
+		},
 	): Promise<void>;
 
 	/** Append a custom entry to the session for state persistence (not sent to LLM). */
@@ -1331,7 +1356,11 @@ export type SendMessageHandler = <T = unknown>(
 
 export type SendUserMessageHandler = (
 	content: string | (TextContent | ImageContent)[],
-	options?: { deliverAs?: "steer" | "followUp"; onPreflightAccepted?: () => void },
+	options?: {
+		deliverAs?: "steer" | "followUp";
+		onPreflightAccepted?: () => void;
+		onPreflightAcceptCommit?: () => void | Promise<void>;
+	},
 ) => void | Promise<void>;
 
 export type AppendEntryHandler = <T = unknown>(customType: string, data?: T) => void;
@@ -1429,6 +1458,7 @@ export interface ExtensionContextActions {
 	clearContext?: () => Promise<boolean>;
 	/** Session control and query seams exposed to the per-session SDK host. */
 	cycleModel?: () => Promise<{ model: Model; thinkingLevel: ThinkingLevel | undefined } | undefined>;
+	setModelProfile?: (name: string) => Promise<boolean>;
 	cycleThinkingLevel?: () => ThinkingLevel | undefined;
 	setQueueMode?: (kind: "steering" | "follow_up" | "interrupt", mode: unknown) => boolean;
 	getSkillState?: () => unknown;
@@ -1455,7 +1485,15 @@ export interface ExtensionContextActions {
 			| undefined,
 	) => void;
 	sdkControl?: (operation: string, input: Record<string, unknown>) => unknown | Promise<unknown>;
-	invokeSkill?: (name: string, args?: string) => Promise<unknown>;
+	invokeSkill?: (
+		name: string,
+		args?: string,
+		options?: {
+			onPreflightAccepted?: () => void;
+			onPreflightAcceptCommit?: () => void | Promise<void>;
+			onSkillPrepared?: (meta: { name: string; path: string; lineCount?: number; cleanedArgs?: string }) => void;
+		},
+	) => Promise<unknown>;
 	setPlanMode?: (on: boolean) => unknown;
 	operateGoal?: (
 		op: "create" | "get" | "resume" | "pause" | "complete" | "drop",

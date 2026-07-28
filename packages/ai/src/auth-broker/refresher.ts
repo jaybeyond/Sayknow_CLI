@@ -96,6 +96,7 @@ export class AuthBrokerRefresher {
 			const targets: number[] = [];
 			for (const entry of snapshot.credentials) {
 				if (entry.credential.type !== "oauth") continue;
+				if (entry.credential.mcpBinding) continue;
 				const expires = entry.credential.expires;
 				if (typeof expires !== "number" || !Number.isFinite(expires)) continue;
 				if (expires > deadline) continue;

@@ -22,6 +22,7 @@ import {
 	type ToolResultMessage,
 } from "@sayknow-cli/ai";
 import {
+	codexToolWireName,
 	getOpenAICodexTransportDetails,
 	prewarmOpenAICodexResponses,
 } from "@sayknow-cli/ai/providers/openai-codex-responses";
@@ -46,8 +47,8 @@ import { loadCapability } from "../capability";
 import { type Rule, ruleCapability, setActiveRules } from "../capability/rule";
 import { kNoAuth, ModelRegistry } from "../config/model-registry";
 import {
-	formatModelString,
 	defaultModelPerProvider,
+	formatModelString,
 	parseModelPattern,
 	resolveAllowedModels,
 	resolveModelChainWithAuth,
@@ -94,6 +95,7 @@ import type { FileSlashCommand } from "../extensibility/slash-commands";
 import type { HindsightSessionState } from "../hindsight/state";
 import { initializeLocalRoot, LocalProtocolHandler, type LocalProtocolOptions } from "../internal-urls";
 import { resolveMemoryBackend } from "../memory-backend";
+import btwUserPrompt from "../prompts/system/btw-user.md" with { type: "text" };
 import asyncResultTemplate from "../prompts/tools/async-result.md" with { type: "text" };
 import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import { MCPManager } from "../runtime-mcp";
@@ -151,6 +153,7 @@ import {
 	ReadTool,
 	ResolveTool,
 	SearchTool,
+	setConfiguredImageModel,
 	setPreferredImageProvider,
 	setPreferredSearchProvider,
 	setSearchFallbackProviders,
@@ -168,6 +171,7 @@ import { buildNamedToolChoice, buildNamedToolChoiceResult } from "../utils/tool-
 import { buildWorkspaceTree, type WorkspaceTree } from "../workspace-tree";
 import {
 	attachLifecycleStartupCapability,
+	lifecycleMcpStartupTimeoutOption,
 	lifecycleStartupCapabilityOption,
 	type SdkStartupCapability,
 } from "./startup-capability";
@@ -428,6 +432,13 @@ export interface CreateAgentSessionOptions {
 	goalToolAllowedOps?: readonly ("create" | "get" | "complete" | "resume" | "drop" | "pause")[];
 	/** Optional per-session allowlist for tools exposed through search_tool_bm25. */
 	discoverableToolAllowedNames?: readonly string[];
+	/**
+	 * Discoverable built-in tools that must stay in the initial active set even when
+	 * `tools.discoveryMode === "all"` would otherwise hide them behind `search_tool_bm25`.
+	 * Used for coordination tools (e.g. `irc`) that a subagent must be able to use
+	 * immediately without first spending a discovery round-trip to find them.
+	 */
+	alwaysActiveToolNames?: readonly string[];
 	/** Optional shared agent registry for IRC routing. Default: AgentRegistry.global(). */
 	agentRegistry?: AgentRegistry;
 	/** Parent task ID prefix for nested artifact naming (e.g., "6-Extensions") */
@@ -1021,6 +1032,11 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	const lifecycleStartupCapability = (
 		options as CreateAgentSessionOptions & { [lifecycleStartupCapabilityOption]?: SdkStartupCapability }
 	)[lifecycleStartupCapabilityOption];
+	// ACP lifecycle launches carry their own MCP startup budget; every other
+	// consumer keeps the manager's short default ceiling.
+	const lifecycleMcpStartupTimeoutMs = (
+		options as CreateAgentSessionOptions & { [lifecycleMcpStartupTimeoutOption]?: number }
+	)[lifecycleMcpStartupTimeoutOption];
 	const isCanonicalSubSession =
 		(options.taskDepth ?? 0) > 0 || Boolean(options.parentTaskPrefix) || Boolean(options.currentAgentType);
 	if (isCanonicalSubSession && options.mcpConfigPath !== undefined) {
@@ -1160,14 +1176,27 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		applyConfiguredSearchTimeout(settings);
 
 		const imageProvider = settings.get("providers.image");
+		const imageModel = settings.get("providers.imageModel");
+		const imageCustomUrl = settings.get("providers.imageCustomUrl");
+		const imageCustomKey = settings.get("providers.imageCustomKey");
+		const imageCustomKeyEnv = settings.get("providers.imageCustomKeyEnv");
 		if (
 			imageProvider === "auto" ||
 			imageProvider === "openai" ||
 			imageProvider === "gemini" ||
 			imageProvider === "openrouter" ||
-			imageProvider === "antigravity"
+			imageProvider === "antigravity" ||
+			imageProvider === "alibaba" ||
+			imageProvider === "custom"
 		) {
-			setPreferredImageProvider(imageProvider);
+			setPreferredImageProvider(imageProvider === "custom" ? "auto" : imageProvider);
+			setConfiguredImageModel({
+				provider: imageProvider,
+				model: imageModel ?? null,
+				customUrl: imageCustomUrl,
+				customKey: imageCustomKey,
+				customKeyEnv: imageCustomKeyEnv,
+			});
 		}
 
 		const sessionManager =
@@ -1511,6 +1540,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			isManagedSessionDestination: () => sessionManager.isManagedDestination(),
 			getActiveSkillState: () => session?.getActiveSkillState(),
 			getActiveSkillPhase: () => session?.getActiveSkillPhase(),
+			getDeepInterviewAskStage: () => session?.getDeepInterviewAskStage(),
 			getHindsightSessionState: () => session?.getHindsightSessionState(),
 			get model() {
 				return agent?.state.model ?? model;
@@ -1528,6 +1558,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			goalToolAllowedOps: options.goalToolAllowedOps,
 			discoverableToolAllowedNames: options.discoverableToolAllowedNames,
 			getToolByName: name => session?.getToolByName(name),
+			getToolForExecution: name => session?.getToolForExecution(name),
 			agentRegistry,
 			getSessionSpawns: () => options.spawns ?? "*",
 			getModelString: () => (hasExplicitModel && model ? formatModelString(model) : undefined),
@@ -1592,13 +1623,19 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		// which collapses to the parent's dir for subagents (they adopt the
 		// parent's ArtifactManager) so one lookup hits everything.
 		const getArtifactsDir = () => sessionManager.getArtifactsDir();
+		const localProtocolOptions = options.localProtocolOptions ?? {
+			getArtifactsDir,
+			isManagedDestination: () => sessionManager.isManagedDestination(),
+			getManagedLegacyLocalMigrationSource: () => sessionManager.getManagedLegacyLocalMigrationSource(),
+			getSessionId: () => sessionManager.getSessionId(),
+		};
 		if (!options.parentTaskPrefix) {
 			setActiveSkills(skills);
 			setActiveRules([...rulebookRules, ...alwaysApplyRules]);
 			if (asyncJobManager) AsyncJobManager.setInstance(asyncJobManager);
 		}
+		await initializeLocalRoot(localProtocolOptions);
 		if (options.localProtocolOptions) {
-			await initializeLocalRoot(options.localProtocolOptions);
 			disposeLocalProtocolOverride = LocalProtocolHandler.installOverride(options.localProtocolOptions);
 		}
 		toolSession.getArtifactsDir = getArtifactsDir;
@@ -1692,7 +1729,12 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 
 		const preExactCustomToolNames = customTools.map(tool => tool.name);
 		if (explicitMcpConfigPath !== undefined) {
-			const owned = new MCPManager(cwd, null, { toolsOnly: true });
+			const owned = new MCPManager(cwd, null, {
+				toolsOnly: true,
+				...(lifecycleMcpStartupTimeoutMs !== undefined
+					? { maxStartupTimeoutMs: lifecycleMcpStartupTimeoutMs }
+					: {}),
+			});
 			owned.setAuthStorage(authStorage);
 			mcpManager = owned;
 			ownsMcpManager = true;
@@ -1851,9 +1893,13 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 						spawnedBySkc,
 						sdkHostModeSupported: options.sdkHostModeSupported,
 						ensureProviderDaemon: options.ensureNotificationProviderDaemon,
-						runEphemeralTurn: async (promptText, signal) => {
+						runBtwTurn: async (question, signal) => {
 							if (!session) throw new Error("Ephemeral turns are unavailable.");
-							const { replyText } = await session.runEphemeralTurn({ promptText, signal });
+							const { replyText } = await session.runEphemeralTurn({
+								purpose: "btw",
+								turn: { question, scope: session.createBtwConversationScope(btwUserPrompt) },
+								signal,
+							});
 							return { replyText };
 						},
 					});
@@ -2166,7 +2212,18 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				const previousPromptMetadataModel = promptMetadataModel;
 				promptMetadataModel = candidateModel;
 				try {
-					return buildSystemPromptToolMetadata(tools);
+					const activeModel = candidateModel ?? agent?.state.model ?? model;
+					// Codex renames reserved tool names on the wire; the prompt must
+					// refer to the tools by the names the model actually receives.
+					const overrides =
+						activeModel?.api === "openai-codex-responses"
+							? Object.fromEntries(
+									Array.from(tools.keys())
+										.filter(name => codexToolWireName(name) !== name)
+										.map(name => [name, { wireName: codexToolWireName(name) }]),
+								)
+							: {};
+					return buildSystemPromptToolMetadata(tools, overrides);
 				} finally {
 					promptMetadataModel = previousPromptMetadataModel;
 				}
@@ -2326,6 +2383,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		// from the initial set unless they were explicitly requested or restored from persistence.
 		// The model finds them via search_tool_bm25 and activates them on demand.
 		if (effectiveDiscoveryMode === "all") {
+			const alwaysActiveDiscoveredBuiltinNames = new Set(
+				(options.alwaysActiveToolNames ?? []).map(name => name.toLowerCase()),
+			);
 			const essentialBuiltinNames = new Set(computeEssentialBuiltinNames(settings));
 			const allowedDiscoveredBuiltinNames = options.discoverableToolAllowedNames
 				? new Set(options.discoverableToolAllowedNames.map(name => name.toLowerCase()))
@@ -2334,6 +2394,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				const tool = toolRegistry.get(name);
 				if (!tool?.loadMode) return true; // not a built-in — leave MCP/custom/extension to existing logic
 				if (tool.loadMode === "essential") return true;
+				if (alwaysActiveDiscoveredBuiltinNames.has(name)) return true;
 				return essentialBuiltinNames.has(name);
 			});
 			explicitlyRequestedDiscoveredBuiltinToolNames = selectRestorableDiscoveredBuiltinToolNames(

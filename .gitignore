@@ -65,6 +65,8 @@ packages/ai/test/.temp-images/
 compaction-results/
 changes/
 __pycache__/
+*.egg-info/
+.pytest_cache/
 
 # Scratch files
 syntax.jsonl
@@ -84,3 +86,5 @@ packages/coding-agent/binaries/
 
 # OMC orchestration runtime state
 .omc/
+# Python SDK build output
+python/skc-sdk/build/

@@ -1,9 +1,10 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { ImageContent, Message, ProviderPayload, TextContent } from "@sayknow-cli/ai";
-import { SessionManager } from "@sayknow-cli/coding-agent/session/session-manager";
+import { MemoryBlobStore } from "@sayknow-cli/coding-agent/session/blob-store";
+import { type PreparedNewSession, SessionManager } from "@sayknow-cli/coding-agent/session/session-manager";
 import {
 	MemorySessionStorage,
 	type SessionStorage,
@@ -218,7 +219,215 @@ class RenameEpermSyncStorage extends MemorySessionStorage {
 	}
 }
 
+class FailingPreparedCleanupStorage extends MemorySessionStorage {
+	failDelete = false;
+
+	async deleteSessionWithArtifacts(sessionPath: string): Promise<void> {
+		if (this.failDelete) throw new Error("staged cleanup failed");
+		return super.deleteSessionWithArtifacts(sessionPath);
+	}
+}
+
+class RetryablePreparedPersistenceStorage extends MemorySessionStorage {
+	failClose = true;
+	failTempUnlink = true;
+	closeAttempts = 0;
+	tempUnlinkAttempts = 0;
+	closeState: ReturnType<SessionStorageWriter["getCloseState"]> = "open";
+
+	openWriter(path: string, options?: { flags?: "a" | "w"; onError?: (err: Error) => void }): SessionStorageWriter {
+		const writer = super.openWriter(path, options);
+		return {
+			writeLine: line => writer.writeLine(line),
+			writeLineSync: line => writer.writeLineSync(line),
+			flush: () => writer.flush(),
+			fsync: () => writer.fsync(),
+			close: async () => {
+				this.closeAttempts++;
+				if (this.failClose) {
+					this.failClose = false;
+					this.closeState = "close_failed_retryable";
+					throw new Error("prepared writer close failed");
+				}
+				await writer.close();
+				this.closeState = writer.getCloseState();
+			},
+			closeSync: () => writer.closeSync(),
+			getError: () => writer.getError(),
+			getCloseState: () => this.closeState,
+			getCloseError: () => writer.getCloseError(),
+		};
+	}
+
+	async unlink(target: string): Promise<void> {
+		if (target.includes(".tmp")) {
+			this.tempUnlinkAttempts++;
+			if (this.failTempUnlink) {
+				this.failTempUnlink = false;
+				throw new Error("prepared temp unlink failed");
+			}
+		}
+		return super.unlink(target);
+	}
+}
+
+class FailingBranchPersistenceStorage extends MemorySessionStorage {
+	failBranchWrite = false;
+	failDelete = false;
+
+	writeTextSync(target: string, content: string): void {
+		if (this.failBranchWrite && target.endsWith(".jsonl")) {
+			super.writeTextSync(target, content);
+			throw new Error("branch persistence failed");
+		}
+		super.writeTextSync(target, content);
+	}
+
+	async deleteSessionWithArtifacts(sessionPath: string): Promise<void> {
+		if (this.failDelete) throw new Error("branch cleanup failed");
+		return super.deleteSessionWithArtifacts(sessionPath);
+	}
+}
+
 describe("SessionManager resident retention boundaries", () => {
+	it("keeps the predecessor active and the stage discardable when resident externalization fails during adoption", async () => {
+		const storage = new MemorySessionStorage();
+		const session = SessionManager.create("/cwd", "/sessions", storage);
+		session.appendMessage({ role: "user", content: "predecessor", timestamp: 1 });
+		session.appendMessage(assistantMessage());
+		const predecessorFile = session.getSessionFile();
+		const prepared = await session.prepareNewSession();
+		session.appendPreparedCustomMessageEntry(prepared, "large", LARGE_TEXT, true);
+		const putSync = spyOn(MemoryBlobStore.prototype, "putSync").mockImplementation(() => {
+			throw new Error("resident externalization failed");
+		});
+
+		expect(() => session.commitPreparedNewSession(prepared)).toThrow("resident externalization failed");
+		expect(session.getSessionFile()).toBe(predecessorFile);
+		putSync.mockRestore();
+
+		expect(() => session.commitPreparedNewSession(prepared)).not.toThrow();
+		expect(session.getSessionFile()).toBe(prepared.sessionFile);
+	});
+
+	it("strongly retains failed staged cleanup after the caller drops its handle", async () => {
+		const storage = new FailingPreparedCleanupStorage();
+		const session = SessionManager.create("/cwd", path.resolve("/sessions"), storage);
+		let prepared: PreparedNewSession | undefined = await session.prepareNewSession();
+		const stagedPath = prepared.sessionFile!;
+		await session.ensurePreparedNewSessionOnDisk(prepared!);
+		storage.failDelete = true;
+
+		await expect(session.discardPreparedNewSession(prepared!)).rejects.toThrow("staged cleanup failed");
+		prepared = undefined;
+		storage.failDelete = false;
+		await session.prepareNewSession();
+
+		expect(storage.existsSync(stagedPath)).toBe(false);
+	});
+
+	it("drains uncommitted prepared successors on close and closeStrict", async () => {
+		const storage = new MemorySessionStorage();
+		const session = SessionManager.create("/cwd", "/sessions", storage);
+		const prepared = await session.prepareNewSession();
+		const stagedPath = prepared.sessionFile!;
+		await session.ensurePreparedNewSessionOnDisk(prepared);
+		expect(storage.existsSync(stagedPath)).toBe(true);
+
+		await session.close();
+		expect(storage.existsSync(stagedPath)).toBe(false);
+
+		const prepared2 = await session.prepareNewSession();
+		const stagedPath2 = prepared2.sessionFile!;
+		await session.ensurePreparedNewSessionOnDisk(prepared2);
+		expect(storage.existsSync(stagedPath2)).toBe(true);
+		await session.closeStrict();
+		expect(storage.existsSync(stagedPath2)).toBe(false);
+	});
+
+	it("preserves prepared writer-close and temp-unlink failures and retries both cleanups", async () => {
+		const storage = new RetryablePreparedPersistenceStorage();
+		const session = SessionManager.create("/cwd", "/sessions", storage);
+		const prepared = await session.prepareNewSession();
+
+		try {
+			await session.ensurePreparedNewSessionOnDisk(prepared);
+			expect.unreachable("Expected prepared persistence to fail");
+		} catch (error) {
+			expect(error).toBeInstanceOf(AggregateError);
+			expect((error as AggregateError).errors.map(item => String(item))).toEqual(
+				expect.arrayContaining([
+					expect.stringContaining("prepared writer close failed"),
+					expect.stringContaining("prepared temp unlink failed"),
+				]),
+			);
+		}
+
+		await expect(session.ensurePreparedNewSessionOnDisk(prepared)).resolves.toBeUndefined();
+		expect(storage.closeAttempts).toBeGreaterThanOrEqual(3);
+		expect(storage.tempUnlinkAttempts).toBeGreaterThanOrEqual(2);
+	});
+
+	it("cleans up a partially persisted branch when branch preparation fails", async () => {
+		const storage = new FailingBranchPersistenceStorage();
+		const session = SessionManager.create("/cwd", "/sessions", storage);
+		const leafId = session.appendMessage({ role: "user", content: "branch source", timestamp: 1 });
+		session.appendMessage(assistantMessage());
+		const existingFiles = storage.listFilesSync("/sessions", "*");
+		storage.failBranchWrite = true;
+
+		await expect(session.prepareBranchedSession(leafId)).rejects.toThrow("branch persistence failed");
+		expect(storage.listFilesSync("/sessions", "*")).toEqual(existingFiles);
+	});
+
+	it("preserves branch persistence and cleanup errors together", async () => {
+		const storage = new FailingBranchPersistenceStorage();
+		const session = SessionManager.create("/cwd", "/sessions", storage);
+		const leafId = session.appendMessage({ role: "user", content: "branch source", timestamp: 1 });
+		session.appendMessage(assistantMessage());
+		storage.failBranchWrite = true;
+		storage.failDelete = true;
+
+		try {
+			await session.prepareBranchedSession(leafId);
+			expect.unreachable("Expected branch preparation to fail");
+		} catch (error) {
+			expect(error).toBeInstanceOf(AggregateError);
+			expect((error as AggregateError).errors.map(item => String(item))).toEqual(
+				expect.arrayContaining([
+					expect.stringContaining("branch persistence failed"),
+					expect.stringContaining("branch cleanup failed"),
+				]),
+			);
+		}
+	});
+
+	it("preserves fork publication and cleanup errors while retaining retry authority", async () => {
+		const storage = new FailingBranchPersistenceStorage();
+		const session = SessionManager.create("/cwd", "/sessions", storage);
+		session.appendMessage({ role: "user", content: "fork source", timestamp: 1 });
+		session.appendMessage(assistantMessage());
+		storage.failBranchWrite = true;
+		storage.failDelete = true;
+
+		try {
+			await session.prepareFork();
+			expect.unreachable("Expected fork preparation to fail");
+		} catch (error) {
+			expect(error).toBeInstanceOf(AggregateError);
+			expect((error as AggregateError).errors.map(item => String(item))).toEqual(
+				expect.arrayContaining([
+					expect.stringContaining("branch persistence failed"),
+					expect.stringContaining("branch cleanup failed"),
+				]),
+			);
+		}
+
+		storage.failBranchWrite = false;
+		storage.failDelete = false;
+		await expect(session.prepareNewSession()).resolves.toBeDefined();
+	});
+
 	it("keeps resident entries bounded after fresh large appends while readers materialize full content and JSONL stays capped text", async () => {
 		isolateBlobDir();
 		const storage = new MemorySessionStorage();

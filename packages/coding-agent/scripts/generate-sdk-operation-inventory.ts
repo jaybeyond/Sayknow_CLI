@@ -39,6 +39,8 @@ const LOCKED_EXCLUSIONS: Readonly<Record<string, string>> = {
 	"agent_session:setForcedToolChoice": "internal accessor/plumbing, not a user-facing control seam",
 	"agent_session:getActiveSkillState": "internal accessor/plumbing, not a user-facing control seam",
 	"agent_session:getActiveSkillPhase": "internal accessor/plumbing, not a user-facing control seam",
+	"agent_session:getDeepInterviewAskStage":
+		"internal AskTool schema-selection accessor, not a user-facing SDK control seam",
 	"agent_session:peekQueueInvoker": "internal accessor/plumbing, not a user-facing control seam",
 	"agent_session:peekStandingResolveHandler": "internal accessor/plumbing, not a user-facing control seam",
 	"agent_session:setStandingResolveHandler": "internal accessor/plumbing, not a user-facing control seam",
@@ -68,6 +70,7 @@ const LOCKED_EXCLUSIONS: Readonly<Record<string, string>> = {
 	"agent_session:getAsyncDeliveryStateForAcp":
 		"internal ACP lifecycle quiescence plumbing, not a user-facing control seam",
 	"agent_session:getToolByName": "internal accessor/plumbing, not a user-facing control seam",
+	"agent_session:getToolForExecution": "internal accessor/plumbing, not a user-facing control seam",
 	"agent_session:registerForegroundBashBackgroundRequestHandler":
 		"internal accessor/plumbing, not a user-facing control seam",
 	"agent_session:hasForegroundBashBackgroundRequestHandler":
@@ -83,6 +86,7 @@ const LOCKED_EXCLUSIONS: Readonly<Record<string, string>> = {
 	"agent_session:refreshMCPTools": "internal accessor/plumbing, not a user-facing control seam",
 	"agent_session:refreshSkcSubskillTools": "internal accessor/plumbing, not a user-facing control seam",
 	"agent_session:buildDisplaySessionContext": "internal accessor/plumbing, not a user-facing control seam",
+	"agent_session:buildPreparedDisplaySessionContext": "internal accessor/plumbing, not a user-facing control seam",
 	"agent_session:convertMessagesToLlm": "internal accessor/plumbing, not a user-facing control seam",
 	"agent_session:prepareSimpleStreamOptions": "internal accessor/plumbing, not a user-facing control seam",
 	"agent_session:getPlanModeState": "internal accessor/plumbing, not a user-facing control seam",
@@ -115,6 +119,8 @@ const LOCKED_EXCLUSIONS: Readonly<Record<string, string>> = {
 	"agent_session:continuePersistedHistory": "internal startup lifecycle plumbing, not a user-facing control seam",
 	"agent_session:promoteRecoveryHydrationAfterOwnershipReadyFence":
 		"internal owner-recovery authority transition after a durable writer fence, never a user-facing SDK operation",
+	"agent_session:restoreFromMemoryGuardCheckpoint":
+		"internal owner-recovery staged restore builder after durable claims/fencing, never a user-facing SDK operation",
 	"agent_session:setActiveModelProfile": "internal accessor/plumbing, not a user-facing control seam",
 	"agent_session:getActiveModelProfile": "internal accessor/plumbing, not a user-facing control seam",
 	"agent_session:getSessionDefaultModelSelector": "internal accessor/plumbing, not a user-facing control seam",
@@ -147,6 +153,8 @@ const LOCKED_EXCLUSIONS: Readonly<Record<string, string>> = {
 	"agent_session:prepareContributionPrep": "internal accessor/plumbing, not a user-facing control seam",
 	"agent_session:setResourceSampler": "internal accessor/plumbing, not a user-facing control seam",
 	"agent_session:setRetainedMemorySampler": "internal accessor/plumbing, not a user-facing control seam",
+	"agent_session:createBtwConversationScope":
+		"internal privacy-scoped side-chat snapshot factory, not a user-facing SDK control seam",
 	"agent_session:recordBashResult": "internal accessor/plumbing, not a user-facing control seam",
 	"agent_session:executePython": "internal accessor/plumbing, not a user-facing control seam",
 	"agent_session:assertEvalExecutionAllowed": "internal accessor/plumbing, not a user-facing control seam",
@@ -193,6 +201,7 @@ const SEAM_TO_SDK: Readonly<Record<string, string>> = {
 	"agent_session:setSessionName": "session.rename",
 	"agent_session:setModel": "model.set",
 	"agent_session:setDefaultModelSelection": "model.set",
+	"agent_session:activateModelProfileForControl": "model.profile.set",
 	"agent_session:cycleModel": "model.cycle",
 	"agent_session:setThinkingLevel": "thinking.set",
 	"agent_session:cycleThinkingLevel": "thinking.cycle",

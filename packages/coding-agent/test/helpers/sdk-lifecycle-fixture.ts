@@ -399,14 +399,16 @@ export async function createLifecycleFixture(): Promise<LifecycleFixture> {
 			success(await global("session.close", { sessionId: forkId }, "close-fork-key"));
 			await assertClosed(agentDir, stateRoot, forkId, forkEndpoint);
 
-			const deleted = success(
-				await global(
-					"session.delete",
-					{ sessionId: forkId, stateRoot, cwd: repo, sessionPath: forkPath },
-					"delete-key",
-				),
+			const deleted = await global(
+				"session.delete",
+				{ sessionId: forkId, stateRoot, cwd: repo, sessionPath: forkPath },
+				"delete-key",
 			);
-			expect(deleted).toMatchObject({ sessionId: forkId });
+			expect(deleted).toMatchObject({
+				type: "broker_response",
+				ok: true,
+				result: { sessionId: forkId },
+			});
 			expect(
 				await fs.access(forkPath).then(
 					() => true,
@@ -414,14 +416,22 @@ export async function createLifecycleFixture(): Promise<LifecycleFixture> {
 				),
 			).toBe(false);
 			expect(
-				success(
-					await global(
-						"session.delete",
-						{ sessionId: forkId, stateRoot, cwd: repo, sessionPath: forkPath },
-						"delete-key",
-					),
+				await fs.access(forkPath.slice(0, -6)).then(
+					() => true,
+					() => false,
 				),
-			).toEqual(deleted);
+			).toBe(false);
+			const replayed = await global(
+				"session.delete",
+				{ sessionId: forkId, stateRoot, cwd: repo, sessionPath: forkPath },
+				"delete-key",
+			);
+			expect(replayed).toMatchObject({ type: "broker_response", ok: true, result: { sessionId: forkId } });
+			const deletedFrameId = (deleted as { id?: unknown }).id;
+			const replayedFrameId = (replayed as { id?: unknown }).id;
+			expect(typeof deletedFrameId).toBe("string");
+			expect(typeof replayedFrameId).toBe("string");
+			expect(replayedFrameId).not.toBe(deletedFrameId);
 			expect(
 				await global(
 					"session.delete",

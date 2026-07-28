@@ -137,6 +137,8 @@ export interface AskAnswerRequest {
 	options: string[];
 	interaction: "selector" | "custom_editor" | "clarification_editor";
 	controls: readonly AskRemoteControl[];
+	/** Optional zero-based recommendation into the authoritative raw options. */
+	recommendedIndex?: number;
 }
 
 export type AskRemoteInteraction =
@@ -232,6 +234,8 @@ export interface ToolSession {
 	 *  its terminal-phase chain guard. Returns the raw phase string or undefined
 	 *  when no active skill (or accessor) is available. */
 	getActiveSkillPhase?: () => string | undefined;
+	/** Restrict provider-facing deep-interview ask metadata to the active workflow stage. */
+	getDeepInterviewAskStage?: () => "topology" | "post-topology" | undefined;
 	/** Pre-loaded prompt templates */
 	promptTemplates?: PromptTemplate[];
 	/** Whether LSP integrations are enabled */
@@ -271,9 +275,11 @@ export interface ToolSession {
 	/** Agent identity used for IRC routing. Returns the registry id (e.g. "0-Main", "0-AuthLoader"). */
 	getAgentId?: () => string | null;
 	/** Look up a registered tool by name (used by the eval js backend's tool bridge). */
+	getToolByName?: (name: string) => AgentTool | undefined;
+	/** Look up a registered tool with the session's execution guards applied. */
+	getToolForExecution?: (name: string) => AgentTool | undefined;
 	/** Purge undelivered queued custom messages matching the predicate. Returns counts. */
 	purgeQueuedCustomMessages?: (predicate: (message: CustomMessage) => boolean) => PurgeQueuedCustomMessagesResult;
-	getToolByName?: (name: string) => AgentTool | undefined;
 	/** Agent registry for IRC routing across live sessions. */
 	agentRegistry?: AgentRegistry;
 	/** Optional restricted bash command prefixes for read-only role agents and constrained modes. */

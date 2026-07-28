@@ -7,7 +7,7 @@
  * - getUserMessagesForBranching returns correct entries
  */
 
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -15,6 +15,7 @@ import { Agent } from "@sayknow-cli/agent-core";
 import { getBundledModel } from "@sayknow-cli/ai";
 import { ModelRegistry } from "@sayknow-cli/coding-agent/config/model-registry";
 import { Settings } from "@sayknow-cli/coding-agent/config/settings";
+import * as internalUrls from "@sayknow-cli/coding-agent/internal-urls";
 import { AgentSession } from "@sayknow-cli/coding-agent/session/agent-session";
 import { AuthStorage } from "@sayknow-cli/coding-agent/session/auth-storage";
 import { SessionManager } from "@sayknow-cli/coding-agent/session/session-manager";
@@ -170,6 +171,25 @@ function largeBranchMarker(label: string): string {
 	return `${label}-${"x".repeat(520_000)}-end`;
 }
 
+async function removeTempDirWithWindowsRetry(tempDir: string): Promise<void> {
+	if (process.platform === "win32") {
+		Bun.gc(true);
+		await Bun.sleep(50);
+	}
+	for (let attempt = 0; ; attempt++) {
+		try {
+			fs.rmSync(tempDir, { recursive: true, force: true });
+			return;
+		} catch (error) {
+			const code =
+				error && typeof error === "object" && "code" in error ? (error as { code?: unknown }).code : undefined;
+			if (process.platform !== "win32" || (code !== "EBUSY" && code !== "EPERM") || attempt >= 100) throw error;
+			Bun.gc(true);
+			await Bun.sleep(100);
+		}
+	}
+}
+
 async function createFidelityAgentSession(tempDir: string): Promise<{
 	session: AgentSession;
 	sessionManager: SessionManager;
@@ -227,6 +247,93 @@ async function evictOldBranchMessage(sessionManager: SessionManager, marker: str
 	await sessionManager.flush();
 	return oldUserId;
 }
+
+describe("successor readiness", () => {
+	it("keeps the predecessor active when branch readiness fails", async () => {
+		const tempDir = path.join(os.tmpdir(), `skc-branch-readiness-${Snowflake.next()}`);
+		fs.mkdirSync(tempDir, { recursive: true });
+		let session: AgentSession | undefined;
+		let authStorage: AuthStorage | undefined;
+		try {
+			const created = await createFidelityAgentSession(tempDir);
+			session = created.session;
+			authStorage = created.authStorage;
+			created.sessionManager.appendMessage({ role: "user", content: "seed", timestamp: Date.now() - 1 });
+			const entryId = created.sessionManager.appendMessage({
+				role: "user",
+				content: "branch me",
+				timestamp: Date.now(),
+			});
+			const beforeId = session.sessionId;
+			const beforeFile = session.sessionFile;
+			const readiness = vi
+				.spyOn(internalUrls, "initializeLocalRoot")
+				.mockRejectedValueOnce(new Error("branch readiness boom"));
+
+			await expect(session.branch(entryId)).rejects.toThrow("branch readiness boom");
+			expect(session.sessionId).toBe(beforeId);
+			expect(session.sessionFile).toBe(beforeFile);
+
+			const result = await session.branch(entryId);
+			expect(result.cancelled).toBe(false);
+			expect(session.sessionId).not.toBe(beforeId);
+			readiness.mockRestore();
+		} finally {
+			await session?.dispose();
+			authStorage?.close();
+			await removeTempDirWithWindowsRetry(tempDir);
+			vi.restoreAllMocks();
+		}
+	}, 30_000);
+});
+
+describe("AgentSession tree navigation local identity", () => {
+	it("keeps local identity and initialized artifacts in place without credentials", async () => {
+		const tempDir = path.join(os.tmpdir(), `skc-tree-local-identity-${Snowflake.next()}`);
+		fs.mkdirSync(tempDir, { recursive: true });
+		let session: AgentSession | undefined;
+		let authStorage: AuthStorage | undefined;
+		try {
+			const created = await createFidelityAgentSession(tempDir);
+			session = created.session;
+			authStorage = created.authStorage;
+			const rootEntryId = created.sessionManager.appendMessage({
+				role: "user",
+				content: "tree root",
+				timestamp: Date.now() - 1,
+			});
+			created.sessionManager.appendMessage({ role: "user", content: "tree leaf", timestamp: Date.now() });
+			const localOptions = {
+				getArtifactsDir: () => created.sessionManager.getArtifactsDir(),
+				getSessionId: () => created.sessionManager.getSessionId(),
+			};
+			const markerPath = internalUrls.resolveLocalUrlToPath("local://tree-marker.txt", localOptions);
+			fs.writeFileSync(markerPath, "tree marker");
+			const before = {
+				id: session.sessionId,
+				file: session.sessionFile,
+				artifacts: created.sessionManager.getArtifactsDir(),
+				root: path.dirname(markerPath),
+				marker: fs.readFileSync(markerPath, "utf8"),
+			};
+
+			const result = await session.navigateTree(rootEntryId, { summarize: false });
+
+			expect(result.cancelled).toBe(false);
+			expect(session.sessionId).toBe(before.id);
+			expect(session.sessionFile).toBe(before.file);
+			expect(created.sessionManager.getArtifactsDir()).toBe(before.artifacts);
+			expect(internalUrls.resolveLocalUrlToPath("local://tree-marker.txt", localOptions)).toBe(markerPath);
+			expect(path.dirname(markerPath)).toBe(before.root);
+			expect(fs.readFileSync(markerPath, "utf8")).toBe(before.marker);
+			expect(fs.existsSync(before.root)).toBe(true);
+		} finally {
+			await session?.dispose();
+			authStorage?.close();
+			await removeTempDirWithWindowsRetry(tempDir);
+		}
+	}, 30_000);
+});
 
 describe("AgentSession branching fidelity", () => {
 	it("uses original pre-compaction user text for branch selectedText", async () => {

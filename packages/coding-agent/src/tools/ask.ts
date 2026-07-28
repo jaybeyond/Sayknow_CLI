@@ -553,7 +553,7 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 	): Promise<AgentToolResult<AskToolDetails>> {
 		await assertUltragoalAskAllowed(this.session.cwd);
 		const gateEmitter = this.session.getWorkflowGateEmitter?.();
-		const canUseWorkflowGate = gateEmitter?.isUnattended() === true;
+		const canUseWorkflowGate = !context?.hasUI && gateEmitter?.supportsRemoteGateAnswers() === true;
 
 		// Headless fallback: unattended workflow gates are the non-TUI answer path.
 		if (!canUseWorkflowGate && (!context?.hasUI || !context.ui)) {

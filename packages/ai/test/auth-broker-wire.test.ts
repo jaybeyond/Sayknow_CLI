@@ -8,6 +8,7 @@ import {
 	AuthBrokerStreamUnsupportedError,
 	AuthStorage,
 	REMOTE_REFRESH_SENTINEL,
+	RemoteAuthCredentialStore,
 	type SnapshotStreamEvent,
 	SqliteAuthCredentialStore,
 	startAuthBroker,
@@ -89,6 +90,85 @@ describe("auth-broker wire surface", () => {
 			expect(entry.credential.access).toBe("access-a");
 			// Refresh token is replaced with the wire sentinel — clients never see it.
 			expect(entry.credential.refresh).toBe(REMOTE_REFRESH_SENTINEL);
+		}
+	});
+
+	test("broker refresh posts the real secret only to the stored MCP token endpoint and preserves binding", async () => {
+		let requestBody = "";
+		const tokenServer = Bun.serve({
+			port: 0,
+			async fetch(request) {
+				requestBody = await request.text();
+				return Response.json({
+					access_token: "rotated-access",
+					refresh_token: "rotated-refresh",
+					expires_in: 3600,
+				});
+			},
+		});
+		const client = new AuthBrokerClient({ url: handle!.url, token });
+		const provider = "mcp_oauth_remote";
+		const mcpBinding = {
+			resourceOrigin: "https://mcp.example",
+			tokenEndpoint: tokenServer.url.href,
+		};
+
+		let clientStorage: AuthStorage | undefined;
+		let streamIterator: AsyncIterator<SnapshotStreamEvent> | undefined;
+		try {
+			const uploaded = await client.uploadCredential(provider, {
+				type: "oauth",
+				access: "old-access",
+				refresh: "broker-refresh-secret",
+				expires: Date.now() - 1,
+				mcpBinding,
+			});
+			const id = uploaded.entries[0]?.id;
+			if (id === undefined) throw new Error("expected uploaded credential");
+			const initial = await client.fetchSnapshot();
+			if (initial.status !== 200) throw new Error("expected snapshot");
+			const remoteStore = new RemoteAuthCredentialStore({ client, initialSnapshot: initial.snapshot });
+			clientStorage = new AuthStorage(remoteStore);
+			await clientStorage.reload();
+			const expected = clientStorage.get(provider);
+			if (expected?.type !== "oauth") throw new Error("expected remote OAuth credential");
+			streamIterator = client.openSnapshotStream()[Symbol.asyncIterator]();
+			await streamIterator.next();
+
+			const refreshed = await clientStorage.forceRefreshOAuthCredential(provider, expected, {
+				clientId: "remote-client",
+				clientSecret: "REMOTE_CLIENT_SECRET",
+			});
+			expect(requestBody).toContain("refresh_token=broker-refresh-secret");
+			expect(requestBody).not.toContain(REMOTE_REFRESH_SENTINEL);
+			expect(requestBody).toContain("client_id=remote-client");
+			expect(requestBody).toContain("client_secret=REMOTE_CLIENT_SECRET");
+			expect(refreshed).toMatchObject({
+				type: "oauth",
+				access: "rotated-access",
+				refresh: REMOTE_REFRESH_SENTINEL,
+				mcpBinding,
+			});
+			const delta = await streamIterator.next();
+			expect(delta.done).toBe(false);
+			expect(JSON.stringify(delta.value)).not.toContain("REMOTE_CLIENT_SECRET");
+
+			const snapshot = await client.fetchSnapshot();
+			if (snapshot.status !== 200) throw new Error("expected snapshot");
+			expect(snapshot.snapshot.credentials.find(entry => entry.id === id)?.credential).toMatchObject({
+				access: "rotated-access",
+				mcpBinding,
+			});
+			expect(JSON.stringify(snapshot.snapshot)).not.toContain("REMOTE_CLIENT_SECRET");
+			expect(store!.listAuthCredentials(provider)[0]?.credential).toMatchObject({
+				access: "rotated-access",
+				refresh: "rotated-refresh",
+				mcpBinding,
+			});
+		} finally {
+			await streamIterator?.return?.();
+			clientStorage?.close();
+			await tokenServer.stop(true);
 		}
 	});
 

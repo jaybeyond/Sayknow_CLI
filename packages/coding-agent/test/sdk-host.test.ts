@@ -20,6 +20,64 @@ describe("session SDK event stream", () => {
 });
 
 describe("SessionSdkHost", () => {
+	test("replay authorization uses negotiated connection capabilities, not frame claims", async () => {
+		let receive!: (connectionId: string, frame: Record<string, unknown>) => void;
+		const sent: Array<{ connectionId: string; frame: Record<string, unknown> }> = [];
+		const host = new SessionSdkHost({
+			sessionId: "replay-capabilities",
+			stateRoot: "/tmp/replay-capabilities",
+			token: "token",
+			connectionCapabilities: connectionId =>
+				connectionId === "authorized"
+					? new Set(["tool_activity_v2"])
+					: connectionId === "initial"
+						? undefined
+						: new Set(),
+			sendFrame: (connectionId, frame) => {
+				sent.push({ connectionId, frame });
+			},
+			onFrame: handler => {
+				receive = handler;
+				return () => {};
+			},
+		});
+		await host.start();
+		host.emitEvent({ kind: "tool_activity" });
+		host.emitEvent({ kind: "reasoning_summary" });
+		host.emitEvent({ kind: "activity" });
+
+		receive("forged", {
+			type: "event_replay",
+			id: "forged",
+			sinceSeq: 0,
+			capabilities: ["tool_activity_v1"],
+		});
+		await new Promise(resolve => setTimeout(resolve, 0));
+		expect((sent.at(-1)!.frame.events as Array<{ kind: string }>).slice(1).map(event => event.kind)).toEqual([
+			"activity",
+		]);
+
+		receive("authorized", { type: "event_replay", id: "authorized", sinceSeq: 0, capabilities: [] });
+		await new Promise(resolve => setTimeout(resolve, 0));
+		expect((sent.at(-1)!.frame.events as Array<{ kind: string }>).slice(1).map(event => event.kind)).toEqual([
+			"tool_activity",
+			"reasoning_summary",
+			"activity",
+		]);
+
+		receive("initial", {
+			type: "event_replay",
+			id: "initial",
+			sinceSeq: 0,
+			capabilities: ["tool_activity_v1"],
+		});
+		await new Promise(resolve => setTimeout(resolve, 0));
+		expect((sent.at(-1)!.frame.events as Array<{ kind: string }>).slice(1).map(event => event.kind)).toEqual([
+			"activity",
+		]);
+		await host.stop();
+	});
+
 	test("lifecycle is idempotent and registers with the broker", async () => {
 		let handler: ((connectionId: string, frame: Record<string, unknown>) => void) | undefined;
 		const registered: number[] = [];
@@ -240,5 +298,42 @@ describe("SessionSdkHost", () => {
 			process.off("unhandledRejection", onUnhandled);
 			await host.stop();
 		}
+	});
+	test("beforeControlResponse gates terminal delivery until the successor hook resolves", async () => {
+		let receive!: (connectionId: string, frame: Record<string, unknown>) => void;
+		const sent: Array<Record<string, unknown>> = [];
+		const successorReady = Promise.withResolvers<void>();
+		const order: string[] = [];
+		const host = new SessionSdkHost({
+			sessionId: "control-drain-order",
+			stateRoot: "/tmp/control-drain-order",
+			token: "token",
+			sendFrame: (_connectionId, frame) => {
+				order.push("send");
+				sent.push(frame);
+			},
+			onFrame: handler => {
+				receive = handler;
+				return () => {};
+			},
+			control: (_connectionId, frame) => ({ id: frame.id, ok: true, result: {} }),
+			beforeControlResponse: async (_connectionId, _request, _response, sendTerminal) => {
+				order.push("before");
+				await successorReady.promise;
+				order.push("ready");
+				await sendTerminal();
+			},
+		});
+		await host.start();
+		receive("client", { type: "control_request", id: "c1", operation: "session.switch", input: {} });
+		await new Promise(resolve => setTimeout(resolve, 0));
+		expect(sent).toEqual([]);
+		expect(order).toEqual(["before"]);
+		successorReady.resolve();
+		await new Promise(resolve => setTimeout(resolve, 0));
+		await new Promise(resolve => setTimeout(resolve, 0));
+		expect(sent).toEqual([expect.objectContaining({ type: "control_response", id: "c1", ok: true })]);
+		expect(order).toEqual(["before", "ready", "send"]);
+		await host.stop();
 	});
 });

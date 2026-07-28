@@ -81,7 +81,7 @@ const BASE_CFG: NotificationConfig = {
 		enabled: false,
 	},
 	toolActivity: {
-		enabled: true,
+		enabled: false,
 	},
 	streaming: {
 		enabled: true,
@@ -222,7 +222,7 @@ describe("notifications config", () => {
 				enabled: false,
 			},
 			toolActivity: {
-				enabled: true,
+				enabled: false,
 			},
 			streaming: {
 				enabled: false,
@@ -232,6 +232,34 @@ describe("notifications config", () => {
 			},
 			idleTimeoutMs: 1234,
 		});
+	});
+
+	test("getNotificationConfig preserves an explicit tool-activity opt-in", () => {
+		const settings = Settings.isolated({
+			"notifications.telegram.toolActivity.enabled": true,
+		});
+
+		expect(getNotificationConfig(settings).toolActivity.enabled).toBe(true);
+	});
+	test("generated schema advertises tool activity as opt-in", async () => {
+		const schema = JSON.parse(
+			await Bun.file(path.join(import.meta.dir, "../../../schemas/config.schema.json")).text(),
+		) as {
+			properties: {
+				notifications: {
+					properties: {
+						telegram: {
+							properties: {
+								toolActivity: { properties: { enabled: { default?: unknown } } };
+							};
+						};
+					};
+				};
+			};
+		};
+		expect(
+			schema.properties.notifications.properties.telegram.properties.toolActivity.properties.enabled.default,
+		).toBe(false);
 	});
 
 	test("getNotificationConfig validates and projects durable Telegram activation markers", () => {
@@ -487,6 +515,28 @@ describe("notifications config", () => {
 			}
 		}
 	}, 30_000);
+	test("Settings keeps malformed notification leaves fail-closed with a relative agent directory", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "skc-notification-relative-agent-dir-"));
+		tempDirs.push(root);
+		const agentDir = path.join(root, "agent");
+		fs.mkdirSync(agentDir, { recursive: true });
+		fs.writeFileSync(
+			path.join(agentDir, "config.yml"),
+			`${JSON.stringify({ notifications: { enabled: "invalid" } })}\n`,
+		);
+
+		const settings = await Settings.loadForScope({
+			cwd: root,
+			agentDir: path.relative(process.cwd(), agentDir),
+		});
+		try {
+			expect(() => settings.getNotificationSettingsSnapshot()).toThrow("skc_notify_daemon_invalid_configuration");
+			await settings.flush();
+			expect(() => settings.getNotificationSettingsSnapshot()).toThrow("skc_notify_daemon_invalid_configuration");
+		} finally {
+			settings.getStorage()?.close();
+		}
+	});
 	test("Settings revalidates malformed notification config after direct repairs only", async () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "skc-notification-direct-repair-"));
 		tempDirs.push(root);
@@ -904,39 +954,108 @@ describe("notifications config", () => {
 			settings.getStorage()?.close();
 		}
 	});
-	test("full Settings rejects invalid or inaccessible config.yml like lightweight loading", async () => {
+	test("full Settings recovers defaults from invalid YAML while notifications remain fail-closed", async () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "skc-btw-settings-load-"));
 		tempDirs.push(root);
-
-		const fixtures =
-			process.platform === "win32"
-				? (["notifications: [\n"] as const)
-				: (["notifications: [\n", "directory"] as const);
-		for (const [index, fixture] of fixtures.entries()) {
-			const agentDir = path.join(root, `agent-${index}`);
-			const configPath = path.join(agentDir, "config.yml");
-			fs.mkdirSync(agentDir, { recursive: true });
-			if (fixture === "directory") {
-				fs.mkdirSync(configPath);
-			} else {
-				fs.writeFileSync(configPath, fixture);
-			}
-
-			await expect(Settings.loadForScope({ cwd: root, agentDir })).rejects.toThrow();
-			await expect(loadLightweightDaemonSettings(agentDir)).rejects.toThrow();
+		const agentDir = path.join(root, "invalid-yaml");
+		const configPath = path.join(agentDir, "config.yml");
+		fs.mkdirSync(agentDir, { recursive: true });
+		fs.writeFileSync(configPath, "notifications: [\n");
+		resetSettingsForTest();
+		const initialized = await Settings.init({ cwd: root, agentDir });
+		try {
+			expect(initialized.get("theme.dark")).toBe("red-octopus");
+			expect(() => initialized.getNotificationSettingsSnapshot()).toThrow("skc_notify_daemon_invalid_configuration");
+		} finally {
+			resetSettingsForTest();
 		}
 
-		const agentDir = path.join(root, "missing-config");
-		fs.mkdirSync(agentDir, { recursive: true });
 		const settings = await Settings.loadForScope({ cwd: root, agentDir });
 		try {
-			expect(settings.getNotificationSettingsSnapshot().telegram.btw.enabled).toBe(true);
-			expect(
-				(await loadLightweightDaemonSettings(agentDir)).getNotificationSettingsSnapshot().telegram.btw.enabled,
-			).toBe(true);
+			expect(settings.get("theme.dark")).toBe("red-octopus");
+			expect(() => settings.getNotificationSettingsSnapshot()).toThrow("skc_notify_daemon_invalid_configuration");
+			await expect(loadLightweightDaemonSettings(agentDir)).rejects.toThrow();
 		} finally {
 			settings.getStorage()?.close();
 		}
+
+		fs.writeFileSync(configPath, `${JSON.stringify({ notifications: { enabled: true } })}\n`);
+		const repaired = await Settings.loadForScope({ cwd: root, agentDir });
+		try {
+			expect(repaired.getNotificationSettingsSnapshot()).toMatchObject({ enabled: true });
+			expect(repaired.getNotificationSettingsSnapshot()).toEqual(
+				(await loadLightweightDaemonSettings(agentDir)).getNotificationSettingsSnapshot(),
+			);
+		} finally {
+			repaired.getStorage()?.close();
+		}
+
+		if (process.platform !== "win32") {
+			const inaccessibleAgentDir = path.join(root, "directory");
+			fs.mkdirSync(path.join(inaccessibleAgentDir, "config.yml"), { recursive: true });
+			await expect(Settings.loadForScope({ cwd: root, agentDir: inaccessibleAgentDir })).rejects.toThrow();
+			await expect(loadLightweightDaemonSettings(inaccessibleAgentDir)).rejects.toThrow();
+		}
+
+		const missingAgentDir = path.join(root, "missing-config");
+		fs.mkdirSync(missingAgentDir, { recursive: true });
+		const missingSettings = await Settings.loadForScope({ cwd: root, agentDir: missingAgentDir });
+		try {
+			expect(missingSettings.getNotificationSettingsSnapshot().telegram.btw.enabled).toBe(true);
+			expect(
+				(await loadLightweightDaemonSettings(missingAgentDir)).getNotificationSettingsSnapshot().telegram.btw
+					.enabled,
+			).toBe(true);
+		} finally {
+			missingSettings.getStorage()?.close();
+		}
+	});
+	test("recovered YAML syntax is read-only until config.yml is repaired", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "skc-settings-syntax-recovery-"));
+		tempDirs.push(root);
+		const agentDir = path.join(root, "agent");
+		const configPath = path.join(agentDir, "config.yml");
+		const malformed = "notifications: [\n";
+		fs.mkdirSync(agentDir, { recursive: true });
+		fs.writeFileSync(configPath, malformed);
+
+		const settings = await Settings.loadForScope({ cwd: root, agentDir });
+		try {
+			expect(settings.getSchemaReport()).toEqual({
+				valid: false,
+				issues: [
+					{
+						path: "config.yml",
+						kind: "invalid",
+						detail: "Configuration YAML syntax is invalid; repair config.yml before changing settings.",
+					},
+				],
+			});
+			expect(() => settings.set("theme.dark", "blue-octopus")).toThrow("Repair config.yml");
+			expect(() => settings.unset("theme.dark")).toThrow("Repair config.yml");
+			await expect(
+				settings.commitAtomicBatch([{ path: "theme.dark", op: "set", value: "blue-octopus" }]),
+			).rejects.toThrow("Repair config.yml");
+			await expect(
+				settings.commitAtomicBatchWithCurrent(() => [{ path: "theme.dark", op: "set", value: "blue-octopus" }]),
+			).rejects.toThrow("Repair config.yml");
+			expect(settings.get("theme.dark")).toBe("red-octopus");
+			await settings.flush();
+			expect(fs.readFileSync(configPath, "utf8")).toBe(malformed);
+
+			fs.writeFileSync(configPath, "theme:\n  dark: blue-octopus\n");
+			await settings.flush();
+			expect(settings.getSchemaReport()).toEqual({ issues: [], valid: true });
+			settings.set("theme.dark", "red-octopus");
+			await settings.flushOrThrow();
+			expect(YAML.parse(fs.readFileSync(configPath, "utf8"))).toMatchObject({ theme: { dark: "red-octopus" } });
+		} finally {
+			settings.getStorage()?.close();
+		}
+
+		const isolated = Settings.isolated();
+		isolated.set("theme.dark", "blue-octopus");
+		expect(isolated.get("theme.dark")).toBe("blue-octopus");
 	});
 
 	test("project notification settings are ignored without leaking credentials", async () => {
@@ -1936,6 +2055,7 @@ describe("notifications config", () => {
 			sessionId: "session-abcdef",
 			question: "Deploy production?",
 			options: ["Yes, deploy", "No, stop", "Custom"],
+			recommendedIndex: 1,
 			summary: "Sensitive summary",
 		};
 
@@ -1950,6 +2070,7 @@ describe("notifications config", () => {
 			sessionId: "session-abcdef",
 			question: "Deploy production?",
 			options: ["Yes", "No"],
+			recommendedIndex: 0,
 			summary: "Sensitive summary",
 		};
 
@@ -1963,6 +2084,7 @@ describe("notifications config", () => {
 			sessionId: "session-abcdef",
 			question: "Sensitive question?",
 			options: ["Sensitive option"],
+			recommendedIndex: 0,
 			summary: "Sensitive summary",
 		};
 

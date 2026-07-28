@@ -1,9 +1,8 @@
 //! Canonical directory identity and fail-closed path security helpers.
 
-use std::{
-	io::{self, Read},
-	path::{Component, Path, PathBuf},
-};
+#[cfg(any(unix, test))]
+use std::io::{self, Read};
+use std::path::{Component, Path, PathBuf};
 
 use napi::{
 	JsString,
@@ -173,10 +172,106 @@ pub struct NativeExactUnlinkResult {
 	pub retained_unknown_path: Option<String>,
 }
 
+/// Bounded, path-free evidence for one publish operation.
+#[napi(object)]
+pub struct NativePublishSyncFailure {
+	pub phase:       String,
+	pub parent_role: String,
+	pub os_code:     i32,
+	pub kind:        String,
+}
+
+/// Bounded, path-free evidence for one publish operation.
+#[napi(object)]
+pub struct NativePublishDiagnostic {
+	pub schema_version:   u32,
+	pub collection_state: String,
+	pub os_code:          Option<i32>,
+	pub sync_failures:    Option<Vec<NativePublishSyncFailure>>,
+}
+
+/// Dedicated result for an atomic no-replace namespace publication.
+#[napi(object)]
+pub struct NativeNoReplaceResult {
+	pub ok:               bool,
+	pub code:             Option<String>,
+	pub mutation_state:   String,
+	pub durability_state: String,
+	pub reason:           String,
+	pub primitive:        String,
+	pub phase:            String,
+	pub diagnostic:       NativePublishDiagnostic,
+}
+
+impl NativeNoReplaceResult {
+	fn from_exact(result: NativeExactUnlinkResult) -> Self {
+		let (mutation_state, durability_state, reason) = if result.ok {
+			// A direct no-replace rename commits the namespace mutation, but does not
+			// fsync either parent directory.
+			("committed", "not_attempted", "none")
+		} else {
+			match result.code.as_deref() {
+				Some("quarantine_collision" | "already_exists") => {
+					("not_committed", "not_attempted", "destination_exists")
+				},
+				Some("atomic_unavailable") => ("not_committed", "not_attempted", "atomic_unavailable"),
+				Some("cross_device") => ("not_committed", "not_attempted", "cross_device"),
+				Some("permission_denied") => ("not_committed", "not_attempted", "permission_denied"),
+				Some("not_found" | "invalid_request") => {
+					("not_committed", "not_attempted", "invalid_request")
+				},
+				Some("reparse_point" | "identity_mismatch") => {
+					("not_committed", "not_attempted", "identity_violation")
+				},
+				// A signal landing before the syscall entered the kernel (or between
+				// retries exhausting the bounded restart loop) never mutates the
+				// filesystem: rename()/renameat2()/renameatx_np() are not partially
+				// observable on EINTR for local filesystems, unlike e.g. close().
+				Some("interrupted") => ("not_committed", "not_attempted", "interrupted"),
+				// Unclassified failures leave the syscall's namespace effect
+				// ambiguous. Never authorize staging cleanup from them.
+				_ => ("unknown", "not_provable", "unknown"),
+			}
+		};
+		Self {
+			ok:               result.ok,
+			code:             result.code,
+			mutation_state:   mutation_state.to_owned(),
+			durability_state: durability_state.to_owned(),
+			reason:           reason.to_owned(),
+			primitive:        if cfg!(target_os = "linux") {
+				"renameat2_noreplace"
+			} else if cfg!(target_os = "macos") {
+				"renameatx_np_excl"
+			} else if cfg!(windows) {
+				"windows_rename_noreplace"
+			} else {
+				"unsupported"
+			}
+			.to_owned(),
+			phase:            if mutation_state == "committed" {
+				"complete"
+			} else if matches!(reason, "invalid_request" | "identity_violation") {
+				"preflight"
+			} else {
+				"rename"
+			}
+			.to_owned(),
+			diagnostic:       NativePublishDiagnostic {
+				schema_version:   1,
+				collection_state: "unavailable".to_owned(),
+				os_code:          None,
+				sync_failures:    None,
+			},
+		}
+	}
+}
+
 /// A deterministic, no-follow description of a directory tree. `relative_path`
 /// is UTF-8, uses `/` separators, and is empty only for the root entry.
 #[napi(object)]
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+
 pub struct NativeDirectoryTreeEntry {
 	pub relative_path: String,
 	pub kind:          String,
@@ -191,7 +286,7 @@ pub struct NativeDirectoryTreeEntry {
 /// Stable evidence returned by `snapshot_directory_tree` and consumed verbatim
 /// by `exact_remove_directory_tree`.
 #[napi(object)]
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NativeDirectoryTreeSnapshot {
 	pub root_dev: String,
 	pub root_ino: String,
@@ -248,6 +343,7 @@ impl NativeExactUnlinkResult {
 		}
 	}
 
+	#[cfg(unix)]
 	fn detached_failure_with_placeholder(
 		code: &str,
 		path: String,
@@ -263,6 +359,7 @@ impl NativeExactUnlinkResult {
 		}
 	}
 
+	#[cfg(unix)]
 	fn detached_failure_with_unknown(code: &str, path: String, unknown_path: String) -> Self {
 		Self {
 			ok: false,
@@ -274,6 +371,7 @@ impl NativeExactUnlinkResult {
 		}
 	}
 
+	#[cfg(unix)]
 	fn retained_placeholder_failure(code: &str, placeholder_path: String) -> Self {
 		Self {
 			ok: false,
@@ -285,6 +383,7 @@ impl NativeExactUnlinkResult {
 		}
 	}
 
+	#[cfg(unix)]
 	fn retained_unknown_failure(code: &str, unknown_path: String) -> Self {
 		Self {
 			ok: false,
@@ -327,6 +426,7 @@ fn sha256(bytes: &[u8]) -> [u8; 32] {
 	hasher.finalize().into()
 }
 
+#[cfg(any(unix, test))]
 pub(crate) fn digest_reader(reader: &mut impl Read) -> io::Result<[u8; 32]> {
 	let mut hasher = Sha256::new();
 	let mut chunk = [0u8; 16 * 1024];
@@ -416,6 +516,7 @@ impl NativeOwnerOnlySecurityResult {
 		}
 	}
 
+	#[cfg(target_os = "linux")]
 	fn linux_success(
 		kind: &str,
 		access_clear: &str,
@@ -443,6 +544,7 @@ impl NativeOwnerOnlySecurityResult {
 		}
 	}
 
+	#[cfg(target_os = "linux")]
 	fn linux_verified_success(kind: &str, access_query: &str, default_query: Option<&str>) -> Self {
 		Self {
 			ok:           true,
@@ -478,6 +580,7 @@ impl NativeOwnerOnlySecurityResult {
 		}
 	}
 
+	#[cfg(target_os = "linux")]
 	fn acl_failure(operation: &str, attribute: &str, category: &str) -> Self {
 		let code = match category {
 			"denied" => "acl_denied",
@@ -499,6 +602,7 @@ impl NativeOwnerOnlySecurityResult {
 	}
 }
 
+#[cfg(unix)]
 fn io_code(error: &io::Error) -> &'static str {
 	match error.kind() {
 		io::ErrorKind::NotFound => "not_found",
@@ -507,6 +611,7 @@ fn io_code(error: &io::Error) -> &'static str {
 	}
 }
 
+#[cfg(unix)]
 fn security_io_code(error: &io::Error) -> &'static str {
 	match error.kind() {
 		io::ErrorKind::NotFound => "not_found",
@@ -557,6 +662,57 @@ pub fn verify_owner_only_path_security(
 		return NativeOwnerOnlySecurityResult::failure("io_error");
 	}
 	platform::verify_owner_only_path_security(Path::new(&path), &kind)
+}
+/// Verify owner-only ACL security without mutation only when the retained
+/// no-follow handle identifies the expected object before and after inspection.
+#[napi]
+pub fn verify_owner_only_path_security_expected(
+	path: String,
+	kind: String,
+	expected_dev: BigInt,
+	expected_ino: BigInt,
+) -> NativeOwnerOnlySecurityResult {
+	if path.contains('\0') {
+		return NativeOwnerOnlySecurityResult::failure("io_error");
+	}
+	let (dev_negative, expected_dev, dev_lossless) = expected_dev.get_u64();
+	let (ino_negative, expected_ino, ino_lossless) = expected_ino.get_u64();
+	if dev_negative || ino_negative || !dev_lossless || !ino_lossless {
+		return NativeOwnerOnlySecurityResult::failure("identity_mismatch");
+	}
+	platform::verify_owner_only_path_security_expected(
+		Path::new(&path),
+		&kind,
+		expected_dev,
+		expected_ino,
+	)
+}
+
+/// Repair an owner-only ACL on a retained expected path.
+///
+/// Its no-follow handle must still identify the expected object before repair
+/// and again after final ACL verification.
+#[napi]
+pub fn repair_owner_only_path_security_expected(
+	path: String,
+	kind: String,
+	expected_dev: BigInt,
+	expected_ino: BigInt,
+) -> NativeOwnerOnlySecurityResult {
+	if path.contains('\0') {
+		return NativeOwnerOnlySecurityResult::failure("io_error");
+	}
+	let (dev_negative, expected_dev, dev_lossless) = expected_dev.get_u64();
+	let (ino_negative, expected_ino, ino_lossless) = expected_ino.get_u64();
+	if dev_negative || ino_negative || !dev_lossless || !ino_lossless {
+		return NativeOwnerOnlySecurityResult::failure("identity_mismatch");
+	}
+	platform::repair_owner_only_path_security_expected(
+		Path::new(&path),
+		&kind,
+		expected_dev,
+		expected_ino,
+	)
 }
 
 /// Apply owner-only security to the exact caller descriptor and its retained
@@ -627,11 +783,16 @@ pub fn exact_restore(
 pub fn rename_no_replace_path(
 	source_path: String,
 	destination_path: String,
-) -> NativeExactUnlinkResult {
+) -> NativeNoReplaceResult {
 	if source_path.contains('\0') || destination_path.contains('\0') {
-		return NativeExactUnlinkResult::failure("io_error");
+		return NativeNoReplaceResult::from_exact(NativeExactUnlinkResult::failure(
+			"invalid_request",
+		));
 	}
-	platform::rename_path_no_replace(Path::new(&source_path), Path::new(&destination_path))
+	NativeNoReplaceResult::from_exact(platform::rename_path_no_replace(
+		Path::new(&source_path),
+		Path::new(&destination_path),
+	))
 }
 
 /// Capture a deterministic, descriptor-relative snapshot of a regular-file and
@@ -877,15 +1038,18 @@ mod publication {
 }
 #[cfg(unix)]
 pub(crate) mod platform {
+	#[cfg(target_os = "linux")]
+	use std::os::unix::fs::MetadataExt;
 	#[cfg(test)]
 	use std::sync::{Mutex, OnceLock, mpsc};
 	use std::{
+		borrow::Cow,
 		ffi::CString,
 		fmt::Write as _,
 		fs::{self, File},
 		os::{
 			fd::{AsRawFd, FromRawFd},
-			unix::{ffi::OsStrExt, fs::MetadataExt},
+			unix::ffi::OsStrExt,
 		},
 		path::{Component, Path},
 	};
@@ -895,6 +1059,42 @@ pub(crate) mod platform {
 		NativeDirectoryTreeResult, NativeDirectoryTreeSnapshot, NativeExactUnlinkResult,
 		NativeOwnerOnlySecurityResult, digest_reader, io_code, security_io_code, sha256,
 	};
+
+	/// Bound on EINTR restarts for the no-replace rename primitive. A signal
+	/// arriving mid-syscall leaves no filesystem side effect (the syscall never
+	/// committed), so restarting is always safe; the bound only guards against a
+	/// pathological signal storm turning a retry loop into a hang.
+	const EINTR_RETRY_LIMIT: u32 = 8;
+
+	/// Test-only fault injection: the next N calls into the no-replace rename
+	/// primitive report a synthetic EINTR before the real syscall runs, letting
+	/// tests exercise the restart loop without racing a real signal.
+	#[cfg(test)]
+	thread_local! {
+		static RENAME_NO_REPLACE_EINTR_INJECT: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+	}
+
+	#[cfg(test)]
+	pub(super) fn inject_rename_no_replace_eintr(count: u32) {
+		RENAME_NO_REPLACE_EINTR_INJECT.with(|remaining| remaining.set(count));
+	}
+
+	#[cfg(test)]
+	fn take_injected_rename_no_replace_eintr() -> bool {
+		RENAME_NO_REPLACE_EINTR_INJECT.with(|remaining| {
+			let current = remaining.get();
+			if current == 0 {
+				return false;
+			}
+			remaining.set(current - 1);
+			true
+		})
+	}
+
+	#[cfg(not(test))]
+	const fn take_injected_rename_no_replace_eintr() -> bool {
+		false
+	}
 
 	#[cfg(test)]
 	static AFTER_EXCHANGE_HOOK: OnceLock<Mutex<Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>>> =
@@ -908,31 +1108,47 @@ pub(crate) mod platform {
 	static AFTER_PLACEHOLDER_DETACH_HOOK: OnceLock<
 		Mutex<Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>>,
 	> = OnceLock::new();
+	#[cfg(test)]
+	static AFTER_TREE_VALIDATION_HOOK: OnceLock<
+		Mutex<Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>>,
+	> = OnceLock::new();
 
 	#[cfg(test)]
+	static AFTER_TREE_RENAME_HOOK: OnceLock<Mutex<Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>>> =
+		OnceLock::new();
+
+	#[cfg(all(test, target_os = "linux"))]
 	pub(super) fn set_after_exchange_hook(hook: Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>) {
 		*AFTER_EXCHANGE_HOOK
 			.get_or_init(|| Mutex::new(None))
 			.lock()
-			.expect("exchange hook lock") = hook;
+			.unwrap_or_else(|poisoned| poisoned.into_inner()) = hook;
 	}
 
-	#[cfg(test)]
+	#[cfg(all(test, target_os = "linux"))]
 	pub(super) fn set_before_exchange_hook(hook: Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>) {
 		*BEFORE_EXCHANGE_HOOK
 			.get_or_init(|| Mutex::new(None))
 			.lock()
-			.expect("before exchange hook lock") = hook;
+			.unwrap_or_else(|poisoned| poisoned.into_inner()) = hook;
 	}
 
-	#[cfg(test)]
+	#[cfg(all(test, target_os = "linux"))]
 	pub(super) fn set_after_placeholder_detach_hook(
 		hook: Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>,
 	) {
 		*AFTER_PLACEHOLDER_DETACH_HOOK
 			.get_or_init(|| Mutex::new(None))
 			.lock()
-			.expect("placeholder detach hook lock") = hook;
+			.unwrap_or_else(|poisoned| poisoned.into_inner()) = hook;
+	}
+
+	#[cfg(all(test, target_os = "linux"))]
+	pub(super) fn set_after_tree_rename_hook(hook: Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>) {
+		*AFTER_TREE_RENAME_HOOK
+			.get_or_init(|| Mutex::new(None))
+			.lock()
+			.unwrap_or_else(|poisoned| poisoned.into_inner()) = hook;
 	}
 
 	#[cfg(test)]
@@ -940,8 +1156,8 @@ pub(crate) mod platform {
 		if let Some((entered, resume)) = AFTER_EXCHANGE_HOOK
 			.get_or_init(|| Mutex::new(None))
 			.lock()
-			.expect("exchange hook lock")
-			.as_ref()
+			.unwrap_or_else(|poisoned| poisoned.into_inner())
+			.take()
 		{
 			entered.send(()).expect("exchange hook receiver");
 			resume.recv().expect("exchange hook resume");
@@ -953,8 +1169,8 @@ pub(crate) mod platform {
 		if let Some((entered, resume)) = BEFORE_EXCHANGE_HOOK
 			.get_or_init(|| Mutex::new(None))
 			.lock()
-			.expect("before exchange hook lock")
-			.as_ref()
+			.unwrap_or_else(|poisoned| poisoned.into_inner())
+			.take()
 		{
 			entered.send(()).expect("before exchange hook receiver");
 			resume.recv().expect("before exchange hook resume");
@@ -966,11 +1182,37 @@ pub(crate) mod platform {
 		if let Some((entered, resume)) = AFTER_PLACEHOLDER_DETACH_HOOK
 			.get_or_init(|| Mutex::new(None))
 			.lock()
-			.expect("placeholder detach hook lock")
-			.as_ref()
+			.unwrap_or_else(|poisoned| poisoned.into_inner())
+			.take()
 		{
 			entered.send(()).expect("placeholder detach hook receiver");
 			resume.recv().expect("placeholder detach hook resume");
+		}
+	}
+
+	#[cfg(test)]
+	fn pause_after_tree_validation_for_test() {
+		if let Some((entered, resume)) = AFTER_TREE_VALIDATION_HOOK
+			.get_or_init(|| Mutex::new(None))
+			.lock()
+			.unwrap_or_else(|poisoned| poisoned.into_inner())
+			.take()
+		{
+			entered.send(()).expect("tree validation hook receiver");
+			resume.recv().expect("tree validation hook resume");
+		}
+	}
+
+	#[cfg(test)]
+	fn pause_after_tree_rename_for_test() {
+		if let Some((entered, resume)) = AFTER_TREE_RENAME_HOOK
+			.get_or_init(|| Mutex::new(None))
+			.lock()
+			.unwrap_or_else(|poisoned| poisoned.into_inner())
+			.take()
+		{
+			entered.send(()).expect("tree rename hook receiver");
+			resume.recv().expect("tree rename hook resume");
 		}
 	}
 
@@ -1096,6 +1338,22 @@ pub(crate) mod platform {
 		Ok(named)
 	}
 
+	#[allow(
+		clippy::missing_const_for_fn,
+		reason = "the macOS alias branch constructs a canonical owned path"
+	)]
+	fn descriptor_walk_path(path: &Path) -> Cow<'_, Path> {
+		#[cfg(target_os = "macos")]
+		{
+			for alias in ["/var", "/tmp", "/etc"] {
+				if let Ok(suffix) = path.strip_prefix(alias) {
+					return Cow::Owned(Path::new("/private").join(&alias[1..]).join(suffix));
+				}
+			}
+		}
+		Cow::Borrowed(path)
+	}
+
 	/// Open each component through retained directory descriptors. Every name is
 	/// lstat'd and then opened no-follow; the two identities must agree. `..`
 	/// is never accepted, so a pathname cannot escape the authority selected at
@@ -1108,7 +1366,12 @@ pub(crate) mod platform {
 		if !matches!(kind, "directory" | "file") {
 			return Err(NativeOwnerOnlySecurityResult::failure("io_error"));
 		}
-		let base = if path.is_absolute() { b"/\0" } else { b".\0" };
+		let walk_path = descriptor_walk_path(path);
+		let base = if walk_path.is_absolute() {
+			b"/\0"
+		} else {
+			b".\0"
+		};
 		// SAFETY: base is a static NUL-terminated path and the flags request a
 		// no-follow directory descriptor.
 		let fd = unsafe {
@@ -1126,7 +1389,7 @@ pub(crate) mod platform {
 		let mut current = unsafe { File::from_raw_fd(fd) };
 		let mut edges = Vec::new();
 		let mut segments = Vec::new();
-		for component in path.components() {
+		for component in walk_path.components() {
 			match component {
 				Component::Normal(segment) => segments.push(segment.as_bytes().to_vec()),
 				Component::RootDir | Component::CurDir => {},
@@ -1172,13 +1435,39 @@ pub(crate) mod platform {
 		let name = CString::new(final_name)
 			.map_err(|_| NativeOwnerOnlySecurityResult::failure("io_error"))?;
 		let named = statat(&current, &name)?;
-		let mut flags = libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW;
-		if kind == "directory" {
+		let expected_kind = if kind == "directory" {
+			libc::S_IFDIR
+		} else {
+			libc::S_IFREG
+		};
+		let is_directory = named.st_mode & libc::S_IFMT == libc::S_IFDIR;
+		if named.st_mode & libc::S_IFMT != expected_kind {
+			return Err(NativeOwnerOnlySecurityResult::failure("not_directory"));
+		}
+		let mut flags = libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_RDONLY;
+		if is_directory {
 			flags |= libc::O_DIRECTORY;
+		} else {
+			flags |= libc::O_NONBLOCK;
 		}
 		// SAFETY: current is retained, name is validated and NUL-terminated, and
 		// O_NOFOLLOW rejects symlinks.
 		let target_fd = unsafe { libc::openat(current.as_raw_fd(), name.as_ptr(), flags) };
+		#[cfg(target_os = "macos")]
+		let target_fd = if target_fd < 0 && !is_directory {
+			let read_error = std::io::Error::last_os_error();
+			if read_error.raw_os_error() == Some(libc::EACCES) {
+				// A hostile macOS ACL may deny reads while leaving owner writes
+				// available. Retry only that denial with write authority so ACLs can
+				// be inspected and repaired without changing file contents.
+				// SAFETY: this retries the same retained parent and validated final component.
+				unsafe { libc::openat(current.as_raw_fd(), name.as_ptr(), flags | libc::O_WRONLY) }
+			} else {
+				return Err(NativeOwnerOnlySecurityResult::failure(security_code(&read_error)));
+			}
+		} else {
+			target_fd
+		};
 		if target_fd < 0 {
 			return Err(NativeOwnerOnlySecurityResult::failure(security_code(
 				&std::io::Error::last_os_error(),
@@ -1190,11 +1479,6 @@ pub(crate) mod platform {
 		if !stat_same_object(&named, &initial) {
 			return Err(NativeOwnerOnlySecurityResult::failure("identity_mismatch"));
 		}
-		let expected_kind = if kind == "directory" {
-			libc::S_IFDIR
-		} else {
-			libc::S_IFREG
-		};
 		if initial.st_mode & libc::S_IFMT != expected_kind {
 			return Err(NativeOwnerOnlySecurityResult::failure("not_directory"));
 		}
@@ -1593,7 +1877,7 @@ pub(crate) mod platform {
 		impl TempDir {
 			fn new() -> Self {
 				let path = std::env::temp_dir().join(format!(
-					"gjc-caller-fd-authority-{}-{}",
+					"skc-caller-fd-authority-{}-{}",
 					std::process::id(),
 					NEXT_TEMP_ID.fetch_add(1, Ordering::Relaxed),
 				));
@@ -1676,7 +1960,7 @@ pub(crate) mod platform {
 	const ACL_FIRST_ENTRY: libc::c_int = 0;
 
 	#[cfg(target_os = "macos")]
-	fn macos_acl_unsupported(errno: Option<i32>) -> bool {
+	const fn macos_acl_unsupported(errno: Option<i32>) -> bool {
 		matches!(errno, Some(libc::ENOTSUP))
 	}
 
@@ -1694,6 +1978,7 @@ pub(crate) mod platform {
 	}
 
 	#[cfg(target_os = "macos")]
+	#[allow(clippy::result_large_err, reason = "preserves operation-specific ACL failure evidence")]
 	fn clear_extended_acl(file: &File) -> Result<(), NativeOwnerOnlySecurityResult> {
 		// SAFETY: this creates an owned ACL allocation for the requested entry count.
 		let acl = unsafe { acl_init(1) };
@@ -1719,6 +2004,7 @@ pub(crate) mod platform {
 	}
 
 	#[cfg(target_os = "macos")]
+	#[allow(clippy::result_large_err, reason = "preserves operation-specific ACL failure evidence")]
 	fn has_extended_acl(file: &File) -> Result<bool, NativeOwnerOnlySecurityResult> {
 		// SAFETY: the file descriptor is live; the returned ACL is freed exactly once.
 		let acl = unsafe { acl_get_fd(file.as_raw_fd()) };
@@ -2033,6 +2319,23 @@ pub(crate) mod platform {
 			Err(result) => result,
 		}
 	}
+	pub(super) fn verify_owner_only_path_security_expected(
+		_: &Path,
+		_: &str,
+		_: u64,
+		_: u64,
+	) -> NativeOwnerOnlySecurityResult {
+		NativeOwnerOnlySecurityResult::failure("acl_unavailable")
+	}
+
+	pub(super) fn repair_owner_only_path_security_expected(
+		_: &Path,
+		_: &str,
+		_: u64,
+		_: u64,
+	) -> NativeOwnerOnlySecurityResult {
+		NativeOwnerOnlySecurityResult::failure("acl_unavailable")
+	}
 
 	#[cfg(target_os = "linux")]
 	pub(super) fn apply_owner_only_fd_security(
@@ -2083,26 +2386,42 @@ pub(crate) mod platform {
 		source: &CString,
 		destination: &CString,
 	) -> Result<(), &'static str> {
-		// SAFETY: the descriptor and both NUL-terminated CString pointers remain valid.
-		let result = unsafe {
-			libc::syscall(
-				libc::SYS_renameat2,
-				source_parent_fd,
-				source.as_ptr(),
-				destination_parent_fd,
-				destination.as_ptr(),
-				libc::RENAME_NOREPLACE,
-			)
-		};
-		if result == 0 {
-			Ok(())
-		} else {
+		// A signal delivered while the syscall is blocked yields EINTR without any
+		// filesystem side effect (the rename simply did not happen yet). POSIX
+		// wrappers conventionally restart in that case; retry a bounded number of
+		// times so a stray signal during a large migration cannot surface as a
+		// spurious, unretried failure. Any other errno is returned immediately.
+		for _ in 0..EINTR_RETRY_LIMIT {
+			if take_injected_rename_no_replace_eintr() {
+				continue;
+			}
+			// SAFETY: the descriptor and both NUL-terminated CString pointers remain valid.
+			let result = unsafe {
+				libc::syscall(
+					libc::SYS_renameat2,
+					source_parent_fd,
+					source.as_ptr(),
+					destination_parent_fd,
+					destination.as_ptr(),
+					libc::RENAME_NOREPLACE,
+				)
+			};
+			if result == 0 {
+				return Ok(());
+			}
 			match std::io::Error::last_os_error().raw_os_error() {
-				Some(libc::EEXIST) => Err("quarantine_collision"),
-				Some(libc::ENOSYS | libc::EINVAL) => Err("atomic_unavailable"),
-				_ => Err("io_error"),
+				Some(libc::EEXIST) => return Err("quarantine_collision"),
+				Some(libc::ENOSYS) => return Err("atomic_unavailable"),
+				// Fixed no-replace syscall arguments make EINVAL an invocation/filesystem
+				// divergence, not proof that the primitive is unavailable.
+				Some(libc::EINVAL) => return Err("invalid_request"),
+				Some(libc::EXDEV) => return Err("cross_device"),
+				Some(libc::EACCES | libc::EPERM) => return Err("permission_denied"),
+				Some(libc::EINTR) => {},
+				_ => return Err("io_error"),
 			}
 		}
+		Err("interrupted")
 	}
 
 	#[cfg(target_os = "linux")]
@@ -2153,25 +2472,39 @@ pub(crate) mod platform {
 		destination: &CString,
 	) -> Result<(), &'static str> {
 		const RENAME_EXCL: u32 = 0x0000_0004;
-		// SAFETY: both descriptors and NUL-terminated CString pointers remain valid.
-		if unsafe {
-			renameatx_np(
-				source_parent_fd,
-				source.as_ptr(),
-				destination_parent_fd,
-				destination.as_ptr(),
-				RENAME_EXCL,
-			)
-		} == 0
-		{
-			Ok(())
-		} else {
+		// A signal delivered while the syscall is blocked yields EINTR without any
+		// filesystem side effect (the rename simply did not happen yet). POSIX
+		// wrappers conventionally restart in that case; retry a bounded number of
+		// times so a stray signal during a large migration cannot surface as a
+		// spurious, unretried failure. Any other errno is returned immediately.
+		for _ in 0..EINTR_RETRY_LIMIT {
+			if take_injected_rename_no_replace_eintr() {
+				continue;
+			}
+			// SAFETY: both descriptors and NUL-terminated CString pointers remain valid.
+			let result = unsafe {
+				renameatx_np(
+					source_parent_fd,
+					source.as_ptr(),
+					destination_parent_fd,
+					destination.as_ptr(),
+					RENAME_EXCL,
+				)
+			};
+			if result == 0 {
+				return Ok(());
+			}
 			match std::io::Error::last_os_error().raw_os_error() {
-				Some(libc::EEXIST) => Err("quarantine_collision"),
-				Some(libc::ENOSYS | libc::EINVAL) => Err("atomic_unavailable"),
-				_ => Err("io_error"),
+				Some(libc::EEXIST) => return Err("quarantine_collision"),
+				Some(libc::ENOSYS) => return Err("atomic_unavailable"),
+				Some(libc::EINVAL) => return Err("invalid_request"),
+				Some(libc::EXDEV) => return Err("cross_device"),
+				Some(libc::EACCES | libc::EPERM) => return Err("permission_denied"),
+				Some(libc::EINTR) => {},
+				_ => return Err("io_error"),
 			}
 		}
+		Err("interrupted")
 	}
 
 	#[cfg(target_os = "macos")]
@@ -2223,42 +2556,66 @@ pub(crate) mod platform {
 	}
 
 	#[derive(Clone, Copy)]
+
 	struct ExchangePlaceholderIdentity {
-		dev: u64,
-		ino: u64,
+		dev:       u64,
+		ino:       u64,
+		directory: bool,
 	}
 
 	fn create_exchange_placeholder(
 		parent_fd: libc::c_int,
 		name: &CString,
+		directory: bool,
 	) -> Result<ExchangePlaceholderIdentity, &'static str> {
-		// An empty directory cannot be replaced by a regular-file rename. Keeping it
-		// at the canonical name prevents both O_EXCL creators and rename-published
-		// successors from winning before detach commits or restores.
-		// SAFETY: `parent_fd` is a live directory descriptor and `name` is a live,
-		// NUL-terminated pathname relative to that descriptor.
-		if unsafe { libc::mkdirat(parent_fd, name.as_ptr(), 0o700) } != 0 {
+		// Darwin RENAME_SWAP requires same-kind entries. The placeholder also keeps the
+		// mutable name occupied until the exchanged object is identity-checked.
+		let created = if directory {
+			// SAFETY: `parent_fd` is live and `name` is a NUL-terminated component.
+			unsafe { libc::mkdirat(parent_fd, name.as_ptr(), 0o700) }
+		} else {
+			// SAFETY: `parent_fd` is live and `name` is a NUL-terminated component.
+			let fd = unsafe {
+				libc::openat(
+					parent_fd,
+					name.as_ptr(),
+					libc::O_CREAT | libc::O_EXCL | libc::O_WRONLY | libc::O_CLOEXEC,
+					0o600,
+				)
+			};
+			if fd >= 0 {
+				// SAFETY: this branch owns the placeholder descriptor exactly once.
+				unsafe { libc::close(fd) };
+				0
+			} else {
+				-1
+			}
+		};
+		if created != 0 {
 			return match std::io::Error::last_os_error().raw_os_error() {
 				Some(libc::EEXIST) => Err("quarantine_collision"),
 				_ => Err("io_error"),
 			};
 		}
+
 		// SAFETY: zero is a valid initialized representation for this output struct.
 		let mut placeholder: libc::stat = unsafe { std::mem::zeroed() };
 		// SAFETY: the descriptor and CString are live; the initialized output struct is
 		// writable.
 		if unsafe {
 			libc::fstatat(parent_fd, name.as_ptr(), &mut placeholder, libc::AT_SYMLINK_NOFOLLOW)
-		} != 0 || placeholder.st_mode & libc::S_IFMT != libc::S_IFDIR
+		} != 0 || (placeholder.st_mode & libc::S_IFMT == libc::S_IFDIR) != directory
 		{
 			return Err("io_error");
 		}
 		Ok(ExchangePlaceholderIdentity {
 			dev: placeholder.st_dev as u64,
 			ino: placeholder.st_ino as u64,
+			directory,
 		})
 	}
 
+	#[allow(dead_code, reason = "retained cleanup outcomes are platform-conditional")]
 	enum ExchangePlaceholderRemoval {
 		Removed,
 		RestoredMismatch,
@@ -2268,10 +2625,9 @@ pub(crate) mod platform {
 	}
 
 	fn exchange_placeholder_quarantine_name(expected: ExchangePlaceholderIdentity) -> CString {
-		CString::new(format!(".gjc-exact-unlink-placeholder-{:x}-{:x}", expected.dev, expected.ino))
+		CString::new(format!(".skc-exact-unlink-placeholder-{:x}-{:x}", expected.dev, expected.ino))
 			.expect("placeholder quarantine name contains no NUL")
 	}
-
 	fn remove_exchange_placeholder(
 		parent_fd: libc::c_int,
 		name: &CString,
@@ -2292,25 +2648,20 @@ pub(crate) mod platform {
 		// writable.
 		let matches = unsafe {
 			libc::fstatat(parent_fd, detached_name.as_ptr(), &mut detached, libc::AT_SYMLINK_NOFOLLOW)
-		} == 0 && detached.st_mode & libc::S_IFMT == libc::S_IFDIR
+		} == 0 && (detached.st_mode & libc::S_IFMT == libc::S_IFDIR)
+			== expected.directory
 			&& detached.st_dev as u64 == expected.dev
 			&& detached.st_ino as u64 == expected.ino;
+
 		if !matches {
 			return match rename_no_replace(parent_fd, parent_fd, &detached_name, name) {
 				Ok(()) => ExchangePlaceholderRemoval::RestoredMismatch,
 				Err(_) => ExchangePlaceholderRemoval::RetainedMismatch(detached_name),
 			};
 		}
-		// SAFETY: the verified placeholder has already been detached from the
-		// canonical pathname; cleanup cannot delete a successor published there.
-		if unsafe { libc::unlinkat(parent_fd, detached_name.as_ptr(), libc::AT_REMOVEDIR) } == 0 {
-			ExchangePlaceholderRemoval::Removed
-		} else {
-			ExchangePlaceholderRemoval::RetainedFailure(
-				detached_name,
-				security_code(&std::io::Error::last_os_error()),
-			)
-		}
+		// POSIX only unlinks by mutable name. The identity proof cannot authorize
+		// a later unlinkat because a same-kind replacement may win that race.
+		ExchangePlaceholderRemoval::RetainedFailure(detached_name, "cleanup_pending")
 	}
 
 	fn digest_openat(parent_fd: libc::c_int, name: &CString) -> Result<[u8; 32], &'static str> {
@@ -2331,7 +2682,12 @@ pub(crate) mod platform {
 		path: &Path,
 		identity: &ExactFileIdentity,
 	) -> NativeExactUnlinkResult {
-		let base = if path.is_absolute() { b"/\0" } else { b".\0" };
+		let walk_path = descriptor_walk_path(path);
+		let base = if walk_path.is_absolute() {
+			b"/\0"
+		} else {
+			b".\0"
+		};
 		// SAFETY: the live descriptor, where used, and NUL-terminated path remain
 		// valid.
 		let mut parent_fd = unsafe {
@@ -2341,7 +2697,7 @@ pub(crate) mod platform {
 			return NativeExactUnlinkResult::failure(security_code(&std::io::Error::last_os_error()));
 		}
 		let mut segments = Vec::new();
-		for component in path.components() {
+		for component in walk_path.components() {
 			match component {
 				Component::Normal(segment) => segments.push(segment.as_bytes().to_vec()),
 				Component::RootDir | Component::CurDir => {},
@@ -2462,14 +2818,15 @@ pub(crate) mod platform {
 			unsafe { libc::close(parent_fd) };
 			return NativeExactUnlinkResult::failure("io_error");
 		};
-		let placeholder = match create_exchange_placeholder(parent_fd, &quarantine) {
-			Ok(placeholder) => placeholder,
-			Err(code) => {
-				// SAFETY: this branch owns the live descriptor and closes it exactly once.
-				unsafe { libc::close(parent_fd) };
-				return NativeExactUnlinkResult::failure(code);
-			},
-		};
+		let placeholder =
+			match create_exchange_placeholder(parent_fd, &quarantine, identity.directory) {
+				Ok(placeholder) => placeholder,
+				Err(code) => {
+					// SAFETY: this branch owns the live descriptor and closes it exactly once.
+					unsafe { libc::close(parent_fd) };
+					return NativeExactUnlinkResult::failure(code);
+				},
+			};
 		// Exchange keeps the canonical pathname occupied by an empty directory while
 		// the detached object is verified. A regular-file rename cannot replace that
 		// directory, so a rename-published successor cannot be deleted by cleanup.
@@ -2621,46 +2978,22 @@ pub(crate) mod platform {
 			unsafe { libc::close(parent_fd) };
 			return result;
 		}
-		// Delete the proven detached object before freeing the canonical placeholder.
-		// SAFETY: `parent_fd` remains a live directory descriptor and `quarantine`
-		// is a live, NUL-terminated detached filename relative to it.
-		let result = if unsafe { libc::unlinkat(parent_fd, quarantine.as_ptr(), 0) } == 0 {
-			match remove_exchange_placeholder(parent_fd, &name, placeholder) {
-				ExchangePlaceholderRemoval::Removed => NativeExactUnlinkResult::success(),
-				ExchangePlaceholderRemoval::RestoredMismatch | ExchangePlaceholderRemoval::Failed => {
-					NativeExactUnlinkResult::retained_unknown_failure(
-						"identity_mismatch",
-						path.to_string_lossy().into_owned(),
-					)
-				},
-				ExchangePlaceholderRemoval::RetainedMismatch(retained_name) => {
-					NativeExactUnlinkResult::retained_unknown_failure(
-						"identity_mismatch",
-						path
-							.parent()
-							.unwrap_or_else(|| Path::new("."))
-							.join(retained_name.to_string_lossy().as_ref())
-							.to_string_lossy()
-							.into_owned(),
-					)
-				},
-				ExchangePlaceholderRemoval::RetainedFailure(retained_name, code) => {
-					NativeExactUnlinkResult::retained_placeholder_failure(
-						code,
-						path
-							.parent()
-							.unwrap_or_else(|| Path::new("."))
-							.join(retained_name.to_string_lossy().as_ref())
-							.to_string_lossy()
-							.into_owned(),
-					)
-				},
-			}
-		} else {
-			NativeExactUnlinkResult::detached_failure(
-				security_code(&std::io::Error::last_os_error()),
-				detached_path,
-			)
+		// POSIX has no descriptor-bound unlink. Retain the proven detached object
+		// and exchange placeholder rather than risk unlinking a replacement.
+		let result = match remove_exchange_placeholder(parent_fd, &name, placeholder) {
+			ExchangePlaceholderRemoval::RetainedFailure(retained_name, code) => {
+				NativeExactUnlinkResult::detached_failure_with_placeholder(
+					code,
+					detached_path,
+					path
+						.parent()
+						.unwrap_or_else(|| Path::new("."))
+						.join(retained_name.to_string_lossy().as_ref())
+						.to_string_lossy()
+						.into_owned(),
+				)
+			},
+			_ => NativeExactUnlinkResult::detached_failure("cleanup_pending", detached_path),
 		};
 
 		// SAFETY: this branch owns the live descriptor and closes it exactly once.
@@ -2671,7 +3004,12 @@ pub(crate) mod platform {
 	fn open_parent_no_follow(
 		path: &Path,
 	) -> Result<(libc::c_int, CString), Box<NativeExactUnlinkResult>> {
-		let base = if path.is_absolute() { b"/\0" } else { b".\0" };
+		let walk_path = descriptor_walk_path(path);
+		let base = if walk_path.is_absolute() {
+			b"/\0"
+		} else {
+			b".\0"
+		};
 		// SAFETY: the live descriptor, where used, and NUL-terminated path remain
 		// valid.
 		let mut parent_fd = unsafe {
@@ -2683,7 +3021,7 @@ pub(crate) mod platform {
 			))));
 		}
 		let mut segments = Vec::new();
-		for component in path.components() {
+		for component in walk_path.components() {
 			match component {
 				Component::Normal(segment) => segments.push(segment.as_bytes().to_vec()),
 				Component::RootDir | Component::CurDir => {},
@@ -3055,11 +3393,6 @@ pub(crate) mod platform {
 		}
 	}
 
-	enum TreeRemovalFailure {
-		Code(&'static str),
-		Retained(&'static str),
-	}
-
 	fn expected_tree_entry<'a>(
 		expected: &'a [NativeDirectoryTreeEntry],
 		relative: &str,
@@ -3137,21 +3470,9 @@ pub(crate) mod platform {
 		matching.next().is_none().then_some(entry)
 	}
 
-	fn quarantine_child(
-		parent_fd: libc::c_int,
-		original: &CString,
-		expected: &NativeDirectoryTreeEntry,
-	) -> Result<CString, &'static str> {
-		let candidate = tree_quarantine_name(expected);
-		rename_no_replace(parent_fd, parent_fd, original, &candidate)?;
-		Ok(candidate)
-	}
-
-	/// Validate the whole retained tree before starting any quarantine or
-	/// deletion. Missing expected entries are permitted because a prior attempt
-	/// may have completed their deletion, but every entry still present must
-	/// map uniquely to its durable logical identity (including deterministic
-	/// quarantine names).
+	/// Validate the retained tree before atomically detaching its root. Every
+	/// entry still present must map uniquely to its durable logical identity,
+	/// including deterministic names retained by older attempts.
 	fn validate_tree_fd(
 		fd: libc::c_int,
 		relative: &str,
@@ -3215,108 +3536,6 @@ pub(crate) mod platform {
 				// SAFETY: this branch owns the live descriptor and closes it exactly once.
 				unsafe { libc::close(child) };
 				result?;
-			}
-		}
-		Ok(())
-	}
-
-	fn remove_tree_fd(
-		fd: libc::c_int,
-		relative: &str,
-		expected: &[NativeDirectoryTreeEntry],
-	) -> Result<(), TreeRemovalFailure> {
-		let mut names = directory_names(fd).map_err(TreeRemovalFailure::Code)?;
-		names.sort();
-		let mut seen = std::collections::BTreeSet::new();
-		for name_bytes in names {
-			let physical =
-				CString::new(name_bytes.clone()).map_err(|_| TreeRemovalFailure::Code("io_error"))?;
-			let direct_name = std::str::from_utf8(&name_bytes).ok();
-			let direct_relative = direct_name.map(|name| {
-				if relative.is_empty() {
-					name.to_owned()
-				} else {
-					format!("{relative}/{name}")
-				}
-			});
-			let expected_direct = direct_relative
-				.as_deref()
-				.and_then(|candidate| expected_tree_entry(expected, candidate));
-			let expected_quarantined =
-				expected_quarantined_tree_entry(expected, relative, &name_bytes);
-			let (logical_bytes, expected_child) = match (expected_direct, expected_quarantined) {
-				(Some(entry), None) => (name_bytes.clone(), entry),
-				(None, Some(entry)) => (
-					entry.relative_path.rsplit_once('/').map_or_else(
-						|| entry.relative_path.as_bytes().to_vec(),
-						|(_, name)| name.as_bytes().to_vec(),
-					),
-					entry,
-				),
-				_ => return Err(TreeRemovalFailure::Code("identity_mismatch")),
-			};
-			let logical_name = std::str::from_utf8(&logical_bytes)
-				.map_err(|_| TreeRemovalFailure::Code("not_utf8"))?;
-			let child_relative = if relative.is_empty() {
-				logical_name.to_owned()
-			} else {
-				format!("{relative}/{logical_name}")
-			};
-			if !seen.insert(child_relative.clone()) {
-				return Err(TreeRemovalFailure::Code("identity_mismatch"));
-			}
-			if expected_tree_entry(expected, &child_relative) != Some(expected_child) {
-				return Err(TreeRemovalFailure::Code("identity_mismatch"));
-			}
-
-			if physical.as_bytes() == logical_bytes.as_slice()
-				&& !detached_entry_matches(fd, &physical, expected_child)
-					.map_err(TreeRemovalFailure::Code)?
-			{
-				return Err(TreeRemovalFailure::Code("identity_mismatch"));
-			}
-			let detached = if physical.as_bytes() == logical_bytes.as_slice() {
-				quarantine_child(fd, &physical, expected_child).map_err(TreeRemovalFailure::Code)?
-			} else {
-				physical
-			};
-			let matches = detached_entry_matches(fd, &detached, expected_child)
-				.map_err(TreeRemovalFailure::Code)?;
-			if !matches {
-				return Err(TreeRemovalFailure::Retained("identity_mismatch"));
-			}
-
-			if expected_child.kind == "directory" {
-				// SAFETY: the live descriptor, where used, and NUL-terminated path remain
-				// valid.
-				let child = unsafe {
-					libc::openat(
-						fd,
-						detached.as_ptr(),
-						libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
-					)
-				};
-				if child < 0 {
-					return Err(TreeRemovalFailure::Retained(security_code(
-						&std::io::Error::last_os_error(),
-					)));
-				}
-				let result = remove_tree_fd(child, &child_relative, expected);
-				// SAFETY: this branch owns the live descriptor and closes it exactly once.
-				unsafe { libc::close(child) };
-				result?;
-				// SAFETY: the parent descriptor and NUL-terminated CString path remain valid.
-				if unsafe { libc::unlinkat(fd, detached.as_ptr(), libc::AT_REMOVEDIR) } != 0 {
-					return Err(TreeRemovalFailure::Retained(security_code(
-						&std::io::Error::last_os_error(),
-					)));
-				}
-			// SAFETY: the parent descriptor and NUL-terminated CString path remain
-			// valid.
-			} else if unsafe { libc::unlinkat(fd, detached.as_ptr(), 0) } != 0 {
-				return Err(TreeRemovalFailure::Retained(security_code(
-					&std::io::Error::last_os_error(),
-				)));
 			}
 		}
 		Ok(())
@@ -3405,61 +3624,87 @@ pub(crate) mod platform {
 			}
 			return NativeExactUnlinkResult::detached_failure(code, retained_path);
 		}
-		// SAFETY: `fd` is the live directory descriptor whose offset is reset.
-		if unsafe { libc::lseek(fd, 0, libc::SEEK_SET) } < 0 {
-			// SAFETY: this branch owns the live descriptor and closes it exactly once.
+		if expected_tree_entry(&expected.entries, "").is_none() {
+			// SAFETY: this branch owns the live descriptors and closes each exactly once.
 			unsafe {
 				libc::close(fd);
 				libc::close(parent);
 			}
-			return NativeExactUnlinkResult::detached_failure("io_error", retained_path);
+			return NativeExactUnlinkResult::detached_failure("identity_mismatch", retained_path);
 		}
-		let removal = remove_tree_fd(fd, "", &expected.entries);
-		let result = match removal {
-			Ok(()) if !already_final => match rename_no_replace(parent, parent, root_name, &final_name) {
+		#[cfg(test)]
+		pause_after_tree_validation_for_test();
+		let detached_retained_path = if already_final {
+			retained_path
+		} else {
+			match rename_no_replace(parent, parent, root_name, &final_name) {
 				Ok(()) => {
-					// SAFETY: zero is a valid initialized representation for this output struct.
-					let mut retained: libc::stat = unsafe { std::mem::zeroed() };
-					// SAFETY: the descriptor is live and the initialized output struct is writable.
-					if unsafe { libc::fstat(fd, &mut retained) } != 0
-						|| retained.st_dev as u64 != expected.root_dev.parse().ok().unwrap_or(u64::MAX)
-						|| retained.st_ino as u64 != expected.root_ino.parse().ok().unwrap_or(u64::MAX)
-					{
-						NativeExactUnlinkResult::detached_failure("identity_mismatch", final_path)
-					// SAFETY: the parent descriptor and NUL-terminated CString path remain valid.
-					} else if unsafe { libc::unlinkat(parent, final_name.as_ptr(), libc::AT_REMOVEDIR) }
-						== 0
-					{
-						NativeExactUnlinkResult::success()
-					} else {
-						NativeExactUnlinkResult::detached_failure(
-							security_code(&std::io::Error::last_os_error()),
-							final_path,
-						)
-					}
+					#[cfg(test)]
+					pause_after_tree_rename_for_test();
+					final_path
 				},
-				Err(code) => NativeExactUnlinkResult::detached_failure(code, planned_path),
-			},
-			Ok(())
-				// SAFETY: the parent descriptor and NUL-terminated CString path remain valid.
-				if unsafe { libc::unlinkat(parent, root_name.as_ptr(), libc::AT_REMOVEDIR) } == 0 =>
-			{
-				NativeExactUnlinkResult::success()
-			},
-			Ok(()) => NativeExactUnlinkResult::detached_failure(
-				security_code(&std::io::Error::last_os_error()),
-				retained_path,
-			),
-			Err(TreeRemovalFailure::Code(code) | TreeRemovalFailure::Retained(code)) => {
-				NativeExactUnlinkResult::detached_failure(code, retained_path)
-			},
+				Err(code) => {
+					// SAFETY: this branch owns the live descriptors and closes each exactly once.
+					unsafe {
+						libc::close(fd);
+						libc::close(parent);
+					}
+					return NativeExactUnlinkResult::detached_failure(code, planned_path);
+				},
+			}
 		};
-		// SAFETY: this branch owns the live descriptor and closes it exactly once.
+		// The pre-rename descriptor cannot authorize the detached name. Reopen and
+		// revalidate the no-replace retained root before reporting it as replayable.
+		let detached_name = if already_final {
+			root_name
+		} else {
+			&final_name
+		};
+		// SAFETY: the parent descriptor and detached component are live.
+		let detached_fd = unsafe {
+			libc::openat(
+				parent,
+				detached_name.as_ptr(),
+				libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+			)
+		};
+		let detached_valid = if detached_fd < 0 {
+			Err("cleanup_pending")
+		} else {
+			// SAFETY: zero is a valid initialized representation for libc::stat.
+
+			let mut detached_root: libc::stat = unsafe { std::mem::zeroed() };
+			// SAFETY: detached_fd is live and detached_root is writable.
+			let result = if unsafe { libc::fstat(detached_fd, &mut detached_root) } != 0
+				|| detached_root.st_dev as u64 != expected.root_dev.parse().ok().unwrap_or(u64::MAX)
+				|| detached_root.st_ino as u64 != expected.root_ino.parse().ok().unwrap_or(u64::MAX)
+			{
+				Err("identity_mismatch")
+			} else {
+				validate_tree_fd(detached_fd, "", &expected.entries)
+			};
+			// SAFETY: this branch owns the detached root descriptor exactly once.
+			unsafe { libc::close(detached_fd) };
+			result
+		};
+		if let Err(code) = detached_valid {
+			// SAFETY: this branch owns the live descriptors and closes each exactly once.
+			unsafe {
+				libc::close(fd);
+				libc::close(parent);
+			}
+			return NativeExactUnlinkResult::detached_failure(code, detached_retained_path);
+		}
+		// POSIX cannot bind final unlink to the verified root descriptor. The
+		// no-replace detached root preserves the entire validated snapshot for
+		// deterministic replay instead of exchanging any child or root with a
+		// mutable placeholder.
+		// SAFETY: this branch owns the live descriptors and closes each exactly once.
 		unsafe {
 			libc::close(fd);
 			libc::close(parent);
 		}
-		result
+		NativeExactUnlinkResult::detached_failure("cleanup_pending", detached_retained_path)
 	}
 }
 
@@ -4465,6 +4710,236 @@ mod platform {
 		Ok(buffer)
 	}
 
+	#[derive(Clone, Copy)]
+	enum OwnerOnlyAclState {
+		Clean,
+		RepairableMismatch,
+		UnsafeMismatch,
+		OwnerMismatch,
+	}
+
+	fn acl_entries_are_structurally_valid(
+		dacl: *mut ACL,
+		ace_count: u32,
+		acl_start: usize,
+		acl_end: usize,
+	) -> bool {
+		for index in 0..ace_count {
+			let mut ace: *mut c_void = null_mut();
+			// SAFETY: `dacl` and `ace` remain inside the live descriptor returned by
+			// GetSecurityInfo, and `ace` is a writable output pointer.
+			if unsafe { GetAce(dacl, index, &mut ace) } == 0 || ace.is_null() {
+				return false;
+			}
+			let ace_start = ace as usize;
+			let Some(header_end) = ace_start.checked_add(size_of::<ACE_HEADER>()) else {
+				return false;
+			};
+			if ace_start < acl_start || header_end > acl_end {
+				return false;
+			}
+			// SAFETY: the fixed ACE header range is bounded by the ACL extent; the
+			// unaligned read avoids imposing an alignment assumption on GetAce.
+			let header = unsafe { std::ptr::read_unaligned(ace.cast::<ACE_HEADER>()) };
+			let ace_size = usize::from(header.AceSize);
+			let Some(ace_end) = ace_start.checked_add(ace_size) else {
+				return false;
+			};
+			if ace_size < size_of::<ACE_HEADER>() || ace_end > acl_end {
+				return false;
+			}
+			if header.AceType == 0 {
+				let sid_offset = std::mem::offset_of!(ACCESS_ALLOWED_ACE, SidStart);
+				let Some(sid_end) = sid_offset.checked_add(8) else {
+					return false;
+				};
+				if sid_end > ace_size {
+					return false;
+				}
+				// SAFETY: `sid_offset..ace_size` lies within the checked ACE and ACL
+				// extents, and the descriptor remains live through validation.
+				let ace_sid = unsafe {
+					std::slice::from_raw_parts(ace.cast::<u8>().add(sid_offset), ace_size - sid_offset)
+				};
+				if valid_sid(ace_sid).is_none() {
+					return false;
+				}
+			}
+		}
+		true
+	}
+
+	fn inspect_owner_only_acl(
+		handle: HANDLE,
+		kind: &str,
+		sid: &[u8],
+	) -> Result<OwnerOnlyAclState, &'static str> {
+		let mut owner = null_mut();
+		let mut dacl = null_mut();
+		let mut descriptor = null_mut();
+		// SAFETY: the retained handle is valid and all output pointers are writable
+		// until the returned LocalAlloc descriptor is released below.
+		let status = unsafe {
+			GetSecurityInfo(
+				handle,
+				SE_FILE_OBJECT,
+				SECURITY_OWNER_DACL,
+				&mut owner,
+				null_mut(),
+				&mut dacl,
+				null_mut(),
+				&mut descriptor,
+			)
+		};
+		if status != 0 {
+			if !descriptor.is_null() {
+				// SAFETY: a non-null descriptor returned by GetSecurityInfo remains owned by
+				// this function on the error path.
+				unsafe { LocalFree(descriptor) };
+			}
+			return Err("acl_unavailable");
+		}
+		if descriptor.is_null() {
+			return Err("acl_unavailable");
+		}
+		let result = if owner.is_null() {
+			Err("acl_unavailable")
+		} else {
+			// SAFETY: GetSecurityInfo returned owner within the live security
+			// descriptor; `sid` is a validated current-user SID.
+			let owner_matches = unsafe { EqualSid(owner, sid.as_ptr().cast_mut().cast()) } != 0;
+			if !owner_matches {
+				Ok(OwnerOnlyAclState::OwnerMismatch)
+			} else {
+				let mut control = 0u16;
+				let mut revision = 0u32;
+				// SAFETY: `descriptor` is the live allocation returned by GetSecurityInfo
+				// and both outputs are writable local scalars.
+				let control_ok = unsafe {
+					windows_sys::Win32::Security::GetSecurityDescriptorControl(
+						descriptor,
+						&mut control,
+						&mut revision,
+					)
+				} != 0;
+				if !control_ok {
+					Ok(OwnerOnlyAclState::UnsafeMismatch)
+				} else {
+					let protected_dacl = control & SE_DACL_PROTECTED != 0;
+					// SAFETY: zero is a valid output initialization for ACL_SIZE_INFORMATION.
+					let mut acl_info: ACL_SIZE_INFORMATION = unsafe { std::mem::zeroed() };
+					let acl_ok = !dacl.is_null()
+						// SAFETY: GetSecurityInfo returned `dacl` within its still-live
+						// descriptor and `acl_info` is an aligned writable output.
+						&& unsafe {
+							GetAclInformation(
+								dacl,
+								(&raw mut acl_info).cast(),
+								u32::try_from(size_of::<ACL_SIZE_INFORMATION>())
+									.expect("ACL info size fits u32"),
+								AclSizeInformation,
+							)
+						} != 0;
+					if !acl_ok {
+						Ok(OwnerOnlyAclState::UnsafeMismatch)
+					} else {
+						let acl_start = dacl as usize;
+						let acl_bytes = acl_info.AclBytesInUse as usize;
+						let acl_end = acl_start.checked_add(acl_bytes);
+						let structurally_valid = acl_bytes >= size_of::<ACL>()
+							&& acl_end.is_some_and(|end| {
+								acl_entries_are_structurally_valid(dacl, acl_info.AceCount, acl_start, end)
+							});
+						if !structurally_valid {
+							Ok(OwnerOnlyAclState::UnsafeMismatch)
+						} else {
+							let expected_flags = if kind == "directory" {
+								OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE
+							} else {
+								0
+							};
+							let exact_owner_ace = if acl_info.AceCount == 1 {
+								let mut ace: *mut c_void = null_mut();
+								// SAFETY: structural validation above proved that this single ACE
+								// is present and bounded; `ace` is a writable output pointer.
+								if unsafe { GetAce(dacl, 0, &mut ace) } == 0 || ace.is_null() {
+									false
+								} else {
+									let header =
+										unsafe { std::ptr::read_unaligned(ace.cast::<ACE_HEADER>()) };
+									let ace_size = usize::from(header.AceSize);
+									let sid_offset = std::mem::offset_of!(ACCESS_ALLOWED_ACE, SidStart);
+									let mask_offset = std::mem::offset_of!(ACCESS_ALLOWED_ACE, Mask);
+									if header.AceType != 0
+										|| header.AceFlags != expected_flags
+										|| mask_offset
+											.checked_add(size_of::<u32>())
+											.is_none_or(|end| end > ace_size)
+										|| sid_offset > ace_size
+									{
+										false
+									} else {
+										// SAFETY: structural validation proved the mask and SID ranges
+										// are inside the live ACE.
+										let mask = unsafe {
+											std::ptr::read_unaligned(
+												ace.cast::<u8>().add(mask_offset).cast::<u32>(),
+											)
+										};
+										let ace_sid = unsafe {
+											std::slice::from_raw_parts(
+												ace.cast::<u8>().add(sid_offset),
+												ace_size - sid_offset,
+											)
+										};
+										owner_only_ace_mask_is_safe(mask)
+											&& valid_sid(ace_sid).is_some()
+											// SAFETY: both pointers identify complete validated SIDs
+											// that remain live through comparison.
+											&& unsafe {
+												EqualSid(
+													ace_sid.as_ptr().cast_mut().cast(),
+													sid.as_ptr().cast_mut().cast(),
+												)
+											} != 0
+									}
+								}
+							} else {
+								false
+							};
+							if protected_dacl && exact_owner_ace {
+								Ok(OwnerOnlyAclState::Clean)
+							} else {
+								Ok(OwnerOnlyAclState::RepairableMismatch)
+							}
+						}
+					}
+				}
+			}
+		};
+		// SAFETY: GetSecurityInfo allocated `descriptor` with LocalAlloc and it is
+		// released once after all owner, ACL, and ACE reads have completed.
+		unsafe { LocalFree(descriptor) };
+		result
+	}
+
+	fn verify_owner_only_handle(handle: HANDLE, kind: &str) -> NativeOwnerOnlySecurityResult {
+		let sid = match current_user_sid() {
+			Ok(sid) => sid,
+			Err(()) => return NativeOwnerOnlySecurityResult::failure("acl_unavailable"),
+		};
+		match inspect_owner_only_acl(handle, kind, &sid) {
+			Ok(OwnerOnlyAclState::Clean) => NativeOwnerOnlySecurityResult::success(),
+			Ok(OwnerOnlyAclState::OwnerMismatch) => {
+				NativeOwnerOnlySecurityResult::failure("owner_mismatch")
+			},
+			Ok(OwnerOnlyAclState::RepairableMismatch | OwnerOnlyAclState::UnsafeMismatch) => {
+				NativeOwnerOnlySecurityResult::failure("acl_verify_failed")
+			},
+			Err(code) => NativeOwnerOnlySecurityResult::failure(code),
+		}
+	}
+
 	pub(super) fn apply_owner_only_path_security(
 		path: &Path,
 		kind: &str,
@@ -4509,135 +4984,118 @@ mod platform {
 			Ok(handle) => handle,
 			Err(result) => return result,
 		};
+		verify_owner_only_handle(handle.target, kind)
+	}
+	pub(super) fn verify_owner_only_path_security_expected(
+		path: &Path,
+		kind: &str,
+		expected_dev: u64,
+		expected_ino: u64,
+	) -> NativeOwnerOnlySecurityResult {
+		let handle = match open_exact(path, kind, READ_CONTROL) {
+			Ok(handle) => handle,
+			Err(result) => return result,
+		};
+		// SAFETY: zero is a valid initialized representation for this output struct.
+		let mut initial_information: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+		if unsafe { GetFileInformationByHandle(handle.target, &mut initial_information) } == 0 {
+			return NativeOwnerOnlySecurityResult::failure(last_error_code());
+		}
+		if !expected_handle_identity_matches(&initial_information, expected_dev, expected_ino) {
+			return NativeOwnerOnlySecurityResult::failure("identity_mismatch");
+		}
+		let verified = verify_owner_only_handle(handle.target, kind);
+		// SAFETY: zero is a valid initialized representation for this output struct.
+		let mut final_information: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+		if unsafe { GetFileInformationByHandle(handle.target, &mut final_information) } == 0 {
+			return NativeOwnerOnlySecurityResult::failure(last_error_code());
+		}
+		if !expected_handle_identity_matches(&final_information, expected_dev, expected_ino) {
+			return NativeOwnerOnlySecurityResult::failure("identity_mismatch");
+		}
+		verified
+	}
+
+	fn expected_handle_identity_matches(
+		information: &BY_HANDLE_FILE_INFORMATION,
+		expected_dev: u64,
+		expected_ino: u64,
+	) -> bool {
+		let ino =
+			(u64::from(information.nFileIndexHigh) << 32) | u64::from(information.nFileIndexLow);
+		u64::from(information.dwVolumeSerialNumber) == expected_dev && ino == expected_ino
+	}
+
+	pub(super) fn repair_owner_only_path_security_expected(
+		path: &Path,
+		kind: &str,
+		expected_dev: u64,
+		expected_ino: u64,
+	) -> NativeOwnerOnlySecurityResult {
+		let handle = match open_exact(path, kind, WRITE_DAC | READ_CONTROL) {
+			Ok(handle) => handle,
+			Err(result) => return result,
+		};
+		// SAFETY: zero is a valid initialized representation for this output struct.
+		let mut information: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+		if unsafe { GetFileInformationByHandle(handle.target, &mut information) } == 0 {
+			return NativeOwnerOnlySecurityResult::failure(last_error_code());
+		}
+		if !expected_handle_identity_matches(&information, expected_dev, expected_ino) {
+			return NativeOwnerOnlySecurityResult::failure("identity_mismatch");
+		}
 		let sid = match current_user_sid() {
 			Ok(sid) => sid,
 			Err(()) => return NativeOwnerOnlySecurityResult::failure("acl_unavailable"),
 		};
-		let mut owner = null_mut();
-		let mut dacl = null_mut();
-		let mut descriptor = null_mut();
-		// SAFETY: the retained handle is valid and all output pointers are writable
-		// until the returned LocalAlloc descriptor is released below.
+		match inspect_owner_only_acl(handle.target, kind, &sid) {
+			Ok(OwnerOnlyAclState::Clean) => return NativeOwnerOnlySecurityResult::success(),
+			Ok(OwnerOnlyAclState::OwnerMismatch) => {
+				return NativeOwnerOnlySecurityResult::failure("owner_mismatch");
+			},
+			Ok(OwnerOnlyAclState::UnsafeMismatch) => {
+				return NativeOwnerOnlySecurityResult::failure("acl_verify_failed");
+			},
+			Ok(OwnerOnlyAclState::RepairableMismatch) => {},
+			Err(code) => return NativeOwnerOnlySecurityResult::failure(code),
+		}
+		let dacl = match owner_only_dacl(&sid, kind) {
+			Ok(dacl) => dacl,
+			Err(()) => return NativeOwnerOnlySecurityResult::failure("acl_apply_failed"),
+		};
+		// SAFETY: the retained handle identifies the prechecked object; `dacl` contains
+		// a validated, live Windows security structure for this synchronous call.
 		let status = unsafe {
-			GetSecurityInfo(
+			SetSecurityInfo(
 				handle.target,
 				SE_FILE_OBJECT,
-				SECURITY_OWNER_DACL,
-				&mut owner,
+				DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
 				null_mut(),
-				&mut dacl,
 				null_mut(),
-				&mut descriptor,
+				dacl.as_ptr().cast(),
+				null_mut(),
 			)
 		};
-		if status != 0 || descriptor.is_null() {
-			return NativeOwnerOnlySecurityResult::failure("acl_unavailable");
+		if status != 0 {
+			return NativeOwnerOnlySecurityResult::failure("acl_apply_failed");
 		}
-		if owner.is_null() {
-			// SAFETY: GetSecurityInfo returned this live LocalAlloc descriptor, which is
-			// released exactly once on this failure path.
-			unsafe { LocalFree(descriptor) };
-			return NativeOwnerOnlySecurityResult::failure("acl_unavailable");
+		// SAFETY: zero is a valid initialized representation for this output struct.
+		let mut final_information: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+		if unsafe { GetFileInformationByHandle(handle.target, &mut final_information) } == 0 {
+			return NativeOwnerOnlySecurityResult::failure(last_error_code());
 		}
-		// SAFETY: GetSecurityInfo returned owner within the live security descriptor;
-		// `sid` is a validated current-user SID.
-		let owner_matches = unsafe { EqualSid(owner, sid.as_ptr().cast_mut().cast()) } != 0;
-		let mut control = 0u16;
-		let mut revision = 0u32;
-		// SAFETY: `descriptor` is the live allocation returned by GetSecurityInfo and
-		// both outputs are writable local scalars.
-		let protected_dacl = unsafe {
-			windows_sys::Win32::Security::GetSecurityDescriptorControl(
-				descriptor,
-				&mut control,
-				&mut revision,
-			)
-		} != 0 && control & SE_DACL_PROTECTED != 0;
-		// SAFETY: zero is a valid output initialization for ACL_SIZE_INFORMATION.
-		let mut acl_info: ACL_SIZE_INFORMATION = unsafe { std::mem::zeroed() };
-		let acl_ok = !dacl.is_null()
-			// SAFETY: GetSecurityInfo returned `dacl` within its still-live descriptor and
-			// `acl_info` is an aligned writable output of the exact checked size.
-			&& unsafe {
-				GetAclInformation(
-					dacl,
-					(&raw mut acl_info).cast(),
-					u32::try_from(size_of::<ACL_SIZE_INFORMATION>()).expect("ACL info size fits u32"),
-					AclSizeInformation,
-				)
-			} != 0;
-		let expected_flags = if kind == "directory" {
-			OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE
-		} else {
-			0
-		};
-		let exact_owner_ace = if acl_ok && acl_info.AceCount == 1 {
-			let acl_start = dacl as usize;
-			let acl_bytes = acl_info.AclBytesInUse as usize;
-			let acl_end = acl_start.checked_add(acl_bytes);
-			let mut ace: *mut c_void = null_mut();
-			// SAFETY: GetAclInformation validated the one-entry ACL in the live descriptor
-			// and `ace` is a writable out-pointer.
-			let got_ace = unsafe { GetAce(dacl, 0, &mut ace) } != 0;
-			if got_ace && !ace.is_null() {
-				let ace_start = ace as usize;
-				let header_end = ace_start.checked_add(size_of::<ACE_HEADER>());
-				if acl_bytes < size_of::<ACL>()
-					|| ace_start < acl_start
-					|| header_end.is_none_or(|end| acl_end.is_none_or(|acl_end| end > acl_end))
-				{
-					false
-				} else {
-					// SAFETY: the fixed ACE header range is fully bounded by AclBytesInUse;
-					// unaligned read avoids imposing an alignment assumption on GetAce.
-					let header = unsafe { std::ptr::read_unaligned(ace.cast::<ACE_HEADER>()) };
-					let ace_size = usize::from(header.AceSize);
-					let ace_end = ace_start.checked_add(ace_size);
-					let sid_offset = std::mem::offset_of!(ACCESS_ALLOWED_ACE, SidStart);
-					let mask_offset = std::mem::offset_of!(ACCESS_ALLOWED_ACE, Mask);
-					let minimum_ace_size = sid_offset.checked_add(sid.len()).unwrap_or(usize::MAX);
-					if ace_size < minimum_ace_size
-						|| mask_offset
-							.checked_add(size_of::<u32>())
-							.is_none_or(|end| end > ace_size)
-						|| ace_end.is_none_or(|end| acl_end.is_none_or(|acl_end| end > acl_end))
-						|| header.AceType != 0
-						|| header.AceFlags != expected_flags
-					{
-						false
-					} else {
-						// SAFETY: the mask range is bounded by the validated ACE size and ACL extent.
-						let mask = unsafe {
-							std::ptr::read_unaligned(ace.cast::<u8>().add(mask_offset).cast::<u32>())
-						};
-						// SAFETY: the trailing SID range is bounded by both AceSize and
-						// AclBytesInUse, and the descriptor remains live through comparison.
-						let ace_sid = unsafe {
-							std::slice::from_raw_parts(
-								ace.cast::<u8>().add(sid_offset),
-								ace_size - sid_offset,
-							)
-						};
-						owner_only_ace_mask_is_safe(mask) && valid_sid(ace_sid).is_some()
-							// SAFETY: both pointers identify complete validated SIDs that remain live.
-							&& unsafe {
-								EqualSid(ace_sid.as_ptr().cast_mut().cast(), sid.as_ptr().cast_mut().cast())
-							} != 0
-					}
-				}
-			} else {
-				false
-			}
-		} else {
-			false
-		};
-		// SAFETY: GetSecurityInfo allocated `descriptor` with LocalAlloc and it is
-		// released once after all owner, ACL, and ACE reads have completed.
-		unsafe { LocalFree(descriptor) };
-		if owner_matches && protected_dacl && exact_owner_ace {
-			NativeOwnerOnlySecurityResult::success()
-		} else {
-			NativeOwnerOnlySecurityResult::failure("acl_verify_failed")
+		if !expected_handle_identity_matches(&final_information, expected_dev, expected_ino) {
+			return NativeOwnerOnlySecurityResult::failure("identity_mismatch");
+		}
+		match inspect_owner_only_acl(handle.target, kind, &sid) {
+			Ok(OwnerOnlyAclState::Clean) => NativeOwnerOnlySecurityResult::success(),
+			Ok(OwnerOnlyAclState::OwnerMismatch) => {
+				NativeOwnerOnlySecurityResult::failure("owner_mismatch")
+			},
+			Ok(OwnerOnlyAclState::RepairableMismatch | OwnerOnlyAclState::UnsafeMismatch) => {
+				NativeOwnerOnlySecurityResult::failure("acl_verify_failed")
+			},
+			Err(code) => NativeOwnerOnlySecurityResult::failure(code),
 		}
 	}
 
@@ -5226,6 +5684,23 @@ mod platform {
 	) -> NativeOwnerOnlySecurityResult {
 		NativeOwnerOnlySecurityResult::failure("acl_unavailable")
 	}
+	pub(super) fn verify_owner_only_path_security_expected(
+		_: &Path,
+		_: &str,
+		_: u64,
+		_: u64,
+	) -> NativeOwnerOnlySecurityResult {
+		NativeOwnerOnlySecurityResult::failure("acl_unavailable")
+	}
+
+	pub(super) fn repair_owner_only_path_security_expected(
+		_: &Path,
+		_: &str,
+		_: u64,
+		_: u64,
+	) -> NativeOwnerOnlySecurityResult {
+		NativeOwnerOnlySecurityResult::failure("acl_unavailable")
+	}
 	pub(super) fn apply_owner_only_fd_security(
 		_: &Path,
 		_: &str,
@@ -5249,7 +5724,8 @@ mod owner_only_security_tests {
 	};
 
 	use super::{
-		apply_owner_only_path_security, rename_no_replace_path, verify_owner_only_path_security,
+		NativeExactUnlinkResult, NativeNoReplaceResult, apply_owner_only_path_security,
+		rename_no_replace_path, verify_owner_only_path_security,
 	};
 
 	static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(0);
@@ -5259,7 +5735,7 @@ mod owner_only_security_tests {
 	impl TempDir {
 		fn new() -> Self {
 			let path = std::env::temp_dir().join(format!(
-				"gjc-owner-security-{}-{}",
+				"skc-owner-security-{}-{}",
 				std::process::id(),
 				NEXT_TEMP_ID.fetch_add(1, Ordering::Relaxed)
 			));
@@ -5329,6 +5805,11 @@ mod owner_only_security_tests {
 			destination.to_string_lossy().into_owned(),
 		);
 		assert!(renamed.ok, "{:?}", renamed.code);
+		assert_eq!(renamed.mutation_state, "committed");
+		assert_eq!(renamed.durability_state, "not_attempted");
+		assert_eq!(renamed.reason, "none");
+		assert_eq!(renamed.diagnostic.schema_version, 1);
+
 		assert_eq!(std::fs::read(&destination).expect("read renamed destination"), b"source");
 
 		let collision_source = dir.0.join("collision-source.tmp");
@@ -5339,11 +5820,35 @@ mod owner_only_security_tests {
 		);
 		assert!(!collision.ok);
 		assert_eq!(collision.code.as_deref(), Some("quarantine_collision"));
+		assert_eq!(collision.mutation_state, "not_committed");
+		assert_eq!(collision.reason, "destination_exists");
+		assert_eq!(collision.durability_state, "not_attempted");
 		assert_eq!(
 			std::fs::read(&collision_source).expect("read retained collision source"),
 			b"collision"
 		);
 		assert_eq!(std::fs::read(&destination).expect("read retained destination"), b"source");
+	}
+
+	#[test]
+	fn rename_no_replace_invalid_request_is_a_preflight_failure() {
+		let result =
+			NativeNoReplaceResult::from_exact(NativeExactUnlinkResult::failure("invalid_request"));
+		assert!(!result.ok);
+		assert_eq!(result.code.as_deref(), Some("invalid_request"));
+		assert_eq!(result.mutation_state, "not_committed");
+		assert_eq!(result.durability_state, "not_attempted");
+		assert_eq!(result.reason, "invalid_request");
+		assert_eq!(result.phase, "preflight");
+	}
+
+	#[test]
+	fn rename_no_replace_rejects_nul_request_before_syscall() {
+		let result = rename_no_replace_path("source\0".to_owned(), "destination".to_owned());
+		assert!(!result.ok);
+		assert_eq!(result.code.as_deref(), Some("invalid_request"));
+		assert_eq!(result.reason, "invalid_request");
+		assert_eq!(result.phase, "preflight");
 	}
 }
 #[cfg(all(test, unix))]
@@ -5362,7 +5867,7 @@ mod retained_broker_publication_tests {
 	impl TempDir {
 		fn new() -> Self {
 			let path = std::env::temp_dir().join(format!(
-				"gjc-retained-broker-publication-{}-{}",
+				"skc-retained-broker-publication-{}-{}",
 				std::process::id(),
 				NEXT_TEMP_ID.fetch_add(1, Ordering::Relaxed)
 			));
@@ -5426,6 +5931,97 @@ mod retained_broker_publication_tests {
 	}
 }
 
+/// Regression coverage for a large legacy-session migration crashing with
+/// `durability_failed`: a signal landing mid-syscall on the no-replace rename
+/// primitive (used to publish every migrated artifact file) used to surface
+/// as a single unretried EINTR, which the JS layer's exhaustive reason match
+/// falls back to classifying as a fatal, unrecoverable durability failure —
+/// even though nothing was ever mutated. Migrating thousands of artifacts
+/// performs thousands of these renames, making a stray signal increasingly
+/// likely to hit over the course of one migration. The fix restarts the
+/// syscall on EINTR (bounded, since nothing committed) instead of failing.
+#[cfg(all(test, unix))]
+mod rename_no_replace_eintr_tests {
+	use std::{
+		path::PathBuf,
+		sync::atomic::{AtomicU64, Ordering},
+	};
+
+	use super::{platform, rename_no_replace_path};
+
+	static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(0);
+
+	struct TempDir(PathBuf);
+
+	impl TempDir {
+		fn new() -> Self {
+			let path = std::env::temp_dir().join(format!(
+				"skc-rename-no-replace-eintr-{}-{}",
+				std::process::id(),
+				NEXT_TEMP_ID.fetch_add(1, Ordering::Relaxed)
+			));
+			std::fs::create_dir(&path).expect("create eintr temp directory");
+			// macOS's default temp root (/var/...) is itself a symlink to
+			// /private/var/...; the no-replace rename primitive under test walks
+			// every path component with O_NOFOLLOW and fails closed on any
+			// symlink, so the canonical (fully resolved) path is required here.
+			let resolved = std::fs::canonicalize(&path).expect("canonicalize eintr temp directory");
+			Self(resolved)
+		}
+	}
+
+	impl Drop for TempDir {
+		fn drop(&mut self) {
+			let _ = std::fs::remove_dir_all(&self.0);
+		}
+	}
+
+	#[test]
+	fn rename_no_replace_restarts_past_transient_eintr() {
+		let dir = TempDir::new();
+		let source = dir.0.join("source.tmp");
+		let destination = dir.0.join("destination.tmp");
+		std::fs::write(&source, b"payload").expect("write rename source");
+
+		// Fewer injected EINTRs than the retry bound: the rename must still
+		// commit, proving a stray signal no longer aborts the migration.
+		platform::inject_rename_no_replace_eintr(3);
+		let result = rename_no_replace_path(
+			source.to_string_lossy().into_owned(),
+			destination.to_string_lossy().into_owned(),
+		);
+		assert!(result.ok, "{:?} / {}", result.code, result.reason);
+		assert_eq!(result.reason, "none");
+		assert_eq!(std::fs::read(&destination).expect("read migrated destination"), b"payload");
+	}
+
+	#[test]
+	fn rename_no_replace_still_fails_closed_once_eintr_exhausts_the_retry_bound() {
+		let dir = TempDir::new();
+		let source = dir.0.join("source.tmp");
+		let destination = dir.0.join("destination.tmp");
+		std::fs::write(&source, b"payload").expect("write rename source");
+
+		// More injected EINTRs than the retry bound: the bound must still be
+		// enforced so a genuine signal storm cannot hang the migration forever.
+		platform::inject_rename_no_replace_eintr(64);
+		let result = rename_no_replace_path(
+			source.to_string_lossy().into_owned(),
+			destination.to_string_lossy().into_owned(),
+		);
+		assert!(!result.ok);
+		assert_eq!(result.code.as_deref(), Some("interrupted"));
+		assert_eq!(result.reason, "interrupted");
+		assert_eq!(result.mutation_state, "not_committed");
+		// Nothing committed: the source is untouched and no destination exists.
+		assert_eq!(std::fs::read(&source).expect("read retained source"), b"payload");
+		assert!(!destination.exists());
+
+		// Clear the injector so later tests in this process are unaffected.
+		platform::inject_rename_no_replace_eintr(0);
+	}
+}
+
 // These tests pause exact_unlink at internal exchange hooks and block on
 // unbounded channel recvs; macOS renameatx_np(RENAME_SWAP) rejects the
 // file<->directory placeholder swap, so the hook is never reached and the
@@ -5436,27 +6032,43 @@ mod exact_unlink_placeholder_tests {
 	use std::{
 		fs,
 		os::unix::fs::MetadataExt,
-		path::Path,
 		sync::{Mutex, MutexGuard, OnceLock, mpsc},
 		thread,
 		time::{SystemTime, UNIX_EPOCH},
 	};
 
-	use super::{ExactFileIdentity, NativeExactUnlinkResult, platform, sha256};
+	use super::{
+		ExactFileIdentity, NativeDirectoryTreeSnapshot, NativeExactUnlinkResult, platform, sha256,
+	};
 
-	fn exchange_hook_test_guard() -> MutexGuard<'static, ()> {
+	struct ExchangeHookTestGuard {
+		_guard: MutexGuard<'static, ()>,
+	}
+
+	impl Drop for ExchangeHookTestGuard {
+		fn drop(&mut self) {
+			platform::set_after_exchange_hook(None);
+			platform::set_before_exchange_hook(None);
+			platform::set_after_placeholder_detach_hook(None);
+			platform::set_after_tree_rename_hook(None);
+		}
+	}
+
+	fn exchange_hook_test_guard() -> ExchangeHookTestGuard {
 		static GUARD: OnceLock<Mutex<()>> = OnceLock::new();
-		GUARD
-			.get_or_init(|| Mutex::new(()))
-			.lock()
-			.expect("exchange hook test guard")
+		ExchangeHookTestGuard {
+			_guard: GUARD
+				.get_or_init(|| Mutex::new(()))
+				.lock()
+				.unwrap_or_else(|poisoned| poisoned.into_inner()),
+		}
 	}
 
 	#[test]
-	fn regular_file_rename_cannot_replace_the_exchange_directory_placeholder() {
+	fn regular_successor_replaces_same_kind_placeholder_and_is_preserved() {
 		let _guard = exchange_hook_test_guard();
 		let root = std::env::temp_dir().join(format!(
-			"gjc-exact-unlink-placeholder-{}-{}",
+			"skc-exact-unlink-placeholder-{}-{}",
 			std::process::id(),
 			SystemTime::now()
 				.duration_since(UNIX_EPOCH)
@@ -5466,6 +6078,7 @@ mod exact_unlink_placeholder_tests {
 		fs::create_dir(&root).expect("create temporary directory");
 		let target = root.join("endpoint.json");
 		let successor = root.join("successor.json");
+		let stale = root.join(".quarantine");
 		fs::write(&target, b"stale").expect("write stale target");
 		fs::write(&successor, b"live successor").expect("write successor");
 		let metadata = fs::metadata(&target).expect("stat target");
@@ -5486,82 +6099,27 @@ mod exact_unlink_placeholder_tests {
 		let unlink = thread::spawn(move || platform::exact_unlink(&target_for_unlink, &identity));
 		entered_rx.recv().expect("wait for exchange");
 
-		let rename = fs::rename(&successor, &target);
-		assert!(rename.is_err(), "regular-file rename replaced the directory placeholder");
-		assert_eq!(fs::read(&successor).expect("successor retained"), b"live successor");
-		resume_tx.send(()).expect("resume unlink");
-		let result = unlink.join().expect("exact unlink thread");
-		platform::set_after_exchange_hook(None);
-		assert!(result.ok, "{:?}", result.code);
-		assert!(!target.exists());
-		assert_eq!(
-			fs::read(&successor).expect("successor retained after cleanup"),
-			b"live successor"
+		assert!(
+			fs::metadata(&target)
+				.expect("stat regular placeholder")
+				.is_file()
 		);
-		fs::remove_dir_all(root).expect("remove temporary directory");
-	}
-
-	fn preserves_directory_successor(target_is_directory: bool) {
-		let _guard = exchange_hook_test_guard();
-		let root = std::env::temp_dir().join(format!(
-			"gjc-exact-unlink-directory-successor-{}-{}",
-			std::process::id(),
-			SystemTime::now()
-				.duration_since(UNIX_EPOCH)
-				.expect("system time")
-				.as_nanos(),
-		));
-		fs::create_dir(&root).expect("create temporary directory");
-		let target = root.join("target");
-		let successor = root.join("successor");
-		if target_is_directory {
-			fs::create_dir(&target).expect("create target directory");
-		} else {
-			fs::write(&target, b"stale").expect("write stale target");
-		}
-		fs::create_dir(&successor).expect("create successor directory");
-		let metadata = fs::metadata(&target).expect("stat target");
-		let identity = ExactFileIdentity {
-			dev:             metadata.dev(),
-			ino:             metadata.ino(),
-			size:            metadata.size(),
-			mtime_ns:        metadata.mtime_nsec() + metadata.mtime() * 1_000_000_000,
-			directory:       target_is_directory,
-			detach_only:     false,
-			quarantine_name: Some(".quarantine".to_owned()),
-			sha256:          (!target_is_directory).then(|| sha256(b"stale")),
-		};
-		let (entered_tx, entered_rx) = mpsc::channel();
-		let (resume_tx, resume_rx) = mpsc::channel();
-		platform::set_after_exchange_hook(Some((entered_tx, resume_rx)));
-		let target_for_unlink = target.clone();
-		let unlink = thread::spawn(move || platform::exact_unlink(&target_for_unlink, &identity));
-		entered_rx.recv().expect("wait for exchange");
-		assert!(fs::metadata(&target).expect("stat placeholder").is_dir());
-		fs::rename(&successor, &target).expect("directory successor replaces empty placeholder");
+		fs::rename(&successor, &target).expect("regular successor replaces regular placeholder");
 		resume_tx.send(()).expect("resume unlink");
 		let result = unlink.join().expect("exact unlink thread");
 		platform::set_after_exchange_hook(None);
 		assert!(!result.ok);
-		assert_eq!(result.code.as_deref(), Some("identity_mismatch"));
-		assert!(target.is_dir(), "directory successor was deleted");
+		assert_eq!(result.code.as_deref(), Some("cleanup_pending"));
+		assert_eq!(result.detached_path.as_deref(), Some(stale.to_string_lossy().as_ref()));
+		assert_eq!(fs::read(&target).expect("successor preserved"), b"live successor");
+		assert_eq!(fs::read(&stale).expect("stale quarantine retained"), b"stale");
 		fs::remove_dir_all(root).expect("remove temporary directory");
 	}
 
-	#[test]
-	fn regular_target_preserves_directory_successor_after_exchange() {
-		preserves_directory_successor(false);
-	}
-
-	#[test]
-	fn directory_target_preserves_directory_successor_after_exchange() {
-		preserves_directory_successor(true);
-	}
-
-	fn mismatch_preserves_directory_successor_and_stale_recovery(target_is_directory: bool) {
+	fn preserves_same_kind_successor(target_is_directory: bool) {
 		let _guard = exchange_hook_test_guard();
 		let root = std::env::temp_dir().join(format!(
-			"gjc-exact-unlink-mismatch-successor-{}-{}",
+			"skc-exact-unlink-same-kind-successor-{}-{}",
 			std::process::id(),
 			SystemTime::now()
 				.duration_since(UNIX_EPOCH)
@@ -5571,12 +6129,14 @@ mod exact_unlink_placeholder_tests {
 		fs::create_dir(&root).expect("create temporary directory");
 		let target = root.join("target");
 		let successor = root.join("successor");
+		let stale = root.join(".quarantine");
 		if target_is_directory {
 			fs::create_dir(&target).expect("create target directory");
+			fs::create_dir(&successor).expect("create successor directory");
 		} else {
 			fs::write(&target, b"stale").expect("write stale target");
+			fs::write(&successor, b"successor").expect("write successor file");
 		}
-		fs::create_dir(&successor).expect("create successor directory");
 		let metadata = fs::metadata(&target).expect("stat target");
 		let identity = ExactFileIdentity {
 			dev:             metadata.dev(),
@@ -5594,41 +6154,103 @@ mod exact_unlink_placeholder_tests {
 		let target_for_unlink = target.clone();
 		let unlink = thread::spawn(move || platform::exact_unlink(&target_for_unlink, &identity));
 		entered_rx.recv().expect("wait for exchange");
+		let placeholder = fs::metadata(&target).expect("stat placeholder");
+		assert_eq!(placeholder.is_dir(), target_is_directory);
+		fs::rename(&successor, &target).expect("same-kind successor replaces placeholder");
+		resume_tx.send(()).expect("resume unlink");
+		let result = unlink.join().expect("exact unlink thread");
+		platform::set_after_exchange_hook(None);
+		assert!(!result.ok);
+		assert!(matches!(result.code.as_deref(), Some("cleanup_pending" | "identity_mismatch")));
+
+		assert_eq!(result.detached_path.as_deref(), Some(stale.to_string_lossy().as_ref()));
+		assert_eq!(fs::metadata(&target).expect("stat successor").is_dir(), target_is_directory);
+		assert!(stale.exists(), "stale quarantine was not retained");
+		fs::remove_dir_all(root).expect("remove temporary directory");
+	}
+
+	#[test]
+	fn regular_target_preserves_regular_successor_after_exchange() {
+		preserves_same_kind_successor(false);
+	}
+
+	#[test]
+	fn directory_target_preserves_directory_successor_after_exchange() {
+		preserves_same_kind_successor(true);
+	}
+
+	fn mismatch_preserves_same_kind_successor_and_stale_recovery(target_is_directory: bool) {
+		let _guard = exchange_hook_test_guard();
+		let root = std::env::temp_dir().join(format!(
+			"skc-exact-unlink-mismatch-successor-{}-{}",
+			std::process::id(),
+			SystemTime::now()
+				.duration_since(UNIX_EPOCH)
+				.expect("system time")
+				.as_nanos(),
+		));
+		fs::create_dir(&root).expect("create temporary directory");
+		let target = root.join("target");
+		let successor = root.join("successor");
 		let stale = root.join(".quarantine");
+		if target_is_directory {
+			fs::create_dir(&target).expect("create target directory");
+			fs::create_dir(&successor).expect("create successor directory");
+		} else {
+			fs::write(&target, b"stale").expect("write stale target");
+			fs::write(&successor, b"successor").expect("write successor file");
+		}
+		let metadata = fs::metadata(&target).expect("stat target");
+		let identity = ExactFileIdentity {
+			dev:             metadata.dev(),
+			ino:             metadata.ino(),
+			size:            metadata.size(),
+			mtime_ns:        metadata.mtime_nsec() + metadata.mtime() * 1_000_000_000,
+			directory:       target_is_directory,
+			detach_only:     false,
+			quarantine_name: Some(".quarantine".to_owned()),
+			sha256:          (!target_is_directory).then(|| sha256(b"stale")),
+		};
+		let (entered_tx, entered_rx) = mpsc::channel();
+		let (resume_tx, resume_rx) = mpsc::channel();
+		platform::set_after_exchange_hook(Some((entered_tx, resume_rx)));
+		let target_for_unlink = target.clone();
+		let unlink = thread::spawn(move || platform::exact_unlink(&target_for_unlink, &identity));
+		entered_rx.recv().expect("wait for exchange");
 		if target_is_directory {
 			fs::write(stale.join("mutation"), b"mutated").expect("mutate detached directory");
 		} else {
 			fs::write(&stale, b"mutated").expect("mutate detached file");
 		}
-		fs::rename(&successor, &target).expect("directory successor replaces placeholder");
+		fs::rename(&successor, &target).expect("same-kind successor replaces placeholder");
 		resume_tx.send(()).expect("resume unlink");
 		let result = unlink.join().expect("exact unlink thread");
 		platform::set_after_exchange_hook(None);
 		assert!(!result.ok);
 		assert_eq!(result.code.as_deref(), Some("identity_mismatch"));
 		assert_eq!(result.detached_path.as_deref(), Some(stale.to_string_lossy().as_ref()));
-		assert!(result.retained_successor_path.is_none());
-		assert!(target.is_dir(), "directory successor was displaced from its canonical path");
+		assert_eq!(result.retained_unknown_path.as_deref(), Some(target.to_string_lossy().as_ref()));
+		assert_eq!(fs::metadata(&target).expect("stat successor").is_dir(), target_is_directory);
 		assert!(stale.exists(), "mutated stale object was not recoverable at its detached path");
 		fs::remove_dir_all(root).expect("remove temporary directory");
 	}
 
 	#[test]
-	fn regular_target_mismatch_preserves_directory_successor_and_stale_recovery() {
-		mismatch_preserves_directory_successor_and_stale_recovery(false);
+	fn regular_target_mismatch_preserves_regular_successor_and_stale_recovery() {
+		mismatch_preserves_same_kind_successor_and_stale_recovery(false);
 	}
 
 	#[test]
 	fn directory_target_mismatch_preserves_directory_successor_and_stale_recovery() {
-		mismatch_preserves_directory_successor_and_stale_recovery(true);
+		mismatch_preserves_same_kind_successor_and_stale_recovery(true);
 	}
 
-	fn preserves_directory_successor_after_placeholder_identity_verification(
+	fn retained_same_kind_placeholder_preserves_successor_after_detach_hook(
 		target_is_directory: bool,
 	) {
 		let _guard = exchange_hook_test_guard();
 		let root = std::env::temp_dir().join(format!(
-			"gjc-exact-unlink-placeholder-detach-{}-{}",
+			"skc-exact-unlink-placeholder-detach-{}-{}",
 			std::process::id(),
 			SystemTime::now()
 				.duration_since(UNIX_EPOCH)
@@ -5638,12 +6260,14 @@ mod exact_unlink_placeholder_tests {
 		fs::create_dir(&root).expect("create temporary directory");
 		let target = root.join("target");
 		let successor = root.join("successor");
+		let stale = root.join(".quarantine");
 		if target_is_directory {
 			fs::create_dir(&target).expect("create target directory");
+			fs::create_dir(&successor).expect("create successor directory");
 		} else {
 			fs::write(&target, b"stale").expect("write stale target");
+			fs::write(&successor, b"successor").expect("write successor file");
 		}
-		fs::create_dir(&successor).expect("create successor directory");
 		let metadata = fs::metadata(&target).expect("stat target");
 		let identity = ExactFileIdentity {
 			dev:             metadata.dev(),
@@ -5663,41 +6287,43 @@ mod exact_unlink_placeholder_tests {
 		entered_rx
 			.recv()
 			.expect("wait for verified placeholder detach");
-		fs::rename(&successor, &target).expect("directory successor fills detached canonical name");
+		fs::rename(&successor, &target).expect("same-kind successor fills detached canonical name");
 		resume_tx.send(()).expect("resume unlink");
 		let result = unlink.join().expect("exact unlink thread");
 		platform::set_after_placeholder_detach_hook(None);
-		assert!(result.ok, "{:?}", result.code);
-		assert!(target.is_dir(), "directory successor was deleted or lost");
-		assert!(
-			fs::metadata(&target).expect("stat successor").ino() != metadata.ino(),
-			"canonical pathname was not replaced by the successor"
+		assert!(!result.ok);
+		assert_eq!(result.code.as_deref(), Some("cleanup_pending"));
+		assert_eq!(result.detached_path.as_deref(), Some(stale.to_string_lossy().as_ref()));
+		let retained = result
+			.retained_placeholder_path
+			.expect("retained placeholder path");
+		assert_eq!(
+			fs::metadata(&retained)
+				.expect("stat retained placeholder")
+				.is_dir(),
+			target_is_directory
 		);
-		if target_is_directory {
-			assert_eq!(
-				result.detached_path.as_deref(),
-				Some(root.join(".quarantine").to_string_lossy().as_ref())
-			);
-		} else {
-			assert!(!root.join(".quarantine").exists(), "stale target was not deleted");
-		}
+		assert_eq!(fs::metadata(&target).expect("stat successor").is_dir(), target_is_directory);
+		assert!(stale.exists(), "stale quarantine was not retained");
 		fs::remove_dir_all(root).expect("remove temporary directory");
 	}
 
 	#[test]
-	fn regular_target_preserves_directory_successor_after_placeholder_identity_verification() {
-		preserves_directory_successor_after_placeholder_identity_verification(false);
+	fn regular_target_retains_regular_placeholder_after_detach_hook() {
+		retained_same_kind_placeholder_preserves_successor_after_detach_hook(false);
 	}
 
 	#[test]
-	fn directory_target_preserves_directory_successor_after_placeholder_identity_verification() {
-		preserves_directory_successor_after_placeholder_identity_verification(true);
+	fn directory_target_retains_directory_placeholder_after_detach_hook() {
+		retained_same_kind_placeholder_preserves_successor_after_detach_hook(true);
 	}
 
-	fn retained_unknown_after_placeholder_mismatch_is_reported_separately(detach_only: bool) {
+	fn poisoned_same_kind_successor_is_retained_without_overwriting_the_next_successor(
+		detach_only: bool,
+	) {
 		let _guard = exchange_hook_test_guard();
 		let root = std::env::temp_dir().join(format!(
-			"gjc-exact-unlink-retained-successor-{}-{}",
+			"skc-exact-unlink-retained-successor-{}-{}",
 			std::process::id(),
 			SystemTime::now()
 				.duration_since(UNIX_EPOCH)
@@ -5710,10 +6336,8 @@ mod exact_unlink_placeholder_tests {
 		let second_successor = root.join("second-successor");
 		let stale = root.join(".quarantine");
 		fs::write(&target, b"stale").expect("write stale target");
-		fs::create_dir(&first_successor).expect("create first successor");
-		fs::write(first_successor.join("owner"), b"first").expect("write first successor owner");
-		fs::create_dir(&second_successor).expect("create second successor");
-		fs::write(second_successor.join("owner"), b"second").expect("write second successor owner");
+		fs::write(&first_successor, b"first").expect("write first successor");
+		fs::write(&second_successor, b"second").expect("write second successor");
 		let metadata = fs::metadata(&target).expect("stat target");
 		let identity = ExactFileIdentity {
 			dev: metadata.dev(),
@@ -5737,12 +6361,13 @@ mod exact_unlink_placeholder_tests {
 		let target_for_unlink = target.clone();
 		let unlink = thread::spawn(move || platform::exact_unlink(&target_for_unlink, &identity));
 		exchange_entered_rx.recv().expect("wait for exchange");
-		fs::rename(&first_successor, &target).expect("first successor replaces placeholder");
+		fs::rename(&first_successor, &target).expect("first regular successor replaces placeholder");
 		exchange_resume_tx.send(()).expect("resume exchange");
 		placeholder_entered_rx
 			.recv()
 			.expect("wait for first successor detach");
-		fs::rename(&second_successor, &target).expect("second successor prevents restoration");
+		fs::rename(&second_successor, &target)
+			.expect("second regular successor prevents restoration");
 		placeholder_resume_tx
 			.send(())
 			.expect("resume placeholder cleanup");
@@ -5751,44 +6376,39 @@ mod exact_unlink_placeholder_tests {
 		platform::set_after_placeholder_detach_hook(None);
 
 		assert!(!result.ok);
-		assert_eq!(result.code.as_deref(), Some("identity_mismatch"));
-		assert!(result.retained_placeholder_path.is_none());
-		assert!(result.retained_successor_path.is_none());
-		let retained = result
-			.retained_unknown_path
-			.expect("unverified cleanup recovery path");
-		assert!(Path::new(&retained).is_dir(), "unverified cleanup entry was not retained");
-		assert_eq!(
-			fs::read(Path::new(&retained).join("owner"))
-				.expect("read retained unverified cleanup entry"),
-			b"first"
-		);
-		assert_eq!(fs::read(target.join("owner")).expect("read second successor"), b"second");
-		if detach_only {
-			assert_eq!(result.detached_path.as_deref(), Some(stale.to_string_lossy().as_ref()));
-			assert_eq!(fs::read(&stale).expect("read detached stale object"), b"stale");
-		} else {
-			assert!(result.detached_path.is_none());
-			assert!(!stale.exists(), "removed stale object was reported as detached");
-		}
+		assert!(matches!(result.code.as_deref(), Some("cleanup_pending" | "identity_mismatch")));
+		assert_eq!(result.detached_path.as_deref(), Some(stale.to_string_lossy().as_ref()));
+		assert_eq!(fs::read(&target).expect("read second successor"), b"second");
+		assert_eq!(fs::read(&stale).expect("read detached stale object"), b"stale");
+		let retained = fs::read_dir(&root)
+			.expect("read temporary directory")
+			.map(|entry| entry.expect("read temporary entry").path())
+			.find(|path| {
+				path
+					.file_name()
+					.and_then(|name| name.to_str())
+					.is_some_and(|name| name.starts_with(".skc-exact-unlink-placeholder-"))
+			})
+			.expect("find retained poisoned successor");
+		assert_eq!(fs::read(retained).expect("read retained poisoned successor"), b"first");
 		fs::remove_dir_all(root).expect("remove temporary directory");
 	}
 
 	#[test]
-	fn retained_unknown_after_stale_removal_has_no_detached_path() {
-		retained_unknown_after_placeholder_mismatch_is_reported_separately(false);
+	fn poisoned_successor_after_stale_removal_is_retained() {
+		poisoned_same_kind_successor_is_retained_without_overwriting_the_next_successor(false);
 	}
 
 	#[test]
-	fn retained_unknown_and_stale_quarantine_are_reported_separately() {
-		retained_unknown_after_placeholder_mismatch_is_reported_separately(true);
+	fn poisoned_successor_and_stale_quarantine_are_retained() {
+		poisoned_same_kind_successor_is_retained_without_overwriting_the_next_successor(true);
 	}
 
 	#[test]
 	fn exchange_failure_retains_placeholder_cleanup_path() {
 		let _guard = exchange_hook_test_guard();
 		let root = std::env::temp_dir().join(format!(
-			"gjc-exact-unlink-exchange-failure-placeholder-{}-{}",
+			"skc-exact-unlink-exchange-failure-placeholder-{}-{}",
 			std::process::id(),
 			SystemTime::now()
 				.duration_since(UNIX_EPOCH)
@@ -5833,10 +6453,10 @@ mod exact_unlink_placeholder_tests {
 				path
 					.file_name()
 					.and_then(|name| name.to_str())
-					.is_some_and(|name| name.starts_with(".gjc-exact-unlink-placeholder-"))
+					.is_some_and(|name| name.starts_with(".skc-exact-unlink-placeholder-"))
 			})
 			.expect("find detached placeholder");
-		fs::write(retained.join("blocker"), b"retained").expect("make placeholder cleanup fail");
+		fs::write(&retained, b"retained").expect("poison retained regular placeholder");
 		placeholder_resume_tx
 			.send(())
 			.expect("resume placeholder cleanup");
@@ -5852,7 +6472,7 @@ mod exact_unlink_placeholder_tests {
 			result.retained_placeholder_path.as_deref(),
 			Some(retained.to_string_lossy().as_ref())
 		);
-		assert!(retained.is_dir(), "retained cleanup path is not recoverable");
+		assert!(retained.is_file(), "retained cleanup path is not a regular placeholder");
 		fs::remove_dir_all(root).expect("remove temporary directory");
 	}
 
@@ -5860,15 +6480,153 @@ mod exact_unlink_placeholder_tests {
 	fn retained_internal_placeholder_is_not_reported_as_a_successor() {
 		let result = NativeExactUnlinkResult::retained_placeholder_failure(
 			"io_error",
-			"/tmp/.gjc-exact-unlink-placeholder-verified".to_owned(),
+			"/tmp/.skc-exact-unlink-placeholder-verified".to_owned(),
 		);
 		assert!(!result.ok);
 		assert!(result.detached_path.is_none());
 		assert!(result.retained_successor_path.is_none());
 		assert_eq!(
 			result.retained_placeholder_path.as_deref(),
-			Some("/tmp/.gjc-exact-unlink-placeholder-verified")
+			Some("/tmp/.skc-exact-unlink-placeholder-verified")
 		);
+	}
+
+	fn assert_tree_replay_result(result: &NativeExactUnlinkResult, detached: &std::path::Path) {
+		assert!(!result.ok);
+		assert_eq!(result.code.as_deref(), Some("cleanup_pending"));
+		assert_eq!(result.detached_path.as_deref(), Some(detached.to_string_lossy().as_ref()));
+		assert!(result.retained_successor_path.is_none());
+		assert!(result.retained_placeholder_path.is_none());
+		assert!(result.retained_unknown_path.is_none());
+	}
+
+	fn same_tree_after_authorized_rename(
+		left: &NativeDirectoryTreeSnapshot,
+		right: &NativeDirectoryTreeSnapshot,
+	) -> bool {
+		left.root_dev == right.root_dev
+			&& left.root_ino == right.root_ino
+			&& left.entries.len() == right.entries.len()
+			&& left
+				.entries
+				.iter()
+				.zip(&right.entries)
+				.all(|(left, right)| {
+					left.relative_path == right.relative_path
+						&& left.kind == right.kind
+						&& left.dev == right.dev
+						&& left.ino == right.ino
+						&& left.size == right.size
+						&& left.mtime_ns == right.mtime_ns
+						&& left.sha256 == right.sha256
+				})
+	}
+
+	fn replay_retains_verified_tree(nested: bool) {
+		let _guard = exchange_hook_test_guard();
+		let root = std::env::temp_dir().join(format!(
+			"skc-tree-replay-{}-{}",
+			std::process::id(),
+			SystemTime::now()
+				.duration_since(UNIX_EPOCH)
+				.expect("system time")
+				.as_nanos(),
+		));
+		fs::create_dir(&root).expect("create temporary directory");
+		let target = root.join("target");
+		fs::create_dir(&target).expect("create target");
+		if nested {
+			fs::create_dir_all(target.join("nested")).expect("create nested tree");
+			fs::write(target.join("root-file"), b"root").expect("write root file");
+			fs::write(target.join("nested/file"), b"nested").expect("write nested file");
+		}
+		let snapshot = platform::snapshot_directory_tree(&target)
+			.snapshot
+			.expect("snapshot target");
+		let detached = root.join("target.removing");
+
+		let first = platform::exact_remove_directory_tree(&target, &snapshot);
+		assert_tree_replay_result(&first, &detached);
+		assert!(target.symlink_metadata().is_err());
+		assert!(
+			same_tree_after_authorized_rename(
+				&platform::snapshot_directory_tree(&detached)
+					.snapshot
+					.expect("snapshot detached"),
+				&snapshot,
+			),
+			"first retained tree is replayable from the original snapshot"
+		);
+
+		let second = platform::exact_remove_directory_tree(&target, &snapshot);
+		assert_tree_replay_result(&second, &detached);
+		assert!(
+			same_tree_after_authorized_rename(
+				&platform::snapshot_directory_tree(&detached)
+					.snapshot
+					.expect("snapshot detached"),
+				&snapshot,
+			),
+			"second call retains the same replayable tree"
+		);
+		fs::remove_dir_all(root).expect("remove temporary directory");
+	}
+
+	#[test]
+	fn empty_tree_retention_replays_on_second_call_with_exact_evidence() {
+		replay_retains_verified_tree(false);
+	}
+
+	#[test]
+	fn nested_tree_retention_replays_on_second_call_with_exact_evidence() {
+		replay_retains_verified_tree(true);
+	}
+	#[test]
+	fn aborted_tree_hook_does_not_block_the_next_hook() {
+		let _guard = exchange_hook_test_guard();
+		let root = std::env::temp_dir().join(format!(
+			"skc-tree-hook-abort-{}-{}",
+			std::process::id(),
+			SystemTime::now()
+				.duration_since(UNIX_EPOCH)
+				.expect("system time")
+				.as_nanos(),
+		));
+		fs::create_dir(&root).expect("create temporary directory");
+		let target = root.join("target");
+		fs::create_dir(&target).expect("create target");
+		let snapshot = platform::snapshot_directory_tree(&target)
+			.snapshot
+			.expect("snapshot target");
+		let (entered_tx, entered_rx) = mpsc::channel();
+		let (resume_tx, resume_rx) = mpsc::channel();
+		drop(resume_tx);
+		platform::set_after_tree_rename_hook(Some((entered_tx, resume_rx)));
+		let target_for_remove = target.clone();
+		let aborted = thread::spawn(move || {
+			platform::exact_remove_directory_tree(&target_for_remove, &snapshot)
+		});
+		entered_rx.recv().expect("wait for aborted hook");
+		assert!(aborted.join().is_err(), "disconnected hook did not abort");
+
+		let next = root.join("next");
+		fs::create_dir(&next).expect("create next target");
+		let snapshot = platform::snapshot_directory_tree(&next)
+			.snapshot
+			.expect("snapshot next target");
+		let (entered_tx, entered_rx) = mpsc::channel();
+		let (resume_tx, resume_rx) = mpsc::channel();
+		platform::set_after_tree_rename_hook(Some((entered_tx, resume_rx)));
+		let next_for_remove = next.clone();
+		let removal =
+			thread::spawn(move || platform::exact_remove_directory_tree(&next_for_remove, &snapshot));
+		entered_rx.recv().expect("wait for next hook");
+		resume_tx.send(()).expect("resume next hook");
+		assert_eq!(
+			removal.join().expect("next removal thread").code.as_deref(),
+			Some("cleanup_pending"),
+		);
+		fs::remove_dir_all(root).expect("remove temporary directory");
 	}
 }
 #[cfg(test)]

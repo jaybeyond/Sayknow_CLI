@@ -1,11 +1,36 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import * as path from "node:path";
-import type { AgentSideConnection, PromptRequest, SessionNotification } from "@agentclientprotocol/sdk";
-import { AcpAgent } from "@sayknow-cli/coding-agent/modes/acp/acp-agent";
+import {
+	type AgentSideConnection,
+	type Client,
+	ClientSideConnection,
+	type CreateTerminalRequest,
+	type CreateTerminalResponse,
+	ndJsonStream,
+	type PromptRequest,
+	RequestError,
+	type RequestPermissionRequest,
+	type RequestPermissionResponse,
+	type SessionNotification,
+} from "@agentclientprotocol/sdk";
+import { AcpAgent, acpRequestFailure } from "@sayknow-cli/coding-agent/modes/acp/acp-agent";
+import { createAcpConnection } from "@sayknow-cli/coding-agent/modes/acp/acp-mode";
 import { writeBrokerDiscovery } from "@sayknow-cli/coding-agent/sdk/broker/discovery";
 import { TempDir } from "@sayknow-cli/utils";
+import { AcpSdkAdapterError } from "../../src/sdk/acp";
 
 type TestSocket = { send(message: string): void };
+class TestClient implements Client {
+	async requestPermission(_params: RequestPermissionRequest): Promise<RequestPermissionResponse> {
+		return { outcome: { outcome: "selected", optionId: "allow_once" } };
+	}
+
+	async sessionUpdate(_params: SessionNotification): Promise<void> {}
+
+	async createTerminal(_params: CreateTerminalRequest): Promise<CreateTerminalResponse> {
+		return { terminalId: "test-terminal" };
+	}
+}
 
 async function bounded<T>(promise: Promise<T>, label: string): Promise<T> {
 	return await Promise.race([
@@ -38,6 +63,7 @@ describe("ACP production cancellation completion", () => {
 		const token = "acp-cancel-token";
 		const updates: SessionNotification[] = [];
 		const promptWaiters: Array<PromiseWithResolvers<void>> = [];
+		const controlOperations: string[] = [];
 		let promptSocket: TestSocket | undefined;
 		let abortAcknowledged = true;
 
@@ -87,6 +113,7 @@ describe("ACP production cancellation completion", () => {
 						return;
 					}
 					if (frame.type !== "control_request") return;
+					if (typeof frame.operation === "string") controlOperations.push(frame.operation);
 					if (frame.operation === "turn.prompt") {
 						promptSocket = socket;
 						promptWaiters.shift()?.resolve();
@@ -133,6 +160,26 @@ describe("ACP production cancellation completion", () => {
 		} as unknown as AgentSideConnection;
 		const acp = new AcpAgent(connection, { agentDir });
 		const created = await bounded(acp.newSession({ cwd, mcpServers: [] }), "new session");
+		expect(created.configOptions).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({
+					id: "model",
+					name: "Model",
+					currentValue: "openai/gpt",
+					options: [{ value: "openai/gpt", name: "GPT" }],
+				}),
+			]),
+		);
+		await bounded(
+			acp.setSessionConfigOption({
+				sessionId: created.sessionId,
+				configId: "model",
+				value: "openai/gpt",
+			}),
+			"set model",
+		);
+		expect(controlOperations).toContain("model.set");
+		expect(controlOperations).not.toContain("model.profile.set");
 
 		const firstDelivered = Promise.withResolvers<void>();
 		promptWaiters.push(firstDelivered);
@@ -189,5 +236,124 @@ describe("ACP production cancellation completion", () => {
 				);
 			}),
 		).toHaveLength(0);
+	});
+});
+
+describe("ACP request failure codes", () => {
+	let connectionAbort: AbortController;
+
+	beforeEach(() => {
+		connectionAbort = new AbortController();
+	});
+
+	afterEach(() => {
+		connectionAbort.abort();
+	});
+
+	function agent(): AcpAgent {
+		return new AcpAgent({ signal: connectionAbort.signal } as unknown as AgentSideConnection, {
+			agentDir: "/tmp",
+		});
+	}
+
+	it("rejects an unknown ext method with method-not-found instead of a successful result", async () => {
+		const error = await agent()
+			.extMethod("does/not-exist", {})
+			.catch((e: unknown) => e);
+
+		expect(error).toBeInstanceOf(RequestError);
+		expect((error as RequestError).code).toBe(-32601);
+	});
+	it("maps adapter error codes and preserves their discriminators", () => {
+		const cases = [
+			{ code: "authentication_failed", expectedCode: -32000 },
+			{ code: "invalid_input", expectedCode: -32602 },
+			{ code: "unsupported", expectedCode: -32602 },
+			{ code: "unsupported_content", expectedCode: -32602 },
+			{ code: "conflict", expectedCode: -32603 },
+		];
+
+		for (const { code, expectedCode } of cases) {
+			const failure = acpRequestFailure(new AcpSdkAdapterError(code, `failure: ${code}`));
+
+			expect(failure).toBeInstanceOf(RequestError);
+			expect(failure).toMatchObject({
+				code: expectedCode,
+				data: { code },
+			});
+		}
+
+		const requestError = RequestError.invalidParams({ code: "already_request_error" }, "already wrapped");
+		expect(acpRequestFailure(requestError)).toBe(requestError);
+		expect(requestError.code).toBe(-32602);
+	});
+
+	// The proxy has two arms: a synchronous `try/catch` and a `.catch` on a returned
+	// Promise. Every real agent method is `async`, so the Promise arm is the production
+	// path — a sync throw would leave it unproven and a deleted `.catch` would still
+	// look green here.
+	it("maps rejected connection-boundary promises through the request-error proxy", async () => {
+		const initialize = spyOn(AcpAgent.prototype, "initialize").mockImplementation(async () => {
+			throw new AcpSdkAdapterError("authentication_failed", "authenticate first");
+		});
+		const clientToAgent = new TransformStream();
+		const agentToClient = new TransformStream();
+		const clientConnection = new ClientSideConnection(
+			() => new TestClient(),
+			ndJsonStream(clientToAgent.writable, agentToClient.readable),
+		);
+		const serverConnection = createAcpConnection(ndJsonStream(agentToClient.writable, clientToAgent.readable));
+
+		try {
+			const error = await clientConnection
+				.initialize({ protocolVersion: 1, clientCapabilities: {} })
+				.catch((reason: unknown) => reason);
+
+			expect(error).toBeInstanceOf(RequestError);
+			expect(error).toMatchObject({
+				code: -32000,
+				data: { code: "authentication_failed" },
+			});
+		} finally {
+			initialize.mockRestore();
+			const closeConnection = (connection: unknown): void => {
+				(connection as { connection: { close(error?: Error): void } }).connection.close();
+			};
+			closeConnection(clientConnection);
+			closeConnection(serverConnection);
+			await Promise.allSettled([clientConnection.closed, serverConnection.closed]);
+		}
+	});
+
+	// A second code over the same async arm, so the wire proof is not a single-value
+	// coincidence: `invalid_input` must reach the client as `-32602`, not `-32000`.
+	it("maps a rejected invalid-input promise to invalid-params on the wire", async () => {
+		const initialize = spyOn(AcpAgent.prototype, "initialize").mockRejectedValue(
+			new AcpSdkAdapterError("invalid_input", "protocolVersion is required"),
+		);
+		const clientToAgent = new TransformStream();
+		const agentToClient = new TransformStream();
+		const clientConnection = new ClientSideConnection(
+			() => new TestClient(),
+			ndJsonStream(clientToAgent.writable, agentToClient.readable),
+		);
+		const serverConnection = createAcpConnection(ndJsonStream(agentToClient.writable, clientToAgent.readable));
+
+		try {
+			const error = await clientConnection
+				.initialize({ protocolVersion: 1, clientCapabilities: {} })
+				.catch((reason: unknown) => reason);
+
+			expect(error).toBeInstanceOf(RequestError);
+			expect(error).toMatchObject({ code: -32602, data: { code: "invalid_input" } });
+		} finally {
+			initialize.mockRestore();
+			const closeConnection = (connection: unknown): void => {
+				(connection as { connection: { close(error?: Error): void } }).connection.close();
+			};
+			closeConnection(clientConnection);
+			closeConnection(serverConnection);
+			await Promise.allSettled([clientConnection.closed, serverConnection.closed]);
+		}
 	});
 });

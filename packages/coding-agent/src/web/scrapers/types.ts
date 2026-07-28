@@ -5,7 +5,7 @@ import { ptree } from "@sayknow-cli/utils";
 import type { AgentStorage } from "../../session/agent-storage";
 import { ToolAbortError } from "../../tools/tool-errors";
 import type { AddressResolver } from "../insane/url-guard";
-import { validatePublicHttpUrl } from "../insane/url-guard";
+import { guardedPublicFetch } from "../insane/url-guard";
 
 export { formatNumber } from "@sayknow-cli/utils";
 
@@ -85,20 +85,6 @@ export interface LoadPageResult {
 	error?: string;
 }
 
-async function guardPublicFetchUrl(
-	rawUrl: string,
-	resolver: AddressResolver | undefined,
-	context: string,
-): Promise<{ ok: true; url: string } | { ok: false; error: string; finalUrl: string }> {
-	const guard = await validatePublicHttpUrl(rawUrl, { resolver });
-	if (guard.ok) return { ok: true, url: guard.url.toString() };
-	return {
-		ok: false,
-		error: `${context}: target URL is not public HTTP(S): ${guard.reason}`,
-		finalUrl: rawUrl,
-	};
-}
-
 function shouldRewriteRedirectMethod(status: number, method: string): boolean {
 	const normalized = method.toUpperCase();
 	return status === 303 || ((status === 301 || status === 302) && normalized === "POST");
@@ -120,20 +106,7 @@ export async function loadPage(url: string, options: LoadPageOptions = {}): Prom
 		maxRedirects = 10,
 	} = options;
 
-	let initialUrl = url;
-	if (publicUrlGuard) {
-		const guarded = await guardPublicFetchUrl(url, resolver, "Blocked URL fetch");
-		if (!guarded.ok) {
-			return {
-				content: "",
-				contentType: "",
-				finalUrl: guarded.finalUrl,
-				ok: false,
-				error: guarded.error,
-			};
-		}
-		initialUrl = guarded.url;
-	}
+	const initialUrl = url;
 
 	attempts: for (let attempt = 0; attempt < USER_AGENTS.length; attempt++) {
 		if (signal?.aborted) {
@@ -165,36 +138,33 @@ export async function loadPage(url: string, options: LoadPageOptions = {}): Prom
 					requestInit.body = currentBody;
 				}
 
-				const response = await fetch(currentUrl, requestInit);
+				const dial = publicUrlGuard
+					? await guardedPublicFetch(currentUrl, requestInit, { resolver })
+					: { ok: true as const, response: await fetch(currentUrl, requestInit), logicalUrl: new URL(currentUrl) };
+				if (!dial.ok) {
+					return {
+						content: "",
+						contentType: "",
+						finalUrl: dial.logicalUrl,
+						ok: false,
+						error: `Blocked URL fetch: target URL is not public HTTP(S): ${dial.reason}`,
+					};
+				}
+				const { response } = dial;
+				const logicalUrl = dial.logicalUrl.toString();
 				if (REDIRECT_STATUSES.has(response.status)) {
 					const location = response.headers.get("location");
 					if (!location) {
 						return {
 							content: "",
 							contentType: "",
-							finalUrl: currentUrl,
+							finalUrl: logicalUrl,
 							ok: false,
 							status: response.status,
 							error: "Redirect response missing Location header",
 						};
 					}
-					const redirectUrl = new URL(location, currentUrl).toString();
-					if (publicUrlGuard) {
-						const guarded = await guardPublicFetchUrl(redirectUrl, resolver, "Blocked URL redirect");
-						if (!guarded.ok) {
-							return {
-								content: "",
-								contentType: "",
-								finalUrl: guarded.finalUrl,
-								ok: false,
-								status: response.status,
-								error: guarded.error,
-							};
-						}
-						currentUrl = guarded.url;
-					} else {
-						currentUrl = redirectUrl;
-					}
+					currentUrl = new URL(location, logicalUrl).toString();
 					if (shouldRewriteRedirectMethod(response.status, currentMethod)) {
 						currentMethod = "GET";
 						currentBody = undefined;
@@ -203,7 +173,7 @@ export async function loadPage(url: string, options: LoadPageOptions = {}): Prom
 				}
 
 				const contentType = response.headers.get("content-type")?.split(";")[0]?.trim().toLowerCase() ?? "";
-				const finalUrl = response.url || currentUrl;
+				const finalUrl = logicalUrl;
 
 				const reader = response.body?.getReader();
 				if (!reader) {

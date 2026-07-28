@@ -126,6 +126,38 @@ export interface SkcTeamApiClaimResult {
 	claim_token?: string;
 	reason?: string;
 }
+export type SkcTeamWorkerClaimSelection =
+	| { kind: "none" }
+	| { kind: "exact"; task: SkcTeamTask; claim: SkcTeamTaskClaim }
+	| { kind: "ambiguous"; tasks: SkcTeamTask[] };
+
+export function selectCurrentClaimedTaskForWorker(
+	tasks: readonly SkcTeamTask[],
+	workerId: string,
+): SkcTeamWorkerClaimSelection {
+	const claimed = tasks.filter(
+		task =>
+			task.status === "in_progress" &&
+			task.assignee === workerId &&
+			task.claim?.owner === workerId &&
+			task.owner === workerId,
+	);
+	if (claimed.length === 0) return { kind: "none" };
+	if (claimed.length === 1) {
+		const task = claimed[0]!;
+		return { kind: "exact", task, claim: task.claim! };
+	}
+	return { kind: "ambiguous", tasks: claimed };
+}
+export function findSkcTeamClaimedTaskForWorker(
+	tasks: readonly SkcTeamTask[],
+	workerId: string,
+): SkcTeamTask | undefined {
+	const active = selectCurrentClaimedTaskForWorker(tasks, workerId);
+	if (active.kind === "exact") return active.task;
+	if (active.kind === "ambiguous") return undefined;
+	return tasks.find(task => task.status === "blocked" && task.assignee === workerId && task.claim?.owner === workerId);
+}
 
 type EventAppender = (event: {
 	type: string;

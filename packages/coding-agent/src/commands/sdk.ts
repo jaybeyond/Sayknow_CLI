@@ -1,11 +1,13 @@
 import { createHash } from "node:crypto";
 import * as fs from "node:fs/promises";
+import * as os from "node:os";
 import * as path from "node:path";
-import { Args, Command, Flags } from "@sayknow-cli/utils/cli";
+import { Args, CliParseError, Command, Flags, renderCommandHelp } from "@sayknow-cli/utils/cli";
 import type { Args as ParsedArgs } from "../cli/args";
 import { Settings } from "../config/settings";
 import { applyStartupModelProfiles, createSessionManager } from "../main";
 import { initializeExtensions } from "../modes/runtime-init";
+import { ACP_MCP_REQUEST_TIMEOUT_MS, ACP_MCP_STARTUP_HEADROOM_MS } from "../sdk/acp/mcp";
 import { Broker } from "../sdk/broker/broker";
 import { completeBrokerProcess } from "../sdk/broker/internal";
 import {
@@ -25,6 +27,7 @@ import {
 	type SdkStartupRollbackResult,
 	SdkStartupRollbackTracker,
 } from "../sdk/startup-capability";
+import { runSdkServe } from "../sdk/transport/serve-cli";
 import {
 	type CapturedSessionTranscriptSnapshot,
 	type ResumeSessionIdentity,
@@ -284,24 +287,106 @@ export async function runSessionHost(
 		throw new Error("SDK startup did not complete before readiness cutoff.");
 	}
 
-	let opened: { parsed: ParsedArgs; sessionManager: SessionManager | undefined };
-	let created: CreateLifecycleAgentSessionResult;
-	try {
-		opened = await openLifecycleSessionManager(request, cwd, agentDir);
-		created = await createLifecycleAgentSession({ cwd, agentDir, sessionManager: opened.sessionManager });
-	} catch (error) {
+	// Inlined rather than extracted to a helper: TypeScript's definite-assignment
+	// analysis does not see a `Promise<never>` helper as terminating, so hoisting
+	// this would make `opened`/`created` "used before assigned" below.
+	const registrationFailure = async (error: unknown): Promise<SdkStartupFailure> => {
 		const rollback = new SdkStartupRollbackTracker();
 		rollback.recordAbsent();
 		const failure = normalizeSdkStartupFailure("registration", "failed", error);
 		await writeFailure(failure, rollback.result);
-		throw new Error(failure.message);
+		return failure;
+	};
+
+	let opened: { parsed: ParsedArgs; sessionManager: SessionManager | undefined };
+	let created: CreateLifecycleAgentSessionResult;
+	let mcpConfigDirectory: string | undefined;
+	try {
+		let mcpConfigPath: string | undefined;
+		try {
+			opened = await openLifecycleSessionManager(request, cwd, agentDir);
+			if (request.mcpServers && request.mcpServers.length > 0) {
+				mcpConfigDirectory = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "skc-acp-mcp-")));
+				mcpConfigPath = path.join(mcpConfigDirectory, "mcp.json");
+				await Bun.write(
+					mcpConfigPath,
+					JSON.stringify({
+						mcpServers: Object.fromEntries(
+							request.mcpServers.map(server => [
+								server.name,
+								"url" in server
+									? {
+											type: server.type,
+											url: server.url,
+											...(server.headers ? { headers: server.headers } : {}),
+											timeout: ACP_MCP_REQUEST_TIMEOUT_MS,
+										}
+									: {
+											type: "stdio",
+											command: server.command,
+											args: server.args,
+											...(server.env ? { env: server.env } : {}),
+											noInheritEnv: true,
+											timeout: ACP_MCP_REQUEST_TIMEOUT_MS,
+										},
+							]),
+						),
+					}),
+				);
+			}
+		} catch (error) {
+			throw await registrationFailure(error);
+		}
+
+		// The longer MCP startup ceiling is scoped to ACP lifecycle launches only:
+		// it applies when this request actually carried `mcpServers`. Ordinary
+		// CLI/SDK `mcpConfigPath` consumers keep the manager's short default.
+		//
+		// This recheck deliberately sits OUTSIDE the registration catch above.
+		// Inside it, the throw would be caught, reclassified as
+		// `registration`/`failed`, and written a second time, losing the
+		// `startup`/`pending` outcome the readiness cutoff is supposed to report.
+		// Session-manager open and MCP config write already consumed part of the
+		// budget, so re-read the clock here rather than reusing the earlier check.
+		let mcpStartupTimeoutMs: number | undefined;
+		if (mcpConfigPath !== undefined) {
+			const remaining = request.semanticReadyDeadlineAt - now() - ACP_MCP_STARTUP_HEADROOM_MS;
+			if (remaining <= 0) {
+				const absent = new SdkStartupRollbackTracker();
+				absent.recordAbsent();
+				await writeFailure(
+					{
+						phase: "startup",
+						reason: "pending",
+						message: "SDK startup did not complete before readiness cutoff.",
+					},
+					absent.result,
+				);
+				throw new Error("SDK startup did not complete before readiness cutoff.");
+			}
+			mcpStartupTimeoutMs = remaining;
+		}
+
+		try {
+			created = await createLifecycleAgentSession({
+				cwd,
+				agentDir,
+				sessionManager: opened.sessionManager,
+				...(mcpConfigPath ? { mcpConfigPath } : {}),
+				...(mcpStartupTimeoutMs !== undefined ? { mcpStartupTimeoutMs } : {}),
+			});
+		} catch (error) {
+			throw await registrationFailure(error);
+		}
+	} finally {
+		if (mcpConfigDirectory) await fs.rm(mcpConfigDirectory, { recursive: true, force: true });
 	}
 	const { parsed } = opened;
 	if ("failure" in created) {
 		created.rollback.recordAbsent();
 		await writeFailure(created.failure, created.rollback.result);
 
-		throw new Error(created.failure.message);
+		throw created.failure;
 	}
 	const { session, capability, rollback } = created;
 	let sessionDisposal: Promise<void> | undefined;
@@ -423,19 +508,51 @@ export async function runSessionHost(
 	await new Promise<void>(() => {});
 }
 
+export type SdkInternalArgv = { action: "broker-internal"; agentDir: string } | { action: "session-host-internal" };
+
+/** Parses the exact private argv contracts used by SDK child-process spawns. */
+export function parseSdkInternalArgv(argv: readonly string[]): SdkInternalArgv {
+	if (argv[0] === "session-host-internal" && argv.length === 1) return { action: "session-host-internal" };
+	if (argv[0] === "broker-internal" && argv.length === 3 && argv[1] === "--agent-dir" && argv[2])
+		return { action: "broker-internal", agentDir: argv[2] };
+	throw new CliParseError("Invalid internal SDK invocation.");
+}
+
+class SdkServeHelp extends Command {
+	static description = "skc sdk serve --stdio | --socket <path> [--session <id>] [--pending-ceiling <bytes>]";
+	static flags = {
+		stdio: Flags.boolean({ description: "Serve SDK frames over standard input and output" }),
+		socket: Flags.string({ description: "Serve SDK frames over a Unix socket path" }),
+		session: Flags.string({ description: "Attach to a specific SDK session" }),
+		"pending-ceiling": Flags.string({ description: "Maximum queued relay bytes per direction" }),
+	};
+	async run(): Promise<void> {}
+}
+
 export default class Sdk extends Command {
-	static description = "SDK internal services";
-	static hidden = true;
-	static args = { action: Args.string({ required: true, options: ["broker-internal", "session-host-internal"] }) };
-	static flags = { "agent-dir": Flags.string({ description: "Internal broker agent directory" }) };
+	static description = "skc sdk serve --stdio | --socket <path> [--session <id>] [--pending-ceiling <bytes>]";
+	static hidden = false;
+	static delegateHelp = true;
+	static args = { action: Args.string({ required: false, options: ["serve"] }) };
+	static flags = SdkServeHelp.flags;
 	async run(): Promise<void> {
-		const { args, flags } = await this.parse(Sdk);
-		if (args.action === "session-host-internal") {
+		const action = this.argv[0];
+		if (this.argv.includes("--help") || this.argv.includes("-h")) {
+			renderCommandHelp("skc", action === "serve" ? "sdk serve" : "sdk", action === "serve" ? SdkServeHelp : Sdk);
+			return;
+		}
+		if (action === "serve") {
+			await runSdkServe(this.argv.slice(1));
+			return;
+		}
+		if (action !== "broker-internal" && action !== "session-host-internal")
+			throw new CliParseError("Expected action to be serve.");
+		const internal = parseSdkInternalArgv(this.argv);
+		if (internal.action === "session-host-internal") {
 			await runSessionHost();
 			return;
 		}
-		const agentDir = flags["agent-dir"] as string | undefined;
-		if (!agentDir) throw new Error("--agent-dir is required for sdk broker-internal.");
+		const agentDir = internal.agentDir;
 		const broker = new Broker({
 			agentDir,
 			resolveDirectoryMigration: async cwd => {

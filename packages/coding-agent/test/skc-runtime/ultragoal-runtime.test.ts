@@ -180,6 +180,11 @@ function passingQualityGate(): string {
 			],
 			blockers: [],
 		},
+		criticReview: {
+			verdict: "OKAY",
+			evidence: "critic approved final aggregate",
+			blockers: [],
+		},
 		iteration: {
 			status: "passed",
 			evidence: "no verification findings remain after steering iterations",
@@ -2275,6 +2280,87 @@ describe("native SKC ultragoal runtime", () => {
 		expect(receipt).not.toHaveProperty("goal");
 	});
 
+	it("reports resolve-blockers (not none/execute-goal) when the only story is blocked (#2903)", async () => {
+		const root = await tempDir();
+		await createUltragoalPlan({ cwd: root, brief: "Ship the fix" });
+		await startNextUltragoalGoal({ cwd: root });
+		await checkpointUltragoalGoal({
+			cwd: root,
+			goalId: "G001",
+			status: "blocked",
+			evidence: "waiting on external review",
+		});
+
+		const jsonResult = await runNativeUltragoalCommand(["complete-goals", "--json"], root);
+		const textResult = await runNativeUltragoalCommand(["complete-goals"], root);
+		const receipt = JSON.parse(jsonResult.stdout ?? "{}");
+
+		expect(jsonResult.status).toBe(0);
+		expect(textResult.status).toBe(0);
+		expect(receipt).toMatchObject({
+			ok: true,
+			all_complete: false,
+			next_action: "resolve-blockers",
+			blocked_goal_ids: ["G001"],
+		});
+		expect(receipt.goal_id).toBeUndefined();
+		expect(receipt.blocked_goals).toEqual([
+			expect.objectContaining({ id: "G001", status: "blocked", evidence: "waiting on external review" }),
+		]);
+		expect(textResult.stdout).toContain("next-action=resolve-blockers");
+		expect(textResult.stdout).toContain("blocked-goal-ids=G001");
+		expect(textResult.stdout).not.toContain("next-action=none");
+		expect(textResult.stdout).not.toContain("next-action=execute-goal");
+	});
+
+	it("reports resolve-blockers for review_blocked with text/json parity (#2903)", async () => {
+		const root = await tempDir();
+		await createUltragoalPlan({ cwd: root, brief: "Ship the fix" });
+		await startNextUltragoalGoal({ cwd: root });
+		await checkpointUltragoalGoal({
+			cwd: root,
+			goalId: "G001",
+			status: "review_blocked",
+			evidence: "architect requested design rewrite",
+		});
+
+		const jsonResult = await runNativeUltragoalCommand(["complete-goals", "--json"], root);
+		const textResult = await runNativeUltragoalCommand(["complete-goals"], root);
+		const receipt = JSON.parse(jsonResult.stdout ?? "{}");
+
+		expect(jsonResult.status).toBe(0);
+		expect(receipt.next_action).toBe("resolve-blockers");
+		expect(receipt.blocked_goal_ids).toEqual(["G001"]);
+		expect(receipt.blocked_goals?.[0]?.status).toBe("review_blocked");
+		expect(textResult.stdout).toContain("next-action=resolve-blockers");
+		expect(textResult.stdout).toContain("G001:review_blocked");
+	});
+
+	it("reports retry-failed when incomplete work is only failed and --retry-failed is off (#2903)", async () => {
+		const root = await tempDir();
+		await createUltragoalPlan({ cwd: root, brief: "Ship the fix" });
+		await startNextUltragoalGoal({ cwd: root });
+		await checkpointUltragoalGoal({
+			cwd: root,
+			goalId: "G001",
+			status: "failed",
+			evidence: "tests red",
+		});
+
+		const jsonResult = await runNativeUltragoalCommand(["complete-goals", "--json"], root);
+		const textResult = await runNativeUltragoalCommand(["complete-goals"], root);
+		const receipt = JSON.parse(jsonResult.stdout ?? "{}");
+
+		expect(receipt).toMatchObject({
+			all_complete: false,
+			next_action: "retry-failed",
+			failed_goal_ids: ["G001"],
+		});
+		expect(receipt.goal_id).toBeUndefined();
+		expect(textResult.stdout).toContain("next-action=retry-failed");
+		expect(textResult.stdout).toContain("failed-goal-ids=G001");
+	});
+
 	it("prints receipt-only json for checkpoint", async () => {
 		const root = await tempDir();
 		await createUltragoalPlan({ cwd: root, brief: "Ship the fix" });
@@ -3149,6 +3235,80 @@ describe("native SKC ultragoal runtime", () => {
 		).rejects.toThrow("changed after its completion receipt was verified");
 	});
 
+	it("re-mints on identical-evidence replay when the recorded final-aggregate gate lacks criticReview OKAY (#3365)", async () => {
+		const root = await tempDir();
+		await createUltragoalPlan({ cwd: root, brief: "Ship the fix" });
+		await startNextUltragoalGoal({ cwd: root });
+		await checkpointUltragoalGoal({
+			cwd: root,
+			goalId: "G001",
+			status: "complete",
+			evidence: "first goal verified",
+			qualityGateJson: await passingLiveQualityGate(root),
+		});
+
+		// Simulate a legacy final-aggregate checkpoint minted before criticReview
+		// was required: strip criticReview from the recorded ledger gate and keep
+		// the receipt hashes internally consistent so the receipt is NOT stale —
+		// only the completion guard's criticReview check rejects it.
+		const goalsPath = path.join(sessionUltragoalDir(root, TEST_SESSION_ID), "goals.json");
+		const ledgerPath = path.join(sessionUltragoalDir(root, TEST_SESSION_ID), "ledger.jsonl");
+		const saved = JSON.parse(await Bun.file(goalsPath).text());
+		const receipt = saved.goals[0].completionVerification;
+		let strippedHash = "";
+		const rewritten = (await Bun.file(ledgerPath).text())
+			.split("\n")
+			.filter(line => line.trim())
+			.map(line => {
+				const event = JSON.parse(line);
+				if (event.eventId === receipt.checkpointLedgerEventId) {
+					delete event.qualityGateJson.criticReview;
+					strippedHash = hashStructuredValue(event.qualityGateJson);
+					event.completionVerification.qualityGateHash = strippedHash;
+				}
+				return JSON.stringify(event);
+			});
+		await fs.writeFile(ledgerPath, `${rewritten.join("\n")}\n`);
+		receipt.qualityGateHash = strippedHash;
+		await fs.writeFile(goalsPath, `${JSON.stringify(saved, null, 2)}\n`);
+
+		// The receipt is fresh but the guard rejects it: without repair the run
+		// loops forever (the receipt validator reports active_missing_critic_verdict
+		// and the durable wrapper surfaces a non-complete state).
+		const brokenPlan = (await readUltragoalPlan(root))!;
+		const brokenLedger = await readUltragoalLedger(root);
+		expect(
+			validateCompletionReceipt({
+				plan: brokenPlan,
+				ledger: brokenLedger,
+				goal: brokenPlan.goals[0]!,
+				receiptKind: "final-aggregate",
+			}).state,
+		).toBe("active_missing_critic_verdict");
+		const blocked = await verifyUltragoalDurableCompletionState({ cwd: root, sessionId: TEST_SESSION_ID });
+		expect(blocked.state).not.toBe("active_verified_complete");
+		const checkpointsBefore = (await readUltragoalLedger(root)).filter(
+			event => event.event === "goal_checkpointed",
+		).length;
+
+		// The identical-evidence replay with a corrected gate (criticReview OKAY)
+		// must re-verify and re-mint instead of no-opping on the broken receipt.
+		const replayed = await checkpointUltragoalGoal({
+			cwd: root,
+			goalId: "G001",
+			status: "complete",
+			evidence: "first goal verified",
+			qualityGateJson: await passingLiveQualityGate(root),
+		});
+		expect(replayed.goals[0]?.completionVerification?.receiptKind).toBe("final-aggregate");
+		expect(replayed.goals[0]?.completionVerification?.receiptId).not.toBe(receipt.receiptId);
+		expect((await readUltragoalLedger(root)).filter(event => event.event === "goal_checkpointed")).toHaveLength(
+			checkpointsBefore + 1,
+		);
+		const durable = await verifyUltragoalDurableCompletionState({ cwd: root, sessionId: TEST_SESSION_ID });
+		expect(durable.state).toBe("active_verified_complete");
+	});
+
 	it("rejects a superseded final-aggregate receipt whose forged basis is mirrored onto the ledger event generation", async () => {
 		const root = await tempDir();
 		await createUltragoalPlan({ cwd: root, brief: "Ship the fix" });
@@ -3706,6 +3866,11 @@ describe("native SKC ultragoal runtime", () => {
 						evidence: "reran",
 						fullRerun: true,
 						rerunCommands: ["bun test:e2e"],
+						blockers: [],
+					},
+					criticReview: {
+						verdict: "OKAY",
+						evidence: "critic approved final aggregate",
 						blockers: [],
 					},
 				}),

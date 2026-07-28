@@ -26,6 +26,15 @@ export interface GetAddonFilenamesInput {
 
 export function getAddonFilenames(input: GetAddonFilenamesInput): string[];
 
+export function getOptionalPackageNames(platformTag: string): string[];
+
+export interface ResolveOptionalPackageNativeDirsInput {
+	packageNames: string[];
+	requireResolve: (id: string) => string;
+}
+
+export function resolveOptionalPackageNativeDirs(input: ResolveOptionalPackageNativeDirsInput): string[];
+
 export interface ShouldStageNodeModulesAddonInput {
 	platform: NodeJS.Platform | string;
 	isCompiledBinary: boolean;
@@ -38,8 +47,9 @@ export interface ResolveLoaderCandidatesInput {
 	addonFilenames: string[];
 	isCompiledBinary: boolean;
 	stageFromNodeModules?: boolean;
+	isWorkspaceLoad?: boolean;
+	optionalPackageNativeDirs?: string[];
 	nativeDir: string;
-	platformNativeDir?: string | null;
 	execDir: string;
 	versionedDir: string;
 	userDataDir: string;
@@ -47,4 +57,56 @@ export interface ResolveLoaderCandidatesInput {
 
 export function resolveLoaderCandidates(input: ResolveLoaderCandidatesInput): string[];
 
-export function loadNative(): Record<string, unknown>;
+export interface LoadFromCandidatesInput<T> {
+	candidates: string[];
+	requireCandidate: (candidate: string) => T;
+	validateCandidate: (bindings: T, candidate: string) => void;
+	describeCandidate: (candidate: string) => string;
+}
+
+export interface LoadFromCandidatesResult<T> {
+	bindings: T | null;
+	errors: string[];
+}
+
+export function loadFromCandidates<T>(input: LoadFromCandidatesInput<T>): LoadFromCandidatesResult<T>;
+
+export interface CachedEmbeddedExtractionIsFreshInput {
+	targetPath: string;
+	embeddedPath: string;
+	sizeOf: (path: string) => number | null;
+}
+
+export function cachedEmbeddedExtractionIsFresh(input: CachedEmbeddedExtractionIsFreshInput): boolean;
+
+export function validateLoadedBindings(
+	ctx: { versionSentinelExport: string; packageVersion: string },
+	bindings: Record<string, unknown>,
+	candidate: string,
+): void;
+
+export interface LoaderContext {
+	isCompiledBinary: boolean;
+	platformTag: string;
+	packageVersion?: string;
+	addonLabel?: string;
+	addonFilenames?: string[];
+	versionedDir?: string;
+	candidates?: string[];
+	selectedVariant?: "modern" | "baseline" | null;
+}
+
+export function embeddedAddonIsAuthoritative(
+	ctx: LoaderContext,
+	addon?: EmbeddedAddon | null,
+): boolean;
+
+export interface LoadNativeOptions {
+	context?: LoaderContext;
+	extractEmbeddedAddons?: (ctx: LoaderContext) => string[];
+	stageNodeModulesAddon?: () => string | null;
+	requireCandidate?: (candidate: string) => Record<string, unknown>;
+	validateCandidate?: (bindings: Record<string, unknown>) => void;
+}
+
+export function loadNative(options?: LoadNativeOptions): Record<string, unknown>;

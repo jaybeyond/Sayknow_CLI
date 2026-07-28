@@ -1,6 +1,6 @@
 import type { ThinkingLevel } from "@sayknow-cli/agent-core";
 import type { Api, Model } from "@sayknow-cli/ai";
-import { $env } from "@sayknow-cli/utils";
+import { $pickenv } from "@sayknow-cli/utils";
 import { parseFileDiffs } from "../../commit/git/diff";
 import type { ConventionalAnalysis } from "../../commit/types";
 import { isExcludedFile } from "../../commit/utils/exclusions";
@@ -34,7 +34,7 @@ export interface MapReduceInput {
 }
 
 export function shouldUseMapReduce(diff: string, settings?: MapReduceSettings): boolean {
-	if ($env.PI_COMMIT_MAP_REDUCE?.toLowerCase() === "false") return false;
+	if ($pickenv("SKC_COMMIT_MAP_REDUCE", "PI_COMMIT_MAP_REDUCE")?.toLowerCase() === "false") return false;
 	if (settings?.enabled === false) return false;
 	const minFiles = settings?.minFiles ?? MIN_FILES_FOR_MAP_REDUCE;
 	const maxFileTokens = settings?.maxFileTokens ?? MAX_FILE_TOKENS;

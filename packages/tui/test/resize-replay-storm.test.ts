@@ -24,6 +24,12 @@ import { VirtualTerminal } from "./virtual-terminal";
 // forces.
 //
 // Set PI_TUI_LEGACY_MULTIPLEXER_FULL_RENDER=1 to opt back into the old behavior.
+//
+// Scope note: these tests observe the IMMEDIATE per-event resize frames only.
+// The debounced width-settle repair (resize-width-settle*.test.ts) intentionally
+// performs ONE full clear+replay ~1000ms after the last width change — that
+// single settled replay is the sanctioned exception to the per-event guard
+// pinned here, made safe by running once per settled sequence.
 
 const COLS = 100;
 
@@ -444,6 +450,31 @@ describe("multiplexer resize replay storm regression", () => {
 				expect(distinctReplayedLineMarkers(out)).toBeGreaterThanOrEqual(55);
 				expect(out).toContain("\x1b[3J");
 			}
+
+			tui.stop();
+		});
+
+		it("ignores same-dimension resize events instead of clearing scrollback and replaying (iTerm2 tab switch)", async () => {
+			const term = new VirtualTerminal(COLS, 30);
+			const tui = new TUI(term);
+			tui.start();
+			await term.waitForRender();
+
+			await buildTranscript(tui, term, 60);
+			term.clearWriteLog();
+
+			// iTerm2 delivers SIGWINCH-driven resize events on tab activation and
+			// window focus changes without changing the grid size. Forcing the
+			// 2J/H/3J clear+replay on those events rebuilds scrollback and can park
+			// the native viewport at the transcript top ("thread jumps to the top
+			// after switching tabs"). A same-size event must be a plain diff render.
+			term.resize(COLS, 30);
+			await term.waitForRender();
+
+			const out = term.getWriteLog().join("");
+			expect(out).not.toContain("\x1b[3J");
+			expect(out).not.toContain("\x1b[2J");
+			expect(distinctReplayedLineMarkers(out)).toBe(0);
 
 			tui.stop();
 		});

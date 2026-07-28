@@ -225,6 +225,28 @@ describe("lifecycle command parser (G009)", () => {
 			}),
 		).toMatch(/in progress/i);
 
+		const uncertain = {
+			type: "session_lifecycle_error",
+			requestId: "r",
+			status: "error",
+			reason: "terminal_uncertain",
+			message: "outcome unknown",
+		} as const;
+		const createUncertain = formatLifecycleOutcome(uncertain, "session_create");
+		expect(createUncertain).toContain("already be starting");
+		expect(createUncertain).toContain("starting it twice");
+
+		const closeUncertain = formatLifecycleOutcome(uncertain, "session_close");
+		expect(closeUncertain).toContain("already be closed");
+		expect(closeUncertain).not.toContain("starting it twice");
+
+		const resumeUncertain = formatLifecycleOutcome(uncertain, "session_resume");
+		expect(resumeUncertain).toContain("reattached or restarting");
+		expect(resumeUncertain).not.toContain("starting it twice");
+
+		const genericUncertain = formatLifecycleOutcome(uncertain);
+		expect(genericUncertain).not.toContain("starting it twice");
+
 		// ambiguous_target lists candidates.
 		const amb = formatLifecycleOutcome({
 			type: "session_lifecycle_error",
@@ -300,9 +322,17 @@ describe("lifecycle command parser (G009)", () => {
 		}
 	});
 
-	it("rejects injection-shaped --mpreset values", () => {
-		expect(parseLifecycleCommand("/session_create path /repo --mpreset 'bad;rm'").kind).toBe("reject");
-		expect(parseLifecycleCommand("/session_create path /repo --mpreset a$(whoami)").kind).toBe("reject");
+	it("preserves quoted and punctuation-bearing exact --mpreset IDs without shell interpretation", () => {
+		expect(parseLifecycleCommand(`/session_create path /repo --mpreset "custom profile/한글 !"`)).toEqual({
+			kind: "create",
+			target: { kind: "existing_path", path: "/repo" },
+			modelPreset: "custom profile/한글 !",
+		});
+		expect(parseLifecycleCommand("/session_create path /repo --mpreset 'bad;rm'")).toMatchObject({
+			kind: "create",
+			modelPreset: "bad;rm",
+		});
+		expect(parseLifecycleCommand(`/session_create path /repo --mpreset "unterminated`).kind).toBe("usage");
 	});
 
 	it("usage text includes --mpreset", () => {

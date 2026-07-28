@@ -1,11 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
 import type { AssistantMessage } from "@sayknow-cli/ai";
 import { exportSessionToHtml } from "@sayknow-cli/coding-agent/export/html";
 import { SessionManager, type SessionMessageEntry } from "@sayknow-cli/coding-agent/session/session-manager";
 import * as native from "@sayknow-cli/natives";
+import { getConfigRootDir } from "@sayknow-cli/utils";
 
 const tempDirs: string[] = [];
 afterEach(async () => {
@@ -14,9 +14,24 @@ afterEach(async () => {
 });
 
 function tempRoot(prefix = "skc-resident-life-"): string {
-	const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+	const parent = getConfigRootDir();
+	fs.mkdirSync(parent, { recursive: true, mode: 0o700 });
+	const dir = fs.mkdtempSync(path.join(parent, prefix));
 	tempDirs.push(dir);
 	return dir;
+}
+
+function failedNativeRename(): native.NativeNoReplaceResult {
+	return {
+		ok: false,
+		code: "io_error",
+		mutationState: "not_committed",
+		durabilityState: "not_attempted",
+		reason: "io_failure",
+		primitive: "unknown",
+		phase: "rename",
+		diagnostic: { schemaVersion: 1, collectionState: "unavailable" },
+	};
 }
 
 function assistant(text: string): AssistantMessage {
@@ -199,7 +214,7 @@ describe("resident cache prune retention, lifecycle cleanup, and JSONL parity", 
 		const newRoot = tempRoot("skc-resident-failed-move-");
 		const realRename = native.renameNoReplacePath;
 		vi.spyOn(native, "renameNoReplacePath").mockImplementation((source, target) =>
-			String(source) === sessionFile ? { ok: false, code: "io_error" } : realRename(source, target),
+			String(source) === sessionFile ? failedNativeRename() : realRename(source, target),
 		);
 
 		await expect(sm.moveTo(newRoot)).rejects.toThrow("Atomic session rename failed: io_error");
@@ -222,7 +237,7 @@ describe("resident cache prune retention, lifecycle cleanup, and JSONL parity", 
 		const newRoot = tempRoot("skc-resident-failed-artifact-move-");
 		const realRename = native.renameNoReplacePath;
 		vi.spyOn(native, "renameNoReplacePath").mockImplementation((source, target) =>
-			String(source) === oldArtifactDir ? { ok: false, code: "io_error" } : realRename(source, target),
+			String(source) === oldArtifactDir ? failedNativeRename() : realRename(source, target),
 		);
 
 		await expect(sm.moveTo(newRoot)).rejects.toThrow("Atomic session rename failed: io_error");

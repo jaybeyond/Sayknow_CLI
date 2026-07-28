@@ -7,7 +7,6 @@ export interface CompileArgOptions {
 	externals?: string[];
 }
 
-
 export const compileAutoloadDisableFlags = [
 	"--no-compile-autoload-bunfig",
 	"--no-compile-autoload-dotenv",

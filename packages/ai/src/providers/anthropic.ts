@@ -11,6 +11,7 @@ import type {
 	RawMessageStreamEvent,
 } from "@anthropic-ai/sdk/resources/messages";
 import {
+	$credentialEnv,
 	$env,
 	extractHttpStatusFromError,
 	isEnoent,
@@ -60,7 +61,12 @@ import { AssistantMessageEventStream } from "../utils/event-stream";
 import { transportFailureFacts } from "../utils/fallback-transport";
 import { isFoundryEnabled } from "../utils/foundry";
 import { finalizeErrorMessage, type RawHttpRequestDump, rewriteCopilotError } from "../utils/http-inspector";
-import { getStreamFirstEventTimeoutMs, getStreamIdleTimeoutMs, iterateWithIdleTimeout } from "../utils/idle-iterator";
+import {
+	getProviderFirstEventTimeoutFallbackMs,
+	getStreamFirstEventTimeoutMs,
+	getStreamIdleTimeoutMs,
+	iterateWithIdleTimeout,
+} from "../utils/idle-iterator";
 import { parseJsonWithRepair, parseStreamingJson } from "../utils/json-parse";
 import { parseGitHubCopilotApiKey } from "../utils/oauth/github-copilot";
 import { notifyProviderResponse } from "../utils/provider-response";
@@ -306,8 +312,12 @@ let warnedStopSequencesTrim = false;
 /**
  * Adaptive thinking `display` is supported starting with Anthropic model Opus 4.7.
  * Older adaptive-thinking models (Opus 4.6, Sonnet 4.6+) reject the field.
+ * Fable (5+) postdates Opus 4.7, accepts `display`, and defaults it to
+ * "omitted" — thinking tokens are billed but no content streams back — so it
+ * must opt in like Opus 4.7+ (issue #2791).
  */
 function supportsAdaptiveThinkingDisplay(modelId: string): boolean {
+	if (/claude-fable-\d/.test(modelId)) return true;
 	const match = /claude-opus-(\d+)-(\d+)/.exec(modelId);
 	if (!match) return false;
 	const major = Number(match[1]);
@@ -407,6 +417,23 @@ export function isAnthropicThinkingBlockMutationError(error: unknown): boolean {
 	);
 }
 
+/**
+ * 400 shape where a replayed `thinking`/`redacted_thinking` block fails signature
+ * validation, e.g. `messages.5.content.24: Invalid \`signature\` in \`thinking\` block`.
+ * Unlike the latest-assistant mutation error above, the cited block can sit anywhere
+ * in the replayed history, so recovery must repair every assistant message rather
+ * than only the latest one.
+ */
+export function isAnthropicThinkingSignatureInvalidError(error: unknown): boolean {
+	if (extractHttpStatusFromError(error) !== 400) return false;
+	const message = error instanceof Error ? error.message : String(error);
+	return (
+		/invalid_request_error/i.test(message) &&
+		/thinking|redacted_thinking/i.test(message) &&
+		/invalid\s+`?signature`?/i.test(message)
+	);
+}
+
 function hasStrictAnthropicTools(params: MessageCreateParamsStreaming): boolean {
 	const tools = params.tools as Array<{ strict?: unknown }> | undefined;
 	return tools?.some(tool => tool.strict === true) ?? false;
@@ -464,7 +491,8 @@ function getCacheControl(
 }
 
 // Stealth mode: Mimic Anthropic Code headers and tool prefixing.
-export const claudeCodeVersion = "2.1.63";
+export const claudeCodeVersion = "2.1.219";
+export const claudeCodeEntrypoint = "sdk-cli";
 export const claudeToolPrefix: string = "proxy_";
 export const claudeCodeSystemInstruction = "You are a Claude agent, built on Anthropic's Claude Agent SDK.";
 
@@ -540,7 +568,7 @@ function createClaudeBillingHeader(payload: unknown): string {
 	const buildHash = Array.from(randomBytes, byte => byte.toString(16).padStart(2, "0"))
 		.join("")
 		.slice(0, 3);
-	return `${CLAUDE_BILLING_HEADER_PREFIX} cc_version=${claudeCodeVersion}.${buildHash}; cc_entrypoint=cli; cch=${cch};`;
+	return `${CLAUDE_BILLING_HEADER_PREFIX} cc_version=${claudeCodeVersion}.${buildHash}; cc_entrypoint=${claudeCodeEntrypoint}; cch=${cch};`;
 }
 
 const CLAUDE_CLOAKING_USER_ID_REGEX =
@@ -600,6 +628,24 @@ export const stripClaudeToolPrefix = (name: string, prefixOverride: string = cla
 	return name.slice(prefixOverride.length);
 };
 
+// Anthropic requires image `data` to be standard (RFC 4648) base64: the standard
+// alphabet only, correct quartet grouping, and padding (when present) confined to
+// a trailing `=`/`==`. A resident image whose blob went missing bakes a
+// human-readable placeholder into `data` (e.g. "[Session resident imageData blob
+// missing: …]"), and other callers can pass whitespace, data URLs, or URL-safe
+// variants — all of which the API rejects with a 400 `invalid base64 data` that
+// fails the *entire* request and bricks the session. Validate the wire format
+// strictly and degrade anything that is not standard base64 to text.
+//
+// Accepts canonical padded forms and their unpadded equivalents; rejects
+// length % 4 === 1, misplaced/overlong padding, whitespace, data URLs, URL-safe
+// (`-`/`_`) alphabets, prose, and empty input. The pattern has no nested
+// quantifier, so even oversized inputs are rejected in linear time.
+const ANTHROPIC_BASE64_IMAGE_DATA = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}(?:==)?|[A-Za-z0-9+/]{3}=?)?$/;
+function isAnthropicBase64ImageData(data: string): boolean {
+	return data.length > 0 && data.length % 4 !== 1 && ANTHROPIC_BASE64_IMAGE_DATA.test(data);
+}
+
 /**
  * Convert content blocks to Anthropic API format
  */
@@ -623,7 +669,18 @@ function convertContentBlocks(
 		.filter((block): block is TextContent => block.type === "text")
 		.map(block => block.text.toWellFormed())
 		.filter(text => text.trim().length > 0);
-	const imageBlocks = content.filter((block): block is ImageContent => block.type === "image");
+	const imageBlocks: ImageContent[] = [];
+	for (const block of content) {
+		if (block.type !== "image") continue;
+		if (isAnthropicBase64ImageData(block.data)) {
+			imageBlocks.push(block);
+			continue;
+		}
+		// Non-base64 image payload (e.g. a missing-blob placeholder): degrade to
+		// text so one lost image cannot invalidate the entire request.
+		const text = block.data.toWellFormed().trim();
+		if (text.length > 0) textBlocks.push(text);
+	}
 	const omittedImages = !supportsImages && imageBlocks.length > 0;
 	if (imageBlocks.length === 0 || !supportsImages) {
 		if (omittedImages) {
@@ -761,10 +818,12 @@ function resolveAnthropicBaseUrl(model: Model<"anthropic-messages">, apiKey?: st
 	// calls api.z.ai directly (no zcode.z.ai gateway, no captcha). Pin the base so dynamic
 	// discovery / stale bundled catalogs / model cache can't redirect it elsewhere.
 	if (model.provider === "glm-zcode") {
-		return normalizeAnthropicBaseUrl(process.env.ZCODE_PLAN_ANTHROPIC_BASE_URL) ?? "https://api.z.ai/api/anthropic";
+		return (
+			normalizeAnthropicBaseUrl($credentialEnv("ZCODE_PLAN_ANTHROPIC_BASE_URL")) ?? "https://api.z.ai/api/anthropic"
+		);
 	}
 	if (model.provider === "anthropic" && isFoundryEnabled()) {
-		const foundryBaseUrl = normalizeAnthropicBaseUrl($env.FOUNDRY_BASE_URL);
+		const foundryBaseUrl = normalizeAnthropicBaseUrl($credentialEnv("FOUNDRY_BASE_URL"));
 		if (foundryBaseUrl) {
 			return foundryBaseUrl;
 		}
@@ -1127,6 +1186,40 @@ function shouldIgnoreAnthropicPreambleEvent(eventType: unknown): boolean {
 	return !ANTHROPIC_PRE_MESSAGE_START_EVENT_TYPES.has(eventType);
 }
 
+function createAnthropicStreamProgressPredicate(): (event: unknown) => boolean {
+	let outputTokens = -1;
+
+	return event => {
+		if (!isRecord(event) || typeof event.type !== "string") return false;
+		if (
+			event.type === "message_start" ||
+			event.type === "content_block_start" ||
+			event.type === "content_block_stop" ||
+			event.type === "message_stop"
+		) {
+			return true;
+		}
+		if (event.type === "content_block_delta") {
+			if (!isRecord(event.delta)) return false;
+			const delta = event.delta;
+			return (
+				(typeof delta.text === "string" && delta.text.length > 0) ||
+				(typeof delta.thinking === "string" && delta.thinking.length > 0) ||
+				(typeof delta.partial_json === "string" && delta.partial_json.length > 0) ||
+				(typeof delta.signature === "string" && delta.signature.length > 0)
+			);
+		}
+		if (event.type === "message_delta") {
+			if (isRecord(event.delta) && event.delta.stop_reason != null) return true;
+			if (!isRecord(event.usage) || typeof event.usage.output_tokens !== "number") return false;
+			if (event.usage.output_tokens <= outputTokens) return false;
+			outputTokens = event.usage.output_tokens;
+			return true;
+		}
+		return false;
+	};
+}
+
 function isTransientStreamEnvelopeError(error: unknown): boolean {
 	if (!(error instanceof Error)) return false;
 	return (
@@ -1283,20 +1376,19 @@ export const streamAnthropic: StreamFunction<"anthropic-messages"> = (
 			let strictFallbackErrorMessage: string | undefined;
 			let dropFastMode = providerSessionState?.fastModeDisabled ?? false;
 			let droppedForcedToolChoice = false;
-			const prepareParams = async (paramsOptions?: {
-				repairLatestAssistantThinking?: boolean;
-				dropForcedToolChoice?: boolean;
-			}): Promise<MessageCreateParamsStreaming> => {
-				let nextParams = buildParams(
-					model,
-					baseUrl,
-					context,
-					isOAuthToken,
-					options,
-					disableStrictTools,
-					paramsOptions?.repairLatestAssistantThinking === true,
-				);
-				if (paramsOptions?.dropForcedToolChoice === true) {
+			let repairLatestAssistantThinking = false;
+			let repairAllAssistantThinking = false;
+			const prepareParams = async (): Promise<MessageCreateParamsStreaming> => {
+				// Degradation state is cumulative: every fallback rebuild must merge all
+				// repairs activated so far. Rebuilding from only the immediate call lets
+				// a later strict/forced-tool/fast-mode fallback reintroduce the rejected
+				// shape (e.g. invalid thinking signatures or forced tool_choice), and
+				// the one-shot thinking-repair guard then blocks recovery.
+				let nextParams = buildParams(model, baseUrl, context, isOAuthToken, options, disableStrictTools, {
+					repairLatestAssistantThinking,
+					repairAllAssistantThinking,
+				});
+				if (droppedForcedToolChoice) {
 					delete nextParams.tool_choice;
 				}
 				if (disableStrictTools) {
@@ -1367,7 +1459,9 @@ export const streamAnthropic: StreamFunction<"anthropic-messages"> = (
 				firstTokenTime = undefined;
 			};
 			const idleTimeoutMs = options?.streamIdleTimeoutMs ?? getStreamIdleTimeoutMs();
-			const firstEventTimeoutMs = options?.streamFirstEventTimeoutMs ?? getStreamFirstEventTimeoutMs(idleTimeoutMs);
+			const firstEventFallbackMs = getProviderFirstEventTimeoutFallbackMs(model.provider);
+			const firstEventTimeoutMs =
+				options?.streamFirstEventTimeoutMs ?? getStreamFirstEventTimeoutMs(idleTimeoutMs, firstEventFallbackMs);
 			stream.push({ type: "start", partial: output });
 			// Retry loop for transient errors from the stream.
 			// Provider-level transport/rate-limit failures: only before any streamed content starts.
@@ -1401,6 +1495,7 @@ export const streamAnthropic: StreamFunction<"anthropic-messages"> = (
 					let sawEvent = false;
 					let sawMessageStart = false;
 					let sawTerminalEnvelope = false;
+					const isProgressEvent = createAnthropicStreamProgressPredicate();
 
 					for await (const event of iterateWithIdleTimeout(anthropicStream, {
 						idleTimeoutMs,
@@ -1410,6 +1505,7 @@ export const streamAnthropic: StreamFunction<"anthropic-messages"> = (
 						onIdle: () => activeAbortTracker.abortLocally(idleTimeoutAbortError),
 						onFirstItemTimeout: () => activeAbortTracker.abortLocally(firstEventTimeoutAbortError),
 						abortSignal: options?.signal,
+						isProgressItem: isProgressEvent,
 					})) {
 						sawEvent = true;
 						if (sawProviderSafetyStop) {
@@ -1730,23 +1826,30 @@ export const streamAnthropic: StreamFunction<"anthropic-messages"> = (
 							registryKey: resolveToolChoice(model, options?.toolChoice).registryKey,
 						});
 						droppedForcedToolChoice = true;
-						params = await prepareParams({ dropForcedToolChoice: true });
+						params = await prepareParams();
 						providerRetryAttempt = 0;
 						resetOutputForRetry();
 						continue;
 					}
+					const thinkingSignatureInvalid = isAnthropicThinkingSignatureInvalidError(streamFailure);
 					if (
 						!options?.fallbackManaged &&
 						!thinkingRepairAttempted &&
 						firstTokenTime === undefined &&
-						isAnthropicThinkingBlockMutationError(streamFailure)
+						(thinkingSignatureInvalid || isAnthropicThinkingBlockMutationError(streamFailure))
 					) {
-						logger.debug("anthropic: repairing latest assistant thinking replay after provider rejection", {
+						logger.debug("anthropic: repairing assistant thinking replay after provider rejection", {
 							model: model.id,
+							scope: thinkingSignatureInvalid ? "all" : "latest",
 							error: streamFailure instanceof Error ? streamFailure.message : String(streamFailure),
 						});
 						thinkingRepairAttempted = true;
-						params = await prepareParams({ repairLatestAssistantThinking: true });
+						if (thinkingSignatureInvalid) {
+							repairAllAssistantThinking = true;
+						} else {
+							repairLatestAssistantThinking = true;
+						}
+						params = await prepareParams();
 						providerRetryAttempt = 0;
 						resetOutputForRetry();
 						continue;
@@ -2210,13 +2313,13 @@ function buildParams(
 	isOAuthToken: boolean,
 	options?: AnthropicOptions,
 	disableStrictTools = false,
-	repairLatestAssistantThinking = false,
+	thinkingRepair?: { repairLatestAssistantThinking?: boolean; repairAllAssistantThinking?: boolean },
 ): MessageCreateParamsStreaming {
 	const { mode: cacheMode, cacheControl } = getCacheControl(model, baseUrl, options?.cacheRetention);
 
 	const params: AnthropicSamplingParams = {
 		model: model.id,
-		messages: convertAnthropicMessages(context.messages, model, isOAuthToken, { repairLatestAssistantThinking }),
+		messages: convertAnthropicMessages(context.messages, model, isOAuthToken, thinkingRepair),
 		max_tokens: options?.maxTokens || (model.maxTokens / 3) | 0,
 		stream: true,
 	};
@@ -2407,7 +2510,7 @@ export function convertAnthropicMessages(
 	messages: Message[],
 	model: Model<"anthropic-messages">,
 	isOAuthToken: boolean,
-	options?: { repairLatestAssistantThinking?: boolean },
+	options?: { repairLatestAssistantThinking?: boolean; repairAllAssistantThinking?: boolean },
 ): MessageParam[] {
 	const params: MessageParam[] = [];
 

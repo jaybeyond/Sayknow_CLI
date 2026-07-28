@@ -11,10 +11,18 @@
  * `hasOnlyFields` allowlist for the same effect.
  */
 import * as z from "zod/v4";
-import { REMOTE_REFRESH_SENTINEL } from "../auth-storage";
+import { isCanonicalMCPOAuthBinding, REMOTE_REFRESH_SENTINEL } from "../auth-storage";
 import { usageReportSchema } from "../usage";
 
 // ─── Credential payloads ───────────────────────────────────────────────────
+
+export const mcpOAuthBindingSchema = z
+	.object({
+		resourceOrigin: z.string().min(1),
+		tokenEndpoint: z.string().min(1),
+	})
+	.strict()
+	.refine(isCanonicalMCPOAuthBinding, { message: "MCP OAuth binding must use canonical HTTP(S) URLs" });
 
 /** Real OAuth credential (broker-side) — refresh token is the actual upstream value. */
 export const oauthCredentialSchema = z
@@ -37,6 +45,7 @@ export const oauthCredentialSchema = z
 		projectId: z.string().optional(),
 		email: z.string().optional(),
 		accountId: z.string().optional(),
+		mcpBinding: mcpOAuthBindingSchema.optional(),
 	})
 	.strict();
 
@@ -163,6 +172,13 @@ export const usageResponseSchema = z
 	.strict();
 
 // ─── Refresh ───────────────────────────────────────────────────────────────
+
+export const credentialRefreshRequestSchema = z
+	.object({
+		clientId: z.string().optional(),
+		clientSecret: z.string().optional(),
+	})
+	.strict();
 
 export const credentialRefreshResponseSchema = z
 	.object({

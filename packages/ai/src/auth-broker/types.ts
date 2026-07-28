@@ -11,6 +11,7 @@ import type {
 	AuthCredentialIfAbsentReason,
 	AuthCredentialSnapshot,
 	AuthCredentialSnapshotEntry,
+	MCPOAuthRefreshClient,
 } from "../auth-storage";
 import type { UsageReport } from "../usage";
 
@@ -48,6 +49,9 @@ export interface UsageResponse {
 export interface CredentialRefreshResponse {
 	entry: AuthCredentialSnapshotEntry;
 }
+
+/** Optional MCP client metadata; the broker still selects the stored token endpoint. */
+export type CredentialRefreshRequest = MCPOAuthRefreshClient;
 
 /** POST /v1/credential/:id/disable request body. */
 export interface CredentialDisableRequest {

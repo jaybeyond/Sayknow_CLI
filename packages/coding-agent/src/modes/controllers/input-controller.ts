@@ -2,7 +2,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { type AgentMessage, ThinkingLevel } from "@sayknow-cli/agent-core";
 import { type AutocompleteProvider, matchesKey, type SlashCommand } from "@sayknow-cli/tui";
-import { $env, logger, sanitizeText } from "@sayknow-cli/utils";
+import { $pickenv, logger, sanitizeText } from "@sayknow-cli/utils";
 import { type AppKeybinding, KEYBINDINGS } from "../../config/keybindings";
 import { isSettingsInitialized, settings } from "../../config/settings";
 import { resolveSubskillActivationForSkillInvocation } from "../../extensibility/skc-plugins";
@@ -32,6 +32,13 @@ import { CommandPalette, type CommandPaletteAction, type CommandPaletteEntry } f
 import type { PasteTextContext } from "../components/custom-editor";
 import { QueuePaneComponent } from "../components/queue-pane";
 import { type QueuedMessageMoveDirection, QueuedMessageSelectorComponent } from "../components/queued-message-selector";
+
+const QUEUE_SELECTOR_NAVIGATION_ACTIONS = [
+	"tui.select.up",
+	"tui.select.down",
+	"tui.select.pageUp",
+	"tui.select.pageDown",
+] as const;
 
 interface Expandable {
 	setExpanded(expanded: boolean): void;
@@ -151,15 +158,24 @@ export class InputController {
 			case "app.editor.external":
 				return Boolean(getEditorCommand());
 			case "app.message.followUp":
-			case "app.message.queue":
 				return (
 					this.ctx.session.isStreaming ||
 					this.ctx.session.isCompacting ||
 					this.ctx.session.isBashRunning ||
 					this.ctx.session.isEvalRunning
 				);
+			case "app.message.queue":
+				return (
+					this.ctx.editor.getText().trim().length > 0 &&
+					(this.ctx.session.isStreaming ||
+						this.ctx.session.isCompacting ||
+						this.ctx.session.isBashRunning ||
+						this.ctx.session.isEvalRunning)
+				);
 			case "app.message.dequeue":
-				return this.ctx.session.queuedMessageCount > 0;
+				return (
+					this.ctx.session.getQueuedMessageEntries().length > 0 || this.ctx.compactionQueuedMessages.length > 0
+				);
 			case "app.clipboard.copyPrompt":
 				return this.ctx.editor.getText().length > 0;
 			case "app.session.tree":
@@ -725,8 +741,12 @@ export class InputController {
 			});
 		}
 
+		// Tab on an empty composer accepts the pending ghost-text prompt suggestion.
+		this.ctx.editor.onTab = (text: string) => this.ctx.promptSuggestion?.tryAcceptOnTab(text) === true;
+
 		this.ctx.editor.onChange = (text: string) => {
 			this.#resetEscapeGestures();
+			this.ctx.promptSuggestion?.notifyEditorChanged(text);
 			const wasBashMode = this.ctx.isBashMode;
 			const wasBashNoContext = this.ctx.isBashNoContext;
 			const wasPythonMode = this.ctx.isPythonMode;
@@ -752,6 +772,29 @@ export class InputController {
 	async submitText(text: string, composer: ComposerSubmissionOptions): Promise<void> {
 		text = text.trim();
 		if ((!isSettingsInitialized() || settings.get("emojiAutocomplete")) && text) text = expandEmoticons(text);
+		if (this.ctx.hasActiveBtw()) {
+			if (!text) return;
+			if (!text.startsWith("/")) {
+				const result = await this.ctx.handleBtwFollowUp(text);
+				if (result === "accepted" && this.#canModifyComposer(composer)) {
+					this.ctx.editor.setText("");
+					this.ctx.pendingImages = [];
+				}
+				return;
+			}
+		}
+
+		if (/^\/btw(?:\s|$)/.test(text)) {
+			const slashResult = await executeBuiltinSlashCommand(text, {
+				ctx: this.ctx,
+				handleBackgroundCommand: () => this.handleBackgroundCommand(),
+				composer,
+			});
+			if (slashResult === true) {
+				this.ctx.pendingImages = [];
+				return;
+			}
+		}
 
 		// Empty submit while streaming with queued messages: flush queues immediately
 		if (!text && this.ctx.session.isStreaming && this.ctx.session.queuedMessageCount > 0) {
@@ -907,7 +950,7 @@ export class InputController {
 
 		// Generate session title on first message
 		const hasUserMessages = this.ctx.session.messages.some((m: AgentMessage) => m.role === "user");
-		if (!hasUserMessages && !this.ctx.sessionManager.getSessionName() && !$env.PI_NO_TITLE) {
+		if (!hasUserMessages && !this.ctx.sessionManager.getSessionName() && !$pickenv("SKC_NO_TITLE", "PI_NO_TITLE")) {
 			const registry = this.ctx.session.modelRegistry;
 			generateSessionTitle(
 				text,
@@ -1010,6 +1053,21 @@ export class InputController {
 		};
 		const pane = new QueuePaneComponent(entries, {
 			selectedIndex,
+			formatKeyHint: key => this.ctx.keybindings.formatKeyHint(key),
+			formatSelectAction: action => this.ctx.keybindings.getDisplayString(action),
+			matchesSelectAction: (keyData, action) =>
+				this.ctx.keybindings.getKeys(action).some(key => matchesKey(keyData, key)),
+			resolveSelectNavigation: keyData =>
+				QUEUE_SELECTOR_NAVIGATION_ACTIONS.find(action =>
+					this.ctx.keybindings.getKeys(action).some(key => matchesKey(keyData, key)),
+				),
+			onSelect: entry => {
+				const restored = this.#restoreQueuedMessageToEditor(entry);
+				close();
+				this.ctx.showStatus(
+					restored === 0 ? "Queued message is no longer available" : "Restored queued message to editor",
+				);
+			},
 			onDelete: (entry, index) => {
 				const deleted = this.ctx.session.removeQueuedMessageForEditing(entry.id) !== undefined;
 				const remaining = this.ctx.session.getQueuedMessageEntries();
@@ -1182,7 +1240,17 @@ export class InputController {
 				this.#restoreEditorFocus();
 				this.ctx.ui.requestRender();
 			},
-			{ selectedIndex },
+			{
+				selectedIndex,
+				formatKeyHint: key => this.ctx.keybindings.formatKeyHint(key),
+				formatSelectAction: action => this.ctx.keybindings.getDisplayString(action),
+				matchesSelectAction: (keyData, action) =>
+					this.ctx.keybindings.getKeys(action).some(key => matchesKey(keyData, key)),
+				resolveSelectNavigation: keyData =>
+					QUEUE_SELECTOR_NAVIGATION_ACTIONS.find(action =>
+						this.ctx.keybindings.getKeys(action).some(key => matchesKey(keyData, key)),
+					),
+			},
 		);
 		this.ctx.editorContainer.clear();
 		this.ctx.editorContainer.addChild(selector);
@@ -1357,6 +1425,14 @@ export class InputController {
 	async handleFollowUp(): Promise<void> {
 		const text = this.ctx.editor.getText().trim();
 		if (!text) return;
+		// While /btw is open, plain text stays in the side chat. Slash-origin
+		// input keeps normal dispatch so commands remain available.
+		if (this.ctx.hasActiveBtw() && !text.startsWith("/")) {
+			if ((await this.ctx.handleBtwFollowUp(text)) === "accepted") {
+				this.ctx.editor.setText("");
+			}
+			return;
+		}
 
 		// Compaction first: while compacting, queue free text and `/skill:*`
 		// commands in the compaction-local queue. `flushCompactionQueue`
@@ -1758,6 +1834,7 @@ export class InputController {
 			moveCursorToMessageStart: () => this.ctx.editor.moveToMessageStart(),
 			moveCursorToLineStart: () => this.ctx.editor.moveToLineStart(),
 			moveCursorToLineEnd: () => this.ctx.editor.moveToLineEnd(),
+			getPromptSuggestion: () => this.ctx.promptSuggestion?.current ?? null,
 		});
 	}
 
@@ -1967,9 +2044,24 @@ export class InputController {
 	}
 
 	toggleThinkingBlockVisibility(): void {
-		this.ctx.hideThinkingBlock = !this.ctx.hideThinkingBlock;
-		settings.set("hideThinkingBlock", this.ctx.hideThinkingBlock);
-		this.ctx.session.agent.hideThinkingSummary = this.ctx.hideThinkingBlock;
+		if (!settings.canWriteDurableConfig()) {
+			this.ctx.showError(
+				"Cannot change settings while config.yml has invalid YAML syntax. Repair config.yml and reload settings.",
+			);
+			return;
+		}
+		const hideThinkingBlock = !this.ctx.hideThinkingBlock;
+		try {
+			settings.set("hideThinkingBlock", hideThinkingBlock);
+		} catch (error) {
+			if (!settings.canWriteDurableConfig()) {
+				this.ctx.showError(error instanceof Error ? error.message : String(error));
+				return;
+			}
+			throw error;
+		}
+		this.ctx.hideThinkingBlock = hideThinkingBlock;
+		this.ctx.session.setThinkingVisibility(hideThinkingBlock ? "hidden" : "visible");
 
 		// Rebuild chat from session messages
 		// Detach the live streaming component before the disposing clear() so the

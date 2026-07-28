@@ -1,5 +1,33 @@
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
+import type { WindowsJobMemoryProbeResult } from "@sayknow-cli/natives";
+
+function safeProbeWindowsJobMemory(): WindowsJobMemoryProbeResult {
+	try {
+		// eslint-disable-next-line @typescript-eslint/no-var-requires
+		const natives = require("@sayknow-cli/natives") as { probeWindowsJobMemory?: () => unknown };
+		if (typeof natives.probeWindowsJobMemory === "function") {
+			return natives.probeWindowsJobMemory() as WindowsJobMemoryProbeResult;
+		}
+	} catch {
+		// Native addon unbuilt or missing
+	}
+	return { kind: "unsupported_platform", platform: process.platform };
+}
+
 import { logger } from "@sayknow-cli/utils";
 import type { Settings } from "../config/settings";
+import { computeMemoryGuardDomain } from "../runtime/memory-domain";
+import {
+	chooseMemoryGuardAction,
+	MemoryGuardHost,
+	resolveMemoryGuardPolicy,
+	revalidateMemoryGuardAction,
+} from "../runtime/memory-guard";
+import type { MemoryGuardPolicy, MemoryGuardWorkerSample } from "../runtime/memory-guard-contract";
+import { resolveEffectiveMemoryLimit } from "../runtime/memory-limit";
+import { executeSkcTeamApiOperation, listSkcTeams, readSkcWorkerHeartbeat } from "../skc-runtime/team-runtime";
 import { listTabsForGc, releaseTabIfGcEligible, type TabGcSnapshot } from "./browser/tab-supervisor";
 import { cleanupStaleScreenshotFallbackDirs, hasCreatedScreenshotFallbackDir } from "./computer-gc";
 
@@ -17,7 +45,6 @@ import { cleanupStaleScreenshotFallbackDirs, hasCreatedScreenshotFallbackDir } f
  * eviction is best-effort and never force-evicts.
  */
 
-const DEFAULT_SWEEP_INTERVAL_MS = 30_000;
 const BYTES_PER_MB = 1024 * 1024;
 
 export interface BrowserGcPolicy {
@@ -55,58 +82,69 @@ export function resolveSweepIntervalMs(settings: Settings): number {
 /** Injectable seams so the controller is fully testable without real browsers/filesystem/RSS. */
 export interface ResourceGcDeps {
 	now: () => number;
+	monotonicNow: () => number;
 	rssBytes: () => number;
+	memorySnapshot: () => Promise<MemoryPressureSnapshot>;
+	runGc: () => void;
 	logWarn: (msg: string, meta?: Record<string, unknown>) => void;
 	listTabs: () => TabGcSnapshot[];
 	releaseTab: (name: string, policy: { now: () => number; idleMs: number }) => Promise<boolean>;
 	cleanupScreenshots: (opts: { now: () => number; staleMs: number }) => Promise<{ scanned: number; removed: number }>;
 	screenshotArmed: () => boolean;
+	listTeamWorkers?: (cwd: string, sessionId: string) => Promise<MemoryGuardWorkerSample[]>;
+	applyTeamWorkerGuard?: (
+		cwd: string,
+		sessionId: string,
+		workerId: string,
+		excessBytes: number,
+		incidentId: string,
+	) => Promise<void>;
 }
 
 const defaultDeps: ResourceGcDeps = {
 	now: () => Date.now(),
+	monotonicNow: () => performance.now(),
 	rssBytes: () => process.memoryUsage().rss,
+	memorySnapshot: () => sampleMemoryPressure(),
+	runGc: () => Bun.gc(true),
 	logWarn: (msg, meta) => logger.warn(msg, meta),
 	listTabs: () => listTabsForGc(),
 	releaseTab: (name, policy) => releaseTabIfGcEligible(name, policy),
 	cleanupScreenshots: opts => cleanupStaleScreenshotFallbackDirs(opts),
 	screenshotArmed: () => hasCreatedScreenshotFallbackDir(),
+	listTeamWorkers: (cwd, sessionId) => sampleTeamWorkers(cwd, sessionId),
+	applyTeamWorkerGuard: (cwd, sessionId, workerId, excessBytes, incidentId) =>
+		applySelectedTeamWorker(cwd, sessionId, workerId, excessBytes, incidentId),
 };
 
 // ── Controller state (process-global; tabs/browsers are module-global too) ──────────────────
-const activeSessions = new Map<string, Settings>();
-
-interface ScheduleOwner {
-	generation: number;
-	token: number;
-}
-
-interface DeferredSchedule {
-	generation: number;
-	deadline: number;
-}
-
-interface WorkOwner {
-	generation: number;
-	source: "timer" | "external";
-}
-
-let pendingTimer: NodeJS.Timeout | null = null;
-let pendingDeadline: number | null = null;
-let pendingOwner: ScheduleOwner | null = null;
-let deferredSchedule: DeferredSchedule | null = null;
-let inProgressOwner: WorkOwner | null = null;
-let stopped = false;
-let timerGeneration = 0;
-let nextTimerToken = 0;
-let schedulerNow = (): number => performance.now();
+const activeSessions = new Map<string, { settings: Settings; cwd: () => string }>();
+const scheduler = new MemoryGuardHost({
+	run: async () => {
+		await sweepOnce(deps);
+	},
+	logDebug: (message, meta) => logger.debug(message, meta),
+});
 let rssWarningActive = false;
 let lastScreenshotScanAt = 0;
+const memoryGuardGcActive = new Set<string>();
+const memoryGuardLastEvaluatedAt = new Map<string, number>();
+const memoryGuardRestartAboveSince = new Map<string, number>();
+const memoryGuardRestartCooldownUntil = new Map<string, number>();
+const memoryGuardWorkerIncidentIds = new Map<string, string>();
 let deps: ResourceGcDeps = defaultDeps;
 
 export interface ResourceGcRegistration {
 	sessionId: string;
 	settings: Settings;
+	cwd?: string | (() => string);
+}
+
+function resolveSessionSweepIntervalMs(settings: Settings): number {
+	const memoryPolicy = resolveMemoryGuardPolicy(settings);
+	return memoryPolicy.enabled
+		? Math.min(resolveSweepIntervalMs(settings), memoryPolicy.checkIntervalMs)
+		: resolveSweepIntervalMs(settings);
 }
 
 /**
@@ -115,121 +153,615 @@ export interface ResourceGcRegistration {
  * session unregisters.
  */
 export function registerResourceGcSession(reg: ResourceGcRegistration): () => void {
-	const isNewSession = !activeSessions.has(reg.sessionId);
-	activeSessions.set(reg.sessionId, reg.settings);
-	stopped = false;
-	if (isNewSession) {
-		const deadline = schedulerNow() + resolveSweepIntervalMs(reg.settings);
+	const registeredCwd = reg.cwd;
+	const cwd = typeof registeredCwd === "function" ? registeredCwd : () => registeredCwd ?? process.cwd();
+	activeSessions.set(reg.sessionId, { settings: reg.settings, cwd });
+	const unregisterSchedule = scheduler.register({
+		ownerId: reg.sessionId,
+		intervalMs: resolveSessionSweepIntervalMs(reg.settings),
+	});
+	const unregisterSettings = reg.settings.onChanged(path => {
 		if (
-			inProgressOwner?.generation === timerGeneration &&
-			(pendingDeadline === null || pendingDeadline <= deadline)
+			path === "memoryGuard.enabled" ||
+			path === "memoryGuard.checkIntervalMs" ||
+			path === "resourceGc.sweepIntervalMs"
 		) {
-			deferSchedule(timerGeneration, deadline);
-		} else {
-			requestSchedule(deadline);
+			scheduler.updateInterval(reg.sessionId, resolveSessionSweepIntervalMs(reg.settings));
+			if (path === "memoryGuard.enabled" && !resolveMemoryGuardPolicy(reg.settings).enabled) {
+				memoryGuardGcActive.delete(reg.sessionId);
+				memoryGuardRestartAboveSince.delete(reg.sessionId);
+				memoryGuardWorkerIncidentIds.delete(reg.sessionId);
+				memoryGuardRestartCooldownUntil.delete(reg.sessionId);
+				memoryGuardLastEvaluatedAt.delete(reg.sessionId);
+			}
 		}
-	}
+	});
 	let unregistered = false;
 	return () => {
 		if (unregistered) return;
 		unregistered = true;
 		activeSessions.delete(reg.sessionId);
-		if (activeSessions.size === 0) stopTimer();
+		memoryGuardLastEvaluatedAt.delete(reg.sessionId);
+		memoryGuardGcActive.delete(reg.sessionId);
+		memoryGuardRestartAboveSince.delete(reg.sessionId);
+		memoryGuardWorkerIncidentIds.delete(reg.sessionId);
+		memoryGuardRestartCooldownUntil.delete(reg.sessionId);
+		unregisterSchedule();
+		unregisterSettings();
 	};
-}
-
-function currentSweepIntervalMs(): number {
-	let min = Number.POSITIVE_INFINITY;
-	for (const settings of activeSessions.values()) min = Math.min(min, resolveSweepIntervalMs(settings));
-	return Number.isFinite(min) ? min : DEFAULT_SWEEP_INTERVAL_MS;
-}
-
-function clearPendingSchedule(): void {
-	if (pendingTimer) clearTimeout(pendingTimer);
-	pendingTimer = null;
-	pendingDeadline = null;
-	pendingOwner = null;
-}
-
-function requestSchedule(deadline: number): void {
-	if (stopped || activeSessions.size === 0) return;
-	if (pendingDeadline !== null && pendingDeadline <= deadline) return;
-	clearPendingSchedule();
-	const owner = { generation: timerGeneration, token: ++nextTimerToken };
-	pendingDeadline = deadline;
-	pendingOwner = owner;
-	pendingTimer = setTimeout(
-		() => {
-			void handleTimerCallback(owner, deadline);
-		},
-		Math.max(0, deadline - schedulerNow()),
-	);
-	pendingTimer.unref?.();
-}
-
-function deferSchedule(generation: number, deadline: number): void {
-	if (generation !== timerGeneration) return;
-	if (deferredSchedule?.generation === generation) {
-		deferredSchedule.deadline = Math.min(deferredSchedule.deadline, deadline);
-		return;
-	}
-	deferredSchedule = { generation, deadline };
-}
-
-async function handleTimerCallback(owner: ScheduleOwner, deadline: number): Promise<void> {
-	if (pendingOwner?.generation !== owner.generation || pendingOwner.token !== owner.token) return;
-	pendingTimer = null;
-	pendingDeadline = null;
-	pendingOwner = null;
-	if (inProgressOwner) {
-		deferSchedule(owner.generation, deadline);
-		return;
-	}
-	await runTick(owner.generation, "timer");
-}
-
-function reconcileCurrentSchedule(): void {
-	if (stopped || activeSessions.size === 0 || inProgressOwner) return;
-	const normalDeadline = schedulerNow() + currentSweepIntervalMs();
-	const deferredDeadline = deferredSchedule?.generation === timerGeneration ? deferredSchedule.deadline : null;
-	if (deferredDeadline !== null) deferredSchedule = null;
-	requestSchedule(deferredDeadline === null ? normalDeadline : Math.min(deferredDeadline, normalDeadline));
-}
-
-function stopTimer(): void {
-	stopped = true;
-	timerGeneration++;
-	clearPendingSchedule();
-	deferredSchedule = null;
-}
-
-async function runTick(generation = timerGeneration, source: WorkOwner["source"] = "external"): Promise<void> {
-	if (inProgressOwner || activeSessions.size === 0) return;
-	const owner: WorkOwner = { generation, source };
-	inProgressOwner = owner;
-	try {
-		await sweepOnce(deps);
-	} catch (err) {
-		logger.debug("resource GC sweep failed", { error: (err as Error).message });
-	} finally {
-		if (inProgressOwner === owner) inProgressOwner = null;
-		// A stale completion only releases its own work lock. Once that lock is released, current
-		// generation demand (which may have deferred behind it) can be reconciled independently.
-		reconcileCurrentSchedule();
-	}
 }
 
 export async function sweepOnce(d: ResourceGcDeps = deps): Promise<void> {
 	if (activeSessions.size === 0) return;
+	try {
+		const memorySweep = sweepMemoryPressureGuard(d);
+		if (memorySweep) await memorySweep;
+	} catch (error) {
+		d.logWarn("Memory guard: sweep failed; continuing with browser/screenshot cleanup", { error: String(error) });
+	}
 	await sweepBrowserTabs(d);
 	await sweepScreenshots(d);
 }
 
+export interface MemoryPressureDomain {
+	hardCapBytes: number;
+	totalUsageBytes: number;
+	source: MemoryPressureSnapshot["source"];
+}
+
+export interface MemoryPressureSnapshot {
+	hardCapBytes: number;
+	totalUsageBytes: number;
+	parentBytes: number;
+	source: "host" | "linux_cgroup_v2" | "linux_cgroup_v1" | "windows_job" | "windows_process_job_limit";
+	domains?: MemoryPressureDomain[];
+}
+
+function decodeMountInfoPath(value: string): string {
+	return value.replace(/\\([0-7]{3})/g, (_match, octal: string) => String.fromCharCode(Number.parseInt(octal, 8)));
+}
+
+interface CgroupDirectoryCandidate {
+	directory: string;
+	mountPoint: string;
+	fallback: boolean;
+}
+
+function resolveCgroupDirectories(
+	mountInfo: string,
+	membershipPath: string,
+	fsType: "cgroup" | "cgroup2",
+): CgroupDirectoryCandidate[] {
+	const contained: CgroupDirectoryCandidate[] = [];
+	const fallbacks: CgroupDirectoryCandidate[] = [];
+	const seen = new Set<string>();
+	for (const line of mountInfo.split("\n")) {
+		const [left, right] = line.split(" - ", 2);
+		if (!left || !right) continue;
+		const leftFields = left.split(" ");
+		const rightFields = right.split(" ");
+		if (leftFields.length < 5 || rightFields[0] !== fsType) continue;
+		if (fsType === "cgroup" && !rightFields.slice(2).join(",").split(",").includes("memory")) continue;
+		const mountRoot = decodeMountInfoPath(leftFields[3]!);
+		const mountPoint = decodeMountInfoPath(leftFields[4]!);
+		const relative = path.posix.relative(mountRoot, membershipPath);
+		const directory =
+			!relative.startsWith("..") && !path.posix.isAbsolute(relative)
+				? path.join(mountPoint, relative)
+				: path.join(mountPoint, membershipPath.replace(/^\/+/, ""));
+		const key = `${directory}\0${mountPoint}`;
+		if (seen.has(key)) continue;
+		seen.add(key);
+		const fallback = relative.startsWith("..") || path.posix.isAbsolute(relative);
+		const candidate = { directory, mountPoint, fallback };
+		if (!relative.startsWith("..") && !path.posix.isAbsolute(relative)) contained.push(candidate);
+		else fallbacks.push(candidate);
+	}
+	return [...contained, ...fallbacks];
+}
+
+async function readMemoryCounter(file: string): Promise<number | null> {
+	try {
+		const value = (await fs.readFile(file, "utf8")).trim();
+		if (value === "max" || !/^\d+$/.test(value)) return null;
+		const parsed = Number(value);
+		return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : null;
+	} catch {
+		return null;
+	}
+}
+
+type MemoryLimitCounter = { kind: "finite"; bytes: number } | { kind: "unlimited" };
+
+async function readMemoryLimit(file: string, fsType: "cgroup" | "cgroup2"): Promise<MemoryLimitCounter | null> {
+	try {
+		const value = (await fs.readFile(file, "utf8")).trim();
+		if (value === "max") return { kind: "unlimited" };
+		if (!/^\d+$/.test(value)) return null;
+		const bytes = BigInt(value);
+		if (fsType === "cgroup" && bytes > BigInt(Number.MAX_SAFE_INTEGER)) return { kind: "unlimited" };
+		const numericBytes = Number(bytes);
+		return Number.isSafeInteger(numericBytes) ? { kind: "finite", bytes: numericBytes } : null;
+	} catch {
+		return null;
+	}
+}
+
+function parseCgroupEntry(line: string): [string, string, string] | null {
+	const first = line.indexOf(":");
+	const second = first < 0 ? -1 : line.indexOf(":", first + 1);
+	if (first < 0 || second < 0) return null;
+	return [line.slice(0, first), line.slice(first + 1, second), line.slice(second + 1)];
+}
+
+async function sampleLinuxCgroupDirectory(
+	candidate: CgroupDirectoryCandidate,
+	fsType: "cgroup" | "cgroup2",
+	hostBytes: number,
+): Promise<MemoryPressureDomain[]> {
+	const limitName = fsType === "cgroup2" ? "memory.max" : "memory.limit_in_bytes";
+	const usageName = fsType === "cgroup2" ? "memory.current" : "memory.usage_in_bytes";
+	const source = fsType === "cgroup2" ? "linux_cgroup_v2" : "linux_cgroup_v1";
+	const domains: MemoryPressureDomain[] = [];
+	let current = candidate.directory;
+	while (true) {
+		const [limit, usage] = await Promise.all([
+			readMemoryLimit(path.join(current, limitName), fsType),
+			readMemoryCounter(path.join(current, usageName)),
+		]);
+		if (limit !== null && usage !== null && (limit.kind === "unlimited" || limit.bytes > 0)) {
+			domains.push({
+				hardCapBytes: limit.kind === "unlimited" ? hostBytes : Math.min(hostBytes, limit.bytes),
+				totalUsageBytes: usage,
+				source,
+			});
+		}
+		if (current === candidate.mountPoint) break;
+		const parent = path.dirname(current);
+		if (
+			parent === current ||
+			(parent !== candidate.mountPoint && !parent.startsWith(`${candidate.mountPoint}${path.sep}`))
+		) {
+			break;
+		}
+		current = parent;
+	}
+	return domains;
+}
+
+export async function __sampleLinuxCgroupHierarchyForTest(
+	mountInfo: string,
+	membership: string,
+	fsType: "cgroup" | "cgroup2",
+	hostBytes: number,
+	parentBytes: number,
+): Promise<MemoryPressureSnapshot | null> {
+	const containedDomains: MemoryPressureDomain[] = [];
+	const fallbackDomains: MemoryPressureDomain[] = [];
+	for (const candidate of resolveCgroupDirectories(mountInfo, membership, fsType)) {
+		const domains = await sampleLinuxCgroupDirectory(candidate, fsType, hostBytes);
+		if (candidate.fallback) fallbackDomains.push(...domains);
+		else containedDomains.push(...domains);
+	}
+	const domains = containedDomains.length > 0 ? containedDomains : fallbackDomains;
+	if (domains.length === 0) return null;
+	const selected = domains.reduce((current, domain) =>
+		domain.totalUsageBytes / Math.min(hostBytes, domain.hardCapBytes) >
+		current.totalUsageBytes / Math.min(hostBytes, current.hardCapBytes)
+			? domain
+			: current,
+	);
+	return {
+		...selected,
+		totalUsageBytes: Math.max(parentBytes, selected.totalUsageBytes),
+		parentBytes,
+		domains,
+	};
+}
+
+async function sampleLinuxCgroupMemory(hostBytes: number, parentBytes: number): Promise<MemoryPressureSnapshot | null> {
+	let cgroup: string;
+	let mountInfo: string;
+	try {
+		[cgroup, mountInfo] = await Promise.all([
+			fs.readFile("/proc/self/cgroup", "utf8"),
+			fs.readFile("/proc/self/mountinfo", "utf8"),
+		]);
+	} catch {
+		return null;
+	}
+
+	const entries = cgroup
+		.split("\n")
+		.map(parseCgroupEntry)
+		.filter((entry): entry is [string, string, string] => entry !== null);
+	const v2Membership = entries.find(parts => parts[0] === "0" && parts[1] === "")?.[2];
+	const v1Membership = entries.find(parts => parts[1].split(",").includes("memory"))?.[2];
+	if (v2Membership) {
+		const snapshot = await __sampleLinuxCgroupHierarchyForTest(
+			mountInfo,
+			v2Membership,
+			"cgroup2",
+			hostBytes,
+			parentBytes,
+		);
+		if (snapshot) return snapshot;
+	}
+	if (v1Membership) {
+		return __sampleLinuxCgroupHierarchyForTest(mountInfo, v1Membership, "cgroup", hostBytes, parentBytes);
+	}
+	return null;
+}
+
+export function __sampleWindowsJobMemoryForTest(
+	hostBytes: number,
+	parentBytes: number,
+	probeResult?: WindowsJobMemoryProbeResult,
+): MemoryPressureSnapshot | null {
+	return sampleWindowsJobMemory(hostBytes, parentBytes, probeResult);
+}
+
+function sampleWindowsJobMemory(
+	hostBytes: number,
+	parentBytes: number,
+	result = safeProbeWindowsJobMemory(),
+): MemoryPressureSnapshot | null {
+	if (result.kind !== "job_snapshot") return null;
+	const domains: MemoryPressureDomain[] = [];
+	const jobUsage = Number(result.jobMemoryUsedBytes);
+	const jobLimitRaw = result.jobMemoryLimitBytes;
+	const hasJobLimit = jobLimitRaw !== undefined && jobLimitRaw !== null;
+	const jobLimit = hasJobLimit ? Number(jobLimitRaw) : NaN;
+	if (Number.isSafeInteger(jobUsage) && jobUsage >= 0) {
+		if (hasJobLimit && Number.isSafeInteger(jobLimit) && jobLimit > 0) {
+			domains.push({
+				hardCapBytes: jobLimit,
+				totalUsageBytes: jobUsage,
+				source: "windows_job",
+			});
+		} else {
+			// Uncapped Job Object: usage participates against policy limit (no physical RAM clamp)
+			domains.push({
+				hardCapBytes: Number.MAX_SAFE_INTEGER,
+				totalUsageBytes: jobUsage,
+				source: "windows_job",
+			});
+		}
+	}
+	const processUsage = Number(result.processPrivateUsageBytes);
+	const processLimitRaw = result.processMemoryLimitBytes;
+	const hasProcessLimit = processLimitRaw !== undefined && processLimitRaw !== null;
+	const processLimit = hasProcessLimit ? Number(processLimitRaw) : NaN;
+	if (Number.isSafeInteger(processUsage) && processUsage >= 0) {
+		if (hasProcessLimit && Number.isSafeInteger(processLimit) && processLimit > 0) {
+			domains.push({
+				hardCapBytes: processLimit,
+				totalUsageBytes: processUsage,
+				source: "windows_process_job_limit",
+			});
+		} else {
+			domains.push({
+				hardCapBytes: Number.MAX_SAFE_INTEGER,
+				totalUsageBytes: processUsage,
+				source: "windows_process_job_limit",
+			});
+		}
+	}
+	const workingSetUsage = Number(result.processWorkingSetBytes);
+	if (Number.isSafeInteger(workingSetUsage) && workingSetUsage >= 0) {
+		domains.push({
+			hardCapBytes: hostBytes,
+			totalUsageBytes: Math.max(parentBytes, workingSetUsage),
+			source: "windows_process_job_limit",
+		});
+	}
+	if (domains.length === 0) return null;
+	const selected = domains.reduce((current, candidate) =>
+		candidate.totalUsageBytes / candidate.hardCapBytes > current.totalUsageBytes / current.hardCapBytes
+			? candidate
+			: current,
+	);
+	return {
+		...selected,
+		parentBytes,
+		domains,
+	};
+}
+
+async function sampleMemoryPressure(): Promise<MemoryPressureSnapshot> {
+	const parentBytes = process.memoryUsage().rss;
+	const hostBytes = os.totalmem();
+	if (process.platform === "linux") {
+		const cgroup = await sampleLinuxCgroupMemory(hostBytes, parentBytes);
+		if (cgroup) return cgroup;
+	}
+	if (process.platform === "win32") {
+		const job = sampleWindowsJobMemory(hostBytes, parentBytes);
+		if (job) return job;
+	}
+	return { hardCapBytes: hostBytes, totalUsageBytes: parentBytes, parentBytes, source: "host" };
+}
+
+export function __selectMemoryPressureDomainForTest(
+	snapshot: MemoryPressureSnapshot,
+	policyLimitBytes: number | null,
+): MemoryPressureSnapshot {
+	const domains = snapshot.domains;
+	if (!domains || domains.length === 0) return snapshot;
+	const selected = domains.reduce((current, domain) => {
+		const currentLimit = Math.min(current.hardCapBytes, policyLimitBytes ?? current.hardCapBytes);
+		const domainLimit = Math.min(domain.hardCapBytes, policyLimitBytes ?? domain.hardCapBytes);
+		return domain.totalUsageBytes / domainLimit > current.totalUsageBytes / currentLimit ? domain : current;
+	});
+	return {
+		...snapshot,
+		...selected,
+		totalUsageBytes: Math.max(snapshot.parentBytes, selected.totalUsageBytes),
+	};
+}
+
+function sweepMemoryPressureGuard(d: ResourceGcDeps): Promise<void> | undefined {
+	let enabled = false;
+	for (const [sessionId, { settings }] of activeSessions) {
+		if (resolveMemoryGuardPolicy(settings).enabled) {
+			enabled = true;
+			continue;
+		}
+		memoryGuardGcActive.delete(sessionId);
+		memoryGuardRestartAboveSince.delete(sessionId);
+		memoryGuardWorkerIncidentIds.delete(sessionId);
+		memoryGuardRestartCooldownUntil.delete(sessionId);
+		memoryGuardLastEvaluatedAt.delete(sessionId);
+	}
+	if (!enabled) return undefined;
+	return sweepEnabledMemoryPressureGuard(d);
+}
+
+async function readLinuxWorkerRssBytes(pid: number): Promise<number | null> {
+	if (process.platform !== "linux" || !Number.isSafeInteger(pid) || pid <= 0) return null;
+	try {
+		const status = await Bun.file(`/proc/${pid}/status`).text();
+		const match = /^VmRSS:\s+(\d+)\s+kB$/m.exec(status);
+		if (!match) return null;
+		const kibibytes = Number(match[1]);
+		return Number.isSafeInteger(kibibytes) ? kibibytes * 1024 : null;
+	} catch {
+		return null;
+	}
+}
+
+async function readLinuxProcessStartTime(pid: number): Promise<string | null> {
+	try {
+		const stat = await Bun.file(`/proc/${pid}/stat`).text();
+		const commandEnd = stat.lastIndexOf(")");
+		if (commandEnd < 0) return null;
+		const startTime = stat
+			.slice(commandEnd + 2)
+			.trim()
+			.split(/\s+/)[19];
+		return startTime && /^\d+$/.test(startTime) ? startTime : null;
+	} catch {
+		return null;
+	}
+}
+
+async function sampleTeamWorkers(cwd: string, sessionId: string): Promise<MemoryGuardWorkerSample[]> {
+	if (process.platform !== "linux") return [];
+	const samples: MemoryGuardWorkerSample[] = [];
+	for (const team of await listSkcTeams(cwd, { ...process.env, SKC_SESSION_ID: sessionId })) {
+		if (team.phase === "complete" || team.phase === "cancelled") continue;
+		for (const worker of team.workers) {
+			try {
+				const heartbeat = await readSkcWorkerHeartbeat(team.team_name, worker.id, cwd, {
+					...process.env,
+					SKC_SESSION_ID: sessionId,
+				});
+				const heartbeatAt = Date.parse(heartbeat?.last_turn_at ?? "");
+				if (
+					!heartbeat?.alive ||
+					!heartbeat.process_start_time ||
+					!Number.isFinite(heartbeatAt) ||
+					Date.now() - heartbeatAt >= 120_000 ||
+					(await readLinuxProcessStartTime(heartbeat.pid)) !== heartbeat.process_start_time
+				)
+					continue;
+				const guard = (await executeSkcTeamApiOperation(
+					"read-worker-memory-guard",
+					{ team_name: team.team_name, worker: worker.id, platform: process.platform },
+					cwd,
+					{ ...process.env, SKC_SESSION_ID: sessionId },
+				)) as { automatic_action_allowed?: boolean; state?: string };
+				if (!guard.automatic_action_allowed || guard.state === "blocked") continue;
+				const bytes = await readLinuxWorkerRssBytes(heartbeat.pid);
+				if (bytes === null) continue;
+				samples.push({ workerId: `${team.team_name}/${worker.id}`, bytes, accepted: true });
+			} catch {
+				// Missing or malformed worker authority is not eligible for automatic mutation.
+			}
+		}
+	}
+	return samples;
+}
+
+async function applySelectedTeamWorker(
+	cwd: string,
+	sessionId: string,
+	workerId: string,
+	excessBytes: number,
+	incidentId: string,
+): Promise<void> {
+	const separator = workerId.lastIndexOf("/");
+	if (separator <= 0 || separator === workerId.length - 1) return;
+	const teamName = workerId.slice(0, separator);
+	const worker = workerId.slice(separator + 1);
+	await executeSkcTeamApiOperation(
+		"apply-worker-memory-guard",
+		{
+			team_name: teamName,
+			worker,
+			platform: process.platform,
+			reason: "production_memory_pressure_sweep",
+			incident_id: incidentId,
+			candidates: [{ worker_id: worker, platform: process.platform, excess_bytes: excessBytes }],
+		},
+		cwd,
+		{ ...process.env, SKC_SESSION_ID: sessionId },
+	);
+}
+async function sweepEnabledMemoryPressureGuard(d: ResourceGcDeps): Promise<void> {
+	const now = d.monotonicNow();
+	const dueSessions: Array<{ sessionId: string; policy: MemoryGuardPolicy; cwd: string }> = [];
+	for (const [sessionId, { settings, cwd: resolveCwd }] of activeSessions) {
+		const policy = resolveMemoryGuardPolicy(settings);
+		const cwd = resolveCwd();
+		if (!policy.enabled) {
+			memoryGuardGcActive.delete(sessionId);
+			memoryGuardRestartAboveSince.delete(sessionId);
+			memoryGuardWorkerIncidentIds.delete(sessionId);
+			memoryGuardRestartCooldownUntil.delete(sessionId);
+			memoryGuardLastEvaluatedAt.delete(sessionId);
+			continue;
+		}
+		const lastEvaluated = memoryGuardLastEvaluatedAt.get(sessionId);
+		if (lastEvaluated !== undefined && now - lastEvaluated < policy.checkIntervalMs) continue;
+		memoryGuardLastEvaluatedAt.set(sessionId, now);
+		dueSessions.push({ sessionId, policy, cwd });
+	}
+	if (dueSessions.length === 0) return;
+
+	const snapshot = await d.memorySnapshot();
+	let gcRequested = false;
+	const gcTelemetry: Array<{ sessionId: string } & Record<string, unknown>> = [];
+	let workerActionTaken = false;
+	for (const { sessionId, policy, cwd } of dueSessions) {
+		const pressure = __selectMemoryPressureDomainForTest(snapshot, policy.policyLimitBytes);
+		const limit = resolveEffectiveMemoryLimit({
+			hardCapBytes: pressure.hardCapBytes,
+			policyLimitBytes: policy.policyLimitBytes,
+		});
+		if (limit.effectiveBytes === null) {
+			memoryGuardGcActive.delete(sessionId);
+			memoryGuardRestartAboveSince.delete(sessionId);
+			memoryGuardWorkerIncidentIds.delete(sessionId);
+			memoryGuardRestartCooldownUntil.delete(sessionId);
+			continue;
+		}
+		const workerSamples = await (d.listTeamWorkers ?? (async () => []))(cwd, sessionId);
+		const domain = computeMemoryGuardDomain({
+			effectiveLimitBytes: limit.effectiveBytes,
+			totalUsageBytes: pressure.totalUsageBytes,
+			parentBytes: pressure.parentBytes,
+			parentReserveBytes: policy.parentReserveBytes,
+			workers: workerSamples,
+		});
+		const decision = chooseMemoryGuardAction({
+			domain,
+			hostSupported: false,
+			workerSupported: workerId =>
+				workerSamples.some(worker => worker.workerId === workerId && worker.accepted !== false),
+		});
+		const usageRatio = pressure.totalUsageBytes / limit.effectiveBytes;
+		if (usageRatio >= policy.gcThresholdRatio) {
+			if (!memoryGuardGcActive.has(sessionId)) {
+				gcRequested = true;
+				gcTelemetry.push({
+					sessionId,
+					parentBytes: pressure.parentBytes,
+					totalUsageBytes: pressure.totalUsageBytes,
+					effectiveLimitBytes: limit.effectiveBytes,
+					domainSource: pressure.source,
+					limitSource: limit.source,
+					usageRatio,
+					decision: decision.kind,
+				});
+			}
+		} else {
+			memoryGuardGcActive.delete(sessionId);
+		}
+
+		if (usageRatio < policy.restartThresholdRatio) {
+			memoryGuardRestartAboveSince.delete(sessionId);
+			memoryGuardWorkerIncidentIds.delete(sessionId);
+			continue;
+		}
+		const aboveSince = memoryGuardRestartAboveSince.get(sessionId);
+		if (aboveSince === undefined) {
+			memoryGuardRestartAboveSince.set(sessionId, now);
+			memoryGuardWorkerIncidentIds.set(sessionId, `worker-pressure:${sessionId}:${Math.trunc(now)}`);
+			continue;
+		}
+		const cooldownUntil = memoryGuardRestartCooldownUntil.get(sessionId) ?? 0;
+		if (now - aboveSince < policy.restartThresholdWindowMs || now < cooldownUntil) continue;
+		const workerIncidentId =
+			memoryGuardWorkerIncidentIds.get(sessionId) ?? `worker-pressure:${sessionId}:${Math.trunc(aboveSince)}`;
+		let workerActionAttemptedForSession = false;
+		if (decision.kind === "execute" && decision.target.kind === "worker" && !workerActionTaken) {
+			const refreshedWorkers = await (d.listTeamWorkers ?? (async () => []))(cwd, sessionId);
+			const refreshedDomain = computeMemoryGuardDomain({
+				effectiveLimitBytes: limit.effectiveBytes,
+				totalUsageBytes: pressure.totalUsageBytes,
+				parentBytes: pressure.parentBytes,
+				parentReserveBytes: policy.parentReserveBytes,
+				workers: refreshedWorkers,
+			});
+			const refreshedDecision = chooseMemoryGuardAction({
+				domain: refreshedDomain,
+				hostSupported: false,
+				workerSupported: workerId =>
+					refreshedWorkers.some(worker => worker.workerId === workerId && worker.accepted !== false),
+			});
+			const revalidated = revalidateMemoryGuardAction(decision, refreshedDecision);
+			if (revalidated.kind !== "execute" || revalidated.target.kind !== "worker") continue;
+			workerActionTaken = true;
+			workerActionAttemptedForSession = true;
+			try {
+				await (d.applyTeamWorkerGuard ?? (async () => undefined))(
+					cwd,
+					sessionId,
+					revalidated.target.workerId,
+					revalidated.target.excessBytes,
+					workerIncidentId,
+				);
+			} catch (error) {
+				d.logWarn("Memory guard: team worker action failed; continuing sweep", {
+					sessionId,
+					workerId: revalidated.target.workerId,
+					error: String(error),
+				});
+			}
+		}
+		if (workerActionAttemptedForSession) memoryGuardRestartCooldownUntil.set(sessionId, now + policy.cooldownMs);
+		d.logWarn("Memory guard: restart threshold sustained", {
+			sessionId,
+			parentBytes: pressure.parentBytes,
+			totalUsageBytes: pressure.totalUsageBytes,
+			effectiveLimitBytes: limit.effectiveBytes,
+			domainSource: pressure.source,
+			limitSource: limit.source,
+			usageRatio,
+			windowMs: policy.restartThresholdWindowMs,
+			cooldownMs: policy.cooldownMs,
+			decision: decision.kind,
+		});
+	}
+	if (gcRequested) {
+		try {
+			d.runGc();
+			for (const { sessionId, ...telemetry } of gcTelemetry) {
+				memoryGuardGcActive.add(sessionId);
+				d.logWarn("Memory guard: GC threshold reached", { sessionId, ...telemetry });
+			}
+		} catch (error) {
+			d.logWarn("Memory guard: GC invocation failed; latch not set", { error: String(error) });
+		}
+	}
+}
+
 function ownerBrowserPolicy(snapshot: TabGcSnapshot): BrowserGcPolicy | null {
 	if (!snapshot.ownerId) return null;
-	const settings = activeSessions.get(snapshot.ownerId);
-	if (!settings) return null;
-	return resolveBrowserGcPolicy(settings);
+	const registration = activeSessions.get(snapshot.ownerId);
+	if (!registration) return null;
+	return resolveBrowserGcPolicy(registration.settings);
 }
 
 /** Coarse, ordering-only eligibility; the live recheck in releaseTabIfGcEligible is authoritative. */
@@ -268,7 +800,7 @@ async function sweepBrowserTabs(d: ResourceGcDeps): Promise<void> {
 function pressuredOwnerIds(d: ResourceGcDeps): Set<string> {
 	const rss = d.rssBytes();
 	const owners = new Set<string>();
-	for (const [sessionId, settings] of activeSessions) {
+	for (const [sessionId, { settings }] of activeSessions) {
 		const policy = resolveBrowserGcPolicy(settings);
 		if (policy.enabled && rss > policy.rssLimitBytes) owners.add(sessionId);
 	}
@@ -307,7 +839,7 @@ async function sweepScreenshots(d: ResourceGcDeps): Promise<void> {
 
 	let staleMs: number | null = null;
 	let scanIntervalMs = Number.POSITIVE_INFINITY;
-	for (const settings of activeSessions.values()) {
+	for (const { settings } of activeSessions.values()) {
 		const policy = resolveComputerGcPolicy(settings);
 		if (!policy.enabled) continue;
 		staleMs = staleMs === null ? policy.staleMs : Math.min(staleMs, policy.staleMs);
@@ -323,22 +855,28 @@ async function sweepScreenshots(d: ResourceGcDeps): Promise<void> {
 
 // ── Test-only seams ─────────────────────────────────────────────────────────────────────────
 export function __setResourceGcDepsForTest(overrides: Partial<ResourceGcDeps>): void {
-	deps = { ...defaultDeps, ...overrides };
+	deps = {
+		...defaultDeps,
+		...overrides,
+		monotonicNow: overrides.monotonicNow ?? overrides.now ?? defaultDeps.monotonicNow,
+		listTeamWorkers: overrides.listTeamWorkers ?? (async () => []),
+		applyTeamWorkerGuard: overrides.applyTeamWorkerGuard ?? (async () => undefined),
+	};
 }
 
 export function __setResourceGcSchedulerNowForTest(now: () => number): void {
-	schedulerNow = now;
+	scheduler.setSchedulerNowForTest(now);
 }
 
 export async function __runResourceGcTickForTest(): Promise<void> {
-	await runTick();
+	await scheduler.runTick();
 }
 
 export async function __runResourceGcTimerCallbackForTest(
 	owner: { generation: number; token: number },
 	deadline: number,
 ): Promise<void> {
-	await handleTimerCallback(owner, deadline);
+	await scheduler.runTimerCallbackForTest(owner, deadline);
 }
 
 export function __getResourceGcStateForTest(): {
@@ -353,28 +891,30 @@ export function __getResourceGcStateForTest(): {
 	deferredGeneration: number | null;
 	activeGeneration: number | null;
 } {
+	const state = scheduler.getStateForTest();
 	return {
-		timerActive: pendingTimer !== null,
+		timerActive: state.timerActive,
 		sessionCount: activeSessions.size,
 		rssWarningActive,
-		inProgress: inProgressOwner !== null,
-		generation: timerGeneration,
-		pendingDeadline,
-		pendingOwner: pendingOwner ? { ...pendingOwner } : null,
-		deferredDeadline: deferredSchedule?.deadline ?? null,
-		deferredGeneration: deferredSchedule?.generation ?? null,
-		activeGeneration: inProgressOwner?.generation ?? null,
+		inProgress: state.inProgress,
+		generation: state.generation,
+		pendingDeadline: state.pendingDeadline,
+		pendingOwner: state.pendingOwner,
+		deferredDeadline: state.deferredDeadline,
+		deferredGeneration: state.deferredGeneration,
+		activeGeneration: state.activeGeneration,
 	};
 }
 
 export function __resetResourceGcForTest(): void {
-	stopTimer();
+	scheduler.resetForTest();
 	activeSessions.clear();
-	inProgressOwner = null;
-	deferredSchedule = null;
 	rssWarningActive = false;
+	memoryGuardGcActive.clear();
+	memoryGuardRestartAboveSince.clear();
+	memoryGuardWorkerIncidentIds.clear();
+	memoryGuardRestartCooldownUntil.clear();
+	memoryGuardLastEvaluatedAt.clear();
 	lastScreenshotScanAt = 0;
-	nextTimerToken = 0;
-	schedulerNow = (): number => performance.now();
 	deps = defaultDeps;
 }

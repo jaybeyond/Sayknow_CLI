@@ -16,8 +16,24 @@ import {
 const THREAD_ID = 901;
 const sleep = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
 
+/**
+ * Polls until `predicate` holds.
+ *
+ * These cases drive a real daemon, a real WebSocket, and a stubbed bot whose
+ * calls one test deliberately holds open to exercise a duplicate-delivery race,
+ * so time spent here tracks how contended the runner is rather than whether the
+ * behaviour under test is correct. The previous 8s budget passed locally but
+ * expired on loaded CI shards: an 8,185ms failure was observed waiting for
+ * "ephemeral turn", well inside that test's own 30s budget.
+ *
+ * The budget is not raised to near the test timeout because a single test
+ * chains up to six of these waits, and an over-long per-wait deadline would let
+ * the enclosing 30s test expire first with a less useful error. Every caller
+ * still asserts its exact post-condition after waiting, so a real regression
+ * fails on the assertion rather than on the clock.
+ */
 async function waitFor(predicate: () => boolean, label: string): Promise<void> {
-	const deadline = Date.now() + 8_000;
+	const deadline = Date.now() + 12_000;
 	while (Date.now() < deadline) {
 		if (predicate()) return;
 		await sleep(20);
@@ -35,8 +51,11 @@ class Bot implements BotApi {
 		body: Record<string, unknown>;
 		options?: { noRetry?: boolean; signal?: AbortSignal };
 	}> = [];
+	constructor(private readonly beforeCall?: (method: string, body: Record<string, unknown>) => void | Promise<void>) {}
 	async call(method: string, body: unknown, options?: { noRetry?: boolean; signal?: AbortSignal }): Promise<unknown> {
-		this.calls.push({ method, body: body as Record<string, unknown>, options });
+		const callBody = body as Record<string, unknown>;
+		this.calls.push({ method, body: callBody, options });
+		if (this.beforeCall) await this.beforeCall(method, callBody);
 		switch (method) {
 			case "getChat":
 				return { ok: true, result: { type: "private" } };
@@ -71,12 +90,12 @@ function isolatedSettings(agentDir: string): Settings {
 		},
 	}) as Settings;
 }
-test("real notifications extension rebinds /btw without provider replay or main-session injection", async () => {
+test("real notifications extension rejects an in-flight /btw response after reconnect", async () => {
 	const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), "skc-btw-extension-e2e-"));
 	const cwd = path.join(agentDir, "repo");
 	const sessionId = "btw-extension-e2e";
 	const handlers = new Map<string, (event: unknown, ctx: unknown) => Promise<unknown>>();
-	const providerCalls: Array<{ prompt: string; signal?: AbortSignal }> = [];
+	const btwCalls: Array<{ question: string; signal?: AbortSignal }> = [];
 	const providerResponse = Promise.withResolvers<{ replyText: string }>();
 	let mainSessionInjections = 0;
 	const settings = isolatedSettings(agentDir);
@@ -115,8 +134,8 @@ test("real notifications extension rebinds /btw without provider replay or main-
 			} as never,
 			{
 				settings,
-				runEphemeralTurn: async (prompt, signal) => {
-					providerCalls.push({ prompt, signal });
+				runBtwTurn: async (question, signal) => {
+					btwCalls.push({ question, signal });
 					if (signal?.aborted) throw signal.reason;
 					return await providerResponse.promise;
 				},
@@ -147,7 +166,7 @@ test("real notifications extension rebinds /btw without provider replay or main-
 				text: "/btw exact side question",
 			},
 		});
-		await waitFor(() => providerCalls.length === 1, "EphemeralTurnHost provider invocation");
+		await waitFor(() => btwCalls.length === 1, "raw-question BTW invocation");
 		daemon.sessions.get(sessionId)!.ws.close();
 		await waitFor(() => !daemon.sessions.has(sessionId), "extension transient transport loss");
 		await daemon.scanRoots();
@@ -158,35 +177,15 @@ test("real notifications extension rebinds /btw without provider replay or main-
 			"extension replacement capability replay",
 		);
 		await sleep(80);
-		expect(providerCalls).toHaveLength(1);
+		expect(btwCalls).toHaveLength(1);
 		providerResponse.resolve({ replyText: "| Formula | Value |\n| --- | --- |\n| $x^2$ | 4 |" });
-		await waitFor(() => bot.count("sendRichMessage") === richBefore + 1, "correlated rich /btw delivery");
-		expect(providerCalls).toHaveLength(1);
-		expect(providerCalls[0]!.prompt).toBe(`<btw>
-This is an ephemeral side question for the current interactive session.
-Answer briefly and directly using the conversation context already provided.
-Do not use tools.
-Do not ask follow-up questions.
-Question:
-exact side question
-</btw>`);
-		expect(providerCalls[0]!.signal).toBeInstanceOf(AbortSignal);
+		await sleep(80);
+		expect(btwCalls).toHaveLength(1);
+		expect(btwCalls[0]!.question).toBe("exact side question");
+		expect(btwCalls[0]!.signal).toBeInstanceOf(AbortSignal);
 		expect(mainSessionInjections).toBe(0);
 		expect(bot.count("sendMessage")).toBe(sendMessageBefore);
-		const richCalls = bot.calls.filter(call => call.method === "sendRichMessage");
-		const richCall = richCalls.at(-1)!;
-		expect(richCalls).toHaveLength(richBefore + 1);
-		expect(richCall.body).toEqual({
-			chat_id: "42",
-			message_thread_id: THREAD_ID,
-			reply_parameters: { message_id: 870 },
-			rich_message: {
-				markdown: "| Formula | Value |\n| --- | --- |\n| $x^2$ | 4 |",
-				skip_entity_detection: true,
-			},
-		});
-		expect(richCall.options?.noRetry).toBe(true);
-		expect(richCall.options?.signal).toBeInstanceOf(AbortSignal);
+		expect(bot.count("sendRichMessage")).toBe(richBefore);
 	} finally {
 		if (handlers.has("session_shutdown")) await handlers.get("session_shutdown")!({ type: "session_shutdown" }, ctx);
 		daemon.requestStop();
@@ -202,6 +201,7 @@ test("/btw travels through NotificationServer and a real WebSocket with one stri
 		const settings = isolatedSettings(agentDir);
 		const sessionId = "btw-e2e";
 		const cwd = path.join(agentDir, "repo");
+		fs.mkdirSync(cwd, { recursive: true });
 		await registerNotificationRoot({ settings, cwd, sessionId });
 		const server = new NotificationServer(sessionId, "token", path.join(cwd, ".skc", "state"), true);
 		const inbound: Array<Record<string, unknown>> = [];
@@ -229,7 +229,26 @@ test("/btw travels through NotificationServer and a real WebSocket with one stri
 			inbound.push(frame as unknown as Record<string, unknown>);
 		});
 		await server.start();
-		const bot = new Bot();
+		let terminalReplyGate:
+			| {
+					text: string;
+					started: PromiseWithResolvers<void>;
+					release: PromiseWithResolvers<void>;
+					injected: boolean;
+					injectDuplicate: () => void;
+			  }
+			| undefined;
+		const bot = new Bot((method, body) => {
+			const richMessage = body.rich_message as { markdown?: unknown } | undefined;
+			if (!terminalReplyGate || method !== "sendRichMessage" || richMessage?.markdown !== terminalReplyGate.text)
+				return;
+			terminalReplyGate.started.resolve();
+			if (!terminalReplyGate.injected) {
+				terminalReplyGate.injected = true;
+				terminalReplyGate.injectDuplicate();
+			}
+			return terminalReplyGate.release.promise;
+		});
 		const daemon = new TelegramNotificationDaemon({
 			settings,
 			ownerId: "owner",
@@ -257,7 +276,9 @@ test("/btw travels through NotificationServer and a real WebSocket with one stri
 			await sleep(80);
 			const terminalDispatchCount = () =>
 				bot.calls.filter(call => call.method === "sendMessage" || call.method === "sendRichMessage").length;
+			const terminalRichDispatchCount = () => bot.count("sendRichMessage");
 			const before = terminalDispatchCount();
+			const richBefore = terminalRichDispatchCount();
 			await daemon.handleTelegramUpdate({
 				update_id: 7,
 				message: { message_id: 70, chat: { id: 42 }, message_thread_id: THREAD_ID, text: "/btw status?" },
@@ -299,6 +320,15 @@ test("/btw travels through NotificationServer and a real WebSocket with one stri
 				await sleep(40);
 				expect(terminalDispatchCount(), JSON.stringify(mismatch)).toBe(before);
 			}
+			// This frame is not an operator-routed event; bypass the unrelated router so
+			// the duplicate test drives concurrent terminal-handler admissions directly.
+			const sessionRouter = (
+				daemon as unknown as {
+					sessionRouter: { dispatch: (session: unknown, message: unknown) => Promise<boolean> };
+				}
+			).sessionRouter;
+			const originalDispatch = sessionRouter.dispatch;
+			sessionRouter.dispatch = async () => false;
 			const terminal = {
 				type: "ephemeral_turn_result",
 				sessionId,
@@ -307,15 +337,43 @@ test("/btw travels through NotificationServer and a real WebSocket with one stri
 				messageId: 70,
 				threadId: String(THREAD_ID),
 				status: "ok",
-				text: "ephemeral answer",
+				text: "| Formula | Value |\n| --- | --- |\n| $x^2$ | 4 |",
+			};
+			// Let startup's identity/topic outbound traffic settle before arming a fresh,
+			// terminal-text-scoped barrier for the duplicate-delivery race.
+			await new Promise<void>(resolve => setImmediate(resolve));
+			await new Promise<void>(resolve => setImmediate(resolve));
+			let duplicate: Promise<void> | undefined;
+			const duplicateHandlerEntered = Promise.withResolvers<void>();
+			terminalReplyGate = {
+				text: terminal.text,
+				started: Promise.withResolvers<void>(),
+				release: Promise.withResolvers<void>(),
+				injected: false,
+				injectDuplicate: () => {
+					duplicate = daemon.handleSessionMessage(daemon.sessions.get(sessionId)!, terminal);
+					duplicateHandlerEntered.resolve();
+				},
 			};
 			server.sendTo(connectionId, JSON.stringify(terminal));
+			await terminalReplyGate.started.promise;
+			await duplicateHandlerEntered.promise;
+			await new Promise<void>(resolve => setImmediate(resolve));
+			expect(terminalRichDispatchCount()).toBe(richBefore + 1);
+			terminalReplyGate.release.resolve();
+			await duplicate;
 			await waitFor(() => terminalDispatchCount() === before + 1, "Telegram terminal dispatch");
+			await new Promise<void>(resolve => setImmediate(resolve));
+			await new Promise<void>(resolve => setImmediate(resolve));
+			expect(terminalDispatchCount()).toBe(before + 1);
+			// Once the first delivery has terminalized, the tombstone must also suppress a
+			// late duplicate after the in-flight-delivery guard has been released.
 			server.sendTo(connectionId, JSON.stringify(terminal));
-			await sleep(80);
+			await new Promise<void>(resolve => setImmediate(resolve));
 			expect(terminalDispatchCount()).toBe(before + 1);
 			const reply = bot.calls.at(-1)!;
 			expect(reply.body).toMatchObject({ chat_id: "42", message_thread_id: THREAD_ID });
+			sessionRouter.dispatch = originalDispatch;
 		} finally {
 			daemon.requestStop();
 			server.stop();
@@ -327,12 +385,13 @@ test("/btw travels through NotificationServer and a real WebSocket with one stri
 		throw err;
 	}
 }, 30_000);
-test("/btw reconnect rebinds the existing provider request without cancellation", async () => {
+test("/btw reconnect does not replay an in-flight provider request", async () => {
 	const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), "skc-btw-reconnect-e2e-"));
 	try {
 		const settings = isolatedSettings(agentDir);
 		const sessionId = "btw-reconnect-e2e";
 		const cwd = path.join(agentDir, "repo");
+		fs.mkdirSync(cwd, { recursive: true });
 		await registerNotificationRoot({ settings, cwd, sessionId });
 		const inbound: Array<Record<string, unknown>> = [];
 		const cancelFrames: Array<Record<string, unknown>> = [];
@@ -398,6 +457,7 @@ test("/btw reconnect rebinds the existing provider request without cancellation"
 
 			daemon.sessions.get(sessionId)!.ws.close();
 			await waitFor(() => !daemon.sessions.has(sessionId) && server.clientCount() === 0, "transient transport loss");
+			await sleep(80);
 			expect(cancelFrames).toHaveLength(0);
 			expect(inbound).toHaveLength(1);
 
@@ -408,8 +468,7 @@ test("/btw reconnect rebinds the existing provider request without cancellation"
 			);
 			server.pushFrame(JSON.stringify({ type: "hello", protocolVersion: 3, capabilities: ["ephemeral_turn_v1"] }));
 			await waitFor(() => daemon.sessions.get(sessionId)?.hostGeneration === 4, "replacement generation-4 replay");
-			expect(inbound).toHaveLength(2);
-			expect(inbound[1]!.requestId).toBe(turn.requestId);
+			expect(inbound).toHaveLength(1);
 			expect(cancelFrames).toHaveLength(0);
 
 			const terminal = {
@@ -423,11 +482,11 @@ test("/btw reconnect rebinds the existing provider request without cancellation"
 				text: "survived replacement",
 			};
 			server.pushFrame(JSON.stringify(terminal));
-			await waitFor(() => bot.count("sendMessage") === beforeTerminal + 1, "single replacement terminal dispatch");
+			await sleep(80);
 			server.pushFrame(JSON.stringify(terminal));
 			await sleep(80);
-			expect(bot.count("sendMessage")).toBe(beforeTerminal + 1);
-			expect(inbound).toHaveLength(2);
+			expect(bot.count("sendMessage")).toBe(beforeTerminal);
+			expect(inbound).toHaveLength(1);
 			expect(cancelFrames).toHaveLength(0);
 		} finally {
 			daemon.requestStop();
@@ -446,6 +505,7 @@ test("/btw generation replacement terminalizes an old pending request exactly on
 		const settings = isolatedSettings(agentDir);
 		const sessionId = "btw-crash-e2e";
 		const cwd = path.join(agentDir, "repo");
+		fs.mkdirSync(cwd, { recursive: true });
 		await registerNotificationRoot({ settings, cwd, sessionId });
 		const inbound: Array<Record<string, unknown>> = [];
 		const cancelFrames: Array<Record<string, unknown>> = [];

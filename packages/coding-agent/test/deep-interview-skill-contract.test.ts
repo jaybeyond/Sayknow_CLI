@@ -7,6 +7,13 @@ const skillPath = join(dirname(fileURLToPath(import.meta.url)), "../src/defaults
 
 const skill = readFileSync(skillPath, "utf8");
 
+function extractSection(content: string, sectionName: string): string {
+	const sectionMatch = content.match(new RegExp(`<${sectionName}>\\n([\\s\\S]*?)\\n</${sectionName}>`));
+	const sectionContent = sectionMatch?.[1];
+	if (sectionContent === undefined) throw new Error(`missing <${sectionName}> section`);
+	return sectionContent;
+}
+
 describe("deep-interview skill conflict-aware scoring contract", () => {
 	it("documents the ambiguity-raising triggers and established facts", () => {
 		expect(skill).toContain("A direct contradiction");
@@ -46,6 +53,37 @@ describe("deep-interview skill conflict-aware scoring contract", () => {
 	});
 });
 
+describe("deep-interview simple-request escape hatch", () => {
+	it("stops before interview state, Round 0, or spec writing when the request is already clear and small", () => {
+		const doNotUseWhen = extractSection(skill, "Do_Not_Use_When");
+		const steps = extractSection(skill, "Steps");
+		const suitabilityGateIndex = steps.indexOf("## Phase 0.5: Suitability Gate");
+		const initializeIndex = steps.indexOf("## Phase 1: Initialize");
+		const roundZeroIndex = steps.indexOf("## Round 0: Topology Enumeration Gate");
+		const executionBridgeIndex = steps.indexOf("## Phase 5: Execution Bridge");
+
+		expect(doNotUseWhen).toMatch(/detailed,\s+specific request[\s\S]*execute directly/i);
+		expect(doNotUseWhen).toMatch(/quick fix or single change[\s\S]*direct execution/i);
+		expect(suitabilityGateIndex).toBeGreaterThanOrEqual(0);
+		expect(suitabilityGateIndex).toBeLessThan(initializeIndex);
+		expect(suitabilityGateIndex).toBeLessThan(roundZeroIndex);
+		expect(suitabilityGateIndex).toBeLessThan(executionBridgeIndex);
+
+		const suitabilityGate = steps.slice(suitabilityGateIndex, initializeIndex);
+		expect(suitabilityGate).toMatch(/clear,\s+bounded,\s+low-risk/i);
+		expect(suitabilityGate).toContain("skc deep-interview read --json");
+		expect(suitabilityGate).toContain("skc deep-interview clear --force");
+		expect(suitabilityGate).toMatch(/newly seeded empty interview/i);
+		expect(suitabilityGate).toMatch(/no recorded `rounds`[\s\S]*no `spec_path`[\s\S]*no `handoff_from`/i);
+		expect(suitabilityGate).toMatch(/If state already contains rounds[\s\S]*do not clear it/i);
+		expect(suitabilityGate).toMatch(/Preserve the active interview/i);
+		expect(suitabilityGate).toMatch(/do not initialize deep-interview state/i);
+		expect(suitabilityGate).toMatch(/do not run Round 0/i);
+		expect(suitabilityGate).toMatch(/do not write a pending-approval spec/i);
+		expect(suitabilityGate).toMatch(/direct implementation/i);
+	});
+});
+
 describe("deep-interview self-proofread output rule", () => {
 	it("adds a silent, best-effort self-proofread rule in Execution_Policy", () => {
 		expect(skill).toContain("one silent, best-effort self-proofread in the preserved session language");
@@ -76,5 +114,75 @@ describe("deep-interview self-proofread output rule", () => {
 
 	it("adds a Final_Checklist item for the silent self-proofread", () => {
 		expect(skill).toContain("was silently self-proofread once according to");
+	});
+});
+
+describe("deep-interview implementation wording boundary", () => {
+	it("treats English and Korean implementation wording as eventual target wording, not execution approval", () => {
+		expect(skill).toContain('`implementation`, "implementation plan", Korean `구현`, or "구현 계획"');
+		expect(skill).toContain("describing the eventual target, not permission to implement now");
+		expect(skill).toContain("do not implement, edit/write code, launch implementation workers");
+		expect(skill).toContain("start task/skill/ultragoal implementation");
+	});
+
+	it("states the deep-interview implementation boundary and required phase transition", () => {
+		expect(skill).toContain(
+			"I can interview for an implementation plan, but I won't implement during deep-interview.",
+		);
+		expect(skill).toContain("continue clarifying scope, risks, acceptance criteria, and unknowns");
+		expect(skill).toContain("Implementation requires an explicit phase transition/approval after the interview");
+		expect(skill).toContain("workflow phase must explicitly transition out of deep-interview");
+		expect(skill).toContain("execution approval must be captured by a downstream execution path");
+	});
+});
+
+describe("deep-interview ask clarification contract", () => {
+	it("treats clarificationQuestion as a non-answer and re-asks without scoring", () => {
+		expect(skill).toContain("clarificationQuestion");
+		expect(skill).toContain("treat it as a non-answer about the displayed choices");
+		expect(skill).toContain(
+			"call `ask` again with the exact original question, options, and `deepInterview.*` metadata",
+		);
+		expect(skill).toContain("bypasses Step 2b′ auto-answer, Step 2b″ free-text refine, Step 2c ambiguity scoring");
+		expect(skill).toContain("must not be recorded as a round answer");
+	});
+});
+
+describe("deep-interview ouroboros ooo-interview parity port", () => {
+	it("documents the tiered confirmation cadence while keeping the hard cap (feature B)", () => {
+		expect(skill).toMatch(/Tiered Confirmation Cadence/i);
+		expect(skill).toMatch(/Rounds 1-3 \(auto-continue\)/i);
+		expect(skill).toMatch(/Rounds 4-15 \(ask to continue\)/i);
+		expect(skill).toMatch(/Rounds 16\+ \(diminishing-returns warning\)/i);
+		expect(skill).toMatch(/never removes this hard safety cap/i);
+		expect(skill).toContain("Round 100");
+	});
+
+	it("documents advisory fanout lanes distinct from the milestone panel (feature C)", () => {
+		expect(skill).toMatch(/advisory fanout/i);
+		expect(skill).toMatch(/distinct from the milestone panel/i);
+		for (const lane of [
+			"code_context",
+			"web_context",
+			"ambiguity_contrarian",
+			"answer_simplifier",
+			"architecture_implications",
+		])
+			expect(skill).toContain(lane);
+	});
+
+	it("documents the confused_terms/references non-behavioral contract (feature A)", () => {
+		expect(skill).toContain("confused_terms");
+		expect(skill).toContain("references");
+		expect(skill).toMatch(/MUST NOT alter the first question/i);
+		expect(skill).toMatch(/never auto-fetched/i);
+	});
+
+	it("documents the FREETEXT_FIELDS allowlist + input size caps (feature D)", () => {
+		expect(skill).toContain("FREETEXT_FIELDS");
+		expect(skill).toMatch(/shell metacharacters/i);
+		expect(skill).toMatch(/50,000/);
+		expect(skill).toMatch(/10,000/);
+		expect(skill).toMatch(/character-count/i);
 	});
 });

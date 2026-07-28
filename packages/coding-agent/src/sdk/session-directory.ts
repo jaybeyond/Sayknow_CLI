@@ -38,7 +38,11 @@ export type ResolveManagedSessionScopeResult =
 				| "network_unsupported"
 				| "sessions_root_unavailable"
 				| "binding_conflict"
-				| "binding_invalid";
+				| "binding_invalid"
+				| "atomic_unavailable"
+				| "durability_not_provable"
+				| "durability_failed"
+				| "invalid_request";
 			message: string;
 	  };
 

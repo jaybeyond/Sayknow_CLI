@@ -355,7 +355,7 @@ function findExactCanonicalModelMatch(
 	modelReference: string,
 	availableModels: Model<Api>[],
 	modelRegistry: CanonicalModelRegistry | undefined,
-	sessionId?: string,
+	_sessionId?: string,
 ): Model<Api> | undefined {
 	if (!modelRegistry) {
 		return undefined;
@@ -378,7 +378,7 @@ function findExactEquivalentModelMatch(
 	modelReference: string,
 	availableModels: Model<Api>[],
 	modelRegistry: CanonicalModelRegistry | undefined,
-	sessionId?: string,
+	_sessionId?: string,
 ): Model<Api> | undefined {
 	if (!modelRegistry?.getCanonicalId || !modelRegistry.resolveCanonicalModel) return undefined;
 	const trimmedReference = modelReference.trim();

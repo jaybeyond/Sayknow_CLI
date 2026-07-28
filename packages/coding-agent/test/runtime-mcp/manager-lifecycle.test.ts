@@ -7,7 +7,6 @@ import * as configValue from "../../src/config/resolve-config-value";
 import { loadMCPJsonFile } from "../../src/discovery/mcp-json";
 import * as mcpClient from "../../src/runtime-mcp/client";
 import { createMCPManager, MCPManager } from "../../src/runtime-mcp/manager";
-import { refreshMCPOAuthToken } from "../../src/runtime-mcp/oauth-flow";
 import { MCPTool } from "../../src/runtime-mcp/tool-bridge";
 import type { JsonRpcMessage, MCPServerConfig, MCPServerConnection, MCPTransport } from "../../src/runtime-mcp/types";
 import { MCPExpectedFailure } from "../../src/runtime-mcp/types";
@@ -93,6 +92,90 @@ describe("MCP manager lifecycle cleanup", () => {
 		expect(manager.getConnectedServers()).toEqual([]);
 		await expect(manager.waitForConnection("bad")).rejects.toThrow("MCP server not connected: bad");
 	});
+	// The long startup ceiling is ACP-scoped (PR #3164 Option B): a slow gateway
+	// gets its configured window only when the caller supplies an explicit
+	// budget, as ACP lifecycle launches do. Without one, the short default
+	// applies so an ordinary consumer cannot be hung by a large `timeout`.
+	test("honors a configured startup timeout for a slow stdio gateway on an ACP-scoped budget", async () => {
+		const manager = new MCPManager(process.cwd(), null, { maxStartupTimeoutMs: 30_500 });
+		const delayedServer = `
+const readline = require('node:readline');
+const rl = readline.createInterface({ input: process.stdin });
+rl.on('line', line => {
+  const msg = JSON.parse(line);
+  if (msg.method === 'initialize') {
+    setTimeout(() => {
+      process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: msg.id, result: { protocolVersion: '2025-03-26', capabilities: { tools: {} }, serverInfo: { name: 'slow-gateway', version: '1' } } }) + '\\n');
+    }, 2200);
+  } else if (msg.method === 'tools/list') {
+    process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: msg.id, result: { tools: [] } }) + '\\n');
+  }
+});
+setInterval(() => {}, 1000);
+`;
+
+		try {
+			const result = await manager.connectServers(
+				{
+					"slow-gateway": {
+						command: process.execPath,
+						args: ["-e", delayedServer],
+						timeout: 5_000,
+					},
+				},
+				{},
+			);
+
+			expect(result.errors).toEqual(new Map());
+			expect(result.connectedServers).toEqual(["slow-gateway"]);
+		} finally {
+			await manager.disconnectAll();
+		}
+	});
+
+	// The same slow gateway must NOT be able to hang an ordinary consumer for
+	// ~30s: without an ACP budget the short default ceiling applies and startup
+	// gives up quickly instead of waiting out the configured `timeout`.
+	test("does not grant the long startup window to a non-ACP consumer", async () => {
+		const manager = new MCPManager(process.cwd());
+		const delayedServer = `
+const readline = require('node:readline');
+const rl = readline.createInterface({ input: process.stdin });
+rl.on('line', line => {
+  const msg = JSON.parse(line);
+  if (msg.method === 'initialize') {
+    setTimeout(() => {
+      process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: msg.id, result: { protocolVersion: '2025-03-26', capabilities: { tools: {} }, serverInfo: { name: 'slow-gateway', version: '1' } } }) + '\\n');
+    }, 2200);
+  } else if (msg.method === 'tools/list') {
+    process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: msg.id, result: { tools: [] } }) + '\\n');
+  }
+});
+setInterval(() => {}, 1000);
+`;
+
+		const startedAt = Date.now();
+		try {
+			const result = await manager.connectServers(
+				{
+					"slow-gateway": {
+						command: process.execPath,
+						args: ["-e", delayedServer],
+						timeout: 5_000,
+					},
+				},
+				{},
+			);
+
+			// Startup gave up at the short default ceiling rather than waiting for
+			// the 2.2s handshake behind a 5s configured timeout.
+			expect(result.connectedServers).toEqual([]);
+			expect(result.errors.get("slow-gateway")).toContain("timed out");
+			expect(Date.now() - startedAt).toBeLessThan(2_200);
+		} finally {
+			await manager.disconnectAll();
+		}
+	});
 	test("factory creates a tools-only exact-config manager and redacts real server errors", async () => {
 		const sentinel = "EXACT_SERVER_SECRET";
 		const server = Bun.serve({
@@ -175,8 +258,11 @@ describe("MCP manager lifecycle cleanup", () => {
 					access: accessToken,
 					refresh: refreshToken,
 					expires: Date.now() - 1,
+					mcpBinding: { resourceOrigin: server.url.origin, tokenEndpoint: tokenUrl },
 				}),
-				set: async () => {},
+				forceRefreshOAuthCredential: async () => {
+					throw new Error(`${rawFailure}:${refreshToken}`);
+				},
 			} as never);
 			await Bun.write(
 				configPath,
@@ -210,64 +296,160 @@ describe("MCP manager lifecycle cleanup", () => {
 		}
 	});
 	test.each([
-		["null root", null],
-		["missing access token", {}],
-		["wrong-typed access token", { access_token: 1 }],
-		["empty access token", { access_token: "" }],
-		["wrong-typed refresh token", { access_token: "access", refresh_token: 1 }],
-		["wrong-typed expiry", { access_token: "access", expires_in: "3600" }],
-		["negative expiry", { access_token: "access", expires_in: -1 }],
-	])("rejects invalid OAuth refresh payloads without persisting credentials: %s", async (_name, payload) => {
-		const cwd = await mkdtempExact("skc-mcp-oauth-invalid-refresh-");
-		const configPath = join(cwd, "exact.json");
-		const manager = new MCPManager(cwd, null, { toolsOnly: true });
-		const persist = vi.fn(async () => {});
-		const fetchSpy = vi
-			.spyOn(globalThis, "fetch")
-			.mockImplementation((async () => Response.json(payload)) as unknown as typeof fetch);
-		const connectSpy = vi.spyOn(mcpClient, "connectToServer").mockRejectedValue(new MCPExpectedFailure());
+		{
+			name: "missing HTTP binding",
+			type: "http" as const,
+			binding: undefined,
+			tokenUrl: "https://tokens.example/refresh",
+		},
+		{
+			name: "mismatched HTTP origin",
+			type: "http" as const,
+			binding: { resourceOrigin: "https://other.example", tokenEndpoint: "https://tokens.example/refresh" },
+			tokenUrl: "https://tokens.example/refresh",
+		},
+		{
+			name: "missing SSE binding",
+			type: "sse" as const,
+			binding: undefined,
+			tokenUrl: "https://tokens.example/refresh",
+		},
+		{
+			name: "tampered token endpoint",
+			type: "http" as const,
+			binding: { resourceOrigin: "https://mcp.example", tokenEndpoint: "https://tokens.example/refresh" },
+			tokenUrl: "https://attacker.example/refresh",
+		},
+	])("fails closed without refreshing an OAuth credential with $name", async ({ type, binding, tokenUrl }) => {
+		const manager = new MCPManager(process.cwd());
+		const fetchSpy = vi.spyOn(globalThis, "fetch");
+		const forceRefresh = vi.fn(async () => {
+			throw new Error("must not refresh");
+		});
+		const access = "BOUNDARY_ACCESS_VALUE";
+		const refresh = "BOUNDARY_REFRESH_VALUE";
+		manager.setAuthStorage({
+			get: () => ({
+				type: "oauth",
+				access,
+				refresh,
+				expires: Date.now() - 1,
+				...(binding ? { mcpBinding: binding } : {}),
+			}),
+			forceRefreshOAuthCredential: forceRefresh,
+		} as never);
 
 		try {
-			const refreshError = await refreshMCPOAuthToken("https://example.test/token", "refresh").then(
-				() => new Error("Expected OAuth refresh to reject"),
-				error => error,
-			);
-			expect(refreshError).toBeInstanceOf(MCPExpectedFailure);
-			const expectedFailure = refreshError as MCPExpectedFailure;
-			expect(expectedFailure.message).toBe("MCP server operation failed");
-			expect(expectedFailure.cause).toBeUndefined();
-
-			manager.setAuthStorage({
-				get: () => ({
-					type: "oauth",
-					access: "access",
-					refresh: "refresh",
-					expires: Date.now() - 1,
-				}),
-				set: persist,
-			} as never);
-			await Bun.write(
-				configPath,
-				JSON.stringify({
-					mcpServers: {
-						oauth: {
-							type: "http",
-							url: "http://127.0.0.1:1",
-							auth: { type: "oauth", credentialId: "credential", tokenUrl: "https://example.test/token" },
-						},
+			const failure = await manager
+				.prepareConfig({
+					type,
+					url: "https://mcp.example/path",
+					headers: { "X-Public": "value" },
+					auth: {
+						type: "oauth",
+						credentialId: "BOUNDARY_CREDENTIAL_ID",
+						tokenUrl,
 					},
-				}),
-			);
+				})
+				.then(
+					() => new Error("Expected OAuth binding validation to reject"),
+					error => error,
+				);
 
-			const result = await manager.discoverAndConnect({ configPath });
-			expect(result.errors.get("oauth")).toBe("MCP server unavailable");
-			expect(persist).not.toHaveBeenCalled();
-			expect(connectSpy).toHaveBeenCalledTimes(1);
-			expect(fetchSpy).toHaveBeenCalledTimes(2);
+			expect(failure).toBeInstanceOf(MCPExpectedFailure);
+			expect((failure as MCPExpectedFailure).message).toBe("MCP server operation failed");
+			expect((failure as MCPExpectedFailure).cause).toBeUndefined();
+			expect(fetchSpy).not.toHaveBeenCalled();
+			expect(forceRefresh).not.toHaveBeenCalled();
+			const diagnostics = JSON.stringify(failure);
+			for (const value of [access, refresh, "BOUNDARY_CREDENTIAL_ID", tokenUrl]) {
+				expect(diagnostics).not.toContain(value);
+			}
 		} finally {
-			await manager.disconnectAll();
 			vi.restoreAllMocks();
-			await rm(cwd, { recursive: true, force: true });
+		}
+	});
+	test("refreshes and injects OAuth only for the exact bound endpoint origin", async () => {
+		const manager = new MCPManager(process.cwd());
+		const forceRefresh = vi.fn(async () => ({
+			type: "oauth" as const,
+			access: "new-access",
+			refresh: "new-refresh",
+			expires: Date.now() + 3_600_000,
+			mcpBinding: {
+				resourceOrigin: "https://mcp.example",
+				tokenEndpoint: "https://tokens.example/refresh",
+			},
+		}));
+		const fetchSpy = vi.spyOn(globalThis, "fetch");
+		manager.setAuthStorage({
+			get: () => ({
+				type: "oauth",
+				access: "old-access",
+				refresh: "old-refresh",
+				expires: Date.now() - 1,
+				mcpBinding: {
+					resourceOrigin: "https://mcp.example",
+					tokenEndpoint: "https://tokens.example/refresh",
+				},
+			}),
+			forceRefreshOAuthCredential: forceRefresh,
+		} as never);
+
+		try {
+			const resolved = await manager.prepareConfig({
+				type: "http",
+				url: "https://mcp.example/another/path?query=1",
+				auth: {
+					type: "oauth",
+					credentialId: "credential",
+				},
+			});
+
+			if (resolved.type !== "http") throw new Error("Expected HTTP MCP config");
+			expect(resolved.headers?.Authorization).toBe("Bearer new-access");
+			expect(fetchSpy).not.toHaveBeenCalled();
+			expect(forceRefresh).toHaveBeenCalledWith("credential", expect.objectContaining({ access: "old-access" }), {
+				clientId: undefined,
+				clientSecret: undefined,
+			});
+		} finally {
+			vi.restoreAllMocks();
+		}
+	});
+	test("fails closed when authoritative refresh returns a missing MCP binding", async () => {
+		const manager = new MCPManager(process.cwd());
+		const fetchSpy = vi.spyOn(globalThis, "fetch");
+		manager.setAuthStorage({
+			get: () => ({
+				type: "oauth",
+				access: "old-access",
+				refresh: "__remote__",
+				expires: Date.now() - 1,
+				mcpBinding: {
+					resourceOrigin: "https://mcp.example",
+					tokenEndpoint: "https://tokens.example/refresh",
+				},
+			}),
+			forceRefreshOAuthCredential: async () => ({
+				type: "oauth",
+				access: "untrusted-new-access",
+				refresh: "__remote__",
+				expires: Date.now() + 3_600_000,
+			}),
+		} as never);
+
+		try {
+			await expect(
+				manager.prepareConfig({
+					type: "http",
+					url: "https://mcp.example/path",
+					auth: { type: "oauth", credentialId: "credential" },
+				}),
+			).rejects.toThrow("MCP server operation failed");
+			expect(fetchSpy).not.toHaveBeenCalled();
+		} finally {
+			vi.restoreAllMocks();
 		}
 	});
 	test("propagates unexpected tools-only OAuth resolution failures", async () => {
@@ -365,7 +547,7 @@ describe("MCP manager lifecycle cleanup", () => {
 			await rm(cwd, { recursive: true, force: true });
 		}
 	});
-	test("preserves 401 auth callback failures after connection cleanup", async () => {
+	test("fails closed when a forced 401 refresh fails", async () => {
 		let deleteCount = 0;
 		const server = Bun.serve({
 			port: 0,
@@ -400,20 +582,23 @@ describe("MCP manager lifecycle cleanup", () => {
 		const cwd = await mkdtempExact("skc-mcp-auth-callback-");
 		const configPath = join(cwd, "exact.json");
 		const manager = new MCPManager(cwd, null, { toolsOnly: true });
-		const failure = new Error("trusted credential storage failure");
-		let credentialLookups = 0;
+		const failure = new Error("SECRET_REFRESH_FAILURE");
+		const forceRefresh = vi.fn(async () => {
+			throw failure;
+		});
 		try {
 			manager.setAuthStorage({
-				get: () => {
-					credentialLookups++;
-					if (credentialLookups === 2) throw failure;
-					return {
-						type: "oauth",
-						access: "access",
-						refresh: "refresh",
-						expires: Date.now() + 60 * 60_000,
-					};
-				},
+				get: () => ({
+					type: "oauth",
+					access: "access",
+					refresh: "refresh",
+					expires: Date.now() + 60 * 60_000,
+					mcpBinding: {
+						resourceOrigin: server.url.origin,
+						tokenEndpoint: "https://auth.example/token",
+					},
+				}),
+				forceRefreshOAuthCredential: forceRefresh,
 			} as never);
 			await Bun.write(
 				configPath,
@@ -428,14 +613,91 @@ describe("MCP manager lifecycle cleanup", () => {
 				}),
 			);
 
-			await expect(manager.discoverAndConnect({ configPath })).rejects.toBe(failure);
-			expect(credentialLookups).toBe(2);
+			const result = await manager.discoverAndConnect({ configPath });
+			expect(result.errors.get("auth")).toBe("MCP server unavailable");
+			expect(JSON.stringify(result.errors)).not.toContain(failure.message);
+			expect(forceRefresh).toHaveBeenCalledTimes(1);
 			expect(deleteCount).toBe(1);
 			expect(manager.getConnectedServers()).toEqual([]);
 		} finally {
 			await manager.disconnectAll();
 			await server.stop(true);
 			await rm(cwd, { recursive: true, force: true });
+		}
+	});
+	test("routes a remote OAuth 401 refresh through authoritative storage", async () => {
+		const authorizationHeaders: string[] = [];
+		const server = Bun.serve({
+			port: 0,
+			async fetch(request) {
+				if (request.method === "DELETE") return new Response(null, { status: 204 });
+				if (request.method === "GET") return new Response(null, { status: 405 });
+				const body = await request.text();
+				authorizationHeaders.push(request.headers.get("authorization") ?? "");
+				const rpc = JSON.parse(body) as { id?: string | number; method?: string };
+				if (rpc.method === "initialize") {
+					return Response.json(
+						{
+							jsonrpc: "2.0",
+							id: rpc.id ?? 0,
+							result: {
+								protocolVersion: "2025-03-26",
+								capabilities: { tools: {} },
+								serverInfo: { name: "remote-auth-retry", version: "1" },
+							},
+						},
+						{ headers: { "Mcp-Session-Id": "remote-auth-retry-session" } },
+					);
+				}
+				if (rpc.method === "tools/list") return new Response("denied", { status: 401 });
+				return new Response(null, { status: 202 });
+			},
+		});
+		const cwd = await mkdtempExact("skc-mcp-remote-auth-retry-");
+		const configPath = join(cwd, "exact.json");
+		const manager = new MCPManager(cwd, null, { toolsOnly: true });
+		const binding = { resourceOrigin: server.url.origin, tokenEndpoint: "https://auth.example/token" };
+		const forceRefresh = vi.fn(async () => ({
+			type: "oauth" as const,
+			access: "remote-new-access",
+			refresh: "__remote__",
+			expires: Date.now() + 60 * 60_000,
+			mcpBinding: binding,
+		}));
+		manager.setAuthStorage({
+			get: () => ({
+				type: "oauth",
+				access: "remote-old-access",
+				refresh: "__remote__",
+				expires: Date.now() + 60 * 60_000,
+				mcpBinding: binding,
+			}),
+			forceRefreshOAuthCredential: forceRefresh,
+		} as never);
+
+		try {
+			await Bun.write(
+				configPath,
+				JSON.stringify({
+					mcpServers: {
+						remote: {
+							type: "http",
+							url: server.url.href,
+							auth: { type: "oauth", credentialId: "credential" },
+						},
+					},
+				}),
+			);
+			const result = await manager.discoverAndConnect({ configPath });
+			expect(result.errors.get("remote")).toBe("MCP server unavailable");
+			expect(forceRefresh).toHaveBeenCalledTimes(1);
+			expect(authorizationHeaders).toContain("Bearer remote-old-access");
+			expect(authorizationHeaders).toContain("Bearer remote-new-access");
+		} finally {
+			await manager.disconnectAll();
+			await server.stop(true);
+			await rm(cwd, { recursive: true, force: true });
+			vi.restoreAllMocks();
 		}
 	});
 	test("fails soft per server for malformed HTTP initialize and stdio tools/list results", async () => {

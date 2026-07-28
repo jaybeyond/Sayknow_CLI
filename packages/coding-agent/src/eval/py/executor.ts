@@ -61,7 +61,7 @@ export interface PythonExecutorOptions {
 	/** @internal Bridge session id, set by `executePython` before delegating. */
 	bridgeSessionId?: string;
 	/** @internal Bridge endpoint info, set by `executePython` before delegating. */
-	bridge?: { url: string; token: string };
+	bridge?: { url: string; capability: string };
 }
 
 export interface PythonKernelExecutor {
@@ -106,6 +106,7 @@ export interface PythonResult {
 interface PythonSession {
 	sessionId: string;
 	kernel: PythonKernel;
+	bridgeCapability?: string;
 	ownerIds: Set<string>;
 	hasFallbackOwner: boolean;
 	queue: Promise<void>;
@@ -261,14 +262,14 @@ function buildKernelEnv(options: {
 	sessionFile?: string;
 	artifactsDir?: string;
 	bridgeSessionId?: string;
-	bridge?: { url: string; token: string };
+	bridge?: { url: string; capability: string };
 }): Record<string, string> | undefined {
 	const env: Record<string, string> = {};
 	if (options.sessionFile) env.PI_SESSION_FILE = options.sessionFile;
 	if (options.artifactsDir) env.PI_ARTIFACTS_DIR = options.artifactsDir;
 	if (options.bridge && options.bridgeSessionId) {
 		env.PI_TOOL_BRIDGE_URL = options.bridge.url;
-		env.PI_TOOL_BRIDGE_TOKEN = options.bridge.token;
+		env.PI_TOOL_BRIDGE_CAPABILITY = options.bridge.capability;
 		env.PI_TOOL_BRIDGE_SESSION = options.bridgeSessionId;
 	}
 	return Object.keys(env).length > 0 ? env : undefined;
@@ -328,6 +329,7 @@ async function acquireSession(sessionId: string, cwd: string, options: PythonExe
 			const session: PythonSession = {
 				sessionId,
 				kernel,
+				bridgeCapability: options.bridge?.capability,
 				ownerIds: new Set(),
 				hasFallbackOwner: false,
 				queue: Promise.resolve(),
@@ -361,12 +363,25 @@ async function replaceSessionKernel(
 		throw new PythonExecutionCancelledError(false);
 	}
 	requireRemainingTimeoutMs(options.deadlineMs);
-	const next = await startKernel(cwd, options);
-	if (sessions.get(session.sessionId) !== session) {
-		await next.shutdown().catch(() => undefined);
-		throw new PythonExecutionCancelledError(false);
+	const bridge = options.bridge;
+	const previousCapability = bridge?.capability;
+	const nextCapability = bridge ? crypto.randomUUID() : undefined;
+	if (bridge && nextCapability) bridge.capability = nextCapability;
+	let next: PythonKernel | undefined;
+	try {
+		next = await startKernel(cwd, options);
+		if (sessions.get(session.sessionId) !== session) {
+			throw new PythonExecutionCancelledError(false);
+		}
+		session.kernel = next;
+		session.bridgeCapability = nextCapability;
+	} catch (err) {
+		await next?.shutdown().catch(() => undefined);
+		if (bridge && previousCapability && bridge.capability === nextCapability) {
+			bridge.capability = previousCapability;
+		}
+		throw err;
 	}
-	session.kernel = next;
 }
 
 async function resetSession(sessionId: string): Promise<void> {
@@ -481,8 +496,8 @@ async function executeWithKernel(
 			displayOutputs.push({ type: "status", event });
 		});
 	const unregisterBridge =
-		options?.toolSession && options?.bridgeSessionId
-			? registerPyToolBridge(options.bridgeSessionId, {
+		options?.toolSession && options?.bridgeSessionId && options.bridge
+			? registerPyToolBridge(options.bridgeSessionId, options.bridge.capability, {
 					toolSession: options.toolSession,
 					signal: options.signal,
 					emitStatus,
@@ -499,8 +514,11 @@ async function executeWithKernel(
 		});
 
 		if (result.cancelled) {
+			// Prefer the caller-configured timeout for the user-facing annotation.
+			// Remaining wall-clock budget can shrink after async setup (Settings.init,
+			// kernel start) and would otherwise flake Math.round() second formatting.
 			const annotation = result.timedOut
-				? formatKernelTimeoutAnnotation(executionTimeoutMs, result.kernelKilled ?? false)
+				? formatKernelTimeoutAnnotation(options?.timeoutMs ?? executionTimeoutMs, result.kernelKilled ?? false)
 				: undefined;
 			let crashNotice: string | null = null;
 			if (result.kernelKilled) {
@@ -554,7 +572,9 @@ async function executeWithKernel(
 				cancelled: true,
 				displayOutputs,
 				stdinRequested: false,
-				...(await sink.dump(timedOut ? formatTimeoutAnnotation(executionTimeoutMs) : undefined)),
+				...(await sink.dump(
+					timedOut ? formatTimeoutAnnotation(options?.timeoutMs ?? executionTimeoutMs) : undefined,
+				)),
 			};
 		}
 		const error = err instanceof Error ? err : new Error(String(err));
@@ -578,7 +598,8 @@ async function ensureKernelAvailable(cwd: string, options: PythonExecutorOptions
 async function ensureToolBridge(options: PythonExecutorOptions): Promise<void> {
 	if (!options.toolSession || options.bridge) return;
 	try {
-		options.bridge = await ensurePyToolBridge();
+		const bridge = await ensurePyToolBridge();
+		options.bridge = { ...bridge, capability: crypto.randomUUID() };
 	} catch (err) {
 		logger.warn("Failed to start Python tool bridge", {
 			error: err instanceof Error ? err.message : String(err),
@@ -607,6 +628,9 @@ async function executeOnSession(code: string, cwd: string, options: PythonExecut
 		await resetSession(sessionId);
 	}
 	const session = await acquireSession(sessionId, cwd, options);
+	if (options.bridge && session.bridgeCapability) {
+		options.bridge.capability = session.bridgeCapability;
+	}
 	return await runQueued(session, options, async () => {
 		if (options.signal?.aborted) {
 			throw new PythonExecutionCancelledError(isTimedOutCancellation(options.signal.reason, options.signal));

@@ -1,0 +1,14 @@
+--- a/packages/sayknow-cli/package.json
++++ b/packages/sayknow-cli/package.json
+@@ -4,7 +4,10 @@
+ 	"version": "0.0.0-forkver",
+ 	"description": "One-line npm install wrapper for the Sayknow-CLI skc CLI",
+ 	"homepage": "https://sayknow-cli.com",
+-	"author": "jaybeyond and Sayknow-CLI Contributors",
++	"author": "jaybeyond",
++	"contributors": [
++		"Mario Zechner"
++	],
+ 	"license": "MIT",
+ 	"repository": {
+ 		"type": "git",

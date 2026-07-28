@@ -4,21 +4,19 @@ import type { AgentToolResult } from "@sayknow-cli/agent-core";
 import type { ImageContent, TextContent } from "@sayknow-cli/ai";
 import { htmlToMarkdown } from "@sayknow-cli/natives";
 import { type Component, Text } from "@sayknow-cli/tui";
-import { $which, ptree, truncate } from "@sayknow-cli/utils";
+import { ptree, truncate } from "@sayknow-cli/utils";
 import type { Settings } from "../config/settings";
 import type { RenderResultOptions } from "../extensibility/custom-tools/types";
 import { type Theme, theme } from "../modes/theme/theme";
 import type { ToolSession } from "../sdk";
 import type { AgentStorage } from "../session/agent-storage";
-import { DEFAULT_MAX_BYTES, truncateHead } from "../session/streaming-output";
+import { DEFAULT_MAX_BYTES, type TruncationDirection, truncateContent } from "../session/streaming-output";
 import { renderStatusLine } from "../tui";
 import { CachedOutputBlock } from "../tui/output-block";
 import { formatDimensionNote, resizeImage } from "../utils/image-resize";
 import { parseHtmlLazy } from "../utils/linkedom";
-import { ensureTool } from "../utils/tools-manager";
-import { INSANE_NOTES, tryInsaneFetch } from "../web/insane/bridge";
-import { validatePublicHttpUrl, validatePublicHttpUrlForInsane } from "../web/insane/url-guard";
-import { extractWithParallel, findParallelApiKey, getParallelExtractContent } from "../web/parallel";
+import { INSANE_NOTES } from "../web/insane/bridge";
+import { validatePublicHttpUrl } from "../web/insane/url-guard";
 import { specialHandlers } from "../web/scrapers";
 import type { RenderResult } from "../web/scrapers/types";
 import { finalizeOutput, loadPage, looksLikeHtml, MAX_OUTPUT_CHARS } from "../web/scrapers/types";
@@ -92,13 +90,6 @@ const MAX_INLINE_IMAGE_OUTPUT_BYTES = 300 * 1024;
 // =============================================================================
 // Utilities
 // =============================================================================
-
-/**
- * Check if a command exists (cross-platform)
- */
-function hasCommand(cmd: string): boolean {
-	return Boolean($which(cmd));
-}
 
 /**
  * Build llms.txt candidates scoped to the requested URL
@@ -537,96 +528,18 @@ async function parseFeedToMarkdown(content: string, maxItems = 10): Promise<stri
 	return content; // Fall back to raw content
 }
 
-/**
- * Render HTML to markdown using Parallel, jina, trafilatura, lynx (in order of preference)
- */
-async function renderHtmlToText(
-	url: string,
+export async function renderHtmlToText(
 	html: string,
-	timeout: number,
-	settings: Settings,
-	userSignal: AbortSignal | undefined,
-	storage: AgentStorage | null,
+	signal?: AbortSignal,
 ): Promise<{ content: string; ok: boolean; method: string }> {
-	const signal = ptree.combineSignals(userSignal, timeout * 1000);
-	const execOptions = {
-		mode: "group" as const,
-		allowNonZero: true,
-		allowAbort: true,
-		stderr: "full" as const,
-		signal,
-	};
-
-	// Try Parallel extract first when credentials are configured
-	if (settings.get("providers.parallelFetch") && findParallelApiKey(storage)) {
-		try {
-			const parallelResult = await extractWithParallel(
-				[url],
-				{
-					objective: "Extract the main content",
-					excerpts: true,
-					fullContent: false,
-					signal,
-				},
-				storage,
-			);
-			const firstDocument = parallelResult.results[0];
-			if (firstDocument) {
-				const content = getParallelExtractContent(firstDocument);
-				if (content.trim().length > 100 && !isLowQualityOutput(content)) {
-					return { content, ok: true, method: "parallel" };
-				}
-			}
-		} catch {
-			// Parallel extract failed, continue to next method
-			signal?.throwIfAborted();
-		}
-	}
-
-	// Try jina first (reader API)
 	try {
-		const jinaUrl = `https://r.jina.ai/${url}`;
-		const response = await fetch(jinaUrl, {
-			headers: { Accept: "text/markdown" },
-			signal,
-		});
-		if (response.ok) {
-			const content = await response.text();
-			if (content.trim().length > 100 && !isLowQualityOutput(content)) {
-				return { content, ok: true, method: "jina" };
-			}
-		}
-	} catch {
-		// Jina failed, continue to next method
 		signal?.throwIfAborted();
-	}
-
-	// Try trafilatura (auto-install via uv/pip)
-	const trafilatura = await ensureTool("trafilatura", { signal, silent: true });
-	if (trafilatura) {
-		const result = await ptree.exec([trafilatura, "-u", url, "--output-format", "markdown"], execOptions);
-		if (result.ok && result.stdout.trim().length > 100) {
-			return { content: result.stdout, ok: true, method: "trafilatura" };
-		}
-	}
-
-	// Try lynx (can't auto-install, system package)
-	const lynx = hasCommand("lynx");
-	if (lynx) {
-		const result = await ptree.exec(["lynx", "-dump", "-nolist", "-width", "250", url], execOptions);
-		if (result.ok) {
-			return { content: result.stdout, ok: true, method: "lynx" };
-		}
-	}
-
-	// Fall back to native converter (fastest, no network/subprocess)
-	try {
 		const content = await htmlToMarkdown(html, { cleanContent: true });
 		if (content.trim().length > 100 && !isLowQualityOutput(content)) {
 			return { content, ok: true, method: "native" };
 		}
 	} catch {
-		// Native converter failed, continue to next method
+		// Native conversion failed; the caller returns its bounded raw HTML.
 		signal?.throwIfAborted();
 	}
 	return { content: "", ok: false, method: "none" };
@@ -707,14 +620,6 @@ async function handleSpecialUrls(
 // Main Render Function
 // =============================================================================
 
-/**
- * Opt-in insane-search fallback for blocked / degraded public URL reads.
- *
- * Returns a finalized `method: "insane"` result on success, or null (so the
- * caller continues with its normal degraded behavior). Fail-closed: no note,
- * guard DNS, dependency probe, or subprocess when raw mode or the opt-in
- * setting is off. The public-URL guard runs BEFORE any probe/spawn.
- */
 export async function tryInsaneFallback(args: {
 	url: string;
 	finalUrl: string;
@@ -727,32 +632,7 @@ export async function tryInsaneFallback(args: {
 }): Promise<FetchRenderResult | null> {
 	if (args.raw) return null;
 	if (args.settings.get("web.insaneFallback") !== true) return null;
-
-	const target = args.finalUrl || args.url;
-	const guard = await validatePublicHttpUrlForInsane(target);
-	if (!guard.ok) {
-		args.notes.push(INSANE_NOTES.guardBlocked(guard.reason));
-		return null;
-	}
-
-	const result = await tryInsaneFetch(guard.url.toString(), {
-		timeoutMs: args.timeout * 1000,
-		signal: args.signal,
-	});
-	if (result.ok) {
-		const output = finalizeOutput(result.content);
-		return {
-			url: args.url,
-			finalUrl: target,
-			contentType: "text/markdown",
-			method: "insane",
-			content: output.content,
-			fetchedAt: args.fetchedAt,
-			truncated: output.truncated,
-			notes: [...args.notes, ...result.notes],
-		};
-	}
-	for (const note of result.notes) args.notes.push(note);
+	args.notes.push(INSANE_NOTES.securityDisabled);
 	return null;
 }
 
@@ -772,6 +652,7 @@ async function renderUrl(
 	if (signal?.aborted) {
 		throw new ToolAbortError();
 	}
+	const preflightSignal = ptree.combineSignals(signal, timeout * 1000);
 
 	// Handle internal protocol URLs (e.g., pi-internal://) - return empty
 	if (url.startsWith("pi-internal://")) {
@@ -789,7 +670,8 @@ async function renderUrl(
 
 	// Step 0: Normalize URL (ensure scheme for special handlers)
 	url = normalizeUrl(url);
-	const publicUrl = await validatePublicHttpUrl(url);
+	const publicUrl = await validatePublicHttpUrl(url, { signal: preflightSignal });
+	if (signal?.aborted) throw new ToolAbortError();
 	if (!publicUrl.ok) {
 		notes.push(`Blocked URL fetch: target URL is not public HTTP(S): ${publicUrl.reason}`);
 		return {
@@ -1138,10 +1020,10 @@ async function renderUrl(
 			throw new ToolAbortError();
 		}
 
-		// 5E: Render HTML with lynx or html2text
-		const htmlResult = await renderHtmlToText(finalUrl, rawContent, timeout, settings, signal, storage);
+		// 5E: Render only the bytes already fetched above.
+		const htmlResult = await renderHtmlToText(rawContent, signal);
 		if (!htmlResult.ok) {
-			notes.push("html rendering failed (lynx/html2text unavailable)");
+			notes.push("native HTML rendering failed");
 			const insane = await tryInsaneFallback({ url, finalUrl, timeout, raw, settings, signal, fetchedAt, notes });
 			if (insane) return insane;
 			const output = finalizeOutput(rawContent);
@@ -1264,7 +1146,12 @@ interface ReadUrlCacheEntry {
 	artifactId?: string;
 	details: ReadUrlToolDetails;
 	image?: FetchImagePayload;
+	/** Complete URL output, including its preamble and body. */
 	output: string;
+	/** UTF-16 code-unit offset of the preamble in `output`. */
+	preambleChars: number;
+	/** Offset of the preamble after `wrapUntrustedContent(output)` is persisted. */
+	wrappedPreambleChars?: number;
 }
 
 const readUrlCache = new Map<string, ReadUrlCacheEntry>();
@@ -1296,7 +1183,13 @@ async function materializeReadUrlCacheEntry(
 	if (entry.artifactId) {
 		const artifactOutput = await readArtifactOutput(session, entry.artifactId);
 		if (artifactOutput !== null) {
-			return { ...entry, output: artifactOutput };
+			// Artifacts retain their trust-boundary wrapper. Keep the raw preamble
+			// coordinate alongside the escaped coordinate for live/rehydrated parity.
+			return {
+				...entry,
+				output: artifactOutput,
+				...(entry.wrappedPreambleChars !== undefined ? { wrappedPreambleChars: entry.wrappedPreambleChars } : {}),
+			};
 		}
 	}
 	return null;
@@ -1336,8 +1229,8 @@ async function buildReadUrlCacheEntry(
 
 	const storage = session.settings.getStorage();
 	const result = await renderUrl(url, effectiveTimeout, raw, session.settings, signal, storage);
-	const output = buildUrlReadOutput(result, result.content);
-	const artifactId = options?.ensureArtifact ? await persistReadUrlArtifact(session, output) : undefined;
+	const built = buildUrlReadOutput(result, result.content);
+	const artifactId = options?.ensureArtifact ? await persistReadUrlArtifact(session, built.output) : undefined;
 
 	return {
 		artifactId,
@@ -1351,7 +1244,9 @@ async function buildReadUrlCacheEntry(
 			notes: result.notes,
 		},
 		image: result.image,
-		output,
+		output: built.output,
+		preambleChars: built.preambleChars,
+		wrappedPreambleChars: built.wrappedPreambleChars,
 	};
 }
 
@@ -1381,60 +1276,138 @@ export async function loadReadUrlCacheEntry(
 
 const UNTRUSTED_CONTENT_OPEN = "<untrusted-content>";
 const UNTRUSTED_CONTENT_CLOSE = "</untrusted-content>";
+export const WRAP_PREFIX_CHARS = `${UNTRUSTED_CONTENT_OPEN}\n`.length;
+const WRAP_SUFFIX = `\n${UNTRUSTED_CONTENT_CLOSE}`;
 
-export function wrapUntrustedContent(content: string): string {
-	return `${UNTRUSTED_CONTENT_OPEN}\n${content.replace(/<\/untrusted-content>/gi, "&lt;/untrusted-content>")}\n${UNTRUSTED_CONTENT_CLOSE}`;
+export function escapeUntrustedContent(content: string): string {
+	return content.replace(/<\/untrusted-content>/gi, "&lt;/untrusted-content>");
 }
 
-function buildUrlReadOutput(result: FetchRenderResult, content: string): string {
-	let output = "";
-	output += `URL: ${result.finalUrl}\n`;
-	output += `Content-Type: ${result.contentType}\n`;
-	output += `Method: ${result.method}\n`;
+export function wrapUntrustedContent(content: string): string {
+	return `${UNTRUSTED_CONTENT_OPEN}\n${escapeUntrustedContent(content)}${WRAP_SUFFIX}`;
+}
+
+function isWrappedReadUrlOutput(output: string): boolean {
+	return output.startsWith(`${UNTRUSTED_CONTENT_OPEN}\n`) && output.endsWith(WRAP_SUFFIX);
+}
+
+/**
+ * Remove only the outer URL-output wrapper before line pagination. The content
+ * remains escaped exactly as persisted; it is deliberately never unescaped.
+ */
+export function prepareReadUrlSelectorInput(
+	output: string,
+	preambleChars: number,
+	wrappedPreambleChars?: number,
+): { text: string; preambleChars: number } {
+	if (!isWrappedReadUrlOutput(output)) return { text: output, preambleChars };
+	const bodyEnd = output.length - WRAP_SUFFIX.length;
+	return {
+		text: output.slice(WRAP_PREFIX_CHARS, Math.max(WRAP_PREFIX_CHARS, bodyEnd)),
+		preambleChars: Math.max(0, (wrappedPreambleChars ?? preambleChars) - WRAP_PREFIX_CHARS),
+	};
+}
+interface BuiltUrlReadOutput {
+	output: string;
+	preambleChars: number;
+	wrappedPreambleChars: number;
+}
+
+function buildReadUrlPreamble(
+	result: Pick<FetchRenderResult, "finalUrl" | "contentType" | "method" | "notes">,
+): string {
+	let preamble = "";
+	preamble += `URL: ${result.finalUrl}\n`;
+	preamble += `Content-Type: ${result.contentType}\n`;
+	preamble += `Method: ${result.method}\n`;
 	if (result.notes.length > 0) {
-		output += `Notes: ${result.notes.join("; ")}\n`;
+		preamble += `Notes: ${result.notes.join("; ")}\n`;
 	}
-	output += `\n---\n\n`;
-	output += content;
-	return output;
+	preamble += "\n---\n\n";
+	return preamble;
+}
+
+function buildUrlReadOutput(result: FetchRenderResult, content: string): BuiltUrlReadOutput {
+	const preamble = buildReadUrlPreamble(result);
+	const preambleChars = preamble.length;
+	const output = `${preamble}${content}`;
+	return {
+		output,
+		preambleChars,
+		wrappedPreambleChars: WRAP_PREFIX_CHARS + escapeUntrustedContent(preamble).length,
+	};
 }
 
 export async function executeReadUrl(
 	session: ToolSession,
 	params: { path: string; raw?: boolean },
 	signal?: AbortSignal,
+	direction: TruncationDirection = "head",
 ): Promise<AgentToolResult<ReadUrlToolDetails>> {
 	let cacheEntry = await loadReadUrlCacheEntry(session, params, signal, { preferCached: true });
-	const truncation = truncateHead(cacheEntry.output, {
+	// `head` intentionally retains the historical whole-output accounting so the
+	// existing URL golden remains byte-identical. Non-head directions account for
+	// and truncate only the body; preamble bytes/chars are never part of that cap.
+	const effectiveDirection =
+		direction !== "head" && cacheEntry.wrappedPreambleChars === undefined ? "head" : direction;
+	const isWrappedOutput = isWrappedReadUrlOutput(cacheEntry.output);
+	const preambleChars = isWrappedOutput
+		? (cacheEntry.wrappedPreambleChars ??
+			WRAP_PREFIX_CHARS + escapeUntrustedContent(buildReadUrlPreamble(cacheEntry.details)).length)
+		: cacheEntry.preambleChars;
+	const wrappedPrefix = isWrappedOutput ? WRAP_PREFIX_CHARS : 0;
+	const wrappedSuffix = isWrappedOutput ? `\n${UNTRUSTED_CONTENT_CLOSE}` : "";
+	const bodyEnd = cacheEntry.output.length - wrappedSuffix.length;
+	const unwrappedOutput = isWrappedOutput
+		? cacheEntry.output.slice(wrappedPrefix, Math.max(wrappedPrefix, bodyEnd))
+		: cacheEntry.output;
+	const truncationInput =
+		effectiveDirection === "head"
+			? unwrappedOutput
+			: cacheEntry.output.slice(preambleChars, Math.max(preambleChars, bodyEnd));
+	const truncation = truncateContent(truncationInput, {
 		maxBytes: DEFAULT_MAX_BYTES,
 		maxLines: FETCH_DEFAULT_MAX_LINES,
+		direction: effectiveDirection,
 	});
 	const needsArtifact = truncation.truncated;
 	if (needsArtifact && !cacheEntry.artifactId) {
 		cacheEntry = await ensureReadUrlCacheArtifact(session, cacheEntry);
 		cacheReadUrlEntry(session, params.path, params.raw ?? false, cacheEntry);
 	}
-	const output = needsArtifact ? truncation.content : cacheEntry.output;
+	const output =
+		effectiveDirection !== "head"
+			? needsArtifact
+				? `${cacheEntry.output.slice(0, preambleChars)}${truncation.content}${wrappedSuffix}`
+				: cacheEntry.output
+			: truncation.content;
 	const details: ReadUrlToolDetails = {
 		...cacheEntry.details,
 		truncated: Boolean(cacheEntry.details.truncated || needsArtifact),
 	};
 
-	const contentBlocks: Array<TextContent | ImageContent> = [{ type: "text", text: wrapUntrustedContent(output) }];
+	const contentBlocks: Array<TextContent | ImageContent> = [
+		{ type: "text", text: isWrappedOutput && effectiveDirection !== "head" ? output : wrapUntrustedContent(output) },
+	];
 	if (cacheEntry.image) {
 		contentBlocks.push({ type: "image", data: cacheEntry.image.data, mimeType: cacheEntry.image.mimeType });
 	}
 
 	const resultBuilder = toolResult(details).content(contentBlocks).sourceUrl(details.finalUrl);
 	if (needsArtifact) {
-		resultBuilder.truncation(truncation, { direction: "head", artifactId: cacheEntry.artifactId });
+		resultBuilder.truncation(truncation, {
+			direction: effectiveDirection === "both" ? "middle" : effectiveDirection === "last" ? "tail" : "head",
+			artifactId: cacheEntry.artifactId,
+			...(effectiveDirection !== "head" ? { maxBytes: DEFAULT_MAX_BYTES } : {}),
+		});
 	} else if (cacheEntry.details.truncated) {
-		const outputLines = cacheEntry.output.split("\n").length;
-		const outputBytes = Buffer.byteLength(cacheEntry.output, "utf-8");
+		const reportedText = effectiveDirection === "head" ? cacheEntry.output : truncationInput;
+		const outputLines = reportedText.split("\n").length;
+		const outputBytes = Buffer.byteLength(reportedText, "utf-8");
 		const totalBytes = Math.max(outputBytes + 1, MAX_OUTPUT_CHARS + 1);
 		const totalLines = outputLines + 1;
-		resultBuilder.truncationFromText(cacheEntry.output, {
-			direction: "tail",
+		resultBuilder.truncationFromText(reportedText, {
+			direction: effectiveDirection === "both" ? "middle" : effectiveDirection === "last" ? "tail" : "head",
 			totalLines,
 			totalBytes,
 			maxBytes: MAX_OUTPUT_CHARS,

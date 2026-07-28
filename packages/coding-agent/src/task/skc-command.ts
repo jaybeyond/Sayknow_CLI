@@ -1,6 +1,6 @@
 import process from "node:process";
 
-import { $env } from "@sayknow-cli/utils";
+import { $pickenv } from "@sayknow-cli/utils";
 
 interface SkcCommand {
 	cmd: string;
@@ -12,7 +12,7 @@ const DEFAULT_CMD = process.platform === "win32" ? "skc.cmd" : "skc";
 const DEFAULT_SHELL = process.platform === "win32";
 
 export function resolveSkcCommand(): SkcCommand {
-	const envCmd = $env.PI_SUBPROCESS_CMD;
+	const envCmd = $pickenv("SKC_SUBPROCESS_CMD", "PI_SUBPROCESS_CMD");
 	if (envCmd?.trim()) {
 		return { cmd: envCmd, args: [], shell: DEFAULT_SHELL };
 	}

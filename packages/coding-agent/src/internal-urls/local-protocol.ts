@@ -149,6 +149,19 @@ async function assertDirectoryNotSymlink(directoryPath: string): Promise<void> {
 const LEGACY_MIGRATION_MARKER = ".skc-local-legacy-migrated-v1";
 const MAX_LEGACY_LOCAL_BYTES = 64 * 1024 * 1024;
 
+type LegacyMigrationState = "complete" | "cleanup_pending";
+
+/**
+ * Marker values that mean legacy migration has settled for this root and the
+ * synchronous resolver may proceed. `cleanup_pending` counts: the entries are
+ * installed and content-verified, and only retirement of the legacy source is
+ * outstanding. Must stay in sync with {@link readMigrationMarker}, which the
+ * async gate uses to decide the same question.
+ */
+function isSettledMigrationMarkerValue(value: string): boolean {
+	return value === "verified\n" || value === "absent\n" || value === "cleanup_pending\n";
+}
+
 interface LegacyEntrySnapshot {
 	readonly relativePath: string;
 	readonly dev: bigint;
@@ -171,6 +184,26 @@ async function snapshotDirectory(directoryPath: string, relativePath: string): P
 	const stat = await fs.lstat(directoryPath, { bigint: true });
 	if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error("Unsafe legacy local:// migration source");
 	return { relativePath, dev: stat.dev, ino: stat.ino, size: stat.size };
+}
+
+interface CanonicalLegacyRoot {
+	readonly root: string;
+	readonly identity: LegacyEntrySnapshot;
+}
+
+async function canonicalLegacyRoot(artifactsDir: string): Promise<CanonicalLegacyRoot> {
+	const lexicalRoot = path.resolve(artifactsDir, "local");
+	const lexicalIdentity = await snapshotDirectory(lexicalRoot, "");
+	const [canonicalArtifactsDir, canonicalRoot] = await Promise.all([
+		fs.realpath(path.resolve(artifactsDir)),
+		fs.realpath(lexicalRoot),
+	]);
+	if (canonicalRoot === canonicalArtifactsDir) throw new Error("Unsafe legacy local:// migration source");
+	ensureWithinRoot(canonicalRoot, canonicalArtifactsDir);
+	const canonicalIdentity = await snapshotDirectory(canonicalRoot, "");
+	if (!matchesSnapshot(canonicalIdentity, lexicalIdentity))
+		throw new Error("Legacy local:// migration source changed during capture");
+	return { root: canonicalRoot, identity: lexicalIdentity };
 }
 
 async function snapshotRegularFile(filePath: string, relativePath: string): Promise<LegacyEntrySnapshot> {
@@ -206,11 +239,16 @@ function manifestsMatch(left: readonly LegacyEntrySnapshot[], right: readonly Le
 	);
 }
 
-async function captureLegacyManifest(root: string): Promise<readonly LegacyEntrySnapshot[]> {
+async function captureLegacyManifest(
+	root: string,
+	expectedRootIdentity: LegacyEntrySnapshot,
+): Promise<readonly LegacyEntrySnapshot[]> {
 	const manifest: LegacyEntrySnapshot[] = [];
 	let copiedBytes = 0n;
 	const captureDirectory = async (directoryPath: string, relativePath: string): Promise<void> => {
 		const directory = await snapshotDirectory(directoryPath, relativePath);
+		if (relativePath === "" && !matchesSnapshot(directory, expectedRootIdentity))
+			throw new Error("Legacy local:// migration source changed during capture");
 		manifest.push(directory);
 		const entries = (await fs.readdir(directoryPath, { withFileTypes: true })).sort((a, b) =>
 			a.name.localeCompare(b.name),
@@ -313,7 +351,7 @@ async function migrateManagedLegacyLocal(
 	}
 	const staging = path.join(scratchParent, `.skc-local-migration-${randomUUID()}`);
 	const installed: Array<{ readonly path: string; readonly dev: bigint; readonly ino: bigint }> = [];
-	let installedMarker: { readonly dev: bigint; readonly ino: bigint } | null = null;
+	let sourceRetired = false;
 	try {
 		await fs.mkdir(staging, { mode: 0o700 });
 		for (const entry of captured.entries) {
@@ -327,7 +365,7 @@ async function migrateManagedLegacyLocal(
 					throw new Error("Legacy local:// migration destination verification failed");
 			}
 		}
-		for (const entry of await fs.readdir(staging)) {
+		for (const entry of (await fs.readdir(staging)).sort()) {
 			const destination = path.join(localRoot, entry);
 			try {
 				await fs.lstat(destination);
@@ -339,18 +377,22 @@ async function migrateManagedLegacyLocal(
 			const identity = await fs.lstat(destination, { bigint: true });
 			installed.push({ path: destination, dev: identity.dev, ino: identity.ino });
 		}
+		try {
+			source.retire(captured.snapshot);
+			sourceRetired = true;
+		} catch (error) {
+			if (!(error instanceof Error) || error.message !== "cleanup_pending") throw error;
+			await fs.writeFile(marker, "cleanup_pending\n", { mode: 0o600, flag: "wx" });
+			return;
+		}
 		await fs.writeFile(marker, "verified\n", { mode: 0o600, flag: "wx" });
-		const markerIdentity = await fs.lstat(marker, { bigint: true });
-		installedMarker = { dev: markerIdentity.dev, ino: markerIdentity.ino };
-		source.retire(captured.snapshot);
 	} catch (error) {
-		const currentMarker = await fs.lstat(marker, { bigint: true }).catch(() => null);
-		if (installedMarker && currentMarker?.dev === installedMarker.dev && currentMarker.ino === installedMarker.ino)
-			await fs.rm(marker, { force: true });
-		for (const destination of installed.reverse()) {
-			const current = await fs.lstat(destination.path, { bigint: true }).catch(() => null);
-			if (current?.dev === destination.dev && current.ino === destination.ino)
-				await fs.rm(destination.path, { recursive: true, force: true });
+		if (!sourceRetired) {
+			for (const destination of installed.reverse()) {
+				const current = await fs.lstat(destination.path, { bigint: true }).catch(() => null);
+				if (current?.dev === destination.dev && current.ino === destination.ino)
+					await fs.rm(destination.path, { recursive: true, force: true });
+			}
 		}
 		throw error;
 	} finally {
@@ -358,15 +400,16 @@ async function migrateManagedLegacyLocal(
 	}
 }
 
-async function readMigrationMarker(marker: string): Promise<boolean> {
+async function readMigrationMarker(marker: string): Promise<LegacyMigrationState | null> {
 	try {
 		const snapshot = await snapshotRegularFile(marker, LEGACY_MIGRATION_MARKER);
 		if (snapshot.size > 32n || snapshot.bytes === undefined) throw new Error("Unsafe local:// migration marker");
 		const value = snapshot.bytes.toString("utf8");
-		if (value !== "verified\n" && value !== "absent\n") throw new Error("Unsafe local:// migration marker");
-		return true;
+		if (value === "cleanup_pending\n") return "cleanup_pending";
+		if (value === "verified\n" || value === "absent\n") return "complete";
+		throw new Error("Unsafe local:// migration marker");
 	} catch (error) {
-		if (isEnoent(error)) return false;
+		if (isEnoent(error)) return null;
 		throw error;
 	}
 }
@@ -388,10 +431,11 @@ async function migrateLegacyLocal(
 		await fs.writeFile(marker, "absent\n", { mode: 0o600, flag: "wx" });
 		return;
 	}
-	const legacyRoot = path.resolve(artifactsDir, "local");
+	let legacySource: CanonicalLegacyRoot;
 	let manifest: readonly LegacyEntrySnapshot[];
 	try {
-		manifest = await captureLegacyManifest(legacyRoot);
+		legacySource = await canonicalLegacyRoot(artifactsDir);
+		manifest = await captureLegacyManifest(legacySource.root, legacySource.identity);
 	} catch (error) {
 		if (isEnoent(error)) {
 			await fs.writeFile(marker, "absent\n", { mode: 0o600, flag: "wx" });
@@ -401,8 +445,8 @@ async function migrateLegacyLocal(
 	}
 	const staging = path.join(scratchParent, `.skc-local-migration-${randomUUID()}`);
 	try {
-		await copyLegacyManifest(legacyRoot, staging, manifest);
-		const verifiedManifest = await captureLegacyManifest(legacyRoot);
+		await copyLegacyManifest(legacySource.root, staging, manifest);
+		const verifiedManifest = await captureLegacyManifest(legacySource.root, legacySource.identity);
 		if (!manifestsMatch(verifiedManifest, manifest))
 			throw new Error("Legacy local:// migration source changed during capture");
 		for (const entry of await fs.readdir(staging)) {
@@ -414,7 +458,17 @@ async function migrateLegacyLocal(
 			}
 			await fs.rename(path.join(staging, entry), path.join(localRoot, entry));
 		}
-		await retireLegacyTree(legacyRoot, manifest);
+		try {
+			await retireLegacyTree(legacySource.root, manifest);
+		} catch (error) {
+			if (
+				!(error instanceof Error) ||
+				error.message !== "Legacy local:// migration retirement failed: cleanup_pending"
+			)
+				throw error;
+			await fs.writeFile(marker, "cleanup_pending\n", { mode: 0o600, flag: "wx" });
+			return;
+		}
 		await fs.writeFile(marker, "verified\n", { mode: 0o600, flag: "wx" });
 	} finally {
 		await fs.rm(staging, { recursive: true, force: true });
@@ -501,8 +555,13 @@ function initializeLocalRootSyncWhenLegacyAbsent(options: LocalProtocolOptions, 
 	if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) throw new Error("Unsafe local:// root");
 	const marker = path.join(localRoot, LEGACY_MIGRATION_MARKER);
 	try {
-		const value = fsSync.readFileSync(marker, "utf8");
-		if (value !== "verified\n" && value !== "absent\n") throw new Error("Unsafe local:// migration marker");
+		// Accept exactly the marker states the async gate treats as settled. A
+		// `cleanup_pending` marker means the entries are fully installed and verified
+		// and only retirement of the legacy source is outstanding, so resolution is
+		// safe; rejecting it here made the sync resolver fail closed on a root the
+		// async gate had already completed.
+		if (!isSettledMigrationMarkerValue(fsSync.readFileSync(marker, "utf8")))
+			throw new Error("Unsafe local:// migration marker");
 		initializedLocalRoots.add(localRoot);
 		return;
 	} catch (error) {
@@ -519,7 +578,10 @@ function initializeLocalRootSyncWhenLegacyAbsent(options: LocalProtocolOptions, 
 		fsSync.writeFileSync(marker, "absent\n", { mode: 0o600, flag: "wx" });
 	} catch (error) {
 		if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-		if (fsSync.readFileSync(marker, "utf8") !== "absent\n") throw new Error("Unsafe local:// migration marker");
+		// A concurrent initializer won the exclusive create. Any settled marker state
+		// it wrote is authoritative; only an unrecognized value is unsafe.
+		if (!isSettledMigrationMarkerValue(fsSync.readFileSync(marker, "utf8")))
+			throw new Error("Unsafe local:// migration marker");
 	}
 	initializedLocalRoots.add(localRoot);
 }

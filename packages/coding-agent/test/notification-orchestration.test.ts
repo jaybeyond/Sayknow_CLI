@@ -101,13 +101,14 @@ function writer(input: { snapshot?: NotificationSettingsSnapshot; agentDir?: str
 	};
 }
 
-function writeLiveForeignOwner(agentDir: string): void {
+function writeLiveForeignOwner(agentDir: string, incarnation = "linux:44444"): void {
 	const paths = daemonPaths(agentDir);
 	fs.mkdirSync(paths.dir, { recursive: true });
 	fs.writeFileSync(
 		paths.state,
 		JSON.stringify({
 			pid: 44_444,
+			incarnation,
 			ownerId: "foreign-owner",
 			tokenFingerprint: tokenFingerprint(FOREIGN_TOKEN),
 			chatId: "foreign-chat",
@@ -131,13 +132,33 @@ describe("notification orchestration ownership", () => {
 			botToken: TOKEN,
 			chatId: "new-chat",
 			saveInactive: false,
-			preflight: next => proposedTelegramIdentity({ settings, ...next, deps: { pidAlive: pid => pid === 44_444 } }),
+			preflight: next =>
+				proposedTelegramIdentity({
+					settings,
+					...next,
+					deps: { pidAlive: pid => pid === 44_444, pidIncarnation: () => "linux:44444" },
+				}),
 		});
 
 		expect(result.status).toBe("cancelled");
 		expect(commits).toEqual([]);
 		expect(JSON.stringify(result)).not.toContain(TOKEN);
 		expect(JSON.stringify(result)).not.toContain(FOREIGN_TOKEN);
+	});
+
+	test("recycled live PID is absent during post-setup identity validation", async () => {
+		const agentDir = tempAgentDir();
+		writeLiveForeignOwner(agentDir, "linux:old-owner");
+		const { writer: settings } = writer({ agentDir });
+
+		await expect(
+			proposedTelegramIdentity({
+				settings,
+				botToken: TOKEN,
+				chatId: "new-chat",
+				deps: { pidAlive: () => true, pidIncarnation: () => "linux:recycled-process" },
+			}),
+		).resolves.toEqual({ status: "absent" });
 	});
 
 	test("Save inactive preserves Discord while recording only a non-secret Telegram marker", async () => {

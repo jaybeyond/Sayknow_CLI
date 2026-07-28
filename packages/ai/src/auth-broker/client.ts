@@ -12,6 +12,7 @@ import type {
 	CredentialDisableRequest,
 	CredentialDisableResponse,
 	CredentialIfAbsentUploadResponse,
+	CredentialRefreshRequest,
 	CredentialRefreshResponse,
 	CredentialUploadRequest,
 	CredentialUploadResponse,
@@ -237,6 +238,18 @@ export class AuthBrokerClient {
 
 	async refreshCredential(id: number, signal?: AbortSignal): Promise<CredentialRefreshResponse> {
 		return this.#request("POST", `/v1/credential/${id}/refresh`, {
+			schema: credentialRefreshResponseSchema,
+			signal,
+		}) as Promise<CredentialRefreshResponse>;
+	}
+
+	async refreshMCPCredential(
+		id: number,
+		body: CredentialRefreshRequest,
+		signal?: AbortSignal,
+	): Promise<CredentialRefreshResponse> {
+		return this.#request("POST", `/v1/credential/${id}/refresh`, {
+			body,
 			schema: credentialRefreshResponseSchema,
 			signal,
 		}) as Promise<CredentialRefreshResponse>;

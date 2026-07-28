@@ -332,6 +332,102 @@ describe("workflow mutation guard", () => {
 		}
 	});
 
+	it("allows the /dev/null sink during active deep-interview", async () => {
+		const cwd = await makeTempRoot();
+		await writeActiveDeepInterview(cwd);
+
+		for (const command of [
+			"echo hi > /dev/null",
+			"echo hi 2>/dev/null",
+			"grep -rn pattern src 2>/dev/null | head -5",
+			"cmd >/dev/null 2>&1",
+			'echo hi > "/dev/null"',
+			"dd if=/dev/zero of=/dev/null",
+		]) {
+			const decision = await getWorkflowMutationDecision({
+				cwd,
+				sessionId: "session-a",
+				tool: tool("bash"),
+				args: { command },
+			});
+			expect(decision.blocked).toBe(false);
+			expect(decision.targets).toEqual([]);
+		}
+	});
+
+	it("blocks every descriptor alias during active deep-interview", async () => {
+		const cwd = await makeTempRoot();
+		await writeActiveDeepInterview(cwd);
+
+		// `/dev/stdout`, `/dev/stderr`, and `/dev/fd/<n>` all name a descriptor that `exec` can
+		// rebind onto a real repository file, so none of them may be treated as a sink.
+		for (const [command, expected] of [
+			["echo x >/dev/fd/3", "/dev/fd/3"],
+			["echo hi > /dev/stdout", "/dev/stdout"],
+			["echo hi 2> /dev/stderr", "/dev/stderr"],
+		] as const) {
+			const decision = await getWorkflowMutationDecision({
+				cwd,
+				sessionId: "session-a",
+				tool: tool("bash"),
+				args: { command },
+			});
+			expect(decision.blocked).toBe(true);
+			expect(decision.targets).toContain(expected);
+		}
+	});
+
+	it("blocks sink-suppression bypasses during active deep-interview", async () => {
+		const cwd = await makeTempRoot();
+		await writeActiveDeepInterview(cwd);
+
+		// Every case pairs a real write with a `/dev/null` sink: suppressing the sink must not
+		// leave an empty target list that reads as "safe".
+		for (const command of [
+			"exec 1<>src/product.ts; printf x >/dev/stdout",
+			"exec 1<>.skc/_session-session-a/state/deep-interview-state.json; printf x >/dev/stdout",
+			"/bin/dd if=/dev/zero of=src/product.ts count=1 2>/dev/null",
+			"printf x | /usr/bin/tee src/product.ts >/dev/null",
+			"dd if=/dev/zero of=/dev/null of=src/product.ts count=1",
+			"printf x >|src/product.ts 2>/dev/null",
+			"printf x >&src/product.ts 2>/dev/null",
+			"printf x >|.skc/_session-session-a/state/deep-interview-state.json 2>/dev/null",
+			'dd if=/dev/zero of=" /dev/null"',
+			'printf x >" src.ts"',
+		]) {
+			const decision = await getWorkflowMutationDecision({
+				cwd,
+				sessionId: "session-a",
+				tool: tool("bash"),
+				args: { command },
+			});
+			expect(decision.blocked).toBe(true);
+		}
+	});
+
+	it("keeps project, .skc, mixed, dd, and exact-match-negative targets blocked", async () => {
+		const cwd = await makeTempRoot();
+		await writeActiveDeepInterview(cwd);
+
+		for (const command of [
+			"echo x > src/product.ts",
+			"echo x > .skc/_session-test/state/deep-interview-state.json",
+			"echo hi > /dev/null; touch src/product.ts",
+			"dd if=/dev/zero of=src/product.ts",
+			"echo x > /dev/nullx",
+			"echo x > dev/null",
+		]) {
+			const decision = await getWorkflowMutationDecision({
+				cwd,
+				sessionId: "session-a",
+				tool: tool("bash"),
+				args: { command },
+			});
+			expect(decision.blocked).toBe(true);
+			expect(decision.targets.length).toBeGreaterThan(0);
+		}
+	});
+
 	it("blocks vim file-switches into .skc", async () => {
 		const cwd = await makeTempRoot();
 		await writeActiveDeepInterview(cwd);
@@ -658,6 +754,10 @@ describe("workflow mutation guard", () => {
 			"dd if=/dev/null of=src/product.ts",
 			"truncate -s 0 src/product.ts",
 			'python <<PY\nopen("src/product.ts", "w").write("x")\nPY',
+			// A literal nested shell script is a real command list; its mutations count.
+			"bash -c 'rm src/product.ts'",
+			"sh -c 'touch src/product.ts'",
+			'zsh -c "echo x > src/product.ts"',
 		]) {
 			const decision = await getWorkflowMutationDecision({
 				cwd,
@@ -671,6 +771,15 @@ describe("workflow mutation guard", () => {
 		for (const command of [
 			"skc ralplan --write --stage planner --artifact /tmp/p.md",
 			"cat sample.md > .skc/specs/deep-interview-sample.md",
+			// Reading and inspecting must never be blocked during a planning phase,
+			// including commands the scanner does not model and read-only wrappers.
+			"skc deep-interview inspect --selector summary --json",
+			"cat package.json | jq .name",
+			"git status --short",
+			"bash -c 'skc deep-interview inspect --json'",
+			'bun -e \'const p=Bun.spawnSync(["skc","state","read"]); process.stdout.write(p.stdout)\'',
+			// Shell metacharacters inside a single-quoted argument value are inert data.
+			"skc deep-interview draft edit --op set --path /a --value 'uses `bun run release`; a > b | c'",
 		]) {
 			const allowed = await getWorkflowMutationDecision({
 				cwd,
@@ -757,5 +866,36 @@ describe("workflow mutation guard", () => {
 				forceOverride: true,
 			}),
 		).rejects.toBeInstanceOf(ToolError);
+	});
+
+	it("BashTool-shaped product mutation throws ToolError and leaves files byte-identical (#2698 / #2665)", async () => {
+		// Mirrors the agent-session bash wrapper: assertWorkflowMutationAllowed runs
+		// before BashTool.execute. A blocked mutation must not touch product or
+		// workflow state bytes — decision-only tests alone do not prove that.
+		const { assertWorkflowMutationAllowed } = await import(
+			"@sayknow-cli/coding-agent/skill-state/workflow-mutation-guard"
+		);
+		const cwd = await makeTempRoot();
+		await writeActiveDeepInterview(cwd);
+		await fs.mkdir(path.join(cwd, "src"), { recursive: true });
+		const productPath = path.join(cwd, "src", "product.ts");
+		const productBefore = 'export const sentinel = "UNTOUCHED-PRODUCT-BYTES";\n';
+		await Bun.write(productPath, productBefore);
+		const modePath = modeStatePath(cwd, "session-a", "deep-interview");
+		const modeBefore = await fs.readFile(modePath);
+
+		await expect(
+			assertWorkflowMutationAllowed({
+				cwd,
+				sessionId: "session-a",
+				tool: tool("bash"),
+				args: { command: "printf x > src/product.ts" },
+			}),
+		).rejects.toBeInstanceOf(ToolError);
+
+		const productAfter = await fs.readFile(productPath, "utf8");
+		const modeAfter = await fs.readFile(modePath);
+		expect(productAfter).toBe(productBefore);
+		expect(Buffer.compare(modeBefore, modeAfter)).toBe(0);
 	});
 });

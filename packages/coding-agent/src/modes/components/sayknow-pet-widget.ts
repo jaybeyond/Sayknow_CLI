@@ -15,6 +15,7 @@ import {
 	type SayknowPixelFrameName,
 	type SayknowPixelFrames,
 	type TUI,
+	tmuxOwnsSixel,
 	wrapTmuxPassthrough,
 } from "@sayknow-cli/tui";
 import type { CustomEditor } from "./custom-editor";
@@ -500,14 +501,25 @@ export class SayknowPetWidget {
 			}
 			if (clearPet) out += this.#clearSixelFootprint(footprint);
 			this.#lastSixelFootprint = footprint;
-			// Under tmux the sixel is forwarded to the OUTER terminal via passthrough
-			// and advances its cursor; the frame's surrounding \x1b7/\x1b8 only reach
-			// tmux, so the outer terminal never restores and scrolls the viewport on
-			// every animation frame. Wrap save-cursor + position + sixel + restore-
-			// cursor as one passthrough unit so the outer cursor returns and nothing
-			// scrolls. The footprint clears above stay tmux-level so tmux repaints the
-			// vacated cells.
-			out += isUnderTmux() ? wrapTmuxPassthrough(`\x1b7${positioned}\x1b8`) : positioned;
+			// Two mutually exclusive delivery modes, and the erase above only works in
+			// the first one:
+			//
+			// tmux owns sixel (terminal-features advertises it): send the frame straight
+			// through. tmux parses it into its own screen model, so the ECH erase above
+			// actually removes the image, and scroll/resize/copy-mode stay consistent.
+			//
+			// tmux does NOT own sixel: the frame has to be smuggled past tmux with DCS
+			// passthrough, which writes pixels directly into the OUTER terminal's image
+			// plane. tmux never records them, so the erase reaches only its cell buffer
+			// and the pixels survive as residue. Passthrough is therefore a fallback,
+			// not the default. The save/restore pair must sit INSIDE the passthrough
+			// envelope: the sixel advances the outer terminal's cursor, and a bare
+			// \x1b7/\x1b8 would only reach tmux, scrolling the viewport every frame.
+			out += tmuxOwnsSixel()
+				? positioned
+				: isUnderTmux()
+					? wrapTmuxPassthrough(`\x1b7${positioned}\x1b8`)
+					: positioned;
 			return out;
 		}
 

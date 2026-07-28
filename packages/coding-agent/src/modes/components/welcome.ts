@@ -1,6 +1,7 @@
 import { type Component, padding, TERMINAL, truncateToWidth, visibleWidth } from "@sayknow-cli/tui";
 import { APP_NAME } from "@sayknow-cli/utils";
 import { formatBuildLabel } from "../../build-metadata";
+import { formatKeyHint, type KeyDisplayContext } from "../../config/keybindings";
 import { t } from "../../i18n";
 import { type ThemeColor, theme } from "../../modes/theme/theme";
 
@@ -20,28 +21,31 @@ export interface WelcomeComponentOptions {
 	getViewportRows?: () => number | undefined;
 	getReservedBottomRows?: (termWidth: number) => number;
 	changelogMarkdown?: string;
+	rightGutterWidth?: number;
 	collapseChangelog?: boolean;
 	buildLabel?: string;
+	keyDisplayContext?: KeyDisplayContext;
 }
 
 const WELCOME_STATIC_RIGHT_ROWS_EXCLUDING_DYNAMIC_SECTIONS = 15;
 const DEFAULT_WHATS_NEW_ROWS = 3;
 const MAX_WHATS_NEW_ROWS = 12;
-const NEWLINE_FLOW_KEY =
-	process.platform === "win32" ? { key: "alt+enter", label: "newline" } : { key: "ctrl+j", label: "newline" };
 
-const FLOW_KEY_ITEMS: ReadonlyArray<{ key: string; label: string }> = [
-	{ key: "/", label: "commands" },
-	{ key: "#", label: "actions" },
-	{ key: "!", label: "shell" },
-	{ key: "$", label: "python" },
-	{ key: "?", label: "keymap" },
-	{ key: "ctrl+l", label: "model" },
-	{ key: "shift+tab", label: "reasoning" },
-	{ key: "tab", label: "complete" },
-	NEWLINE_FLOW_KEY,
-	{ key: "ctrl+c", label: "clear" },
-];
+function flowKeyItems(context: KeyDisplayContext): ReadonlyArray<{ key: string; label: string }> {
+	const newlineKey = context.platform === "win32" ? "alt+enter" : "ctrl+j";
+	return [
+		{ key: "/", label: "commands" },
+		{ key: "#", label: "actions" },
+		{ key: "!", label: "shell" },
+		{ key: "$", label: "python" },
+		{ key: "?", label: "keymap" },
+		{ key: "ctrl+l", label: "model" },
+		{ key: "shift+tab", label: "reasoning" },
+		{ key: "tab", label: "complete" },
+		{ key: newlineKey, label: "newline" },
+		{ key: "ctrl+c", label: "clear" },
+	];
+}
 
 /**
  * Sayknow-CLI launch surface: a blue-gradient SAYKNOW wordmark, compact
@@ -109,7 +113,8 @@ export class WelcomeComponent implements Component {
 	}
 
 	render(termWidth: number): string[] {
-		const boxWidth = Math.max(0, termWidth);
+		const rightGutterWidth = this.#rightGutterWidth(termWidth);
+		const boxWidth = Math.max(0, termWidth - rightGutterWidth);
 		if (boxWidth < 4) {
 			return [];
 		}
@@ -264,7 +269,7 @@ export class WelcomeComponent implements Component {
 			lines.push(tl + titleStyled + theme.fg("dim", hChar.repeat(afterTitle)) + tr);
 		}
 		if (outputRows === 1) {
-			return lines;
+			return this.#withRightGutter(lines, rightGutterWidth);
 		}
 
 		if (showRightColumn) {
@@ -292,7 +297,7 @@ export class WelcomeComponent implements Component {
 			lines.push(bl + h.repeat(leftCol) + br);
 		}
 
-		return lines;
+		return this.#withRightGutter(lines, rightGutterWidth);
 	}
 
 	/** Center text within a given width */
@@ -314,6 +319,19 @@ export class WelcomeComponent implements Component {
 		}
 		return str + padding(width - visLen);
 	}
+	#rightGutterWidth(termWidth: number): number {
+		const configured = this.options.rightGutterWidth ?? 0;
+		if (!Number.isFinite(configured) || configured <= 0) return 0;
+		const gutterWidth = Math.floor(configured);
+		return Math.min(gutterWidth, Math.max(0, termWidth - 4));
+	}
+
+	#withRightGutter(lines: string[], rightGutterWidth: number): string[] {
+		if (rightGutterWidth <= 0) return lines;
+		const gutter = padding(rightGutterWidth);
+		return lines.map(line => line + gutter);
+	}
+
 	#targetRows(termWidth: number): number | undefined {
 		const viewportRows = this.options.getViewportRows?.();
 		if (typeof viewportRows !== "number" || !Number.isFinite(viewportRows) || viewportRows <= 0) {
@@ -347,7 +365,8 @@ export class WelcomeComponent implements Component {
 	}
 
 	#flowKeyItemText(item: { key: string; label: string }): string {
-		return `${theme.fg("dim", item.key)}${theme.fg("muted", ` ${this.#flowKeyLabel(item.label)}`)}`;
+		const context = this.options.keyDisplayContext ?? { platform: process.platform };
+		return `${theme.fg("dim", formatKeyHint(item.key, context))}${theme.fg("muted", ` ${this.#flowKeyLabel(item.label)}`)}`;
 	}
 
 	#flowKeyLabel(label: string): string {
@@ -376,7 +395,7 @@ export class WelcomeComponent implements Component {
 		const separator = ` ${theme.fg("dim", "·")} `;
 		const rows: string[] = [];
 		let current = "";
-		for (const item of FLOW_KEY_ITEMS) {
+		for (const item of flowKeyItems(this.options.keyDisplayContext ?? { platform: process.platform })) {
 			const segment = this.#flowKeyItemText(item);
 			const next = current ? `${current}${separator}${segment}` : segment;
 			if (current && visibleWidth(next) > contentWidth) {
@@ -395,7 +414,7 @@ export class WelcomeComponent implements Component {
 		const rowLimit = Math.max(1, Math.floor(maxRows));
 		if (rows.length <= rowLimit) return rows;
 		if (rowLimit === 1) {
-			const firstItem = FLOW_KEY_ITEMS[0];
+			const firstItem = flowKeyItems(this.options.keyDisplayContext ?? { platform: process.platform })[0];
 			const firstSegment = firstItem ? this.#flowKeyItemText(firstItem) : theme.fg("dim", "keys");
 			return [this.#fitToWidth(` ${firstSegment} ${theme.fg("dim", "· … ")}${theme.bold("/help")}`, width)];
 		}
@@ -679,8 +698,16 @@ function gradientLogo(lines: readonly string[], phase = 0, shine?: ShineConfig):
 
 /** Total length of the intro animation. */
 const INTRO_MS = 3000;
-/** Render cadence during the intro (~30fps). */
-const INTRO_TICK_MS = 33;
+/** Resolve the intro cadence without making tests mutate global process state. */
+export function resolveWelcomeIntroTickMs(
+	platform: NodeJS.Platform = process.platform,
+	tmux = process.env.TMUX,
+): number {
+	return platform === "win32" && tmux ? 100 : 33;
+}
+
+/** Render at 30fps directly, but cap native Windows multiplexers at 10fps to avoid ConPTY output backpressure. */
+const INTRO_TICK_MS = resolveWelcomeIntroTickMs();
 /** Number of full gradient rotations the sweep performs before settling. */
 const INTRO_SWEEPS = 2.5;
 /** Number of times the shine highlight crosses the diagonal across the intro. */

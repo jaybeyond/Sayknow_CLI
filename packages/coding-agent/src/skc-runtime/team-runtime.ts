@@ -455,7 +455,32 @@ export interface WorkerHeartbeatFile {
 	last_turn_at: string;
 	turn_count: number;
 	alive: boolean;
+	/** Linux process start time, so a recycled PID cannot impersonate this worker. */
+	process_start_time?: string;
 }
+/**
+ * Linux process start time (field 22 of /proc/<pid>/stat), used to pin a heartbeat
+ * to one specific process. PIDs are recycled, so without this a reaper can match a
+ * stale record against an unrelated process that later took the same PID.
+ * Returns undefined off Linux or when the process is gone.
+ */
+async function readLinuxProcessStartTime(pid: number): Promise<string | undefined> {
+	if (process.platform !== "linux" || !Number.isSafeInteger(pid) || pid <= 0) return undefined;
+	try {
+		const stat = await Bun.file(`/proc/${pid}/stat`).text();
+		const commandEnd = stat.lastIndexOf(")");
+		if (commandEnd < 0) return undefined;
+		const fields = stat
+			.slice(commandEnd + 2)
+			.trim()
+			.split(/\s+/);
+		const startTime = fields[19];
+		return startTime && /^\d+$/.test(startTime) ? startTime : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
 interface GitResult {
 	ok: boolean;
 	stdout: string;
@@ -491,12 +516,18 @@ interface SkcWorkerIntegrationDedupeState {
 
 export interface SkcWorkerIntegrationAttemptRequestResult {
 	requested: boolean;
-	reason: "requested" | "not_worker" | "missing_worktree" | "no_changes" | "deduped" | "git_error";
+	reason: "requested" | "not_worker" | "missing_worktree" | "no_changes" | "deduped" | "git_error" | "cancelled";
 	worker?: string;
 	team_name?: string;
 	fingerprint?: string;
 	head?: string | null;
 	status?: SkcWorkerCheckpointClassification["kind"];
+}
+
+/** Caller-supplied controls for a worker integration attempt. */
+export interface SkcWorkerIntegrationAttemptOptions {
+	/** Abort the attempt between its blocking git probes. */
+	signal?: AbortSignal;
 }
 
 function isSkcTeamTaskStatus(value: string): value is SkcTeamTaskStatus {
@@ -2973,7 +3004,13 @@ function workerIntegrationFingerprint(head: string | null, classification: SkcWo
 export async function requestSkcWorkerIntegrationAttempt(
 	cwd = process.cwd(),
 	env: NodeJS.ProcessEnv = process.env,
+	options: SkcWorkerIntegrationAttemptOptions = {},
 ): Promise<SkcWorkerIntegrationAttemptRequestResult> {
+	// The probes below shell out to git, which can block for a long time on a large
+	// or network-backed worktree. The caller (session shutdown) needs to stop waiting,
+	// so bail at each boundary instead of running to completion regardless.
+	const cancelled = (): SkcWorkerIntegrationAttemptRequestResult => ({ requested: false, reason: "cancelled" });
+	if (options.signal?.aborted) return cancelled();
 	const teamName = env.SKC_TEAM_NAME?.trim();
 	const worker = env.SKC_TEAM_WORKER_ID?.trim() || env.SKC_TEAM_INTERNAL_WORKER?.split("/").pop()?.trim();
 	if (!teamName || !worker) return { requested: false, reason: "not_worker" };
@@ -2983,7 +3020,9 @@ export async function requestSkcWorkerIntegrationAttempt(
 	const worktreePath = env.SKC_TEAM_WORKTREE_PATH?.trim() || configuredWorker?.worktree_path;
 	if (!worktreePath || !(await pathExists(worktreePath)))
 		return { requested: false, reason: "missing_worktree", worker, team_name: teamName };
+	if (options.signal?.aborted) return cancelled();
 	const classification = classifyWorkerCheckpointStatus(worktreePath);
+	if (options.signal?.aborted) return cancelled();
 	const head = resolveHead(worktreePath);
 	if (classification.kind === "git_error") {
 		return { requested: false, reason: "git_error", worker, team_name: teamName, head, status: classification.kind };
@@ -4346,6 +4385,7 @@ export async function executeSkcTeamApiOperation(
 					last_turn_at: now(),
 					turn_count: Number(input.turn_count ?? 0),
 					alive: Boolean(input.alive ?? true),
+					process_start_time: await readLinuxProcessStartTime(Number(input.pid ?? 0)),
 				},
 				cwd,
 				env,

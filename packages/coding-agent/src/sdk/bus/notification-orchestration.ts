@@ -1,5 +1,6 @@
 import type { CasRestoreResult } from "../../config/atomic-yaml-patch";
 import type { RawSettings, SettingsAtomicPatch, SettingsAtomicReceipt } from "../../config/settings";
+import { isProcessIncarnation, processIncarnation } from "../broker/process-incarnation";
 import {
 	getNotificationConfig,
 	hasNonBlankValue,
@@ -53,6 +54,7 @@ export interface ProposedTelegramIdentityPreflightInput {
 	deps?: {
 		fs?: TelegramDaemonFs;
 		pidAlive?: (pid: number) => boolean;
+		pidIncarnation?: (pid: number) => string | undefined;
 	};
 }
 
@@ -109,6 +111,16 @@ export async function proposedTelegramIdentity(
 
 		const pidAlive = input.deps?.pidAlive ?? defaultPidAlive;
 		if (!pidAlive(metadata.pid)) return { status: "absent" };
+		const pidIncarnation = input.deps?.pidIncarnation ?? processIncarnation;
+		const persistedIncarnation = state.incarnation;
+		const currentIncarnation = pidIncarnation(metadata.pid);
+		if (
+			!isProcessIncarnation(persistedIncarnation) ||
+			!isProcessIncarnation(currentIncarnation) ||
+			persistedIncarnation !== currentIncarnation
+		) {
+			return { status: "absent" };
+		}
 
 		if (state.tokenFingerprint === tokenFingerprint(input.botToken) && state.chatId === input.chatId) {
 			return {

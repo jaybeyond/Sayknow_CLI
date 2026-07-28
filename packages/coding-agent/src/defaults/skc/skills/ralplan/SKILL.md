@@ -41,7 +41,10 @@ When ralplan detects its own current-session state is corrupt, tampered, unreada
 
 Ralplan is a planning module. It may inspect context and draft or update plan/spec/proposal artifacts, but it MUST mark those artifacts as `pending approval` unless the user has explicitly opted into execution in the current turn or via the structured approval UI. Before explicit execution approval, it MUST NOT run mutation-oriented shell commands, edit source files, commit, push, open PRs, invoke execution skills, or delegate implementation tasks.
 
-Planning artifacts and stage handoffs MUST be persisted through the ralplan CLI artifact writer, not by direct `.skc/` edits. Every role agent or subagent that produces a durable stage artifact MUST write it with:
+Explicitly naming `ultragoal` or `team` (including `/skill:` and `skc` forms) counts as opting into execution for that skill — do not re-ask for the same consent.
+
+Persist planning artifacts and handoffs through the ralplan CLI writer, never direct `.skc/` edits:
+Direct `write`, `edit`, or `ast_edit` calls against `.skc/_session-{sessionid}/specs`, `.skc/_session-{sessionid}/plans`, `.skc/_session-{sessionid}/state`, or any other `.skc/` path are forbidden unless an explicit force override is active.
 
 ```bash
 skc ralplan --write --stage <type> --stage_n <N> --artifact "markdown file path or markdown string"
@@ -62,7 +65,7 @@ RECEIPT-ONLY guideline: role agents (`planner`, `architect`, and `critic`) persi
 This skill runs SKC planning in consensus mode for the provided arguments.
 
 The consensus workflow:
-1. **Planner** creates the initial plan and a compact **RALPLAN-DR summary** before review. Launch the Planner ONCE per run as a detached, resumable subagent (await it before the Architect) and record its returned subagent id as the run's persisted Planner id; persist the stage with `skc ralplan --write --stage planner --stage_n 1 --artifact-env SKC_RALPLAN_ARTIFACT --planner-id <id> --planner-resumable <true|false>` (see **Persisted Planner** below):
+1. **Planner** creates the initial plan and a compact **RALPLAN-DR summary** before review. Launch the Planner ONCE per run as a detached, resumable subagent (await it before the Architect) and record its returned subagent id as the run's persisted Planner id; persist the stage with `skc ralplan --write --stage planner --stage_n 1 --artifact-env SKC_RALPLAN_ARTIFACT --planner-id <id> --planner-resumable <true|false>` (see **Persisted role agents** below):
    - After persistence, return only the receipt/path plus compact planning status; do not paste the full plan markdown back to the caller unless explicitly requested.
    - Principles (3-5)
    - Decision Drivers (top 3)
@@ -70,19 +73,32 @@ The consensus workflow:
    - If only one viable option remains, explicit invalidation rationale for alternatives
    - Deliberate mode only: pre-mortem (3 scenarios) + expanded test plan (unit/integration/e2e/observability)
 2. **User feedback** *(--interactive only)*: If `--interactive` is set, use the `ask` tool to present the draft plan **plus the Principles / Drivers / Options summary** before review (Proceed to review / Request changes / Skip review). Otherwise, automatically proceed to review.
-3. **Architect** reviews for architectural soundness and must provide the strongest steelman antithesis, at least one real tradeoff tension, and (when possible) synthesis — **await completion before step 4**. In deliberate mode, Architect should explicitly flag principle violations.
-   - The Architect agent/subagent must persist its review with `skc ralplan --write --stage architect --stage_n <N> --artifact-env SKC_RALPLAN_ARTIFACT --json`, then return the receipt/path plus compact verdict/status (`CLEAR`/`WATCH`/`BLOCK`, `APPROVE`/`COMMENT`/`REQUEST CHANGES`) instead of pasting the full review body.
-4. **Critic** evaluates against quality criteria — run only after step 3 completes. Critic must enforce principle-option consistency, fair alternatives, risk mitigation clarity, testable acceptance criteria, and concrete verification steps. In deliberate mode, Critic must reject missing/weak pre-mortem or expanded test plan.
-   - The Critic agent/subagent must persist its evaluation with `skc ralplan --write --stage critic --stage_n <N> --artifact-env SKC_RALPLAN_ARTIFACT --json`, then return the receipt/path plus compact verdict/status (`OKAY`/`ITERATE`/`REJECT`) instead of pasting the full evaluation body.
-5. **Re-review loop** (max 5 iterations): Any non-`OKAY` Critic verdict (`ITERATE` or `REJECT`) MUST run the same full closed loop:
+3. **Review fan-out after Planner persistence**: launch the Architect and Critic ONCE per run as detached, resumable review lanes against the same immutable Planner receipt/path/sha/stage_n. Their pass-1 fan-out remains parallel when Critic is **plan-only** and does not consume Architect output (see **Persisted role agents** below).
+   - **Architect lane**: challenge architecture, surface tradeoff tensions, and enrich thin plans with synthesis or missed sub-scope. Persist with `skc ralplan --write --stage architect --stage_n <N> --artifact-env SKC_RALPLAN_ARTIFACT --architect-id <id> --architect-resumable <true|false> --lane-verdict <token> --json`, then return receipt/path plus `CLEAR`/`WATCH`/`BLOCK` and `APPROVE`/`COMMENT`/`REQUEST CHANGES`.
+   - **Plan-only Critic lane**: independently check quality, principle-option consistency, alternatives, risks, acceptance criteria, and verification; when the plan is thin, request concrete expansion rather than only defects. Persist with `skc ralplan --write --stage critic --stage_n <N> --artifact-env SKC_RALPLAN_ARTIFACT --critic-id <id> --critic-resumable <true|false> --lane-verdict <token> --json`, then return receipt/path plus `OKAY`/`ITERATE`/`REJECT`.
+   - **Sequential fallback**: if Critic must evaluate Architect findings, verdict, antithesis, tradeoffs, synthesis, status, or any Architect-produced artifact, await the Architect result before issuing that Architect-dependent Critic pass.
+   - Every Architect/Critic assignment, including each pass-2+ re-review assignment in step 5, MUST instruct the reviewer to include `--lane-verdict <token>` on its existing `skc ralplan --write`: Architect passes its Architectural Status token (`CLEAR`/`WATCH`/`BLOCK`), and Critic passes its verdict token (`OKAY`/`ITERATE`/`REJECT`). The flag is optional so legacy invocations stay valid.
+4. **Review join gate**: before consensus, revision, reconciliation, finalization, or approval, verify both Architect and Critic receipts/verdicts exist for the same Planner artifact/pass (`path`, `sha256`, `stage_n`). A non-`CLEAR` Architect verdict, non-`APPROVE` Architect decision, or any non-`OKAY` Critic verdict routes back to Planner revision; do not finalize from only one review lane.
+5. **Re-review loop** (max 5 iterations; **runtime-enforced**): Any non-`OKAY` Critic verdict (`ITERATE` or `REJECT`) or Architect result that is not `CLEAR`/`APPROVE` MUST run the same full closed loop. Pass 2+ resumes the SAME persisted Architect and Critic lane subagents with the mandatory re-review context bundle and runs sequentially Architect -> Critic: await the Architect result and its receipt/path before assigning Critic; Critic receives the current-pass Architect receipt/path and performs the rule-5 counter-review before consolidated feedback routes to Planner revision. From pass 2, both reviewers are bound by the five-rule ratchet: delta-only review, novelty justification, verdict monotonicity, severity scoping, and Critic counter-review of Architect scope inflation; unjustified inflation does not force a revision.
    a. Collect Architect + Critic feedback
-   b. Revise the plan by resuming the SAME persisted Planner subagent with consolidated Architect + Critic feedback (see **Persisted Planner** below); fall back to a fresh Planner spawn only per the fallback routing table
-   c. Return to Architect review
+   b. Revise the plan by resuming the SAME persisted Planner subagent with consolidated Architect + Critic feedback (see **Persisted role agents** below); fall back to a fresh Planner spawn only per the fallback routing table
+
+   **Re-review context bundle (pass 2+; mandatory):** Every pass-2+ Architect or Critic assignment MUST include:
+   1. the explicit review pass number `N` for that lane, stated literally as `review pass N` in the assignment text, where **N is the ordinal review pass for that lane across the entire ralplan run/re-review loop** (equivalently the opener-iteration ordinal): the review of the initial Planner artifact is `review pass 1`, the review of the first revised Planner artifact is `review pass 2`, and so on; **N never resets within an opener iteration and never resets when a new `revision` opener begins in the same run** — it increments monotonically with every review the lane performs in the run. This ordinal is a workflow counter distinct from the runtime lane budget (which counts lane writes per opener iteration, WI-5): at the default budget the two coincide numerically, but the ratchet ("from pass 2") always keys off the run-level N so normal post-revision re-reviews activate delta-only review, monotonicity, and the sequential cadence;
+   2. the current revision receipt under review (`path`, `sha256`, `stage_n`);
+   3. the prior Planner/revision artifact path that the previous pass reviewed;
+   4. the prior same-lane review artifact path (`stage-NN-architect.md` / `stage-NN-critic.md`) with its receipt fields;
+   5. the consolidated prior blockers and the revision's claimed resolutions, as orchestrator-collected pointers into those artifacts (never pasted bodies);
+   6. Critic pass-2+ only: the current-pass Architect receipt/path, awaited first per the sequential cadence, so the rule-5 counter-review is evaluable.
+
+   **The re-review context bundle remains mandatory regardless of whether a reviewer is resumed or uses a fresh-spawn fallback.** A fresh-spawn fallback always receives everything required to apply delta-only review (rule 1), novelty justification (rule 2), monotonicity (rule 3), severity scoping (rule 4), and counter-review (rule 5).
+   c. For pass 2+, resume (or fresh-spawn only per the routing table) Architect -> Critic sequentially: await the Architect result and receipt/path, then issue Critic with the mandatory context bundle, including the current-pass Architect receipt/path. Critic performs the rule-5 counter-review before consolidated feedback routes to Planner revision.
       - Persist each Planner revision with `skc ralplan --write --stage revision --stage_n <N> --artifact-env SKC_RALPLAN_ARTIFACT --json` before re-review, then pass the receipt/path forward instead of duplicating the full revision markdown in the parent conversation.
-   d. Return to Critic evaluation
-   e. Repeat this loop until Critic returns `OKAY` or 5 iterations are reached
-   f. If 5 iterations are reached without `OKAY`, present the best version to the user
-6. **Post-ralplan interview** (intent reconciliation gate): After Critic returns `OKAY` and before the plan is finalized, reconcile the consensus plan against the user's actual intent. The goal is to make sure ralplan did not silently bake in assumptions that conflict with what the user wants.
+   d. Re-join Architect and Critic verdicts for the same revised Planner artifact/pass
+   e. Repeat this loop until Critic returns `OKAY` **and** Architect is `CLEAR`/`APPROVE` for the same Planner artifact/pass, or 5 iterations are reached
+   f. If 5 iterations are reached without Critic `OKAY` plus Architect `CLEAR`/`APPROVE`, **stop opening further planner/revision passes**. Present the best version to the user (interactive) or surface `PLANNING-STUCK` (headless). Do **not** auto-start implementation.
+   g. **Runtime budget (#3165):** native `skc ralplan --write` refuses a new `planner`/`revision` that would open consensus iteration **> max** (default **5**, overridable via `skc.ralplan.maxIterations` in project/user `.skc/settings.json`, integer 1..20). Cap uses the same iteration definition as the HUD (`planner`/`revision` openers in `index.jsonl`). Overflow exits **3**, prints operator-visible **`PLANNING-STUCK`** on stdout (and stderr detail; JSON includes `planning_stuck: true`), and still allows `architect`/`critic` within an already-opened pass plus `post-interview`/`adr`/`final` so the best plan can be escalated to `pending approval` without auto-execution. A new `--run-id` starts a fresh budget.
+6. **Post-ralplan interview** (intent reconciliation gate): After the review join gate has both Critic `OKAY` and Architect `CLEAR`/`APPROVE` for the same Planner artifact/pass, and before the plan is finalized, reconcile the consensus plan against the user's actual intent. The goal is to make sure ralplan did not silently bake in assumptions that conflict with what the user wants.
    a. **Collect open items** from the run: every assumption the Planner/Architect/Critic resolved by assumption rather than by stated fact, every ambiguity flagged during review, and every decision the loop made without explicit user input. Source these from the persisted `planner`/`architect`/`critic`/`revision` stage artifacts, not from memory.
    b. **Cross-check prior context for conflicts**: glob `.skc/_session-{sessionid}/specs/deep-interview-*.md` and other prior specs/plans/context relevant by topic. For each, list points where the consensus plan contradicts, weakens, or expands beyond a previously crystallized decision, constraint, or non-goal. Cite the conflicting artifact and line/section.
    c. **Reconcile with the user via the `ask` tool (always, regardless of `--interactive`)**: Never stop idle with plain-text prose after the consensus loop. Every reconciliation question MUST go through the `ask` tool with contextual options plus free-text.
@@ -90,8 +106,8 @@ The consensus workflow:
       - If the plan is crystal clear (no open assumptions or prior-context conflicts), skip straight to the step 8 final-options `ask` instead of inventing filler questions.
       - For every confirmed open item, embed the resolved outcome into the final plan under an **## Intent Reconciliation** section so the `pending approval` artifact records each decision; record any item the user explicitly defers as an open confirmation under that same section.
    d. Persist the reconciliation with `skc ralplan --write --stage post-interview --stage_n <N> --artifact-env SKC_RALPLAN_ARTIFACT --json`, then return the receipt/path plus a compact status (reconciled-clean / reconciled-with-revision / open-confirmations-pending) instead of pasting the full body.
-7. On reconciliation completion, mark the plan `pending approval` unless explicit execution approval has already been captured, persist the ADR/final plan via `skc ralplan --write --stage final --stage_n <N> --artifact-env SKC_RALPLAN_ARTIFACT`, and do not directly edit `.skc/_session-{sessionid}/plans`. Final plan must include ADR (Decision, Drivers, Alternatives considered, Why chosen, Consequences, Follow-ups) and, when present, the **## Intent Reconciliation** section.
-8. **Always** present the finalized plan via the `ask` tool (regardless of `--interactive`) with `workflowGate: { stage: "ralplan", kind: "approval" }` on the final question so RPC/headless clients receive a `ralplan`/`approval` workflow gate, not a deep-interview question gate. Use these options:
+7. On reconciliation completion, re-check the review join gate (Critic `OKAY` plus Architect `CLEAR`/`APPROVE` for the same Planner artifact/pass), mark the plan `pending approval` unless explicit execution approval has already been captured, persist the ADR/final plan via `skc ralplan --write --stage final --stage_n <N> --artifact-env SKC_RALPLAN_ARTIFACT`, and do not directly edit `.skc/_session-{sessionid}/plans`. Final plan must include ADR (Decision, Drivers, Alternatives considered, Why chosen, Consequences, Follow-ups) and, when present, the **## Intent Reconciliation** section.
+8. **Final approval gate (with explicit-execution exception):** If the user already explicitly named an execution skill in the current turn or via the structured approval UI (`ultragoal`, `/skill:ultragoal`, `skc ultragoal`, `team`, `/skill:team`, `skc team`, or "Approve execution via ultragoal/team"), that is execution approval — skip the re-ask and proceed to step 9 with that skill. Otherwise, **always** present the finalized plan via the `ask` tool (regardless of `--interactive`) with `workflowGate: { stage: "ralplan", kind: "approval" }` on the final question so RPC/headless clients receive a `ralplan`/`approval` workflow gate, not a deep-interview question gate. Use these options:
    - **Refine further** — re-run the consensus loop / request changes, then return here
    - **Approve execution via ultragoal (Recommended)** — goal-tracked autonomous execution
    - **Approve execution via team** — only when tmux-based interactive worker parallelization is required
@@ -108,36 +124,77 @@ The consensus workflow:
 
    The skill tool then dispatches the execution skill same-turn and runs `skc state ralplan handoff --to <team|ultragoal> --json` in-process to atomically demote ralplan, promote the callee, and sync `.skc/_session-{sessionid}/state/skill-active-state.json`. You do not need to run the handoff verb yourself.
 
-> **Important:** Steps 3 and 4 MUST run sequentially. Do NOT issue both agent Task calls in the same parallel batch. Always await the Architect result before issuing the Critic Task.
+> **Important:** Architect and Critic MAY run in the same parallel batch only for the plan-only Critic lane after Planner persistence (review pass 1). Pass 2+ re-reviews MUST run sequentially Architect -> Critic: await Architect before issuing Critic, pass the current-pass Architect receipt/path to Critic for the rule-5 counter-review, then apply the same review join gate before consensus.
 
-Follow the Plan skill's full documentation for consensus mode details.
+## Consensus iteration cap (operator contract)
 
-### Persisted Planner (consensus loop)
+- Default max consensus iterations: **5** (`skc.ralplan.maxIterations`).
+- On cap: exit code **3**, marker **`PLANNING-STUCK`** (stdout), no silent re-loop, no automatic ultragoal/team handoff. Opener budget is `max(index.jsonl openers, on-disk stage-*-{planner,revision}.md count)` so a missing/empty/malformed ledger cannot fail open after prior openers.
+- Headless/CI: treat `PLANNING-STUCK` / exit 3 as terminal planning failure for orchestration/watchdogs.
+- Interactive: present best existing plan via the final approval gate; residual critic findings stay as caveats.
+- Override example (project `.skc/settings.json`):
 
-The Planner is a **same-session persisted subagent**: launched detached once, awaited before the Architect, then **resumed** with consolidated Architect + Critic feedback on every re-review pass instead of being re-spawned. The Architect and Critic stay **fresh, independent spawns each pass** so their verdicts remain reproducible from their pass artifacts alone. Do NOT modify the subagent control surface; this orchestration uses the existing `subagent` resume/steer controls only.
+```json
+{
+  "skc": {
+    "ralplan": {
+      "maxIterations": 3
+    }
+  }
+}
+```
 
-**Persistence boundary:** this is same-parent, active-session continuity only. Resumability depends on the manager's retained subagent resume metadata and a persistent parent session (an in-memory parent yields `resumable:false`), not just the `.skc` run-state record. A terminal subagent whose live job record was evicted can still be resumed when its retained resume descriptor points at a saved subagent session file. After a process restart, missing resume metadata, or any unavailable/failed resume, use the fresh Planner fallback.
+## Per-lane review budget (operator contract)
 
-**Resume routing table** (per re-review pass, when resuming the persisted Planner id):
+- Default: **1** Architect pass and **1** Critic pass per opener iteration.
+- Override via `skc.ralplan.maxReviewPassesPerLane`: project `.skc/settings.json` overrides user settings; the value is an integer **1..10** registered in the public settings schema.
+- On overflow: exit code **3** with the **`PLANNING-STUCK`** marker and lane-specific JSON/stderr detail.
+- `post-interview`, `adr`, and `final` are always allowed.
+- Identical re-writes dedupe without stuck-signaling — including after a crash between artifact write and ledger append: the identical retry repairs the missing ledger row and returns the dedupe receipt.
+- A new `--run-id` starts a fresh budget.
+- A rule-2-justified blocker routes through a Planner `revision` opener (new iteration, fresh lane budget), never a second same-iteration review pass.
+- Override example (project `.skc/settings.json`):
+
+```json
+{
+  "skc": {
+    "ralplan": {
+      "maxIterations": 3,
+      "maxReviewPassesPerLane": 2
+    }
+  }
+}
+```
+
+
+Follow this ralplan-internal consensus workflow for consensus mode details.
+
+### Persisted role agents (consensus loop)
+
+The Planner, Architect, and Critic are **same-session persisted subagents**. Launch the Planner detached once and await it before review fan-out; Architect and Critic are also launched once per run as detached, resumable subagents in the pass-1 fan-out (parallel only for the plan-only Critic lane tied to the same Planner receipt/path/sha/stage_n). On pass 2+, resume the SAME persisted Planner with consolidated feedback and resume the SAME persisted Architect and Critic lane subagents with the mandatory re-review context bundle instead of fresh-spawning. Do NOT modify the subagent control surface; use existing `subagent` resume/steer controls only.
+
+**Persistence boundary:** same-parent, active-session continuity only. Resumability requires retained subagent resume metadata and a persistent parent session (in-memory parent yields `resumable:false`), not just `.skc` run-state. A terminal subagent can still resume when its retained descriptor points at a saved subagent session; after process restart, missing metadata, or failed/unavailable resume, use the fresh role/lane fallback.
+
+**Resume routing table (for every persisted role: Planner, Architect, and Critic)** (per re-review pass, when resuming that role's persisted id):
 
 | Resume outcome | Action |
 |---|---|
-| `running` | `steer`/inject the consolidated feedback to the same id, then await — do NOT fresh-spawn |
-| `queued` | retain/update the queued message or await the same id — do NOT fresh-spawn just because it is queued |
-| `context_unavailable`, `not_found`, `no_runner`, `resume_failed` | fresh Planner spawn for that pass; record the fallback metadata. `not_found` should only mean same-session resume metadata is unavailable, not merely that a terminal live job was evicted. |
-| terminal (`completed`/`failed`/`cancelled`) + revision message | resume the same id when context is available; otherwise use the fresh fallback above |
+| `running` | `steer`/inject that role's follow-up context to the same id, then await — do NOT fresh-spawn |
+| `queued` | retain/update the queued message or `await` the same id — do NOT fresh-spawn just because it is queued |
+| `context_unavailable`, `not_found`, `no_runner`, `resume_failed` | fresh-spawn fallback for that role/lane on that pass; record the fallback metadata. `not_found` should only mean same-session resume metadata is unavailable, not merely that a terminal live job was evicted. |
+| terminal (`completed`/`failed`/`cancelled`) + follow-up message | resume the same id when context is available; otherwise use the fresh-spawn fallback above |
 
-**Recording persisted-Planner metadata** (audit/routing only — never claim `subagent list` proves resumability, since the snapshot does not expose `resumable`). Ride these optional flags on the normal `--write` for the planner/revision stage of the pass:
+**Ratchet synergy:** a resumed Architect or Critic natively retains prior-pass context, but the re-review context bundle remains mandatory regardless so the fresh-spawn fallback remains fully functional and applies all five rules.
 
-```
-skc ralplan --write --stage revision --stage_n <N> --artifact-env SKC_RALPLAN_ARTIFACT \
-  --planner-id <id> --planner-resumable <true|false> \
-  --fallback-reason <context_unavailable|not_found|no_runner|resume_failed|process_restart|missing_record> \
-  --fallback-attempted-id <id> --fallback-stage-n <N> \
-  --fallback-receipt-path <fresh-planner-stage-artifact-path> --json
-```
+**Recording persisted-role-agent metadata** (audit/routing only — never claim `subagent list` proves resumability, since the snapshot does not expose `resumable`). Ride the matching optional flags on the role's normal `--write` for the pass:
 
-Set `--planner-resumable true` only when the parent session is provably persistent; set/record `false` after an observed `context_unavailable`; otherwise omit it (unknown). Fallback flags are recorded only when a fresh-spawn fallback actually occurs: a fallback record requires `--fallback-reason` **together with** `--fallback-attempted-id` and `--fallback-stage-n` (the failed id and the pass it failed on), while `--fallback-receipt-path` (the fresh Planner's stage artifact) is optional.
+| Role | Normal write stage | Metadata flags |
+|---|---|---|
+| Planner | `planner` or `revision` | `--planner-id <id> --planner-resumable <true|false>` |
+| Architect | `architect` | `--architect-id <id> --architect-resumable <true|false>` |
+| Critic | `critic` | `--critic-id <id> --critic-resumable <true|false>` |
+
+The existing fallback flags ride the same role's normal write: `--fallback-reason <context_unavailable|not_found|no_runner|resume_failed|process_restart|missing_record>`, `--fallback-attempted-id <id>`, `--fallback-stage-n <N>`, and optional `--fallback-receipt-path <fresh-role-stage-artifact-path>`. A planner/revision write records Planner fallback metadata, an Architect write records Architect fallback metadata, and a Critic write records Critic fallback metadata. Set the matching `--*-resumable` flag to `true` only when the parent session is provably persistent; set/record `false` after an observed `context_unavailable`; otherwise omit it (unknown). Fallback flags are recorded only when a fresh-spawn fallback actually occurs: a fallback record requires `--fallback-reason` **together with** `--fallback-attempted-id` and `--fallback-stage-n` (the failed id and the pass it failed on), while `--fallback-receipt-path` is optional.
 
 ## Pre-Execution Gate
 

@@ -3,7 +3,7 @@ import { describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { SessionCreateFrame } from "@sayknow-cli/coding-agent/sdk/bus/index";
+import type { SessionCloseFrame, SessionCreateFrame } from "@sayknow-cli/coding-agent/sdk/bus/index";
 import {
 	attachLifecycleControl,
 	buildCreateArgv,
@@ -22,10 +22,17 @@ import type { LedgerEntry, OrchestratorDeps } from "@sayknow-cli/coding-agent/sd
 import { startDaemonLifecycleControl } from "@sayknow-cli/coding-agent/sdk/bus/telegram-daemon";
 import { parseLaunchWorktreeMode } from "@sayknow-cli/coding-agent/skc-runtime/launch-worktree";
 import * as native from "@sayknow-cli/natives";
-import { logger } from "@sayknow-cli/utils";
+import { getConfigRootDir, logger } from "@sayknow-cli/utils";
 import { Settings } from "../src/config/settings";
 import { tokenFingerprint } from "../src/sdk/bus/config";
-import { acquireDaemonOwnership, TelegramNotificationDaemon } from "../src/sdk/bus/telegram-daemon";
+import { exactUnlinkNotificationFile, readNotificationEndpointFile } from "../src/sdk/bus/notification-service";
+import {
+	acquireDaemonOwnership,
+	daemonPaths,
+	type TelegramDaemonFs,
+	TelegramNotificationDaemon,
+} from "../src/sdk/bus/telegram-daemon";
+
 import {
 	prepareManagedSessionScopeForWriteSync,
 	resolveManagedScope,
@@ -38,6 +45,14 @@ function secureOwnerOnlyFile(pathname: string): void {
 	if (!applied.ok) throw new Error(`Owner-only security rejected ${pathname}: ${applied.code}`);
 	const verified = native.verifyOwnerOnlyPathSecurity(pathname, "file") as NativeSecurity;
 	if (!verified.ok) throw new Error(`Owner-only security rejected ${pathname}: ${verified.code}`);
+}
+
+function managedFixtureRoot(prefix: string): string {
+	const fixturesRoot = path.join(getConfigRootDir(), "test-fixtures");
+	fs.mkdirSync(fixturesRoot, { recursive: true, mode: 0o700 });
+	const applied = native.applyOwnerOnlyPathSecurity(fixturesRoot, "directory") as NativeSecurity;
+	if (!applied.ok) throw new Error(`Owner-only security rejected ${fixturesRoot}: ${applied.code}`);
+	return fs.mkdtempSync(path.join(fixturesRoot, prefix));
 }
 
 function writeManagedSession(sessionsRoot: string, cwd: string, sessionId: string): void {
@@ -76,6 +91,19 @@ function createFrame(over: Partial<SessionCreateFrame> = {}): SessionCreateFrame
 		chatId: PAIRED,
 		token: "control-token",
 		target: { kind: "existing_path", path: "/repo" },
+		...over,
+	};
+}
+
+function closeFrame(over: Partial<SessionCloseFrame> = {}): SessionCloseFrame {
+	return {
+		type: "session_close",
+		requestId: "lc_close_1",
+		updateId: 100,
+		chatId: PAIRED,
+		token: "control-token",
+		target: { sessionId: "sess_1", tmuxSession: "skc-sess_1" },
+		force: true,
 		...over,
 	};
 }
@@ -190,21 +218,28 @@ function immediateTimeout(): typeof setTimeout {
 }
 
 async function startAsOwner(settings: Settings, ownerId: string, botToken: string): Promise<void> {
-	await acquireDaemonOwnership({
+	const acquisition = await acquireDaemonOwnership({
 		settings,
 		tokenFingerprint: tokenFingerprint(botToken),
 		chatId: PAIRED,
 		pid: process.pid,
 		randomId: () => ownerId,
 	});
+	if (!acquisition.acquired) throw new Error(`ownership acquisition failed: ${JSON.stringify(acquisition)}`);
+	const paths = daemonPaths(settings.getAgentDir());
+	const state = JSON.parse(fs.readFileSync(paths.state, "utf8")) as { ownershipPhase: string };
+	state.ownershipPhase = "ready";
+	fs.writeFileSync(paths.state, `${JSON.stringify(state)}\n`, { mode: 0o600 });
+	fs.rmSync(paths.steal, { force: true });
 }
 
 it("passes the daemon-derived audit key through real lifecycle startup without a fallback", async () => {
 	const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), "skc-daemon-audit-key-"));
 	const settings = daemonSettings(agentDir);
-	await startAsOwner(settings, "audit-key-owner", "bot-token");
+	await startAsOwner(settings, "audit-key-owner", "123456:secret-token");
 
 	let capturedKey: Uint8Array | undefined;
+	const startupOrder: string[] = [];
 	let registered = 0;
 	const factory: LifecycleControlServerFactory = () =>
 		({
@@ -218,9 +253,14 @@ it("passes the daemon-derived audit key through real lifecycle startup without a
 	const daemon = new TelegramNotificationDaemon({
 		settings,
 		ownerId: "audit-key-owner",
-		botToken: "bot-token",
+		botToken: "123456:secret-token",
 		chatId: PAIRED,
-		botApi: { call: async () => ({ ok: true, result: [] }) } as never,
+		botApi: {
+			call: async (method: string) => {
+				startupOrder.push(`bot:${method}`);
+				return { ok: true, result: [] };
+			},
+		} as never,
 		idleTimeoutMs: 10,
 		now: (() => {
 			let now = 0;
@@ -229,6 +269,7 @@ it("passes the daemon-derived audit key through real lifecycle startup without a
 		setTimeoutImpl: immediateTimeout(),
 		createLifecycleControlServer: factory,
 		createLifecycleOrchestratorDeps: input => {
+			startupOrder.push("lifecycle-deps");
 			capturedKey = input.auditRedactionKey;
 			return { ...stubDeps(), auditRedactionKey: input.auditRedactionKey };
 		},
@@ -237,20 +278,21 @@ it("passes the daemon-derived audit key through real lifecycle startup without a
 	await daemon.run();
 
 	expect(Buffer.from(capturedKey ?? []).toString("hex")).toBe(
-		"03936c8324cc679ecdc4bca97b2a88acaedf993ec45a8e6b3196033a6f9727a6",
+		"ff2063f913d83ae42436a9e33c8bdd86ae77006c5a3fe4980dc7062ba4d95aca",
 	);
+	expect(startupOrder[0]).toBe("lifecycle-deps");
 	expect(registered).toBe(1);
 });
 
-it("does not attach lifecycle audit dependencies or fall back when daemon key derivation has no token", async () => {
-	const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), "skc-daemon-missing-audit-key-"));
+it("rejects a whitespace-only token before lifecycle, timer, or Bot API activity", async () => {
+	const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), "skc-daemon-whitespace-token-"));
 	const settings = daemonSettings(agentDir);
-	await startAsOwner(settings, "missing-audit-key-owner", "bot-token");
-
 	let dependenciesBuilt = 0;
 	let registered = 0;
 	let started = 0;
 	let stopped = 0;
+	let intervalsStarted = 0;
+	let apiCalls = 0;
 	const factory: LifecycleControlServerFactory = () =>
 		({
 			onLifecycleRequest: () => {
@@ -266,16 +308,19 @@ it("does not attach lifecycle audit dependencies or fall back when daemon key de
 		}) as LifecycleControlServer;
 	const daemon = new TelegramNotificationDaemon({
 		settings,
-		ownerId: "missing-audit-key-owner",
-		botToken: undefined as unknown as string,
+		ownerId: "whitespace-token-owner",
+		botToken: " \t\n ",
 		chatId: PAIRED,
-		botApi: { call: async () => ({ ok: true, result: [] }) } as never,
-		idleTimeoutMs: 10,
-		now: (() => {
-			let now = 0;
-			return () => (now += 11);
-		})(),
-		setTimeoutImpl: immediateTimeout(),
+		botApi: {
+			call: async () => {
+				apiCalls++;
+				return { ok: true, result: [] };
+			},
+		} as never,
+		setIntervalImpl: ((..._args: unknown[]) => {
+			intervalsStarted++;
+			return 0;
+		}) as unknown as typeof setInterval,
 		createLifecycleControlServer: factory,
 		createLifecycleOrchestratorDeps: () => {
 			dependenciesBuilt++;
@@ -285,7 +330,196 @@ it("does not attach lifecycle audit dependencies or fall back when daemon key de
 
 	await daemon.run();
 
-	expect([dependenciesBuilt, registered, started, stopped]).toEqual([0, 0, 0, 1]);
+	expect([dependenciesBuilt, registered, started, stopped, intervalsStarted, apiCalls]).toEqual([0, 0, 0, 0, 0, 0]);
+});
+
+it("does not resume daemon startup after stop during deferred lifecycle startup", async () => {
+	const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), "skc-daemon-lifecycle-stop-"));
+	const settings = daemonSettings(agentDir);
+	await startAsOwner(settings, "lifecycle-stop-owner", "123456:secret-token");
+	const lifecycleStarted = Promise.withResolvers<void>();
+	const releaseLifecycleStart = Promise.withResolvers<void>();
+	let registered = 0;
+	let stopped = 0;
+	let intervalsStarted = 0;
+	let apiCalls = 0;
+	let controlsCleared = 0;
+
+	const factory: LifecycleControlServerFactory = () =>
+		({
+			onLifecycleRequest: () => {
+				registered++;
+			},
+			respond: () => {},
+			start: async () => {
+				lifecycleStarted.resolve();
+				await releaseLifecycleStart.promise;
+			},
+			stop: () => {
+				stopped++;
+			},
+		}) as LifecycleControlServer;
+	const daemon = new TelegramNotificationDaemon({
+		settings,
+		ownerId: "lifecycle-stop-owner",
+		botToken: "123456:secret-token",
+		chatId: PAIRED,
+		botApi: {
+			call: async () => {
+				apiCalls++;
+				return { ok: true, result: [] };
+			},
+		} as never,
+		setIntervalImpl: ((..._args: unknown[]) => {
+			intervalsStarted++;
+			return 0;
+		}) as unknown as typeof setInterval,
+		createLifecycleControlServer: factory,
+		createLifecycleOrchestratorDeps: () => stubDeps(),
+		control: {
+			shouldStop: async () => false,
+			clear: async () => {
+				controlsCleared++;
+			},
+		},
+	});
+
+	const run = daemon.run();
+	await lifecycleStarted.promise;
+	daemon.requestStop();
+	releaseLifecycleStart.resolve();
+	await run;
+
+	expect([registered, stopped, intervalsStarted, apiCalls, controlsCleared]).toEqual([1, 1, 0, 0, 1]);
+	const paths = daemonPaths(agentDir);
+	const state = JSON.parse(fs.readFileSync(paths.state, "utf8")) as { stoppedAt?: number };
+	expect(state.stoppedAt).toEqual(expect.any(Number));
+	expect(fs.existsSync(paths.lock)).toBe(false);
+});
+
+it("does not restore running state after stop during deferred initial heartbeat renewal", async () => {
+	const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), "skc-daemon-renewal-stop-"));
+	const settings = daemonSettings(agentDir);
+	await startAsOwner(settings, "renewal-stop-owner", "123456:secret-token");
+	const renewalStarted = Promise.withResolvers<void>();
+	const releaseRenewal = Promise.withResolvers<void>();
+	let delayStateRead = true;
+	let lifecycleFactories = 0;
+	let intervalsStarted = 0;
+	let apiCalls = 0;
+	const paths = daemonPaths(agentDir);
+
+	const daemonFs: TelegramDaemonFs = {
+		mkdir: async (directory, opts) => {
+			await fs.promises.mkdir(directory, opts);
+		},
+		readFile: async (file, encoding) => {
+			if (delayStateRead && file === paths.state) {
+				delayStateRead = false;
+				renewalStarted.resolve();
+				await releaseRenewal.promise;
+			}
+			return await fs.promises.readFile(file, encoding);
+		},
+		writeFile: fs.promises.writeFile.bind(fs.promises),
+		rename: fs.promises.rename.bind(fs.promises),
+		unlink: fs.promises.unlink.bind(fs.promises),
+		open: fs.promises.open.bind(fs.promises),
+		readdir: async file => await fs.promises.readdir(file),
+		chmod: fs.promises.chmod.bind(fs.promises),
+		stat: fs.promises.stat.bind(fs.promises),
+		readEndpointFile: readNotificationEndpointFile,
+		exactUnlink: async (file, identity) =>
+			await exactUnlinkNotificationFile(file, identity, ".skc-test-daemon-transition.json"),
+	};
+	const daemon = new TelegramNotificationDaemon({
+		settings,
+		ownerId: "renewal-stop-owner",
+		botToken: "123456:secret-token",
+		chatId: PAIRED,
+		fs: daemonFs,
+		botApi: {
+			call: async () => {
+				apiCalls++;
+				return { ok: true, result: [] };
+			},
+		} as never,
+		setIntervalImpl: ((..._args: unknown[]) => {
+			intervalsStarted++;
+			return 0;
+		}) as unknown as typeof setInterval,
+		createLifecycleControlServer: () => {
+			lifecycleFactories++;
+			return {
+				onLifecycleRequest: () => {},
+				respond: () => {},
+				start: async () => {},
+				stop: () => {},
+			} as LifecycleControlServer;
+		},
+		createLifecycleOrchestratorDeps: () => stubDeps(),
+	});
+	const run = daemon.run();
+	await renewalStarted.promise;
+	daemon.requestStop();
+	releaseRenewal.resolve();
+	await run;
+
+	expect([lifecycleFactories, intervalsStarted, apiCalls]).toEqual([0, 0, 0]);
+});
+
+it("does not clean up foreign durable state when initial heartbeat renewal rejects ownership", async () => {
+	const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), "skc-daemon-foreign-renewal-"));
+	const settings = daemonSettings(agentDir);
+	await startAsOwner(settings, "foreign-owner", "123456:secret-token");
+	const paths = daemonPaths(agentDir);
+	const durableFiles = [paths.aliases, path.join(paths.dir, "telegram-topics.json"), paths.seenUpdates];
+	const contents = ['{"version":1,"aliases":{}}\n', '{"version":1,"topics":{}}\n', '{"version":1,"updateIds":[42]}\n'];
+	for (let index = 0; index < durableFiles.length; index++)
+		fs.writeFileSync(durableFiles[index]!, contents[index]!, { mode: 0o600 });
+
+	let stateReads = 0;
+	const daemonFs: TelegramDaemonFs = {
+		mkdir: async (directory, opts) => {
+			await fs.promises.mkdir(directory, opts);
+		},
+		readFile: async (file, encoding) => {
+			if (file === paths.state) stateReads++;
+			return await fs.promises.readFile(file, encoding);
+		},
+		writeFile: fs.promises.writeFile.bind(fs.promises),
+		rename: fs.promises.rename.bind(fs.promises),
+		unlink: fs.promises.unlink.bind(fs.promises),
+		open: fs.promises.open.bind(fs.promises),
+		readdir: async file => await fs.promises.readdir(file),
+		chmod: fs.promises.chmod.bind(fs.promises),
+		readEndpointFile: readNotificationEndpointFile,
+		exactUnlink: async (file, identity) =>
+			await exactUnlinkNotificationFile(file, identity, ".skc-test-daemon-transition.json"),
+	};
+
+	let controlsCleared = 0;
+	const daemon = new TelegramNotificationDaemon({
+		settings,
+		ownerId: "contending-owner",
+		botToken: "123456:secret-token",
+		chatId: PAIRED,
+		fs: daemonFs,
+		botApi: { call: async () => ({ ok: true, result: [] }) } as never,
+		control: {
+			shouldStop: async () => false,
+			clear: async () => {
+				controlsCleared++;
+			},
+		},
+	});
+
+	await daemon.run();
+
+	expect(durableFiles.map(file => fs.readFileSync(file, "utf8"))).toEqual(contents);
+	expect(controlsCleared).toBe(0);
+	expect(stateReads).toBe(1);
+	expect(fs.existsSync(paths.lock)).toBe(true);
 });
 
 describe("lifecycle control runtime", () => {
@@ -391,6 +625,27 @@ describe("lifecycle control runtime", () => {
 		});
 		expect(resp.type).toBe("session_lifecycle_error");
 		if (resp.type === "session_lifecycle_error") expect(resp.reason).toBe("rate_limited");
+	});
+	it("outcomeToResponse fails closed when a historical close success lacks process termination", () => {
+		const entry: LedgerEntry = {
+			requestHash: "h",
+			state: "success",
+			requestId: "lc_close_1",
+			verb: "session_close",
+			intendedSessionId: "sess_1",
+			sessionId: "sess_1",
+			createdAt: 0,
+			updatedAt: 0,
+			targetSummary: {},
+			processGone: false,
+		};
+		const response = outcomeToResponse(closeFrame(), { status: "ok", entry });
+		expect(response).toMatchObject({
+			type: "session_lifecycle_error",
+			requestId: "lc_close_1",
+			reason: "terminal_uncertain",
+		});
+		expect(response.type).not.toBe("session_close_response");
 	});
 
 	it("attachLifecycleControl wires a request through to a response", async () => {
@@ -1134,7 +1389,7 @@ describe("lifecycle control runtime", () => {
 	});
 
 	posixTmuxIt("daemonResumeSession fails closed against saved history (notFound / ambiguous)", async () => {
-		const root = fs.mkdtempSync(path.join(os.tmpdir(), "skc-resume-"));
+		const root = managedFixtureRoot("skc-resume-");
 		const proj = path.join(root, "proj");
 		fs.mkdirSync(proj, { recursive: true });
 		await writeManagedSession(root, proj, "abc111");
@@ -1164,7 +1419,7 @@ describe("lifecycle control runtime", () => {
 	});
 
 	posixTmuxIt("daemonResumeSession cold-restarts saved sessions from their recorded cwd", async () => {
-		const root = fs.mkdtempSync(path.join(os.tmpdir(), "skc-resume-cwd-"));
+		const root = managedFixtureRoot("skc-resume-cwd-");
 		const proj = path.join(root, "saved-project");
 		const callsFile = path.join(root, "tmux-calls.log");
 		const serverState = path.join(root, "tmux-server-started");
@@ -1529,7 +1784,7 @@ describe("lifecycle control runtime", () => {
 	posixTmuxIt(
 		"refuses unsafe or unverifiable servers before daemon create or cold-resume can mutate tmux",
 		async () => {
-			const root = fs.mkdtempSync(path.join(os.tmpdir(), "skc-pre-mutation-refusal-"));
+			const root = managedFixtureRoot("skc-pre-mutation-refusal-");
 			const project = path.join(root, "project");
 			const callsFile = path.join(root, "tmux-calls.log");
 			const tmux = path.join(root, "fake-tmux.sh");
@@ -1643,7 +1898,7 @@ describe("lifecycle control runtime", () => {
 	posixTmuxIt(
 		"writes no cold-resume ownership tags when a replacement server reuses the native session before metadata",
 		async () => {
-			const root = fs.mkdtempSync(path.join(os.tmpdir(), "skc-cold-resume-metadata-"));
+			const root = managedFixtureRoot("skc-cold-resume-metadata-");
 			const project = path.join(root, "project");
 			const callsFile = path.join(root, "tmux-calls.log");
 			const tmux = path.join(root, "fake-tmux.sh");
@@ -1702,7 +1957,7 @@ describe("lifecycle control runtime", () => {
 	);
 
 	posixTmuxIt("refuses psmux before create or cold-resume can mutate lifecycle state", async () => {
-		const root = fs.mkdtempSync(path.join(os.tmpdir(), "skc-lifecycle-psmux-"));
+		const root = managedFixtureRoot("skc-lifecycle-psmux-");
 		const project = path.join(root, "project");
 		const psmux = path.join(root, "psmux");
 		const plain = path.join(root, "plain");

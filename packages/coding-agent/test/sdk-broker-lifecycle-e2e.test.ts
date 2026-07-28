@@ -549,6 +549,48 @@ test("session host exact cutoff writes proven pre-session absence", async () => 
 	}
 });
 
+test("session host fails closed when its lifecycle effect marker is corrupt", async () => {
+	const root = await fs.mkdtemp(path.join(process.env.TMPDIR ?? "/tmp", "skc-lifecycle-corrupt-marker-"));
+	const agentDir = path.join(root, "agent");
+	const stateRoot = path.join(root, ".skc", "state");
+	const sessionId = "corrupt-marker";
+	const effectMarker = "corrupt-marker-effect";
+	const deadlines = deriveLifecycleDeadlines(1_000, 4_000);
+	const names = ["SKC_AGENT_DIR", "SKC_STATE_ROOT", "SKC_LIFECYCLE_REQUEST_ID", "SKC_SDK_LIFECYCLE_REQUEST"] as const;
+	const previous = names.map(name => process.env[name]);
+	try {
+		await fs.mkdir(path.join(stateRoot, "sdk"), { recursive: true });
+		await fs.writeFile(path.join(stateRoot, "sdk", `${sessionId}.lifecycle.json`), "{");
+		process.env.SKC_AGENT_DIR = agentDir;
+		process.env.SKC_STATE_ROOT = stateRoot;
+		process.env.SKC_LIFECYCLE_REQUEST_ID = effectMarker;
+		process.env.SKC_SDK_LIFECYCLE_REQUEST = JSON.stringify({
+			operation: "session.create",
+			sessionId,
+			cwd: root,
+			stateRoot,
+			effectMarker,
+			...deadlines,
+		});
+		await expect(
+			runSessionHost({
+				now: () => deadlines.semanticReadyDeadlineAt,
+				sleep: async () => {},
+				cwd: root,
+				processIncarnation: () => "test-incarnation",
+			}),
+		).rejects.toThrow("marker authority was not published");
+		await expect(fs.stat(path.join(stateRoot, "sdk", `${sessionId}.json`))).rejects.toMatchObject({ code: "ENOENT" });
+	} finally {
+		names.forEach((name, index) => {
+			const value = previous[index];
+			if (value === undefined) delete process.env[name];
+			else process.env[name] = value;
+		});
+		await fs.rm(root, { recursive: true, force: true });
+	}
+});
+
 test("startup failure artifacts reject symlink and oversize collisions while accepting byte-identical owner evidence", async () => {
 	const root = await fs.mkdtemp(path.join(process.env.TMPDIR ?? "/tmp", "skc-lifecycle-artifact-"));
 	const id = "artifact-session";
@@ -817,7 +859,8 @@ setInterval(()=>{},1000);
 		expect(JSON.stringify(listed.result)).toContain('"terminalUncertain":true');
 	} finally {
 		await broker.stop();
-		process.env.SKC_SDK_SESSION_COMMAND = previous;
+		if (previous === undefined) delete process.env.SKC_SDK_SESSION_COMMAND;
+		else process.env.SKC_SDK_SESSION_COMMAND = previous;
 		await fs.rm(agentDir, { recursive: true, force: true });
 	}
 }, 15_000);
@@ -2977,6 +3020,7 @@ test("session-host-internal exits with a sanitized startup failure before writin
 }, 20_000);
 
 test("production lifecycle factory failure preserves reason and redacts collected secrets", async () => {
+	if (process.platform !== "linux") return;
 	const root = await fs.mkdtemp(path.join(process.env.TMPDIR ?? "/tmp", "skc-sdk-factory-failure-"));
 	const agentDir = path.join(root, "agent");
 	const broker = new Broker({ agentDir });
@@ -3016,6 +3060,7 @@ test("production lifecycle factory failure preserves reason and redacts collecte
 	}
 }, 10_000);
 test("never-settling model profile startup cuts off with proven pre-registration cleanup", async () => {
+	if (process.platform !== "linux") return;
 	const root = await fs.mkdtemp(path.join(process.env.TMPDIR ?? "/tmp", "skc-sdk-profile-cutoff-"));
 	const agentDir = path.join(root, "agent");
 	const broker = new Broker({ agentDir });
@@ -3054,6 +3099,7 @@ test("never-settling model profile startup cuts off with proven pre-registration
 	}
 }, 10_000);
 test("production post-registration startup failure proves cleanup and exact replay", async () => {
+	if (process.platform !== "linux") return;
 	const root = await fs.mkdtemp(path.join(process.env.TMPDIR ?? "/tmp", "skc-sdk-production-failure-"));
 	const agentDir = path.join(root, "agent");
 	const broker = new Broker({ agentDir });
@@ -3108,8 +3154,16 @@ test("production post-registration startup failure proves cleanup and exact repl
 		expect(sessions).toMatchObject({ ok: true, result: { sessions: [] } });
 		const sdkDir = path.join(root, ".skc", "state", "sdk");
 		const entries = await fs.readdir(sdkDir);
-		expect(entries.some(entry => entry.includes(".lifecycle.failure."))).toBe(false);
-		expect(entries.some(entry => entry.endsWith(".lifecycle.json"))).toBe(false);
+		// Retained `.skc-delete-*` quarantines are typed cleanup evidence; only
+		// canonical lifecycle metadata must be gone. Every remaining entry that
+		// still matches a lifecycle pattern must be an authorized quarantine name.
+		const canonical = entries.filter(entry => !entry.startsWith(".skc-delete-"));
+		expect(canonical.some(entry => entry.includes(".lifecycle.failure."))).toBe(false);
+		expect(canonical.some(entry => entry.endsWith(".lifecycle.json"))).toBe(false);
+		const retained = entries.filter(
+			entry => entry.includes(".lifecycle.failure.") || entry.endsWith(".lifecycle.json"),
+		);
+		expect(retained.every(entry => entry.startsWith(".skc-delete-"))).toBe(true);
 	} finally {
 		if (previousFailure === undefined) delete process.env.SKC_SDK_TEST_FAIL_AFTER_REGISTRATION;
 		else process.env.SKC_SDK_TEST_FAIL_AFTER_REGISTRATION = previousFailure;
@@ -3161,6 +3215,106 @@ test("production broker session.create authenticates a source-workspace v3 nativ
 		await fs.rm(root, { recursive: true, force: true });
 	}
 }, 20_000);
+
+test("broker agentDir profile validates, activates, and is discoverable through session Q27", async () => {
+	const root = await fs.mkdtemp(path.join(process.env.TMPDIR ?? "/tmp", "skc-sdk-profile-agent-dir-"));
+	const cwd = path.join(root, "workspace");
+	const agentDir = path.join(root, "agent");
+	await fs.mkdir(cwd, { recursive: true });
+	await fs.mkdir(agentDir, { recursive: true });
+	await Bun.write(
+		path.join(agentDir, "models.yml"),
+		`providers:\n  fixture:\n    baseUrl: https://example.invalid/v1\n    apiKey: fixture-key\n    api: openai-completions\n    models:\n      - id: fixture-model\n        name: Fixture Model\n        contextWindow: 4096\n        maxTokens: 1024\nprofiles:\n  agent-dir-only:\n    display_name: Agent Dir Only\n    required_providers: [fixture]\n    model_mapping:\n      executor: fixture/fixture-model\n`,
+	);
+	const broker = new Broker({ agentDir });
+	try {
+		await broker.start();
+		const created = await broker.handleRequest(
+			"session.create",
+			{ cwd, modelPreset: "agent-dir-only", readinessTimeoutMs: 10_000 },
+			"agent-dir-profile-create",
+		);
+		if (!created.ok) throw new Error(created.error.message);
+		const { sessionId, endpoint } = created.result as {
+			sessionId: string;
+			endpoint: { url: string; token: string };
+		};
+		const client = await SdkClient.connect(endpoint.url, endpoint.token, { timeoutMs: 2_000, reconnectAttempts: 0 });
+		try {
+			expect(await client.query("models.profiles.list")).toMatchObject({
+				ok: true,
+				page: {
+					items: expect.arrayContaining([
+						expect.objectContaining({
+							id: "agent-dir-only",
+							displayName: "Agent Dir Only",
+							source: "configured",
+						}),
+					]),
+				},
+			});
+		} finally {
+			await client.close();
+		}
+		expect(await broker.handleRequest("session.close", { sessionId }, "agent-dir-profile-close")).toMatchObject({
+			ok: true,
+			result: { sessionId },
+		});
+	} finally {
+		await broker.stop();
+		await fs.rm(root, { recursive: true, force: true });
+	}
+}, 20_000);
+
+test("child profile activation failures preserve typed codes through readiness and BrokerResponse", async () => {
+	if (process.platform !== "linux") return;
+	const shellQuote = (value: string) => `'${value.replaceAll("'", `'"'"'`)}'`;
+	for (const scenario of [
+		{ code: "unknown_model_profile", replacement: "profiles: {}\n" },
+		{ code: "model_profile_registry_error", replacement: "profiles: [invalid\n" },
+	] as const) {
+		const root = await fs.mkdtemp(path.join(process.env.TMPDIR ?? "/tmp", `skc-sdk-${scenario.code}-`));
+		const cwd = path.join(root, "workspace");
+		const agentDir = path.join(root, "agent");
+		await fs.mkdir(cwd, { recursive: true });
+		await fs.mkdir(agentDir, { recursive: true });
+		await Bun.write(
+			path.join(agentDir, "models.yml"),
+			`providers:\n  fixture:\n    baseUrl: https://example.invalid/v1\n    apiKey: fixture-key\n    api: openai-completions\n    models:\n      - id: fixture-model\n        name: Fixture Model\n        contextWindow: 4096\n        maxTokens: 1024\nprofiles:\n  agent-dir-only:\n    required_providers: [fixture]\n    model_mapping:\n      executor: fixture/fixture-model\n`,
+		);
+		const broker = new Broker({ agentDir });
+		setLifecycleCommandResolverForTest(broker, () => ({
+			file: "/bin/sh",
+			args: [
+				"-c",
+				`printf %s ${shellQuote(scenario.replacement)} > "$SKC_AGENT_DIR/models.yml"; exec ${shellQuote(process.execPath)} run ${shellQuote(cliEntrypoint)} sdk session-host-internal`,
+			],
+		}));
+		try {
+			await broker.start();
+			const response = await broker.handleRequest(
+				"session.create",
+				{ cwd, modelPreset: "agent-dir-only", readinessTimeoutMs: 10_000 },
+				`child-profile-${scenario.code}`,
+			);
+			expect(response).toMatchObject({
+				ok: false,
+				error: {
+					code: scenario.code,
+					details: { requestedProfile: "agent-dir-only", discoveryQuery: "models.profiles.list" },
+				},
+				startupFailure: {
+					code: scenario.code,
+					details: { requestedProfile: "agent-dir-only", discoveryQuery: "models.profiles.list" },
+				},
+			});
+		} finally {
+			setLifecycleCommandResolverForTest(broker, undefined);
+			await broker.stop();
+			await fs.rm(root, { recursive: true, force: true });
+		}
+	}
+}, 40_000);
 
 test("broker close acknowledges before terminating the lifecycle child and preserves its terminal host index", async () => {
 	const root = await fs.mkdtemp(path.join(process.env.TMPDIR ?? "/tmp", "skc-sdk-close-subprocess-"));

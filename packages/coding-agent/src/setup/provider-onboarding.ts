@@ -4,6 +4,7 @@ import * as path from "node:path";
 import { getAgentDbPath, getAgentDir } from "@sayknow-cli/utils";
 import { YAML } from "bun";
 import { type ModelsConfig, ModelsConfigSchema } from "../config/models-config-schema";
+import { compareRankedProviders, famousProviderIndex } from "../config/provider-ranking";
 import { AuthStorage } from "../session/auth-storage";
 import providerPresets from "./provider-presets.json";
 
@@ -49,6 +50,7 @@ interface ProviderPreset {
 	baseUrl: string;
 	apiKeyEnv: string;
 	models: readonly string[];
+	modelApi?: Readonly<Record<string, ProviderSetupApi>>;
 	compat?: ProviderCompatConfig;
 }
 
@@ -80,11 +82,25 @@ export function findProviderPreset(value: string | undefined): ProviderPreset | 
 	return PROVIDER_PRESETS.find(preset => preset.id === normalized || preset.aliases.includes(normalized));
 }
 
+function providerPresetRankingId(preset: ProviderPreset): string {
+	return (
+		[preset.providerId, preset.id, ...preset.aliases].find(id => famousProviderIndex(id) !== undefined) ?? preset.id
+	);
+}
+
 export function formatProviderPresetList(): string {
-	return PROVIDER_PRESETS.map(preset => {
-		const aliases = preset.aliases.length > 0 ? ` (aliases: ${preset.aliases.join(", ")})` : "";
-		return `${preset.id}${aliases}: ${preset.description}`;
-	}).join("\n");
+	return [...PROVIDER_PRESETS]
+		.sort((left, right) =>
+			compareRankedProviders(
+				{ id: providerPresetRankingId(left), label: left.name, authState: "none" },
+				{ id: providerPresetRankingId(right), label: right.name, authState: "none" },
+			),
+		)
+		.map(preset => {
+			const aliases = preset.aliases.length > 0 ? ` (aliases: ${preset.aliases.join(", ")})` : "";
+			return `${preset.id}${aliases}: ${preset.description}`;
+		})
+		.join("\n");
 }
 
 export function parseModelList(values: readonly string[]): string[] {
@@ -113,6 +129,7 @@ function resolvePresetInput(input: ProviderSetupInput): {
 	apiKey?: string;
 	apiKeyEnv?: string;
 	models: readonly string[];
+	modelApi?: Readonly<Record<string, ProviderSetupApi>>;
 	api: ProviderSetupApi;
 	compat?: ProviderCompatConfig;
 } {
@@ -152,9 +169,30 @@ function resolvePresetInput(input: ProviderSetupInput): {
 		apiKey: input.apiKey,
 		apiKeyEnv: input.apiKeyEnv ?? preset?.apiKeyEnv,
 		models: input.models && input.models.length > 0 ? input.models : (preset?.models ?? []),
+		modelApi: preset?.modelApi,
 		api: preset?.api ?? apiForCompatibility(compatibility),
 		compat: preset?.compat,
 	};
+}
+
+export function validateModelApi(
+	modelApi: Readonly<Record<string, string>> | undefined,
+	models: readonly string[],
+	presetId: string,
+): void {
+	if (!modelApi) return;
+	const modelSet = new Set(models);
+	const validApis: readonly string[] = ["openai-responses", "openai-completions", "anthropic-messages"];
+	for (const [key, value] of Object.entries(modelApi)) {
+		if (!modelSet.has(key)) {
+			throw new Error(`Provider preset '${presetId}' declares modelApi for unknown model '${key}'.`);
+		}
+		if (!validApis.includes(value)) {
+			throw new Error(
+				`Provider preset '${presetId}' declares invalid modelApi value '${value}' for model '${key}'.`,
+			);
+		}
+	}
 }
 
 function validateSetupInput(input: ProviderSetupInput): {
@@ -166,6 +204,7 @@ function validateSetupInput(input: ProviderSetupInput): {
 	compatibility: ProviderCompatibility;
 	api: ProviderSetupApi;
 	compat?: ProviderCompatConfig;
+	modelApi?: Readonly<Record<string, ProviderSetupApi>>;
 	preset?: ProviderPreset;
 } {
 	const resolved = resolvePresetInput(input);
@@ -201,6 +240,7 @@ function validateSetupInput(input: ProviderSetupInput): {
 
 	const models = parseModelList(resolved.models);
 	if (models.length === 0) throw new Error("At least one model id is required.");
+	validateModelApi(resolved.modelApi, models, resolved.preset?.id ?? resolved.providerId);
 
 	return {
 		providerId,
@@ -210,6 +250,7 @@ function validateSetupInput(input: ProviderSetupInput): {
 		models,
 		compatibility: resolved.compatibility,
 		api: resolved.api,
+		modelApi: resolved.modelApi,
 		compat: resolved.compat,
 		preset: resolved.preset,
 	};
@@ -275,7 +316,10 @@ export async function addApiCompatibleProvider(input: ProviderSetupInput): Promi
 		baseUrl: validated.baseUrl,
 		api: validated.api,
 		auth: "apiKey",
-		models: validated.models.map(id => ({ id })),
+		models: validated.models.map(id => {
+			const api = validated.modelApi?.[id];
+			return api ? { id, api } : { id };
+		}),
 	};
 	if (validated.compat) provider.compat = validated.compat;
 	if (validated.credentialSource === "env") {

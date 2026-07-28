@@ -2,7 +2,9 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { $ } from "bun";
 import { detectHostAvx2Support } from "../../../scripts/host-detect";
+import { assertRequiredSymbols } from "./embed-guard";
 import { generateEnumExports } from "./gen-enums";
+import { resolveCargoToolchainPath } from "./rust-toolchain-path";
 
 const repoRoot = path.join(import.meta.dir, "../../..");
 const rustDir = path.join(repoRoot, "crates/pi-natives");
@@ -146,13 +148,50 @@ async function installGeneratedBindings(outputDir: string): Promise<void> {
 	}
 }
 
-async function validateRecoveryFsBindings(): Promise<void> {
+async function ensurePublishDiagnosticDeclaration(): Promise<void> {
+	const declarationPath = path.join(nativeDir, "index.d.ts");
+	const bindings = await Bun.file(declarationPath).text();
+	if (bindings.includes("export interface NativePublishDiagnostic")) return;
+	if (!bindings.includes("diagnostic: NativePublishDiagnostic"))
+		throw new Error("napi build did not generate the native publish diagnostic reference");
+	const declaration = `\n/** Bounded, path-free evidence for a parent-directory durability failure. */
+export interface NativePublishSyncFailure {
+  phase: string
+  parentRole: string
+  osCode: number
+  kind: string
+}
+
+/** Bounded, path-free evidence for one atomic publication. */
+export interface NativePublishDiagnostic {
+  schemaVersion: number
+  collectionState: string
+  osCode?: number
+  syncFailures?: Array<NativePublishSyncFailure>
+}
+`;
+	await Bun.write(declarationPath, `${bindings.trimEnd()}\n${declaration}`);
+}
+
+const requiredGeneratedBindingSymbols = [
+	"RecoveryFsRoot",
+	"RecoveryFsIdentity",
+	"RecoveryFsResult",
+	"NativePublishDiagnostic",
+	"NativePublishSyncFailure",
+	"openRecoveryFsRoot",
+	"repairOwnerOnlyPathSecurityExpected",
+	"verifyOwnerOnlyPathSecurityExpected",
+	"probeWindowsJobMemory",
+] as const;
+
+export function validateGeneratedBindingSource(bindings: string): void {
+	assertRequiredSymbols(bindings, requiredGeneratedBindingSymbols);
+}
+
+async function validateGeneratedBindings(): Promise<void> {
 	const bindings = await Bun.file(path.join(nativeDir, "index.d.ts")).text();
-	for (const symbol of ["RecoveryFsRoot", "RecoveryFsIdentity", "RecoveryFsResult", "openRecoveryFsRoot"]) {
-		if (!bindings.includes(symbol)) {
-			throw new Error(`napi build did not generate the required recovery filesystem binding: ${symbol}`);
-		}
-	}
+	validateGeneratedBindingSource(bindings);
 }
 
 type NativeBuildProfile = "local" | "ci" | "dist";
@@ -211,12 +250,6 @@ const canonicalAddonPath = path.join(nativeDir, canonicalAddonFilename);
 
 console.log(`Building pi-natives for ${targetPlatform}-${targetArch}${variantSuffix}${profileSuffix}…`);
 
-await fs.mkdir(nativeDir, { recursive: true });
-await cleanupStaleTemps(nativeDir);
-await fs.mkdir(path.join(nativeDir, ".build"), { recursive: true });
-const buildOutputDir = await fs.mkdtemp(buildOutputDirPrefix);
-napiArgs[10] = buildOutputDir;
-
 // Resolve napi bin directly: `bunx @napi-rs/cli` can pick up the wrong bin on
 // systems where `cli` exists on PATH (e.g. Mono's /usr/bin/cli on Ubuntu).
 const napiBin = Bun.which("napi", {
@@ -226,11 +259,30 @@ if (!napiBin) {
 	throw new Error("Could not locate @napi-rs/cli `napi` binary in node_modules/.bin");
 }
 
+const cargoPathResolution = await resolveCargoToolchainPath({
+	cwd: repoRoot,
+	currentPath: Bun.env.PATH ?? "",
+});
+if (!cargoPathResolution) {
+	throw new Error(
+		"Could not locate Cargo for native addon build. Install Rust with rustup, or ensure `cargo` is available on PATH.",
+	);
+}
+Bun.env.PATH = cargoPathResolution.pathValue;
+
+await fs.mkdir(nativeDir, { recursive: true });
+await cleanupStaleTemps(nativeDir);
+await fs.mkdir(path.join(nativeDir, ".build"), { recursive: true });
+const buildOutputDir = await fs.mkdtemp(buildOutputDirPrefix);
+napiArgs[10] = buildOutputDir;
+
 try {
 	const buildResult = await $`${napiBin} ${napiArgs}`.nothrow();
 	if (buildResult.exitCode !== 0) {
-		const stderr = buildResult.stderr?.toString("utf-8") ?? "";
-		throw new Error(`napi build failed${stderr ? `:\n${stderr}` : ""}`);
+		const stderr = buildResult.stderr?.toString("utf-8").trim() ?? "";
+		const stdout = buildResult.stdout?.toString("utf-8").trim() ?? "";
+		const details = [stderr, stdout].filter(detail => detail !== "").join("\n");
+		throw new Error(`napi build failed${details ? `:\n${details}` : ""}`);
 	}
 
 	const builtAddonPath = await resolveBuiltAddonPath(buildOutputDir, canonicalAddonFilename);
@@ -240,7 +292,6 @@ try {
 	}
 
 	await installGeneratedBindings(buildOutputDir);
-	await validateRecoveryFsBindings();
 
 	await Bun.write(
 		`${canonicalAddonPath}.build.json`,
@@ -248,6 +299,8 @@ try {
 	);
 
 	await generateEnumExports();
+	await ensurePublishDiagnosticDeclaration();
+	await validateGeneratedBindings();
 
 	console.log("Build complete.");
 } finally {

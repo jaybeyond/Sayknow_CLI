@@ -1,0 +1,13 @@
+--- a/packages/coding-agent/test/web/search/web-search-redteam.test.ts
++++ b/packages/coding-agent/test/web/search/web-search-redteam.test.ts
+@@ -170,10 +170,6 @@
+ 				auth: ["anthropic", "tavily", "openai-codex", "custom-openai"],
+ 			}),
+ 		).resolves.toEqual(["anthropic", "tavily", "duckduckgo"]);
+-	});
+-
+-	it("falls back to DuckDuckGo when Tavily is selected without credentials", async () => {
+-		await expect(chainIds(undefined, { preferred: "tavily" })).resolves.toEqual(["duckduckgo"]);
+ 	});
+ 
+ 	it("does not inject openai-compatible in a generic no-credential context", async () => {

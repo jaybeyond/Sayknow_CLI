@@ -5,7 +5,15 @@ import * as fs from "node:fs/promises";
 import path from "node:path";
 import type { NativeExactUnlinkResult } from "@sayknow-cli/natives";
 import * as native from "@sayknow-cli/natives";
-import { resolveEquivalentPath } from "@sayknow-cli/utils";
+import { $credentialEnv, resolveEquivalentPath } from "@sayknow-cli/utils";
+
+import {
+	isModelProfileError,
+	type ModelProfileErrorDetails,
+	validateModelProfileName,
+} from "../../config/model-profile-contract";
+import { mergeModelProfiles } from "../../config/model-profiles";
+import { ModelsConfigFile } from "../../config/model-registry";
 import { validateManagedArtifactTree } from "../../session/internal/managed-session-storage";
 import {
 	FileSessionStorage,
@@ -21,6 +29,7 @@ import {
 	planLaunchWorktree,
 	type SkcLaunchWorktreePlan,
 } from "../../skc-runtime/launch-worktree";
+import type { SessionLifecycleMcpServer } from "../acp/mcp";
 import { SdkClient, SdkClientError } from "../client/client";
 import {
 	type LogicalSessionCandidate,
@@ -207,6 +216,7 @@ export interface SessionLifecycleLaunchRequest {
 	/** Broker-issued effect marker which the child echoes only after host readiness. */
 	effectMarker?: string;
 	modelPreset?: string;
+	mcpServers?: SessionLifecycleMcpServer[];
 	worktree?: SessionLifecycleWorktreeTarget;
 	receivedAt: number;
 	requestedReadinessTimeoutMs: number;
@@ -240,6 +250,77 @@ function hasValidTranscriptAuthority(path: unknown, identity: unknown): path is 
 	return typeof path === "string" && path.length > 0 && isSessionLifecycleTranscriptIdentity(identity);
 }
 
+function isSessionLifecycleMcpServer(value: unknown): value is SessionLifecycleMcpServer {
+	if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+	const server = value as Record<string, unknown>;
+	if (server.type === "http" || server.type === "sse") {
+		if (
+			!Object.keys(server).every(key => key === "type" || key === "name" || key === "url" || key === "headers") ||
+			typeof server.name !== "string" ||
+			!/^[A-Za-z0-9_.-]{1,100}$/.test(server.name) ||
+			typeof server.url !== "string" ||
+			server.url.length > 8_192
+		)
+			return false;
+		try {
+			const url = new URL(server.url);
+			if (url.protocol !== "http:" && url.protocol !== "https:") return false;
+		} catch {
+			return false;
+		}
+		if (server.headers === undefined) return true;
+		if (typeof server.headers !== "object" || server.headers === null || Array.isArray(server.headers)) return false;
+		const headers = server.headers as Record<string, unknown>;
+		return (
+			Object.keys(headers).length <= 100 &&
+			Object.entries(headers).every(
+				([name, headerValue]) =>
+					name.length > 0 &&
+					name.length <= 256 &&
+					!name.includes("\r") &&
+					!name.includes("\n") &&
+					typeof headerValue === "string" &&
+					headerValue.length <= 8_192 &&
+					!headerValue.includes("\r") &&
+					!headerValue.includes("\n"),
+			)
+		);
+	}
+	const env = server.env;
+	return (
+		Object.keys(server).every(
+			key => key === "type" || key === "name" || key === "command" || key === "args" || key === "env",
+		) &&
+		(server.type === undefined || server.type === "stdio") &&
+		typeof server.name === "string" &&
+		/^[A-Za-z0-9_.-]{1,100}$/.test(server.name) &&
+		typeof server.command === "string" &&
+		server.command.length <= 4_096 &&
+		path.isAbsolute(server.command) &&
+		Array.isArray(server.args) &&
+		server.args.length <= 100 &&
+		server.args.every(argument => typeof argument === "string" && argument.length <= 8_192) &&
+		(env === undefined ||
+			(typeof env === "object" &&
+				env !== null &&
+				!Array.isArray(env) &&
+				Object.keys(env).length <= 100 &&
+				Object.entries(env).every(
+					([name, envValue]) =>
+						/^[A-Za-z_][A-Za-z0-9_]*$/.test(name) && typeof envValue === "string" && envValue.length <= 32_768,
+				)))
+	);
+}
+
+function isSessionLifecycleMcpServers(value: unknown): value is SessionLifecycleMcpServer[] {
+	return (
+		Array.isArray(value) &&
+		value.length <= 64 &&
+		value.every(isSessionLifecycleMcpServer) &&
+		new Set(value.map(server => server.name)).size === value.length
+	);
+}
+
 export function readSessionLifecycleLaunchRequest(
 	value: string | undefined,
 	now = Date.now(),
@@ -270,6 +351,7 @@ export function readSessionLifecycleLaunchRequest(
 		(request.effectMarker !== undefined &&
 			(typeof request.effectMarker !== "string" || !/^[A-Za-z0-9._-]{1,128}$/.test(request.effectMarker))) ||
 		(request.modelPreset !== undefined && (typeof request.modelPreset !== "string" || !request.modelPreset)) ||
+		(request.mcpServers !== undefined && !isSessionLifecycleMcpServers(request.mcpServers)) ||
 		!hasValidLifecycleDeadlines(
 			{
 				receivedAt: request.receivedAt as number,
@@ -302,6 +384,7 @@ type SessionLaunch = {
 	sessionPath?: string;
 	sessionIdentity?: SessionLifecycleTranscriptIdentity;
 	modelPreset?: string;
+	mcpServers?: SessionLifecycleMcpServer[];
 	worktree?: SessionLifecycleWorktreeTarget;
 	worktreePlan?: SkcLaunchWorktreePlan;
 };
@@ -325,12 +408,34 @@ function serializeCleanupIdentity(identity: CleanupIdentity): BrokerCleanupIdent
 	};
 }
 
-const fail = (code: string, message: string, cleanup?: CleanupEvidence): BrokerResponse => ({
+const fail = (
+	code: string,
+	message: string,
+	cleanup?: CleanupEvidence,
+	details?: ModelProfileErrorDetails,
+): BrokerResponse => ({
 	ok: false,
-	error: { code: code as never, message, ...(cleanup ? { cleanup } : {}) },
+	error: { code: code as never, message, ...(details ? { details } : {}), ...(cleanup ? { cleanup } : {}) },
 });
 function text(value: unknown): string | undefined {
 	return typeof value === "string" && value ? value : undefined;
+}
+
+function validateBrokerModelPreset(agentDir: string, requestedProfile: string): string | BrokerResponse {
+	const modelsConfigFile = ModelsConfigFile.relocate(path.join(agentDir, "models.yml"));
+	modelsConfigFile.invalidate();
+	const loaded = modelsConfigFile.tryLoad();
+	const profiles = mergeModelProfiles(loaded.status === "ok" ? loaded.value.profiles : undefined);
+	try {
+		return validateModelProfileName(requestedProfile, profiles, loaded.status === "error" ? loaded.error : undefined);
+	} catch (error) {
+		if (isModelProfileError(error)) return fail(error.code, error.message, undefined, error.details);
+		throw error;
+	}
+}
+
+export function validateBrokerModelPresetForTest(agentDir: string, requestedProfile: string): string | BrokerResponse {
+	return validateBrokerModelPreset(agentDir, requestedProfile);
 }
 
 function readinessTimeout(input: Input): number | BrokerResponse {
@@ -601,12 +706,31 @@ async function reconcileReadyScope(broker: Broker, id: string, scope: string | u
 	});
 }
 
+/**
+ * Operator override for the session-host command, resolved from trusted
+ * environment sources only.
+ *
+ * The result is spawned directly, so whatever can set it chooses which binary
+ * the broker runs. `$env` merges the caller's `cwd/.env` into `process.env`, so
+ * reading it there would let repository content replace the session host;
+ * resolve it the same way provider credentials are (launching shell plus
+ * SKC/user-owned `.env` files, never the project `.env`).
+ */
+function sdkSessionCommandOverride(): { file: string; args: string[] } | undefined {
+	const configured = $credentialEnv("SKC_SDK_SESSION_COMMAND");
+	if (!configured) return undefined;
+	const [file, ...args] = configured.trim().split(/\s+/);
+	return file ? { file, args } : undefined;
+}
+
+/** Test seam: the session-host command override as resolved from trusted env. */
+export function sdkSessionCommandOverrideForTest(): { file: string; args: string[] } | undefined {
+	return sdkSessionCommandOverride();
+}
+
 function command(broker: Broker): LifecycleCommand {
-	const configured = process.env.SKC_SDK_SESSION_COMMAND;
-	if (configured) {
-		const [file, ...args] = configured.trim().split(/\s+/);
-		if (file) return { file, args };
-	}
+	const configured = sdkSessionCommandOverride();
+	if (configured) return configured;
 	return lifecycleCommandResolversForTest.get(broker)?.() ?? resolveSdkInternalSpawnCommand("session-host-internal");
 }
 
@@ -623,7 +747,7 @@ type ReadyAuthority = {
 };
 type ReadinessResult =
 	| { kind: "ready"; authority: ReadyAuthority }
-	| { kind: "startup_failed"; message: string }
+	| { kind: "startup_failed"; failure: SdkStartupFailure }
 	| { kind: "child_exited" }
 	| { kind: "timeout" };
 const processIncarnationReadersForTest = new WeakMap<Broker, (pid: number) => string | undefined>();
@@ -796,19 +920,25 @@ function isLifecycleTranscriptEvidence(value: unknown): value is LifecycleTransc
 function isSdkStartupFailure(value: unknown): value is SdkStartupFailure {
 	if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
 	const failure = value as Record<string, unknown>;
-	return (
-		Object.keys(failure).length === 3 &&
-		(failure.phase === "registration" || failure.phase === "startup") &&
-		(failure.reason === "disabled" ||
-			failure.reason === "ineligible" ||
-			failure.reason === "factory_absent" ||
-			failure.reason === "runner_absent" ||
-			failure.reason === "pending" ||
-			failure.reason === "failed") &&
-		typeof failure.message === "string" &&
-		Buffer.byteLength(failure.message) > 0 &&
-		Buffer.byteLength(failure.message) <= 512
-	);
+	const keys = Object.keys(failure);
+	if (
+		!keys.every(
+			key => key === "phase" || key === "reason" || key === "message" || key === "code" || key === "details",
+		) ||
+		(failure.phase !== "registration" && failure.phase !== "startup") ||
+		(failure.reason !== "disabled" &&
+			failure.reason !== "ineligible" &&
+			failure.reason !== "factory_absent" &&
+			failure.reason !== "runner_absent" &&
+			failure.reason !== "pending" &&
+			failure.reason !== "failed") ||
+		typeof failure.message !== "string" ||
+		Buffer.byteLength(failure.message) === 0 ||
+		Buffer.byteLength(failure.message) > 512
+	)
+		return false;
+	if (failure.code === undefined && failure.details === undefined) return keys.length === 3;
+	return keys.length === 5 && isModelProfileError(failure);
 }
 
 function isLifecycleFailureArtifact(value: unknown): value is LifecycleFailureArtifact {
@@ -817,8 +947,14 @@ function isLifecycleFailureArtifact(value: unknown): value is LifecycleFailureAr
 	if (!isEffectMarker(record)) return false;
 	const artifact = value as LifecycleFailureArtifact;
 	return (
-		Object.keys(record).length === (artifact.transcript === undefined ? 7 : 8) &&
-		isSdkStartupFailure({ phase: artifact.phase, reason: artifact.reason, message: artifact.message }) &&
+		Object.keys(record).length ===
+			7 + (artifact.code === undefined ? 0 : 2) + (artifact.transcript === undefined ? 0 : 1) &&
+		isSdkStartupFailure({
+			phase: artifact.phase,
+			reason: artifact.reason,
+			message: artifact.message,
+			...(artifact.code === undefined ? {} : { code: artifact.code, details: artifact.details }),
+		}) &&
 		isRollbackResult(artifact.rollback) &&
 		(artifact.transcript === undefined || isLifecycleTranscriptEvidence(artifact.transcript))
 	);
@@ -864,6 +1000,8 @@ export async function writeSessionLifecycleFailure(
 		...(transcript ? { transcript } : {}),
 	};
 	const bytes = Buffer.from(canonicalJson(artifact), "utf8");
+	if (bytes.length > MAX_LIFECYCLE_METADATA_BYTES)
+		throw new Error("Lifecycle startup failure exceeds the metadata size ceiling.");
 	const target = lifecycleFailurePath(root, id, effectMarker);
 	const temporary = path.join(directory, `.${id}.lifecycle.failure.${effectMarker}.${randomUUID()}.tmp`);
 	let published = false;
@@ -1240,6 +1378,10 @@ function validateLifecycleMetadataReplay(cleanup: CleanupEvidence): BrokerRespon
 			if (!current) continue;
 			if (!sameLifecycleCleanupIdentity(current.identity, file.identity))
 				return fail("terminal_uncertain", "Lifecycle metadata candidate lacks exact replay authority.");
+			// A completed file's recorded retained quarantine is receipt-bound durable
+			// evidence; anything else that remains is an active survivor.
+			if (file.completed && file.detachedPath && path.resolve(candidate) === path.resolve(file.detachedPath))
+				continue;
 			activeCandidates++;
 		}
 		if (file.completed && activeCandidates > 0)
@@ -1288,7 +1430,21 @@ function lifecycleMetadataReplayAbsent(cleanup: CleanupEvidence): boolean {
 	const id = cleanup.sessionId!;
 	const required = new Set<string>([lifecycleMarkerPath(root, id), lifecycleReadyPath(root, id)]);
 	for (const file of files) for (const candidate of lifecycleCleanupCandidates(file)) required.add(candidate);
-	return [...required].every(absentLifecyclePath);
+	for (const candidate of required) {
+		if (absentLifecyclePath(candidate)) continue;
+		// A completed file's recorded retained quarantine is durable evidence, not a
+		// survivor — accept it only at its receipt-bound path and identity.
+		const owner = files.find(
+			file =>
+				file.completed === true &&
+				file.detachedPath !== undefined &&
+				path.resolve(file.detachedPath) === path.resolve(candidate),
+		);
+		if (!owner) return false;
+		const current = captureLifecycleFile(candidate, true, true);
+		if (!current || !sameLifecycleCleanupIdentity(current.identity, owner.identity)) return false;
+	}
+	return true;
 }
 
 /**
@@ -1551,16 +1707,28 @@ async function reconcileLifecycleCleanup(
 		const candidates = lifecycleCleanupCandidates(file);
 		if (file.completed) {
 			for (const candidate of candidates) {
+				let stat: ReturnType<typeof fsSync.lstatSync>;
 				try {
-					fsSync.lstatSync(candidate);
-					return fail(
-						"terminal_uncertain",
-						"Lifecycle cleanup receipt marks a target complete while an authorized candidate remains.",
-					);
+					stat = fsSync.lstatSync(candidate);
 				} catch (error) {
-					if ((error as NodeJS.ErrnoException).code !== "ENOENT")
-						return fail("terminal_uncertain", "Lifecycle cleanup completion could not be safely inspected.");
+					if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
+					return fail("terminal_uncertain", "Lifecycle cleanup completion could not be safely inspected.");
 				}
+				// A completed file's recorded retained quarantine is durable evidence,
+				// not a survivor — accept it only at its receipt-bound path and identity.
+				if (
+					file.detachedPath &&
+					path.resolve(candidate) === path.resolve(file.detachedPath) &&
+					stat.isFile() &&
+					!stat.isSymbolicLink()
+				) {
+					const current = captureLifecycleFile(candidate, true, true);
+					if (current && sameLifecycleCleanupIdentity(current.identity, file.identity)) continue;
+				}
+				return fail(
+					"terminal_uncertain",
+					"Lifecycle cleanup receipt marks a target complete while an authorized candidate remains.",
+				);
 			}
 			continue;
 		}
@@ -1630,6 +1798,22 @@ async function reconcileLifecycleCleanup(
 			quarantineName: path.basename(currentFile.plannedPath),
 		});
 		if (!result.ok) {
+			if (result.code === "cleanup_pending" && result.detachedPath === currentFile.plannedPath) {
+				// Typed retained authority: the native verified the exact identity-bound
+				// detach and retained the quarantine as durable evidence. Record the
+				// evidence and advance — never claim a terminal byte deletion.
+				const lifecycleFiles = activeCleanup.lifecycleFiles!.map((candidate, candidateIndex) =>
+					candidateIndex === index
+						? { ...candidate, detachedPath: result.detachedPath, completed: true as const }
+						: candidate,
+				);
+				activeCleanup = { ...activeCleanup, lifecycleFiles };
+				await broker.ledger.transition(identity, "effect_started", {
+					response: fail("cleanup_pending", "Lifecycle cleanup completion was durably reconciled.", activeCleanup),
+				});
+				lifecycleCleanupHooksForTest.get(broker)?.();
+				continue;
+			}
 			const lifecycleFiles = activeCleanup.lifecycleFiles!.map((candidate, candidateIndex) =>
 				candidateIndex === index && result.detachedPath
 					? { ...candidate, detachedPath: result.detachedPath }
@@ -1662,6 +1846,22 @@ async function readSessionLifecycleFailure(
 ): Promise<LifecycleFailureArtifact | undefined> {
 	return (await readLifecycleFailureArtifact(lifecycleFailurePath(root, id, expected.effectMarker), expected))
 		?.artifact;
+}
+
+export async function readSessionLifecycleFailureForTest(
+	root: string,
+	id: string,
+	expected: { pid: number; effectMarker: string; incarnation: string },
+): Promise<SdkStartupFailure | undefined> {
+	const artifact = await readSessionLifecycleFailure(root, id, expected);
+	return artifact
+		? {
+				phase: artifact.phase,
+				reason: artifact.reason,
+				message: artifact.message,
+				...(artifact.code === undefined ? {} : { code: artifact.code, details: artifact.details }),
+			}
+		: undefined;
 }
 
 async function hasDurableProcessIdentity(
@@ -2055,14 +2255,14 @@ async function waitForReady(
 ): Promise<ReadinessResult> {
 	while (timing.now() < deadline) {
 		const startupFailure = await readSessionLifecycleFailure(root, id, expected);
-		if (startupFailure) return { kind: "startup_failed", message: startupFailure.message };
+		if (startupFailure) return { kind: "startup_failed", failure: startupFailure };
 		if (
 			observeProcess(expected.pid, expected.incarnation, value => processIncarnationForBroker(broker, value)) ===
 			"exited"
 		) {
 			const finalStartupFailure = await readSessionLifecycleFailure(root, id, expected);
 			return finalStartupFailure
-				? { kind: "startup_failed", message: finalStartupFailure.message }
+				? { kind: "startup_failed", failure: finalStartupFailure }
 				: { kind: "child_exited" };
 		}
 		try {
@@ -2190,10 +2390,15 @@ async function launchInput(
 	const requested = sessionId(input);
 	if (requested !== undefined && !isCanonicalSessionId(requested))
 		return fail("invalid_input", "sessionId must be a canonical safe identifier.");
+	if (input.modelPreset !== undefined && (typeof input.modelPreset !== "string" || input.modelPreset.length === 0))
+		return fail("invalid_input", "modelPreset must be a non-empty exact profile ID.");
 	const modelPreset = text(input.modelPreset);
+	if (input.mcpServers !== undefined && !isSessionLifecycleMcpServers(input.mcpServers))
+		return fail("invalid_input", "mcpServers must contain unique valid stdio, HTTP, or SSE server definitions.");
+	const mcpServers = input.mcpServers as SessionLifecycleMcpServer[] | undefined;
 
 	if (operation === "session.create")
-		return { id: randomUUID(), cwd, root: resolvedRoot, modelPreset, worktree, worktreePlan };
+		return { id: randomUUID(), cwd, root: resolvedRoot, modelPreset, mcpServers, worktree, worktreePlan };
 	if (operation === "session.resume") {
 		if (!requested) return fail("invalid_input", "sessionId is required to resume a saved session.");
 		const savedPath = text(input.sessionPath);
@@ -2207,6 +2412,7 @@ async function launchInput(
 			sessionPath: saved.path,
 			sessionIdentity: saved.identity,
 			modelPreset,
+			mcpServers,
 			worktree,
 			worktreePlan,
 		};
@@ -2228,6 +2434,7 @@ async function launchInput(
 		sourceSessionIdentity: source.identity,
 		sourceCwd,
 		modelPreset,
+		mcpServers,
 		worktree,
 		worktreePlan,
 	};
@@ -2614,6 +2821,11 @@ async function executeLifecycleResponse(
 
 		const launch = await launchInput(broker, operation, input);
 		if ("ok" in launch) return launch;
+		if (launch.modelPreset) {
+			const validatedModelPreset = validateBrokerModelPreset(broker.settings.agentDir, launch.modelPreset);
+			if (typeof validatedModelPreset !== "string") return validatedModelPreset;
+			launch.modelPreset = validatedModelPreset;
+		}
 		if (!hasProcessIncarnationAuthority())
 			return fail(
 				"incarnation_unavailable",
@@ -2692,6 +2904,7 @@ async function executeLifecycleResponse(
 			...(launch.sessionPath ? { sessionPath: launch.sessionPath } : {}),
 			...(launch.sessionIdentity ? { sessionIdentity: launch.sessionIdentity } : {}),
 			...(launch.modelPreset ? { modelPreset: launch.modelPreset } : {}),
+			...(launch.mcpServers ? { mcpServers: launch.mcpServers } : {}),
 			...(launch.worktree ? { worktree: launch.worktree } : {}),
 		};
 		let child: ChildProcess | undefined;
@@ -2767,7 +2980,12 @@ async function executeLifecycleResponse(
 					`Session ${launch.id} did not become ready and its spawned process could not be verified dead.`,
 				);
 			return readiness.kind === "startup_failed"
-				? fail("spawn_failed", readiness.message)
+				? fail(
+						readiness.failure.code ?? "spawn_failed",
+						readiness.failure.message,
+						undefined,
+						readiness.failure.details,
+					)
 				: readiness.kind === "child_exited"
 					? fail("spawn_failed", `Session ${launch.id} exited before registering readiness.`)
 					: fail(
@@ -3042,11 +3260,26 @@ async function executeLifecycleResponse(
 				`Unable to delete saved session artifacts: ${error instanceof Error ? error.message : String(error)}`,
 			);
 		}
-		if (deleted.kind === "artifacts_removed") {
+		const retainedArtifactsCleanup =
+			deleted.kind === "cleanup_pending" &&
+			deleted.phase === "artifacts" &&
+			deleted.detachedArtifactsPath !== undefined &&
+			cleanupTarget.plannedArtifactsPath !== undefined &&
+			(deleted.detachedArtifactsPath === cleanupTarget.plannedArtifactsPath ||
+				deleted.detachedArtifactsPath === `${cleanupTarget.plannedArtifactsPath}.removing`);
+		if (deleted.kind === "artifacts_removed" || retainedArtifactsCleanup) {
 			const transcriptPhaseCleanup = {
 				...preauthorizedCleanup,
 				phase: "transcript" as const,
 				artifactsRemoved: true,
+				...(deleted.kind === "cleanup_pending" && deleted.phase === "artifacts"
+					? {
+							detachedArtifactsPath: deleted.detachedArtifactsPath,
+							...(deleted.artifactsIdentity
+								? { artifactsIdentity: serializeCleanupIdentity(deleted.artifactsIdentity) }
+								: {}),
+						}
+					: {}),
 				...(preauthorizedCleanup.artifactTree
 					? { artifactTree: { ...preauthorizedCleanup.artifactTree, completed: true as const } }
 					: {}),
@@ -3067,7 +3300,14 @@ async function executeLifecycleResponse(
 				artifactsRemoved: true,
 			});
 		}
-		if (deleted.kind === "cleanup_pending")
+		if (
+			deleted.kind === "cleanup_pending" &&
+			!(
+				deleted.phase === "transcript" &&
+				deleted.detachedTranscriptPath !== undefined &&
+				deleted.detachedTranscriptPath === cleanupTarget.plannedTranscriptPath
+			)
+		)
 			return fail(
 				"cleanup_pending",
 				`Saved session cleanup is pending in ${deleted.phase}: ${deleted.error.message}`,
@@ -3322,6 +3562,9 @@ export async function executeLifecycle(
 				phase: evidence.artifact.phase,
 				reason: evidence.artifact.reason,
 				message: evidence.artifact.message,
+				...(evidence.artifact.code === undefined
+					? {}
+					: { code: evidence.artifact.code, details: evidence.artifact.details }),
 				rollback: {
 					endpointGeneration: evidence.artifact.rollback.endpointGeneration,
 					fenced: evidence.artifact.rollback.fenced,
@@ -3386,11 +3629,18 @@ export async function executeLifecycle(
 				: startupFailure && cleanupProof
 					? {
 							ok: false,
-							error: {
-								code: "spawn_failed",
-								message: "No ready SDK endpoint remains available.",
-								endpoint: "unavailable",
-							},
+							error: startupFailure.code
+								? {
+										code: startupFailure.code,
+										message: startupFailure.message,
+										details: startupFailure.details!,
+										endpoint: "unavailable" as const,
+									}
+								: {
+										code: "spawn_failed",
+										message: "No ready SDK endpoint remains available.",
+										endpoint: "unavailable" as const,
+									},
 							...(durableEffects ? { durableEffects } : {}),
 							startupFailure,
 						}

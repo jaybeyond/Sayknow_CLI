@@ -19,7 +19,10 @@ export interface PyToolBridgeEntry {
 
 export interface PyToolBridgeInfo {
 	url: string;
-	token: string;
+}
+
+interface PyToolBridgeRegistration extends PyToolBridgeEntry {
+	sessionId: string;
 }
 
 interface BridgeServer {
@@ -27,11 +30,20 @@ interface BridgeServer {
 	stop: () => Promise<void>;
 }
 
-const registrations = new Map<string, PyToolBridgeEntry>();
+const registrations = new Map<string, PyToolBridgeRegistration>();
 let serverPromise: Promise<BridgeServer> | null = null;
 
+function isCanonicalCapability(capability: string): boolean {
+	return capability.length > 0 && !/\s/.test(capability);
+}
+
+function parseBearerCapability(authorization: string | null): string | null {
+	if (!authorization?.startsWith("Bearer ")) return null;
+	const capability = authorization.slice("Bearer ".length);
+	return isCanonicalCapability(capability) ? capability : null;
+}
+
 async function startServer(): Promise<BridgeServer> {
-	const token = crypto.randomUUID();
 	const server = Bun.serve({
 		hostname: "127.0.0.1",
 		port: 0,
@@ -40,7 +52,12 @@ async function startServer(): Promise<BridgeServer> {
 			if (req.method !== "POST" || url.pathname !== "/v1/tool") {
 				return new Response("Not Found", { status: 404 });
 			}
-			if (req.headers.get("authorization") !== `Bearer ${token}`) {
+			const capability = parseBearerCapability(req.headers.get("authorization"));
+			if (!capability) {
+				return new Response("Forbidden", { status: 403 });
+			}
+			const registration = registrations.get(capability);
+			if (!registration) {
 				return new Response("Forbidden", { status: 403 });
 			}
 
@@ -55,19 +72,15 @@ async function startServer(): Promise<BridgeServer> {
 			if (!sessionId || !name) {
 				return Response.json({ ok: false, error: "Missing session/name" }, { status: 400 });
 			}
-			const entry = registrations.get(sessionId);
-			if (!entry) {
-				return Response.json(
-					{ ok: false, error: `No active Python tool bridge session: ${sessionId}` },
-					{ status: 200 },
-				);
+			if (sessionId !== registration.sessionId) {
+				return new Response("Forbidden", { status: 403 });
 			}
 
 			try {
 				const value = await callSessionTool(name, body.args, {
-					session: entry.toolSession,
-					signal: entry.signal,
-					emitStatus: entry.emitStatus,
+					session: registration.toolSession,
+					signal: registration.signal,
+					emitStatus: registration.emitStatus,
 				});
 				return Response.json({ ok: true, value });
 			} catch (err) {
@@ -81,7 +94,6 @@ async function startServer(): Promise<BridgeServer> {
 
 	const info: PyToolBridgeInfo = {
 		url: `http://${server.hostname}:${server.port}`,
-		token,
 	};
 	logger.debug("Python tool bridge listening", { url: info.url });
 
@@ -111,11 +123,15 @@ export async function ensurePyToolBridge(): Promise<PyToolBridgeInfo> {
  * Register a tool session for the duration of one execution. The returned
  * function MUST be called to remove the entry once execution finishes.
  */
-export function registerPyToolBridge(sessionId: string, entry: PyToolBridgeEntry): () => void {
-	registrations.set(sessionId, entry);
+export function registerPyToolBridge(sessionId: string, capability: string, entry: PyToolBridgeEntry): () => void {
+	if (!isCanonicalCapability(capability)) {
+		throw new Error("Python tool bridge capability must be a non-empty canonical bearer token");
+	}
+	const registration = { ...entry, sessionId };
+	registrations.set(capability, registration);
 	return () => {
-		if (registrations.get(sessionId) === entry) {
-			registrations.delete(sessionId);
+		if (registrations.get(capability) === registration) {
+			registrations.delete(capability);
 		}
 	};
 }

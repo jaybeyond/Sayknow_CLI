@@ -115,6 +115,7 @@ export async function initializeExtensions(session: AgentSession, options: Initi
 			compact: instructionsOrOptions => runExtensionCompact(session, instructionsOrOptions),
 			clearContext: () => session.clearContext(),
 			cycleModel: () => session.cycleModel(),
+			setModelProfile: name => session.activateModelProfileForControl(name),
 			cycleThinkingLevel: () => session.cycleThinkingLevel(),
 			setQueueMode: (kind, mode) => {
 				if (kind === "steering" && (mode === "all" || mode === "one-at-a-time")) {
@@ -131,7 +132,7 @@ export async function initializeExtensions(session: AgentSession, options: Initi
 				}
 				return false;
 			},
-			invokeSkill: (name, args) => session.invokeSkill(name, args),
+			invokeSkill: (name, args, options) => session.invokeSkill(name, args, options),
 			setPlanMode: on => session.setSdkPlanMode(on),
 			operateGoal: (op, objective) => session.operateGoal(op, objective),
 			getSkillState: () => session.skills.map(skill => ({ name: skill.name, description: skill.description })),
@@ -379,7 +380,24 @@ export async function initializeExtensions(session: AgentSession, options: Initi
 						const disabled = [...(session.settings.get("disabledExtensions") ?? [])];
 						const on = input.on === true;
 						const next = on ? disabled.filter(value => value !== id) : [...new Set([...disabled, id])];
-						session.settings.set("disabledExtensions", next);
+						if (!session.settings.canWriteDurableConfig()) {
+							throw Object.assign(
+								new Error(
+									"Cannot change settings while config.yml has invalid YAML syntax. Repair config.yml and reload settings.",
+								),
+								{ code: "invalid_request" },
+							);
+						}
+						try {
+							session.settings.set("disabledExtensions", next);
+						} catch (error) {
+							if (!session.settings.canWriteDurableConfig()) {
+								throw Object.assign(new Error(error instanceof Error ? error.message : String(error)), {
+									code: "invalid_request",
+								});
+							}
+							throw error;
+						}
 						return { changed: true, enabled: on };
 					}
 					case "session.delete":

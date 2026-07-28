@@ -92,6 +92,7 @@ export class ConversationStore<T extends ConversationRecord> {
 	readonly #pidAlive: (pid: number) => boolean;
 	readonly #sleep: (ms: number) => Promise<void>;
 	readonly #lockTimeoutMs: number;
+	readonly #platform: NodeJS.Platform;
 
 	constructor(input: {
 		agentDir: string;
@@ -104,6 +105,7 @@ export class ConversationStore<T extends ConversationRecord> {
 		pidAlive?: (pid: number) => boolean;
 		sleep?: (ms: number) => Promise<void>;
 		lockTimeoutMs?: number;
+		platform?: NodeJS.Platform;
 	}) {
 		this.#file = conversationStorePath(input.agentDir, input.kind, input.fileName);
 		this.#directory = path.dirname(this.#file);
@@ -114,6 +116,7 @@ export class ConversationStore<T extends ConversationRecord> {
 		this.#pidAlive = input.pidAlive ?? defaultPidAlive;
 		this.#sleep = input.sleep ?? (async ms => await Bun.sleep(ms));
 		this.#lockTimeoutMs = input.lockTimeoutMs ?? 1_000;
+		this.#platform = input.platform ?? process.platform;
 	}
 
 	get filePath(): string {
@@ -325,12 +328,7 @@ export class ConversationStore<T extends ConversationRecord> {
 				await handle.close();
 			}
 			await this.#fs.rename(temporary, this.#file);
-			const directory = await this.#fs.open(this.#directory, "r");
-			try {
-				await directory.sync();
-			} finally {
-				await directory.close();
-			}
+			await syncParentDirectory(this.#fs, this.#directory, this.#platform);
 		} catch (error) {
 			await this.#fs.unlink(temporary).catch(() => undefined);
 			throw error;
@@ -342,6 +340,42 @@ function isMissing(error: unknown): error is NodeJS.ErrnoException {
 	return isRecord(error) && error.code === "ENOENT";
 }
 
+async function syncParentDirectory(
+	fs: ConversationStoreFs,
+	directory: string,
+	platform: NodeJS.Platform,
+): Promise<void> {
+	let handle: ConversationStoreFileHandle;
+	try {
+		handle = await fs.open(directory, "r");
+	} catch (error) {
+		if (platform === "win32" && isUnsupportedDirectoryBarrierError(error)) return;
+		throw error;
+	}
+	let syncError: unknown;
+	try {
+		await handle.sync();
+	} catch (error) {
+		if (!(platform === "win32" && isUnsupportedDirectoryBarrierError(error))) syncError = error;
+	}
+	let closeError: unknown;
+	try {
+		await handle.close();
+	} catch (error) {
+		closeError = error;
+	}
+	if (syncError && closeError)
+		throw new AggregateError([syncError, closeError], "Parent directory sync and close failed");
+	if (syncError) throw syncError;
+	if (closeError) throw closeError;
+}
+
+function isUnsupportedDirectoryBarrierError(error: unknown): boolean {
+	return (
+		isRecord(error) &&
+		(error.code === "EINVAL" || error.code === "ENOTSUP" || error.code === "EOPNOTSUPP" || error.code === "EPERM")
+	);
+}
 function isAlreadyExists(error: unknown): error is NodeJS.ErrnoException {
 	return isRecord(error) && error.code === "EEXIST";
 }

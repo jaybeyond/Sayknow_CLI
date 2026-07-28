@@ -1,0 +1,14 @@
+--- a/packages/coding-agent/src/session/agent-session.ts
++++ b/packages/coding-agent/src/session/agent-session.ts
+@@ -13484,8 +13484,9 @@
+ 		}
+ 		if (
+ 			this.settings.get("retry.fallbackRevertPolicy") === "cooldown-expiry" &&
+-			controller.activeIndex > 0 &&
+-			this.#modelRegistry.getSelectorSuppressionStatus(controller.chain.entries[0] ?? "") === "expired"
++			controller.activeIndex > 0
++			// TODO(upstream-v0.11): ModelRegistry.getSelectorSuppressionStatus was removed;
++			// rewire the cooldown-expiry revert policy to the new suppression API when available.
+ 		) {
+ 			controller.resetForNewTurn();
+ 		}

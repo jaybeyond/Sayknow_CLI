@@ -1,6 +1,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { getConfigRootDir } from "@sayknow-cli/utils";
 import { syncSkillActiveState } from "../skill-state/active-state";
 import { buildRalplanHudSummary } from "../skill-state/workflow-hud";
 import { WORKFLOW_STATE_VERSION } from "../skill-state/workflow-state-contract";
@@ -11,8 +12,17 @@ import {
 	type RalplanIndexRow,
 	summarizeRalplanIndex,
 } from "./ledger-event-renderer";
+import {
+	assertCwdMatchesRepositoryBinding,
+	assertPathUnderRepositoryBinding,
+	captureRepositoryBinding,
+	parseRepositoryBinding,
+	publicRepositoryBinding,
+	type RepositoryBinding,
+	RepositoryBindingError,
+} from "./repository-binding";
 import { isRestrictedRoleAgentBash, SKC_RALPLAN_ARTIFACT_ENV } from "./restricted-role-agent-bash";
-import { modeStatePath, sessionPlansDir } from "./session-layout";
+import { modeStatePath, sessionPlansDir, skcRoot } from "./session-layout";
 import { resolveSkcSessionForWrite, writeSessionActivityMarker } from "./session-resolution";
 import { migrateWorkflowState } from "./state-migrations";
 import { runNativeStateCommand } from "./state-runtime";
@@ -40,7 +50,7 @@ import { getSkillManifest } from "./workflow-manifest";
  *
  * 2. **Artifact write**: `skc ralplan --write --stage <type> --stage_n <N>
  *    (--artifact <path-or-string> | --artifact-env SKC_RALPLAN_ARTIFACT)
- *    [--run-id <id>] [--session-id <id>] [--json]` persists Planner / Architect
+ *    [--run-id <id>] [--session-id <id>] [--lane-verdict <token>] [--json]` persists Planner / Architect
  *    / Critic / revision / post-interview / ADR / final markdown under `.skc/plans/ralplan/<run-id>/`, maintains
  *    an `index.jsonl` audit log, copies `final` stages to `pending-approval.md`, and advances
  *    the HUD chip to reflect the latest persisted stage.
@@ -54,6 +64,498 @@ export interface RalplanCommandResult {
 
 const KNOWN_STAGES = ["planner", "architect", "critic", "revision", "post-interview", "adr", "final"] as const;
 type RalplanStage = (typeof KNOWN_STAGES)[number];
+/** Default consensus iterations (planner + revision openers) per run. Matches SKILL.md re-review cap. */
+export const RALPLAN_DEFAULT_MAX_ITERATIONS = 5;
+/** Inclusive upper bound for `skc.ralplan.maxIterations` settings overrides. */
+export const RALPLAN_MAX_ITERATIONS_LIMIT = 20;
+/** Operator-visible stuck signal for headless/CI orchestration (#3165). */
+export const PLANNING_STUCK_MARKER = "PLANNING-STUCK";
+/** Default architect/critic review passes per consensus iteration. */
+export const RALPLAN_DEFAULT_MAX_REVIEW_PASSES_PER_LANE = 1;
+/** Inclusive upper bound for `skc.ralplan.maxReviewPassesPerLane` settings overrides. */
+export const RALPLAN_MAX_REVIEW_PASSES_PER_LANE_LIMIT = 10;
+
+const RALPLAN_ITERATION_OPENER_STAGES = new Set<RalplanStage>(["planner", "revision"]);
+
+/** Collapse duplicate ledger rows for the same deterministic stage artifact before review-lane budget accounting. */
+function deduplicateRalplanIndexRowsByStageIdentity(rows: readonly RalplanIndexRow[]): RalplanIndexRow[] {
+	const seen = new Set<string>();
+	return rows.filter(row => {
+		if (typeof row.stageN !== "number") return true;
+		const identity = `${row.stage}\u0000${row.stageN}`;
+		if (seen.has(identity)) return false;
+		seen.add(identity);
+		return true;
+	});
+}
+
+export type RalplanIterationCapDecision =
+	| {
+			allowed: true;
+			currentIterations: number;
+			projectedIterations: number;
+			maxIterations: number;
+	  }
+	| {
+			allowed: false;
+			currentIterations: number;
+			projectedIterations: number;
+			maxIterations: number;
+			reason: string;
+	  };
+
+/**
+ * Pure consensus-iteration budget gate (#3165).
+ *
+ * A `planner` or `revision` write opens a new iteration (same definition as
+ * `summarizeRalplanIndex`). Other stages never open iterations and are always
+ * allowed by this gate — including `final` after the cap is already reached.
+ *
+ * `iterationFloor` raises the observed opener count when on-disk evidence or a
+ * recovered ledger is higher than the parsed index (fail-closed vs wipe/truncate).
+ */
+export function evaluateRalplanIterationCap(input: {
+	rows: readonly RalplanIndexRow[];
+	stage: string;
+	maxIterations?: number;
+	/** Minimum opener count (e.g. on-disk stage-*-{planner,revision}.md). */
+	iterationFloor?: number;
+}): RalplanIterationCapDecision {
+	const maxIterations =
+		typeof input.maxIterations === "number" &&
+		Number.isInteger(input.maxIterations) &&
+		input.maxIterations >= 1 &&
+		input.maxIterations <= RALPLAN_MAX_ITERATIONS_LIMIT
+			? input.maxIterations
+			: RALPLAN_DEFAULT_MAX_ITERATIONS;
+	const fromIndex = summarizeRalplanIndex(input.rows).iteration;
+	const floor =
+		typeof input.iterationFloor === "number" && Number.isInteger(input.iterationFloor) && input.iterationFloor > 0
+			? input.iterationFloor
+			: 0;
+	const currentIterations = Math.max(fromIndex, floor);
+	if (!RALPLAN_ITERATION_OPENER_STAGES.has(input.stage as RalplanStage)) {
+		return {
+			allowed: true,
+			currentIterations,
+			projectedIterations: currentIterations,
+			maxIterations,
+		};
+	}
+	const projectedIterations = currentIterations + 1;
+	if (projectedIterations > maxIterations) {
+		const ledgerNote = floor > fromIndex ? ` (ledger under-count: index=${fromIndex}, on-disk openers=${floor})` : "";
+		return {
+			allowed: false,
+			currentIterations,
+			projectedIterations,
+			maxIterations,
+			reason:
+				`ralplan consensus iteration cap exceeded: opening ${input.stage} would start ` +
+				`iteration ${projectedIterations} (max ${maxIterations})${ledgerNote}`,
+		};
+	}
+	return {
+		allowed: true,
+		currentIterations,
+		projectedIterations,
+		maxIterations,
+	};
+}
+
+export type RalplanReviewLane = "architect" | "critic";
+
+export type RalplanReviewLaneBudgetDecision =
+	| {
+			allowed: true;
+			lane?: RalplanReviewLane;
+			currentPasses: number;
+			projectedPasses: number;
+			maxReviewPassesPerLane: number;
+			finalSlot: boolean;
+			ledgerNote?: string;
+	  }
+	| {
+			allowed: false;
+			lane: RalplanReviewLane;
+			currentPasses: number;
+			projectedPasses: number;
+			maxReviewPassesPerLane: number;
+			finalSlot: false;
+			ledgerNote?: string;
+			reason: string;
+	  };
+
+/**
+ * Pure per-lane review-pass budget gate. Architect and critic passes are limited
+ * within the current consensus iteration; all other stages remain unconditionally
+ * available as escalation paths.
+ */
+export function evaluateRalplanReviewLaneBudget(input: {
+	rows: readonly RalplanIndexRow[];
+	stage: string;
+	maxReviewPassesPerLane?: unknown;
+	onDiskLaneCounts?: { architect: number; critic: number };
+}): RalplanReviewLaneBudgetDecision {
+	const maxReviewPassesPerLane =
+		typeof input.maxReviewPassesPerLane === "number" &&
+		Number.isInteger(input.maxReviewPassesPerLane) &&
+		input.maxReviewPassesPerLane >= 1 &&
+		input.maxReviewPassesPerLane <= RALPLAN_MAX_REVIEW_PASSES_PER_LANE_LIMIT
+			? input.maxReviewPassesPerLane
+			: RALPLAN_DEFAULT_MAX_REVIEW_PASSES_PER_LANE;
+	if (input.stage !== "architect" && input.stage !== "critic") {
+		return {
+			allowed: true,
+			currentPasses: 0,
+			projectedPasses: 0,
+			maxReviewPassesPerLane,
+			finalSlot: false,
+		};
+	}
+
+	const lane = input.stage as RalplanReviewLane;
+	const rows = deduplicateRalplanIndexRowsByStageIdentity(input.rows);
+	const summary = summarizeRalplanIndex(rows);
+	const indexCurrent = summary.currentStages.filter(stage => stage === lane).length;
+	const parsedTotal = rows.filter(row => row.stage === lane).length;
+	const onDiskRaw = input.onDiskLaneCounts?.[lane];
+	const onDiskTotal = typeof onDiskRaw === "number" && Number.isInteger(onDiskRaw) && onDiskRaw > 0 ? onDiskRaw : 0;
+	const diskExcess = Math.max(0, onDiskTotal - parsedTotal);
+	const currentPasses = indexCurrent + diskExcess;
+	const projectedPasses = currentPasses + 1;
+	const ledgerNote =
+		diskExcess > 0
+			? ` (ledger under-count: parsed ${lane} rows=${parsedTotal}, on-disk ${lane} artifacts=${onDiskTotal})`
+			: undefined;
+	const finalSlot = projectedPasses === maxReviewPassesPerLane;
+	if (projectedPasses > maxReviewPassesPerLane) {
+		return {
+			allowed: false,
+			lane,
+			currentPasses,
+			projectedPasses,
+			maxReviewPassesPerLane,
+			finalSlot: false,
+			ledgerNote,
+			reason:
+				`ralplan review lane budget exceeded: ${lane} pass ${projectedPasses} of max ${maxReviewPassesPerLane} ` +
+				`in consensus iteration ${Math.max(1, summary.iteration)}${ledgerNote ?? ""}`,
+		};
+	}
+	return {
+		allowed: true,
+		lane,
+		currentPasses,
+		projectedPasses,
+		maxReviewPassesPerLane,
+		finalSlot,
+		ledgerNote,
+	};
+}
+
+function getErrorCode(error: unknown): string | undefined {
+	if (!error || typeof error !== "object" || !("code" in error)) return undefined;
+	const code = (error as { code?: unknown }).code;
+	return typeof code === "string" ? code : undefined;
+}
+
+/** Filename pattern for persisted planner/revision stage artifacts. */
+const OPENER_ARTIFACT_RE = /^stage-\d{2,}-(planner|revision)\.md$/;
+const LANE_ARTIFACT_RE = /^stage-\d{2,}-(architect|critic)\.md$/;
+
+/**
+ * Count on-disk planner/revision stage artifacts for a run. Used as a floor when
+ * `index.jsonl` is missing, empty, truncated, or otherwise under-counts openers.
+ */
+export async function countRalplanOnDiskOpeners(cwd: string, sessionId: string, runId: string): Promise<number> {
+	const runDir = path.join(sessionPlansDir(cwd, sessionId), "ralplan", runId);
+	try {
+		const entries = await fs.readdir(runDir);
+		let count = 0;
+		for (const name of entries) {
+			if (OPENER_ARTIFACT_RE.test(name)) count += 1;
+		}
+		return count;
+	} catch {
+		return 0;
+	}
+}
+
+/**
+ * Count on-disk Architect/Critic stage artifacts for a run. This is the
+ * fail-closed floor for a missing, truncated, or malformed `index.jsonl`.
+ */
+export async function countRalplanOnDiskLaneArtifacts(
+	cwd: string,
+	sessionId: string,
+	runId: string,
+): Promise<{ architect: number; critic: number }> {
+	const runDir = path.join(sessionPlansDir(cwd, sessionId), "ralplan", runId);
+	try {
+		const entries = await fs.readdir(runDir);
+		const counts = { architect: 0, critic: 0 };
+		for (const name of entries) {
+			const match = LANE_ARTIFACT_RE.exec(name);
+			if (match) counts[match[1] as RalplanReviewLane] += 1;
+		}
+		return counts;
+	} catch (error) {
+		if (getErrorCode(error) === "ENOENT") return { architect: 0, critic: 0 };
+		throw error;
+	}
+}
+
+/**
+ * Load index rows for cap enforcement. Unlike HUD reads, returns structural
+ * signals so callers can fail closed when the ledger is empty/malformed while
+ * opener artifacts already exist on disk.
+ */
+export async function loadRalplanIndexForCap(
+	cwd: string,
+	sessionId: string,
+	runId: string,
+): Promise<{
+	rows: RalplanIndexRow[];
+	indexPresent: boolean;
+	parseableLines: number;
+	rawLineCount: number;
+	rawText?: string;
+}> {
+	const indexPath = path.join(sessionPlansDir(cwd, sessionId), "ralplan", runId, "index.jsonl");
+	try {
+		const text = await fs.readFile(indexPath, "utf8");
+		const lines = text.split(/\r?\n/).filter(line => line.trim().length > 0);
+		const rows: RalplanIndexRow[] = [];
+		for (const line of lines) {
+			const row = parseRalplanIndexLine(line);
+			if (row) rows.push(row);
+		}
+		return {
+			rows,
+			indexPresent: true,
+			parseableLines: rows.length,
+			rawLineCount: lines.length,
+			rawText: text,
+		};
+	} catch (error) {
+		const code =
+			error && typeof error === "object" && "code" in error ? (error as { code?: string }).code : undefined;
+		if (code === "ENOENT") {
+			return { rows: [], indexPresent: false, parseableLines: 0, rawLineCount: 0 };
+		}
+		// Unreadable index: treat as present-but-untrusted empty parse.
+		return { rows: [], indexPresent: true, parseableLines: 0, rawLineCount: 0 };
+	}
+}
+
+function parseBoundedPositiveInteger(value: unknown, limit: number): number | null {
+	return typeof value === "number" && Number.isFinite(value) && Number.isInteger(value) && value >= 1 && value <= limit
+		? value
+		: null;
+}
+
+function parseMaxIterationsValue(value: unknown): number | null {
+	return parseBoundedPositiveInteger(value, RALPLAN_MAX_ITERATIONS_LIMIT);
+}
+
+async function readSettingsMaxIterations(settingsPath: string): Promise<number | null> {
+	try {
+		const raw = await Bun.file(settingsPath).text();
+		const parsed = JSON.parse(raw) as Record<string, unknown>;
+		const flat = parseMaxIterationsValue(parsed["skc.ralplan.maxIterations"]);
+		if (flat !== null) return flat;
+		const skc = parsed.skc;
+		if (skc && typeof skc === "object") {
+			const ralplan = (skc as Record<string, unknown>).ralplan;
+			if (ralplan && typeof ralplan === "object") {
+				return parseMaxIterationsValue((ralplan as Record<string, unknown>).maxIterations);
+			}
+		}
+		return null;
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * Resolve ralplan consensus iteration cap. Project `./.skc/settings.json` overrides
+ * user settings, else default 5.
+ */
+export async function resolveRalplanMaxIterations(cwd: string): Promise<{ maxIterations: number; source: string }> {
+	const projectPath = path.join(skcRoot(cwd), "settings.json");
+	const project = await readSettingsMaxIterations(projectPath);
+	if (project !== null) return { maxIterations: project, source: projectPath };
+	const userPath = path.join(getConfigRootDir(), "settings.json");
+	const user = await readSettingsMaxIterations(userPath);
+	if (user !== null) return { maxIterations: user, source: userPath };
+	return { maxIterations: RALPLAN_DEFAULT_MAX_ITERATIONS, source: "default" };
+}
+
+function parseMaxReviewPassesPerLaneValue(value: unknown): number | null {
+	return parseBoundedPositiveInteger(value, RALPLAN_MAX_REVIEW_PASSES_PER_LANE_LIMIT);
+}
+
+type RalplanReviewPassesPerLaneSetting =
+	| { kind: "absent" }
+	| { kind: "valid"; value: number }
+	| { kind: "invalid"; reason: string };
+
+function parsePresentMaxReviewPassesPerLane(value: unknown): RalplanReviewPassesPerLaneSetting {
+	const parsed = parseMaxReviewPassesPerLaneValue(value);
+	return parsed === null
+		? {
+				kind: "invalid",
+				reason:
+					"expected skc.ralplan.maxReviewPassesPerLane to be an integer between 1 and " +
+					RALPLAN_MAX_REVIEW_PASSES_PER_LANE_LIMIT,
+			}
+		: { kind: "valid", value: parsed };
+}
+
+function parseMaxReviewPassesPerLaneSettings(parsed: unknown): RalplanReviewPassesPerLaneSetting {
+	if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return { kind: "absent" };
+	const settings = parsed as Record<string, unknown>;
+	if (Object.hasOwn(settings, "skc.ralplan.maxReviewPassesPerLane")) {
+		return parsePresentMaxReviewPassesPerLane(settings["skc.ralplan.maxReviewPassesPerLane"]);
+	}
+	const skc = settings.skc;
+	if (!skc || typeof skc !== "object" || Array.isArray(skc)) return { kind: "absent" };
+	const ralplan = (skc as Record<string, unknown>).ralplan;
+	if (!ralplan || typeof ralplan !== "object" || Array.isArray(ralplan)) return { kind: "absent" };
+	const ralplanSettings = ralplan as Record<string, unknown>;
+	if (!Object.hasOwn(ralplanSettings, "maxReviewPassesPerLane")) return { kind: "absent" };
+	return parsePresentMaxReviewPassesPerLane(ralplanSettings.maxReviewPassesPerLane);
+}
+
+async function readSettingsMaxReviewPassesPerLane(settingsPath: string): Promise<RalplanReviewPassesPerLaneSetting> {
+	let raw: string;
+	try {
+		raw = await Bun.file(settingsPath).text();
+	} catch (error) {
+		if (getErrorCode(error) === "ENOENT") return { kind: "absent" };
+		return {
+			kind: "invalid",
+			reason: `unable to read settings: ${error instanceof Error ? error.message : String(error)}`,
+		};
+	}
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(raw);
+	} catch (error) {
+		return {
+			kind: "invalid",
+			reason: `malformed JSON: ${error instanceof Error ? error.message : String(error)}`,
+		};
+	}
+	return parseMaxReviewPassesPerLaneSettings(parsed);
+}
+
+/** Resolve the per-lane review-pass budget with project-over-user precedence. */
+export async function resolveRalplanMaxReviewPassesPerLane(
+	cwd: string,
+): Promise<{ maxReviewPassesPerLane: number; source: string }> {
+	const projectPath = path.join(skcRoot(cwd), "settings.json");
+	const project = await readSettingsMaxReviewPassesPerLane(projectPath);
+	if (project.kind === "invalid") {
+		throw new RalplanCommandError(2, `invalid ralplan settings at ${projectPath}: ${project.reason}`);
+	}
+	if (project.kind === "valid") return { maxReviewPassesPerLane: project.value, source: projectPath };
+	const userPath = path.join(getConfigRootDir(), "settings.json");
+	const user = await readSettingsMaxReviewPassesPerLane(userPath);
+	if (user.kind === "invalid") {
+		throw new RalplanCommandError(2, `invalid ralplan settings at ${userPath}: ${user.reason}`);
+	}
+	if (user.kind === "valid") return { maxReviewPassesPerLane: user.value, source: userPath };
+	return { maxReviewPassesPerLane: RALPLAN_DEFAULT_MAX_REVIEW_PASSES_PER_LANE, source: "default" };
+}
+
+function buildPlanningStuckResult(input: {
+	json: boolean;
+	stage: RalplanStage;
+	stageN: number;
+	runId: string;
+	decision: Extract<RalplanIterationCapDecision, { allowed: false }>;
+	source: string;
+}): RalplanCommandResult {
+	const detail =
+		`${PLANNING_STUCK_MARKER}: ${input.decision.reason} ` +
+		`(run_id=${input.runId}, stage=${input.stage}, stage_n=${input.stageN}, source=${input.source}). ` +
+		`Stop opening planner/revision passes; escalate the best existing plan via final/pending-approval without auto-implementation.`;
+	if (input.json) {
+		return {
+			status: 3,
+			stdout: `${JSON.stringify(
+				{
+					ok: false,
+					planning_stuck: true,
+					marker: PLANNING_STUCK_MARKER,
+					run_id: input.runId,
+					stage: input.stage,
+					stage_n: input.stageN,
+					iteration: input.decision.currentIterations,
+					projected_iteration: input.decision.projectedIterations,
+					max_iterations: input.decision.maxIterations,
+					max_iterations_source: input.source,
+					reason: input.decision.reason,
+				},
+				null,
+				2,
+			)}\n`,
+			stderr: `${detail}\n`,
+		};
+	}
+	return {
+		status: 3,
+		stdout: `${PLANNING_STUCK_MARKER}\n`,
+		stderr: `${detail}\n`,
+	};
+}
+
+function buildLaneBudgetStuckResult(input: {
+	json: boolean;
+	stage: RalplanStage;
+	stageN: number;
+	runId: string;
+	decision: Extract<RalplanReviewLaneBudgetDecision, { allowed: false }>;
+	source: string;
+}): RalplanCommandResult {
+	const detail =
+		`${PLANNING_STUCK_MARKER}: ${input.decision.reason} ` +
+		`(run_id=${input.runId}, stage=${input.stage}, stage_n=${input.stageN}, source=${input.source}). ` +
+		`Stop re-invoking the ${input.decision.lane} review lane in this consensus iteration; ` +
+		"route a rule-2-justified blocker through a Planner revision opener (fresh lane budget) while opener budget remains, " +
+		"or escalate the best existing plan via post-interview/adr/final without auto-implementation.";
+	if (input.json) {
+		return {
+			status: 3,
+			stdout: `${JSON.stringify(
+				{
+					ok: false,
+					planning_stuck: true,
+					marker: PLANNING_STUCK_MARKER,
+					run_id: input.runId,
+					stage: input.stage,
+					stage_n: input.stageN,
+					lane: input.decision.lane,
+					passes: input.decision.currentPasses,
+					projected_passes: input.decision.projectedPasses,
+					max_review_passes_per_lane: input.decision.maxReviewPassesPerLane,
+					max_review_passes_source: input.source,
+					reason: input.decision.reason,
+				},
+				null,
+				2,
+			)}\n`,
+			stderr: `${detail}\n`,
+		};
+	}
+	return {
+		status: 3,
+		stdout: `${PLANNING_STUCK_MARKER}\n`,
+		stderr: `${detail}\n`,
+	};
+}
 
 const KNOWN_ARCHITECT_KINDS = new Set(["openai-code"]);
 const KNOWN_CRITIC_KINDS = new Set(["openai-code"]);
@@ -87,10 +589,15 @@ const VALUE_FLAGS = new Set([
 	"--critic",
 	"--planner-id",
 	"--planner-resumable",
+	"--architect-id",
+	"--architect-resumable",
+	"--critic-id",
+	"--critic-resumable",
 	"--fallback-reason",
 	"--fallback-attempted-id",
 	"--fallback-stage-n",
 	"--fallback-receipt-path",
+	"--lane-verdict",
 ]);
 
 export function isRalplanArtifactWriteInvocation(args: readonly string[]): boolean {
@@ -180,6 +687,43 @@ async function readActiveRunId(cwd: string, sessionId: string): Promise<string |
 }
 
 /**
+ * Read the authoritative repository binding from ralplan run state and fail closed
+ * when the active cwd no longer matches (handoff / QA / stage write) (#2901).
+ */
+async function enforceRalplanRepositoryBinding(cwd: string, sessionId: string): Promise<RepositoryBinding> {
+	const statePath = ralplanStatePath(cwd, sessionId);
+	const existingRead = await readExistingStateForMutation(statePath);
+	if (existingRead.kind === "corrupt") {
+		throw new RalplanCommandError(
+			2,
+			`existing ralplan state is corrupt or tampered (${existingRead.error}); refusing to proceed at ${statePath}`,
+		);
+	}
+	if (existingRead.kind === "absent") {
+		// No prior seed — capture live authority so subsequent handoffs still have a stamp.
+		return publicRepositoryBinding(await captureRepositoryBinding(cwd, { displayPath: cwd }));
+	}
+	const raw = existingRead.value.repository_binding ?? existingRead.value.repositoryBinding;
+	try {
+		if (raw === undefined) {
+			// Legacy seeds without a field: stamp current cwd and require future writes match it.
+			return publicRepositoryBinding(await captureRepositoryBinding(cwd, { displayPath: cwd }));
+		}
+		const binding = parseRepositoryBinding(raw);
+		await assertCwdMatchesRepositoryBinding(cwd, binding);
+		return publicRepositoryBinding(binding);
+	} catch (error) {
+		if (error instanceof RepositoryBindingError) {
+			throw new RalplanCommandError(2, `ralplan repository binding rejected: ${error.message}`);
+		}
+		throw new RalplanCommandError(
+			2,
+			`ralplan repository binding rejected: ${error instanceof Error ? error.message : String(error)}`,
+		);
+	}
+}
+
+/**
  * Run-state phases that an artifact write must never reopen. Once ralplan has
  * reached a terminal/handed-off phase, a stray `--write` must not regress
  * `current_phase` back to a stage — that would silently re-arm a chain guard or
@@ -213,6 +757,13 @@ async function persistActiveRunId(cwd: string, sessionId: string, runId: string,
 			// "complete"/"handoff" and disarm the Stop hook). PHASE_LOCK only guards same-run writes.
 			const isNewRun = existing.run_id !== runId;
 			const nextPhase = isNewRun ? stage : advanceCurrentPhase(existing.current_phase, stage);
+			if (isNewRun) {
+				// State writes shallow-merge, so clear both HUD verdict sources at the run boundary.
+				delete existing.verdict;
+				for (const key of Object.keys(existing)) {
+					if (key.startsWith("last_review_verdict")) delete existing[key];
+				}
+			}
 			if (
 				existing.run_id === runId &&
 				existing.version === WORKFLOW_STATE_VERSION &&
@@ -231,6 +782,7 @@ async function persistActiveRunId(cwd: string, sessionId: string, runId: string,
 			existing.updated_at = new Date().toISOString();
 			await writeWorkflowEnvelopeAtomic(statePath, existing, {
 				cwd,
+				lockHeld: true,
 				receipt: { cwd, skill: "ralplan", owner: "skc-runtime", command: "skc ralplan persist-run-id", sessionId },
 				audit: { category: "state", verb: "write", owner: "skc-runtime", skill: "ralplan", sessionId },
 			});
@@ -239,9 +791,12 @@ async function persistActiveRunId(cwd: string, sessionId: string, runId: string,
 	);
 }
 
-/* --------------------------- planner run-state --------------------------- */
+/* ---------------------- persisted role-agent run-state --------------------- */
 
-interface PlannerStateUpdate {
+type PersistedRole = "planner" | RalplanReviewLane;
+
+interface PersistedRoleStateUpdate {
+	role: PersistedRole;
 	subagentId?: string;
 	resumable?: boolean;
 	fallbackReason?: string;
@@ -249,6 +804,25 @@ interface PlannerStateUpdate {
 	fallbackStageN?: number;
 	fallbackReceiptPath?: string;
 }
+
+interface LaneVerdictUpdate {
+	lane: RalplanReviewLane;
+	verdict: string;
+	stageN: number;
+}
+
+const PERSISTED_ROLES = ["planner", "architect", "critic"] as const;
+
+const PERSISTED_ROLE_FLAGS: Record<PersistedRole, { id: string; resumable: string }> = {
+	planner: { id: "--planner-id", resumable: "--planner-resumable" },
+	architect: { id: "--architect-id", resumable: "--architect-resumable" },
+	critic: { id: "--critic-id", resumable: "--critic-resumable" },
+};
+
+const LANE_VERDICTS: Record<RalplanReviewLane, ReadonlySet<string>> = {
+	architect: new Set(["CLEAR", "WATCH", "BLOCK"]),
+	critic: new Set(["OKAY", "ITERATE", "REJECT"]),
+};
 
 function parseBooleanFlag(raw: string, flag: string): boolean {
 	if (raw === "true") return true;
@@ -262,7 +836,7 @@ function assertSubagentId(value: string, label: string): void {
 	}
 }
 
-function plannerFlagValue(args: readonly string[], flag: string): string | undefined {
+function roleStateFlagValue(args: readonly string[], flag: string): string | undefined {
 	const value = flagValue(args, flag);
 	if (value === undefined && hasFlag(args, flag)) {
 		throw new RalplanCommandError(2, `missing value for ${flag}.`);
@@ -270,19 +844,64 @@ function plannerFlagValue(args: readonly string[], flag: string): string | undef
 	return value;
 }
 
+function persistedRoleForStage(stage: RalplanStage): PersistedRole | undefined {
+	if (stage === "planner" || stage === "revision") return "planner";
+	if (stage === "architect" || stage === "critic") return stage;
+	return undefined;
+}
+
+function suppliedPersistedRoleFlag(args: readonly string[], role: PersistedRole): string | undefined {
+	const flags = PERSISTED_ROLE_FLAGS[role];
+	if (hasFlag(args, flags.id)) return flags.id;
+	if (hasFlag(args, flags.resumable)) return flags.resumable;
+	return undefined;
+}
+
 /**
- * Parse the optional persisted-Planner metadata flags that may ride alongside a
- * `--write`. Returns `undefined` when none are present so existing writes are
- * unaffected. Throws `RalplanCommandError` on any malformed value. This records
- * a same-session audit/routing hint, not a durable subagent registry.
+ * Parse the optional same-session persisted role-agent metadata that may ride
+ * alongside a `--write`. Planner metadata rides planner/revision stages;
+ * Architect and Critic metadata ride only their matching review lane. This is
+ * an audit/routing hint, not a durable subagent registry.
  */
-function parsePlannerStateArgs(args: readonly string[]): PlannerStateUpdate | undefined {
-	const subagentId = plannerFlagValue(args, "--planner-id");
-	const resumableRaw = plannerFlagValue(args, "--planner-resumable");
-	const fallbackReason = plannerFlagValue(args, "--fallback-reason");
-	const fallbackAttemptedId = plannerFlagValue(args, "--fallback-attempted-id");
-	const fallbackStageNRaw = plannerFlagValue(args, "--fallback-stage-n");
-	const fallbackReceiptPath = plannerFlagValue(args, "--fallback-receipt-path");
+function parsePersistedRoleStateArgs(
+	args: readonly string[],
+	stage: RalplanStage,
+): PersistedRoleStateUpdate | undefined {
+	const role = persistedRoleForStage(stage);
+	for (const candidate of PERSISTED_ROLES) {
+		const suppliedFlag = suppliedPersistedRoleFlag(args, candidate);
+		if (suppliedFlag && candidate !== role) {
+			const expectedStages = candidate === "planner" ? "planner or revision" : candidate;
+			throw new RalplanCommandError(
+				2,
+				`${suppliedFlag} is only valid with --stage ${expectedStages} (received ${stage}).`,
+			);
+		}
+	}
+
+	const fallbackFlagsPresent = [
+		"--fallback-reason",
+		"--fallback-attempted-id",
+		"--fallback-stage-n",
+		"--fallback-receipt-path",
+	].some(flag => hasFlag(args, flag));
+	if (!role) {
+		if (fallbackFlagsPresent) {
+			throw new RalplanCommandError(
+				2,
+				`--fallback-reason is only valid with --stage planner, revision, architect, or critic (received ${stage}).`,
+			);
+		}
+		return undefined;
+	}
+
+	const flags = PERSISTED_ROLE_FLAGS[role];
+	const subagentId = roleStateFlagValue(args, flags.id);
+	const resumableRaw = roleStateFlagValue(args, flags.resumable);
+	const fallbackReason = roleStateFlagValue(args, "--fallback-reason");
+	const fallbackAttemptedId = roleStateFlagValue(args, "--fallback-attempted-id");
+	const fallbackStageNRaw = roleStateFlagValue(args, "--fallback-stage-n");
+	const fallbackReceiptPath = roleStateFlagValue(args, "--fallback-receipt-path");
 
 	const anyPresent = [
 		subagentId,
@@ -294,14 +913,13 @@ function parsePlannerStateArgs(args: readonly string[]): PlannerStateUpdate | un
 	].some(value => value !== undefined);
 	if (!anyPresent) return undefined;
 
-	const update: PlannerStateUpdate = {};
-
+	const update: PersistedRoleStateUpdate = { role };
 	if (subagentId !== undefined) {
-		assertSubagentId(subagentId, "--planner-id");
+		assertSubagentId(subagentId, flags.id);
 		update.subagentId = subagentId;
 	}
 	if (resumableRaw !== undefined) {
-		update.resumable = parseBooleanFlag(resumableRaw, "--planner-resumable");
+		update.resumable = parseBooleanFlag(resumableRaw, flags.resumable);
 	}
 
 	const anyFallback = [fallbackReason, fallbackAttemptedId, fallbackStageNRaw, fallbackReceiptPath].some(
@@ -309,7 +927,7 @@ function parsePlannerStateArgs(args: readonly string[]): PlannerStateUpdate | un
 	);
 	if (anyFallback) {
 		if (!fallbackReason) {
-			throw new RalplanCommandError(2, "--fallback-reason is required when recording planner fallback metadata.");
+			throw new RalplanCommandError(2, `--fallback-reason is required when recording ${role} fallback metadata.`);
 		}
 		if (!KNOWN_FALLBACK_REASONS.has(fallbackReason)) {
 			throw new RalplanCommandError(
@@ -321,13 +939,13 @@ function parsePlannerStateArgs(args: readonly string[]): PlannerStateUpdate | un
 		if (fallbackAttemptedId === undefined) {
 			throw new RalplanCommandError(
 				2,
-				"--fallback-attempted-id is required when recording planner fallback metadata.",
+				`--fallback-attempted-id is required when recording ${role} fallback metadata.`,
 			);
 		}
 		assertSubagentId(fallbackAttemptedId, "--fallback-attempted-id");
 		update.fallbackAttemptedId = fallbackAttemptedId;
 		if (fallbackStageNRaw === undefined) {
-			throw new RalplanCommandError(2, "--fallback-stage-n is required when recording planner fallback metadata.");
+			throw new RalplanCommandError(2, `--fallback-stage-n is required when recording ${role} fallback metadata.`);
 		}
 		update.fallbackStageN = parseStageN(fallbackStageNRaw);
 		if (fallbackReceiptPath !== undefined) {
@@ -341,24 +959,63 @@ function parsePlannerStateArgs(args: readonly string[]): PlannerStateUpdate | un
 	return update;
 }
 
-/** Snake-case projection of a PlannerStateUpdate for state JSON + receipts. Omitted fields stay absent — an unknown `planner_resumable` is encoded by omission, never literal null. */
-function plannerStatePayload(update: PlannerStateUpdate): Record<string, unknown> {
+/** Parse the self-reported review verdict carried by a lane artifact write. */
+function parseLaneVerdictArgs(
+	args: readonly string[],
+	stage: RalplanStage,
+	stageN: number,
+): LaneVerdictUpdate | undefined {
+	const rawVerdict = roleStateFlagValue(args, "--lane-verdict");
+	if (rawVerdict === undefined) return undefined;
+	if (stage !== "architect" && stage !== "critic") {
+		throw new RalplanCommandError(
+			2,
+			`--lane-verdict is only valid with --stage architect or critic (received ${stage}).`,
+		);
+	}
+	const verdict = rawVerdict.trim().toUpperCase();
+	if (!LANE_VERDICTS[stage].has(verdict)) {
+		throw new RalplanCommandError(
+			2,
+			`invalid --lane-verdict for ${stage}: ${rawVerdict}. Expected one of: ${[...LANE_VERDICTS[stage]].join(", ")}.`,
+		);
+	}
+	return { lane: stage, verdict, stageN };
+}
+
+/**
+ * Snake-case projection of persisted role metadata for state JSON + receipts.
+ * Omitted fields stay absent — an unknown resumability value is never encoded
+ * as literal null.
+ */
+function persistedRoleStatePayload(update: PersistedRoleStateUpdate): Record<string, unknown> {
 	const payload: Record<string, unknown> = {};
-	if (update.subagentId !== undefined) payload.planner_subagent_id = update.subagentId;
-	if (update.resumable !== undefined) payload.planner_resumable = update.resumable;
-	if (update.fallbackReason !== undefined) payload.planner_fallback_reason = update.fallbackReason;
-	if (update.fallbackAttemptedId !== undefined) payload.planner_fallback_attempted_id = update.fallbackAttemptedId;
-	if (update.fallbackStageN !== undefined) payload.planner_fallback_stage_n = update.fallbackStageN;
-	if (update.fallbackReceiptPath !== undefined) payload.planner_fallback_receipt_path = update.fallbackReceiptPath;
+	const prefix = update.role;
+	if (update.subagentId !== undefined) {
+		payload[prefix === "planner" ? "planner_subagent_id" : `${prefix}_id`] = update.subagentId;
+	}
+	if (update.resumable !== undefined) payload[`${prefix}_resumable`] = update.resumable;
+	if (update.fallbackReason !== undefined) payload[`${prefix}_fallback_reason`] = update.fallbackReason;
+	if (update.fallbackAttemptedId !== undefined)
+		payload[`${prefix}_fallback_attempted_id`] = update.fallbackAttemptedId;
+	if (update.fallbackStageN !== undefined) payload[`${prefix}_fallback_stage_n`] = update.fallbackStageN;
+	if (update.fallbackReceiptPath !== undefined) {
+		payload[`${prefix}_fallback_receipt_path`] = update.fallbackReceiptPath;
+	}
 	return payload;
 }
 
 /**
- * Merge persisted-Planner metadata into the ralplan run-state JSON. Same-session
- * audit/routing hint only — it records what the caller has already proven and is
- * NOT a durable cross-process subagent registry.
+ * Merge persisted role-agent metadata into the ralplan run-state JSON, optionally only for its active run.
+ * This is a same-session audit/routing hint only; it does not create a durable
+ * cross-process subagent registry, ledger entry, or additional state file.
  */
-async function applyPlannerStateUpdate(cwd: string, sessionId: string, update: PlannerStateUpdate): Promise<void> {
+async function applyPersistedRoleStateUpdate(
+	cwd: string,
+	sessionId: string,
+	update: PersistedRoleStateUpdate,
+	expectedActiveRunId?: string,
+): Promise<boolean> {
 	const statePath = ralplanStatePath(cwd, sessionId);
 	return await withWorkflowStateLock(
 		statePath,
@@ -371,7 +1028,8 @@ async function applyPlannerStateUpdate(cwd: string, sessionId: string, update: P
 				);
 			}
 			let existing: Record<string, unknown> = existingRead.kind === "valid" ? existingRead.value : {};
-			Object.assign(existing, plannerStatePayload(update));
+			if (expectedActiveRunId !== undefined && existing.run_id !== expectedActiveRunId) return false;
+			Object.assign(existing, persistedRoleStatePayload(update));
 			if (typeof existing.skill !== "string") existing.skill = "ralplan";
 			if (typeof existing.active !== "boolean") existing.active = true;
 			if (typeof existing.current_phase !== "string") existing.current_phase = "planner";
@@ -379,9 +1037,59 @@ async function applyPlannerStateUpdate(cwd: string, sessionId: string, update: P
 			existing.updated_at = new Date().toISOString();
 			await writeWorkflowEnvelopeAtomic(statePath, existing, {
 				cwd,
-				receipt: { cwd, skill: "ralplan", owner: "skc-runtime", command: "skc ralplan planner-state", sessionId },
+				lockHeld: true,
+				receipt: {
+					cwd,
+					skill: "ralplan",
+					owner: "skc-runtime",
+					command: `skc ralplan ${update.role}-state`,
+					sessionId,
+				},
 				audit: { category: "state", verb: "write", owner: "skc-runtime", skill: "ralplan", sessionId },
 			});
+			return true;
+		},
+		{ cwd },
+	);
+}
+
+/** Merge a lane's self-reported verdict into the same-session ralplan run state, optionally only for its active run. */
+async function applyLaneVerdictUpdate(
+	cwd: string,
+	sessionId: string,
+	update: LaneVerdictUpdate,
+	expectedActiveRunId?: string,
+): Promise<boolean> {
+	const statePath = ralplanStatePath(cwd, sessionId);
+	return await withWorkflowStateLock(
+		statePath,
+		async () => {
+			const existingRead = await readExistingStateForMutation(statePath);
+			if (existingRead.kind === "corrupt") {
+				throw new RalplanCommandError(
+					2,
+					`existing ralplan state is corrupt or tampered (${existingRead.error}); refusing to overwrite ${statePath}`,
+				);
+			}
+			let existing: Record<string, unknown> = existingRead.kind === "valid" ? existingRead.value : {};
+			if (expectedActiveRunId !== undefined && existing.run_id !== expectedActiveRunId) return false;
+			Object.assign(existing, {
+				last_review_verdict: update.verdict,
+				last_review_verdict_lane: update.lane,
+				last_review_verdict_stage_n: update.stageN,
+			});
+			if (typeof existing.skill !== "string") existing.skill = "ralplan";
+			if (typeof existing.active !== "boolean") existing.active = true;
+			if (typeof existing.current_phase !== "string") existing.current_phase = "planner";
+			existing = migrateWorkflowState(existing, "ralplan").state;
+			existing.updated_at = new Date().toISOString();
+			await writeWorkflowEnvelopeAtomic(statePath, existing, {
+				cwd,
+				lockHeld: true,
+				receipt: { cwd, skill: "ralplan", owner: "skc-runtime", command: "skc ralplan lane-verdict", sessionId },
+				audit: { category: "state", verb: "write", owner: "skc-runtime", skill: "ralplan", sessionId },
+			});
+			return true;
 		},
 		{ cwd },
 	);
@@ -532,28 +1240,19 @@ interface ExistingStageArtifact {
 }
 
 /**
- * Find the most recent `index.jsonl` row for a `(stage, stage_n)` pair so a
- * repeated `--write` can dedupe instead of silently clobbering the artifact and
- * appending a duplicate ledger row. Best-effort: a missing or unreadable index
- * yields `undefined`, treated as "no prior artifact". The ledger is the source of
- * truth for dedup because it is exactly what a duplicate write would corrupt.
+ * Find the most recent complete `index.jsonl` row for a `(stage, stage_n)` pair
+ * in the single ledger snapshot used by the dedupe guard and both budget gates.
+ * A parseable row missing `path` or `sha256` is intentionally treated as missing
+ * so the deterministic on-disk probe can repair the crash gap.
  */
-async function findExistingStageArtifact(
-	cwd: string,
-	sessionId: string,
-	runId: string,
+function findExistingStageArtifact(
+	indexText: string | undefined,
 	stage: RalplanStage,
 	stageN: number,
-): Promise<ExistingStageArtifact | undefined> {
-	const indexPath = path.join(sessionPlansDir(cwd, sessionId), "ralplan", runId, "index.jsonl");
-	let text: string;
-	try {
-		text = await fs.readFile(indexPath, "utf8");
-	} catch {
-		return undefined;
-	}
+): ExistingStageArtifact | undefined {
+	if (indexText === undefined) return undefined;
 	let match: ExistingStageArtifact | undefined;
-	for (const line of text.split(/\r?\n/)) {
+	for (const line of indexText.split(/\r?\n/)) {
 		const trimmed = line.trim();
 		if (!trimmed) continue;
 		let row: unknown;
@@ -575,6 +1274,124 @@ async function findExistingStageArtifact(
 	return match;
 }
 
+interface OnDiskStageArtifact {
+	path: string;
+	sha256: string;
+}
+
+/** Probe the deterministic artifact path left by a crash before ledger append. */
+async function findOnDiskStageArtifact(
+	cwd: string,
+	resolved: Pick<ResolvedArtifactArgs, "sessionId" | "runId" | "stage" | "stageN">,
+): Promise<OnDiskStageArtifact | undefined> {
+	const filePath = path.join(
+		sessionPlansDir(cwd, resolved.sessionId),
+		"ralplan",
+		resolved.runId,
+		`stage-${pad2(resolved.stageN)}-${resolved.stage}.md`,
+	);
+	try {
+		const content = await fs.readFile(filePath, "utf8");
+		return { path: filePath, sha256: createHash("sha256").update(content).digest("hex") };
+	} catch (error) {
+		const code = getErrorCode(error);
+		if (code === "ENOENT" || code === "ENOTDIR") return undefined;
+		throw error;
+	}
+}
+
+/** Ensure a deduplicated final stage still has its byte-identical pending-approval copy. */
+async function ensureFinalPendingApproval(
+	cwd: string,
+	resolved: Pick<ResolvedArtifactArgs, "sessionId" | "runId" | "stageN">,
+	stageArtifact: Pick<OnDiskStageArtifact, "path" | "sha256">,
+): Promise<string> {
+	const pendingApprovalPath = path.join(
+		sessionPlansDir(cwd, resolved.sessionId),
+		"ralplan",
+		resolved.runId,
+		"pending-approval.md",
+	);
+	const stageContent = await fs.readFile(stageArtifact.path);
+	const stageSha256 = createHash("sha256").update(stageContent).digest("hex");
+	if (stageSha256 !== stageArtifact.sha256) {
+		throw new RalplanCommandError(
+			2,
+			`refusing to deduplicate ralplan final stage ${resolved.stageN}: stage artifact sha256 mismatch at ${stageArtifact.path} (ledger sha256=${stageArtifact.sha256}, artifact sha256=${stageSha256}).`,
+		);
+	}
+
+	let pendingContent: Buffer;
+	try {
+		pendingContent = await fs.readFile(pendingApprovalPath);
+	} catch (error) {
+		if (getErrorCode(error) !== "ENOENT") throw error;
+		await writeArtifact(pendingApprovalPath, stageContent.toString("utf8"), {
+			cwd,
+			audit: {
+				category: "artifact",
+				verb: "write",
+				owner: "skc-runtime",
+				skill: "ralplan",
+				sessionId: resolved.sessionId,
+			},
+		});
+		return pendingApprovalPath;
+	}
+
+	const pendingSha256 = createHash("sha256").update(pendingContent).digest("hex");
+	if (!pendingContent.equals(stageContent) || pendingSha256 !== stageSha256) {
+		throw new RalplanCommandError(
+			2,
+			`refusing to deduplicate ralplan final stage ${resolved.stageN}: pending approval content mismatch at ${pendingApprovalPath} (stage sha256=${stageSha256}, pending sha256=${pendingSha256}).`,
+		);
+	}
+	return pendingApprovalPath;
+}
+
+/** Append the missing row for a deterministic artifact that survived a crash gap. */
+async function repairMissingStageArtifactLedger(
+	cwd: string,
+	resolved: Pick<ResolvedArtifactArgs, "sessionId" | "runId" | "stage" | "stageN">,
+	onDisk: OnDiskStageArtifact,
+): Promise<ExistingStageArtifact> {
+	const createdAt = new Date().toISOString();
+	const indexEntry = {
+		stage: resolved.stage,
+		stage_n: resolved.stageN,
+		path: onDisk.path,
+		created_at: createdAt,
+		sha256: onDisk.sha256,
+	};
+	const result = await appendJsonlIdempotent(
+		path.join(sessionPlansDir(cwd, resolved.sessionId), "ralplan", resolved.runId, "index.jsonl"),
+		indexEntry,
+		{
+			cwd,
+			audit: {
+				category: "ledger",
+				verb: "append",
+				owner: "skc-runtime",
+				skill: "ralplan",
+				sessionId: resolved.sessionId,
+			},
+			key: ralplanIndexKey,
+		},
+	);
+	const duplicate = result.duplicate;
+	if (duplicate && typeof duplicate === "object" && !Array.isArray(duplicate)) {
+		const record = duplicate as Record<string, unknown>;
+		if (typeof record.path === "string" && typeof record.sha256 === "string") {
+			return {
+				path: record.path,
+				sha256: record.sha256,
+				createdAt: typeof record.created_at === "string" ? record.created_at : createdAt,
+			};
+		}
+	}
+	return { path: onDisk.path, sha256: onDisk.sha256, createdAt };
+}
+
 /**
  * Read and parse the run's `index.jsonl` rows. Best-effort: returns [] when the
  * file is absent or unreadable so HUD sync never fails on a missing index.
@@ -594,6 +1411,18 @@ async function readRalplanIndexRows(cwd: string, sessionId: string, runId: strin
 	}
 }
 
+/** Read the lane verdict from ralplan run state without making HUD sync fail on state read errors. */
+async function readRalplanLastReviewVerdict(cwd: string, sessionId: string): Promise<string | undefined> {
+	try {
+		const existingRead = await readExistingStateForMutation(ralplanStatePath(cwd, sessionId));
+		return existingRead.kind === "valid" && typeof existingRead.value.last_review_verdict === "string"
+			? existingRead.value.last_review_verdict
+			: undefined;
+	} catch {
+		return undefined;
+	}
+}
+
 async function syncRalplanHud(options: {
 	cwd: string;
 	sessionId: string;
@@ -601,6 +1430,7 @@ async function syncRalplanHud(options: {
 	pendingApproval: boolean;
 	iteration?: number;
 	runId?: string;
+	reviewPassBudget?: number;
 	latestSummary?: string;
 }): Promise<void> {
 	try {
@@ -626,15 +1456,25 @@ async function buildRalplanHud(options: {
 	latestSummary?: string;
 	runId?: string;
 	sessionId?: string;
+	reviewPassBudget?: number;
 }) {
 	let iterationFromIndex: number | undefined;
 	let stages: string | undefined;
+	let architectPasses: number | undefined;
+	let criticPasses: number | undefined;
+	let verdict: string | undefined;
 	if (options.runId && options.sessionId) {
-		const rows = await readRalplanIndexRows(options.cwd, options.sessionId, options.runId);
+		const [rows, lastReviewVerdict] = await Promise.all([
+			readRalplanIndexRows(options.cwd, options.sessionId, options.runId),
+			readRalplanLastReviewVerdict(options.cwd, options.sessionId),
+		]);
+		verdict = lastReviewVerdict;
 		if (rows.length > 0) {
 			const summary = summarizeRalplanIndex(rows);
 			iterationFromIndex = summary.iteration;
 			stages = formatRalplanStagePresence(summary.currentStages);
+			architectPasses = summary.currentStages.filter(stage => stage === "architect").length;
+			criticPasses = summary.currentStages.filter(stage => stage === "critic").length;
 		}
 	}
 	return buildRalplanHudSummary({
@@ -642,6 +1482,10 @@ async function buildRalplanHud(options: {
 		iteration: options.iteration,
 		iterationFromIndex,
 		stages,
+		architectPasses,
+		criticPasses,
+		reviewPassBudget: options.reviewPassBudget,
+		verdict,
 		pendingApproval: options.pendingApproval,
 		latestSummary: options.latestSummary,
 		updatedAt: new Date().toISOString(),
@@ -649,21 +1493,39 @@ async function buildRalplanHud(options: {
 }
 
 async function handleArtifactWrite(args: readonly string[], cwd: string): Promise<RalplanCommandResult> {
-	const plannerState = parsePlannerStateArgs(args);
 	const resolved = await resolveArtifactArgs(args, cwd);
+	const persistedRoleState = parsePersistedRoleStateArgs(args, resolved.stage);
+	const laneVerdict = parseLaneVerdictArgs(args, resolved.stage, resolved.stageN);
+	// Fail closed before stage persistence / path writes when cwd drifted to a sibling repo.
+	const repositoryBinding = await enforceRalplanRepositoryBinding(cwd, resolved.sessionId);
+	// Artifact file paths (when --artifact points at a file) must stay under the bound root.
+	const rawArtifact = flagValue(args, "--artifact");
+	if (rawArtifact && !isRestrictedRoleAgentBash()) {
+		const candidate = path.isAbsolute(rawArtifact) ? rawArtifact : path.resolve(cwd, rawArtifact);
+		try {
+			const stat = await fs.stat(candidate);
+			if (stat.isFile()) {
+				assertPathUnderRepositoryBinding(repositoryBinding, candidate);
+			}
+		} catch (error) {
+			if (error instanceof RepositoryBindingError) {
+				throw new RalplanCommandError(2, `ralplan repository binding rejected: ${error.message}`);
+			}
+			// Non-file / missing path is inline content; resolveArtifactContent already handled it.
+		}
+	}
 	const content = resolved.artifact.endsWith("\n") ? resolved.artifact : `${resolved.artifact}\n`;
 	const sha256 = createHash("sha256").update(content).digest("hex");
+
+	// Read the ledger once before persistence. The dedupe guard and both gates
+	// consume this same snapshot so no additional ledger read can slip between gate
+	// evaluation and persistence.
+	const indexLoad = await loadRalplanIndexForCap(cwd, resolved.sessionId, resolved.runId);
 
 	// Duplicate-write guard: a second `--write` for the same (stage, stage_n) must not
 	// silently clobber the artifact or append a duplicate ledger row. Classify before any
 	// state mutation so a conflict never regresses run-state phase.
-	const existingArtifact = await findExistingStageArtifact(
-		cwd,
-		resolved.sessionId,
-		resolved.runId,
-		resolved.stage,
-		resolved.stageN,
-	);
+	const existingArtifact = findExistingStageArtifact(indexLoad.rawText, resolved.stage, resolved.stageN);
 	if (existingArtifact) {
 		if (existingArtifact.sha256 !== sha256) {
 			throw new RalplanCommandError(
@@ -671,14 +1533,102 @@ async function handleArtifactWrite(args: readonly string[], cwd: string): Promis
 				`refusing to overwrite ralplan ${resolved.stage} stage ${resolved.stageN} at ${existingArtifact.path}: an artifact with different content already exists (existing sha256=${existingArtifact.sha256}, new sha256=${sha256}). Use a new --stage_n to record another pass.`,
 			);
 		}
-		return buildDeduplicatedResult(resolved, existingArtifact, sha256, cwd);
+		if (resolved.stage === "final") await ensureFinalPendingApproval(cwd, resolved, existingArtifact);
+		return buildDeduplicatedResult(resolved, existingArtifact, sha256, cwd, repositoryBinding);
+	}
+
+	// `persistArtifact` writes the artifact before its ledger row. If a process crashed
+	// in that gap, an identical retry repairs the row and remains a normal deduplicated
+	// receipt; a differing retry retains the ordinary no-overwrite refusal.
+	const onDiskArtifact = await findOnDiskStageArtifact(cwd, resolved);
+	if (onDiskArtifact) {
+		if (onDiskArtifact.sha256 !== sha256) {
+			throw new RalplanCommandError(
+				2,
+				`refusing to overwrite ralplan ${resolved.stage} stage ${resolved.stageN} at ${onDiskArtifact.path}: an artifact with different content already exists (existing sha256=${onDiskArtifact.sha256}, new sha256=${sha256}). Use a new --stage_n to record another pass.`,
+			);
+		}
+		if (resolved.stage === "final") await ensureFinalPendingApproval(cwd, resolved, onDiskArtifact);
+		const repairedArtifact = await repairMissingStageArtifactLedger(cwd, resolved, onDiskArtifact);
+		let appliedPersistedRoleState: PersistedRoleStateUpdate | undefined;
+		if (
+			persistedRoleState &&
+			(await applyPersistedRoleStateUpdate(cwd, resolved.sessionId, persistedRoleState, resolved.runId))
+		) {
+			appliedPersistedRoleState = persistedRoleState;
+		}
+		let appliedLaneVerdict: LaneVerdictUpdate | undefined;
+		if (laneVerdict && (await applyLaneVerdictUpdate(cwd, resolved.sessionId, laneVerdict, resolved.runId))) {
+			appliedLaneVerdict = laneVerdict;
+		}
+		return buildDeduplicatedResult(
+			resolved,
+			repairedArtifact,
+			sha256,
+			cwd,
+			repositoryBinding,
+			appliedLaneVerdict,
+			appliedPersistedRoleState,
+		);
+	}
+
+	// Consensus iteration budget (#3165): refuse new planner/revision openers past the cap.
+	// Dedupe returns above so identical re-writes never stuck-signal. Non-openers (architect,
+	// critic, final, …) remain allowed so operators can escalate without auto-implementation.
+	// On-disk opener artifacts floor the count so a wiped/truncated/malformed index.jsonl cannot
+	// under-count and fail open after prior planner/revision writes.
+	//
+	// Gate evaluation, artifact write, and ledger append are sequential within one
+	// `skc ralplan --write` invocation. This is NOT exclusive across processes: no
+	// run-scoped lock or CAS admission exists, intentionally matching #3165's
+	// check-then-persist exposure.
+	const [onDiskOpeners, onDiskLaneArtifacts, iterationLimit, laneLimit] = await Promise.all([
+		countRalplanOnDiskOpeners(cwd, resolved.sessionId, resolved.runId),
+		countRalplanOnDiskLaneArtifacts(cwd, resolved.sessionId, resolved.runId),
+		resolveRalplanMaxIterations(cwd),
+		resolveRalplanMaxReviewPassesPerLane(cwd),
+	]);
+	const capDecision = evaluateRalplanIterationCap({
+		rows: indexLoad.rows,
+		stage: resolved.stage,
+		maxIterations: iterationLimit.maxIterations,
+		iterationFloor: onDiskOpeners,
+	});
+	if (!capDecision.allowed) {
+		return buildPlanningStuckResult({
+			json: resolved.json,
+			stage: resolved.stage,
+			stageN: resolved.stageN,
+			runId: resolved.runId,
+			decision: capDecision,
+			source: iterationLimit.source,
+		});
+	}
+	const laneBudgetDecision = evaluateRalplanReviewLaneBudget({
+		rows: indexLoad.rows,
+		stage: resolved.stage,
+		maxReviewPassesPerLane: laneLimit.maxReviewPassesPerLane,
+		onDiskLaneCounts: onDiskLaneArtifacts,
+	});
+	if (!laneBudgetDecision.allowed) {
+		return buildLaneBudgetStuckResult({
+			json: resolved.json,
+			stage: resolved.stage,
+			stageN: resolved.stageN,
+			runId: resolved.runId,
+			decision: laneBudgetDecision,
+			source: laneLimit.source,
+		});
 	}
 
 	// Keep run-state `current_phase` coherent with the stage being persisted.
 	await persistActiveRunId(cwd, resolved.sessionId, resolved.runId, resolved.stage);
 	const persisted = await persistArtifact(resolved, cwd, content, sha256);
-	if (plannerState) {
-		await applyPlannerStateUpdate(cwd, resolved.sessionId, plannerState);
+	if (persistedRoleState) {
+		await applyPersistedRoleStateUpdate(cwd, resolved.sessionId, persistedRoleState);
+	}
+	if (laneVerdict) {
+		await applyLaneVerdictUpdate(cwd, resolved.sessionId, laneVerdict);
 	}
 	await writeSessionActivityMarker(cwd, resolved.sessionId, { writer: "ralplan-runtime", path: persisted.path });
 	await syncRalplanHud({
@@ -688,34 +1638,51 @@ async function handleArtifactWrite(args: readonly string[], cwd: string): Promis
 		runId: persisted.runId,
 		pendingApproval: persisted.stage === "final",
 		iteration: persisted.stageN,
+		reviewPassBudget: laneLimit.maxReviewPassesPerLane,
 		latestSummary: `persisted ${persisted.stage} stage ${persisted.stageN}`,
 	});
+	const reviewBudgetWarning =
+		laneBudgetDecision.lane && laneBudgetDecision.finalSlot && laneBudgetDecision.maxReviewPassesPerLane > 1
+			? {
+					lane: laneBudgetDecision.lane,
+					passes: laneBudgetDecision.projectedPasses,
+					max: laneBudgetDecision.maxReviewPassesPerLane,
+				}
+			: undefined;
+
 	const payload: Record<string, unknown> = {
 		run_id: persisted.runId,
 		path: persisted.path,
 		stage: persisted.stage,
 		stage_n: persisted.stageN,
 		sha256: persisted.sha256,
+		repository_binding: repositoryBinding,
 		created_at: persisted.createdAt,
 	};
 	if (persisted.pendingApprovalPath) payload.pending_approval_path = persisted.pendingApprovalPath;
-	if (plannerState) payload.planner_state = plannerStatePayload(plannerState);
+	if (persistedRoleState) payload[`${persistedRoleState.role}_state`] = persistedRoleStatePayload(persistedRoleState);
+	if (reviewBudgetWarning) payload.review_budget_warning = reviewBudgetWarning;
+	if (laneVerdict) payload.lane_verdict = { lane: laneVerdict.lane, verdict: laneVerdict.verdict };
+
 	const stdout = resolved.json
 		? `${JSON.stringify(payload, null, 2)}\n`
-		: `Persisted ralplan ${persisted.stage} stage ${persisted.stageN} at ${persisted.path}.\n`;
+		: `${reviewBudgetWarning ? `Warning: ralplan ${reviewBudgetWarning.lane} review budget final slot used (${reviewBudgetWarning.passes}/${reviewBudgetWarning.max}).\n` : ""}Persisted ralplan ${persisted.stage} stage ${persisted.stageN} at ${persisted.path}.\n`;
 	return { status: 0, stdout };
 }
 
 /**
- * Deterministic no-op receipt for an identical repeated `--write`: report the
- * already-persisted artifact without rewriting the file, appending a ledger row, or
- * churning run-state. `deduplicated: true` lets callers distinguish it from a fresh write.
+ * Deterministic receipt for an identical repeated `--write`. Ledger-backed duplicates
+ * do not rewrite artifacts, append rows, or churn run state; a crash-gap repair may
+ * complete riding persisted role/lane metadata before returning this receipt.
  */
 function buildDeduplicatedResult(
 	resolved: ResolvedArtifactArgs,
 	existing: ExistingStageArtifact,
 	sha256: string,
 	cwd: string,
+	repositoryBinding: RepositoryBinding,
+	laneVerdict?: LaneVerdictUpdate,
+	persistedRoleState?: PersistedRoleStateUpdate,
 ): RalplanCommandResult {
 	const payload: Record<string, unknown> = {
 		run_id: resolved.runId,
@@ -723,9 +1690,14 @@ function buildDeduplicatedResult(
 		stage: resolved.stage,
 		stage_n: resolved.stageN,
 		sha256,
+		repository_binding: repositoryBinding,
 		created_at: existing.createdAt,
 		deduplicated: true,
 	};
+	if (laneVerdict) payload.lane_verdict = { lane: laneVerdict.lane, verdict: laneVerdict.verdict };
+	if (persistedRoleState) {
+		payload[`${persistedRoleState.role}_state`] = persistedRoleStatePayload(persistedRoleState);
+	}
 	if (resolved.stage === "final") {
 		payload.pending_approval_path = path.join(
 			sessionPlansDir(cwd, resolved.sessionId),
@@ -774,6 +1746,9 @@ function extractPositionalTask(args: readonly string[]): string {
 }
 
 function resolveConsensusArgs(args: readonly string[], cwd: string): ConsensusHandoffArgs {
+	if (hasFlag(args, "--lane-verdict")) {
+		throw new RalplanCommandError(2, "--lane-verdict is only supported with skc ralplan --write.");
+	}
 	const architectKind = flagValue(args, "--architect")?.trim() || undefined;
 	if (architectKind && !KNOWN_ARCHITECT_KINDS.has(architectKind)) {
 		throw new RalplanCommandError(
@@ -809,7 +1784,7 @@ function resolveConsensusArgs(args: readonly string[], cwd: string): ConsensusHa
 async function seedRalplanState(
 	cwd: string,
 	resolved: ConsensusHandoffArgs,
-): Promise<{ statePath: string; runId: string }> {
+): Promise<{ statePath: string; runId: string; repositoryBinding: RepositoryBinding }> {
 	const statePath = ralplanStatePath(cwd, resolved.sessionId);
 	// Reuse an existing run id when present so a re-invocation of `skc ralplan "task"` doesn't
 	// orphan in-progress artifacts under a fresh run id.
@@ -817,6 +1792,11 @@ async function seedRalplanState(
 	const runId = existingRunId ?? resolved.sessionId ?? defaultRunId();
 	assertSafePathComponent(runId, "run-id");
 	const now = new Date().toISOString();
+	// When an active seed already carries authority, re-entry must match it (fail closed).
+	// Otherwise stamp the current cwd as the durable binding for this run.
+	const repositoryBinding = existingRunId
+		? await enforceRalplanRepositoryBinding(cwd, resolved.sessionId)
+		: publicRepositoryBinding(await captureRepositoryBinding(cwd, { displayPath: cwd }));
 	const payload: Record<string, unknown> = {
 		active: true,
 		current_phase: "planner",
@@ -827,6 +1807,7 @@ async function seedRalplanState(
 		task: resolved.task,
 		run_id: runId,
 		updated_at: now,
+		repository_binding: repositoryBinding,
 	};
 	if (resolved.architectKind) payload.architect_kind = resolved.architectKind;
 	if (resolved.criticKind) payload.critic_kind = resolved.criticKind;
@@ -849,7 +1830,7 @@ async function seedRalplanState(
 		},
 	});
 	await writeSessionActivityMarker(cwd, resolved.sessionId, { writer: "ralplan-runtime", path: statePath });
-	return { statePath, runId };
+	return { statePath, runId, repositoryBinding };
 }
 
 async function handleConsensusHandoff(args: readonly string[], cwd: string): Promise<RalplanCommandResult> {
@@ -857,7 +1838,7 @@ async function handleConsensusHandoff(args: readonly string[], cwd: string): Pro
 	if (!resolved.task) {
 		throw new RalplanCommandError(2, 'skc ralplan requires a task description, e.g. `skc ralplan "<task>"`.');
 	}
-	const { statePath, runId } = await seedRalplanState(cwd, resolved);
+	const { statePath, runId, repositoryBinding } = await seedRalplanState(cwd, resolved);
 	const mode = resolved.deliberate ? "deliberate" : "short";
 	await syncRalplanHud({
 		cwd,
@@ -875,6 +1856,7 @@ async function handleConsensusHandoff(args: readonly string[], cwd: string): Pro
 		state_path: statePath,
 		run_id: runId,
 		handoff: "/skill:ralplan",
+		repository_binding: repositoryBinding,
 	};
 	const stdout = resolved.json
 		? renderCliWriteReceipt({ ok: true, ...summary })

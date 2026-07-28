@@ -1,3 +1,8 @@
+import {
+	isModelProfileError,
+	type ModelProfileErrorCode,
+	type ModelProfileErrorDetails,
+} from "../config/model-profile-contract";
 export type SdkStartupPhase = "registration" | "startup";
 
 export type SdkStartupReason = "disabled" | "ineligible" | "factory_absent" | "runner_absent" | "pending" | "failed";
@@ -6,6 +11,8 @@ export interface SdkStartupFailure {
 	phase: SdkStartupPhase;
 	reason: SdkStartupReason;
 	message: string;
+	code?: ModelProfileErrorCode;
+	details?: ModelProfileErrorDetails;
 }
 
 export type SdkStartupResult = { status: "started" } | { status: "failed"; failure: SdkStartupFailure };
@@ -15,6 +22,12 @@ const MAX_MESSAGE_BYTES = 512;
 
 /** Internal symbols for lifecycle-only SDK startup construction and bus wiring. */
 export const lifecycleStartupCapabilityOption: unique symbol = Symbol("lifecycleStartupCapability");
+/**
+ * Internal option carrying the startup budget for ACP lifecycle MCP launches.
+ * Only set when the lifecycle request actually supplies `mcpServers`, so the
+ * longer ceiling never leaks to ordinary CLI/SDK `mcpConfigPath` consumers.
+ */
+export const lifecycleMcpStartupTimeoutOption: unique symbol = Symbol("lifecycleMcpStartupTimeout");
 const lifecycleStartupCapabilityOnApi: unique symbol = Symbol("lifecycleStartupCapabilityOnApi");
 
 export function attachLifecycleStartupCapability(api: object, capability: SdkStartupCapability): void {
@@ -134,7 +147,8 @@ export function normalizeSdkStartupFailure(
 							? "SDK startup did not complete before readiness cutoff."
 							: FALLBACK_MESSAGE;
 	const message = sanitizeSdkStartupMessage(error, knownSecrets);
-	return { phase, reason, message: message === FALLBACK_MESSAGE ? fallback : message };
+	const profileError = isModelProfileError(error) ? { code: error.code, details: error.details } : {};
+	return { phase, reason, message: message === FALLBACK_MESSAGE ? fallback : message, ...profileError };
 }
 
 /** Collect process-scoped credentials without exposing a raw-secret API. */

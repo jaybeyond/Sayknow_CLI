@@ -1,11 +1,16 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { getStreamFirstEventTimeoutMs, getStreamIdleTimeoutMs } from "../src/utils/idle-iterator";
+import {
+	getOpenAIStreamIdleTimeoutMs,
+	getProviderFirstEventTimeoutFallbackMs,
+	getStreamFirstEventTimeoutMs,
+	getStreamIdleTimeoutMs,
+} from "../src/utils/idle-iterator";
 
 /**
  * Per-provider fallback overrides on the stream-watchdog helpers.
  *
- * These are the gear that lets `google-gemini-cli` widen its first-event floor
- * beyond the 100s global default without forcing every other provider to wait
+ * These helpers let selected slow-first-token providers widen their first-event
+ * floor beyond the 100s global default without forcing every provider to wait
  * just as long. Tests pin the precedence contract callers depend on:
  * caller option > env var > per-provider fallback > base default.
  */
@@ -13,6 +18,7 @@ import { getStreamFirstEventTimeoutMs, getStreamIdleTimeoutMs } from "../src/uti
 const ENV_KEYS = [
 	"PI_STREAM_IDLE_TIMEOUT_MS",
 	"PI_OPENAI_STREAM_IDLE_TIMEOUT_MS",
+	"SKC_OPENAI_STREAM_IDLE_TIMEOUT_MS",
 	"PI_STREAM_FIRST_EVENT_TIMEOUT_MS",
 ] as const;
 
@@ -36,6 +42,15 @@ afterEach(() => {
 	}
 });
 
+describe("getProviderFirstEventTimeoutFallbackMs(provider)", () => {
+	it("gives Kimi Code one continuous 300-second first-event window", () => {
+		expect(getProviderFirstEventTimeoutFallbackMs("kimi-code")).toBe(300_000);
+	});
+
+	it("does not widen unrelated providers", () => {
+		expect(getProviderFirstEventTimeoutFallbackMs("anthropic")).toBeUndefined();
+	});
+});
 describe("getStreamIdleTimeoutMs(fallbackMs)", () => {
 	it("returns the per-provider fallback when env vars are unset", () => {
 		expect(getStreamIdleTimeoutMs(300_000)).toBe(300_000);
@@ -49,6 +64,35 @@ describe("getStreamIdleTimeoutMs(fallbackMs)", () => {
 	it("treats PI_STREAM_IDLE_TIMEOUT_MS=0 as a watchdog disable", () => {
 		Bun.env.PI_STREAM_IDLE_TIMEOUT_MS = "0";
 		expect(getStreamIdleTimeoutMs(300_000)).toBeUndefined();
+	});
+
+	it("honors the documented SKC_OPENAI_STREAM_IDLE_TIMEOUT_MS override", () => {
+		Bun.env.SKC_OPENAI_STREAM_IDLE_TIMEOUT_MS = "77";
+		expect(getStreamIdleTimeoutMs(300_000)).toBe(77);
+	});
+
+	it("resolves SKC-first: SKC_OPENAI_STREAM_IDLE_TIMEOUT_MS wins over legacy PI_STREAM_IDLE_TIMEOUT_MS", () => {
+		Bun.env.SKC_OPENAI_STREAM_IDLE_TIMEOUT_MS = "77";
+		Bun.env.PI_STREAM_IDLE_TIMEOUT_MS = "42";
+		expect(getStreamIdleTimeoutMs(300_000)).toBe(77);
+	});
+
+	it("treats SKC_OPENAI_STREAM_IDLE_TIMEOUT_MS=0 as a watchdog disable", () => {
+		Bun.env.SKC_OPENAI_STREAM_IDLE_TIMEOUT_MS = "0";
+		expect(getStreamIdleTimeoutMs(300_000)).toBeUndefined();
+	});
+});
+
+describe("getOpenAIStreamIdleTimeoutMs()", () => {
+	it("honors the documented SKC_OPENAI_STREAM_IDLE_TIMEOUT_MS first", () => {
+		Bun.env.SKC_OPENAI_STREAM_IDLE_TIMEOUT_MS = "88";
+		Bun.env.PI_OPENAI_STREAM_IDLE_TIMEOUT_MS = "42";
+		expect(getOpenAIStreamIdleTimeoutMs()).toBe(88);
+	});
+
+	it("falls back to the legacy PI_OPENAI_STREAM_IDLE_TIMEOUT_MS alias", () => {
+		Bun.env.PI_OPENAI_STREAM_IDLE_TIMEOUT_MS = "42";
+		expect(getOpenAIStreamIdleTimeoutMs()).toBe(42);
 	});
 });
 

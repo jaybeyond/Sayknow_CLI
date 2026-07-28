@@ -1405,6 +1405,51 @@ describe("coordinator runtime state sidecar", () => {
 		});
 		expect(payload.source).not.toBe("process_postmortem");
 	});
+	it("publishes the owner verdict before preserving terminal agent evidence", async () => {
+		const root = await tempRoot();
+		const stateFile = path.join(root, "state.json");
+		const sessionId = "preserved-owner-session";
+		const generation = await replaceOwnerGeneration(root, sessionId, "preserved-owner-generation");
+		await createOwnerIntent(root, {
+			generation,
+			session_id: sessionId,
+			server_key: "opaque-owner",
+			expected_terminal: { signal: "SIGTERM", result: "owner_term_then_session_cleanup" },
+			dispatch_id: "operator-dispatch",
+			created_at: "2026-01-01T00:00:00.000Z",
+			expires_at: "2099-01-01T00:00:00.000Z",
+		});
+		process.env[SKC_COORDINATOR_SESSION_STATE_FILE_ENV] = stateFile;
+		process.env[SKC_COORDINATOR_SESSION_ID_ENV] = sessionId;
+		await Bun.write(
+			stateFile,
+			JSON.stringify({
+				schema_version: 1,
+				session_id: sessionId,
+				state: "completed",
+				cwd: root,
+				workdir: root,
+				session_file: null,
+				final_response: { source: "agent_end", text: "Already done" },
+			}),
+		);
+
+		await persistCoordinatorRuntimeStateFromPostmortem(postmortem.Reason.SIGTERM, {
+			sessionId,
+			cwd: root,
+			sessionFile: null,
+			ownerTerminal: { generation, stateDir: root, socketKey: "opaque-owner" },
+		});
+
+		expect(await readPayload(stateFile)).toMatchObject({
+			state: "completed",
+			final_response: { source: "agent_end", text: "Already done" },
+		});
+		expect(await readJson(lifecyclePaths(root, sessionId, generation).verdictFile)).toMatchObject({
+			classification: "expected_operator_shutdown",
+			observer: "sidecar",
+		});
+	});
 
 	it("does not overwrite richer terminal launch_error evidence during postmortem", async () => {
 		const root = await tempRoot();

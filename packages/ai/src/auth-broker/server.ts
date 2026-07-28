@@ -16,6 +16,7 @@ import { AuthBrokerRefresher, type AuthBrokerRefresherSchedule } from "./refresh
 import type {
 	CredentialDisableResponse,
 	CredentialIfAbsentUploadResponse,
+	CredentialRefreshRequest,
 	CredentialRefreshResponse,
 	CredentialUploadResponse,
 	HealthzResponse,
@@ -33,7 +34,11 @@ import {
 	DEFAULT_SERVER_IDLE_TIMEOUT_S,
 	DEFAULT_STREAM_KEEPALIVE_MS,
 } from "./types";
-import { credentialDisableRequestSchema, credentialUploadRequestSchema } from "./wire-schemas";
+import {
+	credentialDisableRequestSchema,
+	credentialRefreshRequestSchema,
+	credentialUploadRequestSchema,
+} from "./wire-schemas";
 
 export interface AuthBrokerServerOptions {
 	/** Underlying credential storage (wraps the local SQLite store on the broker). */
@@ -561,7 +566,10 @@ export function startAuthBroker(opts: AuthBrokerServerOptions): AuthBrokerServer
 				if (refreshMatch) {
 					const id = Number.parseInt(refreshMatch[1], 10);
 					try {
-						const entry = await opts.storage.refreshCredentialById(id, req.signal);
+						const parsed = await parseBody(req, credentialRefreshRequestSchema, { allowEmpty: true });
+						if (!parsed.ok) return parsed.response;
+						const refreshRequest: CredentialRefreshRequest = parsed.data;
+						const entry = await opts.storage.refreshCredentialById(id, req.signal, refreshRequest);
 						const body: CredentialRefreshResponse = { entry };
 						logger.info("auth-broker credential refreshed", {
 							id,

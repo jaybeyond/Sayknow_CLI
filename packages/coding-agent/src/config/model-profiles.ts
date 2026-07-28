@@ -1,9 +1,8 @@
 import { sanitizeText } from "@sayknow-cli/utils";
-import type { SkcModelAssignmentTargetId } from "./model-registry";
 import { type ModelSelectorValue, normalizeModelSelectorValue } from "./model-selector-value";
-import type { ModelsConfig } from "./models-config-schema";
+import type { ModelsConfig, SKC_MODEL_ASSIGNMENT_TARGET_IDS } from "./models-config-schema";
 
-export type ModelProfileRole = SkcModelAssignmentTargetId;
+export type ModelProfileRole = (typeof SKC_MODEL_ASSIGNMENT_TARGET_IDS)[number];
 
 export interface ModelProfileDefinition {
 	name: string;
@@ -101,11 +100,11 @@ export const BUILTIN_MODEL_PROFILES: readonly ModelProfileDefinition[] = [
 		architect: "opencode-go/deepseek-v4-pro",
 	}),
 	profile("claude-opus", ["anthropic"], {
-		default: "anthropic/claude-opus-4-8:xhigh",
+		default: "anthropic/claude-opus-5:xhigh",
 		executor: "anthropic/claude-sonnet-5",
-		planner: "anthropic/claude-opus-4-8:low",
-		critic: "anthropic/claude-opus-4-8:high",
-		architect: "anthropic/claude-opus-4-8:xhigh",
+		planner: "anthropic/claude-opus-5:low",
+		critic: "anthropic/claude-opus-5:high",
+		architect: "anthropic/claude-opus-5:xhigh",
 	}),
 	profile("claude-fable", ["anthropic"], {
 		default: "anthropic/claude-fable-5:xhigh",
@@ -208,6 +207,27 @@ export const BUILTIN_MODEL_PROFILES: readonly ModelProfileDefinition[] = [
 		critic: "xai/grok-4.3:xhigh",
 		architect: "xai/grok-4.3:xhigh",
 	}),
+	profile("grok-45-eco", ["xai"], {
+		default: "xai/grok-4.5:low",
+		executor: "xai/grok-4.5:minimal",
+		planner: "xai/grok-4.5:low",
+		critic: "xai/grok-4.5:medium",
+		architect: "xai/grok-4.5:high",
+	}),
+	profile("grok-45-medium", ["xai"], {
+		default: "xai/grok-4.5:medium",
+		executor: "xai/grok-4.5:low",
+		planner: "xai/grok-4.5:medium",
+		critic: "xai/grok-4.5:high",
+		architect: "xai/grok-4.5:high",
+	}),
+	profile("grok-45-pro", ["xai"], {
+		default: "xai/grok-4.5:high",
+		executor: "xai/grok-4.5:medium",
+		planner: "xai/grok-4.5:high",
+		critic: "xai/grok-4.5:high",
+		architect: "xai/grok-4.5:high",
+	}),
 	profile("grok-build-pro", ["grok-build"], {
 		default: "grok-build/grok-composer-2.5-fast",
 		executor: "grok-build/grok-build",
@@ -257,8 +277,22 @@ export const BUILTIN_MODEL_PROFILES: readonly ModelProfileDefinition[] = [
 		critic: "minimax-code/minimax-m3:xhigh",
 		architect: "minimax-code/minimax-m3:xhigh",
 	}),
+	profile("alibaba-token-plan-balanced", ["alibaba-token-plan"], {
+		default: "alibaba-token-plan/qwen3.8-max-preview:medium",
+		executor: "alibaba-token-plan/deepseek-v4-pro:xhigh",
+		planner: "alibaba-token-plan/glm-5.2:high",
+		architect: "alibaba-token-plan/qwen3.8-max-preview:xhigh",
+		critic: "alibaba-token-plan/glm-5.2:high",
+	}),
+	profile("alibaba-token-plan-qwenmaxxing", ["alibaba-token-plan"], {
+		default: "alibaba-token-plan/qwen3.8-max-preview:medium",
+		executor: "alibaba-token-plan/qwen3.8-max-preview:low",
+		planner: "alibaba-token-plan/qwen3.8-max-preview:medium",
+		architect: "alibaba-token-plan/qwen3.8-max-preview:xhigh",
+		critic: "alibaba-token-plan/qwen3.8-max-preview:xhigh",
+	}),
 	profile("opus-codex", ["anthropic", "openai-codex"], {
-		default: "anthropic/claude-opus-4-8:xhigh",
+		default: "anthropic/claude-opus-5:xhigh",
 		executor: "openai-codex/gpt-5.6-terra:low",
 		planner: "anthropic/claude-sonnet-5",
 		critic: "openai-codex/gpt-5.6-sol:xhigh",
@@ -274,8 +308,8 @@ export const BUILTIN_MODEL_PROFILES: readonly ModelProfileDefinition[] = [
 	profile("fable-opus-codex", ["anthropic", "openai-codex"], {
 		default: "anthropic/claude-fable-5:high",
 		executor: "openai-codex/gpt-5.6-terra:medium",
-		planner: "anthropic/claude-opus-4-8:medium",
-		critic: "anthropic/claude-opus-4-8:high",
+		planner: "anthropic/claude-opus-5:medium",
+		critic: "anthropic/claude-opus-5:high",
 		architect: "openai-codex/gpt-5.6-sol:xhigh",
 	}),
 ];
@@ -308,6 +342,9 @@ const PROFILE_PRESENTATION: Record<string, ModelProfilePresentation> = {
 	"grok-eco": { displayName: "Grok Eco", providerGroup: "GROK" },
 	"grok-medium": { displayName: "Grok Medium", providerGroup: "GROK" },
 	"grok-pro": { displayName: "Grok Pro", providerGroup: "GROK" },
+	"grok-45-eco": { displayName: "Grok 4.5 Eco", providerGroup: "GROK" },
+	"grok-45-medium": { displayName: "Grok 4.5 Medium", providerGroup: "GROK" },
+	"grok-45-pro": { displayName: "Grok 4.5 Pro", providerGroup: "GROK" },
 	"grok-build-pro": { displayName: "Grok Build Pro", providerGroup: "GROK" },
 	"cursor-eco": { displayName: "Cursor Eco", providerGroup: "CURSOR" },
 	"cursor-medium": { displayName: "Cursor Medium", providerGroup: "CURSOR" },
@@ -315,6 +352,8 @@ const PROFILE_PRESENTATION: Record<string, ModelProfilePresentation> = {
 	"minimax-eco": { displayName: "MiniMax Eco", providerGroup: "MINIMAX" },
 	"minimax-medium": { displayName: "MiniMax Medium", providerGroup: "MINIMAX" },
 	"minimax-pro": { displayName: "MiniMax Pro", providerGroup: "MINIMAX" },
+	"alibaba-token-plan-balanced": { displayName: "Balanced", providerGroup: "ALIBABA TOKEN PLAN" },
+	"alibaba-token-plan-qwenmaxxing": { displayName: "QwenMaxxing", providerGroup: "ALIBABA TOKEN PLAN" },
 	"opus-codex": { displayName: "Opus + Codex", providerGroup: "COMBOS" },
 	"codex-opencodego": { displayName: "Codex + OpenCodeGo", providerGroup: "COMBOS" },
 	"fable-opus-codex": { displayName: "Fable + Opus + Codex", providerGroup: "COMBOS" },
@@ -330,6 +369,7 @@ const PROFILE_GROUP_ORDER = [
 	"GROK",
 	"CURSOR",
 	"MINIMAX",
+	"ALIBABA TOKEN PLAN",
 	"COMBOS",
 ];
 
@@ -347,6 +387,7 @@ const PROFILE_RECOMMENDATIONS: Record<string, string> = {
 	"grok-build": "grok-build-pro",
 	cursor: "cursor-medium",
 	"minimax-code": "minimax-medium",
+	"alibaba-token-plan": "alibaba-token-plan-balanced",
 };
 
 export function getModelProfilePresentation(

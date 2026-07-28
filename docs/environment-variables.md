@@ -19,8 +19,13 @@ Most runtime lookups use `$env` from `@sayknow-cli/utils` (`packages/utils/src/e
 3. Agent `.env` (`~/.skc/agent/.env`, respecting `SKC_CONFIG_DIR` / `SKC_CODING_AGENT_DIR`) for keys not already set
 4. Config-root `.env` (`~/.skc/.env`, respecting `SKC_CONFIG_DIR`) for keys not already set
 5. Home `.env` (`~/.env`) for keys not already set
+6. Login shell rc files (`~/.zshenv`, `~/.zprofile`, `~/.zshrc`, `~/.bash_profile`, `~/.bashrc`) for keys not already set
 
-Additional rule inside each `.env` file: `SKC_*` keys are mirrored to `SKC_*` keys in that parsed file.
+Step 6 does not execute those files. Each is scanned line by line for literal `export NAME=value` or `NAME=value` assignments, and surrounding quotes are stripped. Values that are not literal are dropped rather than resolved: a command substitution such as `export FOO=$(...)` is discarded.
+
+Because the scan is per line and has no notion of shell block structure, it does not reflect whether an assignment would actually run. An assignment nested in an `if` or a function body is read exactly like a top-level one, so a value you guarded behind something like `if [ -n "$CI" ]` in `~/.zshrc` still reaches `$env` unconditionally. Only assignments that do not start their own line — for example one packed after `case ... in` on the same line — are missed.
+
+Keys are used exactly as written. A `PI_`-prefixed key in a `.env` file is not mirrored to its `SKC_` counterpart, or the reverse — where both spellings are accepted it is because the reading code asks for both names.
 
 ---
 
@@ -34,7 +39,7 @@ These are consumed via `getEnvApiKey()` (`packages/ai/src/stream.ts`) unless not
 | ------------------------------- | ------------------------------------------------ | -------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
 | `ANTHROPIC_OAUTH_TOKEN`         | Anthropic API auth                               | Using Anthropic with OAuth token auth                          | Takes precedence over `ANTHROPIC_API_KEY` for provider auth resolution                              |
 | `ANTHROPIC_API_KEY`             | Anthropic API auth                               | Using Anthropic without OAuth token                            | Fallback after `ANTHROPIC_OAUTH_TOKEN`                                                              |
-| `ANTHROPIC_FOUNDRY_API_KEY`     | Anthropic via Azure Foundry / enterprise gateway | `ANTHROPIC_MODEL_CODE_USE_FOUNDRY` enabled                              | Takes precedence over `ANTHROPIC_OAUTH_TOKEN` and `ANTHROPIC_API_KEY` when Foundry mode is enabled  |
+| `ANTHROPIC_FOUNDRY_API_KEY`     | Anthropic via Azure Foundry / enterprise gateway | `CLAUDE_CODE_USE_FOUNDRY` enabled                              | Takes precedence over `ANTHROPIC_OAUTH_TOKEN` and `ANTHROPIC_API_KEY` when Foundry mode is enabled  |
 | `OPENAI_API_KEY`                | OpenAI auth                                      | Using OpenAI-family providers without explicit apiKey argument | Used by OpenAI Completions/Responses providers                                                      |
 | `GEMINI_API_KEY`                | Google Gemini auth                               | Using `google` provider models                                 | Primary key for Gemini provider mapping                                                             |
 | `GOOGLE_API_KEY`                | Gemini image tool auth fallback                  | Using `gemini_image` tool without `GEMINI_API_KEY`             | Used by coding-agent image tool fallback path                                                       |
@@ -67,11 +72,13 @@ These are consumed via `getEnvApiKey()` (`packages/ai/src/stream.ts`) unless not
 | `QWEN_OAUTH_TOKEN`              | Qwen Portal auth                                 | Using `qwen-portal` with OAuth token                           | Takes precedence over `QWEN_PORTAL_API_KEY`                                                         |
 | `QWEN_PORTAL_API_KEY`           | Qwen Portal auth                                 | Using `qwen-portal` with API key                               | Fallback after `QWEN_OAUTH_TOKEN`                                                                   |
 | `ZENMUX_API_KEY`                | ZenMux auth                                      | Using `zenmux` provider                                        | Used for ZenMux OpenAI and Anthropic-compatible routes                                              |
+| `OPENGATEWAY_API_KEY`           | OpenGateway (by Sionic AI) auth                  | Using `opengateway` provider                                  | OpenAI-compatible gateway; models discovered via `/v1/models`                                       |
+| `BIZROUTER_API_KEY`             | BizRouter auth                                    | Using `bizrouter` provider                                    | Korean enterprise LLM gateway; OpenAI-compatible, models discovered via `/v1/models`                |
 | `VLLM_API_KEY`                  | vLLM auth/discovery opt-in                       | Using `vllm` provider (local OpenAI-compatible servers)        | Any non-empty value works for no-auth local servers                                                 |
 | `CURSOR_ACCESS_TOKEN`           | Cursor provider auth                             | Using Cursor provider                                          |                                                                                                     |
 | `AI_GATEWAY_API_KEY`            | Vercel AI Gateway auth                           | Using `vercel-ai-gateway` provider                             |                                                                                                     |
 | `CLOUDFLARE_AI_GATEWAY_API_KEY` | Cloudflare AI Gateway auth                       | Using `cloudflare-ai-gateway` provider                         | Base URL must be configured as `https://gateway.ai.cloudflare.com/v1/<account>/<gateway>/anthropic` |
-| `ALIBABA_CODING_PLAN_API_KEY`   | Alibaba Coding Plan auth                         | Using `alibaba-coding-plan` provider                           |                                                                                                     |
+| `ALIBABA_TOKEN_PLAN_API_KEY`    | Alibaba Token Plan auth                          | Using `alibaba-token-plan` provider                            |                                                                                                     |
 | `DEEPSEEK_API_KEY`              | DeepSeek auth                                    | Using DeepSeek models                                          |                                                                                                     |
 | `KILO_API_KEY`                  | Kilo auth                                        | Using Kilo models                                              |                                                                                                     |
 | `OLLAMA_CLOUD_API_KEY`          | Ollama Cloud auth                                | Using `ollama-cloud` provider                                  |                                                                                                     |
@@ -110,27 +117,27 @@ When more than one OAuth credential is stored for the same provider (e.g. severa
 
 ### Anthropic Foundry Gateway (Azure / enterprise proxy)
 
-When `ANTHROPIC_MODEL_CODE_USE_FOUNDRY` is enabled, Anthropic requests switch to Foundry mode:
+When `CLAUDE_CODE_USE_FOUNDRY` is enabled, Anthropic requests switch to Foundry mode:
 
 - Base URL resolves from `FOUNDRY_BASE_URL` (fallback remains model/default base URL if unset).
 - API key resolution for provider `anthropic` becomes:
   `ANTHROPIC_FOUNDRY_API_KEY` → `ANTHROPIC_OAUTH_TOKEN` → `ANTHROPIC_API_KEY`.
 - `ANTHROPIC_CUSTOM_HEADERS` is parsed as comma/newline-separated `key: value` pairs and merged into request headers.
 - TLS client/server material can be injected from env values:
-  `NODE_EXTRA_CA_CERTS`, `ANTHROPIC_MODEL_CODE_CLIENT_CERT`, `ANTHROPIC_MODEL_CODE_CLIENT_KEY`.
+  `NODE_EXTRA_CA_CERTS`, `CLAUDE_CODE_CLIENT_CERT`, `CLAUDE_CODE_CLIENT_KEY`.
   Each accepts either:
   - a filesystem path to PEM content, or
   - inline PEM (including escaped `\n` sequences).
 
 | Variable                    | Value type                                     | Behavior                                                                      |
 | --------------------------- | ---------------------------------------------- | ----------------------------------------------------------------------------- |
-| `ANTHROPIC_MODEL_CODE_USE_FOUNDRY`   | Boolean-like string (`1`, `true`, `yes`, `on`) | Enables Foundry mode for Anthropic provider                                   |
+| `CLAUDE_CODE_USE_FOUNDRY`   | Boolean-like string (`1`, `true`, `yes`, `on`) | Enables Foundry mode for Anthropic provider                                   |
 | `FOUNDRY_BASE_URL`          | URL string                                     | Anthropic endpoint base URL in Foundry mode                                   |
 | `ANTHROPIC_FOUNDRY_API_KEY` | Token string                                   | Used for `Authorization: Bearer <token>`                                      |
 | `ANTHROPIC_CUSTOM_HEADERS`  | Header list string                             | Extra headers; format `header-a: value, header-b: value` or newline-separated |
 | `NODE_EXTRA_CA_CERTS`       | PEM path or inline PEM                         | Extra CA chain for server certificate validation                              |
-| `ANTHROPIC_MODEL_CODE_CLIENT_CERT`   | PEM path or inline PEM                         | mTLS client certificate                                                       |
-| `ANTHROPIC_MODEL_CODE_CLIENT_KEY`    | PEM path or inline PEM                         | mTLS client private key (must be paired with cert)                            |
+| `CLAUDE_CODE_CLIENT_CERT`   | PEM path or inline PEM                         | mTLS client certificate                                                       |
+| `CLAUDE_CODE_CLIENT_KEY`    | PEM path or inline PEM                         | mTLS client private key (must be paired with cert)                            |
 
 ### Amazon Bedrock
 
@@ -236,11 +243,13 @@ providers:
 
 `skc --tmux` launches the interactive TUI inside a fresh SKC-managed tmux session. Plain `skc --tmux` does not auto-attach a scoped managed session from the same project/branch; use an explicit resume path such as `skc --tmux --continue`, `skc --tmux --resume`, or `skc session attach <session>` when you intend to continue existing tmux context. Older-version sessions are not auto-attached after upgrades. When SKC creates a session it applies a profile that is **scoped to the SKC session only** (it never runs `set -g` / global tmux options), including:
 
-- `mouse on` — enables mouse-wheel scrolling into tmux copy-mode (history/scrollback).
+- `mouse on` — enables tmux copy-mode scrolling when SKC mouse support is disabled.
 - `set-clipboard on` and a readable copy-mode `mode-style`.
 - SKC ownership/identity tags (`@skc-profile`, version, branch/project markers).
 
-This profile is applied on macOS, Linux, WSL (Linux), and native Windows when a compatible tmux provider is available. It is applied **only to sessions SKC itself creates**. If you start tmux yourself and then run `skc` inside it, SKC leaves your tmux configuration untouched — add `set -g mouse on` to your own `~/.tmux.conf`, or relaunch with `skc --tmux` to get the managed profile.
+This profile is applied on macOS, Linux, WSL (Linux), and native Windows when a compatible tmux provider is available. It is applied **only to sessions SKC itself creates**. If you start tmux yourself and then run `skc` inside it, SKC leaves your tmux configuration untouched. SKC's own mouse support is disabled by default, so the host terminal or tmux retains wheel and selection behavior. Add `set -g mouse on` to your own `~/.tmux.conf` when you want tmux copy-mode scrolling.
+
+Set `mouse.enabled: true` to let SKC capture the wheel for virtual session scrolling (three rows per notch, not a full page). When SKC owns mouse input, dragging across rendered text highlights the selection and copies it to the system clipboard on release.
 
 | Variable | Behavior |
 | --- | --- |
@@ -248,9 +257,9 @@ This profile is applied on macOS, Linux, WSL (Linux), and native Windows when a 
 | `SKC_TMUX_SESSION` | Explicit tmux session name override for `--tmux` startup. Use a unique value (for example `SKC_TMUX_SESSION=skc-fresh-$(date +%s) skc --tmux`) to force a fresh named session. |
 | `SKC_TMUX_COMMAND` | tmux binary/name override for every SKC tmux flow (`SKC_TEAM_TMUX_COMMAND` is honored as a team-path alias). This is not a shell command line; include only the executable path/name, not flags. |
 | `SKC_TMUX_PROFILE` | Set `0`/`false`/`off` to apply only the required ownership tags and skip the scroll/mouse/clipboard profile |
-| `SKC_MOUSE` | Set `0`/`false`/`off` to skip `mouse on`, leaving wheel scrolling to the host terminal instead of tmux copy-mode |
-| `SKC_PSMUX_COMMAND` | Force the resolved multiplexer to be treated as psmux (skips the version-banner probe). Useful when the binary is a thin wrapper that does not advertise `psmux` in `-V` output. |
-| `SKC_PSMUX_DETECTION` | Set `0`/`false`/`off` to skip psmux detection entirely. SKC falls back to treating the resolved command as plain tmux. |
+| `SKC_MOUSE` | Set `0`/`false`/`off` to skip the managed profile's tmux `mouse on`; this does not disable SKC's own mouse support |
+| `SKC_PSMUX_COMMAND` | Identifies a psmux wrapper for Windows alias resolution. The value must resolve to the same executable identity as the selected `tmux` command; unresolved or conflicting evidence fails closed. |
+| `SKC_PSMUX_DETECTION` | Set `0`/`false`/`off` to skip banner-based psmux detection. Executable-name and alias-identity safety checks still apply. |
 | `SKC_PSMUX_FORCE_DETECT` | Set `1`/`true`/`on` to re-probe the multiplexer on every call instead of caching the per-process verdict. |
 
 #### Windows psmux support
@@ -273,12 +282,9 @@ SKC does not currently expose a supported `SKC_TMUX_NAMESPACE` runtime knob or p
 
 #### WSL / Windows Terminal scrolling
 
-On WSL with Windows Terminal, scrolling behaves differently depending on whether tmux owns the mouse:
+SKC's SGR mouse support is disabled by default, so tmux or Windows Terminal retains wheel ownership. In a SKC-managed tmux session, the default profile's `mouse on` enters tmux copy-mode and scrolls pane history.
 
-- **With the SKC profile (default):** the mouse wheel enters tmux copy-mode and scrolls the pane's scrollback. Keyboard fallback: `Ctrl-b [` to enter copy-mode, then `PgUp`/arrows; `q` to exit.
-- **Without tmux mouse capture (`SKC_MOUSE=off`, or running outside `skc --tmux`):** Windows Terminal handles the wheel and scrolls its own native scrollback.
-
-If the wheel does not scroll inside `skc --tmux` on WSL, confirm the session is SKC-managed (`skc session list`) so the `mouse on` profile is actually applied; sessions you launched yourself do not receive it. Set `SKC_MOUSE=off` if you prefer Windows Terminal's native scrollback over tmux copy-mode.
+Set `mouse.enabled: true` to make the wheel scroll SKC's virtual session viewport three rows at a time, including inside `skc --tmux`. PageUp/PageDown page the visible transcript lane, moving by its height minus one row. Set `SKC_MOUSE=off` as well as leaving SKC mouse support disabled to skip tmux mouse capture and let Windows Terminal handle its native scrollback. Keyboard fallback for tmux copy-mode remains `Ctrl-b [`, followed by `PgUp`/arrows; press `q` to exit.
 
 ### Team tmux backend, dry-run, and state paths
 
@@ -396,7 +402,7 @@ SearXNG also reads the equivalent `searxng.endpoint`, `searxng.token`, `searxng.
 Anthropic web search uses `findAnthropicAuth()` from `packages/ai/src/utils/anthropic-auth.ts` in this order:
 
 1. `ANTHROPIC_SEARCH_API_KEY` (+ optional `ANTHROPIC_SEARCH_BASE_URL`)
-2. `ANTHROPIC_FOUNDRY_API_KEY` when `ANTHROPIC_MODEL_CODE_USE_FOUNDRY` is enabled
+2. `ANTHROPIC_FOUNDRY_API_KEY` when `CLAUDE_CODE_USE_FOUNDRY` is enabled
 3. Anthropic OAuth credentials from `agent.db` (must not expire within 5-minute buffer)
 4. Anthropic API-key credentials from `agent.db`
 5. Generic Anthropic env fallback: provider key (`ANTHROPIC_FOUNDRY_API_KEY` in Foundry mode, otherwise `ANTHROPIC_OAUTH_TOKEN`/`ANTHROPIC_API_KEY`) + optional `ANTHROPIC_BASE_URL` (`FOUNDRY_BASE_URL` when Foundry mode is enabled)
@@ -486,15 +492,17 @@ These are consumed via `@sayknow-cli/utils/dirs` and affect where coding-agent s
 | Variable                   | Behavior                                                                       |
 | -------------------------- | ------------------------------------------------------------------------------ |
 | `SKC_BASH_NO_CI`            | Suppresses automatic `CI=true` injection into spawned shell env                |
-| `ANTHROPIC_MODEL_BASH_NO_CI`        | Legacy alias fallback for `SKC_BASH_NO_CI`                                      |
+| `PI_BASH_NO_CI`             | Legacy alias fallback for `SKC_BASH_NO_CI`                                     |
+| `CLAUDE_BASH_NO_CI`         | Legacy alias fallback for `SKC_BASH_NO_CI`                                     |
 | `SKC_BASH_NO_LOGIN`         | Disables login-shell mode; shell args become `['-c']` instead of `['-l','-c']` |
-| `ANTHROPIC_MODEL_BASH_NO_LOGIN`     | Legacy alias fallback for `SKC_BASH_NO_LOGIN`                                   |
-| `SKC_SHELL_PREFIX`          | Optional command prefix wrapper                                                |
-| `ANTHROPIC_MODEL_CODE_SHELL_PREFIX` | Legacy alias fallback for `SKC_SHELL_PREFIX`                                    |
+| `PI_BASH_NO_LOGIN`          | Legacy alias fallback for `SKC_BASH_NO_LOGIN`                                  |
+| `CLAUDE_BASH_NO_LOGIN`      | Legacy alias fallback for `SKC_BASH_NO_LOGIN`                                  |
+| `PI_SHELL_PREFIX`           | Optional command prefix wrapper                                                |
+| `CLAUDE_CODE_SHELL_PREFIX`  | Legacy alias fallback for `PI_SHELL_PREFIX`                                    |
 | `VISUAL`                   | Preferred external editor command                                              |
 | `EDITOR`                   | Fallback external editor command                                               |
 
-Current implementation: `SKC_BASH_NO_LOGIN`/`ANTHROPIC_MODEL_BASH_NO_LOGIN` are active; when either is set, `getShellArgs()` returns `['-c']`.
+Current implementation: `SKC_BASH_NO_CI` and `SKC_BASH_NO_LOGIN` are resolved first, then the `PI_*` and `CLAUDE_*` aliases above. Both are boolean-like: only `1`/`Y`/`TRUE`/`YES`/`ON` (case-insensitive) enable them, so an explicit `SKC_BASH_NO_LOGIN=0` keeps the login shell even when a legacy alias is truthy. The shell prefix is read from `PI_SHELL_PREFIX`/`CLAUDE_CODE_SHELL_PREFIX` only; `SKC_SHELL_PREFIX` is not currently honored.
 
 ---
 
@@ -541,22 +549,36 @@ These are read as runtime signals; they are usually set by the terminal/OS rathe
 
 ---
 
-## 11) Bridge mode (`--mode bridge`)
+## 11) ACP permission handling
 
-Consumed by `packages/coding-agent/src/modes/bridge/*`. The bridge is a
-network-reachable control surface and is **secure-by-default**: it refuses to
-start without TLS and a bearer token, and the 0.3.1 default endpoint matrix
-fail-closes session events, commands, controller ownership, UI responses, host
-tool results, and host URI results. See `docs/bridge.md` for protocol details.
-
-| Variable | Required | Default | Behavior |
+| Variable | Values | Default | Behavior |
 | --- | --- | --- | --- |
-| `SKC_BRIDGE_TOKEN` | Yes | — | Bearer token required on authenticated endpoints. **Secret — never commit.** |
-| `SKC_BRIDGE_TLS_CERT` | Yes | — | Path to the TLS certificate (PEM). Startup fails closed if cert/key are missing (TLS is mandatory, including loopback). |
-| `SKC_BRIDGE_TLS_KEY` | Yes | — | Path to the TLS private key (PEM). **Secret — never commit; `chmod 600`.** |
-| `SKC_BRIDGE_HOST` | No | `127.0.0.1` | Bind hostname. |
-| `SKC_BRIDGE_PORT` | No | `4077` | Bind port (1–65535). |
-| `SKC_BRIDGE_SCOPES` | No | `prompt` | Parsed for dormant command-surface compatibility. Valid scopes: `prompt`, `control`, `bash`, `export`, `session`, `model`, `message:read`, `host_tools`, `host_uri`, `admin`. The default endpoint matrix still advertises no accepted scopes and rejects commands before scope checks. |
+| `SKC_ACP_PERMISSION_MODE` | `prompt`, `auto`, `always-allow` | `prompt` | Controls whether ACP tool calls use the client's permission prompt or the SDK allow policy. `auto` and `always-allow` both allow gated tool calls without prompting. Invalid values fail safely to `prompt`. |
+
+ACP client metadata at `_meta.skc.permissionHandling` takes precedence when the client supplies that field; the process environment is the fallback. JetBrains Air custom agents can set the fallback per agent in `acp.json`:
+
+```json
+{
+  "agent_servers": {
+    "Sayknow-Local-Opus": {
+      "command": "/absolute/path/to/skc",
+      "args": ["acp", "--mpreset", "opus-codex"],
+      "env": {
+        "SKC_ACP_PERMISSION_MODE": "always-allow"
+      }
+    }
+  }
+}
+```
+
+Use `always-allow` only for workspaces and tool configurations you trust. It removes the approval boundary for gated shell, monitor, eval, delete, and move operations. Changes apply to newly launched ACP agent processes.
+SKC does not expose a separate ACP `--yolo` flag.
+
+See [External control readiness](./external-control-readiness.md#jetbrains-air-custom-agent) for the Air setup flow.
+
+---
+
+## 12) Removed ingress modes
 
 Local development with a self-signed certificate must add the local CA to the
 client trust store; there is no plaintext or certificate-verification-bypass mode.
@@ -570,7 +592,6 @@ Treat these as secrets; do not log or commit them:
 - Provider/API keys and OAuth/bearer credentials (all `*_API_KEY`, `*_TOKEN`, OAuth access/refresh tokens)
 - Cloud credentials (`AWS_*`, `GOOGLE_APPLICATION_CREDENTIALS` path may expose service-account material)
 - Search/provider auth vars (`EXA_API_KEY`, `BRAVE_API_KEY`, `PERPLEXITY_API_KEY`, Anthropic search keys)
-- Foundry mTLS material (`ANTHROPIC_MODEL_CODE_CLIENT_CERT`, `ANTHROPIC_MODEL_CODE_CLIENT_KEY`, `NODE_EXTRA_CA_CERTS` when it points to private CA bundles)
-- Bridge auth/TLS material (`SKC_BRIDGE_TOKEN` and the `SKC_BRIDGE_TLS_KEY` private key; never commit cert/key/token material)
+- Foundry mTLS material (`CLAUDE_CODE_CLIENT_CERT`, `CLAUDE_CODE_CLIENT_KEY`, `NODE_EXTRA_CA_CERTS` when it points to private CA bundles)
 
 Python runtime also explicitly strips many common key vars before spawning kernel subprocesses (`packages/coding-agent/src/eval/py/runtime.ts`).

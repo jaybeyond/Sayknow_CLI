@@ -32,6 +32,7 @@ mod btrfs;
 mod diff;
 mod linux_reflink;
 mod overlayfs;
+mod plain_tree;
 mod projfs;
 mod rcopy;
 mod windows_block_clone;

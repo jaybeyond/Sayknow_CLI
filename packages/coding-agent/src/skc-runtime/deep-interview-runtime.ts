@@ -1,16 +1,30 @@
 import { createHash, randomBytes } from "node:crypto";
 import * as fs from "node:fs/promises";
-import * as os from "node:os";
 import * as path from "node:path";
+import { getConfigRootDir } from "@sayknow-cli/utils";
+import { YAML } from "bun";
 import { syncSkillActiveState } from "../skill-state/active-state";
 import { deriveDeepInterviewHud } from "../skill-state/workflow-hud";
 import { WORKFLOW_STATE_VERSION } from "../skill-state/workflow-state-contract";
-import { normalizeDeepInterviewEnvelope } from "./deep-interview-state";
+import { isDeepInterviewStageVerb, runDeepInterviewStageCommand } from "./deep-interview-stage";
+import {
+	assertDeepInterviewInputWithinLimit,
+	assertDeepInterviewIntentReview,
+	type DeepInterviewIntentCategory,
+	type DeepInterviewIntentItem,
+	type DeepInterviewIntentManifest,
+	type DeepInterviewIntentReview,
+	MAX_DEEP_INTERVIEW_STRUCTURED_RESPONSE_LENGTH,
+	MAX_INITIAL_CONTEXT_LENGTH,
+	normalizeDeepInterviewEnvelope,
+	reviewDeepInterviewIntent,
+} from "./deep-interview-state";
 import { runNativeRalplanCommand } from "./ralplan-runtime";
 import { modeStatePath, sessionSpecsDir } from "./session-layout";
 import { resolveSkcSessionForWrite, writeSessionActivityMarker } from "./session-resolution";
 import { runNativeStateCommand } from "./state-runtime";
 import { appendJsonl, readExistingStateForMutation, writeArtifact, writeWorkflowEnvelopeAtomic } from "./state-writer";
+import { assertSafePathComponent, CommandError, flagValue, hasFlag } from "./workflow-cli-common";
 
 export * from "./deep-interview-recorder";
 
@@ -19,7 +33,7 @@ export * from "./deep-interview-recorder";
  *
  * The CLI itself does not run the Socratic interview; that lives inside the `/skill:deep-interview`
  * skill executed by the agent. This handler validates the documented argument-hint surface
- * (`[--quick|--standard|--deep] <idea>`), seeds `.skc/state/deep-interview-state.json`, and
+ * (`[--trace] [--quick|--standard|--deep] <idea>`), seeds `.skc/state/deep-interview-state.json`, and
  * updates the shared HUD rail via `syncSkillActiveState` so the active interview is visible to
  * the TUI.
  */
@@ -30,8 +44,6 @@ export interface DeepInterviewCommandResult {
 	stderr?: string;
 }
 
-const PATH_COMPONENT_RE = /^[A-Za-z0-9_-][A-Za-z0-9._-]{0,63}$/;
-
 const DEFAULT_AMBIGUITY_THRESHOLD = 0.05;
 
 const RESOLUTION_THRESHOLDS = {
@@ -40,14 +52,73 @@ const RESOLUTION_THRESHOLDS = {
 	deep: 0.35,
 } as const;
 
+const TRACE_MAX_RELEVANT_PATHS = 12;
+const TRACE_MAX_PACKAGE_HINTS = 8;
+const TRACE_MAX_DIRECTORY_VISITS = 1200;
+const TRACE_MAX_ENTRY_VISITS = 5000;
+const TRACE_MAX_PENDING_DIRECTORIES = 1200;
+const TRACE_SKIP_DIRS = new Set([
+	".git",
+	".skc",
+	"node_modules",
+	"dist",
+	"build",
+	"coverage",
+	".next",
+	".turbo",
+	".cache",
+	"vendor",
+	"target",
+	".venv",
+	"venv",
+	"__pycache__",
+	".pytest_cache",
+	"tmp",
+	"temp",
+	"logs",
+	"out",
+]);
+const TRACE_SOURCE_EXTENSIONS = new Set([
+	".ts",
+	".tsx",
+	".js",
+	".jsx",
+	".mts",
+	".cts",
+	".py",
+	".rs",
+	".go",
+	".java",
+	".kt",
+	".swift",
+	".md",
+	".json",
+	".yml",
+	".yaml",
+]);
+
+interface DeepInterviewTraceSummary {
+	enabled: true;
+	generated_at: string;
+	bounded: true;
+	limits: {
+		max_relevant_paths: number;
+		max_package_hints: number;
+		max_directory_visits: number;
+		max_entry_visits: number;
+		max_pending_directories: number;
+	};
+	idea_terms: string[];
+	project_hints: string[];
+	relevant_paths: Array<{ path: string; reason: string }>;
+	findings: string[];
+}
+
 type DeepInterviewResolution = keyof typeof RESOLUTION_THRESHOLDS;
 
-class DeepInterviewCommandError extends Error {
-	constructor(
-		public readonly exitStatus: number,
-		message: string,
-	) {
-		super(message);
+class DeepInterviewCommandError extends CommandError {
+	constructor(exitStatus: number, message: string) {
+		super(exitStatus, message);
 		this.name = "DeepInterviewCommandError";
 	}
 }
@@ -61,22 +132,6 @@ const VALUE_FLAGS = new Set([
 	"--spec",
 	"--handoff",
 ]);
-
-function flagValue(args: readonly string[], flag: string): string | undefined {
-	const index = args.indexOf(flag);
-	if (index < 0) return undefined;
-	return args[index + 1];
-}
-
-function hasFlag(args: readonly string[], flag: string): boolean {
-	return args.includes(flag);
-}
-
-function assertSafePathComponent(value: string, label: string): void {
-	if (!PATH_COMPONENT_RE.test(value) || value.includes("..")) {
-		throw new DeepInterviewCommandError(2, `invalid path component for --${label}: ${value}`);
-	}
-}
 
 function defaultSpecSlug(now: Date = new Date()): string {
 	const yyyy = now.getUTCFullYear().toString().padStart(4, "0");
@@ -100,11 +155,139 @@ async function resolveSpecContent(rawSpec: string, cwd: string): Promise<string>
 		if (stat.isFile()) return await fs.readFile(candidate, "utf-8");
 	} catch (error) {
 		const err = error as NodeJS.ErrnoException;
-		if (err.code !== "ENOENT" && err.code !== "ENOTDIR") {
+		if (err.code !== "ENOENT" && err.code !== "ENOTDIR" && err.code !== "ENAMETOOLONG") {
 			throw new DeepInterviewCommandError(2, `failed to read --spec ${candidate}: ${err.message}`);
 		}
 	}
 	return rawSpec;
+}
+
+function traceTerms(idea: string): string[] {
+	const terms = new Set<string>();
+	for (const match of idea.toLowerCase().matchAll(/[a-z0-9][a-z0-9_-]{2,}/g)) {
+		const value = match[0];
+		if (["the", "and", "for", "with", "that", "this", "from", "into", "should", "would"].includes(value)) continue;
+		terms.add(value);
+		if (terms.size >= 12) break;
+	}
+	return [...terms];
+}
+
+function relativePathReason(relativePath: string, terms: readonly string[]): string | undefined {
+	const normalized = relativePath.toLowerCase();
+	const matched = terms.find(term => normalized.includes(term));
+	if (matched) return `path matches idea term "${matched}"`;
+	if (/deep[-_]?interview/i.test(relativePath)) return "path matches deep-interview workflow surface";
+	if (/skill|workflow|runtime|state/i.test(relativePath)) return "path matches workflow/runtime surface";
+	return undefined;
+}
+
+async function readPackageHints(cwd: string): Promise<string[]> {
+	const packagePath = path.join(cwd, "package.json");
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(await fs.readFile(packagePath, "utf-8"));
+	} catch {
+		return [];
+	}
+	const manifest = parsed as {
+		name?: unknown;
+		workspaces?: unknown;
+		scripts?: Record<string, unknown>;
+		dependencies?: Record<string, unknown>;
+		devDependencies?: Record<string, unknown>;
+	};
+	const hints: string[] = [];
+	if (typeof manifest.name === "string") hints.push(`package: ${manifest.name}`);
+	if (manifest.workspaces) hints.push("workspace: package.json declares workspaces");
+	const scripts = Object.keys(manifest.scripts ?? {}).slice(0, TRACE_MAX_PACKAGE_HINTS);
+	if (scripts.length > 0) hints.push(`scripts: ${scripts.join(", ")}`);
+	const deps = [...Object.keys(manifest.dependencies ?? {}), ...Object.keys(manifest.devDependencies ?? {})]
+		.filter(name => /typescript|bun|react|vite|zod|winston|commander|oclif/i.test(name))
+		.slice(0, TRACE_MAX_PACKAGE_HINTS);
+	if (deps.length > 0) hints.push(`notable dependencies: ${deps.join(", ")}`);
+	return hints.slice(0, TRACE_MAX_PACKAGE_HINTS);
+}
+
+async function collectRelevantTracePaths(
+	cwd: string,
+	terms: readonly string[],
+): Promise<Array<{ path: string; reason: string }>> {
+	const results: Array<{ path: string; reason: string; score: number }> = [];
+	const pending: Array<{ absolutePath: string; depth: number }> = [{ absolutePath: cwd, depth: 0 }];
+	let visitedDirectories = 0;
+	let visitedEntries = 0;
+	while (
+		pending.length > 0 &&
+		visitedDirectories < TRACE_MAX_DIRECTORY_VISITS &&
+		visitedEntries < TRACE_MAX_ENTRY_VISITS
+	) {
+		const current = pending.shift();
+		if (!current) break;
+		visitedDirectories += 1;
+		try {
+			const directory = await fs.opendir(current.absolutePath);
+			for await (const entry of directory) {
+				visitedEntries += 1;
+				if (visitedEntries > TRACE_MAX_ENTRY_VISITS) break;
+				if (TRACE_SKIP_DIRS.has(entry.name)) continue;
+				const absolutePath = path.join(current.absolutePath, entry.name);
+				const relativePath = path.relative(cwd, absolutePath).split(path.sep).join("/");
+				if (entry.isDirectory()) {
+					if (current.depth < 6 && pending.length < TRACE_MAX_PENDING_DIRECTORIES) {
+						pending.push({ absolutePath, depth: current.depth + 1 });
+					}
+					continue;
+				}
+				if (!entry.isFile() || !TRACE_SOURCE_EXTENSIONS.has(path.extname(entry.name))) continue;
+				const reason = relativePathReason(relativePath, terms);
+				if (!reason) continue;
+				const termScore = terms.reduce(
+					(score, term) => score + (relativePath.toLowerCase().includes(term) ? 2 : 0),
+					0,
+				);
+				const surfaceScore = /deep[-_]?interview|skill|workflow|runtime|state/i.test(relativePath) ? 1 : 0;
+				results.push({ path: relativePath, reason, score: termScore + surfaceScore });
+			}
+		} catch {}
+	}
+	return results
+		.sort((a, b) => b.score - a.score || a.path.localeCompare(b.path))
+		.slice(0, TRACE_MAX_RELEVANT_PATHS)
+		.map(({ path: relativePath, reason }) => ({ path: relativePath, reason }));
+}
+
+async function buildDeepInterviewTraceSummary(cwd: string, idea: string): Promise<DeepInterviewTraceSummary> {
+	const terms = traceTerms(idea);
+	const [projectHints, relevantPaths] = await Promise.all([
+		readPackageHints(cwd),
+		collectRelevantTracePaths(cwd, terms),
+	]);
+	const findings = [
+		projectHints.length > 0
+			? "Project manifest was summarized into bounded package/script/dependency hints."
+			: "No readable package.json manifest was found at the project root.",
+		relevantPaths.length > 0
+			? `Relevant path scan captured ${relevantPaths.length} bounded path hint(s) before interview questions.`
+			: "Relevant path scan found no matching source/documentation paths before interview questions.",
+		"Trace summary intentionally stores path-level evidence only; raw files and logs are excluded.",
+	];
+	return {
+		enabled: true,
+		generated_at: new Date().toISOString(),
+		bounded: true,
+		limits: {
+			max_relevant_paths: TRACE_MAX_RELEVANT_PATHS,
+			max_package_hints: TRACE_MAX_PACKAGE_HINTS,
+			max_directory_visits: TRACE_MAX_DIRECTORY_VISITS,
+			max_entry_visits: TRACE_MAX_ENTRY_VISITS,
+			max_pending_directories: TRACE_MAX_PENDING_DIRECTORIES,
+		},
+		idea_terms: terms,
+		project_hints: projectHints,
+		relevant_paths: relevantPaths,
+		findings,
+	};
 }
 
 interface ResolvedDeepInterviewArgs {
@@ -114,6 +297,7 @@ interface ResolvedDeepInterviewArgs {
 	sessionId: string;
 	idea: string;
 	language?: DeepInterviewLanguagePreference;
+	trace?: DeepInterviewTraceSummary;
 	json: boolean;
 }
 
@@ -190,16 +374,14 @@ async function readSettingsAmbiguityThreshold(
 function modernSettingsPath(): string {
 	const configDir = process.env.SKC_CODING_AGENT_DIR?.trim() || process.env.PI_CODING_AGENT_DIR?.trim();
 	if (configDir) return path.join(configDir, "config.yml");
-	const configRoot = process.env.SKC_CONFIG_DIR?.trim() || process.env.PI_CONFIG_DIR?.trim();
-	if (configRoot) return path.join(configRoot, "agent", "config.yml");
-	return path.join(os.homedir(), ".skc", "agent", "config.yml");
+	return path.join(getConfigRootDir(), "agent", "config.yml");
 }
 
 async function readModernSettingsAmbiguityThreshold(): Promise<{ threshold: number; source: string } | undefined> {
 	const modernConfigPath = modernSettingsPath();
 	let parsed: unknown;
 	try {
-		parsed = (await import("bun")).YAML.parse(await fs.readFile(modernConfigPath, "utf-8"));
+		parsed = YAML.parse(await fs.readFile(modernConfigPath, "utf-8"));
 	} catch {
 		return undefined;
 	}
@@ -218,8 +400,7 @@ async function resolveConfiguredAmbiguityThreshold(
 	const projectSettings = path.join(cwd, ".skc", "settings.json");
 	const projectValue = await readSettingsAmbiguityThreshold(projectSettings);
 	if (projectValue) return projectValue;
-	const configDir = process.env.SKC_CONFIG_DIR?.trim() || path.join(os.homedir(), ".skc");
-	const userSettings = path.join(configDir, "settings.json");
+	const userSettings = path.join(getConfigRootDir(), "settings.json");
 	return await readSettingsAmbiguityThreshold(userSettings);
 }
 
@@ -371,6 +552,7 @@ async function resolveDeepInterviewArgs(args: readonly string[], cwd: string): P
 			skipNext = true;
 			continue;
 		}
+		if (arg === "--trace") continue;
 		if (arg === "--quick" || arg === "--standard" || arg === "--deep" || arg === "--json") continue;
 		if (arg.startsWith("-")) {
 			throw new DeepInterviewCommandError(2, `unknown flag for skc deep-interview: ${arg}`);
@@ -378,7 +560,9 @@ async function resolveDeepInterviewArgs(args: readonly string[], cwd: string): P
 		ideaParts.push(arg);
 	}
 	const idea = ideaParts.join(" ").trim();
+	assertDeepInterviewInputWithinLimit(idea, MAX_INITIAL_CONTEXT_LENGTH, "initial_idea");
 	const effectiveResolution: DeepInterviewResolution = resolution ?? "standard";
+	const trace = hasFlag(args, "--trace") && idea ? await buildDeepInterviewTraceSummary(cwd, idea) : undefined;
 	return {
 		resolution: effectiveResolution,
 		threshold,
@@ -386,14 +570,75 @@ async function resolveDeepInterviewArgs(args: readonly string[], cwd: string): P
 		sessionId,
 		idea,
 		language: resolveDeepInterviewLanguagePreference(idea),
+		trace,
 		json: hasFlag(args, "--json"),
 	};
+}
+
+function intentIdsInSpec(content: string): string[] {
+	const ids = content.match(/(?:artifact|surface|integration|constraint):[a-z0-9][a-z0-9._/-]{0,127}/g) ?? [];
+	return [...new Set(ids)].sort();
+}
+
+function resolveLockedIntentReview(existing: unknown, content: string): DeepInterviewIntentReview | undefined {
+	const envelope = normalizeDeepInterviewEnvelope(existing);
+	const state = envelope.state;
+	if (!state) return undefined;
+	if (state.intent_contract === undefined) {
+		if (state.intent_contract_required === true)
+			throw new DeepInterviewCommandError(
+				2,
+				"deep-interview locked intent blocks spec persistence: missing Round 0 intent contract",
+			);
+		return undefined;
+	}
+	const locked = state.intent_contract as DeepInterviewIntentManifest;
+	const observedIds = intentIdsInSpec(content);
+	const rounds = Array.isArray(state.rounds)
+		? state.rounds
+				.filter(
+					(round): round is Record<string, unknown> =>
+						Boolean(round) && typeof round === "object" && !Array.isArray(round),
+				)
+				.map(round => ({ round: round.round, answer_hash: round.answer_hash }))
+		: [];
+	try {
+		if (state.intent_review === undefined) {
+			if (locked.items.some(item => !observedIds.includes(item.id))) throw new Error("missing intent review");
+			const lockedById = new Map(locked.items.map(item => [item.id, item]));
+			const observedItems: DeepInterviewIntentItem[] = observedIds.map(id => {
+				const existingItem = lockedById.get(id);
+				if (existingItem) return existingItem;
+				return {
+					id,
+					category: id.slice(0, id.indexOf(":")) as DeepInterviewIntentCategory,
+					statement: id,
+				};
+			});
+			return reviewDeepInterviewIntent(locked, observedItems, {
+				status: "not_required",
+				supporting_substitutions: [],
+			});
+		}
+		assertDeepInterviewIntentReview(state.intent_review, locked, observedIds, rounds);
+		return state.intent_review as DeepInterviewIntentReview;
+	} catch (error) {
+		throw new DeepInterviewCommandError(
+			2,
+			`deep-interview locked intent blocks spec persistence: ${error instanceof Error ? error.message : String(error)}`,
+		);
+	}
 }
 
 export async function persistDeepInterviewSpec(
 	cwd: string,
 	resolved: ResolvedDeepInterviewSpecWriteArgs,
 ): Promise<PersistedDeepInterviewSpec> {
+	assertDeepInterviewInputWithinLimit(
+		resolved.spec,
+		MAX_DEEP_INTERVIEW_STRUCTURED_RESPONSE_LENGTH,
+		"structured deep-interview response",
+	);
 	const statePath = deepInterviewStatePath(cwd, resolved.sessionId);
 	const existingRead = await readExistingStateForMutation(statePath);
 	if (existingRead.kind === "corrupt" && !resolved.force) {
@@ -404,8 +649,9 @@ export async function persistDeepInterviewSpec(
 	}
 	const existing = existingRead.kind === "valid" ? existingRead.value : {};
 
-	const specPath = path.join(sessionSpecsDir(cwd, resolved.sessionId), `deep-interview-${resolved.slug}.md`);
 	const content = resolved.spec.endsWith("\n") ? resolved.spec : `${resolved.spec}\n`;
+	const intentReview = resolveLockedIntentReview(existing, content);
+	const specPath = path.join(sessionSpecsDir(cwd, resolved.sessionId), `deep-interview-${resolved.slug}.md`);
 	await writeArtifact(specPath, content, {
 		cwd,
 		audit: {
@@ -447,6 +693,10 @@ export async function persistDeepInterviewSpec(
 		spec_persisted_at: createdAt,
 		updated_at: createdAt,
 	}) as Record<string, unknown>;
+	if (intentReview) {
+		const state = payload.state as Record<string, unknown>;
+		state.intent_review = intentReview;
+	}
 	if (resolved.sessionId) payload.session_id = resolved.sessionId;
 	await writeWorkflowEnvelopeAtomic(statePath, payload, {
 		cwd,
@@ -488,6 +738,7 @@ export async function persistDeepInterviewSpec(
 
 async function seedDeepInterviewState(cwd: string, resolved: ResolvedDeepInterviewArgs): Promise<string> {
 	const statePath = deepInterviewStatePath(cwd, resolved.sessionId);
+	assertDeepInterviewInputWithinLimit(resolved.idea, MAX_INITIAL_CONTEXT_LENGTH, "initial_idea");
 	const now = new Date().toISOString();
 	const payload: Record<string, unknown> = {
 		active: true,
@@ -499,6 +750,7 @@ async function seedDeepInterviewState(cwd: string, resolved: ResolvedDeepIntervi
 		threshold_source: resolved.thresholdSource,
 		state: {
 			initial_idea: resolved.idea,
+			intent_contract_required: true,
 			rounds: [],
 			established_facts: [],
 			current_ambiguity: 1.0,
@@ -507,6 +759,17 @@ async function seedDeepInterviewState(cwd: string, resolved: ResolvedDeepIntervi
 		},
 		updated_at: now,
 	};
+	if (resolved.trace) {
+		payload.trace = resolved.trace;
+		(payload.state as Record<string, unknown>).trace = resolved.trace;
+		(payload.state as Record<string, unknown>).trace_summary = resolved.trace;
+		(payload.state as Record<string, unknown>).codebase_context = {
+			source: "trace",
+			summary: resolved.trace.findings,
+			relevant_paths: resolved.trace.relevant_paths,
+			project_hints: resolved.trace.project_hints,
+		};
+	}
 	if (resolved.language) {
 		payload.language = resolved.language;
 		(payload.state as Record<string, unknown>).language = resolved.language;
@@ -629,6 +892,8 @@ export async function runNativeDeepInterviewCommand(
 	cwd = process.cwd(),
 ): Promise<DeepInterviewCommandResult> {
 	try {
+		const [firstArg, ...restArgs] = args;
+		if (isDeepInterviewStageVerb(firstArg)) return await runDeepInterviewStageCommand(firstArg, restArgs, cwd);
 		if (isDeepInterviewSpecWriteInvocation(args)) return await handleSpecWrite(args, cwd);
 		const resolved = await resolveDeepInterviewArgs(args, cwd);
 		if (!resolved.idea) {
@@ -646,6 +911,7 @@ export async function runNativeDeepInterviewCommand(
 			threshold_source: resolved.thresholdSource,
 			idea: resolved.idea,
 			language: resolved.language,
+			trace: resolved.trace,
 			state_path: statePath,
 			handoff: "/skill:deep-interview",
 		};
@@ -654,12 +920,13 @@ export async function runNativeDeepInterviewCommand(
 			: [
 					`deep-interview seed state_path=${statePath}`,
 					`resolution=${resolved.resolution} threshold=${resolved.threshold} threshold_source=${resolved.thresholdSource}`,
+					resolved.trace ? `trace=enabled bounded_paths=${resolved.trace.relevant_paths.length}` : undefined,
 					"handoff=/skill:deep-interview",
 					"",
 				].join("\n");
 		return { status: 0, stdout };
 	} catch (error) {
-		if (error instanceof DeepInterviewCommandError) return { status: error.exitStatus, stderr: `${error.message}\n` };
+		if (error instanceof CommandError) return { status: error.exitStatus, stderr: `${error.message}\n` };
 		return { status: 1, stderr: `${error instanceof Error ? error.message : String(error)}\n` };
 	}
 }

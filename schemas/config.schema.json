@@ -109,7 +109,7 @@
 								"enabled": {
 									"type": "boolean",
 									"description": "Send Telegram updates for tool starts and completions.",
-									"default": true
+									"default": false
 								}
 							},
 							"additionalProperties": false
@@ -139,6 +139,9 @@
 							"type": "string"
 						},
 						"parentChannelId": {
+							"type": "string"
+						},
+						"channelId": {
 							"type": "string"
 						}
 					},
@@ -347,6 +350,20 @@
 						}
 					},
 					"additionalProperties": false
+				},
+				"ralplan": {
+					"type": "object",
+					"properties": {
+						"maxIterations": {
+							"type": "number",
+							"default": 5
+						},
+						"maxReviewPassesPerLane": {
+							"type": "number",
+							"default": 1
+						}
+					},
+					"additionalProperties": false
 				}
 			},
 			"additionalProperties": false
@@ -357,7 +374,7 @@
 				"dark": {
 					"type": "string",
 					"description": "Theme used when terminal has dark background",
-					"default": "red-octopus"
+					"default": "blue-octopus"
 				},
 				"light": {
 					"type": "string",
@@ -376,6 +393,21 @@
 			],
 			"description": "Icon/symbol style",
 			"default": "unicode"
+		},
+		"language": {
+			"type": "string",
+			"enum": [
+				"auto",
+				"en",
+				"ko",
+				"zh",
+				"ja",
+				"es",
+				"fr",
+				"de"
+			],
+			"description": "Interface language. Auto follows your system locale.",
+			"default": "auto"
 		},
 		"colorBlindMode": {
 			"type": "boolean",
@@ -430,6 +462,11 @@
 				},
 				"showSkillHud": {
 					"type": "boolean",
+					"default": true
+				},
+				"showActionHints": {
+					"type": "boolean",
+					"description": "Show contextual keyboard shortcuts in the status line",
 					"default": true
 				},
 				"leftSegments": {
@@ -908,7 +945,7 @@
 			"properties": {
 				"enabled": {
 					"type": "boolean",
-					"description": "Enable SGR mouse wheel scrolling and overlay row selection. Disabled in tmux and screen.",
+					"description": "Enable SKC session scrolling, drag-to-copy text selection, and overlay row selection with the mouse. Disabled by default to preserve native terminal or tmux scrollback and selection.",
 					"default": false
 				}
 			},
@@ -982,6 +1019,11 @@
 			"description": "Suggest emojis from `:name:` shortcodes and expand text emoticons like `:D` or `:-)`",
 			"default": true
 		},
+		"promptSuggestions": {
+			"type": "boolean",
+			"description": "Predict your likely next prompt after each turn (smol-model call) and show it as ghost text; Tab accepts",
+			"default": false
+		},
 		"startup": {
 			"type": "object",
 			"properties": {
@@ -1015,7 +1057,7 @@
 				"enabled": {
 					"type": "boolean",
 					"description": "Show the interactive GitHub star reminder when gh is authenticated",
-					"default": true
+					"default": false
 				}
 			},
 			"additionalProperties": false
@@ -1516,7 +1558,7 @@
 			"properties": {
 				"defaultLimit": {
 					"type": "number",
-					"description": "Default number of lines returned when agent calls read without a limit",
+					"description": "Default collection/selection limit for read operations; bare local receipts use the separate 50-line / 10 KiB receipt budgets",
 					"default": 300
 				},
 				"receiptBudgetLines": {
@@ -1528,6 +1570,16 @@
 					"type": "number",
 					"description": "Maximum UTF-8 body size for a bare read receipt before a selector footer is shown",
 					"default": 10
+				},
+				"truncation": {
+					"type": "string",
+					"enum": [
+						"head",
+						"last",
+						"both"
+					],
+					"description": "Configured default direction for routes that support directional truncation; bare local and archive reads use this value (factory default: last), while explicit truncation always wins",
+					"default": "last"
 				},
 				"summaryMaxBytes": {
 					"type": "number",
@@ -1916,7 +1968,7 @@
 			"properties": {
 				"insaneFallback": {
 					"type": "boolean",
-					"description": "Opt in to the vendored insane-search escalation for blocked public URL reads (403/WAF/JS-gated). Off by default. Requires preinstalled python3 + curl_cffi (and node + playwright/stealth for the browser phase); changes network posture by enabling TLS/browser impersonation for public pages.",
+					"description": "Compatibility-only preference. Remote renderer fallback stays disabled because it cannot preserve validated per-hop network routing.",
 					"default": false
 				}
 			},
@@ -2088,6 +2140,44 @@
 					"type": "number",
 					"description": "How often the resource GC sweeps browser tabs and stale screenshot directories.",
 					"default": 30000
+				}
+			},
+			"additionalProperties": false
+		},
+		"memoryGuard": {
+			"type": "object",
+			"properties": {
+				"enabled": {
+					"type": "boolean",
+					"default": false
+				},
+				"checkIntervalMs": {
+					"type": "number",
+					"default": 30000
+				},
+				"gcThresholdPercent": {
+					"type": "number",
+					"default": 70
+				},
+				"restartThresholdPercent": {
+					"type": "number",
+					"default": 85
+				},
+				"restartThresholdWindowMs": {
+					"type": "number",
+					"default": 90000
+				},
+				"cooldownMs": {
+					"type": "number",
+					"default": 600000
+				},
+				"parentReserveMb": {
+					"type": "number",
+					"default": 1024
+				},
+				"policyLimitMb": {
+					"type": "number",
+					"default": 0
 				}
 			},
 			"additionalProperties": false
@@ -2385,10 +2475,28 @@
 						"openai",
 						"gemini",
 						"openrouter",
-						"antigravity"
+						"antigravity",
+						"alibaba",
+						"custom"
 					],
-					"description": "Provider for image generation tool",
+					"description": "Provider and model for image generation tool",
 					"default": "auto"
+				},
+				"imageModel": {
+					"type": "string",
+					"description": "Override the default image generation model for the selected provider"
+				},
+				"imageCustomUrl": {
+					"type": "string",
+					"description": "Base URL for custom OpenAI-compatible image endpoint"
+				},
+				"imageCustomKey": {
+					"type": "string",
+					"description": "API key for custom OpenAI-compatible image endpoint"
+				},
+				"imageCustomKeyEnv": {
+					"type": "string",
+					"description": "Environment variable name holding the API key for custom image endpoint"
 				},
 				"kimiApiFormat": {
 					"type": "string",
@@ -2540,6 +2648,152 @@
 				"max": {
 					"type": "number",
 					"default": 65536
+				}
+			},
+			"additionalProperties": false
+		},
+		"plugins": {
+			"type": "object",
+			"properties": {
+				"security": {
+					"type": "object",
+					"properties": {
+						"scanMode": {
+							"type": "string",
+							"enum": [
+								"warn",
+								"off",
+								"block"
+							],
+							"description": "warn: scan on install and log advisory findings (default); off: skip scan; block: deny install when score exceeds threshold",
+							"default": "warn"
+						},
+						"riskThreshold": {
+							"type": "number",
+							"description": "Score threshold (0–100) above which block mode denies install. Default 60.",
+							"default": 60
+						}
+					},
+					"additionalProperties": false
+				}
+			},
+			"additionalProperties": false
+		},
+		"telegram": {
+			"type": "object",
+			"properties": {
+				"enabled": {
+					"type": "boolean",
+					"description": "Enable two-way Telegram bot control of skc sessions",
+					"default": false
+				},
+				"botToken": {
+					"type": "string",
+					"description": "Telegram bot token from @BotFather (required when enabled)"
+				},
+				"allowedUserIds": {
+					"type": "string",
+					"description": "Comma-separated Telegram user IDs permitted to send commands"
+				},
+				"allowedChatIds": {
+					"type": "string",
+					"description": "Comma-separated Telegram chat IDs permitted to send commands"
+				},
+				"backend": {
+					"type": "string",
+					"enum": [
+						"coordinator",
+						"rpc"
+					],
+					"description": "Coordinator (multi-session lifecycle) or RPC (single persistent session)",
+					"default": "coordinator"
+				},
+				"enableStop": {
+					"type": "boolean",
+					"description": "Allow graceful stop requests (adds the reports mutation class)",
+					"default": false
+				},
+				"enableRich": {
+					"type": "boolean",
+					"description": "HTML formatting + inline keyboards",
+					"default": true
+				},
+				"enablePush": {
+					"type": "boolean",
+					"description": "Follow/Mute subscriptions via coordinator event watch",
+					"default": false
+				},
+				"registerCommands": {
+					"type": "boolean",
+					"description": "Register the Bot command menu at startup",
+					"default": true
+				},
+				"presets": {
+					"type": "string",
+					"description": "JSON array of {id, workdir, sessionCommand, taskTemplate?, taskMaxLen?}"
+				},
+				"rpcSocket": {
+					"type": "string",
+					"description": "Path to the skc launch --output rpc UNIX socket (RPC backend only)"
+				},
+				"stateDir": {
+					"type": "string",
+					"description": "Gateway state dir for reconnect/resync (required for RPC backend)"
+				},
+				"pollTimeoutSec": {
+					"type": "number",
+					"default": 30
+				},
+				"apiBase": {
+					"type": "string"
+				},
+				"coordinatorCommand": {
+					"type": "string",
+					"default": "skc"
+				},
+				"coordinatorArgs": {
+					"type": "string",
+					"default": "mcp-serve,coordinator"
+				},
+				"enableEditMessageText": {
+					"type": "boolean",
+					"default": false
+				},
+				"richCallbackTtlMs": {
+					"type": "number",
+					"default": 600000
+				},
+				"richCallbackMaxTokens": {
+					"type": "number",
+					"default": 500
+				},
+				"defaultTaskMaxLen": {
+					"type": "number",
+					"default": 2000
+				},
+				"livenessMs": {
+					"type": "number",
+					"default": 60000
+				},
+				"followTtlMs": {
+					"type": "number",
+					"default": 86400000
+				},
+				"subscriptionsMax": {
+					"type": "number",
+					"default": 1000
+				},
+				"longPollMs": {
+					"type": "number",
+					"default": 25000
+				},
+				"digestThreshold": {
+					"type": "number",
+					"default": 5
+				},
+				"allowAttachSocketArg": {
+					"type": "boolean",
+					"default": false
 				}
 			},
 			"additionalProperties": false

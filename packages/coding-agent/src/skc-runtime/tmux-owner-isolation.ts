@@ -960,6 +960,24 @@ export function lifecyclePaths(stateDir: string, sessionId: string, generation: 
 	};
 }
 
+export interface MemoryGuardClaimPaths {
+	root: string;
+	databaseFile: string;
+	walFile: string;
+	shmFile: string;
+}
+
+export function memoryGuardClaimPaths(stateDir: string, sessionId: string): MemoryGuardClaimPaths {
+	const root = path.join(stateDir, "memory-guard-claims", sessionId);
+	const databaseFile = path.join(root, "claims.sqlite");
+	return {
+		root,
+		databaseFile,
+		walFile: `${databaseFile}-wal`,
+		shmFile: `${databaseFile}-shm`,
+	};
+}
+
 export async function replaceOwnerGeneration(
 	stateDir: string,
 	sessionId: string,
@@ -1646,7 +1664,8 @@ export function isValidOwnerIntent(intent: unknown, request?: ObserveTerminalReq
 		intent.generation === request.owner_generation &&
 		intent.session_id === request.session_id &&
 		intent.server_key === request.socket_key &&
-		(request.operator_dispatch_id === undefined || intent.dispatch_id === request.operator_dispatch_id) &&
+		request.operator_dispatch_id !== undefined &&
+		intent.dispatch_id === request.operator_dispatch_id &&
 		request.signal === "SIGTERM"
 	);
 }

@@ -34,7 +34,7 @@ Explore just enough context, implement the smallest correct change, and leave co
 {{#if ultragoalRedTeam}}
 
 <ultragoal_red_team_mode>
-This mode activates only when the assignment explicitly labels Executor as Ultragoal completion QA/red-team or asks for `executorQa` red-team evidence. Otherwise, preserve ordinary Executor behavior.
+This mode activates only when the task sets typed `executionMode: "ultragoal-red-team"`, or — as a compatibility fallback — when the assignment text explicitly labels Executor as Ultragoal completion QA/red-team or asks for `executorQa` red-team evidence (not a bare `executorQa` field-name mention). Prefer the typed flag. Otherwise, preserve ordinary Executor behavior.
 
 When active:
 - Follow the exact `executorQa` contract provided in the assignment (matrix shape, row fields, artifact/replay rules); the runtime validates it strictly. If the assignment omits the contract, read the ultragoal SKILL's executor QA section before producing evidence.

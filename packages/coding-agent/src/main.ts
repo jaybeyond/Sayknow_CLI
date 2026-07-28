@@ -11,7 +11,8 @@ import * as path from "node:path";
 import { createInterface } from "node:readline/promises";
 import type { ImageContent } from "@sayknow-cli/ai";
 import {
-	$env,
+	$pickenv,
+	getAgentDir,
 	getProjectDir,
 	logger,
 	normalizePathForComparison,
@@ -534,7 +535,16 @@ interface InteractiveModeFactoryOptions {
 type CreateInteractiveMode = (options: InteractiveModeFactoryOptions) => InteractiveMode;
 
 type ResumePickerTerminalCheck = () => boolean;
-type ListForResumePickerReadOnly = (cwd: string, sessionDir?: string) => Promise<SessionInfo[]>;
+type ListForResumePickerReadOnly = (cwd: string, sessionDir?: string, storage?: undefined) => Promise<SessionInfo[]>;
+
+type ListManagedForResumePickerReadOnly = (
+	cwd: string,
+	managedAgentDir?: string,
+	storage?: undefined,
+) => Promise<SessionInfo[]>;
+
+type ResolveManagedAgentDirForScope = (cwd: string) => string;
+
 type SelectResumeSession = (sessions: SessionInfo[]) => Promise<SessionSelectionResult>;
 type OpenExistingSessionStrict = (
 	identity: ResumeSessionIdentity,
@@ -546,6 +556,11 @@ type OpenExistingSessionStrict = (
 export const BARE_RESUME_CONFLICT_ERROR =
 	"--resume without a session cannot be combined with --continue, --fork, or --no-session.";
 export const BARE_RESUME_INTERACTIVE_ERROR = "--resume requires an interactive terminal; use --resume <id>.";
+
+/** Resolves only the managed agent root needed for pre-consent picker inventory. */
+export function resolveManagedAgentDirForScope(_cwd: string): string {
+	return getAgentDir();
+}
 export const BARE_RESUME_OPEN_ERROR = "Could not open the selected session. Use --resume <id>.";
 
 function isBareResume(parsed: Args): boolean {
@@ -683,7 +698,7 @@ async function promptForkSession(session: SessionInfo): Promise<boolean> {
 	}
 }
 
-async function getChangelogForDisplay(parsed: Args): Promise<string | undefined> {
+export async function getChangelogForDisplay(parsed: Args): Promise<string | undefined> {
 	if (parsed.continue || parsed.resume) {
 		return undefined;
 	}
@@ -695,15 +710,19 @@ async function getChangelogForDisplay(parsed: Args): Promise<string | undefined>
 
 	const lastVersion = settings.get("lastChangelogVersion");
 	if (!lastVersion) {
-		settings.set("lastChangelogVersion", VERSION);
-		await flushChangelogVersion();
+		if (settings.canWriteDurableConfig()) {
+			settings.set("lastChangelogVersion", VERSION);
+			await flushChangelogVersion();
+		}
 		return getInstalledVersionChangelogEntry(entries, VERSION)?.content;
 	}
 
 	if (lastVersion !== VERSION) {
 		const newEntries = getNewEntries(entries, lastVersion);
-		settings.set("lastChangelogVersion", VERSION);
-		await flushChangelogVersion();
+		if (settings.canWriteDurableConfig()) {
+			settings.set("lastChangelogVersion", VERSION);
+			await flushChangelogVersion();
+		}
 		if (newEntries.length > 0) {
 			return newEntries.map(e => e.content).join("\n\n");
 		}
@@ -741,7 +760,13 @@ export async function createSessionManager(
 		if (forkSource.includes("/") || forkSource.includes("\\") || forkSource.endsWith(".jsonl")) {
 			return await SessionManager.forkFrom(forkSource, cwd, sessionDestination(), undefined, migrationPolicy);
 		}
-		const match = await resolveResumableSession(forkSource, cwd, parsed.sessionDir);
+		const match = await resolveResumableSession(
+			forkSource,
+			cwd,
+			parsed.sessionDir,
+			undefined,
+			parsed.sessionDir ? undefined : activeSettings.getAgentDir(),
+		);
 		if (!match) {
 			throw new Error(`Session "${forkSource}" not found.`);
 		}
@@ -754,14 +779,18 @@ export async function createSessionManager(
 	if (typeof parsed.resume === "string") {
 		const sessionArg = parsed.resume;
 		if (sessionArg.includes("/") || sessionArg.includes("\\") || sessionArg.endsWith(".jsonl")) {
-			return await SessionManager.open(
-				sessionArg,
-				SessionManager.explicitDestination(path.dirname(sessionArg)),
-				undefined,
-				migrationPolicy,
-			);
+			const destination = parsed.sessionDir
+				? SessionManager.explicitDestination(parsed.sessionDir)
+				: SessionManager.explicitDestination(path.dirname(sessionArg));
+			return await SessionManager.open(sessionArg, destination, undefined, migrationPolicy);
 		}
-		const match = await resolveResumableSession(sessionArg, cwd, parsed.sessionDir);
+		const match = await resolveResumableSession(
+			sessionArg,
+			cwd,
+			parsed.sessionDir,
+			undefined,
+			parsed.sessionDir ? undefined : activeSettings.getAgentDir(),
+		);
 		if (!match) {
 			throw new Error(`Session "${sessionArg}" not found.`);
 		}
@@ -1058,12 +1087,62 @@ export interface RunRootCommandDependencies {
 	runPrintMode?: RunPrintMode;
 	isResumePickerTerminal?: ResumePickerTerminalCheck;
 	listForResumePickerReadOnly?: ListForResumePickerReadOnly;
+	listManagedForResumePickerReadOnly?: ListManagedForResumePickerReadOnly;
+	resolveManagedAgentDirForScope?: ResolveManagedAgentDirForScope;
 	selectResumeSession?: SelectResumeSession;
 	openExistingSessionStrict?: OpenExistingSessionStrict;
 	initializeSettings?: typeof Settings.init;
 	loadSettingsForScope?: typeof Settings.loadForScope;
 }
 
+export interface ModelRoleOverrides {
+	smol?: string;
+	slow?: string;
+	plan?: string;
+}
+
+/**
+ * Resolve the ephemeral `smol`/`slow`/`plan` model-role overrides.
+ *
+ * Precedence per role is CLI flag > documented `SKC_*_MODEL` > legacy
+ * `PI_*_MODEL`, matching the repo-wide SKC-first/PI-fallback convention.
+ * Resolution reads the process environment via `$pickenv`, which trims values
+ * and treats empty/whitespace as unset; it is deliberately kept separate from
+ * credential env resolution (`$credentialEnv`/`$pickCredentialEnv`). The
+ * function is pure and stateless, so it reads fresh each call and a later
+ * invocation never inherits an earlier one's values.
+ */
+export function resolveModelRoleOverrides(parsed: Pick<Args, "smol" | "slow" | "plan">): ModelRoleOverrides {
+	const overrides: ModelRoleOverrides = {};
+	const smol = parsed.smol ?? $pickenv("SKC_SMOL_MODEL", "PI_SMOL_MODEL");
+	const slow = parsed.slow ?? $pickenv("SKC_SLOW_MODEL", "PI_SLOW_MODEL");
+	const plan = parsed.plan ?? $pickenv("SKC_PLAN_MODEL", "PI_PLAN_MODEL");
+	if (smol) overrides.smol = smol;
+	if (slow) overrides.slow = slow;
+	if (plan) overrides.plan = plan;
+	return overrides;
+}
+
+/**
+ * Apply the `--no-pty` / `--no-title` terminal-control flags to the environment.
+ *
+ * Sets the canonical `SKC_*` name (so an explicit flag wins over a user-set
+ * `SKC_*` value under the SKC-first resolver — CLI authority) and the legacy
+ * `PI_*` name for backward compatibility. `--acp` mode implies `--no-title`.
+ */
+export function applyTerminalControlFlagsToEnv(
+	parsed: Pick<Args, "noPty" | "noTitle" | "mode">,
+	env: NodeJS.ProcessEnv = Bun.env,
+): void {
+	if (parsed.noPty) {
+		env.SKC_NO_PTY = "1";
+		env.PI_NO_PTY = "1";
+	}
+	if (parsed.noTitle || parsed.mode === "acp") {
+		env.SKC_NO_TITLE = "1";
+		env.PI_NO_TITLE = "1";
+	}
+}
 export async function runRootCommand(
 	parsed: Args,
 	rawArgs: string[],
@@ -1094,10 +1173,18 @@ export async function runRootCommand(
 		await logger.time("maybeAutoChdir", maybeAutoChdir, parsedArgs);
 		autoChdirApplied = true;
 		const resumeCwd = getProjectDir();
-		const sessions = await (deps.listForResumePickerReadOnly ?? SessionManager.listForResumePickerReadOnly)(
-			resumeCwd,
-			parsedArgs.sessionDir,
-		);
+		const managedAgentDir = parsedArgs.sessionDir
+			? undefined
+			: (deps.resolveManagedAgentDirForScope ?? resolveManagedAgentDirForScope)(resumeCwd);
+		const sessions = parsedArgs.sessionDir
+			? await (deps.listForResumePickerReadOnly ?? SessionManager.listForResumePickerReadOnly)(
+					resumeCwd,
+					parsedArgs.sessionDir,
+				)
+			: await (deps.listManagedForResumePickerReadOnly ?? SessionManager.listManagedForResumePickerReadOnly)(
+					resumeCwd,
+					managedAgentDir,
+				);
 		if (sessions.length === 0) {
 			process.stdout.write(`${chalk.dim("No sessions found")}\n`);
 			return;
@@ -1108,19 +1195,16 @@ export async function runRootCommand(
 		if (selection.kind === "cancelled") {
 			return;
 		}
+		const scopedSettings = await (deps.loadSettingsForScope ?? Settings.loadForScope)({ cwd: resumeCwd });
 		const resumeMigrationPolicy =
-			(await (deps.loadSettingsForScope ?? Settings.loadForScope)({ cwd: resumeCwd })).get(
-				"session.directoryMigration",
-			) === "disabled"
-				? "disabled"
-				: "copy-retain";
+			scopedSettings.get("session.directoryMigration") === "disabled" ? "disabled" : "copy-retain";
 		let opened: StrictSessionOpenResult;
 		try {
 			opened = await (deps.openExistingSessionStrict ?? SessionManager.openExistingStrict)(
 				selection.identity,
 				parsedArgs.sessionDir
 					? SessionManager.explicitDestination(parsedArgs.sessionDir)
-					: SessionManager.managedDestination(resumeCwd, settings.getAgentDir()),
+					: SessionManager.managedDestination(resumeCwd, scopedSettings.getAgentDir()),
 				undefined,
 				resumeMigrationPolicy,
 			);
@@ -1198,12 +1282,7 @@ export async function runRootCommand(
 		applyAcpDefaultSettingOverrides(settingsInstance);
 	}
 	modelRegistry.applyConfiguredModelBindings(settingsInstance);
-	if (parsedArgs.noPty) {
-		Bun.env.PI_NO_PTY = "1";
-	}
-	if (parsedArgs.noTitle || parsedArgs.mode === "acp") {
-		Bun.env.PI_NO_TITLE = "1";
-	}
+	applyTerminalControlFlagsToEnv(parsedArgs);
 	const hasPreparedInput = parsedArgs.messages.length > 0 || parsedArgs.fileArgs.length > 0;
 	const { pipedInput, fileText, fileImages } = await logger.time("prepareInitialMessage", async () => {
 		const pipedInput =
@@ -1254,15 +1333,14 @@ export async function runRootCommand(
 	// Auto-start Telegram Remote gateway if enabled in settings
 	if (!parsedArgs.print && !autoPrint) await maybeAutostartTelegramRemote();
 
-	// Apply model role overrides from CLI args or env vars (ephemeral, not persisted)
-	const smolModel = parsedArgs.smol ?? $env.PI_SMOL_MODEL;
-	const slowModel = parsedArgs.slow ?? $env.PI_SLOW_MODEL;
-	const planModel = parsedArgs.plan ?? $env.PI_PLAN_MODEL;
-	if (smolModel || slowModel || planModel) {
+	// Apply model role overrides from CLI args or env vars (ephemeral, not persisted).
+	// Precedence per role: CLI flag > documented SKC_*_MODEL > legacy PI_*_MODEL.
+	const roleOverrides = resolveModelRoleOverrides(parsedArgs);
+	if (roleOverrides.smol || roleOverrides.slow || roleOverrides.plan) {
 		settingsInstance.overrideModelRoles({
-			smol: smolModel,
-			slow: slowModel,
-			plan: planModel,
+			...(roleOverrides.smol ? { smol: roleOverrides.smol } : {}),
+			...(roleOverrides.slow ? { slow: roleOverrides.slow } : {}),
+			...(roleOverrides.plan ? { plan: roleOverrides.plan } : {}),
 		});
 	}
 
@@ -1556,9 +1634,9 @@ export async function runRootCommand(
 					process.stdout.write(`${chalk.dim(`Model scope: ${modelList} ${chalk.gray("(Alt+N to cycle)")}`)}\n`);
 				}
 
-				if ($env.PI_TIMING) {
+				if ($pickenv("SKC_TIMING", "PI_TIMING")) {
 					logger.printTimings();
-					exitForTiming = $env.PI_TIMING === "x";
+					exitForTiming = $pickenv("SKC_TIMING", "PI_TIMING") === "x";
 				}
 
 				if (!exitForTiming) {
@@ -1603,7 +1681,7 @@ export async function runRootCommand(
 					initialImages,
 					suppressProcessExit: deps.suppressProcessExit,
 				});
-				if ($env.PI_TIMING) {
+				if ($pickenv("SKC_TIMING", "PI_TIMING")) {
 					logger.printTimings();
 				}
 			} finally {

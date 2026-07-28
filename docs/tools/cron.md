@@ -24,13 +24,20 @@ Each session can hold up to **50** scheduled tasks per owner. Recurring tasks
 auto-expire **7 days** after creation. One-shot tasks delete themselves after
 firing.
 
+Every firing starts a normal agent turn, so its assistant response may be visible
+even though the injected cron message itself is hidden. Use `monitor` with a
+stateful script for ongoing PR/CI polling, log watching, or other jobs that
+should emit only when state changes, and set `persistent: true` so it survives
+the first emitted event. A cron prompt that merely asks the agent not to report
+routine polls cannot guarantee silent execution.
+
 ## Inputs
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
 | `op` | `"create" \| "list" \| "delete"` | Yes | Selects the operation. |
 | `cron_expression` | `string` | `op=create` | Standard 5-field cron expression in local time: `minute hour day-of-month month day-of-week`. |
-| `prompt` | `string` | `op=create` | Prompt to inject between turns when the cron fires. |
+| `prompt` | `string` | `op=create` | Prompt to inject between turns when the cron fires. Each firing starts a normal, potentially visible agent turn. |
 | `recurring` | `boolean` | `op=create` (defaults `true`) | `true` to fire on every match (recurring, auto-expires after 7 days); `false` to fire once and self-delete. |
 | `id` | `string` | `op=delete` | The 8-character job ID returned by `op=create`. |
 

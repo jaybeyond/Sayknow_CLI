@@ -8,22 +8,42 @@ import * as path from "node:path";
 
 const root = path.join(import.meta.dir, "..");
 const SHA = /^[0-9a-f]{40}$/i;
-export const GUARD_CONTRACT_VERSION = 18;
+export const GUARD_CONTRACT_VERSION = 28;
 const telegramContract = "packages/coding-agent/src/sdk/bus/telegram-daemon-contract.ts";
 const telegramDaemon = "packages/coding-agent/src/sdk/bus/telegram-daemon.ts";
+const telegramControl = "packages/coding-agent/src/sdk/bus/telegram-daemon-control.ts";
+const sdkHost = "packages/coding-agent/src/sdk/host/host.ts";
+
 const chatControl = "packages/coding-agent/src/sdk/bus/chat-daemon-control.ts";
 const chatCli = "packages/coding-agent/src/sdk/bus/chat-daemon-cli.ts";
 const config = "packages/coding-agent/src/sdk/bus/config.ts";
 const guardScript = "scripts/telegram-daemon-generation-guard.ts";
 const manifestScript = "scripts/telegram-daemon-generation-manifest.json";
-const nativeAuthorityFamilies = {
-	"crates/pi-natives/src/path_identity.rs": ["telegram", "discord", "slack"],
-	"crates/pi-natives/src/ps.rs": ["telegram", "discord", "slack"],
-	"crates/pi-shell/src/process.rs": ["telegram", "discord", "slack"],
-	"packages/natives/native/index.d.ts": ["telegram", "discord", "slack"],
-	"packages/coding-agent/src/sdk/broker/process-incarnation.ts": ["telegram", "discord", "slack"],
-} as const satisfies Record<string, readonly Family[]>;
-const nativeAuthoritySources = Object.keys(nativeAuthorityFamilies) as Array<keyof typeof nativeAuthorityFamilies>;
+const nativeAuthorityDeclarations = {
+	"crates/pi-natives/src/path_identity.rs": [
+		"retain_broker_publication",
+		"canonical_existing_directory_identity",
+		"apply_owner_only_path_security",
+		"verify_owner_only_path_security",
+		"verify_owner_only_path_security_expected",
+		"repair_owner_only_path_security_expected",
+		"apply_owner_only_fd_security",
+		"verify_owner_only_fd_security",
+		"exact_unlink",
+		"exact_restore",
+		"rename_no_replace_path",
+		"snapshot_directory_tree",
+		"exact_remove_directory_tree",
+	],
+	"crates/pi-natives/src/ps.rs": ["napi impl Process"],
+	"crates/pi-shell/src/process.rs": ["impl Process", "kill_process_group", "current_descendant_pids", "add_new_descendants"],
+	"packages/natives/native/index.d.ts": ["Process"],
+	"packages/coding-agent/src/sdk/broker/process-incarnation.ts": ["isProcessIncarnation", "processIncarnation"],
+} as const;
+const nativeAuthorityFamilies = Object.fromEntries(
+	Object.keys(nativeAuthorityDeclarations).map(source => [source, ["telegram", "discord", "slack"]]),
+) as unknown as Record<keyof typeof nativeAuthorityDeclarations, readonly Family[]>;
+const nativeAuthoritySources = Object.keys(nativeAuthorityDeclarations) as Array<keyof typeof nativeAuthorityDeclarations>;
 
 type Family = "telegram" | "discord" | "slack";
 type Inventory = Readonly<Record<Family, Readonly<Record<string, readonly string[]>>>>;
@@ -42,7 +62,7 @@ type GuardManifest = {
  * endpoint or provider generations: they do not replace daemon owners.
  */
 export const protectedInventory = manifest.inventory as Inventory;
-const PROTECTED_INVENTORY_SHA256 = "97097acba84eff8b74119660df3531c7a51f17146148c6ba6e1ca8e35ff2e5e0";
+const PROTECTED_INVENTORY_SHA256 = "caea0dbab69af5b4eb3d94bfbeec64ec1c30a9b0894054cb7005bde687ee961b";
 
 /** Transition-marker generations fence every daemon lifecycle mutation. */
 export const TRANSITION_TOKEN_PROTECTED_DECLARATIONS = [
@@ -64,11 +84,26 @@ export const TELEGRAM_OWNER_LOCK_PROTECTED_DECLARATIONS = [
 	"ownershipLockMatchesState",
 	"ownershipLockMatchesMetadata",
 	"ownershipLockIsReclaimable",
+	"isParentDaemonState",
+	"isGenerationAbsentParentDaemonState",
+	"isGeneration3ReleaseDaemonState",
 	"isLegacyParentDaemonState",
+	"legacyOwnershipLockMatchesHandoffState",
+	"historicalStateSerializer",
 	"legacyParentHandoffDecision",
+	"unlinkOwnershipLockExactly",
 	"rebindOwnershipLock",
 	"rollbackOwnershipLockRebind",
+	"retireProvisionalDaemonOwnership",
+	"confirmTelegramDaemonSpawn",
 ] as const;
+
+/** Telegram process authority must distinguish cooperative and hard termination. */
+export const TELEGRAM_PROCESS_AUTHORITY_PROTECTED_DECLARATIONS = ["DaemonProcessReference", "defaultProcessReference", "signalCapturedOwner"] as const;
+
+
+/** Telegram authentication and lifecycle control must remain generation-fenced. */
+export const TELEGRAM_LIFECYCLE_PROTECTED_DECLARATIONS = ["validBotToken", "requestStop", "startLifecycleControl", "run"] as const;
 
 /** Chat daemon CLI helpers determine whether a prior owner can be replaced. */
 export const CHAT_CLI_PROTECTED_DECLARATIONS = ["defaultPidAlive", "loadConfig", "ownerPid"] as const;
@@ -77,6 +112,23 @@ export const CHAT_CLI_PROTECTED_DECLARATIONS = ["defaultPidAlive", "loadConfig",
 export const CHAT_CONFIG_PROTECTED_DECLARATIONS = {
 	discord: ["getNotificationConfig", "notificationConfigFromFile", "isDiscordConfigured", "tokenFingerprint"],
 	slack: ["getNotificationConfig", "notificationConfigFromFile", "isSlackConfigured", "tokenFingerprint"],
+} as const;
+
+/** Telegram tool-activity defaults and delivery admission must stay generation-fenced. */
+export const TELEGRAM_TOOL_ACTIVITY_PROTECTED_DECLARATIONS = {
+	[config]: ["parseNotificationSettingsSnapshot"],
+	[sdkHost]: ["TOOL_ACTIVITY_CAPABILITY"],
+	[telegramDaemon]: [
+		"TOOL_ACTIVITY_CAPABILITY",
+		"LEGACY_TOOL_ACTIVITY_CAPABILITY",
+		"negotiateToolActivityCapability",
+		"toolActivityOwner",
+		"toolActivityAuthorityIsCurrent",
+		"toolActivityDeliveryIsCurrent",
+		"handleSessionMessage",
+		"processTelegramUpdate",
+		"createSessionRouter",
+	],
 } as const;
 
 /** Chat credential, provenance, and persistence are shared takeover authority. */
@@ -125,10 +177,24 @@ function validateChatConfigInventory(inventory: Inventory): void {
 	}
 }
 
+function validateTelegramToolActivityInventory(inventory: Inventory): void {
+	for (const [file, required] of Object.entries(TELEGRAM_TOOL_ACTIVITY_PROTECTED_DECLARATIONS)) {
+		const symbols = inventory.telegram[file];
+		if (!symbols || required.some(symbol => !symbols.includes(symbol)))
+			throw new Error("telegram-daemon-generation-guard: Telegram tool-activity configuration and delivery policy must be protected by the Telegram generation contract");
+	}
+}
+
 function validateTelegramOwnerLockInventory(inventory: Inventory): void {
 	const symbols = inventory.telegram[telegramDaemon];
 	if (!symbols || TELEGRAM_OWNER_LOCK_PROTECTED_DECLARATIONS.some(symbol => !symbols.includes(symbol)))
 		throw new Error("telegram-daemon-generation-guard: Telegram owner-lock handoff primitives must be protected by the Telegram generation contract");
+}
+
+function validateTelegramLifecycleInventory(inventory: Inventory): void {
+	const symbols = inventory.telegram[telegramDaemon];
+	if (!symbols || TELEGRAM_LIFECYCLE_PROTECTED_DECLARATIONS.some(symbol => !symbols.includes(symbol)))
+		throw new Error("telegram-daemon-generation-guard: Telegram authentication and lifecycle primitives must be protected by the Telegram generation contract");
 }
 
 function validateTransitionTokenInventory(inventory: Inventory): void {
@@ -137,6 +203,13 @@ function validateTransitionTokenInventory(inventory: Inventory): void {
 		throw new Error("telegram-daemon-generation-guard: transition-token primitives must be protected by the Telegram generation contract");
 }
 
+function validateTelegramProcessAuthorityInventory(inventory: Inventory): void {
+	const symbols = inventory.telegram[telegramControl];
+	if (!symbols || TELEGRAM_PROCESS_AUTHORITY_PROTECTED_DECLARATIONS.some(symbol => !symbols.includes(symbol)))
+		throw new Error("telegram-daemon-generation-guard: Telegram process termination authority must be protected by the Telegram generation contract");
+}
+
+
 
 
 function inventoryHash(inventory: Inventory): string {
@@ -144,7 +217,7 @@ function inventoryHash(inventory: Inventory): string {
 }
 
 export function validateInventory(inventory: Inventory = protectedInventory): void {
-	if (GUARD_CONTRACT_VERSION !== 18) throw new Error("telegram-daemon-generation-guard: unsupported guard contract version");
+	if (GUARD_CONTRACT_VERSION !== 28) throw new Error("telegram-daemon-generation-guard: unsupported guard contract version");
 	for (const [family, files] of Object.entries(inventory)) {
 		for (const [file, symbols] of Object.entries(files)) {
 			if (!file || symbols.length === 0 || new Set(symbols).size !== symbols.length)
@@ -153,9 +226,12 @@ export function validateInventory(inventory: Inventory = protectedInventory): vo
 	}
 	validateTransitionTokenInventory(inventory);
 	validateTelegramOwnerLockInventory(inventory);
+	validateTelegramLifecycleInventory(inventory);
+	validateTelegramProcessAuthorityInventory(inventory);
 	validateChatOwnerLockInventory(inventory);
 	validateChatCliInventory(inventory);
 	validateChatConfigInventory(inventory);
+	validateTelegramToolActivityInventory(inventory);
 }
 
 export function validateManifest(value: unknown = manifest): asserts value is GuardManifest {
@@ -206,17 +282,18 @@ export async function currentTreeDigests(): Promise<Record<string, string>> {
 }
 
 export async function manifestForCurrentTree(): Promise<GuardManifest> {
-	validateManifest();
+	validateInventory(manifest.inventory as Inventory);
 	const nativeAuthoritySha256 = Object.fromEntries(
 		await Promise.all(
-			nativeAuthoritySources.map(async source => [
-				source,
-				crypto.createHash("sha256").update(await Bun.file(path.join(root, source)).text()).digest("hex"),
-			]),
+			nativeAuthoritySources.map(async source => {
+				const digest = nativeAuthorityDigest(source, await Bun.file(path.join(root, source)).text());
+				if (!digest) throw new Error(`telegram-daemon-generation-guard: native authority declaration is missing, ambiguous, or malformed: ${source}`);
+				return [source, digest];
+			}),
 		),
 	) as GuardManifest["nativeAuthoritySha256"];
 	return {
-		contractVersion: manifest.contractVersion,
+		contractVersion: GUARD_CONTRACT_VERSION,
 		inventory: manifest.inventory as Inventory,
 		digests: Object.fromEntries(Object.entries(await currentTreeDigests()).sort()),
 		nativeAuthoritySha256,
@@ -237,6 +314,8 @@ export async function writeManifest(target = path.join(root, manifestScript)): P
 
 export async function validateCurrentTreeManifest(): Promise<void> {
 	const actual = await manifestForCurrentTree();
+	if (manifest.contractVersion !== actual.contractVersion)
+		throw new Error("telegram-daemon-generation-guard: semantic manifest contract version does not match the current guard");
 	const expected = JSON.stringify(Object.entries(manifest.digests).sort());
 	if (JSON.stringify(Object.entries(actual.digests).sort()) !== expected)
 		throw new Error("telegram-daemon-generation-guard: semantic manifest declaration digests do not byte-match the current tree");
@@ -526,35 +605,195 @@ export type Evaluation = {
 	guardContractBumped: boolean;
 };
 
-function authorityDigest(source: string | undefined): string | undefined {
-	return source === undefined ? undefined : crypto.createHash("sha256").update(source).digest("hex");
+function nativeAuthorityDigest(source: keyof typeof nativeAuthorityDeclarations, content: string | undefined): string | undefined {
+	const declarations = extractNativeDeclarations(source, content);
+	if ([...declarations.values()].some(declaration => !declaration?.valid)) return undefined;
+	return crypto.createHash("sha256").update([...declarations.values()].map(declaration => declaration!.canonical).join("\n")).digest("hex");
+}
+
+function rustLexicalSource(source: string): { code: string; valid: boolean } {
+	const code = source.split("");
+	const blank = (start: number, end: number) => {
+		for (let index = start; index < end; index++) if (code[index] !== "\n") code[index] = " ";
+	};
+	const isIdentifier = (value: string | undefined) => value !== undefined && /[A-Za-z0-9_]/.test(value);
+	for (let index = 0; index < source.length;) {
+		if (source.startsWith("//", index)) {
+			const end = source.indexOf("\n", index);
+			blank(index, end === -1 ? source.length : end);
+			index = end === -1 ? source.length : end;
+			continue;
+		}
+		if (source.startsWith("/*", index)) {
+			const start = index;
+			let depth = 1;
+			index += 2;
+			while (index < source.length && depth > 0) {
+				if (source.startsWith("/*", index)) {
+					depth++;
+					index += 2;
+				} else if (source.startsWith("*/", index)) {
+					depth--;
+					index += 2;
+				} else index++;
+			}
+			if (depth !== 0) return { code: code.join(""), valid: false };
+			blank(start, index);
+			continue;
+		}
+		const raw = /^(?:br|r)(#+)?"/.exec(source.slice(index));
+		if (raw && !isIdentifier(source[index - 1])) {
+			const start = index;
+			const hashes = raw[1] ?? "";
+			const close = `"${hashes}`;
+			index += raw[0].length;
+			const end = source.indexOf(close, index);
+			if (end === -1) return { code: code.join(""), valid: false };
+			index = end + close.length;
+			blank(start, index);
+			continue;
+		}
+		const quote = source[index] === '"' ? index : source.startsWith('b"', index) && !isIdentifier(source[index - 1]) ? index + 1 : -1;
+		if (quote !== -1) {
+			const start = index;
+			index = quote + 1;
+			let closed = false;
+			while (index < source.length) {
+				if (source[index] === "\\") index += 2;
+				else if (source[index] === '"') {
+					index++;
+					closed = true;
+					break;
+				} else if (source[index++] === "\n") return { code: code.join(""), valid: false };
+			}
+			if (!closed || index > source.length) return { code: code.join(""), valid: false };
+			blank(start, index);
+			continue;
+		}
+		const charStart = source[index] === "'" ? index : source.startsWith("b'", index) && !isIdentifier(source[index - 1]) ? index + 1 : -1;
+		if (charStart !== -1) {
+			const start = index;
+			index = charStart + 1;
+			let closed = false;
+			while (index < source.length && source[index] !== "\n") {
+				if (source[index] === "\\") index += 2;
+				else if (source[index] === "'") {
+					index++;
+					closed = true;
+					break;
+				} else index++;
+			}
+			if (closed) {
+				blank(start, index);
+				continue;
+			}
+			const lifetime = /^[A-Za-z_][A-Za-z0-9_]*/.exec(source.slice(charStart + 1));
+			const lifetimeEnd = lifetime ? charStart + 1 + lifetime[0].length : -1;
+			if (!lifetime || !/[\s,:>+)]/.test(source[lifetimeEnd] ?? "")) return { code: code.join(""), valid: false };
+			index = start + 1;
+			continue;
+		}
+		index++;
+	}
+	return { code: code.join(""), valid: true };
+}
+
+function rustDeclaration(source: string, selector: string): Declaration {
+	const lexical = rustLexicalSource(source);
+	if (!lexical.valid) return malformedDeclaration();
+	const declarationName = selector;
+	const prefix = declarationName === "napi impl Process"
+		? "#\\[napi\\](?:\\s*#\\[[^\\]]+\\])*\\s*impl\\s+Process\\b"
+		: declarationName === "impl Process"
+			? "impl\\s+Process\\b"
+			: `(?:#\\[[^\\]]+\\]\\s*)*pub(?:\\(super\\))?\\s+(?:async\\s+)?fn\\s+${declarationName}\\b`;
+	const pattern = new RegExp(prefix, "g");
+	const matches = [...lexical.code.matchAll(pattern)];
+	if (matches.length === 0) return undefined;
+	const declarations: string[] = [];
+	for (const match of matches) {
+		const start = match.index!;
+		const headerEnd = start + match[0].length;
+		const open = lexical.code.indexOf("{", headerEnd);
+		if (open === -1 || /;|\b(?:pub\s+)?(?:async\s+)?fn\b|\bimpl\b/.test(lexical.code.slice(headerEnd, open))) return malformedDeclaration();
+		let depth = 0;
+		let end = -1;
+		for (let index = open; index < lexical.code.length; index++) {
+			if (lexical.code[index] === "{") depth++;
+			else if (lexical.code[index] === "}" && --depth === 0) {
+				end = index + 1;
+				break;
+			}
+		}
+		if (end === -1) return malformedDeclaration();
+		declarations.push(source.slice(start, end));
+	}
+	const text = declarations.join("\n");
+	return { text, canonical: text.replace(/\/\*[\s\S]*?\*\/|\/\/.*|\s+/g, ""), valid: true };
+}
+
+function extractNativeDeclarations(source: keyof typeof nativeAuthorityDeclarations, content: string | undefined): Map<string, Declaration> {
+	const selectors = nativeAuthorityDeclarations[source];
+	if (content === undefined) return new Map(selectors.map(selector => [selector, undefined]));
+	if (source.endsWith(".rs")) return new Map(selectors.map(selector => [selector, rustDeclaration(content, selector)]));
+	return extractDeclarations(content, selectors);
+}
+
+function inventoryFromManifestSource(source: string | undefined): Inventory | undefined {
+	if (source === undefined) return undefined;
+	try {
+		const inventory = (JSON.parse(source) as { inventory?: unknown }).inventory;
+		if (!inventory || typeof inventory !== "object" || Array.isArray(inventory)) return undefined;
+		if (Object.keys(inventory).sort().join(",") !== "discord,slack,telegram") return undefined;
+		for (const files of Object.values(inventory as Record<string, unknown>)) {
+			if (!files || typeof files !== "object" || Array.isArray(files)) return undefined;
+			for (const symbols of Object.values(files as Record<string, unknown>))
+				if (!Array.isArray(symbols) || symbols.some(symbol => typeof symbol !== "string")) return undefined;
+		}
+		return inventory as Inventory;
+	} catch {
+		return undefined;
+	}
+}
+
+function inventorySymbols(inventory: Inventory, family: Family, file: string): readonly string[] {
+	return inventory[family]?.[file] ?? [];
 }
 
 export function evaluate(
 	base: ReadonlyMap<string, string | undefined>,
 	head: ReadonlyMap<string, string | undefined>,
 	inventory: Inventory = protectedInventory,
+	baseInventory: Inventory = inventory,
 ): Evaluation {
 	const protectedChanges: string[] = [];
 	const malformedDeclarations: string[] = [];
 	const bootstrapping = isLegacyBootstrapBase(base);
-	for (const [family, files] of Object.entries(inventory) as [Family, Inventory[Family]][]) {
-		for (const [file, symbols] of Object.entries(files)) {
-			const beforeDeclarations = extractDeclarations(base.get(file) ?? "", symbols);
-			const afterDeclarations = extractDeclarations(head.get(file) ?? "", symbols);
+	for (const family of ["telegram", "discord", "slack"] as const) {
+		const files = new Set([...Object.keys(baseInventory[family]), ...Object.keys(inventory[family])]);
+		for (const file of files) {
+			const symbols = new Set([...inventorySymbols(baseInventory, family, file), ...inventorySymbols(inventory, family, file)]);
+			const beforeDeclarations = extractDeclarations(base.get(file) ?? "", [...symbols]);
+			const afterDeclarations = extractDeclarations(head.get(file) ?? "", [...symbols]);
 			for (const symbol of symbols) {
+				const beforeProtected = inventorySymbols(baseInventory, family, file).includes(symbol);
+				const afterProtected = inventorySymbols(inventory, family, file).includes(symbol);
 				const before = beforeDeclarations.get(symbol);
 				const after = afterDeclarations.get(symbol);
 				const label = `${family}:${file}:${symbol}`;
-				if (!after?.valid || !after || (!bootstrapping && (!before?.valid || !before)))
+				if ((afterProtected && (!after?.valid || !after)) || (!bootstrapping && beforeProtected && (!before?.valid || !before)))
 					malformedDeclarations.push(label);
-				if (before?.canonical !== after?.canonical) protectedChanges.push(label);
+				if ((beforeProtected || afterProtected) && before?.canonical !== after?.canonical) protectedChanges.push(label);
 			}
 		}
 	}
 	for (const source of nativeAuthoritySources) {
-		if (authorityDigest(base.get(source)) === authorityDigest(head.get(source))) continue;
-		for (const family of nativeAuthorityFamilies[source]) protectedChanges.push(`${family}:${source}:authority`);
+		if (!base.has(source) && !head.has(source)) continue;
+		const before = nativeAuthorityDigest(source, base.get(source));
+		const after = nativeAuthorityDigest(source, head.get(source));
+		const label = `${source}:authority`;
+		if (!before || !after) malformedDeclarations.push(label);
+		if (before !== after) for (const family of nativeAuthorityFamilies[source]) protectedChanges.push(`${family}:${label}`);
 	}
 	const nativeAuthorityChanges = protectedChanges.filter(change => change.endsWith(":authority"));
 	const guardPolicyChanged =
@@ -566,7 +805,6 @@ export function evaluate(
 	const guardContractBumped =
 		headGuardContractVersion !== undefined &&
 		(headGuardContractVersion > (baseGuardContractVersion ?? Number.POSITIVE_INFINITY));
-
 	const oldTelegramGeneration = generation(base.get(telegramContract));
 	const newTelegramGeneration = generation(head.get(telegramContract));
 	const telegramGenerationBumped =
@@ -575,10 +813,7 @@ export function evaluate(
 		(["discord", "slack"] as const).map(kind => {
 			const before = generation(base.get(chatControl), kind);
 			const after = generation(head.get(chatControl), kind);
-			return [
-				kind,
-				after !== undefined && after > (before ?? (bootstrapping ? 0 : Number.POSITIVE_INFINITY)),
-			];
+			return [kind, after !== undefined && after > (before ?? (bootstrapping ? 0 : Number.POSITIVE_INFINITY))];
 		}),
 	) as Evaluation["chatGenerationBumped"];
 	return { protectedChanges, nativeAuthorityChanges, telegramGenerationBumped, chatGenerationBumped, malformedDeclarations, guardPolicyChanged, guardContractBumped };
@@ -627,11 +862,23 @@ export async function run(baseInput: string | undefined, headInput: string | und
 	// no-op policy change.
 	await validateCurrentTreeManifest();
 	if (process.env.SKC_DAEMON_GUARD_DEBUG === "1") console.error("daemon-generation-guard: objects verified");
-	const files = [guardScript, manifestScript, ...new Set([...Object.values(protectedInventory).flatMap(inventory => Object.keys(inventory)), ...nativeAuthoritySources])];
+	// The base manifest can name declarations removed or moved in head, so fetch it
+	// before loading sources and compare the complete base/head protected-path union.
+	const baseManifestSource = await blob(base, manifestScript);
+	const baseInventory = inventoryFromManifestSource(baseManifestSource) ?? protectedInventory;
+	const files = [
+		guardScript,
+		manifestScript,
+		...new Set([
+			...Object.values(baseInventory).flatMap(inventory => Object.keys(inventory)),
+			...Object.values(protectedInventory).flatMap(inventory => Object.keys(inventory)),
+			...nativeAuthoritySources,
+		]),
+	];
 	const baseFiles: Array<readonly [string, string | undefined]> = [];
 	const headFiles: Array<readonly [string, string | undefined]> = [];
 	for (const file of files) {
-		baseFiles.push([file, await blob(base, file)]);
+		baseFiles.push([file, file === manifestScript ? baseManifestSource : await blob(base, file)]);
 		headFiles.push([file, await blob(head, file)]);
 	}
 	if (process.env.SKC_DAEMON_GUARD_DEBUG === "1") {
@@ -640,7 +887,7 @@ export async function run(baseInput: string | undefined, headInput: string | und
 	}
 	if (process.env.SKC_DAEMON_GUARD_DEBUG === "1") console.error("daemon-generation-guard: blobs loaded");
 	const baseMap = new Map(baseFiles);
-	const decision = evaluate(baseMap, new Map(headFiles));
+	const decision = evaluate(baseMap, new Map(headFiles), protectedInventory, baseInventory);
 	if (process.env.SKC_DAEMON_GUARD_DEBUG === "1") console.error("daemon-generation-guard: declarations evaluated");
 	if (baseMap.get(guardScript) !== undefined && decision.guardPolicyChanged && !decision.guardContractBumped)
 		throw new Error(`telegram-daemon-generation-guard: guard policy change requires a strictly higher GUARD_CONTRACT_VERSION`);

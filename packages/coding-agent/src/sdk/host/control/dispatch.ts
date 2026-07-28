@@ -137,7 +137,7 @@ function invoke(
 ): Promise<ControlValue> | ControlValue {
 	switch (operation) {
 		case "turn.prompt":
-			return surface.prompt(text(input), input.images);
+			return surface.prompt(text(input), input.images, input.clientRef as string | undefined);
 		case "turn.steer":
 			return surface.steer(text(input));
 		case "turn.follow_up":
@@ -158,7 +158,11 @@ function invoke(
 		case "workflow.plan_approve":
 			return surface.approvePlan(text(input, "id"), input.choice, input.expectedSessionId as string | undefined);
 		case "skill.invoke":
-			return surface.invokeSkill(text(input, "name"), input.args);
+			return surface.invokeSkill(
+				text(input, "name"),
+				input.args,
+				typeof input.clientRef === "string" ? input.clientRef : undefined,
+			);
 		case "mode.plan.set":
 			return surface.setPlanMode(input.on as boolean);
 		case "mode.goal.operate":
@@ -167,6 +171,8 @@ function invoke(
 			return surface.replaceTodo(input.items);
 		case "model.set":
 			return surface.setModel(text(input, "id"), input.thinkingLevel);
+		case "model.profile.set":
+			return surface.setModelProfile(text(input, "id"));
 		case "model.cycle":
 			return surface.cycleModel();
 		case "thinking.set":

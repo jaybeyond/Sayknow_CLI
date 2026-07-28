@@ -110,7 +110,13 @@
           "doctor",
           "kickoff",
           "write-spec",
-          "write-artifact"
+          "write-artifact",
+          "stage",
+          "check",
+          "apply",
+          "discard",
+          "read",
+          "write"
         ],
         "name": "session-id",
         "type": "string"
@@ -256,10 +262,48 @@
       },
       {
         "appliesToVerbs": [
-          "write-spec"
+          "write-spec",
+          "stage",
+          "check",
+          "apply",
+          "discard",
+          "read",
+          "write",
+          "clear",
+          "handoff"
         ],
         "name": "json",
         "type": "boolean"
+      },
+      {
+        "appliesToVerbs": [
+          "stage",
+          "write"
+        ],
+        "name": "input",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "appliesToVerbs": [
+          "write"
+        ],
+        "name": "reset",
+        "type": "boolean"
+      },
+      {
+        "appliesToVerbs": [
+          "stage"
+        ],
+        "enumValues": [
+          "initialize-context",
+          "record-round",
+          "update-facts",
+          "merge-state"
+        ],
+        "name": "for",
+        "required": true,
+        "type": "enum"
       },
       {
         "name": "args",
@@ -304,6 +348,38 @@
       {
         "name": "write-spec",
         "surface": "command-flag"
+      },
+      {
+        "name": "stage",
+        "surface": "command-positional"
+      },
+      {
+        "name": "check",
+        "surface": "command-positional"
+      },
+      {
+        "name": "apply",
+        "surface": "command-positional"
+      },
+      {
+        "name": "discard",
+        "surface": "command-positional"
+      },
+      {
+        "name": "read",
+        "surface": "command-positional"
+      },
+      {
+        "name": "write",
+        "surface": "command-positional"
+      },
+      {
+        "name": "clear",
+        "surface": "command-positional"
+      },
+      {
+        "name": "handoff",
+        "surface": "command-positional"
       },
       {
         "name": "graph",
@@ -534,7 +610,13 @@
           "doctor",
           "kickoff",
           "write-spec",
-          "write-artifact"
+          "write-artifact",
+          "stage",
+          "check",
+          "apply",
+          "discard",
+          "read",
+          "write"
         ],
         "name": "session-id",
         "type": "string"
@@ -922,7 +1004,13 @@
           "doctor",
           "kickoff",
           "write-spec",
-          "write-artifact"
+          "write-artifact",
+          "stage",
+          "check",
+          "apply",
+          "discard",
+          "read",
+          "write"
         ],
         "name": "session-id",
         "type": "string"
@@ -1046,6 +1134,9 @@
           "read-worker-status",
           "read-worker-heartbeat",
           "update-worker-heartbeat",
+          "read-worker-memory-guard",
+          "update-worker-memory-guard",
+          "apply-worker-memory-guard",
           "write-worker-inbox",
           "write-worker-identity",
           "append-event",
@@ -1109,6 +1200,41 @@
           "api"
         ],
         "name": "completionEvidence",
+        "type": "object"
+      },
+      {
+        "appliesToVerbs": [
+          "api"
+        ],
+        "name": "platform",
+        "type": "string"
+      },
+      {
+        "appliesToVerbs": [
+          "api"
+        ],
+        "name": "automatic-action-allowed",
+        "type": "boolean"
+      },
+      {
+        "appliesToVerbs": [
+          "api"
+        ],
+        "name": "incident-id",
+        "type": "string"
+      },
+      {
+        "appliesToVerbs": [
+          "api"
+        ],
+        "name": "pid-probe",
+        "type": "object"
+      },
+      {
+        "appliesToVerbs": [
+          "api"
+        ],
+        "name": "candidates",
         "type": "object"
       },
       {
@@ -1370,7 +1496,13 @@
           "doctor",
           "kickoff",
           "write-spec",
-          "write-artifact"
+          "write-artifact",
+          "stage",
+          "check",
+          "apply",
+          "discard",
+          "read",
+          "write"
         ],
         "name": "session-id",
         "type": "string"
@@ -1515,10 +1647,58 @@
           "record-review-blockers",
           "steer",
           "classify-blocker",
+          "record-critic-verdict",
+          "record-critic-gate-override",
           "rebaseline-pipeline-overlap"
         ],
         "name": "evidence",
         "required": true,
+        "type": "string"
+      },
+      {
+        "appliesToVerbs": [
+          "record-critic-verdict"
+        ],
+        "enumValues": [
+          "completion",
+          "pause"
+        ],
+        "name": "terminus",
+        "required": true,
+        "type": "enum"
+      },
+      {
+        "appliesToVerbs": [
+          "record-critic-verdict"
+        ],
+        "enumValues": [
+          "OKAY",
+          "ITERATE",
+          "REJECT"
+        ],
+        "name": "verdict",
+        "required": true,
+        "type": "enum"
+      },
+      {
+        "appliesToVerbs": [
+          "record-critic-verdict"
+        ],
+        "name": "blockers-json",
+        "type": "string"
+      },
+      {
+        "appliesToVerbs": [
+          "record-critic-verdict"
+        ],
+        "name": "goal-id",
+        "type": "string"
+      },
+      {
+        "appliesToVerbs": [
+          "record-critic-verdict"
+        ],
+        "name": "classification-event-id",
         "type": "string"
       },
       {
@@ -1743,6 +1923,8 @@
           "record-review-blockers",
           "steer",
           "classify-blocker",
+          "record-critic-verdict",
+          "record-critic-gate-override",
           "start-pipeline-overlap",
           "join-pipeline-overlap",
           "rebaseline-pipeline-overlap"
@@ -1828,6 +2010,14 @@
       },
       {
         "name": "classify-blocker",
+        "surface": "command-positional"
+      },
+      {
+        "name": "record-critic-verdict",
+        "surface": "command-positional"
+      },
+      {
+        "name": "record-critic-gate-override",
         "surface": "command-positional"
       },
       {

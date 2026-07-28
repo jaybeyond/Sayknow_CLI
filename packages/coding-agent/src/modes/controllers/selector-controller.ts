@@ -2057,7 +2057,10 @@ export class SelectorController {
 		this.#clearTransientSessionUi();
 		const migrationPolicy =
 			this.ctx.settings?.get("session.directoryMigration") === "disabled" ? "disabled" : "copy-retain";
-		const writableSessionPath = await SessionManager.prepareManagedCandidateForWrite(sessionPath, migrationPolicy);
+		const writableSessionPath = await this.ctx.sessionManager.prepareManagedCandidateForWrite(
+			sessionPath,
+			migrationPolicy,
+		);
 
 		// Switch session via AgentSession (emits hook and tool session events)
 		if (!(await this.ctx.session.switchSession(writableSessionPath))) return;

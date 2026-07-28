@@ -280,6 +280,53 @@ describe("managed attempt transaction", () => {
 		expect(agent.state.messages.filter(message => message.role === "assistant")).toHaveLength(0);
 	});
 
+	it("clears managed ownership before terminal observers run", async () => {
+		const mock = createMockModel();
+		const agent = new Agent({
+			initialState: { model: mock.model, systemPrompt: ["test"], tools: [], messages: [] },
+			streamFn: async () => {
+				throw Object.assign(new Error(""), {
+					transportFailure: { kind: "transport", status: 400, openaiErrorCode: "context_length_exceeded" },
+				});
+			},
+		});
+		let ownerBeforeTerminal: number | undefined;
+		let ownerAtMessageEnd: number | undefined;
+		let ownerAtAgentEnd: number | undefined;
+		agent.subscribe(event => {
+			if (event.type === "message_end" && event.message.role === "assistant") {
+				ownerAtMessageEnd = agent.currentManagedLogicalRunId;
+			}
+			if (event.type === "agent_end") {
+				ownerAtAgentEnd = agent.currentManagedLogicalRunId;
+			}
+		});
+
+		await agent.prompt("run", {
+			fallbackManaged: true,
+			onManagedAttemptOutcome: outcome => {
+				if (outcome.type !== "context_overflow_discarded") {
+					throw new Error(`Expected discarded overflow, received ${outcome.type}`);
+				}
+				return {
+					type: "maintenance",
+					continuation: ownership => {
+						ownerBeforeTerminal = agent.currentManagedLogicalRunId;
+						agent.requestRunTerminal(ownership.logicalRunId, {
+							stopReason: "error",
+							messages: [outcome.message],
+						});
+					},
+				};
+			},
+		});
+
+		expect(ownerBeforeTerminal).toBeDefined();
+		expect(ownerAtMessageEnd).toBeUndefined();
+		expect(ownerAtAgentEnd).toBeUndefined();
+		expect(agent.currentManagedLogicalRunId).toBeUndefined();
+	});
+
 	it("discards retryable managed failures before any assistant lifecycle escapes", async () => {
 		const mock = createMockModel();
 		const streamFn = async () => {
@@ -982,6 +1029,61 @@ describe("managed attempt transaction", () => {
 		expect(message.content).toEqual([]);
 	});
 
+	it("preserves reasoning summary events through managed replay", async () => {
+		const mock = createMockModel();
+		const callbacks: AssistantMessageEvent[] = [];
+		const agent = new Agent({
+			initialState: { model: mock.model, systemPrompt: ["test"], tools: [], messages: [] },
+			streamFn: () => {
+				const stream = new AssistantMessageEventStream();
+				queueMicrotask(() => {
+					const partial = assistantMessage(mock.model);
+					partial.content.push({ type: "thinking", thinking: "safe summary" });
+					stream.push({ type: "start", partial });
+					stream.push({ type: "reasoning_summary_start", contentIndex: 0, partial });
+					stream.push({
+						type: "reasoning_summary_delta",
+						contentIndex: 0,
+						delta: "safe summary",
+						partial,
+					});
+					stream.push({
+						type: "reasoning_summary_end",
+						contentIndex: 0,
+						content: "safe summary",
+						partial,
+					});
+					stream.push({ type: "done", reason: "stop", message: partial });
+				});
+				return stream;
+			},
+			onAssistantMessageEvent: (_message, event) => callbacks.push(event),
+		});
+
+		await agent.prompt("run", { fallbackManaged: true });
+
+		expect(agent.state.error).toBeUndefined();
+		expect(callbacks.map(event => event.type)).toEqual([
+			"reasoning_summary_start",
+			"reasoning_summary_delta",
+			"reasoning_summary_end",
+		]);
+		expect(callbacks[0]).toMatchObject({ type: "reasoning_summary_start", contentIndex: 0 });
+		expect(callbacks[1]).toMatchObject({
+			type: "reasoning_summary_delta",
+			contentIndex: 0,
+			delta: "safe summary",
+		});
+		expect(callbacks[2]).toMatchObject({
+			type: "reasoning_summary_end",
+			contentIndex: 0,
+			content: "safe summary",
+		});
+		expect(agent.state.messages.at(-1)).toMatchObject({
+			role: "assistant",
+			content: [{ type: "thinking", thinking: "safe summary" }],
+		});
+	});
 	it("preserves a complete detached toolcall_end event", async () => {
 		const mock = createMockModel();
 		const toolCall = {
