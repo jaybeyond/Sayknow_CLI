@@ -5,6 +5,31 @@ This file tracks the **fork's own releases**; upstream's full feature history li
 in that project. Each release notes the upstream version it is built on.
 
 
+## [0.5.1] — 2026-07-29
+
+Built on upstream **gajae-code v0.12.0**.
+
+### Fixed (Sayknow Pet still left sixel residue under tmux)
+
+0.5.0 gave tmux ownership of the pet's sixel, which is the real fix — but it only
+takes effect for a client that attaches *after* the feature is set, because tmux
+computes client features at attach time. Every already-attached client kept
+falling back to DCS passthrough, and that fallback still erased at tmux level
+while its pixels lived in the outer terminal. So the residue persisted for
+exactly the people who already had a session open.
+
+- **The erase now rides the same envelope as the draw.** When the frame goes out
+  through passthrough, the erase does too, reaching the terminal that actually
+  holds the image; the absolute coordinates match because the draw used the same
+  ones. When tmux owns the sixel, the erase stays at tmux level as before.
+- **`terminal-features` is set with the correct scope.** It is a *server* option,
+  so the previous `set-option -aq -t <target>` silently ignored the target. Now
+  `set-option -saq`.
+- Added a regression test that pins the multiplexer environment and asserts draw
+  and erase share one envelope. The pet suite previously inherited whatever
+  terminal the developer ran it in, so it passed on CI and failed inside tmux;
+  the environment is now pinned per test.
+
 ## [0.5.0] — 2026-07-28
 
 Built on upstream **gajae-code v0.12.0** (previous fork release tracked v0.11.6).

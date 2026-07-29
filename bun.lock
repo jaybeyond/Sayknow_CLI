@@ -15,7 +15,7 @@
     },
     "packages/agent": {
       "name": "@sayknow-cli/agent-core",
-      "version": "0.5.0",
+      "version": "0.5.1",
       "dependencies": {
         "@opentelemetry/api": "catalog:",
         "@sayknow-cli/ai": "catalog:",
@@ -30,7 +30,7 @@
     },
     "packages/ai": {
       "name": "@sayknow-cli/ai",
-      "version": "0.5.0",
+      "version": "0.5.1",
       "bin": {
         "pi-ai": "./src/cli.ts",
       },
@@ -48,14 +48,14 @@
     },
     "packages/bridge-client": {
       "name": "@sayknow-cli/bridge-client",
-      "version": "0.5.0",
+      "version": "0.5.1",
       "devDependencies": {
         "@types/bun": "catalog:",
       },
     },
     "packages/coding-agent": {
       "name": "@sayknow-cli/coding-agent",
-      "version": "0.5.0",
+      "version": "0.5.1",
       "bin": {
         "skc": "bin/skc.js",
       },
@@ -91,7 +91,7 @@
     },
     "packages/natives": {
       "name": "@sayknow-cli/natives",
-      "version": "0.5.0",
+      "version": "0.5.1",
       "devDependencies": {
         "@napi-rs/cli": "catalog:",
         "@types/bun": "catalog:",
@@ -107,23 +107,23 @@
     },
     "packages/natives-darwin-arm64": {
       "name": "@sayknow-cli/natives-darwin-arm64",
-      "version": "0.5.0",
+      "version": "0.5.1",
     },
     "packages/natives-darwin-x64": {
       "name": "@sayknow-cli/natives-darwin-x64",
-      "version": "0.5.0",
+      "version": "0.5.1",
     },
     "packages/natives-linux-arm64": {
       "name": "@sayknow-cli/natives-linux-arm64",
-      "version": "0.5.0",
+      "version": "0.5.1",
     },
     "packages/natives-linux-x64": {
       "name": "@sayknow-cli/natives-linux-x64",
-      "version": "0.5.0",
+      "version": "0.5.1",
     },
     "packages/natives-win32-x64": {
       "name": "@sayknow-cli/natives-win32-x64",
-      "version": "0.5.0",
+      "version": "0.5.1",
     },
     "packages/orchestration-token-benchmark": {
       "name": "@sayknow-cli/orchestration-token-benchmark",
@@ -134,7 +134,7 @@
     },
     "packages/sayknow-cli": {
       "name": "sayknow-cli",
-      "version": "0.5.0",
+      "version": "0.5.1",
       "bin": {
         "skc": "bin/skc.js",
       },
@@ -144,7 +144,7 @@
     },
     "packages/stats": {
       "name": "@sayknow-cli/stats",
-      "version": "0.5.0",
+      "version": "0.5.1",
       "bin": {
         "skc-stats": "./src/index.ts",
       },
@@ -169,7 +169,7 @@
     },
     "packages/telegram-remote": {
       "name": "@sayknow-cli/telegram-remote",
-      "version": "0.5.0",
+      "version": "0.5.1",
       "dependencies": {
         "@sayknow-cli/coding-agent": "catalog:",
       },
@@ -179,7 +179,7 @@
     },
     "packages/tui": {
       "name": "@sayknow-cli/tui",
-      "version": "0.5.0",
+      "version": "0.5.1",
       "dependencies": {
         "@sayknow-cli/natives": "catalog:",
         "@sayknow-cli/utils": "catalog:",
@@ -219,7 +219,7 @@
     },
     "packages/utils": {
       "name": "@sayknow-cli/utils",
-      "version": "0.5.0",
+      "version": "0.5.1",
       "dependencies": {
         "@sayknow-cli/natives": "catalog:",
         "beautiful-mermaid": "catalog:",
@@ -233,7 +233,7 @@
     },
     "python/roboskc/web": {
       "name": "roboskc-web",
-      "version": "0.5.0",
+      "version": "0.5.1",
       "dependencies": {
         "solid-js": "catalog:",
       },
@@ -263,14 +263,14 @@
     "@opentelemetry/context-async-hooks": "^2.0.0",
     "@opentelemetry/sdk-trace-base": "^2.0.0",
     "@puppeteer/browsers": "^2.13.0",
-    "@sayknow-cli/agent-core": "0.5.0",
-    "@sayknow-cli/ai": "0.5.0",
-    "@sayknow-cli/bridge-client": "0.5.0",
-    "@sayknow-cli/coding-agent": "0.5.0",
-    "@sayknow-cli/natives": "0.5.0",
-    "@sayknow-cli/stats": "0.5.0",
-    "@sayknow-cli/tui": "0.5.0",
-    "@sayknow-cli/utils": "0.5.0",
+    "@sayknow-cli/agent-core": "0.5.1",
+    "@sayknow-cli/ai": "0.5.1",
+    "@sayknow-cli/bridge-client": "0.5.1",
+    "@sayknow-cli/coding-agent": "0.5.1",
+    "@sayknow-cli/natives": "0.5.1",
+    "@sayknow-cli/stats": "0.5.1",
+    "@sayknow-cli/tui": "0.5.1",
+    "@sayknow-cli/utils": "0.5.1",
     "@tailwindcss/node": "^4.2.4",
     "@tailwindcss/vite": "^4.2.4",
     "@types/babel__generator": "^7.27.0",
@@ -1090,7 +1090,7 @@
 
     "lru-cache": ["lru-cache@11.3.6", "", {}, "sha512-Gf/KoL3C/MlI7Bt0PGI9I+TeTC/I6r/csU58N4BSNc4lppLBeKsOdFYkK+dX0ABDUMJNfCHTyPpzwwO21Awd3A=="],
 
-    "lucide-react": ["lucide-react@1.26.0", "", { "peerDependencies": { "react": "^16.5.1 || ^17.0.0 || ^18.0.0 || ^19.0.0" } }, "sha512-raglYVR2+VkMfJL158krjVmE+rV5ST2lzA/KQm1FRSjMHT4MnWaegHxoVEpmc2So3nOEhp9oGejJwAPX8MoAjg=="],
+    "lucide-react": ["lucide-react@1.27.0", "", { "peerDependencies": { "react": "^16.5.1 || ^17.0.0 || ^18.0.0 || ^19.0.0" } }, "sha512-rJicGl/3Fly/E0rOH1YmPZ6e49JCnKknh1ox1vpHnkfjujAkKA6sqUZvH3MTAaXXjgexyUwgNwTJzTtYuAFYJw=="],
 
     "magic-string": ["magic-string@0.30.21", "", { "dependencies": { "@jridgewell/sourcemap-codec": "^1.5.5" } }, "sha512-vd2F4YUyEXKGcLHoq+TEyCjxueSeHnFxyyjNp80yg0XV4vUhnDer/lvvlqM/arB5bXQN5K2/3oinyCRyx8T2CQ=="],
 
