@@ -88,6 +88,38 @@ describe("Responses provider: truncated tool-call detection", () => {
 		expect(tools[0].incompleteArguments).toBe(true);
 	});
 
+	test("accepts complete JSON when the response truncates before item finalization", async () => {
+		const events = [
+			{
+				type: "response.output_item.added",
+				output_index: 0,
+				item: { type: "function_call", id: "fc_1", call_id: "call_1", name: "todo_write", arguments: "" },
+			},
+			{
+				type: "response.function_call_arguments.delta",
+				item_id: "fc_1",
+				output_index: 0,
+				delta: '{"ops":[{"op":"init","list":[{"phase":"Check","items":["Inspect changes"]}]}]}   ',
+			},
+			{
+				type: "response.completed",
+				response: { id: "resp_1", status: "incomplete", incomplete_details: { reason: "max_output_tokens" } },
+			},
+		];
+		const output = makeOutput();
+		const { stream } = makeCapture();
+		await processResponsesStream(makeStream(events), output, stream, makeModel());
+
+		expect(output.stopReason).toBe("length");
+		const tools = toolBlocks(output);
+		expect(tools).toHaveLength(1);
+		expect(tools[0].name).toBe("todo_write");
+		expect(tools[0].arguments).toEqual({
+			ops: [{ op: "init", list: [{ phase: "Check", items: ["Inspect changes"] }] }],
+		});
+		expect(tools[0].incompleteArguments).toBeFalsy();
+	});
+
 	test("does NOT flag a completed tool call even if the turn later truncates", async () => {
 		const events = [
 			{

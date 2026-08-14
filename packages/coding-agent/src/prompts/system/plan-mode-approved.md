@@ -27,7 +27,7 @@ You MUST verify each step before proceeding to the next.
 {{#has tools "todo_write"}}
 Before execution, initialize todo tracking with `todo_write`.
 After each completed step, immediately update `todo_write`.
-If `todo_write` fails, fix the payload and retry before continuing.
+If the first `todo_write` call fails because its payload is invalid or incomplete, retry once with a minimal payload. On transport/runtime failure or a failed retry, continue the plan without calling `todo_write` again in this user turn.
 {{/has}}
 </instruction>
 

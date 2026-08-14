@@ -1,4 +1,13 @@
 import { Args, Command, Flags } from "@sayknow-cli/utils/cli";
+import { readBootGeneration } from "../skc-runtime/boot-generation";
+import {
+	decodeRestoreReference,
+	encodeRestoreReference,
+	evaluateRestoreCandidates,
+	listRestorePointers,
+	type RestoreCandidateVerdict,
+} from "../skc-runtime/session-restore";
+import { buildRestoreCandidateDeps, restoreSession } from "../skc-runtime/session-restore-runtime";
 import {
 	attachSkcTmuxSession,
 	createSkcTmuxSession,
@@ -45,12 +54,13 @@ function sessionJson(session: SessionJsonDto): SessionJsonDto {
 }
 
 export default class Session extends Command {
-	static description = "List, inspect, attach, and remove tagged SKC-managed tmux sessions";
+	static description =
+		"List, inspect, attach, and remove tagged SKC-managed tmux sessions. `restore` is a manual, opt-in recovery step that only ever restores sessions this machine can prove died in a REBOOT: nothing starts automatically at login, a session that is still live is never duplicated, and running tools or background work are not recovered — only the tmux session, its directory, and its conversation.";
 	static strict = false;
 
 	static args = {
 		action: Args.string({
-			description: "list (default), status, create, attach, or remove",
+			description: "list (default), status, create, attach, remove, or restore",
 			required: false,
 		}),
 		session: Args.string({
@@ -67,6 +77,15 @@ export default class Session extends Command {
 		"state-file": Flags.string({
 			description: "Expected @skc-session-state-file tag for force-close (defense-in-depth match)",
 		}),
+		"dry-run": Flags.boolean({
+			description:
+				"restore: list candidates and their verdicts. Changes nothing at all (no tmux command, no lock, no database, no pointer write). This is the default when no --reference is given.",
+			default: false,
+		}),
+		reference: Flags.string({
+			description:
+				"restore: restore exactly one candidate by the opaque reference shown in --dry-run output. Refused unless that candidate is still reboot-eligible at this moment.",
+		}),
 	};
 
 	static examples = [
@@ -76,6 +95,8 @@ export default class Session extends Command {
 		"skc session attach <session>",
 		"skc session remove <session>",
 		"skc session force-close <session> --session-id <id>",
+		"skc session restore --dry-run   # list what a reboot left behind",
+		"skc session restore --reference <ref>   # restore exactly that one",
 	];
 
 	async run(): Promise<void> {
@@ -102,6 +123,71 @@ export default class Session extends Command {
 						].join("\t"),
 					),
 				);
+				return;
+			}
+
+			if (action === "restore") {
+				// Manual, reboot-proven, opt-in. Nothing here starts automatically at
+				// login, and a session is only ever restored when this host can prove
+				// the machine rebooted since that session was recorded.
+				const reference = flags.reference;
+				const decoded = reference ? decodeRestoreReference(reference) : null;
+				if (reference && !decoded) throw new Error("invalid_restore_reference");
+				const pointers = listRestorePointers().filter(
+					pointer =>
+						!decoded ||
+						(pointer.coordinator_session_id === decoded.coordinatorSessionId &&
+							pointer.state_file === decoded.stateFile),
+				);
+				if (reference && pointers.length === 0) throw new Error("restore_reference_not_found");
+				const verdicts = evaluateRestoreCandidates(pointers, buildRestoreCandidateDeps(readBootGeneration()));
+				const describe = (verdict: RestoreCandidateVerdict) => ({
+					reference: encodeRestoreReference(verdict.pointer.coordinator_session_id, verdict.pointer.state_file),
+					sessionId: verdict.pointer.skc_session_id,
+					cwd: verdict.pointer.cwd,
+					branch: verdict.pointer.branch,
+					eligible: verdict.eligible,
+					...(verdict.eligible ? {} : { reason: verdict.reason }),
+				});
+				// Dry run is the default reporting surface and performs zero mutation:
+				// no pointer write, no lock, no SQLite, no tmux command.
+				if (flags["dry-run"] || !reference) {
+					const rows = verdicts.map(describe);
+					if (json) {
+						writeJson({ ok: true, dryRun: true, candidates: rows });
+						return;
+					}
+					writeText(
+						rows.length === 0
+							? ["no restore candidates"]
+							: rows.map(row =>
+									[
+										row.eligible ? "restorable" : `skipped(${row.reason})`,
+										row.sessionId,
+										row.cwd,
+										row.reference,
+									].join("\t"),
+								),
+					);
+					return;
+				}
+				const verdict = verdicts[0];
+				if (!verdict) throw new Error("restore_reference_not_found");
+				if (!verdict.eligible) throw new Error(`restore_ineligible_${verdict.reason}`);
+				const outcome = restoreSession(verdict.pointer);
+				if (!outcome.ok) throw new Error(outcome.detail);
+				if (json) {
+					writeJson({
+						ok: true,
+						restored: {
+							sessionId: outcome.pointer.skc_session_id,
+							cwd: outcome.pointer.cwd,
+							tmuxSession: outcome.tmuxSession,
+						},
+					});
+					return;
+				}
+				writeText([`restored: ${outcome.tmuxSession} (${outcome.pointer.skc_session_id})`]);
 				return;
 			}
 

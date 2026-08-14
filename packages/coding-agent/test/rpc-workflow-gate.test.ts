@@ -57,7 +57,10 @@ describe("RPC workflow_gate contract", () => {
 			},
 		});
 		const schema: RpcJsonSchema = { type: "string", enum: ["approve", "request-changes", "reject"] };
-		const gate = broker.openGate({ stage: "ralplan", kind: "approval", schema, context: { title: "Approve plan?" } });
+		const gate = broker.openGate(
+			{ stage: "ralplan", kind: "approval", schema, context: { title: "Approve plan?" } },
+			{ activate: () => {}, isLive: () => true, release: () => {}, terminalProof: "not_published" },
+		);
 
 		// Advertised schema_hash equals the server-side validation hash (agreement).
 		expect(gate.schema_hash).toBe(schemaHash(schema));

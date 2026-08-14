@@ -104,6 +104,12 @@ export function modelSupportsTokenCostMetrics(model: Model | undefined): boolean
 export interface WorkflowGateEmitter {
 	/** True only when unattended mode has been negotiated. */
 	isUnattended(): boolean;
+	/**
+	 * True when gates emitted through this emitter can be answered remotely
+	 * (workflow_gate_response over RPC/bridge). The ask tool refuses headless
+	 * execution unless this reports true.
+	 */
+	supportsRemoteGateAnswers(): boolean;
 	/** Open + emit a gate; resolves with the agent's answer (from workflow_gate_response). */
 	emitGate(input: OpenGateInput): Promise<unknown>;
 	/**
@@ -155,6 +161,10 @@ export class UnattendedSessionControlPlane implements RpcUnattendedControlPlane,
 
 	isUnattended(): boolean {
 		return this.#controller !== undefined;
+	}
+
+	supportsRemoteGateAnswers(): boolean {
+		return true;
 	}
 
 	/** Observe every emitted gate (e.g. so an extension can map an ask to its gate_id). */
@@ -219,19 +229,27 @@ export class UnattendedSessionControlPlane implements RpcUnattendedControlPlane,
 		this.#broker = new WorkflowGateBroker(this.opts.runId, this.opts.store ?? new MemoryGateStore(), {
 			emit: gate => this.opts.emitFrame(gate),
 			audit: e => this.opts.audit?.(e),
-			advance: (gate, answer) => {
-				const pending = this.#pending.get(gate.gate_id);
+			// The broker verifies the continuation is still live *after* `advance`
+			// returns, so the pending waiter must survive advance and only settle in
+			// `completeAccepted` (mirroring the session-side gate emitter).
+			advance: () => {},
+			completeAccepted: record => {
+				const pending = this.#pending.get(record.gate.gate_id);
 				if (pending) {
-					this.#pending.delete(gate.gate_id);
-					pending.resolve(answer);
+					this.#pending.delete(record.gate.gate_id);
+					pending.resolve(record.answer);
 					return;
 				}
 				// A controller may answer synchronously while emitFrame is still on the
 				// stack. Keep the accepted answer so emitGate can still resolve after
 				// openGate returns and the caller starts awaiting.
-				this.#earlyAnswers.set(gate.gate_id, answer);
+				this.#earlyAnswers.set(record.gate.gate_id, record.answer);
 			},
 			finalizeAccepted: record => this.#finalizeAcceptedGate(record),
+			// The control plane's durable record is the gate store itself; it never
+			// publishes a separate terminal transcript, so accepted gates (live and
+			// recovered) terminalize with the designed "not_published" proof.
+			terminalizeAccepted: () => "not_published",
 		});
 		this.#brokerReady = true;
 		void this.startRecoveryOnce();
@@ -496,7 +514,21 @@ export class UnattendedSessionControlPlane implements RpcUnattendedControlPlane,
 		if (!this.#broker) {
 			return Promise.reject(new Error("cannot emit a workflow gate before unattended mode is negotiated"));
 		}
-		const gate = this.#broker.openGate(input);
+		// Opening without a continuation quarantines the gate as
+		// "opened_without_continuation", which makes it permanently unanswerable.
+		// Register the pending waiter through the continuation contract so the
+		// broker records a live, resolvable gate and can fence it on release.
+		const waiter = Promise.withResolvers<unknown>();
+		const gate = this.#broker.openGate(input, {
+			activate: opened => this.#pending.set(opened.gate_id, { resolve: waiter.resolve, reject: waiter.reject }),
+			isLive: gateId => this.#pending.has(gateId),
+			release: gateId => {
+				const pending = this.#pending.get(gateId);
+				if (!pending) return;
+				this.#pending.delete(gateId);
+				pending.reject(new Error(`workflow gate ${gateId} continuation was fenced`));
+			},
+		});
 		for (const listener of this.#gateListeners) {
 			try {
 				listener(gate);
@@ -507,11 +539,10 @@ export class UnattendedSessionControlPlane implements RpcUnattendedControlPlane,
 		if (this.#earlyAnswers.has(gate.gate_id)) {
 			const answer = this.#earlyAnswers.get(gate.gate_id);
 			this.#earlyAnswers.delete(gate.gate_id);
+			this.#pending.delete(gate.gate_id);
 			return Promise.resolve(answer);
 		}
-		const { promise, resolve, reject } = Promise.withResolvers<unknown>();
-		this.#pending.set(gate.gate_id, { resolve, reject });
-		return promise;
+		return waiter.promise;
 	}
 
 	async recover(): Promise<void> {

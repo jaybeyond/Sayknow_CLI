@@ -22,10 +22,10 @@ describe("PetSelectorComponent", () => {
 		const component = new PetSelectorComponent("red", onSelect, () => {}, onPreview, false);
 		const rendered = stripAnsi(component.render(80).join("\n"));
 
-		expect(rendered).toContain("RedSayknow (saved)");
-		expect(rendered).toContain("BlueSayknow");
+		expect(rendered).toContain("RedOctopus (saved)");
+		expect(rendered).toContain("BlueOctopus");
 		expect(rendered).toContain("Saved, unavailable");
-		expect(stripAnsi(component.render(40).join("\n"))).toContain("RedSayknow (saved)");
+		expect(stripAnsi(component.render(40).join("\n"))).toContain("RedOctopus (saved)");
 		expect(component.getSelectList().getSelectedItem()?.value).toBe("off");
 
 		component.getSelectList().handleInput("\x1b[B");
@@ -37,8 +37,8 @@ describe("PetSelectorComponent", () => {
 		const items = createPetSelectItems(
 			[
 				{ value: "off", label: "Off" },
-				{ value: "red", label: "RedSayknow" },
-				{ value: "blue", label: "BlueSayknow" },
+				{ value: "red", label: "RedOctopus" },
+				{ value: "blue", label: "BlueOctopus" },
 			],
 			"blue",
 			false,
@@ -49,10 +49,15 @@ describe("PetSelectorComponent", () => {
 		expect(items.find(item => item.value === "blue")?.description).toContain("Saved, unavailable");
 	});
 
-	it("preserves multiplexer-specific recovery guidance", () => {
-		const warning = getPetUnavailableWarning({ TMUX: "/tmp/tmux-1/default,1,0" });
-		expect(warning).toContain("outside the multiplexer");
-		expect(warning).toContain("PI_FORCE_IMAGE_PROTOCOL=sixel");
+	it("gives multiplexer-specific recovery guidance", () => {
+		// tmux CAN carry graphics (DCS passthrough), so its warning names the real
+		// requirement — a capable outer terminal — instead of telling users to leave.
+		const tmuxWarning = getPetUnavailableWarning({ TMUX: "/tmp/tmux-1/default,1,0" });
+		expect(tmuxWarning).toContain("passthrough");
+		expect(tmuxWarning).toContain("Ghostty");
+		expect(tmuxWarning).not.toContain("outside the multiplexer");
+		// screen/zellij have no passthrough envelope: leaving is the only fix.
+		expect(getPetUnavailableWarning({ ZELLIJ: "session" })).toContain("outside the multiplexer");
 		expect(getPetUnavailableWarning({})).toBe(PET_UNAVAILABLE_WARNING);
 	});
 });

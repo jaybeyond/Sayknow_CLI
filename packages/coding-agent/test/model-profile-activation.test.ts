@@ -97,6 +97,13 @@ function fakeSession(initial = model("provider-a", "initial")) {
 		thinkingLevel: ThinkingLevel.Low as ThinkingLevel | undefined,
 		sessionId: "session-1",
 		setModelTemporaryCalls: [] as Array<{ model: Model; thinkingLevel?: ThinkingLevel }>,
+		configuredModelChains: {} as Record<string, readonly string[] | undefined>,
+		getConfiguredModelChain(role: string): readonly string[] | undefined {
+			return this.configuredModelChains[role];
+		},
+		setConfiguredModelChain(role: string, entries: readonly string[]) {
+			this.configuredModelChains[role] = entries;
+		},
 		async setModelTemporary(next: Model, thinkingLevel?: ThinkingLevel) {
 			this.setModelTemporaryCalls.push({ model: next, thinkingLevel });
 			this.model = next;
@@ -159,10 +166,10 @@ describe("model profile activation", () => {
 			architect: "provider-b/executor",
 		});
 	});
-	test("builtin codex-eco preserves high-effort Luna and Terra selectors", async () => {
+	test("builtin codex-eco preserves catalog role selectors, clamping efforts to the resolved model's supported range", async () => {
 		const registry = fakeRegistry({ profiles: [...BUILTIN_MODEL_PROFILES] });
 		const catalog = BUILTIN_MODEL_PROFILES.find(profile => profile.name === "codex-eco");
-		expect(catalog?.modelMapping.executor).toBe("openai-codex/gpt-5.6-luna:high");
+		expect(catalog?.modelMapping.executor).toBe("openai-codex/gpt-5.6-luna:low");
 
 		const prepared = await prepareModelProfileActivation({
 			session: fakeSession(),
@@ -170,10 +177,15 @@ describe("model profile activation", () => {
 			settings: Settings.isolated(),
 			profileName: "codex-eco",
 		});
-		expect(prepared.agentModelOverrides.executor).toBe("openai-codex/gpt-5.6-luna:high");
-		expect(prepared.agentModelOverrides.architect).toBe("openai-codex/gpt-5.6-sol:medium");
-		expect(prepared.agentModelOverrides.planner).toBe("openai-codex/gpt-5.6-terra:medium");
-		expect(prepared.agentModelOverrides.critic).toBe("openai-codex/gpt-5.6-terra:high");
+		// The catalog's executor selector is luna:low; the resolved fake luna model
+		// does not support low effort, so activation clamps it up to medium while
+		// every other role selector passes through verbatim.
+		expect(prepared.agentModelOverrides).toEqual({
+			architect: "openai-codex/gpt-5.6-terra:high",
+			critic: "openai-codex/gpt-5.6-terra:xhigh",
+			executor: "openai-codex/gpt-5.6-luna:medium",
+			planner: "openai-codex/gpt-5.6-luna:high",
+		});
 	});
 
 	test("session-only changes active model and replaces runtime overrides without persisted sets", async () => {
@@ -456,6 +468,8 @@ function stubXiaomiSession() {
 		model: undefined,
 		thinkingLevel: ThinkingLevel.Medium,
 		sessionId: "test-session",
+		getConfiguredModelChain: (): readonly string[] | undefined => undefined,
+		setConfiguredModelChain: () => {},
 		setModelTemporary: async () => {},
 		setActiveModelProfile: () => {},
 		getActiveModelProfile: () => undefined,

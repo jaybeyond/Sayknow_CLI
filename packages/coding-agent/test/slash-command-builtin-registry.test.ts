@@ -55,14 +55,14 @@ function createClearTuiRuntime() {
 }
 
 describe("builtin /pet slash command", () => {
-	it("exposes the named Sayknow choices", () => {
+	it("exposes the named skin choices", () => {
 		const petCommand = BUILTIN_SLASH_COMMAND_DEFS.find(command => command.name === "pet");
 
-		expect(petCommand?.subcommands?.map(command => command.name)).toEqual(["off", "RedSayknow", "BlueSayknow"]);
-		expect(petCommand?.inlineHint).toBe("[off|RedSayknow|BlueSayknow]");
+		expect(petCommand?.subcommands?.map(command => command.name)).toEqual(["off", "RedOctopus", "BlueOctopus"]);
+		expect(petCommand?.inlineHint).toBe("[off|RedOctopus|BlueOctopus]");
 	});
 
-	it("maps named Sayknow commands to their internal modes", async () => {
+	it("maps named skin commands to their internal modes", async () => {
 		mutableTerminal.imageProtocol = ImageProtocol.Kitty;
 		const setPetMode = vi.fn((_mode: string) => true);
 		const setText = vi.fn();
@@ -70,36 +70,36 @@ describe("builtin /pet slash command", () => {
 		const ctx = { setPetMode, showStatus, editor: { setText } } as unknown as InteractiveModeContext;
 		const runtime = { ctx, handleBackgroundCommand: () => undefined };
 
-		expect(await executeBuiltinSlashCommand("/pet redsayknow", runtime)).toBe(true);
-		expect(await executeBuiltinSlashCommand("/pet BlueSayknow", runtime)).toBe(true);
+		expect(await executeBuiltinSlashCommand("/pet redoctopus", runtime)).toBe(true);
+		expect(await executeBuiltinSlashCommand("/pet BlueOctopus", runtime)).toBe(true);
 
 		expect(setPetMode.mock.calls.map(call => call[0])).toEqual(["red", "blue"]);
 	});
 
-	it("keeps deprecated on/red/blue inputs accepted while display stays canonical", async () => {
+	it("keeps deprecated on/red/blue and legacy Sayknow names accepted while display stays canonical", async () => {
 		mutableTerminal.imageProtocol = ImageProtocol.Kitty;
 		const setPetMode = vi.fn((_mode: string) => true);
 		const showStatus = vi.fn();
 		const ctx = { setPetMode, showStatus, editor: { setText: vi.fn() } } as unknown as InteractiveModeContext;
 
-		for (const token of ["red", "blue", "on"]) {
+		for (const token of ["red", "blue", "on", "RedSayknow", "bluesayknow"]) {
 			expect(
 				await executeBuiltinSlashCommand(`/pet ${token}`, { ctx, handleBackgroundCommand: () => undefined }),
 			).toBe(true);
 		}
 
 		// Deprecated inputs still commit, mapped to their canonical modes.
-		expect(setPetMode.mock.calls.map(call => call[0])).toEqual(["red", "blue", "red"]);
+		expect(setPetMode.mock.calls.map(call => call[0])).toEqual(["red", "blue", "red", "red", "blue"]);
 		// The public surface stays canonical: no deprecated names in subcommands.
 		const petCommand = BUILTIN_SLASH_COMMAND_DEFS.find(command => command.name === "pet");
-		expect(petCommand?.subcommands?.map(command => command.name)).toEqual(["off", "RedSayknow", "BlueSayknow"]);
+		expect(petCommand?.subcommands?.map(command => command.name)).toEqual(["off", "RedOctopus", "BlueOctopus"]);
 
 		// Unknown tokens still fall through to usage guidance.
 		expect(await executeBuiltinSlashCommand("/pet purple", { ctx, handleBackgroundCommand: () => undefined })).toBe(
 			true,
 		);
-		expect(showStatus).toHaveBeenLastCalledWith("Usage: /pet [off|RedSayknow|BlueSayknow]", { dim: true });
-		expect(setPetMode).toHaveBeenCalledTimes(3);
+		expect(showStatus).toHaveBeenLastCalledWith("Usage: /pet [off|RedOctopus|BlueOctopus]", { dim: true });
+		expect(setPetMode).toHaveBeenCalledTimes(5);
 	});
 
 	it("suppresses the success status when the shared commit policy rejects", async () => {
@@ -109,7 +109,7 @@ describe("builtin /pet slash command", () => {
 		const ctx = { setPetMode, showStatus, editor: { setText: vi.fn() } } as unknown as InteractiveModeContext;
 
 		expect(
-			await executeBuiltinSlashCommand("/pet RedSayknow", { ctx, handleBackgroundCommand: () => undefined }),
+			await executeBuiltinSlashCommand("/pet RedOctopus", { ctx, handleBackgroundCommand: () => undefined }),
 		).toBe(true);
 		// The commit policy owns the rejection warning; the handler must not
 		// claim success or bypass the policy with its own capability check.
@@ -122,10 +122,10 @@ describe("builtin /pet slash command", () => {
 
 		for (const prefix of ["r", "R", "ReD"]) {
 			const completions = await petCommand?.getArgumentCompletions?.(prefix);
-			expect(completions?.map(item => item.label)).toEqual(["RedSayknow"]);
+			expect(completions?.map(item => item.label)).toEqual(["RedOctopus"]);
 		}
 
-		expect(petCommand?.getInlineHint?.("ReD")).toBe("Sayknow");
+		expect(petCommand?.getInlineHint?.("ReD")).toBe("Octopus");
 	});
 });
 describe("builtin /copy slash command", () => {

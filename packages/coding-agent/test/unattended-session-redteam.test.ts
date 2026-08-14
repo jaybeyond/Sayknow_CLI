@@ -59,6 +59,9 @@ class StubEmitter implements WorkflowGateEmitter {
 	isUnattended(): boolean {
 		return true;
 	}
+	supportsRemoteGateAnswers(): boolean {
+		return true;
+	}
 	emitGate(input: OpenGateInput): Promise<unknown> {
 		this.received.push(input);
 		return Promise.resolve(this.answerFor(input));

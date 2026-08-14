@@ -1331,7 +1331,7 @@ export async function runRootCommand(
 	// Initialize discovery system with settings for provider persistence
 	logger.time("initializeWithSettings", initializeWithSettings, settingsInstance);
 	// Auto-start Telegram Remote gateway if enabled in settings
-	if (!parsedArgs.print && !autoPrint) await maybeAutostartTelegramRemote();
+	if (!parsedArgs.print && !autoPrint) await maybeAutostartTelegramRemote(settingsInstance);
 
 	// Apply model role overrides from CLI args or env vars (ephemeral, not persisted).
 	// Precedence per role: CLI flag > documented SKC_*_MODEL > legacy PI_*_MODEL.

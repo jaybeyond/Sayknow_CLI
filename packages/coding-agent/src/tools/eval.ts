@@ -183,8 +183,8 @@ function timeoutSecondsFromMs(timeoutMs: number): number {
 }
 
 async function resolveBackend(session: ToolSession, language: EvalLanguage): Promise<ResolvedBackend> {
-	const allowPy = (session.settings.get("eval.py") as boolean | undefined) ?? true;
-	const allowJs = (session.settings.get("eval.js") as boolean | undefined) ?? true;
+	// SKC_PY wins over the legacy PI_PY/PI_JS env flags, which win over settings.
+	const { python: allowPy, js: allowJs } = resolveEvalBackends(session);
 
 	if (language === "python") {
 		if (!allowPy) throw new ToolError("Python backend is disabled (eval.py = false).");

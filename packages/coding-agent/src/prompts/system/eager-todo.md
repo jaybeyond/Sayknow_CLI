@@ -10,4 +10,6 @@ You MUST keep exactly one task `in_progress` and all later tasks `pending`.
 
 After `todo_write` succeeds, continue the request in the same turn.
 Do not call `todo_write` again unless task state materially changed.
+If the first `todo_write` call fails because its arguments are invalid or incomplete, retry once with a minimal payload.
+If it fails because of transport/runtime infrastructure, or if the retry fails, do not call it again in this user turn; continue the request and track the checklist in reasoning.
 </system-reminder>

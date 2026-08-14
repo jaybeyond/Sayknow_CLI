@@ -26,6 +26,11 @@ import {
 	WorkflowGateBroker,
 } from "@sayknow-cli/coding-agent/modes/shared/agent-wire/workflow-gate-broker";
 
+/** Live continuation: gates opened without one are quarantined as unanswerable. */
+function liveContinuation() {
+	return { activate: () => {}, isLive: () => true, release: () => {}, terminalProof: "not_published" as const };
+}
+
 const DECLARATION: RpcUnattendedDeclaration = {
 	actor: "hermes",
 	budget: { max_tokens: 1_000_000, max_tool_calls: 100, max_wall_time_ms: 600_000, max_cost_usd: 50 },
@@ -91,9 +96,12 @@ describe("#323 gate channel over the RPC dispatch transport", () => {
 		// Drive a deep-interview question, a ralplan approval, and an ultragoal
 		// execution gate — each answered through a workflow_gate_response COMMAND.
 		const gates: RpcWorkflowGate[] = [
-			broker.openGate(questionToGate({ id: "q", question: "auth?", options: [{ label: "JWT" }] })),
-			broker.openGate(approvalGate({ summary: "PRD" })),
-			broker.openGate(executionGate({ summary: "go" })),
+			broker.openGate(
+				questionToGate({ id: "q", question: "auth?", options: [{ label: "JWT" }] }),
+				liveContinuation(),
+			),
+			broker.openGate(approvalGate({ summary: "PRD" }), liveContinuation()),
+			broker.openGate(executionGate({ summary: "go" }), liveContinuation()),
 		];
 		const answers: unknown[] = [
 			{ selected: ["JWT"], other: false },
@@ -118,7 +126,7 @@ describe("#323 gate channel over the RPC dispatch transport", () => {
 			{ id: "n", type: "negotiate_unattended", declaration: DECLARATION } as RpcCommand,
 			context,
 		);
-		const gate = broker.openGate(approvalGate());
+		const gate = broker.openGate(approvalGate(), liveContinuation());
 
 		const bad = await dispatchRpcCommand(
 			{

@@ -172,7 +172,10 @@ describe("ultragoal ask guard", () => {
 		plan.goals[0].updatedAt = now;
 		plan.goals[0].completedAt = now;
 		const eventId = "event-final";
-		const qualityGateJson = {};
+		// The final-aggregate checkpoint gate must carry a clean critic OKAY.
+		const qualityGateJson = {
+			criticReview: { verdict: "OKAY", evidence: "critic reviewed the aggregate run", blockers: [] },
+		};
 		const skcGoalJson = {};
 		const generation = computeUltragoalPlanGeneration({
 			plan,

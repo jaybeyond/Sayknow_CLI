@@ -143,7 +143,7 @@ export function isImageProtocolForced(): boolean {
 	return getForcedImageProtocol() !== undefined;
 }
 
-const SIXEL_MULTIPLEXER_DISABLED_ENV_VALUES = new Set(["0", "off", "false", "no"]);
+const MULTIPLEXER_GRAPHICS_DISABLED_ENV_VALUES = new Set(["0", "off", "false", "no"]);
 
 /**
  * Returns whether the sixel-through-multiplexer path (passthrough-wrapped probe
@@ -152,8 +152,33 @@ const SIXEL_MULTIPLEXER_DISABLED_ENV_VALUES = new Set(["0", "off", "false", "no"
  */
 export function isSixelMultiplexerEnabled(env: NodeJS.ProcessEnv = Bun.env): boolean {
 	const raw = env.SKC_SIXEL_MULTIPLEXER?.trim().toLowerCase();
-	return raw === undefined || raw === "" || !SIXEL_MULTIPLEXER_DISABLED_ENV_VALUES.has(raw);
+	return raw === undefined || raw === "" || !MULTIPLEXER_GRAPHICS_DISABLED_ENV_VALUES.has(raw);
 }
+
+/**
+ * Returns whether the kitty-graphics-through-tmux path (passthrough-wrapped
+ * capability query + DCS passthrough overlay render) is enabled. On by default;
+ * set SKC_KITTY_MULTIPLEXER=0 to keep overlay graphics off under tmux for
+ * kitty-protocol terminals (Ghostty, kitty, WezTerm).
+ */
+export function isKittyMultiplexerEnabled(env: NodeJS.ProcessEnv = Bun.env): boolean {
+	const raw = env.SKC_KITTY_MULTIPLEXER?.trim().toLowerCase();
+	return raw === undefined || raw === "" || !MULTIPLEXER_GRAPHICS_DISABLED_ENV_VALUES.has(raw);
+}
+
+/**
+ * Image id reserved for the kitty capability query. It is never placed, so a
+ * terminal that answers `OK` leaves nothing on screen.
+ */
+export const KITTY_PROBE_IMAGE_ID = 0x736b_6301;
+
+/**
+ * Kitty graphics capability query: transmit one black RGB pixel with `a=q`
+ * (query only, never displayed). A terminal that implements the protocol
+ * answers `\x1b_Gi=<id>;OK\x1b\\`; one that does not stays silent, which is the
+ * end-to-end evidence tmux's own DA1 sixel claim can never provide.
+ */
+export const KITTY_CAPABILITY_QUERY = `\x1b_Gi=${KITTY_PROBE_IMAGE_ID},s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\`;
 
 /**
  * Returns whether the process runs under tmux specifically. Only tmux implements
@@ -220,6 +245,113 @@ export function tmuxOwnsSixel(env: NodeJS.ProcessEnv = Bun.env): boolean {
 /** Testing seam: drop the cached tmux sixel-ownership answer. */
 export function resetTmuxSixelOwnershipCache(): void {
 	tmuxSixelOwnershipCache = undefined;
+}
+
+/**
+ * Screen-absolute origin of this tmux pane: what has to be added to a
+ * pane-relative cell position to hit the same cell in the OUTER terminal.
+ *
+ * Passthrough payloads bypass tmux entirely, so a cursor-position escape inside
+ * the envelope addresses the outer terminal's screen, not the pane. Without the
+ * offset a split window or a top status line draws the overlay in the wrong
+ * place. tmux never repositions the real cursor before forwarding a passthrough
+ * payload (`tty_cmd_rawstring` only invalidates its cursor state), so absolute
+ * positioning inside the envelope is the only reliable placement.
+ *
+ * Cached because it shells out to tmux; every pane geometry change that matters
+ * also resizes the pane, and the TUI drops the cache on resize.
+ */
+export interface TmuxPaneOffset {
+	top: number;
+	left: number;
+}
+const NO_PANE_OFFSET: TmuxPaneOffset = Object.freeze({ top: 0, left: 0 });
+let tmuxPaneOffsetCache: TmuxPaneOffset | undefined;
+
+function parseStatusLines(raw: string | undefined): number {
+	const value = raw?.trim().toLowerCase() ?? "";
+	if (value === "on") return 1;
+	if (value === "off" || value === "") return 0;
+	const parsed = Number.parseInt(value, 10);
+	return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+}
+
+export function tmuxPaneOffset(env: NodeJS.ProcessEnv = Bun.env): TmuxPaneOffset {
+	if (!isUnderTmux(env)) return NO_PANE_OFFSET;
+	if (tmuxPaneOffsetCache) return tmuxPaneOffsetCache;
+	let offset = NO_PANE_OFFSET;
+	try {
+		const probe = Bun.spawnSync({
+			cmd: [
+				env.SKC_TMUX_COMMAND?.trim() || "tmux",
+				"display",
+				"-p",
+				// Status lines only shift the window down when they sit on top.
+				"#{pane_top} #{pane_left} #{?#{==:#{status-position},top},#{status},0}",
+			],
+			stdout: "pipe",
+			stderr: "ignore",
+		});
+		if (probe.success) {
+			const [topRaw, leftRaw, statusRaw] = new TextDecoder().decode(probe.stdout).trim().split(/\s+/u);
+			const top = Number.parseInt(topRaw ?? "", 10);
+			const left = Number.parseInt(leftRaw ?? "", 10);
+			offset = {
+				top: (Number.isFinite(top) && top > 0 ? top : 0) + parseStatusLines(statusRaw),
+				left: Number.isFinite(left) && left > 0 ? left : 0,
+			};
+		}
+	} catch {
+		offset = NO_PANE_OFFSET;
+	}
+	tmuxPaneOffsetCache = offset;
+	return offset;
+}
+
+/** Drop the cached pane origin (pane geometry changed, or a test needs a clean slate). */
+export function resetTmuxPaneOffsetCache(): void {
+	tmuxPaneOffsetCache = undefined;
+}
+
+let tmuxPanePassthroughRequested = false;
+
+/**
+ * Ask tmux to forward DCS passthrough for THIS pane.
+ *
+ * SKC-launched sessions already carry the option from their tmux profile, but a
+ * pane the user created by hand inherits the server default (`off`), and then
+ * every passthrough payload — including the capability query — is swallowed.
+ * `-p` keeps the change pane-local (never global server state) and `-q` stays
+ * quiet on tmux < 3.3 where the option does not exist. Runs at most once.
+ */
+export function enableTmuxPanePassthrough(env: NodeJS.ProcessEnv = Bun.env): boolean {
+	if (!isUnderTmux(env)) return false;
+	if (tmuxPanePassthroughRequested) return true;
+	tmuxPanePassthroughRequested = true;
+	try {
+		const target = env.TMUX_PANE?.trim();
+		Bun.spawnSync({
+			cmd: [
+				env.SKC_TMUX_COMMAND?.trim() || "tmux",
+				"set-option",
+				"-pq",
+				...(target ? ["-t", target] : []),
+				"allow-passthrough",
+				"on",
+			],
+			stdout: "ignore",
+			stderr: "ignore",
+		});
+	} catch {
+		// tmux missing or refusing the option: the probe simply gets no answer
+		// and graphics stay off, which is the correct conservative outcome.
+	}
+	return true;
+}
+
+/** Testing seam: allow the pane passthrough request to run again. */
+export function resetTmuxPanePassthroughRequest(): void {
+	tmuxPanePassthroughRequested = false;
 }
 
 function parseMajorMinorVersion(versionRaw?: string): { major: number; minor: number } | null {
@@ -350,13 +482,15 @@ export const TERMINAL = (() => {
 		);
 	}
 	// Multiplexers (tmux/screen/zellij) consume raw kitty/iTerm2 graphics
-	// escapes instead of forwarding them (no DCS passthrough wrapping is
-	// emitted), so a detected image protocol draws nothing while its
-	// out-of-band cursor writes corrupt the frame. Graphics are therefore
-	// unconditionally suppressed under a multiplexer; the runtime sixel probe
-	// never runs there (tmux advertises DA1 ";4" from compile-time support
-	// regardless of the attached client), and PI_FORCE_IMAGE_PROTOCOL=sixel
-	// is the only opt-in for chains that render sixel end-to-end.
+	// escapes instead of forwarding them, so an inline image protocol draws
+	// nothing while its out-of-band cursor writes corrupt the frame. Inline
+	// graphics stay suppressed under a multiplexer; only an explicit
+	// SKC_FORCE_IMAGE_PROTOCOL opts back in.
+	//
+	// Absolutely-positioned OVERLAYS are a separate channel: they can be
+	// smuggled to the outer terminal through tmux's DCS passthrough envelope
+	// with their own cursor addressing, so the runtime probes enable them via
+	// setTmuxOverlayImageProtocol() instead of touching TERMINAL.imageProtocol.
 	if (resolved.imageProtocol && forcedImageProtocol === undefined && underMultiplexer) {
 		resolved = new TerminalInfo(resolved.id, null, resolved.trueColor, resolved.hyperlinks, resolved.notifyProtocol);
 	}
@@ -389,6 +523,10 @@ export function setTerminalImageProtocol(imageProtocol: ImageProtocol | null): v
 	const mutable = TERMINAL as unknown as MutableTerminalInfo;
 	if (mutable.imageProtocol === imageProtocol) return;
 	mutable.imageProtocol = imageProtocol;
+	notifyImageProtocolChanged(imageProtocol);
+}
+
+function notifyImageProtocolChanged(imageProtocol: ImageProtocol | null): void {
 	for (const listener of imageProtocolChangeListeners) {
 		try {
 			listener(imageProtocol);
@@ -396,6 +534,32 @@ export function setTerminalImageProtocol(imageProtocol: ImageProtocol | null): v
 			// Listener failures must not break protocol switching.
 		}
 	}
+}
+
+let tmuxOverlayImageProtocol: ImageProtocol | null = null;
+
+/**
+ * Protocol available for absolutely-positioned overlays that reach the outer
+ * terminal through tmux's DCS passthrough envelope, when inline graphics are
+ * suppressed by the multiplexer. Set by the startup capability probes on proof
+ * that the outer terminal answered end to end; never inferred from env vars.
+ */
+export function getTmuxOverlayImageProtocol(): ImageProtocol | null {
+	return tmuxOverlayImageProtocol;
+}
+
+export function setTmuxOverlayImageProtocol(imageProtocol: ImageProtocol | null): void {
+	if (tmuxOverlayImageProtocol === imageProtocol) return;
+	tmuxOverlayImageProtocol = imageProtocol;
+	// Overlay owners (the pet) subscribe through the same channel: for them a
+	// passthrough overlay protocol arriving late is the same event as inline
+	// graphics arriving late.
+	notifyImageProtocolChanged(imageProtocol);
+}
+
+/** Effective protocol for overlay drawing: inline graphics first, passthrough second. */
+export function getOverlayImageProtocol(): ImageProtocol | null {
+	return TERMINAL.imageProtocol ?? tmuxOverlayImageProtocol;
 }
 
 export function getTerminalInfo(terminalId: TerminalId): TerminalInfo {
@@ -847,9 +1011,23 @@ export function renderImage(
 			const targetHeightPx = Math.max(1, fit.rows * cellDims.heightPx);
 			const decoded = new Uint8Array(Buffer.from(base64Data, "base64"));
 			const raster = encodeSixel(decoded, targetWidthPx, targetHeightPx);
-			// Under tmux, forward the raster to the outer terminal via the DCS
-			// passthrough envelope (no-op when not under tmux).
-			return { sequence: wrapTmuxPassthrough(raster), rows: fit.rows };
+			// An INLINE image has no cursor addressing of its own: it is drawn wherever
+			// the cursor currently sits. That only works when the multiplexer is the one
+			// placing it.
+			//
+			// tmux 3.4+ with the sixel terminal-feature parses the raster into its own
+			// screen model, so it owns the placement and every later scroll / erase /
+			// resize moves or clears the image with the text around it.
+			if (!isUnderTmux() || tmuxOwnsSixel()) return { sequence: raster, rows: fit.rows };
+			// Otherwise the only route out is DCS passthrough, which writes pixels
+			// straight into the OUTER terminal's image plane at its PHYSICAL cursor.
+			// tmux neither positions that cursor for the pane nor records the pixels, so
+			// inline passthrough lands in the wrong row and survives every repaint —
+			// transcript images pile up over the text and never clear. The absolutely
+			// positioned overlay channel (the pet) carries its own coordinates and is
+			// the only inline-free user of passthrough. A text placeholder beats an
+			// image welded to the wrong part of the screen.
+			return null;
 		} catch {
 			return null;
 		}

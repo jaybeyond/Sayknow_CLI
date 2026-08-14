@@ -3,7 +3,7 @@ import * as path from "node:path";
 import { ThinkingLevel } from "@sayknow-cli/agent-core";
 import { type Model, modelsAreEqual } from "@sayknow-cli/ai";
 import { getOAuthProviders } from "@sayknow-cli/ai/utils/oauth";
-import { PET_SKINS, type PetMode, Spacer, Text } from "@sayknow-cli/tui";
+import { PET_SKIN_IDS, PET_SKINS, type PetMode, Spacer, Text } from "@sayknow-cli/tui";
 import { setProjectDir } from "@sayknow-cli/utils";
 import { jobElapsedMs } from "../async";
 import { materializeActiveModelProfileAssignments } from "../config/model-profile-activation";
@@ -78,18 +78,23 @@ function canClearComposer(runtime: BuiltinSlashCommandRuntime): boolean {
 
 const PET_COMMAND_OPTIONS: ReadonlyArray<{ name: string; mode: PetMode; description: string }> = [
 	{ name: "off", mode: "off", description: "Hide the pet" },
-	{ name: "RedSayknow", mode: "red", description: PET_SKINS.red.description },
-	{ name: "BlueSayknow", mode: "blue", description: PET_SKINS.blue.description },
+	// Names come from the skin registry so `/pet`, both selectors and the
+	// confirmation status line always speak the same skin name.
+	...PET_SKIN_IDS.map(id => ({ name: PET_SKINS[id].label, mode: id, description: PET_SKINS[id].description })),
 ];
 const PET_COMMAND_HINT = `[${PET_COMMAND_OPTIONS.map(option => option.name).join("|")}]`;
 /**
- * Deprecated inputs kept accepted for compatibility (`/pet on|red|blue`).
+ * Deprecated inputs kept accepted for compatibility (`/pet on|red|blue`, plus the
+ * `RedSayknow`/`BlueSayknow` spellings this command accepted before the skin
+ * registry became its only name source).
  * Display, completion, and inline hints stay canonical (`PET_COMMAND_OPTIONS`).
  */
 const PET_COMMAND_DEPRECATED_INPUTS: Readonly<Record<string, PetMode>> = {
 	on: "red",
 	red: "red",
 	blue: "blue",
+	redsayknow: "red",
+	bluesayknow: "blue",
 };
 
 type SkcModelBatchAssignmentTargetId = "all-role-agents" | "all-targets";

@@ -1032,6 +1032,13 @@ export class ModelRegistry {
 	#lastStaticLoadMtime: number | null = null;
 	#registeredProviderSources: Set<string> = new Set();
 	#providerDiscoveryStates: Map<string, ProviderDiscoveryState> = new Map();
+	/**
+	 * Monotonic per-provider discovery sequence. Overlapping refreshes for the
+	 * same provider can complete out of order; only the newest-started refresh
+	 * may publish discovery state or contribute models, so a slow stale fetch
+	 * never overwrites a fresher result.
+	 */
+	#providerDiscoverySequences: Map<string, number> = new Map();
 	#cacheDbPath?: string;
 	#suppressedSelectors: Map<string, number> = new Map();
 	#backgroundRefresh?: Promise<void>;
@@ -1815,11 +1822,15 @@ export class ModelRegistry {
 		providerConfig: DiscoveryProviderConfig,
 		strategy: ModelRefreshStrategy,
 	): Promise<Model<Api>[]> {
+		const sequence = (this.#providerDiscoverySequences.get(providerConfig.provider) ?? 0) + 1;
+		this.#providerDiscoverySequences.set(providerConfig.provider, sequence);
+		const isCurrentDiscovery = () => this.#providerDiscoverySequences.get(providerConfig.provider) === sequence;
 		const cached = readModelCache<Api>(providerConfig.provider, 24 * 60 * 60 * 1000, Date.now, this.#cacheDbPath);
 		const requiresAuth = !this.#keylessProviders.has(providerConfig.provider);
 		if (requiresAuth) {
 			const apiKey = await this.#peekApiKeyForProvider(providerConfig.provider);
 			if (!isAuthenticated(apiKey)) {
+				if (!isCurrentDiscovery()) return [];
 				this.#providerDiscoveryStates.set(providerConfig.provider, {
 					provider: providerConfig.provider,
 					status: "unauthenticated",
@@ -1865,6 +1876,7 @@ export class ModelRegistry {
 				: result.models.length > 0
 					? "ok"
 					: "empty";
+		if (!isCurrentDiscovery()) return [];
 		this.#providerDiscoveryStates.set(providerId, {
 			provider: providerId,
 			status,

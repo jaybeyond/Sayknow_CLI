@@ -4,11 +4,13 @@ import * as fsSync from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { processIncarnation } from "@sayknow-cli/coding-agent/sdk/broker/process-incarnation";
+import { ownerProofAvailable } from "@sayknow-cli/coding-agent/skc-runtime/session-restore-runtime";
 import {
 	buildSkcTmuxExactOptionTarget,
 	buildSkcTmuxProfileCommands,
 } from "@sayknow-cli/coding-agent/skc-runtime/tmux-common";
-import { replaceOwnerGeneration } from "@sayknow-cli/coding-agent/skc-runtime/tmux-owner-isolation";
+import { probeOwnerLiveness, replaceOwnerGeneration } from "@sayknow-cli/coding-agent/skc-runtime/tmux-owner-isolation";
 import {
 	forceCloseSkcTmuxSession,
 	listSkcTmuxSessions,
@@ -19,6 +21,7 @@ import {
 const tmux = Bun.which("tmux");
 const systemdRun = Bun.which("systemd-run");
 const isLinux = process.platform === "linux";
+const isDarwin = process.platform === "darwin";
 const isolatedServers: Array<{ env: NodeJS.ProcessEnv; stateDir: string; scopeName: string }> = [];
 const userScopeAvailable =
 	isLinux &&
@@ -248,4 +251,69 @@ try {
 			final_response: { source: "agent_end", text: "terminal evidence" },
 		});
 	}, 10_000);
+});
+
+// Acceptance criterion 6: on Darwin the owner proof must be REAL, not the
+// `{pid: 1, startTime: "not-applicable"}` sentinel the pre-fence code used. These
+// run against a private tmux socket so the developer's own server is untouched.
+describe.skipIf(!isDarwin || !tmux)("darwin owner proof", () => {
+	const sockets: string[] = [];
+
+	function isolatedTmuxEnv(): NodeJS.ProcessEnv {
+		const socket = `skc-darwin-proof-${crypto.randomUUID().slice(0, 8)}`;
+		sockets.push(socket);
+		return { ...process.env, SKC_TMUX_COMMAND: `${tmux} -L ${socket}`, SKC_PSMUX_DETECTION: "off" };
+	}
+
+	afterEach(() => {
+		for (const socket of sockets.splice(0)) {
+			Bun.spawnSync([tmux!, "-L", socket, "kill-server"], { stdout: "ignore", stderr: "ignore" });
+		}
+	});
+
+	it("reads a real tmux server pid and a microsecond-resolution incarnation", () => {
+		const socket = `skc-darwin-proof-${crypto.randomUUID().slice(0, 8)}`;
+		sockets.push(socket);
+		// A real server, so `#{pid}` is a real process we can bind an incarnation to.
+		expect(
+			Bun.spawnSync([tmux!, "-L", socket, "new-session", "-d", "-s", "proofcheck", "sleep", "30"], {
+				stdout: "ignore",
+				stderr: "ignore",
+			}).exitCode,
+		).toBe(0);
+
+		const reported = Bun.spawnSync([tmux!, "-L", socket, "display-message", "-p", "#{pid}"], { stdout: "pipe" });
+		const serverPid = Number.parseInt(reported.stdout.toString().trim(), 10);
+		expect(Number.isSafeInteger(serverPid)).toBe(true);
+		expect(serverPid).toBeGreaterThan(1);
+
+		const incarnation = processIncarnation(serverPid);
+		expect(incarnation).toBeDefined();
+		// `darwin:<sec>:<usec>` — microsecond resolution is what makes same-second
+		// PID reuse distinguishable, which second-precision `ps lstart` cannot do.
+		expect(incarnation).toMatch(/^darwin:[1-9]\d*:\d+$/u);
+		expect(processIncarnation(serverPid)).toBe(incarnation);
+	});
+
+	it("treats a changed incarnation for the same pid as a dead owner", () => {
+		const incarnation = processIncarnation(process.pid);
+		expect(incarnation).toBeDefined();
+		if (!incarnation) return;
+		expect(probeOwnerLiveness(process.pid, incarnation)).toBe("alive");
+		// Same live pid, different incarnation: the recorded process is gone and the
+		// pid was reused. Reporting "alive" here would let a stale reservation block
+		// forever; reporting "dead" without the incarnation check would let a
+		// successor displace a live owner.
+		expect(probeOwnerLiveness(process.pid, "darwin:1:1")).toBe("dead");
+	});
+
+	it("refuses restore before any attempt or create when the provider is psmux", () => {
+		// psmux exposes no immutable native session identity, so restore must fail
+		// closed at the eligibility gate rather than reaching a spawn.
+		expect(ownerProofAvailable({ ...process.env, SKC_TMUX_COMMAND: "psmux", SKC_PSMUX_COMMAND: "psmux" })).toBe(
+			false,
+		);
+		const env = isolatedTmuxEnv();
+		expect(ownerProofAvailable(env)).toBe(true);
+	});
 });

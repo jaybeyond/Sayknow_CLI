@@ -2,8 +2,8 @@ import { describe, expect, it } from "bun:test";
 import { createBridgeFetchHandler } from "@sayknow-cli/coding-agent/modes/bridge/bridge-mode";
 import { approvalGate } from "@sayknow-cli/coding-agent/modes/shared/agent-wire/approval-gate";
 import {
-	BridgeFrameSequencer,
-	toBridgeWorkflowGateFrame,
+	AgentWireFrameSequencer,
+	toAgentWireWorkflowGateFrame,
 } from "@sayknow-cli/coding-agent/modes/shared/agent-wire/event-envelope";
 import {
 	type BridgeHandshakeAccepted,
@@ -94,9 +94,9 @@ describe("bridge handshake advertises workflow_gate (#321)", () => {
 describe("workflow_gate bridge frame (#321 replay/idempotency)", () => {
 	it("sequences gate frames with monotonic seq and gate_id correlation", () => {
 		const broker = new WorkflowGateBroker("run-bridge", new MemoryGateStore());
-		const seq = new BridgeFrameSequencer("sess-1");
+		const seq = new AgentWireFrameSequencer("sess-1");
 		const gate = broker.openGate(approvalGate({ summary: "plan" }));
-		const frame = toBridgeWorkflowGateFrame(gate, seq);
+		const frame = toAgentWireWorkflowGateFrame(gate, seq);
 		expect(frame.type).toBe("workflow_gate");
 		expect(frame.seq).toBe(1);
 		expect(frame.correlation_id).toBe(gate.gate_id);
@@ -104,7 +104,7 @@ describe("workflow_gate bridge frame (#321 replay/idempotency)", () => {
 		expect(frame.session_id).toBe("sess-1");
 		expect(frame.frame_id).toBeTruthy();
 		const gate2 = broker.openGate(approvalGate());
-		const frame2 = toBridgeWorkflowGateFrame(gate2, seq);
+		const frame2 = toAgentWireWorkflowGateFrame(gate2, seq);
 		expect(frame2.seq).toBe(2); // replayable ordering
 		expect(frame2.frame_id).not.toBe(frame.frame_id); // idempotency key per frame
 	});

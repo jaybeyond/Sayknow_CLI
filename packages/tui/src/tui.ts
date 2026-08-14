@@ -10,12 +10,22 @@ import { isKeyRelease } from "./keys";
 import { renderMetrics } from "./metrics";
 import type { Terminal } from "./terminal";
 import {
+	enableTmuxPanePassthrough,
+	getTmuxOverlayImageProtocol,
 	ImageProtocol,
 	isImageProtocolForced,
+	isKittyMultiplexerEnabled,
+	isSixelMultiplexerEnabled,
 	isUnderTerminalMultiplexer,
+	isUnderTmux,
+	KITTY_CAPABILITY_QUERY,
+	KITTY_PROBE_IMAGE_ID,
+	resetTmuxPaneOffsetCache,
 	setCellDimensions,
 	setTerminalImageProtocol,
+	setTmuxOverlayImageProtocol,
 	TERMINAL,
+	wrapTmuxPassthrough,
 } from "./terminal-capabilities";
 import {
 	Ellipsis,
@@ -321,13 +331,14 @@ function isMultiplexerSession(env: Record<string, string | undefined> = Bun.env)
 
 /**
  * Startup sixel capability probe policy (pure; exported for tests):
- * - Never probe when PI_FORCE_IMAGE_PROTOCOL is set — an explicit
+ * - Never probe when SKC_FORCE_IMAGE_PROTOCOL is set — an explicit
  *   configuration (including "off") is authoritative.
- * - Never probe inside a terminal multiplexer: tmux advertises DA1 ";4"
- *   whenever it was compiled with sixel support, regardless of whether the
- *   attached client terminal can render sixel, so a positive reply is not
- *   end-to-end evidence. Graphics under a multiplexer are strictly opt-in
- *   via PI_FORCE_IMAGE_PROTOCOL=sixel.
+ * - Under tmux, probe through the DCS passthrough envelope: the query reaches
+ *   the OUTER terminal, so its DA1 ";4" is genuine end-to-end evidence. A bare
+ *   query would only reach tmux, which advertises sixel whenever it was
+ *   compiled with support, regardless of the attached client.
+ * - Never probe under screen/zellij: no passthrough envelope exists there, so
+ *   no answer can be trusted and nothing can be drawn anyway.
  * - Probe Windows Terminal (>=1.22 renders sixel but exposes no env marker).
  */
 export function shouldProbeSixelCapability(
@@ -335,8 +346,23 @@ export function shouldProbeSixelCapability(
 	platform: NodeJS.Platform = process.platform,
 ): boolean {
 	if (isImageProtocolForced()) return false;
-	if (isUnderTerminalMultiplexer(env)) return false;
+	if (isUnderTerminalMultiplexer(env)) return isUnderTmux(env) && isSixelMultiplexerEnabled(env);
 	return platform === "win32" && Boolean(env.WT_SESSION?.trim());
+}
+
+/**
+ * Startup kitty-graphics probe policy for tmux panes (pure; exported for tests).
+ *
+ * Kitty-protocol terminals (Ghostty, kitty, WezTerm) never answer a sixel query,
+ * so the sixel probe alone leaves them without graphics inside tmux. The kitty
+ * capability query has the property the sixel path lacks: tmux itself does not
+ * implement the protocol and cannot fake the reply, so an `OK` coming back
+ * through passthrough proves the outer terminal drew it.
+ */
+export function shouldProbeKittyPassthrough(env: NodeJS.ProcessEnv = Bun.env): boolean {
+	if (isImageProtocolForced()) return false;
+	if (!isUnderTmux(env)) return false;
+	return isKittyMultiplexerEnabled(env);
 }
 
 function useLegacyMultiplexerFullRender(env: Record<string, string | undefined> = Bun.env): boolean {
@@ -709,6 +735,10 @@ export class TUI extends Container {
 	#sixelProbeBuffer = "";
 	#sixelProbeTimeout?: NodeJS.Timeout;
 	#sixelProbeUnsubscribe?: () => void;
+	#kittyProbePending = false;
+	#kittyProbeBuffer = "";
+	#kittyProbeTimeout?: NodeJS.Timeout;
+	#kittyProbeUnsubscribe?: () => void;
 	#showHardwareCursor = $pickflag("SKC_HARDWARE_CURSOR", "PI_HARDWARE_CURSOR");
 	#debugRedraw = TUI.#readDebugRedrawFlag();
 	// macOS: steady-block cursor anchors CJK IME overlays; disable with SKC_TUI_IME_CURSOR=0.
@@ -1294,12 +1324,16 @@ export class TUI extends Container {
 		this.terminal.start(
 			data => this.#handleInput(data),
 			() => {
+				// A resize can also mean the pane moved or split: passthrough
+				// overlays address the outer screen, so their pane origin is stale.
+				resetTmuxPaneOffsetCache();
 				this.invalidate();
 				this.requestResizeRender();
 			},
 		);
 		this.flushTerminalCleanup();
 		this.#hideCursor();
+		this.#queryKittyPassthroughSupport();
 		this.#querySixelSupport();
 		this.#queryCellSize();
 		this.requestRender(true);
@@ -1423,15 +1457,126 @@ export class TUI extends Container {
 		this.#sixelProbePendingDa = true;
 		this.#sixelProbePendingGraphics = true;
 		this.#sixelProbeUnsubscribe = this.addInputListener(data => this.#handleSixelProbeInput(data));
-		if (!this.#writeTerminal("\x1b[c")) return;
-		if (!this.#writeTerminal("\x1b[?2;1;0S")) return;
-		this.#sixelProbeTimeout = setTimeout(() => {
-			this.#finishSixelProbe(false);
-		}, 250);
+		// Under tmux both queries travel in ONE passthrough envelope so the outer
+		// terminal answers for itself; tmux would otherwise answer for a client it
+		// knows nothing about. A pane that never had passthrough enabled swallows
+		// the payload silently, hence the request first.
+		if (isUnderTmux()) enableTmuxPanePassthrough();
+		if (!this.#writeTerminal(wrapTmuxPassthrough("\x1b[c\x1b[?2;1;0S"))) return;
+		this.#sixelProbeTimeout = setTimeout(
+			() => {
+				this.#finishSixelProbe(false);
+			},
+			// The passthrough round trip adds tmux's own input latency on top of the
+			// outer terminal's reply time.
+			isUnderTmux() ? 600 : 250,
+		);
 	}
 
 	#isSixelProbeCandidate(): boolean {
 		return shouldProbeSixelCapability();
+	}
+
+	/**
+	 * Ask the terminal attached to this tmux client whether it speaks the kitty
+	 * graphics protocol, through the passthrough envelope.
+	 *
+	 * Unlike sixel there is no way for tmux to answer on the terminal's behalf:
+	 * tmux does not implement kitty graphics, so a reply can only come from the
+	 * outer terminal that received the forwarded query. Success enables the
+	 * passthrough OVERLAY channel (absolutely positioned, cursor-neutral art such
+	 * as the pet) and deliberately leaves inline image rendering suppressed,
+	 * since inline placements would land at tmux's stale physical cursor.
+	 */
+	#queryKittyPassthroughSupport(): void {
+		if (TERMINAL.imageProtocol || getTmuxOverlayImageProtocol()) return;
+		if (!shouldProbeKittyPassthrough()) return;
+		if (!process.stdin.isTTY || !process.stdout.isTTY) return;
+
+		this.#clearKittyProbeState();
+		this.#kittyProbePending = true;
+		this.#kittyProbeUnsubscribe = this.addInputListener(data => this.#handleKittyProbeInput(data));
+		enableTmuxPanePassthrough();
+		if (!this.#writeTerminal(wrapTmuxPassthrough(KITTY_CAPABILITY_QUERY))) return;
+		this.#kittyProbeTimeout = setTimeout(() => {
+			this.#finishKittyProbe(false);
+		}, 600);
+	}
+
+	/**
+	 * Consume the kitty graphics reply (`ESC _ G i=<id>;OK ESC \`) so it never
+	 * reaches the editor as keystrokes, and pass everything else through.
+	 */
+	#handleKittyProbeInput(data: string): InputListenerResult {
+		if (!this.#kittyProbePending) return undefined;
+
+		this.#kittyProbeBuffer += data;
+		let passthrough = "";
+		let probeOutcome: boolean | null = null;
+
+		while (this.#kittyProbeBuffer.length > 0) {
+			const match = this.#kittyProbeBuffer.match(/\x1b_G([^\x1b]*)\x1b\\/u);
+			if (!match || match.index === undefined) break;
+			passthrough += this.#kittyProbeBuffer.slice(0, match.index);
+			this.#kittyProbeBuffer = this.#kittyProbeBuffer.slice(match.index + match[0].length);
+			const body = match[1] ?? "";
+			const [keys, status] = body.split(";");
+			// Only our own probe id answers the capability question; any other
+			// graphics response is still swallowed rather than typed into the editor.
+			if (!(keys ?? "").split(",").includes(`i=${KITTY_PROBE_IMAGE_ID}`)) continue;
+			probeOutcome = (status ?? "").trim() === "OK";
+			break;
+		}
+
+		if (probeOutcome === null) {
+			// Hold back anything that could still become our reply; release the rest.
+			const start = this.#kittyProbeBuffer.indexOf("\x1b_G");
+			if (start >= 0) {
+				passthrough += this.#kittyProbeBuffer.slice(0, start);
+				this.#kittyProbeBuffer = this.#kittyProbeBuffer.slice(start);
+			} else {
+				const lastEsc = this.#kittyProbeBuffer.lastIndexOf("\x1b");
+				const tail = lastEsc >= 0 ? this.#kittyProbeBuffer.slice(lastEsc) : "";
+				if (tail && "\x1b_G".startsWith(tail)) {
+					passthrough += this.#kittyProbeBuffer.slice(0, lastEsc);
+					this.#kittyProbeBuffer = tail;
+				} else {
+					passthrough += this.#kittyProbeBuffer;
+					this.#kittyProbeBuffer = "";
+				}
+			}
+		} else {
+			passthrough += this.#kittyProbeBuffer;
+			this.#kittyProbeBuffer = "";
+			this.#finishKittyProbe(probeOutcome);
+		}
+
+		if (passthrough.length === 0) {
+			return { consume: true };
+		}
+
+		return { data: passthrough };
+	}
+
+	#finishKittyProbe(supported: boolean): void {
+		this.#clearKittyProbeState();
+		if (!supported || TERMINAL.imageProtocol || getTmuxOverlayImageProtocol()) return;
+
+		setTmuxOverlayImageProtocol(ImageProtocol.Kitty);
+		this.#queryCellSize();
+		this.invalidate();
+		this.requestRender(true);
+	}
+
+	#clearKittyProbeState(): void {
+		if (this.#kittyProbeTimeout) {
+			clearTimeout(this.#kittyProbeTimeout);
+			this.#kittyProbeTimeout = undefined;
+		}
+		this.#kittyProbeUnsubscribe?.();
+		this.#kittyProbeUnsubscribe = undefined;
+		this.#kittyProbePending = false;
+		this.#kittyProbeBuffer = "";
 	}
 
 	#handleSixelProbeInput(data: string): InputListenerResult {
@@ -1550,18 +1695,22 @@ export class TUI extends Container {
 		this.requestRender(true);
 	}
 	#queryCellSize(): void {
-		// Only query if terminal supports images (cell size is only used for image rendering)
-		if (!TERMINAL.imageProtocol) {
+		// Cell size is only used for image rendering — inline or passthrough overlay.
+		if (!TERMINAL.imageProtocol && !getTmuxOverlayImageProtocol()) {
 			return;
 		}
-		// Query terminal for cell size in pixels: CSI 16 t
-		// Response format: CSI 6 ; height ; width t
-		this.#writeTerminal("\x1b[16t");
+		// Query terminal for cell size in pixels: CSI 16 t → CSI 6 ; height ; width t.
+		// Under tmux the query is passthrough-wrapped so the OUTER terminal reports
+		// its real cell size; tmux otherwise answers with a value of its own, which
+		// oversizes the pet sprite and pushes it out of bounds (an out-of-range
+		// position resolves to a null overlay payload, freezing the animation).
+		this.#writeTerminal(wrapTmuxPassthrough("\x1b[16t"));
 	}
 
 	stop(): void {
 		this.flushTerminalCleanup();
 		this.#clearSixelProbeState();
+		this.#clearKittyProbeState();
 		this.#stopped = true;
 		this.#settleRenderCommitWaiters(false);
 		if (this.#renderTimer) {

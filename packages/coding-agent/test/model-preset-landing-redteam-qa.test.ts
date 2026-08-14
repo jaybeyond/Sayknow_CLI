@@ -135,6 +135,7 @@ function createRegistry(
 		getModelProfiles: () => new Map(profileMap),
 		getModelProfile: (name: string) => profileMap.get(name),
 		getAvailableModelProfileNames: () => [...profileMap.keys()],
+		hasConfiguredProviderAuth: (provider: string) => authenticatedProviders.includes(provider),
 		getApiKeyForProvider: async (provider: string) => (authenticatedProviders.includes(provider) ? "key" : undefined),
 		getApiKey: async () => "key",
 	};
@@ -340,7 +341,9 @@ describe("preset landing adversarial QA", () => {
 	test("built-in Codex Eco preview preserves the Terra and Luna role models", async () => {
 		const selector = createSelector({ profiles: [builtinProfile("codex-eco")] });
 		await rendered(selector);
-		selector.refreshPresetProfiles("codex-eco");
+		selector.handleInput("\x1b[C");
+		selector.handleInput("\x1b[B");
+		selector.handleInput("\n");
 
 		const text = await rendered(selector);
 		expect(text).toContain("DEFAULT: openai-codex/gpt-5.6-terra");
@@ -357,7 +360,9 @@ describe("preset landing adversarial QA", () => {
 			profiles: [builtinProfile("codex-opencodego")],
 		});
 		await rendered(selector);
-		selector.refreshPresetProfiles("codex-opencodego");
+		selector.handleInput("\x1b[C");
+		selector.handleInput("\x1b[B");
+		selector.handleInput("\n");
 
 		const text = await rendered(selector);
 		expect(text).toContain("DEFAULT: openai-codex/gpt-5.6-sol");

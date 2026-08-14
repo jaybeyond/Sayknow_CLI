@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Notes
+
+- The SDK bridge protocol carried over this transport remains **experimental**;
+  frame shapes and endpoints may change between minor releases.
+
 ## [0.12.0] - 2026-07-28
 ### Fixed
 

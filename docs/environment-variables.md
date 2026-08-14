@@ -580,6 +580,32 @@ See [External control readiness](./external-control-readiness.md#jetbrains-air-c
 
 ## 12) Removed ingress modes
 
+`--mode rpc`, `--mode rpc-ui`, and `--mode bridge` are no longer wired into the
+CLI; the [SDK machine interface](./sdk.md) is the canonical external bus. The
+retired `GJC_RPC_EMIT_TITLE` variable is not runtime configuration. The bridge
+protocol surface itself remains in-tree as dormant machinery (see section 13)
+and keeps its configuration contract until it is either re-exposed or removed.
+
+---
+
+## 13) Bridge surface configuration (dormant)
+
+Consumed by `packages/coding-agent/src/modes/bridge/*`. The bridge surface is
+retained in-tree but is not currently reachable through a CLI mode. When
+launched, it is **secure-by-default**: it refuses to start without TLS and a
+bearer token, and the default endpoint matrix fail-closes session events,
+commands, controller ownership, UI responses, host tool results, and host URI
+results. See `docs/bridge.md` for protocol details.
+
+| Variable | Required | Default | Behavior |
+| --- | --- | --- | --- |
+| `SKC_BRIDGE_TOKEN` | Yes | — | Bearer token required on authenticated endpoints. **Secret — never commit.** |
+| `SKC_BRIDGE_TLS_CERT` | Yes | — | Path to the TLS certificate (PEM). Startup fails closed if cert/key are missing (TLS is mandatory, including loopback). |
+| `SKC_BRIDGE_TLS_KEY` | Yes | — | Path to the TLS private key (PEM). **Secret — never commit; `chmod 600`.** |
+| `SKC_BRIDGE_HOST` | No | `127.0.0.1` | Bind hostname. |
+| `SKC_BRIDGE_PORT` | No | `4077` | Bind port (1–65535). |
+| `SKC_BRIDGE_SCOPES` | No | `prompt` | Parsed for dormant command-surface compatibility. Valid scopes: `prompt`, `control`, `bash`, `export`, `session`, `model`, `message:read`, `host_tools`, `host_uri`, `admin`. The default endpoint matrix still advertises no accepted scopes and rejects commands before scope checks. |
+
 Local development with a self-signed certificate must add the local CA to the
 client trust store; there is no plaintext or certificate-verification-bypass mode.
 

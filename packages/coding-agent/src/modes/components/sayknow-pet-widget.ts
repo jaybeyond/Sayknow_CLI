@@ -4,6 +4,7 @@ import {
 	type Component,
 	type Container,
 	getCellDimensions,
+	getTmuxOverlayImageProtocol,
 	isUnderTmux,
 	PARA_PARA_STEPS,
 	PET_SKINS,
@@ -14,8 +15,10 @@ import {
 	registerAnimationCallback,
 	type SayknowPixelFrameName,
 	type SayknowPixelFrames,
+	TERMINAL,
 	type TUI,
 	tmuxOwnsSixel,
+	tmuxPaneOffset,
 	wrapTmuxPassthrough,
 } from "@sayknow-cli/tui";
 import type { CustomEditor } from "./custom-editor";
@@ -216,7 +219,7 @@ export class SayknowPetWidget {
 
 	/** Live preview during a selector: change the sprite without re-mounting the
 	 *  composer editor (that would tear down the open overlay). After a short idle
-	 *  eye-roll it fires the signature burst once (RedSayknow flex, BlueSayknow para-para
+	 *  eye-roll it fires the signature burst once (RedOctopus flex, BlueOctopus para-para
 	 *  then sob) so the selector demos the animation instead of waiting the random gap. */
 	previewMode(mode: PetMode): void {
 		this.#applyMode(mode, false);
@@ -341,7 +344,7 @@ export class SayknowPetWidget {
 		const mode = this.#mode;
 		if (mode === "off") return "base";
 		// Random idle burst → the skin's own animation, driven by its burst descriptor
-		// (RedSayknow holds a flex; BlueSayknow dances the para-para then sobs).
+		// (RedOctopus holds a flex; BlueOctopus dances the para-para then sobs).
 		if (now < this.#flexUntil) {
 			const burst = PET_SKINS[mode].burst;
 			const elapsed = now - (this.#flexUntil - petBurstDurationMs(burst));
@@ -384,7 +387,7 @@ export class SayknowPetWidget {
 			}
 		}
 		// Random show-off, both while idle and while working. Each skin's burst runs for
-		// its own length (RedSayknow a brief flex; BlueSayknow a para-para cycle plus sob).
+		// its own length (RedOctopus a brief flex; BlueOctopus a para-para cycle plus sob).
 		if (this.#autoFlexGapMs && now >= this.#flexUntil) {
 			if (this.#nextAutoFlexAt === 0) {
 				this.#scheduleAutoFlex(now);
@@ -429,11 +432,35 @@ export class SayknowPetWidget {
 		return out;
 	}
 
+	/**
+	 * Whether pet art must be smuggled to the outer terminal through tmux's DCS
+	 * passthrough envelope. True exactly when the multiplexer suppressed inline
+	 * graphics and the startup probe proved the outer terminal can draw them.
+	 */
+	#usesTmuxPassthrough(): boolean {
+		return TERMINAL.imageProtocol === null && getTmuxOverlayImageProtocol() !== null;
+	}
+
+	/**
+	 * Cursor-position escape for the pet's top-left cell.
+	 *
+	 * Passthrough payloads address the OUTER terminal's screen, so they carry the
+	 * pane origin; tmux-level payloads stay pane-relative.
+	 */
+	#cursorTo(x: number, y: number, outer: boolean): string {
+		const offset = outer ? tmuxPaneOffset() : { top: 0, left: 0 };
+		return `\x1b[${y + offset.top + 1};${x + offset.left + 1}H`;
+	}
+
 	/** Pending on-screen image cleanup. Pure: authority is consumed separately, on delivery. */
 	#imageCleanupPayload(): string {
 		let out = "";
 		if (this.#kittyCleanupPending && this.#kittyImageId !== undefined) {
-			out += `\x1b_Ga=d,d=I,i=${this.#kittyImageId},q=2\x1b\\`;
+			// Deleting by image id needs no cursor addressing, but it still has to
+			// reach the terminal that holds the placement — the outer one when the
+			// art was delivered through passthrough.
+			const del = `\x1b_Ga=d,d=I,i=${this.#kittyImageId},q=2\x1b\\`;
+			out += this.#usesTmuxPassthrough() ? wrapTmuxPassthrough(del) : del;
 		}
 		if (this.#lastSixelFootprint) {
 			out += this.#clearSixelFootprint(this.#lastSixelFootprint);
@@ -491,8 +518,10 @@ export class SayknowPetWidget {
 		// A full frame supersedes any cleanup-only frame still awaiting ack.
 		this.#frameCleanupAwaitingAck = false;
 		const { x, y } = pos;
+		const frame = pixel.frames[this.#frame];
 		let out = "";
-		const positioned = `\x1b[${y + 1};${x + 1}H${pixel.frames[this.#frame]}`;
+		const positioned = `${this.#cursorTo(x, y, false)}${frame}`;
+		const positionedOuter = `${this.#cursorTo(x, y, true)}${frame}`;
 
 		if (pixel.protocol === "sixel") {
 			const footprint = { x, y, columns: pixel.columns, rows: pixel.rasterRows };
@@ -518,7 +547,7 @@ export class SayknowPetWidget {
 			out += tmuxOwnsSixel()
 				? positioned
 				: isUnderTmux()
-					? wrapTmuxPassthrough(`\x1b7${positioned}\x1b8`)
+					? wrapTmuxPassthrough(`\x1b7${positionedOuter}\x1b8`)
 					: positioned;
 			return out;
 		}
@@ -526,7 +555,12 @@ export class SayknowPetWidget {
 		// A kitty frame (re)places the image cursor-neutrally, so cleanup is pending
 		// again even if a narrow-terminal pass consumed it earlier.
 		this.#kittyCleanupPending = true;
-		out += positioned;
+		// Under tmux the placement is cursor-neutral for the OUTER terminal but its
+		// addressing is not: tmux forwards passthrough bytes without first syncing
+		// the physical cursor, so the frame carries its own outer-screen position,
+		// and the save/restore pair sits inside the envelope so the outer cursor is
+		// exactly where tmux believes it left it.
+		out += this.#usesTmuxPassthrough() ? wrapTmuxPassthrough(`\x1b7${positionedOuter}\x1b8`) : positioned;
 		return out;
 	}
 }

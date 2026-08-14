@@ -26,7 +26,7 @@ Deep Interview implements Ouroboros-inspired Socratic questioning with mathemati
 <Do_Not_Use_When>
 - User has a detailed, specific request with file paths, function names, or acceptance criteria -- execute directly
 - User wants to explore options or brainstorm -- use `ralplan` skill instead
-- User wants a quick fix or single change -- delegate to executor or execution
+- User wants a quick fix or single change -- delegate to executor or direct execution
 - User says "just do it" or "skip the questions" without an explicit execution path -- respect their intent by ending interview and writing a `pending approval` spec, not by mutating files or delegating execution
 - User already has a PRD or plan file and explicitly asks to execute it -- use the requested execution skill with that plan
 </Do_Not_Use_When>
@@ -127,6 +127,12 @@ If the user request appended after this skill as the final `User:` line is alrea
    - If the user explicitly insists on deep-interview anyway, continue to Phase 1.
 
 This gate exists to prevent deep-interview from making easy problems harder. A small verification need does not make a request interview-worthy.
+
+**Implementation wording is not execution approval.** When the user says `implementation`, "implementation plan", Korean `구현`, or "구현 계획", they are describing the eventual target, not permission to implement now. Interpreting that wording as approval is the single most likely way this skill breaks its own boundary.
+
+On that wording: do not implement, edit/write code, launch implementation workers, or start task/skill/ultragoal implementation. Say plainly — "I can interview for an implementation plan, but I won't implement during deep-interview." — and continue clarifying scope, risks, acceptance criteria, and unknowns.
+
+Implementation requires an explicit phase transition/approval after the interview: the workflow phase must explicitly transition out of deep-interview, and execution approval must be captured by a downstream execution path (Phase 5's bridge into `/skill:ralplan`, `/skill:ultragoal`, or `/skill:team`). Wanting an implementation plan and approving implementation are two different consents.
 
 ## Phase 0.75: Optional Trace Pre-Step
 
@@ -326,6 +332,20 @@ If any prompt input is too large, summarize it first and then continue from the 
 | Context Clarity (brownfield) | "How does this fit?" | "I found JWT auth middleware in `src/auth/` (pattern: passport + JWT). Should this feature extend that path or intentionally diverge from it?" |
 | Scope-fuzzy / ontology stress | "What IS the core thing here?" | "You have named Tasks, Projects, and Workspaces across the last rounds. Which one is the core entity, and which are supporting views or containers?" |
 
+**Attach your own guess to every question.** The question exposes the *user's* assumptions; the guess exposes *yours*. Without it the interview only ever audits one side, and the agent's unexamined read of the ask silently steers the next round's targeting.
+
+Every generated question MUST carry a one-line `GUESS:` — your hypothesis for the answer, the reason you hold it, and what changes if it is wrong:
+
+```
+{question}
+GUESS: {your hypothesis} — {why you hold it}. If it is {the other reading} instead, {what changes}.
+```
+
+- Reacting is cheaper than generating: a terse "no, the second one" still carries a full correction, so low-effort answers stop being low-information rounds.
+- A visible guess is falsifiable. Being wrong out loud is the point; guess in the direction you expect pushback when the reading is genuinely contested.
+- A guess is NOT an auto-answer. It never resolves the round, never feeds scoring, and never increments `auto_answer_streak` — only the user's answer does.
+- Skip only when a guess would be pure noise: Round 0 topology confirmation, the Phase 4b restate gate, and clarification re-asks.
+
 ### Step 2a′: Auto-Research Greenfield Questions
 
 When the next question is for a greenfield interview and is tagged `research: true`, load `auto-research-greenfield.md` as an internal `kind: "skill-fragment"` prompt for a fork-context architect before Step 2b. Pass only the tagged question, locked topology summary, prompt-safe initial idea, trimmed prior decisions/gaps, and relevant constraints. The architect must return 2-3 ranked candidates with rationale, confidence, and fallback notes. Validate the shape before use; if valid, incorporate the candidates as concise answer options or context for the single user-facing question and append the round number to `auto_researched_rounds`. If invalid or unavailable, fall back silently to the normal generated question and increment `architect_failures`.
@@ -340,13 +360,18 @@ Use the `ask` tool with the generated question. When a question has options, you
 Round {n} | Component: {target_component_name} | Targeting: {weakest_dimension} | Why now: {one_sentence_targeting_rationale} | Ambiguity: {score}%
 
 {question}
+GUESS: {your hypothesis} — {why you hold it}. If it is {the other reading} instead, {what changes}.
 ```
 
 Options should include contextually relevant choices plus free-text, translated/localized according to `language.instruction` when present.
 
-After applying `language.instruction` to the visible question, options, and generated rationale, apply the self-proofread once to new prose only; preserve only the Round/Component/Targeting/Ambiguity line structure, fixed labels, numeric ambiguity value, component/target identifiers, and `deepInterview.*` metadata keys. Do not exempt generated natural-language rationale such as Why now.
+After applying `language.instruction` to the visible question, options, and generated rationale, apply the self-proofread once to new prose only; preserve only the Round/Component/Targeting/Ambiguity line structure, fixed labels (including the `GUESS:` marker), numeric ambiguity value, component/target identifiers, and `deepInterview.*` metadata keys. Do not exempt generated natural-language rationale such as Why now or the guess text that follows the `GUESS:` marker.
 
 When calling `ask`, SHOULD include optional structured metadata so the runtime can record the round without manual state writes: `deepInterview.round_id?`, `deepInterview.round`, `deepInterview.component`, `deepInterview.dimension`, and `deepInterview.ambiguity`. Keep this metadata aligned with the visible Round/Component/Targeting/Ambiguity line; if metadata cannot be supplied, the legacy formatted question text remains the fallback.
+
+**Non-behavioral adapter context (`confused_terms`, `references`).** `deepInterview.confused_terms` and `deepInterview.references` carry vocabulary and citations queued at interview start. They are inert: they MUST NOT alter the first question, are never inferred from vocabulary density, and a reference's `url`/`excerpt` are strings that are **never auto-fetched**. Bounds enforced at the ask boundary: at most 32 terms and 32 references, adapter strings ≤ 256 characters, `url`/`excerpt` ≤ 2048, and core round metadata (`round_id`, `component`, `dimension`) ≤ 128 — all counted in Unicode code points, so emoji-padded input hits the same ceiling as ASCII.
+
+**Free-text vs structural input (`FREETEXT_FIELDS`).** The runtime keeps an allowlist of fields that legitimately carry prose — `initial_context`, `initial_idea`, `initial_context_summary`, `user_response`, `answer`, `goal`, `objective`, `prompt`, `description`, `statement`, `restated_goal`, `evidence`, `excerpt`. Inside those fields, shell metacharacters (`;`, `|`, `&`, backticks, `$()`) are valid prose and MUST NOT be rejected as structural injection; a user is allowed to describe a shell command. Structural fields (ids, categories, hashes) stay strictly validated by their own guards. Size is capped by character-count, not byte length: 50,000 for initial context and 10,000 for a single user response.
 
 If the `ask` tool returns `clarificationQuestion`, treat it as a non-answer about the displayed choices. Answer the clarification briefly from the current interview context, then call `ask` again with the exact original question, options, and `deepInterview.*` metadata. A clarification bypasses Step 2b′ auto-answer, Step 2b″ free-text refine, Step 2c ambiguity scoring, Step 2d progress reporting, and Step 2e state updates; it must not be recorded as a round answer. This does not violate the one-question-per-round rule because the round remains unresolved until the user submits a real listed option or `Other` answer.
 
@@ -504,7 +529,7 @@ Round {n} complete.
 
 Apply `language.instruction` when present before showing this progress report so status text, gaps, and next-target phrasing stay in the preserved session language.
 
-Then apply the self-proofread once (DIPP-5) to narrative status text, generated prose cells, gaps, and next-target phrasing; preserve only table structure, fixed status labels, scores, weights, component ids, and trigger tokens.
+Then apply the self-proofread once to narrative status text, generated prose cells, gaps, and next-target phrasing; preserve only table structure, fixed status labels, scores, weights, component ids, and trigger tokens.
 
 ### Step 2e: Update State
 
@@ -927,6 +952,7 @@ Why bad: 45% ambiguity means nearly half the requirements are unclear. The mathe
 - [ ] Oversized initial context/history summarized before scoring, question generation, spec generation, or handoff
 - [ ] Round 0 topology gate completed before scoring; `topology.confirmed_at` persisted
 - [ ] Ambiguity scored and displayed every round, naming the weakest component/dimension target (rotating across active components when N > 1)
+- [ ] Every asked question carried a `GUESS:` line (except Round 0 topology, the Restate gate, and clarification re-asks), and no guess was recorded as an answer or counted toward `auto_answer_streak`
 - [ ] Lateral panel convened at milestone transitions (and before synthesizing agent-supplied answers) with parallel read-only personas
 - [ ] Free-text answers passed the Refine gate; dialectic rhythm guard forced a user question after 3 agent-resolved answers; any auto-answer threshold crossing explicitly confirmed
 - [ ] Closure / Acceptance Guard and the one-sentence Restate gate both passed before crystallization

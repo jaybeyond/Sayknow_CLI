@@ -39,6 +39,11 @@ import {
 	WorkflowGateBroker,
 } from "@sayknow-cli/coding-agent/modes/shared/agent-wire/workflow-gate-broker";
 
+/** Live continuation: gates opened without one are quarantined as unanswerable. */
+function liveContinuation() {
+	return { activate: () => {}, isLive: () => true, release: () => {}, terminalProof: "not_published" as const };
+}
+
 /**
  * A scripted external agent with a canned "memory". It answers any gate it
  * receives without any human interaction, recording how many gates it handled.
@@ -110,6 +115,7 @@ describe("#323 end-to-end unattended workflow lifecycle (zero human input)", () 
 		// 2. Durable broker; audit every gate lifecycle event.
 		const brokerAudit: GateAuditEvent[] = [];
 		const broker = new WorkflowGateBroker(runId, new FileGateStore(path.join(dir, "gates.json")), {
+			advance: () => {},
 			audit: e => brokerAudit.push(e),
 		});
 
@@ -119,7 +125,7 @@ describe("#323 end-to-end unattended workflow lifecycle (zero human input)", () 
 		// Helper: open a gate, let the canned-memory agent answer it, resolve, audit.
 		const driveGate = async (input: Parameters<typeof broker.openGate>[0]) => {
 			rounds += 1;
-			const gate = broker.openGate(input);
+			const gate = broker.openGate(input, liveContinuation());
 			// Pre-turn budget accounting for the round (estimate + reconcile).
 			controller.preTurnEstimate({ tokens: 500, costUsd: 0.01 });
 			const answer = agent.answer(gate);

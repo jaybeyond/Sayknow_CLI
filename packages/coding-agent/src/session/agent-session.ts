@@ -1547,6 +1547,27 @@ type SessionAdmissionLease = {
 	release(): void;
 };
 
+const TODO_WRITE_INFRASTRUCTURE_ERROR =
+	/(?:HTTP2StreamReset|ECONNRESET|ECONNREFUSED|ETIMEDOUT|network error|transport error|connection reset|stream reset|timed out|timeout|fetching https?:)/iu;
+const TODO_WRITE_ERROR_CONTEXT_LIMIT = 1_000;
+
+export function buildTodoWriteFailureReminder(errorText: string | undefined, failureCount: number): string {
+	const normalizedError = errorText?.trim().slice(0, TODO_WRITE_ERROR_CONTEXT_LIMIT);
+	const shouldRetry =
+		failureCount === 1 && (!normalizedError || !TODO_WRITE_INFRASTRUCTURE_ERROR.test(normalizedError));
+	const directive = shouldRetry
+		? "Correct the todo_write payload and retry once with a minimal argument object. If that retry fails, do not call todo_write again in this user turn; continue the requested work using a checklist in reasoning."
+		: "Do not call todo_write again in this user turn. Continue the requested work now, track the remaining steps in reasoning, and report progress directly.";
+
+	return [
+		"<system-reminder>",
+		"todo_write failed, so todo progress is not visible to the user.",
+		normalizedError ? `Failure: ${normalizedError}` : "Failure: todo_write returned an error.",
+		directive,
+		"</system-reminder>",
+	].join("\n");
+}
+
 export class AgentSession {
 	readonly agent: Agent;
 	readonly sessionManager: SessionManager;
@@ -1740,6 +1761,7 @@ export class AgentSession {
 	#fallbackInvocationId = 0;
 	// Todo completion reminder state
 	#todoReminderCount = 0;
+	#todoWriteFailureCount = 0;
 	#deepInterviewUserIntentEpoch = 0;
 	#deepInterviewTurnOwnerEpoch = 0;
 	#deepInterviewGenuineUserMessageEpochs = new WeakMap<object, number>();
@@ -3794,24 +3816,21 @@ export class AgentSession {
 				if (toolName === "edit" && details?.path) {
 					this.#invalidateFileCacheForPath(details.path);
 				}
-				if (toolName === "todo_write" && !isError && Array.isArray(details?.phases)) {
-					this.setTodoPhases(details.phases);
+				if (toolName === "todo_write" && !isError) {
+					this.#todoWriteFailureCount = 0;
+					if (Array.isArray(details?.phases)) {
+						this.setTodoPhases(details.phases);
+					}
 				}
 				if (toolName === "todo_write" && isError) {
+					this.#todoWriteFailureCount++;
 					const errorText = content?.find(part => part.type === "text")?.text;
-					const reminderText = [
-						"<system-reminder>",
-						"todo_write failed, so todo progress is not visible to the user.",
-						errorText ? `Failure: ${errorText}` : "Failure: todo_write returned an error.",
-						"Fix the todo payload and call todo_write again before continuing.",
-						"</system-reminder>",
-					].join("\n");
 					await this.sendCustomMessage(
 						{
 							customType: "todo-write-error-reminder",
-							content: reminderText,
+							content: buildTodoWriteFailureReminder(errorText, this.#todoWriteFailureCount),
 							display: false,
-							details: { toolName, errorText },
+							details: { toolName, errorText, failureCount: this.#todoWriteFailureCount },
 						},
 						{ deliverAs: "nextTurn" },
 					);
@@ -7793,6 +7812,7 @@ export class AgentSession {
 				this.#defaultFallbackChain().resetAttemptBudget();
 				this.#overflowMaintenanceAttempts = 0;
 				this.#throwIfPromptPreflightCancelled(generation, preflightSignal);
+				this.#todoWriteFailureCount = 0;
 			}
 			// Flush any pending bash messages before the new prompt
 			this.#flushPendingBashMessages();

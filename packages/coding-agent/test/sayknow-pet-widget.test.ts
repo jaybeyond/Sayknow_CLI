@@ -3,7 +3,12 @@ import {
 	__animationSchedulerTestHooks,
 	Container,
 	getCellDimensions,
+	ImageProtocol,
+	resetTmuxPaneOffsetCache,
+	resetTmuxSixelOwnershipCache,
 	setCellDimensions,
+	setTmuxOverlayImageProtocol,
+	TERMINAL,
 	type TUI,
 } from "@sayknow-cli/tui";
 import type { CustomEditor } from "../src/modes/components/custom-editor";
@@ -567,7 +572,7 @@ describe("SayknowPetWidget", () => {
 		}
 	});
 
-	it("runs a para-para-then-sob burst for BlueSayknow", () => {
+	it("runs a para-para-then-sob burst for BlueOctopus", () => {
 		vi.useFakeTimers();
 		const { widget } = makeWidget(80, 30, { autoFlexGapMs: [500, 500] });
 		try {
@@ -640,6 +645,122 @@ describe("SayknowPetWidget", () => {
 		expect(widget.mode).toBe("off");
 		expect(stubs.getEmitter()).toBeUndefined();
 		widget.dispose();
+	});
+});
+
+describe("SayknowPetWidget tmux passthrough delivery", () => {
+	const originalTmux = Bun.env.TMUX;
+	const originalTmuxPane = Bun.env.TMUX_PANE;
+	const originalTmuxLaunched = Bun.env.SKC_TMUX_LAUNCHED;
+	const originalTmuxCommand = Bun.env.SKC_TMUX_COMMAND;
+	const originalProtocol = TERMINAL.imageProtocol;
+	const mutableTerminal = TERMINAL as unknown as { imageProtocol: ImageProtocol | null };
+	const paneOffsetStub = `${import.meta.dir}/fixtures/tui/tmux-pane-offset-stub.sh`;
+
+	function underTmux(tmuxCommand: string): void {
+		Bun.env.TMUX = "/tmp/tmux-1000/default,1234,0";
+		Bun.env.TMUX_PANE = "%1";
+		Bun.env.SKC_TMUX_COMMAND = tmuxCommand;
+		resetTmuxSixelOwnershipCache();
+		resetTmuxPaneOffsetCache();
+	}
+
+	afterEach(() => {
+		__animationSchedulerTestHooks.reset();
+		setTmuxOverlayImageProtocol(null);
+		mutableTerminal.imageProtocol = originalProtocol;
+		for (const [key, value] of [
+			["TMUX", originalTmux],
+			["TMUX_PANE", originalTmuxPane],
+			["SKC_TMUX_LAUNCHED", originalTmuxLaunched],
+			["SKC_TMUX_COMMAND", originalTmuxCommand],
+		] as const) {
+			if (value === undefined) delete Bun.env[key];
+			else Bun.env[key] = value;
+		}
+		resetTmuxSixelOwnershipCache();
+		resetTmuxPaneOffsetCache();
+	});
+
+	it("wraps the kitty overlay in the passthrough envelope and addresses the outer screen", () => {
+		// `false` answers nothing: tmux neither owns sixel nor reports a pane origin.
+		underTmux("false");
+		mutableTerminal.imageProtocol = null;
+		setTmuxOverlayImageProtocol(ImageProtocol.Kitty);
+		const { widget, getEmitter } = makeWidget(80, 30, { protocol: "kitty" });
+		try {
+			widget.setMode("red");
+			const payload = getEmitter()?.() ?? "";
+
+			expect(payload.startsWith("\x1bPtmux;")).toBe(true);
+			expect(payload.endsWith("\x1b\\")).toBe(true);
+			// Save/restore must sit inside the envelope: the outer cursor is the one
+			// that has to come back, and tmux would swallow a bare \x1b7/\x1b8.
+			expect(payload).toContain("\x1bPtmux;\x1b\x1b7");
+			// Every inner ESC is doubled, so the raw kitty APC never appears verbatim.
+			expect(payload).toContain("\x1b\x1b_G");
+			// Strip the doubled pairs: no bare APC escape may survive, or tmux would
+			// terminate the envelope early and eat the rest of the frame.
+			expect(payload.replaceAll("\x1b\x1b", "").includes("\x1b_G")).toBe(false);
+			// Pane origin unknown -> pane-relative position, one column of inset.
+			expect(payload).toContain(`;${80 - 4 - 1 + 1}H`);
+		} finally {
+			widget.dispose();
+		}
+	});
+
+	it("offsets the overlay by the pane origin reported by tmux", () => {
+		underTmux(paneOffsetStub);
+		mutableTerminal.imageProtocol = null;
+		setTmuxOverlayImageProtocol(ImageProtocol.Kitty);
+		const { widget, getEmitter } = makeWidget(80, 30, { protocol: "kitty" });
+		try {
+			widget.setMode("red");
+			const payload = getEmitter()?.() ?? "";
+
+			// Stub pane: 11 rows down, 40 columns right, one top status line.
+			expect(payload).toContain(`;${80 - 4 - 1 + 40 + 1}H`);
+		} finally {
+			widget.dispose();
+		}
+	});
+
+	it("sends the kitty delete through passthrough so the outer terminal drops the image", () => {
+		underTmux("false");
+		mutableTerminal.imageProtocol = null;
+		setTmuxOverlayImageProtocol(ImageProtocol.Kitty);
+		const { widget, written, getEmitter } = makeWidget(80, 30, { protocol: "kitty" });
+		try {
+			widget.setMode("red");
+			const imageId = getEmitter()?.()?.match(/i=(\d+)/)?.[1];
+			expect(imageId).toBeDefined();
+			written.length = 0;
+
+			widget.setMode("off");
+
+			const cleanup = written.find(chunk => chunk.includes("a=d,d=I"));
+			expect(cleanup).toBeDefined();
+			expect(cleanup).toContain("\x1bPtmux;");
+			expect(cleanup).toContain(`\x1b\x1b_Ga=d,d=I,i=${imageId},q=2`);
+		} finally {
+			widget.dispose();
+		}
+	});
+
+	it("keeps inline kitty delivery unwrapped when the terminal renders images itself", () => {
+		underTmux("false");
+		mutableTerminal.imageProtocol = ImageProtocol.Kitty;
+		setTmuxOverlayImageProtocol(null);
+		const { widget, getEmitter } = makeWidget(80, 30, { protocol: "kitty" });
+		try {
+			widget.setMode("red");
+			const payload = getEmitter()?.() ?? "";
+
+			expect(payload.startsWith("\x1bPtmux;")).toBe(false);
+			expect(payload).toContain("\x1b_G");
+		} finally {
+			widget.dispose();
+		}
 	});
 });
 

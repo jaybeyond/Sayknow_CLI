@@ -1,9 +1,8 @@
-import { afterEach, describe, expect, it, spyOn, vi } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, spyOn, vi } from "bun:test";
 import * as fsSync from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { buildWindowsPowerShellInnerCommand } from "@sayknow-cli/coding-agent/skc-runtime/launch-tmux";
 import {
 	__setBinaryResolverForTests,
 	clearPsmuxDetectionCache,
@@ -12,7 +11,13 @@ import {
 	buildSkcTmuxExactOptionTarget,
 	buildSkcTmuxExactSessionTarget,
 } from "@sayknow-cli/coding-agent/skc-runtime/tmux-common";
-import { lifecyclePaths, observeOwnerTerminal } from "@sayknow-cli/coding-agent/skc-runtime/tmux-owner-isolation";
+import {
+	__setOwnerIncarnationReaderForTests,
+	lifecyclePaths,
+	observeOwnerTerminal,
+	releaseIdentityCreate,
+	reserveIdentityCreate,
+} from "@sayknow-cli/coding-agent/skc-runtime/tmux-owner-isolation";
 import {
 	__setCreateOwnerIsolationForTests,
 	__setMutationServerProofForTests,
@@ -23,6 +28,8 @@ import {
 	removeSkcTmuxSession,
 	statusSkcTmuxSession,
 } from "@sayknow-cli/coding-agent/skc-runtime/tmux-sessions";
+import { buildWindowsPowerShellInnerCommand } from "@sayknow-cli/coding-agent/skc-runtime/windows-powershell-command";
+import { setAgentDir } from "@sayknow-cli/utils/dirs";
 
 type SpawnSyncResult = Bun.SyncSubprocess<"pipe", "pipe">;
 type SpawnSyncCommandMock = (command: string[]) => SpawnSyncResult;
@@ -1241,5 +1248,111 @@ describe("SKC tmux session management", () => {
 			fs.access(path.join(stateDir, sessionId, "owner-lifecycle", `intent-${generation}.json.cancelled`)),
 		).resolves.toBeNull();
 		await fs.rm(stateDir, { recursive: true, force: true });
+	});
+});
+
+describe("shared identity create fence", () => {
+	// The fence database lives under the agent dir; isolate it so these tests
+	// never write into the developer's real ~/.skc.
+	const originalAgentDir = process.env.SKC_CODING_AGENT_DIR;
+	beforeEach(() => {
+		const isolated = fsSync.mkdtempSync(path.join(os.tmpdir(), "skc-fence-agent-"));
+		fenceAgentRoots.push(isolated);
+		setAgentDir(path.join(isolated, "agent"));
+	});
+	const fenceAgentRoots: string[] = [];
+
+	const OWNER_INCARNATION = "darwin:1700000000:424242";
+
+	function fenceFixture(): { stateDir: string; stateFile: string; sessionId: string; env: NodeJS.ProcessEnv } {
+		const stateDir = fsSync.mkdtempSync(path.join(os.tmpdir(), "skc-create-fence-"));
+		fixtureDirectories.push(stateDir);
+		const sessionId = "coordinator-session-1";
+		const stateFile = path.join(stateDir, "runtime-state.json");
+		fsSync.writeFileSync(stateFile, "{}\n");
+		return {
+			stateDir,
+			stateFile,
+			sessionId,
+			env: {
+				SKC_PSMUX_DETECTION: "off",
+				SKC_TMUX_COMMAND: "tmux",
+				SKC_TMUX_SESSION: "fenced-session",
+				SKC_COORDINATOR_SESSION_ID: sessionId,
+				SKC_COORDINATOR_SESSION_STATE_FILE: stateFile,
+			},
+		};
+	}
+
+	afterEach(() => {
+		__setOwnerIncarnationReaderForTests(null);
+		if (originalAgentDir) setAgentDir(originalAgentDir);
+		for (const dir of fenceAgentRoots.splice(0)) fsSync.rmSync(dir, { recursive: true, force: true });
+		__setCreateOwnerIsolationForTests(null);
+	});
+
+	it("serializes explicit create with a restore-shaped contender for one coordinator identity", () => {
+		const { stateDir, stateFile, sessionId, env } = fenceFixture();
+		__setOwnerIncarnationReaderForTests(() => OWNER_INCARNATION);
+
+		// A restore-shaped contender holds the identity first. Restore derives the
+		// same (stateDir, sessionId, stateFile) triple from the sidecar it resumes.
+		// The holder is this very process, so the production code's real
+		// liveness probe (signal 0 + incarnation) sees a genuinely live owner.
+		const contender = reserveIdentityCreate(
+			{ stateDir, sessionId, stateFile },
+			{ ownerPid: process.pid, ownerIncarnation: OWNER_INCARNATION },
+		);
+		expect(contender.ok).toBe(true);
+		if (!contender.ok) return;
+
+		let spawnAttempts = 0;
+		__setCreateOwnerIsolationForTests({
+			execute: () => {
+				spawnAttempts += 1;
+				return { ok: false, code: "scope_bootstrap_failed", diagnostic: "must-not-reach" };
+			},
+		});
+
+		expect(() => createSkcTmuxSession(env, { platform: "darwin" })).toThrow(
+			/skc_tmux_identity_create_identity_reserved_live/,
+		);
+		// The loser stops before the owner-isolation plan executes, so it performs
+		// no tmux mutation at all: no new-session, no tag, no publication.
+		expect(spawnAttempts).toBe(0);
+
+		releaseIdentityCreate(contender.reservation);
+	});
+
+	it("records the attempt session name before the helper can create anything", () => {
+		const { env } = fenceFixture();
+		__setOwnerIncarnationReaderForTests(() => OWNER_INCARNATION);
+
+		let sawPlan = false;
+		__setCreateOwnerIsolationForTests({
+			execute: plan => {
+				sawPlan = plan.ok;
+				return { ok: false, code: "scope_bootstrap_failed", diagnostic: "test-stop" };
+			},
+		});
+
+		// With the identity free the creator proceeds, and the reservation must
+		// already carry the (random) attempt name by the time the helper runs.
+		expect(() => createSkcTmuxSession(env, { platform: "darwin" })).toThrow(
+			"skc_tmux_owner_isolation_scope_bootstrap_failed:test-stop",
+		);
+		expect(sawPlan).toBe(true);
+	});
+
+	it("releases the identity so a later creator is not blocked by a finished one", () => {
+		const { env } = fenceFixture();
+		__setOwnerIncarnationReaderForTests(() => OWNER_INCARNATION);
+		__setCreateOwnerIsolationForTests({
+			execute: () => ({ ok: false, code: "scope_bootstrap_failed", diagnostic: "test-stop" }),
+		});
+
+		expect(() => createSkcTmuxSession(env, { platform: "darwin" })).toThrow(/scope_bootstrap_failed/);
+		// A failed create must not leave the identity permanently reserved.
+		expect(() => createSkcTmuxSession(env, { platform: "darwin" })).toThrow(/scope_bootstrap_failed/);
 	});
 });

@@ -35,19 +35,29 @@ import {
 	SKC_TMUX_VERSION_OPTION,
 } from "./tmux-common";
 import {
+	type AbandonedIdentityCensus,
+	abandonIdentityCreate,
+	advanceIdentityCreatePhase,
 	captureOwnerGenerationBaselineSync,
 	classifyCgroup,
 	closeExactTmuxOwner,
 	executeTmuxOwnerIsolationPlanSync,
+	type IdentityCreateKey,
+	type IdentityCreateReservation,
+	type IdentityCreateReservationResult,
 	isOwnerGenerationBaselineCurrentSync,
 	isValidOwnerVerdict,
 	lifecyclePaths,
+	type OwnerGenerationBaseline,
 	type OwnerIsolationProbeSync,
 	type OwnerVerdict,
 	observeOwnerTerminal,
 	type PlanResponse,
 	planTmuxOwnerIsolationSync,
+	recoverAbandonedIdentityCreate,
+	releaseIdentityCreate,
 	replaceOwnerGenerationSync,
+	reserveIdentityCreate,
 	type TmuxOwnerIsolationExecutionDependencies,
 	type TmuxOwnerIsolationExecutionResult,
 	type TmuxServerProof,
@@ -134,6 +144,17 @@ const FORCE_CLOSE_VERDICT_POLL_MS = 50;
 
 export interface CreateSkcTmuxSessionOptions {
 	platform?: NodeJS.Platform;
+	/**
+	 * Restore only: run the child in the session's recorded directory instead of
+	 * this process's cwd.
+	 */
+	cwd?: string;
+	/**
+	 * Restore only: argv appended to the `skc` child, e.g. `["--resume", "<id>"]`.
+	 * Restore reuses this creator verbatim so it inherits the same identity fence
+	 * and owner-isolation proof as an ordinary create.
+	 */
+	childArgs?: string[];
 }
 
 export type CreateOwnerIsolationTestDependencies = {
@@ -362,6 +383,113 @@ export function statusSkcTmuxSession(sessionName: string, env: NodeJS.ProcessEnv
 	throw new Error(`skc_tmux_session_not_found:${sessionName}`);
 }
 
+/**
+ * Live-tmux census for authority-first recovery of an abandoned reservation.
+ *
+ * Authority is the CURRENT published generation on disk compared against the
+ * live session's canonical tags — never the reservation's own `phase`, because a
+ * creator can publish and then die before recording that it published.
+ */
+/**
+ * Resolves a reservation refused because its previous owner died after reaching
+ * the helper. Shared by every producer so none of them can brick an identity by
+ * treating an abandoned row as a permanent collision.
+ */
+export function settleAbandonedIdentity(
+	reserved: IdentityCreateReservationResult,
+	identityKey: IdentityCreateKey,
+	census: AbandonedIdentityCensus,
+): IdentityCreateReservationResult {
+	if (reserved.ok) return reserved;
+	if (reserved.code !== "identity_orphan_unresolved" || !reserved.existing) return reserved;
+	return recoverAbandonedIdentityCreate(identityKey, reserved.existing, census);
+}
+
+export function abandonedIdentityCensus(
+	tmuxCommand: string,
+	env: NodeJS.ProcessEnv,
+	stateFile: string,
+): AbandonedIdentityCensus {
+	return {
+		inspect: evidence => {
+			// Cleanup uncertainty covers a child abandoned BEFORE it was tagged, so a
+			// profile-filtered listing would report `absent` for exactly the sessions
+			// this census exists to find. Check the raw name list first.
+			let rawNames: string[];
+			try {
+				rawNames = listRawTmuxSessionNames(env);
+			} catch (error) {
+				return { kind: "unknown", reason: `list_failed:${error instanceof Error ? error.message : "error"}` };
+			}
+			let sessions: SkcTmuxSessionStatus[];
+			try {
+				sessions = listSkcTmuxSessions(env);
+			} catch (error) {
+				return { kind: "unknown", reason: `list_failed:${error instanceof Error ? error.message : "error"}` };
+			}
+			const match = sessions.find(
+				session =>
+					(evidence.attemptSessionName !== null && session.name === evidence.attemptSessionName) ||
+					(session.sessionId === evidence.sessionId && session.sessionStateFile === stateFile),
+			);
+			if (!match) {
+				// An untagged remnant still occupies the attempt name. It carries no
+				// canonical proof, so it can be neither authority nor a safe kill
+				// target from here: refuse rather than reclaim over it.
+				if (evidence.attemptSessionName !== null && rawNames.includes(evidence.attemptSessionName)) {
+					return { kind: "unknown", reason: "untagged_attempt_remnant" };
+				}
+				return { kind: "absent" };
+			}
+			let nativeSessionId: string | undefined;
+			try {
+				nativeSessionId = evidence.nativeSessionId ?? readNativeTmuxSessionId(match.name, env);
+			} catch {
+				nativeSessionId = undefined;
+			}
+			if (!nativeSessionId) return { kind: "unknown", reason: "native_session_id_unavailable" };
+			let published: OwnerGenerationBaseline;
+			try {
+				published = captureOwnerGenerationBaselineSync(evidence.stateDir, evidence.sessionId);
+			} catch (error) {
+				return {
+					kind: "unknown",
+					reason: `generation_unreadable:${error instanceof Error ? error.message : "error"}`,
+				};
+			}
+			// A missing, corrupt or unreadable generation must never be downgraded to
+			// "orphan": that would authorize killing a session we cannot judge.
+			if (published.state !== "current") return { kind: "unknown", reason: `generation_${published.state}` };
+			if (!match.sessionId || !match.sessionStateFile || !match.ownerGeneration)
+				return { kind: "unknown", reason: "incomplete_canonical_tags" };
+			if (match.sessionId !== evidence.sessionId || match.sessionStateFile !== stateFile)
+				return { kind: "unknown", reason: "tag_identity_mismatch" };
+			return match.ownerGeneration === published.generation
+				? { kind: "authoritative", nativeSessionId }
+				: { kind: "orphan", nativeSessionId };
+		},
+		cleanupOrphan: (nativeSessionId, attemptSessionName) => {
+			const server = requireSafeTmuxServerForMutation(tmuxCommand, env);
+			cleanupExactCreatedTmuxSession(
+				nativeSessionId,
+				attemptSessionName ?? nativeSessionId,
+				tmuxCommand,
+				env,
+				server.pid,
+				server.startTime,
+			);
+		},
+	};
+}
+
+/**
+ * A lost reservation means another process already recovered this identity.
+ * The caller must perform no further tmux mutation.
+ */
+function fenceLost(): never {
+	throw new Error("skc_tmux_identity_create_fence_lost");
+}
+
 export function createSkcTmuxSession(
 	env: NodeJS.ProcessEnv = process.env,
 	options: CreateSkcTmuxSessionOptions = {},
@@ -369,7 +497,7 @@ export function createSkcTmuxSession(
 	const platform = options.platform ?? process.platform;
 	const tmuxCommand = resolveSkcTmuxCommand(env, platform);
 	const sessionName = buildSkcTmuxSessionName(env);
-	const cwd = process.cwd();
+	const cwd = options.cwd ?? process.cwd();
 	const sessionId = env[SKC_COORDINATOR_SESSION_ID_ENV]?.trim() || sessionName;
 	const stateFile =
 		env[SKC_COORDINATOR_SESSION_STATE_FILE_ENV]?.trim() ||
@@ -385,12 +513,13 @@ export function createSkcTmuxSession(
 		[SKC_COORDINATOR_SESSION_STATE_FILE_ENV]: stateFile,
 	};
 	const shellQuote = (value: string): string => `'${value.replace(/'/g, `'\\''`)}'`;
+	const childArgs = options.childArgs ?? [];
 	const command =
 		platform === "win32"
-			? buildWindowsPowerShellInnerCommand({ command: ["skc"], environment: childEnvironment })
-			: `exec env ${Object.entries(childEnvironment)
+			? buildWindowsPowerShellInnerCommand({ command: ["skc", ...childArgs], environment: childEnvironment })
+			: `cd ${shellQuote(cwd)} && exec env ${Object.entries(childEnvironment)
 					.map(([name, value]) => `${name}=${shellQuote(value)}`)
-					.join(" ")} skc`;
+					.join(" ")} skc${childArgs.map(argument => ` ${shellQuote(argument)}`).join("")}`;
 	const tmuxArgv = [
 		tmuxCommand,
 		"new-session",
@@ -492,100 +621,157 @@ export function createSkcTmuxSession(
 	if (resolveSkcTmuxBinary({ env, platform }).isPsmux)
 		throw new Error("skc_tmux_owner_isolation_native_session_identity_unavailable");
 
-	const baseline = captureOwnerGenerationBaselineSync(stateDir, sessionId);
-	const ownerPlan = planTmuxOwnerIsolationSync(
-		{
-			schema_version: 1,
-			op: "plan",
-			platform,
-			session_id: sessionId,
-			owner_generation: generation,
-			baseline,
-			cwd,
-			state_dir: stateDir,
-			socket_key: tmuxCommand,
-			tmux_argv: tmuxArgv,
-		},
-		ownerProbe,
-	);
-	if (!ownerPlan.ok) throw new Error(`skc_tmux_owner_isolation_${ownerPlan.code}:${ownerPlan.diagnostic}`);
-
-	const outcome = (createOwnerIsolationTestDependencies?.execute ?? executeTmuxOwnerIsolationPlanSync)(ownerPlan, {
-		socketKey: tmuxCommand,
-		spawn: (argv, stdinLine) => {
-			const result = stdinLine
-				? Bun.spawnSync(argv, {
-						stdout: "pipe",
-						stderr: "pipe",
-						stdin: Buffer.from(stdinLine),
-						env,
-					})
-				: Bun.spawnSync(argv, { stdout: "pipe", stderr: "pipe", env });
-			return { exitCode: result.exitCode, stdout: result.stdout.toString() };
-		},
-		probeServer: ownerProbe.probeServer,
-		isCurrentGeneration: () => isOwnerGenerationBaselineCurrentSync(stateDir, sessionId, baseline),
-		cleanupSpawned: ({ execution, nativeSessionId, server }) => {
-			if (!server.pid || !server.startTime) throw new Error("skc_tmux_cleanup_target_changed");
-			cleanupExactCreatedTmuxSession(
-				nativeSessionId,
-				execution.attempt_session,
-				tmuxCommand,
-				env,
-				server.pid,
-				server.startTime,
-			);
-		},
-	});
-	if (!outcome.ok) throw new Error(`skc_tmux_owner_isolation_${outcome.code}:${outcome.diagnostic}`);
-
-	const nativeSessionId = outcome.native_session_id;
-	if (!nativeSessionId) throw new Error("skc_tmux_owner_isolation_native_session_identity_unavailable");
-	const server = requireSafeTmuxServerForMutation(tmuxCommand, env);
-	if (server.pid !== outcome.server_pid || server.startTime !== outcome.server_start_time)
-		throw new Error("skc_tmux_owner_changed_after_create");
-	if (!isNativeTmuxSessionBoundToName(nativeSessionId, sessionName, env))
-		throw new Error("skc_tmux_owner_changed_after_create");
-
+	// Shared identity create fence. `SessionManager` has no inter-process
+	// single-writer lock on a transcript, so two owners for one canonical
+	// (stateDir, sessionId) is a data-integrity failure rather than a
+	// recoverable skip. The reservation is a durable row, not a held SQLite
+	// transaction: the owner-isolation helper below runs in its own process and
+	// acquires the same database itself, so holding a transaction across the
+	// `Bun.spawnSync` would deadlock the helper against its own parent.
+	const identityKey = { stateDir, sessionId, stateFile };
+	const reserved = reserveIdentityCreate(identityKey);
+	// Fail closed. The fence database lives under SKC's own config root, so it is
+	// always reachable for a native-identity provider; an unreachable fence means
+	// the one-create guarantee cannot be honored and creating anyway could put a
+	// second writer on this identity's transcript.
+	// A proven-dead owner that reached the helper may have left an untagged child.
+	// Resolve it authority-first OUTSIDE the fence window before creating anything.
+	const settled = settleAbandonedIdentity(reserved, identityKey, abandonedIdentityCensus(tmuxCommand, env, stateFile));
+	if (!settled.ok) throw new Error(`skc_tmux_identity_create_${settled.code}:${settled.diagnostic}`);
+	let reservation: IdentityCreateReservation | null = settled.reservation;
+	let cleanupUncertain = false;
 	try {
-		tagCreatedTmuxSession(
-			nativeSessionId,
-			sessionName,
-			outcome.server_pid,
-			env,
+		const baseline = captureOwnerGenerationBaselineSync(stateDir, sessionId);
+		const ownerPlan = planTmuxOwnerIsolationSync(
 			{
-				sessionId,
-				sessionStateFile: stateFile,
-				ownerGeneration: generation,
-				ownerServerKey: tmuxCommand,
-				version: env.npm_package_version ?? null,
+				schema_version: 1,
+				op: "plan",
+				platform,
+				session_id: sessionId,
+				owner_generation: generation,
+				baseline,
+				cwd,
+				state_dir: stateDir,
+				socket_key: tmuxCommand,
+				tmux_argv: tmuxArgv,
 			},
-			tmuxCommand,
+			ownerProbe,
 		);
-	} catch (tagError) {
+		if (!ownerPlan.ok) throw new Error(`skc_tmux_owner_isolation_${ownerPlan.code}:${ownerPlan.diagnostic}`);
+
+		// Record the attempt session name BEFORE the helper can create anything.
+		// Creator names are random, so this row is the only way a successor can name
+		// an orphan left behind by a creator that died mid-spawn.
+		if (reservation)
+			reservation =
+				advanceIdentityCreatePhase(reservation, "helper_invoked", { attemptSessionName: sessionName }) ??
+				fenceLost();
+
+		const outcome = (createOwnerIsolationTestDependencies?.execute ?? executeTmuxOwnerIsolationPlanSync)(ownerPlan, {
+			socketKey: tmuxCommand,
+			spawn: (argv, stdinLine) => {
+				const result = stdinLine
+					? Bun.spawnSync(argv, {
+							stdout: "pipe",
+							stderr: "pipe",
+							stdin: Buffer.from(stdinLine),
+							env,
+						})
+					: Bun.spawnSync(argv, { stdout: "pipe", stderr: "pipe", env });
+				return { exitCode: result.exitCode, stdout: result.stdout.toString() };
+			},
+			probeServer: ownerProbe.probeServer,
+			isCurrentGeneration: () => isOwnerGenerationBaselineCurrentSync(stateDir, sessionId, baseline),
+			cleanupSpawned: ({ execution, nativeSessionId, server }) => {
+				if (!server.pid || !server.startTime) throw new Error("skc_tmux_cleanup_target_changed");
+				cleanupExactCreatedTmuxSession(
+					nativeSessionId,
+					execution.attempt_session,
+					tmuxCommand,
+					env,
+					server.pid,
+					server.startTime,
+				);
+			},
+		});
+		if (!outcome.ok) throw new Error(`skc_tmux_owner_isolation_${outcome.code}:${outcome.diagnostic}`);
+
+		const nativeSessionId = outcome.native_session_id;
+		if (!nativeSessionId) throw new Error("skc_tmux_owner_isolation_native_session_identity_unavailable");
+		const server = requireSafeTmuxServerForMutation(tmuxCommand, env);
+		if (server.pid !== outcome.server_pid || server.startTime !== outcome.server_start_time)
+			throw new Error("skc_tmux_owner_changed_after_create");
+		if (!isNativeTmuxSessionBoundToName(nativeSessionId, sessionName, env))
+			throw new Error("skc_tmux_owner_changed_after_create");
+		if (reservation)
+			reservation =
+				advanceIdentityCreatePhase(reservation, "spawned", {
+					nativeSessionId,
+					serverPid: outcome.server_pid ?? null,
+					serverStartTime: outcome.server_start_time ?? null,
+				}) ?? fenceLost();
+
 		try {
-			cleanupExactCreatedTmuxSession(
+			tagCreatedTmuxSession(
 				nativeSessionId,
 				sessionName,
-				tmuxCommand,
-				env,
 				outcome.server_pid,
-				outcome.server_start_time,
+				env,
+				{
+					sessionId,
+					sessionStateFile: stateFile,
+					ownerGeneration: generation,
+					ownerServerKey: tmuxCommand,
+					version: env.npm_package_version ?? null,
+				},
+				tmuxCommand,
 			);
-		} catch (cleanupError) {
-			throw new AggregateError([tagError, cleanupError], "skc_tmux_profile_tag_failed_cleanup_failed");
+		} catch (tagError) {
+			try {
+				cleanupExactCreatedTmuxSession(
+					nativeSessionId,
+					sessionName,
+					tmuxCommand,
+					env,
+					outcome.server_pid,
+					outcome.server_start_time,
+				);
+			} catch (cleanupError) {
+				throw new AggregateError([tagError, cleanupError], "skc_tmux_profile_tag_failed_cleanup_failed");
+			}
+			throw tagError;
 		}
-		throw tagError;
-	}
 
-	if (nativeSessionId) {
-		const firstServer = requireSafeTmuxServerForMutation(tmuxCommand, env);
-		if (firstServer.pid !== outcome.server_pid || firstServer.startTime !== outcome.server_start_time)
-			throw new Error("skc_tmux_owner_changed_after_create");
-		const status = statusSkcTmuxSessionByNativeId(nativeSessionId, env);
-		const finalServer = requireSafeTmuxServerForMutation(tmuxCommand, env);
-		if (finalServer.pid !== firstServer.pid || finalServer.startTime !== firstServer.startTime)
-			throw new Error("skc_tmux_owner_changed_after_create");
+		if (nativeSessionId) {
+			const firstServer = requireSafeTmuxServerForMutation(tmuxCommand, env);
+			if (firstServer.pid !== outcome.server_pid || firstServer.startTime !== outcome.server_start_time)
+				throw new Error("skc_tmux_owner_changed_after_create");
+			const status = statusSkcTmuxSessionByNativeId(nativeSessionId, env);
+			const finalServer = requireSafeTmuxServerForMutation(tmuxCommand, env);
+			if (finalServer.pid !== firstServer.pid || finalServer.startTime !== firstServer.startTime)
+				throw new Error("skc_tmux_owner_changed_after_create");
+			try {
+				replaceOwnerGenerationSync(stateDir, sessionId, generation, baseline);
+			} catch (publicationError) {
+				try {
+					cleanupExactCreatedTmuxSession(
+						nativeSessionId,
+						sessionName,
+						tmuxCommand,
+						env,
+						outcome.server_pid,
+						outcome.server_start_time,
+					);
+				} catch (cleanupError) {
+					throw new AggregateError(
+						[publicationError, cleanupError],
+						"skc_tmux_owner_generation_publish_failed_cleanup_failed",
+					);
+				}
+				throw publicationError;
+			}
+			return status;
+		}
 		try {
 			replaceOwnerGenerationSync(stateDir, sessionId, generation, baseline);
 		} catch (publicationError) {
@@ -606,29 +792,19 @@ export function createSkcTmuxSession(
 			}
 			throw publicationError;
 		}
-		return status;
-	}
-	try {
-		replaceOwnerGenerationSync(stateDir, sessionId, generation, baseline);
-	} catch (publicationError) {
-		try {
-			cleanupExactCreatedTmuxSession(
-				nativeSessionId,
-				sessionName,
-				tmuxCommand,
-				env,
-				outcome.server_pid,
-				outcome.server_start_time,
-			);
-		} catch (cleanupError) {
-			throw new AggregateError(
-				[publicationError, cleanupError],
-				"skc_tmux_owner_generation_publish_failed_cleanup_failed",
-			);
+		return statusSkcTmuxSession(sessionName, env);
+	} catch (error) {
+		// A failed cleanup means a child may still exist that we could not remove.
+		// Releasing here would erase the only durable evidence a successor has, so
+		// the row stays and authority-first recovery resolves it later.
+		if (error instanceof AggregateError && /cleanup_failed/.test(String(error.message))) cleanupUncertain = true;
+		throw error;
+	} finally {
+		if (reservation) {
+			if (cleanupUncertain) abandonIdentityCreate(reservation);
+			else releaseIdentityCreate(reservation);
 		}
-		throw publicationError;
 	}
-	return statusSkcTmuxSession(sessionName, env);
 }
 
 function statusSkcTmuxSessionByNativeId(nativeSessionId: string, env: NodeJS.ProcessEnv): SkcTmuxSessionStatus {

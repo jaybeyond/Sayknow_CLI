@@ -213,9 +213,12 @@ export class SettingsList implements Component {
 
 	#closeSubmenu(): void {
 		this.#submenuComponent = null;
-		// Restore selection to the item that opened the submenu
+		// Restore selection to the item that opened the submenu. `setItems` leaves an
+		// open submenu untouched, so the list may have shrunk past that index while it
+		// was open — clamp or the restored selection points at nothing and the main
+		// list renders with no cursor at all.
 		if (this.#submenuItemIndex !== null) {
-			this.#selectedIndex = this.#submenuItemIndex;
+			this.#selectedIndex = Math.min(this.#submenuItemIndex, Math.max(0, this.#items.length - 1));
 			this.#submenuItemIndex = null;
 			this.#notifySelectionChange();
 		}

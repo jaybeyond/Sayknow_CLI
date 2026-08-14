@@ -31,18 +31,21 @@ describe("sayknow pixel frames", () => {
 		expect(built.frames.base.startsWith('\x1bP0;1;0q"1;1;36;45')).toBe(true);
 	});
 
-	it("carries the >< effort face on danceL and the ^^ victory face on flex", () => {
-		const effort = __sayknowPetTestHooks
-			.getPixelGrid("danceL")
-			.slice(6, 9)
-			.map(row => row.slice(5, 11));
-		const victory = __sayknowPetTestHooks
-			.getPixelGrid("flex")
-			.slice(6, 9)
-			.map(row => row.slice(5, 11));
+	it("sways only the tentacles on danceL and swaps the pupils for sparkles on flex", () => {
+		const base = __sayknowPetTestHooks.getPixelGrid("base");
+		const danceL = __sayknowPetTestHooks.getPixelGrid("danceL");
+		const flex = __sayknowPetTestHooks.getPixelGrid("flex");
 
-		expect(effort).toEqual(["GVVVGV", "VGVGVV", "GVVVGV"]); // > <
-		expect(victory).toEqual(["VGVVGV", "GVGGVG", "VVVVVV"]); // ^ ^
+		// The dance moves the tentacle rows (11-14) and must leave the face alone,
+		// otherwise the work loop reads as a different pet every other frame.
+		expect(danceL.slice(0, 11)).toEqual(base.slice(0, 11));
+		expect(danceL.slice(11)).not.toEqual(base.slice(11));
+
+		// The flex accent is an eye-row swap only: sparkles (G) outside the pupils (V).
+		expect(flex.map((row, index) => (row === base[index] ? null : index)).filter(index => index !== null)).toEqual([
+			7,
+		]);
+		expect(flex[7]).toBe("KRRGVRRRRRRVGRRK");
 	});
 
 	it("encodes kitty frames as chunked raw-RGBA transmits with delete-first", () => {

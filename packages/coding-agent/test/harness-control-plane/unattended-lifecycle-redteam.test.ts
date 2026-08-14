@@ -30,6 +30,11 @@ import {
 	WorkflowGateBroker,
 } from "@sayknow-cli/coding-agent/modes/shared/agent-wire/workflow-gate-broker";
 
+/** Live continuation: gates opened without one are quarantined as unanswerable. */
+function liveContinuation() {
+	return { activate: () => {}, isLive: () => true, release: () => {}, terminalProof: "not_published" as const };
+}
+
 const DECLARATION: RpcUnattendedDeclaration = {
 	actor: "openclaw/hermes",
 	budget: { max_tokens: 1_000_000, max_tool_calls: 100, max_wall_time_ms: 600_000, max_cost_usd: 50 },
@@ -125,6 +130,7 @@ function makeHarness(overrides: Partial<RpcUnattendedDeclaration> = {}) {
 	});
 	const brokerAudit: GateAuditEvent[] = [];
 	const broker = new WorkflowGateBroker(runId, new FileGateStore(path.join(dir, "gates", "store.json")), {
+		advance: () => {},
 		audit: e => brokerAudit.push(e),
 	});
 	return { auditLog, broker, brokerAudit, controller, declaration, dir, runId, sessionId };
@@ -135,7 +141,7 @@ async function resolveViaBroker(
 	gateInput: Parameters<WorkflowGateBroker["openGate"]>[0],
 	answer: unknown,
 ) {
-	const gate = harness.broker.openGate(gateInput);
+	const gate = harness.broker.openGate(gateInput, liveContinuation());
 	const resolution = await harness.broker.resolve({ gate_id: gate.gate_id, answer });
 	if (resolution.status === "accepted") {
 		harness.auditLog.record({
@@ -162,7 +168,7 @@ describe("#323 unattended lifecycle red-team guardrails", () => {
 		});
 		const agent = new ScriptedMemoryAgent();
 
-		const firstGate = harness.broker.openGate(questionToGate(DI_QUESTIONS[0]!));
+		const firstGate = harness.broker.openGate(questionToGate(DI_QUESTIONS[0]!), liveContinuation());
 		harness.controller.preflightToolCall("first gate round");
 		const answer = agent.answer(firstGate);
 		const resolution = await harness.broker.resolve({ gate_id: firstGate.gate_id, answer });
@@ -210,7 +216,7 @@ describe("#323 unattended lifecycle red-team guardrails", () => {
 
 	it("rejects malformed gate answers and leaves the gate pending until a valid answer is supplied", async () => {
 		const harness = makeHarness();
-		const gate = harness.broker.openGate(approvalGate({ summary: "red-team malformed gate" }));
+		const gate = harness.broker.openGate(approvalGate({ summary: "red-team malformed gate" }), liveContinuation());
 
 		const malformed = await harness.broker.resolve({
 			gate_id: gate.gate_id,
@@ -233,7 +239,7 @@ describe("#323 unattended lifecycle red-team guardrails", () => {
 		let resolvedGates = 0;
 
 		for (const question of DI_QUESTIONS) {
-			const gate = harness.broker.openGate(questionToGate(question));
+			const gate = harness.broker.openGate(questionToGate(question), liveContinuation());
 			const answer = agent.answer(gate);
 			const resolution = await harness.broker.resolve({ gate_id: gate.gate_id, answer });
 			expect(resolution.status).toBe("accepted");

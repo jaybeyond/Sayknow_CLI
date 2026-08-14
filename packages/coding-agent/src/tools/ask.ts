@@ -39,6 +39,7 @@ import { getMarkdownTheme, type Theme, theme } from "../modes/theme/theme";
 import askDescription from "../prompts/tools/ask.md" with { type: "text" };
 import { appendOrMergeDeepInterviewRound, syncDeepInterviewRecorderHud } from "../skc-runtime/deep-interview-recorder";
 import { deepInterviewStatePath } from "../skc-runtime/deep-interview-runtime";
+import { DEEP_INTERVIEW_INTENT_CATEGORIES, deepInterviewCharacterCount } from "../skc-runtime/deep-interview-state";
 import { renderStatusLine } from "../tui";
 import type { ToolSession } from ".";
 import { formatErrorMessage, formatMeta, formatTitle } from "./render-utils";
@@ -53,13 +54,114 @@ const OptionItem = z.object({
 	label: z.string().describe("display label"),
 });
 
-/** Optional structured deep-interview round metadata; when present the round is recorded automatically. */
-const DeepInterviewMeta = z.object({
-	round_id: z.string().describe("stable optional round identity").optional(),
+/**
+ * Bounded by code points, not UTF-16 units: an emoji-padded field must hit the same
+ * ceiling the gate adapter and interview state enforce, or oversized metadata survives
+ * the tool boundary and only fails deeper in the recorder.
+ */
+const boundedText = (max: number) => z.string().refine(value => deepInterviewCharacterCount(value) <= max);
+const ADAPTER_TEXT_MAX = 256;
+const CORE_TEXT_MAX = 128;
+const LONG_TEXT_MAX = 2048;
+
+/** Inert adapter context: never fetched, never allowed to alter the first question. */
+const AskGateReferenceItem = z
+	.object({
+		reference_id: boundedText(ADAPTER_TEXT_MAX),
+		label: boundedText(ADAPTER_TEXT_MAX),
+		origin: boundedText(ADAPTER_TEXT_MAX),
+		url: boundedText(LONG_TEXT_MAX).optional(),
+		excerpt: boundedText(LONG_TEXT_MAX).optional(),
+	})
+	.strict();
+
+/** One locked-intent line. `id` MUST carry its own category as a prefix. */
+const IntentItem = z
+	.object({
+		id: z.string().min(1),
+		category: z.enum(DEEP_INTERVIEW_INTENT_CATEGORIES),
+		statement: boundedText(1_000).min(1),
+	})
+	.strict()
+	.refine(item => item.id.startsWith(`${item.category}:`));
+
+const IntentSubstitution = z
+	.object({
+		removed_id: z.string().min(1),
+		replacement_ids: z.array(z.string().min(1)),
+		rationale: boundedText(500),
+	})
+	.strict();
+
+const IntentContract = z
+	.object({ items: z.array(IntentItem).min(1).max(64), confirmation_options: z.array(z.string().min(1)).min(1) })
+	.strict()
+	.describe("Round 0 locked-intent manifest proposal");
+
+const IntentReview = z
+	.object({
+		observed_items: z.array(IntentItem).min(1).max(64),
+		supporting_substitutions: z.array(IntentSubstitution).max(64),
+		approval_options: z.array(z.string().min(1)).min(1),
+	})
+	.strict()
+	.describe("post-Round-0 locked-intent reduction review");
+
+const deepInterviewMetaBase = {
+	round_id: boundedText(CORE_TEXT_MAX).describe("stable optional round identity").optional(),
 	round: z.number().int().nonnegative().describe("round number"),
-	component: z.string().min(1).describe("targeted topology component"),
-	dimension: z.string().min(1).describe("targeted clarity dimension"),
+	component: boundedText(CORE_TEXT_MAX).min(1).describe("targeted topology component"),
+	dimension: boundedText(CORE_TEXT_MAX).min(1).describe("targeted clarity dimension"),
 	ambiguity: z.number().min(0).max(1).describe("ambiguity at ask time (0..1)"),
+	confused_terms: z
+		.array(boundedText(ADAPTER_TEXT_MAX))
+		.max(32)
+		.describe("inert adapter vocabulary; never alters the question")
+		.optional(),
+	references: z
+		.array(AskGateReferenceItem)
+		.max(32)
+		.describe("inert adapter references; never auto-fetched")
+		.optional(),
+};
+
+/**
+ * Optional structured deep-interview round metadata; when present the round is
+ * recorded automatically. The three branches are mutually exclusive **on the
+ * wire**, not just at parse time: the manifest is locked exactly once, by the
+ * Round 0 topology confirmation (accepting a contract on any later round would
+ * let a mid-interview answer replace the locked intent), and a reduction review
+ * only exists after Round 0 has locked a manifest. Providers that only see the
+ * JSON schema must be unable to combine the two.
+ */
+const DeepInterviewMeta = z.union([
+	// Branch order is load-bearing: the intent-carrying branches must win when
+	// their key is present, and every branch is strict so a contract or review
+	// attached to the wrong round fails closed instead of being silently
+	// stripped by a laxer branch.
+	z
+		.object({
+			...deepInterviewMetaBase,
+			round: z.literal(0).describe("the manifest is locked exactly once, at Round 0"),
+			component: z.literal("review-topology"),
+			intent_contract: IntentContract,
+		})
+		.strict()
+		.describe("Round 0 topology confirmation carrying the locked-intent manifest proposal"),
+	z
+		.object({
+			...deepInterviewMetaBase,
+			round: z.number().int().min(1).describe("reviews only exist after Round 0 locked a manifest"),
+			intent_review: IntentReview,
+		})
+		.strict()
+		.describe("post-Round-0 locked-intent reduction review"),
+	z.object(deepInterviewMetaBase).strict().describe("ordinary interview round metadata"),
+]);
+
+const WorkflowGateMeta = z.object({
+	stage: z.enum(["deep-interview", "ralplan", "ultragoal"]).describe("workflow gate stage"),
+	kind: z.enum(["question", "approval", "execution"]).describe("workflow gate kind"),
 });
 
 const QuestionItem = z.object({
@@ -68,6 +170,7 @@ const QuestionItem = z.object({
 	options: z.array(OptionItem).describe("available options"),
 	multi: z.boolean().describe("allow multiple selections").optional(),
 	recommended: z.number().describe("recommended option index").optional(),
+	workflowGate: WorkflowGateMeta.describe("optional workflow gate stage/kind override").optional(),
 	deepInterview: DeepInterviewMeta.describe("optional deep-interview round metadata").optional(),
 });
 
@@ -93,6 +196,8 @@ export interface AskToolDetails {
 	multi?: boolean;
 	selectedOptions?: string[];
 	customInput?: string;
+	/** Set when the user answered with a clarification question instead of a choice. */
+	clarificationQuestion?: string;
 	/** Multi-part question mode */
 	results?: QuestionResult[];
 }
@@ -519,6 +624,9 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 	): Promise<void> {
 		const meta = q.deepInterview;
 		if (!meta) return;
+		// A stage/kind override addresses a non-deep-interview gate; recording it as
+		// an interview round would corrupt the interview state.
+		if (q.workflowGate && (q.workflowGate.stage !== "deep-interview" || q.workflowGate.kind !== "question")) return;
 		const cwd = this.session.cwd;
 		const sessionId = this.session.getSessionId?.() ?? undefined;
 		const statePath = deepInterviewStatePath(cwd, sessionId);
@@ -536,6 +644,11 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 					ambiguity: meta.ambiguity,
 					selectedOptions,
 					customInput,
+					// The Round 0 manifest is locked from the confirmation answer itself, and any
+					// later reduction is reviewed against that lock. Dropping them here leaves the
+					// recorder nothing to bind, so the "locked intent" is never actually locked.
+					intent_contract: "intent_contract" in meta ? meta.intent_contract : undefined,
+					intent_review: "intent_review" in meta ? meta.intent_review : undefined,
 				},
 				{ sessionId },
 			).then(async () => {
@@ -553,7 +666,11 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 	): Promise<AgentToolResult<AskToolDetails>> {
 		await assertUltragoalAskAllowed(this.session.cwd);
 		const gateEmitter = this.session.getWorkflowGateEmitter?.();
-		const canUseWorkflowGate = !context?.hasUI && gateEmitter?.supportsRemoteGateAnswers() === true;
+		// A negotiated unattended run answers through workflow gates even when a UI
+		// exists; otherwise gates are the headless answer path only.
+		const canUseWorkflowGate =
+			gateEmitter?.supportsRemoteGateAnswers() === true &&
+			(gateEmitter.isUnattended?.() === true || !context?.hasUI);
 
 		// Headless fallback: unattended workflow gates are the non-TUI answer path.
 		if (!canUseWorkflowGate && (!context?.hasUI || !context.ui)) {
@@ -652,7 +769,11 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 
 		const askQuestion = async (
 			q: AskParams["questions"][number],
-			options?: { previous?: QuestionResult; navigation?: NavigationControls },
+			options?: {
+				previous?: QuestionResult;
+				navigation?: NavigationControls;
+				navigationLabel?: "Next" | "Done";
+			},
 		) => {
 			const rawOptionLabels = q.options.map(o => o.label);
 			// Unattended (#316/#323/G011): route the question through the workflow-gate
@@ -663,7 +784,12 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 					question: q.question,
 					options: q.options,
 					multi: q.multi,
+					// Interactive multi-select allows finishing with nothing selected
+					// ("Next"); the gate path must keep the same empty-answer semantics.
+					allowEmpty: q.multi === true,
+					navigationLabel: options?.navigationLabel,
 					recommended: q.recommended,
+					workflowGate: q.workflowGate,
 					deepInterview: q.deepInterview,
 				};
 				const answer = await gateEmitter.emitGate(questionToGate(gateQuestion));
@@ -672,6 +798,7 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 					optionLabels: rawOptionLabels,
 					selectedOptions: decoded.selectedOptions,
 					customInput: decoded.customInput,
+					clarificationQuestion: decoded.clarificationQuestion,
 					navigation: undefined as NavigationControls | undefined,
 					cancelled: false,
 					timedOut: false,
@@ -716,7 +843,15 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 							return displayIndex >= 0 ? (rawOptionLabels[displayIndex] ?? selected) : selected;
 						})
 					: displaySelectedOptions;
-				return { optionLabels: rawOptionLabels, selectedOptions, customInput, navigation, cancelled, timedOut };
+				return {
+					optionLabels: rawOptionLabels,
+					selectedOptions,
+					customInput,
+					clarificationQuestion: undefined as string | undefined,
+					navigation,
+					cancelled,
+					timedOut,
+				};
 			} catch (error) {
 				if (error instanceof Error && error.name === "AbortError") {
 					throw new ToolAbortError("Ask input was cancelled");
@@ -727,8 +862,12 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 
 		if (params.questions.length === 1) {
 			const [q] = params.questions;
-			const { optionLabels, selectedOptions, customInput, cancelled, timedOut } = await askQuestion(q);
+			const { optionLabels, selectedOptions, customInput, clarificationQuestion, cancelled, timedOut } =
+				await askQuestion(q);
 
+			if (clarificationQuestion !== undefined) {
+				return this.#clarificationResult(q, optionLabels, clarificationQuestion);
+			}
 			if (!timedOut && (cancelled || (selectedOptions.length === 0 && customInput === undefined))) {
 				context?.abort();
 				throw new ToolAbortError("Ask tool was cancelled by the user");
@@ -777,11 +916,21 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 				optionLabels,
 				selectedOptions,
 				customInput,
+				clarificationQuestion,
 				navigation: navAction,
 				cancelled,
 				timedOut,
-			} = await askQuestion(q, { previous, navigation });
+			} = await askQuestion(q, {
+				previous,
+				navigation,
+				navigationLabel: questionIndex + 1 < params.questions.length ? "Next" : "Done",
+			});
 
+			// A clarification is an answer about the ask itself: stop the sequence and
+			// surface the question instead of treating the empty selection as a cancel.
+			if (clarificationQuestion !== undefined) {
+				return this.#clarificationResult(q, optionLabels, clarificationQuestion);
+			}
 			if (cancelled && !timedOut) {
 				context?.abort();
 				throw new ToolAbortError("Ask tool was cancelled by the user");
@@ -823,6 +972,30 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 		const responseText = `User answers:\n${responseLines.join("\n")}`;
 
 		return { content: [{ type: "text" as const, text: responseText }], details };
+	}
+
+	/** A clarification answer surfaces the user's question instead of a selection. */
+	#clarificationResult(
+		q: AskParams["questions"][number],
+		optionLabels: string[],
+		clarificationQuestion: string,
+	): AgentToolResult<AskToolDetails> {
+		return {
+			content: [
+				{
+					type: "text" as const,
+					text: `User asked a clarification question about the choices: ${clarificationQuestion}`,
+				},
+			],
+			details: {
+				question: q.question,
+				options: optionLabels,
+				multi: q.multi ?? false,
+				selectedOptions: [],
+				customInput: undefined,
+				clarificationQuestion,
+			},
+		};
 	}
 }
 

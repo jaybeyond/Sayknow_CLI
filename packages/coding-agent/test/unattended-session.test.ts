@@ -225,7 +225,7 @@ describe("UnattendedSessionControlPlane", () => {
 		await expect(pending).resolves.toEqual({ selected: ["JWT"] });
 	});
 
-	it("recovers a persisted pending acknowledgement when the participant registered before negotiation", async () => {
+	it("quarantines a prior instance's pending acknowledgement instead of re-acking after restart", async () => {
 		const file = path.join(mkdtempSync(path.join(tmpdir(), "gate-recovery-pending-")), "gates.json");
 		const initialStore = new FileGateStore(file);
 		const initialBroker = new WorkflowGateBroker("run-recovery", initialStore, {
@@ -233,7 +233,15 @@ describe("UnattendedSessionControlPlane", () => {
 				throw new Error("simulated crash before advance");
 			},
 		});
-		const gate = initialBroker.openGate({ stage: "deep-interview", kind: "question", schema: { type: "string" } });
+		const gate = initialBroker.openGate(
+			{ stage: "deep-interview", kind: "question", schema: { type: "string" } },
+			{
+				activate: () => {},
+				isLive: () => true,
+				release: () => {},
+				terminalProof: "not_published",
+			},
+		);
 		await expect(
 			initialBroker.resolve(
 				{ gate_id: gate.gate_id, answer: "yes", idempotency_key: "answer-1" },
@@ -269,17 +277,17 @@ describe("UnattendedSessionControlPlane", () => {
 		plane.negotiate(DECL);
 		await plane.startRecoveryOnce({ participantGraceMs: 0 });
 
-		expect(recoveryCalls).toBe(1);
+		// Fail-closed restart contract: another instance's accepted-but-unadvanced
+		// gate is quarantined at store adoption; no acknowledgement is replayed.
+		expect(recoveryCalls).toBe(0);
 		expect(new FileGateStore(file).get(gate.gate_id)).toMatchObject({
-			advanced: true,
-			ackPolicy: {
-				state: "delivered",
-				outcome: { status: "delivered", messageId: 42 },
-			},
+			status: "quarantined",
+			advanced: false,
+			lifecycle: { state: "quarantined", reason: "accepted_unadvanced_after_process_restart" },
 		});
 	});
 
-	it("does not resend a persisted attempt-started acknowledgement during recovery", async () => {
+	it("quarantines a prior instance's attempt-started acknowledgement without resending it", async () => {
 		const file = path.join(mkdtempSync(path.join(tmpdir(), "gate-recovery-started-")), "gates.json");
 		const store = new FileGateStore(file);
 		const initialBroker = new WorkflowGateBroker("run-recovery-started", store, {
@@ -287,7 +295,15 @@ describe("UnattendedSessionControlPlane", () => {
 				throw new Error("simulated crash before advance");
 			},
 		});
-		const gate = initialBroker.openGate({ stage: "deep-interview", kind: "question", schema: { type: "string" } });
+		const gate = initialBroker.openGate(
+			{ stage: "deep-interview", kind: "question", schema: { type: "string" } },
+			{
+				activate: () => {},
+				isLive: () => true,
+				release: () => {},
+				terminalProof: "not_published",
+			},
+		);
 		await expect(
 			initialBroker.resolve(
 				{ gate_id: gate.gate_id, answer: "yes" },
@@ -324,11 +340,9 @@ describe("UnattendedSessionControlPlane", () => {
 
 		expect(recoveryCalls).toBe(0);
 		expect(new FileGateStore(file).get(gate.gate_id)).toMatchObject({
-			advanced: true,
-			ackPolicy: {
-				state: "unknown",
-				outcome: { status: "unknown", reason: "shutdown" },
-			},
+			status: "quarantined",
+			advanced: false,
+			lifecycle: { state: "quarantined", reason: "accepted_unadvanced_after_process_restart" },
 		});
 	});
 

@@ -1,8 +1,12 @@
-import { describe, expect, it, spyOn } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import {
+	daemonResumeSession as notificationDaemonResumeSession,
+	daemonSpawnCreate as notificationDaemonSpawnCreate,
+} from "@sayknow-cli/coding-agent/notifications/lifecycle-control-runtime";
 import type { SessionCloseFrame, SessionCreateFrame } from "@sayknow-cli/coding-agent/sdk/bus/index";
 import {
 	attachLifecycleControl,
@@ -19,10 +23,21 @@ import {
 	outcomeToResponse,
 } from "@sayknow-cli/coding-agent/sdk/bus/lifecycle-control-runtime";
 import type { LedgerEntry, OrchestratorDeps } from "@sayknow-cli/coding-agent/sdk/bus/lifecycle-orchestrator";
-import { startDaemonLifecycleControl } from "@sayknow-cli/coding-agent/sdk/bus/telegram-daemon";
+import {
+	deriveLifecycleAuditRedactionKey,
+	startDaemonLifecycleControl,
+} from "@sayknow-cli/coding-agent/sdk/bus/telegram-daemon";
 import { parseLaunchWorktreeMode } from "@sayknow-cli/coding-agent/skc-runtime/launch-worktree";
+import { tmuxRuntimeSessionPath } from "@sayknow-cli/coding-agent/skc-runtime/session-layout";
+import { buildSkcTmuxSessionSlug } from "@sayknow-cli/coding-agent/skc-runtime/tmux-common";
+import {
+	__setOwnerIncarnationReaderForTests,
+	releaseIdentityCreate,
+	reserveIdentityCreate,
+} from "@sayknow-cli/coding-agent/skc-runtime/tmux-owner-isolation";
 import * as native from "@sayknow-cli/natives";
 import { getConfigRootDir, logger } from "@sayknow-cli/utils";
+import { setAgentDir } from "@sayknow-cli/utils/dirs";
 import { Settings } from "../src/config/settings";
 import { tokenFingerprint } from "../src/sdk/bus/config";
 import { exactUnlinkNotificationFile, readNotificationEndpointFile } from "../src/sdk/bus/notification-service";
@@ -277,8 +292,12 @@ it("passes the daemon-derived audit key through real lifecycle startup without a
 
 	await daemon.run();
 
-	expect(Buffer.from(capturedKey ?? []).toString("hex")).toBe(
-		"ff2063f913d83ae42436a9e33c8bdd86ae77006c5a3fe4980dc7062ba4d95aca",
+	// Bound to the bot token, not to a constant: a fallback key would still be 32
+	// bytes, so the assertion is the derivation itself plus token sensitivity.
+	expect(capturedKey).toHaveLength(32);
+	expect(Buffer.from(capturedKey ?? [])).toEqual(Buffer.from(deriveLifecycleAuditRedactionKey("123456:secret-token")));
+	expect(Buffer.from(capturedKey ?? [])).not.toEqual(
+		Buffer.from(deriveLifecycleAuditRedactionKey("123456:other-token")),
 	);
 	expect(startupOrder[0]).toBe("lifecycle-deps");
 	expect(registered).toBe(1);
@@ -2258,5 +2277,151 @@ describe("lifecycle control runtime", () => {
 			findSession: () => undefined,
 		})({ sessionId: "exact-id", tmuxSession: "skc_lc_exact-id", sessionStateFile: "/private/exact.json" });
 		expect(received).toEqual([["skc_lc_exact-id", env, "exact-id", "/private/exact.json"]]);
+	});
+});
+
+describe("lifecycle creators share the identity create fence", () => {
+	// The fence database lives under the agent dir; isolate it so these tests
+	// never write into the developer's real ~/.skc.
+	const originalAgentDir = process.env.SKC_CODING_AGENT_DIR;
+	const fenceAgentRoots: string[] = [];
+	beforeEach(() => {
+		const isolated = fs.mkdtempSync(path.join(os.tmpdir(), "skc-fence-agent-"));
+		fenceAgentRoots.push(isolated);
+		setAgentDir(path.join(isolated, "agent"));
+	});
+
+	// The notification and SDK-bus runtimes are separate implementations of the
+	// same producer shape. Each row below drives its OWN module: one passing copy
+	// never proves the other.
+	function fenceFixture(sessionId: string): {
+		root: string;
+		project: string;
+		stateDir: string;
+		stateFile: string;
+		tmux: string;
+		callsFile: string;
+	} {
+		const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "skc-lc-fence-")));
+		fenceRoots.push(root);
+		const project = path.join(root, "project");
+		fs.mkdirSync(project, { recursive: true });
+		const stateFile = tmuxRuntimeSessionPath(project, sessionId, buildSkcTmuxSessionSlug(`skc_lc_${sessionId}`));
+		const stateDir = path.dirname(stateFile);
+		// The fence lives inside an existing state tree and never creates one.
+		fs.mkdirSync(stateDir, { recursive: true });
+		const tmux = path.join(root, "tmux");
+		const callsFile = path.join(root, "tmux-calls.log");
+		fs.writeFileSync(tmux, ["#!/usr/bin/env bash", 'printf "%s\\n" "$*" >> "$TMUX_CALLS"', "exit 0", ""].join("\n"));
+		fs.chmodSync(tmux, 0o755);
+		return { root, project, stateDir, stateFile, tmux, callsFile };
+	}
+
+	const fenceRoots: string[] = [];
+	const INCARNATION = "darwin:1700000000:606060";
+
+	function holdIdentity(stateDir: string, sessionId: string, stateFile: string) {
+		__setOwnerIncarnationReaderForTests(() => INCARNATION);
+		const held = reserveIdentityCreate(
+			{ stateDir, sessionId, stateFile },
+			{ ownerPid: process.pid, ownerIncarnation: INCARNATION },
+		);
+		if (!held.ok) throw new Error(`expected to hold the identity: ${held.code}`);
+		return held.reservation;
+	}
+
+	afterEach(() => {
+		__setOwnerIncarnationReaderForTests(null);
+		if (originalAgentDir) setAgentDir(originalAgentDir);
+		for (const dir of fenceAgentRoots.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
+		for (const dir of fenceRoots.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
+	});
+
+	it("notification daemonSpawnCreate serializes with a restore-shaped contender", async () => {
+		const sessionId = "notif-create-1";
+		const { project, stateDir, stateFile, tmux, callsFile } = fenceFixture(sessionId);
+		const reservation = holdIdentity(stateDir, sessionId, stateFile);
+		try {
+			await expect(
+				notificationDaemonSpawnCreate({ ...process.env, SKC_TMUX_COMMAND: tmux, TMUX_CALLS: callsFile })(
+					createFrame({ target: { kind: "existing_path", path: project } }),
+					{ lifecycleRequestId: "lc-notif-create", intendedSessionId: sessionId },
+				),
+			).rejects.toThrow(/skc_lifecycle_identity_create_identity_reserved_live/);
+			// The loser must not spawn, tag, or publish anything.
+			expect(fs.existsSync(callsFile)).toBe(false);
+		} finally {
+			releaseIdentityCreate(reservation);
+		}
+	});
+
+	it("notification daemonResumeSession cold restart serializes with a restore-shaped contender", async () => {
+		const sessionId = "notif-resume-1";
+		const { project, stateDir, stateFile, tmux, callsFile } = fenceFixture(sessionId);
+		const reservation = holdIdentity(stateDir, sessionId, stateFile);
+		try {
+			await expect(
+				// No live session and no sessionsRoot: the cold-restart branch reuses
+				// the requested id/path verbatim, which is the identity restore would
+				// derive from that session's sidecar.
+				notificationDaemonResumeSession(
+					{ ...process.env, SKC_TMUX_COMMAND: tmux, TMUX_CALLS: callsFile },
+					{ listSessions: () => [] },
+				)({ sessionIdOrPrefix: sessionId, path: project }),
+			).rejects.toThrow(/skc_lifecycle_identity_create_identity_reserved_live/);
+			expect(fs.existsSync(callsFile)).toBe(false);
+		} finally {
+			releaseIdentityCreate(reservation);
+		}
+	});
+
+	it("SDK-bus daemonSpawnCreate serializes with a restore-shaped contender", async () => {
+		const sessionId = "sdk-create-1";
+		const { project, stateDir, stateFile, tmux, callsFile } = fenceFixture(sessionId);
+		const reservation = holdIdentity(stateDir, sessionId, stateFile);
+		try {
+			await expect(
+				daemonSpawnCreate({ ...process.env, SKC_TMUX_COMMAND: tmux, TMUX_CALLS: callsFile })(
+					createFrame({ target: { kind: "existing_path", path: project } }),
+					{ lifecycleRequestId: "lc-sdk-create", intendedSessionId: sessionId },
+				),
+			).rejects.toThrow(/skc_lifecycle_identity_create_identity_reserved_live/);
+			expect(fs.existsSync(callsFile)).toBe(false);
+		} finally {
+			releaseIdentityCreate(reservation);
+		}
+	});
+
+	posixTmuxIt("SDK-bus daemonResumeSession cold restart serializes with a restore-shaped contender", async () => {
+		// The SDK-bus resume always resolves the id against saved managed history,
+		// so the identity under test comes from a real saved session, exactly as a
+		// restore of that session would derive it.
+		const sessionsRoot = managedFixtureRoot("skc-sdk-resume-fence-");
+		fenceRoots.push(sessionsRoot);
+		const sessionId = "sdkresume1";
+		const project = path.join(sessionsRoot, "saved-project");
+		fs.mkdirSync(project, { recursive: true });
+		writeManagedSession(sessionsRoot, project, sessionId);
+
+		const stateFile = tmuxRuntimeSessionPath(project, sessionId, buildSkcTmuxSessionSlug(`skc_lc_${sessionId}`));
+		const stateDir = path.dirname(stateFile);
+		fs.mkdirSync(stateDir, { recursive: true });
+		const tmux = path.join(sessionsRoot, "tmux");
+		const callsFile = path.join(sessionsRoot, "tmux-calls.log");
+		fs.writeFileSync(tmux, ["#!/usr/bin/env bash", 'printf "%s\\n" "$*" >> "$TMUX_CALLS"', "exit 0", ""].join("\n"));
+		fs.chmodSync(tmux, 0o755);
+
+		const reservation = holdIdentity(stateDir, sessionId, stateFile);
+		try {
+			await expect(
+				daemonResumeSession(
+					{ ...process.env, SKC_TMUX_COMMAND: tmux, TMUX_CALLS: callsFile },
+					{ sessionsRoot, listSessions: () => [] },
+				)({ sessionIdOrPrefix: sessionId, path: project }),
+			).rejects.toThrow(/skc_lifecycle_identity_create_identity_reserved_live/);
+			expect(fs.existsSync(callsFile)).toBe(false);
+		} finally {
+			releaseIdentityCreate(reservation);
+		}
 	});
 });

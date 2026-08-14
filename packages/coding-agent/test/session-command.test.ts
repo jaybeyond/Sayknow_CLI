@@ -2,7 +2,9 @@ import { afterEach, describe, expect, it, mock, spyOn } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { setAgentDir } from "@sayknow-cli/utils/dirs";
 import SessionCommand from "../src/commands/session";
+import { publishRestorePointer } from "../src/skc-runtime/session-restore";
 import * as tmuxSessions from "../src/skc-runtime/tmux-sessions";
 
 type SpawnSyncMock = {
@@ -361,6 +363,99 @@ describe("skc session command", () => {
 			]);
 			expect(JSON.parse(output)).toEqual({ ok: false, reason });
 			mock.restore();
+		}
+	});
+
+	it("restore --dry-run mutates nothing for valid, corrupt, and missing pointers", async () => {
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "skc-restore-cli-"));
+		const previousAgentDir = process.env.SKC_CODING_AGENT_DIR;
+		setAgentDir(path.join(root, "agent"));
+		const project = path.join(root, "project");
+		await fs.mkdir(project, { recursive: true });
+		const transcript = path.join(project, "transcript.jsonl");
+		await fs.writeFile(transcript, "{}\n");
+		const stateFile = path.join(project, "state.json");
+		await fs.writeFile(
+			stateFile,
+			`${JSON.stringify({ session_id: "coord-cli", state: "running", cwd: project, session_file: transcript })}\n`,
+		);
+
+		async function snapshotTree(dir: string): Promise<Record<string, string>> {
+			const seen: Record<string, string> = {};
+			async function walk(current: string): Promise<void> {
+				for (const entry of await fs.readdir(current, { withFileTypes: true })) {
+					const full = path.join(current, entry.name);
+					if (entry.isDirectory()) {
+						seen[full] = "dir";
+						await walk(full);
+						continue;
+					}
+					const stat = await fs.stat(full);
+					const bytes = await fs.readFile(full);
+					seen[full] = `${stat.ino}:${stat.mode}:${bytes.toString("hex")}`;
+				}
+			}
+			await walk(dir);
+			return seen;
+		}
+
+		async function runDryRun(): Promise<{ payload: unknown; calls: string[][] }> {
+			const calls: string[][] = [];
+			const spawnSync = spyOn(Bun, "spawnSync") as unknown as SpawnSyncMock;
+			spawnSync.mockImplementation((cmd: unknown) => {
+				const argv = Array.isArray(cmd) ? (cmd as string[]) : ((cmd as { cmd?: string[] }).cmd ?? []);
+				calls.push(argv);
+				return spawnResult(0, "");
+			});
+			try {
+				return { payload: JSON.parse(await runSessionCommand(["restore", "--dry-run", "--json"])), calls };
+			} finally {
+				spawnSync.mockRestore?.();
+			}
+		}
+
+		try {
+			// Case 1: a valid pointer. Reported, never acted on.
+			publishRestorePointer({
+				coordinatorSessionId: "coord-cli",
+				stateFile,
+				skcSessionId: "skc-cli",
+				sessionFile: transcript,
+				cwd: project,
+				bootGeneration: { source: "darwin-kern-boottime", value: "1.000001" },
+			});
+			const agentDir = path.join(root, "agent");
+			let before = await snapshotTree(agentDir);
+			let result = await runDryRun();
+			const valid = result.payload as { ok: boolean; dryRun: boolean; candidates: { sessionId: string }[] };
+			expect(valid.ok).toBe(true);
+			expect(valid.dryRun).toBe(true);
+			expect(valid.candidates).toHaveLength(1);
+			expect(valid.candidates[0]?.sessionId).toBe("skc-cli");
+			expect(await snapshotTree(agentDir)).toEqual(before);
+			expectNoTmuxMutation(result.calls.filter(call => call[0] === "tmux"));
+
+			// Case 2: a corrupt pointer must not throw, and must not be repaired.
+			const pointerDir = path.join(agentDir, "session-restore", "pointers");
+			await fs.writeFile(path.join(pointerDir, "corrupt.json"), "{ not json");
+			before = await snapshotTree(agentDir);
+			result = await runDryRun();
+			expect((result.payload as { ok: boolean }).ok).toBe(true);
+			expect(await snapshotTree(agentDir)).toEqual(before);
+			expectNoTmuxMutation(result.calls.filter(call => call[0] === "tmux"));
+
+			// Case 3: no pointers at all. Nothing is created to hold the absence.
+			await fs.rm(pointerDir, { recursive: true, force: true });
+			before = await snapshotTree(agentDir);
+			result = await runDryRun();
+			const empty = result.payload as { ok: boolean; candidates: unknown[] };
+			expect(empty.ok).toBe(true);
+			expect(empty.candidates).toEqual([]);
+			expect(await snapshotTree(agentDir)).toEqual(before);
+			expectNoTmuxMutation(result.calls.filter(call => call[0] === "tmux"));
+		} finally {
+			if (previousAgentDir) setAgentDir(previousAgentDir);
+			await fs.rm(root, { recursive: true, force: true });
 		}
 	});
 });

@@ -1,10 +1,12 @@
 import {
+	getOverlayImageProtocol,
 	ImageProtocol,
 	isUnderTerminalMultiplexer,
+	isUnderTmux,
 	onImageProtocolChanged,
 	type SelectItem,
+	shouldProbeKittyPassthrough,
 	shouldProbeSixelCapability,
-	TERMINAL,
 } from "@sayknow-cli/tui";
 
 export type PetPixelProtocol = "sixel" | "kitty";
@@ -14,16 +16,22 @@ export const PET_SAVED_UNAVAILABLE_DESCRIPTION =
 	"Saved, unavailable — requires compatible Kitty or Sixel overlay rendering";
 export const PET_UNAVAILABLE_WARNING =
 	"⚠ Pets aren’t available in this terminal. Its image support isn’t compatible with Sayknow Pet’s overlay rendering yet. Try Kitty, Ghostty, WezTerm, or a terminal with compatible Sixel support.";
+const PET_TMUX_UNAVAILABLE_WARNING =
+	"⚠ Sayknow Pet graphics are unavailable: the terminal attached to this tmux client answered neither the Kitty nor the Sixel capability query forwarded through DCS passthrough. Attach from Ghostty, Kitty, WezTerm, or a Sixel-capable terminal, and leave tmux `allow-passthrough` enabled.";
 const PET_MULTIPLEXER_UNAVAILABLE_WARNING =
-	"⚠ Sayknow Pet graphics are unavailable inside tmux, screen, or zellij because image escapes are not forwarded end to end. Run skc outside the multiplexer, or set PI_FORCE_IMAGE_PROTOCOL=sixel only when the full terminal chain supports Sixel.";
+	"⚠ Sayknow Pet graphics are unavailable inside screen and zellij: neither forwards image escapes to the outer terminal. Run skc under tmux (which has DCS passthrough) or outside the multiplexer.";
 
 export function getPetUnavailableWarning(env: NodeJS.ProcessEnv = Bun.env): string {
+	if (isUnderTmux(env)) return PET_TMUX_UNAVAILABLE_WARNING;
 	return isUnderTerminalMultiplexer(env) ? PET_MULTIPLEXER_UNAVAILABLE_WARNING : PET_UNAVAILABLE_WARNING;
 }
 
 export function getPetPixelProtocol(): PetPixelProtocol | null {
-	if (TERMINAL.imageProtocol === ImageProtocol.Kitty) return "kitty";
-	if (TERMINAL.imageProtocol === ImageProtocol.Sixel) return "sixel";
+	// Overlay channel: inline graphics when the terminal renders them directly,
+	// otherwise the tmux passthrough protocol proven by the startup probe.
+	const protocol = getOverlayImageProtocol();
+	if (protocol === ImageProtocol.Kitty) return "kitty";
+	if (protocol === ImageProtocol.Sixel) return "sixel";
 	return null;
 }
 
@@ -55,24 +63,25 @@ export function createPetSelectItems(
 
 /**
  * Grace period before declaring the terminal pet-incapable at startup. The
- * asynchronous Sixel capability probe starts inside `TUI.start()` and answers
- * within its own 250 ms deadline; this margin covers probe scheduling so a
- * supported terminal is never told it is incompatible while the probe is
- * still in flight.
+ * asynchronous capability probes start inside `TUI.start()` and answer within
+ * their own deadline (250 ms directly, 600 ms through tmux passthrough); this
+ * margin covers probe scheduling so a supported terminal is never told it is
+ * incompatible while a probe is still in flight.
  */
-export const PET_CAPABILITY_SETTLE_MS = 1_000;
+export const PET_CAPABILITY_SETTLE_MS = 1_500;
 
 /**
- * Whether the asynchronous startup Sixel capability probe may still enable
- * graphics for this session, meaning current unavailability is not final.
+ * Whether an asynchronous startup capability probe (Sixel, or Kitty through
+ * tmux passthrough) may still enable graphics for this session, meaning current
+ * unavailability is not final.
  */
 export function isPetCapabilityProbePending(
 	env: NodeJS.ProcessEnv = Bun.env,
 	platform: NodeJS.Platform = process.platform,
 ): boolean {
-	if (TERMINAL.imageProtocol !== null) return false;
+	if (getPetPixelProtocol() !== null) return false;
 	if (!process.stdin.isTTY || !process.stdout.isTTY) return false;
-	return shouldProbeSixelCapability(env, platform);
+	return shouldProbeSixelCapability(env, platform) || shouldProbeKittyPassthrough(env);
 }
 
 /**

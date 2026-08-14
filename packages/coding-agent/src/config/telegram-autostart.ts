@@ -10,11 +10,18 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { getConfigRootDir, isCompiledBinary, logger } from "@sayknow-cli/utils";
-import { settings } from "./settings";
+import { settings as globalSettings, type Settings } from "./settings";
 import type { TelegramSettings } from "./settings-schema";
 import { telegramSettingsToEnv, validateTelegramSettings } from "./telegram-env-bridge";
 
-function readTelegramSettings(): TelegramSettings {
+/**
+ * The startup command runs against an explicit Settings instance (tests and
+ * embedders inject one), so read through it instead of the global proxy —
+ * which may not be initialized at all on those paths.
+ */
+type TelegramSettingsSource = Pick<Settings, "get">;
+
+function readTelegramSettings(settings: TelegramSettingsSource): TelegramSettings {
 	return {
 		enabled: settings.get("telegram.enabled"),
 		botToken: settings.get("telegram.botToken"),
@@ -69,10 +76,10 @@ function isAlreadyRunning(pidFile: string): boolean {
  * it in the background. Never throws — failures are logged as warnings so the
  * main skc session is unaffected.
  */
-export async function maybeAutostartTelegramRemote(): Promise<void> {
+export async function maybeAutostartTelegramRemote(settings: TelegramSettingsSource = globalSettings): Promise<void> {
 	if (!settings.get("telegram.enabled")) return;
 
-	const config = readTelegramSettings();
+	const config = readTelegramSettings(settings);
 	const errors = validateTelegramSettings(config);
 	if (errors.length > 0) {
 		logger.warn("Telegram Remote enabled but misconfigured, skipping autostart", { errors });

@@ -10,6 +10,7 @@ import {
 	kittyImageId,
 	renderImage,
 	resetKittyTransmissions,
+	resetTmuxSixelOwnershipCache,
 	setCellDimensions,
 	setKittyTransmitWriter,
 	TERMINAL,
@@ -297,6 +298,79 @@ describe("terminal image rendering", () => {
 		expect(lines).toHaveLength(2);
 		expect(lines[0]).toBe("");
 		expect(lines[1]).toContain("\x1b[1A");
+	});
+});
+
+describe("inline SIXEL under tmux", () => {
+	// An inline image carries no coordinates: it lands wherever the cursor is.
+	// Under tmux only tmux knows where the pane's cursor actually is, so the
+	// raster is only safe to emit when tmux parses it into its own screen model.
+	const originalProtocol = TERMINAL.imageProtocol;
+	const originalTmux = Bun.env.TMUX;
+	const originalTmuxPane = Bun.env.TMUX_PANE;
+	const originalSkcTmuxLaunched = Bun.env.SKC_TMUX_LAUNCHED;
+	const originalTerm = Bun.env.TERM;
+	const originalTmuxCommand = Bun.env.SKC_TMUX_COMMAND;
+	let originalCellDims: CellDimensions;
+
+	function underTmux(stub: "tmux-termfeatures-sixel.sh" | "tmux-termfeatures-no-sixel.sh"): void {
+		Bun.env.TMUX = "/tmp/tmux-1000/default,1,0";
+		Bun.env.SKC_TMUX_COMMAND = `${import.meta.dir}/fixtures/${stub}`;
+		resetTmuxSixelOwnershipCache();
+	}
+
+	beforeEach(() => {
+		originalCellDims = { ...getCellDimensions() };
+		setCellDimensions({ widthPx: 10, heightPx: 10 });
+		terminal.imageProtocol = ImageProtocol.Sixel;
+	});
+
+	afterEach(() => {
+		setCellDimensions(originalCellDims);
+		terminal.imageProtocol = originalProtocol;
+		if (originalTmux === undefined) delete Bun.env.TMUX;
+		else Bun.env.TMUX = originalTmux;
+		if (originalTmuxCommand === undefined) delete Bun.env.SKC_TMUX_COMMAND;
+		else Bun.env.SKC_TMUX_COMMAND = originalTmuxCommand;
+		if (originalTmuxPane === undefined) delete Bun.env.TMUX_PANE;
+		else Bun.env.TMUX_PANE = originalTmuxPane;
+		if (originalSkcTmuxLaunched === undefined) delete Bun.env.SKC_TMUX_LAUNCHED;
+		else Bun.env.SKC_TMUX_LAUNCHED = originalSkcTmuxLaunched;
+		if (originalTerm === undefined) delete Bun.env.TERM;
+		else Bun.env.TERM = originalTerm;
+		resetTmuxSixelOwnershipCache();
+	});
+
+	it("emits the raster raw when tmux owns sixel so scroll and erase reach the image", () => {
+		underTmux("tmux-termfeatures-sixel.sh");
+
+		const result = renderImage(BASE64_ONE_PIXEL_PNG, SQUARE_DIMENSIONS, { maxWidthCells: 10, maxHeightCells: 2 });
+
+		expect(result?.sequence.startsWith("\x1bP")).toBe(true);
+		// Passthrough would smuggle the pixels past tmux into the outer terminal's
+		// image plane, where tmux can never move or clear them again.
+		expect(result?.sequence.startsWith("\x1bPtmux;")).toBe(false);
+	});
+
+	it("refuses an inline placement tmux can neither position nor erase", () => {
+		underTmux("tmux-termfeatures-no-sixel.sh");
+
+		// Null falls through to the textual placeholder, which beats an image
+		// welded to the outer terminal's physical cursor for the rest of the session.
+		expect(renderImage(BASE64_ONE_PIXEL_PNG, SQUARE_DIMENSIONS, { maxWidthCells: 10, maxHeightCells: 2 })).toBeNull();
+	});
+
+	it("still emits the raster outside any multiplexer", () => {
+		delete Bun.env.TMUX;
+		delete Bun.env.TMUX_PANE;
+		delete Bun.env.SKC_TMUX_LAUNCHED;
+		Bun.env.TERM = "xterm-256color";
+		Bun.env.SKC_TMUX_COMMAND = `${import.meta.dir}/fixtures/tmux-termfeatures-no-sixel.sh`;
+		resetTmuxSixelOwnershipCache();
+
+		const result = renderImage(BASE64_ONE_PIXEL_PNG, SQUARE_DIMENSIONS, { maxWidthCells: 10, maxHeightCells: 2 });
+
+		expect(result?.sequence.startsWith("\x1bP")).toBe(true);
 	});
 });
 

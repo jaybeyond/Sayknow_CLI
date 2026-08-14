@@ -5,7 +5,7 @@ import { type AssistantMessage, getBundledModel, type TextContent, type ToolCall
 import { AssistantMessageEventStream } from "@sayknow-cli/ai/utils/event-stream";
 import { ModelRegistry } from "@sayknow-cli/coding-agent/config/model-registry";
 import { Settings } from "@sayknow-cli/coding-agent/config/settings";
-import { AgentSession } from "@sayknow-cli/coding-agent/session/agent-session";
+import { AgentSession, buildTodoWriteFailureReminder } from "@sayknow-cli/coding-agent/session/agent-session";
 import { AuthStorage } from "@sayknow-cli/coding-agent/session/auth-storage";
 import { convertToLlm } from "@sayknow-cli/coding-agent/session/messages";
 import { SessionManager } from "@sayknow-cli/coding-agent/session/session-manager";
@@ -86,6 +86,26 @@ function isVolatileProjectContextMessage(message: AgentMessage): boolean {
 	const text = getMessageText(message);
 	return text.startsWith("<system-reminder>") && text.includes("current working directory");
 }
+describe("todo_write failure recovery", () => {
+	it("allows one payload retry, then fails open", () => {
+		const firstFailure = buildTodoWriteFailureReminder("Invalid tool arguments", 1);
+		const secondFailure = buildTodoWriteFailureReminder("Invalid tool arguments", 2);
+
+		expect(firstFailure).toContain("retry once with a minimal argument object");
+		expect(secondFailure).toContain("Do not call todo_write again in this user turn");
+		expect(secondFailure).toContain("Continue the requested work now");
+	});
+
+	it("fails open immediately on transport errors", () => {
+		const reminder = buildTodoWriteFailureReminder(
+			'HTTP2StreamReset fetching "https://chatgpt.com/backend-api/codex/responses"',
+			1,
+		);
+
+		expect(reminder).toContain("Do not call todo_write again in this user turn");
+		expect(reminder).not.toContain("retry once with a minimal argument object");
+	});
+});
 describe("AgentSession eager todo enforcement", () => {
 	let tempDir: TempDir;
 	let session: AgentSession;

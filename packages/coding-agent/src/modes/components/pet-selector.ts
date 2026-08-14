@@ -13,7 +13,7 @@ const PET_OPTIONS: { value: PetMode; label: string; description: string }[] = [
 ];
 
 /**
- * Theme-style picker for the sayknow pet skin (Off / RedSayknow / BlueSayknow). Preview
+ * Theme-style picker for the sayknow pet skin (Off / RedOctopus / BlueOctopus). Preview
  * fires as the selection moves; select commits, cancel restores.
  */
 export class PetSelectorComponent extends Container {

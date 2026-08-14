@@ -10,7 +10,6 @@ import {
 	AgentWireFrameSequencer,
 	toAgentWireCompactEventFrame,
 	toAgentWireEventFrame,
-	toBridgeEventFrame,
 } from "../src/modes/shared/agent-wire/event-envelope";
 import { rpcSuccess } from "../src/modes/shared/agent-wire/responses";
 import type { AgentSessionEvent } from "../src/session/agent-session";
@@ -279,7 +278,7 @@ describe("RPC compact message_update frames", () => {
 	it("BRIDGE-UNAFFECTED: bridge event framing keeps full message_update payloads with no compact leakage", () => {
 		const source = message([{ type: "text", text: "bridge" }]);
 		const event = update(source, { type: "text_delta", contentIndex: 0, delta: "!", partial: clone(source) });
-		const bridgeFrame = toBridgeEventFrame(event, new AgentWireFrameSequencer("sess-bridge"));
+		const bridgeFrame = toAgentWireEventFrame(event, new AgentWireFrameSequencer("sess-bridge"));
 
 		expect(bridgeFrame.payload).toEqual({ event_type: "message_update", event });
 		expect((bridgeFrame.payload as AgentWireEventPayload).event).toBe(event);

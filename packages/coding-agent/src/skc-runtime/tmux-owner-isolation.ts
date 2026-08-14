@@ -12,6 +12,7 @@ import * as fs from "node:fs/promises";
 
 import * as path from "node:path";
 import { openRecoveryFsRoot } from "@sayknow-cli/natives";
+import { getAgentDir } from "@sayknow-cli/utils/dirs";
 import { isCompiledBinary } from "@sayknow-cli/utils/env";
 import { parseLinuxProcStartTime } from "./linux-proc";
 
@@ -1450,6 +1451,670 @@ async function releaseVerdictLock(token: string): Promise<void> {
 		} catch {}
 	} finally {
 		lock.database.close();
+	}
+}
+
+/**
+ * Shared identity create fence (frozen contract F1'-F9''', architect-approved).
+ *
+ * Concurrent creators of the SAME canonical `(stateDir, sessionId)` identity must
+ * not both spawn a child: `SessionManager` opens transcripts with append flags and
+ * has no inter-process single-writer lock, so two owners on one transcript is a
+ * data-integrity failure rather than a recoverable skip.
+ *
+ * The fence deliberately does NOT hold the SQLite writer transaction across the
+ * spawn. `bootstrapTmuxOwnerIsolation()` runs in a separate process and acquires
+ * this very database twice itself, and the synchronous creator blocks on that
+ * helper through `Bun.spawnSync`, so a held transaction would deadlock the helper
+ * against its own parent. A long hold would also starve the 250 ms verdict path
+ * that shares this database. Instead each transition takes a short (target 50 ms)
+ * transaction that only reads and writes a durable reservation row; mutual
+ * exclusion outlives the transaction as row state, not as a held lock.
+ */
+export type IdentityCreatePhase = "reserved" | "helper_invoked" | "spawned" | "tagged" | "published";
+
+const IDENTITY_CREATE_PHASE_ORDER: readonly IdentityCreatePhase[] = [
+	"reserved",
+	"helper_invoked",
+	"spawned",
+	"tagged",
+	"published",
+];
+
+/** Phases at or beyond which an untagged child may already exist on the server. */
+export function identityCreatePhaseMayHaveChild(phase: IdentityCreatePhase): boolean {
+	return IDENTITY_CREATE_PHASE_ORDER.indexOf(phase) >= IDENTITY_CREATE_PHASE_ORDER.indexOf("helper_invoked");
+}
+
+export interface IdentityCreateKey {
+	stateDir: string;
+	sessionId: string;
+	stateFile: string;
+}
+
+export interface IdentityCreateReservation {
+	reservationId: string;
+	stateDir: string;
+	sessionId: string;
+	stateFile: string;
+	ownerPid: number;
+	ownerIncarnation: string;
+	phase: IdentityCreatePhase;
+	attemptSessionName: string | null;
+	nativeSessionId: string | null;
+	serverPid: number | null;
+	serverStartTime: string | null;
+	claimedAt: string;
+	updatedAt: string;
+	leaseDeadline: string;
+}
+
+export type IdentityCreateReservationResult =
+	| { ok: true; reservation: IdentityCreateReservation; recovered: IdentityCreateReservation | null }
+	| {
+			ok: false;
+			code:
+				| "identity_reserved_live"
+				| "identity_reserved_unknown"
+				| "identity_fence_contended"
+				| "identity_incarnation_unavailable"
+				| "identity_orphan_unresolved"
+				| "identity_existing_owner";
+			existing: IdentityCreateReservation | null;
+			diagnostic: string;
+	  };
+
+/** Owner liveness is tri-state: only a proven-dead owner may be displaced. */
+export type OwnerLiveness = "alive" | "dead" | "unknown";
+
+/**
+ * `processIncarnation()` returns `undefined` both for a vanished process and for a
+ * failed probe, so existence is resolved first. Signal 0 distinguishes them:
+ * `ESRCH` proves absence, `EPERM` proves a live process owned by another user, and
+ * anything else is unknown. Only then does the incarnation discriminate PID reuse.
+ */
+export function probeOwnerLiveness(
+	pid: number,
+	recordedIncarnation: string,
+	deps: { readIncarnation?: (pid: number) => string | undefined; signal?: (pid: number) => void } = {},
+): OwnerLiveness {
+	if (!Number.isSafeInteger(pid) || pid <= 0) return "unknown";
+	const signal = deps.signal ?? ((target: number) => process.kill(target, 0));
+	try {
+		signal(pid);
+	} catch (error) {
+		const code = (error as { code?: unknown }).code;
+		if (code === "ESRCH") return "dead";
+		if (code !== "EPERM") return "unknown";
+	}
+	const readIncarnation = deps.readIncarnation ?? defaultOwnerIncarnationReader;
+	const current = readIncarnation(pid);
+	if (current === undefined) return "unknown";
+	return current === recordedIncarnation ? "alive" : "dead";
+}
+
+let ownerIncarnationReader: ((pid: number) => string | undefined) | null = null;
+
+function defaultOwnerIncarnationReader(pid: number): string | undefined {
+	if (!ownerIncarnationReader) {
+		// Imported lazily: the Darwin reader opens a FFI handle, which must not be
+		// paid by callers that never touch the fence.
+		const module = require("../sdk/broker/process-incarnation") as {
+			processIncarnation: (pid: number) => string | undefined;
+		};
+		ownerIncarnationReader = module.processIncarnation;
+	}
+	return ownerIncarnationReader(pid);
+}
+
+/** @internal Test seam for the incarnation reader. */
+export function __setOwnerIncarnationReaderForTests(reader: ((pid: number) => string | undefined) | null): void {
+	ownerIncarnationReader = reader;
+}
+
+/** Raw paths may be relative or alias the same inode; the fence key must not. */
+function canonicalIdentityPath(value: string): string {
+	const resolved = path.resolve(value);
+	try {
+		return fsSync.realpathSync.native(resolved);
+	} catch {
+		return resolved;
+	}
+}
+
+export function canonicalIdentityCreateKey(key: IdentityCreateKey): IdentityCreateKey {
+	return {
+		stateDir: canonicalIdentityPath(key.stateDir),
+		sessionId: key.sessionId,
+		stateFile: canonicalIdentityPath(key.stateFile),
+	};
+}
+
+const IDENTITY_FENCE_WINDOW_MS = 250;
+const IDENTITY_RESERVATION_DEFAULT_TTL_MS = 30_000;
+
+const IDENTITY_RESERVATION_TABLE = `CREATE TABLE IF NOT EXISTS identity_create_reservation (
+	state_dir TEXT NOT NULL,
+	session_id TEXT NOT NULL,
+	state_file TEXT NOT NULL,
+	reservation_id TEXT NOT NULL,
+	owner_pid INTEGER NOT NULL,
+	owner_incarnation TEXT NOT NULL,
+	phase TEXT NOT NULL,
+	attempt_session_name TEXT,
+	native_session_id TEXT,
+	server_pid INTEGER,
+	server_start_time TEXT,
+	claimed_at TEXT NOT NULL,
+	updated_at TEXT NOT NULL,
+	lease_deadline TEXT NOT NULL,
+	PRIMARY KEY (state_dir, session_id)
+)`;
+
+interface ReservationRow {
+	state_dir: string;
+	session_id: string;
+	state_file: string;
+	reservation_id: string;
+	owner_pid: number;
+	owner_incarnation: string;
+	phase: string;
+	attempt_session_name: string | null;
+	native_session_id: string | null;
+	server_pid: number | null;
+	server_start_time: string | null;
+	claimed_at: string;
+	updated_at: string;
+	lease_deadline: string;
+}
+
+function reservationFromRow(row: ReservationRow): IdentityCreateReservation {
+	return {
+		reservationId: row.reservation_id,
+		stateDir: row.state_dir,
+		sessionId: row.session_id,
+		stateFile: row.state_file,
+		ownerPid: row.owner_pid,
+		ownerIncarnation: row.owner_incarnation,
+		phase: (IDENTITY_CREATE_PHASE_ORDER as readonly string[]).includes(row.phase)
+			? (row.phase as IdentityCreatePhase)
+			: "reserved",
+		attemptSessionName: row.attempt_session_name,
+		nativeSessionId: row.native_session_id,
+		serverPid: row.server_pid,
+		serverStartTime: row.server_start_time,
+		claimedAt: row.claimed_at,
+		updatedAt: row.updated_at,
+		leaseDeadline: row.lease_deadline,
+	};
+}
+
+/**
+ * Runs `operation` inside one short write transaction on the identity's lock
+ * database. The transaction is committed (or rolled back) before returning, so it
+ * is never held across a spawn, a helper process, or a tag.
+ */
+/**
+ * The single fence database, under SKC's own agent directory.
+ *
+ * The lifecycle root (`<stateDir>/<sessionId>/owner-lifecycle`) cannot host it: a
+ * create that is about to be REFUSED must leave no filesystem trace, and that
+ * directory may not exist yet. SKC's agent directory always exists, so the fence
+ * is always reachable and creators can fail closed instead of proceeding unfenced.
+ *
+ * One shared file rather than one per identity. Reservations are rows keyed by
+ * `(state_dir, session_id)`, so a single database keeps this state bounded
+ * forever instead of accreting a file per session that nothing ever collects.
+ * Deleting per-identity files on release was the alternative and is unsafe: on
+ * POSIX an unlink while another process holds the database open leaves that
+ * process working against an orphaned inode while a third creates a fresh file,
+ * which would silently split the fence in two. Cross-identity contention is the
+ * accepted cost, bounded by a window that only reads and writes one row.
+ */
+function identityFenceDatabaseFile(): string {
+	return path.join(getAgentDir(), "identity-create-fence.sqlite");
+}
+
+function withIdentityFenceWindow<T>(operation: (db: Database) => T): T | null {
+	const lockDatabaseFile = identityFenceDatabaseFile();
+	let db: Database;
+	try {
+		fsSync.mkdirSync(path.dirname(lockDatabaseFile), { recursive: true, mode: 0o700 });
+		db = new Database(lockDatabaseFile);
+	} catch {
+		return null;
+	}
+	try {
+		try {
+			fsSync.chmodSync(lockDatabaseFile, 0o600);
+		} catch {}
+		db.exec(`PRAGMA busy_timeout = ${IDENTITY_FENCE_WINDOW_MS}`);
+		db.exec("BEGIN IMMEDIATE");
+	} catch {
+		db.close();
+		return null;
+	}
+	try {
+		db.exec(IDENTITY_RESERVATION_TABLE);
+		const result = operation(db);
+		db.exec("COMMIT");
+		return result;
+	} catch (error) {
+		try {
+			db.exec("ROLLBACK");
+		} catch {}
+		throw error;
+	} finally {
+		db.close();
+	}
+}
+
+/**
+ * Reservation ids whose creating attempt is still executing in THIS process.
+ *
+ * A row owned by our own live process is ambiguous: it is either a concurrent
+ * in-flight attempt (which must still block us) or our own abandoned attempt
+ * from an earlier failure that deliberately kept its evidence. Only the second
+ * may be recovered, and only this set can tell them apart — process liveness
+ * cannot, because both cases are "the owner is alive".
+ */
+const inFlightReservations = new Set<string>();
+
+/**
+ * Ends the attempt while KEEPING the durable row.
+ *
+ * Used when cleanup after a spawn was uncertain: a child may survive that we
+ * could not remove, so the evidence must outlive the attempt. Unlike
+ * `releaseIdentityCreate` this leaves the row for authority-first recovery.
+ */
+export function abandonIdentityCreate(reservation: IdentityCreateReservation): void {
+	inFlightReservations.delete(reservation.reservationId);
+}
+
+export interface ReserveIdentityCreateOptions {
+	ttlMs?: number;
+	ownerPid?: number;
+	ownerIncarnation?: string;
+	now?: () => Date;
+	probeLiveness?: (pid: number, incarnation: string) => OwnerLiveness;
+}
+
+function reservationLease(now: Date, ttlMs: number): string {
+	return new Date(now.getTime() + Math.max(0, ttlMs)).toISOString();
+}
+
+function selectReservation(db: Database, key: IdentityCreateKey): IdentityCreateReservation | null {
+	const row = db
+		.query("SELECT * FROM identity_create_reservation WHERE state_dir = ? AND session_id = ?")
+		.get(key.stateDir, key.sessionId) as ReservationRow | null;
+	return row ? reservationFromRow(row) : null;
+}
+
+function writeReservation(db: Database, reservation: IdentityCreateReservation): void {
+	db.query(
+		`INSERT OR REPLACE INTO identity_create_reservation (
+			state_dir, session_id, state_file, reservation_id, owner_pid, owner_incarnation, phase,
+			attempt_session_name, native_session_id, server_pid, server_start_time,
+			claimed_at, updated_at, lease_deadline
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+	).run(
+		reservation.stateDir,
+		reservation.sessionId,
+		reservation.stateFile,
+		reservation.reservationId,
+		reservation.ownerPid,
+		reservation.ownerIncarnation,
+		reservation.phase,
+		reservation.attemptSessionName,
+		reservation.nativeSessionId,
+		reservation.serverPid,
+		reservation.serverStartTime,
+		reservation.claimedAt,
+		reservation.updatedAt,
+		reservation.leaseDeadline,
+	);
+}
+
+function freshReservation(
+	key: IdentityCreateKey,
+	options: ReserveIdentityCreateOptions,
+	incarnation: string,
+): IdentityCreateReservation {
+	const now = (options.now ?? (() => new Date()))();
+	const stamp = now.toISOString();
+	return {
+		reservationId: crypto.randomUUID(),
+		stateDir: key.stateDir,
+		sessionId: key.sessionId,
+		stateFile: key.stateFile,
+		ownerPid: options.ownerPid ?? process.pid,
+		ownerIncarnation: incarnation,
+		phase: "reserved",
+		attemptSessionName: null,
+		nativeSessionId: null,
+		serverPid: null,
+		serverStartTime: null,
+		claimedAt: stamp,
+		updatedAt: stamp,
+		leaseDeadline: reservationLease(now, options.ttlMs ?? IDENTITY_RESERVATION_DEFAULT_TTL_MS),
+	};
+}
+
+/**
+ * Claims the identity when it is free, and otherwise reports why not.
+ *
+ * A dead previous owner is deliberately NOT displaced here: authority-first
+ * recovery has to census live tmux, which shells out and must never run inside
+ * the fence window. The caller performs that census and then calls
+ * {@link reclaimIdentityCreate}.
+ *
+ * The lease deadline is diagnostic only. Expiry never authorizes takeover; only a
+ * proven-dead owner does, because real creator paths block in unbounded
+ * `Bun.spawnSync` and cannot heartbeat while blocked.
+ */
+export function reserveIdentityCreate(
+	rawKey: IdentityCreateKey,
+	options: ReserveIdentityCreateOptions = {},
+): IdentityCreateReservationResult {
+	const key = canonicalIdentityCreateKey(rawKey);
+	const ownerPid = options.ownerPid ?? process.pid;
+	const incarnation = options.ownerIncarnation ?? defaultOwnerIncarnationReader(ownerPid);
+	if (incarnation === undefined) {
+		return {
+			ok: false,
+			code: "identity_incarnation_unavailable",
+			existing: null,
+			diagnostic: "own_process_incarnation_unavailable",
+		};
+	}
+	const probeLiveness = options.probeLiveness ?? ((pid, recorded) => probeOwnerLiveness(pid, recorded));
+	const outcome = withIdentityFenceWindow<IdentityCreateReservationResult>(db => {
+		const existing = selectReservation(db, key);
+		if (!existing) {
+			const reservation = freshReservation(key, options, incarnation);
+			writeReservation(db, reservation);
+			inFlightReservations.add(reservation.reservationId);
+			return { ok: true, reservation, recovered: null };
+		}
+		if (existing.stateFile !== key.stateFile) {
+			return {
+				ok: false,
+				code: "identity_reserved_unknown",
+				existing,
+				diagnostic: "state_file_mismatch",
+			};
+		}
+		const liveness = probeLiveness(existing.ownerPid, existing.ownerIncarnation);
+		if (liveness === "alive") {
+			// Our own row from a finished attempt that kept its evidence: we are the
+			// only party that can safely resolve it, and refusing forever would brick
+			// the identity for the rest of this process's life.
+			const ourOwnAbandonedRow =
+				existing.ownerPid === ownerPid &&
+				existing.ownerIncarnation === incarnation &&
+				!inFlightReservations.has(existing.reservationId);
+			if (!ourOwnAbandonedRow) {
+				return { ok: false, code: "identity_reserved_live", existing, diagnostic: `phase=${existing.phase}` };
+			}
+			if (!identityCreatePhaseMayHaveChild(existing.phase)) {
+				const reservation = freshReservation(key, options, incarnation);
+				writeReservation(db, reservation);
+				inFlightReservations.add(reservation.reservationId);
+				return { ok: true, reservation, recovered: existing };
+			}
+			return {
+				ok: false,
+				code: "identity_orphan_unresolved",
+				existing,
+				diagnostic: `self_abandoned phase=${existing.phase} census_required`,
+			};
+		}
+		if (liveness === "unknown") {
+			return {
+				ok: false,
+				code: "identity_reserved_unknown",
+				existing,
+				diagnostic: `owner_liveness_unknown phase=${existing.phase}`,
+			};
+		}
+		// Authority-first recovery, branch 1: a dead owner that never reached the
+		// helper cannot have produced a child, so no census is needed. Reclaiming
+		// here is what stops a crashed or force-killed creator from bricking the
+		// identity forever — without it every later create aborts on a tombstone.
+		if (!identityCreatePhaseMayHaveChild(existing.phase)) {
+			const reservation = freshReservation(key, options, incarnation);
+			writeReservation(db, reservation);
+			inFlightReservations.add(reservation.reservationId);
+			return { ok: true, reservation, recovered: existing };
+		}
+		// Branches 2-5 need a live tmux census (canonical tags plus the current
+		// published generation) that shells out and must not run inside this
+		// window. The caller performs it and then calls reclaimIdentityCreate().
+		return {
+			ok: false,
+			code: "identity_orphan_unresolved",
+			existing,
+			diagnostic: `owner_dead phase=${existing.phase} census_required`,
+		};
+	});
+	if (outcome === null) {
+		return {
+			ok: false,
+			code: "identity_fence_contended",
+			existing: null,
+			diagnostic: "fence_window_unavailable",
+		};
+	}
+	return outcome;
+}
+
+/**
+ * Completes authority-first recovery after the caller proved, outside the fence
+ * window, that the abandoned reservation left no authoritative child behind.
+ *
+ * `expectedReservationId` pins the exact abandoned row: if another process already
+ * recovered it, the row no longer matches and this fails closed rather than
+ * producing a second child.
+ */
+export function reclaimIdentityCreate(
+	rawKey: IdentityCreateKey,
+	expectedReservationId: string,
+	options: ReserveIdentityCreateOptions = {},
+): IdentityCreateReservationResult {
+	const key = canonicalIdentityCreateKey(rawKey);
+	const ownerPid = options.ownerPid ?? process.pid;
+	const incarnation = options.ownerIncarnation ?? defaultOwnerIncarnationReader(ownerPid);
+	if (incarnation === undefined) {
+		return {
+			ok: false,
+			code: "identity_incarnation_unavailable",
+			existing: null,
+			diagnostic: "own_process_incarnation_unavailable",
+		};
+	}
+	const probeLiveness = options.probeLiveness ?? ((pid, recorded) => probeOwnerLiveness(pid, recorded));
+	const outcome = withIdentityFenceWindow<IdentityCreateReservationResult>(db => {
+		const existing = selectReservation(db, key);
+		if (!existing || existing.reservationId !== expectedReservationId) {
+			return {
+				ok: false,
+				code: "identity_orphan_unresolved",
+				existing,
+				diagnostic: "reservation_changed_during_recovery",
+			};
+		}
+		const liveness = probeLiveness(existing.ownerPid, existing.ownerIncarnation);
+		const ourOwnAbandonedRow =
+			existing.ownerPid === ownerPid &&
+			existing.ownerIncarnation === incarnation &&
+			!inFlightReservations.has(existing.reservationId);
+		if (liveness !== "dead" && !ourOwnAbandonedRow) {
+			return {
+				ok: false,
+				code: liveness === "alive" ? "identity_reserved_live" : "identity_reserved_unknown",
+				existing,
+				diagnostic: `owner_resurrected liveness=${liveness}`,
+			};
+		}
+		const reservation = freshReservation(key, options, incarnation);
+		writeReservation(db, reservation);
+		inFlightReservations.add(reservation.reservationId);
+		return { ok: true, reservation, recovered: existing };
+	});
+	if (outcome === null) {
+		return {
+			ok: false,
+			code: "identity_fence_contended",
+			existing: null,
+			diagnostic: "fence_window_unavailable",
+		};
+	}
+	return outcome;
+}
+
+/**
+ * What a live-tmux census concluded about the child an abandoned reservation may
+ * have left behind. `unknown` is not a soft failure: it is the fail-closed case.
+ */
+export type AbandonedIdentityVerdict =
+	| { kind: "authoritative"; nativeSessionId: string }
+	| { kind: "orphan"; nativeSessionId: string }
+	| { kind: "absent" }
+	| { kind: "unknown"; reason: string };
+
+/**
+ * Injected so this module never imports the tmux session helpers (which already
+ * depend on it). The census shells out and therefore runs OUTSIDE the fence
+ * window, by construction.
+ */
+export interface AbandonedIdentityCensus {
+	inspect(evidence: {
+		stateDir: string;
+		sessionId: string;
+		attemptSessionName: string | null;
+		nativeSessionId: string | null;
+	}): AbandonedIdentityVerdict;
+	cleanupOrphan(nativeSessionId: string, attemptSessionName: string | null): void;
+}
+
+/**
+ * Authority-first recovery for a reservation whose owner is proven dead and that
+ * reached at least `helper_invoked`, so an untagged child may exist.
+ *
+ * The reservation's own `phase` is a hint, never the authority: a creator can
+ * publish its generation and die before recording `published`. The census reads
+ * the live canonical tags and the current published generation instead, so a
+ * valid child is preserved rather than killed — which is what keeps a
+ * tag-before-report crash from producing a successor.
+ */
+export function recoverAbandonedIdentityCreate(
+	key: IdentityCreateKey,
+	existing: IdentityCreateReservation,
+	census: AbandonedIdentityCensus,
+	options: ReserveIdentityCreateOptions = {},
+): IdentityCreateReservationResult {
+	const canonical = canonicalIdentityCreateKey(key);
+	const verdict = census.inspect({
+		stateDir: canonical.stateDir,
+		sessionId: canonical.sessionId,
+		attemptSessionName: existing.attemptSessionName,
+		nativeSessionId: existing.nativeSessionId,
+	});
+	if (verdict.kind === "unknown") {
+		return {
+			ok: false,
+			code: "identity_orphan_unresolved",
+			existing,
+			diagnostic: `census_unknown:${verdict.reason}`,
+		};
+	}
+	if (verdict.kind === "authoritative") {
+		// A valid published child is still serving this identity. Preserve it and
+		// tell the caller an owner exists; creating a second one is never correct.
+		return {
+			ok: false,
+			code: "identity_existing_owner",
+			existing,
+			diagnostic: `authoritative_child:${verdict.nativeSessionId}`,
+		};
+	}
+	if (verdict.kind === "orphan") {
+		try {
+			census.cleanupOrphan(verdict.nativeSessionId, existing.attemptSessionName);
+		} catch (error) {
+			return {
+				ok: false,
+				code: "identity_orphan_unresolved",
+				existing,
+				diagnostic: `orphan_cleanup_failed:${error instanceof Error ? error.message : String(error)}`,
+			};
+		}
+	}
+	return reclaimIdentityCreate(canonical, existing.reservationId, options);
+}
+
+export interface IdentityCreatePhasePatch {
+	attemptSessionName?: string | null;
+	nativeSessionId?: string | null;
+	serverPid?: number | null;
+	serverStartTime?: string | null;
+}
+
+/**
+ * Records a create-progress transition and renews the lease.
+ *
+ * Returns `null` when the reservation is no longer ours. The caller MUST treat
+ * that as a lost fence and perform no tmux mutation: another process has already
+ * recovered this identity.
+ */
+export function advanceIdentityCreatePhase(
+	reservation: IdentityCreateReservation,
+	phase: IdentityCreatePhase,
+	patch: IdentityCreatePhasePatch = {},
+	options: Pick<ReserveIdentityCreateOptions, "ttlMs" | "now"> = {},
+): IdentityCreateReservation | null {
+	const key: IdentityCreateKey = {
+		stateDir: reservation.stateDir,
+		sessionId: reservation.sessionId,
+		stateFile: reservation.stateFile,
+	};
+	const now = (options.now ?? (() => new Date()))();
+	return withIdentityFenceWindow<IdentityCreateReservation | null>(db => {
+		const current = selectReservation(db, key);
+		if (!current || current.reservationId !== reservation.reservationId) return null;
+		const updated: IdentityCreateReservation = {
+			...current,
+			phase,
+			attemptSessionName:
+				patch.attemptSessionName !== undefined ? patch.attemptSessionName : current.attemptSessionName,
+			nativeSessionId: patch.nativeSessionId !== undefined ? patch.nativeSessionId : current.nativeSessionId,
+			serverPid: patch.serverPid !== undefined ? patch.serverPid : current.serverPid,
+			serverStartTime: patch.serverStartTime !== undefined ? patch.serverStartTime : current.serverStartTime,
+			updatedAt: now.toISOString(),
+			leaseDeadline: reservationLease(now, options.ttlMs ?? IDENTITY_RESERVATION_DEFAULT_TTL_MS),
+		};
+		writeReservation(db, updated);
+		return updated;
+	});
+}
+
+/** Releases the reservation. Idempotent, and never deletes a successor's row. */
+export function releaseIdentityCreate(reservation: IdentityCreateReservation): void {
+	inFlightReservations.delete(reservation.reservationId);
+	const key: IdentityCreateKey = {
+		stateDir: reservation.stateDir,
+		sessionId: reservation.sessionId,
+		stateFile: reservation.stateFile,
+	};
+	try {
+		withIdentityFenceWindow<void>(db => {
+			db.query(
+				"DELETE FROM identity_create_reservation WHERE state_dir = ? AND session_id = ? AND reservation_id = ?",
+			).run(key.stateDir, key.sessionId, reservation.reservationId);
+		});
+	} catch {
+		// A failed release leaves a row whose owner is provably dead once this
+		// process exits, which the authority-first recovery path resolves.
 	}
 }
 

@@ -19,6 +19,13 @@ import {
 	SKC_TMUX_SESSION_PREFIX,
 	type SkcTmuxProfileCommand,
 } from "./tmux-common";
+import {
+	abandonIdentityCreate,
+	advanceIdentityCreatePhase,
+	type IdentityCreateReservation,
+	releaseIdentityCreate,
+	reserveIdentityCreate,
+} from "./tmux-owner-isolation";
 import { findSkcTmuxSessionByName, findSkcTmuxSessionByScope, type SkcTmuxSessionStatus } from "./tmux-sessions";
 
 export {
@@ -65,6 +72,8 @@ export interface TmuxSpawnResult {
 	exitCode: number | null;
 	signalCode?: string | null;
 	stderr?: string;
+	/** Populated only when the caller asked for `stdout: "pipe"`. */
+	stdout?: string;
 }
 
 export type TmuxSpawnSync = (command: string, args: string[], options: TmuxSpawnOptions) => TmuxSpawnResult;
@@ -73,8 +82,8 @@ export interface TmuxSpawnOptions {
 	cwd: string;
 	env: NodeJS.ProcessEnv;
 	stdin: "inherit";
-	stdout: "inherit";
-	stderr: "inherit";
+	stdout: "inherit" | "pipe";
+	stderr: "inherit" | "pipe";
 }
 
 export interface TmuxLaunchPlan {
@@ -88,6 +97,12 @@ export interface TmuxLaunchPlan {
 	project?: string | null;
 	sessionId?: string | null;
 	sessionStateFile?: string | null;
+	/**
+	 * Capability of the RESOLVED provider, not a platform guess. psmux has no
+	 * immutable native session identity, so it stays outside the native-proof
+	 * create fence and keeps its existing spawn/profile/attach behavior.
+	 */
+	isPsmux: boolean;
 }
 
 function explicitTmuxSessionName(env: NodeJS.ProcessEnv): string | undefined {
@@ -408,11 +423,105 @@ function readCurrentBranch(cwd: string): string | null {
 	}
 }
 
-function cleanupCreatedTmuxSession(plan: TmuxLaunchPlan, spawnSync: TmuxSpawnSync, options: TmuxSpawnOptions): void {
+/**
+ * Immutable identity of a session this process created, used so cleanup can
+ * never target a different session that merely reuses the name.
+ */
+interface CreatedSessionIdentity {
+	nativeSessionId: string;
+	serverPid: string;
+	/** Session birth time: distinguishes a reused `$id` on a restarted server. */
+	sessionCreated: string;
+}
+
+/**
+ * Reads `#{session_id}` and the server `#{pid}` for the session just created.
+ * Returns null when the provider cannot supply them, in which case cleanup falls
+ * back to the pre-existing name-based path.
+ */
+function captureCreatedSessionIdentity(
+	plan: TmuxLaunchPlan,
+	spawnSync: TmuxSpawnSync,
+	options: TmuxSpawnOptions,
+): CreatedSessionIdentity | null {
+	const probed = spawnSync(
+		plan.tmuxCommand,
+		[
+			"display-message",
+			"-p",
+			"-t",
+			buildSkcTmuxExactSessionTarget(plan.sessionName, { env: options.env }),
+			"#{session_id}\t#{pid}\t#{session_created}",
+		],
+		{ ...options, stdout: "pipe" },
+	);
+	if (probed.exitCode !== 0 || typeof probed.stdout !== "string") return null;
+	const [nativeSessionId, serverPid, sessionCreated] = probed.stdout.trim().split("\t");
+	if (!nativeSessionId?.startsWith("$") || !serverPid || !sessionCreated) return null;
+	return { nativeSessionId, serverPid, sessionCreated };
+}
+
+/**
+ * Returns false when the created session was NOT provably removed, so the caller
+ * can keep the reservation as evidence for authority-first recovery.
+ */
+function cleanupCreatedTmuxSession(
+	plan: TmuxLaunchPlan,
+	spawnSync: TmuxSpawnSync,
+	options: TmuxSpawnOptions,
+	identity?: CreatedSessionIdentity | null,
+): boolean {
+	if (plan.isPsmux) {
+		// Capability carveout: psmux exposes no immutable session identity, so the
+		// pre-existing name-based cleanup is all that is available there.
+		const killed = spawnSync(
+			plan.tmuxCommand,
+			["kill-session", "-t", buildSkcTmuxExactSessionTarget(plan.sessionName, { env: options.env })],
+			options,
+		);
+		return killed.exitCode === 0;
+	}
+	// Fail closed: without the immutable identity we cannot prove what we would be
+	// killing, and a session NAME may belong to somebody else by now. Leaking a
+	// session is recoverable; killing an unrelated one is not.
+	if (!identity) return false;
+	// One tmux invocation proves AND kills, so no other process can swap the
+	// target between the check and the kill. The predicate pins the server
+	// incarnation, the exact session id, and that session's birth time.
+	const predicate = [
+		`#{&&:#{==:#{pid},${identity.serverPid}}`,
+		`#{&&:#{==:#{session_id},${identity.nativeSessionId}}`,
+		`#{==:#{session_created},${identity.sessionCreated}}}}`,
+	].join(",");
 	spawnSync(
 		plan.tmuxCommand,
-		["kill-session", "-t", buildSkcTmuxExactSessionTarget(plan.sessionName, { env: options.env })],
+		["if-shell", "-t", identity.nativeSessionId, "-F", predicate, `kill-session -t ${identity.nativeSessionId}`],
 		options,
+	);
+	// `if-shell` exits 0 even when the predicate is false and nothing ran, so its
+	// exit code is not proof. Ask whether that exact session is still there.
+	const survivor = spawnSync(plan.tmuxCommand, ["has-session", "-t", identity.nativeSessionId], {
+		...options,
+		stdout: "pipe",
+		stderr: "pipe",
+	});
+	// A signalled or otherwise unfinished probe answers nothing. Treating that as
+	// removal would delete the only evidence that a child may survive, so an
+	// indeterminate result fails closed.
+	if (typeof survivor.exitCode !== "number") return false;
+	// Zero means the session is still there.
+	if (survivor.exitCode === 0) return false;
+	// Non-zero is ambiguous on its own: tmux exits non-zero both for a session it
+	// cannot find and for an operational failure such as a refused socket. Only an
+	// explicit absence — including the whole server being gone — proves our child
+	// is no longer on a server we own. Anything else fails closed.
+	const diagnostic = (survivor.stderr ?? "").toLowerCase();
+	return (
+		diagnostic.includes("can't find session") ||
+		diagnostic.includes("cannot find session") ||
+		diagnostic.includes("session not found") ||
+		diagnostic.includes("no server running") ||
+		diagnostic.includes("no such file or directory")
 	);
 }
 function isTmuxAttachDisconnectError(result: TmuxSpawnResult): boolean {
@@ -486,6 +595,7 @@ export function buildDefaultTmuxLaunchPlan(context: TmuxLaunchContext): TmuxLaun
 		sessionId,
 		sessionStateFile,
 		attachSessionName: existingSessionName,
+		isPsmux: resolvedBinary.isPsmux,
 	};
 }
 
@@ -498,7 +608,12 @@ function defaultSpawnSync(command: string, args: string[], options: TmuxSpawnOpt
 		stdout: options.stdout,
 		stderr: options.stderr,
 	});
-	return { exitCode: result.exitCode, signalCode: result.signalCode };
+	return {
+		exitCode: result.exitCode,
+		signalCode: result.signalCode,
+		...(options.stdout === "pipe" ? { stdout: result.stdout?.toString() } : {}),
+		...(options.stderr === "pipe" ? { stderr: result.stderr?.toString() } : {}),
+	};
 }
 
 export function launchDefaultTmuxIfNeeded(context: TmuxLaunchContext): boolean {
@@ -525,49 +640,112 @@ export function launchDefaultTmuxIfNeeded(context: TmuxLaunchContext): boolean {
 		if (attached.exitCode === 0) return true;
 	}
 
-	const created = spawnSync(plan.tmuxCommand, plan.newSessionArgs, options);
-	if (created.exitCode === 0) {
-		renameTmuxWindow(
-			plan.tmuxCommand,
-			buildSkcTmuxWindowTitle(plan.project ?? plan.cwd, plan.branch),
-			spawnSync,
-			options,
-			buildSkcTmuxExactSessionTarget(plan.sessionName, { env }),
-		);
-
-		const profile = applySkcTmuxProfile({
-			tmuxCommand: plan.tmuxCommand,
-			target: plan.sessionName,
-			cwd: plan.cwd,
-			env,
-			spawnSync,
-			branch: plan.branch,
-			project: plan.project,
-			sessionId: plan.sessionId ?? null,
-			sessionStateFile: plan.sessionStateFile ?? null,
-			version: VERSION,
-		});
-		const ownershipFailure = profile.failures.find(item => item.command.args.includes("@skc-profile"));
-		if (ownershipFailure) {
-			cleanupCreatedTmuxSession(plan, spawnSync, options);
+	// Shared identity create fence for the CREATED branch only. The attach
+	// fallback above is not a creator and stays unfenced.
+	//
+	// Capability, not platform: psmux exposes no immutable native session
+	// identity, so it cannot participate in the native-proof fence and keeps its
+	// existing behavior. That carveout is safe because restore already ends in
+	// `unsupported_owner_proof` before it can create on psmux, so no restore
+	// child can race this producer.
+	const fenceIdentity =
+		plan.isPsmux || !plan.sessionId || !plan.sessionStateFile
+			? null
+			: {
+					stateDir: path.dirname(plan.sessionStateFile),
+					sessionId: plan.sessionId,
+					stateFile: plan.sessionStateFile,
+				};
+	let reservation: IdentityCreateReservation | null = null;
+	let cleanupUncertain = false;
+	if (fenceIdentity) {
+		const reserved = reserveIdentityCreate(fenceIdentity);
+		if (!reserved.ok) {
+			// A PROVEN competing owner blocks the launch: perform no tmux mutation
+			// (no spawn, no attach, no delete). Falling through to a direct
+			// in-process launch is refused too, because it would put a second
+			// writer on the same coordinator transcript.
+			// Fail closed for every non-ok result. The fence database lives under
+			// SKC's own config root, so an unreachable fence is not a routine
+			// environment difference: it means the one-create guarantee cannot be
+			// honored, and launching anyway risks a second writer on this identity.
 			(context.diagnosticWriter ?? safeStderrWrite)(
-				formatTmuxLaunchDiagnostic("profile tagging failed", ownershipFailure.stderr),
+				formatTmuxLaunchDiagnostic("identity create fence", `${reserved.code}: ${reserved.diagnostic}`),
 			);
 			return true;
 		}
+		reservation = reserved.reservation;
 	}
-	if (created.exitCode !== 0) return false;
-	const attached = spawnSync(
-		plan.tmuxCommand,
-		["attach-session", "-t", buildSkcTmuxExactSessionTarget(plan.sessionName, { env })],
-		options,
-	);
-	if (attached.exitCode === 0) return true;
-	if (isTmuxAttachDisconnectError(attached)) {
-		(context.diagnosticWriter ?? safeStderrWrite)(formatTmuxLaunchDiagnostic("attach disconnected", attached.stderr));
+	try {
+		// Record the attempt name BEFORE the first spawn-capable call, exactly like
+		// the other producers. Without it a crash between `new-session` and the
+		// release leaves the row at `reserved`, which a successor reclaims WITHOUT a
+		// census — and that is how a second owner reaches one transcript.
+		if (reservation) {
+			reservation =
+				advanceIdentityCreatePhase(reservation, "helper_invoked", { attemptSessionName: plan.sessionName }) ??
+				(() => {
+					throw new Error("skc_tmux_identity_create_fence_lost");
+				})();
+		}
+		const created = spawnSync(plan.tmuxCommand, plan.newSessionArgs, options);
+		// Capture the immutable native identity while we still know the session we
+		// just made is the one behind this name. psmux cannot supply it, which is
+		// exactly why it stays outside the native-proof guarantee.
+		const createdIdentity =
+			created.exitCode === 0 && !plan.isPsmux ? captureCreatedSessionIdentity(plan, spawnSync, options) : null;
+		if (created.exitCode === 0) {
+			renameTmuxWindow(
+				plan.tmuxCommand,
+				buildSkcTmuxWindowTitle(plan.project ?? plan.cwd, plan.branch),
+				spawnSync,
+				options,
+				buildSkcTmuxExactSessionTarget(plan.sessionName, { env }),
+			);
+
+			const profile = applySkcTmuxProfile({
+				tmuxCommand: plan.tmuxCommand,
+				target: plan.sessionName,
+				cwd: plan.cwd,
+				env,
+				spawnSync,
+				branch: plan.branch,
+				project: plan.project,
+				sessionId: plan.sessionId ?? null,
+				sessionStateFile: plan.sessionStateFile ?? null,
+				version: VERSION,
+			});
+			const ownershipFailure = profile.failures.find(item => item.command.args.includes("@skc-profile"));
+			if (ownershipFailure) {
+				if (!cleanupCreatedTmuxSession(plan, spawnSync, options, createdIdentity)) cleanupUncertain = true;
+				(context.diagnosticWriter ?? safeStderrWrite)(
+					formatTmuxLaunchDiagnostic("profile tagging failed", ownershipFailure.stderr),
+				);
+				return true;
+			}
+		}
+		if (created.exitCode !== 0) return false;
+		const attached = spawnSync(
+			plan.tmuxCommand,
+			["attach-session", "-t", buildSkcTmuxExactSessionTarget(plan.sessionName, { env })],
+			options,
+		);
+		if (attached.exitCode === 0) return true;
+		if (isTmuxAttachDisconnectError(attached)) {
+			(context.diagnosticWriter ?? safeStderrWrite)(
+				formatTmuxLaunchDiagnostic("attach disconnected", attached.stderr),
+			);
+			return true;
+		}
+		if (!cleanupCreatedTmuxSession(plan, spawnSync, options, createdIdentity)) cleanupUncertain = true;
+		(context.diagnosticWriter ?? safeStderrWrite)(formatTmuxLaunchDiagnostic("attach failed", attached.stderr));
 		return true;
+	} finally {
+		if (reservation) {
+			// An unproven cleanup may have left a child; its row is the only evidence
+			// a successor gets, so end the attempt without deleting it.
+			if (cleanupUncertain) abandonIdentityCreate(reservation);
+			else releaseIdentityCreate(reservation);
+		}
 	}
-	cleanupCreatedTmuxSession(plan, spawnSync, options);
-	(context.diagnosticWriter ?? safeStderrWrite)(formatTmuxLaunchDiagnostic("attach failed", attached.stderr));
-	return true;
 }

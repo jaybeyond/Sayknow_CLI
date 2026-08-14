@@ -440,9 +440,9 @@ describe("native release binary coverage", () => {
 
 		// Native and binary builds also run in the tag rehearsal; publish remains tag-only.
 		for (const job of [native, binaries]) {
-			expect(job).toContain("if: ${{ startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.rehearsal == 'tag-build-verify') }}");
+			expect(job).toContain("if: ${{ (startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/sayknow-v')) || (github.event_name == 'workflow_dispatch' && inputs.rehearsal == 'tag-build-verify') }}");
 		}
-		expect(publish).toContain("if: ${{ startsWith(github.ref, 'refs/tags/v') && github.event_name != 'workflow_dispatch' }}");
+		expect(publish).toContain("if: ${{ (startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/sayknow-v')) && github.event_name != 'workflow_dispatch' }}");
 		expect(workflow).not.toContain("release_source_verify");
 		expect(workflow).not.toContain("verify exact source SHA passed a successful main CI run");
 

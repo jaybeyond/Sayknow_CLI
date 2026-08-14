@@ -62,10 +62,10 @@ describe("SettingsSelectorComponent pet capability", () => {
 
 		openPetSetting(component);
 		const submenu = stripVTControlCharacters(component.render(80).join("\n"));
-		expect(submenu).toContain("RedSayknow (saved)");
-		expect(submenu).toContain("BlueSayknow");
+		expect(submenu).toContain("RedOctopus (saved)");
+		expect(submenu).toContain("BlueOctopus");
 		expect(submenu).toContain("Saved, unavailable");
-		expect(stripVTControlCharacters(component.render(40).join("\n"))).toContain("RedSayknow (saved)");
+		expect(stripVTControlCharacters(component.render(40).join("\n"))).toContain("RedOctopus (saved)");
 
 		component.handleInput("\x1b[B");
 		expect(onPetPreview).not.toHaveBeenCalled();
@@ -93,7 +93,24 @@ describe("SettingsSelectorComponent pet capability", () => {
 	it.each([
 		["TMUX", { TMUX: "/tmp/host,1,0" }],
 		["tmux TERM", { TERM: "tmux-256color" }],
-	])("shows multiplexer recovery guidance for %s without normal-terminal guidance", (_name, terminalEnv) => {
+	])("shows tmux-specific recovery guidance for %s", (_name, terminalEnv) => {
+		settings.set("pet.mode", "red");
+		const component = makeComponent(false, {}, terminalEnv);
+
+		openPetSetting(component);
+		const submenu = stripVTControlCharacters(component.render(200).join("\n"));
+
+		// tmux carries graphics through DCS passthrough, so the fix is a capable
+		// outer terminal — not leaving the multiplexer, and not forcing sixel.
+		expect(submenu).toContain("passthrough");
+		expect(submenu).not.toContain("outside the multiplexer");
+		expect(submenu).not.toContain("FORCE_IMAGE_PROTOCOL=sixel");
+	});
+
+	it.each([
+		["screen", { STY: "1234.pts-0.host" }],
+		["zellij", { ZELLIJ: "session" }],
+	])("keeps leave-the-multiplexer guidance for %s, which has no passthrough", (_name, terminalEnv) => {
 		settings.set("pet.mode", "red");
 		const component = makeComponent(false, {}, terminalEnv);
 
@@ -101,7 +118,6 @@ describe("SettingsSelectorComponent pet capability", () => {
 		const submenu = stripVTControlCharacters(component.render(200).join("\n"));
 
 		expect(submenu).toContain("outside the multiplexer");
-		expect(submenu).toContain("PI_FORCE_IMAGE_PROTOCOL=sixel");
 		expect(submenu).not.toContain("Ghostty");
 	});
 

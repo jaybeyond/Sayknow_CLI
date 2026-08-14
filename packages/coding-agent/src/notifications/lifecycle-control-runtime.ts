@@ -25,20 +25,26 @@ import {
 	resolveSkcTmuxCommand,
 } from "../skc-runtime/tmux-common";
 import {
+	abandonIdentityCreate,
+	advanceIdentityCreatePhase,
 	captureOwnerGenerationBaseline,
 	classifyCgroup,
 	isExactScopedBootstrapSuccessReceipt,
 	type OwnerGenerationBaseline,
 	type OwnerIsolationProbe,
 	planTmuxOwnerIsolation,
+	releaseIdentityCreate,
 	replaceOwnerGeneration,
+	reserveIdentityCreate,
 	type TmuxServerProof,
 } from "../skc-runtime/tmux-owner-isolation";
 import {
+	abandonedIdentityCensus,
 	findSkcTmuxSessionByName,
 	forceCloseSkcTmuxSession,
 	listSkcTmuxSessions,
 	type SkcTmuxSessionStatus,
+	settleAbandonedIdentity,
 } from "../skc-runtime/tmux-sessions";
 
 import type { ResumeCandidate, SessionCreateFrame, SessionLifecycleRequest, SessionLifecycleResponse } from "./index";
@@ -657,91 +663,99 @@ export function daemonSpawnCreate(
 		const sessionStateFile = lifecycleRuntimeStateFile(cwd, ids.intendedSessionId, name);
 		const stateDir = path.dirname(sessionStateFile);
 		const generation = crypto.randomUUID();
-		const previousBaseline = await captureOwnerGenerationBaseline(stateDir, ids.intendedSessionId);
-		// Detached: no interactive TTY needed (daemon-safe). These values contain
-		// only opaque ids and paths needed by the resident sidecar to publish its
-		// exact-owner terminal verdict.
-		const childEnv: Record<string, string> = {
-			SKC_TMUX_LAUNCHED: "1",
-			SKC_NOTIFICATIONS: "1",
-			SKC_SESSION_ID: ids.intendedSessionId,
-			SKC_LIFECYCLE_REQUEST_ID: ids.lifecycleRequestId,
-			[SKC_COORDINATOR_SESSION_ID_ENV]: ids.intendedSessionId,
-			[SKC_COORDINATOR_SESSION_STATE_FILE_ENV]: sessionStateFile,
-			[SKC_TMUX_OWNER_GENERATION_ENV]: generation,
-			[SKC_TMUX_OWNER_STATE_DIR_ENV]: stateDir,
-			[SKC_TMUX_OWNER_SERVER_KEY_ENV]: "default",
-		};
-		if (ids.startupPromptRef) childEnv.SKC_STARTUP_PROMPT_REF = ids.startupPromptRef;
-		const envPairs = Object.entries(childEnv)
-			.map(([k, v]) => `${k}=${shellQuote(v)}`)
-			.join(" ");
-		const command = `cd ${shellQuote(cwd)} && exec env ${envPairs} skc ${args.map(shellQuote).join(" ")}`;
-		let ownerExecution: LifecycleAttemptExecution | undefined;
+		// Shared identity create fence, acquired before the final baseline capture
+		// and before any spawn preparation. Notification create and a restore of
+		// the same coordinator identity must not both produce a child.
+		const identityKey = { stateDir, sessionId: ids.intendedSessionId, stateFile: sessionStateFile };
+		const reserved = reserveIdentityCreate(identityKey);
+		// A dead previous owner that reached the helper may have left an untagged
+		// child. Resolve it authority-first instead of treating the row as a
+		// permanent collision, which would brick this identity forever.
+		const settled = settleAbandonedIdentity(
+			reserved,
+			identityKey,
+			abandonedIdentityCensus(tmux, env, sessionStateFile),
+		);
+		// Fail closed: an unreachable fence cannot honor the one-create guarantee.
+		if (!settled.ok) throw new Error(`skc_lifecycle_identity_create_${settled.code}:${settled.diagnostic}`);
+		let reservation = settled.reservation;
+		let cleanupUncertain = false;
 		try {
-			ownerExecution = await executeLifecycleTmuxOwnerPlan({
-				tmux,
-				env,
-				sessionId: ids.intendedSessionId,
-				generation,
-				stateDir,
-				cwd,
-				sessionName: name,
-				argv: [tmux, "new-session", "-d", "-P", "-F", "#{session_id}", "-s", name, "sh", "-c", command],
-				ownerIsolationProbe: opts.ownerIsolationProbe,
-				onAttemptCreated: attempt => {
-					ownerExecution = attempt;
-				},
-				previousBaseline,
-
-				prepareSpawn: () => {
-					if (frame.target.kind === "plain_dir") fs.mkdirSync(cwd, { recursive: true });
-				},
-			});
-			if (!ownerExecution.nativeSessionId || ownerExecution.serverPid === undefined)
-				throw new Error("skc_lifecycle_owner_server_unverifiable");
-			const target = `${ownerExecution.nativeSessionId}:`;
-			await applyRequiredLifecycleTmuxMetadata(
-				tmux,
-				target,
-				env,
-				{
-					sessionId: ids.intendedSessionId,
-					sessionStateFile,
-					project: cwd,
-					ownerGeneration: generation,
-					ownerServerKey: ownerExecution.serverKey,
-				},
-				{
-					nativeSessionId: ownerExecution.nativeSessionId,
-					attemptSession: ownerExecution.attemptSession,
-					serverPid: ownerExecution.serverPid,
-				},
-			);
-			if (
-				!ownerExecution.nativeSessionId ||
-				ownerExecution.serverPid === undefined ||
-				ownerExecution.serverStartTime === undefined ||
-				!(await reproveLifecycleAttempt({
+			const previousBaseline = await captureOwnerGenerationBaseline(stateDir, ids.intendedSessionId);
+			// Detached: no interactive TTY needed (daemon-safe). These values contain
+			// only opaque ids and paths needed by the resident sidecar to publish its
+			// exact-owner terminal verdict.
+			const childEnv: Record<string, string> = {
+				SKC_TMUX_LAUNCHED: "1",
+				SKC_NOTIFICATIONS: "1",
+				SKC_SESSION_ID: ids.intendedSessionId,
+				SKC_LIFECYCLE_REQUEST_ID: ids.lifecycleRequestId,
+				[SKC_COORDINATOR_SESSION_ID_ENV]: ids.intendedSessionId,
+				[SKC_COORDINATOR_SESSION_STATE_FILE_ENV]: sessionStateFile,
+				[SKC_TMUX_OWNER_GENERATION_ENV]: generation,
+				[SKC_TMUX_OWNER_STATE_DIR_ENV]: stateDir,
+				[SKC_TMUX_OWNER_SERVER_KEY_ENV]: "default",
+			};
+			if (ids.startupPromptRef) childEnv.SKC_STARTUP_PROMPT_REF = ids.startupPromptRef;
+			const envPairs = Object.entries(childEnv)
+				.map(([k, v]) => `${k}=${shellQuote(v)}`)
+				.join(" ");
+			const command = `cd ${shellQuote(cwd)} && exec env ${envPairs} skc ${args.map(shellQuote).join(" ")}`;
+			let ownerExecution: LifecycleAttemptExecution | undefined;
+			// Record the attempt name BEFORE anything can spawn. Without this the
+			// reservation stays at `reserved`, and a successor would read a crash
+			// here as "no child can exist" and reclaim an identity that already
+			// has an untagged child.
+			reservation =
+				advanceIdentityCreatePhase(reservation, "helper_invoked", { attemptSessionName: name }) ??
+				(() => {
+					throw new Error("skc_lifecycle_identity_create_fence_lost");
+				})();
+			try {
+				ownerExecution = await executeLifecycleTmuxOwnerPlan({
 					tmux,
 					env,
-					serverKey: ownerExecution.serverKey,
-					nativeSessionId: ownerExecution.nativeSessionId,
-					attemptSession: ownerExecution.attemptSession,
-					expectedServerPid: ownerExecution.serverPid,
-					expectedServerStartTime: ownerExecution.serverStartTime,
+					sessionId: ids.intendedSessionId,
+					generation,
+					stateDir,
+					cwd,
+					sessionName: name,
+					argv: [tmux, "new-session", "-d", "-P", "-F", "#{session_id}", "-s", name, "sh", "-c", command],
 					ownerIsolationProbe: opts.ownerIsolationProbe,
-				}))
-			)
-				throw new Error("skc_lifecycle_owner_server_unverifiable");
-			if (!(await isLifecycleGenerationUnchanged(stateDir, ids.intendedSessionId, previousBaseline)))
-				throw new Error("skc_lifecycle_owner_generation_changed");
-			await replaceOwnerGeneration(stateDir, ids.intendedSessionId, generation, previousBaseline);
-		} catch (error) {
-			let cleanupFailure: unknown;
-			if (ownerExecution?.attemptCreated) {
-				try {
-					await cleanupLifecycleAttempt({
+					onAttemptCreated: attempt => {
+						ownerExecution = attempt;
+					},
+					previousBaseline,
+
+					prepareSpawn: () => {
+						if (frame.target.kind === "plain_dir") fs.mkdirSync(cwd, { recursive: true });
+					},
+				});
+				if (!ownerExecution.nativeSessionId || ownerExecution.serverPid === undefined)
+					throw new Error("skc_lifecycle_owner_server_unverifiable");
+				const target = `${ownerExecution.nativeSessionId}:`;
+				await applyRequiredLifecycleTmuxMetadata(
+					tmux,
+					target,
+					env,
+					{
+						sessionId: ids.intendedSessionId,
+						sessionStateFile,
+						project: cwd,
+						ownerGeneration: generation,
+						ownerServerKey: ownerExecution.serverKey,
+					},
+					{
+						nativeSessionId: ownerExecution.nativeSessionId,
+						attemptSession: ownerExecution.attemptSession,
+						serverPid: ownerExecution.serverPid,
+					},
+				);
+				if (
+					!ownerExecution.nativeSessionId ||
+					ownerExecution.serverPid === undefined ||
+					ownerExecution.serverStartTime === undefined ||
+					!(await reproveLifecycleAttempt({
 						tmux,
 						env,
 						serverKey: ownerExecution.serverKey,
@@ -750,23 +764,52 @@ export function daemonSpawnCreate(
 						expectedServerPid: ownerExecution.serverPid,
 						expectedServerStartTime: ownerExecution.serverStartTime,
 						ownerIsolationProbe: opts.ownerIsolationProbe,
-					});
-				} catch (cleanupError) {
-					cleanupFailure = cleanupError;
+					}))
+				)
+					throw new Error("skc_lifecycle_owner_server_unverifiable");
+				if (!(await isLifecycleGenerationUnchanged(stateDir, ids.intendedSessionId, previousBaseline)))
+					throw new Error("skc_lifecycle_owner_generation_changed");
+				await replaceOwnerGeneration(stateDir, ids.intendedSessionId, generation, previousBaseline);
+			} catch (error) {
+				let cleanupFailure: unknown;
+				if (ownerExecution?.attemptCreated) {
+					try {
+						await cleanupLifecycleAttempt({
+							tmux,
+							env,
+							serverKey: ownerExecution.serverKey,
+							nativeSessionId: ownerExecution.nativeSessionId,
+							attemptSession: ownerExecution.attemptSession,
+							expectedServerPid: ownerExecution.serverPid,
+							expectedServerStartTime: ownerExecution.serverStartTime,
+							ownerIsolationProbe: opts.ownerIsolationProbe,
+						});
+					} catch (cleanupError) {
+						cleanupFailure = cleanupError;
+					}
 				}
+				if (cleanupFailure !== undefined)
+					throw new AggregateError([error, cleanupFailure], "skc_lifecycle_cleanup_uncertain");
+				throw error;
 			}
-			if (cleanupFailure !== undefined)
-				throw new AggregateError([error, cleanupFailure], "skc_lifecycle_cleanup_uncertain");
-			throw error;
-		}
 
-		return {
-			sessionId: ids.intendedSessionId,
-			tmuxSession: name,
-			sessionStateFile,
-			endpointUrl: "",
-			topicThreadId: "",
-		};
+			return {
+				sessionId: ids.intendedSessionId,
+				tmuxSession: name,
+				sessionStateFile,
+				endpointUrl: "",
+				topicThreadId: "",
+			};
+		} catch (error) {
+			// `skc_lifecycle_cleanup_uncertain` means a child may survive that we
+			// could not remove. Keep the reservation so its evidence outlives us.
+			if (error instanceof AggregateError && /cleanup_uncertain/.test(String(error.message)))
+				cleanupUncertain = true;
+			throw error;
+		} finally {
+			if (cleanupUncertain) abandonIdentityCreate(reservation);
+			else releaseIdentityCreate(reservation);
+		}
 	};
 }
 
@@ -912,81 +955,88 @@ export function daemonResumeSession(
 		const sessionStateFile = lifecycleRuntimeStateFile(resolvedResumeCwd, resumeId, name);
 		const stateDir = path.dirname(sessionStateFile);
 		const generation = crypto.randomUUID();
-		const previousBaseline = await captureOwnerGenerationBaseline(stateDir, resumeId);
-		const childEnv: Record<string, string> = {
-			SKC_TMUX_LAUNCHED: "1",
-			SKC_NOTIFICATIONS: "1",
-			[SKC_COORDINATOR_SESSION_ID_ENV]: resumeId,
-			[SKC_COORDINATOR_SESSION_STATE_FILE_ENV]: sessionStateFile,
-			[SKC_TMUX_OWNER_GENERATION_ENV]: generation,
-			[SKC_TMUX_OWNER_STATE_DIR_ENV]: stateDir,
-			[SKC_TMUX_OWNER_SERVER_KEY_ENV]: "default",
-		};
-		const envPairs = Object.entries(childEnv)
-			.map(([key, value]) => `${key}=${shellQuote(value)}`)
-			.join(" ");
-		const command = `cd ${shellQuote(resolvedResumeCwd)} && exec env ${envPairs} skc --resume ${shellQuote(resumeId)}`;
-		let ownerExecution: LifecycleAttemptExecution | undefined;
+		// Same shared fence as create: a cold restart reuses the historical id, so
+		// it can collide with a restore of that exact identity.
+		const identityKey = { stateDir, sessionId: resumeId, stateFile: sessionStateFile };
+		const reserved = reserveIdentityCreate(identityKey);
+		// A dead previous owner that reached the helper may have left an untagged
+		// child. Resolve it authority-first instead of treating the row as a
+		// permanent collision, which would brick this identity forever.
+		const settled = settleAbandonedIdentity(
+			reserved,
+			identityKey,
+			abandonedIdentityCensus(tmux, env, sessionStateFile),
+		);
+		// Fail closed: an unreachable fence cannot honor the one-create guarantee.
+		if (!settled.ok) throw new Error(`skc_lifecycle_identity_create_${settled.code}:${settled.diagnostic}`);
+		let reservation = settled.reservation;
+		let cleanupUncertain = false;
 		try {
-			ownerExecution = await executeLifecycleTmuxOwnerPlan({
-				tmux,
-				env,
-				sessionId: resumeId,
-				generation,
-				stateDir,
-				cwd: resolvedResumeCwd,
-				sessionName: name,
-				argv: [tmux, "new-session", "-d", "-P", "-F", "#{session_id}", "-s", name, "sh", "-c", command],
-				ownerIsolationProbe: opts.ownerIsolationProbe,
-				onAttemptCreated: attempt => {
-					ownerExecution = attempt;
-				},
-				previousBaseline,
-			});
-			if (!ownerExecution.nativeSessionId || ownerExecution.serverPid === undefined)
-				throw new Error("skc_lifecycle_owner_server_unverifiable");
-			const tgt = `${ownerExecution.nativeSessionId}:`;
-			await applyRequiredLifecycleTmuxMetadata(
-				tmux,
-				tgt,
-				env,
-				{
-					sessionId: resumeId,
-					sessionStateFile,
-					project: resolvedResumeCwd,
-					ownerGeneration: generation,
-					ownerServerKey: ownerExecution.serverKey,
-				},
-				{
-					nativeSessionId: ownerExecution.nativeSessionId,
-					attemptSession: ownerExecution.attemptSession,
-					serverPid: ownerExecution.serverPid,
-				},
-			);
-			if (
-				!ownerExecution.nativeSessionId ||
-				ownerExecution.serverPid === undefined ||
-				ownerExecution.serverStartTime === undefined ||
-				!(await reproveLifecycleAttempt({
+			const previousBaseline = await captureOwnerGenerationBaseline(stateDir, resumeId);
+			const childEnv: Record<string, string> = {
+				SKC_TMUX_LAUNCHED: "1",
+				SKC_NOTIFICATIONS: "1",
+				[SKC_COORDINATOR_SESSION_ID_ENV]: resumeId,
+				[SKC_COORDINATOR_SESSION_STATE_FILE_ENV]: sessionStateFile,
+				[SKC_TMUX_OWNER_GENERATION_ENV]: generation,
+				[SKC_TMUX_OWNER_STATE_DIR_ENV]: stateDir,
+				[SKC_TMUX_OWNER_SERVER_KEY_ENV]: "default",
+			};
+			const envPairs = Object.entries(childEnv)
+				.map(([key, value]) => `${key}=${shellQuote(value)}`)
+				.join(" ");
+			const command = `cd ${shellQuote(resolvedResumeCwd)} && exec env ${envPairs} skc --resume ${shellQuote(resumeId)}`;
+			let ownerExecution: LifecycleAttemptExecution | undefined;
+			// Record the attempt name BEFORE anything can spawn. Without this the
+			// reservation stays at `reserved`, and a successor would read a crash
+			// here as "no child can exist" and reclaim an identity that already
+			// has an untagged child.
+			reservation =
+				advanceIdentityCreatePhase(reservation, "helper_invoked", { attemptSessionName: name }) ??
+				(() => {
+					throw new Error("skc_lifecycle_identity_create_fence_lost");
+				})();
+			try {
+				ownerExecution = await executeLifecycleTmuxOwnerPlan({
 					tmux,
 					env,
-					serverKey: ownerExecution.serverKey,
-					nativeSessionId: ownerExecution.nativeSessionId,
-					attemptSession: ownerExecution.attemptSession,
-					expectedServerPid: ownerExecution.serverPid,
-					expectedServerStartTime: ownerExecution.serverStartTime,
+					sessionId: resumeId,
+					generation,
+					stateDir,
+					cwd: resolvedResumeCwd,
+					sessionName: name,
+					argv: [tmux, "new-session", "-d", "-P", "-F", "#{session_id}", "-s", name, "sh", "-c", command],
 					ownerIsolationProbe: opts.ownerIsolationProbe,
-				}))
-			)
-				throw new Error("skc_lifecycle_owner_server_unverifiable");
-			if (!(await isLifecycleGenerationUnchanged(stateDir, resumeId, previousBaseline)))
-				throw new Error("skc_lifecycle_owner_generation_changed");
-			await replaceOwnerGeneration(stateDir, resumeId, generation, previousBaseline);
-		} catch (error) {
-			let cleanupFailure: unknown;
-			if (ownerExecution?.attemptCreated) {
-				try {
-					await cleanupLifecycleAttempt({
+					onAttemptCreated: attempt => {
+						ownerExecution = attempt;
+					},
+					previousBaseline,
+				});
+				if (!ownerExecution.nativeSessionId || ownerExecution.serverPid === undefined)
+					throw new Error("skc_lifecycle_owner_server_unverifiable");
+				const tgt = `${ownerExecution.nativeSessionId}:`;
+				await applyRequiredLifecycleTmuxMetadata(
+					tmux,
+					tgt,
+					env,
+					{
+						sessionId: resumeId,
+						sessionStateFile,
+						project: resolvedResumeCwd,
+						ownerGeneration: generation,
+						ownerServerKey: ownerExecution.serverKey,
+					},
+					{
+						nativeSessionId: ownerExecution.nativeSessionId,
+						attemptSession: ownerExecution.attemptSession,
+						serverPid: ownerExecution.serverPid,
+					},
+				);
+				if (
+					!ownerExecution.nativeSessionId ||
+					ownerExecution.serverPid === undefined ||
+					ownerExecution.serverStartTime === undefined ||
+					!(await reproveLifecycleAttempt({
 						tmux,
 						env,
 						serverKey: ownerExecution.serverKey,
@@ -995,24 +1045,53 @@ export function daemonResumeSession(
 						expectedServerPid: ownerExecution.serverPid,
 						expectedServerStartTime: ownerExecution.serverStartTime,
 						ownerIsolationProbe: opts.ownerIsolationProbe,
-					});
-				} catch (cleanupError) {
-					cleanupFailure = cleanupError;
+					}))
+				)
+					throw new Error("skc_lifecycle_owner_server_unverifiable");
+				if (!(await isLifecycleGenerationUnchanged(stateDir, resumeId, previousBaseline)))
+					throw new Error("skc_lifecycle_owner_generation_changed");
+				await replaceOwnerGeneration(stateDir, resumeId, generation, previousBaseline);
+			} catch (error) {
+				let cleanupFailure: unknown;
+				if (ownerExecution?.attemptCreated) {
+					try {
+						await cleanupLifecycleAttempt({
+							tmux,
+							env,
+							serverKey: ownerExecution.serverKey,
+							nativeSessionId: ownerExecution.nativeSessionId,
+							attemptSession: ownerExecution.attemptSession,
+							expectedServerPid: ownerExecution.serverPid,
+							expectedServerStartTime: ownerExecution.serverStartTime,
+							ownerIsolationProbe: opts.ownerIsolationProbe,
+						});
+					} catch (cleanupError) {
+						cleanupFailure = cleanupError;
+					}
 				}
+				if (cleanupFailure !== undefined)
+					throw new AggregateError([error, cleanupFailure], "skc_lifecycle_cleanup_uncertain");
+				throw error;
 			}
-			if (cleanupFailure !== undefined)
-				throw new AggregateError([error, cleanupFailure], "skc_lifecycle_cleanup_uncertain");
-			throw error;
-		}
 
-		return {
-			sessionId: resumeId,
-			tmuxSession: name,
-			sessionStateFile,
-			endpointUrl: "",
-			topicThreadId: "",
-			mode: "cold_restarted",
-		};
+			return {
+				sessionId: resumeId,
+				tmuxSession: name,
+				sessionStateFile,
+				endpointUrl: "",
+				topicThreadId: "",
+				mode: "cold_restarted",
+			};
+		} catch (error) {
+			// `skc_lifecycle_cleanup_uncertain` means a child may survive that we
+			// could not remove. Keep the reservation so its evidence outlives us.
+			if (error instanceof AggregateError && /cleanup_uncertain/.test(String(error.message)))
+				cleanupUncertain = true;
+			throw error;
+		} finally {
+			if (cleanupUncertain) abandonIdentityCreate(reservation);
+			else releaseIdentityCreate(reservation);
+		}
 	};
 }
 

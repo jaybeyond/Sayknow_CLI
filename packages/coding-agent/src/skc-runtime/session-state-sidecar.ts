@@ -6,6 +6,7 @@ import type { AssistantMessage } from "@sayknow-cli/ai";
 import { normalizePathForComparison, postmortem } from "@sayknow-cli/utils";
 import { withFileLock } from "../config/file-lock";
 import { sessionRuntimeDir } from "./session-layout";
+import { publishRestorePointer, readTranscriptSessionId } from "./session-restore";
 import {
 	isValidOwnerIntent,
 	lifecyclePaths,
@@ -754,6 +755,41 @@ async function withCoordinatorTransactionLock<T>(stateFile: string, operation: (
 	return await withStateFileLock(coordinatorTransactionLockFile(stateFile), operation);
 }
 
+/**
+ * Mirrors a live session into the global restore index.
+ *
+ * Sidecars are scattered across every project, so restore cannot find them by
+ * scanning; this pointer is the only discovery path. Failures are swallowed on
+ * purpose — a missing pointer costs a restore candidate, while a throw here
+ * would break the session that was merely reporting its state.
+ */
+function publishRestorePointerForSidecar(stateFile: string, payload: Record<string, unknown>): void {
+	try {
+		const state = payload.state;
+		if (state === "completed" || state === "errored") return;
+		const sessionId = typeof payload.session_id === "string" ? payload.session_id : "";
+		const sessionFile = typeof payload.session_file === "string" ? payload.session_file : "";
+		const cwd = typeof payload.cwd === "string" ? payload.cwd : "";
+		if (!sessionId || !sessionFile || !cwd) return;
+		// The coordinator id is NOT what `skc --resume` resolves. A normal tmux child
+		// mints its own session id, so the transcript header is the only authority.
+		// Without it a pointer would name a conversation that cannot be reopened, so
+		// publishing is skipped rather than guessed.
+		const skcSessionId = readTranscriptSessionId(sessionFile);
+		if (!skcSessionId) return;
+		publishRestorePointer({
+			coordinatorSessionId: sessionId,
+			stateFile,
+			skcSessionId,
+			sessionFile,
+			cwd,
+			branch: typeof payload.branch === "string" ? payload.branch : null,
+		});
+	} catch {
+		// Never let restore bookkeeping break session state reporting.
+	}
+}
+
 async function writeStateFile(stateFile: string, payload: Record<string, unknown>): Promise<void> {
 	await fs.mkdir(path.dirname(stateFile), { recursive: true });
 	await Bun.write(stateFile, `${JSON.stringify(payload)}\n`);
@@ -807,6 +843,11 @@ export async function persistCoordinatorRuntimeStateFromEvent(
 						};
 						if (shouldSkipRuntimeStateWrite(previous, payload, nowMs)) return;
 						await writeStateFile(stateFile, payload);
+						// Publish the restore pointer only AFTER the sidecar it points at is
+						// durable, so a pointer can never reference a state that was never
+						// written. Terminal states publish nothing: a finished session is
+						// not a restore candidate.
+						publishRestorePointerForSidecar(stateFile, payload);
 					}),
 			),
 	);

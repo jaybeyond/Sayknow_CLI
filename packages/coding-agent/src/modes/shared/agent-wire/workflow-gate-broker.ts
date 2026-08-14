@@ -96,6 +96,8 @@ export interface AskSelectedAckRecoveryParticipant {
 /** SDK-native surface for emitting a workflow gate and awaiting its answer. */
 export interface WorkflowGateEmitter {
 	supportsRemoteGateAnswers(): boolean;
+	/** True when an unattended run has been negotiated for this emitter (control-plane emitters). */
+	isUnattended?(): boolean;
 	emitGate(input: OpenGateInput): Promise<unknown>;
 	onGateEmitted?(listener: (gate: WorkflowGate) => void): () => void;
 	resolveGate?(response: WorkflowGateResponse): Promise<WorkflowGateResolution>;

@@ -795,16 +795,18 @@ export async function processResponsesStream<TApi extends Api>(
 }
 
 /**
- * Mark tool-call blocks left incomplete by a length-truncated response so the
- * agent loop rejects them instead of executing a best-effort partial parse.
+ * Mark tool-call blocks whose arguments are structurally incomplete when a
+ * response stops for length.
  *
- * The universal signal is finalization: a call that never received its terminal
- * `output_item.done` (passed in via `isFinalized`) was cut off mid-arguments.
- * This covers both JSON function calls and raw-input custom tools without
- * mis-flagging a *completed* custom tool whose raw input is not valid JSON. As a
- * defensive secondary, a finalized JSON function call whose buffered arguments
- * still don't parse (e.g. a misbehaving relay) is flagged too. No-op unless the
- * turn stopped for length.
+ * A missing `output_item.done` normally means the call was cut off. Responses
+ * can also hit the output-token limit after emitting a complete JSON object but
+ * before finalizing the item (for example, after a long whitespace tail). A
+ * non-finalized JSON call is therefore safe only when its exact buffered text
+ * parses as complete JSON. Custom tools carry raw input with no structural
+ * completion marker, so they still require finalization.
+ *
+ * Finalized JSON calls get the same defensive parse check for misbehaving
+ * relays. No-op unless the turn stopped for length.
  *
  * Shared by both Responses providers (`openai-responses`, `openai-codex-responses`).
  */
@@ -816,15 +818,17 @@ export function flagTruncatedToolCalls(
 	if (stopReason !== "length") return;
 	for (const block of output.content) {
 		if (block.type !== "toolCall") continue;
+		const partial = (block as { partialJson?: string }).partialJson;
 		if (!isFinalized(block)) {
-			block.incompleteArguments = true;
+			if (block.customWireName || partial === undefined || !isCompleteJson(partial)) {
+				block.incompleteArguments = true;
+			}
 			continue;
 		}
-		// Finalized: custom tools carry raw (non-JSON) input and are complete once
-		// finalized; only JSON function calls get the parse double-check.
-		if (!block.customWireName) {
-			const partial = (block as { partialJson?: string }).partialJson;
-			if (partial !== undefined && !isCompleteJson(partial)) block.incompleteArguments = true;
+		// Finalized custom tools carry raw (non-JSON) input. Only JSON function
+		// calls need the defensive parse check.
+		if (!block.customWireName && partial !== undefined && !isCompleteJson(partial)) {
+			block.incompleteArguments = true;
 		}
 	}
 }

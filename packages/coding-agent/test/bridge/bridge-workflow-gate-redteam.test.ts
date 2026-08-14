@@ -2,8 +2,8 @@ import { describe, expect, it } from "bun:test";
 import { createBridgeFetchHandler } from "@sayknow-cli/coding-agent/modes/bridge/bridge-mode";
 import { approvalGate } from "@sayknow-cli/coding-agent/modes/shared/agent-wire/approval-gate";
 import {
-	BridgeFrameSequencer,
-	toBridgeWorkflowGateFrame,
+	AgentWireFrameSequencer,
+	toAgentWireWorkflowGateFrame,
 } from "@sayknow-cli/coding-agent/modes/shared/agent-wire/event-envelope";
 import {
 	type BridgeHandshakeAccepted,
@@ -129,10 +129,10 @@ describe("workflow_gate red-team negotiation", () => {
 describe("workflow_gate red-team frames", () => {
 	it("creates replayable monotonic frames with unique ids and gate correlation", () => {
 		const broker = new WorkflowGateBroker("run-redteam", new MemoryGateStore());
-		const sequencer = new BridgeFrameSequencer("sess-redteam");
+		const sequencer = new AgentWireFrameSequencer("sess-redteam");
 		const frames = Array.from({ length: 5 }, (_, index) => {
 			const gate = broker.openGate(approvalGate({ summary: `gate ${index}` }));
-			return { gate, frame: toBridgeWorkflowGateFrame(gate, sequencer) };
+			return { gate, frame: toAgentWireWorkflowGateFrame(gate, sequencer) };
 		});
 		expect(frames.map(({ frame }) => frame.seq)).toEqual([1, 2, 3, 4, 5]);
 		expect(new Set(frames.map(({ frame }) => frame.frame_id)).size).toBe(frames.length);
@@ -142,7 +142,7 @@ describe("workflow_gate red-team frames", () => {
 			expect(frame.payload.gate_id).toBe(gate.gate_id);
 		}
 		const otherGate = broker.openGate(approvalGate({ summary: "other" }));
-		const otherFrame = toBridgeWorkflowGateFrame(otherGate, new BridgeFrameSequencer("sess-other"));
+		const otherFrame = toAgentWireWorkflowGateFrame(otherGate, new AgentWireFrameSequencer("sess-other"));
 		expect(otherFrame.session_id).toBe("sess-other");
 		expect(otherFrame.seq).toBe(1);
 		expect(otherFrame.correlation_id).toBe(otherGate.gate_id);

@@ -1,6 +1,7 @@
-import { afterAll, afterEach, beforeAll, describe, expect, it, spyOn, vi } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, spyOn, vi } from "bun:test";
 import { Buffer } from "node:buffer";
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import { VERSION } from "@sayknow-cli/coding-agent";
 import type { Args } from "@sayknow-cli/coding-agent/cli/args";
@@ -16,6 +17,12 @@ import {
 } from "@sayknow-cli/coding-agent/skc-runtime/launch-tmux";
 import { __setBinaryResolverForTests } from "@sayknow-cli/coding-agent/skc-runtime/psmux-detect";
 import { sessionRuntimeDir } from "@sayknow-cli/coding-agent/skc-runtime/session-layout";
+import {
+	__setOwnerIncarnationReaderForTests,
+	releaseIdentityCreate,
+	reserveIdentityCreate,
+} from "@sayknow-cli/coding-agent/skc-runtime/tmux-owner-isolation";
+import { setAgentDir } from "@sayknow-cli/utils/dirs";
 
 function args(overrides: Partial<Args> = {}): Args {
 	return {
@@ -522,7 +529,7 @@ describe("default SKC tmux launch", () => {
 		spyOn(Bun, "spawnSync").mockReturnValue(
 			spawnResult(
 				0,
-				`current-skc\t1\t0\t1770000000\t1\troot\t1\t12345\tfeature/demo\tfeature-demo\t/repo\tcurrent-session\t/state\t${VERSION}`,
+				`current-skc\t1\t0\t1770000000\t1\troot\t1\t12345\tfeature/demo\tfeature-demo\t/repo\tcurrent-session\t/state\t\t${VERSION}\t$1`,
 			),
 		);
 		const plan = buildDefaultTmuxLaunchPlan({
@@ -546,7 +553,7 @@ describe("default SKC tmux launch", () => {
 		spyOn(Bun, "spawnSync").mockReturnValue(
 			spawnResult(
 				0,
-				`current-skc\t1\t0\t1770000000\t1\troot\t1\t12345\tfeature/demo\tfeature-demo\t/repo\tcurrent-session\t/state\t${VERSION}`,
+				`current-skc\t1\t0\t1770000000\t1\troot\t1\t12345\tfeature/demo\tfeature-demo\t/repo\tcurrent-session\t/state\t\t${VERSION}\t$1`,
 			),
 		);
 		const plan = buildDefaultTmuxLaunchPlan({
@@ -605,6 +612,8 @@ describe("default SKC tmux launch", () => {
 			diagnosticWriter: message => diagnostics.push(message),
 			spawnSync: (command, spawnArgs, options) => {
 				calls.push({ command, args: spawnArgs, options });
+				// Real tmux answers this; a stub that does not is not modelling tmux.
+				if (spawnArgs[0] === "display-message") return { exitCode: 0, stdout: "$3\t7777\t1700000000\n" };
 				if (spawnArgs[0] === "attach-session") return { exitCode: 1, stderr: "attach failed" };
 				return { exitCode: 0 };
 			},
@@ -613,7 +622,8 @@ describe("default SKC tmux launch", () => {
 		expect(handled).toBe(true);
 		expect(calls.some(call => call.args[0] === "new-session")).toBe(true);
 		expect(calls.some(call => call.args[0] === "attach-session")).toBe(true);
-		expect(calls.some(call => call.args[0] === "kill-session")).toBe(true);
+		// Cleanup is now proven and atomic: one invocation both checks and kills.
+		expect(calls.some(call => call.args[0] === "if-shell")).toBe(true);
 		expect(diagnostics[0]).toStartWith("skc --tmux failed after creating tmux session: attach failed.");
 	});
 
@@ -728,7 +738,16 @@ describe("default SKC tmux launch", () => {
 
 		expect(result.skipped).toBe(false);
 		expect(result.failures).toEqual([]);
-		expect(calls).toHaveLength(4);
+		// Name the profile rather than counting it: adding a setting must be a
+		// deliberate edit here, and a silently dropped one still fails.
+		expect(calls.map(call => call.args[call.args.length - 2])).toEqual([
+			"mouse",
+			"@skc-profile",
+			"set-clipboard",
+			"terminal-features",
+			"allow-passthrough",
+			"mode-style",
+		]);
 		expect(calls.every(call => call.command === "tmux")).toBe(true);
 		expect(calls.every(call => call.args.includes("-t") && call.args.includes("%7"))).toBe(true);
 		expect(calls.flatMap(call => call.args)).not.toContain("-g");
@@ -935,13 +954,16 @@ describe("default SKC tmux launch", () => {
 			spawnSync: (command, spawnArgs, options) => {
 				calls.push({ command, args: spawnArgs, options });
 				if (spawnArgs.includes("@skc-profile")) return { exitCode: 1, stderr: "no server running on /tmp/tmux" };
+				// Real tmux answers this; a stub that does not is not modelling tmux.
+				if (spawnArgs[0] === "display-message") return { exitCode: 0, stdout: "$3\t7777\t1700000000\n" };
 				return { exitCode: 0 };
 			},
 		});
 
 		expect(handled).toBe(true);
 		expect(calls.some(call => call.args[0] === "new-session")).toBe(true);
-		expect(calls.some(call => call.args[0] === "kill-session")).toBe(true);
+		// Cleanup is now proven and atomic: one invocation both checks and kills.
+		expect(calls.some(call => call.args[0] === "if-shell")).toBe(true);
 		expect(diagnostics).toHaveLength(1);
 		expect(diagnostics[0]).toStartWith("skc --tmux failed after creating tmux session: profile tagging failed.");
 		expect(diagnostics[0].length).toBeLessThan(320);
@@ -1003,6 +1025,8 @@ describe("default SKC tmux launch", () => {
 			diagnosticWriter: message => diagnostics.push(message),
 			spawnSync: (command, spawnArgs, options) => {
 				calls.push({ command, args: spawnArgs, options });
+				// Real tmux answers this; a stub that does not is not modelling tmux.
+				if (spawnArgs[0] === "display-message") return { exitCode: 0, stdout: "$3\t7777\t1700000000\n" };
 				if (spawnArgs[0] === "attach-session") return { exitCode: 1, stderr: "attach failed" };
 				return { exitCode: 0 };
 			},
@@ -1011,7 +1035,8 @@ describe("default SKC tmux launch", () => {
 		expect(handled).toBe(true);
 		expect(calls.some(call => call.args[0] === "new-session")).toBe(true);
 		expect(calls.some(call => call.args[0] === "attach-session")).toBe(true);
-		expect(calls.some(call => call.args[0] === "kill-session")).toBe(true);
+		// Cleanup is now proven and atomic: one invocation both checks and kills.
+		expect(calls.some(call => call.args[0] === "if-shell")).toBe(true);
 		expect(diagnostics).toHaveLength(1);
 		expect(diagnostics[0]).toStartWith("skc --tmux failed after creating tmux session: attach failed.");
 		expect(diagnostics[0].length).toBeLessThan(320);
@@ -1125,6 +1150,8 @@ describe("default SKC tmux launch", () => {
 			currentBranch: "",
 			existingBranchSessionName: null,
 			spawnSync: (_command, spawnArgs) => {
+				// Real tmux answers this; a stub that does not is not modelling tmux.
+				if (spawnArgs[0] === "display-message") return { exitCode: 0, stdout: "$3\t7777\t1700000000\n" };
 				if (spawnArgs[0] === "attach-session") return { exitCode: 1, stderr: "attach failed" };
 				return { exitCode: 0 };
 			},
@@ -1284,4 +1311,270 @@ it("emits a UTF-16LE BOM and a script-block &-invocation for native Windows --tm
 	// No bare `& '<flag>'` invocation should leak into the inner script,
 	// because that is what previously made pwsh reject the encoded command.
 	expect(script).not.toMatch(/&\s+'-{1,2}[A-Za-z]/);
+});
+
+describe("default launch identity create fence", () => {
+	// The fence database lives under the agent dir; isolate it so these tests
+	// never write into the developer's real ~/.skc.
+	const originalAgentDir = process.env.SKC_CODING_AGENT_DIR;
+	beforeEach(() => {
+		const isolated = fs.mkdtempSync(path.join(os.tmpdir(), "skc-fence-agent-"));
+		fenceAgentRoots.push(isolated);
+		setAgentDir(path.join(isolated, "agent"));
+	});
+	const fenceAgentRoots: string[] = [];
+
+	const fenceDirs: string[] = [];
+
+	function fenceEnv(overrides: Record<string, string> = {}): {
+		env: Record<string, string>;
+		stateDir: string;
+		stateFile: string;
+		sessionId: string;
+		lockDatabase: string;
+	} {
+		const stateDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "skc-launch-fence-")));
+		fenceDirs.push(stateDir);
+		const sessionId = "launch-coordinator-1";
+		const stateFile = path.join(stateDir, "runtime-state.json");
+		fs.writeFileSync(stateFile, "{}\n");
+		return {
+			stateDir,
+			stateFile,
+			sessionId,
+			lockDatabase: path.join(stateDir, sessionId, "owner-lifecycle", "owner-locks.sqlite"),
+			env: {
+				SKC_COORDINATOR_SESSION_ID: sessionId,
+				SKC_COORDINATOR_SESSION_STATE_FILE: stateFile,
+				...overrides,
+			},
+		};
+	}
+
+	afterEach(() => {
+		__setOwnerIncarnationReaderForTests(null);
+		if (originalAgentDir) setAgentDir(originalAgentDir);
+		for (const dir of fenceAgentRoots.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
+		for (const dir of fenceDirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
+	});
+
+	it("serializes a non-psmux default created launch with a restore-shaped contender", () => {
+		const { env, stateDir, stateFile, sessionId } = fenceEnv({ SKC_PSMUX_DETECTION: "off" });
+		__setOwnerIncarnationReaderForTests(() => "darwin:1700000000:515151");
+
+		// A restore-shaped contender owns the identity. It is this process, so the
+		// production liveness probe sees a genuinely live owner.
+		const contender = reserveIdentityCreate(
+			{ stateDir, sessionId, stateFile },
+			{ ownerPid: process.pid, ownerIncarnation: "darwin:1700000000:515151" },
+		);
+		expect(contender.ok).toBe(true);
+		if (!contender.ok) return;
+
+		const calls: Array<{ command: string; args: string[] }> = [];
+		const diagnostics: string[] = [];
+		const handled = launchDefaultTmuxIfNeeded({
+			parsed: args({ messages: ["hello"], tmux: true }),
+			rawArgs: ["--tmux", "hello"],
+			cwd: stateDir,
+			env,
+			argv: ["bun", "packages/coding-agent/src/cli.ts"],
+			execPath: "/bin/bun",
+			platform: "darwin",
+			tty: interactiveTty,
+			tmuxAvailable: true,
+			existingBranchSessionName: null,
+			currentBranch: null,
+			diagnosticWriter: message => {
+				diagnostics.push(message);
+			},
+			spawnSync: (command, spawnArgs) => {
+				calls.push({ command, args: spawnArgs });
+				return { exitCode: 0 };
+			},
+		});
+
+		// The loser performs no tmux mutation at all: no new-session, no
+		// attach-session, no kill-session.
+		expect(handled).toBe(true);
+		expect(calls).toEqual([]);
+		expect(diagnostics.join("\n")).toContain("identity_reserved_live");
+
+		releaseIdentityCreate(contender.reservation);
+	});
+
+	it("kills the created session by immutable native id, not by its reusable name", () => {
+		const { env } = fenceEnv({ SKC_PSMUX_DETECTION: "off" });
+		const calls: Array<{ command: string; args: string[] }> = [];
+		const handled = launchDefaultTmuxIfNeeded({
+			parsed: args({ messages: ["hello"], tmux: true }),
+			rawArgs: ["--tmux", "hello"],
+			cwd: "/repo",
+			env,
+			argv: ["bun", "packages/coding-agent/src/cli.ts"],
+			execPath: "/bin/bun",
+			platform: "darwin",
+			tty: interactiveTty,
+			tmuxAvailable: true,
+			existingBranchSessionName: null,
+			currentBranch: null,
+			spawnSync: (command, spawnArgs) => {
+				calls.push({ command, args: spawnArgs });
+				if (spawnArgs[0] === "display-message") return { exitCode: 0, stdout: "$7\t4242\t1700000000\n" };
+				// Force the attach to fail so the cleanup path runs.
+				if (spawnArgs[0] === "attach-session") return { exitCode: 1, stderr: "attach refused" };
+				return { exitCode: 0 };
+			},
+		});
+
+		expect(handled).toBe(true);
+		// Check and kill must be ONE tmux invocation: a separate check leaves a
+		// window for the target to be swapped. A bare kill-session by name is
+		// exactly the unsafe shape this replaces.
+		expect(calls.some(call => call.args[0] === "kill-session")).toBe(false);
+		const guarded = calls.find(call => call.args[0] === "if-shell");
+		expect(guarded).toBeDefined();
+		expect(guarded?.args).toEqual([
+			"if-shell",
+			"-t",
+			"$7",
+			"-F",
+			"#{&&:#{==:#{pid},4242},#{&&:#{==:#{session_id},$7},#{==:#{session_created},1700000000}}}",
+			"kill-session -t $7",
+		]);
+	});
+
+	// These prove the DURABLE consequence, not just which commands ran: after an
+	// unproven cleanup the reservation row must survive, and after a proven one it
+	// must be gone. A later owner sees exactly that difference.
+	function launchThenProbeReservation(
+		hasSession: () => { exitCode: number | null; stderr?: string; signalCode?: string },
+	): { env: Record<string, string>; stateDir: string; stateFile: string; sessionId: string } {
+		const fixture = fenceEnv({ SKC_PSMUX_DETECTION: "off" });
+		launchDefaultTmuxIfNeeded({
+			parsed: args({ messages: ["hello"], tmux: true }),
+			rawArgs: ["--tmux", "hello"],
+			cwd: fixture.stateDir,
+			env: fixture.env,
+			argv: ["bun", "packages/coding-agent/src/cli.ts"],
+			execPath: "/bin/bun",
+			platform: "darwin",
+			tty: interactiveTty,
+			tmuxAvailable: true,
+			existingBranchSessionName: null,
+			currentBranch: null,
+			spawnSync: (_command, spawnArgs) => {
+				if (spawnArgs[0] === "display-message") return { exitCode: 0, stdout: "$7\t4242\t1700000000\n" };
+				if (spawnArgs[0] === "has-session") return hasSession();
+				if (spawnArgs[0] === "attach-session") return { exitCode: 1, stderr: "attach refused" };
+				return { exitCode: 0 };
+			},
+		});
+		return fixture;
+	}
+
+	it("keeps the reservation when the cleanup probe cannot answer", () => {
+		// The probe was killed by a signal, so removal is unproven.
+		const fixture = launchThenProbeReservation(() => ({ exitCode: null, signalCode: "SIGKILL" }));
+		__setOwnerIncarnationReaderForTests(() => "darwin:1700000000:909090");
+		const successor = reserveIdentityCreate(
+			{ stateDir: fixture.stateDir, sessionId: fixture.sessionId, stateFile: fixture.stateFile },
+			{ ownerPid: 4242001, ownerIncarnation: "darwin:1700000000:909090", probeLiveness: () => "dead" },
+		);
+		// The row survived, so a successor must resolve it instead of creating.
+		expect(successor.ok).toBe(false);
+		if (successor.ok) return;
+		expect(successor.code).toBe("identity_orphan_unresolved");
+		expect(successor.existing?.attemptSessionName).toBeTruthy();
+	});
+
+	it("keeps the reservation when the probe fails for an operational reason", () => {
+		// Non-zero, but tmux never said the session is absent.
+		const fixture = launchThenProbeReservation(() => ({
+			exitCode: 1,
+			stderr: "error connecting to /tmp/tmux-501/default (Permission denied)",
+		}));
+		__setOwnerIncarnationReaderForTests(() => "darwin:1700000000:909091");
+		const successor = reserveIdentityCreate(
+			{ stateDir: fixture.stateDir, sessionId: fixture.sessionId, stateFile: fixture.stateFile },
+			{ ownerPid: 4242002, ownerIncarnation: "darwin:1700000000:909091", probeLiveness: () => "dead" },
+		);
+		expect(successor.ok).toBe(false);
+		if (successor.ok) return;
+		expect(successor.code).toBe("identity_orphan_unresolved");
+	});
+
+	it("releases the reservation once tmux confirms the session is gone", () => {
+		const fixture = launchThenProbeReservation(() => ({
+			exitCode: 1,
+			stderr: "can't find session: $7",
+		}));
+		__setOwnerIncarnationReaderForTests(() => "darwin:1700000000:909092");
+		const successor = reserveIdentityCreate(
+			{ stateDir: fixture.stateDir, sessionId: fixture.sessionId, stateFile: fixture.stateFile },
+			{ ownerPid: 4242003, ownerIncarnation: "darwin:1700000000:909092", probeLiveness: () => "dead" },
+		);
+		// Removal was proven, so nothing blocks the next creator.
+		expect(successor.ok).toBe(true);
+	});
+
+	it("refuses cleanup entirely when the immutable identity cannot be captured", () => {
+		const { env } = fenceEnv({ SKC_PSMUX_DETECTION: "off" });
+		const calls: Array<{ command: string; args: string[] }> = [];
+		launchDefaultTmuxIfNeeded({
+			parsed: args({ messages: ["hello"], tmux: true }),
+			rawArgs: ["--tmux", "hello"],
+			cwd: "/repo",
+			env,
+			argv: ["bun", "packages/coding-agent/src/cli.ts"],
+			execPath: "/bin/bun",
+			platform: "darwin",
+			tty: interactiveTty,
+			tmuxAvailable: true,
+			existingBranchSessionName: null,
+			currentBranch: null,
+			spawnSync: (command, spawnArgs) => {
+				calls.push({ command, args: spawnArgs });
+				// The provider cannot report the session id.
+				if (spawnArgs[0] === "display-message") return { exitCode: 1 };
+				if (spawnArgs[0] === "attach-session") return { exitCode: 1, stderr: "attach refused" };
+				return { exitCode: 0 };
+			},
+		});
+
+		// Leaking a session is recoverable; killing an unrelated one is not. With no
+		// proof of what we would kill, nothing is killed — and never by name.
+		expect(calls.some(call => call.args[0] === "kill-session")).toBe(false);
+		expect(calls.some(call => call.args[0] === "if-shell")).toBe(false);
+	});
+
+	it("keeps resolved psmux default creation outside the native-proof create fence", () => {
+		const { env, lockDatabase } = fenceEnv({ SKC_TMUX_COMMAND: "psmux", SKC_PSMUX_COMMAND: "psmux" });
+
+		const calls: Array<{ command: string; args: string[] }> = [];
+		const handled = launchDefaultTmuxIfNeeded({
+			parsed: args({ messages: ["hello"], tmux: true }),
+			rawArgs: ["--tmux", "hello"],
+			cwd: "/repo",
+			env,
+			argv: ["bun", "packages/coding-agent/src/cli.ts"],
+			execPath: "/bin/bun",
+			platform: "win32",
+			tty: interactiveTty,
+			tmuxAvailable: true,
+			existingBranchSessionName: null,
+			currentBranch: null,
+			spawnSync: (command, spawnArgs) => {
+				calls.push({ command, args: spawnArgs });
+				return { exitCode: 0 };
+			},
+		});
+
+		// psmux has no immutable native session identity, so the carveout must not
+		// touch the native-proof fence at all — not even to create its database.
+		expect(handled).toBe(true);
+		expect(fs.existsSync(lockDatabase)).toBe(false);
+		// Existing psmux launch behavior is untouched.
+		expect(calls.some(call => call.args[0] === "new-session")).toBe(true);
+	});
 });

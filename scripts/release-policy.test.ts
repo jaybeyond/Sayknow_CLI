@@ -33,9 +33,9 @@ describe("stable release policy", () => {
 		expect(jobSection(ci, "binaries")).toContain("needs: [native]");
 		expect(jobSection(ci, "publish")).toContain("needs: [native, binaries]");
 		for (const stage of ["native", "binaries"]) {
-			expect(jobSection(ci, stage)).toContain("if: ${{ startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.rehearsal == 'tag-build-verify') }}");
+			expect(jobSection(ci, stage)).toContain("if: ${{ (startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/sayknow-v')) || (github.event_name == 'workflow_dispatch' && inputs.rehearsal == 'tag-build-verify') }}");
 		}
-		expect(jobSection(ci, "publish")).toContain("if: ${{ startsWith(github.ref, 'refs/tags/v') && github.event_name != 'workflow_dispatch' }}");
+		expect(jobSection(ci, "publish")).toContain("if: ${{ (startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/sayknow-v')) && github.event_name != 'workflow_dispatch' }}");
 
 		const publish = jobSection(ci, "publish");
 		expect(publish).toContain("--prepare-evidence --evidence-dir");
@@ -49,7 +49,7 @@ describe("stable release policy", () => {
 		const ci = await workflow();
 		const concurrency = ci.slice(ci.indexOf("concurrency:\n"), ci.indexOf("\njobs:"));
 
-		expect(concurrency).toContain("cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/v') }}");
+		expect(concurrency).toContain("cancel-in-progress: ${{ !(startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/sayknow-v')) }}");
 		expect(concurrency).not.toContain("cancel-in-progress: true");
 	});
 
@@ -75,7 +75,7 @@ describe("stable release policy", () => {
 		// The monolithic `test` job is now a sharded graph; every job in that graph,
 		// plus the bounded `check` job, must stay excluded on release tags.
 		for (const job of ["check", "main_plan", "main_native", "main_shards", "test"]) {
-			expect(jobSection(ci, job)).toContain("!startsWith(github.ref, 'refs/tags/v')");
+			expect(jobSection(ci, job)).toContain("!(startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/sayknow-v'))");
 		}
 	});
 

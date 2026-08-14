@@ -387,7 +387,7 @@ describe("AgentSession managed fallback upstream request counts", () => {
 
 		expect(calls).toEqual([selector(primary), selector(fallback)]);
 		expect(suppressSpy).toHaveBeenCalledWith(selector(primary), expect.any(Number));
-		expect(modelRegistry.getSelectorSuppressionStatus(selector(fallback))).toBe("none");
+		expect(modelRegistry.isSelectorSuppressed(selector(fallback))).toBe(false);
 		await Bun.sleep(5);
 
 		await session!.prompt("Return after cooldown expiry");
