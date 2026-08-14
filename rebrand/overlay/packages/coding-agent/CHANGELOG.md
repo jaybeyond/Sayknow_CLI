@@ -5,6 +5,138 @@ This file tracks the **fork's own releases**; upstream's full feature history li
 in that project. Each release notes the upstream version it is built on.
 
 
+## [Unreleased]
+
+## [0.5.2] — 2026-08-14
+
+Built on upstream **gajae-code v0.12.0**.
+
+### Fixed (unattended workflow gates were unanswerable through the control plane)
+
+`UnattendedSessionControlPlane.emitGate` opened gates without a broker
+continuation, so every gate it emitted was quarantined as
+`opened_without_continuation` and could never be answered; its `advance` hook
+also settled the waiter early, violating the broker's post-advance liveness
+check, and accepted gates then failed terminalization for lack of a proof. The
+control plane now registers a live continuation, settles waiters in
+`completeAccepted` (mirroring the session-side emitter), and declares the
+designed `not_published` terminal proof. The ask tool regained the fork's gate
+semantics on top of that: a negotiated unattended emitter wins over an attended
+UI, clarification answers surface the user's question instead of aborting as a
+cancel, multi-select keeps its empty-"Next" semantics through the gate schema,
+and gate metadata carries the Next/Done navigation label again.
+
+### Fixed (ask wire schema: deep-interview intent branches and gate addressing)
+
+The deep-interview intent contract is enforced **on the wire** again: ask's
+`deepInterview` metadata is a union of three mutually exclusive strict branches
+(ordinary round / Round-0 `intent_contract` locked to `component:
+"review-topology"` / post-Round-0 `intent_review` with `round >= 1`), so a
+provider that only sees the JSON schema cannot combine a manifest lock with a
+reduction review or attach either to the wrong round. Questions also regained
+the `workflowGate` stage/kind override for addressing non-deep-interview gates,
+and such overridden questions are excluded from the interview recorder.
+
+### Fixed (`SKC_PY` / `PI_PY` / `PI_JS` eval backend selection was ignored)
+
+`resolveEvalBackends` existed but the eval tool never called it: backend
+allowance was read from settings only, so `SKC_PY=js` still spawned the Python
+kernel. The tool now resolves allowance through the documented precedence
+(`SKC_PY`, then legacy `PI_PY`/`PI_JS`, then `eval.py`/`eval.js` settings).
+
+### Fixed (stale model discovery result could overwrite a fresher one)
+
+Overlapping `refreshProvider` calls for the same provider raced without any
+ordering guard: whichever fetch *completed* last published its discovery state
+and model list, so a slow stale response could erase the models a fresher
+refresh had just delivered. Discovery now carries a monotonic per-provider
+sequence and only the newest-started refresh may publish state or contribute
+models.
+
+### Fixed (post-merge repair: type-check and test contracts realigned)
+
+The upstream merges left the workspace `check` red for several releases: test
+files frozen at fork v0.4.7 kept exercising APIs their source had since dropped
+(session-sticky canonical model resolution, `getSelectorSuppressionStatus`,
+`refreshPresetProfiles`, the pre-broker in-process `AcpAgent`, the fork-era
+bridge-client `WorkflowGate` surface). Stale suites superseded by current
+coverage were removed, the survivors were realigned to the shipped APIs, the
+form-elicitation bridge kept its only coverage via a ported focused suite, the
+`node-pty` dev dependency the merge dropped from `@sayknow-cli/tui` is restored,
+and the extracted model helper modules (`config/model-auth`,
+`config/model-bindings-applier`, `config/model-discovery-manager`) are now
+explicitly unexported, matching the documented package surface.
+
+### Fixed (todo_write truncation and retry loops)
+
+Structurally complete JSON tool calls now execute even when a Responses provider
+hits its output-token limit before emitting the final item event. Invalid todo
+payloads retry at most once, while transport failures and repeated errors fail
+open so the requested work continues without visible todo tracking.
+
+### Fixed (v0.5.0 upstream merge reverted the fork's tmux graphics support)
+
+The v0.12.0 upstream merge overwrote `packages/tui/src/tui.ts` and silently
+dropped three fork-only behaviors, which is why the pet was unavailable in every
+tmux session and `packages/tui/test/sixel-probe.test.ts` shipped with three
+failing tests:
+
+- the capability probe refused to run under any multiplexer, so
+  `isSixelMultiplexerEnabled()` became dead code
+- the sixel probe was no longer wrapped in tmux's DCS passthrough envelope, so
+  tmux answered for a client it knows nothing about
+- the `CSI 16 t` cell-size query lost its passthrough wrapper (the v0.4.6 fix),
+  so tmux reported a cell size the outer terminal never uses
+
+All three are restored, with the probe deadline back at 600 ms under tmux to
+cover the passthrough round trip.
+
+### Fixed (transcript images stacked over the text under tmux)
+
+Enabling the sixel probe under tmux also switched INLINE graphics on, and the
+inline path wrapped every raster in the DCS passthrough envelope. Passthrough
+writes pixels straight into the OUTER terminal's image plane at its *physical*
+cursor: tmux neither positions that cursor for the pane nor records the pixels,
+so tool-result screenshots landed in the wrong row and survived every repaint —
+each render stacked another copy over the transcript.
+
+Inline placements now follow the same ownership rule the pet already used:
+
+- tmux advertising the `sixel` terminal-feature (which the SKC tmux profile sets
+  automatically) parses the raster into its own screen model, so the raster is
+  written raw and scroll / erase / resize move the image with its text.
+- Without that feature the inline render returns the `[image/png …]` placeholder
+  instead. An image welded to the outer terminal's physical cursor for the rest
+  of the session is worse than no image.
+- Absolutely positioned overlays (the pet) are unaffected: they carry their own
+  coordinates through the envelope and remain the only passthrough user.
+
+### Added (Sayknow Pet under tmux on kitty-protocol terminals)
+
+Ghostty, Kitty and WezTerm implement kitty graphics and no sixel at all, so the
+sixel probe alone left them with no pet inside tmux. SKC now also forwards a
+kitty capability query (`a=q`) through the passthrough envelope. tmux cannot
+answer it on the terminal's behalf — it does not implement the protocol — so an
+`OK` coming back is genuine end-to-end evidence, unlike tmux's compile-time DA1
+sixel claim.
+
+- A successful query enables a dedicated **overlay** channel
+  (`setTmuxOverlayImageProtocol`) rather than inline image rendering: absolutely
+  positioned art can carry its own cursor addressing through the envelope, while
+  inline placements would land at tmux's stale physical cursor.
+- Overlay payloads now carry the pane origin (`#{pane_top}`, `#{pane_left}`, and
+  top status lines), so a split window or a top status bar no longer draws the
+  pet in the wrong place. This also fixes the pre-existing sixel-fallback path.
+- `allow-passthrough` is requested pane-locally at startup, so a tmux pane the
+  user created by hand works without manual configuration.
+- Kill switch: `SKC_KITTY_MULTIPLEXER=0`.
+- The tmux-specific unavailable warning no longer tells users to leave the
+  multiplexer or to force sixel; it names the actual requirement.
+
+Verified end to end on Ghostty 1.3.1 + tmux 3.6b: pane passthrough is enabled
+automatically, the probe reports `ImageProtocol.Kitty`, and the outer terminal's
+real cell metrics (16x34) replace the 9x18 default.
+
 ## [0.5.1] — 2026-07-29
 
 Built on upstream **gajae-code v0.12.0**.

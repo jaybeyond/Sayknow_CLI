@@ -7,6 +7,10 @@ in that project. Each release notes the upstream version it is built on.
 
 ## [Unreleased]
 
+## [0.5.2] — 2026-08-14
+
+Built on upstream **gajae-code v0.12.0**.
+
 ### Fixed (unattended workflow gates were unanswerable through the control plane)
 
 `UnattendedSessionControlPlane.emitGate` opened gates without a broker
