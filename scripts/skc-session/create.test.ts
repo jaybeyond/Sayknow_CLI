@@ -9,6 +9,20 @@ const createScript = path.join(import.meta.dir, "create.sh");
 const postmortemScript = path.join(import.meta.dir, "postmortem.sh");
 const harnessOwnerScript = path.join(import.meta.dir, "harness-tmux-owner-start.sh");
 
+// create.sh requires bash >= 4 (`mapfile -d ''`, plus here-documents nested in
+// process substitutions that bash 3.2 mis-parses). macOS ships 3.2, so these
+// tests exercise the real script only where the interpreter can run it; CI runs
+// on bash 5 and keeps full coverage.
+const bashMajor = Number.parseInt(
+	Bun.spawnSync(["bash", "-c", "printf %s \"${BASH_VERSINFO[0]}\""]).stdout.toString().trim(),
+	10,
+);
+const supportedBash = Number.isInteger(bashMajor) && bashMajor >= 4;
+if (!supportedBash) {
+	console.warn(`skipping skc-session create tests: bash ${bashMajor || "unknown"} found, >= 4 required`);
+}
+const bashTest = supportedBash ? test : test.skip;
+
 async function executable(file: string, content: string) {
 	await fs.mkdir(path.dirname(file), { recursive: true });
 	await Bun.write(file, content);
@@ -211,7 +225,7 @@ afterEach(async () => {
 });
 
 describe("skc-session create public owner lifecycle", () => {
-	test("rejects missing binaries, directories, git worktrees, and detached branches", async () => {
+	bashTest("rejects missing binaries, directories, git worktrees, and detached branches", async () => {
 		const root = await fs.mkdtemp(path.join(os.tmpdir(), "skc-create-validation-")); roots.push(root);
 		const legacyRoutingArgs = Bun.spawnSync(["bash", createScript, "x", root, "channel", "@mention"], { stderr: "pipe" });
 		expect(legacyRoutingArgs.exitCode).toBe(2); expect(legacyRoutingArgs.stderr.toString()).toContain("<session-name> <worktree-path>");
@@ -228,7 +242,7 @@ describe("skc-session create public owner lifecycle", () => {
 		expect(detachedResult.exitCode).toBe(1); expect(detachedResult.stderr.toString()).toContain("could not determine branch");
 	});
 
-	test("writes worktree baseline and public creation metadata before planning", async () => {
+	bashTest("writes worktree baseline and public creation metadata before planning", async () => {
 		const root = await fs.mkdtemp(path.join(os.tmpdir(), "skc-create-metadata-")); roots.push(root);
 		const dir = await worktree(root); const state = path.join(root, "state"); const bin = await fixture(root);
 		const name = `metadata-${Date.now()}`; const socket = `skc-${name}`; sessions.push({ name, socket });
@@ -238,7 +252,7 @@ describe("skc-session create public owner lifecycle", () => {
 		expect(await Bun.file(path.join(state, "creation-state.json")).json()).toMatchObject({ kind: "creation_started", session_id: name });
 	});
 
-	test("records an initially dirty worktree without claiming it as new recovery work", async () => {
+	bashTest("records an initially dirty worktree without claiming it as new recovery work", async () => {
 		const root = await fs.mkdtemp(path.join(os.tmpdir(), "skc-create-dirty-")); roots.push(root);
 		const dir = await worktree(root); await Bun.write(path.join(dir, "README.md"), "dirty\n"); const state = path.join(root, "state"); const bin = await fixture(root);
 		const name = `dirty-${Date.now()}`; sessions.push({ name, socket: `skc-${name}` });
@@ -246,7 +260,7 @@ describe("skc-session create public owner lifecycle", () => {
 		expect(await Bun.file(path.join(state, "metadata.json")).json()).toMatchObject({ worktree_baseline_dirty: true });
 	});
 
-	test("accepts direct canonical plans, re-proves the isolated server, and tags the owner session", async () => {
+	bashTest("accepts direct canonical plans, re-proves the isolated server, and tags the owner session", async () => {
 		const root = await fs.mkdtemp(path.join(os.tmpdir(), "skc-create-direct-")); roots.push(root);
 		const dir = await worktree(root); const state = path.join(root, "state"); const bin = await fixture(root); const proofLog = path.join(root, "proof.log");
 		const name = `direct-${Date.now()}`; const socket = `skc-${name}`; sessions.push({ name, socket });
@@ -279,7 +293,7 @@ describe("skc-session create public owner lifecycle", () => {
 		expect(planRequests.filter(request => request.op === "plan")).toHaveLength(2);
 	});
 
-	test("rejects a post-spawn server start-time mismatch before tagging or generation publication", async () => {
+	bashTest("rejects a post-spawn server start-time mismatch before tagging or generation publication", async () => {
 		const root = await fs.mkdtemp(path.join(os.tmpdir(), "skc-create-postspawn-start-")); roots.push(root);
 		const dir = await worktree(root); const state = path.join(root, "state"); const bin = await fixture(root);
 		const name = `postspawn-start-${Date.now()}`; const socket = `skc-${name}`; sessions.push({ name, socket });
@@ -292,7 +306,7 @@ describe("skc-session create public owner lifecycle", () => {
 		expect((await fs.readdir(lifecycle)).some(file => file.startsWith("creation-failed-"))).toBe(true);
 	});
 
-	test("accepts scoped plans with exactly the owner bootstrap stdin line", async () => {
+	bashTest("accepts scoped plans with exactly the owner bootstrap stdin line", async () => {
 		const root = await fs.mkdtemp(path.join(os.tmpdir(), "skc-create-scoped-")); roots.push(root);
 		const dir = await worktree(root); const state = path.join(root, "state"); const bin = await fixture(root, "scoped");
 		const name = `scoped-${Date.now()}`; sessions.push({ name, socket: `skc-${name}` });
@@ -300,7 +314,7 @@ describe("skc-session create public owner lifecycle", () => {
 		expect(await Bun.file(path.join(state, "started.json")).exists()).toBe(true);
 	});
 
-test("fails closed for malformed plans before creating an owner", async () => {
+bashTest("fails closed for malformed plans before creating an owner", async () => {
 	const root = await fs.mkdtemp(path.join(os.tmpdir(), "skc-create-invalid-plan-")); roots.push(root);
 	const dir = await worktree(root); const bad = path.join(root, "bad-skc"); const name = `invalid-plan-${Date.now()}`;
 	await executable(bad, `#!/usr/bin/env python3
@@ -319,7 +333,7 @@ else:
 	expect(Bun.spawnSync(["tmux", "-L", `skc-${name}`, "has-session", "-t", `=${name}`], { stdout: "pipe", stderr: "pipe" }).exitCode).not.toBe(0);
 });
 
-	test("runner classifies terminal runtime completion as normal cleanup", async () => {
+	bashTest("runner classifies terminal runtime completion as normal cleanup", async () => {
 		const root = await fs.mkdtemp(path.join(os.tmpdir(), "skc-create-completed-")); roots.push(root);
 		const dir = await worktree(root); const state = path.join(root, "state");
 		const runner = `python3 - <<'PY'\nimport json, os\njson.dump({"session_id": os.environ["SKC_SESSION_NAME"], "cwd": os.environ["SKC_SESSION_WORKDIR"], "owner_generation": os.environ["SKC_SESSION_OWNER_GENERATION"], "state":"completed", "final_response":{"source":"agent_end"}}, open(os.environ["SKC_COORDINATOR_SESSION_STATE_FILE"], "w"))\nPY\nexit 0`;
@@ -328,7 +342,7 @@ else:
 		expect(await Bun.file(path.join(state, "final.json")).json()).toMatchObject({ owner_exit_reason: "terminal_runtime_cleanup", severity: "normal", runtime_terminal: true, runtime_terminal_state: "completed" });
 	});
 
-	test("runner ignores arbitrary runtime-state payload classifications", async () => {
+	bashTest("runner ignores arbitrary runtime-state payload classifications", async () => {
 		const root = await fs.mkdtemp(path.join(os.tmpdir(), "skc-create-postmortem-")); roots.push(root);
 		const dir = await worktree(root); const state = path.join(root, "state");
 		const hostile = "private runtime payload must never persist";
@@ -340,7 +354,7 @@ else:
 		expect(JSON.parse(final)).toMatchObject({ owner_exit_reason: "terminal_runtime_cleanup", severity: "normal", runtime_terminal: true });
 	});
 
-test("runner ignores a stale prompt acceptance marker from another generation", async () => {
+bashTest("runner ignores a stale prompt acceptance marker from another generation", async () => {
 	const root = await fs.mkdtemp(path.join(os.tmpdir(), "skc-create-recovery-")); roots.push(root);
 	const dir = await worktree(root); const state = path.join(root, "state"); await fs.mkdir(state, { recursive: true });
 	await Bun.write(path.join(state, "prompt-accepted.json"), JSON.stringify({ schema_version: 1, kind: "prompt_accepted", session_id: "other", owner_generation: "stale", worktreeBaselineDirty: false }));
@@ -349,7 +363,7 @@ test("runner ignores a stale prompt acceptance marker from another generation", 
 	expect(await Bun.file(path.join(state, "final.json")).json()).toMatchObject({ owner_exit_reason: "owner_exited_before_prompt_acceptance", prompt_accepted: false, worktree_changed_since_baseline: true });
 });
 
-test("ships only human-visible tmux lifecycle helpers", async () => {
+bashTest("ships only human-visible tmux lifecycle helpers", async () => {
 	const [create, postmortem, harnessOwner] = await Promise.all([
 		Bun.file(createScript).text(),
 		Bun.file(postmortemScript).text(),
@@ -372,7 +386,7 @@ test("ships only human-visible tmux lifecycle helpers", async () => {
 	expect(harnessOwner).toContain("MACHINE_CONTROL=Coordinator MCP, ACP, or Sayknow-CLI SDK");
 });
 
-test("passes branch and coordinator identity to the raw owner without private lifecycle payloads", async () => {
+bashTest("passes branch and coordinator identity to the raw owner without private lifecycle payloads", async () => {
 	const root = await fs.mkdtemp(path.join(os.tmpdir(), "skc-create-owner-env-")); roots.push(root);
 	const dir = await worktree(root); const state = path.join(root, "state");
 	const runner = `python3 - <<'PY'
@@ -387,7 +401,7 @@ sleep 2`;
 });
 
 
-test("records one generation-bound recovery only after a prior incident replacement is started", async () => {
+bashTest("records one generation-bound recovery only after a prior incident replacement is started", async () => {
 	const root = await fs.mkdtemp(path.join(os.tmpdir(), "skc-create-replacement-")); roots.push(root);
 	const dir = await worktree(root); const state = path.join(root, "state"); const bin = await fixture(root);
 	const name = `replacement-${Date.now()}`; const socket = `skc-${name}`; sessions.push({ name, socket });
@@ -402,7 +416,7 @@ test("records one generation-bound recovery only after a prior incident replacem
 	expect(recovery.owner_generation).not.toBe("prior-generation");
 });
 
-test("reconciles an immediately replaced missing owner before publishing the next generation", async () => {
+bashTest("reconciles an immediately replaced missing owner before publishing the next generation", async () => {
 	const root = await fs.mkdtemp(path.join(os.tmpdir(), "skc-create-immediate-replace-")); roots.push(root);
 	const dir = await worktree(root); const state = path.join(root, "state"); const bin = await fixture(root); const name = `immediate-${Date.now()}`; const socket = `skc-${name}`; sessions.push({ name, socket });
 	expect(Bun.spawnSync(["bash", createScript, name, dir], { env: env({ SKC_BIN: bin, SKC_SESSION_STATE_DIR: state }) }).exitCode).toBe(0);
@@ -418,7 +432,7 @@ test("reconciles an immediately replaced missing owner before publishing the nex
 	expect(await Bun.file(path.join(state, "recovery.json")).json()).toMatchObject({ owner_generation: current, prior_owner_generation: prior });
 });
 
-test("publishes one coherent generation-bound creation failure and removes stale completion aliases", async () => {
+bashTest("publishes one coherent generation-bound creation failure and removes stale completion aliases", async () => {
 	const root = await fs.mkdtemp(path.join(os.tmpdir(), "skc-create-failure-receipt-")); roots.push(root);
 	const dir = await worktree(root); const state = path.join(root, "state"); const name = `failure-${Date.now()}`; sessions.push({ name, socket: `skc-${name}` });
 	const bin = path.join(root, "bin", "skc");
@@ -453,7 +467,7 @@ else:
 	for (const alias of ["started.json", "prompt-accepted.json", "terminal.json", "final.json", "recovery.json"]) expect(await Bun.file(path.join(state, alias)).exists()).toBe(false);
 });
 
-test("retries a generation-bound failed create without synthesizing owner loss or recovery", async () => {
+bashTest("retries a generation-bound failed create without synthesizing owner loss or recovery", async () => {
 	const root = await fs.mkdtemp(path.join(os.tmpdir(), "skc-create-failed-retry-")); roots.push(root);
 	const dir = await worktree(root); const state = path.join(root, "state"); const bin = await fixture(root); const name = `failed-retry-${Date.now()}`; const socket = `skc-${name}`; sessions.push({ name, socket });
 	const failingTmux = path.join(root, "tmux-fail");
@@ -469,7 +483,7 @@ test("retries a generation-bound failed create without synthesizing owner loss o
 	expect(await Bun.file(path.join(state, "recovery.json")).exists()).toBe(false);
 });
 
-test("does not recover an incident again in a third generation when a canonical recovery exists", async () => {
+bashTest("does not recover an incident again in a third generation when a canonical recovery exists", async () => {
 	const root = await fs.mkdtemp(path.join(os.tmpdir(), "skc-create-third-recovery-")); roots.push(root);
 	const dir = await worktree(root); const state = path.join(root, "state"); const bin = await fixture(root);
 	const name = `third-recovery-${Date.now()}`; sessions.push({ name, socket: `skc-${name}` }); const lifecycle = path.join(state, name, "owner-lifecycle");
@@ -482,7 +496,7 @@ test("does not recover an incident again in a third generation when a canonical 
 	expect(await Bun.file(path.join(state, "incident.json")).exists()).toBe(false);
 });
 
-	test("does not accept a terminal runtime record from another session", async () => {
+	bashTest("does not accept a terminal runtime record from another session", async () => {
 		const root = await fs.mkdtemp(path.join(os.tmpdir(), "skc-create-mismatch-")); roots.push(root);
 		const dir = await worktree(root); const state = path.join(root, "state");
 		const runner = `python3 - <<'PY'\nimport json, os\njson.dump({"session_id":"other", "state":"completed"}, open(os.environ["SKC_COORDINATOR_SESSION_STATE_FILE"], "w"))\nPY\nexit 0`;
@@ -491,7 +505,7 @@ test("does not recover an incident again in a third generation when a canonical 
 		expect(await Bun.file(path.join(state, "final.json")).json()).toMatchObject({ owner_exit_reason: "owner_exited_before_prompt_acceptance", runtime_terminal: false });
 	});
 
-	test("does not classify a stale terminal runtime receipt as a replacement generation cleanup", async () => {
+	bashTest("does not classify a stale terminal runtime receipt as a replacement generation cleanup", async () => {
 		const root = await fs.mkdtemp(path.join(os.tmpdir(), "skc-create-stale-runtime-")); roots.push(root);
 		const dir = await worktree(root); const state = path.join(root, "state"); await fs.mkdir(state, { recursive: true });
 		const name = `stale-runtime-${Date.now()}`; sessions.push({ name, socket: `skc-${name}` });
@@ -502,7 +516,7 @@ test("does not recover an incident again in a third generation when a canonical 
 		expect(await Bun.file(path.join(state, "final.json")).json()).toMatchObject({ owner_exit_reason: "owner_exited_before_prompt_acceptance", runtime_terminal: false });
 	});
 
-	test("writes terminal lifecycle state even when the runner exits unsuccessfully", async () => {
+	bashTest("writes terminal lifecycle state even when the runner exits unsuccessfully", async () => {
 		const root = await fs.mkdtemp(path.join(os.tmpdir(), "skc-create-terminal-")); roots.push(root);
 		const dir = await worktree(root); const state = path.join(root, "state"); const bin = await fixture(root, "direct", "exit 23");
 		const name = `terminal-${Date.now()}`; sessions.push({ name, socket: `skc-${name}` });
@@ -514,7 +528,7 @@ test("does not recover an incident again in a third generation when a canonical 
 		expect(await Bun.file(path.join(state, name, "owner-lifecycle", `final-${generation.generation}.json`)).exists()).toBe(true);
 	});
 
-	test("monitor consumes one absolute seven-second recovery budget across polling and publication", async () => {
+	bashTest("monitor consumes one absolute seven-second recovery budget across polling and publication", async () => {
 		const create = await Bun.file(createScript).text();
 		expect(create).toContain('last_seen_ms="$(date +%s%3N)"');
 		expect(create).toContain('deadline_at_ms=$((last_seen_ms + 7000))');
@@ -523,7 +537,7 @@ test("does not recover an incident again in a third generation when a canonical 
 		expect(create).not.toContain('deadline=$((SECONDS + 7))');
 	});
 
-	test("anchors recovery to the pre-probe timestamp and rejects a crossed publication deadline", async () => {
+	bashTest("anchors recovery to the pre-probe timestamp and rejects a crossed publication deadline", async () => {
 		const root = await fs.mkdtemp(path.join(os.tmpdir(), "skc-monitor-deadline-"));
 		roots.push(root);
 		const source = await Bun.file(createScript).text();
@@ -595,7 +609,7 @@ skc_session_write_vanished_json() { : >"$1"; }
 		expect(await Bun.file(clockCount).text()).toBe("5");
 	});
 
-	test("monitor writes immutable verdict and incident markers after owner loss without claiming recovery", async () => {
+	bashTest("monitor writes immutable verdict and incident markers after owner loss without claiming recovery", async () => {
 		const root = await fs.mkdtemp(path.join(os.tmpdir(), "skc-create-monitor-")); roots.push(root);
 		const dir = await worktree(root); const state = path.join(root, "state"); const bin = await fixture(root);
 		const name = `monitor-${Date.now()}`; const socket = `skc-${name}`; sessions.push({ name, socket });
@@ -630,7 +644,7 @@ skc_session_write_vanished_json() { : >"$1"; }
 		expect(await Bun.file(path.join(state, "metadata.json")).json()).toMatchObject({ owner_generation: recoveredGeneration.generation });
 	}, 10_000);
 
-test("serializes current aliases and refuses a stale generation overwrite", async () => {
+bashTest("serializes current aliases and refuses a stale generation overwrite", async () => {
 	const root = await fs.mkdtemp(path.join(os.tmpdir(), "skc-alias-generation-")); roots.push(root);
 	const lifecycle = path.join(root, "session", "owner-lifecycle");
 	await fs.mkdir(lifecycle, { recursive: true });
@@ -660,7 +674,7 @@ test("serializes current aliases and refuses a stale generation overwrite", asyn
 	expect(await Bun.file(aliasPath).json()).toEqual(currentAlias);
 });
 
-test("keeps creation-cleanup and monitor failure canonicals immutable and rejects stale aliases", async () => {
+bashTest("keeps creation-cleanup and monitor failure canonicals immutable and rejects stale aliases", async () => {
 	const root = await fs.mkdtemp(path.join(os.tmpdir(), "skc-failure-publication-")); roots.push(root);
 	const lifecycle = path.join(root, "session", "owner-lifecycle"); await fs.mkdir(lifecycle, { recursive: true });
 	const generationPath = path.join(lifecycle, "generation.json"); const aliasPath = path.join(root, "creation-cleanup-failure.json");
@@ -683,7 +697,7 @@ test("keeps creation-cleanup and monitor failure canonicals immutable and reject
 	expect(create).toContain('skc_session_publish_current_alias "$monitor_failure_canonical"');
 });
 
-test("keeps canonical generation receipts immutable while aliases publish the current generation", async () => {
+bashTest("keeps canonical generation receipts immutable while aliases publish the current generation", async () => {
 	const [create, postmortem] = await Promise.all([Bun.file(createScript).text(), Bun.file(postmortemScript).text()]);
 	expect(create).toContain('verdict-$OWNER_GENERATION.json');
 	expect(create).toContain('incident-$OWNER_GENERATION.json');
@@ -693,7 +707,7 @@ test("keeps canonical generation receipts immutable while aliases publish the cu
 	expect(postmortem).toContain("os.link(temporary, path)");
 });
 
-test("rejects a non-UUID prior generation before reconciliation or alias publication", async () => {
+bashTest("rejects a non-UUID prior generation before reconciliation or alias publication", async () => {
 	const root = await fs.mkdtemp(path.join(os.tmpdir(), "skc-create-invalid-generation-")); roots.push(root);
 	const dir = await worktree(root); const state = path.join(root, "state"); const bin = await fixture(root); const name = `invalid-generation-${Date.now()}`; sessions.push({ name, socket: `skc-${name}` });
 	const lifecycle = path.join(state, name, "owner-lifecycle"); const generation = "not-a-canonical-uuid";
@@ -707,7 +721,7 @@ test("rejects a non-UUID prior generation before reconciliation or alias publica
 	for (const canonical of ["verdict", "incident", "vanished", "terminal", "final"]) expect(await Bun.file(path.join(lifecycle, `${canonical}-${generation}.json`)).exists()).toBe(false);
 });
 
-test("validates expected raw verdicts only against the matching consumed intent", async () => {
+bashTest("validates expected raw verdicts only against the matching consumed intent", async () => {
 	const root = await fs.mkdtemp(path.join(os.tmpdir(), "skc-consumed-intent-"));
 	roots.push(root);
 	const session = "session";
@@ -768,7 +782,7 @@ test("validates expected raw verdicts only against the matching consumed intent"
 	expect(validate().exitCode).not.toBe(0);
 });
 
-test("accepts only canonical UTC calendar timestamps for raw expected and unexpected verdicts", async () => {
+bashTest("accepts only canonical UTC calendar timestamps for raw expected and unexpected verdicts", async () => {
 	const root = await fs.mkdtemp(path.join(os.tmpdir(), "skc-raw-verdict-timestamps-")); roots.push(root);
 	const session = "timestamp-session", generation = "123e4567-e89b-42d3-a456-426614174000", serverKey = "private-socket";
 	const generationPath = path.join(root, "generation.json"), intentPath = path.join(root, `intent-${generation}.json`), verdictPath = path.join(root, `verdict-${generation}.json`);
@@ -785,7 +799,7 @@ test("accepts only canonical UTC calendar timestamps for raw expected and unexpe
 	}
 });
 
-test("forwards SIGTERM dispatch only for an exact live owner intent receipt", async () => {
+bashTest("forwards SIGTERM dispatch only for an exact live owner intent receipt", async () => {
 	const root = await fs.mkdtemp(path.join(os.tmpdir(), "skc-supervisor-intent-")); roots.push(root);
 	const dir = await worktree(root); const state = path.join(root, "state"); const setupBin = await fixture(root);
 	const name = `intent-${Date.now()}`; const socket = `skc-${name}`; sessions.push({ name, socket });
@@ -826,7 +840,7 @@ test("forwards SIGTERM dispatch only for an exact live owner intent receipt", as
 }, 20_000);
 
 
-test("records a nonzero terminal observer adapter failure while forwarding SIGTERM", async () => {
+bashTest("records a nonzero terminal observer adapter failure while forwarding SIGTERM", async () => {
 	const root = await fs.mkdtemp(path.join(os.tmpdir(), "skc-supervisor-adapter-failure-")); roots.push(root);
 	const dir = await worktree(root); const state = path.join(root, "state"); const setupBin = await fixture(root); const name = `adapter-failure-${Date.now()}`; sessions.push({ name, socket: `skc-${name}` });
 	expect(Bun.spawnSync(["bash", createScript, name, dir], { env: env({ SKC_BIN: setupBin, SKC_SESSION_STATE_DIR: state }) }).exitCode).toBe(0);
@@ -847,7 +861,7 @@ signal.pause()
 	expect(await Bun.file(path.join(state, "supervisor-failure.json")).json()).toMatchObject({ kind: "supervisor_failure", session_id: name, owner_generation: generation });
 });
 
-test("records finalizer failure without replacing the owner exit status", async () => {
+bashTest("records finalizer failure without replacing the owner exit status", async () => {
 	const root = await fs.mkdtemp(path.join(os.tmpdir(), "skc-finalizer-failure-")); roots.push(root);
 	const dir = await worktree(root); const state = path.join(root, "state"); const setupBin = await fixture(root); const name = `finalizer-failure-${Date.now()}`; sessions.push({ name, socket: `skc-${name}` });
 	expect(Bun.spawnSync(["bash", createScript, name, dir], { env: env({ SKC_BIN: setupBin, SKC_SESSION_STATE_DIR: state }) }).exitCode).toBe(0);
@@ -860,7 +874,7 @@ test("records finalizer failure without replacing the owner exit status", async 
 	expect(await Bun.file(path.join(state, "finalization-failure.json")).json()).toMatchObject({ kind: "finalization_failed", session_id: name, owner_generation: generation, owner_exit_code: 23, finalizer_exit_code: 24 });
 });
 
-test("records rollback failures and immutable collision faults", async () => {
+bashTest("records rollback failures and immutable collision faults", async () => {
 	for (const kind of ["rollback", "probe", "canonical-collision"] as const) {
 		const root = await fs.mkdtemp(path.join(os.tmpdir(), `skc-creation-cleanup-${kind}-`)); roots.push(root);
 		const dir = await worktree(root); const state = path.join(root, "state"); const bin = await fixture(root); const name = `creation-cleanup-${kind}-${Date.now()}`; sessions.push({ name, socket: `skc-${name}` });
@@ -889,7 +903,7 @@ exec tmux "$@"
 	}
 });
 
-test("refuses rollback after same-name replacement of the captured native owner", async () => {
+bashTest("refuses rollback after same-name replacement of the captured native owner", async () => {
 	const root = await fs.mkdtemp(path.join(os.tmpdir(), "skc-creation-replacement-")); roots.push(root);
 	const dir = await worktree(root); const state = path.join(root, "state"); const bin = await fixture(root); const name = `creation-replacement-${Date.now()}`; const socket = `skc-${name}`; sessions.push({ name, socket });
 	const tmux = path.join(root, "tmux-replacement");
@@ -912,7 +926,7 @@ exec tmux "$@"
 	expect(failure).toMatchObject({ kind: "creation_cleanup_failed", rollback_failures: ["owner_session_rollback_refused"] });
 	expect(await Bun.file(path.join(state, "creation-cleanup-failure.json")).exists()).toBe(false);
 });
-test("holds stale publishers behind replacement creation and preserves every current alias", async () => {
+bashTest("holds stale publishers behind replacement creation and preserves every current alias", async () => {
 	const root = await fs.mkdtemp(path.join(os.tmpdir(), "skc-alias-transition-")); roots.push(root);
 	const dir = await worktree(root); const state = path.join(root, "state"); const bin = await fixture(root); const name = `transition-${Date.now()}`; const socket = `skc-${name}`; sessions.push({ name, socket });
 	expect(Bun.spawnSync(["bash", createScript, name, dir], { env: env({ SKC_BIN: bin, SKC_SESSION_STATE_DIR: state }) }).exitCode).toBe(0);
@@ -954,7 +968,7 @@ exec tmux "$@"
 	}
 }, 20_000);
 
-test("rejects a noncanonical prior generation before owner creation", async () => {
+bashTest("rejects a noncanonical prior generation before owner creation", async () => {
 	const root = await fs.mkdtemp(path.join(os.tmpdir(), "skc-create-prestart-")); roots.push(root);
 	const dir = await worktree(root); const state = path.join(root, "state"); const bin = await fixture(root); const name = `prestart-${Date.now()}`; sessions.push({ name, socket: `skc-${name}` });
 	const lifecycle = path.join(state, name, "owner-lifecycle"); await fs.mkdir(lifecycle, { recursive: true });
@@ -967,7 +981,7 @@ test("rejects a noncanonical prior generation before owner creation", async () =
 });
 
 
-test("fails closed and byte-preserves malformed, corrupt, or mismatched current generation state", async () => {
+bashTest("fails closed and byte-preserves malformed, corrupt, or mismatched current generation state", async () => {
 	for (const [label, body] of [
 		["malformed", "{not json"],
 		["invalid-utf8", Buffer.from([0x7b, 0x22, 0x67, 0x65, 0x6e, 0x22, 0x3a, 0xff, 0x7d])],
@@ -989,7 +1003,7 @@ test("fails closed and byte-preserves malformed, corrupt, or mismatched current 
 	}
 });
 
-test("requires every terminal runtime identity receipt field", async () => {
+bashTest("requires every terminal runtime identity receipt field", async () => {
 	for (const missing of ["session_id", "cwd", "owner_generation"] as const) {
 		const root = await fs.mkdtemp(path.join(os.tmpdir(), `skc-runtime-${missing}-`)); roots.push(root);
 		const dir = await worktree(root); const state = path.join(root, "state"); const name = `runtime-${missing}-${Date.now()}`; sessions.push({ name, socket: `skc-${name}` });
@@ -1000,7 +1014,7 @@ test("requires every terminal runtime identity receipt field", async () => {
 	}
 }, 20_000);
 
-test("does not reconcile malformed or unknown canonical verdicts into incidents", async () => {
+bashTest("does not reconcile malformed or unknown canonical verdicts into incidents", async () => {
 	for (const verdict of [
 		{ schema_version: 1, generation: "prior", session_id: "placeholder", classification: "unexpected_owner_loss", dedupe_key: "bad" },
 		{ schema_version: 1, generation: "prior", session_id: "placeholder", classification: "unknown", dedupe_key: "bad" },
@@ -1023,7 +1037,7 @@ test("does not reconcile malformed or unknown canonical verdicts into incidents"
 });
 
 
-test("keeps owner status while exposing injected supervisor and finalization receipt publication failures", async () => {
+bashTest("keeps owner status while exposing injected supervisor and finalization receipt publication failures", async () => {
 	for (const kind of ["supervisor_failure", "finalization_failure"] as const) {
 		const root = await fs.mkdtemp(path.join(os.tmpdir(), `skc-receipt-publication-${kind}-`)); roots.push(root);
 		const dir = await worktree(root); const state = path.join(root, "state"); const setupBin = await fixture(root); const name = `receipt-${kind}-${Date.now()}`; sessions.push({ name, socket: `skc-${name}` });
@@ -1045,7 +1059,7 @@ test("keeps owner status while exposing injected supervisor and finalization rec
 	}
 }, 20_000);
 
-test("keeps owner status while exposing canonical-collision and alias publication faults", async () => {
+bashTest("keeps owner status while exposing canonical-collision and alias publication faults", async () => {
 	for (const kind of ["supervisor_failure", "finalization_failure"] as const) for (const fault of ["canonical-collision", "alias"] as const) {
 		const root = await fs.mkdtemp(path.join(os.tmpdir(), `skc-receipt-${kind}-${fault}-`)); roots.push(root);
 		const dir = await worktree(root); const state = path.join(root, "state"); const setupBin = await fixture(root); const name = `receipt-${kind}-${fault}-${Date.now()}`; sessions.push({ name, socket: `skc-${name}` });

@@ -3,6 +3,15 @@
 # Lifecycle records contain identifiers and classifications only.
 set -euo pipefail
 
+# Requires bash >= 4: `mapfile -d ''` parses the NUL-delimited scoped argv, and
+# bash 3.2 additionally mis-parses the here-documents nested in the process
+# substitutions below (it re-runs them and then reports "ambiguous redirect").
+# macOS ships 3.2, so fail fast with the fix instead of a cryptic parse error.
+if (( ${BASH_VERSINFO[0]:-0} < 4 )); then
+  echo "skc-session requires bash >= 4 (found ${BASH_VERSION:-unknown}); on macOS install a newer bash, e.g. 'brew install bash'" >&2
+  exit 2
+fi
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=postmortem.sh
 source "$SCRIPT_DIR/postmortem.sh"
