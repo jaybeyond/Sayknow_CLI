@@ -47,6 +47,8 @@ export interface WorkspacePackage {
 
 export interface Task {
 	key: string;
+	// Stable per-task identity, independent of the human-readable key.
+	identity: string;
 	description: string;
 	command: readonly string[];
 	cwd?: string;
@@ -101,11 +103,14 @@ export interface BuildInventory {
 // native-build job rather than as shards.
 export interface TaskMatrixEntry {
 	key: string;
+	identity: string;
 	description: string;
 	command: readonly string[];
 	cwd?: string;
 	native: boolean;
 	rust: boolean;
+	// Whether the shard must install cargo-nextest.
+	nextest: boolean;
 	nativeBuild: boolean;
 }
 
@@ -408,9 +413,22 @@ function taskNeedsNative(key: string): boolean {
 	);
 }
 
-// Tasks that need the Rust toolchain (and nextest) provisioned on their shard.
+// Tasks that need the Rust toolchain provisioned on their shard. Partitioned
+// rust-test keys (`rust-test:partition-i-of-N`) count too.
 function taskNeedsRust(key: string): boolean {
-	return key === "rust-check" || key === "rust-test";
+	return key === "rust-check" || isRustTestKey(key);
+}
+
+// Tasks that run through cargo nextest and therefore need it installed. Only
+// the partitioned rust-test shards use `cargo nextest run --partition`.
+function taskNeedsNextest(key: string): boolean {
+	return key.startsWith("rust-test:partition-");
+}
+
+// Key-derived, stable across runs and machines: shards are matched to plan
+// entries by identity, so it must not depend on ordering or local paths.
+function taskIdentity(key: string): string {
+	return `legacy:${toBase64Url(key)}`;
 }
 
 // Build the machine-readable descriptor list for the current changed-path plan.
@@ -418,11 +436,13 @@ function taskNeedsRust(key: string): boolean {
 export function describeTasks(tasks: readonly Task[]): TaskMatrixEntry[] {
 	return tasks.map(task => ({
 		key: task.key,
+		identity: task.identity,
 		description: task.description,
 		command: task.command,
 		cwd: task.cwd ? path.relative(repoRoot, task.cwd) || "." : undefined,
 		native: taskNeedsNative(task.key),
 		rust: taskNeedsRust(task.key),
+		nextest: taskNeedsNextest(task.key),
 		nativeBuild: isNativeBuildKey(task.key),
 	}));
 }
@@ -531,8 +551,9 @@ async function emitMatrix(): Promise<void> {
 		`has_python=${hasPython}`,
 		`has_darwin_arm64_tab_worker_smoke=${hasDarwinArm64TabWorkerSmoke}`,
 		`has_windows_session_path=${hasWindowsSessionPath}`,
-		`plan_digest=${digest}`,
-		`plan_source_sha=${sourceSha}`,
+		// No plan_digest/plan_source_sha: this tree has no canonical-plan writer,
+		// and full mode deliberately resolves the plan independently in every job
+		// instead of binding shards to a shared plan artifact.
 		`plan_mode=${mode}`,
 		"changed_paths<<__SKC_PATHS_EOF__",
 		...paths,
@@ -991,7 +1012,7 @@ function add(
 	phase?: Task["phase"],
 ): void {
 	if (!tasks.has(key)) {
-		tasks.set(key, { key, description, command, cwd, capabilities, phase });
+		tasks.set(key, { key, identity: taskIdentity(key), description, command, cwd, capabilities, phase });
 	}
 }
 
@@ -1099,12 +1120,13 @@ function isPythonStaticAssetPath(changedPath: string): boolean {
 	return changedPath.startsWith("python/roboskc/assets/");
 }
 
+// Python sources: the SDK plus the roboskc service, excluding roboskc's web
+// frontend and static assets, which schedule no Python validation. These were
+// two separate declarations, so the second silently shadowed the first and
+// roboskc changes never scheduled Python work.
 function isPythonPath(changedPath: string): boolean {
+	if (changedPath.startsWith("python/skc-sdk/")) return true;
 	return changedPath.startsWith("python/roboskc/") && !changedPath.startsWith("python/roboskc/web/") && !isPythonStaticAssetPath(changedPath);
-}
-
-function isPythonPath(changedPath: string): boolean {
-	return changedPath.startsWith("python/skc-sdk/");
 }
 
 function isRustPath(changedPath: string): boolean {
