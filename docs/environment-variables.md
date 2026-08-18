@@ -582,9 +582,10 @@ See [External control readiness](./external-control-readiness.md#jetbrains-air-c
 
 `--mode rpc`, `--mode rpc-ui`, and `--mode bridge` are no longer wired into the
 CLI; the [SDK machine interface](./sdk.md) is the canonical external bus. The
-retired `GJC_RPC_EMIT_TITLE` variable is not runtime configuration. The bridge
-protocol surface itself remains in-tree as dormant machinery (see section 13)
-and keeps its configuration contract until it is either re-exposed or removed.
+retired legacy RPC title-emission variable is not runtime configuration. The
+bridge protocol surface itself remains in-tree as dormant machinery (see
+section 13) and keeps its configuration contract until it is either re-exposed
+or removed.
 
 ---
 

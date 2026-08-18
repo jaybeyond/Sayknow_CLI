@@ -306,4 +306,4 @@ Sayknow-CLI's default TUI identity is the cephalopod pair: blue-octopus as the d
 
 MIT — Sayknow-CLI is an independent, MIT-licensed project. See [`LICENSE`](LICENSE).
 
-Sayknow-CLI references and builds upon [gajae-code](https://github.com/Yeachan-Heo/gajae-code) (MIT) — which itself descends from the original MIT work of Mario Zechner and Can Bölük — and extends it well beyond the original with its own features, workflows, and brand. It is not a mere rebrand. As the MIT License requires, the upstream authors' copyright is retained in [`LICENSE`](LICENSE); historical attribution lives in [`NOTICE.md`](NOTICE.md).
+Sayknow-CLI descends from the original MIT work of Mario Zechner and Can Bölük and has grown well beyond it with its own features, workflows, and brand. As the MIT License requires, the original authors' copyright is retained in [`LICENSE`](LICENSE); historical attribution lives in [`NOTICE.md`](NOTICE.md).

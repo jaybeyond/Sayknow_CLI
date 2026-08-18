@@ -1,15 +1,12 @@
 # Notices
 
-Sayknow-CLI is an **independently developed, MIT-licensed** project. It references and
-builds upon [`gajae-code`](https://github.com/Yeachan-Heo/gajae-code) (MIT) — which in
-turn descends from the original MIT work of Mario Zechner and Can Bölük — and extends
-that lineage substantially with its own features, workflows, tooling, and brand. It is
-**not** a mere rebrand, and it is **not** maintained or endorsed by the upstream authors.
+Sayknow-CLI is an **independently developed, MIT-licensed** project. It descends
+from the original MIT work of Mario Zechner and Can Bölük and extends that
+lineage substantially with its own features, workflows, tooling, and brand. It
+is **not** maintained or endorsed by the original authors.
 
-As the MIT License requires, the upstream authors' copyright notices are retained in
-[`LICENSE`](LICENSE) alongside Sayknow-CLI's own copyright. See
-[`docs/FORK_MAINTENANCE.md`](docs/FORK_MAINTENANCE.md) for how upstream releases are
-referenced and synced.
+As the MIT License requires, the original authors' copyright notices are
+retained in [`LICENSE`](LICENSE) alongside Sayknow-CLI's own copyright.
 
 Sayknow-CLI also builds on lessons from a small family of agent harnesses and keeps
 attribution visible:

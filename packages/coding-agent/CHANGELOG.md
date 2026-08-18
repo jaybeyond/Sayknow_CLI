@@ -1,15 +1,30 @@
 # Changelog
 
-Sayknow-CLI is a rebranded fork of [gajae-code](https://github.com/Yeachan-Heo/gajae-code).
+Sayknow-CLI descends from an upstream MIT agent harness; see [`NOTICE.md`](../../NOTICE.md).
 This file tracks the **fork's own releases**; upstream's full feature history lives
 in that project. Each release notes the upstream version it is built on.
 
 
 ## [Unreleased]
 
+### Changed
+
+- **Upstream independence.** Retired the upstream sync/regeneration pipeline
+  (`rebrand/` layer plus the generation scripts); this tree is now the single
+  source of truth and upstream fixes are ported by cherry-pick only. See
+  `docs/FORK_MAINTENANCE.md`.
+- `bun run release` now enforces the fork policy end to end: runs from the
+  `sayknow-fork` branch, tags `sayknow-vX.Y.Z`, checks monotonicity against the
+  fork tag series only, refuses same-version plain `v` tags on origin, and the
+  release attaches both release-evidence JSONs for the daily public-sync live
+  check.
+- Scrubbed upstream brand references from public docs, the embedded docs
+  index, and test fixtures (also fixing two fixture assertions the original
+  rename had broken). MIT attribution remains in `LICENSE` and `NOTICE.md`.
+
 ## [0.5.2] — 2026-08-14
 
-Built on upstream **gajae-code v0.12.0**.
+Built on upstream **v0.12.0**.
 
 ### Fixed (unattended workflow gates were unanswerable through the control plane)
 
@@ -139,7 +154,7 @@ real cell metrics (16x34) replace the 9x18 default.
 
 ## [0.5.1] — 2026-07-29
 
-Built on upstream **gajae-code v0.12.0**.
+Built on upstream **v0.12.0**.
 
 ### Fixed (Sayknow Pet still left sixel residue under tmux)
 
@@ -164,7 +179,7 @@ exactly the people who already had a session open.
 
 ## [0.5.0] — 2026-07-28
 
-Built on upstream **gajae-code v0.12.0** (previous fork release tracked v0.11.6).
+Built on upstream **v0.12.0** (previous fork release tracked v0.11.6).
 
 ### Security (inherited from upstream v0.12.0)
 
@@ -221,11 +236,11 @@ and that summary is injected into every later session.
 
 ### Fixed (rebrand leakage)
 
-- **Stop creating `.gjc-*` paths.** `recovery_fs` and `path_identity` still wrote
-  `.gjc-recovery`, `.gjc-managed-remove-*`, and `.gjc-exact-unlink-*` on disk: the
-  rename never reached them, so recovery state landed under an upstream-branded
-  directory name. 24 residual tokens are gone and the sync pipeline now fails the
-  build instead of shipping them.
+- **Stop creating legacy-branded recovery paths.** `recovery_fs` and
+  `path_identity` still wrote legacy-branded recovery and removal marker
+  directories on disk: the rename never reached them, so recovery state landed
+  under an upstream-branded directory name. 24 residual tokens are gone and the
+  build now fails instead of shipping them.
 
 ### Fixed (fork pipeline)
 
@@ -389,7 +404,7 @@ platform subpackages publish from a single CI run.
 
 ### Changed
 
-- Synced onto upstream **gajae-code v0.11.6** (from v0.6.0), a 5-minor-version jump
+- Synced onto upstream **v0.11.6** (from v0.6.0), a 5-minor-version jump
   bringing v0.7–v0.11 evolution: managed chat daemon (#2782, #2785, #2786), Telegram
   lock auto-reconciliation (#2781), compiled startup import-cycle fix (#2779), legacy
   daemon tombstone reclamation (#2780), nextest CI hardening (#2777), and the new
@@ -440,7 +455,7 @@ platform subpackages publish from a single CI run.
 
 ### Changed
 
-- Synced onto upstream **gajae-code v0.7.1** (from v0.6.5), bringing 0.7.0's mobile
+- Synced onto upstream **v0.7.1** (from v0.6.5), bringing 0.7.0's mobile
   notifications SDK + managed Telegram daemon and 0.7.1's fixes (assistant
   notification lead-in, stale tmux session reuse, packaged native imports, and the
   glm-zcode Z.AI provider) while preserving the Sayknow-CLI brand.
@@ -480,7 +495,7 @@ platform subpackages publish from a single CI run.
 
 ### Changed
 
-- Synced onto upstream **gajae-code v0.6.5** (from v0.6.0), bringing its latest
+- Synced onto upstream **v0.6.5** (from v0.6.0), bringing its latest
   features and fixes while preserving the Sayknow-CLI brand. The new welcome
   logo-mode support renders the blue **SAYKNOW** wordmark in every mode.
 
@@ -544,7 +559,7 @@ platform subpackages publish from a single CI run.
 
 ### Changed
 
-- Synced onto upstream **gajae-code v0.6.0** (52 commits, +27k lines), bringing its
+- Synced onto upstream **v0.6.0** (52 commits, +27k lines), bringing its
   new features and fixes — including the opt-in `skc rlm` research mode, the goal
   `pause` operation, steer-by-default while busy, and the experimental
   desktop-control tool surface — while preserving the Sayknow-CLI brand and the
@@ -552,7 +567,7 @@ platform subpackages publish from a single CI run.
 
 ## [0.1.0] — 2026-06-17
 
-Initial Sayknow-CLI release, forked from gajae-code v0.5.4.
+Initial Sayknow-CLI release, forked from upstream v0.5.4.
 
 ### Added
 
@@ -570,7 +585,7 @@ Initial Sayknow-CLI release, forked from gajae-code v0.5.4.
 
 ### Changed
 
-- Rebranded `gajae-code` → **Sayknow-CLI** (`skc`, `@sayknow-cli/*`) and reset the
+- Rebranded the upstream harness → **Sayknow-CLI** (`skc`, `@sayknow-cli/*`) and reset the
   version to 0.1.0.
 - The model selector now starts OAuth login directly when you pick an
   unauthenticated preset, instead of only printing a hint.

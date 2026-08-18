@@ -359,7 +359,7 @@ def test_rate_limit_cap_unlimited_allowlist_beats_association() -> None:
 def test_rate_limit_cap_unlimited_is_case_insensitive() -> None:
     assert (
         rate_limit_cap(
-            "Can1357",
+            "JayBeyond",
             None,
             unlimited=frozenset({"jaybeyond"}),
             default=3,
@@ -439,7 +439,7 @@ def test_extract_mention_handles_multiple_occurrences() -> None:
 
 def test_is_maintainer_recognizes_explicit_allowlist() -> None:
     assert is_maintainer("jaybeyond", None, maintainers=frozenset({"jaybeyond"}))
-    assert is_maintainer("Can1357", "NONE", maintainers=frozenset({"jaybeyond"}))
+    assert is_maintainer("JayBeyond", "NONE", maintainers=frozenset({"jaybeyond"}))
 
 
 def test_is_maintainer_recognizes_trusted_associations() -> None:
