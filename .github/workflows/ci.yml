@@ -379,6 +379,12 @@ jobs:
                  bun scripts/ci-release-publish.ts --publish-from-evidence \
                     --evidence-dir "$evidence_dir" \
                     --release-serialization-key sayknow-production-release
+              # The daily public-sync live check requires both evidence JSONs as
+              # release assets; keep them for the Create GitHub Release step.
+              mkdir -p release-evidence-assets
+              cp "$evidence_dir"/sayknow-release-packages-expected-v1.json \
+                 "$evidence_dir"/sayknow-release-packages-v1.json \
+                 release-evidence-assets/
          - name: Download release binaries
            uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
            with:
@@ -392,4 +398,6 @@ jobs:
               draft: false
               prerelease: false
               generate_release_notes: true
-              files: release-binaries/skc-*
+              files: |
+                 release-binaries/skc-*
+                 release-evidence-assets/sayknow-release-packages-*.json

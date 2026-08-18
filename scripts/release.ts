@@ -323,8 +323,19 @@ export function isStableReleaseVersion(version: string): boolean {
 	return stableVersionPattern.test(version);
 }
 
+// Fork release policy (docs/FORK_MAINTENANCE.md): releases run from the local
+// `sayknow-fork` branch (published as origin/main) and stable releases are
+// tagged `sayknow-vX.Y.Z`. Plain `vX.Y.Z` tags are upstream-derived history
+// and are never created here.
+export const FORK_RELEASE_BRANCH = "sayknow-fork";
+
+export function stableReleaseTag(version: string): string {
+	if (!isStableReleaseVersion(version)) throw new Error(`Release version must be exact stable X.Y.Z, received ${version}`);
+	return `sayknow-v${version}`;
+}
+
 function parseVersion(v: string): [number, number, number] {
-	const match = v.match(/^v?((?:0|[1-9]\d*))\.((?:0|[1-9]\d*))\.((?:0|[1-9]\d*))$/u);
+	const match = v.match(/^(?:sayknow-)?v?((?:0|[1-9]\d*))\.((?:0|[1-9]\d*))\.((?:0|[1-9]\d*))$/u);
 	if (!match) throw new Error(`Invalid stable version: ${v}`);
 	return [parseInt(match[1]), parseInt(match[2]), parseInt(match[3])];
 }
@@ -338,15 +349,19 @@ function compareVersions(a: string, b: string): number {
 	return aPatch - bPatch;
 }
 async function assertImmutableNewTag(version: string): Promise<void> {
-	const tag = `v${version}`;
+	const tag = stableReleaseTag(version);
 	const local = await git(["show-ref", "--verify", "--quiet", `refs/tags/${tag}`]).quiet().nothrow();
 	if (local.exitCode === 0) {
 		throw new Error(`Refusing to reuse existing local tag ${tag}; corrections require a newer version`);
 	}
-	const remote = await git(["ls-remote", "--tags", "origin", `refs/tags/${tag}`, `refs/tags/${tag}^{}`]).quiet().nothrow();
-	if (remote.exitCode !== 0) throw new Error(`Cannot verify immutable remote tag ${tag}`);
-	if (remote.stdout.toString().trim() !== "") {
-		throw new Error(`Refusing to reuse existing remote tag ${tag}; corrections require a newer version`);
+	// ci.yml treats both `v*` and `sayknow-v*` as release tags, so a plain
+	// `v${version}` tag on origin would race a second publish of this version.
+	for (const remoteTag of [tag, `v${version}`]) {
+		const remote = await git(["ls-remote", "--tags", "origin", `refs/tags/${remoteTag}`, `refs/tags/${remoteTag}^{}`]).quiet().nothrow();
+		if (remote.exitCode !== 0) throw new Error(`Cannot verify immutable remote tag ${remoteTag}`);
+		if (remote.stdout.toString().trim() !== "") {
+			throw new Error(`Refusing to reuse existing remote tag ${remoteTag}; corrections require a newer version`);
+		}
 	}
 }
 
@@ -357,7 +372,7 @@ async function fetchRemoteTags(): Promise<void> {
 
 export function releaseAtomicPushArgs(version: string): readonly string[] {
 	if (!isStableReleaseVersion(version)) throw new Error(`Release version must be exact stable X.Y.Z, received ${version}`);
-	const tag = `v${version}`;
+	const tag = stableReleaseTag(version);
 	return ["push", "--atomic", "origin", "HEAD:refs/heads/main", `refs/tags/${tag}:refs/tags/${tag}`];
 }
 
@@ -391,11 +406,11 @@ export function assertAtomicPushRemoteState(output: string, sourceCommit: string
 async function pushReleaseRefsAtomically(version: string): Promise<void> {
 	const sourceCommit = (await git(["rev-parse", "HEAD"]).text()).trim();
 	if (!/^[0-9a-f]{40}$/u.test(sourceCommit)) throw new Error("Cannot resolve release commit for atomic push");
+	const tag = stableReleaseTag(version);
 	const push = await git(releaseAtomicPushArgs(version)).quiet().nothrow();
 	if (push.exitCode !== 0) {
-		throw new Error(`Atomic push of main and v${version} was rejected; neither ref may be retried independently: ${outputOf(push) || `exit ${push.exitCode ?? "unknown"}`}`);
+		throw new Error(`Atomic push of main and ${tag} was rejected; neither ref may be retried independently: ${outputOf(push) || `exit ${push.exitCode ?? "unknown"}`}`);
 	}
-	const tag = `v${version}`;
 	const remote = await git(["ls-remote", "origin", "refs/heads/main", `refs/tags/${tag}`, `refs/tags/${tag}^{}`]).quiet().nothrow();
 	if (remote.exitCode !== 0) {
 		throw new Error(`Cannot verify atomic release push; do not independently push main or ${tag}: ${outputOf(remote) || `exit ${remote.exitCode ?? "unknown"}`}`);
@@ -404,7 +419,7 @@ async function pushReleaseRefsAtomically(version: string): Promise<void> {
 }
 
 async function latestVerifiedRemoteStableTag(): Promise<string> {
-	const result = await git(["ls-remote", "--tags", "origin", "refs/tags/v*"]).quiet().nothrow();
+	const result = await git(["ls-remote", "--tags", "origin", "refs/tags/sayknow-v*"]).quiet().nothrow();
 	if (result.exitCode !== 0) throw new Error(`Cannot verify remote stable tags: ${outputOf(result) || `exit ${result.exitCode ?? "unknown"}`}`);
 	const tags = new Set<string>();
 	for (const line of result.stdout.toString().trim().split("\n")) {
@@ -413,10 +428,10 @@ async function latestVerifiedRemoteStableTag(): Promise<string> {
 		if (fields.length !== 2 || !/^[0-9a-f]{40}$/u.test(fields[0]!)) {
 			throw new Error(`Cannot verify remote stable tags: malformed ls-remote output ${JSON.stringify(line)}`);
 		}
-		const match = fields[1]!.match(/^refs\/tags\/(v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*))(?:\^\{\})?$/u);
+		const match = fields[1]!.match(/^refs\/tags\/(sayknow-v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*))(?:\^\{\})?$/u);
 		if (match) tags.add(match[1]!);
 	}
-	if (tags.size === 0) throw new Error("No stable vX.Y.Z tag exists on origin to compare against");
+	if (tags.size === 0) throw new Error("No stable sayknow-vX.Y.Z tag exists on origin to compare against");
 	return [...tags].reduce((latest, tag) => compareVersions(tag, latest) > 0 ? tag : latest);
 }
 
@@ -457,11 +472,11 @@ async function cmdRelease(version: string): Promise<void> {
 	console.log("Pre-flight checks...");
 
 	const branch = await git(["branch", "--show-current"]).text();
-	if (branch.trim() !== "main") {
-		console.error(`Error: Must be on main branch (currently on '${branch.trim()}')`);
+	if (branch.trim() !== FORK_RELEASE_BRANCH) {
+		console.error(`Error: Must be on the ${FORK_RELEASE_BRANCH} release branch (currently on '${branch.trim()}')`);
 		process.exit(1);
 	}
-	console.log("  On main branch");
+	console.log(`  On ${FORK_RELEASE_BRANCH} release branch (publishes to origin/main)`);
 
 	const status = await git(["status", "--porcelain"]).text();
 	if (status.trim()) {
@@ -480,7 +495,7 @@ async function cmdRelease(version: string): Promise<void> {
 	if (compareVersions(version, latestTag) <= 0) {
 		throw new Error(`Version ${version} must be greater than latest stable tag ${latestTag}`);
 	}
-	console.log(`  Version ${version} > verified origin tag ${latestTag}; tag v${version} is unused locally and on origin\n`);
+	console.log(`  Version ${version} > verified origin tag ${latestTag}; tag ${stableReleaseTag(version)} is unused locally and on origin\n`);
 
 
 	// 2. Update package versions
@@ -624,7 +639,7 @@ async function cmdRelease(version: string): Promise<void> {
 	console.log("Committing and tagging...");
 	await git(["add", "--update"]);
 	await git(["commit", "-m", `chore: bump version to ${version}`]);
-	await git(["tag", "--no-sign", `v${version}`]);
+	await git(["tag", "--no-sign", stableReleaseTag(version)]);
 	console.log();
 
 	// 8. Push
@@ -634,10 +649,10 @@ async function cmdRelease(version: string): Promise<void> {
 
 	// 9. Watch CI
 	console.log("Watching CI...");
-	const success = await watchCI(`v${version}`);
+	const success = await watchCI(stableReleaseTag(version));
 
 	if (success) {
-		console.log(`=== Released v${version} ===`);
+		console.log(`=== Released ${stableReleaseTag(version)} ===`);
 	} else {
 		console.error("\nStable release correction required:");
 		console.error("  Keep the published tag immutable; do not retag, delete, or force-push it.");

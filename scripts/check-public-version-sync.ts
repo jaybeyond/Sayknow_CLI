@@ -90,7 +90,9 @@ const STABLE_BINARY_ASSETS = [
 	"skc-darwin-x64",
 	"skc-windows-x64.exe",
 ] as const;
-const STABLE_TAG_RE = /^v(\d+\.\d+\.\d+)$/;
+// Fork release policy: stable releases are tagged `sayknow-vX.Y.Z`; plain
+// `vX.Y.Z` stays accepted for upstream-derived history. Group 1 is the version.
+const STABLE_TAG_RE = /^(?:sayknow-)?v(\d+\.\d+\.\d+)$/;
 const SHA256_RE = /^[a-f0-9]{64}$/;
 const SHA1_RE = /^[a-f0-9]{40}$/;
 const CANONICAL_CHANGELOG_PATH = "packages/coding-agent/CHANGELOG.md";
@@ -325,7 +327,7 @@ function releaseCompletenessViolation(release: GitHubRelease): SyncViolation | u
 		return { path: SOURCE_LATEST_RELEASE_API, message: `Latest source release ${release.tag_name} must be published and non-prerelease.` };
 	}
 	const tagMatch = release.tag_name.match(STABLE_TAG_RE);
-	if (!tagMatch) return { path: SOURCE_LATEST_RELEASE_API, message: `Published release ${release.tag_name} is not an exact stable vX.Y.Z tag.` };
+	if (!tagMatch) return { path: SOURCE_LATEST_RELEASE_API, message: `Published release ${release.tag_name} is not an exact stable vX.Y.Z or sayknow-vX.Y.Z tag.` };
 	if (release.published_at === null || normalizePublishedAt(release.published_at) === undefined) {
 		return { path: SOURCE_LATEST_RELEASE_API, message: `Published release ${release.tag_name} has no valid published_at timestamp.` };
 	}
@@ -411,10 +413,11 @@ function parseReleaseSyncState(text: string): ReleaseSyncState | SyncViolation {
 	) {
 		return { path: PUBLIC_RELEASE_STATE, message: "Deployed release state contains values with invalid types." };
 	}
+	const stateTagVersion = typeof release.tag === "string" ? release.tag.match(STABLE_TAG_RE)?.[1] : undefined;
 	if (
 		release.id < 1 ||
-		!STABLE_TAG_RE.test(release.tag) ||
-		release.version !== release.tag.slice(1) ||
+		stateTagVersion === undefined ||
+		release.version !== stateTagVersion ||
 		!SHA1_RE.test(source.commit_sha) ||
 		normalizePublishedAt(release.published_at) === undefined
 	) {

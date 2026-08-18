@@ -216,6 +216,20 @@ describe("public docs/site/version sync guard", () => {
 
 		await expect(checkLivePublicVersionSync("unused", mockFetch(responses), 50)).resolves.toEqual([]);
 	});
+	test("live check accepts the fork's sayknow-v release tag as a stable release", async () => {
+		const forkTag = "sayknow-v1.2.3";
+		const forkUrl = `https://github.com/jaybeyond/Sayknow_CLI/releases/tag/${forkTag}`;
+		const forkRelease = { ...stableRelease(), tag_name: forkTag, html_url: forkUrl };
+		const state = JSON.parse(releaseState()) as {
+			release: { tag: string; url: string };
+		};
+		state.release.tag = forkTag;
+		state.release.url = forkUrl;
+		const responses = liveResponses(forkRelease, `${JSON.stringify(state, null, 2)}\n`);
+		responses[`${GIT_API}/ref/tags/${forkTag}`] = { object: { sha: SOURCE_SHA, type: "commit" } };
+
+		await expect(checkLivePublicVersionSync("unused", mockFetch(responses), 50)).resolves.toEqual([]);
+	});
 	test("uses /releases/latest authority and ignores out-of-order paginated release lists", async () => {
 		const responses = liveResponses(stableRelease(), releaseState());
 		responses[RELEASE_LIST_API] = [

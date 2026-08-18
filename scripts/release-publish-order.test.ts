@@ -14,10 +14,12 @@ import { PUBLIC_PACKAGE_DEFINITIONS, type PackageEvidenceRecord } from "./releas
 import {
 	assertAtomicPushRemoteState,
 	classifyStableReleaseFinalizationReceipt,
+	FORK_RELEASE_BRANCH,
 	isStableReleaseVersion,
 	parseReleaseCli,
 	releaseAtomicPushArgs,
 	STABLE_GITHUB_RELEASE_FINALIZATION_JOB_NAME,
+	stableReleaseTag,
 } from "./release";
 
 
@@ -326,19 +328,36 @@ describe("immutable stable release contracts", () => {
 			"--atomic",
 			"origin",
 			"HEAD:refs/heads/main",
-			"refs/tags/v1.2.3:refs/tags/v1.2.3",
+			"refs/tags/sayknow-v1.2.3:refs/tags/sayknow-v1.2.3",
 		]);
 		expect(() => releaseAtomicPushArgs("1.2.3-rc.1")).toThrow("exact stable");
 		expect(releaseScript).toContain("await pushReleaseRefsAtomically(version)");
 		expect(releaseScript).not.toContain('git(["push", "origin", "main"])');
 	});
+	test("stable releases use the fork tag series and release branch", async () => {
+		const releaseScript = await Bun.file(path.join(repoRoot, "scripts/release.ts")).text();
+
+		// Fork policy (docs/FORK_MAINTENANCE.md): local `sayknow-fork` publishes
+		// to origin/main and stable tags are `sayknow-vX.Y.Z`; plain vX.Y.Z tags
+		// stay upstream-derived history.
+		expect(FORK_RELEASE_BRANCH).toBe("sayknow-fork");
+		expect(stableReleaseTag("1.2.3")).toBe("sayknow-v1.2.3");
+		expect(() => stableReleaseTag("1.2.3-rc.1")).toThrow("exact stable");
+		expect(releaseScript).toContain("if (branch.trim() !== FORK_RELEASE_BRANCH) {");
+		// Monotonicity compares against the fork's own tag series only, so a
+		// synced upstream vX.Y.Z tag can never block or inflate fork versions.
+		expect(releaseScript).toContain('"refs/tags/sayknow-v*"');
+		// Same-version plain v tags on origin must fail closed: ci.yml treats
+		// both v* and sayknow-v* as release tags.
+		expect(releaseScript).toContain("for (const remoteTag of [tag, `v${version}`])");
+	});
 	test("creates an unsigned lightweight tag despite tag.gpgSign and verifies lightweight or signed tag output by peeled commit", async () => {
 		const releaseScript = await Bun.file(path.join(repoRoot, "scripts/release.ts")).text();
 		const sourceCommit = "a".repeat(40);
 		const annotatedTagObject = "b".repeat(40);
-		const tag = "v1.2.3";
+		const tag = "sayknow-v1.2.3";
 
-		expect(releaseScript).toContain('await git(["tag", "--no-sign", `v${version}`]);');
+		expect(releaseScript).toContain('await git(["tag", "--no-sign", stableReleaseTag(version)]);');
 		expect(releaseScript).toContain('["ls-remote", "origin", "refs/heads/main", `refs/tags/${tag}`, `refs/tags/${tag}^{}`]');
 		expect(releaseScript).not.toContain('["ls-remote", "--refs", "origin", "refs/heads/main", `refs/tags/${tag}`]');
 		expect(() => assertAtomicPushRemoteState([
@@ -410,7 +429,7 @@ describe("immutable stable release contracts", () => {
 		expect(releaseScript).toContain("--workflow ci.yml");
 		expect(releaseScript).toContain("Cannot parse CI run query");
 		expect(releaseScript).toContain("headSha");
-		expect(releaseScript).toContain("await watchCI(`v${version}`)");
+		expect(releaseScript).toContain("await watchCI(stableReleaseTag(version))");
 		expect(assertionIndex).toBeGreaterThan(-1);
 		expect(assertionIndex).toBeLessThan(commitIndex);
 	});
@@ -459,7 +478,10 @@ describe("native release binary coverage", () => {
 		// Publish cuts the GitHub Release directly (no separate draft/finalize dance).
 		expect(publish).toContain("softprops/action-gh-release");
 		expect(publish).toContain("draft: false");
-		expect(publish).toContain("files: release-binaries/skc-*");
+		expect(publish).toContain("release-binaries/skc-*");
+		// The daily public-sync live check validates both evidence JSONs as release
+		// assets, so the release must attach them alongside the binaries.
+		expect(publish).toContain("release-evidence-assets/sayknow-release-packages-*.json");
 
 		// The paranoid multi-job evidence/verify chain is gone.
 		for (const removed of [
