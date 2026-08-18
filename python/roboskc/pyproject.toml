@@ -28,6 +28,12 @@ dev = [
   "ruff>=0.13",
 ]
 
+# skc-rpc is an in-repo package and is not published, so resolve it from the
+# tree. CI installs both with `pip install -e python/skc-rpc -e python/roboskc`;
+# this keeps a bare `uv run` working without that manual ordering.
+[tool.uv.sources]
+skc-rpc = { path = "../skc-rpc", editable = true }
+
 [project.scripts]
 roboskc = "roboskc.cli:main"
 

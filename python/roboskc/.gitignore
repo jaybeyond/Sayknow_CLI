@@ -1,4 +1,7 @@
 .venv/
+# Local `uv run` resolution artifact. CI installs with pip (-e python/skc-rpc
+# -e python/roboskc[dev]), so a committed lock would drift unverified.
+uv.lock
 .pi-context/
 .cache/
 data/
