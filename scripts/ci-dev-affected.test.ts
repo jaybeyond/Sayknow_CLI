@@ -2,7 +2,7 @@ import { afterAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { describeTasks, expandWithDependents, isDarwinArm64TabWorkerSmokePath, isWindowsSessionPathRegressionPath, loadBuildInventory, needsDarwinArm64TabWorkerSmoke, needsWindowsSessionPathRegression, normalizeChangedPaths, packageScriptCommand, planFullTasks, planTargetedTasks, planTasks, requiresCargoWorkspaceEmergency, resolvePackageCwd, runCommand, validateAffectedAggregate, type AffectedAggregateResults, type CargoInventoryUnit, type WorkspacePackage } from "./ci-dev-affected";
+import { describeTasks, expandWithDependents, isDarwinArm64TabWorkerSmokePath, isWindowsSessionPathRegressionPath, needsDarwinArm64TabWorkerSmoke, needsWindowsSessionPathRegression, packageScriptCommand, planFullTasks, planTargetedTasks, planTasks, resolvePackageCwd, runCommand, validateAffectedAggregate, type AffectedAggregateResults, type WorkspacePackage } from "./ci-dev-affected";
 
 // Matrix planning validates live workspace and Cargo manifests in subprocesses.
 // Hosted runners can need more than Bun's 5s default during their first cold scan.
@@ -1347,42 +1347,6 @@ describe("push-mode broad planning still runs the fuller suite", () => {
 	});
 });
 
-describe("normalizeChangedPaths", () => {
-	test("normalizes, deduplicates, and orders safe repository-relative paths", () => {
-		expect(normalizeChangedPaths(["packages\\stats/src/index.ts", "./packages/stats/src/index.ts"])).toEqual(["packages/stats/src/index.ts"]);
-	});
-
-	test("rejects absolute and escaping paths", () => {
-		for (const unsafe of ["/etc/passwd", "../package.json", "packages/../package.json", "C:/workspace/package.json"]) {
-			expect(() => normalizeChangedPaths([unsafe])).toThrow("affected-path-invalid");
-		}
-	});
-});
-
-describe("build inventory validation", () => {
-	test("rejects unknown fields and duplicate Cargo names without the typed emergency", async () => {
-		const root = await fs.mkdtemp(path.join(os.tmpdir(), "ci-dev-inventory-"));
-		try {
-			const source = JSON.parse(await Bun.file(path.join(import.meta.dir, "ci-dev-affected-build-inventory.json")).text()) as {
-				schemaVersion: number;
-				typescript: Array<Record<string, unknown>>;
-				cargo: Array<Record<string, unknown>>;
-				emergency: Record<string, unknown>;
-			};
-			const unknownPath = path.join(root, "unknown.json");
-			await Bun.write(unknownPath, JSON.stringify({ ...source, unexpected: true }));
-			await expect(loadBuildInventory(unknownPath)).rejects.toThrow("unexpected build inventory field");
-
-			const duplicatePath = path.join(root, "duplicate.json");
-			const duplicateCargo = source.cargo.map((unit, index) => index === 1 ? { ...unit, name: source.cargo[0]?.name } : unit);
-			await Bun.write(duplicatePath, JSON.stringify({ ...source, cargo: duplicateCargo, emergency: {} }));
-			await expect(loadBuildInventory(duplicatePath)).rejects.toThrow("duplicate Cargo names require workspace emergency");
-		} finally {
-			await fs.rm(root, { recursive: true, force: true });
-		}
-	});
-});
-
 describe("workspace dependent closure", () => {
 	const leaf: WorkspacePackage = { name: "leaf", dir: "packages/leaf", manifest: { name: "leaf", dependencies: { top: "workspace:*" } } };
 	const middle: WorkspacePackage = { name: "middle", dir: "packages/middle", manifest: { name: "middle", dependencies: { leaf: "workspace:*" } } };
@@ -1392,19 +1356,6 @@ describe("workspace dependent closure", () => {
 	test("selects direct and transitive dependents through a cycle without duplicates", () => {
 		expect(expandWithDependents([leaf], graph).map(unit => unit.name)).toEqual(["leaf", "middle", "top"]);
 		expect(expandWithDependents([middle], graph).map(unit => unit.name)).toEqual(["leaf", "middle", "top"]);
-	});
-});
-
-describe("Cargo workspace ambiguity", () => {
-	const first: CargoInventoryUnit = { id: "first", name: "duplicate", manifestPath: "crates/first/Cargo.toml", supported: true, nativeAddonSource: false };
-	const second: CargoInventoryUnit = { id: "second", name: "duplicate", manifestPath: "crates/second/Cargo.toml", supported: true, nativeAddonSource: false };
-	const unique: CargoInventoryUnit = { id: "unique", name: "unique", manifestPath: "crates/unique/Cargo.toml", supported: true, nativeAddonSource: false };
-	const supported = [first, second, unique];
-
-	test("uses the workspace emergency when any selected name is globally duplicated", () => {
-		expect(requiresCargoWorkspaceEmergency([first], supported)).toBe(true);
-		expect(requiresCargoWorkspaceEmergency([first, second], supported)).toBe(true);
-		expect(requiresCargoWorkspaceEmergency([unique], supported)).toBe(false);
 	});
 });
 

@@ -12,9 +12,14 @@ const PYTHON_DEV_SETUP =
 // Keys for tasks that compile the @sayknow-cli/natives addon. They run once in
 // the dedicated dev-ci native-build job (not as matrix shards) and publish the
 // built `.node` files as an artifact the runtime-dependent shards download.
-// Declared here (before the top-level `await main()`) so it is initialized for
-// every CLI mode despite top-level await halting later module statements.
+// Declared before any other module state purely for readability; the single
+// top-level `await main()` lives at the end of the file, after every statement
+// here has initialized.
 const NATIVE_BUILD_KEYS: ReadonlySet<string> = new Set(["native-build", "native-linux-x64"]);
+
+// Shard/partition defaults.
+const DEFAULT_CODING_AGENT_TEST_SHARDS = 8;
+const DEFAULT_RUST_TEST_PARTITIONS = 1;
 
 // Behavioral-owner tests cover entrypoint contracts whose names intentionally do
 // not follow the source-file basename convention. They supplement, rather than
@@ -143,10 +148,6 @@ async function main(): Promise<void> {
 	}
 }
 
-if (import.meta.main) {
-	await main();
-}
-
 // CI runs in one of two planning modes:
 //   - "pr": pull_request runs get a fast, narrowly targeted plan (run only the
 //     tests/checks directly relevant to the changed paths).
@@ -162,6 +163,22 @@ export function resolvePlanMode(): PlanMode {
 		return explicitMode;
 	}
 	return Bun.env.GITHUB_EVENT_NAME?.trim() === "pull_request" ? "pr" : "push";
+}
+
+// Main CI sets CI_FORCE_FULL on both the planner and every shard, so the full
+// task union is resolved identically on each without a shared plan artifact and
+// without touching git history (the checkout is shallow, and this fork has no
+// long-lived integration branch to diff against).
+export function forceFullPlan(): boolean {
+	const value = Bun.env.CI_FORCE_FULL?.trim().toLowerCase();
+	return value === "1" || value === "true";
+}
+
+// Branch that non-full, non-PR runs diff against. Overridable so a fork or a
+// local checkout can name its own integration branch.
+export function integrationBranchRef(): string {
+	const value = Bun.env.CI_DEV_BASE_BRANCH?.trim();
+	return `origin/${value && value !== "" ? value : "main"}`;
 }
 
 // Resolve the plan for the current changed paths and CI mode. PR mode builds the
@@ -205,6 +222,109 @@ function addRustTestTasks(tasks: Map<string, Task>): void {
 }
 
 
+function positiveIntFromEnv(name: string, fallback: number): number {
+	const raw = Bun.env[name]?.trim();
+	if (!raw) return fallback;
+	const parsed = Number.parseInt(raw, 10);
+	return Number.isInteger(parsed) && parsed >= 1 ? parsed : fallback;
+}
+
+function rustTestPartitions(): number {
+	return positiveIntFromEnv("CI_RUST_TEST_PARTITIONS", DEFAULT_RUST_TEST_PARTITIONS);
+}
+
+function codingAgentTestShards(): number {
+	return positiveIntFromEnv("CI_CODING_AGENT_TEST_SHARDS", DEFAULT_CODING_AGENT_TEST_SHARDS);
+}
+
+// The coding-agent suite is far larger than every other package, so it is split
+// into bounded shards instead of one long-running task.
+function addWorkspaceTestTasks(tasks: Map<string, Task>, packages: readonly WorkspacePackage[]): void {
+	add(tasks, "root-test:release", "Root release contract tests", ["bun", "run", "test:release"]);
+	for (const workspacePackage of packages) {
+		if (workspacePackage.manifest.scripts?.test) {
+			addPackageTestTasks(tasks, workspacePackage);
+		}
+	}
+}
+
+function addPackageTestTasks(tasks: Map<string, Task>, workspacePackage: WorkspacePackage): void {
+	if (workspacePackage.name !== "@sayknow-cli/coding-agent") {
+		add(tasks, `test:${workspacePackage.name}`, `Test ${workspacePackage.name}`, packageScriptCommand("test"), resolvePackageCwd(workspacePackage.dir));
+		return;
+	}
+
+	const total = codingAgentTestShards();
+	for (let shard = 1; shard <= total; shard++) {
+		addCodingAgentTestShard(tasks, shard, total);
+	}
+	addCodingAgentSdkProductionHostTask(tasks);
+}
+
+function addCodingAgentTestShard(tasks: Map<string, Task>, shard: number, total: number = codingAgentTestShards()): void {
+	add(
+		tasks,
+		`test:@sayknow-cli/coding-agent:shard-${shard}-of-${total}`,
+		`Test @sayknow-cli/coding-agent shard ${shard}/${total}`,
+		["bun", "test", `--shard=${shard}/${total}`],
+		resolvePackageCwd("packages/coding-agent"),
+	);
+}
+
+// The production SDK host case must run in its own process: the sharded run
+// loads the daemon worker differently and would false-green it.
+function addCodingAgentSdkProductionHostTask(tasks: Map<string, Task>): void {
+	add(
+		tasks,
+		"test:@sayknow-cli/coding-agent:sdk-production-host-isolated",
+		"Test @sayknow-cli/coding-agent production SDK host in isolation",
+		[
+			"bun",
+			"test",
+			"test/sdk-chat-daemon-worker.test.ts",
+			"-t",
+			"routes Slack safe queries through the production Session SDK host",
+		],
+		resolvePackageCwd("packages/coding-agent"),
+	);
+}
+
+function behavioralTestsFor(changedPath: string): readonly string[] {
+	return BEHAVIORAL_OWNER_TESTS[changedPath] ?? [];
+}
+
+function isRustTestKey(key: string): boolean {
+	return key === "rust-test" || key.startsWith("rust-test:partition-");
+}
+
+function toBase64Url(value: string): string {
+	return Buffer.from(value).toString("base64url");
+}
+
+// Changed paths cross a trust boundary (CI env, canonical plan files), so they
+// are normalized to repo-relative POSIX form and anything escaping the repo is
+// rejected outright.
+export function normalizeChangedPaths(paths: readonly string[]): string[] {
+	const normalized = paths.map(entry => entry.replaceAll("\\", "/").trim()).map(entry => entry.replace(/^\.\//, ""));
+	for (const entry of normalized) {
+		if (!entry || entry.startsWith("/") || /^[A-Za-z]:\//.test(entry) || entry === ".." || entry.startsWith("../") || entry.includes("/../") || entry.split("/").some(part => part === "." || part === "")) {
+			throw new Error(`affected-path-invalid: unsafe changed path '${entry}'`);
+		}
+	}
+	return Array.from(new Set(normalized)).sort();
+}
+
+function assertExactKeys(value: Record<string, unknown>, keys: readonly string[], label: string): void {
+	if (Object.keys(value).length !== keys.length || Object.keys(value).some(key => !keys.includes(key))) throw new Error(`inventory-invalid: unexpected ${label} field`);
+}
+
+function normalizeInventoryPath(value: string): string {
+	const normalized = value.replaceAll("\\", "/").replace(/^\.\//, "");
+	if (!normalized || normalized.startsWith("/") || normalized.includes("../") || normalized.split("/").some(part => !part || part === ".")) throw new Error("inventory-invalid: unsafe inventory path");
+	return normalized;
+}
+
+
 function addPythonTasks(tasks: Map<string, Task>): void {
 	add(tasks, "python-check", "Python SDK type check", ["bun", "run", "check:py-sdk"], undefined, { rust: false, nextest: false, nativeConsumer: false, nativeProducer: false }, "python");
 	add(tasks, "python-test", "Python SDK tests", ["bun", "run", "test:py-sdk"], undefined, { rust: false, nextest: false, nativeConsumer: true, nativeProducer: false }, "python");
@@ -212,6 +332,9 @@ function addPythonTasks(tasks: Map<string, Task>): void {
 }
 async function resolvePlannedTasks(paths: readonly string[]): Promise<Task[]> {
 	const packages = await getWorkspacePackages();
+	if (forceFullPlan()) {
+		return planFullTasks(packages);
+	}
 	if (resolvePlanMode() === "pr") {
 		const testFiles = await gatherTestFiles();
 		return planTargetedTasks(paths, packages, testFiles);
@@ -247,7 +370,7 @@ async function emitAffectedFlags(): Promise<void> {
 	try {
 		const paths = await getChangedPaths();
 		const packages = await getWorkspacePackages();
-		const planned = planTasks(paths, packages);
+		const planned = forceFullPlan() ? planFullTasks(packages) : planTasks(paths, packages);
 		const keys = new Set(planned.map(task => task.key));
 		rust = keys.has("rust-check") || keys.has("rust-test");
 		native = keys.has("native-build") || keys.has("native-linux-x64");
@@ -479,6 +602,10 @@ function printPlan(paths: readonly string[], plannedTasks: readonly Task[]): voi
 }
 
 async function getChangedPaths(): Promise<string[]> {
+	// Full mode plans the complete union, so no diff is needed; computing one
+	// would fail anyway on the shallow CI checkout.
+	if (forceFullPlan()) return [];
+
 	const explicitPaths = Bun.env.CI_DEV_CHANGED_PATHS?.trim();
 	if (explicitPaths) {
 		return explicitPaths
@@ -520,12 +647,13 @@ async function resolveBaseRef(): Promise<string> {
 		return `${before}..${Bun.env.GITHUB_SHA?.trim() || "HEAD"}`;
 	}
 
-	const mergeBase = await $`git merge-base HEAD origin/dev`.cwd(repoRoot).quiet().nothrow();
+	const integrationRef = integrationBranchRef();
+	const mergeBase = await $`git merge-base HEAD ${integrationRef}`.cwd(repoRoot).quiet().nothrow();
 	if (mergeBase.exitCode === 0) {
 		const value = mergeBase.stdout.toString().trim();
 		if (value !== "") return value;
 	}
-	return "origin/dev";
+	return integrationRef;
 }
 
 async function getWorkspacePackages(): Promise<WorkspacePackage[]> {
@@ -904,7 +1032,7 @@ function findTouchedPackages(paths: readonly string[], packages: readonly Worksp
 	return packages.filter(workspacePackage => paths.some(changedPath => changedPath === workspacePackage.dir || changedPath.startsWith(`${workspacePackage.dir}/`)));
 }
 
-function expandWithDependents(touched: readonly WorkspacePackage[], packages: readonly WorkspacePackage[]): WorkspacePackage[] {
+export function expandWithDependents(touched: readonly WorkspacePackage[], packages: readonly WorkspacePackage[]): WorkspacePackage[] {
 	const workspaceByName = new Map(packages.map(workspacePackage => [workspacePackage.name, workspacePackage]));
 	const selected = new Map(touched.map(workspacePackage => [workspacePackage.name, workspacePackage]));
 	const queue = [...touched.map(workspacePackage => workspacePackage.name)];
