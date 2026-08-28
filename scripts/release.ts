@@ -513,7 +513,12 @@ async function cmdRelease(version: string): Promise<void> {
 		publicPkgPaths.push(pkgPath);
 	}
 
-	await $`sd '"version": "[^"]+"' ${`"version": "${version}"`} ${publicPkgPaths}`;
+	for (const pkgPath of publicPkgPaths) {
+		const raw = await Bun.file(pkgPath).text();
+		const updated = raw.replace(/"version":\s*"[^"]+"/, `"version": "${version}"`);
+		if (updated === raw) throw new Error(`Cannot find a version field in ${pkgPath}`);
+		await Bun.write(pkgPath, updated);
+	}
 
 	// Verify
 	console.log("  Verifying versions:");
@@ -535,7 +540,10 @@ async function cmdRelease(version: string): Promise<void> {
 
 	// 3. Update Rust workspace version
 	console.log(`Updating Rust workspace version to ${version}…`);
-	await $`sd '^version = "[^"]+"' ${`version = "${version}"`} Cargo.toml`;
+	const cargoTomlBefore = await Bun.file("Cargo.toml").text();
+	const cargoTomlUpdated = cargoTomlBefore.replace(/^version = "[^"]+"/m, `version = "${version}"`);
+	if (cargoTomlUpdated === cargoTomlBefore) throw new Error("Cannot find the Rust workspace version in Cargo.toml");
+	await Bun.write("Cargo.toml", cargoTomlUpdated);
 
 	// Verify
 	const cargoToml = await Bun.file("Cargo.toml").text();
@@ -574,7 +582,12 @@ async function cmdRelease(version: string): Promise<void> {
 		"packages/natives/native/index.d.ts",
 		"packages/natives/native/index.js",
 	];
-	await $`sd '__piNativesV[A-Za-z0-9_]+' ${sentinelName} ${sentinelFiles}`;
+	for (const sentinelFile of sentinelFiles) {
+		const raw = await Bun.file(sentinelFile).text();
+		const updated = raw.replaceAll(/__piNativesV[A-Za-z0-9_]+/g, sentinelName);
+		if (updated === raw) throw new Error(`Cannot find a pi-natives version sentinel in ${sentinelFile}`);
+		await Bun.write(sentinelFile, updated);
+	}
 	const libRs = await Bun.file("crates/pi-natives/src/lib.rs").text();
 	if (!libRs.includes(`js_name = "${sentinelName}"`)) {
 		console.error(
