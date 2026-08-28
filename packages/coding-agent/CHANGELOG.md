@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.5.5] - 2026-08-28
+
 ## [0.5.4] - 2026-08-28
 
 Sayknow-CLI descends from an upstream MIT agent harness; see [`NOTICE.md`](../../NOTICE.md).
