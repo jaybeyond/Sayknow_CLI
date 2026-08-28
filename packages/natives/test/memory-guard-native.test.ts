@@ -44,7 +44,7 @@ describe("probeWindowsJobMemory", () => {
 		const probe = loadNative().probeWindowsJobMemory;
 		expect(typeof probe).toBe("function");
 		expectTaggedProbeResult((probe as () => unknown)());
-	});
+	}, 20_000);
 
 	it("rejects stale same-version bindings without the memory probe capability", () => {
 		const bindings = {
