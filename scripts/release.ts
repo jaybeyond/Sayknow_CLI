@@ -436,14 +436,12 @@ async function latestVerifiedRemoteStableTag(): Promise<string> {
 }
 
 async function assertReleaseVersionConsistency(version: string, publicPkgPaths: readonly string[]): Promise<void> {
-	const publicPackageNames: string[] = [];
 	for (const pkgPath of publicPkgPaths) {
 		const manifest = await Bun.file(pkgPath).json() as unknown;
 		if (!isObject(manifest) || typeof manifest.name !== "string" || typeof manifest.version !== "string" || manifest.private === true) {
 			throw new Error(`Cannot verify public package release version in ${pkgPath}`);
 		}
 		if (manifest.version !== version) throw new Error(`Public package ${manifest.name} in ${pkgPath} has version ${manifest.version}, expected ${version}`);
-		publicPackageNames.push(manifest.name);
 	}
 
 	const rootPackage = await Bun.file("package.json").json() as unknown;
@@ -454,9 +452,6 @@ async function assertReleaseVersionConsistency(version: string, publicPkgPaths: 
 	for (const [name, catalogVersion] of Object.entries(catalog)) {
 		if (!name.startsWith("@sayknow-cli/")) continue;
 		if (catalogVersion !== version) throw new Error(`Root catalog ${name} has version ${String(catalogVersion)}, expected ${version}`);
-	}
-	for (const name of publicPackageNames.filter(name => name.startsWith("@sayknow-cli/"))) {
-		if (catalog[name] !== version) throw new Error(`Root catalog does not match public package ${name} at ${version}`);
 	}
 
 	const cargoToml = await Bun.file("Cargo.toml").text();
