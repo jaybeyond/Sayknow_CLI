@@ -49,6 +49,7 @@ describe("resume progress lease", () => {
 			settings: { get: () => undefined },
 			sessionManager: {
 				getSessionId: () => currentSessionId,
+				prepareManagedCandidateForWrite: vi.fn(async (sessionPath: string) => sessionPath),
 				isManagedDestination: () => false,
 				getSessionName: () => undefined,
 				getCwd: () => "/tmp",
@@ -68,10 +69,14 @@ describe("resume progress lease", () => {
 
 		currentSessionId = "after";
 		switchResult.resolve(true);
-		await resume;
+		await expect(resume).resolves.toBe(true);
 		expect(statusContainer.children).toHaveLength(0);
 		expect(context.showStatus).toHaveBeenCalledWith("Resumed session");
-		expect(session.switchSession).toHaveBeenCalledWith("/tmp/target.jsonl", expect.any(Object));
+		expect(session.switchSession).toHaveBeenCalledWith("/tmp/target.jsonl", undefined);
+		expect(context.sessionManager.prepareManagedCandidateForWrite).toHaveBeenCalledWith(
+			"/tmp/target.jsonl",
+			"copy-retain",
+		);
 
 		ui.stop();
 	});
@@ -110,6 +115,7 @@ describe("resume progress lease", () => {
 			settings: { get: () => undefined },
 			sessionManager: {
 				getSessionId: () => "before",
+				prepareManagedCandidateForWrite: vi.fn(async (sessionPath: string) => sessionPath),
 				isManagedDestination: () => false,
 				getSessionName: () => undefined,
 				getCwd: () => "/tmp",
@@ -122,8 +128,8 @@ describe("resume progress lease", () => {
 		} as unknown as InteractiveModeContext;
 		const controller = new SelectorController(context);
 
-		await expect(controller.handleResumeSession("/tmp/target.jsonl")).resolves.toBeUndefined();
-		expect(switchSession).toHaveBeenCalledWith("/tmp/target.jsonl", expect.any(Object));
+		await expect(controller.handleResumeSession("/tmp/target.jsonl")).resolves.toBe(true);
+		expect(switchSession).toHaveBeenCalledWith("/tmp/target.jsonl", undefined);
 		expect(context.showStatus).toHaveBeenCalledWith("Resumed session");
 		expect(ui.requestRenderWithGeneration).not.toHaveBeenCalled();
 	});

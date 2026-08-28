@@ -1,6 +1,6 @@
 //! Endpoint discovery file: how a client finds a session's WS server.
 //!
-//! Each running server writes `<state_root>/notifications/<sessionId>.json`
+//! Each running server writes `<state_root>/sdk/<sessionId>.json`
 //! (under `.skc/state/`, an already git-ignored runtime path) describing the
 //! bound host/port and the per-session token. Clients read this file to
 //! connect.
@@ -134,7 +134,7 @@ pub fn redact_token(token: &str) -> String {
 /// Directory holding per-session endpoint files under a SKC state root.
 #[must_use]
 pub fn endpoint_dir(state_root: &Path) -> PathBuf {
-	state_root.join("notifications")
+	state_root.join("sdk")
 }
 
 /// Path of the endpoint file for a given session.

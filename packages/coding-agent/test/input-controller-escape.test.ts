@@ -7,6 +7,7 @@ import type {
 	InteractiveModeContext,
 	SubmittedUserInput,
 } from "@sayknow-cli/coding-agent/modes/types";
+import { associateSessionMessageViewportAnchorId } from "@sayknow-cli/coding-agent/session/session-manager";
 import { SubagentTool, type ToolSession } from "@sayknow-cli/coding-agent/tools";
 import type { SlashCommand } from "@sayknow-cli/tui";
 
@@ -890,6 +891,98 @@ describe("InputController escape behavior", () => {
 		expect(ctx.showTreeSelector).not.toHaveBeenCalled();
 		expect(ctx.showUserMessageSelector).not.toHaveBeenCalled();
 	});
+});
+it("lists availability-gated navigation and message actions in the palette and dispatches remaps", async () => {
+	const { ctx, editor } = createContext();
+	const showCommandPalette = vi.fn();
+	const message = {
+		role: "user",
+		content: "prompt",
+		timestamp: Date.now(),
+	} as InteractiveModeContext["session"]["messages"][number];
+	associateSessionMessageViewportAnchorId(message, "user-turn");
+	ctx.showCommandPalette = showCommandPalette;
+	(
+		ctx.session as unknown as {
+			isStreaming: boolean;
+			messages: typeof ctx.session.messages;
+			queuedMessageCount: number;
+			getQueuedMessageEntries(): unknown[];
+		}
+	).isStreaming = true;
+	(
+		ctx.session as unknown as {
+			messages: typeof ctx.session.messages;
+			queuedMessageCount: number;
+			getQueuedMessageEntries(): unknown[];
+		}
+	).messages = [message];
+	(
+		ctx.session as unknown as {
+			queuedMessageCount: number;
+			getQueuedMessageEntries(): unknown[];
+		}
+	).queuedMessageCount = 1;
+	(ctx.session as unknown as { getQueuedMessageEntries(): unknown[] }).getQueuedMessageEntries = () => [{}];
+	(ctx.keybindings as unknown as { getKeys(action: string): string[] }).getKeys = action =>
+		({
+			"app.message.followUp": ["ctrl+f"],
+			"app.message.queue": ["ctrl+q"],
+			"app.message.dequeue": ["ctrl+d"],
+			"app.transcript.prevTurn": ["alt+up"],
+			"app.transcript.nextTurn": ["alt+down"],
+			"app.message.sendNow": ["ctrl+enter"],
+		})[action] ?? [];
+	editor.setText("draft");
+	const controller = new InputController(ctx);
+	controller.setupKeyHandlers();
+
+	controller.openCommandPalette();
+	const actions = showCommandPalette.mock.calls[0]?.[1] as Array<{ id: string; handler: () => void }>;
+	const ids = [
+		"app.message.followUp",
+		"app.message.queue",
+		"app.message.dequeue",
+		"app.transcript.prevTurn",
+		"app.transcript.nextTurn",
+		"app.message.sendNow",
+	] as const;
+	expect(actions.map(action => action.id)).toEqual(expect.arrayContaining(ids));
+
+	const execute = vi.spyOn(controller.actionRegistry, "execute").mockResolvedValue(true);
+	for (const id of ids) actions.find(action => action.id === id)?.handler();
+	const customHandlers = (editor.setCustomKeyHandler as unknown as { mock: { calls: Array<[string, () => void]> } })
+		.mock.calls;
+	for (const id of ids) {
+		const key = {
+			"app.message.followUp": "ctrl+f",
+			"app.message.queue": "ctrl+q",
+			"app.message.dequeue": "ctrl+d",
+			"app.transcript.prevTurn": "alt+up",
+			"app.transcript.nextTurn": "alt+down",
+			"app.message.sendNow": "ctrl+enter",
+		}[id];
+		customHandlers.find(([registeredKey]) => registeredKey === key)?.[1]();
+	}
+	const customRemapIds = [
+		"app.message.followUp",
+		"app.transcript.prevTurn",
+		"app.transcript.nextTurn",
+		"app.message.sendNow",
+	] as const;
+	expect(execute).toHaveBeenCalledTimes(ids.length + customRemapIds.length);
+	expect(execute.mock.calls.map(([id]) => id)).toEqual([...ids, ...customRemapIds]);
+	execute.mockRestore();
+
+	(ctx.session as { isStreaming: boolean; queuedMessageCount: number; messages: unknown[] }).isStreaming = false;
+	(ctx.session as { queuedMessageCount: number; messages: unknown[] }).queuedMessageCount = 0;
+	(ctx.session as { messages: unknown[] }).messages = [];
+	(ctx.session as unknown as { getQueuedMessageEntries(): unknown[] }).getQueuedMessageEntries = () => [];
+	editor.setText("");
+	await Promise.resolve();
+	controller.openCommandPalette();
+	const unavailable = showCommandPalette.mock.calls[1]?.[1] as Array<{ id: string }>;
+	for (const id of ids) expect(unavailable.map(action => action.id)).not.toContain(id);
 });
 describe("InputController command palette", () => {
 	it("runs registered actions directly and excludes unsupported actions and self-reentry", () => {

@@ -24,6 +24,12 @@ import { MCPExpectedFailure, toJsonRpcError } from "../../runtime-mcp/types";
  */
 const CLOSE_WAIT_MS = 1_000;
 
+/** Write one JSONL frame while honoring Bun FileSink backpressure and flush failures. */
+export async function writeStdioFrame(stdin: Bun.FileSink, message: string): Promise<void> {
+	await Promise.resolve(stdin.write(message));
+	await stdin.flush();
+}
+
 /**
  * Build a minimal environment for a no-inherit stdio MCP child. Only OS-level
  * keys needed to locate/run an interpreter (PATH, HOME, temp, locale, and the
@@ -69,6 +75,9 @@ export class StdioTransport implements MCPTransport {
 	#readLoop: Promise<void> | null = null;
 	#stderrLoop: Promise<void> | null = null;
 	#closePromise: Promise<void> | null = null;
+	#writeQueue: Promise<void> = Promise.resolve();
+	#connectionEpoch = 0;
+	#terminalFailure: { epoch: number; error: MCPExpectedFailure } | undefined;
 
 	onClose?: () => void;
 	onError?: (error: Error) => void;
@@ -115,6 +124,8 @@ export class StdioTransport implements MCPTransport {
 			throw new MCPExpectedFailure(error);
 		}
 
+		this.#connectionEpoch++;
+		this.#terminalFailure = undefined;
 		this.#connected = true;
 
 		// Start reading stdout
@@ -126,6 +137,7 @@ export class StdioTransport implements MCPTransport {
 
 	async #startReadLoop(): Promise<void> {
 		if (!this.#process?.child.stdout) return;
+		const epoch = this.#connectionEpoch;
 		let failure: MCPExpectedFailure | undefined;
 		try {
 			for await (const line of readJsonl(this.#process.child.stdout)) {
@@ -138,11 +150,12 @@ export class StdioTransport implements MCPTransport {
 			}
 		} catch (error) {
 			failure = new MCPExpectedFailure(error);
-			if (this.#connected) {
-				this.onError?.(failure);
-			}
 		} finally {
-			this.#handleClose(failure);
+			if (failure) {
+				this.#terminalizeFailure(failure, epoch);
+			} else {
+				this.#handleClose();
+			}
 		}
 	}
 
@@ -177,7 +190,10 @@ export class StdioTransport implements MCPTransport {
 		}
 		// Server-to-client request: has both method and id
 		if ("method" in message && "id" in message && message.id != null) {
-			void this.#handleServerRequest(message as JsonRpcRequest);
+			const stdin = this.#getStdin();
+			if (stdin) {
+				void this.#handleServerRequest(message as JsonRpcRequest, this.#connectionEpoch, stdin);
+			}
 			return;
 		}
 
@@ -211,21 +227,23 @@ export class StdioTransport implements MCPTransport {
 		}
 	}
 
-	async #handleServerRequest(request: JsonRpcRequest): Promise<void> {
-		try {
-			if (!this.onRequest) {
-				this.#sendResponse(request.id, undefined, { code: -32601, message: "Method not found" });
-				return;
-			}
-			const result = await this.onRequest(request.method, request.params);
-			this.#sendResponse(request.id, result);
-		} catch (error) {
-			try {
-				this.#sendResponse(request.id, undefined, toJsonRpcError(error));
-			} catch {
-				// Best-effort — process may have exited
-			}
+	async #handleServerRequest(request: JsonRpcRequest, epoch: number, stdin: Bun.FileSink): Promise<void> {
+		if (!this.onRequest) {
+			await this.#sendResponseOrClose(request.id, epoch, stdin, undefined, {
+				code: -32601,
+				message: "Method not found",
+			});
+			return;
 		}
+
+		let result: unknown;
+		try {
+			result = await this.onRequest(request.method, request.params);
+		} catch (error) {
+			await this.#sendResponseOrClose(request.id, epoch, stdin, undefined, toJsonRpcError(error));
+			return;
+		}
+		await this.#sendResponseOrClose(request.id, epoch, stdin, result);
 	}
 
 	#getStdin(): Bun.FileSink | null {
@@ -233,18 +251,59 @@ export class StdioTransport implements MCPTransport {
 		return typeof stdin === "object" && stdin !== null ? stdin : null;
 	}
 
-	#sendResponse(id: string | number, result?: unknown, error?: JsonRpcError): void {
-		const stdin = this.#getStdin();
-		if (!this.#connected || !stdin) return;
+	async #sendResponse(
+		id: string | number,
+		epoch: number,
+		stdin: Bun.FileSink,
+		result?: unknown,
+		error?: JsonRpcError,
+	): Promise<void> {
 		const response = error
 			? { jsonrpc: "2.0" as const, id, error }
 			: { jsonrpc: "2.0" as const, id, result: result ?? {} };
-		stdin.write(`${JSON.stringify(response)}\n`);
-		stdin.flush();
+		await this.#queueWriteFrame(stdin, `${JSON.stringify(response)}\n`, epoch);
+	}
+
+	#queueWriteFrame(stdin: Bun.FileSink, message: string, epoch: number): Promise<void> {
+		const write = this.#writeQueue
+			.catch(() => {})
+			.then(() => {
+				if (!this.#connected || this.#connectionEpoch !== epoch || this.#getStdin() !== stdin) {
+					throw this.#terminalFailure?.epoch === epoch ? this.#terminalFailure.error : new MCPExpectedFailure();
+				}
+				return writeStdioFrame(stdin, message);
+			});
+		this.#writeQueue = write.catch(() => {});
+		return write;
+	}
+
+	async #sendResponseOrClose(
+		id: string | number,
+		epoch: number,
+		stdin: Bun.FileSink,
+		result?: unknown,
+		error?: JsonRpcError,
+	): Promise<void> {
+		try {
+			await this.#sendResponse(id, epoch, stdin, result, error);
+		} catch (writeError) {
+			this.#terminalizeFailure(writeError, epoch);
+		}
 	}
 
 	#handleClose(failure?: MCPExpectedFailure): void {
 		void this.#closeInternal(true, failure);
+	}
+
+	#terminalizeFailure(error: unknown, epoch: number): MCPExpectedFailure {
+		const existing = this.#terminalFailure;
+		if (existing?.epoch === epoch) return existing.error;
+		const failure = error instanceof MCPExpectedFailure ? error : new MCPExpectedFailure(error);
+		if (epoch !== this.#connectionEpoch) return failure;
+		this.#terminalFailure = { epoch, error: failure };
+		this.onError?.(failure);
+		this.#handleClose(failure);
+		return failure;
 	}
 
 	async request<T = unknown>(
@@ -253,8 +312,9 @@ export class StdioTransport implements MCPTransport {
 		options?: MCPRequestOptions,
 	): Promise<T> {
 		const stdin = this.#getStdin();
+		const epoch = this.#connectionEpoch;
 		if (!this.#connected || !stdin) {
-			throw new MCPExpectedFailure();
+			throw this.#terminalFailure?.epoch === epoch ? this.#terminalFailure.error : new MCPExpectedFailure();
 		}
 
 		const id = Snowflake.next();
@@ -318,12 +378,10 @@ export class StdioTransport implements MCPTransport {
 
 		const message = `${JSON.stringify(request)}\n`;
 		try {
-			// Bun's FileSink has write() method directly
-			stdin.write(message);
-			stdin.flush();
+			await this.#queueWriteFrame(stdin, message, epoch);
 		} catch (error: unknown) {
 			cleanup();
-			reject(new MCPExpectedFailure(error));
+			reject(this.#terminalizeFailure(error, epoch));
 		}
 
 		return promise;
@@ -331,8 +389,9 @@ export class StdioTransport implements MCPTransport {
 
 	async notify(method: string, params?: Record<string, unknown>): Promise<void> {
 		const stdin = this.#getStdin();
+		const epoch = this.#connectionEpoch;
 		if (!this.#connected || !stdin) {
-			throw new MCPExpectedFailure();
+			throw this.#terminalFailure?.epoch === epoch ? this.#terminalFailure.error : new MCPExpectedFailure();
 		}
 
 		const notification = {
@@ -343,16 +402,20 @@ export class StdioTransport implements MCPTransport {
 
 		const message = `${JSON.stringify(notification)}\n`;
 		try {
-			// Bun's FileSink has write() method directly
-			stdin.write(message);
-			stdin.flush();
+			await this.#queueWriteFrame(stdin, message, epoch);
 		} catch (error) {
-			throw new MCPExpectedFailure(error);
+			throw this.#terminalizeFailure(error, epoch);
 		}
 	}
 
 	async close(): Promise<void> {
-		await this.#closeInternal(false);
+		const epoch = this.#connectionEpoch;
+		let failure = this.#terminalFailure?.epoch === epoch ? this.#terminalFailure.error : undefined;
+		if (!failure) {
+			failure = new MCPExpectedFailure();
+			this.#terminalFailure = { epoch, error: failure };
+		}
+		await this.#closeInternal(false, failure);
 	}
 
 	#closeInternal(fromReadLoop: boolean, failure?: MCPExpectedFailure): Promise<void> {

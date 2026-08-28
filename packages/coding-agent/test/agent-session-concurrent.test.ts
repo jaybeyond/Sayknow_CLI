@@ -124,6 +124,20 @@ describe("AgentSession concurrent prompt guard", () => {
 		await firstPrompt.catch(() => {}); // Ignore abort error
 	});
 
+	it("idle-required session switch rejects without interrupting an active turn", async () => {
+		await createSession();
+		const firstPrompt = session.prompt("First message");
+		await waitFor(() => session.isStreaming);
+
+		await expect(
+			session.switchSession(path.join(tempDir, "target.jsonl"), { requireIdle: true }),
+		).rejects.toBeInstanceOf(AgentBusyError);
+		expect(session.isStreaming).toBe(true);
+
+		await session.abort();
+		await firstPrompt.catch(() => {});
+	});
+
 	it("should allow steer() while streaming", async () => {
 		await createSession();
 

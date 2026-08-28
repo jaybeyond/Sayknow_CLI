@@ -89,12 +89,10 @@ function deleteClientLock(key: string, clientPromise: Promise<LspClient>): void 
 	}
 }
 
-function evictDeadCachedClient(key: string, client: LspClient): void {
+function evictDeadCachedClient(client: LspClient): void {
 	if (client.proc.exitCode === null && !client.proc.killed && !client.owner?.disposed && !killedClients.has(client))
 		return;
-	deleteCachedClient(key, client);
-	client.resolveProjectLoaded();
-	rejectPendingRequests(client, new Error("LSP server exited"));
+	terminalizeTransport(client, new Error("LSP server exited"));
 }
 
 function terminalizeTransport(client: LspClient, cause: unknown): Error {
@@ -275,7 +273,9 @@ async function writeMessage(
 	if (terminalError) throw terminalError;
 
 	try {
-		client.proc.stdin.write(`Content-Length: ${Buffer.byteLength(content, "utf-8")}\r\n\r\n${content}`);
+		await Promise.resolve(
+			client.proc.stdin.write(`Content-Length: ${Buffer.byteLength(content, "utf-8")}\r\n\r\n${content}`),
+		);
 		await client.proc.stdin.flush();
 	} catch (error) {
 		if (isKnownSinkPeerClosedError(error)) {
@@ -302,7 +302,7 @@ function queueWriteMessage(
  * Start background message reader for a client.
  * Routes responses to pending requests and handles notifications.
  */
-async function startMessageReader(client: LspClient): Promise<void> {
+export async function startMessageReader(client: LspClient): Promise<void> {
 	if (client.isReading) return;
 	client.isReading = true;
 
@@ -311,7 +311,10 @@ async function startMessageReader(client: LspClient): Promise<void> {
 	try {
 		while (true) {
 			const { done, value } = await reader.read();
-			if (done) break;
+			if (done) {
+				terminalizeTransport(client, new Error("LSP stdout closed"));
+				break;
+			}
 
 			// Atomically update buffer before processing
 			const currentBuffer: Buffer = Buffer.concat([client.messageBuffer, value]);
@@ -368,11 +371,7 @@ async function startMessageReader(client: LspClient): Promise<void> {
 			client.messageBuffer = workingBuffer;
 		}
 	} catch (err) {
-		// Connection closed or error - reject all pending requests
-		for (const pending of Array.from(client.pendingRequests.values())) {
-			pending.reject(new Error(`LSP connection closed: ${err}`));
-		}
-		client.pendingRequests.clear();
+		terminalizeTransport(client, err);
 	} finally {
 		reader.releaseLock();
 		client.isReading = false;
@@ -488,7 +487,7 @@ export async function getOrCreateClient(config: ServerConfig, cwd: string, initT
 	// Check if client already exists
 	const existingClient = clients.get(key);
 	if (existingClient) {
-		evictDeadCachedClient(key, existingClient);
+		evictDeadCachedClient(existingClient);
 		if (clients.has(key)) {
 			existingClient.lastActivity = Date.now();
 			return existingClient;
@@ -558,13 +557,10 @@ export async function getOrCreateClient(config: ServerConfig, cwd: string, initT
 		};
 		clients.set(key, client);
 
-		// Register crash recovery - remove client on process exit
+		// Register crash recovery and durably terminalize retained references on exit.
 		proc.exited.then(async () => {
-			deleteCachedClient(key, client);
 			deleteClientLock(key, clientPromise);
-			client.resolveProjectLoaded();
-
-			// Reject any pending requests — the server is gone, they will never complete.
+			let error = new Error(`LSP server exited unexpectedly (code ${proc.exitCode})`);
 			if (client.pendingRequests.size > 0) {
 				// Strip informational log lines (e.g. marksman's [INF]/[DBG] prefix)
 				// — they are startup noise, not actionable errors.
@@ -588,16 +584,13 @@ export async function getOrCreateClient(config: ServerConfig, cwd: string, initT
 				);
 				const diagnosticSuffix = crashNotice ? `\n${crashNotice}` : "";
 				const code = proc.exitCode;
-				const err = new Error(
+				error = new Error(
 					stderr
 						? `LSP server exited (code ${code}): ${stderr}${diagnosticSuffix}`
 						: `LSP server exited unexpectedly (code ${code})${diagnosticSuffix}`,
 				);
-				for (const pending of client.pendingRequests.values()) {
-					pending.reject(err);
-				}
-				client.pendingRequests.clear();
 			}
+			terminalizeTransport(client, error);
 		});
 
 		// Start background message reader
@@ -980,12 +973,7 @@ export async function sendNotification(client: LspClient, method: string, params
 	};
 
 	client.lastActivity = Date.now();
-	try {
-		await queueWriteMessage(client, notification);
-	} catch (error) {
-		if (transportClosedErrors.get(client) === error) return;
-		throw error;
-	}
+	await queueWriteMessage(client, notification);
 }
 
 /**

@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { Agent, type AgentContext } from "@sayknow-cli/agent-core";
@@ -198,6 +198,60 @@ describe("AgentSession mid-run maintenance outcomes", () => {
 			assistant(model, usage(10_000)),
 		]);
 		expect(await session.runMidRunMaintenanceForTests(contextOf(session))).toBe("not-needed");
+	});
+
+	it("runs the emergency floor when model contextWindow metadata is unavailable", async () => {
+		session = await buildSession({
+			contextWindow: 0,
+			shortCircuit: true,
+			settings: { "compaction.keepRecentTokens": 10 },
+		});
+		await seedCompactableConversation(session, 1_000);
+		session.setResourceSampler(() => ({
+			heapUsedBytes: Number.MAX_SAFE_INTEGER,
+			providerBytes: 0,
+			messageCount: 0,
+			imageBytes: 0,
+		}));
+
+		await session.runPrePromptContextCheckForTests();
+		expect(getLatestCompactionEntry(session.sessionManager.getBranch())).not.toBeNull();
+	});
+
+	it.each([
+		["disabled", { "compaction.enabled": false }],
+		["off", { "compaction.strategy": "off" }],
+	] as const)("forces transcript emergency compaction when settings are %s", async (_label, settings) => {
+		session = await buildSession({
+			shortCircuit: true,
+			settings: { ...settings, "compaction.keepRecentTokens": 10 },
+		});
+		await seedCompactableConversation(session, 1_000);
+		session.setResourceSampler(() => ({
+			heapUsedBytes: 0,
+			providerBytes: 0,
+			messageCount: 0,
+			imageBytes: 0,
+			transcriptFileBytes: 48 * 1024 * 1024 + 1,
+		}));
+
+		await session.runPrePromptContextCheckForTests();
+		expect(getLatestCompactionEntry(session.sessionManager.getBranch())).not.toBeNull();
+	});
+
+	it("rewrites exact live entries when transcript emergency compaction is skipped", async () => {
+		session = await buildSession({ contextWindow: 0, shortCircuit: false });
+		const rewriteSpy = vi.spyOn(session.sessionManager, "rewriteEntries").mockResolvedValue();
+		session.setResourceSampler(() => ({
+			heapUsedBytes: 0,
+			providerBytes: 0,
+			messageCount: 0,
+			imageBytes: 0,
+			transcriptFileBytes: 48 * 1024 * 1024 + 1,
+		}));
+
+		await session.runPrePromptContextCheckForTests();
+		expect(rewriteSpy).toHaveBeenCalledTimes(1);
 	});
 
 	it("returns not-needed at exactly the threshold and maintains just past it", async () => {

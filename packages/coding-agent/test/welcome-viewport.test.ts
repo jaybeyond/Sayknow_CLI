@@ -26,6 +26,24 @@ describe("welcome intro cadence", () => {
 		expect(resolveWelcomeIntroTickMs("linux", "tmux,1,0")).toBe(33);
 	});
 });
+describe("logo animation", () => {
+	it("renders the final logo immediately when animation is skipped", () => {
+		const skipped = new WelcomeComponent("1.2.3", "test-model", "test-provider", [], [], "ascii", {
+			skipLogoAnimation: true,
+		});
+		const finalFrame = skipped.render(100);
+
+		skipped.playIntro(() => {});
+		expect(skipped.render(100)).toEqual(finalFrame);
+
+		const animated = new WelcomeComponent("1.2.3", "test-model", "test-provider", [], [], "ascii");
+		animated.playIntro(() => {});
+		expect(animated.render(100)).not.toEqual(finalFrame);
+
+		skipped.dispose();
+		animated.dispose();
+	});
+});
 
 function stripRenderControls(line: string): string {
 	return stripVTControlCharacters(line);

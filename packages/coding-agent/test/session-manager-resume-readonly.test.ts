@@ -1175,20 +1175,14 @@ describe("active managed picker root", () => {
 			this: ManagedSessionDescendantStore,
 		) {
 			assertBound.call(this);
-			const stack = new Error().stack ?? "";
-			if (
-				stack.includes("publishManagedFileNoReplace") &&
-				stack.includes("assertPublicationConsent") &&
-				++publicationGuards === 2
-			)
-				fs.renameSync(replacementPath, legacyPath);
+			if (++publicationGuards === 5) fs.renameSync(replacementPath, legacyPath);
 		});
 
 		expectStrictFailure(
 			await SessionManager.openExistingStrict(inspection.identity, destination),
 			"identity-mismatch",
 		);
-		expect(publicationGuards).toBe(2);
+		expect(publicationGuards).toBe(6);
 		expect(fs.readdirSync(path.join(protocolRoot, "receipts"))).toEqual(before.receipts);
 		expect(fs.readdirSync(path.join(protocolRoot, "tombstones"))).toEqual(before.tombstones);
 		expect(fs.existsSync(path.join(destination.directory, path.basename(legacyPath)))).toBe(false);
@@ -1256,7 +1250,7 @@ describe("active managed picker root", () => {
 
 		await expect(
 			SessionManager.prepareManagedCandidateForWrite(legacyPath, "copy-retain", destination),
-		).rejects.toThrow("Managed descendant root binding changed");
+		).rejects.toThrow("Managed root authority changed");
 
 		expect(assertions).toBe(5);
 		expect(fs.readFileSync(legacyPath)).toEqual(candidateBefore);

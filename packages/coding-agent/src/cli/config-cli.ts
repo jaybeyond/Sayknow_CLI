@@ -88,6 +88,10 @@ function redactConfigValue(path: string, value: unknown, showSecrets?: boolean):
 	}
 	return REDACTED_SECRET_VALUE;
 }
+function reportConfigPersistenceFailure(): never {
+	console.error(chalk.red("Failed to persist configuration."));
+	process.exit(1);
+}
 
 /** Find setting definition by path */
 function findSettingDef(path: string): CliSettingDef | undefined {
@@ -223,25 +227,25 @@ function parseAndSetValue(path: SettingPath, rawValue: string): void {
 			const lower = trimmed.toLowerCase();
 			if (["true", "1", "yes", "on"].includes(lower)) parsedValue = true;
 			else if (["false", "0", "no", "off"].includes(lower)) parsedValue = false;
-			else throw new Error(`Invalid boolean value: ${rawValue}. Use true/false, yes/no, on/off, or 1/0`);
+			else throw new Error("Invalid boolean value. Use true/false, yes/no, on/off, or 1/0");
 			break;
 		}
 		case "number": {
 			parsedValue = Number(trimmed);
-			if (!Number.isFinite(parsedValue)) throw new Error(`Invalid number: ${rawValue}`);
+			if (!Number.isFinite(parsedValue)) throw new Error("Invalid number");
 			const validate =
 				"validate" in SETTINGS_SCHEMA[path]
 					? (SETTINGS_SCHEMA[path].validate as ((value: number) => boolean) | undefined)
 					: undefined;
 			if (validate?.(parsedValue as number) === false) {
-				throw new Error(`Invalid number for ${path}: ${rawValue}`);
+				throw new Error(`Invalid number for ${path}`);
 			}
 			break;
 		}
 		case "enum": {
 			const valid = getEnumValues(path);
 			if (valid && !valid.includes(trimmed)) {
-				throw new Error(`Invalid value: ${rawValue}. Valid values: ${valid.join(", ")}`);
+				throw new Error(`Invalid value. Valid values: ${valid.join(", ")}`);
 			}
 			parsedValue = trimmed;
 			break;
@@ -251,10 +255,10 @@ function parseAndSetValue(path: SettingPath, rawValue: string): void {
 			try {
 				parsed = JSON.parse(trimmed);
 			} catch {
-				throw new Error(`Invalid array JSON: ${rawValue}`);
+				throw new Error("Invalid array JSON");
 			}
 			if (!Array.isArray(parsed)) {
-				throw new Error(`Invalid array JSON: ${rawValue}`);
+				throw new Error("Invalid array JSON");
 			}
 			parsedValue = parsed;
 			break;
@@ -264,10 +268,10 @@ function parseAndSetValue(path: SettingPath, rawValue: string): void {
 			try {
 				parsed = JSON.parse(trimmed);
 			} catch {
-				throw new Error(`Invalid record JSON: ${rawValue}`);
+				throw new Error("Invalid record JSON");
 			}
 			if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
-				throw new Error(`Invalid record JSON: ${rawValue}`);
+				throw new Error("Invalid record JSON");
 			}
 			parsedValue = parsed;
 			break;
@@ -408,6 +412,11 @@ async function handleSet(
 		console.error(chalk.red(String(err)));
 		process.exit(1);
 	}
+	try {
+		await settings.flushOrThrow();
+	} catch {
+		reportConfigPersistenceFailure();
+	}
 
 	const newValue = settings.get(def.path);
 	const displayValue = redactConfigValue(def.path, newValue, flags.showSecrets);
@@ -437,6 +446,12 @@ async function handleReset(key: string | undefined, flags: { json?: boolean }): 
 	const defaultValue = getDefault(path);
 	if (defaultValue === undefined) settings.unset(path);
 	else settings.set(path, defaultValue as SettingValue<typeof path>);
+
+	try {
+		await settings.flushOrThrow();
+	} catch {
+		reportConfigPersistenceFailure();
+	}
 
 	if (flags.json) {
 		console.log(JSON.stringify({ key: def.path, value: defaultValue }));

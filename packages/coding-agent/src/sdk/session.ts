@@ -2272,13 +2272,14 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			};
 		};
 
+		const explicitlyDisabledTools = options.toolNames?.length === 0;
 		const toolNamesFromRegistry = Array.from(toolRegistry.keys());
 		const hasExplicitToolNames = options.toolNames !== undefined;
 		const requestedToolNames = hasExplicitToolNames
 			? [
 					...new Set([
 						...options.toolNames!.map(name => name.toLowerCase()),
-						...(settings.get("goal.enabled") ? ["goal"] : []),
+						...(settings.get("goal.enabled") && !explicitlyDisabledTools ? ["goal"] : []),
 					]),
 				]
 			: toolNamesFromRegistry;
@@ -2298,7 +2299,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			registeredTools.filter(tool => tool.definition.defaultInactive).map(tool => tool.definition.name),
 		);
 		const requestedActiveToolNames = normalizedRequested;
-		const initialRequestedActiveToolNames = options.toolNames
+		const initialRequestedActiveToolNames = hasExplicitToolNames
 			? requestedActiveToolNames
 			: requestedActiveToolNames.filter(name => !defaultInactiveToolNames.has(name));
 		const discoverableMCPToolNames = new Set<string>();
@@ -2348,11 +2349,13 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			];
 			hasExplicitMCPToolSelection =
 				hasExplicitToolNames && (options.toolNames!.length === 0 || selectableExplicitMCPToolNames.length > 0);
-			initialSelectedMCPToolNames = existingSession.hasPersistedMCPToolSelection
-				? restoredSelectedMCPToolNames
-				: hasExplicitMCPToolSelection
-					? selectableExplicitMCPToolNames
-					: defaultSelectedMCPToolNames;
+			initialSelectedMCPToolNames = explicitlyDisabledTools
+				? []
+				: existingSession.hasPersistedMCPToolSelection
+					? restoredSelectedMCPToolNames
+					: hasExplicitMCPToolSelection
+						? selectableExplicitMCPToolNames
+						: defaultSelectedMCPToolNames;
 			initialToolNames = [
 				...new Set([
 					...initialRequestedActiveToolNames.filter(name => !discoverableMCPToolNames.has(name)),
@@ -2361,14 +2364,15 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			];
 		}
 
-		// Custom, extension-registered, and plugin-bundle MCP tools are always
-		// included regardless of the caller's built-in tool filter. Plugin MCPs
-		// remain always-on even when generic MCP discovery is disabled.
-		const alwaysInclude: string[] = [
-			...(options.customTools?.map(t => (isCustomTool(t) ? t.name : t.name)) ?? []),
-			...registeredTools.filter(t => !t.definition.defaultInactive).map(t => t.definition.name),
-			...pluginMcpToolNames,
-		];
+		// Custom, extension-registered, and plugin-bundle MCP tools bypass
+		// built-in filtering, but not an explicit zero-tool selection.
+		const alwaysInclude: string[] = explicitlyDisabledTools
+			? []
+			: [
+					...(options.customTools?.map(t => (isCustomTool(t) ? t.name : t.name)) ?? []),
+					...registeredTools.filter(t => !t.definition.defaultInactive).map(t => t.definition.name),
+					...pluginMcpToolNames,
+				];
 		const pluginMcpToolNameSet = new Set(pluginMcpToolNames);
 		for (const name of alwaysInclude) {
 			if (mcpDiscoveryEnabled && discoverableMCPToolNames.has(name) && !pluginMcpToolNameSet.has(name)) {
@@ -2414,9 +2418,11 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				allowedDiscoveredBuiltinNames,
 				essentialBuiltinNames,
 			);
-			initialSelectedDiscoveredBuiltinToolNames = existingSession.hasPersistedDiscoveredBuiltinToolSelection
-				? restoredDiscoveredNames
-				: explicitlyRequestedDiscoveredBuiltinToolNames;
+			initialSelectedDiscoveredBuiltinToolNames = explicitlyDisabledTools
+				? []
+				: existingSession.hasPersistedDiscoveredBuiltinToolSelection
+					? restoredDiscoveredNames
+					: explicitlyRequestedDiscoveredBuiltinToolNames;
 			initialToolNames = [...new Set([...baselineInitialToolNames, ...initialSelectedDiscoveredBuiltinToolNames])];
 			hasExplicitDiscoveredBuiltinToolSelection =
 				hasExplicitToolNames &&
@@ -2717,6 +2723,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			workspaceTree: resolvedWorkspaceTree,
 			reloadSshTool,
 			requestedToolNames: requestedToolNameSet,
+			explicitlyDisabledTools,
 			discoverableToolAllowedNames: options.discoverableToolAllowedNames,
 			mcpDiscoveryEnabled,
 			discoveryMode: effectiveDiscoveryMode,

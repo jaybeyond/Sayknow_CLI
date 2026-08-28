@@ -595,6 +595,11 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 	readonly description: string;
 	readonly parameters = askSchema;
 	readonly strict = true;
+	/**
+	 * These fields are rendered to the user and carry no executable or durable
+	 * meaning. IDs and workflow/deep-interview metadata remain fail-closed.
+	 */
+	readonly displaySafeEscapedArgFields = ["questions.question", "questions.options.label"] as const;
 	readonly loadMode = "discoverable";
 
 	constructor(private readonly session: ToolSession) {

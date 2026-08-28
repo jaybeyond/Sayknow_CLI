@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test, vi } from "bun:test";
+import * as fs from "node:fs/promises";
 import { logger } from "@sayknow-cli/utils";
 import { disposeAllOwnedProcesses, liveOwnedProcessCount } from "../../src/runtime/process-lifecycle";
 import { HttpTransport } from "../../src/runtime-mcp/transports/http";
@@ -64,6 +65,128 @@ describe("MCP stdio transport lifecycle", () => {
 		expect(isAlive(oldChildPid)).toBe(false);
 		await transport.close();
 		await waitFor(() => !isAlive(newChildPid));
+	});
+
+	test.each([
+		"notify",
+		"request",
+	] as const)("peer-closed %s terminalizes the transport and reports the write failure once", async operation => {
+		const command = [
+			"node",
+			"-e",
+			`const fs=require('fs'); fs.closeSync(0); process.stdout.write(JSON.stringify({jsonrpc:'2.0',method:'ready'})+'\\n'); setInterval(()=>{},1000);`,
+		];
+		const transport = new StdioTransport({ command: command[0], args: command.slice(1), timeout: 500 });
+		const ready = Promise.withResolvers<void>();
+		const onError = vi.fn();
+		const onClose = vi.fn();
+		transport.onNotification = method => {
+			if (method === "ready") ready.resolve();
+		};
+		transport.onError = onError;
+		transport.onClose = onClose;
+		await transport.connect();
+		await Promise.race([
+			ready.promise,
+			Bun.sleep(1_000).then(() => {
+				throw new Error("ready notification timed out");
+			}),
+		]);
+
+		const params = { payload: "x".repeat(1024 * 1024) };
+		const writes = [1, 2].map(sequence =>
+			operation === "notify"
+				? transport.notify("test/after-close", { ...params, sequence })
+				: transport.request("test/after-close", { ...params, sequence }),
+		);
+		const outcomes = await Promise.allSettled(writes);
+		expect(outcomes.every(outcome => outcome.status === "rejected")).toBe(true);
+		await waitFor(() => onClose.mock.calls.length === 1);
+		expect(transport.connected).toBe(false);
+		expect(onError).toHaveBeenCalledTimes(1);
+		expect(onClose).toHaveBeenCalledTimes(1);
+		await expect(transport.notify("test/stale", {})).rejects.toThrow();
+		await expect(transport.request("test/stale", {})).rejects.toThrow();
+		expect(onError).toHaveBeenCalledTimes(1);
+		expect(onClose).toHaveBeenCalledTimes(1);
+	});
+
+	test("server response write failure reports and closes once", async () => {
+		const command = [
+			"node",
+			"-e",
+			`const fs=require('fs'); fs.closeSync(0); process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:1,method:'server/test',params:{}})+'\\n'); setInterval(()=>{},1000);`,
+		];
+		const transport = new StdioTransport({ command: command[0], args: command.slice(1), timeout: 500 });
+		const onRequest = vi.fn(async () => ({ ok: true }));
+		const onError = vi.fn();
+		const onClose = vi.fn();
+		transport.onRequest = onRequest;
+		transport.onError = onError;
+		transport.onClose = onClose;
+		await transport.connect();
+
+		await waitFor(() => onError.mock.calls.length === 1);
+		await waitFor(() => onClose.mock.calls.length === 1);
+		expect(transport.connected).toBe(false);
+		expect(onRequest).toHaveBeenCalledTimes(1);
+		expect(onError).toHaveBeenCalledTimes(1);
+		expect(onClose).toHaveBeenCalledTimes(1);
+	});
+
+	test("deferred server responses cannot write to or close a reconnected epoch", async () => {
+		const marker = `/tmp/skc-mcp-stdio-epoch-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+		const command = [
+			"node",
+			"-e",
+			`const fs=require('fs'); const marker=${JSON.stringify(marker)}; if (!fs.existsSync(marker)) { fs.writeFileSync(marker,'1'); process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:1,method:'server/deferred',params:{}})+'\\n'); } else { process.stdin.on('data',()=>process.stdout.write(JSON.stringify({jsonrpc:'2.0',method:'unexpected-write'})+'\\n')); process.stdout.write(JSON.stringify({jsonrpc:'2.0',method:'ready'})+'\\n'); } setInterval(()=>{},1000);`,
+		];
+		const transport = new StdioTransport({ command: command[0], args: command.slice(1), timeout: 500 });
+		const handlerGate = Promise.withResolvers<void>();
+		const handlerReturned = Promise.withResolvers<void>();
+		const ready = Promise.withResolvers<void>();
+		let unexpectedWrite = false;
+		const onRequest = vi.fn(async () => {
+			await handlerGate.promise;
+			handlerReturned.resolve();
+			return { ok: true };
+		});
+		const onError = vi.fn();
+		const onClose = vi.fn();
+		transport.onRequest = onRequest;
+		transport.onNotification = method => {
+			if (method === "ready") ready.resolve();
+			if (method === "unexpected-write") unexpectedWrite = true;
+		};
+		transport.onError = onError;
+		transport.onClose = onClose;
+
+		try {
+			await transport.connect();
+			await waitFor(() => onRequest.mock.calls.length === 1);
+			await transport.close();
+			expect(onClose).toHaveBeenCalledTimes(1);
+
+			await transport.connect();
+			await Promise.race([
+				ready.promise,
+				Bun.sleep(1_000).then(() => {
+					throw new Error("reconnected server ready notification timed out");
+				}),
+			]);
+
+			handlerGate.resolve();
+			await handlerReturned.promise;
+			await Bun.sleep(50);
+			expect(transport.connected).toBe(true);
+			expect(unexpectedWrite).toBe(false);
+			expect(onRequest).toHaveBeenCalledTimes(1);
+			expect(onError).not.toHaveBeenCalled();
+			expect(onClose).toHaveBeenCalledTimes(1);
+		} finally {
+			await transport.close();
+			await fs.rm(marker, { force: true });
+		}
 	});
 });
 

@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -8,6 +8,7 @@ import type { DapCapabilities, DapClientState, DapEventMessage, DapResolvedAdapt
 import {
 	disposeAllOwnedProcesses,
 	liveOwnedProcessCount,
+	type OwnedProcess,
 	spawnOwnedProcess,
 } from "../../src/runtime/process-lifecycle";
 
@@ -126,6 +127,16 @@ async function tempDir(prefix: string): Promise<string> {
 	return fs.mkdtemp(path.join(os.tmpdir(), prefix));
 }
 
+async function captureError(promise: Promise<unknown>): Promise<Error> {
+	try {
+		await promise;
+	} catch (error) {
+		if (error instanceof Error) return error;
+		throw error;
+	}
+	throw new Error("Expected promise to reject");
+}
+
 afterEach(async () => {
 	await disposeAllOwnedProcesses();
 });
@@ -150,6 +161,60 @@ describe("DAP lifecycle behavior", () => {
 			await fs.rm(cwd, { recursive: true, force: true });
 		}
 	}, 15_000);
+
+	it("readable EOF rejects pending and future requests and exposes awaitable disposal", async () => {
+		const sink = {
+			write: vi.fn(() => 1),
+			flush: vi.fn(() => undefined),
+		};
+		const child = {
+			stdin: sink,
+			stdout: new ReadableStream<Uint8Array>(),
+			stderr: new ReadableStream<Uint8Array>(),
+			exited: Promise.resolve(0),
+			exitCode: null,
+			killed: false,
+			kill: () => true,
+		};
+		const disposeGate = Promise.withResolvers<void>();
+		const awaitExit = vi.fn(async () => ({ exited: true, code: 0 }));
+		const owner = {
+			child,
+			dispose: vi.fn(() => disposeGate.promise),
+			awaitExit,
+		} as unknown as OwnedProcess;
+		let readableController: ReadableStreamDefaultController<Uint8Array> | undefined;
+		const readable = new ReadableStream<Uint8Array>({
+			start(controller) {
+				readableController = controller;
+			},
+		});
+		const client = new DapClient(STDIO_ADAPTER, "/tmp", owner, { readable, writeSink: sink });
+
+		const readerLoop = client.startMessageReader();
+		const pending = captureError(client.sendRequest("pending", {}, undefined, 5_000));
+		await Bun.sleep(0);
+		readableController?.close();
+		await readerLoop;
+
+		const terminalError = await pending;
+		expect(terminalError.message).toBe("DAP adapter fake-stdio transport closed");
+		expect((terminalError.cause as Error).message).toBe("DAP readable closed");
+		const staleError = await captureError(client.sendRequest("stale", {}, undefined, 50));
+		expect(staleError).toBe(terminalError);
+		expect(sink.write).toHaveBeenCalledTimes(1);
+
+		let disposalSettled = false;
+		const disposal = client.dispose().then(() => {
+			disposalSettled = true;
+		});
+		await Bun.sleep(0);
+		expect(disposalSettled).toBe(false);
+		disposeGate.resolve();
+		await disposal;
+		expect(owner.dispose).toHaveBeenCalledTimes(1);
+		expect(awaitExit).toHaveBeenCalledTimes(1);
+	});
 
 	it.skipIf(process.platform !== "linux")("socket-mode Unix startup failure unlinks the temporary .sock", async () => {
 		const cwd = await tempDir("skc-dap-unix-socket-timeout-");

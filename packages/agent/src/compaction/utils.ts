@@ -147,8 +147,12 @@ export function serializeConversation(messages: Message[]): string {
 				} else if (block.type === "thinking") {
 					thinkingParts.push(block.thinking);
 				} else if (block.type === "toolCall") {
-					const args = block.arguments as Record<string, unknown>;
-					const argsStr = Object.entries(args)
+					// `arguments` is typed non-null, but persisted history can carry a
+					// null/non-object payload from an aborted or malformed tool call.
+					// Summarization must never throw here: this runs inside compaction,
+					// which is itself the recovery path for context overflow.
+					const args = block.arguments as Record<string, unknown> | null | undefined;
+					const argsStr = Object.entries(args && typeof args === "object" && !Array.isArray(args) ? args : {})
 						.map(([k, v]) => `${k}=${JSON.stringify(v)}`)
 						.join(", ");
 					toolCalls.push(`${block.name}(${argsStr})`);

@@ -94,4 +94,47 @@ describe("emergencyCompactionReason (W4 / F6)", () => {
 		expect(resolveEmergencyCompactionLimits(Number.NaN).heapUsedBytes).toBe(fullFloor);
 		expect(resolveEmergencyCompactionLimits(Number.POSITIVE_INFINITY).heapUsedBytes).toBe(fullFloor);
 	});
+
+	it("exposes a 48 MiB transcript-file floor by default", () => {
+		expect(LIM.transcriptFileBytes).toBe(48 * 1024 * 1024);
+	});
+
+	it("flags transcriptFile only above its floor", () => {
+		expect(
+			emergencyCompactionReason({
+				...under,
+				transcriptFileBytes: LIM.transcriptFileBytes! + 1,
+			}),
+		).toBe("transcriptFile");
+		expect(emergencyCompactionReason({ ...under, transcriptFileBytes: LIM.transcriptFileBytes })).toBeNull();
+		expect(emergencyCompactionReason({ ...under, transcriptFileBytes: 0 })).toBeNull();
+		expect(emergencyCompactionReason({ ...under, transcriptFileBytes: undefined })).toBeNull();
+	});
+
+	it("keeps transcriptFile in the documented emergency priority order", () => {
+		const transcriptExceeded = LIM.transcriptFileBytes! + 1;
+		expect(
+			emergencyCompactionReason({
+				...under,
+				heapUsedBytes: LIM.heapUsedBytes + 1,
+				transcriptFileBytes: transcriptExceeded,
+			}),
+		).toBe("heap");
+		expect(
+			emergencyCompactionReason({
+				...under,
+				materializedResidentBytes: LIM.retainedMemoryBytes,
+				transcriptFileBytes: transcriptExceeded,
+			}),
+		).toBe("retainedMemory");
+		expect(
+			emergencyCompactionReason({
+				...under,
+				transcriptFileBytes: transcriptExceeded,
+				providerBytes: LIM.providerBytes + 1,
+				imageBytes: LIM.imageBytes + 1,
+				messageCount: LIM.messageCount + 1,
+			}),
+		).toBe("transcriptFile");
+	});
 });

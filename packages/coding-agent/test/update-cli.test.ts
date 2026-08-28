@@ -6,16 +6,20 @@ import * as path from "node:path";
 import type { BinaryUpdateFlow } from "../src/cli/update-cli";
 import {
 	buildReleaseBinaryUrlForTest,
+	fetchExpectedBinaryDigest,
 	formatBinaryDownloadFailureMessageForTest,
 	formatManualUpdateInstructionsForTest,
 	formatVerificationFailureForTest,
 	fsyncFileForTest,
+	getBinaryNameForTest,
 	replaceBinaryForUpdate,
 	resolveNpmManagedTargetForTest,
 	resolveUpdateMethodForTest,
 	runBinaryUpdateFlow,
 	runPackageManagerUpdateForTest,
 	runUpdateCommand,
+	verifyReleaseBinaryIntegrity,
+	withBinaryUpdateLock,
 } from "../src/cli/update-cli";
 import { initTheme } from "../src/modes/theme/theme";
 
@@ -98,14 +102,68 @@ describe("update-cli install target detection", () => {
 describe("update-cli binary release assets", () => {
 	it("downloads fallback binaries from the current owner release repository", () => {
 		expect(buildReleaseBinaryUrlForTest("0.2.3", "linux", "x64")).toBe(
-			"https://github.com/jaybeyond/Sayknow_CLI/releases/download/v0.2.3/skc-linux-x64",
+			"https://github.com/jaybeyond/Sayknow_CLI/releases/download/sayknow-v0.2.3/skc-linux-x64",
 		);
 	});
 
 	it("uses the existing Windows .exe release asset name", () => {
 		expect(buildReleaseBinaryUrlForTest("0.2.3", "win32", "x64")).toBe(
-			"https://github.com/jaybeyond/Sayknow_CLI/releases/download/v0.2.3/skc-windows-x64.exe",
+			"https://github.com/jaybeyond/Sayknow_CLI/releases/download/sayknow-v0.2.3/skc-windows-x64.exe",
 		);
+	});
+
+	it("maps every published platform and rejects unsupported combinations", () => {
+		expect(getBinaryNameForTest("linux", "x64")).toBe("skc-linux-x64");
+		expect(getBinaryNameForTest("linux", "arm64")).toBe("skc-linux-arm64");
+		expect(getBinaryNameForTest("darwin", "x64")).toBe("skc-darwin-x64");
+		expect(getBinaryNameForTest("darwin", "arm64")).toBe("skc-darwin-arm64");
+		expect(getBinaryNameForTest("win32", "x64")).toBe("skc-windows-x64.exe");
+		expect(() => getBinaryNameForTest("win32", "arm64")).toThrow("Unsupported architecture");
+	});
+
+	it("resolves sums first, validates manifest fallback, and fails closed when both are missing", async () => {
+		const digest = "a".repeat(64);
+		const sumsFetch = async () => new Response(`${digest}  skc-linux-x64\n`);
+		await expect(fetchExpectedBinaryDigest("1.2.3", "skc-linux-x64", sumsFetch)).resolves.toBe(digest);
+		await expect(
+			fetchExpectedBinaryDigest(
+				"1.2.3",
+				"skc-linux-x64",
+				async () => new Response(`${digest}  skc-linux-x64\n${digest}  skc-linux-x64\n`),
+			),
+		).rejects.toThrow("more than once");
+
+		const responses = [
+			new Response("", { status: 404 }),
+			Response.json({
+				schema: "sayknow-release-binaries-v1",
+				schema_version: 1,
+				release_version: "1.2.3",
+				tag: "sayknow-v1.2.3",
+				binaries: [{ name: "skc-linux-x64", sha256: digest, size: 10 }],
+			}),
+		];
+		await expect(fetchExpectedBinaryDigest("1.2.3", "skc-linux-x64", async () => responses.shift()!)).resolves.toBe(
+			digest,
+		);
+
+		await expect(
+			fetchExpectedBinaryDigest("1.2.3", "skc-linux-x64", async () => new Response("", { status: 404 })),
+		).rejects.toThrow("no Sayknow binary integrity manifest");
+	});
+
+	it("rejects a downloaded binary with the wrong digest", async () => {
+		const dir = await makeTempDir();
+		const binary = path.join(dir, "skc");
+		await Bun.write(binary, "downloaded bytes");
+		await expect(
+			verifyReleaseBinaryIntegrity(
+				binary,
+				"1.2.3",
+				"skc-linux-x64",
+				async () => new Response(`${"0".repeat(64)}  skc-linux-x64\n`),
+			),
+		).rejects.toThrow("SHA-256 mismatch");
 	});
 
 	it("reports actionable Unix manual update commands for unsupported fallback paths", () => {
@@ -427,6 +485,70 @@ describe("update-cli binary replacement", () => {
 		expect(await Bun.file(backupPath).exists()).toBe(false);
 	});
 
+	it("installs and verifies a binary when migrating to a fresh standalone target", async () => {
+		const dir = await makeTempDir();
+		const targetPath = path.join(dir, "skc");
+		const tempPath = `${targetPath}.new`;
+		const backupPath = `${targetPath}.bak`;
+		await Bun.write(tempPath, "new binary");
+
+		const result = await replaceBinaryForUpdate({
+			targetPath,
+			tempPath,
+			backupPath,
+			expectedVersion: "15.1.8",
+			verifyInstalledVersion: async () => ({ ok: true, actual: "15.1.8", path: targetPath }),
+		});
+
+		expect(result.ok).toBe(true);
+		expect(await Bun.file(targetPath).text()).toBe("new binary");
+		expect(await Bun.file(tempPath).exists()).toBe(false);
+		expect(await Bun.file(backupPath).exists()).toBe(false);
+	});
+
+	it("recovers an interrupted backup before attempting the next replacement", async () => {
+		const dir = await makeTempDir();
+		const targetPath = path.join(dir, "skc");
+		const tempPath = `${targetPath}.new`;
+		const backupPath = `${targetPath}.bak`;
+		await Bun.write(backupPath, "last working binary");
+		await Bun.write(tempPath, "broken binary");
+
+		await expect(
+			replaceBinaryForUpdate({
+				targetPath,
+				tempPath,
+				backupPath,
+				expectedVersion: "15.1.8",
+				verifyInstalledVersion: async () => ({ ok: false, path: targetPath }),
+			}),
+		).rejects.toThrow("restored previous skc binary");
+		expect(await Bun.file(targetPath).text()).toBe("last working binary");
+		expect(await Bun.file(backupPath).exists()).toBe(false);
+	});
+
+	it("removes an unverified fresh-target publish recovered from a replacing journal", async () => {
+		const dir = await makeTempDir();
+		const targetPath = path.join(dir, "skc");
+		const tempPath = `${targetPath}.new`;
+		const backupPath = `${targetPath}.bak`;
+		await Bun.write(targetPath, "unverified interrupted publish");
+		await Bun.write(`${backupPath}.state.json`, JSON.stringify({ phase: "replacing", hadTarget: false }));
+		await Bun.write(tempPath, "broken next update");
+
+		await expect(
+			replaceBinaryForUpdate({
+				targetPath,
+				tempPath,
+				backupPath,
+				expectedVersion: "15.1.9",
+				verifyInstalledVersion: async () => ({ ok: false, path: targetPath }),
+			}),
+		).rejects.toThrow();
+		expect(await Bun.file(targetPath).exists()).toBe(false);
+		expect(await Bun.file(`${backupPath}.state.json`).exists()).toBe(false);
+	});
+
 	it("keeps a verified replacement when backup cleanup hits EPERM", async () => {
 		const dir = await makeTempDir();
 		const targetPath = path.join(dir, "skc.cmd");
@@ -459,6 +581,84 @@ describe("update-cli binary replacement", () => {
 			expect(await Bun.file(targetPath).text()).toBe("new binary");
 			expect(await Bun.file(tempPath).exists()).toBe(false);
 			expect(await Bun.file(backupPath).text()).toBe("old binary");
+		} finally {
+			unlinkSpy.mockRestore();
+		}
+	});
+
+	it("does not mistake a committed cleanup warning for an interrupted rollback", async () => {
+		const dir = await makeTempDir();
+		const targetPath = path.join(dir, "skc");
+		const tempPath = `${targetPath}.new`;
+		const backupPath = `${targetPath}.bak`;
+		await Bun.write(targetPath, "old binary");
+		await Bun.write(tempPath, "verified binary");
+		const originalUnlink = fsNode.promises.unlink;
+		const unlinkSpy = vi.spyOn(fsNode.promises, "unlink").mockImplementation(async filePath => {
+			if (String(filePath) === backupPath && fsNode.existsSync(backupPath)) {
+				const err = new Error("EPERM: operation not permitted, unlink");
+				(err as NodeJS.ErrnoException).code = "EPERM";
+				throw err;
+			}
+			return await originalUnlink(filePath);
+		});
+		try {
+			const first = await replaceBinaryForUpdate({
+				targetPath,
+				tempPath,
+				backupPath,
+				expectedVersion: "15.1.8",
+				verifyInstalledVersion: async () => ({ ok: true, actual: "15.1.8", path: targetPath }),
+			});
+			expect(first.cleanupWarning).toContain("could not remove backup");
+		} finally {
+			unlinkSpy.mockRestore();
+		}
+
+		await Bun.write(tempPath, "broken next update");
+		await expect(
+			replaceBinaryForUpdate({
+				targetPath,
+				tempPath,
+				backupPath,
+				expectedVersion: "15.1.9",
+				verifyInstalledVersion: async () => ({ ok: false, path: targetPath }),
+			}),
+		).rejects.toThrow("restored previous skc binary");
+		expect(await Bun.file(targetPath).text()).toBe("verified binary");
+		expect(await Bun.file(backupPath).exists()).toBe(false);
+		expect(await Bun.file(`${backupPath}.state.json`).exists()).toBe(false);
+	});
+
+	it("keeps the verified target when committed state cleanup fails", async () => {
+		const dir = await makeTempDir();
+		const targetPath = path.join(dir, "skc");
+		const tempPath = `${targetPath}.new`;
+		const backupPath = `${targetPath}.bak`;
+		const statePath = `${backupPath}.state.json`;
+		await Bun.write(targetPath, "old binary");
+		await Bun.write(tempPath, "verified binary");
+		const originalUnlink = fsNode.promises.unlink;
+		const unlinkSpy = vi.spyOn(fsNode.promises, "unlink").mockImplementation(async filePath => {
+			if (String(filePath) === statePath && fsNode.existsSync(statePath)) {
+				const err = new Error("EPERM: operation not permitted, unlink");
+				(err as NodeJS.ErrnoException).code = "EPERM";
+				throw err;
+			}
+			return await originalUnlink(filePath);
+		});
+		try {
+			const result = await replaceBinaryForUpdate({
+				targetPath,
+				tempPath,
+				backupPath,
+				expectedVersion: "15.1.8",
+				verifyInstalledVersion: async () => ({ ok: true, actual: "15.1.8", path: targetPath }),
+			});
+			expect(result.cleanupWarning).toContain("could not remove transaction state file");
+			expect(await Bun.file(targetPath).text()).toBe("verified binary");
+			expect(await Bun.file(backupPath).exists()).toBe(false);
+			expect(await Bun.file(statePath).exists()).toBe(true);
 		} finally {
 			unlinkSpy.mockRestore();
 		}
@@ -533,13 +733,40 @@ describe("update-cli download durability", () => {
 	});
 });
 
+describe("update-cli binary update locking", () => {
+	it("serializes updater and installer transactions with the shared directory lock", async () => {
+		const dir = await makeTempDir();
+		const targetPath = path.join(dir, "skc");
+		let release: (() => void) | undefined;
+		const holding = withBinaryUpdateLock(
+			targetPath,
+			() =>
+				new Promise<void>(resolve => {
+					release = resolve;
+				}),
+		);
+		while (!release) await Bun.sleep(1);
+
+		await expect(withBinaryUpdateLock(targetPath, async () => {})).rejects.toThrow(
+			"Another SKC installer or update is already running",
+		);
+		release();
+		await holding;
+		expect(await Bun.file(path.join(dir, ".skc-install.lock")).exists()).toBe(false);
+	});
+});
+
 describe("update-cli binary update flow", () => {
 	it("downloads, fsyncs, then replaces and verifies in that order", async () => {
 		const calls: string[] = [];
 		const targetPath = "/opt/skc/bin/skc";
 		const flow: BinaryUpdateFlow = {
+			transactionId: "test",
 			download: async (url, tempPath) => {
 				calls.push(`download ${url} -> ${tempPath}`);
+			},
+			verifyIntegrity: async filePath => {
+				calls.push(`integrity ${filePath}`);
 			},
 			fsync: async filePath => {
 				calls.push(`fsync ${filePath}`);
@@ -564,22 +791,54 @@ describe("update-cli binary update flow", () => {
 
 		expect(result.ok).toBe(true);
 		expect(calls).toEqual([
-			`download https://example.test/skc -> ${targetPath}.new`,
-			`fsync ${targetPath}.new`,
+			`download https://example.test/skc -> ${targetPath}.new.test`,
+			`integrity ${targetPath}.new.test`,
+			`fsync ${targetPath}.new.test`,
 			"beforeReplace",
-			`replace ${targetPath}.new -> ${targetPath}`,
+			`replace ${targetPath}.new.test -> ${targetPath}`,
 			"verify 1.2.3",
 		]);
-		expect(calls).not.toContain(`removeTemp ${targetPath}.new`);
+		expect(calls).not.toContain(`removeTemp ${targetPath}.new.test`);
+	});
+
+	it("removes the staged binary and never publishes when integrity verification fails", async () => {
+		const calls: string[] = [];
+		const targetPath = "/opt/skc/bin/skc";
+		await expect(
+			runBinaryUpdateFlow(targetPath, "https://example.test/skc", "1.2.3", {
+				transactionId: "test",
+				download: async () => {
+					calls.push("download");
+				},
+				verifyIntegrity: async () => {
+					calls.push("integrity");
+					throw new Error("SHA-256 mismatch");
+				},
+				fsync: async () => {
+					calls.push("fsync");
+				},
+				replace: async () => {
+					calls.push("replace");
+					return { ok: true };
+				},
+				verifyInstalledVersion: async () => ({ ok: true }),
+				removeTemp: async () => {
+					calls.push("removeTemp");
+				},
+			}),
+		).rejects.toThrow("SHA-256 mismatch");
+		expect(calls).toEqual(["download", "integrity", "removeTemp"]);
 	});
 
 	it("aborts before replacement/verification when fsync fails", async () => {
 		const calls: string[] = [];
 		const targetPath = "/opt/skc/bin/skc";
 		const flow: BinaryUpdateFlow = {
+			transactionId: "test",
 			download: async (_url, tempPath) => {
 				calls.push(`download ${tempPath}`);
 			},
+			verifyIntegrity: async () => {},
 			fsync: async () => {
 				calls.push("fsync");
 				throw new Error("EIO: fsync failed");
@@ -601,7 +860,7 @@ describe("update-cli binary update flow", () => {
 			"fsync failed",
 		);
 
-		expect(calls).toEqual([`download ${targetPath}.new`, "fsync", `removeTemp ${targetPath}.new`]);
+		expect(calls).toEqual([`download ${targetPath}.new.test`, "fsync", `removeTemp ${targetPath}.new.test`]);
 		expect(calls).not.toContain("replace");
 		expect(calls).not.toContain("verify");
 	});

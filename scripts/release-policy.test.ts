@@ -26,6 +26,8 @@ function jobSection(workflowText: string, jobName: string): string {
 describe("stable release policy", () => {
 	test("tag releases build natives, then binaries, then publish npm + the GitHub Release", async () => {
 		const ci = await workflow();
+		expect(ci).toContain('tags: ["sayknow-v*"]');
+		expect(ci).not.toContain('tags: ["v*",');
 		const stages = ["native", "binaries", "publish"];
 		const positions = stages.map(stage => ci.indexOf(`   ${stage}:`));
 		for (const position of positions) expect(position).toBeGreaterThanOrEqual(0);
@@ -33,23 +35,30 @@ describe("stable release policy", () => {
 		expect(jobSection(ci, "binaries")).toContain("needs: [native]");
 		expect(jobSection(ci, "publish")).toContain("needs: [native, binaries]");
 		for (const stage of ["native", "binaries"]) {
-			expect(jobSection(ci, stage)).toContain("if: ${{ (startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/sayknow-v')) || (github.event_name == 'workflow_dispatch' && inputs.rehearsal == 'tag-build-verify') }}");
+			expect(jobSection(ci, stage)).toContain("if: ${{ startsWith(github.ref, 'refs/tags/sayknow-v') || (github.event_name == 'workflow_dispatch' && inputs.rehearsal == 'tag-build-verify') }}");
 		}
-		expect(jobSection(ci, "publish")).toContain("if: ${{ (startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/sayknow-v')) && github.event_name != 'workflow_dispatch' }}");
+		expect(jobSection(ci, "publish")).toContain("if: ${{ startsWith(github.ref, 'refs/tags/sayknow-v') && github.event_name != 'workflow_dispatch' }}");
 
 		const publish = jobSection(ci, "publish");
 		expect(publish).toContain("--prepare-evidence --evidence-dir");
 		expect(publish).toContain("--publish-from-evidence");
 		expect(publish).toContain("--release-serialization-key sayknow-production-release");
 		expect(publish).toContain("softprops/action-gh-release");
-		expect(publish).toContain("draft: false");
+		expect(publish).toContain("draft: true");
+		expect(publish).toContain('gh release edit "$GITHUB_REF_NAME" --draft=false');
+		expect(publish.indexOf("Stage GitHub Release draft")).toBeLessThan(
+			publish.indexOf("Publish packages to npm"),
+		);
+		expect(publish).toContain("Publish binary checksum manifest");
+		expect(publish).toContain("sayknow-release-binaries-v1.json");
+		expect(publish).toContain("sayknow-release-binaries.sha256");
 	});
 
 	test("release tags run a non-cancelling concurrency lane", async () => {
 		const ci = await workflow();
 		const concurrency = ci.slice(ci.indexOf("concurrency:\n"), ci.indexOf("\njobs:"));
 
-		expect(concurrency).toContain("cancel-in-progress: ${{ !(startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/sayknow-v')) }}");
+		expect(concurrency).toContain("cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/sayknow-v') }}");
 		expect(concurrency).not.toContain("cancel-in-progress: true");
 	});
 
@@ -75,7 +84,7 @@ describe("stable release policy", () => {
 		// The monolithic `test` job is now a sharded graph; every job in that graph,
 		// plus the bounded `check` job, must stay excluded on release tags.
 		for (const job of ["check", "main_plan", "main_native", "main_shards", "test"]) {
-			expect(jobSection(ci, job)).toContain("!(startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/sayknow-v'))");
+			expect(jobSection(ci, job)).toContain("!startsWith(github.ref, 'refs/tags/sayknow-v')");
 		}
 	});
 

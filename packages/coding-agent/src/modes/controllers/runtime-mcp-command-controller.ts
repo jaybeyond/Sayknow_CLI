@@ -540,6 +540,7 @@ export class MCPCommandController {
 
 		const resolvedClientId = clientId.trim() || parsedAuthUrl.searchParams.get("client_id") || undefined;
 		const resolvedClientSecret = clientSecret.trim() || undefined;
+		let authorizationUrlLease: number | undefined;
 
 		try {
 			// Create OAuth flow
@@ -556,6 +557,7 @@ export class MCPCommandController {
 				},
 				{
 					onAuth: (info: { url: string; instructions?: string }) => {
+						authorizationUrlLease = this.ctx.setOAuthAuthorizationUrl(info.url);
 						// Show auth URL prominently in chat
 						this.ctx.chatContainer.addChild(new Spacer(1));
 						this.ctx.chatContainer.addChild(
@@ -564,6 +566,16 @@ export class MCPCommandController {
 						this.ctx.chatContainer.addChild(new Spacer(1));
 						this.ctx.chatContainer.addChild(
 							new Text(theme.fg("muted", "Preparing browser authorization..."), 1, 0),
+						);
+						this.ctx.chatContainer.addChild(
+							new Text(
+								theme.fg(
+									"muted",
+									`Press ${this.ctx.keybindings.getDisplayString("app.oauth.copyUrl")} to copy the authorization URL.`,
+								),
+								1,
+								0,
+							),
 						);
 						this.ctx.chatContainer.addChild(new Spacer(1));
 						this.ctx.chatContainer.addChild(
@@ -661,6 +673,8 @@ export class MCPCommandController {
 			} else {
 				throw new Error(`OAuth authentication failed: ${errorMsg}`);
 			}
+		} finally {
+			if (authorizationUrlLease !== undefined) this.ctx.clearOAuthAuthorizationUrl(authorizationUrlLease);
 		}
 	}
 

@@ -702,7 +702,7 @@ function inspectCandidate(filePath: string, provenance: "v2" | "legacy"): Manage
 			provenance,
 			migrationState: provenance === "v2" ? "native_v2" : "legacy_unmigrated",
 			identity: {
-				canonicalPath: path.resolve(filePath),
+				canonicalPath: canonicalizeTrustedPath(filePath),
 				sessionId: header.id,
 				...snapshot.identity,
 				mtimeMs: Number(named.mtimeMs),
@@ -740,6 +740,7 @@ function listDirectoryCandidates(
 	directory: string,
 	provenance: "v2" | "legacy",
 	scope: ManagedScope,
+	maxCandidates?: number,
 ): readonly CandidateInspection[] {
 	let directoryStat: fs.Stats;
 	try {
@@ -749,8 +750,28 @@ function listDirectoryCandidates(
 		throw error;
 	}
 	if (!directoryStat.isDirectory() || directoryStat.isSymbolicLink()) throw new Error("unsafe directory");
-	return fs
-		.readdirSync(directory, { withFileTypes: true })
+	let entries: fs.Dirent[];
+	if (maxCandidates === undefined) {
+		entries = fs.readdirSync(directory, { withFileTypes: true });
+	} else {
+		entries = [];
+		let scannedEntries = 0;
+		const handle = fs.opendirSync(directory);
+		try {
+			for (;;) {
+				const entry = handle.readSync();
+				if (!entry) break;
+				scannedEntries++;
+				if (scannedEntries > maxCandidates * 4 + 128) throw new Error("candidate_capacity_exceeded");
+				if (!entry.name.endsWith(".jsonl")) continue;
+				entries.push(entry);
+				if (entries.length > maxCandidates) throw new Error("candidate_capacity_exceeded");
+			}
+		} finally {
+			handle.closeSync();
+		}
+	}
+	return entries
 		.filter(entry => entry.name.endsWith(".jsonl"))
 		.map(entry => {
 			const filePath = path.join(directory, entry.name);
@@ -967,7 +988,10 @@ export function prepareManagedSessionScopeForWriteSync(
 	}
 }
 
-export function listManagedCandidates(scope: ManagedScope): ManagedCandidateListing {
+export function listManagedCandidates(
+	scope: ManagedScope,
+	options?: { maxCandidates?: number },
+): ManagedCandidateListing {
 	try {
 		let root: fs.Stats;
 		try {
@@ -990,8 +1014,19 @@ export function listManagedCandidates(scope: ManagedScope): ManagedCandidateList
 			})),
 		];
 		const seen = new Set<string>();
+		let inspectedCandidates = 0;
 		for (const directory of directories) {
-			for (const candidate of listDirectoryCandidates(directory.path, directory.provenance, scope)) {
+			const remainingCandidates =
+				options?.maxCandidates === undefined ? undefined : options.maxCandidates - inspectedCandidates;
+			for (const candidate of listDirectoryCandidates(
+				directory.path,
+				directory.provenance,
+				scope,
+				remainingCandidates,
+			)) {
+				inspectedCandidates++;
+				if (options?.maxCandidates !== undefined && inspectedCandidates > options.maxCandidates)
+					throw new Error("candidate_capacity_exceeded");
 				if ("code" in candidate) {
 					invalid.push({ code: candidate.code });
 					continue;
@@ -1108,7 +1143,7 @@ function sameCandidate(left: ManagedCandidate, right: ManagedCandidate): boolean
 
 function matchesExpectedResumeIdentity(candidate: ManagedCandidate, expected: ResumeSessionIdentity): boolean {
 	return (
-		path.resolve(candidate.identity.canonicalPath) === path.resolve(expected.canonicalPath) &&
+		canonicalizeTrustedPath(candidate.identity.canonicalPath) === canonicalizeTrustedPath(expected.canonicalPath) &&
 		candidate.identity.sessionId === expected.sessionId &&
 		candidate.identity.dev === expected.dev &&
 		candidate.identity.ino === expected.ino &&

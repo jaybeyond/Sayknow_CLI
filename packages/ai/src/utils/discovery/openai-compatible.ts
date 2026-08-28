@@ -1,8 +1,43 @@
+import * as net from "node:net";
 import { UNK_CONTEXT_WINDOW, UNK_MAX_TOKENS } from "@sayknow-cli/ai";
 import * as z from "zod/v4";
 import type { Api, FetchImpl, Model, Provider } from "../../types";
 
 const MODELS_PATH = "/models";
+const MAX_MODELS_RESPONSE_BYTES = 1_000_000;
+function parseIpv6Hextets(host: string): number[] | undefined {
+	if (net.isIP(host) !== 6) return undefined;
+	const doubleColon = host.indexOf("::");
+	if (doubleColon !== host.lastIndexOf("::")) return undefined;
+	const parseSide = (value: string): number[] | undefined => {
+		if (!value) return [];
+		const parts = value.split(":");
+		if (parts.some(part => !/^[0-9a-f]{1,4}$/i.test(part))) return undefined;
+		return parts.map(part => Number.parseInt(part, 16));
+	};
+	if (doubleColon < 0) {
+		const hextets = parseSide(host);
+		return hextets?.length === 8 ? hextets : undefined;
+	}
+	const left = parseSide(host.slice(0, doubleColon));
+	const right = parseSide(host.slice(doubleColon + 2));
+	if (!left || !right) return undefined;
+	const missing = 8 - left.length - right.length;
+	if (missing < 1) return undefined;
+	return [...left, ...new Array<number>(missing).fill(0), ...right];
+}
+
+function isLoopbackHost(hostname: string): boolean {
+	const host = hostname.toLowerCase().replace(/^\[|\]$/g, "");
+	if (host === "localhost") return true;
+	if (net.isIP(host) === 4) return host.split(".", 1)[0] === "127";
+	const hextets = parseIpv6Hextets(host);
+	if (!hextets) return false;
+	const isIpv6Loopback = hextets.slice(0, 7).every(part => part === 0) && hextets[7] === 1;
+	const isIpv4MappedLoopback =
+		hextets.slice(0, 5).every(part => part === 0) && hextets[5] === 0xffff && hextets[6]! >> 8 === 0x7f;
+	return isIpv6Loopback || isIpv4MappedLoopback;
+}
 
 /**
  * Minimal OpenAI-style model entry shape consumed by discovery.
@@ -128,7 +163,9 @@ export async function fetchOpenAICompatibleModels<TApi extends Api>(
 		response = await fetchImpl(`${baseUrl}${MODELS_PATH}`, {
 			method: "GET",
 			headers: requestHeaders,
-			signal: options.signal,
+			signal: options.signal
+				? AbortSignal.any([options.signal, AbortSignal.timeout(5_000)])
+				: AbortSignal.timeout(5_000),
 		});
 	} catch {
 		return null;
@@ -144,7 +181,7 @@ export async function fetchOpenAICompatibleModels<TApi extends Api>(
 
 	let payload: unknown;
 	try {
-		payload = await response.json();
+		payload = JSON.parse(await readModelsResponse(response));
 	} catch {
 		return null;
 	}
@@ -188,12 +225,79 @@ export async function fetchOpenAICompatibleModels<TApi extends Api>(
 	return Array.from(deduped.values()).sort((left, right) => left.id.localeCompare(right.id));
 }
 
+async function readModelsResponse(response: Response): Promise<string> {
+	const contentLength = Number(response.headers.get("content-length"));
+	if (Number.isFinite(contentLength) && contentLength > MAX_MODELS_RESPONSE_BYTES) {
+		throw new Error("OpenAI-compatible models response exceeds the size limit");
+	}
+	if (!response.body) return "";
+	const reader = response.body.getReader();
+	const chunks: Uint8Array[] = [];
+	let total = 0;
+	try {
+		while (true) {
+			const { done, value } = await reader.read();
+			if (done) break;
+			if (!value) continue;
+			total += value.byteLength;
+			if (total > MAX_MODELS_RESPONSE_BYTES) {
+				await reader.cancel();
+				throw new Error("OpenAI-compatible models response exceeds the size limit");
+			}
+			chunks.push(value);
+		}
+	} finally {
+		reader.releaseLock();
+	}
+	const body = new Uint8Array(total);
+	let offset = 0;
+	for (const chunk of chunks) {
+		body.set(chunk, offset);
+		offset += chunk.byteLength;
+	}
+	return new TextDecoder().decode(body);
+}
+
 function normalizeBaseUrl(baseUrl: string): string {
 	const trimmed = baseUrl.trim();
 	if (!trimmed) {
 		return "";
 	}
 	return trimmed.endsWith("/") ? trimmed.slice(0, -1) : trimmed;
+}
+/**
+ * Returns a canonical HTTP(S) OpenAI-compatible base URL without embedded URL
+ * credentials, query parameters, or fragments.
+ */
+export function resolveCanonicalOpenAIBaseUrl(value: string | undefined): string | undefined {
+	const candidate = value?.trim();
+	if (!candidate) return undefined;
+	try {
+		const parsed = new URL(candidate);
+		if (
+			(parsed.protocol === "http:" || parsed.protocol === "https:") &&
+			!parsed.username &&
+			!parsed.password &&
+			!parsed.search &&
+			!parsed.hash
+		) {
+			return candidate;
+		}
+	} catch {
+		// Invalid endpoint.
+	}
+	return undefined;
+}
+
+/**
+ * Returns a local OpenAI-compatible base URL only when it is an HTTP(S)
+ * loopback endpoint; otherwise returns the trusted fallback.
+ */
+export function resolveLoopbackOpenAIBaseUrl(value: string | undefined, fallback: string): string {
+	const candidate = resolveCanonicalOpenAIBaseUrl(value);
+	if (!candidate) return fallback;
+	const parsed = new URL(candidate);
+	return isLoopbackHost(parsed.hostname) ? candidate : fallback;
 }
 
 function extractModelEntries(payload: unknown): ParsedOpenAICompatibleModelRecord[] | null {

@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs";
 import * as fs from "node:fs/promises";
-import { logger } from "@sayknow-cli/utils";
+import { isKnownSinkPeerClosedError, logger } from "@sayknow-cli/utils";
 import { formatCrashDiagnosticNotice, writeCrashReport } from "../debug/crash-diagnostics";
 import { NON_INTERACTIVE_ENV } from "../exec/non-interactive-env";
 import { type OwnedProcess, spawnOwnedProcess } from "../runtime/process-lifecycle";
@@ -62,9 +62,9 @@ function parseMessage(
 
 async function writeMessage(sink: DapWriteSink, message: DapRequestMessage | DapResponseMessage): Promise<void> {
 	const content = JSON.stringify(message);
-	sink.write(`Content-Length: ${Buffer.byteLength(content, "utf-8")}\r\n\r\n`);
-	sink.write(content);
-	await sink.flush();
+	const frame = `Content-Length: ${Buffer.byteLength(content, "utf-8")}\r\n\r\n${content}`;
+	await Promise.resolve(sink.write(frame));
+	await Promise.resolve(sink.flush());
 }
 
 function toErrorMessage(value: unknown): string {
@@ -98,6 +98,9 @@ export class DapClient {
 	#messageBuffer = Buffer.alloc(0);
 	#isReading = false;
 	#disposed = false;
+	#terminalError: Error | undefined;
+	#disposePromise: Promise<void> | undefined;
+	#writeQueue: Promise<void> = Promise.resolve();
 	#lastActivity = Date.now();
 	#capabilities?: DapCapabilities;
 	#eventHandlers = new Map<string, Set<DapEventHandler>>();
@@ -117,6 +120,18 @@ export class DapClient {
 		this.#readable = options?.readable ?? (this.proc.stdout as ReadableStream<Uint8Array>);
 		this.#writeSink = options?.writeSink ?? this.proc.stdin;
 		this.#socket = options?.socket;
+	}
+
+	#queueWriteMessage(message: DapRequestMessage | DapResponseMessage): Promise<void> {
+		const write = this.#writeQueue
+			.catch(() => {})
+			.then(() => {
+				if (this.#terminalError) throw this.#terminalError;
+				if (this.#disposed) throw new Error(`DAP adapter ${this.adapter.name} is not running`);
+				return writeMessage(this.#writeSink, message);
+			});
+		this.#writeQueue = write.catch(() => {});
+		return write;
 	}
 
 	static async spawn({ adapter, cwd }: DapSpawnOptions): Promise<DapClient> {
@@ -142,7 +157,7 @@ export class DapClient {
 		proc.exited.then(() => {
 			client.#handleProcessExit();
 		});
-		void client.#startMessageReader();
+		void client.startMessageReader();
 		return client;
 	}
 
@@ -199,7 +214,7 @@ export class DapClient {
 			transport = await connectSocket({ unix: socketPath }, 10_000);
 			const client = new DapClient(adapter, cwd, owner, transport);
 			proc.exited.then(() => client.#handleProcessExit());
-			void client.#startMessageReader();
+			void client.startMessageReader();
 			return client;
 		} catch (err) {
 			transport?.socket.end();
@@ -268,7 +283,7 @@ export class DapClient {
 		const { readable, writeSink, socket } = wrapBunSocket(rawSocket);
 		const client = new DapClient(adapter, cwd, owner, { readable, writeSink, socket });
 		proc.exited.then(() => client.#handleProcessExit());
-		void client.#startMessageReader();
+		void client.startMessageReader();
 		return client;
 	}
 
@@ -364,6 +379,7 @@ export class DapClient {
 		signal?: AbortSignal,
 		timeoutMs: number = DEFAULT_REQUEST_TIMEOUT_MS,
 	): Promise<TBody> {
+		if (this.#terminalError) throw this.#terminalError;
 		if (signal?.aborted) {
 			throw signal.reason instanceof Error ? signal.reason : new ToolAbortError();
 		}
@@ -412,10 +428,11 @@ export class DapClient {
 		});
 		this.#lastActivity = Date.now();
 		try {
-			await writeMessage(this.#writeSink, request);
+			await this.#queueWriteMessage(request);
 		} catch (error) {
 			this.#pendingRequests.delete(requestSeq);
 			cleanup();
+			if (isKnownSinkPeerClosedError(error)) throw this.#terminalizeTransport(error);
 			throw error;
 		}
 		return promise;
@@ -431,37 +448,30 @@ export class DapClient {
 			...(message ? { message } : {}),
 			...(body !== undefined ? { body } : {}),
 		};
-		await writeMessage(this.#writeSink, response);
+		await this.#queueWriteMessage(response);
 	}
 
 	async dispose(): Promise<void> {
-		if (this.#disposed) return;
-		this.#disposed = true;
-		this.#rejectPendingRequests(new Error(`DAP adapter ${this.adapter.name} disposed`));
-		try {
-			this.#socket?.end();
-		} catch {
-			/* socket may already be closed */
+		if (!this.#disposed) {
+			const error = new Error(`DAP adapter ${this.adapter.name} disposed`);
+			this.#disposed = true;
+			this.#terminalError = error;
+			this.#rejectPendingRequests(error);
 		}
-		try {
-			await this.#owner.dispose();
-			await this.#owner.awaitExit({ timeoutMs: 1_000 });
-		} catch (error) {
-			logger.debug("Failed to dispose DAP adapter", {
-				adapter: this.adapter.name,
-				error: toErrorMessage(error),
-			});
-		}
+		await this.#beginOwnerDisposal();
 	}
 
-	async #startMessageReader(): Promise<void> {
+	async startMessageReader(): Promise<void> {
 		if (this.#isReading) return;
 		this.#isReading = true;
 		const reader = this.#readable.getReader();
 		try {
 			while (true) {
 				const { done, value } = await reader.read();
-				if (done) break;
+				if (done) {
+					this.#terminalizeTransport(new Error("DAP readable closed"));
+					break;
+				}
 				const currentBuffer = Buffer.concat([this.#messageBuffer, value]);
 				this.#messageBuffer = currentBuffer;
 				let workingBuffer = currentBuffer;
@@ -482,7 +492,7 @@ export class DapClient {
 				this.#messageBuffer = workingBuffer;
 			}
 		} catch (error) {
-			this.#rejectPendingRequests(new Error(`DAP connection closed: ${toErrorMessage(error)}`));
+			this.#terminalizeTransport(error);
 		} finally {
 			reader.releaseLock();
 			this.#isReading = false;
@@ -523,9 +533,9 @@ export class DapClient {
 		try {
 			const handler = this.#reverseRequestHandlers.get(message.command);
 			if (handler) {
+				let body: unknown;
 				try {
-					const body = await handler(message.arguments);
-					await this.sendResponse(message, true, body);
+					body = await handler(message.arguments);
 				} catch (error) {
 					const errorMessage = toErrorMessage(error);
 					await this.sendResponse(
@@ -539,7 +549,9 @@ export class DapClient {
 						},
 						errorMessage,
 					);
+					return;
 				}
+				await this.sendResponse(message, true, body);
 				return;
 			}
 			const errorMessage = `Unsupported DAP request: ${message.command}`;
@@ -555,6 +567,10 @@ export class DapClient {
 				errorMessage,
 			);
 		} catch (error) {
+			if (isKnownSinkPeerClosedError(error)) {
+				this.#terminalizeTransport(error);
+				return;
+			}
 			logger.warn("Failed to answer DAP adapter request", {
 				adapter: this.adapter.name,
 				command: message.command,
@@ -586,7 +602,39 @@ export class DapClient {
 				? `DAP adapter exited (code ${exitCode}): ${stderr}${diagnosticSuffix}`
 				: `DAP adapter exited unexpectedly (code ${exitCode})${diagnosticSuffix}`,
 		);
+		this.#terminalError = error;
 		this.#rejectPendingRequests(error);
+	}
+
+	#terminalizeTransport(cause: unknown): Error {
+		if (this.#terminalError) return this.#terminalError;
+		const error = new Error(`DAP adapter ${this.adapter.name} transport closed`, { cause });
+		this.#terminalError = error;
+		this.#disposed = true;
+		this.#rejectPendingRequests(error);
+		void this.#beginOwnerDisposal();
+		return error;
+	}
+
+	#beginOwnerDisposal(): Promise<void> {
+		if (this.#disposePromise) return this.#disposePromise;
+		this.#disposePromise = (async () => {
+			try {
+				this.#socket?.end();
+			} catch {
+				/* socket may already be closed */
+			}
+			try {
+				await this.#owner.dispose();
+				await this.#owner.awaitExit({ timeoutMs: 1_000 });
+			} catch (disposeError) {
+				logger.debug("Failed to dispose DAP adapter", {
+					adapter: this.adapter.name,
+					error: toErrorMessage(disposeError),
+				});
+			}
+		})();
+		return this.#disposePromise;
 	}
 
 	#rejectPendingRequests(error: Error): void {

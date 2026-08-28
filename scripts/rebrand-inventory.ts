@@ -38,9 +38,9 @@ const allowedUnscopedPackageNames = new Set([expectedRootPackageName]);
 const rootPublicMetadataFields = ["name", "description", "homepage", "repository", "bugs"] as const;
 const rootLegacyScriptKeys = new Set(["test:py"]);
 
-const ignoredDirs = new Set([".git", "node_modules", ".skc", "dist", "build", "coverage", ".turbo"]);
+const ignoredDirs = new Set([".git", "node_modules", ".skc", "__pycache__", "dist", "build", "coverage", ".turbo"]);
 const ignoredFiles = new Set(["bun.lock", "Cargo.lock"]);
-const ignoredExtensions = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico", ".node", ".wasm"]);
+const ignoredExtensions = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico", ".node", ".wasm", ".pyc"]);
 
 const forbiddenLegacyTokens = ["@oh-my" + "-pi", "oh-my" + "-pi", "om" + "p"] as const;
 const legacyTokenPatterns = forbiddenLegacyTokens.map(token => ({

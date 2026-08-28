@@ -1001,68 +1001,30 @@ describe("session lifecycle commands", () => {
 		expect(notified).toBe(false);
 	});
 
-	it("/move: reports moved path via sessionManager.getCwd() and calls notifyTitleChanged", async () => {
+	it("/move: is consumed without exposing or mutating an ACP-supplied host path", async () => {
 		const { output, fakeSessionManager, runtime } = createRuntime();
-		let notified = false;
-		runtime.notifyTitleChanged = async () => {
-			notified = true;
-		};
-		const result = await executeAcpBuiltinSlashCommand("/move /tmp", runtime);
+		const result = await executeAcpBuiltinSlashCommand("/move /private/host/path", runtime);
 		expect(result).toEqual({ consumed: true });
-		expect(fakeSessionManager._flushed).toBe(true);
-		expect(fakeSessionManager._movedTo).toBe("/tmp");
-		expect(output[0]).toContain("/tmp");
-		expect(notified).toBe(true);
-	});
-
-	it("/move: refuses while streaming", async () => {
-		const { output, session, runtime } = createRuntime();
-		session.isStreaming = true;
-		const result = await executeAcpBuiltinSlashCommand("/move /tmp", runtime);
-		expect(result).toEqual({ consumed: true });
-		expect(output[0]).toContain("streaming");
+		expect(output).toEqual(["/move is not available over ACP."]);
+		expect(output.join("\n")).not.toContain("/private/host/path");
+		expect(fakeSessionManager._movedTo).toBeUndefined();
+		expect(fakeSessionManager._flushed).toBe(false);
 	});
 });
 
 describe("wave 3 commands", () => {
-	// /export
-	it("/export: calls exportToHtml with the given arg and outputs the path", async () => {
-		const { output, runtime } = createRuntime();
-		const result = await executeAcpBuiltinSlashCommand("/export /tmp/out.html", runtime);
-		expect(result).toEqual({ consumed: true });
-		expect(output[0]).toBe("Session exported to: /tmp/out.html");
-	});
-
-	it("/export: uses default path when no arg given", async () => {
-		const { output, runtime } = createRuntime();
-		const result = await executeAcpBuiltinSlashCommand("/export", runtime);
-		expect(result).toEqual({ consumed: true });
-		expect(output[0]).toContain("Session exported to:");
-	});
-
-	it("/export: returns usage on exportToHtml failure", async () => {
+	it("/export: is consumed without exposing or writing an ACP-supplied host path", async () => {
 		const { output, session, runtime } = createRuntime();
+		let called = false;
 		session.exportToHtml = async () => {
-			throw new Error("disk full");
+			called = true;
+			return "/private/host/path";
 		};
-		const result = await executeAcpBuiltinSlashCommand("/export", runtime);
+		const result = await executeAcpBuiltinSlashCommand("/export /private/host/path", runtime);
 		expect(result).toEqual({ consumed: true });
-		expect(output[0]).toContain("Failed to export session: disk full");
-	});
-
-	// /move
-	it("/move: returns usage when no arg", async () => {
-		const { output, runtime } = createRuntime();
-		const result = await executeAcpBuiltinSlashCommand("/move", runtime);
-		expect(result).toEqual({ consumed: true });
-		expect(output[0]).toContain("Usage: /move");
-	});
-
-	it("/move: returns usage when path does not exist", async () => {
-		const { output, runtime } = createRuntime();
-		const result = await executeAcpBuiltinSlashCommand("/move /no/such/path/xyz", runtime);
-		expect(result).toEqual({ consumed: true });
-		expect(output[0]).toContain("does not exist");
+		expect(output).toEqual(["/export is not available over ACP."]);
+		expect(output.join("\n")).not.toContain("/private/host/path");
+		expect(called).toBe(false);
 	});
 
 	// /memory

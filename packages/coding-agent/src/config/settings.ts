@@ -39,6 +39,7 @@ import { AgentStorage } from "../session/agent-storage";
 import { type EditMode, normalizeEditMode } from "../utils/edit-mode";
 import {
 	type AtomicYamlPatch,
+	AtomicYamlRetargetError,
 	applyAtomicYamlPatches,
 	applyAtomicYamlPatchesWithCurrent,
 	atomicYamlPathHash,
@@ -830,22 +831,28 @@ export class Settings implements NotificationSettingsReader {
 		if (this.#modified.size > 0 && !this.#pendingSaveSlot) this.#queueSave();
 		this.#releasePendingSaveSlot();
 		const observedSave = this.#savePromise;
+		let saveError: unknown;
 		try {
 			await observedSave;
-		} catch {
+		} catch (error) {
 			// Historical flush() behavior logs background failures but does not reject.
+			saveError = error;
 		}
+		if (saveError instanceof AtomicYamlRetargetError) return;
 		// A failed predecessor may settle just before a new mutation observes its
 		// still-reserved slot. Explicit flush owns one fresh attempt for remaining
 		// dirty patches instead of leaving them stranded or retrying forever.
 		if (this.#modified.size > 0 && this.#savePromise === observedSave) {
 			if (!this.#pendingSaveSlot) this.#queueSave();
 			this.#releasePendingSaveSlot();
+			let retryError: unknown;
 			try {
 				await this.#savePromise;
-			} catch {
+			} catch (error) {
 				// Keep dirty state for a later explicit flush or mutation.
+				retryError = error;
 			}
+			if (retryError instanceof AtomicYamlRetargetError) return;
 		}
 		await this.#refreshDurableSettings();
 		if (this.#modified.size > 0 && !this.#pendingSaveSlot) {
@@ -871,6 +878,7 @@ export class Settings implements NotificationSettingsReader {
 			saveError = error;
 		}
 		await this.#refreshDurableSettings();
+		if (saveError instanceof AtomicYamlRetargetError) throw saveError;
 		if (this.#modified.size > 0 && !this.#pendingSaveSlot) {
 			this.#queueSave();
 			this.#releasePendingSaveSlot();
@@ -1721,6 +1729,9 @@ export class Settings implements NotificationSettingsReader {
 					logger.warn("Settings: refresh after background save failure failed", { error: String(refreshError) });
 				}
 				throw error;
+			})
+			.finally(() => {
+				if (this.#pendingSaveSlot === slot) this.#pendingSaveSlot = undefined;
 			});
 		this.#savePromise = save;
 		void save.catch(() => {});

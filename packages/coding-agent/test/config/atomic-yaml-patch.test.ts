@@ -7,6 +7,7 @@ import {
 	AtomicYamlConflictError,
 	type AtomicYamlPatch,
 	AtomicYamlReplaceError,
+	AtomicYamlRetargetError,
 	applyAtomicYamlPatches,
 	atomicYamlPathHash,
 } from "../../src/config/atomic-yaml-patch";
@@ -153,5 +154,42 @@ describe("atomic YAML patches", () => {
 		expect(await readYaml(configPath)).toEqual({ durable: { value: "old" } });
 		const directoryEntries = await fs.readdir(path.dirname(configPath));
 		expect(directoryEntries.filter(entry => entry.endsWith(".tmp"))).toEqual([]);
+	});
+	test("rejects a symlink retarget before publication", async () => {
+		const directory = await fs.mkdtemp(path.join(os.tmpdir(), "skc-atomic-yaml-retarget-"));
+		temporaryDirectories.push(directory);
+		const realTarget = path.join(directory, "real-config.yml");
+		const otherTarget = path.join(directory, "other-config.yml");
+		const configPath = path.join(directory, "config.yml");
+		const initialReal = { theme: { dark: "red" } };
+		const initialOther = { other: true };
+		await fs.writeFile(realTarget, YAML.stringify(initialReal, null, 2));
+		await fs.writeFile(otherTarget, YAML.stringify(initialOther, null, 2));
+		await fs.symlink(realTarget, configPath);
+
+		await expect(
+			applyAtomicYamlPatches(configPath, [{ path: "theme.dark", op: "set", value: "blue" }], {
+				validateRoot: async () => {
+					await fs.rm(configPath, { force: true });
+					await fs.symlink(otherTarget, configPath);
+				},
+			}),
+		).rejects.toBeInstanceOf(AtomicYamlRetargetError);
+
+		expect(await readYaml(realTarget)).toEqual(initialReal);
+		expect(await readYaml(otherTarget)).toEqual(initialOther);
+	});
+
+	test("persists through a dangling config symlink without replacing the link", async () => {
+		const directory = await fs.mkdtemp(path.join(os.tmpdir(), "skc-atomic-yaml-dangling-"));
+		temporaryDirectories.push(directory);
+		const target = path.join(directory, "nested", "config.yml");
+		const configPath = path.join(directory, "config.yml");
+		await fs.symlink(target, configPath);
+
+		await applyAtomicYamlPatches(configPath, [{ path: "theme.dark", op: "set", value: "blue" }]);
+
+		expect((await fs.lstat(configPath)).isSymbolicLink()).toBe(true);
+		expect(await readYaml(target)).toEqual({ theme: { dark: "blue" } });
 	});
 });

@@ -33,6 +33,7 @@
 	"scripts": {
 		"build": "bun scripts/build-binary.ts",
 		"check": "biome check . && bun run check:types",
+		"check:runtime": "bun run generate-hotkeys-docs --check",
 		"check:types": "tsgo -p tsconfig.json --noEmit",
 		"lint": "biome lint .",
 		"test": "bun test --isolate",
@@ -43,6 +44,7 @@
 		"fmt": "biome format --write . && bun run format-prompts",
 		"format-prompts": "bun scripts/format-prompts.ts",
 		"generate-docs-index": "bun scripts/generate-docs-index.ts",
+		"generate-hotkeys-docs": "bun scripts/generate-hotkeys-docs.ts",
 		"prepack": "bun scripts/generate-docs-index.ts",
 		"generate-template": "bun scripts/generate-template.ts",
 		"install:defaults": "bun src/cli.ts setup defaults",
@@ -87,7 +89,11 @@
 		"examples",
 		"README.md",
 		"CHANGELOG.md",
-		"vendor"
+		"vendor",
+		"!vendor/insane-search/engine/tests/**",
+		"!src/export/html/template.html",
+		"!src/export/html/template.css",
+		"!src/export/html/template.js"
 	],
 	"exports": {
 		"./cli": {

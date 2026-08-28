@@ -41,6 +41,7 @@ import {
 	sendNotificationTest,
 } from "../sdk/bus/notification-service";
 import { computeCacheMissCostSummary, formatCacheMissSummaryLines } from "../session/cache-economics";
+import { formatSessionImportSummary, runSessionImportCommand } from "../session-import";
 import { formatModelOnboardingGuidance } from "../setup/model-onboarding-guidance";
 import {
 	addApiCompatibleProvider,
@@ -510,6 +511,93 @@ const shutdownHandlerTui = (_command: ParsedSlashCommand, runtime: TuiSlashComma
 	return commandConsumed();
 };
 
+type SessionImportRunner = typeof runSessionImportCommand;
+
+function isBusySessionImportActivation(error: unknown): boolean {
+	return typeof error === "object" && error !== null && "code" in error && error.code === "busy";
+}
+
+export async function handleImportSessionCommand(
+	command: ParsedSlashCommand,
+	runtime: SlashCommandRuntime,
+	importer: SessionImportRunner = runSessionImportCommand,
+): Promise<SlashCommandResult> {
+	if (runtime.session.isStreaming)
+		return usage("Cannot import a session while a response is streaming; wait for it to finish.", runtime);
+	const outcome = await importer(command.args, runtime.cwd);
+	if (outcome.kind === "error") return usage(outcome.message, runtime);
+	const importTargetLabel = outcome.result.reused ? "reused imported session" : "newly published imported session";
+	if (runtime.session.isStreaming)
+		return usage(
+			`Import completed, but the ${importTargetLabel} was not activated because a response started streaming. Resume it later from the session picker.`,
+			runtime,
+		);
+	let switched: boolean;
+	try {
+		switched = await runtime.session.switchSession(outcome.result.targetPath, { requireIdle: true });
+	} catch (error) {
+		return usage(
+			isBusySessionImportActivation(error)
+				? `Import completed, but the ${importTargetLabel} was not activated because a response or turn started. Resume it later from the session picker.`
+				: `Import completed, but the ${importTargetLabel} could not be activated. Resume it later from the session picker.`,
+			runtime,
+		);
+	}
+	if (!switched)
+		return usage(
+			`${outcome.result.reused ? "Import found an existing imported session" : "Import created a new session"}, but switching to it was cancelled. Resume it later from the session picker.`,
+			runtime,
+		);
+	await runtime.notifyTitleChanged?.();
+	await runtime.output(formatSessionImportSummary(outcome.result));
+	return commandConsumed();
+}
+
+export async function handleImportSessionTuiCommand(
+	command: ParsedSlashCommand,
+	runtime: TuiSlashCommandRuntime,
+	importer: SessionImportRunner = runSessionImportCommand,
+): Promise<SlashCommandResult> {
+	runtime.ctx.editor.setText("");
+	if (runtime.ctx.session.isStreaming) {
+		runtime.ctx.showError("Cannot import a session while a response is streaming; wait for it to finish.");
+		return;
+	}
+	const outcome = await importer(command.args, runtime.ctx.sessionManager.getCwd());
+	if (outcome.kind === "error") {
+		runtime.ctx.showError(outcome.message);
+		return;
+	}
+	const importTargetLabel = outcome.result.reused ? "reused imported session" : "newly published imported session";
+	if (runtime.ctx.session.isStreaming) {
+		runtime.ctx.showError(
+			`Import completed, but the ${importTargetLabel} was not activated because a response started streaming. Resume it later from the session picker.`,
+		);
+		return;
+	}
+	let resumed: boolean;
+	try {
+		resumed = await runtime.ctx.handleResumeSession(outcome.result.targetPath, { requireIdle: true });
+	} catch (error) {
+		runtime.ctx.showError(
+			isBusySessionImportActivation(error)
+				? `Import completed, but the ${importTargetLabel} was not activated because a response or turn started. Resume it later from the session picker.`
+				: `Import completed, but the ${importTargetLabel} could not be activated. Resume it later from the session picker.`,
+		);
+		return;
+	}
+	if (!resumed) {
+		runtime.ctx.showError(
+			`${outcome.result.reused ? "Import found an existing imported session" : "Import created a new session"}, but switching to it was cancelled. Resume it later from the session picker.`,
+		);
+		return;
+	}
+	const { prepared } = outcome.result;
+	const providerLabel = prepared.conversation.provider === "codex" ? "Codex" : "Claude";
+	runtime.ctx.showStatus(
+		`${outcome.result.reused ? "Reused" : "Imported"} ${providerLabel} session "${outcome.result.title}" (${prepared.conversation.messages.length} messages reconstructed${prepared.counts.redacted > 0 ? `, ${prepared.counts.redacted} secret values redacted` : ""}).`,
+	);
+}
 const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 	{
 		name: "notify",
@@ -882,6 +970,7 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 		name: "export",
 		priority: 50,
 		description: "Export this session to an HTML file",
+		acp: false,
 		inlineHint: "[path]",
 		allowArgs: true,
 		handle: async (command, runtime) => {
@@ -905,6 +994,16 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 			await runtime.ctx.handleExportCommand(command.text);
 			runtime.ctx.editor.setText("");
 		},
+	},
+	{
+		name: "import-session",
+		priority: 51,
+		description: "Import or reuse a Codex or Claude session transcript",
+		acp: false,
+		inlineHint: "<transcript-file> [--provider codex|claude]",
+		allowArgs: true,
+		handle: handleImportSessionCommand,
+		handleTui: handleImportSessionTuiCommand,
 	},
 	{
 		name: "copy",
@@ -1654,7 +1753,7 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 	{
 		name: "move",
 		description: "Move session to a different working directory",
-		acpDescription: "Move the current session file",
+		acp: false,
 		inlineHint: "<path>",
 		allowArgs: true,
 		handle: async (command, runtime) => {

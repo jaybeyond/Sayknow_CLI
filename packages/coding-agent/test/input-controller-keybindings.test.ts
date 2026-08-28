@@ -69,6 +69,8 @@ async function createContext(options?: {
 		"app.message.followUp": options?.followUpKeys ?? [],
 		"app.message.dequeue": ["alt+up", "alt+down"],
 		"app.irc.sidebar.toggle": options?.ircSidebarToggleKeys ?? ["alt+i"],
+		"app.oauth.copyUrl": ["alt+shift+u"],
+		"app.todo.toggle": ["alt+shift+t"],
 		"tui.select.confirm": ["enter"],
 		"tui.select.cancel": ["escape"],
 	};
@@ -82,6 +84,9 @@ async function createContext(options?: {
 	const onInputCallback = vi.fn();
 	const showHookSelector = vi.fn(async () => "Attach images" as string | undefined);
 	const toggleIrcSidebar = vi.fn();
+	const hasOAuthAuthorizationUrl = vi.fn(() => false);
+	const copyOAuthAuthorizationUrl = vi.fn(async () => {});
+	const toggleTodoExpansion = vi.fn();
 	const startPendingSubmission = vi.fn(
 		(
 			input: {
@@ -213,6 +218,8 @@ async function createContext(options?: {
 		pendingImages: [],
 		compactionQueuedMessages,
 		queueCompactionMessage,
+		todoPhases: [],
+		toggleTodoExpansion,
 		onInputCallback,
 		startPendingSubmission,
 		flushPendingBashComponents: vi.fn(),
@@ -277,6 +284,8 @@ async function createContext(options?: {
 		updateEditorBorderColor: vi.fn(),
 		handleBashCommand,
 		showWarning: vi.fn(),
+		hasOAuthAuthorizationUrl,
+		copyOAuthAuthorizationUrl,
 		showStatus,
 		showError: vi.fn(),
 		showHookSelector,
@@ -305,6 +314,9 @@ async function createContext(options?: {
 			removeQueuedMessageForEditing,
 			moveQueuedMessageForEditing,
 			toggleIrcSidebar,
+			hasOAuthAuthorizationUrl,
+			copyOAuthAuthorizationUrl,
+			toggleTodoExpansion,
 		},
 		queues: {
 			compactionQueuedMessages,
@@ -1008,6 +1020,40 @@ describe("InputController keybinding setup", () => {
 		await expect(controller.handleFollowUp()).rejects.toThrow("queue full");
 
 		expect(ctx.locallySubmittedUserSignatures.has("queued during stream\u00000")).toBe(false);
+	});
+	it("copies OAuth URLs only through the active explicit remap", async () => {
+		const { InputController, ctx, editor, spies } = await createContext();
+		const controller = new InputController(ctx);
+		controller.setupKeyHandlers();
+
+		const handler = (
+			editor.setCustomKeyHandler as Mock<(key: string, handler: () => boolean) => void>
+		).mock.calls.find(([key]) => key === "alt+shift+u")?.[1];
+		expect(handler).toBeDefined();
+		expect(handler?.()).toBe(false);
+		expect(spies.copyOAuthAuthorizationUrl).not.toHaveBeenCalled();
+
+		spies.hasOAuthAuthorizationUrl.mockReturnValue(true);
+		await Promise.resolve();
+		expect(handler?.()).toBe(true);
+		await Promise.resolve();
+		expect(spies.copyOAuthAuthorizationUrl).toHaveBeenCalledTimes(1);
+	});
+	it("toggles the todo HUD only while todo tasks exist", async () => {
+		const { InputController, ctx, editor, spies } = await createContext();
+		const controller = new InputController(ctx);
+		controller.setupKeyHandlers();
+
+		const handler = (
+			editor.setCustomKeyHandler as Mock<(key: string, handler: () => boolean) => void>
+		).mock.calls.find(([key]) => key === "alt+shift+t")?.[1];
+		expect(handler?.()).toBe(false);
+		expect(spies.toggleTodoExpansion).not.toHaveBeenCalled();
+
+		ctx.todoPhases = [{ name: "Work", tasks: [{ content: "Do work", status: "pending" }] }];
+		await Promise.resolve();
+		expect(handler?.()).toBe(true);
+		expect(spies.toggleTodoExpansion).toHaveBeenCalledTimes(1);
 	});
 });
 

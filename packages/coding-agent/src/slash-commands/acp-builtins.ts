@@ -15,7 +15,7 @@ export type { AcpBuiltinCommandRuntime, AcpBuiltinSlashCommandResult } from "./t
  * see commands it cannot drive.
  */
 export const ACP_BUILTIN_SLASH_COMMANDS: AvailableCommand[] = BUILTIN_SLASH_COMMANDS_INTERNAL.filter(
-	command => command.handle !== undefined,
+	command => command.handle !== undefined && command.acp !== false,
 ).map(command => {
 	// Honor mode-specific copy: ACP clients receive concise text-mode
 	// descriptions/hints when the spec sets `acpDescription` / `acpInputHint`,
@@ -43,6 +43,10 @@ export async function executeAcpBuiltinSlashCommand(
 	const parsed = parseSlashCommand(text);
 	if (!parsed) return false;
 	const command = lookupBuiltinSlashCommand(parsed.name);
+	if (command?.acp === false) {
+		await runtime.output(`/${parsed.name} is not available over ACP.`);
+		return { consumed: true };
+	}
 	if (!command?.handle) {
 		const diagnostic = formatUnknownBuiltinSlashCommandDiagnostic(parsed.name);
 		if (!diagnostic) return false;

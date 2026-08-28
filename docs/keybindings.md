@@ -151,6 +151,7 @@ Authoritative inventory of the keybinding registry, one row per action. Generate
 | `app.model.select` | ctrl+l | composer |
 | `app.model.selectTemporary` | alt+p | composer |
 | `app.tools.expand` | ctrl+o | composer |
+| `app.todo.toggle` | alt+shift+t | composer |
 | `app.tool.backgroundFold` | ctrl+b | composer |
 | `app.editor.external` | ctrl+g | composer |
 | `app.message.followUp` | _(none)_ | composer |
@@ -159,6 +160,7 @@ Authoritative inventory of the keybinding registry, one row per action. Generate
 | `app.clipboard.pasteImage` | ctrl+v (darwin/linux) / alt+v (win32) | composer |
 | `app.clipboard.copyLine` | alt+shift+l | composer |
 | `app.clipboard.copyPrompt` | alt+shift+c | composer |
+| `app.oauth.copyUrl` | alt+shift+u | composer |
 | `app.session.new` | ctrl+n | composer |
 | `app.session.tree` | _(none)_ | composer |
 | `app.session.fork` | _(none)_ | composer |

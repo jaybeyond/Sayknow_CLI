@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Compaction now serializes malformed persisted tool calls with null or missing arguments instead of throwing inside the recovery path, and long managed sessions trigger an emergency rewrite before their append-only transcript reaches the storage file-size ceiling.
+
 ## [0.12.0] - 2026-07-28
 
 ## [0.11.11] - 2026-07-26

@@ -298,6 +298,10 @@ export interface InteractiveModeContext {
 	): Promise<CompactionOutcome>;
 
 	openInBrowser(urlOrPath: string): void;
+	setOAuthAuthorizationUrl(url: string): number;
+	hasOAuthAuthorizationUrl(): boolean;
+	clearOAuthAuthorizationUrl(lease: number): void;
+	copyOAuthAuthorizationUrl(): Promise<void>;
 	/** Resolved source of truth for slash autocomplete and command palette entries. */
 	getSlashCommands?(): readonly SlashCommand[];
 	refreshSlashCommandState(cwd?: string): Promise<void>;
@@ -322,7 +326,7 @@ export interface InteractiveModeContext {
 	showTreeSelector(): void;
 	showSessionSelector(): void;
 	showSessionsDashboard(): void;
-	handleResumeSession(sessionPath: string): Promise<void>;
+	handleResumeSession(sessionPath: string, options?: { requireIdle?: boolean }): Promise<boolean>;
 	handleSessionDeleteCommand(): Promise<void>;
 	showOAuthSelector(mode: "login" | "logout", providerId?: string, options?: OAuthSelectorOptions): Promise<void>;
 	showHookConfirm(title: string, message: string): Promise<boolean>;

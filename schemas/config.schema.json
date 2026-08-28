@@ -1043,6 +1043,11 @@
 					"description": "Logo style for the startup welcome screen",
 					"default": "auto"
 				},
+				"skipLogoAnimation": {
+					"type": "boolean",
+					"description": "Show the final welcome logo immediately",
+					"default": false
+				},
 				"checkUpdate": {
 					"type": "boolean",
 					"description": "At interactive startup, notify of newer versions; never install. Use `skc update` only for recognized Bun global, Windows npm, or bundled-installer binaries; source, linked, and unrecognized installs use their original method.",

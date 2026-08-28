@@ -25,7 +25,8 @@ import {
 } from "../../session/session-storage";
 import {
 	ensureLaunchWorktree,
-	ensureReusableNodeModules,
+	ensureLaunchWorktreeDependencies,
+	launchWorktreeCwd,
 	planLaunchWorktree,
 	type SkcLaunchWorktreePlan,
 } from "../../skc-runtime/launch-worktree";
@@ -656,7 +657,7 @@ async function validateLiveResumeScope(
 					: { enabled: true, detached: true, name: null },
 			);
 			if (!planned.enabled) return fail("invalid_input", "Lifecycle worktree target is invalid.");
-			cwd = path.resolve(planned.worktreePath);
+			cwd = launchWorktreeCwd(planned);
 		} catch (error) {
 			return fail(
 				"invalid_input",
@@ -2338,7 +2339,7 @@ function preparePlannedWorktree(plan: SkcLaunchWorktreePlan): SessionLifecycleWo
 		throw new Error("Lifecycle worktree preparation did not preserve the durable worktree identity.");
 	return {
 		enabled: true,
-		cwd: path.resolve(prepared.worktreePath),
+		cwd: launchWorktreeCwd(prepared),
 		created: prepared.created,
 		reused: prepared.reused,
 		...(prepared.branchName ? { branch: prepared.branchName } : {}),
@@ -2377,7 +2378,7 @@ async function launchInput(
 			);
 			if (!planned.enabled) return fail("invalid_input", "Lifecycle worktree target is invalid.");
 			worktreePlan = planned;
-			cwd = path.resolve(planned.worktreePath);
+			cwd = launchWorktreeCwd(planned);
 		} catch (error) {
 			return fail(
 				"invalid_input",
@@ -2867,7 +2868,7 @@ async function executeLifecycleResponse(
 					digest: createHash("sha256").update(canonicalJson({ worktree })).digest("hex"),
 				};
 				await broker.ledger.transition(identity, "effect_started", { durableEffects });
-				ensureReusableNodeModules(launch.worktreePlan.repoRoot, launch.worktreePlan.worktreePath);
+				ensureLaunchWorktreeDependencies(launch.worktreePlan);
 			}
 		} catch (error) {
 			return fail(

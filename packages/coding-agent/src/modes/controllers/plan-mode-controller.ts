@@ -103,6 +103,11 @@ export class PlanModeController {
 				this.ctx.sessionManager.appendModeChange("none");
 			return;
 		}
+		if (this.ctx.session.hasExplicitlyDisabledTools()) {
+			if (sessionContext.mode === "plan" || sessionContext.mode === "plan_paused")
+				this.ctx.sessionManager.appendModeChange("none");
+			return;
+		}
 		if (sessionContext.mode === "plan") {
 			await this.enter({ planFilePath: sessionContext.modeData?.planFilePath as string | undefined });
 		} else if (sessionContext.mode === "plan_paused") {
@@ -115,6 +120,8 @@ export class PlanModeController {
 
 	async enter(options?: { planFilePath?: string; workflow?: "parallel" | "iterative" }): Promise<void> {
 		if (this.#enabled) return;
+		if (this.ctx.session.hasExplicitlyDisabledTools())
+			return this.ctx.showWarning("Plan mode requires the resolve tool.");
 		if (!this.ctx.modeGate.enter("plan")) return this.ctx.showWarning("Exit goal mode first.");
 		this.#paused = false;
 		const planFilePath = options?.planFilePath ?? "local://PLAN.md";
@@ -143,7 +150,7 @@ export class PlanModeController {
 	async exit(options?: { silent?: boolean; paused?: boolean }): Promise<void> {
 		if (!this.#enabled) return;
 		await this.ctx.session.abort({ timeoutMs: ABORT_TIMEOUT_MS });
-		if (this.#previousTools?.length) await this.ctx.session.setActiveToolsByName(this.#previousTools);
+		if (this.#previousTools !== undefined) await this.ctx.session.setActiveToolsByName(this.#previousTools);
 		if (this.#providerSessionScope && !this.ctx.session.isStreaming) {
 			if (this.ctx.session.restoreTemporaryProviderSessionScope(this.#providerSessionScope))
 				this.#providerSessionScope = undefined;

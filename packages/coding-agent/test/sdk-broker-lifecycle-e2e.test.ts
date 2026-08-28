@@ -2124,6 +2124,89 @@ test("broker terminalizes default command resolver failures", async () => {
 	}
 });
 
+test("broker maps nested package cwd and dependency installation into its worktree", async () => {
+	const root = await fs.mkdtemp(path.join(process.env.TMPDIR ?? "/tmp", "skc-broker-nested-worktree-"));
+	const repo = path.join(root, "repo");
+	const packageRoot = path.join(repo, "apps", "demo");
+	const agentDir = path.join(root, "agent");
+	const run = (command: string, args: string[], cwd: string): void => {
+		const result = Bun.spawnSync([command, ...args], { cwd, stdout: "ignore", stderr: "pipe" });
+		if (result.exitCode !== 0) throw new Error(result.stderr?.toString() || `${command} failed`);
+	};
+	let planned = planLaunchWorktree(packageRoot, { enabled: false });
+	const broker = new Broker({ agentDir });
+	try {
+		await fs.mkdir(packageRoot, { recursive: true });
+		await fs.mkdir(path.join(repo, "packages", "local-dep"), { recursive: true });
+		run("git", ["init"], repo);
+		run("git", ["config", "user.email", "test@example.com"], repo);
+		run("git", ["config", "user.name", "Test User"], repo);
+		await Bun.write(
+			path.join(packageRoot, "package.json"),
+			JSON.stringify({
+				name: "nested-broker-package",
+				version: "1.0.0",
+				packageManager: `bun@${Bun.version}`,
+				dependencies: { "local-dep": "file:../../packages/local-dep" },
+			}),
+		);
+		await Bun.write(
+			path.join(repo, "packages", "local-dep", "package.json"),
+			JSON.stringify({ name: "local-dep", version: "1.0.0" }),
+		);
+		await Bun.write(path.join(repo, "packages", "local-dep", "index.js"), 'export const source = "worktree";\n');
+		run("bun", ["install"], packageRoot);
+		run("git", ["add", "."], repo);
+		run("git", ["commit", "-m", "nested package"], repo);
+		await Bun.write(
+			path.join(repo, "packages", "local-dep", "index.js"),
+			'export const source = "source-mutated";\n',
+		);
+		planned = planLaunchWorktree(packageRoot, { enabled: true, detached: false, name: "nested-broker" });
+		if (!planned.enabled) throw new Error("Expected enabled worktree plan.");
+		setLifecycleCommandResolverForTest(broker, () => {
+			throw new Error("intentional post-worktree resolver failure");
+		});
+		await broker.start();
+
+		const response = await broker.handleRequest(
+			"session.create",
+			{
+				cwd: packageRoot,
+				stateRoot: path.join(packageRoot, ".skc", "state"),
+				target: { worktree: { enabled: true, name: "nested-broker" } },
+			},
+			"nested-broker-worktree",
+		);
+		expect(response).toMatchObject({
+			ok: false,
+			error: {
+				code: "spawn_failed",
+				message: expect.stringContaining("intentional post-worktree resolver failure"),
+			},
+		});
+		const nestedWorktree = path.join(planned.worktreePath, "apps", "demo");
+		expect((await fs.lstat(path.join(nestedWorktree, "node_modules"))).isSymbolicLink()).toBe(false);
+		expect(await Bun.file(path.join(nestedWorktree, "node_modules", "local-dep", "index.js")).text()).toContain(
+			'"worktree"',
+		);
+		const ledger = await fs.readFile(path.join(agentDir, "sdk", "lifecycle-ledger.jsonl"), "utf8");
+		expect(ledger).toContain(createHash("sha256").update(nestedWorktree).digest("hex"));
+	} finally {
+		setLifecycleCommandResolverForTest(broker, undefined);
+		await broker.stop();
+		if (planned.enabled) {
+			Bun.spawnSync(["git", "worktree", "remove", "--force", planned.worktreePath], {
+				cwd: repo,
+				stdout: "ignore",
+				stderr: "ignore",
+			});
+		}
+		await fs.rm(root, { recursive: true, force: true });
+		await fs.rm(`${repo}.sayknow-cli-worktrees`, { recursive: true, force: true });
+	}
+}, 30_000);
+
 test("broker rejects invalid and oversized readiness timeouts before spawning", async () => {
 	const agentDir = await fs.mkdtemp(path.join(process.env.TMPDIR ?? "/tmp", "skc-broker-timeout-"));
 	const fixture = path.join(agentDir, "spawned.js");

@@ -165,6 +165,8 @@ export interface SessionStorage {
 	readBytesSync?(path: string): Uint8Array;
 	/** Exact bytes and descriptor-bound identity captured from one opened regular file. */
 	readSnapshotSync?(path: string): SessionStorageSnapshot;
+	/** Exact descriptor-bound bytes, refusing growth or allocation beyond maxBytes. */
+	readSnapshotBoundedSync?(path: string, maxBytes: number): SessionStorageSnapshot;
 	statSync(path: string): SessionStorageStat;
 	listFilesSync(dir: string, pattern: string): string[];
 	/** List matching files with mtimes without issuing one JavaScript stat call per path. */
@@ -174,6 +176,8 @@ export interface SessionStorage {
 	 * authorization inventory; the forgiving {@link listFilesSync} stays display-only.
 	 */
 	listFilesStrictSync?(dir: string, pattern: string): string[];
+	/** Strict bounded scan; `truncated` means completeness was not granted. */
+	listFilesStrictBoundedSync?(dir: string, pattern: string, maxFiles: number): { files: string[]; truncated: boolean };
 
 	exists(path: string): Promise<boolean>;
 	readText(path: string): Promise<string>;
@@ -696,6 +700,39 @@ export class FileSessionStorage implements SessionStorage {
 		}
 	}
 
+	readSnapshotBoundedSync(fpath: string, maxBytes: number): SessionStorageSnapshot {
+		const flags = fs.constants.O_RDONLY | fs.constants.O_NONBLOCK | (fs.constants.O_NOFOLLOW ?? 0);
+		const fd = fs.openSync(fpath, flags);
+		try {
+			const initial = statFromNode(fs.fstatSync(fd, { bigint: true }));
+			if (!initial.isFile) throw new Error(`Not a regular file: ${fpath}`);
+			if (initial.size > maxBytes) throw new Error("Snapshot exceeds the strict byte limit.");
+			const chunks: Buffer[] = [];
+			let total = 0;
+			while (total <= maxBytes) {
+				const chunk = Buffer.allocUnsafe(Math.min(1024 * 1024, maxBytes - total + 1));
+				const bytesRead = fs.readSync(fd, chunk, 0, chunk.byteLength, null);
+				if (bytesRead === 0) break;
+				total += bytesRead;
+				if (total > maxBytes) throw new Error("Snapshot exceeds the strict byte limit.");
+				chunks.push(chunk.subarray(0, bytesRead));
+			}
+			const terminal = statFromNode(fs.fstatSync(fd, { bigint: true }));
+			if (
+				initial.dev !== terminal.dev ||
+				initial.ino !== terminal.ino ||
+				initial.size !== terminal.size ||
+				initial.mtimeNs !== terminal.mtimeNs ||
+				total !== terminal.size
+			) {
+				throw new Error("Snapshot changed during the bounded read.");
+			}
+			return { bytes: Buffer.concat(chunks, total), stat: terminal };
+		} finally {
+			fs.closeSync(fd);
+		}
+	}
+
 	statSync(path: string): SessionStorageStat {
 		return statFromNode(fs.statSync(path, { bigint: true }));
 	}
@@ -727,6 +764,26 @@ export class FileSessionStorage implements SessionStorage {
 		// Strict: never suppress scan/root errors. Authorization inventory depends on
 		// a complete enumeration; a swallowed error here would grant partial authority.
 		return Array.from(new Bun.Glob(pattern).scanSync(dir)).map(name => path.join(dir, name));
+	}
+
+	listFilesStrictBoundedSync(dir: string, pattern: string, maxFiles: number): { files: string[]; truncated: boolean } {
+		const handle = fs.opendirSync(dir);
+		const files: string[] = [];
+		let entries = 0;
+		try {
+			for (;;) {
+				const entry = handle.readSync();
+				if (!entry) break;
+				entries++;
+				if (entries > maxFiles * 4 + 128) return { files, truncated: true };
+				if (!matchesPattern(entry.name, pattern)) continue;
+				files.push(path.join(dir, entry.name));
+				if (files.length > maxFiles) return { files, truncated: true };
+			}
+			return { files, truncated: false };
+		} finally {
+			handle.closeSync();
+		}
 	}
 
 	async exists(path: string): Promise<boolean> {
@@ -1469,6 +1526,12 @@ export class MemorySessionStorage implements SessionStorage {
 		return { bytes: Buffer.from(entry.content), stat: this.#statFor(entry) };
 	}
 
+	readSnapshotBoundedSync(path: string, maxBytes: number): SessionStorageSnapshot {
+		const snapshot = this.readSnapshotSync(path);
+		if (snapshot.bytes.byteLength > maxBytes) throw new Error("Snapshot exceeds the strict byte limit.");
+		return snapshot;
+	}
+
 	statSync(path: string): SessionStorageStat {
 		const entry = this.#files.get(path);
 		if (!entry) throw new Error(`File not found: ${path}`);
@@ -1496,6 +1559,13 @@ export class MemorySessionStorage implements SessionStorage {
 	listFilesStrictSync(dir: string, pattern: string): string[] {
 		// In-memory scan never suppresses; identical to the display scan.
 		return this.listFilesSync(dir, pattern);
+	}
+
+	listFilesStrictBoundedSync(dir: string, pattern: string, maxFiles: number): { files: string[]; truncated: boolean } {
+		const files = this.listFilesSync(dir, pattern);
+		return files.length > maxFiles
+			? { files: files.slice(0, maxFiles + 1), truncated: true }
+			: { files, truncated: false };
 	}
 
 	exists(path: string): Promise<boolean> {

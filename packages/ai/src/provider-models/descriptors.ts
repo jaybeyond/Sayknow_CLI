@@ -31,6 +31,7 @@ import {
 	nanoGptModelManagerOptions,
 	nvidiaModelManagerOptions,
 	ollamaModelManagerOptions,
+	omlxModelManagerOptions,
 	openaiModelManagerOptions,
 	opencodeGoModelManagerOptions,
 	opencodeZenModelManagerOptions,
@@ -38,6 +39,7 @@ import {
 	openrouterModelManagerOptions,
 	qianfanModelManagerOptions,
 	qwenPortalModelManagerOptions,
+	sglangModelManagerOptions,
 	syntheticModelManagerOptions,
 	togetherModelManagerOptions,
 	veniceModelManagerOptions,
@@ -260,11 +262,21 @@ export const PROVIDER_DESCRIPTORS: readonly ProviderDescriptor[] = [
 		catalog("LiteLLM", ["LITELLM_API_KEY"], { allowUnauthenticated: true }),
 	),
 	descriptor("lm-studio", "llama-3-8b", config => lmStudioModelManagerOptions(config), { allowUnauthenticated: true }),
+	descriptor("omlx", "Qwen3.5-122B-A10B-Q4", config => omlxModelManagerOptions(config), {
+		allowUnauthenticated: true,
+	}),
 	catalogDescriptor(
 		"vllm",
 		"gpt-oss-20b",
 		config => vllmModelManagerOptions(config),
 		catalog("vLLM", ["VLLM_API_KEY"], { allowUnauthenticated: true }),
+	),
+	catalogDescriptor(
+		"sglang",
+		"gpt-oss-20b",
+		config => sglangModelManagerOptions(config),
+		catalog("SGLang", ["SGLANG_API_KEY"], { allowUnauthenticated: true }),
+		{ allowUnauthenticated: true },
 	),
 	catalogDescriptor(
 		"moonshot",

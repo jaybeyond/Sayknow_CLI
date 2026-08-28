@@ -325,6 +325,37 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		}
 	});
 
+	it("does not restore persisted discoverable built-ins for an explicit empty selection", async () => {
+		const sessionManager = SessionManager.inMemory();
+		const targetEntryId = sessionManager.appendMessage({
+			role: "user",
+			content: "before empty selection resume",
+			timestamp: Date.now(),
+		});
+		sessionManager.appendDiscoveredBuiltinToolSelection(["find"]);
+		const { session } = await createMinimalSession(
+			tempDirs,
+			Settings.isolated({ "tools.discoveryMode": "all", "tools.essentialOverride": ["read", "bash", "edit"] }),
+			[],
+			sessionManager,
+			[createMcpCustomTool("mcp__docs_search", "docs", "search")],
+		);
+
+		try {
+			expect(session.getActiveToolNames()).toEqual([]);
+			expect(session.getAllToolNames()).toContain("mcp__docs_search");
+			expect(await session.activateDiscoveredTools(["find", "mcp__docs_search"])).toEqual([]);
+			await session.setActiveToolsByName(["read", "mcp__docs_search"]);
+			expect(session.getActiveToolNames()).toEqual([]);
+			const result = await session.branch(targetEntryId);
+			expect(result.cancelled).toBe(false);
+			expect(session.getSelectedDiscoveredToolNames()).toEqual([]);
+			expect(session.getActiveToolNames()).toEqual([]);
+		} finally {
+			await session.dispose();
+		}
+	});
+
 	it("excludes the goal tool only when goal mode is disabled", async () => {
 		const { session } = await createMinimalSession(tempDirs, Settings.isolated({ "goal.enabled": false }));
 

@@ -55,6 +55,8 @@ These are consumed via `getEnvApiKey()` (`packages/ai/src/stream.ts`) unless not
 | `VENICE_API_KEY`                | Venice auth                                      | Using `venice` provider                                        |                                                                                                     |
 | `LITELLM_API_KEY`               | LiteLLM auth                                     | Using `litellm` provider                                       | OpenAI-compatible LiteLLM proxy key                                                                 |
 | `LM_STUDIO_API_KEY`             | LM Studio auth (optional)                        | Using `lm-studio` provider with authenticated hosts            | Local LM Studio usually runs without auth; any non-empty token works when a key is required         |
+| `OMLX_API_KEY`                  | oMLX auth (optional)                             | Using `omlx` provider with authenticated hosts                 | Local oMLX usually runs without auth; any non-empty token works when a key is required              |
+| `SGLANG_API_KEY`                | SGLang bearer-token auth (optional)              | Using `sglang` provider with authenticated hosts               | Credentialless implicit discovery is restricted to loopback                                        |
 | `OLLAMA_API_KEY`                | Ollama auth (optional)                           | Using `ollama` provider with authenticated hosts               | Local Ollama usually runs without auth; any non-empty token works when a key is required            |
 | `LLAMA_CPP_API_KEY`             | llama.cpp auth (optional)                        | Using `llama.cpp` provider with authenticated hosts            | Local llama.cpp usually runs without auth; any non-empty token works when a key is configured       |
 | `XIAOMI_API_KEY`                | Xiaomi MiMo auth                                 | Using `xiaomi` provider                                        |                                                                                                     |
@@ -462,6 +464,8 @@ Extra conditional behavior:
 | `SMITHERY_API_URL`           | Smithery API base URL override (default `https://api.smithery.ai`)                                 |
 | `PUPPETEER_EXECUTABLE_PATH`  | Browser tool Chromium executable override                                                          |
 | `LM_STUDIO_BASE_URL`         | Default implicit LM Studio discovery base URL override (`http://127.0.0.1:1234/v1` if unset)       |
+| `OMLX_BASE_URL`              | Default implicit oMLX discovery base URL (`http://127.0.0.1:8080/v1` if unset); only HTTP(S) loopback URLs without userinfo/query/fragment are accepted |
+| `SGLANG_BASE_URL`            | Trusted SGLang discovery base URL (`http://127.0.0.1:30000/v1` if unset); requires canonical HTTP(S) without userinfo/query/fragment, and credentialless implicit discovery is loopback-only |
 | `OLLAMA_BASE_URL`            | Default implicit Ollama discovery base URL override (`http://127.0.0.1:11434` if unset)            |
 | `LLAMA_CPP_BASE_URL`         | Default implicit Llama.cpp discovery base URL override (`http://127.0.0.1:8080` if unset)          |
 | `SKC_EDIT_VARIANT`            | Forces edit tool variant when valid (`patch`, `replace`, `hashline`, `atom`, `vim`, `apply_patch`) |

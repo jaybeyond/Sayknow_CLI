@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -7,10 +7,11 @@ import {
 	sendNotification,
 	sendRequest,
 	shutdownAll,
+	startMessageReader,
 	waitForProjectLoaded,
 } from "../../src/lsp/client";
-import type { ServerConfig } from "../../src/lsp/types";
-import { disposeAllOwnedProcesses } from "../../src/runtime/process-lifecycle";
+import type { LspClient, ServerConfig } from "../../src/lsp/types";
+import { disposeAllOwnedProcesses, type OwnedProcess } from "../../src/runtime/process-lifecycle";
 
 const BUN = process.execPath;
 const ORIGINAL_PATH = Bun.env.PATH;
@@ -72,13 +73,15 @@ describe("LSP lifecycle behavior", () => {
 			const config = serverConfig(BUN, [script]);
 			const first = await getOrCreateClient(config, cwd, 1_000);
 			const pending = sendRequest(first, "workspace/neverResponds", null, undefined, 60_000);
-			const pendingSettled = pending.catch(error => error as Error);
+			const pendingSettled = captureError(pending);
 			expect(first.pendingRequests.size).toBe(1);
 
 			first.proc.kill();
 			const second = await getOrCreateClient(config, cwd, 1_000);
-			expect(await pendingSettled).toHaveProperty("message");
+			const terminalError = await pendingSettled;
 			await first.proc.exited.catch(() => undefined);
+			const staleError = await captureError(sendRequest(first, "workspace/stale", null, undefined, 50));
+			expect(staleError).toBe(terminalError);
 			const cachedAfterFirstExit = await getOrCreateClient(config, cwd, 1_000);
 
 			expect(second).not.toBe(first);
@@ -92,6 +95,45 @@ describe("LSP lifecycle behavior", () => {
 		} finally {
 			await fs.rm(cwd, { recursive: true, force: true });
 		}
+	});
+
+	it("terminalizes pending requests when the stdout stream reaches EOF", async () => {
+		const pending = Promise.withResolvers<unknown>();
+		const owner = {
+			dispose: vi.fn(async () => {}),
+		} as unknown as OwnedProcess;
+		const client = {
+			name: "eof-client",
+			cwd: "/tmp",
+			config: serverConfig(BUN),
+			proc: {
+				stdout: new ReadableStream<Uint8Array>({
+					start(controller) {
+						controller.close();
+					},
+				}),
+			},
+			owner,
+			requestId: 1,
+			diagnostics: new Map(),
+			diagnosticsVersion: 0,
+			openFiles: new Map(),
+			pendingRequests: new Map([[1, { resolve: pending.resolve, reject: pending.reject }]]),
+			messageBuffer: new Uint8Array(),
+			isReading: false,
+			lastActivity: 0,
+			writeQueue: Promise.resolve(),
+			activeProgressTokens: new Set(),
+			projectLoaded: Promise.resolve(),
+			resolveProjectLoaded: vi.fn(),
+		} as unknown as LspClient;
+
+		await startMessageReader(client);
+		const pendingError = await captureError(pending.promise);
+		expect(pendingError.message).toBe("LSP transport closed");
+		expect((pendingError.cause as Error).message).toBe("LSP stdout closed");
+		expect(client.pendingRequests.size).toBe(0);
+		expect(owner.dispose).toHaveBeenCalledTimes(1);
 	});
 
 	it.each([
@@ -132,14 +174,15 @@ describe("LSP lifecycle behavior", () => {
 					throw peerClosedError;
 				},
 			});
-			await sendNotification(first, "test/afterClose", {});
+			const notificationError = await captureError(sendNotification(first, "test/afterClose", {}));
 			const pendingError = await pending;
-			expect(pendingError.message).toBe("LSP transport closed");
-			expect(pendingError.cause).toBe(peerClosedError);
+			expect(notificationError.message).toBe("LSP transport closed");
+			expect(notificationError.cause).toBe(peerClosedError);
+			expect(pendingError).toBe(notificationError);
 			expect(first.pendingRequests.size).toBe(0);
 
 			const staleRequestError = await captureError(sendRequest(first, "test/stale", null));
-			expect(staleRequestError).toBe(pendingError);
+			expect(staleRequestError).toBe(notificationError);
 
 			const second = await getOrCreateClient(config, cwd, 1_000);
 			expect(second).not.toBe(first);

@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added first-class oMLX and SGLang OpenAI-compatible local providers. oMLX includes model capability enrichment and macOS profiles; SGLang discovery is credentialless only on normalized loopback origins and supports trusted `SGLANG_BASE_URL`/`SGLANG_API_KEY` configuration.
+### Fixed
+
+- Hardened local OpenAI-compatible discovery with bounded catalogs, redirect refusal, canonical loopback URLs, safe oMLX limits, and explicit-only SGLang login; deprecated `sglang-local` credentials no longer shadow real keys.
+
+- Anthropic's measured `invalid_request_error` prompt-overflow envelope now triggers context compaction only when its reported token usage actually exceeds the reported maximum, while auth, quota, rate-limit, and unverified prose remain authoritative non-overflow failures.
+
 ## [0.7.5] - 2026-06-27
 
 ### Fixed

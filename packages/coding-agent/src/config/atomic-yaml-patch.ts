@@ -93,7 +93,31 @@ export class AtomicYamlReplaceError extends Error {
 		this.name = "AtomicYamlReplaceError";
 	}
 }
+/** Raised when the configured lexical route no longer resolves to its original target. */
+export class AtomicYamlRetargetError extends Error {
+	readonly code = "ATOMIC_YAML_RETARGETED";
 
+	constructor() {
+		super("Atomic YAML configuration target changed before publication.");
+		this.name = "AtomicYamlRetargetError";
+	}
+}
+
+/** Test-only coordination hooks for deterministic target-authority races. */
+export const AtomicYamlTestHooks: {
+	afterTargetBound?: (canonicalPath: string) => Promise<void> | void;
+} = {};
+
+type AtomicYamlTargetIdentity = {
+	device: bigint;
+	inode: bigint;
+};
+
+type AtomicYamlTarget = {
+	canonicalPath: string;
+	resolvedPath: string;
+	identity: AtomicYamlTargetIdentity | undefined;
+};
 type PathState = { exists: boolean; value: unknown };
 type ReceiptChange = {
 	path: string;
@@ -103,6 +127,7 @@ type ReceiptChange = {
 };
 
 const queues = new Map<string, Promise<void>>();
+const trustedQueuedTargets = new Map<string, AtomicYamlTarget>();
 let nextReceiptRevision = 0;
 /** Bounded Windows sharing-violation retries: 10, 25, 50, 100, then 200 ms. */
 const WINDOWS_RENAME_BACKOFF_MS = [10, 25, 50, 100, 200] as const;
@@ -110,6 +135,80 @@ const WINDOWS_SHARING_VIOLATION_CODES = new Set(["EPERM", "EACCES", "EBUSY"]);
 
 function canonicalConfigPath(configPath: string): string {
 	return path.normalize(path.resolve(configPath));
+}
+
+async function resolveMissingAtomicYamlPath(inputPath: string): Promise<string> {
+	let unresolvedPath = inputPath;
+	const missingSegments: string[] = [];
+	for (;;) {
+		try {
+			return path.join(await fs.realpath(unresolvedPath), ...missingSegments.reverse());
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+			const parent = path.dirname(unresolvedPath);
+			if (parent === unresolvedPath) throw error;
+			missingSegments.push(path.basename(unresolvedPath));
+			unresolvedPath = parent;
+		}
+	}
+}
+
+async function resolveAtomicYamlTargetPath(inputPath: string, depth = 0): Promise<string> {
+	const canonicalPath = canonicalConfigPath(inputPath);
+	try {
+		return await fs.realpath(canonicalPath);
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+	}
+	try {
+		const metadata = await fs.lstat(canonicalPath);
+		if (metadata.isSymbolicLink()) {
+			if (depth >= 32) throw new AtomicYamlRetargetError();
+			const linkedPath = await fs.readlink(canonicalPath);
+			const targetPath = path.isAbsolute(linkedPath)
+				? linkedPath
+				: path.resolve(path.dirname(canonicalPath), linkedPath);
+			return await resolveAtomicYamlTargetPath(targetPath, depth + 1);
+		}
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+	}
+	return await resolveMissingAtomicYamlPath(canonicalPath);
+}
+
+async function readAtomicYamlTargetIdentity(resolvedPath: string): Promise<AtomicYamlTargetIdentity | undefined> {
+	try {
+		const metadata = await fs.stat(resolvedPath, { bigint: true });
+		return { device: metadata.dev, inode: metadata.ino };
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+		throw error;
+	}
+}
+
+async function resolveAtomicYamlTarget(configPath: string): Promise<AtomicYamlTarget> {
+	const canonicalPath = canonicalConfigPath(configPath);
+	const resolvedPath = await resolveAtomicYamlTargetPath(canonicalPath);
+	return {
+		canonicalPath,
+		resolvedPath,
+		identity: await readAtomicYamlTargetIdentity(resolvedPath),
+	};
+}
+
+function sameAtomicYamlIdentity(
+	left: AtomicYamlTargetIdentity | undefined,
+	right: AtomicYamlTargetIdentity | undefined,
+): boolean {
+	if (!left || !right) return left === right;
+	return left.device === right.device && left.inode === right.inode;
+}
+
+async function assertAtomicYamlTarget(target: AtomicYamlTarget): Promise<void> {
+	const current = await resolveAtomicYamlTarget(target.canonicalPath);
+	if (current.resolvedPath !== target.resolvedPath || !sameAtomicYamlIdentity(current.identity, target.identity)) {
+		throw new AtomicYamlRetargetError();
+	}
 }
 
 function assertPatch(patch: AtomicYamlPatch): void {
@@ -266,12 +365,12 @@ async function replaceWithRetry(tempPath: string, configPath: string, options: A
 }
 
 async function writeAtomicYaml(
-	configPath: string,
+	target: AtomicYamlTarget,
 	value: Record<string, unknown>,
 	options: AtomicYamlPatchOptions,
 ): Promise<void> {
-	const directory = path.dirname(configPath);
-	const tempPath = path.join(directory, `.${path.basename(configPath)}.${process.pid}.${randomUUID()}.tmp`);
+	const directory = path.dirname(target.resolvedPath);
+	const tempPath = path.join(directory, `.${path.basename(target.resolvedPath)}.${process.pid}.${randomUUID()}.tmp`);
 	try {
 		const tempHandle = await fs.open(tempPath, "wx", 0o600);
 		try {
@@ -280,8 +379,12 @@ async function writeAtomicYaml(
 		} finally {
 			await tempHandle.close();
 		}
-		await replaceWithRetry(tempPath, configPath, options);
+		await assertAtomicYamlTarget(target);
+		await replaceWithRetry(tempPath, target.resolvedPath, options);
 		await syncParentDirectory(directory);
+		const publishedTarget = await resolveAtomicYamlTarget(target.canonicalPath);
+		if (publishedTarget.resolvedPath !== target.resolvedPath) throw new AtomicYamlRetargetError();
+		target.identity = publishedTarget.identity;
 	} finally {
 		await fs.rm(tempPath, { force: true }).catch(() => undefined);
 	}
@@ -302,10 +405,12 @@ function createReceipt(
 		},
 		async restore(): Promise<CasRestoreResult> {
 			if (discarded) return { status: "discarded" };
-			return await enqueueAtomicYamlOperation(configPath, async canonicalPath => {
+			return await enqueueAtomicYamlOperation(configPath, async (_canonicalPath, target) => {
 				if (discarded) return { status: "discarded" };
-				return await withFileLock(canonicalPath, async () => {
-					const { current, root } = await readYaml(canonicalPath);
+				await assertAtomicYamlTarget(target);
+				return await withFileLock(target.resolvedPath, async () => {
+					await assertAtomicYamlTarget(target);
+					const { current, root } = await readYaml(target.resolvedPath);
 					const conflicts = changes
 						.filter(
 							change =>
@@ -320,7 +425,7 @@ function createReceipt(
 							: { path: change.path, op: "unset" },
 					);
 					await options.validateRoot?.(root, restorePatches);
-					const receipt = await applyPatchesUnderLock(canonicalPath, current, restorePatches, options);
+					const receipt = await applyPatchesUnderLock(target, current, restorePatches, options);
 					await options.onRestored?.(restorePatches);
 					return { status: "restored", receipt };
 				});
@@ -330,12 +435,12 @@ function createReceipt(
 }
 
 async function applyPatchesUnderLock(
-	configPath: string,
+	target: AtomicYamlTarget,
 	current: Record<string, unknown>,
 	patches: readonly AtomicYamlPatch[],
 	options: AtomicYamlPatchOptions,
 ): Promise<CasReceipt> {
-	if (patches.length === 0) return createReceipt(configPath, [], options);
+	if (patches.length === 0) return createReceipt(target.canonicalPath, [], options);
 
 	for (const patch of patches) {
 		if (!patch.expected) continue;
@@ -373,8 +478,8 @@ async function applyPatchesUnderLock(
 	}
 	const changes = [...changesByPath.values()];
 
-	await writeAtomicYaml(configPath, current, options);
-	return createReceipt(configPath, changes, options);
+	await writeAtomicYaml(target, current, options);
+	return createReceipt(target.canonicalPath, changes, options);
 }
 
 /** Build patches from current durable YAML while holding the shared queue and file lock. */
@@ -385,14 +490,17 @@ export function applyAtomicYamlPatchesWithCurrent(
 	) => Promise<readonly AtomicYamlPatch[]> | readonly AtomicYamlPatch[],
 	options: AtomicYamlPatchOptions = {},
 ): Promise<CasReceipt> {
-	return enqueueAtomicYamlOperation(configPath, async canonicalPath => {
-		await fs.mkdir(path.dirname(canonicalPath), { recursive: true, mode: 0o700 });
-		return await withFileLock(canonicalPath, async () => {
-			const { current, root } = await readYaml(canonicalPath);
+	return enqueueAtomicYamlOperation(configPath, async (_canonicalPath, target) => {
+		await assertAtomicYamlTarget(target);
+		await fs.mkdir(path.dirname(target.resolvedPath), { recursive: true, mode: 0o700 });
+		await assertAtomicYamlTarget(target);
+		return await withFileLock(target.resolvedPath, async () => {
+			await assertAtomicYamlTarget(target);
+			const { current, root } = await readYaml(target.resolvedPath);
 			const patches = await buildPatches(current);
 			for (const patch of patches) assertPatch(patch);
 			await options.validateRoot?.(root, patches);
-			return await applyPatchesUnderLock(canonicalPath, current, patches, options);
+			return await applyPatchesUnderLock(target, current, patches, options);
 		});
 	});
 }
@@ -404,18 +512,41 @@ export function applyAtomicYamlPatchesWithCurrent(
  */
 export function enqueueAtomicYamlOperation<T>(
 	configPath: string,
-	operation: (canonicalConfigPath: string) => Promise<T>,
+	operation: (canonicalConfigPath: string, target: AtomicYamlTarget) => Promise<T>,
 ): Promise<T> {
 	const canonicalPath = canonicalConfigPath(configPath);
 	const prior = queues.get(canonicalPath) ?? Promise.resolve();
-	const result = prior.catch(() => undefined).then(() => operation(canonicalPath));
+	const targetAtEnqueue = resolveAtomicYamlTarget(canonicalPath).then(async target => {
+		await AtomicYamlTestHooks.afterTargetBound?.(canonicalPath);
+		return target;
+	});
+	const result = prior
+		.catch(() => undefined)
+		.then(async () => {
+			const target = await targetAtEnqueue;
+			const current = await resolveAtomicYamlTarget(canonicalPath);
+			if (
+				current.resolvedPath !== target.resolvedPath ||
+				(!sameAtomicYamlIdentity(current.identity, target.identity) &&
+					!sameAtomicYamlIdentity(trustedQueuedTargets.get(canonicalPath)?.identity, current.identity))
+			) {
+				throw new AtomicYamlRetargetError();
+			}
+			target.identity = current.identity;
+			const value = await operation(canonicalPath, target);
+			trustedQueuedTargets.set(canonicalPath, { ...target });
+			return value;
+		});
 	const completion = result.then(
 		() => undefined,
 		() => undefined,
 	);
 	queues.set(canonicalPath, completion);
 	void completion.finally(() => {
-		if (queues.get(canonicalPath) === completion) queues.delete(canonicalPath);
+		if (queues.get(canonicalPath) === completion) {
+			queues.delete(canonicalPath);
+			trustedQueuedTargets.delete(canonicalPath);
+		}
 	});
 	return result;
 }
@@ -429,14 +560,17 @@ export function reserveAtomicYamlPatchSlot(
 	patches: () => Promise<readonly AtomicYamlPatch[]> | readonly AtomicYamlPatch[],
 	options: AtomicYamlPatchOptions = {},
 ): Promise<CasReceipt> {
-	return enqueueAtomicYamlOperation(configPath, async canonicalPath => {
+	return enqueueAtomicYamlOperation(configPath, async (_canonicalPath, target) => {
 		const nextPatches = await patches();
 		for (const patch of nextPatches) assertPatch(patch);
-		await fs.mkdir(path.dirname(canonicalPath), { recursive: true, mode: 0o700 });
-		return await withFileLock(canonicalPath, async () => {
-			const { current, root } = await readYaml(canonicalPath);
+		await assertAtomicYamlTarget(target);
+		await fs.mkdir(path.dirname(target.resolvedPath), { recursive: true, mode: 0o700 });
+		await assertAtomicYamlTarget(target);
+		return await withFileLock(target.resolvedPath, async () => {
+			await assertAtomicYamlTarget(target);
+			const { current, root } = await readYaml(target.resolvedPath);
 			await options.validateRoot?.(root, nextPatches);
-			return await applyPatchesUnderLock(canonicalPath, current, nextPatches, options);
+			return await applyPatchesUnderLock(target, current, nextPatches, options);
 		});
 	});
 }
@@ -450,14 +584,17 @@ export function reserveAtomicYamlUpdateSlot<T>(
 	update: () => Promise<AtomicYamlUpdate<T>> | AtomicYamlUpdate<T>,
 	options: AtomicYamlPatchOptions = {},
 ): Promise<T> {
-	return enqueueAtomicYamlOperation(configPath, async canonicalPath => {
+	return enqueueAtomicYamlOperation(configPath, async (_canonicalPath, target) => {
 		const atomicUpdate = await update();
-		await fs.mkdir(path.dirname(canonicalPath), { recursive: true, mode: 0o700 });
-		return await withFileLock(canonicalPath, async () => {
-			const { current } = await readYaml(canonicalPath);
+		await assertAtomicYamlTarget(target);
+		await fs.mkdir(path.dirname(target.resolvedPath), { recursive: true, mode: 0o700 });
+		await assertAtomicYamlTarget(target);
+		return await withFileLock(target.resolvedPath, async () => {
+			await assertAtomicYamlTarget(target);
+			const { current } = await readYaml(target.resolvedPath);
 			const result = await atomicUpdate.apply(current);
 			if (atomicUpdate.shouldWrite?.(result) !== false) {
-				await writeAtomicYaml(canonicalPath, current, options);
+				await writeAtomicYaml(target, current, options);
 			}
 			await atomicUpdate.committed?.(current, result);
 			return result;

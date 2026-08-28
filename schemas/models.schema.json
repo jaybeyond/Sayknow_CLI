@@ -246,6 +246,8 @@
 									"ollama",
 									"llama.cpp",
 									"lm-studio",
+									"omlx",
+									"sglang",
 									"openai-models-list"
 								]
 							}

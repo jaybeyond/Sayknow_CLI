@@ -347,8 +347,8 @@ describe("immutable stable release contracts", () => {
 		// Monotonicity compares against the fork's own tag series only, so a
 		// synced upstream vX.Y.Z tag can never block or inflate fork versions.
 		expect(releaseScript).toContain('"refs/tags/sayknow-v*"');
-		// Same-version plain v tags on origin must fail closed: ci.yml treats
-		// both v* and sayknow-v* as release tags.
+		// Same-version plain v tags on origin fail closed in release.ts and never
+		// enter the canonical sayknow-v-only release workflow.
 		expect(releaseScript).toContain("for (const remoteTag of [tag, `v${version}`])");
 	});
 	test("creates an unsigned lightweight tag despite tag.gpgSign and verifies lightweight or signed tag output by peeled commit", async () => {
@@ -459,9 +459,9 @@ describe("native release binary coverage", () => {
 
 		// Native and binary builds also run in the tag rehearsal; publish remains tag-only.
 		for (const job of [native, binaries]) {
-			expect(job).toContain("if: ${{ (startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/sayknow-v')) || (github.event_name == 'workflow_dispatch' && inputs.rehearsal == 'tag-build-verify') }}");
+			expect(job).toContain("if: ${{ startsWith(github.ref, 'refs/tags/sayknow-v') || (github.event_name == 'workflow_dispatch' && inputs.rehearsal == 'tag-build-verify') }}");
 		}
-		expect(publish).toContain("if: ${{ (startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/sayknow-v')) && github.event_name != 'workflow_dispatch' }}");
+		expect(publish).toContain("if: ${{ startsWith(github.ref, 'refs/tags/sayknow-v') && github.event_name != 'workflow_dispatch' }}");
 		expect(workflow).not.toContain("release_source_verify");
 		expect(workflow).not.toContain("verify exact source SHA passed a successful main CI run");
 
@@ -475,10 +475,23 @@ describe("native release binary coverage", () => {
 		expect(publish).toContain("--release-serialization-key sayknow-production-release");
 		expect(publish).toContain("NPM_TOKEN: ${{ secrets.NPM_TOKEN }}");
 
-		// Publish cuts the GitHub Release directly (no separate draft/finalize dance).
+		// All binary and package evidence is staged in a draft before npm mutates;
+		// the release becomes public only after npm publication succeeds.
 		expect(publish).toContain("softprops/action-gh-release");
-		expect(publish).toContain("draft: false");
+		expect(publish).toContain("draft: true");
+		expect(publish).toContain('gh release edit "$GITHUB_REF_NAME" --draft=false');
 		expect(publish).toContain("release-binaries/skc-*");
+		expect(publish).toContain("sayknow-release-binaries-v1.json");
+		expect(publish).toContain("sayknow-release-binaries.sha256");
+		expect(publish.indexOf("Publish binary checksum manifest")).toBeLessThan(
+			publish.indexOf("Stage GitHub Release draft"),
+		);
+		expect(publish.indexOf("Stage GitHub Release draft")).toBeLessThan(
+			publish.indexOf("Publish packages to npm"),
+		);
+		expect(publish.indexOf("Publish packages to npm")).toBeLessThan(
+			publish.indexOf("Publish GitHub Release"),
+		);
 		// The daily public-sync live check validates both evidence JSONs as release
 		// assets, so the release must attach them alongside the binaries.
 		expect(publish).toContain("release-evidence-assets/sayknow-release-packages-*.json");

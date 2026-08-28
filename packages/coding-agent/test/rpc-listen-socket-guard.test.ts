@@ -25,73 +25,6 @@ const fixtureModelsYaml = `providers:
           cacheWrite: 0
 `;
 
-type Frame = { type?: string; id?: string; success?: boolean; command?: string };
-
-interface SocketClient {
-	send(frame: object): void;
-	nextFrame(timeoutMs?: number): Promise<Frame>;
-	close(): void;
-}
-
-async function connectRpcSocket(socketPath: string): Promise<SocketClient> {
-	const frames: Frame[] = [];
-	const waiters: Array<(frame: Frame) => void> = [];
-	const decoder = new TextDecoder();
-	let buffer = "";
-	const socket = await Bun.connect({
-		unix: socketPath,
-		socket: {
-			data(_socket, bytes) {
-				buffer += decoder.decode(bytes);
-				while (true) {
-					const newline = buffer.indexOf("\n");
-					if (newline < 0) break;
-					const line = buffer.slice(0, newline).trim();
-					buffer = buffer.slice(newline + 1);
-					if (!line) continue;
-					const frame = JSON.parse(line) as Frame;
-					const waiter = waiters.shift();
-					if (waiter) waiter(frame);
-					else frames.push(frame);
-				}
-			},
-		},
-	});
-	return {
-		send(frame: object): void {
-			socket.write(`${JSON.stringify(frame)}\n`);
-		},
-		nextFrame(timeoutMs = 10_000): Promise<Frame> {
-			const queued = frames.shift();
-			if (queued) return Promise.resolve(queued);
-			let timer: ReturnType<typeof setTimeout> | undefined;
-			return new Promise<Frame>((resolve, reject) => {
-				timer = setTimeout(() => reject(new Error("Timed out waiting for RPC socket frame")), timeoutMs);
-				waiters.push(frame => {
-					if (timer) clearTimeout(timer);
-					resolve(frame);
-				});
-			});
-		},
-		close(): void {
-			socket.end();
-		},
-	};
-}
-
-async function waitForSocket(socketPath: string): Promise<void> {
-	const deadline = Date.now() + 15_000;
-	while (Date.now() < deadline) {
-		try {
-			await stat(socketPath);
-			return;
-		} catch {
-			await Bun.sleep(25);
-		}
-	}
-	throw new Error(`Timed out waiting for RPC socket ${socketPath}`);
-}
-
 function spawnRpcSocketServer(socketPath: string) {
 	return Bun.spawn(
 		[
@@ -207,54 +140,20 @@ describe("--listen duplicate refusal boundary (issue 19)", () => {
 	});
 });
 
-describe("--listen active-socket sink lifecycle", () => {
-	it("keeps a newer socket after stale closure and survives a current-client response race", async () => {
-		const socketPath = path.join(dir, "sink-lifecycle.sock");
+describe("--mode rpc removal boundary", () => {
+	it("fails before binding --listen and points callers to the SDK", async () => {
+		const socketPath = path.join(dir, "removed-mode.sock");
 		const proc = spawnRpcSocketServer(socketPath);
-		let first: SocketClient | undefined;
-		let second: SocketClient | undefined;
-		let third: SocketClient | undefined;
-		try {
-			await waitForSocket(socketPath);
-			first = await connectRpcSocket(socketPath);
-			expect(await first.nextFrame()).toEqual({ type: "ready" });
+		const [stdout, stderr, exitCode] = await Promise.all([
+			new Response(proc.stdout).text(),
+			new Response(proc.stderr).text(),
+			proc.exited,
+		]);
 
-			second = await connectRpcSocket(socketPath);
-			expect(await second.nextFrame()).toEqual({ type: "ready" });
-			first.close(); // Its later close callback must not detach the newer sink.
-			await Bun.sleep(50);
-
-			second.send({ id: "second-state", type: "get_state" });
-			expect(await second.nextFrame()).toMatchObject({
-				id: "second-state",
-				type: "response",
-				command: "get_state",
-				success: true,
-			});
-			second.send({ id: "current-close", type: "get_state" });
-			second.close();
-			await Bun.sleep(50);
-			expect(
-				await Promise.race([
-					proc.exited.then(() => "exited" as const),
-					Bun.sleep(50).then(() => "running" as const),
-				]),
-			).toBe("running");
-
-			third = await connectRpcSocket(socketPath);
-			expect(await third.nextFrame()).toEqual({ type: "ready" });
-			third.send({ id: "third-state", type: "get_state" });
-			expect(await third.nextFrame()).toMatchObject({
-				id: "third-state",
-				type: "response",
-				command: "get_state",
-				success: true,
-			});
-		} finally {
-			first?.close();
-			second?.close();
-			third?.close();
-			proc.kill();
-		}
-	}, 45_000);
+		expect(exitCode).toBe(2);
+		expect(stdout).toContain("USAGE");
+		expect(stderr).toContain("--mode rpc was removed");
+		expect(stderr).toContain("docs/sdk.md");
+		await expect(stat(socketPath)).rejects.toThrow();
+	});
 });

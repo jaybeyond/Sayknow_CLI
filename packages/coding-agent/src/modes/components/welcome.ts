@@ -25,6 +25,7 @@ export interface WelcomeComponentOptions {
 	collapseChangelog?: boolean;
 	buildLabel?: string;
 	keyDisplayContext?: KeyDisplayContext;
+	skipLogoAnimation?: boolean;
 }
 
 const WELCOME_STATIC_RIGHT_ROWS_EXCLUDING_DYNAMIC_SECTIONS = 15;
@@ -75,6 +76,10 @@ export class WelcomeComponent implements Component {
 	 */
 	playIntro(requestRender: () => void): void {
 		this.#stopAnimation();
+		if (this.options.skipLogoAnimation) {
+			requestRender();
+			return;
+		}
 		this.#animStart = performance.now();
 		requestRender();
 		this.#animTimer = setInterval(() => {

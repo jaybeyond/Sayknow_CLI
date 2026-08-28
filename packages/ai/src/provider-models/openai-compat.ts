@@ -8,6 +8,8 @@ import {
 	fetchOpenAICompatibleModels,
 	type OpenAICompatibleModelMapperContext,
 	type OpenAICompatibleModelRecord,
+	resolveCanonicalOpenAIBaseUrl,
+	resolveLoopbackOpenAIBaseUrl,
 } from "../utils/discovery/openai-compatible";
 import { toFireworksPublicModelId } from "../utils/fireworks-model-id";
 import { getGitHubCopilotBaseUrl, OPENCODE_HEADERS, parseGitHubCopilotApiKey } from "../utils/oauth/github-copilot";
@@ -197,6 +199,18 @@ function firstPositiveModelNumber(fallback: number, ...candidates: readonly unkn
 	return fallback;
 }
 
+function safePositiveInteger(value: unknown): number | undefined {
+	return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : undefined;
+}
+
+function firstPositiveSafeInteger(fallback: number, ...candidates: readonly unknown[]): number {
+	for (const candidate of candidates) {
+		const value = safePositiveInteger(candidate);
+		if (value !== undefined) return value;
+	}
+	return fallback;
+}
+
 function mapLmStudioModel(
 	entry: OpenAICompatibleModelRecord,
 	defaults: Model<"openai-completions">,
@@ -215,6 +229,52 @@ function mapLmStudioModel(
 			getNestedModelValue(entry, ["meta", "n_ctx_train"]),
 		),
 		maxTokens: firstPositiveModelNumber(
+			model.maxTokens,
+			entry.max_completion_tokens,
+			entry.max_tokens,
+			entry.max_output_tokens,
+			getNestedModelValue(entry, ["details", "max_completion_tokens"]),
+			getNestedModelValue(entry, ["details", "max_tokens"]),
+			getNestedModelValue(entry, ["meta", "max_completion_tokens"]),
+			getNestedModelValue(entry, ["meta", "max_tokens"]),
+		),
+	};
+}
+function mapOmlxModel(
+	entry: OpenAICompatibleModelRecord,
+	defaults: Model<"openai-completions">,
+	reference: Model<"openai-completions"> | undefined,
+): Model<"openai-completions"> {
+	const model = mapWithBundledReference(entry, defaults, reference);
+	return {
+		...model,
+		reasoning: true,
+		thinking: {
+			mode: "effort",
+			minLevel: Effort.Low,
+			maxLevel: Effort.High,
+			defaultLevel: Effort.Medium,
+			levels: [Effort.Low, Effort.Medium, Effort.High],
+		},
+		compat: {
+			...(model.compat ?? {}),
+			supportsStore: false,
+			supportsDeveloperRole: false,
+			supportsReasoningEffort: true,
+			thinkingFormat: "qwen-chat-template",
+			reasoningContentField: "reasoning_content",
+		},
+		contextWindow: firstPositiveSafeInteger(
+			model.contextWindow,
+			safePositiveInteger(entry.max_model_len),
+			entry.context_length,
+			entry.max_context_length,
+			getNestedModelValue(entry, ["meta", "n_ctx"]),
+			getNestedModelValue(entry, ["details", "context_length"]),
+			getNestedModelValue(entry, ["details", "n_ctx"]),
+			getNestedModelValue(entry, ["meta", "n_ctx_train"]),
+		),
+		maxTokens: firstPositiveSafeInteger(
 			model.maxTokens,
 			entry.max_completion_tokens,
 			entry.max_tokens,
@@ -1381,6 +1441,42 @@ export function lmStudioModelManagerOptions(
 			}),
 	};
 }
+// ---------------------------------------------------------------------------
+// 12.6. oMLX (Apple Silicon MLX Local Server)
+// ---------------------------------------------------------------------------
+
+export interface OmlxModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+}
+
+export function omlxModelManagerOptions(config?: OmlxModelManagerConfig): ModelManagerOptions<"openai-completions"> {
+	const apiKey = config?.apiKey;
+	const baseUrl = resolveLoopbackOpenAIBaseUrl(
+		config?.baseUrl ?? $credentialEnv("OMLX_BASE_URL"),
+		"http://127.0.0.1:8080/v1",
+	);
+	const references = createBundledReferenceMap<"openai-completions">("omlx" as Parameters<typeof getBundledModels>[0]);
+	return {
+		providerId: "omlx",
+		fetchDynamicModels: () =>
+			fetchOpenAICompatibleModels({
+				api: "openai-completions",
+				provider: "omlx",
+				baseUrl,
+				apiKey,
+				fetch: (input, init) =>
+					fetch(input, {
+						...init,
+						redirect: "error",
+						signal: init?.signal
+							? AbortSignal.any([init.signal, AbortSignal.timeout(500)])
+							: AbortSignal.timeout(500),
+					}),
+				mapModel: (entry, defaults) => mapOmlxModel(entry, defaults, references.get(defaults.id)),
+			}),
+	};
+}
 
 // ---------------------------------------------------------------------------
 // 13. Synthetic
@@ -1733,6 +1829,62 @@ export function vllmModelManagerOptions(config?: VllmModelManagerConfig): ModelM
 					};
 				},
 			}),
+	};
+}
+// ---------------------------------------------------------------------------
+// 22.5. SGLang
+// ---------------------------------------------------------------------------
+
+export interface SglangModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+}
+
+export function sglangModelManagerOptions(
+	config?: SglangModelManagerConfig,
+): ModelManagerOptions<"openai-completions"> {
+	const apiKey = config?.apiKey;
+	const configuredBaseUrl = config?.baseUrl ?? $credentialEnv("SGLANG_BASE_URL");
+	const baseUrl =
+		resolveCanonicalOpenAIBaseUrl(configuredBaseUrl) ?? (config?.baseUrl ? "" : "http://127.0.0.1:30000/v1");
+	const isLoopback = baseUrl.length > 0 && resolveLoopbackOpenAIBaseUrl(baseUrl, "") === baseUrl;
+	const references = createBundledReferenceMap<"openai-completions">(
+		"sglang" as Parameters<typeof getBundledModels>[0],
+	);
+	return {
+		providerId: "sglang",
+		...(baseUrl && (apiKey || isLoopback)
+			? {
+					fetchDynamicModels: () =>
+						fetchOpenAICompatibleModels({
+							api: "openai-completions",
+							provider: "sglang",
+							baseUrl,
+							apiKey,
+							fetch: (input, init) =>
+								fetch(input, {
+									...init,
+									redirect: "error",
+									signal: isLoopback
+										? init?.signal
+											? AbortSignal.any([init.signal, AbortSignal.timeout(500)])
+											: AbortSignal.timeout(500)
+										: init?.signal,
+								}),
+							mapModel: (entry, defaults) => {
+								const model = mapWithBundledReference(entry, defaults, references.get(defaults.id));
+								const contextWindow = toNumber(entry.max_model_len);
+								return {
+									...model,
+									contextWindow:
+										contextWindow !== undefined && Number.isSafeInteger(contextWindow) && contextWindow > 0
+											? contextWindow
+											: model.contextWindow,
+								};
+							},
+						}),
+				}
+			: {}),
 	};
 }
 

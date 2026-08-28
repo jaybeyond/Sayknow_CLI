@@ -198,3 +198,70 @@ describe("classifyContextOverflow - authoritative transport facts", () => {
 		expect(classifyContextOverflow(message, { kind: "transport", status: 418 })).toBe(true);
 	});
 });
+
+describe("classifyContextOverflow - generic invalid_request_error envelope", () => {
+	it("classifies Anthropic prompt-too-long measurements as overflow", () => {
+		const message = createErrorMessage(
+			'400 {"type":"error","error":{"type":"invalid_request_error","message":"prompt is too long: 1158066 tokens > 1000000 maximum"}}',
+		);
+		message.errorStatus = 400;
+		expect(
+			classifyContextOverflow(message, {
+				kind: "transport",
+				status: 400,
+				anthropicErrorType: "invalid_request_error",
+				providerCode: "invalid_request_error",
+			}),
+		).toBe(true);
+	});
+
+	it("keeps genuine invalid_request_error failures non-overflow", () => {
+		const message = createErrorMessage(
+			'400 {"type":"error","error":{"type":"invalid_request_error","message":"Invalid `signature` in `thinking` block"}}',
+		);
+		message.errorStatus = 400;
+		expect(
+			classifyContextOverflow(message, {
+				kind: "transport",
+				status: 400,
+				anthropicErrorType: "invalid_request_error",
+			}),
+		).toBe(false);
+	});
+
+	it("does not let loose overflow prose override a generic envelope", () => {
+		const message = createErrorMessage("Tool failed: too many tokens in the uploaded document");
+		message.errorStatus = 400;
+		expect(
+			classifyContextOverflow(message, {
+				kind: "transport",
+				status: 400,
+				anthropicErrorType: "invalid_request_error",
+			}),
+		).toBe(false);
+	});
+
+	it("rejects a measurement that does not prove an overage", () => {
+		const message = createErrorMessage("prompt is too long: 10 tokens > 1000000 maximum");
+		message.errorStatus = 400;
+		expect(
+			classifyContextOverflow(message, {
+				kind: "transport",
+				status: 400,
+				anthropicErrorType: "invalid_request_error",
+			}),
+		).toBe(false);
+	});
+
+	it("keeps a specific non-overflow cause authoritative", () => {
+		const message = createErrorMessage("rate limited; prompt is too long: 200 tokens > 100 maximum");
+		message.errorStatus = 429;
+		expect(
+			classifyContextOverflow(message, {
+				kind: "transport",
+				status: 400,
+				anthropicErrorType: "rate_limit_error",
+			}),
+		).toBe(false);
+	});
+});

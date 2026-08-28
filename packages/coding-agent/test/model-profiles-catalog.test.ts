@@ -53,6 +53,61 @@ const expectedProfiles: Array<{ name: string; requiredProviders: string[]; mappi
 		},
 	},
 	{
+		name: "macos-omlx-fast",
+		requiredProviders: ["omlx"],
+		mapping: {
+			default: "omlx/Qwen3.6-35B-A3B-4bit:low",
+			executor: "omlx/Qwen3.6-35B-A3B-4bit:low",
+			architect: "omlx/Qwen3.6-35B-A3B-4bit:high",
+			planner: "omlx/Qwen3.6-35B-A3B-4bit:medium",
+			critic: "omlx/Qwen3.6-35B-A3B-4bit:high",
+		},
+	},
+	{
+		name: "macos-omlx-balanced",
+		requiredProviders: ["omlx"],
+		mapping: {
+			default: "omlx/Qwen3.6-35B-A3B-8bit:low",
+			executor: "omlx/Qwen3.6-35B-A3B-8bit:low",
+			architect: "omlx/Qwen3.6-35B-A3B-8bit:high",
+			planner: "omlx/Qwen3.6-35B-A3B-8bit:medium",
+			critic: "omlx/Qwen3.6-35B-A3B-8bit:high",
+		},
+	},
+	{
+		name: "macos-omlx-quality",
+		requiredProviders: ["omlx"],
+		mapping: {
+			default: "omlx/Qwen3.6-35B-A3B-8bit:low",
+			executor: "omlx/Qwen3.6-35B-A3B-8bit:low",
+			architect: "omlx/Qwen3.6-35B-A3B-8bit:high",
+			planner: "omlx/Qwen3.6-35B-A3B-8bit:medium",
+			critic: "omlx/Qwen3.8-27B-8bit:high",
+		},
+	},
+	{
+		name: "macos-omlx-abliterated-fast",
+		requiredProviders: ["omlx"],
+		mapping: {
+			default: "omlx/Qwen3.8-27B-Uncensored-MLX-4bit:low",
+			executor: "omlx/Qwen3.8-27B-Uncensored-MLX-4bit:low",
+			architect: "omlx/Qwen3.8-27B-Uncensored-MLX-4bit:high",
+			planner: "omlx/Qwen3.8-27B-Uncensored-MLX-4bit:medium",
+			critic: "omlx/Qwen3.8-27B-Uncensored-MLX-4bit:high",
+		},
+	},
+	{
+		name: "macos-omlx-abliterated-balanced",
+		requiredProviders: ["omlx"],
+		mapping: {
+			default: "omlx/Qwen3.8-27B-Uncensored-MLX-4bit:low",
+			executor: "omlx/Qwen3.8-27B-Uncensored-MLX-4bit:low",
+			architect: "omlx/Qwen3.8-27B-Uncensored-MLX-4bit:high",
+			planner: "omlx/Qwen3.8-27B-Uncensored-MLX-4bit:medium",
+			critic: "omlx/Qwen3.8-27B-Uncensored-MLX-4bit:high",
+		},
+	},
+	{
 		name: "opencodego",
 		requiredProviders: ["opencode-go"],
 		mapping: {
@@ -398,11 +453,18 @@ const oldNames = [
 	"glm-standard",
 	"fable-codex",
 ];
+const macosOmlxModels = new Set([
+	"Qwen3.6-35B-A3B-4bit",
+	"Qwen3.6-35B-A3B-8bit",
+	"Qwen3.8-27B-8bit",
+	"Qwen3.8-27B-Uncensored-MLX-4bit",
+]);
 
 function selectorExists(selector: string): boolean {
 	const parsed = parseModelString(selector);
 	if (!parsed) return false;
 	if (parsed.provider === "grok-build") return ["grok-composer-2.5-fast", "grok-build"].includes(parsed.id);
+	if (parsed.provider === "omlx") return macosOmlxModels.has(parsed.id);
 	return (modelsJson as Record<string, Record<string, unknown>>)[parsed.provider]?.[parsed.id] !== undefined;
 }
 
@@ -439,7 +501,7 @@ const fixedNonCodexComboMappings: Record<string, Partial<Record<Role, string>>> 
 };
 
 describe("built-in model profile catalog", () => {
-	test("contains exact 33-profile matrix cell-for-cell", () => {
+	test("contains exact 38-profile matrix cell-for-cell", () => {
 		expect(BUILTIN_MODEL_PROFILES.map(profile => profile.name)).toEqual(
 			expectedProfiles.map(profile => profile.name),
 		);
@@ -583,11 +645,20 @@ describe("built-in model profile catalog", () => {
 			"grok-45-eco": "Grok 4.5 Eco",
 			"grok-45-medium": "Grok 4.5 Medium",
 			"grok-45-pro": "Grok 4.5 Pro",
+			"macos-omlx-fast": "4-bit Fast (MoE measured 93.5 tok/s)",
+			"macos-omlx-balanced": "8-bit Balanced (MoE measured 71.1 tok/s)",
+			"macos-omlx-quality": "Quality mix (8-bit MoE + 8-bit dense critic)",
+			"macos-omlx-abliterated-fast": "Uncensored 4-bit Fast (measured 19.8 tok/s)",
+			"macos-omlx-abliterated-balanced": "Uncensored 4-bit Balanced (same winner as fast)",
 		})) {
-			expect(getModelProfilePresentation(name)).toEqual({ displayName, providerGroup: "GROK" });
+			expect(getModelProfilePresentation(name)).toEqual({
+				displayName,
+				providerGroup: name.startsWith("macos-omlx-") ? "macOS Local (oMLX)" : "GROK",
+			});
 		}
 		expect([...groupModelProfilesForPresetLanding(profiles).keys()]).toEqual([
 			"CODEX",
+			"macOS Local (oMLX)",
 			"OPENCODEGO",
 			"CLAUDE",
 			"GLM",
@@ -611,6 +682,7 @@ describe("built-in model profile catalog", () => {
 		expect(recommendModelProfileForProvider("xai", profiles)?.name).toBe("grok-medium");
 		expect(recommendModelProfileForProvider("grok-build", profiles)?.name).toBe("grok-build-pro");
 		expect(recommendModelProfileForProvider("cursor", profiles)?.name).toBe("cursor-medium");
+		expect(recommendModelProfileForProvider("omlx", profiles)?.name).toBe("macos-omlx-balanced");
 		expect(recommendModelProfileForProvider("alibaba-token-plan", profiles)?.name).toBe(
 			"alibaba-token-plan-balanced",
 		);

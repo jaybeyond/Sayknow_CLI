@@ -3,7 +3,7 @@ name: CI
 on:
    push:
       branches: [main]
-      tags: ["v*", "sayknow-v*"]
+      tags: ["sayknow-v*"]
    pull_request:
       branches: [main]
    workflow_dispatch:
@@ -23,7 +23,7 @@ permissions:
 concurrency:
    # Release tags never cancel; ordinary CI is cancellable per ref.
    group: ci-${{ github.ref }}-${{ github.event_name == 'workflow_dispatch' && inputs.rehearsal || 'event' }}
-   cancel-in-progress: ${{ !(startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/sayknow-v')) }}
+   cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/sayknow-v') }}
 
 jobs:
    # ---------------------------------------------------------------------------
@@ -31,7 +31,7 @@ jobs:
    # These never run on tags — a tag is cut from an already-green main.
    # ---------------------------------------------------------------------------
    check:
-      if: ${{ !(startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/sayknow-v')) && (github.event_name != 'workflow_dispatch' || inputs.rehearsal == 'main-nontag') }}
+      if: ${{ !startsWith(github.ref, 'refs/tags/sayknow-v') && (github.event_name != 'workflow_dispatch' || inputs.rehearsal == 'main-nontag') }}
       runs-on: ubuntu-22.04
       timeout-minutes: 20
       steps:
@@ -59,7 +59,7 @@ jobs:
    # keeps the stable branch-protection status name.
    # ---------------------------------------------------------------------------
    main_plan:
-      if: ${{ !(startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/sayknow-v')) && (github.event_name != 'workflow_dispatch' || inputs.rehearsal == 'main-nontag') }}
+      if: ${{ !startsWith(github.ref, 'refs/tags/sayknow-v') && (github.event_name != 'workflow_dispatch' || inputs.rehearsal == 'main-nontag') }}
       runs-on: ubuntu-22.04
       timeout-minutes: 10
       env:
@@ -81,7 +81,7 @@ jobs:
            run: bun scripts/ci-dev-affected.ts --matrix-json
 
    main_native:
-      if: ${{ !(startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/sayknow-v')) && (github.event_name != 'workflow_dispatch' || inputs.rehearsal == 'main-nontag') && needs.main_plan.outputs.has_native == 'true' }}
+      if: ${{ !startsWith(github.ref, 'refs/tags/sayknow-v') && (github.event_name != 'workflow_dispatch' || inputs.rehearsal == 'main-nontag') && needs.main_plan.outputs.has_native == 'true' }}
       needs: [main_plan]
       runs-on: ubuntu-22.04
       timeout-minutes: 30
@@ -123,7 +123,7 @@ jobs:
    main_python_matrix:
       name: Python SDK / ${{ matrix.python-version }}
       needs: [main_plan, main_native]
-      if: ${{ always() && !(startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/sayknow-v')) && (github.event_name != 'workflow_dispatch' || inputs.rehearsal == 'main-nontag') && needs.main_plan.outputs.has_python == 'true' && needs.main_native.result != 'failure' && needs.main_native.result != 'cancelled' }}
+      if: ${{ always() && !startsWith(github.ref, 'refs/tags/sayknow-v') && (github.event_name != 'workflow_dispatch' || inputs.rehearsal == 'main-nontag') && needs.main_plan.outputs.has_python == 'true' && needs.main_native.result != 'failure' && needs.main_native.result != 'cancelled' }}
       runs-on: ubuntu-22.04
       timeout-minutes: 30
       strategy:
@@ -153,7 +153,7 @@ jobs:
 
    main_shards:
       name: test-shard / ${{ matrix.key }}
-      if: ${{ always() && !(startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/sayknow-v')) && (github.event_name != 'workflow_dispatch' || inputs.rehearsal == 'main-nontag') && needs.main_plan.outputs.has_tasks == 'true' && needs.main_native.result != 'failure' && needs.main_native.result != 'cancelled' }}
+      if: ${{ always() && !startsWith(github.ref, 'refs/tags/sayknow-v') && (github.event_name != 'workflow_dispatch' || inputs.rehearsal == 'main-nontag') && needs.main_plan.outputs.has_tasks == 'true' && needs.main_native.result != 'failure' && needs.main_native.result != 'cancelled' }}
       needs: [main_plan, main_native]
       runs-on: ubuntu-22.04
       timeout-minutes: ${{ matrix.rust && 90 || 60 }}
@@ -207,7 +207,7 @@ jobs:
 
    # Branch protection must keep requiring this stable aggregate status.
    test:
-      if: ${{ always() && !(startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/sayknow-v')) && (github.event_name != 'workflow_dispatch' || inputs.rehearsal == 'main-nontag') }}
+      if: ${{ always() && !startsWith(github.ref, 'refs/tags/sayknow-v') && (github.event_name != 'workflow_dispatch' || inputs.rehearsal == 'main-nontag') }}
       needs: [main_plan, main_native, main_python_matrix, main_shards]
       runs-on: ubuntu-22.04
       timeout-minutes: 5
@@ -230,7 +230,7 @@ jobs:
    # and cuts the GitHub Release; rehearsals stop after binary verification.
    # ---------------------------------------------------------------------------
    native:
-      if: ${{ (startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/sayknow-v')) || (github.event_name == 'workflow_dispatch' && inputs.rehearsal == 'tag-build-verify') }}
+      if: ${{ startsWith(github.ref, 'refs/tags/sayknow-v') || (github.event_name == 'workflow_dispatch' && inputs.rehearsal == 'tag-build-verify') }}
       timeout-minutes: 90
       runs-on: ${{ matrix.os }}
       strategy:
@@ -256,7 +256,7 @@ jobs:
               save_cache: "true"
 
    binaries:
-      if: ${{ (startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/sayknow-v')) || (github.event_name == 'workflow_dispatch' && inputs.rehearsal == 'tag-build-verify') }}
+      if: ${{ startsWith(github.ref, 'refs/tags/sayknow-v') || (github.event_name == 'workflow_dispatch' && inputs.rehearsal == 'tag-build-verify') }}
       needs: [native]
       timeout-minutes: 60
       runs-on: ${{ matrix.os }}
@@ -337,7 +337,7 @@ jobs:
               path: ${{ matrix.binary_path }}
 
    publish:
-      if: ${{ (startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/sayknow-v')) && github.event_name != 'workflow_dispatch' }}
+      if: ${{ startsWith(github.ref, 'refs/tags/sayknow-v') && github.event_name != 'workflow_dispatch' }}
       needs: [native, binaries]
       timeout-minutes: 45
       runs-on: ubuntu-22.04
@@ -363,24 +363,13 @@ jobs:
               pattern: pi-natives-*
               path: packages/natives/native
               merge-multiple: true
-         - name: Publish packages to npm
-           env:
-              NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+         - name: Prepare package release evidence
            shell: bash
            run: |
               set -euo pipefail
               evidence_dir="$RUNNER_TEMP/release-evidence"
               mkdir -p "$evidence_dir"
               bun scripts/ci-release-publish.ts --prepare-evidence --evidence-dir "$evidence_dir"
-              npm_config="$(mktemp "$RUNNER_TEMP/npmrc.XXXXXX")"
-              trap 'rm -f "$npm_config"' EXIT
-              printf "//registry.npmjs.org/:_authToken=%s\n" "$NPM_TOKEN" > "$npm_config"
-              NPM_CONFIG_USERCONFIG="$npm_config" NODE_AUTH_TOKEN="$NPM_TOKEN" \
-                 bun scripts/ci-release-publish.ts --publish-from-evidence \
-                    --evidence-dir "$evidence_dir" \
-                    --release-serialization-key sayknow-production-release
-              # The daily public-sync live check requires both evidence JSONs as
-              # release assets; keep them for the Create GitHub Release step.
               mkdir -p release-evidence-assets
               cp "$evidence_dir"/sayknow-release-packages-expected-v1.json \
                  "$evidence_dir"/sayknow-release-packages-v1.json \
@@ -391,13 +380,43 @@ jobs:
               pattern: skc-binary-*
               path: release-binaries
               merge-multiple: true
-         - name: Create GitHub Release
+         - name: Publish binary checksum manifest
+           env:
+              TAG_NAME: ${{ github.ref_name }}
+           shell: bash
+           run: |
+              set -euo pipefail
+              package_version="$(bun -e 'console.log(require("./packages/coding-agent/package.json").version)')"
+              test "$TAG_NAME" = "sayknow-v${package_version}"
+              bun scripts/release-binaries-manifest.ts --bin-dir release-binaries --tag "$TAG_NAME"
+         - name: Stage GitHub Release draft
            uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65  # v2
            with:
               tag_name: ${{ github.ref_name }}
-              draft: false
+              draft: true
               prerelease: false
               generate_release_notes: true
               files: |
                  release-binaries/skc-*
+                 release-binaries/sayknow-release-binaries-v1.json
+                 release-binaries/sayknow-release-binaries.sha256
                  release-evidence-assets/sayknow-release-packages-*.json
+         - name: Publish packages to npm
+           env:
+              NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+           shell: bash
+           run: |
+              set -euo pipefail
+              evidence_dir="$RUNNER_TEMP/release-evidence"
+              npm_config="$(mktemp "$RUNNER_TEMP/npmrc.XXXXXX")"
+              trap 'rm -f "$npm_config"' EXIT
+              printf "//registry.npmjs.org/:_authToken=%s\n" "$NPM_TOKEN" > "$npm_config"
+              NPM_CONFIG_USERCONFIG="$npm_config" NODE_AUTH_TOKEN="$NPM_TOKEN" \
+                 bun scripts/ci-release-publish.ts --publish-from-evidence \
+                    --evidence-dir "$evidence_dir" \
+                    --release-serialization-key sayknow-production-release
+         - name: Publish GitHub Release
+           env:
+              GH_TOKEN: ${{ github.token }}
+           shell: bash
+           run: gh release edit "$GITHUB_REF_NAME" --draft=false

@@ -34,6 +34,8 @@ const LOCKED_EXCLUSIONS: Readonly<Record<string, string>> = {
 	"slash_command:pet": "visual/local-only command, not a user-facing SDK control seam",
 	"slash_command:transcript": "visual/local-only transcript viewer, not a user-facing SDK control seam",
 	"slash_command:sessions": "visual/local-only sessions dashboard, not a user-facing SDK control seam",
+	"slash_command:import-session":
+		"local transcript-file import into a new session; ACP is explicitly disabled and no SDK operation reads caller-selected host paths",
 	"agent_session:constructor": "internal accessor/plumbing, not a user-facing control seam",
 	"agent_session:nextToolChoice": "internal accessor/plumbing, not a user-facing control seam",
 	"agent_session:setForcedToolChoice": "internal accessor/plumbing, not a user-facing control seam",
@@ -51,6 +53,7 @@ const LOCKED_EXCLUSIONS: Readonly<Record<string, string>> = {
 	"agent_session:clearPlanCompactAbortPending": "internal accessor/plumbing, not a user-facing control seam",
 	"agent_session:enqueueCustomMessageDisplay": "internal accessor/plumbing, not a user-facing control seam",
 	"agent_session:runMidRunMaintenanceForTests": "test-only maintenance seam, not a user-facing SDK control seam",
+	"agent_session:runPrePromptContextCheckForTests": "test-only context check seam, not a user-facing SDK control seam",
 	"agent_session:estimateMidRunContextTokensForTests": "test-only estimator seam, not a user-facing SDK control seam",
 	"agent_session:activeMidRunBarrierCountForTests": "read-only test seam, not a user-facing SDK control seam",
 	"agent_session:activeMidRunMaintenanceCountForTests": "read-only test seam, not a user-facing SDK control seam",
@@ -58,6 +61,8 @@ const LOCKED_EXCLUSIONS: Readonly<Record<string, string>> = {
 	"agent_session:setCancelAndSubmitAbortOutcomeProviderForTests":
 		"test-only cancellation seam, not a user-facing SDK control seam",
 	"agent_session:getAgentId": "internal accessor/plumbing, not a user-facing control seam",
+	"agent_session:hasExplicitlyDisabledTools":
+		"internal automatic-tool-selection predicate, not a user-facing SDK control seam",
 	"agent_session:emitNotice": "internal accessor/plumbing, not a user-facing control seam",
 	"agent_session:subscribe": "internal accessor/plumbing, not a user-facing control seam",
 	"agent_session:dispose": "internal accessor/plumbing, not a user-facing control seam",
@@ -274,9 +279,6 @@ const SEAM_TO_SDK: Readonly<Record<string, string>> = {
 	"slash_command:rename": "session.rename",
 	"slash_command:move": "session.cwd.move",
 };
-
-/** Genuine action seams awaiting a reviewed registry mapping or exclusion. */
-const PENDING_REVIEW: Readonly<Record<string, string>> = {};
 
 function lockedExclusion(sourceId: string): string | undefined {
 	return LOCKED_EXCLUSIONS[sourceId];
@@ -812,7 +814,6 @@ function generatedRecords(seams: Awaited<ReturnType<typeof scanSeams>>): Invento
 	for (const seam of seams) {
 		const sdkId = SEAM_TO_SDK[seam.sourceId];
 		const rationale = lockedExclusion(seam.sourceId);
-		if (!sdkId && !rationale) continue;
 		if (!sdkId) {
 			if (!rationale) continue;
 			records.push({
@@ -877,8 +878,6 @@ export function pendingReviewErrors(seams: readonly Pick<SourceSeam, "sourceId">
 
 async function check(records: InventoryRecord[], seams: Awaited<ReturnType<typeof scanSeams>>): Promise<void> {
 	const errors = [...validateRegistry(records), ...pendingReviewErrors(seams)];
-	for (const sourceId of Object.keys(PENDING_REVIEW))
-		errors.push(`Pending review source seam: ${sourceId}. ${PENDING_REVIEW[sourceId]}`);
 	let checkedIn: InventoryRecord[];
 	try {
 		checkedIn = await Bun.file(inventoryPath).json();

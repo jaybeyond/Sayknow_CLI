@@ -21,6 +21,15 @@ describe("application keybinding domains", () => {
 		expect(metadataById.get("app.session.fork")?.title).toBe("Branch from message");
 		expect(KEYBINDINGS["app.session.fork"].description).toBe("Branch from message");
 	});
+	it("keeps palette-only navigation and message actions free of default chords", () => {
+		for (const id of [
+			"app.message.followUp",
+			"app.transcript.prevTurn",
+			"app.transcript.nextTurn",
+			"app.message.sendNow",
+		] as const)
+			expect(defaultKeys(id)).toEqual([]);
+	});
 
 	it("rejects default chord collisions within a focus domain", () => {
 		const owners = new Map<string, AppKeybinding[]>();

@@ -592,7 +592,7 @@ describe("InteractiveMode.setEditorComponent", () => {
 		const renderedText = rendered.join("\n");
 		const noticeIndex = rendered.findIndex(line => line.includes("New session started"));
 		expect(rendered.length).toBeLessThanOrEqual(rows);
-		expect(renderedText).toContain("SKC Forge");
+		expect(renderedText).toContain("Sayknow-CLI");
 		expect(noticeIndex).toBeGreaterThan(0);
 		expect(rendered[noticeIndex - 1]?.trim()).not.toBe("");
 		expect(renderedText).toContain("New session started");

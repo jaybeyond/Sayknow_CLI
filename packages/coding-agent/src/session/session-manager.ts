@@ -4350,6 +4350,7 @@ export class SessionManager {
 	#sessionName: string | undefined;
 	#titleSource: "auto" | "user" | undefined;
 	#sessionFile: string | undefined;
+	#transcriptStatFailureReported = false;
 	#flushed: boolean = false;
 	#needsFullRewriteOnNextPersist: boolean = false;
 	#ensuredOnDisk: boolean = false;
@@ -6573,6 +6574,28 @@ export class SessionManager {
 	getSessionFile(): string | undefined {
 		return this.#sessionFile;
 	}
+	/**
+	 * Managed on-disk transcript size in bytes. Returns undefined when the
+	 * destination is explicit, the file does not exist yet, or its identity
+	 * cannot be verified.
+	 */
+	getTranscriptFileBytes(): number | undefined {
+		if (this.destination.kind !== "managed" || !this.#sessionFile) return undefined;
+		try {
+			const size = this.#managedTranscriptStore().sizeSync(path.basename(this.#sessionFile));
+			this.#transcriptStatFailureReported = false;
+			return size ?? undefined;
+		} catch (error) {
+			if (!this.#transcriptStatFailureReported) {
+				this.#transcriptStatFailureReported = true;
+				logger.warn("Managed transcript size sampling failed", {
+					sessionFile: this.#sessionFile,
+					error: toError(error).message,
+				});
+			}
+			return undefined;
+		}
+	}
 
 	acquireMemoryGuardParticipantIngressLease(): MemoryGuardParticipantIngressLease {
 		if (this.#memoryGuardParticipantIngressToken)
@@ -7093,7 +7116,17 @@ export class SessionManager {
 					new Map(),
 				);
 				const persistedEntry = prepareEntryForPersistenceSync(materializedEntry, this.#blobStore);
-				this.#appendManagedRecordSync(persistedEntry);
+				try {
+					this.#appendManagedRecordSync(persistedEntry);
+				} catch (appendError) {
+					// A managed append-only transcript can hit the per-file limit
+					// even after compaction reduced the live entries. Only the
+					// authority-bound append error may authorize a full rewrite.
+					if (!(appendError instanceof Error) || appendError.message !== "content_too_large") {
+						throw appendError;
+					}
+					this.#rewriteFileSync();
+				}
 				return;
 			}
 			const writer = this.#ensurePersistWriter();
@@ -7119,16 +7152,29 @@ export class SessionManager {
 	}
 
 	#appendEntry(entry: SessionEntry): void {
+		if (this.#persistError) throw this.#persistError;
 		this.#assertRecoveryHydrationWritable();
 		const normalizedEntry = normalizeSessionEntryForStorage(entry);
 		const residentEntry = prepareEntryForResidentSync(normalizedEntry, this.#residentBlobStores()) as SessionEntry;
+		const previousLeafId = this.#leafId;
 		this.#fileEntries.push(residentEntry);
 		this.#byId.set(residentEntry.id, residentEntry);
 		this.#leafId = residentEntry.id;
 		this.#bumpEntryRevision();
 		this.#leafRevision++;
 		if (entry.type === "label") this.#labelRevision++;
-		this._persist(residentEntry);
+		try {
+			this._persist(residentEntry);
+		} catch (error) {
+			this.#fileEntries.pop();
+			this.#byId.delete(residentEntry.id);
+			this.#leafId = previousLeafId;
+			this.#entryRevision--;
+			this.#leafRevision--;
+			if (entry.type === "label") this.#labelRevision--;
+			this.#resetMaterializedCaches();
+			throw error;
+		}
 		// Same validated, overflow-guarded aggregation as the resume path (#buildIndex): a
 		// malformed task-result or assistant usage shape reaching the append path must not
 		// crash or poison getUsageStatistics() either.
@@ -9395,7 +9441,14 @@ export class SessionManager {
 	 */
 	static inventorySessionsStrict(
 		cwd: string,
-		options?: { sessionDir?: string; storage?: SessionStorage; destination?: SessionDestination },
+		options?: {
+			sessionDir?: string;
+			storage?: SessionStorage;
+			destination?: SessionDestination;
+			maxCandidates?: number;
+			maxTotalBytes?: number;
+			filterOtherWorkspaces?: boolean;
+		},
 	): StrictInventoryResult {
 		const storage = options?.storage ?? new FileSessionStorage();
 		const destination = options?.destination;
@@ -9419,20 +9472,27 @@ export class SessionManager {
 				});
 				if (resolved.kind === "error")
 					return { kind: "failure", failures: [{ kind: "root", message: resolved.message, path: dir }] };
-				const listing = listManagedCandidates(resolved.scope);
+				const listing = listManagedCandidates(resolved.scope, { maxCandidates: options?.maxCandidates });
 				if (listing.kind === "error")
 					return { kind: "failure", failures: [{ kind: "scan", message: listing.message, path: dir }] };
 				const failures: StrictInventoryFailure[] = [];
 				const candidates: StrictInventoryCandidate[] = [];
+				let remainingBytes = options?.maxTotalBytes;
 				for (const managedCandidate of listing.owned) {
 					const candidate = inventoryReadCandidate(
 						storage,
 						managedCandidate.path,
 						cwd,
 						path.dirname(managedCandidate.path),
+						remainingBytes,
+						options?.filterOtherWorkspaces,
 					);
 					if ("failures" in candidate) failures.push(...candidate.failures);
-					else candidates.push(candidate.candidate);
+					else {
+						if (remainingBytes !== undefined) remainingBytes -= candidate.bytes;
+						if ("filtered" in candidate) continue;
+						candidates.push(candidate.candidate);
+					}
 				}
 				assertManagedDirectoryRoot(destination.securityContext.rootAuthority);
 				store.assertBound();
@@ -9450,11 +9510,27 @@ export class SessionManager {
 				failures: [{ kind: "scan", message: "Strict scoped session scan is unavailable", path: dir }],
 			};
 		}
-		const strictScan = storage.listFilesStrictSync.bind(storage);
 
 		let files: string[];
 		try {
-			files = strictScan(dir, "*.jsonl");
+			if (options?.maxCandidates !== undefined) {
+				if (!storage.listFilesStrictBoundedSync) {
+					return {
+						kind: "failure",
+						failures: [{ kind: "scan", message: "Bounded strict session scan is unavailable", path: dir }],
+					};
+				}
+				const bounded = storage.listFilesStrictBoundedSync(dir, "*.jsonl", options.maxCandidates);
+				if (bounded.truncated) {
+					return {
+						kind: "failure",
+						failures: [{ kind: "scan", message: "Strict session candidate limit exceeded", path: dir }],
+					};
+				}
+				files = bounded.files;
+			} else {
+				files = storage.listFilesStrictSync(dir, "*.jsonl");
+			}
 		} catch (err) {
 			const code = (err as NodeJS.ErrnoException)?.code;
 			// Only a confirmed ENOENT proves the scoped root is genuinely absent,
@@ -9487,12 +9563,22 @@ export class SessionManager {
 
 		const failures: StrictInventoryFailure[] = [];
 		const candidates: StrictInventoryCandidate[] = [];
+		let remainingBytes = options?.maxTotalBytes;
 		for (const file of files) {
-			const candidate = inventoryReadCandidate(storage, file, cwd, dir);
+			const candidate = inventoryReadCandidate(
+				storage,
+				file,
+				cwd,
+				dir,
+				remainingBytes,
+				options?.filterOtherWorkspaces,
+			);
 			if ("failures" in candidate) {
 				failures.push(...candidate.failures);
 				continue;
 			}
+			if (remainingBytes !== undefined) remainingBytes -= candidate.bytes;
+			if ("filtered" in candidate) continue;
 			candidates.push(candidate.candidate);
 		}
 		if (failures.length > 0) {
@@ -9521,7 +9607,12 @@ function inventoryReadCandidate(
 	file: string,
 	expectedCwd: string,
 	sessionDir: string,
-): { candidate: StrictInventoryCandidate } | { failures: StrictInventoryFailure[] } {
+	maxBytes?: number,
+	filterOtherWorkspaces = false,
+):
+	| { candidate: StrictInventoryCandidate; bytes: number }
+	| { filtered: true; bytes: number }
+	| { failures: StrictInventoryFailure[] } {
 	const failures: StrictInventoryFailure[] = [];
 	const resolvedFile = path.resolve(file);
 	if (!pathIsWithin(path.resolve(sessionDir), resolvedFile)) {
@@ -9534,7 +9625,14 @@ function inventoryReadCandidate(
 	}
 	let snapshot: SessionStorageSnapshot;
 	try {
-		snapshot = storage.readSnapshotSync(file);
+		if (maxBytes !== undefined) {
+			if (maxBytes < 0 || !storage.readSnapshotBoundedSync) {
+				return { failures: [{ kind: "read", message: "Bounded exact session read is unavailable", path: file }] };
+			}
+			snapshot = storage.readSnapshotBoundedSync(file, maxBytes);
+		} else {
+			snapshot = storage.readSnapshotSync(file);
+		}
 	} catch (err) {
 		const code = (err as NodeJS.ErrnoException)?.code;
 		if (code === "ELOOP" || code === "SYMLINK") {
@@ -9576,8 +9674,12 @@ function inventoryReadCandidate(
 	}
 	const canonicalHeaderCwd = resolveEquivalentPath(header.cwd);
 	if (canonicalHeaderCwd !== resolveEquivalentPath(expectedCwd)) {
+		if (filterOtherWorkspaces) return { filtered: true, bytes: snapshot.bytes.byteLength };
 		failures.push({ kind: "cwd", message: "Candidate cwd does not match the scoped workspace", path: file });
 		return { failures };
 	}
-	return { candidate: { path: resolvedFile, id: header.id, cwd: header.cwd, identity: snapshot.stat } };
+	return {
+		candidate: { path: resolvedFile, id: header.id, cwd: header.cwd, identity: snapshot.stat },
+		bytes: snapshot.bytes.byteLength,
+	};
 }

@@ -1668,6 +1668,17 @@ export const streamAnthropic: StreamFunction<"anthropic-messages"> = (
 							if (block) {
 								blocksByAnthropicIndex.delete(event.index);
 								delete (block as { index?: number }).index;
+								if (block.type === "toolCall" && /\\u[0-9a-fA-F]{4}/.test(block.partialJson)) {
+									const escapedCodeUnits = [...block.partialJson.matchAll(/\\u([0-9a-fA-F]{4})/g)].map(match =>
+										Number.parseInt(match[1]!, 16),
+									);
+									if (escapedCodeUnits.some(codeUnit => codeUnit >= 0x80)) {
+										Object.defineProperties(block, {
+											escapedNonAsciiArguments: { value: true, configurable: true },
+											escapedNonAsciiArgumentsRaw: { value: block.partialJson, configurable: true },
+										});
+									}
+								}
 								if (block.type === "text") {
 									stream.push({
 										type: "text_end",

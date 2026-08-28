@@ -4,6 +4,7 @@
  * Handles `skc update` to check for and install updates.
  * Uses bun if available, otherwise downloads binary from GitHub releases.
  */
+import { createHash, randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { pipeline } from "node:stream/promises";
@@ -17,6 +18,8 @@ const RELEASE_REPO = "jaybeyond/Sayknow_CLI";
 const PACKAGE = "@sayknow-cli/coding-agent";
 const NPM_WRAPPER_PACKAGE = "sayknow-cli";
 const NPM_MANAGED_PACKAGES = [NPM_WRAPPER_PACKAGE, PACKAGE] as const;
+const BINARY_MANIFEST_ASSET = "sayknow-release-binaries-v1.json";
+const BINARY_SHA256_ASSET = "sayknow-release-binaries.sha256";
 
 interface ReleaseInfo {
 	tag: string;
@@ -272,9 +275,19 @@ function getBinaryName(platform: NodeJS.Platform = process.platform, arch: strin
 	}
 
 	if (os === "windows") {
+		if (archName !== "x64") {
+			throw new Error(formatUnsupportedTargetMessage(`Unsupported architecture for Windows: ${arch}`));
+		}
 		return `${APP_NAME}-${os}-${archName}.exe`;
 	}
 	return `${APP_NAME}-${os}-${archName}`;
+}
+
+export function getBinaryNameForTest(
+	platform: NodeJS.Platform = process.platform,
+	arch: string = process.arch,
+): string {
+	return getBinaryName(platform, arch);
 }
 
 /**
@@ -367,8 +380,87 @@ function buildReleaseBinaryUrl(
 	arch: string = process.arch,
 ): string {
 	const binaryName = getBinaryName(platform, arch);
-	const tag = `v${version}`;
+	const tag = `sayknow-v${version}`;
 	return `https://github.com/${RELEASE_REPO}/releases/download/${tag}/${binaryName}`;
+}
+
+function buildReleaseAssetUrl(version: string, assetName: string): string {
+	return `https://github.com/${RELEASE_REPO}/releases/download/sayknow-v${version}/${assetName}`;
+}
+
+function parseExpectedDigestFromSums(text: string, assetName: string): string | undefined {
+	const matches: string[] = [];
+	for (const line of text.split(/\r?\n/)) {
+		const match = line.trim().match(/^([a-fA-F0-9]{64}) {2}[ *]?([^/\\]+)$/);
+		if (match?.[2] === assetName) matches.push(match[1]!.toLowerCase());
+	}
+	if (matches.length > 1) throw new Error(`Release checksum file lists ${assetName} more than once`);
+	return matches[0];
+}
+
+function expectedDigestFromManifest(value: unknown, version: string, assetName: string): string {
+	if (!value || typeof value !== "object") throw new Error("Release binary manifest is not an object");
+	const manifest = value as Record<string, unknown>;
+	if (
+		manifest.schema !== "sayknow-release-binaries-v1" ||
+		manifest.schema_version !== 1 ||
+		manifest.release_version !== version ||
+		manifest.tag !== `sayknow-v${version}` ||
+		!Array.isArray(manifest.binaries)
+	) {
+		throw new Error("Release binary manifest metadata does not match the requested release");
+	}
+	const matches = manifest.binaries.filter(
+		entry => entry && typeof entry === "object" && (entry as Record<string, unknown>).name === assetName,
+	) as Array<Record<string, unknown>>;
+	if (matches.length !== 1 || typeof matches[0]?.sha256 !== "string" || !/^[a-f0-9]{64}$/.test(matches[0].sha256)) {
+		throw new Error(`Release binary manifest does not contain one valid SHA-256 for ${assetName}`);
+	}
+	return matches[0].sha256;
+}
+
+export async function fetchExpectedBinaryDigest(
+	version: string,
+	assetName: string,
+	fetchImpl: (url: string) => Promise<Response> = fetch,
+): Promise<string> {
+	const sumsResponse = await fetchImpl(buildReleaseAssetUrl(version, BINARY_SHA256_ASSET));
+	if (sumsResponse.ok) {
+		const digest = parseExpectedDigestFromSums(await sumsResponse.text(), assetName);
+		if (!digest) throw new Error(`Release checksum file does not list ${assetName}`);
+		return digest;
+	}
+	if (sumsResponse.status !== 404) {
+		throw new Error(`Release checksum file could not be fetched: HTTP ${sumsResponse.status}`);
+	}
+
+	const manifestResponse = await fetchImpl(buildReleaseAssetUrl(version, BINARY_MANIFEST_ASSET));
+	if (!manifestResponse.ok) {
+		if (manifestResponse.status === 404) {
+			throw new Error(`Release ${version} has no Sayknow binary integrity manifest`);
+		}
+		throw new Error(`Release binary manifest could not be fetched: HTTP ${manifestResponse.status}`);
+	}
+	return expectedDigestFromManifest(await manifestResponse.json(), version, assetName);
+}
+
+async function sha256File(filePath: string): Promise<string> {
+	const hash = createHash("sha256");
+	for await (const chunk of fs.createReadStream(filePath)) hash.update(chunk);
+	return hash.digest("hex");
+}
+
+export async function verifyReleaseBinaryIntegrity(
+	filePath: string,
+	version: string,
+	assetName: string,
+	fetchImpl: (url: string) => Promise<Response> = fetch,
+): Promise<void> {
+	const expected = await fetchExpectedBinaryDigest(version, assetName, fetchImpl);
+	const actual = await sha256File(filePath);
+	if (actual !== expected) {
+		throw new Error(`SHA-256 mismatch for ${assetName}: expected ${expected}, got ${actual}`);
+	}
 }
 
 function formatBinaryDownloadFailureMessage(
@@ -439,10 +531,129 @@ function formatBackupCleanupWarning(backupPath: string, err: unknown): string {
 
 async function cleanupVerifiedBackup(backupPath: string): Promise<string | undefined> {
 	try {
-		await unlinkIfExists(backupPath);
+		await unlinkDurably(backupPath);
 		return undefined;
 	} catch (err) {
 		return formatBackupCleanupWarning(backupPath, err);
+	}
+}
+
+async function pathExists(filePath: string): Promise<boolean> {
+	try {
+		await fs.promises.lstat(filePath);
+		return true;
+	} catch (err) {
+		if (isEnoent(err)) return false;
+		throw err;
+	}
+}
+
+async function syncParentDirectory(filePath: string): Promise<void> {
+	// Node cannot portably fsync directory handles on Windows. NTFS journals the
+	// rename operations used below; POSIX platforms require an explicit parent sync.
+	if (process.platform === "win32") return;
+	const handle = await fs.promises.open(path.dirname(filePath), "r");
+	try {
+		await handle.sync();
+	} finally {
+		await handle.close();
+	}
+}
+
+async function unlinkDurably(filePath: string): Promise<void> {
+	await unlinkIfExists(filePath);
+	await syncParentDirectory(filePath);
+}
+
+async function renameDurably(sourcePath: string, targetPath: string): Promise<void> {
+	await fs.promises.rename(sourcePath, targetPath);
+	await syncParentDirectory(targetPath);
+	if (path.dirname(sourcePath) !== path.dirname(targetPath)) await syncParentDirectory(sourcePath);
+}
+
+export async function withBinaryUpdateLock<T>(targetPath: string, operation: () => Promise<T>): Promise<T> {
+	const lockPath = path.join(path.dirname(targetPath), ".skc-install.lock");
+	try {
+		await fs.promises.mkdir(lockPath);
+	} catch (err) {
+		if ((err as NodeJS.ErrnoException).code === "EEXIST") {
+			throw new Error(`Another SKC installer or update is already running (lock: ${lockPath}).`);
+		}
+		throw err;
+	}
+	try {
+		await fs.promises.writeFile(
+			path.join(lockPath, "owner.json"),
+			JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() }),
+			{ flag: "wx" },
+		);
+		return await operation();
+	} finally {
+		await fs.promises.rm(lockPath, { recursive: true, force: true });
+	}
+}
+
+type BinaryReplacementPhase = "replacing" | "committed";
+
+interface BinaryReplacementState {
+	phase: BinaryReplacementPhase;
+	hadTarget: boolean;
+}
+
+function binaryReplacementStatePath(backupPath: string): string {
+	return `${backupPath}.state.json`;
+}
+
+async function readBinaryReplacementState(statePath: string): Promise<BinaryReplacementState | undefined> {
+	try {
+		const value = JSON.parse(await fs.promises.readFile(statePath, "utf8")) as Partial<BinaryReplacementState>;
+		if ((value.phase === "replacing" || value.phase === "committed") && typeof value.hadTarget === "boolean") {
+			return value as BinaryReplacementState;
+		}
+		return { phase: "replacing", hadTarget: true };
+	} catch (err) {
+		if (isEnoent(err)) return undefined;
+		return { phase: "replacing", hadTarget: true };
+	}
+}
+
+async function writeBinaryReplacementState(statePath: string, state: BinaryReplacementState): Promise<void> {
+	const handle = await fs.promises.open(statePath, "w", 0o600);
+	try {
+		await handle.writeFile(JSON.stringify(state));
+		await handle.sync();
+	} finally {
+		await handle.close();
+	}
+	await syncParentDirectory(statePath);
+}
+
+async function recoverInterruptedBinaryReplacement(targetPath: string, backupPath: string): Promise<void> {
+	const statePath = binaryReplacementStatePath(backupPath);
+	const state = await readBinaryReplacementState(statePath);
+	if (!(await pathExists(backupPath))) {
+		if (state?.phase === "replacing" && state.hadTarget === false) {
+			await unlinkDurably(targetPath);
+		}
+		await unlinkDurably(statePath);
+		return;
+	}
+	if (state?.phase === "committed" && (await pathExists(targetPath))) {
+		await unlinkDurably(backupPath);
+		await unlinkDurably(statePath);
+		return;
+	}
+	await unlinkDurably(targetPath);
+	await renameDurably(backupPath, targetPath);
+	await unlinkDurably(statePath);
+}
+
+async function cleanupCommittedReplacementState(statePath: string): Promise<string | undefined> {
+	try {
+		await unlinkDurably(statePath);
+		return undefined;
+	} catch (err) {
+		return `Installed update, but could not remove transaction state file ${statePath}: ${err}. The verified binary remains installed.`;
 	}
 }
 
@@ -450,31 +661,56 @@ async function cleanupVerifiedBackup(backupPath: string): Promise<string | undef
  * Atomically replace the installed binary and roll back if version verification fails.
  */
 export async function replaceBinaryForUpdate(options: BinaryReplacementOptions): Promise<InstalledVersionVerification> {
+	const statePath = binaryReplacementStatePath(options.backupPath);
+	await recoverInterruptedBinaryReplacement(options.targetPath, options.backupPath);
+	await unlinkDurably(options.backupPath);
+	const hadTarget = await pathExists(options.targetPath);
 	let backupReady = false;
+	let publishedNew = false;
+	let verification: InstalledVersionVerification;
 	try {
-		await unlinkIfExists(options.backupPath);
-		await fs.promises.rename(options.targetPath, options.backupPath);
-		backupReady = true;
+		await writeBinaryReplacementState(statePath, {
+			phase: "replacing",
+			hadTarget,
+		});
+		try {
+			await fs.promises.rename(options.targetPath, options.backupPath);
+			backupReady = true;
+			await syncParentDirectory(options.backupPath);
+		} catch (err) {
+			if (!isEnoent(err)) throw err;
+		}
 		await fs.promises.rename(options.tempPath, options.targetPath);
+		publishedNew = true;
+		await syncParentDirectory(options.targetPath);
 
-		const verification = await options.verifyInstalledVersion(options.expectedVersion);
+		verification = await options.verifyInstalledVersion(options.expectedVersion);
 		if (!verification.ok) {
 			throw new Error(
 				`${formatVerificationFailure(verification, options.expectedVersion)}; restored previous ${APP_NAME} binary`,
 			);
 		}
 
+		await writeBinaryReplacementState(statePath, {
+			phase: "committed",
+			hadTarget,
+		});
 		backupReady = false;
-		const cleanupWarning = await cleanupVerifiedBackup(options.backupPath);
-		return cleanupWarning ? { ...verification, cleanupWarning } : verification;
 	} catch (err) {
 		if (backupReady) {
-			await unlinkIfExists(options.targetPath);
-			await fs.promises.rename(options.backupPath, options.targetPath);
+			await unlinkDurably(options.targetPath);
+			await renameDurably(options.backupPath, options.targetPath);
+		} else if (publishedNew) {
+			await unlinkDurably(options.targetPath);
 		}
-		await unlinkIfExists(options.tempPath);
+		await unlinkDurably(options.tempPath);
+		await unlinkDurably(statePath);
 		throw err;
 	}
+
+	let cleanupWarning = await cleanupVerifiedBackup(options.backupPath);
+	if (!cleanupWarning) cleanupWarning = await cleanupCommittedReplacementState(statePath);
+	return cleanupWarning ? { ...verification, cleanupWarning } : verification;
 }
 
 function formatPackageManagerInstallFailure(
@@ -594,17 +830,20 @@ async function downloadBinaryTo(url: string, tempPath: string, binaryName: strin
 /** Injectable steps of the binary update flow (seams for testing ordering). */
 export interface BinaryUpdateFlow {
 	download(url: string, tempPath: string): Promise<void>;
+	verifyIntegrity(filePath: string): Promise<void>;
 	fsync(filePath: string): Promise<void>;
 	replace(options: BinaryReplacementOptions): Promise<InstalledVersionVerification>;
 	verifyInstalledVersion(expectedVersion: string): Promise<InstalledVersionVerification>;
 	/** Best-effort cleanup of the temp file when the flow aborts before replace. */
 	removeTemp?(filePath: string): Promise<void>;
+	/** Stable suffix for focused tests; production uses a process-unique staging path. */
+	transactionId?: string;
 	/** Called once fsync has succeeded, right before replacement begins. */
 	beforeReplace?(): void;
 }
 
 /**
- * Orchestrate download → fsync → replace → verify with a strict ordering
+ * Orchestrate download → integrity verification → fsync → replace → version/smoke verification.
  * contract: the downloaded temp binary MUST be flushed to stable storage
  * before it is published (renamed into place) or exec'd for verification.
  *
@@ -618,11 +857,13 @@ export async function runBinaryUpdateFlow(
 	expectedVersion: string,
 	flow: BinaryUpdateFlow,
 ): Promise<InstalledVersionVerification> {
-	const tempPath = `${targetPath}.new`;
+	const transactionId = flow.transactionId ?? `${process.pid}.${randomUUID()}`;
+	const tempPath = `${targetPath}.new.${transactionId}`;
 	const backupPath = `${targetPath}.bak`;
 
 	await flow.download(url, tempPath);
 	try {
+		await flow.verifyIntegrity(tempPath);
 		await flow.fsync(tempPath);
 	} catch (err) {
 		if (flow.removeTemp) await flow.removeTemp(tempPath);
@@ -647,14 +888,17 @@ async function updateViaBinaryAt(targetPath: string, expectedVersion: string): P
 	const url = buildReleaseBinaryUrl(expectedVersion);
 	console.log(chalk.dim(`Downloading ${binaryName}…`));
 
-	const verification = await runBinaryUpdateFlow(targetPath, url, expectedVersion, {
-		download: (downloadUrl, tempPath) => downloadBinaryTo(downloadUrl, tempPath, binaryName),
-		fsync: fsyncFile,
-		replace: replaceBinaryForUpdate,
-		verifyInstalledVersion: verifyInstalledRuntime,
-		removeTemp: unlinkIfExists,
-		beforeReplace: () => console.log(chalk.dim("Installing update...")),
-	});
+	const verification = await withBinaryUpdateLock(targetPath, () =>
+		runBinaryUpdateFlow(targetPath, url, expectedVersion, {
+			download: (downloadUrl, tempPath) => downloadBinaryTo(downloadUrl, tempPath, binaryName),
+			verifyIntegrity: tempPath => verifyReleaseBinaryIntegrity(tempPath, expectedVersion, binaryName),
+			fsync: fsyncFile,
+			replace: replaceBinaryForUpdate,
+			verifyInstalledVersion: verifyInstalledRuntime,
+			removeTemp: unlinkIfExists,
+			beforeReplace: () => console.log(chalk.dim("Installing update...")),
+		}),
+	);
 
 	printVerifiedVersion(expectedVersion);
 	if (verification.cleanupWarning) console.warn(chalk.yellow(verification.cleanupWarning));

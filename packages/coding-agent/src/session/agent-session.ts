@@ -545,6 +545,8 @@ export interface AgentSessionConfig {
 	/** Rebuild the SSH tool from current capability discovery results. */
 	reloadSshTool?: () => Promise<AgentTool | null>;
 	requestedToolNames?: ReadonlySet<string>;
+	/** True only when the caller explicitly selected no tools. */
+	explicitlyDisabledTools?: boolean;
 	/** Optional per-session allowlist for tools exposed through search_tool_bm25. */
 	discoverableToolAllowedNames?: readonly string[];
 	/** Optional accessor for live MCP server instructions, injected as untrusted user-role request data. */
@@ -1748,6 +1750,7 @@ export class AgentSession {
 	// Handoff state
 	#handoffAbortController: AbortController | undefined = undefined;
 	#skipPostTurnMaintenanceAssistantTimestamp: number | undefined = undefined;
+	#suppressNextPostTurnMaintenanceAfterAutoHandoff = false;
 
 	// Retry state
 	#retryAbortController: AbortController | undefined = undefined;
@@ -1759,6 +1762,7 @@ export class AgentSession {
 	#overflowMaintenanceAttempts = 0;
 	#defaultFallbackExhaustedLastTurn = false;
 	#fallbackInvocationId = 0;
+	#fallbackSuppressedSelectors = new Set<string>();
 	// Todo completion reminder state
 	#todoReminderCount = 0;
 	#todoWriteFailureCount = 0;
@@ -1853,6 +1857,7 @@ export class AgentSession {
 	#getMcpServerInstructions: (() => Map<string, string> | undefined) | undefined;
 	#reloadSshTool: (() => Promise<AgentTool | null>) | undefined;
 	#requestedToolNames: ReadonlySet<string> | undefined;
+	#explicitlyDisabledTools: boolean;
 	#baseSystemPrompt: string[];
 	#initialWorkspaceTree: WorkspaceTree | undefined;
 	/** Throttle cache for the per-turn volatile workspace-tree scan (see #buildVolatileProjectContextMessage). */
@@ -2043,6 +2048,12 @@ export class AgentSession {
 		});
 	}
 
+	#sessionTransitionAdmissionBusyError(): AgentBusyError {
+		return Object.assign(new AgentBusyError("Cannot start a turn while a session transition is in progress."), {
+			code: "busy",
+		});
+	}
+
 	/**
 	 * Reject a turn start while a handoff transition owns the session. Handoff never
 	 * routes its own generation/injection through these turn-start chokepoints, and
@@ -2068,6 +2079,7 @@ export class AgentSession {
 	 * orchestrator does not hold it), so there is no self-deadlock.
 	 */
 	#sessionTransitionKind: string | undefined;
+	#sessionTurnAdmissionFenced = false;
 
 	#beginSessionTransition(kind: string): void {
 		if (this.#sessionTransitionKind !== undefined) {
@@ -2108,6 +2120,7 @@ export class AgentSession {
 				code: "busy",
 			});
 		}
+		if (this.#sessionTurnAdmissionFenced) throw this.#sessionTransitionAdmissionBusyError();
 
 		const entry: SessionAdmissionEntry = {
 			kind,
@@ -2135,6 +2148,13 @@ export class AgentSession {
 			throw Object.assign(new AgentBusyError("Cannot start a turn while a handoff is in progress."), {
 				code: "busy",
 			});
+		}
+		if (this.#sessionTurnAdmissionFenced) {
+			entry.released = true;
+			entry.settled.resolve();
+			if (this.#activeSessionAdmission === entry) this.#activeSessionAdmission = undefined;
+			this.#activateNextSessionAdmission();
+			throw this.#sessionTransitionAdmissionBusyError();
 		}
 
 		const release = () => {
@@ -2372,6 +2392,7 @@ export class AgentSession {
 		this.#toolRegistry = config.toolRegistry ?? new Map();
 		this.#workflowGateToolSession = config.workflowGateToolSession;
 		this.#requestedToolNames = config.requestedToolNames;
+		this.#explicitlyDisabledTools = config.explicitlyDisabledTools === true;
 		this.#transformContext = config.transformContext ?? (messages => messages);
 		this.#onPayload = config.onPayload;
 		this.rawSseDebugBuffer = config.rawSseDebugBuffer ?? new RawSseDebugBuffer();
@@ -3779,8 +3800,9 @@ export class AgentSession {
 					this.#resolveTtsrResume();
 				}
 				this.#queueDeferredTtsrInjectionIfNeeded(assistantMsg);
-				if (this.#handoffAbortController) {
+				if (this.#handoffAbortController || this.#suppressNextPostTurnMaintenanceAfterAutoHandoff) {
 					this.#skipPostTurnMaintenanceAssistantTimestamp = assistantMsg.timestamp;
+					this.#suppressNextPostTurnMaintenanceAfterAutoHandoff = false;
 				}
 				if (
 					assistantMsg.stopReason !== "error" &&
@@ -5872,6 +5894,7 @@ export class AgentSession {
 	}
 
 	async activateDiscoveredTools(toolNames: string[]): Promise<string[]> {
+		if (this.#explicitlyDisabledTools) return [];
 		const previousSelectedMCPToolNames = this.getSelectedMCPToolNames();
 		const previousSelectedDiscoveredBuiltinToolNames = this.#getSelectedDiscoveredBuiltinToolNames();
 		const nextActiveToolNames = this.getActiveToolNames();
@@ -6099,7 +6122,9 @@ export class AgentSession {
 			nextSelectedDiscoveredBuiltinToolNames?: string[];
 		},
 	): Promise<void> {
-		toolNames = [...new Set([...toolNames.map(name => name.toLowerCase()), ...this.#mandatoryMCPToolNames])];
+		toolNames = this.#explicitlyDisabledTools
+			? []
+			: [...new Set([...toolNames.map(name => name.toLowerCase()), ...this.#mandatoryMCPToolNames])];
 		const previousSelectedMCPToolNames = options?.previousSelectedMCPToolNames ?? this.getSelectedMCPToolNames();
 		const previousSelectedDiscoveredBuiltinToolNames =
 			options?.previousSelectedDiscoveredBuiltinToolNames ?? this.#getSelectedDiscoveredBuiltinToolNames();
@@ -6209,6 +6234,11 @@ export class AgentSession {
 		await this.#applyActiveToolsByName(nextActive);
 	}
 
+	/** Whether the caller explicitly selected no tools for this session. */
+	hasExplicitlyDisabledTools(): boolean {
+		return this.#explicitlyDisabledTools;
+	}
+
 	/**
 	 * Set active tools by name.
 	 * Only tools in the registry can be enabled. Unknown tool names are ignored.
@@ -6220,6 +6250,11 @@ export class AgentSession {
 	}
 
 	async #restoreMCPSelectionsForSessionContext(sessionContext: SessionContext): Promise<void> {
+		if (this.#explicitlyDisabledTools) {
+			this.#selectedDiscoveredToolNames.clear();
+			await this.#applyActiveToolsByName([], { persistMCPSelection: false });
+			return;
+		}
 		if (!this.#mcpDiscoveryEnabled && this.#resolveEffectiveDiscoveryMode() !== "all") {
 			await this.#attachAskToolIfWorkflowActive();
 			return;
@@ -7073,6 +7108,7 @@ export class AgentSession {
 			this.#toolRegistry.set(askTool.name, askTool);
 		}
 
+		if (this.#explicitlyDisabledTools) return;
 		try {
 			if ((this.#workflowGateEmitter?.listPendingGates?.().length ?? 0) > 0) {
 				this.#attachAskTool();
@@ -7118,6 +7154,7 @@ export class AgentSession {
 	}
 
 	#attachAskTool(): void {
+		if (this.#explicitlyDisabledTools) return;
 		const askTool = this.#toolRegistry.get("ask");
 		if (!askTool || this.getActiveToolNames().includes(askTool.name)) return;
 		this.#setGuardedAgentTools([...this.agent.state.tools, askTool]);
@@ -7200,6 +7237,7 @@ export class AgentSession {
 	}
 
 	async #activatePendingSkcGoalModeRequest(): Promise<boolean> {
+		if (this.#explicitlyDisabledTools) return false;
 		if (!this.settings.get("goal.enabled")) return false;
 		const pendingGoal = await consumePendingGoalModeRequest(
 			this.sessionManager.getCwd(),
@@ -7212,9 +7250,10 @@ export class AgentSession {
 		}
 
 		const previousTools = this.getActiveToolNames();
-		const goalTools = [...new Set([...previousTools, "goal"])];
 		await this.#goalRuntime.createGoal({ objective: pendingGoal.objective, provenance: pendingGoal.provenance });
-		await this.setActiveToolsByName(goalTools);
+		if (!this.#explicitlyDisabledTools) {
+			await this.setActiveToolsByName([...new Set([...previousTools, "goal"])]);
+		}
 		if (this.isStreaming) {
 			await this.sendGoalModeContext({ deliverAs: "steer" });
 		}
@@ -9472,7 +9511,6 @@ export class AgentSession {
 					persistMCPSelection: false,
 					nextSelectedDiscoveredBuiltinToolNames: [],
 				});
-			} else {
 			}
 		}
 		this.#todoReminderCount = 0;
@@ -10066,7 +10104,13 @@ export class AgentSession {
 			});
 			if (!resolved.model) continue;
 
-			if (roleModels.some(candidate => modelsAreEqual(candidate.model, resolved.model))) continue;
+			if (
+				roleModels.some(
+					candidate =>
+						modelsAreEqual(candidate.model, resolved.model) && candidate.thinkingLevel === resolved.thinkingLevel,
+				)
+			)
+				continue;
 			roleModels.push({
 				role,
 				model: resolved.model,
@@ -11626,6 +11670,11 @@ export class AgentSession {
 		this.#resourceSampler = sampler;
 	}
 
+	/** Test seam: drive the pre-prompt emergency/threshold check directly. */
+	runPrePromptContextCheckForTests(pendingMessages: readonly AgentMessage[] = []): Promise<void> {
+		return this.#checkEstimatedContextBeforePrompt(pendingMessages);
+	}
+
 	setRetainedMemorySampler(sampler: (() => RetainedMemorySample) | undefined): void {
 		this.#retainedMemorySampler = sampler;
 	}
@@ -11659,26 +11708,31 @@ export class AgentSession {
 			materializedResidentBytes: this.#streamingEditFileCache.totalBytes,
 			tuiChatChildren: retainedMemory.tuiChatChildren ?? 0,
 			tuiCachedRenderBytes: retainedMemory.tuiCachedRenderBytes ?? 0,
+			transcriptFileBytes: this.sessionManager.getTranscriptFileBytes(),
 		};
 	}
 
 	async #checkEstimatedContextBeforePromptOnce(pendingMessages: readonly AgentMessage[]): Promise<void> {
 		const model = this.model;
 		if (!model) return;
-		const contextWindow = model.contextWindow ?? 0;
-		if (contextWindow <= 0) return;
 		// F6: non-disableable emergency floor — compact before OOM even when token-based
 		// compaction is disabled or its threshold is set too high (weak-hardware protection).
 		const emergencyReason = emergencyCompactionReason(this.#resourceSampler());
 		if (emergencyReason) {
 			logger.warn("Emergency compaction triggered (resource floor exceeded)", { reason: emergencyReason });
-			await this.#runAutoCompaction("overflow", false, false, {
+			const status = await this.#runAutoCompaction("overflow", false, false, {
 				continueAfterMaintenance: false,
 				deferHandoffMaintenance: false,
 				force: true,
 			});
+			if (emergencyReason === "transcriptFile" && status.kind === "skipped") {
+				logger.warn("Transcript emergency compaction was skipped; rewriting exact live entries");
+				await this.sessionManager.rewriteEntries();
+			}
 			return;
 		}
+		const contextWindow = model.contextWindow ?? 0;
+		if (contextWindow <= 0) return;
 		const compactionSettings = this.settings.getGroup("compaction");
 		if (!compactionSettings.enabled || compactionSettings.strategy === "off") return;
 
@@ -11712,6 +11766,7 @@ export class AgentSession {
 			await this.#runAutoCompaction("threshold", false, false, {
 				continueAfterMaintenance: false,
 				deferHandoffMaintenance: false,
+				suppressNextPostTurnMaintenanceAfterHandoff: true,
 			});
 		}
 	}
@@ -11803,6 +11858,7 @@ export class AgentSession {
 			return;
 		}
 
+		if (this.#explicitlyDisabledTools) return;
 		this.#attachAskTool();
 
 		const reminder = prompt.render(planModeToolDecisionReminderPrompt, {
@@ -12702,6 +12758,7 @@ export class AgentSession {
 			force?: boolean;
 			signal?: AbortSignal;
 			beforeTerminalOverflowNoop?: () => void;
+			suppressNextPostTurnMaintenanceAfterHandoff?: boolean;
 		},
 	): Promise<AutoCompactionTerminalStatus> {
 		const compactionSettings = this.settings.getGroup("compaction");
@@ -12783,6 +12840,9 @@ export class AgentSession {
 				if (autoCompactionSignal.aborted) return await emitAborted();
 
 				if (handoffResult) {
+					if (options?.suppressNextPostTurnMaintenanceAfterHandoff) {
+						this.#suppressNextPostTurnMaintenanceAfterAutoHandoff = true;
+					}
 					await this.#emitSessionEvent({
 						type: "auto_compaction_end",
 						action,
@@ -13502,12 +13562,15 @@ export class AgentSession {
 			if (controller.chain.entries.length > 1) await this.#advanceDefaultFallback(controller, "new_turn", 0);
 			return;
 		}
+		const primarySelector = controller.chain.entries[0];
 		if (
 			this.settings.get("retry.fallbackRevertPolicy") === "cooldown-expiry" &&
-			controller.activeIndex > 0
-			// TODO(upstream-v0.11): ModelRegistry.getSelectorSuppressionStatus was removed;
-			// rewire the cooldown-expiry revert policy to the new suppression API when available.
+			controller.activeIndex > 0 &&
+			primarySelector &&
+			this.#fallbackSuppressedSelectors.has(primarySelector) &&
+			!this.#modelRegistry.isSelectorSuppressed(primarySelector)
 		) {
+			this.#fallbackSuppressedSelectors.delete(primarySelector);
 			controller.resetForNewTurn();
 		}
 	}
@@ -13560,7 +13623,9 @@ export class AgentSession {
 		const existing = this.#defaultFallbackController;
 		if (
 			existing &&
-			(existing.chain.origin === "runtime" || existing.chain.entries.join("\u0000") === chain.entries.join("\u0000"))
+			(existing.chain.origin === "runtime" ||
+				(existing.activeIndex > 0 && existing.chain.entries.length > 1) ||
+				existing.chain.entries.join("\u0000") === chain.entries.join("\u0000"))
 		) {
 			return existing;
 		}
@@ -13846,6 +13911,7 @@ export class AgentSession {
 
 		if (managedFallback && trigger.class === "rate_limit" && trigger.retryAfterMs !== undefined && failedSelector) {
 			this.#modelRegistry.suppressSelector(failedSelector, Date.now() + trigger.retryAfterMs);
+			this.#fallbackSuppressedSelectors.add(failedSelector);
 		}
 
 		const retry = async (ownership?: ManagedAttemptContinuationOwnership): Promise<void> => {
@@ -15074,14 +15140,22 @@ export class AgentSession {
 	 * Switch to a different session file.
 	 * Aborts current operation, loads messages, restores model/thinking.
 	 * Listeners are preserved and will continue receiving events.
+	 * `requireIdle` rejects an active turn and fences new admissions for the transition.
 	 * @returns true if switch completed, false if cancelled by hook
 	 */
 	async switchSession(
 		sessionPath: string,
-		options?: { transition?: SessionSwitchEvent["transition"] },
+		options?: { transition?: SessionSwitchEvent["transition"]; requireIdle?: boolean },
 	): Promise<boolean> {
 		this.#beginSessionTransition("switch-session");
 		try {
+			if (options?.requireIdle) {
+				this.#sessionTurnAdmissionFenced = true;
+				if (this.isStreaming || this.#activeSessionAdmission !== undefined)
+					throw Object.assign(new AgentBusyError("Cannot switch sessions while a response or turn is active."), {
+						code: "busy",
+					});
+			}
 			const previousSessionFile = this.sessionManager.getSessionFile();
 			const switchingToDifferentSession = previousSessionFile
 				? path.resolve(previousSessionFile) !== path.resolve(sessionPath)
@@ -15307,6 +15381,7 @@ export class AgentSession {
 				throw error;
 			}
 		} finally {
+			this.#sessionTurnAdmissionFenced = false;
 			this.#endSessionTransition();
 		}
 	}

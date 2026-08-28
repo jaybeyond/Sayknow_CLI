@@ -29,6 +29,7 @@ interface AppKeybindings {
 	"app.model.select": true;
 	"app.model.selectTemporary": true;
 	"app.tools.expand": true;
+	"app.todo.toggle": true;
 	"app.tool.backgroundFold": true;
 	"app.editor.external": true;
 	"app.message.followUp": true;
@@ -37,6 +38,7 @@ interface AppKeybindings {
 	"app.clipboard.pasteImage": true;
 	"app.clipboard.copyLine": true;
 	"app.clipboard.copyPrompt": true;
+	"app.oauth.copyUrl": true;
 	"app.session.new": true;
 	"app.session.tree": true;
 	"app.session.fork": true;
@@ -131,6 +133,10 @@ export const KEYBINDINGS = {
 		defaultKeys: "ctrl+o",
 		description: "Expand tools",
 	},
+	"app.todo.toggle": {
+		defaultKeys: "alt+shift+t",
+		description: "Toggle todo list expansion",
+	},
 	"app.tool.backgroundFold": {
 		defaultKeys: "ctrl+b",
 		description: "Fold/background supported foreground tool",
@@ -162,6 +168,10 @@ export const KEYBINDINGS = {
 	"app.clipboard.copyPrompt": {
 		defaultKeys: "alt+shift+c",
 		description: "Copy prompt",
+	},
+	"app.oauth.copyUrl": {
+		defaultKeys: "alt+shift+u",
+		description: "Copy OAuth authorization URL",
 	},
 	"app.session.new": {
 		defaultKeys: "ctrl+n",

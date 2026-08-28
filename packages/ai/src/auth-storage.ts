@@ -37,6 +37,12 @@ import { loginDeepSeek } from "./utils/oauth/deepseek";
 import { loginOpenAICodexDevice } from "./utils/oauth/openai-codex";
 import type { OAuthController, OAuthCredentials, OAuthProvider, OAuthProviderId } from "./utils/oauth/types";
 
+const DEPRECATED_SGLANG_NO_AUTH_TOKEN = "sglang-local";
+
+function isDeprecatedSglangNoAuthToken(provider: string, apiKey: string | undefined): boolean {
+	return provider === "sglang" && apiKey === DEPRECATED_SGLANG_NO_AUTH_TOKEN;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Credential Types
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1351,6 +1357,11 @@ export class AuthStorage {
 			.filter(
 				(entry): entry is { credential: Extract<AuthCredential, { type: T }>; index: number } =>
 					entry.credential.type === type,
+			)
+			.filter(
+				entry =>
+					type !== "api_key" ||
+					!isDeprecatedSglangNoAuthToken(provider, (entry.credential as ApiKeyCredential).key),
 			);
 
 		if (credentials.length === 0) return undefined;
@@ -1947,6 +1958,12 @@ export class AuthStorage {
 			case "vllm": {
 				const { loginVllm } = await import("./utils/oauth/vllm");
 				const apiKey = await loginVllm(ctrl);
+				await saveApiKeyCredential(apiKey);
+				return;
+			}
+			case "sglang": {
+				const { loginSglang } = await import("./utils/oauth/sglang");
+				const apiKey = await loginSglang(ctrl);
 				await saveApiKeyCredential(apiKey);
 				return;
 			}
@@ -3434,7 +3451,8 @@ export class AuthStorage {
 
 		const apiKeySelection = this.#selectCredentialByType(provider, "api_key");
 		if (apiKeySelection) {
-			return this.#configValueResolver(apiKeySelection.credential.key);
+			const apiKey = await this.#configValueResolver(apiKeySelection.credential.key);
+			if (!isDeprecatedSglangNoAuthToken(provider, apiKey)) return apiKey;
 		}
 
 		// Return current OAuth access token only if it is not already expired.
@@ -3487,16 +3505,24 @@ export class AuthStorage {
 			return configKey;
 		}
 
+		let skippedDeprecatedNoAuthToken = false;
 		if (selectedCredential?.credential.type === "api_key") {
-			this.#recordSessionCredential(provider, sessionId, "api_key", selectedCredential.index);
-			return this.#configValueResolver(selectedCredential.credential.key);
+			const apiKey = await this.#configValueResolver(selectedCredential.credential.key);
+			if (!isDeprecatedSglangNoAuthToken(provider, apiKey)) {
+				this.#recordSessionCredential(provider, sessionId, "api_key", selectedCredential.index);
+				return apiKey;
+			}
+			skippedDeprecatedNoAuthToken = true;
 		}
 
-		if (!selectedCredential) {
+		if (!selectedCredential || skippedDeprecatedNoAuthToken) {
 			const apiKeySelection = this.#selectCredentialByType(provider, "api_key", sessionId);
 			if (apiKeySelection) {
-				this.#recordSessionCredential(provider, sessionId, "api_key", apiKeySelection.index);
-				return this.#configValueResolver(apiKeySelection.credential.key);
+				const apiKey = await this.#configValueResolver(apiKeySelection.credential.key);
+				if (!isDeprecatedSglangNoAuthToken(provider, apiKey)) {
+					this.#recordSessionCredential(provider, sessionId, "api_key", apiKeySelection.index);
+					return apiKey;
+				}
 			}
 		}
 

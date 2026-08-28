@@ -28,8 +28,12 @@ describe("managed session directory SDK", () => {
 		temporaryDirectories.push(agentDir, cwd);
 
 		const resolved = await resolveManagedSessionScope({ cwd, agentDir });
+		const canonicalAgentDir = await fs.realpath(agentDir);
 
-		expect(resolved).toMatchObject({ kind: "resolved", scope: { sessionsRoot: getSessionsDir(agentDir) } });
+		expect(resolved).toMatchObject({
+			kind: "resolved",
+			scope: { sessionsRoot: getSessionsDir(canonicalAgentDir) },
+		});
 	});
 
 	it.skipIf(process.platform !== "linux")(
@@ -92,7 +96,7 @@ describe("managed session directory SDK", () => {
 	});
 	it("pins the v2 digest wire format", () => {
 		expect(computeManagedScopeDigest("posix", "/workspace/a-b/c")).toBe(
-			"ckdstvtkkadas65jsj3gvlcstjat5o5yuwifaq2p3qrc5lmran5q",
+			"r4l3xval4ms4odgp6hmwhn3kwswgbyi63ljrts2izpbn4eoykxaa",
 		);
 	});
 	it("uses distinct fixed-width v2 components for legacy collision vectors", async () => {

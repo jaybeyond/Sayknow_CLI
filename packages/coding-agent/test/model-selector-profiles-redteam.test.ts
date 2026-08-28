@@ -53,6 +53,8 @@ function createRegistry(options: { profiles?: ModelProfileDefinition[]; missingC
 		getModelProfiles: () => new Map(profiles),
 		getModelProfile: (name: string) => profiles.get(name),
 		getAvailableModelProfileNames: () => [...profiles.keys()],
+		getCanonicalVariants: () => [],
+		getCanonicalId: () => undefined,
 		getApiKeyForProvider: async () => (options.missingCredentials ? undefined : "key"),
 		getApiKey: async () => "key",
 	};
@@ -107,11 +109,33 @@ function createControllerContext(options: { missingCredentials?: boolean } = {})
 		scopedModels: [],
 		modelRegistry: createRegistry(options),
 		setModelTemporaryCalls: [] as Array<{ model: Model; thinkingLevel?: ThinkingLevel }>,
+		activeModelProfile: undefined as string | undefined,
+		configuredModelChains: new Map<string, readonly string[]>(),
+		sessionDefaultModelSelector: "provider-a/alternate",
 		async setModelTemporary(next: Model, thinkingLevel?: ThinkingLevel) {
 			this.setModelTemporaryCalls.push({ model: next, thinkingLevel });
 			this.model = next;
 			this.thinkingLevel = thinkingLevel;
 		},
+		setActiveModelProfile(profileName: string | undefined) {
+			this.activeModelProfile = profileName;
+		},
+		getActiveModelProfile() {
+			return this.activeModelProfile;
+		},
+		getConfiguredModelChain(role: string) {
+			return this.configuredModelChains.get(role);
+		},
+		setConfiguredModelChain(role: string, entries: readonly string[]) {
+			this.configuredModelChains.set(role, [...entries]);
+		},
+		getSessionDefaultModelSelector() {
+			return this.sessionDefaultModelSelector;
+		},
+		recordResumeDefaultModel(selector: string) {
+			this.sessionDefaultModelSelector = selector;
+		},
+		seedDefaultFallbackResolution: vi.fn(),
 	};
 	const ctx = {
 		ui: { setFocus: vi.fn(), requestRender: vi.fn() },
@@ -205,6 +229,7 @@ describe("model selector profile red-team", () => {
 
 		expect(sessionOnly.setCalls).not.toContainEqual({ path: "modelProfile.default", value: "profile-a" });
 		expect(sessionOnly.settings.get("modelProfile.default")).toBe("old-profile");
+		expect(sessionOnly.session.activeModelProfile).toBe("profile-a");
 		expect(sessionOnly.ctx.showStatus).toHaveBeenCalledWith("Model profile: profile-a");
 
 		const persistent = createControllerContext();
@@ -212,6 +237,7 @@ describe("model selector profile red-team", () => {
 
 		expect(persistent.setCalls).toContainEqual({ path: "modelProfile.default", value: "profile-a" });
 		expect(persistent.flush).toHaveBeenCalledTimes(1);
+		expect(persistent.session.activeModelProfile).toBe("profile-a");
 		expect(persistent.ctx.showStatus).toHaveBeenCalledWith("Default model profile: profile-a");
 	});
 

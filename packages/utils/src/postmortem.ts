@@ -335,12 +335,25 @@ async function exitQuietlyForAttributableStdoutEpipe(reason: Reason): Promise<vo
 	if (process.exitCode === BROKEN_PIPE_EXIT_CODE) process.exit(BROKEN_PIPE_EXIT_CODE);
 }
 
+/**
+ * A benign shutdown write error means the sink is already dying, so routing a
+ * diagnostic through the logger can hit that same sink and raise the next
+ * identical fatal. Latching the note to one attempt per process bounds that:
+ * without it, a stdout EPIPE during cleanup drives an unbounded
+ * fatal -> log -> fatal loop that pins a core and grows the heap without limit
+ * instead of letting the process exit.
+ */
+let benignShutdownIoErrorNoted = false;
+
 async function handleFatalError(label: string, reason: unknown, cleanupReason: Reason): Promise<void> {
 	if (cleanupStage !== "idle" && isBenignIoWriteError(reason)) {
-		logger.debug("Ignoring benign terminal I/O write error during shutdown", {
-			code: (reason as { code?: unknown }).code,
-			syscall: (reason as { syscall?: unknown }).syscall,
-		});
+		if (!benignShutdownIoErrorNoted) {
+			benignShutdownIoErrorNoted = true;
+			logger.debug("Ignoring benign terminal I/O write error during shutdown", {
+				code: (reason as { code?: unknown }).code,
+				syscall: (reason as { syscall?: unknown }).syscall,
+			});
+		}
 		return;
 	}
 	if (stdoutEpipeClassifier.isAttributableProcessStdoutEpipe(reason)) {

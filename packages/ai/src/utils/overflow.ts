@@ -127,8 +127,12 @@ const EMPTY_RESPONSE_USAGE_THRESHOLD = 5;
  * misleading error text.
  */
 const OVERFLOW_PROVIDER_CODES = new Set(["context_length_exceeded", "request_too_large"]);
+/**
+ * Codes that name a specific non-overflow *cause*. These are authoritative and
+ * can never be upgraded by error prose. Generic HTTP envelope types belong in
+ * {@link GENERIC_ENVELOPE_PROVIDER_CODES} instead.
+ */
 const NON_OVERFLOW_PROVIDER_CODES = new Set([
-	"invalid_request_error",
 	"authentication_error",
 	"invalid_api_key",
 	"invalid_token",
@@ -145,6 +149,7 @@ const NON_OVERFLOW_PROVIDER_CODES = new Set([
 	"rate_limit_error",
 	"rate_limit_exceeded",
 	"too_many_requests",
+	"empty_response",
 ]);
 
 function transportCodes(transportFailure: TransportFailureFacts | undefined): string[] {
@@ -155,6 +160,53 @@ function transportCodes(transportFailure: TransportFailureFacts | undefined): st
 
 function hasTypedNonOverflowCode(transportFailure: TransportFailureFacts | undefined): boolean {
 	return transportCodes(transportFailure).some(code => NON_OVERFLOW_PROVIDER_CODES.has(code));
+}
+
+/**
+ * Generic envelope codes that name the HTTP error *category*, not its cause.
+ *
+ * Anthropic reports context overflow through this envelope:
+ *
+ *   {"type":"error","error":{"type":"invalid_request_error",
+ *    "message":"prompt is too long: 1158066 tokens > 1000000 maximum"}}
+ *
+ * Treating the envelope as an authoritative non-overflow cause vetoed the
+ * overflow classification, so auto-compaction never ran and the session died on
+ * the very overflow it was supposed to absorb.
+ *
+ * Unlike {@link NON_OVERFLOW_PROVIDER_CODES} (auth, quota, rate limit), this
+ * envelope names no cause, so it must not veto an overflow the provider stated
+ * quantitatively. It still vetoes free-form prose: only the self-verifying
+ * measured form below can override it.
+ */
+const GENERIC_ENVELOPE_PROVIDER_CODES = new Set(["invalid_request_error"]);
+
+/**
+ * Anthropic's measured overflow report: `<used> tokens > <limit> maximum`.
+ *
+ * Deliberately far narrower than {@link OVERFLOW_PATTERNS}. Those patterns
+ * include loose prose (`too many tokens`, `token limit exceeded`) that a tool
+ * result or a model-authored string can trivially contain, so they must never
+ * be able to flip a typed transport classification. This form carries its own
+ * arithmetic proof and is verified below, so injected text cannot satisfy it
+ * without also asserting a real overage.
+ */
+const ANTHROPIC_MEASURED_OVERFLOW_PATTERN = /prompt is too long:\s*(\d+)\s*tokens?\s*>\s*(\d+)\s*maximum/i;
+
+/**
+ * True only for a provider-measured overflow that verifies against itself:
+ * the reported usage must actually exceed the reported maximum.
+ */
+function hasSelfVerifyingOverflowMeasurement(message: AssistantMessage): boolean {
+	if (message.stopReason !== "error") return false;
+	const errorMessage = message.errorMessage;
+	if (!errorMessage) return false;
+	const match = ANTHROPIC_MEASURED_OVERFLOW_PATTERN.exec(errorMessage);
+	if (!match) return false;
+	const used = Number(match[1]);
+	const maximum = Number(match[2]);
+	if (!Number.isFinite(used) || !Number.isFinite(maximum) || maximum <= 0) return false;
+	return used > maximum;
 }
 
 function isTypedNoBodyOverflow(
@@ -173,7 +225,18 @@ export function classifyContextOverflow(
 	if (transportFailure?.status === 429) return false;
 	const typedCodes = transportCodes(transportFailure);
 	if (typedCodes.some(code => OVERFLOW_PROVIDER_CODES.has(code))) return true;
+	// A specific non-overflow cause (auth, quota, rate limit) is authoritative
+	// and can never be upgraded by error prose.
 	if (hasTypedNonOverflowCode(transportFailure)) return false;
+	// A generic envelope (`invalid_request_error`) names no cause. It still
+	// vetoes free-form overflow prose, but must not veto a provider-measured,
+	// self-verifying overflow report — that is how Anthropic reports overflow.
+	if (
+		typedCodes.some(code => GENERIC_ENVELOPE_PROVIDER_CODES.has(code)) &&
+		!hasSelfVerifyingOverflowMeasurement(message)
+	) {
+		return false;
+	}
 	if (isTypedNoBodyOverflow(message, transportFailure)) return true;
 
 	const errorMessage = message.errorMessage;

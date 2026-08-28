@@ -21,7 +21,7 @@ import {
 	zodToWireSchema,
 } from "@sayknow-cli/ai";
 import { isInvalidPromptError, neutralizeReservedControlTokens } from "@sayknow-cli/ai/utils";
-import { sanitizeText } from "@sayknow-cli/utils";
+import { logger, sanitizeText } from "@sayknow-cli/utils";
 import {
 	createHarmonyAuditEvent,
 	detectHarmonyLeakInAssistantMessage,
@@ -113,6 +113,62 @@ const ABORTED: unique symbol = Symbol("agent-loop-aborted");
  * bounded too.
  */
 const MAX_CONSECUTIVE_MALFORMED_TURNS = 5;
+/**
+ * Validate provider-observed escaped arguments before permitting the only
+ * exception to the fail-closed tool boundary. The raw JSON must decode to the
+ * exact parsed arguments, every decoded non-ASCII scalar must be under a
+ * tool-declared display path, and the wire must not contain ASCII escapes.
+ */
+export function displaySafeEscapedArguments(
+	tool: AgentTool<TSchema> | undefined,
+	toolCall: Extract<AssistantMessage["content"][number], { type: "toolCall" }>,
+): boolean {
+	const fields = tool?.displaySafeEscapedArgFields;
+	const raw = toolCall.escapedNonAsciiArgumentsRaw;
+	if (!fields?.length || !raw) return false;
+
+	let decoded: unknown;
+	try {
+		decoded = JSON.parse(raw);
+	} catch {
+		return false;
+	}
+	if (JSON.stringify(decoded) !== JSON.stringify(toolCall.arguments)) return false;
+
+	const displayPaths = fields.map(field => field.split("."));
+	const path: string[] = [];
+	const isDisplayPath = () =>
+		displayPaths.some(
+			segments => segments.length === path.length && segments.every((segment, index) => path[index] === segment),
+		);
+	const walk = (value: unknown): boolean => {
+		if (typeof value === "string") {
+			return [...value].every(character => character.codePointAt(0)! < 0x80 || isDisplayPath());
+		}
+		if (Array.isArray(value)) return value.every(walk);
+		if (value && typeof value === "object") {
+			return Object.entries(value).every(([key, child]) => {
+				if (!/^[\x00-\x7f]*$/.test(key)) return false;
+				path.push(key);
+				const valid = walk(child);
+				path.pop();
+				return valid;
+			});
+		}
+		return true;
+	};
+	if (!walk(toolCall.arguments)) return false;
+
+	const escapes = [...raw.matchAll(/\\u([0-9a-fA-F]{4})/g)].map(match => Number.parseInt(match[1]!, 16));
+	return escapes.length > 0 && escapes.every(codeUnit => codeUnit >= 0x80);
+}
+
+function clearEscapedArgumentMetadata(
+	toolCall: Extract<AssistantMessage["content"][number], { type: "toolCall" }>,
+): void {
+	delete toolCall.escapedNonAsciiArguments;
+	delete toolCall.escapedNonAsciiArgumentsRaw;
+}
 function managedContextOverflow(message: AssistantMessage, config: AgentLoopConfig): boolean {
 	const transportFailure = managedTransportFailure(message);
 	// Managed empty-stop responses may be repaired by the managed shell below; only
@@ -1541,6 +1597,7 @@ async function runLoopBody(
 				type ToolCallContent = Extract<AssistantMessage["content"][number], { type: "toolCall" }>;
 				const toolCalls = message.content.filter((c): c is ToolCallContent => c.type === "toolCall");
 				const toolResults: ToolResultMessage[] = [];
+				for (const toolCall of toolCalls) clearEscapedArgumentMetadata(toolCall);
 				for (const toolCall of toolCalls) {
 					const result = createAbortedToolResult(toolCall, stream, message.stopReason, message.errorMessage);
 					currentContext.messages.push(result);
@@ -1571,6 +1628,7 @@ async function runLoopBody(
 			let repeatedMalformedToolCall = false;
 			if (hasMoreToolCalls) {
 				if (wasRecoveryAttempt) {
+					for (const toolCall of toolCalls) clearEscapedArgumentMetadata(toolCall);
 					for (const toolCall of toolCalls) {
 						const result = createAbortedToolResult(
 							toolCall,
@@ -2195,6 +2253,19 @@ async function executeToolCalls(
 
 		await runInActiveSpan(toolSpan, async () => {
 			try {
+				if (toolCall.escapedNonAsciiArguments) {
+					const displaySafe = displaySafeEscapedArguments(tool, toolCall);
+					clearEscapedArgumentMetadata(toolCall);
+					if (!displaySafe) {
+						record.argumentValidationFailed = true;
+						throw new Error(
+							"Tool call arguments contained unverified \\uXXXX-escaped non-ASCII text and were rejected.",
+						);
+					}
+					logger.warn("agent: executing a tool-call whose display-safe arguments were \\uXXXX-escaped", {
+						mode: config.fallbackManaged ? "managed" : "in_loop",
+					});
+				}
 				if (toolCall.incompleteArguments) {
 					record.argumentValidationFailed = true;
 					// The provider flagged this call's argument JSON as truncated

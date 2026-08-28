@@ -14,6 +14,18 @@ REPO="jaybeyond/Sayknow_CLI"
 PACKAGE="@sayknow-cli/coding-agent"
 INSTALL_DIR="${SKC_INSTALL_DIR:-$HOME/.local/bin}"
 MIN_BUN_VERSION="1.3.14"
+BINARY_SHA256_ASSET="sayknow-release-binaries.sha256"
+LOCK_DIR=""
+LOCK_OWNED=""
+DOWNLOAD_TMP=""
+INTEGRITY_TMP=""
+
+cleanup_install() {
+    [ -z "$DOWNLOAD_TMP" ] || rm -f "$DOWNLOAD_TMP"
+    [ -z "$INTEGRITY_TMP" ] || rm -f "$INTEGRITY_TMP"
+    [ -z "$LOCK_OWNED" ] || rmdir "$LOCK_DIR" 2>/dev/null || true
+}
+trap cleanup_install EXIT HUP INT TERM
 
 # Parse arguments
 MODE=""
@@ -183,6 +195,72 @@ install_via_bun() {
     echo "Run 'skc' to get started!"
 }
 
+file_sha256() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$1" | awk '{print $1}'
+    else
+        echo "No SHA-256 tool found (need sha256sum or shasum)" >&2
+        return 1
+    fi
+}
+
+fetch_integrity_asset() {
+    url="$1"
+    out="$2"
+    curl -sSL --retry 2 --retry-delay 1 -A "skc-install" -o "$out" -w "%{http_code}" "$url"
+}
+
+verify_binary_checksum() {
+    asset_name="$1"
+    downloaded="$2"
+    sums_url="https://github.com/${REPO}/releases/download/${LATEST}/${BINARY_SHA256_ASSET}"
+    INTEGRITY_TMP=$(mktemp "${INSTALL_DIR}/.skc.integrity.XXXXXX")
+
+    if ! http_code=$(fetch_integrity_asset "$sums_url" "$INTEGRITY_TMP"); then
+        echo "Failed to fetch integrity asset $sums_url. Existing install was not changed." >&2
+        exit 1
+    fi
+    if [ "$http_code" != "200" ]; then
+        if [ "$http_code" = "404" ]; then
+            echo "Release ${LATEST} has no Sayknow binary integrity manifest. Existing install was not changed." >&2
+        else
+            echo "Integrity asset returned HTTP ${http_code}. Existing install was not changed." >&2
+        fi
+        exit 1
+    fi
+    expected_lines=$(awk -v name="$asset_name" '$2 == name || $2 == "*" name { print tolower($1) }' "$INTEGRITY_TMP")
+    expected_count=$(printf '%s\n' "$expected_lines" | awk 'NF { count++ } END { print count + 0 }')
+    if [ "$expected_count" -ne 1 ]; then
+        echo "Integrity manifest did not list exactly one SHA-256 for ${asset_name}. Existing install was not changed." >&2
+        exit 1
+    fi
+    expected="$expected_lines"
+
+    if ! printf '%s\n' "$expected" | grep -Eq '^[0-9a-f]{64}$'; then
+        echo "Integrity manifest did not list one valid SHA-256 for ${asset_name}. Existing install was not changed." >&2
+        exit 1
+    fi
+    actual=$(file_sha256 "$downloaded")
+    if [ "$actual" != "$expected" ]; then
+        echo "SHA-256 mismatch for ${asset_name}. Existing install was not changed." >&2
+        exit 1
+    fi
+    echo "Verified SHA-256 for ${asset_name}"
+    rm -f "$INTEGRITY_TMP"
+    INTEGRITY_TMP=""
+}
+
+acquire_install_lock() {
+    LOCK_DIR="${INSTALL_DIR}/.skc-install.lock"
+    if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+        echo "Another SKC installer is already running in ${INSTALL_DIR} (lock: ${LOCK_DIR})." >&2
+        exit 1
+    fi
+    LOCK_OWNED="1"
+}
+
 # Install binary from GitHub releases
 install_binary() {
     # Detect platform
@@ -202,33 +280,32 @@ install_binary() {
     esac
 
     BINARY="skc-${PLATFORM}-${ARCH}"
-    # Get release tag
+    # Resolve only canonical Sayknow release tags. The latest endpoint exposes
+    # the selected tag in its final redirect URL, avoiding heuristic JSON parsing.
     if [ -n "$REF" ]; then
         echo "Fetching release $REF..."
-        if RELEASE_JSON=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/tags/${REF}"); then
-            LATEST=$(echo "$RELEASE_JSON" | grep '"tag_name"' | sed -E 's/.*"([^"]+)".*/\1/')
-        else
-            echo "Release tag not found: $REF"
-            echo "For branch/commit installs, use --source with --ref."
-            exit 1
-        fi
+        LATEST="$REF"
     else
         echo "Fetching latest release..."
-        RELEASE_JSON=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest")
-        LATEST=$(echo "$RELEASE_JSON" | grep '"tag_name"' | sed -E 's/.*"([^"]+)".*/\1/')
+        if ! latest_url=$(curl -fsSL -o /dev/null -w "%{url_effective}" "https://github.com/${REPO}/releases/latest"); then
+            echo "Failed to resolve the latest Sayknow release"
+            exit 1
+        fi
+        LATEST="${latest_url##*/}"
     fi
-
-    if [ -z "$LATEST" ]; then
-        echo "Failed to fetch release tag"
+    if ! printf '%s\n' "$LATEST" | grep -Eq '^sayknow-v[0-9]+\.[0-9]+\.[0-9]+$'; then
+        echo "Release tag is not canonical: $LATEST"
+        echo "For branch/commit installs, use --source with --ref."
         exit 1
     fi
     echo "Using version: $LATEST"
 
     mkdir -p "$INSTALL_DIR"
+    acquire_install_lock
     # Download binary to a temp file first so a failed or partial download
     # never clobbers an existing working install at ${INSTALL_DIR}/skc.
     BINARY_URL="https://github.com/${REPO}/releases/download/${LATEST}/${BINARY}"
-    DOWNLOAD_TMP="${INSTALL_DIR}/.skc.download.$$"
+    DOWNLOAD_TMP=$(mktemp "${INSTALL_DIR}/.skc.download.XXXXXX")
     echo "Downloading ${BINARY}..."
     if ! curl -fsSL "$BINARY_URL" -o "$DOWNLOAD_TMP"; then
         rm -f "$DOWNLOAD_TMP"
@@ -241,8 +318,10 @@ install_binary() {
         echo "Expected asset URL: $BINARY_URL"
         exit 1
     fi
+    verify_binary_checksum "$BINARY" "$DOWNLOAD_TMP"
     chmod +x "$DOWNLOAD_TMP"
     mv -f "$DOWNLOAD_TMP" "${INSTALL_DIR}/skc"
+    DOWNLOAD_TMP=""
     echo ""
     echo "✓ Installed skc to ${INSTALL_DIR}/skc"
 

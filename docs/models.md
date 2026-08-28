@@ -249,7 +249,7 @@ providers:
 
 - `auth`: `apiKey` (default), `none`, or `oauth`; for `models.yml` custom models, `oauth` is accepted by schema but does not waive the `apiKey` requirement
 - `models.yml` is strict: unknown provider/model keys fail validation before provider dispatch, so stale keys such as `requestTransform` or `wireModelId` only work where this document lists them.
-- `discovery.type`: `ollama`, `llama.cpp`, or `lm-studio`
+- `discovery.type`: `ollama`, `llama.cpp`, `lm-studio`, `omlx`, `sglang`, or `openai-models-list`
 - `cacheRetention`: `none`, `short`, or `long`; request-time options win over model/modelOverride values, then provider values, then `SKC_CACHE_RETENTION`, then the runtime default. The runtime default is `short` for most providers, but the Anthropic provider defaults to `long` (`ttl: "1h"`) because the ~5m default is too fragile for long-running subagent workflows. The 1h marker is only emitted on the canonical Anthropic API (`api.anthropic.com`) for models advertising `supportsLongCacheRetention`; proxies, gateways, and incapable models fall back to the default ephemeral (~5m) breakpoint. For OpenAI Responses, this controls `prompt_cache_retention` only; it does not disable `prompt_cache_key` when a stable session id exists.
 
 ## OpenAI-compatible proxy configuration
@@ -503,6 +503,14 @@ If `lm-studio` is not explicitly configured, registry adds an implicit discovera
 - auth mode: keyless (`auth: none` behavior)
 
 Runtime discovery fetches models (`GET /models`) and synthesizes model entries with local defaults.
+
+### Implicit oMLX discovery
+
+If `omlx` is not explicitly configured, registry adds an implicit OpenAI-compatible provider at `OMLX_BASE_URL` or `http://127.0.0.1:8080/v1`. Implicit discovery accepts only canonical HTTP(S) loopback URLs without userinfo, query, or fragment; redirects are refused. It discovers models through `GET /v1/models`, accepts `OMLX_API_KEY` when the loopback server requires one, and otherwise uses keyless local auth. Built-in macOS oMLX profiles select the reviewed served model ids and preserve role-specific thinking effort.
+
+### Implicit SGLang discovery
+
+If `sglang` is not explicitly configured, its bundled OpenAI-compatible descriptor discovers models at trusted `SGLANG_BASE_URL` or `http://127.0.0.1:30000/v1`. Credentialless implicit discovery accepts only HTTP(S) loopback origins, including normalized IPv4, IPv6, and IPv4-mapped loopback forms. Remote SGLang servers require an explicit provider configuration or a trusted base URL plus `SGLANG_API_KEY`; all endpoint URLs must omit userinfo, query, and fragment components, and project-local environment files cannot silently redirect implicit authenticated discovery.
 
 ### Explicit provider discovery
 

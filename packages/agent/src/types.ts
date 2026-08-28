@@ -539,6 +539,13 @@ export interface AgentTool<TParameters extends TSchema = TSchema, TDetails = any
 	 * - function: `_i` is NOT injected; intent is derived dynamically from (potentially partial / streaming) args.
 	 */
 	intent?: "omit" | "optional" | "require" | ((args: Partial<Static<TParameters>>) => string | undefined);
+	/**
+	 * Argument fields (dotted paths into the arguments object) that render as
+	 * pure display text. A corroborated `\uXXXX`-escaped non-ASCII payload may
+	 * execute with a warning only when every decoded non-ASCII value is under
+	 * one of these paths. IDs, metadata, and all undeclared fields fail closed.
+	 */
+	displaySafeEscapedArgFields?: readonly string[];
 
 	/** The main execution callback for this tool. */
 	execute: AgentToolExecFn<TParameters, TDetails, TTheme>;

@@ -880,6 +880,20 @@ export class ManagedSessionDescendantStore {
 		};
 	}
 
+	/** Read only the exact managed file size through the retained root authority. */
+	sizeSync(relativePath: string): number | null {
+		this.#assertBound();
+		if (!this.#authority) throw new Error("managed_size_authority_unavailable");
+		const relative = this.#relative(this.#resolve(relativePath));
+		const result = this.#authority.stat(relative);
+		if (!result.ok) {
+			if (result.code === "not_found") return null;
+			throw new Error(result.code ?? "managed_size_failed");
+		}
+		if (!result.identity) throw new Error("Managed descendant identity is unavailable");
+		return Number(result.identity.size);
+	}
+
 	/** Remove an exact captured file without reopening its pathname as authority. */
 	removeExpected(relativePath: string, expected: ManagedFileSnapshot): void {
 		this.#assertBound();

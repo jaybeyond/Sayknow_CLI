@@ -99,7 +99,7 @@ describe("createAgentSession session storage isolation", () => {
 				throw new Error("Expected session file path");
 			}
 
-			expect(sessionFile.startsWith(path.join(agentDir, "sessions"))).toBe(true);
+			expect(sessionFile.startsWith(path.join(fs.realpathSync.native(agentDir), "sessions"))).toBe(true);
 			expect(sessionFile.startsWith(getSessionsDir())).toBe(false);
 		} finally {
 			await session.dispose();

@@ -60,6 +60,8 @@ function createRegistry(options: { missingCredentials?: boolean } = {}) {
 		getModelProfiles: () => new Map(profiles),
 		getModelProfile: (name: string) => profiles.get(name),
 		getAvailableModelProfileNames: () => [...profiles.keys()],
+		getCanonicalVariants: () => [],
+		getCanonicalId: () => undefined,
 		getApiKeyForProvider: async () => (options.missingCredentials ? undefined : "key"),
 		getApiKey: async () => "key",
 	};
@@ -109,11 +111,33 @@ function createControllerContext(options: { missingCredentials?: boolean } = {})
 		scopedModels: [],
 		modelRegistry: createRegistry(options),
 		setModelTemporaryCalls: [] as Array<{ model: Model; thinkingLevel?: ThinkingLevel }>,
+		activeModelProfile: undefined as string | undefined,
+		configuredModelChains: new Map<string, readonly string[]>(),
+		sessionDefaultModelSelector: "provider-a/alternate",
 		async setModelTemporary(next: Model, thinkingLevel?: ThinkingLevel) {
 			this.setModelTemporaryCalls.push({ model: next, thinkingLevel });
 			this.model = next;
 			this.thinkingLevel = thinkingLevel;
 		},
+		setActiveModelProfile(profileName: string | undefined) {
+			this.activeModelProfile = profileName;
+		},
+		getActiveModelProfile() {
+			return this.activeModelProfile;
+		},
+		getConfiguredModelChain(role: string) {
+			return this.configuredModelChains.get(role);
+		},
+		setConfiguredModelChain(role: string, entries: readonly string[]) {
+			this.configuredModelChains.set(role, [...entries]);
+		},
+		getSessionDefaultModelSelector() {
+			return this.sessionDefaultModelSelector;
+		},
+		recordResumeDefaultModel(selector: string) {
+			this.sessionDefaultModelSelector = selector;
+		},
+		seedDefaultFallbackResolution: vi.fn(),
 	};
 	const ctx = {
 		ui: { setFocus: vi.fn(), requestRender: vi.fn() },
@@ -260,19 +284,21 @@ describe("model selector profiles", () => {
 		expect(session.setModelTemporaryCalls).toHaveLength(1);
 		expect(session.model).toBe(defaultModel);
 		expect(session.thinkingLevel).toBe(ThinkingLevel.High);
+		expect(session.activeModelProfile).toBe("profile-a");
 		expect(settings.get("task.agentModelOverrides")).toMatchObject({ executor: "provider-a/alternate" });
 		expect(settings.get("modelProfile.default")).toBe("old-profile");
 		expect(ctx.showStatus).toHaveBeenCalledWith("Model profile: profile-a");
 	});
 
-	test("Set as default persists and flushes modelProfile.default", async () => {
-		const { ctx, flush, setCalls } = createControllerContext();
+	test("Set as default activates, persists, and flushes modelProfile.default", async () => {
+		const { ctx, flush, setCalls, session } = createControllerContext();
 		const controller = new SelectorController(ctx as never);
 		await selectFirstProfile(controller, true);
 
 		expect(ctx.showStatus).toHaveBeenCalledWith("Default model profile: profile-a");
 		expect(setCalls).toContainEqual({ path: "modelProfile.default", value: "profile-a" });
 		expect(flush).toHaveBeenCalledTimes(1);
+		expect(session.activeModelProfile).toBe("profile-a");
 		expect(ctx.showStatus).toHaveBeenCalledWith("Default model profile: profile-a");
 	});
 

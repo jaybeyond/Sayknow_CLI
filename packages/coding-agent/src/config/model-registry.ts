@@ -7,7 +7,9 @@ import {
 	type CacheRetention,
 	type Context,
 	createModelManager,
+	Effort,
 	enrichModelThinking,
+	fetchOpenAICompatibleModels,
 	getBundledModels,
 	getBundledProviders,
 	googleAntigravityModelManagerOptions,
@@ -18,6 +20,7 @@ import {
 	type ModelRequestTransform,
 	openaiCodexModelManagerOptions,
 	PROVIDER_DESCRIPTORS,
+	type Provider,
 	readModelCache,
 	registerCustomApi,
 	type SimpleStreamOptions,
@@ -595,6 +598,10 @@ function toPositiveNumberOrUndefined(value: unknown): number | undefined {
 		}
 	}
 	return undefined;
+}
+
+function toSafePositiveIntegerOrUndefined(value: unknown): number | undefined {
+	return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : undefined;
 }
 
 function extractOllamaContextWindow(payload: Record<string, unknown>): number | undefined {
@@ -1905,6 +1912,8 @@ export class ModelRegistry {
 			case "llama.cpp":
 				return this.#discoverLlamaCppModels(providerConfig);
 			case "lm-studio":
+			case "omlx":
+			case "sglang":
 			case "openai-models-list":
 				return this.#discoverOpenAIModelsList(providerConfig);
 		}
@@ -2210,48 +2219,61 @@ export class ModelRegistry {
 
 	async #discoverOpenAIModelsList(providerConfig: DiscoveryProviderConfig): Promise<Model<Api>[]> {
 		const baseUrl = this.#normalizeOpenAIModelsListBaseUrl(providerConfig.baseUrl);
-		const modelsUrl = `${baseUrl}/models`;
-
 		const headers: Record<string, string> = { ...(providerConfig.headers ?? {}) };
 		const apiKey = await this.authStorage.getApiKey(providerConfig.provider);
-		if (apiKey && apiKey !== DEFAULT_LOCAL_TOKEN && apiKey !== kNoAuth) {
-			headers.Authorization = `Bearer ${apiKey}`;
-		}
-
-		const response = await fetch(modelsUrl, {
+		const bearerToken = apiKey && apiKey !== DEFAULT_LOCAL_TOKEN && apiKey !== kNoAuth ? apiKey : undefined;
+		const isOmlx = providerConfig.provider === "omlx";
+		const parseDiscoveryLimit = isOmlx ? toSafePositiveIntegerOrUndefined : toPositiveNumberOrUndefined;
+		const discovered = await fetchOpenAICompatibleModels({
+			api: providerConfig.api,
+			provider: providerConfig.provider as Provider,
+			baseUrl,
+			apiKey: bearerToken,
 			headers,
-			signal: AbortSignal.timeout(250),
+			signal: AbortSignal.timeout(providerConfig.provider === "sglang" ? 500 : 250),
+			fetch: (input, init) => fetch(input, { ...init, redirect: "error" }),
+			throwOnStatus: response => new Error(`HTTP ${response.status} from ${baseUrl}/models`),
+			mapModel: (item, defaults) => ({
+				...defaults,
+				reasoning: isOmlx,
+				...(isOmlx
+					? {
+							thinking: {
+								mode: "effort" as const,
+								minLevel: Effort.Low,
+								maxLevel: Effort.High,
+								defaultLevel: Effort.Medium,
+								levels: [Effort.Low, Effort.Medium, Effort.High],
+							},
+						}
+					: {}),
+				contextWindow:
+					parseDiscoveryLimit(item.max_model_len) ??
+					parseDiscoveryLimit(item.context_length) ??
+					parseDiscoveryLimit(item.context_window) ??
+					parseDiscoveryLimit(item.max_context_length) ??
+					UNK_CONTEXT_WINDOW,
+				maxTokens:
+					parseDiscoveryLimit(item.max_completion_tokens) ??
+					parseDiscoveryLimit(item.max_tokens) ??
+					parseDiscoveryLimit(item.max_output_tokens) ??
+					UNK_MAX_TOKENS,
+				headers,
+				compat: {
+					...(providerConfig.compat ?? {}),
+					supportsStore: false,
+					supportsDeveloperRole: false,
+					supportsReasoningEffort: isOmlx,
+					...(isOmlx
+						? {
+								thinkingFormat: "qwen-chat-template" as const,
+								reasoningContentField: "reasoning_content" as const,
+							}
+						: {}),
+				},
+			}),
 		});
-		if (!response.ok) {
-			throw new Error(`HTTP ${response.status} from ${modelsUrl}`);
-		}
-		const payload = (await response.json()) as { data?: Array<{ id: string }> };
-		const models = payload.data ?? [];
-		const discovered: Model<Api>[] = [];
-		for (const item of models) {
-			const id = item.id;
-			if (!id) continue;
-			discovered.push(
-				enrichModelThinking({
-					id,
-					name: id,
-					api: providerConfig.api,
-					provider: providerConfig.provider,
-					baseUrl,
-					reasoning: false,
-					input: ["text"],
-					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-					contextWindow: 128000,
-					maxTokens: 8192,
-					headers,
-					compat: {
-						supportsStore: false,
-						supportsDeveloperRole: false,
-						supportsReasoningEffort: false,
-					},
-				}),
-			);
-		}
+		if (discovered === null) throw new Error(`Invalid OpenAI-compatible model catalog from ${baseUrl}`);
 		return this.#applyProviderModelOverrides(providerConfig.provider, discovered);
 	}
 

@@ -1,10 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { readFileSync } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { getConfigRootDir, setAgentDir } from "@sayknow-cli/utils";
+import { YAML } from "bun";
 import { inspectConfigFile, runConfigCommand } from "../src/cli/config-cli";
-import { resetSettingsForTest } from "../src/config/settings";
+import { AtomicYamlTestHooks } from "../src/config/atomic-yaml-patch";
+import { resetSettingsForTest, Settings } from "../src/config/settings";
 
 let testAgentDir = "";
 const originalAgentDir = process.env.SKC_CODING_AGENT_DIR;
@@ -17,6 +20,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+	AtomicYamlTestHooks.afterTargetBound = undefined;
 	vi.restoreAllMocks();
 	resetSettingsForTest();
 	if (originalAgentDir) {
@@ -303,4 +307,142 @@ it("redacts invalid secret settings in doctor output", async () => {
 	const report = await inspectConfigFile(configPath);
 	expect(report.invalidValues).toContainEqual({ path: "notifications.telegram.botToken", value: "<redacted>" });
 	expect(JSON.stringify(report)).not.toContain(secret);
+});
+
+describe("config CLI durable persistence", () => {
+	it("writes set and reset values before reporting success", async () => {
+		const durableValuesAtSuccess: unknown[] = [];
+		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {
+			const persisted = YAML.parse(readFileSync(path.join(testAgentDir, "config.yml"), "utf8")) as {
+				colorBlindMode?: unknown;
+			};
+			durableValuesAtSuccess.push(persisted.colorBlindMode);
+		});
+
+		await runConfigCommand({ action: "set", key: "colorBlindMode", value: "true", flags: { json: true } });
+		expect(durableValuesAtSuccess.at(-1)).toBe(true);
+
+		logSpy.mockClear();
+		durableValuesAtSuccess.length = 0;
+		await runConfigCommand({ action: "reset", key: "colorBlindMode", flags: { json: true } });
+		expect(durableValuesAtSuccess.at(-1)).toBe(false);
+		expect(JSON.parse(String(logSpy.mock.calls.at(-1)?.[0]))).toEqual({
+			key: "colorBlindMode",
+			value: false,
+		});
+	});
+
+	it("fails without success output or unsafe error details when persistence fails", async () => {
+		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+		const exitSpy = vi.spyOn(process, "exit").mockImplementation(((): never => {
+			throw new Error("process.exit");
+		}) as never);
+		const secret = "do-not-print-this-secret";
+		const instance = await Settings.init();
+		const flushSpy = vi
+			.spyOn(instance, "flushOrThrow")
+			.mockRejectedValue(new Error(`${testAgentDir}/config.yml ${secret}`));
+
+		try {
+			await expect(
+				runConfigCommand({ action: "set", key: "colorBlindMode", value: "true", flags: { json: true } }),
+			).rejects.toThrow("process.exit");
+		} finally {
+			flushSpy.mockRestore();
+			await instance.flush();
+		}
+
+		expect(exitSpy).toHaveBeenCalledWith(1);
+		expect(logSpy).not.toHaveBeenCalled();
+		const diagnostic = errorSpy.mock.calls.map(call => Bun.stripANSI(String(call[0] ?? ""))).join("\n");
+		expect(diagnostic).toContain("Failed to persist configuration");
+		expect(diagnostic).not.toContain(testAgentDir);
+		expect(diagnostic).not.toContain(secret);
+	});
+
+	it("fails reset without success output when persistence fails", async () => {
+		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+		await runConfigCommand({ action: "set", key: "colorBlindMode", value: "true", flags: { json: true } });
+		logSpy.mockClear();
+
+		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+		const exitSpy = vi.spyOn(process, "exit").mockImplementation(((): never => {
+			throw new Error("process.exit");
+		}) as never);
+		const instance = await Settings.init();
+		const secret = `${testAgentDir}/config.yml reset-secret`;
+		const flushSpy = vi.spyOn(instance, "flushOrThrow").mockRejectedValue(new Error(secret));
+		try {
+			await expect(
+				runConfigCommand({ action: "reset", key: "colorBlindMode", flags: { json: true } }),
+			).rejects.toThrow("process.exit");
+		} finally {
+			flushSpy.mockRestore();
+			await instance.flush();
+		}
+
+		expect(exitSpy).toHaveBeenCalledWith(1);
+		expect(logSpy).not.toHaveBeenCalled();
+		expect(errorSpy.mock.calls.map(call => Bun.stripANSI(String(call[0] ?? ""))).join("\n")).toContain(
+			"Failed to persist configuration",
+		);
+		expect(errorSpy.mock.calls.map(call => Bun.stripANSI(String(call[0] ?? ""))).join("\n")).not.toContain(secret);
+	});
+
+	it("does not rebase a best-effort flush after target retargeting", async () => {
+		const configPath = path.join(testAgentDir, "config.yml");
+		const realTarget = path.join(testAgentDir, "real-config.yml");
+		const otherTarget = path.join(testAgentDir, "other-config.yml");
+		const initialReal = { configSchemaVersion: 1, colorBlindMode: false };
+		const initialOther = { configSchemaVersion: 1, colorBlindMode: false, other: true };
+		await fs.writeFile(realTarget, YAML.stringify(initialReal, null, 2));
+		await fs.writeFile(otherTarget, YAML.stringify(initialOther, null, 2));
+		await fs.symlink(realTarget, configPath);
+		const instance = await Settings.init();
+		let retargeted = false;
+		AtomicYamlTestHooks.afterTargetBound = async canonicalPath => {
+			if (retargeted || canonicalPath !== path.resolve(configPath)) return;
+			retargeted = true;
+			await fs.rm(configPath, { force: true });
+			await fs.symlink(otherTarget, configPath);
+		};
+
+		instance.set("colorBlindMode", true);
+		await instance.flush();
+
+		expect(retargeted).toBe(true);
+		expect(YAML.parse(await fs.readFile(realTarget, "utf8"))).toEqual(initialReal);
+		expect(YAML.parse(await fs.readFile(otherTarget, "utf8"))).toEqual(initialOther);
+
+		AtomicYamlTestHooks.afterTargetBound = undefined;
+		await fs.rm(configPath, { force: true });
+		await fs.symlink(realTarget, configPath);
+		await instance.flush();
+
+		expect(YAML.parse(await fs.readFile(realTarget, "utf8"))).toMatchObject({
+			configSchemaVersion: 1,
+			colorBlindMode: true,
+		});
+		expect(YAML.parse(await fs.readFile(otherTarget, "utf8"))).toEqual(initialOther);
+	});
+	it("does not echo an invalid value in diagnostics", async () => {
+		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+		const exitSpy = vi.spyOn(process, "exit").mockImplementation(((): never => {
+			throw new Error("process.exit");
+		}) as never);
+		const secret = "invalid-secret-value".repeat(100);
+
+		await expect(
+			runConfigCommand({ action: "set", key: "colorBlindMode", value: secret, flags: { json: true } }),
+		).rejects.toThrow("process.exit");
+
+		expect(exitSpy).toHaveBeenCalledWith(1);
+		expect(logSpy).not.toHaveBeenCalled();
+		const diagnostic = errorSpy.mock.calls.map(call => Bun.stripANSI(String(call[0] ?? ""))).join("\n");
+		expect(diagnostic).toContain("Invalid boolean value");
+		expect(diagnostic).not.toContain(secret);
+		expect(diagnostic.length).toBeLessThan(256);
+	});
 });

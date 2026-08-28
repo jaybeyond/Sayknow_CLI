@@ -27,6 +27,8 @@ $Package = "@sayknow-cli/coding-agent"
 $InstallDir = if ($env:SKC_INSTALL_DIR) { $env:SKC_INSTALL_DIR } else { "$env:LOCALAPPDATA\skc" }
 $BinaryName = "skc-windows-x64.exe"
 $MinimumBunVersion = "1.3.14"
+$BinaryManifestAsset = "sayknow-release-binaries-v1.json"
+$BinarySha256Asset = "sayknow-release-binaries.sha256"
 
 function Test-BunInstalled {
     try {
@@ -249,6 +251,68 @@ function Install-ViaBun {
     Write-Host "Run 'skc' to get started!"
 }
 
+function Get-WebStatus {
+    param($ErrorRecord)
+    try { return [int]$ErrorRecord.Exception.Response.StatusCode } catch { return 0 }
+}
+
+function Assert-BinaryChecksum {
+    param([string]$Tag, [string]$AssetName, [string]$DownloadedPath)
+    $sumsUrl = "https://github.com/$Repo/releases/download/$Tag/$BinarySha256Asset"
+    $manifestUrl = "https://github.com/$Repo/releases/download/$Tag/$BinaryManifestAsset"
+    $sumsTmp = Join-Path $InstallDir (".skc.sums." + [System.Guid]::NewGuid().ToString("N"))
+    $manifestTmp = Join-Path $InstallDir (".skc.manifest." + [System.Guid]::NewGuid().ToString("N"))
+    try {
+        $expected = $null
+        try {
+            Invoke-WebRequest -Uri $sumsUrl -OutFile $sumsTmp
+            $checksumMatches = @()
+            foreach ($line in Get-Content $sumsTmp) {
+                if ($line -match '^([0-9a-fA-F]{64})  \*?([^/\\]+)$' -and $Matches[2] -eq $AssetName) {
+                    $checksumMatches += $Matches[1].ToLowerInvariant()
+                }
+            }
+            if ($checksumMatches.Count -ne 1) {
+                throw "Release checksum file did not list exactly one SHA-256 for $AssetName"
+            }
+            $expected = $checksumMatches[0]
+        } catch {
+            if ($_.Exception.Message -match "Release checksum file") { throw }
+            if ((Get-WebStatus $_) -ne 404) {
+                throw "Integrity asset $BinarySha256Asset could not be fetched. Existing install was not changed."
+            }
+            try {
+                Invoke-WebRequest -Uri $manifestUrl -OutFile $manifestTmp
+            } catch {
+                throw "Release $Tag has no Sayknow binary integrity manifest. Existing install was not changed."
+            }
+            $manifest = Get-Content $manifestTmp -Raw | ConvertFrom-Json
+            $expectedVersion = $Tag -replace '^sayknow-v', '' -replace '^v', ''
+            if (
+                $manifest.schema -ne "sayknow-release-binaries-v1" -or
+                $manifest.schema_version -ne 1 -or
+                $manifest.release_version -ne $expectedVersion -or
+                $manifest.tag -ne $Tag
+            ) {
+                throw "Release binary manifest metadata does not match $Tag"
+            }
+            $matches = @($manifest.binaries | Where-Object { $_.name -eq $AssetName })
+            if ($matches.Count -ne 1 -or [string]$matches[0].sha256 -notmatch '^[0-9a-f]{64}$') {
+                throw "Release binary manifest did not list one valid SHA-256 for $AssetName"
+            }
+            $expected = [string]$matches[0].sha256
+        }
+        $actual = (Get-FileHash -Algorithm SHA256 -Path $DownloadedPath).Hash.ToLowerInvariant()
+        if ($actual -ne $expected) {
+            throw "SHA-256 mismatch for $AssetName. Existing install was not changed."
+        }
+        Write-Host "Verified SHA-256 for $AssetName"
+    } finally {
+        Remove-Item -Force $sumsTmp -ErrorAction SilentlyContinue
+        Remove-Item -Force $manifestTmp -ErrorAction SilentlyContinue
+    }
+}
+
 function Install-Binary {
     if ($Ref) {
         Write-Host "Fetching release $Ref..."
@@ -269,6 +333,13 @@ function Install-Binary {
     Write-Host "Using version: $Latest"
 
     New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
+    $LockDir = Join-Path $InstallDir ".skc-install.lock"
+    try {
+        New-Item -ItemType Directory -Path $LockDir -ErrorAction Stop | Out-Null
+    } catch {
+        throw "Another SKC installer is already running in $InstallDir (lock: $LockDir)."
+    }
+    try {
 
     # Download binary to a temp file first so a failed or partial download
     # never clobbers an existing working install at $InstallDir\skc.exe.
@@ -282,6 +353,7 @@ function Install-Binary {
         Remove-Item -Force $DownloadTmp -ErrorAction SilentlyContinue
         throw
     }
+        Assert-BinaryChecksum -Tag $Latest -AssetName $BinaryName -DownloadedPath $DownloadTmp
     Move-Item -Force $DownloadTmp $OutPath
 
     Write-Host ""
@@ -301,6 +373,10 @@ function Install-Binary {
         Write-Host "Restart your terminal, then run 'skc' to get started!"
     } else {
         Write-Host "Run 'skc' to get started!"
+    }
+    } finally {
+        if ($DownloadTmp) { Remove-Item -Force $DownloadTmp -ErrorAction SilentlyContinue }
+        Remove-Item -Recurse -Force $LockDir -ErrorAction SilentlyContinue
     }
 }
 

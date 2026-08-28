@@ -1417,6 +1417,15 @@ export const SETTINGS_SCHEMA = {
 			],
 		},
 	},
+	"startup.skipLogoAnimation": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "interaction",
+			label: "Skip Logo Animation",
+			description: "Show the final welcome logo immediately",
+		},
+	},
 
 	"startup.checkUpdate": {
 		type: "boolean",

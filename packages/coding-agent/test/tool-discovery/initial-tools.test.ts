@@ -207,18 +207,64 @@ describe("alwaysActiveToolNames keeps discoverable coordination tools loaded", (
 	it("hides irc from a subagent-style session by default and forces it active when requested", async () => {
 		const cwd = await tempDir();
 		const agentDir = await tempDir();
+		try {
+			// No `toolNames`: this is the executor/generic-subagent path, which inherits the
+			// full builtin set. With tools.discoveryMode="all" (the default), `irc` is
+			// loadMode "discoverable" and must therefore be hidden behind search_tool_bm25.
+			const hidden = await createAgentSession({ cwd, agentDir });
+			try {
+				expect(hidden.session.getActiveToolNames()).not.toContain("irc");
+			} finally {
+				await hidden.session.dispose();
+			}
 
-		// No `toolNames`: this is the executor/generic-subagent path, which inherits the
-		// full builtin set. With tools.discoveryMode="all" (the default), `irc` is
-		// loadMode "discoverable" and must therefore be hidden behind search_tool_bm25.
-		const hidden = await createAgentSession({ cwd, agentDir });
-		expect(hidden.session.getActiveToolNames()).not.toContain("irc");
+			const forced = await createAgentSession({ cwd, agentDir, alwaysActiveToolNames: ["irc"] });
+			try {
+				expect(forced.session.getActiveToolNames()).toContain("irc");
+				// Forcing one tool active must not drag the rest of the discoverable set in.
+				expect(forced.session.getActiveToolNames()).not.toContain("browser");
+			} finally {
+				await forced.session.dispose();
+			}
+		} finally {
+			await Promise.all([
+				fs.rm(cwd, { recursive: true, force: true }),
+				fs.rm(agentDir, { recursive: true, force: true }),
+			]);
+		}
+	}, 60_000);
+});
 
-		const forced = await createAgentSession({ cwd, agentDir, alwaysActiveToolNames: ["irc"] });
-		expect(forced.session.getActiveToolNames()).toContain("irc");
+describe("an explicitly empty tool selection disables built-in tools", () => {
+	async function tempDir(): Promise<string> {
+		return await fs.mkdtemp(path.join(os.tmpdir(), "skc-empty-tools-"));
+	}
 
-		// Forcing one tool active must not drag the rest of the discoverable set in.
-		expect(forced.session.getActiveToolNames()).not.toContain("browser");
+	it("keeps goal out of an empty selection while preserving it for non-empty selections", async () => {
+		const cwd = await tempDir();
+		const agentDir = await tempDir();
+		try {
+			const none = await createAgentSession({ cwd, agentDir, toolNames: [] });
+			try {
+				expect(none.session.hasExplicitlyDisabledTools()).toBe(true);
+				expect(none.session.getActiveToolNames()).toEqual([]);
+			} finally {
+				await none.session.dispose();
+			}
+
+			const some = await createAgentSession({ cwd, agentDir, toolNames: ["read"] });
+			try {
+				expect(some.session.hasExplicitlyDisabledTools()).toBe(false);
+				expect(some.session.getActiveToolNames()).toEqual(expect.arrayContaining(["read", "goal"]));
+			} finally {
+				await some.session.dispose();
+			}
+		} finally {
+			await Promise.all([
+				fs.rm(cwd, { recursive: true, force: true }),
+				fs.rm(agentDir, { recursive: true, force: true }),
+			]);
+		}
 	}, 60_000);
 });
 
@@ -247,7 +293,7 @@ describe("computeEssentialBuiltinNames", () => {
 		expect(computeEssentialBuiltinNames(settings)).toEqual(["read"]);
 	});
 
-	it("falls back to defaults when override is non-empty but contains only invalid names", () => {
+	it("keeps an explicit override empty when every name is invalid", () => {
 		// The filtered list is empty (no valid names), but the override was provided —
 		// current behavior returns the empty filtered list (caller can decide). Document the behavior.
 		const settings = Settings.isolated({

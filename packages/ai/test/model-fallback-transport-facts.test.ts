@@ -48,7 +48,11 @@ describe("fallback transport facts", () => {
 				headers: { "content-type": "application/json", "retry-after": "11" },
 			})) as unknown as FetchImpl;
 
-		const result = await streamOpenAICompletions(model, context, { apiKey: "test-key", fetch }).result();
+		const result = await streamOpenAICompletions(model, context, {
+			apiKey: "test-key",
+			fetch,
+			requestMaxRetries: 0,
+		}).result();
 
 		expect(result.transportFailure).toMatchObject({
 			kind: "transport",

@@ -47,8 +47,9 @@ describe("CustomEditor temporary model selector keybinding", () => {
 describe("CustomEditor queue keybinding", () => {
 	it("triggers explicit queue from the configured action key", () => {
 		const editor = createEditor();
-		const onQueue = vi.fn();
+		const onQueue = vi.fn(() => true);
 		editor.onQueue = onQueue;
+		editor.setActionKeys("app.message.queue", ["alt+enter"]);
 
 		editor.handleInput("\x1b\r");
 
@@ -65,8 +66,8 @@ describe("CustomEditor queue keybinding", () => {
 		for (const { data, key } of inputs) expect(parseKey(data)).toBe(key);
 
 		const editor = createEditor();
-		const onQueue = vi.fn();
-		const onDequeue = vi.fn();
+		const onQueue = vi.fn(() => true);
+		const onDequeue = vi.fn(() => true);
 		editor.onQueue = onQueue;
 		editor.onDequeue = onDequeue;
 		editor.setActionKeys("app.message.queue", ["alt+q"]);
@@ -81,8 +82,9 @@ describe("CustomEditor queue keybinding", () => {
 
 	it("triggers explicit queue from legacy Alt+LF terminals", () => {
 		const editor = createEditor();
-		const onQueue = vi.fn();
+		const onQueue = vi.fn(() => true);
 		editor.onQueue = onQueue;
+		editor.setActionKeys("app.message.queue", ["alt+enter"]);
 
 		editor.handleInput("\x1b\n");
 
@@ -92,7 +94,7 @@ describe("CustomEditor queue keybinding", () => {
 
 	it("leaves Ctrl+Enter for newline by default", () => {
 		const editor = createEditor();
-		const onQueue = vi.fn();
+		const onQueue = vi.fn(() => true);
 		editor.onQueue = onQueue;
 
 		editor.handleInput("a");
@@ -105,7 +107,7 @@ describe("CustomEditor queue keybinding", () => {
 
 	it("supports remapping the explicit queue key when Alt+Enter is unavailable", () => {
 		const editor = createEditor();
-		const onQueue = vi.fn();
+		const onQueue = vi.fn(() => true);
 		editor.onQueue = onQueue;
 		editor.setActionKeys("app.message.queue", ["alt+q"]);
 
@@ -142,7 +144,10 @@ describe("CustomEditor bracketed paste interception", () => {
 		editor.handleInput("\x1b[200~/tmp/clipboard-2026-06-04-120441-CAC144E7.png\x1b[201~");
 		await Bun.sleep(0);
 
-		expect(onPasteText).toHaveBeenCalledWith("/tmp/clipboard-2026-06-04-120441-CAC144E7.png");
+		expect(onPasteText).toHaveBeenCalledWith(
+			"/tmp/clipboard-2026-06-04-120441-CAC144E7.png",
+			expect.objectContaining({ signal: expect.anything(), commit: expect.any(Function) }),
+		);
 		expect(editor.getText()).toBe("");
 	});
 
@@ -154,7 +159,10 @@ describe("CustomEditor bracketed paste interception", () => {
 		editor.handleInput("\x1b[200~hello\x1b[201~");
 		await Bun.sleep(0);
 
-		expect(onPasteText).toHaveBeenCalledWith("hello");
+		expect(onPasteText).toHaveBeenCalledWith(
+			"hello",
+			expect.objectContaining({ signal: expect.anything(), commit: expect.any(Function) }),
+		);
 		expect(editor.getText()).toBe("hello");
 	});
 
@@ -212,7 +220,7 @@ describe("CustomEditor bracketed paste interception", () => {
 		pasteDecision.resolve(false);
 		await Promise.resolve();
 
-		expect(editor.getText()).toBe("before ");
+		expect(editor.getText()).toBe("before middle after");
 	});
 
 	it("bounds the async paste input queue and clears pending state", async () => {
@@ -229,12 +237,14 @@ describe("CustomEditor bracketed paste interception", () => {
 		}
 
 		expect(onPastePendingInputCleared).toHaveBeenCalledWith("queue-limit", 65);
-		expect(editor.getText()).toBe("before ");
+		const restoredText = editor.getText();
+		expect(restoredText.startsWith("before middle queued-0 ")).toBe(true);
+		expect(restoredText).toContain("queued-64 ");
 
 		pasteDecision.resolve(false);
 		await Bun.sleep(0);
 
-		expect(editor.getText()).toBe("before ");
+		expect(editor.getText()).toBe(restoredText);
 	});
 
 	it("clears pending async paste state when disposed", async () => {

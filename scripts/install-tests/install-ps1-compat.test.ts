@@ -32,6 +32,19 @@ describe("install.ps1 Windows PowerShell 5.1 compatibility", () => {
 		}
 	});
 
+	test("verifies Sayknow checksums and serializes binary publication", async () => {
+		const installer = await Bun.file(installPs1Path).text();
+		expect(installer).toContain("sayknow-release-binaries.sha256");
+		expect(installer).toContain("sayknow-release-binaries-v1.json");
+		expect(installer).toContain("Get-FileHash -Algorithm SHA256");
+		expect(installer).toContain("$manifest.release_version -ne $expectedVersion");
+		expect(installer).toContain("$checksumMatches.Count -ne 1");
+		expect(installer).toContain(".skc-install.lock");
+		expect(installer.indexOf("Assert-BinaryChecksum -Tag")).toBeLessThan(
+			installer.indexOf("Move-Item -Force $DownloadTmp"),
+		);
+	});
+
 	test.skipIf(!pwsh)("parses without syntax errors under PowerShell", async () => {
 		const script = [
 			"$errors = $null",

@@ -312,6 +312,25 @@ export function selectShutdownDraft(editorText: string, hasActiveBtw: boolean): 
 	return hasActiveBtw ? "" : editorText;
 }
 
+export class OAuthAuthorizationUrlState {
+	#active: { url: string; lease: number } | undefined;
+	#nextLease = 0;
+
+	set(url: string): number {
+		const lease = ++this.#nextLease;
+		this.#active = { url, lease };
+		return lease;
+	}
+
+	clear(lease: number): void {
+		if (this.#active?.lease === lease) this.#active = undefined;
+	}
+
+	get current(): string | undefined {
+		return this.#active?.url;
+	}
+}
+
 export class InteractiveMode implements InteractiveModeContext {
 	session: AgentSession;
 	sessionManager: SessionManager;
@@ -384,6 +403,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	fileSlashCommands: Set<string> = new Set();
 	skillCommands: Map<string, Skill> = new Map();
 	oauthManualInput: OAuthManualInputManager = new OAuthManualInputManager();
+	#oauthAuthorizationUrl = new OAuthAuthorizationUrlState();
 	promptSuggestion: PromptSuggestionController;
 
 	#baseSlashCommands: SlashCommand[] = [];
@@ -697,6 +717,7 @@ export class InteractiveMode implements InteractiveModeContext {
 
 		const startupQuiet = settings.get("startup.quiet");
 		const welcomeLogoMode = resolveWelcomeLogoMode(settings.get("startup.welcomeBannerMode"));
+		const skipLogoAnimation = settings.get("startup.skipLogoAnimation");
 		this.#welcomeComponent = undefined;
 
 		for (const warning of this.session.configWarnings) {
@@ -722,6 +743,7 @@ export class InteractiveMode implements InteractiveModeContext {
 					rightGutterWidth: COMPOSER_RIGHT_GUTTER_WIDTH,
 					collapseChangelog: settings.get("collapseChangelog"),
 					keyDisplayContext: this.#keyDisplayContext,
+					skipLogoAnimation,
 				},
 			);
 
@@ -2042,6 +2064,33 @@ export class InteractiveMode implements InteractiveModeContext {
 	openInBrowser(urlOrPath: string): void {
 		this.#commandController.openInBrowser(urlOrPath);
 	}
+	setOAuthAuthorizationUrl(url: string): number {
+		return this.#oauthAuthorizationUrl.set(url);
+	}
+
+	clearOAuthAuthorizationUrl(lease: number): void {
+		this.#oauthAuthorizationUrl.clear(lease);
+	}
+
+	hasOAuthAuthorizationUrl(): boolean {
+		return this.#oauthAuthorizationUrl.current !== undefined;
+	}
+
+	async copyOAuthAuthorizationUrl(): Promise<void> {
+		const url = this.#oauthAuthorizationUrl.current;
+		if (!url) {
+			this.showWarning("No OAuth authorization URL is available to copy.");
+			return;
+		}
+		try {
+			await copyToClipboard(url);
+			this.showStatus("OAuth authorization URL copied to clipboard");
+		} catch (error) {
+			this.showError(
+				`Failed to copy OAuth authorization URL: ${error instanceof Error ? error.message : String(error)}`,
+			);
+		}
+	}
 
 	// Selector handling
 	showCommandPalette(
@@ -2104,10 +2153,11 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#selectorController.showSessionSelector();
 	}
 
-	handleResumeSession(sessionPath: string): Promise<void> {
-		this.#btwController.dispose();
-		this.resetObserverRegistry();
-		return this.#selectorController.handleResumeSession(sessionPath);
+	handleResumeSession(sessionPath: string, options?: { requireIdle?: boolean }): Promise<boolean> {
+		return this.#selectorController.handleResumeSession(sessionPath, options, () => {
+			this.#btwController.dispose();
+			this.resetObserverRegistry();
+		});
 	}
 
 	handleSessionDeleteCommand(): Promise<void> {

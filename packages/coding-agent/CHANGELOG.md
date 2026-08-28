@@ -7,8 +7,26 @@ in that project. Each release notes the upstream version it is built on.
 
 ## [Unreleased]
 
+### Added
+
+- Added zero-configuration oMLX and loopback-safe SGLang discovery through the shared OpenAI-compatible registry, including reviewed oMLX model profiles, thinking-effort preservation, schemas, and local-provider tests.
+- Added explicit-file `/import-session` support for Codex rollout JSONL, Claude Code JSONL, and claude.ai exports with bounded redacted context, quarantined unmappable records, durable provenance, workspace-scoped idempotent native publication, and ACP isolation for path-bearing import, export, and move commands.
+### Fixed
+
+- Imported-session targets activate only through an idle-only session transition; a response or turn that wins the activation race leaves the reused or newly published target intact for later resume instead of interrupting active work.
+
+- LSP, DAP, and stdio MCP protocol writes now serialize complete write/flush transactions, await sink backpressure, propagate peer-close failures, and terminalize stale transports on fatal writes or stdout EOF instead of leaving delayed unhandled EPIPE errors or timeout-bound pending requests.
+- Managed sessions now sample transcript size proactively only through a retained exact-file authority, treat unavailable sampling as unknown, and recover an authority-bound `content_too_large` append by atomically rewriting the exact live entry set; failed rewrites latch persistence and roll back volatile branch mutation before later appends.
+- Explicit empty tool selections such as `--no-tools` now remain authoritative across goal/workflow restoration, session branching, and plan-mode transitions instead of silently reactivating built-in tools.
+- `config set` and `config reset` now report success only after durable persistence; atomic YAML writes retain their original resolved target and fail closed on symlink or target-identity retargeting.
+- `skc --worktree` now installs Bun, npm, or pnpm dependencies from the worktree's own matching lockfile instead of linking a package checkout to the source tree's `node_modules`; nested package roots keep their cwd, legacy owned links are migrated, unrelated links are refused, and repeated launches reuse the local install location.
+- Release publication now emits Sayknow-owned SHA-256 manifests, and standalone installers plus `skc update` verify the selected platform binary before replacing an installation; missing or mismatched integrity metadata and concurrent installers fail closed.
+
 ### Changed
 
+- The command palette now exposes availability-gated follow-up, queue editing, immediate-send, and transcript-turn actions; their default keybindings remain unchanged, while user remaps dispatch through the shared action registry.
+- Korean and emoji escapes in `ask` question text and option labels now recover as display-only content while ids and workflow metadata remain fail-closed.
+- The todo HUD can be expanded from its action/keybinding, startup can skip the logo sweep, and provider or MCP OAuth URLs copy only through an explicit remappable action.
 - **Upstream independence.** Retired the upstream sync/regeneration pipeline
   (`rebrand/` layer plus the generation scripts); this tree is now the single
   source of truth and upstream fixes are ported by cherry-pick only. See

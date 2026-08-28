@@ -40,6 +40,7 @@ import {
 	theme,
 } from "../../modes/theme/theme";
 import type { InteractiveModeContext, OAuthSelectorOptions } from "../../modes/types";
+import { acquireResumeProgressLease } from "../../modes/utils/ui-helpers";
 import { getNotificationConfig, isTelegramConfigured, maskToken } from "../../sdk/bus/config";
 import {
 	clearTelegramActivationMarker,
@@ -2052,26 +2053,40 @@ export class SelectorController {
 		return true;
 	}
 
-	async handleResumeSession(sessionPath: string): Promise<void> {
-		const previousSessionId = this.ctx.sessionManager.getSessionId();
-		this.#clearTransientSessionUi();
-		const migrationPolicy =
-			this.ctx.settings?.get("session.directoryMigration") === "disabled" ? "disabled" : "copy-retain";
-		const writableSessionPath = await this.ctx.sessionManager.prepareManagedCandidateForWrite(
-			sessionPath,
-			migrationPolicy,
-		);
+	async handleResumeSession(
+		sessionPath: string,
+		options?: { requireIdle?: boolean },
+		onSwitched?: () => void,
+	): Promise<boolean> {
+		const progress = acquireResumeProgressLease(this.ctx);
+		await progress.committed;
+		try {
+			const previousSessionId = this.ctx.sessionManager.getSessionId();
+			const migrationPolicy =
+				this.ctx.settings?.get("session.directoryMigration") === "disabled" ? "disabled" : "copy-retain";
+			const writableSessionPath = await this.ctx.sessionManager.prepareManagedCandidateForWrite(
+				sessionPath,
+				migrationPolicy,
+			);
 
-		// Switch session via AgentSession (emits hook and tool session events)
-		if (!(await this.ctx.session.switchSession(writableSessionPath))) return;
-		const switchingToDifferentSession = previousSessionId !== this.ctx.sessionManager.getSessionId();
-		if (switchingToDifferentSession) this.ctx.resetIrcSidebarSession();
-		this.#refreshSessionTerminalTitle();
-		this.ctx.updateEditorBorderColor();
+			// Switch session via AgentSession (emits hook and tool session events)
+			if (!(await this.ctx.session.switchSession(writableSessionPath, options))) return false;
+			onSwitched?.();
+			this.#clearTransientSessionUi();
+			const switchingToDifferentSession = previousSessionId !== this.ctx.sessionManager.getSessionId();
+			if (switchingToDifferentSession) this.ctx.resetIrcSidebarSession();
+			this.#refreshSessionTerminalTitle();
+			this.ctx.updateEditorBorderColor();
 
-		this.ctx.rebuildInitialMessages(switchingToDifferentSession ? "replace-identity" : "reconcile-same-transcript");
-		await this.ctx.reloadTodos();
-		this.ctx.showStatus("Resumed session");
+			this.ctx.rebuildInitialMessages(
+				switchingToDifferentSession ? "replace-identity" : "reconcile-same-transcript",
+			);
+			await this.ctx.reloadTodos();
+			this.ctx.showStatus("Resumed session");
+			return true;
+		} finally {
+			progress.clear();
+		}
 	}
 
 	async handleSessionDeleteCommand(): Promise<void> {
@@ -2158,6 +2173,7 @@ export class SelectorController {
 		}
 
 		this.ctx.showStatus(`Logging in to ${providerId}… (Esc to cancel)`);
+		let authorizationUrlLease: number | undefined;
 		const manualInput = this.ctx.oauthManualInput;
 		const useManualInput = CALLBACK_SERVER_PROVIDERS.has(providerId as OAuthProvider);
 		const abort = new AbortController();
@@ -2172,6 +2188,7 @@ export class SelectorController {
 			await this.ctx.session.modelRegistry.authStorage.login(providerId as OAuthProvider, {
 				signal: abort.signal,
 				onAuth: (info: { url: string; instructions?: string }) => {
+					authorizationUrlLease = this.ctx.setOAuthAuthorizationUrl(info.url);
 					this.ctx.chatContainer.addChild(new Spacer(1));
 					this.ctx.chatContainer.addChild(new Text(theme.fg("dim", info.url), 1, 0));
 					const hyperlink = `\x1b]8;;${info.url}\x07Click here to login\x1b]8;;\x07`;
@@ -2184,6 +2201,16 @@ export class SelectorController {
 						this.ctx.chatContainer.addChild(new Spacer(1));
 						this.ctx.chatContainer.addChild(new Text(theme.fg("dim", MANUAL_LOGIN_TIP), 1, 0));
 					}
+					this.ctx.chatContainer.addChild(
+						new Text(
+							theme.fg(
+								"dim",
+								`Press ${this.ctx.keybindings.getDisplayString("app.oauth.copyUrl")} to copy the authorization URL.`,
+							),
+							1,
+							0,
+						),
+					);
 					this.ctx.ui.requestRender();
 					this.ctx.openInBrowser(info.url);
 				},
@@ -2235,6 +2262,7 @@ export class SelectorController {
 			if (useManualInput) {
 				manualInput.clear(`Manual OAuth input cleared for ${providerId}`);
 			}
+			if (authorizationUrlLease !== undefined) this.ctx.clearOAuthAuthorizationUrl(authorizationUrlLease);
 		}
 	}
 

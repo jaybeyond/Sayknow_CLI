@@ -92,6 +92,41 @@ export const BUILTIN_MODEL_PROFILES: readonly ModelProfileDefinition[] = [
 		critic: "openai-codex/gpt-5.6-sol:max",
 		architect: "openai-codex/gpt-5.6-sol:xhigh",
 	}),
+	profile("macos-omlx-fast", ["omlx"], {
+		default: "omlx/Qwen3.6-35B-A3B-4bit:low",
+		executor: "omlx/Qwen3.6-35B-A3B-4bit:low",
+		architect: "omlx/Qwen3.6-35B-A3B-4bit:high",
+		planner: "omlx/Qwen3.6-35B-A3B-4bit:medium",
+		critic: "omlx/Qwen3.6-35B-A3B-4bit:high",
+	}),
+	profile("macos-omlx-balanced", ["omlx"], {
+		default: "omlx/Qwen3.6-35B-A3B-8bit:low",
+		executor: "omlx/Qwen3.6-35B-A3B-8bit:low",
+		architect: "omlx/Qwen3.6-35B-A3B-8bit:high",
+		planner: "omlx/Qwen3.6-35B-A3B-8bit:medium",
+		critic: "omlx/Qwen3.6-35B-A3B-8bit:high",
+	}),
+	profile("macos-omlx-quality", ["omlx"], {
+		default: "omlx/Qwen3.6-35B-A3B-8bit:low",
+		executor: "omlx/Qwen3.6-35B-A3B-8bit:low",
+		architect: "omlx/Qwen3.6-35B-A3B-8bit:high",
+		planner: "omlx/Qwen3.6-35B-A3B-8bit:medium",
+		critic: "omlx/Qwen3.8-27B-8bit:high",
+	}),
+	profile("macos-omlx-abliterated-fast", ["omlx"], {
+		default: "omlx/Qwen3.8-27B-Uncensored-MLX-4bit:low",
+		executor: "omlx/Qwen3.8-27B-Uncensored-MLX-4bit:low",
+		architect: "omlx/Qwen3.8-27B-Uncensored-MLX-4bit:high",
+		planner: "omlx/Qwen3.8-27B-Uncensored-MLX-4bit:medium",
+		critic: "omlx/Qwen3.8-27B-Uncensored-MLX-4bit:high",
+	}),
+	profile("macos-omlx-abliterated-balanced", ["omlx"], {
+		default: "omlx/Qwen3.8-27B-Uncensored-MLX-4bit:low",
+		executor: "omlx/Qwen3.8-27B-Uncensored-MLX-4bit:low",
+		architect: "omlx/Qwen3.8-27B-Uncensored-MLX-4bit:high",
+		planner: "omlx/Qwen3.8-27B-Uncensored-MLX-4bit:medium",
+		critic: "omlx/Qwen3.8-27B-Uncensored-MLX-4bit:high",
+	}),
 	profile("opencodego", ["opencode-go"], {
 		default: "opencode-go/kimi-k2.6",
 		executor: "opencode-go/deepseek-v4-flash",
@@ -327,6 +362,23 @@ const PROFILE_PRESENTATION: Record<string, ModelProfilePresentation> = {
 	"codex-eco": { displayName: "Codex Eco", providerGroup: "CODEX" },
 	"codex-medium": { displayName: "Codex Medium", providerGroup: "CODEX" },
 	"codex-pro": { displayName: "Codex Pro", providerGroup: "CODEX" },
+	"macos-omlx-fast": { displayName: "4-bit Fast (MoE measured 93.5 tok/s)", providerGroup: "macOS Local (oMLX)" },
+	"macos-omlx-balanced": {
+		displayName: "8-bit Balanced (MoE measured 71.1 tok/s)",
+		providerGroup: "macOS Local (oMLX)",
+	},
+	"macos-omlx-quality": {
+		displayName: "Quality mix (8-bit MoE + 8-bit dense critic)",
+		providerGroup: "macOS Local (oMLX)",
+	},
+	"macos-omlx-abliterated-fast": {
+		displayName: "Uncensored 4-bit Fast (measured 19.8 tok/s)",
+		providerGroup: "macOS Local (oMLX)",
+	},
+	"macos-omlx-abliterated-balanced": {
+		displayName: "Uncensored 4-bit Balanced (same winner as fast)",
+		providerGroup: "macOS Local (oMLX)",
+	},
 	opencodego: { displayName: "OpenCodeGo", providerGroup: "OPENCODEGO" },
 	"claude-opus": { displayName: "Claude Opus", providerGroup: "CLAUDE" },
 	"claude-fable": { displayName: "Claude Fable", providerGroup: "CLAUDE" },
@@ -361,6 +413,7 @@ const PROFILE_PRESENTATION: Record<string, ModelProfilePresentation> = {
 
 const PROFILE_GROUP_ORDER = [
 	"CODEX",
+	"macOS Local (oMLX)",
 	"OPENCODEGO",
 	"CLAUDE",
 	"GLM",
@@ -372,6 +425,14 @@ const PROFILE_GROUP_ORDER = [
 	"ALIBABA TOKEN PLAN",
 	"COMBOS",
 ];
+const MACOS_OMLX_PROFILE_ORDER = [
+	"macos-omlx-fast",
+	"macos-omlx-balanced",
+	"macos-omlx-quality",
+	"macos-omlx-abliterated-fast",
+	"macos-omlx-abliterated-balanced",
+] as const;
+const MACOS_OMLX_PROFILE_RANK = new Map<string, number>(MACOS_OMLX_PROFILE_ORDER.map((name, index) => [name, index]));
 
 const PROFILE_RECOMMENDATIONS: Record<string, string> = {
 	"openai-codex": "codex-medium",
@@ -386,6 +447,7 @@ const PROFILE_RECOMMENDATIONS: Record<string, string> = {
 	xai: "grok-medium",
 	"grok-build": "grok-build-pro",
 	cursor: "cursor-medium",
+	omlx: "macos-omlx-balanced",
 	"minimax-code": "minimax-medium",
 	"alibaba-token-plan": "alibaba-token-plan-balanced",
 };
@@ -420,7 +482,13 @@ export function groupModelProfilesForPresetLanding(
 	}
 	for (const [group, entries] of groups) {
 		if (entries.length === 0) groups.delete(group);
-		else entries.sort((a, b) => a.name.localeCompare(b.name));
+		else if (group === "macOS Local (oMLX)") {
+			entries.sort(
+				(a, b) =>
+					(MACOS_OMLX_PROFILE_RANK.get(a.name) ?? Number.MAX_SAFE_INTEGER) -
+					(MACOS_OMLX_PROFILE_RANK.get(b.name) ?? Number.MAX_SAFE_INTEGER),
+			);
+		} else entries.sort((a, b) => a.name.localeCompare(b.name));
 	}
 	return groups;
 }

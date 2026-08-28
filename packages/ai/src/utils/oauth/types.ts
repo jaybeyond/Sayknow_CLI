@@ -52,6 +52,7 @@ export type OAuthProvider =
 	| "venice"
 	| "vercel-ai-gateway"
 	| "vllm"
+	| "sglang"
 	| "xai"
 	| "glm-zcode"
 	| "xiaomi"

@@ -3,7 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { YAML } from "bun";
-import { AtomicYamlConflictError, atomicYamlPathHash } from "../src/config/atomic-yaml-patch";
+import { AtomicYamlRetargetError, atomicYamlPathHash } from "../src/config/atomic-yaml-patch";
 
 describe("Settings global model role durability", () => {
 	let testDir: string;
@@ -75,7 +75,10 @@ describe("Settings global model role durability", () => {
 		if (!winner?.selector) throw new Error("Expected a winning selector.");
 		expect(results.filter(result => result.status === "winner")).toHaveLength(1);
 		expect(results.filter(result => result.status === "loser")).toEqual([
-			expect.objectContaining({ name: AtomicYamlConflictError.name, code: "ATOMIC_YAML_CONFLICT" }),
+			expect.objectContaining({
+				name: AtomicYamlRetargetError.name,
+				code: "ATOMIC_YAML_RETARGETED",
+			}),
 		]);
 		expect(
 			(YAML.parse(await Bun.file(configPath).text()) as { modelRoles: { default: string } }).modelRoles.default,

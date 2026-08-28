@@ -91,6 +91,7 @@ export class InputController {
 			"app.model.select": () => this.ctx.showModelSelector(),
 			"app.model.selectTemporary": () => this.ctx.showModelSelector({ temporaryOnly: true }),
 			"app.tools.expand": () => this.toggleToolOutputExpansion(),
+			"app.todo.toggle": () => this.ctx.toggleTodoExpansion(),
 			"app.tool.backgroundFold": () => {
 				this.handleForegroundToolBackgroundFold();
 			},
@@ -103,6 +104,7 @@ export class InputController {
 			},
 			"app.clipboard.copyLine": () => this.handleCopyCurrentLine(),
 			"app.clipboard.copyPrompt": () => this.handleCopyPrompt(),
+			"app.oauth.copyUrl": () => this.ctx.copyOAuthAuthorizationUrl(),
 			"app.session.new": async () => {
 				await this.ctx.handleClearCommand();
 			},
@@ -153,6 +155,8 @@ export class InputController {
 				return this.ctx.session.getRoleModelCycleCandidateCount() > 1;
 			case "app.tools.expand":
 				return this.ctx.chatContainer.children.some(isExpandable);
+			case "app.todo.toggle":
+				return this.ctx.todoPhases.some(phase => phase.tasks.length > 0);
 			case "app.tool.backgroundFold":
 				return Boolean(this.ctx.session.hasForegroundBashBackgroundRequestHandler?.());
 			case "app.editor.external":
@@ -178,6 +182,8 @@ export class InputController {
 				);
 			case "app.clipboard.copyPrompt":
 				return this.ctx.editor.getText().length > 0;
+			case "app.oauth.copyUrl":
+				return this.ctx.hasOAuthAuthorizationUrl();
 			case "app.session.tree":
 			case "app.session.fork":
 				return this.ctx.session.messages.length > 0;
@@ -258,14 +264,20 @@ export class InputController {
 	 *  so abort cleanup going idle cannot turn the second Esc into an idle action. */
 	#steerConsumePending = false;
 	#commandPaletteActions = new Map<AppKeybinding, CommandPaletteAction>();
+	readonly #availabilityGatedPaletteActions = new Set<AppKeybinding>();
 	#paletteCommandInFlight = false;
 
-	#registerCommandPaletteAction(action: AppKeybinding, handler: () => void | Promise<void>): void {
+	#registerCommandPaletteAction(
+		action: AppKeybinding,
+		handler: () => void | Promise<void>,
+		availabilityGated = false,
+	): void {
 		this.#commandPaletteActions.set(action, {
 			id: action,
 			label: KEYBINDINGS[action].description,
 			handler,
 		});
+		if (availabilityGated) this.#availabilityGatedPaletteActions.add(action);
 	}
 
 	#globalInterruptUnsubscribe: (() => void) | undefined;
@@ -623,14 +635,12 @@ export class InputController {
 		this.ctx.editor.setActionKeys("app.tools.expand", this.ctx.keybindings.getKeys("app.tools.expand"));
 		this.ctx.editor.onExpandTools = () => this.#executeAction("app.tools.expand");
 		this.#registerCommandPaletteAction("app.tools.expand", expandTools);
-		const dequeue = () => this.handleDequeue();
 		this.ctx.editor.setActionKeys("app.message.dequeue", this.ctx.keybindings.getKeys("app.message.dequeue"));
 		this.ctx.editor.onDequeue = () => this.#executeAction("app.message.dequeue");
-		this.#registerCommandPaletteAction("app.message.dequeue", dequeue);
-		const queue = () => this.handleQueueSubmit();
+		this.#registerCommandPaletteAction("app.message.dequeue", () => this.#executeAction("app.message.dequeue"), true);
 		this.ctx.editor.setActionKeys("app.message.queue", this.ctx.keybindings.getKeys("app.message.queue"));
 		this.ctx.editor.onQueue = () => this.#executeAction("app.message.queue");
-		this.#registerCommandPaletteAction("app.message.queue", queue);
+		this.#registerCommandPaletteAction("app.message.queue", () => this.#executeAction("app.message.queue"), true);
 
 		this.ctx.editor.onViewportPageScroll = direction => this.ctx.ui.scrollViewportPages(direction);
 		this.ctx.editor.onViewportFollowLive = () => {
@@ -699,10 +709,55 @@ export class InputController {
 				return true;
 			});
 		}
+		this.#registerCommandPaletteAction(
+			"app.message.followUp",
+			() => this.#executeAction("app.message.followUp"),
+			true,
+		);
 		for (const key of this.ctx.keybindings.getKeys("app.message.followUp")) {
 			this.ctx.editor.setCustomKeyHandler(key, () => {
 				if (!this.actionRegistry.isAvailable("app.message.followUp")) return false;
 				this.#executeAction("app.message.followUp");
+				return true;
+			});
+		}
+		this.#registerCommandPaletteAction(
+			"app.transcript.prevTurn",
+			() => this.#executeAction("app.transcript.prevTurn"),
+			true,
+		);
+		for (const key of this.ctx.keybindings.getKeys("app.transcript.prevTurn")) {
+			this.ctx.editor.setCustomKeyHandler(key, () => {
+				if (!this.actionRegistry.isAvailable("app.transcript.prevTurn")) return false;
+				this.#executeAction("app.transcript.prevTurn");
+				return true;
+			});
+		}
+		this.#registerCommandPaletteAction(
+			"app.transcript.nextTurn",
+			() => this.#executeAction("app.transcript.nextTurn"),
+			true,
+		);
+		for (const key of this.ctx.keybindings.getKeys("app.transcript.nextTurn")) {
+			this.ctx.editor.setCustomKeyHandler(key, () => {
+				if (!this.actionRegistry.isAvailable("app.transcript.nextTurn")) return false;
+				this.#executeAction("app.transcript.nextTurn");
+				return true;
+			});
+		}
+		this.#registerCommandPaletteAction("app.message.sendNow", () => this.#executeAction("app.message.sendNow"), true);
+		for (const key of this.ctx.keybindings.getKeys("app.message.sendNow")) {
+			this.ctx.editor.setCustomKeyHandler(key, () => {
+				if (!this.actionRegistry.isAvailable("app.message.sendNow")) return false;
+				this.#executeAction("app.message.sendNow");
+				return true;
+			});
+		}
+		this.#registerCommandPaletteAction("app.todo.toggle", () => this.#executeAction("app.todo.toggle"), true);
+		for (const key of this.ctx.keybindings.getKeys("app.todo.toggle")) {
+			this.ctx.editor.setCustomKeyHandler(key, () => {
+				if (!this.actionRegistry.isAvailable("app.todo.toggle")) return false;
+				this.#executeAction("app.todo.toggle");
 				return true;
 			});
 		}
@@ -715,6 +770,14 @@ export class InputController {
 		for (const key of this.ctx.keybindings.getKeys("app.clipboard.copyLine")) {
 			this.ctx.editor.setCustomKeyHandler(key, () => {
 				this.#executeAction("app.clipboard.copyLine");
+			});
+		}
+		this.#registerCommandPaletteAction("app.oauth.copyUrl", () => this.#executeAction("app.oauth.copyUrl"), true);
+		for (const key of this.ctx.keybindings.getKeys("app.oauth.copyUrl")) {
+			this.ctx.editor.setCustomKeyHandler(key, () => {
+				if (!this.actionRegistry.isAvailable("app.oauth.copyUrl")) return false;
+				this.#executeAction("app.oauth.copyUrl");
+				return true;
 			});
 		}
 		for (const key of this.ctx.keybindings.getKeys("app.session.observe")) {
@@ -1900,7 +1963,9 @@ export class InputController {
 			return;
 		}
 
-		const actions = [...this.#commandPaletteActions.values()];
+		const actions = [...this.#commandPaletteActions.entries()]
+			.filter(([id]) => !this.#availabilityGatedPaletteActions.has(id) || this.actionRegistry.isAvailable(id))
+			.map(([, action]) => action);
 		const slashCommands = [...(this.ctx.getSlashCommands?.() ?? this.#slashCommands)];
 		if (!this.ctx.showCommandPalette) {
 			let overlayHandle: ReturnType<typeof this.ctx.ui.showOverlay> | undefined;

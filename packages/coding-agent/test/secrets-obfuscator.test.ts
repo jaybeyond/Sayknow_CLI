@@ -427,7 +427,7 @@ describe("SecretObfuscator authenticated placeholders", () => {
 
 	it("matches the fixed authenticated-placeholder vector", () => {
 		const obfuscator = new SecretObfuscator([{ type: "plain", content: "secret-value" }], TEST_KEY);
-		expect(obfuscator.obfuscate("secret-value")).toBe("#SKC1_LEyH7CSGoVYoWfjXx6PKVQ#");
+		expect(obfuscator.obfuscate("secret-value")).toBe("#SKC1_RV7CD1aeKTIOz2edclA-0g#");
 	});
 
 	it("keeps helper-created plain tokens stable within the process", () => {

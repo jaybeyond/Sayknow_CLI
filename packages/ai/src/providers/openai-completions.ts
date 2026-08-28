@@ -38,6 +38,7 @@ import {
 import { normalizeSystemPrompts, sanitizeJsonStrings } from "../utils";
 import { createAbortSourceTracker } from "../utils/abort";
 import { AssistantMessageEventStream } from "../utils/event-stream";
+import { transportFailureFacts } from "../utils/fallback-transport";
 import { toFirepassWireModelId, toFireworksWireModelId } from "../utils/fireworks-model-id";
 import {
 	type CapturedHttpErrorResponse,
@@ -465,7 +466,7 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions"> = (
 				options?.fetch,
 				options?.streamFirstEventTimeoutMs,
 				options?.authCredentialType,
-				options?.requestMaxRetries,
+				options?.fallbackManaged ? 0 : options?.requestMaxRetries,
 				options?.sessionId,
 			);
 			const premiumRequestsTotal = copilotPremiumRequests;
@@ -500,7 +501,10 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions"> = (
 					body: params,
 				};
 				const { data, response, request_id } = await client.chat.completions
-					.create(params as OpenAI.Chat.Completions.ChatCompletionCreateParamsStreaming, { signal: requestSignal })
+					.create(params as OpenAI.Chat.Completions.ChatCompletionCreateParamsStreaming, {
+						signal: requestSignal,
+						...(options?.fallbackManaged ? { maxRetries: 0 } : {}),
+					})
 					.withResponse();
 				await notifyProviderResponse(options, response, model, request_id);
 				return data;
@@ -510,6 +514,7 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions"> = (
 				openaiStream = await callWithCopilotModelRetry(() => createCompletionsStream(), {
 					provider: model.provider,
 					signal: requestSignal,
+					fallbackManaged: options?.fallbackManaged,
 				});
 			} catch (error) {
 				const capturedErrorResponse = getCapturedErrorResponse();
@@ -766,13 +771,25 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions"> = (
 
 				if (choice.finish_reason) {
 					const finishReasonResult = mapStopReason(choice.finish_reason);
-					output.stopReason = finishReasonResult.stopReason;
-					if (finishReasonResult.errorMessage) {
-						output.errorMessage = finishReasonResult.errorMessage;
+					if (choice.finish_reason === "content_filter") {
+						output.errorKind = "provider_safety_stop";
+					}
+					if (output.errorKind !== "provider_safety_stop" || choice.finish_reason === "content_filter") {
+						output.stopReason = finishReasonResult.stopReason;
+						if (finishReasonResult.errorMessage) {
+							output.errorMessage = finishReasonResult.errorMessage;
+						}
 					}
 				}
 
 				if (choice.delta) {
+					const refusal = choice.delta.refusal;
+					if (typeof refusal === "string" && refusal.length > 0) {
+						output.errorKind = "provider_safety_stop";
+						output.stopReason = "error";
+						output.errorMessage = "Provider refusal";
+						appendTextDelta(refusal);
+					}
 					const normalizedDeltaText = normalizeStreamingContentText(choice.delta.content);
 					if (normalizedDeltaText.length > 0) {
 						if (!firstTokenTime) firstTokenTime = Date.now();
@@ -944,13 +961,19 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions"> = (
 			const firstEventTimeoutError = abortTracker.getLocalAbortReason();
 			output.stopReason = abortTracker.wasCallerAbort() ? "aborted" : "error";
 			output.errorStatus = extractHttpStatusFromError(error) ?? getCapturedErrorResponse?.()?.status;
-			output.errorMessage =
-				firstEventTimeoutError?.message ??
-				(await finalizeErrorMessage(error, rawRequestDump, getCapturedErrorResponse?.()));
-			// Some providers via OpenRouter include extra details here.
-			const rawMetadata = (error as { error?: { metadata?: { raw?: string } } })?.error?.metadata?.raw;
-			if (rawMetadata) output.errorMessage += `\n${rawMetadata}`;
-			output.errorMessage = rewriteCopilotError(output.errorMessage, error, model.provider);
+			output.transportFailure = transportFailureFacts(error);
+			if (isOpenAICompletionsSafetyStop(error, getCapturedErrorResponse?.())) {
+				output.errorKind = "provider_safety_stop";
+			}
+			if (output.errorKind !== "provider_safety_stop" || !output.errorMessage) {
+				output.errorMessage =
+					firstEventTimeoutError?.message ??
+					(await finalizeErrorMessage(error, rawRequestDump, getCapturedErrorResponse?.()));
+				// Some providers via OpenRouter include extra details here.
+				const rawMetadata = (error as { error?: { metadata?: { raw?: string } } })?.error?.metadata?.raw;
+				if (rawMetadata) output.errorMessage += `\n${rawMetadata}`;
+				output.errorMessage = rewriteCopilotError(output.errorMessage, error, model.provider);
+			}
 			output.duration = Date.now() - startTime;
 			if (firstTokenTime) output.ttft = firstTokenTime - startTime;
 			stream.push({ type: "error", reason: output.stopReason, error: output });
@@ -1264,8 +1287,12 @@ function buildParams(
 		// Qwen uses top-level enable_thinking: boolean
 		params.enable_thinking = !!options?.reasoning && !options?.disableReasoning;
 	} else if (supportsReasoningParams && compat.thinkingFormat === "qwen-chat-template" && model.reasoning) {
+		const enableThinking = !!options?.reasoning && !options?.disableReasoning;
 		params.chat_template_kwargs = {
-			enable_thinking: !!options?.reasoning && !options?.disableReasoning,
+			enable_thinking: enableThinking,
+			...(enableThinking && options?.reasoning
+				? { reasoning_effort: mapReasoningEffort(options.reasoning, compat.reasoningEffortMap) }
+				: {}),
 		};
 	} else if (supportsReasoningParams && compat.thinkingFormat === "openrouter" && model.reasoning) {
 		// OpenRouter normalizes reasoning across providers via a nested reasoning object.
@@ -1926,7 +1953,22 @@ function shouldRetryWithoutStrictTools(
 		.join("\n");
 	return /wrong_api_format|mixed values for 'strict'|tool[s]?\b.*strict|\bstrict\b.*tool/i.test(messageParts);
 }
-
+function isOpenAICompletionsSafetyStop(
+	error: unknown,
+	capturedErrorResponse: CapturedHttpErrorResponse | undefined,
+): boolean {
+	const hasContentFilterCode = (value: unknown): boolean =>
+		typeof value === "string" && value.toLowerCase() === "content_filter";
+	const errorRecord = error as { code?: unknown; error?: { code?: unknown } } | undefined;
+	if (hasContentFilterCode(errorRecord?.code) || hasContentFilterCode(errorRecord?.error?.code)) return true;
+	if (!capturedErrorResponse?.bodyText) return false;
+	try {
+		const body = JSON.parse(capturedErrorResponse.bodyText) as { code?: unknown; error?: { code?: unknown } };
+		return hasContentFilterCode(body.code) || hasContentFilterCode(body.error?.code);
+	} catch {
+		return false;
+	}
+}
 function mapStopReason(reason: ChatCompletionChunk.Choice["finish_reason"] | string): {
 	stopReason: StopReason;
 	errorMessage?: string;

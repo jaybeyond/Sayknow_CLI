@@ -7,6 +7,7 @@ import type { Args } from "@sayknow-cli/coding-agent/cli/args";
 import { buildDefaultTmuxLaunchPlan } from "@sayknow-cli/coding-agent/skc-runtime/launch-tmux";
 import {
 	ensureLaunchWorktree,
+	ensureReusableNodeModules,
 	parseLaunchWorktreeMode,
 	planLaunchWorktree,
 	prepareLaunchWorktree,
@@ -113,6 +114,221 @@ describe("default launch worktrees", () => {
 		const second = prepareLaunchWorktree(repo, ["--worktree", "--slow", "opus"]);
 		expect(await fs.realpath(second.cwd)).toBe(await fs.realpath(expectedPath));
 		expect(second.worktree.enabled && second.worktree.reused).toBe(true);
+	});
+
+	for (const manager of ["bun", "npm", "pnpm"] as const) {
+		it.skipIf(manager !== "bun" && Bun.which(manager) === null)(
+			`installs ${manager} dependencies inside the worktree from its lockfile`,
+			async () => {
+				const repo = await createRepo(`skc-launch-worktree-${manager}-package-`);
+				const version = run(manager, ["--version"], repo);
+				const rootManifest = {
+					name: "workspace-root",
+					private: true,
+					packageManager: `${manager}@${version}`,
+					...(manager === "pnpm" ? {} : { workspaces: ["packages/*"] }),
+					devDependencies: { "@scope/app": manager === "npm" ? "1.0.0" : "workspace:*" },
+				};
+				await Bun.write(path.join(repo, "package.json"), JSON.stringify(rootManifest));
+				if (manager === "pnpm")
+					await Bun.write(path.join(repo, "pnpm-workspace.yaml"), "packages:\n  - packages/*\n");
+				await fs.mkdir(path.join(repo, "packages", "app"), { recursive: true });
+				await Bun.write(
+					path.join(repo, "packages", "app", "package.json"),
+					JSON.stringify({ name: "@scope/app", version: "1.0.0", exports: "./index.js" }),
+				);
+				await Bun.write(path.join(repo, "packages", "app", "index.js"), 'export const source = "worktree";\n');
+				run(manager, ["install"], repo);
+				const lockfile =
+					manager === "bun"
+						? (await Bun.file(path.join(repo, "bun.lock")).exists())
+							? "bun.lock"
+							: "bun.lockb"
+						: manager === "pnpm"
+							? "pnpm-lock.yaml"
+							: "package-lock.json";
+				run(
+					"git",
+					["add", "package.json", lockfile, "packages", ...(manager === "pnpm" ? ["pnpm-workspace.yaml"] : [])],
+					repo,
+				);
+				run("git", ["commit", "-m", "workspace package"], repo);
+
+				const plan = planLaunchWorktree(repo, { enabled: true, detached: false, name: `${manager}-workspace` });
+				if (!plan.enabled) throw new Error("expected enabled worktree plan");
+				const worktree = ensureLaunchWorktree(plan);
+				if (!worktree.enabled) throw new Error("expected enabled worktree");
+				await fs.symlink(
+					path.join(repo, "node_modules"),
+					path.join(worktree.worktreePath, "node_modules"),
+					"junction",
+				);
+
+				expect(ensureReusableNodeModules(repo, worktree.worktreePath)).toBe("present");
+				const launched = prepareLaunchWorktree(repo, ["--worktree", `${manager}-workspace`]);
+				const worktreeModules = path.join(launched.cwd, "node_modules");
+				expect((await fs.lstat(worktreeModules)).isSymbolicLink()).toBe(false);
+				expect(await fs.realpath(path.join(worktreeModules, "@scope", "app"))).toBe(
+					path.join(launched.cwd, "packages", "app"),
+				);
+				expect(await fs.realpath(path.join(repo, "node_modules", "@scope", "app"))).toBe(
+					path.join(repo, "packages", "app"),
+				);
+			},
+			30_000,
+		);
+	}
+
+	it("preserves a nested package cwd and installs at its mapped lockfile root", async () => {
+		const repo = await createRepo("skc-launch-worktree-nested-package-");
+		const packageRoot = path.join(repo, "apps", "demo");
+		await fs.mkdir(packageRoot, { recursive: true });
+		await fs.mkdir(path.join(repo, "packages", "local-dep"), { recursive: true });
+		await Bun.write(
+			path.join(packageRoot, "package.json"),
+			JSON.stringify({
+				name: "nested-package",
+				version: "1.0.0",
+				packageManager: `bun@${Bun.version}`,
+				dependencies: { "local-dep": "file:../../packages/local-dep" },
+			}),
+		);
+		await Bun.write(
+			path.join(repo, "packages", "local-dep", "package.json"),
+			JSON.stringify({ name: "local-dep", version: "1.0.0" }),
+		);
+		await Bun.write(path.join(repo, "packages", "local-dep", "index.js"), 'export const source = "worktree";\n');
+		run("bun", ["install"], packageRoot);
+		const lockfile = (await Bun.file(path.join(packageRoot, "bun.lock")).exists()) ? "bun.lock" : "bun.lockb";
+		run("git", ["add", "apps", "packages", path.join("apps", "demo", lockfile)], repo);
+		run("git", ["commit", "-m", "nested package"], repo);
+		await Bun.write(
+			path.join(repo, "packages", "local-dep", "index.js"),
+			'export const source = "source-mutated";\n',
+		);
+
+		const launched = prepareLaunchWorktree(packageRoot, ["--worktree", "nested-package"]);
+		const worktreeRoot = launched.worktree.enabled ? launched.worktree.worktreePath : "";
+		expect(launched.cwd).toBe(path.join(worktreeRoot, "apps", "demo"));
+		expect((await fs.lstat(path.join(launched.cwd, "node_modules"))).isSymbolicLink()).toBe(false);
+		expect(await Bun.file(path.join(launched.cwd, "node_modules", "local-dep", "index.js")).text()).toContain(
+			'"worktree"',
+		);
+		expect(await Bun.file(path.join(repo, "packages", "local-dep", "index.js")).text()).toContain('"source-mutated"');
+	});
+
+	it("fails closed when the lockfile package manager is unavailable", async () => {
+		const repo = await createRepo("skc-launch-worktree-unavailable-manager-");
+		await Bun.write(
+			path.join(repo, "package.json"),
+			JSON.stringify({ name: "package-root", version: "1.0.0", packageManager: "npm@11.5.2" }),
+		);
+		await Bun.write(
+			path.join(repo, "package-lock.json"),
+			JSON.stringify({
+				name: "package-root",
+				version: "1.0.0",
+				lockfileVersion: 3,
+				requires: true,
+				packages: { "": { name: "package-root", version: "1.0.0" } },
+			}),
+		);
+		run("git", ["add", "package.json", "package-lock.json"], repo);
+		run("git", ["commit", "-m", "npm package"], repo);
+
+		const plan = planLaunchWorktree(repo, { enabled: true, detached: false, name: "unavailable-manager" });
+		if (!plan.enabled) throw new Error("expected enabled worktree plan");
+		const worktree = ensureLaunchWorktree(plan);
+		if (!worktree.enabled) throw new Error("expected enabled worktree");
+		expect(() =>
+			ensureReusableNodeModules(repo, worktree.worktreePath, {
+				isExecutableAvailable: () => false,
+			}),
+		).toThrow("worktree_dependency_manager_unavailable:npm");
+
+		expect(() =>
+			ensureReusableNodeModules(repo, worktree.worktreePath, {
+				isExecutableAvailable: () => true,
+				version: () => "10.0.0",
+			}),
+		).toThrow("worktree_dependency_manager_version_mismatch:npm:11.5.2:10.0.0");
+
+		let boundedFailure: Error | undefined;
+		try {
+			ensureReusableNodeModules(repo, worktree.worktreePath, {
+				isExecutableAvailable: () => true,
+				version: () => "11.5.2",
+				spawnInstall: () => ({ exitCode: 1, stderr: "x".repeat(1024 * 1024) }),
+			});
+		} catch (error) {
+			boundedFailure = error instanceof Error ? error : new Error(String(error));
+		}
+		expect(boundedFailure?.message).toStartWith("worktree_dependency_install_failed:npm:");
+		expect(boundedFailure?.message.length).toBeLessThan(2200);
+	});
+
+	it("refuses an external node_modules link instead of installing through it", async () => {
+		const repo = await createRepo("skc-launch-worktree-external-modules-");
+		await Bun.write(
+			path.join(repo, "package.json"),
+			JSON.stringify({
+				name: "workspace-root",
+				private: true,
+				packageManager: `bun@${Bun.version}`,
+				workspaces: ["packages/*"],
+				devDependencies: { "@scope/app": "workspace:*" },
+			}),
+		);
+		await fs.mkdir(path.join(repo, "packages", "app"), { recursive: true });
+		await Bun.write(
+			path.join(repo, "packages", "app", "package.json"),
+			JSON.stringify({ name: "@scope/app", version: "1.0.0" }),
+		);
+		run("bun", ["install"], repo);
+		const lockfile = (await Bun.file(path.join(repo, "bun.lock")).exists()) ? "bun.lock" : "bun.lockb";
+		run("git", ["add", "package.json", lockfile, "packages"], repo);
+		run("git", ["commit", "-m", "workspace package"], repo);
+
+		const plan = planLaunchWorktree(repo, { enabled: true, detached: false, name: "external-modules" });
+		if (!plan.enabled) throw new Error("expected enabled worktree plan");
+		const worktree = ensureLaunchWorktree(plan);
+		if (!worktree.enabled) throw new Error("expected enabled worktree");
+		const externalModules = path.join(repo, "external-node-modules");
+		await fs.mkdir(externalModules);
+		await fs.symlink(externalModules, path.join(worktree.worktreePath, "node_modules"), "junction");
+
+		expect(() => ensureReusableNodeModules(repo, worktree.worktreePath)).toThrow(/worktree_node_modules_not_local:/);
+		expect(await fs.realpath(path.join(worktree.worktreePath, "node_modules"))).toBe(externalModules);
+	});
+
+	it("requires one supported lockfile for package worktrees", async () => {
+		const repo = await createRepo("skc-launch-worktree-lockfile-errors-");
+		await Bun.write(
+			path.join(repo, "package.json"),
+			JSON.stringify({
+				name: "workspace-root",
+				private: true,
+				packageManager: `bun@${Bun.version}`,
+				workspaces: [],
+			}),
+		);
+		run("git", ["add", "package.json"], repo);
+		run("git", ["commit", "-m", "package without lockfile"], repo);
+
+		const plan = planLaunchWorktree(repo, { enabled: true, detached: false, name: "missing-lockfile" });
+		if (!plan.enabled) throw new Error("expected enabled worktree plan");
+		const worktree = ensureLaunchWorktree(plan);
+		if (!worktree.enabled) throw new Error("expected enabled worktree");
+
+		expect(() => ensureReusableNodeModules(repo, worktree.worktreePath)).toThrow(
+			"worktree_dependency_lockfile_missing",
+		);
+
+		await Bun.write(path.join(worktree.worktreePath, "bun.lock"), "");
+		await Bun.write(path.join(worktree.worktreePath, "bun.lockb"), "");
+		expect(() => ensureReusableNodeModules(repo, worktree.worktreePath)).toThrow(
+			"worktree_dependency_lockfile_ambiguous:bun.lock,bun.lockb",
+		);
 	});
 
 	it("creates launch worktrees beside the canonical source repo when launched from an existing worktree", async () => {

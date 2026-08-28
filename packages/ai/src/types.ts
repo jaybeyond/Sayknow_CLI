@@ -168,7 +168,9 @@ export type KnownProvider =
 	| "xiaomi-token-plan-ams"
 	| "xiaomi-token-plan-cn"
 	| "zenmux"
-	| "lm-studio";
+	| "lm-studio"
+	| "omlx"
+	| "sglang";
 export type Provider = KnownProvider | string;
 
 import type { Effort } from "./model-thinking";
@@ -529,6 +531,12 @@ export interface ToolCall {
 	 * rejects the call with a retryable error instead.
 	 */
 	incompleteArguments?: boolean;
+	/**
+	 * Transient raw JSON for a provider-detected `\uXXXX`-escaped non-ASCII
+	 * tool payload. The agent loop validates and removes it before persistence.
+	 */
+	escapedNonAsciiArguments?: boolean;
+	escapedNonAsciiArgumentsRaw?: string;
 }
 
 export interface Usage {
