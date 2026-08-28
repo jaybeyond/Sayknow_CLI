@@ -1,11 +1,13 @@
 # Changelog
 
+## [Unreleased]
+
 Sayknow-CLI descends from an upstream MIT agent harness; see [`NOTICE.md`](../../NOTICE.md).
 This file tracks the **fork's own releases**; upstream's full feature history lives
 in that project. Each release notes the upstream version it is built on.
 
 
-## [Unreleased]
+## [0.5.3] - 2026-08-28
 
 ### Added
 

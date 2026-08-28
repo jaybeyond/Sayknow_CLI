@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.5.3] - 2026-08-28
+
 ### Notes
 
 - The SDK bridge protocol carried over this transport remains **experimental**;

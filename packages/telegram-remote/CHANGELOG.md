@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.5.3] - 2026-08-28
+
 ### Added
 
 - Managed-service examples for Telegram Remote deployments: Linux systemd user units for coordinator

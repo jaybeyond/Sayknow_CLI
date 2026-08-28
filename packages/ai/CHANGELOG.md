@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.5.3] - 2026-08-28
+
 ### Added
 
 - Added first-class oMLX and SGLang OpenAI-compatible local providers. oMLX includes model capability enrichment and macOS profiles; SGLang discovery is credentialless only on normalized loopback origins and supports trusted `SGLANG_BASE_URL`/`SGLANG_API_KEY` configuration.
