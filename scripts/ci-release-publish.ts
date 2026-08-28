@@ -815,7 +815,7 @@ export async function publishRetainedPackage(
 	// dist-tag can briefly lag behind the just-published version. Both resolve within
 	// seconds, so re-observe with bounded backoff before treating either as a failure.
 	// Real conflicts (integrity/byte mismatch) are rethrown immediately, never retried.
-	const retries = operations.visibilityRetries ?? 12;
+	const retries = operations.visibilityRetries ?? 36;
 	const delayMs = operations.visibilityDelayMs ?? 5000;
 	const sleep = operations.sleep ?? ((ms: number) => Bun.sleep(ms));
 	const isTransientVisibilityError = (error: unknown): boolean => {
