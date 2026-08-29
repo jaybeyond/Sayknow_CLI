@@ -88,3 +88,9 @@ packages/coding-agent/binaries/
 .omc/
 # Python SDK build output
 python/skc-sdk/build/
+
+# Affected-CI planner artifacts (published as workflow artifacts, never committed)
+.ci-dev-affected-plan.json
+.ci-dev-affected-evidence.json
+.ci-dev-affected-evidence.receipt.json
+.ci-dev-shard-receipts/

@@ -122,7 +122,29 @@ async function main(): Promise<void> {
 		return;
 	}
 	if (process.argv.includes("--matrix-json")) {
-		await emitMatrix();
+		// Main CI full mode emits the lean deterministic matrix; dev-ci's
+		// changed-path mode emits the canonical plan and its replay bindings.
+		await (forceFullPlan() ? emitFullMatrix() : emitMatrix());
+		return;
+	}
+	if (process.argv.includes("--validate-plan")) {
+		await validateCanonicalPlan();
+		return;
+	}
+	if (process.argv.includes("--validate-aggregate")) {
+		await validateAggregate();
+		return;
+	}
+	if (process.argv.includes("--validate-shard-receipts")) {
+		await validateShardReceipts();
+		return;
+	}
+	if (process.argv.includes("--write-affected-evidence")) {
+		await writeAffectedEvidence();
+		return;
+	}
+	if (process.argv.includes("--validate-affected-evidence")) {
+		await validateAffectedEvidence();
 		return;
 	}
 	if (process.argv.includes("--native-build")) {
@@ -336,6 +358,14 @@ function addPythonTasks(tasks: Map<string, Task>): void {
 	add(tasks, "python-build-smoke", "Python SDK build smoke", ["bun", "run", "ci:test:py-sdk-build"], undefined, { rust: false, nextest: false, nativeConsumer: false, nativeProducer: false }, "python");
 }
 async function resolvePlannedTasks(paths: readonly string[]): Promise<Task[]> {
+	// Shards run against the exact plan the planner job published, not a
+	// re-derivation: `loadCanonicalPlan` binds the plan bytes to the plan digest
+	// and the checked-out source SHA, so plan drift fails loudly here instead of
+	// silently skipping validation on a shard.
+	const canonical = await loadCanonicalPlan();
+	if (canonical) {
+		return canonical;
+	}
 	const packages = await getWorkspacePackages();
 	if (forceFullPlan()) {
 		return planFullTasks(packages);
@@ -525,12 +555,19 @@ async function emitFullMatrix(): Promise<void> {
 }
 
 async function emitMatrix(): Promise<void> {
+	const sourceSha = await resolveSourceSha();
 	const paths = await getChangedPaths();
 	const mode = resolvePlanMode();
 	const tasks = await resolvePlannedTasks(paths);
 	const entries = describeTasks(tasks);
 
 	console.log(JSON.stringify(entries));
+
+	// The canonical plan is the single source of truth every downstream dev-ci
+	// job replays: shards bind to it by digest + source SHA, and the evidence
+	// producer hashes it as child evidence. It is written unconditionally so a
+	// local `--matrix-json` run reproduces exactly what CI publishes.
+	const planDigest = await writeCanonicalPlan(paths, mode, sourceSha, tasks);
 
 	const githubOutput = process.env.GITHUB_OUTPUT;
 	if (!githubOutput) return;
@@ -551,9 +588,8 @@ async function emitMatrix(): Promise<void> {
 		`has_python=${hasPython}`,
 		`has_darwin_arm64_tab_worker_smoke=${hasDarwinArm64TabWorkerSmoke}`,
 		`has_windows_session_path=${hasWindowsSessionPath}`,
-		// No plan_digest/plan_source_sha: this tree has no canonical-plan writer,
-		// and full mode deliberately resolves the plan independently in every job
-		// instead of binding shards to a shared plan artifact.
+		`plan_digest=${planDigest}`,
+		`plan_source_sha=${sourceSha}`,
 		`plan_mode=${mode}`,
 		"changed_paths<<__SKC_PATHS_EOF__",
 		...paths,
@@ -561,6 +597,15 @@ async function emitMatrix(): Promise<void> {
 		"",
 	];
 	await fs.appendFile(githubOutput, lines.join("\n"));
+}
+
+// Serialize the plan to its canonical bytes and publish it at the repo root.
+// The digest returned here is what `loadCanonicalPlan` re-derives from the file
+// text, so the JSON must be written verbatim with no trailing newline.
+async function writeCanonicalPlan(paths: readonly string[], mode: PlanMode, sourceSha: string, tasks: readonly Task[]): Promise<string> {
+	const raw = JSON.stringify({ schemaVersion: 1, sourceSha, mode, paths, tasks: serializeTasks(tasks) });
+	await Bun.write(path.join(repoRoot, AFFECTED_PLAN_NAME), raw);
+	return sha256(raw);
 }
 
 // `--native-build` runs every native build task in the current plan exactly
@@ -622,6 +667,23 @@ function printPlan(paths: readonly string[], plannedTasks: readonly Task[]): voi
 	}
 }
 
+// The canonical source head every planner decision binds to. On pull_request,
+// GITHUB_SHA is the synthetic merge commit, which does not exist in the
+// depth-one shard checkouts that later replay the plan; CI_DEV_SOURCE_SHA names
+// the real source commit instead and therefore wins. Resolution is verified
+// against this checkout so an unavailable head fails loudly rather than
+// silently planning from the wrong tree.
+async function resolveSourceSha(): Promise<string> {
+	const declared = Bun.env.CI_DEV_SOURCE_SHA?.trim();
+	const ambient = Bun.env.GITHUB_SHA?.trim();
+	const candidate = declared || (ambient && !ZERO_SHA.test(ambient) ? ambient : "") || "HEAD";
+	const resolved = await $`git rev-parse --verify --quiet ${`${candidate}^{commit}`}`.cwd(repoRoot).quiet().nothrow();
+	if (resolved.exitCode !== 0 || resolved.stdout.toString().trim() === "") {
+		throw new Error(`affected-plan-invalid: canonical source head ${candidate} is not available in this checkout`);
+	}
+	return candidate === "HEAD" ? resolved.stdout.toString().trim() : candidate;
+}
+
 async function getChangedPaths(): Promise<string[]> {
 	// Full mode plans the complete union, so no diff is needed; computing one
 	// would fail anyway on the shallow CI checkout.
@@ -629,47 +691,48 @@ async function getChangedPaths(): Promise<string[]> {
 
 	const explicitPaths = Bun.env.CI_DEV_CHANGED_PATHS?.trim();
 	if (explicitPaths) {
-		return explicitPaths
-			.split(/[\n,]/)
-			.map(entry => entry.trim())
-			.filter(Boolean)
-			.sort();
+		return normalizeChangedPaths(explicitPaths.split(/[\n,]/).map(entry => entry.trim()).filter(Boolean));
 	}
 
-	const base = await resolveBaseRef();
-	const head = Bun.env.GITHUB_SHA?.trim() || "HEAD";
+	const head = await resolveSourceSha();
+	const base = await resolveBaseRef(head);
 	const range = base.includes("...") || base.includes("..") ? base : `${base}...${head}`;
 	const diff = await $`git diff --name-only -z ${range}`.cwd(repoRoot).quiet().nothrow();
 	if (diff.exitCode !== 0) {
 		const stderr = diff.stderr.toString().trim();
 		throw new Error(`Failed to compute changed paths for ${range}: ${stderr}`);
 	}
-	return new TextDecoder().decode(diff.stdout).split("\0").filter(Boolean).sort();
+	return normalizeChangedPaths(new TextDecoder().decode(diff.stdout).split("\0").filter(Boolean));
 }
 
-async function resolveBaseRef(): Promise<string> {
+async function resolveBaseRef(head: string): Promise<string> {
 	const eventName = Bun.env.GITHUB_EVENT_NAME?.trim();
 	const before = Bun.env.GITHUB_EVENT_BEFORE?.trim();
 	const baseSha = Bun.env.GITHUB_BASE_SHA?.trim();
 	const baseRef = Bun.env.GITHUB_BASE_REF?.trim();
 
+	// `origin/<base ref>` is mutable and frequently absent in a shallow shard
+	// checkout. Prefer its merge-base when it resolves, then fall through to the
+	// immutable event base SHA rather than emitting a ref that git cannot read.
 	if (eventName === "pull_request" && baseRef) {
-		const mergeBase = await $`git merge-base HEAD ${`origin/${baseRef}`}`.cwd(repoRoot).quiet().nothrow();
+		const mergeBase = await $`git merge-base ${head} ${`origin/${baseRef}`}`.cwd(repoRoot).quiet().nothrow();
 		if (mergeBase.exitCode === 0) {
 			const value = mergeBase.stdout.toString().trim();
 			if (value !== "") return value;
 		}
-		return `origin/${baseRef}`;
 	}
 	if (baseSha && !ZERO_SHA.test(baseSha)) {
 		return baseSha;
 	}
+	if (baseRef && eventName === "pull_request") {
+		return `origin/${baseRef}`;
+	}
 	if (before && !ZERO_SHA.test(before)) {
-		return `${before}..${Bun.env.GITHUB_SHA?.trim() || "HEAD"}`;
+		return `${before}..${head}`;
 	}
 
 	const integrationRef = integrationBranchRef();
-	const mergeBase = await $`git merge-base HEAD ${integrationRef}`.cwd(repoRoot).quiet().nothrow();
+	const mergeBase = await $`git merge-base ${head} ${integrationRef}`.cwd(repoRoot).quiet().nothrow();
 	if (mergeBase.exitCode === 0) {
 		const value = mergeBase.stdout.toString().trim();
 		if (value !== "") return value;
@@ -1585,6 +1648,15 @@ async function validateShardReceipts(): Promise<void> {
 	}
 	actual.sort((left, right) => left.key.localeCompare(right.key));
 	if (JSON.stringify(actual) !== JSON.stringify(expected)) throw new Error("affected-plan-invalid: shard receipt set does not match canonical plan");
+}
+
+// `--validate-plan` asserts the published plan artifact still binds to this
+// checkout before a shard consumes it. Every failure mode throws, so the
+// process exits non-zero and the shard fails instead of running an unbound plan.
+async function validateCanonicalPlan(): Promise<void> {
+	const tasks = await loadCanonicalPlan();
+	if (!tasks) throw new Error("affected-plan-invalid: plan validation requires CI_DEV_AFFECTED_PLAN");
+	console.log(`canonical plan validated: ${tasks.length} task(s)`);
 }
 
 async function loadCanonicalPlan(): Promise<Task[] | null> {
