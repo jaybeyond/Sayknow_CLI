@@ -191,6 +191,24 @@ export function refreshModelThinking<TApi extends Api>(model: ApiModel<TApi>): A
 }
 
 /**
+ * Extract the GLM generation from a Zhipu/ZAI model id: `glm-5.3` and
+ * `glm-5.3-flash` -> 5.3, `glm-5` and `glm-5-turbo` -> 5, `glm-4.7` -> 4.7.
+ * Returns undefined for ids that are not a plain GLM generation, including the
+ * vision line (`glm-5v-turbo`), so those never inherit text-model corrections.
+ */
+export function glmGeneration(modelId: string): number | undefined {
+	const match = modelId.toLowerCase().match(/^glm-(\d+)(?:\.(\d+))?(?![\d.v])/);
+	if (!match) return undefined;
+	const [, major, minor] = match;
+	return minor === undefined ? Number(major) : Number(`${major}.${minor}`);
+}
+
+function glmGenerationAtLeast(modelId: string, minimum: number): boolean {
+	const generation = glmGeneration(modelId);
+	return generation !== undefined && generation >= minimum;
+}
+
+/**
  * Apply upstream metadata corrections to a mutable array of models.
  *
  * Each model is first normalized through `refreshModelThinking()` so generated
@@ -425,12 +443,30 @@ function applyGeneratedModelPolicy(model: ApiModel<Api>): void {
 	if (parsedModel.family === "openai") {
 		applyOpenAICatalogPolicy(model, parsedModel);
 	}
-	// GLM-5.2 (Zhipu/ZAI): ships a 1M lossless context window, but the bundled
-	// catalog copied GLM-5.1's 200K and that stale value survives generate-models
-	// (provider-scoped models bypass the models.dev refresh in applyGlobalModelsDevFallback).
-	// Pin to the true 1M so context-cap / auto-compaction thresholds aren't tripped ~5x early.
-	if (model.provider === "zai" && model.id === "glm-5.2") {
+	// GLM-5.2 and newer (Zhipu/ZAI): ship a 1M lossless context window, but the
+	// bundled catalog copied GLM-5.1's 200K and that stale value survives
+	// generate-models (provider-scoped models bypass the models.dev refresh in
+	// applyGlobalModelsDevFallback). Pin the true 1M so context-cap /
+	// auto-compaction thresholds aren't tripped ~5x early.
+	//
+	// Matched by generation rather than by exact id so the next GLM point
+	// release inherits the correct window instead of silently regressing to
+	// whatever the catalog happens to carry. The correction only raises a
+	// stale-low window: a future generation that genuinely ships more than 1M
+	// keeps its larger catalog value instead of being clamped down to 1M.
+	if (model.provider === "zai" && glmGenerationAtLeast(model.id, 5.2) && model.contextWindow < 1_000_000) {
 		model.contextWindow = 1_000_000;
+	}
+	// Alibaba Token Plan's qwen3.8-max-preview is routed through the OpenAI
+	// Responses API. models.dev recently started publishing the whole
+	// alibaba-token-plan provider, and its blanket chat-completions mapping wins
+	// the generate-models merge, so a regeneration silently reroutes this one
+	// paid model. Pin the routing that ships today and is covered by
+	// register-builtins' Responses lazy-path watchdog until the endpoint is
+	// re-verified; the catalog's other metadata (vision input, 131K output cap)
+	// is still inherited.
+	if (model.provider === "alibaba-token-plan" && model.id === "qwen3.8-max-preview") {
+		model.api = "openai-responses" as typeof model.api;
 	}
 	// MiniMax-M3: MiniMax exposes a 1M context tier, but usage beyond 512K is
 	// billed separately. Keep bundled/default metadata at the billing-safe 512K

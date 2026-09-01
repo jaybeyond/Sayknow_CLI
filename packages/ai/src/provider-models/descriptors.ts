@@ -338,7 +338,7 @@ export const PROVIDER_DESCRIPTORS: readonly ProviderDescriptor[] = [
 		config => bizrouterModelManagerOptions(config),
 		catalog("BizRouter", ["BIZROUTER_API_KEY"]),
 	),
-	catalogDescriptor("zai", "glm-5.2", config => zaiModelManagerOptions(config), catalog("zAI", ["ZAI_API_KEY"])),
+	catalogDescriptor("zai", "glm-5.3", config => zaiModelManagerOptions(config), catalog("zAI", ["ZAI_API_KEY"])),
 	catalogDescriptor(
 		"glm-zcode",
 		"glm-5.2",
