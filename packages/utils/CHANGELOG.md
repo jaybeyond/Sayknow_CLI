@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Crash-log redaction now covers vendor token shapes that previously persisted in plain text: GitLab `glpat-`, fine-grained GitHub `github_pat_`, npm `npm_`, Hugging Face `hf_`, Stripe `sk_live_`/`rk_test_`, temporary AWS key ids (`ASIA`/`ABIA`/`ACCA` alongside `AKIA`), Google `AIza…` API keys, whole PEM private-key blocks, basic-auth credentials embedded in URLs (scheme and host stay readable), and the `session_token`/`secret_access_key` labeled forms an STS payload carries.
+
 ## [0.5.6] - 2026-08-28
 
 ## [0.11.11] - 2026-07-26

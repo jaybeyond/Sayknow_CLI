@@ -125,6 +125,54 @@ describe("recordFatalCrash", () => {
 		expect(contents).toContain('"refresh_token": "«redacted»');
 	});
 
+	it("redacts vendor token shapes before persisting", () => {
+		const target = tempCrashLog();
+		const gitlab = "glpat-AbCdEf0123456789AbCdEf";
+		const huggingface = "hf_AbCdEf0123456789AbCdEf012345";
+		const finePat = "github_pat_11ABCDEFG0123456789_abcdefghij0123456789";
+		const npmToken = "npm_AbCdEf0123456789AbCdEf01";
+		const stripe = "sk_live_AbCdEf0123456789AbCd";
+		const sts = "ASIAABCDEFGHIJKLMNOP";
+		const google = "AIzaSyA-1234567890abcdefghijklmnopqrstu";
+		const urlCred = "https://jay:supersecretpw@gitlab.example.com/repo.git";
+		const err = new Error(
+			`sync failed: ${gitlab} ${huggingface} ${finePat} ${npmToken} ${stripe} ${sts} ${google} ${urlCred}`,
+		);
+
+		recordFatalCrash("Uncaught Exception", err, { path: target });
+
+		const contents = fs.readFileSync(target, "utf8");
+		expect(contents).toContain("sync failed");
+		expect(contents).toContain("«redacted-gitlab-token»");
+		expect(contents).not.toContain("glpat-AbCdEf");
+		expect(contents).not.toContain("hf_AbCdEf");
+		expect(contents).not.toContain("github_pat_11ABCDEFG");
+		expect(contents).not.toContain("npm_AbCdEf");
+		expect(contents).not.toContain("sk_live_AbCdEf");
+		expect(contents).not.toContain(sts);
+		expect(contents).not.toContain(google);
+		expect(contents).not.toContain("supersecretpw");
+		// Scheme and host survive so the record stays diagnosable.
+		expect(contents).toContain("https://«redacted-url-credential»@gitlab.example.com");
+	});
+
+	it("redacts a PEM private key block whole", () => {
+		const target = tempCrashLog();
+		const pem = [
+			"-----BEGIN RSA PRIVATE KEY-----",
+			"MIIEpAIBAAKCAQEA0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKL",
+			"-----END RSA PRIVATE KEY-----",
+		].join("\n");
+		const err = new Error(`config dump:\n${pem}`);
+
+		recordFatalCrash("Uncaught Exception", err, { path: target });
+
+		const contents = fs.readFileSync(target, "utf8");
+		expect(contents).toContain("«redacted-private-key»");
+		expect(contents).not.toContain("MIIEpAIBAAKCAQEA");
+		expect(contents).not.toContain("BEGIN RSA PRIVATE KEY");
+	});
+
 	it("enforces owner-only permissions on a pre-existing file", () => {
 		if (process.platform === "win32") return;
 		const target = tempCrashLog();
