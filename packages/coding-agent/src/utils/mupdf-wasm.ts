@@ -13,9 +13,18 @@
  * `locateFile` hook that returns the embedded asset path makes the loader
  * read the wasm from the bunfs directly — no disk sidecar needed.
  *
+ * The asset MUST live under this package (`vendor/mupdf/…`), not under the
+ * monorepo `node_modules/` tree. A `../../../../node_modules/mupdf/…` import
+ * resolves in a workspace checkout but breaks every published install
+ * (`bun install -g` / npm) where `@sayknow-cli/coding-agent` sits several
+ * directories deeper and mupdf is hoisted elsewhere — that was the 0.5.8
+ * startup crash. Refresh the vendored bytes from
+ * `node_modules/mupdf/dist/mupdf-wasm.wasm` whenever markit-ai's mupdf
+ * dependency moves.
+ *
  * This must run before the first `import("mupdf")` anywhere in the process.
  */
-import mupdfWasmPath from "../../../../node_modules/mupdf/dist/mupdf-wasm.wasm" with { type: "file" };
+import mupdfWasmPath from "../../vendor/mupdf/mupdf-wasm.wasm" with { type: "file" };
 
 const MODULE_CONFIG_KEY = "$libmupdf_wasm_Module";
 

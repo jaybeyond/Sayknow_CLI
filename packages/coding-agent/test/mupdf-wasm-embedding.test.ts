@@ -9,7 +9,28 @@ import { ensureMupdfWasmResolution } from "../src/utils/mupdf-wasm";
 const MODULE_CONFIG_KEY = "$libmupdf_wasm_Module";
 const fixturePdfPath = path.resolve(import.meta.dirname, "fixtures/dummy-pdf-fixture.pdf");
 
+function resolveVendoredMupdfWasmPath(): string {
+	return path.resolve(import.meta.dirname, "../vendor/mupdf/mupdf-wasm.wasm");
+}
+
 describe("mupdf wasm embedding (upstream #5433)", () => {
+	it("embeds the wasm from the package-local vendor path, not monorepo node_modules", () => {
+		const vendored = resolveVendoredMupdfWasmPath();
+		expect(fs.existsSync(vendored)).toBe(true);
+		const bytes = fs.readFileSync(vendored);
+		// Real wasm magic, not a Git LFS pointer (which would pack as ~130 bytes
+		// of ASCII and crash every published install the same way 0.5.8 did).
+		expect(bytes.subarray(0, 4).equals(Buffer.from([0x00, 0x61, 0x73, 0x6d]))).toBe(true);
+		expect(bytes.byteLength).toBeGreaterThan(1_000_000);
+
+		const source = fs.readFileSync(path.resolve(import.meta.dirname, "../src/utils/mupdf-wasm.ts"), "utf8");
+		const importLines = source.split("\n").filter(line => line.trimStart().startsWith("import "));
+		expect(importLines.some(line => line.includes('../../vendor/mupdf/mupdf-wasm.wasm" with { type: "file" }'))).toBe(
+			true,
+		);
+		expect(importLines.some(line => line.includes("node_modules/mupdf"))).toBe(false);
+	});
+
 	it("seeds the emscripten module config with a locateFile hook", () => {
 		const globalScope = globalThis as typeof globalThis & Record<string, unknown>;
 		const previous = globalScope[MODULE_CONFIG_KEY];
