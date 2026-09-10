@@ -160,7 +160,13 @@ export function getMaxReasoningEffort(modelId: string): Effort | undefined {
   )?.maxReasoningEffort;
 }
 
-const EFFORT_CAPABLE_PREFIXES = ['grok-3-mini', 'grok-4.20-multi-agent', 'grok-4.3', 'grok-4.5', 'grok-4.6'];
+const EFFORT_CAPABLE_PREFIXES = [
+  'grok-3-mini',
+  'grok-4.20-multi-agent',
+  'grok-4.3',
+  'grok-4.5',
+  'grok-4.6',
+];
 
 export function supportsReasoningEffort(modelId: string): boolean {
   const name = getCanonicalModelName(modelId);
