@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Opt-in adaptive compaction. A fixed threshold compacts at the same context percentage no matter how fast a session fills its window, so a tool-call burst can overshoot between two checks while a quiet session compacts more often than it needs to. `AdaptiveCompactionTracker` records calls per window and `computeAdaptiveThresholdPercent` lowers the threshold in proportion to that rate, bounded by a configurable floor. Disabled by default and inert when disabled: a fixed `thresholdTokens` still wins, `thresholdPercent` is returned unchanged, and the reserve-based default path is untouched. When enabled it still returns the base while the context sits below 70% of it, and during a short post-compaction grace, so a burst cannot chain compactions.
+
 ## [0.5.6] - 2026-08-28
 
 ## [0.5.3] - 2026-08-28

@@ -101,6 +101,16 @@ async function withTempDir(run: (dir: string) => Promise<void>): Promise<void> {
 	}
 }
 
+function emptyWorkspaceTree(): {
+	rootPath: string;
+	rendered: string;
+	truncated: boolean;
+	totalLines: number;
+	agentsMdFiles: string[];
+} {
+	return { rootPath: os.tmpdir(), rendered: "", truncated: false, totalLines: 0, agentsMdFiles: [] };
+}
+
 test("executor red-team block renders only for ultragoal completion QA assignments", () => {
 	const executor = getBundledAgent("executor");
 	expect(executor).toBeDefined();
@@ -508,5 +518,51 @@ describe("system Handlebars prompt templates", () => {
 		const workstation = /<workstation>\n(?<content>[\s\S]*?)\n<\/workstation>/u.exec(projectPrompt)?.groups?.content;
 		expect(workstation).toContain("OS:");
 		expect(workstation).not.toContain("CPU:");
+	}, 30_000);
+
+	test("buildSystemPrompt omits reasoning-language guidance by default", async () => {
+		const { systemPrompt } = await buildSystemPrompt({
+			cwd: os.tmpdir(),
+			contextFiles: [],
+			skills: [],
+			rules: [],
+			toolNames: ["read"],
+			workspaceTree: emptyWorkspaceTree(),
+		});
+
+		expect(systemPrompt.join("\n")).not.toContain("<reasoning-language>");
+	}, 30_000);
+
+	test("buildSystemPrompt adds reasoning-language guidance when set to english", async () => {
+		const { systemPrompt } = await buildSystemPrompt({
+			cwd: os.tmpdir(),
+			contextFiles: [],
+			skills: [],
+			rules: [],
+			toolNames: ["read"],
+			reasoningLanguage: "english",
+			workspaceTree: emptyWorkspaceTree(),
+		});
+
+		const rendered = systemPrompt.join("\n");
+		const block = /<reasoning-language>\n(?<content>[\s\S]*?)\n<\/reasoning-language>/u.exec(rendered)?.groups
+			?.content;
+		expect(block).toContain("Reason through development and technical problem-solving in English.");
+		expect(block).toContain("Keep user-facing answers in the language the user requested or used.");
+	}, 30_000);
+
+	test("buildSystemPrompt treats an explicit off the same as an absent setting", async () => {
+		const shared = {
+			cwd: os.tmpdir(),
+			contextFiles: [],
+			skills: [],
+			rules: [],
+			toolNames: ["read"],
+			workspaceTree: emptyWorkspaceTree(),
+		};
+		const absent = await buildSystemPrompt(shared);
+		const explicitOff = await buildSystemPrompt({ ...shared, reasoningLanguage: "off" });
+
+		expect(explicitOff.systemPrompt[0]).toBe(absent.systemPrompt[0]);
 	}, 30_000);
 });

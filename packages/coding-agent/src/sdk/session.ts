@@ -2197,6 +2197,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 
 		const repeatToolDescriptions = settings.get("repeatToolDescriptions");
 		const eagerTasks = settings.get("task.eager");
+		const reasoningLanguage = settings.get("reasoningLanguage");
 		const intentTracingEnabled = resolveIntentTracingEnabled(
 			settings.get("tools.intentTracing"),
 			options.hasUI ?? false,
@@ -2257,6 +2258,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				toolDiscoveryActive: effectiveDiscoveryMode === "all" || mcpDiscoveryEnabled,
 				eagerTasks,
 				secretsEnabled,
+				reasoningLanguage,
 				workspaceTree: workspaceTreePromise,
 				subagent: options.parentTaskPrefix !== undefined,
 			});

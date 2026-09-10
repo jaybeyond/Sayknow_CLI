@@ -42,10 +42,13 @@ import {
 } from "@sayknow-cli/agent-core";
 import { normalizeMessagesForProvider } from "@sayknow-cli/agent-core/agent-loop";
 import {
+	type AdaptiveCompactionOptions,
+	AdaptiveCompactionTracker,
 	AUTO_HANDOFF_THRESHOLD_FOCUS,
 	CompactionCancelledError,
 	type CompactionPreparation,
 	type CompactionResult,
+	type CompactionSettings as CoreCompactionSettings,
 	calculateContextTokens,
 	calculatePromptTokens,
 	collectEntriesForBranchSummary,
@@ -10771,6 +10774,43 @@ export class AgentSession {
 	}
 
 	/**
+	 * Call-rate tracker backing opt-in adaptive compaction. Always maintained so
+	 * enabling the setting mid-session has immediate, honest state; the recorded
+	 * rate only reaches a threshold decision while `compaction.adaptive.enabled`
+	 * is true.
+	 */
+	#adaptiveCompaction = new AdaptiveCompactionTracker();
+
+	#adaptiveCompactionOptions(): AdaptiveCompactionOptions {
+		return {
+			enabled: this.settings.get("compaction.adaptive.enabled"),
+			baseThresholdPercent: this.settings.get("compaction.adaptive.baseThresholdPercent"),
+			aggression: this.settings.get("compaction.adaptive.aggression"),
+			turnWindow: this.settings.get("compaction.adaptive.turnWindow"),
+			minThresholdPercent: this.settings.get("compaction.adaptive.minThresholdPercent"),
+		};
+	}
+
+	/**
+	 * Compaction settings for a threshold decision.
+	 *
+	 * `getGroup("compaction")` flattens `compaction.adaptive.*` into dotted keys,
+	 * so the nested options object is assembled explicitly here. The tracker
+	 * window follows the configured minutes so a settings change takes effect
+	 * without restarting the session.
+	 */
+	#compactionSettingsWithAdaptive(): CoreCompactionSettings {
+		const adaptive = this.#adaptiveCompactionOptions();
+		const windowMinutes = Number.isFinite(adaptive.turnWindow) ? Math.max(1, adaptive.turnWindow) : 15;
+		this.#adaptiveCompaction.setWindowMs(windowMinutes * 60_000);
+		return {
+			...this.settings.getGroup("compaction"),
+			adaptive,
+			adaptiveState: this.#adaptiveCompaction.decisionState(),
+		};
+	}
+
+	/**
 	 * Evidence-gated below-threshold maintenance pruning (Finding 13). Runs
 	 * #pruneToolOutputs ONCE, below the compaction threshold, only when it is
 	 * opted in AND the estimated stale-prunable savings both clear a high minimum
@@ -11436,13 +11476,15 @@ export class AgentSession {
 			}
 			return this.#scheduleOverflowRetryContinuation(generation);
 		}
-		const compactionSettings = this.settings.getGroup("compaction");
+		const compactionSettings = this.#compactionSettingsWithAdaptive();
 		if (!compactionSettings.enabled || compactionSettings.strategy === "off") return false;
 
 		// Case 2: Threshold - turn succeeded but context is getting large
 		// Skip if this was an error (non-overflow errors don't have usage data)
 		if (assistantMessage.stopReason === "error") return false;
 		let contextTokens = calculateContextTokens(assistantMessage.usage);
+		this.#adaptiveCompaction.recordCall(contextTokens);
+		compactionSettings.adaptiveState = this.#adaptiveCompaction.decisionState();
 		// Model maxTokens is a capability ceiling, not a per-turn reservation.
 		// Auto maintenance should track actual context fullness.
 		const autoCompactionOutputReserveTokens = 0;
@@ -12747,8 +12789,31 @@ export class AgentSession {
 
 	/**
 	 * Internal: Run auto-compaction with events.
+	 *
+	 * Wraps the run so a completed compaction resets the adaptive call-rate
+	 * tracker in exactly one place. The post-compaction context size is reported
+	 * as 0 because the next recorded call carries the real provider number; the
+	 * tracker only uses this value as a fallback for callers that pass none.
 	 */
 	async #runAutoCompaction(
+		reason: "overflow" | "threshold" | "idle",
+		willRetry: boolean,
+		deferred = false,
+		options?: {
+			continueAfterMaintenance?: boolean;
+			deferHandoffMaintenance?: boolean;
+			force?: boolean;
+			signal?: AbortSignal;
+			beforeTerminalOverflowNoop?: () => void;
+			suppressNextPostTurnMaintenanceAfterHandoff?: boolean;
+		},
+	): Promise<AutoCompactionTerminalStatus> {
+		const status = await this.#runAutoCompactionInner(reason, willRetry, deferred, options);
+		if (status.kind === "compacted") this.#adaptiveCompaction.recordCompact(0);
+		return status;
+	}
+
+	async #runAutoCompactionInner(
 		reason: "overflow" | "threshold" | "idle",
 		willRetry: boolean,
 		deferred = false,

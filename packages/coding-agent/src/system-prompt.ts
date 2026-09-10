@@ -375,6 +375,11 @@ export interface BuildSystemPromptOptions {
 	alwaysApplyRules?: AlwaysApplyRule[];
 	/** Whether secret obfuscation is active. When true, explains the redaction format in the prompt. */
 	secretsEnabled?: boolean;
+	/**
+	 * Reason through technical work in English while answering in the language the
+	 * user used. Affects prompt guidance only. Default: "off".
+	 */
+	reasoningLanguage?: "off" | "english";
 	/** Pre-loaded workspace tree (skips discovery if provided). May be a Promise to allow early kick-off. */
 	workspaceTree?: WorkspaceTree | Promise<WorkspaceTree>;
 	/**
@@ -439,6 +444,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		toolDiscoveryActive = false,
 		eagerTasks = false,
 		secretsEnabled = false,
+		reasoningLanguage = "off",
 		workspaceTree: providedWorkspaceTree,
 		subagent = false,
 	} = options;
@@ -613,6 +619,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		toolDiscoveryActive: toolDiscoveryActive && hasHiddenToolDiscoveryTool,
 		eagerTasks,
 		secretsEnabled,
+		reasoningLanguageEnglish: reasoningLanguage === "english",
 		subagent,
 	};
 	const rendered = prompt.render(resolvedCustomPrompt ? customSystemPromptTemplate : systemPromptTemplate, data);
