@@ -2,11 +2,11 @@
 
 ## [Unreleased]
 
+## [0.5.9] - 2026-09-10
+
 ### Fixed
 
 - Fixed published-install startup crash from the 0.5.8 PDF wasm embed. The asset was imported from `../../../../node_modules/mupdf/dist/mupdf-wasm.wasm`, which only exists in the monorepo checkout — after `bun install -g` / `skc update` the same relative path resolved outside the package and aborted before the TUI opened. The wasm is now vendored under `packages/coding-agent/vendor/mupdf/` and imported package-locally so source installs and compiled binaries both resolve it.
-
-## [0.5.8] - 2026-09-10
 
 ## [0.5.7] - 2026-09-10
 
