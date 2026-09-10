@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.5.7] - 2026-09-10
+
 ### Added
 
 - `@` file search accepts Hangul chosung (초성): a bare consonant matches any syllable carrying it as its initial, so `@ㅎㄱ` finds `한글.txt`. Literal and full-syllable matches keep ranking above chosung matches, and a chosung query never matches a name with no Hangul in it.
@@ -10,8 +12,6 @@
 
 - `@` file search and path autocomplete now match canonically decomposed (NFD) file names against composed (NFC) input. macOS reports Korean directory entries as conjoining jamo while composer keystrokes are precomposed, so `@한` found nothing even though `한글.txt` existed. Both the directory-listing prefix match and the native fuzzy matcher now compare composed forms while completion values keep the on-disk name.
 - `@` fuzzy discovery no longer re-filters native matches through a plain ASCII subsequence check. The native matcher already returns only scored entries and is the authority on what matched, so the second pass could only discard valid Hangul results; it now filters by path (`.git` exclusion) alone.
-
-## [0.5.6] - 2026-08-28
 
 ## [0.7.8] - 2026-06-30
 

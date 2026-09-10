@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.5.7] - 2026-09-10
+
 ### Added
 
 - Bundled `openai-codex/gpt-6-astra` (ported from upstream #5294) so eligible ChatGPT accounts can select GPT-6 Astra without waiting for authenticated Codex discovery. The reviewed snapshot records the 272K prompt budget, 128K output cap, text-and-image input, websocket preference, low-through-max reasoning efforts, freeform `apply_patch`, and standard published pricing ($10/$50, cache read $1, cache write $12.50). Upstream's above-272K pricing tier is intentionally omitted: this fork's cost engine has no long-context tier support, so the field would be dead data. The GPT model-id parser and the generated `apply_patch` policy now recognize the `astra` variant (GPT-6), and the catalog was regenerated, which also picks up the current models.dev snapshot across gateway providers.
@@ -9,8 +11,6 @@
 ### Fixed
 
 - Bumped the advertised Claude Code client version from 2.1.219 to 2.1.267. Anthropic gates newer models (e.g. the 5.1 line) on the advertised client version and rejected requests with HTTP 400 `claude_code_version_too_old` ("version 2.1.251 or newer is required"), so those models were unusable through the Claude Code OAuth path.
-
-## [0.5.6] - 2026-08-28
 
 ## [0.5.3] - 2026-08-28
 

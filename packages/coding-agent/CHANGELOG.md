@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.5.7] - 2026-09-10
+
 ### Added
 
 - Added opt-in `reasoningLanguage: english`. Model reasoning quality on technical work is generally better in English, but that previously meant answering in English too. With the setting on, the system prompt gains a `<reasoning-language>` block asking the agent to reason in English while keeping user-facing answers in the language the user used; correctness, safety, and communication requirements are explicitly unchanged. The default `off` adds nothing to the prompt.
@@ -10,8 +12,6 @@
 ### Fixed
 
 - Restored PDF conversion in standalone binaries (ported from upstream #5433). Compiled releases kept mupdf `--external`, but compiled-Bun module resolution cannot satisfy markit's bare `import("mupdf")`, and mupdf's Emscripten loader cannot find `mupdf-wasm.wasm` inside the bunfs — so every standalone PDF read fell back to raw bytes behind a generic "PDF support requires 'mupdf'" note while the real cause was discarded. mupdf is now bundled: the wasm is embedded via `with { type: "file" }` and routed to the loader through a `locateFile` hook seeded before the first mupdf import, markit-ai's bundler-hostile `require("mupdf")` image-render call is patched to a dynamic import (`patches/markit-ai@0.5.3.patch`), and conversion failures re-run the import so diagnostics carry the actual error. The fetch tool also accepts any non-empty markit conversion instead of discarding short documents (e.g. the 14-character W3C dummy.pdf) into a raw-bytes fallback.
-
-## [0.5.6] - 2026-08-28
 
 ## [0.5.4] - 2026-08-28
 
