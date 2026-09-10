@@ -667,9 +667,12 @@ export class AskTool implements AgentTool<AskParametersSchema, AskToolDetails> {
 	 * Provider-facing metadata authority follows the durable deep-interview stage:
 	 * Round 0 may lock an intent contract, later rounds may only review it, and a
 	 * session with no active interview exposes (and accepts) no metadata at all.
+	 * A host that does not track interview stages at all cannot fail closed on
+	 * one, so it keeps the complete (still mutually exclusive) metadata union.
 	 */
 	get parameters(): AskParametersSchema {
-		const stage = this.session.getDeepInterviewAskStage?.();
+		if (typeof this.session.getDeepInterviewAskStage !== "function") return askSchema;
+		const stage = this.session.getDeepInterviewAskStage();
 		if (stage === "topology") return topologyAskSchema;
 		if (stage === "post-topology") return postTopologyAskSchema;
 		return ordinaryAskSchema;
