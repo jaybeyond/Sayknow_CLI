@@ -18,6 +18,11 @@ declare module "*.lark" {
 	export default content;
 }
 
+declare module "*.wasm" {
+	const assetPath: string;
+	export default assetPath;
+}
+
 // turndown-plugin-gfm has no published types
 declare module "turndown-plugin-gfm" {
 	import type TurndownService from "turndown";
