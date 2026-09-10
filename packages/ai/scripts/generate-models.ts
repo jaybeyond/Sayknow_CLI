@@ -72,6 +72,36 @@ function isRetiredBundledModel(model: Pick<Model, "provider" | "id">): boolean {
 }
 
 /**
+ * Keep the reviewed GPT-6 Astra Codex row available without authenticated
+ * discovery (ported from upstream #5294). The capability values mirror OpenAI
+ * Codex 0.153.4's bundled model catalog. This fork's cost engine has no
+ * long-context tier support, so only the published standard pricing
+ * ($10/$50, cache read $1, cache write $12.50) is recorded; upstream's
+ * above-272K tier (2x input/cache, 1.5x output) is intentionally omitted
+ * rather than carried as dead data the `Model` type rejects. Thinking
+ * metadata and `applyPatchToolType` are filled by
+ * `applyGeneratedModelPolicies`, which runs after this injection.
+ */
+export function injectCodexAstraModel(models: Model[]): void {
+	const astra: Model<"openai-codex-responses"> = {
+		id: "gpt-6-astra",
+		name: "GPT-6-Astra",
+		api: "openai-codex-responses",
+		provider: "openai-codex",
+		baseUrl: "https://chatgpt.com/backend-api",
+		reasoning: true,
+		input: ["text", "image"],
+		cost: { input: 10, output: 50, cacheRead: 1, cacheWrite: 12.5 },
+		contextWindow: 272_000,
+		maxTokens: 128_000,
+		preferWebsockets: true,
+		priority: 1,
+	};
+	const hasAstra = models.some(model => model.provider === astra.provider && model.id === astra.id);
+	if (!hasAstra) models.push(astra);
+}
+
+/**
  * Inject dedicated image generation models into providers that support them.
  * gpt-image-2 is registered under openai and openai-codex so the image
  * generation tool can route through a dedicated model instead of the active
@@ -497,6 +527,7 @@ async function generateModels() {
 	allModels = applyPremiumMultiplierOverrides(allModels);
 	allModels = applyCodexPricingFallback(allModels);
 	allModels = applyClaudeOpusVisionCorrections(allModels);
+	injectCodexAstraModel(allModels);
 	applyGeneratedModelPolicies(allModels);
 	linkOpenAIPromotionTargets(allModels);
 	injectImageGenerationModels(allModels);

@@ -21,4 +21,22 @@ describe("OpenAI Codex defaults", () => {
 		// safe request cap instead of promising a window that overflows upstream.
 		expect(model.contextWindow).toBe(272_000);
 	});
+
+	it("bundles GPT-6 Astra with reviewed Codex and pricing metadata", () => {
+		const model = getBundledModel("openai-codex", "gpt-6-astra");
+
+		expect(model).toMatchObject({
+			name: "GPT-6-Astra",
+			api: "openai-codex-responses",
+			reasoning: true,
+			input: ["text", "image"],
+			contextWindow: 272_000,
+			maxTokens: 128_000,
+			preferWebsockets: true,
+			priority: 1,
+			applyPatchToolType: "freeform",
+			thinking: { mode: "effort", minLevel: Effort.Low, maxLevel: Effort.Max },
+			cost: { input: 10, output: 50, cacheRead: 1, cacheWrite: 12.5 },
+		});
+	});
 });
