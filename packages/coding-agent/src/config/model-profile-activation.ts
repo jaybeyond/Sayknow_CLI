@@ -2,11 +2,8 @@ import { ThinkingLevel } from "@sayknow-cli/agent-core";
 import type { Api, Model } from "@sayknow-cli/ai";
 import type { AgentSession } from "../session/agent-session";
 import { formatClampedModelSelector } from "../thinking";
-import {
-	aggregateModelProfileRequiredProviders,
-	formatAvailableProfileNames,
-	resolveProfileBindings,
-} from "./model-profiles";
+import { UnknownModelProfileError, validateModelProfileName } from "./model-profile-contract";
+import { aggregateModelProfileRequiredProviders, resolveProfileBindings } from "./model-profiles";
 import {
 	isAuthenticated,
 	kNoAuth,
@@ -49,7 +46,7 @@ export interface PrepareModelProfileActivationOptions {
 		| "resolveCanonicalModel"
 		| "getCanonicalVariants"
 		| "getCanonicalId"
-	>;
+	> & { getError?: ModelRegistry["getError"] };
 	settings: Pick<Settings, "get">;
 	profileName: string;
 }
@@ -347,12 +344,11 @@ export async function prepareModelProfileActivation(
 	options: PrepareModelProfileActivationOptions,
 ): Promise<PreparedModelProfileActivation> {
 	const profiles = options.modelRegistry.getModelProfiles();
-	const profileName = resolveModelProfileName(options.profileName, profiles);
+	// Typed contract errors (`unknown_model_profile` / `model_profile_registry_error`)
+	// so SDK lifecycle readiness and BrokerResponse preserve the code and details.
+	const profileName = validateModelProfileName(options.profileName, profiles, options.modelRegistry.getError?.());
 	const profile = profiles.get(profileName) ?? options.modelRegistry.getModelProfile(profileName);
-	if (!profile) {
-		const available = formatAvailableProfileNames(profiles);
-		throw new Error(`Unknown model profile "${options.profileName}". Available profiles: ${available}`);
-	}
+	if (!profile) throw new UnknownModelProfileError(options.profileName, profiles);
 	const profileLabel = options.profileName;
 
 	const requiredProviders = aggregateModelProfileRequiredProviders(profile.requiredProviders, profile);

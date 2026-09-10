@@ -5,7 +5,7 @@ import type { OAuthProvider } from "@sayknow-cli/ai/utils/oauth/types";
 import type { Component, OverlayHandle, SlashCommand } from "@sayknow-cli/tui";
 import { Input, isPetMode, Loader, Spacer, Text } from "@sayknow-cli/tui";
 import { getAgentDbPath, getProjectDir, logger, VERSION } from "@sayknow-cli/utils";
-import { type AppKeybinding, formatKeyHints } from "../../config/keybindings";
+import type { AppKeybinding } from "../../config/keybindings";
 import {
 	activateModelProfile,
 	materializeActiveModelProfileAssignment,
@@ -27,6 +27,7 @@ import {
 	getPluginsCacheDir,
 	MarketplaceManager,
 } from "../../extensibility/plugins/marketplace";
+import { INTERACTIVE_SELECTOR_RESUME_ORIGIN } from "../../extensibility/shared-events";
 import {
 	getAvailableThemes,
 	getCurrentThemeName,
@@ -832,7 +833,7 @@ export class SelectorController {
 				id: `action:${action.id}`,
 				label: action.label,
 				description: action.id,
-				keybinding: formatKeyHints(this.ctx.keybindings.getKeys(action.id as AppKeybinding)) || undefined,
+				keybinding: this.ctx.keybindings.getDisplayString(action.id as AppKeybinding) || undefined,
 				searchText: action.id,
 				handler: action.handler,
 			})),
@@ -1042,13 +1043,18 @@ export class SelectorController {
 			const selector = new ThinkingSelectorComponent(
 				this.ctx.session.thinkingLevel,
 				availableLevels,
-				selection => {
-					done();
-
+				async selection => {
 					const { level, persistDefault } = selection;
 					const configuredDefault = this.ctx.settings.get("defaultThinkingLevel");
 					const levelToApply = level === ThinkingLevel.Inherit ? configuredDefault : level;
-					this.ctx.session.setThinkingLevel(levelToApply, persistDefault);
+					try {
+						await this.ctx.session.setThinkingLevelForControl(level, persistDefault);
+					} catch (error) {
+						this.ctx.showError(error instanceof Error ? error.message : String(error));
+						return;
+					}
+					done();
+
 					const effectiveLevel = this.ctx.session.thinkingLevel ?? ThinkingLevel.Off;
 					const requestedLabel =
 						level === ThinkingLevel.Inherit ? `${level} (configured default: ${configuredDefault})` : level;
@@ -1959,10 +1965,7 @@ export class SelectorController {
 	}
 
 	async showSessionSelector(): Promise<void> {
-		const sessions = await SessionManager.listForResumePickerReadOnly(
-			this.ctx.sessionManager.getCwd(),
-			this.ctx.sessionManager.getSessionDir(),
-		);
+		const sessions = await this.ctx.sessionManager.listForResumePickerReadOnly();
 		this.showSelector(done => {
 			const selector = new SessionSelectorComponent(
 				sessions,
@@ -2064,13 +2067,30 @@ export class SelectorController {
 			const previousSessionId = this.ctx.sessionManager.getSessionId();
 			const migrationPolicy =
 				this.ctx.settings?.get("session.directoryMigration") === "disabled" ? "disabled" : "copy-retain";
-			const writableSessionPath = await this.ctx.sessionManager.prepareManagedCandidateForWrite(
-				sessionPath,
-				migrationPolicy,
-			);
+			let writableSessionPath = sessionPath;
+			if (this.ctx.sessionManager.isManagedDestination()) {
+				// Managed candidates are prepared against their inspected identity so a
+				// replacement race fails closed before adoption. Explicit `--session-dir`
+				// selections never enter the managed migration fence (preparation would
+				// reject a non-managed destination authority outright).
+				const inspection = await SessionManager.inspectSessionTailReadOnly(sessionPath);
+				if (inspection.kind === "error")
+					throw new Error(`Could not inspect selected session: ${inspection.reason}`);
+				writableSessionPath = await this.ctx.sessionManager.prepareManagedCandidateForStrictAdoption(
+					sessionPath,
+					migrationPolicy,
+					inspection.identity,
+				);
+			}
 
 			// Switch session via AgentSession (emits hook and tool session events)
-			if (!(await this.ctx.session.switchSession(writableSessionPath, options))) return false;
+			if (
+				!(await this.ctx.session.switchSession(writableSessionPath, {
+					...options,
+					transition: { origin: INTERACTIVE_SELECTOR_RESUME_ORIGIN },
+				}))
+			)
+				return false;
 			onSwitched?.();
 			this.#clearTransientSessionUi();
 			const switchingToDifferentSession = previousSessionId !== this.ctx.sessionManager.getSessionId();

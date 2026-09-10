@@ -288,11 +288,27 @@ class StdioRpcTransport implements RpcTransport {
 			} else {
 				onClose(new Error("RPC stdio transport closed"));
 			}
-		})().catch((err: Error) => {
-			if (!readySettled) {
-				readySettled = true;
+		})().catch(async (err: Error) => {
+			if (readySettled) {
+				onClose(err);
+				return;
+			}
+			// Non-JSONL stdout before `ready` usually means the CLI refused to start
+			// (for example a usage error such as the removed `--mode rpc`). When the
+			// child is already gone, report its exit code and stderr instead of the
+			// parse noise so callers see the actual refusal.
+			const proc = this.#process;
+			const exitCode = proc
+				? await Promise.race([proc.exited.catch(() => proc.exitCode ?? -1), Bun.sleep(1_000).then(() => undefined)])
+				: undefined;
+			if (readySettled) return;
+			readySettled = true;
+			if (exitCode === undefined) {
 				readyReject(err);
-			} else onClose(err);
+				return;
+			}
+			const stderr = await getStartupStderr();
+			readyReject(new Error(`Agent process exited with code ${exitCode} before ready. Stderr: ${stderr}`));
 		});
 		void this.#process.exited.then(async (exitCode: number) => {
 			if (!readySettled) {

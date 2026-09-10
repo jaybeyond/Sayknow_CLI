@@ -41,7 +41,14 @@ import { appendOrMergeDeepInterviewRound, syncDeepInterviewRecorderHud } from ".
 import { deepInterviewStatePath } from "../skc-runtime/deep-interview-runtime";
 import { DEEP_INTERVIEW_INTENT_CATEGORIES, deepInterviewCharacterCount } from "../skc-runtime/deep-interview-state";
 import { renderStatusLine } from "../tui";
-import type { ToolSession } from ".";
+import type {
+	AskAnswerRequest,
+	AskRemoteInteraction,
+	AskRemoteReceipt,
+	AskSettlement,
+	AskSettlementResult,
+	ToolSession,
+} from ".";
 import { formatErrorMessage, formatMeta, formatTitle } from "./render-utils";
 import { ToolAbortError } from "./tool-errors";
 import { assertUltragoalAskAllowed } from "./ultragoal-ask-guard";
@@ -134,48 +141,81 @@ const deepInterviewMetaBase = {
  * only exists after Round 0 has locked a manifest. Providers that only see the
  * JSON schema must be unable to combine the two.
  */
-const DeepInterviewMeta = z.union([
-	// Branch order is load-bearing: the intent-carrying branches must win when
-	// their key is present, and every branch is strict so a contract or review
-	// attached to the wrong round fails closed instead of being silently
-	// stripped by a laxer branch.
-	z
-		.object({
-			...deepInterviewMetaBase,
-			round: z.literal(0).describe("the manifest is locked exactly once, at Round 0"),
-			component: z.literal("review-topology"),
-			intent_contract: IntentContract,
-		})
-		.strict()
-		.describe("Round 0 topology confirmation carrying the locked-intent manifest proposal"),
-	z
-		.object({
-			...deepInterviewMetaBase,
-			round: z.number().int().min(1).describe("reviews only exist after Round 0 locked a manifest"),
-			intent_review: IntentReview,
-		})
-		.strict()
-		.describe("post-Round-0 locked-intent reduction review"),
-	z.object(deepInterviewMetaBase).strict().describe("ordinary interview round metadata"),
-]);
+const DeepInterviewTopologyMeta = z
+	.object({
+		...deepInterviewMetaBase,
+		round: z.literal(0).describe("the manifest is locked exactly once, at Round 0"),
+		component: z.literal("review-topology"),
+		intent_contract: IntentContract,
+	})
+	.strict()
+	.describe("Round 0 topology confirmation carrying the locked-intent manifest proposal");
+const DeepInterviewReviewMeta = z
+	.object({
+		...deepInterviewMetaBase,
+		round: z.number().int().min(1).describe("reviews only exist after Round 0 locked a manifest"),
+		intent_review: IntentReview,
+	})
+	.strict()
+	.describe("post-Round-0 locked-intent reduction review");
+const DeepInterviewRoundMeta = z.object(deepInterviewMetaBase).strict().describe("ordinary interview round metadata");
+// Branch order is load-bearing: the intent-carrying branches must win when
+// their key is present, and every branch is strict so a contract or review
+// attached to the wrong round fails closed instead of being silently
+// stripped by a laxer branch.
+const DeepInterviewMeta = z.union([DeepInterviewTopologyMeta, DeepInterviewReviewMeta, DeepInterviewRoundMeta]);
+type DeepInterviewMeta = z.infer<typeof DeepInterviewMeta>;
 
 const WorkflowGateMeta = z.object({
 	stage: z.enum(["deep-interview", "ralplan", "ultragoal"]).describe("workflow gate stage"),
 	kind: z.enum(["question", "approval", "execution"]).describe("workflow gate kind"),
 });
 
-const QuestionItem = z.object({
+function createQuestionItemSchema(deepInterviewSchema: z.ZodType<DeepInterviewMeta>) {
+	return z.object({
+		id: z.string().describe("question id"),
+		question: z.string().describe("question text"),
+		options: z.array(OptionItem).describe("available options"),
+		multi: z.boolean().describe("allow multiple selections").optional(),
+		recommended: z.number().describe("recommended option index").optional(),
+		workflowGate: WorkflowGateMeta.describe("optional workflow gate stage/kind override").optional(),
+		deepInterview: deepInterviewSchema.describe("optional deep-interview round metadata").optional(),
+	});
+}
+
+const QuestionItem = createQuestionItemSchema(DeepInterviewMeta);
+/** Round 0 of an active deep interview: only the topology confirmation may carry intent authority. */
+const TopologyQuestionItem = createQuestionItemSchema(DeepInterviewTopologyMeta);
+/** After Round 0 locked a manifest: ordinary rounds and reduction reviews, never a new contract. */
+const PostTopologyQuestionItem = createQuestionItemSchema(z.union([DeepInterviewRoundMeta, DeepInterviewReviewMeta]));
+
+/**
+ * Outside an active deep interview no deep-interview authority exists, so the
+ * provider-facing schema omits the metadata entirely and validation strips it.
+ */
+const OrdinaryQuestionItem = z.object({
 	id: z.string().describe("question id"),
 	question: z.string().describe("question text"),
 	options: z.array(OptionItem).describe("available options"),
 	multi: z.boolean().describe("allow multiple selections").optional(),
 	recommended: z.number().describe("recommended option index").optional(),
 	workflowGate: WorkflowGateMeta.describe("optional workflow gate stage/kind override").optional(),
-	deepInterview: DeepInterviewMeta.describe("optional deep-interview round metadata").optional(),
 });
 
 export const askSchema = z.object({
 	questions: z.array(QuestionItem).min(1).describe("questions to ask"),
+});
+
+const topologyAskSchema = z.object({
+	questions: z.array(TopologyQuestionItem).min(1).describe("questions to ask"),
+});
+
+const postTopologyAskSchema = z.object({
+	questions: z.array(PostTopologyQuestionItem).min(1).describe("questions to ask"),
+});
+
+const ordinaryAskSchema = z.object({
+	questions: z.array(OrdinaryQuestionItem).min(1).describe("questions to ask"),
 });
 
 export type AskToolInput = z.infer<typeof askSchema>;
@@ -208,6 +248,31 @@ export interface AskToolDetails {
 
 const OTHER_OPTION = "Other (type your own)";
 const RECOMMENDED_SUFFIX = " (Recommended)";
+
+/** A one-shot local receipt used to normalize legacy string answer sources. */
+function legacyAskReceipt(value: string): {
+	source: "remote";
+	interaction: AskRemoteInteraction;
+	settle(settlement: AskSettlement): Promise<AskSettlementResult>;
+} {
+	let settled: Promise<AskSettlementResult> | undefined;
+	return {
+		interaction: { kind: "value", value },
+		source: "remote",
+		settle(settlement) {
+			if (!settled) {
+				settled = Promise.resolve(
+					settlement.kind === "commit"
+						? { kind: "committed", ack: { status: "failed", reason: "unsupported" } }
+						: settlement.kind === "invalid"
+							? { kind: "invalid_closed" }
+							: { kind: "resolved_without_commit" },
+				);
+			}
+			return settled;
+		},
+	};
+}
 const DEEP_INTERVIEW_SELECTOR_SCROLL_TITLE_ROWS = Number.MAX_SAFE_INTEGER;
 const DEEP_INTERVIEW_RECORDER_AWAIT_TIMEOUT_MS = 250;
 
@@ -581,6 +646,11 @@ function formatQuestionResult(result: QuestionResult): string {
 // =============================================================================
 
 type AskParams = AskToolInput;
+type AskParametersSchema =
+	| typeof ordinaryAskSchema
+	| typeof askSchema
+	| typeof topologyAskSchema
+	| typeof postTopologyAskSchema;
 
 /**
  * Ask tool for interactive user prompting during execution.
@@ -588,12 +658,22 @@ type AskParams = AskToolInput;
  * Allows gathering user preferences, clarifying instructions, and getting decisions
  * on implementation choices as the agent works.
  */
-export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
+export class AskTool implements AgentTool<AskParametersSchema, AskToolDetails> {
 	readonly name = "ask";
 	readonly label = "Ask";
 	readonly summary = "Ask the user a clarifying question";
 	readonly description: string;
-	readonly parameters = askSchema;
+	/**
+	 * Provider-facing metadata authority follows the durable deep-interview stage:
+	 * Round 0 may lock an intent contract, later rounds may only review it, and a
+	 * session with no active interview exposes (and accepts) no metadata at all.
+	 */
+	get parameters(): AskParametersSchema {
+		const stage = this.session.getDeepInterviewAskStage?.();
+		if (stage === "topology") return topologyAskSchema;
+		if (stage === "post-topology") return postTopologyAskSchema;
+		return ordinaryAskSchema;
+	}
 	readonly strict = true;
 	/**
 	 * These fields are rendered to the user and carry no executable or durable
@@ -684,46 +764,157 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 		}
 
 		const extensionUi = context?.ui;
+		let activeRemoteReceipt: AskRemoteReceipt | undefined;
+		let remoteGeneration = 0;
+		type RemoteRaceResult = {
+			winner: "remote";
+			value: string;
+			receipt: AskRemoteReceipt;
+			settlement?: AskSettlement;
+		};
+		const ignoreRemoteAnswerFailure = (error: unknown): Promise<never> => {
+			if (!(error instanceof Error && error.name === "AbortError")) {
+				logger.warn("Ask remote answer source failed", {
+					error: error instanceof Error ? error.message : String(error),
+				});
+			}
+			return new Promise<never>(() => {});
+		};
+		const settleActiveRemote = async (settlement: AskSettlement): Promise<void> => {
+			const receipt = activeRemoteReceipt;
+			activeRemoteReceipt = undefined;
+			if (receipt) await receipt.settle(settlement);
+		};
+		const checkedPrefix = `${theme.checkbox.checked} `;
+		const uncheckedPrefix = `${theme.checkbox.unchecked} `;
+		/** The option a displayed label stands for, without checkbox, numbering, or recommendation decoration. */
+		const semanticLabel = (label: string): string =>
+			stripRecommendedSuffix(
+				(label.startsWith(checkedPrefix)
+					? label.slice(checkedPrefix.length)
+					: label.startsWith(uncheckedPrefix)
+						? label.slice(uncheckedPrefix.length)
+						: label
+				).replace(/^\s*\d+[.)]\s+/, ""),
+			);
+		/** Turn a typed or legacy remote answer into a race result, or park forever when it cannot count. */
+		const acceptRemoteAnswer = (
+			answer: AskRemoteReceipt | string | undefined,
+			generation: number,
+			resolveValue: (receipt: AskRemoteReceipt, value: string) => RemoteRaceResult,
+		): RemoteRaceResult | Promise<RemoteRaceResult> => {
+			// undefined is not a valid remote answer (registration failed, or the local
+			// UI already won and aborted us): never settle the race, let the local
+			// selector decide instead of cancelling the ask.
+			if (answer === undefined) return new Promise<never>(() => {});
+			const receipt = typeof answer === "string" ? legacyAskReceipt(answer) : answer;
+			if (generation !== remoteGeneration) {
+				return receipt
+					.settle({ kind: "resolve_without_commit", reason: "aborted" })
+					.then(() => new Promise<never>(() => {}));
+			}
+			if (receipt.interaction.kind !== "value") {
+				// No remote controls are advertised, so a control interaction has nothing to
+				// act on: close it as invalid and keep waiting for a real answer.
+				return receipt
+					.settle({ kind: "invalid", reason: "invalid_control" })
+					.then(() => new Promise<never>(() => {}));
+			}
+			return resolveValue(receipt, receipt.interaction.value);
+		};
 		const ui: UIContext = {
 			select: (prompt, options, dialogOptions) => {
 				if (!extensionUi) throw new ToolAbortError("Ask tool requires interactive mode");
 				const source = this.session.getAskAnswerSource?.();
 				if (!source) return extensionUi.select(prompt, options, dialogOptions);
 				// Race the local UI against a remote answer (e.g. a Telegram reply via the
-				// notifications SDK) so asks can be answered without RPC mode. When the
-				// local UI wins, abort the remote source so it stops waiting and marks the
-				// action resolved-locally. First valid answer wins.
-				// Race the local UI against a remote answer (e.g. a Telegram reply via the
 				// notifications SDK) so asks can be answered without RPC mode. First valid
 				// answer wins; the loser is aborted so neither side is left hanging:
 				//   - local wins  -> abort the remote source (marks the action resolved-locally)
 				//   - remote wins -> abort the local selector so the TUI dialog actually closes
+				// Typed sources (`awaitAnswerRequest`) hand back a receipt that is settled once
+				// the answer is accepted, so SDK-routed interactions commit durably.
 				const remoteController = new AbortController();
 				const localController = new AbortController();
-				// Propagate an external cancel (the tool's signal) to the local selector too.
+				const generation = ++remoteGeneration;
+				// Propagate external cancellation to both race legs and invalidate late replies.
 				const toolSignal = dialogOptions?.signal;
-				if (toolSignal) {
-					if (toolSignal.aborted) localController.abort();
-					else toolSignal.addEventListener("abort", () => localController.abort(), { once: true });
-				}
-				const remote = source.awaitAnswer(prompt, options, remoteController.signal).then(answer => {
-					// undefined is not a valid remote answer (registration failed, or the local
-					// UI already won and aborted us): never settle the race, let the local
-					// selector decide instead of cancelling the ask.
-					if (answer === undefined) return new Promise<string | undefined>(() => {});
+				const abortRace = () => {
+					if (generation === remoteGeneration) remoteGeneration++;
 					localController.abort();
-					return answer;
-				});
+					remoteController.abort();
+				};
+				if (toolSignal) {
+					if (toolSignal.aborted) abortRace();
+					else toolSignal.addEventListener("abort", abortRace, { once: true });
+				}
+				const request: AskAnswerRequest = { question: prompt, options, interaction: "selector", controls: [] };
+				const remote = (
+					source.awaitAnswerRequest
+						? source.awaitAnswerRequest(request, remoteController.signal)
+						: source.awaitAnswer(prompt, options, remoteController.signal)
+				)
+					.then(answer =>
+						acceptRemoteAnswer(answer, generation, (receipt, remoteValue) => {
+							const selectedValue =
+								options.find(
+									option =>
+										option === remoteValue ||
+										option === `${checkedPrefix}${remoteValue}` ||
+										option === `${uncheckedPrefix}${remoteValue}`,
+								) ?? remoteValue;
+							if (semanticLabel(selectedValue) === OTHER_OPTION) {
+								// "Other" only transitions to the custom editor; the answer arrives there.
+								return {
+									winner: "remote" as const,
+									value: selectedValue,
+									receipt,
+									settlement: { kind: "resolve_without_commit", reason: "other_transition" },
+								};
+							}
+							if (
+								(selectedValue.startsWith(checkedPrefix) || selectedValue.startsWith(uncheckedPrefix)) &&
+								options.includes(selectedValue)
+							) {
+								// Multi-select: a listed entry toggles and the question is shown again.
+								return {
+									winner: "remote" as const,
+									value: selectedValue,
+									receipt,
+									settlement: { kind: "resolve_without_commit", reason: "toggle" },
+								};
+							}
+							return { winner: "remote" as const, value: selectedValue, receipt };
+						}),
+					)
+					.catch(ignoreRemoteAnswerFailure);
 				const local = extensionUi
 					.select(prompt, options, { ...dialogOptions, signal: localController.signal })
 					.then(answer => {
+						if (generation === remoteGeneration) remoteGeneration++;
 						remoteController.abort();
-						return answer;
+						return { winner: "local" as const, value: answer };
+					})
+					.catch(error => {
+						if (generation === remoteGeneration) remoteGeneration++;
+						remoteController.abort();
+						throw error;
 					});
 				// The losing selector may reject when aborted after the race already settled;
 				// swallow that so it is not an unhandled rejection (the race result is unaffected).
 				void local.catch(() => undefined);
-				return Promise.race([local, remote]);
+				return Promise.race([local, remote]).then(async result => {
+					if (result.winner === "remote") {
+						localController.abort();
+						if (result.settlement) await result.receipt.settle(result.settlement);
+						else activeRemoteReceipt = result.receipt;
+					} else {
+						void remote.then(remoteResult =>
+							remoteResult.receipt.settle({ kind: "resolve_without_commit", reason: "aborted" }),
+						);
+					}
+					return result.value;
+				});
 			},
 			editor: (title, prefill, dialogOptions, editorOptions) => {
 				if (!extensionUi) throw new ToolAbortError("Ask tool requires interactive mode");
@@ -734,24 +925,60 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 				// reply) instead of blocking on the local-only editor. Mirrors `select`.
 				const remoteController = new AbortController();
 				const localController = new AbortController();
+				const generation = ++remoteGeneration;
 				const toolSignal = dialogOptions?.signal;
-				if (toolSignal) {
-					if (toolSignal.aborted) localController.abort();
-					else toolSignal.addEventListener("abort", () => localController.abort(), { once: true });
-				}
-				const remote = source.awaitAnswer(title, [], remoteController.signal).then(answer => {
-					if (answer === undefined) return new Promise<string | undefined>(() => {});
+				const abortRace = () => {
+					if (generation === remoteGeneration) remoteGeneration++;
 					localController.abort();
-					return answer;
-				});
+					remoteController.abort();
+				};
+				if (toolSignal) {
+					if (toolSignal.aborted) abortRace();
+					else toolSignal.addEventListener("abort", abortRace, { once: true });
+				}
+				const request: AskAnswerRequest = {
+					question: title,
+					options: [],
+					interaction: "custom_editor",
+					controls: [],
+				};
+				const remote = (
+					source.awaitAnswerRequest
+						? source.awaitAnswerRequest(request, remoteController.signal)
+						: source.awaitAnswer(title, [], remoteController.signal)
+				)
+					.then(answer =>
+						acceptRemoteAnswer(answer, generation, (receipt, value) => ({
+							winner: "remote" as const,
+							value,
+							receipt,
+						})),
+					)
+					.catch(ignoreRemoteAnswerFailure);
 				const local = extensionUi
 					.editor(title, prefill, { ...(dialogOptions ?? {}), signal: localController.signal }, editorOptions)
 					.then(answer => {
+						if (generation === remoteGeneration) remoteGeneration++;
 						remoteController.abort();
-						return answer;
+						return { winner: "local" as const, value: answer };
+					})
+					.catch(error => {
+						if (generation === remoteGeneration) remoteGeneration++;
+						remoteController.abort();
+						throw error;
 					});
 				void local.catch(() => undefined);
-				return Promise.race([local, remote]);
+				return Promise.race([local, remote]).then(result => {
+					if (result.winner === "remote") {
+						activeRemoteReceipt = result.receipt;
+						localController.abort();
+					} else {
+						void remote.then(remoteResult =>
+							remoteResult.receipt.settle({ kind: "resolve_without_commit", reason: "aborted" }),
+						);
+					}
+					return result.value;
+				});
 			},
 		};
 
@@ -809,60 +1036,88 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 					timedOut: false,
 				};
 			}
-			try {
-				const deepInterviewPrompt = formatDeepInterviewSelectorPrompt(q.question);
-				const isDeepInterviewQuestion = deepInterviewPrompt !== null || q.deepInterview !== undefined;
-				const displayQuestion = deepInterviewPrompt ?? q.question;
-				const shouldNumberOptions = isDeepInterviewQuestion || isDeepInterviewAskQuestion(q.question);
-				const optionLabels = shouldNumberOptions ? numberOptionLabels(rawOptionLabels) : rawOptionLabels;
-				const initialSelection =
-					shouldNumberOptions && options?.previous
-						? {
-								...options.previous,
-								selectedOptions: options.previous.selectedOptions.map(selected => {
-									const rawIndex = rawOptionLabels.indexOf(selected);
-									return rawIndex >= 0 ? (optionLabels[rawIndex] ?? selected) : selected;
-								}),
-							}
-						: options?.previous;
-				const {
-					selectedOptions: displaySelectedOptions,
-					customInput,
-					navigation,
-					cancelled,
-					timedOut,
-				} = await askSingleQuestion(ui, displayQuestion, optionLabels, q.multi ?? false, {
-					recommended: q.recommended,
-					timeout: timeout ?? undefined,
-					signal,
-					initialSelection,
-					navigation: options?.navigation,
-					scrollTitleRows: isDeepInterviewQuestion ? DEEP_INTERVIEW_SELECTOR_SCROLL_TITLE_ROWS : undefined,
-					otherOptionLabel: shouldNumberOptions
-						? formatNumberedOptionLabel(OTHER_OPTION, optionLabels.length)
-						: undefined,
-				});
-				const selectedOptions = shouldNumberOptions
-					? displaySelectedOptions.map(selected => {
-							const displayIndex = optionLabels.indexOf(selected);
-							return displayIndex >= 0 ? (rawOptionLabels[displayIndex] ?? selected) : selected;
-						})
-					: displaySelectedOptions;
-				return {
-					optionLabels: rawOptionLabels,
-					selectedOptions,
-					customInput,
-					clarificationQuestion: undefined as string | undefined,
-					navigation,
-					cancelled,
-					timedOut,
-				};
-			} catch (error) {
-				if (error instanceof Error && error.name === "AbortError") {
-					throw new ToolAbortError("Ask input was cancelled");
+			for (;;)
+				try {
+					const deepInterviewPrompt = formatDeepInterviewSelectorPrompt(q.question);
+					const isDeepInterviewQuestion = deepInterviewPrompt !== null || q.deepInterview !== undefined;
+					const displayQuestion = deepInterviewPrompt ?? q.question;
+					const shouldNumberOptions = isDeepInterviewQuestion || isDeepInterviewAskQuestion(q.question);
+					const optionLabels = shouldNumberOptions ? numberOptionLabels(rawOptionLabels) : rawOptionLabels;
+					const initialSelection =
+						shouldNumberOptions && options?.previous
+							? {
+									...options.previous,
+									selectedOptions: options.previous.selectedOptions.map(selected => {
+										const rawIndex = rawOptionLabels.indexOf(selected);
+										return rawIndex >= 0 ? (optionLabels[rawIndex] ?? selected) : selected;
+									}),
+								}
+							: options?.previous;
+					const {
+						selectedOptions: displaySelectedOptions,
+						customInput,
+						navigation,
+						cancelled,
+						timedOut,
+					} = await askSingleQuestion(ui, displayQuestion, optionLabels, q.multi ?? false, {
+						recommended: q.recommended,
+						timeout: timeout ?? undefined,
+						signal,
+						initialSelection,
+						navigation: options?.navigation,
+						scrollTitleRows: isDeepInterviewQuestion ? DEEP_INTERVIEW_SELECTOR_SCROLL_TITLE_ROWS : undefined,
+						otherOptionLabel: shouldNumberOptions
+							? formatNumberedOptionLabel(OTHER_OPTION, optionLabels.length)
+							: undefined,
+					});
+					const selectedOptions = shouldNumberOptions
+						? displaySelectedOptions.map(selected => {
+								const displayIndex = optionLabels.indexOf(selected);
+								return displayIndex >= 0 ? (rawOptionLabels[displayIndex] ?? selected) : selected;
+							})
+						: displaySelectedOptions;
+					if (activeRemoteReceipt) {
+						// A remote answer won this question: settle its receipt with the outcome so
+						// the answer source can acknowledge (commit) or release it.
+						const settlement: AskSettlement =
+							customInput !== undefined && customInput.trim().length === 0
+								? { kind: "invalid", reason: "empty_custom" }
+								: cancelled
+									? { kind: "resolve_without_commit", reason: "cancelled" }
+									: timedOut
+										? { kind: "resolve_without_commit", reason: "timed_out" }
+										: navigation === "back"
+											? { kind: "resolve_without_commit", reason: "back_navigation" }
+											: navigation === "forward" &&
+													selectedOptions.length === 0 &&
+													(customInput === undefined || customInput.trim().length === 0)
+												? { kind: "resolve_without_commit", reason: "empty_navigation" }
+												: selectedOptions.length > 0 || (customInput?.trim().length ?? 0) > 0
+													? { kind: "commit" }
+													: { kind: "resolve_without_commit", reason: "cancelled" };
+						await settleActiveRemote(settlement);
+						// An empty remote custom answer is rejected, not recorded: ask again.
+						if (settlement.kind === "invalid") continue;
+					}
+					return {
+						optionLabels: rawOptionLabels,
+						selectedOptions,
+						customInput,
+						clarificationQuestion: undefined as string | undefined,
+						navigation,
+						cancelled,
+						timedOut,
+					};
+				} catch (error) {
+					await settleActiveRemote({
+						kind: "resolve_without_commit",
+						reason: error instanceof Error && error.name === "AbortError" ? "aborted" : "exception",
+					});
+					if (error instanceof Error && error.name === "AbortError") {
+						throw new ToolAbortError("Ask input was cancelled");
+					}
+					throw error;
 				}
-				throw error;
-			}
 		};
 
 		if (params.questions.length === 1) {

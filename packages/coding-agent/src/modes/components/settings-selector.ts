@@ -204,6 +204,10 @@ const TIME_FORMAT_OPTIONS: SelectItem[] = [
 	{ value: "24h", label: "24h" },
 	{ value: "12h", label: "12h" },
 ];
+const USAGE_MODE_OPTIONS: SelectItem[] = [
+	{ value: "used", label: "Used" },
+	{ value: "remaining", label: "Remaining" },
+];
 const USAGE_MODE_VALUES = ["used", "remaining"] as const;
 type UsageMode = (typeof USAGE_MODE_VALUES)[number];
 
@@ -220,6 +224,7 @@ function mergeSegmentOptions(
 		path: base?.path || overrides?.path ? { ...(base?.path ?? {}), ...(overrides?.path ?? {}) } : undefined,
 		git: base?.git || overrides?.git ? { ...(base?.git ?? {}), ...(overrides?.git ?? {}) } : undefined,
 		time: base?.time || overrides?.time ? { ...(base?.time ?? {}), ...(overrides?.time ?? {}) } : undefined,
+		usage: base?.usage || overrides?.usage ? { ...(base?.usage ?? {}), ...(overrides?.usage ?? {}) } : undefined,
 	};
 }
 
@@ -279,8 +284,6 @@ function segmentPlacement(
 class StatusLineCustomEditor extends Container {
 	#list!: SettingsList;
 	#draft: StatusLineDraft;
-	#currentWidthPreviewText!: Text;
-	#narrowWidthPreviewText!: Text;
 	#previewHighlightSegment: StatusLineSegmentId | undefined;
 
 	constructor(
@@ -312,13 +315,6 @@ class StatusLineCustomEditor extends Container {
 		this.clear();
 		this.addChild(new Text(theme.bold(theme.fg("accent", "Status Line Custom Editor")), 0, 0));
 		this.addChild(new Spacer(1));
-		this.addChild(new Text(theme.fg("muted", "Current width preview:"), 0, 0));
-		this.#currentWidthPreviewText = new Text(this.#statusLinePreview(), 0, 0);
-		this.addChild(this.#currentWidthPreviewText);
-		this.addChild(new Text(theme.fg("muted", "Narrow width preview:"), 0, 0));
-		this.#narrowWidthPreviewText = new Text(this.#statusLinePreview(40), 0, 0);
-		this.addChild(this.#narrowWidthPreviewText);
-		this.addChild(new Spacer(1));
 		this.#list = new SettingsList(
 			this.#items(),
 			14,
@@ -326,27 +322,17 @@ class StatusLineCustomEditor extends Container {
 			(id, value) => this.#handleChange(id, value),
 			() => this.#cancel(),
 			item => this.#setSelectedItem(item),
+			2,
 		);
 		this.addChild(this.#list);
 	}
 
 	#refresh(): void {
-		this.#refreshPreview();
 		this.#list.setItems(this.#items());
-	}
-
-	#refreshPreview(): void {
-		this.#currentWidthPreviewText.setText(this.#statusLinePreview());
-		this.#narrowWidthPreviewText.setText(this.#statusLinePreview(40));
-	}
-
-	#statusLinePreview(width?: number): string {
-		return this.callbacks.getStatusLinePreview?.(width) ?? theme.fg("dim", "(preview not available)");
 	}
 	#setSelectedItem(item: SettingItem | undefined): void {
 		this.#previewHighlightSegment = this.#highlightSegmentForItem(item);
 		this.#preview();
-		this.#refreshPreview();
 	}
 
 	#highlightSegmentForItem(item: SettingItem | undefined): StatusLineSegmentId | undefined {
@@ -431,6 +417,22 @@ class StatusLineCustomEditor extends Container {
 						values: ["→"],
 					},
 				);
+			}
+			if (id === "usage") {
+				items.push({
+					id: "option.usage.mode",
+					label: "Usage: mode",
+					currentValue: this.#draft.segmentOptions.usage?.mode ?? "used",
+					submenu: (currentValue, done) =>
+						new SelectSubmenu(
+							"Usage mode",
+							"Show used quota or remaining quota in the usage segment.",
+							USAGE_MODE_OPTIONS,
+							currentValue,
+							done,
+							() => done(),
+						),
+				});
 			}
 		}
 
@@ -596,6 +598,12 @@ class StatusLineCustomEditor extends Container {
 			case "time.showSeconds":
 				this.#draft.segmentOptions.time = { ...(this.#draft.segmentOptions.time ?? {}), showSeconds: bool };
 				break;
+			case "usage.mode":
+				this.#draft.segmentOptions.usage = {
+					...(this.#draft.segmentOptions.usage ?? {}),
+					mode: value === "remaining" ? "remaining" : "used",
+				};
+				break;
 		}
 	}
 
@@ -606,6 +614,8 @@ class StatusLineCustomEditor extends Container {
 			rightSegments: [...this.#draft.rightSegments],
 			separator: this.#draft.separator,
 			segmentOptions: cloneSegmentOptions(this.#draft.segmentOptions),
+			sessionAccent: settings.get("statusLine.sessionAccent"),
+			maxRows: settings.get("statusLine.maxRows"),
 			previewHighlightSegment: this.#previewHighlightSegment,
 		});
 	}
@@ -618,6 +628,7 @@ class StatusLineCustomEditor extends Container {
 			separator: settings.get("statusLine.separator"),
 			segmentOptions: cloneSegmentOptions(settings.get("statusLine.segmentOptions") as StatusLineSegmentOptions),
 			sessionAccent: settings.get("statusLine.sessionAccent"),
+			maxRows: settings.get("statusLine.maxRows"),
 			previewHighlightSegment: undefined,
 		});
 	}
@@ -1197,13 +1208,20 @@ export class SettingsSelectorComponent extends Container {
 	#buildItemsForTab(defs: SettingDef[], tabId: SettingTab): SettingItem[] {
 		const items = this.#buildItemsForDefs(defs);
 		if (tabId === "appearance") {
+			const customEditorCallbacks: SettingsCallbacks = {
+				...this.callbacks,
+				onStatusLinePreview: previewSettings => {
+					this.callbacks.onStatusLinePreview?.(previewSettings);
+					this.#updateStatusPreview();
+				},
+			};
 			const customEditorItem: SettingItem = {
 				id: STATUS_LINE_CUSTOM_EDITOR_ID,
 				label: "Status Line Custom Editor",
 				description:
 					"Edit custom status line segments, placement, separator, and typed segment options with live previews.",
 				currentValue: "open",
-				submenu: (_currentValue, done) => new StatusLineCustomEditor(this.callbacks, done),
+				submenu: (_currentValue, done) => new StatusLineCustomEditor(customEditorCallbacks, done),
 			};
 			const presetIndex = items.findIndex(item => item.id === "statusLine.preset");
 			if (presetIndex >= 0) {

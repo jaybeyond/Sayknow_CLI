@@ -89,7 +89,10 @@ export interface BisectToolDetails {
 	reason?: string;
 }
 
-const FIRST_BAD_RE = /^([0-9a-f]{7,40}) is the first bad commit$/m;
+// git < 2.55 prints "<sha> is the first bad commit"; git >= 2.55 quotes the
+// term: "<sha> is the first 'bad' commit". Accept both so convergence is
+// detected regardless of the host git version.
+const FIRST_BAD_RE = /^([0-9a-f]{7,40}) is the first '?bad'? commit$/m;
 const ONLY_SKIPPED_RE = /only '?skip'?ped commits left to test/i;
 
 /** Parse the culprit SHA from `git bisect good|bad` output, or null when not yet converged. */

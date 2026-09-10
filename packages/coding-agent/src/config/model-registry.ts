@@ -69,6 +69,36 @@ import { type Settings, settings } from "./settings";
 
 export type { CanonicalModelIndex, CanonicalModelRecord, CanonicalModelVariant, ModelEquivalenceConfig };
 
+/**
+ * Strip userinfo and query strings from a discovery URL before it is surfaced
+ * in an error message, so credentials embedded in the URL never reach logs or UI.
+ */
+function redactDiscoveryUrl(value: string | URL): string {
+	try {
+		const url = typeof value === "string" ? new URL(value) : value;
+		return `${url.origin}${url.pathname}`;
+	} catch {
+		return "(invalid URL)";
+	}
+}
+
+/**
+ * Fingerprint of the environment variables that can change provider
+ * availability without touching AuthStorage. Keys the `getAvailable()` cache
+ * so a process.env mutation invalidates it.
+ */
+function envAvailabilityFingerprint(): string {
+	return Object.entries(process.env)
+		.filter(
+			([name]) =>
+				/(?:_API_KEY|_OAUTH_TOKEN|_ACCESS_TOKEN)$/.test(name) ||
+				/^(?:GH_TOKEN|GITHUB_TOKEN|HF_TOKEN|COPILOT_GITHUB_TOKEN)$/.test(name),
+		)
+		.sort(([left], [right]) => left.localeCompare(right))
+		.map(([name, value]) => `${name}=${value ?? ""}`)
+		.join("\u0000");
+}
+
 export const kNoAuth = "N/A";
 
 export function isAuthenticated(apiKey: string | undefined | null): apiKey is string {
@@ -544,6 +574,8 @@ export interface ProviderDiscoveryState {
 export interface CanonicalModelQueryOptions {
 	availableOnly?: boolean;
 	candidates?: readonly Model<Api>[];
+	/** Session whose canonical stickiness should scope the lookup, when the caller has one. */
+	sessionId?: string;
 }
 
 /** Result of loading custom models from models.json */
@@ -1021,6 +1053,9 @@ export class ModelRegistry {
 	#providerWebSearchModes: Map<string, WebSearchMode> = new Map();
 	#keylessProviders: Set<string> = new Set();
 	#discoverableProviders: DiscoveryProviderConfig[] = [];
+	#availableModelsCache: Model<Api>[] | undefined;
+	#availableModelsDisabledProviders: string | undefined;
+	#availableModelsEnvFingerprint: string | undefined;
 	#customModelOverlays: CustomModelOverlay[] = [];
 	#providerOverrides: Map<string, ProviderOverride> = new Map();
 	#modelOverrides: Map<string, Map<string, ModelOverride>> = new Map();
@@ -1074,6 +1109,8 @@ export class ModelRegistry {
 			const keyConfig = this.#customProviderApiKeys.get(provider);
 			return keyConfig;
 		});
+		// Any credential mutation (runtime/config keys, OAuth refresh) changes availability.
+		this.authStorage.onGenerationChanged(() => this.#invalidateAvailableModels());
 		// Load models synchronously in constructor
 		this.#loadModels();
 	}
@@ -2232,7 +2269,17 @@ export class ModelRegistry {
 			headers,
 			signal: AbortSignal.timeout(providerConfig.provider === "sglang" ? 500 : 250),
 			fetch: (input, init) => fetch(input, { ...init, redirect: "error" }),
-			throwOnStatus: response => new Error(`HTTP ${response.status} from ${baseUrl}/models`),
+			throwOnStatus: response => {
+				const modelsUrl = redactDiscoveryUrl(`${baseUrl}/models`);
+				if (response.status === 401 || response.status === 403) {
+					// Redacted by construction: name the provider, endpoint, and the
+					// config surface to fix, never the resolved key.
+					return new Error(
+						`HTTP ${response.status} from ${modelsUrl}: provider "${providerConfig.provider}" credential was rejected for OpenAI models-list discovery; check providers.${providerConfig.provider}.apiKey/apiKeyEnv.`,
+					);
+				}
+				return new Error(`HTTP ${response.status} from ${modelsUrl}`);
+			},
 			mapModel: (item, defaults) => ({
 				...defaults,
 				reasoning: isOmlx,
@@ -2434,12 +2481,21 @@ export class ModelRegistry {
 	}
 
 	#rebuildCanonicalIndex(): void {
+		// #models has already changed by the time a rebuild is requested; drop the
+		// availability cache even when the index rebuild itself is deferred.
+		this.#invalidateAvailableModels();
 		if (this.#rebuildSuspended > 0) {
 			this.#rebuildPending = true;
 			return;
 		}
 		this.#canonicalIndex = buildCanonicalModelIndex(this.#models, this.#equivalenceConfig);
 		this.#rebuildPending = false;
+	}
+
+	#invalidateAvailableModels(): void {
+		this.#availableModelsCache = undefined;
+		this.#availableModelsDisabledProviders = undefined;
+		this.#availableModelsEnvFingerprint = undefined;
 	}
 
 	#suspendRebuild(): void {
@@ -2453,6 +2509,7 @@ export class ModelRegistry {
 		if (this.#rebuildSuspended === 0 && this.#rebuildPending) {
 			this.#rebuildPending = false;
 			this.#canonicalIndex = buildCanonicalModelIndex(this.#models, this.#equivalenceConfig);
+			this.#invalidateAvailableModels();
 		}
 	}
 
@@ -2503,8 +2560,10 @@ export class ModelRegistry {
 		return this.#models;
 	}
 
-	#isModelAvailable(model: Model<Api>): boolean {
-		const disabledProviders = getDisabledProviderIdsFromSettings();
+	#isModelAvailable(
+		model: Model<Api>,
+		disabledProviders: ReadonlySet<string> = getDisabledProviderIdsFromSettings(),
+	): boolean {
 		return (
 			!disabledProviders.has(model.provider) &&
 			(this.#keylessProviders.has(model.provider) || this.authStorage.hasAuth(model.provider))
@@ -2643,7 +2702,20 @@ export class ModelRegistry {
 	 * This is a fast check that doesn't refresh OAuth tokens.
 	 */
 	getAvailable(): Model<Api>[] {
-		return this.#models.filter(model => this.#isModelAvailable(model));
+		const disabledProviders = getDisabledProviderIdsFromSettings();
+		const disabledProviderKey = [...disabledProviders].sort().join("\u0000");
+		const envFingerprint = envAvailabilityFingerprint();
+		if (
+			this.#availableModelsCache &&
+			this.#availableModelsDisabledProviders === disabledProviderKey &&
+			this.#availableModelsEnvFingerprint === envFingerprint
+		) {
+			return this.#availableModelsCache;
+		}
+		this.#availableModelsCache = this.#models.filter(model => this.#isModelAvailable(model, disabledProviders));
+		this.#availableModelsDisabledProviders = disabledProviderKey;
+		this.#availableModelsEnvFingerprint = envFingerprint;
+		return this.#availableModelsCache;
 	}
 
 	/**

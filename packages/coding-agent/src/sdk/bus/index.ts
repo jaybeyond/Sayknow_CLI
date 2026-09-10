@@ -3217,9 +3217,7 @@ export function createNotificationsExtension(
 		let serverStopped = rt.serverStopped;
 		if (!serverStopped) {
 			try {
-				// fork's NotificationServer.stop() is synchronous; stopAndWait is upstream v0.11.x's
-				// async variant. TODO(port): add stop_and_wait to pi-natives/src/notifications.rs.
-				rt.server.stop();
+				await rt.server.stopAndWait();
 				serverStopped = true;
 				rt.serverStopped = true;
 			} catch (e) {

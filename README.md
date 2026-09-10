@@ -205,7 +205,7 @@ No sprawling default skill zoo: SKC improves by making this small method better.
 | Claude Code | `skc --tmux` or `skc --tmux --worktree <name>` | SKC does not become a Claude Code extension. |
 | OpenCode | `skc` or `skc --tmux` | External-runner workflow only today. |
 | Claw Code | `skc --tmux --worktree <name>` | SKC does not install into or replace Claw Code. |
-| External controller / bot | `skc --mode rpc` for a subprocess worker, or the documented coordinator bridge for compatible integrations | Compatible bots drive SKC through an explicit coordinator/RPC contract, not scrollback scraping. |
+| External controller / bot | The Sayknow-CLI SDK ([`docs/sdk.md`](docs/sdk.md)); `skc --mode rpc` was removed | Compatible bots drive SKC through the documented SDK/coordinator contract, not scrollback scraping. |
 
 For generic third-party bot setup and provider-independent smokes, see [`docs/bot-integration.md`](docs/bot-integration.md). For evaluating Aside as an opt-in search/context retrieval sidecar, see [`docs/aside-integration.md`](docs/aside-integration.md). For readiness classification across external-control surfaces, see [`docs/external-control-readiness.md`](docs/external-control-readiness.md). For lower-level protocol details, see [`docs/rpc.md`](docs/rpc.md) and [`docs/bridge.md`](docs/bridge.md). For the remote operator surfaces roadmap, see [`docs/sayknow-remote.md`](docs/sayknow-remote.md) (web steering wheel) and [`docs/telegram-remote.md`](docs/telegram-remote.md) (Telegram lifecycle button).
 

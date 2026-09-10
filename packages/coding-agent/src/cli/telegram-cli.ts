@@ -148,7 +148,7 @@ export async function runTelegramCommand(cmd: TelegramCommandArgs): Promise<void
 		case "__gateway": {
 			// Hidden entrypoint: run the Telegram Remote gateway in-process. Reached
 			// only via the self-spawn from runStart()/autostart, never by users.
-			const { loadConfigFromEnv, runService } = await import("../../../telegram-remote/src/index");
+			const { loadConfigFromEnv, runService } = await import("@sayknow-cli/telegram-remote");
 			await runService(loadConfigFromEnv(process.env));
 			return;
 		}

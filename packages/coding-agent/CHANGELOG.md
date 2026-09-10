@@ -2,6 +2,26 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Telegram tool activity and reasoning summaries flow again. The native notifications server (`crates/skc-notifications`) still admitted only the legacy `tool_activity_v1` token while the daemon and SDK host negotiated `tool_activity_v2`, so every tool-activity and reasoning-summary frame was silently dropped. Ported the upstream protocol constants: v2 is canonical, v1 stays receive-only for legacy clients.
+- `bisect` recognizes git 2.55's quoted convergence line (`<sha> is the first 'bad' commit`). On newer git every bisect ran to the step limit and reported no conclusion.
+- `/resume` with an explicit `--session-dir` no longer fails closed: the interactive selector called the managed-only candidate preparation unconditionally. It now lists through the read-only picker inventory, uses strict adoption only for managed destinations, and tags switches with the selector resume origin.
+- Model registry: `getAvailable()` is memoized (keyed on disabled providers and credential env, invalidated on auth-generation changes and catalog rebuilds), provider-discovery 401/403 errors name the provider and the `providers.<id>.apiKey` / `apiKeyEnv` surface through a redacted URL, and the resolver forwards the session id so parent-session canonical stickiness reaches bare subagent overrides.
+- Thinking/effort selector awaits the session's control-level change and surfaces errors instead of closing optimistically. Command palette hints use the configured key display strings.
+- Status line custom editor caught up with upstream: usage-mode row, stable description-area height, parent preview refresh on edit and cancel, and `usage` merged into segment options.
+- Hidden `__gateway` telegram subcommand imports `@sayknow-cli/telegram-remote` by package name instead of a cross-package relative path that does not exist in published installs.
+- Deep-interview skill: ported the "Per-question advisory fanout lanes" subsection that the v0.5.0 sync missed.
+- Stdio RPC client reports the child's exit code and stderr when the child exits before `ready`, instead of a misleading JSONL parse error.
+- `ask` tool caught up with the SDK contract: the parameter schema is stage-gated for deep interviews (topology vs post-topology vs ordinary asks), and SDK-routed asks consume the typed `awaitAnswerRequest` receipt and settlement (commit / resolve-without-commit / invalid) instead of only the legacy `awaitAnswer` path, so remote answers fire at invocation time.
+- Model profile activation raises typed `UnknownModelProfileError` / registry errors, so an SDK child that fails profile activation reports `code` and `details` through readiness and `BrokerResponse` instead of a bare `spawn_failed`.
+- SDK host shutdown awaits the native notifications server's `stopAndWait()`; a failing stop is no longer recorded as a successful `hostStopped` during rollback.
+- `mupdf` compiled-binary test and the Python SDK real-session tests run against whichever native addon variant CI built.
+
+### CI
+
+- Main CI is green again for the first time since the v0.11.6 sync. The `runtime-check` shard now downloads the native addon artifact, the planner (`scripts/ci-dev-affected.ts`) was rebuilt on the upstream v0.12.0 model with the fork's deltas (including the isolated production SDK host shard), the install smoke Dockerfile publishes the platform native packages, and roughly one hundred stale test contracts carried over from the v0.11.6/v0.12.0 syncs (rebrand strings, retired `--mode rpc`, catalog growth, default theme, golden HMAC domains) were realigned to the fork's intended behavior without removing or skipping tests.
+
 ## [0.5.10] - 2026-09-10
 
 ### Added

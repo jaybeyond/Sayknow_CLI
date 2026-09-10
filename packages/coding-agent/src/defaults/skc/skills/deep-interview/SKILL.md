@@ -635,6 +635,18 @@ A transition occurs whenever the band changes versus the prior scored round — 
 
 **Bookkeeping:** record each convened panel in `state.lateral_reviews` (round, milestone transition or pre-answer trigger, personas dispatched, findings folded). On panel spawn or validation failure, fall back silently to the normal generated question and increment `lateral_panel_failures`; do not expose tool noise unless it changes the next user-facing question. The panel is a prompt-budgeted assist layer — summarize oversized context before dispatch.
 
+### Per-question advisory fanout lanes (distinct from the milestone panel)
+
+Separate from the milestone-triggered lateral panel above, a lightweight **advisory fanout** may assist any single question the main session is about to synthesize or route — especially when the user is terse, uncertain, or would benefit from selectable options instead of another open-ended prompt. Adopted from ouroboros's ooo interview, the standard lanes are:
+
+- `code_context` — inspect repo-local facts and reuse existing exploration before asking the user.
+- `web_context` — browse/search only when current external facts genuinely affect the answer.
+- `ambiguity_contrarian` — find hidden assumptions, vague terms, missing decisions, and risky defaults.
+- `answer_simplifier` — turn the question into 2-3 easy choices or one concise draft answer.
+- `architecture_implications` — check whether the answer changes ownership, interfaces, rollout, or system shape.
+
+Advisory fanout is an assist layer, not a decision maker: it never replaces or delays the single user-facing question, never adds a second question, and never forwards a synthesized answer without the user's approval, edit, or explicit auto-confirm request. It differs from the milestone panel in trigger (per-question, not band-transition) and intent (help the human answer this one question). When both would fire on the same round, run the milestone panel and fold advisory lanes into the same single question. Runtimes without a parallel subagent primitive process lanes sequentially; on lane failure, fall back silently to the normal generated question.
+
 ## Phase 4: Crystallize Spec
 
 When ambiguity ≤ threshold (or hard cap / early exit):
