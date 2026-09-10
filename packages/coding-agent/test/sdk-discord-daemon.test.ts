@@ -729,9 +729,12 @@ describe("DiscordNotificationDaemon fake-provider acceptance", () => {
 				daemon.notify({ sessionId: "session", endpointGeneration: 1, content: "recovered" }),
 			).rejects.toThrow("rate limited");
 			provider.failPost = false;
+			// Lease recovery backs off 25ms * 2^failures (capped at 1s) and the first
+			// retry can race the flag flip above, so allow several backoff rounds on a
+			// loaded runner; the assertion below still requires the real delivery.
 			for (
 				let attempt = 0;
-				attempt < 20 && !provider.messages.some(message => message.content === "recovered");
+				attempt < 200 && !provider.messages.some(message => message.content === "recovered");
 				attempt++
 			)
 				await Bun.sleep(25);
@@ -1839,6 +1842,10 @@ describe("DiscordNotificationDaemon fake-provider acceptance", () => {
 				},
 			});
 			await restarted.start();
+			// Gateway delivery of the start event is dispatched asynchronously after
+			// start() resolves; wait (bounded) for both commands before asserting that
+			// crash recovery was dispatched ahead of it.
+			for (let attempt = 0; attempt < 200 && commands.length < 2; attempt++) await Bun.sleep(25);
 			expect(commands).toEqual(["/sdk recovered", "/sdk early"]);
 			await restarted.stop();
 		});
