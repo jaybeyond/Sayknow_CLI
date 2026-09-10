@@ -802,7 +802,10 @@ describe("lifecycle control runtime", () => {
 			);
 
 			const originalRead = fs.readFileSync as (file: fs.PathOrFileDescriptor, options?: unknown) => string;
-			const readSpy = spyOn(fs, "readFileSync").mockImplementation(((file, options) => {
+			const readSpy = spyOn(fs, "readFileSync").mockImplementation(((
+				file: fs.PathOrFileDescriptor,
+				options?: unknown,
+			) => {
 				if (file === ledgerPath) {
 					const error = new Error("permission denied") as NodeJS.ErrnoException;
 					error.code = "EACCES";
