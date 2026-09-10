@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- `fuzzyFind` understands Hangul. Names and queries are composed before comparison so a decomposed (NFD) on-disk name matches precomposed (NFC) input, and a query carrying bare compatibility consonants additionally matches syllable initials (`ㅎㄱ` → `한글.txt`). The chosung lane runs only after every literal lane declines and scores in a band strictly below them, so a real name match always outranks a consonant-skeleton match and ASCII scoring is unchanged. Composition is the arithmetic Hangul syllable rule (UAX #15), so no normalization dependency was added.
+
 ## [0.5.6] - 2026-08-28
 
 ## [0.7.0] - 2026-06-22

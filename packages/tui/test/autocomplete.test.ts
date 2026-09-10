@@ -100,6 +100,66 @@ describe("CombinedAutocompleteProvider", () => {
 		});
 	});
 
+	describe("Hangul path completion", () => {
+		let baseDir: string;
+
+		beforeEach(() => {
+			baseDir = fs.mkdtempSync(path.join(os.tmpdir(), "autocomplete-hangul-test-"));
+		});
+
+		afterEach(() => {
+			fs.rmSync(baseDir, { recursive: true, force: true });
+		});
+
+		it("matches a syllable query against a decomposed on-disk name", async () => {
+			// macOS reports Korean directory entries in NFD; the composer sends NFC.
+			fs.writeFileSync(path.join(baseDir, "한글.txt".normalize("NFD")), "x\n");
+
+			const provider = new CombinedAutocompleteProvider([], baseDir);
+			const line = "@한글";
+			const result = await provider.getSuggestions([line], 0, line.length);
+
+			const values = result?.items.map(item => item.value) ?? [];
+			expect(values.some(value => value.normalize("NFC") === "@한글.txt")).toBe(true);
+		});
+
+		it("matches bare consonants against syllable initials", async () => {
+			fs.writeFileSync(path.join(baseDir, "한글.txt"), "x\n");
+			fs.writeFileSync(path.join(baseDir, "readme.txt"), "x\n");
+
+			const provider = new CombinedAutocompleteProvider([], baseDir);
+			const line = "@ㅎㄱ";
+			const result = await provider.getSuggestions([line], 0, line.length);
+
+			const values = (result?.items.map(item => item.value) ?? []).map(value => value.normalize("NFC"));
+			expect(values).toContain("@한글.txt");
+			expect(values).not.toContain("@readme.txt");
+		});
+
+		it("ranks a full-syllable match above a chosung-only match", async () => {
+			fs.writeFileSync(path.join(baseDir, "한글.txt"), "x\n");
+			fs.writeFileSync(path.join(baseDir, "홍길동.txt"), "x\n");
+
+			const provider = new CombinedAutocompleteProvider([], baseDir);
+			const line = "@한글";
+			const result = await provider.getSuggestions([line], 0, line.length);
+
+			const values = (result?.items.map(item => item.value) ?? []).map(value => value.normalize("NFC"));
+			expect(values[0]).toBe("@한글.txt");
+		});
+
+		it("completes a decomposed directory entry from a composed prefix", async () => {
+			fs.mkdirSync(path.join(baseDir, "문서".normalize("NFD")), { recursive: true });
+
+			const provider = new CombinedAutocompleteProvider([], baseDir);
+			const line = "문";
+			const result = await provider.getForceFileSuggestions([line], 0, line.length);
+
+			const values = (result?.items.map(item => item.value) ?? []).map(value => value.normalize("NFC"));
+			expect(values).toContain("문서/");
+		});
+	});
+
 	describe("@ fuzzy search scoped paths", () => {
 		let rootDir: string;
 		let baseDir: string;
