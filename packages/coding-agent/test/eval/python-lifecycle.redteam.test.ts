@@ -62,6 +62,15 @@ async function waitForProcessGone(pid: number, timeoutMs = 5000): Promise<boolea
 	return !isProcessAlive(pid);
 }
 
+async function waitUntil(check: () => boolean, timeoutMs: number): Promise<boolean> {
+	const deadline = Date.now() + timeoutMs;
+	while (Date.now() < deadline) {
+		if (check()) return true;
+		await Bun.sleep(25);
+	}
+	return check();
+}
+
 function countAbortListeners(signal: AbortSignal): { readonly count: () => number; readonly restore: () => void } {
 	let count = 0;
 	const originalAdd = signal.addEventListener.bind(signal);
@@ -137,6 +146,15 @@ describe("python eval lifecycle red-team", () => {
 		let childPid: number | undefined;
 		try {
 			const pidFile = `${tempDir.path()}/owned-child.pid`;
+			// The cell timeout is a wall-clock budget that also covers kernel startup, and CI
+			// runners can spend most of 500ms booting Python. Warm the session kernel first so
+			// the budget below bounds the bash cell itself (the behaviour under test).
+			const warmup = await executePython("pass", {
+				cwd: tempDir.path(),
+				sessionId: "redteam-bash-descendant-timeout",
+				kernelMode: "session",
+			});
+			expect(warmup.cancelled).toBe(false);
 			const result = await executePython(`%%bash\n(sleep 30) &\nprintf '%s' "$!" > "${pidFile}"\nwait`, {
 				cwd: tempDir.path(),
 				sessionId: "redteam-bash-descendant-timeout",
@@ -178,7 +196,11 @@ describe("python eval lifecycle red-team", () => {
 				signal: controller.signal,
 				timeoutMs: 60_000,
 			});
-			await Bun.sleep(250);
+			// Kernel startup is not bounded by the cell budget and routinely exceeds a fixed
+			// 250ms on CI runners; wait for the kernel to come up and for the in-flight cell
+			// to register its single abort listener instead of assuming a sleep suffices.
+			expect(await waitUntil(() => shutdown !== undefined, 30_000)).toBe(true);
+			expect(await waitUntil(() => listeners.count() === 1, 5_000)).toBe(true);
 			expect(listeners.count()).toBe(1);
 			expect(shutdown).toBeDefined();
 

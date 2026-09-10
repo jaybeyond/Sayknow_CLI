@@ -3,6 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { resetSettingsForTest, Settings, settings } from "@sayknow-cli/coding-agent/config/settings";
+import { setLanguage } from "@sayknow-cli/coding-agent/i18n/index";
 import { SettingsSelectorComponent } from "@sayknow-cli/coding-agent/modes/components/settings-selector";
 import { initTheme } from "@sayknow-cli/coding-agent/modes/theme/theme";
 
@@ -13,6 +14,8 @@ beforeAll(async () => {
 beforeEach(async () => {
 	resetSettingsForTest();
 	await Settings.init({ inMemory: true });
+	// Settings.init re-applies the "auto" language hook; pin English so labels are locale-independent.
+	setLanguage("en");
 });
 
 afterEach(() => {
@@ -81,7 +84,7 @@ describe("SettingsSelectorComponent memory tab", () => {
 				{
 					availableThinkingLevels: [],
 					thinkingLevel: undefined,
-					availableThemes: ["blue-octopus"],
+					availableThemes: ["red-octopus"],
 					availableModelProfiles: [],
 					cwd: testDir,
 				},
@@ -99,9 +102,9 @@ describe("SettingsSelectorComponent memory tab", () => {
 				"Cannot change settings while config.yml has invalid YAML syntax. Repair config.yml and reload settings.",
 			]);
 			expect(changes).toEqual([]);
-			expect(settings.get("theme.dark")).toBe("red-octopus");
+			expect(settings.get("theme.dark")).toBe("blue-octopus");
 			component.handleInput("\x1b");
-			expect(component.render(120).join("\n")).toContain("red-octopus");
+			expect(component.render(120).join("\n")).toContain("blue-octopus");
 		} finally {
 			Settings.instance.getStorage()?.close();
 			try {

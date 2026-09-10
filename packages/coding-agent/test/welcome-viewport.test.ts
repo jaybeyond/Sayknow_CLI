@@ -234,8 +234,10 @@ describe("WelcomeComponent viewport sizing", () => {
 			name: `trail-session-${index + 1}`,
 			timeAgo: `${index + 1}m ago`,
 		}));
+		// The Sayknow-CLI welcome adds a 6-row Workflows block above Flow keys, so the
+		// compact viewport needs those extra rows before the trail gets its baseline.
 		const compact = new WelcomeComponent("1.2.3", "test-model", "test-provider", recentSessions, [], "ascii", {
-			getViewportRows: () => 24,
+			getViewportRows: () => 30,
 			getReservedBottomRows: () => 4,
 		});
 		const roomy = new WelcomeComponent("1.2.3", "test-model", "test-provider", recentSessions, [], "ascii", {
@@ -291,15 +293,16 @@ describe("WelcomeComponent viewport sizing", () => {
 			name: `trail-session-${index + 1}`,
 			timeAgo: `${index + 1}m ago`,
 		}));
+		// 18 upstream rows + the fork's 6-row Workflows block: Flow keys must still clip first.
 		const compact = new WelcomeComponent("1.2.3", "test-model", "test-provider", recentSessions, [], "ascii", {
-			getViewportRows: () => 18,
+			getViewportRows: () => 24,
 			getReservedBottomRows: () => 4,
 		});
 
 		const lines = compact.render(80);
 		const flowRows = flowKeyContentRows(lines);
 
-		expect(lines).toHaveLength(14);
+		expect(lines).toHaveLength(20);
 		expect(flowRows.length).toBeLessThanOrEqual(2);
 		expect(lines.join("\n")).toContain("/help");
 	});

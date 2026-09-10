@@ -20,6 +20,7 @@ import {
 } from "../../src/skc-runtime/session-restore-runtime";
 import {
 	__setOwnerIncarnationReaderForTests,
+	type PlanResponse,
 	releaseIdentityCreate,
 	reserveIdentityCreate,
 } from "../../src/skc-runtime/tmux-owner-isolation";
@@ -262,6 +263,19 @@ describe("dry run mutates nothing", () => {
 	});
 });
 
+/**
+ * The tmux argv a plan would run. A direct plan carries it verbatim; when the
+ * caller's cgroup demands isolation (e.g. Linux CI runners inside a systemd
+ * service scope) the plan is "scoped" and the tmux argv travels in the
+ * bootstrap request on stdin behind a fixed `--internal-tmux-owner-isolation`
+ * argv, so reading `execution.argv` alone is platform-dependent.
+ */
+function plannedTmuxArgv(plan: PlanResponse): string[] | undefined {
+	if (!plan.ok) return undefined;
+	if (plan.execution.mode === "direct") return plan.execution.argv;
+	return (JSON.parse(plan.execution.stdin_line) as { tmux_argv: string[] }).tmux_argv;
+}
+
 describe("restoreSession", () => {
 	it("adopts the recorded identity and resumes that transcript in its own cwd", () => {
 		const { project } = isolatedRoot();
@@ -282,7 +296,7 @@ describe("restoreSession", () => {
 		let plannedArgv: string[] | undefined;
 		__setCreateOwnerIsolationForTests({
 			execute: plan => {
-				if (plan.ok) plannedArgv = plan.execution.argv;
+				plannedArgv = plannedTmuxArgv(plan);
 				return { ok: false, code: "scope_bootstrap_failed", diagnostic: "test-stop" };
 			},
 		});
@@ -434,7 +448,7 @@ describe("resume identity comes from the transcript, not the coordinator", () =>
 		let plannedArgv: string[] | undefined;
 		__setCreateOwnerIsolationForTests({
 			execute: plan => {
-				if (plan.ok) plannedArgv = plan.execution.argv;
+				plannedArgv = plannedTmuxArgv(plan);
 				return { ok: false, code: "scope_bootstrap_failed", diagnostic: "test-stop" };
 			},
 		});

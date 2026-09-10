@@ -964,7 +964,7 @@ describe("notifications config", () => {
 		resetSettingsForTest();
 		const initialized = await Settings.init({ cwd: root, agentDir });
 		try {
-			expect(initialized.get("theme.dark")).toBe("red-octopus");
+			expect(initialized.get("theme.dark")).toBe("blue-octopus");
 			expect(() => initialized.getNotificationSettingsSnapshot()).toThrow("skc_notify_daemon_invalid_configuration");
 		} finally {
 			resetSettingsForTest();
@@ -972,7 +972,7 @@ describe("notifications config", () => {
 
 		const settings = await Settings.loadForScope({ cwd: root, agentDir });
 		try {
-			expect(settings.get("theme.dark")).toBe("red-octopus");
+			expect(settings.get("theme.dark")).toBe("blue-octopus");
 			expect(() => settings.getNotificationSettingsSnapshot()).toThrow("skc_notify_daemon_invalid_configuration");
 			await expect(loadLightweightDaemonSettings(agentDir)).rejects.toThrow();
 		} finally {
@@ -1031,31 +1031,31 @@ describe("notifications config", () => {
 					},
 				],
 			});
-			expect(() => settings.set("theme.dark", "blue-octopus")).toThrow("Repair config.yml");
+			expect(() => settings.set("theme.dark", "red-octopus")).toThrow("Repair config.yml");
 			expect(() => settings.unset("theme.dark")).toThrow("Repair config.yml");
 			await expect(
-				settings.commitAtomicBatch([{ path: "theme.dark", op: "set", value: "blue-octopus" }]),
+				settings.commitAtomicBatch([{ path: "theme.dark", op: "set", value: "red-octopus" }]),
 			).rejects.toThrow("Repair config.yml");
 			await expect(
-				settings.commitAtomicBatchWithCurrent(() => [{ path: "theme.dark", op: "set", value: "blue-octopus" }]),
+				settings.commitAtomicBatchWithCurrent(() => [{ path: "theme.dark", op: "set", value: "red-octopus" }]),
 			).rejects.toThrow("Repair config.yml");
-			expect(settings.get("theme.dark")).toBe("red-octopus");
+			expect(settings.get("theme.dark")).toBe("blue-octopus");
 			await settings.flush();
 			expect(fs.readFileSync(configPath, "utf8")).toBe(malformed);
 
-			fs.writeFileSync(configPath, "theme:\n  dark: blue-octopus\n");
+			fs.writeFileSync(configPath, "theme:\n  dark: red-octopus\n");
 			await settings.flush();
 			expect(settings.getSchemaReport()).toEqual({ issues: [], valid: true });
-			settings.set("theme.dark", "red-octopus");
+			settings.set("theme.dark", "blue-octopus");
 			await settings.flushOrThrow();
-			expect(YAML.parse(fs.readFileSync(configPath, "utf8"))).toMatchObject({ theme: { dark: "red-octopus" } });
+			expect(YAML.parse(fs.readFileSync(configPath, "utf8"))).toMatchObject({ theme: { dark: "blue-octopus" } });
 		} finally {
 			settings.getStorage()?.close();
 		}
 
 		const isolated = Settings.isolated();
-		isolated.set("theme.dark", "blue-octopus");
-		expect(isolated.get("theme.dark")).toBe("blue-octopus");
+		isolated.set("theme.dark", "red-octopus");
+		expect(isolated.get("theme.dark")).toBe("red-octopus");
 	});
 
 	test("project notification settings are ignored without leaking credentials", async () => {

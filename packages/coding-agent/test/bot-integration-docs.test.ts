@@ -29,14 +29,14 @@ describe("external controller integration docs", () => {
 		expect(guide).toContain("Dry-run lifecycle smoke");
 		expect(guide).toContain("Optional live smoke");
 		expect(guide).toContain("not privileged integration modes");
-		expect(guide).toContain("skc --mode rpc");
+		expect(guide).toContain("`--mode rpc`, `--mode rpc-ui`, and `--mode bridge` have been removed");
 		expect(guide).toContain("skc_coordinator_register_session");
-		expect(guide).toContain("visible tmux fallback");
+		expect(guide).toContain("advisory process metadata only");
 		expect(guide).toContain("active_turn_exists");
 		expect(guide).toContain("Provider/auth failure");
 		expect(guide).toContain("Coordinator cancellation");
 		expect(guide).toContain('status: "cancelled"');
-		expect(guide).toContain("not a tmux process kill");
+		expect(guide).toContain("does not kill or control any tmux process");
 
 		for (const toolName of COORDINATOR_MCP_TOOL_NAMES) {
 			expect(guide).toContain(toolName);
@@ -130,7 +130,8 @@ describe("external controller integration docs", () => {
 			expect(readiness).toContain(smoke);
 		}
 
-		expect(cliArgs).toContain('export type Mode = "text" | "json" | "rpc" | "acp" | "rpc-ui" | "bridge"');
+		expect(cliArgs).toContain('export type Mode = "text" | "json" | "acp"');
+		expect(cliArgs).toContain('const removed = mode === "rpc" || mode === "rpc-ui" || mode === "bridge"');
 		expect(acpCommand).toContain("Run Sayknow-CLI as an ACP (Agent Client Protocol) server over stdio");
 		expect(mcpCommand).toContain('server !== "coordinator" && server !== "hermes"');
 		expect(bridgeMode).toContain("const FAIL_CLOSED_BRIDGE_ENDPOINTS");

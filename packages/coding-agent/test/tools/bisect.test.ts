@@ -78,6 +78,11 @@ describe("parseFirstBadCommit", () => {
 		expect(parseFirstBadCommit("abc1234 is the first bad commit")).toBe("abc1234");
 	});
 
+	it("accepts the quoted-term wording emitted by git >= 2.55", () => {
+		const output = `${FORTY_HEX} is the first 'bad' commit\ncommit ${FORTY_HEX}\nAuthor: X\n`;
+		expect(parseFirstBadCommit(output)).toBe(FORTY_HEX);
+	});
+
 	it("returns null before the search has converged", () => {
 		expect(parseFirstBadCommit("Bisecting: 3 revisions left to test after this (roughly 2 steps)")).toBeNull();
 	});

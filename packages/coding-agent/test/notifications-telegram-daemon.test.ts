@@ -15119,7 +15119,7 @@ describe("Telegram tool activity capability and routing", () => {
 			update_id: 964,
 			message: {
 				chat: { id: 42, type: "private" },
-				text: "/TOOLACTIVITY@SAYKNOWCODEBOT ON",
+				text: "/TOOLACTIVITY@SAYKNOWCLIBOT ON",
 				message_id: 4,
 			},
 		});

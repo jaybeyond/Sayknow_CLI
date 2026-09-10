@@ -9,7 +9,6 @@ import {
 	RpcClient,
 	type RpcSessionEventListener,
 } from "@sayknow-cli/coding-agent/modes/rpc/rpc-client";
-import { YAML } from "bun";
 import { AGENT_WIRE_EVENT_TYPES } from "../src/modes/shared/agent-wire/event-contract";
 import { AgentWireFrameSequencer, toAgentWireEventFrame } from "../src/modes/shared/agent-wire/event-envelope";
 import type { AgentSessionEvent } from "../src/session/agent-session";
@@ -75,17 +74,31 @@ afterEach(async () => {
 	await rm(workspace, { recursive: true, force: true });
 });
 
-async function waitForSocket(socketPath: string, timeoutMs = 30_000): Promise<void> {
-	const start = Date.now();
-	while (Date.now() - start < timeoutMs) {
-		try {
-			await stat(socketPath);
-			return;
-		} catch {
-			await Bun.sleep(50);
-		}
+/** `--mode rpc` is retired (docs/sdk.md); args.ts rejects it before any server binds or reads stdin. */
+const REMOVAL_MESSAGE = "--mode rpc was removed; external control now uses the Sayknow-CLI SDK (docs/sdk.md)";
+
+async function collect(proc: Bun.Subprocess<"ignore", "pipe", "pipe">) {
+	const [stdout, stderr, exitCode] = await Promise.all([
+		new Response(proc.stdout).text(),
+		new Response(proc.stderr).text(),
+		proc.exited,
+	]);
+	return { stdout, stderr, exitCode };
+}
+
+function expectUsageRefusal(result: { exitCode: number; stdout: string; stderr: string }): void {
+	expect(result.exitCode, result.stderr).toBe(2);
+	expect(result.stdout).toContain("USAGE");
+	expect(result.stderr).toContain(REMOVAL_MESSAGE);
+}
+
+async function exists(filePath: string): Promise<boolean> {
+	try {
+		await stat(filePath);
+		return true;
+	} catch {
+		return false;
 	}
-	throw new Error(`socket ${socketPath} was not created`);
 }
 
 function spawnRpc(socketPath: string) {
@@ -115,9 +128,13 @@ function spawnRpc(socketPath: string) {
 }
 
 describe("RpcClient UDS transport", () => {
-	test("sets a durable default model through the real UDS server", async () => {
+	test("cannot set a durable default through the removed UDS server: the launch fails closed and config.yml is untouched", async () => {
 		await writeFile(path.join(agentDir, "models.yml"), defaultSelectionModelsYaml);
+		const configFile = path.join(agentDir, "config.yml");
+		await writeFile(configFile, "modelRoles:\n  default: rpc-test/rpc-test-a:off\n");
+		const configBaseline = await Bun.file(configFile).text();
 		const socketPath = path.join(workspace, "rpc-client-default-selection.sock");
+		const sessionDir = path.join(workspace, "default-selection-sessions");
 		const proc = Bun.spawn(
 			[
 				"bun",
@@ -129,7 +146,7 @@ describe("RpcClient UDS transport", () => {
 				"--model",
 				"rpc-test-a",
 				"--session-dir",
-				path.join(workspace, "default-selection-sessions"),
+				sessionDir,
 				"--listen",
 				socketPath,
 			],
@@ -141,43 +158,30 @@ describe("RpcClient UDS transport", () => {
 				stderr: "pipe",
 			},
 		);
-		const stderrText = new Response(proc.stderr).text();
 		const client = new RpcClient({ transport: "uds", socketPath });
 		try {
-			await waitForSocket(socketPath);
-			await client.start();
-			expect((await client.getState()).model).toMatchObject({ provider: "rpc-test", id: "rpc-test-a" });
-
-			const selection = await client.setDefaultModelSelection("rpc-test", "rpc-test-b", ThinkingLevel.Off);
-
-			expect(selection).toEqual({
-				provider: "rpc-test",
-				modelId: "rpc-test-b",
-				thinkingLevel: ThinkingLevel.Off,
-			});
-			expect(YAML.parse(await Bun.file(path.join(agentDir, "config.yml")).text())).toMatchObject({
-				modelRoles: { default: "rpc-test/rpc-test-b:off" },
-			});
-			expect(await client.getState()).toMatchObject({
-				model: { provider: "rpc-test", id: "rpc-test-b" },
-				thinkingLevel: ThinkingLevel.Off,
-			});
+			expectUsageRefusal(await collect(proc));
+			await expect(client.start()).rejects.toThrow();
+			await expect(client.setDefaultModelSelection("rpc-test", "rpc-test-b", ThinkingLevel.Off)).rejects.toThrow(
+				"Client not started",
+			);
+			// The durable selector is byte-for-byte untouched and no session state appeared.
+			expect(await Bun.file(configFile).text()).toBe(configBaseline);
+			expect(await exists(sessionDir)).toBe(false);
+			expect(await Bun.file(socketPath).exists()).toBe(false);
 		} finally {
 			client.stop();
 			proc.kill();
-			await proc.exited;
-			expect(Bun.spawnSync(["kill", "-0", String(proc.pid)]).exitCode).not.toBe(0);
-			expect(await Bun.file(socketPath).exists()).toBe(false);
-			expect((await stderrText).trim()).toBe("");
-			await rm(workspace, { recursive: true, force: true });
 		}
 	}, 45_000);
 
-	test("connects to rpc-mode UDS, correlates requests, checks pending-gate replay API, and leaves server alive on close", async () => {
+	test("surfaces the removal to UDS clients: no server comes up, start() rejects instead of hanging, and stop() stays safe", async () => {
 		const socketPath = path.join(workspace, "rpc.sock");
 		const proc = spawnRpc(socketPath);
 		try {
-			await waitForSocket(socketPath);
+			expectUsageRefusal(await collect(proc));
+			await expect(stat(socketPath)).rejects.toThrow();
+
 			let toolCalls = 0;
 			const hostEchoTool = defineRpcClientTool({
 				name: "host_echo",
@@ -198,29 +202,23 @@ describe("RpcClient UDS transport", () => {
 			const gates: unknown[] = [];
 			client.onExtensionUiRequest(req => extensionRequests.push(req));
 			client.onWorkflowGate(gate => gates.push(gate));
-			await client.start();
 
-			const [state, tools] = await Promise.all([client.getState(), client.setCustomTools([hostEchoTool])]);
-			expect(state.sessionId).toBeTruthy();
-			expect(tools).toContain("host_echo");
-			expect(Array.isArray(await client.getPendingWorkflowGates())).toBe(true);
-			await expect(client.respondGate("wg_missing", "approve", "k1")).rejects.toThrow(
-				/workflow gates are not available|no pending gate|not negotiated|not available/i,
-			);
-			client.respondExtensionUi({ type: "extension_ui_response", id: "unused", value: "ok" });
+			// The unbound path fails the connect itself (ENOENT), well inside the 30s ready timeout.
+			const started = Date.now();
+			await expect(client.start()).rejects.toThrow();
+			expect(Date.now() - started).toBeLessThan(20_000);
+
+			// Every request stays fail-closed; no host tool, UI request, or gate is ever dispatched.
+			await expect(client.getPendingWorkflowGates()).rejects.toThrow("Client not started");
+			await expect(client.getState()).rejects.toThrow("Client not started");
+			await expect(client.bash("printf never-runs")).rejects.toThrow("Client not started");
 			expect(extensionRequests).toHaveLength(0);
 			expect(gates).toHaveLength(0);
 			expect(toolCalls).toBe(0);
-
-			const pending = client.bash("printf pending-close; sleep 5");
-			client.stop();
-			await expect(pending).rejects.toThrow(/closed|stopped|Client not started|Socket closed/i);
-			await Bun.sleep(300);
-			expect(proc.killed).toBe(false);
+			expect(() => client.stop()).not.toThrow();
 
 			const reconnect = new RpcClient({ transport: "uds", socketPath });
-			await reconnect.start();
-			expect((await reconnect.getState()).sessionId).toBe(state.sessionId);
+			await expect(reconnect.start()).rejects.toThrow();
 			reconnect.stop();
 		} finally {
 			proc.kill();
@@ -410,19 +408,28 @@ describe("RpcClient UDS transport", () => {
 		}
 	}, 30_000);
 
-	test("stdio transport still starts and serves a basic correlated request", async () => {
+	test("stdio transport surfaces the removal error from start() instead of a JSONL parse failure", async () => {
+		const sessionDir = path.join(workspace, "stdio-sessions");
 		const client = new RpcClient({
 			cliPath: cliEntry,
 			cwd: workspace,
 			provider: "rpc-test",
 			model: "rpc-test-model",
-			sessionDir: path.join(workspace, "stdio-sessions"),
+			sessionDir,
 			env: { ...cliEnv.env, SKC_HARNESS_STATE_ROOT: workspace, NO_COLOR: "1", PI_NOTIFICATIONS: "off" },
 		});
 		try {
-			await client.start();
-			const state = await client.getState();
-			expect(state.sessionId).toBeTruthy();
+			// The usage text lands on stdout; the client must report the child's exit code and
+			// stderr (the removal notice) rather than the JSONL parse noise.
+			const error = await client.start().then(
+				() => undefined,
+				(reason: unknown) => reason,
+			);
+			expect(error).toBeInstanceOf(Error);
+			expect((error as Error).message).toMatch(/exited with code 2/);
+			expect((error as Error).message).toContain(REMOVAL_MESSAGE);
+			await expect(client.getState()).rejects.toThrow("Client not started");
+			expect(await exists(sessionDir)).toBe(false);
 		} finally {
 			client.stop();
 		}

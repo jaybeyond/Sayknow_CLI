@@ -33,7 +33,9 @@ afterEach(async () => {
 });
 
 function makeTempDir(): string {
-	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "skc-resume-readonly-"));
+	// Managed-session guards reject symlinked path components (macOS `/var` -> `/private/var`),
+	// so canonicalize like scripts/test-preload.ts does for the shared TMPDIR.
+	const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "skc-resume-readonly-")));
 	tempDirs.push(dir);
 	return dir;
 }
@@ -1250,7 +1252,7 @@ describe("active managed picker root", () => {
 
 		await expect(
 			SessionManager.prepareManagedCandidateForWrite(legacyPath, "copy-retain", destination),
-		).rejects.toThrow("Managed root authority changed");
+		).rejects.toThrow(/Managed (?:descendant root binding|root authority) changed/);
 
 		expect(assertions).toBe(5);
 		expect(fs.readFileSync(legacyPath)).toEqual(candidateBefore);

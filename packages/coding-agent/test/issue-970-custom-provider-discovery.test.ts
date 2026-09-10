@@ -2,6 +2,7 @@ import { afterEach, beforeAll, beforeEach, describe, expect, test, vi } from "bu
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { UNK_CONTEXT_WINDOW, UNK_MAX_TOKENS } from "@sayknow-cli/ai";
 import type { ModelRegistry, ProviderDiscoveryState } from "@sayknow-cli/coding-agent/config/model-registry";
 import { ModelRegistry as ModelRegistryImpl } from "@sayknow-cli/coding-agent/config/model-registry";
 import { Settings } from "@sayknow-cli/coding-agent/config/settings";
@@ -136,8 +137,10 @@ describe("issue #970 custom provider discovery", () => {
 		expect(deepseek?.api).toBe("openai-completions");
 		expect(deepseek?.provider).toBe("vllm");
 		expect(deepseek?.name).toBe("deepseek-r1");
-		expect(deepseek?.contextWindow).toBe(128000);
-		expect(deepseek?.maxTokens).toBe(8192);
+		// Discovered-only models with no server-reported limits keep the unknown
+		// sentinels rather than being silently defaulted to 128K/8K.
+		expect(deepseek?.contextWindow).toBe(UNK_CONTEXT_WINDOW);
+		expect(deepseek?.maxTokens).toBe(UNK_MAX_TOKENS);
 	});
 
 	test("shows a provider-tab hint when discovery succeeds but returns zero models", async () => {

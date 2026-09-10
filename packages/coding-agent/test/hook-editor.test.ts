@@ -78,6 +78,10 @@ function createControllerContext() {
 		editorContainer,
 		ui,
 		hookEditor: undefined,
+		restoreComposer() {
+			editorContainer.clear();
+			editorContainer.addChild(editor);
+		},
 	} as unknown as TestContext;
 
 	return { ctx, editor, editorContainer, ui };

@@ -32,6 +32,8 @@ function createControllerContext(overrides: Partial<InteractiveModeContext> = {}
 			hasForegroundBashBackgroundRequestHandler: () => false,
 		},
 		compactionQueuedMessages: [],
+		todoPhases: [],
+		hasOAuthAuthorizationUrl: () => false,
 		chatContainer: { children: [] },
 		goalModeController: { enabled: false, paused: false, handleCommand: () => {} },
 		planModeController: { enabled: true, paused: false, handleCommand: () => {} },

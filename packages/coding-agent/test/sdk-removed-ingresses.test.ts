@@ -20,9 +20,14 @@ async function runCli(args: string[]): Promise<{ exitCode: number; stdout: strin
 }
 
 describe("removed external ingresses (Phase D structural proof)", () => {
-	it("no rpc or bridge mode source directories remain", () => {
-		expect(fs.existsSync(path.join(packageRoot, "src", "modes", "rpc"))).toBe(false);
-		expect(fs.existsSync(path.join(packageRoot, "src", "modes", "bridge"))).toBe(false);
+	// Sayknow-CLI keeps `src/modes/rpc` and `src/modes/bridge` as fork-owned library
+	// code (published through the `./modes/rpc/*` package export and consumed by
+	// `@sayknow-cli/telegram-remote`); only their CLI ingress was removed. The
+	// structural proof is therefore that the mode dispatcher wires neither module.
+	it("rpc and bridge modes are not wired into the mode dispatcher", () => {
+		const dispatcher = fs.readFileSync(path.join(packageRoot, "src", "modes", "index.ts"), "utf8");
+		expect(dispatcher).not.toMatch(/from\s+["']\.\/(?:rpc|bridge)(?:\/|["'])/);
+		expect(dispatcher).not.toMatch(/\b(?:runRpcMode|runBridgeMode|RpcMode|BridgeMode)\b/);
 	});
 
 	it("renders removed --mode values as usage errors", async () => {

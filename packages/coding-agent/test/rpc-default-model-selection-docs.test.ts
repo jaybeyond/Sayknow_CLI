@@ -86,21 +86,25 @@ describe("durable default model selection documentation", () => {
 		expect(bridgeDoc).toContain("| `set_default_model_selection` | `model` |");
 	});
 
-	test("records the limited durable default in the changelog", async () => {
-		// Given the package changelog
-		const changelog = await readRepositoryFile("packages/coding-agent/CHANGELOG.md");
+	test("records the durable default's retirement and its SDK migration path", async () => {
+		// Given the SDK reference and the RPC-to-SDK parity audit (the fork's changelog
+		// tracks fork releases only; the retired RPC contract's status lives in these docs)
+		const [sdkDoc, parityAudit] = await Promise.all([
+			readRepositoryFile("docs/sdk.md"),
+			readRepositoryFile("docs/sdk-rpc-parity-audit.md"),
+		]);
 
-		// When the Unreleased section plus the most recent released section are
-		// inspected (a release moves Unreleased content into a version section,
-		// so this contract must survive the release commit itself)
-		const currentSections = changelog.match(
-			/## \[Unreleased\][\s\S]*?(?=\n## \[|$)(?:\n## \[\d+\.\d+\.\d+\][\s\S]*?(?=\n## \[|$))?/,
-		)?.[0];
+		// When the removed-mode migration guidance is inspected
+		const migration = sdkDoc.match(/## Migration from the removed RPC mode[\s\S]*?(?=\n## |$)/)?.[0];
 
-		// Then it records the durable selector without overstating precedence
-		expect(currentSections).toContain(
-			"RPC clients can now durably select the machine-global default model and effective thinking level for subsequent messages",
-		);
-		expect(currentSections).toContain("while project policy and resumed session history retain precedence");
+		// Then the retired transport, its canonical successor, and the audit are named
+		expect(migration).toContain("The retired `--mode rpc`, `rpc-ui`, and `bridge` modes are removed.");
+		expect(migration).toContain("canonical external control/query bus");
+		expect(migration).toContain("sdk-rpc-parity-audit.md");
+
+		// And the durable selector maps to `model.set` without overstating the retired envelope
+		const auditRow = parityAudit.match(/^\| Model \| `set_default_model_selection` \|[^\n]+$/m)?.[0];
+		expect(auditRow).toContain("`model.set` with `thinkingLevel`");
+		expect(auditRow).toContain("not the retired durable-selector response envelope");
 	});
 });

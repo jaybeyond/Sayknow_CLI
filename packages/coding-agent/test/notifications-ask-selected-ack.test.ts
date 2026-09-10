@@ -46,7 +46,7 @@ async function startInteractiveNotifications() {
 		},
 	} as never;
 	await handlers.get("session_start")!({ type: "session_start" }, ctx);
-	const endpointPath = path.join(cwd, ".skc", "state", "notifications", `${sessionId}.json`);
+	const endpointPath = path.join(cwd, ".skc", "state", "sdk", `${sessionId}.json`);
 	const endpoint = await waitFor(() => {
 		try {
 			return JSON.parse(fs.readFileSync(endpointPath, "utf8")) as { url: string; token: string };

@@ -52,6 +52,8 @@ function createKeylessRegistry() {
 		getModelProfiles: () => new Map(profiles),
 		getModelProfile: (name: string) => profiles.get(name),
 		getAvailableModelProfileNames: () => [...profiles.keys()],
+		// Keyless providers count as configured (mirrors ModelRegistry#keylessProviders).
+		hasConfiguredProviderAuth: () => true,
 		getApiKeyForProvider: async (_provider: string) => kNoAuth,
 		getApiKey: async () => kNoAuth,
 	};
@@ -97,9 +99,14 @@ describe("keyless / no-auth provider model apply", () => {
 
 	test("prepareModelProfileActivation does not reject a keyless provider", async () => {
 		const prepared = await prepareModelProfileActivation({
-			session: { model: localModel, thinkingLevel: undefined, sessionId: "sess-keyless" } as never,
+			session: {
+				model: localModel,
+				thinkingLevel: undefined,
+				sessionId: "sess-keyless",
+				getConfiguredModelChain: () => undefined,
+			} as never,
 			modelRegistry: createKeylessRegistry() as never,
-			settings: { get: () => undefined } as never,
+			settings: { get: () => undefined, getStorage: () => undefined } as never,
 			profileName: "local-preset",
 		});
 		// The auth gate passed (no "requires credentials" throw) and the profile

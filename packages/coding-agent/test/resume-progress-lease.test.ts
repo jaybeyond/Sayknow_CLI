@@ -72,11 +72,9 @@ describe("resume progress lease", () => {
 		await expect(resume).resolves.toBe(true);
 		expect(statusContainer.children).toHaveLength(0);
 		expect(context.showStatus).toHaveBeenCalledWith("Resumed session");
-		expect(session.switchSession).toHaveBeenCalledWith("/tmp/target.jsonl", undefined);
-		expect(context.sessionManager.prepareManagedCandidateForWrite).toHaveBeenCalledWith(
-			"/tmp/target.jsonl",
-			"copy-retain",
-		);
+		expect(session.switchSession).toHaveBeenCalledWith("/tmp/target.jsonl", expect.any(Object));
+		// Explicit (non-managed) destinations never enter the managed migration fence.
+		expect(context.sessionManager.prepareManagedCandidateForWrite).not.toHaveBeenCalled();
 
 		ui.stop();
 	});
@@ -129,7 +127,7 @@ describe("resume progress lease", () => {
 		const controller = new SelectorController(context);
 
 		await expect(controller.handleResumeSession("/tmp/target.jsonl")).resolves.toBe(true);
-		expect(switchSession).toHaveBeenCalledWith("/tmp/target.jsonl", undefined);
+		expect(switchSession).toHaveBeenCalledWith("/tmp/target.jsonl", expect.any(Object));
 		expect(context.showStatus).toHaveBeenCalledWith("Resumed session");
 		expect(ui.requestRenderWithGeneration).not.toHaveBeenCalled();
 	});

@@ -155,11 +155,11 @@ describe("canonical lifecycle correlation", () => {
 				request:
 					'{"type":"session_create","target":{"kind":"existing_path","path":"C:\\\\repo\\\\\\"quoted\\""},"startupPromptRef":null,"modelPreset":"codex-eco","force":null}',
 				hash: "d281bec48aba2844bef9a3ff66102d0366210e44ea99af79907e2a77ec624b4c",
-				targetRef: "a317cb142c695e865aa0b3e7b95ade856df1e8105875eda1f6315b768cb616a4",
-				requestRef: "67b9413235920dec88874b45e77daa2010cab0d0d1df2ee1da5ba44f2330c1e4",
+				targetRef: "4d5cab385d8a792fd533f8e4256a259616637e41d3ea46503dfaf359181b0e0e",
+				requestRef: "8b0b25506d3e95f45f520f49ad6331434e61a515c8b5e0cdb1ad9926c39d5865",
 				targetKind: "existing_path",
 				rawValues: ['C:\\repo\\"quoted"', "codex-eco", "control-token"],
-				audit: '{"schemaVersion":2,"ts":"1970-01-01T00:00:01.000Z","chatRef":"f05b1a602d9038ea96b543dc8929a33d587f1f8b48af352460ffc0f81d178bdf","updateId":100,"requestRef":"67b9413235920dec88874b45e77daa2010cab0d0d1df2ee1da5ba44f2330c1e4","verb":"session_create","targetKind":"existing_path","targetRef":"a317cb142c695e865aa0b3e7b95ade856df1e8105875eda1f6315b768cb616a4","event":"rejected","reason":"unauthorized"}',
+				audit: '{"schemaVersion":2,"ts":"1970-01-01T00:00:01.000Z","chatRef":"42ca42986565578eecf3cd1aee3010f94b2d3db832a5773c80c2e4dd9b6fa13f","updateId":100,"requestRef":"8b0b25506d3e95f45f520f49ad6331434e61a515c8b5e0cdb1ad9926c39d5865","verb":"session_create","targetKind":"existing_path","targetRef":"4d5cab385d8a792fd533f8e4256a259616637e41d3ea46503dfaf359181b0e0e","event":"rejected","reason":"unauthorized"}',
 			},
 			{
 				name: "plain_dir non-ASCII",
@@ -172,11 +172,11 @@ describe("canonical lifecycle correlation", () => {
 				request:
 					'{"type":"session_create","target":{"kind":"plain_dir","path":"/新しい ディレクトリ"},"startupPromptRef":null,"modelPreset":null,"force":null}',
 				hash: "a11eb7d921d0e036180013dacca73d56878a4edcb7352efa24da74cf44971e2a",
-				targetRef: "0414dbe87dc9d86ff579bb1fd18832100dba0208adb0b2753c5195793483c0cc",
-				requestRef: "78c3d37443ee49d596048dd9d3d0326d4e0d50499adfacc90627b6999f526508",
+				targetRef: "11afa5f850c9dc72e896de46f2af0c00180a33b14262c9f2170393a23badbf43",
+				requestRef: "cefa74a36cf5d5cdda2b05181017f28315f38b42d2be75a6e2c4c81aa2f99157",
 				targetKind: "plain_dir",
 				rawValues: ["/新しい ディレクトリ", "control-token"],
-				audit: '{"schemaVersion":2,"ts":"1970-01-01T00:00:01.000Z","chatRef":"f05b1a602d9038ea96b543dc8929a33d587f1f8b48af352460ffc0f81d178bdf","updateId":101,"requestRef":"78c3d37443ee49d596048dd9d3d0326d4e0d50499adfacc90627b6999f526508","verb":"session_create","targetKind":"plain_dir","targetRef":"0414dbe87dc9d86ff579bb1fd18832100dba0208adb0b2753c5195793483c0cc","event":"rejected","reason":"unauthorized"}',
+				audit: '{"schemaVersion":2,"ts":"1970-01-01T00:00:01.000Z","chatRef":"42ca42986565578eecf3cd1aee3010f94b2d3db832a5773c80c2e4dd9b6fa13f","updateId":101,"requestRef":"cefa74a36cf5d5cdda2b05181017f28315f38b42d2be75a6e2c4c81aa2f99157","verb":"session_create","targetKind":"plain_dir","targetRef":"11afa5f850c9dc72e896de46f2af0c00180a33b14262c9f2170393a23badbf43","event":"rejected","reason":"unauthorized"}',
 			},
 			{
 				name: "worktree",
@@ -189,8 +189,8 @@ describe("canonical lifecycle correlation", () => {
 				request:
 					'{"type":"session_create","target":{"kind":"worktree","repo":"/repo","branch":"feat/x"},"startupPromptRef":null,"modelPreset":null,"force":null}',
 				hash: "f06086b61a2e5f843af7e7b84f5906b06bb94406baea3a3bb544142b1382a2aa",
-				targetRef: "ea1a203670e480216b15b72cebeaa3fc036e087a320f2d605ea4ad380e716e0b",
-				requestRef: "b7d0e5624273f918b98020b421d818a92cdaf84c399c5992407699103a5c8293",
+				targetRef: "7e167c481902219deef9cf62240a3a28b805090fb91f9ee540a8924c34093447",
+				requestRef: "ad9da999173aa45d6d2ee28a8b7c19089ee9b5218b30b0651de49ed001fcdebb",
 				targetKind: "worktree",
 				rawValues: ["/repo", "feat/x", "control-token"],
 			},
@@ -208,8 +208,8 @@ describe("canonical lifecycle correlation", () => {
 				request:
 					'{"type":"session_close","target":{"kind":"session_close","sessionId":"sess-close","tmuxSession":null,"sessionStateFile":null},"startupPromptRef":null,"modelPreset":null,"force":false}',
 				hash: "508eb3d45379ee6c992c5ba35c0665a4db4f88d9de4849639e8774cc4c115f64",
-				targetRef: "37578b8e5b19aee456778853117c3e9dddb207acff5e535cb9a03863d20b1fb5",
-				requestRef: "1af2bb3df21f698a1dfa7c9fa68cca32bf21ab9a3eb0dbc3a4ed22f9afc5092b",
+				targetRef: "31a5c38150395292baa60d743c75e564f93ef024b3e927be81e5050347dc939b",
+				requestRef: "d34888877759676a08dca594e775a6b5429f0e8b0288465fb736363614f98f4e",
 				targetKind: "session_close",
 				rawValues: ["sess-close", "control-token"],
 			},
@@ -232,9 +232,9 @@ describe("canonical lifecycle correlation", () => {
 					'{"kind":"session_close","sessionId":"sess-close","tmuxSession":"skc-sess-close","sessionStateFile":"/private/state.jsonl"}',
 				request:
 					'{"type":"session_close","target":{"kind":"session_close","sessionId":"sess-close","tmuxSession":"skc-sess-close","sessionStateFile":"/private/state.jsonl"},"startupPromptRef":null,"modelPreset":null,"force":true}',
-				hash: "cf6ca81580d64a3a2505521b6e5cee6515ffff411c4ba81b00b489602359f928",
-				targetRef: "ae426efe866c7ca58465383b2f5856e855b8b037a09827077b0a8fe07da9f045",
-				requestRef: "3a8cfeb8a3125616a57633d024ae1a604dc78f8531a4c761abfb0eeea0370d40",
+				hash: "a14235b0afca4d0c99cf31bf598a77ad353ed184845b59d82f51b195adbb24cd",
+				targetRef: "e5de5eacf850b6aa9d048cdc61ffd4f77057d65d5a107eeaf2e7874ab57d8f48",
+				requestRef: "8851973dcf6beecf81d702086ad3ddb22c1531b0074434cb96518a187580d8f4",
 				targetKind: "session_close",
 				rawValues: ["sess-close", "skc-sess-close", "/private/state.jsonl", "control-token"],
 			},
@@ -252,8 +252,8 @@ describe("canonical lifecycle correlation", () => {
 				request:
 					'{"type":"session_resume","target":{"kind":"session_resume","sessionIdOrPrefix":"sess-resume","path":null},"startupPromptRef":null,"modelPreset":null,"force":null}',
 				hash: "cd41bb0e5f88e41b6ab29a7c203bcbeb35b10750bf93fd319231fdd953fd8b23",
-				targetRef: "d3133775a34f9ff18afc3bc9a4617223d409ce79b277eca818ffd83cc61753cb",
-				requestRef: "ebaa7d2329678fca55a4575cfebb2c0500e578fda56389e3de6f6d6e0121fefc",
+				targetRef: "0a33dbb4d2bea6c77d14e3e4d3d34e0f562aa8e82080bf7753269e66e3589702",
+				requestRef: "8527f6fe9573eb4d13fc9140509e423e97a118c01636de4b743a17389148bc85",
 				targetKind: "session_resume",
 				rawValues: ["sess-resume", "control-token"],
 			},
@@ -271,8 +271,8 @@ describe("canonical lifecycle correlation", () => {
 				request:
 					'{"type":"session_resume","target":{"kind":"session_resume","sessionIdOrPrefix":"sess-resume","path":"/private/resume"},"startupPromptRef":null,"modelPreset":null,"force":null}',
 				hash: "53aa22e8c08d897fcf59f8cb9b7f54b544d96e52ecfbaa693e72bf0fddc31a3c",
-				targetRef: "532a5b3fac01dbff54568f667783ea5cb8a1eec79c52201e109086abd83fb2d9",
-				requestRef: "b13fde62e5e408034ad64862024ba02a08817361b5dca9b19db4a4aa6f0e283d",
+				targetRef: "dce9b0c51bd0b6e91d8ae08a60566145da98a76428e89a0490299c3b4cc45fa9",
+				requestRef: "d41ca4a47d22fddf0d0502cc9212bdcf457269ce00e93c18e17eb5f996520fb5",
 				targetKind: "session_resume",
 				rawValues: ["sess-resume", "/private/resume", "control-token"],
 			},
@@ -283,8 +283,8 @@ describe("canonical lifecycle correlation", () => {
 				request:
 					'{"type":"session_create","target":{"kind":"existing_path","path":"/model"},"startupPromptRef":null,"modelPreset":null,"force":null}',
 				hash: "8d5a928195ceac8fadcbde7dffbe0cbf4967a73dd72156efbb0154eec279f124",
-				targetRef: "254b1c1d23063013c81ec559076535da343d79bd12f08dfaeab44d2a23f2e0e7",
-				requestRef: "e764345a7c11ebb0b77c30a85e288c3490c7fe9b07992d41a116a712383e2135",
+				targetRef: "e1ff1151e386d5128f3e5e87865542d2fdcdf78db327b642ef2ad6c9a0f4c9f2",
+				requestRef: "114c4493889a161f61975e4fc1ce7e831264baa252f6cc4baac4f1dafcc36ad7",
 				targetKind: "existing_path",
 				rawValues: ["/model", "control-token"],
 			},
@@ -300,8 +300,8 @@ describe("canonical lifecycle correlation", () => {
 				request:
 					'{"type":"session_create","target":{"kind":"existing_path","path":"/model"},"startupPromptRef":null,"modelPreset":"codex-eco","force":null}',
 				hash: "380e8ce83da82443d65a8f3076f36d6e25340c9cab49969e7fc6b48a073b9d6c",
-				targetRef: "254b1c1d23063013c81ec559076535da343d79bd12f08dfaeab44d2a23f2e0e7",
-				requestRef: "39085791b74f37a4d04bb693b4beae019f71d7e715b4a33edeebddc4e388e826",
+				targetRef: "e1ff1151e386d5128f3e5e87865542d2fdcdf78db327b642ef2ad6c9a0f4c9f2",
+				requestRef: "62683765a1a1c6d08a59220549ce0ddcf19d5900281361013b0ae246470f9baa",
 				targetKind: "existing_path",
 				rawValues: ["/model", "codex-eco", "control-token"],
 			},
@@ -323,7 +323,7 @@ describe("canonical lifecycle correlation", () => {
 			const serialized = JSON.stringify(audit[0]);
 			expect(serialized, variant.name).toBe(
 				variant.audit ??
-					`{"schemaVersion":2,"ts":"1970-01-01T00:00:01.000Z","chatRef":"f05b1a602d9038ea96b543dc8929a33d587f1f8b48af352460ffc0f81d178bdf","updateId":${variant.frame.updateId},"requestRef":"${variant.requestRef}","verb":"${variant.frame.type}","targetKind":"${variant.targetKind}","targetRef":"${variant.targetRef}","event":"rejected","reason":"unauthorized"}`,
+					`{"schemaVersion":2,"ts":"1970-01-01T00:00:01.000Z","chatRef":"42ca42986565578eecf3cd1aee3010f94b2d3db832a5773c80c2e4dd9b6fa13f","updateId":${variant.frame.updateId},"requestRef":"${variant.requestRef}","verb":"${variant.frame.type}","targetKind":"${variant.targetKind}","targetRef":"${variant.targetRef}","event":"rejected","reason":"unauthorized"}`,
 			);
 			for (const raw of variant.rawValues) expect(serialized, variant.name).not.toContain(raw);
 		}

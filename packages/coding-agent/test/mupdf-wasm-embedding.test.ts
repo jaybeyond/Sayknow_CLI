@@ -2,7 +2,7 @@ import { describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-
+import { getAddonFilenames } from "../../natives/native/loader-state.js";
 import { convertFileWithMarkit } from "../src/utils/markit";
 import { ensureMupdfWasmResolution } from "../src/utils/mupdf-wasm";
 
@@ -108,12 +108,28 @@ describe("mupdf wasm embedding in a compiled binary (upstream #5433)", () => {
 			// cwd fallback by placing the locally built addon next to the binary.
 			// This keeps the assertion focused on what the test proves: the mupdf
 			// wasm asset resolves from inside the bunfs.
-			const addonName = `pi_natives.${process.platform}-${process.arch}.node`;
-			const addonSource = path.join(workspaceRoot, "natives/native", addonName);
-			expect(fs.existsSync(addonSource), `missing ${addonSource}; run: bun --cwd=packages/natives run build`).toBe(
-				true,
-			);
-			fs.copyFileSync(addonSource, path.join(outDir, addonName));
+			//
+			// Use the loader's own filename list so CI-built x64 variants
+			// (`pi_natives.<tag>-baseline.node` / `-modern.node`) satisfy the check
+			// as well as the unsuffixed local build. The binary picks its variant at
+			// runtime (AVX2 detection), so every built variant is staged next to it.
+			const platformTag = `${process.platform}-${process.arch}`;
+			const nativeDir = path.join(workspaceRoot, "natives/native");
+			const addonNames = [
+				...new Set([
+					...getAddonFilenames({ tag: platformTag, arch: process.arch, variant: "modern" }),
+					...getAddonFilenames({ tag: platformTag, arch: process.arch, variant: "baseline" }),
+					...getAddonFilenames({ tag: platformTag, arch: process.arch, variant: null }),
+				]),
+			];
+			const builtAddons = addonNames.filter(name => fs.existsSync(path.join(nativeDir, name)));
+			expect(
+				builtAddons.length > 0,
+				`missing ${addonNames.map(name => path.join(nativeDir, name)).join(" or ")}; run: bun --cwd=packages/natives run build`,
+			).toBe(true);
+			for (const addonName of builtAddons) {
+				fs.copyFileSync(path.join(nativeDir, addonName), path.join(outDir, addonName));
+			}
 
 			const run = Bun.spawn([executable, fixturePdfPath], { cwd: outDir, stdout: "pipe", stderr: "pipe" });
 			const [runExit, stdout, stderr] = await Promise.all([

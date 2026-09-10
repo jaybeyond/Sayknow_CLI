@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { devEntrypoints, releaseEntrypoints } from "../scripts/compile-args";
 import { buildTelegramDaemonSpawnArgs, daemonPaths } from "../src/notifications/telegram-daemon";
 
 const repoRoot = path.resolve(import.meta.dir, "../../..");
@@ -53,8 +54,20 @@ describe("compiled daemon smoke coverage", () => {
 	});
 
 	test("build script preserves the dynamic daemon entrypoint for compiled binaries", () => {
+		// The entrypoint lists moved from build-binary.ts into the shared
+		// compile-args builder; the build script must keep consuming that
+		// builder and the lists must keep the daemon entrypoints.
 		const buildScript = fs.readFileSync(path.join(repoRoot, "packages/coding-agent/scripts/build-binary.ts"), "utf8");
-		expect(buildScript).toContain("telegram-daemon-cli.ts");
+		expect(buildScript).toContain("buildDevCompileArgs");
+		expect(devEntrypoints).toEqual(
+			expect.arrayContaining(["./src/sdk/bus/telegram-daemon-cli.ts", "./src/sdk/bus/chat-daemon-cli.ts"]),
+		);
+		expect(releaseEntrypoints).toEqual(
+			expect.arrayContaining([
+				"./packages/coding-agent/src/sdk/bus/telegram-daemon-cli.ts",
+				"./packages/coding-agent/src/sdk/bus/chat-daemon-cli.ts",
+			]),
+		);
 	});
 
 	test("compiled-mode spawn args self-spawn the binary without a script prefix and carry a reload warning", () => {

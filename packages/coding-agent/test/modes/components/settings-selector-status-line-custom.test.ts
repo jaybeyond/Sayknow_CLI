@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { SettingPath } from "@sayknow-cli/coding-agent/config/settings";
 import { resetSettingsForTest, Settings, settings } from "@sayknow-cli/coding-agent/config/settings";
+import { setLanguage } from "@sayknow-cli/coding-agent/i18n/index";
 import {
 	SettingsSelectorComponent,
 	type StatusLinePreviewSettings,
@@ -28,6 +29,8 @@ beforeAll(async () => {
 beforeEach(async () => {
 	resetSettingsForTest();
 	await Settings.init({ inMemory: true });
+	// Settings.init re-applies the "auto" language hook; pin English so labels are locale-independent.
+	setLanguage("en");
 	vi.restoreAllMocks();
 });
 
@@ -58,8 +61,17 @@ function createSelector(options: SelectorOptions = {}) {
 	);
 	return { component, previews, changedSettings, previewWidths };
 }
+/** Move the Appearance cursor down until the row with this label is selected. */
+function selectRow(component: SettingsSelectorComponent, label: string): void {
+	for (let i = 0; i < 40; i++) {
+		if (Bun.stripANSI(component.render(120).join("\n")).includes(`❯ ${label}`)) return;
+		component.handleInput("\x1b[B");
+	}
+	throw new Error(`Appearance row "${label}" not found`);
+}
+
 function selectCustomEditor(component: SettingsSelectorComponent): void {
-	for (let i = 0; i < 5; i++) component.handleInput("\x1b[B");
+	selectRow(component, "Status Line Custom Editor");
 }
 
 function openCustomEditor(component: SettingsSelectorComponent): void {
@@ -76,7 +88,7 @@ describe("SettingsSelectorComponent status line custom editor", () => {
 	it("keeps Custom out of the generic preset selector", () => {
 		const { component } = createSelector();
 
-		for (let i = 0; i < 4; i++) component.handleInput("\x1b[B");
+		selectRow(component, "Status Line Preset");
 
 		component.handleInput("\n");
 
