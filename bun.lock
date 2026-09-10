@@ -15,7 +15,7 @@
     },
     "packages/agent": {
       "name": "@sayknow-cli/agent-core",
-      "version": "0.5.7",
+      "version": "0.5.8",
       "dependencies": {
         "@opentelemetry/api": "catalog:",
         "@sayknow-cli/ai": "catalog:",
@@ -30,7 +30,7 @@
     },
     "packages/ai": {
       "name": "@sayknow-cli/ai",
-      "version": "0.5.7",
+      "version": "0.5.8",
       "bin": {
         "pi-ai": "./src/cli.ts",
       },
@@ -48,14 +48,14 @@
     },
     "packages/bridge-client": {
       "name": "@sayknow-cli/bridge-client",
-      "version": "0.5.7",
+      "version": "0.5.8",
       "devDependencies": {
         "@types/bun": "catalog:",
       },
     },
     "packages/coding-agent": {
       "name": "@sayknow-cli/coding-agent",
-      "version": "0.5.7",
+      "version": "0.5.8",
       "bin": {
         "skc": "bin/skc.js",
       },
@@ -91,7 +91,7 @@
     },
     "packages/natives": {
       "name": "@sayknow-cli/natives",
-      "version": "0.5.7",
+      "version": "0.5.8",
       "devDependencies": {
         "@napi-rs/cli": "catalog:",
         "@types/bun": "catalog:",
@@ -107,23 +107,23 @@
     },
     "packages/natives-darwin-arm64": {
       "name": "@sayknow-cli/natives-darwin-arm64",
-      "version": "0.5.7",
+      "version": "0.5.8",
     },
     "packages/natives-darwin-x64": {
       "name": "@sayknow-cli/natives-darwin-x64",
-      "version": "0.5.7",
+      "version": "0.5.8",
     },
     "packages/natives-linux-arm64": {
       "name": "@sayknow-cli/natives-linux-arm64",
-      "version": "0.5.7",
+      "version": "0.5.8",
     },
     "packages/natives-linux-x64": {
       "name": "@sayknow-cli/natives-linux-x64",
-      "version": "0.5.7",
+      "version": "0.5.8",
     },
     "packages/natives-win32-x64": {
       "name": "@sayknow-cli/natives-win32-x64",
-      "version": "0.5.7",
+      "version": "0.5.8",
     },
     "packages/orchestration-token-benchmark": {
       "name": "@sayknow-cli/orchestration-token-benchmark",
@@ -134,7 +134,7 @@
     },
     "packages/sayknow-cli": {
       "name": "sayknow-cli",
-      "version": "0.5.7",
+      "version": "0.5.8",
       "bin": {
         "skc": "bin/skc.js",
       },
@@ -144,7 +144,7 @@
     },
     "packages/stats": {
       "name": "@sayknow-cli/stats",
-      "version": "0.5.7",
+      "version": "0.5.8",
       "bin": {
         "skc-stats": "./src/index.ts",
       },
@@ -179,7 +179,7 @@
     },
     "packages/tui": {
       "name": "@sayknow-cli/tui",
-      "version": "0.5.7",
+      "version": "0.5.8",
       "dependencies": {
         "@sayknow-cli/natives": "catalog:",
         "@sayknow-cli/utils": "catalog:",
@@ -220,7 +220,7 @@
     },
     "packages/utils": {
       "name": "@sayknow-cli/utils",
-      "version": "0.5.7",
+      "version": "0.5.8",
       "dependencies": {
         "@sayknow-cli/natives": "catalog:",
         "beautiful-mermaid": "catalog:",
@@ -267,14 +267,14 @@
     "@opentelemetry/context-async-hooks": "^2.0.0",
     "@opentelemetry/sdk-trace-base": "^2.0.0",
     "@puppeteer/browsers": "^2.13.0",
-    "@sayknow-cli/agent-core": "0.5.7",
-    "@sayknow-cli/ai": "0.5.7",
-    "@sayknow-cli/bridge-client": "0.5.7",
-    "@sayknow-cli/coding-agent": "0.5.7",
-    "@sayknow-cli/natives": "0.5.7",
-    "@sayknow-cli/stats": "0.5.7",
-    "@sayknow-cli/tui": "0.5.7",
-    "@sayknow-cli/utils": "0.5.7",
+    "@sayknow-cli/agent-core": "0.5.8",
+    "@sayknow-cli/ai": "0.5.8",
+    "@sayknow-cli/bridge-client": "0.5.8",
+    "@sayknow-cli/coding-agent": "0.5.8",
+    "@sayknow-cli/natives": "0.5.8",
+    "@sayknow-cli/stats": "0.5.8",
+    "@sayknow-cli/tui": "0.5.8",
+    "@sayknow-cli/utils": "0.5.8",
     "@tailwindcss/node": "^4.2.4",
     "@tailwindcss/vite": "^4.2.4",
     "@types/babel__generator": "^7.27.0",
@@ -384,7 +384,7 @@
 
     "@bufbuild/protobuf": ["@bufbuild/protobuf@2.14.1", "", {}, "sha512-agRJn3+EJDUe8AvxTx/LnHA/GErvLE62pSaSk7+MwFOtOv8eWBu/qCq2qoZjBjVZ3C2aiFJCveuSs17KMkYGOw=="],
 
-    "@colors/colors": ["@colors/colors@1.6.1", "", {}, "sha512-dTmUJzXSuayBK+hZydEaXd2mhx61qWQwkwaBBY6LyEOVx/L9aQU5ac8eFNEsd9nrD1+zb9zvDCphLSe8g1F4Qw=="],
+    "@colors/colors": ["@colors/colors@1.6.0", "", {}, "sha512-Ir+AOibqzrIsL6ajt3Rz3LskB7OiMVHqltZmspbW/TJuTVuyOMirVqAkjfY6JISiLHgyNqicAC8AyHHGzNd/dA=="],
 
     "@dabh/diagnostics": ["@dabh/diagnostics@2.0.9", "", { "dependencies": { "@so-ric/colorspace": "^1.1.6", "enabled": "2.0.x", "kuler": "^2.0.0" } }, "sha512-R6siwR65Hm+3yfgP7o8DKhNvputQAwfoz9zTc3kyDudnomj2/BcLmD+uGQQPICjuFUp8ounPBU+jmKsocwVVAg=="],
 
@@ -1419,8 +1419,6 @@
     "jszip/readable-stream": ["readable-stream@2.3.8", "", { "dependencies": { "core-util-is": "~1.0.0", "inherits": "~2.0.3", "isarray": "~1.0.0", "process-nextick-args": "~2.0.0", "safe-buffer": "~5.1.1", "string_decoder": "~1.1.1", "util-deprecate": "~1.0.1" } }, "sha512-8p0AUk4XODgIewSi0l8Epjs+EVnWiK7NoDIEGU0HhE7+ZyY8D1IMY7odu5lRrFXGg71L15KG8QrPmum45RTtdA=="],
 
     "log-update/slice-ansi": ["slice-ansi@7.1.2", "", { "dependencies": { "ansi-styles": "^6.2.1", "is-fullwidth-code-point": "^5.0.0" } }, "sha512-iOBWFgUX7caIZiuutICxVgX1SdxwAVFFKwt1EvMYYec/NWO5meOJ6K5uQxhrYBdQJne4KxiqZc+KptFOWFSI9w=="],
-
-    "logform/@colors/colors": ["@colors/colors@1.6.0", "", {}, "sha512-Ir+AOibqzrIsL6ajt3Rz3LskB7OiMVHqltZmspbW/TJuTVuyOMirVqAkjfY6JISiLHgyNqicAC8AyHHGzNd/dA=="],
 
     "parse5/entities": ["entities@6.0.1", "", {}, "sha512-aN97NXWF6AWBTahfVOIrB/NShkzi5H7F9r1s9mD3cDj4Ko5f2qhhVoYMibXF7GlLveb/D2ioWay8lxI97Ven3g=="],
 
