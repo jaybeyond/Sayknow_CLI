@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.5.11] - 2026-09-10
+
 ### Fixed
 
 - Telegram tool activity and reasoning summaries flow again. The native notifications server (`crates/skc-notifications`) still admitted only the legacy `tool_activity_v1` token while the daemon and SDK host negotiated `tool_activity_v2`, so every tool-activity and reasoning-summary frame was silently dropped. Ported the upstream protocol constants: v2 is canonical, v1 stays receive-only for legacy clients.

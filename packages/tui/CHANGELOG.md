@@ -2,11 +2,11 @@
 
 ## [Unreleased]
 
+## [0.5.11] - 2026-09-10
+
 ### Added
 
 - `SettingsList` accepts an optional `descriptionRows` constructor argument to reserve a fixed description-area height (default `0`, no change for existing callers).
-
-## [0.5.10] - 2026-09-10
 
 ## [0.5.7] - 2026-09-10
 
