@@ -94,7 +94,7 @@ write_unsupported_evidence() {
 }
 
 proc_start_time() { local stat rest; [[ "$1" =~ ^[1-9][0-9]*$ && -r "/proc/$1/stat" ]] || return 1; IFS= read -r stat <"/proc/$1/stat" || return 1; rest="${stat##*) }"; set -- $rest; [[ "${20:-}" =~ ^[0-9]+$ ]] && printf '%s\n' "${20}"; }
-track_server() { local tmpdir="$1" socket="$2" session="$3" pid="$4" start cgroup native_id prefix candidate kept=(); native_id="$(TMUX_TMPDIR="$tmpdir" tmux -L "$socket" display-message -p -t "=$session:" '#{session_id}' 2>/dev/null || true)"; start="$(proc_start_time "$pid" || true)"; cgroup="$(proc_cgroup "$pid")"; [[ "$native_id" =~ ^\$[0-9]+$ && -n "$start" && -n "$cgroup" ]] || return 1; prefix="$tmpdir|$socket|$native_id|"; for candidate in "${TRACKED_SERVERS[@]}"; do [[ "$candidate" == "$prefix"* ]] || kept+=("$candidate"); done; TRACKED_SERVERS=("${kept[@]}" "$tmpdir|$socket|$native_id|$pid|$start|$cgroup"); }
+track_server() { local tmpdir="$1" socket="$2" session="$3" pid="$4" start cgroup native_id prefix candidate kept=(); native_id="$(TMUX_TMPDIR="$tmpdir" tmux -L "$socket" display-message -p -t "=$session:" '#{session_id}' 2>/dev/null || true)"; start="$(proc_start_time "$pid" || true)"; cgroup="$(proc_cgroup "$pid")"; [[ "$native_id" =~ ^\$[0-9]+$ && -n "$start" && -n "$cgroup" ]] || return 1; prefix="$tmpdir|$socket|$native_id|"; for candidate in ${TRACKED_SERVERS[@]+"${TRACKED_SERVERS[@]}"}; do [[ "$candidate" == "$prefix"* ]] || kept+=("$candidate"); done; TRACKED_SERVERS=(${kept[@]+"${kept[@]}"} "$tmpdir|$socket|$native_id|$pid|$start|$cgroup"); }
 capture_verdict_baseline() { local state="$1" session="$2" value; value="$("$3" -e 'const m=await import(process.argv[1]); console.log(JSON.stringify(await m.captureCanonicalVerdictBaseline(process.argv[2],process.argv[3])))' "$SCRIPT_DIR/wait-for-issue-1938-verdict.ts" "$state" "$session")" || return 1; python3 - "$value" <<'PY'
 import json,sys
 v=json.loads(sys.argv[1]); fields=("generation","verdictFileId","incidentFileId","incidentAliasFileId","vanishedFileId","vanishedAliasFileId"); print("\t".join(str(v.get(field) or "_") for field in fields))
@@ -197,10 +197,10 @@ cleanup() {
   [[ "$rc" -eq 77 ]] && { CLEANUP_STATUS="not_started"; write_unsupported_evidence || exit 1; exit 77; }
 
   CLEANUP_STATUS="failed"
-  for server in "${TRACKED_SERVERS[@]}"; do IFS='|' read -r tmpdir socket native_id pid start cgroup <<<"$server"; kill_owned_server "$tmpdir" "$socket" "$native_id" "$pid" "$start" "$cgroup" || cleanup_incomplete private_session; done
-  for server in "${TRACKED_SERVERS[@]}"; do IFS='|' read -r tmpdir socket native_id pid start cgroup <<<"$server"; terminate_owned_server "$pid" "$start" "$cgroup" || cleanup_incomplete private_server_terminate; done
-  for server in "${TRACKED_SERVERS[@]}"; do IFS='|' read -r tmpdir socket native_id pid start cgroup <<<"$server"; wait_owned_server_gone "$pid" "$start" "$cgroup" || cleanup_incomplete private_server; done
-  for unit in "${TRACKED_UNITS[@]}"; do
+  for server in ${TRACKED_SERVERS[@]+"${TRACKED_SERVERS[@]}"}; do IFS='|' read -r tmpdir socket native_id pid start cgroup <<<"$server"; kill_owned_server "$tmpdir" "$socket" "$native_id" "$pid" "$start" "$cgroup" || cleanup_incomplete private_session; done
+  for server in ${TRACKED_SERVERS[@]+"${TRACKED_SERVERS[@]}"}; do IFS='|' read -r tmpdir socket native_id pid start cgroup <<<"$server"; terminate_owned_server "$pid" "$start" "$cgroup" || cleanup_incomplete private_server_terminate; done
+  for server in ${TRACKED_SERVERS[@]+"${TRACKED_SERVERS[@]}"}; do IFS='|' read -r tmpdir socket native_id pid start cgroup <<<"$server"; wait_owned_server_gone "$pid" "$start" "$cgroup" || cleanup_incomplete private_server; done
+  for unit in ${TRACKED_UNITS[@]+"${TRACKED_UNITS[@]}"}; do
     systemctl --user stop "$unit" >/dev/null 2>&1 || unit_is_explicitly_gone "$unit" || cleanup_incomplete unit_stop
 
   done
@@ -215,7 +215,7 @@ import shutil, sys
 shutil.rmtree(sys.argv[1])
 PY
   fi
-  for unit in "${TRACKED_UNITS[@]}"; do wait_unit_gone "$unit" || cleanup_incomplete unit_unload; done
+  for unit in ${TRACKED_UNITS[@]+"${TRACKED_UNITS[@]}"}; do wait_unit_gone "$unit" || cleanup_incomplete unit_unload; done
   [[ -z "$TMUX_TMPDIR_PRIVATE" || ! -e "$TMUX_TMPDIR_PRIVATE" ]] || cleanup_incomplete private_tmpdir_present
   [[ -z "$WORKTREE" || ! -e "$WORKTREE" ]] || cleanup_incomplete worktree_present
   [[ -z "$WORKTREE_BRANCH" ]] || ! git -C "$REPO_ROOT" show-ref --verify --quiet "refs/heads/$WORKTREE_BRANCH" || cleanup_incomplete worktree_branch_present
@@ -235,7 +235,7 @@ if [[ -n "${SKC_ISSUE1938_TEST_CLEANUP_PROBE_ONLY:-}" ]]; then
       socket="skc-issue1938-held-monitor-$$"; monitor_session="issue1938-held-owner-monitor"
       TMUX_TMPDIR="$TMUX_TMPDIR_PRIVATE" tmux -L "$socket" new-session -d -s "$monitor_session" /bin/sleep 120 || exit 1
       monitor_pid="$(TMUX_TMPDIR="$TMUX_TMPDIR_PRIVATE" tmux -L "$socket" display-message -p -t "=$monitor_session:" '#{pid}')"
-      track_server "$TMUX_TMPDIR_PRIVATE" "$socket" "$monitor_session" "$monitor_pid" || exit 1
+      track_server "$TMUX_TMPDIR_PRIVATE" "$socket" "$monitor_session" "$monitor_pid" || { TMUX_TMPDIR="$TMUX_TMPDIR_PRIVATE" tmux -L "$socket" kill-session -t "=$monitor_session" >/dev/null 2>&1; exit 1; }
       ;;
     systemd) TRACKED_UNITS+=("skc-issue1938-test.service") ;;
     *) exit 2 ;;

@@ -7,19 +7,60 @@ import * as fs from "node:fs/promises";
 const repoRoot = path.join(import.meta.dir, "..");
 const ZERO_SHA = /^0+$/;
 const PACKAGE_SCOPES = ["dependencies", "devDependencies", "peerDependencies", "optionalDependencies"] as const;
+// roboskc (python/roboskc, python/skc-rpc) is a fork-only Python service kept
+// outside the SDK's `python-*` phase: its lint/test tasks run as ordinary
+// matrix shards and install their own editable packages first.
 const PYTHON_DEV_SETUP =
 	"python3 -m pip install --user --upgrade 'pip>=24' 'setuptools>=69' wheel && python3 -m pip install --user -e python/skc-rpc -e 'python/roboskc[dev]'";
+// The coding-agent package has hundreds of test files; keep affected validation
+// below the shard timeout by splitting package-wide/full-workspace TypeScript
+// suites across the matrix. Dev keeps the default; Main CI full mode overrides
+// via CI_CODING_AGENT_TEST_SHARDS to bound the long tail.
+const DEFAULT_CODING_AGENT_TEST_SHARDS = 8;
+
+function codingAgentTestShards(): number {
+	return positiveIntFromEnv("CI_CODING_AGENT_TEST_SHARDS", DEFAULT_CODING_AGENT_TEST_SHARDS);
+}
+
+// Number of nextest partitions the rust-test suite is split into. Dev runs one
+// unpartitioned rust-test task; Main CI full mode raises this to bound the
+// rust-test long tail.
+const DEFAULT_RUST_TEST_PARTITIONS = 1;
+
+function rustTestPartitions(): number {
+	return positiveIntFromEnv("CI_RUST_TEST_PARTITIONS", DEFAULT_RUST_TEST_PARTITIONS);
+}
+
+function positiveIntFromEnv(name: string, fallback: number): number {
+	const raw = Bun.env[name]?.trim();
+	if (!raw) return fallback;
+	const parsed = Number.parseInt(raw, 10);
+	return Number.isInteger(parsed) && parsed >= 1 ? parsed : fallback;
+}
+
+// True when Main CI requests the deterministic full plan via `CI_FORCE_FULL`.
+function isForceFullMode(): boolean {
+	const raw = Bun.env.CI_FORCE_FULL?.trim().toLowerCase();
+	return raw === "1" || raw === "true";
+}
+// SDK host lifecycle and coordinator prompt-control changes need the stable first
+// package shard in addition to targeted coverage. Keep this list limited to the
+// stateful surfaces whose regressions depend on broader package ordering.
+const CODING_AGENT_SHARD_ONE_COVERAGE_PATHS = [
+	"packages/coding-agent/src/sdk/bus/",
+	"packages/coding-agent/src/sdk/host/",
+	"packages/coding-agent/src/coordinator-mcp/",
+	"packages/coding-agent/test/sdk-host-wiring.test.ts",
+	"packages/coding-agent/test/coordinator-mcp/send-prompt-concurrency.test.ts",
+] as const;
+
+
 // Keys for tasks that compile the @sayknow-cli/natives addon. They run once in
 // the dedicated dev-ci native-build job (not as matrix shards) and publish the
 // built `.node` files as an artifact the runtime-dependent shards download.
-// Declared before any other module state purely for readability; the single
-// top-level `await main()` lives at the end of the file, after every statement
-// here has initialized.
+// Declared here (before the top-level `await main()`) so it is initialized for
+// every CLI mode despite top-level await halting later module statements.
 const NATIVE_BUILD_KEYS: ReadonlySet<string> = new Set(["native-build", "native-linux-x64"]);
-
-// Shard/partition defaults.
-const DEFAULT_CODING_AGENT_TEST_SHARDS = 8;
-const DEFAULT_RUST_TEST_PARTITIONS = 1;
 
 // Behavioral-owner tests cover entrypoint contracts whose names intentionally do
 // not follow the source-file basename convention. They supplement, rather than
@@ -47,8 +88,7 @@ export interface WorkspacePackage {
 
 export interface Task {
 	key: string;
-	// Stable per-task identity, independent of the human-readable key.
-	identity: string;
+	identity?: string;
 	description: string;
 	command: readonly string[];
 	cwd?: string;
@@ -109,7 +149,6 @@ export interface TaskMatrixEntry {
 	cwd?: string;
 	native: boolean;
 	rust: boolean;
-	// Whether the shard must install cargo-nextest.
 	nextest: boolean;
 	nativeBuild: boolean;
 }
@@ -122,21 +161,21 @@ async function main(): Promise<void> {
 		return;
 	}
 	if (process.argv.includes("--matrix-json")) {
-		// Main CI full mode emits the lean deterministic matrix; dev-ci's
-		// changed-path mode emits the canonical plan and its replay bindings.
-		await (forceFullPlan() ? emitFullMatrix() : emitMatrix());
+		await emitMatrix();
 		return;
 	}
 	if (process.argv.includes("--validate-plan")) {
-		await validateCanonicalPlan();
-		return;
-	}
-	if (process.argv.includes("--validate-aggregate")) {
-		await validateAggregate();
+		const canonical = await loadCanonicalPlan();
+		if (!canonical) throw new Error("affected-plan-invalid: canonical plan is required");
+		console.log(`canonical plan validated: ${canonical.length} task(s)`);
 		return;
 	}
 	if (process.argv.includes("--validate-shard-receipts")) {
 		await validateShardReceipts();
+		return;
+	}
+	if (process.argv.includes("--validate-aggregate")) {
+		await validateAggregate();
 		return;
 	}
 	if (process.argv.includes("--write-affected-evidence")) {
@@ -175,6 +214,7 @@ async function main(): Promise<void> {
 	}
 }
 
+
 // CI runs in one of two planning modes:
 //   - "pr": pull_request runs get a fast, narrowly targeted plan (run only the
 //     tests/checks directly relevant to the changed paths).
@@ -190,22 +230,6 @@ export function resolvePlanMode(): PlanMode {
 		return explicitMode;
 	}
 	return Bun.env.GITHUB_EVENT_NAME?.trim() === "pull_request" ? "pr" : "push";
-}
-
-// Main CI sets CI_FORCE_FULL on both the planner and every shard, so the full
-// task union is resolved identically on each without a shared plan artifact and
-// without touching git history (the checkout is shallow, and this fork has no
-// long-lived integration branch to diff against).
-export function forceFullPlan(): boolean {
-	const value = Bun.env.CI_FORCE_FULL?.trim().toLowerCase();
-	return value === "1" || value === "true";
-}
-
-// Branch that non-full, non-PR runs diff against. Overridable so a fork or a
-// local checkout can name its own integration branch.
-export function integrationBranchRef(): string {
-	const value = Bun.env.CI_DEV_BASE_BRANCH?.trim();
-	return `origin/${value && value !== "" ? value : "main"}`;
 }
 
 // Resolve the plan for the current changed paths and CI mode. PR mode builds the
@@ -249,132 +273,26 @@ function addRustTestTasks(tasks: Map<string, Task>): void {
 }
 
 
-function positiveIntFromEnv(name: string, fallback: number): number {
-	const raw = Bun.env[name]?.trim();
-	if (!raw) return fallback;
-	const parsed = Number.parseInt(raw, 10);
-	return Number.isInteger(parsed) && parsed >= 1 ? parsed : fallback;
-}
-
-function rustTestPartitions(): number {
-	return positiveIntFromEnv("CI_RUST_TEST_PARTITIONS", DEFAULT_RUST_TEST_PARTITIONS);
-}
-
-function codingAgentTestShards(): number {
-	return positiveIntFromEnv("CI_CODING_AGENT_TEST_SHARDS", DEFAULT_CODING_AGENT_TEST_SHARDS);
-}
-
-// The coding-agent suite is far larger than every other package, so it is split
-// into bounded shards instead of one long-running task.
-function addWorkspaceTestTasks(tasks: Map<string, Task>, packages: readonly WorkspacePackage[]): void {
-	add(tasks, "root-test:release", "Root release contract tests", ["bun", "run", "test:release"]);
-	for (const workspacePackage of packages) {
-		if (workspacePackage.manifest.scripts?.test) {
-			addPackageTestTasks(tasks, workspacePackage);
-		}
-	}
-}
-
-function addPackageTestTasks(tasks: Map<string, Task>, workspacePackage: WorkspacePackage): void {
-	if (workspacePackage.name !== "@sayknow-cli/coding-agent") {
-		add(tasks, `test:${workspacePackage.name}`, `Test ${workspacePackage.name}`, packageScriptCommand("test"), resolvePackageCwd(workspacePackage.dir));
-		return;
-	}
-
-	const total = codingAgentTestShards();
-	for (let shard = 1; shard <= total; shard++) {
-		addCodingAgentTestShard(tasks, shard, total);
-	}
-	addCodingAgentSdkProductionHostTask(tasks);
-}
-
-function addCodingAgentTestShard(tasks: Map<string, Task>, shard: number, total: number = codingAgentTestShards()): void {
-	add(
-		tasks,
-		`test:@sayknow-cli/coding-agent:shard-${shard}-of-${total}`,
-		`Test @sayknow-cli/coding-agent shard ${shard}/${total}`,
-		["bun", "test", `--shard=${shard}/${total}`],
-		resolvePackageCwd("packages/coding-agent"),
-	);
-}
-
-// The production SDK host case must run in its own process: the sharded run
-// loads the daemon worker differently and would false-green it.
-function addCodingAgentSdkProductionHostTask(tasks: Map<string, Task>): void {
-	add(
-		tasks,
-		"test:@sayknow-cli/coding-agent:sdk-production-host-isolated",
-		"Test @sayknow-cli/coding-agent production SDK host in isolation",
-		[
-			"bun",
-			"test",
-			"test/sdk-chat-daemon-worker.test.ts",
-			"-t",
-			"routes Slack safe queries through the production Session SDK host",
-		],
-		resolvePackageCwd("packages/coding-agent"),
-	);
-}
-
-function behavioralTestsFor(changedPath: string): readonly string[] {
-	return BEHAVIORAL_OWNER_TESTS[changedPath] ?? [];
-}
-
-function isRustTestKey(key: string): boolean {
-	return key === "rust-test" || key.startsWith("rust-test:partition-");
-}
-
-function toBase64Url(value: string): string {
-	return Buffer.from(value).toString("base64url");
-}
-
-// Changed paths cross a trust boundary (CI env, canonical plan files), so they
-// are normalized to repo-relative POSIX form and anything escaping the repo is
-// rejected outright.
-export function normalizeChangedPaths(paths: readonly string[]): string[] {
-	const normalized = paths.map(entry => entry.replaceAll("\\", "/").trim()).map(entry => entry.replace(/^\.\//, ""));
-	for (const entry of normalized) {
-		if (!entry || entry.startsWith("/") || /^[A-Za-z]:\//.test(entry) || entry === ".." || entry.startsWith("../") || entry.includes("/../") || entry.split("/").some(part => part === "." || part === "")) {
-			throw new Error(`affected-path-invalid: unsafe changed path '${entry}'`);
-		}
-	}
-	return Array.from(new Set(normalized)).sort();
-}
-
-function assertExactKeys(value: Record<string, unknown>, keys: readonly string[], label: string): void {
-	if (Object.keys(value).length !== keys.length || Object.keys(value).some(key => !keys.includes(key))) throw new Error(`inventory-invalid: unexpected ${label} field`);
-}
-
-function normalizeInventoryPath(value: string): string {
-	const normalized = value.replaceAll("\\", "/").replace(/^\.\//, "");
-	if (!normalized || normalized.startsWith("/") || normalized.includes("../") || normalized.split("/").some(part => !part || part === ".")) throw new Error("inventory-invalid: unsafe inventory path");
-	return normalized;
-}
-
-
 function addPythonTasks(tasks: Map<string, Task>): void {
 	add(tasks, "python-check", "Python SDK type check", ["bun", "run", "check:py-sdk"], undefined, { rust: false, nextest: false, nativeConsumer: false, nativeProducer: false }, "python");
 	add(tasks, "python-test", "Python SDK tests", ["bun", "run", "test:py-sdk"], undefined, { rust: false, nextest: false, nativeConsumer: true, nativeProducer: false }, "python");
 	add(tasks, "python-build-smoke", "Python SDK build smoke", ["bun", "run", "ci:test:py-sdk-build"], undefined, { rust: false, nextest: false, nativeConsumer: false, nativeProducer: false }, "python");
 }
+function addRoboskcPythonTasks(tasks: Map<string, Task>): void {
+	add(tasks, "roboskc-lint", "roboskc Python lint", ["bash", "-lc", `${PYTHON_DEV_SETUP} && python3 -m ruff check python && python3 -m ruff format --check python/roboskc`]);
+	add(tasks, "roboskc-test", "roboskc Python tests", ["bash", "-lc", `${PYTHON_DEV_SETUP} && python3 -m pytest -x --import-mode=importlib python/skc-rpc/tests python/roboskc/tests`]);
+}
 async function resolvePlannedTasks(paths: readonly string[]): Promise<Task[]> {
-	// Shards run against the exact plan the planner job published, not a
-	// re-derivation: `loadCanonicalPlan` binds the plan bytes to the plan digest
-	// and the checked-out source SHA, so plan drift fails loudly here instead of
-	// silently skipping validation on a shard.
-	const canonical = await loadCanonicalPlan();
-	if (canonical) {
-		return canonical;
-	}
+	if (isForceFullMode()) return planFullTasks(await getWorkspacePackages());
+	const fromArtifact = await loadCanonicalPlan();
+	if (fromArtifact) return fromArtifact;
+	const normalizedPaths = normalizeChangedPaths(paths);
 	const packages = await getWorkspacePackages();
-	if (forceFullPlan()) {
-		return planFullTasks(packages);
-	}
-	if (resolvePlanMode() === "pr") {
-		const testFiles = await gatherTestFiles();
-		return planTargetedTasks(paths, packages, testFiles);
-	}
-	return planTasks(paths, packages);
+	const legacy = resolvePlanMode() === "pr"
+		? planTargetedTasks(normalizedPaths, packages, await gatherTestFiles())
+		: planTasks(normalizedPaths, packages);
+	if (normalizedPaths.length > 0 && normalizedPaths.every(isDocOrChangelogPath)) return legacy;
+	return appendBuildTasks(legacy, normalizedPaths, packages, await loadBuildInventory());
 }
 
 // Repo-relative list of TypeScript test files, used by PR-mode targeting to map
@@ -405,7 +323,7 @@ async function emitAffectedFlags(): Promise<void> {
 	try {
 		const paths = await getChangedPaths();
 		const packages = await getWorkspacePackages();
-		const planned = forceFullPlan() ? planFullTasks(packages) : planTasks(paths, packages);
+		const planned = isForceFullMode() ? planFullTasks(packages) : planTasks(paths, packages);
 		const keys = new Set(planned.map(task => task.key));
 		rust = keys.has("rust-check") || keys.has("rust-test");
 		native = keys.has("native-build") || keys.has("native-linux-x64");
@@ -434,31 +352,26 @@ function taskNeedsNative(key: string): boolean {
 		key === "python-test" ||
 		key === "root-test" ||
 		key === "root-check" ||
-		key === "root-test" ||
+		key === "check:@sayknow-cli/coding-agent" ||
 		key === "cli-smoke" ||
+		key === "runtime-check" ||
 		key === "wrapper-version" ||
 		key === "deep-interview-definitions" ||
 		key === "deep-interview-runtime" ||
+		key === "bridge-client-sdk-package-smoke" ||
 		key.startsWith("test:")
 	);
 }
 
-// Tasks that need the Rust toolchain provisioned on their shard. Partitioned
-// rust-test keys (`rust-test:partition-i-of-N`) count too.
+// rust-test may be split into nextest partitions (`rust-test:partition-i-of-N`)
+// in Main CI full mode; treat every partition like the single rust-test task.
+function isRustTestKey(key: string): boolean {
+	return key === "rust-test" || key.startsWith("rust-test:partition-");
+}
+
+// Tasks that need the Rust toolchain (and nextest) provisioned on their shard.
 function taskNeedsRust(key: string): boolean {
-	return key === "rust-check" || isRustTestKey(key);
-}
-
-// Tasks that run through cargo nextest and therefore need it installed. Only
-// the partitioned rust-test shards use `cargo nextest run --partition`.
-function taskNeedsNextest(key: string): boolean {
-	return key.startsWith("rust-test:partition-");
-}
-
-// Key-derived, stable across runs and machines: shards are matched to plan
-// entries by identity, so it must not depend on ordering or local paths.
-function taskIdentity(key: string): string {
-	return `legacy:${toBase64Url(key)}`;
+	return key === "rust-check" || isRustTestKey(key) || key === "ci-selftest" || key === "ci-dry-run" || key === "affected-selftest" || key === "affected-dry-run";
 }
 
 // Build the machine-readable descriptor list for the current changed-path plan.
@@ -466,14 +379,14 @@ function taskIdentity(key: string): string {
 export function describeTasks(tasks: readonly Task[]): TaskMatrixEntry[] {
 	return tasks.map(task => ({
 		key: task.key,
-		identity: task.identity,
+		identity: canonicalTaskIdentity(task),
 		description: task.description,
 		command: task.command,
 		cwd: task.cwd ? path.relative(repoRoot, task.cwd) || "." : undefined,
-		native: taskNeedsNative(task.key),
-		rust: taskNeedsRust(task.key),
-		nextest: taskNeedsNextest(task.key),
-		nativeBuild: isNativeBuildKey(task.key),
+		native: task.capabilities?.nativeConsumer ?? taskNeedsNative(task.key),
+		rust: task.capabilities?.rust ?? taskNeedsRust(task.key),
+		nextest: task.capabilities?.nextest ?? isRustTestKey(task.key),
+		nativeBuild: task.capabilities?.nativeProducer ?? isNativeBuildKey(task.key),
 	}));
 }
 
@@ -555,19 +468,18 @@ async function emitFullMatrix(): Promise<void> {
 }
 
 async function emitMatrix(): Promise<void> {
+	if (isForceFullMode()) return emitFullMatrix();
 	const sourceSha = await resolveSourceSha();
-	const paths = await getChangedPaths();
+	await requireCommitObject(sourceSha, "source head");
+	await assertCheckedOutSourceHead(sourceSha);
+	const paths = normalizeChangedPaths(await getChangedPaths());
 	const mode = resolvePlanMode();
 	const tasks = await resolvePlannedTasks(paths);
 	const entries = describeTasks(tasks);
-
+	const canonical = JSON.stringify({ schemaVersion: 1, sourceSha, mode, paths, tasks: serializeTasks(tasks) });
+	const digest = new Bun.CryptoHasher("sha256").update(canonical).digest("hex");
+	await Bun.write(path.join(repoRoot, ".ci-dev-affected-plan.json"), canonical);
 	console.log(JSON.stringify(entries));
-
-	// The canonical plan is the single source of truth every downstream dev-ci
-	// job replays: shards bind to it by digest + source SHA, and the evidence
-	// producer hashes it as child evidence. It is written unconditionally so a
-	// local `--matrix-json` run reproduces exactly what CI publishes.
-	const planDigest = await writeCanonicalPlan(paths, mode, sourceSha, tasks);
 
 	const githubOutput = process.env.GITHUB_OUTPUT;
 	if (!githubOutput) return;
@@ -588,7 +500,7 @@ async function emitMatrix(): Promise<void> {
 		`has_python=${hasPython}`,
 		`has_darwin_arm64_tab_worker_smoke=${hasDarwinArm64TabWorkerSmoke}`,
 		`has_windows_session_path=${hasWindowsSessionPath}`,
-		`plan_digest=${planDigest}`,
+		`plan_digest=${digest}`,
 		`plan_source_sha=${sourceSha}`,
 		`plan_mode=${mode}`,
 		"changed_paths<<__SKC_PATHS_EOF__",
@@ -597,15 +509,6 @@ async function emitMatrix(): Promise<void> {
 		"",
 	];
 	await fs.appendFile(githubOutput, lines.join("\n"));
-}
-
-// Serialize the plan to its canonical bytes and publish it at the repo root.
-// The digest returned here is what `loadCanonicalPlan` re-derives from the file
-// text, so the JSON must be written verbatim with no trailing newline.
-async function writeCanonicalPlan(paths: readonly string[], mode: PlanMode, sourceSha: string, tasks: readonly Task[]): Promise<string> {
-	const raw = JSON.stringify({ schemaVersion: 1, sourceSha, mode, paths, tasks: serializeTasks(tasks) });
-	await Bun.write(path.join(repoRoot, AFFECTED_PLAN_NAME), raw);
-	return sha256(raw);
 }
 
 // `--native-build` runs every native build task in the current plan exactly
@@ -667,72 +570,90 @@ function printPlan(paths: readonly string[], plannedTasks: readonly Task[]): voi
 	}
 }
 
-// The canonical source head every planner decision binds to. On pull_request,
-// GITHUB_SHA is the synthetic merge commit, which does not exist in the
-// depth-one shard checkouts that later replay the plan; CI_DEV_SOURCE_SHA names
-// the real source commit instead and therefore wins. Resolution is verified
-// against this checkout so an unavailable head fails loudly rather than
-// silently planning from the wrong tree.
-async function resolveSourceSha(): Promise<string> {
-	const declared = Bun.env.CI_DEV_SOURCE_SHA?.trim();
-	const ambient = Bun.env.GITHUB_SHA?.trim();
-	const candidate = declared || (ambient && !ZERO_SHA.test(ambient) ? ambient : "") || "HEAD";
-	const resolved = await $`git rev-parse --verify --quiet ${`${candidate}^{commit}`}`.cwd(repoRoot).quiet().nothrow();
-	if (resolved.exitCode !== 0 || resolved.stdout.toString().trim() === "") {
-		throw new Error(`affected-plan-invalid: canonical source head ${candidate} is not available in this checkout`);
-	}
-	return candidate === "HEAD" ? resolved.stdout.toString().trim() : candidate;
-}
-
 async function getChangedPaths(): Promise<string[]> {
-	// Full mode plans the complete union, so no diff is needed; computing one
-	// would fail anyway on the shallow CI checkout.
-	if (forceFullPlan()) return [];
-
+	if (isForceFullMode()) return [];
 	const explicitPaths = Bun.env.CI_DEV_CHANGED_PATHS?.trim();
 	if (explicitPaths) {
-		return normalizeChangedPaths(explicitPaths.split(/[\n,]/).map(entry => entry.trim()).filter(Boolean));
+		return explicitPaths
+			.split(/[\n,]/)
+			.map(entry => entry.trim())
+			.filter(Boolean)
+			.sort();
 	}
 
+	const base = await resolveBaseRef();
 	const head = await resolveSourceSha();
-	const base = await resolveBaseRef(head);
-	const range = base.includes("...") || base.includes("..") ? base : `${base}...${head}`;
+	await requireCommitObject(base, "base");
+	await requireCommitObject(head, "source head");
+	const range = `${base}..${head}`;
 	const diff = await $`git diff --name-only -z ${range}`.cwd(repoRoot).quiet().nothrow();
 	if (diff.exitCode !== 0) {
 		const stderr = diff.stderr.toString().trim();
 		throw new Error(`Failed to compute changed paths for ${range}: ${stderr}`);
 	}
-	return normalizeChangedPaths(new TextDecoder().decode(diff.stdout).split("\0").filter(Boolean));
+	return new TextDecoder().decode(diff.stdout).split("\0").filter(Boolean).sort();
 }
 
-async function resolveBaseRef(head: string): Promise<string> {
+async function requireCommitObject(ref: string, label: string): Promise<void> {
+	const result = await $`git cat-file -e ${`${ref}^{commit}`}`.cwd(repoRoot).quiet().nothrow();
+	if (result.exitCode !== 0) throw new Error(`Failed to compute changed paths: ${label} '${ref}' is not available`);
+}
+
+async function resolveSourceSha(): Promise<string> {
+	const configured = Bun.env.CI_DEV_SOURCE_SHA?.trim() || Bun.env.GITHUB_SHA?.trim();
+	if (configured) return configured;
+	const checkedOut = await $`git rev-parse HEAD`.cwd(repoRoot).quiet().nothrow();
+	if (checkedOut.exitCode !== 0) throw new Error("Failed to resolve source head");
+	return checkedOut.stdout.toString().trim();
+}
+
+async function assertCheckedOutSourceHead(sourceSha: string): Promise<void> {
+	const checkedOut = await $`git rev-parse HEAD`.cwd(repoRoot).quiet().nothrow();
+	if (checkedOut.exitCode !== 0 || checkedOut.stdout.toString().trim() !== sourceSha) {
+		throw new Error(`Failed to publish affected plan: checked-out SHA does not match source head '${sourceSha}'`);
+	}
+}
+
+// Branch that non-full, non-PR runs diff against when the event supplies no
+// base. This fork has no long-lived `dev` branch: `main` is the integration
+// branch, overridable via CI_DEV_BASE_BRANCH for a fork or local checkout.
+export function integrationBranchRef(): string {
+	const value = Bun.env.CI_DEV_BASE_BRANCH?.trim();
+	return `origin/${value && value !== "" ? value : "main"}`;
+}
+
+async function resolveBaseRef(): Promise<string> {
 	const eventName = Bun.env.GITHUB_EVENT_NAME?.trim();
 	const before = Bun.env.GITHUB_EVENT_BEFORE?.trim();
 	const baseSha = Bun.env.GITHUB_BASE_SHA?.trim();
 	const baseRef = Bun.env.GITHUB_BASE_REF?.trim();
 
-	// `origin/<base ref>` is mutable and frequently absent in a shallow shard
-	// checkout. Prefer its merge-base when it resolves, then fall through to the
-	// immutable event base SHA rather than emitting a ref that git cannot read.
+	// A PR event supplies its immutable base commit. Prefer it over the mutable
+	// branch ref: the base branch can be force-pushed after the event is queued,
+	// leaving the current origin/<baseRef> unrelated to the checked-out PR head.
+	if (eventName === "pull_request" && baseSha && !ZERO_SHA.test(baseSha)) {
+		return baseSha;
+	}
 	if (eventName === "pull_request" && baseRef) {
-		const mergeBase = await $`git merge-base ${head} ${`origin/${baseRef}`}`.cwd(repoRoot).quiet().nothrow();
+		const mergeBase = await $`git merge-base HEAD ${`origin/${baseRef}`}`.cwd(repoRoot).quiet().nothrow();
 		if (mergeBase.exitCode === 0) {
 			const value = mergeBase.stdout.toString().trim();
 			if (value !== "") return value;
 		}
+		if (baseSha && !ZERO_SHA.test(baseSha)) return baseSha;
+		return `origin/${baseRef}`;
 	}
 	if (baseSha && !ZERO_SHA.test(baseSha)) {
 		return baseSha;
 	}
-	if (baseRef && eventName === "pull_request") {
+	if (eventName === "pull_request" && baseRef) {
 		return `origin/${baseRef}`;
 	}
 	if (before && !ZERO_SHA.test(before)) {
-		return `${before}..${head}`;
+		return before;
 	}
-
 	const integrationRef = integrationBranchRef();
-	const mergeBase = await $`git merge-base ${head} ${integrationRef}`.cwd(repoRoot).quiet().nothrow();
+	const mergeBase = await $`git merge-base HEAD ${integrationRef}`.cwd(repoRoot).quiet().nothrow();
 	if (mergeBase.exitCode === 0) {
 		const value = mergeBase.stdout.toString().trim();
 		if (value !== "") return value;
@@ -803,8 +724,6 @@ export function planTasks(paths: readonly string[], packages: readonly Workspace
 	const touchedPackages = findTouchedPackages(paths, packages);
 	const rootPackageReleaseHarnessOnly = isRootPackageReleaseHarnessOnly(paths);
 	const fullWorkspace = paths.some(isFullWorkspacePath) && !rootPackageReleaseHarnessOnly;
-	const pythonChanged = paths.some(isPythonPath);
-	const webChanged = paths.some(changedPath => changedPath.startsWith("python/roboskc/web/"));
 	const rustChanged = paths.some(isRustPath);
 	const installChanged = paths.some(isInstallPath);
 	const publishChanged = paths.some(isReleasePublishPath);
@@ -827,9 +746,9 @@ export function planTasks(paths: readonly string[], packages: readonly Workspace
 	}
 
 	if (fullWorkspace) {
-		add(tasks, "root-check", "Root TypeScript/tooling check", ["bun", "run", "check:ts"]);
+		add(tasks, "root-check", "Root TypeScript/tooling check", ["bun", "run", "ci:check:full"]);
 		addNativeBuild(tasks);
-		add(tasks, "root-test", "Root workspace TypeScript tests", ["bun", "run", "test:ts"]);
+		addWorkspaceTestTasks(tasks, packages);
 	} else if (!ciOnly && !workflowHarnessOnly) {
 		const affectedPackages = expandWithDependents(touchedPackages, packages);
 		if (affectedPackages.some(workspacePackage => workspacePackage.manifest.scripts?.test)) {
@@ -840,26 +759,33 @@ export function planTasks(paths: readonly string[], packages: readonly Workspace
 				add(tasks, `check:${workspacePackage.name}`, `Check ${workspacePackage.name}`, packageScriptCommand("check"), resolvePackageCwd(workspacePackage.dir));
 			}
 			if (workspacePackage.manifest.scripts?.test) {
-				add(tasks, `test:${workspacePackage.name}`, `Test ${workspacePackage.name}`, packageScriptCommand("test"), resolvePackageCwd(workspacePackage.dir));
+				addPackageTestTasks(tasks, workspacePackage);
 			}
 		}
 	}
+	if (needsDarwinArm64TabWorkerSmoke(paths)) {
+		add(tasks, "install-methods", "Install method smoke tests", ["bun", "run", "ci:test:install-methods"]);
+	}
 
 	if (toolingScriptChanged && !fullWorkspace && !ciOnly && !workflowHarnessOnly) {
-		add(tasks, "root-check", "Root TypeScript/tooling check", ["bun", "run", "check:ts"]);
-		ensureNativeBuild(tasks);
+		add(tasks, "root-check", "Root TypeScript/tooling check", ["bun", "run", "ci:check:full"]);
 	}
 	if (wrapperChanged) {
 		add(tasks, "wrapper-version", "Unscoped wrapper CLI version smoke", ["bun", "packages/sayknow-cli/bin/skc.js", "--version"]);
 	}
 	if (publishChanged) {
-		add(tasks, "release-publish-contract", "Release publish contract tests", ["bun", "run", "test:release"]);
-		add(tasks, "release-publish-dry-run", "Release publish dry-run", ["bun", "scripts/ci-release-publish.ts", "--dry-run"]);
+		addReleasePublishTasks(tasks);
+	}
+	if (paths.some(isBridgeClientSdkPackageSmokePath)) {
+		add(tasks, "bridge-client-sdk-package-smoke", "Bridge-client SDK package smoke", ["bun", "packages/coding-agent/scripts/build-sdk-package-smoke.ts"]);
 	}
 
 	if (paths.some(isPythonPath)) {
 		addPythonTasks(tasks);
 		addNativeBuild(tasks);
+	}
+	if (paths.some(isRoboskcPythonPath)) {
+		addRoboskcPythonTasks(tasks);
 	}
 	if (rustChanged) {
 		add(tasks, "rust-check", "Rust check", ["bun", "run", "check:rs"]);
@@ -908,9 +834,9 @@ export function planTargetedTasks(paths: readonly string[], packages: readonly W
 	let needPermissionCheck = false;
 
 	if (fullWorkspace) {
-		add(tasks, "root-check", "Root TypeScript/tooling check", ["bun", "run", "check:ts"]);
+		add(tasks, "root-check", "Root TypeScript/tooling check", ["bun", "run", "ci:check:full"]);
 		addNativeBuild(tasks);
-		add(tasks, "root-test", "Root workspace TypeScript tests", ["bun", "run", "test:ts"]);
+		addWorkspaceTestTasks(tasks, packages);
 	}
 
 	for (const changedPath of relevant) {
@@ -926,16 +852,6 @@ export function planTargetedTasks(paths: readonly string[], packages: readonly W
 			needPermissionCheck = true;
 			continue;
 		}
-		if (isPythonPath(changedPath)) {
-			add(tasks, "python-lint", "Python lint", pythonLintCommand());
-			add(tasks, "python-test", "Python tests", pythonTestCommand());
-			continue;
-		}
-		if (isWebPath(changedPath)) {
-			add(tasks, "roboskc-web-typecheck", "roboskc web typecheck", packageScriptCommand("typecheck"), resolvePackageCwd("python/roboskc/web"));
-			add(tasks, "roboskc-web-build", "roboskc web build", packageScriptCommand("build"), resolvePackageCwd("python/roboskc/web"));
-			continue;
-		}
 		if (isRustPath(changedPath)) {
 			add(tasks, "rust-check", "Rust check", ["bun", "run", "check:rs"]);
 			add(tasks, "rust-test", "Rust tests", ["bun", "run", "test:rs"]);
@@ -948,16 +864,47 @@ export function planTargetedTasks(paths: readonly string[], packages: readonly W
 			addPythonTasks(tasks);
 			continue;
 		}
+		if (isRoboskcPythonPath(changedPath)) {
+			addRoboskcPythonTasks(tasks);
+			continue;
+		}
 		if (isInstallPath(changedPath)) {
 			add(tasks, "install-methods", "Install method smoke tests", ["bun", "run", "ci:test:install-methods"]);
 			continue;
 		}
+		if (isReleasePublishPath(changedPath)) {
+			addReleasePublishTasks(tasks);
+			if (isUnscopedWrapperPath(changedPath)) {
+				add(tasks, "wrapper-version", "Unscoped wrapper CLI version smoke", ["bun", "packages/sayknow-cli/bin/skc.js", "--version"]);
+			}
+		}
+		if (isBridgeClientSdkPackageSmokePath(changedPath)) {
+			add(tasks, "bridge-client-sdk-package-smoke", "Bridge-client SDK package smoke", ["bun", "packages/coding-agent/scripts/build-sdk-package-smoke.ts"]);
+			const bridgeClientOwner = owningPackage(changedPath, packages);
+			if (bridgeClientOwner?.manifest.scripts?.check) {
+				add(
+					tasks,
+					`check:${bridgeClientOwner.name}`,
+					`Check ${bridgeClientOwner.name}`,
+					packageScriptCommand("check"),
+					resolvePackageCwd(bridgeClientOwner.dir),
+				);
+			}
+		}
+
 
 		const mappedTests = mappedTestsFor(changedPath, packages, testFiles);
+		for (const testFile of mappedTests) {
+			addTestFileTask(tasks, testFile);
+		}
+		for (const testFile of behavioralTestsFor(changedPath)) {
+			addTestFileTask(tasks, testFile);
+		}
+		if (isCodingAgentShardOneCoveragePath(changedPath)) {
+			addCodingAgentTestShard(tasks, 1);
+		}
+
 		if (mappedTests.length > 0) {
-			for (const testFile of mappedTests) {
-				addTestFileTask(tasks, testFile);
-			}
 			continue;
 		}
 
@@ -972,22 +919,21 @@ export function planTargetedTasks(paths: readonly string[], packages: readonly W
 			if (isUnscopedWrapperPath(changedPath)) {
 				add(tasks, "wrapper-version", "Unscoped wrapper CLI version smoke", ["bun", "packages/sayknow-cli/bin/skc.js", "--version"]);
 			}
-			if (isReleasePublishPath(changedPath)) {
-				add(tasks, "release-publish-contract", "Release publish contract tests", ["bun", "run", "test:release"]);
-				add(tasks, "release-publish-dry-run", "Release publish dry-run", ["bun", "scripts/ci-release-publish.ts", "--dry-run"]);
-			}
 			continue;
 		}
 
 		// Unmapped root-level code/config (no owning package, no mapped test):
 		// fall back to the root tooling typecheck rather than the full suite.
 		if (isCodeIshPath(changedPath)) {
-			add(tasks, "root-check", "Root TypeScript/tooling check", ["bun", "run", "check:ts"]);
+			add(tasks, "root-check", "Root TypeScript/tooling check", ["bun", "run", "ci:check:full"]);
 		}
 	}
 
+	if (needsDarwinArm64TabWorkerSmoke(relevant)) {
+		add(tasks, "install-methods", "Install method smoke tests", ["bun", "run", "ci:test:install-methods"]);
+	}
 	if (needCiSelftest) {
-		add(tasks, "ci-selftest", "Affected CI selector unit tests", ["bun", "test", "scripts/ci-dev-affected.test.ts"]);
+		add(tasks, "ci-selftest", "Affected CI selector unit tests", ["bun", "test", "scripts/ci-dev-affected.test.ts", "scripts/dev-ci-guard-topology.test.ts"]);
 		add(tasks, "ci-dry-run", "Affected CI selector dry-run", ["bun", "scripts/ci-dev-affected.ts", "--dry-run"]);
 	}
 	if (needYamlParse) {
@@ -1008,10 +954,61 @@ function addTestFileTask(tasks: Map<string, Task>, testFile: string): void {
 	add(tasks, `test:${testFile}`, `Test ${testFile}`, ["bun", "test", testFile]);
 }
 
+function addWorkspaceTestTasks(tasks: Map<string, Task>, packages: readonly WorkspacePackage[]): void {
+	add(tasks, "root-test:release", "Root release contract tests", ["bun", "run", "test:release"]);
+	for (const workspacePackage of packages) {
+		if (workspacePackage.manifest.scripts?.test) {
+			addPackageTestTasks(tasks, workspacePackage);
+		}
+	}
+}
+
+function addPackageTestTasks(tasks: Map<string, Task>, workspacePackage: WorkspacePackage): void {
+	if (workspacePackage.name !== "@sayknow-cli/coding-agent") {
+		add(tasks, `test:${workspacePackage.name}`, `Test ${workspacePackage.name}`, packageScriptCommand("test"), resolvePackageCwd(workspacePackage.dir));
+		return;
+	}
+
+	const total = codingAgentTestShards();
+	for (let shard = 1; shard <= total; shard++) {
+		addCodingAgentTestShard(tasks, shard, total);
+	}
+	addCodingAgentSdkProductionHostTask(tasks);
+}
+
+function addCodingAgentTestShard(tasks: Map<string, Task>, shard: number, total: number = codingAgentTestShards()): void {
+	add(
+		tasks,
+		`test:@sayknow-cli/coding-agent:shard-${shard}-of-${total}`,
+		`Test @sayknow-cli/coding-agent shard ${shard}/${total}`,
+		["bun", "test", `--shard=${shard}/${total}`],
+		resolvePackageCwd("packages/coding-agent"),
+	);
+}
+
+// The production SDK host case must run in its own process: the sharded run
+// loads the daemon worker differently and would false-green it.
+function addCodingAgentSdkProductionHostTask(tasks: Map<string, Task>): void {
+	add(
+		tasks,
+		"test:@sayknow-cli/coding-agent:sdk-production-host-isolated",
+		"Test @sayknow-cli/coding-agent production SDK host in isolation",
+		[
+			"bun",
+			"test",
+			"test/sdk-chat-daemon-worker.test.ts",
+			"-t",
+			"routes Slack safe queries through the production Session SDK host",
+		],
+		resolvePackageCwd("packages/coding-agent"),
+	);
+}
+
 // Resolve the directly-named test(s) for a changed path: the changed file itself
 // if it is a test, otherwise test files whose basename is `<base>.test.ts(x)` and
 // which live within the changed file's owning package (or its directory for
-// root-level files). Returns [] when there is no direct mapping.
+// root-level files). Returns [] when there is no unique direct mapping, so basename
+// collisions fall back to package-level checks instead of selecting arbitrary tests.
 function mappedTestsFor(changedPath: string, packages: readonly WorkspacePackage[], testFiles: readonly string[]): string[] {
 	if (isTestFilePath(changedPath)) {
 		return testFiles.includes(changedPath) ? [changedPath] : [];
@@ -1023,7 +1020,23 @@ function mappedTestsFor(changedPath: string, packages: readonly WorkspacePackage
 	const wanted = new Set([`${base}.test.ts`, `${base}.test.tsx`]);
 	const owner = owningPackage(changedPath, packages);
 	const scopePrefix = owner ? `${owner.dir}/` : `${path.posix.dirname(changedPath)}/`;
-	return testFiles.filter(testFile => wanted.has(path.posix.basename(testFile)) && testFile.startsWith(scopePrefix));
+	const matches = testFiles.filter(
+		testFile => wanted.has(path.posix.basename(testFile)) && testFile.startsWith(scopePrefix),
+	);
+	return matches.length === 1 ? matches : [];
+}
+
+// Resolve explicit behavioral-owner tests. Unlike mappedTestsFor(), these tests
+// are additive because an entrypoint's package-level check and smoke coverage
+// remain necessary even when it owns a dedicated contract test.
+function behavioralTestsFor(changedPath: string): readonly string[] {
+	return BEHAVIORAL_OWNER_TESTS[changedPath] ?? [];
+}
+
+function isCodingAgentShardOneCoveragePath(changedPath: string): boolean {
+	return CODING_AGENT_SHARD_ONE_COVERAGE_PATHS.some(coveragePath =>
+		coveragePath.endsWith("/") ? changedPath.startsWith(coveragePath) : changedPath === coveragePath,
+	);
 }
 
 function owningPackage(changedPath: string, packages: readonly WorkspacePackage[]): WorkspacePackage | undefined {
@@ -1052,9 +1065,6 @@ function isCiHarnessScriptPath(changedPath: string): boolean {
 	return changedPath === "scripts/ci-dev-affected.ts" || changedPath === "scripts/ci-dev-affected.test.ts" || changedPath === "scripts/dev-ci-guard-topology.test.ts" || changedPath === "scripts/check-workflow-yaml.ts" || changedPath === "scripts/check-workflow-permissions.ts" || changedPath === "scripts/check-workflow-permissions.test.ts";
 }
 
-function isWebPath(changedPath: string): boolean {
-	return changedPath.startsWith("python/roboskc/web/");
-}
 
 function isCodeIshPath(changedPath: string): boolean {
 	return /\.(tsx?|jsx?|mts|cts|mjs|cjs|json|jsonc|toml|ya?ml|sh)$/.test(changedPath) || changedPath === "bun.lock";
@@ -1075,7 +1085,7 @@ function add(
 	phase?: Task["phase"],
 ): void {
 	if (!tasks.has(key)) {
-		tasks.set(key, { key, identity: taskIdentity(key), description, command, cwd, capabilities, phase });
+		tasks.set(key, { key, description, command, cwd, capabilities, phase });
 	}
 }
 
@@ -1090,21 +1100,6 @@ export function packageScriptCommand(script: string): readonly string[] {
 	return ["bun", "run", script];
 }
 
-function pythonLintCommand(): readonly string[] {
-	return [
-		"bash",
-		"-lc",
-		`${PYTHON_DEV_SETUP} && python3 -m ruff check python && python3 -m ruff format --check python/roboskc`,
-	];
-}
-
-function pythonTestCommand(): readonly string[] {
-	return [
-		"bash",
-		"-lc",
-		`${PYTHON_DEV_SETUP} && python3 -m pytest -x --import-mode=importlib python/skc-rpc/tests python/roboskc/tests`,
-	];
-}
 
 // Resolve a workspace-relative package directory to an absolute path used as
 // the spawned task's process cwd.
@@ -1179,17 +1174,23 @@ function isReleaseHarnessScriptPath(changedPath: string): boolean {
 	].includes(changedPath);
 }
 
-function isPythonStaticAssetPath(changedPath: string): boolean {
-	return changedPath.startsWith("python/roboskc/assets/");
+function addReleasePublishTasks(tasks: Map<string, Task>): void {
+	add(tasks, "release-publish-contract", "Release publish contract tests", ["bun", "run", "test:release"]);
+	add(tasks, "release-publish-dry-run", "Release publish dry-run", ["bun", "scripts/ci-release-publish.ts", "--dry-run"]);
+	addTestFileTask(tasks, "scripts/release-evidence.test.ts");
 }
 
-// Python sources: the SDK plus the roboskc service, excluding roboskc's web
-// frontend and static assets, which schedule no Python validation. These were
-// two separate declarations, so the second silently shadowed the first and
-// roboskc changes never scheduled Python work.
+
 function isPythonPath(changedPath: string): boolean {
-	if (changedPath.startsWith("python/skc-sdk/")) return true;
-	return changedPath.startsWith("python/roboskc/") && !changedPath.startsWith("python/roboskc/web/") && !isPythonStaticAssetPath(changedPath);
+	return changedPath.startsWith("python/skc-sdk/");
+}
+
+// roboskc's own Python sources (plus the skc-rpc package it imports). Its web
+// frontend is a bun workspace planned like any other package, and its static
+// assets schedule no Python validation.
+function isRoboskcPythonPath(changedPath: string): boolean {
+	if (changedPath.startsWith("python/skc-rpc/")) return true;
+	return changedPath.startsWith("python/roboskc/") && !changedPath.startsWith("python/roboskc/web/") && !changedPath.startsWith("python/roboskc/assets/");
 }
 
 function isRustPath(changedPath: string): boolean {
@@ -1207,6 +1208,13 @@ function isInstallPath(changedPath: string): boolean {
 
 function isCodingAgentRuntimePath(changedPath: string): boolean {
 	return changedPath.startsWith("packages/coding-agent/") || changedPath.startsWith("packages/agent/") || changedPath.startsWith("packages/ai/");
+}
+
+function isBridgeClientSdkPackageSmokePath(changedPath: string): boolean {
+	return (
+		changedPath.startsWith("packages/bridge-client/") ||
+		changedPath.startsWith("packages/coding-agent/src/sdk/client/")
+	);
 }
 
 function isDeepInterviewOnly(paths: readonly string[]): boolean {
@@ -1227,6 +1235,236 @@ function isWorkflowPath(changedPath: string): boolean {
 	return changedPath.startsWith(".github/workflows/");
 }
 
+
+const BUILD_INVENTORY_PATH = path.join(repoRoot, "scripts/ci-dev-affected-build-inventory.json");
+const NATIVE_PRODUCER: Task = {
+	key: "native-linux-x64",
+	identity: "native:linux-x64:baseline-modern",
+	description: "Build linux x64 native addons",
+	command: ["bash", "-lc", 'TARGET_VARIANTS="baseline modern" bun scripts/ci-build-native.ts'],
+	cwd: repoRoot,
+	capabilities: { rust: true, nextest: false, nativeConsumer: false, nativeProducer: true },
+	phase: "native-producer",
+};
+
+export function normalizeChangedPaths(paths: readonly string[]): string[] {
+	const normalized = paths.map(entry => entry.replaceAll("\\", "/").trim()).map(entry => entry.replace(/^\.\//, ""));
+	for (const entry of normalized) {
+		if (!entry || entry.startsWith("/") || /^[A-Za-z]:\//.test(entry) || entry === ".." || entry.startsWith("../") || entry.includes("/../") || entry.split("/").some(part => part === "." || part === "")) {
+			throw new Error(`affected-path-invalid: unsafe changed path '${entry}'`);
+		}
+	}
+	return Array.from(new Set(normalized)).sort();
+}
+
+export async function loadBuildInventory(inventoryPath = BUILD_INVENTORY_PATH): Promise<BuildInventory> {
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(await Bun.file(inventoryPath).text());
+	} catch (error) {
+		throw new Error(`inventory-invalid: cannot read build inventory (${error instanceof Error ? error.message : String(error)})`);
+	}
+	if (!isRecord(parsed) || parsed.schemaVersion !== 1 || !Array.isArray(parsed.typescript) || !Array.isArray(parsed.cargo) || !isRecord(parsed.emergency)) {
+		throw new Error("inventory-invalid: malformed build inventory");
+	}
+	assertExactKeys(parsed, ["schemaVersion", "typescript", "cargo", "emergency"], "build inventory");
+	const inventory: BuildInventory = {
+		schemaVersion: 1,
+		typescript: parsed.typescript.map(parseTsInventoryUnit),
+		cargo: parsed.cargo.map(parseCargoInventoryUnit),
+		emergency: parseEmergency(parsed.emergency),
+	};
+	assertInventory(inventory);
+	await assertTypeScriptInventoryLive(inventory);
+	await expandCargoDependents(inventory.cargo, inventory.cargo, false);
+	return inventory;
+}
+
+function parseTsInventoryUnit(value: unknown): TsInventoryUnit {
+	if (!isRecord(value) || !isString(value.id) || !isString(value.name) || !isString(value.dir) || typeof value.nativeConsumer !== "boolean" || typeof value.nativeProducer !== "boolean") throw new Error("inventory-invalid: malformed TypeScript unit");
+	assertExactKeys(value, ["id", "name", "dir", "nativeConsumer", "nativeProducer"], "TypeScript unit");
+	return { id: value.id, name: value.name, dir: normalizeInventoryPath(value.dir), nativeConsumer: value.nativeConsumer, nativeProducer: value.nativeProducer };
+}
+function parseCargoInventoryUnit(value: unknown): CargoInventoryUnit {
+	if (!isRecord(value) || !isString(value.id) || !isString(value.name) || !isString(value.manifestPath) || value.supported !== true || typeof value.nativeAddonSource !== "boolean") throw new Error("inventory-invalid: malformed Cargo unit");
+	assertExactKeys(value, ["id", "name", "manifestPath", "supported", "nativeAddonSource"], "Cargo unit");
+	return { id: value.id, name: value.name, manifestPath: normalizeInventoryPath(value.manifestPath), supported: true, nativeAddonSource: value.nativeAddonSource };
+}
+function parseEmergency(value: Record<string, unknown>): BuildInventory["emergency"] {
+	if (Object.keys(value).some(key => key !== "cargoWorkspaceBuild")) throw new Error("inventory-invalid: unexpected emergency field");
+	const emergency = value.cargoWorkspaceBuild;
+	if (emergency === undefined) return {};
+	if (!isRecord(emergency) || emergency.id !== "cargo-workspace-emergency" || emergency.key !== "cargo-build:emergency:workspace" || emergency.identity !== "emergency:cargo-workspace:root" || !Array.isArray(emergency.command) || emergency.command.join("\0") !== "cargo\0build\0--workspace" || emergency.cwd !== "." || !isRecord(emergency.capabilities) || emergency.allowedReasons === undefined || !Array.isArray(emergency.allowedReasons) || emergency.allowedReasons.join("\0") !== "cargo-name-ambiguity") throw new Error("inventory-invalid: malformed cargo workspace emergency");
+	assertExactKeys(emergency, ["id", "key", "identity", "command", "cwd", "capabilities", "allowedReasons"], "cargo workspace emergency");
+	const capabilities = emergency.capabilities;
+	if (capabilities.rust !== true || capabilities.nextest !== false || capabilities.nativeConsumer !== false || capabilities.nativeProducer !== false) throw new Error("inventory-invalid: malformed cargo workspace emergency capabilities");
+	assertExactKeys(capabilities, ["rust", "nextest", "nativeConsumer", "nativeProducer"], "cargo workspace emergency capabilities");
+	return { cargoWorkspaceBuild: { id: "cargo-workspace-emergency", key: "cargo-build:emergency:workspace", identity: "emergency:cargo-workspace:root", command: ["cargo", "build", "--workspace"], cwd: ".", capabilities: { rust: true, nextest: false, nativeConsumer: false, nativeProducer: false }, allowedReasons: ["cargo-name-ambiguity"] } };
+}
+function normalizeInventoryPath(value: string): string {
+	const normalized = value.replaceAll("\\", "/").replace(/^\.\//, "");
+	if (!normalized || normalized.startsWith("/") || normalized.includes("../") || normalized.split("/").some(part => !part || part === ".")) throw new Error("inventory-invalid: unsafe inventory path");
+	return normalized;
+}
+function assertInventory(inventory: BuildInventory): void {
+	const unique = (values: readonly string[], label: string) => { if (new Set(values).size !== values.length) throw new Error(`inventory-invalid: duplicate ${label}`); };
+	unique(inventory.typescript.map(unit => unit.id), "TypeScript id");
+	unique(inventory.typescript.map(unit => unit.name), "TypeScript name");
+	unique(inventory.typescript.map(unit => unit.dir), "TypeScript directory");
+	unique(inventory.cargo.map(unit => unit.id), "Cargo id");
+	unique(inventory.cargo.map(unit => unit.manifestPath), "Cargo manifest path");
+	const nativeSources = inventory.cargo.filter(unit => unit.nativeAddonSource);
+	if (nativeSources.length !== 1 || nativeSources[0]?.id !== "pi-natives") throw new Error("inventory-invalid: pi-natives must be the sole native addon source");
+	const counts = new Map<string, number>();
+	for (const unit of inventory.cargo) counts.set(unit.name, (counts.get(unit.name) ?? 0) + 1);
+	if (Array.from(counts.values()).some(count => count > 1) && !inventory.emergency.cargoWorkspaceBuild) throw new Error("inventory-invalid: duplicate Cargo names require workspace emergency");
+}
+
+async function assertTypeScriptInventoryLive(inventory: BuildInventory): Promise<void> {
+	const workspaces = await getWorkspacePackages();
+	const buildable = workspaces.filter(workspacePackage => workspacePackage.name !== "@sayknow-cli/natives" && workspacePackage.manifest.scripts?.build);
+	const classified = inventory.typescript.filter(unit => !unit.nativeProducer);
+	const buildableNames = new Set(buildable.map(workspacePackage => workspacePackage.name));
+	const classifiedNames = new Set(classified.map(unit => unit.name));
+	if (buildableNames.size !== classifiedNames.size || Array.from(buildableNames).some(name => !classifiedNames.has(name))) {
+		throw new Error("inventory-drift: TypeScript build-capable workspaces are not fully classified");
+	}
+	for (const unit of inventory.typescript) {
+		const manifest = await readPackageManifest(path.join(repoRoot, unit.dir, "package.json"));
+		if (!manifest || manifest.name !== unit.name || (!unit.nativeProducer && !manifest.scripts?.build)) throw new Error(`inventory-drift: TypeScript build unit ${unit.id} does not match its package manifest`);
+	}
+}
+
+async function appendBuildTasks(legacy: readonly Task[], paths: readonly string[], packages: readonly WorkspacePackage[], inventory: BuildInventory): Promise<Task[]> {
+	const withoutNative = legacy.filter(task => !isNativeBuildKey(task.key));
+	const buildPaths = paths.filter(changedPath => !isDocOrChangelogPath(changedPath));
+	const selectedTs = selectTsBuildUnits(buildPaths, packages, inventory);
+	const cargo = await selectCargoBuildTasks(buildPaths, inventory, packages);
+	const legacyNeedsProducer = legacy.some(task => isNativeBuildKey(task.key)) || legacy.some(task => taskNeedsNative(task.key));
+	const cargoNeedsProducer = inventory.cargo
+		.filter(unit => unit.nativeAddonSource)
+		.some(unit => cargo.some(task => task.key === inventory.emergency.cargoWorkspaceBuild?.key || task.identity === stableIdentity("cargo", unit.id, unit.manifestPath)));
+	const needsProducer = legacyNeedsProducer || selectedTs.some(unit => unit.nativeConsumer || unit.nativeProducer) || cargoNeedsProducer;
+	const tsTasks = selectedTs.map(unit => ({ key: `ts-build:${stableIdentity("ts", unit.id, unit.dir)}`, identity: stableIdentity("ts", unit.id, unit.dir), description: `Build ${unit.name}`, command: ["bun", "run", "build"] as const, cwd: resolvePackageCwd(unit.dir), capabilities: { rust: false, nextest: false, nativeConsumer: unit.nativeConsumer, nativeProducer: unit.nativeProducer }, phase: "ts-build" as const }));
+	return [...withoutNative, ...(needsProducer ? [NATIVE_PRODUCER] : []), ...tsTasks, ...cargo];
+}
+function selectTsBuildUnits(paths: readonly string[], packages: readonly WorkspacePackage[], inventory: BuildInventory): TsInventoryUnit[] {
+	const selected = allBuildFallback(paths, packages)
+		? packages
+		: expandWithDependents(findTouchedPackages(paths, packages), packages);
+	const names = new Set(selected.map(unit => unit.name));
+	return inventory.typescript.filter(unit => names.has(unit.name)).sort(compareTsUnits);
+}
+function allBuildFallback(paths: readonly string[], packages: readonly WorkspacePackage[]): boolean {
+	return paths.some(changedPath =>
+		isFullWorkspacePath(changedPath) ||
+		changedPath === "bun.lock" ||
+		changedPath.startsWith("tsconfig") ||
+		isWorkflowHarnessPath(changedPath) ||
+		changedPath === "scripts/ci-dev-affected-build-inventory.json" ||
+		(!isDocOrChangelogPath(changedPath) && !owningPackage(changedPath, packages)),
+	);
+}
+function compareTsUnits(left: TsInventoryUnit, right: TsInventoryUnit): number { return left.dir.localeCompare(right.dir) || left.name.localeCompare(right.name) || left.id.localeCompare(right.id); }
+function stableIdentity(domain: string, id: string, location: string): string { return `${domain}:${toBase64Url(id)}:${toBase64Url(location)}`; }
+function toBase64Url(value: string): string { return Buffer.from(value).toString("base64url"); }
+
+async function selectCargoBuildTasks(paths: readonly string[], inventory: BuildInventory, packages: readonly WorkspacePackage[]): Promise<Task[]> {
+	const supported = inventory.cargo.filter(unit => unit.supported);
+	const fallbackAll = paths.some(changedPath =>
+		changedPath === "Cargo.toml" ||
+		changedPath === "Cargo.lock" ||
+		changedPath === "rust-toolchain.toml" ||
+		changedPath.startsWith(".cargo/") ||
+		isFullWorkspacePath(changedPath) ||
+		isWorkflowHarnessPath(changedPath) ||
+		changedPath === "scripts/ci-dev-affected-build-inventory.json" ||
+		(!isDocOrChangelogPath(changedPath) && !changedPath.startsWith("crates/") && !owningPackage(changedPath, packages)),
+	);
+	if (!fallbackAll && !paths.some(isRustPath)) return [];
+	const cargoChanged = paths.filter(isRustPath);
+	const fallback = fallbackAll || cargoChanged.some(changed => !supported.some(unit => changed === unit.manifestPath || changed.startsWith(`${path.posix.dirname(unit.manifestPath)}/`)));
+	let selected = fallback ? supported : supported.filter(unit => cargoChanged.some(changed => changed === unit.manifestPath || changed.startsWith(`${path.posix.dirname(unit.manifestPath)}/`)));
+	if (!fallback) selected = await expandCargoDependents(selected, supported, true);
+	if (requiresCargoWorkspaceEmergency(selected, supported)) {
+		const emergency = inventory.emergency.cargoWorkspaceBuild;
+		if (!emergency) throw new Error("inventory-invalid: duplicate selected Cargo name has no emergency");
+		return [{
+			key: emergency.key,
+			identity: emergency.identity,
+			description: "Build Cargo workspace",
+			command: emergency.command,
+			cwd: repoRoot,
+			capabilities: emergency.capabilities,
+			phase: "cargo-build",
+		}];
+	}
+	return selected.sort((left, right) => left.manifestPath.localeCompare(right.manifestPath) || left.id.localeCompare(right.id)).map(unit => ({ key: `cargo-build:${stableIdentity("cargo", unit.id, unit.manifestPath)}`, identity: stableIdentity("cargo", unit.id, unit.manifestPath), description: `Build Cargo crate ${unit.name}`, command: ["cargo", "build", "--package", unit.name] as const, cwd: repoRoot, capabilities: { rust: true, nextest: false, nativeConsumer: false, nativeProducer: false }, phase: "cargo-build" as const }));
+}
+
+export function requiresCargoWorkspaceEmergency(
+	selected: readonly CargoInventoryUnit[],
+	supported: readonly CargoInventoryUnit[],
+): boolean {
+	const counts = new Map<string, number>();
+	for (const unit of supported) counts.set(unit.name, (counts.get(unit.name) ?? 0) + 1);
+	return selected.some(unit => (counts.get(unit.name) ?? 0) > 1);
+}
+
+async function expandCargoDependents(
+	initial: readonly CargoInventoryUnit[],
+	supported: readonly CargoInventoryUnit[],
+	fallbackOnMetadataFailure: boolean,
+): Promise<CargoInventoryUnit[]> {
+	const metadata = await $`cargo metadata --format-version=1 --no-deps`.cwd(repoRoot).quiet().nothrow();
+	if (metadata.exitCode !== 0) {
+		if (fallbackOnMetadataFailure) return [...supported];
+		throw new Error(`inventory-drift: cargo metadata failed: ${metadata.stderr.toString().trim()}`);
+	}
+	let decoded: unknown;
+	try {
+		decoded = JSON.parse(metadata.stdout.toString());
+	} catch {
+		if (fallbackOnMetadataFailure) return [...supported];
+		throw new Error("inventory-drift: cargo metadata was not JSON");
+	}
+	if (!isRecord(decoded) || !Array.isArray(decoded.packages) || !Array.isArray(decoded.workspace_members) || !decoded.workspace_members.every(isString)) {
+		if (fallbackOnMetadataFailure) return [...supported];
+		throw new Error("inventory-drift: cargo metadata workspace inventory missing");
+	}
+	const byManifest = new Map<string, CargoInventoryUnit>();
+	for (const unit of supported) byManifest.set(path.resolve(repoRoot, unit.manifestPath), unit);
+	const byPackageId = new Map<string, CargoInventoryUnit>();
+	for (const entry of decoded.packages) {
+		if (!isRecord(entry) || !isString(entry.id) || !isString(entry.name) || !isString(entry.manifest_path)) continue;
+		const unit = byManifest.get(path.resolve(entry.manifest_path));
+		if (unit) {
+			if (unit.name !== entry.name || byPackageId.has(entry.id)) throw new Error("inventory-drift: Cargo registry mapping mismatch");
+			byPackageId.set(entry.id, unit);
+		}
+	}
+	if (byPackageId.size !== supported.length) throw new Error("inventory-drift: supported Cargo inventory does not match metadata");
+	const workspaceMemberIds = new Set(decoded.workspace_members as string[]);
+	if (workspaceMemberIds.size !== supported.length || Array.from(workspaceMemberIds).some(id => !byPackageId.has(id))) {
+		throw new Error("inventory-drift: Cargo workspace contains unclassified members");
+	}
+	const reverse = new Map<string, string[]>();
+	for (const entry of decoded.packages) {
+		if (!isRecord(entry) || !isString(entry.id) || !Array.isArray(entry.dependencies)) continue;
+		for (const dependency of entry.dependencies) {
+			if (!isRecord(dependency) || !isString(dependency.path)) continue;
+			const dependencyUnit = byManifest.get(path.resolve(dependency.path, "Cargo.toml"));
+			if (dependencyUnit) reverse.set(dependencyUnit.id, [...(reverse.get(dependencyUnit.id) ?? []), entry.id]);
+		}
+	}
+	const selected = new Map(initial.map(unit => [unit.id, unit]));
+	const queue = [...selected.keys()];
+	while (queue.length > 0) {
+		const current = queue.shift(); if (!current) continue;
+		for (const packageId of reverse.get(current) ?? []) { const unit = byPackageId.get(packageId); if (unit && !selected.has(unit.id)) { selected.set(unit.id, unit); queue.push(unit.id); } }
+	}
+	return Array.from(selected.values());
+}
 function isWorkflowHarnessPath(changedPath: string): boolean {
 	return (
 		isWorkflowPath(changedPath) ||
@@ -1244,7 +1482,14 @@ function isToolingScriptPath(changedPath: string): boolean {
 }
 
 function isReleasePublishPath(changedPath: string): boolean {
-	return changedPath === "scripts/ci-release-publish.ts" || changedPath.startsWith("packages/sayknow-cli/");
+	return (
+		changedPath === "scripts/ci-release-publish.ts" ||
+		changedPath === "scripts/release-evidence.ts" ||
+		changedPath.startsWith("packages/bridge-client/") ||
+		changedPath.startsWith("packages/sayknow-cli/") ||
+		changedPath.startsWith("packages/natives-") ||
+		changedPath === "packages/natives/package.json"
+	);
 }
 
 function isUnscopedWrapperPath(changedPath: string): boolean {
@@ -1253,6 +1498,10 @@ function isUnscopedWrapperPath(changedPath: string): boolean {
 
 function isString(value: unknown): value is string {
 	return typeof value === "string";
+}
+
+function assertExactKeys(value: Record<string, unknown>, keys: readonly string[], label: string): void {
+	if (Object.keys(value).length !== keys.length || Object.keys(value).some(key => !keys.includes(key))) throw new Error(`inventory-invalid: unexpected ${label} field`);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -1648,15 +1897,6 @@ async function validateShardReceipts(): Promise<void> {
 	}
 	actual.sort((left, right) => left.key.localeCompare(right.key));
 	if (JSON.stringify(actual) !== JSON.stringify(expected)) throw new Error("affected-plan-invalid: shard receipt set does not match canonical plan");
-}
-
-// `--validate-plan` asserts the published plan artifact still binds to this
-// checkout before a shard consumes it. Every failure mode throws, so the
-// process exits non-zero and the shard fails instead of running an unbound plan.
-async function validateCanonicalPlan(): Promise<void> {
-	const tasks = await loadCanonicalPlan();
-	if (!tasks) throw new Error("affected-plan-invalid: plan validation requires CI_DEV_AFFECTED_PLAN");
-	console.log(`canonical plan validated: ${tasks.length} task(s)`);
 }
 
 async function loadCanonicalPlan(): Promise<Task[] | null> {

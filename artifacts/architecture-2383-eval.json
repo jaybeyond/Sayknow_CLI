@@ -6,8 +6,8 @@
 	"source": {
 		"url": "https://platform.claude.com/docs/en/build-with-claude/prompt-caching",
 		"retrievedAt": "2026-07-18",
-		"providerSourceBlobOid": "9f57b6bc596921b3c9be93990d9c21baa3ae72ab",
-		"providerSourceSha256": "0fff1f82dbfeeac72a4b0d449c9e5766c82089c4542ef533b4770520aa80a5b8",
+		"providerSourceBlobOid": "30ef07a628dea646cf25df675d62e794edd63850",
+		"providerSourceSha256": "ba0e85170a946923a92ca409147fec52908e0cc66eba6b0078a61069126be0bf",
 		"inputFixtureSha256": "b1ca8d3183ca168140774f848ed414252178f7c5788d61243069862ae59c129b"
 	},
 	"derivationCommands": [

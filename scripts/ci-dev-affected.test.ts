@@ -718,14 +718,16 @@ describe("--matrix-json and --task CLI fan-out", () => {
 		expect(await Bun.file(path.join(repoRoot, ".ci-dev-affected-plan.json")).exists()).toBe(true);
 	});
 	test("Cargo selection includes transitive dependents and never emits vendored shards", async () => {
-		const sdk = await runScript(["--matrix-json"], "crates/skc-sdk/src/lib.rs");
-		expect(sdk.exitCode).toBe(0);
-		const sdkKeys = (JSON.parse(sdk.stdout.trim()) as Array<{ key: string }>).map(entry => entry.key);
-		expect(sdkKeys.filter(key => key.startsWith("cargo-build:"))).toEqual([
-			"cargo-build:cargo:Z2pjLXNkaw:Y3JhdGVzL2dqYy1zZGsvQ2FyZ28udG9tbA",
+		// skc-notifications is a leaf crate that pi-natives depends on, so a change
+		// there must select both (ordered by manifest path) and the native producer.
+		const notifications = await runScript(["--matrix-json"], "crates/skc-notifications/src/lib.rs");
+		expect(notifications.exitCode).toBe(0);
+		const notificationKeys = (JSON.parse(notifications.stdout.trim()) as Array<{ key: string }>).map(entry => entry.key);
+		expect(notificationKeys.filter(key => key.startsWith("cargo-build:"))).toEqual([
 			"cargo-build:cargo:cGktbmF0aXZlcw:Y3JhdGVzL3BpLW5hdGl2ZXMvQ2FyZ28udG9tbA",
+			"cargo-build:cargo:c2tjLW5vdGlmaWNhdGlvbnM:Y3JhdGVzL3NrYy1ub3RpZmljYXRpb25zL0NhcmdvLnRvbWw",
 		]);
-		expect(sdkKeys.filter(key => key === "native-linux-x64")).toHaveLength(1);
+		expect(notificationKeys.filter(key => key === "native-linux-x64")).toHaveLength(1);
 
 		const vendored = await runScript(["--matrix-json"], "crates/brush-core-vendored/src/lib.rs");
 		expect(vendored.exitCode).toBe(0);
@@ -741,6 +743,7 @@ describe("--matrix-json and --task CLI fan-out", () => {
 		expect(entries.filter(entry => entry.key.startsWith("ts-build:")).map(entry => entry.key)).toEqual([
 			"ts-build:ts:Y29kaW5nLWFnZW50:cGFja2FnZXMvY29kaW5nLWFnZW50",
 			"ts-build:ts:c3RhdHM:cGFja2FnZXMvc3RhdHM",
+			"ts-build:ts:cm9ib3NrYy13ZWI:cHl0aG9uL3JvYm9za2Mvd2Vi",
 		]);
 	});
 
@@ -758,7 +761,7 @@ describe("--matrix-json and --task CLI fan-out", () => {
 			const { stdout, exitCode } = await runScript(["--matrix-json"], changedPath);
 			expect(exitCode).toBe(0);
 			const entries = JSON.parse(stdout.trim()) as Array<{ key: string }>;
-			expect(entries.filter(entry => entry.key.startsWith("ts-build:")).map(entry => entry.key)).toHaveLength(2);
+			expect(entries.filter(entry => entry.key.startsWith("ts-build:")).map(entry => entry.key)).toHaveLength(3);
 			expect(entries.filter(entry => entry.key.startsWith("cargo-build:")).map(entry => entry.key)).toHaveLength(5);
 			expect(entries.filter(entry => entry.key === "native-linux-x64")).toHaveLength(1);
 		}
@@ -782,8 +785,12 @@ describe("--matrix-json and --task CLI fan-out", () => {
 			"check:@sayknow-cli/ai", "test:@sayknow-cli/ai",
 			"check:@sayknow-cli/coding-agent",
 			...Array.from({ length: 8 }, (_, index) => `test:@sayknow-cli/coding-agent:shard-${index + 1}-of-8`),
+			"test:@sayknow-cli/coding-agent:sdk-production-host-isolated",
 			"check:@sayknow-cli/natives", "test:@sayknow-cli/natives",
 			"check:@sayknow-cli/stats", "test:@sayknow-cli/stats",
+			// Fork-only workspace: telegram-remote depends on coding-agent, so it sits
+			// inside the natives dependent closure (ordered by workspace directory).
+			"check:@sayknow-cli/telegram-remote", "test:@sayknow-cli/telegram-remote",
 			"check:@sayknow-cli/tui", "test:@sayknow-cli/tui",
 			"check:@sayknow-cli/typescript-edit-benchmark", "test:@sayknow-cli/typescript-edit-benchmark",
 			"check:@sayknow-cli/utils", "test:@sayknow-cli/utils",
@@ -1406,6 +1413,13 @@ describe("planFullTasks — Main CI full mode (issue: shard main CI)", () => {
 		// Default coding-agent shard count stays 8 (dev parity).
 		expect(keys.filter(key => key.startsWith("test:@sayknow-cli/coding-agent:shard-")).length).toBe(8);
 		expect(keys).toContain("test:@sayknow-cli/coding-agent:shard-1-of-8");
+		// The production SDK host case runs in its own process, right after the shards.
+		const isolatedHost = "test:@sayknow-cli/coding-agent:sdk-production-host-isolated";
+		expect(keys.indexOf(isolatedHost)).toBe(keys.indexOf("test:@sayknow-cli/coding-agent:shard-8-of-8") + 1);
+		const isolatedTask = planFullTasks(fullModePackages).find(task => task.key === isolatedHost);
+		expect(isolatedTask?.command).toEqual(["bun", "test", "test/sdk-chat-daemon-worker.test.ts", "-t", "routes Slack safe queries through the production Session SDK host"]);
+		expect(isolatedTask?.cwd).toBe(resolvePackageCwd("packages/coding-agent"));
+		expect(describeTasks([isolatedTask!])[0]?.native).toBe(true);
 		// Default rust-test stays a single unpartitioned task.
 		expect(keys).toContain("rust-test");
 		expect(keys.some(key => key.startsWith("rust-test:partition-"))).toBe(false);

@@ -2,14 +2,15 @@
   "schemaVersion": 1,
   "typescript": [
     { "id": "coding-agent", "name": "@sayknow-cli/coding-agent", "dir": "packages/coding-agent", "nativeConsumer": true, "nativeProducer": false },
-    { "id": "stats", "name": "@sayknow-cli/stats", "dir": "packages/stats", "nativeConsumer": false, "nativeProducer": false }
+    { "id": "stats", "name": "@sayknow-cli/stats", "dir": "packages/stats", "nativeConsumer": false, "nativeProducer": false },
+    { "id": "roboskc-web", "name": "roboskc-web", "dir": "python/roboskc/web", "nativeConsumer": false, "nativeProducer": false }
   ],
   "cargo": [
-    { "id": "skc-sdk", "name": "skc-sdk", "manifestPath": "crates/skc-sdk/Cargo.toml", "supported": true, "nativeAddonSource": false },
     { "id": "pi-ast", "name": "pi-ast", "manifestPath": "crates/pi-ast/Cargo.toml", "supported": true, "nativeAddonSource": false },
     { "id": "pi-iso", "name": "pi-iso", "manifestPath": "crates/pi-iso/Cargo.toml", "supported": true, "nativeAddonSource": false },
     { "id": "pi-natives", "name": "pi-natives", "manifestPath": "crates/pi-natives/Cargo.toml", "supported": true, "nativeAddonSource": true },
-    { "id": "pi-shell", "name": "pi-shell", "manifestPath": "crates/pi-shell/Cargo.toml", "supported": true, "nativeAddonSource": false }
+    { "id": "pi-shell", "name": "pi-shell", "manifestPath": "crates/pi-shell/Cargo.toml", "supported": true, "nativeAddonSource": false },
+    { "id": "skc-notifications", "name": "skc-notifications", "manifestPath": "crates/skc-notifications/Cargo.toml", "supported": true, "nativeAddonSource": false }
   ],
   "emergency": {
     "cargoWorkspaceBuild": {
