@@ -337,6 +337,51 @@ describe("release package evidence", () => {
 		})).rejects.toThrow("E403 denied");
 	});
 
+	test("retries a post-publish tarball CDN 404 with backoff and rethrows other download failures", async () => {
+		const { expected } = expectedFixture();
+		const record = expected.packages[0]!;
+		const tarball = canonicalizePackageTarball(fixtureTarball(`{"name":"${record.name}","version":"1.2.3","dependencies":{}}\n`));
+		const exact = observation(record);
+
+		// npm view can list the freshly published version while the tarball CDN
+		// still returns 404 (the sayknow-v0.5.7 failure shape). That must retry
+		// and settle once the CDN catches up.
+		let observeCalls = 0;
+		const sleeps: number[] = [];
+		await expect(publishRetainedPackage(record, "retained.tgz", {
+			readTarball: async () => tarball,
+			observe: async () => {
+				observeCalls += 1;
+				if (observeCalls === 1) return undefined; // pre-publish absence
+				if (observeCalls <= 3) throw new Error("Registry tarball download failed: HTTP 404");
+				return exact;
+			},
+			publish: async () => ({ exitCode: 0, output: "" }),
+			visibilityDelayMs: 1,
+			sleep: async (ms) => {
+				sleeps.push(ms);
+			},
+		})).resolves.toEqual(exact);
+		expect(observeCalls).toBe(4);
+		expect(sleeps.length).toBe(2);
+
+		// Any other tarball download failure is not propagation lag and must
+		// rethrow immediately without burning the retry budget.
+		let hardFailureObserveCalls = 0;
+		await expect(publishRetainedPackage(record, "retained.tgz", {
+			readTarball: async () => tarball,
+			observe: async () => {
+				hardFailureObserveCalls += 1;
+				if (hardFailureObserveCalls === 1) return undefined;
+				throw new Error("Registry tarball download failed: HTTP 403");
+			},
+			publish: async () => ({ exitCode: 0, output: "" }),
+			visibilityDelayMs: 1,
+			sleep: async () => {},
+		})).rejects.toThrow("Registry tarball download failed: HTTP 403");
+		expect(hardFailureObserveCalls).toBe(2);
+	});
+
 	test("rejects malformed tarballs and malformed expected evidence before publication", async () => {
 		const { expected } = expectedFixture();
 		const directory = await fs.mkdtemp(path.join(os.tmpdir(), "sayknow-cli-release-evidence-malformed-"));

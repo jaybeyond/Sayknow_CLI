@@ -812,9 +812,12 @@ export async function publishRetainedPackage(
 	}
 	// npm's registry is read-after-write eventually consistent: right after a successful
 	// publish the version can be briefly invisible to a follow-up read AND the `latest`
-	// dist-tag can briefly lag behind the just-published version. Both resolve within
-	// seconds, so re-observe with bounded backoff before treating either as a failure.
-	// Real conflicts (integrity/byte mismatch) are rethrown immediately, never retried.
+	// dist-tag can briefly lag behind the just-published version. The tarball CDN can
+	// also lag the metadata: `npm view` already lists the version while the tarball URL
+	// still returns 404 (this failed the sayknow-v0.5.7 publish on natives-win32-x64).
+	// All three resolve within seconds, so re-observe with bounded backoff before
+	// treating any of them as a failure. Real conflicts (integrity/byte mismatch) are
+	// rethrown immediately, never retried.
 	const retries = operations.visibilityRetries ?? 36;
 	const delayMs = operations.visibilityDelayMs ?? 5000;
 	const sleep = operations.sleep ?? ((ms: number) => Bun.sleep(ms));
@@ -822,7 +825,8 @@ export async function publishRetainedPackage(
 		const message = error instanceof Error ? error.message : String(error);
 		return (
 			message.includes(`does not identify immutable expected evidence`) ||
-			message.includes(`stable ${NPM_RELEASE_TAG} is absent although`)
+			message.includes(`stable ${NPM_RELEASE_TAG} is absent although`) ||
+			message.includes("Registry tarball download failed: HTTP 404")
 		);
 	};
 	let observed: RegistryPackageObservation | undefined;
