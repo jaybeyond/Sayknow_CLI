@@ -739,7 +739,7 @@ Request shaping:
 
 Reasoning / thinking:
 
-- `supportsReasoningEffort` — accept `reasoning_effort`. Default: auto (off for Grok and zAI).
+- `supportsReasoningEffort` — accept `reasoning_effort`. Default: auto (off for zAI; on for Grok and OpenAI-compatible hosts that advertise it).
 - `reasoningEffortMap` — partial map from internal effort levels (`minimal|low|medium|high|xhigh`) to provider-specific strings (e.g. DeepSeek maps `xhigh -> "max"`).
 - `thinkingFormat` — request shape for thinking: `"openai"` (`reasoning_effort`), `"openrouter"` (`reasoning: { effort }`), `"zai"` (`thinking: { type: "enabled" }`), `"qwen"` (top-level `enable_thinking`), or `"qwen-chat-template"` (`chat_template_kwargs.enable_thinking`). Default: `"openai"`.
 - `reasoningContentField` — assistant field carrying chain-of-thought: `"reasoning_content"`, `"reasoning"`, or `"reasoning_text"`. Default: auto.

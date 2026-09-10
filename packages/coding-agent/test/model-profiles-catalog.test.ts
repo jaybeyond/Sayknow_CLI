@@ -306,6 +306,39 @@ const expectedProfiles: Array<{ name: string; requiredProviders: string[]; mappi
 		},
 	},
 	{
+		name: "grok-46-eco",
+		requiredProviders: ["xai"],
+		mapping: {
+			default: "xai/grok-4.6:low",
+			executor: "xai/grok-4.6:low",
+			planner: "xai/grok-4.6:low",
+			critic: "xai/grok-4.6:medium",
+			architect: "xai/grok-4.6:high",
+		},
+	},
+	{
+		name: "grok-46-medium",
+		requiredProviders: ["xai"],
+		mapping: {
+			default: "xai/grok-4.6:medium",
+			executor: "xai/grok-4.6:low",
+			planner: "xai/grok-4.6:medium",
+			critic: "xai/grok-4.6:high",
+			architect: "xai/grok-4.6:xhigh",
+		},
+	},
+	{
+		name: "grok-46-pro",
+		requiredProviders: ["xai"],
+		mapping: {
+			default: "xai/grok-4.6:xhigh",
+			executor: "xai/grok-4.6:medium",
+			planner: "xai/grok-4.6:high",
+			critic: "xai/grok-4.6:xhigh",
+			architect: "xai/grok-4.6:xhigh",
+		},
+	},
+	{
 		name: "grok-build-pro",
 		requiredProviders: ["grok-build"],
 		mapping: {
@@ -529,6 +562,51 @@ describe("built-in model profile catalog", () => {
 		}
 	});
 
+	test("Grok 4.6 profiles resolve every role at the expected effort", () => {
+		const profiles = mergeModelProfiles();
+		for (const name of ["grok-46-eco", "grok-46-medium", "grok-46-pro"] as const) {
+			const expected = expectedProfiles.find(profile => profile.name === name);
+			if (!expected) throw new Error(`Missing expected profile: ${name}`);
+			const definition = profiles.get(name);
+			if (!definition) throw new Error(`Missing resolved profile: ${name}`);
+			const resolved = resolveProfileBindings(definition);
+			expect(resolved.defaultSelector).toBe(expected.mapping.default);
+			expect(resolved.agentModelOverrides).toEqual({
+				executor: expected.mapping.executor,
+				architect: expected.mapping.architect,
+				planner: expected.mapping.planner,
+				critic: expected.mapping.critic,
+			});
+		}
+	});
+
+	test("Grok 4.6 profiles may request documented xhigh reasoning", () => {
+		const grok46Profiles = BUILTIN_MODEL_PROFILES.filter(profile => profile.name.startsWith("grok-46-"));
+		expect(grok46Profiles.map(profile => profile.name)).toEqual(["grok-46-eco", "grok-46-medium", "grok-46-pro"]);
+		for (const profile of grok46Profiles) {
+			for (const selectorValue of Object.values(profile.modelMapping)) {
+				for (const selector of normalizeModelSelectorValue(selectorValue)) {
+					const trimmedSelector = selector.trim();
+					const separator = trimmedSelector.lastIndexOf(":");
+					const hasEffort = separator > trimmedSelector.indexOf("/");
+					const modelReference = hasEffort ? trimmedSelector.slice(0, separator).trim() : trimmedSelector;
+					const parsed = parseModelString(modelReference);
+					if (parsed?.provider.toLowerCase() !== "xai" || parsed.id.toLowerCase() !== "grok-4.6") continue;
+					const effort = hasEffort
+						? trimmedSelector
+								.slice(separator + 1)
+								.trim()
+								.toLowerCase()
+						: undefined;
+					if (effort === undefined) {
+						throw new Error(`missing effort suffix on grok-4.6 selector ${trimmedSelector}`);
+					}
+					expect(["low", "medium", "high", "xhigh"]).toContain(effort);
+				}
+			}
+		}
+	});
+
 	test("Grok 4.5 profiles never request unsupported xhigh reasoning", () => {
 		const grok45Profiles = BUILTIN_MODEL_PROFILES.filter(profile => profile.name.startsWith("grok-45-"));
 		expect(grok45Profiles.map(profile => profile.name)).toEqual(["grok-45-eco", "grok-45-medium", "grok-45-pro"]);
@@ -645,6 +723,9 @@ describe("built-in model profile catalog", () => {
 			"grok-45-eco": "Grok 4.5 Eco",
 			"grok-45-medium": "Grok 4.5 Medium",
 			"grok-45-pro": "Grok 4.5 Pro",
+			"grok-46-eco": "Grok 4.6 Eco",
+			"grok-46-medium": "Grok 4.6 Medium",
+			"grok-46-pro": "Grok 4.6 Pro",
 			"macos-omlx-fast": "4-bit Fast (MoE measured 93.5 tok/s)",
 			"macos-omlx-balanced": "8-bit Balanced (MoE measured 71.1 tok/s)",
 			"macos-omlx-quality": "Quality mix (8-bit MoE + 8-bit dense critic)",
@@ -679,7 +760,7 @@ describe("built-in model profile catalog", () => {
 		expect(recommendModelProfileForProvider("xiaomi-token-plan-sgp", profiles)?.name).toBe("mimo-medium");
 		expect(recommendModelProfileForProvider("xiaomi-token-plan-ams", profiles)?.name).toBe("mimo-medium");
 		expect(recommendModelProfileForProvider("xiaomi-token-plan-cn", profiles)?.name).toBe("mimo-medium");
-		expect(recommendModelProfileForProvider("xai", profiles)?.name).toBe("grok-medium");
+		expect(recommendModelProfileForProvider("xai", profiles)?.name).toBe("grok-46-medium");
 		expect(recommendModelProfileForProvider("grok-build", profiles)?.name).toBe("grok-build-pro");
 		expect(recommendModelProfileForProvider("cursor", profiles)?.name).toBe("cursor-medium");
 		expect(recommendModelProfileForProvider("omlx", profiles)?.name).toBe("macos-omlx-balanced");

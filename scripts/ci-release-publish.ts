@@ -818,7 +818,12 @@ export async function publishRetainedPackage(
 	// All three resolve within seconds, so re-observe with bounded backoff before
 	// treating any of them as a failure. Real conflicts (integrity/byte mismatch) are
 	// rethrown immediately, never retried.
-	const retries = operations.visibilityRetries ?? 36;
+	// sayknow-v0.5.9 failed here on bridge-client: the package eventually
+	// appeared on the registry, but the default ~3m budget timed out first and
+	// aborted before coding-agent/sayknow-cli could publish. Keep the same
+	// delay cadence and widen the window so transient metadata/CDN lag cannot
+	// strand a partially-published tag.
+	const retries = operations.visibilityRetries ?? 72;
 	const delayMs = operations.visibilityDelayMs ?? 5000;
 	const sleep = operations.sleep ?? ((ms: number) => Bun.sleep(ms));
 	const isTransientVisibilityError = (error: unknown): boolean => {

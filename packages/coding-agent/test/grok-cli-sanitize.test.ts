@@ -34,4 +34,15 @@ describe("Grok CLI payload sanitize", () => {
 			expect(efforts).toEqual(["low", "low", "medium", "high", "high", "high"]);
 		}
 	});
+
+	it("keeps Grok 4.6 xhigh and clamps only above the documented cap", () => {
+		for (const modelId of ["grok-4.6", "grok-4.6-latest"]) {
+			const efforts = ["minimal", "low", "medium", "high", "xhigh", "max"].map(requested => {
+				const payload = sanitizePayload({ reasoning: { effort: requested } }, modelId, undefined, process.cwd());
+				return (payload.reasoning as { effort: string }).effort;
+			});
+
+			expect(efforts).toEqual(["low", "low", "medium", "high", "xhigh", "xhigh"]);
+		}
+	});
 });

@@ -205,7 +205,10 @@ export function detectOpenAICompat(model: Model<"openai-completions">, resolvedB
 		supportsDeveloperRole: !isNonStandard,
 		sendSessionHeaders: false,
 		supportsMultipleSystemMessages: supportsMultipleSystemMessagesDefault,
-		supportsReasoningEffort: !isGrok && !isZai,
+		// xAI Grok 4.5+ accepts reasoning_effort on chat-completions (and
+		// Responses). Older catalogs left this off; keeping it disabled
+		// silently drops profile effort suffixes like :xhigh for grok-4.6.
+		supportsReasoningEffort: !isZai,
 		reasoningEffortMap,
 		supportsUsageInStreaming: !isCerebras,
 		disableReasoningOnForcedToolChoice: isKimiModel || isAnthropicModel || isOpenCodeGoReasoning,

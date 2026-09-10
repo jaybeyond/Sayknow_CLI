@@ -66,6 +66,40 @@ describe("bundled Grok CLI defaults", () => {
 		}
 	});
 
+	it("registers Grok 4.6 with verified model metadata and documented xhigh effort cap", async () => {
+		const previousGrokCliModels = process.env.SKC_GROK_CLI_MODELS;
+		delete process.env.SKC_GROK_CLI_MODELS;
+		try {
+			const model = resolveModels().find(candidate => candidate.id === "grok-4.6");
+
+			expect(model).toEqual({
+				id: "grok-4.6",
+				name: "Grok 4.6",
+				reasoning: true,
+				input: ["text", "image"],
+				cost: { input: 2, output: 6, cacheRead: 0.5, cacheWrite: 0 },
+				contextWindow: 500_000,
+				maxTokens: 30_000,
+				maxReasoningEffort: Effort.XHigh,
+			});
+			expect(supportsReasoningEffort("grok-build/grok-4.6")).toBe(true);
+
+			const providerConfig = await captureGrokBuildProviderConfig();
+			const registeredModel = providerConfig?.models?.find(candidate => candidate.id === "grok-4.6");
+			expect(registeredModel?.thinking).toEqual({
+				minLevel: Effort.Low,
+				maxLevel: Effort.XHigh,
+				mode: "effort",
+			});
+		} finally {
+			if (previousGrokCliModels === undefined) {
+				delete process.env.SKC_GROK_CLI_MODELS;
+			} else {
+				process.env.SKC_GROK_CLI_MODELS = previousGrokCliModels;
+			}
+		}
+	});
+
 	it("maps official Grok 4.5 aliases to canonical metadata and effort limits", async () => {
 		const previousGrokCliModels = process.env.SKC_GROK_CLI_MODELS;
 		const aliases = ["grok-4.5-latest", "grok-build-latest"];

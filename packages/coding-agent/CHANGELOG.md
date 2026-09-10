@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added built-in `grok-46-{eco,medium,pro}` model profiles for official `xai/grok-4.6` (500K context, reasoning effort through `xhigh`). xAI provider recommendation now defaults to `grok-46-medium`, web search defaults to `grok-4.6`, and the Grok CLI vendor catalog registers the model with the documented effort cap.
+
 ## [0.5.9] - 2026-09-10
 
 ### Fixed

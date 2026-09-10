@@ -35,4 +35,18 @@ describe("coding-agent package files", () => {
 		expect(fileSet.has("src/sdk/broker/internal-source.bunfig.toml")).toBe(true);
 		expect(fileSet.has("src/sdk/broker/internal-source-marker-2178.txt")).toBe(true);
 	});
+
+	it("packs the vendored mupdf wasm required by published installs", () => {
+		const files = packedFiles();
+		const fileSet = new Set(files);
+		expect(fileSet.has("vendor/mupdf/mupdf-wasm.wasm")).toBe(true);
+		expect(fileSet.has("src/utils/mupdf-wasm.ts")).toBe(true);
+		expect(files.some(file => file.includes("node_modules/mupdf"))).toBe(false);
+
+		const wasmPath = path.resolve(packageDir, "vendor/mupdf/mupdf-wasm.wasm");
+		const bytes = Bun.file(wasmPath);
+		// Keep the pack-path guard honest: the packed path must resolve to a real
+		// wasm blob, not a missing/LFS stub that would recreate the 0.5.8 crash.
+		expect(bytes.size).toBeGreaterThan(1_000_000);
+	});
 });

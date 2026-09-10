@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Enabled `reasoning_effort` for native xAI Grok chat-completions and pinned bundled `xai/grok-4.5` / `xai/grok-4.6` thinking ranges to the official docs (`high` for 4.5, `xhigh` for 4.6). Default xAI model is now `grok-4.6`.
+
 ## [0.5.9] - 2026-09-10
 
 ## [0.5.7] - 2026-09-10

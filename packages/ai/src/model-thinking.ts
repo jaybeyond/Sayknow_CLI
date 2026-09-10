@@ -475,6 +475,35 @@ function applyGeneratedModelPolicy(model: ApiModel<Api>): void {
 	if (model.provider !== "opencode-go" && model.id === "minimax-m3") {
 		model.contextWindow = 512_000;
 	}
+	// xAI Grok 4.5/4.6: official reasoning docs (docs.x.ai) expose
+	// low/medium/high, with xhigh only on grok-4.6+. Catalog snapshots and
+	// openai-compat historically clamped everything to high because
+	// supportsReasoningEffort was false for Grok; pin the documented ranges so
+	// profile suffixes and requireSupportedEffort stay honest across regen.
+	if (model.provider === "xai" && /^grok-4\.6(?:$|[-.])/.test(model.id)) {
+		if (model.thinking) {
+			model.thinking = {
+				...model.thinking,
+				mode: "effort",
+				minLevel: Effort.Low,
+				maxLevel: Effort.XHigh,
+				defaultLevel: Effort.High,
+			};
+			delete model.thinking.levels;
+		}
+	}
+	if (model.provider === "xai" && /^grok-4\.5(?:$|[-.])/.test(model.id)) {
+		if (model.thinking) {
+			model.thinking = {
+				...model.thinking,
+				mode: "effort",
+				minLevel: Effort.Low,
+				maxLevel: Effort.High,
+				defaultLevel: Effort.High,
+			};
+			delete model.thinking.levels;
+		}
+	}
 }
 
 function scrubGeneratedModelName(name: string): string {

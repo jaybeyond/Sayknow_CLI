@@ -20,7 +20,7 @@ A practical guide to picking models for SKC's roles, for every subscription situ
 
 | You have | Use |
 | --- | --- |
-| **One vendor** | the built-in preset for that vendor — `claude-opus` (Anthropic), `codex-{eco,medium,pro}` (OpenAI/Codex), `opencodego` (OpenCode Go), or a single-vendor flagship tier (`zai/glm-5.2`, `kimi-code/...`, `xiaomi/...`, `xai/grok-4.3`, `minimax-code/...`). These already map all five roles inside one vendor. |
+| **One vendor** | the built-in preset for that vendor — `claude-opus` (Anthropic), `codex-{eco,medium,pro}` (OpenAI/Codex), `opencodego` (OpenCode Go), or a single-vendor flagship tier (`zai/glm-5.2`, `kimi-code/...`, `xiaomi/...`, `xai/grok-4.6`, `minimax-code/...`). These already map all five roles inside one vendor. |
 | **Claude + Codex** | the built-in `opus-codex` (Claude main loop + Codex support roles). |
 | **Three or more / all five** | the cross-vendor profiles below — each role on its axis leader, `critic` kept cross-family. |
 
@@ -40,7 +40,7 @@ profiles:
       executor:  openai-codex/gpt-5.4:high
       planner:   google-antigravity/gemini-3.1-pro-low:high
       architect: google-antigravity/gemini-3.1-pro-low:high
-      critic:    xai/grok-4.3:medium
+      critic:    xai/grok-4.6:medium
 
   ultimate:              # cost-no-object, best per role
     required_providers: [anthropic, openai-codex, google-antigravity, xai]
@@ -49,7 +49,7 @@ profiles:
       executor:  anthropic/claude-opus-5:max
       planner:   openai-codex/gpt-5.5:xhigh
       architect: google-antigravity/gemini-3.1-pro-low:high
-      critic:    xai/grok-4.3:high
+      critic:    xai/grok-4.6:high
 
   eco:                   # cheapest delegated work; main loop stays on Opus
     required_providers: [anthropic, opencode-go, google-antigravity, xai]
@@ -90,9 +90,9 @@ Current axis leaders and the cheaper second option, with metered price ($/1M in/
 | Reasoning (`planner`) | `openai-codex/gpt-5.5` (ARC-AGI-2) / `google-antigravity/gemini-3.1-pro-low:high` (GPQA) | `xai/grok-4-1-fast` (0.2/0.5) |
 | Large context (`architect`) | `anthropic/claude-opus-5` (effective long-context) | `xai/grok-4-fast` (2M nominal, 0.2/0.5) |
 | Multimodal review (`architect`) | `google-antigravity/gemini-3.1-pro-low:high` | `google-antigravity/gemini-3.5-flash` |
-| Independent critic | `xai/grok-4.3` (1.25/2.5) | `opencode-go/glm-5.2` · `google-antigravity/gemini-3.5-flash` |
+| Independent critic | `xai/grok-4.6` (2/6) | `opencode-go/glm-5.2` · `google-antigravity/gemini-3.5-flash` |
 
-On standard tasks, all current frontier models in the catalog are accurate; **pick by cost, latency, and role fit, not by raw accuracy on easy prompts.** As an indicative SKC-routed latency reference (`skc -p`, identical coding + reasoning prompts, all correct): `grok-4.3` and `glm-5.2` ≈ 2–3s, `deepseek-v4-pro` ≈ 3–4s, `claude-opus-4-8` / `gpt-5.5` ≈ 4–7s, `gemini-3.1-pro-low:high` ≈ 7s. `claude-opus-5` shares Opus 4.8's published context/output envelope but has not been latency-measured here.
+On standard tasks, all current frontier models in the catalog are accurate; **pick by cost, latency, and role fit, not by raw accuracy on easy prompts.** As an indicative SKC-routed latency reference (`skc -p`, identical coding + reasoning prompts, all correct): `grok-4.6` / `grok-4.3` and `glm-5.2` ≈ 2–3s, `deepseek-v4-pro` ≈ 3–4s, `claude-opus-4-8` / `gpt-5.5` ≈ 4–7s, `gemini-3.1-pro-low:high` ≈ 7s. `claude-opus-5` shares Opus 4.8's published context/output envelope but has not been latency-measured here.
 
 ## Verified selector notes (current catalog)
 

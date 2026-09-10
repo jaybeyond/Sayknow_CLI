@@ -90830,8 +90830,9 @@
 			"maxTokens": 500000,
 			"thinking": {
 				"mode": "effort",
-				"minLevel": "minimal",
-				"maxLevel": "high"
+				"minLevel": "low",
+				"maxLevel": "high",
+				"defaultLevel": "high"
 			}
 		},
 		"grok-4.6": {
@@ -90855,8 +90856,9 @@
 			"maxTokens": 500000,
 			"thinking": {
 				"mode": "effort",
-				"minLevel": "minimal",
-				"maxLevel": "high"
+				"minLevel": "low",
+				"maxLevel": "xhigh",
+				"defaultLevel": "high"
 			}
 		},
 		"grok-beta": {

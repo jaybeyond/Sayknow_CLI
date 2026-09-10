@@ -13,7 +13,7 @@ import { SearchProvider } from "./base";
 import { classifyProviderHttpError, withHardTimeout } from "./utils";
 
 const DEFAULT_BASE_URL = "https://api.x.ai/v1";
-const DEFAULT_MODEL = "grok-4.3";
+const DEFAULT_MODEL = "grok-4.6";
 const DEFAULT_NUM_RESULTS = 10;
 const MAX_WEB_DOMAINS = 5;
 const MAX_X_HANDLES = 20;
