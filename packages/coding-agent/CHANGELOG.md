@@ -1,6 +1,8 @@
 # Changelog
 
 ## [Unreleased]
+
+## [0.5.13] - 2026-09-15
 ### Fixed
 
 - Session-import's cross-process idempotency test no longer depends on Bun child stdout surviving a contended file lock. The child writes its result to a file as well as stdout, so a silent empty pipe on Linux CI cannot fail a successful import.
