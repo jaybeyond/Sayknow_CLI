@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -1008,19 +1008,23 @@ describe("session import materialization and command", () => {
 		fs.mkdirSync(workspace);
 		const serviceUrl = pathToFileURL(path.resolve(import.meta.dir, "../src/session-import/service.ts")).href;
 		const childCode = `
+			import { writeFileSync } from "node:fs";
 			import { importExternalSession } from ${JSON.stringify(serviceUrl)};
 			const result = await importExternalSession({
 				sourcePath: process.env.IMPORT_SOURCE,
 				cwd: process.env.IMPORT_WORKSPACE,
 				destination: process.env.IMPORT_DESTINATION,
 			});
-			console.log(JSON.stringify({
+			const payload = JSON.stringify({
 				targetSessionId: result.targetSessionId,
 				targetPath: result.targetPath,
 				reused: result.reused,
-			}));
+			});
+			writeFileSync(process.env.IMPORT_RESULT, payload);
+			console.log(payload);
 		`;
 		const runChild = async (childDestination = destination) => {
+			const resultPath = path.join(dir, `child-result-${randomUUID()}.json`);
 			const child = Bun.spawn([process.execPath, "-e", childCode], {
 				cwd: path.resolve(import.meta.dir, "../../.."),
 				env: {
@@ -1028,6 +1032,7 @@ describe("session import materialization and command", () => {
 					IMPORT_SOURCE: source,
 					IMPORT_WORKSPACE: workspace,
 					IMPORT_DESTINATION: childDestination,
+					IMPORT_RESULT: resultPath,
 				},
 				stdout: "pipe",
 				stderr: "pipe",
@@ -1037,8 +1042,14 @@ describe("session import materialization and command", () => {
 				new Response(child.stdout).text(),
 				new Response(child.stderr).text(),
 			]);
-			if (exitCode !== 0) throw new Error(stderr);
-			return JSON.parse(stdout.trim()) as {
+			if (exitCode !== 0) {
+				throw new Error(`import child exited ${exitCode}\nstdout:\n${stdout}\nstderr:\n${stderr}`);
+			}
+			const payload = fs.existsSync(resultPath) ? fs.readFileSync(resultPath, "utf8").trim() : stdout.trim();
+			if (!payload) {
+				throw new Error(`import child produced no result\nstdout:\n${stdout}\nstderr:\n${stderr}`);
+			}
+			return JSON.parse(payload) as {
 				targetSessionId: string;
 				targetPath: string;
 				reused: boolean;
