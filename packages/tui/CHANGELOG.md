@@ -1,6 +1,8 @@
 # Changelog
 
 ## [Unreleased]
+
+## [0.5.12] - 2026-09-15
 ### Fixed
 
 - Under tmux, a successful sixel DA1 no longer turns INLINE transcript images back on. Ghostty answers that query with ";4" even though it never paints sixel, so tool screenshots were smuggled through DCS passthrough onto the outer image plane and stacked over the chat. The probe now enables overlay sixel only; inline sixel stays off unless tmux itself owns `terminal-features=sixel`.

@@ -1,6 +1,8 @@
 # Changelog
 
 ## [Unreleased]
+
+## [0.5.12] - 2026-09-15
 ### Added
 
 - `skc ultragoal succession offer|adopt|status` gives an approved Ultragoal an explicit, audited path from the repository it was planned in to the repository its implementation belongs to (ported from upstream #5353). The source run fences the selected unfinished goals immediately; the target adopts a fresh pending plan with verbatim brief/objectives and unresolved obligations as provenance, not inherited completion authority.

@@ -250,6 +250,17 @@
 									"sglang",
 									"openai-models-list"
 								]
+							},
+							"apiByModelPrefix": {
+								"type": "object",
+								"propertyNames": {
+									"type": "string",
+									"minLength": 1
+								},
+								"additionalProperties": {
+									"type": "string",
+									"minLength": 1
+								}
 							}
 						},
 						"required": [
