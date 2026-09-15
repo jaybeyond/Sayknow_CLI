@@ -1,7 +1,11 @@
 import { describe, expect, it } from "bun:test";
 import { hookFetch } from "@sayknow-cli/utils";
 import { omlxModelManagerOptions, sglangModelManagerOptions } from "../src/provider-models/openai-compat";
-import { fetchOpenAICompatibleModels, resolveLoopbackOpenAIBaseUrl } from "../src/utils/discovery/openai-compatible";
+import {
+	detectDiscoveredApiFamily,
+	fetchOpenAICompatibleModels,
+	resolveLoopbackOpenAIBaseUrl,
+} from "../src/utils/discovery/openai-compatible";
 
 const fallback = "http://127.0.0.1:30000/v1";
 
@@ -120,5 +124,34 @@ describe("OpenAI-compatible loopback discovery", () => {
 		expect(
 			sglangModelManagerOptions({ baseUrl: "https://gpu.example/v1#fragment", apiKey: "secret" }).fetchDynamicModels,
 		).toBeUndefined();
+	});
+});
+
+describe("detectDiscoveredApiFamily", () => {
+	it("routes by owned_by owner first", () => {
+		expect(detectDiscoveredApiFamily({ id: "whatever", owned_by: "anthropic" })).toBe("anthropic-messages");
+		expect(detectDiscoveredApiFamily({ id: "whatever", owned_by: "openai" })).toBe("openai-completions");
+		expect(detectDiscoveredApiFamily({ id: "whatever", owned_by: "open-ai" })).toBe("openai-completions");
+	});
+
+	it("owner signal wins over a conflicting id", () => {
+		expect(detectDiscoveredApiFamily({ id: "claude-opus-5", owned_by: "openai" })).toBe("openai-completions");
+		expect(detectDiscoveredApiFamily({ id: "gpt-5.6", owned_by: "anthropic" })).toBe("anthropic-messages");
+	});
+
+	it("falls back to the model id when owner is missing or unknown", () => {
+		expect(detectDiscoveredApiFamily({ id: "claude-opus-5" })).toBe("anthropic-messages");
+		expect(detectDiscoveredApiFamily({ id: "claude-sonnet-4-20250514", owned_by: "proxy" })).toBe(
+			"anthropic-messages",
+		);
+		expect(detectDiscoveredApiFamily({ id: "gpt-5.6-sol" })).toBe("openai-completions");
+		expect(detectDiscoveredApiFamily({ id: "o1-preview" })).toBe("openai-completions");
+		expect(detectDiscoveredApiFamily({ id: "codex-auto-review" })).toBe("openai-completions");
+	});
+
+	it("returns undefined when neither signal is conclusive", () => {
+		expect(detectDiscoveredApiFamily({ id: "llama-3-8b" })).toBeUndefined();
+		expect(detectDiscoveredApiFamily({ id: "mistral-large", owned_by: "mistralai" })).toBeUndefined();
+		expect(detectDiscoveredApiFamily({})).toBeUndefined();
 	});
 });

@@ -1,6 +1,18 @@
 # Changelog
 
 ## [Unreleased]
+### Added
+
+- `skc ultragoal succession offer|adopt|status` gives an approved Ultragoal an explicit, audited path from the repository it was planned in to the repository its implementation belongs to (ported from upstream #5353). The source run fences the selected unfinished goals immediately; the target adopts a fresh pending plan with verbatim brief/objectives and unresolved obligations as provenance, not inherited completion authority.
+- Custom OpenAI-compatible providers in `models.yml` auto-populate `/model` from their live `/v1/models` catalog without a manual `discovery:` block, and auto-classify each discovered model's wire API family (ported from upstream #5187). Explicit `discovery` config and the local `openaiCompat` proxy lane are unchanged.
+
+### Fixed
+
+- Session import redaction now bounds the URL-credential scheme to 16 characters so large credential-free transcripts scan in linear time instead of quadratic (ported from upstream #5346). Markdown-wrapped `https://user:pass@host` credentials remain redacted.
+- File-lock acquisition timeouts are a typed `FileLockAcquireError` with the lock path, retry count, and holder, instead of an untyped string. Empty `.lock` directories left by a crash between `mkdir` and writing `info` are reclaimable by GC (the SKC-shaped subset of upstream #5378/#5381; this tree has no `.lock.pending.<pid>.<uuid>` staging).
+- `writeGuardedJsonAtomic` honors `lockHeld`, so callers already inside `withWorkflowStateLock` (succession offer/adopt, start/checkpoint) no longer self-deadlock.
+- Under tmux, a successful sixel DA1 no longer turns INLINE transcript images back on. Ghostty answers that query with ";4" even though it never paints sixel, so every screenshot was smuggled through DCS passthrough onto the outer image plane and stacked over the chat. The probe now enables overlay sixel (the pet) only; inline sixel stays off unless tmux itself owns `terminal-features=sixel`.
+
 
 ## [0.5.11] - 2026-09-10
 

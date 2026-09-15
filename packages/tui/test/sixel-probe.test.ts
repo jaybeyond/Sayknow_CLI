@@ -1,11 +1,14 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import {
+	getTmuxOverlayImageProtocol,
 	ImageProtocol,
 	isSixelMultiplexerEnabled,
 	isUnderTerminalMultiplexer,
 	isUnderTmux,
 	onImageProtocolChanged,
+	resetTmuxSixelOwnershipCache,
 	setTerminalImageProtocol,
+	setTmuxOverlayImageProtocol,
 	shouldProbeSixelCapability,
 	TERMINAL,
 	TUI,
@@ -44,8 +47,10 @@ function restoreEnv(key: string, value: string | undefined): void {
 
 function probeSetup(): void {
 	setTerminalImageProtocol(null);
+	setTmuxOverlayImageProtocol(null);
 	terminalInfo.imageProtocol = null;
 	delete Bun.env.PI_FORCE_IMAGE_PROTOCOL;
+	delete Bun.env.SKC_FORCE_IMAGE_PROTOCOL;
 	Object.defineProperty(process.stdin, "isTTY", { value: true, configurable: true });
 	Object.defineProperty(process.stdout, "isTTY", { value: true, configurable: true });
 }
@@ -53,13 +58,16 @@ function probeSetup(): void {
 describe("TUI SIXEL capability probe", () => {
 	afterEach(() => {
 		setTerminalImageProtocol(originalProtocol);
+		setTmuxOverlayImageProtocol(null);
 		terminalInfo.imageProtocol = originalProtocol;
 		restoreEnv("WT_SESSION", originalWtSession);
 		restoreEnv("TMUX", originalTmux);
 		restoreEnv("TERM", originalTerm);
 		restoreEnv("PI_FORCE_IMAGE_PROTOCOL", originalForceProtocol);
+		restoreEnv("SKC_TMUX_COMMAND", undefined);
 		restoreIsTty(process.stdin, stdinIsTtyDescriptor);
 		restoreIsTty(process.stdout, stdoutIsTtyDescriptor);
+		resetTmuxSixelOwnershipCache();
 	});
 
 	it("enables SIXEL only after positive terminal capability response", () => {
@@ -160,20 +168,42 @@ describe("TUI SIXEL capability probe", () => {
 		tui.stop();
 	});
 
-	it("probes under tmux and trusts the outer terminal's sixel DA1 via passthrough", () => {
+	it("under tmux enables overlay sixel, not inline, when tmux does not own the protocol", () => {
 		probeSetup();
 		delete Bun.env.WT_SESSION;
 		delete Bun.env.SKC_SIXEL_MULTIPLEXER;
 		Bun.env.TMUX = "/tmp/tmux-1000/default,1234,0";
+		Bun.env.SKC_TMUX_COMMAND = `${import.meta.dir}/fixtures/tmux-termfeatures-no-sixel.sh`;
+		resetTmuxSixelOwnershipCache();
 
 		const terminal = new VirtualTerminal(80, 24);
 		const tui = new TUI(terminal);
 		tui.start();
-		// The query is passthrough-wrapped to the outer terminal, so its DA1 ";4"
-		// sixel attribute is genuine end-to-end evidence — sixel is enabled.
+		// Ghostty answers DA1 with the sixel attribute even though it never paints
+		// sixel. That evidence is enough for overlay art; it must not reopen inline
+		// placements, which would stack over the transcript.
+		terminal.sendInput("\x1b[?1;2;4c");
+
+		expect(TERMINAL.imageProtocol).toBeNull();
+		expect(getTmuxOverlayImageProtocol()).toBe(ImageProtocol.Sixel);
+		tui.stop();
+	});
+
+	it("under tmux enables inline sixel only when tmux owns the protocol", () => {
+		probeSetup();
+		delete Bun.env.WT_SESSION;
+		delete Bun.env.SKC_SIXEL_MULTIPLEXER;
+		Bun.env.TMUX = "/tmp/tmux-1000/default,1234,0";
+		Bun.env.SKC_TMUX_COMMAND = `${import.meta.dir}/fixtures/tmux-termfeatures-sixel.sh`;
+		resetTmuxSixelOwnershipCache();
+
+		const terminal = new VirtualTerminal(80, 24);
+		const tui = new TUI(terminal);
+		tui.start();
 		terminal.sendInput("\x1b[?1;2;4c");
 
 		expect(TERMINAL.imageProtocol).toBe(ImageProtocol.Sixel);
+		expect(getTmuxOverlayImageProtocol()).toBeNull();
 		tui.stop();
 	});
 

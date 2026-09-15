@@ -3,7 +3,7 @@ import { writeFileSync } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { removeFileLockDirForGc, withFileLock } from "@sayknow-cli/coding-agent/config/file-lock";
+import { FileLockAcquireError, removeFileLockDirForGc, withFileLock } from "@sayknow-cli/coding-agent/config/file-lock";
 import { fileLocksGcAdapter } from "@sayknow-cli/coding-agent/config/file-lock-gc";
 import type { GcContext, GcPidProbe, GcRecord } from "@sayknow-cli/coding-agent/skc-runtime/gc-runtime";
 
@@ -122,7 +122,25 @@ describe("withFileLock stale owner liveness (#652)", () => {
 
 		await expect(
 			withFileLock(lockedFile, async () => {}, { staleMs: 1, retries: 2, retryDelayMs: 1 }),
-		).rejects.toThrow("Failed to acquire lock");
+		).rejects.toBeInstanceOf(FileLockAcquireError);
+		expect(await fs.exists(lockDir)).toBe(true);
+	});
+
+	test("typed acquire timeout names the lock path and holder", async () => {
+		const base = await makeTemp();
+		const lockedFile = path.join(base, "state.json");
+		const lockDir = `${lockedFile}.lock`;
+		await writeInfo(lockDir, { pid: process.pid, timestamp: Date.now() });
+		try {
+			await withFileLock(lockedFile, async () => {}, { staleMs: 60_000, retries: 1, retryDelayMs: 1 });
+			throw new Error("expected acquire timeout");
+		} catch (error) {
+			expect(error).toBeInstanceOf(FileLockAcquireError);
+			const typed = error as FileLockAcquireError;
+			expect(typed.code).toBe("acquire_timeout");
+			expect(typed.lockPath).toBe(lockDir);
+			expect(typed.holder).toContain(String(process.pid));
+		}
 		expect(await fs.exists(lockDir)).toBe(true);
 	});
 
@@ -310,5 +328,22 @@ describe("fileLocksGcAdapter.prune TOCTOU (#606)", () => {
 		const onDisk = JSON.parse(await fs.readFile(path.join(lockDir, "info"), "utf8"));
 		expect(onDisk.pid).toBe(LIVE_PID);
 		expect(onDisk.timestamp).toBe(2000);
+	});
+});
+
+describe("empty file-lock dir GC", () => {
+	test("collects and prunes an empty mkdir-before-info leftover", async () => {
+		const base = await makeTemp();
+		const spoolDir = path.join(base, "spool");
+		const lockDir = path.join(spoolDir, "empty.lock");
+		await fs.mkdir(lockDir, { recursive: true });
+		const ctx = ctxWith(spoolDir, () => ({ status: "keep", reason: "alive" }));
+		const collected = await fileLocksGcAdapter.collect(ctx);
+		const record = collected.records.find(item => item.path === lockDir);
+		expect(record?.reason).toBe("empty_file_lock_dir");
+		expect(record?.removable).toBe(true);
+		const outcome = await fileLocksGcAdapter.prune(record!, ctx);
+		expect(outcome.removed).toBe(true);
+		expect(await fs.exists(lockDir)).toBe(false);
 	});
 });

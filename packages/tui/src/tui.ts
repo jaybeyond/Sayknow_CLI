@@ -25,6 +25,7 @@ import {
 	setTerminalImageProtocol,
 	setTmuxOverlayImageProtocol,
 	TERMINAL,
+	tmuxOwnsSixel,
 	wrapTmuxPassthrough,
 } from "./terminal-capabilities";
 import {
@@ -1687,9 +1688,25 @@ export class TUI extends Container {
 
 	#finishSixelProbe(supported: boolean): void {
 		this.#clearSixelProbeState();
-		if (!supported || TERMINAL.imageProtocol) return;
+		if (!supported || TERMINAL.imageProtocol || getTmuxOverlayImageProtocol()) return;
 
-		setTerminalImageProtocol(ImageProtocol.Sixel);
+		// Under tmux a successful outer-terminal DA1 proves the *client* can draw
+		// sixel, not that tmux can place or erase an INLINE raster. Enabling
+		// TERMINAL.imageProtocol here re-opens the stacked-transcript bug: Ghostty
+		// answers DA1 with ";4" even though it never paints sixel, so every tool
+		// screenshot is smuggled through passthrough onto the outer image plane
+		// and survives the next repaint. Overlay art (the pet) carries its own
+		// coordinates and is the only safe user of that evidence. Inline sixel
+		// stays off unless tmux itself owns the protocol.
+		if (isUnderTmux()) {
+			if (tmuxOwnsSixel()) {
+				setTerminalImageProtocol(ImageProtocol.Sixel);
+			} else {
+				setTmuxOverlayImageProtocol(ImageProtocol.Sixel);
+			}
+		} else {
+			setTerminalImageProtocol(ImageProtocol.Sixel);
+		}
 		this.#queryCellSize();
 		this.invalidate();
 		this.requestRender(true);

@@ -29,6 +29,7 @@ import {
 	UNK_MAX_TOKENS,
 	unregisterCustomApis,
 } from "@sayknow-cli/ai";
+import { detectDiscoveredApiFamily } from "@sayknow-cli/ai/utils/discovery/openai-compatible";
 
 // Sentinel for local-only OAuth token (LM Studio, vLLM) — declared inline to avoid loading
 // any provider module at startup. Must match `DEFAULT_LOCAL_TOKEN` in oauth/lm-studio.ts.
@@ -211,6 +212,36 @@ export function getRoleInfo(role: string, settings: Settings): RoleInfo {
 type ProviderValidationMode = "models-config" | "runtime-register";
 
 const OPENAI_REQUEST_TRANSFORM_APIS = new Set<Api>(["openai-completions", "openai-responses"]);
+
+const OPENAI_FAMILY_APIS = new Set<Api>([
+	"openai-completions",
+	"openai-responses",
+	"openai-codex-responses",
+	"azure-openai-responses",
+]);
+
+function isOpenAIFamilyApi(api: Api): boolean {
+	return OPENAI_FAMILY_APIS.has(api);
+}
+
+function dominantOpenAIFamilyModelApi(models: readonly { api?: string }[] | undefined): Api | undefined {
+	if (!models || models.length === 0) return undefined;
+	const counts = new Map<Api, number>();
+	for (const model of models) {
+		const api = model.api as Api | undefined;
+		if (api === undefined || !isOpenAIFamilyApi(api)) continue;
+		counts.set(api, (counts.get(api) ?? 0) + 1);
+	}
+	let best: Api | undefined;
+	let bestCount = 0;
+	for (const [api, count] of counts) {
+		if (count > bestCount) {
+			best = api;
+			bestCount = count;
+		}
+	}
+	return best;
+}
 
 function getKnownProviderApis(providerName: string): Set<Api> {
 	const apis = new Set<Api>();
@@ -1563,17 +1594,30 @@ export class ModelRegistry {
 				keylessProviders.add(providerName);
 			}
 
-			if (providerConfig.discovery && providerConfig.api) {
+			const effectiveDiscoveryBaseUrl = providerConfig.baseUrl ?? resolveProviderBaseUrlFromEnv(providerName);
+			const providerApi =
+				(providerConfig.api as Api | undefined) ??
+				dominantOpenAIFamilyModelApi(providerConfig.models as { api?: string }[] | undefined);
+			const autoDiscovery: ProviderDiscovery | undefined =
+				!providerConfig.discovery &&
+				!localOpenAICompat &&
+				providerApi !== undefined &&
+				isOpenAIFamilyApi(providerApi) &&
+				effectiveDiscoveryBaseUrl !== undefined
+					? { type: "openai-models-list" }
+					: undefined;
+			const effectiveDiscovery = providerConfig.discovery ?? autoDiscovery;
+			if (effectiveDiscovery && providerApi) {
 				discoverableProviders.push({
 					provider: providerName,
-					api: providerConfig.api as Api,
-					baseUrl: providerConfig.baseUrl ?? resolveProviderBaseUrlFromEnv(providerName),
+					api: providerApi,
+					baseUrl: effectiveDiscoveryBaseUrl,
 					headers: providerConfig.headers,
 					compat: providerConfig.compat,
 					requestTransform: providerConfig.requestTransform,
 					cacheRetention: providerConfig.cacheRetention,
-					discovery: providerConfig.discovery,
-					optional: false,
+					discovery: effectiveDiscovery,
+					optional: !providerConfig.discovery,
 				});
 			}
 
@@ -2280,48 +2324,80 @@ export class ModelRegistry {
 				}
 				return new Error(`HTTP ${response.status} from ${modelsUrl}`);
 			},
-			mapModel: (item, defaults) => ({
-				...defaults,
-				reasoning: isOmlx,
-				...(isOmlx
-					? {
-							thinking: {
-								mode: "effort" as const,
-								minLevel: Effort.Low,
-								maxLevel: Effort.High,
-								defaultLevel: Effort.Medium,
-								levels: [Effort.Low, Effort.Medium, Effort.High],
-							},
-						}
-					: {}),
-				contextWindow:
-					parseDiscoveryLimit(item.max_model_len) ??
-					parseDiscoveryLimit(item.context_length) ??
-					parseDiscoveryLimit(item.context_window) ??
-					parseDiscoveryLimit(item.max_context_length) ??
-					UNK_CONTEXT_WINDOW,
-				maxTokens:
-					parseDiscoveryLimit(item.max_completion_tokens) ??
-					parseDiscoveryLimit(item.max_tokens) ??
-					parseDiscoveryLimit(item.max_output_tokens) ??
-					UNK_MAX_TOKENS,
-				headers,
-				compat: {
-					...(providerConfig.compat ?? {}),
-					supportsStore: false,
-					supportsDeveloperRole: false,
-					supportsReasoningEffort: isOmlx,
+			mapModel: (item, defaults) => {
+				const api = this.#resolveDiscoveredModelApi(
+					providerConfig,
+					typeof item.id === "string" ? item.id : "",
+					item,
+				);
+				return {
+					...defaults,
+					api,
+					reasoning: isOmlx,
 					...(isOmlx
 						? {
-								thinkingFormat: "qwen-chat-template" as const,
-								reasoningContentField: "reasoning_content" as const,
+								thinking: {
+									mode: "effort" as const,
+									minLevel: Effort.Low,
+									maxLevel: Effort.High,
+									defaultLevel: Effort.Medium,
+									levels: [Effort.Low, Effort.Medium, Effort.High],
+								},
 							}
 						: {}),
-				},
-			}),
+					contextWindow:
+						parseDiscoveryLimit(item.max_model_len) ??
+						parseDiscoveryLimit(item.context_length) ??
+						parseDiscoveryLimit(item.context_window) ??
+						parseDiscoveryLimit(item.max_context_length) ??
+						UNK_CONTEXT_WINDOW,
+					maxTokens:
+						parseDiscoveryLimit(item.max_completion_tokens) ??
+						parseDiscoveryLimit(item.max_tokens) ??
+						parseDiscoveryLimit(item.max_output_tokens) ??
+						UNK_MAX_TOKENS,
+					headers,
+					compat: {
+						...(providerConfig.compat ?? {}),
+						supportsStore: false,
+						supportsDeveloperRole: false,
+						supportsReasoningEffort: isOmlx,
+						...(isOmlx
+							? {
+									thinkingFormat: "qwen-chat-template" as const,
+									reasoningContentField: "reasoning_content" as const,
+								}
+							: {}),
+					},
+				};
+			},
 		});
 		if (discovered === null) throw new Error(`Invalid OpenAI-compatible model catalog from ${baseUrl}`);
 		return this.#applyProviderModelOverrides(providerConfig.provider, discovered);
+	}
+
+	#resolveDiscoveredModelApi(
+		providerConfig: DiscoveryProviderConfig,
+		modelId: string,
+		entry?: { id?: unknown; owned_by?: unknown },
+	): Api {
+		let matchedPrefixLength = -1;
+		let prefixApi: Api | undefined;
+		for (const [prefix, routedApi] of Object.entries(providerConfig.discovery.apiByModelPrefix ?? {})) {
+			if (modelId.startsWith(prefix) && prefix.length > matchedPrefixLength) {
+				prefixApi = routedApi as Api;
+				matchedPrefixLength = prefix.length;
+			}
+		}
+		if (prefixApi !== undefined) return prefixApi;
+		if (providerConfig.discovery.type === "openai-models-list") {
+			const detected = detectDiscoveredApiFamily(entry ?? { id: modelId });
+			if (detected === "anthropic-messages") return "anthropic-messages";
+			if (detected === "openai-completions") {
+				return isOpenAIFamilyApi(providerConfig.api) ? providerConfig.api : "openai-completions";
+			}
+		}
+		return providerConfig.api;
 	}
 
 	#normalizeLlamaCppBaseUrl(baseUrl?: string): string {

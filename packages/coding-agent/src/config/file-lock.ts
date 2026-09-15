@@ -14,6 +14,21 @@ const DEFAULT_OPTIONS: Required<FileLockOptions> = {
 	retries: 50,
 	retryDelayMs: 100,
 };
+export class FileLockAcquireError extends Error {
+	readonly code = "acquire_timeout";
+
+	constructor(
+		readonly filePath: string,
+		readonly lockPath: string,
+		readonly attempts: number,
+		readonly holder: string,
+	) {
+		super(
+			`Failed to acquire lock for ${filePath} after ${attempts} attempts: ${holder} (${lockPath}); a live owner is never displaced`,
+		);
+		this.name = "FileLockAcquireError";
+	}
+}
 
 type LockInfo = FileLockOwnerToken;
 
@@ -243,6 +258,12 @@ async function releaseLock(lockPath: string, owner: FileLockOwnerToken): Promise
 	const outcome = await removeFileLockDirForGc(lockPath, owner);
 	if (outcome !== "removed") throw new Error(`Failed to release file lock: ${outcome}.`);
 }
+async function lockHolderDescription(lockPath: string): Promise<string> {
+	const info = await readLockInfo(lockPath);
+	if (!info) return "unknown holder";
+	return `pid ${info.pid}`;
+}
+
 async function acquireLock(filePath: string, options: FileLockOptions = {}): Promise<() => Promise<void>> {
 	const opts = { ...DEFAULT_OPTIONS, ...options };
 	const lockPath = getLockPath(filePath);
@@ -255,7 +276,7 @@ async function acquireLock(filePath: string, options: FileLockOptions = {}): Pro
 		if (await removeStaleLockForAcquire(lockPath, stale)) continue;
 		await Bun.sleep(opts.retryDelayMs);
 	}
-	throw new Error(`Failed to acquire lock for ${filePath} after ${opts.retries} attempts`);
+	throw new FileLockAcquireError(filePath, lockPath, opts.retries, await lockHolderDescription(lockPath));
 }
 
 /**

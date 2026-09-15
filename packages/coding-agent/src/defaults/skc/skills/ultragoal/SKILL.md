@@ -37,6 +37,9 @@ skc ultragoal complete-goals --retry-failed
 skc ultragoal checkpoint --goal-id <id> --status complete --evidence "<evidence>" --quality-gate-json <quality-gate-json-or-path>
 skc ultragoal checkpoint --goal-id <id> --status failed --evidence "<blocker/evidence>"
 skc ultragoal record-review-blockers --goal-id <id> --title "Resolve final review blockers" --objective "<blocker-resolution objective>" --evidence "<review findings>"
+skc ultragoal succession offer --target-repo <path> --goal-id <id> --authorize "<statement>" --authorized-by <identity>
+skc ultragoal succession adopt --offer <path>
+skc ultragoal succession status --json
 ```
 
 Use these exact goal-tool calls for the inline goal state:

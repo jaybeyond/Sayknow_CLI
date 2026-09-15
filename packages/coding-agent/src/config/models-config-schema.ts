@@ -185,6 +185,7 @@ export type ModelOverride = z.infer<typeof ModelOverrideSchema>;
 
 export const ProviderDiscoverySchema = z.object({
 	type: z.enum(["ollama", "llama.cpp", "lm-studio", "omlx", "sglang", "openai-models-list"]),
+	apiByModelPrefix: z.record(z.string().min(1), z.string().min(1)).optional(),
 });
 
 const LocalOpenAICompatSchema = z

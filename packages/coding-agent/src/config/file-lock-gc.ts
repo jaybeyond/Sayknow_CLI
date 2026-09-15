@@ -58,9 +58,33 @@ function keptMalformedRecord(lockDir: string): GcRecord {
 	};
 }
 
+function emptyLockDirRecord(lockDir: string): GcRecord {
+	return {
+		store: "file_locks",
+		id: lockDir,
+		path: lockDir,
+		pid_status: "none",
+		status: "stale",
+		stale: true,
+		removable: true,
+		action: "none",
+		reason: "empty_file_lock_dir",
+	};
+}
+
 async function collectLockRecord(lockDir: string, ctx: GcContext): Promise<GcRecord> {
 	const info = await readFileLockInfoForGc(lockDir);
-	if (!info) return keptMalformedRecord(lockDir);
+	if (!info) {
+		// mkdir-before-info crash leftover: an empty `.lock` dir has no owner token
+		// and is safe to reclaim. Any other info-less shape stays fail-closed.
+		try {
+			const entries = await fs.readdir(lockDir);
+			if (entries.length === 0) return emptyLockDirRecord(lockDir);
+		} catch (error) {
+			if (!isEnoent(error)) throw error;
+		}
+		return keptMalformedRecord(lockDir);
+	}
 
 	const probeResult = ctx.probe(info.pid);
 	const pidStatus = gcPidStatusLabel(probeResult);
@@ -165,7 +189,20 @@ export const fileLocksGcAdapter: GcStoreAdapter = {
 	async prune(record: GcRecord, ctx: GcContext): Promise<GcPruneOutcome> {
 		const lockDir = record.path ?? record.id;
 		const info = await readFileLockInfoForGc(lockDir);
-		if (!info) return { removed: false, skipped: "lock_no_longer_dead_or_missing" };
+		if (!info) {
+			if (record.reason !== "empty_file_lock_dir") {
+				return { removed: false, skipped: "lock_no_longer_dead_or_missing" };
+			}
+			try {
+				const entries = await fs.readdir(lockDir);
+				if (entries.length !== 0) return { removed: false, skipped: "lock_no_longer_dead_or_missing" };
+				await fs.rmdir(lockDir);
+				return { removed: true };
+			} catch (error) {
+				if (isEnoent(error)) return { removed: false, skipped: "lock_no_longer_dead_or_missing" };
+				return { removed: false, error: errorMessage(error) };
+			}
+		}
 
 		const probeResult = ctx.probe(info.pid);
 		if (probeResult.status !== "dead") {

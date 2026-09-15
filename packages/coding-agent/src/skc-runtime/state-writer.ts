@@ -515,38 +515,35 @@ async function writeGuardedResolvedJsonAtomic(
 	value: unknown,
 	options: GuardedStateWriterOptions,
 ): Promise<GuardedWriteResult> {
-	return lockResolvedWorkflowTarget(
-		filePath,
-		async () => {
-			const current = await readJsonIfPresentTolerant(filePath);
-			const currentRevision = persistedStateRevision(current);
+	const write = async (): Promise<GuardedWriteResult> => {
+		const current = await readJsonIfPresentTolerant(filePath);
+		const currentRevision = persistedStateRevision(current);
 
-			if (options.policy === "source") {
-				if (options.expectedRevision !== undefined && options.expectedRevision !== currentRevision) {
-					throw new StateWriteConflictError(filePath, options.expectedRevision, currentRevision);
-				}
-				const next = stampStateRevision(withWorkflowReceipt(value, buildReceipt(options)), currentRevision + 1);
-				await atomicWrite(filePath, jsonText(next));
-				await maybeAudit(filePath, options);
-				return { path: filePath, written: true, revision: currentRevision + 1, stamped: next };
+		if (options.policy === "source") {
+			if (options.expectedRevision !== undefined && options.expectedRevision !== currentRevision) {
+				throw new StateWriteConflictError(filePath, options.expectedRevision, currentRevision);
 			}
-
-			const incomingSourceRevision =
-				options.sourceRevision ?? (isPlainObject(value) ? persistedStateRevision(value) : 0);
-			if (current !== undefined && incomingSourceRevision <= persistedSourceRevision(current)) {
-				return { path: filePath, written: false, reason: "stale-skip", revision: currentRevision };
-			}
-			const next = stampStateRevision(
-				withWorkflowReceipt(value, buildReceipt(options)),
-				currentRevision + 1,
-				incomingSourceRevision,
-			);
+			const next = stampStateRevision(withWorkflowReceipt(value, buildReceipt(options)), currentRevision + 1);
 			await atomicWrite(filePath, jsonText(next));
 			await maybeAudit(filePath, options);
 			return { path: filePath, written: true, revision: currentRevision + 1, stamped: next };
-		},
-		options.lock,
-	);
+		}
+
+		const incomingSourceRevision =
+			options.sourceRevision ?? (isPlainObject(value) ? persistedStateRevision(value) : 0);
+		if (current !== undefined && incomingSourceRevision <= persistedSourceRevision(current)) {
+			return { path: filePath, written: false, reason: "stale-skip", revision: currentRevision };
+		}
+		const next = stampStateRevision(
+			withWorkflowReceipt(value, buildReceipt(options)),
+			currentRevision + 1,
+			incomingSourceRevision,
+		);
+		await atomicWrite(filePath, jsonText(next));
+		await maybeAudit(filePath, options);
+		return { path: filePath, written: true, revision: currentRevision + 1, stamped: next };
+	};
+	return options.lockHeld ? write() : lockResolvedWorkflowTarget(filePath, write, options.lock);
 }
 
 export async function writeGuardedJsonAtomic(

@@ -31,6 +31,11 @@ import {
 	validateDeferredMemberReceiptFresh,
 	validateReceiptFreshBase,
 } from "./ultragoal-receipt-freshness";
+import {
+	assertUltragoalAdoptionPublished,
+	assertUltragoalGoalNotFenced,
+	runUltragoalSuccessionCommand,
+} from "./ultragoal-succession";
 
 export {
 	CRITIC_GATE_HARD_STOP_EVENT,
@@ -600,7 +605,12 @@ export async function recordUltragoalNudgeIfBudgetRemaining(input: {
 	);
 }
 
-export async function writePlan(cwd: string, plan: UltragoalPlan, sessionId?: string | null): Promise<void> {
+export async function writePlan(
+	cwd: string,
+	plan: UltragoalPlan,
+	sessionId?: string | null,
+	options: { lockHeld?: boolean } = {},
+): Promise<void> {
 	const resolvedSessionId =
 		sessionId?.trim() || resolveSkcSessionForWrite(cwd, { envSessionId: process.env.SKC_SESSION_ID }).skcSessionId;
 	const paths = getUltragoalPaths(cwd, resolvedSessionId);
@@ -611,10 +621,30 @@ export async function writePlan(cwd: string, plan: UltragoalPlan, sessionId?: st
 	await writeGuardedJsonAtomic(paths.goalsPath, plan, {
 		cwd,
 		policy: "source",
+		lockHeld: options.lockHeld === true,
 		expectedRevision: typeof plan.state_revision === "number" ? persistedStateRevision(plan) : undefined,
 		audit: { category: "state", verb: "write", owner: "skc-runtime", sessionId: resolvedSessionId },
 	});
 	await writeSessionActivityMarker(cwd, resolvedSessionId, { writer: "ultragoal-runtime", path: paths.goalsPath });
+}
+
+/**
+ * The single exclusion that decides who owns an Ultragoal run.
+ *
+ * Establishing ownership is a read-decide-write sequence: a start reads the plan,
+ * checks the outgoing succession fence, then commits `active`. Every caller that
+ * decides ownership — source admission, succession offer, and successor
+ * publication — runs that decision inside this lock, keyed on the plan.
+ */
+export async function withUltragoalPlanOwnership<T>(cwd: string, sessionId: string, fn: () => Promise<T>): Promise<T> {
+	return withWorkflowStateLock(getUltragoalPaths(cwd, sessionId).goalsPath, fn, { cwd });
+}
+
+export async function resolveUltragoalOwnershipSession(cwd: string, sessionId?: string | null): Promise<string> {
+	return (
+		sessionId?.trim() ||
+		(await resolveSkcSessionForRead(cwd, { envSessionId: process.env.SKC_SESSION_ID })).skcSessionId
+	);
 }
 
 function chooseReceiptKind(
@@ -1710,40 +1740,44 @@ export async function startNextUltragoalGoal(input: {
 	allComplete: boolean;
 	nextAction: UltragoalCompleteNextAction;
 }> {
-	const plan = await readUltragoalPlan(input.cwd, input.sessionId);
-	if (!plan) throw new Error("No ultragoal plan found. Run `skc ultragoal create-goals --brief ...` first.");
-	// Fail closed: delegated execution requires stamped repository authority (#2901).
-	if (!plan.repositoryBinding) {
-		throw new Error(
-			"Ultragoal plan is missing repositoryBinding; recreate goals so the plan is bound to an authoritative repository identity.",
-		);
-	}
-	await assertCwdMatchesRepositoryBinding(input.cwd, plan.repositoryBinding);
-	const retryFailed = input.retryFailed === true;
-	const goal = chooseNextGoal(plan, retryFailed);
-	if (!goal) {
-		const state = getUltragoalRunCompletionState(plan, { retryFailed });
+	const sessionId = await resolveUltragoalOwnershipSession(input.cwd, input.sessionId);
+	return withUltragoalPlanOwnership(input.cwd, sessionId, async () => {
+		const plan = await readUltragoalPlan(input.cwd, sessionId);
+		if (!plan) throw new Error("No ultragoal plan found. Run `skc ultragoal create-goals --brief ...` first.");
+		if (!plan.repositoryBinding) {
+			throw new Error(
+				"Ultragoal plan is missing repositoryBinding; recreate goals so the plan is bound to an authoritative repository identity.",
+			);
+		}
+		await assertCwdMatchesRepositoryBinding(input.cwd, plan.repositoryBinding);
+		await assertUltragoalAdoptionPublished(input.cwd, sessionId);
+		const retryFailed = input.retryFailed === true;
+		const goal = chooseNextGoal(plan, retryFailed);
+		if (goal) await assertUltragoalGoalNotFenced(input.cwd, sessionId, goal.id);
+		if (!goal) {
+			const state = getUltragoalRunCompletionState(plan, { retryFailed });
+			return {
+				plan,
+				allComplete: state.allComplete,
+				nextAction: resolveUltragoalCompleteNextAction(plan, { retryFailed }),
+			};
+		}
+		if (goal.status !== "active") {
+			const now = new Date().toISOString();
+			goal.status = "active";
+			goal.startedAt = goal.startedAt ?? now;
+			goal.updatedAt = now;
+			plan.updatedAt = now;
+			await writePlan(input.cwd, plan, sessionId, { lockHeld: true });
+			await appendLedger(input.cwd, { event: "goal_started", goalId: goal.id }, sessionId);
+		}
 		return {
 			plan,
-			allComplete: state.allComplete,
-			nextAction: resolveUltragoalCompleteNextAction(plan, { retryFailed }),
+			goal,
+			allComplete: false,
+			nextAction: { kind: "execute-goal", goal },
 		};
-	}
-	if (goal.status !== "active") {
-		const now = new Date().toISOString();
-		goal.status = "active";
-		goal.startedAt = goal.startedAt ?? now;
-		goal.updatedAt = now;
-		plan.updatedAt = now;
-		await writePlan(input.cwd, plan, input.sessionId);
-		await appendLedger(input.cwd, { event: "goal_started", goalId: goal.id }, input.sessionId);
-	}
-	return {
-		plan,
-		goal,
-		allComplete: false,
-		nextAction: { kind: "execute-goal", goal },
-	};
+	});
 }
 
 async function readStructuredValue(cwd: string, value: string): Promise<unknown> {
@@ -3046,10 +3080,13 @@ export async function checkpointUltragoalGoal(input: {
 	evidence: string;
 	qualityGateJson?: string;
 }): Promise<UltragoalPlan> {
-	const plan = await readUltragoalPlan(input.cwd);
+	const sessionId = await resolveUltragoalOwnershipSession(input.cwd, null);
+	const plan = await readUltragoalPlan(input.cwd, sessionId);
 	if (!plan) throw new Error("No ultragoal plan found. Run `skc ultragoal create-goals --brief ...` first.");
 	const goal = plan.goals.find(item => item.id === input.goalId);
 	if (!goal) throw new Error(`No ultragoal goal found for ${input.goalId}.`);
+	await assertUltragoalAdoptionPublished(input.cwd, sessionId);
+	await assertUltragoalGoalNotFenced(input.cwd, sessionId, goal.id);
 	const evidence = input.evidence.trim();
 	if (!evidence) throw new Error("checkpoint evidence is required");
 	const ledgerBefore = await readUltragoalLedger(input.cwd);
@@ -3209,17 +3246,21 @@ export async function checkpointUltragoalGoal(input: {
 	goal.updatedAt = now;
 	if (input.status === "complete") goal.completedAt = now;
 	plan.updatedAt = now;
-	await writePlan(input.cwd, plan);
-	const persistedPlan = await readUltragoalPlan(input.cwd);
-	if (persistedPlan?.state_revision !== undefined) plan.state_revision = persistedPlan.state_revision;
-	await appendLedger(input.cwd, {
-		eventId: pendingCheckpointEventId,
-		event: "goal_checkpointed",
-		goalId: goal.id,
-		status: input.status,
-		evidence,
-		qualityGateJson,
-		completionVerification: goal.completionVerification,
+	await withUltragoalPlanOwnership(input.cwd, sessionId, async () => {
+		await assertUltragoalAdoptionPublished(input.cwd, sessionId);
+		await assertUltragoalGoalNotFenced(input.cwd, sessionId, goal.id);
+		await writePlan(input.cwd, plan, sessionId, { lockHeld: true });
+		const persistedPlan = await readUltragoalPlan(input.cwd, sessionId);
+		if (persistedPlan?.state_revision !== undefined) plan.state_revision = persistedPlan.state_revision;
+		await appendLedger(input.cwd, {
+			eventId: pendingCheckpointEventId,
+			event: "goal_checkpointed",
+			goalId: goal.id,
+			status: input.status,
+			evidence,
+			qualityGateJson,
+			completionVerification: goal.completionVerification,
+		});
 	});
 	return plan;
 }
@@ -4155,6 +4196,10 @@ const FLAGS_WITH_VALUES = new Set([
 	"--review-result-json",
 	"--qa-result-json",
 	"--target-state-json",
+	"--target-repo",
+	"--authorize",
+	"--authorized-by",
+	"--offer",
 ]);
 
 function isHelpArg(arg: string): boolean {
@@ -4283,6 +4328,36 @@ function renderUltragoalHelp(args: readonly string[]): string | null {
 			"",
 		].join("\n");
 	}
+	if (subject === "succession") {
+		return [
+			"Run native SKC Ultragoal workflow commands",
+			"",
+			"USAGE",
+			"  $ skc ultragoal succession offer --target-repo <path> --goal-id <id> [--goal-id <id> ...] --authorize <statement> --authorized-by <identity> [--json]",
+			"  $ skc ultragoal succession adopt --offer <path> [--skc-goal-mode aggregate|per-story] [--json]",
+			"  $ skc ultragoal succession status [--json]",
+			"",
+			"FLAGS",
+			"      --target-repo=<value>        Destination repository for the successor run; never the source repository",
+			"      --goal-id=<value>            Unfinished source goal to hand off (repeatable; no implicit or wildcard selection)",
+			"      --authorize=<value>          Required. Explicit bounded authorization statement for this source/target/selection",
+			"      --authorized-by=<value>      Required. Identity that authorized the handoff",
+			"      --offer=<value>              Offer document recorded by `succession offer`, read from inside the source worktree",
+			"      --skc-goal-mode=<value>      Successor validation mode (default aggregate); the source mode is provenance only",
+			"      --json                       Output a machine-readable receipt",
+			"",
+			"OWNERSHIP",
+			"  `offer` records a durable outgoing ownership fence, so the source run stops scheduling and checkpointing the",
+			"  selected goals immediately — not when the target happens to adopt. Between offer and adoption no run owns them.",
+			"  The source brief, goals and ledger are never written. Goals the offer did not select stay schedulable.",
+			"  There is deliberately no `revoke` verb: an unadopted offer keeps its goals fenced.",
+			"",
+			"EXAMPLES",
+			'  $ skc ultragoal succession offer --target-repo ../payments-api --goal-id G002 --goal-id G003 --authorize "leader approved moving the refund stories" --authorized-by human:release-lead --json',
+			"  $ skc ultragoal succession adopt --offer ../plan-repo/.skc/_session-abc/ultragoal/succession/offer-<id>.json --json",
+			"",
+		].join("\n");
+	}
 
 	return [
 		"Run native SKC Ultragoal workflow commands",
@@ -4305,8 +4380,11 @@ function renderUltragoalHelp(args: readonly string[]): string | null {
 		"  start-pipeline-overlap",
 		"  join-pipeline-overlap",
 		"  rebaseline-pipeline-overlap",
+		"  succession offer",
+		"  succession adopt",
+		"  succession status",
 		"",
-		"Run `skc ultragoal checkpoint --help`, `skc ultragoal review --help`, `skc ultragoal classify-blocker --help`, `skc ultragoal record-critic-verdict --help`, or `skc ultragoal record-critic-gate-override --help` for command-specific requirements.",
+		"Run `skc ultragoal checkpoint --help`, `skc ultragoal review --help`, `skc ultragoal classify-blocker --help`, `skc ultragoal record-critic-verdict --help`, `skc ultragoal record-critic-gate-override --help`, or `skc ultragoal succession --help` for command-specific requirements.",
 		"",
 	].join("\n");
 }
@@ -4846,6 +4924,8 @@ async function dispatchUltragoalCommand(args: string[], cwd: string): Promise<Ul
 					stdout: json ? renderCliWriteReceipt(receipt) : `Rebaselined pipeline overlap ${receipt.overlap_id}.\n`,
 				};
 			}
+			case "succession":
+				return await runUltragoalSuccessionCommand(args, cwd);
 			default:
 				return { status: 1, stderr: `Unknown skc ultragoal command: ${command}\n` };
 		}

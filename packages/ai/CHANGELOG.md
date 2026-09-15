@@ -1,6 +1,9 @@
 # Changelog
 
 ## [Unreleased]
+### Added
+
+- `detectDiscoveredApiFamily` infers Anthropic Messages vs OpenAI Completions for mixed OpenAI-compatible `/v1/models` catalogs from `owned_by` then the model id (ported from upstream #5187).
 
 ## [0.5.11] - 2026-09-10
 
