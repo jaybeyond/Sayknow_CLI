@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Isolate `UserPromptSubmit` hook tests with an explicit `cwd`/`stateDir` so Linux CI cannot resolve a repo-root ralplan session and skip seeding workflow state for "consensus plan … animation".
+
 ## [0.5.17] - 2026-09-16
 
 ### Fixed

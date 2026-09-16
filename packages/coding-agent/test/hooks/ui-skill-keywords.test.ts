@@ -23,13 +23,18 @@ async function makeHookRoot(): Promise<string> {
 }
 
 async function dispatchIsolatedHook(prompt: string) {
+	const cwd = await makeHookRoot();
 	return dispatchSkcNativeSkillHook(
 		{
 			hook_event_name: "UserPromptSubmit",
 			prompt,
-			cwd: await makeHookRoot(),
+			cwd,
 		},
-		{ home: await makeHookRoot() },
+		{
+			cwd,
+			home: await makeHookRoot(),
+			stateDir: path.join(cwd, ".skc"),
+		},
 	);
 }
 
