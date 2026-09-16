@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Pin UI-skill hook tests to a unique `session_id` so CI's `SKC_SESSION_ID` cannot stale-skip ralplan activation and drop workflow context from "consensus plan … animation".
+
 ## [0.5.18] - 2026-09-16
 
 ### Fixed

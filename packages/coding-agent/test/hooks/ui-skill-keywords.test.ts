@@ -29,6 +29,7 @@ async function dispatchIsolatedHook(prompt: string) {
 			hook_event_name: "UserPromptSubmit",
 			prompt,
 			cwd,
+			session_id: `ui-skill-hook-${path.basename(cwd)}`,
 		},
 		{
 			cwd,
