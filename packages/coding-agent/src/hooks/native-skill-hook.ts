@@ -306,43 +306,80 @@ async function dispatchSkcNativeSkillHookInner(
 	const hookEventName = readHookEventName(payload);
 	const cwd = (options.cwd ?? safeString(payload.cwd).trim()) || process.cwd();
 	if (hookEventName === "UserPromptSubmit") {
-		const recoveryDiagnostics = await collectUserPromptStateRecoveryDiagnostics({
-			cwd,
-			sessionId: readSessionId(payload),
-			threadId: readThreadId(payload),
-			stateDir: options.stateDir,
-			prompt: readPromptText(payload),
-			sessionFile: readSessionFile(payload),
-		});
-		const recoveryContext = buildStateRecoveryDiagnosticsContext(recoveryDiagnostics);
 		const prompt = readPromptText(payload);
-		const skillState = prompt
-			? await recordSkillActivation({
-					cwd,
-					text: prompt,
-					sessionId: readSessionId(payload),
-					threadId: readThreadId(payload),
-					turnId: readTurnId(payload),
-					stateDir: options.stateDir,
-				})
-			: null;
-		const effectiveSkillConfig = skillState
-			? await resolveEffectiveSkillConfig(cwd, options.effectiveSkillConfig, options.configPaths, {
-					sessionId: readSessionId(payload),
-					threadId: readThreadId(payload),
-					stateDir: options.stateDir,
-				})
-			: undefined;
-		const activeUltragoalContext = skillState
-			? null
-			: await buildActiveUltragoalPromptContext({
-					cwd,
-					sessionId: readSessionId(payload),
-					threadId: readThreadId(payload),
-					stateDir: options.stateDir,
-					prompt,
-					sessionFile: readSessionFile(payload),
-				});
+		// Compute the bundled UI-skill directive first so a later state/recovery
+		// lookup cannot abort the turn without it.
+		const uiSkillContext = buildUiSkillActivationContext(prompt);
+		let externalUiContext: string | null = null;
+		try {
+			externalUiContext = await buildExternalUiSkillContext({
+				cwd,
+				home: options.home ?? os.homedir(),
+				text: prompt,
+			});
+		} catch {
+			externalUiContext = null;
+		}
+
+		let recoveryContext: string | null = null;
+		try {
+			const recoveryDiagnostics = await collectUserPromptStateRecoveryDiagnostics({
+				cwd,
+				sessionId: readSessionId(payload),
+				threadId: readThreadId(payload),
+				stateDir: options.stateDir,
+				prompt,
+				sessionFile: readSessionFile(payload),
+			});
+			recoveryContext = buildStateRecoveryDiagnosticsContext(recoveryDiagnostics);
+		} catch {
+			recoveryContext = null;
+		}
+
+		let skillState = null;
+		try {
+			skillState = prompt
+				? await recordSkillActivation({
+						cwd,
+						text: prompt,
+						sessionId: readSessionId(payload),
+						threadId: readThreadId(payload),
+						turnId: readTurnId(payload),
+						stateDir: options.stateDir,
+					})
+				: null;
+		} catch {
+			skillState = null;
+		}
+
+		let effectiveSkillConfig: EffectiveSkillConfigInput | undefined;
+		try {
+			effectiveSkillConfig = skillState
+				? await resolveEffectiveSkillConfig(cwd, options.effectiveSkillConfig, options.configPaths, {
+						sessionId: readSessionId(payload),
+						threadId: readThreadId(payload),
+						stateDir: options.stateDir,
+					})
+				: undefined;
+		} catch {
+			effectiveSkillConfig = undefined;
+		}
+
+		let activeUltragoalContext: string | null = null;
+		try {
+			activeUltragoalContext = skillState
+				? null
+				: await buildActiveUltragoalPromptContext({
+						cwd,
+						sessionId: readSessionId(payload),
+						threadId: readThreadId(payload),
+						stateDir: options.stateDir,
+						prompt,
+						sessionFile: readSessionFile(payload),
+					});
+		} catch {
+			activeUltragoalContext = null;
+		}
 		if (activeUltragoalContext?.startsWith("BLOCK_ULTRAGOAL_COMPLETION:")) {
 			return {
 				hookEventName,
@@ -356,25 +393,9 @@ async function dispatchSkcNativeSkillHookInner(
 				},
 			};
 		}
-		// Frontend skills SKC routes to but does not vendor (license-restricted
-		// collections). Resolved against the user's own install roots. A lookup
-		// failure must not swallow the bundled UI-skill directive.
-		let externalUiContext: string | null = null;
-		try {
-			externalUiContext = await buildExternalUiSkillContext({
-				cwd,
-				home: options.home ?? os.homedir(),
-				text: prompt,
-			});
-		} catch {
-			externalUiContext = null;
-		}
 		const additionalContext = [
 			skillState ? buildSkillActivationAdditionalContext(skillState, effectiveSkillConfig) : activeUltragoalContext,
-			// Bundled frontend UI skills are advertised independently of workflow
-			// activation: they have no mode state and must fire even when a
-			// workflow keyword already matched.
-			buildUiSkillActivationContext(prompt),
+			uiSkillContext,
 			externalUiContext,
 			recoveryContext,
 			classifyQuestionOnlyPrompt(prompt),
