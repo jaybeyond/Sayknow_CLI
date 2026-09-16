@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Native `UserPromptSubmit` UI-skill routing no longer lets a failed install-root lookup swallow the bundled skill directive. Candidate `SKILL.md` probes are best-effort, and hook tests isolate `home` so a runner's `~/.agents/skills` cannot pollute CI.
+
 ## [0.5.14] - 2026-09-16
 
 ### Added

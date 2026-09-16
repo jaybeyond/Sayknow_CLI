@@ -28,6 +28,7 @@ type HookPayload = Record<string, unknown>;
 
 interface SkcNativeHookDispatchOptions {
 	cwd?: string;
+	home?: string;
 	stateDir?: string;
 	effectiveSkillConfig?: EffectiveSkillConfigInput;
 	configPaths?: string[];
@@ -342,12 +343,18 @@ export async function dispatchSkcNativeSkillHook(
 			};
 		}
 		// Frontend skills SKC routes to but does not vendor (license-restricted
-		// collections). Resolved against the user's own install roots.
-		const externalUiContext = await buildExternalUiSkillContext({
-			cwd,
-			home: os.homedir(),
-			text: prompt,
-		});
+		// collections). Resolved against the user's own install roots. A lookup
+		// failure must not swallow the bundled UI-skill directive.
+		let externalUiContext: string | null = null;
+		try {
+			externalUiContext = await buildExternalUiSkillContext({
+				cwd,
+				home: options.home ?? os.homedir(),
+				text: prompt,
+			});
+		} catch {
+			externalUiContext = null;
+		}
 		const additionalContext = [
 			skillState ? buildSkillActivationAdditionalContext(skillState, effectiveSkillConfig) : activeUltragoalContext,
 			// Bundled frontend UI skills are advertised independently of workflow

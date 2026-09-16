@@ -264,7 +264,11 @@ function skillCandidatePaths(cwd: string, home: string, skill: string): string[]
 
 async function isSkillInstalled(cwd: string, home: string, skill: string): Promise<boolean> {
 	for (const candidate of skillCandidatePaths(cwd, home, skill)) {
-		if (await Bun.file(candidate).exists()) return true;
+		try {
+			if (await Bun.file(candidate).exists()) return true;
+		} catch {
+			// Permission or I/O on a candidate must not fail the prompt hook.
+		}
 	}
 	return false;
 }

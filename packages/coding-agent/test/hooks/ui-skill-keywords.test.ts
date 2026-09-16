@@ -22,6 +22,17 @@ async function makeHookRoot(): Promise<string> {
 	return root;
 }
 
+async function dispatchIsolatedHook(prompt: string) {
+	return dispatchSkcNativeSkillHook(
+		{
+			hook_event_name: "UserPromptSubmit",
+			prompt,
+			cwd: await makeHookRoot(),
+		},
+		{ home: await makeHookRoot() },
+	);
+}
+
 afterAll(async () => {
 	await Promise.all(hookRoots.map(root => fs.rm(root, { recursive: true, force: true })));
 });
@@ -173,21 +184,13 @@ describe("automatic frontend UI skill routing", () => {
 	});
 
 	it("injects the directive through the native UserPromptSubmit hook", async () => {
-		const result = await dispatchSkcNativeSkillHook({
-			hook_event_name: "UserPromptSubmit",
-			prompt: "animate the dropdown open",
-			cwd: await makeHookRoot(),
-		});
+		const result = await dispatchIsolatedHook("animate the dropdown open");
 		const output = result.outputJson as { hookSpecificOutput?: { additionalContext?: string } } | null;
 		expect(output?.hookSpecificOutput?.additionalContext).toContain("`animate`");
 	});
 
 	it("fires even when a workflow keyword already matched", async () => {
-		const result = await dispatchSkcNativeSkillHook({
-			hook_event_name: "UserPromptSubmit",
-			prompt: "consensus plan for the new dropdown animation",
-			cwd: await makeHookRoot(),
-		});
+		const result = await dispatchIsolatedHook("consensus plan for the new dropdown animation");
 		const output = result.outputJson as { hookSpecificOutput?: { additionalContext?: string } } | null;
 		const context = output?.hookSpecificOutput?.additionalContext ?? "";
 		expect(context).toContain("ralplan");
@@ -195,11 +198,7 @@ describe("automatic frontend UI skill routing", () => {
 	});
 
 	it("stays out of the prompt when the work is not frontend", async () => {
-		const result = await dispatchSkcNativeSkillHook({
-			hook_event_name: "UserPromptSubmit",
-			prompt: "bump the package version",
-			cwd: await makeHookRoot(),
-		});
+		const result = await dispatchIsolatedHook("bump the package version");
 		const output = result.outputJson as { hookSpecificOutput?: { additionalContext?: string } } | null;
 		expect(output?.hookSpecificOutput?.additionalContext ?? "").not.toContain("emil-design-eng");
 	});
