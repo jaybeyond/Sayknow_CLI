@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.5.14] - 2026-09-16
+
 ### Added
 
 - Bundled frontend UI/UX craft skills so SKC sessions can invoke them without a separate user install: Emil Kowalski's web craft set (`emil-design-eng`, `animate`, `review-animations`, `improve-animations`, `find-animation-opportunities`, `pick-ui-library`, `prototype`, `mobile-native`, `animation-vocabulary`, `apple-design`, `ask-sonner`) and Appllama's native mobile build bar (`appllama-app-design-skill`). These are not public workflow skills; the four workflows remain `deep-interview`, `ralplan`, `ultragoal`, and `team`. `appllama-usage` is deliberately excluded because it only drives the paid Appllama MCP, which SKC does not ship. Each skill's companion reference files are inlined as appendices by `scripts/build-ui-skill-bundle.ts`, since only `SKILL.md` is compiled into the binary and a bundled skill's `baseDir` is a virtual path.
