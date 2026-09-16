@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.5.17] - 2026-09-16
+
 ### Fixed
 
 - Compute the bundled UI-skill directive before workflow-state lookups in `UserPromptSubmit`, and isolate each lookup so a Linux CI recovery/activation failure cannot return empty context for `animate` / `ralplan` routing.
