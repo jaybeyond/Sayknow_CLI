@@ -9,7 +9,7 @@
 
 export const IMPORT_REDACTED_PLACEHOLDER = "[REDACTED]";
 /** Bumped when patterns change; persisted in import provenance. */
-export const IMPORT_SANITIZER_VERSION = 4;
+export const IMPORT_SANITIZER_VERSION = 5;
 interface RedactionRule {
 	readonly id: string;
 	readonly pattern: RegExp;
@@ -67,11 +67,16 @@ const REDACTION_RULES: readonly RedactionRule[] = [
 	// Long hex secrets (64+ hex chars: webhook secrets, signing keys).
 	{ id: "hex-secret", pattern: new RegExp(`\\b${HEX}{64,}\\b`, "g") },
 	// Basic-auth credentials embedded in URLs (https://user:pass@host).
-	// The scheme repetition is bounded. Unbounded `[a-z0-9+.-]*` in front of the
-	// literal `://` re-tries every prefix of a long alphabetic run before failing,
-	// which is quadratic in the input length: 200 KB of ordinary prose costs ~10s.
-	// IANA's longest registered scheme is well under 16 characters.
-	{ id: "url-credential", pattern: /([a-z][a-z0-9+.-]{0,15}:\/\/)[^/\s:@]{1,256}:[^/\s@]{1,256}@/gi },
+	// The scheme-character run is boundary anchored, so the unbounded suffix is
+	// attempted once per maximal run instead of once at every prefix. Keeping the
+	// leading non-letter characters in the capture preserves redaction for URLs
+	// embedded after digits or scheme punctuation without imposing an arbitrary
+	// scheme-length cap. Unbounded `[a-z0-9+.-]*` without that boundary re-tries
+	// every prefix of a long alphabetic run, which is quadratic in the input.
+	{
+		id: "url-credential",
+		pattern: /(?<![A-Za-z0-9+.-])([0-9+.-]*[a-z][a-z0-9+.-]*:\/\/)[^/\s:@]{1,256}:[^/\s@]{1,256}@/gi,
+	},
 	// Sensitive env/KEY assignments: OPENAI_API_KEY=..., token: ..., password = ...
 	// The name prefix is optional so a bare sensitive name (`password: …`) also matches.
 	{

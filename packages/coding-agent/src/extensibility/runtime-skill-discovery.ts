@@ -203,7 +203,12 @@ export async function discoverRuntimeSkills(
 		};
 		if (matchesQuery(candidate, options.query ?? "")) candidates.push(candidate);
 	}
-	candidates.sort((a, b) => compareSkillOrder(a.name, a.path, b.name, b.path));
+	candidates.sort((a, b) => {
+		// Project scope is reported first: a populated user-home catalog must not
+		// exhaust the bounded result budget before a project skill is ever named.
+		const scopeRank = (source: RuntimeSkillDiscoverySource) => (source === "project" ? 0 : 1);
+		return scopeRank(a.source) - scopeRank(b.source) || compareSkillOrder(a.name, a.path, b.name, b.path);
+	});
 	return candidates.slice(0, normalizeLimit(options.limit));
 }
 

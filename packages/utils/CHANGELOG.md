@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Crash-log URL redaction no longer caps the scheme at 16 characters. The scheme-character run is boundary-anchored so long and digit-prefixed credential URLs still redact without quadratic scanning (ported from upstream #5402).
+
 ## [0.5.13] - 2026-09-15
 
 ## [0.5.7] - 2026-09-10

@@ -615,6 +615,10 @@ describe("session import safety", () => {
 			["postgres://svc:s3cr3tvalue@db.internal:5432/app", "s3cr3tvalue"],
 			["git+ssh://deploy:tokenvalue123@git.example.com/x.git", "tokenvalue123"],
 			["_https://deploy:underscore-secret@example.com/repo.git_", "underscore-secret"],
+			// Longer than the previous 16-character scheme cap, and a digit-prefixed
+			// boundary-adjacent URL. Both must still redact without quadratic scanning.
+			["verylongcustomscheme://deploy:longscheme-secret@example.com/repo.git", "longscheme-secret"],
+			["9https://deploy:digit-boundary-secret@example.com/repo.git", "digit-boundary-secret"],
 		] as const;
 		for (const [input, secret] of cases) {
 			const result = redactImportedText(input);
@@ -664,7 +668,7 @@ describe("session import safety", () => {
 			destination: path.join(dir, "sessions"),
 		});
 		expect(result.prepared.counts.redacted).toBeGreaterThanOrEqual(secrets.length);
-		expect(result.prepared.provenance.sanitizerVersion).toBe(4);
+		expect(result.prepared.provenance.sanitizerVersion).toBe(5);
 		const persisted = fs.readFileSync(result.targetPath, "utf8");
 		for (const secret of secrets) {
 			expect(result.prepared.contextText).not.toContain(secret);

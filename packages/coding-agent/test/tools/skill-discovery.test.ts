@@ -326,8 +326,8 @@ describe("SkillDiscoveryTool", () => {
 				createSession(cwd, { settings: runtimeSkillSettings() }),
 			).execute("call", {});
 			expect(allSources.details?.candidates).toEqual([
-				expect.objectContaining({ name: "historical", source: "user" }),
 				expect.objectContaining({ name: "shared", description: "Project user skill", source: "project" }),
+				expect.objectContaining({ name: "historical", source: "user" }),
 			]);
 		} finally {
 			if (originalHome === undefined) delete process.env.HOME;
@@ -483,6 +483,41 @@ describe("SkillDiscoveryTool", () => {
 			expect(result.details?.candidates).toEqual([
 				expect.objectContaining({ name: "alpha", description: "Sort alpha", path: alphaPath, source: "project" }),
 			]);
+		} finally {
+			if (originalHome === undefined) delete process.env.HOME;
+			else process.env.HOME = originalHome;
+			await fs.rm(cwd, { recursive: true, force: true });
+			await fs.rm(home, { recursive: true, force: true });
+		}
+	});
+
+	it("reports project runtime skills before a populated user-home catalog", async () => {
+		const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "skc-skill-budget-"));
+		const home = await fs.mkdtemp(path.join(os.tmpdir(), "skc-skill-budget-home-"));
+		const originalHome = process.env.HOME;
+		try {
+			process.env.HOME = home;
+			await makeSkill(path.join(cwd, ".skc", "skills"), "zz-project-helper", "Project helper skill");
+			// A real operator home routinely holds far more runtime skills than the
+			// bounded result budget; they must not hide the project's own skill.
+			for (let i = 0; i < 30; i++) {
+				await makeSkill(
+					path.join(home, ".skc", "skills"),
+					`aa-home-helper-${String(i).padStart(2, "0")}`,
+					`Home helper ${i}`,
+				);
+			}
+
+			const result = await new SkillDiscoveryTool(createSession(cwd, { settings: runtimeSkillSettings() })).execute(
+				"call",
+				{ limit: 10 },
+			);
+			const names = result.details?.candidates.map(candidate => candidate.name) ?? [];
+			expect(names).toContain("zz-project-helper");
+			expect(result.details?.candidates.find(candidate => candidate.name === "zz-project-helper")?.source).toBe(
+				"project",
+			);
+			expect(names[0]).toBe("zz-project-helper");
 		} finally {
 			if (originalHome === undefined) delete process.env.HOME;
 			else process.env.HOME = originalHome;

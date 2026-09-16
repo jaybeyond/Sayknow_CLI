@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Runtime skill discovery ranks project `.skc/skills` ahead of the user-home catalog before applying the result limit, so a populated `~/.skc/skills` cannot hide a project skill (ported from upstream v0.16.5 skill-convention budget ranking).
+- Session-import URL redaction no longer caps the scheme at 16 characters. The scheme-character run is boundary-anchored so long and digit-prefixed credential URLs still redact without quadratic scanning (ported from upstream #5402).
+
 ## [0.5.13] - 2026-09-15
 ### Fixed
 

@@ -135,8 +135,10 @@ describe("recordFatalCrash", () => {
 		const sts = "ASIAABCDEFGHIJKLMNOP";
 		const google = "AIzaSyA-1234567890abcdefghijklmnopqrstu";
 		const urlCred = "https://jay:supersecretpw@gitlab.example.com/repo.git";
+		const longScheme = "verylongcustomscheme://deploy:longscheme-secret@example.com/repo.git";
+		const digitBoundary = "9https://deploy:digit-boundary-secret@example.com/repo.git";
 		const err = new Error(
-			`sync failed: ${gitlab} ${huggingface} ${finePat} ${npmToken} ${stripe} ${sts} ${google} ${urlCred}`,
+			`sync failed: ${gitlab} ${huggingface} ${finePat} ${npmToken} ${stripe} ${sts} ${google} ${urlCred} ${longScheme} ${digitBoundary}`,
 		);
 
 		recordFatalCrash("Uncaught Exception", err, { path: target });
@@ -154,6 +156,8 @@ describe("recordFatalCrash", () => {
 		expect(contents).not.toContain("supersecretpw");
 		// Scheme and host survive so the record stays diagnosable.
 		expect(contents).toContain("https://«redacted-url-credential»@gitlab.example.com");
+		expect(contents).not.toContain("longscheme-secret");
+		expect(contents).not.toContain("digit-boundary-secret");
 	});
 
 	it("redacts a PEM private key block whole", () => {

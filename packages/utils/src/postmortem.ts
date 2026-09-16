@@ -252,9 +252,11 @@ function redactCrashSecrets(text: string): string {
 	);
 	// Basic-auth credentials embedded in a URL. Scheme and host stay readable
 	// because they are the diagnostic value; only the userinfo is dropped. The
-	// scheme repetition is bounded so a long alphabetic run cannot go quadratic.
+	// scheme-character run is boundary anchored so a long alphabetic run cannot
+	// go quadratic, while leading digits and scheme punctuation stay in the
+	// capture so longer and boundary-adjacent URLs still redact.
 	redacted = redacted.replace(
-		/(?<![A-Za-z0-9+.-])([a-z][a-z0-9+.-]{0,15}:\/\/)[^/\s:@]{1,256}:[^/\s@]{1,256}@/gi,
+		/(?<![A-Za-z0-9+.-])([0-9+.-]*[a-z][a-z0-9+.-]*:\/\/)[^/\s:@]{1,256}:[^/\s@]{1,256}@/gi,
 		"$1«redacted-url-credential»@",
 	);
 	// AKIA is the long-term AWS access key id; ASIA the temporary/STS one, which
