@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Native skill hooks never throw out of `UserPromptSubmit` / `Stop`. A failed install-root or state lookup returns empty context instead of aborting the turn, which is what collapsed the bundled UI-skill directive in Linux CI.
+
 ## [0.5.15] - 2026-09-16
 
 ### Fixed

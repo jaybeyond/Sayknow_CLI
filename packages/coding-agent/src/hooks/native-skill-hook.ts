@@ -289,6 +289,20 @@ export async function dispatchSkcNativeSkillHook(
 	payload: HookPayload,
 	options: SkcNativeHookDispatchOptions = {},
 ): Promise<SkcNativeHookDispatchResult> {
+	try {
+		return await dispatchSkcNativeSkillHookInner(payload, options);
+	} catch {
+		// A native hook must never fail the turn. Surface nothing rather than
+		// aborting UserPromptSubmit / Stop over an install-root or state lookup.
+		const hookEventName = readHookEventName(payload);
+		return { hookEventName, outputJson: null };
+	}
+}
+
+async function dispatchSkcNativeSkillHookInner(
+	payload: HookPayload,
+	options: SkcNativeHookDispatchOptions = {},
+): Promise<SkcNativeHookDispatchResult> {
 	const hookEventName = readHookEventName(payload);
 	const cwd = (options.cwd ?? safeString(payload.cwd).trim()) || process.cwd();
 	if (hookEventName === "UserPromptSubmit") {
