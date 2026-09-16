@@ -122,7 +122,33 @@ Apply sanitization to success, error, diff, and streaming render paths.
 
 ## UI design and visual QA
 
-For future UI, dashboard, terminal, and TUI visual work, follow [`docs/ui-design-visual-qa.md`](docs/ui-design-visual-qa.md) before broad product-screen implementation. The contract requires a pre-implementation UI workflow branch, complete `DESIGN.md` source material, component showcase/state harness coverage, fresh full-surface visual evidence with CJK semantic line-break defects blocking completion, independent review, ANSI-preserving terminal/TUI evidence requirements, and an explicit provenance boundary against raw third-party corpus vendoring.
+For frontend UI, web, dashboard, mobile-web, animation, and visual-polish work, invoke the matching bundled UI skill before writing or reviewing that surface. The skills are compiled into SKC (`packages/coding-agent/src/defaults/skc/ui-skills`); users do not install them. They are not a fifth public workflow — the four workflows remain `deep-interview`, `ralplan`, `ultragoal`, and `team`.
+
+| Skill | Use when |
+| --- | --- |
+| `emil-design-eng` | General UI/UX craft, component polish, animation decisions |
+| `animate` | Building new motion |
+| `review-animations` | Reviewing existing motion |
+| `improve-animations` | Auditing a codebase's motion and producing plans |
+| `find-animation-opportunities` | Finding places that should (or should not) animate |
+| `pick-ui-library` | Choosing a frontend library instead of hand-rolling |
+| `prototype` | Building several genuinely different UI variants |
+| `mobile-native` | Making a web app feel native on a phone |
+| `ask-sonner` | Working with Sonner toasts |
+| `appllama-app-design-skill` | Building native Expo / React Native app screens |
+| `react-bits` | Animated React components (text/background/cursor effects) from the React Bits registry |
+| `apple-design` | Apple-style motion, materials, and gesture UI |
+| `animation-vocabulary` | Naming a motion effect |
+
+Some frontend skills are routed to but deliberately **not** bundled, because their license permits using the content while forbidding redistribution of the collection. Add them to a project once with `skc setup ui-skills` (`--check` to audit, `--force` to reinstall); SKC also installs on demand mid-task when a matching prompt arrives and the skill is absent.
+
+| Skill | Source | Lands in |
+| --- | --- | --- |
+| `transitions-dev` | [Jakubantalik/transitions.dev](https://github.com/Jakubantalik/transitions.dev) | `<project>/.agents/skills/` |
+
+Installs run upstream's own publisher CLI; SKC never republishes the payload. Do not vendor those payloads into `defaults/skc/ui-skills`; only redistributable (MIT) skill sources belong there.
+
+For Sayknow-CLI's own TUI/dashboard visual QA process, also follow [`docs/ui-design-visual-qa.md`](docs/ui-design-visual-qa.md): pre-implementation workflow branch, first-party `DESIGN.md`, component showcase/state harness, and fresh full-surface visual evidence. Do not copy raw third-party design corpora into product `DESIGN.md`.
 
 ## Commands and verification
 

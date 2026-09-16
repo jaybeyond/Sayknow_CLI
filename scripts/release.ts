@@ -15,6 +15,10 @@ const changelogGlob = new Glob("packages/*/CHANGELOG.md");
 const packageJsonGlob = new Glob("packages/*/package.json");
 const cargoTomlGlob = new Glob("crates/*/Cargo.toml");
 const stableVersionPattern = /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/u;
+const INDEPENDENT_PRIVATE_PACKAGE_NAMES = new Set([
+	"@sayknow-cli/orchestration-token-benchmark",
+	"@sayknow-cli/typescript-edit-benchmark",
+]);
 
 
 function git(args: readonly string[]) {
@@ -435,13 +439,18 @@ async function latestVerifiedRemoteStableTag(): Promise<string> {
 	return [...tags].reduce((latest, tag) => compareVersions(tag, latest) > 0 ? tag : latest);
 }
 
-async function assertReleaseVersionConsistency(version: string, publicPkgPaths: readonly string[]): Promise<void> {
-	for (const pkgPath of publicPkgPaths) {
+async function assertReleaseVersionConsistency(version: string, bumpedPkgPaths: readonly string[]): Promise<void> {
+	for (const pkgPath of bumpedPkgPaths) {
 		const manifest = await Bun.file(pkgPath).json() as unknown;
-		if (!isObject(manifest) || typeof manifest.name !== "string" || typeof manifest.version !== "string" || manifest.private === true) {
-			throw new Error(`Cannot verify public package release version in ${pkgPath}`);
+		if (!isObject(manifest) || typeof manifest.name !== "string" || typeof manifest.version !== "string") {
+			throw new Error(`Cannot verify package release version in ${pkgPath}`);
 		}
-		if (manifest.version !== version) throw new Error(`Public package ${manifest.name} in ${pkgPath} has version ${manifest.version}, expected ${version}`);
+		if (INDEPENDENT_PRIVATE_PACKAGE_NAMES.has(manifest.name)) {
+			throw new Error(`Independent private package ${manifest.name} in ${pkgPath} must not be in the lockstep bump set`);
+		}
+		if (manifest.version !== version) {
+			throw new Error(`Package ${manifest.name} in ${pkgPath} has version ${manifest.version}, expected ${version}`);
+		}
 	}
 
 	const rootPackage = await Bun.file("package.json").json() as unknown;
@@ -497,18 +506,23 @@ async function cmdRelease(version: string): Promise<void> {
 	console.log(`Updating package versions to ${version}…`);
 	const pkgJsonPaths = await Array.fromAsync(packageJsonGlob.scan("."));
 
-	// Filter out private packages
-	const publicPkgPaths: string[] = [];
+	// Filter out private packages whose versions are independently pinned
+	// (benchmarks stay at 0.0.1). Other private packages — currently
+	// `telegram-remote` — still bump so G002's lockstep allowlist stays true.
+	const bumpedPkgPaths: string[] = [];
 	for (const pkgPath of pkgJsonPaths) {
 		const pkgJson = await Bun.file(pkgPath).json();
-		if (pkgJson.private) {
-			console.log(`  Skipping ${pkgJson.name} (private)`);
+		if (pkgJson.private === true && INDEPENDENT_PRIVATE_PACKAGE_NAMES.has(pkgJson.name as string)) {
+			console.log(`  Skipping ${pkgJson.name} (independent private)`);
 			continue;
 		}
-		publicPkgPaths.push(pkgPath);
+		if (pkgJson.private === true) {
+			console.log(`  Including ${pkgJson.name} (lockstep private)`);
+		}
+		bumpedPkgPaths.push(pkgPath);
 	}
 
-	for (const pkgPath of publicPkgPaths) {
+	for (const pkgPath of bumpedPkgPaths) {
 		const raw = await Bun.file(pkgPath).text();
 		const updated = raw.replace(/"version":\s*"[^"]+"/, `"version": "${version}"`);
 		if (updated === raw) throw new Error(`Cannot find a version field in ${pkgPath}`);
@@ -517,7 +531,7 @@ async function cmdRelease(version: string): Promise<void> {
 
 	// Verify
 	console.log("  Verifying versions:");
-	for (const pkgPath of publicPkgPaths) {
+	for (const pkgPath of bumpedPkgPaths) {
 		const pkgJson = await Bun.file(pkgPath).json();
 		console.log(`    ${pkgJson.name}: ${pkgJson.version}`);
 	}
@@ -557,8 +571,8 @@ async function cmdRelease(version: string): Promise<void> {
 			}
 		}
 	}
-	await assertReleaseVersionConsistency(version, publicPkgPaths);
-	console.log("  All public package, Cargo workspace, and @sayknow-cli catalog versions match");
+	await assertReleaseVersionConsistency(version, bumpedPkgPaths);
+	console.log("  All lockstep package, Cargo workspace, and @sayknow-cli catalog versions match");
 	console.log();
 
 	// 3b. Rename the pi-natives version sentinel so any `.node` left on disk from

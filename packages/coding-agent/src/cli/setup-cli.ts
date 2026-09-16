@@ -23,6 +23,7 @@ import {
 	getAutoImportOAuthCredentialSkips,
 	isAutoImportOAuthCredential,
 } from "../setup/credential-import";
+import { formatExternalUiSkillsReport, installExternalUiSkills } from "../setup/external-ui-skills";
 import {
 	formatHermesSetupResult,
 	type HermesSetupFlags,
@@ -46,7 +47,8 @@ export type SetupComponent =
 	| "hooks"
 	| "provider"
 	| "python"
-	| "stt";
+	| "stt"
+	| "ui-skills";
 
 export interface SetupCommandArgs {
 	component: SetupComponent;
@@ -290,6 +292,25 @@ export async function runSetupCommand(cmd: SetupCommandArgs): Promise<void> {
 		case "credentials":
 			await handleCredentialsSetup(cmd.flags);
 			break;
+		case "ui-skills":
+			await handleUiSkillsSetup(cmd.flags);
+			break;
+	}
+}
+
+async function handleUiSkillsSetup(flags: SetupCommandArgs["flags"]): Promise<void> {
+	const report = await installExternalUiSkills({
+		cwd: process.cwd(),
+		check: flags.check,
+		force: flags.force,
+	});
+	if (flags.json) {
+		process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+	} else {
+		process.stdout.write(`${formatExternalUiSkillsReport(report)}\n`);
+	}
+	if (report.failed > 0 || (flags.check && report.missing > 0)) {
+		process.exitCode = 1;
 	}
 }
 

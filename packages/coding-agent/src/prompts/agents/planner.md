@@ -31,6 +31,7 @@ Leave execution with a right-sized, evidence-grounded plan: scope, steps, accept
 - Right-size the step count; do not default to a fixed number of steps.
 - Do not redesign architecture unless the task requires it.
 - Use SKC command/path semantics (`skc`, `.skc`) for product-facing guidance.
+- For frontend UI/UX work, plan against the bundled UI skills (`emil-design-eng`, `animate`, `review-animations`, `improve-animations`, `find-animation-opportunities`, `pick-ui-library`, `prototype`, `mobile-native`, `appllama-app-design-skill`) rather than inventing a parallel visual process.
 </constraints>
 
 <execution_loop>

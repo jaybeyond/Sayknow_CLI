@@ -1,4 +1,5 @@
 import { appendFile, mkdir, stat } from "node:fs/promises";
+import * as os from "node:os";
 import * as path from "node:path";
 import { getAgentDir, getConfigDirName } from "@sayknow-cli/utils";
 import { YAML } from "bun";
@@ -14,6 +15,7 @@ import {
 	type EffectiveSkillConfigInput,
 	recordSkillActivation,
 } from "./skill-state";
+import { buildExternalUiSkillContext, buildUiSkillActivationContext } from "./ui-skill-keywords";
 
 export type SkcNativeHookEventName = "UserPromptSubmit" | "Stop";
 
@@ -339,8 +341,20 @@ export async function dispatchSkcNativeSkillHook(
 				},
 			};
 		}
+		// Frontend skills SKC routes to but does not vendor (license-restricted
+		// collections). Resolved against the user's own install roots.
+		const externalUiContext = await buildExternalUiSkillContext({
+			cwd,
+			home: os.homedir(),
+			text: prompt,
+		});
 		const additionalContext = [
 			skillState ? buildSkillActivationAdditionalContext(skillState, effectiveSkillConfig) : activeUltragoalContext,
+			// Bundled frontend UI skills are advertised independently of workflow
+			// activation: they have no mode state and must fire even when a
+			// workflow keyword already matched.
+			buildUiSkillActivationContext(prompt),
+			externalUiContext,
 			recoveryContext,
 			classifyQuestionOnlyPrompt(prompt),
 		]

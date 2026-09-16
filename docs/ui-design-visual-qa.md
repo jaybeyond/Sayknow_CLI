@@ -2,7 +2,7 @@
 
 This is the repo-owned contract for future Sayknow-CLI UI, web, dashboard, terminal, and TUI visual work. It adapts the useful OMO design-reference and visual-QA workflow without vendoring any third-party design corpus.
 
-It is not a fifth bundled workflow skill. Sayknow-CLI's public workflow surface remains `deep-interview`, `ralplan`, `ultragoal`, and `team`; use this document as planning/review guidance inside those workflows or direct implementation.
+It is not a fifth bundled workflow skill. Sayknow-CLI's public workflow surface remains `deep-interview`, `ralplan`, `ultragoal`, and `team`. Frontend UI/UX craft itself is handled by the bundled UI skills under `packages/coding-agent/src/defaults/skc/ui-skills` (`emil-design-eng`, `animate`, and siblings); this document is the SKC-owned visual-QA process for SKC's own TUI/dashboard surfaces, used inside those workflows or direct implementation.
 
 ## Required branch before implementation
 

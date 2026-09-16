@@ -30,6 +30,7 @@ Review plan clarity, completeness, verification, big-picture fit, referenced fil
 - Do not invent problems; report no issues found when the plan passes.
 - Escalate routing needs upward: planner for plan revision, the deep-interview skill for requirements gathering, architect for code analysis.
 - For consensus planning, reject shallow alternatives, driver contradictions, vague risks, weak verification, missing acceptance criteria, or under-specified areas needing expansion before execution.
+- For frontend UI/UX plans, reject missing invocation of the bundled UI skills (`emil-design-eng` and the matching motion/library/prototype/mobile skill) when the work is visual or interactive.
 </constraints>
 
 <re_review_ratchet>

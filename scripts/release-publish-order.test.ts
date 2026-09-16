@@ -421,7 +421,7 @@ describe("immutable stable release contracts", () => {
 
 	test("release checks fetched remote tags, typed CI observations, and version catalogs before committing", async () => {
 		const releaseScript = await Bun.file(path.join(repoRoot, "scripts/release.ts")).text();
-		const assertionIndex = releaseScript.indexOf("await assertReleaseVersionConsistency(version, publicPkgPaths)");
+		const assertionIndex = releaseScript.indexOf("await assertReleaseVersionConsistency(version, bumpedPkgPaths)");
 		const commitIndex = releaseScript.indexOf('git(["commit", "-m"');
 
 		expect(releaseScript).toContain('git(["fetch", "--quiet", "origin", "--tags"])');

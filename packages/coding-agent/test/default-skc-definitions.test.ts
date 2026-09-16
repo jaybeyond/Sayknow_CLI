@@ -13,6 +13,7 @@ import {
 	getEmbeddedDefaultSkcSkills,
 	installDefaultSkcDefinitions,
 } from "@sayknow-cli/coding-agent/defaults/skc-defaults";
+import { BUNDLED_SKC_UI_SKILL_NAMES, getEmbeddedSkcUiSkills } from "@sayknow-cli/coding-agent/defaults/skc-ui-skills";
 import { loadSkills, resetActiveSkillsForTests, setActiveSkills } from "@sayknow-cli/coding-agent/extensibility/skills";
 import { parseInternalUrl } from "@sayknow-cli/coding-agent/internal-urls/parse";
 import { SkillProtocolHandler } from "@sayknow-cli/coding-agent/internal-urls/skill-protocol";
@@ -97,6 +98,27 @@ describe("default SKC definitions", () => {
 		expect(team?.content).toContain("`planner` for broad context mapping/sequencing");
 		expect(team?.content).toContain("`architect` for architecture or external-doc-risk assessment");
 		expect(team?.content).not.toMatch(/auto-delegate `researcher`|`researcher` as an evidence lane/i);
+	});
+
+	it("bundles Emil Kowalski frontend UI skills separately from the four public workflows", () => {
+		const uiSkills = getEmbeddedSkcUiSkills();
+		expect(uiSkills.map(skill => skill.name).sort()).toEqual([...BUNDLED_SKC_UI_SKILL_NAMES].sort());
+		expect(uiSkills).toHaveLength(13);
+		expect(uiSkills.every(skill => skill.source === "bundled:ui")).toBe(true);
+		expect(uiSkills.every(skill => skill.filePath.startsWith("embedded:skc/ui-skills/"))).toBe(true);
+		expect(uiSkills.every(skill => skill.content?.includes("SKC loads this skill automatically"))).toBe(true);
+		expect(uiSkills.some(skill => skill.name === "write-swift")).toBe(false);
+		expect(uiSkills.some(skill => skill.name === "animate-expo")).toBe(false);
+		// appllama-usage only drives the paid Appllama MCP, which SKC does not ship.
+		expect(uiSkills.some(skill => skill.name === "appllama-usage")).toBe(false);
+		// Companion reference files are inlined; a bundled skill cannot read them from disk.
+		const appDesign = uiSkills.find(skill => skill.name === "appllama-app-design-skill");
+		expect(appDesign?.content).toContain("## Appendix: motion.md");
+		expect(uiSkills.find(skill => skill.name === "animate")?.content).toContain("## Appendix: RECIPES.md");
+		const workflowNames = getDefaultSkcDefinitions()
+			.filter(definition => definition.kind === "skill")
+			.map(definition => definition.name as string);
+		expect(workflowNames).not.toContain("emil-design-eng");
 	});
 
 	it("exposes deep-interview fragments only through the parent-scoped fragment accessor", () => {
@@ -488,11 +510,14 @@ Project executor override body.
 		expect(routing).toContain("`/skill:ultragoal`");
 		expect(routing).toContain("`/skill:team`");
 		expect(routing).toContain("Delegate large implementation slices to `executor`");
+		expect(routing).toContain("Frontend UI/UX work");
+		expect(routing).toContain("emil-design-eng");
+		expect(routing).toContain("These are bundled; do not ask the user to install them");
 		expect(routing).toContain("read the full skill text and follow it exactly");
 		expect(routing).toContain(
 			"Before explicit execution approval, planning and interview workflows NEVER edit product source",
 		);
-		expect(routing.split("\n").filter(line => line.startsWith("-"))).toHaveLength(9);
+		expect(routing.split("\n").filter(line => line.startsWith("-"))).toHaveLength(10);
 		expect(decomposition).toMatch(/skip it for one-step or obvious two-step fixes/i);
 	});
 
@@ -804,7 +829,7 @@ describe("bundled skills CLI", () => {
 		expect(parsed.content).toContain("# Ultragoal");
 	});
 
-	it("lists exactly the embedded default workflow skills", async () => {
+	it("lists embedded default workflow skills plus bundled UI skills", async () => {
 		const externalRoot = await makeTempRoot();
 		const proc = Bun.spawn(
 			[
@@ -834,8 +859,19 @@ describe("bundled skills CLI", () => {
 		expect(exitCode).toBe(0);
 		expect(stderr).toBe("");
 		const parsed = JSON.parse(stdout) as { skills: Array<{ name: string; path: string }> };
-		expect(parsed.skills.map(skill => skill.name).sort()).toEqual([...DEFAULT_SKC_DEFINITION_NAMES].sort());
-		expect(parsed.skills.every(skill => skill.path.startsWith("embedded:skc/skills/"))).toBe(true);
+		const expected = [...DEFAULT_SKC_DEFINITION_NAMES, ...BUNDLED_SKC_UI_SKILL_NAMES].sort();
+		expect(parsed.skills.map(skill => skill.name).sort()).toEqual(expected);
+		expect(
+			parsed.skills
+				.filter(skill => (DEFAULT_SKC_DEFINITION_NAMES as readonly string[]).includes(skill.name))
+				.every(skill => skill.path.startsWith("embedded:skc/skills/")),
+		).toBe(true);
+		expect(parsed.skills.some(skill => skill.name === "emil-design-eng")).toBe(true);
+		expect(
+			parsed.skills
+				.filter(skill => skill.name === "emil-design-eng")
+				.every(skill => skill.path.startsWith("embedded:skc/ui-skills/")),
+		).toBe(true);
 		expect(parsed.skills.some(skill => skill.name === "auto-research-greenfield")).toBe(false);
 		expect(parsed.skills.some(skill => skill.name === "auto-answer-uncertain")).toBe(false);
 		expect(parsed.skills.some(skill => skill.name === "ai-slop-cleaner")).toBe(false);

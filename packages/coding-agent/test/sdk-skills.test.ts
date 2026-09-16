@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { Settings } from "@sayknow-cli/coding-agent/config/settings";
 import { DEFAULT_SKC_DEFINITION_NAMES } from "@sayknow-cli/coding-agent/defaults/skc-defaults";
+import { BUNDLED_SKC_UI_SKILL_NAMES } from "@sayknow-cli/coding-agent/defaults/skc-ui-skills";
 import type { Skill } from "@sayknow-cli/coding-agent/sdk";
 import { createAgentSession } from "@sayknow-cli/coding-agent/sdk";
 import { SessionManager } from "@sayknow-cli/coding-agent/session/session-manager";
@@ -78,10 +79,10 @@ Loaded via symbolic link.
 			sessionManager: SessionManager.inMemory(),
 			settings: Settings.isolated({ "skills.enabled": false }),
 		});
-		const expected = [...DEFAULT_SKC_DEFINITION_NAMES].sort();
+		const expected = [...DEFAULT_SKC_DEFINITION_NAMES, ...BUNDLED_SKC_UI_SKILL_NAMES].sort();
 
 		expect(session.skills.map(skill => skill.name).sort()).toEqual(expected);
-		expect(session.skills.every(skill => skill.filePath.startsWith("embedded:skc/skills/"))).toBe(true);
+		expect(session.skills.every(skill => skill.filePath.startsWith("embedded:skc/"))).toBe(true);
 	}, 15_000);
 
 	it("should discover skills by default and expose them on session.skills", async () => {
@@ -131,7 +132,9 @@ Loaded via symbolic link.
 			settings: createIsolatedSkillsSettings(),
 		});
 
-		expect(session.skills.map(skill => skill.name).sort()).toEqual([...DEFAULT_SKC_DEFINITION_NAMES].sort());
+		expect(session.skills.map(skill => skill.name).sort()).toEqual(
+			[...DEFAULT_SKC_DEFINITION_NAMES, ...BUNDLED_SKC_UI_SKILL_NAMES].sort(),
+		);
 		expect(session.skillWarnings).toEqual([]);
 	});
 
@@ -154,6 +157,9 @@ Loaded via symbolic link.
 
 		expect(session.skills).toContainEqual(customSkill);
 		for (const name of DEFAULT_SKC_DEFINITION_NAMES) {
+			expect(session.skills.some(skill => skill.name === name)).toBe(true);
+		}
+		for (const name of BUNDLED_SKC_UI_SKILL_NAMES) {
 			expect(session.skills.some(skill => skill.name === name)).toBe(true);
 		}
 		expect(session.skillWarnings).toEqual([]);

@@ -15,6 +15,7 @@ const COMPONENTS: SetupComponent[] = [
 	"provider",
 	"python",
 	"stt",
+	"ui-skills",
 ];
 
 export default class Setup extends Command {

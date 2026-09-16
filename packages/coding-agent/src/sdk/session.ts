@@ -63,6 +63,7 @@ import "../discovery";
 import { resolveConfigValue } from "../config/resolve-config-value";
 import { getEmbeddedDefaultSkcSkills } from "../defaults/skc-defaults";
 import { BUNDLED_GROK_BUILD_EXTENSION_ID, getBundledGrokBuildExtensionFactory } from "../defaults/skc-grok-cli";
+import { withEmbeddedSkcUiSkills } from "../defaults/skc-ui-skills";
 import { initializeWithSettings } from "../discovery";
 import { disposeAllVmContexts, disposeVmContextsByOwner } from "../eval/js/context-manager";
 import { disposeAllKernelSessions, disposeKernelSessionsByOwner } from "../eval/py/executor";
@@ -982,7 +983,7 @@ function withEmbeddedDefaultSkcSkills(skills: Skill[]): Skill[] {
 			byName.set(defaultSkill.name, defaultSkill);
 		}
 	}
-	return [...byName.values()];
+	return withEmbeddedSkcUiSkills([...byName.values()]);
 }
 
 export function resolveIntentTracingEnabled(intentTracingSetting: boolean | undefined, hasUI: boolean): boolean {
@@ -1383,10 +1384,11 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			skills = withEmbeddedDefaultSkcSkills(skillsResult.skills);
 			skillWarnings = skillsResult.warnings;
 		} else {
-			// SKC's four public workflow skills are bundled into the binary so the
-			// default workflow surface survives accidental .skc deletion. Arbitrary
-			// filesystem skill discovery remains gated by skills.enabled above.
-			skills = getEmbeddedDefaultSkcSkills();
+			// SKC's four public workflow skills plus bundled UI craft skills are
+			// compiled into the binary so the default surface survives accidental
+			// .skc deletion. Arbitrary filesystem skill discovery remains gated by
+			// skills.enabled above.
+			skills = withEmbeddedSkcUiSkills(getEmbeddedDefaultSkcSkills());
 			skillWarnings = [];
 		}
 

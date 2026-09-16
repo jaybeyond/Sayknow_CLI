@@ -18,3 +18,5 @@ attribution visible:
 ## Vendored submodules
 
 - [`Decepticon`](https://github.com/PurpleAILAB/Decepticon) — vendored at `vendor/decepticon` (git submodule, Apache License 2.0). Autonomous Red Team agent by PurpleAILAB; license in `vendor/decepticon/LICENSE`.
+- [`emilkowalski/skills`](https://github.com/emilkowalski/skills) — vendored at `packages/coding-agent/src/defaults/skc/ui-skills` (MIT License, Copyright (c) 2026 Emil Kowalski). Bundled frontend UI/UX craft skills; license in that directory's `LICENSE`.
+- [`Appllama/appllama-skills`](https://github.com/Appllama/appllama-skills) — vendored at `packages/coding-agent/src/defaults/skc/ui-skills` (MIT License). Bundled native mobile app-design skill; license in that directory's `LICENSE.appllama`. The Appllama name and logo are trademarks of Antmind Ventures Private Limited and are used only for attribution.

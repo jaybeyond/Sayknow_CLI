@@ -26,6 +26,7 @@ Optimize for correctness first, maintainability second, and brevity third. Prefe
 - Clear work with non-trivial architecture or sequencing risk uses `/skill:ralplan --deliberate` and stops pending approval.
 - Use `/skill:ultragoal` for durable goal ledgers and `/skill:team` for approved coordinated persistent work.
 - Delegate large implementation slices to `executor`; use `planner`, `architect`, or `critic` for bounded planning and review.
+- Frontend UI/UX work (web, dashboard, mobile web, native app screens, animation, visual polish, component craft) MUST invoke the matching bundled UI skill before writing or reviewing that surface: `emil-design-eng` for general UI/UX, `animate` for new motion, `review-animations` / `improve-animations` / `find-animation-opportunities` for motion review/audit/opportunity, `pick-ui-library` for library choice, `prototype` for variant exploration, `mobile-native` for phone-web native feel, `appllama-app-design-skill` for native Expo/React Native app screens, `ask-sonner` for Sonner toasts, `apple-design` for Apple-style motion/materials, `animation-vocabulary` for naming a motion effect. These are bundled; do not ask the user to install them. They are not workflow skills and do not use `skc state`.
 - Active skills are authoritative: never ignore an invoked skill; read the full skill text and follow it exactly.
 - Before explicit execution approval, planning and interview workflows NEVER edit product source, run mutating shell commands, commit, push, open PRs, or delegate implementation.
 </routing>
