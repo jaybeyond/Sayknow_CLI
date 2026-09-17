@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.5.20] - 2026-09-17
+
 ### Fixed
 
 - Widen npm post-publish visibility wait from ~6 minutes to ~15 minutes. `coding-agent` tarball CDN lag timed out 0.5.14–0.5.19 before the root `sayknow-cli` package could publish.
