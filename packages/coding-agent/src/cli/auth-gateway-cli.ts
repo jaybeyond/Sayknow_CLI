@@ -2,15 +2,20 @@
  * `skc auth-gateway` command handlers.
  *
  * Boots a forward-proxy server that lets less-trusted clients (the macOS
- * usage widget and containerized deployments) make provider API calls without ever
- * seeing the access token. The gateway is itself a broker client and
- * resolves credentials through the configured broker (via the same
- * `SKC_AUTH_BROKER_URL` / `auth.broker.url` precedence used elsewhere).
+ * usage widget, local desktop apps and containerized deployments) make provider
+ * API calls without ever seeing the access token.
+ *
+ * Credential source mirrors `discoverAuthStorage()` in sdk/session.ts:
+ *   - broker configured (`SKC_AUTH_BROKER_URL` / `auth.broker.url`) → the
+ *     gateway is a broker client and never touches local SQLite.
+ *   - no broker → the local SQLite store at `<agentDir>/agent.db`, so a
+ *     single-machine user runs the gateway alone instead of also standing up
+ *     `skc auth-broker serve`.
  *
  * Sub-verbs:
- *   - `serve [--bind=…]` — boots the gateway against the configured broker.
+ *   - `serve [--bind=…]` — boots the gateway against the broker or local store.
  *   - `token` / `token --regenerate` — manages the gateway bearer token file.
- *   - `status` — prints the locally-stored gateway token and bind hint.
+ *   - `status` — prints the locally-stored gateway token and credential source.
  */
 import * as crypto from "node:crypto";
 import * as fs from "node:fs/promises";
@@ -28,7 +33,7 @@ import {
 	type SnapshotResponse,
 	startAuthGateway,
 } from "@sayknow-cli/ai";
-import { getConfigRootDir, isEnoent, VERSION } from "@sayknow-cli/utils";
+import { getAgentDbPath, getAgentDir, getConfigRootDir, isEnoent, VERSION } from "@sayknow-cli/utils";
 import chalk from "chalk";
 import { type AuthBrokerClientConfig, resolveAuthBrokerConfig } from "../session/auth-broker-config";
 
@@ -128,29 +133,66 @@ async function fetchBrokerSnapshot(client: AuthBrokerClient): Promise<SnapshotRe
 	return result.snapshot;
 }
 
-async function runServe(flags: AuthGatewayCommandArgs["flags"]): Promise<void> {
+/**
+ * Credential source the gateway is serving from. `broker` mirrors the previous
+ * behaviour; `local` is the single-machine path that makes `skc auth-broker
+ * serve` optional.
+ */
+export interface GatewayCredentialSource {
+	storage: AuthStorage;
+	kind: "broker" | "local";
+	/** Broker URL in broker mode, `null` in local mode. */
+	brokerUrl: string | null;
+	/** `<agentDir>/agent.db` in local mode, `null` in broker mode. */
+	dbPath: string | null;
+	/** `broker <url>` / `local <dbPath>` — also used as the AuthStorage sourceLabel. */
+	label: string;
+}
+
+/**
+ * Open the credential store the gateway should serve from.
+ *
+ * Same precedence as `discoverAuthStorage()` in sdk/session.ts: a configured
+ * broker wins, otherwise fall back to the local SQLite store. Callers own the
+ * returned `storage` and must `close()` it.
+ */
+export async function openGatewayCredentialSource(): Promise<GatewayCredentialSource> {
 	const brokerConfig = await resolveAuthBrokerConfig();
-	if (!brokerConfig) {
-		throw new Error(
-			"`skc auth-gateway serve` requires SKC_AUTH_BROKER_URL (or `auth.broker.url`/`auth.broker.token` in config.yml). The gateway is itself a broker client.",
-		);
+	if (brokerConfig) {
+		// Refresh + usage both flow through the store's broker hooks automatically —
+		// `RemoteAuthCredentialStore.refreshOAuthCredential` and `.fetchUsageReports`.
+		// AuthStorage discovers them when no explicit option overrides them, so the
+		// gateway only needs to construct the store and pass it in.
+		const client = createBrokerClient(brokerConfig);
+		const initialSnapshot = await fetchBrokerSnapshot(client);
+		const store = new RemoteAuthCredentialStore({ client, initialSnapshot });
+		const label = `broker ${brokerConfig.url}`;
+		const storage = new AuthStorage(store, { sourceLabel: label });
+		try {
+			await storage.reload();
+		} catch (error) {
+			try {
+				storage.close();
+			} catch {
+				// Preserve the initial reload failure.
+			}
+			throw error;
+		}
+		return { storage, kind: "broker", brokerUrl: brokerConfig.url, dbPath: null, label };
 	}
+	const dbPath = getAgentDbPath(getAgentDir());
+	const label = `local ${dbPath}`;
+	// `AuthStorage.create` opens the store and reloads it in one step.
+	const storage = await AuthStorage.create(dbPath, { sourceLabel: label });
+	return { storage, kind: "local", brokerUrl: null, dbPath, label };
+}
+
+async function runServe(flags: AuthGatewayCommandArgs["flags"]): Promise<void> {
 	const bind = flags.bind ?? DEFAULT_AUTH_GATEWAY_BIND;
 	const gatewayToken = flags.noAuth ? null : await ensureToken();
 
-	// Build a broker-backed AuthStorage — same pattern as discoverAuthStorage()
-	// in sdk/session.ts. The gateway never touches local SQLite.
-	const client = createBrokerClient(brokerConfig);
-	const initialSnapshot = await fetchBrokerSnapshot(client);
-	const store = new RemoteAuthCredentialStore({ client, initialSnapshot });
-	// Refresh + usage both flow through the store's broker hooks automatically —
-	// `RemoteAuthCredentialStore.refreshOAuthCredential` and `.fetchUsageReports`.
-	// AuthStorage discovers them when no explicit option overrides them, so the
-	// gateway only needs to construct the store and pass it in.
-	const storage = new AuthStorage(store, {
-		sourceLabel: `broker ${brokerConfig.url}`,
-	});
-	await storage.reload();
+	const source = await openGatewayCredentialSource();
+	const storage = source.storage;
 
 	// Build the model resolver + catalog from pi-ai's bundled metadata, scoped
 	// to providers we hold credentials for. Format handlers ask `resolveModel`
@@ -183,7 +225,11 @@ async function runServe(flags: AuthGatewayCommandArgs["flags"]): Promise<void> {
 	} else {
 		process.stdout.write(`auth: disabled (--no-auth) — any client can call this gateway\n`);
 	}
-	process.stdout.write(`upstream broker: ${brokerConfig.url}\n`);
+	if (source.kind === "broker") {
+		process.stdout.write(`upstream broker: ${source.brokerUrl}\n`);
+	} else {
+		process.stdout.write(`credentials: local ${source.dbPath}\n`);
+	}
 
 	const stopped = Promise.withResolvers<void>();
 	let shutdownStarted = false;
@@ -243,24 +289,35 @@ async function runToken(flags: AuthGatewayCommandArgs["flags"]): Promise<void> {
 
 async function runStatus(flags: AuthGatewayCommandArgs["flags"]): Promise<void> {
 	const token = await readToken();
-	const brokerConfig = await resolveAuthBrokerConfig();
 	const tokenFile = getTokenFilePath();
-	if (!brokerConfig) {
+	const tokenPresent = token !== null;
+
+	let source: GatewayCredentialSource;
+	try {
+		source = await openGatewayCredentialSource();
+	} catch (error) {
+		// Broker unreachable, or the local SQLite store failed to open.
+		const message = error instanceof Error ? error.message : String(error);
+		const brokerConfig = await resolveAuthBrokerConfig().catch(() => null);
 		const status = {
 			ready: false,
-			reason: "not_configured",
+			reason: brokerConfig ? "broker_unavailable" : "local_store_unavailable",
+			source: brokerConfig ? "broker" : "local",
 			tokenFile,
-			tokenPresent: token !== null,
-			broker: null,
-			brokerConfigured: false,
+			tokenPresent,
+			broker: brokerConfig?.url ?? null,
+			brokerConfigured: brokerConfig !== null,
 			brokerAuthenticated: false,
+			dbPath: brokerConfig ? null : getAgentDbPath(getAgentDir()),
+			error: message,
 		};
 		if (flags.json) {
 			process.stdout.write(`${JSON.stringify(status)}\n`);
 		} else {
-			process.stdout.write(`${chalk.yellow("No broker configured.")} Set SKC_AUTH_BROKER_URL.\n`);
+			const what = brokerConfig ? `upstream broker: ${brokerConfig.url}` : `local store: ${status.dbPath}`;
+			process.stdout.write(`${chalk.red("FAILED")} ${what}: ${message}\n`);
 			process.stdout.write(
-				`token: ${status.tokenPresent ? chalk.green("present") : chalk.red("missing")} at ${status.tokenFile}\n`,
+				`token: ${tokenPresent ? chalk.green("present") : chalk.red("missing")} at ${tokenFile}\n`,
 			);
 		}
 		process.exitCode = 1;
@@ -268,56 +325,50 @@ async function runStatus(flags: AuthGatewayCommandArgs["flags"]): Promise<void> 
 	}
 
 	try {
-		const snapshot = await fetchBrokerSnapshot(createBrokerClient(brokerConfig));
-		const tokenPresent = token !== null;
+		const credentialCount = source.storage.exportSnapshot().credentials.length;
+		// Ready means a client can actually get an answer: it needs a bearer
+		// token to present, and we need at least one provider credential to serve.
+		const ready = tokenPresent && credentialCount > 0;
 		const status = {
-			ready: tokenPresent,
-			reason: tokenPresent ? null : "token_missing",
+			ready,
+			reason: !tokenPresent ? "token_missing" : credentialCount === 0 ? "no_credentials" : null,
+			source: source.kind,
 			tokenFile,
 			tokenPresent,
-			broker: brokerConfig.url,
-			brokerConfigured: true,
-			brokerAuthenticated: true,
-			credentialCount: snapshot.credentials.length,
+			broker: source.brokerUrl,
+			brokerConfigured: source.kind === "broker",
+			brokerAuthenticated: source.kind === "broker",
+			dbPath: source.dbPath,
+			credentialCount,
 		};
 		if (flags.json) {
 			process.stdout.write(`${JSON.stringify(status)}\n`);
 		} else {
-			const brokerLine = `upstream broker: ${brokerConfig.url} (${snapshot.credentials.length} credential${
-				snapshot.credentials.length === 1 ? "" : "s"
-			})`;
-			process.stdout.write(`${tokenPresent ? chalk.green("ready") : chalk.yellow("not ready")} ${brokerLine}\n`);
+			const plural = credentialCount === 1 ? "" : "s";
+			const sourceLine =
+				source.kind === "broker"
+					? `upstream broker: ${source.brokerUrl} (${credentialCount} credential${plural})`
+					: `local store: ${source.dbPath} (${credentialCount} credential${plural})`;
+			process.stdout.write(`${ready ? chalk.green("ready") : chalk.yellow("not ready")} ${sourceLine}\n`);
 			process.stdout.write(
-				`token: ${tokenPresent ? chalk.green("present") : chalk.red("missing")} at ${status.tokenFile}\n`,
+				`token: ${tokenPresent ? chalk.green("present") : chalk.red("missing")} at ${tokenFile}\n`,
 			);
 			if (!tokenPresent) {
 				process.stdout.write(
 					"Run `skc auth-gateway token` or `skc auth-gateway serve` to create a bearer token.\n",
 				);
 			}
+			if (credentialCount === 0) {
+				process.stdout.write(
+					source.kind === "broker"
+						? "The broker holds no credentials. Log in on the broker host.\n"
+						: "No local credentials. Run `skc auth-broker login <provider>` (e.g. anthropic).\n",
+				);
+			}
 		}
-		if (!tokenPresent) process.exitCode = 1;
-	} catch (error) {
-		const message = error instanceof Error ? error.message : String(error);
-		const status = {
-			ready: false,
-			reason: "broker_unavailable",
-			tokenFile,
-			tokenPresent: token !== null,
-			broker: brokerConfig.url,
-			brokerConfigured: true,
-			brokerAuthenticated: false,
-			error: message,
-		};
-		if (flags.json) {
-			process.stdout.write(`${JSON.stringify(status)}\n`);
-		} else {
-			process.stdout.write(`${chalk.red("FAILED")} upstream broker: ${brokerConfig.url}: ${message}\n`);
-			process.stdout.write(
-				`token: ${status.tokenPresent ? chalk.green("present") : chalk.red("missing")} at ${status.tokenFile}\n`,
-			);
-		}
-		process.exitCode = 1;
+		if (!ready) process.exitCode = 1;
+	} finally {
+		source.storage.close();
 	}
 }
 
@@ -343,30 +394,22 @@ export async function runAuthGatewayCommand(cmd: AuthGatewayCommandArgs): Promis
 }
 
 /**
- * `skc auth-gateway check` — probe each broker-supplied credential and print
- * per-credential auth health. Use this when the gateway is returning 401s and
+ * `skc auth-gateway check` — probe each credential the gateway would serve and
+ * print per-credential auth health. Use this when the gateway is returning 401s
  * you need to find which row in a multi-account pool is the bad one. The
  * aggregate `/v1/usage` endpoint silently drops failed credentials, so a
  * dedicated diagnostic is the only way to see which credentials failed.
  */
 async function runCheck(flags: AuthGatewayCommandArgs["flags"]): Promise<void> {
-	const brokerConfig = await resolveAuthBrokerConfig();
-	if (!brokerConfig) {
-		throw new Error(
-			"`skc auth-gateway check` requires SKC_AUTH_BROKER_URL (or `auth.broker.url`/`auth.broker.token` in config.yml). It probes the same credentials the gateway would serve.",
-		);
-	}
-
-	const client = createBrokerClient(brokerConfig);
-	const initialSnapshot = await fetchBrokerSnapshot(client);
-	const store = new RemoteAuthCredentialStore({ client, initialSnapshot });
-	const storage = new AuthStorage(store, { sourceLabel: `broker ${brokerConfig.url}` });
+	const source = await openGatewayCredentialSource();
+	const storage = source.storage;
 	try {
-		await storage.reload();
 		const results = await storage.checkCredentials();
 
 		if (flags.json) {
-			process.stdout.write(`${JSON.stringify({ broker: brokerConfig.url, credentials: results }, null, 2)}\n`);
+			process.stdout.write(
+				`${JSON.stringify({ source: source.kind, broker: source.brokerUrl, dbPath: source.dbPath, credentials: results }, null, 2)}\n`,
+			);
 		} else {
 			const grouped = new Map<string, typeof results>();
 			for (const row of results) {
@@ -375,7 +418,7 @@ async function runCheck(flags: AuthGatewayCommandArgs["flags"]): Promise<void> {
 				grouped.set(row.provider, list);
 			}
 			const providers = [...grouped.keys()].sort();
-			process.stdout.write(`broker: ${brokerConfig.url}\n`);
+			process.stdout.write(`${source.label}\n`);
 			for (const provider of providers) {
 				const rows = grouped.get(provider) ?? [];
 				process.stdout.write(`\n${chalk.bold(provider)} (${rows.length})\n`);

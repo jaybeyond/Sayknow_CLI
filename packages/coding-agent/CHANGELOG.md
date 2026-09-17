@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Changed
+
+- `skc auth-gateway` (`serve`, `status`, `check`) now falls back to the local SQLite credential store when no broker is configured, matching `discoverAuthStorage()` precedence. A configured broker still wins and never degrades to local credentials. Single-machine users no longer have to run `skc auth-broker serve` alongside the gateway.
+- `skc auth-gateway status --json` reports `source` (`broker`/`local`), `dbPath`, and `credentialCount` in both modes; `ready` now requires a bearer token **and** at least one credential (`reason`: `token_missing`, `no_credentials`, `broker_unavailable`, `local_store_unavailable`).
+
 ## [0.5.20] - 2026-09-17
 
 ### Fixed

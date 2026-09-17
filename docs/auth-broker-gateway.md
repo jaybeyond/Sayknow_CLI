@@ -3,7 +3,7 @@
 The auth broker and auth gateway are two cooperating HTTP services that move OAuth refresh tokens and provider access tokens off developer laptops and into a single broker host.
 
 - **`skc auth-broker serve`** holds the canonical SQLite credential vault, performs OAuth refreshes, and exposes a small REST API (`/v1/snapshot`, `/v1/credential/:id/refresh`, `/v1/credential/:id/disable`, `/v1/credential`, `/v1/usage`, `/v1/healthz`).
-- **`skc auth-gateway serve`** is a forward-proxy. It accepts OpenAI Chat Completions, Anthropic Messages, and OpenAI Responses requests, injects the broker-resolved access token, and forwards the bytes to the real provider. Clients (containerised skc, llm-git, the macOS usage widget, …) never see the access token.
+- **`skc auth-gateway serve`** is a forward-proxy. It accepts OpenAI Chat Completions, Anthropic Messages, and OpenAI Responses requests, injects the resolved access token, and forwards the bytes to the real provider. Clients (containerised skc, local desktop apps, llm-git, the macOS usage widget, …) never see the access token. Credentials come from the broker when one is configured, otherwise from the local SQLite store — so the gateway also runs standalone on a single machine.
 
 Transport security between operator, broker, and gateway is delegated to the operator (Tailscale / Wireguard / reverse proxy + TLS). Every endpoint except `/v1/healthz` (broker) and `/healthz` (gateway) requires a bearer token.
 
@@ -90,10 +90,13 @@ Requests use `Authorization: Bearer <token>`. The server compares against an in-
 skc auth-gateway serve   [--bind=host:port] [--no-auth]
 skc auth-gateway token   [--regenerate] [--json]
 skc auth-gateway status  [--json]
+skc auth-gateway check   [--json]
 ```
 
-- `serve` requires `SKC_AUTH_BROKER_URL` (or `auth.broker.url` in `config.yml`) — the gateway is itself a broker client. It calls `AuthBrokerClient.fetchSnapshot()`, wraps it in `RemoteAuthCredentialStore`, and constructs an `AuthStorage` that resolves access tokens through the broker. Default bind is `127.0.0.1:4000`. The gateway token is stored at `<config-dir>/auth-gateway.token` (`0600`); `--no-auth` disables the bearer check entirely (loopback-only use).
-- `token` / `status` mirror the broker’s equivalents.
+- `serve` resolves credentials with the same precedence as the interactive client (`discoverAuthStorage()`): when `SKC_AUTH_BROKER_URL` (or `auth.broker.url` in `config.yml`) is set the gateway is a broker client — it calls `AuthBrokerClient.fetchSnapshot()`, wraps it in `RemoteAuthCredentialStore`, and never touches local SQLite. With no broker configured it serves from the local store at `<agent-dir>/agent.db`, so a single-machine user runs the gateway alone instead of also standing up `skc auth-broker serve`. Default bind is `127.0.0.1:4000`. The gateway token is stored at `<config-dir>/auth-gateway.token` (`0600`); `--no-auth` disables the bearer check entirely (loopback-only use).
+- `status` prints the credential source (`source: "broker" | "local"`), `credentialCount`, and the bearer-token state. `ready` is true only when a bearer token exists **and** at least one credential is available; otherwise `reason` is `token_missing`, `no_credentials`, `broker_unavailable`, or `local_store_unavailable` and the exit code is `1`.
+- `check` probes every credential the gateway would serve — broker-supplied or local — and reports per-credential auth health.
+- `token` mirrors the broker’s equivalent.
 
 ### Endpoints
 
@@ -141,7 +144,7 @@ The broker is **off** unless `SKC_AUTH_BROKER_URL` (or `auth.broker.url` in `con
 
 | Variable | Purpose | Required when |
 | -------- | ------- | ------------- |
-| `SKC_AUTH_BROKER_URL`   | Base URL of the remote auth-broker (e.g. `https://broker.tailnet:8765`). Selecting this puts the client in broker mode — local SQLite is bypassed. | Any time the skc client should resolve credentials through a broker (and required by `skc auth-gateway serve`). |
+| `SKC_AUTH_BROKER_URL`   | Base URL of the remote auth-broker (e.g. `https://broker.tailnet:8765`). Selecting this puts the client in broker mode — local SQLite is bypassed. | Any time the skc client (or `skc auth-gateway`) should resolve credentials through a broker. Unset means the local SQLite store is used. |
 | `SKC_AUTH_BROKER_TOKEN` | Bearer token used for every broker endpoint except `/v1/healthz`. | When `SKC_AUTH_BROKER_URL` is set and no token is available from `auth.broker.token` or `<config-dir>/auth-broker.token`. |
 
 Resolution order in `resolveAuthBrokerConfig()`:
@@ -150,7 +153,7 @@ Resolution order in `resolveAuthBrokerConfig()`:
 2. `SKC_AUTH_BROKER_TOKEN` env (else `auth.broker.token` from `config.yml`, else `<config-dir>/auth-broker.token`);
 3. URL set but no token resolvable → hard error pointing at the token file path.
 
-The gateway has no dedicated env vars — it inherits `SKC_AUTH_BROKER_*` because it is itself a broker client.
+The gateway has no dedicated env vars — it inherits `SKC_AUTH_BROKER_*` because it is a broker client whenever a broker is configured, and falls back to the same local store the interactive client uses when one is not.
 
 ### `config.yml` keys
 

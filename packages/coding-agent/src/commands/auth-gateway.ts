@@ -1,5 +1,6 @@
 /**
- * `skc auth-gateway` — run a forward proxy that injects auth from the broker.
+ * `skc auth-gateway` — run a forward proxy that injects auth from the broker,
+ * or from the local credential store when no broker is configured.
  */
 import { Args, Command, Flags, renderCommandHelp } from "@sayknow-cli/utils/cli";
 import {
@@ -11,7 +12,8 @@ import {
 import { initTheme } from "../modes/theme/theme";
 
 export default class AuthGateway extends Command {
-	static description = "Run an auth-gateway forward proxy backed by the configured broker";
+	static description =
+		"Run an auth-gateway forward proxy backed by the configured broker, or local credentials when no broker is set";
 
 	static args = {
 		action: Args.string({
@@ -32,13 +34,13 @@ export default class AuthGateway extends Command {
 	};
 
 	static examples = [
-		"# Boot the gateway against the configured broker\n  skc auth-gateway serve",
+		"# Boot the gateway (broker when configured, else local credentials)\n  skc auth-gateway serve",
 		"# Boot on a non-default port\n  skc auth-gateway serve --bind=127.0.0.1:4000",
 		"# Print the gateway bearer token (creates one on first run)\n  skc auth-gateway token",
 		"# Rotate the gateway bearer token\n  skc auth-gateway token --regenerate",
 		"# Run on loopback without any bearer (anyone on this host can call)\n  skc auth-gateway serve --no-auth",
-		"# Show local gateway + broker config status\n  skc auth-gateway status",
-		"# Probe each broker credential to see which one is producing 401s\n  skc auth-gateway check",
+		"# Show gateway token + credential source status\n  skc auth-gateway status",
+		"# Probe each credential to see which one is producing 401s\n  skc auth-gateway check",
 		"# Same, machine-readable for scripts\n  skc auth-gateway check --json",
 	];
 
