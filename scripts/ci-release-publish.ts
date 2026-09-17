@@ -823,7 +823,9 @@ export async function publishRetainedPackage(
 	// aborted before coding-agent/sayknow-cli could publish. Keep the same
 	// delay cadence and widen the window so transient metadata/CDN lag cannot
 	// strand a partially-published tag.
-	const retries = operations.visibilityRetries ?? 72;
+	// sayknow-v0.5.14..0.5.19 then failed the same way on coding-agent (~6m was
+	// still short for that tarball), so the default window is 15 minutes.
+	const retries = operations.visibilityRetries ?? 180;
 	const delayMs = operations.visibilityDelayMs ?? 5000;
 	const sleep = operations.sleep ?? ((ms: number) => Bun.sleep(ms));
 	const isTransientVisibilityError = (error: unknown): boolean => {
