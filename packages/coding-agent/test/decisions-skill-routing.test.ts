@@ -6,7 +6,7 @@ import { createDecisionService } from "../src/decisions";
 import { createSemanticSkillRouter } from "../src/decisions/skill-routing";
 import type { DecisionBackend, DecisionResult } from "../src/decisions/types";
 import { detectPrimarySkillKeyword, recordSkillActivation } from "../src/hooks/skill-state";
-import { listActiveSkills } from "../src/skill-state/active-state";
+import { type CanonicalSkcWorkflowSkill, listActiveSkills } from "../src/skill-state/active-state";
 
 function serviceReturning(choice: string, seen?: { state?: string }): ReturnType<typeof createDecisionService> {
 	const backend: DecisionBackend = {
@@ -25,19 +25,21 @@ function serviceReturning(choice: string, seen?: { state?: string }): ReturnType
 	return createDecisionService({ registry: {} as never, settings: {} as never, enabled: true, backends: [backend] });
 }
 
-test("routes Korean paraphrases the keyword table cannot see", async () => {
-	const korean = [
+test("routes Korean paraphrases the keyword table still cannot see", async () => {
+	// The keyword table gained Korean entries, so the semantic stage is no longer the
+	// only thing that fires on Korean. These phrasings sit outside it on purpose: they
+	// say the same thing without using any enumerated phrase, which is exactly the gap
+	// the semantic stage exists to cover.
+	const beyondKeywords = [
 		"요구사항이 아직 흐릿한데 나한테 질문해서 스펙을 뽑아줘",
-		"이거 아키텍처 리스크 커. 실행 전에 합의된 계획부터 세워줘",
-		"이 목표 끝까지 추적해줘. 중간에 잊지 말고",
-		"작업 크니까 워커 여러 개로 나눠서 병렬로 돌려줘",
+		"설계가 위험해 보여. 먼저 승인받을 문서부터 만들자",
+		"이 일은 여러 사람이 나눠 맡아야 할 크기야",
 	];
-	for (const prompt of korean) {
-		// Baseline: the deterministic stage genuinely has nothing for these.
+	for (const prompt of beyondKeywords) {
 		expect(detectPrimarySkillKeyword(prompt)).toBeNull();
 	}
 	const route = createSemanticSkillRouter(serviceReturning("ralplan"));
-	expect(await route(korean[1] as string)).toBe("ralplan");
+	expect(await route(beyondKeywords[1] as string)).toBe("ralplan");
 });
 
 test("none is a real answer, not a routing failure", async () => {
@@ -121,7 +123,7 @@ test("a throwing semantic stage leaves activation exactly as keyword-only", asyn
 test("semantic activation is recorded when the keyword table misses", async () => {
 	const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "skc-routing-"));
 	try {
-		const prompt = "이거 아키텍처 리스크 커. 실행 전에 합의된 계획부터 세워줘";
+		const prompt = "설계가 위험해 보여. 먼저 승인받을 문서부터 만들자";
 		expect(detectPrimarySkillKeyword(prompt)).toBeNull();
 		const state = await recordSkillActivation({
 			cwd,
@@ -131,5 +133,39 @@ test("semantic activation is recorded when the keyword table misses", async () =
 		expect(listActiveSkills(state).some(entry => entry.skill === "ralplan")).toBe(true);
 	} finally {
 		await fs.rm(cwd, { force: true, recursive: true });
+	}
+});
+
+test("Korean keywords close the deterministic gap without firing on ordinary work", () => {
+	// Before these entries the table was English-only and recalled 0/9 on Korean.
+	const shouldMatch: Array<[string, CanonicalSkcWorkflowSkill]> = [
+		["추측하지 말고 모르는 건 다 물어봐", "deep-interview"],
+		["뭘 만들지 정리가 안 됐어. 인터뷰하듯 파고들어줘", "deep-interview"],
+		["이거 아키텍처 리스크 커. 실행 전에 합의된 계획부터 세워줘", "ralplan"],
+		["여러 안 비교해서 검토받을 계획서 만들어줘", "ralplan"],
+		["이 목표 끝까지 추적해줘. 중간에 잊지 말고", "ultragoal"],
+		["장기 목표로 등록해두고 진행상황 계속 관리해", "ultragoal"],
+		["작업 크니까 워커 여러 개로 나눠서 병렬로 돌려줘", "team"],
+		["팀 구성해서 각자 파트 맡아 진행하게 해", "team"],
+	];
+	for (const [prompt, skill] of shouldMatch) {
+		expect(detectPrimarySkillKeyword(prompt)?.skill).toBe(skill);
+	}
+
+	// A keyword fires with full authority and no confidence to fall back on, so a loose
+	// entry activates a workflow the user never asked for. That is worse than missing
+	// one, because the semantic stage still catches paraphrases behind it.
+	const mustStaySilent = [
+		"이 테스트 왜 깨지는지 봐줘",
+		"README 오타 하나 고쳐",
+		"이 함수 뭐하는 건지 설명해줘",
+		"이 정규식 무슨 뜻이야?",
+		"우리 서비스에 이 모델 붙이면 뭐가 좋아?",
+		"계획 없이 그냥 바로 고쳐줘",
+		"팀에서 쓰는 린트 설정 알려줘",
+		"목표 달성률 계산하는 함수 보여줘",
+	];
+	for (const prompt of mustStaySilent) {
+		expect(detectPrimarySkillKeyword(prompt)).toBeNull();
 	}
 });
