@@ -7,7 +7,10 @@
  * prompts, and compares it with the deterministic keyword stage it is meant to
  * back up.
  *
- *   bun scripts/eval-skill-routing.ts [--repeat N] [--json out.json]
+ *   bun scripts/eval-skill-routing.ts [--repeat N] [--json out.json] [--backend typesafe|llm]
+ *
+ * `--backend` pins one backend so the two can be compared head to head. Without it the
+ * normal resolution order applies (TypeSafe when a key exists, else the logged-in model).
  *
  * The keyword baseline is recomputed here rather than quoted, so the comparison
  * can never drift away from what `skill-keywords.ts` currently contains.
@@ -15,7 +18,7 @@
 import { ModelRegistry } from "../src/config/model-registry";
 import { resolveRoleSelection } from "../src/config/model-resolver";
 import { Settings } from "../src/config/settings";
-import { createDecisionService } from "../src/decisions";
+import { createDecisionService, createLlmDecisionBackend, createTypeSafeDecisionBackend } from "../src/decisions";
 import { createSemanticSkillRouter } from "../src/decisions/skill-routing";
 import { detectPrimarySkillKeyword } from "../src/hooks/skill-state";
 import { discoverAuthStorage } from "../src/sdk";
@@ -66,12 +69,34 @@ async function main(): Promise<void> {
 	const registry = new ModelRegistry(await discoverAuthStorage());
 	await registry.refresh();
 	registry.applyConfiguredModelBindings(settings);
+	const backendIndex = Bun.argv.indexOf("--backend");
+	const pinned = backendIndex > 0 ? Bun.argv[backendIndex + 1] : undefined;
 	const model = resolveRoleSelection(["smol", "default"], settings, registry.getAvailable(), registry)?.model;
-	if (!model) throw new Error("no model available — log in first");
-	console.log(`model: ${model.provider}/${model.id}   repeat: ${repeat}\n`);
+	if (!model && pinned !== "typesafe") throw new Error("no model available — log in first");
+
+	// `--model provider/id` pins one concrete model so candidates can be compared on
+	// measured accuracy and latency instead of on guesses about what "small" means.
+	const modelIndex = Bun.argv.indexOf("--model");
+	const wanted = modelIndex > 0 ? Bun.argv[modelIndex + 1] : undefined;
+	const forced = wanted
+		? registry.getAvailable().find(m => `${m.provider}/${m.id}` === wanted || m.id === wanted)
+		: undefined;
+	if (wanted && !forced) throw new Error(`model not available: ${wanted}`);
+
+	const backends =
+		pinned === "typesafe"
+			? [createTypeSafeDecisionBackend({ registry })]
+			: pinned === "llm" || forced
+				? [createLlmDecisionBackend({ registry, settings, model: forced })]
+				: undefined;
+	// The llm backend now selects its own small model, so the script cannot label the run
+	// from role resolution — doing so reported opus while a 4B model actually answered.
+	const label =
+		pinned === "typesafe" ? "typesafe/jev" : pinned === "llm" ? "llm/auto-small" : `${model?.provider}/${model?.id}`;
+	console.log(`backend: ${pinned ?? "auto"}   model: ${label}   repeat: ${repeat}\n`);
 
 	const route = createSemanticSkillRouter(
-		createDecisionService({ registry, settings, enabled: true, timeoutMs: 30_000 }),
+		createDecisionService({ registry, settings, enabled: true, timeoutMs: 30_000, backends }),
 	);
 
 	const rows: Array<{ case: Case; keyword: Expected; semantic: Expected; ms: number }> = [];
@@ -129,7 +154,10 @@ async function main(): Promise<void> {
 			jsonPath,
 			JSON.stringify(
 				{
-					model: `${model.provider}/${model.id}`,
+					// Must be the backend that actually answered, not the chat model that was
+					// resolved for the fallback path — a mislabelled run poisons later comparisons.
+					model: label,
+					backend: pinned ?? "auto",
 					repeat,
 					rows: rows.map(r => ({ ...r.case, ...r, case: undefined })),
 				},

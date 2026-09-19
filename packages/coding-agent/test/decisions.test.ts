@@ -246,3 +246,132 @@ test("sends the System One wire shape the hosted API documents", async () => {
 	// noul carries no criteria on the wire
 	expect(sent?.questions).toEqual({ urgent: { type: "noul", instructions: "is it urgent" } });
 });
+
+// --- cost guard --------------------------------------------------------------
+
+import { createLlmDecisionBackend } from "../src/decisions/llm-backend";
+
+/** Minimal Settings stub: role resolution reads usage order and the role mapping. */
+function settingsStub(role = "test-model") {
+	return {
+		getStorage: () => undefined,
+		getModelRole: () => role,
+	} as never;
+}
+
+function registryWithModel(inputCostPerMTok: number, onGetApiKey?: () => void) {
+	const model = {
+		provider: "anthropic",
+		id: "test-model",
+		cost: { input: inputCostPerMTok, output: 0, cacheRead: 0, cacheWrite: 0 },
+		reasoning: false,
+	};
+	const registry = {
+		getAvailable: () => [model],
+		async getApiKey() {
+			onGetApiKey?.();
+			// Stop before the network: these tests only assert whether the guard was passed.
+			return undefined;
+		},
+	};
+	return { model, registry: registry as never };
+}
+
+test("declines a frontier model: a decision must never cost more than what it replaces", async () => {
+	let reached = false;
+	const { registry } = registryWithModel(15, () => {
+		reached = true;
+	});
+	const backend = createLlmDecisionBackend({ registry, settings: settingsStub() });
+	expect(await backend.decide({ state: "라우팅 대상", questions: tsQuestions })).toBeNull();
+	// Declined before touching credentials, so no request is ever prepared.
+	expect(reached).toBe(false);
+});
+
+test("an explicit model override is the caller's call and bypasses the ceiling", async () => {
+	let reached = false;
+	const { registry, model } = registryWithModel(15, () => {
+		reached = true;
+	});
+	const backend = createLlmDecisionBackend({ registry, settings: settingsStub(), model: model as never });
+	await backend.decide({ state: "x", questions: tsQuestions });
+	expect(reached).toBe(true);
+});
+
+test("the ceiling is configurable for callers that accept the cost", async () => {
+	let reached = false;
+	const { registry } = registryWithModel(15, () => {
+		reached = true;
+	});
+	const backend = createLlmDecisionBackend({ registry, settings: settingsStub(), maxInputCostPerMTok: 100 });
+	await backend.decide({ state: "x", questions: tsQuestions });
+	expect(reached).toBe(true);
+});
+
+// --- local runtime preference ------------------------------------------------
+
+import { clearLocalRuntimeLivenessCache } from "../src/decisions/llm-backend";
+
+function registryWithLocal(localAlive: boolean) {
+	const local = {
+		provider: "lm-studio",
+		id: "qwen3-4b-local",
+		baseUrl: "http://127.0.0.1:1234/v1",
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		reasoning: false,
+	};
+	const hosted = {
+		provider: "anthropic",
+		id: "claude-haiku-4-5",
+		baseUrl: "https://api.anthropic.com",
+		cost: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0 },
+		reasoning: false,
+	};
+	let picked: string | undefined;
+	const registry = {
+		getAvailable: () => [hosted, local],
+		async getApiKey(model: { provider: string; id: string }) {
+			picked = `${model.provider}/${model.id}`;
+			return undefined; // stop before the network
+		},
+	};
+	const fetchImpl = (async (url: string) => {
+		if (!url.startsWith("http://127.0.0.1:1234")) throw new Error(`unexpected probe: ${url}`);
+		if (!localAlive) throw new Error("ECONNREFUSED");
+		return new Response("{}", { status: 200 });
+	}) as never;
+	return { registry: registry as never, fetchImpl, picked: () => picked };
+}
+
+test("a live local runtime wins: zero tokens and nothing leaves the machine", async () => {
+	clearLocalRuntimeLivenessCache();
+	const { registry, fetchImpl, picked } = registryWithLocal(true);
+	const backend = createLlmDecisionBackend({ registry, settings: settingsStub(), fetchImpl });
+	await backend.decide({ state: "라우팅 대상 문장", questions: tsQuestions });
+	expect(picked()).toBe("lm-studio/qwen3-4b-local");
+});
+
+test("a dead local runtime is skipped rather than hung on", async () => {
+	clearLocalRuntimeLivenessCache();
+	const { registry, fetchImpl, picked } = registryWithLocal(false);
+	const backend = createLlmDecisionBackend({ registry, settings: settingsStub(), fetchImpl });
+	await backend.decide({ state: "라우팅 대상 문장", questions: tsQuestions });
+	// The registry lists local models whether or not the runtime is up, so the probe is
+	// the only thing standing between a decision and a dead endpoint.
+	expect(picked()).toBe("anthropic/claude-haiku-4-5");
+});
+
+test("liveness is probed once, not on every decision", async () => {
+	clearLocalRuntimeLivenessCache();
+	let probes = 0;
+	const { registry } = registryWithLocal(true);
+	const counting = (async (url: string) => {
+		probes += 1;
+		if (!url.startsWith("http://127.0.0.1:1234")) throw new Error("unexpected");
+		return new Response("{}", { status: 200 });
+	}) as never;
+	const backend = createLlmDecisionBackend({ registry, settings: settingsStub(), fetchImpl: counting });
+	await backend.decide({ state: "첫 번째 판단", questions: tsQuestions });
+	await backend.decide({ state: "두 번째 판단", questions: tsQuestions });
+	expect(probes).toBe(1);
+});

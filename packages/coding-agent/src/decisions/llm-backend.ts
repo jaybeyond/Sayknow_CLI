@@ -135,6 +135,25 @@ function toAnswers(questions: DecisionRequest["questions"], args: Record<string,
 }
 
 export interface LlmBackendDeps {
+	/**
+	 * Refuse to spend more than this per million input tokens on a decision.
+	 *
+	 * The whole premise of a typed-decision service is judgment cheap enough to put in
+	 * places you could not previously afford it. Routing a prompt through a frontier
+	 * model inverts that: the deterministic path it replaces costs effectively nothing
+	 * (the routing rules already sit in the cached system prompt), so a decision call on
+	 * an expensive model is a pure cost *increase* for a few points of accuracy.
+	 *
+	 * Measured: a routing decision on claude-opus-5 costs ~$0.0063 and 1.46s; the same
+	 * decision on the hosted System One model costs ~$0.000018 and 0.31s.
+	 *
+	 * Above the cap this backend declines, which leaves routing to the system prompt —
+	 * exactly the behaviour before typed decisions existed. Configure a `smol` role with
+	 * a cheap model to turn it back on.
+	 */
+	maxInputCostPerMTok?: number;
+	/** Injected in tests to make the local-runtime probe deterministic. */
+	fetchImpl?: typeof fetch;
 	registry: ModelRegistry;
 	settings: Settings;
 	sessionId?: string;
@@ -142,17 +161,155 @@ export interface LlmBackendDeps {
 	model?: Model<Api>;
 }
 
+/**
+ * Default ceiling, in $/million input tokens.
+ *
+ * Sits above Haiku/mini-class pricing and below every frontier model, so the backend
+ * runs when a cheap model is configured and stands down when only an expensive one is.
+ */
+const DEFAULT_MAX_INPUT_COST_PER_MTOK = 1.5;
+
+/**
+ * Model ids that advertise a small variant.
+ *
+ * Picking "the cheapest available model" sounds right and is wrong: on a real registry
+ * the cheapest entries are subscription-priced specials — measured here, the three
+ * lowest were `codex-auto-review`, `gpt-5-codex-mini` and **`gpt-image-2`**. A price of
+ * zero means "covered by a plan", not "small", so price alone cannot choose.
+ *
+ * This matches only models that name themselves small. It is conservative on purpose:
+ * when nothing matches we decline and routing stays where it was, which is a far better
+ * failure than silently sending decisions to an image generator.
+ */
+const SMALL_MODEL_ID = /(^|[-_/])(mini|flash|haiku|air|lite|nano|small|tiny|\d+b)([-_.]|$)/i;
+
+/** Text in, text out. A decision has no use for image modalities either way. */
+function isTextOnly(model: Model<Api>): boolean {
+	return (model.input ?? ["text"]).includes("text") && !(model.output ?? ["text"]).includes("image");
+}
+
+/**
+ * Locally hosted runtimes. A decision answered here costs no tokens at all and the
+ * state never leaves the machine, which is the strongest possible fit for this feature.
+ *
+ * The catch is that the registry lists their models whether or not the runtime is
+ * running — verified here: with LM Studio, Ollama and llama.cpp all stopped,
+ * `getAvailable()` still returned three `lm-studio/*` models. Selecting one blindly
+ * points decisions at a dead endpoint, so a local model is only chosen after its
+ * endpoint answers.
+ */
+const LOCAL_PROVIDERS = new Set(["lm-studio", "ollama", "llama.cpp"]);
+
+/** A probe must be quick enough to be worth doing before a sub-second decision. */
+const LIVENESS_TIMEOUT_MS = 600;
+/** Re-probe occasionally rather than per decision; runtimes start and stop between turns. */
+const LIVENESS_TTL_MS = 30_000;
+
+const livenessCache = new Map<string, { alive: boolean; checkedAt: number }>();
+
+/** Reset between tests; also lets a caller force a fresh probe after starting a runtime. */
+export function clearLocalRuntimeLivenessCache(): void {
+	livenessCache.clear();
+}
+
+async function isLocalRuntimeAlive(baseUrl: string, fetchImpl: typeof fetch = fetch): Promise<boolean> {
+	const cached = livenessCache.get(baseUrl);
+	if (cached && Date.now() - cached.checkedAt < LIVENESS_TTL_MS) return cached.alive;
+
+	const controller = new AbortController();
+	const timer = setTimeout(() => controller.abort(), LIVENESS_TIMEOUT_MS);
+	let alive = false;
+	try {
+		// `/models` is the one endpoint every OpenAI-compatible local runtime serves, and
+		// it is cheap. Any answer at all proves the process is up; the status does not
+		// matter because some runtimes answer 404 until a model is loaded.
+		const response = await fetchImpl(`${baseUrl.replace(/\/+$/, "")}/models`, { signal: controller.signal });
+		alive = response.status < 500;
+	} catch {
+		alive = false;
+	} finally {
+		clearTimeout(timer);
+	}
+	livenessCache.set(baseUrl, { alive, checkedAt: Date.now() });
+	if (!alive) logger.debug("decisions/llm: local runtime not answering", { baseUrl });
+	return alive;
+}
+
+/**
+ * Pick a small, fast text model.
+ *
+ * Sorting by price alone is a trap, and it was measured: the cheapest qualifying model
+ * on this registry is free but took **4.8s** per routing decision — three times slower
+ * than the frontier model it was meant to replace — because "free" subscription tiers
+ * are dominated by reasoning models. A decision service that is cheap and slow has
+ * missed the point twice over.
+ *
+ * So non-reasoning wins first, price second. Ties break by id so the choice is stable
+ * across runs; a backend that silently changed model between turns would make routing
+ * non-reproducible, which is most of what this feature is for.
+ */
+async function pickSmallModel(
+	available: Model<Api>[],
+	costCeiling: number,
+	fetchImpl?: typeof fetch,
+): Promise<Model<Api> | undefined> {
+	// A local runtime that is actually up wins outright: zero tokens, zero egress. Its
+	// size is not screened the way hosted models are — if the user loaded it, they chose
+	// it, and trying costs nothing.
+	const local = available
+		.filter(model => LOCAL_PROVIDERS.has(model.provider) && isTextOnly(model))
+		.sort((a, b) => a.id.localeCompare(b.id));
+	for (const model of local) {
+		if (await isLocalRuntimeAlive(model.baseUrl, fetchImpl)) {
+			logger.debug("decisions/llm: using local runtime", { id: `${model.provider}/${model.id}` });
+			return model;
+		}
+	}
+
+	return available
+		.filter(
+			model =>
+				isTextOnly(model) &&
+				model.cost.input <= costCeiling &&
+				SMALL_MODEL_ID.test(model.id) &&
+				!LOCAL_PROVIDERS.has(model.provider),
+		)
+		.sort(
+			(a, b) =>
+				Number(!!a.reasoning) - Number(!!b.reasoning) || a.cost.input - b.cost.input || a.id.localeCompare(b.id),
+		)[0];
+}
+
 export function createLlmDecisionBackend(deps: LlmBackendDeps): DecisionBackend {
+	const costCeiling = deps.maxInputCostPerMTok ?? DEFAULT_MAX_INPUT_COST_PER_MTOK;
 	return {
 		name: "llm",
 		async decide(request: DecisionRequest): Promise<DecisionResult | null> {
 			validateQuestions(request.questions);
 			const available = deps.registry.getAvailable();
-			// "smol" first: decisions are short, frequent, and never need a frontier model.
-			const model =
-				deps.model ?? resolveRoleSelection(["smol", "default"], deps.settings, available, deps.registry)?.model;
-			if (!model) {
-				logger.debug("decisions/llm: no model available");
+			// Resolution order, cheapest intent first:
+			//   1. an explicit override — the caller already decided
+			//   2. the `smol` role — the user already decided
+			//   3. the cheapest small model on hand — nobody decided, so decide safely
+			// `default` is deliberately absent: it is whatever the user chats with, which is
+			// exactly the frontier model this feature exists to avoid spending on.
+			const chosen =
+				deps.model ??
+				resolveRoleSelection(["smol"], deps.settings, available, deps.registry)?.model ??
+				(await pickSmallModel(available, costCeiling, deps.fetchImpl));
+			if (!chosen) {
+				logger.debug("decisions/llm: no small model available; leaving the decision to existing behaviour");
+				return null;
+			}
+			const model = chosen;
+			// The ceiling still applies to an explicitly configured `smol` role — a role can
+			// point anywhere, including at a frontier model.
+			if (!deps.model && model.cost.input > costCeiling) {
+				logger.debug("decisions/llm: declining, model too expensive for a decision", {
+					id: `${model.provider}/${model.id}`,
+					inputCostPerMTok: model.cost.input,
+					ceiling: costCeiling,
+				});
 				return null;
 			}
 			const apiKey = await deps.registry.getApiKey(model, deps.sessionId);
