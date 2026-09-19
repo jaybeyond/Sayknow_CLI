@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.5.22] - 2026-09-19
+
 ### Added
 
 - TypeSafe (hosted System One `jev`) as a typed-decision backend. Add the key with `TYPESAFE_API_KEY=<key> skc setup typesafe`; it is verified against the live API before being stored, because the decision service fails open and an unverified bad key would be swallowed silently forever. Removing it (`--remove`) falls back to your logged-in model. The key is read from the environment, never a flag — this repo already refuses raw `--api-key` values because they leak into shell history and the process list.
