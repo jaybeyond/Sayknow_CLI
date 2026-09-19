@@ -80,7 +80,12 @@ function toAnswer(question: Question, raw: TypeSafeAnswer | undefined): Answer |
 	}
 	if (question.type === "choice") {
 		if (typeof raw.choice !== "string" || !(raw.choice in question.criteria)) return null;
-		return { type: "choice", choice: raw.choice, ...(raw.probabilities ? { probabilities: raw.probabilities } : {}) };
+		return {
+			type: "choice",
+			choice: raw.choice,
+			...(raw.probabilities ? { probabilities: raw.probabilities } : {}),
+			...(typeof raw.confidence === "number" ? { confidence: raw.confidence } : {}),
+		};
 	}
 	if (typeof raw.score !== "number") return null;
 	const level = Math.min(question.criteria.length - 1, Math.max(0, Math.round(raw.score)));
@@ -90,6 +95,7 @@ function toAnswer(question: Question, raw: TypeSafeAnswer | undefined): Answer |
 		level,
 		legend: raw.legend ?? Object.fromEntries(question.criteria.map((meaning, index) => [String(index), meaning])),
 		...(raw.probabilities ? { probabilities: raw.probabilities } : {}),
+		...(typeof raw.confidence === "number" ? { confidence: raw.confidence } : {}),
 	};
 }
 

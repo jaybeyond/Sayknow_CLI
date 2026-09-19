@@ -4,7 +4,12 @@ import { matchesSelectCancel } from "../../modes/utils/keybinding-matchers";
 import { formatModelOnboardingGuidance } from "../../setup/model-onboarding-guidance";
 import { DynamicBorder } from "./dynamic-border";
 
-export type ProviderOnboardingAction = "custom-provider-wizard" | "oauth-login" | "import-credentials" | "api-guide";
+export type ProviderOnboardingAction =
+	| "custom-provider-wizard"
+	| "oauth-login"
+	| "import-credentials"
+	| "api-guide"
+	| "typesafe-key";
 
 interface ProviderOnboardingOption {
 	label: string;
@@ -27,6 +32,13 @@ const PROVIDER_ONBOARDING_OPTIONS: ProviderOnboardingOption[] = [
 		label: "Add API-compatible provider",
 		description: "Show the /provider add and skc setup provider commands.",
 		action: "api-guide",
+	},
+	{
+		// Not a chat model, so it never shows in the model picker — but this list is where
+		// users come to add a key, and a CLI-only path means nobody turns it on.
+		label: "Add TypeSafe key (typed decisions)",
+		description: "Route workflow decisions through the hosted System One model. Off entirely without a key.",
+		action: "typesafe-key",
 	},
 	{
 		label: "Import existing credentials",

@@ -40,6 +40,12 @@ export interface ChoiceAnswer {
 	choice: string;
 	/** Present only when the backend exposes a distribution. */
 	probabilities?: Record<string, number>;
+	/**
+	 * How certain the backend is, 0..1. Only meaningful when the result reports
+	 * `calibrated: true` — that is the difference between a number you can threshold on
+	 * and a number that merely ranks. Absent when the backend cannot supply one.
+	 */
+	confidence?: number;
 }
 
 export interface ScoreAnswer {
@@ -50,6 +56,8 @@ export interface ScoreAnswer {
 	level: number;
 	legend: Record<string, string>;
 	probabilities?: Record<string, number>;
+	/** See {@link ChoiceAnswer.confidence}. */
+	confidence?: number;
 }
 
 export interface NoulAnswer {

@@ -150,6 +150,7 @@ import { ToolExecutionComponent } from "../components/tool-execution";
 import type { StatusLineSettings } from "../components/tool-status-header";
 import { TranscriptViewerOverlay, transcriptViewerEntries } from "../components/transcript-viewer-overlay";
 import { TreeSelectorComponent } from "../components/tree-selector";
+import { TypeSafeKeyPromptComponent } from "../components/typesafe-key-prompt";
 import { UserMessageSelectorComponent } from "../components/user-message-selector";
 import type { JobsObserver } from "../jobs-observer";
 import type { SessionObserverRegistry } from "../session-observer-registry";
@@ -879,6 +880,8 @@ export class SelectorController {
 						void this.showOAuthSelector("login");
 					} else if (action === "import-credentials") {
 						void this.#handleCredentialImport();
+					} else if (action === "typesafe-key") {
+						this.#showTypeSafeKeyPrompt();
 					} else {
 						this.ctx.showStatus(formatProviderOnboardingCommandGuide());
 					}
@@ -889,6 +892,47 @@ export class SelectorController {
 				},
 			);
 			return { component: selector, focus: selector };
+		});
+	}
+
+	/**
+	 * Take a TypeSafe key and verify it before storing.
+	 *
+	 * Verification is not optional here. The decision service fails open by design, so an
+	 * unverified bad key produces no error anywhere: decisions silently keep coming from
+	 * the user's own model while the UI claims TypeSafe is on. Better to keep the prompt
+	 * open and say the key was rejected.
+	 */
+	#showTypeSafeKeyPrompt(): void {
+		this.showSelector(done => {
+			let prompt: TypeSafeKeyPromptComponent | undefined;
+			prompt = new TypeSafeKeyPromptComponent(
+				({ apiKey }) => {
+					prompt?.setBusy(true);
+					void (async () => {
+						try {
+							const { formatTypeSafeKeyResult, setTypeSafeKey } = await import("../../setup/decision-provider");
+							const result = await setTypeSafeKey({ apiKey });
+							if (result.error) {
+								prompt?.setError(result.error);
+								this.ctx.ui.requestRender();
+								return;
+							}
+							done();
+							this.ctx.showStatus(formatTypeSafeKeyResult(result));
+						} catch (error) {
+							prompt?.setError(error instanceof Error ? error.message : String(error));
+							this.ctx.ui.requestRender();
+						}
+					})();
+				},
+				() => {
+					done();
+					this.ctx.ui.requestRender();
+				},
+				() => this.ctx.ui.requestRender(),
+			);
+			return { component: prompt, focus: prompt };
 		});
 	}
 
