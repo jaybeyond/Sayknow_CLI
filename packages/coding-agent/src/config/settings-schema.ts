@@ -1999,6 +1999,18 @@ export const SETTINGS_SCHEMA = {
 	"hindsight.mentalModelRefreshIntervalMs": { type: "number", default: 5 * 60 * 1000 },
 	"hindsight.mentalModelMaxRenderChars": { type: "number", default: 16_000 },
 
+	// Typed decisions
+	"decisions.enabled": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "context",
+			label: "Typed decisions",
+			description:
+				"Let a cheap model answer typed questions the deterministic rules cannot. Currently routes workflow skills when the keyword table finds nothing — which is every non-English phrasing. Costs one small model call on those prompts; every failure falls back to today's behaviour.",
+		},
+	},
+
 	// TTSR
 	"ttsr.enabled": {
 		type: "boolean",

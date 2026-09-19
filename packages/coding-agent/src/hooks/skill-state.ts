@@ -121,6 +121,12 @@ export interface RecordSkillActivationInput {
 	turnId?: string;
 	nowIso?: string;
 	stateDir?: string;
+	/**
+	 * Semantic fallback, consulted only when no keyword matched. Supplying it turns the
+	 * literal keyword table into a two-stage router; omitting it keeps the historical
+	 * keyword-only behaviour byte for byte.
+	 */
+	resolveSkillSemantically?: (text: string) => Promise<SkcWorkflowSkill | null>;
 }
 
 export interface StopHookInput {
@@ -471,8 +477,18 @@ async function seedSkillActivationState(
 // real /skill dispatch paths resolve sub-skill activation before prompt construction.
 export async function recordSkillActivation(input: RecordSkillActivationInput): Promise<SkillActiveState | null> {
 	const match = detectPrimarySkillKeyword(input.text);
-	if (!match) return null;
-	return await seedSkillActivationState(match.skill, match.keyword, "skc-skill-state-hook", input);
+	if (match) return await seedSkillActivationState(match.skill, match.keyword, "skc-skill-state-hook", input);
+	if (!input.resolveSkillSemantically) return null;
+	// The semantic stage is advisory: any failure leaves routing to the system prompt,
+	// exactly as it behaved before this stage existed.
+	let semantic: SkcWorkflowSkill | null = null;
+	try {
+		semantic = await input.resolveSkillSemantically(input.text);
+	} catch {
+		return null;
+	}
+	if (!semantic) return null;
+	return await seedSkillActivationState(semantic, `semantic:${semantic}`, "skc-skill-decision", input);
 }
 
 export interface EnsureWorkflowSkillActivationInput {

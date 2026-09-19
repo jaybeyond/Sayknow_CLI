@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+### Added
+
+- Typed decisions (`decisions.enabled`, default off): a small, reusable service that asks the model you are already logged into a typed question and gets back a value your code can branch on. Type safety comes from a forced tool call with enum-constrained fields, so an option outside the declared set cannot reach the caller. No extra vendor, no extra key.
+- Workflow-skill routing now has a semantic second stage. The literal keyword table stays first and free; the model is consulted only when it matches nothing. Measured over 23 prompts × 3 runs against `claude-opus-5`: keyword-only **0/27 in Korean** (43% overall), hybrid **69/69 (100%)** with zero false activations on the 18 negative cases, p50 1.46s. Reproduce with `bun scripts/eval-skill-routing.ts --repeat 3`.
+
+### Fixed
+
+- `NativeRuntimeCompatibilityError` now lists only the causes that actually fired and names the file the process loaded `@sayknow-cli/natives` from. A pure version mismatch used to read "required workflow arbitration methods are **available**", which described a healthy runtime while refusing to start every session and extension.
+- `dev:link` / `dev:doctor` fail on (and `dev:link` removes) nested installs under `packages/<pkg>/node_modules` that shadow a workspace package, and verify that `@sayknow-cli/natives` resolves to the same version as the `coding-agent` runtime that loads it. A published `@sayknow-cli/natives` copy left inside `packages/coding-agent/node_modules` wins resolution over the workspace link and breaks every SDK session.
+- `dev:doctor` accepts this checkout's bun-linked `bin/skc.js` wrapper — the one `install:dev` itself creates — instead of reporting it as drift, but only when the wrapper is byte-identical to the expected workspace wrapper and `@sayknow-cli/coding-agent/cli` resolves back to this checkout's `src/cli.ts`.
+
 ## [0.5.21] - 2026-09-17
 
 ### Changed

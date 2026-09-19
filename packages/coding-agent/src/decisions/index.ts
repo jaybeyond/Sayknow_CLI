@@ -1,0 +1,72 @@
+/**
+ * Typed decisions — entry point.
+ *
+ * Call sites ask for a judgment and get a typed answer or nothing. They never learn
+ * which backend answered, and they never have to handle a transport error: every
+ * failure path resolves `null`. That is deliberate — a decision service is an
+ * *enhancement* to code that already works, so an outage must degrade behaviour to
+ * the previous default rather than break the turn.
+ */
+import { logger } from "@sayknow-cli/utils";
+import { createLlmDecisionBackend, type LlmBackendDeps } from "./llm-backend";
+import type { DecisionBackend, DecisionRequest, DecisionResult } from "./types";
+
+export { createLlmDecisionBackend } from "./llm-backend";
+export * from "./types";
+
+/** Hard ceiling. A decision that takes longer than this is worthless to the caller. */
+const DEFAULT_TIMEOUT_MS = 8_000;
+
+export interface DecisionServiceOptions extends LlmBackendDeps {
+	/** Off by default; callers opt in per feature. */
+	enabled?: boolean;
+	timeoutMs?: number;
+	/** Injection point for tests and for the self-hosted/hosted backends. */
+	backends?: DecisionBackend[];
+}
+
+export interface DecisionService {
+	readonly enabled: boolean;
+	/** Resolves null when disabled, unavailable, timed out, or the model misbehaved. */
+	decide(request: DecisionRequest): Promise<DecisionResult | null>;
+}
+
+export function createDecisionService(options: DecisionServiceOptions): DecisionService {
+	const enabled = options.enabled ?? false;
+	const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+	const backends = options.backends ?? [createLlmDecisionBackend(options)];
+
+	return {
+		enabled,
+		async decide(request: DecisionRequest): Promise<DecisionResult | null> {
+			if (!enabled || backends.length === 0) return null;
+			for (const backend of backends) {
+				const controller = new AbortController();
+				const abortOnCallerSignal = () => controller.abort();
+				request.signal?.addEventListener("abort", abortOnCallerSignal, { once: true });
+				let timer: ReturnType<typeof setTimeout> | undefined;
+				try {
+					// The deadline must be a race, not just an abort. A provider that ignores
+					// its signal would otherwise hang the caller's turn forever — and the
+					// caller here is the user's prompt, so "forever" means a frozen session.
+					const deadline = new Promise<null>(resolve => {
+						timer = setTimeout(() => {
+							controller.abort();
+							resolve(null);
+						}, timeoutMs);
+					});
+					const result = await Promise.race([backend.decide({ ...request, signal: controller.signal }), deadline]);
+					if (result) return result;
+				} catch (error) {
+					// Fail open: log and try the next backend, then give up quietly.
+					logger.debug("decisions: backend failed", { backend: backend.name, error: String(error) });
+				} finally {
+					if (timer) clearTimeout(timer);
+					controller.abort();
+					request.signal?.removeEventListener("abort", abortOnCallerSignal);
+				}
+			}
+			return null;
+		},
+	};
+}

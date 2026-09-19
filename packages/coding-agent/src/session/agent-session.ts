@@ -202,6 +202,8 @@ import { onAppendOnlyModeChanged } from "../config/settings";
 import type { SettingPath } from "../config/settings-schema";
 import { getDefault } from "../config/settings-schema";
 import { RawSseDebugBuffer } from "../debug/raw-sse-buffer";
+import { createDecisionService } from "../decisions";
+import { createSemanticSkillRouter, type SkillRouter } from "../decisions/skill-routing";
 import { loadCapability } from "../discovery";
 import { expandApplyPatchToEntries, normalizeDiff, normalizeToLF, ParseError, previewPatch, stripBom } from "../edit";
 import { MAX_EDIT_FILE_BYTES } from "../edit/read-file";
@@ -260,7 +262,11 @@ import { expandSlashCommand, type FileSlashCommand } from "../extensibility/slas
 import { GoalRuntime } from "../goals/runtime";
 import type { Goal, GoalModeState } from "../goals/state";
 import type { HindsightSessionState } from "../hindsight/state";
-import { buildSkillStopOutput, ensureWorkflowSkillActivationState } from "../hooks/skill-state";
+import {
+	buildSkillStopOutput,
+	detectPrimarySkillKeyword,
+	ensureWorkflowSkillActivationState,
+} from "../hooks/skill-state";
 import { initializeLocalRoot, type LocalProtocolOptions, resolveLocalUrlToPath } from "../internal-urls";
 import { shutdownAll as shutdownAllLspClients } from "../lsp/client";
 import { resolveMemoryBackend } from "../memory-backend";
@@ -1841,6 +1847,9 @@ export class AgentSession {
 
 	// Model registry for API key resolution
 	#modelRegistry: ModelRegistry;
+
+	/** Built on first use; the decision service resolves model and credential lazily. */
+	#semanticSkillRouter?: SkillRouter;
 
 	// Tool registry and prompt builder for extensions
 	#toolRegistry: Map<string, AgentTool>;
@@ -7548,6 +7557,41 @@ export class AgentSession {
 	 * @throws Error if streaming and no streamingBehavior specified
 	 * @throws Error if no model selected or no API key available (when not streaming)
 	 */
+	/**
+	 * Second-stage workflow routing for prompts the keyword table cannot see.
+	 *
+	 * Runs in this process, not the hook process: the hook only receives paths and
+	 * config, so it has no model registry and no credentials to call anything with.
+	 *
+	 * Deliberately best-effort — a disabled setting, a missing credential, a timeout or
+	 * a nonsense answer all resolve to "no activation", which is precisely the
+	 * behaviour before this stage existed.
+	 */
+	async #routeWorkflowSemantically(text: string): Promise<void> {
+		if (!this.settings.get("decisions.enabled")) return;
+		if (detectPrimarySkillKeyword(text)) return; // deterministic stage already decided
+		try {
+			this.#semanticSkillRouter ??= createSemanticSkillRouter(
+				createDecisionService({
+					registry: this.#modelRegistry,
+					settings: this.settings,
+					sessionId: this.sessionManager.getSessionId(),
+					enabled: true,
+				}),
+			);
+			const skill = await this.#semanticSkillRouter(text);
+			if (!skill) return;
+			await ensureWorkflowSkillActivationState({
+				cwd: this.sessionManager.getCwd(),
+				skill,
+				sessionId: this.sessionManager.getSessionId(),
+			});
+			this.#attachAskTool();
+		} catch (error) {
+			logger.debug("agent-session: semantic workflow routing failed", { error: String(error) });
+		}
+	}
+
 	async prompt(text: string, options?: PromptOptions): Promise<void> {
 		this.#assertRecoveryHydrationPromoted();
 		const expandPromptTemplates = options?.expandPromptTemplates ?? true;
@@ -7605,6 +7649,12 @@ export class AgentSession {
 		const claimsGenuineUserIntent = !options?.synthetic && options?.attribution !== "agent";
 		const deepInterviewUserIntentEpoch =
 			claimsGenuineUserIntent && !this.isStreaming ? this.#claimDeepInterviewUserIntent() : undefined;
+
+		// The keyword table in `hooks/skill-keywords.ts` is thirteen literal strings, so a
+		// Korean phrasing of "plan this before you touch code" activates nothing. Ask a
+		// cheap model only when the deterministic stage found nothing, and only for real
+		// user turns. Any failure leaves routing to the system prompt, exactly as before.
+		if (claimsGenuineUserIntent && !this.isStreaming) await this.#routeWorkflowSemantically(expandedText);
 
 		// If streaming, queue via steer() or followUp() based on option
 		if (this.isStreaming) {
