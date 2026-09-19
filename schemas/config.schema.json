@@ -1500,6 +1500,17 @@
 			},
 			"additionalProperties": false
 		},
+		"decisions": {
+			"type": "object",
+			"properties": {
+				"enabled": {
+					"type": "boolean",
+					"description": "Let a cheap model answer typed questions the deterministic rules cannot. Currently routes workflow skills when the keyword table finds nothing — which is every non-English phrasing. Costs one small model call on those prompts; every failure falls back to today's behaviour.",
+					"default": false
+				}
+			},
+			"additionalProperties": false
+		},
 		"ttsr": {
 			"type": "object",
 			"properties": {
