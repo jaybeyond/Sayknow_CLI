@@ -1,3 +1,5 @@
+import { fileURLToPath } from "node:url";
+
 const REQUIRED_WORKFLOW_ARBITRATION_METHODS = ["registerArbitratedAsk", "retireIfUnclaimed", "stopAndWait"] as const;
 
 export class NativeRuntimeCompatibilityError extends Error {
@@ -8,12 +10,20 @@ export class NativeRuntimeCompatibilityError extends Error {
 		readonly runtimeVersion: string,
 		readonly nativeVersion: string,
 		readonly workflowArbitrationAvailable: boolean,
+		readonly nativeModulePath: string | null = null,
 	) {
+		const loadedFrom = nativeModulePath ? ` (loaded from ${nativeModulePath})` : "";
+		const causes = [
+			...(runtimeVersion === nativeVersion
+				? []
+				: [`loaded native version is ${nativeVersion}${loadedFrom}, expected ${runtimeVersion}`]),
+			...(workflowArbitrationAvailable ? [] : [`required workflow arbitration methods are missing${loadedFrom}`]),
+		];
 		super(
 			`Incompatible @sayknow-cli/natives for @sayknow-cli/coding-agent@${runtimeVersion}: ` +
-				`loaded native version is ${nativeVersion}, and required workflow arbitration methods are ` +
-				`${workflowArbitrationAvailable ? "available" : "missing"}. ` +
-				`Reinstall matching @sayknow-cli/coding-agent and @sayknow-cli/natives packages.`,
+				`${causes.join("; ")}. ` +
+				`Reinstall matching @sayknow-cli/coding-agent and @sayknow-cli/natives packages, ` +
+				`and remove any stale nested node_modules copy of @sayknow-cli/natives that shadows it.`,
 		);
 		this.name = "NativeRuntimeCompatibilityError";
 	}
@@ -27,10 +37,26 @@ function hasWorkflowArbitrationMethods(notificationServer: unknown): boolean {
 	);
 }
 
+/**
+ * Where the process actually loaded `@sayknow-cli/natives` from. Diagnostic only:
+ * a nested `node_modules` copy wins resolution over a workspace link, so the path
+ * is the difference between "reinstall something" and a one-line fix.
+ */
+function resolveNativeModulePath(): string | null {
+	try {
+		const resolved = import.meta.resolve?.("@sayknow-cli/natives");
+		if (typeof resolved !== "string") return null;
+		return resolved.startsWith("file:") ? fileURLToPath(resolved) : resolved;
+	} catch {
+		return null;
+	}
+}
+
 export function assertNativeRuntimeCompatibility(input: {
 	runtimeVersion: string;
 	nativeVersion: string;
 	notificationServer: unknown;
+	nativeModulePath?: string | null;
 }): void {
 	const workflowArbitrationAvailable = hasWorkflowArbitrationMethods(input.notificationServer);
 	if (input.runtimeVersion !== input.nativeVersion || !workflowArbitrationAvailable)
@@ -38,5 +64,6 @@ export function assertNativeRuntimeCompatibility(input: {
 			input.runtimeVersion,
 			input.nativeVersion,
 			workflowArbitrationAvailable,
+			input.nativeModulePath ?? resolveNativeModulePath(),
 		);
 }

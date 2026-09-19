@@ -255,9 +255,30 @@ export function isLocalWindowsBunShim(file: string, root = repoRoot, bunExecutab
 	);
 }
 
+/**
+ * `bun --cwd=packages/coding-agent link` (what `install:dev` runs) puts this
+ * checkout's `bin/skc.js` wrapper on PATH instead of a direct `cli.ts` symlink.
+ * Accept it only on the same evidence the Windows shim demands: the wrapper is
+ * this checkout's file, is byte-identical to the expected wrapper, and
+ * `@sayknow-cli/coding-agent/cli` resolves from this checkout to its own source.
+ */
+export function isLocalWorkspaceWrapper(real: string | null, root = repoRoot): boolean {
+	if (!real) return false;
+	const packageRoot = path.join(root, "packages", "coding-agent");
+	const wrapper = path.join(packageRoot, "bin", "skc.js");
+	if (realpath(real) !== realpath(wrapper)) return false;
+	try {
+		if (fs.readFileSync(wrapper, "utf8") !== EXPECTED_WORKSPACE_WRAPPER) return false;
+		return realpath(Bun.resolveSync("@sayknow-cli/coding-agent/cli", root)) === realpath(path.join(packageRoot, "src", "cli.ts"));
+	} catch {
+		return false;
+	}
+}
+
 function describe(real: string | null): string {
 	if (!real) return "broken symlink / unresolved";
 	if (real === cliSourceReal) return "workspace source (cli.ts) — OK";
+	if (isLocalWorkspaceWrapper(real)) return `workspace wrapper (bin/skc.js -> src/cli.ts) — OK: ${real}`;
 	if (/[/\\]dist[/\\]/.test(real)) return `compiled binary: ${real}`;
 	if (real.includes("$bunfs")) return `compiled binary (bunfs): ${real}`;
 	if (real.includes(`${path.sep}node_modules${path.sep}sayknow-cli${path.sep}`)) return `published wrapper: ${real}`;
@@ -278,7 +299,11 @@ export function isApprovedWorkspaceSource(
 	bunExecutable = process.execPath,
 ): boolean {
 	const source = path.join(root, "packages", "coding-agent", "src", "cli.ts");
-	return real === (realpath(source) ?? source) || (platform === "win32" && isLocalWindowsBunShim(file, root, bunExecutable));
+	return (
+		real === (realpath(source) ?? source) ||
+		isLocalWorkspaceWrapper(real, root) ||
+		(platform === "win32" && isLocalWindowsBunShim(file, root, bunExecutable))
+	);
 }
 
 function isApprovedSource(winner: SkcHit): boolean {
@@ -327,6 +352,154 @@ function assertWorkspaceLinksLocal(): void {
 	process.exit(1);
 }
 
+export interface NestedWorkspaceShadow {
+	/** Installed copy that shadows a workspace package, e.g. `packages/coding-agent/node_modules/@sayknow-cli/natives`. */
+	dir: string;
+	/** Workspace package it shadows, e.g. `@sayknow-cli/natives`. */
+	packageName: string;
+	/** Version of the shadowing copy, when readable. */
+	version: string | null;
+	/** Version of the workspace package that should have won resolution. */
+	workspaceVersion: string | null;
+}
+
+function readPackageJson(dir: string): { name?: string; version?: string } | null {
+	try {
+		return JSON.parse(fs.readFileSync(path.join(dir, "package.json"), "utf8"));
+	} catch {
+		return null;
+	}
+}
+
+function workspacePackages(root: string): Map<string, string | null> {
+	const packages = new Map<string, string | null>();
+	let entries: string[];
+	try {
+		entries = fs.readdirSync(path.join(root, "packages"));
+	} catch {
+		return packages;
+	}
+	for (const entry of entries) {
+		const manifest = readPackageJson(path.join(root, "packages", entry));
+		if (manifest?.name) packages.set(manifest.name, manifest.version ?? null);
+	}
+	return packages;
+}
+
+function nestedInstallDirs(scopeDir: string, scope: string | null): Array<{ dir: string; packageName: string }> {
+	let entries: string[];
+	try {
+		entries = fs.readdirSync(scopeDir);
+	} catch {
+		return [];
+	}
+	const found: Array<{ dir: string; packageName: string }> = [];
+	for (const entry of entries) {
+		if (entry.startsWith(".")) continue;
+		const dir = path.join(scopeDir, entry);
+		if (!scope && entry.startsWith("@")) {
+			found.push(...nestedInstallDirs(dir, entry));
+			continue;
+		}
+		found.push({ dir, packageName: scope ? `${scope}/${entry}` : entry });
+	}
+	return found;
+}
+
+/**
+ * Real (non-symlinked) installs under `packages/<pkg>/node_modules` that shadow a
+ * workspace package. Node/Bun resolve from the nearest `node_modules`, so such a
+ * copy wins over the root workspace link and silently pins a stale version — this
+ * is how a published `@sayknow-cli/natives` ends up loaded inside the workspace
+ * runtime and trips `NativeRuntimeCompatibilityError`.
+ */
+export function findNestedWorkspaceShadows(root = repoRoot): NestedWorkspaceShadow[] {
+	const rootReal = realpath(root) ?? root;
+	const packages = workspacePackages(root);
+	if (packages.size === 0) return [];
+	let workspaceDirs: string[];
+	try {
+		workspaceDirs = fs.readdirSync(path.join(root, "packages"));
+	} catch {
+		return [];
+	}
+	const shadows: NestedWorkspaceShadow[] = [];
+	for (const workspaceDir of workspaceDirs) {
+		const nodeModules = path.join(root, "packages", workspaceDir, "node_modules");
+		for (const { dir, packageName } of nestedInstallDirs(nodeModules, null)) {
+			if (!packages.has(packageName)) continue;
+			const real = realpath(dir);
+			// A symlink back into this checkout is the expected workspace wiring.
+			if (real && real.startsWith(rootReal + path.sep) && !real.startsWith(nodeModules + path.sep)) continue;
+			shadows.push({
+				dir,
+				packageName,
+				version: readPackageJson(dir)?.version ?? null,
+				workspaceVersion: packages.get(packageName) ?? null,
+			});
+		}
+	}
+	return shadows;
+}
+
+function assertNoNestedWorkspaceShadows(mode: "check" | "fix"): void {
+	const shadows = findNestedWorkspaceShadows();
+	if (shadows.length === 0) return;
+	const describeShadow = ({ dir, packageName, version, workspaceVersion }: NestedWorkspaceShadow): string =>
+		`    ${dir}\n      ${packageName}@${version ?? "unknown"} shadows workspace ${workspaceVersion ?? "source"}`;
+	if (mode === "fix") {
+		console.log("! Removing nested installs that shadow workspace packages:");
+		for (const shadow of shadows) {
+			console.log(describeShadow(shadow));
+			fs.rmSync(shadow.dir, { recursive: true, force: true });
+		}
+		const leftover = findNestedWorkspaceShadows();
+		if (leftover.length === 0) return;
+		console.error("✗ Could not remove every nested workspace shadow:");
+		for (const shadow of leftover) console.error(describeShadow(shadow));
+		process.exit(1);
+	}
+	console.error("✗ Nested installs shadow workspace packages (stale version wins resolution):");
+	for (const shadow of shadows) console.error(describeShadow(shadow));
+	console.error("  Fix: bun run dev:link   (or: rm -rf the directories above)");
+	process.exit(1);
+}
+
+/** Version of `specifier` as resolved from `fromDir`, plus the file that resolution picked. */
+export function resolvePackageFrom(specifier: string, fromDir: string): { file: string; version: string | null } | null {
+	let file: string;
+	try {
+		file = Bun.resolveSync(specifier, fromDir);
+	} catch {
+		return null;
+	}
+	for (let dir = path.dirname(file); ; dir = path.dirname(dir)) {
+		const manifest = readPackageJson(dir);
+		if (manifest?.name === specifier) return { file, version: manifest.version ?? null };
+		const parent = path.dirname(dir);
+		if (parent === dir) return { file, version: null };
+	}
+}
+
+/**
+ * `@sayknow-cli/natives` must resolve to the same version as the runtime that loads
+ * it: the SDK bus refuses to start when `nativeBuildInfo().version` differs from the
+ * `coding-agent` version, which kills every extension and session.
+ */
+function assertNativeVersionParity(): void {
+	const runtimeDir = path.join(repoRoot, "packages", "coding-agent");
+	const runtimeVersion = readPackageJson(runtimeDir)?.version ?? null;
+	const natives = resolvePackageFrom("@sayknow-cli/natives", runtimeDir);
+	if (!natives || !runtimeVersion || natives.version === runtimeVersion) return;
+	console.error("✗ `@sayknow-cli/natives` resolves to a different version than the runtime that loads it:");
+	console.error(`    @sayknow-cli/coding-agent@${runtimeVersion}`);
+	console.error(`    @sayknow-cli/natives@${natives.version ?? "unknown"}`);
+	console.error(`      -> ${natives.file}`);
+	console.error("  Every SDK session would fail with NativeRuntimeCompatibilityError.");
+	console.error("  Fix: bun run dev:link  (then rebuild natives if needed: bun run build:native)");
+	process.exit(1);
+}
+
 function assertSourceExists(): void {
 	if (fs.existsSync(cliSource)) return;
 	console.error(`✗ Cannot find CLI source at ${cliSource}`);
@@ -337,6 +510,8 @@ function assertSourceExists(): void {
 function check(): never {
 	assertSourceExists();
 	assertWorkspaceLinksLocal();
+	assertNoNestedWorkspaceShadows("check");
+	assertNativeVersionParity();
 	const hits = findSkcOnPath();
 	if (hits.length === 0) {
 		console.error("✗ `skc` is not on PATH.");
@@ -368,6 +543,8 @@ function check(): never {
 function link(): never {
 	assertSourceExists();
 	assertWorkspaceLinksLocal();
+	assertNoNestedWorkspaceShadows("fix");
+	assertNativeVersionParity();
 	if (process.platform === "win32") {
 		console.error("dev:link targets Unix-like systems (symlink into ~/.local/bin).");
 		console.error("On Windows, install the dev CLI with Bun instead:");

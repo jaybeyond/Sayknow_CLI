@@ -4,10 +4,13 @@ import * as os from "node:os";
 import * as path from "node:path";
 import {
 	commandExtensions,
+	findNestedWorkspaceShadows,
 	findSkcOnPath,
 	isApprovedWorkspaceSource,
 	isLocalWindowsBunShim,
+	isLocalWorkspaceWrapper,
 	pathDirs,
+	resolvePackageFrom,
 	smokeTest,
 } from "./dev-link";
 
@@ -105,6 +108,37 @@ describe("dev:link command discovery", () => {
 	test("uses the documented Windows PATHEXT fallback and keeps Unix extensionless", () => {
 		expect(commandExtensions("win32", "")).toEqual([".COM", ".EXE", ".BAT", ".CMD"]);
 		expect(commandExtensions("linux", ".EXE")).toEqual([""]);
+	});
+});
+
+describe.skipIf(process.platform === "win32")("dev:link workspace wrapper provenance", () => {
+	test("accepts this checkout's bun-linked bin/skc.js wrapper on any platform", async () => {
+		const root = await workspaceFixture();
+		const wrapper = path.join(root, "packages", "coding-agent", "bin", "skc.js");
+		expect(isLocalWorkspaceWrapper(wrapper, root)).toBe(true);
+		expect(isFixtureSource(path.join(root, "global-bin", "skc"), wrapper, root, "linux")).toBe(true);
+	});
+
+	test("rejects a wrapper whose contents drifted from the expected workspace wrapper", async () => {
+		const root = await workspaceFixture();
+		const wrapper = path.join(root, "packages", "coding-agent", "bin", "skc.js");
+		await Bun.write(wrapper, '#!/usr/bin/env bun\nimport { runCli } from "sayknow-cli/cli";\n\nawait runCli([]);\n');
+		expect(isLocalWorkspaceWrapper(wrapper, root)).toBe(false);
+		expect(isFixtureSource("ignored", wrapper, root, "linux")).toBe(false);
+	});
+
+	test("rejects an identical wrapper that belongs to a different checkout", async () => {
+		const root = await workspaceFixture();
+		const other = await workspaceFixture();
+		const foreignWrapper = path.join(other, "packages", "coding-agent", "bin", "skc.js");
+		expect(isLocalWorkspaceWrapper(foreignWrapper, root)).toBe(false);
+	});
+
+	test("rejects the wrapper when the workspace no longer resolves the CLI to its own source", async () => {
+		const root = await workspaceFixture();
+		const wrapper = path.join(root, "packages", "coding-agent", "bin", "skc.js");
+		await fs.rm(path.join(root, "node_modules", "@sayknow-cli", "coding-agent"));
+		expect(isLocalWorkspaceWrapper(wrapper, root)).toBe(false);
 	});
 });
 
@@ -258,5 +292,68 @@ describe("dev:link", () => {
 		expect(result.stdout.toString()).toContain(`Linked ${path.join(targetDir, "skc")}`);
 		expect(result.stderr.toString()).toContain("still resolves to a different command earlier on PATH");
 		expect(result.stderr.toString()).toContain(path.join(shadowDir, "skc"));
+	});
+});
+
+describe("nested workspace shadows", () => {
+	async function shadowFixture(): Promise<string> {
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "skc-dev-link-nested-"));
+		tempRoots.push(root);
+		for (const [pkg, version] of [
+			["coding-agent", "0.5.21"],
+			["natives", "0.5.21"],
+		] as const) {
+			await fs.mkdir(path.join(root, "packages", pkg), { recursive: true });
+			await Bun.write(
+				path.join(root, "packages", pkg, "package.json"),
+				JSON.stringify({ name: `@sayknow-cli/${pkg}`, version }),
+			);
+		}
+		return root;
+	}
+
+	test("reports nothing for a clean workspace", async () => {
+		expect(findNestedWorkspaceShadows(await shadowFixture())).toEqual([]);
+	});
+
+	test("reports a nested install that shadows a workspace package", async () => {
+		const root = await shadowFixture();
+		const nested = path.join(root, "packages", "coding-agent", "node_modules", "@sayknow-cli", "natives");
+		await fs.mkdir(nested, { recursive: true });
+		await Bun.write(path.join(nested, "package.json"), JSON.stringify({ name: "@sayknow-cli/natives", version: "0.5.13" }));
+		expect(findNestedWorkspaceShadows(root)).toEqual([
+			{ dir: nested, packageName: "@sayknow-cli/natives", version: "0.5.13", workspaceVersion: "0.5.21" },
+		]);
+	});
+
+	test.skipIf(process.platform === "win32")("accepts a nested symlink back into the checkout", async () => {
+		const root = await shadowFixture();
+		const scope = path.join(root, "packages", "coding-agent", "node_modules", "@sayknow-cli");
+		await fs.mkdir(scope, { recursive: true });
+		await fs.symlink(path.join(root, "packages", "natives"), path.join(scope, "natives"));
+		expect(findNestedWorkspaceShadows(root)).toEqual([]);
+	});
+
+	test("ignores nested installs of packages this workspace does not own", async () => {
+		const root = await shadowFixture();
+		const nested = path.join(root, "packages", "coding-agent", "node_modules", "some-dependency");
+		await fs.mkdir(nested, { recursive: true });
+		await Bun.write(path.join(nested, "package.json"), JSON.stringify({ name: "some-dependency", version: "1.0.0" }));
+		expect(findNestedWorkspaceShadows(root)).toEqual([]);
+	});
+});
+
+describe("package resolution parity", () => {
+	test("reads the version of the package that resolution actually picks", async () => {
+		const repoRoot = path.join(import.meta.dir, "..");
+		const runtime = JSON.parse(
+			await Bun.file(path.join(repoRoot, "packages", "coding-agent", "package.json")).text(),
+		) as { version: string };
+		const natives = resolvePackageFrom("@sayknow-cli/natives", path.join(repoRoot, "packages", "coding-agent"));
+		expect(natives?.version).toBe(runtime.version);
+	});
+
+	test("returns null for an unresolvable specifier", () => {
+		expect(resolvePackageFrom("@sayknow-cli/does-not-exist", import.meta.dir)).toBeNull();
 	});
 });
