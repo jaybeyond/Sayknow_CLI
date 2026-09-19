@@ -4,6 +4,8 @@
 
 ### Added
 
+- TypeSafe (hosted System One `jev`) as a typed-decision backend. Add the key with `TYPESAFE_API_KEY=<key> skc setup typesafe`; it is verified against the live API before being stored, because the decision service fails open and an unverified bad key would be swallowed silently forever. Removing it (`--remove`) falls back to your logged-in model. The key is read from the environment, never a flag — this repo already refuses raw `--api-key` values because they leak into shell history and the process list.
+- Decision backends now resolve in order: TypeSafe when a key exists (the only backend that returns calibrated probabilities), otherwise the model you are already logged into. TypeSafe is deliberately **not** registered in the chat-provider registry: it has no stream, no messages and no text output, so giving it a `Model` shape would put a non-chat endpoint in the model picker.
 - Typed decisions (`decisions.enabled`, default off): a small, reusable service that asks the model you are already logged into a typed question and gets back a value your code can branch on. Type safety comes from a forced tool call with enum-constrained fields, so an option outside the declared set cannot reach the caller. No extra vendor, no extra key.
 - Workflow-skill routing now has a semantic second stage. The literal keyword table stays first and free; the model is consulted only when it matches nothing. Measured over 23 prompts × 3 runs against `claude-opus-5`: keyword-only **0/27 in Korean** (43% overall), hybrid **69/69 (100%)** with zero false activations on the 18 negative cases, p50 1.46s. Reproduce with `bun scripts/eval-skill-routing.ts --repeat 3`.
 

@@ -146,3 +146,103 @@ test("a backend that ignores its abort signal cannot hang the turn", async () =>
 	expect(await service.decide(request)).toBeNull();
 	expect(Date.now() - started).toBeLessThan(2000);
 });
+
+// --- TypeSafe backend -------------------------------------------------------
+
+import type { Question } from "../src/decisions/types";
+import { createTypeSafeDecisionBackend } from "../src/decisions/typesafe-backend";
+
+function registryWithKey(key: string | undefined) {
+	return {
+		async getApiKeyForProvider() {
+			return key;
+		},
+	} as never;
+}
+
+const tsQuestions: Record<string, Question> = {
+	dept: { type: "choice", instructions: "which team", criteria: { billing: "money", technical: "bugs" } },
+	urgent: { type: "noul", instructions: "is it urgent" },
+	sev: { type: "score", instructions: "severity", criteria: ["low", "mid", "high"] },
+};
+
+function jsonResponse(body: unknown, status = 200) {
+	return async () => new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
+}
+
+test("no stored key means the backend steps aside silently", async () => {
+	let called = false;
+	const backend = createTypeSafeDecisionBackend({
+		registry: registryWithKey(undefined),
+		fetchImpl: (async () => {
+			called = true;
+			return new Response("{}");
+		}) as never,
+	});
+	expect(await backend.decide({ state: "x", questions: tsQuestions })).toBeNull();
+	expect(called).toBe(false);
+});
+
+test("maps every answer type and is the only backend allowed to claim calibration", async () => {
+	const backend = createTypeSafeDecisionBackend({
+		registry: registryWithKey("sk-test"),
+		fetchImpl: jsonResponse({
+			model: "jev-1.13.0",
+			answers: {
+				dept: {
+					type: "choice",
+					choice: "technical",
+					probabilities: { billing: 0.1, technical: 0.9 },
+					confidence: 0.8,
+				},
+				urgent: { type: "noul", noul: 0.93 },
+				sev: { type: "score", score: 1.7, legend: { "0": "low", "1": "mid", "2": "high" } },
+			},
+		}) as never,
+	});
+	const result = await backend.decide({ state: "payouts failing", questions: tsQuestions });
+	expect(result?.calibrated).toBe(true);
+	expect(result?.model).toBe("jev-1.13.0");
+	expect(result?.answers.dept).toMatchObject({ type: "choice", choice: "technical" });
+	expect(result?.answers.urgent).toMatchObject({ type: "noul", noul: 0.93 });
+	// score keeps the fractional value and derives the discrete level from it
+	expect(result?.answers.sev).toMatchObject({ type: "score", score: 1.7, level: 2 });
+});
+
+test("an option outside the declared set is dropped, not coerced", async () => {
+	const backend = createTypeSafeDecisionBackend({
+		registry: registryWithKey("sk-test"),
+		fetchImpl: jsonResponse({ answers: { dept: { type: "choice", choice: "legal" } } }) as never,
+	});
+	const only = { dept: tsQuestions.dept as Question };
+	expect(await backend.decide({ state: "x", questions: only })).toBeNull();
+});
+
+test("an HTTP failure resolves null so the next backend can answer", async () => {
+	const backend = createTypeSafeDecisionBackend({
+		registry: registryWithKey("sk-test"),
+		fetchImpl: jsonResponse({ error: "rate limited" }, 429) as never,
+	});
+	expect(await backend.decide({ state: "x", questions: tsQuestions })).toBeNull();
+});
+
+test("sends the System One wire shape the hosted API documents", async () => {
+	let sent: Record<string, unknown> | undefined;
+	let url: string | undefined;
+	let auth: string | null | undefined;
+	const backend = createTypeSafeDecisionBackend({
+		registry: registryWithKey("sk-test"),
+		fetchImpl: (async (input: string, init: RequestInit) => {
+			url = input;
+			auth = new Headers(init.headers).get("Authorization");
+			sent = JSON.parse(String(init.body));
+			return new Response(JSON.stringify({ answers: { urgent: { type: "noul", noul: 1 } } }));
+		}) as never,
+	});
+	await backend.decide({ state: "s", questions: { urgent: tsQuestions.urgent as Question } });
+	expect(url).toBe("https://api.typesafe.ai/v1/systemone");
+	expect(auth).toBe("Bearer sk-test");
+	expect(sent).toMatchObject({ state: "s", model: "jev-latest" });
+	// noul carries no criteria on the wire
+	expect(sent?.questions).toEqual({ urgent: { type: "noul", instructions: "is it urgent" } });
+});

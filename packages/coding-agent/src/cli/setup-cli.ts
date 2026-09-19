@@ -48,6 +48,7 @@ export type SetupComponent =
 	| "provider"
 	| "python"
 	| "stt"
+	| "typesafe"
 	| "ui-skills";
 
 export interface SetupCommandArgs {
@@ -81,6 +82,8 @@ export interface SetupCommandArgs {
 		yes?: boolean;
 		dryRun?: boolean;
 		keychain?: boolean;
+		skipVerify?: boolean;
+		remove?: boolean;
 	};
 }
 
@@ -94,6 +97,7 @@ const VALID_COMPONENTS: SetupComponent[] = [
 	"provider",
 	"python",
 	"stt",
+	"typesafe",
 ];
 
 function hasProviderSetupFlags(flags: SetupCommandArgs["flags"]): boolean {
@@ -188,8 +192,12 @@ export function parseSetupArgs(args: string[]): SetupCommandArgs | undefined {
 		} else if (arg === "--base-url") {
 			flags.baseUrl = args[++i];
 		} else if (arg === "--api-key") {
-			console.error(chalk.red("Provider setup rejects raw --api-key values; use --api-key-env <ENV> instead."));
+			console.error(chalk.red("Setup rejects raw --api-key values; pass the key through an environment variable."));
 			process.exit(1);
+		} else if (arg === "--skip-verify") {
+			flags.skipVerify = true;
+		} else if (arg === "--remove") {
+			flags.remove = true;
 		} else if (arg === "--api-key-env") {
 			flags.apiKeyEnv = args[++i];
 		} else if (arg === "--model" || arg === "--models") {
@@ -288,6 +296,9 @@ export async function runSetupCommand(cmd: SetupCommandArgs): Promise<void> {
 			break;
 		case "stt":
 			await handleSttSetup(cmd.flags);
+			break;
+		case "typesafe":
+			await handleTypeSafeSetup(cmd.flags);
 			break;
 		case "credentials":
 			await handleCredentialsSetup(cmd.flags);
@@ -801,4 +812,45 @@ ${chalk.bold("Examples:")}
   ${APP_NAME} setup credentials --dry-run  Preview importable credentials (redacted)
   ${APP_NAME} setup credentials --yes      Import without an interactive prompt
 `);
+}
+
+/**
+ * `skc setup typesafe` — enable the hosted System One model for typed decisions.
+ *
+ * The key is read from `TYPESAFE_API_KEY`, never from a flag: this repo already refuses
+ * raw `--api-key` values because they land in shell history and in the process list of
+ * every user on the machine. Same rule applies here.
+ *
+ * Verified against the live API before storing. The decision service fails open, so an
+ * unverified bad key would be swallowed forever — the user would believe TypeSafe was
+ * active while every decision quietly came from their own model.
+ */
+export async function handleTypeSafeSetup(flags: SetupCommandArgs["flags"]): Promise<void> {
+	const { formatTypeSafeKeyResult, removeTypeSafeKey, setTypeSafeKey } = await import("../setup/decision-provider");
+
+	if (flags.remove) {
+		await removeTypeSafeKey();
+		process.stdout.write("TypeSafe key removed. Typed decisions fall back to your logged-in model.\n");
+		return;
+	}
+
+	const apiKey = process.env.TYPESAFE_API_KEY?.trim();
+	if (!apiKey) {
+		process.stdout.write(
+			`Usage: TYPESAFE_API_KEY=<key> ${APP_NAME} setup typesafe [--skip-verify]\n` +
+				`       ${APP_NAME} setup typesafe --remove\n\n` +
+				"The key is taken from the environment on purpose: a flag would leak it into\n" +
+				"shell history and the process list.\n",
+		);
+		process.exitCode = 1;
+		return;
+	}
+
+	const result = await setTypeSafeKey({ apiKey, skipVerify: flags.skipVerify });
+	if (flags.json) {
+		process.stdout.write(`${JSON.stringify(result)}\n`);
+	} else {
+		process.stdout.write(`${formatTypeSafeKeyResult(result)}\n`);
+	}
+	if (result.error) process.exitCode = 1;
 }

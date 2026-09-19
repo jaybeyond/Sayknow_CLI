@@ -10,9 +10,11 @@
 import { logger } from "@sayknow-cli/utils";
 import { createLlmDecisionBackend, type LlmBackendDeps } from "./llm-backend";
 import type { DecisionBackend, DecisionRequest, DecisionResult } from "./types";
+import { createTypeSafeDecisionBackend } from "./typesafe-backend";
 
 export { createLlmDecisionBackend } from "./llm-backend";
 export * from "./types";
+export { createTypeSafeDecisionBackend, TYPESAFE_PROVIDER } from "./typesafe-backend";
 
 /** Hard ceiling. A decision that takes longer than this is worthless to the caller. */
 const DEFAULT_TIMEOUT_MS = 8_000;
@@ -34,7 +36,17 @@ export interface DecisionService {
 export function createDecisionService(options: DecisionServiceOptions): DecisionService {
 	const enabled = options.enabled ?? false;
 	const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-	const backends = options.backends ?? [createLlmDecisionBackend(options)];
+	/**
+	 * Order matters and is not configurable by accident.
+	 *
+	 * TypeSafe first *when a key exists*: it is the only backend that returns calibrated
+	 * probabilities, and it resolves `null` immediately when no key is stored, so users
+	 * who never added one pay nothing for it being in the list.
+	 *
+	 * The user's logged-in model is the fallback and the default experience: no extra
+	 * vendor, no extra key, works offline of TypeSafe entirely.
+	 */
+	const backends = options.backends ?? [createTypeSafeDecisionBackend(options), createLlmDecisionBackend(options)];
 
 	return {
 		enabled,
