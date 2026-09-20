@@ -31,7 +31,9 @@
 
 <div class="card ok">
 <strong>P0 수정 반영됨 (2026-09-20)</strong> — 아래 §3에서 진단한 배선 결함, 평가 라벨 부정확, confidence 미사용 세 가지를 모두 고쳤다.
-수정 후 실측: <b>출시 구성(semantic only) 22/23 (96%), 한국어 8/9, 오탐 0/6, p50 344ms.</b>
+이어서 P1-6(criteria 보강)까지 적용했다.<br>
+최종 실측 (23케이스 × 3회): <b>출시 구성 단독으로 69/69 (100%), 한국어 27/27, 영어 24/24, 오탐 0/18, p50 317ms.</b>
+키워드 없이 의미 단계만으로 만점이다.
 이 문서는 진단 시점의 기록을 남기되, 수정된 항목에 표시를 달았다.
 </div>
 
@@ -257,7 +259,10 @@ const skill = await this.#semanticSkillRouter(text);   // 키워드 조기 retur
 <ol start="4">
 <li><b>실사용 오탐 관찰</b> — 벤치 23문항은 내가 쓴 문장이다. 네가 실제로 치는 프롬프트에서 워크플로가 원치 않게 켜지는지 며칠 본다. 오탐 1건이 미스 10건보다 나쁘다.</li>
 <li><b>임계값 재적합</b> — 실사용 로그가 쌓이면 0.75를 데이터로 정한다. 지금은 10문항 근사.</li>
-<li><b>criteria 보강</b> — 오답 1건("추측하지 말고…")은 deep-interview 설명에 "정보를 캐묻는 요청" 계열을 추가하면 잡힐 가능성. 재측정 필요.</li>
+<li><b>criteria 보강</b> <span class="tag ok">완료</span> — 원인은 설명문이 <i>요청의 상태</i>("무엇을 만들지 모호함")만 담고 <i>요청받은 행동</i>("묻고 나서 시작하라")을 담지 않은 것이었다. 그 문장은 모호하지 않고 진행 방식에 대한 지시라 <code>none</code>으로 갔다.<br>
+후보 4개를 실모델로 비교(쉬운 15문항 + 적대적 12문항)했고, 오탐 0을 유지한 셋 중 가장 짧은 것을 채택:<br>
+<code>"The user wants requirements drawn out of them by questioning before anything is built. Includes explicit instructions to ask rather than assume."</code><br>
+적용 후 해당 문항 <b>8/8 deep-interview</b>, confidence 0.76~0.83. 다만 게이트(0.75) 여유가 0.01뿐이라 소스에 기록해뒀다 — 임계값은 실사용 데이터로 재적합할 것.</li>
 </ol>
 
 <h3>P2 · 확장 검토</h3>
@@ -283,8 +288,9 @@ const skill = await this.#semanticSkillRouter(text);   // 키워드 조기 retur
 <dt>reasoningLanguage</dt><dd>off</dd>
 <dt>미커밋</dt><dd><code>/model</code> 힌트 + <code>/provider typesafe</code> 서브커맨드 (6파일). tsgo/biome/테스트 39개 통과</dd>
 <dt>이 보고서에서 새로 발견</dt><dd>§3 배선 결함 1건 · 평가 라벨 부정확 1건 · confidence 미사용 1건 — <b>모두 수정 완료</b></dd>
-<dt>수정 후 실측</dt><dd>출시 구성 22/23 (96%) · 한국어 8/9 · 오탐 0/6 · p50 344ms · 테스트 14개</dd>
-<dt>남은 미스 1건</dt><dd>"추측하지 말고 모르는 건 다 물어봐" → none. criteria 보강 대상 (P1-6)</dd>
+<dt>최종 실측</dt><dd>출시 구성 <b>69/69 (100%)</b> · 한국어 27/27 · 영어 24/24 · 오탐 0/18 · p50 317ms · 테스트 44개</dd>
+<dt>미스</dt><dd>없음. criteria 보강으로 마지막 1건 해소</dd>
+<dt>주의</dt><dd>"추측하지 말고…"가 confidence 0.76으로 게이트(0.75) 경계에 붙어 있다. 임계값을 올리면 이 정답이 떨어지고, 내리면 관측된 오답(0.71)이 다시 들어온다</dd>
 </div>
 
 <p class="tl">측정하지 않은 것: llm 백엔드 폴백의 실제 한국어 품질(haiku-4-5 89%/오탐 2건 외 미측정), 로컬 런타임 모델의 판단 품질(선택 경로만 검증), 인젝션 스크리닝·컨텍스트 필터의 실제 효과(미구현).</p>

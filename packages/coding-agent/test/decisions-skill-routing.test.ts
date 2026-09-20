@@ -3,7 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { createDecisionService } from "../src/decisions";
-import { createSemanticSkillRouter } from "../src/decisions/skill-routing";
+import { buildRoutingCriteria, createSemanticSkillRouter } from "../src/decisions/skill-routing";
 import type { DecisionBackend, DecisionResult } from "../src/decisions/types";
 import { detectPrimarySkillKeyword, recordSkillActivation } from "../src/hooks/skill-state";
 import { type CanonicalSkcWorkflowSkill, listActiveSkills } from "../src/skill-state/active-state";
@@ -254,4 +254,17 @@ test("an uncalibrated backend is not gated on a number it did not really produce
 		backends: [backend],
 	});
 	expect(await createSemanticSkillRouter(service)("여러 갈래로 나눠서 같이 진행하자")).toBe("team");
+});
+
+test("deep-interview covers an instruction to ask, not only a vague spec", () => {
+	// The criteria used to describe a property of the request ("vague about what to
+	// build"), so a direct order about how to proceed — the request is not vague at all —
+	// resolved to none. This was the only miss in the 23-case set. The wording now scopes
+	// to the behaviour being asked for.
+	const criteria = buildRoutingCriteria();
+	expect(criteria["deep-interview"]).toMatch(/ask rather than assume/i);
+	expect(criteria["deep-interview"]).not.toMatch(/vague about what to build/i);
+	// Every workflow plus an explicit escape hatch; without `none` the model must pick a
+	// workflow for prompts that need none of them.
+	expect(Object.keys(criteria).sort()).toEqual(["deep-interview", "none", "ralplan", "team", "ultragoal"].sort());
 });

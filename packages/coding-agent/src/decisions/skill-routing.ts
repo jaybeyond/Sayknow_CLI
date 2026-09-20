@@ -26,8 +26,13 @@ const NONE = "none";
  * are the whole contract with the model — the enum ids alone carry almost no signal.
  */
 const WORKFLOW_MEANINGS: Record<CanonicalSkcWorkflowSkill, string> = {
+	// Scoped to the *behaviour* the user is asking for, not only to the state of the
+	// request. The earlier wording ("vague about what to build") described a property of
+	// the spec, so a direct instruction to ask rather than assume — the request is not
+	// vague, it is an order about how to proceed — landed on `none`. Measured: that one
+	// prompt was the sole miss in the 23-case set.
 	"deep-interview":
-		"The request is vague about what to build. The user wants to be interviewed and have requirements elicited before anything is designed or written.",
+		"The user wants requirements drawn out of them by questioning before anything is built. Includes explicit instructions to ask rather than assume.",
 	ralplan:
 		"The user wants a deliberate plan, design comparison, or approval before any code is touched. Architecture or sequencing risk is involved.",
 	ultragoal:
@@ -38,7 +43,8 @@ const WORKFLOW_MEANINGS: Record<CanonicalSkcWorkflowSkill, string> = {
 const ROUTING_INSTRUCTIONS =
 	"Which workflow should handle this user request? Choose none unless the request clearly calls for one of the workflows.";
 
-function buildCriteria(): Record<string, string> {
+/** Exported so tests can assert the contract the model is actually given. */
+export function buildRoutingCriteria(): Record<string, string> {
 	const criteria: Record<string, string> = {};
 	for (const skill of CANONICAL_SKC_WORKFLOW_SKILLS) criteria[skill] = WORKFLOW_MEANINGS[skill];
 	criteria[NONE] =
@@ -63,6 +69,12 @@ const MAX_PROMPT_CHARS = 4_000;
  * confidence was 0.67 — and that case was "none", so gating it out costs nothing. A
  * floor here therefore removes the observed error without removing a real activation.
  *
+ * One prompt sits close to this line. "추측하지 말고 모르는 건 다 물어봐" resolves to
+ * deep-interview in 8/8 samples but at 0.76-0.83, so the floor has roughly 0.01 of
+ * headroom on it. Raising the floor would drop a correct activation; lowering it would
+ * re-admit the 0.71 error. Treat 0.75 as fitted to a small sample and re-derive it from
+ * real usage rather than nudging it on a hunch.
+ *
  * Only applied when the backend reports `calibrated: true`. An ordinary LLM answering
  * through a forced enum has no meaningful confidence to compare against, so gating on a
  * number it did not really produce would just be superstition.
@@ -76,7 +88,7 @@ export type SkillRouter = (text: string) => Promise<CanonicalSkcWorkflowSkill | 
  * disabled so the caller keeps its existing behaviour with no branching.
  */
 export function createSemanticSkillRouter(service: DecisionService): SkillRouter {
-	const criteria = buildCriteria();
+	const criteria = buildRoutingCriteria();
 	return async (text: string): Promise<CanonicalSkcWorkflowSkill | null> => {
 		if (!service.enabled) return null;
 		const trimmed = text.trim();
