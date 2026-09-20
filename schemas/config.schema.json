@@ -1505,7 +1505,7 @@
 			"properties": {
 				"enabled": {
 					"type": "boolean",
-					"description": "Let a cheap model answer typed questions the deterministic rules cannot. Currently routes workflow skills when the keyword table finds nothing — which is every non-English phrasing. Costs one small model call on those prompts; every failure falls back to today's behaviour.",
+					"description": "Let a cheap model answer typed questions the deterministic rules cannot. Currently routes workflow skills for phrasings the keyword table cannot express — which is most non-English wording. Costs one small model call per real user turn. Any failure falls back to today's behaviour, but a successful answer can also select a different workflow than the deep-interview ambiguity detector would have.",
 					"default": false
 				}
 			},

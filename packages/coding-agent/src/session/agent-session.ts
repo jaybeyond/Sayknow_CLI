@@ -7658,10 +7658,18 @@ export class AgentSession {
 		const deepInterviewUserIntentEpoch =
 			claimsGenuineUserIntent && !this.isStreaming ? this.#claimDeepInterviewUserIntent() : undefined;
 
-		// The keyword table in `hooks/skill-keywords.ts` is thirteen literal strings, so a
+		// The keyword table in `hooks/skill-keywords.ts` is a list of literal strings, so a
 		// Korean phrasing of "plan this before you touch code" activates nothing. Ask a
-		// cheap model only when the deterministic stage found nothing, and only for real
-		// user turns. Any failure leaves routing to the system prompt, exactly as before.
+		// cheap model instead, and only for real user turns. Any failure leaves routing to
+		// the system prompt, exactly as before.
+		//
+		// Ordering matters: this runs *after* the deep-interview intent claim above but
+		// before streaming, so a workflow it activates is in place before the ambiguity
+		// detector in `skc-runtime/deep-interview-ambiguity.ts` would otherwise seed one.
+		// Verified end to end: "설계가 위험해 보여 … 승인받을 문서부터 만들자" seeds
+		// deep-interview with the setting off and ralplan with it on. Both are plausible
+		// readings and ralplan is the better one here, but the point is that enabling this
+		// can *change* an activation rather than only add one where there was none.
 		if (claimsGenuineUserIntent && !this.isStreaming) await this.#routeWorkflowSemantically(expandedText);
 
 		// If streaming, queue via steer() or followUp() based on option
