@@ -1288,12 +1288,21 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 	{
 		name: "provider",
 		description: "Set up API-compatible providers or login providers",
-		inlineHint: "add|login",
+		inlineHint: "add|login|typesafe",
 		allowArgs: true,
 		handle: async (command, runtime) => {
 			const args = command.args.trim();
 			if (!args || args === "help") {
 				await runtime.output(providerSetupUsage());
+				return commandConsumed();
+			}
+			if (args === "typesafe") {
+				await runtime.output(
+					"TypeSafe key entry needs an interactive terminal.\n" +
+						"Run it in the TUI (/provider typesafe) or from a shell:\n" +
+						"  TYPESAFE_API_KEY=<key> skc setup typesafe\n" +
+						"  skc setup typesafe --remove",
+				);
 				return commandConsumed();
 			}
 			if (args === "login" || args.startsWith("login ")) {
@@ -1358,6 +1367,14 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 			if (args === "login" || args.startsWith("login ")) {
 				const providerId = args.slice("login".length).trim() || undefined;
 				await runtime.ctx.showOAuthSelector("login", providerId);
+				runtime.ctx.editor.setText("");
+				return;
+			}
+			// TypeSafe is not a chat model, so it cannot live in the model list. A direct
+			// subcommand keeps it one step away from `/model`, where users actually look
+			// for "add a key", instead of buried in the onboarding menu.
+			if (args === "typesafe") {
+				runtime.ctx.showTypeSafeKeyPrompt();
 				runtime.ctx.editor.setText("");
 				return;
 			}

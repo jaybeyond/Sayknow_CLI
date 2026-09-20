@@ -321,6 +321,8 @@ export interface InteractiveModeContext {
 	showModelSelector(options?: { temporaryOnly?: boolean }): void;
 	showEffortSelector(): void;
 	showProviderOnboarding(): void;
+	/** Open the TypeSafe key prompt (typed decisions; not a chat model). */
+	showTypeSafeKeyPrompt(): void;
 	showPluginSelector(mode?: "install" | "uninstall"): void;
 	showUserMessageSelector(): void;
 	showTreeSelector(): void;

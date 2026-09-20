@@ -881,7 +881,7 @@ export class SelectorController {
 					} else if (action === "import-credentials") {
 						void this.#handleCredentialImport();
 					} else if (action === "typesafe-key") {
-						this.#showTypeSafeKeyPrompt();
+						this.showTypeSafeKeyPrompt();
 					} else {
 						this.ctx.showStatus(formatProviderOnboardingCommandGuide());
 					}
@@ -903,7 +903,7 @@ export class SelectorController {
 	 * the user's own model while the UI claims TypeSafe is on. Better to keep the prompt
 	 * open and say the key was rejected.
 	 */
-	#showTypeSafeKeyPrompt(): void {
+	showTypeSafeKeyPrompt(): void {
 		this.showSelector(done => {
 			let prompt: TypeSafeKeyPromptComponent | undefined;
 			prompt = new TypeSafeKeyPromptComponent(

@@ -2133,6 +2133,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#selectorController.showEffortSelector();
 	}
 
+	showTypeSafeKeyPrompt(): void {
+		this.#selectorController.showTypeSafeKeyPrompt();
+	}
+
 	showProviderOnboarding(): void {
 		this.#selectorController.showProviderOnboarding();
 	}

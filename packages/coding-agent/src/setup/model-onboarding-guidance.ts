@@ -6,6 +6,11 @@ export const MODEL_ONBOARDING_PROVIDER_PRESET_COMMAND = "/provider add --preset 
 
 export const MODEL_ONBOARDING_SETUP_COMMAND = "skc setup provider";
 export const MODEL_ONBOARDING_OAUTH_COMMAND = "/provider login [provider-id] or /login [provider-id]";
+/**
+ * TypeSafe is not a chat model and never appears in the model list, so the only way a
+ * user learns it exists is from the surfaces where they go to add credentials.
+ */
+export const MODEL_ONBOARDING_TYPESAFE_COMMAND = "/provider typesafe";
 
 export function formatModelOnboardingGuidance(): string {
 	return [
@@ -15,12 +20,13 @@ export function formatModelOnboardingGuidance(): string {
 		`Provider presets: ${MODEL_ONBOARDING_PROVIDER_PRESET_COMMAND} (or ${MODEL_ONBOARDING_SETUP_COMMAND} --preset <preset>).`,
 		`API-compatible custom providers: ${MODEL_ONBOARDING_API_PROVIDER_COMMAND}.`,
 		`OAuth/subscription providers: ${MODEL_ONBOARDING_OAUTH_COMMAND}.`,
+		`Typed decisions (not a chat model): ${MODEL_ONBOARDING_TYPESAFE_COMMAND} adds a TypeSafe key.`,
 		"Then run /model to select a configured model or assign it to a target.",
 	].join("\n");
 }
 
 export function formatModelOnboardingInlineHint(): string {
-	return `Add MiniMax/GLM presets with ${MODEL_ONBOARDING_PROVIDER_PRESET_COMMAND}; custom API providers with ${MODEL_ONBOARDING_API_PROVIDER_COMMAND} (or ${MODEL_ONBOARDING_SETUP_COMMAND}); OAuth/subscription with ${MODEL_ONBOARDING_OAUTH_COMMAND}; then run /model for DEFAULT, EXECUTOR, ARCHITECT, PLANNER, and CRITIC.`;
+	return `Add MiniMax/GLM presets with ${MODEL_ONBOARDING_PROVIDER_PRESET_COMMAND}; custom API providers with ${MODEL_ONBOARDING_API_PROVIDER_COMMAND} (or ${MODEL_ONBOARDING_SETUP_COMMAND}); OAuth/subscription with ${MODEL_ONBOARDING_OAUTH_COMMAND}; TypeSafe typed decisions with ${MODEL_ONBOARDING_TYPESAFE_COMMAND}; then run /model for DEFAULT, EXECUTOR, ARCHITECT, PLANNER, and CRITIC.`;
 }
 
 export function formatNoModelOnboardingError(): string {

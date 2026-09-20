@@ -1,0 +1,292 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Typed Decisions · TypeSafe 연동 분석 보고서 (2026-09-20)</title>
+<style>
+  :root { --bg:#0f1115; --fg:#e6e6e6; --muted:#9aa0a6; --card:#161a22; --line:#252b36; --ok:#3fb950; --warn:#d29922; --bad:#f85149; --acc:#58a6ff; --mono:"SF Mono",Menlo,Consolas,monospace; }
+  * { box-sizing:border-box }
+  body { margin:0; background:var(--bg); color:var(--fg); font:15px/1.6 -apple-system,"Apple SD Gothic Neo","Noto Sans KR",sans-serif; }
+  main { max-width:1040px; margin:0 auto; padding:40px 24px 80px }
+  h1 { font-size:26px; margin:0 0 4px } h2 { font-size:20px; margin:44px 0 12px; padding-top:20px; border-top:1px solid var(--line) } h3 { font-size:16px; margin:24px 0 8px }
+  .sub { color:var(--muted); margin-bottom:28px }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:16px 18px; margin:14px 0 }
+  .ok { border-left:4px solid var(--ok) } .warn { border-left:4px solid var(--warn) } .bad { border-left:4px solid var(--bad) } .info { border-left:4px solid var(--acc) }
+  table { width:100%; border-collapse:collapse; margin:10px 0; font-size:14px } th,td { text-align:left; padding:7px 10px; border-bottom:1px solid var(--line); vertical-align:top } th { color:var(--muted); font-weight:600 }
+  td.n { font-family:var(--mono); text-align:right; white-space:nowrap }
+  code,pre { font-family:var(--mono); font-size:13px } code { background:#1f2430; padding:1px 5px; border-radius:4px } pre { background:#0b0d12; border:1px solid var(--line); border-radius:6px; padding:12px 14px; overflow:auto; line-height:1.5 }
+  .tag { display:inline-block; font-size:12px; padding:1px 8px; border-radius:10px; border:1px solid var(--line); color:var(--muted); margin-right:6px }
+  .tag.ok{color:var(--ok);border-color:var(--ok)} .tag.warn{color:var(--warn);border-color:var(--warn)} .tag.bad{color:var(--bad);border-color:var(--bad)}
+  .flow { font-family:var(--mono); font-size:13px; white-space:pre; background:#0b0d12; border:1px solid var(--line); border-radius:6px; padding:14px; overflow:auto }
+  .kv { display:grid; grid-template-columns:200px 1fr; gap:6px 16px; font-size:14px } .kv dt { color:var(--muted) } .kv dd { margin:0 }
+  .tl { color:var(--muted); font-size:13px }
+  ul { padding-left:20px } li { margin:4px 0 }
+</style>
+</head>
+<body><main>
+
+<h1>Typed Decisions · TypeSafe 연동 분석 보고서</h1>
+<div class="sub">sayknow-cli 0.5.22 기준 · 2026-09-20 · 모든 수치는 이 세션에서 직접 측정한 값이며, 측정하지 않은 것은 그렇게 표기한다.</div>
+
+<div class="card ok">
+<strong>P0 수정 반영됨 (2026-09-20)</strong> — 아래 §3에서 진단한 배선 결함, 평가 라벨 부정확, confidence 미사용 세 가지를 모두 고쳤다.
+수정 후 실측: <b>출시 구성(semantic only) 22/23 (96%), 한국어 8/9, 오탐 0/6, p50 344ms.</b>
+이 문서는 진단 시점의 기록을 남기되, 수정된 항목에 표시를 달았다.
+</div>
+
+<div class="card bad">
+<strong>한 줄 결론 (진단 시점)</strong><br>
+TypeSafe는 <b>코딩에 관여하지 않는다.</b> 현재 쓰이는 곳은 워크플로 라우팅 한 군데뿐이고, 그 자리에서는 정확도를 올린다.
+그런데 <b>배선 결함이 하나 있다</b> — SKC 자체 TUI에서 키워드가 맞는 프롬프트는 의미 판단도 활성화도 건너뛴다.
+오늘 추가한 한국어 키워드 8개가 <b>SKC TUI에서는 죽은 코드</b>다. 기본값이 off라 사용자 영향은 없지만, 켜기 전에 반드시 고쳐야 한다.
+</div>
+
+<!-- ───────────────────────────────────────────── -->
+<h2>1. TypeSafe가 실제로 무엇인가</h2>
+
+<p>공식 문서(<code>docs.typesafe.ai</code>)를 다시 정독한 결과를 우리 관점으로 압축한다.</p>
+
+<div class="card info">
+<b>"AI-powered software, not agents"</b> — 그들 스스로의 정의다.<br>
+<i>"It does not generate code or choose its own next action. It provides AI primitives that embed into software, so code remains in control."</i>
+</div>
+
+<table>
+<tr><th>속성</th><th>내용</th><th>우리에게 의미</th></tr>
+<tr><td>출력</td><td>choice / score / noul 세 가지 타입 값. 문자열 생성 없음</td><td>파싱·검증·재시도 불필요. 코드가 바로 분기</td></tr>
+<tr><td>병렬</td><td>질문 N개를 한 요청에. 서로 독립 평가</td><td>여러 판단을 한 번에 물어도 지연이 거의 안 는다</td></tr>
+<tr><td>보정된 confidence</td><td>RLCD로 학습. "모르겠다"를 숫자로 표현</td><td><b>실측 확인됨</b> (§4). opus에는 없는 신호</td></tr>
+<tr><td>속도</td><td>문서상 ~100ms (SF 기준)</td><td>서울 실측 <b>p50 308~332ms</b></td></tr>
+<tr><td>비용</td><td>$0.042/MTok 입력, 출력 무료</td><td>라우팅 1회 ≈ <b>$0.000018</b></td></tr>
+<tr><td>한계</td><td>문자 그대로 읽음 · 숫자/날짜 약함 · CJK 영어보다 열세 · 생성 불가</td><td>한국어 라우팅 89%는 이 열세 안에서 나온 값</td></tr>
+</table>
+
+<h3>어디에 쓸 수 있고 어디에 못 쓰나 — 문서가 긋는 선</h3>
+<table>
+<tr><th>쓸 수 있는 곳 (System One 과제)</th><th>못 쓰는 곳</th></tr>
+<tr><td>분류·라우팅 — "이 요청은 어디로"</td><td><b>코드 작성</b></td></tr>
+<tr><td>필터링 — "이 청크가 질문과 관련 있나"</td><td><b>추론·계획·설계</b></td></tr>
+<tr><td>게이팅 — "이 명령이 되돌릴 수 없는가"</td><td><b>다음 행동 결정</b></td></tr>
+<tr><td>스코어링 — "심각도 몇 단계"</td><td>산술·날짜 비교·카운팅</td></tr>
+<tr><td>추출을 선택으로 변환 — 후보를 코드가 뽑고 모델이 고름</td><td>자유 텍스트 생성</td></tr>
+</table>
+<p>공통 조건: <b>답이 미리 정해진 N개 중 하나</b>여야 한다. "무엇을"은 묻되 "어떻게"는 못 묻는다. 코딩은 출력 공간이 열려 있는 문제라 <b>구조적으로</b> 여기 들어갈 수 없다.</p>
+
+<!-- ───────────────────────────────────────────── -->
+<h2>2. sayknow-cli에서 실제로 어떻게 작동하나</h2>
+
+<p><code>src/decisions/</code>를 소비하는 곳은 코드베이스 전체에서 <b>한 곳</b>이다: <code>agent-session.ts</code>의 <code>#routeWorkflowSemantically()</code>.</p>
+
+<div class="flow">유저 프롬프트 (SKC TUI)
+   │
+   ├─ decisions.enabled === false ──────────────▶ 아무것도 안 함 (현재 기본값)
+   │
+   ├─ detectPrimarySkillKeyword(text) 히트 ─────▶ return   ◀── §3 결함: 여기서 아무것도 활성화 안 됨
+   │
+   ├─ 12자 미만 ────────────────────────────────▶ return
+   │
+   ├─ 백엔드 순서로 판단 1회
+   │     ① typesafe  (키 있을 때)      calibrated:true
+   │     ② llm       (소형 모델)        calibrated:false
+   │     ③ 없음 → null
+   │
+   ├─ 답이 none / 실패 / 8초 초과 ─────────────▶ return  (기존 동작: 시스템 프롬프트가 라우팅)
+   │
+   └─ ensureWorkflowSkillActivationState(skill) ▶ .skc/state/skill-active-state.json 기록
+                                                  → 뮤테이션 가드 · Stop 훅 · HUD · ask 도구
+   │
+   ▼
+Claude 턴 시작 ─────── 코딩 · 추론 · 툴 호출 전부 여기. TypeSafe 관여 0</div>
+
+<div class="kv card">
+<dt>실행 시점</dt><dd><code>prompt()</code> 안, 스트리밍 시작 <b>전</b>. 진짜 유저 턴(<code>claimsGenuineUserIntent</code>)에서만</dd>
+<dt>전송되는 것</dt><dd>프롬프트 앞 4,000자 + 워크플로 5개의 설명문. 파일·코드·툴 출력은 <b>안 감</b></dd>
+<dt>돌아오는 것</dt><dd><code>{ choice, probabilities, confidence }</code> — 워크플로 이름 하나</dd>
+<dt>실패 시</dt><dd>전부 <code>null</code>로 수렴. 자격증명 없음·오프라인·타임아웃·enum 밖 값 → 오늘과 같은 동작</dd>
+<dt>추가 지연</dt><dd>키워드 미스한 턴에만 p50 ~330ms. 키워드 히트면 호출 자체가 없음</dd>
+</div>
+
+<h3>코딩 정확도에 미치는 영향: 0</h3>
+<p>Claude에 가는 시스템 프롬프트, 메시지, 툴 목록 어디에도 판단 결과가 섞이지 않는다. 결과는 상태 파일 한 줄로만 남고, 그 파일은 <b>라우팅 이전에도 <code>/skill:ralplan</code>으로 만들어지던 것과 동일한 파일</b>이다. 즉 워크플로가 켜졌을 때의 동작은 새로울 게 없고, 켜는 방법만 늘어난 것이다.</p>
+
+<!-- ───────────────────────────────────────────── -->
+<h2>3. 배선 결함 — 지금 고쳐야 하는 것</h2>
+
+<div class="card bad">
+<b>SKC TUI에서 키워드가 맞는 프롬프트는 활성화되지 않는다.</b> <span class="tag ok">수정됨</span>
+</div>
+
+<p>사실관계를 순서대로 놓으면:</p>
+<ol>
+<li><code>UserPromptSubmit</code> 훅(<code>skc codex-native-hook</code>)이 키워드 활성화를 담당한다. 그런데 이 훅은 <code>~/.codex/hooks.json</code>에 설치되는 <b>Codex CLI 연동 전용</b>이다. SKC 자체 세션/TUI에서는 <b>발사되지 않는다</b> (코드베이스에서 <code>UserPromptSubmit</code>을 참조하는 곳은 훅 구현과 설치 스크립트뿐).</li>
+<li>SKC TUI에서 워크플로를 켜는 경로는 <code>/skill:&lt;name&gt;</code> 명시 호출뿐이었다 (<code>agent-session.ts:7762</code>). 일반 프롬프트의 키워드는 시스템 프롬프트 <code>&lt;routing&gt;</code>이 모델에게 알려주는 <b>권고</b>였지, 결정론적 활성화가 아니었다.</li>
+<li>내가 넣은 <code>#routeWorkflowSemantically</code>는 <code>if (detectPrimarySkillKeyword(text)) return;</code> — 주석에 "deterministic stage already decided"라고 썼다. <b>이 전제는 Codex 호스트에서만 참이다.</b></li>
+<li>결과: SKC TUI + <code>decisions.enabled: true</code>에서<br>
+  <code>"실행 전에 합의된 계획부터 세워줘"</code> → 한국어 키워드 <code>합의된 계획</code> 히트 → <b>return</b> → 의미 판단 안 함 → 활성화 안 함.<br>
+  키워드를 추가하기 <b>전</b>에는 이 문장이 의미 판단으로 가서 활성화됐다. <b>키워드 추가가 이 경로에서는 퇴행이다.</b></li>
+</ol>
+
+<div class="card warn">
+<b>평가 스크립트의 "hybrid 100%"는 출시된 동작이 아니다.</b> <span class="tag ok">수정됨</span><br>
+<code>scripts/eval-skill-routing.ts</code>는 <code>keyword ?? semantic</code>을 계산한다 — 두 단계가 <i>합쳐졌을 때</i>의 이상적 결과다. 실제 <code>agent-session.ts</code>는 키워드 히트 시 아무것도 하지 않는다. 내가 "하이브리드(출시본)"라고 표기한 수치는 측정 대상과 출시 코드가 달랐다. 이 보고서에서 정정한다.
+<br><br><b>적용 결과:</b> 라벨을 <code>keyword only (Codex hook)</code> / <code>semantic only (SHIPPED)</code> / <code>keyword+semantic (upper bound)</code>로 바꾸고,
+미스 목록도 출시 구성 기준으로 보고하도록 고쳤다.
+</div>
+
+<h3>영향 범위</h3>
+<table>
+<tr><th>호스트</th><th>키워드 프롬프트</th><th>패러프레이즈 프롬프트</th><th>상태</th></tr>
+<tr><td>Codex CLI (훅 설치)</td><td>훅이 활성화 ✅</td><td>의미 판단 안 됨 (훅에 모델 없음)</td><td>키워드 21개는 여기서 유효</td></tr>
+<tr><td><b>SKC TUI</b> (decisions off, 기본)</td><td>권고만 (기존과 동일)</td><td>권고만 (기존과 동일)</td><td>영향 없음</td></tr>
+<tr><td><b>SKC TUI</b> (decisions on)</td><td><span class="tag bad">활성화 안 됨</span></td><td>의미 판단 → 활성화 ✅</td><td><b>결함</b>. 한국어 키워드 8개 무효</td></tr>
+</table>
+
+<p>두 호스트가 서로 배타적이라 <b>이중 활성화는 없다</b> — 그건 확인했다. 문제는 이중이 아니라 <b>누락</b>이다.</p>
+
+<h3>수정 — 결정이 하나 필요하다</h3>
+<pre>// 지금
+if (detectPrimarySkillKeyword(text)) return;
+const skill = await this.#semanticSkillRouter(text);
+
+// 안 A — 키워드도 SKC TUI에서 결정론적으로 활성화 (Codex 훅과 동일 동작)
+const skill = detectPrimarySkillKeyword(text)?.skill ?? await this.#semanticSkillRouter(text);
+
+// 안 B — 키워드는 권고로 두고, 의미 판단만 활성화 (기존 SKC 동작 유지 + 의미 단계 추가)
+const skill = await this.#semanticSkillRouter(text);   // 키워드 조기 return 제거</pre>
+<p><b>A</b>는 "consensus plan"이 SKC TUI에서도 하드 활성화된다 — Codex와 동작이 같아지지만, SKC 사용자에겐 새 동작이다. <b>B</b>는 SKC의 기존 계약(키워드=권고)을 지키면서 의미 판단만 얹는다. 대신 키워드 히트 프롬프트도 매번 판단 호출이 나가 비용이 조금 는다.</p>
+<p class="tl"><b>적용 결과:</b> 안 B를 채택해 <code>if (detectPrimarySkillKeyword(text)) return;</code>을 제거했다.
+회귀 테스트 <code>"a keyword hit no longer suppresses the semantic stage"</code>로 고정 — 키워드가 맞는 프롬프트가 실제로 백엔드에 도달하는지까지 검증한다.</p>
+<p>권고 근거: <b>B</b>. 활성화는 사용자에게 뮤테이션 가드·Stop 훅이 걸리는 강한 동작이라, 이미 있던 계약을 조용히 바꾸지 않는 쪽이 맞다. 키워드는 confidence 없이 발동하므로 오탐 시 되돌릴 신호도 없다.</p>
+
+<!-- ───────────────────────────────────────────── -->
+<h2>4. 측정값 — 효과가 있는가</h2>
+
+<h3>4.1 라우팅 정확도 (23 프롬프트, 한국어 9 / 영어 8 / negative 6)</h3>
+<table>
+<tr><th>구성</th><th class="n">전체</th><th class="n">한국어</th><th class="n">영어</th><th class="n">오탐 없음</th><th class="n">p50</th><th class="n">비용/콜</th></tr>
+<tr><td>0.5.21 (키워드 13개, 영어만)</td><td class="n">43%</td><td class="n"><b>0%</b></td><td class="n">50%</td><td class="n">100%</td><td class="n">0ms</td><td class="n">0</td></tr>
+<tr><td>키워드 21개 (한국어 추가) — Codex 훅 경로</td><td class="n">78%</td><td class="n">89%</td><td class="n">50%</td><td class="n">100%</td><td class="n">0ms</td><td class="n">0</td></tr>
+<tr><td>TypeSafe 단독</td><td class="n">96%</td><td class="n">89%</td><td class="n">100%</td><td class="n">100%</td><td class="n">308ms</td><td class="n">$0.000018</td></tr>
+<tr><td>키워드 + TypeSafe (이상적 결합)</td><td class="n">100%</td><td class="n">100%</td><td class="n">100%</td><td class="n">100%</td><td class="n">332ms</td><td class="n">$0.000018</td></tr>
+<tr><td><i>참고: claude-opus-5</i></td><td class="n">100%</td><td class="n">100%</td><td class="n">100%</td><td class="n">100%</td><td class="n">1,463ms</td><td class="n">$0.0063</td></tr>
+</table>
+<p class="tl">TypeSafe 3회 반복 66/69 — 오답은 3회 모두 같은 1문항. 흔들림이 아니라 일관된 판단 차이. opus 대비 지연 4.7×, 비용 ~350× 유리.</p>
+
+<h3>4.2 confidence가 실제로 보정돼 있는가 — 이게 TypeSafe를 쓰는 유일한 근거다</h3>
+<p>10문항에 대해 <code>confidence</code>를 직접 받아봤다:</p>
+<table>
+<tr><th>판정</th><th class="n">conf</th><th>기대</th><th>실제</th><th>프롬프트</th></tr>
+<tr><td><span class="tag bad">MISS</span></td><td class="n">0.71</td><td>deep-interview</td><td>none</td><td>추측하지 말고 모르는 건 다 물어봐</td></tr>
+<tr><td><span class="tag ok">OK</span></td><td class="n">0.67</td><td>none</td><td>none</td><td>우리 서비스에 이 모델 붙이면 뭐가 좋아?</td></tr>
+<tr><td><span class="tag ok">OK</span></td><td class="n">0.90</td><td>ultragoal</td><td>ultragoal</td><td>이 목표 끝까지 추적해줘</td></tr>
+<tr><td><span class="tag ok">OK</span></td><td class="n">0.97</td><td>ralplan</td><td>ralplan</td><td>여러 안 비교해서 검토받을 계획서</td></tr>
+<tr><td><span class="tag ok">OK</span></td><td class="n">1.00</td><td colspan="3">나머지 6건 (전부 정답)</td></tr>
+</table>
+<div class="kv card ok">
+<dt>정답 confidence</dt><dd>평균 <b>0.95</b>, 최소 0.67</dd>
+<dt>오답 confidence</dt><dd><b>0.71</b> (top2: none 0.77 / deep-interview 0.23)</dd>
+</div>
+<p><b>보정돼 있다.</b> 확신한 것(1.00)은 전부 맞았고, 유일한 오답은 스스로 "애매하다"고 표시했다. 다만 정답 최소(0.67)와 오답(0.71)이 <b>겹친다</b> — 임계값 하나로 완벽히 가를 수는 없다. 그런데 겹치는 정답 쪽은 <code>none</code>이라, 폴백으로 보내도 손해가 거의 없다(다시 none이 나오거나, 워크플로를 안 켜는 안전한 실패).</p>
+
+<div class="card info">
+<b>따라서 confidence 게이트가 정당화된다.</b> <span class="tag ok">적용됨 — <code>MIN_CALIBRATED_CONFIDENCE = 0.75</code></span><br> <code>confidence &lt; 0.75 → 활성화하지 않음</code>으로 두면 오답 1건이 잡히고 정답 1건이 같이 걸리는데, 그 정답은 어차피 "켜지 말자"였다. 실질 손해 0. 이걸 안 넣으면 TypeSafe를 쓰는 이유의 절반을 버리는 것이다.
+</div>
+
+<h3>4.3 우리가 잘못 쓰고 있는 것 — 문서 기준 대조</h3>
+<table>
+<tr><th>TypeSafe 문서의 권고</th><th>우리 현황</th><th>판정</th></tr>
+<tr><td>confidence로 act / review / escalate 분기</td><td><code>calibrated:true</code>일 때 0.75 미만은 활성화하지 않음</td><td><span class="tag ok">적용됨</span></td></tr>
+<tr><td>독립 질문은 한 요청에 묶어라 (fan-out)</td><td>질문 1개만 보낸다</td><td><span class="tag">해당 없음</span> — 지금은 물을 게 하나뿐</td></tr>
+<tr><td>state는 질문에 필요한 것만</td><td>프롬프트 앞 4,000자</td><td><span class="tag ok">적정</span></td></tr>
+<tr><td>criteria에 경계 사례를 명시</td><td>워크플로 5개 설명문. 오답 1건은 criteria 보강으로 잡힐 가능성</td><td><span class="tag warn">개선 여지</span></td></tr>
+<tr><td>영어가 정확도 최고, CJK는 검증하고 써라</td><td>한국어 89% 실측. 검증은 했다</td><td><span class="tag ok">준수</span></td></tr>
+<tr><td>임계값은 자기 데이터로 정하라</td><td>10문항으로 0.75 근사. <b>표본 부족</b></td><td><span class="tag warn">더 재야 함</span></td></tr>
+</table>
+
+<!-- ───────────────────────────────────────────── -->
+<h2>5. "어떤 언어로 말하든 영어로 추론" 기능과의 관계</h2>
+
+<p>확인한 사실:</p>
+<div class="kv card">
+<dt>설정 키</dt><dd><code>reasoningLanguage: "off" | "english"</code> (기본 off). 별도로 <code>language</code>(UI 언어, 현재 ko)</dd>
+<dt>구현</dt><dd><code>system-prompt.md</code>의 <b>지시문 3줄</b>. <code>{{#if reasoningLanguageEnglish}}</code>로 렌더</dd>
+<dt>내용</dt><dd>"Reason through development in English. Keep user-facing answers in the language the user used."</dd>
+<dt>번역 파이프라인?</dt><dd><b>없다.</b> 프롬프트는 한국어 그대로 Claude에 간다. Claude가 사고만 영어로 하라는 권고다</dd>
+</div>
+
+<h3>충돌 여부: 없다 — 다만 이유를 정확히</h3>
+<ul>
+<li>두 기능은 <b>다른 레이어</b>다. <code>reasoningLanguage</code>는 Claude 시스템 프롬프트 템플릿 플래그. 판단 라우팅은 Claude 턴 <b>이전</b>에 상태 파일을 쓰는 단계. 서로 읽지도 쓰지도 않는다.</li>
+<li>판단 라우팅은 <code>reasoningLanguage</code>를 <b>참조하지 않고</b>, 참조할 필요도 없다. TypeSafe는 한국어 원문을 받는다.</li>
+<li>"영어로 번역해서 TypeSafe에 보내면 정확도가 오르지 않을까" — 이론상 그렇다(문서가 영어 우위를 명시). 하지만 번역에 모델 호출이 하나 더 필요해 <b>이 기능의 존재 이유(싸고 빠름)를 무너뜨린다.</b> 한국어 89%를 받아들이고 confidence 게이트로 방어하는 게 맞다.</li>
+</ul>
+
+<div class="card ok">
+결론: <b>배선이 꼬이지 않았다.</b> 두 기능은 독립이고, 켜고 끄는 조합 4가지 모두 서로 영향 없이 동작한다. 유일한 접점은 "둘 다 한국어 사용자를 위한 기능"이라는 목적뿐이다.
+</div>
+
+<!-- ───────────────────────────────────────────── -->
+<h2>6. 어디까지 쓸 수 있나 — 후보별 정직한 평가</h2>
+
+<table>
+<tr><th>후보</th><th>TypeSafe 패턴</th><th>기대 효과</th><th>비용·리스크</th><th>판정</th></tr>
+<tr><td><b>워크플로 라우팅</b> (현재)</td><td>intent-routing</td><td>한국어 0%→89~100%. <b>없던 기능</b></td><td>턴당 330ms, 프롬프트 4KB 전송</td><td><span class="tag ok">유지. §3 수정 + confidence 게이트 필수</span></td></tr>
+<tr><td>bash 명령 위험도 게이팅</td><td>confidence-routing</td><td>346줄 프리픽스 규칙 밖의 파괴적 명령 포착</td><td>명령마다 330ms. 인터랙티브 경로라 체감됨. 오탐 시 사용자 마찰</td><td><span class="tag warn">규칙 밖 명령에만 한정하면 가능</span></td></tr>
+<tr><td>fetch/read 인젝션 스크리닝</td><td>llm-guardrails 쿡북</td><td>현재 방어 0 (태깅만). <b>없던 방어선</b></td><td>fetch마다 330ms 병렬 가능. <b>문서 자체가 "적대적 입력에 강하지 않다"고 인정</b> — 1차 필터로만</td><td><span class="tag warn">가능. 최종 방어선으로 쓰면 안 됨</span></td></tr>
+<tr><td>read/search 컨텍스트 필터</td><td>classifying-rag-passages</td><td>Claude 입력 토큰 감소 — <b>유일하게 코딩에 간접 기여</b> (컨텍스트 로트 완화)</td><td>read마다 330ms + 청크 수. 관련 있는 걸 버리면 답이 틀린다 — <b>고위험</b></td><td><span class="tag warn">보수적 임계값(버리지 말고 순서만) 전제로 검토</span></td></tr>
+<tr><td>세션 트레이스 품질 심사</td><td>agent-trace-observability</td><td>사람이 봐야 할 세션 자동 표시</td><td>비동기라 지연 무관. 트레이스 전체가 나감</td><td><span class="tag">데이터 정책 확인 후</span></td></tr>
+<tr><td>스킬 카탈로그 선택</td><td>skill-suggestion 쿡북</td><td>182개 중 택1 사례가 문서에 있음</td><td>지금 스킬 4개라 과함</td><td><span class="tag">스킬 수 늘면</span></td></tr>
+</table>
+
+<div class="card warn">
+<b>공통 전제: 프롬프트/콘텐츠가 미국 서버로 나간다.</b> ZDR(무보존)은 엔터프라이즈 전용. 지금 라우팅은 프롬프트 앞부분만 보내지만, 스크리닝·필터는 <b>파일 내용과 페이지 본문</b>이 나간다. 확장 전에 데이터 정책을 정해야 한다. <code>secrets/obfuscator.ts</code>가 있으니 전송 전 스크럽은 붙일 수 있다.
+</div>
+
+<!-- ───────────────────────────────────────────── -->
+<h2>7. 개선 방향 — 우선순위</h2>
+
+<h3>P0 · 켜기 전에 반드시 <span class="tag ok">완료</span></h3>
+<ol>
+<li><b>§3 배선 수정</b> — 안 B 권고. 키워드 조기 return 제거. 테스트: SKC TUI 경로에서 한국어 키워드 프롬프트가 활성화되는지 <b>실제 세션</b>으로 검증 (스텁 아님).</li>
+<li><b>평가 스크립트 정직화</b> — "hybrid (shipped)" 라벨 제거. 출시 코드가 실제로 하는 것과 이상적 결합을 분리해서 보고.</li>
+<li><b>confidence 게이트</b> — <code>calibrated:true</code>인 답에 한해 <code>confidence &lt; 0.75 → 활성화 안 함</code>. llm 백엔드(<code>calibrated:false</code>)는 게이트 없음(숫자가 의미 없으므로).</li>
+</ol>
+
+<h3>P1 · 켜고 나서</h3>
+<ol start="4">
+<li><b>실사용 오탐 관찰</b> — 벤치 23문항은 내가 쓴 문장이다. 네가 실제로 치는 프롬프트에서 워크플로가 원치 않게 켜지는지 며칠 본다. 오탐 1건이 미스 10건보다 나쁘다.</li>
+<li><b>임계값 재적합</b> — 실사용 로그가 쌓이면 0.75를 데이터로 정한다. 지금은 10문항 근사.</li>
+<li><b>criteria 보강</b> — 오답 1건("추측하지 말고…")은 deep-interview 설명에 "정보를 캐묻는 요청" 계열을 추가하면 잡힐 가능성. 재측정 필요.</li>
+</ol>
+
+<h3>P2 · 확장 검토</h3>
+<ol start="7">
+<li><b>인젝션 스크리닝</b> — fetch 결과에 noul 2개(<code>injection_attempt</code>, <code>instruction_shaped</code>). 병렬이라 체감 0. <b>경고 표시만</b>, 격리는 confidence ≥ 0.9에서만.</li>
+<li><b>컨텍스트 필터</b> — 검토는 하되 "버리기"가 아니라 "순서 재배치"로 시작. 관련 없는 청크를 뒤로 보내는 건 틀려도 안전하다.</li>
+</ol>
+
+<h3>하지 말 것</h3>
+<ul>
+<li>TypeSafe를 <code>packages/ai</code> 채팅 프로바이더로 등록 — 고를 수 없는 모델이 선택기에 생긴다 (이미 안 하고 있음, 유지)</li>
+<li>번역 후 TypeSafe 호출 — 호출 하나가 더 붙어 존재 이유가 사라진다</li>
+<li>확률을 프론티어 모델에게 쓰게 하기 — 정확도 0.35로 무너진다(이미 회피, 유지)</li>
+<li>"코딩이 좋아진다"는 기대 — 구조적으로 불가. 이 기능의 값어치는 <b>한국어로도 워크플로가 켜진다</b>에 있다</li>
+</ul>
+
+<!-- ───────────────────────────────────────────── -->
+<h2>8. 현재 상태 스냅샷</h2>
+<div class="kv card">
+<dt>배포</dt><dd>0.5.22 — npm 3패키지 확인, CI 태그 런 success</dd>
+<dt>decisions.enabled</dt><dd><b>false</b> (기본). 지금은 아무 동작 없음</dd>
+<dt>TypeSafe 키</dt><dd>이 머신 auth db에 저장됨 (레포 밖, <code>~/.skc/agent/agent.db</code>)</dd>
+<dt>reasoningLanguage</dt><dd>off</dd>
+<dt>미커밋</dt><dd><code>/model</code> 힌트 + <code>/provider typesafe</code> 서브커맨드 (6파일). tsgo/biome/테스트 39개 통과</dd>
+<dt>이 보고서에서 새로 발견</dt><dd>§3 배선 결함 1건 · 평가 라벨 부정확 1건 · confidence 미사용 1건 — <b>모두 수정 완료</b></dd>
+<dt>수정 후 실측</dt><dd>출시 구성 22/23 (96%) · 한국어 8/9 · 오탐 0/6 · p50 344ms · 테스트 14개</dd>
+<dt>남은 미스 1건</dt><dd>"추측하지 말고 모르는 건 다 물어봐" → none. criteria 보강 대상 (P1-6)</dd>
+</div>
+
+<p class="tl">측정하지 않은 것: llm 백엔드 폴백의 실제 한국어 품질(haiku-4-5 89%/오탐 2건 외 미측정), 로컬 런타임 모델의 판단 품질(선택 경로만 검증), 인젝션 스크리닝·컨텍스트 필터의 실제 효과(미구현).</p>
+
+</main></body></html>
