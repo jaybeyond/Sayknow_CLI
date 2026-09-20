@@ -2007,7 +2007,7 @@ export const SETTINGS_SCHEMA = {
 			tab: "context",
 			label: "Typed decisions",
 			description:
-				"Let a cheap model answer typed questions the deterministic rules cannot. Currently routes workflow skills for phrasings the keyword table cannot express — which is most non-English wording. Costs one small model call per real user turn. Any failure falls back to today's behaviour, but a successful answer can also select a different workflow than the deep-interview ambiguity detector would have.",
+				"Add a model-backed second stage to workflow routing. The keyword table already runs on every turn and costs nothing; this handles the phrasings it cannot express, which is most wording that is not a literal match. Costs one small model call, and only on turns the keyword table did not already answer. Any failure falls back to keyword-only behaviour, but a successful answer can also select a different workflow than the deep-interview ambiguity detector would have.",
 		},
 	},
 

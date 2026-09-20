@@ -268,3 +268,16 @@ test("deep-interview covers an instruction to ask, not only a vague spec", () =>
 	// workflow for prompts that need none of them.
 	expect(Object.keys(criteria).sort()).toEqual(["deep-interview", "none", "ralplan", "team", "ultragoal"].sort());
 });
+
+test("the keyword table is what a Korean workflow phrasing hits, with no model involved", () => {
+	// These used to reach only the Codex `UserPromptSubmit` hook, which this host never
+	// fires, so in an SKC session they activated nothing at all. The session now runs the
+	// same table itself — free, deterministic, and independent of `decisions.enabled`.
+	const cases: Array<[string, CanonicalSkcWorkflowSkill]> = [
+		["이거 아키텍처 리스크 커. 실행 전에 합의된 계획부터 세워줘", "ralplan"],
+		["추측하지 말고 모르는 건 다 물어봐", "deep-interview"],
+		["이 목표 끝까지 추적해줘", "ultragoal"],
+		["작업 크니까 워커 여러 개로 나눠서 병렬로 돌려줘", "team"],
+	];
+	for (const [prompt, skill] of cases) expect(detectPrimarySkillKeyword(prompt)?.skill).toBe(skill);
+});

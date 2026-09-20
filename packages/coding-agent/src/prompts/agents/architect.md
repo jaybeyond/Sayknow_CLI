@@ -1,7 +1,7 @@
 ---
 name: architect
 description: Read-only architecture and code-review agent with severity-rated findings and status verdicts
-tools: read, search, find, lsp, ast_grep, web_search, bash, report_finding, irc
+tools: read, search, find, lsp, ast_grep, web_search, bash, report_finding, skill, irc
 thinking-level: high
 blocking: true
 forkContext: allowed

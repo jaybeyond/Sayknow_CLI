@@ -262,7 +262,12 @@ import { expandSlashCommand, type FileSlashCommand } from "../extensibility/slas
 import { GoalRuntime } from "../goals/runtime";
 import type { Goal, GoalModeState } from "../goals/state";
 import type { HindsightSessionState } from "../hindsight/state";
-import { buildSkillStopOutput, ensureWorkflowSkillActivationState } from "../hooks/skill-state";
+import {
+	buildSkillStopOutput,
+	detectPrimarySkillKeyword,
+	ensureWorkflowSkillActivationState,
+} from "../hooks/skill-state";
+import { buildUiSkillActivationContext } from "../hooks/ui-skill-keywords";
 import { initializeLocalRoot, type LocalProtocolOptions, resolveLocalUrlToPath } from "../internal-urls";
 import { shutdownAll as shutdownAllLspClients } from "../lsp/client";
 import { resolveMemoryBackend } from "../memory-backend";
@@ -309,6 +314,7 @@ import {
 } from "../skc-runtime/session-state-sidecar";
 import { requestSkcWorkerIntegrationAttempt } from "../skc-runtime/team-runtime";
 import {
+	type CanonicalSkcWorkflowSkill,
 	isCanonicalSkcWorkflowSkill,
 	readVisibleSkillActiveState,
 	syncSkillActiveState,
@@ -7577,6 +7583,17 @@ export class AgentSession {
 	 * precisely the behaviour before this stage existed.
 	 */
 	async #routeWorkflowSemantically(text: string): Promise<void> {
+		// Stage one: the keyword table. Free, deterministic, and measured at zero false
+		// positives, so it is not gated behind the opt-in setting — gating it was why an
+		// enumerated phrase activated nothing in this host while the Codex hook activated
+		// it fine. Activating here makes the two hosts agree.
+		const keyword = detectPrimarySkillKeyword(text);
+		if (keyword) {
+			await this.#activateWorkflowSkill(keyword.skill);
+			return;
+		}
+
+		// Stage two costs a model call, so it stays opt-in.
 		if (!this.settings.get("decisions.enabled")) return;
 		try {
 			this.#semanticSkillRouter ??= createSemanticSkillRouter(
@@ -7589,6 +7606,20 @@ export class AgentSession {
 			);
 			const skill = await this.#semanticSkillRouter(text);
 			if (!skill) return;
+			await this.#activateWorkflowSkill(skill);
+		} catch (error) {
+			logger.debug("agent-session: semantic workflow routing failed", { error: String(error) });
+		}
+	}
+
+	/**
+	 * Seed workflow state and attach the ask tool.
+	 *
+	 * Both routing stages funnel through here, and both are best-effort: a failure to
+	 * write state must never take down the user's turn, so it is logged and swallowed.
+	 */
+	async #activateWorkflowSkill(skill: CanonicalSkcWorkflowSkill): Promise<void> {
+		try {
 			await ensureWorkflowSkillActivationState({
 				cwd: this.sessionManager.getCwd(),
 				skill,
@@ -7596,7 +7627,7 @@ export class AgentSession {
 			});
 			this.#attachAskTool();
 		} catch (error) {
-			logger.debug("agent-session: semantic workflow routing failed", { error: String(error) });
+			logger.debug("agent-session: workflow activation failed", { skill, error: String(error) });
 		}
 	}
 
@@ -7705,6 +7736,7 @@ export class AgentSession {
 			const hasPendingUserDirective = this.#toolChoiceQueue.inspect().includes("user-force");
 			const eagerTodoPrelude =
 				!options?.synthetic && !hasPendingUserDirective ? this.#createEagerTodoPrelude(expandedText) : undefined;
+			const uiSkillPrelude = options?.synthetic ? undefined : this.#createUiSkillPrelude(expandedText);
 
 			const userContent: (TextContent | ImageContent)[] = [{ type: "text", text: expandedText }];
 			if (options?.images) {
@@ -7733,7 +7765,13 @@ export class AgentSession {
 			try {
 				await this.#promptWithMessage(message, expandedText, {
 					...options,
-					prependMessages: eagerTodoPrelude ? [eagerTodoPrelude.message] : undefined,
+					prependMessages:
+						eagerTodoPrelude || uiSkillPrelude
+							? [
+									...(uiSkillPrelude ? [uiSkillPrelude] : []),
+									...(eagerTodoPrelude ? [eagerTodoPrelude.message] : []),
+								]
+							: undefined,
 					admissionLease: admission,
 					resetRetryReplaySafety: true,
 				});
@@ -11978,6 +12016,35 @@ export class AgentSession {
 			expandPromptTemplates: false,
 			toolChoice: "required",
 		});
+	}
+
+	/**
+	 * Deterministic activation for the bundled frontend UI/UX skills.
+	 *
+	 * `hooks/ui-skill-keywords.ts` already knows how to match a prompt against all
+	 * thirteen bundled skills in Korean and English, but the only caller was the Codex
+	 * `UserPromptSubmit` hook — which this host never fires. In an SKC session the skills
+	 * were therefore advertised solely by a sentence in the system prompt, leaving it to
+	 * the model to notice and obey. That is not activation, it is hope.
+	 *
+	 * The matcher is deliberately conservative and measured that way: on sixteen real
+	 * prompts it caught 5 of 8 frontend requests and produced **zero** false positives on
+	 * the 8 backend ones. Missing a match costs nothing — the system-prompt sentence is
+	 * still there — while a wrong match would load a design skill onto a database task.
+	 * That asymmetry is why a reminder is the right shape here and a forced tool call is
+	 * not.
+	 */
+	#createUiSkillPrelude(promptText: string): AgentMessage | undefined {
+		if (this.#planModeState?.enabled) return undefined;
+		const directive = buildUiSkillActivationContext(promptText);
+		if (!directive) return undefined;
+		logger.debug("agent-session: bundled UI skill matched", { promptChars: promptText.length });
+		return {
+			role: "developer",
+			content: [{ type: "text", text: `<system-reminder>\n${directive}\n</system-reminder>` }],
+			attribution: "agent",
+			timestamp: Date.now(),
+		};
 	}
 
 	#createEagerTodoPrelude(promptText: string): { message: AgentMessage; toolChoice?: ToolChoice } | undefined {
