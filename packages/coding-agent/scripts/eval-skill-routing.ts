@@ -126,12 +126,12 @@ async function main(): Promise<void> {
 
 	console.log("\n=== stage comparison ===");
 	for (const [label, pick] of [
-		["keyword only (today)", (row: (typeof rows)[number]) => row.keyword],
-		["semantic only", (row: (typeof rows)[number]) => row.semantic],
-		["hybrid (shipped)", hybrid],
+		["keyword only (Codex hook)", (row: (typeof rows)[number]) => row.keyword],
+		["semantic only (SHIPPED)", (row: (typeof rows)[number]) => row.semantic],
+		["keyword+semantic (upper bound)", hybrid],
 	] as const) {
 		console.log(
-			`${label.padEnd(22)} all ${pct(...score(pick, () => true))}  ko ${pct(...score(pick, ko))}  en ${pct(...score(pick, en))}  clean-negatives ${pct(...score(pick, negatives))}`,
+			`${label.padEnd(32)} all ${pct(...score(pick, () => true))}  ko ${pct(...score(pick, ko))}  en ${pct(...score(pick, en))}  clean-negatives ${pct(...score(pick, negatives))}`,
 		);
 	}
 
@@ -140,12 +140,13 @@ async function main(): Promise<void> {
 		`\nlatency p50 ${latencies[Math.floor(latencies.length / 2)]}ms  p95 ${latencies[Math.max(0, Math.ceil(latencies.length * 0.95) - 1)]}ms  max ${latencies.at(-1)}ms`,
 	);
 
-	const misses = rows.filter(row => hybrid(row) !== row.case.expect);
+	// Report against what actually ships in this host, not against the upper bound.
+	const misses = rows.filter(row => row.semantic !== row.case.expect);
 	if (misses.length > 0) {
-		console.log("\n=== hybrid misses ===");
+		console.log("\n=== misses in shipped configuration (semantic only) ===");
 		for (const row of misses)
 			console.log(
-				`  [${row.case.lang}] want=${row.case.expect ?? "none"} got=${hybrid(row) ?? "none"} :: ${row.case.prompt}`,
+				`  [${row.case.lang}] want=${row.case.expect ?? "none"} got=${row.semantic ?? "none"} :: ${row.case.prompt}`,
 			);
 	}
 

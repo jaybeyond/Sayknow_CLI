@@ -51,6 +51,24 @@ const MIN_PROMPT_CHARS = 12;
 /** Only the opening of a prompt decides its workflow; the rest is payload. */
 const MAX_PROMPT_CHARS = 4_000;
 
+/**
+ * Minimum calibrated confidence required to activate a workflow.
+ *
+ * Activation is a strong move: it switches on the mutation guard, the Stop hook and the
+ * ask tool. Getting it wrong is worse than missing, because the user did not ask for any
+ * of that and has no obvious way to see why it appeared.
+ *
+ * Measured over ten routing prompts against the hosted model: every answer it reported
+ * at 1.00 was correct, and its single wrong answer reported 0.71. The lowest *correct*
+ * confidence was 0.67 — and that case was "none", so gating it out costs nothing. A
+ * floor here therefore removes the observed error without removing a real activation.
+ *
+ * Only applied when the backend reports `calibrated: true`. An ordinary LLM answering
+ * through a forced enum has no meaningful confidence to compare against, so gating on a
+ * number it did not really produce would just be superstition.
+ */
+const MIN_CALIBRATED_CONFIDENCE = 0.75;
+
 export type SkillRouter = (text: string) => Promise<CanonicalSkcWorkflowSkill | null>;
 
 /**
@@ -73,9 +91,19 @@ export function createSemanticSkillRouter(service: DecisionService): SkillRouter
 		if (!result || answer?.type !== "choice" || answer.choice === NONE) return null;
 		const skill = CANONICAL_SKC_WORKFLOW_SKILLS.find(candidate => candidate === answer.choice);
 		if (!skill) return null;
+		if (result.calibrated && (answer.confidence ?? 0) < MIN_CALIBRATED_CONFIDENCE) {
+			logger.debug("decisions/skill-routing: below confidence floor, leaving routing alone", {
+				skill,
+				confidence: answer.confidence,
+				floor: MIN_CALIBRATED_CONFIDENCE,
+			});
+			return null;
+		}
 		logger.debug("decisions/skill-routing: semantic match", {
 			skill,
 			backend: result.backend,
+			confidence: answer.confidence,
+			calibrated: result.calibrated,
 			durationMs: result.durationMs,
 		});
 		return skill;

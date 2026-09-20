@@ -262,11 +262,7 @@ import { expandSlashCommand, type FileSlashCommand } from "../extensibility/slas
 import { GoalRuntime } from "../goals/runtime";
 import type { Goal, GoalModeState } from "../goals/state";
 import type { HindsightSessionState } from "../hindsight/state";
-import {
-	buildSkillStopOutput,
-	detectPrimarySkillKeyword,
-	ensureWorkflowSkillActivationState,
-} from "../hooks/skill-state";
+import { buildSkillStopOutput, ensureWorkflowSkillActivationState } from "../hooks/skill-state";
 import { initializeLocalRoot, type LocalProtocolOptions, resolveLocalUrlToPath } from "../internal-urls";
 import { shutdownAll as shutdownAllLspClients } from "../lsp/client";
 import { resolveMemoryBackend } from "../memory-backend";
@@ -7558,18 +7554,30 @@ export class AgentSession {
 	 * @throws Error if no model selected or no API key available (when not streaming)
 	 */
 	/**
-	 * Second-stage workflow routing for prompts the keyword table cannot see.
+	 * Semantic workflow routing for prompts the keyword table cannot express.
 	 *
 	 * Runs in this process, not the hook process: the hook only receives paths and
 	 * config, so it has no model registry and no credentials to call anything with.
 	 *
-	 * Deliberately best-effort — a disabled setting, a missing credential, a timeout or
-	 * a nonsense answer all resolve to "no activation", which is precisely the
-	 * behaviour before this stage existed.
+	 * **The keyword table is not consulted here, and that is deliberate.** An earlier
+	 * version returned early on a keyword hit, on the assumption that the deterministic
+	 * stage had already activated the workflow. That assumption holds only under the
+	 * Codex host, where `skc codex-native-hook` runs on `UserPromptSubmit`. This session
+	 * never fires that hook, so the early return meant a prompt containing an enumerated
+	 * keyword activated *nothing at all* — strictly worse than before the keywords
+	 * existed, because the semantic stage had been handling those phrasings.
+	 *
+	 * Keywords remain advisory in this host, as they always were: the routing rules in
+	 * the system prompt describe them to the model. Only this stage activates, and only
+	 * when it is confident enough to be worth the mutation guard and Stop hook that
+	 * activation switches on.
+	 *
+	 * Deliberately best-effort — a disabled setting, a missing credential, a timeout, a
+	 * nonsense answer or low confidence all resolve to "no activation", which is
+	 * precisely the behaviour before this stage existed.
 	 */
 	async #routeWorkflowSemantically(text: string): Promise<void> {
 		if (!this.settings.get("decisions.enabled")) return;
-		if (detectPrimarySkillKeyword(text)) return; // deterministic stage already decided
 		try {
 			this.#semanticSkillRouter ??= createSemanticSkillRouter(
 				createDecisionService({

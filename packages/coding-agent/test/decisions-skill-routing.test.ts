@@ -169,3 +169,89 @@ test("Korean keywords close the deterministic gap without firing on ordinary wor
 		expect(detectPrimarySkillKeyword(prompt)).toBeNull();
 	}
 });
+
+test("a keyword hit no longer suppresses the semantic stage", async () => {
+	// Regression: the router used to return early when `detectPrimarySkillKeyword`
+	// matched, assuming the deterministic hook had already activated the workflow. That
+	// hook only runs under the Codex host. In this session the early return meant an
+	// enumerated keyword activated nothing at all — worse than before the keywords were
+	// added, because the semantic stage had been handling those phrasings.
+	const withKeyword = "이거 아키텍처 리스크 커. 실행 전에 합의된 계획부터 세워줘";
+	expect(detectPrimarySkillKeyword(withKeyword)?.skill).toBe("ralplan");
+
+	const seen: { state?: string } = {};
+	const route = createSemanticSkillRouter(serviceReturning("ralplan", seen));
+	expect(await route(withKeyword)).toBe("ralplan");
+	// The prompt must actually reach the backend rather than being short-circuited.
+	expect(seen.state).toBe(withKeyword);
+});
+
+test("a calibrated answer below the confidence floor does not activate", async () => {
+	// Activation switches on the mutation guard, the Stop hook and the ask tool. The one
+	// wrong answer observed against the hosted model reported 0.71, so a floor removes it.
+	const backend: DecisionBackend = {
+		name: "stub",
+		async decide(): Promise<DecisionResult> {
+			return {
+				answers: { workflow: { type: "choice", choice: "ralplan", confidence: 0.71 } },
+				backend: "stub",
+				model: "stub/model",
+				calibrated: true,
+				durationMs: 1,
+			};
+		},
+	};
+	const service = createDecisionService({
+		registry: {} as never,
+		settings: {} as never,
+		enabled: true,
+		backends: [backend],
+	});
+	expect(await createSemanticSkillRouter(service)("계획이 필요한 복잡한 작업이야")).toBeNull();
+});
+
+test("a calibrated answer at the floor activates", async () => {
+	const backend: DecisionBackend = {
+		name: "stub",
+		async decide(): Promise<DecisionResult> {
+			return {
+				answers: { workflow: { type: "choice", choice: "ralplan", confidence: 0.75 } },
+				backend: "stub",
+				model: "stub/model",
+				calibrated: true,
+				durationMs: 1,
+			};
+		},
+	};
+	const service = createDecisionService({
+		registry: {} as never,
+		settings: {} as never,
+		enabled: true,
+		backends: [backend],
+	});
+	expect(await createSemanticSkillRouter(service)("계획이 필요한 복잡한 작업이야")).toBe("ralplan");
+});
+
+test("an uncalibrated backend is not gated on a number it did not really produce", async () => {
+	// The LLM backend answers through a forced enum and reports calibrated:false. It has
+	// no confidence to compare, so applying a floor would just be superstition.
+	const backend: DecisionBackend = {
+		name: "llm",
+		async decide(): Promise<DecisionResult> {
+			return {
+				answers: { workflow: { type: "choice", choice: "team" } },
+				backend: "llm",
+				model: "some/small-model",
+				calibrated: false,
+				durationMs: 1,
+			};
+		},
+	};
+	const service = createDecisionService({
+		registry: {} as never,
+		settings: {} as never,
+		enabled: true,
+		backends: [backend],
+	});
+	expect(await createSemanticSkillRouter(service)("여러 갈래로 나눠서 같이 진행하자")).toBe("team");
+});
