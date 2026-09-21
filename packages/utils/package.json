@@ -1,7 +1,7 @@
 {
 	"type": "module",
 	"name": "@sayknow-cli/utils",
-	"version": "0.5.23",
+	"version": "0.5.24",
 	"description": "Shared utilities for pi packages",
 	"homepage": "https://sayknow-cli.com",
 	"author": "jaybeyond",
