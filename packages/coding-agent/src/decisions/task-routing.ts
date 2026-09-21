@@ -37,6 +37,21 @@ export interface TaskRoutingPolicy {
 	 * this bar sits higher than the upgrade bar on purpose.
 	 */
 	minDowngradeConfidence: number;
+	/**
+	 * Model for frontend planning, when the assignment reads as frontend work.
+	 *
+	 * This is the **domain** axis, not a rung on the ladder: a design-strong model
+	 * is not "better" than a code-strong one, it is a different specialty. Only
+	 * planning roles ever take it, and only laterally — the implementation roles
+	 * stay on the difficulty ladder.
+	 */
+	frontendModel?: string;
+	/**
+	 * Bar for the lateral swap above. Directional bars do not apply here because
+	 * neither direction is "spending more": being wrong either way costs quality,
+	 * symmetrically, so one bar is the whole story.
+	 */
+	minDomainConfidence: number;
 }
 
 export const DEFAULT_TASK_ROUTING_POLICY: Omit<TaskRoutingPolicy, "tiers"> = {
@@ -46,7 +61,17 @@ export const DEFAULT_TASK_ROUTING_POLICY: Omit<TaskRoutingPolicy, "tiers"> = {
 	// overriding one needs a stronger signal in either direction.
 	minUpgradeConfidence: 0.5,
 	minDowngradeConfidence: 0.75,
+	minDomainConfidence: 0.6,
 };
+
+/**
+ * Roles whose output is a plan or a design review.
+ *
+ * These are the only roles the domain swap applies to — the user's intent is
+ * "a design-strong model *plans* the frontend; implementation stays where it
+ * is". Executor keeps the difficulty ladder regardless of domain.
+ */
+export const PLANNING_ROLES: ReadonlySet<string> = new Set(["planner", "architect"]);
 
 /**
  * The questions describe the *work*, never a model name.
@@ -71,6 +96,11 @@ function buildQuestions(): Record<string, Question> {
 			instructions:
 				"Does this assignment touch production, money, credentials, published releases, or state that cannot be undone?",
 		},
+		domain: {
+			type: "noul",
+			instructions:
+				"Is this assignment frontend/UI work — interfaces, components, visual design, styling or interaction — rather than data, APIs, infrastructure or business logic?",
+		},
 	};
 }
 
@@ -85,7 +115,8 @@ export interface TaskRoutingRequest {
 
 export interface TaskRoutingResult {
 	model: string;
-	tier: TaskTier;
+	/** Null when the move was a domain swap — that axis has no ladder. */
+	tier: TaskTier | null;
 	reason: string;
 }
 
@@ -140,9 +171,9 @@ export async function routeTaskModel(
 	request: TaskRoutingRequest,
 ): Promise<TaskRoutingResult | null> {
 	const configured = TASK_TIERS.filter(tier => policy.tiers[tier]);
-	// One tier is not a ladder; with nothing to move between there is no decision
-	// worth paying a model call for.
-	if (configured.length < 2) return null;
+	const frontendModel = policy.frontendModel?.trim() || undefined;
+	// Neither axis has anything to move on: no ladder and no domain model.
+	if (configured.length < 2 && !frontendModel) return null;
 
 	const assignment = request.assignment.trim();
 	if (assignment.length < 24) return null;
@@ -154,6 +185,37 @@ export async function routeTaskModel(
 	});
 	if (!result) return null;
 
+	// --- Domain axis: lateral swap for planning roles ---
+	//
+	// A design-strong model is not "more capable" than a code-strong one, so this
+	// is not a rung on the ladder and the directional bars do not apply. When the
+	// assignment clearly reads as frontend work and a frontend model is
+	// configured, planning roles take it — that is the whole of the user's
+	// intent: the design model *plans* the frontend, implementation stays put.
+	// When the swap fires, the difficulty ladder is skipped entirely for this
+	// spawn; for planning, design judgment is the point, not raw capability.
+	const domainAnswer = result.answers.domain;
+	if (
+		frontendModel &&
+		PLANNING_ROLES.has(request.agentName) &&
+		domainAnswer?.type === "noul" &&
+		domainAnswer.noul >= policy.minDomainConfidence
+	) {
+		if (request.currentModel && matchesModel(frontendModel, request.currentModel)) return null;
+		logger.debug("decisions/task-routing: routed", {
+			agent: request.agentName,
+			model: frontendModel,
+			reason: `frontend (domain ${domainAnswer.noul.toFixed(2)})`,
+		});
+		return {
+			model: frontendModel,
+			tier: null,
+			reason: `frontend (domain ${domainAnswer.noul.toFixed(2)})`,
+		};
+	}
+
+	// --- Difficulty axis: the ladder ---
+	if (configured.length < 2) return null;
 	const answer = result.answers.tier;
 	if (answer?.type !== "choice") return null;
 	let tier = TASK_TIERS.find(candidate => candidate === answer.choice);

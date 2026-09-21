@@ -783,6 +783,10 @@
 						"deepModel": {
 							"type": "string",
 							"default": ""
+						},
+						"frontendModel": {
+							"type": "string",
+							"default": ""
 						}
 					},
 					"additionalProperties": false

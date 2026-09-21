@@ -152,3 +152,97 @@ test("a trivially short assignment is not worth a model call", async () => {
 	expect(routed).toBeNull();
 	expect(called).toBe(false);
 });
+
+// --- domain axis (frontend planning) -----------------------------------------
+
+const FRONTEND = "openai-codex/gpt-5.6-sol:high";
+const POLICY_FE: TaskRoutingPolicy = { ...POLICY, frontendModel: FRONTEND };
+
+function domainAnswer(noul: number): DecisionResult["answers"] {
+	return { tier: { type: "choice", choice: "balanced", confidence: 0.9 }, domain: { type: "noul", noul } };
+}
+
+test("frontend planning on a planning role takes the domain model laterally", async () => {
+	const routed = await routeTaskModel(service(domainAnswer(0.9)), POLICY_FE, {
+		agentName: "planner",
+		assignment: "온보딩 화면 정보구조를 설계하고 컴포넌트 구조를 계획해줘",
+		currentModel: "openai-codex/gpt-5.6-terra:high",
+	});
+	expect(routed).toMatchObject({ model: FRONTEND, tier: null });
+});
+
+test("architect is a planning role too", async () => {
+	const routed = await routeTaskModel(service(domainAnswer(0.85)), POLICY_FE, {
+		agentName: "architect",
+		assignment: "다크모드 색상 시스템 설계를 검토하고 컴포넌트 토큰 구조를 계획해줘",
+		// Not the frontend model — otherwise "already there" correctly refuses.
+		currentModel: "openai-codex/gpt-5.6-terra:high",
+	});
+	expect(routed).toMatchObject({ model: FRONTEND, tier: null });
+});
+
+test("the executor is never domain-swapped — implementation keeps the ladder", async () => {
+	// The user's intent: the design model *plans* the frontend; another model
+	// still writes it. A confident frontend read must not move an executor.
+	const routed = await routeTaskModel(service(domainAnswer(1)), POLICY_FE, {
+		agentName: "executor",
+		assignment: "온보딩 화면 컴포넌트를 만들어줘",
+		currentModel: TIERS.fast,
+	});
+	expect(routed).toBeNull();
+});
+
+test("below the single domain bar there is no swap either way", async () => {
+	// Lateral swap has one bar: wrong either way costs quality symmetrically.
+	for (const noul of [0.3, 0.55]) {
+		const routed = await routeTaskModel(service(domainAnswer(noul)), POLICY_FE, {
+			agentName: "planner",
+			assignment: "일반적인 리팩토링 순서를 계획해줘",
+			currentModel: "openai-codex/gpt-5.6-terra:high",
+		});
+		expect(routed).toBeNull();
+	}
+});
+
+test("an unconfigured frontend model disables the domain axis entirely", async () => {
+	const routed = await routeTaskModel(service(domainAnswer(1)), POLICY, {
+		agentName: "planner",
+		assignment: "온보딩 화면 정보구조를 설계해줘",
+		currentModel: "openai-codex/gpt-5.6-terra:high",
+	});
+	expect(routed).toBeNull();
+});
+
+test("the domain swap does not need a tier ladder", async () => {
+	// Domain and difficulty are separate axes; configuring only a frontend model
+	// must still route planning roles on domain.
+	const routed = await routeTaskModel(
+		service(domainAnswer(0.9)),
+		{ ...POLICY_FE, tiers: {} },
+		{
+			agentName: "planner",
+			assignment: "온보딩 화면 정보구조를 설계하고 컴포넌트 구조를 계획해줘",
+			currentModel: "openai-codex/gpt-5.6-terra:high",
+		},
+	);
+	expect(routed).toMatchObject({ model: FRONTEND });
+});
+
+test("a role already on the frontend model is left alone", async () => {
+	const routed = await routeTaskModel(service(domainAnswer(0.9)), POLICY_FE, {
+		agentName: "planner",
+		assignment: "온보딩 화면 정보구조를 설계해줘",
+		currentModel: FRONTEND,
+	});
+	expect(routed).toBeNull();
+});
+
+test("backend planning falls through to the difficulty ladder untouched", async () => {
+	const routed = await routeTaskModel(service(domainAnswer(0.1)), POLICY_FE, {
+		agentName: "planner",
+		assignment: "결제 연동 마이그레이션 순서를 짜줘. 롤백 불가 구간이 있다",
+		currentModel: TIERS.fast,
+	});
+	// The stub answers balanced; the point is the ladder answered, not the domain swap.
+	expect(routed).toMatchObject({ model: TIERS.balanced, tier: "balanced" });
+});

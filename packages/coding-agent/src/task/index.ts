@@ -484,7 +484,8 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			balanced: this.session.settings.get("task.modelRouting.balancedModel") || undefined,
 			deep: this.session.settings.get("task.modelRouting.deepModel") || undefined,
 		};
-		if (Object.values(tiers).filter(Boolean).length < 2) return undefined;
+		const frontendModel = this.session.settings.get("task.modelRouting.frontendModel") || undefined;
+		if (Object.values(tiers).filter(Boolean).length < 2 && !frontendModel) return undefined;
 
 		const assignment = (tasks ?? [])
 			.map(task => [task.description, task.assignment].filter(Boolean).join("\n"))
@@ -499,7 +500,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			if (!registry) return undefined;
 			const routed = await routeTaskModel(
 				createDecisionService({ registry, settings: this.session.settings, enabled: true }),
-				{ ...DEFAULT_TASK_ROUTING_POLICY, tiers },
+				{ ...DEFAULT_TASK_ROUTING_POLICY, tiers, frontendModel },
 				// A role may be configured with a fallback chain; the first entry is what it
 				// actually runs on, so that is the baseline the direction is measured from.
 				{

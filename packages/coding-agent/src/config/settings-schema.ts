@@ -2039,6 +2039,17 @@ export const SETTINGS_SCHEMA = {
 	"task.modelRouting.balancedModel": { type: "string", default: "" },
 	/** Most capable tier. Unclear cause, cross-cutting design, hard to undo. */
 	"task.modelRouting.deepModel": { type: "string", default: "" },
+	/**
+	 * Frontend planning model — the **domain** axis.
+	 *
+	 * When a planning role (planner/architect) is handed work that clearly reads
+	 * as frontend/UI, it takes this model instead of the ladder's answer. A
+	 * design-strong model is not "more capable" than a code-strong one; this is a
+	 * lateral swap. Unset disables it entirely, and implementation roles are
+	 * never swapped by domain — the user asked for the design model to plan the
+	 * frontend, not to write it.
+	 */
+	"task.modelRouting.frontendModel": { type: "string", default: "" },
 
 	// TTSR
 	"ttsr.enabled": {
