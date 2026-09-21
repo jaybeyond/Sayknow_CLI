@@ -17,7 +17,7 @@ import * as os from "node:os";
 import path from "node:path";
 import type { AgentTool, AgentToolResult, AgentToolUpdateCallback } from "@sayknow-cli/agent-core";
 import type { Model, Usage } from "@sayknow-cli/ai";
-import { $pickenv, prompt, Snowflake } from "@sayknow-cli/utils";
+import { $pickenv, logger, prompt, Snowflake } from "@sayknow-cli/utils";
 import type { ToolSession } from "..";
 import { AsyncJobManager, OwnerSubagentShutdownError, type ResumeRunner } from "../async";
 import { resolveAgentModelPatterns } from "../config/model-resolver";
@@ -459,6 +459,61 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 
 	#getTaskSimpleMode(): TaskSimpleMode {
 		return this.session.settings.get("task.simple");
+	}
+
+	/**
+	 * Pick a model for this spawn from the assignment, or null to keep the configured one.
+	 *
+	 * Opt-in twice over: `decisions.enabled` must be on *and* at least two tier
+	 * models configured. That double gate is deliberate — a user who set explicit
+	 * per-role models chose them on purpose, and silently overriding those from a
+	 * classifier would be a worse default than doing nothing.
+	 *
+	 * One decision per spawn, not per task: every task in a call runs on the same
+	 * agent and the same model, so asking per task would pay N times for a value
+	 * that can only be set once.
+	 */
+	async #routeSpawnModel(
+		agentName: string,
+		tasks: ReadonlyArray<{ description?: string; assignment?: string }> | undefined,
+		currentModel: string | readonly string[] | undefined,
+	): Promise<string | undefined> {
+		if (!this.session.settings.get("task.modelRouting.enabled")) return undefined;
+		const tiers = {
+			fast: this.session.settings.get("task.modelRouting.fastModel") || undefined,
+			balanced: this.session.settings.get("task.modelRouting.balancedModel") || undefined,
+			deep: this.session.settings.get("task.modelRouting.deepModel") || undefined,
+		};
+		if (Object.values(tiers).filter(Boolean).length < 2) return undefined;
+
+		const assignment = (tasks ?? [])
+			.map(task => [task.description, task.assignment].filter(Boolean).join("\n"))
+			.filter(Boolean)
+			.join("\n\n");
+		if (!assignment) return undefined;
+
+		try {
+			const { createDecisionService } = await import("../decisions");
+			const { DEFAULT_TASK_ROUTING_POLICY, routeTaskModel } = await import("../decisions/task-routing");
+			const registry = this.session.modelRegistry;
+			if (!registry) return undefined;
+			const routed = await routeTaskModel(
+				createDecisionService({ registry, settings: this.session.settings, enabled: true }),
+				{ ...DEFAULT_TASK_ROUTING_POLICY, tiers },
+				// A role may be configured with a fallback chain; the first entry is what it
+				// actually runs on, so that is the baseline the direction is measured from.
+				{
+					agentName,
+					assignment,
+					currentModel: Array.isArray(currentModel) ? currentModel[0] : currentModel,
+				},
+			);
+			return routed?.model;
+		} catch (error) {
+			// Routing is an optimisation. A failure here must never stop a spawn.
+			logger.debug("task: spawn model routing failed", { agent: agentName, error: String(error) });
+			return undefined;
+		}
 	}
 
 	/**
@@ -1114,9 +1169,14 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		// Apply per-agent model override from settings (highest priority)
 		const agentModelOverrides = this.session.settings.get("task.agentModelOverrides");
 		const settingsModelOverride = agentModelOverrides[agentName];
+		// Per-spawn routing sits *above* the configured role model but uses it as the
+		// baseline: the decision is "is this particular assignment heavier or lighter
+		// than what this role normally gets", not "pick a model from scratch". Declining
+		// leaves the configured value exactly as it was.
+		const routedModelOverride = await this.#routeSpawnModel(agentName, boundParams.tasks, settingsModelOverride);
 		const parentActiveModelPattern = this.session.getActiveModelString?.();
 		const modelOverride = resolveAgentModelPatterns({
-			settingsOverride: settingsModelOverride,
+			settingsOverride: routedModelOverride ?? settingsModelOverride,
 			agentModel: effectiveAgent.model,
 			settings: this.session.settings,
 			activeModelPattern: parentActiveModelPattern,

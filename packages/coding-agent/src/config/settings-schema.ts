@@ -2011,6 +2011,35 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	/**
+	 * Per-spawn model routing for subagents.
+	 *
+	 * A role's configured model is a standing guess about the average task that
+	 * role gets; this moves it when a particular assignment is clearly harder or
+	 * clearly more mechanical. Subagents only — routing the main loop's model
+	 * mid-session invalidates the prompt cache, which on a long context costs
+	 * more than the cheaper tier saves.
+	 *
+	 * Needs `decisions.enabled` and at least two tiers configured. Without both
+	 * it never fires and the configured role models are used unchanged.
+	 */
+	"task.modelRouting.enabled": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "tasks",
+			label: "Route subagent models per task",
+			description:
+				"Ask a cheap model how demanding each subagent assignment is, and move that spawn to a cheaper or stronger model. Needs typed decisions on and the tier models below set. Moving to a cheaper model requires more confidence than moving to a stronger one, because being wrong about it costs a retry.",
+		},
+	},
+	/** Cheapest tier. Mechanical, local, single-file work. */
+	"task.modelRouting.fastModel": { type: "string", default: "" },
+	/** Middle tier. Ordinary engineering against an existing pattern. */
+	"task.modelRouting.balancedModel": { type: "string", default: "" },
+	/** Most capable tier. Unclear cause, cross-cutting design, hard to undo. */
+	"task.modelRouting.deepModel": { type: "string", default: "" },
+
 	// TTSR
 	"ttsr.enabled": {
 		type: "boolean",
