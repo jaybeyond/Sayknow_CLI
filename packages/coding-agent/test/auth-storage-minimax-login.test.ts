@@ -24,7 +24,7 @@ describe("AuthStorage MiniMax login", () => {
 		}
 	});
 
-	test("replaces existing MiniMax Coding Plan API key on relogin", async () => {
+	test("keeps the first MiniMax Coding Plan API key and adds the relogin key to the pool", async () => {
 		using _hook = hookFetch(
 			() => new Response("{}", { status: 200, headers: { "Content-Type": "application/json" } }),
 		);
@@ -38,13 +38,16 @@ describe("AuthStorage MiniMax login", () => {
 		currentApiKey = "sk-new";
 		await authStorage.login("minimax-code", loginCallbacks);
 
+		// API-key login upserts instead of replacing the provider pool, so a second
+		// account is added rather than wiping the first. The first row stays the
+		// provider's primary credential.
 		expect(authStorage.get("minimax-code")).toEqual({
 			type: "api_key",
-			key: "sk-new",
+			key: "sk-old",
 		});
-		expect(authStorage.getAll()["minimax-code"]).toEqual({
-			type: "api_key",
-			key: "sk-new",
-		});
+		expect(authStorage.getAll()["minimax-code"]).toEqual([
+			{ type: "api_key", key: "sk-old" },
+			{ type: "api_key", key: "sk-new" },
+		]);
 	});
 });
