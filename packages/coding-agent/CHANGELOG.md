@@ -1,6 +1,8 @@
 # Changelog
 
 ## [Unreleased]
+
+## [0.5.26] - 2026-09-23
 ### Added
 
 - `/model` role rows now open a second level so a model can be assigned to a *detailed use* rather than only to a whole role. `planner`/`architect` offer backend architecture and frontend design, `executor` offers implementation and testing, `critic` offers review; `default` has none and still assigns in one keystroke. The two bulk rows deliberately stay canonical-only — an action that also rewrote five detailed-use overrides could not be undone from the same menu. Assignments persist to the new `task.modelRouting.specialtyModels` record, whose keys are allowlisted to those five ids. Saving one while `task.modelRouting.enabled` is off persists it and says so instead of silently enabling a feature you did not ask for. First-level rows are now stable descriptors rather than positional index arithmetic, which is what previously made every added row a chance to assign a model to the wrong role.
@@ -13,8 +15,6 @@
 - Model-selector suites that assert UI copy now pin the locale — and restore it. They previously inherited whatever `language` the developer had configured, because a sibling suite restores the real agent directory and reloads real settings, and one suite pinned Korean without putting it back — so whether they passed depended on test file ordering.
 - The first-level `/model` role rows (`Set as EXECUTOR (Executor)`) were hardcoded English inside an otherwise localized menu. They now go through i18n in all seven locales; the redundant `(Name)` suffix is dropped where the locale does not need it, and the role tag stays verbatim because it is the same identifier receipts and `/model` arguments use.
 - Login, `--list-models`, `/model`, and `/model provider/id` now refresh provider catalogs online so newly published Kimi/Grok (and other OpenAI-compatible) ids appear without waiting for a bundled `models.json` regen or a 2h cache TTL.
-
-## [0.5.25] - 2026-09-21
 
 ## [0.5.22] - 2026-09-19
 

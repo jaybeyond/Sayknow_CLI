@@ -1,12 +1,12 @@
 # Changelog
 
 ## [Unreleased]
+
+## [0.5.26] - 2026-09-23
 ### Fixed
 - API-key `/login` now upserts a second key instead of replacing the whole provider pool. Same-key re-login still reuses the existing row.
 - Bundle `xai/grok-4.7` and use it as the xAI default without changing explicitly saved model choices. Preserve its `low`–`xhigh` reasoning range during catalog generation. Cost metadata records the standard (<200k prompt tokens) tariff; the existing cost engine does not represent long-context price tiers.
 - Bundle `anthropic/claude-opus-5-5` (1M context, 128K output, vision, adaptive thinking). The provider default stays `claude-sonnet-4-6`: promoting a Sonnet default to an Opus would raise per-token cost for every user, so selecting Opus 5.5 stays explicit. Cost metadata records the standard tariff ($4/$20, cache read $0.20 at the Opus-5.5-specific 0.05x multiplier, 5-minute cache write $5); the cost engine represents neither the fast-mode tier ($8/$40) nor long-context tiers. Anthropic's server-side default effort (`medium`) is deliberately not encoded as `thinking.defaultLevel`, because `inferDefaultEffort` has no Anthropic rule and catalog regeneration would strip it — every sibling Opus entry omits it for the same reason.
-
-## [0.5.25] - 2026-09-21
 
 ## [0.5.12] - 2026-09-15
 ### Added
