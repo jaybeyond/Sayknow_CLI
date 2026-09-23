@@ -1,6 +1,8 @@
 # Changelog
 
 ## [Unreleased]
+### Fixed
+- API-key `/login` now upserts a second key instead of replacing the whole provider pool. Same-key re-login still reuses the existing row.
 
 ## [0.5.25] - 2026-09-21
 

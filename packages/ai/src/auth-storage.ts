@@ -387,7 +387,7 @@ export interface AuthCredentialStore {
 	markCredentialSuspect?(credentialId: number, opts?: { signal?: AbortSignal }): Promise<void>;
 	/**
 	 * Optional async write hook for upserting a single credential. When present,
-	 * `AuthStorage.#upsertOAuthCredential` routes through this instead of the
+	 * `AuthStorage.#upsertStoredCredential` routes through this instead of the
 	 * sync `upsertAuthCredentialForProvider`. `RemoteAuthCredentialStore` uses
 	 * it to send the upsert to the broker via `POST /v1/credential`.
 	 *
@@ -400,10 +400,11 @@ export interface AuthCredentialStore {
 		credential: AuthCredential,
 	): Promise<AuthCredentialIfAbsentResult>;
 	/**
-	 * Optional async write hook for replace-all semantics (e.g. API-key login
-	 * overwriting any previous keys for the same provider). When present,
+	 * Optional async write hook for replace-all semantics (logout-style
+	 * overwrite of every stored credential for a provider). When present,
 	 * `AuthStorage.set` routes through this instead of the sync
-	 * `replaceAuthCredentialsForProvider`.
+	 * `replaceAuthCredentialsForProvider`. API-key login no longer uses this
+	 * path: it upserts so a second account is added instead of wiping the pool.
 	 */
 	replaceAuthCredentialsRemote?(provider: string, credentials: AuthCredential[]): Promise<StoredAuthCredential[]>;
 	/**
@@ -1550,7 +1551,7 @@ export class AuthStorage {
 		};
 	}
 
-	async #upsertOAuthCredential(provider: string, credential: OAuthCredential): Promise<void> {
+	async #upsertStoredCredential(provider: string, credential: AuthCredential): Promise<void> {
 		const stored = this.#store.upsertAuthCredentialRemote
 			? await this.#store.upsertAuthCredentialRemote(provider, credential)
 			: this.#store.upsertAuthCredentialForProvider(provider, credential);
@@ -1560,6 +1561,17 @@ export class AuthStorage {
 		);
 		this.#resetProviderAssignments(provider);
 		this.#invalidateUsageCacheForProvider(provider);
+	}
+
+	async #dropStoredApiKeysForProvider(provider: string): Promise<void> {
+		const remaining = this.#getCredentialsForProvider(provider).filter(credential => credential.type !== "api_key");
+		if (remaining.length === this.#getCredentialsForProvider(provider).length) return;
+		await this.set(provider, remaining);
+	}
+
+	async #upsertOAuthCredential(provider: string, credential: OAuthCredential): Promise<void> {
+		await this.#dropStoredApiKeysForProvider(provider);
+		await this.#upsertStoredCredential(provider, credential);
 	}
 
 	#invalidateUsageCacheForProvider(provider: string): void {
@@ -1696,7 +1708,7 @@ export class AuthStorage {
 		let credentials: OAuthCredentials;
 		const saveApiKeyCredential = async (apiKey: string): Promise<void> => {
 			const newCredential: ApiKeyCredential = { type: "api_key", key: apiKey };
-			await this.set(provider, newCredential);
+			await this.#upsertStoredCredential(provider, newCredential);
 		};
 		const manualCodeInput = () => ctrl.onPrompt({ message: "Paste the authorization code (or full redirect URL):" });
 		switch (provider) {
@@ -2048,13 +2060,6 @@ export class AuthStorage {
 			}
 		}
 		const newCredential: OAuthCredential = { type: "oauth", ...credentials };
-		if (provider === "xai") {
-			const existingOAuthCredentials = this.#getCredentialsForProvider(provider).filter(
-				(credential): credential is OAuthCredential => credential.type === "oauth",
-			);
-			await this.set(provider, [...existingOAuthCredentials, newCredential]);
-			return;
-		}
 		await this.#upsertOAuthCredential(provider, newCredential);
 	}
 

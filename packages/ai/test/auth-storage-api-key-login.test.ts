@@ -129,4 +129,27 @@ describe("AuthStorage api-key login replacement", () => {
 		expect(store.getApiKey("deepseek")).toBe("same-deepseek-key");
 		expect(await authStorage.getApiKey("deepseek", "session-deepseek-relogin")).toBe("same-deepseek-key");
 	});
+
+	it("keeps the previous api-key when a second login returns a different key", async () => {
+		if (!store || !authStorage || !dbPath) throw new Error("test setup failed");
+
+		loginKagiSpy.mockResolvedValueOnce("first-kagi-key").mockResolvedValueOnce("second-kagi-key");
+
+		const controller = {
+			onAuth: () => {},
+			onPrompt: async () => "",
+		};
+
+		await authStorage.login("kagi", controller);
+		await authStorage.login("kagi", controller);
+
+		expect(countCredentialRows(dbPath, "kagi")).toBe(2);
+		const credentials = store.listAuthCredentials("kagi");
+		expect(credentials).toHaveLength(2);
+		const keys = credentials
+			.map(entry => (entry.credential.type === "api_key" ? entry.credential.key : undefined))
+			.filter((key): key is string => typeof key === "string")
+			.sort();
+		expect(keys).toEqual(["first-kagi-key", "second-kagi-key"]);
+	});
 });
