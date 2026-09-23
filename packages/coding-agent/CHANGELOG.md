@@ -1,6 +1,9 @@
 # Changelog
 
 ## [Unreleased]
+### Fixed
+
+- Login, `--list-models`, `/model`, and `/model provider/id` now refresh provider catalogs online so newly published Kimi/Grok (and other OpenAI-compatible) ids appear without waiting for a bundled `models.json` regen or a 2h cache TTL.
 
 ## [0.5.25] - 2026-09-21
 

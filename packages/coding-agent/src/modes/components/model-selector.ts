@@ -315,6 +315,7 @@ export class ModelSelectorComponent extends Container {
 	#onSelectCallback = (() => {}) as RoleSelectCallback;
 	#onCancelCallback = (() => {}) as CancelCallback;
 	#errorMessage?: unknown;
+	#catalogRefreshGeneration = 0;
 	#tui: TUI;
 	#scopedModels: ReadonlyArray<ScopedModelItem>;
 	#temporaryOnly: boolean;
@@ -431,19 +432,42 @@ export class ModelSelectorComponent extends Container {
 		// Add bottom border
 		this.addChild(new DynamicBorder());
 
-		// Load models and do initial render
-		this.#loadModels().then(() => {
-			this.#buildProviderTabs();
-			if (this.#viewMode === "presets" && (this.#modelRegistry.getModelProfiles?.().size ?? 0) === 0) {
-				this.#viewMode = "models";
-			}
-			if (this.#viewMode === "presets") {
-				void this.#refreshProviderAuth();
-				this.#renderPresetLanding();
+		void this.#bootstrapCatalog();
+	}
+
+	async #bootstrapCatalog(): Promise<void> {
+		await this.#loadModels();
+		this.#buildProviderTabs();
+		if (this.#viewMode === "presets" && (this.#modelRegistry.getModelProfiles?.().size ?? 0) === 0) {
+			this.#viewMode = "models";
+		}
+		if (this.#viewMode === "presets") {
+			void this.#refreshProviderAuth();
+			this.#renderPresetLanding();
+		} else {
+			this.#updateTabBar();
+			const currentQuery = this.#searchInput.getValue();
+			if (currentQuery) {
+				this.#filterModels(currentQuery);
 			} else {
+				this.#updateList();
+			}
+			void this.#refreshLiveCatalog();
+		}
+		this.#tui.requestRender();
+	}
+
+	async #refreshLiveCatalog(): Promise<void> {
+		if (this.#scopedModels.length > 0) return;
+		const generation = ++this.#catalogRefreshGeneration;
+		try {
+			await this.#modelRegistry.refresh("online");
+			if (generation !== this.#catalogRefreshGeneration) return;
+			await this.#loadModels();
+			if (generation !== this.#catalogRefreshGeneration) return;
+			this.#buildProviderTabs();
+			if (this.#viewMode === "models") {
 				this.#updateTabBar();
-				// Always apply the current search query — the user may have typed
-				// while models were loading asynchronously.
 				const currentQuery = this.#searchInput.getValue();
 				if (currentQuery) {
 					this.#filterModels(currentQuery);
@@ -451,9 +475,13 @@ export class ModelSelectorComponent extends Container {
 					this.#updateList();
 				}
 			}
-			// Request re-render after models are loaded
 			this.#tui.requestRender();
-		});
+		} catch (error) {
+			if (generation !== this.#catalogRefreshGeneration) return;
+			this.#errorMessage = error instanceof Error ? error.message : String(error);
+			this.#updateList();
+			this.#tui.requestRender();
+		}
 	}
 
 	#isActiveDefaultFallback(): boolean {
@@ -1145,6 +1173,7 @@ export class ModelSelectorComponent extends Container {
 		this.#setSearchInputValue(seed ?? this.#searchInput.getValue());
 		this.#updateTabBar();
 		this.#filterModels(this.#searchInput.getValue());
+		void this.#refreshLiveCatalog();
 	}
 
 	/**

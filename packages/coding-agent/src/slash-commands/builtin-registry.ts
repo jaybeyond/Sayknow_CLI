@@ -360,9 +360,8 @@ async function resolveModelCommandSelection(
 	}
 
 	const providerRef = parseProviderQualifiedSelector(selector);
-	const discoverableProviders = runtime.session.modelRegistry?.getDiscoverableProviders?.() ?? [];
-	if (providerRef && discoverableProviders.includes(providerRef.provider)) {
-		await runtime.session.modelRegistry.refreshProvider?.(providerRef.provider, "online");
+	if (providerRef && runtime.session.modelRegistry?.refreshProvider) {
+		await runtime.session.modelRegistry.refreshProvider(providerRef.provider, "online");
 		availableModels = runtime.session.getAvailableModels?.() ?? [];
 		const refreshedSelection = resolveModelCommandSelectionFromAvailable(
 			runtime,
@@ -372,12 +371,15 @@ async function resolveModelCommandSelection(
 		if (refreshedSelection) {
 			return { ok: true, selection: refreshedSelection };
 		}
-		return {
-			ok: false,
-			failure: {
-				message: formatDiscoverableProviderFailure(selector, providerRef.provider, providerRef.modelId, runtime),
-			},
-		};
+		const discoverableProviders = runtime.session.modelRegistry.getDiscoverableProviders?.() ?? [];
+		if (discoverableProviders.includes(providerRef.provider)) {
+			return {
+				ok: false,
+				failure: {
+					message: formatDiscoverableProviderFailure(selector, providerRef.provider, providerRef.modelId, runtime),
+				},
+			};
+		}
 	}
 
 	return {

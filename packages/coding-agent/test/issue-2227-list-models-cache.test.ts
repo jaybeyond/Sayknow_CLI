@@ -26,7 +26,7 @@ afterEach(() => {
 });
 
 describe("--list-models cache refresh (issue #2227)", () => {
-	test("uses online-if-uncached exactly once through the public root command", async () => {
+	test("uses online discovery exactly once through the public root command", async () => {
 		using tempDir = TempDir.createSync("@skc-issue-2227-");
 		const authStorage = await AuthStorage.create(path.join(tempDir.path(), "auth.db"));
 		authStorage.setRuntimeApiKey("anthropic", "test-key");
@@ -57,7 +57,7 @@ describe("--list-models cache refresh (issue #2227)", () => {
 			).rejects.toBe(successfulExit);
 
 			expect(refreshSpy).toHaveBeenCalledTimes(1);
-			expect(refreshSpy).toHaveBeenCalledWith("online-if-uncached");
+			expect(refreshSpy).toHaveBeenCalledWith("online");
 			expect(registerProviderSpy).toHaveBeenCalledWith("grok-build", expect.any(Object), "bundled:grok-build");
 			expect(exitSpy).toHaveBeenCalledTimes(1);
 			expect(exitSpy).toHaveBeenCalledWith(0);

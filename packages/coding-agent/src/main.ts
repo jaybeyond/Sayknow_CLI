@@ -1245,7 +1245,7 @@ export async function runRootCommand(
 	}
 
 	if (parsedArgs.listModels !== undefined) {
-		await modelRegistry.refresh("online-if-uncached");
+		await modelRegistry.refresh("online");
 		const searchPattern = typeof parsedArgs.listModels === "string" ? parsedArgs.listModels : undefined;
 		await runListModelsCommand({
 			modelRegistry,
