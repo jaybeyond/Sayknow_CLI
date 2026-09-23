@@ -3,6 +3,41 @@ import { Effort } from "../src/model-thinking";
 import { getBundledModel } from "../src/models";
 
 describe("preset catalog model entries", () => {
+	test("bundles xai/grok-4.7 with vision and supported reasoning levels", () => {
+		const model = getBundledModel("xai", "grok-4.7");
+
+		expect(model.api).toBe("openai-completions");
+		expect(model.baseUrl).toBe("https://api.x.ai/v1");
+		expect(model.input).toEqual(["text", "image"]);
+		expect(model.reasoning).toBe(true);
+		expect(model.contextWindow).toBe(500_000);
+		expect(model.maxTokens).toBe(500_000);
+		expect(model.cost).toEqual({ input: 2, output: 6, cacheRead: 0.5, cacheWrite: 0 });
+		expect(model.thinking).toEqual({
+			mode: "effort",
+			minLevel: Effort.Low,
+			maxLevel: Effort.XHigh,
+			defaultLevel: Effort.High,
+		});
+	});
+	test("bundles anthropic/claude-opus-5-5 with vision and adaptive thinking", () => {
+		const model = getBundledModel("anthropic", "claude-opus-5-5");
+
+		expect(model.id).toBe("claude-opus-5-5");
+		expect(model.provider).toBe("anthropic");
+		expect(model.api).toBe("anthropic-messages");
+		expect(model.baseUrl).toBe("https://api.anthropic.com");
+		expect(model.input).toEqual(["text", "image"]);
+		expect(model.reasoning).toBe(true);
+		expect(model.contextWindow).toBe(1_000_000);
+		expect(model.maxTokens).toBe(128_000);
+		expect(model.cost).toEqual({ input: 4, output: 20, cacheRead: 0.2, cacheWrite: 5 });
+		expect(model.thinking).toEqual({
+			mode: "anthropic-adaptive",
+			minLevel: Effort.Minimal,
+			maxLevel: Effort.Max,
+		});
+	});
 	test("bundles kimi-code/kimi-k2.7-code", () => {
 		const model = getBundledModel("kimi-code", "kimi-k2.7-code");
 

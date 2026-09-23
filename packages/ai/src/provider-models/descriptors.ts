@@ -166,7 +166,7 @@ export const PROVIDER_DESCRIPTORS: readonly ProviderDescriptor[] = [
 		config => fuguModelManagerOptions(config),
 		catalog("Sakana Fugu", ["FUGU_API_KEY"]),
 	),
-	descriptor("xai", "grok-4.6", config => xaiModelManagerOptions(config)),
+	descriptor("xai", "grok-4.7", config => xaiModelManagerOptions(config)),
 	catalogDescriptor(
 		"deepseek",
 		"deepseek-v4-pro",

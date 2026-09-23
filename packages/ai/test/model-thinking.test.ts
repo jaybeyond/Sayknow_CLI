@@ -32,6 +32,17 @@ function createModel<TApi extends Api>(overrides: {
 }
 
 describe("model thinking metadata", () => {
+	it.each(["grok-4.6", "grok-4.7"])("preserves documented reasoning choices for %s during regeneration", id => {
+		const model = createModel({ id, api: "openai-completions", provider: "xai" });
+		model.thinking = { mode: "effort", minLevel: Effort.Low, maxLevel: Effort.High };
+		const models = [model];
+		applyGeneratedModelPolicies(models);
+		const generated = models[0]!;
+
+		expect(requireSupportedEffort(generated, Effort.XHigh)).toBe(Effort.XHigh);
+		expect(generated.thinking?.defaultLevel).toBe(Effort.High);
+		expect(() => requireSupportedEffort(generated, Effort.Max)).toThrow();
+	});
 	it("stores supported efforts for Codex mini in model metadata", () => {
 		const model = createModel({
 			id: "gpt-5.1-codex-mini",
