@@ -5,6 +5,7 @@ import { getThinkingLevelMetadata } from "../thinking-metadata";
 import { EDIT_MODES } from "../utils/edit-mode";
 import { CONFIGURABLE_SEARCH_PROVIDER_IDS } from "../web/search/types";
 import type { ModelSelectorValue } from "./model-selector-value";
+import { TASK_MODEL_SPECIALTY_IDS } from "./task-model-specialties";
 
 const THINKING_EFFORTS = ["minimal", "low", "medium", "high", "xhigh", "max"] as readonly Effort[];
 const DEFAULT_THINKING_LEVELS = ["off", ...THINKING_EFFORTS] as const;
@@ -192,6 +193,11 @@ interface RecordDef<T> {
 	type: "record";
 	default: Record<string, T>;
 	valueSchema?: RecordValueDef;
+	/**
+	 * Closed key set. When present, reconciliation rejects any other key instead of
+	 * silently carrying a typo that no consumer will ever read.
+	 */
+	keys?: readonly string[];
 	ui?: UiBase;
 }
 
@@ -2050,6 +2056,25 @@ export const SETTINGS_SCHEMA = {
 	 * frontend, not to write it.
 	 */
 	"task.modelRouting.frontendModel": { type: "string", default: "" },
+	/**
+	 * Per-specialty models — the **work-kind** axis.
+	 *
+	 * Keys are the bounded ids in `config/task-model-specialties.ts`; values use the
+	 * same selector grammar as any other model setting, so a chain is allowed. A
+	 * specialty with no entry inherits the role's resolved model unchanged, which is
+	 * why the default is empty rather than pre-populated.
+	 *
+	 * These are routing hints, never agents: nothing here widens the canonical role
+	 * roster, model-profile role keys, tool grants, or spawn permissions. Saving one
+	 * does not enable `task.modelRouting.enabled`; the assignment surface reports the
+	 * disabled state instead of silently turning routing on.
+	 */
+	"task.modelRouting.specialtyModels": {
+		type: "record",
+		default: {} as Record<string, ModelSelectorValue>,
+		valueSchema: MODEL_SELECTOR_VALUE_SCHEMA,
+		keys: TASK_MODEL_SPECIALTY_IDS,
+	},
 
 	// TTSR
 	"ttsr.enabled": {
@@ -4079,15 +4104,20 @@ export function reconcileSettingsSchema(raw: Record<string, unknown>): {
 		}
 		if (!validSettingValue(definition, next))
 			issues.push({ path, kind: "invalid", detail: `Expected ${definition.type}.` });
-		if (
-			definition.type === "record" &&
-			"valueSchema" in definition &&
-			definition.valueSchema &&
-			validSettingValue(definition, next)
-		) {
+		if (definition.type === "record" && validSettingValue(definition, next)) {
+			const allowedKeys = "keys" in definition && definition.keys ? new Set<string>(definition.keys) : undefined;
+			const valueSchema = "valueSchema" in definition ? definition.valueSchema : undefined;
 			for (const [key, entry] of Object.entries(next as Record<string, unknown>)) {
+				if (allowedKeys && !allowedKeys.has(key)) {
+					issues.push({
+						path: `${path}.${key}`,
+						kind: "invalid",
+						detail: `Unknown key. Expected one of: ${[...allowedKeys].join(", ")}.`,
+					});
+					continue;
+				}
 				if (
-					definition.valueSchema.type === "model-selector-value" &&
+					valueSchema?.type === "model-selector-value" &&
 					!(typeof entry === "string" || (Array.isArray(entry) && entry.every(item => typeof item === "string")))
 				) {
 					issues.push({ path: `${path}.${key}`, kind: "invalid", detail: "Expected model-selector-value." });

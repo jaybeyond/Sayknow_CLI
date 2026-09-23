@@ -2,6 +2,12 @@ import type { ThinkingLevel } from "@sayknow-cli/agent-core";
 import type { Usage } from "@sayknow-cli/ai";
 import { $env } from "@sayknow-cli/utils";
 import * as z from "zod/v4";
+import {
+	TASK_MODEL_SPECIALTY_IDS,
+	type TaskModelSpecialty,
+	type TaskRoutingSource,
+} from "../config/task-model-specialties";
+import type { TaskTier } from "../decisions/task-routing";
 import { isValidTaskId, TASK_ID_DESCRIPTION } from "./id";
 import type { TaskResultReceipt } from "./receipt";
 import type { SpawnRoiReconciliation } from "./roi-reconciliation";
@@ -102,6 +108,12 @@ const createTaskItemSchema = (_contextEnabled: boolean) =>
 			.optional()
 			.describe(
 				"typed executor mode: default keeps ordinary executor behavior; ultragoal-red-team injects the Ultragoal QA/red-team prompt fragment. Prefer this over free-form assignment text (#2698).",
+			),
+		specialty: z
+			.enum(TASK_MODEL_SPECIALTY_IDS)
+			.optional()
+			.describe(
+				"kind of work, so the model the user assigned to it under /model runs this child: backendArchitecture, frontendDesign, implementation, testing, or review. Declaring it is deterministic — no classifier, no routing switch; the child only leaves that model if it errors (429, 5xx, auth, quota). Omit to keep the agent's role model, or to let auto-detection decide when task.modelRouting.enabled is on.",
 			),
 		inheritContext: z
 			.enum(["none", "receipt", "last-turn", "bounded", "full"])
@@ -250,6 +262,34 @@ export interface ModelSubstitutionWarning {
 	reason: "auth_unavailable" | "assistant_model_mismatch";
 }
 
+/**
+ * What the model router *asked for* on one child — deliberately not what it ran on.
+ *
+ * The dispatched value is a fallback chain, so the head can lose to a later
+ * candidate when it fails to authenticate. Recording the request separately is
+ * what keeps a receipt from claiming a specialty model was used when the spawn
+ * actually fell through to the role's baseline. `ModelSubstitutionWarning`
+ * covers the disagreement; this covers the intent.
+ */
+export interface TaskRoutingAttribution {
+	/** Axis the head came from. `baseline` means the router declined to move. */
+	source: TaskRoutingSource;
+	/** Bounded specialty id, present only when the specialty axis won. */
+	specialty?: TaskModelSpecialty;
+	/** Tier the classifier settled on. Null for a specialty swap, which has no ladder. */
+	tier?: TaskTier;
+	/** True when the caller declared the specialty on the spawn; no classifier ran. */
+	declared: boolean;
+	/** False for ordinary LLM backends, which return no probabilities at all. */
+	calibrated: boolean;
+	/** Probability. Present only when `calibrated` is true — never synthesised. */
+	confidence?: number;
+	/** Ordinal clarity in [0,1], recorded in place of a probability when uncalibrated. */
+	ordinalStrength?: number;
+	/** Router's own explanation, surfaced verbatim on the receipt. */
+	reason: string;
+}
+
 /** Progress tracking for a single agent */
 export interface AgentProgress {
 	index: number;
@@ -283,6 +323,8 @@ export interface AgentProgress {
 	durationMs: number;
 	modelOverride?: string | string[];
 	modelSubstitutionWarning?: ModelSubstitutionWarning;
+	/** What the router asked for on this child. See {@link TaskRoutingAttribution}. */
+	routing?: TaskRoutingAttribution;
 	/** Data extracted by registered subprocess tool handlers (keyed by tool name) */
 	extractedToolData?: Record<string, unknown[]>;
 	/**
@@ -345,6 +387,8 @@ export interface SingleResult {
 	/** Model's context window in tokens, when known. */
 	contextWindow?: number;
 	modelOverride?: string | string[];
+	/** What the router asked for on this child. See {@link TaskRoutingAttribution}. */
+	routing?: TaskRoutingAttribution;
 	modelSubstitutionWarning?: ModelSubstitutionWarning;
 	error?: string;
 	aborted?: boolean;

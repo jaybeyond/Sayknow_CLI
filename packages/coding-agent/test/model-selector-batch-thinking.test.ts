@@ -1,4 +1,4 @@
-import { beforeAll, describe, expect, test, vi } from "bun:test";
+import { afterAll, beforeAll, describe, expect, test, vi } from "bun:test";
 import { ThinkingLevel } from "@sayknow-cli/agent-core";
 import { Effort, type Model } from "@sayknow-cli/ai";
 import type { ModelRegistry, SkcModelAssignmentTargetId } from "@sayknow-cli/coding-agent/config/model-registry";
@@ -6,6 +6,7 @@ import { Settings } from "@sayknow-cli/coding-agent/config/settings";
 import { ModelSelectorComponent } from "@sayknow-cli/coding-agent/modes/components/model-selector";
 import { getThemeByName, setThemeInstance } from "@sayknow-cli/coding-agent/modes/theme/theme";
 import type { TUI } from "@sayknow-cli/tui";
+import { getLanguage, setLanguage } from "../src/i18n";
 
 const DOWN = "\x1b[B";
 
@@ -106,6 +107,20 @@ function createCodexReasoningModel(id: string): Model {
 }
 
 let testTheme = await getThemeByName("red-octopus");
+
+// This file asserts UI copy, so the locale must be pinned rather than inherited.
+// Suites that restore the real agent directory reload the developer's own
+// `language` setting, which would otherwise decide whether this file passes.
+let previousLanguage: string | undefined;
+
+beforeAll(() => {
+	previousLanguage = getLanguage();
+	setLanguage("en");
+});
+
+afterAll(() => {
+	if (previousLanguage) setLanguage(previousLanguage as never);
+});
 
 function installTestTheme(): void {
 	if (!testTheme) throw new Error("Failed to load test theme");

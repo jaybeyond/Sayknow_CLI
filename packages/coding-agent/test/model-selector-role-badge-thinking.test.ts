@@ -1,4 +1,4 @@
-import { beforeAll, describe, expect, test, vi } from "bun:test";
+import { afterAll, beforeAll, describe, expect, test, vi } from "bun:test";
 import { ThinkingLevel } from "@sayknow-cli/agent-core";
 import { Effort, getBundledModel, type Model } from "@sayknow-cli/ai";
 import type { ModelRegistry, SkcModelAssignmentTargetId } from "@sayknow-cli/coding-agent/config/model-registry";
@@ -12,6 +12,7 @@ import {
 	theme,
 } from "@sayknow-cli/coding-agent/modes/theme/theme";
 import type { TUI } from "@sayknow-cli/tui";
+import { getLanguage, setLanguage } from "../src/i18n";
 
 function normalizeRenderedText(text: string): string {
 	return (
@@ -128,6 +129,20 @@ function createOllamaCloudModel(id: string): Model {
 }
 let testTheme = await getThemeByName("red-octopus");
 
+// This file asserts UI copy, so the locale must be pinned rather than inherited.
+// Suites that restore the real agent directory reload the developer's own
+// `language` setting, which would otherwise decide whether this file passes.
+let previousLanguage: string | undefined;
+
+beforeAll(() => {
+	previousLanguage = getLanguage();
+	setLanguage("en");
+});
+
+afterAll(() => {
+	if (previousLanguage) setLanguage(previousLanguage as never);
+});
+
 function installTestTheme(): void {
 	if (!testTheme) {
 		throw new Error("Failed to load dark theme for ModelSelector tests");
@@ -224,6 +239,9 @@ describe("ModelSelector canonical model selection", () => {
 		selector.handleInput("\n");
 		selector.handleInput("\x1b[B");
 		selector.handleInput("\n");
+		// Executor has detailed uses, so its row opens the second level. "General
+		// (whole role)" is the first row there and is the canonical assignment.
+		selector.handleInput("\n");
 		expect(selected).toBeUndefined();
 		const thinkingRendered = normalizeRenderedText(selector.render(220).join("\n"));
 		expect(thinkingRendered).toContain("Reasoning for Executor");
@@ -260,6 +278,7 @@ describe("ModelSelector canonical model selection", () => {
 		selector.handleInput("\x1b[B");
 		selector.handleInput("\x1b[B");
 		selector.handleInput("\x1b[B");
+		selector.handleInput("\n");
 		selector.handleInput("\n");
 		selector.handleInput("\x1b[B");
 		selector.handleInput("\x1b[B");
@@ -410,6 +429,8 @@ describe("ModelSelector canonical model selection", () => {
 		selector.handleInput("\t");
 		selector.handleInput("\n");
 		selector.handleInput("\x1b[B");
+		selector.handleInput("\n");
+		// Second level: take "General (whole role)".
 		selector.handleInput("\n");
 		selector.handleInput("\n");
 
@@ -564,6 +585,7 @@ describe("ModelSelector canonical model selection", () => {
 
 		selector.handleInput("\n");
 		selector.handleInput("\x1b[B");
+		selector.handleInput("\n");
 		selector.handleInput("\n");
 
 		expect(selected).toBeUndefined();

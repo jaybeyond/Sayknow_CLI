@@ -14,9 +14,10 @@ import {
 import { formatModelProfileDisplayLabel, recommendModelProfileForProvider } from "../../config/model-profiles";
 import { SKC_MODEL_ASSIGNMENT_TARGETS, type SkcModelAssignmentTargetId } from "../../config/model-registry";
 import { formatModelSelectorValue } from "../../config/model-resolver";
-import { selectorHead } from "../../config/model-selector-value";
+import { type ModelSelectorValue, selectorHead } from "../../config/model-selector-value";
 import type { ModelProfileConfig } from "../../config/models-config-schema";
 import { type Settings, settings } from "../../config/settings";
+import { specialtiesForRole } from "../../config/task-model-specialties";
 import { DebugSelectorComponent } from "../../debug";
 import { disableProvider, enableProvider } from "../../discovery";
 import { clearPluginRootsAndCaches, resolveActiveProjectRegistryPath } from "../../discovery/helpers";
@@ -28,6 +29,7 @@ import {
 	MarketplaceManager,
 } from "../../extensibility/plugins/marketplace";
 import { INTERACTIVE_SELECTOR_RESUME_ORIGIN } from "../../extensibility/shared-events";
+import { t } from "../../i18n";
 import {
 	getAvailableThemes,
 	getCurrentThemeName,
@@ -1589,6 +1591,52 @@ export class SelectorController {
 							this.ctx.ui.requestRender();
 							return;
 						}
+						if (selection.kind === "specialtyAssignment") {
+							const value =
+								selection.selector ??
+								formatModelSelectorValue(
+									`${selection.model.provider}/${selection.model.id}`,
+									selection.thinkingLevel,
+								);
+							const current = this.ctx.settings.get("task.modelRouting.specialtyModels") ?? {};
+							this.ctx.settings.set("task.modelRouting.specialtyModels", {
+								...current,
+								[selection.specialty]: value,
+							});
+							this.ctx.settings
+								.getStorage()
+								?.recordModelUsage(`${selection.model.provider}/${selection.model.id}`);
+							await this.ctx.notifyConfigChanged?.();
+							// The assignment is live for declared work as soon as it is saved. The
+							// routing switch only governs auto-detection, so say that rather than
+							// auto-enabling a classifier the user did not ask for.
+							const specialtyLabel = t(`modelSelector.specialty.${selection.specialty}`);
+							this.ctx.showStatus(
+								this.ctx.settings.get("task.modelRouting.enabled")
+									? t("modelSelector.specialtySaved", { specialty: specialtyLabel, value })
+									: t("modelSelector.specialtySavedRoutingOff", { specialty: specialtyLabel, value }),
+							);
+							done();
+							this.ctx.ui.requestRender();
+							return;
+						}
+						if (selection.kind === "specialtyReset") {
+							const current = this.ctx.settings.get("task.modelRouting.specialtyModels") ?? {};
+							const remaining: Record<string, ModelSelectorValue> = {};
+							for (const [key, value] of Object.entries(current)) {
+								if (!specialtiesForRole(selection.role).includes(key as never)) remaining[key] = value;
+							}
+							this.ctx.settings.set("task.modelRouting.specialtyModels", remaining);
+							await this.ctx.notifyConfigChanged?.();
+							this.ctx.showStatus(
+								t("modelSelector.specialtyCleared", {
+									target: SKC_MODEL_ASSIGNMENT_TARGETS[selection.role].name,
+								}),
+							);
+							done();
+							this.ctx.ui.requestRender();
+							return;
+						}
 						const { model, role, thinkingLevel, selector: selectedSelector } = selection;
 						if (role === null) {
 							// Temporary: update agent state but don't persist to settings
@@ -2306,7 +2354,7 @@ export class SelectorController {
 				},
 				onManualCodeInput: useManualInput ? () => manualInput.waitForInput(providerId) : undefined,
 			});
-			await this.ctx.session.modelRegistry.refresh();
+			await this.ctx.session.modelRegistry.refresh("online");
 			this.ctx.chatContainer.addChild(new Spacer(1));
 			this.ctx.chatContainer.addChild(
 				new Text(theme.fg("success", `${theme.status.success} Successfully logged in to ${providerId}`), 1, 0),

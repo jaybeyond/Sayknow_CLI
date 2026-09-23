@@ -1,8 +1,9 @@
-import { beforeAll, describe, expect, test, vi } from "bun:test";
+import { afterAll, beforeAll, describe, expect, test, vi } from "bun:test";
 import { ThinkingLevel } from "@sayknow-cli/agent-core";
 import type { Model } from "@sayknow-cli/ai";
 import type { ModelProfileDefinition } from "@sayknow-cli/coding-agent/config/model-profiles";
 import { Settings } from "@sayknow-cli/coding-agent/config/settings";
+import { getLanguage, setLanguage } from "@sayknow-cli/coding-agent/i18n/index";
 import {
 	ModelSelectorComponent,
 	type ModelSelectorSelection,
@@ -163,10 +164,20 @@ async function selectFirstProfile(controller: SelectorController, setDefault = f
 	await Bun.sleep(0);
 }
 
+// These assertions are about English UI copy, so the locale is pinned rather
+// than inherited from whichever suite ran before this one.
+let previousLanguage: string | undefined;
+
 describe("model selector profiles", () => {
 	beforeAll(async () => {
+		previousLanguage = getLanguage();
+		setLanguage("en");
 		testTheme = await getThemeByName("red-octopus");
 		installTestTheme();
+	});
+
+	afterAll(() => {
+		if (previousLanguage) setLanguage(previousLanguage as never);
 	});
 
 	test("renders preset landing above model rows", async () => {

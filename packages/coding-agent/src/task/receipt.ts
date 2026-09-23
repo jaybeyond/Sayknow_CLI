@@ -28,6 +28,8 @@ export interface TaskResultReceipt {
 	contextTokens?: number;
 	contextWindow?: number;
 	modelOverride?: string | string[];
+	/** What the router asked for, kept separate from what the spawn ran on. */
+	routing?: SingleResult["routing"];
 	modelSubstitutionWarning?: SingleResult["modelSubstitutionWarning"];
 	usage?: SingleResult["usage"];
 	cost?: number;
@@ -245,6 +247,7 @@ export function buildTaskReceipt(raw: SingleResult): TaskResultReceipt {
 		contextTokens: raw.contextTokens,
 		contextWindow: raw.contextWindow,
 		modelOverride: raw.modelOverride,
+		routing: raw.routing,
 		modelSubstitutionWarning: raw.modelSubstitutionWarning,
 		usage: raw.usage,
 		cost: raw.usage?.cost.total,

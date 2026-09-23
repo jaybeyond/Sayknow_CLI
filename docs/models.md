@@ -667,6 +667,78 @@ They now also expose canonical/coalesced models:
 
 Selecting a canonical entry stores the canonical selector. Selecting a provider row stores the explicit `provider/modelId`.
 
+### Assigning a model to a detailed use
+
+The role rows in `/model` open a second level. The first level keeps its seven
+actions in their original order; picking `executor`, `architect`, `planner` or
+`critic` then offers **General (whole role)** plus the detailed uses that role
+can actually run:
+
+| Role | Detailed uses |
+| --- | --- |
+| `planner`, `architect` | `backendArchitecture`, `frontendDesign` |
+| `executor` | `implementation`, `testing` |
+| `critic` | `review` |
+
+`default` has no detailed uses and still assigns in one keystroke. The two bulk
+rows write canonical role models only — they never touch detailed-use settings,
+because a "set everything" action that also rewrote five overrides could not be
+undone from the same menu.
+
+Detailed-use assignments persist to `task.modelRouting.specialtyModels`, a
+record whose keys are restricted to the five ids above; anything else is
+rejected by config validation. A row shows the model it already holds, and
+**Clear detailed-use overrides** removes only the entries belonging to that role.
+
+A saved detailed-use model is live immediately for any spawn that **declares**
+that work (below). Saving one while `task.modelRouting.enabled` is `false` still
+persists it and says so; that switch only governs auto-detection.
+
+### How a subagent's model is chosen
+
+There are two ways a detailed-use model reaches a spawn. The first is
+deterministic and needs no switch; the second is a guess and is opt-in.
+
+**Declared.** The `task` tool accepts `.specialty` per task — one of the five
+ids above. When the user assigned a model to that specialty, the child runs on
+it. No classifier is consulted, `task.modelRouting.enabled` is not read, and no
+confidence bar applies. The child leaves that model only when it **errors**:
+the child session's fallback chain retries `fallback.maxAttempts` times on a
+transport failure (429, 5xx, auth, quota) and then advances to the role's own
+chain composed behind it. The menu groups specialties under the roles that
+usually do that work, but the setting is one flat map, and a declared specialty
+ignores that grouping on purpose: a frontend build delegated to `executor` with
+`specialty: "frontendDesign"` runs on the frontend model.
+
+**Auto-detected.** Without a declaration, routing is off unless
+`task.modelRouting.enabled` is true **and** there is somewhere to route to: at
+least two of `task.modelRouting.fastModel` / `balancedModel` / `deepModel`, or a
+detailed-use entry, or the legacy `task.modelRouting.frontendModel`. A single
+tier is not an axis — there is nowhere to move from it. It also needs typed
+decisions (`decisions.enabled`) and a cheap model for the classifier to run on.
+
+One classification runs per **child task**, not per `task` call. A batch shares
+an agent but not a workload, so an implementation slice and a test slice in the
+same call are classified separately.
+
+Either way the result is dispatched as an ordered fallback chain, not a single
+model:
+
+1. the detailed-use model — declared, or picked by the classifier for a role that can run it
+2. the tier model, when the difficulty axis moved (auto-detected only)
+3. the role's own configured chain
+
+The tail is always the role baseline, so a detailed-use model that cannot
+authenticate still lands on something the role can actually run. A high-risk
+auto-detected assignment skips the detailed-use axis entirely and composes tier
+plus baseline only, because a lateral swap can move sideways into something
+weaker.
+
+Receipts record what the router **requested** separately from what the spawn ran
+on. When the backend is an ordinary LLM it reports no probabilities at all, so
+the receipt carries an ordinal clarity score and `calibrated: false` instead of
+a fabricated confidence.
+
 ## Context promotion (model-level fallback chains)
 
 Context promotion is an overflow recovery mechanism for small-context variants (for example `*-spark`) that automatically promotes to a larger-context sibling when the API rejects a request with a context length error. It is **off by default** (`contextPromotion.enabled` is `false`); opt in to enable it.

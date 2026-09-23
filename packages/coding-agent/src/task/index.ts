@@ -21,6 +21,9 @@ import { $pickenv, logger, prompt, Snowflake } from "@sayknow-cli/utils";
 import type { ToolSession } from "..";
 import { AsyncJobManager, OwnerSubagentShutdownError, type ResumeRunner } from "../async";
 import { resolveAgentModelPatterns } from "../config/model-resolver";
+import { normalizeModelSelectorValue } from "../config/model-selector-value";
+import type { TaskModelSpecialty } from "../config/task-model-specialties";
+import type { TaskRoutingResult } from "../decisions/task-routing";
 import type { Theme } from "../modes/theme/theme";
 import planModeSubagentPrompt from "../prompts/system/plan-mode-subagent.md" with { type: "text" };
 import taskDescriptionTemplate from "../prompts/tools/task.md" with { type: "text" };
@@ -37,6 +40,7 @@ import {
 	type SingleResult,
 	type TaskItem,
 	type TaskParams,
+	type TaskRoutingAttribution,
 	type TaskToolDetails,
 	type TaskToolSchemaInstance,
 } from "./types";
@@ -212,6 +216,7 @@ export type {
 	SubagentLifecyclePayload,
 	SubagentProgressPayload,
 	TaskParams,
+	TaskRoutingAttribution,
 	TaskToolDetails,
 } from "./types";
 export {
@@ -462,54 +467,80 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	}
 
 	/**
-	 * Pick a model for this spawn from the assignment, or null to keep the configured one.
+	 * Route a child whose caller declared the kind of work.
 	 *
-	 * Opt-in twice over: `decisions.enabled` must be on *and* at least two tier
-	 * models configured. That double gate is deliberate — a user who set explicit
-	 * per-role models chose them on purpose, and silently overriding those from a
-	 * classifier would be a worse default than doing nothing.
+	 * Deterministic by design: no classifier, no `task.modelRouting.enabled`
+	 * gate. The user assigned a model to this specialty in `/model`; if the caller
+	 * says the work is that specialty, the child runs on that model and leaves it
+	 * only when it errors — the child session's fallback chain advances to the
+	 * role baseline composed behind it.
+	 */
+	async #routeDeclaredSpecialty(
+		agentName: string,
+		specialty: TaskModelSpecialty,
+		baselineChain: readonly string[],
+	): Promise<TaskRoutingResult | undefined> {
+		try {
+			const { resolveDeclaredSpecialtyRouting } = await import("../decisions/task-routing");
+			return (
+				resolveDeclaredSpecialtyRouting(this.session.settings, {
+					agentName,
+					specialty,
+					currentModel: baselineChain[0],
+					baselineChain,
+				}) ?? undefined
+			);
+		} catch (error) {
+			// A declared specialty with nothing behind it still spawns on the role model.
+			logger.debug("task: declared specialty routing failed", { agent: agentName, specialty, error: String(error) });
+			return undefined;
+		}
+	}
+
+	/**
+	 * Pick a model for one child assignment, or undefined to keep the configured one.
 	 *
-	 * One decision per spawn, not per task: every task in a call runs on the same
-	 * agent and the same model, so asking per task would pay N times for a value
-	 * that can only be set once.
+	 * This is the *guessing* half: a classifier reads the assignment and decides.
+	 * Opt-in twice over: `task.modelRouting.enabled` must be on *and* an axis must
+	 * have something to move on. That double gate is deliberate — a user who set
+	 * explicit per-role models chose them on purpose, and silently overriding those
+	 * from a classifier would be a worse default than doing nothing. A caller that
+	 * *knows* the kind of work declares it instead (`#routeDeclaredSpecialty`).
+	 *
+	 * One decision per *child*, not per call. Every task in a call shares an agent,
+	 * but not a workload: a batch can hold an implementation slice and a test slice,
+	 * and a single joined classification would have to answer for both at once.
 	 */
 	async #routeSpawnModel(
 		agentName: string,
-		tasks: ReadonlyArray<{ description?: string; assignment?: string }> | undefined,
-		currentModel: string | readonly string[] | undefined,
-	): Promise<string | undefined> {
+		assignment: string | undefined,
+		baselineChain: readonly string[],
+	): Promise<TaskRoutingResult | undefined> {
+		// Cheap guard before the dynamic import so a disabled feature costs nothing.
 		if (!this.session.settings.get("task.modelRouting.enabled")) return undefined;
-		const tiers = {
-			fast: this.session.settings.get("task.modelRouting.fastModel") || undefined,
-			balanced: this.session.settings.get("task.modelRouting.balancedModel") || undefined,
-			deep: this.session.settings.get("task.modelRouting.deepModel") || undefined,
-		};
-		const frontendModel = this.session.settings.get("task.modelRouting.frontendModel") || undefined;
-		if (Object.values(tiers).filter(Boolean).length < 2 && !frontendModel) return undefined;
-
-		const assignment = (tasks ?? [])
-			.map(task => [task.description, task.assignment].filter(Boolean).join("\n"))
-			.filter(Boolean)
-			.join("\n\n");
-		if (!assignment) return undefined;
+		const trimmed = assignment?.trim();
+		if (!trimmed) return undefined;
 
 		try {
 			const { createDecisionService } = await import("../decisions");
-			const { DEFAULT_TASK_ROUTING_POLICY, routeTaskModel } = await import("../decisions/task-routing");
+			const { buildTaskRoutingPolicyFromSettings, routeTaskModel } = await import("../decisions/task-routing");
+			const policy = buildTaskRoutingPolicyFromSettings(this.session.settings);
+			if (!policy) return undefined;
 			const registry = this.session.modelRegistry;
 			if (!registry) return undefined;
 			const routed = await routeTaskModel(
 				createDecisionService({ registry, settings: this.session.settings, enabled: true }),
-				{ ...DEFAULT_TASK_ROUTING_POLICY, tiers, frontendModel },
-				// A role may be configured with a fallback chain; the first entry is what it
-				// actually runs on, so that is the baseline the direction is measured from.
+				policy,
 				{
 					agentName,
-					assignment,
-					currentModel: Array.isArray(currentModel) ? currentModel[0] : currentModel,
+					assignment: trimmed,
+					// A role may be configured with a fallback chain; the first entry is what it
+					// actually runs on, so that is the baseline the direction is measured from.
+					currentModel: baselineChain[0],
+					baselineChain,
 				},
 			);
-			return routed?.model;
+			return routed ?? undefined;
 		} catch (error) {
 			// Routing is an optimisation. A failure here must never stop a spawn.
 			logger.debug("task: spawn model routing failed", { agent: agentName, error: String(error) });
@@ -1170,19 +1201,18 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		// Apply per-agent model override from settings (highest priority)
 		const agentModelOverrides = this.session.settings.get("task.agentModelOverrides");
 		const settingsModelOverride = agentModelOverrides[agentName];
-		// Per-spawn routing sits *above* the configured role model but uses it as the
-		// baseline: the decision is "is this particular assignment heavier or lighter
-		// than what this role normally gets", not "pick a model from scratch". Declining
-		// leaves the configured value exactly as it was.
-		const routedModelOverride = await this.#routeSpawnModel(agentName, boundParams.tasks, settingsModelOverride);
+		// The role's own resolved chain. Per-child routing composes *in front of* this
+		// and never replaces it: a specialty or tier that cannot be authenticated must
+		// still fall through to the model the role would have used anyway.
 		const parentActiveModelPattern = this.session.getActiveModelString?.();
 		const modelOverride = resolveAgentModelPatterns({
-			settingsOverride: routedModelOverride ?? settingsModelOverride,
+			settingsOverride: settingsModelOverride,
 			agentModel: effectiveAgent.model,
 			settings: this.session.settings,
 			activeModelPattern: parentActiveModelPattern,
 			fallbackModelPattern: this.session.getModelString?.(),
 		});
+		const baselineChain = normalizeModelSelectorValue(modelOverride);
 		const thinkingLevelOverride = effectiveAgent.thinkingLevel;
 
 		// Output schema priority: task call > agent frontmatter > inherited parent session.
@@ -1474,6 +1504,28 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					sessionFile?: string | null;
 				},
 			) => {
+				// Route THIS child. A declared specialty is deterministic; otherwise a
+				// batch shares an agent but not a workload, so a joined classification
+				// would have to answer for an implementation slice and a test slice at
+				// the same time.
+				const routed = task.specialty
+					? await this.#routeDeclaredSpecialty(agentName, task.specialty, baselineChain)
+					: await this.#routeSpawnModel(agentName, task.assignment, baselineChain);
+				const taskModelOverride = routed ? routed.candidates.map(candidate => candidate.selector) : modelOverride;
+				// Requested, not effective: the chain above can still fall through to a
+				// later candidate, so this records intent and nothing more.
+				const taskRouting: TaskRoutingAttribution | undefined = routed
+					? {
+							source: routed.requestedSource,
+							specialty: routed.requestedSpecialty,
+							tier: routed.requestedTier,
+							declared: routed.declared,
+							calibrated: routed.calibrated,
+							confidence: routed.confidence,
+							ordinalStrength: routed.ordinalStrength,
+							reason: routed.reason,
+						}
+					: undefined;
 				const forkContextSeed = prebuiltForkContextSeeds?.get(task.id) ?? (await buildForkContextSeed(task));
 				const forkContext = requestsForkContext(task)
 					? { mode: task.inheritContext, clonedTokens: forkContextSeed?.metadata.approximateTokens ?? 0 }
@@ -1516,7 +1568,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 						resumeMessage: overrides?.resumeMessage ?? executionOverrides?.resumeMessage,
 						subagentId: task.id,
 						taskDepth,
-						modelOverride,
+						modelOverride: taskModelOverride,
 						parentActiveModelPattern,
 						parentSessionId: this.session.getSessionId?.() ?? undefined,
 						thinkingLevel: thinkingLevelOverride,
@@ -1533,6 +1585,8 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 						onProgress: progress => {
 							progressMap.set(index, {
 								...structuredClone(progress),
+								modelOverride: taskModelOverride,
+								...(taskRouting ? { routing: taskRouting } : {}),
 							});
 							AsyncJobManager.instance()?.recordSubagentProgress(task.id, progress);
 							emitProgress();
@@ -1589,7 +1643,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 						resumeMessage: overrides?.resumeMessage ?? executionOverrides?.resumeMessage,
 						subagentId: task.id,
 						taskDepth,
-						modelOverride,
+						modelOverride: taskModelOverride,
 						parentActiveModelPattern,
 						parentSessionId: this.session.getSessionId?.() ?? undefined,
 						thinkingLevel: thinkingLevelOverride,
@@ -1606,6 +1660,8 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 						onProgress: progress => {
 							progressMap.set(index, {
 								...structuredClone(progress),
+								modelOverride: taskModelOverride,
+								...(taskRouting ? { routing: taskRouting } : {}),
 							});
 							AsyncJobManager.instance()?.recordSubagentProgress(task.id, progress);
 							emitProgress();
@@ -1629,6 +1685,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					const resultWithForkContext = {
 						...result,
 						...(forkContext ? { forkContext } : {}),
+						...(taskRouting ? { routing: taskRouting } : {}),
 						forkContextAdvisory,
 						repositoryBinding: publicRepositoryBinding(taskRepositoryBinding),
 					};
@@ -1709,7 +1766,8 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 						truncated: false,
 						durationMs: Date.now() - taskStart,
 						tokens: 0,
-						modelOverride,
+						modelOverride: taskModelOverride,
+						...(taskRouting ? { routing: taskRouting } : {}),
 						forkContext,
 						error: message,
 					};

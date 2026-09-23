@@ -35,6 +35,7 @@ import type { ModelProfileConfig } from "../../config/models-config-schema";
 import { getProviderAuthHealth } from "../../config/provider-auth-health";
 import { compareRankedProviders, type ProviderAuthState } from "../../config/provider-ranking";
 import type { Settings } from "../../config/settings";
+import { specialtiesForRole, type TaskModelSpecialty } from "../../config/task-model-specialties";
 import { t } from "../../i18n";
 import { type ThemeColor, theme } from "../../modes/theme/theme";
 import { formatModelOnboardingInlineHint } from "../../setup/model-onboarding-guidance";
@@ -112,6 +113,18 @@ export type ModelSelectorSelection =
 			setDefault: boolean;
 	  }
 	| {
+			kind: "specialtyAssignment";
+			model: Model;
+			role: SkcModelAssignmentTargetId;
+			specialty: TaskModelSpecialty;
+			thinkingLevel?: ThinkingLevel;
+			selector?: string;
+	  }
+	| {
+			kind: "specialtyReset";
+			role: SkcModelAssignmentTargetId;
+	  }
+	| {
 			kind: "createProfile";
 			profile: ModelProfileConfig;
 	  }
@@ -125,6 +138,34 @@ interface PendingThinkingChoice {
 	role: SkcModelAssignmentTargetId | null;
 	roles?: readonly SkcModelAssignmentTargetId[];
 	levels: ThinkingLevel[];
+}
+
+/** Role agents only — the bulk action that deliberately excludes `default`. */
+const ROLE_AGENT_TARGET_IDS = ["executor", "architect", "planner", "critic"] as const;
+
+/**
+ * A first-level row. Stable descriptors, never positions.
+ *
+ * `scope` distinguishes the two bulk rows rather than a boolean, because the
+ * difference between them is which targets they write, not a degree of anything.
+ */
+type ModelSelectorAction =
+	| { kind: "role"; role: SkcModelAssignmentTargetId }
+	| {
+			kind: "bulk";
+			roles: readonly SkcModelAssignmentTargetId[];
+			scope: "roleAgents" | "allTargets";
+	  };
+
+/** A second-level row under one canonical role. */
+type ModelSelectorDetailAction =
+	| { kind: "roleGeneral"; role: SkcModelAssignmentTargetId }
+	| { kind: "specialty"; role: SkcModelAssignmentTargetId; specialty: TaskModelSpecialty }
+	| { kind: "resetSpecialties"; role: SkcModelAssignmentTargetId };
+
+interface PendingDetailChoice {
+	item: ModelItem | CanonicalModelItem;
+	role: SkcModelAssignmentTargetId;
 }
 
 type RoleSelectCallback = (selection: ModelSelectorSelection) => void | Promise<void>;
@@ -328,6 +369,8 @@ export class ModelSelectorComponent extends Container {
 	#isCurrentModelFastModeActive: () => boolean = () => false;
 	#pendingActionItem?: ModelItem | CanonicalModelItem;
 	#selectedActionIndex: number = 0;
+	#pendingDetailChoice?: PendingDetailChoice;
+	#selectedDetailIndex: number = 0;
 	#pendingThinkingChoice?: PendingThinkingChoice;
 	#selectedThinkingIndex: number = 0;
 
@@ -1504,10 +1547,66 @@ export class ModelSelectorComponent extends Container {
 			);
 			if (this.#pendingThinkingChoice) {
 				this.#renderThinkingMenu(this.#pendingThinkingChoice);
+			} else if (this.#pendingDetailChoice) {
+				this.#renderDetailMenu(this.#pendingDetailChoice);
 			} else if (this.#pendingActionItem) {
 				this.#renderActionMenu(this.#pendingActionItem);
 			}
 		}
+	}
+
+	/**
+	 * First-level actions, in a fixed order the tests and muscle memory both rely on.
+	 *
+	 * Built as descriptors rather than derived from an index so that adding a row
+	 * cannot silently renumber the ones below it — the previous index arithmetic
+	 * meant every new action was a chance to mis-assign a model to the wrong role.
+	 */
+	#getActions(): ModelSelectorAction[] {
+		const actions: ModelSelectorAction[] = SKC_MODEL_ASSIGNMENT_TARGET_IDS.map(role => ({ kind: "role", role }));
+		actions.push({ kind: "bulk", roles: ROLE_AGENT_TARGET_IDS, scope: "roleAgents" });
+		actions.push({ kind: "bulk", roles: SKC_MODEL_ASSIGNMENT_TARGET_IDS, scope: "allTargets" });
+		return actions;
+	}
+
+	/**
+	 * Second-level rows for one canonical role: General, then its specialties, then reset.
+	 *
+	 * `default` and the bulk actions never reach here. They write canonical role
+	 * models only, because a "set everything" action that also rewrote five
+	 * specialty overrides would be impossible to undo from this menu.
+	 */
+	#getDetailActions(role: SkcModelAssignmentTargetId): ModelSelectorDetailAction[] {
+		const rows: ModelSelectorDetailAction[] = [{ kind: "roleGeneral", role }];
+		for (const specialty of specialtiesForRole(role)) rows.push({ kind: "specialty", role, specialty });
+		if (rows.length > 1) rows.push({ kind: "resetSpecialties", role });
+		return rows;
+	}
+
+	#actionLabel(action: ModelSelectorAction): string {
+		if (action.kind === "bulk") {
+			return action.scope === "roleAgents"
+				? t("modelSelector.setForAllRoleAgents")
+				: t("modelSelector.setForAllTargets");
+		}
+		const target = SKC_MODEL_ASSIGNMENT_TARGETS[action.role];
+		const label = t("modelSelector.setAsTarget", {
+			tag: target.tag ?? action.role.toUpperCase(),
+			name: target.name,
+		});
+		const count = specialtiesForRole(action.role).length;
+		return count > 0 ? `${label} ${theme.fg("muted", t("modelSelector.hasDetailedUses"))}` : label;
+	}
+
+	#detailActionLabel(action: ModelSelectorDetailAction): string {
+		if (action.kind === "roleGeneral") return t("modelSelector.generalRole");
+		if (action.kind === "resetSpecialties") return t("modelSelector.resetSpecialties");
+		// Read through rather than caching: a row that states what it already holds
+		// is worse than useless if it states a stale value.
+		const assigned = this.#settings.get("task.modelRouting.specialtyModels")?.[action.specialty];
+		const current = selectorHead(assigned);
+		const label = t(`modelSelector.specialty.${action.specialty}`);
+		return current ? `${label} ${theme.fg("muted", `— ${current}`)}` : label;
 	}
 
 	#renderActionMenu(item: ModelItem | CanonicalModelItem): void {
@@ -1516,17 +1615,42 @@ export class ModelSelectorComponent extends Container {
 			new Text(theme.fg("muted", `  ${t("modelSelector.actionFor", { id: item.model.id })}`), 0, 0),
 		);
 		this.#listContainer.addChild(new Spacer(1));
-		const actionCount = this.#getActionCount(item.model);
-		for (let i = 0; i < actionCount; i++) {
+		const actions = this.#getActions();
+		for (let i = 0; i < actions.length; i++) {
+			const action = actions[i];
+			if (!action) continue;
 			const prefix = i === this.#selectedActionIndex ? theme.fg("accent", `${theme.nav.cursor} `) : "  ";
-			const role = SKC_MODEL_ASSIGNMENT_TARGET_IDS[i];
-			const label = role
-				? `Set as ${SKC_MODEL_ASSIGNMENT_TARGETS[role].tag ?? role.toUpperCase()} (${SKC_MODEL_ASSIGNMENT_TARGETS[role].name})`
-				: i === SKC_MODEL_ASSIGNMENT_TARGET_IDS.length
-					? "Set for all role agents"
-					: "Set for all targets";
+			const label = this.#actionLabel(action);
 			this.#listContainer.addChild(
 				new Text(`${prefix}${i === this.#selectedActionIndex ? theme.fg("accent", label) : label}`, 0, 0),
+			);
+		}
+	}
+
+	#renderDetailMenu(choice: PendingDetailChoice): void {
+		this.#listContainer.addChild(new Spacer(1));
+		this.#listContainer.addChild(
+			new Text(
+				theme.fg(
+					"muted",
+					`  ${t("modelSelector.detailedUseFor", {
+						target: SKC_MODEL_ASSIGNMENT_TARGETS[choice.role].name,
+						id: choice.item.model.id,
+					})}`,
+				),
+				0,
+				0,
+			),
+		);
+		this.#listContainer.addChild(new Spacer(1));
+		const rows = this.#getDetailActions(choice.role);
+		for (let i = 0; i < rows.length; i++) {
+			const action = rows[i];
+			if (!action) continue;
+			const prefix = i === this.#selectedDetailIndex ? theme.fg("accent", `${theme.nav.cursor} `) : "  ";
+			const label = this.#detailActionLabel(action);
+			this.#listContainer.addChild(
+				new Text(`${prefix}${i === this.#selectedDetailIndex ? theme.fg("accent", label) : label}`, 0, 0),
 			);
 		}
 	}
@@ -1566,7 +1690,7 @@ export class ModelSelectorComponent extends Container {
 		return this.#roles[role]?.thinkingLevel ?? ThinkingLevel.Inherit;
 	}
 	#getActionCount(_model: Model): number {
-		return SKC_MODEL_ASSIGNMENT_TARGET_IDS.length + 2;
+		return this.#getActions().length;
 	}
 
 	#getSelectedItem(): ModelItem | CanonicalModelItem | undefined {
@@ -1578,6 +1702,10 @@ export class ModelSelectorComponent extends Container {
 	handleInput(keyData: string): void {
 		if (this.#pendingThinkingChoice) {
 			this.#handleThinkingMenuInput(keyData);
+			return;
+		}
+		if (this.#pendingDetailChoice) {
+			this.#handleDetailMenuInput(keyData);
 			return;
 		}
 		if (this.#pendingActionItem) {
@@ -1812,23 +1940,98 @@ export class ModelSelectorComponent extends Container {
 			return;
 		}
 		if (matchesKey(keyData, "enter") || matchesKey(keyData, "return") || keyData === "\n") {
-			this.#pendingActionItem = undefined;
-			const role = SKC_MODEL_ASSIGNMENT_TARGET_IDS[this.#selectedActionIndex];
-			if (role) {
-				this.#handleSelect(item, role);
+			const action = this.#getActions()[this.#selectedActionIndex];
+			if (!action) return;
+			if (action.kind === "bulk") {
+				this.#pendingActionItem = undefined;
+				this.#handleSelect(item, "default", undefined, action.roles);
 				return;
 			}
-			const roles =
-				this.#selectedActionIndex === SKC_MODEL_ASSIGNMENT_TARGET_IDS.length
-					? (["executor", "architect", "planner", "critic"] as const)
-					: SKC_MODEL_ASSIGNMENT_TARGET_IDS;
-			this.#handleSelect(item, "default", undefined, roles);
+			// A role with specialties opens the detail level instead of assigning
+			// straight away; a role without any keeps the old one-keystroke path.
+			if (this.#getDetailActions(action.role).length > 1) {
+				this.#pendingActionItem = undefined;
+				this.#pendingDetailChoice = { item, role: action.role };
+				this.#selectedDetailIndex = 0;
+				this.#updateList();
+				return;
+			}
+			this.#pendingActionItem = undefined;
+			this.#handleSelect(item, action.role);
 			return;
 		}
 		if (getKeybindings().matches(keyData, "tui.select.cancel")) {
 			this.#pendingActionItem = undefined;
 			this.#updateList();
 		}
+	}
+	/**
+	 * Second level: General, the role's specialties, and reset.
+	 *
+	 * Cancel steps back to the first level rather than closing outright, so a
+	 * wrong turn costs one keystroke instead of restarting the whole selection.
+	 */
+	#handleDetailMenuInput(keyData: string): void {
+		const choice = this.#pendingDetailChoice;
+		if (!choice) return;
+		const rows = this.#getDetailActions(choice.role);
+		if (matchesKey(keyData, "up")) {
+			this.#selectedDetailIndex = this.#selectedDetailIndex === 0 ? rows.length - 1 : this.#selectedDetailIndex - 1;
+			this.#updateList();
+			return;
+		}
+		if (matchesKey(keyData, "down")) {
+			this.#selectedDetailIndex = (this.#selectedDetailIndex + 1) % rows.length;
+			this.#updateList();
+			return;
+		}
+		if (matchesKey(keyData, "enter") || matchesKey(keyData, "return") || keyData === "\n") {
+			const action = rows[this.#selectedDetailIndex];
+			if (!action) return;
+			this.#pendingDetailChoice = undefined;
+			if (action.kind === "roleGeneral") {
+				this.#handleSelect(choice.item, action.role);
+				return;
+			}
+			if (action.kind === "resetSpecialties") {
+				this.#onSelectCallback({ kind: "specialtyReset", role: action.role });
+				return;
+			}
+			this.#handleSpecialtySelect(choice.item, action.role, action.specialty);
+			return;
+		}
+		if (getKeybindings().matches(keyData, "tui.select.cancel")) {
+			this.#pendingDetailChoice = undefined;
+			this.#pendingActionItem = choice.item;
+			this.#selectedActionIndex = Math.max(
+				0,
+				this.#getActions().findIndex(action => action.kind === "role" && action.role === choice.role),
+			);
+			this.#updateList();
+		}
+	}
+
+	/**
+	 * Assign a model to one specialty.
+	 *
+	 * Reuses the same explicit-thinking gate as a canonical assignment, because a
+	 * specialty override is dispatched exactly like a role model and would hit
+	 * the same "which effort?" ambiguity if it skipped it.
+	 */
+	#handleSpecialtySelect(
+		item: ModelItem | CanonicalModelItem,
+		role: SkcModelAssignmentTargetId,
+		specialty: TaskModelSpecialty,
+	): void {
+		const thinkingLevel = item.thinkingLevel ?? this.#getCurrentRoleThinkingLevel(role);
+		this.#onSelectCallback({
+			kind: "specialtyAssignment",
+			model: item.model,
+			role,
+			specialty,
+			thinkingLevel,
+			selector: formatModelSelectorValue(item.selector, thinkingLevel),
+		});
 	}
 
 	#handleThinkingMenuInput(keyData: string): void {
@@ -1855,10 +2058,19 @@ export class ModelSelectorComponent extends Container {
 		if (getKeybindings().matches(keyData, "tui.select.cancel")) {
 			this.#pendingThinkingChoice = undefined;
 			if (choice.role !== null) {
+				// Step back one level, landing on the row that got us here. Located by
+				// descriptor rather than computed from lengths, so the two bulk rows
+				// cannot drift apart from the list that renders them.
 				this.#pendingActionItem = choice.item;
-				this.#selectedActionIndex = choice.roles
-					? SKC_MODEL_ASSIGNMENT_TARGET_IDS.length + (choice.roles.includes("default") ? 1 : 0)
-					: Math.max(0, SKC_MODEL_ASSIGNMENT_TARGET_IDS.indexOf(choice.role));
+				const actions = this.#getActions();
+				const bulkRoles = choice.roles;
+				const wanted = bulkRoles
+					? actions.findIndex(
+							action =>
+								action.kind === "bulk" && action.roles.includes("default") === bulkRoles.includes("default"),
+						)
+					: actions.findIndex(action => action.kind === "role" && action.role === choice.role);
+				this.#selectedActionIndex = Math.max(0, wanted);
 			}
 			this.#updateList();
 		}

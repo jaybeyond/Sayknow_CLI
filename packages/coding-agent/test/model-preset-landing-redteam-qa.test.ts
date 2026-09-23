@@ -1,8 +1,8 @@
-import { beforeAll, describe, expect, test, vi } from "bun:test";
+import { afterAll, beforeAll, describe, expect, test, vi } from "bun:test";
 import { Effort, type Model } from "@sayknow-cli/ai";
 import { BUILTIN_MODEL_PROFILES, type ModelProfileDefinition } from "@sayknow-cli/coding-agent/config/model-profiles";
 import { Settings } from "@sayknow-cli/coding-agent/config/settings";
-import { setLanguage } from "@sayknow-cli/coding-agent/i18n/index";
+import { getLanguage, setLanguage } from "@sayknow-cli/coding-agent/i18n/index";
 import {
 	ModelSelectorComponent,
 	type ModelSelectorSelection,
@@ -184,15 +184,24 @@ function cursorRowLabel(selector: ModelSelectorComponent): string | undefined {
 	return cursorLine?.replace("❯", "").replace(/\s+/g, " ").trim();
 }
 
+let previousLanguage: string | undefined;
 describe("preset landing adversarial QA", () => {
 	beforeAll(async () => {
 		// The fork's model selector is i18n'd; the assertions below check the
 		// Korean strings, so pin the language deterministically — otherwise the
 		// active language leaks from whichever test ran last (en vs ko) and these
 		// assertions flake by test-execution order.
+		previousLanguage = getLanguage();
 		setLanguage("ko");
 		testTheme = await getThemeByName("red-octopus");
 		installTestTheme();
+	});
+
+	afterAll(() => {
+		// Pinning without restoring is what made sibling suites depend on file
+		// order: this suite left the process in Korean, and the next file to
+		// assert English copy failed purely because it ran second.
+		if (previousLanguage) setLanguage(previousLanguage as never);
 	});
 
 	test("Escape closes exactly one preset layer in order", async () => {
@@ -253,8 +262,11 @@ describe("preset landing adversarial QA", () => {
 		selector.handleInput("\n");
 		text = normalizeRenderedText(selector.render(260).join("\n"));
 		expect(text).toContain("작업 대상:");
-		expect(text).toContain("Set as DEFAULT");
-		expect(text).toContain("Set as EXECUTOR");
+		// This suite pins Korean on purpose, so the role rows must be Korean too.
+		// Asserting English here would re-freeze the untranslated label the rest
+		// of this menu had already moved past.
+		expect(text).toContain("DEFAULT에 설정");
+		expect(text).toContain("EXECUTOR에 설정");
 	});
 
 	test("temporaryOnly, initialSearchInput, and scoped models bypass preset landing", async () => {

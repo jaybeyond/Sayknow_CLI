@@ -153,96 +153,285 @@ test("a trivially short assignment is not worth a model call", async () => {
 	expect(called).toBe(false);
 });
 
-// --- domain axis (frontend planning) -----------------------------------------
+// --- specialty axis (kind of work) -------------------------------------------
 
 const FRONTEND = "openai-codex/gpt-5.6-sol:high";
 const POLICY_FE: TaskRoutingPolicy = { ...POLICY, frontendModel: FRONTEND };
+const BASELINE = "openai-codex/gpt-5.6-terra:high";
 
-function domainAnswer(noul: number): DecisionResult["answers"] {
-	return { tier: { type: "choice", choice: "balanced", confidence: 0.9 }, domain: { type: "noul", noul } };
+/**
+ * One classifier call answers both axes. The specialty choice carries the
+ * calibrated confidence; `specialtyClear` carries the ordinal a backend that
+ * cannot report probabilities uses instead.
+ */
+function specialtyAnswer(choice: string, clarity: number, confidence?: number): DecisionResult["answers"] {
+	return {
+		tier: { type: "choice", choice: "balanced", confidence: 0.9 },
+		specialty: { type: "choice", choice, ...(confidence === undefined ? {} : { confidence }) },
+		specialtyClear: { type: "noul", noul: clarity },
+	};
 }
 
-test("frontend planning on a planning role takes the domain model laterally", async () => {
-	const routed = await routeTaskModel(service(domainAnswer(0.9)), POLICY_FE, {
+test("frontend design on a planning role takes the specialty model laterally", async () => {
+	const routed = await routeTaskModel(service(specialtyAnswer("frontendDesign", 0.9, 0.9)), POLICY_FE, {
 		agentName: "planner",
 		assignment: "온보딩 화면 정보구조를 설계하고 컴포넌트 구조를 계획해줘",
-		currentModel: "openai-codex/gpt-5.6-terra:high",
+		currentModel: BASELINE,
 	});
-	expect(routed).toMatchObject({ model: FRONTEND, tier: null });
+	expect(routed).toMatchObject({ model: FRONTEND, tier: null, requestedSpecialty: "frontendDesign" });
 });
 
 test("architect is a planning role too", async () => {
-	const routed = await routeTaskModel(service(domainAnswer(0.85)), POLICY_FE, {
+	const routed = await routeTaskModel(service(specialtyAnswer("frontendDesign", 0.9, 0.85)), POLICY_FE, {
 		agentName: "architect",
 		assignment: "다크모드 색상 시스템 설계를 검토하고 컴포넌트 토큰 구조를 계획해줘",
 		// Not the frontend model — otherwise "already there" correctly refuses.
-		currentModel: "openai-codex/gpt-5.6-terra:high",
+		currentModel: BASELINE,
 	});
 	expect(routed).toMatchObject({ model: FRONTEND, tier: null });
 });
 
-test("the executor is never domain-swapped — implementation keeps the ladder", async () => {
+test("the executor never takes a design specialty — implementation keeps the ladder", async () => {
 	// The user's intent: the design model *plans* the frontend; another model
 	// still writes it. A confident frontend read must not move an executor.
-	const routed = await routeTaskModel(service(domainAnswer(1)), POLICY_FE, {
+	const routed = await routeTaskModel(service(specialtyAnswer("frontendDesign", 1, 1)), POLICY_FE, {
 		agentName: "executor",
-		assignment: "온보딩 화면 컴포넌트를 만들어줘",
+		assignment: "온보딩 화면 컴포넌트를 기존 디자인 토큰에 맞춰 구현해줘",
 		currentModel: TIERS.fast,
 	});
-	expect(routed).toBeNull();
+	expect(routed).toMatchObject({ requestedSource: "tier" });
+	expect(routed?.requestedSpecialty).toBeUndefined();
 });
 
-test("below the single domain bar there is no swap either way", async () => {
+test("below the single calibrated bar there is no swap either way", async () => {
 	// Lateral swap has one bar: wrong either way costs quality symmetrically.
-	for (const noul of [0.3, 0.55]) {
-		const routed = await routeTaskModel(service(domainAnswer(noul)), POLICY_FE, {
+	for (const confidence of [0.3, 0.55]) {
+		const routed = await routeTaskModel(service(specialtyAnswer("frontendDesign", 1, confidence)), POLICY_FE, {
 			agentName: "planner",
 			assignment: "일반적인 리팩토링 순서를 계획해줘",
-			currentModel: "openai-codex/gpt-5.6-terra:high",
+			currentModel: BASELINE,
 		});
-		expect(routed).toBeNull();
+		expect(routed?.requestedSpecialty).toBeUndefined();
 	}
 });
 
-test("an unconfigured frontend model disables the domain axis entirely", async () => {
-	const routed = await routeTaskModel(service(domainAnswer(1)), POLICY, {
+test("an unconfigured specialty disables that swap entirely", async () => {
+	const routed = await routeTaskModel(service(specialtyAnswer("frontendDesign", 1, 1)), POLICY, {
 		agentName: "planner",
-		assignment: "온보딩 화면 정보구조를 설계해줘",
-		currentModel: "openai-codex/gpt-5.6-terra:high",
+		assignment: "온보딩 화면 정보구조를 설계하고 컴포넌트 구조를 계획해줘",
+		currentModel: BASELINE,
 	});
-	expect(routed).toBeNull();
+	expect(routed?.requestedSpecialty).toBeUndefined();
 });
 
-test("the domain swap does not need a tier ladder", async () => {
-	// Domain and difficulty are separate axes; configuring only a frontend model
-	// must still route planning roles on domain.
+test("the specialty swap does not need a tier ladder", async () => {
+	// Specialty and difficulty are separate axes; configuring only a specialty
+	// model must still route a compatible role.
 	const routed = await routeTaskModel(
-		service(domainAnswer(0.9)),
+		service(specialtyAnswer("frontendDesign", 0.9, 0.9)),
 		{ ...POLICY_FE, tiers: {} },
 		{
 			agentName: "planner",
 			assignment: "온보딩 화면 정보구조를 설계하고 컴포넌트 구조를 계획해줘",
-			currentModel: "openai-codex/gpt-5.6-terra:high",
+			currentModel: BASELINE,
 		},
 	);
 	expect(routed).toMatchObject({ model: FRONTEND });
 });
 
-test("a role already on the frontend model is left alone", async () => {
-	const routed = await routeTaskModel(service(domainAnswer(0.9)), POLICY_FE, {
+test("a role already on the specialty model is left alone", async () => {
+	const routed = await routeTaskModel(service(specialtyAnswer("frontendDesign", 0.9, 0.9)), POLICY_FE, {
 		agentName: "planner",
-		assignment: "온보딩 화면 정보구조를 설계해줘",
+		assignment: "온보딩 화면 정보구조를 설계하고 컴포넌트 구조를 계획해줘",
 		currentModel: FRONTEND,
 	});
 	expect(routed).toBeNull();
 });
 
-test("backend planning falls through to the difficulty ladder untouched", async () => {
-	const routed = await routeTaskModel(service(domainAnswer(0.1)), POLICY_FE, {
+test("a neutral classification falls through to the difficulty ladder untouched", async () => {
+	const routed = await routeTaskModel(service(specialtyAnswer("none", 0.1)), POLICY_FE, {
 		agentName: "planner",
 		assignment: "결제 연동 마이그레이션 순서를 짜줘. 롤백 불가 구간이 있다",
 		currentModel: TIERS.fast,
 	});
-	// The stub answers balanced; the point is the ladder answered, not the domain swap.
-	expect(routed).toMatchObject({ model: TIERS.balanced, tier: "balanced" });
+	// The stub answers balanced; the point is the ladder answered, not a swap.
+	expect(routed).toMatchObject({ model: TIERS.balanced, tier: "balanced", requestedSource: "tier" });
+});
+
+test("an explicit specialty entry wins over the legacy frontend selector", async () => {
+	const explicit = "anthropic/claude-opus-5:high";
+	const routed = await routeTaskModel(
+		service(specialtyAnswer("frontendDesign", 0.9, 0.9)),
+		{ ...POLICY_FE, specialtyModels: { frontendDesign: explicit } },
+		{
+			agentName: "planner",
+			assignment: "온보딩 화면 정보구조를 설계하고 컴포넌트 구조를 계획해줘",
+			currentModel: BASELINE,
+		},
+	);
+	expect(routed).toMatchObject({ model: explicit, requestedSource: "specialty" });
+});
+
+test("the legacy frontend selector is still reported as legacy, not as a new entry", async () => {
+	const routed = await routeTaskModel(service(specialtyAnswer("frontendDesign", 0.9, 0.9)), POLICY_FE, {
+		agentName: "planner",
+		assignment: "온보딩 화면 정보구조를 설계하고 컴포넌트 구조를 계획해줘",
+		currentModel: BASELINE,
+	});
+	expect(routed).toMatchObject({ requestedSource: "legacy-frontend" });
+});
+
+test("backend architecture routes planning roles to its own model", async () => {
+	const backend = "anthropic/claude-opus-5:xhigh";
+	const routed = await routeTaskModel(
+		service(specialtyAnswer("backendArchitecture", 0.9, 0.9)),
+		{ ...POLICY, specialtyModels: { backendArchitecture: backend } },
+		{ agentName: "architect", assignment: "결제 서비스의 API 경계와 데이터 모델을 설계해줘", currentModel: BASELINE },
+	);
+	expect(routed).toMatchObject({ model: backend, requestedSpecialty: "backendArchitecture", tier: null });
+});
+
+test("implementation and testing route the executor, review routes the critic", async () => {
+	const impl = "anthropic/claude-sonnet-5:low";
+	const tests = "anthropic/claude-haiku-4-5";
+	const review = "anthropic/claude-opus-5:xhigh";
+	const policy: TaskRoutingPolicy = {
+		...POLICY,
+		specialtyModels: { implementation: impl, testing: tests, review },
+	};
+
+	const implementation = await routeTaskModel(service(specialtyAnswer("implementation", 0.9, 0.9)), policy, {
+		agentName: "executor",
+		assignment: "기존 패턴을 따라 사용자 조회 핸들러를 추가해줘",
+		currentModel: BASELINE,
+	});
+	expect(implementation).toMatchObject({ model: impl, requestedSpecialty: "implementation" });
+
+	const testing = await routeTaskModel(service(specialtyAnswer("testing", 0.9, 0.9)), policy, {
+		agentName: "executor",
+		assignment: "이 회귀에 대한 집중 테스트를 설계하고 작성해줘",
+		currentModel: BASELINE,
+	});
+	expect(testing).toMatchObject({ model: tests, requestedSpecialty: "testing" });
+
+	const reviewed = await routeTaskModel(service(specialtyAnswer("review", 0.9, 0.9)), policy, {
+		agentName: "critic",
+		assignment: "이 변경의 정확성과 회귀 위험, 유지보수성을 검토해줘",
+		currentModel: BASELINE,
+	});
+	expect(reviewed).toMatchObject({ model: review, requestedSpecialty: "review" });
+
+	// review belongs to the critic, so the same answer must not move an executor.
+	const misrouted = await routeTaskModel(service(specialtyAnswer("review", 0.9, 0.9)), policy, {
+		agentName: "executor",
+		assignment: "이 변경의 정확성과 회귀 위험, 유지보수성을 검토해줘",
+		currentModel: BASELINE,
+	});
+	expect(misrouted?.requestedSpecialty).toBeUndefined();
+});
+
+// --- uncalibrated backend ----------------------------------------------------
+
+test("an uncalibrated backend routes on a high ordinal and never claims confidence", async () => {
+	const routed = await routeTaskModel(service(specialtyAnswer("frontendDesign", 0.8), false), POLICY_FE, {
+		agentName: "planner",
+		assignment: "온보딩 화면 정보구조를 설계하고 컴포넌트 구조를 계획해줘",
+		currentModel: BASELINE,
+	});
+
+	expect(routed).toMatchObject({ model: FRONTEND, calibrated: false, ordinalStrength: 0.8 });
+	// The ordinal ranks; it is not a probability and must never be reported as one.
+	expect(routed?.confidence).toBeUndefined();
+	expect(routed?.reason).toContain("uncalibrated");
+});
+
+test("an uncalibrated backend declines just below the ordinal bar", async () => {
+	const routed = await routeTaskModel(service(specialtyAnswer("frontendDesign", 0.74), false), POLICY_FE, {
+		agentName: "planner",
+		assignment: "온보딩 화면 정보구조를 설계하고 컴포넌트 구조를 계획해줘",
+		currentModel: BASELINE,
+	});
+	expect(routed?.requestedSpecialty).toBeUndefined();
+});
+
+test("a calibrated backend ignores the ordinal and uses its confidence", async () => {
+	// High ordinal, low confidence: the calibrated bar is the one that governs.
+	const routed = await routeTaskModel(service(specialtyAnswer("frontendDesign", 1, 0.2)), POLICY_FE, {
+		agentName: "planner",
+		assignment: "온보딩 화면 정보구조를 설계하고 컴포넌트 구조를 계획해줘",
+		currentModel: BASELINE,
+	});
+	expect(routed?.requestedSpecialty).toBeUndefined();
+});
+
+test("an unrecognized specialty option is declined rather than coerced", async () => {
+	const routed = await routeTaskModel(service(specialtyAnswer("frontenddesign", 1, 1)), POLICY_FE, {
+		agentName: "planner",
+		assignment: "온보딩 화면 정보구조를 설계하고 컴포넌트 구조를 계획해줘",
+		currentModel: BASELINE,
+	});
+	expect(routed?.requestedSpecialty).toBeUndefined();
+});
+
+// --- candidate composition ---------------------------------------------------
+
+test("a specialty chain is composed ahead of the tier and the role baseline", async () => {
+	const routed = await routeTaskModel(
+		service(specialtyAnswer("frontendDesign", 0.9, 0.9)),
+		{ ...POLICY, specialtyModels: { frontendDesign: ["design/primary", "design/secondary"] } },
+		{
+			agentName: "planner",
+			assignment: "온보딩 화면 정보구조를 설계하고 컴포넌트 구조를 계획해줘",
+			currentModel: BASELINE,
+			baselineChain: [BASELINE, "openai-codex/gpt-5.6-terra:low"],
+		},
+	);
+
+	expect(routed?.candidates).toEqual([
+		{ selector: "design/primary", source: "specialty", specialty: "frontendDesign" },
+		{ selector: "design/secondary", source: "specialty", specialty: "frontendDesign" },
+		{ selector: TIERS.balanced, source: "tier", tier: "balanced" },
+		{ selector: BASELINE, source: "baseline" },
+		{ selector: "openai-codex/gpt-5.6-terra:low", source: "baseline" },
+	]);
+});
+
+test("irreversible work outranks the specialty axis and never admits it", async () => {
+	const answers: DecisionResult["answers"] = {
+		...specialtyAnswer("frontendDesign", 1, 1),
+		risky: { type: "noul", noul: 0.94 },
+	};
+	const routed = await routeTaskModel(
+		service(answers),
+		{ ...POLICY_FE, specialtyModels: { frontendDesign: "design/primary" } },
+		{ agentName: "planner", assignment: "프로덕션 결제 화면을 되돌릴 수 없게 교체해줘", currentModel: TIERS.fast },
+	);
+
+	expect(routed).toMatchObject({ model: TIERS.deep, tier: "deep", requestedSource: "tier" });
+	expect(routed?.candidates.some(candidate => candidate.source === "specialty")).toBe(false);
+});
+
+test("a specialty selector already inside the role's own chain is attributed to baseline", async () => {
+	// The specialty points at the role's *fallback* entry, not its head, so the
+	// "already there" check does not fire and composition is what has to be right.
+	const routed = await routeTaskModel(
+		service(specialtyAnswer("frontendDesign", 0.9, 0.9)),
+		{ ...POLICY, specialtyModels: { frontendDesign: "role/secondary" } },
+		{
+			agentName: "planner",
+			assignment: "온보딩 화면 정보구조를 설계하고 컴포넌트 구조를 계획해줘",
+			currentModel: "role/primary",
+			baselineChain: ["role/primary", "role/secondary"],
+		},
+	);
+
+	// Resolving that entry would only prove the role's own chain was usable, so it
+	// must not be reported as a specialty hit.
+	expect(routed?.requestedSource).toBe("tier");
+	expect(routed?.candidates.some(candidate => candidate.source === "specialty")).toBe(false);
+	expect(routed?.candidates.map(candidate => `${candidate.selector}:${candidate.source}`)).toEqual([
+		`${TIERS.balanced}:tier`,
+		"role/primary:baseline",
+		"role/secondary:baseline",
+	]);
 });
