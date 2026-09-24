@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.6.2] - 2026-09-24
+
 ### Fixed
 
 - `/model` list search now matches vendor-style version punctuation. Typing `opus 5.5` (or just `5.5`) in the ALL or provider tab returned "No matching models" even though `anthropic/claude-opus-5-5` was in the list, because those tabs fuzzy-matched only `${id} ${provider}` and `5.5` cannot be a subsequence of `5-5`. The ALL/provider tabs now use the same punctuation-insensitive pipeline as the CANONICAL tab (id + provider + display name, alpha-token and compact-substring prefilters, fuzzy only for ranking/typo rescue), so `opus 5.5`, `5.5`, `opus55` and `opus-5-5` all land on Opus 5.5.

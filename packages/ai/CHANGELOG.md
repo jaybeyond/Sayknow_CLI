@@ -2,11 +2,11 @@
 
 ## [Unreleased]
 
+## [0.6.2] - 2026-09-24
+
 ### Fixed
 
 - Bumped the advertised Claude Code client version from 2.1.267 to 2.1.281. Anthropic gates `claude-opus-5-5` on the advertised client version and answered HTTP 400 `claude_code_version_too_old` ("version 2.1.280 or newer is required"), so the preset added in 0.6.1 was selectable but every request through the Claude Code OAuth path failed. Measured against the live API: with `claude-cli/2.1.267` the model returns 400, with `claude-cli/2.1.281` it returns 200. A test now pins the advertised version at or above the 2.1.280 gate so it cannot be walked back under a shipped model's floor.
-
-## [0.6.1] - 2026-09-24
 
 ## [0.6.0] - 2026-09-24
 ### Fixed
