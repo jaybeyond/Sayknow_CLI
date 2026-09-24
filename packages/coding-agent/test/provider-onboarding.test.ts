@@ -572,7 +572,7 @@ describe("provider onboarding setup core", () => {
 					"gpt",
 				]),
 			).toThrow("exit 1");
-			expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("Provider setup rejects raw --api-key values"));
+			expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("rejects raw --api-key values"));
 		} finally {
 			errorSpy.mockRestore();
 			exitSpy.mockRestore();

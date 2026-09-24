@@ -1297,6 +1297,9 @@ describe("bare /login external credential import gate", () => {
 			if (!(selector instanceof ProviderOnboardingSelectorComponent)) {
 				throw new Error("Expected provider onboarding selector");
 			}
+			// "Import existing credentials" is the last of five entries in
+			// `provider-onboarding-selector.ts`; the TypeSafe key entry sits before it.
+			selector.handleInput("\x1b[B");
 			selector.handleInput("\x1b[B");
 			selector.handleInput("\x1b[B");
 			selector.handleInput("\x1b[B");

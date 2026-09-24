@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { beforeAll, describe, expect, test } from "bun:test";
 import { JobsOverlayComponent, type JobsOverlayController } from "../src/modes/components/jobs-overlay";
 import {
 	buildConfirmItems,
@@ -8,6 +8,7 @@ import {
 	parseJobRef,
 } from "../src/modes/components/jobs-overlay-model";
 import type { JobsSnapshot } from "../src/modes/jobs-observer";
+import { initTheme } from "../src/modes/theme/theme";
 
 function snapshot(over: Partial<JobsSnapshot> = {}): JobsSnapshot {
 	return {
@@ -59,6 +60,13 @@ function makeOverlayController(over: Partial<JobsSnapshot> = {}) {
 }
 
 describe("jobs overlay model", () => {
+	// `JobsOverlayComponent` reads `theme.getSymbolPreset()`; the theme is only
+	// initialised by the interactive host, so this file must seed it itself
+	// instead of relying on whichever sibling file ran first in the shard.
+	beforeAll(async () => {
+		await initTheme(false);
+	});
+
 	test("AC8 list is grouped Monitors-then-Crons preserving newest-first order", () => {
 		const items = buildJobsListItems(
 			snapshot({

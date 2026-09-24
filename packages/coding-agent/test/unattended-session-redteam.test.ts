@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { beforeAll, describe, expect, it } from "bun:test";
 import type { AgentToolContext } from "@sayknow-cli/agent-core";
 import { Settings } from "@sayknow-cli/coding-agent/config/settings";
 import type { RpcUnattendedDeclaration, RpcWorkflowGate } from "@sayknow-cli/coding-agent/modes/rpc/rpc-types";
@@ -8,6 +8,7 @@ import {
 	type WorkflowGateEmitter,
 } from "@sayknow-cli/coding-agent/modes/shared/agent-wire/unattended-session";
 import type { OpenGateInput } from "@sayknow-cli/coding-agent/modes/shared/agent-wire/workflow-gate-broker";
+import { initTheme } from "@sayknow-cli/coding-agent/modes/theme/theme";
 import type { ToolSession } from "@sayknow-cli/coding-agent/tools";
 import { AskTool } from "@sayknow-cli/coding-agent/tools/ask";
 
@@ -181,6 +182,12 @@ describe("UnattendedSessionControlPlane red-team G011", () => {
 });
 
 describe("AskTool unattended gate red-team G011", () => {
+	// The multi-select decode path renders `theme.checkbox` markers; the theme is
+	// lazily initialised by the interactive host, so seed it here as the SDK tests do.
+	beforeAll(async () => {
+		await initTheme(false);
+	});
+
 	it("decodes a multi-select gate answer to multiple selectedOptions", async () => {
 		const previousSkcSessionId = process.env.SKC_SESSION_ID;
 		process.env.SKC_SESSION_ID = "unattended-redteam-ask-test-session";

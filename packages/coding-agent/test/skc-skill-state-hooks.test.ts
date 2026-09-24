@@ -13,6 +13,7 @@ import {
 	detectSkillKeywords,
 	ensureWorkflowSkillActivationState,
 	readVisibleSkillActiveState,
+	recordSkillActivation,
 } from "../src/hooks/skill-state";
 import { activeSnapshotPath, modeStatePath, sessionSpecsDir, sessionStateDir } from "../src/skc-runtime/session-layout";
 import { reconcileWorkflowSkillState } from "../src/skc-runtime/state-runtime";
@@ -336,6 +337,11 @@ describe("SKC native skill-state hooks", () => {
 			{ cwd: root, policy: "cache", sourceRevision: 2 },
 		);
 
+		// The state layer refuses the stale activation; the hook never lets that
+		// refusal abort the user's turn and emits nothing instead.
+		await expect(
+			recordSkillActivation({ cwd: root, text: "$deep-interview clarify again", sessionId }),
+		).rejects.toThrow(/state write conflict/);
 		await expect(
 			dispatchSkcNativeSkillHook(
 				{
@@ -346,7 +352,7 @@ describe("SKC native skill-state hooks", () => {
 				},
 				{ effectiveSkillConfig: testEffectiveSkillConfig },
 			),
-		).rejects.toThrow(/state write conflict/);
+		).resolves.toMatchObject({ hookEventName: "UserPromptSubmit", outputJson: null });
 
 		await expect(JSON.parse(await fs.readFile(statePath, "utf-8"))).toMatchObject({
 			current_phase: "handoff",

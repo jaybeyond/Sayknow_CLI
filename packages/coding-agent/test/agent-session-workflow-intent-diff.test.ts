@@ -153,11 +153,19 @@ describe("AgentSession workflow intent-diff tracking", () => {
 	});
 
 	it("records ambiguous and durable prompts as explicit workflow escalations", async () => {
+		// The first prompt hits the deep-interview keyword table, and the workflow it
+		// activates re-runs the agent through its stop gate after the turn; the session
+		// is still streaming when `prompt()` resolves. Wait it out between prompts.
 		await session.prompt("I'm not sure what this product should be, don't assume the requirements");
+		await session.waitForIdle();
 		await session.prompt("create a durable goal ledger for this multi-step release");
+		await session.waitForIdle();
 		await session.prompt("create a durable goal ledger for this production release");
+		await session.waitForIdle();
 		await session.prompt("use ultragoal to track this release");
+		await session.waitForIdle();
 		await session.prompt("ultragoal로 이 작업 처리해줘");
+		await session.waitForIdle();
 
 		const [deepInterview, ultragoal, productionUltragoal, namedUltragoal, koreanUltragoal] = workflowIntentEntries();
 		expect(deepInterview?.data).toMatchObject({
