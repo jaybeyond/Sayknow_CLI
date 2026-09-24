@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-09-24
+
 ### Added
 
 - The 13 bundled UI skills are now part of the typed decision instead of 20 hand-written regexes. Measured recall of the pattern table on real Korean prompts was 5/8; a prompt like "이 부분 손보기 전에 어떻게 갈지부터 같이 정하고 넘어가자" matched nothing and the skill never activated. The picked skill still arrives as the same hidden `developer` reminder, now labelled `semantic match` when the model answered and `matched` when a pattern did.
