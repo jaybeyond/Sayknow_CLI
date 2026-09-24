@@ -141,6 +141,21 @@ export const BUILTIN_MODEL_PROFILES: readonly ModelProfileDefinition[] = [
 		critic: "anthropic/claude-opus-5:high",
 		architect: "anthropic/claude-opus-5:xhigh",
 	}),
+	/**
+	 * Opus 5.5 is a separate preset instead of a bump of `claude-opus`, because its
+	 * envelope differs: it costs less than Opus 5 ($4/$20 vs $5/$25) at the same
+	 * 1M context / 128K output, and it accepts the `max` adaptive level. So the deep
+	 * lanes are pushed one notch above the Opus 5 preset (`architect` at `max`,
+	 * `planner` at `medium` instead of `low`) while the mechanical executor lane
+	 * stays on Sonnet 5. Anyone who wants the old cost/effort shape keeps `claude-opus`.
+	 */
+	profile("claude-opus-5-5", ["anthropic"], {
+		default: "anthropic/claude-opus-5-5:xhigh",
+		executor: "anthropic/claude-sonnet-5",
+		planner: "anthropic/claude-opus-5-5:medium",
+		critic: "anthropic/claude-opus-5-5:high",
+		architect: "anthropic/claude-opus-5-5:max",
+	}),
 	profile("claude-fable", ["anthropic"], {
 		default: "anthropic/claude-fable-5:xhigh",
 		executor: "anthropic/claude-sonnet-5",
@@ -402,6 +417,7 @@ const PROFILE_PRESENTATION: Record<string, ModelProfilePresentation> = {
 	},
 	opencodego: { displayName: "OpenCodeGo", providerGroup: "OPENCODEGO" },
 	"claude-opus": { displayName: "Claude Opus", providerGroup: "CLAUDE" },
+	"claude-opus-5-5": { displayName: "Claude Opus 5.5", providerGroup: "CLAUDE" },
 	"claude-fable": { displayName: "Claude Fable", providerGroup: "CLAUDE" },
 	"glm-eco": { displayName: "GLM Eco", providerGroup: "GLM" },
 	"glm-medium": { displayName: "GLM Medium", providerGroup: "GLM" },
@@ -460,7 +476,9 @@ const MACOS_OMLX_PROFILE_RANK = new Map<string, number>(MACOS_OMLX_PROFILE_ORDER
 
 const PROFILE_RECOMMENDATIONS: Record<string, string> = {
 	"openai-codex": "codex-medium",
-	anthropic: "claude-opus",
+	// Newest Anthropic flagship, and cheaper per token than the Opus 5 preset it
+	// replaces here. `claude-opus` stays selectable for the older cost/effort shape.
+	anthropic: "claude-opus-5-5",
 	"opencode-go": "opencodego",
 	zai: "glm-medium",
 	"kimi-code": "kimi-coding-plan-medium",

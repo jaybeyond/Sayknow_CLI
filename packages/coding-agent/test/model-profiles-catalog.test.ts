@@ -130,6 +130,17 @@ const expectedProfiles: Array<{ name: string; requiredProviders: string[]; mappi
 		},
 	},
 	{
+		name: "claude-opus-5-5",
+		requiredProviders: ["anthropic"],
+		mapping: {
+			default: "anthropic/claude-opus-5-5:xhigh",
+			executor: "anthropic/claude-sonnet-5",
+			planner: "anthropic/claude-opus-5-5:medium",
+			critic: "anthropic/claude-opus-5-5:high",
+			architect: "anthropic/claude-opus-5-5:max",
+		},
+	},
+	{
 		name: "claude-fable",
 		requiredProviders: ["anthropic"],
 		mapping: {
@@ -534,7 +545,7 @@ const fixedNonCodexComboMappings: Record<string, Partial<Record<Role, string>>> 
 };
 
 describe("built-in model profile catalog", () => {
-	test("contains exact 38-profile matrix cell-for-cell", () => {
+	test("contains exact 42-profile matrix cell-for-cell", () => {
 		expect(BUILTIN_MODEL_PROFILES.map(profile => profile.name)).toEqual(
 			expectedProfiles.map(profile => profile.name),
 		);
@@ -752,7 +763,7 @@ describe("built-in model profile catalog", () => {
 			"COMBOS",
 		]);
 		expect(recommendModelProfileForProvider("openai-codex", profiles)?.name).toBe("codex-medium");
-		expect(recommendModelProfileForProvider("anthropic", profiles)?.name).toBe("claude-opus");
+		expect(recommendModelProfileForProvider("anthropic", profiles)?.name).toBe("claude-opus-5-5");
 		expect(recommendModelProfileForProvider("opencode-go", profiles)?.name).toBe("opencodego");
 		expect(recommendModelProfileForProvider("zai", profiles)?.name).toBe("glm-medium");
 		expect(recommendModelProfileForProvider("kimi-code", profiles)?.name).toBe("kimi-coding-plan-medium");
@@ -788,6 +799,43 @@ describe("built-in model profile catalog", () => {
 			planner: "grok-build/grok-composer-2.5-fast",
 			critic: "grok-build/grok-composer-2.5-fast",
 		});
+	});
+
+	test("claude-opus-5-5 is an additive CLAUDE preset that leaves claude-opus untouched", () => {
+		const profiles = mergeModelProfiles();
+		const definition = profiles.get("claude-opus-5-5");
+		if (!definition) throw new Error("Missing resolved profile: claude-opus-5-5");
+		expect(definition.requiredProviders).toEqual(["anthropic"]);
+		expect(getModelProfilePresentation(definition)).toEqual({
+			displayName: "Claude Opus 5.5",
+			providerGroup: "CLAUDE",
+		});
+		const resolved = resolveProfileBindings(definition);
+		expect(resolved.defaultSelector).toBe("anthropic/claude-opus-5-5:xhigh");
+		expect(resolved.agentModelOverrides).toEqual({
+			executor: "anthropic/claude-sonnet-5",
+			planner: "anthropic/claude-opus-5-5:medium",
+			critic: "anthropic/claude-opus-5-5:high",
+			architect: "anthropic/claude-opus-5-5:max",
+		});
+		// The older preset keeps its Opus 5 cost/effort shape.
+		expect(builtinMapping("claude-opus")).toEqual({
+			default: "anthropic/claude-opus-5:xhigh",
+			executor: "anthropic/claude-sonnet-5",
+			planner: "anthropic/claude-opus-5:low",
+			critic: "anthropic/claude-opus-5:high",
+			architect: "anthropic/claude-opus-5:xhigh",
+		});
+		// Every effort the preset requests must exist in the bundled thinking range.
+		const thinking = (modelsJson as Record<string, Record<string, { thinking?: { maxLevel?: string } }>>).anthropic?.[
+			"claude-opus-5-5"
+		]?.thinking;
+		expect(thinking?.maxLevel).toBe("max");
+		expect(
+			groupModelProfilesForPresetLanding(profiles)
+				.get("CLAUDE")
+				?.map(profile => profile.name),
+		).toEqual(["claude-fable", "claude-opus", "claude-opus-5-5"]);
 	});
 
 	test("built-in minimax profiles resolve to minimax-m3 and never minimax-v3 (issue #656)", () => {

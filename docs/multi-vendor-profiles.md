@@ -20,7 +20,7 @@ A practical guide to picking models for SKC's roles, for every subscription situ
 
 | You have | Use |
 | --- | --- |
-| **One vendor** | the built-in preset for that vendor — `claude-opus` (Anthropic), `codex-{eco,medium,pro}` (OpenAI/Codex), `opencodego` (OpenCode Go), or a single-vendor flagship tier (`zai/glm-5.2`, `kimi-code/...`, `xiaomi/...`, `xai/grok-4.6`, `minimax-code/...`). These already map all five roles inside one vendor. |
+| **One vendor** | the built-in preset for that vendor — `claude-opus-5-5` or `claude-opus` (Anthropic), `codex-{eco,medium,pro}` (OpenAI/Codex), `opencodego` (OpenCode Go), or a single-vendor flagship tier (`zai/glm-5.2`, `kimi-code/...`, `xiaomi/...`, `xai/grok-4.6`, `minimax-code/...`). These already map all five roles inside one vendor. |
 | **Claude + Codex** | the built-in `opus-codex` (Claude main loop + Codex support roles). |
 | **Three or more / all five** | the cross-vendor profiles below — each role on its axis leader, `critic` kept cross-family. |
 

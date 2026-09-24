@@ -199,6 +199,7 @@ Built-in profiles are grouped by provider mix and tier:
 - `codex-{eco,medium,pro}` — all roles on `openai-codex/gpt-5.5`, differing only by per-role reasoning effort
 - `opencodego` — single OpenCode Go preset (Kimi default, DeepSeek executor/architect, Qwen planner, MiMo critic)
 - `claude-opus` — Anthropic OAuth preset centered on `claude-opus-5`
+- `claude-opus-5-5` — Anthropic preset centered on `claude-opus-5-5` (`xhigh` default, `max` architect, `high` critic, `medium` planner, `claude-sonnet-5` executor). Recommended automatically after an Anthropic login; `claude-opus` stays available for the Opus 5 cost/effort shape.
 - Single-provider tiers: `glm-{eco,medium,pro}`, `kimi-coding-plan-{eco,medium,pro}`, `mimo-{eco,medium,pro}`, `grok-{eco,medium,pro}`, `cursor-{eco,medium,pro}`, `minimax-{eco,medium,pro}`
 - Combos: `opus-codex` (Claude main agent with Codex support roles), `codex-opencodego` (Codex orchestrator/architect with OpenCode Go workers)
 
