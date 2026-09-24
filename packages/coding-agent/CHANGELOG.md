@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-09-24
+
 ### Added
 
 - New built-in model profile `claude-opus-5-5` (`/model` → CLAUDE group, or `skc --mpreset claude-opus-5-5`). Opus 5.5 was bundled in the catalog in 0.6.0 but no preset referenced it, so it only appeared in the model list, never in the preset landing view. The preset is additive and tuned to Opus 5.5's own envelope rather than copied from `claude-opus`: it costs less than Opus 5 ($4/$20 vs $5/$25) at the same 1M context and 128K output and accepts the `max` adaptive level, so `architect` runs at `max` and `planner` at `medium` instead of the Opus 5 preset's `xhigh`/`low`, while `executor` stays on `claude-sonnet-5` so mechanical work does not pay Opus rates.

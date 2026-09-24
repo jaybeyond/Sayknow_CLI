@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-09-24
+
 ## [0.6.0] - 2026-09-24
 ### Fixed
 - Retire `anthropic/claude-3-haiku-20240307`, `claude-3-5-sonnet-20240620` and `claude-3-5-sonnet-20241022`: the Anthropic API answers 404 `not_found_error` for all three (measured 2026-09-23 with a forced tool call). Left in the catalog, the cheapest of them was the first pick for typed decisions on every registry with an Anthropic key.
