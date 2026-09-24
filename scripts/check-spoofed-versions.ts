@@ -1,12 +1,18 @@
 #!/usr/bin/env bun
 
 /**
- * Checks spoofed external tool versions against their latest GitHub releases.
+ * Checks spoofed external tool versions against their latest upstream releases.
  *
- * We impersonate several external tools (Gemini CLI, Antigravity) via User-Agent
+ * We impersonate several external tools (Gemini CLI, Claude Code) via User-Agent
  * strings. When these tools release new versions, the upstream service may start
  * rejecting or deprioritizing older versions. This script detects drift so we
- * can bump before users hit 403s/429s.
+ * can bump before users hit 400s/403s/429s.
+ *
+ * This is not hypothetical for Claude Code: Anthropic gates newer models on the
+ * advertised client version and answers HTTP 400 `claude_code_version_too_old`.
+ * It has bitten twice — 2.1.219 was under the 2.1.251 gate of the 5.1 line, and
+ * 2.1.267 was under the 2.1.280 gate of `claude-opus-5-5`, which made a model
+ * that was bundled, listed and preset-selectable fail on every request.
  *
  * Usage:
  *   bun scripts/check-spoofed-versions.ts          # check and report
@@ -15,21 +21,20 @@
 
 import * as path from "node:path";
 
-const PROVIDER_FILE = path.join(
-	import.meta.dir,
-	"../packages/ai/src/providers/google-gemini-headers.ts",
-);
+const repoFile = (relativePath: string): string => path.join(import.meta.dir, "..", relativePath);
 
 interface VersionCheck {
 	/** Human label for the report. */
 	name: string;
-	/** Regex to extract the current hardcoded version from PROVIDER_FILE. */
+	/** Source file holding the hardcoded version. */
+	file: string;
+	/** Regex to extract the current hardcoded version from `file`. */
 	sourcePattern: RegExp;
-	/** GitHub owner/repo to fetch latest release from. */
-	repo: string;
-	/** Extract semver from the release tag name (e.g. "v0.35.3" -> "0.35.3"). */
-	parseTag: (tag: string) => string | null;
+	/** Resolve the newest version published upstream. */
+	fetchLatest: () => Promise<string | null>;
 }
+
+const SEMVER_RE = /(\d+\.\d+\.\d+)/;
 
 /** Fetch latest non-prerelease tag from a GitHub repo. */
 async function fetchLatestGitHubRelease(repo: string, parseTag: (tag: string) => string | null): Promise<string | null> {
@@ -46,25 +51,58 @@ async function fetchLatestGitHubRelease(repo: string, parseTag: (tag: string) =>
 	}
 }
 
-const SEMVER_RE = /(\d+\.\d+\.\d+)/;
+/**
+ * Fetch a dist-tag from the npm registry. Claude Code ships to npm rather than
+ * GitHub releases, and `latest` is the version Anthropic's own gate messages
+ * tell users to update to.
+ */
+async function fetchLatestNpmVersion(packageName: string, distTag: string): Promise<string | null> {
+	try {
+		const res = await fetch(`https://registry.npmjs.org/${packageName}`, {
+			headers: { Accept: "application/json", "User-Agent": "sayknow-cli/version-check" },
+		});
+		if (!res.ok) return null;
+		const data = (await res.json()) as { "dist-tags"?: Record<string, string> };
+		const version = data["dist-tags"]?.[distTag];
+		return version ? (SEMVER_RE.exec(version)?.[1] ?? null) : null;
+	} catch {
+		return null;
+	}
+}
 
 const checks: VersionCheck[] = [
 	{
 		name: "Gemini CLI",
-		sourcePattern: /PI_AI_GEMINI_CLI_VERSION\s*\|\|\s*"(\d+\.\d+\.\d+)"/,
-		repo: "google-gemini/gemini-cli",
-		parseTag: (tag) => SEMVER_RE.exec(tag)?.[1] ?? null,
+		file: repoFile("packages/ai/src/providers/google-gemini-headers.ts"),
+		// Matches the constant, not the env-override expression it feeds: the
+		// inline `PI_AI_GEMINI_CLI_VERSION || "x.y.z"` shape this used to target
+		// was refactored away, and the check silently degraded to a [WARN].
+		sourcePattern: /export const DEFAULT_GEMINI_CLI_VERSION = "(\d+\.\d+\.\d+)"/,
+		fetchLatest: () =>
+			fetchLatestGitHubRelease("google-gemini/gemini-cli", tag => SEMVER_RE.exec(tag)?.[1] ?? null),
+	},
+	{
+		name: "Claude Code",
+		file: repoFile("packages/ai/src/providers/anthropic.ts"),
+		sourcePattern: /export const claudeCodeVersion = "(\d+\.\d+\.\d+)"/,
+		fetchLatest: () => fetchLatestNpmVersion("@anthropic-ai/claude-code", "latest"),
 	},
 ];
 
 async function run() {
 	const doUpdate = process.argv.includes("--update");
-	let source = await Bun.file(PROVIDER_FILE).text();
+	const sources = new Map<string, string>();
+	const updatedFiles = new Set<string>();
 	let anyDrift = false;
-	let anyUpdate = false;
 	let anyChecked = false;
 
 	for (const check of checks) {
+		let source = sources.get(check.file);
+		if (source === undefined) {
+			source = await Bun.file(check.file).text();
+			sources.set(check.file, source);
+		}
+
 		const match = check.sourcePattern.exec(source);
 		if (!match?.[1]) {
 			console.error(`[WARN] Could not extract current ${check.name} version from source`);
@@ -72,10 +110,10 @@ async function run() {
 		}
 
 		const current = match[1];
-		const latest = await fetchLatestGitHubRelease(check.repo, check.parseTag);
+		const latest = await check.fetchLatest();
 
 		if (!latest) {
-			console.error(`[FAIL] Could not fetch latest ${check.name} version from ${check.repo}`);
+			console.error(`[FAIL] Could not fetch latest ${check.name} version`);
 			continue;
 		}
 
@@ -88,16 +126,16 @@ async function run() {
 			anyDrift = true;
 
 			if (doUpdate) {
-				source = source.replace(match[0], match[0].replace(current, latest));
-				anyUpdate = true;
+				sources.set(check.file, source.replace(match[0], match[0].replace(current, latest)));
+				updatedFiles.add(check.file);
 				console.log(`       Updated in source.`);
 			}
 		}
 	}
 
-	if (anyUpdate) {
-		await Bun.write(PROVIDER_FILE, source);
-		console.log(`\nWrote updates to ${path.relative(process.cwd(), PROVIDER_FILE)}`);
+	for (const file of updatedFiles) {
+		await Bun.write(file, sources.get(file) ?? "");
+		console.log(`\nWrote updates to ${path.relative(process.cwd(), file)}`);
 	}
 
 	if (!anyChecked) {

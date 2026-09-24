@@ -64,11 +64,49 @@ function getAlphaSearchTokens(query: string): string[] {
 	return [...normalizeSearchText(query).matchAll(/[a-z]+/g)].map(match => match[0]).filter(token => token.length > 0);
 }
 
+interface SearchableItem {
+	searchText: string;
+	normalizedSearchText: string;
+	compactSearchText: string;
+}
+
+function buildSearchFields(parts: readonly string[]): SearchableItem {
+	const searchText = parts.join(" ");
+	return {
+		searchText,
+		normalizedSearchText: normalizeSearchText(searchText),
+		compactSearchText: compactSearchText(searchText),
+	};
+}
+
+/**
+ * Punctuation-insensitive search shared by every list view. Users type model
+ * names the way vendors print them ("opus 5.5", "gpt 5.4"), while ids spell
+ * the same thing with dashes ("claude-opus-5-5"). The alpha-token and compact
+ * substring passes bridge that gap; the fuzzy pass only ranks (or, when both
+ * prefilters are empty, rescues typos) over the display text.
+ */
+function filterSearchableItems<T extends SearchableItem>(items: T[], query: string): T[] {
+	const alphaTokens = getAlphaSearchTokens(query);
+	const alphaFiltered =
+		alphaTokens.length === 0
+			? items
+			: items.filter(item => alphaTokens.every(token => item.normalizedSearchText.includes(token)));
+	const compactQuery = compactSearchText(query);
+	const substringFiltered =
+		compactQuery.length === 0
+			? alphaFiltered
+			: alphaFiltered.filter(item => item.compactSearchText.includes(compactQuery));
+	const fuzzySource =
+		substringFiltered.length > 0 ? substringFiltered : alphaFiltered.length > 0 ? alphaFiltered : items;
+	return fuzzyFilter(fuzzySource, query, ({ searchText }) => searchText);
+}
+
 function computeModelRank(model: Model, roles: Record<string, RoleAssignment | undefined>): number {
 	return roles.default && modelsAreEqual(roles.default.model, model) ? 0 : 1;
 }
 
-interface ModelItem {
+interface ModelItem extends SearchableItem {
 	kind: "provider";
 	provider: string;
 	id: string;
@@ -78,15 +116,12 @@ interface ModelItem {
 	explicitThinkingLevel?: boolean;
 }
 
-interface CanonicalModelItem {
+interface CanonicalModelItem extends SearchableItem {
 	kind: "canonical";
 	id: string;
 	model: Model;
 	selector: string;
 	variantCount: number;
-	searchText: string;
-	normalizedSearchText: string;
-	compactSearchText: string;
 	thinkingLevel?: ThinkingLevel;
 	explicitThinkingLevel?: boolean;
 }
@@ -732,6 +767,7 @@ export class ModelSelectorComponent extends Container {
 				selector: `${scoped.model.provider}/${scoped.model.id}`,
 				thinkingLevel: scoped.thinkingLevel,
 				explicitThinkingLevel: scoped.explicitThinkingLevel,
+				...buildSearchFields([scoped.model.id, scoped.model.provider, scoped.model.name]),
 			}));
 		} else {
 			// Reload config and cached discovery state without blocking on live provider refresh
@@ -754,6 +790,7 @@ export class ModelSelectorComponent extends Container {
 					id: model.id,
 					model,
 					selector: `${model.provider}/${model.id}`,
+					...buildSearchFields([model.id, model.provider, model.name]),
 				}));
 			} catch (error) {
 				this.#allModels = [];
@@ -779,23 +816,20 @@ export class ModelSelectorComponent extends Container {
 				});
 				if (!selectedModel) return undefined;
 				const selectedSelector = `${selectedModel.provider}/${selectedModel.id}`;
-				const searchText = [
-					record.id,
-					record.name,
-					selectedModel.provider,
-					selectedModel.id,
-					selectedModel.name,
-					...record.variants.flatMap(variant => [variant.selector, variant.model.name]),
-				].join(" ");
 				const item: CanonicalModelItem = {
 					kind: "canonical",
 					id: record.id,
 					model: selectedModel,
 					selector: record.id,
 					variantCount: record.variants.length,
-					searchText,
-					normalizedSearchText: normalizeSearchText(searchText),
-					compactSearchText: compactSearchText(searchText),
+					...buildSearchFields([
+						record.id,
+						record.name,
+						selectedModel.provider,
+						selectedModel.id,
+						selectedModel.name,
+						...record.variants.flatMap(variant => [variant.selector, variant.model.name]),
+					]),
 				};
 				const scopedThinkingLevel = scopedThinkingBySelector.get(selectedSelector);
 				if (scopedThinkingLevel !== undefined) {
@@ -925,29 +959,11 @@ export class ModelSelectorComponent extends Container {
 			}
 
 			if (isCanonicalTab) {
-				const alphaTokens = getAlphaSearchTokens(query);
-				const alphaFiltered =
-					alphaTokens.length === 0
-						? baseCanonicalModels
-						: baseCanonicalModels.filter(item =>
-								alphaTokens.every(token => item.normalizedSearchText.includes(token)),
-							);
-				const compactQuery = compactSearchText(query);
-				const substringFiltered =
-					compactQuery.length === 0
-						? alphaFiltered
-						: alphaFiltered.filter(item => item.compactSearchText.includes(compactQuery));
-				const fuzzySource =
-					substringFiltered.length > 0
-						? substringFiltered
-						: alphaFiltered.length > 0
-							? alphaFiltered
-							: baseCanonicalModels;
-				const fuzzyMatches = fuzzyFilter(fuzzySource, query, ({ searchText }) => searchText);
+				const fuzzyMatches = filterSearchableItems(baseCanonicalModels, query);
 				this.#sortCanonicalModels(fuzzyMatches);
 				this.#filteredCanonicalModels = fuzzyMatches;
 			} else {
-				const fuzzyMatches = fuzzyFilter(baseModels, query, ({ id, provider }) => `${id} ${provider}`);
+				const fuzzyMatches = filterSearchableItems(baseModels, query);
 				this.#sortModels(fuzzyMatches);
 				this.#filteredModels = fuzzyMatches;
 			}

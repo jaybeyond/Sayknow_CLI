@@ -84,6 +84,24 @@ function captureAnthropicPayload(
 }
 
 describe("Anthropic request fingerprint alignment", () => {
+	// Anthropic refuses newer models on the OAuth path when the advertised client
+	// version is below their gate, with HTTP 400 `claude_code_version_too_old`.
+	// The Opus 5.5 line demanded "version 2.1.280 or newer"; 2.1.267 made the model
+	// bundled in the catalog unusable. Keep the floor explicit so a future edit
+	// cannot quietly walk the advertised version back under a shipped model's gate.
+	it("advertises a Claude Code version at or above the gate of the newest bundled models", () => {
+		const parse = (value: string): number[] => {
+			const parts = value.split(".").map(Number);
+			expect(parts).toHaveLength(3);
+			for (const part of parts) expect(Number.isInteger(part)).toBe(true);
+			return parts;
+		};
+		const advertised = parse(claudeCodeVersion);
+		const floor = parse("2.1.280");
+		const compared = advertised.findIndex((part, index) => part !== floor[index]);
+		expect(compared === -1 || advertised[compared]! > floor[compared]!).toBe(true);
+	});
+
 	it("maps Stainless OS and arch values from explicit inputs", () => {
 		expect(mapStainlessOs("darwin")).toBe("MacOS");
 		expect(mapStainlessOs("windows")).toBe("Windows");
