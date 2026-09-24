@@ -43,8 +43,9 @@ export function createDecisionService(options: DecisionServiceOptions): Decision
 	 * probabilities, and it resolves `null` immediately when no key is stored, so users
 	 * who never added one pay nothing for it being in the list.
 	 *
-	 * The user's logged-in model is the fallback and the default experience: no extra
-	 * vendor, no extra key, works offline of TypeSafe entirely.
+	 * The user's logged-in provider is the fallback and the default experience: no extra
+	 * vendor, no extra key, works offline of TypeSafe entirely. Inside it, a live local
+	 * runtime is tried before a hosted small model; see `llm-backend.ts`.
 	 */
 	const backends = options.backends ?? [createTypeSafeDecisionBackend(options), createLlmDecisionBackend(options)];
 
@@ -53,6 +54,11 @@ export function createDecisionService(options: DecisionServiceOptions): Decision
 		async decide(request: DecisionRequest): Promise<DecisionResult | null> {
 			if (!enabled || backends.length === 0) return null;
 			for (const backend of backends) {
+				// A listener added to a signal that already fired never runs, and the
+				// backends only read their own derived signal. Measured: a caller that
+				// aborted during the previous backend's await got a full attempt budget of
+				// silence from the next one instead of an immediate null.
+				if (request.signal?.aborted) return null;
 				const controller = new AbortController();
 				const abortOnCallerSignal = () => controller.abort();
 				request.signal?.addEventListener("abort", abortOnCallerSignal, { once: true });

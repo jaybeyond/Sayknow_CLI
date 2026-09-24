@@ -123,6 +123,9 @@ export function createTypeSafeDecisionBackend(deps: TypeSafeBackendDeps): Decisi
 			// No key means the user never added TypeSafe. That is not an error — the next
 			// backend (their logged-in model) handles it.
 			if (!apiKey) return null;
+			// The credential lookup awaited; a caller that aborted meanwhile must not start
+			// a request whose abort listener would never fire.
+			if (request.signal?.aborted) return null;
 
 			const controller = new AbortController();
 			const abortOnCaller = () => controller.abort();

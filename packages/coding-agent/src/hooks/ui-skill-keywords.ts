@@ -160,9 +160,29 @@ export function detectUiSkillKeywords(text: string): UiSkillKeywordMatch[] {
 	}
 	// Keep the lead skill plus the craft baseline; more than that is noise.
 	const lead = deduped[0]!;
-	if (lead.skill === UI_SKILL_BASE || SELF_SUFFICIENT_UI_SKILLS.has(lead.skill)) return [lead];
-	const base = deduped.find(item => item.skill === UI_SKILL_BASE);
-	return base ? [lead, base] : [lead];
+	return pairWithBaseline(lead.skill);
+}
+
+/**
+ * A specialized skill plus the craft baseline, which is the pairing the skills
+ * themselves assume. Skills that carry their own complete craft bar stand alone.
+ */
+function pairWithBaseline(skill: BundledSkcUiSkillName): UiSkillKeywordMatch[] {
+	const definition = UI_SKILL_KEYWORD_DEFINITIONS.find(item => item.skill === skill);
+	const lead: UiSkillKeywordMatch = { skill, keyword: skill, priority: definition?.priority ?? 0 };
+	if (skill === UI_SKILL_BASE || SELF_SUFFICIENT_UI_SKILLS.has(skill)) return [lead];
+	const base = UI_SKILL_KEYWORD_DEFINITIONS.find(item => item.skill === UI_SKILL_BASE);
+	return [lead, { skill: UI_SKILL_BASE, keyword: UI_SKILL_BASE, priority: base?.priority ?? 0 }];
+}
+
+function renderUiSkillDirective(skills: readonly BundledSkcUiSkillName[], evidence: string): string {
+	const names = skills.map(skill => `\`${skill}\``).join(" then ");
+	return [
+		`SKC detected frontend UI/UX work in this prompt (${evidence}).`,
+		`Before writing or reviewing that surface, load ${names} with the \`skill\` tool.`,
+		"These skills are bundled with SKC: never tell the user to install them, and never skip them because the task looks small.",
+		"They are not workflow skills and have no `skc state` mode state.",
+	].join(" ");
 }
 
 /**
@@ -173,14 +193,51 @@ export function detectUiSkillKeywords(text: string): UiSkillKeywordMatch[] {
 export function buildUiSkillActivationContext(text: string): string | null {
 	const matches = detectUiSkillKeywords(text);
 	if (matches.length === 0) return null;
-	const names = matches.map(match => `\`${match.skill}\``).join(" then ");
-	return [
-		`SKC detected frontend UI/UX work in this prompt (matched "${matches[0]!.keyword}").`,
-		`Before writing or reviewing that surface, load ${names} with the \`skill\` tool.`,
-		"These skills are bundled with SKC: never tell the user to install them, and never skip them because the task looks small.",
-		"They are not workflow skills and have no `skc state` mode state.",
-	].join(" ");
+	return renderUiSkillDirective(
+		matches.map(match => match.skill),
+		`matched "${matches[0]!.keyword}"`,
+	);
 }
+
+/**
+ * Same directive, for a skill chosen by the semantic stage rather than by a
+ * pattern. The regex table caught 5 of 8 real frontend prompts; this is the path
+ * for the other three, and it names its source so a wrong pick is traceable to
+ * the model rather than to a pattern nobody can find.
+ */
+export function buildUiSkillDirectiveForSkill(skill: BundledSkcUiSkillName): string {
+	return renderUiSkillDirective(
+		pairWithBaseline(skill).map(match => match.skill),
+		"semantic match",
+	);
+}
+
+/**
+ * What each bundled skill is *for*, in the words a user would recognise.
+ *
+ * This is the whole contract with the routing model — the skill ids alone carry
+ * almost no signal, and `appllama-app-design-skill` carries actively misleading
+ * signal. Kept next to the patterns so the two cannot drift apart.
+ */
+export const BUNDLED_UI_SKILL_MEANINGS: Record<BundledSkcUiSkillName, string> = {
+	"emil-design-eng":
+		"General web UI/UX craft: building or reviewing components, layout, spacing, typography, design systems, CSS. The default for frontend work with no more specific fit.",
+	animate:
+		"Adding new motion to a web UI: animations, transitions, easing, keyframes, hover effects, micro-interactions.",
+	"review-animations": "Reviewing motion that already exists and judging whether it is good.",
+	"improve-animations": "Auditing and fixing motion that already exists and is known to be wrong or cheap-looking.",
+	"find-animation-opportunities":
+		"Asking where motion could be added to a surface that currently has none, without naming a specific effect.",
+	"pick-ui-library": "Choosing between UI libraries, component kits, or frontend packages.",
+	prototype: "Exploring several visual variants or mockups of the same screen before committing to one.",
+	"mobile-native":
+		"Making a web page on a phone feel native: touch targets, safe areas, viewport and scroll behaviour, gestures.",
+	"animation-vocabulary": "Naming a motion effect the user described but could not name.",
+	"apple-design": "Apple-style motion, materials, and Human Interface Guidelines feel.",
+	"ask-sonner": "Toast notifications, specifically the Sonner library.",
+	"appllama-app-design-skill": "Native app screens built with Expo or React Native — not a website viewed on a phone.",
+	"react-bits": "Pre-built animated React components: animated text, animated backgrounds, cursor and scroll effects.",
+};
 
 /**
  * Frontend skills SKC routes to but deliberately does NOT vendor.

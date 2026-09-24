@@ -4,6 +4,7 @@
  */
 import { Database } from "bun:sqlite";
 import { getModelDbPath } from "@sayknow-cli/utils/dirs";
+import { isRetiredModelKey } from "./model-retirements";
 import type { Api, Model } from "./types";
 
 const CACHE_SCHEMA_VERSION = 3;
@@ -96,7 +97,12 @@ export function readModelCache<TApi extends Api>(
 		if (!row || row.version !== CACHE_SCHEMA_VERSION) {
 			return null;
 		}
-		const models = JSON.parse(row.models) as Model<TApi>[];
+		// A row written before a model was retired still carries it for up to the TTL;
+		// the bundled catalog filters retirements, so the cache must too or the merge
+		// brings the dead entry straight back.
+		const models = (JSON.parse(row.models) as Model<TApi>[]).filter(
+			model => !isRetiredModelKey(model.provider ?? providerId, model.id),
+		);
 		const ageMs = now() - row.updated_at;
 		const fresh = Number.isFinite(ageMs) && ageMs >= 0 && ageMs <= ttlMs;
 		return {

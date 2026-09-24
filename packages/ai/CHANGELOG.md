@@ -1,6 +1,9 @@
 # Changelog
 
 ## [Unreleased]
+### Fixed
+- Retire `anthropic/claude-3-haiku-20240307`, `claude-3-5-sonnet-20240620` and `claude-3-5-sonnet-20241022`: the Anthropic API answers 404 `not_found_error` for all three (measured 2026-09-23 with a forced tool call). Left in the catalog, the cheapest of them was the first pick for typed decisions on every registry with an Anthropic key.
+- The on-disk model cache now filters retired keys on read. A row written before a retirement carried the dead entry for up to the TTL and the catalog merge brought it straight back.
 
 ## [0.5.26] - 2026-09-23
 ### Fixed

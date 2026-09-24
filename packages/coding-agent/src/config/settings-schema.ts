@@ -2008,12 +2008,32 @@ export const SETTINGS_SCHEMA = {
 	// Typed decisions
 	"decisions.enabled": {
 		type: "boolean",
-		default: false,
+		default: true,
 		ui: {
 			tab: "context",
 			label: "Typed decisions",
 			description:
-				"Add a model-backed second stage to workflow routing. The keyword table already runs on every turn and costs nothing; this handles the phrasings it cannot express, which is most wording that is not a literal match. Costs one small model call, and only on turns the keyword table did not already answer. Any failure falls back to keyword-only behaviour, but a successful answer can also select a different workflow than the deep-interview ambiguity detector would have.",
+				"Model-backed second stage for workflow routing. The keyword table runs first on every turn and costs nothing; this handles the phrasings it cannot express, which is most wording that is not a literal match. Costs one small model call, only on turns the keyword table did not already answer, on the cheapest backend available: TypeSafe when a key is stored, else a local runtime that is running, else the small model of the provider you are chatting with. Any failure falls back to keyword-only behaviour, but a successful answer can also select a different workflow than the deep-interview ambiguity detector would have. Turn off to route on the keyword table alone.",
+		},
+	},
+
+	/**
+	 * Feed routing answers back into the deterministic keyword table.
+	 *
+	 * The hand-written table cannot be grown by hand for Korean — measured recall
+	 * was 0/9 — so it grows itself instead: a two-stem pattern that produced the
+	 * same routing answer on two distinct prompts, and was never contradicted, is
+	 * promoted and thereafter fires for free. One contradiction retracts it
+	 * permanently. Stems and hashes are stored; prompt text never is.
+	 */
+	"decisions.keywordLearning": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "context",
+			label: "Learn routing keywords",
+			description:
+				"Remember the phrasings the routing model resolves, so repeating one stops costing a model call. A pattern must give the same answer on two different prompts before it fires on its own, and a single disagreement removes it for good. Only word stems and hashes are written to disk, never your prompts. Turn off to keep the keyword table frozen at its built-in entries.",
 		},
 	},
 
@@ -2026,12 +2046,14 @@ export const SETTINGS_SCHEMA = {
 	 * mid-session invalidates the prompt cache, which on a long context costs
 	 * more than the cheaper tier saves.
 	 *
-	 * Needs `decisions.enabled` and at least two tiers configured. Without both
-	 * it never fires and the configured role models are used unchanged.
+	 * Needs `decisions.enabled` and at least two tiers configured. The tiers are
+	 * empty by default, so this is a no-op until the user sets them — which is why
+	 * it defaults on: shipping it off meant the routing code existed and never ran
+	 * even for users who had configured the tiers it needs.
 	 */
 	"task.modelRouting.enabled": {
 		type: "boolean",
-		default: false,
+		default: true,
 		ui: {
 			tab: "tasks",
 			label: "Route subagent models per task",

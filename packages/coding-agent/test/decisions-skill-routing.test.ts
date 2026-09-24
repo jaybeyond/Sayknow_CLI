@@ -3,7 +3,8 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { createDecisionService } from "../src/decisions";
-import { buildRoutingCriteria, createSemanticSkillRouter } from "../src/decisions/skill-routing";
+import { createSemanticSkillRouter } from "../src/decisions/prompt-triage";
+import { buildRoutingCriteria } from "../src/decisions/skill-routing";
 import type { DecisionBackend, DecisionResult } from "../src/decisions/types";
 import { detectPrimarySkillKeyword, recordSkillActivation } from "../src/hooks/skill-state";
 import { type CanonicalSkcWorkflowSkill, listActiveSkills } from "../src/skill-state/active-state";
@@ -75,7 +76,18 @@ test("short prompts never reach the model", async () => {
 	const seen: { state?: string } = {};
 	const route = createSemanticSkillRouter(serviceReturning("ralplan", seen));
 	expect(await route("고고")).toBeNull();
+	expect(await route("谢谢")).toBeNull();
+	expect(await route("ok thanks")).toBeNull();
 	expect(seen.state).toBeUndefined();
+});
+
+test("the length floor is measured in signal, not code units", async () => {
+	// Six Han characters is a complete request; the floor was fitted to Latin and
+	// Hangul and would have thrown it away on `String.length` alone.
+	const seen: { state?: string } = {};
+	const route = createSemanticSkillRouter(serviceReturning("ralplan", seen));
+	expect(await route("先做架构设计")).toBe("ralplan");
+	expect(seen.state).toBe("先做架构设计");
 });
 
 test("long prompts are truncated before they are sent", async () => {

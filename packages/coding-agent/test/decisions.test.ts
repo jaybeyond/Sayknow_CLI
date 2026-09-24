@@ -375,3 +375,261 @@ test("liveness is probed once, not on every decision", async () => {
 	await backend.decide({ state: "두 번째 판단", questions: tsQuestions });
 	expect(probes).toBe(1);
 });
+
+// --- candidate iteration ------------------------------------------------------
+
+import { clearDeadModelCache } from "../src/decisions/llm-backend";
+
+type Scripted = "ok" | "404" | "hang" | "no-tool";
+
+/**
+ * Two hosted small models per provider; `script` decides how each one answers. The
+ * completion is scripted, not fetched, so the only thing under test is which model the
+ * backend tries, in what order, and what it does with the answer.
+ */
+function scriptedRegistry(script: Record<string, Scripted>, preferredProvider?: string) {
+	const models = [
+		{
+			provider: "anthropic",
+			id: "claude-3-haiku-20240307",
+			cost: { input: 0.25, output: 0, cacheRead: 0, cacheWrite: 0 },
+			reasoning: false,
+		},
+		{
+			provider: "anthropic",
+			id: "claude-haiku-4-5",
+			cost: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0 },
+			reasoning: true,
+		},
+		{
+			provider: "zai",
+			id: "glm-4.5-flash",
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			reasoning: true,
+		},
+	];
+	const tried: string[] = [];
+	const registry = {
+		getAvailable: () => models,
+		async getApiKey() {
+			return "k";
+		},
+	};
+	const completeImpl = (async (
+		model: { provider: string; id: string },
+		_ctx: unknown,
+		opts: { signal?: AbortSignal },
+	) => {
+		const key = `${model.provider}/${model.id}`;
+		tried.push(key);
+		switch (script[key] ?? "ok") {
+			case "404":
+				return {
+					role: "assistant",
+					content: [],
+					stopReason: "error",
+					errorStatus: 404,
+					errorMessage: "not_found_error",
+				};
+			case "hang":
+				return await new Promise(resolve =>
+					opts.signal?.addEventListener(
+						"abort",
+						() => resolve({ role: "assistant", content: [], stopReason: "aborted" }),
+						{ once: true },
+					),
+				);
+			case "no-tool":
+				return { role: "assistant", content: [{ type: "text", text: "ralplan" }], stopReason: "stop" };
+			default:
+				return {
+					role: "assistant",
+					content: [
+						{
+							type: "toolCall",
+							id: "t",
+							name: "emit_decisions",
+							arguments: { dept: "billing", urgent: "probably_yes", sev: "mid" },
+						},
+					],
+					stopReason: "toolUse",
+				};
+		}
+	}) as never;
+	const backend = createLlmDecisionBackend({
+		registry: registry as never,
+		settings: settingsStub("unset-role"),
+		completeImpl,
+		preferredProvider,
+		attemptTimeoutMs: 20,
+	});
+	return { backend, tried };
+}
+
+test("a model the provider no longer serves is skipped for the next candidate, and remembered", async () => {
+	clearDeadModelCache();
+	const { backend, tried } = scriptedRegistry({ "anthropic/claude-3-haiku-20240307": "404" }, "anthropic");
+	const first = await backend.decide({ state: "라우팅 대상 문장", questions: tsQuestions });
+	expect(first?.model).toBe("anthropic/claude-haiku-4-5");
+	expect(tried).toEqual(["anthropic/claude-3-haiku-20240307", "anthropic/claude-haiku-4-5"]);
+
+	tried.length = 0;
+	const second = await backend.decide({ state: "두 번째 문장", questions: tsQuestions });
+	expect(second?.model).toBe("anthropic/claude-haiku-4-5");
+	// The 404 is not paid for again on the next turn.
+	expect(tried).toEqual(["anthropic/claude-haiku-4-5"]);
+});
+
+test("a model that blows the attempt budget is abandoned for the next candidate", async () => {
+	clearDeadModelCache();
+	const { backend, tried } = scriptedRegistry({ "anthropic/claude-3-haiku-20240307": "hang" }, "anthropic");
+	const result = await backend.decide({ state: "라우팅 대상 문장", questions: tsQuestions });
+	expect(result?.model).toBe("anthropic/claude-haiku-4-5");
+	expect(tried).toEqual(["anthropic/claude-3-haiku-20240307", "anthropic/claude-haiku-4-5"]);
+});
+
+test("the provider the user is already chatting with is tried before cheaper ones elsewhere", async () => {
+	clearDeadModelCache();
+	// Price order would put the free zai tier first; the session is on anthropic.
+	const { tried } = await (async () => {
+		const r = scriptedRegistry({ "anthropic/claude-3-haiku-20240307": "404" }, "anthropic");
+		await r.backend.decide({ state: "라우팅 대상 문장", questions: tsQuestions });
+		return r;
+	})();
+	expect(tried[0]).toBe("anthropic/claude-3-haiku-20240307");
+	expect(tried).not.toContain("zai/glm-4.5-flash");
+
+	clearDeadModelCache();
+	const other = scriptedRegistry({}, "zai");
+	await other.backend.decide({ state: "라우팅 대상 문장", questions: tsQuestions });
+	expect(other.tried).toEqual(["zai/glm-4.5-flash"]);
+});
+
+test("a model that answers but ignores the forced tool is neither retried nor remembered as dead", async () => {
+	clearDeadModelCache();
+	const { backend, tried } = scriptedRegistry({ "anthropic/claude-3-haiku-20240307": "no-tool" });
+	expect(await backend.decide({ state: "라우팅 대상 문장", questions: tsQuestions })).toBeNull();
+	expect(tried).toEqual(["anthropic/claude-3-haiku-20240307"]);
+	tried.length = 0;
+	await backend.decide({ state: "다시", questions: tsQuestions });
+	expect(tried).toEqual(["anthropic/claude-3-haiku-20240307"]);
+});
+
+test("every candidate dead resolves null, not an exception, so the next backend can answer", async () => {
+	clearDeadModelCache();
+	const { backend } = scriptedRegistry({
+		"anthropic/claude-3-haiku-20240307": "404",
+		"anthropic/claude-haiku-4-5": "404",
+		"zai/glm-4.5-flash": "404",
+	});
+	expect(await backend.decide({ state: "라우팅 대상 문장", questions: tsQuestions })).toBeNull();
+});
+
+test("a local runtime contributes one candidate, the smallest chat model, never an embedding model", async () => {
+	clearDeadModelCache();
+	clearLocalRuntimeLivenessCache();
+	const mk = (id: string) => ({
+		provider: "ollama",
+		id,
+		baseUrl: "http://127.0.0.1:11434/v1",
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		reasoning: false,
+	});
+	const hosted = {
+		provider: "anthropic",
+		id: "claude-haiku-4-5",
+		cost: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0 },
+		reasoning: true,
+	};
+	const models = [hosted, mk("qwen3.5:9b"), mk("nomic-embed-text:latest"), mk("gemma4:e4b"), mk("qwen3:1.7b")];
+	const tried: string[] = [];
+	const registry = {
+		getAvailable: () => models,
+		async getApiKey() {
+			return "k";
+		},
+	};
+	const completeImpl = (async (
+		model: { provider: string; id: string },
+		_ctx: unknown,
+		opts: { signal?: AbortSignal },
+	) => {
+		tried.push(`${model.provider}/${model.id}`);
+		if (model.provider === "ollama") {
+			// Cold start: never answers inside the attempt budget.
+			return await new Promise(resolve =>
+				opts.signal?.addEventListener(
+					"abort",
+					() => resolve({ role: "assistant", content: [], stopReason: "aborted" }),
+					{ once: true },
+				),
+			);
+		}
+		return {
+			role: "assistant",
+			content: [
+				{
+					type: "toolCall",
+					id: "t",
+					name: "emit_decisions",
+					arguments: { dept: "billing", urgent: "probably_yes", sev: "mid" },
+				},
+			],
+			stopReason: "toolUse",
+		};
+	}) as never;
+	const fetchImpl = (async () => new Response("{}", { status: 200 })) as never;
+	const backend = createLlmDecisionBackend({
+		registry: registry as never,
+		settings: settingsStub("unset-role"),
+		completeImpl,
+		fetchImpl,
+		preferredProvider: "anthropic",
+		attemptTimeoutMs: 20,
+	});
+
+	const first = await backend.decide({ state: "라우팅 대상 문장", questions: tsQuestions });
+	expect(first?.model).toBe("anthropic/claude-haiku-4-5");
+	// Smallest chat model once, then straight to hosted: no 9b, no e4b, no embedder.
+	expect(tried).toEqual(["ollama/qwen3:1.7b", "anthropic/claude-haiku-4-5"]);
+
+	tried.length = 0;
+	await backend.decide({ state: "다음 턴", questions: tsQuestions });
+	// The miss parks the runtime: the next size up is not tried on the next turn.
+	expect(tried).toEqual(["anthropic/claude-haiku-4-5"]);
+});
+
+test("a caller that already aborted gets null at once, not an attempt budget of silence", async () => {
+	clearDeadModelCache();
+	let attempts = 0;
+	const { backend } = (() => {
+		const r = scriptedRegistry({ "anthropic/claude-haiku-4-5": "hang" }, "anthropic");
+		return r;
+	})();
+	const counting: DecisionBackend = {
+		name: "llm",
+		decide: async request => {
+			attempts += 1;
+			return backend.decide(request);
+		},
+	};
+	const controller = new AbortController();
+	// The first backend aborts the caller while it is running, then steps aside.
+	const aborter: DecisionBackend = {
+		name: "aborter",
+		decide: async () => {
+			controller.abort();
+			return null;
+		},
+	};
+	const service = createDecisionService({
+		registry: {} as never,
+		settings: {} as never,
+		enabled: true,
+		backends: [aborter, counting],
+	});
+	const started = Date.now();
+	expect(await service.decide({ ...request, signal: controller.signal })).toBeNull();
+	expect(attempts).toBe(0);
+	expect(Date.now() - started).toBeLessThan(100);
+});

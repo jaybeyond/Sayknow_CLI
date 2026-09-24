@@ -5,7 +5,9 @@ import { getAgentDir, getConfigDirName } from "@sayknow-cli/utils";
 import { YAML } from "bun";
 import type { SkillDiscoverySettings } from "../config/skill-settings-defaults";
 import { DEFAULT_DISABLED_EXTENSIONS, DEFAULT_SKILL_DISCOVERY_SETTINGS } from "../config/skill-settings-defaults";
+import type { PromptTriager } from "../decisions/prompt-triage";
 import { sessionLogsDir } from "../skc-runtime/session-layout";
+import { routeNativePrompt } from "./native-prompt-routing";
 import {
 	buildActiveUltragoalPromptContext,
 	buildSkillActivationAdditionalContext,
@@ -13,7 +15,6 @@ import {
 	buildStateRecoveryDiagnosticsContext,
 	collectUserPromptStateRecoveryDiagnostics,
 	type EffectiveSkillConfigInput,
-	recordSkillActivation,
 } from "./skill-state";
 import { buildExternalUiSkillContext, buildUiSkillActivationContext } from "./ui-skill-keywords";
 
@@ -32,6 +33,8 @@ interface SkcNativeHookDispatchOptions {
 	stateDir?: string;
 	effectiveSkillConfig?: EffectiveSkillConfigInput;
 	configPaths?: string[];
+	/** Injected in tests so the model stage runs without credentials or a network. */
+	triager?: PromptTriager;
 }
 
 interface ConfigCacheEntry {
@@ -337,19 +340,25 @@ async function dispatchSkcNativeSkillHookInner(
 		}
 
 		let skillState = null;
+		let semanticUiContext: string | null = null;
 		try {
-			skillState = prompt
-				? await recordSkillActivation({
-						cwd,
-						text: prompt,
-						sessionId: readSessionId(payload),
-						threadId: readThreadId(payload),
-						turnId: readTurnId(payload),
-						stateDir: options.stateDir,
-					})
-				: null;
+			if (prompt) {
+				const routed = await routeNativePrompt({
+					cwd,
+					text: prompt,
+					sessionId: readSessionId(payload),
+					threadId: readThreadId(payload),
+					turnId: readTurnId(payload),
+					stateDir: options.stateDir,
+					configPaths: resolveConfigPaths(cwd, options.configPaths),
+					triager: options.triager,
+				});
+				skillState = routed.skillState;
+				semanticUiContext = routed.uiSkillContext;
+			}
 		} catch {
 			skillState = null;
+			semanticUiContext = null;
 		}
 
 		let effectiveSkillConfig: EffectiveSkillConfigInput | undefined;
@@ -395,7 +404,7 @@ async function dispatchSkcNativeSkillHookInner(
 		}
 		const additionalContext = [
 			skillState ? buildSkillActivationAdditionalContext(skillState, effectiveSkillConfig) : activeUltragoalContext,
-			uiSkillContext,
+			uiSkillContext ?? semanticUiContext,
 			externalUiContext,
 			recoveryContext,
 			classifyQuestionOnlyPrompt(prompt),

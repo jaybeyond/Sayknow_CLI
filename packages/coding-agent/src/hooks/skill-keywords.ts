@@ -5,6 +5,15 @@ export interface SkillKeywordDefinition {
 	skill: SkcWorkflowSkill;
 	priority: number;
 	guidance: string;
+	/**
+	 * Pre-compiled matcher, replacing the literal-substring compilation of
+	 * `keyword`. Only learned entries set it: they are two stems with a bounded
+	 * gap, which a literal string cannot express. `keyword` stays human-readable
+	 * for logs and for the guidance line.
+	 */
+	pattern?: RegExp;
+	/** Mined from routing answers rather than written by hand. */
+	learned?: boolean;
 }
 
 export const SKC_WORKFLOW_SKILLS = CANONICAL_SKC_WORKFLOW_SKILLS;

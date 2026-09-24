@@ -697,7 +697,8 @@ persists it and says so; that switch only governs auto-detection.
 ### How a subagent's model is chosen
 
 There are two ways a detailed-use model reaches a spawn. The first is
-deterministic and needs no switch; the second is a guess and is opt-in.
+deterministic and needs no switch; the second is a guess and only fires once
+there are tiers configured for it to choose between.
 
 **Declared.** The `task` tool accepts `.specialty` per task — one of the five
 ids above. When the user assigned a model to that specialty, the child runs on
@@ -710,12 +711,14 @@ usually do that work, but the setting is one flat map, and a declared specialty
 ignores that grouping on purpose: a frontend build delegated to `executor` with
 `specialty: "frontendDesign"` runs on the frontend model.
 
-**Auto-detected.** Without a declaration, routing is off unless
-`task.modelRouting.enabled` is true **and** there is somewhere to route to: at
+**Auto-detected.** Without a declaration, routing needs
+`task.modelRouting.enabled` (on by default) **and** somewhere to route to: at
 least two of `task.modelRouting.fastModel` / `balancedModel` / `deepModel`, or a
-detailed-use entry, or the legacy `task.modelRouting.frontendModel`. A single
-tier is not an axis — there is nowhere to move from it. It also needs typed
-decisions (`decisions.enabled`) and a cheap model for the classifier to run on.
+detailed-use entry, or the legacy `task.modelRouting.frontendModel`. The tiers
+are empty until you set them, so the default-on switch is a no-op for an
+unconfigured install. A single tier is not an axis — there is nowhere to move
+from it. It also needs typed decisions (`decisions.enabled`, on by default) and
+a cheap model for the classifier to run on.
 
 One classification runs per **child task**, not per `task` call. A batch shares
 an agent but not a workload, so an implementation slice and a test slice in the

@@ -32,6 +32,7 @@ import {
 	isSkcWorkflowSkill,
 	SKC_SKILL_KEYWORD_DEFINITIONS,
 	type SkcWorkflowSkill,
+	type SkillKeywordDefinition,
 } from "./skill-keywords";
 
 export const SKC_STATE_DIR = ".skc";
@@ -95,6 +96,8 @@ export interface SkillKeywordMatch {
 	keyword: string;
 	skill: SkcWorkflowSkill;
 	priority: number;
+	/** Matched a pattern mined from routing answers, not a hand-written keyword. */
+	learned?: boolean;
 }
 
 export type { SkillActiveEntry, SkillActiveState } from "../skill-state/active-state";
@@ -121,6 +124,12 @@ export interface RecordSkillActivationInput {
 	turnId?: string;
 	nowIso?: string;
 	stateDir?: string;
+	/**
+	 * Patterns promoted by the keyword learner, appended after the hand-written
+	 * table. The caller loads them because it knows whether learning is on; see
+	 * `detectSkillKeywords`.
+	 */
+	learned?: readonly SkillKeywordDefinition[];
 	/**
 	 * Semantic fallback, consulted only when no keyword matched. Supplying it turns the
 	 * literal keyword table into a two-stage router; omitting it keeps the historical
@@ -161,10 +170,11 @@ function keywordToPattern(keyword: string): RegExp {
 	return new RegExp(`${prefix}${escaped}${suffix}`, "i");
 }
 
-const KEYWORD_PATTERNS = SKC_SKILL_KEYWORD_DEFINITIONS.map(definition => ({
-	...definition,
-	pattern: keywordToPattern(definition.keyword),
-}));
+function compileDefinition(definition: SkillKeywordDefinition): SkillKeywordDefinition & { pattern: RegExp } {
+	return { ...definition, pattern: definition.pattern ?? keywordToPattern(definition.keyword) };
+}
+
+const KEYWORD_PATTERNS = SKC_SKILL_KEYWORD_DEFINITIONS.map(compileDefinition);
 
 function parseExplicitSkillInvocations(text: string): {
 	matches: SkillKeywordMatch[];
@@ -192,16 +202,34 @@ function parseExplicitSkillInvocations(text: string): {
 	return { matches, sawExplicitLikeInvocation };
 }
 
-export function detectSkillKeywords(text: string): SkillKeywordMatch[] {
+/**
+ * Match a prompt against the keyword table.
+ *
+ * `learned` carries patterns mined from semantic routing answers (see
+ * `decisions/keyword-learning.ts`). It is a parameter rather than a module-level
+ * load because this file is imported by the hook process, where a synchronous
+ * disk read on every prompt is not acceptable and the caller already knows
+ * whether learning is enabled.
+ */
+export function detectSkillKeywords(
+	text: string,
+	learned: readonly SkillKeywordDefinition[] = [],
+): SkillKeywordMatch[] {
 	const explicit = parseExplicitSkillInvocations(text);
 	if (explicit.matches.length > 0) return explicit.matches;
 	if (explicit.sawExplicitLikeInvocation) return [];
 
 	const implicit: SkillKeywordMatch[] = [];
-	for (const definition of KEYWORD_PATTERNS) {
+	const definitions = learned.length > 0 ? [...KEYWORD_PATTERNS, ...learned.map(compileDefinition)] : KEYWORD_PATTERNS;
+	for (const definition of definitions) {
 		const match = text.match(definition.pattern);
 		if (!match) continue;
-		implicit.push({ keyword: match[0], skill: definition.skill, priority: definition.priority });
+		implicit.push({
+			keyword: match[0],
+			skill: definition.skill,
+			priority: definition.priority,
+			...(definition.learned ? { learned: true } : {}),
+		});
 	}
 
 	const merged: SkillKeywordMatch[] = [];
@@ -212,8 +240,11 @@ export function detectSkillKeywords(text: string): SkillKeywordMatch[] {
 	return merged;
 }
 
-export function detectPrimarySkillKeyword(text: string): SkillKeywordMatch | null {
-	return detectSkillKeywords(text)[0] ?? null;
+export function detectPrimarySkillKeyword(
+	text: string,
+	learned: readonly SkillKeywordDefinition[] = [],
+): SkillKeywordMatch | null {
+	return detectSkillKeywords(text, learned)[0] ?? null;
 }
 
 export function resolveSkcStateDir(cwd: string, stateDir?: string): string {
@@ -476,7 +507,7 @@ async function seedSkillActivationState(
 // Fallback for native-hook prompts when SkillPromptDetails.subskillActivation is absent;
 // real /skill dispatch paths resolve sub-skill activation before prompt construction.
 export async function recordSkillActivation(input: RecordSkillActivationInput): Promise<SkillActiveState | null> {
-	const match = detectPrimarySkillKeyword(input.text);
+	const match = detectPrimarySkillKeyword(input.text, input.learned);
 	if (match) return await seedSkillActivationState(match.skill, match.keyword, "skc-skill-state-hook", input);
 	if (!input.resolveSkillSemantically) return null;
 	// The semantic stage is advisory: any failure leaves routing to the system prompt,

@@ -1,25 +1,29 @@
 /**
- * Semantic fallback for workflow-skill routing.
+ * The workflow-routing question: what the model is asked, and the thresholds the
+ * answer is held to.
  *
- * The keyword table in `hooks/skill-keywords.ts` is thirteen literal strings. It is
+ * The keyword table in `hooks/skill-keywords.ts` is a list of literal strings. It is
  * exact and free, and it is the right first stage — but measured against realistic
  * paraphrases it recalls 4/17, and **0/9 in Korean**, which is most of our users. A
  * miss is not fatal (the model still sees the routing rules in the system prompt), but
  * it means the deterministic gate simply does not exist for those prompts.
  *
- * This module fills that gap only where the keyword stage produced nothing:
+ * The staging that closes the gap lives in `prompt-triage.ts`:
  *
- *   keyword (exact, free) -> semantic (this, one cheap call) -> system prompt (as today)
+ *   keyword + learned (exact, free) -> one typed decision -> system prompt (as today)
  *
- * The two stages fail in opposite directions, which is why both are kept. Measured on
- * the same 22 prompts, the literal stage is the one that catches `ultragoal this` and
- * `consensus plan`; the semantic stage is the one that catches everything Korean.
+ * The stages fail in opposite directions, which is why all of them are kept. Measured
+ * on the same 22 prompts, the literal stage is the one that catches `ultragoal this`
+ * and `consensus plan`; the semantic stage is the one that catches everything Korean.
+ *
+ * This file holds only the contract and the numbers, so the criteria cannot drift away
+ * from the thresholds that judge answers against them.
  */
-import { logger } from "@sayknow-cli/utils";
 import { CANONICAL_SKC_WORKFLOW_SKILLS, type CanonicalSkcWorkflowSkill } from "../skill-state/active-state";
-import type { DecisionService } from "./index";
 
-const NONE = "none";
+/** Shared across every routing question so one answer shape covers them all. */
+export const NONE_CHOICE = "none";
+const NONE = NONE_CHOICE;
 
 /**
  * What each workflow is *for*, in the words a user would recognise. These descriptions
@@ -40,7 +44,7 @@ const WORKFLOW_MEANINGS: Record<CanonicalSkcWorkflowSkill, string> = {
 	team: "The work is large enough to split across several coordinated workers running in parallel.",
 };
 
-const ROUTING_INSTRUCTIONS =
+export const ROUTING_INSTRUCTIONS =
 	"Which workflow should handle this user request? Choose none unless the request clearly calls for one of the workflows.";
 
 /** Exported so tests can assert the contract the model is actually given. */
@@ -52,10 +56,30 @@ export function buildRoutingCriteria(): Record<string, string> {
 	return criteria;
 }
 
-/** Prompts below this length never carry enough signal to justify a model round-trip. */
-const MIN_PROMPT_CHARS = 12;
+/**
+ * Prompts below this length never carry enough signal to justify a model round-trip.
+ * Measured with {@link promptSignalLength}, not `String.length`: the floor was fitted
+ * to English and Korean, and in code units a complete Chinese request is shorter than
+ * "ok thanks".
+ */
+export const MIN_PROMPT_CHARS = 12;
 /** Only the opening of a prompt decides its workflow; the rest is payload. */
-const MAX_PROMPT_CHARS = 4_000;
+export const MAX_PROMPT_CHARS = 4_000;
+
+const DENSE_SCRIPT_PATTERN = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/gu;
+
+/**
+ * Prompt length in Latin-letter equivalents.
+ *
+ * One Han character, kana or Hangul syllable carries what two or three Latin letters
+ * do, so each counts double. "先做架构设计" (6 code units) is a whole request; "谢谢" and
+ * "고마워요" still fall under the floor, which is the point of having one.
+ */
+export function promptSignalLength(text: string): number {
+	let dense = 0;
+	for (const _ of text.matchAll(DENSE_SCRIPT_PATTERN)) dense++;
+	return text.length + dense;
+}
 
 /**
  * Minimum calibrated confidence required to activate a workflow.
@@ -79,45 +103,4 @@ const MAX_PROMPT_CHARS = 4_000;
  * through a forced enum has no meaningful confidence to compare against, so gating on a
  * number it did not really produce would just be superstition.
  */
-const MIN_CALIBRATED_CONFIDENCE = 0.75;
-
-export type SkillRouter = (text: string) => Promise<CanonicalSkcWorkflowSkill | null>;
-
-/**
- * Build the semantic router. Returns null-resolving function when the service is
- * disabled so the caller keeps its existing behaviour with no branching.
- */
-export function createSemanticSkillRouter(service: DecisionService): SkillRouter {
-	const criteria = buildRoutingCriteria();
-	return async (text: string): Promise<CanonicalSkcWorkflowSkill | null> => {
-		if (!service.enabled) return null;
-		const trimmed = text.trim();
-		if (trimmed.length < MIN_PROMPT_CHARS) return null;
-		const state = trimmed.length > MAX_PROMPT_CHARS ? trimmed.slice(0, MAX_PROMPT_CHARS) : trimmed;
-
-		const result = await service.decide({
-			state,
-			questions: { workflow: { type: "choice", instructions: ROUTING_INSTRUCTIONS, criteria } },
-		});
-		const answer = result?.answers.workflow;
-		if (!result || answer?.type !== "choice" || answer.choice === NONE) return null;
-		const skill = CANONICAL_SKC_WORKFLOW_SKILLS.find(candidate => candidate === answer.choice);
-		if (!skill) return null;
-		if (result.calibrated && (answer.confidence ?? 0) < MIN_CALIBRATED_CONFIDENCE) {
-			logger.debug("decisions/skill-routing: below confidence floor, leaving routing alone", {
-				skill,
-				confidence: answer.confidence,
-				floor: MIN_CALIBRATED_CONFIDENCE,
-			});
-			return null;
-		}
-		logger.debug("decisions/skill-routing: semantic match", {
-			skill,
-			backend: result.backend,
-			confidence: answer.confidence,
-			calibrated: result.calibrated,
-			durationMs: result.durationMs,
-		});
-		return skill;
-	};
-}
+export const MIN_CALIBRATED_CONFIDENCE = 0.75;

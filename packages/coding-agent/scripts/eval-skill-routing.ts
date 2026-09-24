@@ -19,7 +19,7 @@ import { ModelRegistry } from "../src/config/model-registry";
 import { resolveRoleSelection } from "../src/config/model-resolver";
 import { Settings } from "../src/config/settings";
 import { createDecisionService, createLlmDecisionBackend, createTypeSafeDecisionBackend } from "../src/decisions";
-import { createSemanticSkillRouter } from "../src/decisions/skill-routing";
+import { createSemanticSkillRouter } from "../src/decisions/prompt-triage";
 import { detectPrimarySkillKeyword } from "../src/hooks/skill-state";
 import { discoverAuthStorage } from "../src/sdk";
 
@@ -27,7 +27,8 @@ type Expected = "deep-interview" | "ralplan" | "ultragoal" | "team" | null;
 interface Case {
 	prompt: string;
 	expect: Expected;
-	lang: "ko" | "en";
+	/** BCP 47 primary subtag. The keyword table only knows ko and en; every other row measures the semantic stage alone. */
+	lang: string;
 }
 
 const CASES: Case[] = [
@@ -54,6 +55,25 @@ const CASES: Case[] = [
 	{ prompt: "우리 서비스에 이 모델 붙이면 뭐가 좋아?", expect: null, lang: "ko" },
 	{ prompt: "fix the failing lint rule in src/utils.ts", expect: null, lang: "en" },
 	{ prompt: "what does this regex do?", expect: null, lang: "en" },
+	// Languages the hand-written table has no entries for. Routing here is the
+	// semantic stage or nothing, which is what the per-language column shows.
+	{ prompt: "需求还不清楚，先通过提问把规格问出来", expect: "deep-interview", lang: "zh" },
+	{ prompt: "架构风险很大，先给我一个需要审批的详细计划", expect: "ralplan", lang: "zh" },
+	{ prompt: "把这个目标登记下来，持续跟踪直到全部交付验证完", expect: "ultragoal", lang: "zh" },
+	{ prompt: "任务太大了，拆成几个并行的工作者一起做", expect: "team", lang: "zh" },
+	{ prompt: "这个测试为什么会挂？", expect: null, lang: "zh" },
+	{ prompt: "修一下 README 里的错别字", expect: null, lang: "zh" },
+	{ prompt: "要件がまだ曖昧なので、質問して仕様を引き出して", expect: "deep-interview", lang: "ja" },
+	{ prompt: "実装前に設計案を比較した計画書を作って承認を待って", expect: "ralplan", lang: "ja" },
+	{ prompt: "この目標を最後まで追跡して、途中で忘れないで", expect: "ultragoal", lang: "ja" },
+	{ prompt: "作業が大きいのでワーカーを複数立てて並列で進めて", expect: "team", lang: "ja" },
+	{ prompt: "この関数は何をしているか説明して", expect: null, lang: "ja" },
+	{ prompt: "Hazme preguntas hasta que los requisitos estén claros", expect: "deep-interview", lang: "es" },
+	{ prompt: "Prepara un plan detallado y espera mi aprobación antes de tocar código", expect: "ralplan", lang: "es" },
+	{ prompt: "Arregla el error de lint en src/utils.ts", expect: null, lang: "es" },
+	{ prompt: "Составь согласованный план миграции и жди моего одобрения", expect: "ralplan", lang: "ru" },
+	{ prompt: "Разбей работу на несколько параллельных воркеров", expect: "team", lang: "ru" },
+	{ prompt: "Что делает эта регулярка?", expect: null, lang: "ru" },
 ];
 
 function pct(hit: number, total: number): string {
@@ -120,18 +140,23 @@ async function main(): Promise<void> {
 	};
 	const positives = (row: (typeof rows)[number]) => row.case.expect !== null;
 	const negatives = (row: (typeof rows)[number]) => row.case.expect === null;
-	const ko = (row: (typeof rows)[number]) => positives(row) && row.case.lang === "ko";
-	const en = (row: (typeof rows)[number]) => positives(row) && row.case.lang === "en";
+	const langs = [...new Set(CASES.map(testCase => testCase.lang))];
 	const hybrid = (row: (typeof rows)[number]) => row.keyword ?? row.semantic;
 
 	console.log("\n=== stage comparison ===");
+	// Both hosts ship the hybrid: the session in `AgentSession#routeWorkflowSemantically`,
+	// the Codex hook in `hooks/native-prompt-routing.ts`. The single-stage rows show
+	// what each stage contributes on its own.
 	for (const [label, pick] of [
-		["keyword only (Codex hook)", (row: (typeof rows)[number]) => row.keyword],
-		["semantic only (SHIPPED)", (row: (typeof rows)[number]) => row.semantic],
-		["keyword+semantic (upper bound)", hybrid],
+		["keyword only", (row: (typeof rows)[number]) => row.keyword],
+		["semantic only", (row: (typeof rows)[number]) => row.semantic],
+		["keyword+semantic (SHIPPED)", hybrid],
 	] as const) {
+		const perLang = langs
+			.map(lang => `${lang} ${pct(...score(pick, row => positives(row) && row.case.lang === lang))}`)
+			.join("  ");
 		console.log(
-			`${label.padEnd(32)} all ${pct(...score(pick, () => true))}  ko ${pct(...score(pick, ko))}  en ${pct(...score(pick, en))}  clean-negatives ${pct(...score(pick, negatives))}`,
+			`${label.padEnd(32)} all ${pct(...score(pick, () => true))}  ${perLang}  clean-negatives ${pct(...score(pick, negatives))}`,
 		);
 	}
 
@@ -140,13 +165,13 @@ async function main(): Promise<void> {
 		`\nlatency p50 ${latencies[Math.floor(latencies.length / 2)]}ms  p95 ${latencies[Math.max(0, Math.ceil(latencies.length * 0.95) - 1)]}ms  max ${latencies.at(-1)}ms`,
 	);
 
-	// Report against what actually ships in this host, not against the upper bound.
-	const misses = rows.filter(row => row.semantic !== row.case.expect);
+	// Report against what ships: keyword first, the model for what it missed.
+	const misses = rows.filter(row => hybrid(row) !== row.case.expect);
 	if (misses.length > 0) {
-		console.log("\n=== misses in shipped configuration (semantic only) ===");
+		console.log("\n=== misses in shipped configuration (keyword+semantic) ===");
 		for (const row of misses)
 			console.log(
-				`  [${row.case.lang}] want=${row.case.expect ?? "none"} got=${row.semantic ?? "none"} :: ${row.case.prompt}`,
+				`  [${row.case.lang}] want=${row.case.expect ?? "none"} got=${hybrid(row) ?? "none"} :: ${row.case.prompt}`,
 			);
 	}
 

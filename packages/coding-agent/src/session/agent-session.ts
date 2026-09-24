@@ -203,7 +203,9 @@ import type { SettingPath } from "../config/settings-schema";
 import { getDefault } from "../config/settings-schema";
 import { RawSseDebugBuffer } from "../debug/raw-sse-buffer";
 import { createDecisionService } from "../decisions";
-import { createSemanticSkillRouter, type SkillRouter } from "../decisions/skill-routing";
+import { loadLearnedKeywordDefinitions, observeRouting } from "../decisions/keyword-learning";
+import { createPromptTriage, type PromptTriager } from "../decisions/prompt-triage";
+import type { BundledSkcUiSkillName } from "../defaults/skc-ui-skills";
 import { loadCapability } from "../discovery";
 import { expandApplyPatchToEntries, normalizeDiff, normalizeToLF, ParseError, previewPatch, stripBom } from "../edit";
 import { MAX_EDIT_FILE_BYTES } from "../edit/read-file";
@@ -267,7 +269,11 @@ import {
 	detectPrimarySkillKeyword,
 	ensureWorkflowSkillActivationState,
 } from "../hooks/skill-state";
-import { buildUiSkillActivationContext } from "../hooks/ui-skill-keywords";
+import {
+	buildUiSkillActivationContext,
+	buildUiSkillDirectiveForSkill,
+	detectUiSkillKeywords,
+} from "../hooks/ui-skill-keywords";
 import { initializeLocalRoot, type LocalProtocolOptions, resolveLocalUrlToPath } from "../internal-urls";
 import { shutdownAll as shutdownAllLspClients } from "../lsp/client";
 import { resolveMemoryBackend } from "../memory-backend";
@@ -533,6 +539,14 @@ export interface AgentSessionConfig {
 	toolRegistry?: Map<string, AgentTool>;
 	/** Tool-session factory context used to lazily attach workflow-gate-only tools. */
 	workflowGateToolSession?: ToolSession;
+	/**
+	 * Stage two of workflow routing: before a genuine user turn, ask a small model
+	 * through the session's own transport which SKC workflow the prompt calls for.
+	 * Hosts that own an interactive user (`createAgentSession`) turn this on; a bare
+	 * session leaves it off so a scripted or injected transport is never consumed by a
+	 * call the host did not script. `decisions.enabled` still governs the user side.
+	 */
+	semanticWorkflowRouting?: boolean;
 	/** Current session pre-LLM message transform pipeline */
 	transformContext?: (messages: AgentMessage[], signal?: AbortSignal) => AgentMessage[] | Promise<AgentMessage[]>;
 	/** Provider payload hook used by the active session request path */
@@ -1851,11 +1865,18 @@ export class AgentSession {
 	#modelRegistry: ModelRegistry;
 
 	/** Built on first use; the decision service resolves model and credential lazily. */
-	#semanticSkillRouter?: SkillRouter;
+	#promptTriager?: PromptTriager;
+
+	/**
+	 * UI skill the semantic stage picked for this turn, when the regex table did
+	 * not. Cleared per prompt: it describes one sentence, not the session.
+	 */
+	#semanticUiSkill?: BundledSkcUiSkillName;
 
 	// Tool registry and prompt builder for extensions
 	#toolRegistry: Map<string, AgentTool>;
 	#workflowGateToolSession: ToolSession | undefined;
+	#semanticWorkflowRouting: boolean;
 	#transformContext: (messages: AgentMessage[], signal?: AbortSignal) => AgentMessage[] | Promise<AgentMessage[]>;
 	#onPayload: SimpleStreamOptions["onPayload"] | undefined;
 	#onResponse: SimpleStreamOptions["onResponse"] | undefined;
@@ -1979,6 +2000,12 @@ export class AgentSession {
 		nonEditDeterminations: 0,
 	};
 	#promptInFlightCount = 0;
+	/**
+	 * A genuine user prompt is being routed to a workflow before its turn starts. Counts
+	 * as streaming so a second `prompt()` queues or rejects exactly as it would mid-turn,
+	 * and `abort()` cancels the routing through the preflight signal.
+	 */
+	#workflowRoutingInFlight = false;
 	#agentEventHandlersInFlight = 0;
 	#queuedExtensionEventCount = 0;
 	#extensionTurnGeneration = 0;
@@ -2405,6 +2432,7 @@ export class AgentSession {
 		}
 		this.#toolRegistry = config.toolRegistry ?? new Map();
 		this.#workflowGateToolSession = config.workflowGateToolSession;
+		this.#semanticWorkflowRouting = config.semanticWorkflowRouting ?? false;
 		this.#requestedToolNames = config.requestedToolNames;
 		this.#explicitlyDisabledTools = config.explicitlyDisabledTools === true;
 		this.#transformContext = config.transformContext ?? (messages => messages);
@@ -5497,7 +5525,7 @@ export class AgentSession {
 
 	/** Whether agent is currently streaming a response */
 	get isStreaming(): boolean {
-		return this.agent.state.isStreaming || this.#promptInFlightCount > 0;
+		return this.agent.state.isStreaming || this.#promptInFlightCount > 0 || this.#workflowRoutingInFlight;
 	}
 
 	/** Wait until streaming and session settlement work are fully settled. */
@@ -7560,55 +7588,112 @@ export class AgentSession {
 	 * @throws Error if no model selected or no API key available (when not streaming)
 	 */
 	/**
-	 * Semantic workflow routing for prompts the keyword table cannot express.
+	 * Per-turn prompt triage: every routing question SKC asks about a user's
+	 * sentence, answered in one place.
 	 *
 	 * Runs in this process, not the hook process: the hook only receives paths and
 	 * config, so it has no model registry and no credentials to call anything with.
 	 *
-	 * **The keyword table is not consulted here, and that is deliberate.** An earlier
-	 * version returned early on a keyword hit, on the assumption that the deterministic
-	 * stage had already activated the workflow. That assumption holds only under the
-	 * Codex host, where `skc codex-native-hook` runs on `UserPromptSubmit`. This session
-	 * never fires that hook, so the early return meant a prompt containing an enumerated
-	 * keyword activated *nothing at all* — strictly worse than before the keywords
-	 * existed, because the semantic stage had been handling those phrasings.
+	 * Three stages, cheapest first, and each one shrinks the next:
 	 *
-	 * Keywords remain advisory in this host, as they always were: the routing rules in
-	 * the system prompt describe them to the model. Only this stage activates, and only
-	 * when it is confident enough to be worth the mutation guard and Stop hook that
-	 * activation switches on.
+	 * 1. **Hand-written tables.** The eighteen workflow keywords and the twenty UI
+	 *    regexes. Free, deterministic, measured at zero false positives, so they
+	 *    are not gated behind the opt-in setting.
+	 * 2. **Learned patterns.** Two-stem rules mined from previous semantic answers
+	 *    (`decisions/keyword-learning.ts`). Also free, also deterministic, and the
+	 *    reason a phrasing the user repeats stops costing a model call.
+	 * 3. **One typed decision** for whatever stages 1 and 2 left unanswered. Both
+	 *    questions ride the same call, so adding UI routing cost no round trip.
 	 *
-	 * Deliberately best-effort — a disabled setting, a missing credential, a timeout, a
-	 * nonsense answer or low confidence all resolve to "no activation", which is
-	 * precisely the behaviour before this stage existed.
+	 * Whatever stage three answers is fed back into stage two, which is what makes
+	 * the keyword table self-populating rather than a list somebody has to grow by
+	 * hand — the original list recalled 0/9 on Korean prompts for exactly that
+	 * reason.
+	 *
+	 * Keyword hits activate here rather than returning early. An earlier version
+	 * returned early on the assumption that the deterministic stage had already
+	 * activated the workflow, which holds only under the Codex host where `skc
+	 * codex-native-hook` runs on `UserPromptSubmit`. This session never fires that
+	 * hook, so the early return meant an enumerated keyword activated *nothing*.
+	 *
+	 * Deliberately best-effort — a disabled setting, a missing credential, a
+	 * timeout, a nonsense answer or low confidence all resolve to "no activation",
+	 * which is precisely the behaviour before this stage existed.
 	 */
-	async #routeWorkflowSemantically(text: string): Promise<void> {
-		// Stage one: the keyword table. Free, deterministic, and measured at zero false
-		// positives, so it is not gated behind the opt-in setting — gating it was why an
-		// enumerated phrase activated nothing in this host while the Codex hook activated
-		// it fine. Activating here makes the two hosts agree.
-		const keyword = detectPrimarySkillKeyword(text);
+	async #routeWorkflowSemantically(text: string, signal: AbortSignal): Promise<void> {
+		this.#semanticUiSkill = undefined;
+		const learningEnabled = this.settings.get("decisions.keywordLearning");
+		// Loaded per turn rather than cached on the session: a second session in the
+		// same repo promotes patterns too, and a user who watched one get learned
+		// expects the next prompt to use it, not the next restart.
+		const learned = learningEnabled ? await loadLearnedKeywordDefinitions() : [];
+		const keyword = detectPrimarySkillKeyword(text, learned);
 		if (keyword) {
+			logger.debug("agent-session: workflow keyword match", {
+				skill: keyword.skill,
+				learned: keyword.learned === true,
+			});
 			await this.#activateWorkflowSkill(keyword.skill);
-			return;
 		}
+		// The regex table answers the UI question for free when it matches; asking
+		// the model as well would pay for an answer already in hand.
+		const uiMatched = detectUiSkillKeywords(text).length > 0;
+		if (keyword && uiMatched) return;
 
-		// Stage two costs a model call, so it stays opt-in.
-		if (!this.settings.get("decisions.enabled")) return;
+		// Stage three costs a model call: the host must have opted the session in and
+		// the user must not have turned the setting (on by default) off.
+		if (!this.#semanticWorkflowRouting || !this.settings.get("decisions.enabled")) return;
+		// Only the model call counts as streaming. Flagging the keyword stage too made
+		// `isStreaming` flicker true for one microtask on every prompt, which a poller
+		// mistook for the turn having started.
+		this.#workflowRoutingInFlight = true;
 		try {
-			this.#semanticSkillRouter ??= createSemanticSkillRouter(
+			this.#promptTriager ??= createPromptTriage(
 				createDecisionService({
 					registry: this.#modelRegistry,
 					settings: this.settings,
 					sessionId: this.sessionManager.getSessionId(),
+					preferredProvider: () => this.model?.provider,
+					// The turn's own transport, not a bare `completeSimple`: the same proxy,
+					// credential-invalidation and retry wrapping the main request gets, and
+					// a host that injects a stream function (tests, embedders) intercepts the
+					// decision too instead of watching it go to the network behind its back.
+					completeImpl: async (model, context, options) =>
+						(await this.agent.streamFn(model, context, options)).result(),
 					enabled: true,
 				}),
 			);
-			const skill = await this.#semanticSkillRouter(text);
-			if (!skill) return;
-			await this.#activateWorkflowSkill(skill);
+			const started = Date.now();
+			const triage = await this.#promptTriager({
+				text,
+				skipWorkflow: Boolean(keyword),
+				skipUiSkill: uiMatched,
+				signal,
+			});
+			logger.debug("agent-session: prompt triage", {
+				workflow: triage?.workflow ?? null,
+				uiSkill: triage?.uiSkill ?? null,
+				durationMs: Date.now() - started,
+			});
+			if (!triage || signal.aborted) return;
+			if (triage.uiSkill) this.#semanticUiSkill = triage.uiSkill;
+			if (keyword) return;
+			if (triage.workflow) await this.#activateWorkflowSkill(triage.workflow);
+			if (learningEnabled) {
+				// Awaited, not fired and forgotten: an unawaited write racing the next
+				// turn's read is how a learned pattern gets lost on the prompt that was
+				// supposed to promote it. The store is a few KB and already in memory.
+				await observeRouting({
+					text,
+					skill: triage.workflow,
+					confidence: triage.workflowConfidence,
+					calibrated: triage.calibrated,
+				});
+			}
 		} catch (error) {
-			logger.debug("agent-session: semantic workflow routing failed", { error: String(error) });
+			logger.debug("agent-session: prompt triage failed", { error: String(error) });
+		} finally {
+			this.#workflowRoutingInFlight = false;
 		}
 	}
 
@@ -7701,7 +7786,12 @@ export class AgentSession {
 		// deep-interview with the setting off and ralplan with it on. Both are plausible
 		// readings and ralplan is the better one here, but the point is that enabling this
 		// can *change* an activation rather than only add one where there was none.
-		if (claimsGenuineUserIntent && !this.isStreaming) await this.#routeWorkflowSemantically(expandedText);
+		if (claimsGenuineUserIntent && !this.isStreaming) {
+			const routingGeneration = this.#promptGeneration;
+			const routingSignal = this.#promptPreflightAbortController.signal;
+			await this.#routeWorkflowSemantically(expandedText, routingSignal);
+			this.#throwIfPromptPreflightCancelled(routingGeneration, routingSignal);
+		}
 
 		// If streaming, queue via steer() or followUp() based on option
 		if (this.isStreaming) {
@@ -12033,12 +12123,22 @@ export class AgentSession {
 	 * still there — while a wrong match would load a design skill onto a database task.
 	 * That asymmetry is why a reminder is the right shape here and a forced tool call is
 	 * not.
+	 *
+	 * The three frontend prompts the patterns missed are now covered by the typed
+	 * decision in `#routeWorkflowSemantically`, which rides the same call as workflow
+	 * routing and therefore costs nothing extra. The patterns stay in front of it: when
+	 * they match, the model is never asked.
 	 */
 	#createUiSkillPrelude(promptText: string): AgentMessage | undefined {
 		if (this.#planModeState?.enabled) return undefined;
-		const directive = buildUiSkillActivationContext(promptText);
+		const matched = buildUiSkillActivationContext(promptText);
+		const directive =
+			matched ?? (this.#semanticUiSkill ? buildUiSkillDirectiveForSkill(this.#semanticUiSkill) : null);
 		if (!directive) return undefined;
-		logger.debug("agent-session: bundled UI skill matched", { promptChars: promptText.length });
+		logger.debug("agent-session: bundled UI skill matched", {
+			promptChars: promptText.length,
+			source: matched ? "pattern" : "semantic",
+		});
 		return {
 			role: "developer",
 			content: [{ type: "text", text: `<system-reminder>\n${directive}\n</system-reminder>` }],

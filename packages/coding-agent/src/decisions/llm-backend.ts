@@ -154,11 +154,21 @@ export interface LlmBackendDeps {
 	maxInputCostPerMTok?: number;
 	/** Injected in tests to make the local-runtime probe deterministic. */
 	fetchImpl?: typeof fetch;
+	/** Injected in tests to script provider answers without a network. */
+	completeImpl?: typeof completeSimple;
+	/** Per-candidate deadline; injected in tests so a hung provider does not cost real seconds. */
+	attemptTimeoutMs?: number;
 	registry: ModelRegistry;
 	settings: Settings;
 	sessionId?: string;
 	/** Overrides role resolution; used by callers that already picked a model. */
 	model?: Model<Api>;
+	/**
+	 * Provider of the model the caller is already talking to. Its small model is tried
+	 * first when nothing was configured; see `rankSmallModels` for why. A thunk is
+	 * accepted so a long-lived backend follows the session when the user switches model.
+	 */
+	preferredProvider?: string | (() => string | undefined);
 }
 
 /**
@@ -186,6 +196,23 @@ const SMALL_MODEL_ID = /(^|[-_/])(mini|flash|haiku|air|lite|nano|small|tiny|\d+b
 /** Text in, text out. A decision has no use for image modalities either way. */
 function isTextOnly(model: Model<Api>): boolean {
 	return (model.input ?? ["text"]).includes("text") && !(model.output ?? ["text"]).includes("image");
+}
+
+/**
+ * Local runtimes list embedding models next to chat models with identical metadata.
+ * Measured: `ollama/nomic-embed-text:latest` was ranked as a candidate and answered
+ * HTTP 400 "does not support chat". Nothing in `Model` says so; the id does.
+ */
+const EMBEDDING_MODEL_ID = /embed/i;
+
+/**
+ * Parameter count from a local model id (`qwen3:1.7b`, `gemma4:e4b`, `lfm2-24b-a2b`),
+ * used only to order local candidates: smaller loads faster and answers faster, and a
+ * five-way choice does not need a 30b model. Unparseable ids sort last.
+ */
+function localModelSize(id: string): number {
+	const match = /(\d+(?:\.\d+)?)b(?![a-z])/i.exec(id);
+	return match ? Number(match[1]) : Number.POSITIVE_INFINITY;
 }
 
 /**
@@ -236,7 +263,50 @@ async function isLocalRuntimeAlive(baseUrl: string, fetchImpl: typeof fetch = fe
 }
 
 /**
- * Pick a small, fast text model.
+ * A model that answered a decision with an error or a timeout, skipped for a while.
+ *
+ * The catalog lists models the provider no longer serves — `claude-3-haiku-20240307`
+ * was the cheapest Anthropic entry and answered 404 on every call — and it lists
+ * "free" reasoning tiers that ignore `disableReasoning` and take ~9s to answer. Either
+ * one, chosen blindly, turned the fallback into a fixed ~1-9s stall that answered
+ * nothing, on every turn, forever. Remembering the failure means one bad turn per
+ * model per TTL, not one per prompt.
+ */
+const DEAD_MODEL_TTL_MS = 10 * 60_000;
+const deadModels = new Map<string, { at: number; reason: string }>();
+
+/** Reset between tests. */
+export function clearDeadModelCache(): void {
+	deadModels.clear();
+}
+
+function modelKey(model: Model<Api>): string {
+	return `${model.provider}/${model.id}`;
+}
+
+function isDead(model: Model<Api>): boolean {
+	const entry = deadModels.get(modelKey(model));
+	if (!entry) return false;
+	if (Date.now() - entry.at < DEAD_MODEL_TTL_MS) return true;
+	deadModels.delete(modelKey(model));
+	return false;
+}
+
+/**
+ * Candidates tried per decision when nothing was configured. Two attempts of
+ * `ATTEMPT_TIMEOUT_MS` fit inside the service's 8s deadline with room for the
+ * liveness probe; a third only runs when the earlier ones failed fast (404, auth).
+ */
+const MAX_AUTO_ATTEMPTS = 3;
+/**
+ * Per-attempt budget. The hosted small models measured here answer in 0.3-1.3s; the
+ * ones that blow this are reasoning tiers that think despite being told not to, and
+ * the right response to those is the next candidate, not a longer wait.
+ */
+const ATTEMPT_TIMEOUT_MS = 3_500;
+
+/**
+ * Rank small, fast text models, best first.
  *
  * Sorting by price alone is a trap, and it was measured: the cheapest qualifying model
  * on this registry is free but took **4.8s** per routing decision — three times slower
@@ -244,29 +314,44 @@ async function isLocalRuntimeAlive(baseUrl: string, fetchImpl: typeof fetch = fe
  * are dominated by reasoning models. A decision service that is cheap and slow has
  * missed the point twice over.
  *
- * So non-reasoning wins first, price second. Ties break by id so the choice is stable
- * across runs; a backend that silently changed model between turns would make routing
- * non-reproducible, which is most of what this feature is for.
+ * The provider the user is already chatting with goes first. Measured on a registry
+ * with Anthropic, Codex and Z.ai keys: price order put four `zai/glm-*` tiers ahead of
+ * `claude-haiku-4-5`, and the first of them took 8.9s — past the service deadline, so
+ * the answer was nothing. The user's own provider is the credential known to work, the
+ * bill they expect to see, and (Haiku next to Opus, mini next to GPT) the small model
+ * they would have picked by hand. Within a provider, non-reasoning wins, then price.
+ * Ties break by id so the choice is stable across runs; a backend that silently changed
+ * model between turns would make routing non-reproducible, which is most of what this
+ * feature is for.
  */
-async function pickSmallModel(
+async function rankSmallModels(
 	available: Model<Api>[],
 	costCeiling: number,
+	preferredProvider: string | undefined,
 	fetchImpl?: typeof fetch,
-): Promise<Model<Api> | undefined> {
-	// A local runtime that is actually up wins outright: zero tokens, zero egress. Its
-	// size is not screened the way hosted models are — if the user loaded it, they chose
-	// it, and trying costs nothing.
+): Promise<Model<Api>[]> {
+	// A live local runtime goes first: zero tokens, zero egress. One candidate only —
+	// measured with Ollama on CPU, every loaded model blew the attempt budget on a cold
+	// start, and with five of them ranked ahead of every hosted model the hosted
+	// fallback was never reached before the service deadline. One local miss now costs
+	// one attempt, after which the dead-model cache sends the next ten minutes of
+	// decisions straight to the hosted candidate.
+	const ranked: Model<Api>[] = [];
 	const local = available
-		.filter(model => LOCAL_PROVIDERS.has(model.provider) && isTextOnly(model))
-		.sort((a, b) => a.id.localeCompare(b.id));
+		.filter(model => LOCAL_PROVIDERS.has(model.provider) && isTextOnly(model) && !EMBEDDING_MODEL_ID.test(model.id))
+		.sort((a, b) => localModelSize(a.id) - localModelSize(b.id) || a.id.localeCompare(b.id));
 	for (const model of local) {
+		// The smallest one missing parks the whole runtime for the TTL; trying the next
+		// size up would only repeat the cold-start stall on the next turn.
+		if (isDead(model)) break;
 		if (await isLocalRuntimeAlive(model.baseUrl, fetchImpl)) {
-			logger.debug("decisions/llm: using local runtime", { id: `${model.provider}/${model.id}` });
-			return model;
+			logger.debug("decisions/llm: using local runtime", { id: modelKey(model) });
+			ranked.push(model);
+			break;
 		}
 	}
 
-	return available
+	const hosted = available
 		.filter(
 			model =>
 				isTextOnly(model) &&
@@ -276,12 +361,18 @@ async function pickSmallModel(
 		)
 		.sort(
 			(a, b) =>
-				Number(!!a.reasoning) - Number(!!b.reasoning) || a.cost.input - b.cost.input || a.id.localeCompare(b.id),
-		)[0];
+				Number(b.provider === preferredProvider) - Number(a.provider === preferredProvider) ||
+				Number(!!a.reasoning) - Number(!!b.reasoning) ||
+				a.cost.input - b.cost.input ||
+				a.id.localeCompare(b.id),
+		);
+	return ranked.concat(hosted);
 }
 
 export function createLlmDecisionBackend(deps: LlmBackendDeps): DecisionBackend {
 	const costCeiling = deps.maxInputCostPerMTok ?? DEFAULT_MAX_INPUT_COST_PER_MTOK;
+	const complete = deps.completeImpl ?? completeSimple;
+	const attemptTimeoutMs = deps.attemptTimeoutMs ?? ATTEMPT_TIMEOUT_MS;
 	return {
 		name: "llm",
 		async decide(request: DecisionRequest): Promise<DecisionResult | null> {
@@ -290,67 +381,122 @@ export function createLlmDecisionBackend(deps: LlmBackendDeps): DecisionBackend 
 			// Resolution order, cheapest intent first:
 			//   1. an explicit override — the caller already decided
 			//   2. the `smol` role — the user already decided
-			//   3. the cheapest small model on hand — nobody decided, so decide safely
+			//   3. the ranked small models on hand — nobody decided, so decide safely,
+			//      and move on when one is dead or slow
 			// `default` is deliberately absent: it is whatever the user chats with, which is
 			// exactly the frontier model this feature exists to avoid spending on.
-			const chosen =
-				deps.model ??
-				resolveRoleSelection(["smol"], deps.settings, available, deps.registry)?.model ??
-				(await pickSmallModel(available, costCeiling, deps.fetchImpl));
-			if (!chosen) {
+			const configured =
+				deps.model ?? resolveRoleSelection(["smol"], deps.settings, available, deps.registry)?.model;
+			const preferredProvider =
+				typeof deps.preferredProvider === "function" ? deps.preferredProvider() : deps.preferredProvider;
+			const candidates = configured
+				? [configured]
+				: (await rankSmallModels(available, costCeiling, preferredProvider, deps.fetchImpl))
+						.filter(model => !isDead(model))
+						.slice(0, MAX_AUTO_ATTEMPTS);
+			if (candidates.length === 0) {
 				logger.debug("decisions/llm: no small model available; leaving the decision to existing behaviour");
-				return null;
-			}
-			const model = chosen;
-			// The ceiling still applies to an explicitly configured `smol` role — a role can
-			// point anywhere, including at a frontier model.
-			if (!deps.model && model.cost.input > costCeiling) {
-				logger.debug("decisions/llm: declining, model too expensive for a decision", {
-					id: `${model.provider}/${model.id}`,
-					inputCostPerMTok: model.cost.input,
-					ceiling: costCeiling,
-				});
-				return null;
-			}
-			const apiKey = await deps.registry.getApiKey(model, deps.sessionId);
-			if (!apiKey) {
-				logger.debug("decisions/llm: no credential", { provider: model.provider, id: model.id });
 				return null;
 			}
 
 			const text = stateToText(request.state);
 			const state = text.length > MAX_STATE_CHARS ? `${text.slice(0, MAX_STATE_CHARS)}…` : text;
-			const started = Date.now();
-			const response = await completeSimple(
-				model,
-				{
-					systemPrompt: [SYSTEM_PROMPT],
-					messages: [{ role: "user", content: `<state>\n${state}\n</state>`, timestamp: Date.now() }],
-					tools: [buildTool(request.questions)],
-				},
-				{
-					apiKey,
-					maxTokens: model.reasoning ? Math.max(MAX_TOKENS, REASONING_SAFE_MAX_TOKENS) : MAX_TOKENS,
-					disableReasoning: true,
-					toolChoice: { type: "tool", name: TOOL_NAME },
-					signal: request.signal,
-				},
-			);
 
-			const args = readToolArguments(response.content);
-			if (!args) {
-				logger.debug("decisions/llm: model did not emit the forced tool call");
-				return null;
+			for (const model of candidates) {
+				if (request.signal?.aborted) return null;
+				// The ceiling still applies to an explicitly configured `smol` role — a role can
+				// point anywhere, including at a frontier model.
+				if (!deps.model && model.cost.input > costCeiling) {
+					logger.debug("decisions/llm: declining, model too expensive for a decision", {
+						id: modelKey(model),
+						inputCostPerMTok: model.cost.input,
+						ceiling: costCeiling,
+					});
+					return null;
+				}
+				const apiKey = await deps.registry.getApiKey(model, deps.sessionId);
+				if (!apiKey) {
+					logger.debug("decisions/llm: no credential", { provider: model.provider, id: model.id });
+					return null;
+				}
+				// The credential lookup awaited; an abort in that window would be missed by
+				// the listener registered below.
+				if (request.signal?.aborted) return null;
+
+				const controller = new AbortController();
+				const abortOnCaller = () => controller.abort();
+				request.signal?.addEventListener("abort", abortOnCaller, { once: true });
+				let timedOut = false;
+				const timer = setTimeout(() => {
+					timedOut = true;
+					controller.abort();
+				}, attemptTimeoutMs);
+				const started = Date.now();
+				let response: AssistantMessage;
+				try {
+					response = await complete(
+						model,
+						{
+							systemPrompt: [SYSTEM_PROMPT],
+							messages: [{ role: "user", content: `<state>\n${state}\n</state>`, timestamp: Date.now() }],
+							tools: [buildTool(request.questions)],
+						},
+						{
+							apiKey,
+							maxTokens: model.reasoning ? Math.max(MAX_TOKENS, REASONING_SAFE_MAX_TOKENS) : MAX_TOKENS,
+							disableReasoning: true,
+							toolChoice: { type: "tool", name: TOOL_NAME },
+							signal: controller.signal,
+						},
+					);
+				} catch (error) {
+					// A thrown transport error is as dead as a 404 for our purposes.
+					response = {
+						role: "assistant",
+						content: [],
+						stopReason: "error",
+						errorMessage: String(error),
+					} as unknown as AssistantMessage;
+				} finally {
+					clearTimeout(timer);
+					request.signal?.removeEventListener("abort", abortOnCaller);
+				}
+
+				if (request.signal?.aborted) return null;
+				if (timedOut || response.stopReason === "error" || response.stopReason === "aborted") {
+					const reason = timedOut
+						? `timeout after ${attemptTimeoutMs}ms`
+						: `${response.errorStatus ?? response.stopReason}: ${(response.errorMessage ?? "").slice(0, 200)}`;
+					deadModels.set(modelKey(model), { at: Date.now(), reason });
+					logger.debug("decisions/llm: model failed, trying the next candidate", {
+						id: modelKey(model),
+						reason,
+						durationMs: Date.now() - started,
+					});
+					continue;
+				}
+
+				const args = readToolArguments(response.content);
+				if (!args) {
+					// The provider answered but ignored the forced tool: a model answer, not an
+					// availability problem, so it is neither retried nor remembered as dead.
+					logger.debug("decisions/llm: model did not emit the forced tool call", {
+						id: modelKey(model),
+						stopReason: response.stopReason,
+					});
+					return null;
+				}
+				const answers = toAnswers(request.questions, args);
+				if (Object.keys(answers).length === 0) return null;
+				return {
+					answers,
+					backend: "llm",
+					model: modelKey(model),
+					calibrated: false,
+					durationMs: Date.now() - started,
+				};
 			}
-			const answers = toAnswers(request.questions, args);
-			if (Object.keys(answers).length === 0) return null;
-			return {
-				answers,
-				backend: "llm",
-				model: `${model.provider}/${model.id}`,
-				calibrated: false,
-				durationMs: Date.now() - started,
-			};
+			return null;
 		},
 	};
 }
