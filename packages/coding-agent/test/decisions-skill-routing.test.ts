@@ -97,12 +97,18 @@ test("long prompts are truncated before they are sent", async () => {
 	expect((seen.state ?? "").length).toBeLessThanOrEqual(4000);
 });
 
+// Activation state is written under a session; without an explicit id the hook
+// falls back to `detectLatestSession(cwd)`, which throws on a host with no live
+// SKC session (CI) and silently binds to the developer's own session locally.
+const ROUTING_TEST_SESSION_ID = "decisions-skill-routing-test";
+
 test("keyword match wins and the semantic stage is never consulted", async () => {
 	const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "skc-routing-"));
 	try {
 		let consulted = false;
 		const state = await recordSkillActivation({
 			cwd,
+			sessionId: ROUTING_TEST_SESSION_ID,
 			text: "consensus plan for the migration",
 			resolveSkillSemantically: async () => {
 				consulted = true;
@@ -121,6 +127,7 @@ test("a throwing semantic stage leaves activation exactly as keyword-only", asyn
 	try {
 		const state = await recordSkillActivation({
 			cwd,
+			sessionId: ROUTING_TEST_SESSION_ID,
 			text: "이 테스트 왜 깨지는지 봐줘",
 			resolveSkillSemantically: async () => {
 				throw new Error("model offline");
@@ -139,6 +146,7 @@ test("semantic activation is recorded when the keyword table misses", async () =
 		expect(detectPrimarySkillKeyword(prompt)).toBeNull();
 		const state = await recordSkillActivation({
 			cwd,
+			sessionId: ROUTING_TEST_SESSION_ID,
 			text: prompt,
 			resolveSkillSemantically: async () => "ralplan",
 		});
