@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.6.3] - 2026-09-25
+
 ### Changed
 
 - Bumped the advertised Gemini CLI version from 0.52.0 to 0.61.0. The repaired drift checker surfaced it nine minor versions behind upstream; the User-Agent exists to claim the rate-limit tier the real CLI gets, and a stale claim is what eventually earns a throttle or a rejection. Unlike the Anthropic bump this one is **not** verified against the live service — there is no Google credential on the release machine, so only the emitted header was checked (`GeminiCLI/0.61.0/gemini-3.1-pro-preview (darwin; arm64; terminal)`). `SKC_AI_GEMINI_CLI_VERSION` overrides it without a release if 0.61.0 ever behaves worse than 0.52.0.
