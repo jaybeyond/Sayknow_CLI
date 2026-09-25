@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Bumped the advertised Gemini CLI version from 0.52.0 to 0.61.0. The repaired drift checker surfaced it nine minor versions behind upstream; the User-Agent exists to claim the rate-limit tier the real CLI gets, and a stale claim is what eventually earns a throttle or a rejection. Unlike the Anthropic bump this one is **not** verified against the live service — there is no Google credential on the release machine, so only the emitted header was checked (`GeminiCLI/0.61.0/gemini-3.1-pro-preview (darwin; arm64; terminal)`). `SKC_AI_GEMINI_CLI_VERSION` overrides it without a release if 0.61.0 ever behaves worse than 0.52.0.
+- Bumped the advertised Claude Code client version from 2.1.281 to 2.1.282, tracking upstream's release a day later. Verified live: `claude-opus-5-5`, `claude-opus-5` and `claude-sonnet-5` all answer HTTP 200 through the OAuth path.
+
 ## [0.6.2] - 2026-09-24
 
 ### Fixed
