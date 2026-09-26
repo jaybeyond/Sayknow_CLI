@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Bumped the advertised Claude Code client version from 2.1.282 to 2.1.283, keeping the drift checker green as upstream ships roughly daily. This one is housekeeping, not a fix: 2.1.282 was already above the 2.1.280 gate and every shipped Anthropic preset answered HTTP 200 on it. Verified live on 2.1.283 too — `claude-opus-5-5`, `claude-opus-5`, `claude-sonnet-5` and `claude-fable-5` all return 200 through the OAuth path.
+
 ## [0.6.3] - 2026-09-25
 
 ### Changed
