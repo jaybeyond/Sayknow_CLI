@@ -123,10 +123,14 @@ describe("ThemeSelectorComponent input handling", () => {
 		}
 		expect(focused).toBe(selector.getSelectList());
 
-		selector.getSelectList().handleInput("\x1b[B");
-		selector.getSelectList().handleInput("\n");
+		const list = selector.getSelectList();
+		list.handleInput("\x1b[B");
+		const target = list.getSelectedItem()?.value;
+		expect(target).toBeDefined();
+		expect(target).not.toBe("red-octopus");
+		list.handleInput("\n");
 
-		expect(settings.get("theme.dark")).toBe("blue-octopus");
+		expect(settings.get("theme.dark")).toBe(target);
 		expect(ctx.ui.setFocus).toHaveBeenLastCalledWith(ctx.editor);
 		expect(ctx.statusLine.invalidate).toHaveBeenCalled();
 		expect(ctx.updateEditorTopBorder).toHaveBeenCalled();

@@ -47,6 +47,8 @@ export const esSettings: Record<string, string> = {
 	"set:statusLine.preset:o:custom:d": "Segmentos definidos por el usuario",
 	"set:statusLine.separator:l": "Separador de la barra de estado",
 	"set:statusLine.separator:d": "Estilo de los separadores entre segmentos",
+	"set:statusLine.separator:o:dot:l": "Punto",
+	"set:statusLine.separator:o:dot:d": "Puntos medios sobre el fondo del terminal (predeterminado de SKC)",
 	"set:statusLine.separator:o:powerline:d": "Flechas sólidas (Nerd Font)",
 	"set:statusLine.separator:o:powerline-thin:l": "Chevron fino",
 	"set:statusLine.separator:o:powerline-thin:d": "Flechas finas (Nerd Font)",

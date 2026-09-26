@@ -48,6 +48,8 @@ All tokens below are required in `colors`.
 
 `selectedBg`, `userMessageBg`, `customMessageBg`, `toolPendingBg`, `toolSuccessBg`, `toolErrorBg`, `statusLineBg`
 
+In the terminal, user prompts, tool blocks, and the composer are drawn on the bare terminal background with a colored rail (`▌` for prompts and the composer, `│` for tool output); they do not paint `userMessageBg` or the `tool*Bg` tokens. Those tokens remain required: session exports derive their palette from `userMessageBg`, and the status line paints `statusLineBg` behind powerline separators.
+
 ### Message/tool text (5)
 
 `userMessageText`, `customMessageText`, `customMessageLabel`, `toolTitle`, `toolOutput`
@@ -98,7 +100,7 @@ Invalid override keys are ignored and logged (`logger.debug`).
 
 Theme lookup order (`loadThemeJson`):
 
-1. built-in embedded themes (`red-octopus.json`, `blue-octopus.json`, `claude-code.json`, `codex.json`, and `opencode.json` compiled into `defaultThemes`)
+1. built-in embedded themes (`blue-octopus.json`, `red-octopus.json`, `ink-octopus.json`, `glow-octopus.json`, `violet-octopus.json`, `claude-code.json`, `codex.json`, `gruvbox-dark.json`, and `opencode.json` compiled into `defaultThemes`)
 2. custom theme file: `<customThemesDir>/<name>.json`
 
 Custom themes directory comes from `getCustomThemesDir()`:
@@ -163,7 +165,7 @@ Auto theme slot selection uses terminal appearance in this order:
 3. macOS appearance fallback only for the known-broken macOS/Zellij OSC 11 path
 4. dark slot fallback
 
-Built-in theme note: `blue-octopus` is the default SKC theme for both the dark and light slots, and `red-octopus` is a bundled warm, high-contrast alternate. Both are cephalopod brand themes with separate semantic error/warning/diff-removal tokens and octopus-oriented symbol overrides. Three additional bundled migration themes — `claude-code`, `codex`, and `opencode` — mirror the look of those tools for easy eye-migration. All three are dark-classified and recommended for `theme.dark`, but are selectable in either slot; they keep SKC's default symbol identity (no crab-symbol overrides).
+Built-in theme note: `blue-octopus` is the default SKC theme for both the dark and light slots, and `red-octopus` is a bundled warm, high-contrast alternate. Three more dark octopus palettes are bundled: `ink-octopus` (warm graphite with a single amber accent), `glow-octopus` (teal-black with bioluminescent green), and `violet-octopus` (plum-dark with lavender). All five are cephalopod brand themes with separate semantic error/warning/diff-removal tokens and octopus-oriented symbol overrides. Three additional bundled migration themes — `claude-code`, `codex`, and `opencode` — mirror the look of those tools for easy eye-migration. All three are dark-classified and recommended for `theme.dark`, but are selectable in either slot; they keep SKC's default symbol identity (no crab-symbol overrides).
 
 Current defaults from settings schema:
 
@@ -234,7 +236,7 @@ Legacy migration exists: old flat `theme: "name"` is migrated to nested `theme.d
 1. Create file in custom themes dir, e.g. `~/.skc/agent/themes/my-theme.json`.
 2. Include `name`, optional `vars`, and **all required** `colors` tokens.
 3. Optionally include `symbols` and `export`.
-4. Select the theme in Settings (`Display -> Dark theme` or `Display -> Light theme`) depending on which auto slot you want. All bundled themes are selectable: the crustacean defaults `red-octopus` and `blue-octopus`, plus the migration themes `claude-code`, `codex`, and `opencode` (dark-classified, recommended for the dark slot but selectable in either).
+4. Select the theme in Settings (`Display -> Dark theme` or `Display -> Light theme`) depending on which auto slot you want. All bundled themes are selectable: the octopus themes `blue-octopus`, `red-octopus`, `ink-octopus`, `glow-octopus`, and `violet-octopus`, plus the migration themes `claude-code`, `codex`, and `opencode` (dark-classified, recommended for the dark slot but selectable in either).
 
 Minimal skeleton:
 

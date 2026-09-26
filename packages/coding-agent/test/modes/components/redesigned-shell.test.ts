@@ -11,9 +11,10 @@ import { STATUS_LINE_PRESETS } from "@sayknow-cli/coding-agent/modes/components/
 import { UserMessageComponent } from "@sayknow-cli/coding-agent/modes/components/user-message";
 import { WelcomeComponent } from "@sayknow-cli/coding-agent/modes/components/welcome";
 import { resolveWelcomeLogoMode } from "@sayknow-cli/coding-agent/modes/interactive-mode";
-import { getEditorTheme, initTheme } from "@sayknow-cli/coding-agent/modes/theme/theme";
+import { getEditorTheme, initTheme, theme } from "@sayknow-cli/coding-agent/modes/theme/theme";
 import type { AgentSession } from "@sayknow-cli/coding-agent/session/agent-session";
 import { type TUI, visibleWidth } from "@sayknow-cli/tui";
+import { ToolExecutionComponent } from "../../../src/modes/components/tool-execution";
 import { StatusLineComponent } from "../../../src/modes/components/tool-status-header";
 
 function createFooterSession(): AgentSession {
@@ -93,18 +94,35 @@ beforeAll(async () => {
 });
 
 describe("redesigned interactive shell chrome", () => {
-	it("renders opencode-style minimal user and sayknow turns", () => {
-		const user = Bun.stripANSI(new UserMessageComponent("hello").render(80).join("\n"));
+	it("renders the user prompt behind a rail instead of a labelled bubble", () => {
+		const lines = new UserMessageComponent("hello\n\nsecond paragraph").render(80);
+		const plain = lines.map(line => Bun.stripANSI(line).replace(/\x1b\]133;[ABC]\x07/g, ""));
+		const body = plain.slice(1);
+
+		expect(plain[0]!.trim()).toBe("");
+		for (const line of body) expect(line.startsWith("▌ ")).toBe(true);
+		expect(body.join("\n")).toContain("▌ hello");
+		expect(body.join("\n")).toContain("▌ second paragraph");
+		expect(plain.join("\n")).not.toContain("user");
+		// No filled bubble: the prompt sits on the transcript background.
+		expect(lines.join("")).not.toMatch(/\x1b\[48;/);
+	});
+
+	it("marks replayed prompts as replay on a dim rail", () => {
+		const plain = Bun.stripANSI(new UserMessageComponent("hello", true).render(80).join("\n"));
+
+		expect(plain).toContain("▌ replay");
+		expect(plain).toContain("▌ hello");
+	});
+
+	it("renders sayknow turns without the generic assistant label", () => {
 		const assistant = Bun.stripANSI(
 			new AssistantMessageComponent(createAssistantMessage("hi")).render(80).join("\n"),
 		);
 
-		expect(user).toContain("user");
 		expect(assistant).toContain("sayknow");
-		expect(user).not.toContain("operator input");
 		expect(assistant).not.toContain("assistant");
 		expect(assistant).not.toContain("sayknow reply");
-		expect(user).not.toContain("▸");
 		expect(assistant).not.toContain("▌");
 	});
 
@@ -140,10 +158,11 @@ describe("redesigned interactive shell chrome", () => {
 		const lines = component.render(54);
 		const rendered = Bun.stripANSI(lines.join("\n"));
 
-		expect(rendered).toContain("Coding should feel like thinking.");
-		expect(rendered).toContain("╔═╗╔═╗╦ ╦╦╔═╔╗╔╔═╗╦ ╦");
-		expect(rendered).toContain("╚═╝╩ ╩ ╩ ╩ ╩╝╚╝╚═╝╚╩╝");
-		expect(rendered).not.toContain("●");
+		expect(rendered).toContain("Sayknow-CLI");
+		expect(rendered).toContain("gpt-5.5");
+		// No enclosing box and no hero wordmark: the ledger is borderless.
+		expect(rendered).not.toContain("╭");
+		expect(rendered).not.toContain("╔═╗");
 		for (const line of lines) {
 			expect(visibleWidth(line)).toBeLessThanOrEqual(54);
 		}
@@ -165,31 +184,17 @@ describe("redesigned interactive shell chrome", () => {
 		}
 	});
 
-	it("renders the brand wordmark even when an ASCII-safe logo is requested", () => {
-		// The Sayknow fork ships a single SAYKNOW wordmark for every logo mode, so an
-		// "ascii" request still resolves to the brand wordmark — never the upstream claw art.
-		const component = new WelcomeComponent("1.2.3", "gpt-5.5", "openai", [], [], "ascii");
-		const lines = component.render(54);
-		const rendered = Bun.stripANSI(lines.join("\n"));
+	it("draws the header rule with ASCII glyphs when an ASCII-safe banner is requested", () => {
+		const ascii = Bun.stripANSI(
+			new WelcomeComponent("1.2.3", "gpt-5.5", "openai", [], [], "ascii").render(54).join("\n"),
+		);
+		const unicode = Bun.stripANSI(
+			new WelcomeComponent("1.2.3", "gpt-5.5", "openai", [], [], "unicode").render(54).join("\n"),
+		);
 
-		expect(rendered).toContain("╔═╗╔═╗╦ ╦╦╔═╔╗╔╔═╗╦ ╦");
-		expect(rendered).not.toContain("+----------------+");
-		for (const line of lines) {
-			expect(visibleWidth(line)).toBeLessThanOrEqual(54);
-		}
-	});
-
-	it("renders the brand wordmark even when a square-corner logo is requested", () => {
-		const component = new WelcomeComponent("1.2.3", "gpt-5.5", "openai", [], [], "square");
-		const lines = component.render(54);
-		const rendered = Bun.stripANSI(lines.join("\n"));
-
-		expect(rendered).toContain("╔═╗╔═╗╦ ╦╦╔═╔╗╔╔═╗╦ ╦");
-		expect(rendered).not.toContain("┌────────────────┐");
-		expect(rendered).not.toContain("+----------------+");
-		for (const line of lines) {
-			expect(visibleWidth(line)).toBeLessThanOrEqual(54);
-		}
+		expect(ascii).toContain("-".repeat(54));
+		expect(ascii).not.toContain("─");
+		expect(unicode).toContain("─".repeat(54));
 	});
 
 	it("resolves welcome banner auto and manual override modes", () => {
@@ -248,6 +253,30 @@ describe("redesigned interactive shell chrome", () => {
 		}
 	});
 
+	it("draws tool results as an unfilled rail instead of a boxed card", () => {
+		const ui = { requestRender: () => {} } as unknown as TUI;
+		const render = (isError: boolean) => {
+			const tool = new ToolExecutionComponent("bash", { command: "git push" }, {}, undefined, ui);
+			tool.updateResult({ content: [{ type: "text", text: "fatal: no remote" }], isError }, false);
+			return tool.render(60);
+		};
+
+		for (const isError of [false, true]) {
+			const lines = render(isError);
+			const plain = lines.map(line => Bun.stripANSI(line));
+			const body = plain.filter(line => line.trim() !== "");
+
+			expect(lines.join("")).not.toMatch(/\x1b\[48;/);
+			for (const boxGlyph of ["┌", "┐", "└", "┘", "╭", "╯"]) expect(plain.join("\n")).not.toContain(boxGlyph);
+			expect(body[0]).toContain("Bash");
+			expect(body.slice(1).every(line => /^\s[│├]/.test(line))).toBe(true);
+			expect(plain.join("\n")).toContain("fatal: no remote");
+			for (const line of lines) expect(visibleWidth(line)).toBeLessThanOrEqual(60);
+		}
+		// The rail, not a fill, carries the error state.
+		expect(render(true).join("")).toContain(theme.fg("error", `${theme.boxSharp.vertical} `));
+	});
+
 	it("keeps eval execution headers compact and mode-labeled", () => {
 		const ui = { requestRender: () => {} } as unknown as TUI;
 		const py = new EvalExecutionComponent("print('ready')", ui, false, "python");
@@ -270,8 +299,7 @@ describe("redesigned interactive shell chrome", () => {
 		const rendered = new UserMessageComponent("hello").render(80);
 
 		expect(rendered[0]).not.toContain("\x1b]133;A\x07");
-		expect(rendered[1]).not.toContain("\x1b]133;A\x07");
-		expect(rendered[2]).toContain("\x1b]133;A\x07");
+		expect(rendered[1]).toContain("\x1b]133;A\x07");
 		expect(rendered[rendered.length - 1]).toContain("\x1b]133;B\x07\x1b]133;C\x07");
 	});
 

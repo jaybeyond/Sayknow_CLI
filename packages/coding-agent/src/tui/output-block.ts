@@ -1,5 +1,5 @@
 /**
- * Bordered output container with optional header and sections.
+ * Railed output container with optional header and sections.
  */
 import {
 	ImageProtocol,
@@ -13,7 +13,7 @@ import type { Theme } from "../modes/theme/theme";
 import { containsSixelSequence, getSixelLineMask } from "../utils/sixel";
 import type { State } from "./types";
 import type { RenderCache } from "./utils";
-import { getStateBgColor, Hasher, padToWidth, truncateToWidth } from "./utils";
+import { Hasher, padToWidth, truncateToWidth } from "./utils";
 
 export interface OutputBlockOptions {
 	header?: string;
@@ -21,17 +21,25 @@ export interface OutputBlockOptions {
 	state?: State;
 	sections?: Array<{ label?: string; lines: string[] }>;
 	width: number;
-	applyBg?: boolean;
 }
 
+/**
+ * Render a tool output block as an open rail: a header line, then content hung
+ * off a single left rule in the state color. There is no enclosing box and no
+ * filled background in any state; the rail color alone carries running/success/error.
+ *
+ * ```
+ * ✓ Bash · 0.4s
+ * │ $ bun test
+ * ├ Output
+ * │ 12 pass
+ * ```
+ */
 export function renderOutputBlock(options: OutputBlockOptions, theme: Theme): string[] {
-	const { header, headerMeta, state, sections = [], width, applyBg = true } = options;
-	const h = theme.boxSharp.horizontal;
-	const v = theme.boxSharp.vertical;
-	const cap = h.repeat(3);
+	const { header, headerMeta, state, sections = [], width } = options;
 	const lineWidth = Math.max(0, width);
-	// Border colors: running/pending use accent, success uses dim (gray), error/warning keep their colors
-	const borderColor: "error" | "warning" | "accent" | "dim" =
+	// Rail colors: running/pending use accent, success recedes to dim, error/warning keep their colors.
+	const railColor: "error" | "warning" | "accent" | "dim" =
 		state === "error"
 			? "error"
 			: state === "warning"
@@ -39,53 +47,19 @@ export function renderOutputBlock(options: OutputBlockOptions, theme: Theme): st
 				: state === "running" || state === "pending"
 					? "accent"
 					: "dim";
-	const border = (text: string) => theme.fg(borderColor, text);
-	const bgFn = (() => {
-		if (!state || !applyBg) return undefined;
-		const bgAnsi = theme.getBgAnsi(getStateBgColor(state));
-		// Keep block background stable even if inner content contains SGR resets (e.g. "\x1b[0m"),
-		// which would otherwise clear the outer background mid-line.
-		return (text: string) => {
-			const stabilized = text
-				.replace(/\x1b\[(?:0)?m/g, m => `${m}${bgAnsi}`)
-				.replace(/\x1b\[49m/g, m => `${m}${bgAnsi}`);
-			return `${bgAnsi}${stabilized}\x1b[49m`;
-		};
-	})();
-
-	const buildBarLine = (leftChar: string, rightChar: string, label?: string, meta?: string): string => {
-		const left = border(`${leftChar}${cap}`);
-		const right = border(rightChar);
-		if (lineWidth <= 0) return left + right;
-		const labelText = [label, meta].filter(Boolean).join(theme.sep.dot);
-		const rawLabel = labelText ? ` ${labelText} ` : " ";
-		const leftWidth = visibleWidth(left);
-		const rightWidth = visibleWidth(right);
-		const maxLabelWidth = Math.max(0, lineWidth - leftWidth - rightWidth);
-		const trimmedLabel = truncateToWidth(rawLabel, maxLabelWidth);
-		const labelWidth = visibleWidth(trimmedLabel);
-		const fillCount = Math.max(0, lineWidth - leftWidth - labelWidth - rightWidth);
-		return `${left}${trimmedLabel}${border(h.repeat(fillCount))}${right}`;
-	};
-
-	const contentPrefix = border(`${v} `);
-	const contentSuffix = border(v);
-	const contentWidth = Math.max(0, lineWidth - visibleWidth(contentPrefix) - visibleWidth(contentSuffix));
+	const rail = (text: string) => theme.fg(railColor, text);
 	const lines: string[] = [];
+	const labelText = [header, headerMeta].filter(Boolean).join(theme.sep.dot);
+	if (labelText) lines.push(padToWidth(truncateToWidth(labelText, lineWidth), lineWidth));
 
-	lines.push(
-		padToWidth(buildBarLine(theme.boxSharp.topLeft, theme.boxSharp.topRight, header, headerMeta), lineWidth, bgFn),
-	);
+	const contentPrefix = rail(`${theme.boxSharp.vertical} `);
+	const contentWidth = Math.max(0, lineWidth - visibleWidth(contentPrefix));
 
-	const hasSections = sections.length > 0;
-	const normalizedSections = hasSections ? sections : [{ lines: [] }];
-
-	for (let i = 0; i < normalizedSections.length; i++) {
-		const section = normalizedSections[i];
+	for (const section of sections) {
 		if (section.label) {
-			lines.push(
-				padToWidth(buildBarLine(theme.boxSharp.teeRight, theme.boxSharp.teeLeft, section.label), lineWidth, bgFn),
-			);
+			const tee = rail(`${theme.boxSharp.teeRight} `);
+			const label = truncateToWidth(theme.fg("dim", section.label), contentWidth);
+			lines.push(padToWidth(`${tee}${label}`, lineWidth));
 		}
 		const allLines = section.lines.flatMap(l => l.split("\n"));
 		const fallbackActive = isTerminalGraphicsFallbackActive();
@@ -102,18 +76,13 @@ export function renderOutputBlock(options: OutputBlockOptions, theme: Theme): st
 			const wrappedLines = wrapTextWithAnsi(line.trimEnd(), contentWidth);
 			for (const wrappedLine of wrappedLines) {
 				const innerPadding = padding(Math.max(0, contentWidth - visibleWidth(wrappedLine)));
-				const fullLine = `${contentPrefix}${wrappedLine}${innerPadding}${contentSuffix}`;
-				lines.push(padToWidth(fullLine, lineWidth, bgFn));
+				lines.push(padToWidth(`${contentPrefix}${wrappedLine}${innerPadding}`, lineWidth));
 			}
 		}
 	}
 
-	const bottomLeft = border(`${theme.boxSharp.bottomLeft}${cap}`);
-	const bottomRight = border(theme.boxSharp.bottomRight);
-	const bottomFillCount = Math.max(0, lineWidth - visibleWidth(bottomLeft) - visibleWidth(bottomRight));
-	const bottomLine = `${bottomLeft}${border(h.repeat(bottomFillCount))}${bottomRight}`;
-	lines.push(padToWidth(bottomLine, lineWidth, bgFn));
-
+	// A block with neither header nor content still marks its place with a bare rail row.
+	if (lines.length === 0) lines.push(padToWidth(rail(theme.boxSharp.vertical), lineWidth));
 	return lines;
 }
 
@@ -147,7 +116,6 @@ export class CachedOutputBlock {
 		h.optional(options.header);
 		h.optional(options.headerMeta);
 		h.optional(options.state);
-		h.bool(options.applyBg ?? true);
 		h.bool(isTerminalGraphicsFallbackActive());
 		if (options.sections) {
 			for (const s of options.sections) {

@@ -427,6 +427,7 @@ export class Editor implements Component, Focusable {
 	/** Display width of the cursorOverride glyph (needed because override may contain ANSI escapes). */
 	cursorOverrideWidth: number | undefined;
 	#promptGutter: string | undefined;
+	#railGutter: string | undefined;
 	#inputPrefix: string | undefined;
 	#inputPrefixWidth = 0;
 	#placeholder: string | undefined;
@@ -564,6 +565,16 @@ export class Editor implements Component, Focusable {
 
 	setPromptGutter(promptGutter: string | undefined): void {
 		this.#promptGutter = promptGutter;
+		this.#invalidateLayoutCache();
+	}
+
+	/**
+	 * Borderless rail: draw `glyph` in the current `borderColor` at the start of
+	 * every input row (not just the first), followed by one space. Takes
+	 * precedence over `setPromptGutter` and is ignored while the border is visible.
+	 */
+	setRailGutter(glyph: string | undefined): void {
+		this.#railGutter = glyph;
 		this.#invalidateLayoutCache();
 	}
 
@@ -732,21 +743,32 @@ export class Editor implements Component, Focusable {
 	}
 
 	#getPromptGutterWidth(width: number, paddingX: number): number {
-		if (this.#borderVisible || !this.#promptGutter) return 0;
+		if (this.#borderVisible) return 0;
+		const gutterWidth = this.#railGutter
+			? visibleWidth(this.#railGutter) + 1
+			: this.#promptGutter
+				? visibleWidth(this.#promptGutter)
+				: 0;
+		if (gutterWidth === 0) return 0;
 		const chromeWidth = 2 * this.#getHorizontalChromeWidth(paddingX);
 		const availableWidth = Math.max(0, width - chromeWidth);
-		return Math.min(visibleWidth(this.#promptGutter), availableWidth);
+		return Math.min(gutterWidth, availableWidth);
 	}
 
 	#getPromptGutter(
 		width: number,
 		paddingX: number,
 	): { firstLine: string; continuation: string; width: number } | undefined {
-		if (this.#borderVisible || !this.#promptGutter) return undefined;
+		if (this.#borderVisible || !(this.#railGutter || this.#promptGutter)) return undefined;
 		const gutterWidth = this.#getPromptGutterWidth(width, paddingX);
 		if (gutterWidth === 0) return undefined;
+		if (this.#railGutter) {
+			// Colored at render time so mode/thinking border colors reach the rail.
+			const rail = this.borderColor(sliceByColumn(`${this.#railGutter} `, 0, gutterWidth, true));
+			return { firstLine: rail, continuation: rail, width: gutterWidth };
+		}
 		return {
-			firstLine: sliceByColumn(this.#promptGutter, 0, gutterWidth, true),
+			firstLine: sliceByColumn(this.#promptGutter ?? "", 0, gutterWidth, true),
 			continuation: padding(gutterWidth),
 			width: gutterWidth,
 		};
@@ -1559,6 +1581,7 @@ export class Editor implements Component, Focusable {
 				inputPrefixWidth: this.#inputPrefixWidth,
 				placeholder: this.#placeholder,
 				promptGutter: this.#promptGutter,
+				railGutter: this.#railGutter,
 				useTerminalCursor: this.#useTerminalCursor,
 				cursorOverride: this.cursorOverride,
 				cursorOverrideWidth: this.cursorOverrideWidth,

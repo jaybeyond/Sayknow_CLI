@@ -1,3 +1,4 @@
+import * as path from "node:path";
 import { type Agent, type AgentMessage, ThinkingLevel } from "@sayknow-cli/agent-core";
 import type { CompactionOutcome } from "@sayknow-cli/agent-core/compaction";
 import type { AssistantMessage, ImageContent, Message, UsageReport } from "@sayknow-cli/ai";
@@ -24,6 +25,7 @@ import {
 	KeybindingsManager,
 	type KeyDisplayContext,
 } from "../config/keybindings";
+import { getModelProfilePresentation } from "../config/model-profiles";
 import { isSettingsInitialized, type Settings, settings } from "../config/settings";
 import { DEFAULT_SKC_DEFINITION_NAMES } from "../defaults/skc-defaults";
 import type {
@@ -46,10 +48,13 @@ import type { AgentSession, AgentSessionEvent } from "../session/agent-session";
 import { HistoryStorage } from "../session/history-storage";
 import type { SessionContext, SessionManager } from "../session/session-manager";
 import { getRecentSessions, getSessionMessageEntryId } from "../session/session-manager";
+import { loadProjectContextFiles } from "../system-prompt";
 import type { LspStartupServerInfo } from "../tools";
+import { shortenPath } from "../tools/render-utils";
 import { formatPhaseDisplayName } from "../tools/todo-write";
 import { copyToClipboard } from "../utils/clipboard";
 import type { EventBus } from "../utils/event-bus";
+import * as gitUtils from "../utils/git";
 import { getSessionAccentAnsi, getSessionAccentHex } from "../utils/session-color";
 import { popTerminalTitle, pushTerminalTitle, setSessionTerminalTitle } from "../utils/title-generator";
 import type { AssistantMessageComponent } from "./components/assistant-message";
@@ -68,6 +73,7 @@ import {
 	warnWhenPetCapabilitySettled,
 } from "./components/pet-capability";
 import { type PetMode, SayknowPetWidget } from "./components/sayknow-pet-widget";
+import { resolveCurrentBranch } from "./components/status-line/git-utils";
 import type { ToolExecutionHandle } from "./components/tool-execution";
 import { StatusLineComponent } from "./components/tool-status-header";
 import { composeToolText } from "./components/tool-transcript-format";
@@ -76,6 +82,8 @@ import {
 	WelcomeComponent,
 	type WelcomeLogoMode,
 	type LspServerInfo as WelcomeLspServerInfo,
+	type WelcomeRoleBinding,
+	type WelcomeSnapshot,
 } from "./components/welcome";
 import { BtwController } from "./controllers/btw-controller";
 import { CommandController } from "./controllers/command-controller";
@@ -196,23 +204,24 @@ const HINT_SHIMMER_PALETTE: ShimmerPalette = {
 	high: "borderAccent",
 };
 
-function getDefaultInputPrefix(): string {
-	return `${theme.fg("accent", ">")} `;
-}
-
 function getShellInputPrefix(isNoContext: boolean): string {
 	const shellLabel = isNoContext
 		? theme.fg("warning", theme.bold("shell no-context"))
 		: theme.fg("bashMode", theme.bold("shell"));
-	return `${shellLabel} ${getDefaultInputPrefix()}`;
+	return `${shellLabel} `;
 }
 
-function configureDefaultComposerChrome(editor: CustomEditor): void {
-	editor.setBorderVisible(true);
-	editor.setBorderStyle("round");
-	editor.setClosedBorderBox(true);
+/**
+ * The composer is an open rail, not a box: every input row starts with the same
+ * rail glyph a submitted prompt keeps in the transcript, colored by the editor's
+ * border color (session accent, thinking level, shell/python mode).
+ */
+export function configureDefaultComposerChrome(editor: CustomEditor): void {
+	editor.setBorderVisible(false);
+	editor.setClosedBorderBox(false);
 	editor.setPromptGutter(undefined);
-	editor.setInputPrefix(getDefaultInputPrefix());
+	editor.setRailGutter(theme.rail.user);
+	editor.setInputPrefix(undefined);
 	editor.setPlaceholder(getDefaultComposerPlaceholder());
 	editor.setPaddingX(1);
 	editor.setRightGutterWidth(COMPOSER_RIGHT_GUTTER_WIDTH);
@@ -744,6 +753,7 @@ export class InteractiveMode implements InteractiveModeContext {
 					collapseChangelog: settings.get("collapseChangelog"),
 					keyDisplayContext: this.#keyDisplayContext,
 					skipLogoAnimation,
+					snapshot: this.#buildWelcomeSnapshot(),
 				},
 			);
 
@@ -873,6 +883,7 @@ export class InteractiveMode implements InteractiveModeContext {
 							error: error instanceof Error ? error.message : String(error),
 						});
 					});
+				this.#probeWelcomeWorkspace(welcomeComponent);
 			}, 0);
 			recentSessionsTimer.unref?.();
 		}
@@ -1206,8 +1217,10 @@ export class InteractiveMode implements InteractiveModeContext {
 			}
 		}
 		if (!this.isBashMode) {
-			this.editor.setInputPrefix(getDefaultInputPrefix());
+			this.editor.setInputPrefix(undefined);
 		}
+		// Re-read the glyph so a symbol-preset switch (unicode/nerd/ascii) reaches the rail.
+		this.editor.setRailGutter(theme.rail.user);
 		this.editor.setPlaceholder(this.#getComposerPlaceholder());
 		this.#setComposerTopBorder();
 		this.ui.requestRender();
@@ -1621,7 +1634,82 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 
 		this.#welcomeComponent.setLspServers(this.#getWelcomeLspServers());
+		// LSP startup settles around the same time the MCP connections do.
+		this.#welcomeComponent.setSnapshot({ mcp: this.#welcomeMcpSummary() });
 		this.ui.requestRender();
+	}
+
+	/** Facts the launch ledger can show synchronously, before any probe runs. */
+	#buildWelcomeSnapshot(): WelcomeSnapshot {
+		const projectDir = getProjectDir();
+		let branch: string | null = null;
+		try {
+			branch = resolveCurrentBranch(projectDir).branch;
+		} catch {
+			branch = null;
+		}
+		const profileName = this.session.getActiveModelProfile() ?? settings.get("modelProfile.default");
+		return {
+			cwd: shortenPath(projectDir),
+			branch,
+			thinkingLevel: this.session.thinkingLevel,
+			profile: profileName ? getModelProfilePresentation(profileName).displayName : undefined,
+			roles: this.#welcomeRoleBindings(),
+			mcp: this.#welcomeMcpSummary(),
+			skills: this.session.skills.length,
+		};
+	}
+
+	/** Role agents in their canonical order, with the provider prefix dropped for width. */
+	#welcomeRoleBindings(): WelcomeRoleBinding[] {
+		const overrides = settings.get("task.agentModelOverrides") as Record<string, unknown> | undefined;
+		if (!overrides) return [];
+		const bindings: WelcomeRoleBinding[] = [];
+		for (const role of ["executor", "planner", "critic", "architect"]) {
+			const selector = overrides[role];
+			if (typeof selector !== "string" || selector.length === 0) continue;
+			const slash = selector.indexOf("/");
+			bindings.push({ role, model: slash >= 0 ? selector.slice(slash + 1) : selector });
+		}
+		return bindings;
+	}
+
+	#welcomeMcpSummary(): { connected: number; total: number } {
+		const manager = this.mcpManager;
+		if (!manager) return { connected: 0, total: 0 };
+		return { connected: manager.getConnectedServers().length, total: manager.getAllServerNames().length };
+	}
+
+	/** Fill in the ledger facts that need I/O: git change counts and project instruction files. */
+	#probeWelcomeWorkspace(welcomeComponent: WelcomeComponent): void {
+		const projectDir = getProjectDir();
+		const apply = (patch: WelcomeSnapshot): void => {
+			if (this.#welcomeComponent !== welcomeComponent) return;
+			welcomeComponent.setSnapshot(patch);
+			this.ui.requestRender();
+		};
+		void gitUtils.status
+			.summary(projectDir)
+			.then(gitChanges => apply({ gitChanges }))
+			.catch(() => apply({ gitChanges: null }));
+		void gitUtils.log
+			.onelines(projectDir, 3)
+			.then(recentCommits => apply({ recentCommits }))
+			.catch(() => {});
+		void loadProjectContextFiles({ cwd: projectDir })
+			.then(files =>
+				apply({
+					contextFiles: files.map(file => {
+						const relative = path.relative(projectDir, file.path);
+						return relative.startsWith("..") ? shortenPath(file.path) : relative;
+					}),
+				}),
+			)
+			.catch(error => {
+				logger.debug("Failed to load context files for welcome screen", {
+					error: error instanceof Error ? error.message : String(error),
+				});
+			});
 	}
 
 	#getWorkingMessageAccent(): WorkingMessageAccent | undefined {

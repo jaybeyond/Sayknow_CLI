@@ -162,6 +162,9 @@ Wählen Sie über Settings (`Appearance -> Dark theme` / `Light theme`) oder `/t
 | --- | --- | --- |
 | `blue-octopus` | Standard-SKC-Identität — blaue Oktopus-Palette mit tentakelblauen Akzenten. | Standard für dunkle und helle Terminals. |
 | `red-octopus` | Warme rote Oktopus-Variante mit starkem Status-Kontrast. | Kontrastreiche dunkle Alternative. |
+| `ink-octopus` | Oktopus-Tinte — warmer Graphit-Hintergrund, papierfarbener Text, ein einziger Bernstein-Akzent. | Ruhige, ablenkungsarme dunkle Sitzungen. |
+| `glow-octopus` | Tiefsee-Biolumineszenz — Petrol-Schwarz mit leuchtendem Grün und Violett als Zweitfarbe. | Dunkle Terminals mit kräftigem Akzent. |
+| `violet-octopus` | Pflaumendunkel mit Lavendel-Akzenten und Aprikose als Zweitfarbe. | Weiche, farbige dunkle Alternative. |
 | `claude-code` | Von Claude Code inspirierte dunkle Palette mit terrakotta- und pinkfarbenen Highlights. | Claude-Code-Muskelgedächtnis, ohne SKC zu verlassen. |
 | `codex` | Klare dunkle blaugraue Palette mit schärferem Coding-Session-Kontrast. | Ein Codex-ähnlicher dunkler Arbeitsbereich. |
 | `opencode` | Von OpenCode inspirierte dunkle Palette mit kräftigeren Terminal-Akzenten. | OpenCode-Muskelgedächtnis im mitgelieferten Picker. |

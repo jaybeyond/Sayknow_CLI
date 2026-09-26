@@ -289,8 +289,10 @@ export class ToolExecutionComponent extends Container {
 		// Always create both - contentBox for custom tools/bash/tools with renderers, contentText for other built-ins.
 		// Vertical padding is 0: block separation comes solely from the leading Spacer
 		// (1 blank line above each block), matching reference TUIs (083.2).
-		this.#contentBox = new Box(1, 0, (text: string) => theme.bg("toolPendingBg", text));
-		this.#contentText = new Text("", 1, 0, (text: string) => theme.bg("toolPendingBg", text));
+		// Tool blocks sit on the transcript background; state is carried by the rail and
+		// status glyph (see renderOutputBlock), never by a filled card.
+		this.#contentBox = new Box(1, 0);
+		this.#contentText = new Text("", 1, 0);
 
 		// Use Box for custom tools or built-in tools that have renderers
 		const hasRenderer = toolName in toolRenderers;
@@ -607,13 +609,6 @@ export class ToolExecutionComponent extends Container {
 	}
 
 	#updateDisplay(): void {
-		// Set background based on state
-		const bgFn = this.#isPartial
-			? (text: string) => theme.bg("toolPendingBg", text)
-			: this.#result?.isError
-				? (text: string) => theme.bg("toolErrorBg", text)
-				: (text: string) => theme.bg("toolSuccessBg", text);
-
 		// Sync shared mutable render state for component closures
 		this.#renderState.expanded = this.#expanded;
 		this.#renderState.isPartial = this.#isPartial;
@@ -624,8 +619,6 @@ export class ToolExecutionComponent extends Container {
 			const tool = this.#tool;
 			const mergeCallAndResult = Boolean((tool as { mergeCallAndResult?: boolean }).mergeCallAndResult);
 			// Custom tools use Box for flexible component rendering
-			const inline = Boolean((tool as { inline?: boolean }).inline);
-			this.#contentBox.setBgFn(inline ? undefined : bgFn);
 			this.#contentBox.clear();
 
 			// Render call component
@@ -699,7 +692,6 @@ export class ToolExecutionComponent extends Container {
 				| undefined;
 			if (perFileResults && perFileResults.length > 1) {
 				// Multi-file: render each file as its own Box (identical to separate tool calls)
-				this.#contentBox.setBgFn(undefined);
 				this.#contentBox.clear();
 
 				const renderContext = this.#buildRenderContext();
@@ -712,10 +704,7 @@ export class ToolExecutionComponent extends Container {
 						this.#multiFileBoxes.push(spacer);
 						this.addChild(spacer);
 					}
-					const fileBgFn = fileResult.isError
-						? (text: string) => theme.bg("toolErrorBg", text)
-						: (text: string) => theme.bg("toolSuccessBg", text);
-					const fileBox = new Box(1, 0, fileBgFn);
+					const fileBox = new Box(1, 0);
 					try {
 						const resultComponent = renderer.renderResult(
 							{ content: [], details: fileResult, isError: fileResult.isError },
@@ -741,7 +730,7 @@ export class ToolExecutionComponent extends Container {
 					const pendingSpacer = new Spacer(1);
 					this.#multiFileBoxes.push(pendingSpacer);
 					this.addChild(pendingSpacer);
-					const pendingBox = new Box(1, 0, (text: string) => theme.bg("toolPendingBg", text));
+					const pendingBox = new Box(1, 0);
 					const pendingText = renderStatusLine(
 						{
 							icon: "pending",
@@ -757,7 +746,6 @@ export class ToolExecutionComponent extends Container {
 			} else {
 				// Single-file or no result: standard rendering
 				// Inline renderers skip background styling
-				this.#contentBox.setBgFn(renderer.inline ? undefined : bgFn);
 				this.#contentBox.clear();
 
 				const renderContext = this.#buildRenderContext();
@@ -806,7 +794,6 @@ export class ToolExecutionComponent extends Container {
 			}
 		} else {
 			// Other built-in tools: use Text directly with caching
-			this.#contentText.setCustomBgFn(bgFn);
 			this.#contentText.setText(this.#formatToolExecution());
 		}
 

@@ -4,7 +4,14 @@
 
 ### Added
 
+- Three more bundled dark octopus themes, selectable from Settings or `/theme`: `ink-octopus` (warm graphite, paper text, one amber accent), `glow-octopus` (teal-black with bioluminescent green and a violet secondary), and `violet-octopus` (plum-dark with lavender and an apricot secondary). The default stays `blue-octopus`.
 - `/rename` with no argument regenerates the session title from the conversation (the first message plus the latest five) instead of printing usage. A result that lands after a newer prompt or an explicit rename is discarded. `/rename <title>` is unchanged. Ported from upstream #5617.
+
+### Changed
+
+- The launch screen is now a borderless workspace ledger instead of a boxed wordmark. The left column shows what the session is about to run with: workspace path, branch with staged/unstaged/untracked counts, the last three commits, model and provider, reasoning level, active preset, the model bound to each role agent (executor, planner, critic, architect), and tooling (MCP connected/total, skill count, loaded instruction files, LSP status). Git counts, commits, and instruction files are probed after first paint and fill in as they settle. The right column keeps What's New, recent sessions, workflows, and keys. Below 100 columns the two columns stack. Every fact is on screen from the first frame; the sub-second intro only lets color spread top to bottom and never blocks input. `startup.skipLogoAnimation` still disables it.
+- The transcript and composer drop their filled cards for rails. A user prompt sits on the terminal background behind an accent `▌` rail instead of a labelled bubble; replayed prompts get a dim rail and a `replay` tag. Tool output hangs off a single `│` rail under its header (`├` marks a section such as Output) instead of a closed box on a tinted fill; the rail color alone carries running, success, and error. The composer is the same `▌` rail on every input row, colored by session accent, thinking level, or shell/python mode, instead of a rounded box with a `>` prompt; shell mode shows `shell` on the rail.
+- The status line sits on the bare terminal with ` · ` between segments. The new `dot` separator is the default for `statusLine.separator` and every built-in preset that used `slash`; `slash` and the powerline styles stay selectable, and powerline still paints its arrows from `statusLineBg`.
 
 ### Fixed
 

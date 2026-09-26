@@ -47,6 +47,8 @@ export const jaSettings: Record<string, string> = {
 	"set:statusLine.preset:o:custom:d": "ユーザー定義セグメント",
 	"set:statusLine.separator:l": "ステータスライン区切り",
 	"set:statusLine.separator:d": "セグメント間の区切りスタイル",
+	"set:statusLine.separator:o:dot:l": "ドット",
+	"set:statusLine.separator:o:dot:d": "ターミナル背景上の中黒 (SKC 既定)",
 	"set:statusLine.separator:o:powerline:d": "塗りつぶし矢印 (Nerd Font)",
 	"set:statusLine.separator:o:powerline-thin:l": "細いシェブロン",
 	"set:statusLine.separator:o:powerline-thin:d": "細い矢印 (Nerd Font)",

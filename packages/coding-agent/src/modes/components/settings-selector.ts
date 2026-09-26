@@ -379,6 +379,7 @@ class StatusLineCustomEditor extends Container {
 						"Status Line Separator",
 						"Style of separators between segments.",
 						[
+							{ value: "dot", label: "Dot" },
 							{ value: "powerline", label: "Powerline" },
 							{ value: "powerline-thin", label: "Thin chevron" },
 							{ value: "slash", label: "Slash" },

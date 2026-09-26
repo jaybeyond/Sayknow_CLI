@@ -186,7 +186,6 @@ export function renderResult(
 						{ label: theme.fg("toolTitle", "Response"), lines: bodyLines },
 					],
 					width,
-					applyBg: false,
 				},
 				theme,
 			);

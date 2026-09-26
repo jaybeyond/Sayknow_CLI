@@ -444,6 +444,7 @@
 				"separator": {
 					"type": "string",
 					"enum": [
+						"dot",
 						"powerline",
 						"powerline-thin",
 						"slash",
@@ -453,7 +454,7 @@
 						"ascii"
 					],
 					"description": "Style of separators between segments",
-					"default": "slash"
+					"default": "dot"
 				},
 				"sessionAccent": {
 					"type": "boolean",

@@ -48,6 +48,8 @@ export const koSettings: Record<string, string> = {
 	"set:statusLine.preset:o:custom:d": "사용자 정의 세그먼트",
 	"set:statusLine.separator:l": "상태 표시줄 구분자",
 	"set:statusLine.separator:d": "세그먼트 사이 구분자 스타일",
+	"set:statusLine.separator:o:dot:l": "점",
+	"set:statusLine.separator:o:dot:d": "터미널 배경 위 가운뎃점 (SKC 기본값)",
 	"set:statusLine.separator:o:powerline:d": "채워진 화살표 (Nerd Font)",
 	"set:statusLine.separator:o:powerline-thin:l": "얇은 갈매기형",
 	"set:statusLine.separator:o:powerline-thin:d": "얇은 화살표 (Nerd Font)",

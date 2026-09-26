@@ -171,7 +171,7 @@ describe("StatusLineComponent cache red-team coverage", () => {
 		const beforeSeparator = text(component.render(160));
 		const beforeSeparatorStats = component.getCacheStatsForTest();
 		const originalSep = theme.sep;
-		Object.defineProperty(theme, "sep", { configurable: true, get: () => ({ ...originalSep, slash: "X" }) });
+		Object.defineProperty(theme, "sep", { configurable: true, get: () => ({ ...originalSep, dot: "X" }) });
 		const afterSeparator = text(component.render(160));
 		const afterSeparatorStats = component.getCacheStatsForTest();
 		expect(afterSeparator).not.toBe(beforeSeparator);

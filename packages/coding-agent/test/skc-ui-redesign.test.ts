@@ -51,15 +51,19 @@ describe("SKC red-octopus redesign defaults", () => {
 	it("exposes bundled selectable themes while preserving red-octopus and blue-octopus defaults", async () => {
 		const themes = await themeModule.getAvailableThemes();
 
-		expect(themes).toEqual(["blue-octopus", "claude-code", "codex", "gruvbox-dark", "opencode", "red-octopus"]);
-		expect(Object.keys(defaultThemes).sort()).toEqual([
+		const expected = [
 			"blue-octopus",
 			"claude-code",
 			"codex",
+			"glow-octopus",
 			"gruvbox-dark",
+			"ink-octopus",
 			"opencode",
 			"red-octopus",
-		]);
+			"violet-octopus",
+		];
+		expect(themes).toEqual(expected);
+		expect(Object.keys(defaultThemes).sort()).toEqual(expected);
 		expect(SETTINGS_SCHEMA["theme.dark"].default).toBe("blue-octopus");
 		expect(SETTINGS_SCHEMA["theme.light"].default).toBe("blue-octopus");
 	});
@@ -152,9 +156,9 @@ describe("SKC red-octopus redesign defaults", () => {
 	});
 
 	it("keeps public status presets on the SKC identity", () => {
-		expect(SETTINGS_SCHEMA["statusLine.separator"].default).toBe("slash");
+		expect(SETTINGS_SCHEMA["statusLine.separator"].default).toBe("dot");
 		expect(STATUS_LINE_PRESETS.default.leftSegments).not.toContain("pi");
-		expect(STATUS_LINE_PRESETS.default.separator).toBe("slash");
+		expect(STATUS_LINE_PRESETS.default.separator).toBe("dot");
 		expect(STATUS_LINE_PRESETS.full.leftSegments).toContain("sayknow");
 		expect(STATUS_LINE_PRESETS.nerd.leftSegments).toContain("sayknow");
 		for (const [name, preset] of Object.entries(STATUS_LINE_PRESETS)) {

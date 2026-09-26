@@ -2,8 +2,7 @@
  * Shared helpers for tool-rendered UI components.
  */
 import { padding, visibleWidth } from "@sayknow-cli/tui";
-import type { Theme, ThemeBg } from "../modes/theme/theme";
-import type { State } from "./types";
+import type { Theme } from "../modes/theme/theme";
 
 export { Ellipsis, truncateToWidth } from "@sayknow-cli/tui";
 
@@ -94,10 +93,4 @@ export function padToWidth(text: string, width: number, bgFn?: (s: string) => st
 	const paddingNeeded = Math.max(0, width - visibleWidth(text));
 	const padded = paddingNeeded > 0 ? text + padding(paddingNeeded) : text;
 	return bgFn ? bgFn(padded) : padded;
-}
-
-export function getStateBgColor(state: State): ThemeBg {
-	if (state === "success") return "toolSuccessBg";
-	if (state === "error") return "toolErrorBg";
-	return "toolPendingBg";
 }

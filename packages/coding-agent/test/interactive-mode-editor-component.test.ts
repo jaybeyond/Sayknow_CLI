@@ -156,18 +156,15 @@ describe("InteractiveMode.setEditorComponent", () => {
 		expect(mode.chatContainer.render(80).join("\n")).toContain("visible extension message");
 	});
 
-	it("renders the default composer as a closed rounded input box", () => {
+	it("renders the default composer as an open rail, not a box", () => {
 		const lines = mode.editor.render(48).map(stripRenderControls);
 
 		expect(lines.every(line => visibleWidth(line) === 48)).toBe(true);
 		expect(lines.every(line => line.endsWith(" "))).toBe(true);
-		expect(lines[0].trimEnd()).toStartWith("╭");
-		expect(lines[0].trimEnd()).toEndWith("╮");
-		expect(lines.at(-1)!.trimEnd()).toStartWith("╰");
-		expect(lines.at(-1)!.trimEnd()).toEndWith("╯");
-		expect(lines.some(line => line.startsWith("│") && line.includes(">") && line.trimEnd().endsWith("│"))).toBe(true);
-		expect(lines.join("\n")).toContain("Type your message...");
-		expect(lines.join("\n")).not.toContain("›");
+		expect(lines.every(line => line.startsWith(`${theme.rail.user} `))).toBe(true);
+		const joined = lines.join("\n");
+		expect(joined).toContain("Type your message...");
+		for (const boxGlyph of ["╭", "╮", "╰", "╯", "│", "›"]) expect(joined).not.toContain(boxGlyph);
 	});
 
 	it("keeps transcript anchoring registered across live IRC sidebar settings", () => {
@@ -289,9 +286,9 @@ describe("InteractiveMode.setEditorComponent", () => {
 		expect(rendered.anchors[durableRow]).not.toBeNull();
 		const durableId = rendered.anchors[durableRow]?.id;
 		expect(durableId).toBeDefined();
-		const userLabelRow = plainLines.findIndex(line => line.trim() === "user");
-		expect(userLabelRow).toBeGreaterThanOrEqual(0);
-		expect(rendered.anchors[userLabelRow]).toBeNull();
+		const replayLabelRow = plainLines.findIndex(line => line.trim() === `${theme.rail.user} replay`);
+		expect(replayLabelRow).toBeGreaterThanOrEqual(0);
+		expect(rendered.anchors[replayLabelRow]).toBeNull();
 		expect(rendered.lines.join("")).toContain("\x1b]133;A\x07");
 		expect(rendered.lines.join("")).toContain("\x1b]133;B\x07\x1b]133;C\x07");
 		expect(syntheticRow).toBeGreaterThanOrEqual(0);
@@ -454,7 +451,7 @@ describe("InteractiveMode.setEditorComponent", () => {
 		return `${formatKeyHints(newlineKeys, injectedKeyDisplayContext)}: New line`;
 	}
 
-	it("keeps the composer right border inside a trailing gutter for CJK input", () => {
+	it("keeps the rail composer inside its trailing gutter for CJK input", () => {
 		mode.editor.focused = true;
 		mode.editor.setText("이전 커밋들");
 
@@ -464,7 +461,7 @@ describe("InteractiveMode.setEditorComponent", () => {
 		expect(promptLine).toBeDefined();
 		expect(lines.every(line => visibleWidth(line) === 48)).toBe(true);
 		expect(lines.every(line => line.endsWith(" "))).toBe(true);
-		expect(promptLine!.trimEnd()).toEndWith("│");
+		expect(promptLine!).toStartWith(`${theme.rail.user} `);
 		expect(promptLine!).toContain("이전 커밋들");
 	});
 
@@ -559,8 +556,8 @@ describe("InteractiveMode.setEditorComponent", () => {
 
 		const assertComposerFollowsStatusLine = () => {
 			const rendered = mode.ui.render(48).map(stripRenderControls);
-			const composerContentIndex = rendered.findIndex(line => line.includes("Type your message..."));
-			const composerIndex = composerContentIndex - 1;
+			// The rail composer has no top border: its first row is the input row.
+			const composerIndex = rendered.findIndex(line => line.includes("Type your message..."));
 			const statusRows = mode.statusLine.render(48).map(stripRenderControls);
 
 			expect(composerIndex).toBeGreaterThan(0);
@@ -598,7 +595,7 @@ describe("InteractiveMode.setEditorComponent", () => {
 		expect(renderedText).toContain("New session started");
 	});
 
-	it("keeps closed rounded composer chrome for one-line, multiline, and narrow prompts", () => {
+	it("keeps the rail on every composer row for one-line, multiline, and narrow prompts", () => {
 		for (const [width, text] of [
 			[48, "Ask skc to improve the composer"],
 			[48, "first line\nsecond line"],
@@ -609,13 +606,9 @@ describe("InteractiveMode.setEditorComponent", () => {
 
 			expect(lines.every(line => visibleWidth(line) === width)).toBe(true);
 			expect(lines.every(line => line.endsWith(" "))).toBe(true);
-			expect(lines[0].trimEnd()).toStartWith("╭");
-			expect(lines[0].trimEnd()).toEndWith("╮");
-			expect(lines.at(-1)!.trimEnd()).toStartWith("╰");
-			expect(lines.at(-1)!.trimEnd()).toEndWith("╯");
-			expect(lines.some(line => line.startsWith("│") && line.includes(">") && line.trimEnd().endsWith("│"))).toBe(
-				true,
-			);
+			expect(lines.every(line => line.startsWith(`${theme.rail.user} `))).toBe(true);
+			expect(lines.length).toBeGreaterThanOrEqual(text.includes("\n") ? 2 : 1);
+			expect(lines.join("\n")).not.toContain("╭");
 			expect(lines.join("\n")).not.toContain("Type your message...");
 		}
 	});
@@ -629,11 +622,12 @@ describe("InteractiveMode.setEditorComponent", () => {
 
 		const rendered = mode.ui.render(48).map(stripRenderControls);
 		expect(rendered.join("\n")).toContain("keep this focused draft visible");
-		expect(rendered.some(line => line.trimEnd().startsWith("╭"))).toBe(true);
-		expect(rendered.some(line => line.trimEnd().endsWith("╯"))).toBe(true);
+		expect(
+			rendered.some(line => line.startsWith(`${theme.rail.user} `) && line.includes("keep this focused draft")),
+		).toBe(true);
 	});
 
-	it("keeps the default prompt prefix while reflecting shell modes in border color", () => {
+	it("labels shell modes on the rail and colors the rail by mode", () => {
 		mode.editor.setText("!!pwd");
 		mode.isBashMode = true;
 		mode.isBashNoContext = true;
@@ -643,13 +637,7 @@ describe("InteractiveMode.setEditorComponent", () => {
 		expect(mode.editor.borderColor("x")).toBe(theme.fg("warning", "x"));
 		let lines = mode.editor.render(48).map(stripRenderControls);
 		expect(
-			lines.some(
-				line =>
-					line.startsWith("│") &&
-					line.includes("shell no-context") &&
-					line.includes(">") &&
-					line.includes("!!pwd"),
-			),
+			lines.some(line => line.startsWith(`${theme.rail.user} shell no-context `) && line.includes("!!pwd")),
 		).toBe(true);
 
 		mode.isBashNoContext = false;
@@ -657,13 +645,14 @@ describe("InteractiveMode.setEditorComponent", () => {
 
 		expect(mode.editor.borderColor("x")).toBe(theme.getBashModeBorderColor()("x"));
 		lines = mode.editor.render(48).map(stripRenderControls);
-		expect(lines.some(line => line.startsWith("│") && line.includes("shell") && line.includes("!!pwd"))).toBe(true);
+		expect(lines.some(line => line.startsWith(`${theme.rail.user} shell `) && line.includes("!!pwd"))).toBe(true);
+		expect(mode.editor.render(48)[0]).toStartWith(theme.getBashModeBorderColor()(`${theme.rail.user} `));
 
 		mode.isBashMode = false;
 		mode.updateEditorChrome();
 
 		lines = mode.editor.render(48).map(stripRenderControls);
-		expect(lines.some(line => line.startsWith("│") && line.includes(">") && line.includes("!!pwd"))).toBe(true);
+		expect(lines.some(line => line.startsWith(`${theme.rail.user} !!pwd`))).toBe(true);
 		expect(lines.join("\n")).not.toContain("shell");
 	});
 

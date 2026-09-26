@@ -142,6 +142,8 @@ export type SymbolKey =
 	| "md.quoteBorder"
 	| "md.hrChar"
 	| "md.bullet"
+	// Transcript rail marking the user's own prompts
+	| "rail.user"
 	// Language/file type icons
 	| "lang.default"
 	| "lang.typescript"
@@ -307,6 +309,7 @@ const UNICODE_SYMBOLS: SymbolMap = {
 	"md.quoteBorder": "▏",
 	"md.hrChar": "─",
 	"md.bullet": "•",
+	"rail.user": "▌",
 	// Language/file icons (emoji-centric, no Nerd Font required)
 	"lang.default": "⌘",
 	"lang.typescript": "🟦",
@@ -567,6 +570,7 @@ const NERD_SYMBOLS: SymbolMap = {
 	"md.hrChar": "─",
 	// pick:  | alt:  •
 	"md.bullet": "\uf111",
+	"rail.user": "▌",
 	// Language icons (nerd font devicons)
 	"lang.default": "",
 	"lang.typescript": "\u{E628}",
@@ -730,6 +734,7 @@ const ASCII_SYMBOLS: SymbolMap = {
 	"md.quoteBorder": "|",
 	"md.hrChar": "-",
 	"md.bullet": "*",
+	"rail.user": "|",
 	// Language icons (ASCII uses abbreviations)
 	"lang.default": "code",
 	"lang.typescript": "ts",
@@ -1513,6 +1518,12 @@ export class Theme {
 			dash: this.#symbols["format.dash"],
 			bracketLeft: this.#symbols["format.bracketLeft"],
 			bracketRight: this.#symbols["format.bracketRight"],
+		};
+	}
+
+	get rail() {
+		return {
+			user: this.#symbols["rail.user"],
 		};
 	}
 

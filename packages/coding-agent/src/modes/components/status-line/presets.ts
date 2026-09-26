@@ -4,7 +4,7 @@ export const STATUS_LINE_PRESETS: Record<StatusLinePreset, PresetDef> = {
 	default: {
 		leftSegments: ["model", "mode", "git", "pr", "path"],
 		rightSegments: ["session_name", "jobs", "token_rate", "cost"],
-		separator: "slash",
+		separator: "dot",
 		segmentOptions: {
 			model: { showThinkingLevel: true },
 			path: { abbreviate: true, maxLength: 32, stripWorkPrefix: true },
@@ -15,7 +15,7 @@ export const STATUS_LINE_PRESETS: Record<StatusLinePreset, PresetDef> = {
 	"default-usage": {
 		leftSegments: ["model", "mode", "git", "pr", "path"],
 		rightSegments: ["session_name", "jobs", "token_rate", "usage", "cost"],
-		separator: "slash",
+		separator: "dot",
 		segmentOptions: {
 			model: { showThinkingLevel: true },
 			path: { abbreviate: true, maxLength: 32, stripWorkPrefix: true },
@@ -26,7 +26,7 @@ export const STATUS_LINE_PRESETS: Record<StatusLinePreset, PresetDef> = {
 	minimal: {
 		leftSegments: ["path", "git"],
 		rightSegments: ["session_name", "jobs", "mode", "context_pct"],
-		separator: "slash",
+		separator: "dot",
 		segmentOptions: {
 			path: { abbreviate: true, maxLength: 30 },
 			git: { showBranch: true, showStaged: false, showUnstaged: false, showUntracked: false },
@@ -36,7 +36,7 @@ export const STATUS_LINE_PRESETS: Record<StatusLinePreset, PresetDef> = {
 	compact: {
 		leftSegments: ["model", "mode", "git", "pr"],
 		rightSegments: ["session_name", "jobs", "cost"],
-		separator: "slash",
+		separator: "dot",
 		segmentOptions: {
 			model: { showThinkingLevel: false },
 			git: { showBranch: true, showStaged: true, showUnstaged: true, showUntracked: false },
@@ -106,7 +106,7 @@ export const STATUS_LINE_PRESETS: Record<StatusLinePreset, PresetDef> = {
 		// User-defined - these are just defaults that get overridden
 		leftSegments: ["model", "mode", "path", "git", "pr"],
 		rightSegments: ["session_name", "jobs", "token_total", "cost"],
-		separator: "slash",
+		separator: "dot",
 		segmentOptions: {},
 	},
 };

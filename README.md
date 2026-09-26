@@ -235,6 +235,9 @@ Pick from Settings (`Appearance -> Dark theme` / `Light theme`) or `/theme`.
 | --- | --- | --- |
 | `blue-octopus` | Default SKC identity — blue octopus palette with tentacle-blue accents. | Default for dark and light terminals. |
 | `red-octopus` | Warm red octopus variant with strong status contrast. | High-contrast dark alternative. |
+| `ink-octopus` | Octopus ink — warm graphite background, paper text, one amber accent. | Calm, low-distraction dark sessions. |
+| `glow-octopus` | Deep-sea bioluminescence — teal-black with glowing green and a violet secondary. | Dark terminals that want a vivid accent. |
+| `violet-octopus` | Plum-dark with lavender accents and an apricot secondary. | Soft, colorful dark alternative. |
 | `claude-code` | Claude Code-inspired dark palette with terracotta and pink highlights. | Claude Code muscle memory without leaving SKC. |
 | `codex` | Crisp dark blue-gray palette with sharper coding-session contrast. | A Codex-like dark workspace. |
 | `opencode` | OpenCode-inspired dark palette with punchier terminal accents. | OpenCode muscle memory in the bundled picker. |

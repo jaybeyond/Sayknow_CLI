@@ -161,6 +161,9 @@ Elige desde Settings (`Appearance -> Dark theme` / `Light theme`) o `/theme`.
 | --- | --- | --- |
 | `blue-octopus` | Identidad predeterminada de SKC — paleta de pulpo azul con acentos azul-tentáculo. | Predeterminado para terminales oscuras y claras. |
 | `red-octopus` | Variante cálida de pulpo rojo con fuerte contraste de estado. | Alternativa oscura de alto contraste. |
+| `ink-octopus` | Tinta de pulpo — fondo grafito cálido, texto color papel y un único acento ámbar. | Sesiones oscuras tranquilas y sin distracciones. |
+| `glow-octopus` | Bioluminiscencia abisal — negro verdiazulado con verde brillante y violeta como secundario. | Terminales oscuras que quieren un acento vivo. |
+| `violet-octopus` | Oscuro ciruela con acentos lavanda y albaricoque como secundario. | Alternativa oscura suave y colorida. |
 | `claude-code` | Paleta oscura inspirada en Claude Code con resaltados terracota y rosa. | Memoria muscular de Claude Code sin salir de SKC. |
 | `codex` | Paleta nítida azul-gris oscuro con un contraste de sesión de codificación más marcado. | Un espacio de trabajo oscuro al estilo Codex. |
 | `opencode` | Paleta oscura inspirada en OpenCode con acentos de terminal más vibrantes. | Memoria muscular de OpenCode en el selector incluido. |

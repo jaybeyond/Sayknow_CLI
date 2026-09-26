@@ -47,6 +47,8 @@ export const zhSettings: Record<string, string> = {
 	"set:statusLine.preset:o:custom:d": "用户自定义分段",
 	"set:statusLine.separator:l": "状态栏分隔符",
 	"set:statusLine.separator:d": "分段之间的分隔符样式",
+	"set:statusLine.separator:o:dot:l": "圆点",
+	"set:statusLine.separator:o:dot:d": "终端背景上的间隔点（SKC 默认）",
 	"set:statusLine.separator:o:powerline:d": "实心箭头 (Nerd Font)",
 	"set:statusLine.separator:o:powerline-thin:l": "细 V 形",
 	"set:statusLine.separator:o:powerline-thin:d": "细箭头 (Nerd Font)",

@@ -27,6 +27,10 @@ export function getSeparator(style: StatusLineSeparatorStyle, theme: Theme): Sep
 					useBgAsFg: true,
 				},
 			};
+		case "dot": {
+			const dot = trimSep(theme.sep.dot);
+			return { left: dot, right: dot };
+		}
 		case "slash": {
 			const slash = trimSep(theme.sep.slash);
 			return { left: slash, right: slash };

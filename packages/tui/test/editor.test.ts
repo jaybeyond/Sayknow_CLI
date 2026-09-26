@@ -1125,6 +1125,43 @@ describe("Editor component", () => {
 			expect(Bun.stripANSI(line!.replaceAll(CURSOR_MARKER, ""))).toContain("Describe the change");
 		});
 
+		it("draws the rail gutter on every row in the live border color", () => {
+			const editor = new Editor(defaultEditorTheme);
+			editor.setBorderVisible(false);
+			editor.setPromptGutter("> ");
+			editor.setRailGutter("▌");
+			editor.borderColor = text => `<${text}>`;
+			editor.setText("first\nsecond\nthird");
+
+			const lines = editor.render(20);
+
+			expect(lines).toHaveLength(3);
+			for (const line of lines) expect(line).toStartWith("<▌ >");
+			expect(lines.map(line => line.slice("<▌ >".length).trimEnd())).toEqual([
+				"first",
+				"second",
+				expect.stringMatching(/^third/),
+			]);
+
+			// The rail follows border color changes without a relayout trigger.
+			editor.borderColor = text => `[${text}]`;
+			expect(editor.render(20)[0]).toStartWith("[▌ ]");
+
+			// Clearing the rail falls back to the first-row prompt gutter.
+			editor.setRailGutter(undefined);
+			const fallback = editor.render(20).map(line => Bun.stripANSI(line));
+			expect(fallback[0]).toStartWith("> first");
+			expect(fallback[1]).toStartWith("  second");
+		});
+
+		it("ignores the rail gutter while the border is visible", () => {
+			const editor = new Editor(defaultEditorTheme);
+			editor.setRailGutter("▌");
+			editor.setText("boxed");
+
+			expect(editor.render(20).join("\n")).not.toContain("▌");
+		});
+
 		it("handles mixed ASCII and wide characters in wrapping", () => {
 			const editor = new Editor(defaultEditorTheme);
 			const width = 15;

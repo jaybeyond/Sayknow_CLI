@@ -593,7 +593,6 @@ export const debugToolRenderer = {
 							{ label: theme.fg("toolTitle", "Output"), lines: displayedLines },
 						],
 						width,
-						applyBg: false,
 					},
 					theme,
 				);

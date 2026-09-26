@@ -50,16 +50,29 @@ async function verifyThemeDefaults(): Promise<GateResult> {
 		.filter(([left, right]) => resolveColor(colors[left], vars) === resolveColor(colors[right], vars))
 		.map(([left, right]) => `${left} matches ${right}`);
 
-	const expectedBuiltIns = ["blue-octopus", "claude-code", "codex", "gruvbox-dark", "opencode", "red-octopus"];
+	const expectedBuiltIns = [
+		"blue-octopus",
+		"claude-code",
+		"codex",
+		"glow-octopus",
+		"gruvbox-dark",
+		"ink-octopus",
+		"opencode",
+		"red-octopus",
+		"violet-octopus",
+	];
 	const retainedBuiltIns =
 		[...defaultIndex.matchAll(/^import /gm)].length === expectedBuiltIns.length &&
 		[...defaultIndex.matchAll(/^\t/gm)].length === expectedBuiltIns.length &&
 		defaultIndex.includes('"blue-octopus": blue_octopus') &&
 		defaultIndex.includes('"claude-code": claude_code') &&
 		defaultIndex.includes("\tcodex,") &&
+		defaultIndex.includes('"glow-octopus": glow_octopus') &&
 		defaultIndex.includes('"gruvbox-dark": gruvbox_dark') &&
+		defaultIndex.includes('"ink-octopus": ink_octopus') &&
 		defaultIndex.includes("\topencode,") &&
 		defaultIndex.includes('"red-octopus": red_octopus') &&
+		defaultIndex.includes('"violet-octopus": violet_octopus') &&
 		!defaultIndex.includes("dark_") &&
 		!defaultIndex.includes("light_") &&
 		isRecord(blueOctopus.colors);
@@ -101,15 +114,15 @@ async function verifyStatusDefaults(): Promise<GateResult> {
 	return {
 		name: "default-visible status line identity",
 		passed:
-			defaultBlock.includes('separator: "slash"') &&
+			defaultBlock.includes('separator: "dot"') &&
 			!defaultBlock.includes('"pi"') &&
-			compactBlock.includes('separator: "slash"') &&
+			compactBlock.includes('separator: "dot"') &&
 			presets.includes('full: {') &&
 			fullUsesSayknow &&
 			nerdUsesSayknow &&
 			publicPresetUsesPi.length === 0,
 		details: [
-			`default separator slash: ${defaultBlock.includes('separator: "slash"')}`,
+			`default separator dot: ${defaultBlock.includes('separator: "dot"')}`,
 			`default pi segment absent: ${!defaultBlock.includes('"pi"')}`,
 			`full SKC identity present: ${fullUsesSayknow}`,
 			`nerd SKC identity present: ${nerdUsesSayknow}`,

@@ -644,13 +644,14 @@ export const SETTINGS_SCHEMA = {
 
 	"statusLine.separator": {
 		type: "enum",
-		values: ["powerline", "powerline-thin", "slash", "pipe", "block", "none", "ascii"] as const,
-		default: "slash",
+		values: ["dot", "powerline", "powerline-thin", "slash", "pipe", "block", "none", "ascii"] as const,
+		default: "dot",
 		ui: {
 			tab: "appearance",
 			label: "Status Line Separator",
 			description: "Style of separators between segments",
 			options: [
+				{ value: "dot", label: "Dot", description: "Middle dots on the bare terminal (SKC default)" },
 				{ value: "powerline", label: "Powerline", description: "Solid arrows (Nerd Font)" },
 				{ value: "powerline-thin", label: "Thin chevron", description: "Thin arrows (Nerd Font)" },
 				{ value: "slash", label: "Slash", description: "Forward slashes" },

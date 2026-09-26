@@ -161,6 +161,9 @@ Choisissez depuis Settings (`Appearance -> Dark theme` / `Light theme`) ou `/the
 | --- | --- | --- |
 | `blue-octopus` | Identité SKC par défaut — palette poulpe bleu avec des accents bleu tentacule. | Par défaut pour les terminaux sombres et clairs. |
 | `red-octopus` | Variante chaleureuse poulpe rouge avec un fort contraste d'état. | Alternative sombre à fort contraste. |
+| `ink-octopus` | Encre de poulpe — fond graphite chaud, texte couleur papier, un seul accent ambre. | Sessions sombres calmes, sans distraction. |
+| `glow-octopus` | Bioluminescence abyssale — noir sarcelle avec un vert lumineux et un violet secondaire. | Terminaux sombres qui veulent un accent vif. |
+| `violet-octopus` | Sombre prune avec des accents lavande et un abricot secondaire. | Alternative sombre douce et colorée. |
 | `claude-code` | Palette sombre inspirée de Claude Code avec des touches terracotta et rose. | La mémoire musculaire de Claude Code sans quitter SKC. |
 | `codex` | Palette bleu-gris sombre et nette avec un contraste de session de codage plus marqué. | Un espace de travail sombre à la manière de Codex. |
 | `opencode` | Palette sombre inspirée d'OpenCode avec des accents de terminal plus percutants. | La mémoire musculaire d'OpenCode dans le sélecteur inclus. |

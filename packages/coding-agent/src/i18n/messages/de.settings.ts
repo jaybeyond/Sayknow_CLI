@@ -46,6 +46,8 @@ export const deSettings: Record<string, string> = {
 	"set:statusLine.preset:o:custom:d": "Benutzerdefinierte Segmente",
 	"set:statusLine.separator:l": "Statusleisten-Trennzeichen",
 	"set:statusLine.separator:d": "Stil der Trennzeichen zwischen Segmenten",
+	"set:statusLine.separator:o:dot:l": "Punkt",
+	"set:statusLine.separator:o:dot:d": "Mittelpunkte auf dem Terminalhintergrund (SKC-Standard)",
 	"set:statusLine.separator:o:powerline:d": "Volle Pfeile (Nerd Font)",
 	"set:statusLine.separator:o:powerline-thin:l": "Dünner Chevron",
 	"set:statusLine.separator:o:powerline-thin:d": "Dünne Pfeile (Nerd Font)",

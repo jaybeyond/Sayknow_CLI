@@ -1,9 +1,9 @@
-import { type Component, padding, TERMINAL, truncateToWidth, visibleWidth } from "@sayknow-cli/tui";
-import { APP_NAME } from "@sayknow-cli/utils";
+import type { ThinkingLevel } from "@sayknow-cli/agent-core";
+import { type Component, padding, truncateToWidth, visibleWidth } from "@sayknow-cli/tui";
 import { formatBuildLabel } from "../../build-metadata";
 import { formatKeyHint, type KeyDisplayContext } from "../../config/keybindings";
-import { t } from "../../i18n";
-import { type ThemeColor, theme } from "../../modes/theme/theme";
+import { type MsgKey, t } from "../../i18n";
+import { theme } from "../../modes/theme/theme";
 
 export interface RecentSession {
 	name: string;
@@ -16,6 +16,34 @@ export interface LspServerInfo {
 	fileTypes: string[];
 }
 
+export interface WelcomeRoleBinding {
+	role: string;
+	model: string;
+}
+
+/**
+ * Workspace and runtime facts shown in the launch ledger. Every field is
+ * optional: the ledger renders what is known and fills the rest in as the
+ * asynchronous probes (git status, context files, MCP) settle.
+ */
+export interface WelcomeSnapshot {
+	/** Display path of the project directory (already home-shortened). */
+	cwd?: string;
+	/** Current branch, `"detached"`, or `null` outside a git repository. */
+	branch?: string | null;
+	gitChanges?: { staged: number; unstaged: number; untracked: number } | null;
+	/** Latest commits as `<short-sha> <subject>` onelines, newest first. */
+	recentCommits?: readonly string[];
+	thinkingLevel?: ThinkingLevel | string;
+	/** Display name of the active model preset. */
+	profile?: string;
+	roles?: readonly WelcomeRoleBinding[];
+	mcp?: { connected: number; total: number };
+	skills?: number;
+	/** Display names of the loaded project instruction files (AGENTS.md, …). */
+	contextFiles?: readonly string[];
+}
+
 export type WelcomeLogoMode = "unicode" | "square" | "ascii";
 export interface WelcomeComponentOptions {
 	getViewportRows?: () => number | undefined;
@@ -26,11 +54,23 @@ export interface WelcomeComponentOptions {
 	buildLabel?: string;
 	keyDisplayContext?: KeyDisplayContext;
 	skipLogoAnimation?: boolean;
+	snapshot?: WelcomeSnapshot;
 }
 
-const WELCOME_STATIC_RIGHT_ROWS_EXCLUDING_DYNAMIC_SECTIONS = 15;
+/** Below this width the ledger and the activity column stack instead of sitting side by side. */
+const TWO_COLUMN_MIN_WIDTH = 100;
+const COLUMN_GAP = 4;
+const MIN_RIGHT_COLUMN = 36;
 const DEFAULT_WHATS_NEW_ROWS = 3;
 const MAX_WHATS_NEW_ROWS = 12;
+const DEFAULT_SESSION_ROWS = 3;
+const MAX_LSP_ROWS = 3;
+const MAX_COMMIT_ROWS = 3;
+
+/** Stagger between two ledger sections appearing during the launch reveal. */
+const SECTION_STAGGER_MS = 55;
+/** How long the whole ledger stays in dim ink before the first section takes its colors. */
+const SECTION_SETTLE_MS = 90;
 
 function flowKeyItems(context: KeyDisplayContext): ReadonlyArray<{ key: string; label: string }> {
 	const newlineKey = context.platform === "win32" ? "alt+enter" : "ctrl+j";
@@ -48,14 +88,30 @@ function flowKeyItems(context: KeyDisplayContext): ReadonlyArray<{ key: string; 
 	];
 }
 
+const WORKFLOWS: ReadonlyArray<{ command: string; key: MsgKey }> = [
+	{ command: "/deep-interview", key: "welcome.wf.deepInterview" },
+	{ command: "/ralplan", key: "welcome.wf.ralplan" },
+	{ command: "/ultragoal", key: "welcome.wf.ultragoal" },
+	{ command: "/team", key: "welcome.wf.team" },
+];
+
+/** A block of rows revealed together during the launch intro. */
+interface Section {
+	lines: string[];
+}
+
 /**
- * Sayknow-CLI launch surface: a blue-gradient SAYKNOW wordmark, compact
- * command affordances, and project signals — a distinct identity, not a
- * copy of another agent shell.
+ * Sayknow-CLI launch surface: an open, borderless ledger. The left column is
+ * the state of this workspace — path, branch, model, reasoning, preset, role
+ * agents, tooling — so the first screen answers "what am I about to run with".
+ * The right column carries activity: what changed, recent sessions, workflows
+ * and keys. No enclosing box and no hero wordmark: the octopus mark and the
+ * facts carry the identity.
  */
 export class WelcomeComponent implements Component {
 	#animStart: number | null = null;
 	#animTimer: NodeJS.Timeout | null = null;
+	#snapshot: WelcomeSnapshot;
 
 	constructor(
 		private readonly version: string,
@@ -65,14 +121,17 @@ export class WelcomeComponent implements Component {
 		private lspServers: LspServerInfo[] = [],
 		private readonly logoMode: WelcomeLogoMode = "unicode",
 		private readonly options: WelcomeComponentOptions = {},
-	) {}
+	) {
+		this.#snapshot = { ...options.snapshot };
+	}
 
 	invalidate(): void {}
 
 	/**
-	 * Play a one-shot intro that sweeps the gradient through every phase
-	 * before settling on the resting frame. Safe to call multiple times —
-	 * subsequent calls reset and replay.
+	 * Play a short one-shot reveal: sections appear top to bottom a few frames
+	 * apart, each settling from dim into its colors. Launch happens once per
+	 * session, so a sub-second reveal is affordable; it never blocks input.
+	 * Safe to call multiple times — subsequent calls reset and replay.
 	 */
 	playIntro(requestRender: () => void): void {
 		this.#stopAnimation();
@@ -117,261 +176,248 @@ export class WelcomeComponent implements Component {
 		this.lspServers = servers;
 	}
 
+	/** Merge newly probed workspace facts into the ledger. */
+	setSnapshot(patch: WelcomeSnapshot): void {
+		this.#snapshot = { ...this.#snapshot, ...patch };
+	}
+
 	render(termWidth: number): string[] {
-		const rightGutterWidth = this.#rightGutterWidth(termWidth);
-		const boxWidth = Math.max(0, termWidth - rightGutterWidth);
-		if (boxWidth < 4) {
-			return [];
-		}
+		const gutterWidth = this.#rightGutterWidth(termWidth);
+		const width = Math.max(0, termWidth - gutterWidth);
+		if (width < 4) return [];
 
 		const targetRows = this.#targetRows(termWidth);
-		if (targetRows !== undefined && targetRows <= 0) {
-			return [];
-		}
-		const targetContentRows = targetRows === undefined ? undefined : Math.max(0, targetRows - 2);
-		const dualContentWidth = boxWidth - 3; // 3 = │ + │ + │
-		const minLeftCol = 20; // wordmark plus Sayknow identity labels
-		const minRightCol = 24;
-		const modelPill = this.#pill(theme.icon.model || "model", this.modelName, "statusLineModel");
-		const providerPill = this.#pill(theme.icon.package || "provider", this.providerName, "statusLinePath");
-		const logoLines = this.#logoLines();
-		const logoMinWidth = Math.max(...logoLines.map(line => visibleWidth(line)));
-		const leftMinContentWidth = Math.max(
-			minLeftCol,
-			logoMinWidth,
-			visibleWidth(t("welcome.tagline")),
-			visibleWidth(modelPill),
-			visibleWidth(providerPill),
-		);
-		const evenLeftCol = Math.floor(dualContentWidth / 2);
-		const maxLeftColWithRightMinimum = Math.max(1, dualContentWidth - minRightCol);
-		const desiredLeftCol = Math.max(leftMinContentWidth, evenLeftCol);
-		const dualLeftCol =
-			dualContentWidth >= minRightCol + 1
-				? Math.min(desiredLeftCol, maxLeftColWithRightMinimum)
-				: Math.max(1, dualContentWidth - 1);
-		const dualRightCol = Math.max(1, dualContentWidth - dualLeftCol);
-		const showRightColumn = dualLeftCol >= leftMinContentWidth && dualRightCol >= minRightCol;
-		const leftCol = showRightColumn ? dualLeftCol : boxWidth - 2;
-		const rightCol = showRightColumn ? dualRightCol : 0;
+		if (targetRows !== undefined && targetRows <= 0) return [];
 
-		const logoColored = this.#currentLogoFrame(logoLines);
+		const header = this.#fitToWidth(this.#headerLine(width), width);
+		if (targetRows === 1) return this.#withRightGutter([header], gutterWidth);
 
-		// When no model is resolved yet, guide the user instead of showing "Unknown".
-		const hasModel = this.modelName !== "Unknown" && this.modelName.length > 0;
-		const identityTail = hasModel
-			? [this.#centerText(modelPill, leftCol), this.#centerText(providerPill, leftCol)]
-			: [
-					this.#centerText(
-						this.#pill(theme.icon.model || "model", t("welcome.chooseModel"), "statusLineModel"),
-						leftCol,
-					),
-					this.#centerText(theme.fg("dim", t("welcome.modelHint")), leftCol),
-				];
+		const rule = theme.fg("borderMuted", this.#ruleGlyph().repeat(width));
+		const bodyRows = targetRows === undefined ? undefined : Math.max(0, targetRows - 2);
 
-		// Left column - centered identity stack: wordmark, tagline, then model state.
-		const leftLines = [
-			"",
-			...logoColored.map(l => this.#centerText(l, leftCol)),
-			"",
-			this.#centerText(theme.fg("muted", t("welcome.tagline")), leftCol),
-			"",
-			...identityTail,
-		];
+		const twoColumn = width >= TWO_COLUMN_MIN_WIDTH;
+		const leftWidth = twoColumn
+			? Math.min(Math.max(44, Math.floor(width * 0.52)), width - COLUMN_GAP - MIN_RIGHT_COLUMN)
+			: width;
+		const rightWidth = twoColumn ? width - leftWidth - COLUMN_GAP : width;
 
-		const buildSeparator = (columnWidth: number): string =>
-			` ${theme.fg("dim", theme.boxRound.horizontal.repeat(Math.max(0, columnWidth - 2)))}`;
+		const ledger = this.#ledgerSections(leftWidth);
+		const ledgerRows = ledger.reduce((sum, section) => sum + section.lines.length, 0);
+		const activityBudget =
+			bodyRows === undefined ? undefined : twoColumn ? bodyRows : Math.max(0, bodyRows - ledgerRows - 1);
+		const activity = this.#activitySections(rightWidth, activityBudget);
 
-		const rightColumnWidth = showRightColumn ? rightCol : leftCol;
-		const separator = buildSeparator(rightColumnWidth);
-		const lspLines: string[] = [];
-		if (this.lspServers.length === 0) {
-			lspLines.push(` ${theme.fg("dim", t("welcome.noLsp"))}`);
-		} else {
-			for (const server of this.lspServers.slice(0, 4)) {
-				const icon =
-					server.status === "ready"
-						? theme.styledSymbol("status.success", "success")
-						: server.status === "error"
-							? theme.styledSymbol("status.error", "error")
-							: theme.styledSymbol("status.pending", "muted");
-				const exts = server.fileTypes.slice(0, 3).join(" ");
-				lspLines.push(` ${icon} ${theme.fg("muted", server.name)} ${theme.fg("dim", exts)}`);
+		const reveal = this.#revealState(ledger.length + activity.length);
+		const leftLines = this.#revealLines(ledger, 0, reveal);
+		const rightLines = this.#revealLines(activity, ledger.length, reveal);
+
+		const body: string[] = [];
+		if (twoColumn) {
+			const rows = bodyRows ?? Math.max(leftLines.length, rightLines.length);
+			const left = this.#clip(leftLines, rows);
+			const right = this.#clip(rightLines, rows);
+			const gap = padding(COLUMN_GAP);
+			for (let i = 0; i < rows; i++) {
+				body.push(this.#fitToWidth(left[i] ?? "", leftWidth) + gap + this.#fitToWidth(right[i] ?? "", rightWidth));
 			}
+		} else {
+			const stacked = [...leftLines, "", ...rightLines];
+			const rows = bodyRows ?? stacked.length;
+			for (const line of this.#clip(stacked, rows)) body.push(this.#fitToWidth(line, width));
+			while (body.length < rows) body.push(padding(width));
 		}
 
-		const flowPreferredRows = this.#flowKeyRows(rightColumnWidth).length;
-		const changelogRowLimit = this.#whatsNewRowLimit(targetContentRows, lspLines.length, flowPreferredRows);
-		const changelogLines = this.#whatsNewLines(rightColumnWidth, changelogRowLimit);
-		const flowRowLimit = this.#flowKeyRowLimit(
-			targetContentRows,
-			changelogLines.length,
-			lspLines.length,
-			rightColumnWidth,
-		);
-		const flowLines = this.#flowKeyLines(rightColumnWidth, flowRowLimit);
-		const sessionLimit = this.#sessionTrailLimit(
-			targetContentRows,
-			changelogLines.length,
-			lspLines.length,
-			flowLines.length,
-		);
-		const sessionLines = this.#sessionTrailLines(rightColumnWidth, sessionLimit);
+		return this.#withRightGutter([header, rule, ...body], gutterWidth);
+	}
 
-		// Workflow affordances: pad the command so descriptions align.
-		const wf = (cmd: string, desc: string): string => {
-			const pad = " ".repeat(Math.max(1, 17 - visibleWidth(cmd)));
-			return ` ${theme.fg("accent", cmd)}${pad}${theme.fg("muted", desc)}`;
-		};
+	// ── Header ──────────────────────────────────────────────────────────────
 
-		const rightLines = [
-			"",
-			` ${theme.bold(theme.fg("accent", "What's New"))}`,
-			...changelogLines,
-			separator,
-			` ${theme.bold(theme.fg("accent", t("welcome.workflows")))}`,
-			wf("/deep-interview", t("welcome.wf.deepInterview")),
-			wf("/ralplan", t("welcome.wf.ralplan")),
-			wf("/ultragoal", t("welcome.wf.ultragoal")),
-			wf("/team", t("welcome.wf.team")),
-			separator,
-			` ${theme.bold(theme.fg("accent", t("welcome.flowKeys")))}`,
-			...flowLines,
-			separator,
-			` ${theme.bold(theme.fg("accent", t("welcome.projectPulse")))}`,
-			...lspLines,
-			separator,
-			` ${theme.bold(theme.fg("accent", t("welcome.sessionTrail")))}`,
-			...sessionLines,
-			"",
-		];
-
-		const contentRows =
-			targetContentRows ??
-			(showRightColumn ? Math.max(leftLines.length, rightLines.length) : leftLines.length + rightLines.length);
-		const outputRows = targetRows === undefined ? Math.max(3, contentRows + 2) : targetRows;
-		const bodyRows = Math.max(0, outputRows - 2);
-
-		const hChar = theme.boxRound.horizontal;
-		const h = theme.fg("dim", hChar);
-		const v = theme.fg("dim", theme.boxRound.vertical);
-		const tl = theme.fg("dim", theme.boxRound.topLeft);
-		const tr = theme.fg("dim", theme.boxRound.topRight);
-		const bl = theme.fg("dim", theme.boxRound.bottomLeft);
-		const br = theme.fg("dim", theme.boxRound.bottomRight);
-
-		const lines: string[] = [];
+	#headerLine(width: number): string {
 		const buildLabel = this.options.buildLabel ?? formatBuildLabel();
-		const title = ` ${APP_NAME} · Sayknow-CLI v${this.version} · ${buildLabel} `;
-		const titlePrefixRaw = hChar.repeat(3);
-		const titleStyled = theme.fg("dim", titlePrefixRaw) + theme.fg("muted", title);
-		const titleVisLen = visibleWidth(titlePrefixRaw) + visibleWidth(title);
-		const titleSpace = boxWidth - 2;
-		if (titleVisLen >= titleSpace) {
-			lines.push(tl + truncateToWidth(titleStyled, titleSpace) + tr);
+		const mark = theme.icon.pi ? `${theme.icon.pi} ` : "";
+		const left = ` ${mark}${theme.bold(theme.fg("text", "Sayknow-CLI"))}${theme.fg("dim", ` v${this.version} · ${buildLabel}`)}`;
+		const tagline = theme.fg("muted", t("welcome.tagline"));
+		const room = width - visibleWidth(left) - visibleWidth(tagline) - 1;
+		return room >= 2 ? `${left}${padding(room)}${tagline} ` : left;
+	}
+
+	#ruleGlyph(): string {
+		return this.logoMode === "ascii" ? "-" : "─";
+	}
+
+	// ── Left column: workspace ledger ───────────────────────────────────────
+
+	#ledgerSections(width: number): Section[] {
+		const labels = {
+			workspace: t("welcome.label.workspace"),
+			branch: t("welcome.label.branch"),
+			commits: t("welcome.label.commits"),
+			model: t("welcome.label.model"),
+			reasoning: t("welcome.label.reasoning"),
+			preset: t("welcome.label.preset"),
+			roles: t("welcome.label.roles"),
+			tools: t("welcome.label.tools"),
+		};
+		const labelWidth = Math.max(...Object.values(labels).map(label => visibleWidth(label))) + 2;
+		const valueWidth = Math.max(1, width - labelWidth - 1);
+		const row = (label: string, value: string): string =>
+			` ${theme.fg("dim", label)}${padding(Math.max(0, labelWidth - visibleWidth(label)))}${this.#truncate(value, valueWidth)}`;
+		const continuation = (value: string): string => ` ${padding(labelWidth)}${this.#truncate(value, valueWidth)}`;
+		const snapshot = this.#snapshot;
+		const sep = theme.fg("dim", " · ");
+
+		// Where
+		const where: string[] = [];
+		if (snapshot.cwd)
+			where.push(row(labels.workspace, theme.fg("statusLinePath", this.#shortenFromLeft(snapshot.cwd, valueWidth))));
+		if (snapshot.branch !== undefined) {
+			const branch =
+				snapshot.branch === null
+					? theme.fg("dim", t("welcome.noGit"))
+					: `${theme.fg(this.#isDirty() ? "statusLineGitDirty" : "statusLineGitClean", snapshot.branch)}${this.#gitChangeSummary(sep)}`;
+			where.push(row(labels.branch, branch));
+		}
+		(snapshot.recentCommits ?? []).slice(0, MAX_COMMIT_ROWS).forEach((oneline, index) => {
+			const space = oneline.indexOf(" ");
+			const value =
+				space > 0
+					? `${theme.fg("accent", oneline.slice(0, space))} ${theme.fg("muted", oneline.slice(space + 1))}`
+					: theme.fg("muted", oneline);
+			where.push(index === 0 ? row(labels.commits, value) : continuation(value));
+		});
+
+		// Brain
+		const brain: string[] = [];
+		const hasModel = this.modelName !== "Unknown" && this.modelName.length > 0;
+		brain.push(
+			row(
+				labels.model,
+				hasModel
+					? `${theme.bold(theme.fg("statusLineModel", this.modelName))}${sep}${theme.fg("muted", this.providerName)}`
+					: `${theme.fg("accent", t("welcome.chooseModel"))}${sep}${theme.fg("dim", t("welcome.modelHint"))}`,
+			),
+		);
+		if (snapshot.thinkingLevel) {
+			const level = String(snapshot.thinkingLevel);
+			brain.push(row(labels.reasoning, theme.getThinkingBorderColor(level as ThinkingLevel)(level)));
+		}
+		brain.push(row(labels.preset, snapshot.profile ? theme.fg("text", snapshot.profile) : theme.fg("dim", "—")));
+		const roles = snapshot.roles ?? [];
+		if (roles.length === 0) {
+			brain.push(row(labels.roles, theme.fg("dim", t("welcome.rolesInherit"))));
 		} else {
-			const afterTitle = titleSpace - titleVisLen;
-			lines.push(tl + titleStyled + theme.fg("dim", hChar.repeat(afterTitle)) + tr);
-		}
-		if (outputRows === 1) {
-			return this.#withRightGutter(lines, rightGutterWidth);
-		}
-
-		if (showRightColumn) {
-			const leftBlock = this.#fitBlock(leftLines, bodyRows, "center");
-			const rightBlock = this.#fitBlock(rightLines, bodyRows, "top");
-			for (let i = 0; i < bodyRows; i++) {
-				const left = this.#fitToWidth(leftBlock[i] ?? "", leftCol);
-				const right = this.#fitToWidth(rightBlock[i] ?? "", rightCol);
-				lines.push(v + left + v + right + v);
-			}
-			lines.push(bl + h.repeat(leftCol) + theme.fg("dim", theme.boxSharp.teeUp) + h.repeat(rightCol) + br);
-		} else {
-			const compactLeftLines =
-				bodyRows < 14
-					? [
-							this.#centerText(theme.bold(theme.fg("accent", "SKC Forge")), leftCol),
-							this.#centerText(this.#loadingLine(), leftCol),
-							this.#centerText(modelPill, leftCol),
-						]
-					: leftLines;
-			const singleBlock = this.#fitBlock([...compactLeftLines, separator, ...rightLines], bodyRows, "top");
-			for (let i = 0; i < bodyRows; i++) {
-				lines.push(v + this.#fitToWidth(singleBlock[i] ?? "", leftCol) + v);
-			}
-			lines.push(bl + h.repeat(leftCol) + br);
+			const roleWidth = Math.max(...roles.map(role => visibleWidth(role.role))) + 2;
+			roles.forEach((binding, index) => {
+				const value = `${theme.fg("muted", binding.role)}${padding(roleWidth - visibleWidth(binding.role))}${theme.fg("text", binding.model)}`;
+				brain.push(index === 0 ? row(labels.roles, value) : continuation(value));
+			});
 		}
 
-		return this.#withRightGutter(lines, rightGutterWidth);
-	}
-
-	/** Center text within a given width */
-	#centerText(text: string, width: number): string {
-		const visLen = visibleWidth(text);
-		if (visLen >= width) {
-			return truncateToWidth(text, width);
+		// Hands
+		const hands: string[] = [];
+		const toolFacts: string[] = [];
+		if (snapshot.mcp) {
+			const { connected, total } = snapshot.mcp;
+			const color = total === 0 ? "dim" : connected === total ? "success" : "warning";
+			toolFacts.push(`${theme.fg("muted", "MCP")} ${theme.fg(color, total === 0 ? "0" : `${connected}/${total}`)}`);
 		}
-		const leftPad = Math.floor((width - visLen) / 2);
-		const rightPad = width - visLen - leftPad;
-		return padding(leftPad) + text + padding(rightPad);
-	}
-
-	/** Fit string to exact width with native ANSI/wide-glyph truncation and padding. */
-	#fitToWidth(str: string, width: number): string {
-		const visLen = visibleWidth(str);
-		if (visLen > width) {
-			return truncateToWidth(str, width, null, true);
+		if (snapshot.skills !== undefined) {
+			toolFacts.push(`${theme.fg("muted", t("welcome.skills"))} ${theme.fg("text", String(snapshot.skills))}`);
 		}
-		return str + padding(width - visLen);
-	}
-	#rightGutterWidth(termWidth: number): number {
-		const configured = this.options.rightGutterWidth ?? 0;
-		if (!Number.isFinite(configured) || configured <= 0) return 0;
-		const gutterWidth = Math.floor(configured);
-		return Math.min(gutterWidth, Math.max(0, termWidth - 4));
-	}
-
-	#withRightGutter(lines: string[], rightGutterWidth: number): string[] {
-		if (rightGutterWidth <= 0) return lines;
-		const gutter = padding(rightGutterWidth);
-		return lines.map(line => line + gutter);
-	}
-
-	#targetRows(termWidth: number): number | undefined {
-		const viewportRows = this.options.getViewportRows?.();
-		if (typeof viewportRows !== "number" || !Number.isFinite(viewportRows) || viewportRows <= 0) {
-			return undefined;
+		if (snapshot.contextFiles !== undefined) {
+			const files = snapshot.contextFiles;
+			const shown = files.length === 0 ? theme.fg("dim", "—") : theme.fg("text", files[0]!);
+			const more = files.length > 1 ? theme.fg("dim", ` +${files.length - 1}`) : "";
+			toolFacts.push(`${theme.fg("muted", t("welcome.rules"))} ${shown}${more}`);
 		}
-		const reservedRows = Math.max(0, Math.floor(this.options.getReservedBottomRows?.(termWidth) ?? 0));
-		return Math.max(0, Math.floor(viewportRows) - reservedRows);
+		const lspLines = this.#lspLines();
+		const toolRows = [...(toolFacts.length > 0 ? [toolFacts.join(sep)] : []), ...lspLines];
+		toolRows.forEach((value, index) => {
+			hands.push(index === 0 ? row(labels.tools, value) : continuation(value));
+		});
+
+		return [where, brain, hands].filter(lines => lines.length > 0).map(lines => ({ lines: [...lines, ""] }));
 	}
 
-	#loadingLine(): string {
-		const frames = theme.spinnerFrames;
-		const elapsed = this.#animStart == null ? 0 : performance.now() - this.#animStart;
-		const frame = frames.length > 0 ? (frames[Math.floor(elapsed / 100) % frames.length] ?? "*") : "*";
-		const label = this.#animStart == null ? "ready" : "warming workspace";
-		return `${theme.fg("warning", frame)} ${theme.fg("muted", label)}`;
+	#lspLines(): string[] {
+		if (this.lspServers.length === 0) return [theme.fg("dim", t("welcome.noLsp"))];
+		const lines = this.lspServers.slice(0, MAX_LSP_ROWS).map(server => {
+			const icon =
+				server.status === "ready"
+					? theme.styledSymbol("status.success", "success")
+					: server.status === "error"
+						? theme.styledSymbol("status.error", "error")
+						: theme.styledSymbol("status.pending", "muted");
+			return `${icon} ${theme.fg("muted", server.name)} ${theme.fg("dim", server.fileTypes.slice(0, 3).join(" "))}`;
+		});
+		const hidden = this.lspServers.length - MAX_LSP_ROWS;
+		if (hidden > 0) lines.push(theme.fg("dim", `+${hidden} LSP`));
+		return lines;
 	}
 
-	#fitBlock(lines: string[], rows: number, align: "top" | "center"): string[] {
-		if (rows <= 0) return [];
-		const clipped =
-			lines.length > rows
-				? rows === 1
-					? [theme.fg("dim", " …")]
-					: [...lines.slice(0, rows - 1), theme.fg("dim", " …")]
-				: lines;
-		const missingRows = rows - clipped.length;
-		if (missingRows <= 0) return clipped;
-		const topPad = align === "center" ? Math.floor(missingRows / 2) : 0;
-		const bottomPad = missingRows - topPad;
-		return [...Array.from({ length: topPad }, () => ""), ...clipped, ...Array.from({ length: bottomPad }, () => "")];
+	#isDirty(): boolean {
+		const changes = this.#snapshot.gitChanges;
+		return !!changes && changes.staged + changes.unstaged + changes.untracked > 0;
+	}
+
+	#gitChangeSummary(sep: string): string {
+		const changes = this.#snapshot.gitChanges;
+		if (changes === undefined) return "";
+		if (changes === null) return "";
+		if (!this.#isDirty()) return `${sep}${theme.fg("dim", t("welcome.clean"))}`;
+		const parts: string[] = [];
+		if (changes.staged > 0) parts.push(theme.fg("statusLineStaged", `+${changes.staged}`));
+		if (changes.unstaged > 0) parts.push(theme.fg("statusLineDirty", `~${changes.unstaged}`));
+		if (changes.untracked > 0) parts.push(theme.fg("statusLineUntracked", `?${changes.untracked}`));
+		return `${sep}${parts.join(" ")}`;
+	}
+
+	// ── Right column: activity ──────────────────────────────────────────────
+
+	#activitySections(width: number, rowBudget: number | undefined): Section[] {
+		const keyRows = this.#flowKeyRows(width);
+		const heading = (label: string, note?: string): string =>
+			` ${theme.bold(theme.fg("accent", label))}${note ? theme.fg("dim", `  ${note}`) : ""}`;
+		const sessionCount = this.recentSessions.length;
+		const sessionBaseline = sessionCount === 0 ? 1 : Math.min(DEFAULT_SESSION_ROWS, sessionCount);
+
+		// Fixed rows: 4 headings + 3 blank separators + workflows + keys + baseline trail.
+		const fixedRows = 4 + 3 + WORKFLOWS.length + keyRows.length + sessionBaseline;
+		const spare = rowBudget === undefined ? 0 : Math.max(0, rowBudget - fixedRows - DEFAULT_WHATS_NEW_ROWS);
+		const whatsNewLimit =
+			rowBudget === undefined
+				? 5
+				: Math.max(1, Math.min(MAX_WHATS_NEW_ROWS, DEFAULT_WHATS_NEW_ROWS + Math.ceil(spare / 2)));
+		const whatsNew = this.#whatsNewLines(width, whatsNewLimit);
+		const sessionLimit =
+			rowBudget === undefined
+				? sessionBaseline
+				: Math.min(sessionCount, sessionBaseline + Math.max(0, rowBudget - fixedRows - whatsNew.length));
+
+		const changelog = this.options.changelogMarkdown?.trim();
+		const version = changelog ? this.#latestChangelogVersion(changelog) : undefined;
+
+		const workflowWidth = Math.max(...WORKFLOWS.map(item => visibleWidth(item.command))) + 2;
+		return [
+			{ lines: [heading(t("welcome.whatsNew"), version ? `v${version}` : undefined), ...whatsNew, ""] },
+			{ lines: [heading(t("welcome.sessionTrail")), ...this.#sessionTrailLines(width, sessionLimit), ""] },
+			{
+				lines: [
+					heading(t("welcome.workflows")),
+					...WORKFLOWS.map(
+						item =>
+							`  ${theme.fg("accent", item.command)}${padding(workflowWidth - visibleWidth(item.command))}${theme.fg("muted", t(item.key))}`,
+					),
+					"",
+				],
+			},
+			{ lines: [heading(t("welcome.flowKeys")), ...keyRows] },
+		];
 	}
 
 	#flowKeyItemText(item: { key: string; label: string }): string {
 		const context = this.options.keyDisplayContext ?? { platform: process.platform };
-		return `${theme.fg("dim", formatKeyHint(item.key, context))}${theme.fg("muted", ` ${this.#flowKeyLabel(item.label)}`)}`;
+		return `${theme.fg("text", formatKeyHint(item.key, context))}${theme.fg("dim", ` ${this.#flowKeyLabel(item.label)}`)}`;
 	}
 
 	#flowKeyLabel(label: string): string {
@@ -396,107 +442,35 @@ export class WelcomeComponent implements Component {
 	}
 
 	#flowKeyRows(width: number): string[] {
-		const contentWidth = Math.max(1, width - 1);
-		const separator = ` ${theme.fg("dim", "·")} `;
+		const contentWidth = Math.max(1, width - 2);
+		const separator = theme.fg("dim", "  ");
 		const rows: string[] = [];
 		let current = "";
 		for (const item of flowKeyItems(this.options.keyDisplayContext ?? { platform: process.platform })) {
 			const segment = this.#flowKeyItemText(item);
 			const next = current ? `${current}${separator}${segment}` : segment;
 			if (current && visibleWidth(next) > contentWidth) {
-				rows.push(` ${current}`);
+				rows.push(`  ${current}`);
 				current = segment;
 			} else {
 				current = next;
 			}
 		}
-		if (current) rows.push(` ${current}`);
-		return rows.length > 0 ? rows : [` ${theme.fg("dim", "No flow keys")}`];
+		if (current) rows.push(`  ${current}`);
+		return rows;
 	}
 
-	#flowKeyLines(width: number, maxRows: number): string[] {
-		const rows = this.#flowKeyRows(width);
-		const rowLimit = Math.max(1, Math.floor(maxRows));
-		if (rows.length <= rowLimit) return rows;
-		if (rowLimit === 1) {
-			const firstItem = flowKeyItems(this.options.keyDisplayContext ?? { platform: process.platform })[0];
-			const firstSegment = firstItem ? this.#flowKeyItemText(firstItem) : theme.fg("dim", "keys");
-			return [this.#fitToWidth(` ${firstSegment} ${theme.fg("dim", "· … ")}${theme.bold("/help")}`, width)];
-		}
-		return [...rows.slice(0, rowLimit - 1), ` ${theme.fg("dim", `… ${theme.bold("/help")} for more`)}`];
-	}
-
-	#flowKeyRowLimit(
-		targetContentRows: number | undefined,
-		changelogLineCount: number,
-		lspLineCount: number,
-		rightColumnWidth: number,
-	): number {
-		const preferredRows = this.#flowKeyRows(rightColumnWidth).length;
-		if (targetContentRows === undefined) return preferredRows;
-
-		const sessionBaselineRows = this.recentSessions.length === 0 ? 1 : Math.min(3, this.recentSessions.length);
-		const availableRows =
-			targetContentRows -
-			WELCOME_STATIC_RIGHT_ROWS_EXCLUDING_DYNAMIC_SECTIONS -
-			changelogLineCount -
-			lspLineCount -
-			sessionBaselineRows;
-		return Math.max(1, Math.min(preferredRows, availableRows));
-	}
-
-	#whatsNewRowLimit(targetContentRows: number | undefined, lspLineCount: number, flowLineCount: number): number {
-		if (targetContentRows === undefined) return 5;
-
-		const sessionBaselineRows = this.recentSessions.length === 0 ? 1 : Math.min(3, this.recentSessions.length);
-		const dynamicRows = Math.max(
-			1,
-			targetContentRows - WELCOME_STATIC_RIGHT_ROWS_EXCLUDING_DYNAMIC_SECTIONS - flowLineCount - lspLineCount,
-		);
-		const rowsAfterBaselineSessions = Math.max(1, dynamicRows - sessionBaselineRows);
-		const spareRows = Math.max(0, rowsAfterBaselineSessions - DEFAULT_WHATS_NEW_ROWS);
-		return Math.max(
-			1,
-			Math.min(MAX_WHATS_NEW_ROWS, rowsAfterBaselineSessions, DEFAULT_WHATS_NEW_ROWS + Math.floor(spareRows / 2)),
-		);
-	}
-
-	#sessionTrailLimit(
-		targetContentRows: number | undefined,
-		changelogLineCount: number,
-		lspLineCount: number,
-		flowLineCount: number,
-	): number {
-		if (this.recentSessions.length === 0) return 0;
-
-		const defaultLimit = Math.min(3, this.recentSessions.length);
-		if (targetContentRows === undefined) return defaultLimit;
-
-		const rowsWithDefaultTrail =
-			WELCOME_STATIC_RIGHT_ROWS_EXCLUDING_DYNAMIC_SECTIONS +
-			changelogLineCount +
-			flowLineCount +
-			lspLineCount +
-			defaultLimit;
-		const extraRows = Math.max(0, targetContentRows - rowsWithDefaultTrail);
-		return Math.min(this.recentSessions.length, defaultLimit + extraRows);
-	}
-
-	#sessionTrailLines(rightColumnWidth: number, limit: number): string[] {
+	#sessionTrailLines(width: number, limit: number): string[] {
 		if (this.recentSessions.length === 0) {
-			return [` ${theme.fg("dim", t("welcome.noSessions"))}`];
+			return [`  ${theme.fg("dim", t("welcome.noSessions"))}`];
 		}
-
-		const bulletPrefix = ` ${theme.md.bullet} `;
-		const prefixWidth = visibleWidth(bulletPrefix);
 		const lines: string[] = [];
-		for (const session of this.recentSessions.slice(0, limit)) {
-			const timeSuffixRaw = ` (${session.timeAgo})`;
-			const timeWidth = visibleWidth(timeSuffixRaw);
-			const nameBudget = Math.max(1, rightColumnWidth - prefixWidth - timeWidth);
-			const nameVis = visibleWidth(session.name);
-			const name = nameVis > nameBudget ? truncateToWidth(session.name, nameBudget) : session.name;
-			lines.push(`${theme.fg("dim", bulletPrefix)}${theme.fg("muted", name)}${theme.fg("dim", timeSuffixRaw)}`);
+		for (const session of this.recentSessions.slice(0, Math.max(1, limit))) {
+			const time = theme.fg("dim", session.timeAgo);
+			const nameBudget = Math.max(1, width - 2 - visibleWidth(session.timeAgo) - 2);
+			const name = this.#truncate(session.name, nameBudget);
+			const pad = padding(Math.max(1, width - 2 - visibleWidth(name) - visibleWidth(session.timeAgo)));
+			lines.push(`  ${theme.fg("muted", name)}${pad}${time}`);
 		}
 		return lines;
 	}
@@ -504,37 +478,27 @@ export class WelcomeComponent implements Component {
 	#whatsNewLines(width: number, maxRows: number): string[] {
 		const rowLimit = Math.max(1, Math.floor(maxRows));
 		const changelog = this.options.changelogMarkdown?.trim();
-		if (!changelog) {
-			return [` ${theme.fg("dim", "Ready for your next prompt")}`];
-		}
+		if (!changelog) return [`  ${theme.fg("dim", t("welcome.readyPrompt"))}`];
 
 		const version = this.#latestChangelogVersion(changelog);
-		if (this.options.collapseChangelog) {
-			return [
-				` ${theme.fg("muted", `Updated to v${version}`)}`,
-				` ${theme.fg("dim", `Use ${theme.bold("/changelog")} for details`)}`,
-			].slice(0, rowLimit);
-		}
-
-		const items = this.#changelogItems(changelog);
+		const items = this.options.collapseChangelog ? [] : this.#changelogItems(changelog);
 		if (items.length === 0) {
 			return [
-				` ${theme.fg("muted", `Updated to v${version}`)}`,
-				` ${theme.fg("dim", `Use ${theme.bold("/changelog")} for details`)}`,
+				`  ${theme.fg("muted", `Updated to v${version}`)}`,
+				`  ${theme.fg("dim", `Use ${theme.bold("/changelog")} for details`)}`,
 			].slice(0, rowLimit);
 		}
 
-		const prefix = ` ${theme.md.bullet} `;
-		const textWidth = Math.max(1, width - visibleWidth(prefix));
-		const visibleItemCount = items.length > rowLimit ? Math.max(1, rowLimit - 1) : rowLimit;
-		const visibleItems = items.slice(0, visibleItemCount).map(item => {
-			const text = visibleWidth(item) > textWidth ? truncateToWidth(item, textWidth) : item;
-			return `${theme.fg("dim", prefix)}${theme.fg("muted", text)}`;
-		});
-		if (items.length > visibleItems.length && visibleItems.length < rowLimit) {
-			visibleItems.push(` ${theme.fg("dim", `… ${theme.bold("/changelog")} for full notes`)}`);
+		const bullet = `  ${theme.md.bullet} `;
+		const textWidth = Math.max(1, width - visibleWidth(bullet));
+		const visibleCount = items.length > rowLimit ? Math.max(1, rowLimit - 1) : rowLimit;
+		const lines = items
+			.slice(0, visibleCount)
+			.map(item => `${theme.fg("accent", bullet)}${theme.fg("muted", this.#truncate(item, textWidth))}`);
+		if (items.length > lines.length && lines.length < rowLimit) {
+			lines.push(`  ${theme.fg("dim", `… ${theme.bold("/changelog")} for full notes`)}`);
 		}
-		return visibleItems;
+		return lines;
 	}
 
 	#latestChangelogVersion(markdown: string): string {
@@ -551,9 +515,7 @@ export class WelcomeComponent implements Component {
 				inFence = !inFence;
 				continue;
 			}
-			if (inFence || !line || /^#{1,6}\s+/.test(line) || /^-{3,}$/.test(line)) {
-				continue;
-			}
+			if (inFence || !line || /^#{1,6}\s+/.test(line) || /^-{3,}$/.test(line)) continue;
 			const withoutBullet = line
 				.replace(/^[-*]\s+/, "")
 				.replace(/^\d+\.\s+/, "")
@@ -575,134 +537,86 @@ export class WelcomeComponent implements Component {
 			.trim();
 	}
 
-	#pill(icon: string, text: string, color: ThemeColor): string {
-		return `${theme.fg("borderMuted", "[")} ${theme.fg(color, icon)} ${theme.fg("muted", text)} ${theme.fg(
-			"borderMuted",
-			"]",
-		)}`;
-	}
+	// ── Launch reveal ───────────────────────────────────────────────────────
 
-	/** Pick the logo frame for the current intro phase, or the resting frame. */
-	#currentLogoFrame(logoLines: readonly string[]): readonly string[] {
-		if (this.#animStart == null) return REST_FRAMES[this.logoMode];
+	/** How many sections are visible, and which one is still settling, at this frame. */
+	/** Number of sections that have taken their colors; the rest are still drawn, but in dim ink. */
+	#revealState(sectionCount: number): { colored: number } {
+		if (this.#animStart == null) return { colored: sectionCount };
 		const elapsed = performance.now() - this.#animStart;
-		if (elapsed >= INTRO_MS) return REST_FRAMES[this.logoMode];
-		// Ease-out cubic so the spin decelerates into the resting state.
-		const progress = elapsed / INTRO_MS;
-		const eased = 1 - (1 - progress) ** 3;
-		// Sweep backward through INTRO_SWEEPS full rotations so the gradient
-		// visibly spins multiple times. `eased == 1` → phase = 0 = resting frame.
-		const phase = ((((1 - eased) * INTRO_SWEEPS) % 1) + 1) % 1;
-		// Shine traverses the diagonal at a steady pace, decoupled from the
-		// gradient phase so the two layers parallax. Strength fades out with
-		// the same ease-out curve so the highlight is gone by the resting frame.
-		const shinePos = (((progress * INTRO_SHINE_TRAVERSALS) % 1) + 1) % 1;
-		const shineStrength = (1 - eased) ** 1.5;
-		return gradientLogo(logoLines, phase, { strength: shineStrength, pos: shinePos });
+		return { colored: Math.min(sectionCount, Math.floor((elapsed - SECTION_SETTLE_MS) / SECTION_STAGGER_MS) + 1) };
 	}
 
-	#logoLines(): readonly string[] {
-		return BRAND_LOGO;
+	/**
+	 * Every fact is on screen from the first frame; the intro only lets color
+	 * spread top to bottom, like ink soaking in. Content never waits on the effect.
+	 */
+	#revealLines(sections: Section[], offset: number, reveal: { colored: number }): string[] {
+		const lines: string[] = [];
+		sections.forEach((section, index) => {
+			if (offset + index < reveal.colored) {
+				lines.push(...section.lines);
+				return;
+			}
+			for (const line of section.lines) lines.push(theme.fg("dim", Bun.stripANSI(line)));
+		});
+		return lines;
 	}
-}
 
-// biome-ignore format: preserve ASCII art layout
-const BRAND_LOGO = [
-	"╔═╗╔═╗╦ ╦╦╔═╔╗╔╔═╗╦ ╦",
-	"╚═╗╠═╣╚╦╝╠╩╗║║║║ ║║║║",
-	"╚═╝╩ ╩ ╩ ╩ ╩╝╚╝╚═╝╚╩╝",
-];
+	// ── Layout helpers ──────────────────────────────────────────────────────
 
-/** Multi-stop palette for the blue-octopus diagonal gradient. */
-const GRADIENT_STOPS: ReadonlyArray<readonly [number, number, number]> = [
-	[6, 19, 33], // deep navy
-	[11, 79, 138], // ocean
-	[47, 155, 255], // octopus mantle blue
-	[94, 200, 255], // bright tentacle blue
-	[168, 224, 255], // sky highlight
-];
+	#clip(lines: string[], rows: number): string[] {
+		if (rows <= 0) return [];
+		if (lines.length <= rows) return lines;
+		if (rows === 1) return [theme.fg("dim", " …")];
+		return [...lines.slice(0, rows - 1), theme.fg("dim", " …")];
+	}
 
-/** 256-color ramp fallback when truecolor isn't available. */
-const GRADIENT_RAMP_256 = [17, 18, 24, 31, 38, 75, 117];
+	#truncate(text: string, width: number): string {
+		return visibleWidth(text) > width ? truncateToWidth(text, width) : text;
+	}
 
-/** Half-width of the shine highlight band, expressed in gradient-t units. */
-const SHINE_HALF_WIDTH = 0.18;
+	/** Keep the tail of a long path — the project directory is the part that identifies it. */
+	#shortenFromLeft(value: string, width: number): string {
+		if (visibleWidth(value) <= width) return value;
+		if (width <= 1) return "…";
+		let tail = value;
+		while (tail.length > 0 && visibleWidth(tail) > width - 1) tail = tail.slice(1);
+		return `…${tail}`;
+	}
 
-interface ShineConfig {
-	/** Overall opacity of the shine overlay, in [0, 1]. */
-	strength: number;
-	/** Center of the shine band along the diagonal, in [0, 1]. */
-	pos: number;
-}
-/**
- * Apply a multi-stop diagonal gradient (bottom-left → top-right) plus an
- * optional sliding shine band across multi-line art. `phase` (0..1) shifts the
- * gradient along the diagonal, wrapping at 1. When `shine` is provided, a soft
- * white highlight is composited on top, centered at `shine.pos`.
- */
-function gradientLogo(lines: readonly string[], phase = 0, shine?: ShineConfig): string[] {
-	const reset = "\x1b[0m";
-	const rows = lines.length;
-	const cols = Math.max(...lines.map(l => l.length));
-	// span+1 so `base` stays strictly < 1: avoids the wrap-around at the
-	// far corner mapping back to t=0 (hot pink) on the resting frame.
-	const span = Math.max(1, cols + rows - 1);
-	const shineStrength = shine && shine.strength > 0 ? shine.strength : 0;
-	const shinePos = shine ? shine.pos : 0;
-	const colorAt = TERMINAL.trueColor
-		? (t: number): string => {
-				// 5-stop palette widens the visible color range and avoids the
-				// deep-blue valley a naive HSL lerp falls into.
-				const stops = GRADIENT_STOPS;
-				const seg = t * (stops.length - 1);
-				const i = Math.min(stops.length - 2, Math.floor(seg));
-				const f = seg - i;
-				const a = stops[i];
-				const b = stops[i + 1];
-				let r = a[0] + (b[0] - a[0]) * f;
-				let g = a[1] + (b[1] - a[1]) * f;
-				let bl = a[2] + (b[2] - a[2]) * f;
-				if (shineStrength > 0) {
-					const dist = Math.abs(t - shinePos);
-					const intensity = Math.max(0, 1 - dist / SHINE_HALF_WIDTH) * shineStrength;
-					if (intensity > 0) {
-						r += (255 - r) * intensity;
-						g += (255 - g) * intensity;
-						bl += (255 - bl) * intensity;
-					}
-				}
-				return `\x1b[38;2;${Math.round(r)};${Math.round(g)};${Math.round(bl)}m`;
-			}
-		: (t: number): string => {
-				const ramp = GRADIENT_RAMP_256;
-				let idx = Math.min(ramp.length - 1, Math.max(0, Math.floor(t * (ramp.length - 1) + 0.5)));
-				if (shineStrength > 0) {
-					const dist = Math.abs(t - shinePos);
-					const intensity = Math.max(0, 1 - dist / SHINE_HALF_WIDTH) * shineStrength;
-					// Promote to the brightest ramp slot when the shine band peaks here.
-					if (intensity > 0.5) idx = ramp.length - 1;
-				}
-				return `\x1b[38;5;${ramp[idx]}m`;
-			};
-	return lines.map((line, y) => {
-		let result = "";
-		for (let x = 0; x < line.length; x++) {
-			const char = line[x];
-			if (char === " ") {
-				result += char;
-				continue;
-			}
-			// Diagonal: bottom-left (x=0, y=rows-1) → top-right (x=cols-1, y=0)
-			const base = (x + (rows - 1 - y)) / span;
-			const t = (((base + phase) % 1) + 1) % 1;
-			result += colorAt(t) + char + reset;
+	/** Fit string to exact width with native ANSI/wide-glyph truncation and padding. */
+	#fitToWidth(str: string, width: number): string {
+		const visLen = visibleWidth(str);
+		if (visLen > width) return truncateToWidth(str, width, null, true);
+		return str + padding(width - visLen);
+	}
+
+	#rightGutterWidth(termWidth: number): number {
+		const configured = this.options.rightGutterWidth ?? 0;
+		if (!Number.isFinite(configured) || configured <= 0) return 0;
+		const gutterWidth = Math.floor(configured);
+		return Math.min(gutterWidth, Math.max(0, termWidth - 4));
+	}
+
+	#withRightGutter(lines: string[], rightGutterWidth: number): string[] {
+		if (rightGutterWidth <= 0) return lines;
+		const gutter = padding(rightGutterWidth);
+		return lines.map(line => line + gutter);
+	}
+
+	#targetRows(termWidth: number): number | undefined {
+		const viewportRows = this.options.getViewportRows?.();
+		if (typeof viewportRows !== "number" || !Number.isFinite(viewportRows) || viewportRows <= 0) {
+			return undefined;
 		}
-		return result;
-	});
+		const reservedRows = Math.max(0, Math.floor(this.options.getReservedBottomRows?.(termWidth) ?? 0));
+		return Math.max(0, Math.floor(viewportRows) - reservedRows);
+	}
 }
 
-/** Total length of the intro animation. */
-const INTRO_MS = 3000;
+/** Upper bound on the reveal: enough for every section to land and settle. */
+const INTRO_MS = 12 * SECTION_STAGGER_MS + SECTION_SETTLE_MS;
 /** Resolve the intro cadence without making tests mutate global process state. */
 export function resolveWelcomeIntroTickMs(
 	platform: NodeJS.Platform = process.platform,
@@ -713,14 +627,3 @@ export function resolveWelcomeIntroTickMs(
 
 /** Render at 30fps directly, but cap native Windows multiplexers at 10fps to avoid ConPTY output backpressure. */
 const INTRO_TICK_MS = resolveWelcomeIntroTickMs();
-/** Number of full gradient rotations the sweep performs before settling. */
-const INTRO_SWEEPS = 2.5;
-/** Number of times the shine highlight crosses the diagonal across the intro. */
-const INTRO_SHINE_TRAVERSALS = 3;
-
-/** Resting gradient frames, cached for re-renders outside of the intro. */
-const REST_FRAMES: Record<WelcomeLogoMode, readonly string[]> = {
-	unicode: gradientLogo(BRAND_LOGO, 0),
-	square: gradientLogo(BRAND_LOGO, 0),
-	ascii: gradientLogo(BRAND_LOGO, 0),
-};

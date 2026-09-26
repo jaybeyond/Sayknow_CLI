@@ -869,11 +869,10 @@ export class StatusLineComponent implements Component {
 		const ctx = this.#buildSegmentContext(width, effectiveSettings);
 		const separatorDef = getSeparator(effectiveSettings.separator ?? "powerline-thin", theme);
 
-		// Use the subtle surface tone (the same elevated background as user-message
-		// bubbles) instead of the heavy `statusLineBg` block, so the rail layers
-		// just above the base background as a quiet zone rather than a solid bar.
-		// Resolving through a semantic slot keeps it correct across every theme.
-		const bgAnsi = theme.getBgAnsi("userMessageBg");
+		// Powerline separators paint their arrows from a surface tone; every other
+		// separator leaves the rail on the bare terminal so it reads as a ledger line,
+		// not a bar.
+		const bgAnsi = separatorDef.endCaps ? theme.getBgAnsi("statusLineBg") : "";
 		const fgAnsi = theme.getFgAnsi("text");
 		const sepAnsi = theme.getFgAnsi("statusLineSep");
 

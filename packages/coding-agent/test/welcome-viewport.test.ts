@@ -1,10 +1,13 @@
-import { afterEach, beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "bun:test";
 import { stripVTControlCharacters } from "node:util";
 import { visibleWidth } from "@sayknow-cli/tui";
-import { resolveWelcomeIntroTickMs, WelcomeComponent } from "../src/modes/components/welcome";
+import { getLanguage, setLanguage } from "../src/i18n";
+import { resolveWelcomeIntroTickMs, WelcomeComponent, type WelcomeSnapshot } from "../src/modes/components/welcome";
 import { getThemeByName, setThemeInstance } from "../src/modes/theme/theme";
 
 const originalBuildChannel = process.env.SKC_BUILD_CHANNEL;
+// The ledger assertions read English labels; a Korean system locale leaks in during full runs.
+const originalLanguage = getLanguage();
 
 afterEach(() => {
 	if (originalBuildChannel === undefined) {
@@ -14,10 +17,42 @@ afterEach(() => {
 	}
 });
 beforeAll(async () => {
-	const theme = await getThemeByName("red-octopus");
-	if (!theme) throw new Error("Failed to load red-octopus theme");
+	setLanguage("en");
+	const theme = await getThemeByName("ink-octopus");
+	if (!theme) throw new Error("Failed to load ink-octopus theme");
 	setThemeInstance(theme);
 });
+afterAll(() => {
+	setLanguage(originalLanguage);
+});
+
+const plain = (lines: string[]): string[] => lines.map(line => stripVTControlCharacters(line));
+
+const FULL_SNAPSHOT: WelcomeSnapshot = {
+	cwd: "~/Dev/sayknow-cli",
+	branch: "feature/ledger",
+	gitChanges: { staged: 2, unstaged: 5, untracked: 1 },
+	recentCommits: ["82c86be perf(session): reject foreign receipts early", "67c255e feat(ai): bundle GPT-6 Sol"],
+	thinkingLevel: "xhigh",
+	profile: "Claude Opus 5.5",
+	roles: [
+		{ role: "executor", model: "claude-sonnet-5" },
+		{ role: "planner", model: "claude-opus-5-5:medium" },
+		{ role: "critic", model: "claude-opus-5-5:high" },
+		{ role: "architect", model: "claude-opus-5-5:max" },
+	],
+	mcp: { connected: 3, total: 4 },
+	skills: 24,
+	contextFiles: ["AGENTS.md", "CLAUDE.md"],
+};
+
+function ledger(snapshot: WelcomeSnapshot, width = 140, rows = 40): string {
+	const welcome = new WelcomeComponent("1.2.3", "Claude Opus 5.5", "anthropic", [], [], "unicode", {
+		snapshot,
+		getViewportRows: () => rows,
+	});
+	return plain(welcome.render(width)).join("\n");
+}
 
 describe("welcome intro cadence", () => {
 	it("reduces frame pressure only for native Windows multiplexers", () => {
@@ -26,82 +61,47 @@ describe("welcome intro cadence", () => {
 		expect(resolveWelcomeIntroTickMs("linux", "tmux,1,0")).toBe(33);
 	});
 });
-describe("logo animation", () => {
-	it("renders the final logo immediately when animation is skipped", () => {
+
+describe("launch reveal", () => {
+	it("renders the settled frame immediately when the reveal is skipped", () => {
 		const skipped = new WelcomeComponent("1.2.3", "test-model", "test-provider", [], [], "ascii", {
 			skipLogoAnimation: true,
+			snapshot: FULL_SNAPSHOT,
 		});
-		const finalFrame = skipped.render(100);
-
+		const settled = skipped.render(120);
 		skipped.playIntro(() => {});
-		expect(skipped.render(100)).toEqual(finalFrame);
+		expect(skipped.render(120)).toEqual(settled);
 
-		const animated = new WelcomeComponent("1.2.3", "test-model", "test-provider", [], [], "ascii");
+		const animated = new WelcomeComponent("1.2.3", "test-model", "test-provider", [], [], "ascii", {
+			snapshot: FULL_SNAPSHOT,
+		});
 		animated.playIntro(() => {});
-		expect(animated.render(100)).not.toEqual(finalFrame);
+		const firstFrame = animated.render(120);
+		// Only color is staged: every fact is readable on the first frame, in the same place.
+		expect(firstFrame).not.toEqual(settled);
+		expect(firstFrame).toHaveLength(settled.length);
+		expect(plain(firstFrame)).toEqual(plain(settled));
 
-		skipped.dispose();
 		animated.dispose();
+		expect(animated.render(120)).toEqual(settled);
+		skipped.dispose();
 	});
 });
 
-function stripRenderControls(line: string): string {
-	return stripVTControlCharacters(line);
-}
-
-function renderedColumnWidths(lines: string[]): { left: number; right: number } {
-	for (const line of lines.map(stripRenderControls)) {
-		const separators = Array.from(line.matchAll(/│/g), match => match.index ?? -1);
-		if (separators.length >= 3) {
-			const [leftEdge, divider, rightEdge] = separators;
-			return {
-				left: visibleWidth(line.slice(leftEdge + 1, divider)),
-				right: visibleWidth(line.slice(divider + 1, rightEdge)),
-			};
-		}
-	}
-	throw new Error("Expected two-column welcome layout");
-}
-
-function renderedRightColumn(lines: string[]): string[] {
-	return lines.map(stripRenderControls).flatMap(line => {
-		const separators = Array.from(line.matchAll(/│/g), match => match.index ?? -1);
-		if (separators.length < 3) return [];
-		const [, divider, rightEdge] = separators;
-		return [line.slice(divider + 1, rightEdge)];
-	});
-}
-
-function flowKeyContentRows(lines: string[]): string[] {
-	const rightColumn = renderedRightColumn(lines);
-	const start = rightColumn.findIndex(line => line.includes("Flow keys"));
-	const end = rightColumn.findIndex((line, index) => index > start && line.includes("Project pulse"));
-	if (start === -1 || end === -1) throw new Error("Expected Flow keys and Project pulse sections");
-	return rightColumn.slice(start + 1, end).filter(line => {
-		const text = line.trim();
-		return text.length > 0 && !/[─━-]{3,}/.test(text);
-	});
-}
-
-describe("WelcomeComponent viewport sizing", () => {
-	it("uses the full terminal width on wide initial forge viewports", () => {
-		const welcome = new WelcomeComponent("1.2.3", "test-model", "test-provider", [], [], "ascii");
-		const lines = welcome.render(200);
-
+describe("WelcomeComponent layout", () => {
+	it("uses the full terminal width on wide viewports", () => {
+		const lines = new WelcomeComponent("1.2.3", "test-model", "test-provider", [], [], "ascii").render(200);
 		expect(lines.length).toBeGreaterThan(0);
-		for (const line of lines) {
-			expect(visibleWidth(line)).toBe(200);
-		}
+		for (const line of lines) expect(visibleWidth(line)).toBe(200);
 	});
 
-	it("reserves the composer gutter for normal and one-row welcome layouts", () => {
+	it("reserves the composer gutter for normal and one-row layouts", () => {
 		const normal = new WelcomeComponent("1.2.3", "test-model", "test-provider", [], [], "ascii", {
 			rightGutterWidth: 1,
 		});
-		for (const line of normal.render(100).map(stripRenderControls)) {
+		for (const line of plain(normal.render(100))) {
 			expect(visibleWidth(line)).toBe(100);
 			expect(line.endsWith(" ")).toBe(true);
-			expect(visibleWidth(line.trimEnd())).toBe(99);
 		}
 
 		const constrained = new WelcomeComponent("1.2.3", "test-model", "test-provider", [], [], "ascii", {
@@ -109,42 +109,50 @@ describe("WelcomeComponent viewport sizing", () => {
 			getViewportRows: () => 1,
 			getReservedBottomRows: () => 0,
 		});
-		const lines = constrained.render(100).map(stripRenderControls);
+		const lines = plain(constrained.render(100));
 		expect(lines).toHaveLength(1);
 		expect(visibleWidth(lines[0]!)).toBe(100);
-		expect(lines[0]!.endsWith(" ")).toBe(true);
-		expect(visibleWidth(lines[0]!.trimEnd())).toBe(99);
+		expect(lines[0]).toContain("Sayknow-CLI");
 	});
 
 	it("renders the build label from metadata instead of defaulting to dev", () => {
 		const welcome = new WelcomeComponent("1.2.3", "test-model", "test-provider", [], [], "ascii", {
 			buildLabel: "release build",
 		});
-		const rendered = welcome.render(120).map(stripRenderControls).join("\n");
-
-		expect(rendered).toContain("skc · Sayknow-CLI v1.2.3 · release build");
+		const rendered = plain(welcome.render(120)).join("\n");
+		expect(rendered).toContain("Sayknow-CLI v1.2.3 · release build");
 		expect(rendered).not.toContain("dev build");
 	});
 
 	it("renders the production metadata resolver label when no override is provided", () => {
 		process.env.SKC_BUILD_CHANNEL = "release";
-		const welcome = new WelcomeComponent("1.2.3", "test-model", "test-provider", [], [], "ascii");
-		const rendered = welcome.render(120).map(stripRenderControls).join("\n");
-
-		expect(rendered).toContain("skc · Sayknow-CLI v1.2.3 · release build");
+		const rendered = plain(
+			new WelcomeComponent("1.2.3", "test-model", "test-provider", [], [], "ascii").render(120),
+		).join("\n");
+		expect(rendered).toContain("Sayknow-CLI v1.2.3 · release build");
 		expect(rendered).not.toContain("dev build");
 	});
 
-	it("splits the forge and details columns evenly on wide viewports", () => {
-		const welcome = new WelcomeComponent("1.2.3", "test-model", "test-provider", [], [], "ascii");
-		const columns = renderedColumnWidths(welcome.render(140));
+	it("is borderless: no enclosing box and no column divider", () => {
+		const rendered = ledger(FULL_SNAPSHOT);
+		for (const glyph of ["╭", "╮", "╰", "╯", "│", "┴"]) expect(rendered).not.toContain(glyph);
+	});
 
-		expect(Math.abs(columns.left - columns.right)).toBeLessThanOrEqual(1);
+	it("sits the ledger beside the activity column when wide, and stacks it when narrow", () => {
+		const wide = ledger(FULL_SNAPSHOT, 140).split("\n");
+		const sideBySide = wide.find(line => line.includes("workspace"));
+		expect(sideBySide).toContain("What's new");
+
+		const narrow = ledger(FULL_SNAPSHOT, 80, 60).split("\n");
+		const workspaceRow = narrow.findIndex(line => line.includes("workspace"));
+		const whatsNewRow = narrow.findIndex(line => line.includes("What's new"));
+		expect(workspaceRow).toBeGreaterThan(-1);
+		expect(whatsNewRow).toBeGreaterThan(workspaceRow);
+		expect(narrow[workspaceRow]).not.toContain("What's new");
 	});
 
 	it("degrades gracefully on tiny terminal widths", () => {
 		const welcome = new WelcomeComponent("1.2.3", "test-model", "test-provider", [], [], "ascii");
-
 		expect(welcome.render(5).every(line => visibleWidth(line) <= 5)).toBe(true);
 		expect(welcome.render(3)).toEqual([]);
 		expect(welcome.render(24).every(line => visibleWidth(line) <= 24)).toBe(true);
@@ -156,61 +164,11 @@ describe("WelcomeComponent viewport sizing", () => {
 			getReservedBottomRows: () => 6,
 		});
 		const lines = welcome.render(100);
-
 		expect(lines).toHaveLength(18);
-		for (const line of lines) {
-			expect(visibleWidth(line)).toBe(100);
-		}
-		expect(lines.some(line => line.includes("Sayknow-CLI"))).toBe(true);
-		expect(lines.some(line => line.includes("What's New"))).toBe(true);
-	});
-	it("integrates changelog highlights without overflowing narrow CJK content", () => {
-		const welcome = new WelcomeComponent("1.2.3", "test-model", "test-provider", [], [], "ascii", {
-			getViewportRows: () => 16,
-			getReservedBottomRows: () => 5,
-			changelogMarkdown: [
-				"## [1.2.3]",
-				"",
-				"### Fixed",
-				"",
-				"- 한국어와 English가 섞인 긴 업데이트 내용을 시작 화면 안에서 안전하게 줄입니다.",
-				"- Added fullscreen startup framing.",
-			].join("\n"),
-		});
-		const lines = welcome.render(60);
-
-		expect(lines).toHaveLength(11);
-		expect(lines.some(line => line.includes("한국어와 English"))).toBe(true);
-		for (const line of lines) {
-			expect(visibleWidth(line)).toBeLessThanOrEqual(60);
-		}
-	});
-
-	it("expands What's New highlights when the viewport has spare rows", () => {
-		const changelogMarkdown = [
-			"## [1.2.3]",
-			"",
-			"### Added",
-			"",
-			...Array.from({ length: 8 }, (_, index) => `- Dynamic changelog item ${index + 1}`),
-		].join("\n");
-		const compact = new WelcomeComponent("1.2.3", "test-model", "test-provider", [], [], "ascii", {
-			getViewportRows: () => 24,
-			getReservedBottomRows: () => 4,
-			changelogMarkdown,
-		});
-		const roomy = new WelcomeComponent("1.2.3", "test-model", "test-provider", [], [], "ascii", {
-			getViewportRows: () => 40,
-			getReservedBottomRows: () => 4,
-			changelogMarkdown,
-		});
-
-		const compactText = compact.render(100).join("\n");
-		const roomyText = roomy.render(100).join("\n");
-
-		expect(compactText).toContain("Dynamic changelog item 1");
-		expect(compactText).not.toContain("Dynamic changelog item 4");
-		expect(roomyText).toContain("Dynamic changelog item 8");
+		for (const line of lines) expect(visibleWidth(line)).toBe(100);
+		const text = plain(lines).join("\n");
+		expect(text).toContain("Sayknow-CLI");
+		expect(text).toContain("What's new");
 	});
 
 	it("does not steal rows when the pinned composer already fills the viewport", () => {
@@ -228,46 +186,134 @@ describe("WelcomeComponent viewport sizing", () => {
 		expect(lines).toHaveLength(1);
 		expect(visibleWidth(lines[0] ?? "")).toBeLessThanOrEqual(80);
 	});
+});
+
+describe("workspace ledger", () => {
+	it("shows the workspace, branch, commits, model, reasoning, preset, roles and tooling", () => {
+		const text = ledger(FULL_SNAPSHOT);
+
+		expect(text).toContain("~/Dev/sayknow-cli");
+		expect(text).toContain("feature/ledger · +2 ~5 ?1");
+		expect(text).toContain("82c86be perf(session): reject foreign receipts early");
+		expect(text).toContain("Claude Opus 5.5 · anthropic");
+		expect(text).toContain("xhigh");
+		expect(text).toContain("preset");
+		expect(text).toContain("MCP 3/4");
+		expect(text).toContain("skills 24");
+		expect(text).toContain("rules AGENTS.md +1");
+
+		// Role agents keep their canonical order.
+		const order = ["executor", "planner", "critic", "architect"].map(role => text.indexOf(`${role} `));
+		expect(order.every(index => index > -1)).toBe(true);
+		expect([...order].sort((a, b) => a - b)).toEqual(order);
+		expect(text).toContain("claude-opus-5-5:max");
+	});
+
+	it("says the roles follow the default model when no role override is set", () => {
+		expect(ledger({ ...FULL_SNAPSHOT, roles: [] })).toContain("roles follow the default model");
+	});
+
+	it("guides model selection instead of printing Unknown", () => {
+		const welcome = new WelcomeComponent("1.2.3", "Unknown", "Unknown", [], [], "unicode");
+		const text = plain(welcome.render(140)).join("\n");
+		expect(text).toContain("choose a model");
+		expect(text).not.toContain("Unknown");
+	});
+
+	it("fills in probed facts as they arrive", () => {
+		const welcome = new WelcomeComponent("1.2.3", "m", "p", [], [], "unicode", {
+			snapshot: { branch: "main" },
+		});
+		const before = plain(welcome.render(140)).join("\n");
+		expect(before).toContain("main");
+		expect(before).not.toContain("clean");
+
+		welcome.setSnapshot({ gitChanges: { staged: 0, unstaged: 0, untracked: 0 } });
+		const after = plain(welcome.render(140)).join("\n");
+		expect(after).toContain("main · clean");
+	});
+
+	it("marks a directory outside git instead of hiding the row", () => {
+		expect(ledger({ branch: null })).toContain("not a git repository");
+	});
+
+	it("keeps the tail of a long workspace path — the part that names the project", () => {
+		const text = ledger({ cwd: `~/${"deeply/nested/".repeat(12)}my-project` }, 100);
+		expect(text).toContain("…");
+		expect(text).toContain("my-project");
+	});
+});
+
+describe("activity column", () => {
+	it("integrates changelog highlights without overflowing narrow CJK content", () => {
+		const welcome = new WelcomeComponent("1.2.3", "test-model", "test-provider", [], [], "ascii", {
+			getViewportRows: () => 40,
+			changelogMarkdown: [
+				"## [1.2.3]",
+				"",
+				"### Fixed",
+				"",
+				"- 한국어와 English가 섞인 긴 업데이트 내용을 시작 화면 안에서 안전하게 줄입니다.",
+				"- Added fullscreen startup framing.",
+			].join("\n"),
+		});
+		const lines = welcome.render(60);
+		expect(plain(lines).join("\n")).toContain("한국어와 English");
+		for (const line of lines) expect(visibleWidth(line)).toBeLessThanOrEqual(60);
+	});
+
+	it("expands What's new highlights when the viewport has spare rows", () => {
+		const changelogMarkdown = [
+			"## [1.2.3]",
+			"",
+			"### Added",
+			"",
+			...Array.from({ length: 10 }, (_, index) => `- Dynamic changelog item ${index + 1}`),
+		].join("\n");
+		const make = (rows: number) =>
+			plain(
+				new WelcomeComponent("1.2.3", "m", "p", [], [], "ascii", {
+					getViewportRows: () => rows,
+					changelogMarkdown,
+				}).render(140),
+			).join("\n");
+
+		const compact = make(24);
+		const roomy = make(48);
+		expect(compact).toContain("Dynamic changelog item 1");
+		expect(compact).not.toContain("Dynamic changelog item 6");
+		expect(roomy).toContain("Dynamic changelog item 6");
+	});
 
 	it("expands the session trail when the viewport has spare rows", () => {
-		const recentSessions = Array.from({ length: 8 }, (_, index) => ({
+		const recentSessions = Array.from({ length: 12 }, (_, index) => ({
 			name: `trail-session-${index + 1}`,
 			timeAgo: `${index + 1}m ago`,
 		}));
-		// The Sayknow-CLI welcome adds a 6-row Workflows block above Flow keys, so the
-		// compact viewport needs those extra rows before the trail gets its baseline.
-		const compact = new WelcomeComponent("1.2.3", "test-model", "test-provider", recentSessions, [], "ascii", {
-			getViewportRows: () => 30,
-			getReservedBottomRows: () => 4,
-		});
-		const roomy = new WelcomeComponent("1.2.3", "test-model", "test-provider", recentSessions, [], "ascii", {
-			getViewportRows: () => 40,
-			getReservedBottomRows: () => 4,
-		});
+		const make = (rows: number) =>
+			plain(
+				new WelcomeComponent("1.2.3", "m", "p", recentSessions, [], "ascii", {
+					getViewportRows: () => rows,
+				}).render(140),
+			).join("\n");
 
-		const compactText = compact.render(100).join("\n");
-		const roomyText = roomy.render(100).join("\n");
-
-		expect(compactText).toContain("trail-session-4");
-		expect(compactText).not.toContain("trail-session-5");
-		expect(roomyText).toContain("trail-session-8");
+		const compact = make(26);
+		const roomy = make(48);
+		expect(compact).toContain("trail-session-3");
+		expect(roomy).toContain("trail-session-8");
+		const count = (text: string) => recentSessions.filter(s => text.includes(`${s.name} `)).length;
+		expect(count(roomy)).toBeGreaterThan(count(compact));
 	});
 
 	it("packs Flow keys across the available section width", () => {
-		const narrow = new WelcomeComponent("1.2.3", "test-model", "test-provider", [], [], "ascii", {
-			keyDisplayContext: { platform: "linux" },
-		});
-		const wide = new WelcomeComponent("1.2.3", "test-model", "test-provider", [], [], "ascii", {
-			keyDisplayContext: { platform: "linux" },
-		});
+		const rowsWith = (width: number) =>
+			plain(
+				new WelcomeComponent("1.2.3", "m", "p", [], [], "ascii", {
+					keyDisplayContext: { platform: "linux" },
+				}).render(width),
+			).filter(line => /Ctrl\+|\/ commands|Tab complete/.test(line)).length;
 
-		const narrowFlowRows = flowKeyContentRows(narrow.render(70));
-		const wideFlowRows = flowKeyContentRows(wide.render(160));
-		const wideText = wideFlowRows.join("\n");
-
-		expect(wideFlowRows.length).toBeLessThan(narrowFlowRows.length);
-		expect(wideText).toContain("/ commands");
-		expect(wideText).toContain("Ctrl+C clear");
+		expect(rowsWith(200)).toBeLessThan(rowsWith(50));
 	});
 
 	it.each([
@@ -275,35 +321,18 @@ describe("WelcomeComponent viewport sizing", () => {
 		["win32", ["Ctrl+L model", "Shift+Tab reasoning", "Tab complete", "Alt+Enter newline", "Ctrl+C clear"]],
 		["linux", ["Ctrl+L model", "Shift+Tab reasoning", "Tab complete", "Ctrl+J newline", "Ctrl+C clear"]],
 	] as const)("renders platform-aware canonical Flow keys for %s", (platform, expected) => {
-		const welcome = new WelcomeComponent("1.2.3", "test-model", "test-provider", [], [], "ascii", {
+		const welcome = new WelcomeComponent("1.2.3", "m", "p", [], [], "ascii", {
 			keyDisplayContext: { platform },
+			getViewportRows: () => 60,
 		});
-		const flowText = flowKeyContentRows(welcome.render(160)).join("\n");
+		const text = plain(welcome.render(200)).join("\n");
+		const flow = text.slice(text.indexOf("Flow keys"));
 
 		let previousIndex = -1;
 		for (const label of expected) {
-			const index = flowText.indexOf(label);
+			const index = flow.indexOf(label);
 			expect(index).toBeGreaterThan(previousIndex);
 			previousIndex = index;
 		}
-	});
-
-	it("clips Flow keys to the viewport row budget before session trail rows", () => {
-		const recentSessions = Array.from({ length: 6 }, (_, index) => ({
-			name: `trail-session-${index + 1}`,
-			timeAgo: `${index + 1}m ago`,
-		}));
-		// 18 upstream rows + the fork's 6-row Workflows block: Flow keys must still clip first.
-		const compact = new WelcomeComponent("1.2.3", "test-model", "test-provider", recentSessions, [], "ascii", {
-			getViewportRows: () => 24,
-			getReservedBottomRows: () => 4,
-		});
-
-		const lines = compact.render(80);
-		const flowRows = flowKeyContentRows(lines);
-
-		expect(lines).toHaveLength(20);
-		expect(flowRows.length).toBeLessThanOrEqual(2);
-		expect(lines.join("\n")).toContain("/help");
 	});
 });
