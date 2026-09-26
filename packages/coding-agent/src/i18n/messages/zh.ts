@@ -22,6 +22,7 @@ export const zh: Partial<Record<MsgKey, string>> = {
 	"welcome.noLsp": "无 LSP 服务器",
 	"welcome.sessionTrail": "会话记录",
 	"welcome.noSessions": "暂无已保存会话",
+	"welcome.allSessions": "{key} 查看全部",
 	"welcome.chooseModel": "选择模型",
 	"welcome.modelHint": "ctrl+l 选择 · / 命令",
 	"welcome.label.workspace": "工作区",

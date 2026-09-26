@@ -22,6 +22,7 @@ export const ja: Partial<Record<MsgKey, string>> = {
 	"welcome.noLsp": "LSP サーバーなし",
 	"welcome.sessionTrail": "セッション履歴",
 	"welcome.noSessions": "保存されたセッションなし",
+	"welcome.allSessions": "{key} すべて表示",
 	"welcome.chooseModel": "モデルを選択",
 	"welcome.modelHint": "ctrl+l で選択 · / でコマンド",
 	"welcome.label.workspace": "ワークスペース",

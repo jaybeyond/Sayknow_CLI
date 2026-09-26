@@ -30,6 +30,7 @@ export const en = {
 	"welcome.noLsp": "No LSP servers",
 	"welcome.sessionTrail": "Session trail",
 	"welcome.noSessions": "No saved trails",
+	"welcome.allSessions": "{key} all sessions",
 	"welcome.chooseModel": "choose a model",
 	"welcome.modelHint": "ctrl+l to pick · / for commands",
 	"welcome.label.workspace": "workspace",

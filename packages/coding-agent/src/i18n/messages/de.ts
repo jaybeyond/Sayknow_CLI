@@ -25,6 +25,7 @@ export const de: Partial<Record<MsgKey, string>> = {
 	"welcome.noLsp": "Keine LSP-Server",
 	"welcome.sessionTrail": "Sitzungsverlauf",
 	"welcome.noSessions": "Keine gespeicherten Verläufe",
+	"welcome.allSessions": "{key} alle Sitzungen",
 	"welcome.chooseModel": "Modell auswählen",
 	"welcome.modelHint": "ctrl+l zum Auswählen · / für Befehle",
 	"welcome.label.workspace": "Arbeitsbereich",

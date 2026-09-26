@@ -55,15 +55,17 @@ export interface WelcomeComponentOptions {
 	keyDisplayContext?: KeyDisplayContext;
 	skipLogoAnimation?: boolean;
 	snapshot?: WelcomeSnapshot;
+	/** Key bound to the resume picker (`app.session.resume`); the sessions heading names it. */
+	resumeKey?: string;
 }
 
 /** Below this width the ledger and the activity column stack instead of sitting side by side. */
 const TWO_COLUMN_MIN_WIDTH = 100;
 const COLUMN_GAP = 4;
 const MIN_RIGHT_COLUMN = 36;
-const DEFAULT_WHATS_NEW_ROWS = 3;
-const MAX_WHATS_NEW_ROWS = 12;
-const DEFAULT_SESSION_ROWS = 3;
+const WHATS_NEW_ROWS = 3;
+/** Recent sessions on the launch screen; the resume picker has the rest. */
+const SESSION_ROWS = 3;
 const MAX_LSP_ROWS = 3;
 const MAX_COMMIT_ROWS = 3;
 
@@ -202,10 +204,7 @@ export class WelcomeComponent implements Component {
 		const rightWidth = twoColumn ? width - leftWidth - COLUMN_GAP : width;
 
 		const ledger = this.#ledgerSections(leftWidth);
-		const ledgerRows = ledger.reduce((sum, section) => sum + section.lines.length, 0);
-		const activityBudget =
-			bodyRows === undefined ? undefined : twoColumn ? bodyRows : Math.max(0, bodyRows - ledgerRows - 1);
-		const activity = this.#activitySections(rightWidth, activityBudget);
+		const activity = this.#activitySections(rightWidth);
 
 		const reveal = this.#revealState(ledger.length + activity.length);
 		const leftLines = this.#revealLines(ledger, 0, reveal);
@@ -374,33 +373,27 @@ export class WelcomeComponent implements Component {
 
 	// ── Right column: activity ──────────────────────────────────────────────
 
-	#activitySections(width: number, rowBudget: number | undefined): Section[] {
+	/**
+	 * The launch screen stays short on purpose: three recent sessions and three
+	 * notes, never more. The full session list lives in the resume picker, and the
+	 * sessions heading names the key that opens it.
+	 */
+	#activitySections(width: number): Section[] {
 		const keyRows = this.#flowKeyRows(width);
 		const heading = (label: string, note?: string): string =>
 			` ${theme.bold(theme.fg("accent", label))}${note ? theme.fg("dim", `  ${note}`) : ""}`;
-		const sessionCount = this.recentSessions.length;
-		const sessionBaseline = sessionCount === 0 ? 1 : Math.min(DEFAULT_SESSION_ROWS, sessionCount);
-
-		// Fixed rows: 4 headings + 3 blank separators + workflows + keys + baseline trail.
-		const fixedRows = 4 + 3 + WORKFLOWS.length + keyRows.length + sessionBaseline;
-		const spare = rowBudget === undefined ? 0 : Math.max(0, rowBudget - fixedRows - DEFAULT_WHATS_NEW_ROWS);
-		const whatsNewLimit =
-			rowBudget === undefined
-				? 5
-				: Math.max(1, Math.min(MAX_WHATS_NEW_ROWS, DEFAULT_WHATS_NEW_ROWS + Math.ceil(spare / 2)));
-		const whatsNew = this.#whatsNewLines(width, whatsNewLimit);
-		const sessionLimit =
-			rowBudget === undefined
-				? sessionBaseline
-				: Math.min(sessionCount, sessionBaseline + Math.max(0, rowBudget - fixedRows - whatsNew.length));
+		const whatsNew = this.#whatsNewLines(width, WHATS_NEW_ROWS);
 
 		const changelog = this.options.changelogMarkdown?.trim();
 		const version = changelog ? this.#latestChangelogVersion(changelog) : undefined;
+		const context = this.options.keyDisplayContext ?? { platform: process.platform };
+		const resumeKey = this.options.resumeKey ? formatKeyHint(this.options.resumeKey, context) : "/resume";
+		const sessionsNote = this.recentSessions.length > 0 ? t("welcome.allSessions", { key: resumeKey }) : undefined;
 
 		const workflowWidth = Math.max(...WORKFLOWS.map(item => visibleWidth(item.command))) + 2;
 		return [
+			{ lines: [heading(t("welcome.sessionTrail"), sessionsNote), ...this.#sessionTrailLines(width), ""] },
 			{ lines: [heading(t("welcome.whatsNew"), version ? `v${version}` : undefined), ...whatsNew, ""] },
-			{ lines: [heading(t("welcome.sessionTrail")), ...this.#sessionTrailLines(width, sessionLimit), ""] },
 			{
 				lines: [
 					heading(t("welcome.workflows")),
@@ -460,12 +453,12 @@ export class WelcomeComponent implements Component {
 		return rows;
 	}
 
-	#sessionTrailLines(width: number, limit: number): string[] {
+	#sessionTrailLines(width: number): string[] {
 		if (this.recentSessions.length === 0) {
 			return [`  ${theme.fg("dim", t("welcome.noSessions"))}`];
 		}
 		const lines: string[] = [];
-		for (const session of this.recentSessions.slice(0, Math.max(1, limit))) {
+		for (const session of this.recentSessions.slice(0, SESSION_ROWS)) {
 			const time = theme.fg("dim", session.timeAgo);
 			const nameBudget = Math.max(1, width - 2 - visibleWidth(session.timeAgo) - 2);
 			const name = this.#truncate(session.name, nameBudget);

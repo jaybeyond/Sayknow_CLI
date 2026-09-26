@@ -754,6 +754,7 @@ export class InteractiveMode implements InteractiveModeContext {
 					keyDisplayContext: this.#keyDisplayContext,
 					skipLogoAnimation,
 					snapshot: this.#buildWelcomeSnapshot(),
+					resumeKey: this.keybindings.getKeys("app.session.resume")[0],
 				},
 			);
 

@@ -164,7 +164,7 @@ Authoritative inventory of the keybinding registry, one row per action. Generate
 | `app.session.new` | ctrl+n | composer |
 | `app.session.tree` | _(none)_ | composer |
 | `app.session.fork` | _(none)_ | composer |
-| `app.session.resume` | _(none)_ | composer |
+| `app.session.resume` | alt+r | composer |
 | `app.session.observe` | ctrl+s | composer |
 | `app.session.dashboard` | _(none)_ | composer |
 | `app.jobs.open` | alt+j | composer |

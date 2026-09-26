@@ -141,13 +141,16 @@ describe("WelcomeComponent layout", () => {
 	it("sits the ledger beside the activity column when wide, and stacks it when narrow", () => {
 		const wide = ledger(FULL_SNAPSHOT, 140).split("\n");
 		const sideBySide = wide.find(line => line.includes("workspace"));
-		expect(sideBySide).toContain("What's new");
+		expect(sideBySide).toContain("Session trail");
 
 		const narrow = ledger(FULL_SNAPSHOT, 80, 60).split("\n");
 		const workspaceRow = narrow.findIndex(line => line.includes("workspace"));
+		const sessionsRow = narrow.findIndex(line => line.includes("Session trail"));
 		const whatsNewRow = narrow.findIndex(line => line.includes("What's new"));
 		expect(workspaceRow).toBeGreaterThan(-1);
-		expect(whatsNewRow).toBeGreaterThan(workspaceRow);
+		// Stacked: sessions come right after the ledger, before release notes.
+		expect(sessionsRow).toBeGreaterThan(workspaceRow);
+		expect(whatsNewRow).toBeGreaterThan(sessionsRow);
 		expect(narrow[workspaceRow]).not.toContain("What's new");
 	});
 
@@ -262,7 +265,7 @@ describe("activity column", () => {
 		for (const line of lines) expect(visibleWidth(line)).toBeLessThanOrEqual(60);
 	});
 
-	it("expands What's new highlights when the viewport has spare rows", () => {
+	it("keeps What's new and the session trail short however tall the viewport is", () => {
 		const changelogMarkdown = [
 			"## [1.2.3]",
 			"",
@@ -270,22 +273,6 @@ describe("activity column", () => {
 			"",
 			...Array.from({ length: 10 }, (_, index) => `- Dynamic changelog item ${index + 1}`),
 		].join("\n");
-		const make = (rows: number) =>
-			plain(
-				new WelcomeComponent("1.2.3", "m", "p", [], [], "ascii", {
-					getViewportRows: () => rows,
-					changelogMarkdown,
-				}).render(140),
-			).join("\n");
-
-		const compact = make(24);
-		const roomy = make(48);
-		expect(compact).toContain("Dynamic changelog item 1");
-		expect(compact).not.toContain("Dynamic changelog item 6");
-		expect(roomy).toContain("Dynamic changelog item 6");
-	});
-
-	it("expands the session trail when the viewport has spare rows", () => {
 		const recentSessions = Array.from({ length: 12 }, (_, index) => ({
 			name: `trail-session-${index + 1}`,
 			timeAgo: `${index + 1}m ago`,
@@ -294,15 +281,34 @@ describe("activity column", () => {
 			plain(
 				new WelcomeComponent("1.2.3", "m", "p", recentSessions, [], "ascii", {
 					getViewportRows: () => rows,
+					changelogMarkdown,
 				}).render(140),
 			).join("\n");
 
-		const compact = make(26);
-		const roomy = make(48);
-		expect(compact).toContain("trail-session-3");
-		expect(roomy).toContain("trail-session-8");
-		const count = (text: string) => recentSessions.filter(s => text.includes(`${s.name} `)).length;
-		expect(count(roomy)).toBeGreaterThan(count(compact));
+		for (const rows of [26, 48, 80]) {
+			const text = make(rows);
+			expect(text).toContain("trail-session-3");
+			expect(text).not.toContain("trail-session-4");
+			expect(text).toContain("Dynamic changelog item 1");
+			expect(text).not.toContain("Dynamic changelog item 4");
+		}
+	});
+
+	it("points the session heading at the resume picker key", () => {
+		const sessions = [{ name: "previous work", timeAgo: "1m ago" }];
+		const withKey = plain(
+			new WelcomeComponent("1.2.3", "m", "p", sessions, [], "ascii", {
+				resumeKey: "alt+r",
+				keyDisplayContext: { platform: "linux" },
+			}).render(140),
+		).join("\n");
+		expect(withKey).toMatch(/Session trail\s+Alt\+R all sessions/);
+
+		const unbound = plain(new WelcomeComponent("1.2.3", "m", "p", sessions, [], "ascii").render(140)).join("\n");
+		expect(unbound).toContain("/resume all sessions");
+
+		const empty = plain(new WelcomeComponent("1.2.3", "m", "p", [], [], "ascii").render(140)).join("\n");
+		expect(empty).not.toContain("all sessions");
 	});
 
 	it("packs Flow keys across the available section width", () => {

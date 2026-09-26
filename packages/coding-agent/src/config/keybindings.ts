@@ -186,7 +186,7 @@ export const KEYBINDINGS = {
 		description: "Branch from message",
 	},
 	"app.session.resume": {
-		defaultKeys: [],
+		defaultKeys: "alt+r",
 		description: "Resume session",
 	},
 	"app.session.observe": {

@@ -22,6 +22,7 @@ export const ko: Partial<Record<MsgKey, string>> = {
 	"welcome.noLsp": "LSP 서버 없음",
 	"welcome.sessionTrail": "세션 기록",
 	"welcome.noSessions": "저장된 세션 없음",
+	"welcome.allSessions": "{key} 전체 보기",
 	"welcome.chooseModel": "모델 선택",
 	"welcome.modelHint": "ctrl+l 선택 · / 명령",
 	"welcome.label.workspace": "작업공간",
