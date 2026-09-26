@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- A turn stopped by the repetition guard is no longer auto-retried. It carries no transport facts, so the session classified it as `unknown` and admitted a bounded retry that would re-trip the same loop and re-bill the full context. Ported from upstream #5627.
+
+### Performance
+
+- `/resume` no longer reads and hashes both transcripts for every (legacy session, v2 session) pair while deciding which legacy sessions are already migrated. A migration receipt names exactly one source and one destination, so a receipt for a different pair is now rejected on those fields before any file I/O. Unrelated transcripts are read once by the listing instead of once more per receipt probe; upstream measured `/resume` in a 589-session directory dropping from 10.4–12.3s to 6.2–7.2s. Ported from upstream #5856 (the `/model` half of that change targets code this fork does not have).
+
 ## [0.6.4] - 2026-09-26
 
 ## [0.6.2] - 2026-09-24

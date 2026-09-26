@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+### Added
+
+- Bundle `openai-codex/gpt-6-sol` and `openai-codex/gpt-6-luna` alongside `gpt-6-astra`, with published standard pricing (Sol $2/$10, cache read $0.20, cache write $2.50; Luna $0.10/$0.50, $0.01/$0.125). Codex discovery reports both ids at zero cost, and the model manager only substitutes a bundled cost when one exists — so until now every Sol or Luna turn was recorded as free in `skc stats`. Observed directly: the local model cache held both rows at cost 0. As with Astra, the above-272K long-context tier is not recorded because this fork's cost engine has no tier support. Ported from upstream #5824.
+- `repetitionGuard` option on `SimpleStreamOptions` (`{ thinking?: number | false; text?: number | false }`), honoured by the openai-completions transport.
+
+### Fixed
+
+- Stop a runaway reasoning stream instead of rendering every repeat. When an openai-completions model falls into a decode loop and emits the same line (or the same short token run) 12 times in a row on the reasoning channel, the turn ends with `stopReason: "error"` and `errorCode: "repetition_guard_tripped"`. Tool calls in the same message still stream and execute, including ones emitted after the repeats: the stream is drained for a bounded window rather than cut at the trip. The stop is terminal — a decode loop is deterministic for the submitted context, so a retry would only re-trip it and re-bill the whole context — and the auth gateway reports it as 502 `upstream_error`, never 499 `request_aborted`. The error message is a fixed literal and the repeated sample is never written to logs. A stall or transport error that lands during the drain window keeps its own classification. Visible text is not guarded by default, because intentional repetition there (logs, tables, generated code) is the deliverable. Ported from upstream #5627.
+- Strip leaked chat-template tool fences (`<|tool_call_end|>` and friends) from rendered thinking, including fences split across chunk boundaries. The visible text channel is untouched, so a fence token mentioned in prose survives. Ported from upstream #5627.
+- Cross-model history replay collapses a pathological run of an exact repeated reasoning paragraph (64+ consecutive copies saving 4KB+) into its first copy plus the exact repeat count. After a model switch, earlier reasoning is re-sent as plain text on every turn, and a decode-looped block could be tens of thousands of copies. Stored history, same-model native replay, final answers and tool output are unchanged. Ported from upstream #5805.
+- openai-completions now honours the per-request `streamIdleTimeoutMs` option, as openai-responses, anthropic and codex already did; it silently used the environment default instead.
+
 ## [0.6.4] - 2026-09-26
 
 ### Fixed
