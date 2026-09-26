@@ -308,6 +308,49 @@ describe("managed session write protocol", () => {
 		expect(interruptedReplay).toMatchObject({ kind: "opened", path: first.path, migrated: true });
 		expect(await fs.readdir(receipts)).toHaveLength(1);
 	});
+	it("coalesces a migrated legacy transcript without full-reading unrelated v2 transcripts", async () => {
+		// Ported from upstream #5856: /resume probes every (legacy source, v2
+		// destination) pair, and each probe used to read and hash both transcripts
+		// before checking whether the receipt even named that destination.
+		const { cwd, sessionsRoot, scope } = await fixture();
+		const legacy = legacyDirectory(sessionsRoot, cwd);
+		await fs.mkdir(legacy, { recursive: true });
+		const source = path.join(legacy, "2026-01-01_session-a.jsonl");
+		await fs.writeFile(source, transcript("session-a", cwd));
+		expect((await prepareManagedSessionScopeForWrite(scope)).kind).toBe("resolved");
+		const unrelated = ["session-b", "session-c", "session-d"].map(id =>
+			path.join(scope.directoryPath, `2026-01-02_${id}.jsonl`),
+		);
+		for (const [index, file] of unrelated.entries())
+			await fs.writeFile(file, transcript(["session-b", "session-c", "session-d"][index]!, cwd), { mode: 0o600 });
+		const listed = listManagedCandidates(scope);
+		if (listed.kind !== "complete") throw new Error("listing incomplete");
+		const legacyCandidate = listed.owned.find(candidate => candidate.provenance === "legacy");
+		if (!legacyCandidate) throw new Error("legacy candidate missing");
+		const opened = await openManagedCandidateForWrite(scope, legacyCandidate);
+		if (opened.kind !== "opened") throw new Error("migration failed");
+
+		const capture = vi.spyOn(managedSessionStorage, "captureManagedFileNoFollow");
+		const coalesced = listManagedCandidates(scope);
+		const fullyRead = capture.mock.calls.map(([pathname]) => pathname);
+		capture.mockRestore();
+
+		if (coalesced.kind !== "complete") throw new Error("listing incomplete");
+		expect(coalesced.owned.map(candidate => [candidate.sessionId, candidate.migrationState]).sort()).toEqual([
+			["session-a", "migrated_v2"],
+			["session-b", "native_v2"],
+			["session-c", "native_v2"],
+			["session-d", "native_v2"],
+		]);
+		// Listing inspects every transcript once. Receipt verification must not add
+		// a second full read per (legacy source, v2 destination) probe: only the
+		// pair the receipt actually names is verified byte-for-byte.
+		const readsOf = (file: string) => fullyRead.filter(pathname => pathname === file).length;
+		for (const file of unrelated) expect(readsOf(file)).toBe(1);
+		expect(readsOf(opened.path)).toBeGreaterThan(1);
+		// macOS reports the canonical path (/private/var) for the legacy source.
+		expect(readsOf(await fs.realpath(source))).toBeGreaterThan(1);
+	});
 	it("publishes a committed managed inode with exactly one link", async () => {
 		const { scope } = await fixture();
 		await prepareManagedSessionScopeForWrite(scope);
