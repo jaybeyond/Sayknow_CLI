@@ -26,9 +26,10 @@ import * as openaiChat from "../providers/openai-chat-server";
 import * as openaiResponses from "../providers/openai-responses-server";
 import * as piNative from "../providers/pi-native-server";
 import { streamSimple } from "../stream";
-import type { Api, AssistantMessageEventStream, Context, Model, SimpleStreamOptions } from "../types";
+import type { Api, AssistantMessage, AssistantMessageEventStream, Context, Model, SimpleStreamOptions } from "../types";
 import { beginAttempt, classifyFallbackTrigger } from "../utils/fallback-transport";
 import { parseBind } from "../utils/parse-bind";
+import { REPETITION_GUARD_ERROR_CODE } from "../utils/stream-repetition-guard";
 import {
 	captureRequestHeaders,
 	corsHeaders,
@@ -240,6 +241,38 @@ function classifyGatewayError(err: unknown): { status: number; type: string; mes
 		return { status: 400, type: "invalid_request_error", message };
 	}
 	return { status: 502, type: "upstream_error", message };
+}
+
+/**
+ * Fixed envelope for a turn the streamed repetition guard stopped. The message
+ * is a literal on purpose: {@link classifyGatewayError} keyword-matches on
+ * message text (`invalid`, `quota`, `rate`, `forbidden`, …), so routing the
+ * stop through that regex could let provider text pick the HTTP status (#5627).
+ */
+const REPETITION_GUARD_GATEWAY_ERROR = {
+	status: 502,
+	type: "upstream_error",
+	message: "Upstream model produced runaway repeated output and the turn was stopped",
+} as const;
+
+/**
+ * Classify a terminal {@link AssistantMessage} that failed into a wire envelope.
+ *
+ * Shared by both non-streaming handlers so a repetition stop cannot be reported
+ * as a client cancellation on one path and an upstream error on the other.
+ * Exported for tests.
+ */
+export function classifyGatewayMessageFailure(
+	message: Pick<AssistantMessage, "stopReason" | "errorCode">,
+	errorMessage: string,
+): { status: number; type: string; message: string } {
+	// Checked before `aborted` as well as before the keyword classifier: a
+	// local decode-loop stop is never a user cancellation, whatever stop reason
+	// the provider chose to carry it on.
+	if (message.errorCode === REPETITION_GUARD_ERROR_CODE) return { ...REPETITION_GUARD_GATEWAY_ERROR };
+	if (message.stopReason === "aborted") return { status: 499, type: "request_aborted", message: errorMessage };
+	const classified = classifyGatewayError(new Error(errorMessage));
+	return { status: classified.status, type: classified.type, message: errorMessage };
 }
 
 async function refreshGatewayApiKeyAfterAuthError(
@@ -520,11 +553,8 @@ async function handleFormatEndpoint(
 					error: errorMessage,
 					peer,
 				});
-				if (message.stopReason === "aborted") {
-					return route.module.formatError(499, "request_aborted", errorMessage);
-				}
-				const classified = classifyGatewayError(new Error(errorMessage));
-				return route.module.formatError(classified.status, classified.type, errorMessage);
+				const classified = classifyGatewayMessageFailure(message, errorMessage);
+				return route.module.formatError(classified.status, classified.type, classified.message);
 			}
 			return json(200, route.module.encodeResponse(message, parsed.modelId));
 		} catch (error) {
@@ -708,11 +738,8 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 					error: errorMessage,
 					peer,
 				});
-				if (message.stopReason === "aborted") {
-					return piNative.formatError(499, "request_aborted", errorMessage);
-				}
-				const classified = classifyGatewayError(new Error(errorMessage));
-				return piNative.formatError(classified.status, classified.type, errorMessage);
+				const classified = classifyGatewayMessageFailure(message, errorMessage);
+				return piNative.formatError(classified.status, classified.type, classified.message);
 			}
 			return json(200, { message });
 		} catch (error) {

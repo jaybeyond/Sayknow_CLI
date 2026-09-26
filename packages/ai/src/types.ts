@@ -430,6 +430,15 @@ export interface StreamOptions {
 	execHandlers?: CursorExecHandlers;
 }
 
+/**
+ * Runaway-repetition guard thresholds, per stream channel. A number sets the
+ * consecutive-repeat threshold; `false` disables that channel's guard.
+ */
+export interface RepetitionGuardOptions {
+	thinking?: number | false;
+	text?: number | false;
+}
+
 // Unified options with reasoning passed to streamSimple() and completeSimple()
 export interface SimpleStreamOptions extends StreamOptions {
 	reasoning?: Effort;
@@ -466,6 +475,14 @@ export interface SimpleStreamOptions extends StreamOptions {
 	syntheticApiFormat?: "openai" | "anthropic";
 	/** Hint that websocket transport should be preferred when supported by the provider implementation. */
 	preferWebsockets?: boolean;
+	/**
+	 * Runaway-repetition guard thresholds, per stream channel. Honoured by the
+	 * openai-completions transport; ignored by providers without a guard.
+	 * Defaults: thinking = DEFAULT_REPETITION_THRESHOLD, text = false — visible
+	 * output is a deliverable and intentional repetition there (logs, fixtures,
+	 * tables, generated code) must survive byte for byte (#5627).
+	 */
+	repetitionGuard?: RepetitionGuardOptions;
 }
 
 // Generic StreamFunction with typed options
@@ -630,6 +647,14 @@ export interface AssistantMessage {
 	usage: Usage;
 	stopReason: StopReason;
 	errorMessage?: string;
+	/**
+	 * Bounded, redaction-safe failure classifier for a terminal provider/runtime
+	 * failure (a safe token matching `[A-Za-z0-9._-]{1,64}`), e.g.
+	 * `repetition_guard_tripped`. Set by the provider/agent that owns the
+	 * classifier; never raw provider text and never a retry-admission fact (retry
+	 * policy keys on `transportFailure`, not on this diagnostic).
+	 */
+	errorCode?: string;
 	errorKind?: AssistantErrorKind;
 	/** HTTP status surfaced by the provider when the request failed. Populated by every provider's catch block alongside `errorMessage` so consumers (auth retry, telemetry, UI) can branch without regex-scraping the message. */
 	errorStatus?: number;

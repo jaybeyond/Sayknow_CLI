@@ -22,6 +22,7 @@ import {
 	type Model,
 	type OpenAICompat,
 	type ProviderSessionState,
+	type RepetitionGuardOptions,
 	resolveServiceTier,
 	type ServiceTier,
 	type StopReason,
@@ -61,6 +62,13 @@ import { callWithCopilotModelRetry } from "../utils/retry";
 import { resolveRetryBudget } from "../utils/retry-budget";
 import { adaptSchemaForStrict, flattenToolRootCombinators, NO_STRICT, toolWireSchema } from "../utils/schema";
 import { wrapFetchForSseDebug } from "../utils/sse-debug";
+import {
+	DEFAULT_REPETITION_THRESHOLD,
+	REPETITION_GUARD_ERROR_CODE,
+	REPETITION_GUARD_STOP_MESSAGE,
+	StreamRepetitionGuard,
+	type StreamRepetitionTrip,
+} from "../utils/stream-repetition-guard";
 import { type HealedToolCall, modelMayLeakKimiToolCalls, ToolCallHealer } from "../utils/tool-call-healing";
 import { isForcedToolChoice, mapToOpenAICompletionsToolChoice } from "../utils/tool-choice";
 import {
@@ -68,6 +76,7 @@ import {
 	markToolChoiceIncapability,
 	resolveToolChoice,
 } from "../utils/tool-choice-capability";
+import { ToolFenceStripper } from "../utils/tool-fence-strip";
 import { COMPOSER_EDIT_DISCIPLINE_PROMPT, isComposerHarnessModel } from "./composer-discipline";
 import {
 	buildCopilotDynamicHeaders,
@@ -271,6 +280,14 @@ export interface OpenAICompletionsOptions extends StreamOptions {
 	/** Force-disable reasoning where supported, or request the lowest effort on generic effort endpoints. */
 	disableReasoning?: boolean;
 	serviceTier?: ServiceTier;
+	/**
+	 * Runaway-repetition guard thresholds, per stream channel. A number sets the
+	 * consecutive-repeat threshold; `false` disables the channel's guard.
+	 * Defaults: thinking = DEFAULT_REPETITION_THRESHOLD, text = false — visible
+	 * output is a deliverable and intentional repetition there (logs, fixtures,
+	 * tables, generated code) must survive byte for byte (#5627).
+	 */
+	repetitionGuard?: RepetitionGuardOptions;
 }
 
 type OpenAICompletionsParams = Omit<OpenAI.Chat.Completions.ChatCompletionCreateParamsStreaming, "reasoning_effort"> & {
@@ -427,6 +444,19 @@ const ALIBABA_TOKEN_PLAN_FIRST_EVENT_TIMEOUT_MS = 300_000;
 
 const OPENAI_COMPLETIONS_FIRST_EVENT_TIMEOUT_MESSAGE =
 	"OpenAI completions stream timed out while waiting for the first event";
+// A tripped repetition guard stops *emitting* immediately, so the user-visible
+// symptom is already fixed at the trip. Aborting the stream right then would
+// also drop `tool_calls` frames a provider emits *after* the repeats, losing a
+// valid invocation (#5627). The stream is drained for a bounded window instead;
+// the only thing the abort still buys is not burning provider budget, and that
+// can wait this long.
+const REPETITION_DRAIN_MAX_CHUNKS = 64;
+const REPETITION_DRAIN_MAX_MS = 2_000;
+// A tool call whose accumulated arguments are not yet complete JSON is worth
+// waiting longer for — but not forever, or a call whose arguments never
+// complete would hold the stream open for the rest of the turn's budget.
+const REPETITION_DRAIN_PENDING_TOOL_MAX_CHUNKS = 256;
+const REPETITION_DRAIN_PENDING_TOOL_MAX_MS = 8_000;
 
 export const streamOpenAICompletions: StreamFunction<"openai-completions"> = (
 	model: Model<"openai-completions">,
@@ -446,9 +476,51 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions"> = (
 		const firstEventTimeoutAbortError = new Error(OPENAI_COMPLETIONS_FIRST_EVENT_TIMEOUT_MESSAGE);
 		const { requestAbortController, requestSignal } = abortTracker;
 
+		// Declared outside the try so the catch block — which is where the abort
+		// below lands — can tell a runaway-repetition stop from a transport error.
+		let repetitionTrip: (StreamRepetitionTrip & { channel: "text" | "thinking" }) | undefined;
+		// Drain-window bookkeeping: when the trip happened, and how many chunks have
+		// been consumed since. Both are only meaningful once `repetitionTrip` is set.
+		let repetitionTrippedAt: number | undefined;
+		let repetitionDrainedChunks = 0;
+		// Set immediately before the guard's own abort and nowhere else. The catch
+		// block must be able to tell OUR abort from a provider stall or a transport
+		// failure that merely happened to land inside the drain window: `repetitionTrip`
+		// alone is true for all three, and using it there discarded the real
+		// timeout/transport facts and flipped the retry classification (#5627 review r4).
+		let repetitionSelfAbort = false;
+		const finalizeRepetitionGuardStop = (): void => {
+			if (!repetitionTrip) return;
+			// `error`, not `aborted`: this is a provider-side failure we detected
+			// locally, and `aborted` is the wire for *client cancellation* — the
+			// auth gateway maps it to 499/`request_aborted` and telemetry counts it
+			// as a user cancel, so borrowing it misreports the turn (#5627). No new
+			// StopReason variant: the union is switched on exhaustively everywhere.
+			// `errorCode` stays the bounded classifier for *why* (#5624).
+			output.stopReason = "error";
+			output.errorCode = REPETITION_GUARD_ERROR_CODE;
+			// A fixed literal, never the observed sample/channel/count: the auth
+			// gateway forwards `errorMessage` to API clients on the streaming path,
+			// so interpolating here publishes raw model output and feeds it to a
+			// keyword classifier that picks HTTP status from message text. The
+			// diagnostic detail lives in the `logger.debug` at the trip site
+			// instead (#5627 review r5).
+			output.errorMessage = REPETITION_GUARD_STOP_MESSAGE;
+			output.duration = Date.now() - startTime;
+			if (firstTokenTime) output.ttft = firstTokenTime - startTime;
+			// No `transportFailure`: this is a local decision, not a retryable
+			// transport fault, and the agent loop's retry admission keys on that
+			// field. The session-layer classifier does not — absent transport facts
+			// it defaults to a bounded retry — so it branches on this `errorCode`
+			// and treats the trip as terminal instead (#5627). Retrying is pointless
+			// anyway: a decode loop is deterministic for the submitted context.
+			stream.push({ type: "error", reason: "error", error: output });
+			stream.end();
+		};
+
 		try {
 			const apiKey = options?.apiKey || getEnvApiKey(model.provider) || "";
-			const idleTimeoutMs = getOpenAIStreamIdleTimeoutMs();
+			const idleTimeoutMs = options?.streamIdleTimeoutMs ?? getOpenAIStreamIdleTimeoutMs();
 			const {
 				client,
 				copilotPremiumRequests,
@@ -649,15 +721,117 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions"> = (
 
 			let taggedTextBuffer = "";
 			let insideTaggedThinking = false;
+			// One guard per channel: interleaving visible text and reasoning through
+			// a single instance would splice unrelated tokens into the same window.
+			// Tool-call frames are never fed through either guard.
+			//
+			// A disabled channel gets no guard at all rather than a lenient one, so
+			// it is structurally impossible for it to set `repetitionTrip`. Visible
+			// text is disabled by default: a decode loop there is not the reported
+			// failure (#5624 was reasoning-channel), and truncating deliverable
+			// output — a log dump, a fixture, a table — corrupts the answer (#5627).
+			const createRepetitionGuard = (
+				setting: number | false | undefined,
+				fallback: number | false,
+			): StreamRepetitionGuard | undefined => {
+				const threshold = setting ?? fallback;
+				return threshold === false ? undefined : new StreamRepetitionGuard({ threshold });
+			};
+			const textRepetitionGuard = createRepetitionGuard(options?.repetitionGuard?.text, false);
+			const thinkingRepetitionGuard = createRepetitionGuard(
+				options?.repetitionGuard?.thinking,
+				DEFAULT_REPETITION_THRESHOLD,
+			);
+			const noteRepetitionTrip = (guard: StreamRepetitionGuard, channel: "text" | "thinking") => {
+				// `takeTrip()` latches once per guard; this latches once per request,
+				// so the drain window below opens exactly once no matter which
+				// channel loops.
+				if (repetitionTrip) return;
+				const trip = guard.takeTrip();
+				if (!trip) return;
+				repetitionTrip = { ...trip, channel };
+				// The repeated unit is never logged. `logger`'s default transport is a
+				// rotating file under `~/.skc/logs` and `makeLogFormat` JSON-stringifies
+				// every metadata key verbatim — no redaction — so a sample would persist
+				// raw model output to disk and carry it into log rotation, support
+				// bundles and backups. If the loop swallowed a secret or a private
+				// fragment of the prompt, that is where it would land (#5627 review r6).
+				//
+				// Only bounded metadata the model cannot control the *content* of goes
+				// out: an id, two enums and two counts. `sampleLength` is deliberately a
+				// number, not a hash — a hash of a short secret is a probe oracle and
+				// buys nothing for debugging a decode loop. `trip.sample` itself stays on
+				// the in-memory trip for callers; this is only the logging contract.
+				//
+				// Separately, `errorMessage` stays a fixed literal because the gateway
+				// forwards it to API clients (#5627 review r5). Both hold at once.
+				logger.debug("openai-completions: repetition guard tripped", {
+					model: model.id,
+					channel,
+					kind: trip.kind,
+					repeats: trip.repeats,
+					sampleLength: trip.sample.length,
+				});
+				// Deliberately no abort here — see the REPETITION_DRAIN_* constants.
+				// The main loop closes the window once late tool-call frames have had
+				// their chance to land.
+				repetitionTrippedAt = Date.now();
+				repetitionDrainedChunks = 0;
+			};
+			/**
+			 * Closes the post-trip drain window. Called once per consumed chunk after
+			 * that chunk is fully processed, so the frames it carried are finalized
+			 * before the stream is cut.
+			 */
+			const maybeAbortAfterRepetitionDrain = (): void => {
+				if (repetitionTrippedAt === undefined || requestSignal.aborted) return;
+				// Reuses the `stopReason === "length"` truncation check below: an open
+				// tool call whose `partialArgs` will not parse is still mid-flight.
+				const toolCallPending =
+					currentBlock?.type === "toolCall" &&
+					!isCompleteJson((currentBlock as { partialArgs?: string }).partialArgs);
+				const maxChunks = toolCallPending ? REPETITION_DRAIN_PENDING_TOOL_MAX_CHUNKS : REPETITION_DRAIN_MAX_CHUNKS;
+				const maxMs = toolCallPending ? REPETITION_DRAIN_PENDING_TOOL_MAX_MS : REPETITION_DRAIN_MAX_MS;
+				if (repetitionDrainedChunks >= maxChunks || Date.now() - repetitionTrippedAt >= maxMs) {
+					repetitionSelfAbort = true;
+					requestAbortController.abort();
+				}
+			};
+
+			// Reasoning-channel only — a fence token in visible prose must survive
+			// as text (CHANGELOG.md:1094), and the Kimi healer must not see this
+			// channel at all or its holdback buffer corrupts.
+			const thinkingFenceStripper = new ToolFenceStripper();
+			let lastThinkingSignature: string | undefined;
+
+			/** Returns the portion safe to emit — the whole chunk when the channel is unguarded. */
+			const feedRepetitionGuard = (
+				guard: StreamRepetitionGuard | undefined,
+				text: string,
+				channel: "text" | "thinking",
+			): string => {
+				if (!guard) return text;
+				const emit = guard.feed(text);
+				noteRepetitionTrip(guard, channel);
+				return emit;
+			};
+
 			const appendTextDelta = (text: string) => {
 				if (!text) return;
 				if (!firstTokenTime) firstTokenTime = Date.now();
-				appendText(output, stream, text);
+				const emit = feedRepetitionGuard(textRepetitionGuard, text, "text");
+				if (emit) appendText(output, stream, emit);
+			};
+			const emitThinkingText = (thinking: string, signature?: string) => {
+				if (!thinking) return;
+				const emit = feedRepetitionGuard(thinkingRepetitionGuard, thinking, "thinking");
+				if (emit) appendThinking(output, stream, emit, signature);
 			};
 			const appendThinkingDelta = (thinking: string, signature?: string) => {
 				if (!thinking) return;
 				if (!firstTokenTime) firstTokenTime = Date.now();
-				appendThinking(output, stream, thinking, signature);
+				lastThinkingSignature = signature;
+				emitThinkingText(thinkingFenceStripper.feed(thinking), signature);
 			};
 
 			const flushTaggedTextBuffer = () => {
@@ -741,15 +915,12 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions"> = (
 				for (const call of calls) emitHealedToolCall(call);
 			};
 
-			for await (const chunk of iterateWithIdleTimeout(openaiStream, {
-				watchdog: firstEventWatchdog,
-				idleTimeoutMs,
-				errorMessage: "OpenAI completions stream stalled while waiting for the next event",
-				onIdle: () => requestAbortController.abort(),
-				abortSignal: options?.signal,
-				isProgressItem: isOpenAICompletionsProgressChunk,
-			})) {
-				if (!chunk || typeof chunk !== "object") continue;
+			// One consumed chunk. Early exits `return` so the post-trip drain check in
+			// the loop below is reached on *every* non-throwing path: a provider that
+			// keeps emitting usage-only, keepalive-shaped, `choices`-less or malformed
+			// chunks after a trip must still spend the drain budget (#5627).
+			const processChunk = (chunk: ChatCompletionChunk): void => {
+				if (!chunk || typeof chunk !== "object") return;
 
 				// OpenAI documents ChatCompletionChunk.id as the unique chat completion identifier,
 				// and each chunk in a streamed completion carries the same id.
@@ -760,7 +931,7 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions"> = (
 				}
 
 				const choice = Array.isArray(chunk.choices) ? chunk.choices[0] : undefined;
-				if (!choice) continue;
+				if (!choice) return;
 
 				if (!chunk.usage) {
 					const choiceUsage = getChoiceUsage(choice);
@@ -895,6 +1066,28 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions"> = (
 						}
 					}
 				}
+			};
+
+			for await (const chunk of iterateWithIdleTimeout(openaiStream, {
+				watchdog: firstEventWatchdog,
+				idleTimeoutMs,
+				errorMessage: "OpenAI completions stream stalled while waiting for the next event",
+				onIdle: () => requestAbortController.abort(),
+				abortSignal: options?.signal,
+				isProgressItem: isOpenAICompletionsProgressChunk,
+			})) {
+				// Counted before the chunk is processed so chunks carrying no delta
+				// still spend the drain budget rather than extending it.
+				if (repetitionTrippedAt !== undefined) repetitionDrainedChunks += 1;
+				processChunk(chunk);
+
+				// Exactly one evaluation per consumed chunk, as the last statement of
+				// the body rather than a `finally`: (a) the chunk is fully processed,
+				// so any `tool_calls` frames it carried have landed before the window
+				// may close; (b) a throwing chunk keeps its own transport facts — a
+				// `finally` would set `repetitionSelfAbort` and the catch below would
+				// relabel a real transport failure as the guard's own abort.
+				maybeAbortAfterRepetitionDrain();
 			}
 
 			if (parseMiniMaxThinkTags && taggedTextBuffer.length > 0) {
@@ -908,6 +1101,29 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions"> = (
 
 			if (stripDeepseekChatTemplateTokens) {
 				flushDeepseekStripBuffer(true);
+			}
+
+			// A partial fence held back at the last chunk never completed, so it was
+			// ordinary thinking text after all.
+			emitThinkingText(thinkingFenceStripper.flush(), lastThinkingSignature);
+
+			// Close each guard's in-progress unit now that no more text is coming:
+			// a final repeat with no trailing newline would otherwise go uncounted
+			// and the runaway turn would read as a healthy completion. Must run
+			// after the fence flush above, whose output feeds the thinking guard.
+			//
+			// Normal-completion path ONLY. Never finalize in the catch block: a
+			// stream that threw mid-repeat must keep its own transport facts rather
+			// than be reclassified as a decode loop (#5627 r4, commit c2aa25d30).
+			// No abort either — the stream has already ended, so aborting would set
+			// `repetitionSelfAbort` for nothing.
+			for (const [guard, channel] of [
+				[textRepetitionGuard, "text"],
+				[thinkingRepetitionGuard, "thinking"],
+			] as const) {
+				if (!guard) continue;
+				guard.finalize();
+				noteRepetitionTrip(guard, channel);
 			}
 
 			if (kimiHealer) {
@@ -936,6 +1152,14 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions"> = (
 
 			finishCurrentBlock(currentBlock);
 
+			// A repetition abort usually surfaces as a throw from the stream
+			// iterator, but a host that had already buffered the rest of the
+			// response finishes the loop normally instead. Same outcome either way.
+			if (repetitionTrip) {
+				finalizeRepetitionGuardStop();
+				return;
+			}
+
 			const firstEventTimeoutError = abortTracker.getLocalAbortReason();
 			if (firstEventTimeoutError) {
 				throw firstEventTimeoutError;
@@ -958,6 +1182,15 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions"> = (
 			stream.end();
 		} catch (error) {
 			for (const block of output.content) delete (block as any).index;
+			// Our own abort landed here. Classify it before the generic transport
+			// path turns it into a retryable provider error. A caller abort still
+			// wins: the user's cancel is the more meaningful intent. Keyed on the
+			// self-abort flag, not on `repetitionTrip`: a stall or transport error
+			// during the drain window must keep its own facts.
+			if (repetitionSelfAbort && !abortTracker.wasCallerAbort()) {
+				finalizeRepetitionGuardStop();
+				return;
+			}
 			const firstEventTimeoutError = abortTracker.getLocalAbortReason();
 			output.stopReason = abortTracker.wasCallerAbort() ? "aborted" : "error";
 			output.errorStatus = extractHttpStatusFromError(error) ?? getCapturedErrorResponse?.()?.status;
