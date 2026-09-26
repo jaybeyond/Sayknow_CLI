@@ -1796,7 +1796,7 @@ var themeWatcher: fs.FSWatcher | undefined;
 var themeReloadTimer: NodeJS.Timeout | undefined;
 var sigwinchHandler: (() => void) | undefined;
 var autoDetectedTheme: boolean = false;
-var autoDarkTheme: string = "blue-octopus";
+var autoDarkTheme: string = "ink-octopus";
 var autoLightTheme: string = "blue-octopus";
 var onThemeChangeCallback: (() => void) | undefined;
 var themeLoadRequestId: number = 0;
@@ -1817,7 +1817,7 @@ export async function initTheme(
 	lightTheme?: string,
 ): Promise<void> {
 	autoDetectedTheme = true;
-	autoDarkTheme = darkTheme ?? "blue-octopus";
+	autoDarkTheme = darkTheme ?? "ink-octopus";
 	autoLightTheme = lightTheme ?? "blue-octopus";
 	const name = getDefaultTheme();
 	previewThemeActive = false;

@@ -530,7 +530,7 @@ export const SETTINGS_SCHEMA = {
 	// Theme
 	"theme.dark": {
 		type: "string",
-		default: "blue-octopus",
+		default: "ink-octopus",
 		ui: {
 			tab: "appearance",
 			label: "Dark Theme",

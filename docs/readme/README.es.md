@@ -151,7 +151,7 @@ retry:
 
 ## Identidad de la TUI
 
-La identidad predeterminada de la TUI es el tema **blue-octopus** de SKC — la mascota del cefalópodo azul — tanto para terminales oscuras como claras. También se incluye una variante cálida **red-octopus** para quienes prefieren una paleta más oscura y de alto contraste. Tres temas de migración adicionales — `claude-code`, `codex` y `opencode` — reflejan el aspecto de esas herramientas para facilitar la migración visual y se pueden seleccionar desde Settings o `/theme`. Los ajustes de tema explícitos del usuario siguen prevaleciendo.
+La identidad predeterminada de la TUI es el tema **ink-octopus** de SKC — tinta de pulpo: grafito cálido, texto color papel y un único acento ámbar — para terminales oscuras, con **blue-octopus** para terminales claras. También se incluye una variante cálida **red-octopus** para quienes prefieren una paleta más oscura y de alto contraste. Tres temas de migración adicionales — `claude-code`, `codex` y `opencode` — reflejan el aspecto de esas herramientas para facilitar la migración visual y se pueden seleccionar desde Settings o `/theme`. Los ajustes de tema explícitos del usuario siguen prevaleciendo.
 
 ### Cuadrícula de temas incluidos
 
@@ -159,9 +159,9 @@ Elige desde Settings (`Appearance -> Dark theme` / `Light theme`) o `/theme`.
 
 | Tema | Sensación visual | Mejor uso |
 | --- | --- | --- |
-| `blue-octopus` | Identidad predeterminada de SKC — paleta de pulpo azul con acentos azul-tentáculo. | Predeterminado para terminales oscuras y claras. |
+| `blue-octopus` | Paleta de pulpo azul con acentos azul-tentáculo. | Predeterminado para terminales claras. |
 | `red-octopus` | Variante cálida de pulpo rojo con fuerte contraste de estado. | Alternativa oscura de alto contraste. |
-| `ink-octopus` | Tinta de pulpo — fondo grafito cálido, texto color papel y un único acento ámbar. | Sesiones oscuras tranquilas y sin distracciones. |
+| `ink-octopus` | Tinta de pulpo — fondo grafito cálido, texto color papel y un único acento ámbar. | Predeterminado para terminales oscuras. |
 | `glow-octopus` | Bioluminiscencia abisal — negro verdiazulado con verde brillante y violeta como secundario. | Terminales oscuras que quieren un acento vivo. |
 | `violet-octopus` | Oscuro ciruela con acentos lavanda y albaricoque como secundario. | Alternativa oscura suave y colorida. |
 | `claude-code` | Paleta oscura inspirada en Claude Code con resaltados terracota y rosa. | Memoria muscular de Claude Code sin salir de SKC. |
@@ -229,7 +229,7 @@ Las contribuciones, los informes de errores y la validación de releases son bie
 
 ## Inspiraciones y linaje
 
-La identidad predeterminada de la TUI de Sayknow-CLI es la pareja de cefalópodos: blue-octopus como predeterminado con un red-octopus cálido como alternativa. También incluye los temas de migración `claude-code`, `codex` y `opencode`, cuyas paletas están inspiradas en esas herramientas para que los usuarios que migran de ellas obtengan un aspecto familiar. Se basa en las lecciones de una pequeña familia de arneses de agentes mientras mantiene la superficie pública de SKC intencionadamente enfocada. La atribución histórica se conserva en [`NOTICE.md`](NOTICE.md).
+La identidad predeterminada de la TUI de Sayknow-CLI es la familia de pulpos: ink-octopus como predeterminado oscuro, blue-octopus como predeterminado claro y red-octopus, glow-octopus y violet-octopus como alternativas. También incluye los temas de migración `claude-code`, `codex` y `opencode`, cuyas paletas están inspiradas en esas herramientas para que los usuarios que migran de ellas obtengan un aspecto familiar. Se basa en las lecciones de una pequeña familia de arneses de agentes mientras mantiene la superficie pública de SKC intencionadamente enfocada. La atribución histórica se conserva en [`NOTICE.md`](NOTICE.md).
 
 ## License
 

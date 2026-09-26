@@ -374,7 +374,7 @@
 				"dark": {
 					"type": "string",
 					"description": "Theme used when terminal has dark background",
-					"default": "blue-octopus"
+					"default": "ink-octopus"
 				},
 				"light": {
 					"type": "string",

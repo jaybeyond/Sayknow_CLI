@@ -15,13 +15,13 @@ describe("SKC red-octopus redesign defaults", () => {
 		vi.restoreAllMocks();
 	});
 
-	it("uses blue-octopus as the default dark and light theme", async () => {
+	it("uses ink-octopus on dark terminals and blue-octopus on light terminals", async () => {
 		themeModule.onTerminalAppearanceChange("dark");
 		await themeModule.initTheme(false);
 
-		expect(SETTINGS_SCHEMA["theme.dark"].default).toBe("blue-octopus");
+		expect(SETTINGS_SCHEMA["theme.dark"].default).toBe("ink-octopus");
 		expect(SETTINGS_SCHEMA["theme.light"].default).toBe("blue-octopus");
-		expect(themeModule.getCurrentThemeName()).toBe("blue-octopus");
+		expect(themeModule.getCurrentThemeName()).toBe("ink-octopus");
 
 		themeModule.onTerminalAppearanceChange("light");
 		await themeModule.initTheme(false);
@@ -64,7 +64,7 @@ describe("SKC red-octopus redesign defaults", () => {
 		];
 		expect(themes).toEqual(expected);
 		expect(Object.keys(defaultThemes).sort()).toEqual(expected);
-		expect(SETTINGS_SCHEMA["theme.dark"].default).toBe("blue-octopus");
+		expect(SETTINGS_SCHEMA["theme.dark"].default).toBe("ink-octopus");
 		expect(SETTINGS_SCHEMA["theme.light"].default).toBe("blue-octopus");
 	});
 

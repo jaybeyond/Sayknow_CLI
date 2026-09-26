@@ -78,10 +78,11 @@ async function verifyThemeDefaults(): Promise<GateResult> {
 		isRecord(blueOctopus.colors);
 
 	return {
-		name: "blue-octopus default (dark + light) with red-octopus alternate, semantic token split",
+		name: "ink-octopus dark default, blue-octopus light default, red-octopus alternate, semantic token split",
 		passed:
+			settings.includes('default: "ink-octopus"') &&
 			settings.includes('default: "blue-octopus"') &&
-			themeRuntime.includes('autoDarkTheme: string = "blue-octopus"') &&
+			themeRuntime.includes('autoDarkTheme: string = "ink-octopus"') &&
 			themeRuntime.includes('autoLightTheme: string = "blue-octopus"') &&
 			retainedBuiltIns &&
 			resolveColor(colors.accent, vars) === resolveColor(vars.tentacle, vars) &&
@@ -90,8 +91,9 @@ async function verifyThemeDefaults(): Promise<GateResult> {
 			resolveColor(colors.toolDiffRemoved, vars) === resolveColor(vars.diffRemovalRed, vars) &&
 			semanticFindings.length === 0,
 		details: [
-			`settings default blue-octopus: ${settings.includes('default: "blue-octopus"')}`,
-			`runtime autoDarkTheme blue-octopus: ${themeRuntime.includes('autoDarkTheme: string = "blue-octopus"')}`,
+			`settings dark default ink-octopus: ${settings.includes('default: "ink-octopus"')}`,
+			`settings light default blue-octopus: ${settings.includes('default: "blue-octopus"')}`,
+			`runtime autoDarkTheme ink-octopus: ${themeRuntime.includes('autoDarkTheme: string = "ink-octopus"')}`,
 			`runtime autoLightTheme blue-octopus: ${themeRuntime.includes('autoLightTheme: string = "blue-octopus"')}`,
 			`expected built-in themes (${expectedBuiltIns.join(", ")}): ${retainedBuiltIns}`,
 			`semantic collisions: ${semanticFindings.join("; ") || "<none>"}`,
@@ -181,18 +183,18 @@ async function verifyDocsBranding(): Promise<GateResult> {
 	return {
 		name: "public docs current SKC cephalopod theme direction",
 		passed:
-			rootReadme.includes("default TUI identity is the SKC **blue-octopus** theme") &&
-			rootReadme.includes("for both dark and light terminals") &&
-			packageReadme.includes("defaults to the bundled `blue-octopus`") &&
+			rootReadme.includes("default TUI identity is the SKC **ink-octopus** theme") &&
+			rootReadme.includes("**blue-octopus** for light terminals") &&
+			packageReadme.includes("defaults to the bundled `ink-octopus`") &&
 			packageReadme.includes("`red-octopus`") &&
-			themeDoc.includes('theme.dark = "blue-octopus"') &&
+			themeDoc.includes('theme.dark = "ink-octopus"') &&
 			themeDoc.includes('theme.light = "blue-octopus"'),
 		details: [
-			`README blue-octopus default: ${rootReadme.includes("default TUI identity is the SKC **blue-octopus** theme")}`,
-			`README both dark and light: ${rootReadme.includes("for both dark and light terminals")}`,
-			`package README default blue-octopus: ${packageReadme.includes("defaults to the bundled `blue-octopus`")}`,
+			`README ink-octopus dark default: ${rootReadme.includes("default TUI identity is the SKC **ink-octopus** theme")}`,
+			`README blue-octopus light default: ${rootReadme.includes("**blue-octopus** for light terminals")}`,
+			`package README default ink-octopus: ${packageReadme.includes("defaults to the bundled `ink-octopus`")}`,
 			`package README red-octopus alternate: ${packageReadme.includes("`red-octopus`")}`,
-			`theme docs default dark blue-octopus: ${themeDoc.includes('theme.dark = "blue-octopus"')}`,
+			`theme docs default dark ink-octopus: ${themeDoc.includes('theme.dark = "ink-octopus"')}`,
 			`theme docs default light blue-octopus: ${themeDoc.includes('theme.light = "blue-octopus"')}`,
 		],
 	};

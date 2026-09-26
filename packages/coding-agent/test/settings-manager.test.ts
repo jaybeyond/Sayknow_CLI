@@ -341,7 +341,7 @@ describe("Settings", () => {
 			await writeSettings({ theme: "light" });
 
 			settings = await Settings.init({ cwd: projectDir, agentDir });
-			expect(settings.get("theme.dark")).toBe("blue-octopus");
+			expect(settings.get("theme.dark")).toBe("ink-octopus");
 			expect(settings.get("theme.light")).toBe("blue-octopus");
 		});
 

@@ -151,7 +151,7 @@ retry:
 
 ## TUI identity
 
-기본 TUI 정체성은 SKC **blue-octopus** 테마 — 파란 두족류 마스코트 — 로, 다크 및 라이트 터미널 모두에 적용됩니다. 더 어둡고 고대비 팔레트를 선호하는 사람들을 위해 따뜻한 **red-octopus** 변형도 번들로 제공됩니다. 세 가지 추가 마이그레이션 테마 — `claude-code`, `codex`, `opencode` — 는 쉬운 눈 마이그레이션을 위해 해당 도구들의 모습을 그대로 따르며 Settings 또는 `/theme`에서 선택할 수 있습니다. 명시적인 사용자 테마 설정이 여전히 우선합니다.
+기본 TUI 정체성은 SKC **ink-octopus** 테마 — 문어 먹물: 따뜻한 흑연색, 종이색 글자, 호박색 강조 하나 — 로 다크 터미널에 적용되며, 라이트 터미널에는 **blue-octopus**가 적용됩니다. 더 어둡고 고대비 팔레트를 선호하는 사람들을 위해 따뜻한 **red-octopus** 변형도 번들로 제공됩니다. 세 가지 추가 마이그레이션 테마 — `claude-code`, `codex`, `opencode` — 는 쉬운 눈 마이그레이션을 위해 해당 도구들의 모습을 그대로 따르며 Settings 또는 `/theme`에서 선택할 수 있습니다. 명시적인 사용자 테마 설정이 여전히 우선합니다.
 
 ### Bundled theme grid
 
@@ -159,9 +159,9 @@ Settings (`Appearance -> Dark theme` / `Light theme`) 또는 `/theme`에서 선�
 
 | Theme | Visual feel | Best fit |
 | --- | --- | --- |
-| `blue-octopus` | 기본 SKC 정체성 — 촉수 블루 액센트가 있는 파란 문어 팔레트. | 다크 및 라이트 터미널의 기본값. |
+| `blue-octopus` | 촉수 블루 액센트가 있는 파란 문어 팔레트. | 라이트 터미널의 기본값. |
 | `red-octopus` | 강한 상태 대비를 가진 따뜻한 빨간 문어 변형. | 고대비 다크 대안. |
-| `ink-octopus` | 문어 먹물 — 따뜻한 흑연색 배경, 종이색 글자, 호박색 강조 하나. | 차분하고 산만하지 않은 다크 세션. |
+| `ink-octopus` | 문어 먹물 — 따뜻한 흑연색 배경, 종이색 글자, 호박색 강조 하나. | 다크 터미널의 기본값. |
 | `glow-octopus` | 심해 생물발광 — 틸빛 어둠에 발광 초록, 보조로 보라. | 선명한 강조색을 원하는 다크 터미널. |
 | `violet-octopus` | 자줏빛 어둠에 라벤더 강조, 보조로 살구색. | 부드럽고 화사한 다크 대안. |
 | `claude-code` | 테라코타와 핑크 하이라이트가 있는 Claude Code 영감 다크 팔레트. | SKC를 떠나지 않고 Claude Code 근육 기억을 유지. |
@@ -229,7 +229,7 @@ bun test packages/coding-agent/test/default-skc-definitions.test.ts
 
 ## Inspirations and lineage
 
-Sayknow-CLI의 기본 TUI 정체성은 두족류 쌍입니다: 기본값인 blue-octopus와 따뜻한 red-octopus 대안. 또한 해당 도구들에서 옮겨오는 사용자들이 익숙한 모습을 얻도록 팔레트가 그 도구들에서 영감을 받은 `claude-code`, `codex`, `opencode` 마이그레이션 테마를 번들로 제공합니다. 공개 SKC 표면을 의도적으로 집중된 상태로 유지하면서, 작은 에이전트 하니스 계열에서 얻은 교훈을 바탕으로 만들어졌습니다. 역사적 출처 표기는 [`NOTICE.md`](NOTICE.md)에 보관되어 있습니다.
+Sayknow-CLI의 기본 TUI 정체성은 문어 가족입니다: 다크 기본값 ink-octopus, 라이트 기본값 blue-octopus, 그리고 red-octopus·glow-octopus·violet-octopus 대안. 또한 해당 도구들에서 옮겨오는 사용자들이 익숙한 모습을 얻도록 팔레트가 그 도구들에서 영감을 받은 `claude-code`, `codex`, `opencode` 마이그레이션 테마를 번들로 제공합니다. 공개 SKC 표면을 의도적으로 집중된 상태로 유지하면서, 작은 에이전트 하니스 계열에서 얻은 교훈을 바탕으로 만들어졌습니다. 역사적 출처 표기는 [`NOTICE.md`](NOTICE.md)에 보관되어 있습니다.
 
 ## License
 

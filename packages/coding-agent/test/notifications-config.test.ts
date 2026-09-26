@@ -964,7 +964,7 @@ describe("notifications config", () => {
 		resetSettingsForTest();
 		const initialized = await Settings.init({ cwd: root, agentDir });
 		try {
-			expect(initialized.get("theme.dark")).toBe("blue-octopus");
+			expect(initialized.get("theme.dark")).toBe("ink-octopus");
 			expect(() => initialized.getNotificationSettingsSnapshot()).toThrow("skc_notify_daemon_invalid_configuration");
 		} finally {
 			resetSettingsForTest();
@@ -972,7 +972,7 @@ describe("notifications config", () => {
 
 		const settings = await Settings.loadForScope({ cwd: root, agentDir });
 		try {
-			expect(settings.get("theme.dark")).toBe("blue-octopus");
+			expect(settings.get("theme.dark")).toBe("ink-octopus");
 			expect(() => settings.getNotificationSettingsSnapshot()).toThrow("skc_notify_daemon_invalid_configuration");
 			await expect(loadLightweightDaemonSettings(agentDir)).rejects.toThrow();
 		} finally {
@@ -1039,7 +1039,7 @@ describe("notifications config", () => {
 			await expect(
 				settings.commitAtomicBatchWithCurrent(() => [{ path: "theme.dark", op: "set", value: "red-octopus" }]),
 			).rejects.toThrow("Repair config.yml");
-			expect(settings.get("theme.dark")).toBe("blue-octopus");
+			expect(settings.get("theme.dark")).toBe("ink-octopus");
 			await settings.flush();
 			expect(fs.readFileSync(configPath, "utf8")).toBe(malformed);
 

@@ -165,11 +165,11 @@ Auto theme slot selection uses terminal appearance in this order:
 3. macOS appearance fallback only for the known-broken macOS/Zellij OSC 11 path
 4. dark slot fallback
 
-Built-in theme note: `blue-octopus` is the default SKC theme for both the dark and light slots, and `red-octopus` is a bundled warm, high-contrast alternate. Three more dark octopus palettes are bundled: `ink-octopus` (warm graphite with a single amber accent), `glow-octopus` (teal-black with bioluminescent green), and `violet-octopus` (plum-dark with lavender). All five are cephalopod brand themes with separate semantic error/warning/diff-removal tokens and octopus-oriented symbol overrides. Three additional bundled migration themes — `claude-code`, `codex`, and `opencode` — mirror the look of those tools for easy eye-migration. All three are dark-classified and recommended for `theme.dark`, but are selectable in either slot; they keep SKC's default symbol identity (no crab-symbol overrides).
+Built-in theme note: `ink-octopus` (warm graphite with a single amber accent) is the default SKC theme for the dark slot and `blue-octopus` for the light slot. `red-octopus` is a bundled warm, high-contrast alternate, and two more dark octopus palettes are bundled: `glow-octopus` (teal-black with bioluminescent green) and `violet-octopus` (plum-dark with lavender). All five are cephalopod brand themes with separate semantic error/warning/diff-removal tokens and octopus-oriented symbol overrides. Three additional bundled migration themes — `claude-code`, `codex`, and `opencode` — mirror the look of those tools for easy eye-migration. All three are dark-classified and recommended for `theme.dark`, but are selectable in either slot; they keep SKC's default symbol identity (no crab-symbol overrides).
 
 Current defaults from settings schema:
 
-- `theme.dark = "blue-octopus"`
+- `theme.dark = "ink-octopus"`
 - `theme.light = "blue-octopus"`
 - `symbolPreset = "unicode"`
 - `colorBlindMode = false`
@@ -229,7 +229,7 @@ Persisted keys:
 - `symbolPreset`
 - `colorBlindMode`
 
-Legacy migration exists: old flat `theme: "name"` is migrated to nested `theme.dark` or `theme.light` based on luminance detection; legacy built-in names `dark`/`light` map to `red-octopus`/`blue-octopus` unless matching custom theme files exist.
+Legacy migration exists: old flat `theme: "name"` is migrated to nested `theme.dark` or `theme.light` based on luminance detection; legacy built-in names `dark`/`light` both map to `blue-octopus` (pinned explicitly, so they do not follow the `ink-octopus` dark default) unless matching custom theme files exist.
 
 ## Creating a custom theme (practical)
 

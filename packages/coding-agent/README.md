@@ -108,6 +108,6 @@ The agent supports three mutually-exclusive memory backends, selected via the `m
 
 Switching backends mid-session is honoured on the next system-prompt rebuild and the next `/memory` slash command. Existing users with `memories.enabled = true|false` are migrated to `memory.backend = "local"|"off"` exactly once on first launch.
 
-## Blue-octopus TUI theme
+## Octopus TUI themes
 
-The interactive TUI defaults to the bundled `blue-octopus` cephalopod theme for both dark and light terminals, with the bundled `red-octopus` theme as a warm, high-contrast alternate and matching welcome/icon assets. Three more dark octopus palettes — `ink-octopus`, `glow-octopus`, and `violet-octopus` — are bundled alongside them. Three additional bundled migration themes — `claude-code`, `codex`, and `opencode` — mirror the look of those tools for easy eye-migration and are selectable from Settings or `/theme`. Explicit user theme settings still win; set `theme.dark: red-octopus` and `theme.light: blue-octopus` in `~/.skc/agent/config.yml` to pin them.
+The interactive TUI defaults to the bundled `ink-octopus` cephalopod theme on dark terminals and `blue-octopus` on light terminals, with `red-octopus` as a warm, high-contrast alternate and `glow-octopus` and `violet-octopus` as further dark palettes. Three additional bundled migration themes — `claude-code`, `codex`, and `opencode` — mirror the look of those tools for easy eye-migration and are selectable from Settings or `/theme`. Explicit user theme settings still win; set `theme.dark: red-octopus` and `theme.light: blue-octopus` in `~/.skc/agent/config.yml` to pin them.

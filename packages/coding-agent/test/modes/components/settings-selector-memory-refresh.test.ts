@@ -102,9 +102,9 @@ describe("SettingsSelectorComponent memory tab", () => {
 				"Cannot change settings while config.yml has invalid YAML syntax. Repair config.yml and reload settings.",
 			]);
 			expect(changes).toEqual([]);
-			expect(settings.get("theme.dark")).toBe("blue-octopus");
+			expect(settings.get("theme.dark")).toBe("ink-octopus");
 			component.handleInput("\x1b");
-			expect(component.render(120).join("\n")).toContain("blue-octopus");
+			expect(component.render(120).join("\n")).toContain("ink-octopus");
 		} finally {
 			Settings.instance.getStorage()?.close();
 			try {
