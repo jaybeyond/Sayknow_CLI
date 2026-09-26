@@ -72,33 +72,53 @@ function isRetiredBundledModel(model: Pick<Model, "provider" | "id">): boolean {
 }
 
 /**
- * Keep the reviewed GPT-6 Astra Codex row available without authenticated
- * discovery (ported from upstream #5294). The capability values mirror OpenAI
- * Codex 0.153.4's bundled model catalog. This fork's cost engine has no
- * long-context tier support, so only the published standard pricing
- * ($10/$50, cache read $1, cache write $12.50) is recorded; upstream's
- * above-272K tier (2x input/cache, 1.5x output) is intentionally omitted
- * rather than carried as dead data the `Model` type rejects. Thinking
- * metadata and `applyPatchToolType` are filled by
+ * Keep the reviewed GPT-6 Codex rows available without authenticated
+ * discovery (Astra ported from upstream #5294, Sol and Luna from #5824).
+ * Astra's capability values mirror OpenAI Codex 0.153.4's bundled model
+ * catalog; Sol and Luna ship on the same Codex transport and envelope.
+ *
+ * Discovery reports these ids with zero cost, and the model manager keeps a
+ * bundled cost whenever discovery reports none — so without a bundled row a
+ * Sol or Luna turn is recorded as free in `skc stats`. This fork's cost engine
+ * has no long-context tier support, so only the published standard pricing is
+ * recorded; upstream's above-272K tier (2x input/cache, 1.5x output) is
+ * intentionally omitted rather than carried as dead data the `Model` type
+ * rejects. Thinking metadata and `applyPatchToolType` are filled by
  * `applyGeneratedModelPolicies`, which runs after this injection.
+ *
+ * Only Astra carries `priority: 1`; Sol and Luna stay in default catalog order
+ * so the flagship remains the first Codex suggestion.
  */
-export function injectCodexAstraModel(models: Model[]): void {
-	const astra: Model<"openai-codex-responses"> = {
-		id: "gpt-6-astra",
-		name: "GPT-6-Astra",
+export function injectCodexGpt6Models(models: Model[]): void {
+	const gpt6 = (
+		id: string,
+		name: string,
+		cost: Model["cost"],
+		priority?: number,
+	): Model<"openai-codex-responses"> => ({
+		id,
+		name,
 		api: "openai-codex-responses",
 		provider: "openai-codex",
 		baseUrl: "https://chatgpt.com/backend-api",
 		reasoning: true,
 		input: ["text", "image"],
-		cost: { input: 10, output: 50, cacheRead: 1, cacheWrite: 12.5 },
+		cost,
 		contextWindow: 272_000,
 		maxTokens: 128_000,
 		preferWebsockets: true,
-		priority: 1,
-	};
-	const hasAstra = models.some(model => model.provider === astra.provider && model.id === astra.id);
-	if (!hasAstra) models.push(astra);
+		...(priority === undefined ? {} : { priority }),
+	});
+	const bundled: Model<"openai-codex-responses">[] = [
+		gpt6("gpt-6-astra", "GPT-6-Astra", { input: 10, output: 50, cacheRead: 1, cacheWrite: 12.5 }, 1),
+		gpt6("gpt-6-sol", "GPT-6-Sol", { input: 2, output: 10, cacheRead: 0.2, cacheWrite: 2.5 }),
+		gpt6("gpt-6-luna", "GPT-6-Luna", { input: 0.1, output: 0.5, cacheRead: 0.01, cacheWrite: 0.125 }),
+	];
+	for (const model of bundled) {
+		if (!models.some(existing => existing.provider === model.provider && existing.id === model.id)) {
+			models.push(model);
+		}
+	}
 }
 
 /**
@@ -527,7 +547,7 @@ async function generateModels() {
 	allModels = applyPremiumMultiplierOverrides(allModels);
 	allModels = applyCodexPricingFallback(allModels);
 	allModels = applyClaudeOpusVisionCorrections(allModels);
-	injectCodexAstraModel(allModels);
+	injectCodexGpt6Models(allModels);
 	applyGeneratedModelPolicies(allModels);
 	linkOpenAIPromotionTargets(allModels);
 	injectImageGenerationModels(allModels);
