@@ -126,6 +126,9 @@ Flow:
    - select -> close selector and call `handleResumeSession(sessionPath)`
    - cancel -> restore editor and rerender
    - exit -> `ctx.shutdown()`
+   - star toggle -> `SessionManager.setSessionStarredForPicker(session, starred)`
+
+The picker opens from `/resume`, the command palette, or `alt+r` (`app.session.resume`). The launch screen lists only the three most recent sessions and names that key.
 
 ## Session selector component behavior
 
@@ -135,7 +138,9 @@ Flow:
 - Enter to select
 - Esc to cancel
 - Ctrl+C to exit
+- Ctrl+S to star or unstar the selected session (only when the host passes a star callback; the CLI and in-session pickers both do). The list re-sorts and the cursor follows the session.
 - fuzzy search across session id/title/cwd/first message/all messages/path
+- starred sessions (`★`) listed first, each group in recency order, before and after filtering
 
 Empty-list render behavior:
 

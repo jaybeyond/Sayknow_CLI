@@ -6,6 +6,7 @@
 
 - Three more bundled dark octopus themes, selectable from Settings or `/theme`: `ink-octopus` (warm graphite, paper text, one amber accent), `glow-octopus` (teal-black with bioluminescent green and a violet secondary), and `violet-octopus` (plum-dark with lavender and an apricot secondary).
 - `alt+r` opens the resume picker (`app.session.resume` had no default key, so the picker was reachable only through `/resume` or the command palette). The launch screen's session heading names the key.
+- Starred sessions. `/star` and `/unstar` mark the current session, and Ctrl+S stars or unstars the selected session in the resume picker (`alt+r`). Starred sessions (`★`) are listed first in the picker and the `/sessions` dashboard. Stars live in `~/.skc/agent/session-stars.json`, not in transcripts, and never change `--continue`, ID-prefix resolution, deletion, or retention. Adapted from upstream #5202 and #5545 (upstream stores stars as transcript header patches; this fork keeps them in a separate index so the transcript format and its bounded listing scan stay unchanged).
 - `/rename` with no argument regenerates the session title from the conversation (the first message plus the latest five) instead of printing usage. A result that lands after a newer prompt or an explicit rename is discarded. `/rename <title>` is unchanged. Ported from upstream #5617.
 
 ### Changed

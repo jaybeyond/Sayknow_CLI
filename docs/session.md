@@ -523,6 +523,10 @@ Defined in `session-manager.ts`:
 
 Metadata extraction reads only a prefix (`readTextPrefix(..., 4096)`) where possible.
 
+### Starred sessions
+
+Stars are discovery-only metadata kept outside transcripts, in `~/.skc/agent/session-stars.json` (`src/session/session-stars.ts`), keyed by session id. `/star`, `/unstar`, and Ctrl+S in the resume picker write it under a cross-process lock with an atomic rename. Listing sets `SessionInfo.starred` from it, and the resume picker and `/sessions` dashboard sort starred sessions first (`prioritizeStarredSessions`). Stars never change `--continue`, ID-prefix resolution, deletion, or retention; a fork gets a new id and starts unstarred; a deleted session leaves a harmless stale id. An unreadable index lists as "nothing starred" and is never overwritten.
+
 ## Related but Distinct: Prompt History Storage
 
 `HistoryStorage` (`history-storage.ts`) is a separate SQLite subsystem for prompt recall/search, not session replay.

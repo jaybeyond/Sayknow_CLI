@@ -97,7 +97,6 @@ import {
 	memoryGuardCanonicalJson,
 	memoryGuardSha256Hex,
 } from "./memory-guard-checkpoint-participant";
-
 import {
 	type BashExecutionMessage,
 	type CustomMessage,
@@ -111,6 +110,7 @@ import {
 	stripInternalDetailsFields,
 } from "./messages";
 import { type SessionManagerReadAccess, sessionManagerReadCapability } from "./session-manager-internal";
+import { isSessionIdStarred, setSessionIdStarred } from "./session-stars";
 import type {
 	ManagedSessionSecurityContext,
 	SessionStorage,
@@ -890,6 +890,8 @@ export interface SessionInfo {
 	/** Working directory where the session was started. Empty string for old sessions. */
 	cwd: string;
 	title?: string;
+	/** Starred for discovery (see session-stars.ts); never affects resolution or retention. */
+	starred: boolean;
 	/** Path to the parent session (if this session was forked). */
 	parentSessionPath?: string;
 	created: Date;
@@ -3820,6 +3822,11 @@ async function collectProjectSessions(cwd: string, storage: FileSessionStorage):
 	return await collectSessionsFromFiles(listProjectSessionTranscriptFiles(cwd), storage);
 }
 
+/** Starred sessions first, each group keeping its incoming (recency) order. */
+export function prioritizeStarredSessions(sessions: readonly SessionInfo[]): SessionInfo[] {
+	return [...sessions.filter(session => session.starred), ...sessions.filter(session => !session.starred)];
+}
+
 function mergeSessionInventories(...inventories: SessionInfo[][]): SessionInfo[] {
 	const sessions = new Map<string, SessionInfo>();
 	for (const inventory of inventories) {
@@ -4230,6 +4237,7 @@ async function collectSessionFromFile(
 			id: header.id,
 			cwd: header.cwd ?? "",
 			title: header.title ?? shortSummary,
+			starred: isSessionIdStarred(header.id),
 			parentSessionPath: header.parentSession,
 			created: new Date(header.timestamp ?? ""),
 			modified: stats.mtime,
@@ -6997,6 +7005,20 @@ export class SessionManager {
 
 	getSessionName(): string | undefined {
 		return this.#sessionName;
+	}
+
+	isSessionStarred(): boolean {
+		return isSessionIdStarred(this.getSessionId());
+	}
+
+	/** Star or unstar this session. Returns `false` when it was already in that state. */
+	async setSessionStarred(starred: boolean): Promise<boolean> {
+		return setSessionIdStarred(this.getSessionId(), starred);
+	}
+
+	/** Star or unstar a session listed in the resume picker (not necessarily this one). */
+	async setSessionStarredForPicker(session: Pick<SessionInfo, "id">, starred: boolean): Promise<void> {
+		await setSessionIdStarred(session.id, starred);
 	}
 
 	/** Strip C0/C1 control characters (includes ESC, so removes ANSI sequences) and collapse whitespace. */

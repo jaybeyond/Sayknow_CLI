@@ -34,6 +34,10 @@ const LOCKED_EXCLUSIONS: Readonly<Record<string, string>> = {
 	"slash_command:pet": "visual/local-only command, not a user-facing SDK control seam",
 	"slash_command:transcript": "visual/local-only transcript viewer, not a user-facing SDK control seam",
 	"slash_command:sessions": "visual/local-only sessions dashboard, not a user-facing SDK control seam",
+	"slash_command:star":
+		"local session-discovery metadata command; no SDK operation counterpart or runtime/retention authority",
+	"slash_command:unstar":
+		"local session-discovery metadata command; no SDK operation counterpart or runtime/retention authority",
 	"slash_command:import-session":
 		"local transcript-file import into a new session; ACP is explicitly disabled and no SDK operation reads caller-selected host paths",
 	"agent_session:constructor": "internal accessor/plumbing, not a user-facing control seam",

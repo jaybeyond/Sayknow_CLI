@@ -14,7 +14,12 @@ import {
 import { formatBytes } from "@sayknow-cli/utils";
 import { theme } from "../../modes/theme/theme";
 import { matchesAppInterrupt } from "../../modes/utils/keybinding-matchers";
-import type { ResumeSessionIdentity, ResumeTailInspection, SessionInfo } from "../../session/session-manager";
+import {
+	prioritizeStarredSessions,
+	type ResumeSessionIdentity,
+	type ResumeTailInspection,
+	type SessionInfo,
+} from "../../session/session-manager";
 import { DynamicBorder } from "./dynamic-border";
 import { HookSelectorComponent } from "./hook-selector";
 
@@ -34,6 +39,7 @@ export type SessionInspector = (sessionPath: string) => Promise<ResumeTailInspec
 
 type SelectorState =
 	| { kind: "browsing" }
+	| { kind: "starring"; token: number }
 	| { kind: "checking"; session: SessionInfo; token: number }
 	| { kind: "confirming"; session: SessionInfo; token: number; identity: ResumeSessionIdentity }
 	| { kind: "settled" };
@@ -47,12 +53,13 @@ class SessionList implements Component {
 	onCancel?: () => void;
 	onExit: () => void = () => {};
 	onDeleteRequest?: (session: SessionInfo) => void;
+	onToggleStarRequest?: (session: SessionInfo) => void;
 
 	constructor(
 		private readonly allSessions: SessionInfo[],
 		private readonly showCwd = false,
 	) {
-		this.#filteredSessions = allSessions;
+		this.#filteredSessions = prioritizeStarredSessions(allSessions);
 		this.#searchInput.onSubmit = () => {
 			const selected = this.#filteredSessions[this.#selectedIndex];
 			if (selected) this.onSelect?.(selected);
@@ -71,17 +78,19 @@ class SessionList implements Component {
 	}
 
 	#filterSessions(query: string): void {
-		this.#filteredSessions = fuzzyFilter(this.allSessions, query, session =>
-			[
-				session.id,
-				session.title ?? "",
-				session.cwd ?? "",
-				session.firstMessage ?? "",
-				session.allMessagesText,
-				session.path,
-			]
-				.filter(Boolean)
-				.join(" "),
+		this.#filteredSessions = prioritizeStarredSessions(
+			fuzzyFilter(this.allSessions, query, session =>
+				[
+					session.id,
+					session.title ?? "",
+					session.cwd ?? "",
+					session.firstMessage ?? "",
+					session.allMessagesText,
+					session.path,
+				]
+					.filter(Boolean)
+					.join(" "),
+			),
 		);
 		this.#clampSelectedIndex();
 	}
@@ -91,6 +100,18 @@ class SessionList implements Component {
 		if (index === -1) return;
 		this.allSessions.splice(index, 1);
 		this.#filterSessions(this.#searchInput.getValue());
+	}
+
+	/** Apply a persisted star change and keep the cursor on the same session as it moves. */
+	setSessionStarred(sessionPath: string, starred: boolean): void {
+		const session = this.allSessions.find(candidate => candidate.path === sessionPath);
+		if (!session) return;
+		session.starred = starred;
+		this.#filterSessions(this.#searchInput.getValue());
+		this.#selectedIndex = Math.max(
+			0,
+			this.#filteredSessions.findIndex(candidate => candidate.path === sessionPath),
+		);
 	}
 
 	invalidate(): void {}
@@ -131,8 +152,9 @@ class SessionList implements Component {
 			const cursorWidth = visibleWidth(cursor);
 			const prefix = selected ? theme.fg("accent", cursor) : padding(cursorWidth);
 			const message = session.firstMessage.replace(/\n/g, " ").trim();
-			const title = truncateToWidth(session.title ?? message, width - cursorWidth);
-			lines.push(prefix + (selected ? theme.bold(title) : title));
+			const star = session.starred ? theme.fg("warning", `${theme.icon.star} `) : "";
+			const title = truncateToWidth(session.title ?? message, width - cursorWidth - visibleWidth(star));
+			lines.push(prefix + star + (selected ? theme.bold(title) : title));
 			if (session.title) lines.push(`  ${theme.fg("dim", truncateToWidth(message, width - cursorWidth))}`);
 			lines.push(
 				theme.fg(
@@ -147,10 +169,10 @@ class SessionList implements Component {
 		}
 		if (start > 0 || end < this.#filteredSessions.length)
 			lines.push(theme.fg("muted", `  (${this.#selectedIndex + 1}/${this.#filteredSessions.length})`));
-		lines.push(
-			"",
-			theme.fg("muted", "  [Del to delete selected transcript/artifacts, Enter to select, Esc to cancel]"),
-		);
+		lines.push("");
+		if (this.onToggleStarRequest)
+			lines.push(theme.fg("muted", truncateToWidth("  [Ctrl+S to star/unstar the selected session]", width)));
+		lines.push(theme.fg("muted", "  [Del to delete selected transcript/artifacts, Enter to select, Esc to cancel]"));
 		return lines;
 	}
 
@@ -169,7 +191,10 @@ class SessionList implements Component {
 			this.#selectedIndex += delta;
 			this.#clampSelectedIndex();
 		};
-		if (matchesKey(keyData, "delete")) {
+		if (matchesKey(keyData, "ctrl+s")) {
+			const selected = this.#filteredSessions[this.#selectedIndex];
+			if (selected) this.onToggleStarRequest?.(selected);
+		} else if (matchesKey(keyData, "delete")) {
 			const selected = this.#filteredSessions[this.#selectedIndex];
 			if (selected) this.onDeleteRequest?.(selected);
 		} else if (matchesKey(keyData, "up")) move(-1);
@@ -186,7 +211,7 @@ class SessionList implements Component {
 	}
 }
 
-/** A one-shot resume consent selector. It never opens or mutates sessions. */
+/** A one-shot resume consent selector with host-owned deletion and star persistence. It never opens sessions. */
 export class SessionSelectorComponent extends Container {
 	#sessionList: SessionList;
 	#confirmationDialog: HookSelectorComponent | null = null;
@@ -203,6 +228,7 @@ export class SessionSelectorComponent extends Container {
 		private readonly onDelete?: (session: SessionInfo) => Promise<boolean>,
 		private readonly inspector?: SessionInspector,
 		private readonly onSelection?: (selection: SessionSelectionResult) => void,
+		private readonly onSetStarred?: (session: SessionInfo, starred: boolean) => Promise<void>,
 	) {
 		super();
 		this.addChild(new Spacer(1));
@@ -219,6 +245,7 @@ export class SessionSelectorComponent extends Container {
 		this.#sessionList.onCancel = () => this.#cancel();
 		this.#sessionList.onExit = () => this.#exit();
 		this.#sessionList.onDeleteRequest = session => this.#showDeleteConfirmation(session);
+		if (this.onSetStarred) this.#sessionList.onToggleStarRequest = session => void this.#toggleStar(session);
 		this.addChild(this.#sessionList);
 		this.addChild(new Spacer(1));
 		this.addChild(new DynamicBorder());
@@ -262,6 +289,29 @@ export class SessionSelectorComponent extends Container {
 		this.#state = { kind: "settled" };
 		this.#sessionList.setInputFrozen(true);
 		this.onExit();
+	}
+	async #toggleStar(session: SessionInfo): Promise<void> {
+		if (!this.onSetStarred || this.#state.kind !== "browsing" || this.#confirmationDialog) return;
+		const token = ++this.#nextToken;
+		const starred = !session.starred;
+		this.#state = { kind: "starring", token };
+		this.#sessionList.setInputFrozen(true);
+		this.#clearError();
+		this.#requestRender();
+		try {
+			await this.onSetStarred(session, starred);
+			if (this.#state.kind !== "starring" || this.#state.token !== token) return;
+			this.#sessionList.setSessionStarred(session.path, starred);
+		} catch (error) {
+			if (this.#state.kind !== "starring" || this.#state.token !== token) return;
+			this.#showError(error instanceof Error ? error.message : String(error));
+		} finally {
+			if (this.#state.kind === "starring" && this.#state.token === token) {
+				this.#state = { kind: "browsing" };
+				this.#sessionList.setInputFrozen(false);
+				this.#requestRender();
+			}
+		}
 	}
 	async #inspect(session: SessionInfo): Promise<void> {
 		const inspector = this.inspector;

@@ -3,6 +3,7 @@ import { ProcessTerminal, TUI } from "@sayknow-cli/tui";
 import { pathIsWithin } from "@sayknow-cli/utils";
 import { type SessionSelectionResult, SessionSelectorComponent } from "../modes/components/session-selector";
 import { type SessionInfo, SessionManager } from "../session/session-manager";
+import { setSessionIdStarred } from "../session/session-stars";
 import { FileSessionStorage } from "../session/session-storage";
 
 export async function deleteSessionPickerCandidate(sessionPath: string, explicitSessionDir?: string): Promise<void> {
@@ -43,6 +44,9 @@ export async function selectSession(
 		},
 		SessionManager.inspectSessionTailReadOnly,
 		settle,
+		async (session, starred) => {
+			await setSessionIdStarred(session.id, starred);
+		},
 	);
 	selector.setOnRequestRender(() => ui.requestRender());
 	ui.addChild(selector);
