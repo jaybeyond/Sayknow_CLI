@@ -71,7 +71,8 @@ const fixtures = [
 
 beforeAll(async () => {
 	Bun.env.COLORTERM = "truecolor";
-	await initTheme();
+	// Snapshots record exact colors; pin the palette they were taken with instead of the default.
+	await initTheme(false, undefined, undefined, "blue-octopus", "blue-octopus");
 });
 
 function oracle(oldText: string, newText: string) {

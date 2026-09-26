@@ -3,8 +3,9 @@ import { TreeSelectorComponent } from "../../../src/modes/components/tree-select
 import { initTheme } from "../../../src/modes/theme/theme";
 import type { SessionTreeNode } from "../../../src/session/session-manager";
 
-beforeAll(() => {
-	initTheme();
+beforeAll(async () => {
+	// Assertions include theme glyphs (md.bullet); pin the palette instead of the default.
+	await initTheme(false, undefined, undefined, "blue-octopus", "blue-octopus");
 });
 
 function createNode(id: string, content: string): SessionTreeNode {
