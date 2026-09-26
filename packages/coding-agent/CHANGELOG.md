@@ -2,9 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- `/rename` with no argument regenerates the session title from the conversation (the first message plus the latest five) instead of printing usage. A result that lands after a newer prompt or an explicit rename is discarded. `/rename <title>` is unchanged. Ported from upstream #5617.
+
 ### Fixed
 
 - A turn stopped by the repetition guard is no longer auto-retried. It carries no transport facts, so the session classified it as `unknown` and admitted a bounded retry that would re-trip the same loop and re-bill the full context. Ported from upstream #5627.
+- The status-line usage segment shows only the active model's provider. It used to mix every cached usage report, so a Grok session could show leftover Claude 5h/7d windows, and with several Codex OAuth accounts the report order decided which account was shown. Codex now uses only the report that uniquely matches the OAuth account this session uses, and Grok's monthly credits are no longer drawn as a 7d window. Ported from upstream #5871 and the two status-line fixes before it.
 
 ### Performance
 
