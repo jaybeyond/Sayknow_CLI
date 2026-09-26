@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.6.5] - 2026-09-26
+
 ### Added
 
 - Bundle `openai-codex/gpt-6-sol` and `openai-codex/gpt-6-luna` alongside `gpt-6-astra`, with published standard pricing (Sol $2/$10, cache read $0.20, cache write $2.50; Luna $0.10/$0.50, $0.01/$0.125). Codex discovery reports both ids at zero cost, and the model manager only substitutes a bundled cost when one exists — so until now every Sol or Luna turn was recorded as free in `skc stats`. Observed directly: the local model cache held both rows at cost 0. As with Astra, the above-272K long-context tier is not recorded because this fork's cost engine has no tier support. Ported from upstream #5824.

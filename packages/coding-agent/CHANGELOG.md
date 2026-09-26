@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.6.5] - 2026-09-26
+
 ### Added
 
 - Three more bundled dark octopus themes, selectable from Settings or `/theme`: `ink-octopus` (warm graphite, paper text, one amber accent), `glow-octopus` (teal-black with bioluminescent green and a violet secondary), and `violet-octopus` (plum-dark with lavender and an apricot secondary).
@@ -25,8 +27,6 @@
 ### Performance
 
 - `/resume` no longer reads and hashes both transcripts for every (legacy session, v2 session) pair while deciding which legacy sessions are already migrated. A migration receipt names exactly one source and one destination, so a receipt for a different pair is now rejected on those fields before any file I/O. Unrelated transcripts are read once by the listing instead of once more per receipt probe; upstream measured `/resume` in a 589-session directory dropping from 10.4–12.3s to 6.2–7.2s. Ported from upstream #5856 (the `/model` half of that change targets code this fork does not have).
-
-## [0.6.4] - 2026-09-26
 
 ## [0.6.2] - 2026-09-24
 
