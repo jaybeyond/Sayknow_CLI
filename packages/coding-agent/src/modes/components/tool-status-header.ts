@@ -1,4 +1,5 @@
 import * as fs from "node:fs";
+import { resolveOAuthStorageProvider } from "@sayknow-cli/ai";
 
 import { type Component, truncateToWidth, visibleWidth } from "@sayknow-cli/tui";
 import { formatCount, getProjectDir } from "@sayknow-cli/utils";
@@ -32,6 +33,33 @@ import { renderSegment, type SegmentContext } from "./status-line/segments";
 import { getSeparator } from "./status-line/separators";
 import { calculateTokensPerSecond } from "./status-line/token-rate";
 import type { SeparatorDef } from "./status-line/types";
+
+function usageReportAccountId(report: unknown): string | undefined {
+	if (!report || typeof report !== "object") return undefined;
+	const record = report as {
+		metadata?: unknown;
+		limits?: unknown;
+	};
+	const metadata = record.metadata;
+	const rawMetadataAccountId =
+		metadata && typeof metadata === "object" ? (metadata as { accountId?: unknown }).accountId : undefined;
+	const metadataAccountId =
+		typeof rawMetadataAccountId === "string" && rawMetadataAccountId.trim() ? rawMetadataAccountId.trim() : undefined;
+	if (!Array.isArray(record.limits)) return metadataAccountId;
+
+	const scopeAccountIds = new Set<string>();
+	for (const limit of record.limits) {
+		if (!limit || typeof limit !== "object") continue;
+		const scope = (limit as { scope?: unknown }).scope;
+		if (!scope || typeof scope !== "object") continue;
+		const accountId = (scope as { accountId?: unknown }).accountId;
+		if (typeof accountId === "string" && accountId.trim()) scopeAccountIds.add(accountId.trim());
+	}
+	if (scopeAccountIds.size > 1) return undefined;
+	const [scopeAccountId] = scopeAccountIds;
+	if (metadataAccountId && scopeAccountId && metadataAccountId !== scopeAccountId) return undefined;
+	return metadataAccountId ?? scopeAccountId;
+}
 
 export interface StatusLineSegmentOptions {
 	model?: { showThinkingLevel?: boolean; showContextPercent?: boolean };
@@ -192,6 +220,9 @@ export class StatusLineComponent implements Component {
 
 	// Provider usage caching (5-min TTL, OAuth/sub only)
 	#cachedUsage: SegmentContext["usage"] = null;
+	#cachedUsageReports: unknown = null;
+	#cachedUsageProvider: string | undefined;
+	#cachedUsageAccountId: string | undefined;
 	#usageFetchedAt = 0;
 	#usageInFlight = false;
 
@@ -507,7 +538,14 @@ export class StatusLineComponent implements Component {
 		void fetcher
 			.call(this.session)
 			.then(reports => {
-				this.#cachedUsage = this.#normalizeUsageReports(reports);
+				this.#cachedUsageReports = reports;
+				this.#cachedUsageProvider = this.#activeUsageProvider();
+				this.#cachedUsageAccountId = this.#activeCodexAccountId(this.#cachedUsageProvider);
+				this.#cachedUsage = this.#normalizeUsageReports(
+					reports,
+					this.#cachedUsageProvider,
+					this.#cachedUsageAccountId,
+				);
 				this.#usageFetchedAt = Date.now();
 				if (this.#onBranchChange) {
 					this.#onBranchChange();
@@ -525,8 +563,25 @@ export class StatusLineComponent implements Component {
 			});
 	}
 
-	#normalizeUsageReports(reports: unknown): SegmentContext["usage"] {
-		if (!Array.isArray(reports)) return null;
+	#normalizeUsageReports(
+		reports: unknown,
+		activeProvider = this.#activeUsageProvider(),
+		activeCodexAccountId = this.#activeCodexAccountId(activeProvider),
+	): SegmentContext["usage"] {
+		if (!activeProvider || !Array.isArray(reports)) return null;
+		const activeCodexReportCount =
+			activeProvider === "openai-codex" && activeCodexAccountId
+				? reports.filter(report => {
+						if (!report || typeof report !== "object") return false;
+						const provider = (report as { provider?: unknown }).provider;
+						return (
+							typeof provider === "string" &&
+							resolveOAuthStorageProvider(provider) === activeProvider &&
+							usageReportAccountId(report) === activeCodexAccountId
+						);
+					}).length
+				: 0;
+		const ambiguousActiveCodexReports = activeCodexReportCount > 1;
 		const windows: NonNullable<SegmentContext["usage"]>["windows"] = [];
 		const seen = new Set<string>();
 		const now = Date.now();
@@ -560,14 +615,23 @@ export class StatusLineComponent implements Component {
 		for (const report of reports) {
 			if (!report || typeof report !== "object") continue;
 			const provider = (report as { provider?: unknown }).provider;
-			const providerId = typeof provider === "string" ? provider : undefined;
+			const providerId = typeof provider === "string" ? resolveOAuthStorageProvider(provider) : undefined;
+			if (providerId !== activeProvider) continue;
+			// Codex usage fetches cover every OAuth account; fail closed unless this session's account matches uniquely.
+			if (
+				providerId === "openai-codex" &&
+				(!activeCodexAccountId ||
+					ambiguousActiveCodexReports ||
+					usageReportAccountId(report) !== activeCodexAccountId)
+			)
+				continue;
 			const limits = (report as { limits?: unknown }).limits;
 			if (!Array.isArray(limits)) continue;
 			for (const limit of limits) {
 				if (!limit || typeof limit !== "object") continue;
 				const l = limit as {
 					id?: unknown;
-					scope?: { windowId?: string; tier?: string; modelId?: string };
+					scope?: { provider?: unknown; windowId?: string; tier?: string; modelId?: string };
 					window?: { id?: string; resetsAt?: number };
 					amount?: { usedFraction?: number };
 				};
@@ -578,6 +642,10 @@ export class StatusLineComponent implements Component {
 				const tier = l.scope?.tier;
 				const modelId = l.scope?.modelId;
 				const resetsAt = l.window?.resetsAt;
+				// A limit scoped to another provider never describes the active one.
+				const scopeProvider =
+					typeof l.scope?.provider === "string" ? resolveOAuthStorageProvider(l.scope.provider) : undefined;
+				if (scopeProvider !== undefined && scopeProvider !== providerId) continue;
 
 				if (providerId === "openai-codex") {
 					if (id === "openai-codex:primary" || (!id && !!windowId && windowId !== "7d" && !modelId)) {
@@ -589,13 +657,36 @@ export class StatusLineComponent implements Component {
 					}
 				} else if (windowId === "5h" && !tier) {
 					pushWindow(`${providerId ?? "provider"}:5h`, "5h", fraction, resetsAt, "m");
-				} else if (windowId === "7d" && !tier) {
+				} else if (windowId === "7d" && !tier && providerId !== "grok-build" && providerId !== "xai") {
+					// Grok's only report is SuperGrok monthly credits filed under "7d"; a month is not a 7d quota.
 					pushWindow(`${providerId ?? "provider"}:7d`, "7d", fraction, resetsAt, "h");
 				}
 			}
 		}
 
 		return windows.length > 0 ? { windows } : null;
+	}
+
+	#activeUsageProvider(): string | undefined {
+		const model = this.session.state.model ?? this.session.model;
+		if (!model || typeof model !== "object") return undefined;
+		const provider = (model as { provider?: unknown }).provider;
+		return typeof provider === "string" && provider.length > 0 ? resolveOAuthStorageProvider(provider) : undefined;
+	}
+
+	#activeCodexAccountId(activeProvider: string | undefined): string | undefined {
+		if (activeProvider !== "openai-codex") return undefined;
+		// Turns resolve their API key with the session id as the sticky key, so the account follows it too.
+		return this.session.modelRegistry.authStorage.getOAuthAccountId(activeProvider, this.session.sessionId);
+	}
+
+	#syncCachedUsageForActiveProvider(): void {
+		const activeProvider = this.#activeUsageProvider();
+		const activeCodexAccountId = this.#activeCodexAccountId(activeProvider);
+		if (this.#cachedUsageProvider === activeProvider && this.#cachedUsageAccountId === activeCodexAccountId) return;
+		this.#cachedUsageProvider = activeProvider;
+		this.#cachedUsageAccountId = activeCodexAccountId;
+		this.#cachedUsage = this.#normalizeUsageReports(this.#cachedUsageReports, activeProvider, activeCodexAccountId);
 	}
 
 	#buildSegmentContext(
@@ -607,7 +698,8 @@ export class StatusLineComponent implements Component {
 	): SegmentContext {
 		const state = this.session.state;
 
-		// Trigger background fetch (5-min TTL); render uses cached value
+		// Reproject cached reports when the model or Codex account changed, then refresh (5-min TTL).
+		this.#syncCachedUsageForActiveProvider();
 		this.refreshUsageInBackground();
 
 		// Get usage statistics
