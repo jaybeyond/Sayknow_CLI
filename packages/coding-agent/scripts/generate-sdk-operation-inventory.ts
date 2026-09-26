@@ -230,6 +230,10 @@ const SEAM_TO_SDK: Readonly<Record<string, string>> = {
 	"agent_session:abortBash": "bash.abort",
 	"agent_session:switchSession": "session.switch",
 	"agent_session:branch": "session.branch",
+	// `/fork` opens the user-prompt selector, which commits via
+	// `session.branch(entryId)` (selector-controller.ts). Despite the command and
+	// keybinding name, it is NOT the exact-state `session.fork` operation.
+	"slash_command:fork": "session.branch",
 	"agent_session:handoff": "session.handoff",
 	"agent_session:exportToHtml": "session.export_html",
 	"agent_session:getAvailableModels": "models.list/current",

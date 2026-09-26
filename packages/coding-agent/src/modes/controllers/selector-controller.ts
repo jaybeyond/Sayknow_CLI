@@ -1895,36 +1895,114 @@ export class SelectorController {
 		});
 	}
 
-	showUserMessageSelector(): void {
-		const userMessages = this.ctx.session.getUserMessagesForBranching();
+	#forkBusyReason(): string | undefined {
+		if (this.ctx.session.isStreaming) return "Wait for the current response to finish or abort it before forking.";
+		if (this.ctx.session.isCompacting) return "Wait for compaction to finish or abort it before forking.";
+		if (this.ctx.bashComponent || this.ctx.pythonComponent)
+			return "Wait for the foreground command to finish or cancel it before forking.";
+		return undefined;
+	}
 
+	/**
+	 * Pick an earlier prompt and continue from it in a new session. The original
+	 * transcript is kept; the selected prompt comes back as an editable draft,
+	 * never auto-submitted.
+	 */
+	showUserMessageSelector(): void {
+		const openedSessionId = this.ctx.sessionManager.getSessionId();
+		const openedSessionFile = this.ctx.sessionManager.getSessionFile();
+		if (!openedSessionFile) {
+			this.ctx.showError("Fork requires a persisted session");
+			return;
+		}
+		const busyReason = this.#forkBusyReason();
+		if (busyReason) {
+			this.ctx.showWarning(busyReason);
+			return;
+		}
+
+		const userMessages = this.ctx.session.getUserMessagesForBranching();
 		if (userMessages.length === 0) {
 			this.ctx.showStatus("No messages to branch from");
 			return;
 		}
 
+		// Close the side-chat composer before the picker takes the editor area.
+		if (this.ctx.hasActiveBtw()) this.ctx.handleBtwEscape();
+
 		this.showSelector(done => {
+			let selectionInFlight = false;
+			const closeWithoutBranch = (message: string, error = false): void => {
+				done();
+				if (error) this.ctx.showError(message);
+				else this.ctx.showStatus(message);
+				this.ctx.ui.requestRender();
+			};
+			const sessionChanged = (): boolean =>
+				this.ctx.sessionManager.getSessionId() !== openedSessionId ||
+				this.ctx.sessionManager.getSessionFile() !== openedSessionFile;
 			const selector = new UserMessageSelectorComponent(
 				userMessages.map(m => ({ id: m.entryId, text: m.text })),
 				async entryId => {
-					const result = await this.ctx.session.branch(entryId);
-					if (result.cancelled) {
-						// Hook cancelled the branch
-						done();
-						this.ctx.ui.requestRender();
+					if (selectionInFlight) return;
+					selectionInFlight = true;
+					if (sessionChanged()) {
+						closeWithoutBranch("Fork cancelled because the active session changed", true);
 						return;
 					}
-					this.ctx.resetIrcSidebarSession();
+					const busyReason = this.#forkBusyReason();
+					if (busyReason) {
+						closeWithoutBranch(busyReason);
+						return;
+					}
 
-					this.ctx.rebuildInitialMessages("replace-identity");
-					this.ctx.editor.setText(result.selectedText);
+					let selectedText = userMessages.find(message => message.entryId === entryId)?.text ?? "";
+					let setupFailure: unknown;
+					try {
+						const result = await this.ctx.session.branch(entryId);
+						if (result.cancelled) {
+							closeWithoutBranch("Fork cancelled");
+							return;
+						}
+						selectedText = result.selectedText;
+					} catch (error) {
+						// Only a failure before the successor was committed is a failed fork.
+						if (!sessionChanged()) {
+							closeWithoutBranch(`Fork failed: ${error instanceof Error ? error.message : String(error)}`, true);
+							return;
+						}
+						setupFailure = error;
+					}
+
+					try {
+						this.ctx.resetIrcSidebarSession();
+						this.ctx.resetObserverRegistry();
+						this.#refreshSessionTerminalTitle();
+						this.ctx.statusLine.invalidate();
+						this.ctx.statusLine.setSessionStartTime(Date.now());
+						this.ctx.updateEditorTopBorder();
+						this.ctx.updateEditorBorderColor();
+						this.ctx.rebuildInitialMessages("replace-identity");
+						await this.ctx.reloadTodos();
+					} catch (error) {
+						setupFailure ??= error;
+					}
+					this.ctx.editor.setText(selectedText);
 					done();
-					this.ctx.showStatus("Branched to new session");
+					if (setupFailure !== undefined) {
+						this.ctx.showError(
+							`Fork created, but session setup failed: ${setupFailure instanceof Error ? setupFailure.message : String(setupFailure)}`,
+						);
+					} else {
+						this.ctx.showStatus("Forked to a new session; edit the selected prompt to continue");
+					}
+					this.ctx.ui.requestRender();
 				},
 				() => {
 					done();
 					this.ctx.ui.requestRender();
 				},
+				() => this.ctx.ui.terminal.rows,
 			);
 			return { component: selector, focus: selector.getMessageList() };
 		});

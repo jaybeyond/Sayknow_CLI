@@ -1829,6 +1829,19 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 		},
 	},
 	{
+		name: "fork",
+		description: "Choose an earlier prompt to continue in a new session",
+		allowArgs: true,
+		handleTui: async (command, runtime) => {
+			runtime.ctx.editor.setText("");
+			if (command.args.trim()) {
+				runtime.ctx.showError("Usage: /fork");
+				return;
+			}
+			runtime.ctx.showUserMessageSelector();
+		},
+	},
+	{
 		name: "rename",
 		description: "Rename the current session, or regenerate the title from the conversation",
 		inlineHint: "[title]",
