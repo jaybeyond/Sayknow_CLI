@@ -35,6 +35,7 @@ import type { ManagedLegacyLocalMigrationSource } from "../internal-urls/local-p
 import { assertSafePathComponent } from "../skc-runtime/session-layout";
 import { writeTextAtomic } from "../skc-runtime/state-writer";
 import * as git from "../utils/git";
+import { invalidateSessionTitleGeneration } from "../utils/session-title-generation";
 import { ArtifactManager } from "./artifacts";
 import {
 	type BlobPutResult,
@@ -7023,6 +7024,7 @@ export class SessionManager {
 		const sanitized = SessionManager.#sanitizeName(name);
 		if (!sanitized) return false;
 
+		invalidateSessionTitleGeneration(this);
 		this.#sessionName = sanitized;
 		this.#titleSource = source;
 		await this.#appendHeaderPatch({ title: sanitized, titleSource: source });
@@ -7219,6 +7221,7 @@ export class SessionManager {
 			| PythonExecutionMessage
 			| FileMentionMessage,
 	): string {
+		if (message.role === "user") invalidateSessionTitleGeneration(this);
 		const entry: SessionMessageEntry = {
 			type: "message",
 			id: generateId(this.#byId),

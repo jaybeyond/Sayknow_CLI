@@ -291,7 +291,10 @@ export const frMsgs: Record<string, string> = {
 	"Usage: /memory mm history <id>": "Usage : /memory mm history <id>",
 	"Usage: /memory mm show <id>": "Usage : /memory mm show <id>",
 	"Usage: /move <path>": "Usage : /move <chemin>",
-	"Usage: /rename <title>": "Usage : /rename <titre>",
+	"Nothing to summarize yet — pass a title: /rename <title>":
+		"Rien à résumer pour l'instant — indiquez un titre : /rename <titre>",
+	"Could not generate a session title — pass one: /rename <title>":
+		"Impossible de générer un titre de session — indiquez-en un : /rename <titre>",
 	"Usage: /ssh add <name> --host <host> [--user <user>] [--port <port>] [--key <keyPath>] [--desc <description>] [--compat] [--scope project|user]":
 		"Usage : /ssh add <nom> --host <host> [--user <utilisateur>] [--port <port>] [--key <cheminClé>] [--desc <description>] [--compat] [--scope project|user]",
 	"Usage: /todo append [<phase>] <task...>": "Usage : /todo append [<phase>] <tâche...>",

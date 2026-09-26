@@ -287,7 +287,10 @@ export const deMsgs: Record<string, string> = {
 	"Usage: /memory mm history <id>": "Verwendung: /memory mm history <id>",
 	"Usage: /memory mm show <id>": "Verwendung: /memory mm show <id>",
 	"Usage: /move <path>": "Verwendung: /move <Pfad>",
-	"Usage: /rename <title>": "Verwendung: /rename <Titel>",
+	"Nothing to summarize yet — pass a title: /rename <title>":
+		"Noch nichts zum Zusammenfassen — gib einen Titel an: /rename <Titel>",
+	"Could not generate a session title — pass one: /rename <title>":
+		"Sitzungstitel konnte nicht erzeugt werden — gib einen an: /rename <Titel>",
 	"Usage: /ssh add <name> --host <host> [--user <user>] [--port <port>] [--key <keyPath>] [--desc <description>] [--compat] [--scope project|user]":
 		"Verwendung: /ssh add <Name> --host <host> [--user <Benutzer>] [--port <Port>] [--key <Schlüsselpfad>] [--desc <Beschreibung>] [--compat] [--scope project|user]",
 	"Usage: /todo append [<phase>] <task...>": "Verwendung: /todo append [<Phase>] <Aufgabe...>",

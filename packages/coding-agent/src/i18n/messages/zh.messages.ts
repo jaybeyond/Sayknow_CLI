@@ -279,7 +279,8 @@ export const zhMsgs: Record<string, string> = {
 	"Usage: /memory mm history <id>": "用法： /memory mm history <id>",
 	"Usage: /memory mm show <id>": "用法： /memory mm show <id>",
 	"Usage: /move <path>": "用法： /move <path>",
-	"Usage: /rename <title>": "用法： /rename <title>",
+	"Nothing to summarize yet — pass a title: /rename <title>": "还没有可总结的对话 — 请直接提供标题： /rename <title>",
+	"Could not generate a session title — pass one: /rename <title>": "无法生成会话标题 — 请直接提供： /rename <title>",
 	"Usage: /ssh add <name> --host <host> [--user <user>] [--port <port>] [--key <keyPath>] [--desc <description>] [--compat] [--scope project|user]":
 		"用法： /ssh add <name> --host <host> [--user <user>] [--port <port>] [--key <keyPath>] [--desc <description>] [--compat] [--scope project|user]",
 	"Usage: /todo append [<phase>] <task...>": "用法： /todo append [<phase>] <task...>",

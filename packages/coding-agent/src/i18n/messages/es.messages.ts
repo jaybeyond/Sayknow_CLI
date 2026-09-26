@@ -293,7 +293,10 @@ export const esMsgs: Record<string, string> = {
 	"Usage: /memory mm history <id>": "Uso: /memory mm history <id>",
 	"Usage: /memory mm show <id>": "Uso: /memory mm show <id>",
 	"Usage: /move <path>": "Uso: /move <ruta>",
-	"Usage: /rename <title>": "Uso: /rename <título>",
+	"Nothing to summarize yet — pass a title: /rename <title>":
+		"Aún no hay nada que resumir — indica un título: /rename <título>",
+	"Could not generate a session title — pass one: /rename <title>":
+		"No se pudo generar un título de sesión — indica uno: /rename <título>",
 	"Usage: /ssh add <name> --host <host> [--user <user>] [--port <port>] [--key <keyPath>] [--desc <description>] [--compat] [--scope project|user]":
 		"Uso: /ssh add <nombre> --host <host> [--user <usuario>] [--port <puerto>] [--key <rutaClave>] [--desc <descripción>] [--compat] [--scope project|user]",
 	"Usage: /todo append [<phase>] <task...>": "Uso: /todo append [<fase>] <tarea...>",

@@ -293,7 +293,10 @@ export const jaMsgs: Record<string, string> = {
 	"Usage: /memory mm history <id>": "使い方: /memory mm history <id>",
 	"Usage: /memory mm show <id>": "使い方: /memory mm show <id>",
 	"Usage: /move <path>": "使い方: /move <path>",
-	"Usage: /rename <title>": "使い方: /rename <title>",
+	"Nothing to summarize yet — pass a title: /rename <title>":
+		"まだ要約する会話がありません — タイトルを指定してください: /rename <title>",
+	"Could not generate a session title — pass one: /rename <title>":
+		"セッションタイトルを生成できませんでした — 指定してください: /rename <title>",
 	"Usage: /ssh add <name> --host <host> [--user <user>] [--port <port>] [--key <keyPath>] [--desc <description>] [--compat] [--scope project|user]":
 		"使い方: /ssh add <name> --host <host> [--user <user>] [--port <port>] [--key <keyPath>] [--desc <description>] [--compat] [--scope project|user]",
 	"Usage: /todo append [<phase>] <task...>": "使い方: /todo append [<phase>] <task...>",

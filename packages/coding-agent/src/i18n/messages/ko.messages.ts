@@ -291,7 +291,10 @@ export const koMsgs: Record<string, string> = {
 	"Usage: /memory mm history <id>": "사용법: /memory mm history <id>",
 	"Usage: /memory mm show <id>": "사용법: /memory mm show <id>",
 	"Usage: /move <path>": "사용법: /move <path>",
-	"Usage: /rename <title>": "사용법: /rename <title>",
+	"Nothing to summarize yet — pass a title: /rename <title>":
+		"아직 요약할 대화가 없습니다 — 제목을 직접 넣으세요: /rename <title>",
+	"Could not generate a session title — pass one: /rename <title>":
+		"세션 제목을 생성하지 못했습니다 — 직접 넣으세요: /rename <title>",
 	"Usage: /ssh add <name> --host <host> [--user <user>] [--port <port>] [--key <keyPath>] [--desc <description>] [--compat] [--scope project|user]":
 		"사용법: /ssh add <name> --host <host> [--user <user>] [--port <port>] [--key <keyPath>] [--desc <description>] [--compat] [--scope project|user]",
 	"Usage: /todo append [<phase>] <task...>": "사용법: /todo append [<phase>] <task...>",
