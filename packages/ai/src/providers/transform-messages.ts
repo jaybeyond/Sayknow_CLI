@@ -17,6 +17,62 @@ const enum ToolCallStatus {
 	Aborted = 2,
 }
 
+const MIN_CROSS_MODEL_THINKING_REPEAT_COUNT = 64;
+const MIN_CROSS_MODEL_THINKING_REPEAT_SAVED_CHARACTERS = 4_096;
+
+/**
+ * Bound pathological cross-model reasoning replay without editing the stored
+ * thinking block. When a model switch degrades foreign reasoning to plain
+ * text, a decode-looped paragraph repeated hundreds of times would otherwise
+ * be re-sent verbatim on every later turn. Only exact adjacent non-empty
+ * paragraphs qualify, and the threshold requires both a large run and
+ * substantial net savings, so ordinary repetition is never touched.
+ */
+function compressRepeatedThinkingParagraphs(thinking: string): string {
+	const parts = thinking.split(/(\r?\n(?:[ \t]*\r?\n)+)/);
+	const compressedParts: string[] = [];
+	let compressed = false;
+
+	for (let paragraphIndex = 0; paragraphIndex < parts.length; ) {
+		const paragraph = parts[paragraphIndex];
+		let runEnd = paragraphIndex;
+		while (runEnd + 2 < parts.length && parts[runEnd + 2] === paragraph) {
+			runEnd += 2;
+		}
+
+		const repeatCount = (runEnd - paragraphIndex) / 2 + 1;
+		let marker: string | undefined;
+		let savedCharacters = 0;
+		if (paragraph.length > 0 && repeatCount >= MIN_CROSS_MODEL_THINKING_REPEAT_COUNT) {
+			marker = `[Repeated paragraph occurred exactly ${repeatCount} consecutive times; only its first occurrence is shown.]`;
+			savedCharacters = (repeatCount - 1) * paragraph.length - marker.length;
+			for (let separatorIndex = paragraphIndex + 3; separatorIndex < runEnd; separatorIndex += 2) {
+				savedCharacters += parts[separatorIndex].length;
+			}
+		}
+
+		if (marker !== undefined && savedCharacters >= MIN_CROSS_MODEL_THINKING_REPEAT_SAVED_CHARACTERS) {
+			compressedParts.push(paragraph);
+			if (paragraphIndex + 1 < parts.length) compressedParts.push(parts[paragraphIndex + 1]);
+			compressedParts.push(marker);
+			compressed = true;
+		} else {
+			for (let partIndex = paragraphIndex; partIndex <= runEnd; partIndex++) {
+				compressedParts.push(parts[partIndex]);
+			}
+		}
+
+		// The separator after the run belongs to the next paragraph and must
+		// survive verbatim, regardless of whether this run was compressed.
+		if (runEnd + 1 < parts.length) {
+			compressedParts.push(parts[runEnd + 1]);
+		}
+		paragraphIndex = runEnd + 2;
+	}
+
+	return compressed ? compressedParts.join("") : thinking;
+}
+
 /**
  * Normalize tool call ID for cross-provider compatibility.
  * OpenAI Responses API generates IDs that are 450+ chars with special characters like `|`.
@@ -105,7 +161,7 @@ export function transformMessages<TApi extends Api>(
 					if (isSameModel) return sanitized;
 					return {
 						type: "text" as const,
-						text: sanitized.thinking,
+						text: compressRepeatedThinkingParagraphs(sanitized.thinking),
 					};
 				}
 
