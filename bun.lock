@@ -15,7 +15,7 @@
     },
     "packages/agent": {
       "name": "@sayknow-cli/agent-core",
-      "version": "0.6.3",
+      "version": "0.6.4",
       "dependencies": {
         "@opentelemetry/api": "catalog:",
         "@sayknow-cli/ai": "catalog:",
@@ -30,7 +30,7 @@
     },
     "packages/ai": {
       "name": "@sayknow-cli/ai",
-      "version": "0.6.3",
+      "version": "0.6.4",
       "bin": {
         "pi-ai": "./src/cli.ts",
       },
@@ -48,14 +48,14 @@
     },
     "packages/bridge-client": {
       "name": "@sayknow-cli/bridge-client",
-      "version": "0.6.3",
+      "version": "0.6.4",
       "devDependencies": {
         "@types/bun": "catalog:",
       },
     },
     "packages/coding-agent": {
       "name": "@sayknow-cli/coding-agent",
-      "version": "0.6.3",
+      "version": "0.6.4",
       "bin": {
         "skc": "bin/skc.js",
       },
@@ -91,7 +91,7 @@
     },
     "packages/natives": {
       "name": "@sayknow-cli/natives",
-      "version": "0.6.3",
+      "version": "0.6.4",
       "devDependencies": {
         "@napi-rs/cli": "catalog:",
         "@types/bun": "catalog:",
@@ -107,23 +107,23 @@
     },
     "packages/natives-darwin-arm64": {
       "name": "@sayknow-cli/natives-darwin-arm64",
-      "version": "0.6.3",
+      "version": "0.6.4",
     },
     "packages/natives-darwin-x64": {
       "name": "@sayknow-cli/natives-darwin-x64",
-      "version": "0.6.3",
+      "version": "0.6.4",
     },
     "packages/natives-linux-arm64": {
       "name": "@sayknow-cli/natives-linux-arm64",
-      "version": "0.6.3",
+      "version": "0.6.4",
     },
     "packages/natives-linux-x64": {
       "name": "@sayknow-cli/natives-linux-x64",
-      "version": "0.6.3",
+      "version": "0.6.4",
     },
     "packages/natives-win32-x64": {
       "name": "@sayknow-cli/natives-win32-x64",
-      "version": "0.6.3",
+      "version": "0.6.4",
     },
     "packages/orchestration-token-benchmark": {
       "name": "@sayknow-cli/orchestration-token-benchmark",
@@ -134,7 +134,7 @@
     },
     "packages/sayknow-cli": {
       "name": "sayknow-cli",
-      "version": "0.6.3",
+      "version": "0.6.4",
       "bin": {
         "skc": "bin/skc.js",
       },
@@ -144,7 +144,7 @@
     },
     "packages/stats": {
       "name": "@sayknow-cli/stats",
-      "version": "0.6.3",
+      "version": "0.6.4",
       "bin": {
         "skc-stats": "./src/index.ts",
       },
@@ -169,7 +169,7 @@
     },
     "packages/telegram-remote": {
       "name": "@sayknow-cli/telegram-remote",
-      "version": "0.6.3",
+      "version": "0.6.4",
       "dependencies": {
         "@sayknow-cli/coding-agent": "catalog:",
       },
@@ -179,7 +179,7 @@
     },
     "packages/tui": {
       "name": "@sayknow-cli/tui",
-      "version": "0.6.3",
+      "version": "0.6.4",
       "dependencies": {
         "@sayknow-cli/natives": "catalog:",
         "@sayknow-cli/utils": "catalog:",
@@ -220,7 +220,7 @@
     },
     "packages/utils": {
       "name": "@sayknow-cli/utils",
-      "version": "0.6.3",
+      "version": "0.6.4",
       "dependencies": {
         "@sayknow-cli/natives": "catalog:",
         "beautiful-mermaid": "catalog:",
@@ -267,14 +267,14 @@
     "@opentelemetry/context-async-hooks": "^2.0.0",
     "@opentelemetry/sdk-trace-base": "^2.0.0",
     "@puppeteer/browsers": "^2.13.0",
-    "@sayknow-cli/agent-core": "0.6.3",
-    "@sayknow-cli/ai": "0.6.3",
-    "@sayknow-cli/bridge-client": "0.6.3",
-    "@sayknow-cli/coding-agent": "0.6.3",
-    "@sayknow-cli/natives": "0.6.3",
-    "@sayknow-cli/stats": "0.6.3",
-    "@sayknow-cli/tui": "0.6.3",
-    "@sayknow-cli/utils": "0.6.3",
+    "@sayknow-cli/agent-core": "0.6.4",
+    "@sayknow-cli/ai": "0.6.4",
+    "@sayknow-cli/bridge-client": "0.6.4",
+    "@sayknow-cli/coding-agent": "0.6.4",
+    "@sayknow-cli/natives": "0.6.4",
+    "@sayknow-cli/stats": "0.6.4",
+    "@sayknow-cli/tui": "0.6.4",
+    "@sayknow-cli/utils": "0.6.4",
     "@tailwindcss/node": "^4.2.4",
     "@tailwindcss/vite": "^4.2.4",
     "@types/babel__generator": "^7.27.0",
@@ -1120,7 +1120,7 @@
 
     "mupdf": ["mupdf@1.28.1", "", {}, "sha512-Gi11Ow2G1SlrXKJNZBL1eAIGFVih5+4ZKqjptamTVaj/5hnlrcVrVbyb7lHE2lfFKdxZPyv9ZtfOOq7XgjzEig=="],
 
-    "music-metadata": ["music-metadata@11.15.0", "", { "dependencies": { "@borewit/text-codec": "^0.2.2", "@tokenizer/token": "^0.3.0", "content-type": "^2.1.0", "debug": "^4.4.3", "file-type": "^21.3.4", "media-typer": "^2.0.0", "strtok3": "^10.3.5", "token-types": "^6.1.2", "uint8array-extras": "^1.5.0", "win-guid": "^0.2.1" } }, "sha512-TN+kO1/oOc8UzDW5N3vSDncBcv9WyNnQQe/NFMcFWq6G1+zVeYUkGvkYpQ/S8wb8vKtUD7i78dIaY0cv+cmPRA=="],
+    "music-metadata": ["music-metadata@11.16.0", "", { "dependencies": { "@borewit/text-codec": "^0.2.2", "@tokenizer/token": "^0.3.0", "content-type": "^2.1.0", "debug": "^4.4.3", "file-type": "^21.3.4", "media-typer": "^2.0.0", "strtok3": "^10.3.5", "token-types": "^6.1.2", "uint8array-extras": "^1.5.0", "win-guid": "^0.2.1" } }, "sha512-D5zZHjQUbfR+JhHjnwdbgeB4qj7zVJtisCB1I0GAI5sjSPGqPLoY14WMIzMeR8iA+4nSFswVLpO4crksZUybBg=="],
 
     "mute-stream": ["mute-stream@3.0.0", "", {}, "sha512-dkEJPVvun4FryqBmZ5KhDo0K9iDXAwn08tMLDinNdRBNPcYEDiWYysLcc6k3mjTMlbP9KyylvRpd4wFtwrT9rw=="],
 
