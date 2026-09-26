@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Opus 5.5 is now bundled for every provider that already serves Opus 5, not just `anthropic`. The 0.6.0 catalog row was hand-written against the direct Anthropic endpoint, so the bundled catalog knew Opus 5.5 on exactly one provider. It matters most where the runtime has no discovery to fall back on: on Amazon Bedrock, `--list-models claude-opus-5-5` returned nothing at all with a live network, and now returns all six regional ids. Providers that do discover their own catalog (OpenRouter, Kilo, Venice, Vercel AI Gateway) surfaced the model once an online refresh succeeded, but not before it — with the cache cold and the network down, OpenRouter reported "No models matching" and now lists `anthropic/claude-opus-5.5` and its `:batch` variant. 16 rows were taken verbatim from a full `scripts/generate-models.ts` run against the live models.dev catalog (6 Bedrock regions, OpenRouter standard + `:batch`, Vercel standard + `-fast`, and one row each for GitHub Copilot, Cloudflare AI Gateway, Kilo, Venice, OpenCode Zen and ZenMux). Nothing else in the catalog was touched and no existing row was overwritten, so the 191 additions and 276 edits an unfiltered regeneration would also have carried are not in this change. Two tests pin the parity, so the next hand-written model addition cannot ship Anthropic-only again.
+
 ### Changed
 
 - Bumped the advertised Claude Code client version from 2.1.282 to 2.1.283, keeping the drift checker green as upstream ships roughly daily. This one is housekeeping, not a fix: 2.1.282 was already above the 2.1.280 gate and every shipped Anthropic preset answered HTTP 200 on it. Verified live on 2.1.283 too — `claude-opus-5-5`, `claude-opus-5`, `claude-sonnet-5` and `claude-fable-5` all return 200 through the OAuth path.
