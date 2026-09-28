@@ -45,10 +45,15 @@ export class BrokerTransport {
 	readonly #requestedPort: number;
 	#server: Bun.Server<undefined> | null = null;
 	#port = 0;
+	#openConnections = 0;
 	constructor(broker: Broker, token: string, port = 0) {
 		this.#broker = broker;
 		this.#token = token;
 		this.#requestedPort = port;
+	}
+	/** Client WebSockets currently open. The broker does not idle out while any is. */
+	get openConnections(): number {
+		return this.#openConnections;
 	}
 	get port(): number {
 		if (!this.#server) throw new Error("Broker transport is not running");
@@ -71,7 +76,15 @@ export class BrokerTransport {
 			},
 			websocket: {
 				maxPayloadLength: MAX_BROKER_JSON_FRAME_BYTES * 2,
-				open: socket => send(socket, { type: "broker_hello", protocolVersion: PROTOCOL_VERSION }),
+				open: socket => {
+					this.#openConnections += 1;
+					this.#broker.noteActivity();
+					send(socket, { type: "broker_hello", protocolVersion: PROTOCOL_VERSION });
+				},
+				close: () => {
+					this.#openConnections = Math.max(0, this.#openConnections - 1);
+					this.#broker.noteActivity();
+				},
 				message: (socket, message) => void this.#handleMessage(socket, message),
 			},
 		});
@@ -82,6 +95,7 @@ export class BrokerTransport {
 		const server = this.#server;
 		this.#server = null;
 		if (server) await server.stop(true);
+		this.#openConnections = 0;
 	}
 	async #handleMessage(socket: ServerWebSocket<unknown>, raw: string | Buffer): Promise<void> {
 		if (Buffer.byteLength(raw) > MAX_BROKER_JSON_FRAME_BYTES) {

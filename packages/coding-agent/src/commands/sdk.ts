@@ -18,6 +18,7 @@ import {
 	writeSessionLifecycleFailure,
 	writeSessionLifecycleReady,
 } from "../sdk/broker/lifecycle";
+import { exitIfSourceGone, startSessionHostGuard } from "../sdk/broker/process-guard";
 import { processIncarnation } from "../sdk/broker/process-incarnation";
 import { type CreateLifecycleAgentSessionResult, createLifecycleAgentSession } from "../sdk/lifecycle-session";
 import { listManagedSessionCandidates, resolveManagedSessionScope } from "../sdk/session-directory";
@@ -505,6 +506,7 @@ export async function runSessionHost(
 	}
 	process.once("SIGTERM", stop);
 	process.once("SIGINT", stop);
+	startSessionHostGuard({ markerPath, pid: process.pid, effectMarker, incarnation, cwd, onLost: stop });
 	await new Promise<void>(() => {});
 }
 
@@ -559,6 +561,7 @@ export default class Sdk extends Command {
 				const policy = (await Settings.loadForScope({ cwd, agentDir })).get("session.directoryMigration");
 				return policy === "disabled" ? "disabled" : "copy-retain";
 			},
+			beforePublicationTick: () => exitIfSourceGone(),
 		});
 		await broker.start();
 		if (!broker.ownsDiscovery) return;

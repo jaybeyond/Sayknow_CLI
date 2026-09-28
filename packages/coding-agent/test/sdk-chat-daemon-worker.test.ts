@@ -935,6 +935,107 @@ describe("chat daemon worker", () => {
 		expect(broker.requests).toHaveLength(1);
 		await runtime.stop();
 	}, 20000);
+	it("starts the broker for a global command when none is running (it stops itself when idle)", async () => {
+		root = await fs.mkdtemp(path.join(process.env.TMPDIR ?? "/tmp", "skc-slack-ensure-broker-"));
+		const agentDir = path.join(root, "agent");
+		const stateRoot = path.join(root, ".skc", "state");
+		const endpointPath = path.join(stateRoot, "sdk", "session.json");
+		await fs.mkdir(path.dirname(endpointPath), { recursive: true });
+		await fs.writeFile(
+			endpointPath,
+			JSON.stringify({ sessionId: "session", url: "ws://127.0.0.1:1", token: "endpoint-token" }),
+		);
+		const index = await new SessionIndex(agentDir).open();
+		await index.append({
+			type: "host_registered",
+			sessionId: "session",
+			locator: { repo: root, stateRoot },
+			endpointGeneration: 1,
+			pid: process.pid,
+			endpointMtimeMs: (await fs.stat(endpointPath)).mtimeMs,
+		});
+		// No broker.json: the broker is not running.
+		const provider = new FakeSlackProvider();
+		const client = new FakeSdkClient();
+		const broker = new FakeSdkClient();
+		client.replayEvents = [
+			{ type: "event", name: "session_ready", sessionId: "session", generation: 1 },
+			{ type: "turn_stream", phase: "finalized", sessionId: "session", text: "ready" },
+		];
+		const ensured: string[] = [];
+		const brokerEndpoints: Array<{ url: string; token: string }> = [];
+		const runtime = new ChatDaemonRuntime(
+			{
+				kind: "slack",
+				agentDir,
+				config: {
+					identity: "fingerprint-only",
+					notifications: {
+						slack: {
+							botToken: "bot-token",
+							appToken: "app-token",
+							workspaceId: "team",
+							channelId: "channel",
+							authorizedUserId: "human",
+						},
+					},
+				},
+			},
+			{
+				createSlackProvider: () => provider,
+				createClient: async () => client,
+				createBrokerClient: async endpoint => {
+					brokerEndpoints.push(endpoint);
+					return broker;
+				},
+				ensureBroker: async ({ agentDir: ensuredDir }) => {
+					ensured.push(ensuredDir);
+					await writeBrokerDiscovery(ensuredDir, {
+						version: 1,
+						protocolVersion: 3,
+						packageGeneration: "test",
+						ownerId: "fresh-owner",
+						pid: process.pid,
+						host: "127.0.0.1",
+						port: 2,
+						url: "ws://127.0.0.1:2",
+						token: "fresh-broker-token",
+						startedAt: Date.now(),
+						heartbeatAt: Date.now(),
+					});
+				},
+				createIndex: () => index,
+				setInterval: (() => 0) as unknown as typeof setInterval,
+				clearInterval: (() => {}) as typeof clearInterval,
+			},
+		);
+		await runtime.start();
+		await provider.waitForPostCount(1, post => post.text === "SKC turn stream\nready");
+		const globalReceived = broker.waitForRequest(
+			request => request.type === "broker_request" && request.operation === "session.list",
+		);
+		provider.handler?.({
+			envelope_id: "global-envelope",
+			payload: {
+				type: "events_api",
+				event_id: "global-event",
+				team_id: "team",
+				event: {
+					type: "message",
+					channel: "channel",
+					ts: "2.global-event",
+					thread_ts: "1.1",
+					user: "human",
+					text: "/sdk global session.list {}",
+					client_msg_id: "global-id",
+				},
+			},
+		});
+		await globalReceived;
+		expect(ensured).toEqual([agentDir]);
+		expect(brokerEndpoints).toEqual([{ url: "ws://127.0.0.1:2", token: "fresh-broker-token" }]);
+		await runtime.stop();
+	}, 20000);
 	it("retains a sent control prompt as ambiguous when its SDK response is lost", async () => {
 		root = await fs.mkdtemp(path.join(process.env.TMPDIR ?? "/tmp", "skc-chat-command-response-loss-"));
 		const agentDir = path.join(root, "agent");

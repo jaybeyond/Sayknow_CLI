@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { ensureBroker } from "../broker/ensure";
 import { type IndexedSession, SessionIndex } from "../broker/session-index";
 import { SdkClient, SdkClientError } from "../client/client";
 import { readSdkBrokerDiscovery, readSdkSessionEndpoint, type SdkSessionEndpoint } from "../client/discovery";
@@ -61,6 +62,8 @@ export interface ChatDaemonRuntimeDeps {
 	createClient?: (endpoint: SdkSessionEndpoint) => Promise<ChatDaemonSdkClient>;
 	createIndex?: (agentDir: string) => SessionIndex;
 	createBrokerClient?: (endpoint: { url: string; token: string }) => Promise<ChatDaemonSdkClient>;
+	/** Starts the agent broker when none is running (default: `ensureBroker`). */
+	ensureBroker?: (settings: { agentDir: string }) => Promise<unknown>;
 	onReconciled?: () => void;
 	setInterval?: typeof setInterval;
 	clearInterval?: typeof clearInterval;
@@ -480,7 +483,16 @@ export class ChatDaemonRuntime {
 		input: Record<string, unknown>,
 		idempotencyKey: string,
 	): Promise<Record<string, unknown>> {
-		const discovery = await readSdkBrokerDiscovery(this.input.agentDir);
+		let discovery = await readSdkBrokerDiscovery(this.input.agentDir);
+		if (!discovery) {
+			// A broker with nothing to serve stops on its own; start a fresh one for this command.
+			try {
+				await (this.deps.ensureBroker ?? ensureBroker)({ agentDir: this.input.agentDir });
+			} catch {
+				throw new ChatDeliveryError("pre_send");
+			}
+			discovery = await readSdkBrokerDiscovery(this.input.agentDir);
+		}
 		if (!discovery) throw new ChatDeliveryError("pre_send");
 		let client: ChatDaemonSdkClient;
 		try {

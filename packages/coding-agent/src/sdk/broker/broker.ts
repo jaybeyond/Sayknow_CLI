@@ -40,6 +40,18 @@ export interface BrokerSettings {
 	packageGeneration?: string;
 	port?: number;
 	heartbeatTtlMs?: number;
+	/**
+	 * Stop after this long with no connection, no request in flight and no live
+	 * session. Clients call `ensureBroker` before use, so the next one starts a fresh
+	 * broker. 0 disables. Default {@link BROKER_IDLE_SHUTDOWN_MS}.
+	 */
+	idleShutdownMs?: number;
+	/**
+	 * Runs at the start of every publication tick, before the tick calls into the
+	 * native addon. The broker process uses it to stop at once when its source
+	 * checkout has vanished (see `process-guard.ts`); return true to skip the tick.
+	 */
+	beforePublicationTick?: () => boolean;
 	/** Broker-owned migration policy. Client lifecycle frames cannot select it. */
 	resolveDirectoryMigration?: (_cwd: string) => Promise<DirectoryMigrationPolicy>;
 }
@@ -49,6 +61,8 @@ type ResolvedBrokerSettings = {
 	packageGeneration: string;
 	port: number;
 	heartbeatTtlMs: number;
+	idleShutdownMs: number;
+	beforePublicationTick: () => boolean;
 	resolveDirectoryMigration: (_cwd: string) => Promise<DirectoryMigrationPolicy>;
 };
 
@@ -371,6 +385,12 @@ type BrokerLockSnapshot = {
 const BROKER_PUBLICATION_CADENCE_MS = 5_000;
 const BROKER_PUBLICATION_GRACE_MS = 15_000;
 const BROKER_SETTLEMENT_MS = 2_000;
+/**
+ * A broker with nothing to serve stops after this long. Without it a broker lived
+ * until killed: one started by a test (or a crashed client) whose caller never came
+ * back stayed up for days holding a port, memory and a mapped native addon.
+ */
+export const BROKER_IDLE_SHUTDOWN_MS = 30 * 60_000;
 type BrokerPublicationState =
 	| "healthy-owned"
 	| "suspect-unpublished"
@@ -400,12 +420,17 @@ export class Broker {
 	#completion!: Promise<void>;
 	#resolveCompletion!: () => void;
 	#rejectCompletion!: (error: unknown) => void;
+	/** Last time a client connected, disconnected, or sent a request. Drives idle shutdown. */
+	#lastActivityAt = Date.now();
+	#idleCheckInFlight = false;
 	constructor(settings: BrokerSettings) {
 		this.settings = {
 			agentDir: settings.agentDir,
 			packageGeneration: settings.packageGeneration ?? "unknown",
 			port: settings.port ?? 0,
 			heartbeatTtlMs: settings.heartbeatTtlMs ?? BROKER_HEARTBEAT_TTL_MS,
+			idleShutdownMs: Math.max(0, settings.idleShutdownMs ?? BROKER_IDLE_SHUTDOWN_MS),
+			beforePublicationTick: settings.beforePublicationTick ?? (() => false),
 			resolveDirectoryMigration: settings.resolveDirectoryMigration ?? (async () => "copy-retain"),
 		};
 		this.index = new SessionIndex(settings.agentDir);
@@ -598,7 +623,8 @@ export class Broker {
 				10,
 				Math.min(BROKER_PUBLICATION_CADENCE_MS, Math.floor(this.settings.heartbeatTtlMs / 3)),
 			);
-			this.#heartbeatTimer = setInterval(() => void this.#watchPublication(), cadenceMs);
+			this.#lastActivityAt = Date.now();
+			this.#heartbeatTimer = setInterval(() => void this.#publicationTick(), cadenceMs);
 			return this.discovery;
 		} catch (error) {
 			await this.#transport?.stop();
@@ -624,6 +650,52 @@ export class Broker {
 		this.#publicationState = kind;
 		if (kind === "suspect-unpublished") this.#lossAt ??= process.hrtime.bigint();
 		else this.#lossAt = null;
+	}
+	async #publicationTick(): Promise<void> {
+		// Before anything that reaches the native addon: the process guard may end the process here.
+		if (this.settings.beforePublicationTick()) return;
+		await this.#watchPublication();
+		if (this.#publicationState === "healthy-owned") await this.#stopIfIdle();
+	}
+	/** Record client activity; an active broker never idles out. */
+	noteActivity(): void {
+		this.#lastActivityAt = Date.now();
+	}
+	/**
+	 * Stop once nothing has used the broker for `idleShutdownMs`: no open client
+	 * connection, no request or lifecycle chain in flight, and no live session host
+	 * in the index. A stop from here is the ordinary owned-root stop, so discovery
+	 * and the lock are released and the next `ensureBroker` starts a new broker.
+	 */
+	async #stopIfIdle(): Promise<void> {
+		const idleMs = this.settings.idleShutdownMs;
+		if (idleMs <= 0 || this.#stopping || this.#idleCheckInFlight) return;
+		if (!this.#idleCandidate(idleMs)) return;
+		this.#idleCheckInFlight = true;
+		try {
+			await this.index.refresh();
+			if (this.index.listSessions().sessions.some(session => session.live)) {
+				// Live hosts keep the broker; look again after another idle window.
+				this.#lastActivityAt = Date.now();
+				return;
+			}
+			// Re-check: a client may have connected while the index was read.
+			if (this.#stopping || !this.#idleCandidate(idleMs)) return;
+			void this.#complete("owned-root");
+		} catch {
+			// An unreadable index is not evidence of idleness; try again next window.
+			this.#lastActivityAt = Date.now();
+		} finally {
+			this.#idleCheckInFlight = false;
+		}
+	}
+	#idleCandidate(idleMs: number): boolean {
+		return (
+			Date.now() - this.#lastActivityAt >= idleMs &&
+			(this.#transport?.openConnections ?? 0) === 0 &&
+			this.#admitted.size === 0 &&
+			this.#chains.size === 0
+		);
 	}
 	async #watchPublication(writeHeartbeat = true): Promise<void> {
 		if (!this.#publication || this.#publicationState === "stopping") return;
@@ -747,12 +819,14 @@ export class Broker {
 	handleRequest(operation: string, input: Record<string, unknown>, idempotencyKey?: string): Promise<BrokerResponse> {
 		if (this.#stopping || (this.#publication !== null && this.#publicationState !== "healthy-owned"))
 			return Promise.resolve(error("unavailable", "broker publication is unavailable"));
+		this.#lastActivityAt = Date.now();
 		let release!: () => void;
 		const admission = new Promise<void>(resolve => (release = resolve));
 		this.#admitted.add(admission);
 		return this.#handleRequest(operation, input, idempotencyKey).finally(() => {
 			release();
 			this.#admitted.delete(admission);
+			this.#lastActivityAt = Date.now();
 		});
 	}
 	async #handleRequest(

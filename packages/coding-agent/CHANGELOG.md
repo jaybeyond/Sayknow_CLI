@@ -10,6 +10,7 @@
 
 ### Fixed
 
+- SDK background processes no longer live forever. A broker now stops after 30 minutes with no client connection, no request in flight and no live session host (the next client starts a fresh one; chat daemons now start one when the discovery file is missing). A session host stops once its ownership marker or worktree has been gone for three checks in a row. A broker or host run from TypeScript source kills itself as soon as its entry script disappears, so ejecting the drive that holds a checkout no longer leaves a process spinning at 100% CPU in Bun's fault handler on the unmapped native addon. Found after brokers and hosts left behind by SDK tests stayed up for two days and one pinned a core when the external drive disconnected.
 - A missing-credential error no longer opens with "For MiniMax/GLM presets…" whatever provider was called. It names the provider that lacks credentials and its `/login <provider>` (or env var) first, then lists other ways to add a provider. Preset lists in these messages, `/provider`, and `skc setup provider` come from the bundled preset catalog instead of a hand-kept `minimax|minimax-cn|glm`, so `alibaba-token-plan` is no longer missing from them.
 
 ## [0.6.6] - 2026-09-28

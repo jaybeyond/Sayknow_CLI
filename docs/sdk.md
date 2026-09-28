@@ -152,6 +152,14 @@ This boundary prevents a child from newly loading caller-cwd or user-global Bun 
 
 Broker and per-session discovery tokens remain in their authoritative private discovery files because clients need them. Launch errors, logs, and diagnostics redact those tokens and never include the child environment or isolation configuration contents.
 
+### Background process lifetime
+
+The broker and session hosts are detached from whoever started them, so each one ends itself when it has nothing to do or no way to keep running:
+
+- **Idle broker.** A broker stops after 30 minutes with no open client connection, no request or lifecycle operation in flight, and no live session host in its index. It releases its discovery file and lock as in a normal stop. Clients call `ensureBroker` before use (the chat daemons start one when the discovery file is missing), so the next request starts a fresh broker.
+- **Orphaned session host.** A session host checks every 5 seconds that its ownership marker (`<stateRoot>/sdk/<sessionId>.lifecycle.json`) still names it and that its worktree exists. After three failed checks in a row (the session was deleted, taken over by another spawn, or its whole state root was removed) it shuts down through its normal stop path. Unreadable state for any other reason does not count as a failure.
+- **Vanished source.** A broker or host started from TypeScript source kills itself as soon as its entry script can no longer be read, for example when the external drive holding the checkout is ejected. The native addon is mapped from that checkout, and a call into a page that can no longer be read left the process spinning at 100% CPU inside Bun's fault handler. The broker checks at the start of every heartbeat tick, before the tick's native calls; a session host checks on its 5-second guard, so a host that calls native code in between can still be caught first. No cleanup runs in that case; readers already treat discovery files and markers whose pid is gone as stale. Compiled binaries run from Bun's virtual filesystem and are not affected.
+
 ## Protocol
 
 JSON text frames. Field names are `camelCase`; the `type` discriminator is

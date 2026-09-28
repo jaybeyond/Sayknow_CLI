@@ -7,6 +7,7 @@ import { NotificationServer } from "@sayknow-cli/natives";
 import { openLifecycleSessionManager, runSessionHost } from "../src/commands/sdk";
 import { AcpAgent } from "../src/modes/acp/acp-agent";
 import { Broker, type BrokerCleanupEvidence, type BrokerResponse } from "../src/sdk/broker/broker";
+import { isPidAlive, readBrokerDiscovery } from "../src/sdk/broker/discovery";
 import { brokerOwnerForTest, startFixtureBrokerWithLeaseForTest } from "../src/sdk/broker/ensure";
 import { deriveIdempotencyIdentity } from "../src/sdk/broker/identity";
 import {
@@ -35,6 +36,30 @@ import { planLaunchWorktree } from "../src/skc-runtime/launch-worktree";
 const cliEntrypoint = path.resolve(import.meta.dir, "../src/cli.ts");
 const spawned: Array<ReturnType<typeof Bun.spawn>> = [];
 const brokerDirs: string[] = [];
+/** Roots whose session host started a broker out of process; that broker outlives the host. */
+const hostBrokerRoots: Array<{ root: string; agentDir: string }> = [];
+
+/**
+ * Stop the out-of-process broker a session host started, then remove its root.
+ * The host may be killed while its `ensureBroker` is still starting that broker,
+ * so the broker can publish (recreating the root) after the test removed it:
+ * wait briefly for it to appear rather than assume it never started.
+ */
+async function stopHostStartedBroker({ root, agentDir }: { root: string; agentDir: string }): Promise<void> {
+	const appearDeadline = Date.now() + 3_000;
+	let discovery = await readBrokerDiscovery(agentDir);
+	while (!discovery && Date.now() < appearDeadline) {
+		await Bun.sleep(50);
+		discovery = await readBrokerDiscovery(agentDir);
+	}
+	if (discovery && isPidAlive(discovery.pid)) {
+		process.kill(discovery.pid, "SIGTERM");
+		const exitDeadline = Date.now() + 5_000;
+		while (isPidAlive(discovery.pid) && Date.now() < exitDeadline) await Bun.sleep(25);
+		if (isPidAlive(discovery.pid)) process.kill(discovery.pid, "SIGKILL");
+	}
+	await fs.rm(root, { recursive: true, force: true });
+}
 
 afterEach(async () => {
 	for (const process of spawned.splice(0)) {
@@ -42,6 +67,7 @@ afterEach(async () => {
 		await process.exited;
 	}
 	for (const agentDir of brokerDirs.splice(0)) await brokerOwnerForTest(agentDir)?.stop();
+	for (const owned of hostBrokerRoots.splice(0)) await stopHostStartedBroker(owned);
 });
 
 async function waitFor<T>(read: () => Promise<T | undefined>, label: string): Promise<T> {
@@ -262,6 +288,8 @@ test("legacy metadata cleanup rejects mixed lifecycle and arbitrary receipt keys
 });
 
 async function liveLifecycleSession(root: string, agentDir: string, sessionId: string, staleMarkerFirst = false) {
+	// The host registers with a broker it starts itself; that broker must be stopped too.
+	hostBrokerRoots.push({ root, agentDir });
 	const stateRoot = path.join(root, ".skc", "state");
 	const request = {
 		operation: "session.create",
@@ -3056,6 +3084,43 @@ test("shipped sdk session-host-internal stays alive only after a semantic ready 
 	} finally {
 		await brokerFixture.lease.close();
 		expect(brokerOwnerForTest(agentDir)).toBeUndefined();
+		await fs.rm(root, { recursive: true, force: true });
+	}
+}, 20_000);
+
+test("a running session host stops by itself once its session state is removed", async () => {
+	const root = await fs.mkdtemp(path.join(process.env.TMPDIR ?? "/tmp", "skc-sdk-host-guard-"));
+	const agentDir = path.join(root, "agent");
+	const sessionId = "host-guard";
+	const stateRoot = path.join(root, ".skc", "state");
+	brokerDirs.push(agentDir);
+	const brokerFixture = await startFixtureBrokerWithLeaseForTest({ agentDir });
+	const priorGuardMs = process.env.SKC_SDK_TEST_HOST_GUARD_MS;
+	process.env.SKC_SDK_TEST_HOST_GUARD_MS = "100";
+	try {
+		const { child } = await liveLifecycleSession(root, agentDir, sessionId);
+		// The guard starts once the host has published readiness.
+		await waitFor(
+			async () =>
+				(await fs
+					.stat(path.join(stateRoot, "sdk", `${sessionId}.lifecycle.ready.json`))
+					.then(() => true)
+					.catch(() => undefined)) ?? undefined,
+			"lifecycle readiness",
+		);
+		await Bun.sleep(400);
+		expect(child.exitCode).toBeNull();
+
+		// What a finished test (or a deleted session) leaves behind: no state root.
+		await fs.rm(stateRoot, { recursive: true, force: true });
+		const exited = await Promise.race([child.exited.then(() => true), Bun.sleep(5_000).then(() => false)]);
+		expect(exited).toBe(true);
+		expect(child.exitCode).toBe(0);
+		spawned.splice(spawned.indexOf(child), 1);
+	} finally {
+		if (priorGuardMs === undefined) delete process.env.SKC_SDK_TEST_HOST_GUARD_MS;
+		else process.env.SKC_SDK_TEST_HOST_GUARD_MS = priorGuardMs;
+		await brokerFixture.lease.close();
 		await fs.rm(root, { recursive: true, force: true });
 	}
 }, 20_000);
