@@ -119,7 +119,7 @@ export function createTypeSafeDecisionBackend(deps: TypeSafeBackendDeps): Decisi
 		name: "typesafe",
 		async decide(request: DecisionRequest): Promise<DecisionResult | null> {
 			validateQuestions(request.questions);
-			const apiKey = await deps.registry.getApiKeyForProvider(TYPESAFE_PROVIDER, deps.sessionId);
+			let apiKey = await deps.registry.getApiKeyForProvider(TYPESAFE_PROVIDER, deps.sessionId);
 			// No key means the user never added TypeSafe. That is not an error — the next
 			// backend (their logged-in model) handles it.
 			if (!apiKey) return null;
@@ -132,13 +132,26 @@ export function createTypeSafeDecisionBackend(deps: TypeSafeBackendDeps): Decisi
 			request.signal?.addEventListener("abort", abortOnCaller, { once: true });
 			const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
 			const started = Date.now();
-			try {
-				const response = await doFetch(`${baseUrl}/v1/systemone`, {
+			const send = (key: string) =>
+				doFetch(`${baseUrl}/v1/systemone`, {
 					method: "POST",
-					headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+					headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
 					body: JSON.stringify({ state: request.state, model, questions: toWireQuestions(request.questions) }),
 					signal: controller.signal,
 				});
+			try {
+				let response = await send(apiKey);
+				if (response.status === 401 || response.status === 403) {
+					// A session reads the credential store once, at startup. A key replaced from
+					// another session (or `skc setup typesafe`) stays invisible here, so every
+					// request kept sending the revoked key. Reload once; retry only if it changed.
+					const refreshed = await reloadedKey(deps, apiKey);
+					if (refreshed && !controller.signal.aborted) {
+						await response.body?.cancel().catch(() => {});
+						apiKey = refreshed;
+						response = await send(apiKey);
+					}
+				}
 				if (!response.ok) {
 					logger.debug("decisions/typesafe: request failed", {
 						status: response.status,
@@ -168,4 +181,25 @@ export function createTypeSafeDecisionBackend(deps: TypeSafeBackendDeps): Decisi
 			}
 		},
 	};
+}
+
+/**
+ * Re-read stored credentials and return the TypeSafe key if it differs from the one
+ * that was just rejected. Undefined when nothing changed (the key really is bad) or the
+ * store cannot be reloaded, so a genuinely revoked key costs one extra read, not a retry.
+ */
+async function reloadedKey(deps: TypeSafeBackendDeps, rejected: string): Promise<string | undefined> {
+	const storage = (deps.registry as { authStorage?: { reload?: () => Promise<void> } }).authStorage;
+	if (typeof storage?.reload !== "function") return undefined;
+	try {
+		await storage.reload();
+		const current = await deps.registry.getApiKeyForProvider(TYPESAFE_PROVIDER, deps.sessionId);
+		if (current && current !== rejected) {
+			logger.debug("decisions/typesafe: picked up a key replaced since this session started");
+			return current;
+		}
+	} catch (error) {
+		logger.debug("decisions/typesafe: credential reload failed", { error: String(error) });
+	}
+	return undefined;
 }

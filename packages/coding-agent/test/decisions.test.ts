@@ -1,7 +1,12 @@
 import { expect, test } from "bun:test";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
+import { ModelRegistry } from "../src/config/model-registry";
 import { createDecisionService } from "../src/decisions";
 import type { DecisionBackend, DecisionRequest, DecisionResult } from "../src/decisions/types";
 import { MAX_OPTIONS, validateQuestions } from "../src/decisions/types";
+import { AuthStorage } from "../src/session/auth-storage";
 
 function backend(name: string, impl: DecisionBackend["decide"]): DecisionBackend {
 	return { name, decide: impl };
@@ -216,6 +221,65 @@ test("an option outside the declared set is dropped, not coerced", async () => {
 	});
 	const only = { dept: tsQuestions.dept as Question };
 	expect(await backend.decide({ state: "x", questions: only })).toBeNull();
+});
+
+test("a key replaced by another process after startup is picked up on 401", async () => {
+	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "skc-typesafe-reload-"));
+	const dbPath = path.join(dir, "agent.db");
+	// This session opened the store before the key was replaced elsewhere.
+	const sessionStorage = await AuthStorage.create(dbPath);
+	const otherProcess = await AuthStorage.create(dbPath);
+	try {
+		await sessionStorage.set("typesafe", { type: "api_key", key: "old-key" });
+		await otherProcess.reload();
+		const registry = new ModelRegistry(sessionStorage);
+		expect(await registry.getApiKeyForProvider("typesafe", "s1")).toBe("old-key");
+		await otherProcess.set("typesafe", { type: "api_key", key: "new-key" });
+
+		const sent: string[] = [];
+		const backend = createTypeSafeDecisionBackend({
+			registry,
+			sessionId: "s1",
+			fetchImpl: (async (_input: string, init: RequestInit) => {
+				const key = new Headers(init.headers).get("Authorization")?.replace("Bearer ", "") ?? "";
+				sent.push(key);
+				return key === "new-key"
+					? new Response(JSON.stringify({ answers: { urgent: { type: "noul", noul: 0.9 } } }))
+					: new Response("{}", { status: 401 });
+			}) as never,
+		});
+		const result = await backend.decide({ state: "x", questions: { urgent: tsQuestions.urgent as Question } });
+		expect(sent).toEqual(["old-key", "new-key"]);
+		expect(result?.answers.urgent).toMatchObject({ type: "noul", noul: 0.9 });
+	} finally {
+		sessionStorage.close();
+		otherProcess.close();
+		await fs.rm(dir, { recursive: true, force: true });
+	}
+});
+
+test("a rejected key that did not change is not retried", async () => {
+	let calls = 0;
+	let reloads = 0;
+	const backend = createTypeSafeDecisionBackend({
+		registry: {
+			authStorage: {
+				async reload() {
+					reloads += 1;
+				},
+			},
+			async getApiKeyForProvider() {
+				return "bad-key";
+			},
+		} as never,
+		fetchImpl: (async () => {
+			calls += 1;
+			return new Response("{}", { status: 401 });
+		}) as never,
+	});
+	expect(await backend.decide({ state: "x", questions: tsQuestions })).toBeNull();
+	expect(calls).toBe(1);
+	expect(reloads).toBe(1);
 });
 
 test("an HTTP failure resolves null so the next backend can answer", async () => {
