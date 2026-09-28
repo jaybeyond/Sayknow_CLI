@@ -433,3 +433,42 @@ export function buildSayknowPixelFrames(options: {
 
 	return { frames, protocol: options.protocol, widthPx, heightPx, columns, rows, rasterRows };
 }
+
+/**
+ * Draw a pet frame as text with half blocks, one terminal row per two pixel rows,
+ * so the same octopus shows up where no pixel protocol is available (the launch
+ * card). Fully transparent pixel rows at the top and bottom are cropped; columns
+ * are kept so every frame of the animation keeps the same width.
+ */
+export function renderPetHalfBlocks(
+	frame: SayknowPixelFrameName,
+	skin: PetSkinId = "red",
+	colorMode: "truecolor" | "256color" = "truecolor",
+): string[] {
+	const grid = PIXEL_GRIDS[frame];
+	const palette = PET_SKINS[skin].palette;
+	const opaque = (row: string): boolean => [...row].some(ch => palette[ch] != null);
+	let top = 0;
+	while (top < grid.length && !opaque(grid[top]!)) top++;
+	let bottom = grid.length - 1;
+	while (bottom > top && !opaque(grid[bottom]!)) bottom--;
+	const format = colorMode === "truecolor" ? "ansi-16m" : "ansi-256";
+	const fg = (rgb: Rgb): string => Bun.color(`rgb(${rgb[0]},${rgb[1]},${rgb[2]})`, format) ?? "";
+	const bg = (rgb: Rgb): string => fg(rgb).replace("\x1b[38;", "\x1b[48;");
+	const lines: string[] = [];
+	for (let row = top; row <= bottom; row += 2) {
+		const upper = grid[row]!;
+		const lower = row + 1 <= bottom ? grid[row + 1]! : "";
+		let line = "";
+		for (let col = 0; col < upper.length; col++) {
+			const up = palette[upper[col]!] ?? null;
+			const down = palette[lower[col] ?? "."] ?? null;
+			if (!up && !down) line += " ";
+			else if (up && down) line += `${fg(up)}${bg(down)}▀\x1b[0m`;
+			else if (up) line += `${fg(up)}▀\x1b[0m`;
+			else line += `${fg(down!)}▄\x1b[0m`;
+		}
+		lines.push(line);
+	}
+	return lines;
+}

@@ -14,7 +14,6 @@ export const ja: Partial<Record<MsgKey, string>> = {
 	"welcome.sessions": "セッション",
 	"welcome.chooseModel": "モデルを選択",
 	"welcome.modelHint": "ctrl+l で選択 · / でコマンド",
-	"welcome.whatsNew": "新着",
 
 	"settings.tab.appearance": "外観",
 	"settings.tab.model": "モデル",

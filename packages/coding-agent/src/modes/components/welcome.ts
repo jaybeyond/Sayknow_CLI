@@ -1,5 +1,13 @@
 import type { ThinkingLevel } from "@sayknow-cli/agent-core";
-import { type Component, padding, truncateToWidth, visibleWidth } from "@sayknow-cli/tui";
+import {
+	type Component,
+	type PetSkinId,
+	padding,
+	renderPetHalfBlocks,
+	type SayknowPixelFrameName,
+	truncateToWidth,
+	visibleWidth,
+} from "@sayknow-cli/tui";
 import { formatBuildLabel } from "../../build-metadata";
 import { formatKeyHint, type KeyDisplayContext } from "../../config/keybindings";
 import { type MsgKey, t } from "../../i18n";
@@ -29,7 +37,7 @@ export interface WelcomeComponentOptions {
 	getReservedBottomRows?: (termWidth: number) => number;
 	changelogMarkdown?: string;
 	rightGutterWidth?: number;
-	/** Show only "updated to vX" instead of the first release note. */
+	/** Show only the version on the release line, without its first note. */
 	collapseChangelog?: boolean;
 	buildLabel?: string;
 	keyDisplayContext?: KeyDisplayContext;
@@ -37,34 +45,33 @@ export interface WelcomeComponentOptions {
 	snapshot?: WelcomeSnapshot;
 	/** Key bound to the resume picker (`app.session.resume`); the card names it. */
 	resumeKey?: string;
+	/** Which Sayknow pet stands on the card (default red). */
+	petSkin?: PetSkinId;
 }
 
 /** Left margin of the card, and the widest the card grows on wide terminals. */
 const MARGIN = 2;
 const MAX_CARD_WIDTH = 76;
-/** Gap between the octopus mark and the identity lines. */
+/** Gap between the mark and the identity lines. */
 const MARK_GAP = 3;
 /** Below this card width the mark is dropped and only the identity lines remain. */
-const MIN_WIDTH_FOR_MARK = 40;
+const MIN_WIDTH_FOR_MARK = 44;
 /** Recent sessions on the card; the resume picker has the rest. */
 const SESSION_ROWS = 3;
 
-/**
- * The octopus, drawn in half blocks: a round mantle whose eyes are cells left
- * empty (so the terminal background shows through, fully enclosed), over a row
- * of tentacles. The tentacle row has two poses so the intro can make it wave.
- */
-const MARK_UNICODE = [" ▄█████▄ ", "██ ███ ██", "▀███████▀"] as const;
-const TENTACLES_UNICODE = ["▀▄▀▄▀▄▀▄▀", "▄▀▄▀▄▀▄▀▄"] as const;
-const MARK_ASCII = ["  .---.  ", " ( o o ) ", "  )   (  "] as const;
-const TENTACLES_ASCII = [" /\\/\\/\\/ ", " \\/\\/\\/\\ "] as const;
-const MARK_WIDTH = 9;
+/** ASCII-safe stand-in for the pet when the banner must avoid block glyphs. */
+const MARK_ASCII = ["  .---.  ", " ( o o ) ", "  )   (  ", " /\\/\\/\\/ "] as const;
+const MARK_ASCII_WAVE = " \\/\\/\\/\\ ";
 
-/** Intro: color spreads down the card while the tentacles wave, then everything rests. */
+/**
+ * Intro: the pet does a short para-para (tentacles sway left, right, left) and
+ * lands on its resting pose while color spreads down the card.
+ */
+const INTRO_POSES: readonly SayknowPixelFrameName[] = ["danceL", "danceR", "danceL", "base"];
 const SECTION_STAGGER_MS = 55;
 const SECTION_SETTLE_MS = 90;
 const WAVE_STEP_MS = 140;
-const INTRO_MS = 4 * WAVE_STEP_MS;
+const INTRO_MS = INTRO_POSES.length * WAVE_STEP_MS;
 
 /** A block of rows that takes its colors together during the intro. */
 interface Section {
@@ -201,7 +208,9 @@ export class WelcomeComponent implements Component {
 
 	#identityLines(cardWidth: number): string[] {
 		const withMark = cardWidth >= MIN_WIDTH_FOR_MARK;
-		const infoWidth = Math.max(1, withMark ? cardWidth - MARK_WIDTH - MARK_GAP : cardWidth);
+		const mark = withMark ? this.#markRows() : [];
+		const markWidth = Math.max(0, ...mark.map(row => visibleWidth(row)));
+		const infoWidth = Math.max(1, withMark ? cardWidth - markWidth - MARK_GAP : cardWidth);
 		const info = [
 			this.#truncate(this.#titleLine(!withMark), infoWidth),
 			this.#truncate(theme.fg("muted", t("welcome.tagline")), infoWidth),
@@ -209,16 +218,28 @@ export class WelcomeComponent implements Component {
 			this.#truncate(this.#whereLine(infoWidth), infoWidth),
 		];
 		if (!withMark) return info;
-		const mark = this.#markRows();
-		return info.map((line, index) => `${mark[index] ?? padding(MARK_WIDTH)}${padding(MARK_GAP)}${line}`);
+		// Center the four identity lines against the pet's height.
+		const offset = Math.max(0, Math.floor((mark.length - info.length) / 2));
+		const rows = Math.max(mark.length, info.length + offset);
+		const out: string[] = [];
+		for (let row = 0; row < rows; row++) {
+			const art = mark[row] ?? padding(markWidth);
+			const text = info[row - offset] ?? "";
+			out.push(text ? `${art}${padding(MARK_GAP)}${text}` : art);
+		}
+		return out;
 	}
 
+	/** The Sayknow pet itself, in half blocks; the pose follows the intro. */
 	#markRows(): string[] {
-		const ascii = this.logoMode === "ascii";
-		const body = ascii ? MARK_ASCII : MARK_UNICODE;
-		const tentacles = ascii ? TENTACLES_ASCII : TENTACLES_UNICODE;
-		const pose = this.#animStart == null ? 0 : Math.floor((performance.now() - this.#animStart) / WAVE_STEP_MS) % 2;
-		return [...body, tentacles[pose]!].map(row => theme.fg("accent", row));
+		const step = this.#animStart == null ? -1 : Math.floor((performance.now() - this.#animStart) / WAVE_STEP_MS);
+		if (this.logoMode === "ascii") {
+			const rows: string[] = [...MARK_ASCII];
+			if (step >= 0 && step < INTRO_POSES.length - 1 && step % 2 === 1) rows[3] = MARK_ASCII_WAVE;
+			return rows.map(row => theme.fg("accent", row));
+		}
+		const pose = step >= 0 && step < INTRO_POSES.length ? INTRO_POSES[step]! : "base";
+		return renderPetHalfBlocks(pose, this.options.petSkin ?? "red", theme.getColorMode());
 	}
 
 	/** `withIcon` adds the 🐙 glyph for layouts that have no room for the drawn mark. */
@@ -270,12 +291,12 @@ export class WelcomeComponent implements Component {
 
 	// ── Release note, sessions, keys ────────────────────────────────────────
 
-	/** One line, only after an update: the version and its first note, pointing at /changelog. */
+	/** One line, only after an update: the new version, its first note, and a pointer to /changelog. */
 	#releaseNoteLine(width: number): string | undefined {
 		const changelog = this.options.changelogMarkdown?.trim();
 		if (!changelog) return undefined;
 		const version = this.#latestChangelogVersion(changelog);
-		const lead = `${theme.bold(theme.fg("accent", t("welcome.whatsNew")))}${theme.fg("dim", ` v${version}`)}`;
+		const lead = theme.bold(theme.fg("accent", `v${version}`));
 		const pointer = theme.fg("dim", "/changelog");
 		const first = this.options.collapseChangelog ? undefined : this.#changelogItems(changelog)[0];
 		if (!first) return this.#spread(lead, pointer, width);

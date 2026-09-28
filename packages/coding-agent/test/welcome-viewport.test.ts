@@ -1,6 +1,6 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "bun:test";
 import { stripVTControlCharacters } from "node:util";
-import { visibleWidth } from "@sayknow-cli/tui";
+import { renderPetHalfBlocks, visibleWidth } from "@sayknow-cli/tui";
 import { getLanguage, setLanguage } from "../src/i18n";
 import {
 	type RecentSession,
@@ -9,6 +9,7 @@ import {
 	type WelcomeComponentOptions,
 	type WelcomeSnapshot,
 } from "../src/modes/components/welcome";
+import { resolveWelcomePetSkin } from "../src/modes/interactive-mode";
 import { getThemeByName, setThemeInstance } from "../src/modes/theme/theme";
 
 const originalBuildChannel = process.env.SKC_BUILD_CHANNEL;
@@ -74,7 +75,7 @@ describe("launch card content", () => {
 		const text = card({ changelogMarkdown: CHANGELOG, getViewportRows: () => 80 }).join("\n");
 		expect(text).toContain("session-3");
 		expect(text).not.toContain("session-4");
-		expect(text).toContain("What's new v1.2.3");
+		expect(text).toMatch(/v1\.2\.3 +\/fork is back|v1\.2\.3 +\/changelog/);
 		expect(text).toContain("/fork is back");
 		expect(text).not.toContain("Second note");
 		expect(text).toContain("/changelog");
@@ -98,9 +99,10 @@ describe("launch card content", () => {
 
 	it("collapses the release line to the version when asked", () => {
 		const text = card({ changelogMarkdown: CHANGELOG, collapseChangelog: true }).join("\n");
-		expect(text).toContain("What's new v1.2.3");
+		expect(text).toMatch(/v1\.2\.3 +\/fork is back|v1\.2\.3 +\/changelog/);
 		expect(text).not.toContain("/fork is back");
-		expect(card().join("\n")).not.toContain("What's new");
+		expect(text).toContain("/changelog");
+		expect(card().join("\n")).not.toContain("/changelog");
 	});
 
 	it("guides model selection instead of printing Unknown", () => {
@@ -127,21 +129,32 @@ describe("launch card content", () => {
 });
 
 describe("launch card layout", () => {
-	it("draws the octopus mark beside the identity lines, with no box around anything", () => {
-		const lines = card();
-		const title = lines.find(line => line.includes("Sayknow-CLI"))!;
-		expect(title).toContain("▄█████▄");
-		expect(lines.join("\n")).toContain("▀▄▀▄▀▄▀▄▀");
+	it("stands the Sayknow pet beside the identity lines, with no box around anything", () => {
+		const welcome = new WelcomeComponent("1.2.3", "m", "p", SESSIONS, "unicode", { petSkin: "blue" });
+		const raw = welcome.render(120);
+		const pet = renderPetHalfBlocks("base", "blue", "truecolor");
+		// The pet's rows open the card, each followed by the identity text.
+		for (const [index, row] of pet.entries()) expect(raw[1 + index]!.startsWith(`  ${row}`)).toBe(true);
+		const lines = plain(raw);
+		expect(lines.find(line => line.includes("Sayknow-CLI"))).toMatch(/^ {2}[▀▄ ]{16} {3}Sayknow-CLI/);
 		for (const glyph of ["╭", "╮", "╰", "╯", "│", "─"]) expect(lines.join("\n")).not.toContain(glyph);
+	});
+
+	it("paints the pet in its skin's colors", () => {
+		const red = new WelcomeComponent("1.2.3", "m", "p", [], "unicode", { petSkin: "red" }).render(120).join("");
+		const blue = new WelcomeComponent("1.2.3", "m", "p", [], "unicode", { petSkin: "blue" }).render(120).join("");
+		expect(red).toContain("229;72;46");
+		expect(blue).toContain("47;155;255");
+		expect(blue).not.toContain("229;72;46");
 	});
 
 	it("uses an ASCII mark in ASCII mode and drops the mark when the card is narrow", () => {
 		const ascii = plain(new WelcomeComponent("1.2.3", "m", "p", [], "ascii").render(100)).join("\n");
 		expect(ascii).toContain("( o o )");
-		expect(ascii).not.toContain("█");
+		expect(ascii).not.toMatch(/[█▀▄]/);
 
 		const narrow = card({}, SESSIONS, 36).join("\n");
-		expect(narrow).not.toContain("█");
+		expect(narrow).not.toMatch(/[▀▄]/);
 		expect(narrow).toContain("Sayknow-CLI");
 	});
 
@@ -163,18 +176,18 @@ describe("launch card layout", () => {
 			card({ changelogMarkdown: CHANGELOG, getViewportRows: () => count, resumeKey: "alt+r" }).join("\n");
 		const full = rows(40);
 		expect(full).toContain("commands");
-		expect(full).toContain("What's new");
+		expect(full).toContain("/changelog");
 
-		const noKeys = rows(13);
+		const noKeys = rows(16);
 		expect(noKeys).not.toContain("commands");
-		expect(noKeys).toContain("What's new");
+		expect(noKeys).toContain("/changelog");
 		expect(noKeys).toContain("session-1");
 
-		const sessionsOnly = rows(11);
-		expect(sessionsOnly).not.toContain("What's new");
+		const sessionsOnly = rows(14);
+		expect(sessionsOnly).not.toContain("/changelog");
 		expect(sessionsOnly).toContain("session-1");
 
-		const identityOnly = rows(5);
+		const identityOnly = rows(8);
 		expect(identityOnly).toContain("Sayknow-CLI");
 		expect(identityOnly).not.toContain("session-1");
 	});
@@ -206,7 +219,7 @@ describe("launch card layout", () => {
 });
 
 describe("launch intro", () => {
-	it("shows every fact on the first frame and moves only color and the tentacles", () => {
+	it("shows every fact on the first frame and moves only color and the pet's tentacles", () => {
 		const skipped = new WelcomeComponent("1.2.3", "m", "p", SESSIONS, "unicode", { skipLogoAnimation: true });
 		const settled = skipped.render(120);
 		skipped.playIntro(() => {});
@@ -216,9 +229,22 @@ describe("launch intro", () => {
 		animated.playIntro(() => {});
 		const firstFrame = animated.render(120);
 		expect(firstFrame).not.toEqual(settled);
-		expect(plain(firstFrame)).toEqual(plain(settled));
+		// Beside the dancing pet (margin 2 + 16 columns + gap 3), every character is already in place.
+		const text = (lines: string[]) => plain(lines).map(line => line.slice(21));
+		expect(text(firstFrame)).toEqual(text(settled));
+		expect(plain(firstFrame).join("\n")).not.toEqual(plain(settled).join("\n"));
 
 		animated.dispose();
 		expect(animated.render(120)).toEqual(settled);
+	});
+});
+
+describe("launch pet skin", () => {
+	it("uses the pet the user keeps, else the skin that matches the theme", () => {
+		expect(resolveWelcomePetSkin("blue", "ink-octopus")).toBe("blue");
+		expect(resolveWelcomePetSkin("red", "blue-octopus")).toBe("red");
+		expect(resolveWelcomePetSkin("off", "blue-octopus")).toBe("blue");
+		expect(resolveWelcomePetSkin("off", "ink-octopus")).toBe("red");
+		expect(resolveWelcomePetSkin("off", undefined)).toBe("red");
 	});
 });

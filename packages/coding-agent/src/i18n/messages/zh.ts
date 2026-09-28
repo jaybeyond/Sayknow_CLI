@@ -14,7 +14,6 @@ export const zh: Partial<Record<MsgKey, string>> = {
 	"welcome.sessions": "会话",
 	"welcome.chooseModel": "选择模型",
 	"welcome.modelHint": "ctrl+l 选择 · / 命令",
-	"welcome.whatsNew": "新变化",
 
 	"settings.tab.appearance": "外观",
 	"settings.tab.model": "模型",

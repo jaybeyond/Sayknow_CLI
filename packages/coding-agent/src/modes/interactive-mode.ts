@@ -69,7 +69,7 @@ import {
 	isPetCapabilityProbePending,
 	warnWhenPetCapabilitySettled,
 } from "./components/pet-capability";
-import { type PetMode, SayknowPetWidget } from "./components/sayknow-pet-widget";
+import { type PetMode, type PetSkinId, SayknowPetWidget } from "./components/sayknow-pet-widget";
 import { resolveCurrentBranch } from "./components/status-line/git-utils";
 import type { ToolExecutionHandle } from "./components/tool-execution";
 import { StatusLineComponent } from "./components/tool-status-header";
@@ -97,7 +97,14 @@ import { shouldShowExtensionCommand } from "./slash-command-visibility";
 import { TasksAggregator } from "./tasks-aggregator";
 import { type ShimmerPalette, shimmerSegments, shimmerText } from "./theme/shimmer";
 import type { Theme } from "./theme/theme";
-import { getEditorTheme, getSymbolTheme, onTerminalAppearanceChange, onThemeChange, theme } from "./theme/theme";
+import {
+	getCurrentThemeName,
+	getEditorTheme,
+	getSymbolTheme,
+	onTerminalAppearanceChange,
+	onThemeChange,
+	theme,
+} from "./theme/theme";
 import { type RegisterTranscriptItem, TranscriptItemRegistry, transcriptItemId } from "./transcript-item-registry";
 import {
 	type CompactionQueuedMessage,
@@ -199,6 +206,15 @@ function getShellInputPrefix(isNoContext: boolean): string {
 		? theme.fg("warning", theme.bold("shell no-context"))
 		: theme.fg("bashMode", theme.bold("shell"));
 	return `${shellLabel} `;
+}
+
+/**
+ * The pet on the launch card: the one the user keeps beside the composer, or —
+ * with the pet off — the skin that matches the theme (blue for blue-octopus).
+ */
+export function resolveWelcomePetSkin(petMode: PetMode, themeName: string | undefined): PetSkinId {
+	if (petMode !== "off") return petMode;
+	return themeName?.startsWith("blue") ? "blue" : "red";
 }
 
 /**
@@ -744,6 +760,7 @@ export class InteractiveMode implements InteractiveModeContext {
 					skipLogoAnimation,
 					snapshot: this.#buildWelcomeSnapshot(),
 					resumeKey: this.keybindings.getKeys("app.session.resume")[0],
+					petSkin: resolveWelcomePetSkin(settings.get("pet.mode"), getCurrentThemeName()),
 				},
 			);
 

@@ -195,7 +195,7 @@ describe("redesigned interactive shell chrome", () => {
 
 		expect(ascii).toContain("( o o )");
 		expect(ascii).not.toMatch(/[█▀▄]/);
-		expect(unicode).toContain("▄█████▄");
+		expect(unicode).toMatch(/[▀▄]{16}/);
 	});
 
 	it("resolves welcome banner auto and manual override modes", () => {

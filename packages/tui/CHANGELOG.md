@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- `renderPetHalfBlocks(frame, skin, colorMode)` draws a Sayknow pet frame as half-block text (two pixel rows per terminal row, truecolor or 256 colors), for surfaces with no sixel/kitty image support.
+
 ## [0.6.5] - 2026-09-26
 
 ## [0.5.12] - 2026-09-15

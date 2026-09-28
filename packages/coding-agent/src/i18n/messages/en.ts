@@ -22,7 +22,6 @@ export const en = {
 	"welcome.sessions": "sessions",
 	"welcome.chooseModel": "choose a model",
 	"welcome.modelHint": "ctrl+l to pick · / for commands",
-	"welcome.whatsNew": "What's new",
 
 	// ── Settings tabs ──
 	"settings.tab.appearance": "Appearance",

@@ -14,7 +14,6 @@ export const ko: Partial<Record<MsgKey, string>> = {
 	"welcome.sessions": "세션",
 	"welcome.chooseModel": "모델 선택",
 	"welcome.modelHint": "ctrl+l 선택 · / 명령",
-	"welcome.whatsNew": "새 소식",
 
 	"settings.tab.appearance": "외관",
 	"settings.tab.model": "모델",

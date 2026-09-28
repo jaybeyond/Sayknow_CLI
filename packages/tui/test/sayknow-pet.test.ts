@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { __sayknowPetTestHooks, buildSayknowPixelFrames, encodeGridSixel } from "@sayknow-cli/tui";
+import { __sayknowPetTestHooks, buildSayknowPixelFrames, encodeGridSixel, renderPetHalfBlocks } from "@sayknow-cli/tui";
 
 describe("sayknow pixel frames", () => {
 	it("encodes bottom-aligned sixel frames with a transparent background", () => {
@@ -70,5 +70,32 @@ describe("sayknow pixel frames", () => {
 	it("keeps a minimum 1x scale for tiny cells", () => {
 		const sixel = encodeGridSixel(["RK", ".G"], 1);
 		expect(sixel.startsWith('\x1bP0;1;0q"1;1;2;2')).toBe(true);
+	});
+});
+
+describe("renderPetHalfBlocks", () => {
+	it("draws two pixel rows per terminal row, cropped to the opaque rows, at a fixed width", () => {
+		const grid = __sayknowPetTestHooks.getPixelGrid("base");
+		const opaqueRows = grid.filter(row => /[^.]/.test(row)).length;
+		for (const frame of ["base", "danceL", "danceR"] as const) {
+			const lines = renderPetHalfBlocks(frame, "red");
+			expect(lines).toHaveLength(Math.ceil(opaqueRows / 2));
+			for (const line of lines) expect(Bun.stringWidth(Bun.stripANSI(line))).toBe(16);
+		}
+	});
+
+	it("maps pixels to half blocks: upper ▀ over lower color, transparent to a space", () => {
+		const [first] = renderPetHalfBlocks("base", "red");
+		// Row 1 is ".....KKKKKK....." over row 2 "...KKRRRRRRKK...": the first column is empty,
+		// column 3 has only a lower pixel (▄ in outline), column 5 has both (▀ outline over body).
+		expect(Bun.stripANSI(first!).startsWith("   ▄▄▀")).toBe(true);
+		expect(first).toContain("\x1b[38;2;74;20;8m\x1b[48;2;229;72;46m▀");
+	});
+
+	it("uses the skin palette and falls back to 256 colors", () => {
+		expect(renderPetHalfBlocks("base", "blue").join("")).toContain("47;155;255");
+		const limited = renderPetHalfBlocks("base", "red", "256color").join("");
+		expect(limited).toContain("\x1b[38;5;");
+		expect(limited).not.toContain("\x1b[38;2;");
 	});
 });

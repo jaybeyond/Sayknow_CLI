@@ -17,7 +17,6 @@ export const de: Partial<Record<MsgKey, string>> = {
 	"welcome.sessions": "Sitzungen",
 	"welcome.chooseModel": "Modell auswählen",
 	"welcome.modelHint": "ctrl+l zum Auswählen · / für Befehle",
-	"welcome.whatsNew": "Neu",
 	"settings.tab.appearance": "Darstellung",
 	"settings.tab.model": "Modell",
 	"settings.tab.interaction": "Interaktion",
