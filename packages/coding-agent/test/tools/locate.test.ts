@@ -78,6 +78,67 @@ export class Store {
 		expect(outline.find(entry => entry.text.startsWith("export function refresh"))?.line).toBe(5);
 	});
 
+	it("never sends the inside of block comments, docstrings or multi-line strings", () => {
+		const rust = outlineOf(
+			"/*!\nsecret crate doc line\n*/\n\nmod flags;\n\npub fn main() {\n\trun();\n}\n",
+			"main.rs",
+		);
+		expect(rust.map(entry => entry.text).join("\n")).not.toContain("secret");
+		expect(rust.map(entry => entry.text)).toContain("pub fn main() {");
+
+		const python = outlineOf(
+			[
+				"class Session:",
+				'    """',
+				"    secret class docstring",
+				'    """',
+				"",
+				'    TEMPLATE = """',
+				"    secret literal body",
+				'    """',
+				"",
+				"    def send(self, request):",
+				'        """secret one-line docstring"""',
+				"        return request",
+				"",
+			].join("\n"),
+			"session.py",
+		);
+		const pyText = python.map(entry => entry.text).join("\n");
+		expect(pyText).not.toContain("secret");
+		expect(pyText).toContain("class Session:");
+		expect(pyText).toContain("def send(self, request):");
+
+		const ts = outlineOf(
+			"export const HELP = `\nsecret template line\n`;\n\nexport function run() {\n\treturn 1;\n}\n",
+		);
+		const tsText = ts.map(entry => entry.text).join("\n");
+		expect(tsText).not.toContain("secret");
+		expect(tsText).toContain("export function run() {");
+
+		const rustString = outlineOf(
+			'const HELP: &str = "\nsecret help line\n";\n\nfn quote(c: char) -> bool {\n\tc == \'"\'\n}\n\npub fn later() {}\n',
+			"help.rs",
+		);
+		const rustText = rustString.map(entry => entry.text).join("\n");
+		expect(rustText).not.toContain("secret");
+		expect(rustText).toContain("pub fn later() {}");
+
+		const rawString = outlineOf(
+			'const SCRIPT: &str = r#"\nexport SECRET_A="$x" \\\nsecret raw line\n"#;\n\npub fn after() {}\n',
+			"raw.rs",
+		);
+		expect(rawString.map(entry => entry.text).join("\n")).not.toMatch(/secret|SECRET/);
+		expect(rawString.map(entry => entry.text)).toContain("pub fn after() {}");
+
+		const inline = outlineOf("@dataclass  # secret inline comment\nclass Point:\n    x: int\n", "point.py");
+		expect(inline.map(entry => entry.text).join("\n")).not.toContain("secret");
+		expect(inline.map(entry => entry.text)).toContain("@dataclass");
+
+		const values = outlineOf('export const CODES = [\n\t"SECRET_CODE_ONE",\n\t"SECRET_CODE_TWO",\n] as const;\n');
+		expect(values.map(entry => entry.text).join("\n")).not.toContain("SECRET");
+	});
+
 	it("keeps classes and methods before fields when a file has too many declarations", () => {
 		const fields = Array.from({ length: 80 }, (_, i) => `\tfield${i}: string;`).join("\n");
 		const outline = outlineOf(

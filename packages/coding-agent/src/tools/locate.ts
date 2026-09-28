@@ -122,7 +122,7 @@ export class LocateTool implements AgentTool<typeof locateSchema, LocateToolDeta
 			});
 			const result = await locateCode(
 				{ query: params.query, root, limit: params.limit ?? 12 },
-				{ listFiles, outline, decide: request => backend.decide(request), signal },
+				{ listFiles, outline, readText, decide: request => backend.decide(request), signal },
 			);
 			if (result.requests > 0 && result.failedRequests === result.requests) {
 				throw new ToolError(
@@ -153,6 +153,13 @@ async function listFiles(root: string, signal?: AbortSignal): Promise<string[]> 
 			const base = path.posix.basename(file);
 			return !SKIPPED_NAMES.has(base) && !SKIPPED_EXTENSIONS.has(path.posix.extname(base).toLowerCase());
 		});
+}
+
+/** Local-only text for the keyword score; never sent anywhere. */
+async function readText(absolutePath: string): Promise<string | undefined> {
+	const stat = fs.statSync(absolutePath, { throwIfNoEntry: false });
+	if (!stat?.isFile() || stat.size > MAX_OUTLINE_BYTES) return undefined;
+	return Bun.file(absolutePath).text();
 }
 
 async function outline(absolutePath: string): Promise<OutlineLine[]> {

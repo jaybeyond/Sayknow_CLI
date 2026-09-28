@@ -26,6 +26,11 @@ export interface LocateDeps {
 	outline(absolutePath: string, signal?: AbortSignal): Promise<OutlineLine[]>;
 	/** One Jev request. Null means the request failed or no key is configured. */
 	decide(request: DecisionRequest): Promise<DecisionResult | null>;
+	/**
+	 * Full text of a file for the local keyword score. Read and scored on this machine only;
+	 * nothing from it is sent. Undefined when a file cannot or should not be read.
+	 */
+	readText?(absolutePath: string): Promise<string | undefined>;
 	signal?: AbortSignal;
 }
 
@@ -70,8 +75,12 @@ const FOLDER_RELATIVE = 0.55;
 /** Always follow this many best folders per depth (if they clear {@link FOLDER_MIN}), so a flat score spread never dead-ends. */
 const FOLDERS_ALWAYS_KEPT = 2;
 const FOLDER_MIN = 0.2;
-/** Extra folders per depth entered on shared query words despite a low Jev score. */
+/** Extra folders per depth entered on the local keyword score despite a low Jev score. */
 const LEXICAL_FOLDERS_KEPT = 2;
+/** Files with the strongest local keyword score, always judged even if their folder was not entered. */
+const LEXICAL_FILES_KEPT = 12;
+/** Weight of the local keyword score (0..1) added to Jev's score for ranking. */
+const LEXICAL_WEIGHT = 0.3;
 /** Priority of files sitting directly in the search root. */
 const ROOT_FILE_PRIORITY = 0.5;
 export const FILE_BAR = 0.5;
@@ -139,6 +148,49 @@ export function termHits(text: string, terms: readonly string[]): number {
 	return hits;
 }
 
+/**
+ * Local keyword score per file, 0..1: IDF-weighted query terms present in the file's own
+ * text (identifiers split into words), normalised to the best file. Uses comments and
+ * strings too, since none of it leaves the machine.
+ */
+async function lexicalScores(
+	root: string,
+	files: readonly string[],
+	terms: readonly string[],
+	readText: (absolutePath: string) => Promise<string | undefined>,
+): Promise<Map<string, number>> {
+	const scores = new Map<string, number>();
+	if (terms.length === 0) return scores;
+	const present = new Map<string, Set<string>>();
+	await inParallel([...files], 32, async file => {
+		const text = await readText(path.join(root, file)).catch(() => undefined);
+		if (!text) return;
+		const words = `${file} ${text}`
+			.replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+			.toLowerCase()
+			.split(/[^a-z0-9]+/);
+		const found = new Set<string>();
+		for (const word of words) {
+			if (word.length < 4) continue;
+			const stem = word.slice(0, 5);
+			if (terms.includes(stem)) found.add(stem);
+		}
+		if (found.size > 0) present.set(file, found);
+	});
+	const total = Math.max(1, files.length);
+	const idf = new Map(
+		terms.map(term => [term, Math.log(total / (1 + [...present.values()].filter(set => set.has(term)).length))]),
+	);
+	let best = 0;
+	for (const [file, found] of present) {
+		const score = [...found].reduce((sum, term) => sum + Math.max(0, idf.get(term)!), 0);
+		scores.set(file, score);
+		best = Math.max(best, score);
+	}
+	if (best > 0) for (const [file, score] of scores) scores.set(file, score / best);
+	return scores;
+}
+
 function parentOf(relative: string): string {
 	const dir = path.posix.dirname(relative);
 	return dir === "." ? "" : dir;
@@ -172,7 +224,20 @@ async function inParallel<T, R>(items: T[], limit: number, run: (item: T) => Pro
 export async function locateCode(params: LocateParams, deps: LocateDeps): Promise<LocateResult> {
 	const started = Date.now();
 	const terms = queryTerms(params.query);
-	const folders = buildTree(await deps.listFiles(params.root, deps.signal));
+	const allFiles = await deps.listFiles(params.root, deps.signal);
+	const folders = buildTree(allFiles);
+	const lexical = deps.readText
+		? await lexicalScores(params.root, allFiles, terms, deps.readText)
+		: new Map<string, number>();
+	const lex = (file: string) => lexical.get(file) ?? 0;
+	/** Best local keyword score of any file under a folder. */
+	const folderLexical = new Map<string, number>();
+	for (const [file, score] of lexical) {
+		for (let dir = parentOf(file); ; dir = parentOf(dir)) {
+			folderLexical.set(dir, Math.max(folderLexical.get(dir) ?? 0, score));
+			if (dir === "") break;
+		}
+	}
 	let requests = 0;
 	let failedRequests = 0;
 	let foldersJudged = 0;
@@ -216,7 +281,7 @@ export async function locateCode(params: LocateParams, deps: LocateDeps): Promis
 	const folderScore = new Map<string, number>([["", ROOT_FILE_PRIORITY]]);
 	const addCandidate = (file: string, folderPriority: number) => {
 		// A path that names the question's words goes ahead of its folder-mates under the cap.
-		const priority = folderPriority + 0.1 * Math.min(2, termHits(file, terms));
+		const priority = folderPriority + 0.1 * Math.min(2, termHits(file, terms)) + 0.5 * lex(file);
 		if ((candidates.get(file) ?? -1) < priority) candidates.set(file, priority);
 	};
 	let frontier = [""];
@@ -272,22 +337,29 @@ export async function locateCode(params: LocateParams, deps: LocateDeps): Promis
 		// Jev judges folders from names alone and sometimes undersells the obvious one
 		// ("notifications/" at 0.2 for a notification question). The folders whose own name
 		// or file names share the most query words are entered too.
-		const lexical = levelScores
+		const lexicalFolders = levelScores
 			.filter(entry => !keep.has(entry.path))
 			.map(entry => {
 				const folder = folders.get(entry.path)!;
-				return { entry, hits: termHits(`${entry.path} ${folder.files.join(" ")}`, terms) };
+				const names = termHits(`${entry.path} ${folder.files.join(" ")}`, terms);
+				return { entry, hits: lexical.size > 0 ? (folderLexical.get(entry.path) ?? 0) : names };
 			})
 			.filter(candidate => candidate.hits > 0)
 			.sort((a, b) => b.hits - a.hits || b.entry.score - a.entry.score)
 			.slice(0, LEXICAL_FOLDERS_KEPT);
-		for (const { entry } of lexical) keep.add(entry.path);
+		for (const { entry } of lexicalFolders) keep.add(entry.path);
 		frontier = levelScores
 			.filter(entry => keep.has(entry.path))
 			.map(entry => {
 				folderScore.set(entry.path, Math.max(entry.score, FOLDER_FLOOR));
 				return entry.path;
 			});
+	}
+
+	// The strongest local keyword matches are judged wherever they live: Jev prunes folders
+	// from names alone, and a pruned folder would otherwise hide an exact match.
+	for (const [file, score] of [...lexical].sort((a, b) => b[1] - a[1]).slice(0, LEXICAL_FILES_KEPT)) {
+		if (score > 0) candidates.set(file, Math.max(candidates.get(file) ?? 0, 1 + score));
 	}
 
 	// --- File judgement: path + declaration lines, no bodies -------------------------
@@ -327,7 +399,11 @@ export async function locateCode(params: LocateParams, deps: LocateDeps): Promis
 		if (!scores) continue;
 		filesJudged += batch.length;
 		batch.forEach((file, index) => {
-			scored.push({ path: file, score: scores.get(`p${index}`) ?? 0, outline: outlines.get(file) ?? [] });
+			// Jev's judgement from declarations, nudged by the local keyword score (which can
+			// see comments and strings). Clamped so the display stays a 0..1 score.
+			const jev = scores.get(`p${index}`) ?? 0;
+			const score = Math.min(1, jev + LEXICAL_WEIGHT * lex(file));
+			scored.push({ path: file, score, outline: outlines.get(file) ?? [] });
 		});
 	}
 	scored.sort((a, b) => b.score - a.score || a.path.localeCompare(b.path));
@@ -432,7 +508,7 @@ function fitOutline(outline: readonly OutlineLine[], terms: readonly string[]): 
  * intersection members (`| "spawn_failed"`), which otherwise crowd real signatures out.
  */
 const NOT_DECLARATION =
-	/^\s*$|^\s*(\/\/|\/\*|\*|#(?!\[)|"""|'''|--)|^\s*[)\]};,]+\s*$|^\s*(import\b|from\s+\S+\s+import\b|use\s)|^\s*[|&]\s/;
+	/^\s*$|^\s*(\/\/|\/\*|\*|#(?!\[)|"""|'''|--)|^\s*[)\]};,]+\s*$|^\s*(import\b|from\s+\S+\s+import\b|use\s)|^\s*[|&]\s|^\s*['"`]|^\s*(return|assert|yield|raise|pass|del|await)\b/;
 const MAX_OUTLINE_LINES = 60;
 const MAX_OUTLINE_LINE_CHARS = 140;
 /** A kept line that opens a type-like container whose body lists members, not statements. */
@@ -445,6 +521,15 @@ const NOT_MEMBER = /^(return|if|else|for|while|switch|case|throw|await|yield|sup
  * LIMIT`, `secret = "x"` → `secret`) unless the value is a function, whose parameters are
  * the signature. Values are data, not names.
  */
+/** A trailing ` # …` or ` // …` comment, when no string could be holding the marker. */
+function withoutTrailingComment(text: string): string {
+	const match = /\s+(#|\/\/)\s.*$/.exec(text);
+	if (!match) return text;
+	const before = text.slice(0, match.index);
+	const balanced = [`"`, `'`, "`"].every(quote => (before.split(quote).length - 1) % 2 === 0);
+	return balanced ? before : text;
+}
+
 function declarationOnly(text: string): string {
 	const assign = /^([^=(]*?[^=!<>])\s*=\s*(?!=|>)(.*)$/.exec(text);
 	if (!assign) return text;
@@ -468,18 +553,21 @@ export function outlineFromSegments(
 ): OutlineLine[] {
 	const all: Array<OutlineLine & { rank: number }> = [];
 	const push = (line: number, raw: string, rank: number) => {
-		const trimmed = declarationOnly(raw.trim());
+		const trimmed = declarationOnly(withoutTrailingComment(raw.trim()));
 		all.push({
 			line,
 			rank,
 			text: trimmed.length > MAX_OUTLINE_LINE_CHARS ? `${trimmed.slice(0, MAX_OUTLINE_LINE_CHARS)}…` : trimmed,
 		});
 	};
+	// Lines inside block comments, docstrings and multi-line string literals. The per-line
+	// filter only sees a comment's opening line; everything after it would leak.
+	const masked = maskedLines(sourceLines.length > 0 ? sourceLines : linesFromSegments(segments));
 	let lastHead = "";
 	for (const segment of segments) {
 		if (segment.kind === "elided") {
 			if (CONTAINER_HEAD.test(lastHead) && segment.endLine !== undefined) {
-				pushMembers(segment.startLine, segment.endLine, sourceLines, push);
+				pushMembers(segment.startLine, segment.endLine, sourceLines, masked, push);
 			}
 			continue;
 		}
@@ -487,7 +575,7 @@ export function outlineFromSegments(
 		const lines = segment.text.split("\n");
 		for (let i = 0; i < lines.length; i++) {
 			const text = lines[i]!;
-			if (NOT_DECLARATION.test(text)) continue;
+			if (masked.has(segment.startLine + i) || NOT_DECLARATION.test(text)) continue;
 			lastHead = text;
 			const topLevel = !/^\s/.test(text);
 			// 0: top-level declaration, 1: nested callable (method), 2: nested field.
@@ -504,16 +592,83 @@ export function outlineFromSegments(
 	return kept.map(({ line, text }) => ({ line, text }));
 }
 
+function linesFromSegments(
+	segments: ReadonlyArray<{ kind: string; startLine: number; text?: string | null }>,
+): string[] {
+	const lines: string[] = [];
+	for (const segment of segments) {
+		if (segment.kind === "elided" || !segment.text) continue;
+		segment.text.split("\n").forEach((text, i) => {
+			lines[segment.startLine - 1 + i] = text;
+		});
+	}
+	return Array.from(lines, text => text ?? "");
+}
+
+const TRIPLE_QUOTES = ['"""', "'''"] as const;
+
+/**
+ * 1-based numbers of lines that belong to a multi-line comment or string: `/* … *\/`
+ * blocks (including `/**` and Rust's `/*!`), Python triple-quoted docstrings and strings,
+ * and multi-line template literals. A declaration line that opens a string value
+ * (`x = """`) is not masked itself — its initialiser is cut later — but the lines after
+ * it are.
+ */
+export function maskedLines(lines: readonly string[]): Set<number> {
+	const masked = new Set<number>();
+	let closer: string | undefined;
+	lines.forEach((text, index) => {
+		const line = index + 1;
+		const trimmed = text.trim();
+		if (closer) {
+			masked.add(line);
+			if (text.includes(closer)) closer = undefined;
+			return;
+		}
+		if (trimmed.startsWith("/*")) {
+			masked.add(line);
+			if (!trimmed.slice(2).includes("*/")) closer = "*/";
+			return;
+		}
+		for (const quote of TRIPLE_QUOTES) {
+			const count = text.split(quote).length - 1;
+			if (count === 0) continue;
+			if (/^[rbuRBUfF]{0,2}("""|''')/.test(trimmed)) masked.add(line);
+			if (count % 2 === 1) closer = quote;
+			return;
+		}
+		if ((text.split("`").length - 1) % 2 === 1) {
+			closer = "`";
+			return;
+		}
+		// Rust raw string `r#"…"#`: it ends only at `"` followed by the same number of `#`.
+		const raw = /\br(#+)"/.exec(text);
+		if (raw) {
+			const end = `"${raw[1]}`;
+			if (!text.slice(raw.index + raw[0].length).includes(end)) {
+				closer = end;
+				return;
+			}
+		}
+		// An odd number of double quotes opens a string that continues on the next lines
+		// (Rust and Go allow it; `r#"…"#` raw strings too). Char literals and escapes first.
+		const quotes = text.replace(/\\./g, "").replace(/'"'/g, "").split('"').length - 1;
+		if (quotes % 2 === 1) closer = '"';
+	});
+	return masked;
+}
+
 function pushMembers(
 	startLine: number,
 	endLine: number,
 	sourceLines: readonly string[],
+	masked: ReadonlySet<number>,
 	push: (line: number, raw: string, rank: number) => void,
 ): void {
 	let memberIndent: string | undefined;
 	for (let line = startLine; line <= endLine && line <= sourceLines.length; line++) {
 		const text = sourceLines[line - 1]!;
-		if (NOT_DECLARATION.test(text)) continue;
+		if (masked.has(line) || NOT_DECLARATION.test(text)) continue;
 		const indent = /^\s*/.exec(text)![0];
 		memberIndent ??= indent;
 		if (indent !== memberIndent) continue;
