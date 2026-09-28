@@ -19,6 +19,7 @@ export const en = {
 	"welcome.sessionTrail": "Recent sessions",
 	"welcome.noSessions": "No saved sessions",
 	"welcome.allSessions": "{key} all sessions",
+	"welcome.continue": "{key} continue",
 	"welcome.sessions": "sessions",
 	"welcome.chooseModel": "choose a model",
 	"welcome.modelHint": "ctrl+l to pick · / for commands",

@@ -97,6 +97,17 @@ describe("launch card content", () => {
 		expect(empty).not.toContain("all sessions");
 	});
 
+	it("marks the session the continue key resumes and names both keys", () => {
+		const lines = card({ resumeKey: "alt+r", continueKey: "ctrl+q", keyDisplayContext: { platform: "linux" } });
+		const text = lines.join("\n");
+		expect(text).toMatch(/Recent sessions\s+Ctrl\+Q continue · Alt\+R all sessions/);
+		expect(lines.find(line => line.includes("session-1"))).toMatch(/^ {2}› session-1/);
+		expect(lines.find(line => line.includes("session-2"))).toMatch(/^ {4}session-2/);
+
+		// Without a continue key nothing is marked.
+		expect(card().find(line => line.includes("session-1"))).not.toContain("›");
+	});
+
 	it("collapses the release line to the version when asked", () => {
 		const text = card({ changelogMarkdown: CHANGELOG, collapseChangelog: true }).join("\n");
 		expect(text).toMatch(/v1\.2\.3 +\/fork is back|v1\.2\.3 +\/changelog/);

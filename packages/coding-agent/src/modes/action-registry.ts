@@ -53,6 +53,7 @@ export const APP_ACTION_METADATA: readonly ActionMetadata[] = [
 	action("app.session.tree", "Session tree", "Session", ["composer"]),
 	action("app.session.fork", "Branch from message", "Session", ["composer"]),
 	action("app.session.resume", "Resume session", "Session", ["composer"]),
+	action("app.session.continue", "Continue last session", "Session", ["composer"]),
 	action("app.session.observe", "Observe sessions", "Session", ["composer"]),
 	action("app.session.dashboard", "Show sessions dashboard", "Session", ["composer"]),
 	action("app.jobs.open", "Open jobs", "Jobs", ["composer"]),

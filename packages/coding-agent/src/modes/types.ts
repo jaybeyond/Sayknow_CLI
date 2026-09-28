@@ -327,6 +327,8 @@ export interface InteractiveModeContext {
 	showUserMessageSelector(): void;
 	showTreeSelector(): void;
 	showSessionSelector(): void;
+	/** Resume the most recent saved session other than this one (the launch card's first row). */
+	continueRecentSession(): Promise<void>;
 	showSessionsDashboard(): void;
 	handleResumeSession(sessionPath: string, options?: { requireIdle?: boolean }): Promise<boolean>;
 	handleSessionDeleteCommand(): Promise<void>;

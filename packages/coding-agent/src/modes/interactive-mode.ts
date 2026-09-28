@@ -1,3 +1,5 @@
+import * as fs from "node:fs";
+import * as path from "node:path";
 import { type Agent, type AgentMessage, ThinkingLevel } from "@sayknow-cli/agent-core";
 import type { CompactionOutcome } from "@sayknow-cli/agent-core/compaction";
 import type { AssistantMessage, ImageContent, Message, UsageReport } from "@sayknow-cli/ai";
@@ -760,6 +762,7 @@ export class InteractiveMode implements InteractiveModeContext {
 					skipLogoAnimation,
 					snapshot: this.#buildWelcomeSnapshot(),
 					resumeKey: this.keybindings.getKeys("app.session.resume")[0],
+					continueKey: this.keybindings.getKeys("app.session.continue")[0],
 					petSkin: resolveWelcomePetSkin(settings.get("pet.mode"), getCurrentThemeName()),
 				},
 			);
@@ -2178,6 +2181,27 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	showSessionSelector(): void {
 		this.#selectorController.showSessionSelector();
+	}
+
+	async continueRecentSession(): Promise<void> {
+		// Listing returns canonical paths (/private/var on macOS); compare canonically so the
+		// live session is never "continued" into itself.
+		const canonical = (file: string): string => {
+			try {
+				return fs.realpathSync(file);
+			} catch {
+				return path.resolve(file);
+			}
+		};
+		const currentFile = this.sessionManager.getSessionFile();
+		const current = currentFile ? canonical(currentFile) : undefined;
+		const recent = await getRecentSessions(this.sessionManager.getSessionDir());
+		const target = recent.find(session => canonical(session.path) !== current);
+		if (!target) {
+			this.showStatus("No earlier session to continue");
+			return;
+		}
+		await this.handleResumeSession(target.path, { requireIdle: true });
 	}
 
 	handleResumeSession(sessionPath: string, options?: { requireIdle?: boolean }): Promise<boolean> {

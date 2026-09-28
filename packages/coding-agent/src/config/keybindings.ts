@@ -43,6 +43,7 @@ interface AppKeybindings {
 	"app.session.tree": true;
 	"app.session.fork": true;
 	"app.session.resume": true;
+	"app.session.continue": true;
 	"app.session.observe": true;
 	"app.session.dashboard": true;
 	"app.jobs.open": true;
@@ -188,6 +189,12 @@ export const KEYBINDINGS = {
 	"app.session.resume": {
 		defaultKeys: "alt+r",
 		description: "Resume session",
+	},
+	// A Control chord on purpose: macOS terminals often turn Option into composed text,
+	// and continuing the last session is the one launch action that must always work.
+	"app.session.continue": {
+		defaultKeys: "ctrl+q",
+		description: "Continue the most recent session",
 	},
 	"app.session.observe": {
 		defaultKeys: "ctrl+s",

@@ -45,6 +45,8 @@ export interface WelcomeComponentOptions {
 	snapshot?: WelcomeSnapshot;
 	/** Key bound to the resume picker (`app.session.resume`); the card names it. */
 	resumeKey?: string;
+	/** Key bound to `app.session.continue`, which resumes the first session on the card. */
+	continueKey?: string;
 	/** Which Sayknow pet stands on the card (default red). */
 	petSkin?: PetSkinId;
 }
@@ -308,14 +310,19 @@ export class WelcomeComponent implements Component {
 	#sessionLines(width: number): string[] {
 		const heading = theme.bold(theme.fg("accent", t("welcome.sessionTrail")));
 		if (this.recentSessions.length === 0) return [heading, theme.fg("dim", t("welcome.noSessions"))];
-		const lines = [
-			this.#spread(heading, theme.fg("dim", t("welcome.allSessions", { key: this.#resumeKey() })), width),
-		];
-		for (const session of this.recentSessions.slice(0, SESSION_ROWS)) {
+		const context = this.options.keyDisplayContext ?? { platform: process.platform };
+		const hints = [t("welcome.allSessions", { key: this.#resumeKey() })];
+		if (this.options.continueKey)
+			hints.unshift(t("welcome.continue", { key: formatKeyHint(this.options.continueKey, context) }));
+		const lines = [this.#spread(heading, theme.fg("dim", hints.join(" · ")), width)];
+		this.recentSessions.slice(0, SESSION_ROWS).forEach((session, index) => {
+			// The first row is the one the continue key resumes; mark it.
+			const lead = index === 0 && this.options.continueKey ? theme.fg("accent", "› ") : "  ";
 			const time = theme.fg("dim", session.timeAgo);
-			const name = theme.fg("muted", this.#truncate(session.name, Math.max(1, width - visibleWidth(time) - 2)));
-			lines.push(this.#spread(name, time, width));
-		}
+			const nameWidth = Math.max(1, width - visibleWidth(lead) - visibleWidth(time) - 2);
+			const name = theme.fg(index === 0 ? "text" : "muted", this.#truncate(session.name, nameWidth));
+			lines.push(this.#spread(`${lead}${name}`, time, width));
+		});
 		return lines;
 	}
 

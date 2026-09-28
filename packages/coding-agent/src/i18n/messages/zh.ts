@@ -11,6 +11,7 @@ export const zh: Partial<Record<MsgKey, string>> = {
 	"welcome.sessionTrail": "会话记录",
 	"welcome.noSessions": "暂无已保存会话",
 	"welcome.allSessions": "{key} 查看全部",
+	"welcome.continue": "{key} 继续",
 	"welcome.sessions": "会话",
 	"welcome.chooseModel": "选择模型",
 	"welcome.modelHint": "ctrl+l 选择 · / 命令",

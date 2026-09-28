@@ -112,6 +112,9 @@ export class InputController {
 			"app.session.tree": () => this.ctx.showTreeSelector(),
 			"app.session.fork": () => this.ctx.showUserMessageSelector(),
 			"app.session.resume": () => this.ctx.showSessionSelector(),
+			"app.session.continue": async () => {
+				await this.ctx.continueRecentSession();
+			},
 			"app.session.observe": async () => {
 				await this.ctx.showSessionObserver();
 			},
@@ -707,6 +710,16 @@ export class InputController {
 		for (const key of this.ctx.keybindings.getKeys("app.session.resume")) {
 			this.ctx.editor.setCustomKeyHandler(key, () => {
 				this.#executeAction("app.session.resume");
+				return true;
+			});
+		}
+		this.#registerCommandPaletteAction("app.session.continue", () => {
+			void this.ctx.continueRecentSession();
+			return undefined;
+		});
+		for (const key of this.ctx.keybindings.getKeys("app.session.continue")) {
+			this.ctx.editor.setCustomKeyHandler(key, () => {
+				this.#executeAction("app.session.continue");
 				return true;
 			});
 		}

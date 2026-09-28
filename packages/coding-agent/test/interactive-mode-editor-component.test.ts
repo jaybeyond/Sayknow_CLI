@@ -1,4 +1,5 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
+import * as fs from "node:fs";
 import * as path from "node:path";
 import { stripVTControlCharacters } from "node:util";
 import { Agent } from "@sayknow-cli/agent-core";
@@ -21,7 +22,12 @@ import { ExtensionUiController } from "../src/modes/controllers/extension-ui-con
 import { InteractiveMode } from "../src/modes/interactive-mode";
 import { AgentSession } from "../src/session/agent-session";
 import { AuthStorage } from "../src/session/auth-storage";
-import { associateSessionMessageEntryId, type SessionContext, SessionManager } from "../src/session/session-manager";
+import {
+	associateSessionMessageEntryId,
+	CURRENT_SESSION_VERSION,
+	type SessionContext,
+	SessionManager,
+} from "../src/session/session-manager";
 
 class TestModalEditor extends CustomEditor {}
 function stripRenderControls(line: string): string {
@@ -746,5 +752,98 @@ describe("InteractiveMode.setEditorComponent", () => {
 		} finally {
 			setTerminalImageProtocol(originalProtocol);
 		}
+	});
+
+	describe("continue the most recent session", () => {
+		const writeSession = (name: string, id: string, title: string, mtimeMs: number): string => {
+			const file = path.join(tempDir.path(), `${name}.jsonl`);
+			const records = [
+				{
+					type: "session",
+					version: CURRENT_SESSION_VERSION,
+					id,
+					title,
+					timestamp: "2026-01-01T00:00:00Z",
+					cwd: tempDir.path(),
+				},
+				{
+					type: "message",
+					id: `${id}-m`,
+					parentId: null,
+					timestamp: "2026-01-01T00:00:01Z",
+					message: { role: "user", content: title, timestamp: 1 },
+				},
+			];
+			fs.writeFileSync(file, `${records.map(record => JSON.stringify(record)).join("\n")}\n`);
+			fs.utimesSync(file, new Date(mtimeMs), new Date(mtimeMs));
+			return file;
+		};
+
+		it("resumes the newest other session, idle-only", async () => {
+			writeSession("older", "older-id", "older work", 1_000_000);
+			const newest = writeSession("newest", "newest-id", "newest work", 2_000_000);
+			const resume = vi.spyOn(mode, "handleResumeSession").mockResolvedValue(true);
+
+			await mode.continueRecentSession();
+
+			expect(resume).toHaveBeenCalledTimes(1);
+			expect(fs.realpathSync(resume.mock.calls[0]?.[0] as string)).toBe(fs.realpathSync(newest));
+			expect(resume.mock.calls[0]?.[1]).toEqual({ requireIdle: true });
+		});
+
+		it("never continues the live session into itself", async () => {
+			const resume = vi.spyOn(mode, "handleResumeSession").mockResolvedValue(true);
+			const live = session.sessionManager.getSessionFile()!;
+			fs.mkdirSync(path.dirname(live), { recursive: true });
+			const records = [
+				{
+					type: "session",
+					version: CURRENT_SESSION_VERSION,
+					id: session.sessionManager.getSessionId(),
+					timestamp: "2026-01-01T00:00:00Z",
+					cwd: tempDir.path(),
+				},
+				{
+					type: "message",
+					id: "m",
+					parentId: null,
+					timestamp: "2026-01-01T00:00:01Z",
+					message: { role: "user", content: "live", timestamp: 1 },
+				},
+			];
+			fs.writeFileSync(live, `${records.map(record => JSON.stringify(record)).join("\n")}\n`);
+			fs.utimesSync(live, new Date(3_000_000), new Date(3_000_000));
+			const older = writeSession("older", "older-id", "older work", 1_000_000);
+
+			await mode.continueRecentSession();
+
+			expect(fs.realpathSync(resume.mock.calls[0]?.[0] as string)).toBe(fs.realpathSync(older));
+		});
+
+		it("says so instead of resuming when there is no earlier session", async () => {
+			const resume = vi.spyOn(mode, "handleResumeSession").mockResolvedValue(true);
+			const status = vi.spyOn(mode, "showStatus");
+
+			await mode.continueRecentSession();
+
+			expect(resume).not.toHaveBeenCalled();
+			expect(status).toHaveBeenCalledWith("No earlier session to continue");
+		});
+
+		it("is bound to ctrl+q in the composer and named on the launch card", async () => {
+			vi.spyOn(mode.ui, "start").mockImplementation(() => {});
+			forceTerminalSize(mode, 120, 40);
+			writeSession("previous", "previous-id", "previous work", 2_000_000);
+			await mode.init();
+			const resume = vi.spyOn(mode, "handleResumeSession").mockResolvedValue(true);
+
+			expect(mode.keybindings.getKeys("app.session.continue")).toEqual(["ctrl+q"]);
+			mode.editor.handleInput("\x11");
+			for (let i = 0; i < 20 && resume.mock.calls.length === 0; i++) await Bun.sleep(5);
+			expect(resume).toHaveBeenCalledTimes(1);
+
+			const card = mode.ui.render(120).map(stripRenderControls).join("\n");
+			expect(card).toContain(t("welcome.continue", { key: formatKeyHint("ctrl+q", injectedKeyDisplayContext) }));
+		});
 	});
 });
