@@ -657,6 +657,25 @@ disabledProviders:
 
 String entries apply everywhere. Scoped entries apply when the current working directory is the configured path or one of its subdirectories. Use `path`, `paths`, `pathPrefix`, or `pathPrefixes`; use `models` for `enabledModels`, `providers` for `disabledProviders`, or `values` for either.
 
+## Fallback chains
+
+When the default model is blocked, the session walks an ordered chain of models instead of stopping. The chain for DEFAULT is built from:
+
+1. **The configured role value.** `modelRoles.default` may be one selector or an ordered array (`[anthropic/claude-opus-5-5:high, openai-codex/gpt-5.5]`); model profiles (`model_mapping`) and `task.agentModelOverrides` accept arrays the same way.
+2. **`fallback.models`**, a list you edit with `/fallback add <model>` / `remove <n>` / `clear`. It is independent of the head, so choosing another default in `/model` keeps it.
+3. **Automatic picks** (`fallback.auto`, on by default): one model from each other provider you are logged in to, up to three. Within a provider the model you used most recently wins, then the provider's curated default; a provider with neither is skipped rather than guessed. Providers already in the chain are not repeated, keyless local providers (Ollama, llama.cpp, LM Studio) are never added, and nothing is added while an `enabledModels` allow-list is in effect.
+
+`/fallback` prints the resulting chain, where each entry came from (`default`, `chain`, `added`, `auto`), and which one is in use. Settings → Model has **Automatic Model Fallback** and **Fallback Attempts per Model**.
+
+How the chain is walked:
+
+- At the start of a prompt, entries whose provider has no usable credentials are skipped immediately (no request is sent), so a missing login moves straight to the next model. With nothing left to try, the error names the provider that lacks credentials and how to log in to it.
+- During a turn, an auth, quota, rate-limit, or server failure retries the current entry up to `fallback.maxAttempts` times (default 3), then advances. Every real switch emits `model_fallback_switched` and shows `Fallback model: from → to` in the status line.
+- Before moving to another model, a provider with several logged-in accounts hands the request to its next account. Settings → Providers → **Multi-Account Order** (`auth.credentialRankingMode`) picks the order: `balanced` (least-used first) or `earliest-reset` (the account whose usage window resets soonest). `SKC_CREDENTIAL_RANKING_MODE` overrides it per machine.
+- `retry.fallbackRevertPolicy` decides when to go back to the head: `cooldown-expiry` (default) retries it on a new turn once its suppression window ends; `never` stays on the fallback until you pick a model.
+
+Appended entries (`fallback.models` and automatic picks) live only in the running session; the configured chain the session records is not rewritten. A temporary model pick, an explicit `--model` at startup, and subagent chains composed by the task router run exactly as asked, without appended entries.
+
 ## `/model` and `--list-models`
 
 Both surfaces keep provider-prefixed models visible and selectable.

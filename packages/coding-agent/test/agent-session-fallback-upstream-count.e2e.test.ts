@@ -530,7 +530,11 @@ describe("AgentSession managed fallback upstream request counts", () => {
 				return successfulStream(model, "Legacy path delivered");
 			},
 		});
-		const settings = Settings.isolated({ "compaction.enabled": false });
+		const settings = Settings.isolated({
+			// Single-model path: no fallback even though other providers have keys.
+			"fallback.auto": false,
+			"compaction.enabled": false,
+		});
 		settings.setModelRole("default", selector(primary));
 		session = new AgentSession({ agent, sessionManager: SessionManager.inMemory(), settings, modelRegistry });
 		session!.setConfiguredModelChain("default", [selector(primary)], "test");

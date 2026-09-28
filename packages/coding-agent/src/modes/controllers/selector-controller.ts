@@ -70,6 +70,7 @@ import {
 } from "../../sdk/bus/telegram-daemon";
 import { TelegramDaemonController } from "../../sdk/bus/telegram-daemon-control";
 import { runTelegramSetup, type TelegramSetupPreflight } from "../../sdk/bus/telegram-setup";
+import { applyCredentialRankingModeSetting } from "../../session/auth-storage-discovery";
 import { type SessionInfo, SessionManager } from "../../session/session-manager";
 import { getTreeForInternalRead } from "../../session/session-manager-internal";
 
@@ -1370,6 +1371,18 @@ export class SelectorController {
 					.catch(error => {
 						this.ctx.showError(error instanceof Error ? error.message : String(error));
 					});
+				break;
+			}
+			case "auth.credentialRankingMode": {
+				const effective = applyCredentialRankingModeSetting(
+					this.ctx.session.modelRegistry.authStorage,
+					this.ctx.settings,
+				);
+				if (effective !== value) {
+					this.ctx.showWarning(
+						`SKC_CREDENTIAL_RANKING_MODE=${effective} is set, so it overrides this setting on this machine.`,
+					);
+				}
 				break;
 			}
 			case "clearOnShrink":

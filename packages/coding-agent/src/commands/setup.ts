@@ -4,6 +4,7 @@
 import { Args, Command, Flags } from "@sayknow-cli/utils/cli";
 import { runSetupCommand, type SetupCommandArgs, type SetupComponent } from "../cli/setup-cli";
 import { initTheme } from "../modes/theme/theme";
+import { PROVIDER_PRESETS } from "../setup/provider-onboarding";
 
 const COMPONENTS: SetupComponent[] = [
 	"claude",
@@ -52,7 +53,9 @@ export default class Setup extends Command {
 		"skc-command": Flags.string({ description: "Command used to start `skc mcp-serve coordinator`" }),
 		target: Flags.string({ description: "Hermes config file target for config-only install" }),
 		"profile-dir": Flags.string({ description: "Hermes profile directory for full setup install" }),
-		preset: Flags.string({ description: "Provider preset: minimax, minimax-cn, or glm" }),
+		preset: Flags.string({
+			description: `Provider preset: ${PROVIDER_PRESETS.map(preset => preset.id).join(", ")}`,
+		}),
 		compat: Flags.string({ description: "Provider compatibility: openai or anthropic" }),
 		provider: Flags.string({ description: "Provider id to add to models.yml" }),
 		"base-url": Flags.string({ description: "Provider API base URL" }),

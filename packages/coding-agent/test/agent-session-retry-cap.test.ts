@@ -81,6 +81,9 @@ describe("AgentSession retry delay cap", () => {
 		});
 
 		const settings = Settings.isolated({
+			// Single-model retry policy under test: the mock stream records a `mock` model, so an
+			// automatic fallback to the keyed provider would turn this into a managed chain.
+			"fallback.auto": false,
 			"compaction.enabled": false,
 			"retry.baseDelayMs": 5,
 			"retry.maxDelayMs": 100,
@@ -148,6 +151,9 @@ describe("AgentSession retry delay cap", () => {
 		});
 
 		const settings = Settings.isolated({
+			// Single-model retry policy under test: the mock stream records a `mock` model, so an
+			// automatic fallback to the keyed provider would turn this into a managed chain.
+			"fallback.auto": false,
 			"compaction.enabled": false,
 			"retry.baseDelayMs": 5,
 			"retry.maxDelayMs": 100,
@@ -210,6 +216,9 @@ describe("AgentSession retry delay cap", () => {
 		});
 
 		const settings = Settings.isolated({
+			// Single-model retry policy under test: the mock stream records a `mock` model, so an
+			// automatic fallback to the keyed provider would turn this into a managed chain.
+			"fallback.auto": false,
 			"compaction.enabled": false,
 			"retry.baseDelayMs": 5,
 			"retry.maxDelayMs": 5_000,
@@ -326,6 +335,9 @@ describe("AgentSession retry admission: repetition guard", () => {
 		});
 
 		const settings = Settings.isolated({
+			// Single-model retry policy under test: the mock stream records a `mock` model, so an
+			// automatic fallback to the keyed provider would turn this into a managed chain.
+			"fallback.auto": false,
 			"compaction.enabled": false,
 			"retry.baseDelayMs": 5,
 			"retry.maxDelayMs": 100,

@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### Added
+
+- Automatic model fallback. When the default model is blocked — no credentials, quota, auth or server errors — the session now continues on a model from another provider you are logged in to instead of stopping. The chain is the configured default (a single model or a `modelRoles` array), then `fallback.models`, then one model per other logged-in provider (the one you used most recently there, else the provider's curated default; up to three). A missing login is skipped before any request; failures during a turn retry `fallback.maxAttempts` times, rotate to the provider's next logged-in account, then move on, and the status line shows each switch. Automatic picks are never added under an `enabledModels` allow-list, for keyless local providers, for an explicit `--model`, or for subagent chains, and they are not written into the session's configured chain. Turn it off with `fallback.auto` (Settings → Model → Automatic Model Fallback).
+- `/fallback` shows the chain the next prompt walks — where each model came from (`default`, `chain`, `added`, `auto`) and which is in use — and edits it: `/fallback add <model>`, `remove <n|model>`, `clear`, `auto on|off`. Added models are kept when you pick another default in `/model`.
+- Settings → Providers → **Multi-Account Order** (`auth.credentialRankingMode`: `balanced` or `earliest-reset`) chooses which logged-in account of a provider a new session uses; it applies immediately. The existing `SKC_CREDENTIAL_RANKING_MODE` env var still overrides it per machine. Settings → Model also shows **Fallback Attempts per Model** (`fallback.maxAttempts`).
+
+### Fixed
+
+- A missing-credential error no longer opens with "For MiniMax/GLM presets…" whatever provider was called. It names the provider that lacks credentials and its `/login <provider>` (or env var) first, then lists other ways to add a provider. Preset lists in these messages, `/provider`, and `skc setup provider` come from the bundled preset catalog instead of a hand-kept `minimax|minimax-cn|glm`, so `alibaba-token-plan` is no longer missing from them.
+
 ## [0.6.6] - 2026-09-28
 
 ### Added

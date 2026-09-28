@@ -152,7 +152,7 @@ The standard retry controls are defined in the settings schema under `retry`:
 - `retry.baseDelayMs`
 - `retry.maxDelayMs`
 
-Fallback candidates are configured as ordered selector arrays on preset `model_mapping` roles, top-level `modelRoles`, or `task.agentModelOverrides`; `fallback.maxAttempts` controls the total request-time attempts per concrete entry. Resolution-time unavailable, unauthenticated, and unknown entries advance immediately without consuming that budget.
+Fallback candidates are configured as ordered selector arrays on preset `model_mapping` roles, top-level `modelRoles`, or `task.agentModelOverrides`; `fallback.maxAttempts` controls the total request-time attempts per concrete entry. Resolution-time unavailable, unauthenticated, and unknown entries advance immediately without consuming that budget. For the session default, `fallback.models` and (with `fallback.auto`) one model per other logged-in provider are appended after the configured chain; see [Fallback chains](./models.md#fallback-chains).
 
 On settings load, a source-aware one-shot migration still reads legacy `retry.fallbackChains` and combines the effective role chain with its ordered, deduplicated legacy tail into the corresponding role array. The legacy key is ignored after migration; it is not a retry configuration surface.
 

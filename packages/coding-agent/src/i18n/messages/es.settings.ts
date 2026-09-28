@@ -216,6 +216,25 @@ export const esSettings: Record<string, string> = {
 	"set:task.serviceTier:o:claude-only:l": "Prioridad (solo Claude)",
 	"set:task.serviceTier:o:claude-only:d":
 		"Modo rápido de Anthropic en solicitudes directas de Claude; se ignora en el resto (incl. Bedrock/Vertex)",
+	"set:fallback.maxAttempts:l": "Intentos de reserva por modelo",
+	"set:fallback.maxAttempts:d":
+		"Intentos por cada modelo de la cadena de reserva (incluido el primero) antes de pasar al siguiente. Los modelos sin credenciales se omiten de inmediato.",
+	"set:fallback.maxAttempts:o:1:l": "1 intento",
+	"set:fallback.maxAttempts:o:2:l": "2 intentos",
+	"set:fallback.maxAttempts:o:3:l": "3 intentos",
+	"set:fallback.maxAttempts:o:5:l": "5 intentos",
+	"set:fallback.auto:l": "Reserva automática de modelo",
+	"set:fallback.auto:d":
+		"Si el modelo predeterminado está bloqueado (sin sesión, cuota, errores de autenticación o servidor), continúa con un modelo de otro proveedor con sesión iniciada. /fallback muestra la cadena.",
+	"set:auth.credentialRankingMode:l": "Orden de varias cuentas",
+	"set:auth.credentialRankingMode:d":
+		"Qué cuenta con sesión iniciada de un proveedor usa una sesión nueva. Una cuenta bloqueada o agotada siempre cede el paso a la siguiente.",
+	"set:auth.credentialRankingMode:o:balanced:l": "Equilibrado",
+	"set:auth.credentialRankingMode:o:balanced:d":
+		"Primero la cuenta menos usada; reparte la carga y deja margen en cada cuenta",
+	"set:auth.credentialRankingMode:o:earliest-reset:l": "Reinicio más próximo",
+	"set:auth.credentialRankingMode:o:earliest-reset:d":
+		"Primero la cuenta cuya ventana de uso se reinicia antes, para no perder cuota al reiniciarse",
 	"set:retry.maxRetries:l": "Intentos de reintento",
 	"set:retry.maxRetries:d": "Número máximo de reintentos ante errores de la API",
 	"set:retry.maxRetries:o:1:l": "1 reintento",
@@ -766,6 +785,7 @@ export const esSettings: Record<string, string> = {
 	"set:searxng.endpoint:l": "Endpoint de SearXNG",
 	"set:searxng.endpoint:d": "URL base de búsqueda autohospedada",
 	"cmd:model:d": "Seleccionar modelo (abre la interfaz de selección)",
+	"cmd:fallback:d": "Ver o editar los modelos que se prueban cuando el modelo predeterminado está bloqueado",
 	"cmd:fast:d": "Alternar el nivel de servicio prioritario (OpenAI service_tier=priority, Anthropic speed=fast)",
 	"cmd:export:d": "Exportar sesión a archivo HTML",
 	"cmd:dump:d": "Copiar la transcripción de la sesión al portapapeles",

@@ -248,6 +248,24 @@ export const koSettings: Record<string, string> = {
 	"set:task.serviceTier:o:claude-only:l": "우선순위 (Claude 전용)",
 	"set:task.serviceTier:o:claude-only:d":
 		"직접 Claude 요청에 Anthropic 고속 모드 적용. 그 외에는 무시됨 (Bedrock/Vertex 포함)",
+	"set:fallback.maxAttempts:l": "모델별 폴백 시도 횟수",
+	"set:fallback.maxAttempts:d":
+		"폴백 체인의 각 모델(첫 모델 포함)을 몇 번 시도한 뒤 다음 모델로 넘어갈지. 자격 증명이 없는 모델은 바로 건너뜁니다.",
+	"set:fallback.maxAttempts:o:1:l": "1회",
+	"set:fallback.maxAttempts:o:2:l": "2회",
+	"set:fallback.maxAttempts:o:3:l": "3회",
+	"set:fallback.maxAttempts:o:5:l": "5회",
+	"set:fallback.auto:l": "자동 모델 폴백",
+	"set:fallback.auto:d":
+		"기본 모델이 막히면(로그인 없음, 한도, 인증·서버 오류) 로그인된 다른 공급자의 모델로 이어서 진행합니다. /fallback 에서 체인을 볼 수 있습니다.",
+	"set:auth.credentialRankingMode:l": "다중 계정 순서",
+	"set:auth.credentialRankingMode:d":
+		"한 공급자에 로그인된 계정 중 새 세션이 어떤 계정을 쓸지. 막히거나 한도가 찬 계정은 항상 다음 계정으로 넘어갑니다.",
+	"set:auth.credentialRankingMode:o:balanced:l": "균형",
+	"set:auth.credentialRankingMode:o:balanced:d": "가장 덜 쓴 계정부터. 부하를 나누고 모든 계정에 여유를 남깁니다",
+	"set:auth.credentialRankingMode:o:earliest-reset:l": "빨리 초기화되는 순",
+	"set:auth.credentialRankingMode:o:earliest-reset:d":
+		"사용량 구간이 가장 먼저 초기화되는 계정부터. 초기화 때 사라질 한도를 먼저 씁니다",
 	"set:retry.maxRetries:l": "재시도 횟수",
 	"set:retry.maxRetries:d": "API 오류 시 최대 재시도 횟수",
 	"set:retry.maxRetries:o:1:l": "1회 재시도",
@@ -768,6 +786,7 @@ export const koSettings: Record<string, string> = {
 	"cmd:theme:d": "테마 선택기 열기",
 	"cmd:goal:d": "목표 모드 토글 (이 세션의 지속적 자율 목표)",
 	"cmd:model:d": "모델 선택 (선택기 UI 열기)",
+	"cmd:fallback:d": "기본 모델이 막혔을 때 시도할 모델 보기·편집",
 	"cmd:fast:d": "우선순위 서비스 티어 토글 (OpenAI service_tier=priority, Anthropic speed=fast)",
 	"cmd:export:d": "세션을 HTML 파일로 내보내기",
 	"cmd:dump:d": "세션 기록을 클립보드에 복사",

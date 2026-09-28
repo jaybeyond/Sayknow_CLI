@@ -1772,6 +1772,17 @@
 		]
 	},
 	{
+		"sourceId": "slash_command:fallback",
+		"sourceFile": "packages/coding-agent/src/slash-commands/builtin-registry.ts",
+		"sourceKind": "slash_command",
+		"decision": "exclude",
+		"rationale": "local fallback-chain configuration (fallback.models / fallback.auto settings); no SDK operation counterpart, and SDK clients observe switches via model_fallback_switched",
+		"exclusionMetadata": {
+			"adapterMappings": "not_applicable",
+			"testIds": "not_applicable"
+		}
+	},
+	{
 		"sourceId": "slash_command:effort",
 		"sourceFile": "packages/coding-agent/src/slash-commands/builtin-registry.ts",
 		"sourceKind": "slash_command",
@@ -4418,6 +4429,17 @@
 		"testIds": [
 			"packages/coding-agent/test/sdk-operation-inventory.test.ts"
 		]
+	},
+	{
+		"sourceId": "agent_session:getDefaultFallbackChain",
+		"sourceFile": "packages/coding-agent/src/session/agent-session.ts",
+		"sourceKind": "agent_session",
+		"decision": "exclude",
+		"rationale": "internal profile and fallback-chain state, not a user-facing SDK control seam",
+		"exclusionMetadata": {
+			"adapterMappings": "not_applicable",
+			"testIds": "not_applicable"
+		}
 	},
 	{
 		"sourceId": "agent_session:abortRetry",

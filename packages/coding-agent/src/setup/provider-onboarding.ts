@@ -103,6 +103,11 @@ export function formatProviderPresetList(): string {
 		.join("\n");
 }
 
+/** `minimax|minimax-cn|…` — the preset ids for a `--preset <…>` usage line, in catalog order. */
+export function formatProviderPresetChoices(): string {
+	return PROVIDER_PRESETS.map(preset => preset.id).join("|");
+}
+
 export function parseModelList(values: readonly string[]): string[] {
 	const models = values
 		.flatMap(value => value.split(","))

@@ -366,6 +366,7 @@ import { buildNamedToolChoice, buildNamedToolChoiceResult } from "../utils/tool-
 import { buildWorkflowIntentDiff, WORKFLOW_INTENT_DIFF_CUSTOM_TYPE } from "../workflow/workflow-intent-diff";
 import { buildWorkspaceTree, type WorkspaceTree } from "../workspace-tree";
 import type { AuthStorage } from "./auth-storage";
+import { autoFallbackSelectors, selectorProvider } from "./auto-fallback";
 import {
 	DefaultModelSelectionRecoveryError,
 	type DefaultModelSelectionResult,
@@ -867,6 +868,14 @@ const KIMI_CODE_FIRST_EVENT_TIMEOUT_MESSAGES = {
 		"OpenAI completions stream timed out while waiting for the first event",
 	]),
 } as const;
+
+/**
+ * Configured default-chain origins that mean "exactly this model": a subagent call
+ * composed by the task router, and an explicit `--model` at startup. These never get
+ * `fallback.models` or automatic entries appended. (A temporary pick installs its own
+ * runtime controller and never reaches the configured-chain path at all.)
+ */
+const EXACT_FALLBACK_CHAIN_ORIGINS: ReadonlySet<string> = new Set(["subagent", "startup-override"]);
 
 const ALIBABA_TOKEN_PLAN_PROVIDER = "alibaba-token-plan";
 const ALIBABA_TOKEN_PLAN_FIRST_EVENT_TIMEOUT_MESSAGES = {
@@ -13903,8 +13912,26 @@ export class AgentSession {
 			controller.seedResolution(activeIndex, [...controller.skips, ...resolution.skips]);
 		}
 		if (!resolution.model) throw new Error(this.#fallbackExhaustionError(controller));
+		if ((controller.chain.appendedFrom ?? controller.chain.entries.length) < 2) {
+			// A one-model configuration is a chain only through appended fallbacks. With its
+			// model usable and the session not sitting on an appended fallback, leave the live
+			// model alone exactly as before anything was appended: a context promotion or a
+			// temporary scope stays, and an unchanged model is not re-set (which would close
+			// provider sessions such as the Codex websocket on every prompt).
+			if (activeIndex === resolutionStart && !this.#isOnAppendedFallback(controller)) return;
+			if (this.model && modelsAreEqual(this.model, resolution.model)) return;
+		}
 		this.#setModelAuthoritatively(resolution.model, "restore");
 		this.setThinkingLevel(resolution.explicitThinkingLevel ? resolution.thinkingLevel : this.thinkingLevel);
+	}
+
+	/** True when the live model is one of the entries appended after the configured chain. */
+	#isOnAppendedFallback(controller: FallbackChainController): boolean {
+		const model = this.model;
+		const appendedFrom = controller.chain.appendedFrom;
+		if (!model || appendedFrom === undefined) return false;
+		const key = `${model.provider}/${model.id}`;
+		return controller.chain.entries.slice(appendedFrom).some(entry => entry === key || entry.startsWith(`${key}:`));
 	}
 
 	/**
@@ -13925,11 +13952,12 @@ export class AgentSession {
 		if (materializeSettingsChain) {
 			this.setConfiguredModelChain("default", settingsEntries, "modelRoles");
 		}
-		const chain: ConfiguredFallbackChain = materializeSettingsChain
+		const configured: ConfiguredFallbackChain = materializeSettingsChain
 			? { role: "default", entries: settingsEntries, origin: "modelRoles", explicitHead: true }
 			: configuredChain
 				? { ...configuredChain, entries: [...configuredChain.entries] }
 				: { role: "default", entries: settingsEntries, origin: "session", explicitHead: true };
+		const chain = this.#withFallbackExtras(configured);
 		const existing = this.#defaultFallbackController;
 		if (
 			existing &&
@@ -13941,6 +13969,76 @@ export class AgentSession {
 		}
 		this.#defaultFallbackController = new FallbackChainController(chain, this.settings.get("fallback.maxAttempts"));
 		return this.#defaultFallbackController;
+	}
+
+	/**
+	 * Append what runs after the configured chain when it is blocked: the user's
+	 * `fallback.models`, then (with `fallback.auto`) one model from each other
+	 * logged-in provider. Extras live only in the controller; the configured chain
+	 * the session persists is untouched. Temporary picks, subagent calls and an
+	 * explicit `--model` stay exactly what was asked for.
+	 */
+	#withFallbackExtras(chain: ConfiguredFallbackChain): ConfiguredFallbackChain {
+		if (EXACT_FALLBACK_CHAIN_ORIGINS.has(chain.origin)) return chain;
+		const entries = [...chain.entries];
+		const seen = new Set(entries);
+		const push = (selector: string): void => {
+			const trimmed = selector.trim();
+			if (!trimmed || seen.has(trimmed)) return;
+			seen.add(trimmed);
+			entries.push(trimmed);
+		};
+		for (const selector of this.settings.get("fallback.models")) push(selector);
+		// Automatic picks stay out of an `enabledModels` allow-list (a deliberate scope) and
+		// out of an explicit `retry.enabled: false` (the user asked for failures to surface).
+		if (
+			this.settings.get("fallback.auto") &&
+			this.settings.get("retry.enabled") !== false &&
+			this.settings.get("enabledModels").length === 0
+		) {
+			// Depends only on configured intent (never the live model), so the chain stays
+			// stable while a fallback is active and when the primary comes back.
+			const excludeProviders = new Set<string>();
+			for (const entry of entries) {
+				const provider = selectorProvider(entry);
+				if (provider) excludeProviders.add(provider);
+			}
+			for (const selector of this.#autoFallbackTail(excludeProviders)) push(selector);
+		}
+		return entries.length === chain.entries.length
+			? chain
+			: { ...chain, entries, appendedFrom: chain.entries.length };
+	}
+
+	#autoFallbackTail(excludeProviders: ReadonlySet<string>): string[] {
+		try {
+			const registry = this.#modelRegistry;
+			return autoFallbackSelectors({
+				available: registry.getAvailable(),
+				hasCredentials: provider => registry.authStorage.hasAuth(provider),
+				excludeProviders,
+				usageOrder: this.settings.getStorage()?.getModelUsageOrder(),
+			});
+		} catch (error) {
+			logger.debug("Automatic model fallback candidates unavailable", {
+				error: error instanceof Error ? error.message : String(error),
+			});
+			return [];
+		}
+	}
+
+	/**
+	 * The default fallback chain the next prompt walks, automatic entries included,
+	 * and the position currently in use.
+	 */
+	getDefaultFallbackChain(): { entries: readonly string[]; activeIndex: number; appendedFrom: number } {
+		const controller = this.#defaultFallbackChain();
+		const entries = [...controller.chain.entries];
+		return {
+			entries,
+			activeIndex: controller.activeIndex,
+			appendedFrom: controller.chain.appendedFrom ?? entries.length,
+		};
 	}
 
 	async #handleManagedAttemptOutcome(outcome: ManagedAttemptOutcome): Promise<ManagedAttemptDecision> {

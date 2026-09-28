@@ -216,6 +216,25 @@ export const frSettings: Record<string, string> = {
 	"set:task.serviceTier:o:claude-only:l": "Priorité (Claude uniquement)",
 	"set:task.serviceTier:o:claude-only:d":
 		"Mode rapide d'Anthropic sur les requêtes Claude directes ; ignoré ailleurs (y compris Bedrock/Vertex)",
+	"set:fallback.maxAttempts:l": "Tentatives de repli par modèle",
+	"set:fallback.maxAttempts:d":
+		"Nombre d'essais de chaque modèle de la chaîne de repli (y compris le premier) avant de passer au suivant. Un modèle sans identifiants est ignoré aussitôt.",
+	"set:fallback.maxAttempts:o:1:l": "1 essai",
+	"set:fallback.maxAttempts:o:2:l": "2 essais",
+	"set:fallback.maxAttempts:o:3:l": "3 essais",
+	"set:fallback.maxAttempts:o:5:l": "5 essais",
+	"set:fallback.auto:l": "Repli automatique de modèle",
+	"set:fallback.auto:d":
+		"Si le modèle par défaut est bloqué (pas de connexion, quota, erreurs d'authentification ou serveur), continuer avec un modèle d'un autre fournisseur connecté. /fallback affiche la chaîne.",
+	"set:auth.credentialRankingMode:l": "Ordre des comptes multiples",
+	"set:auth.credentialRankingMode:d":
+		"Quel compte connecté d'un fournisseur une nouvelle session utilise. Un compte bloqué ou épuisé passe toujours la main au suivant.",
+	"set:auth.credentialRankingMode:o:balanced:l": "Équilibré",
+	"set:auth.credentialRankingMode:o:balanced:d":
+		"Le compte le moins utilisé d'abord ; répartit la charge et garde de la marge sur chaque compte",
+	"set:auth.credentialRankingMode:o:earliest-reset:l": "Réinitialisation la plus proche",
+	"set:auth.credentialRankingMode:o:earliest-reset:d":
+		"Le compte dont la fenêtre d'utilisation se réinitialise le plus tôt d'abord, pour ne pas perdre de quota",
 	"set:retry.maxRetries:l": "Tentatives de nouvel essai",
 	"set:retry.maxRetries:d": "Nombre maximal de nouvelles tentatives en cas d'erreurs API",
 	"set:retry.maxRetries:o:1:l": "1 nouvel essai",
@@ -738,6 +757,7 @@ export const frSettings: Record<string, string> = {
 	"set:searxng.endpoint:l": "Point de terminaison SearXNG",
 	"set:searxng.endpoint:d": "URL de base de recherche auto-hébergée",
 	"cmd:model:d": "Sélectionner le modèle (ouvre l'interface de sélection)",
+	"cmd:fallback:d": "Afficher ou modifier les modèles essayés quand le modèle par défaut est bloqué",
 	"cmd:fast:d":
 		"Activer/désactiver le niveau de service prioritaire (OpenAI service_tier=priority, Anthropic speed=fast)",
 	"cmd:export:d": "Exporter la session vers un fichier HTML",

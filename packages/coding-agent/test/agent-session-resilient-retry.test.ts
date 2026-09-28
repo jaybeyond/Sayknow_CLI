@@ -101,6 +101,9 @@ describe("AgentSession resilient retry", () => {
 			},
 		});
 		const settings = Settings.isolated({
+			// Single-model retry policy under test: the mock stream records a `mock` model, so an
+			// automatic fallback to the keyed provider would turn this into a managed chain.
+			"fallback.auto": false,
 			"compaction.enabled": false,
 			"retry.baseDelayMs": 1,
 			"retry.maxDelayMs": 10,
@@ -174,6 +177,9 @@ describe("AgentSession resilient retry", () => {
 			},
 		});
 		const settings = Settings.isolated({
+			// Single-model retry policy under test: the mock stream records a `mock` model, so an
+			// automatic fallback to the keyed provider would turn this into a managed chain.
+			"fallback.auto": false,
 			"compaction.enabled": false,
 			...(options.bareDefault
 				? {}
@@ -212,6 +218,9 @@ describe("AgentSession resilient retry", () => {
 			},
 		});
 		const settings = Settings.isolated({
+			// Single-model retry policy under test: the mock stream records a `mock` model, so an
+			// automatic fallback to the keyed provider would turn this into a managed chain.
+			"fallback.auto": false,
 			"compaction.enabled": false,
 			...(options.bareDefault
 				? {}
@@ -255,7 +264,12 @@ describe("AgentSession resilient retry", () => {
 			},
 		});
 		// Only compaction is disabled; no retry.* keys are seeded.
-		const settings = Settings.isolated({ "compaction.enabled": false });
+		const settings = Settings.isolated({
+			// Single-model retry policy under test: the mock stream records a `mock` model, so an
+			// automatic fallback to the keyed provider would turn this into a managed chain.
+			"fallback.auto": false,
+			"compaction.enabled": false,
+		});
 		settings.setModelRole("default", `${model.provider}/${model.id}`);
 		return new AgentSession({
 			agent,
@@ -282,7 +296,12 @@ describe("AgentSession resilient retry", () => {
 			initialState: { model, systemPrompt: ["Test"], tools: options.tools ?? [], messages: [] },
 			streamFn: options.streamFn,
 		});
-		const settings = Settings.isolated({ "compaction.enabled": false });
+		const settings = Settings.isolated({
+			// Single-model retry policy under test: the mock stream records a `mock` model, so an
+			// automatic fallback to the keyed provider would turn this into a managed chain.
+			"fallback.auto": false,
+			"compaction.enabled": false,
+		});
 		settings.setModelRole("default", `${model.provider}/${model.id}`);
 		return new AgentSession({
 			agent,

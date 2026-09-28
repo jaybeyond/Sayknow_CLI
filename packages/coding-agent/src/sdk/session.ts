@@ -110,7 +110,7 @@ import {
 } from "../secrets";
 import { AgentSession, type ForkContextSeed } from "../session/agent-session";
 import type { AuthStorage } from "../session/auth-storage";
-import { discoverAuthStorage } from "../session/auth-storage-discovery";
+import { applyCredentialRankingModeSetting, discoverAuthStorage } from "../session/auth-storage-discovery";
 import { type CustomMessage, convertToLlm } from "../session/messages";
 import { createReadonlySessionManager, SessionManager } from "../session/session-manager";
 import { formatNoModelsAvailableFallback } from "../setup/model-onboarding-guidance";
@@ -1057,6 +1057,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		}
 		const settings = options.settings ?? (await logger.time("settings", Settings.init, { cwd, agentDir }));
 		modelRegistry.applyConfiguredModelBindings(settings);
+		// Multi-account order comes from settings (the env var still overrides it); apply it
+		// before the first model-availability probe picks an account for this session.
+		applyCredentialRankingModeSetting(authStorage, settings);
 		logger.time("initializeWithSettings", initializeWithSettings, settings);
 		const canRefreshModelsBeforeCredentialSelector =
 			!options.credentialSelector || runtimeCredentialSelectorInstalled || options.modelRegistry !== undefined;

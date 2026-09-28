@@ -38,6 +38,8 @@ const LOCKED_EXCLUSIONS: Readonly<Record<string, string>> = {
 		"local session-discovery metadata command; no SDK operation counterpart or runtime/retention authority",
 	"slash_command:unstar":
 		"local session-discovery metadata command; no SDK operation counterpart or runtime/retention authority",
+	"slash_command:fallback":
+		"local fallback-chain configuration (fallback.models / fallback.auto settings); no SDK operation counterpart, and SDK clients observe switches via model_fallback_switched",
 	"slash_command:import-session":
 		"local transcript-file import into a new session; ACP is explicitly disabled and no SDK operation reads caller-selected host paths",
 	"agent_session:constructor": "internal accessor/plumbing, not a user-facing control seam",
@@ -192,6 +194,8 @@ const LOCKED_EXCLUSIONS: Readonly<Record<string, string>> = {
 	"agent_session:getConfiguredModelChain":
 		"internal profile and fallback-chain state, not a user-facing SDK control seam",
 	"agent_session:setConfiguredModelChain":
+		"internal profile and fallback-chain state, not a user-facing SDK control seam",
+	"agent_session:getDefaultFallbackChain":
 		"internal profile and fallback-chain state, not a user-facing SDK control seam",
 	"agent_session:setDefaultFallbackRuntimeModel":
 		"internal fallback runtime bookkeeping, not a user-facing SDK control seam",

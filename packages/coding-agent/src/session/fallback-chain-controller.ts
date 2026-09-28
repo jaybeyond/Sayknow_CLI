@@ -7,6 +7,11 @@ export interface ConfiguredFallbackChain {
 	origin: string;
 	identity?: string;
 	explicitHead: boolean;
+	/**
+	 * Index of the first entry appended at runtime after the configured intent
+	 * (`fallback.models`, then automatic picks). Absent when nothing was appended.
+	 */
+	appendedFrom?: number;
 }
 
 export interface FallbackFailure {

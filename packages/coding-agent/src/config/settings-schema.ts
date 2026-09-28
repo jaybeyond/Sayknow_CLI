@@ -1223,7 +1223,38 @@ export const SETTINGS_SCHEMA = {
 		type: "number",
 		default: 3,
 		validate: (value: number) => Number.isInteger(value) && value > 0,
+		ui: {
+			tab: "model",
+			label: "Fallback Attempts per Model",
+			description:
+				"Tries on each model in the fallback chain (including the first) before moving to the next one. Missing credentials skip a model immediately.",
+			options: [
+				{ value: "1", label: "1 try" },
+				{ value: "2", label: "2 tries" },
+				{ value: "3", label: "3 tries" },
+				{ value: "5", label: "5 tries" },
+			],
+		},
 	},
+
+	/**
+	 * When the default model is blocked, keep going on another logged-in provider
+	 * after the configured chain and `fallback.models` run out. The extra entries
+	 * are computed per session and never written into the configured chain.
+	 */
+	"fallback.auto": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "model",
+			label: "Automatic Model Fallback",
+			description:
+				"When the default model is blocked (no login, quota, auth or server errors), continue on a model from another logged-in provider. /fallback shows the chain.",
+		},
+	},
+
+	/** Models to try, in order, after the default chain. Edited with `/fallback`. */
+	"fallback.models": { type: "array", default: EMPTY_STRING_ARRAY },
 
 	// Retries
 	"retry.enabled": { type: "boolean", default: true },
@@ -3491,6 +3522,31 @@ export const SETTINGS_SCHEMA = {
 	// ────────────────────────────────────────────────────────────────────────
 	// Providers
 	// ────────────────────────────────────────────────────────────────────────
+
+	// Multi-account order. `SKC_CREDENTIAL_RANKING_MODE` overrides it per machine.
+	"auth.credentialRankingMode": {
+		type: "enum",
+		values: ["balanced", "earliest-reset"] as const,
+		default: "balanced",
+		ui: {
+			tab: "providers",
+			label: "Multi-Account Order",
+			description:
+				"Which logged-in account of a provider a new session uses. A blocked or exhausted account is always skipped for the next one.",
+			options: [
+				{
+					value: "balanced",
+					label: "Balanced",
+					description: "Least-used account first; spreads load and keeps headroom on every account",
+				},
+				{
+					value: "earliest-reset",
+					label: "Earliest reset",
+					description: "Account whose usage window resets soonest first, so quota is not lost at reset",
+				},
+			],
+		},
+	},
 
 	// Secret handling
 	"secrets.enabled": {

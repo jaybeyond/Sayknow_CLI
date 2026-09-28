@@ -247,6 +247,25 @@ export const jaSettings: Record<string, string> = {
 	"set:task.serviceTier:o:claude-only:l": "優先度 (Claude のみ)",
 	"set:task.serviceTier:o:claude-only:d":
 		"直接の Claude リクエストに Anthropic 高速モードを適用。それ以外では無視されます (Bedrock/Vertex を含む)",
+	"set:fallback.maxAttempts:l": "モデルごとのフォールバック試行回数",
+	"set:fallback.maxAttempts:d":
+		"フォールバックチェーンの各モデル (最初のモデルを含む) を何回試してから次へ進むか。認証情報のないモデルはすぐにスキップします。",
+	"set:fallback.maxAttempts:o:1:l": "1 回",
+	"set:fallback.maxAttempts:o:2:l": "2 回",
+	"set:fallback.maxAttempts:o:3:l": "3 回",
+	"set:fallback.maxAttempts:o:5:l": "5 回",
+	"set:fallback.auto:l": "自動モデルフォールバック",
+	"set:fallback.auto:d":
+		"既定モデルが使えないとき (未ログイン、上限、認証・サーバーエラー)、ログイン済みの別プロバイダーのモデルで続行します。/fallback でチェーンを確認できます。",
+	"set:auth.credentialRankingMode:l": "複数アカウントの順序",
+	"set:auth.credentialRankingMode:d":
+		"プロバイダーにログイン済みのアカウントのうち、新しいセッションがどれを使うか。ブロック・上限到達のアカウントは常に次へ回ります。",
+	"set:auth.credentialRankingMode:o:balanced:l": "バランス",
+	"set:auth.credentialRankingMode:o:balanced:d":
+		"使用量が最も少ないアカウントから。負荷を分散し、すべてのアカウントに余裕を残します",
+	"set:auth.credentialRankingMode:o:earliest-reset:l": "リセットが早い順",
+	"set:auth.credentialRankingMode:o:earliest-reset:d":
+		"使用量ウィンドウが最も早くリセットされるアカウントから。リセットで失われる枠を先に使います",
 	"set:retry.maxRetries:l": "リトライ回数",
 	"set:retry.maxRetries:d": "API エラー時の最大リトライ回数",
 	"set:retry.maxRetries:o:1:l": "1 回リトライ",
@@ -779,6 +798,7 @@ export const jaSettings: Record<string, string> = {
 	"cmd:theme:d": "テーマセレクターを開く",
 	"cmd:goal:d": "ゴールモードを切り替え（このセッションの永続的な自律目標）",
 	"cmd:model:d": "モデルを選択（セレクター UI を開く）",
+	"cmd:fallback:d": "既定モデルが使えないときに試すモデルを表示・編集",
 	"cmd:fast:d": "優先サービスティアを切り替え（OpenAI service_tier=priority、Anthropic speed=fast）",
 	"cmd:export:d": "セッションを HTML ファイルにエクスポート",
 	"cmd:dump:d": "セッションのトランスクリプトをクリップボードにコピー",

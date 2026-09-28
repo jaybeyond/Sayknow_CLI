@@ -22,6 +22,15 @@
 						}
 					},
 					"additionalProperties": false
+				},
+				"credentialRankingMode": {
+					"type": "string",
+					"enum": [
+						"balanced",
+						"earliest-reset"
+					],
+					"description": "Which logged-in account of a provider a new session uses. A blocked or exhausted account is always skipped for the next one.",
+					"default": "balanced"
 				}
 			},
 			"additionalProperties": false
@@ -946,7 +955,18 @@
 			"properties": {
 				"maxAttempts": {
 					"type": "number",
+					"description": "Tries on each model in the fallback chain (including the first) before moving to the next one. Missing credentials skip a model immediately.",
 					"default": 3
+				},
+				"auto": {
+					"type": "boolean",
+					"description": "When the default model is blocked (no login, quota, auth or server errors), continue on a model from another logged-in provider. /fallback shows the chain.",
+					"default": true
+				},
+				"models": {
+					"type": "array",
+					"items": true,
+					"default": []
 				}
 			},
 			"additionalProperties": false

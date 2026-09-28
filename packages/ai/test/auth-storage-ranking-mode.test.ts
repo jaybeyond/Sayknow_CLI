@@ -169,4 +169,15 @@ describe("AuthStorage credentialRankingMode", () => {
 		const apiKey = await storage.getApiKey("anthropic", "session-earliest-reset-exhausted");
 		expect(apiKey).toBe("api-acct-late");
 	});
+
+	test("a mode changed at runtime applies to the next new session, not the pinned one", async () => {
+		const storage = await makeStorage("balanced");
+		expect(await storage.getApiKey("anthropic", "session-before-change")).toBe("api-acct-late");
+
+		storage.setCredentialRankingMode("earliest-reset");
+		expect(storage.getCredentialRankingMode()).toBe("earliest-reset");
+		expect(await storage.getApiKey("anthropic", "session-after-change")).toBe("api-acct-soon");
+		// The session that already picked an account keeps it.
+		expect(await storage.getApiKey("anthropic", "session-before-change")).toBe("api-acct-late");
+	});
 });

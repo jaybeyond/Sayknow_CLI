@@ -107,11 +107,11 @@ The gateway has no dedicated env vars — it inherits `SKC_AUTH_BROKER_*`. Its o
 
 ### Multi-account credential ranking
 
-When more than one OAuth credential is stored for the same provider (e.g. several Anthropic accounts), `AuthStorage` ranks them at session start to pick which one serves the session. This env var selects the ranking strategy; it is fully opt-in and does not change the default.
+When more than one OAuth credential is stored for the same provider (e.g. several Anthropic accounts), `AuthStorage` ranks them at session start to pick which one serves the session. The strategy is the `auth.credentialRankingMode` setting (Settings → Providers → Multi-Account Order); this env var overrides it per machine.
 
 | Variable                      | Used for                                          | Required when  | Notes / precedence                                                                                                                                                                                                                                                                                            |
 | ----------------------------- | ------------------------------------------------- | -------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `SKC_CREDENTIAL_RANKING_MODE` | Multi-account OAuth credential selection strategy | Never (opt-in) | `balanced` (default) prefers the least-drained account (spreads load, keeps burst headroom). `earliest-reset` prefers the soonest-to-reset non-blocked account (earliest-expiry-first) so perishable tumbling-window quota (e.g. Claude 5h/7d) is drained before reset. Unset/unknown → `balanced`. Only affects session-start ranking; blocked/exhausted accounts still sort last. |
+| `SKC_CREDENTIAL_RANKING_MODE` | Multi-account OAuth credential selection strategy | Never (opt-in) | Overrides `auth.credentialRankingMode`. `balanced` (default) prefers the least-drained account (spreads load, keeps burst headroom). `earliest-reset` prefers the soonest-to-reset non-blocked account (earliest-expiry-first) so perishable tumbling-window quota (e.g. Claude 5h/7d) is drained before reset. Unset/unknown → the setting. Only affects session-start ranking; blocked/exhausted accounts still sort last. |
 
 ---
 

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- `AuthStorage.setCredentialRankingMode()` / `getCredentialRankingMode()` change the multi-account ranking after construction. Like the constructor option, a change affects only new selections; a session already pinned to an account keeps it.
+
 ## [0.6.6] - 2026-09-28
 
 ## [0.6.5] - 2026-09-26

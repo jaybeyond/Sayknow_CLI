@@ -15,7 +15,9 @@ import {
 	formatNoCredentialOnboardingError,
 	formatNoModelOnboardingError,
 	formatNoModelsAvailableFallback,
+	MODEL_ONBOARDING_PROVIDER_PRESET_COMMAND,
 } from "../src/setup/model-onboarding-guidance";
+import { PROVIDER_PRESETS } from "../src/setup/provider-onboarding";
 import { BUILTIN_SLASH_COMMANDS_INTERNAL } from "../src/slash-commands/builtin-registry";
 import type { SlashCommandRuntime } from "../src/slash-commands/types";
 
@@ -102,6 +104,35 @@ describe("model onboarding guidance", () => {
 		expect(text).toContain("OPENCODE_API_KEY");
 		expect(text).toContain("project .env is intentionally ignored");
 		expect(text).toContain("skc auth-broker login opencode-go");
+	});
+
+	it("names every bundled preset from the catalog and never hardcodes a provider pair", () => {
+		for (const preset of PROVIDER_PRESETS) {
+			expect(MODEL_ONBOARDING_PROVIDER_PRESET_COMMAND).toContain(preset.id);
+		}
+		for (const text of [
+			formatModelOnboardingGuidance(),
+			formatModelOnboardingInlineHint(),
+			formatNoCredentialOnboardingError("anthropic"),
+		]) {
+			expect(text).not.toContain("MiniMax/GLM");
+			expect(text).toContain("/fallback");
+		}
+	});
+
+	it("leads a missing-credential error with the fix for the provider that was called", () => {
+		const text = formatNoCredentialOnboardingError("anthropic");
+		const login = text.indexOf("/login anthropic");
+		const alternatives = text.indexOf("Or use another provider:");
+		expect(text.startsWith("No credentials found for anthropic.")).toBe(true);
+		expect(login).toBeGreaterThan(0);
+		expect(alternatives).toBeGreaterThan(login);
+		expect(text.indexOf("/provider add --preset")).toBeGreaterThan(alternatives);
+
+		// No OAuth login and no known env var: say what to add instead of a /login that cannot work.
+		const custom = formatNoCredentialOnboardingError("local-openai");
+		expect(custom).toContain("Add an API key for local-openai");
+		expect(custom).not.toContain("/login local-openai");
 	});
 
 	it("updates /model status output with provider setup and login routes", async () => {

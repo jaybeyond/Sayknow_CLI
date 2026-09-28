@@ -235,6 +235,25 @@ export const deSettings: Record<string, string> = {
 	"set:task.serviceTier:o:claude-only:l": "Priorität (nur Claude)",
 	"set:task.serviceTier:o:claude-only:d":
 		"Anthropic-Schnellmodus bei direkten Claude-Anfragen; sonst ignoriert (inkl. Bedrock/Vertex)",
+	"set:fallback.maxAttempts:l": "Fallback-Versuche pro Modell",
+	"set:fallback.maxAttempts:d":
+		"Versuche je Modell der Fallback-Kette (einschließlich des ersten), bevor das nächste drankommt. Modelle ohne Anmeldedaten werden sofort übersprungen.",
+	"set:fallback.maxAttempts:o:1:l": "1 Versuch",
+	"set:fallback.maxAttempts:o:2:l": "2 Versuche",
+	"set:fallback.maxAttempts:o:3:l": "3 Versuche",
+	"set:fallback.maxAttempts:o:5:l": "5 Versuche",
+	"set:fallback.auto:l": "Automatischer Modell-Fallback",
+	"set:fallback.auto:d":
+		"Ist das Standardmodell blockiert (keine Anmeldung, Kontingent, Auth- oder Serverfehler), mit einem Modell eines anderen angemeldeten Anbieters weitermachen. /fallback zeigt die Kette.",
+	"set:auth.credentialRankingMode:l": "Reihenfolge mehrerer Konten",
+	"set:auth.credentialRankingMode:d":
+		"Welches angemeldete Konto eines Anbieters eine neue Sitzung verwendet. Ein blockiertes oder erschöpftes Konto übergibt immer an das nächste.",
+	"set:auth.credentialRankingMode:o:balanced:l": "Ausgewogen",
+	"set:auth.credentialRankingMode:o:balanced:d":
+		"Am wenigsten genutztes Konto zuerst; verteilt die Last und lässt jedem Konto Reserve",
+	"set:auth.credentialRankingMode:o:earliest-reset:l": "Früheste Zurücksetzung",
+	"set:auth.credentialRankingMode:o:earliest-reset:d":
+		"Konto, dessen Nutzungsfenster zuerst zurückgesetzt wird, zuerst, damit kein Kontingent verfällt",
 	"set:retry.maxRetries:l": "Wiederholungsversuche",
 	"set:retry.maxRetries:d": "Maximale Wiederholungsversuche bei API-Fehlern",
 	"set:retry.maxRetries:o:1:l": "1 Wiederholung",
@@ -773,6 +792,7 @@ export const deSettings: Record<string, string> = {
 	"set:searxng.endpoint:l": "SearXNG-Endpunkt",
 	"set:searxng.endpoint:d": "Basis-URL für selbst gehostete Suche",
 	"cmd:model:d": "Modell auswählen (öffnet Auswahloberfläche)",
+	"cmd:fallback:d": "Modelle anzeigen oder bearbeiten, die bei blockiertem Standardmodell versucht werden",
 	"cmd:fast:d": "Prioritäts-Service-Tier umschalten (OpenAI service_tier=priority, Anthropic speed=fast)",
 	"cmd:export:d": "Sitzung in HTML-Datei exportieren",
 	"cmd:dump:d": "Sitzungstranskript in die Zwischenablage kopieren",

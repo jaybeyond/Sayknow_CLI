@@ -9,6 +9,7 @@
  */
 import { getAgentDbPath, getAgentDir } from "@sayknow-cli/utils";
 import { resolveConfigValue } from "../config/resolve-config-value";
+import type { Settings } from "../config/settings";
 import { resolveAuthBrokerConfig } from "./auth-broker-config";
 import { AuthBrokerClient, AuthStorage, RemoteAuthCredentialStore } from "./auth-storage";
 
@@ -25,7 +26,7 @@ import { AuthBrokerClient, AuthStorage, RemoteAuthCredentialStore } from "./auth
  */
 export async function discoverAuthStorage(agentDir: string = getAgentDir()): Promise<AuthStorage> {
 	const brokerConfig = await resolveAuthBrokerConfig();
-	const credentialRankingMode = resolveCredentialRankingMode();
+	const credentialRankingMode = credentialRankingModeFromEnv();
 	if (brokerConfig) {
 		const client = new AuthBrokerClient({ url: brokerConfig.url, token: brokerConfig.token });
 		const initialResult = await client.fetchSnapshot();
@@ -70,14 +71,28 @@ export async function discoverAuthStorage(agentDir: string = getAgentDir()): Pro
 }
 
 /**
- * Opt-in multi-account credential ranking mode, read from the
- * `SKC_CREDENTIAL_RANKING_MODE` env var. Unset/unknown → `undefined`, leaving
- * {@link AuthStorage}'s default (`balanced`) untouched. `earliest-reset`
- * switches to earliest-expiry-first selection so soon-to-reset tumbling-window
- * quota is drained before it is lost.
+ * Per-machine multi-account ranking override from `SKC_CREDENTIAL_RANKING_MODE`.
+ * Unset/unknown → `undefined`, so the `auth.credentialRankingMode` setting (or
+ * {@link AuthStorage}'s `balanced` default) decides. `earliest-reset` switches to
+ * earliest-expiry-first selection so soon-to-reset tumbling-window quota is
+ * drained before it is lost.
  */
-function resolveCredentialRankingMode(): "balanced" | "earliest-reset" | undefined {
+export function credentialRankingModeFromEnv(): "balanced" | "earliest-reset" | undefined {
 	const raw = process.env.SKC_CREDENTIAL_RANKING_MODE?.trim();
 	if (raw === "balanced" || raw === "earliest-reset") return raw;
 	return undefined;
+}
+
+/**
+ * Apply the `auth.credentialRankingMode` setting to a credential store. The env
+ * var still wins, so a machine that pins a mode keeps it whatever config says.
+ * Returns the mode now in effect.
+ */
+export function applyCredentialRankingModeSetting(
+	storage: Pick<AuthStorage, "setCredentialRankingMode">,
+	settings: Pick<Settings, "get">,
+): "balanced" | "earliest-reset" {
+	const mode = credentialRankingModeFromEnv() ?? settings.get("auth.credentialRankingMode");
+	storage.setCredentialRankingMode(mode);
+	return mode;
 }

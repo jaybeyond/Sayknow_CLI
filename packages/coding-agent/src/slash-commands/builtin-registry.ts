@@ -45,6 +45,7 @@ import { formatSessionImportSummary, runSessionImportCommand } from "../session-
 import { formatModelOnboardingGuidance } from "../setup/model-onboarding-guidance";
 import {
 	addApiCompatibleProvider,
+	formatProviderPresetChoices,
 	formatProviderPresetList,
 	formatProviderSetupResult,
 	parseProviderCompatibility,
@@ -207,6 +208,102 @@ async function updateSessionStar(
 	return commandConsumed();
 }
 
+const FALLBACK_USAGE =
+	"Usage: /fallback [add <model> | remove <number|model> | clear | auto on|off]\n" +
+	"Models listed here run, in order, after the default model when it is blocked (no login, quota, auth or server errors).";
+
+/** Show or edit what runs when the default model is blocked. */
+async function handleFallbackCommand(
+	command: ParsedSlashCommand,
+	runtime: SlashCommandRuntime,
+): Promise<SlashCommandResult> {
+	const { verb, rest } = parseSubcommand(command.args);
+	const added = runtime.settings.get("fallback.models");
+	const save = async (models: string[], message: string): Promise<SlashCommandResult> => {
+		runtime.settings.set("fallback.models", models);
+		await runtime.notifyConfigChanged?.();
+		await runtime.output(`${message}\n\n${formatFallbackChain(runtime)}`);
+		return commandConsumed();
+	};
+	switch (verb) {
+		case "":
+		case "show":
+		case "list":
+			await runtime.output(formatFallbackChain(runtime));
+			return commandConsumed();
+		case "add": {
+			if (!rest) return usage(FALLBACK_USAGE, runtime);
+			const resolution = await resolveModelCommandSelection(runtime, rest);
+			if (!resolution.ok) return usage(resolution.failure.message, runtime);
+			const { model, thinkingLevel } = resolution.selection;
+			const selector = formatModelSelectorValue(`${model.provider}/${model.id}`, thinkingLevel);
+			if (added.includes(selector)) {
+				await runtime.output(`${selector} is already a fallback.\n\n${formatFallbackChain(runtime)}`);
+				return commandConsumed();
+			}
+			return save([...added, selector], `Added fallback: ${selector}`);
+		}
+		case "remove":
+		case "rm": {
+			const index = /^\d+$/.test(rest) ? Number(rest) - 1 : added.indexOf(rest);
+			const target = added[index];
+			if (!rest || target === undefined) {
+				return usage(
+					added.length === 0
+						? "No fallback models are set. Add one with /fallback add <model>."
+						: `Remove by number (1-${added.length}) or exact selector: ${added.join(", ")}`,
+					runtime,
+				);
+			}
+			return save(
+				added.filter((_, position) => position !== index),
+				`Removed fallback: ${target}`,
+			);
+		}
+		case "clear":
+			return save([], "Cleared fallback models.");
+		case "auto": {
+			const value = rest.toLowerCase();
+			if (value !== "on" && value !== "off") return usage("Usage: /fallback auto on|off", runtime);
+			runtime.settings.set("fallback.auto", value === "on");
+			await runtime.notifyConfigChanged?.();
+			await runtime.output(`Automatic fallback ${value}.\n\n${formatFallbackChain(runtime)}`);
+			return commandConsumed();
+		}
+		default:
+			return usage(FALLBACK_USAGE, runtime);
+	}
+}
+
+function formatFallbackChain(runtime: SlashCommandRuntime): string {
+	const auto = runtime.settings.get("fallback.auto");
+	const added = new Set(runtime.settings.get("fallback.models"));
+	const { entries, activeIndex, appendedFrom } = runtime.session.getDefaultFallbackChain();
+	const width = Math.max(0, ...entries.map(entry => entry.length));
+	const lines = [`Model fallback (automatic: ${auto ? "on" : "off"})`];
+	if (entries.length === 0) lines.push("  (no default model)");
+	entries.forEach((entry, index) => {
+		const source = index < appendedFrom ? (index === 0 ? "default" : "chain") : added.has(entry) ? "added" : "auto";
+		const inUse = index === activeIndex ? "  ← in use" : "";
+		lines.push(`  ${index + 1}. ${entry.padEnd(width)}  ${source}${inUse}`);
+	});
+	if (entries.length === 1) {
+		lines.push(
+			auto
+				? "  Nothing to fall back to yet: log in to another provider (/login) or add one with /fallback add <model>."
+				: "  Nothing to fall back to: add a model with /fallback add <model> or turn on /fallback auto on.",
+		);
+	}
+	if (auto && runtime.settings.get("enabledModels").length > 0) {
+		lines.push("  enabledModels restricts this session, so automatic picks are off; added models still apply.");
+	}
+	lines.push(
+		`Each model gets ${runtime.settings.get("fallback.maxAttempts")} tries; a blocked or exhausted account first hands over to the provider's next logged-in account (order: ${runtime.session.modelRegistry.authStorage.getCredentialRankingMode()}).`,
+		"/fallback add <model> · remove <n> · clear · auto on|off",
+	);
+	return lines.join("\n");
+}
+
 function parseProviderSetupSlashArgs(args: string): {
 	preset?: string;
 	compat?: string;
@@ -273,8 +370,7 @@ function parseProviderSetupSlashArgs(args: string): {
 function providerSetupUsage(): string {
 	return [
 		"Provider onboarding",
-		"Presets: /provider add --preset <minimax|minimax-cn|glm> [--force]",
-		"Aliases: /provider add minimax, /provider add minimax-cn, /provider add glm, /provider add zai (writes glm-proxy)",
+		`Presets: /provider add --preset <${formatProviderPresetChoices()}> [--force]`,
 		"API providers: /provider add --compat <openai|anthropic> --provider <id> --base-url <url> --api-key-env <ENV> --model <model> [--force]",
 		`Available presets:\n${formatProviderPresetList()}`,
 		"OAuth/subscription providers: /provider login [provider-id] or /login [provider-id]",
@@ -930,6 +1026,20 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 			runtime.ctx.showModelSelector();
 			runtime.ctx.editor.setText("");
 		},
+	},
+	{
+		name: "fallback",
+		description: "Show or edit the models tried when the default model is blocked",
+		inlineHint: "[add <model> | remove <n> | clear | auto on|off]",
+		acpInputHint: "[add <model> | remove <n> | clear | auto on|off]",
+		subcommands: [
+			{ name: "add", description: "Add a fallback model after the default chain" },
+			{ name: "remove", description: "Remove an added fallback by number or selector" },
+			{ name: "clear", description: "Remove every added fallback" },
+			{ name: "auto", description: "Turn automatic fallback to other logged-in providers on or off" },
+		],
+		allowArgs: true,
+		handle: handleFallbackCommand,
 	},
 	{
 		name: "effort",

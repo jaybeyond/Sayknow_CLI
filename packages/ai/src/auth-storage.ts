@@ -1045,6 +1045,20 @@ export class AuthStorage {
 		this.#fallbackResolver = resolver;
 	}
 
+	/** Multi-account ranking in effect for new session-start selections. */
+	getCredentialRankingMode(): CredentialRankingMode {
+		return this.#credentialRankingMode;
+	}
+
+	/**
+	 * Change how multi-account credentials are ranked. Like the constructor option,
+	 * it only affects selections made from now on (session start, or when a session's
+	 * preferred credential is blocked); sessions already pinned to an account keep it.
+	 */
+	setCredentialRankingMode(mode: CredentialRankingMode): void {
+		this.#credentialRankingMode = mode;
+	}
+
 	/**
 	 * Reload credentials from storage.
 	 */

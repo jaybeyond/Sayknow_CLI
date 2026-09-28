@@ -97,6 +97,8 @@ describe("AgentSession retry fallback", () => {
 		});
 
 		const settings = Settings.isolated({
+			// Single-model path: no fallback even though other providers have keys.
+			"fallback.auto": false,
 			"compaction.enabled": false,
 			"retry.baseDelayMs": 5,
 			"retry.maxRetries": 1,
@@ -158,6 +160,8 @@ describe("AgentSession retry fallback", () => {
 		});
 
 		const settings = Settings.isolated({
+			// Single-model path: no fallback even though other providers have keys.
+			"fallback.auto": false,
 			"compaction.enabled": false,
 			"retry.baseDelayMs": 5,
 			"retry.maxRetries": 1,
@@ -216,6 +220,8 @@ describe("AgentSession retry fallback", () => {
 		});
 
 		const settings = Settings.isolated({
+			// Single-model path: no fallback even though other providers have keys.
+			"fallback.auto": false,
 			"compaction.enabled": false,
 			"retry.baseDelayMs": 5,
 			"retry.maxRetries": 1,
@@ -275,6 +281,8 @@ describe("AgentSession retry fallback", () => {
 		});
 
 		const settings = Settings.isolated({
+			// Single-model path: no fallback even though other providers have keys.
+			"fallback.auto": false,
 			"compaction.enabled": false,
 			"retry.baseDelayMs": 5,
 			"retry.maxRetries": 1,
@@ -336,6 +344,8 @@ describe("AgentSession retry fallback", () => {
 		});
 
 		const settings = Settings.isolated({
+			// Single-model path: no fallback even though other providers have keys.
+			"fallback.auto": false,
 			"compaction.enabled": false,
 			"retry.baseDelayMs": 5,
 			"retry.maxRetries": 1,
@@ -429,6 +439,8 @@ describe("AgentSession retry fallback", () => {
 			},
 		});
 		const settings = Settings.isolated({
+			// Single-model path: no fallback even though other providers have keys.
+			"fallback.auto": false,
 			"compaction.enabled": false,
 			"retry.baseDelayMs": 1,
 			"retry.maxRetries": 1,
@@ -934,7 +946,11 @@ describe("AgentSession retry fallback", () => {
 				return mock.stream(requestedModel, context, options);
 			},
 		});
-		const settings = Settings.isolated({ "compaction.enabled": false });
+		const settings = Settings.isolated({
+			// Single-model path: no fallback even though other providers have keys.
+			"fallback.auto": false,
+			"compaction.enabled": false,
+		});
 		settings.setModelRole("default", `${primary.provider}/${primary.id}`);
 		session = new AgentSession({ agent, sessionManager: SessionManager.inMemory(), settings, modelRegistry });
 		session.setConfiguredModelChain("default", [`${primary.provider}/${primary.id}`], "test");
