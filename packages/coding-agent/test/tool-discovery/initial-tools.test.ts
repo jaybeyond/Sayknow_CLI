@@ -17,6 +17,7 @@ import {
 	DEFAULT_ESSENTIAL_TOOL_NAMES,
 	IrcTool,
 	JobTool,
+	LocateTool,
 	RecipeTool,
 	SshTool,
 	TelegramSendTool,
@@ -102,6 +103,8 @@ async function getToolMetadata(): Promise<Map<string, { loadMode?: string; summa
 		new RecipeTool(toolSession, []),
 		new IrcTool(toolSession),
 		new TelegramSendTool(toolSession),
+		// Offered only with a TypeSafe key, which this session does not have.
+		new LocateTool(toolSession),
 	]) {
 		metadata.set(tool.name, { loadMode: tool.loadMode, summary: tool.summary });
 	}
