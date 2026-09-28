@@ -7,7 +7,14 @@ import * as z from "zod/v4";
 import { createTypeSafeDecisionBackend, TYPESAFE_PROVIDER } from "../decisions/typesafe-backend";
 import locateDescription from "../prompts/tools/locate.md" with { type: "text" };
 import type { ToolSession } from ".";
-import { FILE_BAR, type LocateResult, locateCode, type OutlineLine, outlineFromSegments } from "./locate-core";
+import {
+	FILE_BAR,
+	type LocateResult,
+	locateCode,
+	type OutlineLine,
+	outlineFromSegments,
+	outlineFromSource,
+} from "./locate-core";
 import { resolveToCwd } from "./path-utils";
 import { ToolError } from "./tool-errors";
 
@@ -154,7 +161,8 @@ async function outline(absolutePath: string): Promise<OutlineLine[]> {
 	const code = await Bun.file(absolutePath).text();
 	// minBodyLines/minCommentLines 1: every body and comment is elided, signatures remain.
 	const summary = natives.summarizeCode({ code, path: absolutePath, minBodyLines: 1, minCommentLines: 1 });
-	return summary.parsed ? outlineFromSegments(summary.segments, code.split("\n")) : [];
+	const lines = code.split("\n");
+	return summary.parsed ? outlineFromSegments(summary.segments, lines) : outlineFromSource(lines);
 }
 
 export function formatLocateResult(query: string, root: string, cwd: string, result: LocateResult): string {
@@ -168,7 +176,7 @@ export function formatLocateResult(query: string, root: string, cwd: string, res
 	const show = (files: LocateResult["files"]) => {
 		files.forEach((file, index) => {
 			const shown = path.relative(cwd, path.join(root, file.path));
-			lines.push("", `${index + 1}. ${shown}  (${file.score.toFixed(2)})`);
+			lines.push("", `${index + 1}. ${shown}  (${file.score.toFixed(2)}${file.weak ? ", weak" : ""})`);
 			for (const entry of file.outline.slice(0, 12)) lines.push(`   L${entry.line} ${entry.text}`);
 			if (file.outline.length > 12) lines.push(`   … ${file.outline.length - 12} more declarations`);
 		});

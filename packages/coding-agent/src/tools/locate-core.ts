@@ -1,5 +1,5 @@
 import * as path from "node:path";
-import type { DecisionRequest, DecisionResult, NoulQuestion } from "../decisions/types";
+import type { ChoiceQuestion, DecisionRequest, DecisionResult, NoulQuestion } from "../decisions/types";
 
 /**
  * Find where behaviour lives by asking Jev, the way `jevgrep` does, but inside SKC and
@@ -38,6 +38,8 @@ export interface LocatedFile {
 	path: string;
 	score: number;
 	outline: OutlineLine[];
+	/** Below {@link FILE_BAR}: a lead worth a glance, not a confident match. */
+	weak?: boolean;
 }
 
 export interface LocateResult {
@@ -68,9 +70,13 @@ const FOLDER_RELATIVE = 0.55;
 /** Always follow this many best folders per depth (if they clear {@link FOLDER_MIN}), so a flat score spread never dead-ends. */
 const FOLDERS_ALWAYS_KEPT = 2;
 const FOLDER_MIN = 0.2;
+/** Extra folders per depth entered on shared query words despite a low Jev score. */
+const LEXICAL_FOLDERS_KEPT = 2;
 /** Priority of files sitting directly in the search root. */
 const ROOT_FILE_PRIORITY = 0.5;
 export const FILE_BAR = 0.5;
+/** Files between this and {@link FILE_BAR} fill the remaining slots, marked weak. */
+export const WEAK_FILE_BAR = 0.3;
 /** Hard ceilings so one question can never turn into an unbounded bill. */
 export const MAX_REQUESTS = 100;
 const MAX_CANDIDATE_FILES = 480;
@@ -109,6 +115,30 @@ function buildTree(files: string[]): Map<string, Folder> {
 	return folders;
 }
 
+const STOP_WORDS = new Set(
+	"the and for with from that this into when which what where does each only than then have will should would could their there about after before other while used uses using".split(
+		" ",
+	),
+);
+
+/** Query terms for lexical hints: lowercase words of 4+ letters, cut to a 5-letter stem. */
+export function queryTerms(query: string): string[] {
+	const words = query.toLowerCase().match(/[a-z][a-z0-9]{3,}/g) ?? [];
+	return [...new Set(words.filter(word => !STOP_WORDS.has(word)).map(word => word.slice(0, 5)))];
+}
+
+/** How many query terms appear in `text`, with camelCase and snake_case identifiers split into words. */
+export function termHits(text: string, terms: readonly string[]): number {
+	if (terms.length === 0) return 0;
+	const words = text
+		.replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+		.toLowerCase()
+		.split(/[^a-z0-9]+/);
+	let hits = 0;
+	for (const term of terms) if (words.some(word => word.startsWith(term))) hits += 1;
+	return hits;
+}
+
 function parentOf(relative: string): string {
 	const dir = path.posix.dirname(relative);
 	return dir === "." ? "" : dir;
@@ -141,15 +171,21 @@ async function inParallel<T, R>(items: T[], limit: number, run: (item: T) => Pro
 
 export async function locateCode(params: LocateParams, deps: LocateDeps): Promise<LocateResult> {
 	const started = Date.now();
+	const terms = queryTerms(params.query);
 	const folders = buildTree(await deps.listFiles(params.root, deps.signal));
 	let requests = 0;
 	let failedRequests = 0;
 	let foldersJudged = 0;
 	let truncated = false;
 
-	const ask = async (state: string, questions: Record<string, NoulQuestion>): Promise<Map<string, number> | null> => {
+	const request = async (
+		state: string,
+		questions: Record<string, NoulQuestion | ChoiceQuestion>,
+		reserved = false,
+	): Promise<DecisionResult | null> => {
 		if (deps.signal?.aborted) return null;
-		if (requests >= MAX_REQUESTS) {
+		// The final rerank has its own slot so a walk that used the whole budget still gets it.
+		if (requests >= MAX_REQUESTS + (reserved ? 1 : 0)) {
 			truncated = true;
 			return null;
 		}
@@ -161,10 +197,12 @@ export async function locateCode(params: LocateParams, deps: LocateDeps): Promis
 			// A timed-out or dropped request is a failed judgement, not a failed search.
 			result = null;
 		}
-		if (!result) {
-			failedRequests += 1;
-			return null;
-		}
+		if (!result) failedRequests += 1;
+		return result;
+	};
+	const ask = async (state: string, questions: Record<string, NoulQuestion>): Promise<Map<string, number> | null> => {
+		const result = await request(state, questions);
+		if (!result) return null;
 		const scores = new Map<string, number>();
 		for (const [key, answer] of Object.entries(result.answers)) {
 			if (answer.type === "noul") scores.set(key, answer.noul);
@@ -176,7 +214,9 @@ export async function locateCode(params: LocateParams, deps: LocateDeps): Promis
 	/** Candidate file -> priority (the score of the folder it came from). */
 	const candidates = new Map<string, number>();
 	const folderScore = new Map<string, number>([["", ROOT_FILE_PRIORITY]]);
-	const addCandidate = (file: string, priority: number) => {
+	const addCandidate = (file: string, folderPriority: number) => {
+		// A path that names the question's words goes ahead of its folder-mates under the cap.
+		const priority = folderPriority + 0.1 * Math.min(2, termHits(file, terms));
 		if ((candidates.get(file) ?? -1) < priority) candidates.set(file, priority);
 	};
 	let frontier = [""];
@@ -224,10 +264,28 @@ export async function locateCode(params: LocateParams, deps: LocateDeps): Promis
 		levelScores.sort((a, b) => b.score - a.score || a.path.localeCompare(b.path));
 		const best = levelScores[0]?.score ?? 0;
 		const bar = Math.max(FOLDER_FLOOR, best * FOLDER_RELATIVE);
-		frontier = levelScores
-			.filter((entry, rank) => entry.score >= bar || (rank < FOLDERS_ALWAYS_KEPT && entry.score >= FOLDER_MIN))
+		const keep = new Set(
+			levelScores
+				.filter((entry, rank) => entry.score >= bar || (rank < FOLDERS_ALWAYS_KEPT && entry.score >= FOLDER_MIN))
+				.map(entry => entry.path),
+		);
+		// Jev judges folders from names alone and sometimes undersells the obvious one
+		// ("notifications/" at 0.2 for a notification question). The folders whose own name
+		// or file names share the most query words are entered too.
+		const lexical = levelScores
+			.filter(entry => !keep.has(entry.path))
 			.map(entry => {
-				folderScore.set(entry.path, entry.score);
+				const folder = folders.get(entry.path)!;
+				return { entry, hits: termHits(`${entry.path} ${folder.files.join(" ")}`, terms) };
+			})
+			.filter(candidate => candidate.hits > 0)
+			.sort((a, b) => b.hits - a.hits || b.entry.score - a.entry.score)
+			.slice(0, LEXICAL_FOLDERS_KEPT);
+		for (const { entry } of lexical) keep.add(entry.path);
+		frontier = levelScores
+			.filter(entry => keep.has(entry.path))
+			.map(entry => {
+				folderScore.set(entry.path, Math.max(entry.score, FOLDER_FLOOR));
 				return entry.path;
 			});
 	}
@@ -250,15 +308,7 @@ export async function locateCode(params: LocateParams, deps: LocateDeps): Promis
 	const fileAnswers = await inParallel(fileBatches, CONCURRENCY, async batch => {
 		const body = batch
 			.map(file => {
-				let text = "";
-				for (const entry of outlines.get(file) ?? []) {
-					const next = `  ${entry.text}\n`;
-					if (text.length + next.length > OUTLINE_CHARS_PER_FILE) {
-						text += "  …\n";
-						break;
-					}
-					text += next;
-				}
+				const text = fitOutline(outlines.get(file) ?? [], terms);
 				return `### ${file}\n${text || "  (no declarations extracted)\n"}`;
 			})
 			.join("\n");
@@ -281,7 +331,12 @@ export async function locateCode(params: LocateParams, deps: LocateDeps): Promis
 		});
 	}
 	scored.sort((a, b) => b.score - a.score || a.path.localeCompare(b.path));
-	const files = scored.filter(file => file.score >= FILE_BAR).slice(0, params.limit);
+	await rerank(scored, params.query, terms, outlines, request);
+	// Rerank order wins; below the rerank head files are already in score order.
+	const files = scored
+		.filter(file => file.score >= WEAK_FILE_BAR)
+		.slice(0, params.limit)
+		.map(file => (file.score < FILE_BAR ? { ...file, weak: true } : file));
 	return {
 		files,
 		weakLeads: files.length === 0 ? scored.slice(0, 3) : [],
@@ -293,6 +348,83 @@ export async function locateCode(params: LocateParams, deps: LocateDeps): Promis
 		truncated,
 		durationMs: Date.now() - started,
 	};
+}
+
+/** How many top files the final comparison looks at together. */
+const RERANK_FILES = 6;
+
+/**
+ * Put the leading files in order with one comparative question. Each file was scored on
+ * its own, and near-equal scores (0.62 vs 0.60) order close siblings almost at random;
+ * shown side by side, the one that implements the behaviour is picked reliably. Jev
+ * returns a probability per file for a choice question; files are reordered by it and keep
+ * their own score for display. A failed request leaves the order as it was.
+ */
+async function rerank(
+	scored: LocatedFile[],
+	query: string,
+	terms: readonly string[],
+	outlines: Map<string, OutlineLine[]>,
+	request: (
+		state: string,
+		questions: Record<string, ChoiceQuestion>,
+		reserved: boolean,
+	) => Promise<DecisionResult | null>,
+): Promise<void> {
+	const head = scored.slice(0, RERANK_FILES).filter(file => file.score >= WEAK_FILE_BAR);
+	if (head.length < 2) return;
+	const criteria: Record<string, string> = {};
+	head.forEach((file, index) => {
+		criteria[`c${index}`] = file.path;
+	});
+	const body = head
+		.map((file, index) => `### c${index}: ${file.path}\n${fitOutline(outlines.get(file.path) ?? [], terms)}`)
+		.join("\n");
+	const result = await request(
+		`Question: ${query}\n\nCandidate files (declarations only):\n${body}`,
+		{
+			best: {
+				type: "choice",
+				instructions:
+					"Which file most directly implements, handles, or tests what the question asks? Judge from paths and declarations.",
+				criteria,
+			},
+		},
+		true,
+	);
+	const answer = result?.answers.best;
+	if (answer?.type !== "choice") return;
+	const probability = (index: number) =>
+		answer.probabilities?.[`c${index}`] ?? (answer.choice === `c${index}` ? 1 : 0);
+	const reordered = head
+		.map((file, index) => ({ file, p: probability(index), index }))
+		.sort((a, b) => b.p - a.p || a.index - b.index)
+		.map(entry => entry.file);
+	scored.splice(0, head.length, ...reordered);
+}
+
+/**
+ * An outline within {@link OUTLINE_CHARS_PER_FILE}. When it does not fit, declarations
+ * that share words with the query go first, so the one that matters in a large file is
+ * not the one cut; the kept lines stay in source order.
+ */
+function fitOutline(outline: readonly OutlineLine[], terms: readonly string[]): string {
+	const render = (entries: readonly OutlineLine[]) => entries.map(entry => `  ${entry.text}\n`).join("");
+	const full = render(outline);
+	if (full.length <= OUTLINE_CHARS_PER_FILE) return full;
+	const ordered = outline
+		.map((entry, index) => ({ entry, index, hits: termHits(entry.text, terms) }))
+		.sort((a, b) => b.hits - a.hits || a.index - b.index);
+	const kept: Array<{ entry: OutlineLine; index: number }> = [];
+	let used = 4; // room for the ellipsis line
+	for (const candidate of ordered) {
+		const size = candidate.entry.text.length + 3;
+		if (used + size > OUTLINE_CHARS_PER_FILE) continue;
+		kept.push(candidate);
+		used += size;
+	}
+	kept.sort((a, b) => a.index - b.index);
+	return `${render(kept.map(candidate => candidate.entry))}  …\n`;
 }
 
 /**
@@ -389,4 +521,45 @@ function pushMembers(
 		if (NOT_MEMBER.test(trimmed)) continue;
 		push(line, text, trimmed.includes("(") ? 1 : 2);
 	}
+}
+
+/** A top-level declaration line in TS/JS, Python, Rust or Go. */
+const TOP_DECLARATION =
+	/^(export\s+)?(default\s+)?(declare\s+)?(abstract\s+)?(async\s+)?(function\*?|class|interface|type|enum|const|let|var|namespace|def|struct|trait|impl|fn|pub|func)\b/;
+/** A method or member signature one indent level in: `name(`, `async name(`, `#name(`, `get name(`. */
+const MEMBER_DECLARATION =
+	/^(?:(?:public|private|protected|static|readonly|override|abstract|async|get|set|declare)\s+)*(?:#?[A-Za-z_$][\w$]*)\s*[<(]/;
+
+/**
+ * Fallback outline for a file the structural parser rejects (1-2% of TypeScript files,
+ * often large central ones). Keeps top-level declarations and members one indent level
+ * in, under the same rules as {@link outlineFromSegments}: no comments, imports, bodies,
+ * or initialiser values.
+ */
+export function outlineFromSource(sourceLines: readonly string[]): OutlineLine[] {
+	const segments: Array<{ kind: string; startLine: number; text: string }> = [];
+	let memberIndent: string | undefined;
+	let inBlockComment = false;
+	sourceLines.forEach((text, index) => {
+		const trimmed = text.trim();
+		if (inBlockComment) {
+			if (trimmed.includes("*/")) inBlockComment = false;
+			return;
+		}
+		if (trimmed.startsWith("/*") && !trimmed.includes("*/")) {
+			inBlockComment = true;
+			return;
+		}
+		const indent = /^\s*/.exec(text)![0];
+		if (indent === "") {
+			memberIndent = undefined;
+			if (TOP_DECLARATION.test(trimmed)) segments.push({ kind: "kept", startLine: index + 1, text });
+			return;
+		}
+		memberIndent ??= indent;
+		if (indent === memberIndent && MEMBER_DECLARATION.test(trimmed) && !NOT_MEMBER.test(trimmed)) {
+			segments.push({ kind: "kept", startLine: index + 1, text });
+		}
+	});
+	return outlineFromSegments(segments);
 }

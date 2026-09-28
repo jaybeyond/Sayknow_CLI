@@ -3,7 +3,7 @@ import { summarizeCode } from "@sayknow-cli/natives";
 import { Settings } from "../../src/config/settings";
 import type { DecisionRequest, DecisionResult } from "../../src/decisions/types";
 import { LocateTool } from "../../src/tools/locate";
-import { LEAF_FOLDER_FILES, locateCode, outlineFromSegments } from "../../src/tools/locate-core";
+import { LEAF_FOLDER_FILES, locateCode, outlineFromSegments, outlineFromSource } from "../../src/tools/locate-core";
 
 function outlineOf(code: string, path = "sample.ts") {
 	return outlineFromSegments(
@@ -13,6 +13,37 @@ function outlineOf(code: string, path = "sample.ts") {
 }
 
 describe("outline sent to Jev", () => {
+	it("falls back to declaration lines when the parser rejects a file, still without bodies or comments", () => {
+		const outline = outlineFromSource([
+			"/**",
+			" * secret block comment",
+			" */",
+			"export class Session {",
+			'\tprivate secretToken = "secret-value";',
+			"\tasync resume(id: string): Promise<void> {",
+			"\t\tconst secretLocal = id;",
+			"\t\treturn;",
+			"\t}",
+			"}",
+			"",
+			"export const LIMIT = 42;",
+			"// secret line",
+			"function helper(a: number) {",
+			"\treturn a;",
+			"}",
+		]);
+		const text = outline.map(entry => entry.text).join("\n");
+		expect(text).toBe(
+			[
+				"export class Session {",
+				"async resume(id: string): Promise<void> {",
+				"export const LIMIT",
+				"function helper(a: number) {",
+			].join("\n"),
+		);
+		expect(outline.map(entry => entry.line)).toEqual([4, 6, 12, 14]);
+	});
+
 	it("keeps declaration lines and drops bodies, comments and imports", () => {
 		const outline = outlineOf(`import { secretImport } from "./x";
 
@@ -150,6 +181,46 @@ describe("locateCode", () => {
 		);
 		expect(result.files).toEqual([]);
 		expect(result.weakLeads.map(file => file.path)).toEqual(["a.ts", "b.ts"]);
+	});
+});
+
+describe("final comparison", () => {
+	const scores: Record<string, number> = { "a.ts": 0.62, "b.ts": 0.6, "c.ts": 0.4, "d.ts": 0.1 };
+	const judge = (choice: DecisionResult | null | "throw") => async (request: DecisionRequest) => {
+		if ("best" in request.questions) {
+			if (choice === "throw") throw new Error("down");
+			return choice;
+		}
+		const answers: DecisionResult["answers"] = {};
+		for (const [key, question] of Object.entries(request.questions)) {
+			const target = /"([^"]+)"/.exec(question.instructions)?.[1] ?? "";
+			answers[key] = { type: "noul", noul: scores[target] ?? 0 };
+		}
+		return { answers, backend: "typesafe", model: "jev-test", calibrated: true, durationMs: 1 } as DecisionResult;
+	};
+	const run = (choice: DecisionResult | null | "throw") =>
+		locateCode(
+			{ query: "q", root: "/repo", limit: 5 },
+			{ listFiles: async () => Object.keys(scores), outline: async () => [], decide: judge(choice) },
+		);
+
+	it("reorders the leading files by the comparative choice and marks sub-bar files weak", async () => {
+		const result = await run({
+			answers: {
+				best: { type: "choice", choice: "c1", probabilities: { c0: 0.2, c1: 0.7, c2: 0.1 } },
+			},
+			backend: "typesafe",
+			model: "jev-test",
+			calibrated: true,
+			durationMs: 1,
+		});
+		expect(result.files.map(file => file.path)).toEqual(["b.ts", "a.ts", "c.ts"]);
+		expect(result.files.map(file => !!file.weak)).toEqual([false, false, true]);
+	});
+
+	it("keeps score order when the comparison fails", async () => {
+		expect((await run(null)).files.map(file => file.path)).toEqual(["a.ts", "b.ts", "c.ts"]);
+		expect((await run("throw")).files.map(file => file.path)).toEqual(["a.ts", "b.ts", "c.ts"]);
 	});
 });
 
