@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.6.6] - 2026-09-28
+
 ### Added
 
 - `ctrl+q` (`app.session.continue`) continues the most recent saved session in one keystroke, from the launch card or mid-session; it never resumes the live session into itself and refuses while a turn is running. The launch card marks that session with `›` and names the key next to `alt+r` for the full list. It is a Control chord on purpose: many macOS terminals turn Option into composed text, so Option shortcuts such as `alt+r` only work where the terminal sends Option as Meta.
