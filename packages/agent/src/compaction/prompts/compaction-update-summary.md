@@ -15,6 +15,7 @@ You MUST use this format (omit sections if not applicable):
 [Preserve existing goals; add new ones if task expanded]
 
 ## Constraints & Preferences
+- Reply language: [the language the user writes in, or the one they asked for — e.g. Korean; replies MUST stay in it]
 - [Preserve existing; add new ones discovered]
 
 ## Progress

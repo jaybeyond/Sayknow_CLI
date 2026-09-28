@@ -19,6 +19,7 @@ Use exactly this structure:
 [What the user is trying to accomplish]
 
 ## Constraints & Preferences
+- Reply language: [the language the user writes in, or the one they asked for — e.g. Korean; replies MUST stay in it]
 - [Any constraints, preferences, or requirements mentioned]
 
 ## Progress

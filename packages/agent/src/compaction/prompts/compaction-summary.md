@@ -8,6 +8,7 @@ You MUST use this format (sections can be omitted if not applicable):
 [User goals; list multiple if session covers different tasks.]
 
 ## Constraints & Preferences
+- Reply language: [the language the user writes in, or the one they asked for — e.g. Korean; replies MUST stay in it]
 - [Constraints or requirements mentioned]
 
 ## Progress

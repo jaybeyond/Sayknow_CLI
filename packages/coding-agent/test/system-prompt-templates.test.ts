@@ -530,7 +530,12 @@ describe("system Handlebars prompt templates", () => {
 			workspaceTree: emptyWorkspaceTree(),
 		});
 
-		expect(systemPrompt.join("\n")).not.toContain("<reasoning-language>");
+		const rendered = systemPrompt.join("\n");
+		expect(rendered).not.toContain("<reasoning-language>");
+		// The reply-language rule is always on, independent of the reasoning setting.
+		const block = /<response-language>\n(?<content>[\s\S]*?)\n<\/response-language>/u.exec(rendered)?.groups?.content;
+		expect(block).toContain("Write every user-facing message in the language the user writes in");
+		expect(block).toContain("including progress notes and the final report after long tool work");
 	}, 30_000);
 
 	test("buildSystemPrompt adds reasoning-language guidance when set to english", async () => {
@@ -548,7 +553,8 @@ describe("system Handlebars prompt templates", () => {
 		const block = /<reasoning-language>\n(?<content>[\s\S]*?)\n<\/reasoning-language>/u.exec(rendered)?.groups
 			?.content;
 		expect(block).toContain("Reason through development and technical problem-solving in English.");
-		expect(block).toContain("Keep user-facing answers in the language the user requested or used.");
+		expect(block).toContain("user-facing answers still follow <response-language>");
+		expect(rendered).toContain("<response-language>");
 	}, 30_000);
 
 	test("buildSystemPrompt treats an explicit off the same as an absent setting", async () => {

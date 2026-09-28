@@ -379,6 +379,7 @@ import {
 	effectiveFallbackDelay,
 	FallbackChainController,
 } from "./fallback-chain-controller";
+import { buildResponseLanguageReminder, detectResponseLanguage } from "./response-language";
 
 export { DefaultModelSelectionRecoveryError } from "./default-model-selection";
 
@@ -7841,6 +7842,7 @@ export class AgentSession {
 			const eagerTodoPrelude =
 				!options?.synthetic && !hasPendingUserDirective ? this.#createEagerTodoPrelude(expandedText) : undefined;
 			const uiSkillPrelude = options?.synthetic ? undefined : this.#createUiSkillPrelude(expandedText);
+			const languagePrelude = options?.synthetic ? undefined : this.#createResponseLanguagePrelude(expandedText);
 
 			const userContent: (TextContent | ImageContent)[] = [{ type: "text", text: expandedText }];
 			if (options?.images) {
@@ -7870,8 +7872,9 @@ export class AgentSession {
 				await this.#promptWithMessage(message, expandedText, {
 					...options,
 					prependMessages:
-						eagerTodoPrelude || uiSkillPrelude
+						eagerTodoPrelude || uiSkillPrelude || languagePrelude
 							? [
+									...(languagePrelude ? [languagePrelude] : []),
 									...(uiSkillPrelude ? [uiSkillPrelude] : []),
 									...(eagerTodoPrelude ? [eagerTodoPrelude.message] : []),
 								]
@@ -12145,6 +12148,21 @@ export class AgentSession {
 	 * routing and therefore costs nothing extra. The patterns stay in front of it: when
 	 * they match, the model is never asked.
 	 */
+	/**
+	 * Name the user's language at the start of the turn when their message is clearly in a
+	 * non-Latin script, so the final report after long English tool output stays in it.
+	 */
+	#createResponseLanguagePrelude(promptText: string): AgentMessage | undefined {
+		const language = detectResponseLanguage(promptText);
+		if (!language) return undefined;
+		return {
+			role: "developer",
+			content: [{ type: "text", text: buildResponseLanguageReminder(language) }],
+			attribution: "agent",
+			timestamp: Date.now(),
+		};
+	}
+
 	#createUiSkillPrelude(promptText: string): AgentMessage | undefined {
 		if (this.#planModeState?.enabled) return undefined;
 		const matched = buildUiSkillActivationContext(promptText);

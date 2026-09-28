@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Compaction, update-summary and handoff prompts ask for the user's reply language under Constraints & Preferences, so it survives a compaction.
+
 ## [0.6.6] - 2026-09-28
 
 ## [0.5.7] - 2026-09-10
