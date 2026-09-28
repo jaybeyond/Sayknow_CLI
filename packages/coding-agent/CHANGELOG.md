@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- The launch screen is a compact card instead of the two-column ledger. A drawn octopus sits beside four lines — version, tagline, model with reasoning level, and project path with branch and change counts — followed by one "What's new" line after an update (pointing at `/changelog`), the three most recent sessions (with the key that opens the full list), and a single row of keys. Commits, preset, role models, MCP/skill/rule/LSP status, workflows, and the full keymap are no longer on it; they are one key or command away. The card stays within 76 columns on wide terminals and, when rows run short, drops the keys row first, then the release line, then the sessions. The intro waves the tentacles and lets color spread for about half a second; every fact is readable from the first frame, and `startup.skipLogoAnimation` still turns it off.
+
 ## [0.6.5] - 2026-09-26
 
 ### Added

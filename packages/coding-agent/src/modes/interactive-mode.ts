@@ -1,4 +1,3 @@
-import * as path from "node:path";
 import { type Agent, type AgentMessage, ThinkingLevel } from "@sayknow-cli/agent-core";
 import type { CompactionOutcome } from "@sayknow-cli/agent-core/compaction";
 import type { AssistantMessage, ImageContent, Message, UsageReport } from "@sayknow-cli/ai";
@@ -25,7 +24,6 @@ import {
 	KeybindingsManager,
 	type KeyDisplayContext,
 } from "../config/keybindings";
-import { getModelProfilePresentation } from "../config/model-profiles";
 import { isSettingsInitialized, type Settings, settings } from "../config/settings";
 import { DEFAULT_SKC_DEFINITION_NAMES } from "../defaults/skc-defaults";
 import type {
@@ -48,7 +46,6 @@ import type { AgentSession, AgentSessionEvent } from "../session/agent-session";
 import { HistoryStorage } from "../session/history-storage";
 import type { SessionContext, SessionManager } from "../session/session-manager";
 import { getRecentSessions, getSessionMessageEntryId } from "../session/session-manager";
-import { loadProjectContextFiles } from "../system-prompt";
 import type { LspStartupServerInfo } from "../tools";
 import { shortenPath } from "../tools/render-utils";
 import { formatPhaseDisplayName } from "../tools/todo-write";
@@ -77,14 +74,7 @@ import { resolveCurrentBranch } from "./components/status-line/git-utils";
 import type { ToolExecutionHandle } from "./components/tool-execution";
 import { StatusLineComponent } from "./components/tool-status-header";
 import { composeToolText } from "./components/tool-transcript-format";
-import {
-	type RecentSession,
-	WelcomeComponent,
-	type WelcomeLogoMode,
-	type LspServerInfo as WelcomeLspServerInfo,
-	type WelcomeRoleBinding,
-	type WelcomeSnapshot,
-} from "./components/welcome";
+import { type RecentSession, WelcomeComponent, type WelcomeLogoMode, type WelcomeSnapshot } from "./components/welcome";
 import { BtwController } from "./controllers/btw-controller";
 import { CommandController } from "./controllers/command-controller";
 import { EventController } from "./controllers/event-controller";
@@ -743,7 +733,6 @@ export class InteractiveMode implements InteractiveModeContext {
 				modelName,
 				providerName,
 				recentSessions,
-				this.#getWelcomeLspServers(),
 				welcomeLogoMode,
 				{
 					getViewportRows: () => this.ui.terminal.rows,
@@ -1611,36 +1600,13 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	#handleLspStartupEvent(event: LspStartupEvent): void {
-		this.#updateWelcomeLspServers();
-
 		const warningMessage = getLspStartupWarningMessage(event);
 		if (warningMessage) {
 			this.showWarning(warningMessage);
 		}
 	}
 
-	#getWelcomeLspServers(): WelcomeLspServerInfo[] {
-		return (
-			this.lspServers?.map(server => ({
-				name: server.name,
-				status: server.status,
-				fileTypes: server.fileTypes,
-			})) ?? []
-		);
-	}
-
-	#updateWelcomeLspServers(): void {
-		if (!this.#welcomeComponent) {
-			return;
-		}
-
-		this.#welcomeComponent.setLspServers(this.#getWelcomeLspServers());
-		// LSP startup settles around the same time the MCP connections do.
-		this.#welcomeComponent.setSnapshot({ mcp: this.#welcomeMcpSummary() });
-		this.ui.requestRender();
-	}
-
-	/** Facts the launch ledger can show synchronously, before any probe runs. */
+	/** Facts the launch card can show synchronously, before the git probe runs. */
 	#buildWelcomeSnapshot(): WelcomeSnapshot {
 		const projectDir = getProjectDir();
 		let branch: string | null = null;
@@ -1649,68 +1615,19 @@ export class InteractiveMode implements InteractiveModeContext {
 		} catch {
 			branch = null;
 		}
-		const profileName = this.session.getActiveModelProfile() ?? settings.get("modelProfile.default");
-		return {
-			cwd: shortenPath(projectDir),
-			branch,
-			thinkingLevel: this.session.thinkingLevel,
-			profile: profileName ? getModelProfilePresentation(profileName).displayName : undefined,
-			roles: this.#welcomeRoleBindings(),
-			mcp: this.#welcomeMcpSummary(),
-			skills: this.session.skills.length,
-		};
+		return { cwd: shortenPath(projectDir), branch, thinkingLevel: this.session.thinkingLevel };
 	}
 
-	/** Role agents in their canonical order, with the provider prefix dropped for width. */
-	#welcomeRoleBindings(): WelcomeRoleBinding[] {
-		const overrides = settings.get("task.agentModelOverrides") as Record<string, unknown> | undefined;
-		if (!overrides) return [];
-		const bindings: WelcomeRoleBinding[] = [];
-		for (const role of ["executor", "planner", "critic", "architect"]) {
-			const selector = overrides[role];
-			if (typeof selector !== "string" || selector.length === 0) continue;
-			const slash = selector.indexOf("/");
-			bindings.push({ role, model: slash >= 0 ? selector.slice(slash + 1) : selector });
-		}
-		return bindings;
-	}
-
-	#welcomeMcpSummary(): { connected: number; total: number } {
-		const manager = this.mcpManager;
-		if (!manager) return { connected: 0, total: 0 };
-		return { connected: manager.getConnectedServers().length, total: manager.getAllServerNames().length };
-	}
-
-	/** Fill in the ledger facts that need I/O: git change counts and project instruction files. */
+	/** Fill in the git change counts, which need I/O. */
 	#probeWelcomeWorkspace(welcomeComponent: WelcomeComponent): void {
-		const projectDir = getProjectDir();
-		const apply = (patch: WelcomeSnapshot): void => {
-			if (this.#welcomeComponent !== welcomeComponent) return;
-			welcomeComponent.setSnapshot(patch);
-			this.ui.requestRender();
-		};
 		void gitUtils.status
-			.summary(projectDir)
-			.then(gitChanges => apply({ gitChanges }))
-			.catch(() => apply({ gitChanges: null }));
-		void gitUtils.log
-			.onelines(projectDir, 3)
-			.then(recentCommits => apply({ recentCommits }))
+			.summary(getProjectDir())
+			.then(gitChanges => {
+				if (this.#welcomeComponent !== welcomeComponent) return;
+				welcomeComponent.setSnapshot({ gitChanges });
+				this.ui.requestRender();
+			})
 			.catch(() => {});
-		void loadProjectContextFiles({ cwd: projectDir })
-			.then(files =>
-				apply({
-					contextFiles: files.map(file => {
-						const relative = path.relative(projectDir, file.path);
-						return relative.startsWith("..") ? shortenPath(file.path) : relative;
-					}),
-				}),
-			)
-			.catch(error => {
-				logger.debug("Failed to load context files for welcome screen", {
-					error: error instanceof Error ? error.message : String(error),
-				});
-			});
 	}
 
 	#getWorkingMessageAccent(): WorkingMessageAccent | undefined {

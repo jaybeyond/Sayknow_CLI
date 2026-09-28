@@ -160,7 +160,7 @@ describe("redesigned interactive shell chrome", () => {
 
 		expect(rendered).toContain("Sayknow-CLI");
 		expect(rendered).toContain("gpt-5.5");
-		// No enclosing box and no hero wordmark: the ledger is borderless.
+		// No enclosing box and no hero wordmark: the launch card is borderless.
 		expect(rendered).not.toContain("╭");
 		expect(rendered).not.toContain("╔═╗");
 		for (const line of lines) {
@@ -168,12 +168,13 @@ describe("redesigned interactive shell chrome", () => {
 		}
 	});
 
-	it("uses a wider splash box on wide terminals", () => {
+	it("pads the launch card to the full terminal width", () => {
 		const component = new WelcomeComponent("1.2.3", "gpt-5.5", "openai");
 		const narrowLines = component.render(100);
 		const wideLines = component.render(160);
-		const narrowTop = Bun.stripANSI(narrowLines[0] ?? "");
-		const wideTop = Bun.stripANSI(wideLines[0] ?? "");
+		const titleRow = (lines: string[]) => Bun.stripANSI(lines.find(line => line.includes("Sayknow-CLI")) ?? "");
+		const narrowTop = titleRow(narrowLines);
+		const wideTop = titleRow(wideLines);
 
 		expect(visibleWidth(narrowTop)).toBe(100);
 		expect(visibleWidth(wideTop)).toBe(160);
@@ -184,17 +185,17 @@ describe("redesigned interactive shell chrome", () => {
 		}
 	});
 
-	it("draws the header rule with ASCII glyphs when an ASCII-safe banner is requested", () => {
+	it("draws the launch mark in ASCII glyphs when an ASCII-safe banner is requested", () => {
 		const ascii = Bun.stripANSI(
-			new WelcomeComponent("1.2.3", "gpt-5.5", "openai", [], [], "ascii").render(54).join("\n"),
+			new WelcomeComponent("1.2.3", "gpt-5.5", "openai", [], "ascii").render(80).join("\n"),
 		);
 		const unicode = Bun.stripANSI(
-			new WelcomeComponent("1.2.3", "gpt-5.5", "openai", [], [], "unicode").render(54).join("\n"),
+			new WelcomeComponent("1.2.3", "gpt-5.5", "openai", [], "unicode").render(80).join("\n"),
 		);
 
-		expect(ascii).toContain("-".repeat(54));
-		expect(ascii).not.toContain("─");
-		expect(unicode).toContain("─".repeat(54));
+		expect(ascii).toContain("( o o )");
+		expect(ascii).not.toMatch(/[█▀▄]/);
+		expect(unicode).toContain("▄█████▄");
 	});
 
 	it("resolves welcome banner auto and manual override modes", () => {

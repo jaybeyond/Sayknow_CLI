@@ -10,13 +10,13 @@ describe("i18n engine", () => {
 
 	it("translates a key per active language", () => {
 		setLanguage("en");
-		expect(t("welcome.workflows")).toBe("Workflows");
+		expect(t("welcome.sessions")).toBe("sessions");
 		setLanguage("ko");
-		expect(t("welcome.workflows")).toBe("워크플로");
+		expect(t("welcome.sessions")).toBe("세션");
 		setLanguage("zh");
-		expect(t("welcome.workflows")).toBe("工作流");
+		expect(t("welcome.sessions")).toBe("会话");
 		setLanguage("ja");
-		expect(t("welcome.workflows")).toBe("ワークフロー");
+		expect(t("welcome.sessions")).toBe("セッション");
 	});
 
 	it("falls back to English when a key is missing in the active language", () => {
@@ -26,10 +26,10 @@ describe("i18n engine", () => {
 	});
 
 	it("interpolates parameters", () => {
-		// No param key uses placeholders today; verify the mechanism directly.
 		setLanguage("en");
-		// Active language returns raw string unchanged when no params given.
-		expect(t("welcome.noLsp")).toBe("No LSP servers");
+		expect(t("welcome.allSessions", { key: "Alt+R" })).toBe("Alt+R all sessions");
+		// Unknown placeholders are left in place rather than dropped.
+		expect(t("welcome.allSessions")).toBe("{key} all sessions");
 	});
 
 	it("detects an explicit non-English LANG locale", () => {

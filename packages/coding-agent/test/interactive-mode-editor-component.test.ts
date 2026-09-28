@@ -5,6 +5,7 @@ import { Agent } from "@sayknow-cli/agent-core";
 import type { AssistantMessage } from "@sayknow-cli/ai";
 import { formatKeyHint, formatKeyHints, type KeyDisplayContext } from "@sayknow-cli/coding-agent/config/keybindings";
 import { resetSettingsForTest, Settings, settings } from "@sayknow-cli/coding-agent/config/settings";
+import { t } from "@sayknow-cli/coding-agent/i18n/index";
 import { initTheme, theme } from "@sayknow-cli/coding-agent/modes/theme/theme";
 import { CURSOR_MARKER, ImageProtocol, setTerminalImageProtocol, TERMINAL, Text, visibleWidth } from "@sayknow-cli/tui";
 import { TempDir } from "@sayknow-cli/utils";
@@ -536,7 +537,7 @@ describe("InteractiveMode.setEditorComponent", () => {
 		const welcome = mode.ui.render(160).map(stripRenderControls).join("\n");
 		expect(composer).toContain(expectedNewlineShortcutHint());
 		expect(composer).toContain(mode.keybindings.getDisplayString("app.model.select", injectedKeyDisplayContext));
-		expect(welcome).toContain(`${formatKeyHint("ctrl+c", injectedKeyDisplayContext)} clear`);
+		expect(welcome).toContain(`${formatKeyHint("ctrl+l", injectedKeyDisplayContext)} ${t("welcome.model")}`);
 
 		mode.statusLine.setActionRegistry(
 			{
@@ -590,8 +591,8 @@ describe("InteractiveMode.setEditorComponent", () => {
 		const noticeIndex = rendered.findIndex(line => line.includes("New session started"));
 		expect(rendered.length).toBeLessThanOrEqual(rows);
 		expect(renderedText).toContain("Sayknow-CLI");
-		expect(noticeIndex).toBeGreaterThan(0);
-		expect(rendered[noticeIndex - 1]?.trim()).not.toBe("");
+		// The card gives up rows to the notice instead of pushing it off screen.
+		expect(noticeIndex).toBeGreaterThan(rendered.findIndex(line => line.includes("Sayknow-CLI")));
 		expect(renderedText).toContain("New session started");
 	});
 

@@ -10,21 +10,9 @@ export interface RecentSession {
 	timeAgo: string;
 }
 
-export interface LspServerInfo {
-	name: string;
-	status: "idle" | "ready" | "error" | "connecting";
-	fileTypes: string[];
-}
-
-export interface WelcomeRoleBinding {
-	role: string;
-	model: string;
-}
-
 /**
- * Workspace and runtime facts shown in the launch ledger. Every field is
- * optional: the ledger renders what is known and fills the rest in as the
- * asynchronous probes (git status, context files, MCP) settle.
+ * Workspace facts on the launch card. Every field is optional: the card renders
+ * what is known and fills in git state once the asynchronous probe settles.
  */
 export interface WelcomeSnapshot {
 	/** Display path of the project directory (already home-shortened). */
@@ -32,16 +20,7 @@ export interface WelcomeSnapshot {
 	/** Current branch, `"detached"`, or `null` outside a git repository. */
 	branch?: string | null;
 	gitChanges?: { staged: number; unstaged: number; untracked: number } | null;
-	/** Latest commits as `<short-sha> <subject>` onelines, newest first. */
-	recentCommits?: readonly string[];
 	thinkingLevel?: ThinkingLevel | string;
-	/** Display name of the active model preset. */
-	profile?: string;
-	roles?: readonly WelcomeRoleBinding[];
-	mcp?: { connected: number; total: number };
-	skills?: number;
-	/** Display names of the loaded project instruction files (AGENTS.md, …). */
-	contextFiles?: readonly string[];
 }
 
 export type WelcomeLogoMode = "unicode" | "square" | "ascii";
@@ -50,65 +29,55 @@ export interface WelcomeComponentOptions {
 	getReservedBottomRows?: (termWidth: number) => number;
 	changelogMarkdown?: string;
 	rightGutterWidth?: number;
+	/** Show only "updated to vX" instead of the first release note. */
 	collapseChangelog?: boolean;
 	buildLabel?: string;
 	keyDisplayContext?: KeyDisplayContext;
 	skipLogoAnimation?: boolean;
 	snapshot?: WelcomeSnapshot;
-	/** Key bound to the resume picker (`app.session.resume`); the sessions heading names it. */
+	/** Key bound to the resume picker (`app.session.resume`); the card names it. */
 	resumeKey?: string;
 }
 
-/** Below this width the ledger and the activity column stack instead of sitting side by side. */
-const TWO_COLUMN_MIN_WIDTH = 100;
-const COLUMN_GAP = 4;
-const MIN_RIGHT_COLUMN = 36;
-const WHATS_NEW_ROWS = 3;
-/** Recent sessions on the launch screen; the resume picker has the rest. */
+/** Left margin of the card, and the widest the card grows on wide terminals. */
+const MARGIN = 2;
+const MAX_CARD_WIDTH = 76;
+/** Gap between the octopus mark and the identity lines. */
+const MARK_GAP = 3;
+/** Below this card width the mark is dropped and only the identity lines remain. */
+const MIN_WIDTH_FOR_MARK = 40;
+/** Recent sessions on the card; the resume picker has the rest. */
 const SESSION_ROWS = 3;
-const MAX_LSP_ROWS = 3;
-const MAX_COMMIT_ROWS = 3;
 
-/** Stagger between two ledger sections appearing during the launch reveal. */
+/**
+ * The octopus, drawn in half blocks: a round mantle whose eyes are cells left
+ * empty (so the terminal background shows through, fully enclosed), over a row
+ * of tentacles. The tentacle row has two poses so the intro can make it wave.
+ */
+const MARK_UNICODE = [" ▄█████▄ ", "██ ███ ██", "▀███████▀"] as const;
+const TENTACLES_UNICODE = ["▀▄▀▄▀▄▀▄▀", "▄▀▄▀▄▀▄▀▄"] as const;
+const MARK_ASCII = ["  .---.  ", " ( o o ) ", "  )   (  "] as const;
+const TENTACLES_ASCII = [" /\\/\\/\\/ ", " \\/\\/\\/\\ "] as const;
+const MARK_WIDTH = 9;
+
+/** Intro: color spreads down the card while the tentacles wave, then everything rests. */
 const SECTION_STAGGER_MS = 55;
-/** How long the whole ledger stays in dim ink before the first section takes its colors. */
 const SECTION_SETTLE_MS = 90;
+const WAVE_STEP_MS = 140;
+const INTRO_MS = 4 * WAVE_STEP_MS;
 
-function flowKeyItems(context: KeyDisplayContext): ReadonlyArray<{ key: string; label: string }> {
-	const newlineKey = context.platform === "win32" ? "alt+enter" : "ctrl+j";
-	return [
-		{ key: "/", label: "commands" },
-		{ key: "#", label: "actions" },
-		{ key: "!", label: "shell" },
-		{ key: "$", label: "python" },
-		{ key: "?", label: "keymap" },
-		{ key: "ctrl+l", label: "model" },
-		{ key: "shift+tab", label: "reasoning" },
-		{ key: "tab", label: "complete" },
-		{ key: newlineKey, label: "newline" },
-		{ key: "ctrl+c", label: "clear" },
-	];
-}
-
-const WORKFLOWS: ReadonlyArray<{ command: string; key: MsgKey }> = [
-	{ command: "/deep-interview", key: "welcome.wf.deepInterview" },
-	{ command: "/ralplan", key: "welcome.wf.ralplan" },
-	{ command: "/ultragoal", key: "welcome.wf.ultragoal" },
-	{ command: "/team", key: "welcome.wf.team" },
-];
-
-/** A block of rows revealed together during the launch intro. */
+/** A block of rows that takes its colors together during the intro. */
 interface Section {
 	lines: string[];
+	/** When the viewport is short, the section with the highest rank is dropped first. */
+	dropRank: number;
 }
 
 /**
- * Sayknow-CLI launch surface: an open, borderless ledger. The left column is
- * the state of this workspace — path, branch, model, reasoning, preset, role
- * agents, tooling — so the first screen answers "what am I about to run with".
- * The right column carries activity: what changed, recent sessions, workflows
- * and keys. No enclosing box and no hero wordmark: the octopus mark and the
- * facts carry the identity.
+ * Sayknow-CLI launch card: the octopus mark beside who and where you are
+ * (version, model and reasoning, project and branch), then the three most recent
+ * sessions and a single row of keys. Everything else — the full session list,
+ * workflows, the keymap, release notes — is one key away, not on the card.
  */
 export class WelcomeComponent implements Component {
 	#animStart: number | null = null;
@@ -120,7 +89,6 @@ export class WelcomeComponent implements Component {
 		private modelName: string,
 		private providerName: string,
 		private recentSessions: RecentSession[] = [],
-		private lspServers: LspServerInfo[] = [],
 		private readonly logoMode: WelcomeLogoMode = "unicode",
 		private readonly options: WelcomeComponentOptions = {},
 	) {
@@ -130,10 +98,8 @@ export class WelcomeComponent implements Component {
 	invalidate(): void {}
 
 	/**
-	 * Play a short one-shot reveal: sections appear top to bottom a few frames
-	 * apart, each settling from dim into its colors. Launch happens once per
-	 * session, so a sub-second reveal is affordable; it never blocks input.
-	 * Safe to call multiple times — subsequent calls reset and replay.
+	 * Play the short launch intro. Content is fully readable from the first frame;
+	 * only color and the tentacles move. Safe to call again — it restarts.
 	 */
 	playIntro(requestRender: () => void): void {
 		this.#stopAnimation();
@@ -145,9 +111,7 @@ export class WelcomeComponent implements Component {
 		requestRender();
 		this.#animTimer = setInterval(() => {
 			const elapsed = performance.now() - (this.#animStart ?? 0);
-			if (elapsed >= INTRO_MS) {
-				this.#stopAnimation();
-			}
+			if (elapsed >= INTRO_MS) this.#stopAnimation();
 			requestRender();
 		}, INTRO_TICK_MS);
 		this.#animTimer.unref?.();
@@ -174,11 +138,7 @@ export class WelcomeComponent implements Component {
 		this.recentSessions = sessions;
 	}
 
-	setLspServers(servers: LspServerInfo[]): void {
-		this.lspServers = servers;
-	}
-
-	/** Merge newly probed workspace facts into the ledger. */
+	/** Merge newly probed workspace facts into the card. */
 	setSnapshot(patch: WelcomeSnapshot): void {
 		this.#snapshot = { ...this.#snapshot, ...patch };
 	}
@@ -190,168 +150,107 @@ export class WelcomeComponent implements Component {
 
 		const targetRows = this.#targetRows(termWidth);
 		if (targetRows !== undefined && targetRows <= 0) return [];
+		if (targetRows === 1) return this.#withRightGutter([this.#fit(this.#titleLine(true), width)], gutterWidth);
 
-		const header = this.#fitToWidth(this.#headerLine(width), width);
-		if (targetRows === 1) return this.#withRightGutter([header], gutterWidth);
-
-		const rule = theme.fg("borderMuted", this.#ruleGlyph().repeat(width));
-		const bodyRows = targetRows === undefined ? undefined : Math.max(0, targetRows - 2);
-
-		const twoColumn = width >= TWO_COLUMN_MIN_WIDTH;
-		const leftWidth = twoColumn
-			? Math.min(Math.max(44, Math.floor(width * 0.52)), width - COLUMN_GAP - MIN_RIGHT_COLUMN)
-			: width;
-		const rightWidth = twoColumn ? width - leftWidth - COLUMN_GAP : width;
-
-		const ledger = this.#ledgerSections(leftWidth);
-		const activity = this.#activitySections(rightWidth);
-
-		const reveal = this.#revealState(ledger.length + activity.length);
-		const leftLines = this.#revealLines(ledger, 0, reveal);
-		const rightLines = this.#revealLines(activity, ledger.length, reveal);
-
-		const body: string[] = [];
-		if (twoColumn) {
-			const rows = bodyRows ?? Math.max(leftLines.length, rightLines.length);
-			const left = this.#clip(leftLines, rows);
-			const right = this.#clip(rightLines, rows);
-			const gap = padding(COLUMN_GAP);
-			for (let i = 0; i < rows; i++) {
-				body.push(this.#fitToWidth(left[i] ?? "", leftWidth) + gap + this.#fitToWidth(right[i] ?? "", rightWidth));
-			}
-		} else {
-			const stacked = [...leftLines, "", ...rightLines];
-			const rows = bodyRows ?? stacked.length;
-			for (const line of this.#clip(stacked, rows)) body.push(this.#fitToWidth(line, width));
-			while (body.length < rows) body.push(padding(width));
-		}
-
-		return this.#withRightGutter([header, rule, ...body], gutterWidth);
+		const cardWidth = Math.max(1, Math.min(MAX_CARD_WIDTH, width - MARGIN));
+		const sections = this.#sections(cardWidth);
+		const lines = this.#fitRows(sections, targetRows);
+		const margin = padding(MARGIN);
+		const out = lines.map(line => this.#fit(line ? margin + line : "", width));
+		if (targetRows !== undefined) while (out.length < targetRows) out.push(padding(width));
+		return this.#withRightGutter(out, gutterWidth);
 	}
 
-	// ── Header ──────────────────────────────────────────────────────────────
-
-	#headerLine(width: number): string {
-		const buildLabel = this.options.buildLabel ?? formatBuildLabel();
-		const mark = theme.icon.pi ? `${theme.icon.pi} ` : "";
-		const left = ` ${mark}${theme.bold(theme.fg("text", "Sayknow-CLI"))}${theme.fg("dim", ` v${this.version} · ${buildLabel}`)}`;
-		const tagline = theme.fg("muted", t("welcome.tagline"));
-		const room = width - visibleWidth(left) - visibleWidth(tagline) - 1;
-		return room >= 2 ? `${left}${padding(room)}${tagline} ` : left;
-	}
-
-	#ruleGlyph(): string {
-		return this.logoMode === "ascii" ? "-" : "─";
-	}
-
-	// ── Left column: workspace ledger ───────────────────────────────────────
-
-	#ledgerSections(width: number): Section[] {
-		const labels = {
-			workspace: t("welcome.label.workspace"),
-			branch: t("welcome.label.branch"),
-			commits: t("welcome.label.commits"),
-			model: t("welcome.label.model"),
-			reasoning: t("welcome.label.reasoning"),
-			preset: t("welcome.label.preset"),
-			roles: t("welcome.label.roles"),
-			tools: t("welcome.label.tools"),
+	/**
+	 * Lay the sections out with a blank row above and between them. When the
+	 * viewport is short, whole sections go by rank — keys, then the release
+	 * note, then sessions — and the identity block is clipped last.
+	 */
+	#fitRows(sections: { identity: string[]; others: Section[] }, targetRows: number | undefined): string[] {
+		const colored = this.#colorReveal(1 + sections.others.length);
+		const identity = this.#inkSection(sections.identity, 0, colored);
+		let others = sections.others.map((section, index) => ({
+			...section,
+			lines: this.#inkSection(section.lines, index + 1, colored),
+		}));
+		const assemble = (): string[] => {
+			const out = ["", ...identity];
+			for (const section of others) out.push("", ...section.lines);
+			return out;
 		};
-		const labelWidth = Math.max(...Object.values(labels).map(label => visibleWidth(label))) + 2;
-		const valueWidth = Math.max(1, width - labelWidth - 1);
-		const row = (label: string, value: string): string =>
-			` ${theme.fg("dim", label)}${padding(Math.max(0, labelWidth - visibleWidth(label)))}${this.#truncate(value, valueWidth)}`;
-		const continuation = (value: string): string => ` ${padding(labelWidth)}${this.#truncate(value, valueWidth)}`;
-		const snapshot = this.#snapshot;
-		const sep = theme.fg("dim", " · ");
-
-		// Where
-		const where: string[] = [];
-		if (snapshot.cwd)
-			where.push(row(labels.workspace, theme.fg("statusLinePath", this.#shortenFromLeft(snapshot.cwd, valueWidth))));
-		if (snapshot.branch !== undefined) {
-			const branch =
-				snapshot.branch === null
-					? theme.fg("dim", t("welcome.noGit"))
-					: `${theme.fg(this.#isDirty() ? "statusLineGitDirty" : "statusLineGitClean", snapshot.branch)}${this.#gitChangeSummary(sep)}`;
-			where.push(row(labels.branch, branch));
+		let lines = assemble();
+		if (targetRows === undefined) return lines;
+		while (lines.length > targetRows && others.length > 0) {
+			const drop = others.reduce((worst, section) => (section.dropRank > worst.dropRank ? section : worst));
+			others = others.filter(section => section !== drop);
+			lines = assemble();
 		}
-		(snapshot.recentCommits ?? []).slice(0, MAX_COMMIT_ROWS).forEach((oneline, index) => {
-			const space = oneline.indexOf(" ");
-			const value =
-				space > 0
-					? `${theme.fg("accent", oneline.slice(0, space))} ${theme.fg("muted", oneline.slice(space + 1))}`
-					: theme.fg("muted", oneline);
-			where.push(index === 0 ? row(labels.commits, value) : continuation(value));
-		});
-
-		// Brain
-		const brain: string[] = [];
-		const hasModel = this.modelName !== "Unknown" && this.modelName.length > 0;
-		brain.push(
-			row(
-				labels.model,
-				hasModel
-					? `${theme.bold(theme.fg("statusLineModel", this.modelName))}${sep}${theme.fg("muted", this.providerName)}`
-					: `${theme.fg("accent", t("welcome.chooseModel"))}${sep}${theme.fg("dim", t("welcome.modelHint"))}`,
-			),
-		);
-		if (snapshot.thinkingLevel) {
-			const level = String(snapshot.thinkingLevel);
-			brain.push(row(labels.reasoning, theme.getThinkingBorderColor(level as ThinkingLevel)(level)));
-		}
-		brain.push(row(labels.preset, snapshot.profile ? theme.fg("text", snapshot.profile) : theme.fg("dim", "—")));
-		const roles = snapshot.roles ?? [];
-		if (roles.length === 0) {
-			brain.push(row(labels.roles, theme.fg("dim", t("welcome.rolesInherit"))));
-		} else {
-			const roleWidth = Math.max(...roles.map(role => visibleWidth(role.role))) + 2;
-			roles.forEach((binding, index) => {
-				const value = `${theme.fg("muted", binding.role)}${padding(roleWidth - visibleWidth(binding.role))}${theme.fg("text", binding.model)}`;
-				brain.push(index === 0 ? row(labels.roles, value) : continuation(value));
-			});
-		}
-
-		// Hands
-		const hands: string[] = [];
-		const toolFacts: string[] = [];
-		if (snapshot.mcp) {
-			const { connected, total } = snapshot.mcp;
-			const color = total === 0 ? "dim" : connected === total ? "success" : "warning";
-			toolFacts.push(`${theme.fg("muted", "MCP")} ${theme.fg(color, total === 0 ? "0" : `${connected}/${total}`)}`);
-		}
-		if (snapshot.skills !== undefined) {
-			toolFacts.push(`${theme.fg("muted", t("welcome.skills"))} ${theme.fg("text", String(snapshot.skills))}`);
-		}
-		if (snapshot.contextFiles !== undefined) {
-			const files = snapshot.contextFiles;
-			const shown = files.length === 0 ? theme.fg("dim", "—") : theme.fg("text", files[0]!);
-			const more = files.length > 1 ? theme.fg("dim", ` +${files.length - 1}`) : "";
-			toolFacts.push(`${theme.fg("muted", t("welcome.rules"))} ${shown}${more}`);
-		}
-		const lspLines = this.#lspLines();
-		const toolRows = [...(toolFacts.length > 0 ? [toolFacts.join(sep)] : []), ...lspLines];
-		toolRows.forEach((value, index) => {
-			hands.push(index === 0 ? row(labels.tools, value) : continuation(value));
-		});
-
-		return [where, brain, hands].filter(lines => lines.length > 0).map(lines => ({ lines: [...lines, ""] }));
+		return lines.slice(0, targetRows);
 	}
 
-	#lspLines(): string[] {
-		if (this.lspServers.length === 0) return [theme.fg("dim", t("welcome.noLsp"))];
-		const lines = this.lspServers.slice(0, MAX_LSP_ROWS).map(server => {
-			const icon =
-				server.status === "ready"
-					? theme.styledSymbol("status.success", "success")
-					: server.status === "error"
-						? theme.styledSymbol("status.error", "error")
-						: theme.styledSymbol("status.pending", "muted");
-			return `${icon} ${theme.fg("muted", server.name)} ${theme.fg("dim", server.fileTypes.slice(0, 3).join(" "))}`;
-		});
-		const hidden = this.lspServers.length - MAX_LSP_ROWS;
-		if (hidden > 0) lines.push(theme.fg("dim", `+${hidden} LSP`));
-		return lines;
+	#sections(cardWidth: number): { identity: string[]; others: Section[] } {
+		const others: Section[] = [];
+		const note = this.#releaseNoteLine(cardWidth);
+		if (note) others.push({ lines: [note], dropRank: 2 });
+		others.push({ lines: this.#sessionLines(cardWidth), dropRank: 1 });
+		others.push({ lines: [this.#keysLine(cardWidth)], dropRank: 3 });
+		return { identity: this.#identityLines(cardWidth), others };
+	}
+
+	// ── Identity: mark + who and where ──────────────────────────────────────
+
+	#identityLines(cardWidth: number): string[] {
+		const withMark = cardWidth >= MIN_WIDTH_FOR_MARK;
+		const infoWidth = Math.max(1, withMark ? cardWidth - MARK_WIDTH - MARK_GAP : cardWidth);
+		const info = [
+			this.#truncate(this.#titleLine(!withMark), infoWidth),
+			this.#truncate(theme.fg("muted", t("welcome.tagline")), infoWidth),
+			this.#truncate(this.#modelLine(), infoWidth),
+			this.#truncate(this.#whereLine(infoWidth), infoWidth),
+		];
+		if (!withMark) return info;
+		const mark = this.#markRows();
+		return info.map((line, index) => `${mark[index] ?? padding(MARK_WIDTH)}${padding(MARK_GAP)}${line}`);
+	}
+
+	#markRows(): string[] {
+		const ascii = this.logoMode === "ascii";
+		const body = ascii ? MARK_ASCII : MARK_UNICODE;
+		const tentacles = ascii ? TENTACLES_ASCII : TENTACLES_UNICODE;
+		const pose = this.#animStart == null ? 0 : Math.floor((performance.now() - this.#animStart) / WAVE_STEP_MS) % 2;
+		return [...body, tentacles[pose]!].map(row => theme.fg("accent", row));
+	}
+
+	/** `withIcon` adds the 🐙 glyph for layouts that have no room for the drawn mark. */
+	#titleLine(withIcon = false): string {
+		const buildLabel = this.options.buildLabel ?? formatBuildLabel();
+		const mark = withIcon && this.logoMode !== "ascii" && theme.icon.pi ? `${theme.icon.pi} ` : "";
+		return `${mark}${theme.bold(theme.fg("text", "Sayknow-CLI"))}${theme.fg("dim", ` v${this.version} · ${buildLabel}`)}`;
+	}
+
+	#modelLine(): string {
+		const sep = theme.fg("dim", " · ");
+		if (this.modelName === "Unknown" || this.modelName.length === 0) {
+			return `${theme.fg("accent", t("welcome.chooseModel"))}${sep}${theme.fg("dim", t("welcome.modelHint"))}`;
+		}
+		const parts = [theme.bold(theme.fg("statusLineModel", this.modelName))];
+		const level = this.#snapshot.thinkingLevel;
+		if (level) parts.push(theme.getThinkingBorderColor(String(level) as ThinkingLevel)(String(level)));
+		else if (this.providerName) parts.push(theme.fg("muted", this.providerName));
+		return parts.join(sep);
+	}
+
+	#whereLine(width: number): string {
+		const { cwd, branch } = this.#snapshot;
+		const sep = theme.fg("dim", " · ");
+		const branchPart =
+			typeof branch === "string"
+				? `${theme.fg(this.#isDirty() ? "statusLineGitDirty" : "statusLineGitClean", branch)}${this.#changeSummary()}`
+				: "";
+		if (!cwd) return branchPart;
+		const pathBudget = Math.max(8, width - (branchPart ? visibleWidth(branchPart) + 3 : 0));
+		const path = theme.fg("statusLinePath", this.#shortenFromLeft(cwd, pathBudget));
+		return branchPart ? `${path}${sep}${branchPart}` : path;
 	}
 
 	#isDirty(): boolean {
@@ -359,144 +258,67 @@ export class WelcomeComponent implements Component {
 		return !!changes && changes.staged + changes.unstaged + changes.untracked > 0;
 	}
 
-	#gitChangeSummary(sep: string): string {
+	#changeSummary(): string {
 		const changes = this.#snapshot.gitChanges;
-		if (changes === undefined) return "";
-		if (changes === null) return "";
-		if (!this.#isDirty()) return `${sep}${theme.fg("dim", t("welcome.clean"))}`;
+		if (!changes || !this.#isDirty()) return "";
 		const parts: string[] = [];
 		if (changes.staged > 0) parts.push(theme.fg("statusLineStaged", `+${changes.staged}`));
 		if (changes.unstaged > 0) parts.push(theme.fg("statusLineDirty", `~${changes.unstaged}`));
 		if (changes.untracked > 0) parts.push(theme.fg("statusLineUntracked", `?${changes.untracked}`));
-		return `${sep}${parts.join(" ")}`;
+		return ` ${parts.join(" ")}`;
 	}
 
-	// ── Right column: activity ──────────────────────────────────────────────
+	// ── Release note, sessions, keys ────────────────────────────────────────
 
-	/**
-	 * The launch screen stays short on purpose: three recent sessions and three
-	 * notes, never more. The full session list lives in the resume picker, and the
-	 * sessions heading names the key that opens it.
-	 */
-	#activitySections(width: number): Section[] {
-		const keyRows = this.#flowKeyRows(width);
-		const heading = (label: string, note?: string): string =>
-			` ${theme.bold(theme.fg("accent", label))}${note ? theme.fg("dim", `  ${note}`) : ""}`;
-		const whatsNew = this.#whatsNewLines(width, WHATS_NEW_ROWS);
-
+	/** One line, only after an update: the version and its first note, pointing at /changelog. */
+	#releaseNoteLine(width: number): string | undefined {
 		const changelog = this.options.changelogMarkdown?.trim();
-		const version = changelog ? this.#latestChangelogVersion(changelog) : undefined;
-		const context = this.options.keyDisplayContext ?? { platform: process.platform };
-		const resumeKey = this.options.resumeKey ? formatKeyHint(this.options.resumeKey, context) : "/resume";
-		const sessionsNote = this.recentSessions.length > 0 ? t("welcome.allSessions", { key: resumeKey }) : undefined;
+		if (!changelog) return undefined;
+		const version = this.#latestChangelogVersion(changelog);
+		const lead = `${theme.bold(theme.fg("accent", t("welcome.whatsNew")))}${theme.fg("dim", ` v${version}`)}`;
+		const pointer = theme.fg("dim", "/changelog");
+		const first = this.options.collapseChangelog ? undefined : this.#changelogItems(changelog)[0];
+		if (!first) return this.#spread(lead, pointer, width);
+		const room = width - visibleWidth(lead) - visibleWidth(pointer) - 4;
+		const body = room >= 12 ? `  ${theme.fg("muted", this.#truncate(first, room))}` : "";
+		return this.#spread(`${lead}${body}`, pointer, width);
+	}
 
-		const workflowWidth = Math.max(...WORKFLOWS.map(item => visibleWidth(item.command))) + 2;
-		return [
-			{ lines: [heading(t("welcome.sessionTrail"), sessionsNote), ...this.#sessionTrailLines(width), ""] },
-			{ lines: [heading(t("welcome.whatsNew"), version ? `v${version}` : undefined), ...whatsNew, ""] },
-			{
-				lines: [
-					heading(t("welcome.workflows")),
-					...WORKFLOWS.map(
-						item =>
-							`  ${theme.fg("accent", item.command)}${padding(workflowWidth - visibleWidth(item.command))}${theme.fg("muted", t(item.key))}`,
-					),
-					"",
-				],
-			},
-			{ lines: [heading(t("welcome.flowKeys")), ...keyRows] },
+	#sessionLines(width: number): string[] {
+		const heading = theme.bold(theme.fg("accent", t("welcome.sessionTrail")));
+		if (this.recentSessions.length === 0) return [heading, theme.fg("dim", t("welcome.noSessions"))];
+		const lines = [
+			this.#spread(heading, theme.fg("dim", t("welcome.allSessions", { key: this.#resumeKey() })), width),
 		];
-	}
-
-	#flowKeyItemText(item: { key: string; label: string }): string {
-		const context = this.options.keyDisplayContext ?? { platform: process.platform };
-		return `${theme.fg("text", formatKeyHint(item.key, context))}${theme.fg("dim", ` ${this.#flowKeyLabel(item.label)}`)}`;
-	}
-
-	#flowKeyLabel(label: string): string {
-		switch (label) {
-			case "commands":
-				return t("welcome.commands");
-			case "actions":
-				return t("welcome.actions");
-			case "shell":
-				return t("welcome.shell");
-			case "python":
-				return t("welcome.python");
-			case "keymap":
-				return t("welcome.keymap");
-			case "model":
-				return t("welcome.model");
-			case "reasoning":
-				return t("welcome.reasoning");
-			default:
-				return label;
-		}
-	}
-
-	#flowKeyRows(width: number): string[] {
-		const contentWidth = Math.max(1, width - 2);
-		const separator = theme.fg("dim", "  ");
-		const rows: string[] = [];
-		let current = "";
-		for (const item of flowKeyItems(this.options.keyDisplayContext ?? { platform: process.platform })) {
-			const segment = this.#flowKeyItemText(item);
-			const next = current ? `${current}${separator}${segment}` : segment;
-			if (current && visibleWidth(next) > contentWidth) {
-				rows.push(`  ${current}`);
-				current = segment;
-			} else {
-				current = next;
-			}
-		}
-		if (current) rows.push(`  ${current}`);
-		return rows;
-	}
-
-	#sessionTrailLines(width: number): string[] {
-		if (this.recentSessions.length === 0) {
-			return [`  ${theme.fg("dim", t("welcome.noSessions"))}`];
-		}
-		const lines: string[] = [];
 		for (const session of this.recentSessions.slice(0, SESSION_ROWS)) {
 			const time = theme.fg("dim", session.timeAgo);
-			const nameBudget = Math.max(1, width - 2 - visibleWidth(session.timeAgo) - 2);
-			const name = this.#truncate(session.name, nameBudget);
-			const pad = padding(Math.max(1, width - 2 - visibleWidth(name) - visibleWidth(session.timeAgo)));
-			lines.push(`  ${theme.fg("muted", name)}${pad}${time}`);
+			const name = theme.fg("muted", this.#truncate(session.name, Math.max(1, width - visibleWidth(time) - 2)));
+			lines.push(this.#spread(name, time, width));
 		}
 		return lines;
 	}
 
-	#whatsNewLines(width: number, maxRows: number): string[] {
-		const rowLimit = Math.max(1, Math.floor(maxRows));
-		const changelog = this.options.changelogMarkdown?.trim();
-		if (!changelog) return [`  ${theme.fg("dim", t("welcome.readyPrompt"))}`];
+	#keysLine(width: number): string {
+		const context = this.options.keyDisplayContext ?? { platform: process.platform };
+		const items: ReadonlyArray<{ key: string; label: MsgKey }> = [
+			{ key: "/", label: "welcome.commands" },
+			{ key: this.#resumeKey(), label: "welcome.sessions" },
+			{ key: formatKeyHint("ctrl+l", context), label: "welcome.model" },
+			{ key: "?", label: "welcome.keymap" },
+		];
+		const text = items
+			.map(item => `${theme.fg("text", item.key)} ${theme.fg("dim", t(item.label))}`)
+			.join(theme.fg("dim", "   "));
+		return this.#truncate(text, width);
+	}
 
-		const version = this.#latestChangelogVersion(changelog);
-		const items = this.options.collapseChangelog ? [] : this.#changelogItems(changelog);
-		if (items.length === 0) {
-			return [
-				`  ${theme.fg("muted", `Updated to v${version}`)}`,
-				`  ${theme.fg("dim", `Use ${theme.bold("/changelog")} for details`)}`,
-			].slice(0, rowLimit);
-		}
-
-		const bullet = `  ${theme.md.bullet} `;
-		const textWidth = Math.max(1, width - visibleWidth(bullet));
-		const visibleCount = items.length > rowLimit ? Math.max(1, rowLimit - 1) : rowLimit;
-		const lines = items
-			.slice(0, visibleCount)
-			.map(item => `${theme.fg("accent", bullet)}${theme.fg("muted", this.#truncate(item, textWidth))}`);
-		if (items.length > lines.length && lines.length < rowLimit) {
-			lines.push(`  ${theme.fg("dim", `… ${theme.bold("/changelog")} for full notes`)}`);
-		}
-		return lines;
+	#resumeKey(): string {
+		const context = this.options.keyDisplayContext ?? { platform: process.platform };
+		return this.options.resumeKey ? formatKeyHint(this.options.resumeKey, context) : "/resume";
 	}
 
 	#latestChangelogVersion(markdown: string): string {
-		const versionMatch = markdown.match(/##\s+\[?(\d+\.\d+\.\d+)\]?/);
-		return versionMatch?.[1] ?? this.version;
+		return markdown.match(/##\s+\[?(\d+\.\d+\.\d+)\]?/)?.[1] ?? this.version;
 	}
 
 	#changelogItems(markdown: string): string[] {
@@ -509,60 +331,41 @@ export class WelcomeComponent implements Component {
 				continue;
 			}
 			if (inFence || !line || /^#{1,6}\s+/.test(line) || /^-{3,}$/.test(line)) continue;
-			const withoutBullet = line
+			const cleaned = line
 				.replace(/^[-*]\s+/, "")
 				.replace(/^\d+\.\s+/, "")
-				.replace(/^>\s*/, "");
-			const cleaned = this.#stripMarkdown(withoutBullet);
+				.replace(/^>\s*/, "")
+				.replace(/`([^`]+)`/g, "$1")
+				.replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
+				.replace(/\*\*([^*]+)\*\*/g, "$1")
+				.replace(/__([^_]+)__/g, "$1")
+				.replace(/\*([^*]+)\*/g, "$1")
+				.replace(/[_~]/g, "")
+				.trim();
 			if (cleaned) items.push(cleaned);
 		}
 		return items;
 	}
 
-	#stripMarkdown(text: string): string {
-		return text
-			.replace(/`([^`]+)`/g, "$1")
-			.replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
-			.replace(/\*\*([^*]+)\*\*/g, "$1")
-			.replace(/__([^_]+)__/g, "$1")
-			.replace(/\*([^*]+)\*/g, "$1")
-			.replace(/[_~]/g, "")
-			.trim();
-	}
+	// ── Intro ───────────────────────────────────────────────────────────────
 
-	// ── Launch reveal ───────────────────────────────────────────────────────
-
-	/** How many sections are visible, and which one is still settling, at this frame. */
-	/** Number of sections that have taken their colors; the rest are still drawn, but in dim ink. */
-	#revealState(sectionCount: number): { colored: number } {
-		if (this.#animStart == null) return { colored: sectionCount };
+	/** Sections that have taken their colors; the rest are drawn in dim ink until the intro reaches them. */
+	#colorReveal(sectionCount: number): number {
+		if (this.#animStart == null) return sectionCount;
 		const elapsed = performance.now() - this.#animStart;
-		return { colored: Math.min(sectionCount, Math.floor((elapsed - SECTION_SETTLE_MS) / SECTION_STAGGER_MS) + 1) };
+		return Math.min(sectionCount, Math.floor((elapsed - SECTION_SETTLE_MS) / SECTION_STAGGER_MS) + 1);
 	}
 
-	/**
-	 * Every fact is on screen from the first frame; the intro only lets color
-	 * spread top to bottom, like ink soaking in. Content never waits on the effect.
-	 */
-	#revealLines(sections: Section[], offset: number, reveal: { colored: number }): string[] {
-		const lines: string[] = [];
-		sections.forEach((section, index) => {
-			if (offset + index < reveal.colored) {
-				lines.push(...section.lines);
-				return;
-			}
-			for (const line of section.lines) lines.push(theme.fg("dim", Bun.stripANSI(line)));
-		});
-		return lines;
+	#inkSection(lines: string[], order: number, colored: number): string[] {
+		return order < colored ? lines : lines.map(line => theme.fg("dim", Bun.stripANSI(line)));
 	}
 
 	// ── Layout helpers ──────────────────────────────────────────────────────
 
-	#clip(lines: string[], rows: number): string[] {
-		if (rows <= 0) return [];
-		if (lines.length <= rows) return lines;
-		if (rows === 1) return [theme.fg("dim", " …")];
-		return [...lines.slice(0, rows - 1), theme.fg("dim", " …")];
+	/** `left` and `right` on one row, `right` flush with the card's right edge. */
+	#spread(left: string, right: string, width: number): string {
+		const room = width - visibleWidth(left) - visibleWidth(right);
+		return room >= 2 ? `${left}${padding(room)}${right}` : this.#truncate(left, width);
 	}
 
 	#truncate(text: string, width: number): string {
@@ -578,8 +381,8 @@ export class WelcomeComponent implements Component {
 		return `…${tail}`;
 	}
 
-	/** Fit string to exact width with native ANSI/wide-glyph truncation and padding. */
-	#fitToWidth(str: string, width: number): string {
+	/** Fit a string to exactly `width` columns (native ANSI/wide-glyph aware). */
+	#fit(str: string, width: number): string {
 		const visLen = visibleWidth(str);
 		if (visLen > width) return truncateToWidth(str, width, null, true);
 		return str + padding(width - visLen);
@@ -588,8 +391,7 @@ export class WelcomeComponent implements Component {
 	#rightGutterWidth(termWidth: number): number {
 		const configured = this.options.rightGutterWidth ?? 0;
 		if (!Number.isFinite(configured) || configured <= 0) return 0;
-		const gutterWidth = Math.floor(configured);
-		return Math.min(gutterWidth, Math.max(0, termWidth - 4));
+		return Math.min(Math.floor(configured), Math.max(0, termWidth - 4));
 	}
 
 	#withRightGutter(lines: string[], rightGutterWidth: number): string[] {
@@ -600,16 +402,12 @@ export class WelcomeComponent implements Component {
 
 	#targetRows(termWidth: number): number | undefined {
 		const viewportRows = this.options.getViewportRows?.();
-		if (typeof viewportRows !== "number" || !Number.isFinite(viewportRows) || viewportRows <= 0) {
-			return undefined;
-		}
+		if (typeof viewportRows !== "number" || !Number.isFinite(viewportRows) || viewportRows <= 0) return undefined;
 		const reservedRows = Math.max(0, Math.floor(this.options.getReservedBottomRows?.(termWidth) ?? 0));
 		return Math.max(0, Math.floor(viewportRows) - reservedRows);
 	}
 }
 
-/** Upper bound on the reveal: enough for every section to land and settle. */
-const INTRO_MS = 12 * SECTION_STAGGER_MS + SECTION_SETTLE_MS;
 /** Resolve the intro cadence without making tests mutate global process state. */
 export function resolveWelcomeIntroTickMs(
 	platform: NodeJS.Platform = process.platform,

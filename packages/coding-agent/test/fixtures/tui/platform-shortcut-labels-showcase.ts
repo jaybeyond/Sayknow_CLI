@@ -208,7 +208,7 @@ function renderStatus(entry: PlatformShortcutLabelsShowcaseEntry, context: KeyDi
 }
 
 function renderWelcome(entry: PlatformShortcutLabelsShowcaseEntry, context: KeyDisplayContext): string[] {
-	const welcome = new WelcomeComponent("0.0.0-showcase", "deterministic-model", "fixture", [], [], "unicode", {
+	const welcome = new WelcomeComponent("0.0.0-showcase", "deterministic-model", "fixture", [], "unicode", {
 		keyDisplayContext: context,
 		getViewportRows: () => entry.viewport.rows - 2,
 		getReservedBottomRows: () => 2,

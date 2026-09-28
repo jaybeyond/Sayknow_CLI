@@ -2,19 +2,22 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from "bun:test";
 import { stripVTControlCharacters } from "node:util";
 import { visibleWidth } from "@sayknow-cli/tui";
 import { getLanguage, setLanguage } from "../src/i18n";
-import { resolveWelcomeIntroTickMs, WelcomeComponent, type WelcomeSnapshot } from "../src/modes/components/welcome";
+import {
+	type RecentSession,
+	resolveWelcomeIntroTickMs,
+	WelcomeComponent,
+	type WelcomeComponentOptions,
+	type WelcomeSnapshot,
+} from "../src/modes/components/welcome";
 import { getThemeByName, setThemeInstance } from "../src/modes/theme/theme";
 
 const originalBuildChannel = process.env.SKC_BUILD_CHANNEL;
-// The ledger assertions read English labels; a Korean system locale leaks in during full runs.
+// Assertions read English labels; a Korean system locale leaks in during full runs.
 const originalLanguage = getLanguage();
 
 afterEach(() => {
-	if (originalBuildChannel === undefined) {
-		delete process.env.SKC_BUILD_CHANNEL;
-	} else {
-		process.env.SKC_BUILD_CHANNEL = originalBuildChannel;
-	}
+	if (originalBuildChannel === undefined) delete process.env.SKC_BUILD_CHANNEL;
+	else process.env.SKC_BUILD_CHANNEL = originalBuildChannel;
 });
 beforeAll(async () => {
 	setLanguage("en");
@@ -28,30 +31,26 @@ afterAll(() => {
 
 const plain = (lines: string[]): string[] => lines.map(line => stripVTControlCharacters(line));
 
-const FULL_SNAPSHOT: WelcomeSnapshot = {
+const SNAPSHOT: WelcomeSnapshot = {
 	cwd: "~/Dev/sayknow-cli",
-	branch: "feature/ledger",
+	branch: "feature/card",
 	gitChanges: { staged: 2, unstaged: 5, untracked: 1 },
-	recentCommits: ["82c86be perf(session): reject foreign receipts early", "67c255e feat(ai): bundle GPT-6 Sol"],
 	thinkingLevel: "xhigh",
-	profile: "Claude Opus 5.5",
-	roles: [
-		{ role: "executor", model: "claude-sonnet-5" },
-		{ role: "planner", model: "claude-opus-5-5:medium" },
-		{ role: "critic", model: "claude-opus-5-5:high" },
-		{ role: "architect", model: "claude-opus-5-5:max" },
-	],
-	mcp: { connected: 3, total: 4 },
-	skills: 24,
-	contextFiles: ["AGENTS.md", "CLAUDE.md"],
 };
 
-function ledger(snapshot: WelcomeSnapshot, width = 140, rows = 40): string {
-	const welcome = new WelcomeComponent("1.2.3", "Claude Opus 5.5", "anthropic", [], [], "unicode", {
-		snapshot,
-		getViewportRows: () => rows,
+const SESSIONS: RecentSession[] = Array.from({ length: 8 }, (_, index) => ({
+	name: `session-${index + 1}`,
+	timeAgo: `${index + 1}m ago`,
+}));
+
+const CHANGELOG = ["## [1.2.3]", "", "### Added", "", "- `/fork` is back", "- Second note", "- Third note"].join("\n");
+
+function card(options: WelcomeComponentOptions = {}, sessions: RecentSession[] = SESSIONS, width = 120): string[] {
+	const welcome = new WelcomeComponent("1.2.3", "Claude Opus 5.5", "anthropic", sessions, "unicode", {
+		snapshot: SNAPSHOT,
+		...options,
 	});
-	return plain(welcome.render(width)).join("\n");
+	return plain(welcome.render(width));
 }
 
 describe("welcome intro cadence", () => {
@@ -62,283 +61,164 @@ describe("welcome intro cadence", () => {
 	});
 });
 
-describe("launch reveal", () => {
-	it("renders the settled frame immediately when the reveal is skipped", () => {
-		const skipped = new WelcomeComponent("1.2.3", "test-model", "test-provider", [], [], "ascii", {
-			skipLogoAnimation: true,
-			snapshot: FULL_SNAPSHOT,
-		});
-		const settled = skipped.render(120);
-		skipped.playIntro(() => {});
-		expect(skipped.render(120)).toEqual(settled);
-
-		const animated = new WelcomeComponent("1.2.3", "test-model", "test-provider", [], [], "ascii", {
-			snapshot: FULL_SNAPSHOT,
-		});
-		animated.playIntro(() => {});
-		const firstFrame = animated.render(120);
-		// Only color is staged: every fact is readable on the first frame, in the same place.
-		expect(firstFrame).not.toEqual(settled);
-		expect(firstFrame).toHaveLength(settled.length);
-		expect(plain(firstFrame)).toEqual(plain(settled));
-
-		animated.dispose();
-		expect(animated.render(120)).toEqual(settled);
-		skipped.dispose();
-	});
-});
-
-describe("WelcomeComponent layout", () => {
-	it("uses the full terminal width on wide viewports", () => {
-		const lines = new WelcomeComponent("1.2.3", "test-model", "test-provider", [], [], "ascii").render(200);
-		expect(lines.length).toBeGreaterThan(0);
-		for (const line of lines) expect(visibleWidth(line)).toBe(200);
+describe("launch card content", () => {
+	it("shows who and where: version, model with reasoning, project path, branch and changes", () => {
+		const text = card({ buildLabel: "release build" }).join("\n");
+		expect(text).toContain("Sayknow-CLI v1.2.3 · release build");
+		expect(text).toContain("Coding should feel like thinking.");
+		expect(text).toContain("Claude Opus 5.5 · xhigh");
+		expect(text).toMatch(/~\/Dev\/sayknow-cli · feature\/card \+2 ~5 \?1/);
 	});
 
-	it("reserves the composer gutter for normal and one-row layouts", () => {
-		const normal = new WelcomeComponent("1.2.3", "test-model", "test-provider", [], [], "ascii", {
-			rightGutterWidth: 1,
-		});
-		for (const line of plain(normal.render(100))) {
-			expect(visibleWidth(line)).toBe(100);
-			expect(line.endsWith(" ")).toBe(true);
+	it("keeps the card short: three sessions, one release line, one row of keys", () => {
+		const text = card({ changelogMarkdown: CHANGELOG, getViewportRows: () => 80 }).join("\n");
+		expect(text).toContain("session-3");
+		expect(text).not.toContain("session-4");
+		expect(text).toContain("What's new v1.2.3");
+		expect(text).toContain("/fork is back");
+		expect(text).not.toContain("Second note");
+		expect(text).toContain("/changelog");
+		for (const gone of ["workspace", "roles", "preset", "MCP", "LSP", "Workflows", "/deep-interview", "Flow keys"]) {
+			expect(text).not.toContain(gone);
 		}
-
-		const constrained = new WelcomeComponent("1.2.3", "test-model", "test-provider", [], [], "ascii", {
-			rightGutterWidth: 1,
-			getViewportRows: () => 1,
-			getReservedBottomRows: () => 0,
-		});
-		const lines = plain(constrained.render(100));
-		expect(lines).toHaveLength(1);
-		expect(visibleWidth(lines[0]!)).toBe(100);
-		expect(lines[0]).toContain("Sayknow-CLI");
 	});
 
-	it("renders the build label from metadata instead of defaulting to dev", () => {
-		const welcome = new WelcomeComponent("1.2.3", "test-model", "test-provider", [], [], "ascii", {
-			buildLabel: "release build",
-		});
-		const rendered = plain(welcome.render(120)).join("\n");
-		expect(rendered).toContain("Sayknow-CLI v1.2.3 · release build");
-		expect(rendered).not.toContain("dev build");
+	it("names the key that opens the full session list", () => {
+		const text = card({ resumeKey: "alt+r", keyDisplayContext: { platform: "linux" } }).join("\n");
+		expect(text).toMatch(/Recent sessions\s+Alt\+R all sessions/);
+		expect(text).toMatch(/\/ commands\s+Alt\+R sessions\s+Ctrl\+L model\s+\? keymap/);
+
+		const unbound = card().join("\n");
+		expect(unbound).toContain("/resume all sessions");
+
+		const empty = card({}, []).join("\n");
+		expect(empty).toContain("No saved sessions");
+		expect(empty).not.toContain("all sessions");
 	});
 
-	it("renders the production metadata resolver label when no override is provided", () => {
-		process.env.SKC_BUILD_CHANNEL = "release";
-		const rendered = plain(
-			new WelcomeComponent("1.2.3", "test-model", "test-provider", [], [], "ascii").render(120),
-		).join("\n");
-		expect(rendered).toContain("Sayknow-CLI v1.2.3 · release build");
-		expect(rendered).not.toContain("dev build");
-	});
-
-	it("is borderless: no enclosing box and no column divider", () => {
-		const rendered = ledger(FULL_SNAPSHOT);
-		for (const glyph of ["╭", "╮", "╰", "╯", "│", "┴"]) expect(rendered).not.toContain(glyph);
-	});
-
-	it("sits the ledger beside the activity column when wide, and stacks it when narrow", () => {
-		const wide = ledger(FULL_SNAPSHOT, 140).split("\n");
-		const sideBySide = wide.find(line => line.includes("workspace"));
-		expect(sideBySide).toContain("Session trail");
-
-		const narrow = ledger(FULL_SNAPSHOT, 80, 60).split("\n");
-		const workspaceRow = narrow.findIndex(line => line.includes("workspace"));
-		const sessionsRow = narrow.findIndex(line => line.includes("Session trail"));
-		const whatsNewRow = narrow.findIndex(line => line.includes("What's new"));
-		expect(workspaceRow).toBeGreaterThan(-1);
-		// Stacked: sessions come right after the ledger, before release notes.
-		expect(sessionsRow).toBeGreaterThan(workspaceRow);
-		expect(whatsNewRow).toBeGreaterThan(sessionsRow);
-		expect(narrow[workspaceRow]).not.toContain("What's new");
-	});
-
-	it("degrades gracefully on tiny terminal widths", () => {
-		const welcome = new WelcomeComponent("1.2.3", "test-model", "test-provider", [], [], "ascii");
-		expect(welcome.render(5).every(line => visibleWidth(line) <= 5)).toBe(true);
-		expect(welcome.render(3)).toEqual([]);
-		expect(welcome.render(24).every(line => visibleWidth(line) <= 24)).toBe(true);
-	});
-
-	it("fills available terminal rows while reserving the pinned composer and HUD", () => {
-		const welcome = new WelcomeComponent("1.2.3", "test-model", "test-provider", [], [], "ascii", {
-			getViewportRows: () => 24,
-			getReservedBottomRows: () => 6,
-		});
-		const lines = welcome.render(100);
-		expect(lines).toHaveLength(18);
-		for (const line of lines) expect(visibleWidth(line)).toBe(100);
-		const text = plain(lines).join("\n");
-		expect(text).toContain("Sayknow-CLI");
-		expect(text).toContain("What's new");
-	});
-
-	it("does not steal rows when the pinned composer already fills the viewport", () => {
-		const hidden = new WelcomeComponent("1.2.3", "test-model", "test-provider", [], [], "ascii", {
-			getViewportRows: () => 5,
-			getReservedBottomRows: () => 5,
-		});
-		expect(hidden.render(80)).toEqual([]);
-
-		const oneRow = new WelcomeComponent("1.2.3", "test-model", "test-provider", [], [], "ascii", {
-			getViewportRows: () => 5,
-			getReservedBottomRows: () => 4,
-		});
-		const lines = oneRow.render(80);
-		expect(lines).toHaveLength(1);
-		expect(visibleWidth(lines[0] ?? "")).toBeLessThanOrEqual(80);
-	});
-});
-
-describe("workspace ledger", () => {
-	it("shows the workspace, branch, commits, model, reasoning, preset, roles and tooling", () => {
-		const text = ledger(FULL_SNAPSHOT);
-
-		expect(text).toContain("~/Dev/sayknow-cli");
-		expect(text).toContain("feature/ledger · +2 ~5 ?1");
-		expect(text).toContain("82c86be perf(session): reject foreign receipts early");
-		expect(text).toContain("Claude Opus 5.5 · anthropic");
-		expect(text).toContain("xhigh");
-		expect(text).toContain("preset");
-		expect(text).toContain("MCP 3/4");
-		expect(text).toContain("skills 24");
-		expect(text).toContain("rules AGENTS.md +1");
-
-		// Role agents keep their canonical order.
-		const order = ["executor", "planner", "critic", "architect"].map(role => text.indexOf(`${role} `));
-		expect(order.every(index => index > -1)).toBe(true);
-		expect([...order].sort((a, b) => a - b)).toEqual(order);
-		expect(text).toContain("claude-opus-5-5:max");
-	});
-
-	it("says the roles follow the default model when no role override is set", () => {
-		expect(ledger({ ...FULL_SNAPSHOT, roles: [] })).toContain("roles follow the default model");
+	it("collapses the release line to the version when asked", () => {
+		const text = card({ changelogMarkdown: CHANGELOG, collapseChangelog: true }).join("\n");
+		expect(text).toContain("What's new v1.2.3");
+		expect(text).not.toContain("/fork is back");
+		expect(card().join("\n")).not.toContain("What's new");
 	});
 
 	it("guides model selection instead of printing Unknown", () => {
-		const welcome = new WelcomeComponent("1.2.3", "Unknown", "Unknown", [], [], "unicode");
-		const text = plain(welcome.render(140)).join("\n");
+		const welcome = new WelcomeComponent("1.2.3", "Unknown", "", [], "unicode");
+		const text = plain(welcome.render(120)).join("\n");
 		expect(text).toContain("choose a model");
 		expect(text).not.toContain("Unknown");
 	});
 
-	it("fills in probed facts as they arrive", () => {
-		const welcome = new WelcomeComponent("1.2.3", "m", "p", [], [], "unicode", {
-			snapshot: { branch: "main" },
+	it("fills in probed git counts as they arrive", () => {
+		const welcome = new WelcomeComponent("1.2.3", "m", "p", [], "unicode", {
+			snapshot: { cwd: "~/x", branch: "main" },
 		});
-		const before = plain(welcome.render(140)).join("\n");
-		expect(before).toContain("main");
-		expect(before).not.toContain("clean");
-
-		welcome.setSnapshot({ gitChanges: { staged: 0, unstaged: 0, untracked: 0 } });
-		const after = plain(welcome.render(140)).join("\n");
-		expect(after).toContain("main · clean");
+		expect(plain(welcome.render(120)).join("\n")).not.toContain("~5");
+		welcome.setSnapshot({ gitChanges: { staged: 0, unstaged: 5, untracked: 0 } });
+		expect(plain(welcome.render(120)).join("\n")).toContain("main ~5");
 	});
 
-	it("marks a directory outside git instead of hiding the row", () => {
-		expect(ledger({ branch: null })).toContain("not a git repository");
-	});
-
-	it("keeps the tail of a long workspace path — the part that names the project", () => {
-		const text = ledger({ cwd: `~/${"deeply/nested/".repeat(12)}my-project` }, 100);
-		expect(text).toContain("…");
+	it("keeps the tail of a long project path, the part that names the project", () => {
+		const text = card({ snapshot: { cwd: `~/${"deep/".repeat(30)}my-project`, branch: "main" } }).join("\n");
 		expect(text).toContain("my-project");
+		expect(text).toContain("…");
 	});
 });
 
-describe("activity column", () => {
-	it("integrates changelog highlights without overflowing narrow CJK content", () => {
-		const welcome = new WelcomeComponent("1.2.3", "test-model", "test-provider", [], [], "ascii", {
-			getViewportRows: () => 40,
-			changelogMarkdown: [
-				"## [1.2.3]",
-				"",
-				"### Fixed",
-				"",
-				"- 한국어와 English가 섞인 긴 업데이트 내용을 시작 화면 안에서 안전하게 줄입니다.",
-				"- Added fullscreen startup framing.",
-			].join("\n"),
-		});
-		const lines = welcome.render(60);
-		expect(plain(lines).join("\n")).toContain("한국어와 English");
-		for (const line of lines) expect(visibleWidth(line)).toBeLessThanOrEqual(60);
+describe("launch card layout", () => {
+	it("draws the octopus mark beside the identity lines, with no box around anything", () => {
+		const lines = card();
+		const title = lines.find(line => line.includes("Sayknow-CLI"))!;
+		expect(title).toContain("▄█████▄");
+		expect(lines.join("\n")).toContain("▀▄▀▄▀▄▀▄▀");
+		for (const glyph of ["╭", "╮", "╰", "╯", "│", "─"]) expect(lines.join("\n")).not.toContain(glyph);
 	});
 
-	it("keeps What's new and the session trail short however tall the viewport is", () => {
-		const changelogMarkdown = [
-			"## [1.2.3]",
-			"",
-			"### Added",
-			"",
-			...Array.from({ length: 10 }, (_, index) => `- Dynamic changelog item ${index + 1}`),
-		].join("\n");
-		const recentSessions = Array.from({ length: 12 }, (_, index) => ({
-			name: `trail-session-${index + 1}`,
-			timeAgo: `${index + 1}m ago`,
-		}));
-		const make = (rows: number) =>
-			plain(
-				new WelcomeComponent("1.2.3", "m", "p", recentSessions, [], "ascii", {
-					getViewportRows: () => rows,
-					changelogMarkdown,
-				}).render(140),
-			).join("\n");
+	it("uses an ASCII mark in ASCII mode and drops the mark when the card is narrow", () => {
+		const ascii = plain(new WelcomeComponent("1.2.3", "m", "p", [], "ascii").render(100)).join("\n");
+		expect(ascii).toContain("( o o )");
+		expect(ascii).not.toContain("█");
 
-		for (const rows of [26, 48, 80]) {
-			const text = make(rows);
-			expect(text).toContain("trail-session-3");
-			expect(text).not.toContain("trail-session-4");
-			expect(text).toContain("Dynamic changelog item 1");
-			expect(text).not.toContain("Dynamic changelog item 4");
+		const narrow = card({}, SESSIONS, 36).join("\n");
+		expect(narrow).not.toContain("█");
+		expect(narrow).toContain("Sayknow-CLI");
+	});
+
+	it("does not stretch across wide terminals", () => {
+		const lines = card({ resumeKey: "alt+r" }, SESSIONS, 220);
+		for (const line of lines) expect(visibleWidth(line)).toBe(220);
+		const longest = Math.max(...lines.map(line => line.trimEnd().length));
+		expect(longest).toBeLessThanOrEqual(2 + 76);
+	});
+
+	it("fills the rows above the pinned composer and HUD", () => {
+		const lines = card({ getViewportRows: () => 30, getReservedBottomRows: () => 6 });
+		expect(lines).toHaveLength(24);
+		expect(lines.join("\n")).toContain("session-1");
+	});
+
+	it("drops keys, then the release line, then sessions when rows run short", () => {
+		const rows = (count: number) =>
+			card({ changelogMarkdown: CHANGELOG, getViewportRows: () => count, resumeKey: "alt+r" }).join("\n");
+		const full = rows(40);
+		expect(full).toContain("commands");
+		expect(full).toContain("What's new");
+
+		const noKeys = rows(13);
+		expect(noKeys).not.toContain("commands");
+		expect(noKeys).toContain("What's new");
+		expect(noKeys).toContain("session-1");
+
+		const sessionsOnly = rows(11);
+		expect(sessionsOnly).not.toContain("What's new");
+		expect(sessionsOnly).toContain("session-1");
+
+		const identityOnly = rows(5);
+		expect(identityOnly).toContain("Sayknow-CLI");
+		expect(identityOnly).not.toContain("session-1");
+	});
+
+	it("reserves the composer gutter, including the one-row layout", () => {
+		for (const line of card({ rightGutterWidth: 1 }, SESSIONS, 100)) {
+			expect(visibleWidth(line)).toBe(100);
+			expect(line.endsWith(" ")).toBe(true);
 		}
+		const oneRow = card({ rightGutterWidth: 1, getViewportRows: () => 1 }, SESSIONS, 100);
+		expect(oneRow).toHaveLength(1);
+		expect(oneRow[0]).toContain("Sayknow-CLI");
 	});
 
-	it("points the session heading at the resume picker key", () => {
-		const sessions = [{ name: "previous work", timeAgo: "1m ago" }];
-		const withKey = plain(
-			new WelcomeComponent("1.2.3", "m", "p", sessions, [], "ascii", {
-				resumeKey: "alt+r",
-				keyDisplayContext: { platform: "linux" },
-			}).render(140),
-		).join("\n");
-		expect(withKey).toMatch(/Session trail\s+Alt\+R all sessions/);
-
-		const unbound = plain(new WelcomeComponent("1.2.3", "m", "p", sessions, [], "ascii").render(140)).join("\n");
-		expect(unbound).toContain("/resume all sessions");
-
-		const empty = plain(new WelcomeComponent("1.2.3", "m", "p", [], [], "ascii").render(140)).join("\n");
-		expect(empty).not.toContain("all sessions");
+	it("gives up rows it does not have and degrades on tiny widths", () => {
+		expect(card({ getViewportRows: () => 5, getReservedBottomRows: () => 5 })).toEqual([]);
+		const welcome = new WelcomeComponent("1.2.3", "m", "p", [], "ascii");
+		expect(welcome.render(3)).toEqual([]);
+		expect(welcome.render(5).every(line => visibleWidth(line) <= 5)).toBe(true);
+		expect(welcome.render(24).every(line => visibleWidth(line) <= 24)).toBe(true);
 	});
 
-	it("packs Flow keys across the available section width", () => {
-		const rowsWith = (width: number) =>
-			plain(
-				new WelcomeComponent("1.2.3", "m", "p", [], [], "ascii", {
-					keyDisplayContext: { platform: "linux" },
-				}).render(width),
-			).filter(line => /Ctrl\+|\/ commands|Tab complete/.test(line)).length;
-
-		expect(rowsWith(200)).toBeLessThan(rowsWith(50));
+	it("renders the build label from metadata when no override is provided", () => {
+		process.env.SKC_BUILD_CHANNEL = "release";
+		const text = plain(new WelcomeComponent("1.2.3", "m", "p", [], "ascii").render(120)).join("\n");
+		expect(text).toContain("Sayknow-CLI v1.2.3 · release build");
+		expect(text).not.toContain("dev build");
 	});
+});
 
-	it.each([
-		["darwin", ["⌃L model", "⇧⇥ reasoning", "⇥ complete", "⌃J newline", "⌃C clear"]],
-		["win32", ["Ctrl+L model", "Shift+Tab reasoning", "Tab complete", "Alt+Enter newline", "Ctrl+C clear"]],
-		["linux", ["Ctrl+L model", "Shift+Tab reasoning", "Tab complete", "Ctrl+J newline", "Ctrl+C clear"]],
-	] as const)("renders platform-aware canonical Flow keys for %s", (platform, expected) => {
-		const welcome = new WelcomeComponent("1.2.3", "m", "p", [], [], "ascii", {
-			keyDisplayContext: { platform },
-			getViewportRows: () => 60,
-		});
-		const text = plain(welcome.render(200)).join("\n");
-		const flow = text.slice(text.indexOf("Flow keys"));
+describe("launch intro", () => {
+	it("shows every fact on the first frame and moves only color and the tentacles", () => {
+		const skipped = new WelcomeComponent("1.2.3", "m", "p", SESSIONS, "unicode", { skipLogoAnimation: true });
+		const settled = skipped.render(120);
+		skipped.playIntro(() => {});
+		expect(skipped.render(120)).toEqual(settled);
 
-		let previousIndex = -1;
-		for (const label of expected) {
-			const index = flow.indexOf(label);
-			expect(index).toBeGreaterThan(previousIndex);
-			previousIndex = index;
-		}
+		const animated = new WelcomeComponent("1.2.3", "m", "p", SESSIONS, "unicode");
+		animated.playIntro(() => {});
+		const firstFrame = animated.render(120);
+		expect(firstFrame).not.toEqual(settled);
+		expect(plain(firstFrame)).toEqual(plain(settled));
+
+		animated.dispose();
+		expect(animated.render(120)).toEqual(settled);
 	});
 });
