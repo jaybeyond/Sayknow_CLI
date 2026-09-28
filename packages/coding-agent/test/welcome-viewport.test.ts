@@ -10,7 +10,7 @@ import {
 	type WelcomeSnapshot,
 } from "../src/modes/components/welcome";
 import { resolveWelcomePetSkin } from "../src/modes/interactive-mode";
-import { getThemeByName, setThemeInstance } from "../src/modes/theme/theme";
+import { theme as activeTheme, getThemeByName, setThemeInstance } from "../src/modes/theme/theme";
 
 const originalBuildChannel = process.env.SKC_BUILD_CHANNEL;
 // Assertions read English labels; a Korean system locale leaks in during full runs.
@@ -143,7 +143,8 @@ describe("launch card layout", () => {
 	it("stands the Sayknow pet beside the identity lines, with no box around anything", () => {
 		const welcome = new WelcomeComponent("1.2.3", "m", "p", SESSIONS, "unicode", { petSkin: "blue" });
 		const raw = welcome.render(120);
-		const pet = renderPetHalfBlocks("base", "blue", "truecolor");
+		// Same color mode as the live theme: CI terminals without COLORTERM get 256 colors.
+		const pet = renderPetHalfBlocks("base", "blue", activeTheme.getColorMode());
 		// The pet's rows open the card, each followed by the identity text.
 		for (const [index, row] of pet.entries()) expect(raw[1 + index]!.startsWith(`  ${row}`)).toBe(true);
 		const lines = plain(raw);
@@ -154,9 +155,13 @@ describe("launch card layout", () => {
 	it("paints the pet in its skin's colors", () => {
 		const red = new WelcomeComponent("1.2.3", "m", "p", [], "unicode", { petSkin: "red" }).render(120).join("");
 		const blue = new WelcomeComponent("1.2.3", "m", "p", [], "unicode", { petSkin: "blue" }).render(120).join("");
-		expect(red).toContain("229;72;46");
-		expect(blue).toContain("47;155;255");
-		expect(blue).not.toContain("229;72;46");
+		const mode = activeTheme.getColorMode();
+		const redPet = renderPetHalfBlocks("base", "red", mode).join("");
+		const bluePet = renderPetHalfBlocks("base", "blue", mode).join("");
+		expect(redPet).not.toBe(bluePet);
+		expect(red).toContain(redPet.slice(0, 60));
+		expect(blue).toContain(bluePet.slice(0, 60));
+		expect(blue).not.toContain(redPet.slice(0, 60));
 	});
 
 	it("uses an ASCII mark in ASCII mode and drops the mark when the card is narrow", () => {
