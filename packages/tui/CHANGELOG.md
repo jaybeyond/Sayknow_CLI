@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.6.7] - 2026-09-28
+
 ### Added
 
 - `Component.handleClick(line, column)`: top-level children that are not focused can take left clicks, hit-tested against the rows they rendered in the last frame; returning true consumes the click before selection and the focused component.

@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.6.7] - 2026-09-28
+
 ### Added
 
 - Launch card sessions open from the card: press `↓` in the empty composer to highlight a recent session, `↑`/`↓` to move, `Enter` to open it (`Esc` returns to typing), or click it. Until the first prompt SKC captures the mouse so the click reaches the card, then hands it back to the terminal; `startup.welcomeMouse` (Settings → Interaction → Clickable Launch Card) turns that off.
