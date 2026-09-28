@@ -428,6 +428,8 @@ export class Editor implements Component, Focusable {
 	cursorOverrideWidth: number | undefined;
 	#promptGutter: string | undefined;
 	#railGutter: string | undefined;
+	/** SGR background painted under every borderless input row (the composer band). */
+	#inputBackground: string | undefined;
 	#inputPrefix: string | undefined;
 	#inputPrefixWidth = 0;
 	#placeholder: string | undefined;
@@ -576,6 +578,21 @@ export class Editor implements Component, Focusable {
 	setRailGutter(glyph: string | undefined): void {
 		this.#railGutter = glyph;
 		this.#invalidateLayoutCache();
+	}
+
+	/**
+	 * Paint a background band (an SGR sequence such as `\x1b[48;2;36;30;24m`) under
+	 * every input row of a borderless editor, so the line being typed stands out from
+	 * the transcript. Undefined removes it. Ignored while the border is visible.
+	 */
+	setInputBackground(background: string | undefined): void {
+		this.#inputBackground = background || undefined;
+		this.#invalidateLayoutCache();
+	}
+
+	/** True while Up/Down are walking prompt history rather than editing. */
+	isBrowsingHistory(): boolean {
+		return this.#historyIndex !== -1;
 	}
 
 	setInputPrefix(inputPrefix: string | undefined): void {
@@ -935,6 +952,7 @@ export class Editor implements Component, Focusable {
 		}
 
 		// Render each layout line
+		const inputRowsStart = result.length;
 		// Emit hardware cursor marker only when focused and not showing autocomplete
 		const emitCursorMarker = this.focused && !this.#autocompleteState;
 		const lineContentWidth = Math.max(0, contentAreaWidth - inputPrefixWidth);
@@ -1120,6 +1138,13 @@ export class Editor implements Component, Focusable {
 				const leftBorder = this.borderColor(`${box.vertical}${padding(paddingX)}`);
 				const rightBorder = this.borderColor(`${padding(rightPaddingWidth)}${box.vertical}`);
 				result.push(leftBorder + displayWithPrefix + linePad + rightBorder);
+			}
+		}
+
+		const background = this.#inputBackground;
+		if (background && !borderVisible) {
+			for (let row = inputRowsStart; row < result.length; row++) {
+				result[row] = paintBackground(result[row]!, background, renderWidth);
 			}
 		}
 
@@ -1582,6 +1607,7 @@ export class Editor implements Component, Focusable {
 				placeholder: this.#placeholder,
 				promptGutter: this.#promptGutter,
 				railGutter: this.#railGutter,
+				inputBackground: this.#inputBackground,
 				useTerminalCursor: this.#useTerminalCursor,
 				cursorOverride: this.cursorOverride,
 				cursorOverrideWidth: this.cursorOverrideWidth,
@@ -3104,4 +3130,14 @@ https://github.com/EsotericSoftware/spine-runtimes/actions/runs/19536643416/job/
 
 		return null;
 	}
+}
+
+/**
+ * Hold a background under a whole row: re-assert it after every reset inside the row
+ * (cursor, ghost text and colored spans all end with one) and pad to `width`.
+ */
+function paintBackground(line: string, background: string, width: number): string {
+	const fill = Math.max(0, width - visibleWidth(line));
+	const held = line.replace(/\x1b\[(?:0)?m|\x1b\[49m/g, match => `${match}${background}`);
+	return `${background}${held}${padding(fill)}\x1b[0m`;
 }

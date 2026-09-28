@@ -1154,6 +1154,48 @@ describe("Editor component", () => {
 			expect(fallback[1]).toStartWith("  second");
 		});
 
+		it("paints the composer band under every input row, held across colored spans and the cursor", () => {
+			const band = "\x1b[48;2;36;30;24m";
+			const editor = new Editor(defaultEditorTheme);
+			editor.setBorderVisible(false);
+			editor.setRailGutter("▌");
+			editor.borderColor = text => `\x1b[33m${text}\x1b[0m`;
+			editor.setInputBackground(band);
+			editor.focused = true;
+			editor.setText("first\nsecond");
+
+			const lines = editor.render(20);
+			expect(lines).toHaveLength(2);
+			for (const line of lines) {
+				expect(line.startsWith(band)).toBe(true);
+				expect(line.endsWith("\x1b[0m")).toBe(true);
+				// The cursor marker is stripped by the TUI before output.
+				expect(visibleWidth(line.replace(CURSOR_MARKER, ""))).toBe(20);
+				// Every reset inside the row is followed by the band again.
+				for (const match of line.matchAll(/\x1b\[0m/g)) {
+					if (match.index! + 4 < line.length) expect(line.slice(match.index! + 4)).toStartWith(band);
+				}
+			}
+
+			editor.setInputBackground(undefined);
+			expect(editor.render(20).join("")).not.toContain(band);
+
+			// A boxed editor keeps its own chrome and gets no band.
+			editor.setBorderVisible(true);
+			editor.setInputBackground(band);
+			expect(editor.render(20).join("")).not.toContain(band);
+		});
+
+		it("reports history browsing", () => {
+			const editor = new Editor(defaultEditorTheme);
+			editor.addToHistory("earlier");
+			expect(editor.isBrowsingHistory()).toBe(false);
+			editor.handleInput("\x1b[A");
+			expect(editor.isBrowsingHistory()).toBe(true);
+			editor.handleInput("\x1b[B");
+			expect(editor.isBrowsingHistory()).toBe(false);
+		});
+
 		it("ignores the rail gutter while the border is visible", () => {
 			const editor = new Editor(defaultEditorTheme);
 			editor.setRailGutter("▌");

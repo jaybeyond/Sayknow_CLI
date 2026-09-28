@@ -1122,6 +1122,11 @@
 					"description": "Logo style for the startup welcome screen",
 					"default": "auto"
 				},
+				"welcomeMouse": {
+					"type": "boolean",
+					"description": "Until the first prompt, capture the mouse so a recent session on the launch card opens with one click. Terminal text selection needs Shift held meanwhile. Off: open sessions with ↓ and Enter.",
+					"default": true
+				},
 				"skipLogoAnimation": {
 					"type": "boolean",
 					"description": "Show the final welcome logo immediately",

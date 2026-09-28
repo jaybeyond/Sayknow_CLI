@@ -848,6 +848,8 @@ export class InputController {
 
 	async submitText(text: string, composer: ComposerSubmissionOptions): Promise<void> {
 		text = text.trim();
+		// Past the launch card: give the mouse back to the terminal and stop offering its rows.
+		if (text) this.ctx.endWelcomeInteraction?.();
 		if ((!isSettingsInitialized() || settings.get("emojiAutocomplete")) && text) text = expandEmoticons(text);
 		if (this.ctx.hasActiveBtw()) {
 			if (!text) return;

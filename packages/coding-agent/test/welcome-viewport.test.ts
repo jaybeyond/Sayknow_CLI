@@ -63,12 +63,23 @@ describe("welcome intro cadence", () => {
 });
 
 describe("launch card content", () => {
-	it("shows who and where: version, model with reasoning, project path, branch and changes", () => {
-		const text = card({ buildLabel: "release build" }).join("\n");
-		expect(text).toContain("Sayknow-CLI v1.2.3 · release build");
-		expect(text).toContain("Coding should feel like thinking.");
+	it("shows the wordmark, then who and where: version, model with reasoning, path, branch and changes", () => {
+		const lines = card({ buildLabel: "release build" });
+		const text = lines.join("\n");
+		expect(text).toContain("╔═╗╔═╗╦ ╦╦╔═╔╗╔╔═╗╦ ╦  ╔═╗╦  ╦");
+		expect(text).toContain("╚═╝╩ ╩ ╩ ╩ ╩╝╚╝╚═╝╚╩╝  ╚═╝╩═╝╩");
+		expect(text).toMatch(/Coding should feel like thinking\.\s+v1\.2\.3 · release build/);
 		expect(text).toContain("Claude Opus 5.5 · xhigh");
-		expect(text).toMatch(/~\/Dev\/sayknow-cli · feature\/card \+2 ~5 \?1/);
+		// Too long to share the model's row, so the place gets its own row instead of being cut.
+		expect(lines.find(line => line.includes("~/Dev/sayknow-cli"))).toMatch(
+			/~\/Dev\/sayknow-cli · feature\/card \+2 ~5 \?1/,
+		);
+		expect(lines.find(line => line.includes("~/Dev/sayknow-cli"))).not.toContain("Claude");
+	});
+
+	it("keeps model and place on one row when both fit", () => {
+		const text = card({ snapshot: { cwd: "~/x", branch: "main", thinkingLevel: "high" } }).join("\n");
+		expect(text).toMatch(/Claude Opus 5\.5 · high {2}· {2}~\/x · main/);
 	});
 
 	it("keeps the card short: three sessions, one release line, one row of keys", () => {
@@ -86,8 +97,8 @@ describe("launch card content", () => {
 
 	it("names the key that opens the full session list", () => {
 		const text = card({ resumeKey: "alt+r", keyDisplayContext: { platform: "linux" } }).join("\n");
-		expect(text).toMatch(/Recent sessions\s+Alt\+R all sessions/);
-		expect(text).toMatch(/\/ commands\s+Alt\+R sessions\s+Ctrl\+L model\s+\? keymap/);
+		expect(text).toMatch(/Recent sessions ─+ Alt\+R all sessions/);
+		expect(text).toMatch(/\/ commands {2}· {2}Alt\+R sessions {2}· {2}Ctrl\+L model {2}· {2}\? keymap/);
 
 		const unbound = card().join("\n");
 		expect(unbound).toContain("/resume all sessions");
@@ -100,7 +111,7 @@ describe("launch card content", () => {
 	it("marks the session the continue key resumes and names both keys", () => {
 		const lines = card({ resumeKey: "alt+r", continueKey: "ctrl+q", keyDisplayContext: { platform: "linux" } });
 		const text = lines.join("\n");
-		expect(text).toMatch(/Recent sessions\s+Ctrl\+Q continue · Alt\+R all sessions/);
+		expect(text).toMatch(/Recent sessions ─+ Ctrl\+Q continue · Alt\+R all sessions/);
 		expect(lines.find(line => line.includes("session-1"))).toMatch(/^ {2}› session-1/);
 		expect(lines.find(line => line.includes("session-2"))).toMatch(/^ {4}session-2/);
 
@@ -110,7 +121,7 @@ describe("launch card content", () => {
 
 	it("collapses the release line to the version when asked", () => {
 		const text = card({ changelogMarkdown: CHANGELOG, collapseChangelog: true }).join("\n");
-		expect(text).toMatch(/v1\.2\.3 +\/fork is back|v1\.2\.3 +\/changelog/);
+		expect(text).toMatch(/v1\.2\.3 ─+ \/changelog/);
 		expect(text).not.toContain("/fork is back");
 		expect(text).toContain("/changelog");
 		expect(card().join("\n")).not.toContain("/changelog");
@@ -140,38 +151,50 @@ describe("launch card content", () => {
 });
 
 describe("launch card layout", () => {
-	it("stands the Sayknow pet beside the identity lines, with no box around anything", () => {
+	it("stands the small Sayknow pet beside the wordmark, with no box around anything", () => {
 		const welcome = new WelcomeComponent("1.2.3", "m", "p", SESSIONS, "unicode", { petSkin: "blue" });
 		const raw = welcome.render(120);
 		// Same color mode as the live theme: CI terminals without COLORTERM get 256 colors.
-		const pet = renderPetHalfBlocks("base", "blue", activeTheme.getColorMode());
-		// The pet's rows open the card, each followed by the identity text.
+		const pet = renderPetHalfBlocks("base", "blue", activeTheme.getColorMode(), { scale: "half" });
+		expect(pet).toHaveLength(4);
+		// The pet's rows open the card, each followed by the wordmark and tagline.
 		for (const [index, row] of pet.entries()) expect(raw[1 + index]!.startsWith(`  ${row}`)).toBe(true);
 		const lines = plain(raw);
-		expect(lines.find(line => line.includes("Sayknow-CLI"))).toMatch(/^ {2}[▀▄ ]{16} {3}Sayknow-CLI/);
-		for (const glyph of ["╭", "╮", "╰", "╯", "│", "─"]) expect(lines.join("\n")).not.toContain(glyph);
+		expect(lines[1]).toMatch(/^ {2}[▀▄ ]{8} {3}╔═╗╔═╗/);
+		for (const glyph of ["╭", "╮", "╰", "╯", "│"]) expect(lines.join("\n")).not.toContain(glyph);
+	});
+
+	it("divides sections with rule headers", () => {
+		const lines = card({ changelogMarkdown: CHANGELOG, resumeKey: "alt+r" });
+		expect(lines.find(line => line.includes("Recent sessions"))).toMatch(/Recent sessions ─{3,} /);
+		expect(lines.find(line => line.includes("/changelog"))).toMatch(/v1\.2\.3 \/fork is back ─{3,} \/changelog/);
 	});
 
 	it("paints the pet in its skin's colors", () => {
 		const red = new WelcomeComponent("1.2.3", "m", "p", [], "unicode", { petSkin: "red" }).render(120).join("");
 		const blue = new WelcomeComponent("1.2.3", "m", "p", [], "unicode", { petSkin: "blue" }).render(120).join("");
 		const mode = activeTheme.getColorMode();
-		const redPet = renderPetHalfBlocks("base", "red", mode).join("");
-		const bluePet = renderPetHalfBlocks("base", "blue", mode).join("");
+		const redPet = renderPetHalfBlocks("base", "red", mode, { scale: "half" }).join("");
+		const bluePet = renderPetHalfBlocks("base", "blue", mode, { scale: "half" }).join("");
 		expect(redPet).not.toBe(bluePet);
 		expect(red).toContain(redPet.slice(0, 60));
 		expect(blue).toContain(bluePet.slice(0, 60));
 		expect(blue).not.toContain(redPet.slice(0, 60));
 	});
 
-	it("uses an ASCII mark in ASCII mode and drops the mark when the card is narrow", () => {
+	it("uses an ASCII mark and a text title in ASCII mode, and drops the pet, then the wordmark, when narrow", () => {
 		const ascii = plain(new WelcomeComponent("1.2.3", "m", "p", [], "ascii").render(100)).join("\n");
-		expect(ascii).toContain("( o o )");
-		expect(ascii).not.toMatch(/[█▀▄]/);
+		expect(ascii).toContain("( oo )");
+		expect(ascii).toContain("Sayknow-CLI v1.2.3");
+		expect(ascii).not.toMatch(/[█▀▄╔╚]/);
 
 		const narrow = card({}, SESSIONS, 36).join("\n");
 		expect(narrow).not.toMatch(/[▀▄]/);
-		expect(narrow).toContain("Sayknow-CLI");
+		expect(narrow).toContain("╔═╗╔═╗");
+
+		const tiny = card({}, SESSIONS, 26).join("\n");
+		expect(tiny).not.toContain("╔═╗");
+		expect(tiny).toContain("Sayknow-CLI");
 	});
 
 	it("does not stretch across wide terminals", () => {
@@ -190,21 +213,22 @@ describe("launch card layout", () => {
 	it("drops keys, then the release line, then sessions when rows run short", () => {
 		const rows = (count: number) =>
 			card({ changelogMarkdown: CHANGELOG, getViewportRows: () => count, resumeKey: "alt+r" }).join("\n");
-		const full = rows(40);
+		// Blank + identity (4 pet/wordmark rows + model + place) + release + sessions + keys = 16.
+		const full = rows(16);
 		expect(full).toContain("commands");
 		expect(full).toContain("/changelog");
 
-		const noKeys = rows(16);
+		const noKeys = rows(15);
 		expect(noKeys).not.toContain("commands");
 		expect(noKeys).toContain("/changelog");
 		expect(noKeys).toContain("session-1");
 
-		const sessionsOnly = rows(14);
+		const sessionsOnly = rows(13);
 		expect(sessionsOnly).not.toContain("/changelog");
 		expect(sessionsOnly).toContain("session-1");
 
 		const identityOnly = rows(8);
-		expect(identityOnly).toContain("Sayknow-CLI");
+		expect(identityOnly).toContain("╔═╗╔═╗");
 		expect(identityOnly).not.toContain("session-1");
 	});
 
@@ -245,8 +269,8 @@ describe("launch intro", () => {
 		animated.playIntro(() => {});
 		const firstFrame = animated.render(120);
 		expect(firstFrame).not.toEqual(settled);
-		// Beside the dancing pet (margin 2 + 16 columns + gap 3), every character is already in place.
-		const text = (lines: string[]) => plain(lines).map(line => line.slice(21));
+		// Beside the dancing pet (margin 2 + 8 columns + gap 3), every character is already in place.
+		const text = (lines: string[]) => plain(lines).map(line => line.slice(13));
 		expect(text(firstFrame)).toEqual(text(settled));
 		expect(plain(firstFrame).join("\n")).not.toEqual(plain(settled).join("\n"));
 
@@ -262,5 +286,73 @@ describe("launch pet skin", () => {
 		expect(resolveWelcomePetSkin("off", "blue-octopus")).toBe("blue");
 		expect(resolveWelcomePetSkin("off", "ink-octopus")).toBe("red");
 		expect(resolveWelcomePetSkin("off", undefined)).toBe("red");
+	});
+});
+
+describe("opening a session from the card", () => {
+	const OPENABLE: RecentSession[] = [
+		{ name: "first", timeAgo: "1m", path: "/s/1.jsonl" },
+		{ name: "second", timeAgo: "2m", path: "/s/2.jsonl" },
+		{ name: "third", timeAgo: "3m", path: "/s/3.jsonl" },
+	];
+	const make = (opened: RecentSession[], sessions = OPENABLE) =>
+		new WelcomeComponent("1.2.3", "m", "p", sessions, "unicode", {
+			resumeKey: "alt+r",
+			continueKey: "ctrl+q",
+			keyDisplayContext: { platform: "linux" },
+			onOpenSession: session => opened.push(session),
+		});
+
+	it("moves a highlight with the keyboard and opens the highlighted session", () => {
+		const opened: RecentSession[] = [];
+		const welcome = make(opened);
+		expect(plain(welcome.render(120)).join("\n")).toMatch(/↓ pick · Ctrl\+Q continue · Alt\+R all sessions/);
+
+		expect(welcome.select(0)).toBe(true);
+		expect(welcome.moveSelection(1)).toBe(true);
+		expect(welcome.moveSelection(5)).toBe(true);
+		expect(welcome.selectedIndex).toBe(2);
+		const raw = welcome.render(120);
+		const text = plain(raw);
+		expect(text.join("\n")).toContain("↑↓ move · ⏎ open · esc back");
+		const row = raw.findIndex(line => Bun.stripANSI(line).includes("third"));
+		expect(text[row]).toMatch(/^ {2}› third/);
+		expect(raw[row]).toContain(activeTheme.getBgAnsi("selectedBg"));
+		expect(text.find(line => line.includes("first"))).not.toContain("›");
+
+		expect(welcome.openSelected()).toBe(true);
+		expect(opened.map(session => session.path)).toEqual(["/s/3.jsonl"]);
+
+		// ↑ past the first row hands focus back.
+		welcome.select(0);
+		expect(welcome.moveSelection(-1)).toBe(false);
+		expect(welcome.selectedIndex).toBeUndefined();
+	});
+
+	it("opens the session under a click, and ignores clicks elsewhere", () => {
+		const opened: RecentSession[] = [];
+		const welcome = make(opened);
+		const lines = plain(welcome.render(120));
+		const secondRow = lines.findIndex(line => line.includes("second"));
+		expect(welcome.handleClick(lines.findIndex(line => line.includes("Recent sessions")))).toBe(false);
+		expect(welcome.handleClick(1)).toBe(false);
+		expect(welcome.handleClick(secondRow)).toBe(true);
+		expect(opened.map(session => session.path)).toEqual(["/s/2.jsonl"]);
+	});
+
+	it("stops offering rows once interaction ends, and never offers rows without a file", () => {
+		const opened: RecentSession[] = [];
+		const welcome = make(opened);
+		const lines = plain(welcome.render(120));
+		welcome.endInteraction();
+		expect(welcome.openableCount).toBe(0);
+		expect(welcome.select(0)).toBe(false);
+		expect(welcome.handleClick(lines.findIndex(line => line.includes("first")))).toBe(false);
+		expect(plain(welcome.render(120)).join("\n")).not.toContain("↓ pick");
+		expect(opened).toEqual([]);
+
+		const noFiles = make(opened, [{ name: "legacy", timeAgo: "1d" }]);
+		expect(noFiles.openableCount).toBe(0);
+		expect(noFiles.select(0)).toBe(false);
 	});
 });

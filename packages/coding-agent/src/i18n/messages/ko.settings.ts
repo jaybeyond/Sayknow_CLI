@@ -269,6 +269,9 @@ export const koSettings: Record<string, string> = {
 	"set:locate.enabled:l": "Locate (Jev 코드 검색)",
 	"set:locate.enabled:d":
 		"TypeSafe 키가 있으면 locate 도구를 제공합니다. 관련성 판단을 위해 폴더 경로, 파일 이름, 선언 줄(함수 본문·주석 제외)을 TypeSafe로 보냅니다.",
+	"set:startup.welcomeMouse:l": "클릭 가능한 시작 카드",
+	"set:startup.welcomeMouse:d":
+		"첫 프롬프트 전까지 마우스를 받아 시작 카드의 최근 세션을 한 번 클릭으로 엽니다. 그동안 터미널 텍스트 선택은 Shift를 누른 채로 하세요. 끄면 ↓와 Enter로 엽니다.",
 	"set:retry.maxRetries:l": "재시도 횟수",
 	"set:retry.maxRetries:d": "API 오류 시 최대 재시도 횟수",
 	"set:retry.maxRetries:o:1:l": "1회 재시도",

@@ -15,6 +15,8 @@ export const fr: Partial<Record<MsgKey, string>> = {
 	"welcome.noSessions": "Aucun historique enregistré",
 	"welcome.allSessions": "{key} toutes les sessions",
 	"welcome.continue": "{key} reprendre",
+	"welcome.pick": "{key} choisir",
+	"welcome.pickActive": "↑↓ déplacer · ⏎ ouvrir · esc retour",
 	"welcome.sessions": "sessions",
 	"welcome.chooseModel": "choisir un modèle",
 	"welcome.modelHint": "ctrl+l pour choisir · / pour les commandes",

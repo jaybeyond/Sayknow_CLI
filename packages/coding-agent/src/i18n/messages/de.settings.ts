@@ -257,6 +257,9 @@ export const deSettings: Record<string, string> = {
 	"set:locate.enabled:l": "Locate (Jev-Codesuche)",
 	"set:locate.enabled:d":
 		"Bietet das locate-Werkzeug an, wenn ein TypeSafe-Schlüssel gespeichert ist. Zur Relevanzbewertung werden Ordnerpfade, Dateinamen und Deklarationszeilen (ohne Funktionsrümpfe und Kommentare) an TypeSafe gesendet.",
+	"set:startup.welcomeMouse:l": "Klickbare Startkarte",
+	"set:startup.welcomeMouse:d":
+		"Bis zum ersten Prompt die Maus übernehmen, damit eine letzte Sitzung auf der Startkarte mit einem Klick öffnet. Terminaltext währenddessen mit gedrückter Umschalttaste markieren. Aus: mit ↓ und Enter öffnen.",
 	"set:retry.maxRetries:l": "Wiederholungsversuche",
 	"set:retry.maxRetries:d": "Maximale Wiederholungsversuche bei API-Fehlern",
 	"set:retry.maxRetries:o:1:l": "1 Wiederholung",

@@ -16,6 +16,8 @@ import { theme } from "../../modes/theme/theme";
 export interface RecentSession {
 	name: string;
 	timeAgo: string;
+	/** Session file; present when the row can be opened from the card. */
+	path?: string;
 }
 
 /**
@@ -49,21 +51,34 @@ export interface WelcomeComponentOptions {
 	continueKey?: string;
 	/** Which Sayknow pet stands on the card (default red). */
 	petSkin?: PetSkinId;
+	/** Called when a session row is opened by click or Enter. */
+	onOpenSession?: (session: RecentSession) => void;
 }
 
 /** Left margin of the card, and the widest the card grows on wide terminals. */
 const MARGIN = 2;
 const MAX_CARD_WIDTH = 76;
-/** Gap between the mark and the identity lines. */
+/** Gap between the pet and the wordmark. */
 const MARK_GAP = 3;
-/** Below this card width the mark is dropped and only the identity lines remain. */
-const MIN_WIDTH_FOR_MARK = 44;
 /** Recent sessions on the card; the resume picker has the rest. */
 const SESSION_ROWS = 3;
 
+/**
+ * The wordmark: SAYKNOW in the brand's box-drawing letters, then CLI. Each row is the
+ * SAYKNOW part and the CLI part, drawn in different colors.
+ */
+// biome-ignore format: preserve letter layout
+const WORDMARK: ReadonlyArray<readonly [string, string]> = [
+	["╔═╗╔═╗╦ ╦╦╔═╔╗╔╔═╗╦ ╦", "╔═╗╦  ╦"],
+	["╚═╗╠═╣╚╦╝╠╩╗║║║║ ║║║║", "║  ║  ║"],
+	["╚═╝╩ ╩ ╩ ╩ ╩╝╚╝╚═╝╚╩╝", "╚═╝╩═╝╩"],
+];
+const WORDMARK_GAP = 2;
+const WORDMARK_WIDTH = 21 + WORDMARK_GAP + 7;
+
 /** ASCII-safe stand-in for the pet when the banner must avoid block glyphs. */
-const MARK_ASCII = ["  .---.  ", " ( o o ) ", "  )   (  ", " /\\/\\/\\/ "] as const;
-const MARK_ASCII_WAVE = " \\/\\/\\/\\ ";
+const MARK_ASCII = [" .--. ", "( oo )", " )  ( ", "/\\/\\/\\"] as const;
+const MARK_ASCII_WAVE = "\\/\\/\\/";
 
 /**
  * Intro: the pet does a short para-para (tentacles sway left, right, left) and
@@ -80,18 +95,25 @@ interface Section {
 	lines: string[];
 	/** When the viewport is short, the section with the highest rank is dropped first. */
 	dropRank: number;
+	/** Session index per line, for rows that open a session. */
+	sessionRows?: Array<number | undefined>;
 }
 
 /**
- * Sayknow-CLI launch card: the octopus mark beside who and where you are
- * (version, model and reasoning, project and branch), then the three most recent
- * sessions and a single row of keys. Everything else — the full session list,
- * workflows, the keymap, release notes — is one key away, not on the card.
+ * Sayknow-CLI launch card: the wordmark with the pet beside it, who and where you are
+ * (version, model and reasoning, project and branch), the release line after an update,
+ * the three most recent sessions — which can be opened from the card with a click or
+ * ↓ then Enter — and a single row of keys.
  */
 export class WelcomeComponent implements Component {
 	#animStart: number | null = null;
 	#animTimer: NodeJS.Timeout | null = null;
 	#snapshot: WelcomeSnapshot;
+	/** Highlighted session row while picking with the keyboard; undefined when not picking. */
+	#selected: number | undefined;
+	/** Session index per rendered line, from the last frame. */
+	#lineSessions: Array<number | undefined> = [];
+	#interactive = true;
 
 	constructor(
 		private readonly version: string,
@@ -145,6 +167,7 @@ export class WelcomeComponent implements Component {
 
 	setRecentSessions(sessions: RecentSession[]): void {
 		this.recentSessions = sessions;
+		if (this.#selected !== undefined && this.#selected >= this.#openable().length) this.#selected = undefined;
 	}
 
 	/** Merge newly probed workspace facts into the card. */
@@ -152,7 +175,78 @@ export class WelcomeComponent implements Component {
 		this.#snapshot = { ...this.#snapshot, ...patch };
 	}
 
+	// ── Picking a session ───────────────────────────────────────────────────
+
+	/** Sessions on the card that can be opened (they have a file). */
+	#openable(): RecentSession[] {
+		return this.recentSessions.slice(0, SESSION_ROWS).filter(session => session.path);
+	}
+
+	/** Rows that can be opened right now. Zero once the card stops taking input. */
+	get openableCount(): number {
+		return this.#interactive ? this.#openable().length : 0;
+	}
+
+	get selectedIndex(): number | undefined {
+		return this.#selected;
+	}
+
+	/** Stop offering the session rows (after the first prompt or a session switch). */
+	endInteraction(): void {
+		this.#interactive = false;
+		this.#selected = undefined;
+	}
+
+	get interactive(): boolean {
+		return this.#interactive;
+	}
+
+	/** Highlight a row, or clear the highlight with undefined. Returns false when there is nothing to select. */
+	select(index: number | undefined): boolean {
+		if (index === undefined) {
+			this.#selected = undefined;
+			return true;
+		}
+		const count = this.openableCount;
+		if (count === 0) return false;
+		this.#selected = Math.max(0, Math.min(count - 1, index));
+		return true;
+	}
+
+	/** Move the highlight; returns false when it would leave the list upward (the caller hands focus back). */
+	moveSelection(delta: number): boolean {
+		if (this.#selected === undefined) return this.select(0);
+		const next = this.#selected + delta;
+		if (next < 0) {
+			this.#selected = undefined;
+			return false;
+		}
+		this.#selected = Math.min(this.openableCount - 1, next);
+		return true;
+	}
+
+	/** Open the highlighted row. */
+	openSelected(): boolean {
+		const session = this.#selected === undefined ? undefined : this.#openable()[this.#selected];
+		if (!session) return false;
+		this.options.onOpenSession?.(session);
+		return true;
+	}
+
+	handleClick(line: number): boolean {
+		if (!this.#interactive) return false;
+		const index = this.#lineSessions[line];
+		const session = index === undefined ? undefined : this.#openable()[index];
+		if (!session) return false;
+		this.#selected = index;
+		this.options.onOpenSession?.(session);
+		return true;
+	}
+
+	// ── Layout ──────────────────────────────────────────────────────────────
+
 	render(termWidth: number): string[] {
+		this.#lineSessions = [];
 		const gutterWidth = this.#rightGutterWidth(termWidth);
 		const width = Math.max(0, termWidth - gutterWidth);
 		if (width < 4) return [];
@@ -163,11 +257,23 @@ export class WelcomeComponent implements Component {
 
 		const cardWidth = Math.max(1, Math.min(MAX_CARD_WIDTH, width - MARGIN));
 		const sections = this.#sections(cardWidth);
-		const lines = this.#fitRows(sections, targetRows);
+		const { lines, sessionRows } = this.#fitRows(sections, targetRows);
 		const margin = padding(MARGIN);
-		const out = lines.map(line => this.#fit(line ? margin + line : "", width));
+		const selectedLine = sessionRows.findIndex(index => index !== undefined && index === this.#selected);
+		const out = lines.map((line, row) => {
+			if (row === selectedLine) return this.#highlightRow(line, cardWidth, width);
+			return this.#fit(line ? margin + line : "", width);
+		});
 		if (targetRows !== undefined) while (out.length < targetRows) out.push(padding(width));
+		this.#lineSessions = sessionRows;
 		return this.#withRightGutter(out, gutterWidth);
+	}
+
+	/** The picked row: a selection band across the card width, held after every reset inside the row. */
+	#highlightRow(line: string, cardWidth: number, width: number): string {
+		const bg = theme.getBgAnsi("selectedBg");
+		const body = this.#fit(line, cardWidth).replace(/\x1b\[(?:0)?m|\x1b\[49m/g, match => `${match}${bg}`);
+		return this.#fit(`${padding(MARGIN)}${bg}${body}\x1b[0m`, width);
 	}
 
 	/**
@@ -175,64 +281,88 @@ export class WelcomeComponent implements Component {
 	 * viewport is short, whole sections go by rank — keys, then the release
 	 * note, then sessions — and the identity block is clipped last.
 	 */
-	#fitRows(sections: { identity: string[]; others: Section[] }, targetRows: number | undefined): string[] {
+	#fitRows(
+		sections: { identity: string[]; others: Section[] },
+		targetRows: number | undefined,
+	): { lines: string[]; sessionRows: Array<number | undefined> } {
 		const colored = this.#colorReveal(1 + sections.others.length);
 		const identity = this.#inkSection(sections.identity, 0, colored);
 		let others = sections.others.map((section, index) => ({
 			...section,
 			lines: this.#inkSection(section.lines, index + 1, colored),
 		}));
-		const assemble = (): string[] => {
-			const out = ["", ...identity];
-			for (const section of others) out.push("", ...section.lines);
-			return out;
+		const assemble = (): { lines: string[]; sessionRows: Array<number | undefined> } => {
+			const lines = ["", ...identity];
+			const sessionRows: Array<number | undefined> = lines.map(() => undefined);
+			for (const section of others) {
+				lines.push("", ...section.lines);
+				sessionRows.push(undefined, ...(section.sessionRows ?? section.lines.map(() => undefined)));
+			}
+			return { lines, sessionRows };
 		};
-		let lines = assemble();
-		if (targetRows === undefined) return lines;
-		while (lines.length > targetRows && others.length > 0) {
+		let result = assemble();
+		if (targetRows === undefined) return result;
+		while (result.lines.length > targetRows && others.length > 0) {
 			const drop = others.reduce((worst, section) => (section.dropRank > worst.dropRank ? section : worst));
 			others = others.filter(section => section !== drop);
-			lines = assemble();
+			result = assemble();
 		}
-		return lines.slice(0, targetRows);
+		return { lines: result.lines.slice(0, targetRows), sessionRows: result.sessionRows.slice(0, targetRows) };
 	}
 
 	#sections(cardWidth: number): { identity: string[]; others: Section[] } {
 		const others: Section[] = [];
 		const note = this.#releaseNoteLine(cardWidth);
 		if (note) others.push({ lines: [note], dropRank: 2 });
-		others.push({ lines: this.#sessionLines(cardWidth), dropRank: 1 });
+		const sessions = this.#sessionSection(cardWidth);
+		others.push({ ...sessions, dropRank: 1 });
 		others.push({ lines: [this.#keysLine(cardWidth)], dropRank: 3 });
 		return { identity: this.#identityLines(cardWidth), others };
 	}
 
-	// ── Identity: mark + who and where ──────────────────────────────────────
+	// ── Identity: pet + wordmark, then who and where ────────────────────────
 
 	#identityLines(cardWidth: number): string[] {
-		const withMark = cardWidth >= MIN_WIDTH_FOR_MARK;
-		const mark = withMark ? this.#markRows() : [];
+		const mark = this.#markRows();
 		const markWidth = Math.max(0, ...mark.map(row => visibleWidth(row)));
-		const infoWidth = Math.max(1, withMark ? cardWidth - markWidth - MARK_GAP : cardWidth);
-		const info = [
-			this.#truncate(this.#titleLine(!withMark), infoWidth),
-			this.#truncate(theme.fg("muted", t("welcome.tagline")), infoWidth),
-			this.#truncate(this.#modelLine(), infoWidth),
-			this.#truncate(this.#whereLine(infoWidth), infoWidth),
-		];
-		if (!withMark) return info;
-		// Center the four identity lines against the pet's height.
-		const offset = Math.max(0, Math.floor((mark.length - info.length) / 2));
-		const rows = Math.max(mark.length, info.length + offset);
-		const out: string[] = [];
-		for (let row = 0; row < rows; row++) {
-			const art = mark[row] ?? padding(markWidth);
-			const text = info[row - offset] ?? "";
-			out.push(text ? `${art}${padding(MARK_GAP)}${text}` : art);
-		}
-		return out;
+		const withMark = cardWidth >= markWidth + MARK_GAP + WORDMARK_WIDTH;
+		const withWordmark = this.logoMode !== "ascii" && cardWidth >= WORDMARK_WIDTH;
+		const indent = withMark ? markWidth + MARK_GAP : 0;
+		const infoWidth = Math.max(1, cardWidth - indent);
+
+		const head: string[] = withWordmark
+			? WORDMARK.map(
+					([word, suffix]) =>
+						`${theme.bold(theme.fg("accent", word))}${padding(WORDMARK_GAP)}${theme.fg("text", suffix)}`,
+				)
+			: [this.#truncate(this.#titleLine(!withMark), infoWidth)];
+		const versionLine = this.#spread(
+			theme.fg("muted", t("welcome.tagline")),
+			theme.fg("dim", this.#versionLabel()),
+			infoWidth,
+		);
+		const info = [...head, withWordmark ? versionLine : theme.fg("muted", t("welcome.tagline"))];
+
+		const rows: string[] = [];
+		if (withMark) {
+			const count = Math.max(mark.length, info.length);
+			for (let row = 0; row < count; row++) {
+				const art = mark[row] ?? padding(markWidth);
+				const text = info[row] ?? "";
+				rows.push(text ? `${art}${padding(MARK_GAP)}${text}` : art);
+			}
+		} else rows.push(...info);
+		// Model and place sit under the wordmark, in the same column.
+		for (const line of this.#statusLines(infoWidth)) rows.push(`${padding(indent)}${line}`);
+		return rows;
 	}
 
-	/** The Sayknow pet itself, in half blocks; the pose follows the intro. */
+	#versionLabel(): string {
+		const buildLabel = this.options.buildLabel ?? formatBuildLabel();
+		return `v${this.version} · ${buildLabel}`;
+	}
+
+	/** The Sayknow pet at half size, in half blocks; the pose follows the intro. */
 	#markRows(): string[] {
 		const step = this.#animStart == null ? -1 : Math.floor((performance.now() - this.#animStart) / WAVE_STEP_MS);
 		if (this.logoMode === "ascii") {
@@ -241,17 +371,30 @@ export class WelcomeComponent implements Component {
 			return rows.map(row => theme.fg("accent", row));
 		}
 		const pose = step >= 0 && step < INTRO_POSES.length ? INTRO_POSES[step]! : "base";
-		return renderPetHalfBlocks(pose, this.options.petSkin ?? "red", theme.getColorMode());
+		return renderPetHalfBlocks(pose, this.options.petSkin ?? "red", theme.getColorMode(), { scale: "half" });
 	}
 
-	/** `withIcon` adds the 🐙 glyph for layouts that have no room for the drawn mark. */
+	/** One-line title for layouts without room for the wordmark. */
 	#titleLine(withIcon = false): string {
-		const buildLabel = this.options.buildLabel ?? formatBuildLabel();
 		const mark = withIcon && this.logoMode !== "ascii" && theme.icon.pi ? `${theme.icon.pi} ` : "";
-		return `${mark}${theme.bold(theme.fg("text", "Sayknow-CLI"))}${theme.fg("dim", ` v${this.version} · ${buildLabel}`)}`;
+		return `${mark}${theme.bold(theme.fg("accent", "Sayknow-CLI"))}${theme.fg("dim", ` ${this.#versionLabel()}`)}`;
 	}
 
-	#modelLine(): string {
+	/**
+	 * Model and reasoning, then project path and branch: on one row when both fit whole,
+	 * otherwise the place gets its own row rather than being cut to nothing.
+	 */
+	#statusLines(width: number): string[] {
+		const model = this.#truncate(this.#modelPart(), width);
+		const sep = theme.fg("dim", "  ·  ");
+		const fullWhere = this.#wherePart(Number.POSITIVE_INFINITY);
+		if (!fullWhere) return [model];
+		if (visibleWidth(model) + visibleWidth(sep) + visibleWidth(fullWhere) <= width)
+			return [`${model}${sep}${fullWhere}`];
+		return [model, this.#wherePart(width)];
+	}
+
+	#modelPart(): string {
 		const sep = theme.fg("dim", " · ");
 		if (this.modelName === "Unknown" || this.modelName.length === 0) {
 			return `${theme.fg("accent", t("welcome.chooseModel"))}${sep}${theme.fg("dim", t("welcome.modelHint"))}`;
@@ -263,7 +406,7 @@ export class WelcomeComponent implements Component {
 		return parts.join(sep);
 	}
 
-	#whereLine(width: number): string {
+	#wherePart(width: number): string {
 		const { cwd, branch } = this.#snapshot;
 		const sep = theme.fg("dim", " · ");
 		const branchPart =
@@ -293,7 +436,19 @@ export class WelcomeComponent implements Component {
 
 	// ── Release note, sessions, keys ────────────────────────────────────────
 
-	/** One line, only after an update: the new version, its first note, and a pointer to /changelog. */
+	/**
+	 * A section header that is also the divider: the label, a hairline rule filling the
+	 * row, and hints at the right end.
+	 */
+	#ruleHeader(label: string, hint: string, width: number): string {
+		const left = `${label} `;
+		const right = hint ? ` ${hint}` : "";
+		const fill = width - visibleWidth(left) - visibleWidth(right);
+		if (fill < 3) return this.#truncate(`${label}${right}`, width);
+		return `${left}${theme.fg("borderMuted", "─".repeat(fill))}${right}`;
+	}
+
+	/** One line, only after an update: the new version and its first note, pointing at /changelog. */
 	#releaseNoteLine(width: number): string | undefined {
 		const changelog = this.options.changelogMarkdown?.trim();
 		if (!changelog) return undefined;
@@ -301,29 +456,46 @@ export class WelcomeComponent implements Component {
 		const lead = theme.bold(theme.fg("accent", `v${version}`));
 		const pointer = theme.fg("dim", "/changelog");
 		const first = this.options.collapseChangelog ? undefined : this.#changelogItems(changelog)[0];
-		if (!first) return this.#spread(lead, pointer, width);
-		const room = width - visibleWidth(lead) - visibleWidth(pointer) - 4;
-		const body = room >= 12 ? `  ${theme.fg("muted", this.#truncate(first, room))}` : "";
-		return this.#spread(`${lead}${body}`, pointer, width);
+		const room = width - visibleWidth(lead) - visibleWidth(pointer) - 8;
+		const label = first && room >= 12 ? `${lead} ${theme.fg("muted", this.#truncate(first, room))}` : lead;
+		return this.#ruleHeader(label, pointer, width);
 	}
 
-	#sessionLines(width: number): string[] {
+	#sessionSection(width: number): Pick<Section, "lines" | "sessionRows"> {
 		const heading = theme.bold(theme.fg("accent", t("welcome.sessionTrail")));
-		if (this.recentSessions.length === 0) return [heading, theme.fg("dim", t("welcome.noSessions"))];
+		if (this.recentSessions.length === 0) {
+			return { lines: [this.#ruleHeader(heading, "", width), `  ${theme.fg("dim", t("welcome.noSessions"))}`] };
+		}
 		const context = this.options.keyDisplayContext ?? { platform: process.platform };
-		const hints = [t("welcome.allSessions", { key: this.#resumeKey() })];
-		if (this.options.continueKey)
-			hints.unshift(t("welcome.continue", { key: formatKeyHint(this.options.continueKey, context) }));
-		const lines = [this.#spread(heading, theme.fg("dim", hints.join(" · ")), width)];
+		const picking = this.#selected !== undefined;
+		const hints = picking
+			? [t("welcome.pickActive")]
+			: [
+					...(this.openableCount > 0 ? [t("welcome.pick", { key: "↓" })] : []),
+					...(this.options.continueKey
+						? [t("welcome.continue", { key: formatKeyHint(this.options.continueKey, context) })]
+						: []),
+					t("welcome.allSessions", { key: this.#resumeKey() }),
+				];
+		const lines = [this.#ruleHeader(heading, theme.fg("dim", hints.join(" · ")), width)];
+		const sessionRows: Array<number | undefined> = [undefined];
+		const openable = this.#openable();
 		this.recentSessions.slice(0, SESSION_ROWS).forEach((session, index) => {
-			// The first row is the one the continue key resumes; mark it.
-			const lead = index === 0 && this.options.continueKey ? theme.fg("accent", "› ") : "  ";
+			const openIndex = openable.indexOf(session);
+			const selected = picking && openIndex === this.#selected;
+			// Idle: the first row is the one the continue key resumes. Picking: the highlighted row.
+			const marked = picking ? selected : index === 0 && !!this.options.continueKey;
+			const lead = marked ? theme.fg("accent", "› ") : "  ";
 			const time = theme.fg("dim", session.timeAgo);
 			const nameWidth = Math.max(1, width - visibleWidth(lead) - visibleWidth(time) - 2);
-			const name = theme.fg(index === 0 ? "text" : "muted", this.#truncate(session.name, nameWidth));
-			lines.push(this.#spread(`${lead}${name}`, time, width));
+			const tone = selected ? "text" : picking ? "muted" : index === 0 ? "text" : "muted";
+			const name = this.#truncate(session.name, nameWidth);
+			lines.push(
+				this.#spread(`${lead}${selected ? theme.bold(theme.fg(tone, name)) : theme.fg(tone, name)}`, time, width),
+			);
+			sessionRows.push(openIndex >= 0 ? openIndex : undefined);
 		});
-		return lines;
+		return { lines, sessionRows };
 	}
 
 	#keysLine(width: number): string {
@@ -335,8 +507,8 @@ export class WelcomeComponent implements Component {
 			{ key: "?", label: "welcome.keymap" },
 		];
 		const text = items
-			.map(item => `${theme.fg("text", item.key)} ${theme.fg("dim", t(item.label))}`)
-			.join(theme.fg("dim", "   "));
+			.map(item => `${theme.fg("accent", item.key)} ${theme.fg("dim", t(item.label))}`)
+			.join(theme.fg("borderMuted", "  ·  "));
 		return this.#truncate(text, width);
 	}
 

@@ -12,6 +12,8 @@ export const zh: Partial<Record<MsgKey, string>> = {
 	"welcome.noSessions": "暂无已保存会话",
 	"welcome.allSessions": "{key} 查看全部",
 	"welcome.continue": "{key} 继续",
+	"welcome.pick": "{key} 选择",
+	"welcome.pickActive": "↑↓ 移动 · ⏎ 打开 · esc 返回",
 	"welcome.sessions": "会话",
 	"welcome.chooseModel": "选择模型",
 	"welcome.modelHint": "ctrl+l 选择 · / 命令",

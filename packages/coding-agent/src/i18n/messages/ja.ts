@@ -12,6 +12,8 @@ export const ja: Partial<Record<MsgKey, string>> = {
 	"welcome.noSessions": "保存されたセッションなし",
 	"welcome.allSessions": "{key} すべて表示",
 	"welcome.continue": "{key} 続ける",
+	"welcome.pick": "{key} 選択",
+	"welcome.pickActive": "↑↓ 移動 · ⏎ 開く · esc 戻る",
 	"welcome.sessions": "セッション",
 	"welcome.chooseModel": "モデルを選択",
 	"welcome.modelHint": "ctrl+l で選択 · / でコマンド",

@@ -329,6 +329,8 @@ export interface InteractiveModeContext {
 	showSessionSelector(): void;
 	/** Resume the most recent saved session other than this one (the launch card's first row). */
 	continueRecentSession(): Promise<void>;
+	/** The launch card stops taking ↓/Enter/clicks and releases mouse capture (first prompt sent). */
+	endWelcomeInteraction?(): void;
 	showSessionsDashboard(): void;
 	handleResumeSession(sessionPath: string, options?: { requireIdle?: boolean }): Promise<boolean>;
 	handleSessionDeleteCommand(): Promise<void>;

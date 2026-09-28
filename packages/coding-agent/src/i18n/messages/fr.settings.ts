@@ -238,6 +238,9 @@ export const frSettings: Record<string, string> = {
 	"set:locate.enabled:l": "Locate (recherche de code Jev)",
 	"set:locate.enabled:d":
 		"Propose l'outil locate quand une clé TypeSafe est enregistrée. Pour juger la pertinence, il envoie à TypeSafe les chemins de dossiers, les noms de fichiers et les lignes de déclaration (sans corps de fonctions ni commentaires).",
+	"set:startup.welcomeMouse:l": "Carte de démarrage cliquable",
+	"set:startup.welcomeMouse:d":
+		"Jusqu'au premier prompt, capturer la souris pour ouvrir une session récente de la carte de démarrage d'un clic. Sélectionnez le texte du terminal avec Maj enfoncée en attendant. Désactivé : ouvrir avec ↓ et Entrée.",
 	"set:retry.maxRetries:l": "Tentatives de nouvel essai",
 	"set:retry.maxRetries:d": "Nombre maximal de nouvelles tentatives en cas d'erreurs API",
 	"set:retry.maxRetries:o:1:l": "1 nouvel essai",

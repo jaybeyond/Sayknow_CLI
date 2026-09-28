@@ -434,19 +434,44 @@ export function buildSayknowPixelFrames(options: {
 	return { frames, protocol: options.protocol, widthPx, heightPx, columns, rows, rasterRows };
 }
 
+// 8x8 small octopus for compact surfaces (the launch card): the same palette and
+// features — rounded mantle with a highlight, white eyes over dark pupils, a row of
+// tentacles — drawn for the size rather than downsampled, which turns the dome blocky.
+// biome-ignore format: pixel grid stays one row per line
+const SMALL_BASE = [
+	"..KKKK..",
+	".KRrrRK.",
+	"KRRRRRRK",
+	"KRWRRWRK",
+	"KRVRRVRK",
+	"KRRRRRRK",
+	"KRKRRKRK",
+	"K.K..K.K",
+];
+const SMALL_GRIDS: Partial<Record<SayknowPixelFrameName, string[]>> = {
+	base: SMALL_BASE,
+	danceL: mix(SMALL_BASE, { 6: "RKRRKRK.", 7: ".K..K.K." }),
+	danceR: mix(SMALL_BASE, { 6: ".KRKRRKR", 7: ".K.K..K." }),
+	gazeL: mix(SMALL_BASE, { 3: "KWRRWRRK", 4: "KVRRVRRK" }),
+	gazeR: mix(SMALL_BASE, { 3: "KRRWRRWK", 4: "KRRVRRVK" }),
+	flicker: mix(SMALL_BASE, { 3: "KRRRRRRK", 4: "KRKRRKRK" }),
+};
+
 /**
  * Draw a pet frame as text with half blocks, one terminal row per two pixel rows,
  * so the same octopus shows up where no pixel protocol is available (the launch
  * card). Fully transparent pixel rows at the top and bottom are cropped; columns
- * are kept so every frame of the animation keeps the same width.
+ * are kept so every frame of the animation keeps the same width. `scale: "half"`
+ * draws the small octopus (8 columns, 4 rows); frames it has no pose for use its base.
  */
 export function renderPetHalfBlocks(
 	frame: SayknowPixelFrameName,
 	skin: PetSkinId = "red",
 	colorMode: "truecolor" | "256color" = "truecolor",
+	options: { scale?: "full" | "half" } = {},
 ): string[] {
-	const grid = PIXEL_GRIDS[frame];
 	const palette = PET_SKINS[skin].palette;
+	const grid = options.scale === "half" ? (SMALL_GRIDS[frame] ?? SMALL_BASE) : PIXEL_GRIDS[frame];
 	const opaque = (row: string): boolean => [...row].some(ch => palette[ch] != null);
 	let top = 0;
 	while (top < grid.length && !opaque(grid[top]!)) top++;

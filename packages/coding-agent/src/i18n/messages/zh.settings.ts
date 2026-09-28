@@ -262,6 +262,9 @@ export const zhSettings: Record<string, string> = {
 	"set:locate.enabled:l": "Locate (Jev 代码搜索)",
 	"set:locate.enabled:d":
 		"存有 TypeSafe 密钥时提供 locate 工具。为判断相关性,会把文件夹路径、文件名和声明行(不含函数体与注释)发送给 TypeSafe。",
+	"set:startup.welcomeMouse:l": "可点击的启动卡片",
+	"set:startup.welcomeMouse:d":
+		"在第一次提交前捕获鼠标,单击即可打开启动卡片上的最近会话。期间选择终端文字需按住 Shift。关闭后用 ↓ 和 Enter 打开。",
 	"set:retry.maxRetries:l": "重试次数",
 	"set:retry.maxRetries:d": "API 错误时的最大重试次数",
 	"set:retry.maxRetries:o:1:l": "重试 1 次",

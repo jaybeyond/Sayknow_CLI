@@ -12,6 +12,8 @@ export const ko: Partial<Record<MsgKey, string>> = {
 	"welcome.noSessions": "저장된 세션 없음",
 	"welcome.allSessions": "{key} 전체 보기",
 	"welcome.continue": "{key} 이어하기",
+	"welcome.pick": "{key} 선택",
+	"welcome.pickActive": "↑↓ 이동 · ⏎ 열기 · esc 닫기",
 	"welcome.sessions": "세션",
 	"welcome.chooseModel": "모델 선택",
 	"welcome.modelHint": "ctrl+l 선택 · / 명령",

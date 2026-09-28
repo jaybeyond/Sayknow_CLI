@@ -9,6 +9,7 @@ import {
 	clearRenderCache,
 	getRenderCacheRetainedBytes,
 	Loader,
+	matchesKey,
 	onImageProtocolChanged,
 	ProcessTerminal,
 	Spacer,
@@ -224,8 +225,27 @@ export function resolveWelcomePetSkin(petMode: PetMode, themeName: string | unde
  * rail glyph a submitted prompt keeps in the transcript, colored by the editor's
  * border color (session accent, thinking level, shell/python mode).
  */
+/** Background band under the composer's input rows, so the line being typed stands out. */
+function composerInputBackground(): string | undefined {
+	try {
+		return theme.getBgAnsi("userMessageBg");
+	} catch {
+		return undefined;
+	}
+}
+
+/** Canonical form of a session path, so /private/var and /var compare equal on macOS. */
+function canonicalPath(file: string): string {
+	try {
+		return fs.realpathSync(file);
+	} catch {
+		return path.resolve(file);
+	}
+}
+
 export function configureDefaultComposerChrome(editor: CustomEditor): void {
 	editor.setBorderVisible(false);
+	editor.setInputBackground(composerInputBackground());
 	editor.setClosedBorderBox(false);
 	editor.setPromptGutter(undefined);
 	editor.setRailGutter(theme.rail.user);
@@ -472,6 +492,9 @@ export class InteractiveMode implements InteractiveModeContext {
 	#eventBus?: EventBus;
 	#eventBusUnsubscribers: Array<() => void> = [];
 	#welcomeComponent?: WelcomeComponent;
+	#welcomeInputUnsubscribe?: () => void;
+	/** Mouse reporting was switched on for the launch card and must be restored after it. */
+	#welcomeEnabledMouse = false;
 	#ircSplitView: IrcSplitViewComponent;
 	#ircSidebarAvailable = false;
 	#ircSidebarRequestedVisible = false;
@@ -764,11 +787,13 @@ export class InteractiveMode implements InteractiveModeContext {
 					resumeKey: this.keybindings.getKeys("app.session.resume")[0],
 					continueKey: this.keybindings.getKeys("app.session.continue")[0],
 					petSkin: resolveWelcomePetSkin(settings.get("pet.mode"), getCurrentThemeName()),
+					onOpenSession: session => void this.#openWelcomeSession(session),
 				},
 			);
 
 			this.ui.addChild(this.#welcomeComponent);
 			this.#welcomeComponent.playIntro(() => this.ui.requestRender());
+			this.#startWelcomeInteraction();
 		}
 
 		this.ui.addChild(this.#ircSplitView);
@@ -880,11 +905,15 @@ export class InteractiveMode implements InteractiveModeContext {
 					)
 					.then(sessions => {
 						if (this.#welcomeComponent !== welcomeComponent) return;
+						const current = this.#currentSessionFileCanonical();
 						welcomeComponent.setRecentSessions(
-							sessions.map(session => ({
-								name: session.name,
-								timeAgo: session.timeAgo,
-							})),
+							sessions
+								.filter(session => canonicalPath(session.path) !== current)
+								.map(session => ({
+									name: session.name,
+									timeAgo: session.timeAgo,
+									path: session.path,
+								})),
 						);
 						this.ui.requestRender();
 					})
@@ -1231,6 +1260,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 		// Re-read the glyph so a symbol-preset switch (unicode/nerd/ascii) reaches the rail.
 		this.editor.setRailGutter(theme.rail.user);
+		this.editor.setInputBackground(composerInputBackground());
 		this.editor.setPlaceholder(this.#getComposerPlaceholder());
 		this.#setComposerTopBorder();
 		this.ui.requestRender();
@@ -1433,6 +1463,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.loadingAnimation.stop();
 			this.loadingAnimation = undefined;
 		}
+		this.#endWelcomeInteraction();
 		this.#welcomeComponent?.dispose();
 		this.#welcomeComponent = undefined;
 		if (this.#sttController) {
@@ -2183,20 +2214,93 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#selectorController.showSessionSelector();
 	}
 
+	#currentSessionFileCanonical(): string | undefined {
+		const currentFile = this.sessionManager.getSessionFile();
+		return currentFile ? canonicalPath(currentFile) : undefined;
+	}
+
+	/**
+	 * The launch card's session rows take ↓/↑/Enter/Esc and clicks until the first prompt
+	 * is sent. Mouse reporting is switched on for that window (unless the user already
+	 * runs with it) so a click reaches the card; it goes back to the configured state when
+	 * the card stops taking input.
+	 */
+	#startWelcomeInteraction(): void {
+		this.#releaseWelcomeInput();
+		const welcome = this.#welcomeComponent;
+		if (!welcome) return;
+		this.#welcomeInputUnsubscribe = this.ui.addInputListener(data => this.#handleWelcomeKey(welcome, data));
+		if (settings.get("startup.welcomeMouse") && !this.ui.mouseEnabled) {
+			this.ui.setMouseEnabled(true);
+			this.#welcomeEnabledMouse = true;
+		}
+	}
+
+	/** The card stops taking input: first prompt sent, a session opened, or the UI rebuilt. */
+	endWelcomeInteraction(): void {
+		this.#endWelcomeInteraction();
+	}
+
+	/** Drop the card's key listener and give mouse reporting back to its configured state. */
+	#releaseWelcomeInput(): void {
+		this.#welcomeInputUnsubscribe?.();
+		this.#welcomeInputUnsubscribe = undefined;
+		if (this.#welcomeEnabledMouse) {
+			this.#welcomeEnabledMouse = false;
+			this.ui.setMouseEnabled(settings.get("mouse.enabled"));
+		}
+	}
+
+	#endWelcomeInteraction(): void {
+		this.#releaseWelcomeInput();
+		if (this.#welcomeComponent?.interactive) {
+			this.#welcomeComponent.endInteraction();
+			this.ui.requestRender();
+		}
+	}
+
+	/**
+	 * ↓ from an empty composer (not walking history) moves into the session rows; there,
+	 * ↑/↓ move, Enter opens, Esc (or ↑ past the first row) hands focus back. Any other key
+	 * leaves the rows and reaches the composer as usual.
+	 */
+	#handleWelcomeKey(welcome: WelcomeComponent, data: string): { consume: true } | undefined {
+		if (this.#welcomeComponent !== welcome || !welcome.interactive) return undefined;
+		if (this.ui.getFocusedComponent() !== this.editor) return undefined;
+		const picking = welcome.selectedIndex !== undefined;
+		if (!picking) {
+			if (!matchesKey(data, "down")) return undefined;
+			if (this.editor.getText() !== "" || this.editor.isBrowsingHistory() || this.editor.isShowingAutocomplete())
+				return undefined;
+			if (!welcome.select(0)) return undefined;
+			this.ui.requestRender();
+			return { consume: true };
+		}
+		if (matchesKey(data, "down")) welcome.moveSelection(1);
+		else if (matchesKey(data, "up")) welcome.moveSelection(-1);
+		else if (matchesKey(data, "enter")) welcome.openSelected();
+		else if (matchesKey(data, "escape")) welcome.select(undefined);
+		else {
+			welcome.select(undefined);
+			this.ui.requestRender();
+			return undefined;
+		}
+		this.ui.requestRender();
+		return { consume: true };
+	}
+
+	async #openWelcomeSession(session: RecentSession): Promise<void> {
+		if (!session.path) return;
+		this.#endWelcomeInteraction();
+		await this.handleResumeSession(session.path, { requireIdle: true });
+	}
+
 	async continueRecentSession(): Promise<void> {
 		// Listing returns canonical paths (/private/var on macOS); compare canonically so the
 		// live session is never "continued" into itself.
-		const canonical = (file: string): string => {
-			try {
-				return fs.realpathSync(file);
-			} catch {
-				return path.resolve(file);
-			}
-		};
-		const currentFile = this.sessionManager.getSessionFile();
-		const current = currentFile ? canonical(currentFile) : undefined;
+		const current = this.#currentSessionFileCanonical();
 		const recent = await getRecentSessions(this.sessionManager.getSessionDir());
-		const target = recent.find(session => canonical(session.path) !== current);
+		const target = recent.find(session => canonicalPath(session.path) !== current);
 		if (!target) {
 			this.showStatus("No earlier session to continue");
 			return;

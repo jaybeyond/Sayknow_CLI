@@ -596,9 +596,9 @@ describe("InteractiveMode.setEditorComponent", () => {
 		const renderedText = rendered.join("\n");
 		const noticeIndex = rendered.findIndex(line => line.includes("New session started"));
 		expect(rendered.length).toBeLessThanOrEqual(rows);
-		expect(renderedText).toContain("Sayknow-CLI");
+		expect(renderedText).toContain("╔═╗╔═╗");
 		// The card gives up rows to the notice instead of pushing it off screen.
-		expect(noticeIndex).toBeGreaterThan(rendered.findIndex(line => line.includes("Sayknow-CLI")));
+		expect(noticeIndex).toBeGreaterThan(rendered.findIndex(line => line.includes("╔═╗╔═╗")));
 		expect(renderedText).toContain("New session started");
 	});
 
@@ -653,7 +653,10 @@ describe("InteractiveMode.setEditorComponent", () => {
 		expect(mode.editor.borderColor("x")).toBe(theme.getBashModeBorderColor()("x"));
 		lines = mode.editor.render(48).map(stripRenderControls);
 		expect(lines.some(line => line.startsWith(`${theme.rail.user} shell `) && line.includes("!!pwd"))).toBe(true);
-		expect(mode.editor.render(48)[0]).toStartWith(theme.getBashModeBorderColor()(`${theme.rail.user} `));
+		// The composer band comes first, then the rail in the mode color.
+		expect(mode.editor.render(48)[0]).toStartWith(
+			`${theme.getBgAnsi("userMessageBg")}${theme.getBashModeBorderColor()(`${theme.rail.user} `)}`,
+		);
 
 		mode.isBashMode = false;
 		mode.updateEditorChrome();
@@ -828,6 +831,106 @@ describe("InteractiveMode.setEditorComponent", () => {
 
 			expect(resume).not.toHaveBeenCalled();
 			expect(status).toHaveBeenCalledWith("No earlier session to continue");
+		});
+
+		/** Start the UI on a silent terminal and return a function that feeds raw input through the TUI. */
+		const startWithInput = async (): Promise<{ send: (data: string) => void; mouse: boolean[] }> => {
+			let onInput: ((data: string) => void) | undefined;
+			const mouse: boolean[] = [];
+			const terminal = mode.ui.terminal as unknown as Record<string, unknown>;
+			for (const method of [
+				"write",
+				"moveBy",
+				"hideCursor",
+				"showCursor",
+				"clearLine",
+				"clearFromCursor",
+				"clearScreen",
+				"setTitle",
+				"setProgress",
+			]) {
+				vi.spyOn(terminal as never, method as never).mockImplementation((() => {}) as never);
+			}
+			vi.spyOn(terminal as never, "start" as never).mockImplementation(((handler: (data: string) => void) => {
+				onInput = handler;
+			}) as never);
+			vi.spyOn(terminal as never, "stop" as never).mockImplementation((() => {}) as never);
+			vi.spyOn(terminal as never, "setMouseEnabled" as never).mockImplementation(((enabled: boolean) => {
+				mouse.push(enabled);
+			}) as never);
+			forceTerminalSize(mode, 120, 40);
+			await mode.init();
+			return { send: data => onInput!(data), mouse };
+		};
+
+		it("opens a card session with ↓ and Enter, and hands ↓ to history once the composer is busy", async () => {
+			writeSession("older", "older-id", "older work", 1_000_000);
+			const newest = writeSession("newest", "newest-id", "newest work", 2_000_000);
+			const { send } = await startWithInput();
+			const resume = vi.spyOn(mode, "handleResumeSession").mockResolvedValue(true);
+			for (let i = 0; i < 40 && !mode.ui.render(120).some(line => line.includes("newest work")); i++)
+				await Bun.sleep(5);
+
+			send("\x1b[B"); // ↓ from the empty composer: first row highlighted
+			send("\x1b[B"); // second row
+			send("\x1b[A"); // back to the first
+			send("\r");
+			for (let i = 0; i < 20 && resume.mock.calls.length === 0; i++) await Bun.sleep(5);
+			expect(resume).toHaveBeenCalledTimes(1);
+			expect(fs.realpathSync(resume.mock.calls[0]?.[0] as string)).toBe(fs.realpathSync(newest));
+			expect(resume.mock.calls[0]?.[1]).toEqual({ requireIdle: true });
+			// Opening a session ends the card's interaction.
+			send("\x1b[B");
+			expect(mode.editor.getText()).toBe("");
+		});
+
+		it("leaves ↓ to the composer when it has text, and Esc returns to typing", async () => {
+			writeSession("previous", "previous-id", "previous work", 2_000_000);
+			const { send } = await startWithInput();
+			const resume = vi.spyOn(mode, "handleResumeSession").mockResolvedValue(true);
+			for (let i = 0; i < 40 && !mode.ui.render(120).some(line => line.includes("previous work")); i++)
+				await Bun.sleep(5);
+
+			send("\x1b[B");
+			send("\x1b"); // Esc: back to the composer
+			await Bun.sleep(60);
+			send("h");
+			expect(mode.editor.getText()).toBe("h");
+			send("\x1b[B"); // composer busy: no highlight
+			send("\r");
+			await Bun.sleep(20);
+			expect(resume).not.toHaveBeenCalled();
+		});
+
+		it("captures the mouse only until the first prompt, and opens a session on click", async () => {
+			writeSession("previous", "previous-id", "previous work", 2_000_000);
+			const { send, mouse } = await startWithInput();
+			expect(mode.ui.mouseEnabled).toBe(true);
+			const resume = vi.spyOn(mode, "handleResumeSession").mockResolvedValue(true);
+			let lines: string[] = [];
+			for (let i = 0; i < 40; i++) {
+				lines = mode.ui.render(120).map(stripRenderControls);
+				if (lines.some(line => line.includes("previous work"))) break;
+				await Bun.sleep(5);
+			}
+			const row = lines.findIndex(line => line.includes("previous work"));
+			expect(row).toBeGreaterThan(0);
+			await Bun.sleep(20);
+			send(`\x1b[<0;6;${row + 1}M`);
+			for (let i = 0; i < 20 && resume.mock.calls.length === 0; i++) await Bun.sleep(5);
+			expect(resume).toHaveBeenCalledTimes(1);
+			// Opening the session gave the mouse back.
+			expect(mode.ui.mouseEnabled).toBe(false);
+			expect(mouse.at(-1)).toBe(false);
+		});
+
+		it("gives the mouse back when the first prompt is sent", async () => {
+			const { mouse } = await startWithInput();
+			expect(mode.ui.mouseEnabled).toBe(true);
+			mode.endWelcomeInteraction();
+			expect(mode.ui.mouseEnabled).toBe(false);
+			expect(mouse).toContain(true);
+			expect(mouse.at(-1)).toBe(false);
 		});
 
 		it("is bound to ctrl+q in the composer and named on the launch card", async () => {

@@ -35,6 +35,7 @@ There are two different listing pipelines:
    - Parses header metadata, applicable tail patches, and the earliest user text preview.
    - Returns lightweight `RecentSessionInfo` with lazy `name` and `timeAgo` getters.
    - Sorts by file `mtime` descending.
+   - The launch card shows the first three (excluding the live session). Until the first prompt they can be opened directly: `↓` from an empty composer (not while browsing history) highlights the first row, `↑`/`↓` move, `Enter` opens it through `handleResumeSession(path, { requireIdle: true })`, `Esc` or `↑` past the top returns to the composer, and any other key goes to the composer. With `startup.welcomeMouse` (on by default) SKC captures the mouse for that window so one click on a row opens it; mouse reporting returns to `mouse.enabled` as soon as the first prompt is sent or a session is opened. Terminal text selection needs Shift held meanwhile.
 
 2. `SessionManager.list(...)` / `SessionManager.listAll()` (resume pickers and ID matching)
    - Reads a bounded 4KB prefix plus at most 16KB of trailing v4 header patches for file-backed sessions.

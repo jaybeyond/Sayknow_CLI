@@ -238,6 +238,9 @@ export const esSettings: Record<string, string> = {
 	"set:locate.enabled:l": "Locate (búsqueda de código con Jev)",
 	"set:locate.enabled:d":
 		"Ofrece la herramienta locate cuando hay una clave de TypeSafe guardada. Para juzgar la relevancia envía a TypeSafe rutas de carpetas, nombres de archivo y líneas de declaración (sin cuerpos de función ni comentarios).",
+	"set:startup.welcomeMouse:l": "Tarjeta de inicio clicable",
+	"set:startup.welcomeMouse:d":
+		"Hasta el primer prompt, captura el ratón para abrir una sesión reciente de la tarjeta de inicio con un clic. Mientras tanto, selecciona texto del terminal con Mayús pulsada. Desactivado: abre con ↓ y Enter.",
 	"set:retry.maxRetries:l": "Intentos de reintento",
 	"set:retry.maxRetries:d": "Número máximo de reintentos ante errores de la API",
 	"set:retry.maxRetries:o:1:l": "1 reintento",

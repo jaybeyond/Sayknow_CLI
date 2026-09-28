@@ -1474,6 +1474,16 @@ export const SETTINGS_SCHEMA = {
 			],
 		},
 	},
+	"startup.welcomeMouse": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "interaction",
+			label: "Clickable Launch Card",
+			description:
+				"Until the first prompt, capture the mouse so a recent session on the launch card opens with one click. Terminal text selection needs Shift held meanwhile. Off: open sessions with ↓ and Enter.",
+		},
+	},
 	"startup.skipLogoAnimation": {
 		type: "boolean",
 		default: false,

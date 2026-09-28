@@ -20,6 +20,8 @@ export const en = {
 	"welcome.noSessions": "No saved sessions",
 	"welcome.allSessions": "{key} all sessions",
 	"welcome.continue": "{key} continue",
+	"welcome.pick": "{key} pick",
+	"welcome.pickActive": "↑↓ move · ⏎ open · esc back",
 	"welcome.sessions": "sessions",
 	"welcome.chooseModel": "choose a model",
 	"welcome.modelHint": "ctrl+l to pick · / for commands",

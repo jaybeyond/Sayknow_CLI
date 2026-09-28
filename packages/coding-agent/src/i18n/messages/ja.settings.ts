@@ -269,6 +269,9 @@ export const jaSettings: Record<string, string> = {
 	"set:locate.enabled:l": "Locate (Jev コード検索)",
 	"set:locate.enabled:d":
 		"TypeSafe キーがあるとき locate ツールを提供します。関連性の判定のため、フォルダパス、ファイル名、宣言行 (関数本体・コメントは除く) を TypeSafe に送ります。",
+	"set:startup.welcomeMouse:l": "クリックできる起動カード",
+	"set:startup.welcomeMouse:d":
+		"最初のプロンプトまでマウスを受け取り、起動カードの最近のセッションをワンクリックで開きます。その間の端末テキスト選択は Shift を押しながら行います。オフでは ↓ と Enter で開きます。",
 	"set:retry.maxRetries:l": "リトライ回数",
 	"set:retry.maxRetries:d": "API エラー時の最大リトライ回数",
 	"set:retry.maxRetries:o:1:l": "1 回リトライ",

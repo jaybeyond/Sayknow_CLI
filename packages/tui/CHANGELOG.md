@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Added
+
+- `Component.handleClick(line, column)`: top-level children that are not focused can take left clicks, hit-tested against the rows they rendered in the last frame; returning true consumes the click before selection and the focused component.
+- `TUI.setMouseEnabled(enabled)`, `TUI.mouseEnabled` and `TUI.getFocusedComponent()`: switch terminal mouse reporting at runtime and ask which component has keyboard focus.
+- `Editor.setInputBackground(sgr)` paints a background band under every borderless input row (held across colored spans and the cursor); `Editor.isBrowsingHistory()`.
+- `renderPetHalfBlocks(..., { scale: "half" })` draws the small 8×4 octopus.
+
 ## [0.6.6] - 2026-09-28
 
 ### Added

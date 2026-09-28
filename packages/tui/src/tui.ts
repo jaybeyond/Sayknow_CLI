@@ -133,6 +133,14 @@ export interface Component {
 	handleMouse?(event: MouseEvent): void;
 
 	/**
+	 * Optional click hook for a top-level child that is not focused: called with the
+	 * row (within this component's last rendered lines) and column of a left click.
+	 * Return true to consume the click. Needs mouse reporting (`enableMouse` or
+	 * {@link TUI.setMouseEnabled}).
+	 */
+	handleClick?(line: number, column: number): boolean;
+
+	/**
 	 * If true, component receives key release events (Kitty protocol).
 	 * Default is false - release events are filtered out.
 	 */
@@ -760,6 +768,9 @@ export class TUI extends Container {
 	#mouseSelectionStart: MouseSelectionPoint | null = null;
 	#mouseSelectionEnd: MouseSelectionPoint | null = null;
 	#mouseSelectionDragged = false;
+	/** Rows each top-level child occupied in the last frame, for click hit-testing. */
+	#childRows = new Map<Component, { start: number; count: number }>();
+	#mouseEnabled = false;
 	#viewportOutputSource: ViewportOutputSource | null = null;
 	#manualOutputNotice = false;
 	#manualTranscriptLineCount = 0;
@@ -828,6 +839,7 @@ export class TUI extends Container {
 		} = {},
 	) {
 		super();
+		this.#mouseEnabled = options.enableMouse === true;
 		this.terminal = terminal;
 		if (showHardwareCursor !== undefined) {
 			this.#showHardwareCursor = showHardwareCursor;
@@ -1315,13 +1327,34 @@ export class TUI extends Container {
 		for (const overlay of this.overlayStack) overlay.mouseBounds = undefined;
 	}
 
+	/**
+	 * Turn terminal mouse reporting on or off while running. With it on, the terminal
+	 * sends clicks and the wheel to the app instead of doing its own selection (most
+	 * terminals still select with Shift held).
+	 */
+	setMouseEnabled(enabled: boolean): void {
+		if (this.#mouseEnabled === enabled) return;
+		this.#mouseEnabled = enabled;
+		if (!enabled) this.#clearMouseSelection();
+		if (!this.#stopped) this.terminal.setMouseEnabled?.(enabled);
+	}
+
+	get mouseEnabled(): boolean {
+		return this.#mouseEnabled;
+	}
+
+	/** The component that currently receives keyboard input. */
+	getFocusedComponent(): Component | null {
+		return this.#focusedComponent;
+	}
+
 	start(): void {
 		this.#stopped = false;
 		this.#terminalUnavailable = false;
 		// Seed the observed width so a spurious post-start resize event (iTerm2 tab
 		// activation, the self-sent SIGWINCH after resume) is not read as a reflow.
 		this.#lastObservedWidth = this.terminal.columns;
-		this.terminal.setMouseEnabled?.(this.options.enableMouse === true);
+		this.terminal.setMouseEnabled?.(this.#mouseEnabled);
 		this.terminal.start(
 			data => this.#handleInput(data),
 			() => {
@@ -2022,6 +2055,10 @@ export class TUI extends Container {
 				this.#clearMouseSelection();
 				this.scrollViewportBy(mouse.direction! * DEFAULT_WHEEL_LINES, { pin: "stable" });
 			} else if (mouse.kind === "click") {
+				if (this.#dispatchChildClick(mouse)) {
+					this.requestRender(false, "mouse");
+					return;
+				}
 				this.#beginMouseSelection(mouse);
 				const focusedOverlay = this.overlayStack.find(o => o.component === this.#focusedComponent);
 				if (focusedOverlay) {
@@ -2094,6 +2131,22 @@ export class TUI extends Container {
 			this.#focusedComponent.handleInput(data);
 			this.requestRender(false, "input");
 		}
+	}
+
+	/** Give a click to the top-level child under it, if that child takes clicks and no overlay is focused. */
+	#dispatchChildClick(mouse: MouseEvent): boolean {
+		if (this.#childRows.size === 0) return false;
+		if (this.overlayStack.some(overlay => overlay.component === this.#focusedComponent)) return false;
+		const point = this.#mouseSelectionPoint(mouse);
+		if (point === null) return false;
+		for (const [child, rows] of this.#childRows) {
+			if (point.line < rows.start || point.line >= rows.start + rows.count) continue;
+			if (child.handleClick?.(point.line - rows.start, point.column)) {
+				this.#clearMouseSelection();
+				return true;
+			}
+		}
+		return false;
 	}
 
 	#mouseSelectionPoint(mouse: MouseEvent): MouseSelectionPoint | null {
@@ -2919,9 +2972,14 @@ export class TUI extends Container {
 		const renderedChildren = new Map<Component, string[]>();
 		let anchorFrame: ViewportAnchorFrame | null = null;
 		const anchorRenderFailureCountBefore = viewportAnchorRenderFailureCount;
+		this.#childRows.clear();
 		for (const child of this.children) {
 			const rendered = safeRenderComponentWithViewportAnchors(child, width, "tui-child");
 			renderedChildren.set(child, rendered.lines);
+			// Children above the pinned suffix keep these rows: padding and suffix trimming
+			// only touch the pinned tail.
+			if (child.handleClick)
+				this.#childRows.set(child, { start: renderedLines.length, count: rendered.lines.length });
 			if (child === this.#viewportAnchorComponent && rendered.anchors.some(anchor => anchor !== null)) {
 				anchorFrame = { startRow: renderedLines.length, anchors: rendered.anchors };
 			}

@@ -158,11 +158,11 @@ describe("redesigned interactive shell chrome", () => {
 		const lines = component.render(54);
 		const rendered = Bun.stripANSI(lines.join("\n"));
 
-		expect(rendered).toContain("Sayknow-CLI");
+		expect(rendered).toContain("╔═╗╔═╗");
 		expect(rendered).toContain("gpt-5.5");
-		// No enclosing box and no hero wordmark: the launch card is borderless.
+		// No enclosing box: the wordmark and sections stand on the background.
 		expect(rendered).not.toContain("╭");
-		expect(rendered).not.toContain("╔═╗");
+		expect(rendered).not.toContain("│");
 		for (const line of lines) {
 			expect(visibleWidth(line)).toBeLessThanOrEqual(54);
 		}
@@ -172,14 +172,14 @@ describe("redesigned interactive shell chrome", () => {
 		const component = new WelcomeComponent("1.2.3", "gpt-5.5", "openai");
 		const narrowLines = component.render(100);
 		const wideLines = component.render(160);
-		const titleRow = (lines: string[]) => Bun.stripANSI(lines.find(line => line.includes("Sayknow-CLI")) ?? "");
+		const titleRow = (lines: string[]) => Bun.stripANSI(lines.find(line => line.includes("╔═╗╔═╗")) ?? "");
 		const narrowTop = titleRow(narrowLines);
 		const wideTop = titleRow(wideLines);
 
 		expect(visibleWidth(narrowTop)).toBe(100);
 		expect(visibleWidth(wideTop)).toBe(160);
 		expect(visibleWidth(wideTop)).toBeGreaterThan(visibleWidth(narrowTop));
-		expect(wideTop).toContain("Sayknow-CLI");
+		expect(wideTop).toContain("╔═╗╔═╗");
 		for (const line of wideLines) {
 			expect(visibleWidth(line)).toBeLessThanOrEqual(160);
 		}
@@ -193,9 +193,9 @@ describe("redesigned interactive shell chrome", () => {
 			new WelcomeComponent("1.2.3", "gpt-5.5", "openai", [], "unicode").render(80).join("\n"),
 		);
 
-		expect(ascii).toContain("( o o )");
-		expect(ascii).not.toMatch(/[█▀▄]/);
-		expect(unicode).toMatch(/[▀▄]{16}/);
+		expect(ascii).toContain("( oo )");
+		expect(ascii).not.toMatch(/[█▀▄╔]/);
+		expect(unicode).toMatch(/[▀▄]{8}/);
 	});
 
 	it("resolves welcome banner auto and manual override modes", () => {
