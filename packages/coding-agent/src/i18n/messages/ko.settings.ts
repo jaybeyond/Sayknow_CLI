@@ -266,6 +266,9 @@ export const koSettings: Record<string, string> = {
 	"set:auth.credentialRankingMode:o:earliest-reset:l": "빨리 초기화되는 순",
 	"set:auth.credentialRankingMode:o:earliest-reset:d":
 		"사용량 구간이 가장 먼저 초기화되는 계정부터. 초기화 때 사라질 한도를 먼저 씁니다",
+	"set:locate.enabled:l": "Locate (Jev 코드 검색)",
+	"set:locate.enabled:d":
+		"TypeSafe 키가 있으면 locate 도구를 제공합니다. 관련성 판단을 위해 폴더 경로, 파일 이름, 선언 줄(함수 본문·주석 제외)을 TypeSafe로 보냅니다.",
 	"set:retry.maxRetries:l": "재시도 횟수",
 	"set:retry.maxRetries:d": "API 오류 시 최대 재시도 횟수",
 	"set:retry.maxRetries:o:1:l": "1회 재시도",

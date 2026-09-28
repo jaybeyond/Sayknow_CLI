@@ -3138,6 +3138,22 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	/**
+	 * The `locate` tool: find code by describing what it does, judged by Jev. Offered only
+	 * when a TypeSafe key is stored. Sends folder paths, file names and declaration lines
+	 * (never bodies or comments) to TypeSafe.
+	 */
+	"locate.enabled": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "tools",
+			label: "Locate (Jev code search)",
+			description:
+				"Offer the locate tool when a TypeSafe key is stored. It sends folder paths, file names and declaration lines (no function bodies or comments) to TypeSafe to judge relevance.",
+		},
+	},
+
 	"tools.essentialOverride": {
 		type: "array",
 		default: [] as string[],

@@ -259,6 +259,9 @@ export const zhSettings: Record<string, string> = {
 	"set:auth.credentialRankingMode:o:balanced:d": "优先用量最少的账户;分摊负载,给每个账户留有余量",
 	"set:auth.credentialRankingMode:o:earliest-reset:l": "最早重置优先",
 	"set:auth.credentialRankingMode:o:earliest-reset:d": "优先用量窗口最早重置的账户,避免额度在重置时浪费",
+	"set:locate.enabled:l": "Locate (Jev 代码搜索)",
+	"set:locate.enabled:d":
+		"存有 TypeSafe 密钥时提供 locate 工具。为判断相关性,会把文件夹路径、文件名和声明行(不含函数体与注释)发送给 TypeSafe。",
 	"set:retry.maxRetries:l": "重试次数",
 	"set:retry.maxRetries:d": "API 错误时的最大重试次数",
 	"set:retry.maxRetries:o:1:l": "重试 1 次",

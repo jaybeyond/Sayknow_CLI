@@ -2403,6 +2403,17 @@
 			},
 			"additionalProperties": false
 		},
+		"locate": {
+			"type": "object",
+			"properties": {
+				"enabled": {
+					"type": "boolean",
+					"description": "Offer the locate tool when a TypeSafe key is stored. It sends folder paths, file names and declaration lines (no function bodies or comments) to TypeSafe to judge relevance.",
+					"default": true
+				}
+			},
+			"additionalProperties": false
+		},
 		"mcp": {
 			"type": "object",
 			"properties": {

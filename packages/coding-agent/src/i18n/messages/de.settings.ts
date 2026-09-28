@@ -254,6 +254,9 @@ export const deSettings: Record<string, string> = {
 	"set:auth.credentialRankingMode:o:earliest-reset:l": "Früheste Zurücksetzung",
 	"set:auth.credentialRankingMode:o:earliest-reset:d":
 		"Konto, dessen Nutzungsfenster zuerst zurückgesetzt wird, zuerst, damit kein Kontingent verfällt",
+	"set:locate.enabled:l": "Locate (Jev-Codesuche)",
+	"set:locate.enabled:d":
+		"Bietet das locate-Werkzeug an, wenn ein TypeSafe-Schlüssel gespeichert ist. Zur Relevanzbewertung werden Ordnerpfade, Dateinamen und Deklarationszeilen (ohne Funktionsrümpfe und Kommentare) an TypeSafe gesendet.",
 	"set:retry.maxRetries:l": "Wiederholungsversuche",
 	"set:retry.maxRetries:d": "Maximale Wiederholungsversuche bei API-Fehlern",
 	"set:retry.maxRetries:o:1:l": "1 Wiederholung",

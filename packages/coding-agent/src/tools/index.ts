@@ -47,6 +47,7 @@ import { FindTool } from "./find";
 import { GithubTool } from "./gh";
 import { IrcTool } from "./irc";
 import { JobTool } from "./job";
+import { LocateTool } from "./locate";
 import { MonitorTool } from "./monitor";
 import { wrapToolWithMetaNotice } from "./output-meta";
 import { ReadTool } from "./read";
@@ -88,6 +89,7 @@ export * from "./gh";
 export * from "./image-gen";
 export * from "./irc";
 export * from "./job";
+export * from "./locate";
 export * from "./monitor";
 export * from "./read";
 export * from "./recipe";
@@ -473,6 +475,7 @@ export const BUILTIN_TOOLS: Record<string, ToolFactory> = {
 	github: GithubTool.createIf,
 	find: s => new FindTool(s),
 	search: s => new SearchTool(s),
+	locate: LocateTool.createIf,
 	lsp: LspTool.createIf,
 	browser: s => new BrowserTool(s),
 	...(isComputerLoadablePlatform() ? { computer: ComputerTool.createIf } : {}),

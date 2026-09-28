@@ -235,6 +235,9 @@ export const frSettings: Record<string, string> = {
 	"set:auth.credentialRankingMode:o:earliest-reset:l": "Réinitialisation la plus proche",
 	"set:auth.credentialRankingMode:o:earliest-reset:d":
 		"Le compte dont la fenêtre d'utilisation se réinitialise le plus tôt d'abord, pour ne pas perdre de quota",
+	"set:locate.enabled:l": "Locate (recherche de code Jev)",
+	"set:locate.enabled:d":
+		"Propose l'outil locate quand une clé TypeSafe est enregistrée. Pour juger la pertinence, il envoie à TypeSafe les chemins de dossiers, les noms de fichiers et les lignes de déclaration (sans corps de fonctions ni commentaires).",
 	"set:retry.maxRetries:l": "Tentatives de nouvel essai",
 	"set:retry.maxRetries:d": "Nombre maximal de nouvelles tentatives en cas d'erreurs API",
 	"set:retry.maxRetries:o:1:l": "1 nouvel essai",

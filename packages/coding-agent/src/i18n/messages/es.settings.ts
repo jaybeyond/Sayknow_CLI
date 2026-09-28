@@ -235,6 +235,9 @@ export const esSettings: Record<string, string> = {
 	"set:auth.credentialRankingMode:o:earliest-reset:l": "Reinicio más próximo",
 	"set:auth.credentialRankingMode:o:earliest-reset:d":
 		"Primero la cuenta cuya ventana de uso se reinicia antes, para no perder cuota al reiniciarse",
+	"set:locate.enabled:l": "Locate (búsqueda de código con Jev)",
+	"set:locate.enabled:d":
+		"Ofrece la herramienta locate cuando hay una clave de TypeSafe guardada. Para juzgar la relevancia envía a TypeSafe rutas de carpetas, nombres de archivo y líneas de declaración (sin cuerpos de función ni comentarios).",
 	"set:retry.maxRetries:l": "Intentos de reintento",
 	"set:retry.maxRetries:d": "Número máximo de reintentos ante errores de la API",
 	"set:retry.maxRetries:o:1:l": "1 reintento",

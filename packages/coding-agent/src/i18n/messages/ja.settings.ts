@@ -266,6 +266,9 @@ export const jaSettings: Record<string, string> = {
 	"set:auth.credentialRankingMode:o:earliest-reset:l": "リセットが早い順",
 	"set:auth.credentialRankingMode:o:earliest-reset:d":
 		"使用量ウィンドウが最も早くリセットされるアカウントから。リセットで失われる枠を先に使います",
+	"set:locate.enabled:l": "Locate (Jev コード検索)",
+	"set:locate.enabled:d":
+		"TypeSafe キーがあるとき locate ツールを提供します。関連性の判定のため、フォルダパス、ファイル名、宣言行 (関数本体・コメントは除く) を TypeSafe に送ります。",
 	"set:retry.maxRetries:l": "リトライ回数",
 	"set:retry.maxRetries:d": "API エラー時の最大リトライ回数",
 	"set:retry.maxRetries:o:1:l": "1 回リトライ",
