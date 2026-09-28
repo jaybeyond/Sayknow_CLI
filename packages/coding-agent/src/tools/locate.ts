@@ -83,6 +83,12 @@ export class LocateTool implements AgentTool<typeof locateSchema, LocateToolDeta
 	readonly name = "locate";
 	readonly label = "Locate";
 	readonly summary = "Find code by describing what it does (Jev relevance judgement)";
+	/**
+	 * Essential when offered: its value is being picked instead of a grep, which a
+	 * discoverable tool hidden behind search_tool_bm25 would rarely be. createIf already
+	 * keeps it out unless a TypeSafe key is stored.
+	 */
+	readonly loadMode = "essential";
 	readonly description: string;
 	readonly parameters = locateSchema;
 	readonly strict = true;
