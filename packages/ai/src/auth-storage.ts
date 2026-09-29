@@ -319,6 +319,14 @@ export interface AuthCredentialStore {
 	getCache(key: string, options?: { includeExpired?: boolean }): string | null;
 	setCache(key: string, value: string, expiresAtSec: number): void;
 	deleteCachePrefix?(prefix: string): void;
+	/**
+	 * Claim the cross-process lease for one usage fetch (single flight across every
+	 * process sharing the store). Returns true when claimed, false when a live peer
+	 * holds it, undefined when the store cannot coordinate (fetch locally).
+	 */
+	tryAcquireUsageFetchLease?(key: string, owner: string, nowMs: number, leaseMs: number): boolean | undefined;
+	/** Release a usage-fetch lease this owner holds; an expired lease recovers on its own. */
+	releaseUsageFetchLease?(key: string, owner: string): void;
 	cleanExpiredCache(): void;
 	/**
 	 * Optional store-supplied OAuth refresh. When present, `AuthStorage` uses
@@ -451,6 +459,18 @@ export interface CredentialDisabledEvent {
  */
 export type CredentialRankingMode = "balanced" | "earliest-reset";
 
+/**
+ * Whether credential selection may probe provider usage endpoints.
+ *
+ * - `network` (default): ranking and quota checks fetch usage when the shared
+ *   cache has no fresh report.
+ * - `cache-only`: ranking and quota checks read only fresh reports another
+ *   process already cached in agent.db and never call the provider. Used by
+ *   short-lived non-interactive runs (`skc -p`) that never display usage.
+ *   Explicit `fetchUsageReports()` calls are unaffected.
+ */
+export type UsageProbeMode = "network" | "cache-only";
+
 export type AuthStorageOptions = {
 	usageProviderResolver?: (provider: Provider) => UsageProvider | undefined;
 	rankingStrategyResolver?: (provider: Provider) => CredentialRankingStrategy | undefined;
@@ -556,6 +576,16 @@ const USAGE_LAST_GOOD_RETENTION_MS = 24 * 60 * 60_000;
  * on the next poll.
  */
 const USAGE_FAILURE_BACKOFF_MS = 10_000;
+/**
+ * Cool-down after a usage fetch fails for a credential with no last-good value.
+ * The failure is persisted in the shared agent.db cache so sibling processes and
+ * repeated credential selection in one process do not re-probe a rate-limited
+ * endpoint (gajae #5939).
+ */
+const USAGE_FAILURE_NEGATIVE_TTL_MS = 60_000;
+/** Grace after the provider request timeout before a peer may take over a usage fetch. */
+const USAGE_FETCH_LEASE_GRACE_MS = 5_000;
+const USAGE_FETCH_WAIT_POLL_MS = 25;
 // Bumped from 3s — Anthropic model usage retries up to 3 times with exponential backoff
 // (~3.5s total worst case); a tight per-request budget aborts retries mid-cycle.
 const DEFAULT_USAGE_REQUEST_TIMEOUT_MS = 10_000;
@@ -836,6 +866,10 @@ export class AuthStorage {
 	#usageReportsInFlight: Map<string, Promise<UsageReport[] | null>> = new Map();
 	#usageFetch: typeof fetch;
 	#usageRequestTimeoutMs: number;
+	#usageFetchLeaseMs: number;
+	#usageProbeMode: UsageProbeMode = "network";
+	/** Identifies this process as a usage-fetch lease owner. */
+	#usageLeaseOwner = crypto.randomUUID();
 	#credentialRankingMode: CredentialRankingMode = "balanced";
 	#usageLogger?: UsageLogger;
 	#fallbackResolver?: (provider: string) => string | undefined;
@@ -868,6 +902,11 @@ export class AuthStorage {
 		this.#usageCache = new AuthStorageUsageCache(this.#store);
 		this.#usageFetch = options.usageFetch ?? fetch;
 		this.#usageRequestTimeoutMs = options.usageRequestTimeoutMs ?? DEFAULT_USAGE_REQUEST_TIMEOUT_MS;
+		const usageTimeoutForLease =
+			Number.isFinite(this.#usageRequestTimeoutMs) && this.#usageRequestTimeoutMs > 0
+				? this.#usageRequestTimeoutMs
+				: DEFAULT_USAGE_REQUEST_TIMEOUT_MS;
+		this.#usageFetchLeaseMs = usageTimeoutForLease + USAGE_FETCH_LEASE_GRACE_MS;
 		this.#credentialRankingMode = options.credentialRankingMode ?? "balanced";
 		this.#refreshOAuthCredentialOverride = options.refreshOAuthCredential;
 		this.#fetchUsageReportsOverride = options.fetchUsageReports;
@@ -1057,6 +1096,11 @@ export class AuthStorage {
 	 */
 	setCredentialRankingMode(mode: CredentialRankingMode): void {
 		this.#credentialRankingMode = mode;
+	}
+
+	/** Select whether credential selection may probe provider usage endpoints. */
+	setUsageProbeMode(mode: UsageProbeMode): void {
+		this.#usageProbeMode = mode;
 	}
 
 	/**
@@ -2323,34 +2367,97 @@ export class AuthStorage {
 		if (inFlight) return inFlight;
 
 		const promise = (async () => {
-			const report = await this.#fetchUsageUncached(request, timeoutMs, logDetails);
-			const ttlJitter = USAGE_REPORT_TTL_MS * (Math.random() * 0.5 - 0.25);
-			if (report !== null) {
-				// Success: stagger per-credential cache expiry so all accounts don't
-				// refresh in the same window — Anthropic / OpenAI rate-limit `/usage`
-				// per source IP regardless of account, and synchronized 5-credential
-				// fan-out trips 429s every cycle. With ±25% jitter on TTL the refresh
-				// times decorrelate within a few cycles.
-				this.#usageCache.set(cacheKey, { value: report, expiresAt: Date.now() + USAGE_REPORT_TTL_MS + ttlJitter });
-				return report;
+			// Cross-process single flight: the lease owner fetches; peers wait for the
+			// owner's cached outcome instead of issuing their own request. `undefined`
+			// means the store cannot coordinate: fetch locally.
+			const leaseClaim = this.#tryAcquireUsageFetchLease(cacheKey);
+			if (leaseClaim === false) {
+				const shared = await this.#waitForUsageReportFromPeer(cacheKey);
+				if (!shared.leaseAcquired) return shared.value;
 			}
-			// Failure: cache the LAST GOOD value (if any) with a short jittered TTL
-			// so the credential cools down briefly without dropping out of the
-			// report. If we never had a good value, return null this cycle and
-			// don't write — let the next poll retry.
-			const lastGood = this.#usageCache.getStale<UsageReport | null>(cacheKey)?.value ?? null;
-			if (lastGood !== null) {
-				const backoffJitter = USAGE_FAILURE_BACKOFF_MS * (Math.random() * 0.5 - 0.25);
-				const coolDown = Date.now() + USAGE_FAILURE_BACKOFF_MS + backoffJitter;
-				this.#usageCache.set(cacheKey, { value: lastGood, expiresAt: coolDown });
+			const leaseOwned = leaseClaim !== undefined;
+			try {
+				return await this.#fetchAndCacheUsageReport(request, cacheKey, timeoutMs, logDetails);
+			} finally {
+				if (leaseOwned) this.#releaseUsageFetchLease(cacheKey);
 			}
-			return lastGood;
 		})().finally(() => {
 			this.#usageRequestInFlight.delete(cacheKey);
 		});
 
 		this.#usageRequestInFlight.set(cacheKey, promise);
 		return promise;
+	}
+
+	/**
+	 * Wait while a peer process holds the per-credential usage lease. Returns the
+	 * peer's cached outcome, or reports that this process now owns the lease. If
+	 * the peer neither publishes nor releases in time, serve the last-good value
+	 * (or null) rather than piling another request onto the endpoint.
+	 */
+	async #waitForUsageReportFromPeer(
+		cacheKey: string,
+	): Promise<{ value: UsageReport | null; leaseAcquired: false } | { leaseAcquired: true }> {
+		const deadline = Date.now() + this.#usageFetchLeaseMs;
+		while (Date.now() < deadline) {
+			await Bun.sleep(USAGE_FETCH_WAIT_POLL_MS);
+			const cached = this.#usageCache.get<UsageReport | null>(cacheKey);
+			if (cached && cached.expiresAt > Date.now()) return { value: cached.value, leaseAcquired: false };
+			if (this.#tryAcquireUsageFetchLease(cacheKey) === true) return { leaseAcquired: true };
+		}
+		return { value: this.#readRetainedLastGoodUsage(cacheKey), leaseAcquired: false };
+	}
+
+	/**
+	 * Last successful report for a credential, if still inside the last-good retention
+	 * window. Age is measured from the report's own `fetchedAt`, which failure cool-down
+	 * rewrites never change, so repeated failures cannot keep an old (possibly
+	 * exhausted) report alive past retention.
+	 */
+	#readRetainedLastGoodUsage(cacheKey: string): UsageReport | null {
+		const report = this.#usageCache.getStale<UsageReport | null>(cacheKey)?.value ?? null;
+		if (!report) return null;
+		const fetchedAt = Number.isFinite(report.fetchedAt) ? report.fetchedAt : 0;
+		return fetchedAt + USAGE_LAST_GOOD_RETENTION_MS > Date.now() ? report : null;
+	}
+
+	async #fetchAndCacheUsageReport(
+		request: UsageRequestDescriptor,
+		cacheKey: string,
+		timeoutMs: number | undefined,
+		logDetails: boolean,
+	): Promise<UsageReport | null> {
+		const report = await this.#fetchUsageUncached(request, timeoutMs, logDetails);
+		if (report !== null) {
+			// Success: stagger per-credential cache expiry so all accounts don't
+			// refresh in the same window — Anthropic / OpenAI rate-limit `/usage`
+			// per source IP regardless of account, and synchronized 5-credential
+			// fan-out trips 429s every cycle. With ±25% jitter on TTL the refresh
+			// times decorrelate within a few cycles.
+			const ttlJitter = USAGE_REPORT_TTL_MS * (Math.random() * 0.5 - 0.25);
+			this.#usageCache.set(cacheKey, { value: report, expiresAt: Date.now() + USAGE_REPORT_TTL_MS + ttlJitter });
+			return report;
+		}
+		// Failure: cache the last good value (if any) with a short jittered TTL so the
+		// credential cools down briefly without dropping out of the report. Without a
+		// previous value, persist the failure itself for a longer cool-down so neither
+		// this process nor its siblings re-probe a rate-limited endpoint on every
+		// credential selection.
+		const lastGood = this.#readRetainedLastGoodUsage(cacheKey);
+		const backoffMs = lastGood !== null ? USAGE_FAILURE_BACKOFF_MS : USAGE_FAILURE_NEGATIVE_TTL_MS;
+		const backoffJitter = backoffMs * (Math.random() * 0.5 - 0.25);
+		this.#usageCache.set(cacheKey, { value: lastGood, expiresAt: Date.now() + backoffMs + backoffJitter });
+		return lastGood;
+	}
+
+	#tryAcquireUsageFetchLease(cacheKey: string): boolean | undefined {
+		const claim = this.#store.tryAcquireUsageFetchLease;
+		if (!claim) return undefined;
+		return claim.call(this.#store, cacheKey, this.#usageLeaseOwner, Date.now(), this.#usageFetchLeaseMs);
+	}
+
+	#releaseUsageFetchLease(cacheKey: string): void {
+		this.#store.releaseUsageFetchLease?.(cacheKey, this.#usageLeaseOwner);
 	}
 
 	#collectUsageRequests(options?: {
@@ -2552,6 +2659,14 @@ export class AuthStorage {
 		// when present: the broker already aggregates usage from a less-throttled
 		// IP, and falling back to the local per-credential fetch would defeat the
 		// whole point of routing through it.
+		// Cache-only mode must precede the store hook: a remote store's hook fetches the
+		// broker's /v1/usage, which can probe upstream providers.
+		if (this.#usageProbeMode === "cache-only") {
+			const cached = this.#usageCache.get<UsageReport | null>(
+				this.#buildUsageReportCacheKey(this.#buildUsageRequestForOauth(provider, credential, options?.baseUrl)),
+			);
+			return cached && cached.expiresAt > Date.now() ? cached.value : null;
+		}
 		const storeHook = this.#store.getUsageReport?.bind(this.#store);
 		if (storeHook) {
 			return storeHook(provider, credential, options?.signal);
@@ -4120,6 +4235,8 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 	#getCacheStmt: Statement;
 	#getCacheIncludingExpiredStmt: Statement;
 	#upsertCacheStmt: Statement;
+	#claimUsageFetchLeaseStmt: Statement;
+	#releaseUsageFetchLeaseStmt: Statement;
 	#deleteCachePrefixStmt: Statement;
 	#deleteExpiredCacheStmt: Statement;
 	#closed = false;
@@ -4160,6 +4277,11 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 		this.#upsertCacheStmt = this.#db.prepare(
 			"INSERT INTO cache (key, value, expires_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, expires_at = excluded.expires_at",
 		);
+		// Claim succeeds only when no live lease exists (absent or expired row).
+		this.#claimUsageFetchLeaseStmt = this.#db.prepare(
+			"INSERT INTO cache (key, value, expires_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, expires_at = excluded.expires_at WHERE cache.expires_at <= ?",
+		);
+		this.#releaseUsageFetchLeaseStmt = this.#db.prepare("DELETE FROM cache WHERE key = ? AND value = ?");
 		this.#deleteCachePrefixStmt = this.#db.prepare("DELETE FROM cache WHERE substr(key, 1, ?) = ?");
 		this.#deleteExpiredCacheStmt = this.#db.prepare(`DELETE FROM cache WHERE expires_at <= ${SQLITE_NOW_EPOCH}`);
 	}
@@ -4671,6 +4793,27 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 			return row?.value ?? null;
 		} catch {
 			return null;
+		}
+	}
+
+	tryAcquireUsageFetchLease(key: string, owner: string, nowMs: number, leaseMs: number): boolean | undefined {
+		try {
+			const nowSec = Math.floor(nowMs / 1000);
+			const expiresAtSec = Math.ceil((nowMs + leaseMs) / 1000);
+			const result = this.#claimUsageFetchLeaseStmt.run(`usage_fetch_lease:${key}`, owner, expiresAtSec, nowSec) as {
+				changes: number;
+			};
+			return result.changes === 1;
+		} catch {
+			return undefined;
+		}
+	}
+
+	releaseUsageFetchLease(key: string, owner: string): void {
+		try {
+			this.#releaseUsageFetchLeaseStmt.run(`usage_fetch_lease:${key}`, owner);
+		} catch {
+			// The bounded expiry recovers a lease whose cleanup failed.
 		}
 	}
 

@@ -233,23 +233,6 @@ describe("AuthStorage usage cache: last-good failure fallback", () => {
 		expect(warn).not.toHaveBeenCalled();
 	});
 
-	it("does NOT cache a failure when no previous good value exists — retries next poll", async () => {
-		let calls = 0;
-		vi.spyOn(claudeUsage.claudeUsageProvider, "fetchUsage").mockImplementation(async () => {
-			calls += 1;
-			return null;
-		});
-
-		const first = anthropicReports(await storage.fetchUsageReports());
-		expect(first).toHaveLength(0);
-		expect(calls).toBe(1);
-
-		const second = anthropicReports(await storage.fetchUsageReports());
-		// No previous value → no cache write → retry on next poll.
-		expect(calls).toBe(2);
-		expect(second).toHaveLength(0);
-	});
-
 	it("serves last-good value through a failure cycle", async () => {
 		let calls = 0;
 		const goldReport = makeReport("a@example.com");

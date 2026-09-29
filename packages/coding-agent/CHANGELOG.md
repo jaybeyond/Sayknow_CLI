@@ -15,6 +15,7 @@
 
 ### Fixed
 
+- Usage lookups for credential ranking are shared across `skc` windows and one-shot runs (from upstream gajae #5961). Each account's usage is fetched by one process at a time (a lease in agent.db); the others wait for that result instead of sending their own request. A failed lookup with nothing cached is remembered for about a minute, so neither this window nor its siblings keep probing an endpoint that is answering 429. A last-good report older than 24 h is no longer reused on failure. `skc -p` and other non-interactive runs rank accounts only from reports already cached and never call the usage endpoints.
 - Managed fallback no longer spends a request on an account it already knows is exhausted. With several accounts for one provider and all of them at their usage limit, the chain used to retry the same model on an exhausted account until its attempts ran out; it now tries each account once and moves to the next model. One exhausted account still hands the turn to the next account on the same model, and a provider with a single account keeps its usual retry budget (from upstream gajae #5874; the rest of that change was already covered by this fork's rotation).
 - Picking a recent session on the launch card with the arrow keys needed the key held down in terminals that use the kitty keyboard protocol (Ghostty, kitty, WezTerm): the release event that follows every press was treated as "another key" and cancelled the pick. Release events are now ignored, so one tap of `↓`/`↑` moves one row and `Enter` opens the highlighted session.
 
