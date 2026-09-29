@@ -10,7 +10,6 @@ import {
 	buildAnthropicHeaders,
 	buildAnthropicSystemBlocks,
 	claudeCodeEntrypoint,
-	claudeCodeVersion,
 	generateClaudeCloakingUserId,
 	isClaudeCloakingUserId,
 	mapStainlessArch,
@@ -18,6 +17,7 @@ import {
 	streamAnthropic,
 	stripClaudeToolPrefix,
 } from "@sayknow-cli/ai/providers/anthropic";
+import { getClaudeCodeVersion } from "@sayknow-cli/ai/providers/claude-code-version";
 import { getEnvApiKey } from "@sayknow-cli/ai/stream";
 import type { Context, Model, TJsonSchema, Tool } from "@sayknow-cli/ai/types";
 import * as z from "zod/v4";
@@ -96,7 +96,7 @@ describe("Anthropic request fingerprint alignment", () => {
 			for (const part of parts) expect(Number.isInteger(part)).toBe(true);
 			return parts;
 		};
-		const advertised = parse(claudeCodeVersion);
+		const advertised = parse(getClaudeCodeVersion());
 		const floor = parse("2.1.280");
 		const compared = advertised.findIndex((part, index) => part !== floor[index]);
 		expect(compared === -1 || advertised[compared]! > floor[compared]!).toBe(true);
@@ -138,7 +138,7 @@ describe("Anthropic request fingerprint alignment", () => {
 		const billingHeader = blocks?.[0]?.text;
 		expect(billingHeader).toMatch(
 			new RegExp(
-				`^x-anthropic-billing-header: cc_version=${claudeCodeVersion}\\.[0-9a-f]{3}; cc_entrypoint=${claudeCodeEntrypoint}; cch=[0-9a-f]{5};$`,
+				`^x-anthropic-billing-header: cc_version=${getClaudeCodeVersion()}\\.[0-9a-f]{3}; cc_entrypoint=${claudeCodeEntrypoint}; cch=[0-9a-f]{5};$`,
 			),
 		);
 
@@ -221,7 +221,7 @@ describe("Anthropic request fingerprint alignment", () => {
 			stream: true,
 			modelHeaders: { "User-Agent": "curl/8.7.1" },
 		});
-		expect(normalizedHeaders["User-Agent"]).toBe(`claude-cli/${claudeCodeVersion} (external, cli)`);
+		expect(normalizedHeaders["User-Agent"]).toBe(`claude-cli/${getClaudeCodeVersion()} (external, cli)`);
 
 		const embeddedClaudeCliHeaders = buildAnthropicHeaders({
 			apiKey: "sk-ant-oat-test",
@@ -229,7 +229,7 @@ describe("Anthropic request fingerprint alignment", () => {
 			stream: true,
 			modelHeaders: { "User-Agent": "my-client claude-cli/2.1.63" },
 		});
-		expect(embeddedClaudeCliHeaders["User-Agent"]).toBe(`claude-cli/${claudeCodeVersion} (external, cli)`);
+		expect(embeddedClaudeCliHeaders["User-Agent"]).toBe(`claude-cli/${getClaudeCodeVersion()} (external, cli)`);
 	});
 
 	it("skips Claude Code instruction injection for claude-3-5-haiku models", async () => {

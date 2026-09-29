@@ -19,6 +19,7 @@
  *   bun scripts/check-spoofed-versions.ts --update  # update source in-place
  */
 
+import { fetchLatestClaudeCodeVersion } from "../packages/ai/src/providers/claude-code-version";
 import * as path from "node:path";
 
 const repoFile = (relativePath: string): string => path.join(import.meta.dir, "..", relativePath);
@@ -82,10 +83,12 @@ const checks: VersionCheck[] = [
 			fetchLatestGitHubRelease("google-gemini/gemini-cli", tag => SEMVER_RE.exec(tag)?.[1] ?? null),
 	},
 	{
+		// The fingerprint self-updates at runtime; this is the bundled floor used before
+		// the first lookup succeeds or when offline.
 		name: "Claude Code",
-		file: repoFile("packages/ai/src/providers/anthropic.ts"),
-		sourcePattern: /export const claudeCodeVersion = "(\d+\.\d+\.\d+)"/,
-		fetchLatest: () => fetchLatestNpmVersion("@anthropic-ai/claude-code", "latest"),
+		file: repoFile("packages/ai/src/providers/claude-code-version.ts"),
+		sourcePattern: /export const CLAUDE_CODE_BASELINE_VERSION = "(\d+\.\d+\.\d+)"/,
+		fetchLatest: () => fetchLatestClaudeCodeVersion(),
 	},
 ];
 

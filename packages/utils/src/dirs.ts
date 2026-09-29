@@ -487,6 +487,11 @@ export function getGithubCacheDbPath(): string {
 	return dirs.rootSubdir(path.join("cache", "github-cache.db"), "cache");
 }
 
+/** Get the resolved Claude Code client-version cache path (~/.skc/cache/claude-code-version.json). */
+export function getClaudeCodeVersionCachePath(): string {
+	return dirs.rootSubdir(path.join("cache", "claude-code-version.json"), "cache");
+}
+
 /** Get the natives directory (~/.skc/natives). */
 export function getNativesDir(): string {
 	return dirs.rootSubdir("natives", "cache");
