@@ -11,6 +11,8 @@ const inventoryPath = process.env.SKC_SDK_OPERATION_INVENTORY
 
 /** Reviewed seams deliberately excluded from the public SDK operation surface. */
 const LOCKED_EXCLUSIONS: Readonly<Record<string, string>> = {
+	"agent_session:getAutoCompactionThresholdTokens":
+		"internal compaction-threshold accessor feeding the /context breakdown; exposed through context.get, not an independent SDK operation",
 	"slash_command:settings": "visual/local-only command, not a user-facing SDK control seam",
 	"slash_command:theme": "visual/local-only command, not a user-facing SDK control seam",
 	"slash_command:copy": "visual/local-only command, not a user-facing SDK control seam",

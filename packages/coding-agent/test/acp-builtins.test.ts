@@ -1,5 +1,6 @@
 import { describe, expect, it, spyOn } from "bun:test";
 import { type AgentMessage, ThinkingLevel } from "@sayknow-cli/agent-core";
+import { type CompactionSettings, resolveThresholdTokens } from "@sayknow-cli/agent-core/compaction";
 import type { Usage } from "@sayknow-cli/ai";
 import { Settings } from "../src/config/settings";
 import { getThemeByName, setThemeInstance, theme } from "../src/modes/theme/theme";
@@ -78,6 +79,7 @@ interface FakeAcpBuiltinSession {
 	getToolByName(name: string): unknown;
 	compact(args?: string): Promise<void>;
 	getContextUsage(): { tokens?: number; contextWindow: number } | undefined;
+	getAutoCompactionThresholdTokens(contextTokens?: number): number;
 	getAvailableModels(): Array<{ provider: string; id: string; contextWindow?: number }>;
 	getAvailableThinkingLevels(): ThinkingLevel[];
 	setModel(model: unknown): Promise<void>;
@@ -167,6 +169,19 @@ function createRuntime() {
 		getToolByName: (_name: string) => undefined,
 		async compact(_args?: string) {},
 		getContextUsage: () => undefined,
+		getAutoCompactionThresholdTokens(
+			this: { model?: { contextWindow?: number }; settings: Settings },
+			contextTokens?: number,
+		) {
+			const contextWindow = this.model?.contextWindow ?? 0;
+			if (contextWindow <= 0) return 0;
+			return resolveThresholdTokens(
+				contextWindow,
+				this.settings.getGroup("compaction") as CompactionSettings,
+				0,
+				contextTokens,
+			);
+		},
 		getAvailableModels: () => [] as Array<{ provider: string; id: string; contextWindow?: number }>,
 		getAvailableThinkingLevels: () => [ThinkingLevel.Low, ThinkingLevel.Medium, ThinkingLevel.High],
 		async setModel(_model: unknown) {},

@@ -1,6 +1,11 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import { Agent, type AgentMessage } from "@sayknow-cli/agent-core";
-import { calculateContextTokens, estimateMessageTokensHeuristic } from "@sayknow-cli/agent-core/compaction";
+import {
+	type CompactionSettings,
+	calculateContextTokens,
+	estimateMessageTokensHeuristic,
+	resolveThresholdTokens,
+} from "@sayknow-cli/agent-core/compaction";
 import { type AssistantMessage, getBundledModel, type Model, type Usage } from "@sayknow-cli/ai";
 import { AssistantMessageEventStream } from "@sayknow-cli/ai/utils/event-stream";
 import { ModelRegistry } from "@sayknow-cli/coding-agent/config/model-registry";
@@ -133,6 +138,11 @@ function createDisplaySession(
 		getAsyncJobSnapshot: () => ({ running: [] }),
 		getGoalModeState: () => undefined,
 		getContextUsage: () => contextUsage,
+		getAutoCompactionThresholdTokens: () =>
+			resolveThresholdTokens(
+				resolvedModel?.contextWindow ?? 0,
+				Settings.instance.getGroup("compaction") as CompactionSettings,
+			),
 	} as unknown as AgentSession;
 }
 
