@@ -1002,8 +1002,15 @@ describe("InteractiveMode.setEditorComponent", () => {
 			for (let i = 0; i < 20 && resume.mock.calls.length === 0; i++) await Bun.sleep(5);
 			expect(resume).toHaveBeenCalledTimes(1);
 
-			const card = mode.ui.render(120).map(stripRenderControls).join("\n");
-			expect(card).toContain(t("welcome.continue", { key: formatKeyHint("ctrl+q", injectedKeyDisplayContext) }));
+			// The card's session list loads after the first frame; wait for it instead of racing it.
+			const hint = t("welcome.continue", { key: formatKeyHint("ctrl+q", injectedKeyDisplayContext) });
+			let card = "";
+			for (let i = 0; i < 100; i++) {
+				card = mode.ui.render(120).map(stripRenderControls).join("\n");
+				if (card.includes(hint)) break;
+				await Bun.sleep(10);
+			}
+			expect(card).toContain(hint);
 		});
 	});
 });
