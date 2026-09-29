@@ -2793,6 +2793,19 @@ export class AuthStorage {
 	 * Uses usage reports to determine accurate reset time when available.
 	 * Returns true if a credential was blocked, enabling automatic fallback to the next credential.
 	 */
+	/**
+	 * How many stored credentials of the same kind as this session's current one the
+	 * provider has (0 when the session has none). A pool of two or more that
+	 * {@link markUsageLimitReached} reports exhausted is really exhausted; a pool of one
+	 * says nothing about the next retry.
+	 */
+	getSessionCredentialPoolSize(provider: string, sessionId: string | undefined): number {
+		const sessionCredential = this.#getSessionCredential(provider, sessionId);
+		if (!sessionCredential) return 0;
+		return this.#getCredentialsForProvider(provider).filter(credential => credential.type === sessionCredential.type)
+			.length;
+	}
+
 	async markUsageLimitReached(
 		provider: string,
 		sessionId: string | undefined,

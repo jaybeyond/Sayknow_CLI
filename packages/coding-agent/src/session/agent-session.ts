@@ -14333,13 +14333,25 @@ export class AgentSession {
 			: legacyUnbounded || attemptsUsed <= retrySettings.maxRetries
 				? "retry"
 				: "exhausted";
-		const credentialRotated =
-			managedFallback &&
-			outcome === "advance" &&
-			(trigger.class === "quota" || trigger.class === "rate_limit") &&
-			(await this.#markFailedManagedCredential(trigger));
-		if (credentialRotated && controller.restorePreviousEntryForRetry()) {
-			outcome = "retry";
+		const usageLimited = trigger.class === "quota" || trigger.class === "rate_limit";
+		let credentialMarked = false;
+		let credentialRotated = false;
+		if (managedFallback && usageLimited && outcome === "advance") {
+			credentialMarked = true;
+			credentialRotated = await this.#markFailedManagedCredential(trigger);
+			if (credentialRotated && controller.restorePreviousEntryForRetry()) outcome = "retry";
+		} else if (managedFallback && usageLimited && outcome === "retry" && this.model) {
+			// Mark before retrying the same model. A pool of accounts that is now fully
+			// blocked would only hand the retry another exhausted account (a wasted request
+			// on a known-dead account), so move on to the next model instead. A single
+			// account keeps the usual retry budget: its limit may be a short burst.
+			const poolSize = this.#modelRegistry.authStorage.getSessionCredentialPoolSize(
+				this.model.provider,
+				this.sessionId,
+			);
+			credentialMarked = true;
+			credentialRotated = await this.#markFailedManagedCredential(trigger);
+			if (!credentialRotated && poolSize > 1) outcome = controller.advance() ? "advance" : "exhausted";
 		}
 		if (outcome === "exhausted") {
 			if (managedFallback) {
@@ -14371,7 +14383,7 @@ export class AgentSession {
 		}
 
 		const retry = async (ownership?: ManagedAttemptContinuationOwnership): Promise<void> => {
-			if (managedFallback && !credentialRotated) await this.#markFailedManagedCredential(trigger);
+			if (managedFallback && !credentialMarked) await this.#markFailedManagedCredential(trigger);
 			let advanced = outcome !== "advance";
 			let resolutionError: unknown;
 			if (outcome === "advance") {
