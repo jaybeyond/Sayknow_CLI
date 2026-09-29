@@ -339,7 +339,8 @@ jobs:
    publish:
       if: ${{ startsWith(github.ref, 'refs/tags/sayknow-v') && github.event_name != 'workflow_dispatch' }}
       needs: [native, binaries]
-      timeout-minutes: 45
+      # Registry/CDN visibility retries across all packages exceeded 45 minutes in 0.7.1.
+      timeout-minutes: 90
       runs-on: ubuntu-22.04
       permissions:
          contents: write
