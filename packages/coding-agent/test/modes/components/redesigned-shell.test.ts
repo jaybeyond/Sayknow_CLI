@@ -185,7 +185,7 @@ describe("redesigned interactive shell chrome", () => {
 		}
 	});
 
-	it("draws the launch mark in ASCII glyphs when an ASCII-safe banner is requested", () => {
+	it("keeps the launch card mascot-free in ASCII and Unicode modes", () => {
 		const ascii = Bun.stripANSI(
 			new WelcomeComponent("1.2.3", "gpt-5.5", "openai", [], "ascii").render(80).join("\n"),
 		);
@@ -193,9 +193,10 @@ describe("redesigned interactive shell chrome", () => {
 			new WelcomeComponent("1.2.3", "gpt-5.5", "openai", [], "unicode").render(80).join("\n"),
 		);
 
-		expect(ascii).toContain("( oo )");
-		expect(ascii).not.toMatch(/[█▀▄╔]/);
-		expect(unicode).toMatch(/[▀▄]{10}/);
+		expect(ascii).toContain("Sayknow-CLI v1.2.3");
+		expect(ascii).not.toMatch(/[█▀▄╔\u{10eeee}]/u);
+		expect(unicode).toContain("╔═╗╔═╗");
+		expect(unicode).not.toMatch(/[▀▄\u{10eeee}]/u);
 	});
 
 	it("resolves welcome banner auto and manual override modes", () => {
