@@ -1,10 +1,6 @@
 import type { AgentMessage } from "@sayknow-cli/agent-core";
 import type { CompactionSettings } from "@sayknow-cli/agent-core/compaction";
-import {
-	effectiveReserveTokens,
-	estimateMessageTokensHeuristic,
-	resolveThresholdTokens,
-} from "@sayknow-cli/agent-core/compaction";
+import { effectiveReserveTokens, estimateMessageTokensHeuristic } from "@sayknow-cli/agent-core/compaction";
 import type { Model } from "@sayknow-cli/ai";
 import { formatNumber } from "@sayknow-cli/utils";
 import type { AgentSession } from "../../session/agent-session";
@@ -135,7 +131,7 @@ export function computeContextBreakdown(
 	if (contextWindow > 0) {
 		const compactionSettings = session.settings.getGroup("compaction") as CompactionSettings;
 		if (compactionSettings.enabled && compactionSettings.strategy !== "off") {
-			const threshold = resolveThresholdTokens(contextWindow, compactionSettings);
+			const threshold = session.getAutoCompactionThresholdTokens(tokensForFreeSpace);
 			autoCompactBufferTokens = Math.max(0, contextWindow - threshold);
 		} else {
 			autoCompactBufferTokens = 0;

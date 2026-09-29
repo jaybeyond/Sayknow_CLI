@@ -4,6 +4,10 @@
 
 ### Changed
 
+- Auto-compaction with default settings now triggers at 300,000 tokens at most (from upstream gajae #6060). On million-token models the reserve-based limit let a session carry close to 1M tokens into every request. A configured `compaction.thresholdTokens` or `thresholdPercent`, adaptive compaction, and a model reached by context promotion keep their own limits. The kept-recent window is bounded below the new threshold so compaction still reduces the prompt. `/context` shows the threshold the session actually uses.
+
+### Changed
+
 - The pet on the launch card keeps dancing after the intro (the composer pet's working dance: sway left, right, rest, sparkle) for as long as its top row is on screen, and stops for good once the conversation pushes the card away. Frames only change five times per 1.6 s loop. `startup.skipLogoAnimation` still turns all launch motion off.
 
 ## [0.6.8] - 2026-09-29

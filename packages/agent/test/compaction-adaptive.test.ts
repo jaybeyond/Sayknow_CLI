@@ -195,6 +195,20 @@ describe("resolveThresholdTokens with adaptive settings", () => {
 	});
 });
 
+describe("default 300K auto-compaction ceiling", () => {
+	test("applies to the reserve-based default only, not to an enabled adaptive mode", () => {
+		const defaults = { ...DEFAULT_COMPACTION_SETTINGS } as CompactionSettings;
+		expect(resolveThresholdTokens(1_000_000, defaults)).toBe(300_000);
+		const adaptive = {
+			...defaults,
+			thresholdPercent: -1,
+			adaptive: options(),
+			adaptiveState: { turnsSinceCompact: 20, callsInWindow: 60, lastContextTokens: 800_000 },
+		} as CompactionSettings;
+		expect(resolveThresholdTokens(1_000_000, adaptive)).toBeGreaterThan(300_000);
+	});
+});
+
 describe("shouldCompact with adaptive settings", () => {
 	test("a busy session compacts at a fill the fixed threshold would allow", () => {
 		const contextTokens = Math.floor(CONTEXT_WINDOW * 0.7);
