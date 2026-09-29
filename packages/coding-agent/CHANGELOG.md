@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-09-29
+
 ### Added
 
 - Grok Build lists Grok 4.7 and Grok 4.7 Build Fast (both up to xhigh reasoning), which the Grok Build endpoint now serves; they were missing from the model picker because the Grok Build list is fixed in code.
