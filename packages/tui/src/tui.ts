@@ -673,6 +673,20 @@ type RenderCommitWaiter = {
 /**
  * TUI - Main class for managing terminal UI with differential rendering
  */
+/**
+ * What the frame about to be written looks like, for a post-render overlay to decide
+ * whether it must redraw: a new line count means the screen may have scrolled, a new
+ * full-redraw count means it was cleared or replayed.
+ */
+export interface PostRenderFrameInfo {
+	totalLines: number;
+	fullRedraws: number;
+	columns: number;
+	rows: number;
+}
+
+export type PostRenderEmitter = (frame: PostRenderFrameInfo) => string | null;
+
 export class TUI extends Container {
 	terminal: Terminal;
 	#previousLines: string[] = [];
@@ -3715,11 +3729,11 @@ export class TUI extends Container {
 	 * Used for absolute-positioned overlays such as pixel-image pets that live
 	 * outside the line-based component model. Return null to emit nothing.
 	 */
-	setPostRenderEmitter(emitter: (() => string | null) | undefined): void {
+	setPostRenderEmitter(emitter: PostRenderEmitter | undefined): void {
 		this.#postRenderEmitter = emitter;
 	}
 
-	#postRenderEmitter: (() => string | null) | undefined;
+	#postRenderEmitter: PostRenderEmitter | undefined;
 
 	#writeRenderBufferAndReanchorImeCursor(
 		buffer: string,
@@ -3727,7 +3741,12 @@ export class TUI extends Container {
 		totalLines: number,
 		onBufferWritten?: () => void,
 	): boolean {
-		const overlay = this.#postRenderEmitter?.();
+		const overlay = this.#postRenderEmitter?.({
+			totalLines,
+			fullRedraws: this.#fullRedrawCount,
+			columns: this.terminal.columns,
+			rows: this.terminal.rows,
+		});
 		if (overlay) {
 			// DECSC/DECRC keep the hardware cursor stable; the dedicated
 			// synchronized block prevents visible tearing while the overlay

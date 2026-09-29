@@ -4,6 +4,7 @@ import {
 	Container,
 	getCellDimensions,
 	ImageProtocol,
+	type PostRenderFrameInfo,
 	resetTmuxPaneOffsetCache,
 	resetTmuxSixelOwnershipCache,
 	setCellDimensions,
@@ -28,7 +29,7 @@ function makeStubs(columns = 80, rows = 30) {
 		},
 		invalidate() {},
 	} as unknown as CustomEditor;
-	let emitter: (() => string | null) | undefined;
+	let emitter: ((frame?: PostRenderFrameInfo) => string | null) | undefined;
 	let available = true;
 	let failWrites = false;
 	const pendingTerminalCleanup: Array<{ payload: string; onDelivered?: () => void }> = [];
@@ -54,7 +55,7 @@ function makeStubs(columns = 80, rows = 30) {
 	};
 	const ui = {
 		requestRender: () => {},
-		setPostRenderEmitter: (fn?: () => string | null) => {
+		setPostRenderEmitter: (fn?: (frame?: PostRenderFrameInfo) => string | null) => {
 			emitter = fn;
 		},
 		queueTerminalCleanup: (payload: string, onDelivered?: () => void) => {
@@ -388,6 +389,38 @@ describe("SayknowPetWidget", () => {
 			expect(stubs.getRenderedWidth()).toBe(80 - 5);
 		} finally {
 			second.dispose();
+		}
+	});
+
+	it("places the Kitty image once per pose and screen shape, not on every render write", () => {
+		const { widget, getEmitter } = makeWidget(80, 30, { protocol: "kitty" });
+		try {
+			widget.setMode("red");
+			const frame: PostRenderFrameInfo = { totalLines: 40, fullRedraws: 1, columns: 80, rows: 30 };
+			expect(getEmitter()?.(frame)).toContain("\x1b_G");
+			// In-place writes (the working-message shimmer, typing): no re-send.
+			for (let i = 0; i < 5; i++) expect(getEmitter()?.({ ...frame })).toBeNull();
+			// A new line count may have scrolled the image away: place it again, once.
+			expect(getEmitter()?.({ ...frame, totalLines: 41 })).toContain("\x1b_G");
+			expect(getEmitter()?.({ ...frame, totalLines: 41 })).toBeNull();
+			// A full redraw may have cleared it.
+			expect(getEmitter()?.({ ...frame, totalLines: 41, fullRedraws: 2 })).toContain("\x1b_G");
+			// So may a resize.
+			expect(getEmitter()?.({ ...frame, totalLines: 41, fullRedraws: 2, rows: 31 })).toContain("\x1b_G");
+		} finally {
+			widget.dispose();
+		}
+	});
+
+	it("keeps redrawing Sixel pets on every write (their pixels live in the text cells)", () => {
+		const { widget, getEmitter } = makeWidget(80, 30);
+		try {
+			widget.setMode("red");
+			const frame: PostRenderFrameInfo = { totalLines: 40, fullRedraws: 1, columns: 80, rows: 30 };
+			expect(getEmitter()?.(frame)).toContain("\x1bP0;1;0q");
+			expect(getEmitter()?.({ ...frame })).toContain("\x1bP0;1;0q");
+		} finally {
+			widget.dispose();
 		}
 	});
 

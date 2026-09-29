@@ -43,13 +43,13 @@ describe("G010 shared animation scheduler red-team", () => {
 		expect(__animationSchedulerTestHooks.getRegistrantCount(80)).toBe(20);
 		expect(__animationSchedulerTestHooks.getActiveTimerCount()).toBe(2);
 		expect(__animationSchedulerTestHooks.getActiveTimerCount(80)).toBe(1);
-		expect(__animationSchedulerTestHooks.getActiveTimerCount(16)).toBe(1);
+		expect(__animationSchedulerTestHooks.getActiveTimerCount(33)).toBe(1);
 
 		for (const loader of defaults) loader.stop();
 
 		expect(__animationSchedulerTestHooks.getRegistrantCount(80)).toBe(0);
 		expect(__animationSchedulerTestHooks.getActiveTimerCount(80)).toBe(0);
-		expect(__animationSchedulerTestHooks.getRegistrantCount(16)).toBe(1);
+		expect(__animationSchedulerTestHooks.getRegistrantCount(33)).toBe(1);
 		expect(__animationSchedulerTestHooks.getActiveTimerCount()).toBe(1);
 
 		animated.stop();
@@ -99,7 +99,7 @@ describe("G010 shared animation scheduler red-team", () => {
 		expect(__animationSchedulerTestHooks.getActiveTimerCount()).toBe(0);
 	});
 
-	it("CADENCE: default repaints at 80ms, time-dependent at 16ms, both spinner frames advance only every 80ms", () => {
+	it("CADENCE: default repaints at 80ms, time-dependent at 33ms, both spinner frames advance only every 80ms", () => {
 		vi.useFakeTimers();
 		const defaultUi = makeUi();
 		const animatedUi = makeUi();
@@ -129,21 +129,24 @@ describe("G010 shared animation scheduler red-team", () => {
 		const initialDefaultRequests = defaultUi.requestRender.mock.calls.length;
 		const initialAnimatedRequests = animatedUi.requestRender.mock.calls.length;
 
-		vi.advanceTimersByTime(16);
+		vi.advanceTimersByTime(33);
 		expect(defaultUi.requestRender.mock.calls.length).toBe(initialDefaultRequests);
 		expect(animatedUi.requestRender.mock.calls.length).toBe(initialAnimatedRequests + 1);
 		expect(defaultFrames.at(-1)).toBe("A");
 		expect(animatedFrames.at(-1)).toBe("A");
 
-		vi.advanceTimersByTime(64);
+		// t=80: the default loader repaints and steps; the shimmer has repainted twice (33, 66)
+		// but its spinner frame has not reached 80 ms yet.
+		vi.advanceTimersByTime(47);
 		expect(defaultUi.requestRender.mock.calls.length).toBe(initialDefaultRequests + 1);
-		expect(animatedUi.requestRender.mock.calls.length).toBe(initialAnimatedRequests + 5);
+		expect(animatedUi.requestRender.mock.calls.length).toBe(initialAnimatedRequests + 2);
 		expect(defaultFrames.at(-1)).toBe("B");
-		expect(animatedFrames.at(-1)).toBe("B");
+		expect(animatedFrames.at(-1)).toBe("A");
 
-		vi.advanceTimersByTime(16);
+		// t=99: the shimmer's third repaint steps its spinner too.
+		vi.advanceTimersByTime(19);
 		expect(defaultUi.requestRender.mock.calls.length).toBe(initialDefaultRequests + 1);
-		expect(animatedUi.requestRender.mock.calls.length).toBe(initialAnimatedRequests + 6);
+		expect(animatedUi.requestRender.mock.calls.length).toBe(initialAnimatedRequests + 3);
 		expect(defaultFrames.at(-1)).toBe("B");
 		expect(animatedFrames.at(-1)).toBe("B");
 

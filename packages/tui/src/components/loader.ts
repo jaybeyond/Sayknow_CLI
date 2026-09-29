@@ -70,7 +70,10 @@ export class Loader extends Text {
 				}
 				this.#updateDisplay();
 			},
-			this.#timeDependentColor ? 16 : 80,
+			// Time-dependent colors (the working-message shimmer) at ~30 fps: every tick
+			// redraws the whole UI, which in a long session costs as much as the rest of
+			// the turn. 60 fps doubled that cost for motion the eye cannot tell apart.
+			this.#timeDependentColor ? 33 : 80,
 		);
 	}
 

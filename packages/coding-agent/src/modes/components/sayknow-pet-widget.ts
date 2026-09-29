@@ -10,6 +10,7 @@ import {
 	PET_SKINS,
 	type PetMode,
 	type PetSkinId,
+	type PostRenderFrameInfo,
 	petBurstDurationMs,
 	petBurstFrame,
 	registerAnimationCallback,
@@ -261,7 +262,8 @@ export class SayknowPetWidget {
 		// The pet overlays the composer's bottom rows; no floor row is reserved, so
 		// the composer stays pinned to the terminal bottom.
 		this.#floorContainer.clear();
-		this.#ui.setPostRenderEmitter(() => this.#overlayPayload());
+		this.#lastKittyPlacementKey = undefined;
+		this.#ui.setPostRenderEmitter(frame => this.#postRenderOverlay(frame));
 		petOverlayEmitterOwners.set(this.#ui, this);
 		this.#animation ??= registerAnimationCallback(now => this.#tick(now), 80);
 		this.#ui.requestRender(true);
@@ -269,6 +271,7 @@ export class SayknowPetWidget {
 
 	/** (Re)build the encoded frames for the current terminal cell metrics. */
 	#buildPixel(protocol: "sixel" | "kitty"): void {
+		this.#lastKittyPlacementKey = undefined;
 		const cell = getCellDimensions();
 		this.#builtCellW = cell.widthPx;
 		this.#builtCellH = cell.heightPx;
@@ -405,6 +408,11 @@ export class SayknowPetWidget {
 		const payload = this.#overlayPayload(true) ?? "";
 		if (payload && this.#ui.terminalAvailable) {
 			this.#ui.terminal.write(`\x1b[?2026h\x1b7${payload}\x1b8\x1b[?2026l`);
+			// The new pose is on screen: the next render needs no re-placement for it.
+			this.#lastKittyPlacementKey =
+				this.#pixel?.protocol === "kitty" ? this.#kittyPlacementKey(this.#lastFrameInfo) : undefined;
+		} else {
+			this.#lastKittyPlacementKey = undefined;
 		}
 	}
 
@@ -480,6 +488,7 @@ export class SayknowPetWidget {
 	 * switch or dispose can retry it.
 	 */
 	#writeImageCleanup(): void {
+		this.#lastKittyPlacementKey = undefined;
 		if (!this.#ui.terminalAvailable) return;
 		const payload = this.#imageCleanupPayload();
 		if (!payload) return;
@@ -492,6 +501,38 @@ export class SayknowPetWidget {
 			return;
 		}
 		this.#consumeCleanupAuthority();
+	}
+
+	/**
+	 * What the kitty image was last placed against: pose, cell, and the frame shape
+	 * (line count, full-redraw count, size). Undefined forces the next placement.
+	 */
+	#lastKittyPlacementKey: string | undefined;
+	#lastFrameInfo: PostRenderFrameInfo | undefined;
+
+	/**
+	 * Overlay after a render write. A kitty image lives in its own layer: text edits in
+	 * place (the working-message shimmer, typing) leave it untouched, so it is placed
+	 * again only when the pose, its cell, the line count (the screen may have scrolled)
+	 * or the full-redraw count (the screen was cleared) changed. Re-sending the ~28 KB
+	 * image on every 60 fps shimmer frame kept skc and the terminal busy while working.
+	 * Sixel pixels live in the text cells and are overwritten with them, so sixel is
+	 * redrawn on every write (its frames are ~2 KB).
+	 */
+	#postRenderOverlay(frame: PostRenderFrameInfo): string | null {
+		this.#lastFrameInfo = frame;
+		if (this.#pixel?.protocol !== "kitty") return this.#overlayPayload();
+		const key = this.#kittyPlacementKey(frame);
+		if (key !== undefined && key === this.#lastKittyPlacementKey) return null;
+		const payload = this.#overlayPayload();
+		this.#lastKittyPlacementKey = payload && key !== undefined ? key : undefined;
+		return payload;
+	}
+
+	#kittyPlacementKey(frame: PostRenderFrameInfo | undefined): string | undefined {
+		const pos = this.#petPosition();
+		if (!pos || !frame) return undefined;
+		return `${this.#frame}|${pos.x},${pos.y}|${frame.totalLines}|${frame.fullRedraws}|${frame.columns}x${frame.rows}`;
 	}
 
 	/** Draw escape payload at the pet's absolute position. */

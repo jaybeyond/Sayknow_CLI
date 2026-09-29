@@ -1,4 +1,8 @@
-export type AnimationCadence = 16 | 80;
+/**
+ * Shared timer cadences. 33 ms (~30 fps) drives colors that change over time (the
+ * working-message shimmer); 80 ms drives frame-stepped animations (spinners, the pet).
+ */
+export type AnimationCadence = 33 | 80;
 
 type TimerHandle = ReturnType<typeof setInterval>;
 type AnimationCallback = (now: number) => void;

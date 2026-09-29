@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Changed
+
+- `TUI.setPostRenderEmitter` passes `PostRenderFrameInfo` (line count, full-redraw count, terminal size) so an overlay can skip re-emitting when nothing that could move or erase it changed.
+- The fast animation cadence is 33 ms (~30 fps) instead of 16 ms; `AnimationCadence` is `33 | 80`.
+
 ### Added
 
 - `TUI.isChildLineVisible(child, line)`: whether a line of a click-tracked top-level child was on screen in the last frame, so animations can stop before they would force a full redraw.

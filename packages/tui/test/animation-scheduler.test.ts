@@ -28,7 +28,7 @@ describe("shared animation scheduler", () => {
 		try {
 			expect(__animationSchedulerTestHooks.getRegistrantCount(80)).toBe(12);
 			expect(__animationSchedulerTestHooks.getActiveTimerCount(80)).toBe(1);
-			expect(__animationSchedulerTestHooks.getActiveTimerCount(16)).toBe(0);
+			expect(__animationSchedulerTestHooks.getActiveTimerCount(33)).toBe(0);
 			const initialRequests = requestRender.mock.calls.length;
 
 			vi.advanceTimersByTime(80);
@@ -42,7 +42,7 @@ describe("shared animation scheduler", () => {
 		expect(__animationSchedulerTestHooks.getActiveTimerCount(80)).toBe(0);
 	});
 
-	it("recomputes declared time-dependent loaders at 16ms and default loaders at 80ms", () => {
+	it("recomputes declared time-dependent loaders at 33ms and default loaders at 80ms", () => {
 		vi.useFakeTimers();
 		let tick = 0;
 		const defaultRequests = vi.fn();
@@ -57,23 +57,23 @@ describe("shared animation scheduler", () => {
 
 		try {
 			expect(__animationSchedulerTestHooks.getActiveTimerCount(80)).toBe(1);
-			expect(__animationSchedulerTestHooks.getActiveTimerCount(16)).toBe(1);
+			expect(__animationSchedulerTestHooks.getActiveTimerCount(33)).toBe(1);
 			const initialDefaultRequests = defaultRequests.mock.calls.length;
 			const initialAnimatedRequests = animatedRequests.mock.calls.length;
 
-			for (let i = 0; i < 4; i++) {
+			for (let i = 0; i < 2; i++) {
 				tick += 1;
-				vi.advanceTimersByTime(16);
+				vi.advanceTimersByTime(33);
 			}
 
 			expect(defaultRequests.mock.calls.length).toBe(initialDefaultRequests);
-			expect(animatedRequests.mock.calls.length).toBe(initialAnimatedRequests + 4);
+			expect(animatedRequests.mock.calls.length).toBe(initialAnimatedRequests + 2);
 
 			tick += 1;
-			vi.advanceTimersByTime(16);
+			vi.advanceTimersByTime(14);
 
 			expect(defaultRequests.mock.calls.length).toBe(initialDefaultRequests + 1);
-			expect(animatedRequests.mock.calls.length).toBe(initialAnimatedRequests + 5);
+			expect(animatedRequests.mock.calls.length).toBe(initialAnimatedRequests + 2);
 		} finally {
 			defaultLoader.stop();
 			animatedLoader.stop();
