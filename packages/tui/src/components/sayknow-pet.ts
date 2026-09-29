@@ -434,49 +434,76 @@ export function buildSayknowPixelFrames(options: {
 	return { frames, protocol: options.protocol, widthPx, heightPx, columns, rows, rasterRows };
 }
 
-// 8x8 small octopus for compact surfaces (the launch card): the same palette and
-// features — rounded mantle with a highlight, white eyes over dark pupils, a row of
-// tentacles — drawn for the size rather than downsampled, which turns the dome blocky.
-// biome-ignore format: pixel grid stays one row per line
-const SMALL_BASE = [
-	"..KKKK..",
-	".KRrrRK.",
-	"KRRRRRRK",
-	"KRWRRWRK",
-	"KRVRRVRK",
-	"KRRRRRRK",
-	"KRKRRKRK",
-	"K.K..K.K",
-];
-const SMALL_GRIDS: Partial<Record<SayknowPixelFrameName, string[]>> = {
-	base: SMALL_BASE,
-	danceL: mix(SMALL_BASE, { 6: "RKRRKRK.", 7: ".K..K.K." }),
-	danceR: mix(SMALL_BASE, { 6: ".KRKRRKR", 7: ".K.K..K." }),
-	gazeL: mix(SMALL_BASE, { 3: "KWRRWRRK", 4: "KVRRVRRK" }),
-	gazeR: mix(SMALL_BASE, { 3: "KRRWRRWK", 4: "KRRVRRVK" }),
-	flicker: mix(SMALL_BASE, { 3: "KRRRRRRK", 4: "KRKRRKRK" }),
-};
+/**
+ * Pixel priority when several pixels merge into one on downscale: features first, so
+ * the eyes survive (a block holding a pupil stays a pupil), then outline over body.
+ */
+const DOWNSCALE_PRIORITY = "VWGwKrRbHhA";
+
+/**
+ * The pet's own sprite, scaled to `size` columns (rows in proportion; nearest block, feature-first),
+ * so compact surfaces show the same octopus rather than a redraw. A block becomes
+ * transparent only when most of it is.
+ */
+function downscaleGrid(grid: readonly string[], size: number, palette: Palette, rowCount?: number): string[] {
+	const sourceRows = grid.length;
+	const source = grid[0]?.length ?? 0;
+	// Rows in proportion to columns unless a height is asked for.
+	const rows = rowCount ?? Math.round((sourceRows * size) / source);
+	const out: string[] = [];
+	for (let row = 0; row < rows; row++) {
+		const rowStart = Math.floor((row * sourceRows) / rows);
+		const rowEnd = Math.floor(((row + 1) * sourceRows) / rows);
+		let line = "";
+		for (let col = 0; col < size; col++) {
+			const colStart = Math.floor((col * source) / size);
+			const colEnd = Math.floor(((col + 1) * source) / size);
+			const cells: string[] = [];
+			for (let y = rowStart; y < rowEnd; y++) for (let x = colStart; x < colEnd; x++) cells.push(grid[y]![x] ?? ".");
+			const opaque = cells.filter(ch => palette[ch] != null);
+			line +=
+				opaque.length * 2 < cells.length
+					? "."
+					: ([...DOWNSCALE_PRIORITY].find(ch => opaque.includes(ch)) ?? opaque[0]!);
+		}
+		out.push(line);
+	}
+	return out;
+}
+
+/** Pixel size of the compact pet: three quarters of the 16×16 sprite (12 columns, 5 rows). */
+const COMPACT_PET_PIXELS = 12;
+/** Terminal rows of the compact pet (two pixel rows each). */
+const COMPACT_PET_ROWS = 5;
 
 /**
  * Draw a pet frame as text with half blocks, one terminal row per two pixel rows,
  * so the same octopus shows up where no pixel protocol is available (the launch
  * card). Fully transparent pixel rows at the top and bottom are cropped; columns
- * are kept so every frame of the animation keeps the same width. `scale: "half"`
- * draws the small octopus (8 columns, 4 rows); frames it has no pose for use its base.
+ * are kept so every frame of the animation keeps the same width. `scale: "compact"`
+ * draws the same sprite at three quarters size (12 columns, 5 rows).
  */
 export function renderPetHalfBlocks(
 	frame: SayknowPixelFrameName,
 	skin: PetSkinId = "red",
 	colorMode: "truecolor" | "256color" = "truecolor",
-	options: { scale?: "full" | "half" } = {},
+	options: { scale?: "full" | "compact" } = {},
 ): string[] {
 	const palette = PET_SKINS[skin].palette;
-	const grid = options.scale === "half" ? (SMALL_GRIDS[frame] ?? SMALL_BASE) : PIXEL_GRIDS[frame];
+	const compact = options.scale === "compact";
+	// Compact: the sprite's own pixel rows without its empty top and bottom margins (the
+	// same for every pose), scaled to 12×10 pixels = 12 columns × 5 rows. Cropping per pose
+	// would change the height while the tentacles move and make the card jump.
+	const grid = compact
+		? downscaleGrid(PIXEL_GRIDS[frame].slice(1, 15), COMPACT_PET_PIXELS, palette, COMPACT_PET_ROWS * 2)
+		: PIXEL_GRIDS[frame];
 	const opaque = (row: string): boolean => [...row].some(ch => palette[ch] != null);
 	let top = 0;
-	while (top < grid.length && !opaque(grid[top]!)) top++;
 	let bottom = grid.length - 1;
-	while (bottom > top && !opaque(grid[bottom]!)) bottom--;
+	if (!compact) {
+		while (top < grid.length && !opaque(grid[top]!)) top++;
+		while (bottom > top && !opaque(grid[bottom]!)) bottom--;
+	}
 	const format = colorMode === "truecolor" ? "ansi-16m" : "ansi-256";
 	const fg = (rgb: Rgb): string => Bun.color(`rgb(${rgb[0]},${rgb[1]},${rgb[2]})`, format) ?? "";
 	const bg = (rgb: Rgb): string => fg(rgb).replace("\x1b[38;", "\x1b[48;");

@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Picking a recent session on the launch card with the arrow keys needed the key held down in terminals that use the kitty keyboard protocol (Ghostty, kitty, WezTerm): the release event that follows every press was treated as "another key" and cancelled the pick. Release events are now ignored, so one tap of `↓`/`↑` moves one row and `Enter` opens the highlighted session.
+
+### Changed
+
+- The launch card shows the pet's own sprite (the same octopus as the composer pet) at three quarters size, 12 columns × 5 rows, instead of a separately drawn small octopus. The model line moves up beside the pet so no blank row opens under the tagline.
+
 ## [0.6.7] - 2026-09-28
 
 ### Added

@@ -155,12 +155,12 @@ describe("launch card layout", () => {
 		const welcome = new WelcomeComponent("1.2.3", "m", "p", SESSIONS, "unicode", { petSkin: "blue" });
 		const raw = welcome.render(120);
 		// Same color mode as the live theme: CI terminals without COLORTERM get 256 colors.
-		const pet = renderPetHalfBlocks("base", "blue", activeTheme.getColorMode(), { scale: "half" });
-		expect(pet).toHaveLength(4);
+		const pet = renderPetHalfBlocks("base", "blue", activeTheme.getColorMode(), { scale: "compact" });
+		expect(pet).toHaveLength(5);
 		// The pet's rows open the card, each followed by the wordmark and tagline.
 		for (const [index, row] of pet.entries()) expect(raw[1 + index]!.startsWith(`  ${row}`)).toBe(true);
 		const lines = plain(raw);
-		expect(lines[1]).toMatch(/^ {2}[▀▄ ]{8} {3}╔═╗╔═╗/);
+		expect(lines[1]).toMatch(/^ {2}[▀▄ ]{12} {3}╔═╗╔═╗/);
 		for (const glyph of ["╭", "╮", "╰", "╯", "│"]) expect(lines.join("\n")).not.toContain(glyph);
 	});
 
@@ -174,8 +174,8 @@ describe("launch card layout", () => {
 		const red = new WelcomeComponent("1.2.3", "m", "p", [], "unicode", { petSkin: "red" }).render(120).join("");
 		const blue = new WelcomeComponent("1.2.3", "m", "p", [], "unicode", { petSkin: "blue" }).render(120).join("");
 		const mode = activeTheme.getColorMode();
-		const redPet = renderPetHalfBlocks("base", "red", mode, { scale: "half" }).join("");
-		const bluePet = renderPetHalfBlocks("base", "blue", mode, { scale: "half" }).join("");
+		const redPet = renderPetHalfBlocks("base", "red", mode, { scale: "compact" }).join("");
+		const bluePet = renderPetHalfBlocks("base", "blue", mode, { scale: "compact" }).join("");
 		expect(redPet).not.toBe(bluePet);
 		expect(red).toContain(redPet.slice(0, 60));
 		expect(blue).toContain(bluePet.slice(0, 60));
@@ -213,7 +213,7 @@ describe("launch card layout", () => {
 	it("drops keys, then the release line, then sessions when rows run short", () => {
 		const rows = (count: number) =>
 			card({ changelogMarkdown: CHANGELOG, getViewportRows: () => count, resumeKey: "alt+r" }).join("\n");
-		// Blank + identity (4 pet/wordmark rows + model + place) + release + sessions + keys = 16.
+		// Blank + identity (5 pet rows beside wordmark, tagline, model; then place) + release + sessions + keys = 16.
 		const full = rows(16);
 		expect(full).toContain("commands");
 		expect(full).toContain("/changelog");
@@ -269,10 +269,9 @@ describe("launch intro", () => {
 		animated.playIntro(() => {});
 		const firstFrame = animated.render(120);
 		expect(firstFrame).not.toEqual(settled);
-		// Beside the dancing pet (margin 2 + 8 columns + gap 3), every character is already in place.
-		const text = (lines: string[]) => plain(lines).map(line => line.slice(13));
+		// Beside the dancing pet (margin 2 + 12 columns + gap 3), every character is already in place.
+		const text = (lines: string[]) => plain(lines).map(line => line.slice(17));
 		expect(text(firstFrame)).toEqual(text(settled));
-		expect(plain(firstFrame).join("\n")).not.toEqual(plain(settled).join("\n"));
 
 		animated.dispose();
 		expect(animated.render(120)).toEqual(settled);

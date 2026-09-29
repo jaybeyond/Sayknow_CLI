@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { renderPetHalfBlocks } from "../src/components/sayknow-pet";
+import { __sayknowPetTestHooks, renderPetHalfBlocks } from "../src/components/sayknow-pet";
 import { type Component, TUI } from "../src/tui";
 
 function fakeTerminal(mouseCalls: boolean[] = []) {
@@ -92,20 +92,23 @@ describe("clicks on top-level children", () => {
 	});
 });
 
-describe("small pet", () => {
-	test("draws the octopus in 8 columns and 4 rows for every intro pose", () => {
+describe("compact pet", () => {
+	test("is the pet's own sprite at three quarters size, for every intro pose", () => {
+		const grid = __sayknowPetTestHooks.getPixelGrid("base");
 		for (const frame of ["base", "danceL", "danceR"] as const) {
-			const lines = renderPetHalfBlocks(frame, "red", "truecolor", { scale: "half" });
-			expect(lines).toHaveLength(4);
-			for (const line of lines) expect(Bun.stringWidth(Bun.stripANSI(line))).toBe(8);
+			const lines = renderPetHalfBlocks(frame, "red", "truecolor", { scale: "compact" });
+			expect(lines).toHaveLength(5);
+			for (const line of lines) expect(Bun.stringWidth(Bun.stripANSI(line))).toBe(12);
 		}
-		// Eye white and pupil are both present.
-		const base = renderPetHalfBlocks("base", "red", "truecolor", { scale: "half" }).join("");
+		// Eye white and pupil survive the downscale.
+		const base = renderPetHalfBlocks("base", "red", "truecolor", { scale: "compact" }).join("");
 		expect(base).toContain("240;244;250");
 		expect(base).toContain("24;18;16");
-		// A pose without small art falls back to the base.
-		expect(renderPetHalfBlocks("cry1", "red", "truecolor", { scale: "half" })).toEqual(
-			renderPetHalfBlocks("base", "red", "truecolor", { scale: "half" }),
+		// Smaller than the full sprite, and the dance still moves the tentacles.
+		expect(renderPetHalfBlocks("base", "red").length).toBeGreaterThan(5);
+		expect(grid).toHaveLength(16);
+		expect(renderPetHalfBlocks("danceL", "red", "truecolor", { scale: "compact" })).not.toEqual(
+			renderPetHalfBlocks("base", "red", "truecolor", { scale: "compact" }),
 		);
 	});
 });

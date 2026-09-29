@@ -8,6 +8,7 @@ import {
 	Container,
 	clearRenderCache,
 	getRenderCacheRetainedBytes,
+	isKeyRelease,
 	Loader,
 	matchesKey,
 	onImageProtocolChanged,
@@ -2267,6 +2268,10 @@ export class InteractiveMode implements InteractiveModeContext {
 	#handleWelcomeKey(welcome: WelcomeComponent, data: string): { consume: true } | undefined {
 		if (this.#welcomeComponent !== welcome || !welcome.interactive) return undefined;
 		if (this.ui.getFocusedComponent() !== this.editor) return undefined;
+		// Terminals with the kitty keyboard protocol (Ghostty, kitty, WezTerm) send a release
+		// event after every press. It is not a keystroke: treating it as "another key" cancelled
+		// the pick a ↓ had just made, so a single tap never moved the highlight.
+		if (isKeyRelease(data)) return undefined;
 		const picking = welcome.selectedIndex !== undefined;
 		if (!picking) {
 			if (!matchesKey(data, "down")) return undefined;

@@ -8,7 +8,15 @@ import { formatKeyHint, formatKeyHints, type KeyDisplayContext } from "@sayknow-
 import { resetSettingsForTest, Settings, settings } from "@sayknow-cli/coding-agent/config/settings";
 import { t } from "@sayknow-cli/coding-agent/i18n/index";
 import { initTheme, theme } from "@sayknow-cli/coding-agent/modes/theme/theme";
-import { CURSOR_MARKER, ImageProtocol, setTerminalImageProtocol, TERMINAL, Text, visibleWidth } from "@sayknow-cli/tui";
+import {
+	CURSOR_MARKER,
+	ImageProtocol,
+	setKittyProtocolActive,
+	setTerminalImageProtocol,
+	TERMINAL,
+	Text,
+	visibleWidth,
+} from "@sayknow-cli/tui";
 import { TempDir } from "@sayknow-cli/utils";
 import { ModelRegistry } from "../src/config/model-registry";
 import type {
@@ -882,6 +890,39 @@ describe("InteractiveMode.setEditorComponent", () => {
 			// Opening a session ends the card's interaction.
 			send("\x1b[B");
 			expect(mode.editor.getText()).toBe("");
+		});
+
+		it("moves one row per tap and opens with Enter under the kitty keyboard protocol (press + release events)", async () => {
+			writeSession("oldest", "oldest-id", "oldest work", 1_000_000);
+			writeSession("older", "older-id", "older work", 2_000_000);
+			writeSession("newest", "newest-id", "newest work", 3_000_000);
+			const { send } = await startWithInput();
+			const resume = vi.spyOn(mode, "handleResumeSession").mockResolvedValue(true);
+			for (let i = 0; i < 40 && !mode.ui.render(120).some(line => line.includes("oldest work")); i++)
+				await Bun.sleep(5);
+			setKittyProtocolActive(true);
+			try {
+				// Ghostty/kitty: a tap is a press and a release; the release must not cancel the pick.
+				const tap = (press: string, release: string) => {
+					send(press);
+					send(release);
+				};
+				tap("\x1b[B", "\x1b[1;1:3B"); // ↓ → first row
+				tap("\x1b[B", "\x1b[1;1:3B"); // ↓ → second row
+				const highlighted = mode.ui
+					.render(120)
+					.map(stripRenderControls)
+					.find(line => line.includes("›"));
+				expect(highlighted).toContain("older work");
+				tap("\r", "\x1b[13;1:3u"); // Enter
+				for (let i = 0; i < 20 && resume.mock.calls.length === 0; i++) await Bun.sleep(5);
+				expect(resume).toHaveBeenCalledTimes(1);
+				expect(fs.realpathSync(resume.mock.calls[0]?.[0] as string)).toBe(
+					fs.realpathSync(path.join(tempDir.path(), "older.jsonl")),
+				);
+			} finally {
+				setKittyProtocolActive(false);
+			}
 		});
 
 		it("leaves ↓ to the composer when it has text, and Esc returns to typing", async () => {

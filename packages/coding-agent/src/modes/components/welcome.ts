@@ -343,17 +343,18 @@ export class WelcomeComponent implements Component {
 		);
 		const info = [...head, withWordmark ? versionLine : theme.fg("muted", t("welcome.tagline"))];
 
+		// Model and place sit under the wordmark, in the same column — starting beside the
+		// pet's last rows when the pet is taller than the wordmark, so no blank row opens.
+		const text = [...info, ...this.#statusLines(infoWidth)];
 		const rows: string[] = [];
 		if (withMark) {
-			const count = Math.max(mark.length, info.length);
+			const count = Math.max(mark.length, text.length);
 			for (let row = 0; row < count; row++) {
 				const art = mark[row] ?? padding(markWidth);
-				const text = info[row] ?? "";
-				rows.push(text ? `${art}${padding(MARK_GAP)}${text}` : art);
+				const line = text[row] ?? "";
+				rows.push(line ? `${art}${padding(MARK_GAP)}${line}` : art);
 			}
-		} else rows.push(...info);
-		// Model and place sit under the wordmark, in the same column.
-		for (const line of this.#statusLines(infoWidth)) rows.push(`${padding(indent)}${line}`);
+		} else rows.push(...text);
 		return rows;
 	}
 
@@ -362,7 +363,7 @@ export class WelcomeComponent implements Component {
 		return `v${this.version} · ${buildLabel}`;
 	}
 
-	/** The Sayknow pet at half size, in half blocks; the pose follows the intro. */
+	/** The Sayknow pet (its own sprite at three quarters size), in half blocks; the pose follows the intro. */
 	#markRows(): string[] {
 		const step = this.#animStart == null ? -1 : Math.floor((performance.now() - this.#animStart) / WAVE_STEP_MS);
 		if (this.logoMode === "ascii") {
@@ -371,7 +372,7 @@ export class WelcomeComponent implements Component {
 			return rows.map(row => theme.fg("accent", row));
 		}
 		const pose = step >= 0 && step < INTRO_POSES.length ? INTRO_POSES[step]! : "base";
-		return renderPetHalfBlocks(pose, this.options.petSkin ?? "red", theme.getColorMode(), { scale: "half" });
+		return renderPetHalfBlocks(pose, this.options.petSkin ?? "red", theme.getColorMode(), { scale: "compact" });
 	}
 
 	/** One-line title for layouts without room for the wordmark. */

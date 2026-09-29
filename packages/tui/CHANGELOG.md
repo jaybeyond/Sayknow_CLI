@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- `renderPetHalfBlocks(..., { scale: "compact" })` draws the pet's own sprite downscaled to 12×5 (eyes kept by feature-first pixel merging), replacing the redrawn `"half"` octopus. Every pose has the same height.
+
 ## [0.6.7] - 2026-09-28
 
 ### Added
