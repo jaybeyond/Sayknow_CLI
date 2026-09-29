@@ -100,6 +100,30 @@ describe("bundled Grok CLI defaults", () => {
 		}
 	});
 
+	it("registers Grok 4.7 and Grok 4.7 Build Fast, first in the list, with xhigh effort", async () => {
+		const previousGrokCliModels = process.env.SKC_GROK_CLI_MODELS;
+		delete process.env.SKC_GROK_CLI_MODELS;
+		try {
+			const ids = resolveModels().map(model => model.id);
+			expect(ids.slice(0, 2)).toEqual(["grok-4.7", "grok-4.7-build-fast"]);
+			for (const id of ["grok-4.7", "grok-4.7-build-fast"]) {
+				expect(supportsReasoningEffort(`grok-build/${id}`)).toBe(true);
+			}
+			const providerConfig = await captureGrokBuildProviderConfig();
+			for (const id of ["grok-4.7", "grok-4.7-build-fast"]) {
+				const registered = providerConfig?.models?.find(candidate => candidate.id === id);
+				expect(registered?.contextWindow).toBe(500_000);
+				expect(registered?.thinking).toEqual({ minLevel: Effort.Low, maxLevel: Effort.XHigh, mode: "effort" });
+			}
+		} finally {
+			if (previousGrokCliModels === undefined) {
+				delete process.env.SKC_GROK_CLI_MODELS;
+			} else {
+				process.env.SKC_GROK_CLI_MODELS = previousGrokCliModels;
+			}
+		}
+	});
+
 	it("maps official Grok 4.5 aliases to canonical metadata and effort limits", async () => {
 		const previousGrokCliModels = process.env.SKC_GROK_CLI_MODELS;
 		const aliases = ["grok-4.5-latest", "grok-build-latest"];

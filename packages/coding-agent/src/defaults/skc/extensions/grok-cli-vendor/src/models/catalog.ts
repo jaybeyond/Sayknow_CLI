@@ -11,6 +11,8 @@ const COST_43 = { input: 1.25, output: 2.5, cacheRead: 0.2, cacheWrite: 0 };
 const COST_45 = { input: 2, output: 6, cacheRead: 0.5, cacheWrite: 0 };
 const COST_46 = { input: 2, output: 6, cacheRead: 0.5, cacheWrite: 0 };
 const COST_420 = { input: 2, output: 6, cacheRead: 0.2, cacheWrite: 0 };
+// Same as direct xAI grok-4.7 (packages/ai models.json).
+const COST_47 = { input: 2, output: 6, cacheRead: 0.5, cacheWrite: 0 };
 
 // ─── Model type ───────────────────────────────────────────────────────────────
 
@@ -39,6 +41,30 @@ export interface GrokCliModelConfig {
 // the actual traffic captured through cli-chat-proxy.grok.com.
 
 const FALLBACK_MODELS: GrokCliModelConfig[] = [
+  {
+    // Served by cli-chat-proxy.grok.com/v1/models (checked 2026-09-29): grok-4.7,
+    // grok-4.7-build-fast, grok-4.6, grok-4.5. Metadata as direct xAI grok-4.7.
+    id: 'grok-4.7',
+    name: 'Grok 4.7',
+    reasoning: true,
+    input: ['text', 'image'],
+    cost: COST_47,
+    contextWindow: 500_000,
+    maxTokens: 30_000,
+    maxReasoningEffort: Effort.XHigh,
+  },
+  {
+    // The Grok Build fast variant of 4.7. xAI publishes no separate price or window;
+    // it is listed with grok-4.7's.
+    id: 'grok-4.7-build-fast',
+    name: 'Grok 4.7 Build Fast',
+    reasoning: true,
+    input: ['text', 'image'],
+    cost: COST_47,
+    contextWindow: 500_000,
+    maxTokens: 30_000,
+    maxReasoningEffort: Effort.XHigh,
+  },
   {
     id: 'grok-composer-2.5-fast',
     name: 'Composer 2.5 Fast (Grok CLI)',
@@ -140,6 +166,7 @@ const FALLBACK_MODELS: GrokCliModelConfig[] = [
 const MODEL_ALIASES: Readonly<Record<string, string>> = {
   'grok-4.5-latest': 'grok-4.5',
   'grok-4.6-latest': 'grok-4.6',
+  'grok-4.7-latest': 'grok-4.7',
   'grok-build-latest': 'grok-4.5',
 };
 
@@ -166,6 +193,7 @@ const EFFORT_CAPABLE_PREFIXES = [
   'grok-4.3',
   'grok-4.5',
   'grok-4.6',
+  'grok-4.7',
 ];
 
 export function supportsReasoningEffort(modelId: string): boolean {
