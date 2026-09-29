@@ -1,14 +1,5 @@
 import type { ThinkingLevel } from "@sayknow-cli/agent-core";
-import {
-	type Component,
-	PARA_PARA_STEPS,
-	type PetSkinId,
-	padding,
-	renderPetHalfBlocks,
-	type SayknowPixelFrameName,
-	truncateToWidth,
-	visibleWidth,
-} from "@sayknow-cli/tui";
+import { type Component, padding, truncateToWidth, visibleWidth } from "@sayknow-cli/tui";
 import { formatBuildLabel } from "../../build-metadata";
 import { formatKeyHint, type KeyDisplayContext } from "../../config/keybindings";
 import { type MsgKey, t } from "../../i18n";
@@ -50,28 +41,13 @@ export interface WelcomeComponentOptions {
 	resumeKey?: string;
 	/** Key bound to `app.session.continue`, which resumes the first session on the card. */
 	continueKey?: string;
-	/** Which Sayknow pet stands on the card (default red). */
-	petSkin?: PetSkinId;
-	/**
-	 * Sayo as an image in the card's text (kitty Unicode placeholders, already uploaded):
-	 * the rows of each pose. Without it the card draws the pixel octopus in half blocks.
-	 */
-	petImage?: { rows: number; line(pose: SayknowPixelFrameName, row: number): string };
 	/** Called when a session row is opened by click or Enter. */
 	onOpenSession?: (session: RecentSession) => void;
-	/**
-	 * Whether a line of this card is on screen right now. When given, the pet keeps
-	 * dancing after the intro for as long as its top row is visible, and stops for good
-	 * once it scrolls away (changing a line above the viewport forces a full redraw).
-	 */
-	isLineVisible?: (line: number) => boolean;
 }
 
 /** Left margin of the card, and the widest the card grows on wide terminals. */
 const MARGIN = 2;
 const MAX_CARD_WIDTH = 76;
-/** Gap between the pet and the wordmark. */
-const MARK_GAP = 3;
 /** Recent sessions on the card; the resume picker has the rest. */
 const SESSION_ROWS = 3;
 
@@ -88,21 +64,9 @@ const WORDMARK: ReadonlyArray<readonly [string, string]> = [
 const WORDMARK_GAP = 2;
 const WORDMARK_WIDTH = 21 + WORDMARK_GAP + 7;
 
-/** ASCII-safe stand-in for the pet when the banner must avoid block glyphs. */
-const MARK_ASCII = [" .--. ", "( oo )", " )  ( ", "/\\/\\/\\"] as const;
-const MARK_ASCII_WAVE = "\\/\\/\\/";
-
-/**
- * Intro: the pet does a short para-para (tentacles sway left, right, left) and
- * lands on its resting pose while color spreads down the card.
- */
-const INTRO_POSES: readonly SayknowPixelFrameName[] = ["danceL", "danceR", "danceL", "base"];
 const SECTION_STAGGER_MS = 55;
 const SECTION_SETTLE_MS = 90;
-const WAVE_STEP_MS = 140;
-const INTRO_MS = INTRO_POSES.length * WAVE_STEP_MS;
-/** After the intro the pet does the composer pet's working dance, on loop. */
-const DANCE_LOOP_MS = PARA_PARA_STEPS.reduce((sum, [, ms]) => sum + ms, 0);
+const INTRO_MS = SECTION_SETTLE_MS + 4 * SECTION_STAGGER_MS;
 
 /** A block of rows that takes its colors together during the intro. */
 interface Section {
@@ -114,18 +78,12 @@ interface Section {
 }
 
 /**
- * Sayknow-CLI launch card: the wordmark with the pet beside it, who and where you are
- * (version, model and reasoning, project and branch), the release line after an update,
- * the three most recent sessions — which can be opened from the card with a click or
- * ↓ then Enter — and a single row of keys.
+ * Sayknow-CLI launch card: the wordmark, model and workspace, release note,
+ * recent sessions and shortcuts. The composer pet does not appear on this card.
  */
 export class WelcomeComponent implements Component {
 	#animStart: number | null = null;
 	#animTimer: NodeJS.Timeout | null = null;
-	#danceStart: number | null = null;
-	#danceTimer: NodeJS.Timeout | null = null;
-	/** Card line holding the pet's top row in the last frame; undefined when no pet is drawn. */
-	#markLine: number | undefined;
 	#snapshot: WelcomeSnapshot;
 	/** Highlighted session row while picking with the keyboard; undefined when not picking. */
 	#selected: number | undefined;
@@ -146,10 +104,7 @@ export class WelcomeComponent implements Component {
 
 	invalidate(): void {}
 
-	/**
-	 * Play the short launch intro. Content is fully readable from the first frame;
-	 * only color and the tentacles move. Safe to call again — it restarts.
-	 */
+	/** Briefly reveal section colors without moving the card's content. */
 	playIntro(requestRender: () => void): void {
 		this.#stopAnimation();
 		if (this.options.skipLogoAnimation) {
@@ -160,72 +115,14 @@ export class WelcomeComponent implements Component {
 		requestRender();
 		this.#animTimer = setInterval(() => {
 			const elapsed = performance.now() - (this.#animStart ?? 0);
-			if (elapsed >= INTRO_MS) {
-				this.#stopAnimation();
-				this.#startDance(requestRender);
-			}
+			if (elapsed >= INTRO_MS) this.#stopAnimation();
 			requestRender();
 		}, INTRO_TICK_MS);
 		this.#animTimer.unref?.();
 	}
 
-	/** True while the pet is dancing after the intro. */
-	get dancing(): boolean {
-		return this.#danceTimer !== null;
-	}
-
-	/**
-	 * Loop the working dance while the pet is on screen. Timers land on frame changes
-	 * only (five per 1.6 s loop), so an idle card costs a handful of renders per second.
-	 */
-	#startDance(requestRender: () => void): void {
-		if (!this.options.isLineVisible || this.#markLine === undefined) return;
-		this.#danceStart = performance.now();
-		const next = (): void => {
-			if (this.#markLine === undefined || !this.options.isLineVisible?.(this.#markLine)) {
-				this.#stopDance();
-				requestRender();
-				return;
-			}
-			requestRender();
-			this.#danceTimer = setTimeout(next, this.#msToNextDanceFrame());
-			this.#danceTimer.unref?.();
-		};
-		this.#danceTimer = setTimeout(next, this.#msToNextDanceFrame());
-		this.#danceTimer.unref?.();
-	}
-
-	#stopDance(): void {
-		if (this.#danceTimer !== null) clearTimeout(this.#danceTimer);
-		this.#danceTimer = null;
-		this.#danceStart = null;
-	}
-
-	#danceOffset(): number {
-		return this.#danceStart === null ? 0 : (performance.now() - this.#danceStart) % DANCE_LOOP_MS;
-	}
-
-	#msToNextDanceFrame(): number {
-		let t = this.#danceOffset();
-		for (const [, ms] of PARA_PARA_STEPS) {
-			if (t < ms) return Math.max(16, ms - t);
-			t -= ms;
-		}
-		return 16;
-	}
-
-	#dancePose(): SayknowPixelFrameName {
-		let t = this.#danceOffset();
-		for (const [frame, ms] of PARA_PARA_STEPS) {
-			if (t < ms) return frame;
-			t -= ms;
-		}
-		return "base";
-	}
-
 	dispose(): void {
 		this.#stopAnimation();
-		this.#stopDance();
 	}
 
 	#stopAnimation(): void {
@@ -323,14 +220,13 @@ export class WelcomeComponent implements Component {
 
 	render(termWidth: number): string[] {
 		this.#lineSessions = [];
-		this.#markLine = undefined;
 		const gutterWidth = this.#rightGutterWidth(termWidth);
 		const width = Math.max(0, termWidth - gutterWidth);
 		if (width < 4) return [];
 
 		const targetRows = this.#targetRows(termWidth);
 		if (targetRows !== undefined && targetRows <= 0) return [];
-		if (targetRows === 1) return this.#withRightGutter([this.#fit(this.#titleLine(true), width)], gutterWidth);
+		if (targetRows === 1) return this.#withRightGutter([this.#fit(this.#titleLine(), width)], gutterWidth);
 
 		const cardWidth = Math.max(1, Math.min(MAX_CARD_WIDTH, width - MARGIN));
 		const sections = this.#sections(cardWidth);
@@ -397,44 +293,23 @@ export class WelcomeComponent implements Component {
 		return { identity: this.#identityLines(cardWidth), others };
 	}
 
-	// ── Identity: pet + wordmark, then who and where ────────────────────────
+	// ── Identity: wordmark, model and workspace ───────────────────────────────
 
 	#identityLines(cardWidth: number): string[] {
-		const mark = this.#markRows();
-		const markWidth = Math.max(0, ...mark.map(row => visibleWidth(row)));
-		const withMark = cardWidth >= markWidth + MARK_GAP + WORDMARK_WIDTH;
-		// The card opens with one blank row, so the pet's top row is card line 1.
-		this.#markLine = withMark ? 1 : undefined;
 		const withWordmark = this.logoMode !== "ascii" && cardWidth >= WORDMARK_WIDTH;
-		const indent = withMark ? markWidth + MARK_GAP : 0;
-		const infoWidth = Math.max(1, cardWidth - indent);
-
-		const head: string[] = withWordmark
+		const head = withWordmark
 			? WORDMARK.map(
 					([word, suffix]) =>
 						`${theme.bold(theme.fg("accent", word))}${padding(WORDMARK_GAP)}${theme.fg("text", suffix)}`,
 				)
-			: [this.#truncate(this.#titleLine(!withMark), infoWidth)];
+			: [this.#truncate(this.#titleLine(), cardWidth)];
 		const versionLine = this.#spread(
 			theme.fg("muted", t("welcome.tagline")),
 			theme.fg("dim", this.#versionLabel()),
-			infoWidth,
+			cardWidth,
 		);
 		const info = [...head, withWordmark ? versionLine : theme.fg("muted", t("welcome.tagline"))];
-
-		// Model and place sit under the wordmark, in the same column — starting beside the
-		// pet's last rows when the pet is taller than the wordmark, so no blank row opens.
-		const text = [...info, ...this.#statusLines(infoWidth)];
-		const rows: string[] = [];
-		if (withMark) {
-			const count = Math.max(mark.length, text.length);
-			for (let row = 0; row < count; row++) {
-				const art = mark[row] ?? padding(markWidth);
-				const line = text[row] ?? "";
-				rows.push(line ? `${art}${padding(MARK_GAP)}${line}` : art);
-			}
-		} else rows.push(...text);
-		return rows;
+		return [...info, ...this.#statusLines(cardWidth)];
 	}
 
 	#versionLabel(): string {
@@ -442,33 +317,9 @@ export class WelcomeComponent implements Component {
 		return `v${this.version} · ${buildLabel}`;
 	}
 
-	/** The Sayknow pet (its own sprite at three quarters size), in half blocks; the pose follows the intro. */
-	#markRows(): string[] {
-		const step = this.#animStart == null ? -1 : Math.floor((performance.now() - this.#animStart) / WAVE_STEP_MS);
-		if (this.logoMode === "ascii") {
-			const rows: string[] = [...MARK_ASCII];
-			const wave =
-				step >= 0
-					? step < INTRO_POSES.length - 1 && step % 2 === 1
-					: this.#danceStart !== null && this.#dancePose() === "danceR";
-			if (wave) rows[3] = MARK_ASCII_WAVE;
-			return rows.map(row => theme.fg("accent", row));
-		}
-		const pose =
-			step >= 0 && step < INTRO_POSES.length
-				? INTRO_POSES[step]!
-				: this.#danceStart !== null
-					? this.#dancePose()
-					: "base";
-		const image = this.options.petImage;
-		if (image) return Array.from({ length: image.rows }, (_, row) => image.line(pose, row));
-		return renderPetHalfBlocks(pose, this.options.petSkin ?? "orange", theme.getColorMode(), { scale: "compact" });
-	}
-
 	/** One-line title for layouts without room for the wordmark. */
-	#titleLine(withIcon = false): string {
-		const mark = withIcon && this.logoMode !== "ascii" && theme.icon.pi ? `${theme.icon.pi} ` : "";
-		return `${mark}${theme.bold(theme.fg("accent", "Sayknow-CLI"))}${theme.fg("dim", ` ${this.#versionLabel()}`)}`;
+	#titleLine(): string {
+		return `${theme.bold(theme.fg("accent", "Sayknow-CLI"))}${theme.fg("dim", ` ${this.#versionLabel()}`)}`;
 	}
 
 	/**

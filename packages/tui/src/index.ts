@@ -12,7 +12,6 @@ export * from "./components/input";
 export * from "./components/loader";
 export * from "./components/markdown";
 export * from "./components/sayknow-pet";
-export * from "./components/sayo-placeholder";
 export * from "./components/sayo-sprite";
 export * from "./components/secret-input";
 export * from "./components/select-list";

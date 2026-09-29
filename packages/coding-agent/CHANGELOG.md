@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- The launch card is text-only: the wordmark starts at the left margin with model and workspace underneath. Removed its Sayo image, pixel/ASCII fallback, and idle dance after the mascot's kitty Unicode placeholders appeared as raw glyphs in a real terminal. The composer pet is unchanged.
+
 ## [0.7.1] - 2026-09-29
 
 ### Added

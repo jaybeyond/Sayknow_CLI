@@ -7,17 +7,13 @@ import type { Component, EditorTheme, SlashCommand } from "@sayknow-cli/tui";
 import {
 	Container,
 	clearRenderCache,
-	getCellDimensions,
 	getRenderCacheRetainedBytes,
 	isKeyRelease,
-	isUnderTmux,
 	Loader,
 	matchesKey,
 	onImageProtocolChanged,
 	ProcessTerminal,
-	prepareSayoPlaceholderImages,
 	Spacer,
-	TERMINAL_ID,
 	Text,
 	TUI,
 } from "@sayknow-cli/tui";
@@ -72,24 +68,17 @@ import type { HookInputComponent } from "./components/hook-input";
 import type { HookSelectorComponent } from "./components/hook-selector";
 import { computeIrcSplitWidths, getIrcSidebarSemanticToken, IrcSplitViewComponent } from "./components/irc-sidebar";
 import {
-	getPetPixelProtocol,
 	getPetUnavailableWarning,
 	isPetAvailable,
 	isPetCapabilityProbePending,
 	warnWhenPetCapabilitySettled,
 } from "./components/pet-capability";
-import { type PetMode, type PetSkinId, SayknowPetWidget } from "./components/sayknow-pet-widget";
+import { type PetMode, SayknowPetWidget } from "./components/sayknow-pet-widget";
 import { resolveCurrentBranch } from "./components/status-line/git-utils";
 import type { ToolExecutionHandle } from "./components/tool-execution";
 import { StatusLineComponent } from "./components/tool-status-header";
 import { composeToolText } from "./components/tool-transcript-format";
-import {
-	type RecentSession,
-	WelcomeComponent,
-	type WelcomeComponentOptions,
-	type WelcomeLogoMode,
-	type WelcomeSnapshot,
-} from "./components/welcome";
+import { type RecentSession, WelcomeComponent, type WelcomeLogoMode, type WelcomeSnapshot } from "./components/welcome";
 import { BtwController } from "./controllers/btw-controller";
 import { CommandController } from "./controllers/command-controller";
 import { EventController } from "./controllers/event-controller";
@@ -112,14 +101,7 @@ import { shouldShowExtensionCommand } from "./slash-command-visibility";
 import { TasksAggregator } from "./tasks-aggregator";
 import { type ShimmerPalette, shimmerSegments, shimmerText } from "./theme/shimmer";
 import type { Theme } from "./theme/theme";
-import {
-	getCurrentThemeName,
-	getEditorTheme,
-	getSymbolTheme,
-	onTerminalAppearanceChange,
-	onThemeChange,
-	theme,
-} from "./theme/theme";
+import { getEditorTheme, getSymbolTheme, onTerminalAppearanceChange, onThemeChange, theme } from "./theme/theme";
 import { type RegisterTranscriptItem, TranscriptItemRegistry, transcriptItemId } from "./transcript-item-registry";
 import {
 	type CompactionQueuedMessage,
@@ -221,20 +203,6 @@ function getShellInputPrefix(isNoContext: boolean): string {
 		? theme.fg("warning", theme.bold("shell no-context"))
 		: theme.fg("bashMode", theme.bold("shell"));
 	return `${shellLabel} `;
-}
-
-/**
- * The pet on the launch card: the one the user keeps beside the composer, or —
- * with the pet off — the skin that matches the theme (blue for blue-octopus).
- */
-/** Height of Sayo on the launch card in terminal rows (the wordmark block is 5 rows). */
-const WELCOME_PET_IMAGE_ROWS = 5;
-/** Kitty image ids for the launch card poses ("SY" + index; 24-bit, carried as a color). */
-const WELCOME_PET_IMAGE_ID_BASE = 0x535901;
-
-export function resolveWelcomePetSkin(petMode: PetMode, themeName: string | undefined): PetSkinId {
-	if (petMode !== "off") return petMode;
-	return themeName?.startsWith("blue") ? "blue" : "orange";
 }
 
 /**
@@ -803,16 +771,7 @@ export class InteractiveMode implements InteractiveModeContext {
 					snapshot: this.#buildWelcomeSnapshot(),
 					resumeKey: this.keybindings.getKeys("app.session.resume")[0],
 					continueKey: this.keybindings.getKeys("app.session.continue")[0],
-					petSkin: resolveWelcomePetSkin(settings.get("pet.mode"), getCurrentThemeName()),
-					petImage:
-						welcomeLogoMode === "unicode"
-							? this.#prepareWelcomePetImage(
-									resolveWelcomePetSkin(settings.get("pet.mode"), getCurrentThemeName()),
-								)
-							: undefined,
 					onOpenSession: session => void this.#openWelcomeSession(session),
-					isLineVisible: line =>
-						this.#welcomeComponent !== undefined && this.ui.isChildLineVisible(this.#welcomeComponent, line),
 				},
 			);
 
@@ -2237,34 +2196,6 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	showSessionSelector(): void {
 		this.#selectorController.showSessionSelector();
-	}
-
-	/**
-	 * Sayo as an image on the launch card, where the terminal draws kitty Unicode
-	 * placeholders (Ghostty, kitty outside a multiplexer: the placeholder carries the
-	 * image id as a 24-bit color, which tmux may not pass through). Uploads the card's
-	 * poses once; the card's text then refers to them. Undefined keeps the pixel octopus.
-	 */
-	#prepareWelcomePetImage(skin: PetSkinId): WelcomeComponentOptions["petImage"] {
-		if (getPetPixelProtocol() !== "kitty") return undefined;
-		if (TERMINAL_ID !== "ghostty" && TERMINAL_ID !== "kitty") return undefined;
-		if (isUnderTmux()) return undefined;
-		try {
-			const cell = getCellDimensions();
-			const images = prepareSayoPlaceholderImages({
-				tint: skin,
-				rows: WELCOME_PET_IMAGE_ROWS,
-				cellWidthPx: cell.widthPx,
-				cellHeightPx: cell.heightPx,
-				poses: ["base", "danceL", "danceR", "flex"],
-				idBase: WELCOME_PET_IMAGE_ID_BASE,
-			});
-			this.ui.terminal.write(images.upload);
-			return images;
-		} catch (error) {
-			logger.debug("Launch card pet image unavailable", { error: String(error) });
-			return undefined;
-		}
 	}
 
 	#currentSessionFileCanonical(): string | undefined {

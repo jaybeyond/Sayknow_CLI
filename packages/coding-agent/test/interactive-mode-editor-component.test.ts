@@ -966,19 +966,13 @@ describe("InteractiveMode.setEditorComponent", () => {
 			expect(mouse.at(-1)).toBe(false);
 		});
 
-		it("keeps the launch pet dancing while the card is on screen, and stops once it scrolls away", async () => {
-			settings.set("startup.skipLogoAnimation", false);
+		it("keeps the launch card text-only even when the composer pet is enabled", async () => {
 			await startWithInput();
 			const welcome = mode.ui.children.find(child => child instanceof WelcomeComponent) as WelcomeComponent;
 			expect(welcome).toBeDefined();
-			for (let i = 0; i < 60 && !welcome.dancing; i++) await Bun.sleep(20);
-			expect(welcome.dancing).toBe(true);
-
-			// Conversation output pushes the card above the viewport.
-			for (let i = 0; i < 80; i++) mode.chatContainer.addChild(new Text(`reply line ${i}`, 1, 0));
-			mode.ui.requestRender();
-			for (let i = 0; i < 60 && welcome.dancing; i++) await Bun.sleep(40);
-			expect(welcome.dancing).toBe(false);
+			const lines = welcome.render(120).map(stripRenderControls);
+			expect(lines[1]).toMatch(/^ {2}╔═╗╔═╗/);
+			expect(lines.join("\n")).not.toContain(String.fromCodePoint(0x10eeee));
 		});
 
 		it("gives the mouse back when the first prompt is sent", async () => {

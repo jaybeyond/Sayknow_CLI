@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Removed
+
+- The launch-card-only `prepareSayoPlaceholderImages` API and its kitty Unicode-placeholder implementation. Composer pet image rendering remains.
+
 ## [0.7.1] - 2026-09-29
 
 ## [0.7.0] - 2026-09-29
