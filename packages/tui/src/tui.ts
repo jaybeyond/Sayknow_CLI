@@ -1343,6 +1343,22 @@ export class TUI extends Container {
 		return this.#mouseEnabled;
 	}
 
+	/**
+	 * Whether `line` of a top-level child was on screen in the last frame. Only children
+	 * with a `handleClick` hook are tracked; others report false. A line scrolled above
+	 * the viewport is not visible — and changing it would force a full redraw, so
+	 * animations should stop there.
+	 */
+	isChildLineVisible(child: Component, line: number): boolean {
+		const rows = this.#childRows.get(child);
+		if (!rows || line < 0 || line >= rows.count) return false;
+		const absolute = rows.start + line;
+		if (this.#manualViewportTop === undefined) {
+			return absolute >= this.#viewportTopRow && absolute < this.#viewportTopRow + this.terminal.rows;
+		}
+		return this.#committedTranscriptRows.includes(absolute);
+	}
+
 	/** The component that currently receives keyboard input. */
 	getFocusedComponent(): Component | null {
 		return this.#focusedComponent;

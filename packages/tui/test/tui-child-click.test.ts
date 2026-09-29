@@ -112,3 +112,35 @@ describe("compact pet", () => {
 		);
 	});
 });
+
+describe("child line visibility", () => {
+	test("reports lines on screen as visible and lines pushed above the viewport as not", async () => {
+		const { terminal } = fakeTerminal();
+		const tui = new TUI(terminal);
+		let tall = false;
+		const card: Component = {
+			render: () => ["card 0", "card 1", "card 2"],
+			invalidate: () => {},
+			handleClick: () => false,
+		};
+		const body: Component = {
+			render: () => (tall ? Array.from({ length: 60 }, (_, i) => `line ${i}`) : ["short"]),
+			invalidate: () => {},
+		};
+		const untracked: Component = { render: () => ["x"], invalidate: () => {} };
+		tui.addChild(card);
+		tui.addChild(body);
+		tui.addChild(untracked);
+		tui.start();
+		await Bun.sleep(5);
+		expect(tui.isChildLineVisible(card, 1)).toBe(true);
+		expect(tui.isChildLineVisible(card, 3)).toBe(false); // outside the card
+		expect(tui.isChildLineVisible(untracked, 0)).toBe(false); // not tracked
+
+		tall = true;
+		tui.requestRender();
+		await Bun.sleep(20);
+		expect(tui.isChildLineVisible(card, 1)).toBe(false);
+		tui.stop();
+	});
+});

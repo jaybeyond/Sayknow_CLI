@@ -789,6 +789,8 @@ export class InteractiveMode implements InteractiveModeContext {
 					continueKey: this.keybindings.getKeys("app.session.continue")[0],
 					petSkin: resolveWelcomePetSkin(settings.get("pet.mode"), getCurrentThemeName()),
 					onOpenSession: session => void this.#openWelcomeSession(session),
+					isLineVisible: line =>
+						this.#welcomeComponent !== undefined && this.ui.isChildLineVisible(this.#welcomeComponent, line),
 				},
 			);
 

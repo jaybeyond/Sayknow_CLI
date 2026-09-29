@@ -355,3 +355,67 @@ describe("opening a session from the card", () => {
 		expect(noFiles.select(0)).toBe(false);
 	});
 });
+
+describe("pet dance after the intro", () => {
+	it("keeps dancing while the pet is on screen and stops for good once it scrolls away", async () => {
+		let visible = true;
+		const asked: number[] = [];
+		const welcome = new WelcomeComponent("1.2.3", "m", "p", SESSIONS, "unicode", {
+			isLineVisible: line => {
+				asked.push(line);
+				return visible;
+			},
+		});
+		const settled = new WelcomeComponent("1.2.3", "m", "p", SESSIONS, "unicode", { skipLogoAnimation: true }).render(
+			120,
+		);
+		welcome.render(120);
+		let renders = 0;
+		welcome.playIntro(() => {
+			renders += 1;
+			welcome.render(120);
+		});
+		await Bun.sleep(800); // intro (560ms) done, dance running
+		expect(welcome.dancing).toBe(true);
+		// The pet's top row is card line 1 (after one blank row).
+		expect(asked.every(line => line === 1)).toBe(true);
+		// Across one dance loop the pet shows more than one pose.
+		const poses = new Set<string>();
+		for (let i = 0; i < 12; i++) {
+			poses.add(welcome.render(120).slice(1, 6).join("\n"));
+			await Bun.sleep(140);
+		}
+		expect(poses.size).toBeGreaterThan(1);
+		const rendersWhileDancing = renders;
+
+		visible = false;
+		await Bun.sleep(700);
+		expect(welcome.dancing).toBe(false);
+		expect(welcome.render(120)).toEqual(settled);
+		const after = renders;
+		await Bun.sleep(700);
+		expect(renders).toBe(after); // no more frames once stopped
+		expect(rendersWhileDancing).toBeGreaterThan(0);
+		welcome.dispose();
+	});
+
+	it("does not dance without a visibility check, when skipped, or without a pet", async () => {
+		const noCheck = new WelcomeComponent("1.2.3", "m", "p", [], "unicode");
+		noCheck.render(120);
+		noCheck.playIntro(() => noCheck.render(120));
+		const skipped = new WelcomeComponent("1.2.3", "m", "p", [], "unicode", {
+			skipLogoAnimation: true,
+			isLineVisible: () => true,
+		});
+		skipped.render(120);
+		skipped.playIntro(() => {});
+		const narrow = new WelcomeComponent("1.2.3", "m", "p", [], "unicode", { isLineVisible: () => true });
+		narrow.render(30);
+		narrow.playIntro(() => narrow.render(30));
+		await Bun.sleep(700);
+		expect(noCheck.dancing).toBe(false);
+		expect(skipped.dancing).toBe(false);
+		expect(narrow.dancing).toBe(false);
+		for (const card of [noCheck, skipped, narrow]) card.dispose();
+	});
+});

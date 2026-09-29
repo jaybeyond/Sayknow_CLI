@@ -7,6 +7,7 @@ import type { AssistantMessage } from "@sayknow-cli/ai";
 import { formatKeyHint, formatKeyHints, type KeyDisplayContext } from "@sayknow-cli/coding-agent/config/keybindings";
 import { resetSettingsForTest, Settings, settings } from "@sayknow-cli/coding-agent/config/settings";
 import { t } from "@sayknow-cli/coding-agent/i18n/index";
+import { WelcomeComponent } from "@sayknow-cli/coding-agent/modes/components/welcome";
 import { initTheme, theme } from "@sayknow-cli/coding-agent/modes/theme/theme";
 import {
 	CURSOR_MARKER,
@@ -963,6 +964,21 @@ describe("InteractiveMode.setEditorComponent", () => {
 			// Opening the session gave the mouse back.
 			expect(mode.ui.mouseEnabled).toBe(false);
 			expect(mouse.at(-1)).toBe(false);
+		});
+
+		it("keeps the launch pet dancing while the card is on screen, and stops once it scrolls away", async () => {
+			settings.set("startup.skipLogoAnimation", false);
+			await startWithInput();
+			const welcome = mode.ui.children.find(child => child instanceof WelcomeComponent) as WelcomeComponent;
+			expect(welcome).toBeDefined();
+			for (let i = 0; i < 60 && !welcome.dancing; i++) await Bun.sleep(20);
+			expect(welcome.dancing).toBe(true);
+
+			// Conversation output pushes the card above the viewport.
+			for (let i = 0; i < 80; i++) mode.chatContainer.addChild(new Text(`reply line ${i}`, 1, 0));
+			mode.ui.requestRender();
+			for (let i = 0; i < 60 && welcome.dancing; i++) await Bun.sleep(40);
+			expect(welcome.dancing).toBe(false);
 		});
 
 		it("gives the mouse back when the first prompt is sent", async () => {

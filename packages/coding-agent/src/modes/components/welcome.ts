@@ -1,6 +1,7 @@
 import type { ThinkingLevel } from "@sayknow-cli/agent-core";
 import {
 	type Component,
+	PARA_PARA_STEPS,
 	type PetSkinId,
 	padding,
 	renderPetHalfBlocks,
@@ -53,6 +54,12 @@ export interface WelcomeComponentOptions {
 	petSkin?: PetSkinId;
 	/** Called when a session row is opened by click or Enter. */
 	onOpenSession?: (session: RecentSession) => void;
+	/**
+	 * Whether a line of this card is on screen right now. When given, the pet keeps
+	 * dancing after the intro for as long as its top row is visible, and stops for good
+	 * once it scrolls away (changing a line above the viewport forces a full redraw).
+	 */
+	isLineVisible?: (line: number) => boolean;
 }
 
 /** Left margin of the card, and the widest the card grows on wide terminals. */
@@ -89,6 +96,8 @@ const SECTION_STAGGER_MS = 55;
 const SECTION_SETTLE_MS = 90;
 const WAVE_STEP_MS = 140;
 const INTRO_MS = INTRO_POSES.length * WAVE_STEP_MS;
+/** After the intro the pet does the composer pet's working dance, on loop. */
+const DANCE_LOOP_MS = PARA_PARA_STEPS.reduce((sum, [, ms]) => sum + ms, 0);
 
 /** A block of rows that takes its colors together during the intro. */
 interface Section {
@@ -108,6 +117,10 @@ interface Section {
 export class WelcomeComponent implements Component {
 	#animStart: number | null = null;
 	#animTimer: NodeJS.Timeout | null = null;
+	#danceStart: number | null = null;
+	#danceTimer: NodeJS.Timeout | null = null;
+	/** Card line holding the pet's top row in the last frame; undefined when no pet is drawn. */
+	#markLine: number | undefined;
 	#snapshot: WelcomeSnapshot;
 	/** Highlighted session row while picking with the keyboard; undefined when not picking. */
 	#selected: number | undefined;
@@ -142,14 +155,72 @@ export class WelcomeComponent implements Component {
 		requestRender();
 		this.#animTimer = setInterval(() => {
 			const elapsed = performance.now() - (this.#animStart ?? 0);
-			if (elapsed >= INTRO_MS) this.#stopAnimation();
+			if (elapsed >= INTRO_MS) {
+				this.#stopAnimation();
+				this.#startDance(requestRender);
+			}
 			requestRender();
 		}, INTRO_TICK_MS);
 		this.#animTimer.unref?.();
 	}
 
+	/** True while the pet is dancing after the intro. */
+	get dancing(): boolean {
+		return this.#danceTimer !== null;
+	}
+
+	/**
+	 * Loop the working dance while the pet is on screen. Timers land on frame changes
+	 * only (five per 1.6 s loop), so an idle card costs a handful of renders per second.
+	 */
+	#startDance(requestRender: () => void): void {
+		if (!this.options.isLineVisible || this.#markLine === undefined) return;
+		this.#danceStart = performance.now();
+		const next = (): void => {
+			if (this.#markLine === undefined || !this.options.isLineVisible?.(this.#markLine)) {
+				this.#stopDance();
+				requestRender();
+				return;
+			}
+			requestRender();
+			this.#danceTimer = setTimeout(next, this.#msToNextDanceFrame());
+			this.#danceTimer.unref?.();
+		};
+		this.#danceTimer = setTimeout(next, this.#msToNextDanceFrame());
+		this.#danceTimer.unref?.();
+	}
+
+	#stopDance(): void {
+		if (this.#danceTimer !== null) clearTimeout(this.#danceTimer);
+		this.#danceTimer = null;
+		this.#danceStart = null;
+	}
+
+	#danceOffset(): number {
+		return this.#danceStart === null ? 0 : (performance.now() - this.#danceStart) % DANCE_LOOP_MS;
+	}
+
+	#msToNextDanceFrame(): number {
+		let t = this.#danceOffset();
+		for (const [, ms] of PARA_PARA_STEPS) {
+			if (t < ms) return Math.max(16, ms - t);
+			t -= ms;
+		}
+		return 16;
+	}
+
+	#dancePose(): SayknowPixelFrameName {
+		let t = this.#danceOffset();
+		for (const [frame, ms] of PARA_PARA_STEPS) {
+			if (t < ms) return frame;
+			t -= ms;
+		}
+		return "base";
+	}
+
 	dispose(): void {
 		this.#stopAnimation();
+		this.#stopDance();
 	}
 
 	#stopAnimation(): void {
@@ -247,6 +318,7 @@ export class WelcomeComponent implements Component {
 
 	render(termWidth: number): string[] {
 		this.#lineSessions = [];
+		this.#markLine = undefined;
 		const gutterWidth = this.#rightGutterWidth(termWidth);
 		const width = Math.max(0, termWidth - gutterWidth);
 		if (width < 4) return [];
@@ -326,6 +398,8 @@ export class WelcomeComponent implements Component {
 		const mark = this.#markRows();
 		const markWidth = Math.max(0, ...mark.map(row => visibleWidth(row)));
 		const withMark = cardWidth >= markWidth + MARK_GAP + WORDMARK_WIDTH;
+		// The card opens with one blank row, so the pet's top row is card line 1.
+		this.#markLine = withMark ? 1 : undefined;
 		const withWordmark = this.logoMode !== "ascii" && cardWidth >= WORDMARK_WIDTH;
 		const indent = withMark ? markWidth + MARK_GAP : 0;
 		const infoWidth = Math.max(1, cardWidth - indent);
@@ -368,10 +442,19 @@ export class WelcomeComponent implements Component {
 		const step = this.#animStart == null ? -1 : Math.floor((performance.now() - this.#animStart) / WAVE_STEP_MS);
 		if (this.logoMode === "ascii") {
 			const rows: string[] = [...MARK_ASCII];
-			if (step >= 0 && step < INTRO_POSES.length - 1 && step % 2 === 1) rows[3] = MARK_ASCII_WAVE;
+			const wave =
+				step >= 0
+					? step < INTRO_POSES.length - 1 && step % 2 === 1
+					: this.#danceStart !== null && this.#dancePose() === "danceR";
+			if (wave) rows[3] = MARK_ASCII_WAVE;
 			return rows.map(row => theme.fg("accent", row));
 		}
-		const pose = step >= 0 && step < INTRO_POSES.length ? INTRO_POSES[step]! : "base";
+		const pose =
+			step >= 0 && step < INTRO_POSES.length
+				? INTRO_POSES[step]!
+				: this.#danceStart !== null
+					? this.#dancePose()
+					: "base";
 		return renderPetHalfBlocks(pose, this.options.petSkin ?? "red", theme.getColorMode(), { scale: "compact" });
 	}
 

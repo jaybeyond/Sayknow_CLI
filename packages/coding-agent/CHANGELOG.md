@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- The pet on the launch card keeps dancing after the intro (the composer pet's working dance: sway left, right, rest, sparkle) for as long as its top row is on screen, and stops for good once the conversation pushes the card away. Frames only change five times per 1.6 s loop. `startup.skipLogoAnimation` still turns all launch motion off.
+
 ## [0.6.8] - 2026-09-29
 
 ### Fixed

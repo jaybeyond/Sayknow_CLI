@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- `TUI.isChildLineVisible(child, line)`: whether a line of a click-tracked top-level child was on screen in the last frame, so animations can stop before they would force a full redraw.
+
 ## [0.6.8] - 2026-09-29
 
 ### Changed
