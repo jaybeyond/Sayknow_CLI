@@ -558,6 +558,10 @@ export function formatTruncationMetaNotice(truncation: TruncationMeta): string {
 		} else {
 			notice = `Showing ${truncation.outputLines} of ${rangeTotal}${truncation.rangeBase === "window" ? "" : " lines"}; middle elided`;
 		}
+		// A read window cut again by the inline backstop still says where to continue.
+		if (truncation.nextOffset != null) {
+			notice += `. Use :${truncation.nextOffset} to continue`;
+		}
 		if (truncation.artifactId != null) {
 			notice += `. ${formatFullOutputReference(truncation.artifactId)}`;
 		}
@@ -808,14 +812,8 @@ async function spillLargeResultToArtifact(
 				maxLines: tailLines,
 			});
 
-	// Replace text blocks with single truncated block, keep images
-	const newContent: (TextContent | ImageContent)[] = [];
-	for (const block of result.content) {
-		if (block.type !== "text") {
-			newContent.push(block);
-		}
-	}
-	newContent.push({ type: "text", text: truncated.content });
+	// Replace the text with the truncated view, keeping images where they were.
+	const newContent = replaceTextKeepingOrder(result.content, truncated.content);
 
 	// Build truncation meta
 	const outputLines = truncated.outputLines ?? truncated.totalLines;
@@ -865,6 +863,21 @@ async function spillLargeResultToArtifact(
 	return { ...result, content: newContent, details: newDetails };
 }
 
+/** Replace the first text block with `text`, keeping every other block in its place. */
+function replaceTextKeepingOrder(content: AgentToolResult["content"], text: string): (TextContent | ImageContent)[] {
+	const out: (TextContent | ImageContent)[] = [];
+	let replaced = false;
+	for (const block of content) {
+		if (block.type !== "text") out.push(block);
+		else if (!replaced) {
+			out.push({ type: "text", text });
+			replaced = true;
+		}
+	}
+	if (!replaced) out.push({ type: "text", text });
+	return out;
+}
+
 const BODY_TRUNCATION_FOOTER_KEY = "__bodyTruncationFooter";
 
 function stripBodyOwnedTruncationFooter(text: string, details: unknown): string {
@@ -885,8 +898,9 @@ function stripBodyOwnedTruncationFooter(text: string, details: unknown): string 
  * closes those gaps: when `tools.maxInlineResultBytes` is configured (> 0), any
  * final result whose inline text exceeds the cap is force-saved to an artifact
  * (reusing an existing artifactId to avoid double-artifacting) and truncated to a
- * head+tail view that fits the cap. Disabled by default (opt-in pending
- * measurement); a 0 cap returns the result untouched.
+ * head+tail view that fits the cap. Defaults to 12 KB, chosen by the live
+ * tool-result A/B in gajae #5945; a 0 cap, or a context that cannot store an
+ * artifact, returns the result untouched.
  */
 async function enforceInlineResultBackstop(
 	result: AgentToolResult,
@@ -917,6 +931,9 @@ async function enforceInlineResultBackstop(
 	if (!artifactId && artifactCapability) {
 		artifactId = (await artifactCapability.saveArtifact(fullText, toolName)) ?? undefined;
 	}
+	// Without an artifact the elided text would be unrecoverable (e.g. standalone
+	// `skc read` has no session store), so an uncapped result beats silent loss.
+	if (!artifactId) return result;
 
 	// Budget head+tail below the cap, reserving room for the elision marker so the
 	// composed `<head>\n<marker>\n<tail>` view never exceeds the configured cap.
@@ -937,40 +954,43 @@ async function enforceInlineResultBackstop(
 		truncated = truncateTail(fullText, { maxBytes: maxInlineBytes, maxLines: tailLines });
 	}
 
-	const newContent: (TextContent | ImageContent)[] = [];
-	for (const block of result.content) {
-		if (block.type !== "text") {
-			newContent.push(block);
-		}
-	}
-	newContent.push({ type: "text", text: truncated.content });
+	const newContent = replaceTextKeepingOrder(result.content, truncated.content);
 
 	const outputLines = truncated.outputLines ?? truncated.totalLines;
 	const outputBytes = truncated.outputBytes ?? truncated.totalBytes;
+	// A result already cut by the spill step, or a read window, carries the real totals;
+	// the intermediate view this backstop cut again does not. Keep the prior totals and a
+	// read window's continuation offset.
+	const priorTruncation = existingMeta?.truncation;
+	const realTotalLines = priorTruncation?.totalLines ?? truncated.totalLines;
+	const realTotalBytes = priorTruncation?.totalBytes ?? truncated.totalBytes;
+	const nextOffsetProp = priorTruncation?.nextOffset !== undefined ? { nextOffset: priorTruncation.nextOffset } : {};
 	const truncationMeta: TruncationMeta =
 		truncated.truncatedBy === "middle"
 			? {
 					direction: "middle",
 					truncatedBy: "middle",
-					totalLines: truncated.totalLines,
-					totalBytes: truncated.totalBytes,
+					totalLines: realTotalLines,
+					totalBytes: realTotalBytes,
 					outputLines,
 					outputBytes,
 					maxBytes: maxInlineBytes,
-					elidedLines: truncated.elidedLines ?? Math.max(0, truncated.totalLines - outputLines),
-					elidedBytes: truncated.elidedBytes ?? Math.max(0, truncated.totalBytes - outputBytes),
+					elidedLines: Math.max(0, realTotalLines - outputLines),
+					elidedBytes: Math.max(0, realTotalBytes - outputBytes),
 					artifactId,
+					...nextOffsetProp,
 				}
 			: {
 					direction: "tail",
 					truncatedBy: truncated.truncatedBy ?? "bytes",
-					totalLines: truncated.totalLines,
-					totalBytes: truncated.totalBytes,
+					totalLines: realTotalLines,
+					totalBytes: realTotalBytes,
 					outputLines,
 					outputBytes,
 					maxBytes: maxInlineBytes,
-					shownRange: { start: truncated.totalLines - outputLines + 1, end: truncated.totalLines },
+					shownRange: { start: realTotalLines - outputLines + 1, end: realTotalLines },
 					artifactId,
+					...nextOffsetProp,
 				};
 
 	const newMeta: OutputMeta = { ...(existingMeta ?? {}), truncation: truncationMeta };

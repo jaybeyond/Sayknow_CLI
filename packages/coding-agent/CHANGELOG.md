@@ -4,6 +4,7 @@
 
 ### Changed
 
+- Tool results above 12 KB are now saved as an artifact and shown to the model as a head+tail view by default (`tools.maxInlineResultBytes`, was off; from upstream gajae #5966). Upstream's live A/B on four models cut tool-result text per task by 34–57% with task success unchanged (45/45). The full text stays readable through the artifact. When no artifact can be stored (standalone `skc read`), output is not cut. Totals and a read window's "Use :N to continue" hint survive a second cut, and images keep their position among content blocks.
 - Auto-compaction with default settings now triggers at 300,000 tokens at most (from upstream gajae #6060). On million-token models the reserve-based limit let a session carry close to 1M tokens into every request. A configured `compaction.thresholdTokens` or `thresholdPercent`, adaptive compaction, and a model reached by context promotion keep their own limits. The kept-recent window is bounded below the new threshold so compaction still reduces the prompt. `/context` shows the threshold the session actually uses.
 
 ### Changed

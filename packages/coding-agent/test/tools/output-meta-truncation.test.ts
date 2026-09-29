@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { truncateHead, truncateMiddleWindows } from "../../src/session/streaming-output";
-import { formatOutputNotice, outputMeta } from "../../src/tools/output-meta";
+import { formatOutputNotice, formatTruncationMetaNotice, outputMeta } from "../../src/tools/output-meta";
 
 describe("output truncation metadata plumbing", () => {
 	test("forwards noticeOwner on ordinary truncation builders", () => {
@@ -59,5 +59,19 @@ describe("output truncation metadata plumbing", () => {
 			.truncationFromText("one", { direction: "head", totalLines: 2, noticeOwner: "body" })
 			.get();
 		expect(textMeta?.truncation?.noticeOwner).toBe("body");
+	});
+
+	test("keeps the read continuation hint in a middle-direction truncation notice", () => {
+		const largeText = Array(300)
+			.fill(0)
+			.map((_, i) => `line ${i} ${"".padEnd(64, "x")}`)
+			.join("\n");
+		const windows = truncateMiddleWindows(largeText, { maxBytes: 12 * 1024, maxLines: 50 });
+		const meta = outputMeta().truncationWindows(windows, { artifactId: "art-full" }).get();
+		expect(meta?.truncation?.direction).toBe("middle");
+		const notice = formatTruncationMetaNotice({ ...meta!.truncation!, nextOffset: 304 });
+		expect(notice).toContain("elided");
+		expect(notice).toContain("Use :304 to continue");
+		expect(notice).toContain("artifact://art-full");
 	});
 });
