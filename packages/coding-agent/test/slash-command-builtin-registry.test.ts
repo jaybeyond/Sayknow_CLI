@@ -58,7 +58,12 @@ describe("builtin /pet slash command", () => {
 	it("exposes the named skin choices", () => {
 		const petCommand = BUILTIN_SLASH_COMMAND_DEFS.find(command => command.name === "pet");
 
-		expect(petCommand?.subcommands?.map(command => command.name)).toEqual(["off", "Sayo", "RedOctopus", "BlueOctopus"]);
+		expect(petCommand?.subcommands?.map(command => command.name)).toEqual([
+			"off",
+			"Sayo",
+			"RedOctopus",
+			"BlueOctopus",
+		]);
 		expect(petCommand?.inlineHint).toBe("[off|Sayo|RedOctopus|BlueOctopus]");
 	});
 
@@ -93,7 +98,12 @@ describe("builtin /pet slash command", () => {
 		expect(setPetMode.mock.calls.map(call => call[0])).toEqual(["red", "blue", "red", "red", "blue"]);
 		// The public surface stays canonical: no deprecated names in subcommands.
 		const petCommand = BUILTIN_SLASH_COMMAND_DEFS.find(command => command.name === "pet");
-		expect(petCommand?.subcommands?.map(command => command.name)).toEqual(["off", "Sayo", "RedOctopus", "BlueOctopus"]);
+		expect(petCommand?.subcommands?.map(command => command.name)).toEqual([
+			"off",
+			"Sayo",
+			"RedOctopus",
+			"BlueOctopus",
+		]);
 
 		// Unknown tokens still fall through to usage guidance.
 		expect(await executeBuiltinSlashCommand("/pet purple", { ctx, handleBackgroundCommand: () => undefined })).toBe(

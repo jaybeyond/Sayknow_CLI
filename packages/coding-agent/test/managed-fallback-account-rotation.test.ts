@@ -2,7 +2,7 @@ import { describe, expect, test, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { Agent, type AgentMessage, type AgentTool } from "@sayknow-cli/agent-core";
+import { Agent, type AgentMessage } from "@sayknow-cli/agent-core";
 import { type AssistantMessage, getBundledModel, type Message, type Model } from "@sayknow-cli/ai";
 import { createMockModel } from "@sayknow-cli/ai/providers/mock";
 import type { CredentialRankingStrategy, UsageProvider, UsageReport } from "@sayknow-cli/ai/usage";
@@ -14,11 +14,8 @@ import { Settings } from "@sayknow-cli/coding-agent/config/settings";
 import { AgentSession } from "@sayknow-cli/coding-agent/session/agent-session";
 import { AuthStorage } from "@sayknow-cli/coding-agent/session/auth-storage";
 import { SessionManager } from "@sayknow-cli/coding-agent/session/session-manager";
-import * as z from "zod/v4";
 
 const provider = "openai-codex";
-const providerAlias = "openai-codex-device";
-const selector = (model: Model) => `${model.provider}/${model.id}`;
 function identityConverter(messages: AgentMessage[]): Message[] {
 	return messages.filter(m => m.role === "user" || m.role === "assistant" || m.role === "toolResult") as Message[];
 }
@@ -51,17 +48,6 @@ function usageLimitStream(model: Model): AssistantMessageEventStream {
 	});
 	return stream;
 }
-
-const toolSchema = z.object({});
-const tool: AgentTool<typeof toolSchema, Record<string, never>> = {
-	name: "fixture_step",
-	label: "Fixture step",
-	description: "Return a synthetic tool result",
-	parameters: toolSchema,
-	async execute() {
-		return { content: [{ type: "text", text: "step complete" }], details: {} };
-	},
-};
 
 const strategy: CredentialRankingStrategy = {
 	findWindowLimits: report => ({ primary: report.limits[0] }),
