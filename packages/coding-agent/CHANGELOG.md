@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.6.8] - 2026-09-29
+
 ### Fixed
 
 - Picking a recent session on the launch card with the arrow keys needed the key held down in terminals that use the kitty keyboard protocol (Ghostty, kitty, WezTerm): the release event that follows every press was treated as "another key" and cancelled the pick. Release events are now ignored, so one tap of `↓`/`↑` moves one row and `Enter` opens the highlighted session.
