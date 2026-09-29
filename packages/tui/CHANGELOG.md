@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.6.9] - 2026-09-29
+
 ### Changed
 
 - `TUI.setPostRenderEmitter` passes `PostRenderFrameInfo` (line count, full-redraw count, terminal size) so an overlay can skip re-emitting when nothing that could move or erase it changed.

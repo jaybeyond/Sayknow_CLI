@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.6.9] - 2026-09-29
+
 ### Changed
 
 - Tool results above 12 KB are now saved as an artifact and shown to the model as a head+tail view by default (`tools.maxInlineResultBytes`, was off; from upstream gajae #5966). Upstream's live A/B on four models cut tool-result text per task by 34–57% with task success unchanged (45/45). The full text stays readable through the artifact. When no artifact can be stored (standalone `skc read`), output is not cut. Totals and a read window's "Use :N to continue" hint survive a second cut, and images keep their position among content blocks.
