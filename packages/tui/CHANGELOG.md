@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-09-29
+
 ### Added
 
 - `renderSayoPose` / `decodePng` (sayo-sprite): Sayo mascot poses and tints rendered from an embedded image; `prepareSayoPlaceholderImages` (sayo-placeholder): kitty Unicode-placeholder images for text lines.
