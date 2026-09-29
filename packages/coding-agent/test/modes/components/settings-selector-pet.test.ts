@@ -39,7 +39,7 @@ function makeComponent(
 function openPetSetting(component: SettingsSelectorComponent): void {
 	for (let attempt = 0; attempt < 100; attempt++) {
 		const rendered = stripVTControlCharacters(component.render(160).join("\n"));
-		if (rendered.includes("16x16 real-pixel sayknow living beside the composer")) {
+		if (rendered.includes("Sayo the octopus beside the composer")) {
 			component.handleInput("\n");
 			return;
 		}

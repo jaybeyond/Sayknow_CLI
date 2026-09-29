@@ -283,8 +283,8 @@ describe("launch pet skin", () => {
 		expect(resolveWelcomePetSkin("blue", "ink-octopus")).toBe("blue");
 		expect(resolveWelcomePetSkin("red", "blue-octopus")).toBe("red");
 		expect(resolveWelcomePetSkin("off", "blue-octopus")).toBe("blue");
-		expect(resolveWelcomePetSkin("off", "ink-octopus")).toBe("red");
-		expect(resolveWelcomePetSkin("off", undefined)).toBe("red");
+		expect(resolveWelcomePetSkin("off", "ink-octopus")).toBe("orange");
+		expect(resolveWelcomePetSkin("off", undefined)).toBe("orange");
 	});
 });
 
@@ -417,5 +417,36 @@ describe("pet dance after the intro", () => {
 		expect(skipped.dancing).toBe(false);
 		expect(narrow.dancing).toBe(false);
 		for (const card of [noCheck, skipped, narrow]) card.dispose();
+	});
+});
+
+describe("launch card Sayo image", () => {
+	it("draws the pet rows from the uploaded image, following the pose", async () => {
+		const seen: string[] = [];
+		const petImage = {
+			rows: 5,
+			line: (pose: string, row: number) => {
+				seen.push(pose);
+				return `[${pose}:${row}]`.padEnd(10, " ");
+			},
+		};
+		const welcome = new WelcomeComponent("1.2.3", "m", "p", SESSIONS, "unicode", {
+			skipLogoAnimation: true,
+			petImage,
+		});
+		const lines = plain(welcome.render(120));
+		for (let row = 0; row < 5; row++) expect(lines[1 + row]).toContain(`[base:${row}]`);
+		expect(lines[1]).toContain("╔═╗╔═╗");
+		expect(lines.join("\n")).not.toMatch(/[▀▄]/);
+
+		const dancing = new WelcomeComponent("1.2.3", "m", "p", SESSIONS, "unicode", {
+			petImage,
+			isLineVisible: () => true,
+		});
+		dancing.render(120);
+		dancing.playIntro(() => dancing.render(120));
+		await Bun.sleep(900);
+		expect(new Set(seen).size).toBeGreaterThan(1);
+		dancing.dispose();
 	});
 });

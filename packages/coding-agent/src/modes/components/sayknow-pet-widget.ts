@@ -275,7 +275,7 @@ export class SayknowPetWidget {
 		const cell = getCellDimensions();
 		this.#builtCellW = cell.widthPx;
 		this.#builtCellH = cell.heightPx;
-		const skin: PetSkinId = this.#mode === "off" ? "red" : this.#mode;
+		const skin: PetSkinId = this.#mode === "off" ? "orange" : this.#mode;
 		if (protocol === "kitty") {
 			this.#kittyImageId ??= allocatePetKittyImageId();
 			this.#kittyCleanupPending = true;

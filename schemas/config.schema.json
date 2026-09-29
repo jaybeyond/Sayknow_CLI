@@ -513,10 +513,11 @@
 					"type": "string",
 					"enum": [
 						"off",
+						"orange",
 						"red",
 						"blue"
 					],
-					"description": "16x16 real-pixel sayknow living beside the composer (sixel/kitty terminals)",
+					"description": "Sayo the octopus beside the composer (kitty-graphics terminals draw the full image; sixel terminals a pixel version)",
 					"default": "off"
 				}
 			},

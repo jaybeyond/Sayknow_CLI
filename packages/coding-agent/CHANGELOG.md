@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- The pet is now Sayo, the Sayknow octopus. On kitty-graphics terminals (Ghostty, kitty, WezTerm) the composer pet is the Sayo image itself, one transformed image per pose: it tilts side to side when dancing, squashes on the "yay" beat, glances, blinks with drawn eyelids, and the blue pet cries real tears. The launch card shows Sayo as an image too (Ghostty and kitty outside tmux, through kitty Unicode placeholders, so the image scrolls and redraws with the text and dancing only changes a color). Sayo in orange is the new default and a third pet (`/pet`, `pet.mode: orange`); red and blue are hue shifts of the same image. Sixel terminals, tmux launch cards and plain text keep the pixel octopus, now also in orange. Pet frames are sent zlib-compressed.
+
 ## [0.6.9] - 2026-09-29
 
 ### Changed

@@ -680,7 +680,8 @@ export const SETTINGS_SCHEMA = {
 		ui: {
 			tab: "appearance",
 			label: "Sayknow Pet",
-			description: "16x16 real-pixel sayknow living beside the composer (sixel/kitty terminals)",
+			description:
+				"Sayo the octopus beside the composer (kitty-graphics terminals draw the full image; sixel terminals a pixel version)",
 			options: [
 				{ value: "off", label: "Off", description: "No pet" },
 				...PET_SKIN_IDS.map(id => ({

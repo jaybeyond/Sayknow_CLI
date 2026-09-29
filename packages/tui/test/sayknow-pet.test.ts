@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import { inflateSync } from "node:zlib";
 import { __sayknowPetTestHooks, buildSayknowPixelFrames, encodeGridSixel, renderPetHalfBlocks } from "@sayknow-cli/tui";
 
 describe("sayknow pixel frames", () => {
@@ -48,14 +49,28 @@ describe("sayknow pixel frames", () => {
 		expect(flex[7]).toBe("KRRGVRRRRRRVGRRK");
 	});
 
-	it("encodes kitty frames as chunked raw-RGBA transmits with delete-first", () => {
+	it("encodes kitty frames as zlib raw-RGBA transmits with delete-first, drawing Sayo", () => {
 		const built = buildSayknowPixelFrames({ protocol: "kitty", cellWidthPx: 9, cellHeightPx: 18, targetRows: 2 });
 		const frame = built.frames.base;
 		expect(frame.startsWith("\x1b_Ga=d,d=I,i=")).toBe(true);
-		expect(frame).toContain("a=T,f=32,s=36,v=36");
-		// 36x36 RGBA exceeds one kitty payload chunk.
-		expect(frame).toContain(",m=1;");
-		expect(frame).toContain("\x1b_Gm=0;");
+		expect(frame).toContain("a=T,f=32,o=z,s=36,v=36");
+		const payload = [...frame.matchAll(/\x1b_G[^;\x1b]*;([^\x1b]*)\x1b\\/g)].map(match => match[1]).join("");
+		const rgba = inflateSync(Buffer.from(payload, "base64"));
+		expect(rgba.length).toBe(36 * 36 * 4);
+		// Mostly Sayo orange: red well above blue among opaque pixels.
+		let opaque = 0;
+		let orange = 0;
+		for (let i = 0; i < rgba.length; i += 4) {
+			if (rgba[i + 3]! < 200) continue;
+			opaque += 1;
+			if (rgba[i]! > 200 && rgba[i + 2]! < 90) orange += 1;
+		}
+		expect(opaque).toBeGreaterThan(36 * 36 * 0.3);
+		expect(orange / opaque).toBeGreaterThan(0.5);
+		// Poses differ, colors differ by skin.
+		expect(built.frames.danceL).not.toBe(frame);
+		const blue = buildSayknowPixelFrames({ protocol: "kitty", cellWidthPx: 9, cellHeightPx: 18, skin: "blue" });
+		expect(blue.frames.base).not.toBe(frame);
 	});
 
 	it("horizontally pads the kitty image so a non-2:1 cell ratio does not stretch the sprite", () => {

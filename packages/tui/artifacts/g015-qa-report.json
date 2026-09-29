@@ -32,8 +32,8 @@
 					"differentialGuardVisibleWidthCalls": 0
 				},
 				"writes": [
-					"[2026-09-29T05:14:04.301Z] fullRender: terminal width changed (-1 -> 20) (prev=0, new=2, height=4)\n",
-					"[2026-09-29T05:14:04.329Z] fullRender: terminal width changed (-1 -> 20) (prev=0, new=2, height=4)\n"
+					"[2026-09-29T11:51:44.829Z] fullRender: terminal width changed (-1 -> 20) (prev=0, new=2, height=4)\n",
+					"[2026-09-29T11:51:44.856Z] fullRender: terminal width changed (-1 -> 20) (prev=0, new=2, height=4)\n"
 				]
 			}
 		},
@@ -246,8 +246,8 @@
 					"differentialGuardVisibleWidthCalls": 0
 				},
 				"writes": [
-					"[2026-09-29T05:14:04.301Z] fullRender: terminal width changed (-1 -> 20) (prev=0, new=2, height=4)\n",
-					"[2026-09-29T05:14:04.329Z] fullRender: terminal width changed (-1 -> 20) (prev=0, new=2, height=4)\n"
+					"[2026-09-29T11:51:44.829Z] fullRender: terminal width changed (-1 -> 20) (prev=0, new=2, height=4)\n",
+					"[2026-09-29T11:51:44.856Z] fullRender: terminal width changed (-1 -> 20) (prev=0, new=2, height=4)\n"
 				]
 			}
 		},

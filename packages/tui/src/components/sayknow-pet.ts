@@ -1,8 +1,10 @@
 /**
  * ┌─ SAYKNOW PET SPRITE SPEC ────────────────────────────────────────────────┐
- * The pet is a 16×16 pixel octopus drawn beside the composer. Everything here
- * is data: no PNGs, no assets — each frame is 16 strings of 16 chars, encoded
- * to a sixel or kitty escape at runtime. Author a new frame by drawing a grid.
+ * The pet is Sayo, the Sayknow octopus, beside the composer. Kitty-graphics terminals
+ * (Ghostty, kitty, WezTerm) draw the Sayo image itself, one transformed image per pose
+ * (sayo-sprite.ts). Sixel terminals and the half-block text fallback draw the 16×16
+ * pixel octopus below instead: each frame is 16 strings of 16 chars, encoded at runtime.
+ * A new pose needs both: a grid here and a transform in sayo-sprite.ts POSES.
  *
  * GRID RULES
  * - Exactly 16 rows × 16 columns. Only PALETTE keys below are valid chars.
@@ -42,10 +44,13 @@
  * spread (see BLUE_PALETTE); add frames only for poses the catalog lacks.
  * └────────────────────────────────────────────────────────────────────────┘
  */
+import { deflateSync } from "node:zlib";
+import { renderSayoPose } from "./sayo-sprite";
+
 type Rgb = readonly [number, number, number];
 
 export type Palette = Record<string, Rgb | null>;
-export const PET_SKIN_IDS = ["red", "blue"] as const;
+export const PET_SKIN_IDS = ["orange", "red", "blue"] as const;
 export type PetSkinId = (typeof PET_SKIN_IDS)[number];
 /** Every pet mode: "off" plus each skin id, in menu order. */
 export const PET_MODE_IDS = ["off", ...PET_SKIN_IDS] as const;
@@ -68,6 +73,16 @@ const RED_PALETTE: Palette = {
 	h: [169, 117, 47], // reserved
 	A: [196, 60, 30], // reserved
 	w: [200, 230, 255], // tear (BlueOcto sob)
+};
+// Sayo's orange for the dot fallback (sixel and text terminals); kitty terminals draw
+// the Sayo image itself (sayo-sprite.ts).
+const ORANGE_PALETTE: Palette = {
+	...RED_PALETTE,
+	K: [120, 40, 10], // outline
+	R: [255, 122, 30], // mantle body
+	r: [255, 176, 100], // highlight
+	b: [232, 70, 40], // underside
+	A: [214, 80, 20], // reserved
 };
 // BlueOcto recolors the octopus for the blue-octopus theme: ocean outline, a bright
 // mantle, azure highlight and foam tears. Reserved hat keys are shared but unused.
@@ -194,6 +209,16 @@ export interface PetSkin {
 
 /** Skin registry — the single source for palettes, behavior and selector/command copy. */
 export const PET_SKINS: Record<PetSkinId, PetSkin> = {
+	orange: {
+		id: "orange",
+		label: "Sayo",
+		description: "Sayo, the orange Sayknow octopus.",
+		palette: ORANGE_PALETTE,
+		burst: {
+			intro: PARA_PARA_STEPS,
+			tail: { frames: ["flex", "base"], stepMs: 220, ms: 880 },
+		},
+	},
 	red: {
 		id: "red",
 		label: "RedOctopus",
@@ -306,6 +331,35 @@ export function encodeGridSixel(
 	return `${out}\x1b\\`;
 }
 
+/**
+ * Kitty escape for a straight-RGBA canvas already laid out to the placement box: delete
+ * the previous image with this id, then transmit and display the new one in `cols`×`rows`
+ * cells. `Y=` drops it by sub-cell pixels; `C=1` keeps the cursor where it was.
+ */
+export function encodeRgbaKitty(
+	rgba: Uint8Array,
+	w: number,
+	h: number,
+	imageId: number,
+	cols: number,
+	rows: number,
+	cellYOffsetPx = 0,
+): string {
+	// zlib-compressed (`o=z`): a mostly transparent sprite shrinks several-fold.
+	const data = deflateSync(rgba).toString("base64");
+	const CHUNK = 4000;
+	const yParam = cellYOffsetPx > 0 ? `,Y=${Math.round(cellYOffsetPx)}` : "";
+	let out = `\x1b_Ga=d,d=I,i=${imageId},q=2\x1b\\`;
+	for (let off = 0, first = true; off < data.length; off += CHUNK, first = false) {
+		const chunk = data.slice(off, off + CHUNK);
+		const more = off + CHUNK < data.length ? 1 : 0;
+		out += first
+			? `\x1b_Ga=T,f=32,o=z,s=${w},v=${h},c=${cols},r=${rows},i=${imageId},q=2,C=1${yParam},m=${more};${chunk}\x1b\\`
+			: `\x1b_Gm=${more};${chunk}\x1b\\`;
+	}
+	return out;
+}
+
 /** Encode a bottom-aligned grid as kitty raw RGBA at `scale`. */
 export function encodeGridKitty(
 	grid: string[],
@@ -345,21 +399,36 @@ export function encodeGridKitty(
 			rgba[o + 3] = 255;
 		}
 	}
-	const data = Buffer.from(rgba).toString("base64");
-	const CHUNK = 4000;
-	// `Y=` offsets the sprite down by sub-cell pixels within the first cell — the
-	// kitty analogue of the sixel top-padding drop. `C=1` keeps the placement
-	// cursor-neutral so the overlay never nudges the composer's real cursor.
-	const yParam = cellYOffsetPx > 0 ? `,Y=${Math.round(cellYOffsetPx)}` : "";
-	let out = `\x1b_Ga=d,d=I,i=${imageId},q=2\x1b\\`;
-	for (let off = 0, first = true; off < data.length; off += CHUNK, first = false) {
-		const chunk = data.slice(off, off + CHUNK);
-		const more = off + CHUNK < data.length ? 1 : 0;
-		out += first
-			? `\x1b_Ga=T,f=32,s=${w},v=${h},c=${cols},r=${rows},i=${imageId},q=2,C=1${yParam},m=${more};${chunk}\x1b\\`
-			: `\x1b_Gm=${more};${chunk}\x1b\\`;
+	return encodeRgbaKitty(rgba, w, h, imageId, cols, rows, cellYOffsetPx);
+}
+
+/**
+ * Sayo for kitty: the pose rendered at the sprite size and placed in the padded box the
+ * grid frames use, so placement, the sub-cell drop and cleanup are unchanged.
+ */
+function encodeSayoKitty(
+	pose: SayknowPixelFrameName,
+	skin: PetSkinId,
+	spritePx: number,
+	imageId: number,
+	cols: number,
+	rows: number,
+	topPaddingPx: number,
+	cellYOffsetPx: number,
+	leftPaddingPx: number,
+	rightPaddingPx: number,
+): string {
+	const sprite = renderSayoPose(pose, skin, spritePx);
+	const w = spritePx + leftPaddingPx + rightPaddingPx;
+	const h = spritePx + topPaddingPx;
+	const rgba = new Uint8Array(w * h * 4);
+	for (let y = 0; y < spritePx; y++) {
+		rgba.set(
+			sprite.data.subarray(y * spritePx * 4, (y + 1) * spritePx * 4),
+			((y + topPaddingPx) * w + leftPaddingPx) * 4,
+		);
 	}
-	return out;
+	return encodeRgbaKitty(rgba, w, h, imageId, cols, rows, cellYOffsetPx);
 }
 
 export interface SayknowPixelFrames {
@@ -390,7 +459,7 @@ export function buildSayknowPixelFrames(options: {
 	/** Native sub-cell `Y=` pixel offset that drops the kitty sprite within its first cell. */
 	kittyCellYOffsetPx?: number;
 	kittyImageId?: number;
-	/** Color skin for the sprite palette (default "red"). */
+	/** Color skin (default "orange", Sayo). */
 	skin?: PetSkinId;
 }): SayknowPixelFrames {
 	const targetRows = options.targetRows ?? 2;
@@ -411,15 +480,16 @@ export function buildSayknowPixelFrames(options: {
 	const leftPaddingPx = Math.floor(horizontalPaddingPx / 2);
 	const rightPaddingPx = horizontalPaddingPx - leftPaddingPx;
 	const imageId = options.kittyImageId ?? 0xc0de;
-	const palette = PET_SKINS[options.skin ?? "red"].palette;
+	const palette = PET_SKINS[options.skin ?? "orange"].palette;
 	const frames = {} as Record<SayknowPixelFrameName, string>;
 	for (const name of Object.keys(PIXEL_GRIDS) as SayknowPixelFrameName[]) {
 		frames[name] =
 			options.protocol === "sixel"
 				? encodeGridSixel(PIXEL_GRIDS[name], scale, topPaddingPx, palette)
-				: encodeGridKitty(
-						PIXEL_GRIDS[name],
-						scale,
+				: encodeSayoKitty(
+						name,
+						options.skin ?? "orange",
+						widthPx,
 						imageId,
 						columns,
 						rows,
@@ -427,7 +497,6 @@ export function buildSayknowPixelFrames(options: {
 						options.kittyCellYOffsetPx ?? 0,
 						leftPaddingPx,
 						rightPaddingPx,
-						palette,
 					);
 	}
 
@@ -485,7 +554,7 @@ const COMPACT_PET_ROWS = 5;
  */
 export function renderPetHalfBlocks(
 	frame: SayknowPixelFrameName,
-	skin: PetSkinId = "red",
+	skin: PetSkinId = "orange",
 	colorMode: "truecolor" | "256color" = "truecolor",
 	options: { scale?: "full" | "compact" } = {},
 ): string[] {

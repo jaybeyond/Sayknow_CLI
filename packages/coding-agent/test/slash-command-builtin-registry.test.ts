@@ -58,8 +58,8 @@ describe("builtin /pet slash command", () => {
 	it("exposes the named skin choices", () => {
 		const petCommand = BUILTIN_SLASH_COMMAND_DEFS.find(command => command.name === "pet");
 
-		expect(petCommand?.subcommands?.map(command => command.name)).toEqual(["off", "RedOctopus", "BlueOctopus"]);
-		expect(petCommand?.inlineHint).toBe("[off|RedOctopus|BlueOctopus]");
+		expect(petCommand?.subcommands?.map(command => command.name)).toEqual(["off", "Sayo", "RedOctopus", "BlueOctopus"]);
+		expect(petCommand?.inlineHint).toBe("[off|Sayo|RedOctopus|BlueOctopus]");
 	});
 
 	it("maps named skin commands to their internal modes", async () => {
@@ -70,10 +70,11 @@ describe("builtin /pet slash command", () => {
 		const ctx = { setPetMode, showStatus, editor: { setText } } as unknown as InteractiveModeContext;
 		const runtime = { ctx, handleBackgroundCommand: () => undefined };
 
+		expect(await executeBuiltinSlashCommand("/pet sayo", runtime)).toBe(true);
 		expect(await executeBuiltinSlashCommand("/pet redoctopus", runtime)).toBe(true);
 		expect(await executeBuiltinSlashCommand("/pet BlueOctopus", runtime)).toBe(true);
 
-		expect(setPetMode.mock.calls.map(call => call[0])).toEqual(["red", "blue"]);
+		expect(setPetMode.mock.calls.map(call => call[0])).toEqual(["orange", "red", "blue"]);
 	});
 
 	it("keeps deprecated on/red/blue and legacy Sayknow names accepted while display stays canonical", async () => {
@@ -92,13 +93,13 @@ describe("builtin /pet slash command", () => {
 		expect(setPetMode.mock.calls.map(call => call[0])).toEqual(["red", "blue", "red", "red", "blue"]);
 		// The public surface stays canonical: no deprecated names in subcommands.
 		const petCommand = BUILTIN_SLASH_COMMAND_DEFS.find(command => command.name === "pet");
-		expect(petCommand?.subcommands?.map(command => command.name)).toEqual(["off", "RedOctopus", "BlueOctopus"]);
+		expect(petCommand?.subcommands?.map(command => command.name)).toEqual(["off", "Sayo", "RedOctopus", "BlueOctopus"]);
 
 		// Unknown tokens still fall through to usage guidance.
 		expect(await executeBuiltinSlashCommand("/pet purple", { ctx, handleBackgroundCommand: () => undefined })).toBe(
 			true,
 		);
-		expect(showStatus).toHaveBeenLastCalledWith("Usage: /pet [off|RedOctopus|BlueOctopus]", { dim: true });
+		expect(showStatus).toHaveBeenLastCalledWith("Usage: /pet [off|Sayo|RedOctopus|BlueOctopus]", { dim: true });
 		expect(setPetMode).toHaveBeenCalledTimes(5);
 	});
 

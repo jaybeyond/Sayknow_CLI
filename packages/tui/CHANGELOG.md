@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Added
+
+- `renderSayoPose` / `decodePng` (sayo-sprite): Sayo mascot poses and tints rendered from an embedded image; `prepareSayoPlaceholderImages` (sayo-placeholder): kitty Unicode-placeholder images for text lines.
+- Pet skin `orange` (Sayo), now first in `PET_SKIN_IDS`; kitty pet frames draw the Sayo image and are sent with `o=z`.
+
 ## [0.6.9] - 2026-09-29
 
 ### Changed

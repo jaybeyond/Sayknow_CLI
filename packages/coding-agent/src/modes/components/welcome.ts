@@ -52,6 +52,11 @@ export interface WelcomeComponentOptions {
 	continueKey?: string;
 	/** Which Sayknow pet stands on the card (default red). */
 	petSkin?: PetSkinId;
+	/**
+	 * Sayo as an image in the card's text (kitty Unicode placeholders, already uploaded):
+	 * the rows of each pose. Without it the card draws the pixel octopus in half blocks.
+	 */
+	petImage?: { rows: number; line(pose: SayknowPixelFrameName, row: number): string };
 	/** Called when a session row is opened by click or Enter. */
 	onOpenSession?: (session: RecentSession) => void;
 	/**
@@ -455,7 +460,9 @@ export class WelcomeComponent implements Component {
 				: this.#danceStart !== null
 					? this.#dancePose()
 					: "base";
-		return renderPetHalfBlocks(pose, this.options.petSkin ?? "red", theme.getColorMode(), { scale: "compact" });
+		const image = this.options.petImage;
+		if (image) return Array.from({ length: image.rows }, (_, row) => image.line(pose, row));
+		return renderPetHalfBlocks(pose, this.options.petSkin ?? "orange", theme.getColorMode(), { scale: "compact" });
 	}
 
 	/** One-line title for layouts without room for the wordmark. */
