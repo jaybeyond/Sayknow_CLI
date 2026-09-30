@@ -757,154 +757,1092 @@ function isManagedPlainRecord(value: unknown): value is Record<string, unknown> 
 	return value !== null && typeof value === "object" && !Array.isArray(value) && !nodeUtilTypes.isProxy(value);
 }
 
-/**
- * Holds managed-attempt assistant output above the public event stream. A
- * cancelled provider attempt is therefore unobservable to sessions and their
- * side-effect consumers. Non-managed streams bypass this object entirely.
+/** An immutable ownership graph. Keys/tags are explicitly canonical; values are
+ * independently owned unless the ledger deliberately shares the same node ID.
+ * Atomic nodes preserve structured-clone graph topology (including cycles).
  */
-class ManagedAttemptTransaction {
-	#batch: Array<
-		| { type: "event"; event: AgentEvent }
-		| { type: "assistant_event"; message: AssistantMessage; event: AssistantMessageEvent }
-	> = [];
-	#stagedEventCount = 0;
-	#stagedBytes = 0;
+interface ManagedOwnedString {
+	kind: "string";
+	retainedRefs: number;
+	id: number;
+	value: string;
+}
+type ManagedValue =
+	| ManagedOwnedString
+	| ({ retainedRefs: number } & (
+			| { kind: "scalar"; id: number; value: undefined | null | boolean | number | bigint }
+			| { kind: "record" | "array"; id: number; fields: ManagedField[]; length: number; nullPrototype: boolean }
+			| { kind: "atomic"; id: number; value: object }
+	  ));
+interface ManagedField {
+	key: ManagedOwnedString;
+	value: ManagedValue;
+}
+interface ManagedPath {
+	id: number;
+	keys: Array<ManagedOwnedString | number>;
+}
+type ManagedPatch =
+	| { kind: "replace"; path: ManagedPath; value: ManagedValue }
+	| { kind: "delete"; path: ManagedPath }
+	| { kind: "truncate"; path: ManagedPath; length: number }
+	| { kind: "append"; path: ManagedPath; id: number; units: Uint16Array };
+interface ManagedVersion {
+	id: number;
+	opStart: number;
+	opCount: number;
+}
+interface ManagedLedgerEntry {
+	kind: "event" | "callback";
+	type: ManagedOwnedString;
+	assistantType?: ManagedOwnedString;
+	shape: "plain" | "message" | "update" | "callback" | "messages";
+	nullPrototype: boolean;
+	assistantNullPrototype: boolean;
+	envelope: ManagedField[];
+	assistantEnvelope: ManagedField[];
+	refs: number[];
+	messageRef?: number;
+	partialRef?: number;
+	messageSlots?: ManagedValue;
+	opaque?: ManagedValue;
+	order: ManagedPath;
+}
+interface ManagedOwnedInventory {
+	totalBytes: number;
+	structuralBytes: number;
+	payloadBytes: number;
+	peakBytes: number;
+	recordCount: number;
+	strings: Array<{ ownerId: number; codeUnits: number; bytes: number }>;
+	buffers: Array<{ ownerId: number; kind: "suffix" | "typed"; bytes: number }>;
+}
+
+interface ManagedOpaqueEnvelope {
+	envelope: Record<string, unknown>;
+	assistantEnvelope: Record<string, unknown>;
+	messageSlots?: Array<number | AgentMessage>;
+}
+
+// Only opaque fields that share an object graph need a grouped owner. Ordinary
+// scalar/delta envelopes retain the compact representation and its admission bound.
+function managedFieldsShareGraph(fields: Array<[string, unknown]>): boolean {
+	const owners = new Map<object, number>();
+	let shared = false;
+	let budget = MANAGED_SNAPSHOT_MAX_NODES;
+	const visit = (value: unknown, owner: number, depth: number): void => {
+		if (--budget < 0 || depth > 512) throw new ManagedAttemptSnapshotError();
+		if (value === null || typeof value !== "object") return;
+		const prior = owners.get(value);
+		if (prior !== undefined) {
+			if (prior !== owner) shared = true;
+			return;
+		}
+		owners.set(value, owner);
+		for (const [, child] of managedAtomicParts(value).fields) visit(child, owner, depth + 1);
+	};
+	for (let owner = 0; owner < fields.length; owner++) visit(fields[owner]![1], owner, 0);
+	return shared;
+}
+
+function managedOwnFields(value: object): Array<[string, unknown]> {
+	return Object.keys(value).map(key => {
+		const descriptor = Object.getOwnPropertyDescriptor(value, key);
+		if (!descriptor || !("value" in descriptor)) throw new ManagedAttemptSnapshotError();
+		return [key, descriptor.value];
+	});
+}
+
+// Raw atomic nodes are already detached by normalization. This walk is shared
+// by equality and accounting, so an unsupported intrinsic cannot be accepted
+// with an uncharged backing store. SharedArrayBuffer is intentionally rejected:
+// structuredClone does not detach its backing memory from the provider.
+function managedAtomicParts(value: object): {
+	tag: string;
+	fields: Array<[string, unknown]>;
+	buffer?: ArrayBuffer;
+	opaqueBytes?: number;
+} {
+	if (nodeUtilTypes.isProxy(value) || nodeUtilTypes.isSharedArrayBuffer(value))
+		throw new ManagedAttemptSnapshotError();
+	if (nodeUtilTypes.isArrayBuffer(value)) return { tag: "ArrayBuffer", fields: [], buffer: value as ArrayBuffer };
+	if (ArrayBuffer.isView(value)) {
+		return {
+			tag: Object.getPrototypeOf(value).constructor.name,
+			fields: [
+				["byteOffset", value.byteOffset],
+				["byteLength", value.byteLength],
+				["buffer", value.buffer],
+			],
+		};
+	}
+	if (nodeUtilTypes.isDate(value)) return { tag: "Date", fields: [["time", Date.prototype.getTime.call(value)]] };
+	if (nodeUtilTypes.isRegExp(value)) {
+		const regexp = value as RegExp;
+		return {
+			tag: "RegExp",
+			fields: [
+				["source", regexp.source],
+				["flags", regexp.flags],
+				["lastIndex", regexp.lastIndex],
+			],
+		};
+	}
+	if (nodeUtilTypes.isMap(value)) {
+		const fields: Array<[string, unknown]> = [];
+		for (const [key, item] of Map.prototype.entries.call(value) as Iterable<[unknown, unknown]>) {
+			fields.push(["key", key], ["value", item]);
+		}
+		return { tag: "Map", fields };
+	}
+	if (nodeUtilTypes.isSet(value)) {
+		return {
+			tag: "Set",
+			fields: Array.from(Set.prototype.values.call(value) as Iterable<unknown>, item => ["value", item]),
+		};
+	}
+	if (nodeUtilTypes.isNativeError(value)) {
+		return {
+			tag: Object.getPrototypeOf(value).constructor.name,
+			fields: Object.getOwnPropertyNames(value).map(key => [
+				key,
+				Object.getOwnPropertyDescriptor(value, key)!.value,
+			]),
+		};
+	}
+	if (nodeUtilTypes.isBoxedPrimitive(value)) {
+		const primitive = Object.getPrototypeOf(value).valueOf.call(value) as unknown;
+		return { tag: Object.getPrototypeOf(value).constructor.name, fields: [["value", primitive]] };
+	}
+	const prototype = Object.getPrototypeOf(value);
+	if (typeof Blob !== "undefined" && value instanceof Blob) {
+		const size = Object.getOwnPropertyDescriptor(Blob.prototype, "size")!.get!.call(value) as number;
+		const type = Object.getOwnPropertyDescriptor(Blob.prototype, "type")!.get!.call(value) as string;
+		// Blob backing data is immutable. Charge its full logical ownership and
+		// always replace it rather than guessing byte equality synchronously.
+		return { tag: "Blob", fields: [["type", type]], opaqueBytes: size };
+	}
+	if (Array.isArray(value)) return { tag: "Array", fields: [["length", value.length], ...managedOwnFields(value)] };
+	if (prototype === null || prototype === Object.prototype)
+		return { tag: prototype === null ? "NullRecord" : "Record", fields: managedOwnFields(value) };
+	throw new ManagedAttemptSnapshotError();
+}
+
+function managedGraphEqual(left: unknown, right: unknown): boolean {
+	const forward = new Map<object, object>();
+	const reverse = new Map<object, object>();
+	let budget = MANAGED_SNAPSHOT_MAX_NODES;
+	const equal = (a: unknown, b: unknown, depth: number): boolean => {
+		if (--budget < 0 || depth > 512) throw new ManagedAttemptSnapshotError();
+		if (a === null || b === null || typeof a !== "object" || typeof b !== "object") return Object.is(a, b);
+		if (forward.has(a)) return forward.get(a) === b;
+		if (reverse.has(b)) return false;
+		forward.set(a, b);
+		reverse.set(b, a);
+		const ap = managedAtomicParts(a);
+		const bp = managedAtomicParts(b);
+		if (ap.tag !== bp.tag || ap.fields.length !== bp.fields.length || !!ap.buffer !== !!bp.buffer) return false;
+		if (ap.opaqueBytes !== undefined || bp.opaqueBytes !== undefined) return false;
+		if (ap.buffer && bp.buffer) {
+			if (ap.buffer.byteLength !== bp.buffer.byteLength) return false;
+			const aa = new Uint8Array(ap.buffer);
+			const bb = new Uint8Array(bp.buffer);
+			for (let i = 0; i < aa.length; i++) if (aa[i] !== bb[i]) return false;
+		}
+		return ap.fields.every(
+			([key, item], index) => key === bp.fields[index]![0] && equal(item, bp.fields[index]![1], depth + 1),
+		);
+	};
+	return equal(left, right, 0);
+}
+
+function managedValueEqual(left: ManagedValue, right: ManagedValue): boolean {
+	if (left === right) return true;
+	if (left.kind !== right.kind) return false;
+	if (left.kind === "string" && right.kind === "string") return left.value === right.value;
+	if (left.kind === "scalar" && right.kind === "scalar") return Object.is(left.value, right.value);
+	if (left.kind === "atomic" && right.kind === "atomic") return managedGraphEqual(left.value, right.value);
+	if ((left.kind === "record" || left.kind === "array") && (right.kind === "record" || right.kind === "array")) {
+		return (
+			left.length === right.length &&
+			left.nullPrototype === right.nullPrototype &&
+			left.fields.length === right.fields.length &&
+			left.fields.every(
+				(field, index) =>
+					field.key.value === right.fields[index]!.key.value &&
+					managedValueEqual(field.value, right.fields[index]!.value),
+			)
+		);
+	}
+	return false;
+}
+
+function managedDecode(value: ManagedValue): unknown {
+	if (value.kind === "string" || value.kind === "scalar") return value.value;
+	if (value.kind === "atomic") return managedReplayClone(value.value);
+	const output: Record<string, unknown> | unknown[] =
+		value.kind === "array" ? new Array(value.length) : value.nullPrototype ? Object.create(null) : {};
+	for (const field of value.fields)
+		Object.defineProperty(output, field.key.value, {
+			value: managedDecode(field.value),
+			enumerable: true,
+			writable: true,
+			configurable: true,
+		});
+	return output;
+}
+
+// structuredClone detaches intrinsic graphs but intentionally erases null
+// record prototypes. Replay must retain the sanitizer's normalized data shape.
+function managedReplayClone<T>(value: T): T {
+	const clone = structuredClone(value);
+	const seen = new Map<object, object>();
+	let budget = MANAGED_SNAPSHOT_MAX_NODES;
+	const restore = (source: unknown, target: unknown, depth: number): void => {
+		if (--budget < 0 || depth > 512) throw new ManagedAttemptSnapshotError();
+		if (source === null || typeof source !== "object") {
+			if (!Object.is(source, target)) throw new ManagedAttemptSnapshotError();
+			return;
+		}
+		if (target === null || typeof target !== "object") throw new ManagedAttemptSnapshotError();
+		if (seen.has(source)) {
+			if (seen.get(source) !== target) throw new ManagedAttemptSnapshotError();
+			return;
+		}
+		seen.set(source, target);
+		if (Object.getPrototypeOf(source) === null) Object.setPrototypeOf(target, null);
+		const before = managedAtomicParts(source);
+		const after = managedAtomicParts(target);
+		if (before.tag !== after.tag || before.fields.length !== after.fields.length)
+			throw new ManagedAttemptSnapshotError();
+		for (let index = 0; index < before.fields.length; index++) {
+			const [key, child] = before.fields[index]!;
+			if (key !== after.fields[index]![0]) throw new ManagedAttemptSnapshotError();
+			restore(child, after.fields[index]![1], depth + 1);
+		}
+	};
+	restore(value, clone, 0);
+	return clone;
+}
+
+function managedReplaySuffix(units: Uint16Array): string {
+	let result = "";
+	for (let start = 0; start < units.length; start += 8_192) {
+		// Only the bounded argument array is transient; the retained suffix owns
+		// its backing buffer, not a view/substr of a cumulative provider string.
+		result += String.fromCharCode(...units.subarray(start, Math.min(start + 8_192, units.length)));
+	}
+	return result;
+}
+
+class ManagedAttemptObserverError extends Error {
+	constructor(cause: unknown) {
+		super(
+			`Managed fallback committed output observer failed: ${cause instanceof Error ? cause.message : "observer exception"}`,
+			{ cause },
+		);
+		this.name = "ManagedAttemptObserverError";
+	}
+}
+
+/**
+ * @internal Unsupported transaction/test seam, not a public config or metrics API.
+ * Inventory measures retained provisional ownership, never process RSS or
+ * postcommit EventStream/consumer snapshots.
+ */
+export class ManagedAttemptTransaction {
+	#entries: Array<ManagedLedgerEntry | undefined> = [];
+	#versions: Array<ManagedVersion | undefined> = [];
+	#ops: Array<ManagedPatch | undefined> = [];
+	#keys = new Map<string, ManagedOwnedString>();
+	#paths: ManagedPath[] = [];
+	#nextOwnerId = 0;
+	#latest: ManagedValue | undefined;
+	#peakBytes = 0;
+	#retainedBytes = 64 * 5;
 	#discarded = false;
 	#committed = false;
+	#publishedAssistant: AssistantMessage | undefined;
+	#stream: EventStream<AgentEvent, AgentMessage[]>;
+	#observer: ((message: AssistantMessage, event: AssistantMessageEvent) => void) | undefined;
+	#model: AgentLoopConfig["model"];
 
 	constructor(
-		private readonly stream: EventStream<AgentEvent, AgentMessage[]>,
-		private readonly onAssistantMessageEvent:
-			| ((message: AssistantMessage, event: AssistantMessageEvent) => void)
-			| undefined,
-		private readonly model: AgentLoopConfig["model"],
-	) {}
+		stream: EventStream<AgentEvent, AgentMessage[]>,
+		observer: ((message: AssistantMessage, event: AssistantMessageEvent) => void) | undefined,
+		model: AgentLoopConfig["model"],
+	) {
+		this.#stream = stream;
+		this.#observer = observer;
+		this.#model = model;
+	}
+
+	#string(value: string): ManagedOwnedString {
+		// Construct by code units instead of retaining a provider substring.
+		const units = new Uint16Array(value.length);
+		for (let index = 0; index < value.length; index++) units[index] = value.charCodeAt(index);
+		return { kind: "string", id: ++this.#nextOwnerId, retainedRefs: 0, value: managedReplaySuffix(units) };
+	}
+
+	#key(value: string): ManagedOwnedString {
+		let key = this.#keys.get(value);
+		if (!key) {
+			key = this.#string(value);
+			this.#keys.set(key.value, key);
+			this.#retainedBytes += 32;
+			this.#retain(key);
+		}
+		return key;
+	}
+
+	#encode(value: unknown): ManagedValue {
+		// Shared/cyclic graphs are atomic rather than tree patches: splitting them
+		// into independent replacements would lose aliases and cycle backrefs.
+		const seen = new Set<object>();
+		let shared = false;
+		let budget = MANAGED_SNAPSHOT_MAX_NODES;
+		const inspect = (item: unknown, depth: number): void => {
+			if (--budget < 0 || depth > 512) throw new ManagedAttemptSnapshotError();
+			if (item === null || typeof item !== "object") return;
+			if (seen.has(item)) {
+				shared = true;
+				return;
+			}
+			seen.add(item);
+			for (const [, child] of managedAtomicParts(item).fields) inspect(child, depth + 1);
+		};
+		inspect(value, 0);
+		const encode = (item: unknown): ManagedValue => {
+			if (typeof item === "string") return this.#string(item);
+			if (
+				item === null ||
+				item === undefined ||
+				typeof item === "boolean" ||
+				typeof item === "number" ||
+				typeof item === "bigint"
+			)
+				return { kind: "scalar", id: ++this.#nextOwnerId, retainedRefs: 0, value: item };
+			if (typeof item !== "object") throw new ManagedAttemptSnapshotError();
+			const prototype = Object.getPrototypeOf(item);
+			if (!Array.isArray(item) && prototype !== null && prototype !== Object.prototype)
+				return { kind: "atomic", id: ++this.#nextOwnerId, retainedRefs: 0, value: managedReplayClone(item) };
+			return {
+				kind: Array.isArray(item) ? "array" : "record",
+				id: ++this.#nextOwnerId,
+				retainedRefs: 0,
+				fields: managedOwnFields(item).map(([key, child]) => ({ key: this.#key(key), value: encode(child) })),
+				length: Array.isArray(item) ? item.length : 0,
+				nullPrototype: prototype === null,
+			};
+		};
+		return shared && value !== null && typeof value === "object"
+			? { kind: "atomic", id: ++this.#nextOwnerId, retainedRefs: 0, value: managedReplayClone(value) }
+			: encode(value);
+	}
+
+	#path(keys: Array<ManagedOwnedString | number>): ManagedPath {
+		const previous = this.#paths.find(
+			path =>
+				path.keys.length === keys.length &&
+				path.keys.every((key, index) =>
+					typeof key === "number" ? key === keys[index] : typeof keys[index] !== "number" && key === keys[index],
+				),
+		);
+		if (previous) return previous;
+		const path = { id: ++this.#nextOwnerId, keys: [...keys] };
+		this.#paths.push(path);
+		this.#retainedBytes += 32 + 64 + keys.length * 32;
+		for (const key of keys) {
+			if (typeof key === "number") this.#retainedBytes += 8;
+			else this.#retain(key);
+		}
+		return path;
+	}
+
+	#transition(next: ManagedValue): number {
+		if (this.#latest && managedValueEqual(this.#latest, next)) return this.#versions.length;
+		const opStart = this.#ops.length;
+		const diff = (
+			previous: ManagedValue | undefined,
+			value: ManagedValue,
+			keys: Array<ManagedOwnedString | number>,
+		): ManagedValue => {
+			if (previous && managedValueEqual(previous, value)) return previous;
+			if (previous?.kind === "string" && value.kind === "string" && value.value.startsWith(previous.value)) {
+				const units = new Uint16Array(value.value.length - previous.value.length);
+				for (let i = 0; i < units.length; i++) units[i] = value.value.charCodeAt(previous.value.length + i);
+				this.#ops.push({ kind: "append", path: this.#path(keys), id: ++this.#nextOwnerId, units });
+				return value;
+			}
+			if (
+				previous &&
+				(previous.kind === "record" || previous.kind === "array") &&
+				value.kind === previous.kind &&
+				(value.kind === "record" || value.kind === "array") &&
+				value.nullPrototype === previous.nullPrototype
+			) {
+				const oldKeys = previous.fields.map(field => field.key.value);
+				const newKeys = value.fields.map(field => field.key.value);
+				const commonOld = oldKeys.filter(key => newKeys.includes(key));
+				const commonNew = newKeys.filter(key => oldKeys.includes(key));
+				const retainedThenAdded = [...commonOld, ...newKeys.filter(key => !oldKeys.includes(key))];
+				const dense = (node: typeof value) =>
+					node.kind !== "array" ||
+					(node.fields.length === node.length &&
+						node.fields.every((field, index) => field.key.value === String(index)));
+				// Primitive array reorders/replacements are atomic. Positional record
+				// updates (e.g. content/tool arguments) remain ordinary field patches.
+				const stableArray =
+					value.kind !== "array" ||
+					(dense(value) &&
+						dense(previous) &&
+						previous.fields
+							.slice(0, Math.min(previous.length, value.length))
+							.every(
+								(field, index) =>
+									managedValueEqual(field.value, value.fields[index]!.value) ||
+									(field.value.kind === "record" && value.fields[index]!.value.kind === "record"),
+							));
+				if (
+					stableArray &&
+					commonOld.every((key, index) => key === commonNew[index]) &&
+					retainedThenAdded.every((key, index) => key === newKeys[index])
+				) {
+					for (const field of previous.fields)
+						if (!newKeys.includes(field.key.value) && value.kind !== "array")
+							this.#ops.push({ kind: "delete", path: this.#path([...keys, field.key]) });
+					const fields = value.fields.map(field => {
+						const old = previous.fields.find(candidate => candidate.key === field.key);
+						return {
+							key: field.key,
+							value: diff(old?.value, field.value, [
+								...keys,
+								value.kind === "array" ? Number(field.key.value) : field.key,
+							]),
+						};
+					});
+					if (value.kind === "array" && value.length < previous.length)
+						this.#ops.push({ kind: "truncate", path: this.#path(keys), length: value.length });
+					return { ...value, fields };
+				}
+			}
+			this.#ops.push({ kind: "replace", path: this.#path(keys), value });
+			return value;
+		};
+		const previous = this.#latest;
+		this.#latest = diff(previous, next, []);
+		this.#retain(this.#latest);
+		if (previous) this.#releaseNode(previous);
+		for (let index = opStart; index < this.#ops.length; index++) {
+			const op = this.#ops[index]!;
+			this.#retainedBytes += 64 + 16;
+			if (op.kind === "replace") this.#retain(op.value);
+			else if (op.kind === "append") this.#retainedBytes += 64 + op.units.byteLength;
+			else if (op.kind === "truncate") this.#retainedBytes += 8;
+		}
+		const id = this.#versions.length + 1;
+		this.#versions.push({ id, opStart, opCount: this.#ops.length - opStart });
+		this.#retainedBytes += 16;
+		return id;
+	}
 
 	push(event: AgentEvent): void {
 		if (this.#committed) {
-			this.stream.push(event);
+			this.#stream.push(event);
 			return;
 		}
-		this.#stage(event);
+		this.#stage("event", event);
 	}
 
 	end(messages: AgentMessage[]): void {
-		this.stream.end(messages);
+		this.#stream.end(messages);
 	}
 
 	stageAssistantMessageEvent(message: AssistantMessage, event: AssistantMessageEvent): void {
-		const partial = managedAssistantShell(message, this.model);
-		this.#batch.push({
-			type: "assistant_event",
-			message: partial,
-			event: managedAssistantEventSnapshot(event, partial),
-		});
+		if (!this.#observer) return;
+		if (this.#committed) {
+			this.#observer(message, event);
+			return;
+		}
+		this.#stage("callback", { message, event });
 	}
 
-	flush(): void {
-		if (this.#discarded || this.#committed) return;
-		for (const item of this.#batch) {
-			if (item.type === "assistant_event") {
-				this.onAssistantMessageEvent?.(item.message, item.event);
+	#preflight(input: unknown): boolean {
+		if (this.#entries.length + 1 > MANAGED_ATTEMPT_MAX_STAGED_EVENTS) throw new ManagedAttemptBufferOverflowError();
+		let serialized: string | undefined;
+		try {
+			serialized = JSON.stringify(input);
+		} catch {
+			return false;
+		}
+		if (serialized === undefined) throw new ManagedAttemptSnapshotError();
+		if (managedAttemptTextEncoder.encode(serialized).byteLength > MANAGED_ATTEMPT_MAX_STAGED_BYTES)
+			throw new ManagedAttemptBufferOverflowError();
+		return true;
+	}
+
+	#stage(
+		kind: "event" | "callback",
+		input: AgentEvent | { message: AssistantMessage; event: AssistantMessageEvent },
+	): void {
+		if (this.#discarded) throw new ManagedAttemptSnapshotError();
+		try {
+			const measured = this.#preflight(input);
+			let normalized: unknown;
+			if (kind === "callback") {
+				const callback = input as { message: AssistantMessage; event: AssistantMessageEvent };
+				const message = managedAssistantShell(callback.message, this.#model);
+				normalized = { message, event: managedAssistantEventSnapshot(callback.event, message) };
 			} else {
-				this.stream.push(item.event);
+				normalized = managedAttemptSnapshotDetailed(this.#repairAssistantEvent(input as AgentEvent)).snapshot;
+				if (!measured) {
+					try {
+						JSON.stringify(normalized);
+					} catch {
+						normalized = sanitizedDetachedClone(normalized);
+					}
+				}
+			}
+			const record = normalized as Record<string, unknown>;
+			const assistantEvent = (kind === "callback" ? record.event : record.assistantMessageEvent) as
+				| Record<string, unknown>
+				| undefined;
+			const entry: ManagedLedgerEntry = {
+				kind,
+				type: this.#key(String(kind === "callback" ? assistantEvent?.type : record.type)),
+				shape:
+					kind === "callback"
+						? "callback"
+						: record.type === "message_update"
+							? "update"
+							: record.type === "agent_end"
+								? "messages"
+								: "plain",
+				nullPrototype: Object.getPrototypeOf(record) === null,
+				assistantNullPrototype: assistantEvent !== undefined && Object.getPrototypeOf(assistantEvent) === null,
+				envelope: [],
+				assistantEnvelope: [],
+				refs: [],
+				order: this.#path([
+					...Object.keys(record).map(key => this.#key(key)),
+					-1,
+					...Object.keys(assistantEvent ?? {}).map(key => this.#key(key)),
+				]),
+			};
+			const references = new Map<object, number>();
+			const envelopeFields: Array<[string, unknown]> = [];
+			const assistantFields: Array<[string, unknown]> = [];
+			const observe = (message: unknown): number => {
+				if (!message || typeof message !== "object" || (message as Record<string, unknown>).role !== "assistant")
+					throw new ManagedAttemptSnapshotError();
+				const existing = references.get(message);
+				if (existing !== undefined) return existing;
+				const slot = entry.refs.length;
+				entry.refs.push(this.#transition(this.#encode(message)));
+				references.set(message, slot);
+				return slot;
+			};
+			if (record.message && (record.message as Record<string, unknown>).role === "assistant") {
+				entry.messageRef = observe(record.message);
+				if (entry.shape === "plain") entry.shape = "message";
+			}
+			if (assistantEvent) {
+				entry.assistantType = this.#key(String(assistantEvent.type));
+				for (const [key, value] of managedOwnFields(assistantEvent)) {
+					if (key === "partial" || key === "message" || key === "error") entry.partialRef = observe(value);
+					else if (key !== "type") assistantFields.push([key, value]);
+				}
+			}
+			const messageSlots =
+				entry.shape === "messages"
+					? ((record.messages as unknown[]).map(message =>
+							message && typeof message === "object" && (message as Record<string, unknown>).role === "assistant"
+								? observe(message)
+								: message,
+						) as Array<number | AgentMessage>)
+					: undefined;
+			for (const [key, value] of managedOwnFields(record)) {
+				if (
+					key === "type" ||
+					(key === "message" && entry.messageRef !== undefined) ||
+					(key === "messages" && entry.shape === "messages") ||
+					(key === "event" && kind === "callback") ||
+					(key === "assistantMessageEvent" && assistantEvent)
+				)
+					continue;
+				envelopeFields.push([key, value]);
+			}
+			if (
+				managedFieldsShareGraph([
+					...envelopeFields,
+					...assistantFields,
+					...(messageSlots ? [["messages", messageSlots] as [string, unknown]] : []),
+				])
+			) {
+				const opaque: ManagedOpaqueEnvelope = {
+					envelope: Object.create(null),
+					assistantEnvelope: Object.create(null),
+				};
+				for (const [key, value] of envelopeFields)
+					Object.defineProperty(opaque.envelope, key, { value, enumerable: true });
+				for (const [key, value] of assistantFields)
+					Object.defineProperty(opaque.assistantEnvelope, key, { value, enumerable: true });
+				if (messageSlots) opaque.messageSlots = messageSlots;
+				entry.opaque = this.#encode(opaque);
+			} else {
+				entry.envelope = envelopeFields.map(([key, value]) => ({
+					key: this.#key(key),
+					value: this.#encode(value),
+				}));
+				entry.assistantEnvelope = assistantFields.map(([key, value]) => ({
+					key: this.#key(key),
+					value: this.#encode(value),
+				}));
+				if (messageSlots) entry.messageSlots = this.#encode(messageSlots);
+			}
+			// A callback/event pair may canonicalize identical immutable delta
+			// payloads, never their independently sampled state or record count.
+			const previous = this.#entries.at(-1);
+			if (kind === "event" && previous?.kind === "callback" && previous.assistantType === entry.assistantType) {
+				for (const field of entry.assistantEnvelope) {
+					const old = previous.assistantEnvelope.find(candidate => candidate.key === field.key);
+					if (old && managedValueEqual(old.value, field.value) && field.value.kind === "string")
+						field.value = old.value;
+				}
+			}
+			this.#entries.push(entry);
+			this.#retainedBytes += 128 + 16 + (entry.refs.length + 1) * 16;
+			this.#retain(entry.type);
+			if (entry.assistantType) this.#retain(entry.assistantType);
+			if (entry.opaque) {
+				this.#retainedBytes += 16;
+				this.#retain(entry.opaque);
+			}
+			for (const field of [...entry.envelope, ...entry.assistantEnvelope]) {
+				this.#retainedBytes += 32;
+				this.#retain(field.key);
+				this.#retain(field.value);
+			}
+			if (entry.messageSlots) {
+				this.#retainedBytes += 16;
+				this.#retain(entry.messageSlots);
+			}
+			if (this.#retainedBytes > MANAGED_ATTEMPT_MAX_STAGED_BYTES) throw new ManagedAttemptBufferOverflowError();
+			this.#peakBytes = Math.max(this.#peakBytes, this.#retainedBytes);
+		} catch (error) {
+			this.discard();
+			if (error instanceof ManagedAttemptBufferOverflowError || error instanceof ManagedAttemptSnapshotError)
+				throw error;
+			throw new ManagedAttemptSnapshotError();
+		}
+	}
+
+	// Admission visits only acquired/released owners, never the preceding log.
+	// The full inventory below independently checks this counter in tests.
+	#nodeBytes(value: ManagedValue): number {
+		if (value.kind === "string") return 8 + 24 + 2 * value.value.length;
+		if (value.kind === "scalar")
+			return 8 + (typeof value.value === "bigint" ? 24 + 2 * String(value.value).length : 8);
+		if (value.kind !== "atomic") return 8 + 64 + 8 + 32 * value.fields.length;
+		const seen = new Set<object>();
+		let budget = MANAGED_SNAPSHOT_MAX_NODES;
+		const raw = (item: unknown, depth: number): number => {
+			if (--budget < 0 || depth > 512) throw new ManagedAttemptSnapshotError();
+			if (typeof item === "string") return 24 + 2 * item.length;
+			if (item === null || typeof item !== "object")
+				return typeof item === "bigint" ? 24 + 2 * String(item).length : 8;
+			if (seen.has(item)) return 16;
+			seen.add(item);
+			const parts = managedAtomicParts(item);
+			let bytes = 64 + (parts.buffer?.byteLength ?? parts.opaqueBytes ?? 0);
+			for (const [key, child] of parts.fields) bytes += 32 + 24 + 2 * key.length + raw(child, depth + 1);
+			return bytes;
+		};
+		return 8 + 64 + raw(value.value, 0);
+	}
+
+	#retain(value: ManagedValue): void {
+		if (value.retainedRefs++ !== 0) return;
+		this.#retainedBytes += this.#nodeBytes(value);
+		if (value.kind === "record" || value.kind === "array") {
+			for (const field of value.fields) {
+				this.#retain(field.key);
+				this.#retain(field.value);
 			}
 		}
-		this.#batch = [];
-		this.#stagedBytes = 0;
-		this.#stagedEventCount = 0;
+	}
+
+	#releaseNode(value: ManagedValue): void {
+		if (--value.retainedRefs !== 0) return;
+		this.#retainedBytes -= this.#nodeBytes(value);
+		if (value.kind === "record" || value.kind === "array") {
+			for (const field of value.fields) {
+				this.#releaseNode(field.key);
+				this.#releaseNode(field.value);
+			}
+		}
+	}
+
+	/** Inventory walks the actual retained ownership roots, not input lengths or
+	 * an estimated snapshot savings counter. Canonical aliases share an ID;
+	 * independently owned strings are charged even when JS values compare equal.
+	 */
+	ownedInventory(): ManagedOwnedInventory {
+		const inventory: ManagedOwnedInventory = {
+			totalBytes: 0,
+			structuralBytes: 0,
+			payloadBytes: 0,
+			peakBytes: this.#peakBytes,
+			recordCount: this.#entries.length,
+			strings: [],
+			buffers: [],
+		};
+		if (!this.#entries.length && !this.#latest) return inventory;
+		const seen = new Set<number>();
+		const rawSeen = new Map<object, number>();
+		let budget = MANAGED_SNAPSHOT_MAX_NODES;
+		let rawOwner = this.#nextOwnerId;
+		const string = (id: number, value: string) => {
+			inventory.structuralBytes += 24;
+			const bytes = value.length * 2;
+			inventory.payloadBytes += bytes;
+			inventory.strings.push({ ownerId: id, codeUnits: value.length, bytes });
+		};
+		const raw = (value: unknown, depth: number): void => {
+			if (--budget < 0 || depth > 512) throw new ManagedAttemptSnapshotError();
+			if (typeof value === "string") {
+				string(++rawOwner, value);
+				return;
+			}
+			if (value === null || typeof value !== "object") {
+				if (typeof value === "bigint") string(++rawOwner, String(value));
+				else inventory.structuralBytes += 8;
+				return;
+			}
+			if (rawSeen.has(value)) {
+				inventory.structuralBytes += 16;
+				return;
+			}
+			const ownerId = ++rawOwner;
+			rawSeen.set(value, ownerId);
+			const parts = managedAtomicParts(value);
+			inventory.structuralBytes += 64;
+			const bytes = parts.buffer?.byteLength ?? parts.opaqueBytes;
+			if (bytes !== undefined) {
+				inventory.payloadBytes += bytes;
+				inventory.buffers.push({ ownerId, kind: "typed", bytes });
+			}
+			for (const [key, child] of parts.fields) {
+				inventory.structuralBytes += 32;
+				string(++rawOwner, key);
+				raw(child, depth + 1);
+			}
+		};
+		const node = (value: ManagedValue): void => {
+			if (seen.has(value.id)) return;
+			seen.add(value.id);
+			inventory.structuralBytes += 8; // Embedded ownership reference count.
+			if (value.kind === "string") string(value.id, value.value);
+			else if (value.kind === "scalar") {
+				if (typeof value.value === "bigint") string(value.id, String(value.value));
+				else inventory.structuralBytes += 8;
+			} else if (value.kind === "atomic") {
+				inventory.structuralBytes += 64;
+				raw(value.value, 0);
+			} else {
+				inventory.structuralBytes += 64 + 8;
+				fields(value.fields);
+			}
+		};
+		const fields = (values: ManagedField[]): void => {
+			for (const field of values) {
+				inventory.structuralBytes += 32;
+				node(field.key);
+				node(field.value);
+			}
+		};
+		// Container headers and every actual key-pool/path-pool member remain
+		// charged even when no longer reachable from the latest state.
+		inventory.structuralBytes += 64 * 5 + this.#keys.size * 32 + this.#paths.length * 32;
+		for (const key of this.#keys.values()) node(key);
+		for (const path of this.#paths) {
+			inventory.structuralBytes += 64 + path.keys.length * 32;
+			for (const key of path.keys) {
+				if (typeof key === "number") inventory.structuralBytes += 8;
+				else node(key);
+			}
+		}
+		for (const entry of this.#entries) {
+			if (!entry) continue;
+			inventory.structuralBytes += 128 + 16 + (entry.refs.length + 1) * 16;
+			node(entry.type);
+			if (entry.assistantType) node(entry.assistantType);
+			if (entry.opaque) {
+				inventory.structuralBytes += 16;
+				node(entry.opaque);
+			}
+			fields(entry.envelope);
+			fields(entry.assistantEnvelope);
+			if (entry.messageSlots) {
+				inventory.structuralBytes += 16;
+				node(entry.messageSlots);
+			}
+		}
+		for (const version of this.#versions) if (version) inventory.structuralBytes += 16;
+		for (const op of this.#ops) {
+			if (!op) continue;
+			inventory.structuralBytes += 64 + 16;
+			if (op.kind === "replace") node(op.value);
+			else if (op.kind === "append") {
+				inventory.structuralBytes += 64;
+				inventory.payloadBytes += op.units.byteLength;
+				inventory.buffers.push({ ownerId: op.id, kind: "suffix", bytes: op.units.byteLength });
+			} else if (op.kind === "truncate") inventory.structuralBytes += 8;
+		}
+		if (this.#latest) node(this.#latest);
+		inventory.totalBytes = inventory.structuralBytes + inventory.payloadBytes;
+		if (!this.#committed && inventory.totalBytes !== this.#retainedBytes) throw new ManagedAttemptSnapshotError();
+		inventory.peakBytes = Math.max(inventory.peakBytes, inventory.totalBytes);
+		return inventory;
+	}
+
+	#replay(consume: boolean, dispatch?: (entry: ManagedLedgerEntry, output: unknown) => boolean): boolean {
+		let working: unknown;
+		let versionIndex = 0;
+		const advance = (id: number): void => {
+			if (id < versionIndex) throw new ManagedAttemptSnapshotError();
+			while (versionIndex < id) {
+				const version = this.#versions[versionIndex];
+				if (!version || version.id !== versionIndex + 1) throw new ManagedAttemptSnapshotError();
+				for (let index = version.opStart; index < version.opStart + version.opCount; index++) {
+					const op = this.#ops[index];
+					if (!op) throw new ManagedAttemptSnapshotError();
+					const keys = op.path.keys.map(key => (typeof key === "number" ? key : key.value));
+					let parent = working as Record<string | number, unknown>;
+					for (const key of keys.slice(0, -1)) {
+						const descriptor = parent && Object.getOwnPropertyDescriptor(parent, key);
+						if (!descriptor || !("value" in descriptor)) throw new ManagedAttemptSnapshotError();
+						parent = descriptor.value;
+					}
+					const key = keys.at(-1);
+					const current =
+						key === undefined ? working : parent && Object.getOwnPropertyDescriptor(parent, key)?.value;
+					if (op.kind === "delete") {
+						if (key === undefined || !parent || !Object.hasOwn(parent, key))
+							throw new ManagedAttemptSnapshotError();
+						delete parent[key];
+					} else if (op.kind === "truncate") {
+						if (!Array.isArray(current) || op.length > current.length) throw new ManagedAttemptSnapshotError();
+						current.length = op.length;
+					} else {
+						if (op.kind === "append" && typeof current !== "string") throw new ManagedAttemptSnapshotError();
+						const value =
+							op.kind === "replace"
+								? managedDecode(op.value)
+								: (current as string) + managedReplaySuffix(op.units);
+						if (key === undefined) working = value;
+						else
+							Object.defineProperty(parent, key, {
+								value,
+								enumerable: true,
+								writable: true,
+								configurable: true,
+							});
+					}
+					if (consume) this.#ops[index] = undefined;
+				}
+				if (consume) this.#versions[versionIndex] = undefined;
+				versionIndex++;
+			}
+		};
+		const decodeFields = (fields: ManagedField[], output: Record<string, unknown>) => {
+			for (const field of fields)
+				Object.defineProperty(output, field.key.value, {
+					value: managedDecode(field.value),
+					enumerable: true,
+					configurable: true,
+					writable: true,
+				});
+		};
+		const ordered = (
+			output: Record<string, unknown>,
+			order: ManagedPath,
+			assistant: boolean,
+			nullPrototype: boolean,
+		): Record<string, unknown> => {
+			const result: Record<string, unknown> = nullPrototype ? Object.create(null) : {};
+			let inAssistant = false;
+			for (const key of order.keys) {
+				if (typeof key === "number") {
+					inAssistant = true;
+					continue;
+				}
+				if (inAssistant !== assistant || !Object.hasOwn(output, key.value)) continue;
+				Object.defineProperty(result, key.value, {
+					value: output[key.value],
+					enumerable: true,
+					configurable: true,
+					writable: true,
+				});
+			}
+			if (Object.keys(result).length !== Object.keys(output).length) throw new ManagedAttemptSnapshotError();
+			return result;
+		};
+		for (let index = 0; index < this.#entries.length; index++) {
+			const entry = this.#entries[index];
+			if (!entry) throw new ManagedAttemptSnapshotError();
+			const messages = entry.refs.map(id => {
+				advance(id);
+				return managedReplayClone(working) as AssistantMessage;
+			});
+			for (const message of messages)
+				if (message?.role !== "assistant" || !Array.isArray(message.content))
+					throw new ManagedAttemptSnapshotError();
+			const output: Record<string, unknown> = {};
+			const opaque = entry.opaque ? (managedDecode(entry.opaque) as ManagedOpaqueEnvelope) : undefined;
+			if (opaque) {
+				for (const [key, value] of managedOwnFields(opaque.envelope))
+					Object.defineProperty(output, key, { value, enumerable: true, configurable: true, writable: true });
+			} else decodeFields(entry.envelope, output);
+			if (entry.kind === "event") output.type = entry.type.value;
+			if (entry.messageRef !== undefined) output.message = messages[entry.messageRef];
+			if (entry.assistantType) {
+				const event: Record<string, unknown> = { type: entry.assistantType.value };
+				if (opaque) {
+					for (const [key, value] of managedOwnFields(opaque.assistantEnvelope))
+						Object.defineProperty(event, key, { value, enumerable: true, configurable: true, writable: true });
+				} else decodeFields(entry.assistantEnvelope, event);
+				if (entry.partialRef !== undefined)
+					event[
+						entry.assistantType.value === "done"
+							? "message"
+							: entry.assistantType.value === "error"
+								? "error"
+								: "partial"
+					] = messages[entry.partialRef];
+				// Validation never calls observers and rejects malformed replay before
+				// the irrevocable commit point, without materializing an output batch.
+				managedAssistantEventSnapshot(
+					event as unknown as AssistantMessageEvent,
+					messages[entry.partialRef ?? entry.messageRef ?? 0]!,
+				);
+				output[entry.kind === "callback" ? "event" : "assistantMessageEvent"] = ordered(
+					event,
+					entry.order,
+					true,
+					entry.assistantNullPrototype,
+				);
+			}
+			const slots = entry.messageSlots
+				? (managedDecode(entry.messageSlots) as Array<number | AgentMessage>)
+				: opaque?.messageSlots;
+			if (slots) output.messages = slots.map(slot => (typeof slot === "number" ? messages[slot] : slot));
+			if (!dispatch) ordered(output, entry.order, false, entry.nullPrototype);
+			if (consume) this.#entries[index] = undefined;
+			if (dispatch && !dispatch(entry, ordered(output, entry.order, false, entry.nullPrototype))) return false;
+		}
+		return true;
+	}
+
+	flush(signal?: AbortSignal): boolean {
+		if (this.#discarded) return false;
+		if (this.#committed) return true;
+		if (signal?.aborted) {
+			this.discard();
+			return false;
+		}
+		try {
+			this.#replay(false);
+		} catch {
+			this.discard();
+			throw new ManagedAttemptSnapshotError();
+		}
+		if (signal?.aborted) {
+			this.discard();
+			return false;
+		}
+		// No validation scratch or whole-output batch survives this point. The
+		// queue and consumer-held detached snapshots are outside provisional L.
 		this.#committed = true;
+		this.#latest = undefined;
+		try {
+			const complete = this.#replay(true, (entry, output) => {
+				if (signal?.aborted) return false;
+				// One postcommit history snapshot, detached before an observer can
+				// mutate its output. It is not retained provisional output or a batch.
+				const message = (output as Record<string, unknown>).message;
+				if (message && typeof message === "object" && (message as AssistantMessage).role === "assistant") {
+					this.#publishedAssistant = managedReplayClone(message) as AssistantMessage;
+				}
+				if (entry.kind === "callback") {
+					const callback = output as { message: AssistantMessage; event: AssistantMessageEvent };
+					try {
+						this.#observer?.(callback.message, callback.event);
+					} catch (error) {
+						throw new ManagedAttemptObserverError(error);
+					}
+				} else {
+					try {
+						this.#stream.push(output as AgentEvent);
+					} catch (error) {
+						throw new ManagedAttemptObserverError(error);
+					}
+				}
+				return !signal?.aborted;
+			});
+			if (complete) this.#publishedAssistant = undefined;
+			return complete;
+		} catch (error) {
+			if (error instanceof ManagedAttemptObserverError || error instanceof ManagedAttemptSnapshotError) throw error;
+			throw new ManagedAttemptSnapshotError();
+		} finally {
+			this.#release();
+		}
+	}
+
+	/** Consume the last exposed prefix only on a postcommit terminal exit. */
+	takePublishedAssistant(): AssistantMessage | undefined {
+		const message = this.#publishedAssistant;
+		this.#publishedAssistant = undefined;
+		return message;
+	}
+
+	#release(): void {
+		this.#entries = [];
+		this.#versions = [];
+		this.#ops = [];
+		this.#latest = undefined;
+		this.#keys.clear();
+		this.#paths = [];
+		this.#retainedBytes = 0;
 	}
 
 	discard(): void {
-		this.#batch = [];
-		this.#stagedBytes = 0;
-		this.#stagedEventCount = 0;
-		this.#discarded = true;
-	}
-
-	#wouldOverflow(bytes: number): boolean {
-		return (
-			this.#stagedEventCount + 1 > MANAGED_ATTEMPT_MAX_STAGED_EVENTS ||
-			this.#stagedBytes + bytes > MANAGED_ATTEMPT_MAX_STAGED_BYTES
-		);
-	}
-
-	#stage(event: AgentEvent): void {
-		// Measure the raw event FIRST so an oversized payload is rejected
-		// before the snapshot duplicates it — the staged-byte cap exists to
-		// bound memory, so cloning ahead of the check would defeat it.
-		// Cyclic/JSON-hostile events cannot be pre-measured; only those fall
-		// through to snapshot-then-measure, where the sanitized detached form
-		// is the cycle-safe estimator.
-		let bytes: number | undefined;
-		try {
-			bytes = managedAttemptTextEncoder.encode(JSON.stringify(event)).byteLength;
-		} catch {
-			bytes = undefined;
-		}
-		if (bytes !== undefined && this.#wouldOverflow(bytes)) {
-			this.discard();
-			throw new ManagedAttemptBufferOverflowError();
-		}
-		const detailed = managedAttemptSnapshotDetailed(this.#repairAssistantEvent(event));
-		let snapshot = detailed.snapshot;
-		if (bytes === undefined || detailed.degraded) {
-			// Account the bytes of what is actually retained: a degraded
-			// snapshot replaces non-JSON leaves with placeholders, so the raw
-			// pre-measure (which omits e.g. function-valued properties) can
-			// undercount the staged form.
-			try {
-				bytes = managedAttemptTextEncoder.encode(JSON.stringify(snapshot)).byteLength;
-			} catch {
-				try {
-					snapshot = sanitizedDetachedClone(snapshot);
-					bytes = managedAttemptTextEncoder.encode(JSON.stringify(snapshot)).byteLength;
-				} catch {
-					bytes = undefined;
-				}
-			}
-			if (bytes === undefined) {
-				// The sanitizer's output is total (detached, JSON-safe), so this
-				// is unreachable unless the sanitizer itself regresses. Fail as a
-				// dedicated local error: it carries no transport facts, so it is
-				// non-retryable and can never be misattributed to the provider.
-				this.discard();
-				throw new ManagedAttemptSnapshotError();
-			}
-			if (this.#wouldOverflow(bytes)) {
-				this.discard();
-				throw new ManagedAttemptBufferOverflowError();
-			}
-		}
-		this.#batch.push({ type: "event", event: snapshot });
-		this.#stagedEventCount += 1;
-
-		this.#stagedBytes += bytes;
+		this.#release();
+		if (!this.#committed) this.#discarded = true;
 	}
 
 	#repairAssistantEvent(event: AgentEvent): AgentEvent {
 		if (event.type === "message_start" || event.type === "message_end" || event.type === "turn_end") {
 			return event.message.role === "assistant"
-				? { ...event, message: managedAssistantShell(event.message, this.model) }
+				? { ...event, message: managedAssistantShell(event.message, this.#model) }
 				: event;
 		}
 		if (event.type === "message_update") {
-			const message = managedAssistantShell(event.message, this.model);
+			const message = managedAssistantShell(event.message, this.#model);
 			return {
 				...event,
 				message,
 				assistantMessageEvent: managedAssistantEventSnapshot(event.assistantMessageEvent, message),
 			};
 		}
-		if (event.type === "agent_end") {
+		if (event.type === "agent_end")
 			return {
 				...event,
 				messages: event.messages.map(message =>
-					message.role === "assistant" ? managedAssistantShell(message, this.model) : message,
+					message.role === "assistant" ? managedAssistantShell(message, this.#model) : message,
 				),
 			};
-		}
 		return event;
 	}
 }
@@ -1411,8 +2349,10 @@ async function runLoopBody(
 				const attemptConfig = attemptTransaction
 					? {
 							...config,
-							onAssistantMessageEvent: (partial: AssistantMessage, event: AssistantMessageEvent) =>
-								attemptTransaction.stageAssistantMessageEvent(partial, event),
+							onAssistantMessageEvent: config.onAssistantMessageEvent
+								? (partial: AssistantMessage, event: AssistantMessageEvent) =>
+										attemptTransaction.stageAssistantMessageEvent(partial, event)
+								: undefined,
 						}
 					: config;
 				if (recoveryState.pending && !recoveryState.inserted) {
@@ -1465,10 +2405,16 @@ async function runLoopBody(
 						stream.end(newMessages);
 						return;
 					}
+					transaction?.discard();
+					if (transaction) {
+						currentContext.messages.splice(contextMessageCount);
+						newMessages.splice(newMessageCount);
+					}
 					throw err;
 				}
 				if (config.fallbackManaged) {
 					await emitHarmonyAudit(config, err, "escalated", harmonyRetryAttempt);
+					transaction?.discard();
 					throw err;
 				}
 				if (err.recovered) {
@@ -1585,7 +2531,40 @@ async function runLoopBody(
 			}
 
 			// One provider invocation is committed before any tool can run.
-			transaction?.flush();
+			if (transaction) {
+				let complete: boolean;
+				try {
+					complete = transaction.flush(loopSignal);
+				} catch (error) {
+					const prefix = transaction.takePublishedAssistant();
+					currentContext.messages.splice(contextMessageCount);
+					newMessages.splice(newMessageCount);
+					if (prefix) {
+						prefix.stopReason = "error";
+						prefix.errorMessage = error instanceof Error ? error.message : "Managed output failed";
+						delete prefix.errorStatus;
+						delete prefix.transportFailure;
+						currentContext.messages.push(prefix);
+						newMessages.push(prefix);
+					}
+					throw error;
+				}
+				if (!complete) {
+					const prefix = transaction.takePublishedAssistant();
+					currentContext.messages.splice(contextMessageCount);
+					newMessages.splice(newMessageCount);
+					await config.onManagedAttemptOutcome?.({ type: "run_terminal", reason: "cancelled" });
+					if (!prefix) {
+						stream.end(newMessages);
+						return;
+					}
+					// Preserve the irreversible prefix, not the provider's unseen tail.
+					currentContext.messages.push(prefix);
+					message = emitAbortedAssistantMessage(prefix, true, currentContext, config, stream);
+					currentContext.messages.push(message);
+					newMessages.push(message);
+				}
+			}
 			if (config.fallbackManaged && message.stopReason !== "error" && message.stopReason !== "aborted") {
 				await config.onManagedAttemptAccepted?.();
 			}

@@ -1,14 +1,21 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, spyOn } from "bun:test";
 import type { ManagedAttemptOutcome } from "@sayknow-cli/agent-core";
 import { Agent } from "@sayknow-cli/agent-core";
-import { agentLoopContinue, sanitizedDetachedClone } from "@sayknow-cli/agent-core/agent-loop";
-import type { AgentContext, AgentEvent, AgentLoopConfig } from "@sayknow-cli/agent-core/types";
+import {
+	agentLoopContinue,
+	MANAGED_ATTEMPT_MAX_STAGED_BYTES,
+	MANAGED_ATTEMPT_MAX_STAGED_EVENTS,
+	ManagedAttemptTransaction,
+	sanitizedDetachedClone,
+} from "@sayknow-cli/agent-core/agent-loop";
+import type { AgentContext, AgentEvent, AgentLoopConfig, AgentMessage } from "@sayknow-cli/agent-core/types";
 import type { AssistantMessage, AssistantMessageEvent, Message } from "@sayknow-cli/ai";
+import { EventStream } from "@sayknow-cli/ai";
 
 import { createMockModel } from "@sayknow-cli/ai/providers/mock";
 import { AssistantMessageEventStream } from "@sayknow-cli/ai/utils/event-stream";
 
-function assistantMessage(model: ReturnType<typeof createMockModel>["model"]): AssistantMessage {
+function assistantMessage(model: AgentLoopConfig["model"]): AssistantMessage {
 	return {
 		role: "assistant",
 		content: [],
@@ -37,7 +44,903 @@ function expectManagedRunStart(events: string[]): void {
 	}
 }
 
+// This is an internal transaction seam, not a config/telemetry API. Observe the
+// actual queue boundary synchronously; consumer-owned output is deliberately
+// excluded from the provisional inventory.
+function ledgerFixture(
+	observed = true,
+	effect?: (message: AssistantMessage, event: AssistantMessageEvent, count: number) => void,
+) {
+	const mock = createMockModel();
+	const order: string[] = [];
+	const events: AgentEvent[] = [];
+	const callbacks: Array<{ message: AssistantMessage; event: AssistantMessageEvent }> = [];
+	class CaptureStream extends EventStream<AgentEvent, AgentMessage[]> {
+		override push(event: AgentEvent): void {
+			events.push(event);
+			order.push(event.type === "message_update" ? "update" : event.type);
+			super.push(event);
+		}
+	}
+	const stream = new CaptureStream(
+		event => event.type === "agent_end",
+		() => [],
+	);
+	const observer = observed
+		? (message: AssistantMessage, event: AssistantMessageEvent) => {
+				callbacks.push({ message, event });
+				order.push("callback");
+				effect?.(message, event, callbacks.length);
+			}
+		: undefined;
+	const transaction = new ManagedAttemptTransaction(stream, observer, mock.model);
+	const message = assistantMessage(mock.model);
+	message.timestamp = 0;
+	message.content = [{ type: "text", text: "" }];
+	const update = (text: string, delta = text) => {
+		(message.content[0] as { type: "text"; text: string }).text = text;
+		const event: AssistantMessageEvent = { type: "text_delta", contentIndex: 0, delta, partial: message };
+		if (observed) transaction.stageAssistantMessageEvent(message, event);
+		transaction.push({ type: "message_update", message, assistantMessageEvent: event });
+	};
+	return { mock, stream, transaction, message, update, events, callbacks, order };
+}
+
+function messageText(message: AssistantMessage): string {
+	return (message.content[0] as { type: "text"; text: string }).text;
+}
+
+describe("managed compact ledger", () => {
+	for (const observed of [false, true]) {
+		it(`retains 1,000 cumulative 49-byte updates losslessly (observer=${observed})`, () => {
+			const fixture = ledgerFixture(observed);
+			const { transaction, message, update, events, callbacks, order } = fixture;
+			transaction.push({ type: "turn_start" });
+			transaction.push({ type: "message_start", message });
+			let text = "";
+			const expected: string[] = [];
+			for (let index = 0; index < 1_000; index++) {
+				const delta = `${String(index).padStart(4, "0")}${"x".repeat(45)}`;
+				text += delta;
+				expected.push(text);
+				update(text, delta);
+			}
+			transaction.push({ type: "message_end", message });
+			const inventory = transaction.ownedInventory();
+			expect(inventory.recordCount).toBe(observed ? 2_003 : 1_003);
+			expect(inventory.totalBytes).toBe(inventory.structuralBytes + inventory.payloadBytes);
+			expect(inventory.totalBytes).toBeLessThanOrEqual(1_040_768);
+			expect(inventory.peakBytes).toBeLessThan(1_048_576);
+			expect(
+				inventory.strings.reduce((sum, owner) => sum + owner.bytes, 0) +
+					inventory.buffers.reduce((sum, owner) => sum + owner.bytes, 0),
+			).toBe(inventory.payloadBytes);
+			expect(
+				inventory.buffers.filter(owner => owner.kind === "suffix").reduce((sum, owner) => sum + owner.bytes, 0),
+			).toBe(98_000);
+			if (observed) expect(inventory.totalBytes - 950_768).toBeLessThanOrEqual(90_000);
+			expect(events).toHaveLength(0);
+			expect(callbacks).toHaveLength(0);
+			transaction.flush();
+			const updates = events.filter(
+				(event): event is Extract<AgentEvent, { type: "message_update" }> => event.type === "message_update",
+			);
+			expect(updates).toHaveLength(1_000);
+			expect(callbacks).toHaveLength(observed ? 1_000 : 0);
+			for (const [index, event] of updates.entries()) {
+				expect(messageText(event.message as AssistantMessage)).toBe(expected[index]);
+				expect(
+					messageText(
+						(event.assistantMessageEvent as Extract<AssistantMessageEvent, { type: "text_delta" }>).partial,
+					),
+				).toBe(expected[index]);
+				if (observed) {
+					expect(messageText(callbacks[index]!.message)).toBe(expected[index]);
+					expect(
+						messageText(
+							(callbacks[index]!.event as Extract<AssistantMessageEvent, { type: "text_delta" }>).partial,
+						),
+					).toBe(expected[index]);
+				}
+			}
+			expect(order.slice(2, -1)).toEqual(
+				Array.from({ length: 1_000 }, () => (observed ? ["callback", "update"] : ["update"])).flat(),
+			);
+			const final = events.at(-1) as Extract<AgentEvent, { type: "message_end" }>;
+			expect(new TextEncoder().encode(messageText(final.message as AssistantMessage)).byteLength).toBe(49_000);
+			(message.content[0] as { type: "text"; text: string }).text = "provider mutation";
+			expect(messageText(updates[0]!.message as AssistantMessage)).toBe(expected[0]);
+			expect(transaction.ownedInventory().totalBytes).toBe(0);
+		});
+	}
+
+	it("preserves lone code units, split pairs, non-prefix replacements and large suffixes", () => {
+		const { transaction, message, update, events, callbacks } = ledgerFixture();
+		transaction.push({ type: "message_start", message });
+		const expected = ["\uD83D", "\uD83D\uDE00", "\uDE00", "\uD83Dx", `${"z".repeat(100_000)}\uD800`];
+		for (const text of expected) update(text, "not an append hint");
+		transaction.push({ type: "message_end", message });
+		transaction.flush();
+		const updates = events.filter(
+			(event): event is Extract<AgentEvent, { type: "message_update" }> => event.type === "message_update",
+		);
+		for (const [index, text] of expected.entries()) {
+			expect(messageText(callbacks[index]!.message)).toBe(text);
+			expect(
+				messageText((callbacks[index]!.event as Extract<AssistantMessageEvent, { type: "text_delta" }>).partial),
+			).toBe(text);
+			expect(messageText(updates[index]!.message as AssistantMessage)).toBe(text);
+			expect(
+				messageText(
+					(updates[index]!.assistantMessageEvent as Extract<AssistantMessageEvent, { type: "text_delta" }>)
+						.partial,
+				),
+			).toBe(text);
+		}
+		expect(messageText(callbacks[0]!.message)).toBe("\uD83D");
+	});
+
+	it("counts callback and lifecycle records at the immutable 10,000 boundary", () => {
+		expect(MANAGED_ATTEMPT_MAX_STAGED_EVENTS).toBe(10_000);
+		for (const updates of [9_997, 9_998]) {
+			const fixture = ledgerFixture(false);
+			fixture.transaction.push({ type: "turn_start" });
+			fixture.transaction.push({ type: "message_start", message: fixture.message });
+			for (let index = 0; index < updates; index++) fixture.update("", "");
+			if (updates === 9_997) {
+				fixture.transaction.push({ type: "message_end", message: fixture.message });
+				expect(fixture.transaction.ownedInventory().recordCount).toBe(10_000);
+				fixture.transaction.flush();
+				expect(fixture.events.filter(event => event.type === "message_update")).toHaveLength(updates);
+			} else {
+				expect(() => fixture.transaction.push({ type: "message_end", message: fixture.message })).toThrow(
+					"provisional event buffer limit",
+				);
+				expect(fixture.events).toHaveLength(0);
+				expect(fixture.transaction.ownedInventory().totalBytes).toBe(0);
+			}
+		}
+		const observed = ledgerFixture();
+		observed.transaction.push({ type: "turn_start" });
+		observed.transaction.push({ type: "message_start", message: observed.message });
+		for (let index = 0; index < 4_999; index++) observed.update("", "");
+		expect(observed.transaction.ownedInventory().recordCount).toBe(10_000);
+		expect(() => observed.transaction.push({ type: "message_end", message: observed.message })).toThrow(
+			"provisional event buffer limit",
+		);
+		expect(observed.events).toHaveLength(0);
+		expect(observed.callbacks).toHaveLength(0);
+	});
+
+	it("uses actual string multiplicity and a uniquely owned one-byte typed residual", () => {
+		const measure = (text: string, bytes = 0) => {
+			const fixture = ledgerFixture();
+			fixture.transaction.push({ type: "turn_start", probe: new Uint8Array(bytes) } as AgentEvent);
+			fixture.transaction.push({ type: "message_start", message: fixture.message });
+			fixture.update(text, text);
+			return fixture;
+		};
+		const base = measure("x");
+		const inventory = base.transaction.ownedInventory();
+		// Independent owners: latest full string, copied suffix, canonical delta.
+		const slope = measure("xx").transaction.ownedInventory().totalBytes - inventory.totalBytes;
+		expect(slope).toBe(6);
+		for (const text of ["é", "\uD800", "\uDC00"])
+			expect(measure(text).transaction.ownedInventory().totalBytes).toBe(inventory.totalBytes);
+		expect(measure("😀").transaction.ownedInventory().totalBytes - inventory.totalBytes).toBe(slope);
+		expect(MANAGED_ATTEMPT_MAX_STAGED_BYTES).toBe(16_777_216);
+		const fixed = inventory.totalBytes - slope;
+		const n = Math.floor((MANAGED_ATTEMPT_MAX_STAGED_BYTES - fixed) / slope);
+		const text = "x".repeat(n);
+		const unpadded = measure(text).transaction.ownedInventory();
+		const residual = MANAGED_ATTEMPT_MAX_STAGED_BYTES - unpadded.totalBytes;
+		expect(residual).toBeGreaterThanOrEqual(0);
+		const exact = measure(text, residual);
+		const owners = exact.transaction.ownedInventory();
+		expect(owners.totalBytes).toBe(16_777_216);
+		expect(owners.buffers.filter(owner => owner.kind === "typed")).toHaveLength(1);
+		expect(owners.buffers.find(owner => owner.kind === "typed")!.bytes).toBe(residual);
+		const raw = {
+			message: exact.message,
+			event: { type: "text_delta", contentIndex: 0, delta: text, partial: exact.message },
+		};
+		expect(new TextEncoder().encode(JSON.stringify(raw)).byteLength).toBeLessThan(16_777_216);
+		expect(
+			new TextEncoder().encode(
+				JSON.stringify({ type: "message_update", message: exact.message, assistantMessageEvent: raw.event }),
+			).byteLength,
+		).toBeLessThan(16_777_216);
+		exact.transaction.flush();
+		expect(exact.callbacks).toHaveLength(1);
+		expect(() => measure(text, residual + 1)).toThrow("provisional event buffer limit");
+	});
+
+	it("preserves nested replacement, deletion, array order and typed metadata at every observation", () => {
+		const fixture = ledgerFixture();
+		const { transaction, message, update, callbacks, events } = fixture;
+		message.content.push({
+			type: "toolCall",
+			id: "call",
+			name: "inspect",
+			arguments: { keep: undefined, remove: 1, list: [1, 2] },
+		});
+		const metadata = message as unknown as Record<string, unknown>;
+		metadata.probe = {
+			date: new Date(NaN),
+			bytes: new Uint16Array([0xd800, 17]),
+			absentLater: undefined,
+			negativeZero: -0,
+		};
+		Object.defineProperty(metadata.probe as object, "__proto__", {
+			value: { safe: true },
+			enumerable: true,
+			writable: true,
+			configurable: true,
+		});
+		transaction.push({ type: "message_start", message });
+		update("prefix", "prefix");
+		const args = (message.content[1] as Extract<AssistantMessage["content"][number], { type: "toolCall" }>).arguments;
+		delete args.remove;
+		args.list = [2, 1];
+		args.nested = { present: undefined };
+		const probe = metadata.probe as { date: Date; bytes: Uint16Array; absentLater?: undefined; negativeZero: number };
+		probe.date = new Date(1234);
+		probe.bytes[0] = 3;
+		delete probe.absentLater;
+		probe.negativeZero = 0;
+		update("non-prefix", "not used to infer a patch");
+		transaction.push({ type: "message_end", message });
+		expect(transaction.ownedInventory().totalBytes).toBeGreaterThan(0);
+		transaction.flush();
+		const updates = events.filter(
+			(event): event is Extract<AgentEvent, { type: "message_update" }> => event.type === "message_update",
+		);
+		for (const held of [callbacks[0]!.message, updates[0]!.message as AssistantMessage]) {
+			const heldArgs = (held.content[1] as Extract<AssistantMessage["content"][number], { type: "toolCall" }>)
+				.arguments;
+			expect(Object.hasOwn(heldArgs, "keep")).toBe(true);
+			expect(heldArgs.keep).toBeUndefined();
+			expect(heldArgs.remove).toBe(1);
+			expect(heldArgs.list).toEqual([1, 2]);
+			const heldProbe = (held as unknown as Record<string, unknown>).probe as typeof probe;
+			expect(Number.isNaN(heldProbe.date.getTime())).toBe(true);
+			expect(heldProbe.bytes).toEqual(new Uint16Array([0xd800, 17]));
+			expect(Object.hasOwn(heldProbe, "absentLater")).toBe(true);
+			expect(Object.is(heldProbe.negativeZero, -0)).toBe(true);
+			expect(Object.hasOwn(heldProbe, "__proto__")).toBe(true);
+			expect(Object.getPrototypeOf(heldProbe)).toBe(Object.prototype);
+		}
+		for (const held of [callbacks[1]!.message, updates[1]!.message as AssistantMessage]) {
+			const heldArgs = (held.content[1] as Extract<AssistantMessage["content"][number], { type: "toolCall" }>)
+				.arguments;
+			expect(Object.hasOwn(heldArgs, "remove")).toBe(false);
+			expect(heldArgs.list).toEqual([2, 1]);
+			expect(heldArgs.nested).toEqual({ present: undefined });
+			const heldProbe = (held as unknown as Record<string, unknown>).probe as typeof probe;
+			expect(heldProbe.date.getTime()).toBe(1234);
+			expect(heldProbe.bytes).toEqual(new Uint16Array([3, 17]));
+			expect(Object.hasOwn(heldProbe, "absentLater")).toBe(false);
+			expect(Object.is(heldProbe.negativeZero, 0)).toBe(true);
+		}
+	});
+
+	it("samples callback/update separately and preserves callback cycles versus event sanitizer placeholders", () => {
+		const { transaction, message, callbacks, events } = ledgerFixture();
+		const cycle: Record<string, unknown> = { value: 1 };
+		cycle.self = cycle;
+		(message as unknown as Record<string, unknown>).probe = cycle;
+		const callback: AssistantMessageEvent = { type: "text_delta", contentIndex: 0, delta: "same", partial: message };
+		(message.content[0] as { text: string }).text = "callback-time";
+		transaction.stageAssistantMessageEvent(message, callback);
+		(message.content[0] as { text: string }).text = "update-time";
+		cycle.value = 2;
+		transaction.push({ type: "message_update", message, assistantMessageEvent: callback });
+		transaction.ownedInventory();
+		transaction.flush();
+		expect(messageText(callbacks[0]!.message)).toBe("callback-time");
+		const probe = (callbacks[0]!.message as unknown as Record<string, unknown>).probe as Record<string, unknown>;
+		expect(probe.value).toBe(1);
+		expect(probe.self).toBe(probe);
+		const update = events[0] as Extract<AgentEvent, { type: "message_update" }>;
+		expect(messageText(update.message as AssistantMessage)).toBe("update-time");
+		expect((update.message as unknown as Record<string, unknown>).probe).toEqual({ value: 2, self: "[Circular]" });
+		expect(Object.getPrototypeOf(callbacks[0]!.message)).toBe(Object.prototype);
+		expect(Object.getPrototypeOf(probe)).toBe(Object.prototype);
+		expect(Object.getPrototypeOf(update)).toBeNull();
+		expect(Object.getPrototypeOf(update.message)).toBeNull();
+		expect(Object.getPrototypeOf((update.message as unknown as Record<string, unknown>).probe)).toBeNull();
+		expect(Object.getPrototypeOf(update.assistantMessageEvent)).toBeNull();
+		expect(
+			Object.getPrototypeOf(
+				(update.assistantMessageEvent as Extract<AssistantMessageEvent, { type: "text_delta" }>).partial,
+			),
+		).toBeNull();
+	});
+
+	for (const failAt of [1, 7]) {
+		it(`prevalidates the entire log before dispatch when replay clone ${failAt} fails`, () => {
+			const { transaction, update, callbacks, events } = ledgerFixture();
+			update("one");
+			update("two");
+			const original = globalThis.structuredClone;
+			let clones = 0;
+			const clone = spyOn(globalThis, "structuredClone").mockImplementation(value => {
+				if (++clones === failAt) throw new Error("replay clone failure");
+				return original(value);
+			});
+			try {
+				expect(() => transaction.flush()).toThrow("snapshot");
+			} finally {
+				clone.mockRestore();
+			}
+			expect(clones).toBe(failAt);
+			expect(callbacks).toHaveLength(0);
+			expect(events).toHaveLength(0);
+			expect(transaction.ownedInventory().totalBytes).toBe(0);
+			expect(transaction.flush()).toBe(false);
+		});
+	}
+
+	for (const failAt of [1, 2]) {
+		it(`retains only the committed prefix when callback ${failAt} throws`, () => {
+			const fixture = ledgerFixture(true, (_message, _event, count) => {
+				if (count === failAt)
+					throw Object.assign(new Error("observer failure"), {
+						transportFailure: { kind: "transport", status: 429 },
+					});
+			});
+			fixture.transaction.push({ type: "message_start", message: fixture.message });
+			for (const text of ["one", "two", "three"]) fixture.update(text);
+			expect(() => fixture.transaction.flush()).toThrow("committed output observer failed");
+			expect(fixture.callbacks).toHaveLength(failAt);
+			expect(fixture.events.filter(event => event.type === "message_update")).toHaveLength(failAt - 1);
+			expect(fixture.transaction.ownedInventory().totalBytes).toBe(0);
+			expect(fixture.transaction.flush()).toBe(true);
+		});
+
+		it(`stops after synchronous abort in callback ${failAt} without rolling back its prefix`, () => {
+			const controller = new AbortController();
+			const fixture = ledgerFixture(true, (_message, _event, count) => {
+				if (count === failAt) controller.abort();
+			});
+			fixture.transaction.push({ type: "message_start", message: fixture.message });
+			for (const text of ["one", "two", "three"]) fixture.update(text);
+			expect(fixture.transaction.flush(controller.signal)).toBe(false);
+			expect(fixture.callbacks).toHaveLength(failAt);
+			expect(fixture.events.filter(event => event.type === "message_update")).toHaveLength(failAt - 1);
+			expect(fixture.transaction.ownedInventory().totalBytes).toBe(0);
+		});
+	}
+
+	it("releases all provisional ownership when already aborted before commit", () => {
+		const controller = new AbortController();
+		const fixture = ledgerFixture();
+		fixture.update("never visible");
+		controller.abort();
+		expect(fixture.transaction.flush(controller.signal)).toBe(false);
+		expect(fixture.callbacks).toHaveLength(0);
+		expect(fixture.events).toHaveLength(0);
+		expect(fixture.transaction.ownedInventory().totalBytes).toBe(0);
+	});
+
+	it("charges and reconstructs directly staged terminal lifecycle message arrays", () => {
+		const { transaction, message, events, update } = ledgerFixture(false);
+		update("terminal");
+		transaction.push({ type: "turn_end", message, toolResults: [] });
+		transaction.push({ type: "agent_end", messages: [message, { role: "user", content: "user", timestamp: 0 }] });
+		expect(transaction.ownedInventory().recordCount).toBe(3);
+		transaction.flush();
+		expect(events.map(event => event.type)).toEqual(["message_update", "turn_end", "agent_end"]);
+		const terminal = events[2] as Extract<AgentEvent, { type: "agent_end" }>;
+		expect(messageText(terminal.messages[0] as AssistantMessage)).toBe("terminal");
+		expect(terminal.messages[1]).toEqual({ role: "user", content: "user", timestamp: 0 });
+	});
+
+	it("rejects raw multibyte UTF-8 input independently of owned UTF-16 storage", () => {
+		const fixture = ledgerFixture(false);
+		const probe = "\u0800".repeat(Math.ceil(MANAGED_ATTEMPT_MAX_STAGED_BYTES / 3));
+		expect(2 * probe.length).toBeLessThan(MANAGED_ATTEMPT_MAX_STAGED_BYTES);
+		expect(new TextEncoder().encode(JSON.stringify({ type: "turn_start", probe })).byteLength).toBeGreaterThan(
+			MANAGED_ATTEMPT_MAX_STAGED_BYTES,
+		);
+		expect(() => fixture.transaction.push({ type: "turn_start", probe } as AgentEvent)).toThrow(
+			"provisional event buffer limit",
+		);
+		expect(fixture.transaction.ownedInventory().totalBytes).toBe(0);
+		expect(fixture.events).toHaveLength(0);
+	});
+
+	it("never stages callbacks when no real observer exists", () => {
+		const fixture = ledgerFixture(false);
+		fixture.transaction.stageAssistantMessageEvent(fixture.message, {
+			type: "text_delta",
+			contentIndex: 0,
+			delta: "ignored",
+			partial: fixture.message,
+		});
+		expect(fixture.transaction.ownedInventory().recordCount).toBe(0);
+		fixture.update("accepted");
+		expect(fixture.transaction.ownedInventory().recordCount).toBe(1);
+		fixture.transaction.flush();
+		expect(fixture.callbacks).toHaveLength(0);
+		expect(
+			messageText(
+				(fixture.events[0] as Extract<AgentEvent, { type: "message_update" }>).message as AssistantMessage,
+			),
+		).toBe("accepted");
+	});
+
+	it("isolates observer mutation from matching updates and later snapshots", () => {
+		const fixture = ledgerFixture(true, message => {
+			(message.content[0] as { text: string }).text = "observer-mutated";
+		});
+		fixture.update("first");
+		fixture.update("second");
+		fixture.transaction.flush();
+		expect(fixture.callbacks.map(callback => messageText(callback.message))).toEqual([
+			"observer-mutated",
+			"observer-mutated",
+		]);
+		expect(
+			fixture.events.map(event =>
+				messageText((event as Extract<AgentEvent, { type: "message_update" }>).message as AssistantMessage),
+			),
+		).toEqual(["first", "second"]);
+	});
+
+	it("keeps an emitted prefix terminal when unexpected postcommit replay fails", () => {
+		let committed = false;
+		const fixture = ledgerFixture(true, () => {
+			committed = true;
+		});
+		fixture.update("first");
+		fixture.update("second");
+		const original = globalThis.structuredClone;
+		const clone = spyOn(globalThis, "structuredClone").mockImplementation(value => {
+			if (committed) throw new Error("postcommit replay failure");
+			return original(value);
+		});
+		try {
+			expect(() => fixture.transaction.flush()).toThrow("snapshot");
+		} finally {
+			clone.mockRestore();
+		}
+		expect(fixture.callbacks).toHaveLength(1);
+		expect(fixture.events).toHaveLength(0);
+		expect(fixture.transaction.ownedInventory().totalBytes).toBe(0);
+		expect(fixture.transaction.flush()).toBe(true);
+	});
+
+	it("retains cross-field atomic aliases as one detached owned graph", () => {
+		const fixture = ledgerFixture(false);
+		const shared = new Uint8Array([1, 2, 3]);
+		fixture.transaction.push({ type: "turn_start", left: shared, right: shared } as AgentEvent);
+		const inventory = fixture.transaction.ownedInventory();
+		expect(inventory.buffers.filter(owner => owner.kind === "typed").map(owner => owner.bytes)).toEqual([3]);
+		shared[0] = 9;
+		fixture.transaction.flush();
+		const output = fixture.events[0] as unknown as { left: Uint8Array; right: Uint8Array };
+		expect(output.left).toEqual(new Uint8Array([1, 2, 3]));
+		expect(output.right).toEqual(new Uint8Array([1, 2, 3]));
+		expect(output.left.buffer).not.toBe(shared.buffer);
+		expect(output.right).toBe(output.left);
+		expect(output.right.buffer).toBe(output.left.buffer);
+	});
+
+	it("preserves distinct typed views of one independently owned backing buffer", () => {
+		const fixture = ledgerFixture(false);
+		const backing = new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8]).buffer;
+		fixture.transaction.push({
+			type: "turn_start",
+			left: new Uint8Array(backing, 1, 3),
+			right: new Uint16Array(backing, 2, 2),
+		} as AgentEvent);
+		expect(
+			fixture.transaction
+				.ownedInventory()
+				.buffers.filter(owner => owner.kind === "typed")
+				.map(owner => owner.bytes),
+		).toEqual([8]);
+		new Uint8Array(backing).fill(99);
+		fixture.transaction.flush();
+		const output = fixture.events[0] as unknown as { left: Uint8Array; right: Uint16Array };
+		expect(output.left).toBeInstanceOf(Uint8Array);
+		expect(output.right).toBeInstanceOf(Uint16Array);
+		expect(output.left.byteOffset).toBe(1);
+		expect(output.right.byteOffset).toBe(2);
+		expect(output.left).toEqual(new Uint8Array([2, 3, 4]));
+		expect(output.left.buffer).toBe(output.right.buffer);
+		expect(output.left.buffer).not.toBe(backing);
+		expect(new Uint8Array(output.left.buffer)).toEqual(new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8]));
+	});
+
+	it("preserves Map/Set aliases across opaque fields without aliasing separately staged records", () => {
+		const fixture = ledgerFixture(false);
+		const key = { value: 1 };
+		const map = new Map([[key, key]]);
+		const set = new Set([key]);
+		const input = { type: "turn_start", key, map, set } as AgentEvent;
+		fixture.transaction.push(input);
+		fixture.transaction.push(input);
+		key.value = 99;
+		fixture.transaction.ownedInventory();
+		fixture.transaction.flush();
+		const outputs = fixture.events as unknown as Array<{
+			key: { value: number };
+			map: Map<object, object>;
+			set: Set<object>;
+		}>;
+		for (const output of outputs) {
+			const [heldKey, heldValue] = [...output.map][0]!;
+			expect(heldKey).toBe(output.key);
+			expect(heldValue).toBe(output.key);
+			expect([...output.set][0]).toBe(output.key);
+			expect(output.key.value).toBe(1);
+			expect(output.key).not.toBe(key);
+		}
+		expect(outputs[0]!.key).not.toBe(outputs[1]!.key);
+		expect(fixture.transaction.ownedInventory().totalBytes).toBe(0);
+	});
+
+	for (const crossField of [false, true]) {
+		it(`preserves repeated non-assistant terminal slots with cross-field alias ${crossField}`, () => {
+			const fixture = ledgerFixture(false);
+			const user = { role: "user" as const, content: "before", timestamp: 1 };
+			const input = {
+				type: "agent_end",
+				messages: [user, user],
+				...(crossField ? { highlighted: user } : {}),
+			} as AgentEvent;
+			fixture.transaction.push(input);
+			user.content = "after";
+			fixture.transaction.ownedInventory();
+			fixture.transaction.flush();
+			const output = fixture.events[0] as Extract<AgentEvent, { type: "agent_end" }> & {
+				highlighted?: AgentMessage;
+			};
+			expect(output.messages[0]).toBe(output.messages[1]);
+			expect(output.messages[0]).not.toBe(user);
+			const held = output.messages[0];
+			expect(held?.role).toBe("user");
+			if (held?.role !== "user") throw new Error("Expected retained user message");
+			expect(held.content).toBe("before");
+			if (crossField) expect(output.highlighted).toBe(output.messages[0]);
+			expect(fixture.transaction.ownedInventory().totalBytes).toBe(0);
+		});
+	}
+
+	it("distinguishes exact raw four-byte Unicode admission from raw cap+1 before duplication", () => {
+		const headerBytes = new TextEncoder().encode(JSON.stringify({ type: "turn_start", probe: "" })).byteLength;
+		const pairs = Math.floor((MANAGED_ATTEMPT_MAX_STAGED_BYTES - headerBytes) / 4);
+		const remainder = MANAGED_ATTEMPT_MAX_STAGED_BYTES - headerBytes - 4 * pairs;
+		const base = `${"😀".repeat(pairs)}${"x".repeat(remainder)}`;
+		for (const extra of [0, 1]) {
+			const fixture = ledgerFixture(false);
+			const input = { type: "turn_start", probe: `${base}${"x".repeat(extra)}` } as AgentEvent;
+			expect(new TextEncoder().encode(JSON.stringify(input)).byteLength).toBe(
+				MANAGED_ATTEMPT_MAX_STAGED_BYTES + extra,
+			);
+			const original = globalThis.structuredClone;
+			let clones = 0;
+			const clone = spyOn(globalThis, "structuredClone").mockImplementation(value => {
+				clones++;
+				return original(value);
+			});
+			try {
+				expect(() => fixture.transaction.push(input)).toThrow("provisional event buffer limit");
+			} finally {
+				clone.mockRestore();
+			}
+			// Exact raw cap reaches normalization, then independently exceeds L
+			// because its retained structural charge is greater than JSON framing.
+			// Raw cap+1 never reaches that transaction-owned duplication at all.
+			expect(clones).toBe(extra === 0 ? 1 : 0);
+			expect(fixture.events).toHaveLength(0);
+			expect(fixture.transaction.ownedInventory().totalBytes).toBe(0);
+		}
+	});
+
+	it("does not alias equal-valued topology flips and preserves Map/Set/RegExp snapshots", () => {
+		const fixture = ledgerFixture();
+		const meta = fixture.message as unknown as Record<string, unknown>;
+		const shared = { value: 1 };
+		meta.probe = { left: shared, right: shared };
+		fixture.update("shared");
+		meta.probe = { left: { value: 1 }, right: { value: 1 } };
+		fixture.update("distinct");
+		const key = { value: 3 };
+		const regex = /a+b/giu;
+		regex.lastIndex = 9;
+		meta.probe = { map: new Map([[key, key]]), set: new Set([key]), regex };
+		fixture.update("intrinsics");
+		fixture.transaction.ownedInventory();
+		fixture.transaction.flush();
+		const updates = fixture.events as Array<Extract<AgentEvent, { type: "message_update" }>>;
+		for (const messages of [
+			fixture.callbacks.map(callback => callback.message),
+			updates.map(event => event.message as AssistantMessage),
+		]) {
+			const first = (messages[0] as unknown as Record<string, unknown>).probe as { left: object; right: object };
+			const second = (messages[1] as unknown as Record<string, unknown>).probe as typeof first;
+			expect(first.left).toBe(first.right);
+			expect(second.left).not.toBe(second.right);
+			expect(first.left).toEqual(second.left);
+			const third = (messages[2] as unknown as Record<string, unknown>).probe as {
+				map: Map<object, object>;
+				set: Set<object>;
+				regex: RegExp;
+			};
+			const [heldKey, heldValue] = [...third.map.entries()][0]!;
+			expect(heldKey).toBe(heldValue);
+			expect([...third.set][0]).toBe(heldKey);
+			expect(heldKey).toEqual({ value: 3 });
+			expect(third.regex).toBeInstanceOf(RegExp);
+			expect(third.regex.source).toBe("a+b");
+			expect(third.regex.flags).toBe("giu");
+			// Existing structured-clone normalization resets RegExp.lastIndex.
+			expect(third.regex.lastIndex).toBe(0);
+		}
+	});
+
+	it("fails an unsupported deep owned graph locally before admission", () => {
+		const fixture = ledgerFixture();
+		let probe: Record<string, unknown> = { leaf: true };
+		for (let depth = 0; depth < 600; depth++) probe = { child: probe };
+		(fixture.message as unknown as Record<string, unknown>).probe = probe;
+		let error: unknown;
+		try {
+			fixture.update("unobservable");
+		} catch (caught) {
+			error = caught;
+		}
+		expect(error).toBeInstanceOf(Error);
+		expect((error as Error).name).toBe("ManagedAttemptSnapshotError");
+		expect((error as Record<string, unknown>).errorStatus).toBeUndefined();
+		expect((error as Record<string, unknown>).transportFailure).toBeUndefined();
+		expect(fixture.callbacks).toHaveLength(0);
+		expect(fixture.events).toHaveLength(0);
+		expect(fixture.transaction.ownedInventory().totalBytes).toBe(0);
+	});
+
+	it("preserves Bun's detached shared-buffer normalization without retaining live provider backing", () => {
+		const fixture = ledgerFixture();
+		const backing = new SharedArrayBuffer(8);
+		new Uint8Array(backing)[0] = 7;
+		(fixture.message as unknown as Record<string, unknown>).probe = backing;
+		fixture.update("accepted");
+		new Uint8Array(backing)[0] = 99;
+		fixture.transaction.ownedInventory();
+		fixture.transaction.flush();
+		const normalized = (fixture.callbacks[0]!.message as unknown as Record<string, unknown>).probe;
+		// Bun 1.3.14's existing structuredClone boundary converts SAB to a
+		// detached ArrayBuffer. It must not be mistaken for shared live memory.
+		expect(normalized).toBeInstanceOf(ArrayBuffer);
+		expect(new Uint8Array(normalized as ArrayBuffer)[0]).toBe(7);
+		expect((normalized as ArrayBuffer).byteLength).toBe(8);
+		expect(fixture.transaction.ownedInventory().totalBytes).toBe(0);
+	});
+});
+
 describe("managed attempt transaction", () => {
+	for (const failure of ["abort", "prevalidation"] as const) {
+		it(`restores shared context and queued user input on precommit ${failure}`, async () => {
+			const mock = createMockModel({ responses: [{ content: ["unpublished"] }] });
+			const queued = { role: "user" as const, content: "queued steering", timestamp: 1 };
+			const context: AgentContext = {
+				systemPrompt: ["test"],
+				tools: [],
+				messages: [{ role: "user", content: "run", timestamp: 0 }],
+			};
+			const controller = new AbortController();
+			const events: AgentEvent[] = [];
+			let callbacks = 0;
+			let cancelled = 0;
+			const original = ManagedAttemptTransaction.prototype.flush;
+			const flush = spyOn(ManagedAttemptTransaction.prototype, "flush").mockImplementationOnce(function (
+				this: ManagedAttemptTransaction,
+				signal,
+			) {
+				if (failure === "abort") {
+					controller.abort();
+					return original.call(this, signal);
+				}
+				const clone = spyOn(globalThis, "structuredClone").mockImplementationOnce(() => {
+					throw new Error("replay validation");
+				});
+				try {
+					return original.call(this, signal);
+				} finally {
+					clone.mockRestore();
+				}
+			});
+			try {
+				const stream = agentLoopContinue(
+					context,
+					{
+						model: mock.model,
+						fallbackManaged: true,
+						convertToLlm: messages => messages as Message[],
+						getSteeringMessages: async () => [queued],
+						onAssistantMessageEvent: () => {
+							callbacks++;
+						},
+						onManagedAttemptOutcome: outcome => {
+							if (outcome.type === "run_terminal") cancelled++;
+							return { type: "terminal", terminal: { stopReason: "exhausted" } };
+						},
+					},
+					controller.signal,
+					mock.stream,
+				);
+				let error: unknown;
+				try {
+					for await (const event of stream) events.push(event);
+				} catch (caught) {
+					error = caught;
+				}
+				if (failure === "prevalidation") expect((error as Error).message).toContain("snapshot");
+				else {
+					expect(error).toBeUndefined();
+					expect(await stream.result()).toEqual([queued]);
+				}
+				expect(cancelled).toBe(failure === "abort" ? 1 : 0);
+				expect(callbacks).toBe(0);
+				expect(events.filter(event => "message" in event && event.message.role === "assistant")).toHaveLength(0);
+				expect(context.messages).toEqual([{ role: "user", content: "run", timestamp: 0 }, queued]);
+			} finally {
+				flush.mockRestore();
+			}
+		});
+	}
+	for (const fallbackManaged of [false, true]) {
+		for (const delayed of [false, true]) {
+			it(`delivers exact 49KB/1,000-update public-loop snapshots (managed=${fallbackManaged}, delayed=${delayed})`, async () => {
+				const mock = createMockModel();
+				const callbacks: AssistantMessage[] = [];
+				const streamFn = () => {
+					const stream = new AssistantMessageEventStream();
+					queueMicrotask(() => {
+						const message = assistantMessage(mock.model);
+						message.content = [{ type: "text", text: "" }];
+						stream.push({ type: "start", partial: structuredClone(message) });
+						for (let index = 0; index < 1_000; index++) {
+							const delta = `${String(index).padStart(4, "0")}${"x".repeat(45)}`;
+							(message.content[0] as { text: string }).text += delta;
+							stream.push({ type: "text_delta", contentIndex: 0, delta, partial: structuredClone(message) });
+						}
+						stream.push({ type: "done", reason: "stop", message });
+					});
+					return stream;
+				};
+				const context: AgentContext = {
+					systemPrompt: ["test"],
+					tools: [],
+					messages: [{ role: "user", content: "run", timestamp: 0 }],
+				};
+				const config: AgentLoopConfig = {
+					model: mock.model,
+					fallbackManaged,
+					convertToLlm: messages => messages as Message[],
+					onAssistantMessageEvent: message => callbacks.push(message),
+				};
+				const stream = agentLoopContinue(context, config, undefined, streamFn);
+				if (delayed) await stream.result();
+				const updates: Array<Extract<AgentEvent, { type: "message_update" }>> = [];
+				for await (const event of stream) if (event.type === "message_update") updates.push(event);
+				const result = await stream.result();
+				expect(callbacks).toHaveLength(1_000);
+				expect(updates).toHaveLength(1_000);
+				let expected = "";
+				for (let index = 0; index < 1_000; index++) {
+					expected += `${String(index).padStart(4, "0")}${"x".repeat(45)}`;
+					expect(messageText(callbacks[index]!)).toBe(expected);
+					expect(messageText(updates[index]!.message as AssistantMessage)).toBe(expected);
+				}
+				expect(messageText(result[0] as AssistantMessage)).toBe(expected);
+				expect(new TextEncoder().encode(expected).byteLength).toBe(49_000);
+				expect((result[0] as AssistantMessage).stopReason).toBe("stop");
+			});
+		}
+	}
+
+	for (const failure of ["throw", "abort"] as const) {
+		for (const failAt of [1, 2]) {
+			it(`never executes tools or retries after ${failure} at committed callback ${failAt}`, async () => {
+				const mock = createMockModel();
+				let calls = 0;
+				let outcomes = 0;
+				let toolCalls = 0;
+				let callbacks = 0;
+				const updates: AgentEvent[] = [];
+				const controller = new AbortController();
+				const streamFn = () => {
+					calls++;
+					const stream = new AssistantMessageEventStream();
+					queueMicrotask(() => {
+						const message = assistantMessage(mock.model);
+						message.content = [
+							{ type: "text", text: "" },
+							{ type: "toolCall", id: "call", name: "inspect", arguments: {} },
+						];
+						message.stopReason = "toolUse";
+						stream.push({ type: "start", partial: structuredClone(message) });
+						for (const text of ["one", "two", "three"]) {
+							(message.content[0] as { text: string }).text = text;
+							stream.push({
+								type: "text_delta",
+								contentIndex: 0,
+								delta: text,
+								partial: structuredClone(message),
+							});
+						}
+						stream.push({ type: "done", reason: "toolUse", message });
+					});
+					return stream;
+				};
+				const context: AgentContext = {
+					systemPrompt: ["test"],
+					messages: [{ role: "user", content: "run", timestamp: 0 }],
+					tools: [
+						{
+							name: "inspect",
+							label: "Inspect",
+							description: "inspect",
+							parameters: { type: "object", properties: {} },
+							execute: async () => {
+								toolCalls++;
+								return { content: [{ type: "text", text: "ran" }], details: {} };
+							},
+						},
+					],
+				};
+				const config: AgentLoopConfig = {
+					model: mock.model,
+					fallbackManaged: true,
+					convertToLlm: messages => messages as Message[],
+					onAssistantMessageEvent: () => {
+						if (++callbacks !== failAt) return;
+						if (failure === "abort") controller.abort();
+						else
+							throw Object.assign(new Error("observer-local"), {
+								transportFailure: { kind: "transport", status: 429 },
+							});
+					},
+					onManagedAttemptOutcome: outcome => {
+						if (outcome.type === "retryable_discarded") outcomes++;
+						return { type: "terminal", terminal: { stopReason: "exhausted" } };
+					},
+				};
+				const stream = agentLoopContinue(context, config, controller.signal, streamFn);
+				let error: unknown;
+				try {
+					for await (const event of stream) if (event.type === "message_update") updates.push(event);
+				} catch (caught) {
+					error = caught;
+				}
+				if (failure === "throw") {
+					expect(error).toBeInstanceOf(Error);
+					expect((error as Error).message).toContain("committed output observer failed");
+					expect((error as Record<string, unknown>).transportFailure).toBeUndefined();
+				} else expect(error).toBeUndefined();
+				expect(calls).toBe(1);
+				expect(outcomes).toBe(0);
+				expect(toolCalls).toBe(0);
+				expect(callbacks).toBe(failAt);
+				expect(updates).toHaveLength(failAt - 1);
+				const published = context.messages.find(message => message.role === "assistant") as AssistantMessage;
+				expect(messageText(published)).toBe(failAt === 1 ? "one" : "two");
+				expect(published.stopReason).toBe(failure === "throw" ? "error" : "aborted");
+				expect(context.messages[0]).toEqual({ role: "user", content: "run", timestamp: 0 });
+				if (failure === "abort") {
+					const result = await stream.result();
+					expect(messageText(result[0] as AssistantMessage)).toBe(failAt === 1 ? "one" : "two");
+					expect((result[0] as AssistantMessage).stopReason).toBe("aborted");
+					expect(result[1]?.role).toBe("toolResult");
+				}
+			});
+		}
+	}
+
 	it("flushes a successful assistant lifecycle once and in provider order", async () => {
 		const mock = createMockModel({ responses: [{ content: ["accepted"] }] });
 		const agent = new Agent({
@@ -779,12 +1682,11 @@ describe("managed attempt transaction", () => {
 		expect(getPrototypeDispatches).toBe(0);
 	});
 
-	it("rejects an oversized event before duplicating it with a snapshot", async () => {
-		// The staged-byte cap exists to bound memory: an over-limit event must
-		// be rejected from its measurement pass alone, WITHOUT first being
-		// duplicated by structuredClone. The nested witness getter counts deep
-		// reads: measurement reads it exactly once; a snapshot taken before
-		// the cap check would read it a second time.
+	it("rejects oversized normalized input before transaction-owned duplication, preserving the upstream getter witness", async () => {
+		// The managed provider shell has already cloned the raw partial once.
+		// Preflight reads that detached normalized shell, not the provider getter.
+		// The one observed getter read is upstream ingress, not preflight proof
+		// that the provider-owned object was rejected before its shell clone.
 		const mock = createMockModel();
 		let witnessReads = 0;
 		const streamFn = () => {
