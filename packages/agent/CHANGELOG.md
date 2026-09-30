@@ -2,11 +2,11 @@
 
 ## [Unreleased]
 
+## [0.7.3] - 2026-09-30
+
 ### Fixed
 
 - Managed fallback now retains a lossless, owned UTF-16 forward-patch ledger instead of cumulative provisional assistant snapshots. Callback records are staged only for an actual observer, all retained owners count against the unchanged 10,000-record/16 MiB limits, and bounded replay validation precedes irreversible callback-before-update dispatch. Local staging/replay/observer failures do not authorize provider fallback.
-
-## [0.7.2] - 2026-09-29
 
 ## [0.6.7] - 2026-09-28
 
