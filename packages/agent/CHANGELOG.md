@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.7.4] - 2026-10-03
+
 ### Fixed
 
 - Managed fallback no longer kills healthy long responses. Exceeding the provisional caps (100,000 records / 16 MiB) now publishes the attempt and streams the rest live instead of failing with "exceeded the provisional event buffer limit"; `ManagedAttemptBufferOverflowError` is removed. Streamed content is also published once it has been held for `MANAGED_ATTEMPT_MAX_VISIBLE_HOLD_MS` (2 s), so long and parallel work stays visible while it streams. A published attempt is never silently discarded: a later provider failure surfaces through the ordinary session retry path with the visible output preserved.
