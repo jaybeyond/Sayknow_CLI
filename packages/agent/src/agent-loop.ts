@@ -64,26 +64,30 @@ import type {
 
 /** Sentinel returned by the abort race in `streamAssistantResponse`. */
 /**
- * Defensive caps for a provisional managed attempt. These are intentionally
- * well above ordinary streamed responses; they only bound memory when an
- * upstream emits an unbounded event stream before the attempt can commit.
+ * Defensive caps for a provisional managed attempt. They only bound memory when
+ * an upstream emits an unbounded event stream before the attempt can commit.
+ * Every streamed delta stages two records (the `message_update` event and the
+ * observer callback), so the record cap must sit well above the byte cap's
+ * effective delta count (~22k ordinary deltas at 16 MiB); a 10,000-record cap
+ * killed healthy ~5,000-delta responses with a non-retryable local error.
  */
-export const MANAGED_ATTEMPT_MAX_STAGED_EVENTS = 10_000;
+export const MANAGED_ATTEMPT_MAX_STAGED_EVENTS = 100_000;
 export const MANAGED_ATTEMPT_MAX_STAGED_BYTES = 16 * 1024 * 1024;
 
 /**
- * Local staging failure: the provisional buffer limit was exceeded. Carries
- * NO transport facts or status by design — only original typed provider
- * transport facts may authorize provider fallback, so local buffer machinery
- * must never masquerade as provider evidence or consume the fallback chain.
- * It is therefore non-retryable and surfaces as an explicit local error.
+ * Longest a managed attempt may hold streamed content invisible. Failures that
+ * warrant a silent model fallback arrive before or at the first content; after
+ * this window the attempt is published so long or parallel work stays visible.
+ * Reaching either staging cap also publishes instead of killing the attempt.
  */
-class ManagedAttemptBufferOverflowError extends Error {
-	constructor() {
-		super("Managed fallback attempt exceeded the provisional event buffer limit");
-		this.name = "ManagedAttemptBufferOverflowError";
-	}
-}
+export const MANAGED_ATTEMPT_MAX_VISIBLE_HOLD_MS = 2_000;
+
+const MANAGED_VISIBLE_CONTENT_EVENT_TYPES: ReadonlySet<string> = new Set([
+	"text_delta",
+	"thinking_delta",
+	"reasoning_summary_delta",
+	"toolcall_delta",
+]);
 
 /**
  * Local snapshot-machinery failure. Deliberately carries no transport facts
@@ -1067,6 +1071,8 @@ export class ManagedAttemptTransaction {
 	#observer: ((message: AssistantMessage, event: AssistantMessageEvent) => void) | undefined;
 	#model: AgentLoopConfig["model"];
 
+	#visibleSince: number | undefined;
+
 	constructor(
 		stream: EventStream<AgentEvent, AgentMessage[]>,
 		observer: ((message: AssistantMessage, event: AssistantMessageEvent) => void) | undefined,
@@ -1246,6 +1252,11 @@ export class ManagedAttemptTransaction {
 		return id;
 	}
 
+	/** Whether staged output has been published; later failures cannot be hidden. */
+	get committed(): boolean {
+		return this.#committed;
+	}
+
 	push(event: AgentEvent): void {
 		if (this.#committed) {
 			this.#stream.push(event);
@@ -1267,8 +1278,22 @@ export class ManagedAttemptTransaction {
 		this.#stage("callback", { message, event });
 	}
 
-	#preflight(input: unknown): boolean {
-		if (this.#entries.length + 1 > MANAGED_ATTEMPT_MAX_STAGED_EVENTS) throw new ManagedAttemptBufferOverflowError();
+	/**
+	 * Hold streamed content back only briefly. Transport failures that justify a
+	 * silent model fallback (429/5xx/auth/first-event timeout) happen before or
+	 * right at the first content; past this window the user must see progress.
+	 */
+	#visibleHoldExpired(entry: ManagedLedgerEntry): boolean {
+		const type = entry.assistantType?.value;
+		if (!type || !MANAGED_VISIBLE_CONTENT_EVENT_TYPES.has(type)) return false;
+		const now = Date.now();
+		this.#visibleSince ??= now;
+		return now - this.#visibleSince >= MANAGED_ATTEMPT_MAX_VISIBLE_HOLD_MS;
+	}
+
+	/** Returns whether the input is JSON-serializable, or "overflow" when it cannot be staged within the caps. */
+	#preflight(input: unknown): boolean | "overflow" {
+		if (this.#entries.length + 1 > MANAGED_ATTEMPT_MAX_STAGED_EVENTS) return "overflow";
 		let serialized: string | undefined;
 		try {
 			serialized = JSON.stringify(input);
@@ -1276,9 +1301,29 @@ export class ManagedAttemptTransaction {
 			return false;
 		}
 		if (serialized === undefined) throw new ManagedAttemptSnapshotError();
-		if (managedAttemptTextEncoder.encode(serialized).byteLength > MANAGED_ATTEMPT_MAX_STAGED_BYTES)
-			throw new ManagedAttemptBufferOverflowError();
+		if (managedAttemptTextEncoder.encode(serialized).byteLength > MANAGED_ATTEMPT_MAX_STAGED_BYTES) return "overflow";
 		return true;
+	}
+
+	/**
+	 * Publish everything staged so far and pass later output straight through.
+	 * Used when holding more output would exceed the memory caps or delay
+	 * visible progress too long. A spilled attempt is no longer discardable:
+	 * a later failure surfaces as an ordinary (same-run) error instead of a
+	 * silent model fallback, and a long healthy response is never killed.
+	 */
+	#spill(): void {
+		this.#visibleSince = undefined;
+		this.flush();
+	}
+
+	#forward(kind: "event" | "callback", input: unknown): void {
+		if (kind === "event") {
+			this.#stream.push(input as AgentEvent);
+			return;
+		}
+		const callback = input as { message: AssistantMessage; event: AssistantMessageEvent };
+		this.#observer?.(callback.message, callback.event);
 	}
 
 	#stage(
@@ -1288,6 +1333,14 @@ export class ManagedAttemptTransaction {
 		if (this.#discarded) throw new ManagedAttemptSnapshotError();
 		try {
 			const measured = this.#preflight(input);
+			if (measured === "overflow") {
+				// Holding this frame would exceed the caps: publish instead of killing
+				// a healthy attempt. The frame itself is forwarded live, exactly as a
+				// committed transaction forwards every later frame.
+				this.#spill();
+				this.#forward(kind, input);
+				return;
+			}
 			let normalized: unknown;
 			if (kind === "callback") {
 				const callback = input as { message: AssistantMessage; event: AssistantMessageEvent };
@@ -1427,12 +1480,17 @@ export class ManagedAttemptTransaction {
 				this.#retainedBytes += 16;
 				this.#retain(entry.messageSlots);
 			}
-			if (this.#retainedBytes > MANAGED_ATTEMPT_MAX_STAGED_BYTES) throw new ManagedAttemptBufferOverflowError();
 			this.#peakBytes = Math.max(this.#peakBytes, this.#retainedBytes);
+			if (this.#retainedBytes > MANAGED_ATTEMPT_MAX_STAGED_BYTES || this.#visibleHoldExpired(entry)) {
+				// The entry is already ledgered, so the flush publishes it too.
+				this.#spill();
+			}
 		} catch (error) {
+			// Once published, failures are ordinary run errors (observer/replay), not
+			// discardable staging failures.
+			if (this.#committed) throw error;
 			this.discard();
-			if (error instanceof ManagedAttemptBufferOverflowError || error instanceof ManagedAttemptSnapshotError)
-				throw error;
+			if (error instanceof ManagedAttemptSnapshotError) throw error;
 			throw new ManagedAttemptSnapshotError();
 		}
 	}
@@ -2389,7 +2447,12 @@ async function runLoopBody(
 			} catch (err) {
 				if (!(err instanceof HarmonyLeakInterruption)) {
 					const failureMessage = managedFailureMessage(err, config);
-					if (config.fallbackManaged && transaction && managedContextOverflow(failureMessage, config)) {
+					if (
+						config.fallbackManaged &&
+						transaction &&
+						!transaction.committed &&
+						managedContextOverflow(failureMessage, config)
+					) {
 						transaction.discard();
 						currentContext.messages.splice(contextMessageCount);
 						newMessages.splice(newMessageCount);
@@ -2397,7 +2460,7 @@ async function runLoopBody(
 						stream.end(newMessages);
 						return;
 					}
-					if (config.fallbackManaged && transaction && managedRetryableFailure(err)) {
+					if (config.fallbackManaged && transaction && !transaction.committed && managedRetryableFailure(err)) {
 						transaction.discard();
 						currentContext.messages.splice(contextMessageCount);
 						newMessages.splice(newMessageCount);
@@ -2405,8 +2468,9 @@ async function runLoopBody(
 						stream.end(newMessages);
 						return;
 					}
+					const published = transaction?.committed === true;
 					transaction?.discard();
-					if (transaction) {
+					if (transaction && !published) {
 						currentContext.messages.splice(contextMessageCount);
 						newMessages.splice(newMessageCount);
 					}
@@ -2482,8 +2546,11 @@ async function runLoopBody(
 				}
 			}
 
+			// A published attempt cannot be silently discarded: its failure surfaces
+			// through the ordinary error path (session retry) with output preserved.
+			const discardable = transaction ? !transaction.committed : true;
 			const overflow = managedContextOverflow(message, config);
-			if (config.fallbackManaged && overflow) {
+			if (config.fallbackManaged && discardable && overflow) {
 				transaction?.discard();
 				currentContext.messages.splice(contextMessageCount);
 				newMessages.splice(newMessageCount);
@@ -2504,7 +2571,12 @@ async function runLoopBody(
 					: "Provider returned an empty response with anomalously low token usage (possible context overflow via proxy)";
 			}
 
-			if (config.fallbackManaged && message.stopReason === "error" && managedRetryableFailure(message)) {
+			if (
+				config.fallbackManaged &&
+				discardable &&
+				message.stopReason === "error" &&
+				managedRetryableFailure(message)
+			) {
 				transaction?.discard();
 				currentContext.messages.splice(contextMessageCount);
 				newMessages.splice(newMessageCount);
@@ -2513,7 +2585,7 @@ async function runLoopBody(
 				return;
 			}
 
-			if (config.fallbackManaged && message.stopReason === "aborted") {
+			if (config.fallbackManaged && discardable && message.stopReason === "aborted") {
 				transaction?.discard();
 				currentContext.messages.splice(contextMessageCount);
 				newMessages.splice(newMessageCount);
@@ -2816,11 +2888,16 @@ async function streamAssistantResponse(
 	const dynamicReasoning = config.getReasoning?.();
 	const harmonyMitigationEnabled = isHarmonyLeakMitigationTarget(config.model);
 	const harmonyAbortController = harmonyMitigationEnabled ? new AbortController() : undefined;
-	const requestSignal = harmonyAbortController
-		? signal
-			? AbortSignal.any([signal, harmonyAbortController.signal])
-			: harmonyAbortController.signal
-		: signal;
+	// Cancels the provider request when this invocation exits by throwing (e.g.
+	// a local managed-staging failure). Without it the provider stream keeps
+	// running unobserved and a stateful transport (Codex websocket) rejects the
+	// immediate retry with "websocket request already in progress".
+	const attemptAbortController = new AbortController();
+	const requestSignal = AbortSignal.any([
+		...(signal ? [signal] : []),
+		...(harmonyAbortController ? [harmonyAbortController.signal] : []),
+		attemptAbortController.signal,
+	]);
 	const effectiveTemperature =
 		harmonyRetryAttempt > 0 && config.temperature !== undefined ? config.temperature + 0.05 : config.temperature;
 	const effectiveToolChoice = recoveryMode ? "none" : (dynamicToolChoice ?? config.toolChoice);
@@ -3001,6 +3078,7 @@ async function streamAssistantResponse(
 			return trailing;
 		});
 	} catch (err) {
+		attemptAbortController.abort(err);
 		failChatSpan(telemetry, chatSpan, {
 			errorObject: err,
 			responseHeaders: capturedHeaders,

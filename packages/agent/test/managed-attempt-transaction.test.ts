@@ -5,6 +5,7 @@ import {
 	agentLoopContinue,
 	MANAGED_ATTEMPT_MAX_STAGED_BYTES,
 	MANAGED_ATTEMPT_MAX_STAGED_EVENTS,
+	MANAGED_ATTEMPT_MAX_VISIBLE_HOLD_MS,
 	ManagedAttemptTransaction,
 	sanitizedDetachedClone,
 } from "@sayknow-cli/agent-core/agent-loop";
@@ -180,36 +181,23 @@ describe("managed compact ledger", () => {
 		expect(messageText(callbacks[0]!.message)).toBe("\uD83D");
 	});
 
-	it("counts callback and lifecycle records at the immutable 10,000 boundary", () => {
-		expect(MANAGED_ATTEMPT_MAX_STAGED_EVENTS).toBe(10_000);
-		for (const updates of [9_997, 9_998]) {
-			const fixture = ledgerFixture(false);
-			fixture.transaction.push({ type: "turn_start" });
-			fixture.transaction.push({ type: "message_start", message: fixture.message });
-			for (let index = 0; index < updates; index++) fixture.update("", "");
-			if (updates === 9_997) {
-				fixture.transaction.push({ type: "message_end", message: fixture.message });
-				expect(fixture.transaction.ownedInventory().recordCount).toBe(10_000);
-				fixture.transaction.flush();
-				expect(fixture.events.filter(event => event.type === "message_update")).toHaveLength(updates);
-			} else {
-				expect(() => fixture.transaction.push({ type: "message_end", message: fixture.message })).toThrow(
-					"provisional event buffer limit",
-				);
-				expect(fixture.events).toHaveLength(0);
-				expect(fixture.transaction.ownedInventory().totalBytes).toBe(0);
-			}
-		}
+	it("commits observed responses past the former 10,000-record cap", () => {
+		expect(MANAGED_ATTEMPT_MAX_STAGED_EVENTS).toBe(100_000);
+		// 6,000 observed deltas stage 12,000+ records: the old cap rejected them.
 		const observed = ledgerFixture();
 		observed.transaction.push({ type: "turn_start" });
 		observed.transaction.push({ type: "message_start", message: observed.message });
-		for (let index = 0; index < 4_999; index++) observed.update("", "");
-		expect(observed.transaction.ownedInventory().recordCount).toBe(10_000);
-		expect(() => observed.transaction.push({ type: "message_end", message: observed.message })).toThrow(
-			"provisional event buffer limit",
-		);
-		expect(observed.events).toHaveLength(0);
-		expect(observed.callbacks).toHaveLength(0);
+		let text = "";
+		for (let index = 0; index < 6_000; index++) {
+			text += "t ";
+			observed.update(text, "t ");
+		}
+		observed.transaction.push({ type: "message_end", message: observed.message });
+		expect(observed.transaction.ownedInventory().recordCount).toBe(12_003);
+		observed.transaction.flush();
+		expect(observed.events.filter(event => event.type === "message_update")).toHaveLength(6_000);
+		expect(observed.callbacks).toHaveLength(6_000);
+		expect(messageText(observed.callbacks.at(-1)!.message)).toBe(text);
 	});
 
 	it("uses actual string multiplicity and a uniquely owned one-byte typed residual", () => {
@@ -252,7 +240,12 @@ describe("managed compact ledger", () => {
 		).toBeLessThan(16_777_216);
 		exact.transaction.flush();
 		expect(exact.callbacks).toHaveLength(1);
-		expect(() => measure(text, residual + 1)).toThrow("provisional event buffer limit");
+		// One unit over the cap no longer kills the attempt: it publishes instead.
+		const over = measure(text, residual + 1);
+		expect(over.transaction.committed).toBeTrue();
+		expect(over.transaction.ownedInventory().totalBytes).toBe(0);
+		expect(over.callbacks).toHaveLength(1);
+		expect(over.events.map(event => event.type)).toEqual(["turn_start", "message_start", "message_update"]);
 	});
 
 	it("preserves nested replacement, deletion, array order and typed metadata at every observation", () => {
@@ -436,18 +429,18 @@ describe("managed compact ledger", () => {
 		expect(terminal.messages[1]).toEqual({ role: "user", content: "user", timestamp: 0 });
 	});
 
-	it("rejects raw multibyte UTF-8 input independently of owned UTF-16 storage", () => {
+	it("publishes raw multibyte UTF-8 input over the cap independently of owned UTF-16 storage", () => {
 		const fixture = ledgerFixture(false);
 		const probe = "\u0800".repeat(Math.ceil(MANAGED_ATTEMPT_MAX_STAGED_BYTES / 3));
 		expect(2 * probe.length).toBeLessThan(MANAGED_ATTEMPT_MAX_STAGED_BYTES);
 		expect(new TextEncoder().encode(JSON.stringify({ type: "turn_start", probe })).byteLength).toBeGreaterThan(
 			MANAGED_ATTEMPT_MAX_STAGED_BYTES,
 		);
-		expect(() => fixture.transaction.push({ type: "turn_start", probe } as AgentEvent)).toThrow(
-			"provisional event buffer limit",
-		);
+		const input = { type: "turn_start", probe } as AgentEvent;
+		fixture.transaction.push(input);
+		expect(fixture.transaction.committed).toBeTrue();
 		expect(fixture.transaction.ownedInventory().totalBytes).toBe(0);
-		expect(fixture.events).toHaveLength(0);
+		expect(fixture.events).toEqual([input]);
 	});
 
 	it("never stages callbacks when no real observer exists", () => {
@@ -609,7 +602,7 @@ describe("managed compact ledger", () => {
 		});
 	}
 
-	it("distinguishes exact raw four-byte Unicode admission from raw cap+1 before duplication", () => {
+	it("publishes exact raw four-byte Unicode cap and raw cap+1 without killing the attempt", () => {
 		const headerBytes = new TextEncoder().encode(JSON.stringify({ type: "turn_start", probe: "" })).byteLength;
 		const pairs = Math.floor((MANAGED_ATTEMPT_MAX_STAGED_BYTES - headerBytes) / 4);
 		const remainder = MANAGED_ATTEMPT_MAX_STAGED_BYTES - headerBytes - 4 * pairs;
@@ -627,15 +620,19 @@ describe("managed compact ledger", () => {
 				return original(value);
 			});
 			try {
-				expect(() => fixture.transaction.push(input)).toThrow("provisional event buffer limit");
+				fixture.transaction.push(input);
 			} finally {
 				clone.mockRestore();
 			}
-			// Exact raw cap reaches normalization, then independently exceeds L
-			// because its retained structural charge is greater than JSON framing.
-			// Raw cap+1 never reaches that transaction-owned duplication at all.
+			// Exact raw cap reaches normalization, then exceeds L through its
+			// retained structural charge and is published from the ledger. Raw
+			// cap+1 never reaches transaction-owned duplication: it is forwarded live.
 			expect(clones).toBe(extra === 0 ? 1 : 0);
-			expect(fixture.events).toHaveLength(0);
+			expect(fixture.transaction.committed).toBeTrue();
+			expect(fixture.events).toHaveLength(1);
+			expect((fixture.events[0] as unknown as { probe: string }).probe).toBe(
+				(input as unknown as { probe: string }).probe,
+			);
 			expect(fixture.transaction.ownedInventory().totalBytes).toBe(0);
 		}
 	});
@@ -959,6 +956,171 @@ describe("managed attempt transaction", () => {
 		expect(assistantBatch.slice(-3)).toEqual(["message_end", "turn_end", "agent_end"]);
 		expect(agent.state.messages.filter(message => message.role === "assistant")).toHaveLength(1);
 		expectManagedRunStart(events);
+	});
+
+	it("commits a long observed managed response that exceeds 5,000 deltas", async () => {
+		const mock = createMockModel();
+		const deltas = 6_000;
+		const streamFn = () => {
+			const stream = new AssistantMessageEventStream();
+			void (async () => {
+				const partial = assistantMessage(mock.model);
+				stream.push({ type: "start", partial });
+				partial.content.push({ type: "text", text: "" });
+				stream.push({ type: "text_start", contentIndex: 0, partial });
+				for (let index = 0; index < deltas; index++) {
+					(partial.content[0] as { type: "text"; text: string }).text += "token ";
+					stream.push({ type: "text_delta", contentIndex: 0, delta: "token ", partial });
+					if (index % 500 === 0) await Bun.sleep(0);
+				}
+				stream.push({ type: "text_end", contentIndex: 0, content: "token ".repeat(deltas), partial });
+				stream.push({ type: "done", reason: "stop", message: partial });
+			})();
+			return stream;
+		};
+		const context: AgentContext = {
+			systemPrompt: ["test"],
+			messages: [{ role: "user", content: "run", timestamp: Date.now() }],
+			tools: [],
+		};
+		let callbacks = 0;
+		const config: AgentLoopConfig = {
+			model: mock.model,
+			convertToLlm: messages => messages as Message[],
+			fallbackManaged: true,
+			onAssistantMessageEvent: () => {
+				callbacks += 1;
+			},
+		};
+		const stream = agentLoopContinue(context, config, undefined, streamFn);
+		const events: AgentEvent[] = [];
+		for await (const event of stream) events.push(event);
+		await stream.result();
+		const final = context.messages.at(-1) as AssistantMessage;
+		expect(final.stopReason).toBe("stop");
+		expect(messageText(final)).toBe("token ".repeat(deltas));
+		expect(events.filter(event => event.type === "message_update")).toHaveLength(deltas + 2);
+		expect(callbacks).toBe(deltas + 2);
+	});
+
+	it("publishes streamed content after the visible-hold window and keeps it on a later failure", async () => {
+		const mock = createMockModel();
+		let releaseTail: (() => void) | undefined;
+		const tail = new Promise<void>(resolve => {
+			releaseTail = resolve;
+		});
+		const streamFn = () => {
+			const stream = new AssistantMessageEventStream();
+			void (async () => {
+				const partial = assistantMessage(mock.model);
+				stream.push({ type: "start", partial });
+				partial.content.push({ type: "text", text: "" });
+				stream.push({ type: "text_start", contentIndex: 0, partial });
+				(partial.content[0] as { type: "text"; text: string }).text = "visible";
+				stream.push({ type: "text_delta", contentIndex: 0, delta: "visible", partial });
+				await Bun.sleep(MANAGED_ATTEMPT_MAX_VISIBLE_HOLD_MS + 50);
+				(partial.content[0] as { type: "text"; text: string }).text += " more";
+				stream.push({ type: "text_delta", contentIndex: 0, delta: " more", partial });
+				await tail;
+				// A provider failure after publication: typed transport facts that
+				// would normally authorize a silent model fallback.
+				const failed: AssistantMessage = {
+					...partial,
+					stopReason: "error",
+					errorMessage: "529 overloaded",
+					errorStatus: 529,
+					transportFailure: { kind: "transport", status: 529 },
+				} as AssistantMessage;
+				stream.push({ type: "error", reason: "error", error: failed });
+			})();
+			return stream;
+		};
+		const agent = new Agent({
+			initialState: { model: mock.model, systemPrompt: ["test"], tools: [], messages: [] },
+			streamFn,
+		});
+		const updates: string[] = [];
+		agent.subscribe(event => {
+			if (event.type === "message_update") updates.push(messageText(event.message as AssistantMessage));
+		});
+		let outcomeCalls = 0;
+		const run = agent.prompt("run", {
+			fallbackManaged: true,
+			onManagedAttemptOutcome: () => {
+				outcomeCalls += 1;
+				return { type: "terminal", terminal: { stopReason: "exhausted" } };
+			},
+		} as any);
+		for (let i = 0; i < 100 && !updates.includes("visible more"); i++) await Bun.sleep(50);
+		// Visible while the provider is still streaming: not held until the end.
+		expect(updates).toContain("visible");
+		expect(updates).toContain("visible more");
+		releaseTail!();
+		await run;
+		await agent.waitForIdle();
+		// Published output is never silently discarded for a model fallback.
+		expect(outcomeCalls).toBe(0);
+		const final = agent.state.messages.at(-1) as AssistantMessage;
+		expect(final.stopReason).toBe("error");
+		expect(messageText(final)).toBe("visible more");
+	});
+
+	it("keeps short managed attempts discardable for silent fallback", async () => {
+		const transaction = new ManagedAttemptTransaction(
+			new EventStream<AgentEvent, AgentMessage[]>(
+				event => event.type === "agent_end",
+				() => [],
+			),
+			() => {},
+			createMockModel().model,
+		);
+		transaction.push({ type: "turn_start" });
+		expect(transaction.committed).toBeFalse();
+	});
+
+	it("aborts the provider request when a provider invocation fails locally", async () => {
+		const mock = createMockModel();
+		let providerSignal: AbortSignal | undefined;
+		const streamFn = (_model: unknown, _context: unknown, options?: { signal?: AbortSignal }) => {
+			providerSignal = options?.signal;
+			const stream = new AssistantMessageEventStream();
+			void (async () => {
+				const partial = assistantMessage(mock.model);
+				stream.push({ type: "start", partial });
+				await Bun.sleep(0);
+				// Over the cap: the attempt is published, and the observer then fails.
+				partial.content.push({ type: "text", text: "x".repeat(9 * 1024 * 1024) });
+				stream.push({ type: "text_start", contentIndex: 0, partial });
+				// Never completes: only an abort can release the provider stream.
+			})();
+			return stream;
+		};
+		const context: AgentContext = {
+			systemPrompt: ["test"],
+			messages: [{ role: "user", content: "run", timestamp: Date.now() }],
+			tools: [],
+		};
+		const config: AgentLoopConfig = {
+			model: mock.model,
+			convertToLlm: messages => messages as Message[],
+			fallbackManaged: true,
+			onAssistantMessageEvent: () => {
+				throw new Error("observer exploded");
+			},
+		};
+		const stream = agentLoopContinue(context, config, undefined, streamFn);
+		let failure: unknown;
+		try {
+			for await (const _event of stream) {
+				// drain
+			}
+			await stream.result();
+		} catch (error) {
+			failure = error;
+		}
+		expect(String(failure ?? "")).toContain("observer exploded");
+		expect(providerSignal).toBeDefined();
+		expect(providerSignal!.aborted).toBeTrue();
 	});
 
 	it("commits a detached accepted message when a managed partial is not structured-cloneable", async () => {
@@ -1682,11 +1844,9 @@ describe("managed attempt transaction", () => {
 		expect(getPrototypeDispatches).toBe(0);
 	});
 
-	it("rejects oversized normalized input before transaction-owned duplication, preserving the upstream getter witness", async () => {
-		// The managed provider shell has already cloned the raw partial once.
-		// Preflight reads that detached normalized shell, not the provider getter.
-		// The one observed getter read is upstream ingress, not preflight proof
-		// that the provider-owned object was rejected before its shell clone.
+	it("publishes oversized normalized input without killing the attempt, preserving the upstream getter witness", async () => {
+		// Oversized output is published instead of failing the run. The provider
+		// getter is still read once at upstream ingress, never by staging.
 		const mock = createMockModel();
 		let witnessReads = 0;
 		const streamFn = () => {
@@ -1704,6 +1864,7 @@ describe("managed attempt transaction", () => {
 				});
 				(partial as unknown as Record<string, unknown>).witness = witness;
 				stream.push({ type: "start", partial });
+				stream.push({ type: "done", reason: "stop", message: partial });
 			});
 			return stream;
 		};
@@ -1722,14 +1883,17 @@ describe("managed attempt transaction", () => {
 		} as any);
 		await agent.waitForIdle();
 
-		// Local overflow is not provider evidence: the fallback chain must not
-		// be consumed, and the failure surfaces as an explicit local error.
+		// Local overflow is not provider evidence: the chain is never consumed,
+		// and a healthy oversized response now completes instead of failing.
 		expect(outcomeCalls).toBe(0);
-		expect(agent.state.error).toContain("provisional event buffer limit");
-		expect(witnessReads).toBe(1);
+		expect(agent.state.error).toBeUndefined();
+		expect(witnessReads).toBeGreaterThanOrEqual(1);
+		const final = agent.state.messages.at(-1) as AssistantMessage;
+		expect(final.stopReason).toBe("stop");
+		expect(messageText(final).length).toBe(16 * 1024 * 1024 + 1);
 	});
 
-	it("fails an over-limit provisional batch as a local error without consuming the chain", async () => {
+	it("publishes an over-limit provisional batch without consuming the chain", async () => {
 		const mock = createMockModel();
 		const streamFn = () => {
 			const stream = new AssistantMessageEventStream();
@@ -1752,6 +1916,7 @@ describe("managed attempt transaction", () => {
 					timestamp: Date.now(),
 				};
 				stream.push({ type: "start", partial: message });
+				stream.push({ type: "done", reason: "stop", message });
 			});
 			return stream;
 		};
@@ -1784,18 +1949,15 @@ describe("managed attempt transaction", () => {
 		} as any);
 		await agent.waitForIdle();
 
-		// Only original typed provider transport facts may authorize provider
-		// fallback: the local buffer-limit error must not synthesize a
-		// provider-like 503 and must not rotate/consume the chain. It surfaces
-		// as an explicit local error message carrying no provider evidence,
-		// and no provisional streamed content leaks (no message_update).
+		// Exceeding the staging caps is not provider evidence and never consumes
+		// the chain; the attempt is published and completes as an ordinary turn.
 		expect(outcomeCalls).toBe(0);
-		expect(agent.state.error).toContain("provisional event buffer limit");
-		expect(events).not.toContain("message_update");
+		expect(agent.state.error).toBeUndefined();
 		expect(surfaced).toHaveLength(1);
-		expect(surfaced[0]?.errorMessage).toContain("provisional event buffer limit");
+		expect(surfaced[0]?.stopReason).toBe("stop");
 		expect(surfaced[0]?.errorStatus).toBeUndefined();
 		expect(surfaced[0]?.transportFailure).toBeUndefined();
+		expect(events.slice(-2)).toEqual(["turn_end", "agent_end"]);
 	});
 
 	it("retains queued follow-up input when its managed attempt is discarded for retry", async () => {

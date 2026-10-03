@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Managed fallback no longer kills healthy long responses. Exceeding the provisional caps (100,000 records / 16 MiB) now publishes the attempt and streams the rest live instead of failing with "exceeded the provisional event buffer limit"; `ManagedAttemptBufferOverflowError` is removed. Streamed content is also published once it has been held for `MANAGED_ATTEMPT_MAX_VISIBLE_HOLD_MS` (2 s), so long and parallel work stays visible while it streams. A published attempt is never silently discarded: a later provider failure surfaces through the ordinary session retry path with the visible output preserved.
+- A provider invocation that exits by throwing (e.g. a local staging failure) now aborts its provider request. Previously the stream kept running unobserved, and the immediate retry on a Codex websocket failed with "websocket request already in progress".
+
 ## [0.7.3] - 2026-09-30
 
 ### Fixed
