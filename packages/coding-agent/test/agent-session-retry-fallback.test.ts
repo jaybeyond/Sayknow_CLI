@@ -36,6 +36,36 @@ function trackRetryEvents(session: AgentSession): {
 	return { retryStartEvents, retryEndEvents };
 }
 
+/** Typed exhausted-quota failure: the trigger that legitimately switches models. */
+function quotaFailureStream(model: { api: string; provider: string; id: string }): AssistantMessageEventStream {
+	const stream = new AssistantMessageEventStream();
+	queueMicrotask(() => {
+		const failure = {
+			role: "assistant",
+			content: [],
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "error",
+			errorMessage: "usage limit reached",
+			errorStatus: 429,
+			timestamp: Date.now(),
+			transportFailure: { kind: "transport", status: 429, providerCode: "usage_limit_reached" },
+		} as AssistantMessage;
+		stream.push({ type: "start", partial: failure });
+		stream.push({ type: "error", reason: "error", error: failure });
+	});
+	return stream;
+}
+
 function getLastAssistantMessage(session: AgentSession): AssistantMessage {
 	const lastMessage = session.messages.at(-1);
 	if (lastMessage?.role !== "assistant") {
@@ -523,18 +553,16 @@ describe("AgentSession retry fallback", () => {
 		if (!primary || !fallback) throw new Error("Expected bundled test models");
 
 		const requestedModels: string[] = [];
+		let calls = 0;
 		const mock = createMockModel({
-			responses: [
-				{ throw: "Provider server error" },
-				{ content: ["Fallback recovered"] },
-				{ content: ["Fallback remained active"] },
-			],
+			responses: [{ content: ["Fallback recovered"] }, { content: ["Fallback remained active"] }],
 		});
 		const agent = new Agent({
 			getApiKey: provider => `${provider}-test-key`,
 			initialState: { model: primary, systemPrompt: ["Test"], tools: [], messages: [] },
 			streamFn: (requestedModel, context, options) => {
 				requestedModels.push(`${requestedModel.provider}/${requestedModel.id}`);
+				if (calls++ === 0) return quotaFailureStream(requestedModel);
 				return mock.stream(requestedModel, context, options);
 			},
 		});
@@ -568,18 +596,16 @@ describe("AgentSession retry fallback", () => {
 		if (!primary || !fallback) throw new Error("Expected bundled test models");
 
 		const requestedModels: string[] = [];
+		let calls = 0;
 		const mock = createMockModel({
-			responses: [
-				{ throw: "Provider server error" },
-				{ content: ["Fallback recovered"] },
-				{ content: ["Fallback remained active"] },
-			],
+			responses: [{ content: ["Fallback recovered"] }, { content: ["Fallback remained active"] }],
 		});
 		const agent = new Agent({
 			getApiKey: provider => `${provider}-test-key`,
 			initialState: { model: primary, systemPrompt: ["Test"], tools: [], messages: [] },
 			streamFn: (requestedModel, context, options) => {
 				requestedModels.push(`${requestedModel.provider}/${requestedModel.id}`);
+				if (calls++ === 0) return quotaFailureStream(requestedModel);
 				return mock.stream(requestedModel, context, options);
 			},
 		});
@@ -709,13 +735,7 @@ describe("AgentSession retry fallback", () => {
 			initialState: { model: primary, systemPrompt: ["Test"], tools: [], messages: [] },
 			streamFn: (requestedModel, context, options) => {
 				requestedModels.push(`${requestedModel.provider}/${requestedModel.id}`);
-				if (requestedModel.provider === primary.provider) {
-					return createMockModel({ responses: [{ throw: "Provider server error" }] }).stream(
-						requestedModel,
-						context,
-						options,
-					);
-				}
+				if (requestedModel.provider === primary.provider) return quotaFailureStream(requestedModel);
 				fallbackCalls++;
 				if (fallbackCalls > 1) {
 					return createMockModel({ responses: [{ content: ["Fallback recovered on the next turn"] }] }).stream(

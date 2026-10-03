@@ -949,6 +949,31 @@ describe("runSubprocess yield reminders", () => {
 		expect(createAgentSessionSpy.mock.calls[0]?.[0]?.thinkingLevel).toBe(Effort.High);
 	});
 
+	it("passes the parent's user language to the child session", async () => {
+		vi.clearAllMocks();
+		const session = createMockSession(({ emit }) => {
+			emit({
+				type: "tool_execution_end",
+				toolCallId: "tool-language",
+				toolName: "yield",
+				result: {
+					content: [{ type: "text", text: "Result submitted." }],
+					details: { status: "success", data: { ok: true } },
+				},
+				isError: false,
+			});
+		});
+		const createAgentSessionSpy = mockCreateAgentSession(session);
+
+		await runSubprocess({
+			...baseOptions,
+			id: "subagent-language",
+			responseLanguage: { code: "ko", name: "Korean" },
+		});
+
+		expect(createAgentSessionSpy.mock.calls[0]?.[0]?.responseLanguage).toEqual({ code: "ko", name: "Korean" });
+	});
+
 	it("prefers explicit modelOverride thinking suffix over provided thinking level, including off", async () => {
 		vi.clearAllMocks();
 		const modelRegistry = {

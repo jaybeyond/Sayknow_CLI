@@ -22,6 +22,7 @@ import type {
 import type { ArtifactManager } from "../session/artifacts";
 import type { ClientBridge } from "../session/client-bridge";
 import type { CustomMessage } from "../session/messages";
+import type { DetectedLanguage } from "../session/response-language";
 import type { ToolChoiceQueue } from "../session/tool-choice-queue";
 import type { SkillActiveEntry } from "../skill-state/active-state";
 import { TaskTool } from "../task";
@@ -274,6 +275,8 @@ export interface ToolSession {
 	isManagedSessionDestination?: () => boolean;
 	/** Get Hindsight runtime state for this agent session. */
 	getHindsightSessionState?: () => HindsightSessionState | undefined;
+	/** Language of the latest user prompt (for subagent inheritance). */
+	getResponseLanguage?: () => DetectedLanguage | undefined;
 	/** Agent identity used for IRC routing. Returns the registry id (e.g. "0-Main", "0-AuthLoader"). */
 	getAgentId?: () => string | null;
 	/** Look up a registered tool by name (used by the eval js backend's tool bridge). */

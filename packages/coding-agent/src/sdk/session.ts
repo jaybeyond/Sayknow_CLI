@@ -112,6 +112,7 @@ import { AgentSession, type ForkContextSeed } from "../session/agent-session";
 import type { AuthStorage } from "../session/auth-storage";
 import { applyCredentialRankingModeSetting, discoverAuthStorage } from "../session/auth-storage-discovery";
 import { type CustomMessage, convertToLlm } from "../session/messages";
+import type { DetectedLanguage } from "../session/response-language";
 import { createReadonlySessionManager, SessionManager } from "../session/session-manager";
 import { formatNoModelsAvailableFallback } from "../setup/model-onboarding-guidance";
 import { closeAllConnections } from "../ssh/connection-manager";
@@ -411,6 +412,8 @@ export interface CreateAgentSessionOptions {
 	parentHindsightSessionState?: HindsightSessionState;
 	/** Pre-allocated agent identity for IRC routing. Default: "0-Main" for top-level, parentTaskPrefix-derived for sub. */
 	agentId?: string;
+	/** Language of the parent's latest user prompt; subagents answer in it. */
+	responseLanguage?: DetectedLanguage;
 	/** Display name for the agent in IRC. Default: "main" or "sub". */
 	agentDisplayName?: string;
 	/** Compact task label for hidden IRC roster reminders. */
@@ -1469,6 +1472,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			getActiveSkillPhase: () => session?.getActiveSkillPhase(),
 			getDeepInterviewAskStage: () => session?.getDeepInterviewAskStage(),
 			getHindsightSessionState: () => session?.getHindsightSessionState(),
+			getResponseLanguage: () => session?.getResponseLanguage(),
 			get model() {
 				return agent?.state.model ?? model;
 			},
@@ -2672,6 +2676,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			ttsrManager,
 			obfuscator,
 			agentId: resolvedAgentId,
+			responseLanguage: options.responseLanguage,
 			agentRegistry,
 			providerSessionId: options.providerSessionId,
 			providerCacheSessionId: providerSessionId,

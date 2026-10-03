@@ -85,6 +85,39 @@ function typedRateLimitStream(
 	return stream;
 }
 
+/** Exhausted quota: the only failure (besides auth) that may switch models. */
+function quotaStream(model: Model): AssistantMessageEventStream {
+	const stream = new AssistantMessageEventStream();
+	queueMicrotask(() => {
+		const message: AssistantMessage = {
+			role: "assistant",
+			content: [],
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "error",
+			errorMessage: "You exceeded your current quota",
+			errorStatus: 429,
+			timestamp: Date.now(),
+			transportFailure: { kind: "transport", status: 429, providerCode: "insufficient_quota" },
+		};
+		stream.push({ type: "start", partial: message });
+		stream.push({ type: "error", reason: "error", error: message });
+	});
+	return stream;
+}
+
+/** A rate limit whose reset is far beyond any retry wait: a spent usage window. */
+const SPENT_WINDOW_RETRY_AFTER_MS = 6 * 60 * 60 * 1000;
+
 function typedOpaqueOverflowStream(model: Model): AssistantMessageEventStream {
 	const stream = new AssistantMessageEventStream();
 	queueMicrotask(() => {
@@ -176,7 +209,7 @@ describe("AgentSession managed fallback upstream request counts", () => {
 				fallbackManaged: options?.fallbackManaged,
 				fallbackAttempt: options?.fallbackAttempt,
 			});
-			return selector(model) === selector(primary) ? rateLimitStream(model) : successfulStream(model);
+			return selector(model) === selector(primary) ? quotaStream(model) : successfulStream(model);
 		});
 
 		await session!.prompt("Exercise managed fallback");
@@ -189,7 +222,7 @@ describe("AgentSession managed fallback upstream request counts", () => {
 		}
 	});
 
-	it("keeps an opaque typed overflow budget-neutral before one rate limit advances N=1", async () => {
+	it("keeps an opaque typed overflow budget-neutral before a spent rate-limit window advances N=1", async () => {
 		const calls: StreamCall[] = [];
 		const fallbackSwitches: Array<Extract<AgentSessionEvent, { type: "model_fallback_switched" }>> = [];
 		const events: AgentSessionEvent[] = [];
@@ -202,7 +235,9 @@ describe("AgentSession managed fallback upstream request counts", () => {
 			});
 			if (selector(model) === selector(primary)) {
 				primaryCalls += 1;
-				return primaryCalls === 1 ? typedOpaqueOverflowStream(model) : typedRateLimitStream(model, 50);
+				return primaryCalls === 1
+					? typedOpaqueOverflowStream(model)
+					: typedRateLimitStream(model, SPENT_WINDOW_RETRY_AFTER_MS);
 			}
 			return createMockModel({ responses: [{ content: ["Recovered after rate limit"] }] }).stream(
 				model,
@@ -229,7 +264,7 @@ describe("AgentSession managed fallback upstream request counts", () => {
 			expect.objectContaining({
 				from: selector(primary),
 				to: selector(fallback),
-				reason: "rate_limit",
+				reason: "quota",
 				attemptsUsed: 1,
 			}),
 		]);
@@ -248,13 +283,17 @@ describe("AgentSession managed fallback upstream request counts", () => {
 		expect(session!.messages.filter(message => message.role === "assistant")).toHaveLength(1);
 	});
 
-	it("advances typed 429 with hostile overflow prose without running maintenance", async () => {
+	it("advances a spent rate-limit window with hostile overflow prose without running maintenance", async () => {
 		const calls: string[] = [];
 		const events: AgentSessionEvent[] = [];
 		const { primary, fallback } = createSession(1, (model, context, options) => {
 			calls.push(selector(model));
 			return selector(model) === selector(primary)
-				? typedRateLimitStream(model, 50, "context_length_exceeded: context window exceeded")
+				? typedRateLimitStream(
+						model,
+						SPENT_WINDOW_RETRY_AFTER_MS,
+						"context_length_exceeded: context window exceeded",
+					)
 				: createMockModel({ responses: [{ content: ["Recovered after typed rate limit"] }] }).stream(
 						model,
 						context,
@@ -269,7 +308,7 @@ describe("AgentSession managed fallback upstream request counts", () => {
 		expect(calls).toEqual([selector(primary), selector(fallback)]);
 		expect(events.filter(event => event.type === "auto_compaction_start")).toHaveLength(0);
 		expect(events).toContainEqual(
-			expect.objectContaining({ type: "model_fallback_switched", reason: "rate_limit", attemptsUsed: 1 }),
+			expect.objectContaining({ type: "model_fallback_switched", reason: "quota", attemptsUsed: 1 }),
 		);
 	});
 
@@ -293,22 +332,15 @@ describe("AgentSession managed fallback upstream request counts", () => {
 			stopReason: "error",
 		});
 	});
-	it("preserves a prior fallback charge across overflow maintenance", async () => {
+	it("preserves a prior retry charge across overflow maintenance and never switches on a rate limit", async () => {
 		const calls: string[] = [];
 		const fallbackSwitches: Array<Extract<AgentSessionEvent, { type: "model_fallback_switched" }>> = [];
 		let primaryCalls = 0;
-		const { primary, fallback } = createSession(2, (model, context, options) => {
+		const { primary } = createSession(2, model => {
 			calls.push(selector(model));
-			if (selector(model) === selector(primary)) {
-				primaryCalls += 1;
-				if (primaryCalls === 2) return typedOpaqueOverflowStream(model);
-				return rateLimitStream(model);
-			}
-			return createMockModel({ responses: [{ content: ["Recovered with preserved budget"] }] }).stream(
-				model,
-				context,
-				options,
-			);
+			primaryCalls += 1;
+			if (primaryCalls === 2) return typedOpaqueOverflowStream(model);
+			return rateLimitStream(model);
 		});
 		session!.subscribe(event => {
 			if (event.type === "model_fallback_switched") fallbackSwitches.push(event);
@@ -317,17 +349,14 @@ describe("AgentSession managed fallback upstream request counts", () => {
 		await session!.prompt("Keep the first policy charge across overflow");
 		await session!.waitForIdle();
 
-		expect(calls).toEqual([selector(primary), selector(primary), selector(primary), selector(fallback)]);
-		expect(fallbackSwitches).toEqual([
-			expect.objectContaining({
-				reason: "rate_limit",
-				attemptsUsed: 2,
-				from: selector(primary),
-				to: selector(fallback),
-			}),
-		]);
+		// Charge 1 (429), budget-neutral overflow, charge 2 (429) exhausts the
+		// same-model budget: the run stops on the primary instead of switching.
+		expect(calls).toEqual([selector(primary), selector(primary), selector(primary)]);
+		expect(fallbackSwitches).toEqual([]);
+		expect(session!.model).toMatchObject({ provider: primary.provider, id: primary.id });
+		expect(session!.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "error" });
 	});
-	it("N=3 performs exactly three upstream attempts before switching and reports attemptsUsed", async () => {
+	it("N=3 retries a transient failure on the same model three times and never switches", async () => {
 		const calls: StreamCall[] = [];
 		const fallbackSwitches: Array<Extract<AgentSessionEvent, { type: "model_fallback_switched" }>> = [];
 		const { primary, fallback } = createSession(3, (model, _context, options) => {
@@ -345,56 +374,90 @@ describe("AgentSession managed fallback upstream request counts", () => {
 		await session!.prompt("Exercise three managed attempts");
 		await session!.waitForIdle();
 
-		expect(calls.map(call => call.selector)).toEqual([
-			selector(primary),
-			selector(primary),
-			selector(primary),
-			selector(fallback),
-		]);
-		expect(calls.filter(call => call.selector === selector(primary))).toHaveLength(3);
-		expect(calls.filter(call => call.selector === selector(fallback))).toHaveLength(1);
-		expect(fallbackSwitches).toHaveLength(1);
-		expect(fallbackSwitches).toEqual([
-			expect.objectContaining({
-				type: "model_fallback_switched",
-				eventId: expect.any(String),
-				from: selector(primary),
-				to: selector(fallback),
-				reason: "rate_limit",
-				role: "default",
-				scope: "session",
-				activeIndex: 1,
-				chainLength: 2,
-				attemptsUsed: 3,
-			}),
-		]);
+		expect(calls.map(call => call.selector)).toEqual([selector(primary), selector(primary), selector(primary)]);
+		expect(calls.map(call => call.selector)).not.toContain(selector(fallback));
+		expect(fallbackSwitches).toEqual([]);
+		expect(session!.model).toMatchObject({ provider: primary.provider, id: primary.id });
+		const last = session!.messages.at(-1) as AssistantMessage;
+		expect(last).toMatchObject({ role: "assistant", stopReason: "error" });
+		// The real provider error is surfaced, not a synthetic chain-exhausted one.
+		expect(last.errorMessage).toBe("rate limit exceeded");
+
+		// The next prompt starts a fresh same-model budget on the same model.
+		calls.length = 0;
+		await session!.prompt("Try again");
+		await session!.waitForIdle();
+		expect(calls.map(call => call.selector)).toEqual([selector(primary), selector(primary), selector(primary)]);
 	});
 
-	it("suppresses the rate-limited head and returns to it when the cooldown expires", async () => {
+	it("retries a short rate limit on the same model without suppressing it", async () => {
 		const calls: string[] = [];
 		let primaryAttempts = 0;
-		const { primary, fallback } = createSession(1, (model, _context, _options) => {
+		const { primary } = createSession(1, (model, _context, _options) => {
 			calls.push(selector(model));
-			if (selector(model) === selector(primary) && primaryAttempts++ === 0) {
-				return typedRateLimitStream(model, 1);
-			}
+			if (primaryAttempts++ === 0) return typedRateLimitStream(model, 1);
 			return successfulStream(model, "Recovered");
 		});
 		const suppressSpy = vi.spyOn(modelRegistry, "suppressSelector");
 
-		await session!.prompt("Switch after a rate limit");
+		await session!.prompt("Retry after a short rate limit");
 		await session!.waitForIdle();
 
-		expect(calls).toEqual([selector(primary), selector(fallback)]);
-		expect(suppressSpy).toHaveBeenCalledWith(selector(primary), expect.any(Number));
-		expect(modelRegistry.isSelectorSuppressed(selector(fallback))).toBe(false);
-		await Bun.sleep(5);
+		// N=1: the single attempt is spent, so a short 429 stops on the same model.
+		expect(calls).toEqual([selector(primary)]);
+		expect(suppressSpy).not.toHaveBeenCalled();
+		expect(modelRegistry.isSelectorSuppressed(selector(primary))).toBe(false);
 
-		await session!.prompt("Return after cooldown expiry");
+		await session!.prompt("Next prompt");
 		await session!.waitForIdle();
-
-		expect(calls).toEqual([selector(primary), selector(fallback), selector(primary)]);
+		expect(calls).toEqual([selector(primary), selector(primary)]);
 		expect(session!.model).toMatchObject({ provider: primary.provider, id: primary.id });
+	});
+
+	it("treats a rate limit that resets beyond the longest retry wait as spent quota", async () => {
+		const calls: string[] = [];
+		const switches: Array<Extract<AgentSessionEvent, { type: "model_fallback_switched" }>> = [];
+		const { primary, fallback } = createSession(3, model => {
+			calls.push(selector(model));
+			return selector(model) === selector(primary)
+				? typedRateLimitStream(model, SPENT_WINDOW_RETRY_AFTER_MS)
+				: successfulStream(model, "Recovered on the fallback");
+		});
+		const suppressSpy = vi.spyOn(modelRegistry, "suppressSelector");
+		session!.subscribe(event => {
+			if (event.type === "model_fallback_switched") switches.push(event);
+		});
+
+		await session!.prompt("Weekly limit reached");
+		await session!.waitForIdle();
+
+		// No same-model retries on a spent window, even with a budget of 3.
+		expect(calls).toEqual([selector(primary), selector(fallback)]);
+		expect(switches).toEqual([
+			expect.objectContaining({ from: selector(primary), to: selector(fallback), reason: "quota" }),
+		]);
+		expect(suppressSpy).toHaveBeenCalledWith(selector(primary), expect.any(Number));
+		expect(session!.model).toMatchObject({ provider: fallback.provider, id: fallback.id });
+	});
+
+	it("retries a rate limit that resets within the retry wait on the same model", async () => {
+		let primaryCalls = 0;
+		const switches: Array<Extract<AgentSessionEvent, { type: "model_fallback_switched" }>> = [];
+		const { primary } = createSession(3, model => {
+			primaryCalls += 1;
+			return primaryCalls === 1 ? typedRateLimitStream(model, 1_000) : successfulStream(model, "Recovered");
+		});
+		session!.subscribe(event => {
+			if (event.type === "model_fallback_switched") switches.push(event);
+		});
+
+		await session!.prompt("Short burst limit");
+		await session!.waitForIdle();
+
+		expect(primaryCalls).toBe(2);
+		expect(switches).toEqual([]);
+		expect(session!.model).toMatchObject({ provider: primary.provider, id: primary.id });
+		expect(session!.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "stop" });
 	});
 
 	it("emits one switch when an exhausted chain restarts with an unavailable head", async () => {
@@ -403,7 +466,7 @@ describe("AgentSession managed fallback upstream request counts", () => {
 		let streamAttempts = 0;
 		const { primary, fallback } = createSession(1, (_model, _context, _options) => {
 			streamAttempts += 1;
-			return streamAttempts <= 2 ? rateLimitStream(_model) : successfulStream(_model, "Recovered next turn");
+			return streamAttempts <= 2 ? quotaStream(_model) : successfulStream(_model, "Recovered next turn");
 		});
 		vi.spyOn(modelRegistry, "getApiKey").mockImplementation(async requested =>
 			selector(requested) === selector(primary) && headUnavailable ? undefined : "test-key",
@@ -504,14 +567,16 @@ describe("AgentSession managed fallback upstream request counts", () => {
 		await session!.prompt("Use two tools before the provider fails");
 		await session!.waitForIdle();
 
+		// Budget reset after accepted tool rounds gives the failing request the full
+		// same-model budget of 3, then the run stops without switching.
 		expect(calls).toEqual([
 			selector(primary),
 			selector(primary),
 			selector(primary),
 			selector(primary),
 			selector(primary),
-			selector(fallback),
 		]);
+		expect(calls).not.toContain(selector(fallback));
 	});
 
 	it("keeps a one-entry chain non-managed and token-free", async () => {

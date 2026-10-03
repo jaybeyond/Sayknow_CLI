@@ -165,9 +165,11 @@ describe("managed fallback rotates same-provider accounts before switching model
 		expect(new Set(r.keys).size).toBe(r.keys.length);
 	});
 
-	test("a single account keeps the retry budget on the same model", async () => {
+	test("a single exhausted account switches to the next model at once", async () => {
 		const r = await run({ accounts: ["a"], quotaKeys: ["TOKEN-a"] });
-		expect(r.keys).toEqual(["TOKEN-a", "TOKEN-a", "TOKEN-a", "fallback-test-key"]);
+		// Exhausted quota is not retried on the same dead account.
+		expect(r.keys).toEqual(["TOKEN-a", "fallback-test-key"]);
+		expect(r.dispatched).toEqual([r.model, r.fallback]);
 	});
 
 	test("an account pinned with --credential is not rotated away", async () => {

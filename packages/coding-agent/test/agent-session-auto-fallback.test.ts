@@ -18,10 +18,12 @@ import { TempDir } from "@sayknow-cli/utils";
 const selector = (model: Model) => `${model.provider}/${model.id}`;
 const OPENAI_DEFAULT = `openai/${defaultModelPerProvider.openai}`;
 
-function rateLimitStream(model: Model): AssistantMessageEventStream {
+function quotaStream(model: Model): AssistantMessageEventStream {
 	const stream = new AssistantMessageEventStream();
 	queueMicrotask(() => {
-		const message: AssistantMessage & { transportFailure: { kind: "transport"; status: number } } = {
+		const message: AssistantMessage & {
+			transportFailure: { kind: "transport"; status: number; providerCode: string };
+		} = {
 			role: "assistant",
 			content: [{ type: "text", text: "" }],
 			api: model.api,
@@ -39,7 +41,7 @@ function rateLimitStream(model: Model): AssistantMessageEventStream {
 			errorMessage: "usage limit reached",
 			errorStatus: 429,
 			timestamp: Date.now(),
-			transportFailure: { kind: "transport", status: 429 },
+			transportFailure: { kind: "transport", status: 429, providerCode: "usage_limit_reached" },
 		};
 		stream.push({ type: "start", partial: message });
 		stream.push({ type: "error", reason: "error", error: message });
@@ -134,7 +136,7 @@ describe("AgentSession automatic model fallback", () => {
 		authStorage.setRuntimeApiKey("anthropic", "test-key");
 		authStorage.setRuntimeApiKey("openai", "test-key");
 		const { calls, switches } = createSession({}, model =>
-			selector(model) === selector(primary) ? rateLimitStream(model) : successfulStream(model),
+			selector(model) === selector(primary) ? quotaStream(model) : successfulStream(model),
 		);
 
 		await session!.prompt("hello");

@@ -33,6 +33,7 @@ function createHarness(
 		getApiKey?: () => Promise<string | undefined>;
 		transformContext?: AgentSessionConfig["transformContext"];
 		convertToLlm?: AgentSessionConfig["convertToLlm"];
+		responseLanguage?: AgentSessionConfig["responseLanguage"];
 	} = {},
 ): Harness {
 	const model = options.model ?? createMockModel({ handler: () => ({ content: ["pong"] }) });
@@ -58,6 +59,7 @@ function createHarness(
 		} as never,
 		agentId: options.agentId ?? "1-Worker",
 		agentRegistry: registry,
+		responseLanguage: options.responseLanguage,
 		convertToLlm:
 			options.convertToLlm ??
 			(async messages => {
@@ -434,5 +436,23 @@ describe("AgentSession respondAsBackground failure visibility", () => {
 		await harness.session.respondAsBackground({ from: "0-Main", message: "retry" });
 
 		expect(rosterDeliveryCount(harness)).toBe(2);
+	});
+});
+
+describe("AgentSession IRC reply language", () => {
+	function lastPromptText(harness: Harness): string {
+		return JSON.stringify(harness.snapshots.at(-1));
+	}
+
+	it("asks for the inherited user language when replying to an English peer", async () => {
+		const harness = createHarness({ responseLanguage: { code: "ko", name: "Korean" } });
+		await harness.session.respondAsBackground({ from: "0-Main", message: "What did you change?" });
+		expect(lastPromptText(harness)).toContain("The user wrote in Korean.");
+	});
+
+	it("adds no language reminder when no user language is known", async () => {
+		const harness = createHarness();
+		await harness.session.respondAsBackground({ from: "0-Main", message: "What did you change?" });
+		expect(lastPromptText(harness)).not.toContain("The user wrote in");
 	});
 });

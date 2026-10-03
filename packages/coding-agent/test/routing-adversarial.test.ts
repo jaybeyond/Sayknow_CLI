@@ -137,25 +137,22 @@ describe("routing adversarial contract probes", () => {
 			3,
 		);
 
-		for (let attempt = 1; attempt <= 3; attempt += 1) {
-			controller.onAttemptStarted();
-			expect(controller.onAttemptFailure("quota", `Fable credential A ${attempt}`)).toBe(
-				attempt < 3 ? "retry" : "advance",
-			);
-		}
+		// Exhausted quota is not retried on the same credential: it advances at once.
+		controller.onAttemptStarted();
+		expect(controller.onAttemptFailure("quota", "Fable credential A")).toBe("advance");
 		expect(controller.currentSelector()).toBe(opus);
 
 		expect(controller.restorePreviousEntryForRetry()).toBe(true);
 		expect(controller.currentSelector()).toBe(fable);
 		expect(controller.attemptsUsed).toBe(2);
-		expect(controller.totalAttemptsUsed).toBe(3);
+		expect(controller.totalAttemptsUsed).toBe(1);
 
 		controller.onAttemptStarted();
 		expect(controller.onAttemptFailure("quota", "Fable credential B")).toBe("advance");
 		expect(controller.currentSelector()).toBe(opus);
 		expect(controller.restorePreviousEntryForRetry()).toBe(false);
-		expect(controller.totalAttemptsUsed).toBe(4);
-		expect(controller.tried.map(failure => failure.selector)).toEqual([fable, fable, fable, fable]);
+		expect(controller.totalAttemptsUsed).toBe(2);
+		expect(controller.tried.map(failure => failure.selector)).toEqual([fable, fable]);
 	});
 
 	test("bounds credential rotations without starving downstream entries", () => {

@@ -12,29 +12,38 @@ function chain(entries: string[]): ConfiguredFallbackChain {
 }
 
 describe("FallbackChainController attempt accounting", () => {
-	it("N=1: a single request-time failure advances immediately", () => {
-		const controller = new FallbackChainController(chain(["a/1", "b/2"]), 1);
+	it("exhausted quota switches models immediately", () => {
+		const controller = new FallbackChainController(chain(["a/1", "b/2"]), 3);
 		expect(controller.currentSelector()).toBe("a/1");
-		expect(controller.onAttemptFailure("rate_limit", "429")).toBe("advance");
+		expect(controller.onAttemptFailure("quota", "out_of_credits")).toBe("advance");
 		expect(controller.currentSelector()).toBe("b/2");
 		expect(controller.attemptsUsed).toBe(0);
 	});
 
-	it("N=3: retries the same model exactly twice before advancing (3 total attempts)", () => {
-		const controller = new FallbackChainController(chain(["a/1", "b/2"]), 3);
-		expect(controller.onAttemptFailure("server", "500")).toBe("retry"); // attempt 1
-		expect(controller.onAttemptFailure("server", "500")).toBe("retry"); // attempt 2
-		expect(controller.currentSelector()).toBe("a/1");
-		expect(controller.onAttemptFailure("server", "500")).toBe("advance"); // attempt 3 -> advance
-		expect(controller.currentSelector()).toBe("b/2");
-		expect(controller.tried.filter(t => t.selector === "a/1")).toHaveLength(3);
+	it("transient failures retry the same model and then stop without switching", () => {
+		for (const triggerClass of ["server", "rate_limit", "unknown"] as const) {
+			const controller = new FallbackChainController(chain(["a/1", "b/2"]), 3);
+			expect(controller.onAttemptFailure(triggerClass, "transient")).toBe("retry"); // attempt 1
+			expect(controller.onAttemptFailure(triggerClass, "transient")).toBe("retry"); // attempt 2
+			expect(controller.currentSelector()).toBe("a/1");
+			expect(controller.onAttemptFailure(triggerClass, "transient")).toBe("stop"); // attempt 3
+			// Never switched, never exhausted: the next request reuses the same model.
+			expect(controller.currentSelector()).toBe("a/1");
+			expect(controller.isExhausted()).toBe(false);
+			expect(controller.attemptsUsed).toBe(0);
+		}
 	});
 
-	it("exhausts the chain after every entry burns N attempts", () => {
+	it("auth failures switch models only after the same-model budget", () => {
 		const controller = new FallbackChainController(chain(["a/1", "b/2"]), 2);
-		expect(controller.onAttemptFailure("quota", "quota")).toBe("retry");
+		expect(controller.onAttemptFailure("auth", "401")).toBe("retry");
+		expect(controller.onAttemptFailure("auth", "401")).toBe("advance");
+		expect(controller.currentSelector()).toBe("b/2");
+	});
+
+	it("exhausts the chain when every entry is out of quota", () => {
+		const controller = new FallbackChainController(chain(["a/1", "b/2"]), 2);
 		expect(controller.onAttemptFailure("quota", "quota")).toBe("advance");
-		expect(controller.onAttemptFailure("quota", "quota")).toBe("retry");
 		expect(controller.onAttemptFailure("quota", "quota")).toBe("exhausted");
 		expect(controller.isExhausted()).toBe(true);
 		expect(controller.currentSelector()).toBeUndefined();
@@ -51,8 +60,7 @@ describe("FallbackChainController attempt accounting", () => {
 
 	it("resets a tail-model controller to the head for the next fresh user turn", () => {
 		const controller = new FallbackChainController(chain(["a/1", "b/2"]), 2);
-		controller.onAttemptFailure("server", "500");
-		controller.onAttemptFailure("server", "500");
+		controller.onAttemptFailure("quota", "quota");
 		expect(controller.currentSelector()).toBe("b/2");
 		controller.resetForNewTurn();
 		expect(controller.currentSelector()).toBe("a/1");
@@ -130,10 +138,10 @@ describe("per-subagent-call stickiness", () => {
 		// same configured chain intent (see task/executor.ts setConfiguredModelChain).
 		const configured = chain(["a/1", "b/2", "c/3"]);
 
-		// Subagent 1 falls back to c/3 during its lifecycle.
+		// Subagent 1 falls back to c/3 during its lifecycle (both heads out of quota).
 		const call1 = new FallbackChainController(configured, 1);
-		expect(call1.onAttemptFailure("rate_limit", "429")).toBe("advance");
-		expect(call1.onAttemptFailure("rate_limit", "429")).toBe("advance");
+		expect(call1.onAttemptFailure("quota", "quota")).toBe("advance");
+		expect(call1.onAttemptFailure("quota", "quota")).toBe("advance");
 		expect(call1.currentSelector()).toBe("c/3");
 
 		// Subagent 2 (same role) gets a brand-new controller: starts at the head.

@@ -35,10 +35,13 @@ function withTimeout<T>(promise: Promise<T>, label: string): Promise<T> {
 	return Promise.race([promise, timeout]).finally(() => clearTimeout(timer)) as Promise<T>;
 }
 
+/** Typed exhausted quota on every model: walks and exhausts the chain. */
 function failedStream(model: Model): AssistantMessageEventStream {
 	const stream = new AssistantMessageEventStream();
 	queueMicrotask(() => {
-		const message: AssistantMessage & { transportFailure: { kind: "transport"; status: number } } = {
+		const message: AssistantMessage & {
+			transportFailure: { kind: "transport"; status: number; providerCode: string };
+		} = {
 			role: "assistant",
 			content: [],
 			api: model.api,
@@ -53,10 +56,10 @@ function failedStream(model: Model): AssistantMessageEventStream {
 				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 			},
 			stopReason: "error",
-			errorMessage: "rate limit exceeded",
+			errorMessage: "usage limit reached",
 			errorStatus: 429,
 			timestamp: Date.now(),
-			transportFailure: { kind: "transport", status: 429 },
+			transportFailure: { kind: "transport", status: 429, providerCode: "usage_limit_reached" },
 		};
 		stream.push({ type: "start", partial: message });
 		stream.push({ type: "error", reason: "error", error: message });
@@ -64,7 +67,7 @@ function failedStream(model: Model): AssistantMessageEventStream {
 	return stream;
 }
 
-function otherTransportFailureStream(model: Model, errorMessage: string): AssistantMessageEventStream {
+function otherTransportFailureStream(model: Model, errorMessage: string, status = 418): AssistantMessageEventStream {
 	const stream = new AssistantMessageEventStream();
 	queueMicrotask(() => {
 		const message: AssistantMessage & { transportFailure: { kind: "transport"; status: number } } = {
@@ -83,9 +86,9 @@ function otherTransportFailureStream(model: Model, errorMessage: string): Assist
 			},
 			stopReason: "error",
 			errorMessage,
-			errorStatus: 418,
+			errorStatus: status,
 			timestamp: Date.now(),
-			transportFailure: { kind: "transport", status: 418 },
+			transportFailure: { kind: "transport", status },
 		};
 		stream.push({ type: "start", partial: message });
 		stream.push({ type: "error", reason: "error", error: message });
@@ -178,8 +181,9 @@ describe("AgentSession managed fallback attempt transaction", () => {
 			calls.push(selector(model));
 			if (calls.length === 1) firstRunId = agent.activeRunId;
 			if (calls.length === 2) expect(agent.activeRunId).not.toBe(firstRunId);
+			// Two transient 429s retry the same model; the third attempt is accepted.
 			return calls.length < 3
-				? failedStream(model)
+				? otherTransportFailureStream(model, "rate limit exceeded", 429)
 				: createMockModel({ responses: [{ content: ["accepted"] }] }).stream(model, context, options);
 		});
 		const events: AgentSessionEvent[] = [];
@@ -189,6 +193,7 @@ describe("AgentSession managed fallback attempt transaction", () => {
 		await session!.waitForIdle();
 
 		expect(calls).toHaveLength(3);
+		expect(new Set(calls).size).toBe(1);
 		expect(events.filter(event => event.type === "agent_end")).toHaveLength(1);
 		expect(assistantLifecycleEvents(events).filter(event => event.type === "message_start")).toHaveLength(1);
 		expect(assistantLifecycleEvents(events).filter(event => event.type === "message_end")).toHaveLength(1);
@@ -230,10 +235,10 @@ describe("AgentSession managed fallback attempt transaction", () => {
 		);
 	});
 
-	it("bounds typed-other managed failures without promoting quota or transient prose", async () => {
+	it("bounds typed-other managed failures on the same model without promoting quota or transient prose", async () => {
 		const errorMessage = "rate limit exceeded; retry after the transient timeout";
 		const calls: string[] = [];
-		createSession(model => {
+		const { primary } = createSession(model => {
 			calls.push(selector(model));
 			return otherTransportFailureStream(model, errorMessage);
 		}, 1);
@@ -243,8 +248,10 @@ describe("AgentSession managed fallback attempt transaction", () => {
 		await session!.prompt("do not classify opaque transport prose");
 		await session!.waitForIdle();
 
-		expect(calls).toHaveLength(2);
-		expect(events).toContainEqual(expect.objectContaining({ type: "model_fallback_switched", reason: "unknown" }));
+		// Opaque prose is never promoted to quota: one bounded attempt, no model switch.
+		expect(calls).toEqual([selector(primary)]);
+		expect(events).not.toContainEqual(expect.objectContaining({ type: "model_fallback_switched" }));
+		expect(session!.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "error", errorMessage });
 	});
 
 	it("routes typed managed context overflow to compaction without consuming fallback attempts", async () => {

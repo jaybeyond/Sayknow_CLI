@@ -382,7 +382,7 @@ import {
 	effectiveFallbackDelay,
 	FallbackChainController,
 } from "./fallback-chain-controller";
-import { buildResponseLanguageReminder, detectResponseLanguage } from "./response-language";
+import { buildResponseLanguageReminder, type DetectedLanguage, detectResponseLanguage } from "./response-language";
 
 export { DefaultModelSelectionRecoveryError } from "./default-model-selection";
 
@@ -644,6 +644,12 @@ export interface AgentSessionConfig {
 	agentId?: string;
 	/** Shared agent registry (for forwarding IRC observations to the main session UI). */
 	agentRegistry?: AgentRegistry;
+	/**
+	 * Language of the user prompt that started this agent (inherited by subagents).
+	 * Agent-attributed prompts and IRC replies are answered in it, so a delegated
+	 * task does not drift into the language of its (usually English) assignment.
+	 */
+	responseLanguage?: DetectedLanguage;
 	/**
 	 * Override the provider-facing session ID for all API requests from this session.
 	 * When absent, `sessionManager.getSessionId()` is used. Needed when benchmark or
@@ -1801,6 +1807,9 @@ export class AgentSession {
 	#defaultFallbackController: FallbackChainController | undefined;
 	#overflowMaintenanceAttempts = 0;
 	#defaultFallbackExhaustedLastTurn = false;
+	#transientStopTimestamp: number | undefined;
+	/** Language of the latest genuine user prompt (or inherited from the parent agent). */
+	#responseLanguage: DetectedLanguage | undefined;
 	#fallbackInvocationId = 0;
 	#fallbackSuppressedSelectors = new Set<string>();
 	// Todo completion reminder state
@@ -2572,6 +2581,7 @@ export class AgentSession {
 		this.#ttsrManager = config.ttsrManager;
 		this.#obfuscator = config.obfuscator;
 		this.#agentId = config.agentId;
+		this.#responseLanguage = config.responseLanguage;
 		this.#agentRegistry = config.agentRegistry;
 		this.#providerSessionId = config.providerSessionId;
 		this.#providerCacheSessionId = config.providerCacheSessionId;
@@ -7845,7 +7855,9 @@ export class AgentSession {
 			const eagerTodoPrelude =
 				!options?.synthetic && !hasPendingUserDirective ? this.#createEagerTodoPrelude(expandedText) : undefined;
 			const uiSkillPrelude = options?.synthetic ? undefined : this.#createUiSkillPrelude(expandedText);
-			const languagePrelude = options?.synthetic ? undefined : this.#createResponseLanguagePrelude(expandedText);
+			const languagePrelude = options?.synthetic
+				? undefined
+				: this.#createResponseLanguagePrelude(expandedText, claimsGenuineUserIntent);
 
 			const userContent: (TextContent | ImageContent)[] = [{ type: "text", text: expandedText }];
 			if (options?.images) {
@@ -12175,18 +12187,31 @@ export class AgentSession {
 	 * they match, the model is never asked.
 	 */
 	/**
-	 * Name the user's language at the start of the turn when their message is clearly in a
-	 * non-Latin script, so the final report after long English tool output stays in it.
+	 * Name the user's language at the start of the turn so the final report after long
+	 * English tool output stays in it. A genuine user prompt sets the language (an
+	 * English one clears it); agent-attributed prompts — subagent assignments, resumes,
+	 * reminders — keep the latest user language instead of the assignment's.
 	 */
-	#createResponseLanguagePrelude(promptText: string): AgentMessage | undefined {
-		const language = detectResponseLanguage(promptText);
-		if (!language) return undefined;
+	#createResponseLanguagePrelude(promptText: string, fromUser: boolean): AgentMessage | undefined {
+		if (fromUser) this.#responseLanguage = detectResponseLanguage(promptText);
+		const language = fromUser
+			? this.#responseLanguage
+			: (this.#responseLanguage ?? detectResponseLanguage(promptText));
+		return language ? this.#createLanguageReminderMessage(language) : undefined;
+	}
+
+	#createLanguageReminderMessage(language: DetectedLanguage): AgentMessage {
 		return {
 			role: "developer",
 			content: [{ type: "text", text: buildResponseLanguageReminder(language) }],
 			attribution: "agent",
 			timestamp: Date.now(),
 		};
+	}
+
+	/** Language user-facing replies should use: latest user prompt, else inherited from the parent. */
+	getResponseLanguage(): DetectedLanguage | undefined {
+		return this.#responseLanguage;
 	}
 
 	#createUiSkillPrelude(promptText: string): AgentMessage | undefined {
@@ -13679,6 +13704,9 @@ export class AgentSession {
 	#isRetryableError(message: AssistantMessage): boolean {
 		if (this.#isTerminalProviderFirstEventTimeout(message)) return false;
 		if (message.errorMessage?.startsWith("Model fallback chain exhausted;")) return false;
+		// Already gave up on this transient failure; do not start a fresh budget.
+		if (this.#transientStopTimestamp !== undefined && message.timestamp === this.#transientStopTimestamp)
+			return false;
 		const transportFailure = message.transportFailure;
 		const contextWindow = this.model?.contextWindow ?? 0;
 		if (classifyContextOverflow(message, transportFailure, contextWindow)) return false;
@@ -14165,6 +14193,15 @@ export class AgentSession {
 	): { class: FallbackTriggerClass; retryAfterMs?: number } | undefined {
 		if (classifyContextOverflow(message, transportFailure, this.model?.contextWindow ?? 0)) return undefined;
 		const transport = classifyFallbackTrigger(transportFailure ?? { status: message.errorStatus });
+		if (transport.class === "rate_limit" && transport.retryAfterMs !== undefined) {
+			// A rate limit whose reset is further away than any retry would wait is a
+			// spent usage window (e.g. a weekly/credit limit), not a burst: treat it as
+			// exhausted quota so it rotates accounts/models instead of stalling.
+			const longestRetryWaitMs = this.settings.getGroup("retry").maxDelayMs;
+			if (longestRetryWaitMs > 0 && transport.retryAfterMs > longestRetryWaitMs) {
+				return { class: "quota", retryAfterMs: transport.retryAfterMs };
+			}
+		}
 		if (transport.class !== "other") return transport;
 		// Managed fallback receives authoritative transport facts from the request
 		// boundary. Once those facts classify as other, error prose must not upgrade
@@ -14328,30 +14365,40 @@ export class AgentSession {
 		const legacyUnbounded = classification === "transient";
 		const attemptsUsed = managedFallback ? controller.attemptsUsed || 1 : this.#retryAttempt + 1;
 		const failedSelector = managedFallback ? controller.currentSelector() : undefined;
-		let outcome = managedFallback
-			? controller.onAttemptFailure(trigger.class, message.errorMessage || "Unknown error")
-			: legacyUnbounded || attemptsUsed <= retrySettings.maxRetries
-				? "retry"
-				: "exhausted";
 		const usageLimited = trigger.class === "quota" || trigger.class === "rate_limit";
 		let credentialMarked = false;
 		let credentialRotated = false;
-		if (managedFallback && usageLimited && outcome === "advance") {
+		if (managedFallback && usageLimited && this.model) {
+			// Rotate to another logged-in account of the same provider first: an
+			// exhausted account or a burst limit on one account is not a reason to
+			// leave the model while another account can still serve it.
 			credentialMarked = true;
 			credentialRotated = await this.#markFailedManagedCredential(trigger);
-			if (credentialRotated && controller.restorePreviousEntryForRetry()) outcome = "retry";
-		} else if (managedFallback && usageLimited && outcome === "retry" && this.model) {
-			// Mark before retrying the same model. A pool of accounts that is now fully
-			// blocked would only hand the retry another exhausted account (a wasted request
-			// on a known-dead account), so move on to the next model instead. A single
-			// account keeps the usual retry budget: its limit may be a short burst.
-			const poolSize = this.#modelRegistry.authStorage.getSessionCredentialPoolSize(
-				this.model.provider,
-				this.sessionId,
-			);
-			credentialMarked = true;
-			credentialRotated = await this.#markFailedManagedCredential(trigger);
-			if (!credentialRotated && poolSize > 1) outcome = controller.advance() ? "advance" : "exhausted";
+		}
+		let outcome = managedFallback
+			? controller.onAttemptFailure(trigger.class, message.errorMessage || "Unknown error", { credentialRotated })
+			: legacyUnbounded || attemptsUsed <= retrySettings.maxRetries
+				? "retry"
+				: "exhausted";
+		if (managedFallback && credentialRotated && outcome === "advance" && controller.restorePreviousEntryForRetry()) {
+			outcome = "retry";
+		}
+		if (outcome === "stop") {
+			// Transient failure past the same-model retry budget: surface the real
+			// provider error and keep the current model; never switch models for it.
+			const attempt = this.#retryAttempt;
+			this.#retryAttempt = 0;
+			this.#transientStopTimestamp = message.timestamp;
+			if (attempt > 0) {
+				await this.#emitSessionEvent({
+					type: "auto_retry_end",
+					success: false,
+					attempt,
+					finalError: message.errorMessage,
+				});
+				this.#resolveRetry();
+			}
+			return managedOutcome ? { type: "terminal", terminal: { stopReason: "error", messages: [message] } } : false;
 		}
 		if (outcome === "exhausted") {
 			if (managedFallback) {
@@ -14377,7 +14424,9 @@ export class AgentSession {
 						? Math.min(retryAfterMs, retrySettings.maxDelayMs)
 						: cappedExponentialWithFullJitter(retrySettings.baseDelayMs, retrySettings.maxDelayMs, attemptsUsed);
 
-		if (managedFallback && trigger.class === "rate_limit" && trigger.retryAfterMs !== undefined && failedSelector) {
+		// Only a spent quota window hides the model from later resolution; a burst
+		// rate limit retries the same model and must not push later turns elsewhere.
+		if (managedFallback && trigger.class === "quota" && trigger.retryAfterMs !== undefined && failedSelector) {
 			this.#modelRegistry.suppressSelector(failedSelector, Date.now() + trigger.retryAfterMs);
 			this.#fallbackSuppressedSelectors.add(failedSelector);
 		}
@@ -15051,7 +15100,11 @@ export class AgentSession {
 					? rosterClaim.message
 					: undefined;
 			const { replyText: generatedReplyText } = await this.runEphemeralTurn({
-				promptText: incomingPrompt,
+				// The reply is read by the user (main UI relay) as much as by the peer:
+				// keep it in the user's language rather than the peer's English message.
+				promptText: this.#responseLanguage
+					? `${incomingPrompt}\n\n${buildResponseLanguageReminder(this.#responseLanguage)}`
+					: incomingPrompt,
 				signal: args.signal,
 				prependMessages: rosterMessage ? [rosterMessage] : undefined,
 				prependMessagesValid: rosterClaim

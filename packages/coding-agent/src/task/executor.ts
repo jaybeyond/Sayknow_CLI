@@ -39,6 +39,7 @@ import type { AgentSession, AgentSessionEvent, ForkContextSeed } from "../sessio
 import type { ArtifactManager } from "../session/artifacts";
 import type { AuthStorage } from "../session/auth-storage";
 import { SKILL_PROMPT_MESSAGE_TYPE } from "../session/messages";
+import type { DetectedLanguage } from "../session/response-language";
 import { SessionManager } from "../session/session-manager";
 import { truncateTail } from "../session/streaming-output";
 import { sessionRoot } from "../skc-runtime/session-layout";
@@ -251,6 +252,8 @@ export interface ExecutorOptions {
 	parentArtifactManager?: ArtifactManager;
 	managedPersistence?: ManagedTaskPersistence;
 	parentHindsightSessionState?: HindsightSessionState;
+	/** Language of the parent's latest user prompt, inherited by the subagent. */
+	responseLanguage?: DetectedLanguage;
 	/**
 	 * Parent agent's OpenTelemetry configuration. When defined, the subagent's
 	 * loop is started with the same tracer/hooks but its own agent identity
@@ -1645,6 +1648,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 						phase: "prompt",
 					},
 					parentHindsightSessionState: options.parentHindsightSessionState,
+					responseLanguage: options.responseLanguage,
 					parentTaskPrefix: id,
 					agentId: id,
 					agentDisplayName: agent.name,

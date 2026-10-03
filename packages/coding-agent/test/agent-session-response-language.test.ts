@@ -29,7 +29,10 @@ describe("AgentSession reply-language reminder", () => {
 		tempDir.removeSync();
 	});
 
-	async function contextFor(prompt: string): Promise<string> {
+	async function contextFor(
+		prompt: string,
+		options?: { attribution?: "agent"; before?: string; responseLanguage?: { code: string; name: string } },
+	): Promise<string> {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) throw new Error("Expected bundled model");
 		const seen: Message[][] = [];
@@ -40,7 +43,11 @@ describe("AgentSession reply-language reminder", () => {
 			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
 			streamFn: ((streamModel, context, options) => {
 				seen.push(context.messages as Message[]);
-				return createMockModel({ responses: [{ content: ["ok"] }] }).stream(streamModel, context, options);
+				return createMockModel({ responses: [{ content: ["ok"] }, { content: ["ok"] }] }).stream(
+					streamModel,
+					context,
+					options,
+				);
 			}) satisfies AgentOptions["streamFn"],
 		});
 		session = new AgentSession({
@@ -48,10 +55,15 @@ describe("AgentSession reply-language reminder", () => {
 			sessionManager: SessionManager.inMemory(),
 			settings: Settings.isolated({ "compaction.enabled": false, "decisions.enabled": false, "todo.eager": false }),
 			modelRegistry: new ModelRegistry(authStorage),
+			responseLanguage: options?.responseLanguage,
 		});
-		await session.prompt(prompt);
+		if (options?.before) {
+			await session.prompt(options.before);
+			await session.waitForIdle();
+		}
+		await session.prompt(prompt, options?.attribution ? { attribution: options.attribution } : undefined);
 		await session.waitForIdle();
-		return JSON.stringify(seen.at(-1));
+		return JSON.stringify(seen.at(-1)?.slice(-2));
 	}
 
 	it("names Korean at the start of a turn written in Korean", async () => {
@@ -63,5 +75,30 @@ describe("AgentSession reply-language reminder", () => {
 	it("adds nothing for an English turn", async () => {
 		const context = await contextFor("Check why the broker test fails");
 		expect(context).not.toContain("The user wrote in");
+	});
+
+	it("answers an English subagent assignment in the inherited user language", async () => {
+		const context = await contextFor("Investigate the failing broker test and report findings", {
+			attribution: "agent",
+			responseLanguage: { code: "ko", name: "Korean" },
+		});
+		expect(context).toContain("The user wrote in Korean.");
+		expect(session!.getResponseLanguage()?.code).toBe("ko");
+	});
+
+	it("keeps the latest user language for later agent-attributed prompts", async () => {
+		const context = await contextFor("Continue from the paused subagent session state.", {
+			attribution: "agent",
+			before: "브로커 테스트를 고쳐줘",
+		});
+		expect(context).toContain("The user wrote in Korean.");
+	});
+
+	it("lets a later English user prompt clear the inherited language", async () => {
+		const context = await contextFor("Now answer in English please", {
+			responseLanguage: { code: "ko", name: "Korean" },
+		});
+		expect(context).not.toContain("The user wrote in");
+		expect(session!.getResponseLanguage()).toBeUndefined();
 	});
 });

@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Automatic model fallback now switches models only when the current model's quota or credits are spent (`insufficient_quota`, `usage_limit_reached`, or a rate limit whose reset is longer than `retry.maxDelayMs`) or after repeated authentication failures. Network errors, timeouts, server errors and short rate limits retry the same model within its budget and then stop with the real provider error instead of silently switching models.
+- An exhausted account rotates to another logged-in account of the same provider before the model is switched.
+
+### Fixed
+
+- Grok Build requests now present client version `1.0.13`; `0.2.33` was rejected by the proxy with HTTP 426. The wrapper's version wins over a stale configured header.
+- Subagents inherit the language of the parent's latest user prompt, so English assignments, resumes and reminders no longer pull their reports into English; IRC auto-replies are written in the same language.
+
 ## [0.7.3] - 2026-09-30
 
 ## [0.7.2] - 2026-09-29

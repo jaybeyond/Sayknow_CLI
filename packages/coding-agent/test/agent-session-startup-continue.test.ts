@@ -214,13 +214,15 @@ describe("AgentSession startup continuation lifecycle", () => {
 		expect(session!.isStreaming).toBe(false);
 	});
 
-	it("holds agent_end until a managed retry recovers", async () => {
+	it("holds agent_end until a managed same-model retry recovers", async () => {
 		let attempts = 0;
+		const models: string[] = [];
 		const accepted = createMockModel({ responses: [{ content: ["recovered"] }] });
 		await createManagedSession((model, context, options) => {
 			attempts += 1;
+			models.push(`${model.provider}/${model.id}`);
 			return attempts === 1 ? retryableFailure(model) : accepted.stream(model, context, options);
-		});
+		}, 2);
 		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
 		const order: string[] = [];
 		session!.subscribe(event => {
@@ -233,6 +235,8 @@ describe("AgentSession startup continuation lifecycle", () => {
 		await session!.waitForIdle();
 
 		expect(attempts).toBe(2);
+		// A transient 429 retries the same model; it does not switch to the fallback.
+		expect(new Set(models).size).toBe(1);
 		expect(order).toEqual(["auto_retry_start", "auto_retry_end", "agent_end"]);
 	});
 

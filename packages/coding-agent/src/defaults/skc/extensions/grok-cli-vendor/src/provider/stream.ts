@@ -7,7 +7,13 @@ import type {
 } from '@sayknow-cli/ai';
 import { streamOpenAIResponses } from '@sayknow-cli/ai/providers/openai-responses';
 
-const GROK_CLI_VERSION = '0.2.33';
+/**
+ * Client version presented to cli-chat-proxy. The proxy rejects outdated
+ * clients with HTTP 426 ("Your Grok CLI version (...) is outdated"), so this
+ * must track the minimum accepted Grok CLI release. It is applied after any
+ * caller/model headers so a stale configured value can never override it.
+ */
+export const GROK_CLI_VERSION = '1.0.13';
 
 /**
  * Stream function that adds Grok CLI-specific headers to requests.

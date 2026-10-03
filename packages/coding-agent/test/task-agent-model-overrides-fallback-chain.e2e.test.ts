@@ -19,7 +19,9 @@ const discardedAttemptContent = "Discarded primary provisional content";
 function rateLimitStream(model: Model): AssistantMessageEventStream {
 	const stream = new AssistantMessageEventStream();
 	queueMicrotask(() => {
-		const message: AssistantMessage & { transportFailure: { kind: "transport"; status: number } } = {
+		const message: AssistantMessage & {
+			transportFailure: { kind: "transport"; status: number; providerCode: string };
+		} = {
 			role: "assistant",
 			content: [{ type: "text", text: discardedAttemptContent }],
 			api: model.api,
@@ -37,7 +39,7 @@ function rateLimitStream(model: Model): AssistantMessageEventStream {
 			errorMessage: "rate limit exceeded",
 			errorStatus: 429,
 			timestamp: Date.now(),
-			transportFailure: { kind: "transport", status: 429 },
+			transportFailure: { kind: "transport", status: 429, providerCode: "usage_limit_reached" },
 		};
 		stream.push({ type: "start", partial: message });
 		stream.push({ type: "text_delta", contentIndex: 0, delta: discardedAttemptContent, partial: message });

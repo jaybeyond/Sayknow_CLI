@@ -1604,6 +1604,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 						localProtocolOptions,
 						parentArtifactManager,
 						parentHindsightSessionState: this.session.getHindsightSessionState?.(),
+						responseLanguage: this.session.getResponseLanguage?.(),
 						parentTelemetry: this.session.getTelemetry?.(),
 						forkContextSeed,
 					});
@@ -1679,6 +1680,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 						localProtocolOptions,
 						parentArtifactManager,
 						parentHindsightSessionState: this.session.getHindsightSessionState?.(),
+						responseLanguage: this.session.getResponseLanguage?.(),
 						parentTelemetry: this.session.getTelemetry?.(),
 						forkContextSeed,
 					});

@@ -20,7 +20,12 @@ export interface FallbackFailure {
 	reason: string;
 }
 
-export type FallbackFailureResult = "retry" | "advance" | "exhausted";
+/**
+ * `stop`: the current model failed transiently past its retry budget. The run
+ * ends with an error but the model stays selected — transient failures never
+ * switch models.
+ */
+export type FallbackFailureResult = "retry" | "advance" | "stop" | "exhausted";
 
 /**
  * In-memory policy state for one fallback-chain scope. A controller is deliberately
@@ -107,7 +112,19 @@ export class FallbackChainController {
 		this.exhaustedForTurn = this.activeIndex >= this.chain.entries.length;
 	}
 
-	onAttemptFailure(triggerClass: FallbackTriggerClass, reason: string): FallbackFailureResult {
+	/**
+	 * Model switching is reserved for failures the current model cannot recover
+	 * from: exhausted quota/credits (advance at once; the session first rotates to
+	 * another logged-in account) and authentication failures (after the per-model
+	 * budget). Network, timeout, server and short rate-limit failures are
+	 * transient: they retry the SAME model within its budget and then stop with
+	 * an error instead of silently switching to a different model.
+	 */
+	onAttemptFailure(
+		triggerClass: FallbackTriggerClass,
+		reason: string,
+		options?: { credentialRotated?: boolean },
+	): FallbackFailureResult {
 		const selector = this.currentSelector();
 		if (!selector || this.exhaustedForTurn) return "exhausted";
 		if (!this.#attemptStarted) {
@@ -121,8 +138,17 @@ export class FallbackChainController {
 			this.exhaustedForTurn = true;
 			return "exhausted";
 		}
+		if (triggerClass === "quota") {
+			// Another logged-in account of the same provider is still usable: stay on
+			// this model within its budget instead of switching models.
+			if (options?.credentialRotated && this.attemptsUsed < this.maxAttempts) return "retry";
+			return this.advance() ? "advance" : "exhausted";
+		}
 		if (this.attemptsUsed < this.maxAttempts) return "retry";
-		return this.advance() ? "advance" : "exhausted";
+		if (triggerClass === "auth") return this.advance() ? "advance" : "exhausted";
+		// Keep the active entry selected; the next request starts a fresh budget.
+		this.resetAttemptBudget();
+		return "stop";
 	}
 
 	advance(): boolean {

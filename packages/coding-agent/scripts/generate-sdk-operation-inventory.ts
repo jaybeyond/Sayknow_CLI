@@ -55,6 +55,7 @@ const LOCKED_EXCLUSIONS: Readonly<Record<string, string>> = {
 	"agent_session:peekStandingResolveHandler": "internal accessor/plumbing, not a user-facing control seam",
 	"agent_session:setStandingResolveHandler": "internal accessor/plumbing, not a user-facing control seam",
 	"agent_session:buildForkContextSeed": "internal accessor/plumbing, not a user-facing control seam",
+	"agent_session:getResponseLanguage": "internal accessor/plumbing, not a user-facing control seam",
 	"agent_session:getHindsightSessionState": "internal accessor/plumbing, not a user-facing control seam",
 	"agent_session:setHindsightSessionState": "internal accessor/plumbing, not a user-facing control seam",
 	"agent_session:markPlanCompactAbortPending": "internal accessor/plumbing, not a user-facing control seam",

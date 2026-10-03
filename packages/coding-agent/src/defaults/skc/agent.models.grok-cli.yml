@@ -10,7 +10,7 @@ providers:
     headers:
       x-xai-token-auth: xai-grok-cli
       x-grok-client-identifier: skc-grok-cli
-      x-grok-client-version: 0.2.33
+      x-grok-client-version: 1.0.13
     models:
       - id: grok-composer-2.5-fast
         name: Composer 2.5 Fast
