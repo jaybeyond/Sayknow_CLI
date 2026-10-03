@@ -321,9 +321,10 @@ describe("openai-codex streaming", () => {
 	});
 
 	it.each([
-		[false, 2],
-		[true, 1],
-	])("uses one websocket request per managed connection-limit failure", async (fallbackManaged, expectedRequests) => {
+		[false, undefined],
+		[true, undefined],
+		[true, 0],
+	])("reconnects connection-limit failures once on the same model (managed=%s, budget=%s)", async (fallbackManaged, streamMaxRetries) => {
 		const tempDir = TempDir.createSync("@pi-codex-stream-");
 		setAgentDir(tempDir.path());
 		let requests = 0;
@@ -357,11 +358,320 @@ describe("openai-codex streaming", () => {
 				sessionId: `connection-limit-${fallbackManaged}`,
 				preferWebsockets: true,
 				fallbackManaged,
+				streamMaxRetries,
 				providerSessionState: new Map<string, ProviderSessionState>(),
 			},
 		).result();
-		expect(requests).toBe(expectedRequests);
-		expect(result.stopReason).toBe(fallbackManaged ? "error" : "stop");
+		expect(requests).toBe(2);
+		expect(result.stopReason).toBe("stop");
+	});
+
+	it.each([
+		{
+			fallbackManaged: false,
+			firstCode: "websocket_connection_limit_reached",
+			nextCode: "websocket_connection_limit_reached",
+		},
+		{
+			fallbackManaged: true,
+			firstCode: "websocket_connection_limit_reached",
+			nextCode: "websocket_connection_limit_reached",
+		},
+		{ fallbackManaged: false, firstCode: "previous_response_not_found", nextCode: "previous_response_not_found" },
+		{ fallbackManaged: true, firstCode: "previous_response_not_found", nextCode: "previous_response_not_found" },
+		{
+			fallbackManaged: true,
+			firstCode: "previous_response_not_found",
+			nextCode: "websocket_connection_limit_reached",
+		},
+		{
+			fallbackManaged: true,
+			firstCode: "websocket_connection_limit_reached",
+			nextCode: "previous_response_not_found",
+		},
+	])("bounds repeated and mixed state errors to one recovery: %j", async ({
+		fallbackManaged,
+		firstCode,
+		nextCode,
+	}) => {
+		const tempDir = TempDir.createSync("@pi-codex-state-budget-");
+		setAgentDir(tempDir.path());
+		const requests: Array<Record<string, unknown>> = [];
+		const fetchMock = vi.fn(async () => new Response(createCompletedCodexSse("unexpected SSE")));
+		global.fetch = fetchMock as unknown as typeof fetch;
+		class RepeatedStateWebSocket extends MockWebSocket {
+			constructor(url: string, options?: { headers?: WsHeaders }) {
+				super(url, options);
+				this.scheduleOpen();
+			}
+			send(data: string): void {
+				requests.push(JSON.parse(data) as Record<string, unknown>);
+				if (requests.length === 1) {
+					this.emitCodexResponse({ messageId: "seed", responseId: "resp_1", text: "seed answer" });
+					return;
+				}
+				if (requests.length > 3) throw new Error("Unexpected extra recovery request");
+				this.sendJson({
+					type: "error",
+					error: { code: requests.length === 2 ? firstCode : nextCode, message: "state expired" },
+				});
+			}
+		}
+		global.WebSocket = RepeatedStateWebSocket as unknown as typeof WebSocket;
+		const model = { ...createCodexTestModel("https://chatgpt.com/backend-api"), preferWebsockets: true };
+		const options = {
+			apiKey: createCodexTestToken(),
+			sessionId: "state-budget",
+			fallbackManaged,
+			providerSessionState: new Map<string, ProviderSessionState>(),
+		};
+		const context = createCodexTestContext();
+		const seed = await streamOpenAICodexResponses(model, context, options).result();
+		const result = await streamOpenAICodexResponses(
+			model,
+			{
+				...context,
+				messages: [...context.messages, seed, { role: "user", content: "continue", timestamp: Date.now() + 1 }],
+			},
+			options,
+		).result();
+		expect(result.stopReason).toBe("error");
+		expect(requests).toHaveLength(3);
+		expect(requests[1]?.previous_response_id).toBe("resp_1");
+		expect(requests[2]?.previous_response_id).toBeUndefined();
+		expect(fetchMock).not.toHaveBeenCalled();
+	});
+
+	it.each([
+		[false, "text"],
+		[true, "text"],
+		[false, "thinking"],
+		[true, "thinking"],
+		[false, "toolCall"],
+		[true, "toolCall"],
+	] as const)("preserves published %s/%s output without replay on connection expiry", async (fallbackManaged, partialType) => {
+		const tempDir = TempDir.createSync("@pi-codex-state-partial-");
+		setAgentDir(tempDir.path());
+		let requests = 0;
+		const fetchMock = vi.fn(async () => new Response(createCompletedCodexSse("unexpected replay")));
+		global.fetch = fetchMock as unknown as typeof fetch;
+		class PartialStateWebSocket extends MockWebSocket {
+			constructor(url: string, options?: { headers?: WsHeaders }) {
+				super(url, options);
+				this.scheduleOpen();
+			}
+			send(): void {
+				requests += 1;
+				if (partialType === "text") {
+					this.sendJson({
+						type: "response.output_item.added",
+						item: { type: "message", id: "partial", role: "assistant", content: [] },
+					});
+					this.sendJson({ type: "response.content_part.added", part: { type: "output_text", text: "" } });
+					this.sendJson({ type: "response.output_text.delta", delta: "partial text" });
+				} else if (partialType === "thinking") {
+					this.sendJson({ type: "response.output_item.added", item: { type: "reasoning", id: "partial" } });
+					this.sendJson({
+						type: "response.reasoning_summary_part.added",
+						part: { type: "summary_text", text: "" },
+					});
+					this.sendJson({
+						type: "response.reasoning_summary_text.delta",
+						item_id: "partial",
+						output_index: 0,
+						delta: "partial thinking",
+					});
+				} else {
+					this.sendJson({
+						type: "response.output_item.added",
+						item: { type: "function_call", id: "partial", call_id: "call_1", name: "echo", arguments: "" },
+					});
+					this.sendJson({ type: "response.function_call_arguments.delta", delta: '{"text":"partial tool"}' });
+					this.sendJson({
+						type: "response.output_item.done",
+						item: {
+							type: "function_call",
+							id: "partial",
+							call_id: "call_1",
+							name: "echo",
+							arguments: '{"text":"partial tool"}',
+						},
+					});
+				}
+				this.sendJson({
+					type: "error",
+					error: { code: "websocket_connection_limit_reached", message: "connection expired" },
+				});
+			}
+		}
+		global.WebSocket = PartialStateWebSocket as unknown as typeof WebSocket;
+		const stream = streamOpenAICodexResponses(
+			{ ...createCodexTestModel("https://chatgpt.com/backend-api"), preferWebsockets: true },
+			createCodexTestContext(),
+			{
+				apiKey: createCodexTestToken(),
+				sessionId: "state-partial",
+				fallbackManaged,
+				providerSessionState: new Map<string, ProviderSessionState>(),
+			},
+		);
+		let starts = 0;
+		for await (const event of stream) {
+			if (event.type === "text_start" || event.type === "thinking_start" || event.type === "toolcall_start")
+				starts += 1;
+		}
+		const result = await stream.result();
+		expect(result.stopReason).toBe("error");
+		expect(result.content).toHaveLength(1);
+		expect(result.content[0]?.type).toBe(partialType);
+		expect(JSON.stringify(result.content)).toContain(`partial ${partialType === "toolCall" ? "tool" : partialType}`);
+		expect(starts).toBe(1);
+		expect(requests).toBe(1);
+		expect(fetchMock).not.toHaveBeenCalled();
+	});
+
+	it("does not hide a managed state-recovery handshake failure behind SSE", async () => {
+		const tempDir = TempDir.createSync("@pi-codex-state-handshake-");
+		setAgentDir(tempDir.path());
+		let constructors = 0;
+		let requests = 0;
+		const fetchMock = vi.fn(async () => new Response(createCompletedCodexSse("unexpected SSE")));
+		global.fetch = fetchMock as unknown as typeof fetch;
+		class FailedRecoveryWebSocket extends MockWebSocket {
+			constructor(url: string, options?: { headers?: WsHeaders }) {
+				super(url, options);
+				constructors += 1;
+				if (constructors === 1) this.scheduleOpen();
+				else
+					setTimeout(
+						() => this.emit("error", { type: "error", message: "handshake rejected" } as unknown as Event),
+						0,
+					);
+			}
+			send(): void {
+				requests += 1;
+				this.sendJson({ type: "error", error: { code: "websocket_connection_limit_reached", message: "expired" } });
+			}
+		}
+		global.WebSocket = FailedRecoveryWebSocket as unknown as typeof WebSocket;
+		const result = await streamOpenAICodexResponses(
+			{ ...createCodexTestModel("https://chatgpt.com/backend-api"), preferWebsockets: true },
+			createCodexTestContext(),
+			{
+				apiKey: createCodexTestToken(),
+				sessionId: "state-handshake",
+				fallbackManaged: true,
+				streamMaxRetries: 0,
+				providerSessionState: new Map<string, ProviderSessionState>(),
+			},
+		).result();
+		expect(result.stopReason).toBe("error");
+		expect(constructors).toBe(2);
+		expect(requests).toBe(1);
+		expect(fetchMock).not.toHaveBeenCalled();
+	});
+
+	it.each([
+		"no-anchor",
+		"explicit-opt-out",
+		"caller-abort",
+	])("does not recover state when %s forbids it", async scenario => {
+		const tempDir = TempDir.createSync("@pi-codex-state-suppressed-");
+		setAgentDir(tempDir.path());
+		let requests = 0;
+		const abort = new AbortController();
+		const fetchMock = vi.fn(async () => new Response(createCompletedCodexSse("unexpected SSE")));
+		global.fetch = fetchMock as unknown as typeof fetch;
+		class SuppressedStateWebSocket extends MockWebSocket {
+			constructor(url: string, options?: { headers?: WsHeaders }) {
+				super(url, options);
+				this.scheduleOpen();
+			}
+			send(data: string): void {
+				requests += 1;
+				expect((JSON.parse(data) as Record<string, unknown>).previous_response_id).toBeUndefined();
+				this.sendJson({
+					type: "error",
+					error: {
+						code: scenario === "no-anchor" ? "previous_response_not_found" : "websocket_connection_limit_reached",
+						message: "state expired",
+					},
+				});
+				if (scenario === "caller-abort") abort.abort();
+			}
+		}
+		global.WebSocket = SuppressedStateWebSocket as unknown as typeof WebSocket;
+		const result = await streamOpenAICodexResponses(
+			{ ...createCodexTestModel("https://chatgpt.com/backend-api"), preferWebsockets: true },
+			createCodexTestContext(),
+			{
+				apiKey: createCodexTestToken(),
+				sessionId: "state-suppressed",
+				fallbackManaged: scenario !== "explicit-opt-out",
+				streamMaxRetries: 0,
+				signal: abort.signal,
+				providerSessionState: new Map<string, ProviderSessionState>(),
+			},
+		).result();
+		expect(result.stopReason).toBe(scenario === "caller-abort" ? "aborted" : "error");
+		expect(requests).toBe(1);
+		expect(fetchMock).not.toHaveBeenCalled();
+	});
+
+	it("resets the one-shot state recovery budget for a genuinely new logical request", async () => {
+		const tempDir = TempDir.createSync("@pi-codex-state-new-turn-");
+		setAgentDir(tempDir.path());
+		const requests: Array<Record<string, unknown>> = [];
+		const fetchMock = vi.fn(async () => new Response(createCompletedCodexSse("unexpected SSE")));
+		global.fetch = fetchMock as unknown as typeof fetch;
+		class NewTurnStateWebSocket extends MockWebSocket {
+			constructor(url: string, options?: { headers?: WsHeaders }) {
+				super(url, options);
+				this.scheduleOpen();
+			}
+			send(data: string): void {
+				requests.push(JSON.parse(data) as Record<string, unknown>);
+				if (requests.length > 4) throw new Error("Unexpected extra recovery request");
+				if (requests.length % 2 === 1) {
+					this.sendJson({
+						type: "error",
+						error: { code: "websocket_connection_limit_reached", message: "expired" },
+					});
+				} else {
+					this.emitCodexResponse({
+						messageId: `msg_${requests.length}`,
+						responseId: `resp_${requests.length}`,
+						text: `answer ${requests.length}`,
+					});
+				}
+			}
+		}
+		global.WebSocket = NewTurnStateWebSocket as unknown as typeof WebSocket;
+		const model = { ...createCodexTestModel("https://chatgpt.com/backend-api"), preferWebsockets: true };
+		const options = {
+			apiKey: createCodexTestToken(),
+			sessionId: "state-new-turn",
+			fallbackManaged: true,
+			streamMaxRetries: 0,
+			providerSessionState: new Map<string, ProviderSessionState>(),
+		};
+		const context = createCodexTestContext();
+		const first = await streamOpenAICodexResponses(model, context, options).result();
+		const second = await streamOpenAICodexResponses(
+			model,
+			{
+				...context,
+				messages: [...context.messages, first, { role: "user", content: "continue", timestamp: Date.now() + 1 }],
+			},
+			options,
+		).result();
+		expect(first.stopReason).toBe("stop");
+		expect(second.stopReason).toBe("stop");
+		expect(requests).toHaveLength(4);
+		expect(requests[2]?.previous_response_id).toBe("resp_2");
+		expect(requests[3]?.previous_response_id).toBeUndefined();
+		expect(JSON.stringify(requests[3]?.input)).toContain("answer 2");
+		expect(fetchMock).not.toHaveBeenCalled();
 	});
 
 	it("does not replay a managed websocket failure over SSE", async () => {
@@ -1992,11 +2302,145 @@ describe("openai-codex streaming", () => {
 		});
 	});
 
-	it("retries websocket continuations with full context when previous_response_id expires", async () => {
+	it.each([
+		{
+			fallbackManaged: false,
+			streamMaxRetries: undefined,
+			code: "previous_response_not_found",
+			message: "anchor expired",
+			recover: true,
+		},
+		{
+			fallbackManaged: true,
+			streamMaxRetries: undefined,
+			code: "previous_response_not_found",
+			message: "anchor expired",
+			recover: true,
+		},
+		{
+			fallbackManaged: true,
+			streamMaxRetries: 0,
+			code: "previous_response_not_found",
+			message: "anchor expired",
+			recover: true,
+		},
+		{
+			fallbackManaged: true,
+			streamMaxRetries: 0,
+			code: "invalid_request_error",
+			message: "Invalid `previous_response_id`.",
+			recover: true,
+		},
+		{
+			fallbackManaged: true,
+			streamMaxRetries: 0,
+			code: "invalid_request_error",
+			message: "Previous response with id 'resp_1' not found.",
+			recover: true,
+		},
+		{
+			fallbackManaged: true,
+			streamMaxRetries: 0,
+			code: "websocket_connection_limit_reached",
+			message: "connection limit",
+			recover: true,
+		},
+		{
+			fallbackManaged: false,
+			streamMaxRetries: 0,
+			code: "previous_response_not_found",
+			message: "anchor expired",
+			recover: false,
+		},
+		{
+			fallbackManaged: true,
+			streamMaxRetries: 0,
+			code: "invalid_request_error",
+			message: "Previous response.",
+			recover: false,
+		},
+		{
+			fallbackManaged: true,
+			streamMaxRetries: 0,
+			code: "invalid_request_error",
+			message: "Invalid previous_response_id tool call.",
+			recover: false,
+		},
+		{
+			fallbackManaged: true,
+			streamMaxRetries: 0,
+			code: "invalid_request_error",
+			message: "Unknown previous response tool call.",
+			recover: false,
+		},
+		{
+			fallbackManaged: true,
+			streamMaxRetries: 0,
+			code: "invalid_request_error",
+			message: "Previous response includes an unknown tool call.",
+			recover: false,
+		},
+		{
+			fallbackManaged: true,
+			streamMaxRetries: 0,
+			code: "authentication_error",
+			message: "Invalid `previous_response_id`.",
+			recover: false,
+		},
+		{
+			fallbackManaged: true,
+			streamMaxRetries: 0,
+			code: "rate_limit_exceeded",
+			message: "Invalid `previous_response_id`.",
+			recover: false,
+		},
+		{
+			fallbackManaged: true,
+			streamMaxRetries: 0,
+			code: "previous_response_not_found",
+			message: "anchor expired",
+			recover: false,
+			wireWithoutAnchor: true,
+		},
+		{
+			fallbackManaged: true,
+			streamMaxRetries: 0,
+			code: "previous_response_not_found",
+			message: "anchor expired",
+			recover: true,
+			bodyAnchor: true,
+		},
+	])("checks websocket anchor recovery against the actual sent request: %j", async ({
+		fallbackManaged,
+		streamMaxRetries,
+		code,
+		message,
+		recover,
+		wireWithoutAnchor = false,
+		bodyAnchor = false,
+	}) => {
 		const tempDir = TempDir.createSync("@pi-codex-stream-");
 		setAgentDir(tempDir.path());
 		const token = createCodexTestToken();
+		let strippedWireAnchor = false;
+		let payloadCalls = 0;
+		const onPayload =
+			wireWithoutAnchor || bodyAnchor
+				? (payload: unknown): void => {
+						const body = payload as Record<string, unknown>;
+						payloadCalls += 1;
+						if (bodyAnchor && payloadCalls === 2) body.previous_response_id = "resp_1";
+						if (wireWithoutAnchor) {
+							body.toJSON = function (this: Record<string, unknown>): Record<string, unknown> {
+								const { previous_response_id: anchor, toJSON: _toJSON, ...wireBody } = this;
+								if (typeof anchor === "string" && anchor.length > 0) strippedWireAnchor = true;
+								return wireBody;
+							};
+						}
+					}
+				: undefined;
 		const sentRequests: Array<Record<string, unknown>> = [];
+		const sockets: MockWebSocket[] = [];
 		const fetchMock = vi.fn(async () => {
 			throw new Error("SSE fallback should not be called");
 		});
@@ -2005,6 +2449,7 @@ describe("openai-codex streaming", () => {
 		class PreviousResponseMissingWebSocket extends MockWebSocket {
 			constructor(url: string, options?: { headers?: WsHeaders }) {
 				super(url, options);
+				sockets.push(this);
 				this.scheduleOpen();
 			}
 
@@ -2025,11 +2470,11 @@ describe("openai-codex streaming", () => {
 				}
 
 				if (requestIndex === 2) {
-					expect(request.previous_response_id).toBe("resp_1");
+					expect(request.previous_response_id).toBe(wireWithoutAnchor ? undefined : "resp_1");
 					this.sendJson({
 						type: "error",
-						code: "previous_response_not_found",
-						message: "Previous response with id 'resp_1' not found.",
+						code,
+						message,
 					});
 					return;
 				}
@@ -2061,6 +2506,9 @@ describe("openai-codex streaming", () => {
 			apiKey: token,
 			sessionId: "ws-expired-previous-response-session",
 			providerSessionState,
+			fallbackManaged,
+			streamMaxRetries,
+			onPayload,
 		}).result();
 		const secondContext: Context = {
 			systemPrompt: ["You are a helpful assistant."],
@@ -2075,8 +2523,19 @@ describe("openai-codex streaming", () => {
 			apiKey: token,
 			sessionId: "ws-expired-previous-response-session",
 			providerSessionState,
+			fallbackManaged,
+			streamMaxRetries,
+			onPayload,
 		}).result();
 
+		if (!recover) {
+			expect(secondResponse.stopReason).toBe("error");
+			expect(sentRequests).toHaveLength(2);
+			expect(sentRequests[1]?.previous_response_id).toBe(wireWithoutAnchor ? undefined : "resp_1");
+			if (wireWithoutAnchor) expect(strippedWireAnchor).toBe(true);
+			expect(fetchMock).not.toHaveBeenCalled();
+			return;
+		}
 		expect(secondResponse.stopReason).toBe("stop");
 		expect(JSON.stringify(secondResponse.content)).toContain("Second answer");
 		expect(fetchMock).not.toHaveBeenCalled();
@@ -2086,6 +2545,10 @@ describe("openai-codex streaming", () => {
 		expect(Array.isArray(retryInput)).toBe(true);
 		expect(JSON.stringify(retryInput)).toContain("First question");
 		expect(JSON.stringify(retryInput)).toContain("Second question");
+		expect(JSON.stringify(retryInput)).toContain("First answer");
+		expect(sentRequests.map(request => request.model)).toEqual([model.id, model.id, model.id]);
+		expect(sockets).toHaveLength(code === "websocket_connection_limit_reached" ? 2 : 1);
+		if (code === "websocket_connection_limit_reached") expect(sockets[0]?.readyState).toBe(MockWebSocket.CLOSED);
 
 		const stats = getOpenAICodexWebSocketDebugStats(model, {
 			sessionId: "ws-expired-previous-response-session",

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Recover Codex WebSocket connection-lifetime expiry and stale response anchors once on the same model, including managed attempts with zero ordinary stream retries. Anchor recovery requires the current request's actual sent `previous_response_id`; only the observed raw anchor rejections qualify. Preserve published text, reasoning, and tool calls instead of replaying them, bound repeated or mixed state errors to one recovery per request, and leave managed reconnect failures to the dispatcher rather than silently replaying over SSE.
+
 ## [0.7.3] - 2026-09-30
 
 ## [0.6.7] - 2026-09-28

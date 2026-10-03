@@ -107,6 +107,8 @@ const CODEX_WEBSOCKET_FIRST_EVENT_TIMEOUT_MS = 15000;
 const CODEX_WEBSOCKET_RETRY_BUDGET = CODEX_MAX_RETRIES;
 const CODEX_WEBSOCKET_TRANSPORT_ERROR_PREFIX = "Codex websocket transport error";
 const CODEX_PREVIOUS_RESPONSE_STALE_CODES = new Set(["previous_response_not_found", "codex_previous_response_stale"]);
+const CODEX_PREVIOUS_RESPONSE_STALE_MESSAGE =
+	/^(?:Invalid [`'"]?previous_response_id[`'"]?\.?|Previous response with id (?:'[^'\r\n]+'|"[^"\r\n]+") not found\.?)$/i;
 const CODEX_RETRYABLE_EVENT_CODES = new Set(["model_error", "server_error", "internal_error"]);
 const CODEX_NON_RETRYABLE_EVENT_CODES = new Set([
 	"invalid_function_parameters",
@@ -229,6 +231,8 @@ interface CodexRequestContext {
 	websocketState?: CodexWebSocketSessionState;
 	transformedBody: RequestBody;
 	rawRequestDump: RawHttpRequestDump;
+	/** Anchor captured after this request's actual WebSocket send, not shared session statistics. */
+	sentPreviousResponseId?: string;
 }
 
 async function retryCodexInitialTransportWithoutToolChoice(
@@ -288,6 +292,7 @@ interface CodexStreamRuntime {
 	nativeOutputItems: Array<Record<string, unknown>>;
 	websocketStreamRetries: number;
 	providerRetryAttempt: number;
+	stateRecoveryAttempted: boolean;
 	sawTerminalEvent: boolean;
 	canSafelyReplayWebsocketOverSse: boolean;
 	/** Ids of tool calls that received their terminal `output_item.done`. */
@@ -810,6 +815,7 @@ async function openCodexWebSocketTransport(
 	requestBodyForState: RequestBody;
 	transport: CodexTransport;
 }> {
+	requestContext.sentPreviousResponseId = undefined;
 	const websocketRequest = buildCodexWebSocketRequest(requestContext.transformedBody, websocketState);
 	const websocketHeaders = createCodexHeaders(
 		requestContext.requestHeaders,
@@ -838,6 +844,10 @@ async function openCodexWebSocketTransport(
 		websocketState,
 		requestSetup.requestSignal,
 		options,
+		serializedRequest => {
+			const anchor = asRecord(JSON.parse(serializedRequest))?.previous_response_id;
+			requestContext.sentPreviousResponseId = typeof anchor === "string" && anchor.length > 0 ? anchor : undefined;
+		},
 	);
 	return { eventStream, requestBodyForState, transport: "websocket" };
 }
@@ -908,6 +918,7 @@ async function reopenCodexWebSocketRuntimeStream(
 	} catch (error) {
 		const wsError = error instanceof Error ? error : new Error(String(error));
 		if (!isCodexWebSocketTransportError(wsError)) throw error;
+		if (context.options?.fallbackManaged || context.requestSetup.requestSignal.aborted) throw error;
 		// Reopen failed at the websocket layer (handshake refused, connect timeout, etc.).
 		// Activate fallback so subsequent turns use SSE, and replay this turn over SSE
 		// instead of surfacing a raw transport error to the caller.
@@ -956,6 +967,7 @@ function createCodexStreamRuntime(initial: {
 		nativeOutputItems: [],
 		websocketStreamRetries: 0,
 		providerRetryAttempt: 0,
+		stateRecoveryAttempted: false,
 		sawTerminalEvent: false,
 		canSafelyReplayWebsocketOverSse: true,
 		finalizedToolCallIds: new Set<string>(),
@@ -1478,14 +1490,15 @@ async function recoverCodexStreamError(
 	runtime: CodexStreamRuntime,
 	error: unknown,
 ): Promise<boolean> {
+	// State maintenance belongs to this wire request, even when transient retries are managed externally.
+	if (
+		(error instanceof CodexProviderStreamError && error.code === "websocket_connection_limit_reached") ||
+		isCodexPreviousResponseNotFound(error)
+	) {
+		return tryRecoverCodexWebSocketState(context, runtime, error);
+	}
 	if (context.options?.fallbackManaged) return false;
 	if (await tryRetryWithoutForcedToolChoice(context, runtime, error)) {
-		return true;
-	}
-	if (await tryReconnectCodexWebSocketOnConnectionLimit(context, runtime, error)) {
-		return true;
-	}
-	if (await tryRecoverCodexPreviousResponseNotFound(context, runtime, error)) {
 		return true;
 	}
 	if (await tryReplayWebsocketFailureOverSse(context, runtime, error)) {
@@ -1561,101 +1574,62 @@ function isForcedCodexToolChoice(choice: RequestBody["tool_choice"]): boolean {
 	return !!choice && choice !== "none" && choice !== "auto";
 }
 
-/**
- * Handles `websocket_connection_limit_reached` errors by closing the stale connection
- * and opening a fresh websocket. If content has already been emitted to the caller,
- * falls back to SSE replay (same as other WS failures) since we cannot safely
- * continue a partial response on a new connection.
- */
-async function tryReconnectCodexWebSocketOnConnectionLimit(
+/** Repair unusable WebSocket state once, before any output is published, without changing models. */
+async function tryRecoverCodexWebSocketState(
 	context: CodexStreamProcessingContext,
 	runtime: CodexStreamRuntime,
 	error: unknown,
 ): Promise<boolean> {
-	if (!(error instanceof CodexProviderStreamError) || error.code !== "websocket_connection_limit_reached") {
-		return false;
-	}
 	const websocketState = context.requestContext.websocketState;
+	if (!websocketState || runtime.transport !== "websocket") return false;
+	const connectionLimit =
+		error instanceof CodexProviderStreamError && error.code === "websocket_connection_limit_reached";
+	if (connectionLimit) {
+		// A spent socket must not survive into the next turn, even if this partial response cannot be replayed.
+		websocketState.connection?.close("connection_limit");
+		websocketState.connection = undefined;
+		resetCodexWebSocketAppendState(websocketState);
+		resetCodexSessionMetadata(websocketState);
+	}
 	if (
-		!websocketState ||
-		runtime.transport !== "websocket" ||
-		context.options?.signal?.aborted ||
-		context.options?.fallbackManaged
+		runtime.stateRecoveryAttempted ||
+		runtime.sawTerminalEvent ||
+		context.output.content.length > 0 ||
+		context.firstTokenTime !== undefined ||
+		context.requestSetup.requestSignal.aborted ||
+		(!context.options?.fallbackManaged &&
+			resolveRetryBudget(context.options?.streamMaxRetries, CODEX_MAX_RETRIES) === 0) ||
+		(!connectionLimit && !context.requestContext.sentPreviousResponseId)
 	) {
 		return false;
 	}
 
-	// Close the stale connection so getOrCreateOpenAI code backendWebSocketConnection creates a fresh one.
-	websocketState.connection?.close("connection_limit");
-	websocketState.connection = undefined;
+	// Independent of streamMaxRetries: managed dispatchers set it to zero to suppress ordinary provider retries.
+	runtime.stateRecoveryAttempted = true;
+	// Use the existing full-body snapshot, not an append delta or a mutable payload hook.
+	const { previous_response_id: _previousResponseId, ...fullContextBody } = runtime.requestBodyForState;
+	context.requestContext.transformedBody = fullContextBody;
 	resetCodexWebSocketAppendState(websocketState);
-
-	logCodexDebug("codex websocket connection limit reached, reconnecting", {
-		hadContent: context.output.content.length > 0,
-		retry: runtime.websocketStreamRetries,
+	resetCodexSessionMetadata(websocketState);
+	runtime.currentItem = null;
+	runtime.currentBlock = null;
+	runtime.nativeOutputItems.length = 0;
+	logCodexDebug("codex websocket state recovery", {
+		reason: connectionLimit ? "connection_limit" : "previous_response_id",
+		attempt: 1,
 	});
-
-	if (context.output.content.length > 0) {
-		// Content already emitted to the caller — cannot safely continue on a new WS.
-		// Reset and replay the full request over SSE.
-		runtime.canSafelyReplayWebsocketOverSse = true;
-		runtime.currentItem = null;
-		runtime.currentBlock = null;
-		runtime.nativeOutputItems.length = 0;
-		resetOutputState(context.output);
-		context.firstTokenTime = undefined;
-		recordCodexWebSocketFailure(websocketState, true);
-		await reopenCodexSseRuntimeStream(context, runtime, websocketState);
-		return true;
-	}
-
-	// No content emitted yet — reconnect over websocket.
-	runtime.websocketStreamRetries += 1;
 	await reopenCodexWebSocketRuntimeStream(context, runtime, websocketState);
 	return true;
 }
 
 function isCodexPreviousResponseNotFound(error: unknown): boolean {
+	if (!(error instanceof CodexProviderStreamError)) return false;
+	if (error.code && CODEX_PREVIOUS_RESPONSE_STALE_CODES.has(error.code)) return true;
+	// Only the two observed raw anchor rejections qualify; formatted code metadata and subfield faults do not.
 	return (
-		error instanceof CodexProviderStreamError &&
-		typeof error.code === "string" &&
-		CODEX_PREVIOUS_RESPONSE_STALE_CODES.has(error.code)
+		(!error.code || error.code === "invalid_request_error") &&
+		CODEX_PREVIOUS_RESPONSE_STALE_MESSAGE.test(error.providerMessage.trim())
 	);
-}
-
-async function tryRecoverCodexPreviousResponseNotFound(
-	context: CodexStreamProcessingContext,
-	runtime: CodexStreamRuntime,
-	error: unknown,
-): Promise<boolean> {
-	const websocketState = context.requestContext.websocketState;
-	if (
-		!isCodexPreviousResponseNotFound(error) ||
-		!websocketState ||
-		context.options?.fallbackManaged ||
-		runtime.transport !== "websocket" ||
-		context.output.content.length > 0 ||
-		context.options?.signal?.aborted ||
-		runtime.providerRetryAttempt >= resolveRetryBudget(context.options?.streamMaxRetries, CODEX_MAX_RETRIES)
-	) {
-		return false;
-	}
-
-	runtime.providerRetryAttempt += 1;
-	resetCodexWebSocketAppendState(websocketState);
-	resetCodexSessionMetadata(websocketState);
-	runtime.currentItem = null;
-	runtime.currentBlock = null;
-	runtime.sawTerminalEvent = false;
-	runtime.nativeOutputItems.length = 0;
-	resetOutputState(context.output);
-	context.firstTokenTime = undefined;
-
-	logCodexDebug("codex previous_response_id expired; retrying with full context", {
-		retry: runtime.providerRetryAttempt,
-	});
-	await reopenCodexWebSocketRuntimeStream(context, runtime, websocketState);
-	return true;
 }
 
 async function tryReplayWebsocketFailureOverSse(
@@ -2346,6 +2320,7 @@ class CodexWebSocketConnection {
 	async *streamRequest(
 		request: Record<string, unknown>,
 		signal?: AbortSignal,
+		onRequestSent?: (serializedRequest: string) => void,
 	): AsyncGenerator<Record<string, unknown>> {
 		if (!this.#socket || this.#socket.readyState !== WebSocket.OPEN) {
 			throw createCodexWebSocketTransportError("websocket connection is unavailable");
@@ -2367,7 +2342,9 @@ class CodexWebSocketConnection {
 		}
 
 		try {
-			this.#socket.send(JSON.stringify(request));
+			const serializedRequest = JSON.stringify(request);
+			this.#socket.send(serializedRequest);
+			onRequestSent?.(serializedRequest);
 			let sawFirstEvent = false;
 			let lastProgressAt = Date.now();
 			while (true) {
@@ -2544,9 +2521,10 @@ async function openCodexWebSocketEventStream(
 	state: CodexWebSocketSessionState,
 	signal?: AbortSignal,
 	options?: Pick<OpenAICodexResponsesOptions, "streamFirstEventTimeoutMs" | "streamIdleTimeoutMs">,
+	onRequestSent?: (serializedRequest: string) => void,
 ): Promise<AsyncGenerator<Record<string, unknown>>> {
 	const connection = await getOrCreateCodexWebSocketConnection(state, url, headers, signal, options);
-	return connection.streamRequest(request, signal);
+	return connection.streamRequest(request, signal, onRequestSent);
 }
 
 function createCodexHeaders(
@@ -2849,12 +2827,14 @@ function getCodexEventErrorMessage(rawEvent: Record<string, unknown>): string {
 class CodexProviderStreamError extends Error {
 	readonly retryable: boolean;
 	readonly code?: string;
+	readonly providerMessage: string;
 
-	constructor(message: string, retryable: boolean, code?: string) {
+	constructor(message: string, retryable: boolean, code: string | undefined, providerMessage: string) {
 		super(message);
 		this.name = "CodexProviderStreamError";
 		this.retryable = retryable;
 		this.code = code;
+		this.providerMessage = providerMessage;
 	}
 }
 
@@ -2880,7 +2860,12 @@ function createCodexProviderStreamError(rawEvent: Record<string, unknown>): Code
 		typeof rawEvent.type === "string" && rawEvent.type === "error"
 			? formatCodexErrorEvent(rawEvent, code, message)
 			: (formatCodexFailure(rawEvent) ?? "Codex response failed");
-	return new CodexProviderStreamError(formattedMessage, isRetryableCodexFailureEvent(rawEvent), code || undefined);
+	return new CodexProviderStreamError(
+		formattedMessage,
+		isRetryableCodexFailureEvent(rawEvent),
+		code || undefined,
+		message,
+	);
 }
 
 function isRetryableCodexProviderError(error: unknown): boolean {
