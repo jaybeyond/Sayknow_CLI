@@ -91,9 +91,19 @@ function messageText(message: AssistantMessage): string {
 	return (message.content[0] as { type: "text"; text: string }).text;
 }
 
+/** Pins Date.now() for tests that assert staging, so the visible-hold window never elapses. */
+function frozenClock(): Disposable {
+	const now = Date.now();
+	const spy = spyOn(Date, "now").mockReturnValue(now);
+	return { [Symbol.dispose]: () => spy.mockRestore() };
+}
+
 describe("managed compact ledger", () => {
 	for (const observed of [false, true]) {
 		it(`retains 1,000 cumulative 49-byte updates losslessly (observer=${observed})`, () => {
+			// Ledger accounting, not timing: freeze the clock so a slow runner cannot
+			// hit the visible-hold window and publish mid-stream.
+			using _clock = frozenClock();
 			const fixture = ledgerFixture(observed);
 			const { transaction, message, update, events, callbacks, order } = fixture;
 			transaction.push({ type: "turn_start" });
@@ -183,6 +193,7 @@ describe("managed compact ledger", () => {
 
 	it("commits observed responses past the former 10,000-record cap", () => {
 		expect(MANAGED_ATTEMPT_MAX_STAGED_EVENTS).toBe(100_000);
+		using _clock = frozenClock();
 		// 6,000 observed deltas stage 12,000+ records: the old cap rejected them.
 		const observed = ledgerFixture();
 		observed.transaction.push({ type: "turn_start" });
