@@ -330,6 +330,38 @@ describe("outer lazy-stream first-event watchdog (fake timers)", () => {
 		expect(result.errorMessage).toBe("Provider stream timed out while waiting for the first event");
 	});
 
+	it("keeps an Anthropic stream alive through a silent gap longer than 120s", async () => {
+		vi.useFakeTimers();
+		// Mirrors a long thinking block: one real event, then 150 s with nothing visible.
+		const partialMessage = createAssistantMessage("stop");
+		const source = {
+			async *[Symbol.asyncIterator]() {
+				yield { type: "start", partial: partialMessage } as const;
+				yield { type: "thinking_start", contentIndex: 0, partial: partialMessage } as const;
+				await new Promise<void>(resolve => setTimeout(resolve, 150_000));
+				yield { type: "text_delta", contentIndex: 0, delta: "done", partial: partialMessage } as const;
+			},
+			result: async () => createAssistantMessage("stop"),
+		} as unknown as AssistantMessageEventStream;
+		setBedrockProviderModule({ streamBedrock: () => source });
+
+		const stream = streamBedrock({ ...createModel(), provider: "anthropic" }, baseContext, {});
+		await flush();
+		vi.advanceTimersByTime(149_000);
+		await flush();
+		let settled = false;
+		void stream.result().then(() => {
+			settled = true;
+		});
+		await flush();
+		expect(settled).toBe(false);
+
+		vi.advanceTimersByTime(1_000);
+		await flush();
+		const result = await stream.result();
+		expect(result.stopReason).toBe("stop");
+	});
+
 	it("explicit streamFirstEventTimeoutMs takes precedence over the Alibaba fallback", async () => {
 		vi.useFakeTimers();
 		const source = createHangingSource();

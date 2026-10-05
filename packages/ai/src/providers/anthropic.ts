@@ -63,6 +63,7 @@ import { isFoundryEnabled } from "../utils/foundry";
 import { finalizeErrorMessage, type RawHttpRequestDump, rewriteCopilotError } from "../utils/http-inspector";
 import {
 	getProviderFirstEventTimeoutFallbackMs,
+	getProviderStreamIdleTimeoutFallbackMs,
 	getStreamFirstEventTimeoutMs,
 	getStreamIdleTimeoutMs,
 	iterateWithIdleTimeout,
@@ -1458,7 +1459,9 @@ export const streamAnthropic: StreamFunction<"anthropic-messages"> = (
 				output.stopReason = "stop";
 				firstTokenTime = undefined;
 			};
-			const idleTimeoutMs = options?.streamIdleTimeoutMs ?? getStreamIdleTimeoutMs();
+			const idleTimeoutMs =
+				options?.streamIdleTimeoutMs ??
+				getStreamIdleTimeoutMs(getProviderStreamIdleTimeoutFallbackMs(model.provider));
 			const firstEventFallbackMs = getProviderFirstEventTimeoutFallbackMs(model.provider);
 			const firstEventTimeoutMs =
 				options?.streamFirstEventTimeoutMs ?? getStreamFirstEventTimeoutMs(idleTimeoutMs, firstEventFallbackMs);

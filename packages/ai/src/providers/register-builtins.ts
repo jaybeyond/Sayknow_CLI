@@ -21,7 +21,12 @@ import type {
 } from "../types";
 import { type AbortSourceTracker, createAbortSourceTracker } from "../utils/abort";
 import { AssistantMessageEventStream as EventStreamImpl } from "../utils/event-stream";
-import { getStreamFirstEventTimeoutMs, getStreamIdleTimeoutMs, iterateWithIdleTimeout } from "../utils/idle-iterator";
+import {
+	getProviderStreamIdleTimeoutFallbackMs,
+	getStreamFirstEventTimeoutMs,
+	getStreamIdleTimeoutMs,
+	iterateWithIdleTimeout,
+} from "../utils/idle-iterator";
 import type { BedrockOptions } from "./amazon-bedrock";
 import type { AnthropicOptions } from "./anthropic";
 import type { AzureOpenAIResponsesOptions } from "./azure-openai-responses";
@@ -217,7 +222,14 @@ function forwardStream<TApi extends Api>(
 ): void {
 	(async () => {
 		try {
-			const idleTimeoutMs = options.streamIdleTimeoutMs ?? getStreamIdleTimeoutMs(limits?.defaultIdleTimeoutMs);
+			// The outer watchdog must not be tighter than the provider's own: an Anthropic
+			// thinking block emits nothing visible for minutes, and a 120 s wrapper would
+			// abort the turn the inner 300 s window deliberately keeps alive.
+			const idleTimeoutMs =
+				options.streamIdleTimeoutMs ??
+				getStreamIdleTimeoutMs(
+					limits?.defaultIdleTimeoutMs ?? getProviderStreamIdleTimeoutFallbackMs(model.provider),
+				);
 			const firstEventFallbackMs = resolveLazyStreamFirstEventFallbackMs(
 				model.provider,
 				limits?.defaultFirstEventTimeoutMs,

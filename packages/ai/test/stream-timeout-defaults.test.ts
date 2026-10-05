@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import {
 	getOpenAIStreamIdleTimeoutMs,
 	getProviderFirstEventTimeoutFallbackMs,
+	getProviderStreamIdleTimeoutFallbackMs,
 	getStreamFirstEventTimeoutMs,
 	getStreamIdleTimeoutMs,
 } from "../src/utils/idle-iterator";
@@ -49,6 +50,25 @@ describe("getProviderFirstEventTimeoutFallbackMs(provider)", () => {
 
 	it("does not widen unrelated providers", () => {
 		expect(getProviderFirstEventTimeoutFallbackMs("anthropic")).toBeUndefined();
+	});
+});
+
+describe("getProviderStreamIdleTimeoutFallbackMs(provider)", () => {
+	it("gives Anthropic a 300-second idle window for silent thinking blocks", () => {
+		expect(getProviderStreamIdleTimeoutFallbackMs("anthropic")).toBe(300_000);
+		expect(getStreamIdleTimeoutMs(getProviderStreamIdleTimeoutFallbackMs("anthropic"))).toBe(300_000);
+	});
+
+	it("keeps the shared 120-second default for other providers", () => {
+		expect(getProviderStreamIdleTimeoutFallbackMs("openai")).toBeUndefined();
+		expect(getStreamIdleTimeoutMs(getProviderStreamIdleTimeoutFallbackMs("openai"))).toBe(120_000);
+	});
+
+	it("still lets the env override and disable the Anthropic window", () => {
+		Bun.env.PI_STREAM_IDLE_TIMEOUT_MS = "45000";
+		expect(getStreamIdleTimeoutMs(getProviderStreamIdleTimeoutFallbackMs("anthropic"))).toBe(45_000);
+		Bun.env.PI_STREAM_IDLE_TIMEOUT_MS = "0";
+		expect(getStreamIdleTimeoutMs(getProviderStreamIdleTimeoutFallbackMs("anthropic"))).toBeUndefined();
 	});
 });
 describe("getStreamIdleTimeoutMs(fallbackMs)", () => {
