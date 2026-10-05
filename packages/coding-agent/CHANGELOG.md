@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.7.5] - 2026-10-05
+
 ### Fixed
 
 - The launch card opens the full session list without a modifier chord: press ↓ past the recent sessions to an "All sessions…" row and Enter (or click it). On macOS the card names `/resume` instead of Option+R, which types a plain `r` on Korean and other non-US layouts.
