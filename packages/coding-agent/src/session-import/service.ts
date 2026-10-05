@@ -169,9 +169,13 @@ async function readImportSource(
 			);
 		}
 		sourceBytes = Buffer.concat(chunks, bytes);
-	} finally {
-		await handle.close();
+	} catch (error) {
+		// The read already failed: a close failure (EBADF seen on Linux CI) must not
+		// replace the typed import error the caller acts on.
+		await handle.close().catch(() => {});
+		throw error;
 	}
+	await handle.close();
 	const bytes = sourceBytes.byteLength;
 	const after = await fsp.lstat(resolved).catch(() => undefined);
 	if (

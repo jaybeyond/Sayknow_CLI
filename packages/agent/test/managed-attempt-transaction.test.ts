@@ -209,7 +209,9 @@ describe("managed compact ledger", () => {
 		expect(observed.events.filter(event => event.type === "message_update")).toHaveLength(6_000);
 		expect(observed.callbacks).toHaveLength(6_000);
 		expect(messageText(observed.callbacks.at(-1)!.message)).toBe(text);
-	});
+		// Staging 12,000 records with lossless snapshots is CPU-bound (~1.5 s locally,
+		// over the 5 s default on shared CI runners); the count is the point of the test.
+	}, 30_000);
 
 	it("uses actual string multiplicity and a uniquely owned one-byte typed residual", () => {
 		const measure = (text: string, bytes = 0) => {
