@@ -114,6 +114,17 @@ describe("launch card content", () => {
 		expect(empty).not.toContain("all sessions");
 	});
 
+	it("names /resume instead of an Option chord on macOS, where Option may type a letter", () => {
+		const mac = card({ resumeKey: "alt+r", continueKey: "ctrl+q", keyDisplayContext: { platform: "darwin" } }).join(
+			"\n",
+		);
+		expect(mac).toContain("/resume all sessions");
+		expect(mac).toContain("/resume sessions");
+		expect(mac).not.toMatch(/⌥|Option|Alt\+R/);
+		// Control chords stay: they never compose into text.
+		expect(mac).toContain("continue");
+	});
+
 	it("marks the session the continue key resumes and names both keys", () => {
 		const lines = card({ resumeKey: "alt+r", continueKey: "ctrl+q", keyDisplayContext: { platform: "linux" } });
 		const text = lines.join("\n");
@@ -329,5 +340,43 @@ describe("opening a session from the card", () => {
 		const noFiles = make(opened, [{ name: "legacy", timeAgo: "1d" }]);
 		expect(noFiles.openableCount).toBe(0);
 		expect(noFiles.select(0)).toBe(false);
+	});
+
+	it("ends the rows with an 'all sessions' row reached by ↓ and Enter or a click", () => {
+		const opened: RecentSession[] = [];
+		let showAll = 0;
+		const welcome = new WelcomeComponent("1.2.3", "m", "p", OPENABLE, "unicode", {
+			continueKey: "ctrl+q",
+			keyDisplayContext: { platform: "darwin" },
+			onOpenSession: session => opened.push(session),
+			onShowAllSessions: () => showAll++,
+		});
+		const lines = plain(welcome.render(120));
+		const allRow = lines.findIndex(line => line.includes("All sessions…"));
+		expect(allRow).toBe(lines.findIndex(line => line.includes("third")) + 1);
+		expect(welcome.openableCount).toBe(4);
+
+		welcome.select(0);
+		welcome.moveSelection(10);
+		expect(welcome.selectedIndex).toBe(3);
+		expect(plain(welcome.render(120))[allRow]).toMatch(/^ {2}› All sessions…/);
+		expect(welcome.openSelected()).toBe(true);
+		expect(showAll).toBe(1);
+		expect(opened).toEqual([]);
+		// Cancelling the picker comes back to an un-highlighted card.
+		expect(welcome.selectedIndex).toBeUndefined();
+
+		expect(welcome.handleClick(allRow)).toBe(true);
+		expect(showAll).toBe(2);
+	});
+
+	it("offers no 'all sessions' row without a handler, sessions, or interaction", () => {
+		expect(make([]).openableCount).toBe(3);
+		const handler = { onShowAllSessions: () => {} };
+		const empty = new WelcomeComponent("1.2.3", "m", "p", [], "unicode", handler);
+		expect(plain(empty.render(120)).join("\n")).not.toContain("All sessions…");
+		const ended = new WelcomeComponent("1.2.3", "m", "p", OPENABLE, "unicode", handler);
+		ended.endInteraction();
+		expect(ended.openableCount).toBe(0);
 	});
 });

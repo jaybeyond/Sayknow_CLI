@@ -772,6 +772,7 @@ export class InteractiveMode implements InteractiveModeContext {
 					resumeKey: this.keybindings.getKeys("app.session.resume")[0],
 					continueKey: this.keybindings.getKeys("app.session.continue")[0],
 					onOpenSession: session => void this.#openWelcomeSession(session),
+					onShowAllSessions: () => this.showSessionSelector(),
 				},
 			);
 

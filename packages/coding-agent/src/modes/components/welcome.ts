@@ -43,6 +43,12 @@ export interface WelcomeComponentOptions {
 	continueKey?: string;
 	/** Called when a session row is opened by click or Enter. */
 	onOpenSession?: (session: RecentSession) => void;
+	/**
+	 * Opens the full session list. When set, the card ends its session rows with an
+	 * "all sessions" row reached with ↓/Enter or a click: no modifier chord, so it works in
+	 * every terminal and keyboard layout (Option+R types a plain `r` on Korean layouts).
+	 */
+	onShowAllSessions?: () => void;
 }
 
 /** Left margin of the card, and the widest the card grows on wide terminals. */
@@ -155,9 +161,15 @@ export class WelcomeComponent implements Component {
 		return this.recentSessions.slice(0, SESSION_ROWS).filter(session => session.path);
 	}
 
-	/** Rows that can be opened right now. Zero once the card stops taking input. */
+	/** Whether the card ends with the "all sessions" row. */
+	#hasAllSessionsRow(): boolean {
+		return !!this.options.onShowAllSessions && this.recentSessions.length > 0;
+	}
+
+	/** Rows that can be picked right now (sessions, then "all sessions"). Zero once the card stops taking input. */
 	get openableCount(): number {
-		return this.#interactive ? this.#openable().length : 0;
+		if (!this.#interactive) return 0;
+		return this.#openable().length + (this.#hasAllSessionsRow() ? 1 : 0);
 	}
 
 	get selectedIndex(): number | undefined {
@@ -200,20 +212,35 @@ export class WelcomeComponent implements Component {
 
 	/** Open the highlighted row. */
 	openSelected(): boolean {
-		const session = this.#selected === undefined ? undefined : this.#openable()[this.#selected];
-		if (!session) return false;
-		this.options.onOpenSession?.(session);
-		return true;
+		return this.#open(this.#selected);
 	}
 
 	handleClick(line: number): boolean {
 		if (!this.#interactive) return false;
 		const index = this.#lineSessions[line];
-		const session = index === undefined ? undefined : this.#openable()[index];
-		if (!session) return false;
+		if (index === undefined) return false;
 		this.#selected = index;
-		this.options.onOpenSession?.(session);
-		return true;
+		if (this.#open(index)) return true;
+		this.#selected = undefined;
+		return false;
+	}
+
+	/** Open a picked row: a session, or the full list for the trailing "all sessions" row. */
+	#open(index: number | undefined): boolean {
+		if (index === undefined) return false;
+		const openable = this.#openable();
+		const session = openable[index];
+		if (session) {
+			this.options.onOpenSession?.(session);
+			return true;
+		}
+		if (index === openable.length && this.#hasAllSessionsRow()) {
+			// The picker takes over; leave the card un-highlighted for when it closes.
+			this.#selected = undefined;
+			this.options.onShowAllSessions?.();
+			return true;
+		}
+		return false;
 	}
 
 	// ── Layout ──────────────────────────────────────────────────────────────
@@ -437,6 +464,17 @@ export class WelcomeComponent implements Component {
 			);
 			sessionRows.push(openIndex >= 0 ? openIndex : undefined);
 		});
+		if (this.#hasAllSessionsRow()) {
+			const allIndex = openable.length;
+			const selected = picking && this.#selected === allIndex;
+			const label = t("welcome.allSessionsRow");
+			lines.push(
+				selected
+					? `${theme.fg("accent", "› ")}${theme.bold(theme.fg("text", label))}`
+					: `  ${theme.fg("dim", label)}`,
+			);
+			sessionRows.push(allIndex);
+		}
 		return { lines, sessionRows };
 	}
 
@@ -454,9 +492,15 @@ export class WelcomeComponent implements Component {
 		return this.#truncate(text, width);
 	}
 
+	/**
+	 * How the card names the full session list. `/resume` works everywhere; a bound chord is
+	 * shown only off macOS, where Option often types a character instead of sending Alt.
+	 */
 	#resumeKey(): string {
 		const context = this.options.keyDisplayContext ?? { platform: process.platform };
-		return this.options.resumeKey ? formatKeyHint(this.options.resumeKey, context) : "/resume";
+		const key = this.options.resumeKey;
+		if (!key || (context.platform === "darwin" && /(^|\+)alt\+/.test(key))) return "/resume";
+		return formatKeyHint(key, context);
 	}
 
 	#latestChangelogVersion(markdown: string): string {

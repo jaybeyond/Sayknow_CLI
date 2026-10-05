@@ -14,6 +14,7 @@ export const de: Partial<Record<MsgKey, string>> = {
 	"welcome.sessionTrail": "Sitzungsverlauf",
 	"welcome.noSessions": "Keine gespeicherten Verläufe",
 	"welcome.allSessions": "{key} alle Sitzungen",
+	"welcome.allSessionsRow": "Alle Sitzungen…",
 	"welcome.continue": "{key} fortsetzen",
 	"welcome.pick": "{key} wählen",
 	"welcome.pickActive": "↑↓ bewegen · ⏎ öffnen · esc zurück",

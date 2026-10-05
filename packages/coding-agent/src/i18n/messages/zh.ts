@@ -11,6 +11,7 @@ export const zh: Partial<Record<MsgKey, string>> = {
 	"welcome.sessionTrail": "会话记录",
 	"welcome.noSessions": "暂无已保存会话",
 	"welcome.allSessions": "{key} 查看全部",
+	"welcome.allSessionsRow": "全部会话…",
 	"welcome.continue": "{key} 继续",
 	"welcome.pick": "{key} 选择",
 	"welcome.pickActive": "↑↓ 移动 · ⏎ 打开 · esc 返回",
