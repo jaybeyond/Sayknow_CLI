@@ -2,11 +2,11 @@
 
 ## [Unreleased]
 
+## [0.7.6] - 2026-10-05
+
 ### Fixed
 
 - Anthropic streams use a 300-second idle window (upstream #4097). A thinking block can stay silent for over two minutes before the tool call arrives; the shared 120-second watchdog aborted those healthy turns as "Anthropic stream stalled while waiting for the next event", repeatedly, on every project. The outer lazy-stream watchdog now uses the same provider window instead of cutting the turn at 120 s. `PI_STREAM_IDLE_TIMEOUT_MS` still overrides, and `0` still disables the watchdog.
-
-## [0.7.5] - 2026-10-05
 
 ## [0.7.4] - 2026-10-03
 

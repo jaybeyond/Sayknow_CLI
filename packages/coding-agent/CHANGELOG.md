@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.7.6] - 2026-10-05
+
 ### Fixed
 
 - Session import keeps the real read error (e.g. `content_too_large`) when closing the source file also fails, instead of surfacing `EBADF: bad file descriptor, close`.
