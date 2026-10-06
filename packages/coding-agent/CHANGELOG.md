@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.7.7] - 2026-10-06
+
 ### Added
 
 - An interrupted step now resumes once on its own without a new message, on the same model. This covers a restart with an unfinished step, and a transient failure after tools ran or part of the answer was shown. Tool calls whose outcome was not observed are never re-run. While any exist, the resumed turn may only use built-in read-only tools. Turn it off with `retry.autoResume: false`.

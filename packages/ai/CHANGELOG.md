@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.7.7] - 2026-10-06
+
 ### Added
 
 - `RecoveryBudget` closes admission after consecutive no-output timeouts (`maxSilentTimeouts`, default 3) with the new `silent_stall` rejection, within its existing request and time limits.
