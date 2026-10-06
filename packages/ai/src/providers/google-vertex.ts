@@ -46,7 +46,12 @@ export const streamGoogleVertex: StreamFunction<"google-vertex"> = (
 
 			const project = resolveProject(options);
 			const location = resolveLocation(options);
-			const accessToken = await getVertexAccessToken({ signal: options?.signal, fetch: options?.fetch });
+			// The ADC token exchange is credential traffic: admit it as "token" so the
+			// following generateContent is counted as the first inference, not a resend.
+			const accessToken = await getVertexAccessToken({
+				signal: options?.signal,
+				fetch: options?.credentialFetch ?? options?.fetch,
+			});
 			const host = resolveEndpointHost(location);
 			const url = `https://${host}/${API_VERSION}/projects/${project}/locations/${location}/publishers/google/models/${model.id}:streamGenerateContent?alt=sse`;
 			return {

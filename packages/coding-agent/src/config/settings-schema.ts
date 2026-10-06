@@ -1261,6 +1261,14 @@ export const SETTINGS_SCHEMA = {
 
 	// Retries
 	"retry.enabled": { type: "boolean", default: true },
+	/**
+	 * Resume an interrupted step once per user turn without a new message, on the same
+	 * model. Tool calls with unobserved outcomes are never re-run; while any exist the
+	 * resumed turn only gets built-in read-only tools.
+	 */
+	"retry.autoResume": { type: "boolean", default: true },
+	/** Consecutive timeouts without any output that stop a step early (1-7). */
+	"retry.maxSilentTimeouts": { type: "number", default: 3 },
 
 	"retry.maxRetries": {
 		type: "number",

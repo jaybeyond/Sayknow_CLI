@@ -91,6 +91,14 @@ export function streamOpenAIAnthropicShim(
 					fetch: options?.fetch,
 					streamIdleTimeoutMs: options?.streamIdleTimeoutMs,
 					streamFirstEventTimeoutMs: options?.streamFirstEventTimeoutMs,
+					// Retry/recovery ownership must reach the inner SDK unchanged: a managed
+					// chain disables transport replay and the session budget admits requests.
+					requestMaxRetries: options?.requestMaxRetries,
+					streamMaxRetries: options?.streamMaxRetries,
+					maxRetryDelayMs: options?.maxRetryDelayMs,
+					fallbackManaged: options?.fallbackManaged,
+					fallbackAttempt: options?.fallbackAttempt,
+					onUpstreamRequest: options?.onUpstreamRequest,
 					thinkingEnabled,
 					thinkingBudgetTokens: thinkingBudget,
 				});
@@ -122,6 +130,12 @@ export function streamOpenAIAnthropicShim(
 					fetch: options?.fetch,
 					streamIdleTimeoutMs: options?.streamIdleTimeoutMs,
 					streamFirstEventTimeoutMs: options?.streamFirstEventTimeoutMs,
+					requestMaxRetries: options?.requestMaxRetries,
+					streamMaxRetries: options?.streamMaxRetries,
+					maxRetryDelayMs: options?.maxRetryDelayMs,
+					fallbackManaged: options?.fallbackManaged,
+					fallbackAttempt: options?.fallbackAttempt,
+					onUpstreamRequest: options?.onUpstreamRequest,
 					reasoning: reasoningEffort,
 				});
 

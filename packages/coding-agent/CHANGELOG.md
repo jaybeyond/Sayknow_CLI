@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+### Added
+
+- An interrupted step now resumes once on its own without a new message, on the same model. This covers a restart with an unfinished step, and a transient failure after tools ran or part of the answer was shown. Tool calls whose outcome was not observed are never re-run. While any exist, the resumed turn may only use built-in read-only tools. Turn it off with `retry.autoResume: false`.
+- A step now stops after 3 consecutive timeouts without any output (`retry.maxSilentTimeouts`) instead of spending its whole retry budget.
+
+### Fixed
+
+- Print mode, `/copy`, RPC, and SDK `session.last_assistant` now return the whole continued answer, including the preserved prefix.
+- A session-owned model step now leaves request retries (including long `Retry-After` waits) to the session retry layer instead of waiting inside the provider SDK. After unobserved remote work is reported, no further resend is admitted for that step.
+- An unanswered continuation instruction is no longer sent to the model after a new prompt. A continuation also stops if compaction removed the preserved prefix from the model context.
+- Transient provider failures recover on the same model within one shared step budget (7 upstream requests, 15 minutes after the first failure) instead of retrying without a limit. A failure after public text keeps that text. On `openai-completions` and `anthropic-messages` models outside a managed fallback attempt, a plain-text tail continues from it on the same model; other cases pause with the output preserved until the next message. Completed tool calls are not re-run. Restarting a session never auto-sends an interrupted recovery.
+- When a step has started remote credential or gateway work whose effects cannot be observed (broker credential refresh, custom OAuth refresh, pi-native gateway, Cursor agent run), a failure is no longer resent automatically and `/retry` is refused; send a new message to resume.
+- Credential rotation and restore HTTP during recovery now counts against the same shared step budget, and runs only while that budget is active.
+
 ## [0.7.6] - 2026-10-05
 
 ### Fixed

@@ -155,6 +155,26 @@ describe("Print mode", () => {
 		process.exitCode = previousExitCode ?? 0;
 	});
 
+	it("prints a continued answer with its preserved prefix joined at the seam", async () => {
+		const { runPrintMode } = await import("../src/modes/print-mode");
+		installImmediateStderrMock([]);
+		const output: string[] = [];
+		installImmediateStdoutMock(output);
+		const prefix = makeAssistantMessage({ content: [{ type: "text", text: "Three findings: one," }] });
+		const continuation = {
+			role: "custom",
+			customType: "stream-continuation",
+			content: "Continue directly from where it stops.",
+			display: false,
+			timestamp: Date.now(),
+		} as unknown as Message;
+		const rest = makeAssistantMessage({ content: [{ type: "text", text: " two, three." }] });
+
+		await runPrintMode(createMockSession([prefix, continuation, rest]), { mode: "text" });
+
+		expect(output.join("")).toBe("Three findings: one, two, three.\n");
+	});
+
 	it("does not render a silent-abort marker or overwrite a caller status", async () => {
 		const { runPrintMode } = await import("../src/modes/print-mode");
 		const stderrOutput: string[] = [];

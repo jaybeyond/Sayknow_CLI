@@ -3,7 +3,7 @@
  */
 import { scheduler } from "node:timers/promises";
 import { getBundledModels } from "../../models";
-import type { OAuthCredentials } from "./types";
+import type { OAuthCredentials, OAuthRefreshOptions } from "./types";
 
 const CLIENT_ID = "Ov23li8tweQw6odWQebz";
 
@@ -240,9 +240,16 @@ const FAR_FUTURE_MS = Date.now() + 10 * 365.25 * 24 * 60 * 60 * 1000;
 
 /**
  * Refresh GitHub Copilot token.
- * With the opencode OAuth flow, the GitHub token is used directly — no JWT exchange needed.
+ * With the opencode OAuth flow, the GitHub token is used directly — no JWT exchange needed,
+ * so refresh sends no upstream request: `options.fetch` is never called. A pre-aborted
+ * `options.signal` still rejects so cancelled recovery does not report fresh credentials.
  */
-export function refreshGitHubCopilotToken(refreshToken: string, enterpriseDomain?: string): OAuthCredentials {
+export function refreshGitHubCopilotToken(
+	refreshToken: string,
+	enterpriseDomain?: string,
+	options?: OAuthRefreshOptions,
+): OAuthCredentials {
+	options?.signal?.throwIfAborted();
 	return {
 		refresh: refreshToken,
 		access: refreshToken,

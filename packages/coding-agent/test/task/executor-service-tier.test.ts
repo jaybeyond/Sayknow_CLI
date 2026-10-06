@@ -56,3 +56,45 @@ describe("createSubagentSettings service-tier inheritance", () => {
 		expect(subagent.get("serviceTier")).toBe("none");
 	});
 });
+
+describe("createSubagentSettings retry-policy provenance", () => {
+	it("keeps inherited schema retry budgets implicit through nested children", () => {
+		const parent = Settings.isolated({});
+		const child = createSubagentSettings(parent);
+		const grandchild = createSubagentSettings(child);
+
+		for (const key of ["fallback.maxAttempts", "retry.enabled", "retry.maxRetries", "retry.baseDelayMs"] as const) {
+			expect(child.get(key)).toEqual(parent.get(key));
+			expect(grandchild.get(key)).toEqual(parent.get(key));
+			expect(child.has(key)).toBe(false);
+			expect(grandchild.has(key)).toBe(false);
+		}
+	});
+
+	it("preserves explicit budgets even when they equal schema defaults", () => {
+		const parent = Settings.isolated({ "fallback.maxAttempts": 3, "retry.maxRetries": 3 });
+		const child = createSubagentSettings(parent);
+		const grandchild = createSubagentSettings(child);
+
+		for (const key of ["fallback.maxAttempts", "retry.maxRetries"] as const) {
+			expect(child.get(key)).toBe(3);
+			expect(grandchild.get(key)).toBe(3);
+			expect(child.has(key)).toBe(true);
+			expect(grandchild.has(key)).toBe(true);
+		}
+	});
+
+	it("retains explicit retry opt-outs without making other defaults explicit", () => {
+		const parent = Settings.isolated({ "retry.enabled": false, "retry.maxRetries": 0 });
+		const child = createSubagentSettings(parent);
+
+		expect(child.get("retry.enabled")).toBe(false);
+		expect(child.get("retry.maxRetries")).toBe(0);
+		expect(child.has("retry.enabled")).toBe(true);
+		expect(child.has("retry.maxRetries")).toBe(true);
+		expect(child.has("fallback.maxAttempts")).toBe(false);
+		expect(child.get("async.enabled")).toBe(false);
+		expect(child.get("bash.autoBackground.enabled")).toBe(false);
+		expect(parent.has("async.enabled")).toBe(false);
+	});
+});

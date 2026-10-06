@@ -36,7 +36,7 @@ import { detectDiscoveredApiFamily } from "@sayknow-cli/ai/utils/discovery/opena
 const DEFAULT_LOCAL_TOKEN = "lm-studio-local";
 
 import { registerOAuthProvider, unregisterOAuthProviders } from "@sayknow-cli/ai/utils/oauth";
-import type { OAuthCredentials, OAuthLoginCallbacks } from "@sayknow-cli/ai/utils/oauth/types";
+import type { OAuthCredentials, OAuthLoginCallbacks, OAuthRefreshOptions } from "@sayknow-cli/ai/utils/oauth/types";
 import { $pickCredentialEnv, isRecord, logger } from "@sayknow-cli/utils";
 import { parseModelString, resolveProviderModelReference } from "../config/model-resolver";
 import { isValidThemeColor, type ThemeColor } from "../modes/theme/theme";
@@ -2864,16 +2864,15 @@ export class ModelRegistry {
 	async getApiKey(
 		model: Model<Api>,
 		sessionId?: string,
-		options: { credentialSelector?: AuthCredentialSelector; signal?: AbortSignal } = {},
+		options: OAuthRefreshOptions & { credentialSelector?: AuthCredentialSelector } = {},
 	): Promise<string | undefined> {
 		if (this.#keylessProviders.has(model.provider) && !this.authStorage.hasAuth(model.provider)) {
 			return kNoAuth;
 		}
 		return this.authStorage.getApiKey(model.provider, sessionId, {
+			...options,
 			baseUrl: model.baseUrl,
 			modelId: model.id,
-			credentialSelector: options.credentialSelector,
-			signal: options.signal,
 		});
 	}
 
@@ -2884,14 +2883,14 @@ export class ModelRegistry {
 		provider: string,
 		sessionId?: string,
 		baseUrl?: string,
-		options: { credentialSelector?: AuthCredentialSelector } = {},
+		options: OAuthRefreshOptions & { credentialSelector?: AuthCredentialSelector } = {},
 	): Promise<string | undefined> {
 		if (this.#keylessProviders.has(provider) && !this.authStorage.hasAuth(provider)) {
 			return kNoAuth;
 		}
 		return this.authStorage.getApiKey(provider, sessionId, {
+			...options,
 			baseUrl,
-			credentialSelector: options.credentialSelector,
 		});
 	}
 

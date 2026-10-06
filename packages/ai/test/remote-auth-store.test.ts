@@ -192,6 +192,11 @@ describe("RemoteAuthCredentialStore + AuthStorage integration", () => {
 		};
 		const credB = { ...credA, email: "b@example.com" };
 
+		// An admitted recovery step never starts a broker request: empty cache → null, no fetch.
+		const cold = await remoteStore.getUsageReport("anthropic", credA, undefined, { cacheOnly: true });
+		expect(cold).toBeNull();
+		expect(fetchSpy).toHaveBeenCalledTimes(0);
+
 		const [resA, resB] = await Promise.all([
 			remoteStore.getUsageReport("anthropic", credA),
 			remoteStore.getUsageReport("anthropic", credB),
@@ -200,6 +205,9 @@ describe("RemoteAuthCredentialStore + AuthStorage integration", () => {
 		expect(fetchSpy).toHaveBeenCalledTimes(1);
 		expect(resA?.metadata?.email).toBe("a@example.com");
 		expect(resB?.metadata?.email).toBe("b@example.com");
+		const cachedOnly = await remoteStore.getUsageReport("anthropic", credB, undefined, { cacheOnly: true });
+		expect(cachedOnly?.metadata?.email).toBe("b@example.com");
+		expect(fetchSpy).toHaveBeenCalledTimes(1);
 
 		// Cached on the second call — still one fetch total.
 		const cached = await remoteStore.getUsageReport("anthropic", credA);
@@ -300,5 +308,109 @@ describe("RemoteAuthCredentialStore + AuthStorage integration", () => {
 		expect(serverStore!.listAuthCredentials("kagi")).toEqual([]);
 		expect(clientStorage.get("kagi")).toBeUndefined();
 		clientStorage.close();
+	});
+	describe("OAuthRefreshOptions.fetch injection", () => {
+		test("refreshCredential routes broker HTTP through injected fetch", async () => {
+			vi.spyOn(oauthUtils, "refreshOAuthToken").mockResolvedValue({
+				access: "inj-access",
+				refresh: "inj-refresh",
+				expires: Date.now() + 120_000,
+				accountId: "account-1",
+				email: "a@example.com",
+			});
+
+			let injectCallCount = 0;
+			const injectedFetch = async (...args: Parameters<typeof fetch>): Promise<Response> => {
+				injectCallCount += 1;
+				return fetch(...args);
+			};
+
+			const brokerClient = new AuthBrokerClient({ url: handle!.url, token });
+			const initialResult = await brokerClient.fetchSnapshot();
+			if (initialResult.status !== 200) throw new Error("expected snapshot");
+			const credentialId = initialResult.snapshot.credentials[0]?.id;
+			if (credentialId === undefined) throw new Error("expected credential");
+
+			await brokerClient.refreshCredential(credentialId, undefined, { fetch: injectedFetch });
+
+			expect(injectCallCount).toBeGreaterThan(0);
+		});
+
+		test("invalidateCredentialMatching sends the broker suspect refresh through the admitted fetch and marks it uncertain", async () => {
+			vi.spyOn(oauthUtils, "refreshOAuthToken").mockResolvedValue({
+				access: "suspect-access",
+				refresh: "suspect-refresh",
+				expires: Date.now() + 120_000,
+				accountId: "account-1",
+				email: "a@example.com",
+			});
+			const brokerClient = new AuthBrokerClient({ url: handle!.url, token });
+			const initialResult = await brokerClient.fetchSnapshot();
+			if (initialResult.status !== 200) throw new Error("expected snapshot");
+			const remoteStore = new RemoteAuthCredentialStore({
+				client: brokerClient,
+				initialSnapshot: initialResult.snapshot,
+			});
+			const clientStorage = new AuthStorage(remoteStore);
+			await clientStorage.reload();
+			const current = remoteStore.listAuthCredentials("anthropic")[0]?.credential;
+			if (current?.type !== "oauth") throw new Error("expected oauth credential");
+
+			const admittedUrls: string[] = [];
+			const uncertain: string[] = [];
+			const admittedFetch = async (...args: Parameters<typeof fetch>): Promise<Response> => {
+				admittedUrls.push(String(args[0] instanceof Request ? args[0].url : args[0]));
+				return fetch(...args);
+			};
+			const invalidated = await clientStorage.invalidateCredentialMatching("anthropic", current.access, {
+				fetch: admittedFetch,
+				onUncertainUpstream: reason => uncertain.push(reason),
+			});
+
+			expect(invalidated).toBe(true);
+			expect(admittedUrls.some(url => url.includes("/refresh"))).toBe(true);
+			expect(uncertain).toEqual(["Broker forced credential refresh has unobserved remote requests"]);
+			clientStorage.close();
+		});
+
+		test("retry cap: maxRetries=0 yields exactly one HTTP attempt from injected fetch", async () => {
+			let injectCallCount = 0;
+			const failingFetch = async (..._args: Parameters<typeof fetch>): Promise<Response> => {
+				injectCallCount += 1;
+				throw new TypeError("simulated network error");
+			};
+
+			// Use a non-routable IP so the real fetch would hang; injected fetch fails fast.
+			const brokerClient = new AuthBrokerClient({
+				url: "http://192.0.2.1:9999",
+				token,
+				maxRetries: 0,
+			});
+
+			await expect(brokerClient.refreshCredential(1, undefined, { fetch: failingFetch })).rejects.toThrow(
+				"1 attempt",
+			);
+
+			expect(injectCallCount).toBe(1);
+		});
+
+		test("precancel: pre-aborted signal skips broker HTTP call entirely", async () => {
+			let injectCallCount = 0;
+			const trackingFetch = async (..._args: Parameters<typeof fetch>): Promise<Response> => {
+				injectCallCount += 1;
+				return fetch(..._args);
+			};
+
+			const ac = new AbortController();
+			ac.abort();
+
+			const brokerClient = new AuthBrokerClient({ url: handle!.url, token });
+
+			await expect(brokerClient.refreshCredential(1, ac.signal, { fetch: trackingFetch })).rejects.toThrow(
+				"aborted",
+			);
+
+			expect(injectCallCount).toBe(0);
+		});
 	});
 });

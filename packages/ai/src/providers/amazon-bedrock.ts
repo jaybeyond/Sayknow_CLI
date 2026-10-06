@@ -248,7 +248,13 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 						kind: "sigv4",
 						credentials: $flag("AWS_BEDROCK_SKIP_AUTH")
 							? { accessKeyId: "dummy-access-key", secretAccessKey: "dummy-secret-key" }
-							: await resolveAwsCredentials({ profile: options.profile, region, signal: options.signal }),
+							: await resolveAwsCredentials({
+									profile: options.profile,
+									region,
+									signal: options.signal,
+									fetch: options.credentialFetch ?? options.fetch,
+									onUncertainUpstream: options.onUncertainUpstream,
+								}),
 					};
 			const bodyText = JSON.stringify(commandInput);
 			const body = new TextEncoder().encode(bodyText);
@@ -300,6 +306,7 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 					headers: await buildRequestHeaders(retryBody),
 					body: retryBody,
 					signal: options.signal,
+					fetch: options.fetch,
 					maxAttempts: 1,
 				});
 			};
@@ -309,7 +316,8 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 				headers: requestHeaders,
 				body,
 				signal: options.signal,
-				maxAttempts: resolveRetryBudget(options.requestMaxRetries, 4) + 1,
+				fetch: options.fetch,
+				maxAttempts: options.fallbackManaged ? 1 : resolveRetryBudget(options.requestMaxRetries, 4) + 1,
 			});
 
 			if (!response.ok && sentForcedToolChoice) {

@@ -26,6 +26,30 @@ export type StreamFn = (
 	...args: Parameters<typeof streamSimple>
 ) => AssistantMessageEventStream | Promise<AssistantMessageEventStream>;
 
+/** Immutable owner lease captured for one invocation, never rebound to a successor. */
+export interface UpstreamRequestLease {
+	readonly onRequest: NonNullable<SimpleStreamOptions["onUpstreamRequest"]>;
+	readonly validate: () => void;
+	readonly onRecoverableFailure: () => void;
+	readonly signal: AbortSignal;
+	/** Records opaque remote work (broker/custom auth) that makes automatic recovery unsafe. */
+	readonly onUncertainUpstream?: (reason: string) => void;
+	/**
+	 * Called exactly once per settled model attempt of this lease with the final
+	 * assistant message, so the owner can track consecutive no-output timeouts.
+	 */
+	readonly onAttemptSettled?: (message: AssistantMessage) => void;
+}
+
+/** Request-scoped credential options; HTTP must use `fetch` so token wires share the owner budget. */
+export type CredentialRequestOptions = Pick<
+	SimpleStreamOptions,
+	"signal" | "fetch" | "onUpstreamRequest" | "onUncertainUpstream"
+>;
+
+/** Local safety stop: a tool identity is never executed twice in the same transcript. */
+export const TOOL_CALL_REENTRY_ERROR_CODE = "tool_call_identity_reentry";
+
 /** Stable identifier for a managed logical run, shared by all of its retry attempts. */
 export type ManagedLogicalRunId = number;
 
@@ -55,11 +79,35 @@ export interface ManagedAttemptContinuationOwnership {
 
 /** Runs after a discarded attempt is idle, only while its ownership token remains current. */
 export type ManagedAttemptContinuation = (ownership: ManagedAttemptContinuationOwnership) => void | Promise<void>;
+/** Owner identity for a recovery-eligible committed partial failure. */
+export interface RecoveryOwner {
+	logicalRunId: number | string;
+	stepId: string;
+	generation: number;
+	attemptId: string;
+}
+
+/** Classification of the committed assistant message tail at the failure boundary. */
+export type RecoveryTail = "plain_text" | "signed_thinking" | "partial_tool" | "opaque";
+
+/** Full evidence package produced by the recovery-evidence callback for a committed partial failure. */
+export interface RecoveryEvidence extends RecoveryOwner {
+	visibleCommitted: boolean;
+	checkpointEntryId?: string;
+	visibleMessageIds: string[];
+	completedTools: Array<{ toolCallId: string; callEntryId: string; resultEntryId: string }>;
+	uncertainTools: Array<{ toolCallId?: string; operationId?: string; reason: string }>;
+	tail: RecoveryTail;
+	failureClass: string;
+	provider: string;
+	model: string;
+}
 
 /** Decision returned by managed fallback policy for one provisional attempt. */
 export type ManagedAttemptDecision =
 	| { type: "retry"; continuation: ManagedAttemptContinuation }
 	| { type: "maintenance"; continuation: ManagedAttemptContinuation }
+	| { type: "pause"; reason: string; checkpointEntryId?: string }
 	| { type: "terminal"; terminal: RunTerminalRequest };
 
 /** Structured result for one managed upstream invocation. */
@@ -73,6 +121,8 @@ export type ManagedAttemptOutcome =
 			};
 	  }
 	| { type: "context_overflow_discarded"; message: AssistantMessage }
+	| { type: "visible_interrupted"; message: AssistantMessage; evidence: RecoveryEvidence }
+	| { type: "unsafe_interrupted"; message: AssistantMessage; evidence: RecoveryEvidence }
 	| { type: "run_terminal"; reason: "cancelled" | "error" | "exhausted" };
 
 export type ManagedAttemptOutcomeHandler = (
@@ -104,6 +154,8 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 
 	/** Receives a managed invocation outcome without publishing provisional lifecycle events. */
 	onManagedAttemptOutcome?: ManagedAttemptOutcomeHandler;
+	/** Persist and validate ownership before resolving credentials or sending any request. */
+	getUpstreamRequestLease?: (context: AgentContext, signal?: AbortSignal) => Promise<UpstreamRequestLease>;
 
 	/**
 	 * When to interrupt tool execution for steering messages.
@@ -184,7 +236,10 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * Useful for short-lived OAuth tokens (e.g., GitHub Copilot) that may expire
 	 * during long-running tool execution phases.
 	 */
-	getApiKey?: (provider: string) => Promise<string | undefined> | string | undefined;
+	getApiKey?: (
+		provider: string,
+		options?: CredentialRequestOptions,
+	) => Promise<string | undefined> | string | undefined;
 
 	/** Returns the credential type selected by the most recent getApiKey call for this session/provider. */
 	getAuthCredentialType?: (provider: string) => "api_key" | "oauth" | undefined;
@@ -353,6 +408,19 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * capture, cost estimator, agent identity).
 	 */
 	telemetry?: AgentTelemetryConfig;
+	/**
+	 * Produces recovery evidence for a committed partial failure.
+	 * When set and the attempt committed before a non-retryable error, the loop
+	 * calls this instead of the existing fail-closed terminal path, allowing the
+	 * session owner to inspect the evidence and decide whether to continue from
+	 * a checkpoint or terminate. Excluded from provider wire options.
+	 */
+	getRecoveryEvidence?: (
+		message: AssistantMessage,
+		context: AgentContext,
+		tail: RecoveryEvidence["tail"],
+		visibleCommitted: boolean,
+	) => Promise<RecoveryEvidence>;
 }
 
 /**

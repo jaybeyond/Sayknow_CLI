@@ -1153,6 +1153,37 @@ function getAnthropicCompat(
 const PROVIDER_MAX_RETRIES = 3;
 const PROVIDER_BASE_DELAY_MS = 2000;
 
+const RETRY_AFTER_MS_HINT_PATTERN = /retry-after-ms=(\d+)/;
+
+/**
+ * Server-requested retry delay carried by a stream failure: an explicit `retryAfterMs`,
+ * the SDK error's response headers (walking `cause`), or a `retry-after-ms=` message hint.
+ */
+function getAnthropicFailureRetryAfterMs(error: unknown): number | undefined {
+	for (let current: unknown = error, depth = 0; isRecord(current) && depth < 4; depth++) {
+		const explicit = current.retryAfterMs;
+		if (typeof explicit === "number" && Number.isFinite(explicit) && explicit >= 0) return explicit;
+		const headers = current.headers;
+		const fromHeaders =
+			headers instanceof Headers
+				? getRetryAfterMsFromHeaders(headers)
+				: isRecord(headers)
+					? getRetryAfterMsFromHeaders(new Headers(Object.entries(headers).filter(isStringHeaderEntry)))
+					: undefined;
+		if (fromHeaders !== undefined) return fromHeaders;
+		current = current.cause;
+	}
+	if (error instanceof Error) {
+		const hint = RETRY_AFTER_MS_HINT_PATTERN.exec(error.message);
+		if (hint) return Number(hint[1]);
+	}
+	return undefined;
+}
+
+function isStringHeaderEntry(entry: [string, unknown]): entry is [string, string] {
+	return typeof entry[1] === "string";
+}
+
 /**
  * Check if an error from the Anthropic SDK is a rate-limit/transient error that
  * should be retried before any content has been emitted.
@@ -1362,7 +1393,9 @@ export const streamAnthropic: StreamFunction<"anthropic-messages"> = (
 					hasTools: !!context.tools?.length,
 					onSseEvent: options?.onSseEvent,
 					fetch: options?.fetch,
-					requestMaxRetries: options?.requestMaxRetries,
+					// A managed chain owns every resend through the shared recovery budget; the
+					// SDK must not replay the request on its own.
+					requestMaxRetries: options?.fallbackManaged ? 0 : options?.requestMaxRetries,
 					maxRetryDelayMs: options?.maxRetryDelayMs,
 				});
 				client = created.client;
@@ -1895,13 +1928,22 @@ export const streamAnthropic: StreamFunction<"anthropic-messages"> = (
 						firstTokenTime === undefined && isProviderRetryableError(streamFailure, model.provider);
 					if (
 						activeAbortTracker.wasCallerAbort() ||
+						// A managed chain's recovery owner decides every resend.
+						options?.fallbackManaged ||
 						providerRetryAttempt >= resolveRetryBudget(options?.streamMaxRetries, PROVIDER_MAX_RETRIES) ||
 						(!canRetryTransientEnvelopeFailure && !canRetryProviderFailure)
 					) {
 						throw streamFailure;
 					}
+					// Honor the server's Retry-After: a wait beyond the caller's cap (0 = uncapped) fails
+					// now so the owner can surface it; a shorter one stretches the backoff to at least it.
+					const retryAfterMs = getAnthropicFailureRetryAfterMs(streamFailure);
+					const retryDelayCapMs = options?.maxRetryDelayMs ?? ANTHROPIC_RETRY_DELAY_CAP_MS;
+					if (retryAfterMs !== undefined && retryDelayCapMs > 0 && retryAfterMs > retryDelayCapMs) {
+						throw streamFailure;
+					}
 					providerRetryAttempt++;
-					const delayMs = PROVIDER_BASE_DELAY_MS * 2 ** (providerRetryAttempt - 1);
+					const delayMs = Math.max(PROVIDER_BASE_DELAY_MS * 2 ** (providerRetryAttempt - 1), retryAfterMs ?? 0);
 					if (options?.providerRetryWait) {
 						await options.providerRetryWait(delayMs, options.signal);
 					} else {

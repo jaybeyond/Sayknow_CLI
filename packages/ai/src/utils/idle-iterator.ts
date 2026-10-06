@@ -1,4 +1,5 @@
 import { $env } from "@sayknow-cli/utils";
+import type { AssistantMessageEvent } from "../types";
 
 const DEFAULT_STREAM_IDLE_TIMEOUT_MS = 120_000;
 const DEFAULT_STREAM_FIRST_EVENT_TIMEOUT_MS = 100_000;
@@ -77,6 +78,54 @@ export function getStreamFirstEventTimeoutMs(
 	return normalizeIdleTimeoutMs($env.PI_STREAM_FIRST_EVENT_TIMEOUT_MS, fallback);
 }
 
+interface CodexStreamTimeoutPolicy {
+	idleTimeoutMs: number | undefined;
+	firstItemTimeoutMs: number;
+	firstItemStartedAt: number;
+}
+
+const codexStreamTimeoutPolicies = new WeakMap<object, CodexStreamTimeoutPolicy>();
+
+/** Resolve once at the stream boundary, without changing the raw WebSocket options. */
+export function resolveCodexStreamTimeoutPolicy(options?: {
+	streamIdleTimeoutMs?: number;
+	streamFirstEventTimeoutMs?: number;
+}): CodexStreamTimeoutPolicy {
+	const idle = options?.streamIdleTimeoutMs;
+	const first = options?.streamFirstEventTimeoutMs;
+	const idleTimeoutMs =
+		typeof idle === "number" && Number.isFinite(idle)
+			? idle > 0
+				? Math.trunc(idle)
+				: undefined
+			: getStreamIdleTimeoutMs(300_000);
+	return {
+		idleTimeoutMs,
+		// Explicit zero prevents the iterator's legacy first-to-idle fallback.
+		firstItemTimeoutMs:
+			typeof first === "number" && Number.isFinite(first)
+				? first > 0
+					? Math.trunc(first)
+					: 0
+				: (getStreamFirstEventTimeoutMs(idleTimeoutMs, 300_000) ?? 0),
+		firstItemStartedAt: Date.now(),
+	};
+}
+
+/** Only fresh lazy-provider option objects are registered; callers may reuse theirs. */
+export function carryCodexStreamTimeoutPolicy(options: object, policy: CodexStreamTimeoutPolicy): void {
+	codexStreamTimeoutPolicies.set(options, policy);
+}
+
+export function takeCodexStreamTimeoutPolicy(options?: {
+	streamIdleTimeoutMs?: number;
+	streamFirstEventTimeoutMs?: number;
+}): CodexStreamTimeoutPolicy {
+	const policy = options && codexStreamTimeoutPolicies.get(options);
+	if (options) codexStreamTimeoutPolicies.delete(options);
+	return policy ?? resolveCodexStreamTimeoutPolicy(options);
+}
+
 export type Watchdog = NodeJS.Timeout | undefined;
 
 const dummyWatchdog = setTimeout(() => {}, 1);
@@ -93,10 +142,28 @@ export function createWatchdog(timeoutMs: number | undefined, onTimeout: () => v
 	return undefined;
 }
 
+/**
+ * Semantic-progress predicate for {@link AssistantMessageEvent} streams: only a non-empty
+ * text, thinking, reasoning-summary, or tool-call delta counts as model progress.
+ */
+export function isSemanticContentDelta(item: unknown): boolean {
+	const event = item as AssistantMessageEvent;
+	return (
+		(event.type === "text_delta" ||
+			event.type === "thinking_delta" ||
+			event.type === "reasoning_summary_delta" ||
+			event.type === "toolcall_delta") &&
+		event.delta.length > 0
+	);
+}
+
 export interface IdleTimeoutIteratorOptions {
 	watchdog?: Watchdog;
 	idleTimeoutMs?: number;
 	firstItemTimeoutMs?: number;
+	firstItemStartedAt?: number;
+	/** Enforce absolute deadlines even when the next item is already buffered. */
+	strictDeadline?: boolean;
 	errorMessage: string;
 	firstItemErrorMessage?: string;
 	onIdle?: () => void;
@@ -175,6 +242,9 @@ export async function* iterateWithIdleTimeout<T>(
 		let activeTimeoutMs: number | undefined;
 		if (awaitingFirstItem) {
 			activeTimeoutMs = firstItemTimeoutMs;
+			if (activeTimeoutMs !== undefined && activeTimeoutMs > 0 && options.firstItemStartedAt !== undefined) {
+				activeTimeoutMs -= Date.now() - options.firstItemStartedAt;
+			}
 		} else if (options.idleTimeoutMs !== undefined && options.idleTimeoutMs > 0) {
 			activeTimeoutMs = options.idleTimeoutMs - (Date.now() - lastProgressAt);
 			// The idle deadline may already have elapsed because the *consumer*
@@ -186,6 +256,24 @@ export async function* iterateWithIdleTimeout<T>(
 			if (activeTimeoutMs < 0) {
 				activeTimeoutMs = 0;
 			}
+		}
+
+		if (
+			options.strictDeadline &&
+			activeTimeoutMs !== undefined &&
+			activeTimeoutMs <= 0 &&
+			(awaitingFirstItem ? firstItemTimeoutMs !== undefined && firstItemTimeoutMs > 0 : true)
+		) {
+			if (abortSignal?.aborted) {
+				closeIterator();
+				throw abortReason(abortSignal);
+			}
+			if (awaitingFirstItem) options.onFirstItemTimeout?.();
+			else options.onIdle?.();
+			closeIterator();
+			throw new Error(
+				awaitingFirstItem ? (options.firstItemErrorMessage ?? options.errorMessage) : options.errorMessage,
+			);
 		}
 
 		const racers: Array<

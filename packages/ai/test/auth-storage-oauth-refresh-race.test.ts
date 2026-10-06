@@ -282,6 +282,54 @@ describe("AuthStorage OAuth refresh race", () => {
 		await expect(second).resolves.toBe("access-rotated");
 		expect(refreshCalls).toBe(1);
 	});
+	test("a waiter on a shared refresh inherits the owner's uncertain-upstream facts and sends nothing", async () => {
+		if (!authStorage) throw new Error("test setup failed");
+
+		const refreshStarted = Promise.withResolvers<void>();
+		const allowRefresh = Promise.withResolvers<void>();
+		let refreshCalls = 0;
+		oauthUtils.registerOAuthProvider({
+			id: "unit-oauth-uncertain",
+			name: "Unit OAuth Uncertain",
+			sourceId: "auth-storage-oauth-refresh-race-test",
+			async login() {
+				return { access: "unused", refresh: "unused", expires: Date.now() };
+			},
+			async refreshToken(credentials) {
+				refreshCalls += 1;
+				refreshStarted.resolve();
+				await allowRefresh.promise;
+				return { ...credentials, access: "access-rotated", expires: Date.now() + 60 * 60_000 };
+			},
+			getApiKey(credentials) {
+				return credentials.access;
+			},
+		});
+		await authStorage.set("unit-oauth-uncertain", [
+			{ type: "oauth", access: "access-old", refresh: "refresh-old", expires: Date.now() - 60_000 },
+		]);
+
+		const ownerReasons: string[] = [];
+		const waiterReasons: string[] = [];
+		const waiterRequests: string[] = [];
+		const owner = authStorage.getApiKey("unit-oauth-uncertain", "uncertain-session", {
+			onUncertainUpstream: reason => ownerReasons.push(reason),
+		});
+		await refreshStarted.promise;
+		const waiter = authStorage.getApiKey("unit-oauth-uncertain", "uncertain-session", {
+			onUncertainUpstream: reason => waiterReasons.push(reason),
+			onUpstreamRequest: kind => waiterRequests.push(kind),
+		});
+		allowRefresh.resolve();
+
+		await expect(owner).resolves.toBe("access-rotated");
+		await expect(waiter).resolves.toBe("access-rotated");
+		expect(refreshCalls).toBe(1);
+		expect(ownerReasons).toEqual(["Custom OAuth refresh has no verified upstream admission capability"]);
+		expect(waiterReasons).toEqual(ownerReasons);
+		expect(waiterRequests).toEqual([]);
+	});
+
 	test("invalidating a session-sticky OAuth credential rotates the retry to another active credential", async () => {
 		if (!authStorage) throw new Error("test setup failed");
 

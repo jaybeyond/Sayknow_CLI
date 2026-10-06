@@ -121,6 +121,46 @@ describe("AgentSession manual retry", () => {
 		expect(lastAgentMessage(session).content).toContainEqual({ type: "text", text: "recovered after manual retry" });
 	});
 
+	it("refuses manual retry after unobservable remote work until a new prompt", async () => {
+		const model = getTestModel();
+		let calls = 0;
+		const agent = new Agent({
+			getApiKey: provider => `${provider}-test-key`,
+			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: (_model, _context, options) => {
+				calls += 1;
+				if (calls === 1) {
+					options?.onUncertainUpstream?.("Gateway dispatch has unobserved remote requests and effects");
+					throw new Error("gateway connection lost");
+				}
+				return createMockModel({ responses: [{ content: ["fresh turn"], stopReason: "stop" }] }).stream(
+					_model,
+					_context,
+					options,
+				);
+			},
+		});
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "compaction.enabled": false, "retry.enabled": false }),
+			modelRegistry: new ModelRegistry(authStorage),
+		});
+		session.subscribe(() => {});
+
+		await session.prompt("dispatch remotely");
+		await session.waitForIdle();
+		expect(lastAgentMessage(session).stopReason).toBe("error");
+
+		await expect(session.retry()).resolves.toBe(false);
+		expect(calls).toBe(1);
+
+		await session.prompt("start over");
+		await session.waitForIdle();
+		expect(calls).toBe(2);
+		expect(lastAgentMessage(session).stopReason).toBe("stop");
+	});
+
 	it("continues from a persisted user tail left by a process crash", async () => {
 		const model = getTestModel();
 		const mock = createMockModel({
@@ -158,7 +198,7 @@ describe("AgentSession manual retry", () => {
 		expect(lastAgentMessage(session).content).toContainEqual({ type: "text", text: "resumed after crash" });
 	});
 
-	it("drops an unresolved tool-use assistant tail before crash retry", async () => {
+	it("preserves an unresolved tool-use tail and refuses crash retry", async () => {
 		const model = getTestModel();
 		const mock = createMockModel({
 			responses: [{ content: ["reran after tool crash"], stopReason: "stop" }],
@@ -198,14 +238,15 @@ describe("AgentSession manual retry", () => {
 		});
 		session.subscribe(() => {});
 
-		await expect(session.retry()).resolves.toBe(true);
+		await expect(session.retry()).resolves.toBe(false);
 		await session.waitForIdle();
 
-		expect(mock.calls.length).toBe(1);
-		expect(
-			session.agent.state.messages.some(message => message.role === "assistant" && message.stopReason === "toolUse"),
-		).toBe(false);
-		expect(lastAgentMessage(session).content).toContainEqual({ type: "text", text: "reran after tool crash" });
+		expect(mock.calls.length).toBe(0);
+		expect(session.agent.state.messages).toEqual(messages);
+		expect(lastAgentMessage(session).stopReason).toBe("toolUse");
+		expect(lastAgentMessage(session).content).toEqual([
+			{ type: "toolCall", id: "tool-1", name: "read", arguments: { path: "README.md" } },
+		]);
 	});
 
 	it("returns false when the trailing assistant turn succeeded", async () => {

@@ -3,7 +3,7 @@
  */
 import { OAuthCallbackFlow, type OAuthCallbackFlowOptions } from "./callback-server";
 import { generatePKCE } from "./pkce";
-import type { OAuthController, OAuthCredentials } from "./types";
+import type { OAuthController, OAuthCredentials, OAuthRefreshOptions } from "./types";
 
 const CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
 const AUTHORIZE_URL = "https://auth.openai.com/oauth/authorize";
@@ -255,8 +255,13 @@ export async function loginOpenAICodexDevice(ctrl: OAuthController): Promise<OAu
 /**
  * Refresh OpenAI code provider OAuth token
  */
-export async function refreshOpenAICodexToken(refreshToken: string): Promise<OAuthCredentials> {
-	const response = await fetch(TOKEN_URL, {
+export async function refreshOpenAICodexToken(
+	refreshToken: string,
+	options?: OAuthRefreshOptions,
+): Promise<OAuthCredentials> {
+	options?.signal?.throwIfAborted();
+	const fetchFn = options?.fetch ?? globalThis.fetch;
+	const response = await fetchFn(TOKEN_URL, {
 		method: "POST",
 		headers: { "Content-Type": "application/x-www-form-urlencoded" },
 		body: new URLSearchParams({
@@ -264,7 +269,9 @@ export async function refreshOpenAICodexToken(refreshToken: string): Promise<OAu
 			refresh_token: refreshToken,
 			client_id: CLIENT_ID,
 		}),
-		signal: AbortSignal.timeout(TOKEN_REQUEST_TIMEOUT_MS),
+		signal: options?.signal
+			? AbortSignal.any([options.signal, AbortSignal.timeout(TOKEN_REQUEST_TIMEOUT_MS)])
+			: AbortSignal.timeout(TOKEN_REQUEST_TIMEOUT_MS),
 	});
 
 	if (!response.ok) {

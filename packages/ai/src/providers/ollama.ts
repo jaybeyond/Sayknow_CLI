@@ -540,7 +540,8 @@ export const streamOllama: StreamFunction<"ollama-chat"> = (
 						const partialJson = typeof rawArgs === "string" ? rawArgs : JSON.stringify(rawArgs ?? {});
 						const toolCall: InternalToolCallBlock = {
 							type: "toolCall",
-							id: `ollama:${output.content.length}:${name}`,
+							// Unique per call: an identity reused across steps would read as tool re-entry.
+							id: `ollama:${crypto.randomUUID()}:${name}`,
 							name,
 							arguments: parseStreamingJson<Record<string, unknown>>(partialJson),
 							partialJson,

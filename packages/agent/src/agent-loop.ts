@@ -10,7 +10,9 @@ import {
 	type Context,
 	classifyContextOverflow,
 	classifyFallbackTrigger,
+	createUpstreamAdmission,
 	EventStream,
+	isRecoveryAdmissionErrorMessage,
 	isZodSchema,
 	streamSimple,
 	type ToolResultMessage,
@@ -59,8 +61,10 @@ import type {
 	AgentTool,
 	AgentToolResult,
 	ManagedAttemptOutcome,
+	RecoveryEvidence,
 	StreamFn,
 } from "./types";
+import { TOOL_CALL_REENTRY_ERROR_CODE } from "./types";
 
 /** Sentinel returned by the abort race in `streamAssistantResponse`. */
 /**
@@ -250,6 +254,18 @@ function managedFailureOutcome(message: AssistantMessage): ManagedAttemptOutcome
 
 function managedContextOverflowOutcome(message: AssistantMessage): ManagedAttemptOutcome {
 	return { type: "context_overflow_discarded", message };
+}
+function classifyRecoveryTail(message: AssistantMessage, config: AgentLoopConfig): RecoveryEvidence["tail"] {
+	if (config.model.transport === "pi-native" || config.model.api === "cursor-agent") {
+		return "opaque";
+	}
+	const hasThinking = message.content.some(c => c.type === "thinking" || c.type === "redactedThinking");
+	if (hasThinking) return "signed_thinking";
+	const hasToolCall = message.content.some(c => c.type === "toolCall");
+	if (hasToolCall) return "partial_tool";
+	const hasText = message.content.some(c => c.type === "text");
+	if (hasText) return "plain_text";
+	return "opaque";
 }
 
 function managedFailureMessage(error: unknown, config: AgentLoopConfig): AssistantMessage {
@@ -2643,6 +2659,17 @@ async function runLoopBody(
 			const wasRecoveryAttempt = recoveryState.pending;
 
 			if (message.stopReason === "error" || message.stopReason === "aborted") {
+				// Committed partial failure: when getRecoveryEvidence is configured and this is a
+				// non-retryable error on a published attempt, produce a typed recovery outcome instead
+				// of the fail-closed terminal. Evidence is collected before placeholder tool results
+				// are appended so the callback observes the committed context unchanged.
+				let recovery: { evidence: RecoveryEvidence; visibleCommitted: boolean } | undefined;
+				if (config.fallbackManaged && message.stopReason === "error" && config.getRecoveryEvidence != null) {
+					const tail = classifyRecoveryTail(message, config);
+					const visibleCommitted = tail === "plain_text";
+					const evidence = await config.getRecoveryEvidence(message, currentContext, tail, visibleCommitted);
+					recovery = { evidence, visibleCommitted };
+				}
 				// Create placeholder tool results for any tool calls in the aborted message
 				// This maintains the tool_use/tool_result pairing that the API requires
 				type ToolCallContent = Extract<AssistantMessage["content"][number], { type: "toolCall" }>;
@@ -2666,7 +2693,16 @@ async function runLoopBody(
 					});
 				}
 				stream.push({ type: "turn_end", message, toolResults });
-				stream.push(buildAgentEndEvent(newMessages, telemetry, stepCounter.count));
+				if (recovery) {
+					// The session owner receives evidence and decides how to proceed.
+					await config.onManagedAttemptOutcome?.({
+						type: recovery.visibleCommitted ? "visible_interrupted" : "unsafe_interrupted",
+						message,
+						evidence: recovery.evidence,
+					});
+				} else {
+					stream.push(buildAgentEndEvent(newMessages, telemetry, stepCounter.count));
+				}
 				stream.end(newMessages);
 				return;
 			}
@@ -2674,6 +2710,46 @@ async function runLoopBody(
 			// Check for tool calls
 			const toolCalls = message.content.filter(c => c.type === "toolCall");
 			hasMoreToolCalls = toolCalls.length > 0;
+
+			// Reusing an already-seen call identity cannot establish a new operation.
+			// Stop the whole batch before any tool starts, including unresolved calls
+			// whose remote outcome is unknown. New identities retain normal approval.
+			// Blank ids carry no identity (some providers emit "" for unnamed calls).
+			const hasIdentity = (id: string): boolean => id.trim().length > 0;
+			const priorCallIds = new Set<string>();
+			for (const prior of currentContext.messages.slice(0, -1)) {
+				if (prior.role === "toolResult" && hasIdentity(prior.toolCallId)) priorCallIds.add(prior.toolCallId);
+				if (prior.role === "assistant") {
+					for (const block of prior.content) {
+						if (block.type === "toolCall" && hasIdentity(block.id)) priorCallIds.add(block.id);
+					}
+				}
+			}
+			const seenCallIds = new Set<string>();
+			const repeatedCall = toolCalls.find(call => {
+				if (!hasIdentity(call.id)) return false;
+				const repeated = priorCallIds.has(call.id) || seenCallIds.has(call.id);
+				seenCallIds.add(call.id);
+				return repeated;
+			});
+			if (repeatedCall) {
+				const failure: AssistantMessage = {
+					...message,
+					content: [],
+					stopReason: "error",
+					errorCode: TOOL_CALL_REENTRY_ERROR_CODE,
+					errorMessage:
+						"A previously observed tool call identity was reused; execution is paused to avoid repeating its effects.",
+				};
+				currentContext.messages.push(failure);
+				newMessages.push(failure);
+				stream.push({ type: "message_start", message: failure });
+				stream.push({ type: "message_end", message: failure });
+				stream.push({ type: "turn_end", message: failure, toolResults: [] });
+				stream.push(buildAgentEndEvent(newMessages, telemetry, stepCounter.count));
+				stream.end(newMessages);
+				return;
+			}
 
 			const toolResults: ToolResultMessage[] = [];
 			let repeatedMalformedToolCall = false;
@@ -2875,8 +2951,51 @@ async function streamAssistantResponse(
 	// Resolve API key (important for expiring tokens) — do this before resolving
 	// metadata so that the session-sticky credential recorded by getApiKey is
 	// visible to metadataResolver (e.g. for the correct account_uuid in metadata.user_id).
-	const resolvedApiKey =
-		(config.getApiKey ? await config.getApiKey(config.model.provider) : undefined) || config.apiKey;
+	// Capture a permanently bound owner lease. Its persistence barrier finishes
+	// before credentials or transport work, and local preparation spends wire 0.
+	// A pre-cancelled invocation takes no lease (no checkpoint, wire 0) and reaches the
+	// standard aborted-message path through the request signal below.
+	const upstreamLease = signal?.aborted ? undefined : await config.getUpstreamRequestLease?.(context, signal);
+	if (!signal?.aborted) upstreamLease?.validate();
+	const upstreamHook = upstreamLease?.onRequest ?? config.onUpstreamRequest;
+	const upstreamAdmission = upstreamHook
+		? createUpstreamAdmission(
+				upstreamHook,
+				config.fetch,
+				upstreamLease?.validate,
+				upstreamLease?.onRecoverableFailure,
+			)
+		: undefined;
+	let resolvedApiKey = config.apiKey;
+	const credentialSignal = AbortSignal.any([
+		...(signal ? [signal] : []),
+		...(upstreamLease ? [upstreamLease.signal] : []),
+	]);
+	// A cancelled invocation resolves no credentials (token wire 0) and falls through to the
+	// standard aborted-message path below, whose request signal carries the same aborts.
+	if (config.getApiKey && !credentialSignal.aborted) {
+		const credentialAbort = Promise.withResolvers<undefined>();
+		const onCredentialAbort = () => credentialAbort.resolve(undefined);
+		credentialSignal.addEventListener("abort", onCredentialAbort, { once: true });
+		try {
+			// A resolver that ignores its signal still yields a finite local terminal.
+			resolvedApiKey =
+				(await Promise.race([
+					config.getApiKey(config.model.provider, {
+						signal: credentialSignal,
+						fetch: upstreamAdmission?.credentialFetch,
+						onUpstreamRequest: upstreamAdmission?.onUpstreamRequest,
+						onUncertainUpstream: upstreamLease?.onUncertainUpstream,
+					}),
+					credentialAbort.promise,
+				])) || config.apiKey;
+		} catch (error) {
+			if (!credentialSignal.aborted) throw error;
+		} finally {
+			credentialSignal.removeEventListener("abort", onCredentialAbort);
+		}
+		if (!credentialSignal.aborted) upstreamLease?.validate();
+	}
 
 	// Re-resolve metadata after credential selection so the per-request value
 	// reflects the credential actually used, not the snapshot from AgentLoopConfig construction.
@@ -2896,6 +3015,7 @@ async function streamAssistantResponse(
 	const requestSignal = AbortSignal.any([
 		...(signal ? [signal] : []),
 		...(harmonyAbortController ? [harmonyAbortController.signal] : []),
+		...(upstreamLease ? [upstreamLease.signal] : []),
 		attemptAbortController.signal,
 	]);
 	const effectiveTemperature =
@@ -2934,6 +3054,7 @@ async function streamAssistantResponse(
 	};
 
 	const finishChat = async (message: AssistantMessage): Promise<void> => {
+		upstreamLease?.onAttemptSettled?.(message);
 		await finishChatSpan(telemetry, chatSpan, message, {
 			stepNumber: chatStepNumber,
 			serviceTier: config.serviceTier,
@@ -2956,6 +3077,17 @@ async function streamAssistantResponse(
 				reasoning: effectiveReasoning,
 				temperature: effectiveTemperature,
 				signal: requestSignal,
+				// A session-owned step decides every resend from the observed failure (including
+				// Retry-After); SDK-internal request retries would hide waits and resends from it.
+				...(upstreamLease ? { requestMaxRetries: 0 } : {}),
+				...(upstreamAdmission
+					? {
+							fetch: upstreamAdmission.fetch,
+							credentialFetch: upstreamAdmission.credentialFetch,
+							onUpstreamRequest: upstreamAdmission.onUpstreamRequest,
+							onUncertainUpstream: upstreamLease?.onUncertainUpstream,
+						}
+					: {}),
 				onResponse: captureOnResponse,
 			});
 
@@ -2971,7 +3103,14 @@ async function streamAssistantResponse(
 			let detachAbortListener: (() => void) | undefined;
 			if (requestSignal) {
 				if (requestSignal.aborted) {
-					const aborted = emitAbortedAssistantMessage(partialMessage, addedPartial, context, config, stream);
+					const aborted = emitAbortedAssistantMessage(
+						partialMessage,
+						addedPartial,
+						context,
+						config,
+						stream,
+						requestSignal.reason,
+					);
 					await finishChat(aborted);
 					return aborted;
 				}
@@ -2989,7 +3128,14 @@ async function streamAssistantResponse(
 						const result = await Promise.race([responseIterator.next(), abortRacePromise]);
 						if (result === ABORTED) {
 							responseIterator.return?.()?.catch(() => {});
-							const aborted = emitAbortedAssistantMessage(partialMessage, addedPartial, context, config, stream);
+							const aborted = emitAbortedAssistantMessage(
+								partialMessage,
+								addedPartial,
+								context,
+								config,
+								stream,
+								requestSignal.reason,
+							);
 							await finishChat(aborted);
 							return aborted;
 						}
@@ -2998,7 +3144,14 @@ async function streamAssistantResponse(
 						next = await responseIterator.next();
 					}
 					if (requestSignal?.aborted) {
-						const aborted = emitAbortedAssistantMessage(partialMessage, addedPartial, context, config, stream);
+						const aborted = emitAbortedAssistantMessage(
+							partialMessage,
+							addedPartial,
+							context,
+							config,
+							stream,
+							requestSignal.reason,
+						);
 						await finishChat(aborted);
 						return aborted;
 					}
@@ -3094,8 +3247,10 @@ function emitAbortedAssistantMessage(
 	context: AgentContext,
 	config: AgentLoopConfig,
 	stream: EventStream<AgentEvent, AgentMessage[]>,
+	reason?: unknown,
 ): AssistantMessage {
-	const errorMessage = "Request was aborted";
+	const recoveryError = reason instanceof Error && isRecoveryAdmissionErrorMessage(reason.message);
+	const errorMessage = recoveryError ? reason.message : "Request was aborted";
 	const now = Date.now();
 	const abortedMessage: AssistantMessage = {
 		role: "assistant",
@@ -3111,7 +3266,7 @@ function emitAbortedAssistantMessage(
 			totalTokens: 0,
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 		},
-		stopReason: "aborted",
+		stopReason: recoveryError ? "error" : "aborted",
 		errorMessage,
 		timestamp: now,
 	};

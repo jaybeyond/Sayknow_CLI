@@ -44,6 +44,7 @@ import {
 	type WorkflowGateTerminalProof,
 } from "../../modes/shared/agent-wire/workflow-gate-broker";
 import type { AgentSessionEvent } from "../../session/agent-session";
+import { lastVisibleAnswerText } from "../../session/messages";
 import { parseThinkingLevel } from "../../thinking";
 import type {
 	AskAnswerRequest,
@@ -1838,22 +1839,8 @@ function sdkQuerySurface(
 		cwd: ctx.cwd,
 		kind: ctx.sessionMetadata?.kind ?? "main",
 	});
-	const lastAssistantText = () => {
-		for (const entry of ctx.sessionManager.getBranch().toReversed()) {
-			if (entry.type !== "message" || entry.message.role !== "assistant") continue;
-			const { content } = entry.message;
-			if (typeof content === "string") return content;
-			if (Array.isArray(content))
-				return content
-					.filter(
-						(block): block is { type: "text"; text: string } =>
-							block.type === "text" && typeof block.text === "string",
-					)
-					.map(block => block.text)
-					.join("");
-		}
-		return undefined;
-	};
+	// A continued answer includes its preserved prefix (the same chain print and /copy use).
+	const lastAssistantText = () => lastVisibleAnswerText(ctx.sessionManager.getBranch());
 	const getDiff = async () => {
 		try {
 			const { stdout } = await execFileAsync("git", ["diff", "--no-ext-diff"], {

@@ -111,6 +111,7 @@ import {
 import { AgentSession, type ForkContextSeed } from "../session/agent-session";
 import type { AuthStorage } from "../session/auth-storage";
 import { applyCredentialRankingModeSetting, discoverAuthStorage } from "../session/auth-storage-discovery";
+import { SYNTHESIZED_ON_RESUME_DETAIL } from "../session/auto-resume";
 import { type CustomMessage, convertToLlm } from "../session/messages";
 import type { DetectedLanguage } from "../session/response-language";
 import { createReadonlySessionManager, SessionManager } from "../session/session-manager";
@@ -266,7 +267,7 @@ export function reconcileTrailingToolCalls(messages: AgentMessage[]): AgentMessa
 				text: "Tool result was not persisted before the previous turn ended; synthesized on resume to keep tool_use/tool_result pairing valid.",
 			},
 		],
-		details: {},
+		details: { [SYNTHESIZED_ON_RESUME_DETAIL]: true },
 		isError: false,
 		timestamp: now,
 	}));
@@ -2534,10 +2535,15 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			shouldPause: options.shouldPause,
 			preferWebsockets: preferOpenAICodexWebsockets,
 			getToolContext: tc => toolContextStore.getContext(tc),
-			getApiKey: async provider => {
+			getApiKey: async (provider, requestOptions) => {
 				// Read agent.sessionId at call time so credential selection stays aligned
 				// with metadataResolver after /new, fork, resume, or branch switches.
-				const key = await modelRegistry.getApiKeyForProvider(provider, agent.providerSessionId ?? agent.sessionId);
+				const key = await modelRegistry.getApiKeyForProvider(
+					provider,
+					agent.providerSessionId ?? agent.sessionId,
+					undefined,
+					requestOptions,
+				);
 				if (!key) {
 					throw new Error(`No API key found for provider "${provider}"`);
 				}
@@ -2549,15 +2555,22 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				streamSimple(streamModel, context, {
 					...streamOptions,
 					onAuthError: async (provider, oldKey, error) => {
-						await modelRegistry.authStorage.invalidateCredentialMatching(provider, oldKey, {
+						// Invalidation (a broker forced refresh) and the re-fetch share the step's admission.
+						const credentialOptions = {
 							signal: streamOptions?.signal,
+							fetch: streamOptions?.credentialFetch,
+							onUpstreamRequest: streamOptions?.onUpstreamRequest,
+							onUncertainUpstream: streamOptions?.onUncertainUpstream,
+						};
+						await modelRegistry.authStorage.invalidateCredentialMatching(provider, oldKey, {
+							...credentialOptions,
 							sessionId: agent.sessionId,
 						});
 						logger.debug("Retrying provider request after credential invalidation", {
 							provider,
 							error: error instanceof Error ? error.message : String(error),
 						});
-						return modelRegistry.getApiKeyForProvider(provider, agent.sessionId);
+						return modelRegistry.getApiKeyForProvider(provider, agent.sessionId, undefined, credentialOptions);
 					},
 				}),
 			cursorExecHandlers,

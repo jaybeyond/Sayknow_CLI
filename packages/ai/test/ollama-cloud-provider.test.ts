@@ -334,6 +334,32 @@ describe("ollama-cloud provider support", () => {
 			toolCall && toolCall.type === "toolCall" ? (toolCall.arguments as { path?: string }).path : undefined,
 		).toBe("README.md");
 	});
+	test("gives the same tool call in consecutive steps distinct identities", async () => {
+		const lines = [
+			{
+				model: "gpt-oss:120b",
+				message: {
+					role: "assistant",
+					tool_calls: [{ type: "function", function: { index: 0, name: "read_file", arguments: { path: "a" } } }],
+				},
+				done: false,
+			},
+			{ model: "gpt-oss:120b", done: true, done_reason: "tool_calls", prompt_eval_count: 1, eval_count: 1 },
+		];
+		global.fetch = vi.fn(async () => createNdjsonResponse(lines)) as unknown as typeof fetch;
+		const context = {
+			messages: [{ role: "user" as const, content: "Read", timestamp: Date.now() }],
+			tools: [readFileTool],
+		};
+		const ids: string[] = [];
+		for (let step = 0; step < 2; step++) {
+			const result = await stream(cloudModel, context, { apiKey: "cloud-test-key" }).result();
+			const toolCall = result.content.find(block => block.type === "toolCall");
+			if (toolCall?.type === "toolCall") ids.push(toolCall.id);
+		}
+		expect(ids).toHaveLength(2);
+		expect(ids[0]).not.toBe(ids[1]);
+	});
 
 	test("converts replay history, tools, and images into native ollama chat payloads", async () => {
 		let requestBody: Record<string, unknown> | undefined;

@@ -4,6 +4,7 @@
  * Both providers use the same authorization-code flow shape; only the client
  * credentials, scopes, endpoint constants, and project-discovery logic differ.
  */
+import type { FetchImpl } from "../../types";
 import { OAuthCallbackFlow } from "./callback-server";
 import type { OAuthController, OAuthCredentials } from "./types";
 
@@ -18,10 +19,15 @@ export interface GoogleOAuthFlowConfig {
 	discoverProject: (accessToken: string, onProgress?: (message: string) => void) => Promise<string>;
 }
 
-async function getUserEmail(accessToken: string): Promise<string | undefined> {
+async function getUserEmail(
+	accessToken: string,
+	fetchImpl?: FetchImpl,
+	signal?: AbortSignal,
+): Promise<string | undefined> {
 	try {
-		const response = await fetch("https://www.googleapis.com/oauth2/v1/userinfo?alt=json", {
+		const response = await (fetchImpl ?? globalThis.fetch)("https://www.googleapis.com/oauth2/v1/userinfo?alt=json", {
 			headers: { Authorization: `Bearer ${accessToken}` },
+			signal,
 		});
 
 		if (response.ok) {
@@ -88,7 +94,7 @@ export class GoogleOAuthFlow extends OAuthCallbackFlow {
 		}
 
 		this.ctrl.onProgress?.("Getting user info...");
-		const email = await getUserEmail(tokenData.access_token);
+		const email = await getUserEmail(tokenData.access_token, this.ctrl.fetch, this.ctrl.signal);
 		const projectId = await this.config.discoverProject(tokenData.access_token, this.ctrl.onProgress);
 
 		return {

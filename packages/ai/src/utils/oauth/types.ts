@@ -1,3 +1,14 @@
+import type { FetchImpl, StreamOptions } from "../../types";
+
+/** HTTP uses the admitted fetch; the hook is only for non-HTTP upstream sends. */
+export interface OAuthRefreshOptions {
+	fetch?: FetchImpl;
+	signal?: AbortSignal;
+	onUpstreamRequest?: StreamOptions["onUpstreamRequest"];
+	/** Marks refresh paths whose remote requests/effects cannot be proven locally. */
+	onUncertainUpstream?: (reason: string) => void;
+}
+
 export type OAuthCredentials = {
 	refresh: string;
 	access: string;
@@ -100,6 +111,6 @@ export interface OAuthProviderInterface {
 	readonly name: string;
 	readonly sourceId?: string;
 	login(callbacks: OAuthLoginCallbacks): Promise<OAuthCredentials | string>;
-	refreshToken?(credentials: OAuthCredentials): Promise<OAuthCredentials>;
+	refreshToken?(credentials: OAuthCredentials, options?: OAuthRefreshOptions): Promise<OAuthCredentials>;
 	getApiKey?(credentials: OAuthCredentials): string;
 }

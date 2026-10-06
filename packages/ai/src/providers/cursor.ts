@@ -386,6 +386,10 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 			const requestContextTools = buildMcpToolDefinitions(context.tools);
 
 			const baseUrl = model.baseUrl || CURSOR_API_URL;
+			// Cursor's agent run executes server-side steps whose effects this client cannot
+			// observe, so the dispatch is admitted once and never auto-resent.
+			options?.onUpstreamRequest?.("inference");
+			options?.onUncertainUpstream?.("Cursor agent run has unobserved remote requests and effects");
 			h2Client = http2.connect(baseUrl);
 
 			h2Request = h2Client.request({

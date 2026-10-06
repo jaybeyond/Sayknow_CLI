@@ -7,6 +7,7 @@ import { $inheritedEnv } from "@sayknow-cli/utils";
 import { getBundledModel } from "../src/models";
 import { streamOpenAICompletions } from "../src/providers/openai-completions";
 import { streamOpenAIResponses } from "../src/providers/openai-responses";
+import { streamSimple } from "../src/stream";
 import type { Context, Model } from "../src/types";
 
 const originalFetch = global.fetch;
@@ -174,6 +175,35 @@ describe("StreamOptions.fetch override", () => {
 		expect(result.stopReason).toBe("stop");
 		expect(calls.length).toBeGreaterThanOrEqual(1);
 		expect(calls[0]?.url).toContain("/chat/completions");
+	});
+
+	it("forwards the fetch override through streamSimple", async () => {
+		const calls: string[] = [];
+		global.fetch = rejectingGlobalFetch();
+		const customFetch = async (input: string | URL | Request, _init?: RequestInit) => {
+			calls.push(String(input instanceof Request ? input.url : input));
+			return createSseResponse([
+				{
+					id: "chatcmpl-test",
+					object: "chat.completion.chunk",
+					created: 0,
+					model: openAICompletionsModel.id,
+					choices: [{ index: 0, delta: { content: "hi" }, finish_reason: "stop" }],
+					usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+				},
+				"[DONE]",
+			]);
+		};
+
+		const result = await streamSimple(openAICompletionsModel, baseContext(), {
+			apiKey: "test-key",
+			fetch: customFetch,
+			streamFirstEventTimeoutMs: 0,
+		}).result();
+
+		expect(result.stopReason).toBe("stop");
+		expect(calls).toHaveLength(1);
+		expect(calls[0]).toContain("/chat/completions");
 	});
 
 	it("routes openai-responses requests through the override", async () => {

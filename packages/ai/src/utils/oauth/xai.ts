@@ -1,4 +1,6 @@
 /** xAI OAuth flow (Grok account login). */
+
+import type { FetchImpl } from "../../types";
 import { OAuthCallbackFlow, type OAuthCallbackFlowOptions } from "./callback-server";
 import { generatePKCE } from "./pkce";
 import type { OAuthController, OAuthCredentials } from "./types";
@@ -35,6 +37,7 @@ export interface XaiOAuthFlowOptions {
 }
 
 export interface XaiOAuthRefreshOptions {
+	fetch?: FetchImpl;
 	signal?: AbortSignal;
 	extraTokenParams?: Readonly<Record<string, string>>;
 }
@@ -81,8 +84,8 @@ function validateXaiEndpoint(rawUrl: string): string {
 	return parsed.toString();
 }
 
-export async function discoverXaiOAuthEndpoints(signal?: AbortSignal): Promise<XaiDiscovery> {
-	const response = await fetch(XAI_OAUTH_DISCOVERY_URL, {
+export async function discoverXaiOAuthEndpoints(signal?: AbortSignal, fetchImpl?: FetchImpl): Promise<XaiDiscovery> {
+	const response = await (fetchImpl ?? globalThis.fetch)(XAI_OAUTH_DISCOVERY_URL, {
 		headers: { Accept: "application/json" },
 		signal: requestSignal(signal),
 	});
@@ -124,8 +127,9 @@ async function postXaiToken(
 	tokenEndpoint: string,
 	body: Record<string, string>,
 	signal?: AbortSignal,
+	fetchImpl?: FetchImpl,
 ): Promise<XaiTokenPayload> {
-	const response = await fetch(tokenEndpoint, {
+	const response = await (fetchImpl ?? globalThis.fetch)(tokenEndpoint, {
 		method: "POST",
 		headers: {
 			Accept: "application/json",
@@ -233,14 +237,14 @@ export async function refreshXaiToken(
 	if (!refreshToken) {
 		throw new Error("xAI credentials are expired and do not include a refresh token");
 	}
-	const { signal, extraTokenParams = {} } = resolveRefreshOptions(options);
-	const discovery = await discoverXaiOAuthEndpoints(signal);
+	const { fetch: fetchImpl, signal, extraTokenParams = {} } = resolveRefreshOptions(options);
+	const discovery = await discoverXaiOAuthEndpoints(signal, fetchImpl);
 	const body = {
 		grant_type: "refresh_token",
 		client_id: XAI_OAUTH_CLIENT_ID,
 		refresh_token: refreshToken,
 	};
 	addNonOverridingParams(body, extraTokenParams);
-	const tokenPayload = await postXaiToken(discovery.tokenEndpoint, body, signal);
+	const tokenPayload = await postXaiToken(discovery.tokenEndpoint, body, signal, fetchImpl);
 	return credentialsFromTokenPayload(tokenPayload, refreshToken);
 }

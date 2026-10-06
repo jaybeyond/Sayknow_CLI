@@ -1,5 +1,5 @@
 import { describe, expect, it, spyOn } from "bun:test";
-import type { ManagedAttemptOutcome } from "@sayknow-cli/agent-core";
+import type { ManagedAttemptOutcome, RecoveryEvidence } from "@sayknow-cli/agent-core";
 import { Agent } from "@sayknow-cli/agent-core";
 import {
 	agentLoopContinue,
@@ -2585,4 +2585,251 @@ it("emits an exhaustion diagnostic lifecycle once before terminal completion", a
 	expect(events.slice(-3)).toEqual(["message_start", "message_end", "agent_end"]);
 	expect(agent.state.messages).toContainEqual(diagnostic);
 	expectManagedRunStart(events);
+});
+it("produces visible_interrupted outcome for a committed plain-text failure", async () => {
+	const mock = createMockModel();
+	const streamFn = () => {
+		const stream = new AssistantMessageEventStream();
+		queueMicrotask(() => {
+			const message = assistantMessage(mock.model);
+			message.content = [{ type: "text", text: "partial answer" }];
+			stream.push({ type: "start", partial: structuredClone(message) });
+			stream.push({
+				type: "text_delta",
+				contentIndex: 0,
+				delta: "partial answer",
+				partial: structuredClone(message),
+			});
+			message.stopReason = "error";
+			message.errorMessage = "non-retryable provider error";
+			stream.push({ type: "error", reason: "error", error: message });
+		});
+		return stream;
+	};
+	const outcomes: ManagedAttemptOutcome[] = [];
+	const evidenceCalls: Array<{ tail: RecoveryEvidence["tail"]; visibleCommitted: boolean }> = [];
+	const agent = new Agent({
+		initialState: { model: mock.model, systemPrompt: ["test"], tools: [], messages: [] },
+		streamFn,
+	});
+	await agent.prompt("run", {
+		fallbackManaged: true,
+		getRecoveryEvidence: async (_message, _ctx, tail, visibleCommitted) => {
+			evidenceCalls.push({ tail, visibleCommitted });
+			return {
+				logicalRunId: 1,
+				stepId: "step-1",
+				generation: 0,
+				attemptId: "attempt-1",
+				visibleCommitted,
+				visibleMessageIds: [],
+				completedTools: [],
+				uncertainTools: [],
+				tail,
+				failureClass: "provider_error",
+				provider: mock.model.provider,
+				model: mock.model.id,
+			};
+		},
+		onManagedAttemptOutcome: outcome => {
+			outcomes.push(outcome);
+			return { type: "terminal", terminal: { stopReason: "error" } };
+		},
+	});
+	expect(outcomes).toHaveLength(1);
+	expect(outcomes[0]!.type).toBe("visible_interrupted");
+	const interrupted = outcomes[0] as Extract<ManagedAttemptOutcome, { type: "visible_interrupted" }>;
+	expect(interrupted.evidence.tail).toBe("plain_text");
+	expect(interrupted.evidence.visibleCommitted).toBe(true);
+	expect(evidenceCalls).toHaveLength(1);
+	expect(evidenceCalls[0]!.tail).toBe("plain_text");
+	expect(evidenceCalls[0]!.visibleCommitted).toBe(true);
+	expect(interrupted.message.content.some(c => c.type === "text")).toBe(true);
+});
+
+it("produces unsafe_interrupted outcome for a committed thinking-tail failure", async () => {
+	const mock = createMockModel();
+	const streamFn = () => {
+		const stream = new AssistantMessageEventStream();
+		queueMicrotask(() => {
+			const message = assistantMessage(mock.model);
+			message.content = [{ type: "thinking", thinking: "some reasoning", thinkingSignature: "sig-1" }];
+			message.stopReason = "error";
+			message.errorMessage = "provider error after thinking";
+			stream.push({ type: "error", reason: "error", error: message });
+		});
+		return stream;
+	};
+	const outcomes: ManagedAttemptOutcome[] = [];
+	const agent = new Agent({
+		initialState: { model: mock.model, systemPrompt: ["test"], tools: [], messages: [] },
+		streamFn,
+	});
+	await agent.prompt("run", {
+		fallbackManaged: true,
+		getRecoveryEvidence: async (_message, _ctx, tail, visibleCommitted) => ({
+			logicalRunId: 1,
+			stepId: "step-2",
+			generation: 0,
+			attemptId: "attempt-1",
+			visibleCommitted,
+			visibleMessageIds: [],
+			completedTools: [],
+			uncertainTools: [],
+			tail,
+			failureClass: "provider_error",
+			provider: mock.model.provider,
+			model: mock.model.id,
+		}),
+		onManagedAttemptOutcome: outcome => {
+			outcomes.push(outcome);
+			return { type: "terminal", terminal: { stopReason: "error" } };
+		},
+	});
+	expect(outcomes).toHaveLength(1);
+	expect(outcomes[0]!.type).toBe("unsafe_interrupted");
+	const interrupted = outcomes[0] as Extract<ManagedAttemptOutcome, { type: "unsafe_interrupted" }>;
+	expect(interrupted.evidence.tail).toBe("signed_thinking");
+	expect(interrupted.evidence.visibleCommitted).toBe(false);
+});
+
+it("pairs committed partial-tool failures with placeholder results before the recovery outcome", async () => {
+	const mock = createMockModel();
+	const streamFn = () => {
+		const stream = new AssistantMessageEventStream();
+		queueMicrotask(() => {
+			const message = assistantMessage(mock.model);
+			message.content = [{ type: "toolCall", id: "call-partial", name: "inspect", arguments: {} }];
+			message.stopReason = "error";
+			message.errorMessage = "provider error after tool call";
+			stream.push({ type: "error", reason: "error", error: message });
+		});
+		return stream;
+	};
+	const order: string[] = [];
+	const turnEndToolResults: string[][] = [];
+	const contextToolResultsAtEvidence: number[] = [];
+	const outcomes: ManagedAttemptOutcome[] = [];
+	const agent = new Agent({
+		initialState: { model: mock.model, systemPrompt: ["test"], tools: [], messages: [] },
+		streamFn,
+	});
+	agent.subscribe(event => {
+		order.push(event.type);
+		if (event.type === "turn_end") {
+			turnEndToolResults.push(event.toolResults.map(result => result.toolCallId));
+		}
+	});
+	await agent.prompt("run", {
+		fallbackManaged: true,
+		getRecoveryEvidence: async (_message, ctx, tail, visibleCommitted) => {
+			order.push("evidence");
+			contextToolResultsAtEvidence.push(ctx.messages.filter(m => m.role === "toolResult").length);
+			return {
+				logicalRunId: 1,
+				stepId: "step-3",
+				generation: 0,
+				attemptId: "attempt-1",
+				visibleCommitted,
+				visibleMessageIds: [],
+				completedTools: [],
+				uncertainTools: [],
+				tail,
+				failureClass: "provider_error",
+				provider: mock.model.provider,
+				model: mock.model.id,
+			};
+		},
+		onManagedAttemptOutcome: outcome => {
+			outcomes.push(outcome);
+			return { type: "terminal", terminal: { stopReason: "error" } };
+		},
+	});
+
+	expect(outcomes).toHaveLength(1);
+	expect(outcomes[0]!.type).toBe("unsafe_interrupted");
+	const interrupted = outcomes[0] as Extract<ManagedAttemptOutcome, { type: "unsafe_interrupted" }>;
+	expect(interrupted.evidence.tail).toBe("partial_tool");
+	// Evidence observes the committed context before placeholder results are appended.
+	expect(contextToolResultsAtEvidence).toEqual([0]);
+	expect(turnEndToolResults).toEqual([["call-partial"]]);
+	const evidenceIndex = order.indexOf("evidence");
+	expect(evidenceIndex).toBeGreaterThanOrEqual(0);
+	expect(order.indexOf("turn_end")).toBeGreaterThan(evidenceIndex);
+});
+
+it("falls through to fail-closed terminal when getRecoveryEvidence is absent on committed failure", async () => {
+	const mock = createMockModel();
+	const streamFn = () => {
+		const stream = new AssistantMessageEventStream();
+		queueMicrotask(() => {
+			const message = assistantMessage(mock.model);
+			message.content = [{ type: "text", text: "partial" }];
+			message.stopReason = "error";
+			message.errorMessage = "non-retryable";
+			stream.push({ type: "error", reason: "error", error: message });
+		});
+		return stream;
+	};
+	const events: string[] = [];
+	const agent = new Agent({
+		initialState: { model: mock.model, systemPrompt: ["test"], tools: [], messages: [] },
+		streamFn,
+	});
+	agent.subscribe(event => events.push(event.type));
+	await agent.prompt("run", { fallbackManaged: true });
+	// Without getRecoveryEvidence, committed failure ends via agent_end (existing behavior).
+	expect(events).toContain("agent_end");
+	expect(agent.state.error).toBeDefined();
+});
+
+describe("session-owned request retries", () => {
+	async function capturedRequestRetries(withLease: boolean): Promise<number | undefined> {
+		const mock = createMockModel();
+		let requestMaxRetries: number | undefined = -1;
+		const streamFn = (_model: unknown, _context: unknown, options?: { requestMaxRetries?: number }) => {
+			requestMaxRetries = options?.requestMaxRetries;
+			const stream = new AssistantMessageEventStream();
+			queueMicrotask(() => {
+				const message = { ...assistantMessage(mock.model), content: [{ type: "text" as const, text: "ok" }] };
+				stream.push({ type: "start", partial: message });
+				stream.push({ type: "done", reason: "stop", message });
+			});
+			return stream;
+		};
+		const config: AgentLoopConfig = {
+			model: mock.model,
+			convertToLlm: messages => messages as Message[],
+			requestMaxRetries: 4,
+			...(withLease
+				? {
+						getUpstreamRequestLease: async () => ({
+							onRequest: () => {},
+							validate: () => {},
+							onRecoverableFailure: () => {},
+							signal: new AbortController().signal,
+						}),
+					}
+				: {}),
+		};
+		const context: AgentContext = {
+			systemPrompt: ["test"],
+			messages: [{ role: "user", content: "run", timestamp: Date.now() }],
+			tools: [],
+		};
+		const stream = agentLoopContinue(context, config, undefined, streamFn);
+		for await (const _event of stream) {
+			// drain
+		}
+		await stream.result();
+		return requestMaxRetries;
+	}
+
+	it("hands every request resend of a leased step to the session owner", async () => {
+		expect(await capturedRequestRetries(true)).toBe(0);
+	});
+
+	it("keeps the configured request retries when no session owns the step", async () => {
+		expect(await capturedRequestRetries(false)).toBe(4);
+	});
 });

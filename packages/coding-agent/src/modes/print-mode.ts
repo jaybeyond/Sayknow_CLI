@@ -8,7 +8,7 @@
 import { type AssistantMessage, type ImageContent, isContextOverflow } from "@sayknow-cli/ai";
 import { isKnownSinkPeerClosedError, logger, sanitizeText } from "@sayknow-cli/utils";
 import type { AgentSession } from "../session/agent-session";
-import { isSilentAbort } from "../session/messages";
+import { getVisibleAnswerChain, isSilentAbort } from "../session/messages";
 import { initializeExtensions } from "./runtime-init";
 
 /**
@@ -267,9 +267,19 @@ export async function runPrintMode(session: AgentSession, options: PrintModeOpti
 				}
 
 				if (printContent) {
-					for (const content of assistantMsg.content) {
-						if (content.type === "text") stdout.write(`${sanitizeText(content.text)}\n`);
+					// A continued answer prints its preserved prefix too, joined at the seam
+					// exactly as it streamed (the continuation resumes mid-line).
+					const lines: string[] = [];
+					for (const [partIndex, part] of getVisibleAnswerChain(session.state.messages, assistantMsg).entries()) {
+						let first = true;
+						for (const content of part.content) {
+							if (content.type !== "text") continue;
+							if (first && partIndex > 0 && lines.length > 0) lines[lines.length - 1] += content.text;
+							else lines.push(content.text);
+							first = false;
+						}
 					}
+					for (const line of lines) stdout.write(`${sanitizeText(line)}\n`);
 				}
 			}
 		}

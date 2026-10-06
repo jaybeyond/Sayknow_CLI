@@ -1,10 +1,14 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import {
+	carryCodexStreamTimeoutPolicy,
 	getOpenAIStreamIdleTimeoutMs,
 	getProviderFirstEventTimeoutFallbackMs,
 	getProviderStreamIdleTimeoutFallbackMs,
 	getStreamFirstEventTimeoutMs,
 	getStreamIdleTimeoutMs,
+	iterateWithIdleTimeout,
+	resolveCodexStreamTimeoutPolicy,
+	takeCodexStreamTimeoutPolicy,
 } from "../src/utils/idle-iterator";
 
 /**
@@ -141,5 +145,148 @@ describe("getStreamFirstEventTimeoutMs(idleTimeoutMs, fallbackMs)", () => {
 
 	it("falls back to the 100s global default when no fallback or env is provided", () => {
 		expect(getStreamFirstEventTimeoutMs()).toBe(100_000);
+	});
+});
+
+describe("Codex semantic clock policy", () => {
+	const cases: Array<{
+		name: string;
+		idle?: string[];
+		first?: string;
+		caller?: { streamIdleTimeoutMs?: number; streamFirstEventTimeoutMs?: number };
+		expectedIdle?: number;
+		expectedFirst: number;
+	}> = [
+		{ name: "absent", expectedIdle: 300_000, expectedFirst: 300_000 },
+		{ name: "SKC alias wins", idle: ["60000", "70000", "80000"], expectedIdle: 60_000, expectedFirst: 300_000 },
+		{ name: "PI_STREAM before PI_OPENAI", idle: ["70000", "80000"], expectedIdle: 70_000, expectedFirst: 300_000 },
+		{ name: "long idle widens first", idle: ["450000"], expectedIdle: 450_000, expectedFirst: 450_000 },
+		{ name: "short first env", first: "45000", expectedIdle: 300_000, expectedFirst: 45_000 },
+		{
+			name: "caller first wins",
+			first: "60000",
+			caller: { streamFirstEventTimeoutMs: 45_000 },
+			expectedIdle: 300_000,
+			expectedFirst: 45_000,
+		},
+		{
+			name: "caller idle wins",
+			idle: ["60000"],
+			caller: { streamIdleTimeoutMs: 40_000 },
+			expectedIdle: 40_000,
+			expectedFirst: 300_000,
+		},
+		{
+			name: "caller first NaN uses env",
+			first: "45000",
+			caller: { streamFirstEventTimeoutMs: NaN },
+			expectedIdle: 300_000,
+			expectedFirst: 45_000,
+		},
+		{
+			name: "caller idle Infinity uses env",
+			idle: ["60000"],
+			caller: { streamIdleTimeoutMs: Infinity },
+			expectedIdle: 60_000,
+			expectedFirst: 300_000,
+		},
+		{
+			name: "caller fractions truncate",
+			caller: { streamIdleTimeoutMs: 1.9, streamFirstEventTimeoutMs: 0.5 },
+			expectedIdle: 1,
+			expectedFirst: 0,
+		},
+	];
+	for (const value of ["bad", "NaN", "Infinity"]) {
+		cases.push(
+			{
+				name: `invalid idle ${value} does not search aliases`,
+				idle: [value, "70000", "80000"],
+				expectedIdle: 300_000,
+				expectedFirst: 300_000,
+			},
+			{ name: `invalid first ${value}`, first: value, expectedIdle: 300_000, expectedFirst: 300_000 },
+			{
+				name: `invalid first ${value} uses widened fallback`,
+				idle: ["450000"],
+				first: value,
+				expectedIdle: 450_000,
+				expectedFirst: 450_000,
+			},
+		);
+	}
+	for (const value of ["0", "-1", "", "   "]) {
+		cases.push(
+			{ name: `disabled idle '${value}' ignores aliases`, idle: [value, "70000", "80000"], expectedFirst: 300_000 },
+			{ name: `disabled first '${value}'`, first: value, expectedIdle: 300_000, expectedFirst: 0 },
+		);
+	}
+	for (const value of [0, -1]) {
+		cases.push(
+			{ name: `caller idle ${value}`, caller: { streamIdleTimeoutMs: value }, expectedFirst: 300_000 },
+			{
+				name: `caller first ${value}`,
+				first: "45000",
+				caller: { streamFirstEventTimeoutMs: value },
+				expectedIdle: 300_000,
+				expectedFirst: 0,
+			},
+		);
+	}
+	for (const fixture of cases) {
+		it(fixture.name, () => {
+			if (fixture.idle) {
+				const keys =
+					fixture.idle.length === 2
+						? ["PI_STREAM_IDLE_TIMEOUT_MS", "PI_OPENAI_STREAM_IDLE_TIMEOUT_MS"]
+						: [
+								"SKC_OPENAI_STREAM_IDLE_TIMEOUT_MS",
+								"PI_STREAM_IDLE_TIMEOUT_MS",
+								"PI_OPENAI_STREAM_IDLE_TIMEOUT_MS",
+							];
+				fixture.idle.forEach((value, index) => {
+					Bun.env[keys[index]] = value;
+				});
+			}
+			if (fixture.first !== undefined) Bun.env.PI_STREAM_FIRST_EVENT_TIMEOUT_MS = fixture.first;
+			const policy = resolveCodexStreamTimeoutPolicy(fixture.caller);
+			expect(policy.idleTimeoutMs).toBe(fixture.expectedIdle);
+			expect(policy.firstItemTimeoutMs).toBe(fixture.expectedFirst);
+		});
+	}
+
+	it("carries the lazy boundary deadline once without rewriting raw caller values", () => {
+		const clock = vi.spyOn(Date, "now").mockReturnValue(1_000);
+		try {
+			const options = { streamIdleTimeoutMs: NaN, streamFirstEventTimeoutMs: 0 };
+			const policy = resolveCodexStreamTimeoutPolicy(options);
+			carryCodexStreamTimeoutPolicy(options, policy);
+			clock.mockReturnValue(151_000);
+			expect(takeCodexStreamTimeoutPolicy(options)).toEqual(policy);
+			expect(options.streamIdleTimeoutMs).toBeNaN();
+			expect(options.streamFirstEventTimeoutMs).toBe(0);
+			expect(takeCodexStreamTimeoutPolicy(options).firstItemStartedAt).toBe(151_000);
+		} finally {
+			clock.mockRestore();
+		}
+	});
+
+	it("rejects buffered admission at the exact inherited deadline", async () => {
+		const clock = vi.spyOn(Date, "now").mockReturnValue(300_000);
+		try {
+			const source = async function* () {
+				yield "buffered";
+			};
+			const guarded = iterateWithIdleTimeout(source(), {
+				firstItemStartedAt: 0,
+				firstItemTimeoutMs: 300_000,
+				strictDeadline: true,
+				errorMessage: "idle",
+				firstItemErrorMessage: "first",
+			});
+			await expect(guarded.next()).rejects.toThrow("first");
+		} finally {
+			clock.mockRestore();
+		}
 	});
 });

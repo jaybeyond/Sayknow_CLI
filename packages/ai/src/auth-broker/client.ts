@@ -8,6 +8,8 @@
 import { readSseEvents } from "@sayknow-cli/utils";
 import type { ZodType, infer as zInfer } from "zod/v4";
 import type { AuthCredential } from "../auth-storage";
+import type { FetchImpl } from "../types";
+import type { OAuthRefreshOptions } from "../utils/oauth/types";
 import type {
 	CredentialDisableRequest,
 	CredentialDisableResponse,
@@ -72,6 +74,8 @@ export interface FetchSnapshotOptions {
 	ifGenerationGt?: number;
 	waitMs?: number;
 	signal?: AbortSignal;
+	/** Per-request fetch override; defaults to the client's configured fetch. */
+	requestFetch?: FetchImpl;
 }
 
 export type FetchSnapshotResult =
@@ -128,6 +132,7 @@ export class AuthBrokerClient {
 			headers,
 			signal: opts.signal,
 			timeoutMs,
+			requestFetch: opts.requestFetch,
 		});
 		const etagGeneration = parseGenerationTag(response.headers.get("etag"));
 		if (response.status === 304) {
@@ -236,10 +241,15 @@ export class AuthBrokerClient {
 		return this.#request("GET", "/v1/usage", { schema: usageResponseSchema, signal }) as Promise<UsageResponse>;
 	}
 
-	async refreshCredential(id: number, signal?: AbortSignal): Promise<CredentialRefreshResponse> {
+	async refreshCredential(
+		id: number,
+		signal?: AbortSignal,
+		options?: OAuthRefreshOptions,
+	): Promise<CredentialRefreshResponse> {
 		return this.#request("POST", `/v1/credential/${id}/refresh`, {
 			schema: credentialRefreshResponseSchema,
 			signal,
+			requestFetch: options?.fetch,
 		}) as Promise<CredentialRefreshResponse>;
 	}
 
@@ -293,7 +303,7 @@ export class AuthBrokerClient {
 	async #request<TSchema extends ZodType>(
 		method: "GET" | "POST",
 		path: string,
-		opts: { schema: TSchema; auth?: boolean; body?: unknown; signal?: AbortSignal },
+		opts: { schema: TSchema; auth?: boolean; body?: unknown; signal?: AbortSignal; requestFetch?: FetchImpl },
 	): Promise<zInfer<TSchema>> {
 		const response = await this.#fetchRaw(method, path, opts);
 		const text = await response.text();
@@ -329,6 +339,7 @@ export class AuthBrokerClient {
 			signal?: AbortSignal;
 			headers?: Record<string, string>;
 			timeoutMs?: number;
+			requestFetch?: FetchImpl;
 		},
 	): Promise<Response> {
 		const auth = opts.auth ?? true;
@@ -352,7 +363,7 @@ export class AuthBrokerClient {
 			const timeoutSignal = AbortSignal.timeout(opts.timeoutMs ?? this.#timeoutMs);
 			const signal = opts.signal ? AbortSignal.any([opts.signal, timeoutSignal]) : timeoutSignal;
 			try {
-				const response = await this.#fetch(url, {
+				const response = await (opts.requestFetch ?? this.#fetch)(url, {
 					method,
 					headers,
 					body: payload,

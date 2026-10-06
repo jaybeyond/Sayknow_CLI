@@ -50,3 +50,60 @@ describe("persisted continuation tail", () => {
 		expect(withFollowUp.hasQueuedMessages()).toBe(false);
 	});
 });
+
+describe("tool filter projection", () => {
+	function namedTool(name: string) {
+		let runs = 0;
+		return {
+			runs: () => runs,
+			tool: {
+				name,
+				label: name,
+				description: name,
+				parameters: { type: "object" as const, properties: {} },
+				execute: async () => {
+					runs++;
+					return { content: [{ type: "text" as const, text: `${name} ran` }] };
+				},
+			},
+		};
+	}
+
+	it("narrows what the model sees and may execute without changing the selected tools", async () => {
+		const read = namedTool("read");
+		const write = namedTool("write");
+		const mock = createMockModel({
+			responses: [
+				{ content: [{ type: "toolCall", id: "w1", name: "write", arguments: {} }] },
+				{ content: ["done"] },
+			],
+		});
+		const agent = new Agent({
+			streamFn: mock.stream,
+			initialState: { model: mock, systemPrompt: [], tools: [read.tool, write.tool], messages: [] },
+		});
+		agent.setToolFilter(tools => tools.filter(tool => tool.name === "read"));
+
+		await agent.prompt("go");
+
+		expect(mock.calls[0]?.context.tools?.map(tool => tool.name)).toEqual(["read"]);
+		expect(write.runs()).toBe(0);
+		expect(agent.state.tools.map(tool => tool.name)).toEqual(["read", "write"]);
+	});
+
+	it("drops a forced tool choice that names a filtered-out tool", async () => {
+		const read = namedTool("read");
+		const write = namedTool("write");
+		const mock = createMockModel({ responses: [{ content: ["done"] }] });
+		const agent = new Agent({
+			streamFn: mock.stream,
+			initialState: { model: mock, systemPrompt: [], tools: [read.tool, write.tool], messages: [] },
+		});
+		agent.setToolFilter(tools => tools.filter(tool => tool.name === "read"));
+
+		await agent.prompt("go", { toolChoice: { type: "tool", name: "write" } });
+
+		const choice = mock.calls[0]?.options?.toolChoice;
+		expect(JSON.stringify(choice ?? null)).not.toContain("write");
+	});
+});

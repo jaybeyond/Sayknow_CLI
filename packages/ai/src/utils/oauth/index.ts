@@ -7,6 +7,7 @@ import type {
 	OAuthProviderId,
 	OAuthProviderInfo,
 	OAuthProviderInterface,
+	OAuthRefreshOptions,
 } from "./types";
 
 const builtInOAuthProviders: OAuthProviderInfo[] = [
@@ -306,21 +307,23 @@ export function unregisterOAuthProviders(sourceId: string): void {
 export async function refreshOAuthToken(
 	provider: OAuthProvider,
 	credentials: OAuthCredentials,
+	options?: OAuthRefreshOptions,
 ): Promise<OAuthCredentials> {
 	if (!credentials) {
 		throw new Error(`No OAuth credentials found for ${provider}`);
 	}
+	options?.signal?.throwIfAborted();
 
 	let newCredentials: OAuthCredentials;
 	switch (provider) {
 		case "anthropic": {
 			const { refreshAnthropicToken } = await import("./anthropic");
-			newCredentials = await refreshAnthropicToken(credentials.refresh);
+			newCredentials = await refreshAnthropicToken(credentials.refresh, options);
 			break;
 		}
 		case "github-copilot": {
 			const { refreshGitHubCopilotToken } = await import("./github-copilot");
-			newCredentials = await refreshGitHubCopilotToken(credentials.refresh, credentials.enterpriseUrl);
+			newCredentials = refreshGitHubCopilotToken(credentials.refresh, credentials.enterpriseUrl, options);
 			break;
 		}
 		case "google-gemini-cli": {
@@ -328,7 +331,7 @@ export async function refreshOAuthToken(
 			if (!credentials.projectId) {
 				throw new Error("Google Cloud credentials missing projectId");
 			}
-			newCredentials = await refreshGoogleCloudToken(credentials.refresh, credentials.projectId);
+			newCredentials = await refreshGoogleCloudToken(credentials.refresh, credentials.projectId, options);
 			break;
 		}
 		case "google-antigravity": {
@@ -336,38 +339,38 @@ export async function refreshOAuthToken(
 			if (!credentials.projectId) {
 				throw new Error("Antigravity credentials missing projectId");
 			}
-			newCredentials = await refreshAntigravityToken(credentials.refresh, credentials.projectId);
+			newCredentials = await refreshAntigravityToken(credentials.refresh, credentials.projectId, options);
 			break;
 		}
 		case "openai-codex":
 		case "openai-codex-device": {
 			const { refreshOpenAICodexToken } = await import("./openai-codex");
-			newCredentials = await refreshOpenAICodexToken(credentials.refresh);
+			newCredentials = await refreshOpenAICodexToken(credentials.refresh, options);
 			break;
 		}
 		case "kimi-code": {
 			const { refreshKimiToken } = await import("./kimi");
-			newCredentials = await refreshKimiToken(credentials.refresh);
+			newCredentials = await refreshKimiToken(credentials.refresh, options);
 			break;
 		}
 		case "gitlab-duo": {
 			const { refreshGitLabDuoToken } = await import("./gitlab-duo");
-			newCredentials = await refreshGitLabDuoToken(credentials);
+			newCredentials = await refreshGitLabDuoToken(credentials, options);
 			break;
 		}
 		case "cursor": {
 			const { refreshCursorToken } = await import("./cursor");
-			newCredentials = await refreshCursorToken(credentials.refresh);
+			newCredentials = await refreshCursorToken(credentials.refresh, options);
 			break;
 		}
 		case "xai": {
 			const { refreshXaiToken } = await import("./xai");
-			newCredentials = await refreshXaiToken(credentials.refresh);
+			newCredentials = await refreshXaiToken(credentials.refresh, options);
 			break;
 		}
 		case "glm-zcode": {
 			const { refreshGlmZcodeToken } = await import("./glm-zcode");
-			newCredentials = await refreshGlmZcodeToken(credentials);
+			newCredentials = await refreshGlmZcodeToken(credentials, options);
 			break;
 		}
 		case "kilo":

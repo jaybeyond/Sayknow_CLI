@@ -389,7 +389,10 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 					headers: requestHeaders,
 					body: requestBodyJson,
 					signal: options?.signal,
-					maxAttempts: resolveRetryBudget(options?.requestMaxRetries, MAX_RETRIES) + 1,
+					// A managed chain's recovery owner decides every resend.
+					maxAttempts: options?.fallbackManaged
+						? 1
+						: resolveRetryBudget(options?.requestMaxRetries, MAX_RETRIES) + 1,
 					defaultDelayMs: attempt => BASE_DELAY_MS * 2 ** attempt,
 					maxDelayMs: options?.maxRetryDelayMs ?? RATE_LIMIT_BUDGET_MS,
 					fetch: options?.fetch,
@@ -616,7 +619,10 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 			let receivedContent = false;
 			let currentResponse = response;
 
-			const emptyStreamRetryBudget = resolveRetryBudget(options?.streamMaxRetries, MAX_EMPTY_STREAM_RETRIES);
+			// A managed chain's recovery owner decides every resend.
+			const emptyStreamRetryBudget = options?.fallbackManaged
+				? 0
+				: resolveRetryBudget(options?.streamMaxRetries, MAX_EMPTY_STREAM_RETRIES);
 			for (let emptyAttempt = 0; emptyAttempt <= emptyStreamRetryBudget; emptyAttempt++) {
 				if (options?.signal?.aborted) {
 					throw new Error("Request was aborted");

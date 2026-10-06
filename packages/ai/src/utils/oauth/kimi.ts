@@ -9,7 +9,7 @@ import * as path from "node:path";
 import { scheduler } from "node:timers/promises";
 import { $env, getAgentDir, isEnoent } from "@sayknow-cli/utils";
 import packageJson from "../../../package.json" with { type: "json" };
-import type { OAuthController, OAuthCredentials } from "./types";
+import type { OAuthController, OAuthCredentials, OAuthRefreshOptions } from "./types";
 
 const CLIENT_ID = "17e5f671-d194-4dfb-9706-5516cb48c098";
 const DEFAULT_OAUTH_HOST = "https://auth.kimi.com";
@@ -229,8 +229,10 @@ export async function loginKimi(options: OAuthController): Promise<OAuthCredenti
 /**
  * Refresh Kimi OAuth token.
  */
-export async function refreshKimiToken(refreshToken: string): Promise<OAuthCredentials> {
-	const response = await fetch(`${resolveOAuthHost()}/api/oauth/token`, {
+export async function refreshKimiToken(refreshToken: string, options?: OAuthRefreshOptions): Promise<OAuthCredentials> {
+	options?.signal?.throwIfAborted();
+	const fetchFn = options?.fetch ?? globalThis.fetch;
+	const response = await fetchFn(`${resolveOAuthHost()}/api/oauth/token`, {
 		method: "POST",
 		headers: {
 			"Content-Type": "application/x-www-form-urlencoded",
@@ -241,6 +243,7 @@ export async function refreshKimiToken(refreshToken: string): Promise<OAuthCrede
 			refresh_token: refreshToken,
 			client_id: CLIENT_ID,
 		}),
+		signal: options?.signal,
 	});
 
 	if (!response.ok) {

@@ -2,6 +2,22 @@
 
 ## [Unreleased]
 
+### Added
+
+- `RecoveryBudget` closes admission after consecutive no-output timeouts (`maxSilentTimeouts`, default 3) with the new `silent_stall` rejection, within its existing request and time limits.
+
+### Fixed
+
+- Amazon Bedrock inference and AWS SSO/IMDS credential requests, GitHub Copilot token refresh, and Vertex ADC token requests now go through the shared recovery budget. A `credential_process` source marks the step as having unobserved remote work.
+- The Anthropic provider retry loop now honors `Retry-After`. A wait longer than the retry cap is returned to the caller instead of being retried early. Gemini CLI does not resend inside a managed fallback attempt.
+- Ollama tool call IDs are now unique for each call, so a repeated tool call in a later step is no longer mistaken for tool re-entry.
+- A stalled model step now recovers on the same model instead of failing or switching models. One shared budget covers the unfinished step: 7 upstream requests and 15 minutes after the first failure, counting hidden SDK resends, token fetches, and websocket frames. An explicit `retry.maxRetries` or `fallback.maxAttempts` keeps its own limit. `retry.enabled: false` still disables recovery.
+- A failure after public text keeps that text and, on supported plain-text tails, continues from it; a failure with no public output retries cleanly. Tool-call or image tails are not retried, and a restart never auto-sends an interrupted recovery.
+- Kimi, Synthetic, and GitLab Duo pass the session's recovery ownership to their inner provider stream, so their SDK no longer resends past the shared budget. GitLab Duo's token request now honors abort.
+- Pi-native gateway streams use the shared idle watchdog and fail with a stall error instead of waiting forever. Codex stream deadlines stay owned by one semantic watchdog; an already-aborted request still captures its payload.
+- Codex WebSocket requests are admitted against the shared budget immediately before the frame is sent on the socket, so a refused admission sends nothing.
+- Cursor agent runs and pi-native gateway dispatches report their upstream work as uncertain, so the session does not resend them automatically.
+
 ## [0.7.6] - 2026-10-05
 
 ### Fixed

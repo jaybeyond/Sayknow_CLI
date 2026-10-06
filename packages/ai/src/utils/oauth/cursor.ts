@@ -1,5 +1,5 @@
 import { generatePKCE } from "./pkce";
-import type { OAuthCredentials } from "./types";
+import type { OAuthCredentials, OAuthRefreshOptions } from "./types";
 
 const CURSOR_LOGIN_URL = "https://cursor.com/loginDeepControl";
 const CURSOR_POLL_URL = "https://api2.cursor.sh/auth/poll";
@@ -95,14 +95,20 @@ export async function loginCursor(
 	};
 }
 
-export async function refreshCursorToken(apiKeyOrRefreshToken: string): Promise<OAuthCredentials> {
-	const response = await fetch(CURSOR_REFRESH_URL, {
+export async function refreshCursorToken(
+	apiKeyOrRefreshToken: string,
+	options?: OAuthRefreshOptions,
+): Promise<OAuthCredentials> {
+	options?.signal?.throwIfAborted();
+	const fetchImpl = options?.fetch ?? globalThis.fetch;
+	const response = await fetchImpl(CURSOR_REFRESH_URL, {
 		method: "POST",
 		headers: {
 			Authorization: `Bearer ${apiKeyOrRefreshToken}`,
 			"Content-Type": "application/json",
 		},
 		body: "{}",
+		signal: options?.signal,
 	});
 
 	if (!response.ok) {

@@ -39,6 +39,7 @@ import {
 	resolveTelemetry,
 	type StablePrefixSnapshot,
 	ThinkingLevel,
+	TOOL_CALL_REENTRY_ERROR_CODE,
 } from "@sayknow-cli/agent-core";
 import { normalizeMessagesForProvider } from "@sayknow-cli/agent-core/agent-loop";
 import {
@@ -99,11 +100,20 @@ import type {
 import {
 	classifyContextOverflow,
 	clearAnthropicFastModeFallback,
+	createUpstreamAdmission,
 	getSupportedEfforts,
 	isContextOverflow,
+	isRecoveryAdmissionErrorMessage,
 	isUsageLimitError,
 	modelsAreEqual,
+	type OAuthRefreshOptions,
+	RecoveryAdmissionError,
+	RecoveryBudget,
+	type RecoveryRequestKind,
 	resolveServiceTier,
+	SAME_MODEL_RECOVERY_BASE_DELAY_MS,
+	SAME_MODEL_RECOVERY_MAX_DELAY_MS,
+	SAME_MODEL_RECOVERY_MAX_REQUESTS,
 	streamSimple,
 } from "@sayknow-cli/ai";
 import {
@@ -386,6 +396,22 @@ import { buildResponseLanguageReminder, type DetectedLanguage, detectResponseLan
 
 export { DefaultModelSelectionRecoveryError } from "./default-model-selection";
 
+import {
+	AUTO_RESUME_FULL_PROMPT,
+	AUTO_RESUME_MARKER_CUSTOM_TYPE,
+	AUTO_RESUME_RESTRICTED_PROMPT,
+	type AutoResumeMarker,
+	type AutoResumeMode,
+	type AutoResumeTrigger,
+	hasAutoResumeMarkerSinceLastUser,
+	hasVisibleFailedPrefix,
+	INTERRUPTED_TOOL_RESULT_TEXT,
+	isRestartSafeTool,
+	isSynthesizedResumeResult,
+	RESTART_RESUME_MAX_REQUESTS,
+	RESTART_RESUME_WINDOW_MS,
+	resolveAutoResumePolicy,
+} from "./auto-resume";
 import type {
 	ClientBridge,
 	ClientBridgePermissionOption,
@@ -401,16 +427,19 @@ import {
 import { pruneStaleFileMentions } from "./file-mention-pruning";
 import type { MemoryGuardRestoreResult } from "./memory-guard-checkpoint-participant";
 import {
+	AUTO_RESUME_CUSTOM_TYPE,
 	type BashExecutionMessage,
 	type CompactionSummaryMessage,
 	type CustomMessage,
 	convertToLlm,
 	createPreAdmissionArtifactSpillPreview,
 	type FileMentionMessage,
+	getVisibleAnswerChain,
 	type PythonExecutionMessage,
 	readPendingDisplayTag,
 	SILENT_ABORT_MARKER,
 	SKILL_PROMPT_MESSAGE_TYPE,
+	VISIBLE_CONTINUATION_CUSTOM_TYPE,
 } from "./messages";
 import { isLegacyProviderSafetyStopMessage } from "./provider-safety-stop";
 import { formatSessionDumpText } from "./session-dump-format";
@@ -918,6 +947,20 @@ function assistantMessageHasVisibleOrToolContent(message: AssistantMessage): boo
 		if (content.type === "text") return content.text.length > 0;
 		return content.type === "thinking" || content.type === "redactedThinking" || content.type === "toolCall";
 	});
+}
+
+/** Serializers with a verified projection of a failed plain-text assistant prefix. */
+const VISIBLE_CONTINUATION_APIS: ReadonlySet<string> = new Set(["openai-completions", "anthropic-messages"]);
+const RECOVERY_CHECKPOINT_CUSTOM_TYPE = "recovery_checkpoint";
+const VISIBLE_CONTINUATION_PROMPT =
+	"The connection was interrupted while you were answering. Your answer above is preserved exactly as the user saw it. Continue directly from where it stops: do not repeat any of it and do not redo completed work.";
+
+/** Only plain text is a proved replay projection; signed/private blocks are never repaired. */
+function isTextVisibleTail(message: AssistantMessage): boolean {
+	return (
+		message.content.every(block => block.type === "text") &&
+		message.content.some(block => block.type === "text" && block.text.trim().length > 0)
+	);
 }
 
 function isLocalModelEndpoint(model: Model | undefined): boolean {
@@ -1762,10 +1805,19 @@ export class AgentSession {
 
 	/** Replay safety for the currently admitted top-level prompt/custom-message run. */
 	#retryReplayEpoch = 0;
+	/**
+	 * Epoch tainted by something outside the model transcript (extension hooks,
+	 * commands, user bash/python, abort). Visible model output and completed tool
+	 * pairs stay in the transcript a recovery keeps and are never re-executed, so
+	 * they do not taint the run; recovery stays same-model and transcript-only.
+	 */
 	#retryReplayUnsafeEpoch: number | undefined;
 
 	#resetRetryReplaySafety(): void {
 		this.#retryReplayEpoch++;
+		this.#uncertainUpstreamUnresolved = false;
+		// A genuine new prompt supersedes an interrupted persisted step.
+		this.#unresolvedRecoveryAtHydration = false;
 		this.#retryReplayUnsafeEpoch = undefined;
 		if (
 			this.#extensionRunner?.hasHandlers("context") ||
@@ -1780,7 +1832,7 @@ export class AgentSession {
 		if (this.#retryReplayEpoch > 0) this.#retryReplayUnsafeEpoch = this.#retryReplayEpoch;
 	}
 
-	get #hasCleanRetryReplaySafety(): boolean {
+	get #hasCleanContinuationSafety(): boolean {
 		return this.#retryReplayEpoch > 0 && this.#retryReplayUnsafeEpoch !== this.#retryReplayEpoch;
 	}
 	#prePromptContextCheckPromise: Promise<void> | undefined = undefined;
@@ -1808,6 +1860,34 @@ export class AgentSession {
 	#overflowMaintenanceAttempts = 0;
 	#defaultFallbackExhaustedLastTurn = false;
 	#transientStopTimestamp: number | undefined;
+	/**
+	 * Shared same-model recovery envelope for the unfinished model step: every
+	 * concrete upstream request (initial, hidden resend, credential/token, session
+	 * retry) is admitted here. Created at the step's first request, cleared when the
+	 * step is accepted or a new user turn starts; never refunded.
+	 */
+	#stepRecoveryBudget: RecoveryBudget | undefined;
+	#visibleRecoveryReferenceIds: string[] = [];
+	#visibleRecoveryContextIds: string[] = [];
+	#stepRecoveryUncertainReasons: string[] = [];
+	/**
+	 * Set when a step dispatched unobservable remote work. Ending the budget closes
+	 * admission but never launders that fact: manual retry stays refused until a new
+	 * user prompt starts a fresh replay epoch.
+	 */
+	#uncertainUpstreamUnresolved = false;
+	/** Durable record of in-step uncertainty; admission and resume decisions await it. */
+	#pendingUncertainFlush: Promise<void> = Promise.resolve();
+	#uncertainFlushFailed = false;
+	/** The current run is an automatic resume restricted to restart-safe tools. */
+	#activeAutoResume: { trigger: AutoResumeTrigger; mode: AutoResumeMode } | undefined;
+	/** A restart resume owns the current envelope until its first step is accepted. */
+	#restartResumeEnvelopePending = false;
+	#restrictedToolMode = false;
+	#stepRecoveryStepId: string | undefined;
+	#stepRecoveryDeadlineAbort: AbortController | undefined;
+	#cancelStepRecoveryDeadline: (() => void) | undefined;
+	#unresolvedRecoveryAtHydration = false;
 	/** Language of the latest genuine user prompt (or inherited from the parent agent). */
 	#responseLanguage: DetectedLanguage | undefined;
 	#fallbackInvocationId = 0;
@@ -2588,6 +2668,8 @@ export class AgentSession {
 		// Per-tool TTSR reminders are folded into the matched tool's result via this hook.
 		this.agent.afterToolCall = ctx => this.#ttsrAfterToolCall(ctx);
 		this.agent.providerSessionState = this.#providerSessionState;
+		this.agent.getUpstreamRequestLease = this.#getUpstreamRequestLease;
+		this.#unresolvedRecoveryAtHydration = this.#hasUnresolvedPersistedRecovery();
 		this.#syncAgentSessionId();
 		this.#removeEphemeralCustomMessages();
 
@@ -3458,38 +3540,9 @@ export class AgentSession {
 
 	/** Internal handler for agent events - shared by subscribe and reconnect */
 	#handleAgentEvent = async (event: AgentEvent): Promise<void> => {
+		// Model output and completed tool pairs stay in the transcript a recovery
+		// keeps; only an observing extension handler can make the run unsafe.
 		if (this.#extensionRunner?.hasHandlers(event.type)) this.#markRetryReplayUnsafe();
-		if (
-			event.type === "tool_execution_start" ||
-			event.type === "tool_execution_update" ||
-			event.type === "tool_execution_end"
-		) {
-			this.#markRetryReplayUnsafe();
-		} else if (event.type === "message_end") {
-			if (
-				event.message.role === "toolResult" ||
-				(event.message.role === "assistant" && assistantMessageHasVisibleOrToolContent(event.message))
-			) {
-				this.#markRetryReplayUnsafe();
-			}
-		} else if (event.type === "message_update") {
-			const update = event.assistantMessageEvent;
-			if (
-				update.type === "toolcall_start" ||
-				update.type === "toolcall_delta" ||
-				update.type === "toolcall_end" ||
-				((update.type === "text_delta" ||
-					update.type === "thinking_delta" ||
-					update.type === "reasoning_summary_delta") &&
-					update.delta.length > 0) ||
-				((update.type === "text_end" ||
-					update.type === "thinking_end" ||
-					update.type === "reasoning_summary_end") &&
-					update.content.length > 0)
-			) {
-				this.#markRetryReplayUnsafe();
-			}
-		}
 		// Record a successful final yield before any asynchronous extension work so a
 		// concurrently delivered agent_end cannot start post-turn maintenance first.
 		if (event.type === "tool_execution_end" && event.toolName === "yield" && !event.isError) {
@@ -3531,6 +3584,11 @@ export class AgentSession {
 				this.#displayDequeueAlreadyHandled.text === userMessageText,
 		);
 		if (userDisplayDequeueAlreadyHandled) this.#displayDequeueAlreadyHandled = undefined;
+		// A user message reaching the model ends any restricted automatic resume: from here
+		// on the user directs the turn. Queuing alone does not lift the restriction.
+		if (event.type === "message_start" && event.message.role === "user" && this.#restrictedToolMode) {
+			this.#endAutoResume("skipped");
+		}
 		if (event.type === "message_start" && event.message.role === "user" && !userDisplayDequeueAlreadyHandled) {
 			const messageText = userMessageText;
 			if (messageText) {
@@ -3871,17 +3929,32 @@ export class AgentSession {
 					this.#skipPostTurnMaintenanceAssistantTimestamp = assistantMsg.timestamp;
 					this.#suppressNextPostTurnMaintenanceAfterAutoHandoff = false;
 				}
+				// An accepted (non-error) model step closes its recovery envelope; the next
+				// model step (e.g. after tool results) starts with a fresh budget.
+				if (assistantMsg.stopReason !== "error" && assistantMsg.stopReason !== "aborted") {
+					// A tool-call step stays in_flight on purpose: until the next step's own
+					// checkpoint supersedes it, a crash during tool execution has unknown effects
+					// and must restart fail closed. The final text step writes the completed marker.
+					if (!assistantMsg.content.some(block => block.type === "toolCall")) {
+						// The completed marker is appended synchronously. A flush lost to a crash
+						// leaves the step unresolved, which restarts fail closed (no auto-resend).
+						void this.#completeStepRecoveryCheckpoint(assistantMsg);
+					}
+					this.#endStepRecoveryBudget({ accepted: true });
+					this.#restartResumeEnvelopePending = false;
+				}
 				if (
 					assistantMsg.stopReason !== "error" &&
 					assistantMsg.stopReason !== "aborted" &&
 					this.#retryAttempt > 0
 				) {
+					const recoveredAttempt = this.#retryAttempt;
+					this.#retryAttempt = 0;
 					await this.#emitSessionEvent({
 						type: "auto_retry_end",
 						success: true,
-						attempt: this.#retryAttempt,
+						attempt: recoveredAttempt,
 					});
-					this.#retryAttempt = 0;
 					// Settle the retry gate here, colocated with the success event, rather
 					// than relying on the generic #resolveRetry() at the end of the
 					// agent_end branch. That tail resolver is bypassed by every early
@@ -3994,6 +4067,7 @@ export class AgentSession {
 			const msg = this.#lastAssistantMessage ?? fallbackAssistant;
 			this.#lastAssistantMessage = undefined;
 			if (!msg) {
+				if (this.#activeAutoResume) this.#endAutoResume("completed");
 				this.#lastSuccessfulYieldToolCallId = undefined;
 				this.#resolveRetry();
 				return;
@@ -4010,12 +4084,14 @@ export class AgentSession {
 			}
 
 			if (this.#skipPostTurnMaintenanceAssistantTimestamp === msg.timestamp) {
+				if (this.#activeAutoResume) this.#endAutoResume(msg.stopReason === "error" ? "failed" : "completed");
 				this.#skipPostTurnMaintenanceAssistantTimestamp = undefined;
 				this.#lastSuccessfulYieldToolCallId = undefined;
 				return;
 			}
 
 			if (this.#assistantEndedWithSuccessfulYield(msg)) {
+				if (this.#activeAutoResume) this.#endAutoResume("completed");
 				this.#lastSuccessfulYieldToolCallId = undefined;
 				if (msg.stopReason !== "error" && msg.stopReason !== "aborted" && (await this.#checkGoalCompletion(msg))) {
 					return;
@@ -4031,9 +4107,17 @@ export class AgentSession {
 				const didRetry = await this.#handleRetryableError(msg, false, transportFailure);
 				if (didRetry) return; // Retry was initiated, don't proceed to compaction
 			}
+			// The resumed run settled: its restricted tool view ends with it.
+			if (this.#activeAutoResume) this.#endAutoResume(msg.stopReason === "error" ? "failed" : "completed");
+			// An interrupted step may resume once, on the same model, inside its budget.
+			const resumeTrigger = this.#autoResumeTriggerFor(msg);
+			const resumed = resumeTrigger !== undefined && (await this.#maybeAutoResume(resumeTrigger));
+			// No automatic retry follows: the step's recovery envelope ends here, unless the
+			// resume carries on inside it.
+			if (!resumed) this.#endStepRecoveryBudget();
 			if (this.#retryAttempt > 0) {
-				// A prior retry ended on a non-retryable (terminal) message: emit
-				// the terminal retry-end and reset so observers clear retry state.
+				// The retry chain ended on a non-retryable (terminal) message, or handed over
+				// to the resume: emit the terminal retry-end and reset so observers clear retry state.
 				const attempt = this.#retryAttempt;
 				this.#retryAttempt = 0;
 				await this.#emitSessionEvent({
@@ -4044,6 +4128,7 @@ export class AgentSession {
 				});
 			}
 			this.#resolveRetry();
+			if (resumed) return;
 
 			const compactionTask = this.#checkCompaction(msg);
 			this.#trackPostPromptTask(compactionTask.then(() => undefined));
@@ -4161,6 +4246,8 @@ export class AgentSession {
 		onSkip?: (reason: "generation_changed" | "aborted_signal" | "queue_drained" | "handoff_in_progress") => void;
 		allowDuringCancelAndSubmit?: boolean;
 		onError?: (error: unknown) => void;
+		/** Run on the current model only: no managed chain, no fallback switch. */
+		pinnedModel?: boolean;
 	}): Promise<void> {
 		const predecessorAgentEndHold = options?.suppressPredecessorAgentEnd
 			? this.#reserveDeferredAgentEndForContinuation()
@@ -4234,7 +4321,7 @@ export class AgentSession {
 						this.agent.state.messages.at(-1)?.role === "assistant" && this.agent.hasQueuedMessages();
 					try {
 						await this.agent.continue({
-							...this.#managedFallbackPromptOptions(),
+							...(options?.pinnedModel ? {} : this.#managedFallbackPromptOptions()),
 							// Reset only after continue() has claimed the queued turn. Skipped or stale
 							// continuations retain predecessor accounting, and resetAttemptBudget keeps
 							// the sticky fallback cursor unchanged.
@@ -5315,6 +5402,16 @@ export class AgentSession {
 		this.agent.setMetadataResolver((provider: string) =>
 			buildSessionMetadata(sid, provider, this.#modelRegistry.authStorage),
 		);
+	}
+
+	/**
+	 * Recovery safety follows the transcript, not the process: a session switch,
+	 * branch, fork, or handoff re-derives it from the persisted checkpoints and drops
+	 * in-memory uncertainty that belonged to the previous transcript.
+	 */
+	#resyncRecoveryStateFromTranscript(): void {
+		this.#unresolvedRecoveryAtHydration = this.#hasUnresolvedPersistedRecovery();
+		this.#uncertainUpstreamUnresolved = false;
 	}
 
 	#rekeyHindsightMemoryForCurrentSessionId(): void {
@@ -6714,11 +6811,48 @@ export class AgentSession {
 		}
 	}
 
+	#hasUnresolvedPersistedRecovery(): boolean {
+		const branch = this.sessionManager.getBranch();
+		const checkpoint = branch.findLast(
+			entry => entry.type === "custom" && entry.customType === RECOVERY_CHECKPOINT_CUSTOM_TYPE,
+		);
+		if (checkpoint?.type !== "custom") return false;
+		if (!checkpoint.data || typeof checkpoint.data !== "object" || Array.isArray(checkpoint.data)) return true;
+		const data = checkpoint.data as Record<string, unknown>;
+		if (data.version !== 1 || data.state !== "completed") return true;
+		if (!Array.isArray(data.visibleMessageIds) || data.visibleMessageIds.length === 0) return true;
+		const branchIds = new Set(branch.map(entry => entry.id));
+		return !data.visibleMessageIds.every(
+			id => typeof id === "string" && branchIds.has(id) && this.sessionManager.getEntry(id)?.type === "message",
+		);
+	}
+
 	/** Main startup calls this exactly once, after a strict open returned `kind: "opened"`. */
 	async continuePersistedHistory(): Promise<void> {
 		this.#assertNoHandoffTransition();
 		this.#assertRecoveryHydrationPromoted();
 		this.#removeEphemeralCustomMessages();
+
+		// A process that died mid-step left an unresolved recovery checkpoint. Its old
+		// budget, deadline and in-flight request outcome are unknown and never reused:
+		// the step resumes at most once, in a small fresh envelope, without re-running
+		// any call whose outcome was not observed. Otherwise the user resumes it.
+		const tail = this.agent.state.messages.at(-1);
+		let autoResumed = false;
+		let resumeGeneration = this.#promptGeneration;
+		if (
+			this.#hasUnresolvedPersistedRecovery() ||
+			(tail?.role === "custom" && tail.customType === VISIBLE_CONTINUATION_CUSTOM_TYPE)
+		) {
+			const staleContinuation = tail?.role === "custom" && tail.customType === VISIBLE_CONTINUATION_CUSTOM_TYPE;
+			autoResumed = !staleContinuation && (await this.#maybeAutoResume("restart"));
+			resumeGeneration = this.#promptGeneration;
+			if (!autoResumed) {
+				throw new Error(
+					"The previous answer was interrupted during automatic recovery. Its preserved output is shown above; send a message to continue.",
+				);
+			}
+		}
 
 		if (!canContinuePersistedHistory(this.agent.state.messages)) {
 			throw new Error("Cannot continue from persisted message history");
@@ -6757,13 +6891,27 @@ export class AgentSession {
 			// volatile-context/hindsight awaits above and this would otherwise start a
 			// turn against the session being handed off.
 			this.#assertNoHandoffTransition();
+			// An abort or new prompt during the preparation above cancels the automatic
+			// resume: it ended the restart envelope, and nothing may be sent outside it.
+			if (autoResumed && (this.#promptGeneration !== resumeGeneration || !this.#stepRecoveryBudget)) {
+				this.#endAutoResume("skipped");
+				return;
+			}
 			await this.agent.continue({
-				...this.#managedFallbackPromptOptions(),
+				...(autoResumed ? {} : this.#managedFallbackPromptOptions()),
 				onRunAccepted: () => {
 					if (hindsightRecall) hindsightState?.markRecallSnippetInjected(hindsightRecall);
 				},
 			});
 			await this.#waitForPostPromptRecovery();
+		} catch (error) {
+			// A restart resume that failed before its run started releases its envelope
+			// and restricted view; a later manual retry or prompt must not inherit them.
+			if (autoResumed && this.#restartResumeEnvelopePending) {
+				this.#endAutoResume("failed");
+				this.#endStepRecoveryBudget();
+			}
+			throw error;
 		} finally {
 			this.#removeEphemeralCustomMessages();
 			this.#endInFlight();
@@ -8073,6 +8221,17 @@ export class AgentSession {
 		let hindsightRecall: string | undefined;
 		try {
 			this.#throwIfPromptPreflightCancelled(generation, preflightSignal);
+			// A new user turn closes any earlier step's envelope (budget, deadline timer,
+			// stepId, uncertainty) before the replay-safety reset clears its residue.
+			if (message.role === "user") {
+				// A real user turn ends any automatic resume before it is processed.
+				if (this.#activeAutoResume) this.#endAutoResume("skipped");
+				this.#endStepRecoveryBudget();
+				// A failed uncertainty write closed admission for the previous step only. Wait
+				// for that step's pending write so its outcome cannot leak into this turn.
+				await this.#pendingUncertainFlush;
+				this.#uncertainFlushFailed = false;
+			}
 			if (options?.resetRetryReplaySafety) this.#resetRetryReplaySafety();
 			if (message.role === "user") {
 				await this.#resetDefaultFallbackForNewTurn();
@@ -9256,6 +9415,8 @@ export class AgentSession {
 		this.#silentAbortPending = options?.silent === true;
 		this.#markRetryReplayUnsafe();
 		this.abortRetry();
+		// Cancellation admits no further upstream request for the interrupted step.
+		this.#endStepRecoveryBudget();
 		this.#promptGeneration++;
 		this.#promptPreflightAbortController.abort();
 		this.#promptPreflightAbortController = new AbortController();
@@ -9614,6 +9775,7 @@ export class AgentSession {
 			}
 			this.setTodoPhases([]);
 			this.#syncAgentSessionId();
+			this.#resyncRecoveryStateFromTranscript();
 			this.#bindWorkflowGateEmitter(previousWorkflowGateSessionId);
 			this.#rekeyHindsightMemoryForCurrentSessionId();
 			this.#resetHindsightConversationTrackingIfHindsight();
@@ -9687,6 +9849,7 @@ export class AgentSession {
 			this.agent.reset();
 			this.setTodoPhases([]);
 			this.#syncAgentSessionId();
+			this.#resyncRecoveryStateFromTranscript();
 			this.#bindWorkflowGateEmitter(previousWorkflowGateSessionId);
 			this.#rekeyHindsightMemoryForCurrentSessionId();
 			this.#resetHindsightConversationTrackingIfHindsight();
@@ -9779,6 +9942,7 @@ export class AgentSession {
 			this.sessionManager.appendContextClearEntry({ sessionId });
 			this.setTodoPhases([]);
 			this.#syncAgentSessionId(sessionId);
+			this.#resyncRecoveryStateFromTranscript();
 			this.#steeringMessages = [];
 			this.#followUpMessages = [];
 			this.#pendingNextTurnMessages = [];
@@ -9848,6 +10012,7 @@ export class AgentSession {
 				throw await discardPreparedNewSessionAfterFailure(this.sessionManager, prepared, error);
 			}
 			this.#syncAgentSessionId();
+			this.#resyncRecoveryStateFromTranscript();
 			this.#bindWorkflowGateEmitter(previousWorkflowGateSessionId);
 			this.#rekeyHindsightMemoryForCurrentSessionId();
 
@@ -11515,6 +11680,7 @@ export class AgentSession {
 				committed = true;
 				this.agent.reset();
 				this.#syncAgentSessionId();
+				this.#resyncRecoveryStateFromTranscript();
 				this.#rekeyHindsightMemoryForCurrentSessionId();
 				this.#steeringMessages = [];
 				this.#followUpMessages = [];
@@ -11585,6 +11751,7 @@ export class AgentSession {
 				// were never mutated before commit, so they survive intact.
 				this.sessionManager.restoreState(rollbackSessionState);
 				this.#syncAgentSessionId(rollbackSessionState.sessionId);
+				this.#resyncRecoveryStateFromTranscript();
 				this.#rekeyHindsightMemoryForCurrentSessionId();
 				this.agent.replaceMessages(rollbackAgentMessages);
 				this.agent.clearAllQueues();
@@ -13702,6 +13869,7 @@ export class AgentSession {
 	}
 
 	#isRetryableError(message: AssistantMessage): boolean {
+		if (message.errorCode === TOOL_CALL_REENTRY_ERROR_CODE) return false;
 		if (this.#isTerminalProviderFirstEventTimeout(message)) return false;
 		if (message.errorMessage?.startsWith("Model fallback chain exhausted;")) return false;
 		// Already gave up on this transient failure; do not start a fresh budget.
@@ -13774,14 +13942,15 @@ export class AgentSession {
 	/**
 	 * Whether a first-event timeout on the error's provider should fail closed —
 	 * i.e. retry a bounded number of times (capped at retry.maxRetries) and then
-	 * surface, instead of joining the unbounded transient-retry class.
+	 * surface, instead of joining the transient class (bounded only by the shared
+	 * step budget of 7 requests / 15 minutes).
 	 *
 	 * Targets the ollama-chat API, which is exclusively ollama-cloud (local
 	 * Ollama uses the openai-responses API). That remote, queued backend can
-	 * stall before its first token even for tiny prompts; an unbounded
-	 * continuation retry re-issues the full request on every attempt and can
-	 * silently spike upstream usage (#713). First-party providers keep their
-	 * existing unbounded first-event-timeout retry behavior.
+	 * stall before its first token even for tiny prompts; each continuation retry
+	 * re-issues the full request and can spike upstream usage (#713). First-party
+	 * providers keep first-event timeouts in the transient class under the shared
+	 * step budget.
 	 */
 	#shouldFailClosedOnFirstEventTimeout(message: AssistantMessage): boolean {
 		// Prefer the active model's API (the model that produced the error);
@@ -13812,11 +13981,12 @@ export class AgentSession {
 	/**
 	 * Ordered retry classification: typed safety stop (surface) -> legacy safety stop
 	 * (surface) -> overflow (compaction) -> terminal (surface) -> usage_limit
-	 * (rotation) -> first_event_timeout (bounded retry) -> transient (unbounded retry) ->
+	 * (rotation) -> first_event_timeout (retry.maxRetries) -> transient (shared step budget) ->
 	 * unknown (bounded retry).
 	 */
 	#classifyErrorForRetry(message: AssistantMessage): RetryErrorClassification {
 		if (message.stopReason !== "error") return "none";
+		if (message.errorCode === TOOL_CALL_REENTRY_ERROR_CODE) return "terminal";
 		if (message.errorKind === "provider_safety_stop") return "terminal";
 		// A decode loop is deterministic for the submitted context: replaying the
 		// identical conversation re-trips the guard and re-bills the full context.
@@ -13863,10 +14033,10 @@ export class AgentSession {
 		if (this.#isTerminalProviderFirstEventTimeout(message)) {
 			return "terminal";
 		}
-		// A first-event timeout on ollama-cloud (the ollama-chat API) must not
-		// join the unbounded transient class: each continuation retry re-issues
-		// the full request to a remote, billable backend, so an unbounded loop
-		// can silently spike usage (#713). Bound it to retry.maxRetries instead.
+		// A first-event timeout on ollama-cloud (the ollama-chat API) must not join
+		// the transient class: each continuation retry re-issues the full request to
+		// a remote, billable backend (#713). Bound it to retry.maxRetries instead of
+		// the wider shared step budget.
 		if (this.#isFirstEventTimeoutErrorMessage(err) && this.#shouldFailClosedOnFirstEventTimeout(message)) {
 			return "first_event_timeout";
 		}
@@ -14118,8 +14288,15 @@ export class AgentSession {
 	}
 
 	async #handleManagedAttemptOutcome(outcome: ManagedAttemptOutcome): Promise<ManagedAttemptDecision> {
+		if (outcome.type === "visible_interrupted" || outcome.type === "unsafe_interrupted") {
+			// The session does not supply managed recovery evidence, so a committed managed
+			// failure is never replayed: preserve it and stop for an explicit user resume.
+			this.#endStepRecoveryBudget();
+			return { type: "pause", reason: outcome.evidence.tail };
+		}
 		if (outcome.type === "run_terminal") {
 			this.#defaultFallbackChain().resetAttemptBudget();
+			this.#endStepRecoveryBudget();
 			return { type: "terminal", terminal: { stopReason: outcome.reason } };
 		}
 		if (outcome.type === "context_overflow_discarded") {
@@ -14205,7 +14382,7 @@ export class AgentSession {
 		if (transport.class !== "other") return transport;
 		// Managed fallback receives authoritative transport facts from the request
 		// boundary. Once those facts classify as other, error prose must not upgrade
-		// the failure into an unbounded transient or quota retry.
+		// the failure into a transient or quota retry.
 		if (transportFailure) return { class: "unknown" };
 		const classification = this.#classifyErrorForRetry(message);
 		if (allowLegacyUsageLimit && classification === "usage_limit") {
@@ -14310,21 +14487,71 @@ export class AgentSession {
 		class: FallbackTriggerClass;
 		retryAfterMs?: number;
 	}): Promise<boolean> {
+		try {
+			return await this.#markFailedManagedCredentialAdmitted(trigger);
+		} catch (error) {
+			// A refused admission ends maintenance locally; the next inference admission
+			// reports the same budget verdict instead of this side path throwing.
+			if (error instanceof RecoveryAdmissionError) return false;
+			throw error;
+		}
+	}
+
+	async #markFailedManagedCredentialAdmitted(trigger: {
+		class: FallbackTriggerClass;
+		retryAfterMs?: number;
+	}): Promise<boolean> {
 		if (!this.model || (trigger.class !== "auth" && trigger.class !== "quota" && trigger.class !== "rate_limit")) {
 			return false;
 		}
 		const authStorage = this.#modelRegistry.authStorage;
+		const requestOptions = this.#stepCredentialRequestOptions();
+		// Recovery maintenance outside a step budget would send unadmitted credential HTTP.
+		if (!requestOptions.fetch) return false;
 		if (trigger.class === "auth") {
-			const apiKey = await this.#modelRegistry.getApiKey(this.model, this.sessionId);
+			const apiKey = await this.#modelRegistry.getApiKey(this.model, this.sessionId, requestOptions);
 			if (!isAuthenticated(apiKey)) return false;
-			return authStorage.invalidateCredentialMatching(this.model.provider, apiKey, { sessionId: this.sessionId });
+			return authStorage.invalidateCredentialMatching(this.model.provider, apiKey, {
+				...requestOptions,
+				sessionId: this.sessionId,
+			});
 		}
 		if (authStorage.hasRuntimeApiKey(this.model.provider)) return false;
-		const activeApiKey = await this.#modelRegistry.getApiKey(this.model, this.sessionId);
+		const activeApiKey = await this.#modelRegistry.getApiKey(this.model, this.sessionId, requestOptions);
 		const rotated = await authStorage.markUsageLimitReached(this.model.provider, this.sessionId, {
 			retryAfterMs: trigger.retryAfterMs,
+			...requestOptions,
 		});
-		return rotated && (await this.#modelRegistry.getApiKey(this.model, this.sessionId)) !== activeApiKey;
+		return (
+			rotated && (await this.#modelRegistry.getApiKey(this.model, this.sessionId, requestOptions)) !== activeApiKey
+		);
+	}
+
+	/**
+	 * Credential maintenance during recovery (rotation, restore, usage probes) spends
+	 * the same step budget as inference: every concrete token/usage HTTP is admitted
+	 * as kind "token", and opaque remote work marks the step unsafe.
+	 */
+	#stepCredentialRequestOptions(): OAuthRefreshOptions {
+		const budget = this.#stepRecoveryBudget;
+		const deadlineAbort = this.#stepRecoveryDeadlineAbort;
+		if (!budget || !deadlineAbort) return {};
+		const validate = (): void => {
+			if (this.#stepRecoveryBudget !== budget) throw new RecoveryAdmissionError("cancelled");
+			budget.assertActive();
+		};
+		const admission = createUpstreamAdmission(
+			kind => budget.reserve(kind),
+			undefined,
+			validate,
+			() => this.#recordStepRecoveryFailure(budget),
+		);
+		return {
+			signal: deadlineAbort.signal,
+			fetch: admission.credentialFetch,
+			onUpstreamRequest: admission.onUpstreamRequest,
+			onUncertainUpstream: reason => this.#recordStepUncertainUpstream(budget, reason),
+		};
 	}
 
 	/** Handle retryable errors with exponential backoff. */
@@ -14336,6 +14563,14 @@ export class AgentSession {
 		const controller = this.#defaultFallbackChain();
 		const managedFallback = controller.chain.entries.length > 1;
 		const retrySettings = this.settings.getGroup("retry");
+		// A rejected admission is the shared budget's own terminal answer, never a retry trigger.
+		if (isRecoveryAdmissionErrorMessage(message.errorMessage)) {
+			return managedOutcome ? { type: "terminal", terminal: { stopReason: "error", messages: [message] } } : false;
+		}
+		// Broker/custom credential work with unobserved remote effects is never resent automatically.
+		if (this.#stepRecoveryUncertainReasons.length > 0) {
+			return managedOutcome ? { type: "terminal", terminal: { stopReason: "error", messages: [message] } } : false;
+		}
 		const legacyRetryConfigured =
 			this.settings.has("retry.enabled") ||
 			this.settings.has("retry.maxRetries") ||
@@ -14345,13 +14580,22 @@ export class AgentSession {
 		// user opt-out.
 		if (!managedFallback && !retrySettings.enabled) return false;
 		const classification = managedFallback ? undefined : this.#classifyErrorForRetry(message);
-		// Bare defaults admit only clean, side-effect-free canonical stream watchdog failures.
+		// A failure after public output is never replayed by deleting that output.
+		// A text-only tail on a verified serializer continues on the same model;
+		// any other public tail (tool calls, images, tainted run) stops with the
+		// output preserved for the user to resume explicitly.
+		const visibleFailure = !managedOutcome && assistantMessageHasVisibleOrToolContent(message);
+		const visibleContinuation = visibleFailure && this.#canContinueVisibleFailure(message);
+		if (visibleFailure && !visibleContinuation) return false;
+		// Bare defaults admit only clean canonical stream watchdog failures. Completed
+		// tool pairs and preserved visible output stay in the transcript and are never
+		// re-executed; only hooks/commands/user shell/abort make the run unsafe.
 		if (!managedFallback && !legacyRetryConfigured) {
 			if (
 				hasBareDefaultRetryDisqualifyingFacts(message) ||
 				(classification !== "transient" && classification !== "first_event_timeout") ||
 				!BARE_DEFAULT_WATCHDOG_ERROR.test(message.errorMessage ?? "") ||
-				!this.#hasCleanRetryReplaySafety
+				!this.#hasCleanContinuationSafety
 			) {
 				return false;
 			}
@@ -14362,8 +14606,29 @@ export class AgentSession {
 				? this.#managedFallbackExhaustionDecision(message, message.errorMessage || "Model fallback attempt failed")
 				: false;
 		}
-		const legacyUnbounded = classification === "transient";
-		const attemptsUsed = managedFallback ? controller.attemptsUsed || 1 : this.#retryAttempt + 1;
+		const transientTrigger = trigger.class === "server" || trigger.class === "rate_limit";
+		// Session retries and per-selector attempts are different units. Respect an
+		// explicit additional-session-retry cap before credential rotation or replay.
+		if (
+			transientTrigger &&
+			(!retrySettings.enabled ||
+				this.#retryAttempt >= (this.settings.has("retry.maxRetries") ? retrySettings.maxRetries : 6))
+		) {
+			this.#transientStopTimestamp = message.timestamp;
+			return managedOutcome ? { type: "terminal", terminal: { stopReason: "error", messages: [message] } } : false;
+		}
+		if (visibleContinuation && !transientTrigger) return false;
+		// Default policy: transient same-model failures are bounded by the shared step
+		// budget (7 requests / 15 minutes after the first failure) instead of an
+		// unbounded loop or a per-entry cap. Explicit retry.maxRetries/fallback.maxAttempts
+		// keep their own attempt units and also stay inside the shared budget.
+		const sharedBudgetOwnsTransient = managedFallback
+			? !this.settings.has("fallback.maxAttempts")
+			: classification === "transient" && !this.settings.has("retry.maxRetries");
+		controller.sessionBudgetOwnsTransient = managedFallback && sharedBudgetOwnsTransient;
+		const sharedTransientRetry = sharedBudgetOwnsTransient && transientTrigger;
+		const attemptsUsed =
+			managedFallback && !sharedTransientRetry ? controller.attemptsUsed || 1 : this.#retryAttempt + 1;
 		const failedSelector = managedFallback ? controller.currentSelector() : undefined;
 		const usageLimited = trigger.class === "quota" || trigger.class === "rate_limit";
 		let credentialMarked = false;
@@ -14374,15 +14639,64 @@ export class AgentSession {
 			// leave the model while another account can still serve it.
 			credentialMarked = true;
 			credentialRotated = await this.#markFailedManagedCredential(trigger);
+			if (this.#stepRecoveryUncertainReasons.length > 0) {
+				return managedOutcome
+					? { type: "terminal", terminal: { stopReason: "error", messages: [message] } }
+					: false;
+			}
 		}
-		let outcome = managedFallback
-			? controller.onAttemptFailure(trigger.class, message.errorMessage || "Unknown error", { credentialRotated })
-			: legacyUnbounded || attemptsUsed <= retrySettings.maxRetries
-				? "retry"
-				: "exhausted";
+		// A resumed run stays on the interrupted model. On a managed chain only the shared
+		// same-model transient path may follow; any other failure stops before the chain is
+		// consulted, because consulting it may already move its cursor to the next model.
+		const leavesResumedModel =
+			this.#activeAutoResume !== undefined && managedFallback && !(sharedBudgetOwnsTransient && transientTrigger);
+		let outcome = leavesResumedModel
+			? "stop"
+			: managedFallback
+				? controller.onAttemptFailure(trigger.class, message.errorMessage || "Unknown error", { credentialRotated })
+				: sharedBudgetOwnsTransient || attemptsUsed <= retrySettings.maxRetries
+					? "retry"
+					: "exhausted";
 		if (managedFallback && credentialRotated && outcome === "advance" && controller.restorePreviousEntryForRetry()) {
 			outcome = "retry";
 		}
+		const stepBudget = this.#stepRecoveryBudget;
+		if (outcome === "retry" && stepBudget && (transientTrigger || !managedFallback))
+			this.#recordStepRecoveryFailure(stepBudget);
+		// Typed transport Retry-After is an uncapped floor; a floor beyond the remaining
+		// deadline stops locally rather than contacting upstream early. A hint parsed from
+		// legacy error prose is advisory and stays capped at retry.maxDelayMs.
+		const parsedRetryAfterMs = managedFallback
+			? undefined
+			: this.#parseRetryAfterMsFromError(message.errorMessage || "Unknown error");
+		const retryAfterMs =
+			trigger.retryAfterMs ??
+			(parsedRetryAfterMs === undefined ? undefined : Math.min(parsedRetryAfterMs, retrySettings.maxDelayMs));
+		const backoffBaseMs =
+			sharedTransientRetry && !this.settings.has("retry.baseDelayMs")
+				? SAME_MODEL_RECOVERY_BASE_DELAY_MS
+				: retrySettings.baseDelayMs;
+		const backoffMaxMs =
+			sharedTransientRetry && !this.settings.has("retry.maxDelayMs")
+				? SAME_MODEL_RECOVERY_MAX_DELAY_MS
+				: retrySettings.maxDelayMs;
+		const delayMs =
+			credentialRotated || outcome === "advance"
+				? 0
+				: managedFallback || transientTrigger
+					? effectiveFallbackDelay(backoffBaseMs, backoffMaxMs, attemptsUsed, retryAfterMs)
+					: retryAfterMs !== undefined
+						? Math.min(retryAfterMs, retrySettings.maxDelayMs)
+						: cappedExponentialWithFullJitter(backoffBaseMs, backoffMaxMs, attemptsUsed);
+		if (outcome === "retry" && stepBudget && !stepBudget.canAdmitAfter(delayMs)) {
+			// The shared request/time budget cannot admit another same-model request
+			// after the required wait: stop on the same model with the real provider
+			// error instead of sending it. Never switch models for it.
+			outcome = managedFallback && !transientTrigger ? "exhausted" : "stop";
+		}
+		if (outcome === "exhausted" && !managedFallback && sharedBudgetOwnsTransient) outcome = "stop";
+		// retry.enabled=false is an explicit opt-out of automatic same-model transient recovery.
+		if (outcome === "retry" && transientTrigger && !retrySettings.enabled) outcome = "stop";
 		if (outcome === "stop") {
 			// Transient failure past the same-model retry budget: surface the real
 			// provider error and keep the current model; never switch models for it.
@@ -14413,16 +14727,6 @@ export class AgentSession {
 
 		const generation = this.#promptGeneration;
 		const errorMessage = message.errorMessage || "Unknown error";
-		const retryAfterMs =
-			trigger.retryAfterMs ?? (managedFallback ? undefined : this.#parseRetryAfterMsFromError(errorMessage));
-		const delayMs =
-			credentialRotated || outcome === "advance"
-				? 0
-				: managedFallback
-					? effectiveFallbackDelay(retrySettings.baseDelayMs, retrySettings.maxDelayMs, attemptsUsed, retryAfterMs)
-					: retryAfterMs !== undefined
-						? Math.min(retryAfterMs, retrySettings.maxDelayMs)
-						: cappedExponentialWithFullJitter(retrySettings.baseDelayMs, retrySettings.maxDelayMs, attemptsUsed);
 
 		// Only a spent quota window hides the model from later resolution; a burst
 		// rate limit retries the same model and must not push later turns elsewhere.
@@ -14474,15 +14778,24 @@ export class AgentSession {
 			await this.#emitSessionEvent({
 				type: "auto_retry_start",
 				attempt: this.#retryAttempt,
-				maxAttempts: managedFallback ? controller.maxAttempts : retrySettings.maxRetries,
+				maxAttempts:
+					sharedBudgetOwnsTransient && transientTrigger
+						? SAME_MODEL_RECOVERY_MAX_REQUESTS - 1
+						: managedFallback
+							? controller.maxAttempts
+							: retrySettings.maxRetries,
 				delayMs,
 				errorMessage,
-				unbounded: managedFallback ? false : legacyUnbounded,
+				unbounded: false,
 			});
 
-			const messages = this.agent.state.messages;
-			if (messages.length > 0 && messages[messages.length - 1].role === "assistant") {
-				this.agent.replaceMessages(messages.slice(0, -1));
+			// A preserved public prefix is never deleted or re-emitted; it is continued
+			// after the backoff instead (see below).
+			if (!visibleContinuation) {
+				const messages = this.agent.state.messages;
+				if (messages.length > 0 && messages[messages.length - 1].role === "assistant") {
+					this.agent.replaceMessages(messages.slice(0, -1));
+				}
 			}
 
 			try {
@@ -14522,6 +14835,19 @@ export class AgentSession {
 			if (this.#retryAbortController === retryAbortController) this.#retryAbortController = undefined;
 			this.#retryNowRequested = false;
 
+			if (visibleContinuation) {
+				// Owner re-check before any durable write: a newer prompt supersedes it.
+				if (this.#promptGeneration !== generation) {
+					this.#failRetryRecovery("Retry continuation was superseded");
+					return;
+				}
+				if (!(await this.#appendVisibleContinuation(message))) {
+					this.#transientStopTimestamp = message.timestamp;
+					this.#failRetryRecovery("Recovery checkpoint could not be saved");
+					return;
+				}
+			}
+
 			if (managedOutcome) {
 				try {
 					await this.#checkEstimatedContextBeforePrompt();
@@ -14560,6 +14886,7 @@ export class AgentSession {
 				delayMs: 1,
 				generation,
 				allowDuringCancelAndSubmit: true,
+				shouldContinue: () => !visibleContinuation || this.#hasVisibleRecoveryReferences(),
 				onError: () => this.#failRetryRecovery("Retry continuation failed to start"),
 				onSkip: () => this.#failRetryRecovery("Retry continuation was superseded"),
 			});
@@ -14578,6 +14905,559 @@ export class AgentSession {
 		this.#retryAbortController?.abort();
 		// Note: #retryAttempt is reset in the catch block of #handleRetryableError
 		this.#resolveRetry();
+	}
+
+	/**
+	 * Single admission point for every concrete upstream request of the current
+	 * model step. Rejects (throws {@link RecoveryAdmissionError}) once the shared
+	 * same-model budget is spent or past its deadline, before anything is sent.
+	 */
+	#getUpstreamRequestLease: NonNullable<AgentLoopConfig["getUpstreamRequestLease"]> = async (context, signal) => {
+		if (
+			!this.#stepRecoveryBudget &&
+			this.#unresolvedRecoveryAtHydration &&
+			context.messages.at(-1)?.role !== "user"
+		) {
+			throw new RecoveryAdmissionError("cancelled");
+		}
+		// A restart resume's first step runs only inside its own small envelope: once that
+		// envelope is gone before the step was accepted (abort, new prompt), no default
+		// budget may take its place.
+		if (!this.#stepRecoveryBudget && this.#restartResumeEnvelopePending) {
+			throw new RecoveryAdmissionError("cancelled");
+		}
+		// The durable record of in-step uncertainty must land before anything else is sent.
+		await this.#pendingUncertainFlush;
+		if (this.#uncertainFlushFailed) throw new RecoveryAdmissionError("cancelled");
+		// Unobservable remote work already happened in this step: no further upstream request
+		// for it, whichever path (retry, rotation, fallback) asks next.
+		if (this.#stepRecoveryBudget && this.#stepRecoveryUncertainReasons.length > 0) {
+			throw new RecoveryAdmissionError("cancelled");
+		}
+		const generation = this.#promptGeneration;
+		this.#stepRecoveryBudget ??= new RecoveryBudget({ maxSilentTimeouts: this.#maxSilentTimeouts() });
+		this.#stepRecoveryDeadlineAbort ??= new AbortController();
+		this.#stepRecoveryStepId ??= crypto.randomUUID();
+		const budget = this.#stepRecoveryBudget;
+		const deadlineAbort = this.#stepRecoveryDeadlineAbort;
+		const stepId = this.#stepRecoveryStepId;
+		const model = this.model;
+		const validate = (): void => {
+			if (
+				signal?.aborted ||
+				this.#isDisposed ||
+				this.#promptGeneration !== generation ||
+				this.#stepRecoveryBudget !== budget ||
+				this.model !== model
+			) {
+				throw new RecoveryAdmissionError("cancelled");
+			}
+			budget.assertActive();
+		};
+		validate();
+		this.sessionManager.appendCustomEntry(RECOVERY_CHECKPOINT_CUSTOM_TYPE, {
+			version: 1,
+			state: "in_flight",
+			logicalRunId: String(this.agent.currentManagedLogicalRunId ?? `${this.sessionId}:${generation}`),
+			stepId,
+			generation,
+			attemptId: String(this.#retryAttempt),
+			selector: model ? `${model.provider}/${model.id}` : undefined,
+			api: model?.api,
+			transport: model?.transport,
+			uncertain: [...this.#stepRecoveryUncertainReasons],
+			// Only this user turn's already-visible assistant output belongs to the step.
+			visibleMessageIds: context.messages
+				.slice(
+					Math.max(
+						0,
+						context.messages.findLastIndex(message => message.role === "user"),
+					),
+				)
+				.filter(message => message.role === "assistant")
+				.map(getSessionMessageEntryId)
+				.filter((id): id is string => id !== undefined),
+			usedRequests: budget.snapshot().usedRequests,
+		});
+		await this.sessionManager.ensureOnDisk();
+		await this.sessionManager.flush();
+		validate();
+		return {
+			validate,
+			signal: deadlineAbort.signal,
+			// Records only; the identity check lives in #recordStepRecoveryFailure so the
+			// original response/error is never replaced by an admission error.
+			onRecoverableFailure: () => this.#recordStepRecoveryFailure(budget),
+			onUncertainUpstream: (reason: string): void => this.#recordStepUncertainUpstream(budget, reason),
+			onAttemptSettled: (message: AssistantMessage): void => this.#recordStepAttemptSettled(budget, message),
+			onRequest: (kind: RecoveryRequestKind): void => {
+				validate();
+				if (this.#uncertainFlushFailed) throw new RecoveryAdmissionError("cancelled");
+				// Unobservable remote work was reported inside this invocation: a resend could
+				// duplicate it, so only the first concrete request of each kind remains admissible.
+				if (kind === "resend" && this.#stepRecoveryUncertainReasons.length > 0) {
+					throw new RecoveryAdmissionError("cancelled");
+				}
+				if (kind === "resend") this.#recordStepRecoveryFailure(budget);
+				budget.reserve(kind);
+			},
+		};
+	};
+
+	async #completeStepRecoveryCheckpoint(message: AssistantMessage): Promise<void> {
+		if (!this.#stepRecoveryStepId || this.agent.state.messages.at(-1) !== message) return;
+		this.sessionManager.appendCustomEntry(RECOVERY_CHECKPOINT_CUSTOM_TYPE, {
+			version: 1,
+			state: "completed",
+			stepId: this.#stepRecoveryStepId,
+			generation: this.#promptGeneration,
+			visibleMessageIds: [getSessionMessageEntryId(message)].filter((id): id is string => id !== undefined),
+		});
+		try {
+			await this.sessionManager.ensureOnDisk();
+			await this.sessionManager.flush();
+		} catch (error) {
+			logger.warn("Recovery completion checkpoint failed", {
+				error: error instanceof Error ? error.message : String(error),
+			});
+		}
+	}
+
+	/**
+	 * Unobservable remote work cannot be proven idempotent: no automatic resend/continuation.
+	 * The reason is also persisted with the step so a restart never resumes it; the next
+	 * admission and every resume decision wait for that write.
+	 */
+	#recordStepUncertainUpstream(budget: RecoveryBudget, reason: string): void {
+		if (this.#stepRecoveryBudget !== budget) return;
+		if (!this.#stepRecoveryUncertainReasons.includes(reason)) this.#stepRecoveryUncertainReasons.push(reason);
+		this.#markRetryReplayUnsafe();
+		const model = this.model;
+		this.sessionManager.appendCustomEntry(RECOVERY_CHECKPOINT_CUSTOM_TYPE, {
+			version: 1,
+			state: "in_flight",
+			stepId: this.#stepRecoveryStepId,
+			generation: this.#promptGeneration,
+			selector: model ? `${model.provider}/${model.id}` : undefined,
+			api: model?.api,
+			transport: model?.transport,
+			uncertain: [...this.#stepRecoveryUncertainReasons],
+			visibleMessageIds: [],
+			usedRequests: budget.snapshot().usedRequests,
+		});
+		this.#pendingUncertainFlush = this.#pendingUncertainFlush
+			.then(async () => {
+				await this.sessionManager.ensureOnDisk();
+				await this.sessionManager.flush();
+			})
+			.catch(error => {
+				this.#uncertainFlushFailed = true;
+				const reason = error instanceof Error ? error.message : String(error);
+				logger.warn("Uncertain upstream checkpoint failed", { error: reason });
+				this.emitNotice(
+					"warning",
+					`Stopped retrying this step: its recovery state could not be saved (${reason}).`,
+					"retry",
+				);
+			});
+	}
+
+	#maxSilentTimeouts(): number {
+		return Math.min(7, Math.max(1, Math.trunc(this.settings.get("retry.maxSilentTimeouts")) || 3));
+	}
+
+	/** Consecutive no-output timeouts close the step early, inside its request budget. */
+	#recordStepAttemptSettled(budget: RecoveryBudget, message: AssistantMessage): void {
+		if (this.#stepRecoveryBudget !== budget) return;
+		const progressed = assistantMessageHasVisibleOrToolContent(message);
+		const silentTimeout =
+			message.stopReason === "error" && BARE_DEFAULT_WATCHDOG_ERROR.test(message.errorMessage ?? "");
+		if (!budget.recordAttemptOutcome({ silentTimeout, progressed, selector: `${message.provider}/${message.model}` }))
+			return;
+		logger.info("silent_stall_tripped", { count: budget.snapshot().silentTimeouts });
+		this.emitNotice(
+			"warning",
+			`Stopped after ${budget.snapshot().silentTimeouts} consecutive timeouts without any output.`,
+			"retry",
+		);
+	}
+
+	#recordStepRecoveryFailure(budget: RecoveryBudget): void {
+		if (this.#stepRecoveryBudget !== budget) return;
+		budget.recordRecoverableFailure();
+		if (this.#cancelStepRecoveryDeadline) return;
+		const deadline = budget.snapshot().deadlineAtMs;
+		if (deadline === undefined) return;
+		const controller = this.#stepRecoveryDeadlineAbort;
+		const timer = setTimeout(
+			() => controller?.abort(new RecoveryAdmissionError("deadline")),
+			Math.max(0, deadline - performance.now()),
+		);
+		this.#cancelStepRecoveryDeadline = () => clearTimeout(timer);
+	}
+
+	/** Ends and permanently closes this lease; late callbacks never start a new budget. */
+	#endStepRecoveryBudget(options?: { accepted?: boolean }): void {
+		// Only an unfinished step leaves unobservable remote effects unresolved.
+		if (!options?.accepted && this.#stepRecoveryUncertainReasons.length > 0) {
+			this.#uncertainUpstreamUnresolved = true;
+		}
+		this.#stepRecoveryBudget?.cancel();
+		this.#cancelStepRecoveryDeadline?.();
+		this.#cancelStepRecoveryDeadline = undefined;
+		this.#stepRecoveryDeadlineAbort = undefined;
+		this.#stepRecoveryStepId = undefined;
+		this.#visibleRecoveryReferenceIds = [];
+		this.#visibleRecoveryContextIds = [];
+		this.#stepRecoveryUncertainReasons = [];
+		this.#stepRecoveryBudget = undefined;
+	}
+
+	/**
+	 * Whether a failed step that already showed output can be continued on the same
+	 * model instead of replayed: the failure must be the live trailing assistant,
+	 * its public tail must be text (no tool calls/images), the serializer must have
+	 * a verified projection, and nothing outside the transcript tainted the run.
+	 */
+	#canContinueVisibleFailure(message: AssistantMessage): boolean {
+		if (message.stopReason !== "error") return false;
+		if (!VISIBLE_CONTINUATION_APIS.has(message.api) || this.model?.transport === "pi-native") return false;
+		if (!this.model || this.model.api !== message.api || this.model.provider !== message.provider) return false;
+		if (this.model.id !== message.model) return false;
+		if (!isTextVisibleTail(message)) return false;
+		if (!this.#hasCleanContinuationSafety || this.#stepRecoveryUncertainReasons.length > 0) return false;
+		return this.agent.state.messages.at(-1) === message && this.#getVisibleRecoveryReferences(message) !== undefined;
+	}
+
+	/**
+	 * Persisted entry ids of the current user turn's failed text tails and completed
+	 * tool pairs; undefined when any is missing from the branch or a tail is not text.
+	 */
+	#getVisibleRecoveryReferences(message: AssistantMessage):
+		| {
+				visibleMessageIds: string[];
+				completedTools: Array<{ toolCallId: string; callEntryId: string; resultEntryId: string }>;
+		  }
+		| undefined {
+		const messages = this.agent.state.messages;
+		const start = messages.findLastIndex(item => item.role === "user");
+		const tail = messages.slice(Math.max(0, start));
+		const branchIds = new Set(this.sessionManager.getBranch().map(entry => entry.id));
+		const visibleMessageIds: string[] = [];
+		const completedTools: Array<{ toolCallId: string; callEntryId: string; resultEntryId: string }> = [];
+		for (const item of tail) {
+			if (item.role !== "assistant") continue;
+			const entryId = getSessionMessageEntryId(item);
+			if (!entryId || !branchIds.has(entryId)) return undefined;
+			if (item.stopReason === "error" || item.stopReason === "aborted") {
+				if (!isTextVisibleTail(item)) return undefined;
+				visibleMessageIds.push(entryId);
+			}
+			for (const block of item.content) {
+				if (block.type !== "toolCall") continue;
+				const result = tail.find(candidate => candidate.role === "toolResult" && candidate.toolCallId === block.id);
+				if (result?.role !== "toolResult" || result.isError) return undefined;
+				const resultEntryId = getSessionMessageEntryId(result);
+				if (!resultEntryId || !branchIds.has(resultEntryId)) return undefined;
+				completedTools.push({ toolCallId: block.id, callEntryId: entryId, resultEntryId });
+			}
+		}
+		const messageId = getSessionMessageEntryId(message);
+		if (!messageId || !visibleMessageIds.includes(messageId)) return undefined;
+		return { visibleMessageIds, completedTools };
+	}
+
+	#hasVisibleRecoveryReferences(): boolean {
+		if (this.#visibleRecoveryReferenceIds.length === 0) return false;
+		const branchIds = new Set(this.sessionManager.getBranch().map(entry => entry.id));
+		if (!this.#visibleRecoveryReferenceIds.every(id => branchIds.has(id) && this.sessionManager.getEntry(id))) {
+			return false;
+		}
+		// Compaction can keep the entries on the branch while replacing them in the model
+		// context; the preserved prefix and completed tool pairs must still be what is sent.
+		const liveIds = new Set(
+			this.agent.state.messages.map(getSessionMessageEntryId).filter((id): id is string => id !== undefined),
+		);
+		return this.#visibleRecoveryContextIds.every(id => liveIds.has(id));
+	}
+
+	/**
+	 * Durably checkpoints the preserved prefix and appends one continuation
+	 * instruction. Returns false (and sends nothing) when persistence fails.
+	 */
+	async #appendVisibleContinuation(message: AssistantMessage): Promise<boolean> {
+		if (this.agent.state.messages.at(-1) !== message) return false;
+		const references = this.#getVisibleRecoveryReferences(message);
+		if (!references) return false;
+		const generation = this.#promptGeneration;
+		const budget = this.#stepRecoveryBudget;
+		const details = {
+			version: 1,
+			state: "recovering",
+			runId: `${this.sessionId}:${generation}`,
+			stepId: references.visibleMessageIds[0],
+			attemptId: String(this.#retryAttempt),
+			generation,
+			selector: `${message.provider}/${message.model}`,
+			...references,
+			uncertainTools: this.#stepRecoveryUncertainReasons.map(reason => ({ reason })),
+			usedRequests: budget?.snapshot().usedRequests ?? 0,
+		};
+		const continuation: AgentMessage = {
+			role: "custom",
+			customType: VISIBLE_CONTINUATION_CUSTOM_TYPE,
+			content: VISIBLE_CONTINUATION_PROMPT,
+			display: false,
+			details,
+			attribution: "agent",
+			timestamp: Date.now(),
+		};
+		try {
+			const continuationMessageId = this.sessionManager.appendCustomMessageEntry(
+				VISIBLE_CONTINUATION_CUSTOM_TYPE,
+				VISIBLE_CONTINUATION_PROMPT,
+				false,
+				details,
+				"agent",
+			);
+			const checkpointEntryId = this.sessionManager.appendCustomEntry(RECOVERY_CHECKPOINT_CUSTOM_TYPE, {
+				...details,
+				continuationMessageId,
+			});
+			// New sessions defer their first write until an assistant exists. Explicitly
+			// materialize before flushing; flush alone need not have a file to fsync.
+			await this.sessionManager.ensureOnDisk();
+			await this.sessionManager.flush();
+			if (this.#isDisposed || this.#promptGeneration !== generation || this.#stepRecoveryBudget !== budget)
+				return false;
+			if (!budget?.canAdmit() || this.agent.state.messages.at(-1) !== message) return false;
+			const contextIds = [
+				...references.visibleMessageIds,
+				...references.completedTools.flatMap(tool => [tool.callEntryId, tool.resultEntryId]),
+			];
+			this.#visibleRecoveryReferenceIds = [checkpointEntryId, continuationMessageId, ...contextIds];
+			this.#visibleRecoveryContextIds = contextIds;
+			if (!this.#hasVisibleRecoveryReferences()) return false;
+			this.agent.appendMessage(continuation);
+			return true;
+		} catch (error) {
+			logger.warn("Visible continuation checkpoint failed", {
+				error: error instanceof Error ? error.message : String(error),
+			});
+			return false;
+		}
+	}
+
+	/** Which in-process interruption, if any, the settled assistant represents. */
+	#autoResumeTriggerFor(message: AssistantMessage): AutoResumeTrigger | undefined {
+		// Managed chains settle here too (the session supplies no managed recovery evidence);
+		// the resume itself is pinned to the interrupted model. Only a transient failure is
+		// resumed: terminal provider answers and an explicit retry opt-out still stop.
+		if (message.stopReason !== "error" || !this.settings.get("retry.enabled")) return undefined;
+		const classification = this.#classifyErrorForRetry(message);
+		if (classification !== "transient" && classification !== "first_event_timeout") return undefined;
+		// A rate-limited or quota-limited provider is not resumed: its retry cap already
+		// decided to stop, and another request would only hit the same limit.
+		const trigger = this.#fallbackTriggerFor(message, true, message.transportFailure);
+		if (trigger?.class === "rate_limit" || trigger?.class === "quota") return undefined;
+		// Work worth keeping exists: tools already ran or the user saw part of the answer.
+		const turnStart = this.agent.state.messages.findLastIndex(item => item.role === "user");
+		const followsTools = this.agent.state.messages.slice(turnStart + 1).some(item => item.role === "toolResult");
+		return followsTools || hasVisibleFailedPrefix([message]) ? "interrupted" : undefined;
+	}
+
+	/** Last persisted recovery checkpoint of the branch, when it records an unfinished step. */
+	#lastInFlightCheckpoint(): Record<string, unknown> | undefined {
+		const entry = this.sessionManager
+			.getBranch()
+			.findLast(item => item.type === "custom" && item.customType === RECOVERY_CHECKPOINT_CUSTOM_TYPE);
+		if (entry?.type !== "custom" || !entry.data || typeof entry.data !== "object" || Array.isArray(entry.data))
+			return undefined;
+		const data = entry.data as Record<string, unknown>;
+		return data.state === "in_flight" || data.state === "recovering" ? data : undefined;
+	}
+
+	/**
+	 * Single decision point for an automatic resume of an interrupted step. Runs at
+	 * most once per user turn, on the interrupted step's selector, and only after the
+	 * resume marker is durable. Returns true when a resume was scheduled.
+	 */
+	async #maybeAutoResume(trigger: AutoResumeTrigger): Promise<boolean> {
+		await this.#pendingUncertainFlush;
+		const generation = this.#promptGeneration;
+		const messages = this.agent.state.messages;
+		const model = this.model;
+		const checkpoint = trigger === "restart" ? this.#lastInFlightCheckpoint() : undefined;
+		const failed = messages.findLast(message => message.role === "assistant") as AssistantMessage | undefined;
+		const selector =
+			trigger === "restart"
+				? typeof checkpoint?.selector === "string"
+					? checkpoint.selector
+					: undefined
+				: failed
+					? `${failed.provider}/${failed.model}`
+					: undefined;
+		const restartUncertain =
+			trigger === "restart" &&
+			(!checkpoint ||
+				!Array.isArray(checkpoint.uncertain) ||
+				checkpoint.uncertain.length > 0 ||
+				typeof checkpoint.api !== "string" ||
+				checkpoint.api === "cursor-agent" ||
+				checkpoint.transport === "pi-native");
+		const budget = this.#stepRecoveryBudget;
+		const selectedTools = this.agent.state.tools;
+		const decision = resolveAutoResumePolicy({
+			enabled: this.settings.get("retry.autoResume") && !this.#isDisposed && !this.#handoffTransitionActive,
+			trigger,
+			messages,
+			resumedThisTurn: hasAutoResumeMarkerSinceLastUser(this.sessionManager.getBranch()),
+			uncertainUpstream:
+				this.#uncertainFlushFailed ||
+				this.#uncertainUpstreamUnresolved ||
+				this.#stepRecoveryUncertainReasons.length > 0 ||
+				restartUncertain,
+			opaqueTransport: model?.api === "cursor-agent" || model?.transport === "pi-native",
+			budgetAdmits: trigger === "restart" ? true : budget?.canAdmit() === true,
+			userInputPending: this.agent.hasQueuedMessages() || this.#cancelAndSubmitInProgress,
+			selectorAvailable: model !== undefined && selector === `${model.provider}/${model.id}`,
+			prefixReplayable:
+				failed !== undefined &&
+				VISIBLE_CONTINUATION_APIS.has(failed.api) &&
+				model?.api === failed.api &&
+				this.#hasCleanContinuationSafety,
+			selectedTools,
+		});
+		if (decision.type === "pause") {
+			logger.debug("auto_resume_paused", { trigger, reason: decision.reason });
+			if (decision.reason === "already_resumed") {
+				this.emitNotice("info", "Automatic resume was already used for this request.", "retry");
+			}
+			return false;
+		}
+		if (!selector) return false;
+		const marker: AutoResumeMarker = {
+			version: 1,
+			trigger,
+			mode: decision.mode,
+			selector,
+			interruptedCallIds: decision.interruptedCalls.map(call => call.id),
+		};
+		const placeholders: ToolResultMessage[] = decision.interruptedCalls.map(call => ({
+			role: "toolResult",
+			toolCallId: call.id,
+			toolName: call.name,
+			content: [{ type: "text", text: INTERRUPTED_TOOL_RESULT_TEXT }],
+			isError: true,
+			timestamp: Date.now(),
+		}));
+		const prompt = decision.mode === "restricted" ? AUTO_RESUME_RESTRICTED_PROMPT : AUTO_RESUME_FULL_PROMPT;
+		const tailBeforeFlush = messages.at(-1);
+		try {
+			this.sessionManager.appendCustomEntry(AUTO_RESUME_MARKER_CUSTOM_TYPE, marker);
+			for (const placeholder of placeholders) this.sessionManager.appendMessage(placeholder);
+			this.sessionManager.appendCustomMessageEntry(AUTO_RESUME_CUSTOM_TYPE, prompt, false, marker, "agent");
+			await this.sessionManager.ensureOnDisk();
+			await this.sessionManager.flush();
+		} catch (error) {
+			logger.warn("Automatic resume checkpoint failed", {
+				error: error instanceof Error ? error.message : String(error),
+			});
+			return false;
+		}
+		if (
+			this.#isDisposed ||
+			this.#promptGeneration !== generation ||
+			this.agent.state.messages !== messages ||
+			messages.at(-1) !== tailBeforeFlush
+		) {
+			// Fail-safe: nothing is sent. The durable marker still consumes this turn's resume.
+			logger.warn("auto_resume_abandoned", { trigger, reason: "state changed while the marker was written" });
+			return false;
+		}
+		// A failed attempt that showed nothing is not part of the answer; resending it only
+		// adds an empty assistant turn (the same rule manual retry applies).
+		const tailMessage = this.agent.state.messages.at(-1);
+		if (
+			placeholders.length === 0 &&
+			tailMessage?.role === "assistant" &&
+			(tailMessage.stopReason === "error" || tailMessage.stopReason === "aborted") &&
+			!assistantMessageHasVisibleOrToolContent(tailMessage)
+		) {
+			this.agent.replaceMessages(this.agent.state.messages.slice(0, -1));
+		}
+		// The durable placeholders replace in-memory pairing results that observed nothing.
+		if (this.agent.state.messages.some(isSynthesizedResumeResult)) {
+			this.agent.replaceMessages(this.agent.state.messages.filter(message => !isSynthesizedResumeResult(message)));
+		}
+		for (const placeholder of placeholders) this.agent.appendMessage(placeholder);
+		this.agent.appendMessage({
+			role: "custom",
+			customType: AUTO_RESUME_CUSTOM_TYPE,
+			content: prompt,
+			display: false,
+			details: marker,
+			attribution: "agent",
+			timestamp: Date.now(),
+		});
+		if (trigger === "restart") {
+			this.#endStepRecoveryBudget();
+			this.#stepRecoveryBudget = new RecoveryBudget({
+				maxRequests: RESTART_RESUME_MAX_REQUESTS,
+				windowMs: RESTART_RESUME_WINDOW_MS,
+				maxSilentTimeouts: this.#maxSilentTimeouts(),
+			});
+			// The small envelope starts its clock now and arms its deadline: an unanswered
+			// restart resume never waits longer, even mid-request.
+			this.#stepRecoveryDeadlineAbort = new AbortController();
+			this.#recordStepRecoveryFailure(this.#stepRecoveryBudget);
+			this.#restartResumeEnvelopePending = true;
+			this.#unresolvedRecoveryAtHydration = false;
+		}
+		if (decision.mode === "restricted") this.#setRestrictedToolMode(true);
+		this.#activeAutoResume = { trigger, mode: decision.mode };
+		this.emitNotice(
+			"info",
+			decision.mode === "restricted"
+				? "Resuming the interrupted step automatically (read-only tools)."
+				: "Resuming the interrupted step automatically.",
+			"retry",
+		);
+		logger.info("auto_resume_started", { trigger, mode: decision.mode, interruptedCalls: placeholders.length });
+		if (trigger === "restart") return true;
+		void this.#scheduleAgentContinue({
+			delayMs: 1,
+			generation,
+			allowDuringCancelAndSubmit: false,
+			pinnedModel: true,
+			shouldContinue: () => !this.agent.hasQueuedMessages(),
+			// A resume that never started closes the step it was carrying, unless a newer
+			// turn already owns the envelope.
+			onError: () => {
+				this.#endAutoResume("failed");
+				if (this.#promptGeneration === generation) this.#endStepRecoveryBudget();
+			},
+			onSkip: () => {
+				this.#endAutoResume("skipped");
+				if (this.#promptGeneration === generation) this.#endStepRecoveryBudget();
+			},
+		});
+		return true;
+	}
+
+	/** Restricted mode narrows only what the model sees and may execute; the selection is untouched. */
+	#setRestrictedToolMode(enabled: boolean): void {
+		if (this.#restrictedToolMode === enabled) return;
+		this.#restrictedToolMode = enabled;
+		this.agent.setToolFilter(enabled ? tools => tools.filter(tool => isRestartSafeTool(tool, tools)) : undefined);
+	}
+
+	#endAutoResume(outcome: "completed" | "failed" | "skipped"): void {
+		this.#restartResumeEnvelopePending = false;
+		this.#setRestrictedToolMode(false);
+		const active = this.#activeAutoResume;
+		this.#activeAutoResume = undefined;
+		if (active) logger.info("auto_resume_finished", { ...active, outcome });
 	}
 
 	/**
@@ -14672,20 +15552,21 @@ export class AgentSession {
 		);
 	}
 
-	#isUnresolvedToolUseAssistant(message: AssistantMessage): boolean {
-		return message.stopReason === "toolUse" && message.content.some(content => content.type === "toolCall");
-	}
-
 	/**
 	 * Manually retry the last failed assistant turn, or resume an interrupted tail
 	 * left by a non-graceful process exit after the user/custom/tool-result message
 	 * was persisted but before the agent emitted a terminal assistant response.
-	 * Removes failed/aborted/unresolved tool-use assistant tails before
-	 * re-attempting with a fresh retry budget.
-	 * @returns true if retry/resume was initiated, false if no retryable tail exists or agent is busy
+	 * Removes only a failed/aborted assistant tail with no visible output or tool
+	 * calls, then re-attempts with a fresh retry budget.
+	 * @returns false when the agent is busy, no retryable tail exists, the tail shows
+	 * output or tool calls, a persisted recovery is unresolved, or the step dispatched
+	 * unobservable remote work; true when a retry/resume was scheduled.
 	 */
 	async retry(): Promise<boolean> {
 		if (this.isStreaming || this.isCompacting || this.isRetrying) return false;
+		if (this.#unresolvedRecoveryAtHydration) return false;
+		// Unobservable remote effects (broker/gateway) cannot be proven unsent.
+		if (this.#uncertainUpstreamUnresolved || this.#stepRecoveryUncertainReasons.length > 0) return false;
 		// A handoff transition owns the session; retrying would mutate the tail and
 		// schedule a continuation against the session being handed off.
 		if (this.isGeneratingHandoff || this.#handoffTransitionActive) return false;
@@ -14697,22 +15578,23 @@ export class AgentSession {
 		if (lastMsg.role !== "assistant") {
 			if (!this.#isInterruptedRetryTail(lastMsg)) return false;
 			this.#retryAttempt = 0;
+			this.#endStepRecoveryBudget();
 			this.#scheduleAgentContinue({ delayMs: 1 });
 			return true;
 		}
 
 		const assistantMsg = lastMsg as AssistantMessage;
-		const shouldDropAssistant =
-			assistantMsg.stopReason === "error" ||
-			assistantMsg.stopReason === "aborted" ||
-			this.#isUnresolvedToolUseAssistant(assistantMsg);
-		if (!shouldDropAssistant) return false;
+		// Explicit retry does not establish the outcome of an interrupted operation
+		// and is never permission to erase a prefix already shown to the user.
+		if (assistantMessageHasVisibleOrToolContent(assistantMsg)) return false;
+		if (assistantMsg.stopReason !== "error" && assistantMsg.stopReason !== "aborted") return false;
 
-		// Remove the failed/aborted/incomplete assistant message before re-attempting.
+		// Remove the empty failed/aborted assistant message before re-attempting.
 		this.agent.replaceMessages(messages.slice(0, -1));
 
-		// Reset retry budget for a fresh attempt
+		// Reset retry budget for a fresh attempt: a manual retry is a new invocation.
 		this.#retryAttempt = 0;
+		this.#endStepRecoveryBudget();
 
 		// Re-attempt the turn
 		this.#scheduleAgentContinue({ delayMs: 1 });
@@ -15737,6 +16619,7 @@ export class AgentSession {
 				// (#2797 / #2925).
 				if (switchingToDifferentSession) await initializeLocalRoot(this.#localProtocolOptions());
 				this.#syncAgentSessionId();
+				this.#resyncRecoveryStateFromTranscript();
 				this.#rekeyHindsightMemoryForCurrentSessionId();
 
 				const sessionContext = this.buildDisplaySessionContext();
@@ -15847,6 +16730,7 @@ export class AgentSession {
 				this.sessionManager.restoreState(previousSessionState);
 				this.#defaultFallbackController = undefined;
 				this.#syncAgentSessionId(previousSessionState.sessionId);
+				this.#resyncRecoveryStateFromTranscript();
 				this.#restoreWorkflowGateEmitter(suspendedWorkflowGateEmitter);
 				this.#rekeyHindsightMemoryForCurrentSessionId();
 				let restoreMcpError: unknown;
@@ -15964,6 +16848,7 @@ export class AgentSession {
 
 			this.#syncTodoPhasesFromBranch();
 			this.#syncAgentSessionId();
+			this.#resyncRecoveryStateFromTranscript();
 			this.#bindWorkflowGateEmitter(previousWorkflowGateSessionId);
 			this.#rekeyHindsightMemoryForCurrentSessionId();
 			this.#resetHindsightConversationTrackingIfHindsight();
@@ -16712,13 +17597,20 @@ export class AgentSession {
 		if (!lastAssistant) return undefined;
 
 		let text = "";
-		for (const content of lastAssistant.content) {
-			if (content.type === "text") {
-				text += content.text;
+		for (const assistant of this.getVisibleAnswerChain(lastAssistant)) {
+			for (const content of assistant.content) {
+				if (content.type === "text") {
+					text += content.text;
+				}
 			}
 		}
 
 		return text.trim() || undefined;
+	}
+
+	/** The assistant messages that together form the visible answer ending at `assistant`. */
+	getVisibleAnswerChain(assistant: AssistantMessage): AssistantMessage[] {
+		return getVisibleAnswerChain(this.messages, assistant);
 	}
 
 	hasCopyCandidateAssistantMessage(): boolean {

@@ -1,8 +1,8 @@
 import { describe, expect, it } from "bun:test";
 import type { AgentMessage } from "@sayknow-cli/agent-core";
-import type { Message } from "@sayknow-cli/ai";
+import type { AssistantMessage, Message } from "@sayknow-cli/ai";
 import { inferCopilotInitiator } from "@sayknow-cli/ai/providers/github-copilot-headers";
-import { convertToLlm } from "@sayknow-cli/coding-agent/session/messages";
+import { convertToLlm, lastVisibleAnswerText } from "@sayknow-cli/coding-agent/session/messages";
 
 function expectAttribution(message: Message | undefined, expected: "user" | "agent" | undefined): void {
 	expect(message).toBeDefined();
@@ -112,5 +112,56 @@ describe("convertToLlm file mention framing", () => {
 		);
 		expect(text).toContain("&lt;/system-reminder&gt;");
 		expect(text?.match(/<\/system-reminder>/g)).toHaveLength(1);
+	});
+});
+
+describe("convertToLlm visible continuation instructions", () => {
+	const instruction: AgentMessage = {
+		role: "custom",
+		customType: "stream-continuation",
+		content: "Continue directly from where it stops.",
+		display: false,
+		attribution: "agent",
+		timestamp: 1,
+	};
+	const user = (text: string): AgentMessage => ({ role: "user", content: text, timestamp: 2 });
+
+	it("keeps a trailing instruction of a live recovery", () => {
+		const converted = convertToLlm([user("report"), instruction]);
+		expect(converted.map(message => message.role)).toEqual(["user", "user"]);
+	});
+
+	it("drops an instruction whose continuation request failed without output", () => {
+		const failed = { role: "assistant", content: [], stopReason: "error" } as unknown as AgentMessage;
+		const converted = convertToLlm([user("report"), instruction, failed, user("new question")]);
+		expect(JSON.stringify(converted)).not.toContain("Continue directly");
+	});
+
+	it("drops an instruction that a later user prompt superseded before any answer", () => {
+		const converted = convertToLlm([user("report"), instruction, user("new question")]);
+		expect(JSON.stringify(converted)).not.toContain("Continue directly");
+		expect(converted).toHaveLength(2);
+	});
+});
+
+describe("lastVisibleAnswerText", () => {
+	const assistant = (text: string) => ({
+		type: "message",
+		message: { role: "assistant", content: [{ type: "text", text }] } as unknown as AssistantMessage,
+	});
+
+	it("returns the preserved prefix together with its continuation", () => {
+		const branch = [
+			{ type: "message", message: { role: "user" } },
+			assistant("Three findings: one,"),
+			{ type: "custom_message", customType: "stream-continuation" },
+			assistant(" two, three."),
+		];
+		expect(lastVisibleAnswerText(branch)).toBe("Three findings: one, two, three.");
+	});
+
+	it("returns only the last answer when no continuation joins it to an earlier one", () => {
+		const branch = [assistant("old"), { type: "message", message: { role: "user" } }, assistant("new")];
+		expect(lastVisibleAnswerText(branch)).toBe("new");
 	});
 });

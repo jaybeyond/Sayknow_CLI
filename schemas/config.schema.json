@@ -979,6 +979,14 @@
 					"type": "boolean",
 					"default": true
 				},
+				"autoResume": {
+					"type": "boolean",
+					"default": true
+				},
+				"maxSilentTimeouts": {
+					"type": "number",
+					"default": 3
+				},
 				"maxRetries": {
 					"type": "number",
 					"description": "Maximum retry attempts on API errors",

@@ -50,7 +50,7 @@ import {
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import { transportFailureFacts } from "../utils/fallback-transport";
 import { finalizeErrorMessage, type RawHttpRequestDump } from "../utils/http-inspector";
-import { getOpenAIStreamIdleTimeoutMs, iterateWithIdleTimeout } from "../utils/idle-iterator";
+import { isSemanticContentDelta, iterateWithIdleTimeout, takeCodexStreamTimeoutPolicy } from "../utils/idle-iterator";
 import { parseStreamingJson } from "../utils/json-parse";
 import { resolveRetryBudget } from "../utils/retry-budget";
 import {
@@ -616,11 +616,10 @@ function createRequestSetup(options: OpenAICodexResponsesOptions | undefined): C
 		source: AsyncGenerator<Record<string, unknown>>,
 	): AsyncGenerator<Record<string, unknown>> =>
 		iterateWithIdleTimeout(source, {
-			idleTimeoutMs: options?.streamIdleTimeoutMs ?? getOpenAIStreamIdleTimeoutMs(),
+			// Semantic deadlines are owned by the concrete public-event guard below.
+			// Keep cancellation here so a stalled SSE reader cannot outlive that guard.
 			errorMessage: "OpenAI Codex SSE stream stalled while waiting for the next event",
-			onIdle: () => requestAbortController.abort(),
-			abortSignal: options?.signal,
-			isProgressItem: isCodexStreamProgressEvent,
+			abortSignal: requestSignal,
 		});
 	return { requestAbortController, requestSignal, wrapCodexSseStream };
 }
@@ -837,6 +836,9 @@ async function openCodexWebSocketTransport(
 		retry,
 		retryBudget: getCodexWebSocketRetryBudget(options),
 	});
+	// Admission is deferred to the concrete request-frame send inside `streamRequest`: a failed
+	// connect, a rejected in-flight lock, or an owner that went stale while connecting sends nothing
+	// and spends nothing. SSE fallback admits through its own `fetch`, so it is never double-counted.
 	const eventStream = await openCodexWebSocketEventStream(
 		toWebSocketUrl(requestContext.url),
 		websocketHeaders,
@@ -844,6 +846,7 @@ async function openCodexWebSocketTransport(
 		websocketState,
 		requestSetup.requestSignal,
 		options,
+		() => options?.onUpstreamRequest?.("inference"),
 		serializedRequest => {
 			const anchor = asRecord(JSON.parse(serializedRequest))?.previous_response_id;
 			requestContext.sentPreviousResponseId = typeof anchor === "string" && anchor.length > 0 ? anchor : undefined;
@@ -985,6 +988,7 @@ async function processCodexResponseStream(
 		try {
 			let firstTokenTime = context.firstTokenTime;
 			for await (const rawEvent of runtime.eventStream) {
+				context.requestSetup.requestSignal.throwIfAborted();
 				firstTokenTime = handleCodexStreamEvent({
 					...context,
 					runtime,
@@ -1490,6 +1494,7 @@ async function recoverCodexStreamError(
 	runtime: CodexStreamRuntime,
 	error: unknown,
 ): Promise<boolean> {
+	if (context.requestSetup.requestSignal.aborted) return false;
 	// State maintenance belongs to this wire request, even when transient retries are managed externally.
 	if (
 		(error instanceof CodexProviderStreamError && error.code === "websocket_connection_limit_reached") ||
@@ -1797,11 +1802,49 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 	options?: OpenAICodexResponsesOptions,
 ): AssistantMessageEventStream => {
 	const stream = new AssistantMessageEventStream();
+	const guardedStream = new AssistantMessageEventStream();
+	const policy = takeCodexStreamTimeoutPolicy(options);
+	const output = createAssistantOutput(model);
+	const requestSetup = createRequestSetup(options);
+	const idleError = "Provider stream stalled while waiting for the next event";
+	const firstError = "Provider stream timed out while waiting for the first event";
+	const abortRequest = (message: string) => requestSetup.requestAbortController.abort(new Error(message));
+
+	(async () => {
+		try {
+			for await (const event of iterateWithIdleTimeout(stream, {
+				...policy,
+				strictDeadline: true,
+				errorMessage: idleError,
+				firstItemErrorMessage: firstError,
+				onIdle: () => abortRequest(idleError),
+				onFirstItemTimeout: () => abortRequest(firstError),
+				abortSignal: options?.signal,
+				isProgressItem: isSemanticContentDelta,
+			})) {
+				guardedStream.push(event);
+			}
+			guardedStream.end();
+		} catch (error) {
+			// Snapshot committed output before abort teardown can mutate the producer.
+			const failure = structuredCloneJSON(output);
+			removeTransientBlockIndices(failure);
+			failure.stopReason = options?.signal?.aborted ? "aborted" : "error";
+			failure.errorMessage =
+				failure.stopReason === "aborted"
+					? "Request was aborted"
+					: error instanceof Error
+						? error.message
+						: String(error);
+			failure.duration = Date.now() - policy.firstItemStartedAt;
+			abortRequest(failure.errorMessage);
+			guardedStream.push({ type: "error", reason: failure.stopReason, error: failure });
+			guardedStream.end();
+		}
+	})();
 
 	(async () => {
 		const startTime = Date.now();
-		const output = createAssistantOutput(model);
-		const requestSetup = createRequestSetup(options);
 		let processingContext: CodexStreamProcessingContext | undefined;
 
 		try {
@@ -1810,6 +1853,7 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 			try {
 				initialTransport = await openInitialCodexEventStream(model, options, requestSetup, requestContext);
 			} catch (error) {
+				requestSetup.requestSignal.throwIfAborted();
 				if (options?.fallbackManaged) throw error;
 				initialTransport = await retryCodexInitialTransportWithoutToolChoice(
 					model,
@@ -1844,6 +1888,8 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 			stream.push({ type: "done", reason: message.stopReason as "stop" | "length" | "toolUse", message });
 			stream.end();
 		} catch (error) {
+			// Even when the semantic guard already published the terminal event, the
+			// failure path must still reset websocket append/anchor state.
 			const failureContext =
 				processingContext ??
 				({
@@ -1876,7 +1922,7 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 		}
 	})();
 
-	return stream;
+	return guardedStream;
 };
 
 export async function prewarmOpenAICodexResponses(
@@ -2320,6 +2366,7 @@ class CodexWebSocketConnection {
 	async *streamRequest(
 		request: Record<string, unknown>,
 		signal?: AbortSignal,
+		admitRequest?: () => void,
 		onRequestSent?: (serializedRequest: string) => void,
 	): AsyncGenerator<Record<string, unknown>> {
 		if (!this.#socket || this.#socket.readyState !== WebSocket.OPEN) {
@@ -2343,6 +2390,11 @@ class CodexWebSocketConnection {
 
 		try {
 			const serializedRequest = JSON.stringify(request);
+			// One admission per request, immediately before the frame reaches the wire. A throwing
+			// admission (spent budget / stale owner) ends this stream with that error and sends nothing.
+			// An already-aborted caller neither admits nor sends.
+			signal?.throwIfAborted();
+			admitRequest?.();
 			this.#socket.send(serializedRequest);
 			onRequestSent?.(serializedRequest);
 			let sawFirstEvent = false;
@@ -2438,6 +2490,8 @@ async function getOrCreateCodexWebSocketConnection(
 	const headerRecord = headersToRecord(headers);
 	if (state.connection?.isOpen()) {
 		if (state.connection.matchesAuth(headerRecord)) {
+			// Reusing an open socket skips `connect(signal)`, so honor a pre-aborted caller here.
+			signal?.throwIfAborted();
 			logger.time("codexWs:reuseOpenSocket");
 			return state.connection;
 		}
@@ -2521,10 +2575,11 @@ async function openCodexWebSocketEventStream(
 	state: CodexWebSocketSessionState,
 	signal?: AbortSignal,
 	options?: Pick<OpenAICodexResponsesOptions, "streamFirstEventTimeoutMs" | "streamIdleTimeoutMs">,
+	admitRequest?: () => void,
 	onRequestSent?: (serializedRequest: string) => void,
 ): Promise<AsyncGenerator<Record<string, unknown>>> {
 	const connection = await getOrCreateCodexWebSocketConnection(state, url, headers, signal, options);
-	return connection.streamRequest(request, signal, onRequestSent);
+	return connection.streamRequest(request, signal, admitRequest, onRequestSent);
 }
 
 function createCodexHeaders(

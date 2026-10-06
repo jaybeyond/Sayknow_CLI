@@ -179,8 +179,9 @@ describe("AgentSession managed fallback upstream request counts", () => {
 	});
 
 	function createSession(
-		maxAttempts: number,
+		maxAttempts: number | undefined,
 		streamFn: AgentOptions["streamFn"],
+		extraSettings: Record<string, unknown> = {},
 	): { primary: Model; fallback: Model } {
 		const primary = getBundledModel("anthropic", "claude-sonnet-4-5");
 		const fallback = getBundledModel("openai", "gpt-4o-mini");
@@ -192,8 +193,9 @@ describe("AgentSession managed fallback upstream request counts", () => {
 		});
 		const settings = Settings.isolated({
 			"compaction.enabled": false,
-			"fallback.maxAttempts": maxAttempts,
+			...(maxAttempts === undefined ? {} : { "fallback.maxAttempts": maxAttempts }),
 			"retry.baseDelayMs": 10,
+			...extraSettings,
 		});
 		settings.setModelRole("default", selector(primary));
 		session = new AgentSession({ agent, sessionManager: SessionManager.inMemory(), settings, modelRegistry });
@@ -390,6 +392,152 @@ describe("AgentSession managed fallback upstream request counts", () => {
 		expect(calls.map(call => call.selector)).toEqual([selector(primary), selector(primary), selector(primary)]);
 	});
 
+	it("default fallback.maxAttempts recovers a transient failure on the same model at the fourth request", async () => {
+		const calls: string[] = [];
+		const switches: Array<Extract<AgentSessionEvent, { type: "model_fallback_switched" }>> = [];
+		let primaryCalls = 0;
+		const { primary } = createSession(undefined, model => {
+			calls.push(selector(model));
+			primaryCalls += 1;
+			return primaryCalls <= 3 ? rateLimitStream(model) : successfulStream(model, "Recovered on W4");
+		});
+		session!.subscribe(event => {
+			if (event.type === "model_fallback_switched") switches.push(event);
+		});
+
+		await session!.prompt("W1 fail, W2 fail, W3 fail, W4 success");
+		await session!.waitForIdle();
+
+		expect(calls).toEqual([selector(primary), selector(primary), selector(primary), selector(primary)]);
+		expect(switches).toEqual([]);
+		expect(session!.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "stop" });
+	});
+
+	it("respects an explicit additional retry cap on a managed default chain", async () => {
+		for (const maxRetries of [0, 1]) {
+			const calls: string[] = [];
+			const { primary } = createSession(
+				undefined,
+				model => {
+					calls.push(selector(model));
+					return rateLimitStream(model);
+				},
+				{ "retry.maxRetries": maxRetries },
+			);
+			await session!.prompt("explicit cap");
+			await session!.waitForIdle();
+			expect(calls).toEqual(Array.from({ length: maxRetries + 1 }, () => selector(primary)));
+			await session!.dispose();
+			session = undefined;
+		}
+	});
+
+	it("default fallback.maxAttempts stops a persistent transient failure after seven same-model requests", async () => {
+		const calls: string[] = [];
+		const switches: Array<Extract<AgentSessionEvent, { type: "model_fallback_switched" }>> = [];
+		const { primary, fallback } = createSession(undefined, model => {
+			calls.push(selector(model));
+			return selector(model) === selector(primary) ? rateLimitStream(model) : successfulStream(model);
+		});
+		session!.subscribe(event => {
+			if (event.type === "model_fallback_switched") switches.push(event);
+		});
+
+		await session!.prompt("persistent transient failure");
+		await session!.waitForIdle();
+
+		expect(calls).toEqual(Array.from({ length: 7 }, () => selector(primary)));
+		expect(calls).not.toContain(selector(fallback));
+		expect(switches).toEqual([]);
+		expect(session!.model).toMatchObject({ provider: primary.provider, id: primary.id });
+		expect(session!.messages.at(-1)).toMatchObject({
+			role: "assistant",
+			stopReason: "error",
+			errorMessage: "rate limit exceeded",
+		});
+	});
+
+	it("counts hidden in-invocation resends against the shared seven-request budget", async () => {
+		const calls: string[] = [];
+		const admissions: string[] = [];
+		const { primary } = createSession(undefined, (model, _context, options) => {
+			calls.push(selector(model));
+			// Simulate a provider/SDK that silently resends inside one invocation until
+			// admission is refused: every resend must pass the session's admission hook.
+			const stream = new AssistantMessageEventStream();
+			queueMicrotask(() => {
+				let rejection: unknown;
+				for (let resend = 0; resend < 20; resend++) {
+					try {
+						options?.onUpstreamRequest?.("inference");
+						admissions.push("admitted");
+					} catch (error) {
+						rejection = error;
+						break;
+					}
+				}
+				const message: AssistantMessage = {
+					role: "assistant",
+					content: [],
+					api: model.api,
+					provider: model.provider,
+					model: model.id,
+					usage: {
+						input: 0,
+						output: 0,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 0,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					},
+					stopReason: "error",
+					errorMessage: rejection instanceof Error ? rejection.message : "unexpected",
+					timestamp: Date.now(),
+				};
+				stream.push({ type: "start", partial: message });
+				stream.push({ type: "error", reason: "error", error: message });
+			});
+			return stream;
+		});
+
+		await session!.prompt("hidden resends");
+		await session!.waitForIdle();
+
+		// The invocation's own first request plus six admitted resends; the eighth is refused,
+		// and a refused admission is terminal (no further session-level retry).
+		expect(admissions).toHaveLength(7);
+		expect(calls).toEqual([selector(primary)]);
+		expect(session!.messages.at(-1)).toMatchObject({
+			role: "assistant",
+			stopReason: "error",
+			errorMessage: "Recovery request limit reached",
+		});
+	});
+
+	it("runs credential maintenance after a managed rate limit through the step's admitted signal and fetch", async () => {
+		let primaryAttempts = 0;
+		createSession(3, (model, _context, _options) => {
+			if (primaryAttempts++ === 0) return typedRateLimitStream(model, 1);
+			return successfulStream(model, "Recovered");
+		});
+		authStorage.removeRuntimeApiKey("anthropic");
+		await authStorage.set("anthropic", [{ type: "api_key", key: "anthropic-stored-key" }]);
+		const maintenance: Array<{ signal: boolean; fetch: boolean; admit: boolean }> = [];
+		vi.spyOn(authStorage, "markUsageLimitReached").mockImplementation(async (_provider, _sessionId, options) => {
+			maintenance.push({
+				signal: options?.signal instanceof AbortSignal,
+				fetch: typeof options?.fetch === "function",
+				admit: typeof options?.onUpstreamRequest === "function",
+			});
+			return false;
+		});
+
+		await session!.prompt("Rotate after a rate limit");
+		await session!.waitForIdle();
+
+		expect(maintenance).toEqual([{ signal: true, fetch: true, admit: true }]);
+	});
+
 	it("retries a short rate limit on the same model without suppressing it", async () => {
 		const calls: string[] = [];
 		let primaryAttempts = 0;
@@ -548,7 +696,18 @@ describe("AgentSession managed fallback upstream request counts", () => {
 			calls.push(selector(model));
 			if (calls.length <= 2) {
 				return createMockModel({
-					responses: [{ content: [{ type: "toolCall", name: "read", arguments: { round: calls.length } }] }],
+					responses: [
+						{
+							content: [
+								{
+									type: "toolCall",
+									id: `read-round-${calls.length}`,
+									name: "read",
+									arguments: { round: calls.length },
+								},
+							],
+						},
+					],
 				}).stream(model, context, options);
 			}
 			return selector(model) === selector(primary)

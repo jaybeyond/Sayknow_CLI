@@ -6,7 +6,7 @@
 import { $env } from "@sayknow-cli/utils";
 import { getGeminiCliHeaders } from "../../providers/google-gemini-headers";
 import { runGoogleOAuthLogin } from "./google-oauth-shared";
-import type { OAuthController, OAuthCredentials } from "./types";
+import type { OAuthController, OAuthCredentials, OAuthRefreshOptions } from "./types";
 
 const decode = (s: string) => atob(s);
 const CLIENT_ID = decode(
@@ -224,8 +224,14 @@ export async function loginGeminiCli(ctrl: OAuthController): Promise<OAuthCreden
 /**
  * Refresh Google Cloud Code Assist token
  */
-export async function refreshGoogleCloudToken(refreshToken: string, projectId: string): Promise<OAuthCredentials> {
-	const response = await fetch(TOKEN_URL, {
+export async function refreshGoogleCloudToken(
+	refreshToken: string,
+	projectId: string,
+	options?: OAuthRefreshOptions,
+): Promise<OAuthCredentials> {
+	options?.signal?.throwIfAborted();
+	const fetchImpl = options?.fetch ?? globalThis.fetch;
+	const response = await fetchImpl(TOKEN_URL, {
 		method: "POST",
 		headers: { "Content-Type": "application/x-www-form-urlencoded" },
 		body: new URLSearchParams({
@@ -234,6 +240,7 @@ export async function refreshGoogleCloudToken(refreshToken: string, projectId: s
 			refresh_token: refreshToken,
 			grant_type: "refresh_token",
 		}),
+		signal: options?.signal,
 	});
 
 	if (!response.ok) {

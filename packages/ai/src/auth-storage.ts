@@ -12,7 +12,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { getAgentDbPath, logger } from "@sayknow-cli/utils";
 import { getEnvApiKey } from "./stream";
-import type { Provider } from "./types";
+import type { FetchImpl, Provider } from "./types";
 import type {
 	CredentialRankingStrategy,
 	UsageCredential,
@@ -35,7 +35,14 @@ import { getOAuthApiKey, getOAuthProvider, refreshOAuthToken, resolveOAuthStorag
 import { loginDeepInfra } from "./utils/oauth/deepinfra";
 import { loginDeepSeek } from "./utils/oauth/deepseek";
 import { loginOpenAICodexDevice } from "./utils/oauth/openai-codex";
-import type { OAuthController, OAuthCredentials, OAuthProvider, OAuthProviderId } from "./utils/oauth/types";
+import type {
+	OAuthController,
+	OAuthCredentials,
+	OAuthProvider,
+	OAuthProviderId,
+	OAuthRefreshOptions,
+} from "./utils/oauth/types";
+import { isRecoveryAdmissionErrorMessage, RecoveryAdmissionError } from "./utils/recovery-budget";
 
 const DEPRECATED_SGLANG_NO_AUTH_TOKEN = "sglang-local";
 
@@ -116,6 +123,7 @@ async function refreshBoundMCPOAuthCredential(
 	credential: OAuthCredential,
 	client: MCPOAuthRefreshClient = {},
 	signal?: AbortSignal,
+	fetchImpl: FetchImpl = globalThis.fetch,
 ): Promise<OAuthCredentials> {
 	const binding = credential.mcpBinding;
 	assertCanonicalMCPOAuthBinding(binding);
@@ -126,7 +134,8 @@ async function refreshBoundMCPOAuthCredential(
 	if (client.clientId) params.set("client_id", client.clientId);
 	if (client.clientSecret) params.set("client_secret", client.clientSecret);
 
-	const response = await fetch(binding.tokenEndpoint, {
+	signal?.throwIfAborted();
+	const response = await fetchImpl(binding.tokenEndpoint, {
 		method: "POST",
 		headers: { "Content-Type": "application/x-www-form-urlencoded" },
 		body: params.toString(),
@@ -344,6 +353,7 @@ export interface AuthCredentialStore {
 		credentialId: number,
 		credential: OAuthCredential,
 		signal?: AbortSignal,
+		options?: OAuthRefreshOptions,
 	): Promise<OAuthCredentials>;
 	/** Broker-backed MCP refresh using the broker's stored token endpoint and refresh secret. */
 	refreshMCPOAuthCredential?(
@@ -358,7 +368,7 @@ export interface AuthCredentialStore {
 	 * Remote broker stores use this to wait out imminent rotations and refresh
 	 * their local snapshot before the caller sees a stale access token.
 	 */
-	prepareForRequest?(credentialId: number, opts?: { signal?: AbortSignal }): Promise<boolean | undefined>;
+	prepareForRequest?(credentialId: number, opts?: OAuthRefreshOptions): Promise<boolean | undefined>;
 	/**
 	 * Optional store-supplied aggregate usage fetch. When present, `AuthStorage`
 	 * routes `fetchUsageReports()` here instead of fanning out per-credential.
@@ -384,15 +394,23 @@ export interface AuthCredentialStore {
 	 * to avoid.
 	 *
 	 * `signal` propagates the agent's cancel down to the broker fetch.
+	 * `options.cacheOnly` forbids a new broker request: an admitted recovery step
+	 * cannot route the broker's HTTP through its wire budget, so it may only read an
+	 * already cached or already in-flight aggregate.
 	 */
-	getUsageReport?(provider: Provider, credential: OAuthCredential, signal?: AbortSignal): Promise<UsageReport | null>;
+	getUsageReport?(
+		provider: Provider,
+		credential: OAuthCredential,
+		signal?: AbortSignal,
+		options?: { cacheOnly?: boolean },
+	): Promise<UsageReport | null>;
 	/**
 	 * Optional store hook to invalidate a specific credential after the upstream
 	 * provider returned 401 on a supposedly-fresh key. Remote stores force the
 	 * broker to re-issue the row; local stores can leave it undefined and let
 	 * {@link AuthStorage.invalidateCredentialMatching} fall back to `reload()`.
 	 */
-	markCredentialSuspect?(credentialId: number, opts?: { signal?: AbortSignal }): Promise<void>;
+	markCredentialSuspect?(credentialId: number, opts?: OAuthRefreshOptions): Promise<void>;
 	/**
 	 * Optional async write hook for upserting a single credential. When present,
 	 * `AuthStorage.#upsertStoredCredential` routes through this instead of the
@@ -506,6 +524,7 @@ export type AuthStorageOptions = {
 		credentialId: number,
 		credential: OAuthCredential,
 		signal?: AbortSignal,
+		options?: OAuthRefreshOptions,
 	) => Promise<OAuthCredentials>;
 	/**
 	 * Human-readable description of the credential store backing this
@@ -629,7 +648,7 @@ type UsageRequestDescriptor = {
 	baseUrl?: string;
 };
 
-type AuthApiKeyOptions = {
+export type AuthApiKeyOptions = OAuthRefreshOptions & {
 	baseUrl?: string;
 	modelId?: string;
 	/**
@@ -665,8 +684,7 @@ export interface OAuthAccess {
 	projectId?: string;
 	enterpriseUrl?: string;
 }
-export interface InvalidateCredentialMatchingOptions {
-	signal?: AbortSignal;
+export interface InvalidateCredentialMatchingOptions extends OAuthRefreshOptions {
 	sessionId?: string;
 }
 
@@ -891,7 +909,8 @@ export class AuthStorage {
 	#generation = 1;
 	#generationListeners: Set<(generation: number) => void> = new Set();
 	#oauthRefreshInFlight: Map<number, Promise<AuthCredentialSnapshotEntry>> = new Map();
-	#oauthCredentialRefreshInFlight: Map<number, Promise<OAuthCredentials>> = new Map();
+	#oauthCredentialRefreshInFlight: Map<number, { promise: Promise<OAuthCredentials>; uncertainReasons: string[] }> =
+		new Map();
 	#closed = false;
 
 	constructor(store: AuthCredentialStore, options: AuthStorageOptions = {}) {
@@ -2284,6 +2303,7 @@ export class AuthStorage {
 		request: UsageRequestDescriptor,
 		timeoutMs?: number,
 		logDetails: boolean = true,
+		admission?: OAuthRefreshOptions,
 	): Promise<UsageReport | null> {
 		const resolver = this.#usageProviderResolver;
 		if (!resolver) return null;
@@ -2314,6 +2334,7 @@ export class AuthStorage {
 						refreshableCredential,
 						refreshableCredentialId,
 						timeoutSignal,
+						admission && { ...admission, signal: timeoutSignal },
 					);
 					const refreshedCredential = this.#mergeRefreshedUsageCredential(request.credential, refreshed);
 					this.#persistRefreshedUsageCredential(request.provider, request.credential, refreshedCredential);
@@ -2322,6 +2343,7 @@ export class AuthStorage {
 						credential: refreshedCredential,
 					};
 				} catch (error) {
+					if (error instanceof RecoveryAdmissionError) throw error;
 					if (logDetails) {
 						this.#usageLogger?.debug("Usage credential refresh failed, using original credential", {
 							provider: request.provider,
@@ -2336,10 +2358,12 @@ export class AuthStorage {
 
 		try {
 			return await providerImpl.fetchUsage(params, {
-				fetch: this.#usageFetch,
+				fetch: admission?.fetch ?? this.#usageFetch,
 				logger: logDetails ? this.#usageLogger : undefined,
 			});
 		} catch (error) {
+			// A refused admission is the recovery owner's verdict, not a usage outage to cache.
+			if (error instanceof RecoveryAdmissionError) throw error;
 			if (logDetails) {
 				logger.debug("AuthStorage usage fetch failed", {
 					provider: request.provider,
@@ -2354,6 +2378,7 @@ export class AuthStorage {
 		request: UsageRequestDescriptor,
 		timeoutMs?: number,
 		logDetails: boolean = true,
+		admission?: OAuthRefreshOptions,
 	): Promise<UsageReport | null> {
 		const cacheKey = this.#buildUsageReportCacheKey(request);
 		const now = Date.now();
@@ -2362,6 +2387,9 @@ export class AuthStorage {
 		if (cached && cached.expiresAt > now) {
 			return cached.value;
 		}
+		// An admitted (recovery-owned) probe never joins or seeds shared in-flight work:
+		// its wires belong to one step budget, and its refusal must not be cached.
+		if (admission) return this.#fetchAndCacheUsageReport(request, cacheKey, timeoutMs, logDetails, admission);
 
 		const inFlight = this.#usageRequestInFlight.get(cacheKey);
 		if (inFlight) return inFlight;
@@ -2377,7 +2405,7 @@ export class AuthStorage {
 			}
 			const leaseOwned = leaseClaim !== undefined;
 			try {
-				return await this.#fetchAndCacheUsageReport(request, cacheKey, timeoutMs, logDetails);
+				return await this.#fetchAndCacheUsageReport(request, cacheKey, timeoutMs, logDetails, admission);
 			} finally {
 				if (leaseOwned) this.#releaseUsageFetchLease(cacheKey);
 			}
@@ -2426,8 +2454,9 @@ export class AuthStorage {
 		cacheKey: string,
 		timeoutMs: number | undefined,
 		logDetails: boolean,
+		admission?: OAuthRefreshOptions,
 	): Promise<UsageReport | null> {
-		const report = await this.#fetchUsageUncached(request, timeoutMs, logDetails);
+		const report = await this.#fetchUsageUncached(request, timeoutMs, logDetails, admission);
 		if (report !== null) {
 			// Success: stagger per-credential cache expiry so all accounts don't
 			// refresh in the same window — Anthropic / OpenAI rate-limit `/usage`
@@ -2653,7 +2682,7 @@ export class AuthStorage {
 	async #getUsageReport(
 		provider: Provider,
 		credential: OAuthCredential,
-		options?: { baseUrl?: string; timeoutMs?: number; signal?: AbortSignal },
+		options?: { baseUrl?: string; timeoutMs?: number } & OAuthRefreshOptions,
 	): Promise<UsageReport | null> {
 		// Store-level hook (e.g. `RemoteAuthCredentialStore`) is authoritative
 		// when present: the broker already aggregates usage from a less-throttled
@@ -2669,12 +2698,24 @@ export class AuthStorage {
 		}
 		const storeHook = this.#store.getUsageReport?.bind(this.#store);
 		if (storeHook) {
-			return storeHook(provider, credential, options?.signal);
+			// Read-only aggregate from the broker's cache: no transcript-visible side effect,
+			// so it never taints replay safety. A step that owns a wire budget cannot admit
+			// the broker's own HTTP, so it reads only what is already cached or in flight.
+			const admitted = options?.fetch !== undefined || options?.onUpstreamRequest !== undefined;
+			return storeHook(provider, credential, options?.signal, admitted ? { cacheOnly: true } : undefined);
 		}
 		return raceUsageWithSignal(
 			this.#fetchUsageCached(
 				this.#buildUsageRequestForOauth(provider, credential, options?.baseUrl),
 				options?.timeoutMs ?? this.#usageRequestTimeoutMs,
+				true,
+				options?.fetch || options?.onUpstreamRequest || options?.onUncertainUpstream
+					? {
+							fetch: options.fetch,
+							onUpstreamRequest: options.onUpstreamRequest,
+							onUncertainUpstream: options.onUncertainUpstream,
+						}
+					: undefined,
 			),
 			options?.signal,
 		);
@@ -2924,7 +2965,7 @@ export class AuthStorage {
 	async markUsageLimitReached(
 		provider: string,
 		sessionId: string | undefined,
-		options?: { retryAfterMs?: number; baseUrl?: string; signal?: AbortSignal },
+		options?: { retryAfterMs?: number; baseUrl?: string } & OAuthRefreshOptions,
 	): Promise<boolean> {
 		const sessionCredential = this.#getSessionCredential(provider, sessionId);
 		if (!sessionCredential) return false;
@@ -3042,6 +3083,9 @@ export class AuthStorage {
 				const usage = await this.#getUsageReport(args.provider, selection.credential, {
 					baseUrl: args.options?.baseUrl,
 					timeoutMs: this.#usageRequestTimeoutMs,
+					fetch: args.options?.fetch,
+					onUpstreamRequest: args.options?.onUpstreamRequest,
+					onUncertainUpstream: args.options?.onUncertainUpstream,
 				});
 				return { selection, usage, usageChecked: true, blockedUntil: undefined as number | undefined };
 			}),
@@ -3218,6 +3262,7 @@ export class AuthStorage {
 						candidate.selection.credential,
 						credentialId,
 						options?.signal,
+						options,
 					);
 					const updated: OAuthCredential = {
 						...candidate.selection.credential,
@@ -3226,7 +3271,9 @@ export class AuthStorage {
 					};
 					candidate.selection.credential = updated;
 					this.#replaceCredentialAt(provider, candidate.selection.index, updated);
-				} catch {}
+				} catch (error) {
+					if (error instanceof RecoveryAdmissionError) throw error;
+				}
 			}),
 		);
 
@@ -3273,19 +3320,43 @@ export class AuthStorage {
 		credential: OAuthCredential,
 		credentialId: number | undefined,
 		signal?: AbortSignal,
+		options?: OAuthRefreshOptions,
 	): Promise<OAuthCredentials> {
 		if (credentialId !== undefined) {
 			const existing = this.#oauthCredentialRefreshInFlight.get(credentialId);
-			if (existing) return raceCredentialRefreshWithSignal(existing, signal);
+			if (existing) {
+				// Waiters send nothing (token wire 0) but inherit the shared refresh's safety facts.
+				for (const reason of existing.uncertainReasons) options?.onUncertainUpstream?.(reason);
+				// Another owner's refused admission is not this waiter's budget verdict.
+				return raceCredentialRefreshWithSignal(
+					existing.promise.catch((error: unknown) => {
+						if (error instanceof RecoveryAdmissionError) {
+							throw new Error("Shared OAuth refresh did not complete", { cause: error });
+						}
+						throw error;
+					}),
+					signal,
+				);
+			}
 		}
 		if (Date.now() + OAUTH_REFRESH_SKEW_MS < credential.expires) return credential;
 		if (credentialId === undefined) {
-			return this.#refreshOAuthCredentialUnshared(provider, credential, undefined, signal);
+			return this.#refreshOAuthCredentialUnshared(provider, credential, undefined, signal, options);
 		}
-		const promise = this.#refreshOAuthCredentialUnshared(provider, credential, credentialId).finally(() => {
+		// A secondary waiter sends nothing. The first owner supplies admission, but
+		// its cancel must not tear down the refresh shared by other waiters.
+		const uncertainReasons: string[] = [];
+		const promise = this.#refreshOAuthCredentialUnshared(provider, credential, credentialId, undefined, {
+			...options,
+			signal: undefined,
+			onUncertainUpstream: reason => {
+				uncertainReasons.push(reason);
+				options?.onUncertainUpstream?.(reason);
+			},
+		}).finally(() => {
 			this.#oauthCredentialRefreshInFlight.delete(credentialId);
 		});
-		this.#oauthCredentialRefreshInFlight.set(credentialId, promise);
+		this.#oauthCredentialRefreshInFlight.set(credentialId, { promise, uncertainReasons });
 		return raceCredentialRefreshWithSignal(promise, signal);
 	}
 
@@ -3294,6 +3365,7 @@ export class AuthStorage {
 		credential: OAuthCredential,
 		credentialId: number | undefined,
 		signal?: AbortSignal,
+		options?: OAuthRefreshOptions,
 	): Promise<OAuthCredentials> {
 		let refreshPromise: Promise<OAuthCredentials>;
 		// Caller override > store-level hook > local per-provider refresh.
@@ -3302,18 +3374,20 @@ export class AuthStorage {
 		const storeRefresh = this.#store.refreshOAuthCredential?.bind(this.#store);
 		const overrideRefresh = this.#refreshOAuthCredentialOverride ?? storeRefresh;
 		if (overrideRefresh && credentialId !== undefined) {
-			refreshPromise = overrideRefresh(provider, credentialId, credential, signal);
+			options?.onUncertainUpstream?.("Broker OAuth refresh has unobserved remote requests and effects");
+			refreshPromise = overrideRefresh(provider, credentialId, credential, signal, options);
 		} else if (credential.mcpBinding) {
-			refreshPromise = refreshBoundMCPOAuthCredential(credential, {}, signal);
+			refreshPromise = refreshBoundMCPOAuthCredential(credential, {}, signal, options?.fetch);
 		} else {
 			const customProvider = getOAuthProvider(provider);
 			if (customProvider) {
 				if (!customProvider.refreshToken) {
 					throw new Error(`OAuth provider "${provider}" does not support token refresh`);
 				}
-				refreshPromise = customProvider.refreshToken(credential);
+				options?.onUncertainUpstream?.("Custom OAuth refresh has no verified upstream admission capability");
+				refreshPromise = customProvider.refreshToken(credential, { ...options, signal });
 			} else {
-				refreshPromise = refreshOAuthToken(provider as OAuthProvider, credential);
+				refreshPromise = refreshOAuthToken(provider as OAuthProvider, credential, { ...options, signal });
 			}
 		}
 		// Bound the refresh so a slow/hanging token endpoint cannot stall credential selection.
@@ -3353,7 +3427,12 @@ export class AuthStorage {
 		const selected = stored[selection.index];
 		if (selected?.credential.type !== "oauth") return false;
 
-		const prepared = await prepare(selected.id, { signal: options?.signal });
+		const prepared = await prepare(selected.id, {
+			signal: options?.signal,
+			fetch: options?.fetch,
+			onUpstreamRequest: options?.onUpstreamRequest,
+			onUncertainUpstream: options?.onUncertainUpstream,
+		});
 		if (!prepared) return true;
 		const latestRows = this.#store.listAuthCredentials(provider);
 		this.#setStoredCredentials(
@@ -3438,6 +3517,7 @@ export class AuthStorage {
 					selection.credential,
 					this.#getStoredCredentials(provider)[selection.index]?.id,
 					options?.signal,
+					options,
 				);
 				const apiKey = customProvider.getApiKey
 					? customProvider.getApiKey(refreshedCredentials)
@@ -3454,6 +3534,7 @@ export class AuthStorage {
 					selection.credential,
 					this.#getStoredCredentials(provider)[selection.index]?.id,
 					options?.signal,
+					options,
 				);
 				const oauthCreds: Record<string, OAuthCredentials> = {
 					[provider]: refreshedCredentials,
@@ -3497,6 +3578,9 @@ export class AuthStorage {
 			this.#recordSessionCredential(provider, sessionId, "oauth", selection.index);
 			return { apiKey: result.apiKey, credential: updated };
 		} catch (error) {
+			// Owner admission and cancellation are not evidence of invalid credentials.
+			if (options?.signal?.aborted) throw options.signal.reason;
+			if (error instanceof Error && isRecoveryAdmissionErrorMessage(error.message)) throw error;
 			const errorMsg = String(error);
 			// Peer-rotation recovery runs before ANY failure classification: a
 			// concurrent process may have rotated the refresh token, which
@@ -3783,7 +3867,10 @@ export class AuthStorage {
 
 		const markSuspect = this.#store.markCredentialSuspect?.bind(this.#store);
 		if (markSuspect) {
-			await markSuspect(matched.id, { signal });
+			const refreshOptions = isAbortSignalOption(optionsOrSignal) ? undefined : optionsOrSignal;
+			// The broker force-refreshes upstream; that exchange is unobservable here.
+			refreshOptions?.onUncertainUpstream?.("Broker forced credential refresh has unobserved remote requests");
+			await markSuspect(matched.id, { ...refreshOptions, signal });
 		} else {
 			await this.reload();
 		}

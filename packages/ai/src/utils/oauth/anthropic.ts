@@ -1,9 +1,10 @@
 /**
  * Anthropic OAuth flow (Anthropic model Pro/Max)
  */
+import { RecoveryAdmissionError } from "../recovery-budget";
 import { OAuthCallbackFlow } from "./callback-server";
 import { generatePKCE } from "./pkce";
-import type { OAuthController, OAuthCredentials } from "./types";
+import type { OAuthController, OAuthCredentials, OAuthRefreshOptions } from "./types";
 
 const decode = (s: string) => atob(s);
 const CLIENT_ID = decode("OWQxYzI1MGEtZTYxYi00NGQ5LTg4ZWQtNTk0NGQxOTYyZjVl");
@@ -12,6 +13,7 @@ const TOKEN_URL = "https://api.anthropic.com/v1/oauth/token";
 const CALLBACK_PORT = 54545;
 const CALLBACK_PATH = "/callback";
 const SCOPES = "org:create_api_key user:profile user:inference";
+const TOKEN_REQUEST_TIMEOUT_MS = 30_000;
 
 function formatErrorDetails(error: unknown): string {
 	if (error instanceof Error) {
@@ -30,15 +32,22 @@ function formatErrorDetails(error: unknown): string {
 	return String(error);
 }
 
-async function postJson(url: string, body: Record<string, string | number>): Promise<string> {
-	const response = await fetch(url, {
+async function postJson(
+	url: string,
+	body: Record<string, string | number>,
+	opts?: Pick<OAuthRefreshOptions, "fetch" | "signal">,
+): Promise<string> {
+	const fetchFn = opts?.fetch ?? globalThis.fetch;
+	const timeoutSignal = AbortSignal.timeout(TOKEN_REQUEST_TIMEOUT_MS);
+	const signal = opts?.signal ? AbortSignal.any([opts.signal, timeoutSignal]) : timeoutSignal;
+	const response = await fetchFn(url, {
 		method: "POST",
 		headers: {
 			"Content-Type": "application/json",
 			Accept: "application/json",
 		},
 		body: JSON.stringify(body),
-		signal: AbortSignal.timeout(30_000),
+		signal,
 	});
 
 	const responseBody = await response.text();
@@ -175,15 +184,24 @@ export async function loginAnthropic(ctrl: OAuthController): Promise<OAuthCreden
 /**
  * Refresh Anthropic OAuth token
  */
-export async function refreshAnthropicToken(refreshToken: string): Promise<OAuthCredentials> {
+export async function refreshAnthropicToken(
+	refreshToken: string,
+	options?: OAuthRefreshOptions,
+): Promise<OAuthCredentials> {
+	options?.signal?.throwIfAborted();
 	let responseBody: string;
 	try {
-		responseBody = await postJson(TOKEN_URL, {
-			grant_type: "refresh_token",
-			client_id: CLIENT_ID,
-			refresh_token: refreshToken,
-		});
+		responseBody = await postJson(
+			TOKEN_URL,
+			{
+				grant_type: "refresh_token",
+				client_id: CLIENT_ID,
+				refresh_token: refreshToken,
+			},
+			options,
+		);
 	} catch (error) {
+		if (error instanceof RecoveryAdmissionError || options?.signal?.aborted) throw error;
 		throw new Error(`Anthropic token refresh request failed. url=${TOKEN_URL}; details=${formatErrorDetails(error)}`);
 	}
 

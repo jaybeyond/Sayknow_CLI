@@ -22,10 +22,12 @@ import type {
 import { type AbortSourceTracker, createAbortSourceTracker } from "../utils/abort";
 import { AssistantMessageEventStream as EventStreamImpl } from "../utils/event-stream";
 import {
+	carryCodexStreamTimeoutPolicy,
 	getProviderStreamIdleTimeoutFallbackMs,
 	getStreamFirstEventTimeoutMs,
 	getStreamIdleTimeoutMs,
 	iterateWithIdleTimeout,
+	resolveCodexStreamTimeoutPolicy,
 } from "../utils/idle-iterator";
 import type { BedrockOptions } from "./amazon-bedrock";
 import type { AnthropicOptions } from "./anthropic";
@@ -234,22 +236,27 @@ function forwardStream<TApi extends Api>(
 				model.provider,
 				limits?.defaultFirstEventTimeoutMs,
 			);
-			const watchedSource = iterateWithIdleTimeout(source, {
-				idleTimeoutMs,
-				firstItemTimeoutMs:
-					options.streamFirstEventTimeoutMs ?? getStreamFirstEventTimeoutMs(idleTimeoutMs, firstEventFallbackMs),
-				errorMessage: LAZY_STREAM_IDLE_TIMEOUT_ERROR,
-				firstItemErrorMessage: LAZY_STREAM_FIRST_EVENT_TIMEOUT_ERROR,
-				onIdle: () => abortTracker.abortLocally(new Error(LAZY_STREAM_IDLE_TIMEOUT_ERROR)),
-				onFirstItemTimeout: () => abortTracker.abortLocally(new Error(LAZY_STREAM_FIRST_EVENT_TIMEOUT_ERROR)),
-				abortSignal: options.signal,
-				// The synthetic `start` event is yielded immediately by every provider before
-				// the upstream model has emitted any tokens. Treating it as the first "real"
-				// item would flip the watchdog from `firstItemTimeoutMs` to the much shorter
-				// `idleTimeoutMs` while we're still legitimately waiting on the model's
-				// first response (slow first-token from reasoning models, cold proxies, etc.).
-				isProgressItem: event => (event as AssistantMessageEvent).type !== "start",
-			});
+			const watchedSource =
+				model.api === "openai-codex-responses"
+					? source
+					: iterateWithIdleTimeout(source, {
+							idleTimeoutMs,
+							firstItemTimeoutMs:
+								options.streamFirstEventTimeoutMs ??
+								getStreamFirstEventTimeoutMs(idleTimeoutMs, firstEventFallbackMs),
+							errorMessage: LAZY_STREAM_IDLE_TIMEOUT_ERROR,
+							firstItemErrorMessage: LAZY_STREAM_FIRST_EVENT_TIMEOUT_ERROR,
+							onIdle: () => abortTracker.abortLocally(new Error(LAZY_STREAM_IDLE_TIMEOUT_ERROR)),
+							onFirstItemTimeout: () =>
+								abortTracker.abortLocally(new Error(LAZY_STREAM_FIRST_EVENT_TIMEOUT_ERROR)),
+							abortSignal: options.signal,
+							// The synthetic `start` event is yielded immediately by every provider before
+							// the upstream model has emitted any tokens. Treating it as the first "real"
+							// item would flip the watchdog from `firstItemTimeoutMs` to the much shorter
+							// `idleTimeoutMs` while we're still legitimately waiting on the model's
+							// first response (slow first-token from reasoning models, cold proxies, etc.).
+							isProgressItem: event => (event as AssistantMessageEvent).type !== "start",
+						});
 
 			for await (const event of watchedSource) {
 				target.push(event);
@@ -306,18 +313,41 @@ function createLazyStream<TApi extends Api>(
 		const outer = new EventStreamImpl();
 		const streamOptions = (options ?? {}) as OptionsForApi<TApi>;
 
-		loadModule()
-			.then(module => {
+		const codexPolicy =
+			model.api === "openai-codex-responses" ? resolveCodexStreamTimeoutPolicy(streamOptions) : undefined;
+		(async () => {
+			try {
 				const abortTracker = createAbortSourceTracker(streamOptions.signal);
 				const providerOptions = { ...streamOptions, signal: abortTracker.requestSignal } as OptionsForApi<TApi>;
+				let module: LazyProviderModule<TApi>;
+				if (codexPolicy) {
+					const loading = async function* () {
+						yield await loadModule();
+					};
+					const guarded = iterateWithIdleTimeout(loading(), {
+						...codexPolicy,
+						strictDeadline: true,
+						errorMessage: LAZY_STREAM_IDLE_TIMEOUT_ERROR,
+						firstItemErrorMessage: LAZY_STREAM_FIRST_EVENT_TIMEOUT_ERROR,
+						abortSignal: streamOptions.signal,
+					});
+					const loaded = await guarded.next();
+					if (loaded.done) throw new Error("Provider module did not load");
+					await guarded.return(undefined);
+					module = loaded.value;
+					carryCodexStreamTimeoutPolicy(providerOptions, codexPolicy);
+				} else {
+					module = await loadModule();
+				}
 				const inner = module.stream(model, context, providerOptions);
 				forwardStream(outer, inner, model, streamOptions, abortTracker, limits);
-			})
-			.catch(error => {
-				const message = createLazyLoadErrorMessage(model, error);
-				outer.push({ type: "error", reason: "error", error: message });
+			} catch (error) {
+				const stopReason = streamOptions.signal?.aborted ? "aborted" : "error";
+				const message = createLazyLoadErrorMessage(model, error, stopReason);
+				outer.push({ type: "error", reason: stopReason, error: message });
 				outer.end(message);
-			});
+			}
+		})();
 
 		return outer;
 	};

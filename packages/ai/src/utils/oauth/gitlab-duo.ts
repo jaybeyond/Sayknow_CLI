@@ -1,7 +1,7 @@
 import { clearGitLabDuoDirectAccessCache } from "../../providers/gitlab-duo";
 import { OAuthCallbackFlow } from "./callback-server";
 import { generatePKCE } from "./pkce";
-import type { OAuthCredentials, OAuthLoginCallbacks } from "./types";
+import type { OAuthCredentials, OAuthLoginCallbacks, OAuthRefreshOptions } from "./types";
 
 const GITLAB_COM_URL = "https://gitlab.com";
 const BUNDLED_CLIENT_ID = "da4edff2e6ebd2bc3208611e2768bc1c1dd7be791dc5ff26ca34ca9ee44f7d4b";
@@ -96,8 +96,13 @@ export async function loginGitLabDuo(callbacks: OAuthLoginCallbacks): Promise<OA
 	return flow.login();
 }
 
-export async function refreshGitLabDuoToken(credentials: OAuthCredentials): Promise<OAuthCredentials> {
-	const response = await fetch(`${GITLAB_COM_URL}/oauth/token`, {
+export async function refreshGitLabDuoToken(
+	credentials: OAuthCredentials,
+	options?: OAuthRefreshOptions,
+): Promise<OAuthCredentials> {
+	options?.signal?.throwIfAborted();
+	const fetchFn = options?.fetch ?? globalThis.fetch;
+	const response = await fetchFn(`${GITLAB_COM_URL}/oauth/token`, {
 		method: "POST",
 		headers: { "Content-Type": "application/x-www-form-urlencoded" },
 		body: new URLSearchParams({
@@ -105,6 +110,7 @@ export async function refreshGitLabDuoToken(credentials: OAuthCredentials): Prom
 			grant_type: "refresh_token",
 			refresh_token: credentials.refresh,
 		}).toString(),
+		signal: options?.signal,
 	});
 
 	if (!response.ok) {

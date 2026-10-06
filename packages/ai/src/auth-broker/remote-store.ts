@@ -20,9 +20,9 @@ import {
 	REMOTE_REFRESH_SENTINEL,
 	type StoredAuthCredential,
 } from "../auth-storage";
-import type { Provider } from "../types";
+import type { FetchImpl, Provider } from "../types";
 import type { UsageReport } from "../usage";
-import type { OAuthCredentials } from "../utils/oauth/types";
+import type { OAuthCredentials, OAuthRefreshOptions } from "../utils/oauth/types";
 import { type AuthBrokerClient, AuthBrokerStreamUnsupportedError } from "./client";
 import type { RefresherSchedule, SnapshotEntry, SnapshotResponse, SnapshotStreamEvent } from "./types";
 
@@ -272,27 +272,34 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 		return true;
 	}
 
-	async waitForFreshSnapshot(maxWaitMs: number, opts: { signal?: AbortSignal } = {}): Promise<boolean> {
+	async waitForFreshSnapshot(
+		maxWaitMs: number,
+		opts: { signal?: AbortSignal; requestFetch?: FetchImpl } = {},
+	): Promise<boolean> {
 		const previousGeneration = this.#generation;
 		const result = await this.#client.fetchSnapshot({
 			ifGenerationGt: this.#generation,
 			waitMs: maxWaitMs,
 			signal: opts.signal,
+			requestFetch: opts.requestFetch,
 		});
 		if (result.status === 200) this.#applySnapshot(result.snapshot, result.generation);
 		return this.#generation !== previousGeneration;
 	}
 
-	async prepareForRequest(credentialId: number, opts: { signal?: AbortSignal } = {}): Promise<boolean> {
+	async prepareForRequest(credentialId: number, opts?: OAuthRefreshOptions): Promise<boolean> {
 		const entry = this.#snapshot.credentials.find(candidate => candidate.id === credentialId);
 		if (entry?.credential.type !== "oauth" || entry.rotatesInMs === null) return false;
 		const remainingMs = this.#snapshotReceivedAt + entry.rotatesInMs - Date.now();
 		if (remainingMs > WAIT_THRESHOLD_MS) return false;
-		return this.waitForFreshSnapshot(MAX_WAIT_MS, opts);
+		return this.waitForFreshSnapshot(MAX_WAIT_MS, {
+			signal: opts?.signal,
+			requestFetch: opts?.fetch,
+		});
 	}
 
-	async markCredentialSuspect(credentialId: number, opts: { signal?: AbortSignal } = {}): Promise<void> {
-		const { entry } = await this.#client.refreshCredential(credentialId, opts.signal);
+	async markCredentialSuspect(credentialId: number, opts: OAuthRefreshOptions = {}): Promise<void> {
+		const { entry } = await this.#client.refreshCredential(credentialId, opts.signal, opts);
 		if (entry.credential.type !== "oauth") {
 			throw new Error(`Broker returned non-OAuth credential for id=${credentialId}`);
 		}
@@ -492,8 +499,9 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 		credentialId: number,
 		_credential: OAuthCredential,
 		signal?: AbortSignal,
+		options?: OAuthRefreshOptions,
 	): Promise<OAuthCredentials> {
-		const { entry } = await this.#client.refreshCredential(credentialId, signal);
+		const { entry } = await this.#client.refreshCredential(credentialId, signal, options);
 		if (!this.#streamingActive) {
 			await this.refreshSnapshot().catch(error => {
 				logger.debug("auth-broker snapshot refresh after credential refresh failed", { error: String(error) });
@@ -555,13 +563,18 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 	 *
 	 * The broker already aggregates with its own 30s TTL on the server side; our
 	 * 15s client TTL is below that so we usually re-use the broker's cache too.
+	 * `cacheOnly` serves only a fresh cached or already in-flight aggregate and
+	 * never starts a broker request.
 	 */
 	async getUsageReport(
 		provider: Provider,
 		credential: OAuthCredential,
 		signal?: AbortSignal,
+		options?: { cacheOnly?: boolean },
 	): Promise<UsageReport | null> {
-		const reports = await this.#raceWithSignal(this.#loadUsageReports(), signal);
+		const pending = options?.cacheOnly ? this.#peekUsageReports() : this.#loadUsageReports();
+		if (!pending) return null;
+		const reports = await this.#raceWithSignal(pending, signal);
 		if (!reports) return null;
 		return matchUsageReport(reports, provider, credential);
 	}
@@ -592,6 +605,12 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 				},
 			);
 		});
+	}
+
+	#peekUsageReports(): Promise<UsageReport[] | null> | undefined {
+		const cached = this.#usageCache;
+		if (cached && Date.now() - cached.fetchedAt < USAGE_CACHE_TTL_MS) return Promise.resolve(cached.reports);
+		return this.#usageInflight ?? undefined;
 	}
 
 	#loadUsageReports(): Promise<UsageReport[] | null> {

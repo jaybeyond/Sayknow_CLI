@@ -43,6 +43,13 @@ export class FallbackChainController {
 	#restoredEntryIndices = new Set<number>();
 	skips: Array<{ selector: string; reason: string }> = [];
 	exhaustedForTurn = false;
+	/**
+	 * When true, the session's shared same-model recovery budget (bounded wire
+	 * count and deadline) owns transient failures instead of the per-entry
+	 * attempt cap. Set only while `fallback.maxAttempts` is not explicitly
+	 * configured; quota and auth keep their per-entry chain semantics.
+	 */
+	sessionBudgetOwnsTransient = false;
 
 	constructor(chain: ConfiguredFallbackChain, maxAttempts: number) {
 		if (!Number.isInteger(maxAttempts) || maxAttempts < 1) {
@@ -133,6 +140,14 @@ export class FallbackChainController {
 		}
 		this.#attemptStarted = false;
 		this.tried.push({ selector, triggerClass, reason });
+		if (this.sessionBudgetOwnsTransient && (triggerClass === "server" || triggerClass === "rate_limit")) {
+			// Transient: the session's shared request budget admits or stops the next
+			// same-model request. It must not consume the chain budget reserved for
+			// quota/auth advancement, so this attempt is not charged here.
+			this.attemptsUsed = Math.max(0, this.attemptsUsed - 1);
+			this.#totalAttemptsUsed = Math.max(0, this.#totalAttemptsUsed - 1);
+			return "retry";
+		}
 		if (this.#totalAttemptsUsed >= this.#maxTotalAttempts()) {
 			this.activeIndex = this.chain.entries.length;
 			this.exhaustedForTurn = true;

@@ -28,8 +28,11 @@
  * This provider must NEVER force `isOAuth=true`: the key is a plain Z.AI API key, and
  * api.z.ai is not api.anthropic.com, so the Anthropic path already emits a plain bearer.
  */
+
+import type { FetchImpl as SharedFetchImpl } from "../../types";
+import { RecoveryAdmissionError } from "../recovery-budget";
 import { OAuthCallbackFlow, type OAuthCallbackFlowOptions, parseCallbackInput } from "./callback-server";
-import type { OAuthController, OAuthCredentials } from "./types";
+import type { OAuthController, OAuthCredentials, OAuthRefreshOptions } from "./types";
 
 const TOKEN_REQUEST_TIMEOUT_MS = 30_000;
 export const GLM_ZCODE_REFRESH_SKEW_MS = 2 * 60 * 1000;
@@ -50,7 +53,7 @@ export const GLM_ZCODE_ZAI_API_BASE = "https://api.z.ai";
 /** Model API base — the provisioned key is used here, exactly like a dashboard key. */
 export const GLM_ZCODE_ANTHROPIC_BASE_URL = "https://api.z.ai/api/anthropic";
 
-type FetchImpl = typeof globalThis.fetch;
+type FetchImpl = SharedFetchImpl;
 
 function envOr(name: string, fallback: string): string {
 	const value = process.env[name];
@@ -415,7 +418,7 @@ export interface GlmZcodeRefreshOptions {
  */
 export async function refreshGlmZcodeToken(
 	credentials: OAuthCredentials,
-	options: AbortSignal | GlmZcodeRefreshOptions = {},
+	options: AbortSignal | GlmZcodeRefreshOptions | OAuthRefreshOptions = {},
 ): Promise<OAuthCredentials> {
 	const { signal, fetch: fetchImpl } =
 		options instanceof AbortSignal ? { signal: options, fetch: undefined } : options;
@@ -426,6 +429,7 @@ export async function refreshGlmZcodeToken(
 	try {
 		return await provisionFromUpstream(fetchImpl ?? globalThis.fetch, upstream, undefined, signal);
 	} catch (error) {
+		if (error instanceof RecoveryAdmissionError || signal?.aborted) throw error;
 		throw new Error(
 			`glm-zcode credentials require re-login (\`/login glm-zcode\`); re-provisioning the Z.AI API key failed (${redactSecrets(String(error))})`,
 		);

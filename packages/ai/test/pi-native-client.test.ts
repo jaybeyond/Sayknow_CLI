@@ -261,40 +261,137 @@ describe("streamPiNative event flow", () => {
 		await expect(stream.result()).rejects.toMatchObject({ status: 502 });
 	});
 
-	it("fails fast when the caller's signal is already aborted before fetch fires", async () => {
-		const fetchImpl = spyOn({ fetch: globalThis.fetch }, "fetch") as unknown as FetchImpl;
+	it("fails fast when already aborted without sending a request", async () => {
+		const fetchSpy = spyOn({ fetch: globalThis.fetch }, "fetch");
 		const controller = new AbortController();
 		controller.abort(new Error("pre-aborted"));
+		const result = await streamPiNative(fakeModel(), baseContext, {
+			apiKey: "k",
+			fetch: fetchSpy,
+			signal: controller.signal,
+		}).result();
+		expect(result.stopReason).toBe("aborted");
+		expect(result.errorMessage).toBe("pre-aborted");
+		expect(fetchSpy.mock.calls).toHaveLength(0);
+	});
 
+	it("propagates caller abort while waiting for headers even when fetch does not settle", async () => {
+		const captured: { signal?: AbortSignal } = {};
+		const pending = Promise.withResolvers<Response>();
+		const fetchImpl: FetchImpl = (_input, init) => {
+			captured.signal = init?.signal ?? undefined;
+			return pending.promise;
+		};
+		const controller = new AbortController();
 		const stream = streamPiNative(fakeModel(), baseContext, {
 			apiKey: "k",
 			fetch: fetchImpl,
 			signal: controller.signal,
 		});
-
-		await expect(stream.result()).rejects.toThrow(/pre-aborted/);
-		// fetch was never called — short-circuit happened in the abort guard
-		expect((fetchImpl as unknown as ReturnType<typeof spyOn>).mock.calls.length).toBe(0);
+		const reason = new Error("user cancel");
+		controller.abort(reason);
+		const result = await stream.result();
+		expect(result.stopReason).toBe("aborted");
+		expect(result.errorMessage).toBe("user cancel");
+		expect(captured.signal?.aborted).toBe(true);
+		expect(captured.signal?.reason).toBe(reason);
 	});
 
-	it("forwards the caller's AbortSignal to the underlying fetch", async () => {
-		// The real abort path runs through fetch — its body is wired to the
-		// signal by the runtime. We test the contract we guarantee (signal
-		// forwarding); body-cancel hooks are a best-effort backstop on the
-		// `streamProxy` shape, and not worth asserting through a synthetic
-		// `ReadableStream` (whose reader is locked by `readSseJson`, so any
-		// `body.cancel()` would throw a `TypeError("locked")` we then swallow).
-		const captured: { signal?: AbortSignal } = {};
-		const fetchImpl: FetchImpl = (async (_input, init) => {
-			captured.signal = init?.signal ?? undefined;
-			return fakeResponse([{ type: "done", reason: "stop", message: baseAssistant() }]);
-		}) as FetchImpl;
+	it("removes the caller abort listener and cancels trailing reads after a terminal event", async () => {
 		const controller = new AbortController();
-		await streamPiNative(fakeModel(), baseContext, {
+		const remove = spyOn(controller.signal, "removeEventListener");
+		const terminal = baseAssistant();
+		let cancelled = false;
+		const body = new ReadableStream<Uint8Array>({
+			start(source) {
+				source.enqueue(sseBytes([{ type: "done", reason: "stop", message: terminal }]));
+			},
+			cancel() {
+				cancelled = true;
+			},
+		});
+		const stream = streamPiNative(fakeModel(), baseContext, {
 			apiKey: "k",
-			fetch: fetchImpl,
 			signal: controller.signal,
-		}).result();
-		expect(captured.signal).toBe(controller.signal);
+			fetch: async () => new Response(body, { headers: { "Content-Type": "text/event-stream" } }),
+		});
+		expect((await stream.result()).stopReason).toBe("stop");
+		await Bun.sleep(0);
+		expect(cancelled).toBe(true);
+		expect(remove.mock.calls.some(call => call[0] === "abort")).toBe(true);
+	});
+
+	it("times out a pre-header stall without waiting for fetch to cooperate", async () => {
+		const pending = Promise.withResolvers<Response>();
+		const captured: { signal?: AbortSignal } = {};
+		const stream = streamPiNative(fakeModel(), baseContext, {
+			apiKey: "k",
+			streamFirstEventTimeoutMs: 20,
+			fetch: (_input, init) => {
+				captured.signal = init?.signal ?? undefined;
+				return pending.promise;
+			},
+		});
+		const result = await stream.result();
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toBe("Pi-native stream timed out while waiting for the first event");
+		expect(captured.signal?.aborted).toBe(true);
+	});
+
+	it("does not extend a semantic first deadline with repeated metadata", async () => {
+		let stopHeartbeats = () => {};
+		const bytes = new TextEncoder().encode(
+			`data: ${JSON.stringify({ type: "start", partial: baseAssistant() })}\n\n`,
+		);
+		const body = new ReadableStream<Uint8Array>({
+			start(source) {
+				const timer = setInterval(() => source.enqueue(bytes), 2);
+				stopHeartbeats = () => clearInterval(timer);
+			},
+			cancel() {
+				stopHeartbeats();
+			},
+		});
+		try {
+			const result = await streamPiNative(fakeModel(), baseContext, {
+				apiKey: "k",
+				streamFirstEventTimeoutMs: 20,
+				streamIdleTimeoutMs: 30,
+				fetch: async () => new Response(body, { headers: { "Content-Type": "text/event-stream" } }),
+			}).result();
+			expect(result.errorMessage).toBe("Pi-native stream timed out while waiting for the first event");
+		} finally {
+			stopHeartbeats();
+		}
+	});
+
+	it("preserves a streamed prefix when the semantic idle deadline expires", async () => {
+		const captured: { signal?: AbortSignal } = {};
+		const prefix = baseAssistant({ content: [{ type: "text", text: "preserved prefix" }] });
+		const body = new ReadableStream<Uint8Array>({
+			start(source) {
+				const events: AssistantMessageEvent[] = [
+					{ type: "start", partial: prefix },
+					{ type: "text_delta", contentIndex: 0, delta: "preserved prefix", partial: prefix },
+				];
+				source.enqueue(
+					new TextEncoder().encode(events.map(event => `data: ${JSON.stringify(event)}\n\n`).join("")),
+				);
+			},
+		});
+		const stream = streamPiNative(fakeModel(), baseContext, {
+			apiKey: "k",
+			streamFirstEventTimeoutMs: 100,
+			streamIdleTimeoutMs: 20,
+			fetch: async (_input, init) => {
+				captured.signal = init?.signal ?? undefined;
+				return new Response(body, { headers: { "Content-Type": "text/event-stream" } });
+			},
+		});
+		const result = await stream.result();
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toBe("Pi-native stream stalled while waiting for the next event");
+		expect(result.content).toEqual(prefix.content);
+		expect(captured.signal?.aborted).toBe(true);
 	});
 });

@@ -14,7 +14,7 @@
  * containerized SKC deployments that route every LLM call through a
  * credential-holding sidecar so the container stays credential-free.
  */
-import { readSseJson } from "@sayknow-cli/utils";
+import { readSseJson, structuredCloneJSON } from "@sayknow-cli/utils";
 import type {
 	Api,
 	AssistantMessage,
@@ -25,6 +25,15 @@ import type {
 	SimpleStreamOptions,
 } from "../types";
 import { AssistantMessageEventStream } from "../utils/event-stream";
+import {
+	getProviderFirstEventTimeoutFallbackMs,
+	getProviderStreamIdleTimeoutFallbackMs,
+	getStreamFirstEventTimeoutMs,
+	getStreamIdleTimeoutMs,
+	isSemanticContentDelta,
+	iterateWithIdleTimeout,
+} from "../utils/idle-iterator";
+import { RecoveryAdmissionError } from "../utils/recovery-budget";
 
 /**
  * Fields that must not cross the wire — either non-serializable (functions,
@@ -37,6 +46,9 @@ const NON_WIRE_KEYS = new Set<keyof SimpleStreamOptions>([
 	"signal",
 	"apiKey",
 	"fetch",
+	"credentialFetch",
+	"onUncertainUpstream",
+	"onUpstreamRequest",
 	"onPayload",
 	"onResponse",
 	"onSseEvent",
@@ -138,80 +150,110 @@ export function streamPiNative<TApi extends Api>(
 	context: Context,
 	options?: SimpleStreamOptions,
 ): AssistantMessageEventStreamType {
+	const producer = new AssistantMessageEventStream();
 	const stream = new AssistantMessageEventStream();
+	const signal = options?.signal;
+	const requestAbort = new AbortController();
+	const startedAt = Date.now();
+	const idleTimeoutMs =
+		options?.streamIdleTimeoutMs ?? getStreamIdleTimeoutMs(getProviderStreamIdleTimeoutFallbackMs(model.provider));
+	// An explicitly disabled first-event watchdog stays disabled (0); undefined would
+	// otherwise fall back to the idle window inside the iterator.
+	const firstTimeoutMs =
+		options?.streamFirstEventTimeoutMs ??
+		getStreamFirstEventTimeoutMs(idleTimeoutMs, getProviderFirstEventTimeoutFallbackMs(model.provider)) ??
+		0;
+	const idleError = "Pi-native stream stalled while waiting for the next event";
+	const firstError = "Pi-native stream timed out while waiting for the first event";
+	const forwardAbort = (): void => requestAbort.abort(signal?.reason);
+	if (signal?.aborted) forwardAbort();
+	else signal?.addEventListener("abort", forwardAbort, { once: true });
+	let partial = makeSyntheticAssistant(model as Model<Api>);
+	let finished = false;
+
+	// One semantic watchdog covers headers, first content, and every subsequent
+	// content gap. Metadata and gateway heartbeats never buy a new deadline.
+	void (async () => {
+		try {
+			for await (const event of iterateWithIdleTimeout(producer, {
+				idleTimeoutMs,
+				firstItemTimeoutMs: firstTimeoutMs,
+				firstItemStartedAt: startedAt,
+				strictDeadline: true,
+				errorMessage: idleError,
+				firstItemErrorMessage: firstError,
+				abortSignal: signal,
+				onIdle: () => requestAbort.abort(new Error(idleError)),
+				onFirstItemTimeout: () => requestAbort.abort(new Error(firstError)),
+				isProgressItem: isSemanticContentDelta,
+			})) {
+				stream.push(event);
+				if (event.type === "done" || event.type === "error") break;
+			}
+			stream.end();
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			if (signal?.aborted || message === idleError || message === firstError || partial.content.length > 0) {
+				const failure = structuredCloneJSON(partial);
+				failure.stopReason = signal?.aborted ? "aborted" : "error";
+				failure.errorMessage = message;
+				stream.push({ type: "error", reason: failure.stopReason, error: failure });
+				stream.end();
+			} else {
+				stream.fail(error);
+			}
+		} finally {
+			finished = true;
+			if (!requestAbort.signal.aborted) requestAbort.abort(new Error("Pi-native stream finished"));
+			signal?.removeEventListener("abort", forwardAbort);
+		}
+	})();
 
 	void (async () => {
-		const signal = options?.signal;
-		// Abort propagation: cancel the response body when the caller's signal
-		// fires. Mirror `streamProxy`'s shape — explicit listener + finally
-		// cleanup — so we don't leak listeners on the long-running case.
-		let response: Response | null = null;
-		const onAbort = (): void => {
-			const body = response?.body;
-			if (body) body.cancel("Request aborted by caller").catch(() => {});
-		};
-		if (signal) {
-			if (signal.aborted) {
-				stream.fail(signal.reason instanceof Error ? signal.reason : new Error(String(signal.reason ?? "aborted")));
-				return;
-			}
-			signal.addEventListener("abort", onAbort, { once: true });
-		}
-
 		try {
+			requestAbort.signal.throwIfAborted();
 			const url = resolveStreamUrl(model as Model<Api>);
 			const fetchImpl = options?.fetch ?? globalThis.fetch;
 			const headers = buildHeaders(model as Model<Api>, options?.apiKey);
-			const body = JSON.stringify({
-				modelId: model.id,
-				context,
-				options: buildWireOptions(options),
-				stream: true,
-			});
-
-			response = await fetchImpl(url, { method: "POST", headers, body, signal });
-			if (!response.ok) {
-				stream.fail(await decodeGatewayError(response));
+			const body = JSON.stringify({ modelId: model.id, context, options: buildWireOptions(options), stream: true });
+			// The gateway runs the provider request (and any hidden resend) remotely; its
+			// effects are unobservable here, so automatic recovery must not resend. The
+			// admitted fetch has already validated and charged the wire before this fires.
+			const markDispatched = (): void =>
+				options?.onUncertainUpstream?.("Pi-native gateway dispatch has unobserved remote requests and effects");
+			const response = await fetchImpl(url, { method: "POST", headers, body, signal: requestAbort.signal }).then(
+				result => {
+					markDispatched();
+					return result;
+				},
+				(error: unknown) => {
+					// A refused admission sent nothing; any other rejection may have reached the gateway.
+					if (!(error instanceof RecoveryAdmissionError)) markDispatched();
+					throw error;
+				},
+			);
+			if (finished) {
+				void response.body?.cancel();
 				return;
 			}
-			if (!response.body) {
-				stream.fail(new Error("auth-gateway returned empty body"));
-				return;
-			}
-
-			let sawTerminal = false;
+			if (!response.ok) throw await decodeGatewayError(response);
+			if (!response.body) throw new Error("auth-gateway returned empty body");
 			for await (const event of readSseJson<AssistantMessageEvent>(
 				response.body as ReadableStream<Uint8Array>,
-				signal,
+				requestAbort.signal,
 			)) {
-				if (event.type === "done" || event.type === "error") sawTerminal = true;
-				stream.push(event);
-				// `stream.push` resolves `.result()` on `done`/`error`; subsequent
-				// pushes are silently dropped by the base class. We still iterate
-				// to drain any trailing bytes from the wire so the underlying TCP
-				// stream closes cleanly.
-			}
-
-			if (!sawTerminal) {
-				const aborted = signal?.aborted === true;
-				if (aborted) {
-					const partial = makeSyntheticAssistant(model as Model<Api>);
-					partial.stopReason = "aborted";
-					partial.errorMessage = "stream closed without terminal event";
-					stream.push({ type: "error", reason: "aborted", error: partial });
-				} else {
-					const error = Object.assign(new Error("pi-native SSE stream closed without terminal event"), {
-						status: 502,
-						headers: response.headers,
-					});
-					stream.fail(error);
+				if (finished) return;
+				if ("partial" in event) partial = structuredCloneJSON(event.partial);
+				producer.push(event);
+				if (event.type === "done" || event.type === "error") {
+					producer.end();
+					return;
 				}
 			}
-			stream.end();
-		} catch (err) {
-			stream.fail(err);
-		} finally {
-			if (signal) signal.removeEventListener("abort", onAbort);
+			if (!finished)
+				throw Object.assign(new Error("pi-native SSE stream closed without terminal event"), { status: 502 });
+		} catch (error) {
+			if (!finished) producer.fail(error);
 		}
 	})();
 

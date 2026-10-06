@@ -11,6 +11,7 @@ import { ExtensionRunner } from "@sayknow-cli/coding-agent/extensibility/extensi
 import type { Extension } from "@sayknow-cli/coding-agent/extensibility/extensions/types";
 import { AgentSession, type AgentSessionEvent } from "@sayknow-cli/coding-agent/session/agent-session";
 import { AuthStorage } from "@sayknow-cli/coding-agent/session/auth-storage";
+import { convertToLlm } from "@sayknow-cli/coding-agent/session/messages";
 import { SessionManager } from "@sayknow-cli/coding-agent/session/session-manager";
 import { TempDir } from "@sayknow-cli/utils";
 import * as z from "zod/v4";
@@ -288,6 +289,7 @@ describe("AgentSession resilient retry", () => {
 		tools?: AgentTool[];
 		streamFn: StreamFn;
 		extensionRunner?: ExtensionRunner;
+		sessionManager?: SessionManager;
 	}): AgentSession {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) throw new Error("Expected bundled Anthropic test model to exist");
@@ -295,6 +297,8 @@ describe("AgentSession resilient retry", () => {
 			getApiKey: provider => `${provider}-test-key`,
 			initialState: { model, systemPrompt: ["Test"], tools: options.tools ?? [], messages: [] },
 			streamFn: options.streamFn,
+			// Production converter: session custom messages reach the model as user turns.
+			convertToLlm,
 		});
 		const settings = Settings.isolated({
 			// Single-model retry policy under test: the mock stream records a `mock` model, so an
@@ -305,7 +309,7 @@ describe("AgentSession resilient retry", () => {
 		settings.setModelRole("default", `${model.provider}/${model.id}`);
 		return new AgentSession({
 			agent,
-			sessionManager: SessionManager.inMemory(),
+			sessionManager: options.sessionManager ?? SessionManager.inMemory(),
 			settings,
 			modelRegistry,
 			extensionRunner: options.extensionRunner,
@@ -340,7 +344,7 @@ describe("AgentSession resilient retry", () => {
 		return { retryStartEvents, retryEndEvents };
 	}
 
-	it("retries transient errors past retry.maxRetries (unbounded)", async () => {
+	it("caps transient retries at an explicit retry.maxRetries instead of retrying unbounded", async () => {
 		const requestedModels: string[] = [];
 		session = buildSession({
 			responses: [
@@ -357,14 +361,46 @@ describe("AgentSession resilient retry", () => {
 		await session.prompt("trigger transient errors beyond maxRetries");
 		await session.waitForIdle();
 
-		// maxRetries is 1, but transient retries are unbounded: 3 retries occur.
-		expect(retryStartEvents.length).toBe(3);
-		expect(retryStartEvents.every(e => e.unbounded === true)).toBe(true);
-		expect(requestedModels).toHaveLength(4);
+		// Explicit retry.maxRetries=1: one same-model retry, then the real error surfaces.
+		expect(retryStartEvents).toHaveLength(1);
+		expect(retryStartEvents.every(e => e.unbounded === false)).toBe(true);
+		expect(requestedModels).toHaveLength(2);
 		expect(retryEndEvents).toHaveLength(1);
-		expect(retryEndEvents[0]).toMatchObject({ success: true });
-		expect(lastAssistant(session).stopReason).toBe("stop");
+		expect(retryEndEvents[0]).toMatchObject({ success: false });
+		expect(lastAssistant(session)).toMatchObject({
+			stopReason: "error",
+			errorMessage: "503 service unavailable: overloaded_error",
+		});
 		expect(waitSpy).toHaveBeenCalled();
+	});
+
+	it("bounds default transient recovery to seven same-model requests per step", async () => {
+		const requestedModels: string[] = [];
+		session = buildSession({
+			responses: Array.from({ length: 14 }, () => ({ throw: "503 service unavailable: overloaded_error" })),
+			settingsOverrides: { "retry.maxRetries": undefined },
+			requestedModels,
+		});
+		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		const { retryStartEvents, retryEndEvents } = track(session);
+
+		await session.prompt("trigger persistent transient errors");
+		await session.waitForIdle();
+
+		// 1 original + 6 recovery requests, then stop on the same model with the real error.
+		expect(requestedModels).toHaveLength(7);
+		expect(new Set(requestedModels).size).toBe(1);
+		expect(retryStartEvents).toHaveLength(6);
+		expect(retryStartEvents.every(e => e.unbounded === false && e.maxAttempts === 6)).toBe(true);
+		expect(retryEndEvents).toEqual([expect.objectContaining({ success: false })]);
+		expect(lastAssistant(session)).toMatchObject({ stopReason: "error" });
+		expect(session.isRetrying).toBe(false);
+
+		// The next user turn starts a fresh step budget on the same model.
+		requestedModels.length = 0;
+		await session.prompt("try again");
+		await session.waitForIdle();
+		expect(requestedModels).toHaveLength(7);
 	});
 
 	it("retries unknown / no-code errors within retry.maxRetries", async () => {
@@ -1005,9 +1041,7 @@ describe("AgentSession resilient retry", () => {
 		expect(lastAssistant(session).errorMessage).toContain("first event");
 	});
 
-	it("keeps first-party first-event timeout retries unbounded (#713 scope guard)", async () => {
-		// The fix is scoped to ollama-cloud: first-party providers keep their
-		// existing unbounded transient-retry behavior for first-event timeouts.
+	it("caps first-party first-event timeout retries at an explicit retry.maxRetries", async () => {
 		const requestedModels: string[] = [];
 		session = buildSession({
 			responses: [
@@ -1016,6 +1050,8 @@ describe("AgentSession resilient retry", () => {
 				{ throw: "Anthropic stream timed out while waiting for the first event" },
 				{ content: ["recovered"] },
 			],
+			// Isolates the retry cap from the silent-stall breaker (default 3).
+			settingsOverrides: { "retry.maxRetries": 3, "retry.maxSilentTimeouts": 4 },
 			requestedModels,
 		});
 		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
@@ -1024,13 +1060,37 @@ describe("AgentSession resilient retry", () => {
 		await session.prompt("first-party first-event timeout");
 		await session.waitForIdle();
 
-		// maxRetries is 1, but unbounded transient retries continue past it.
 		expect(retryStartEvents).toHaveLength(3);
-		expect(retryStartEvents.every(e => e.unbounded === true)).toBe(true);
+		expect(retryStartEvents.every(e => e.unbounded === false)).toBe(true);
 		expect(requestedModels).toHaveLength(4);
 		expect(retryEndEvents).toHaveLength(1);
 		expect(retryEndEvents[0]).toMatchObject({ success: true });
 		expect(lastAssistant(session).stopReason).toBe("stop");
+	});
+	it("stops after consecutive first-event timeouts without output, inside the request budget", async () => {
+		const requestedModels: string[] = [];
+		session = buildSession({
+			responses: [
+				{ throw: "Anthropic stream timed out while waiting for the first event" },
+				{ throw: "Anthropic stream timed out while waiting for the first event" },
+				{ throw: "Anthropic stream timed out while waiting for the first event" },
+				{ content: ["never sent"] },
+			],
+			settingsOverrides: { "retry.maxRetries": 6 },
+			requestedModels,
+		});
+		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		const notices: string[] = [];
+		session.subscribe(event => {
+			if (event.type === "notice") notices.push(event.message);
+		});
+
+		await session.prompt("silent provider");
+		await session.waitForIdle();
+
+		expect(requestedModels).toHaveLength(3);
+		expect(lastAssistant(session).stopReason).toBe("error");
+		expect(notices.some(message => message.includes("3 consecutive timeouts without any output"))).toBe(true);
 	});
 	it("retries provider stream first-event timeouts under a bare default config (single model)", async () => {
 		// Regression: with a single default model and NO explicit retry.* keys,
@@ -1252,64 +1312,150 @@ describe("AgentSession resilient retry", () => {
 		expect(retryEndEvents[0]).toMatchObject({ success: true });
 		expect(lastAssistant(session).stopReason).toBe("stop");
 	});
-	it("fails closed on structured watchdog facts and actual streamed partial output under bare defaults", async () => {
-		for (const partialOutput of [false, true]) {
-			const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
-			const streamedDeltas: string[] = [];
-			session = buildBareStreamingSession({
-				streamFn: () => {
-					const stream = new AssistantMessageEventStream();
-					queueMicrotask(() => {
-						const empty = assistantMessage(
-							model,
-							[],
-							"error",
-							"Example Provider Watchdog stream timed out while waiting for the first event",
-						);
-						if (!partialOutput) empty.transportFailure = { kind: "transport", status: 503 };
-						stream.push({ type: "start", partial: empty });
-						if (partialOutput) {
-							const visible = assistantMessage(
-								model,
-								[{ type: "text", text: "already visible" }],
-								"error",
-								"Example Provider Watchdog stream timed out while waiting for the first event",
-							);
-							stream.push({ type: "text_start", contentIndex: 0, partial: empty });
-							stream.push({ type: "text_delta", contentIndex: 0, delta: "already ", partial: visible });
-							stream.push({ type: "text_delta", contentIndex: 0, delta: "visible", partial: visible });
-							streamedDeltas.push("already ", "visible");
-							stream.push({ type: "error", reason: "error", error: visible });
-							return;
-						}
-						stream.push({ type: "error", reason: "error", error: empty });
-					});
-					return stream;
-				},
-			});
-			vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
-			const { retryStartEvents } = track(session);
-			const observedDeltas: string[] = [];
-			session.subscribe(event => {
-				if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
-					observedDeltas.push(event.assistantMessageEvent.delta);
-				}
-			});
+	it("fails closed on structured watchdog facts under bare defaults", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		session = buildBareStreamingSession({
+			streamFn: () => {
+				const stream = new AssistantMessageEventStream();
+				queueMicrotask(() => {
+					const empty = assistantMessage(
+						model,
+						[],
+						"error",
+						"Example Provider Watchdog stream timed out while waiting for the first event",
+					);
+					empty.transportFailure = { kind: "transport", status: 503 };
+					stream.push({ type: "start", partial: empty });
+					stream.push({ type: "error", reason: "error", error: empty });
+				});
+				return stream;
+			},
+		});
+		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		const { retryStartEvents } = track(session);
 
-			await session.prompt("bare-config unsafe watchdog");
-			await session.waitForIdle();
+		await session.prompt("bare-config unsafe watchdog");
+		await session.waitForIdle();
 
-			expect(retryStartEvents).toHaveLength(0);
-			expect(lastAssistant(session).stopReason).toBe("error");
-			if (partialOutput) {
-				expect(observedDeltas).toEqual(streamedDeltas);
-				expect(lastAssistant(session).content).toEqual([{ type: "text", text: "already visible" }]);
-			}
-			await session.dispose();
-			session = undefined;
-		}
+		expect(retryStartEvents).toHaveLength(0);
+		expect(lastAssistant(session).stopReason).toBe("error");
 	});
-	it("does not replay a bare-default watchdog after a registered tool completes and continues", async () => {
+	it("continues a stalled visible text answer on the same model without deleting or re-emitting it", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const stall = "Anthropic stream stalled while waiting for the next event";
+		const contexts: Array<Array<{ role: string; text: string }>> = [];
+		let streamCalls = 0;
+		session = buildBareStreamingSession({
+			streamFn: (_model, context) => {
+				streamCalls++;
+				contexts.push(
+					context.messages.map(message => ({
+						role: message.role,
+						text:
+							typeof message.content === "string"
+								? message.content
+								: message.content
+										.map(block => (block.type === "text" ? block.text : `[${block.type}]`))
+										.join(""),
+					})),
+				);
+				const stream = new AssistantMessageEventStream();
+				queueMicrotask(() => {
+					if (streamCalls === 1) {
+						const empty = assistantMessage(model, [], "error", stall);
+						const visible = assistantMessage(
+							model,
+							[{ type: "text", text: "Three findings: one," }],
+							"error",
+							stall,
+						);
+						stream.push({ type: "start", partial: empty });
+						stream.push({ type: "text_start", contentIndex: 0, partial: empty });
+						stream.push({ type: "text_delta", contentIndex: 0, delta: "Three findings: one,", partial: visible });
+						stream.push({ type: "error", reason: "error", error: visible });
+						return;
+					}
+					const done = assistantMessage(model, [{ type: "text", text: " two, three." }], "stop");
+					const opening = assistantMessage(model, [], "stop");
+					stream.push({ type: "start", partial: opening });
+					stream.push({ type: "text_start", contentIndex: 0, partial: opening });
+					stream.push({ type: "text_delta", contentIndex: 0, delta: " two, three.", partial: done });
+					stream.push({ type: "done", reason: "stop", message: done });
+				});
+				return stream;
+			},
+		});
+		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		const { retryStartEvents, retryEndEvents } = track(session);
+		const deltas: string[] = [];
+		session.subscribe(event => {
+			if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
+				deltas.push(event.assistantMessageEvent.delta);
+			}
+		});
+
+		await session.prompt("report");
+		await session.waitForIdle();
+
+		expect(streamCalls).toBe(2);
+		expect(retryStartEvents).toHaveLength(1);
+		expect(retryEndEvents.at(-1)?.success).toBe(true);
+		// Each delta was shown exactly once: nothing deleted, nothing re-emitted.
+		expect(deltas).toEqual(["Three findings: one,", " two, three."]);
+		const assistants = session.agent.state.messages.filter(
+			(message): message is AssistantMessage => message.role === "assistant",
+		);
+		expect(assistants.map(message => message.content)).toEqual([
+			[{ type: "text", text: "Three findings: one," }],
+			[{ type: "text", text: " two, three." }],
+		]);
+		// The continuation request keeps the preserved prefix plus one instruction.
+		const resent = contexts[1]!;
+		expect(resent.at(-2)).toEqual({ role: "assistant", text: "Three findings: one," });
+		expect(resent.at(-1)?.role).toBe("user");
+		expect(resent.at(-1)?.text).toContain("Continue directly from where it stops");
+		expect(resent.filter(message => message.text.includes("Continue directly"))).toHaveLength(1);
+		// The checkpoint is durable session state, not model context.
+		const entries = session.sessionManager.getEntries();
+		expect(entries.some(entry => entry.type === "custom" && entry.customType === "recovery_checkpoint")).toBe(true);
+	});
+	it("pauses instead of continuing when the visible tail contains a tool call", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const stall = "Anthropic stream stalled while waiting for the next event";
+		let streamCalls = 0;
+		session = buildBareStreamingSession({
+			streamFn: () => {
+				streamCalls++;
+				const stream = new AssistantMessageEventStream();
+				queueMicrotask(() => {
+					const partial = assistantMessage(
+						model,
+						[
+							{ type: "text", text: "Writing the file" },
+							{ type: "toolCall", id: "partial-call", name: "write", arguments: {} },
+						],
+						"error",
+						stall,
+					);
+					stream.push({ type: "start", partial });
+					stream.push({ type: "error", reason: "error", error: partial });
+				});
+				return stream;
+			},
+		});
+		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		const { retryStartEvents } = track(session);
+
+		await session.prompt("unsafe tail");
+		await session.waitForIdle();
+
+		expect(streamCalls).toBe(1);
+		expect(retryStartEvents).toHaveLength(0);
+		expect(
+			session.agent.state.messages.some(message => message.role === "assistant" && message.stopReason === "error"),
+		).toBe(true);
+	});
+	it("recovers a bare-default watchdog after a completed tool without re-running the tool", async () => {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
 		const toolCall: ToolCall = { type: "toolCall", id: "counted-tool-call", name: "counted", arguments: {} };
 		let toolRuns = 0;
@@ -1336,14 +1482,20 @@ describe("AgentSession resilient retry", () => {
 						stream.push({ type: "done", reason: "toolUse", message: response });
 						return;
 					}
-					const failure = assistantMessage(
-						model,
-						[],
-						"error",
-						"Example Provider Watchdog stream timed out while waiting for the first event",
-					);
-					stream.push({ type: "start", partial: failure });
-					stream.push({ type: "error", reason: "error", error: failure });
+					if (streamCalls === 2) {
+						const failure = assistantMessage(
+							model,
+							[],
+							"error",
+							"Example Provider Watchdog stream timed out while waiting for the first event",
+						);
+						stream.push({ type: "start", partial: failure });
+						stream.push({ type: "error", reason: "error", error: failure });
+						return;
+					}
+					const done = assistantMessage(model, [{ type: "text", text: "finished" }], "stop");
+					stream.push({ type: "start", partial: done });
+					stream.push({ type: "done", reason: "stop", message: done });
 				});
 				return stream;
 			},
@@ -1355,12 +1507,14 @@ describe("AgentSession resilient retry", () => {
 		await session.waitForIdle();
 
 		expect(toolRuns).toBe(1);
-		expect(session.agent.state.messages).toContainEqual(
-			expect.objectContaining({ role: "toolResult", toolCallId: toolCall.id, toolName: "counted" }),
-		);
-		expect(streamCalls).toBe(2);
-		expect(retryStartEvents).toHaveLength(0);
-		expect(lastAssistant(session).stopReason).toBe("error");
+		expect(
+			session.agent.state.messages.filter(
+				message => message.role === "toolResult" && message.toolCallId === toolCall.id,
+			),
+		).toHaveLength(1);
+		expect(streamCalls).toBe(3);
+		expect(retryStartEvents).toHaveLength(1);
+		expect(lastAssistant(session).stopReason).toBe("stop");
 	});
 	it("gives an active cancel-and-submit replacement a clean retry epoch", async () => {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
@@ -1476,5 +1630,291 @@ describe("AgentSession resilient retry", () => {
 		expect(retryStartEvents).toHaveLength(0);
 		expect(requestedModels).toHaveLength(1);
 		expect(lastAssistant(session).stopReason).toBe("error");
+	});
+
+	it("never continues signed or redacted thinking tails after public text", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const privateBlocks: AssistantMessage["content"][number][] = [
+			{ type: "thinking", thinking: "private", thinkingSignature: "immutable-signature" },
+			{ type: "redactedThinking", data: "opaque-data" },
+		];
+		for (const privateBlock of privateBlocks) {
+			let requests = 0;
+			session = buildBareStreamingSession({
+				streamFn: () => {
+					requests++;
+					const stream = new AssistantMessageEventStream();
+					queueMicrotask(() => {
+						const partial = assistantMessage(
+							model,
+							[privateBlock, { type: "text", text: "preserved" }],
+							"error",
+							"Anthropic stream stalled while waiting for the next event",
+						);
+						stream.push({ type: "start", partial });
+						stream.push({ type: "error", reason: "error", error: partial });
+					});
+					return stream;
+				},
+			});
+			await session.prompt("signed-tail safety");
+			await session.waitForIdle();
+			expect(requests).toBe(1);
+			expect(lastAssistant(session).content).toEqual([privateBlock, { type: "text", text: "preserved" }]);
+			await session.dispose();
+			session = undefined;
+		}
+	});
+
+	it("refuses a visible continuation when checkpoint flush fails", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		let requests = 0;
+		session = buildBareStreamingSession({
+			streamFn: () => {
+				requests++;
+				const stream = new AssistantMessageEventStream();
+				queueMicrotask(() => {
+					const partial = assistantMessage(
+						model,
+						[{ type: "text", text: "prefix" }],
+						"error",
+						"Anthropic stream stalled while waiting for the next event",
+					);
+					stream.push({ type: "start", partial });
+					stream.push({ type: "error", reason: "error", error: partial });
+				});
+				return stream;
+			},
+		});
+		const ensure = vi.spyOn(session.sessionManager, "ensureOnDisk");
+		const originalFlush = session.sessionManager.flush.bind(session.sessionManager);
+		vi.spyOn(session.sessionManager, "flush").mockImplementation(async () => {
+			const marker = session!.sessionManager
+				.getBranch()
+				.findLast(entry => entry.type === "custom" && entry.customType === "recovery_checkpoint");
+			if (marker?.type === "custom" && (marker.data as { state?: string })?.state === "recovering")
+				throw new Error("disk failure");
+			await originalFlush();
+		});
+		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		await session.prompt("checkpoint failure");
+		await session.waitForIdle();
+		expect(requests).toBe(1);
+		expect(ensure).toHaveBeenCalled();
+		expect(lastAssistant(session).content).toEqual([{ type: "text", text: "prefix" }]);
+	});
+
+	it("does not re-execute a completed call ID returned by a later model step", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		let requests = 0;
+		let toolRuns = 0;
+		const countedTool: AgentTool = {
+			name: "counted",
+			label: "Counted",
+			description: "Counts real effects",
+			parameters: z.object({}),
+			execute: async () => {
+				toolRuns++;
+				return { content: [{ type: "text" as const, text: "saved" }] };
+			},
+		};
+		session = buildBareStreamingSession({
+			tools: [countedTool],
+			streamFn: () => {
+				requests++;
+				const stream = new AssistantMessageEventStream();
+				queueMicrotask(() => {
+					const response = assistantMessage(
+						model,
+						[{ type: "toolCall", id: "confirmed-write", name: "counted", arguments: {} }],
+						"toolUse",
+					);
+					stream.push({ type: "start", partial: response });
+					stream.push({ type: "done", reason: "toolUse", message: response });
+				});
+				return stream;
+			},
+		});
+		await session.prompt("one write only");
+		await session.waitForIdle();
+		expect(requests).toBe(2);
+		expect(toolRuns).toBe(1);
+		expect(lastAssistant(session).errorCode).toBe("tool_call_identity_reentry");
+		expect(
+			session.agent.state.messages.filter(
+				message => message.role === "toolResult" && message.toolCallId === "confirmed-write",
+			),
+		).toHaveLength(1);
+	});
+
+	it("runs consecutive tool calls whose provider left the call id blank", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		let requests = 0;
+		let toolRuns = 0;
+		const countedTool: AgentTool = {
+			name: "counted",
+			label: "Counted",
+			description: "Counts real effects",
+			parameters: z.object({}),
+			execute: async () => {
+				toolRuns++;
+				return { content: [{ type: "text" as const, text: "saved" }] };
+			},
+		};
+		session = buildBareStreamingSession({
+			tools: [countedTool],
+			streamFn: () => {
+				requests++;
+				const stream = new AssistantMessageEventStream();
+				queueMicrotask(() => {
+					const response =
+						requests <= 2
+							? assistantMessage(
+									model,
+									[{ type: "toolCall", id: "", name: "counted", arguments: {} }],
+									"toolUse",
+								)
+							: assistantMessage(model, [{ type: "text", text: "done" }], "stop");
+					stream.push({ type: "start", partial: response });
+					stream.push({
+						type: "done",
+						reason: response.stopReason === "toolUse" ? "toolUse" : "stop",
+						message: response,
+					});
+				});
+				return stream;
+			},
+		});
+		await session.prompt("two unnamed writes");
+		await session.waitForIdle();
+		expect(requests).toBe(3);
+		expect(toolRuns).toBe(2);
+		expect(lastAssistant(session).errorCode).toBeUndefined();
+	});
+
+	it("does not truncate a Retry-After floor beyond the remaining deadline", async () => {
+		const requestedModels: string[] = [];
+		session = buildStatusErrorSession({
+			errorMessage: "503 service unavailable",
+			errorStatus: 503,
+			transportFailure: { kind: "transport", status: 503, headers: { "retry-after-ms": "1200000" } },
+			recoveredContent: "must not be requested",
+			requestedModels,
+			settingsOverrides: { "retry.maxRetries": 1, "retry.maxDelayMs": 60_000 },
+		});
+		const wait = vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		await session.prompt("respect provider wait floor");
+		await session.waitForIdle();
+		expect(requestedModels).toHaveLength(1);
+		expect(wait).not.toHaveBeenCalled();
+		expect(lastAssistant(session).stopReason).toBe("error");
+	});
+
+	it("persists in_flight before credential lookup and first inference, then completed after success", async () => {
+		const manager = SessionManager.create(tempDir.path(), tempDir.path());
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const phases: string[] = [];
+		session = buildBareStreamingSession({
+			sessionManager: manager,
+			streamFn: async () => {
+				const file = manager.getSessionFile();
+				if (!file) throw new Error("Missing checkpoint file");
+				const contents = await Bun.file(file).text();
+				expect(contents).toContain('"state":"in_flight"');
+				phases.push("inference");
+				const stream = new AssistantMessageEventStream();
+				queueMicrotask(() => {
+					const done = assistantMessage(model, [{ type: "text", text: "accepted" }], "stop");
+					stream.push({ type: "start", partial: done });
+					stream.push({ type: "done", reason: "stop", message: done });
+				});
+				return stream;
+			},
+		});
+		vi.spyOn(session.agent, "getApiKey").mockImplementation(async () => {
+			const file = manager.getSessionFile();
+			if (!file) throw new Error("Missing checkpoint file");
+			expect(await Bun.file(file).text()).toContain('"state":"in_flight"');
+			phases.push("credentials");
+			return "test-key";
+		});
+		await session.prompt("durable first admission");
+		await session.waitForIdle();
+		expect(phases).toEqual(["credentials", "inference"]);
+		const file = manager.getSessionFile();
+		if (!file) throw new Error("Missing completion file");
+		expect(await Bun.file(file).text()).toContain('"state":"completed"');
+	});
+
+	it("lets a new prompt run a full tool loop after hydrating an interrupted checkpoint", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const manager = SessionManager.inMemory();
+		manager.appendCustomEntry("recovery_checkpoint", { version: 1, state: "in_flight", stepId: "lost-step" });
+		const toolCall: ToolCall = { type: "toolCall", id: "hydrated-tool-call", name: "counted", arguments: {} };
+		let toolRuns = 0;
+		let streamCalls = 0;
+		const countedTool: AgentTool = {
+			name: "counted",
+			label: "Counted",
+			description: "Counts executions after hydration",
+			parameters: z.object({}),
+			execute: async () => {
+				toolRuns++;
+				return { content: [{ type: "text" as const, text: "counted result" }] };
+			},
+		};
+		session = buildBareStreamingSession({
+			tools: [countedTool],
+			sessionManager: manager,
+			streamFn: () => {
+				streamCalls++;
+				const stream = new AssistantMessageEventStream();
+				queueMicrotask(() => {
+					const response =
+						streamCalls === 1
+							? assistantMessage(model, [toolCall], "toolUse")
+							: assistantMessage(model, [{ type: "text", text: "finished" }], "stop");
+					stream.push({ type: "start", partial: response });
+					stream.push({
+						type: "done",
+						reason: response.stopReason === "toolUse" ? "toolUse" : "stop",
+						message: response,
+					});
+				});
+				return stream;
+			},
+		});
+
+		await session.prompt("explicit resume after interruption");
+		await session.waitForIdle();
+
+		expect(toolRuns).toBe(1);
+		expect(streamCalls).toBe(2);
+		expect(lastAssistant(session).stopReason).toBe("stop");
+	});
+
+	it("never rebinds a retained old admission hook to a successor turn", async () => {
+		const retained: Array<NonNullable<Parameters<StreamFn>[2]>["onUpstreamRequest"]> = [];
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		session = buildBareStreamingSession({
+			streamFn: (_model, _context, options) => {
+				retained.push(options?.onUpstreamRequest);
+				options?.onUpstreamRequest?.("inference");
+				const stream = new AssistantMessageEventStream();
+				queueMicrotask(() => {
+					const done = assistantMessage(model, [{ type: "text", text: "done" }], "stop");
+					stream.push({ type: "done", reason: "stop", message: done });
+				});
+				return stream;
+			},
+		});
+		await session.prompt("first owner");
+		await session.waitForIdle();
+		expect(retained[0]).toBeDefined();
+		expect(() => retained[0]?.("resend")).toThrow("Recovery was cancelled before another upstream request");
+		await session.prompt("successor owner");
+		await session.waitForIdle();
+		expect(retained).toHaveLength(2);
+		expect(() => retained[0]?.("inference")).toThrow("Recovery was cancelled before another upstream request");
 	});
 });

@@ -79,6 +79,35 @@ describe("AgentSession startup continuation", () => {
 		}
 	});
 
+	it("never auto-sends an interrupted recovery continuation on restart", async () => {
+		const interrupted: AssistantMessage = {
+			...assistantTail(),
+			content: [{ type: "text", text: "partial answer" }],
+			stopReason: "error",
+			errorMessage: "Anthropic stream stalled while waiting for the next event",
+		};
+		const session = await createSession([
+			{ role: "user", content: "report", timestamp: 0 },
+			interrupted,
+			{
+				role: "custom",
+				customType: "stream-continuation",
+				content: "Continue directly from where it stops.",
+				display: false,
+				attribution: "agent",
+				timestamp: 1,
+			},
+		]);
+		try {
+			const continueSpy = vi.spyOn(session.agent, "continue");
+			await expect(session.continuePersistedHistory()).rejects.toThrow("interrupted during automatic recovery");
+			expect(continueSpy).not.toHaveBeenCalled();
+			expect(session.agent.state.messages.at(1)).toBe(interrupted);
+		} finally {
+			await session.dispose();
+		}
+	});
+
 	it("delegates and awaits Agent.continue exactly once for user and tool-result tails", async () => {
 		const resumableTails: AgentMessage[][] = [
 			[{ role: "user", content: "resume", timestamp: 0 }],

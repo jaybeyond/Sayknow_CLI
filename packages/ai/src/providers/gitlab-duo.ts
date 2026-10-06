@@ -1,6 +1,12 @@
 import { ANTHROPIC_THINKING, mapAnthropicToolChoice } from "../stream";
 import type { Api, Context, FetchImpl, Model, SimpleStreamOptions } from "../types";
 import { AssistantMessageEventStream } from "../utils/event-stream";
+import {
+	getProviderFirstEventTimeoutFallbackMs,
+	getProviderStreamIdleTimeoutFallbackMs,
+	getStreamFirstEventTimeoutMs,
+	getStreamIdleTimeoutMs,
+} from "../utils/idle-iterator";
 import { createProviderErrorMessage } from "./error-message";
 import type { OpenAICompletionsOptions } from "./openai-completions";
 import type { OpenAIResponsesOptions } from "./openai-responses";
@@ -172,9 +178,27 @@ interface DirectAccessToken {
 
 const directAccessCache = new Map<string, DirectAccessToken>();
 
+/**
+ * Recovery ownership the inner provider stream must receive unchanged: stream
+ * clocks, managed-attempt identity (disables transport replay), the local SDK
+ * retry cap, and the owner's upstream admission hook.
+ */
+function gitlabRecoveryOptions(options: SimpleStreamOptions) {
+	return {
+		streamIdleTimeoutMs: options.streamIdleTimeoutMs,
+		streamFirstEventTimeoutMs: options.streamFirstEventTimeoutMs,
+		requestMaxRetries: options.requestMaxRetries,
+		streamMaxRetries: options.streamMaxRetries,
+		fallbackManaged: options.fallbackManaged,
+		fallbackAttempt: options.fallbackAttempt,
+		onUpstreamRequest: options.onUpstreamRequest,
+	};
+}
+
 async function getDirectAccessToken(
 	gitlabAccessToken: string,
 	fetchImpl: FetchImpl = fetch,
+	signal?: AbortSignal,
 ): Promise<DirectAccessToken> {
 	const cached = directAccessCache.get(gitlabAccessToken);
 	if (cached && cached.expiresAt > Date.now()) {
@@ -190,6 +214,7 @@ async function getDirectAccessToken(
 		body: JSON.stringify({
 			feature_flags: { DuoAgentPlatformNext: true },
 		}),
+		signal,
 	});
 
 	if (!response.ok) {
@@ -215,6 +240,28 @@ async function getDirectAccessToken(
 	};
 	directAccessCache.set(gitlabAccessToken, token);
 	return token;
+}
+
+const DIRECT_ACCESS_TIMEOUT_MESSAGE = "GitLab Duo direct access token request timed out";
+
+/** Caller signal bounded by the first-event window (0 disables the bound). */
+function directAccessDeadline(
+	model: Model<Api>,
+	options: SimpleStreamOptions,
+): { signal: AbortSignal | undefined; dispose: () => void } {
+	const idleTimeoutMs =
+		options.streamIdleTimeoutMs ?? getStreamIdleTimeoutMs(getProviderStreamIdleTimeoutFallbackMs(model.provider));
+	const firstTimeoutMs =
+		options.streamFirstEventTimeoutMs ??
+		getStreamFirstEventTimeoutMs(idleTimeoutMs, getProviderFirstEventTimeoutFallbackMs(model.provider)) ??
+		0;
+	if (!(firstTimeoutMs > 0)) return { signal: options.signal, dispose: () => {} };
+	const timeout = new AbortController();
+	const timer = setTimeout(() => timeout.abort(new Error(DIRECT_ACCESS_TIMEOUT_MESSAGE)), firstTimeoutMs);
+	return {
+		signal: options.signal ? AbortSignal.any([options.signal, timeout.signal]) : timeout.signal,
+		dispose: () => clearTimeout(timer),
+	};
 }
 
 export function clearGitLabDuoDirectAccessCache(): void {
@@ -243,7 +290,15 @@ export function streamGitLabDuo(
 				throw new Error(`Unsupported GitLab Duo model: ${model.id}`);
 			}
 
-			const directAccess = await getDirectAccessToken(options.apiKey, options.fetch);
+			// Token HTTP is admitted as kind "token", never as the step's inference request.
+			// The first-event window starts at the request, so a stalled token exchange is
+			// bounded by the same deadline instead of waiting outside any watchdog.
+			const bound = directAccessDeadline(model, options);
+			const directAccess = await getDirectAccessToken(
+				options.apiKey,
+				options.credentialFetch ?? options.fetch,
+				bound.signal,
+			).finally(bound.dispose);
 			const headers = {
 				...directAccess.headers,
 				...options.headers,
@@ -282,6 +337,7 @@ export function streamGitLabDuo(
 								onResponse: options.onResponse,
 								onSseEvent: options.onSseEvent,
 								fetch: options.fetch,
+								...gitlabRecoveryOptions(options),
 								thinkingEnabled: Boolean(reasoningEffort) && model.reasoning,
 								thinkingBudgetTokens: reasoningEffort
 									? (options.thinkingBudgets?.[reasoningEffort] ?? ANTHROPIC_THINKING[reasoningEffort])
@@ -319,6 +375,7 @@ export function streamGitLabDuo(
 									onResponse: options.onResponse,
 									onSseEvent: options.onSseEvent,
 									fetch: options.fetch,
+									...gitlabRecoveryOptions(options),
 									reasoning: reasoningEffort,
 									toolChoice: options.toolChoice,
 								} satisfies OpenAIResponsesOptions,
@@ -351,6 +408,7 @@ export function streamGitLabDuo(
 									onResponse: options.onResponse,
 									onSseEvent: options.onSseEvent,
 									fetch: options.fetch,
+									...gitlabRecoveryOptions(options),
 									reasoning: reasoningEffort,
 									toolChoice: options.toolChoice,
 								} satisfies OpenAICompletionsOptions,

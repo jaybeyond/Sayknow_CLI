@@ -173,7 +173,7 @@ export interface AgentOptions {
 	 * Resolves an API key dynamically for each LLM call.
 	 * Useful for expiring tokens (e.g., GitHub Copilot OAuth).
 	 */
-	getApiKey?: (provider: string) => Promise<string | undefined> | string | undefined;
+	getApiKey?: AgentLoopConfig["getApiKey"];
 	getAuthCredentialType?: (provider: string) => "api_key" | "oauth" | undefined;
 
 	/**
@@ -300,6 +300,8 @@ export interface AgentPromptOptions {
 	onManagedAttemptAccepted?: AgentLoopConfig["onManagedAttemptAccepted"];
 	/** Receives a discarded managed attempt without exposing assistant lifecycle events. */
 	onManagedAttemptOutcome?: AgentLoopConfig["onManagedAttemptOutcome"];
+	/** Produces recovery evidence for a committed partial failure. Excluded from provider wire options. */
+	getRecoveryEvidence?: AgentLoopConfig["getRecoveryEvidence"];
 }
 
 /** Buffered Cursor tool result with text position at time of call */
@@ -368,6 +370,7 @@ export class Agent {
 	#transformToolCallArguments?: (args: Record<string, unknown>, toolName: string) => Record<string, unknown>;
 	#intentTracing: boolean;
 	#getToolChoice?: () => ToolChoice | undefined;
+	#toolFilter?: (tools: AgentTool<any>[]) => AgentTool<any>[];
 	#onPayload?: SimpleStreamOptions["onPayload"];
 	#onResponse?: SimpleStreamOptions["onResponse"];
 	#onSseEvent?: SimpleStreamOptions["onSseEvent"];
@@ -390,8 +393,10 @@ export class Agent {
 	#managedLogicalRunOwner?: ManagedLogicalRunId;
 
 	streamFn: StreamFn;
-	getApiKey?: (provider: string) => Promise<string | undefined> | string | undefined;
+	getApiKey?: AgentLoopConfig["getApiKey"];
 	getAuthCredentialType?: (provider: string) => "api_key" | "oauth" | undefined;
+
+	getUpstreamRequestLease?: AgentLoopConfig["getUpstreamRequestLease"];
 	/**
 	 * Hook invoked after tool arguments are validated and before execution.
 	 * Reassign at any time to swap the implementation (e.g. on extension reload).
@@ -906,6 +911,20 @@ export class Agent {
 		this.#contextRevision++;
 	}
 
+	/**
+	 * Restricts the tools a run exposes to the model and may execute, without
+	 * changing the selected tool set (`state.tools`). Pass `undefined` to clear.
+	 */
+	setToolFilter(filter: ((tools: AgentTool<any>[]) => AgentTool<any>[]) | undefined) {
+		this.#toolFilter = filter;
+		this.#contextRevision++;
+	}
+
+	/** Tools a run exposes to the model: the selected set narrowed by the active tool filter. */
+	#projectedTools(): AgentTool<any>[] {
+		return this.#toolFilter ? this.#toolFilter(this.#state.tools) : this.#state.tools;
+	}
+
 	replaceMessages(ms: AgentMessage[]) {
 		this.#state.messages = ms.slice();
 		this.#contextRevision++;
@@ -1373,7 +1392,7 @@ export class Agent {
 		const context: AgentContext = {
 			systemPrompt: this.#state.systemPrompt,
 			messages: this.#state.messages.slice(),
-			tools: this.#state.tools,
+			tools: this.#projectedTools(),
 		};
 
 		const cursorOnToolResult =
@@ -1403,8 +1422,13 @@ export class Agent {
 					}
 				: undefined;
 
-		const getToolChoice = () =>
-			this.#getToolChoice?.() ?? refreshToolChoiceForActiveTools(options?.toolChoice, this.#state.tools);
+		const getToolChoice = () => {
+			if (!this.#toolFilter) {
+				return this.#getToolChoice?.() ?? refreshToolChoiceForActiveTools(options?.toolChoice, this.#state.tools);
+			}
+			// A forced choice must never name a tool the filter withholds.
+			return refreshToolChoiceForActiveTools(this.#getToolChoice?.() ?? options?.toolChoice, this.#projectedTools());
+		};
 		const cursorExecHandlers = fallbackManaged ? undefined : this.#cursorExecHandlersForRun(runId);
 		let managedDecision: ManagedAttemptDecision | undefined;
 		let managedOutcome: ManagedAttemptOutcome | undefined;
@@ -1436,6 +1460,7 @@ export class Agent {
 						fallbackManaged: true,
 						nextFallbackAttempt: options?.nextFallbackAttempt,
 						onManagedAttemptAccepted: options?.onManagedAttemptAccepted,
+						getRecoveryEvidence: options?.getRecoveryEvidence,
 						onManagedAttemptOutcome: async outcome => {
 							managedOutcome = outcome;
 							managedDecision = (await options?.onManagedAttemptOutcome?.(outcome)) ?? {
@@ -1456,13 +1481,14 @@ export class Agent {
 			signal: abortController.signal,
 			getApiKey: this.getApiKey,
 			getAuthCredentialType: this.getAuthCredentialType,
+			getUpstreamRequestLease: this.getUpstreamRequestLease,
 			getToolContext: this.#getToolContext,
 			syncContextBeforeModelCall: async context => {
 				if (this.#listeners.size > 0) {
 					await Bun.sleep(0);
 				}
 				context.systemPrompt = this.#state.systemPrompt;
-				context.tools = this.#state.tools;
+				context.tools = this.#projectedTools();
 			},
 			...(cursorExecHandlers ? { cursorExecHandlers } : {}),
 			...(cursorOnToolResult ? { cursorOnToolResult } : {}),
@@ -1627,6 +1653,8 @@ export class Agent {
 			if (managedOutcome) {
 				if (managedDecision?.type === "terminal") {
 					this.requestRunTerminal(managedLogicalRunOwner ?? runId, managedDecision.terminal);
+				} else if (managedDecision?.type === "pause") {
+					this.requestRunTerminal(managedLogicalRunOwner ?? runId, { stopReason: "error" });
 				} else if (managedOutcome.type === "run_terminal") {
 					this.requestRunTerminal(managedLogicalRunOwner ?? runId, { stopReason: managedOutcome.reason });
 				} else if (managedDecision?.type !== "retry" && managedDecision?.type !== "maintenance") {

@@ -713,7 +713,8 @@ function getUsageTokens(usage: unknown): number {
 export function createSubagentSettings(baseSettings: Settings, inheritedServiceTier?: ServiceTier): Settings {
 	const snapshot: Partial<Record<SettingPath, unknown>> = {};
 	for (const key of Object.keys(SETTINGS_SCHEMA) as SettingPath[]) {
-		snapshot[key] = baseSettings.get(key);
+		// Materializing schema defaults would turn inherited retry policy into explicit caps.
+		if (baseSettings.has(key)) snapshot[key] = baseSettings.get(key);
 	}
 	// Subagent-scoped service-tier override: "inherit" uses the parent session's
 	// LIVE intent (so a runtime `/fast on` reaches subagents and a main-model

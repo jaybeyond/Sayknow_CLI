@@ -51,8 +51,10 @@ export type {
 	OAuthProvider,
 	OAuthProviderId,
 	OAuthProviderInfo,
+	OAuthRefreshOptions,
 } from "./utils/oauth/types";
 export * from "./utils/overflow";
+export * from "./utils/recovery-budget";
 export * from "./utils/retry";
 export * from "./utils/schema";
 export * from "./utils/tool-choice-capability";

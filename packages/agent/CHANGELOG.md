@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- `Agent.setToolFilter()` narrows the tools a run exposes to the model and may execute (including a forced tool choice) without changing the selected tool set. An upstream lease can observe each settled attempt through `onAttemptSettled`.
+
 ## [0.7.6] - 2026-10-05
 
 ## [0.7.4] - 2026-10-03

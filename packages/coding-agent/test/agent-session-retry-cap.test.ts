@@ -25,7 +25,7 @@ function lastAssistant(session: AgentSession): AssistantMessage {
 }
 
 /**
- * Contract: legacy transient retries have unbounded attempts with delays capped
+ * Contract: transient retries are bounded by the shared same-model step budget with delays capped
  * at `retry.maxDelayMs`; unknown errors use the finite retry budget. Provider
  * retry hints take precedence over computed backoff and are capped at that maximum.
  */
@@ -112,7 +112,7 @@ describe("AgentSession retry delay cap", () => {
 		// The transient retry loop runs once and its delay is capped.
 		expect(requestedModels).toEqual([`${model.provider}/${model.id}`, `${model.provider}/${model.id}`]);
 		expect(retryStartEvents).toHaveLength(1);
-		expect(retryStartEvents[0].unbounded).toBe(true);
+		expect(retryStartEvents[0].unbounded).toBe(false);
 		expect(retryStartEvents[0].delayMs).toBe(100);
 		expect(waitSpy).toHaveBeenCalledWith(retryStartEvents[0].delayMs, expect.anything());
 		// Successful retry emits a success end event and recovers.

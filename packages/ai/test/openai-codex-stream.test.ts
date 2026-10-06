@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { enrichModelThinking } from "@sayknow-cli/ai/model-thinking";
 import {
 	getOpenAICodexTransportDetails,
@@ -8,6 +8,7 @@ import {
 } from "@sayknow-cli/ai/providers/openai-codex-responses";
 import type { Context, Model, ProviderSessionState } from "@sayknow-cli/ai/types";
 import { getAgentDir, setAgentDir, TempDir } from "@sayknow-cli/utils";
+import { stream as streamModel } from "../src/stream";
 import { classifyFallbackTrigger } from "../src/utils/fallback-transport";
 
 const RAW_SENTINEL = "RAW_SENTINEL_DO_NOT_SURFACE";
@@ -726,10 +727,12 @@ describe("openai-codex streaming", () => {
 		const result = await streamOpenAICodexResponses(model, context, {
 			apiKey: token,
 			streamIdleTimeoutMs: 20,
+			// Status frames are not semantic output, so the first-output clock owns this stall.
+			streamFirstEventTimeoutMs: 20,
 		}).result();
 
 		expect(result.stopReason).toBe("error");
-		expect(result.errorMessage).toBe("OpenAI Codex SSE stream stalled while waiting for the next event");
+		expect(result.errorMessage).toBe("Provider stream timed out while waiting for the first event");
 		expect(result.content as unknown[]).toEqual([
 			{
 				type: "toolCall",
@@ -2032,6 +2035,131 @@ describe("openai-codex streaming", () => {
 		expect(transportDetails.lastTransport).toBe("sse");
 		expect(transportDetails.websocketDisabled).toBe(true);
 		expect(transportDetails.fallbackCount).toBe(1);
+	});
+
+	it("does not admit an upstream request when the websocket connect fails before any frame is sent", async () => {
+		const tempDir = TempDir.createSync("@pi-codex-ws-admission-");
+		setAgentDir(tempDir.path());
+		const fetchMock = vi.fn(async () => new Response(createCompletedCodexSse("Hello SSE")));
+		global.fetch = fetchMock as unknown as typeof fetch;
+		let frameSends = 0;
+		class FailingConnectWebSocket extends MockWebSocket {
+			constructor(url: string, options?: { headers?: WsHeaders }) {
+				super(url, options);
+				setTimeout(() => {
+					this.emit("error", new Event("error"));
+					this.emit("close", new Event("close"));
+					this.readyState = MockWebSocket.CLOSED;
+				}, 0);
+			}
+			send(): void {
+				frameSends += 1;
+			}
+		}
+		global.WebSocket = FailingConnectWebSocket as unknown as typeof WebSocket;
+		const onUpstreamRequest = vi.fn();
+
+		const result = await streamOpenAICodexResponses(
+			{ ...createCodexTestModel("https://chatgpt.com/backend-api"), preferWebsockets: true },
+			createCodexTestContext(),
+			{
+				apiKey: createCodexTestToken(),
+				sessionId: "ws-admission-connect-failure",
+				preferWebsockets: true,
+				providerSessionState: new Map<string, ProviderSessionState>(),
+				onUpstreamRequest,
+			},
+		).result();
+
+		expect(result.stopReason).toBe("stop");
+		expect(frameSends).toBe(0);
+		// The websocket never reached the wire; only the SSE fallback fetch (admitted by its own fetch) ran.
+		expect(onUpstreamRequest).not.toHaveBeenCalled();
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+	});
+
+	it("ends the stream with the admission error and sends no frame when admission throws", async () => {
+		const tempDir = TempDir.createSync("@pi-codex-ws-admission-");
+		setAgentDir(tempDir.path());
+		const fetchMock = vi.fn(async () => new Response(createCompletedCodexSse("unexpected SSE")));
+		global.fetch = fetchMock as unknown as typeof fetch;
+		let frameSends = 0;
+		class OpenWebSocket extends MockWebSocket {
+			constructor(url: string, options?: { headers?: WsHeaders }) {
+				super(url, options);
+				this.scheduleOpen();
+			}
+			send(): void {
+				frameSends += 1;
+				this.emitCodexResponse({ messageId: "msg_unexpected", responseId: "resp_unexpected", text: "leak" });
+			}
+		}
+		global.WebSocket = OpenWebSocket as unknown as typeof WebSocket;
+		const admissionError = new Error("recovery owner is stale");
+		const onUpstreamRequest = vi.fn(() => {
+			throw admissionError;
+		});
+
+		const result = await streamOpenAICodexResponses(
+			{ ...createCodexTestModel("https://chatgpt.com/backend-api"), preferWebsockets: true },
+			createCodexTestContext(),
+			{
+				apiKey: createCodexTestToken(),
+				sessionId: "ws-admission-throws",
+				preferWebsockets: true,
+				providerSessionState: new Map<string, ProviderSessionState>(),
+				onUpstreamRequest,
+			},
+		).result();
+
+		expect(onUpstreamRequest).toHaveBeenCalledTimes(1);
+		expect(onUpstreamRequest).toHaveBeenCalledWith("inference");
+		expect(frameSends).toBe(0);
+		expect(fetchMock).not.toHaveBeenCalled();
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toContain("recovery owner is stale");
+		expect(result.content).toEqual([]);
+	});
+
+	it("admits a successful websocket request exactly once, immediately before the frame send", async () => {
+		const tempDir = TempDir.createSync("@pi-codex-ws-admission-");
+		setAgentDir(tempDir.path());
+		const fetchMock = vi.fn(async () => new Response(createCompletedCodexSse("unexpected SSE")));
+		global.fetch = fetchMock as unknown as typeof fetch;
+		const order: string[] = [];
+		class OpenWebSocket extends MockWebSocket {
+			constructor(url: string, options?: { headers?: WsHeaders }) {
+				super(url, options);
+				order.push("construct");
+				this.scheduleOpen();
+			}
+			send(): void {
+				order.push("send");
+				this.emitCodexResponse({ messageId: "msg_ws", responseId: "resp_ws", text: "Hello WS" });
+			}
+		}
+		global.WebSocket = OpenWebSocket as unknown as typeof WebSocket;
+		const onUpstreamRequest = vi.fn(() => {
+			order.push("admit");
+		});
+
+		const result = await streamOpenAICodexResponses(
+			{ ...createCodexTestModel("https://chatgpt.com/backend-api"), preferWebsockets: true },
+			createCodexTestContext(),
+			{
+				apiKey: createCodexTestToken(),
+				sessionId: "ws-admission-success",
+				preferWebsockets: true,
+				providerSessionState: new Map<string, ProviderSessionState>(),
+				onUpstreamRequest,
+			},
+		).result();
+
+		expect(result.stopReason).toBe("stop");
+		expect(onUpstreamRequest).toHaveBeenCalledTimes(1);
+		expect(onUpstreamRequest).toHaveBeenCalledWith("inference");
+		expect(order).toEqual(["construct", "admit", "send"]);
+		expect(fetchMock).not.toHaveBeenCalled();
 	});
 
 	it("captures websocket handshake metadata and replays it on later SSE requests", async () => {
@@ -3711,5 +3839,323 @@ describe("openai-codex streaming", () => {
 
 		expect(requestTurnStates[0]).toBeNull();
 		expect(requestTurnStates[1]).toBe("turn-state-1");
+	});
+});
+
+describe("openai-codex semantic clocks (fake timers)", () => {
+	const clockEnvNames = [
+		"SKC_OPENAI_STREAM_IDLE_TIMEOUT_MS",
+		"PI_STREAM_IDLE_TIMEOUT_MS",
+		"PI_OPENAI_STREAM_IDLE_TIMEOUT_MS",
+		"PI_STREAM_FIRST_EVENT_TIMEOUT_MS",
+	] as const;
+	const savedClockEnv = new Map<string, string | undefined>();
+
+	beforeEach(() => {
+		for (const name of clockEnvNames) {
+			savedClockEnv.set(name, Bun.env[name]);
+			delete Bun.env[name];
+		}
+		setAgentDir(TempDir.createSync("@pi-codex-clock-").path());
+	});
+
+	afterEach(() => {
+		vi.useRealTimers();
+		for (const name of clockEnvNames) restoreEnv(name, savedClockEnv.get(name));
+	});
+
+	const created = { type: "response.created", response: { id: "resp_clock" } };
+	const inProgress = { type: "response.in_progress", response: { id: "resp_clock", status: "in_progress" } };
+	const textStart = [
+		{
+			type: "response.output_item.added",
+			item: { type: "message", id: "msg_clock", role: "assistant", status: "in_progress", content: [] },
+		},
+		{ type: "response.content_part.added", part: { type: "output_text", text: "" } },
+	];
+	const textDelta = (delta: string) => ({ type: "response.output_text.delta", delta });
+	const textDone = (text: string) => [
+		{
+			type: "response.output_item.done",
+			item: {
+				type: "message",
+				id: "msg_clock",
+				role: "assistant",
+				status: "completed",
+				content: [{ type: "output_text", text }],
+			},
+		},
+		{ type: "response.completed", response: { id: "resp_clock", status: "completed", usage: DEFAULT_USAGE } },
+	];
+
+	interface TimedFrame {
+		atMs: number;
+		events: Array<Record<string, unknown>>;
+		close?: boolean;
+	}
+
+	/** SSE body driven entirely by (fake) timers; heartbeats are non-semantic status frames. */
+	function createTimedCodexSse(
+		signal: AbortSignal | undefined,
+		frames: TimedFrame[],
+		heartbeatEveryMs?: number,
+	): Response {
+		const encoder = new TextEncoder();
+		const timers: NodeJS.Timeout[] = [];
+		let heartbeat: NodeJS.Timeout | undefined;
+		const stop = () => {
+			for (const timer of timers) clearTimeout(timer);
+			if (heartbeat) clearInterval(heartbeat);
+		};
+		const encode = (event: Record<string, unknown>) => encoder.encode(`data: ${JSON.stringify(event)}\n\n`);
+		const body = new ReadableStream<Uint8Array>({
+			start(controller) {
+				for (const frame of frames) {
+					timers.push(
+						setTimeout(() => {
+							for (const event of frame.events) controller.enqueue(encode(event));
+							if (frame.close) {
+								stop();
+								controller.close();
+							}
+						}, frame.atMs),
+					);
+				}
+				if (heartbeatEveryMs !== undefined) {
+					heartbeat = setInterval(() => controller.enqueue(encode(inProgress)), heartbeatEveryMs);
+				}
+				signal?.addEventListener(
+					"abort",
+					() => {
+						stop();
+						const reason = signal.reason;
+						controller.error(reason instanceof Error ? reason : new Error("request aborted"));
+					},
+					{ once: true },
+				);
+			},
+			cancel: stop,
+		});
+		return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
+	}
+
+	function installTimedFetch(frames: TimedFrame[], heartbeatEveryMs?: number): { calls: () => number } {
+		let calls = 0;
+		global.fetch = ((input: string | URL | Request, init?: RequestInit) => {
+			calls += 1;
+			return Promise.resolve(createTimedCodexSse(getRequestSignal(input, init), frames, heartbeatEveryMs));
+		}) as typeof fetch;
+		return { calls: () => calls };
+	}
+
+	async function flush(ticks = 200): Promise<void> {
+		for (let i = 0; i < ticks; i++) await Promise.resolve();
+	}
+
+	function trackSettled(result: Promise<unknown>): () => boolean {
+		let settled = false;
+		void result.then(
+			() => {
+				settled = true;
+			},
+			() => {
+				settled = true;
+			},
+		);
+		return () => settled;
+	}
+
+	const sseModel = () => ({ ...createCodexTestModel("https://chatgpt.com/backend-api"), preferWebsockets: false });
+	const entrypoints = [
+		{
+			name: "direct",
+			open: (options: { apiKey: string; signal?: AbortSignal }) =>
+				streamOpenAICodexResponses(sseModel(), createCodexTestContext(), options),
+		},
+		{
+			name: "lazy",
+			open: (options: { apiKey: string; signal?: AbortSignal }) =>
+				streamModel(sseModel(), createCodexTestContext(), options),
+		},
+	] as const;
+
+	for (const entry of entrypoints) {
+		it(`${entry.name}: metadata at 1s then content at 150s survives the old 120s window`, async () => {
+			vi.useFakeTimers();
+			const fetchState = installTimedFetch([
+				{ atMs: 1_000, events: [created] },
+				{ atMs: 150_000, events: [...textStart, textDelta("late hello"), ...textDone("late hello")], close: true },
+			]);
+			const response = entry.open({ apiKey: createCodexTestToken() }).result();
+			const settled = trackSettled(response);
+			await flush();
+			expect(fetchState.calls()).toBe(1);
+
+			vi.advanceTimersByTime(120_000);
+			await flush();
+			expect(settled()).toBe(false);
+
+			vi.advanceTimersByTime(30_000);
+			await flush();
+			const result = await response;
+			expect(result.stopReason).toBe("stop");
+			expect(result.content).toContainEqual(expect.objectContaining({ type: "text", text: "late hello" }));
+			expect(fetchState.calls()).toBe(1);
+		});
+
+		it(`${entry.name}: status heartbeats never extend the 300s semantic-first deadline`, async () => {
+			vi.useFakeTimers();
+			const fetchState = installTimedFetch([{ atMs: 1_000, events: [created] }], 10_000);
+			const response = entry.open({ apiKey: createCodexTestToken() }).result();
+			const settled = trackSettled(response);
+			await flush();
+
+			vi.advanceTimersByTime(299_999);
+			await flush();
+			expect(settled()).toBe(false);
+
+			vi.advanceTimersByTime(1);
+			await flush();
+			expect(settled()).toBe(true);
+			const result = await response;
+			expect(result.stopReason).toBe("error");
+			expect(result.errorMessage).toBe("Provider stream timed out while waiting for the first event");
+			expect(fetchState.calls()).toBe(1);
+		});
+
+		it(`${entry.name}: semantic idle is 300s after the last delta and keeps the committed partial`, async () => {
+			vi.useFakeTimers();
+			const fetchState = installTimedFetch(
+				[
+					{ atMs: 1_000, events: [created] },
+					{ atMs: 2_000, events: [...textStart, textDelta("partial")] },
+				],
+				10_000,
+			);
+			const response = entry.open({ apiKey: createCodexTestToken() }).result();
+			const settled = trackSettled(response);
+			await flush();
+
+			// Deliver the 2s delta before measuring idle; one jump would skip its processing.
+			vi.advanceTimersByTime(2_000);
+			await flush();
+			expect(settled()).toBe(false);
+
+			vi.advanceTimersByTime(299_999);
+			await flush();
+			expect(settled()).toBe(false);
+
+			vi.advanceTimersByTime(1);
+			await flush();
+			expect(settled()).toBe(true);
+			const result = await response;
+			expect(result.stopReason).toBe("error");
+			expect(result.errorMessage).toBe("Provider stream stalled while waiting for the next event");
+			expect(result.content).toContainEqual(expect.objectContaining({ type: "text", text: "partial" }));
+			expect(fetchState.calls()).toBe(1);
+		});
+
+		it(`${entry.name}: caller abort ends as aborted, not as a clock failure`, async () => {
+			vi.useFakeTimers();
+			const fetchState = installTimedFetch([{ atMs: 1_000, events: [created] }], 10_000);
+			const controller = new AbortController();
+			setTimeout(() => controller.abort(), 50_000);
+			const response = entry.open({ apiKey: createCodexTestToken(), signal: controller.signal }).result();
+			await flush();
+
+			vi.advanceTimersByTime(50_000);
+			await flush();
+			const result = await response;
+			expect(result.stopReason).toBe("aborted");
+			expect(result.errorMessage).toBe("Request was aborted");
+			expect(fetchState.calls()).toBe(1);
+		});
+	}
+
+	it("a shorter common first-event env still wins over the Codex 300s floor", async () => {
+		vi.useFakeTimers();
+		Bun.env.PI_STREAM_FIRST_EVENT_TIMEOUT_MS = "45000";
+		installTimedFetch([{ atMs: 1_000, events: [created] }], 10_000);
+		const response = streamModel(sseModel(), createCodexTestContext(), { apiKey: createCodexTestToken() }).result();
+		const settled = trackSettled(response);
+		await flush();
+
+		vi.advanceTimersByTime(44_999);
+		await flush();
+		expect(settled()).toBe(false);
+
+		vi.advanceTimersByTime(1);
+		await flush();
+		const result = await response;
+		expect(result.errorMessage).toBe("Provider stream timed out while waiting for the first event");
+	});
+
+	it("disabled common first-event env does not fall back to the idle timer", async () => {
+		vi.useFakeTimers();
+		Bun.env.PI_STREAM_FIRST_EVENT_TIMEOUT_MS = "0";
+		Bun.env.PI_STREAM_IDLE_TIMEOUT_MS = "20000";
+		const controller = new AbortController();
+		installTimedFetch([{ atMs: 1_000, events: [created] }], 10_000);
+		const response = streamOpenAICodexResponses(sseModel(), createCodexTestContext(), {
+			apiKey: createCodexTestToken(),
+			signal: controller.signal,
+		}).result();
+		const settled = trackSettled(response);
+		await flush();
+
+		vi.advanceTimersByTime(400_000);
+		await flush();
+		expect(settled()).toBe(false);
+
+		controller.abort();
+		await flush();
+		expect((await response).stopReason).toBe("aborted");
+	});
+
+	it("websocket: raw metadata keeps the socket alive while content at 150s still completes", async () => {
+		vi.useFakeTimers();
+		const fetchMock = vi.fn(async () => new Response("unexpected SSE fallback", { status: 500 }));
+		global.fetch = fetchMock as unknown as typeof fetch;
+		let sends = 0;
+		class LateContentWebSocket extends MockWebSocket {
+			constructor(url: string, options?: { headers?: WsHeaders }) {
+				super(url, options);
+				this.scheduleOpen();
+			}
+
+			send(): void {
+				sends += 1;
+				setTimeout(() => this.sendJson(created), 1_000);
+				setTimeout(() => {
+					for (const event of [...textStart, textDelta("ws late"), ...textDone("ws late")]) this.sendJson(event);
+				}, 150_000);
+			}
+		}
+		global.WebSocket = LateContentWebSocket as unknown as typeof WebSocket;
+		const response = streamOpenAICodexResponses(
+			createCodexTestModel("https://chatgpt.com/backend-api"),
+			createCodexTestContext(),
+			{
+				apiKey: createCodexTestToken(),
+				sessionId: "ws-clock-session",
+				providerSessionState: new Map<string, ProviderSessionState>(),
+			},
+		).result();
+		const settled = trackSettled(response);
+		await flush();
+		vi.advanceTimersByTime(1);
+		await flush();
+		expect(sends).toBe(1);
+
+		vi.advanceTimersByTime(120_000);
+		await flush();
+		expect(settled()).toBe(false);
+
+		vi.advanceTimersByTime(30_000);
+		await flush();
+		const result = await response;
+		expect(result.stopReason).toBe("stop");
+		expect(result.content).toContainEqual(expect.objectContaining({ type: "text", text: "ws late" }));
+		expect(fetchMock).not.toHaveBeenCalled();
 	});
 });

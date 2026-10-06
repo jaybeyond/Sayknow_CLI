@@ -29,6 +29,7 @@ import type { OpenAICompletionsOptions } from "./providers/openai-completions";
 import type { OpenAIResponsesOptions } from "./providers/openai-responses";
 import type { AssistantMessageEventStream } from "./utils/event-stream";
 import type { FallbackAttemptToken, TransportFailureFacts } from "./utils/fallback-transport";
+import type { RecoveryRequestKind } from "./utils/recovery-budget";
 
 export type { AssistantMessageEventStream } from "./utils/event-stream";
 
@@ -333,6 +334,14 @@ export interface StreamOptions {
 	/** Opaque token returned by beginAttempt for a managed transport invocation. */
 	fallbackAttempt?: FallbackAttemptToken;
 	/**
+	 * Called synchronously immediately before each concrete upstream request this
+	 * invocation sends (HTTP request through {@link fetch}, websocket request frame).
+	 * Throwing rejects that request before it leaves the process; the session uses it
+	 * to enforce one shared same-model recovery budget across hidden SDK resends,
+	 * transport fallbacks and token requests.
+	 */
+	onUpstreamRequest?: (kind: RecoveryRequestKind) => void;
+	/**
 	 * Called when a provider returns 401 before any replay-unsafe assistant
 	 * event has been emitted. Returning a different key retries the provider
 	 * request once.
@@ -417,10 +426,13 @@ export interface StreamOptions {
 	 * Optional `fetch` implementation override. Providers route every HTTP
 	 * request — direct calls, SDK clients, and retry helpers — through this
 	 * implementation when set. Defaults to `globalThis.fetch`. Providers that
-	 * do not use `fetch` (Bedrock's AWS SDK transport, Cursor's HTTP/2
-	 * channel) silently ignore the override.
+	 * do not use `fetch` (Cursor's HTTP/2 channel) silently ignore the override.
 	 */
 	fetch?: FetchImpl;
+	/** Admitted token HTTP adapter, separate from inference requests. */
+	credentialFetch?: FetchImpl;
+	/** Reports transport/auth paths with unverified remote effects to the owner. */
+	onUncertainUpstream?: (reason: string) => void;
 	/**
 	 * Authentication credential type selected for this request.
 	 * Providers use this only when endpoint routing differs between API-key and OAuth credentials.

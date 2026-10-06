@@ -101,6 +101,66 @@ export interface SkillPromptDetails {
  *  (fallback error emission) read it via `isSilentAbort`. */
 export const SILENT_ABORT_MARKER = "__skc.silent_abort__";
 
+/** Custom message type of the hidden instruction that resumes an interrupted visible answer. */
+export const VISIBLE_CONTINUATION_CUSTOM_TYPE = "stream-continuation";
+/** Hidden instruction that drives an automatic resume of an interrupted step. */
+export const AUTO_RESUME_CUSTOM_TYPE = "auto-resume";
+
+/**
+ * The assistant messages that together form one visible answer: a preserved prefix
+ * interrupted mid-stream and each same-step continuation that resumed it. Returns
+ * `[assistant]` when the message did not resume an interrupted answer.
+ */
+export function getVisibleAnswerChain(
+	messages: readonly ({ role: string; customType?: string } | AssistantMessage)[],
+	assistant: AssistantMessage,
+): AssistantMessage[] {
+	let index = messages.lastIndexOf(assistant);
+	if (index < 0) return [assistant];
+	const chain = [assistant];
+	while (index >= 2) {
+		const instruction = messages[index - 1];
+		const prefix = messages[index - 2];
+		if (instruction.role !== "custom" || !("customType" in instruction)) break;
+		if (instruction.customType !== VISIBLE_CONTINUATION_CUSTOM_TYPE) break;
+		if (!isAssistantMessage(prefix)) break;
+		chain.unshift(prefix);
+		index -= 2;
+	}
+	return chain;
+}
+
+/**
+ * Text of the last visible answer on a persisted branch, including the preserved
+ * prefix of a continued answer. Entries are projected to messages and continuation
+ * instructions; everything else breaks a chain.
+ */
+export function lastVisibleAnswerText(
+	branch: readonly (
+		| { type: "message"; message: { role: string } | AssistantMessage }
+		| { type: "custom_message"; customType: string }
+		| { type: string }
+	)[],
+): string | undefined {
+	const messages: Array<{ role: string; customType?: string } | AssistantMessage> = [];
+	for (const entry of branch) {
+		if ("message" in entry) messages.push(entry.message);
+		else if ("customType" in entry) messages.push({ role: "custom", customType: entry.customType });
+		else messages.push({ role: entry.type });
+	}
+	const last = messages.findLast(isAssistantMessage);
+	if (!last) return undefined;
+	return getVisibleAnswerChain(messages, last)
+		.flatMap(message => message.content)
+		.filter(block => block.type === "text")
+		.map(block => block.text)
+		.join("");
+}
+
+export function isAssistantMessage(message: { role: string } | AssistantMessage): message is AssistantMessage {
+	return message.role === "assistant";
+}
+
 /** Type-guard for `SILENT_ABORT_MARKER`. Renderers MUST branch on this rather
  *  than string-comparing inline so refactors to the marker constant (e.g.,
  *  namespacing changes) propagate through every consumer in lockstep. */
@@ -386,6 +446,36 @@ export function createCustomMessage(
 }
 
 /**
+ * A continuation instruction that no assistant answered (its request was never
+ * admitted, or a restart/new prompt superseded it). Only the trailing instruction of
+ * a live recovery and one followed by its continued answer reach the model.
+ */
+function isStaleVisibleContinuation(messages: readonly AgentMessage[], message: AgentMessage, index: number): boolean {
+	if (
+		message.role !== "custom" ||
+		(message.customType !== VISIBLE_CONTINUATION_CUSTOM_TYPE && message.customType !== AUTO_RESUME_CUSTOM_TYPE)
+	)
+		return false;
+	for (let i = index + 1; i < messages.length; i++) {
+		const next = messages[i];
+		// A failed continuation request with no visible output did not answer the instruction.
+		if (
+			next.role === "assistant" &&
+			next.content.some(
+				block =>
+					(block.type === "text" && block.text.trim().length > 0) ||
+					block.type === "thinking" ||
+					block.type === "redactedThinking" ||
+					block.type === "toolCall",
+			)
+		)
+			return false;
+		if (next.role === "user") return true;
+	}
+	return false;
+}
+
+/**
  * Transform AgentMessages (including custom types) to LLM-compatible Messages.
  *
  * This is used by:
@@ -395,6 +485,7 @@ export function createCustomMessage(
  */
 export function convertToLlm(messages: AgentMessage[]): Message[] {
 	return messages
+		.filter((m, index) => !isStaleVisibleContinuation(messages, m, index))
 		.map((m): Message | undefined => {
 			switch (m.role) {
 				case "bashExecution":

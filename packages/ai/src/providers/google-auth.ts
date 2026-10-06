@@ -17,6 +17,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { $credentialEnv, $envpos, isEnoent, logger } from "@sayknow-cli/utils";
 import type { FetchImpl } from "../types";
+import { RecoveryAdmissionError } from "../utils/recovery-budget";
 
 const OAUTH_TOKEN_URL = "https://oauth2.googleapis.com/token";
 const METADATA_TOKEN_URL = "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token";
@@ -177,7 +178,9 @@ async function fetchMetadataToken(
 		});
 		if (!response.ok) return undefined;
 		return (await response.json()) as TokenResponse;
-	} catch {
+	} catch (error) {
+		// A refused admission is the owner's verdict, not a missing metadata server.
+		if (error instanceof RecoveryAdmissionError) throw error;
 		return undefined;
 	}
 }
