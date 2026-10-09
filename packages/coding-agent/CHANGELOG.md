@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.7.8] - 2026-10-09
+
 ### Fixed
 
 - Hiding thinking blocks (`hideThinkingBlock`) no longer asks the provider to omit reasoning from the stream. With Anthropic `display: "omitted"` (or an OpenAI null reasoning summary) a long thinking phase streamed only keepalives, and the idle watchdog cut healthy answers as `Anthropic stream stalled while waiting for the next event` at exactly its limit. Thinking is now hidden locally only.
