@@ -3017,6 +3017,17 @@
 		}
 	},
 	{
+		"sourceId": "agent_session:shouldResumeInterruptedStepOnStartup",
+		"sourceFile": "packages/coding-agent/src/session/agent-session.ts",
+		"sourceKind": "agent_session",
+		"decision": "exclude",
+		"rationale": "CLI startup plumbing for `skc --continue` restart auto-resume, not a user-facing control seam",
+		"exclusionMetadata": {
+			"adapterMappings": "not_applicable",
+			"testIds": "not_applicable"
+		}
+	},
+	{
 		"sourceId": "agent_session:continuePersistedHistory",
 		"sourceFile": "packages/coding-agent/src/session/agent-session.ts",
 		"sourceKind": "agent_session",

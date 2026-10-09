@@ -187,6 +187,8 @@ const LOCKED_EXCLUSIONS: Readonly<Record<string, string>> = {
 	"agent_session:getLastVisibleHandoffText": "internal accessor/plumbing, not a user-facing control seam",
 	"agent_session:getVisibleAnswerChain": "internal accessor/plumbing, not a user-facing control seam",
 	"agent_session:hasExtensionHandlers": "internal accessor/plumbing, not a user-facing control seam",
+	"agent_session:shouldResumeInterruptedStepOnStartup":
+		"CLI startup plumbing for `skc --continue` restart auto-resume, not a user-facing control seam",
 	"agent_session:registerBeforeAgentStartContributor": "internal accessor/plumbing, not a user-facing control seam",
 	"agent_session:setSdkPermissionProvider": "internal reverse-provider plumbing, not a user-facing SDK control seam",
 	"agent_session:beginTemporaryProviderSessionScope":

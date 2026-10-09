@@ -1,11 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import * as fs from "node:fs";
 import * as path from "node:path";
 import { scheduler } from "node:timers/promises";
-import { Agent, type AgentMessage, type AgentTool } from "@sayknow-cli/agent-core";
+import { Agent, type AgentMessage, type AgentTool, ThinkingLevel } from "@sayknow-cli/agent-core";
 import { type AssistantMessage, getBundledModel, type Model, streamSimple } from "@sayknow-cli/ai";
 import { ModelRegistry } from "@sayknow-cli/coding-agent/config/model-registry";
 import { Settings } from "@sayknow-cli/coding-agent/config/settings";
 import { ExtensionToolWrapper } from "@sayknow-cli/coding-agent/extensibility/extensions/wrapper";
+import { runRootCommand } from "@sayknow-cli/coding-agent/main";
+import type { InteractiveMode } from "@sayknow-cli/coding-agent/modes/interactive-mode";
 import { createAgentSession } from "@sayknow-cli/coding-agent/sdk";
 import { AgentSession, type AgentSessionEvent } from "@sayknow-cli/coding-agent/session/agent-session";
 import { AuthStorage } from "@sayknow-cli/coding-agent/session/auth-storage";
@@ -19,7 +22,7 @@ import { convertToLlm } from "@sayknow-cli/coding-agent/session/messages";
 import { SessionManager } from "@sayknow-cli/coding-agent/session/session-manager";
 import type { ToolSession } from "@sayknow-cli/coding-agent/tools";
 import { ReadTool } from "@sayknow-cli/coding-agent/tools/read";
-import { TempDir } from "@sayknow-cli/utils";
+import { logger, TempDir } from "@sayknow-cli/utils";
 import * as z from "zod/v4";
 
 /**
@@ -37,9 +40,12 @@ interface WireLog {
 function installReplies(replies: readonly Reply[]): WireLog {
 	const log: WireLog = { bodies: [] };
 	vi.spyOn(globalThis, "fetch").mockImplementation((async (
-		_input: Parameters<typeof fetch>[0],
+		input: Parameters<typeof fetch>[0],
 		init?: Parameters<typeof fetch>[1],
 	) => {
+		// Startup may refresh model catalogs in the background; only inference is the wire.
+		const url = input instanceof Request ? input.url : String(input);
+		if (!url.endsWith("/chat/completions")) return new Response("{}", { status: 404 });
 		log.bodies.push(typeof init?.body === "string" ? init.body : "");
 		const reply = replies[log.bodies.length - 1];
 		if (!reply) throw new Error(`Unexpected outbound request #${log.bodies.length}`);
@@ -334,6 +340,66 @@ describe("automatic same-model resume", () => {
 			session = undefined;
 			vi.restoreAllMocks();
 		}
+	});
+
+	it("18b) a restart never resumes a thinking-only step that stopped on a rate limit, quota, auth or terminal error", async () => {
+		const m = groq();
+		const thinkingFailure = (errorMessage: string, extra: Partial<AssistantMessage> = {}): AssistantMessage => ({
+			...assistantWithCall(m, "t1", "read"),
+			content: [{ type: "thinking", thinking: "plan", thinkingSignature: "sig" }],
+			stopReason: "error",
+			errorMessage,
+			...extra,
+		});
+		for (const failed of [
+			thinkingFailure("429 rate limit exceeded", { transportFailure: { kind: "transport", status: 429 } }),
+			thinkingFailure("500 requests per minute exceeded"),
+			thinkingFailure("quota exhausted", {
+				transportFailure: { kind: "transport", status: 429, providerCode: "insufficient_quota" },
+			}),
+			thinkingFailure("HTTP 401 unauthorized", { transportFailure: { kind: "transport", status: 401 } }),
+			thinkingFailure("HTTP 400 invalid request"),
+		]) {
+			const reopened = await interruptedSession({
+				messages: [{ role: "user", content: "think", timestamp: Date.now() }, failed],
+				checkpoint: restartCheckpoint(m),
+			});
+			const log = installReplies([]);
+			session = build({ model: m, tools: [readTool()], sessionManager: reopened });
+			session.agent.replaceMessages(reopened.buildSessionContext().messages);
+			await expect(session.continuePersistedHistory()).rejects.toThrow("interrupted during automatic recovery");
+			expect(log.bodies).toHaveLength(0);
+			await session.dispose();
+			session = undefined;
+			vi.restoreAllMocks();
+		}
+	});
+
+	it("18c) a restart resumes a thinking-only step that stopped on a server overload, without the failed reasoning", async () => {
+		const m = groq();
+		const reopened = await interruptedSession({
+			messages: [
+				{ role: "user", content: "think", timestamp: Date.now() },
+				{
+					...assistantWithCall(m, "t1", "read"),
+					content: [{ type: "thinking", thinking: "private plan", thinkingSignature: "sig" }],
+					stopReason: "error",
+					errorMessage: "503 service unavailable: overloaded_error",
+				},
+			],
+			checkpoint: restartCheckpoint(m),
+		});
+		const log = installReplies([textReply(m.id, "done")]);
+		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		session = build({ model: m, tools: [readTool()], sessionManager: reopened });
+		session.agent.replaceMessages(reopened.buildSessionContext().messages);
+
+		await session.continuePersistedHistory();
+		await session.waitForIdle();
+
+		expect(log.bodies).toHaveLength(1);
+		expect(log.bodies[0]).not.toContain("private plan");
+		expect(markerCount(session)).toBe(1);
 	});
 
 	it("15) a restart on a different model than the interrupted step pauses", async () => {
@@ -640,15 +706,26 @@ describe("automatic same-model resume", () => {
 		] as AgentMessage[];
 		expect(findInterruptedToolCalls(completed)).toEqual([]);
 		expect(resolveAutoResumePolicy({ ...base, messages: completed })).toMatchObject({ type: "resume", mode: "full" });
-		// Signed reasoning or a cut-off call in a failed tail never resumes.
+		// Signed reasoning next to a call, or a cut-off call, in a failed tail never resumes.
 		const failedWithThinking: AssistantMessage = {
 			...assistantWithCall(m, "w2", "write"),
-			content: [{ type: "thinking", thinking: "secret", thinkingSignature: "sig" }],
+			content: [
+				{ type: "thinking", thinking: "secret", thinkingSignature: "sig" },
+				{ type: "toolCall", id: "w2", name: "write", arguments: {} },
+			],
 			stopReason: "error",
 		};
 		expect(
 			resolveAutoResumePolicy({ ...base, messages: [base.messages[0], failedWithThinking] as AgentMessage[] }),
 		).toEqual({ type: "pause", reason: "unsafe_tail" });
+		// A failure that streamed only reasoning holds no answer: it is dropped and resumed.
+		const failedThinkingOnly: AssistantMessage = {
+			...failedWithThinking,
+			content: [{ type: "thinking", thinking: "secret", thinkingSignature: "sig" }],
+		};
+		expect(
+			resolveAutoResumePolicy({ ...base, messages: [base.messages[0], failedThinkingOnly] as AgentMessage[] }),
+		).toEqual({ type: "resume", mode: "full", interruptedCalls: [] });
 		// A visible text prefix needs a faithful serializer projection.
 		const failedText: AssistantMessage = {
 			...assistantWithCall(m, "w3", "write"),
@@ -737,6 +814,131 @@ describe("automatic same-model resume", () => {
 			expect(markerCount(sdkSession)).toBe(1);
 		});
 	}
+
+	/** Runs the real `skc --continue` root command against the saved session; only the TUI is faked. */
+	async function cliContinue(options: {
+		sessionDir: string;
+		settings?: Parameters<typeof Settings.isolated>[0];
+	}): Promise<{ continued: number; notices: string[]; errors: string[] }> {
+		const m = groq();
+		const tracked = { continued: 0, notices: [] as string[], errors: [] as string[] };
+		const stop = new Error("stop interactive harness");
+		authStorage.setRuntimeApiKey(m.provider, `${m.provider}-test-key`);
+		const root = runRootCommand(
+			{
+				messages: [],
+				fileArgs: [],
+				unknownFlags: new Map(),
+				continue: true,
+				sessionDir: options.sessionDir,
+				model: `${m.provider}/${m.id}`,
+				tools: ["read", "write"],
+				noSkills: true,
+				noRules: true,
+				noExtensions: true,
+			},
+			[],
+			{
+				suppressProcessExit: true,
+				settings: Settings.isolated({
+					"compaction.enabled": false,
+					"fallback.auto": false,
+					"startup.checkUpdate": false,
+					"marketplace.autoUpdate": "off",
+					...options.settings,
+				}),
+				discoverAuthStorage: async () => authStorage,
+				createAgentSession: async sessionOptions => {
+					const created = await createAgentSession({
+						...sessionOptions,
+						authStorage,
+						modelRegistry,
+						disableExtensionDiscovery: true,
+						enableMCP: false,
+						enableLsp: false,
+					});
+					session = created.session;
+					const original = created.session.continuePersistedHistory.bind(created.session);
+					vi.spyOn(created.session, "continuePersistedHistory").mockImplementation(async () => {
+						tracked.continued++;
+						await original();
+					});
+					created.session.subscribe(event => {
+						if (event.type === "notice") tracked.notices.push(event.message);
+					});
+					return created;
+				},
+				initTheme: async () => {},
+				readPipedInput: async () => undefined,
+				stdinIsTTY: true,
+				runStartupCredentialAutoImportIfNeeded: async () => undefined,
+				getChangelogForDisplay: async () => undefined,
+				createInteractiveMode: () =>
+					({
+						init: async () => {},
+						showNewVersionNotification: () => {},
+						renderInitialMessages: () => {},
+						showStatus: () => {},
+						showWarning: () => {},
+						showError: (message: string) => tracked.errors.push(message),
+						getUserInput: async () => {
+							await session?.waitForIdle();
+							throw stop;
+						},
+					}) as unknown as InteractiveMode,
+			},
+		);
+		await expect(root).rejects.toBe(stop);
+		return tracked;
+	}
+
+	async function interruptedSessionDir(m: Model, settled: boolean): Promise<string> {
+		const sessionDir = path.join(tempDir.path(), "sessions");
+		const first = SessionManager.create(tempDir.path(), SessionManager.explicitDestination(sessionDir));
+		first.appendMessage({ role: "user", content: "update the file", timestamp: Date.now() });
+		first.appendMessage(assistantWithCall(m, "w1", "write"));
+		if (!settled) {
+			first.appendCustomEntry("recovery_checkpoint", { version: 1, state: "in_flight", ...restartCheckpoint(m) });
+		}
+		await first.ensureOnDisk();
+		await first.flush();
+		return sessionDir;
+	}
+
+	it("CLI `skc --continue` resumes an interrupted step once, read-only, without user input", async () => {
+		const m = groq();
+		const sessionDir = await interruptedSessionDir(m, false);
+		const log = installReplies([textReply(m.id, "verified")]);
+		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+
+		const result = await cliContinue({ sessionDir });
+
+		expect(result.continued).toBe(1);
+		expect(result.errors).toEqual([]);
+		expect(log.bodies).toHaveLength(1);
+		expect(toolNames(log.bodies[0])).toEqual(["read"]);
+		expect(log.bodies[0]).toContain("Interrupted before its outcome was observed");
+		expect(result.notices).toContain("Resuming the interrupted step automatically (read-only tools).");
+		expect(markerCount(session as AgentSession)).toBe(1);
+	});
+
+	it("CLI `skc --continue` leaves a session idle when nothing was interrupted or auto-resume is off", async () => {
+		const m = groq();
+		for (const testCase of [
+			{ settled: true, settings: {} },
+			{ settled: false, settings: { "retry.autoResume": false } },
+		]) {
+			const sessionDir = await interruptedSessionDir(m, testCase.settled);
+			const log = installReplies([]);
+			const result = await cliContinue({ sessionDir, settings: testCase.settings });
+			expect(result.continued).toBe(0);
+			expect(log.bodies).toHaveLength(0);
+			await session?.dispose();
+			session = undefined;
+			vi.restoreAllMocks();
+			fs.rmSync(sessionDir, { recursive: true, force: true });
+		}
+	});
 
 	it("17) the active tool list stays the user's during a restricted resume, and later changes are kept", async () => {
 		const m = groq();
@@ -863,34 +1065,43 @@ describe("automatic same-model resume", () => {
 
 	it("a failure after a visible text prefix resumes once, inside the same step budget", async () => {
 		const m = groq();
-		const partialThenDrop: Reply = () => {
-			const encoder = new TextEncoder();
-			let sent = false;
-			const body = new ReadableStream<Uint8Array>(
-				{
-					pull(controller) {
-						if (!sent) {
-							sent = true;
-							controller.enqueue(
-								encoder.encode(oc(m.id, { role: "assistant" }) + oc(m.id, { content: "Three findings: one," })),
-							);
-							return;
-						}
-						controller.error(new Error("socket hang up"));
+		const partialThenDrop =
+			(text: string): Reply =>
+			() => {
+				const encoder = new TextEncoder();
+				let sent = false;
+				const body = new ReadableStream<Uint8Array>(
+					{
+						pull(controller) {
+							if (!sent) {
+								sent = true;
+								controller.enqueue(
+									encoder.encode(oc(m.id, { role: "assistant" }) + oc(m.id, { content: text })),
+								);
+								return;
+							}
+							controller.error(new Error("socket hang up"));
+						},
 					},
-				},
-				{ highWaterMark: 0 },
-			);
-			return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
-		};
-		const log = installReplies([partialThenDrop, partialThenDrop, textReply(m.id, " two, three.")]);
+					{ highWaterMark: 0 },
+				);
+				return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
+			};
+		const log = installReplies([
+			partialThenDrop("Three findings: one,"),
+			partialThenDrop(" two,"),
+			textReply(m.id, " three."),
+		]);
 		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		const info = vi.spyOn(logger, "info");
 		session = build({ model: m, tools: [readTool()], settings: { "retry.maxRetries": 1 } });
 		const deltas: string[] = [];
+		const notices: string[] = [];
 		session.subscribe(event => {
 			if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
 				deltas.push(event.assistantMessageEvent.delta);
 			}
+			if (event.type === "notice") notices.push(event.message);
 		});
 
 		await session.prompt("report");
@@ -900,11 +1111,21 @@ describe("automatic same-model resume", () => {
 
 		expect(log.bodies).toHaveLength(3);
 		expect(markerCount(session)).toBe(1);
-		// The resume request carries the preserved prefix; nothing shown is re-emitted.
-		expect(log.bodies[2]).toContain("Three findings: one,");
-		expect(deltas.filter(delta => delta === " two, three.")).toHaveLength(1);
+		// The resume request carries the preserved prefix exactly once; nothing shown is re-emitted.
+		const occurrences = (body: string, text: string) => body.split(text).length - 1;
+		expect(occurrences(log.bodies[1], "Three findings: one,")).toBe(1);
+		expect(occurrences(log.bodies[2], "Three findings: one,")).toBe(1);
+		expect(occurrences(log.bodies[2], " two,")).toBe(1);
+		expect(deltas).toEqual(["Three findings: one,", " two,", " three."]);
 		const last = session.agent.state.messages.findLast(message => message.role === "assistant") as AssistantMessage;
 		expect(last.stopReason).toBe("stop");
+		// The user is told the step resumed; operators get one start/finish pair.
+		expect(notices).toContain("Resuming the interrupted step automatically.");
+		const lifecycle = info.mock.calls.filter(([message]) => String(message).startsWith("auto_resume_"));
+		expect(lifecycle).toEqual([
+			["auto_resume_started", { trigger: "interrupted", mode: "full", interruptedCalls: 0 }],
+			["auto_resume_finished", { trigger: "interrupted", mode: "full", outcome: "completed" }],
+		]);
 	});
 
 	it("a failed uncertainty write closes only its own step and is reported", async () => {
@@ -955,5 +1176,334 @@ describe("automatic same-model resume", () => {
 		expect(log.bodies).toHaveLength(1);
 		const last = session.agent.state.messages.findLast(message => message.role === "assistant") as AssistantMessage;
 		expect(last.stopReason).toBe("stop");
+	});
+
+	// ------------------------------------------------------- thinking-only failure
+	function claude(): Model {
+		const found = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!found) throw new Error("missing bundled model");
+		return found;
+	}
+
+	it("hiding thinking blocks never asks the provider to omit reasoning from the stream", async () => {
+		const m = getBundledModel("anthropic", "claude-opus-5-5");
+		if (!m) throw new Error("missing bundled model");
+		const log = installAnthropic([anthropicReply(m, ["thinking", "text"], "stop")]);
+		session = build({ model: m, settings: { hideThinkingBlock: true } });
+		session.agent.hideThinkingSummary = true;
+		session.setThinkingLevel(ThinkingLevel.High);
+
+		await session.prompt("think hard");
+		await session.waitForIdle();
+
+		expect(session.getThinkingVisibility()).toBe("hidden");
+		expect(log.bodies).toHaveLength(1);
+		// Omitted reasoning streams only pings during a long thinking phase and the idle
+		// watchdog would cut the healthy answer as "stalled".
+		const thinking = (JSON.parse(log.bodies[0]) as { thinking?: { display?: string } }).thinking;
+		expect(thinking).toBeDefined();
+		expect(thinking?.display).not.toBe("omitted");
+	});
+
+	function af(event: string, data: object): string {
+		return `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+	}
+
+	function anthropicFrames(m: Model, blocks: ReadonlyArray<"thinking" | "text">, text = "answer"): string[] {
+		const frames = [
+			af("message_start", {
+				type: "message_start",
+				message: {
+					id: "msg_thinking_only",
+					type: "message",
+					role: "assistant",
+					model: m.id,
+					content: [],
+					stop_reason: null,
+					stop_sequence: null,
+					usage: { input_tokens: 1, output_tokens: 0 },
+				},
+			}),
+		];
+		blocks.forEach((kind, index) => {
+			frames.push(
+				af("content_block_start", {
+					type: "content_block_start",
+					index,
+					content_block:
+						kind === "thinking" ? { type: "thinking", thinking: "", signature: "" } : { type: "text", text: "" },
+				}),
+				af("content_block_delta", {
+					type: "content_block_delta",
+					index,
+					delta:
+						kind === "thinking"
+							? { type: "thinking_delta", thinking: "private plan" }
+							: { type: "text_delta", text },
+				}),
+			);
+		});
+		return frames;
+	}
+
+	const OVERLOADED = af("error", { type: "error", error: { type: "overloaded_error", message: "Overloaded" } });
+
+	function anthropicReply(m: Model, blocks: ReadonlyArray<"thinking" | "text">, end: "overloaded" | "stop"): Reply {
+		const frames = anthropicFrames(m, blocks);
+		if (end === "overloaded") frames.push(OVERLOADED);
+		else
+			frames.push(
+				af("content_block_stop", { type: "content_block_stop", index: blocks.length - 1 }),
+				af("message_delta", {
+					type: "message_delta",
+					delta: { stop_reason: "end_turn", stop_sequence: null },
+					usage: { output_tokens: 1 },
+				}),
+				af("message_stop", { type: "message_stop" }),
+			);
+		return sse(frames);
+	}
+
+	function installAnthropic(replies: readonly Reply[]): WireLog {
+		const log: WireLog = { bodies: [] };
+		vi.spyOn(globalThis, "fetch").mockImplementation((async (
+			input: Parameters<typeof fetch>[0],
+			init?: Parameters<typeof fetch>[1],
+		) => {
+			const url = input instanceof Request ? input.url : String(input);
+			if (!url.endsWith("/v1/messages")) return new Response("{}", { status: 404 });
+			log.bodies.push(typeof init?.body === "string" ? init.body : "");
+			const reply = replies[log.bodies.length - 1];
+			if (!reply) throw new Error(`Unexpected outbound request #${log.bodies.length}`);
+			return reply();
+		}) as typeof fetch);
+		return log;
+	}
+
+	it("an overloaded failure that streamed only thinking retries on the same model without replaying it", async () => {
+		const m = claude();
+		const log = installAnthropic([
+			anthropicReply(m, ["thinking"], "overloaded"),
+			anthropicReply(m, ["text"], "stop"),
+		]);
+		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		session = build({ model: m });
+
+		await session.prompt("think hard");
+		await session.waitForIdle();
+
+		expect(log.bodies).toHaveLength(2);
+		// The failed reasoning is never sent back, signed or not.
+		expect(log.bodies[1]).not.toContain("private plan");
+		const last = session.agent.state.messages.findLast(message => message.role === "assistant") as AssistantMessage;
+		expect(last.stopReason).toBe("stop");
+		expect(last.model).toBe(m.id);
+		const assistants = session.agent.state.messages.filter(message => message.role === "assistant");
+		expect(assistants).toHaveLength(1);
+	});
+
+	const BARE_RETRY = {
+		"retry.maxRetries": undefined,
+		"retry.baseDelayMs": undefined,
+		"retry.maxDelayMs": undefined,
+	} as const;
+
+	it("with no retry settings, a thinking-only overload still retries the same model within the step budget", async () => {
+		const m = claude();
+		const log = installAnthropic(Array.from({ length: 9 }, () => anthropicReply(m, ["thinking"], "overloaded")));
+		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		session = build({ model: m, settings: BARE_RETRY });
+
+		await session.prompt("think hard");
+		await session.waitForIdle();
+
+		// 1 original + 6 recoveries: the shared 7-request step budget, then the real error.
+		expect(log.bodies).toHaveLength(7);
+		for (const body of log.bodies) {
+			expect((JSON.parse(body) as { model: string }).model).toBe(m.id);
+			expect(body).not.toContain("private plan");
+		}
+		const last = session.agent.state.messages.findLast(message => message.role === "assistant") as AssistantMessage;
+		expect(last.stopReason).toBe("error");
+		expect(last.errorMessage).toContain("overloaded_error");
+	});
+
+	it("with no retry settings, a thinking-only overload recovers once the provider answers", async () => {
+		const m = claude();
+		const log = installAnthropic([
+			anthropicReply(m, ["thinking"], "overloaded"),
+			anthropicReply(m, ["text"], "stop"),
+		]);
+		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		session = build({ model: m, settings: BARE_RETRY });
+
+		await session.prompt("think hard");
+		await session.waitForIdle();
+
+		expect(log.bodies).toHaveLength(2);
+		const last = session.agent.state.messages.findLast(message => message.role === "assistant") as AssistantMessage;
+		expect(last.stopReason).toBe("stop");
+	});
+
+	it("with no retry settings, a thinking-only rate limit is not retried", async () => {
+		const m = claude();
+		const rateLimited = sse([
+			...anthropicFrames(m, ["thinking"]),
+			af("error", { type: "error", error: { type: "rate_limit_error", message: "Rate limited" } }),
+		]);
+		const log = installAnthropic([rateLimited, anthropicReply(m, ["text"], "stop")]);
+		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		session = build({ model: m, settings: BARE_RETRY });
+
+		await session.prompt("think hard");
+		await session.waitForIdle();
+
+		expect(log.bodies).toHaveLength(1);
+		const last = session.agent.state.messages.findLast(message => message.role === "assistant") as AssistantMessage;
+		expect(last.stopReason).toBe("error");
+	});
+
+	it("with no retry settings, a thinking-only throttle quoting a bare number is not mistaken for a 5xx", async () => {
+		const m = claude();
+		for (const [message, expected] of [
+			["500 requests per minute exceeded", 1],
+			["HTTP 500 internal failure", 2],
+		] as const) {
+			const failed = sse([
+				...anthropicFrames(m, ["thinking"]),
+				af("error", { type: "error", error: { type: "api_failure", message } }),
+			]);
+			const log = installAnthropic([failed, anthropicReply(m, ["text"], "stop")]);
+			vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+			session = build({ model: m, settings: BARE_RETRY });
+
+			await session.prompt("think hard");
+			await session.waitForIdle();
+
+			expect(log.bodies).toHaveLength(expected);
+			await session.dispose();
+			session = undefined;
+			vi.restoreAllMocks();
+		}
+	});
+
+	it("an explicit retry after a stopped thinking-only failure drops the reasoning and asks again", async () => {
+		const m = claude();
+		const log = installAnthropic([
+			anthropicReply(m, ["thinking"], "overloaded"),
+			anthropicReply(m, ["text"], "stop"),
+		]);
+		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		session = build({ model: m, settings: { "retry.enabled": false } });
+
+		await session.prompt("think hard");
+		await session.waitForIdle();
+		expect(log.bodies).toHaveLength(1);
+
+		expect(await session.retry()).toBe(true);
+		await session.waitForIdle();
+
+		expect(log.bodies).toHaveLength(2);
+		expect(log.bodies[1]).not.toContain("private plan");
+		const assistants = session.agent.state.messages.filter(message => message.role === "assistant");
+		expect(assistants).toHaveLength(1);
+		expect((assistants[0] as AssistantMessage).stopReason).toBe("stop");
+	});
+
+	it("a step that streamed only thinking after tools ran resumes once without the failed reasoning", async () => {
+		const m = claude();
+		const log = installAnthropic([
+			anthropicReply(m, ["thinking"], "overloaded"),
+			anthropicReply(m, ["text"], "stop"),
+		]);
+		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		// The same-model retry is spent, so the interrupted step reaches automatic resume.
+		session = build({ model: m, settings: { "retry.maxRetries": 0 } });
+		session.agent.replaceMessages([
+			{ role: "user", content: "check the file", timestamp: Date.now() },
+			{
+				...assistantWithCall(m, "r1", "read"),
+			},
+			{
+				role: "toolResult",
+				toolCallId: "r1",
+				toolName: "read",
+				content: [{ type: "text", text: "contents" }],
+				isError: false,
+				timestamp: Date.now(),
+			},
+		]);
+		const info = vi.spyOn(logger, "info");
+
+		await session.agent.continue();
+		await session.waitForIdle();
+		for (let i = 0; i < 50 && log.bodies.length < 2; i++) await Bun.sleep(5);
+		await session.waitForIdle();
+
+		expect(log.bodies).toHaveLength(2);
+		expect(log.bodies[1]).not.toContain("private plan");
+		// The failed attempt is dropped, not replayed as an aborted turn.
+		expect(log.bodies[1]).not.toContain("turn-aborted");
+		for (const body of log.bodies) expect((JSON.parse(body) as { model: string }).model).toBe(m.id);
+		expect(markerCount(session)).toBe(1);
+		expect(info.mock.calls.some(([message]) => message === "auto_resume_started")).toBe(true);
+		const last = session.agent.state.messages.findLast(message => message.role === "assistant") as AssistantMessage;
+		expect(last.stopReason).toBe("stop");
+	});
+	it("a long thinking-only overload on a managed fallback chain retries the same model, never the next entry", async () => {
+		const m = claude();
+		const thinkingThenStall: Reply = () => {
+			const encoder = new TextEncoder();
+			const frames = anthropicFrames(m, ["thinking"]);
+			let next = 0;
+			const body = new ReadableStream<Uint8Array>(
+				{
+					async pull(controller) {
+						if (next < frames.length) {
+							controller.enqueue(encoder.encode(frames[next++]));
+							return;
+						}
+						// Past the managed hold window the reasoning is already published to the user.
+						await Bun.sleep(2_100);
+						controller.enqueue(encoder.encode(OVERLOADED));
+						controller.close();
+					},
+				},
+				{ highWaterMark: 0 },
+			);
+			return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
+		};
+		const log = installAnthropic([thinkingThenStall, anthropicReply(m, ["text"], "stop")]);
+		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		authStorage.setRuntimeApiKey("groq", "groq-test-key");
+		session = build({ model: m, settings: { "fallback.auto": true } });
+		expect(session.getDefaultFallbackChain().entries.length).toBeGreaterThan(1);
+
+		await session.prompt("think hard");
+		await session.waitForIdle();
+		for (let i = 0; i < 50 && log.bodies.length < 2; i++) await Bun.sleep(5);
+		await session.waitForIdle();
+
+		expect(log.bodies).toHaveLength(2);
+		expect(log.bodies[1]).not.toContain("private plan");
+		for (const body of log.bodies) expect((JSON.parse(body) as { model: string }).model).toBe(m.id);
+		const last = session.agent.state.messages.findLast(message => message.role === "assistant") as AssistantMessage;
+		expect(last.stopReason).toBe("stop");
+		expect(last.model).toBe(m.id);
+	}, 15_000);
+
+	it("a failure with thinking and visible text still stops with the text preserved", async () => {
+		const m = claude();
+		const log = installAnthropic([anthropicReply(m, ["thinking", "text"], "overloaded")]);
+		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		session = build({ model: m });
+
+		await session.prompt("think then answer");
+		await session.waitForIdle();
+
+		expect(log.bodies).toHaveLength(1);
+		const last = session.agent.state.messages.findLast(message => message.role === "assistant") as AssistantMessage;
+		expect(last.stopReason).toBe("error");
+		expect(last.content.some(block => block.type === "text" && block.text === "answer")).toBe(true);
 	});
 });

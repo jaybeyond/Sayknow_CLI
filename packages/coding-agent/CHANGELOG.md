@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Hiding thinking blocks (`hideThinkingBlock`) no longer asks the provider to omit reasoning from the stream. With Anthropic `display: "omitted"` (or an OpenAI null reasoning summary) a long thinking phase streamed only keepalives, and the idle watchdog cut healthy answers as `Anthropic stream stalled while waiting for the next event` at exactly its limit. Thinking is now hidden locally only.
+- `skc --continue` no longer re-sends a step that stopped on a rate limit, quota, auth or terminal provider answer; restart resume applies the same failure eligibility as in-process resume.
+- Throttle messages that quote a bare number (for example `500 requests per minute exceeded`) are never treated as a server 5xx for retry or resume.
+- An explicit `retry()` after a stopped failure that streamed only thinking now drops that reasoning and asks the same model again.
+- A model step that failed with a transient error (for example Anthropic `overloaded_error`) after streaming only thinking now retries on the same model instead of stopping. The failed reasoning is dropped, never replayed; thinking next to answer text or a tool call still stops with the output preserved. This works with default settings too (no `retry.*` keys), bounded by the same 7-request step budget; rate-limit and quota errors are not retried.
+- `skc --continue` now actually resumes a step that a process exit interrupted. In 0.7.7 only a session picked from the bare `--resume` list reached the automatic resume; `--continue` opened the session idle. Other sessions still open idle, and `retry.autoResume: false` keeps every one of them idle.
+
 ## [0.7.7] - 2026-10-06
 
 ### Added

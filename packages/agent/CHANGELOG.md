@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- `hideThinkingSummary` is display-only state and is no longer forwarded to the provider. Asking a provider to omit reasoning made long thinking stream only keepalives, so the idle watchdog aborted healthy answers as stalled. Callers that need provider-side omission set `SimpleStreamOptions.hideThinkingSummary` on the stream call directly.
+
 ## [0.7.7] - 2026-10-06
 
 ### Added

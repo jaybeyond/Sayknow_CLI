@@ -1659,7 +1659,10 @@ export async function runRootCommand(
 						initialMessage,
 						initialImages,
 						deps.createInteractiveMode,
-						bareResumeAction,
+						bareResumeAction ??
+							(parsedArgs.continue && session.shouldResumeInterruptedStepOnStartup()
+								? "continue-tail"
+								: undefined),
 					);
 				}
 			} catch (error) {

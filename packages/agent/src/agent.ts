@@ -218,9 +218,9 @@ export interface AgentOptions {
 	repetitionPenalty?: number;
 	serviceTier?: ServiceTier;
 	/**
-	 * If true, request that the underlying provider omit reasoning/thinking summaries
-	 * from the response. The model still reasons internally; only the human-readable
-	 * summary stream is suppressed. Useful when the UI hides thinking blocks anyway.
+	 * Local display state: whether the UI hides thinking blocks. It never changes the
+	 * provider request; reasoning keeps streaming so long thinking still counts as
+	 * stream progress for the idle watchdog.
 	 */
 	hideThinkingSummary?: boolean;
 
@@ -1444,7 +1444,9 @@ export class Agent {
 			presencePenalty: this.#presencePenalty,
 			repetitionPenalty: this.#repetitionPenalty,
 			serviceTier: this.#serviceTier,
-			hideThinkingSummary: this.#hideThinkingSummary,
+			// Hiding thinking is a local display preference and never changes the request:
+			// a provider told to omit reasoning streams only keepalives during long
+			// thinking, and the idle watchdog then cuts a healthy answer as stalled.
 			interruptMode: this.#interruptMode,
 			sessionId: this.#sessionId,
 			providerSessionId: this.#providerSessionId,

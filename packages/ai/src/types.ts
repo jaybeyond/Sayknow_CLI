@@ -468,7 +468,10 @@ export interface SimpleStreamOptions extends StreamOptions {
 	 * from the response (e.g. Anthropic `thinking.display = "omitted"`,
 	 * OpenAI Responses `reasoning.summary` left unset). The model still
 	 * reasons internally; only the human-readable summary stream is dropped.
-	 * Useful when the UI hides thinking blocks anyway and the summary is wasted bandwidth.
+	 * Never derive this from a UI "hide thinking" preference: with no reasoning
+	 * deltas a long thinking phase streams only keepalives and the idle watchdog
+	 * cuts the answer as stalled. Only explicit API callers (e.g. an OpenAI
+	 * Responses request with `reasoning.summary: "none"`) set it.
 	 */
 	hideThinkingSummary?: boolean;
 	/** Custom token budgets for thinking levels (token-based providers only) */

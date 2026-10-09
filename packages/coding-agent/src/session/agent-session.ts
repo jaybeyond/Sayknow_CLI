@@ -408,6 +408,7 @@ import {
 	INTERRUPTED_TOOL_RESULT_TEXT,
 	isRestartSafeTool,
 	isSynthesizedResumeResult,
+	isThinkingOnlyFailure,
 	RESTART_RESUME_MAX_REQUESTS,
 	RESTART_RESUME_WINDOW_MS,
 	resolveAutoResumePolicy,
@@ -897,6 +898,11 @@ type RetryErrorClassification =
 
 const BARE_DEFAULT_WATCHDOG_ERROR =
 	/^(?:[A-Za-z][A-Za-z0-9-]*(?: [A-Za-z][A-Za-z0-9-]*){0,3} )stream (?:timed out while waiting for the first event|stalled while waiting for the next event)$/;
+/** Server-side overload/unavailability wording. Bare numbers never count: "500 requests per minute" is a throttle. */
+const BARE_DEFAULT_SERVER_OVERLOAD_ERROR = /overloaded|service.?unavailable|internal.?server.?error|\bapi_error\b/i;
+/** Throttle or quota wording, in any phrasing a provider uses for it. */
+const BARE_DEFAULT_THROTTLE_ERROR =
+	/rate.?limit|too many requests|quota|usage.?limit|requests? per (?:second|minute|hour|day)|\b(?:rpm|tpm|rpd)\b|throttl/i;
 const KIMI_CODE_FIRST_EVENT_TIMEOUT_MESSAGES = {
 	"anthropic-messages": new Set([
 		"Provider stream timed out while waiting for the first event",
@@ -927,6 +933,10 @@ const ALIBABA_TOKEN_PLAN_FIRST_EVENT_TIMEOUT_MESSAGES = {
 		"OpenAI completions stream timed out while waiting for the first event",
 	]),
 } as const;
+
+function isServerHttpStatus(status: number | undefined): boolean {
+	return status !== undefined && status >= 500 && status <= 599;
+}
 
 function hasBareDefaultRetryDisqualifyingFacts(message: AssistantMessage): boolean {
 	if (message.errorKind !== undefined || message.errorStatus !== undefined) return true;
@@ -1014,7 +1024,6 @@ export interface BtwConversationScope {
 	systemPrompt: string[];
 	messages: BtwRoleTextMessage[];
 	thinkingLevel: ThinkingLevel;
-	hideThinkingSummary: boolean;
 	serviceTier: ServiceTier | undefined;
 	credentialSessionId: string;
 	providerAffinitySessionId: string;
@@ -6825,6 +6834,15 @@ export class AgentSession {
 		return !data.visibleMessageIds.every(
 			id => typeof id === "string" && branchIds.has(id) && this.sessionManager.getEntry(id)?.type === "message",
 		);
+	}
+
+	/**
+	 * Whether startup `--continue` should hand this session to the restart resume
+	 * policy: automatic resume is on and the persisted history ends in a step a process
+	 * exit interrupted. Every other tail stays idle until the user sends a message.
+	 */
+	shouldResumeInterruptedStepOnStartup(): boolean {
+		return this.settings.get("retry.autoResume") && this.#hasUnresolvedPersistedRecovery();
 	}
 
 	/** Main startup calls this exactly once, after a strict open returned `kind: "opened"`. */
@@ -14583,20 +14601,34 @@ export class AgentSession {
 		// A failure after public output is never replayed by deleting that output.
 		// A text-only tail on a verified serializer continues on the same model;
 		// any other public tail (tool calls, images, tainted run) stops with the
-		// output preserved for the user to resume explicitly.
-		const visibleFailure = !managedOutcome && assistantMessageHasVisibleOrToolContent(message);
+		// output preserved for the user to resume explicitly. A failure that streamed
+		// only reasoning holds no answer and its signed blocks cannot be replayed: it
+		// is dropped and retried like a failure that showed nothing.
+		const thinkingOnlyFailure = !managedOutcome && isThinkingOnlyFailure(message);
+		const visibleFailure =
+			!managedOutcome && !thinkingOnlyFailure && assistantMessageHasVisibleOrToolContent(message);
 		const visibleContinuation = visibleFailure && this.#canContinueVisibleFailure(message);
 		if (visibleFailure && !visibleContinuation) return false;
-		// Bare defaults admit only clean canonical stream watchdog failures. Completed
-		// tool pairs and preserved visible output stay in the transcript and are never
+		// Bare defaults admit only clean canonical stream watchdog failures, plus a
+		// transient server failure that streamed only reasoning (e.g. an SSE
+		// overloaded_error after thinking_delta): the provider's own pre-content
+		// retry cannot cover it, and it has no answer to preserve. Completed tool
+		// pairs and preserved visible output stay in the transcript and are never
 		// re-executed; only hooks/commands/user shell/abort make the run unsafe.
 		if (!managedFallback && !legacyRetryConfigured) {
-			if (
-				hasBareDefaultRetryDisqualifyingFacts(message) ||
-				(classification !== "transient" && classification !== "first_event_timeout") ||
-				!BARE_DEFAULT_WATCHDOG_ERROR.test(message.errorMessage ?? "") ||
-				!this.#hasCleanContinuationSafety
-			) {
+			const bareWatchdog =
+				!hasBareDefaultRetryDisqualifyingFacts(message) &&
+				(classification === "transient" || classification === "first_event_timeout") &&
+				BARE_DEFAULT_WATCHDOG_ERROR.test(message.errorMessage ?? "");
+			const bareThinkingOnly =
+				thinkingOnlyFailure &&
+				classification === "transient" &&
+				message.errorKind === undefined &&
+				!BARE_DEFAULT_THROTTLE_ERROR.test(message.errorMessage ?? "") &&
+				(BARE_DEFAULT_SERVER_OVERLOAD_ERROR.test(message.errorMessage ?? "") ||
+					isServerHttpStatus(this.#extractExplicitHttpStatusFromErrorMessage(message.errorMessage ?? ""))) &&
+				(!transportFailure || classifyFallbackTrigger(transportFailure).class === "server");
+			if (!(bareWatchdog || bareThinkingOnly) || !this.#hasCleanContinuationSafety) {
 				return false;
 			}
 		}
@@ -15254,16 +15286,26 @@ export class AgentSession {
 		// the resume itself is pinned to the interrupted model. Only a transient failure is
 		// resumed: terminal provider answers and an explicit retry opt-out still stop.
 		if (message.stopReason !== "error" || !this.settings.get("retry.enabled")) return undefined;
-		const classification = this.#classifyErrorForRetry(message);
-		if (classification !== "transient" && classification !== "first_event_timeout") return undefined;
-		// A rate-limited or quota-limited provider is not resumed: its retry cap already
-		// decided to stop, and another request would only hit the same limit.
-		const trigger = this.#fallbackTriggerFor(message, true, message.transportFailure);
-		if (trigger?.class === "rate_limit" || trigger?.class === "quota") return undefined;
+		if (!this.#isResumableFailure(message)) return undefined;
 		// Work worth keeping exists: tools already ran or the user saw part of the answer.
 		const turnStart = this.agent.state.messages.findLastIndex(item => item.role === "user");
 		const followsTools = this.agent.state.messages.slice(turnStart + 1).some(item => item.role === "toolResult");
 		return followsTools || hasVisibleFailedPrefix([message]) ? "interrupted" : undefined;
+	}
+
+	/**
+	 * Error eligibility shared by in-process and restart resume. Only a transient
+	 * failure is resumed: terminal provider answers, rate limits and quota stop, since
+	 * the retry cap already decided to stop and another request would hit the same limit.
+	 */
+	#isResumableFailure(message: AssistantMessage): boolean {
+		const classification = this.#classifyErrorForRetry(message);
+		if (classification !== "transient" && classification !== "first_event_timeout") return false;
+		// Throttle copy can quote bare numbers ("500 requests per minute") that the
+		// transient classifier reads as a status; it is a limit, never resumed.
+		if (BARE_DEFAULT_THROTTLE_ERROR.test(message.errorMessage ?? "")) return false;
+		const trigger = this.#fallbackTriggerFor(message, true, message.transportFailure);
+		return trigger?.class !== "rate_limit" && trigger?.class !== "quota" && trigger?.class !== "auth";
 	}
 
 	/** Last persisted recovery checkpoint of the branch, when it records an unfinished step. */
@@ -15289,6 +15331,17 @@ export class AgentSession {
 		const model = this.model;
 		const checkpoint = trigger === "restart" ? this.#lastInFlightCheckpoint() : undefined;
 		const failed = messages.findLast(message => message.role === "assistant") as AssistantMessage | undefined;
+		// A restart re-checks the stored failure: a step that stopped on a rate limit,
+		// quota, auth or terminal answer stays stopped across processes too.
+		if (
+			trigger === "restart" &&
+			failed?.stopReason === "error" &&
+			messages.lastIndexOf(failed) > messages.findLastIndex(message => message.role === "user") &&
+			!this.#isResumableFailure(failed)
+		) {
+			logger.debug("auto_resume_paused", { trigger, reason: "non_transient_failure" });
+			return false;
+		}
 		const selector =
 			trigger === "restart"
 				? typeof checkpoint?.selector === "string"
@@ -15375,14 +15428,14 @@ export class AgentSession {
 			logger.warn("auto_resume_abandoned", { trigger, reason: "state changed while the marker was written" });
 			return false;
 		}
-		// A failed attempt that showed nothing is not part of the answer; resending it only
-		// adds an empty assistant turn (the same rule manual retry applies).
+		// A failed attempt that showed nothing, or only private reasoning, is not part of the
+		// answer; resending it only adds an empty assistant turn (the same rule manual retry applies).
 		const tailMessage = this.agent.state.messages.at(-1);
 		if (
 			placeholders.length === 0 &&
 			tailMessage?.role === "assistant" &&
 			(tailMessage.stopReason === "error" || tailMessage.stopReason === "aborted") &&
-			!assistantMessageHasVisibleOrToolContent(tailMessage)
+			(isThinkingOnlyFailure(tailMessage) || !assistantMessageHasVisibleOrToolContent(tailMessage))
 		) {
 			this.agent.replaceMessages(this.agent.state.messages.slice(0, -1));
 		}
@@ -15585,8 +15638,9 @@ export class AgentSession {
 
 		const assistantMsg = lastMsg as AssistantMessage;
 		// Explicit retry does not establish the outcome of an interrupted operation
-		// and is never permission to erase a prefix already shown to the user.
-		if (assistantMessageHasVisibleOrToolContent(assistantMsg)) return false;
+		// and is never permission to erase a prefix already shown to the user. A failure
+		// that streamed only reasoning holds no answer and is dropped like an empty one.
+		if (!isThinkingOnlyFailure(assistantMsg) && assistantMessageHasVisibleOrToolContent(assistantMsg)) return false;
 		if (assistantMsg.stopReason !== "error" && assistantMsg.stopReason !== "aborted") return false;
 
 		// Remove the empty failed/aborted assistant message before re-attempting.
@@ -16207,7 +16261,6 @@ export class AgentSession {
 			systemPrompt: [...this.systemPrompt, instruction],
 			messages: this.#projectBtwVisibleText(this.buildDisplaySessionContext().messages),
 			thinkingLevel: this.thinkingLevel ?? ThinkingLevel.Off,
-			hideThinkingSummary: this.agent.hideThinkingSummary ?? false,
 			serviceTier: this.serviceTier,
 			credentialSessionId: providerAffinitySessionId,
 			providerAffinitySessionId,
@@ -16295,7 +16348,6 @@ export class AgentSession {
 						this.sessionId,
 					),
 					reasoning: toReasoningEffort(this.thinkingLevel),
-					hideThinkingSummary: this.agent.hideThinkingSummary,
 					serviceTier: this.serviceTier,
 					signal: args.signal,
 					toolChoice: "none",
@@ -16368,7 +16420,6 @@ export class AgentSession {
 			apiKey,
 			sessionId: scope.sideSessionId,
 			reasoning: toReasoningEffort(scope.thinkingLevel),
-			hideThinkingSummary: scope.hideThinkingSummary,
 			serviceTier: scope.serviceTier,
 			signal: requestSignal,
 			toolChoice: "none",

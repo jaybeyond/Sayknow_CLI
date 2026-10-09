@@ -57,6 +57,21 @@ export interface AutoResumeMarker {
 	interruptedCallIds: string[];
 }
 
+/**
+ * A failed attempt that streamed only private reasoning: no answer text, no tool call.
+ * Nothing in it is part of the answer and its signed blocks can never be replayed, so
+ * recovery drops it and asks the same model again instead of stopping.
+ */
+export function isThinkingOnlyFailure(message: AgentMessage | undefined): boolean {
+	if (message?.role !== "assistant" || message.stopReason !== "error") return false;
+	let thinking = false;
+	for (const block of message.content) {
+		if (block.type === "thinking" || block.type === "redactedThinking") thinking = true;
+		else if (block.type !== "text" || block.text.trim().length > 0) return false;
+	}
+	return thinking;
+}
+
 /** Built-in tools whose execution has no side effects and may run again after a restart. */
 const RESTART_SAFE_TOOL_CLASSES = [ReadTool, SearchTool, FindTool, AstGrepTool, LocateTool] as const;
 
@@ -112,8 +127,9 @@ export function findInterruptedToolCalls(messages: readonly AgentMessage[]): Too
 
 /**
  * Tails that cannot be resumed safely: a failed step holding private signed reasoning
- * or tool calls (possibly cut off mid-arguments), a call without an id, or unanswered
- * calls whose results could no longer be placed directly after their assistant.
+ * next to an answer or tool calls (possibly cut off mid-arguments), a call without an
+ * id, or unanswered calls whose results could no longer be placed directly after their
+ * assistant. A failure that streamed only reasoning is dropped before resuming instead.
  */
 function hasUnsafeAssistantTail(messages: readonly AgentMessage[]): boolean {
 	const assistantIndex = messages.findLastIndex(message => message.role === "assistant");
@@ -121,7 +137,7 @@ function hasUnsafeAssistantTail(messages: readonly AgentMessage[]): boolean {
 	if (assistantIndex === -1 || assistantIndex < messages.findLastIndex(message => message.role === "user"))
 		return false;
 	const assistant = messages[assistantIndex] as AssistantMessage;
-	if (assistant.stopReason === "error" || assistant.stopReason === "aborted") {
+	if ((assistant.stopReason === "error" || assistant.stopReason === "aborted") && !isThinkingOnlyFailure(assistant)) {
 		if (
 			assistant.content.some(
 				block => block.type === "thinking" || block.type === "redactedThinking" || block.type === "toolCall",

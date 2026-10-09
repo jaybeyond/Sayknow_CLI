@@ -19,7 +19,7 @@ const compiledSessionFixture = path.join(
 let compiledFixturesReady: Promise<void> | undefined;
 
 afterAll(async () => {
-	await fs.rm(compiledFixtureRoot, { recursive: true, force: true });
+	await removeFixtureRoot(compiledFixtureRoot);
 });
 
 async function compileFixture(entrypoint: string, outfile: string): Promise<void> {
@@ -40,6 +40,21 @@ async function ensureCompiledFixtures(): Promise<void> {
 		})();
 	}
 	await compiledFixturesReady;
+}
+
+// Bun's recursive `fs.rm` on macOS can fail transiently with EFAULT right after a
+// freshly compiled fixture executable exits, leaving a partially removed tree. No
+// process holds the files and a short retry succeeds, so cleanup retries EFAULT only.
+async function removeFixtureRoot(root: string): Promise<void> {
+	for (let attempt = 1; ; attempt++) {
+		try {
+			await fs.rm(root, { recursive: true, force: true });
+			return;
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "EFAULT" || attempt >= 5) throw error;
+			await Bun.sleep(100 * attempt);
+		}
+	}
 }
 
 async function phase<T>(promise: Promise<T>, label: string, timeoutMs: number): Promise<T> {
@@ -153,7 +168,7 @@ async function assertAuthenticatedFixtureTopology(
 		await started.lease.terminateExactChild();
 		socket?.destroy();
 		await new Promise<void>(resolve => server.close(() => resolve()));
-		await fs.rm(root, { recursive: true, force: true });
+		await removeFixtureRoot(root);
 	}
 }
 
@@ -229,7 +244,7 @@ test.serial(
 			await expect(fs.stat(path.join(agentDir, "sdk"))).rejects.toMatchObject({ code: "ENOENT" });
 		} finally {
 			await started.lease.terminateExactChild();
-			await fs.rm(root, { recursive: true, force: true });
+			await removeFixtureRoot(root);
 		}
 	},
 	35_000,
@@ -296,7 +311,7 @@ test.serial(
 				await expectCompiledBrokerToRejectSibling(broker, root);
 			}
 		} finally {
-			await fs.rm(root, { recursive: true, force: true });
+			await removeFixtureRoot(root);
 		}
 	},
 	30_000,
