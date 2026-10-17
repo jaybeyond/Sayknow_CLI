@@ -138,14 +138,13 @@ export function serializeConversation(messages: Message[]): string {
 			if (content) parts.push(`[User]: ${content}`);
 		} else if (msg.role === "assistant") {
 			const textParts: string[] = [];
-			const thinkingParts: string[] = [];
 			const toolCalls: string[] = [];
 
+			// Thinking is private model reasoning; summarize only what the assistant
+			// visibly said and did, never paste prior reasoning into the summary prompt.
 			for (const block of msg.content) {
 				if (block.type === "text") {
 					textParts.push(block.text);
-				} else if (block.type === "thinking") {
-					thinkingParts.push(block.thinking);
 				} else if (block.type === "toolCall") {
 					// `arguments` is typed non-null, but persisted history can carry a
 					// null/non-object payload from an aborted or malformed tool call.
@@ -159,9 +158,6 @@ export function serializeConversation(messages: Message[]): string {
 				}
 			}
 
-			if (thinkingParts.length > 0) {
-				parts.push(`[Assistant thinking]: ${thinkingParts.join("\n")}`);
-			}
 			if (textParts.length > 0) {
 				parts.push(`[Assistant]: ${textParts.join("\n")}`);
 			}

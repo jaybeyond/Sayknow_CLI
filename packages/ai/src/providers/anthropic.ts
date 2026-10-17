@@ -1968,7 +1968,11 @@ export const streamAnthropic: StreamFunction<"anthropic-messages"> = (
 			const firstEventTimeoutError = activeAbortTracker.getLocalAbortReason();
 			output.stopReason = activeAbortTracker.wasCallerAbort() ? "aborted" : "error";
 			output.errorStatus = extractHttpStatusFromError(error);
-			output.transportFailure = transportFailureFacts(error);
+			const transportFailure = transportFailureFacts(error);
+			output.transportFailure =
+				transportFailure?.providerErrorCode === "1113" && isZaiAnthropicEndpoint(model)
+					? { ...transportFailure, providerCode: "insufficient_quota" }
+					: transportFailure;
 			if (output.errorKind !== "provider_safety_stop" || !output.errorMessage) {
 				output.errorMessage =
 					firstEventTimeoutError?.message ?? (await finalizeErrorMessage(error, rawRequestDump));
@@ -2616,15 +2620,8 @@ export function convertAnthropicMessages(
 						text: block.text.toWellFormed(),
 					});
 				} else if (block.type === "thinking") {
-					if (hasSignedThinking) {
-						if (!block.thinkingSignature || block.thinkingSignature.trim().length === 0) {
-							if (block.thinking.trim().length === 0) continue;
-							blocks.push({
-								type: "text",
-								text: block.thinking.toWellFormed(),
-							});
-							continue;
-						}
+					if (block.thinkingSignature && block.thinkingSignature.trim().length > 0) {
+						// Signed bytes must replay exactly as received, even when empty.
 						blocks.push({
 							type: "thinking",
 							thinking: block.thinking,
@@ -2633,24 +2630,15 @@ export function convertAnthropicMessages(
 						continue;
 					}
 					if (block.thinking.trim().length === 0) continue;
-					if (!block.thinkingSignature || block.thinkingSignature.trim().length === 0) {
-						if (isNonSigningAnthropicEndpoint(model)) {
-							blocks.push({
-								type: "thinking",
-								thinking: block.thinking.toWellFormed(),
-								signature: "",
-							});
-						} else {
-							blocks.push({
-								type: "text",
-								text: block.thinking.toWellFormed(),
-							});
-						}
-					} else {
+					// Unsigned native thinking replays only where the endpoint never signs.
+					// Elsewhere it cannot be replayed as thinking, and must not be downgraded
+					// to a visible `text` block: that would inject the model's private
+					// reasoning into the assistant transcript of every later request.
+					if (!hasSignedThinking && isNonSigningAnthropicEndpoint(model)) {
 						blocks.push({
 							type: "thinking",
 							thinking: block.thinking.toWellFormed(),
-							signature: block.thinkingSignature,
+							signature: "",
 						});
 					}
 				} else if (block.type === "redactedThinking") {

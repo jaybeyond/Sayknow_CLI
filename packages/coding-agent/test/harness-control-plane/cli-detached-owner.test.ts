@@ -281,8 +281,10 @@ describe.skipIf(process.platform !== "linux")("skc harness start --detach (detac
 		// Owner-backed finalize: the evidence gate HONESTLY refuses without real commit/PR/tests
 		// (no fake completion evidence in shipped code).
 		const fin = await runHarness(["finalize", "--session", SID]);
+		// Assert on the whole evidence object so a CI flake prints whether the owner answered
+		// (finalize evidence) or the CLI fell back (`reason: "owner-not-live"` after an unreachable/timeout route).
+		expect(fin.json?.evidence).toHaveProperty("finalize");
 		const finEvidence = (fin.json?.evidence as Record<string, unknown>).finalize as Record<string, unknown>;
-		expect(finEvidence).toBeTruthy();
 		expect(finEvidence.completed).toBe(false);
 		expect((finEvidence.blockers as unknown[]).length).toBeGreaterThan(0);
 

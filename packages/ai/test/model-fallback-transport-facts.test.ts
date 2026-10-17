@@ -39,6 +39,207 @@ describe("fallback transport facts", () => {
 		expect(() => structuredClone(result.transportFailure)).not.toThrow();
 	});
 
+	it("keeps raw 1113 generic across direct and nested envelopes without assigning vendor semantics", () => {
+		for (const code of ["1113", 1113]) {
+			const envelopes = [
+				{ status: 429, error: { type: "rate_limit_error", code, message: "ignored" } },
+				{
+					status: 429,
+					code: "error",
+					error: { type: "error", error: { type: "rate_limit_error", code, message: "ignored" } },
+				},
+			];
+
+			for (const envelope of envelopes) {
+				const facts = transportFailureFacts(envelope);
+				expect(facts).toMatchObject({
+					kind: "transport",
+					status: 429,
+					providerCode: "1113",
+					providerErrorCode: "1113",
+					anthropicErrorType: "rate_limit_error",
+				});
+				expect(classifyFallbackTrigger(facts)).toEqual({ class: "rate_limit" });
+
+				for (const roundTrip of [
+					JSON.parse(JSON.stringify(facts)),
+					structuredClone(facts),
+					transportFailureFacts(facts),
+				]) {
+					expect(roundTrip).toEqual(facts);
+					expect(classifyFallbackTrigger(roundTrip)).toEqual({ class: "rate_limit" });
+				}
+			}
+		}
+	});
+
+	it("canonicalizes numeric and string 1113 only through the verified ZAI Anthropic adapter boundary", async () => {
+		const bundled = getBundledModel("anthropic", "claude-sonnet-4-6") as Model<"anthropic-messages">;
+		const model = {
+			...bundled,
+			provider: "zai",
+			baseUrl: "https://api.z.ai/api/anthropic",
+		} as Model<"anthropic-messages">;
+		const context: Context = { messages: [{ role: "user", content: "hello", timestamp: Date.now() }] };
+
+		for (const [index, code] of [1113, "1113"].entries()) {
+			let requestCount = 0;
+			let clientCount = 0;
+			const options =
+				typeof code === "number"
+					? {
+							apiKey: "zai-test-key",
+							fetch: (async () => {
+								requestCount += 1;
+								return new Response(
+									JSON.stringify({
+										type: "error",
+										error: {
+											type: "rate_limit_error",
+											code,
+											message: "Insufficient balance or no resource package",
+										},
+									}),
+									{
+										status: 429,
+										headers: {
+											"content-type": "application/json",
+											"retry-after": "7",
+											"set-cookie": "secret=1",
+											authorization: "secret",
+										},
+									},
+								);
+							}) as FetchImpl,
+						}
+					: {
+							client: {
+								messages: {
+									create: (() => {
+										clientCount += 1;
+										throw Object.assign(new Error("opaque provider failure"), {
+											status: 429,
+											headers: new Headers({
+												"retry-after": "7",
+												"set-cookie": "secret=1",
+												authorization: "secret",
+											}),
+											error: {
+												type: "error",
+												error: {
+													type: "rate_limit_error",
+													code,
+													message: "Insufficient balance or no resource package",
+												},
+											},
+										});
+									}) as unknown as Anthropic["messages"]["create"],
+								},
+							} as Anthropic,
+						};
+			const result = await streamAnthropic(model, context, {
+				...options,
+				fallbackManaged: true,
+				fallbackAttempt: beginAttempt(`zai/${model.id}`, `1113-${index}`),
+				requestMaxRetries: 9,
+				streamMaxRetries: 9,
+			}).result();
+
+			expect(requestCount + clientCount).toBe(1);
+			expect(requestCount).toBe(typeof code === "number" ? 1 : 0);
+			expect(clientCount).toBe(typeof code === "string" ? 1 : 0);
+			expect(result.transportFailure).toMatchObject({
+				kind: "transport",
+				status: 429,
+				providerCode: "insufficient_quota",
+				providerErrorCode: "1113",
+				anthropicErrorType: "rate_limit_error",
+			});
+			expect(result.transportFailure?.headers).toEqual({ "retry-after": "7" });
+
+			for (const roundTrip of [
+				JSON.parse(JSON.stringify(result.transportFailure)),
+				structuredClone(result.transportFailure),
+				transportFailureFacts(result.transportFailure),
+			]) {
+				expect(roundTrip).toEqual(result.transportFailure);
+				expect(classifyFallbackTrigger(roundTrip)).toEqual({ class: "quota", retryAfterMs: 7000 });
+			}
+		}
+	});
+
+	it("rejects unverified 1113 and malformed-code quota spoofs", async () => {
+		const genericNegatives = [
+			{ status: 429, error: { type: "rate_limit_error", code: "1113" } },
+			{ status: 429, type: "error", code: "1113" },
+			{ kind: "transport", status: 429, providerFamily: "zai", providerErrorCode: "1113" },
+			{ status: 429, error: { type: "rate_limit_error", message: "1113 insufficient quota" } },
+			{ status: 429, error: { type: "rate_limit_error", code: { value: 1113 } } },
+			{ status: 429, error: { type: "rate_limit_error", code: Number.NaN } },
+		];
+		for (const error of genericNegatives) {
+			expect(classifyFallbackTrigger(transportFailureFacts(error))).toEqual({ class: "rate_limit" });
+		}
+
+		const bundled = getBundledModel("anthropic", "claude-sonnet-4-6") as Model<"anthropic-messages">;
+		const context: Context = { messages: [{ role: "user", content: "hello", timestamp: Date.now() }] };
+		const cases = [
+			{
+				name: "non-zai",
+				model: bundled,
+				error: { status: 429, error: { type: "rate_limit_error", code: "1113" } },
+			},
+			{
+				name: "lookalike",
+				model: { ...bundled, baseUrl: "https://api.z.ai.attacker.example/api/anthropic" },
+				error: { status: 429, error: { type: "rate_limit_error", code: "1113" } },
+			},
+			{
+				name: "message-only-zai",
+				model: { ...bundled, provider: "zai", baseUrl: "https://api.z.ai/api/anthropic" },
+				error: { status: 429, error: { type: "rate_limit_error", message: "1113 insufficient quota" } },
+			},
+			{
+				name: "ordinary-zai-burst",
+				model: { ...bundled, provider: "zai", baseUrl: "https://api.z.ai/api/anthropic" },
+				error: { status: 429, error: { type: "rate_limit_error", code: "rate_limit_error" } },
+			},
+			{
+				name: "invalid-object-zai",
+				model: { ...bundled, provider: "zai", baseUrl: "https://api.z.ai/api/anthropic" },
+				error: { status: 429, error: { type: "rate_limit_error", code: { value: 1113 } } },
+			},
+			{
+				name: "nan-zai",
+				model: { ...bundled, provider: "zai", baseUrl: "https://api.z.ai/api/anthropic" },
+				error: { status: 429, error: { type: "rate_limit_error", code: Number.NaN } },
+			},
+		] as const;
+
+		for (const fixture of cases) {
+			let clientCount = 0;
+			const client = {
+				messages: {
+					create: (() => {
+						clientCount += 1;
+						throw Object.assign(new Error("opaque"), fixture.error);
+					}) as unknown as Anthropic["messages"]["create"],
+				},
+			} as Anthropic;
+			const result = await streamAnthropic(fixture.model as Model<"anthropic-messages">, context, {
+				client,
+				fallbackManaged: true,
+				fallbackAttempt: beginAttempt(`${fixture.name}/${fixture.model.id}`, 1),
+				requestMaxRetries: 9,
+				streamMaxRetries: 9,
+			}).result();
+
+			expect(clientCount).toBe(1);
+			expect(classifyFallbackTrigger(result.transportFailure)).toEqual({ class: "rate_limit" });
+			expect(result.transportFailure?.providerCode).not.toBe("insufficient_quota");
+		}
+	});
+
 	it("emits transport facts captured from fetch error responses", async () => {
 		const model = getBundledModel("openai", "gpt-4o-mini") as Model<"openai-completions">;
 		const context: Context = { messages: [{ role: "user", content: "hello", timestamp: Date.now() }] };
@@ -82,6 +283,26 @@ describe("fallback transport facts", () => {
 		expect(classifyFallbackTrigger({ kind: "transport", status: 503 })).toEqual({ class: "server" });
 	});
 
+	it("gives the canonical provider code precedence over conflicting raw diagnostics", () => {
+		expect(
+			classifyFallbackTrigger({
+				kind: "transport",
+				status: 429,
+				providerCode: "insufficient_quota",
+				providerErrorCode: "rate_limit_error",
+				anthropicErrorType: "rate_limit_error",
+			}),
+		).toEqual({ class: "quota" });
+		expect(
+			classifyFallbackTrigger({
+				kind: "transport",
+				status: 429,
+				providerCode: "rate_limit_error",
+				providerErrorCode: "insufficient_quota",
+				openaiErrorCode: "insufficient_quota",
+			}),
+		).toEqual({ class: "rate_limit" });
+	});
 	it("normalizes provider transport metadata without parsing error text", () => {
 		const quotaError = Object.assign(new Error("provider response"), {
 			status: 429,
@@ -107,11 +328,20 @@ describe("fallback transport facts", () => {
 	it("preserves first-party typed error codes and classifies bare 5xx without prose", () => {
 		const anthropic = transportFailureFacts({ status: 429, error: { type: "rate_limit_error" } });
 		const openai = transportFailureFacts({ status: 401, error: { code: "invalid_api_key" } });
+		const contextOverflow = transportFailureFacts({
+			status: 400,
+			error: { code: "context_length_exceeded" },
+		});
 
 		expect(anthropic).toMatchObject({ anthropicErrorType: "rate_limit_error" });
 		expect(classifyFallbackTrigger(anthropic)).toEqual({ class: "rate_limit" });
 		expect(openai).toMatchObject({ openaiErrorCode: "invalid_api_key" });
 		expect(classifyFallbackTrigger(openai)).toEqual({ class: "auth" });
+		expect(contextOverflow).toMatchObject({
+			providerCode: "context_length_exceeded",
+			openaiErrorCode: "context_length_exceeded",
+		});
+		expect(classifyFallbackTrigger(contextOverflow)).toEqual({ class: "other" });
 		expect(classifyFallbackTrigger({ kind: "transport", status: 500 })).toEqual({ class: "server" });
 	});
 

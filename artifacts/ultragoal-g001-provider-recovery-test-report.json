@@ -1,0 +1,172 @@
+{
+	"schemaVersion": 1,
+	"kind": "api-package-test-report",
+	"storyId": "G001",
+	"surface": "package",
+	"reviewSnapshot": {
+		"algorithm": "sha256 of git diff --binary for the ordered file list; report file excluded to avoid self-reference",
+		"sha256": "5f3dbea64414a60a996a80f03453d284f4d059eda5f0952c293ec6ca046f6d2f",
+		"files": [
+			"artifacts/architecture-2383-eval.json",
+			"packages/ai/CHANGELOG.md",
+			"packages/ai/src/providers/anthropic.ts",
+			"packages/ai/src/utils/fallback-transport.ts",
+			"packages/ai/test/model-fallback-transport-facts.test.ts",
+			"packages/ai/test/openai-codex-stream.test.ts",
+			"packages/coding-agent/CHANGELOG.md",
+			"packages/coding-agent/src/session/agent-session.ts",
+			"packages/coding-agent/test/agent-session-fallback-upstream-count.e2e.test.ts",
+			"packages/coding-agent/test/agent-session-midrun-maintenance.test.ts"
+		]
+	},
+	"contracts": [
+		{
+			"id": "codex-history-rewrite",
+			"obligation": "Completed compaction and prune rewrites invalidate every active or suspended Codex epoch. Across HTTP/WebSocket and append-only off/on/auto, the next provider request is a fresh full baseline with no stale anchor or connection metadata, removed history is absent, retained summary/system/tools/paired tool call-result/steering appear exactly once, and normal append resumes. Repeated rewrites, late old completions, close failures, and failed or aborted rewrites preserve the same boundary.",
+			"status": "passed",
+			"evidence": [
+				"packages/ai/test/openai-codex-stream.test.ts",
+				"packages/coding-agent/test/agent-session-midrun-maintenance.test.ts"
+			]
+		},
+		{
+			"id": "zai-1113-quota",
+			"obligation": "At the verified Z.AI Anthropic boundary, structured numeric or string vendor code 1113 is preserved as providerErrorCode and canonicalized to providerCode insufficient_quota. Numeric/string and default/5+ fallback budgets each produce exactly one Z.AI HTTP request, one fallback request, one quota switch with attemptsUsed 1, and one accepted user/assistant lifecycle.",
+			"status": "passed",
+			"evidence": [
+				"packages/ai/test/model-fallback-transport-facts.test.ts",
+				"packages/coding-agent/test/agent-session-fallback-upstream-count.e2e.test.ts"
+			]
+		}
+	],
+	"commands": [
+		{
+			"argv": [
+				"bun",
+				"test",
+				"packages/ai/test/model-fallback-transport-facts.test.ts",
+				"packages/ai/test/openai-codex-stream.test.ts",
+				"packages/ai/test/anthropic-cache-eval.integration.test.ts",
+				"packages/coding-agent/test/agent-session-fallback-upstream-count.e2e.test.ts",
+				"packages/coding-agent/test/agent-session-midrun-maintenance.test.ts"
+			],
+			"exitCode": 0,
+			"result": "170 pass, 0 fail, 1226 assertions"
+		},
+		{
+			"argv": ["bun", "--cwd=packages/ai", "run", "check"],
+			"exitCode": 0,
+			"result": "Biome check and tsgo typecheck passed"
+		},
+		{
+			"argv": ["bun", "--cwd=packages/coding-agent", "run", "check"],
+			"exitCode": 0,
+			"result": "Biome check and tsgo typecheck passed"
+		},
+		{
+			"argv": ["bun", "run", "check"],
+			"exitCode": 0,
+			"result": "Full TypeScript and Rust static checks passed"
+		}
+	],
+	"failureEvidence": [
+		{
+			"id": "codex-long-session-before-fix",
+			"source": "/Users/jay/.skc/agent/sessions/v2-4baczlrouwlycwmh3gxdpmf4fjxvqu7vu2hhodp53k3brfcytniq/2026-10-01T06-31-07-276Z_01a0f628-d90c-7000-ae2c-c95af948ea75.jsonl",
+			"observations": {
+				"tokensBeforeCompaction": 881941,
+				"localMessagesAfterCompaction": 39,
+				"localSerializedCharactersAfterCompaction": 328777,
+				"nextProviderCacheReadTokens": 881024,
+				"nextProviderTotalTokens": 894231,
+				"laterOverflowTotalTokens": 921558
+			},
+			"owner": "The pre-fix history-rewrite fence closed only the active provider map. A Codex epoch suspended by a temporary provider scope could be restored after compaction and retain the pre-compaction provider-visible context."
+		}
+	],
+	"adversarialCases": [
+		{
+			"id": "codex-transport-matrix",
+			"scenario": "Production compaction and prune run after normal continuation state is primed for HTTP and WebSocket with append-only off, on, and auto.",
+			"expectedBehavior": "The first post-rewrite final body/frame has no stale anchor, delta, turn-state, etag, item reference, or removed/truncated payload; unpruned old payloads and retained summary or paired tool call-result/steering appear exactly once; production policy resolves append-only auto to disabled for openai-codex; compaction shrinks the same serialization by at least 50 percent; normal HTTP full-context and WebSocket append continuation resume from the fresh epoch.",
+			"evidence": [
+				"packages/coding-agent/test/agent-session-midrun-maintenance.test.ts :: rebases the first actual %s request after production compaction (append-only=%s) [http/websocket × off/on/auto]",
+				"packages/coding-agent/test/agent-session-midrun-maintenance.test.ts :: rebases the first actual %s request after production prune (append-only=%s) [http/websocket × off/on/auto]"
+			],
+			"verdict": "passed"
+		},
+		{
+			"id": "codex-suspended-repeated-scope",
+			"scenario": "Nested suspended Codex maps, an active-map alias, a throwing close, an unrelated provider state, and a second completed compaction coexist.",
+			"expectedBehavior": "Every reachable Codex epoch closes once per completed rewrite and is removed; unrelated provider state survives; repeated rewrites do not resurrect stale state.",
+			"evidence": [
+				"packages/coding-agent/test/agent-session-midrun-maintenance.test.ts :: compaction closes every nested Codex epoch, even when one close throws or maps alias"
+			],
+			"verdict": "passed"
+		},
+		{
+			"id": "codex-prune-and-failure-boundaries",
+			"scenario": "Production prune removes oversized old tool output, failed compaction and aborts after flush or during the compaction hook are exercised, and a pending real Codex prewarm is closed by production compaction.",
+			"expectedBehavior": "Prune sends a fresh provider baseline with retained paired result/steering exactly once; failed or aborted rewrites do not close or delete the current epoch; late prewarm callbacks cannot recreate deleted provider state.",
+			"evidence": [
+				"packages/coding-agent/test/agent-session-midrun-maintenance.test.ts :: returns failed without issuing a completed Codex rewrite epoch",
+				"packages/coding-agent/test/agent-session-midrun-maintenance.test.ts :: aborts after event drain and flush complete but before history rewrite",
+				"packages/coding-agent/test/agent-session-midrun-maintenance.test.ts :: aborts while the compaction hook is in progress without completing a rewrite epoch",
+				"packages/coding-agent/test/agent-session-midrun-maintenance.test.ts :: closes a pending real Codex prewarm at the production rewrite fence and ignores late callbacks",
+				"packages/coding-agent/test/agent-session-midrun-maintenance.test.ts :: cleans a held EventStream consumer barrier before it can flush or rewrite"
+			],
+			"verdict": "passed"
+		},
+		{
+			"id": "codex-late-completion",
+			"scenario": "A pre-rewrite WebSocket or HTTP/SSE request remains in flight while production compaction completes and a fresh baseline succeeds, then the detached request completes late.",
+			"expectedBehavior": "The old response cannot reclaim turn-state, etag, or the active anchor, cannot duplicate continuation, and the next normal HTTP or WebSocket turn continues only from the fresh response.",
+			"evidence": [
+				"packages/coding-agent/test/agent-session-midrun-maintenance.test.ts :: does not let a pre-rewrite in-flight websocket completion reclaim the fresh anchor",
+				"packages/coding-agent/test/agent-session-midrun-maintenance.test.ts :: does not let a pre-rewrite in-flight HTTP completion reclaim the fresh epoch"
+			],
+			"verdict": "passed"
+		},
+		{
+			"id": "zai-hostile-negatives",
+			"scenario": "Non-Z.AI code 1113, a lookalike hostname, spoofed raw providerFamily/kind metadata, message-only text, malformed object/NaN codes, generic outer errors, and an ordinary Z.AI burst 429 are presented.",
+			"expectedBehavior": "None is promoted to exhausted quota; safe rate-limit or existing classifications remain, and arbitrary/auth response headers are not retained.",
+			"evidence": [
+				"packages/ai/test/model-fallback-transport-facts.test.ts :: rejects unverified 1113 and malformed-code quota spoofs",
+				"packages/ai/test/model-fallback-transport-facts.test.ts :: gives the canonical provider code precedence over conflicting raw diagnostics"
+			],
+			"verdict": "passed"
+		},
+		{
+			"id": "zai-round-trip-and-adapter",
+			"scenario": "Numeric and string Z.AI 1113 cross the real Anthropic adapter, JSON serialization, structuredClone, and re-normalization with provider retry limits set adversarially high.",
+			"expectedBehavior": "Each adapter path makes one concrete request, preserves raw code/type/status plus canonical insufficient_quota and safe retry headers, and classifies as quota without hidden resend.",
+			"evidence": [
+				"packages/ai/test/model-fallback-transport-facts.test.ts :: keeps raw 1113 generic across direct and nested envelopes without assigning vendor semantics",
+				"packages/ai/test/model-fallback-transport-facts.test.ts :: canonicalizes numeric and string 1113 only through the verified ZAI Anthropic adapter boundary"
+			],
+			"verdict": "passed"
+		},
+		{
+			"id": "zai-budget-lifecycle-matrix",
+			"scenario": "Numeric/string 1113 are each run through actual AgentSession adapters with default and five-attempt fallback budgets.",
+			"expectedBehavior": "Every row produces HTTP order [ZAI, fallback], counts 1/1, one quota switch with attemptsUsed 1, final fallback success, and exactly one user plus accepted assistant lifecycle.",
+			"evidence": [
+				"packages/coding-agent/test/agent-session-fallback-upstream-count.e2e.test.ts :: advances exact ZAI quota once through actual adapters (numeric/default-budget, string/default-budget, numeric/five-budget, string/five-budget)"
+			],
+			"verdict": "passed"
+		}
+	],
+	"broaderVerification": [
+		{
+			"argv": ["bun", "run", "test"],
+			"status": "blocked",
+			"result": "Timed out after 1200 seconds; Rust tests could not start because cargo-nextest is not installed. TypeScript workspace execution also exposed unrelated pre-existing/environment failures, including macOS /var versus /private/var path assertions and a Kimi fresh-install failure whose exact package-wide cause is not identified."
+		},
+		{
+			"argv": ["bun", "--cwd=packages/ai", "test"],
+			"status": "blocked",
+			"result": "2251 pass, 337 skip, 1 unrelated Kimi fresh-install failure during package-wide execution; the exact cause is not identified, and that test passes in isolation."
+		}
+	]
+}

@@ -14,6 +14,8 @@ import type { AssistantMessage, AssistantMessageEvent, Message } from "@sayknow-
 import { EventStream } from "@sayknow-cli/ai";
 
 import { createMockModel } from "@sayknow-cli/ai/providers/mock";
+import { convertCodexResponsesMessages } from "@sayknow-cli/ai/providers/openai-codex-responses";
+import { encodeTextSignatureV1 } from "@sayknow-cli/ai/providers/openai-responses-shared";
 import { AssistantMessageEventStream } from "@sayknow-cli/ai/utils/event-stream";
 
 function assistantMessage(model: AgentLoopConfig["model"]): AssistantMessage {
@@ -2198,6 +2200,87 @@ describe("managed attempt transaction", () => {
 			customWireName: "custom_safe",
 			incompleteArguments: true,
 		});
+	});
+	it("preserves thinking and text replay signatures through the managed shell", async () => {
+		// The managed shell rebuilds every committed assistant message. Dropping
+		// `thinkingSignature` made every later Anthropic request replay prior
+		// reasoning as plain assistant text instead of signed thinking blocks.
+		const mock = createMockModel();
+		const agent = new Agent({
+			initialState: { model: mock.model, systemPrompt: ["test"], tools: [], messages: [] },
+			streamFn: () => {
+				const stream = new AssistantMessageEventStream();
+				queueMicrotask(() => {
+					const message = assistantMessage(mock.model);
+					message.content.push(
+						{
+							type: "thinking",
+							thinking: "summary",
+							thinkingSignature: "sig-anthropic",
+							itemId: "rs_1",
+							provenance: "summary",
+							summaryText: "summary",
+						},
+						{ type: "text", text: "answer", textSignature: "msg_1" },
+					);
+					stream.push({ type: "done", reason: "stop", message });
+				});
+				return stream;
+			},
+		});
+		await agent.prompt("run", { fallbackManaged: true });
+		const message = agent.state.messages.at(-1) as AssistantMessage;
+		expect(message.content).toEqual([
+			{
+				type: "thinking",
+				thinking: "summary",
+				thinkingSignature: "sig-anthropic",
+				itemId: "rs_1",
+				provenance: "summary",
+				summaryText: "summary",
+			},
+			{ type: "text", text: "answer", textSignature: "msg_1" },
+		]);
+	});
+
+	it("keeps Codex reasoning and message phase replayable after a managed turn is resumed", async () => {
+		// Resume strips `providerPayload`, so Codex replays from content metadata:
+		// the reasoning item lives in `thinkingSignature` and the message id/phase
+		// in `textSignature`. Losing either drops encrypted reasoning and the
+		// commentary/final_answer phase from every resumed request.
+		const mock = createMockModel();
+		const reasoningItem = {
+			type: "reasoning",
+			id: "rs_1",
+			summary: [{ type: "summary_text", text: "plan" }],
+			encrypted_content: "enc",
+		};
+		const agent = new Agent({
+			initialState: { model: mock.model, systemPrompt: ["test"], tools: [], messages: [] },
+			streamFn: () => {
+				const stream = new AssistantMessageEventStream();
+				queueMicrotask(() => {
+					const message = assistantMessage(mock.model);
+					message.content.push(
+						{ type: "thinking", thinking: "plan", thinkingSignature: JSON.stringify(reasoningItem) },
+						{ type: "text", text: "preamble", textSignature: encodeTextSignatureV1("msg_a", "commentary") },
+					);
+					stream.push({ type: "done", reason: "stop", message });
+				});
+				return stream;
+			},
+		});
+		await agent.prompt("run", { fallbackManaged: true });
+		const managed = agent.state.messages.at(-1) as AssistantMessage;
+		const codexModel = { ...mock.model, api: "openai-codex-responses", provider: "openai-codex" } as never;
+		const resumed: AssistantMessage = { ...managed, api: "openai-codex-responses", provider: "openai-codex" };
+		const replay = convertCodexResponsesMessages(codexModel, {
+			messages: [{ role: "user", content: "run", timestamp: 0 }, resumed],
+		}) as unknown as Array<Record<string, unknown>>;
+		expect(replay.filter(item => item.role !== "user")).toMatchObject([
+			{ type: "reasoning", id: "rs_1", encrypted_content: "enc" },
+			{ type: "message", id: "msg_a", phase: "commentary" },
+		]);
 	});
 
 	it("rejects managed events with hidden required fields as local failures", async () => {

@@ -75,4 +75,34 @@ describe("serializeConversation", () => {
 		expect(result).not.toContain("truncated");
 		expect(result).toContain(longText);
 	});
+
+	it("never pastes assistant reasoning into the summary prompt", () => {
+		const messages: Message[] = [
+			{
+				role: "assistant",
+				content: [
+					{ type: "thinking", thinking: "private reasoning", thinkingSignature: "sig" },
+					{ type: "text", text: "visible answer" },
+					{ type: "toolCall", id: "call_1", name: "read", arguments: { path: "a.ts" } },
+				],
+				api: "anthropic-messages",
+				provider: "anthropic",
+				model: "test",
+				usage: {
+					input: 0,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 0,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				stopReason: "toolUse",
+				timestamp: Date.now(),
+			},
+		];
+
+		expect(serializeConversation(messages)).toBe(
+			'[Assistant]: visible answer\n\n[Assistant tool calls]: read(path="a.ts")',
+		);
+	});
 });

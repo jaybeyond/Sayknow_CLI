@@ -811,7 +811,7 @@ await stream(anthropic-model, context, {
 
 ## Cross-Provider Handoffs
 
-The library supports seamless handoffs between different LLM providers within the same conversation. This allows you to switch models mid-conversation while preserving context, including thinking blocks, tool calls, and tool results.
+The library supports seamless handoffs between different LLM providers within the same conversation. This allows you to switch models mid-conversation while preserving visible text, tool calls, and tool results.
 
 ### How It Works
 
@@ -819,7 +819,7 @@ When messages from one provider are sent to a different provider, the library au
 
 - **User and tool result messages** are passed through unchanged
 - **Assistant messages from the same provider/API** are preserved as-is
-- **Assistant messages from different providers** have their thinking blocks converted to text with `<thinking>` tags
+- **Assistant messages from a different model** drop their thinking blocks: reasoning replays only to the model that produced it and is never resent as visible text
 - **Tool calls and regular text** are preserved unchanged
 
 ### Example: Multi-Provider Conversation
@@ -839,7 +839,7 @@ const anthropic-modelResponse = await complete(anthropic-model, context, {
 });
 context.messages.push(anthropic-modelResponse);
 
-// Switch to GPT-5 - it will see Anthropic model's thinking as <thinking> tagged text
+// Switch to GPT-5 - it sees the visible answer; Anthropic's reasoning is not replayed
 const gpt5 = getModel("openai", "gpt-5-mini");
 context.messages.push({ role: "user", content: "Is that calculation correct?" });
 const gptResponse = await complete(gpt5, context);
@@ -857,7 +857,7 @@ All providers can handle messages from other providers, including:
 
 - Text content
 - Tool calls and tool results (including images in tool results)
-- Thinking/reasoning blocks (transformed to tagged text for cross-provider compatibility)
+- Thinking/reasoning blocks (replayed natively to the producing model, dropped for other models)
 - Aborted messages with partial content
 
 This enables flexible workflows where you can:

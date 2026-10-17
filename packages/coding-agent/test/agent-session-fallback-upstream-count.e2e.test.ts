@@ -2,7 +2,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import { scheduler } from "node:timers/promises";
 import { Agent, type AgentOptions } from "@sayknow-cli/agent-core";
-import { type AssistantMessage, getBundledModel, type Model } from "@sayknow-cli/ai";
+import {
+	type AssistantMessage,
+	type FetchImpl,
+	getBundledModel,
+	type Model,
+	streamAnthropic,
+	streamOpenAICompletions,
+} from "@sayknow-cli/ai";
 import { createMockModel } from "@sayknow-cli/ai/providers/mock";
 import { AssistantMessageEventStream } from "@sayknow-cli/ai/utils/event-stream";
 import { ModelRegistry } from "@sayknow-cli/coding-agent/config/model-registry";
@@ -182,9 +189,10 @@ describe("AgentSession managed fallback upstream request counts", () => {
 		maxAttempts: number | undefined,
 		streamFn: AgentOptions["streamFn"],
 		extraSettings: Record<string, unknown> = {},
+		models?: { primary: Model; fallback: Model },
 	): { primary: Model; fallback: Model } {
-		const primary = getBundledModel("anthropic", "claude-sonnet-4-5");
-		const fallback = getBundledModel("openai", "gpt-4o-mini");
+		const primary = models?.primary ?? getBundledModel("anthropic", "claude-sonnet-4-5");
+		const fallback = models?.fallback ?? getBundledModel("openai", "gpt-4o-mini");
 		if (!primary || !fallback) throw new Error("Expected bundled test models");
 		const agent = new Agent({
 			getApiKey: provider => `${provider}-test-key`,
@@ -223,6 +231,127 @@ describe("AgentSession managed fallback upstream request counts", () => {
 			expect(call).toMatchObject({ fallbackManaged: true, fallbackAttempt: { attemptId: expect.any(String) } });
 		}
 	});
+
+	for (const fixture of [
+		{ name: "numeric/default-budget", code: 1113, maxAttempts: undefined },
+		{ name: "string/default-budget", code: "1113", maxAttempts: undefined },
+		{ name: "numeric/five-budget", code: 1113, maxAttempts: 5 },
+		{ name: "string/five-budget", code: "1113", maxAttempts: 5 },
+	] as const) {
+		it(`advances exact ZAI quota once through actual adapters (${fixture.name})`, async () => {
+			const requestOrder: string[] = [];
+			const requestUrls: string[] = [];
+			const events: AgentSessionEvent[] = [];
+			const zaiFetch = (async (input: Parameters<FetchImpl>[0]) => {
+				requestOrder.push("ZAI");
+				requestUrls.push(input instanceof Request ? input.url : String(input));
+				return new Response(
+					JSON.stringify({
+						type: "error",
+						error: {
+							type: "rate_limit_error",
+							code: fixture.code,
+							message: "Insufficient balance or no resource package",
+						},
+					}),
+					{ status: 429, headers: { "content-type": "application/json" } },
+				);
+			}) as FetchImpl;
+			const fallbackFetch = (async (input: Parameters<FetchImpl>[0]) => {
+				requestOrder.push("fallback");
+				requestUrls.push(input instanceof Request ? input.url : String(input));
+				return new Response(
+					[
+						'data: {"id":"chatcmpl-test","object":"chat.completion.chunk","created":0,"model":"gpt-4o-mini","choices":[{"index":0,"delta":{"role":"assistant","content":"Recovered"},"finish_reason":null}]}',
+						'data: {"id":"chatcmpl-test","object":"chat.completion.chunk","created":0,"model":"gpt-4o-mini","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}',
+						"data: [DONE]",
+						"",
+					].join("\n\n"),
+					{ status: 200, headers: { "content-type": "text/event-stream" } },
+				);
+			}) as FetchImpl;
+			const bundledZai = getBundledModel("zai", "glm-4.5-flash");
+			const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
+			if (!bundledZai || !fallbackModel) throw new Error("Expected bundled ZAI and OpenAI models");
+			const primaryModel = {
+				...bundledZai,
+				api: "anthropic-messages",
+				baseUrl: "https://api.z.ai/api/anthropic",
+			} as Model<"anthropic-messages">;
+			authStorage.setRuntimeApiKey("zai", "zai-test-key");
+
+			const { primary, fallback } = createSession(
+				fixture.maxAttempts,
+				(model, context, options) => {
+					if (selector(model) === selector(primaryModel)) {
+						return streamAnthropic(
+							{
+								...model,
+								api: "anthropic-messages",
+								baseUrl: "https://api.z.ai/api/anthropic",
+							} as Model<"anthropic-messages">,
+							context,
+							{
+								...options,
+								apiKey: "zai-test-key",
+								fetch: zaiFetch,
+								requestMaxRetries: 9,
+								streamMaxRetries: 9,
+							},
+						);
+					}
+					return streamOpenAICompletions(model as Model<"openai-completions">, context, {
+						...options,
+						apiKey: "openai-test-key",
+						fetch: fallbackFetch,
+						requestMaxRetries: 9,
+						streamMaxRetries: 9,
+					});
+				},
+				{},
+				{ primary: primaryModel, fallback: fallbackModel },
+			);
+			session!.subscribe(event => events.push(event));
+
+			await session!.prompt(`Advance exact ZAI quota once: ${fixture.name}`);
+			await session!.waitForIdle();
+
+			expect(selector(primary)).toBe("zai/glm-4.5-flash");
+			expect(requestOrder).toEqual(["ZAI", "fallback"]);
+			expect(requestOrder.filter(provider => provider === "ZAI")).toHaveLength(1);
+			expect(requestOrder.filter(provider => provider === "fallback")).toHaveLength(1);
+			expect(requestUrls[0]).toContain("api.z.ai/api/anthropic");
+			expect(requestUrls[1]).toContain("openai.com");
+			expect(events.filter(event => event.type === "model_fallback_switched")).toEqual([
+				expect.objectContaining({
+					from: selector(primary),
+					to: selector(fallback),
+					reason: "quota",
+					attemptsUsed: 1,
+				}),
+			]);
+			expect(session!.model).toMatchObject({ provider: fallback.provider, id: fallback.id });
+			expect(session!.messages.filter(message => message.role === "user")).toHaveLength(1);
+			expect(session!.messages.filter(message => message.role === "assistant")).toEqual([
+				expect.objectContaining({
+					role: "assistant",
+					stopReason: "stop",
+					content: [expect.objectContaining({ type: "text", text: "Recovered" })],
+				}),
+			]);
+			const assistantLifecycle = events.filter(
+				event =>
+					(event.type === "message_start" || event.type === "message_update" || event.type === "message_end") &&
+					"message" in event &&
+					event.message.role === "assistant",
+			);
+			expect(assistantLifecycle.filter(event => event.type === "message_start")).toHaveLength(1);
+			expect(assistantLifecycle.filter(event => event.type === "message_end")).toHaveLength(1);
+			expect(events.filter(event => event.type === "agent_end")).toEqual([
+				expect.objectContaining({ stopReason: "completed" }),
+			]);
+		});
+	}
 
 	it("keeps an opaque typed overflow budget-neutral before a spent rate-limit window advances N=1", async () => {
 		const calls: StreamCall[] = [];

@@ -22,6 +22,8 @@ export interface TransportFailureFacts {
 	status?: number;
 	/** Canonical provider error code used for fallback classification. */
 	providerCode?: string;
+	/** Provider-native error code retained independently from envelope/type fields. */
+	providerErrorCode?: string;
 	/** Anthropic's typed `error.type`, preserved separately at the transport boundary. */
 	anthropicErrorType?: string;
 	/** OpenAI's typed `error.code`, preserved separately at the transport boundary. */
@@ -100,6 +102,11 @@ function stringValue(value: unknown): string | undefined {
 	return typeof value === "string" ? value : undefined;
 }
 
+function providerCodeValue(value: unknown): string | undefined {
+	if (typeof value === "string") return value;
+	return typeof value === "number" && Number.isFinite(value) ? String(value) : undefined;
+}
+
 /** Retry-signal headers retained on transport facts; everything else is dropped. */
 const RETAINED_TRANSPORT_HEADERS = ["retry-after", "retry-after-ms"] as const;
 
@@ -151,15 +158,25 @@ export function transportFailureFacts(
 	const value = error as FallbackTriggerInput & { kind?: unknown; type?: unknown };
 	const response = propertyOf(value, "response");
 	const nestedError = propertyOf(value, "error");
+	const nestedProviderError = propertyOf(nestedError, "error");
 	const status =
 		finiteStatus(propertyOf(value, "status")) ??
 		finiteStatus(propertyOf(response, "status")) ??
 		finiteStatus(propertyOf(capturedResponse, "status"));
-	const anthropicErrorType = stringValue(propertyOf(nestedError, "type")) ?? stringValue(propertyOf(value, "type"));
+	const anthropicErrorType =
+		stringValue(propertyOf(value, "anthropicErrorType")) ??
+		stringValue(propertyOf(nestedProviderError, "type")) ??
+		stringValue(propertyOf(nestedError, "type")) ??
+		stringValue(propertyOf(value, "type"));
+	const providerErrorCode =
+		stringValue(propertyOf(value, "providerErrorCode")) ??
+		providerCodeValue(propertyOf(nestedProviderError, "code")) ??
+		providerCodeValue(propertyOf(nestedError, "code"));
 	const openaiErrorCode =
-		stringValue(propertyOf(value, "openaiErrorCode")) ?? stringValue(propertyOf(nestedError, "code"));
+		stringValue(propertyOf(value, "openaiErrorCode")) ?? providerCodeValue(propertyOf(nestedError, "code"));
 	const providerCode =
 		stringValue(propertyOf(value, "providerCode")) ??
+		providerErrorCode ??
 		openaiErrorCode ??
 		stringValue(propertyOf(value, "code")) ??
 		anthropicErrorType;
@@ -189,7 +206,15 @@ export function transportFailureFacts(
 	) {
 		return undefined;
 	}
-	return { kind: "transport", status, providerCode, anthropicErrorType, openaiErrorCode, headers };
+	return {
+		kind: "transport",
+		status,
+		providerCode,
+		providerErrorCode,
+		anthropicErrorType,
+		openaiErrorCode,
+		headers,
+	};
 }
 
 function headersOf(headers: TransportHeaders | undefined): Headers | undefined {
@@ -255,12 +280,15 @@ export function classifyFallbackTrigger(
 	const retryAfterMs =
 		parseRetryAfterMilliseconds(headers?.get("retry-after-ms") ?? null) ??
 		parseRetryAfterSeconds(headers?.get("retry-after") ?? null);
-	const code = (facts.openaiErrorCode ?? facts.anthropicErrorType ?? facts.providerCode)?.toLowerCase();
-	const triggerClass: FallbackTriggerClass = isQuotaCode(code)
+	const code = facts.providerCode?.toLowerCase();
+	const hasQuotaCode = isQuotaCode(code);
+	const hasAuthCode = isAuthCode(code);
+	const hasRateLimitCode = isRateLimitCode(code);
+	const triggerClass: FallbackTriggerClass = hasQuotaCode
 		? "quota"
-		: facts.status === 401 || facts.status === 403 || isAuthCode(code)
+		: facts.status === 401 || facts.status === 403 || hasAuthCode
 			? "auth"
-			: facts.status === 429 || isRateLimitCode(code)
+			: facts.status === 429 || hasRateLimitCode
 				? "rate_limit"
 				: facts.status !== undefined && facts.status >= 500 && facts.status <= 599
 					? "server"

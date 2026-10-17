@@ -12781,9 +12781,23 @@ export class AgentSession {
 	}
 
 	#closeCodexProviderSessionsForHistoryRewrite(): void {
-		const currentModel = this.model;
-		if (currentModel?.api !== "openai-codex-responses") return;
-		this.#closeProviderSessionsForModelSwitch(currentModel, currentModel);
+		const providerKey = "openai-codex-responses";
+		const maps = new Set<Map<string, ProviderSessionState>>([this.#providerSessionState]);
+		if (this.agent.providerSessionState) maps.add(this.agent.providerSessionState);
+		for (const scope of this.#temporaryProviderSessionScopes) maps.add(scope.providerSessionState);
+		for (const providerSessionState of maps) {
+			const state = providerSessionState.get(providerKey);
+			if (!state) continue;
+			try {
+				state.close();
+			} catch (error) {
+				logger.warn("Failed to close Codex provider session state after history rewrite", {
+					providerKey,
+					error: String(error),
+				});
+			}
+			providerSessionState.delete(providerKey);
+		}
 	}
 
 	/**

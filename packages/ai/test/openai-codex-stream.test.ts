@@ -4055,6 +4055,44 @@ describe("openai-codex semantic clocks (fake timers)", () => {
 			expect(fetchState.calls()).toBe(1);
 		});
 
+		it(`${entry.name}: an idle stall inside an unfinished tool call is terminal and never replays the request`, async () => {
+			// Upstream 06395b374 guards the same invariant: a stall is not semantic progress,
+			// so an unfinished tool call must surface as an error instead of a resend.
+			vi.useFakeTimers();
+			const fetchState = installTimedFetch(
+				[
+					{ atMs: 1_000, events: [created] },
+					{
+						atMs: 2_000,
+						events: [
+							{
+								type: "response.output_item.added",
+								item: {
+									type: "function_call",
+									id: "fc_clock",
+									call_id: "call_clock",
+									name: "echo",
+									arguments: "",
+								},
+							},
+							{ type: "response.function_call_arguments.delta", delta: '{"text":"par' },
+						],
+					},
+				],
+				10_000,
+			);
+			const response = entry.open({ apiKey: createCodexTestToken() }).result();
+			await flush();
+			vi.advanceTimersByTime(2_000);
+			await flush();
+			vi.advanceTimersByTime(300_000);
+			await flush();
+			const result = await response;
+			expect(result.stopReason).toBe("error");
+			expect(result.errorMessage).toBe("Provider stream stalled while waiting for the next event");
+			expect(fetchState.calls()).toBe(1);
+		});
+
 		it(`${entry.name}: caller abort ends as aborted, not as a clock failure`, async () => {
 			vi.useFakeTimers();
 			const fetchState = installTimedFetch([{ atMs: 1_000, events: [created] }], 10_000);

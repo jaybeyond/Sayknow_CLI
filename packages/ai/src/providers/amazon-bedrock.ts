@@ -728,9 +728,11 @@ function convertMessages(
 						case "thinking":
 							// Skip empty thinking blocks
 							if (c.thinking.trim().length === 0) continue;
-							// Thinking blocks require a valid signature when sent as reasoningContent.
-							// If the signature is missing (e.g., from an aborted stream), or the model
-							// doesn't support signatures, convert to plain text instead.
+							// Signed Claude reasoning replays natively. Models without signature
+							// support take unsigned reasoning. Claude reasoning that lost its
+							// signature (e.g. an aborted stream) cannot replay as reasoning and is
+							// dropped: demoting it to a visible text block would inject the model's
+							// private reasoning into the assistant transcript of every later request.
 							if (supportsThinkingSignature(model) && c.thinkingSignature) {
 								contentBlocks.push({
 									reasoningContent: {
@@ -738,13 +740,9 @@ function convertMessages(
 									},
 								});
 							} else if (!supportsThinkingSignature(model)) {
-								// Model doesn't support signatures at all — send as unsigned reasoning
 								contentBlocks.push({
 									reasoningContent: { reasoningText: { text: c.thinking.toWellFormed() } },
 								});
-							} else {
-								// Model requires signature but we don't have one — demote to text
-								contentBlocks.push({ text: `[Thinking]: ${c.thinking.toWellFormed()}` });
 							}
 							break;
 						default:
@@ -810,6 +808,9 @@ function convertMessages(
 
 	return result;
 }
+
+/** @internal Exported for tests. */
+export { convertMessages as convertBedrockMessages };
 
 export function stripBedrockForcedToolChoiceForRetry<T extends { toolConfig?: { toolChoice?: unknown } }>(body: T): T {
 	if (body.toolConfig) {

@@ -253,20 +253,16 @@ export function convertMessages<T extends GoogleApiType>(model: Model<T>, contex
 				} else if (block.type === "thinking") {
 					// Skip empty thinking blocks
 					if (!block.thinking || block.thinking.trim() === "") continue;
-					// Only keep as thinking block if same provider AND same model
-					// Otherwise convert to plain text (no tags to avoid model mimicking them)
-					if (isSameProviderAndModel) {
-						const thoughtSignature = resolveThoughtSignature(isSameProviderAndModel, block.thinkingSignature);
-						parts.push({
-							thought: true,
-							text: block.thinking.toWellFormed(),
-							...(thoughtSignature && { thoughtSignature }),
-						});
-					} else {
-						parts.push({
-							text: block.thinking.toWellFormed(),
-						});
-					}
+					// Only the producing provider+model can replay its reasoning as a thought
+					// part. Another model's reasoning is dropped rather than resent as visible
+					// text, which would present it as the assistant's spoken output.
+					if (!isSameProviderAndModel) continue;
+					const thoughtSignature = resolveThoughtSignature(isSameProviderAndModel, block.thinkingSignature);
+					parts.push({
+						thought: true,
+						text: block.thinking.toWellFormed(),
+						...(thoughtSignature && { thoughtSignature }),
+					});
 				} else if (block.type === "toolCall") {
 					const thoughtSignature = resolveThoughtSignature(isSameProviderAndModel, block.thoughtSignature);
 					const effectiveSignature =

@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- The stream-stall hint now suggests an idle timeout longer than the one that fired (twice the larger of the configured override and the longest built-in window). It previously suggested `PI_STREAM_IDLE_TIMEOUT_MS=300000`, which equals Anthropic's built-in window and changed nothing.
+- Managed fallback now treats Z.AI error `1113` (insufficient balance or no resource package) as exhausted quota and advances after one upstream request instead of retrying the same model until the step budget is spent.
+- After compaction or another Codex history rewrite, the first WebSocket request now starts from a fresh provider-visible baseline instead of inheriting stale connection context and eventually failing with `context_length_exceeded`.
+- Session storage on macOS accepts paths named through OS-owned links such as `/var` → `/private/var` and `/tmp` → `/private/tmp`. Managed roots are canonical, so a session or agent directory under the system temp dir was rejected as `Managed path escapes configured root` or `Unsafe reparse storage path`. Only root-owned links in root-owned, non-world-writable directories are exempt; user-created links anywhere in the path are still refused.
+
 ## [0.7.8] - 2026-10-09
 
 ### Fixed

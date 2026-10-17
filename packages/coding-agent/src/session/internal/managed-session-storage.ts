@@ -319,7 +319,7 @@ export function retainManagedDirectoryAuthority(
 	expected?: { dev: bigint; ino: bigint },
 ): RecoveryFsRoot | undefined {
 	assertManagedDirectoryRoot(root);
-	managedRelativePath(root, directory);
+	const components = managedRelativePath(root, directory);
 	const resolved = path.resolve(directory);
 	if (process.platform !== "linux") return undefined;
 	const named = fs.lstatSync(resolved, { bigint: true });
@@ -336,7 +336,7 @@ export function retainManagedDirectoryAuthority(
 			retainedRoot.identity.ino !== root.ino.toString()
 		)
 			throw new Error("Managed root authority changed");
-		const relative = path.relative(root.canonicalPath, resolved).split(path.sep).join("/");
+		const relative = components.join("/");
 		return rootAuthority.retainManagedDirectory(relative, named.dev.toString(), named.ino.toString());
 	} finally {
 		rootAuthority.close();
@@ -368,11 +368,68 @@ function ensureManagedRoot(root: ManagedDirectoryRoot): void {
 }
 
 function managedRelativePath(root: ManagedDirectoryRoot, pathname: string): readonly string[] {
-	const relative = path.relative(root.canonicalPath, path.resolve(pathname));
+	const resolved = path.resolve(pathname);
+	const components = textualRelativePath(root.canonicalPath, resolved) ?? aliasedRelativePath(root, resolved);
+	if (components === undefined) throw new Error(`Managed path escapes configured root: ${pathname}`);
+	return components;
+}
+
+function textualRelativePath(rootPath: string, resolved: string): string[] | undefined {
+	const relative = path.relative(rootPath, resolved);
 	if (relative === "") return [];
-	if (path.isAbsolute(relative) || relative.split(path.sep).includes(".."))
-		throw new Error(`Managed path escapes configured root: ${pathname}`);
+	if (path.isAbsolute(relative) || relative.split(path.sep).includes("..")) return undefined;
 	return relative.split(path.sep);
+}
+
+/**
+ * The root is canonical, but a caller may name it through an OS alias such as macOS
+ * `/var` -> `/private/var`. Find the textual ancestor that is the root directory itself
+ * (same device and inode, not a link) and accept it only when every link above it is OS
+ * layout. Components below it stay textual, so the per-component checks still reject any
+ * link inside the root.
+ */
+function aliasedRelativePath(root: ManagedDirectoryRoot, resolved: string): string[] | undefined {
+	const below: string[] = [];
+	let current = resolved;
+	for (;;) {
+		try {
+			const stat = fs.lstatSync(current, { bigint: true });
+			if (stat.isDirectory() && stat.dev === root.dev && stat.ino === root.ino) {
+				return onlyTrustedSystemLinks(path.dirname(current)) ? below.reverse() : undefined;
+			}
+		} catch (error) {
+			const code = (error as NodeJS.ErrnoException).code;
+			if (code !== "ENOENT" && code !== "ENOTDIR") throw error;
+		}
+		const parent = path.dirname(current);
+		if (parent === current) return undefined;
+		below.push(path.basename(current));
+		current = parent;
+	}
+}
+
+function onlyTrustedSystemLinks(pathname: string): boolean {
+	const parsed = path.parse(pathname);
+	let current = parsed.root;
+	for (const part of pathname.slice(parsed.root.length).split(path.sep)) {
+		if (!part) continue;
+		current = path.join(current, part);
+		const stat = fs.lstatSync(current);
+		if (stat.isSymbolicLink() && !isTrustedSystemLink(current, stat)) return false;
+	}
+	return true;
+}
+
+/**
+ * A root-owned link inside a root-owned directory that nobody else can write (macOS `/var`
+ * and `/tmp`, merged-usr `/bin`) is OS layout: replacing it already requires root. Windows
+ * reports uid 0 for every file, so the exemption is POSIX-only.
+ * @internal
+ */
+export function isTrustedSystemLink(linkPath: string, linkStat: fs.Stats): boolean {
+	if (process.platform === "win32" || linkStat.uid !== 0) return false;
+	const parent = fs.statSync(path.dirname(linkPath));
+	return parent.uid === 0 && (parent.mode & 0o022) === 0;
 }
 
 const PROCESS_START_ID = randomUUID();

@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Compaction and branch summaries no longer paste assistant thinking into the summarization prompt; `serializeConversation` emits only visible assistant text, tool calls, user messages, and tool results.
+
+### Fixed
+
+- Fallback-managed runs keep replay metadata on committed assistant content: `thinkingSignature`, `itemId`, `provenance`, `summaryText`, and `rawText` on thinking blocks and `textSignature` on text blocks. Dropping them made every managed turn persist unsigned thinking, which later requests replayed as plain text instead of signed reasoning.
+
 ## [0.7.8] - 2026-10-09
 
 ### Changed

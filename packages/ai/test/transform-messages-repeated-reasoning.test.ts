@@ -2,9 +2,10 @@ import { describe, expect, it } from "bun:test";
 import { transformMessages } from "@sayknow-cli/ai/providers/transform-messages";
 import type { AssistantMessage, Message, Model, ToolResultMessage, UserMessage } from "@sayknow-cli/ai/types";
 
-// Issue #5805 (ported from upstream): when a model switch degrades foreign
+// Issue #5805 (ported from upstream): when a model switch degraded foreign
 // reasoning to plain text, a decode-looped paragraph repeated tens of thousands
-// of times was re-sent verbatim on every later turn.
+// of times was re-sent verbatim on every later turn. Foreign reasoning is now
+// never replayed, so no size of reasoning can reach another model's request.
 
 const deepseekModel: Model<"openai-completions"> = {
 	api: "openai-completions",
@@ -97,15 +98,12 @@ function assistantTextBlocks(messages: Message[]): string[] {
 	return blocks;
 }
 
-describe("transform-messages cross-model repeated reasoning replay (#5805)", () => {
-	it("compresses pathological consecutive thinking repeats only in send-boundary text conversion", () => {
+describe("transform-messages cross-model reasoning replay (#5805)", () => {
+	it("drops foreign reasoning of any size instead of replaying it as assistant text", () => {
 		const repeatCount = 65_956;
 		const repeatedParagraph = "Need think again";
-		const prefix = "Distinct leading thought.";
-		const middle = "Distinct transition thought.";
-		const suffix = "Distinct closing thought.";
 		const repeatedRun = `${repeatedParagraph}\n\n`.repeat(repeatCount - 1) + repeatedParagraph;
-		const reasoning = `${prefix}\n\n${repeatedRun}\n\n${middle}\n\n${suffix}`;
+		const reasoning = `Distinct leading thought.\n\n${repeatedRun}\n\nDistinct closing thought.`;
 		const finalText = `Visible final answer.\n\n${"This final paragraph is not reasoning.\n\n".repeat(80)}Visible final tail.`;
 		const toolContent = `${"Repeated tool output stays untouched.\n\n".repeat(80)}Tool output tail.`;
 		const reasoningTurn = completedAssistant(
@@ -115,7 +113,13 @@ describe("transform-messages cross-model repeated reasoning replay (#5805)", () 
 			],
 			deepseekModel,
 		);
-		const toolTurn = assistantTurn([{ type: "text", text: "Preparing tool call." }], deepseekModel);
+		const toolTurn = assistantTurn(
+			[
+				{ type: "thinking", thinking: "short foreign reasoning" },
+				{ type: "text", text: "Preparing tool call." },
+			],
+			deepseekModel,
+		);
 		const toolMessage = { ...toolResult(), content: [{ type: "text" as const, text: toolContent }] };
 		const messages: Message[] = [user, reasoningTurn, toolTurn, toolMessage];
 		const sourceBefore = JSON.stringify(messages);
@@ -123,26 +127,16 @@ describe("transform-messages cross-model repeated reasoning replay (#5805)", () 
 		expect(reasoning.length).toBeGreaterThan(1_000_000);
 
 		const transformed = transformMessages(messages, customOpenAIModel);
-		const convertedText = assistantTextBlocks(transformed);
-		const compressedReasoning = convertedText[0];
-
-		expect(compressedReasoning.length).toBeLessThan(10_000);
-		expect(compressedReasoning).toContain(prefix);
-		expect(compressedReasoning).toContain(repeatedParagraph);
-		expect(compressedReasoning).toContain(`exactly ${repeatCount} consecutive times`);
-		expect(compressedReasoning).toContain(middle);
-		expect(compressedReasoning).toContain(suffix);
-		expect(compressedReasoning.split(repeatedParagraph)).toHaveLength(2);
-		expect(compressedReasoning.indexOf(prefix)).toBeLessThan(compressedReasoning.indexOf(repeatedParagraph));
-		expect(compressedReasoning.indexOf(repeatedParagraph)).toBeLessThan(compressedReasoning.indexOf(middle));
-		expect(compressedReasoning.indexOf(middle)).toBeLessThan(compressedReasoning.indexOf(suffix));
-		expect(convertedText.slice(1)).toEqual([finalText, "Preparing tool call."]);
+		expect(assistantTextBlocks(transformed)).toEqual([finalText, "Preparing tool call."]);
+		expect(JSON.stringify(transformed)).not.toContain(repeatedParagraph);
+		expect(JSON.stringify(transformed)).not.toContain("short foreign reasoning");
+		const transformedTool = transformed.find(msg => msg.role === "assistant" && msg.stopReason === "toolUse");
+		expect(transformedTool?.role === "assistant" ? transformedTool.content.map(block => block.type) : []).toEqual([
+			"text",
+			"toolCall",
+		]);
 		expect(transformed.find(msg => msg.role === "toolResult")).toBe(toolMessage);
 		expect(JSON.stringify(messages)).toBe(sourceBefore);
-
-		// A transformed send-boundary result can be passed through again without
-		// multiplying the summary marker or changing the converted reasoning.
-		expect(JSON.stringify(transformMessages(transformed, customOpenAIModel))).toBe(JSON.stringify(transformed));
 
 		// The same large reasoning remains native and byte-for-byte unchanged when
 		// replayed to its source model.
@@ -151,30 +145,16 @@ describe("transform-messages cross-model repeated reasoning replay (#5805)", () 
 		expect(nativeAssistant?.role).toBe("assistant");
 		if (nativeAssistant?.role === "assistant") {
 			expect(nativeAssistant.content[0]).toBe(reasoningTurn.content[0]);
-			expect(nativeAssistant.content[0]).toEqual({
-				type: "thinking",
-				thinking: reasoning,
-				thinkingSignature: undefined,
-			});
 		}
 	});
 
-	it("leaves ordinary or low-savings paragraph repetition unchanged", () => {
-		const longParagraph = "ordinary paragraph ".repeat(125);
-		const fewLargeRepeats = [longParagraph, longParagraph, longParagraph].join("\n\n");
-		const fewRepeatMessages: Message[] = [
+	it("drops a foreign reasoning-only turn without inventing visible text", () => {
+		const messages: Message[] = [
 			user,
-			completedAssistant([{ type: "thinking", thinking: fewLargeRepeats }], deepseekModel),
+			completedAssistant([{ type: "thinking", thinking: "only reasoning" }], deepseekModel),
 		];
-		const fewRepeatText = assistantTextBlocks(transformMessages(fewRepeatMessages, customOpenAIModel))[0];
-		expect(fewRepeatText).toBe(fewLargeRepeats);
-
-		const manyTinyRepeats = Array.from({ length: 128 }, () => "x").join("\n\n");
-		const manyRepeatMessages: Message[] = [
-			user,
-			completedAssistant([{ type: "thinking", thinking: manyTinyRepeats }], deepseekModel),
-		];
-		const manyRepeatText = assistantTextBlocks(transformMessages(manyRepeatMessages, customOpenAIModel))[0];
-		expect(manyRepeatText).toBe(manyTinyRepeats);
+		const transformed = transformMessages(messages, customOpenAIModel);
+		const assistant = transformed.find(msg => msg.role === "assistant");
+		expect(assistant?.role === "assistant" ? assistant.content : undefined).toEqual([]);
 	});
 });

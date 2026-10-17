@@ -56,38 +56,58 @@ function getDeviceModel(): string {
 	return formatDeviceModel(label, release, arch);
 }
 
-let getDeviceId = (): string => {
+type KimiCommonHeaders = Readonly<{
+	"User-Agent": string;
+	"X-Msh-Platform": string;
+	"X-Msh-Version": string;
+	"X-Msh-Device-Name": string;
+	"X-Msh-Device-Model": string;
+	"X-Msh-Os-Version": string;
+	"X-Msh-Device-Id": string;
+}>;
+
+// Keyed by the device-id path: the agent dir can change at runtime (`setAgentDir`), and an id
+// cached for one dir must never be reported for another or skip creating the new dir's file.
+const deviceIdsByPath = new Map<string, string>();
+
+function getDeviceId(): string {
 	const deviceIdPath = path.join(getAgentDir(), DEVICE_ID_FILENAME);
+	const cached = deviceIdsByPath.get(deviceIdPath);
+	if (cached) return cached;
 	try {
-		const existing = fs.readFileSync(deviceIdPath, "utf-8");
-		const trimmed = existing.trim();
-		if (trimmed) {
-			getDeviceId = () => trimmed;
-			return trimmed;
+		const existing = fs.readFileSync(deviceIdPath, "utf-8").trim();
+		if (existing) {
+			deviceIdsByPath.set(deviceIdPath, existing);
+			return existing;
 		}
 	} catch (error) {
 		if (!isEnoent(error)) throw error;
 	}
 
 	const deviceId = crypto.randomUUID().replace(/-/g, "");
+	// A fresh install has no agent dir yet; the device id must not depend on another writer creating it.
+	fs.mkdirSync(path.dirname(deviceIdPath), { recursive: true, mode: 0o700 });
 	fs.writeFileSync(deviceIdPath, `${deviceId}\n`, { mode: 0o600 });
-	getDeviceId = () => deviceId;
+	deviceIdsByPath.set(deviceIdPath, deviceId);
 	return deviceId;
-};
+}
 
-export let getKimiCommonHeaders = () => {
-	const headers = Object.freeze({
+let cachedCommonHeaders: KimiCommonHeaders | undefined;
+
+export function getKimiCommonHeaders(): KimiCommonHeaders {
+	const deviceId = getDeviceId();
+	if (cachedCommonHeaders?.["X-Msh-Device-Id"] === deviceId) return cachedCommonHeaders;
+	cachedCommonHeaders = Object.freeze({
 		"User-Agent": `KimiCLI/${packageJson.version}`,
 		"X-Msh-Platform": "kimi_cli",
 		"X-Msh-Version": packageJson.version,
 		"X-Msh-Device-Name": os.hostname(),
 		"X-Msh-Device-Model": getDeviceModel(),
 		"X-Msh-Os-Version": os.version(),
-		"X-Msh-Device-Id": getDeviceId(),
+		"X-Msh-Device-Id": deviceId,
 	});
-	getKimiCommonHeaders = () => headers;
-	return headers;
-};
+	return cachedCommonHeaders;
+}
 
 async function requestDeviceAuthorization(): Promise<{
 	userCode: string;

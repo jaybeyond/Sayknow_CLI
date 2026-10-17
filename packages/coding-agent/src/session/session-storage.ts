@@ -7,6 +7,7 @@ import * as native from "@sayknow-cli/natives";
 import { isEnoent, pathIsWithin, peekFile, toError } from "@sayknow-cli/utils";
 import {
 	assertManagedDirectoryRoot,
+	isTrustedSystemLink,
 	type ManagedDirectoryRoot,
 	validateNativeSecurityResult,
 } from "./internal/managed-session-storage";
@@ -487,13 +488,21 @@ function assertNoReparsePath(pathname: string): void {
 	for (const part of resolved.slice(parsed.root.length).split(path.sep)) {
 		if (!part) continue;
 		current = path.join(current, part);
+		let stat: fs.Stats;
 		try {
-			if (fs.lstatSync(current).isSymbolicLink()) throw new Error(`Unsafe reparse storage path: ${current}`);
+			stat = fs.lstatSync(current);
 		} catch (error) {
 			if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+			continue;
+		}
+		if (stat.isSymbolicLink() && !isTrustedSystemLink(current, stat)) {
+			throw new Error(`Unsafe reparse storage path: ${current}`);
 		}
 	}
 }
+
+/** @internal Exported for tests. */
+export { assertNoReparsePath as assertNoReparseStoragePath };
 
 // FinalizationRegistry to clean up leaked file descriptors
 const writerRegistry = new FinalizationRegistry<number>(fd => {

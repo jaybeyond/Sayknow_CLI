@@ -65,6 +65,83 @@ describe("Anthropic thinking replay immutability", () => {
 		]);
 	});
 
+	it("drops unsigned Anthropic thinking instead of replaying it as assistant text", () => {
+		// Sessions persisted while the managed shell stripped signatures carry
+		// unsigned native thinking. Replaying it as a `text` block would put the
+		// model's private reasoning into the visible transcript of every request.
+		const assistant = (content: AssistantMessage["content"]): AssistantMessage => ({
+			role: "assistant",
+			content,
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: model.id,
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "toolUse",
+			timestamp: Date.now(),
+		});
+		const user: UserMessage = { role: "user", content: "continue", timestamp: Date.now() };
+		const unsignedOnly = assistant([
+			{ type: "thinking", thinking: "unsigned private reasoning" },
+			{ type: "text", text: "visible answer" },
+		]);
+		const mixed = assistant([
+			{ type: "thinking", thinking: "signed reasoning", thinkingSignature: "sig_ok" },
+			{ type: "thinking", thinking: "unsigned interleaved reasoning", thinkingSignature: "" },
+			{ type: "text", text: "mixed answer" },
+		]);
+
+		const params = convertAnthropicMessages([user, unsignedOnly, user, mixed], model, false);
+		const assistantParams = params.filter(message => message.role === "assistant");
+		expect(assistantParams.map(message => message.content)).toEqual([
+			[{ type: "text", text: "visible answer" }],
+			[
+				{ type: "thinking", thinking: "signed reasoning", signature: "sig_ok" },
+				{ type: "text", text: "mixed answer" },
+			],
+		]);
+		expect(JSON.stringify(params)).not.toContain("unsigned");
+	});
+
+	it("keeps unsigned thinking as native thinking on non-signing Anthropic endpoints", () => {
+		const zaiModel: Model<"anthropic-messages"> = { ...model, provider: "zai", id: "glm-5" };
+		const assistant: AssistantMessage = {
+			role: "assistant",
+			content: [
+				{ type: "thinking", thinking: "zai reasoning" },
+				{ type: "text", text: "zai answer" },
+			],
+			api: "anthropic-messages",
+			provider: "zai",
+			model: zaiModel.id,
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "stop",
+			timestamp: Date.now(),
+		};
+		const params = convertAnthropicMessages(
+			[{ role: "user", content: "continue", timestamp: Date.now() }, assistant],
+			zaiModel,
+			false,
+		);
+		expect(params.find(message => message.role === "assistant")?.content).toEqual([
+			{ type: "thinking", thinking: "zai reasoning", signature: "" },
+			{ type: "text", text: "zai answer" },
+		]);
+	});
+
 	it("drops aborted assistant thinking while preserving a resolved tool-use turn", () => {
 		const user: UserMessage = {
 			role: "user",
@@ -272,12 +349,11 @@ describe("Anthropic thinking replay immutability", () => {
 		]);
 	});
 
-	it("keeps cross-model thinking as text during signature-invalid replay repair", () => {
+	it("drops cross-model thinking instead of replaying it as text during signature-invalid repair", () => {
 		const userA: UserMessage = { role: "user", content: "first", timestamp: Date.now() };
 		const userB: UserMessage = { role: "user", content: "second", timestamp: Date.now() };
-		// Replayed history from a DIFFERENT Anthropic model: its thinking was never
-		// sent as a signed block by this model, so it degrades to plain text and
-		// cannot be the signature failure — repair must not delete it.
+		// Replayed history from a DIFFERENT Anthropic model: its reasoning cannot be
+		// replayed natively by this model and must not leak in as visible text.
 		const crossModelAssistant: AssistantMessage = {
 			role: "assistant",
 			content: [
@@ -313,13 +389,7 @@ describe("Anthropic thinking replay immutability", () => {
 
 		expect(params).toEqual([
 			{ role: "user", content: "first" },
-			{
-				role: "assistant",
-				content: [
-					{ type: "text", text: "important prior reasoning" },
-					{ type: "text", text: "cross-model answer" },
-				],
-			},
+			{ role: "assistant", content: [{ type: "text", text: "cross-model answer" }] },
 			{ role: "user", content: "second" },
 			{ role: "assistant", content: [{ type: "text", text: "same-model answer" }] },
 			{ role: "user", content: "Continue." },

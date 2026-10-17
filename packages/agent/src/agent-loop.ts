@@ -666,11 +666,30 @@ function managedAssistantContent(value: unknown): AssistantMessage["content"][nu
 	const type = managedProperty(value, "type");
 	if (type === "text") {
 		const text = managedProperty(value, "text");
-		return typeof text === "string" ? { type, text } : undefined;
+		if (typeof text !== "string") return undefined;
+		const textSignature = managedProperty(value, "textSignature");
+		return { type, text, ...(typeof textSignature === "string" ? { textSignature } : {}) };
 	}
 	if (type === "thinking") {
 		const thinking = managedProperty(value, "thinking");
-		return typeof thinking === "string" ? { type, thinking } : undefined;
+		if (typeof thinking !== "string") return undefined;
+		// Replay metadata must survive the shell: without `thinkingSignature` the
+		// provider can no longer replay this block as native signed thinking and
+		// degrades the private reasoning to plain assistant text on later requests.
+		const thinkingSignature = managedProperty(value, "thinkingSignature");
+		const itemId = managedProperty(value, "itemId");
+		const provenance = managedProperty(value, "provenance");
+		const summaryText = managedProperty(value, "summaryText");
+		const rawText = managedProperty(value, "rawText");
+		return {
+			type,
+			thinking,
+			...(typeof thinkingSignature === "string" ? { thinkingSignature } : {}),
+			...(typeof itemId === "string" ? { itemId } : {}),
+			...(provenance === "summary" || provenance === "raw" || provenance === "mixed" ? { provenance } : {}),
+			...(typeof summaryText === "string" ? { summaryText } : {}),
+			...(typeof rawText === "string" ? { rawText } : {}),
+		};
 	}
 	if (type === "redactedThinking") {
 		const data = managedProperty(value, "data");
