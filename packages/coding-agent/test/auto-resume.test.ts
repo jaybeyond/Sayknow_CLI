@@ -22,7 +22,7 @@ import { convertToLlm } from "@sayknow-cli/coding-agent/session/messages";
 import { SessionManager } from "@sayknow-cli/coding-agent/session/session-manager";
 import type { ToolSession } from "@sayknow-cli/coding-agent/tools";
 import { ReadTool } from "@sayknow-cli/coding-agent/tools/read";
-import { logger, TempDir } from "@sayknow-cli/utils";
+import { getProjectDir, logger, setProjectDir, TempDir } from "@sayknow-cli/utils";
 import * as z from "zod/v4";
 
 /**
@@ -112,6 +112,9 @@ function toolSession(cwd: string): ToolSession {
 }
 
 describe("automatic same-model resume", () => {
+	// `skc --continue` adopts the session cwd as the project dir (and process cwd); restore it
+	// before the temp dir is removed, or later shell spawns in this process run from a deleted cwd.
+	const originalProjectDir = getProjectDir();
 	let tempDir: TempDir;
 	let authStorage: AuthStorage;
 	let modelRegistry: ModelRegistry;
@@ -129,6 +132,7 @@ describe("automatic same-model resume", () => {
 			session = undefined;
 		}
 		authStorage.close();
+		setProjectDir(originalProjectDir);
 		tempDir.removeSync();
 		vi.restoreAllMocks();
 	});
