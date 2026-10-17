@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.7.9] - 2026-10-17
+
 ### Changed
 
 - Compaction and branch summaries no longer paste assistant thinking into the summarization prompt; `serializeConversation` emits only visible assistant text, tool calls, user messages, and tool results.

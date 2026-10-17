@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.7.9] - 2026-10-17
+
 ### Fixed
 
 - The stream-stall hint now suggests an idle timeout longer than the one that fired (twice the larger of the configured override and the longest built-in window). It previously suggested `PI_STREAM_IDLE_TIMEOUT_MS=300000`, which equals Anthropic's built-in window and changed nothing.

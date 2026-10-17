@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.7.9] - 2026-10-17
+
 ### Changed
 
 - Reasoning from a different model is no longer replayed. Previously a model switch (including automatic fallback) resent the prior model's thinking as visible assistant `text`, so the next model received another model's private reasoning as if it were the assistant's spoken output. `transformMessages` and the Google converter now drop foreign thinking and redacted thinking; visible text, tool calls, and tool results still carry the conversation. The cross-model repeated-paragraph compression is removed with the path it bounded.
@@ -12,8 +14,6 @@
 - Codex WebSocket history rewrites now open a fresh connection before sending the new full baseline, so connection-scoped turn metadata cannot retain the pre-compaction context; normal delta appends resume on the following turn.
 - Z.AI Anthropic-compatible errors preserve structured vendor code `1113` and classify it as exhausted quota only for Z.AI endpoints, so managed fallback advances instead of repeatedly retrying an account with no balance or resource package.
 - Anthropic and Bedrock replay drop unsigned Claude thinking instead of resending it as a visible assistant `text` block (Bedrock previously sent `[Thinking]: …`). Sessions persisted without thinking signatures previously injected every prior reasoning block into the transcript of each later request; non-signing Anthropic-compatible endpoints (Z.AI, GLM, DeepSeek) and Bedrock models without signature support still replay unsigned reasoning natively.
-
-## [0.7.8] - 2026-10-09
 
 ## [0.7.7] - 2026-10-06
 
