@@ -70,7 +70,7 @@ export interface TmuxLaunchContext {
 
 export interface TmuxSpawnResult {
 	exitCode: number | null;
-	signalCode?: string | null;
+	signalCode?: NodeJS.Signals | number | null;
 	stderr?: string;
 	/** Populated only when the caller asked for `stdout: "pipe"`. */
 	stdout?: string;

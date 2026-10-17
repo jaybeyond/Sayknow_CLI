@@ -14,6 +14,7 @@ import {
 	SKC_TMUX_LAUNCHED_ENV,
 	SKC_TMUX_SESSION_PREFIX,
 	type TmuxSpawnOptions,
+	type TmuxSpawnResult,
 } from "@sayknow-cli/coding-agent/skc-runtime/launch-tmux";
 import { __setBinaryResolverForTests } from "@sayknow-cli/coding-agent/skc-runtime/psmux-detect";
 import { sessionRuntimeDir } from "@sayknow-cli/coding-agent/skc-runtime/session-layout";
@@ -1447,9 +1448,12 @@ describe("default launch identity create fence", () => {
 	// These prove the DURABLE consequence, not just which commands ran: after an
 	// unproven cleanup the reservation row must survive, and after a proven one it
 	// must be gone. A later owner sees exactly that difference.
-	function launchThenProbeReservation(
-		hasSession: () => { exitCode: number | null; stderr?: string; signalCode?: string },
-	): { env: Record<string, string>; stateDir: string; stateFile: string; sessionId: string } {
+	function launchThenProbeReservation(hasSession: () => TmuxSpawnResult): {
+		env: Record<string, string>;
+		stateDir: string;
+		stateFile: string;
+		sessionId: string;
+	} {
 		const fixture = fenceEnv({ SKC_PSMUX_DETECTION: "off" });
 		launchDefaultTmuxIfNeeded({
 			parsed: args({ messages: ["hello"], tmux: true }),
