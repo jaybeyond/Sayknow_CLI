@@ -1,4 +1,4 @@
-You MUST incorporate new messages above into the existing handoff summary in <previous-summary> tags, used by another LLM to resume task.
+You MUST incorporate new messages above into the existing handoff summary in <previous-summary> tags; the task resumes from this summary after older context is dropped.
 RULES:
 - MUST preserve all information from previous summary
 - MUST add new progress, decisions, and context from new messages

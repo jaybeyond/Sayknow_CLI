@@ -1,4 +1,4 @@
-Another language model started to solve this problem and produced a summary of its thinking process. You also have access to the state of the tools that were used by that language model. You MUST use this to build on the work that has already been done and NEVER duplicate work. Here is the summary produced by the other language model; you MUST use the information in this summary to assist with your own analysis:
+Earlier turns of this session were compacted to save context. The summary below records the work completed so far, the decisions made, and the current state of the task; the files and tool state it describes are still in place. Continue the task from this state: build on the completed work and NEVER redo it.
 
 <summary>
 {{summary}}

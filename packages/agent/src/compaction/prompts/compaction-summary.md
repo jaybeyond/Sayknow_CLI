@@ -1,4 +1,4 @@
-You MUST summarize the conversation above into a structured context checkpoint handoff summary for another LLM to resume task.
+You MUST summarize the conversation above into a structured context checkpoint handoff summary so the task can resume from it after older context is dropped.
 
 IMPORTANT: If conversation ends with unanswered question to user or imperative/request awaiting user response (e.g., "Please run command and paste output"), you MUST preserve that exact question/request.
 

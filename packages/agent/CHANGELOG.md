@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Changed
+
+- The post-compaction context message now presents the summary as this session's compacted work state instead of "a summary of another language model's thinking process". The old framing read as handing over another model's reasoning and correlated with Anthropic `reasoning_extraction` refusals in long sessions.
+- The compaction summary, compaction update, and handoff-document prompts no longer describe the summary as written "for another LLM" or "another instance of yourself"; they describe resuming the task after older context is dropped.
+- Compaction keeps the category of a provider refusal (`Refusal (<category>)`) but replaces the provider's explanation with `[provider explanation omitted]` in serialized conversations, previous summaries, stored summaries, and rendered summary context. The "preserve exact error messages" rule otherwise copied the policy prose into every later summary and re-sent it on every request.
+
 ## [0.7.9] - 2026-10-17
 
 ### Changed

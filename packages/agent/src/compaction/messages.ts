@@ -11,6 +11,7 @@ import { prompt } from "@sayknow-cli/utils";
 import type { AgentMessage } from "../types";
 import branchSummaryContextPrompt from "./prompts/branch-summary-context.md" with { type: "text" };
 import compactionSummaryContextPrompt from "./prompts/compaction-summary-context.md" with { type: "text" };
+import { redactProviderRefusalExplanations } from "./utils";
 
 const COMPACTION_SUMMARY_TEMPLATE = compactionSummaryContextPrompt;
 const BRANCH_SUMMARY_TEMPLATE = branchSummaryContextPrompt;
@@ -76,11 +77,13 @@ function getPrunedToolResultContent(message: ToolResultMessage): (TextContent | 
 }
 
 export function renderBranchSummaryContext(summary: string): string {
-	return prompt.render(BRANCH_SUMMARY_TEMPLATE, { summary });
+	return prompt.render(BRANCH_SUMMARY_TEMPLATE, { summary: redactProviderRefusalExplanations(summary) });
 }
 
+// Summaries persisted before refusal redaction existed still carry the provider's
+// explanation; redact at render time so stored sessions stop re-sending it.
 export function renderCompactionSummaryContext(summary: string): string {
-	return prompt.render(COMPACTION_SUMMARY_TEMPLATE, { summary });
+	return prompt.render(COMPACTION_SUMMARY_TEMPLATE, { summary: redactProviderRefusalExplanations(summary) });
 }
 
 export function createBranchSummaryMessage(summary: string, fromId: string, timestamp: string): BranchSummaryMessage {

@@ -40,6 +40,7 @@ import {
 	createFileOps,
 	extractFileOpsFromMessage,
 	type FileOperations,
+	redactProviderRefusalExplanations,
 	SUMMARIZATION_SYSTEM_PROMPT,
 	serializeConversation,
 	upsertFileOperations,
@@ -1023,7 +1024,7 @@ export async function generateSummary(
 	// Build the prompt with conversation wrapped in tags
 	let promptText = `<conversation>\n${conversationText}\n</conversation>\n\n`;
 	if (previousSummary) {
-		promptText += `<previous-summary>\n${previousSummary}\n</previous-summary>\n\n`;
+		promptText += `<previous-summary>\n${redactProviderRefusalExplanations(previousSummary)}\n</previous-summary>\n\n`;
 	}
 	promptText += formatAdditionalContext(options?.extraContext);
 	promptText += basePrompt;
@@ -1560,7 +1561,7 @@ export async function compact(
 
 	// Compute file lists and append to summary
 	const { readFiles, modifiedFiles } = computeFileLists(fileOps);
-	summary = upsertFileOperations(summary, readFiles, modifiedFiles);
+	summary = upsertFileOperations(redactProviderRefusalExplanations(summary), readFiles, modifiedFiles);
 	const shortSummary = deriveShortSummary(summary);
 
 	if (!firstKeptEntryId) {

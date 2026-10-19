@@ -119,6 +119,20 @@ function truncateForSummary(text: string, maxChars: number): string {
 }
 
 /**
+ * Provider refusal errors render as `Refusal (<category>): <explanation>` (see the
+ * Anthropic adapter). The explanation is the provider's own policy prose; once it
+ * lands in a compaction summary, the "preserve exact error messages" rule copies it
+ * into every later summary and re-sends it with every request. Keep the category,
+ * which is what the work needs, and drop the explanation.
+ */
+const PROVIDER_REFUSAL_EXPLANATION = /\bRefusal \(([A-Za-z0-9_.-]+)\): [^\n`"]+/g;
+export const PROVIDER_REFUSAL_EXPLANATION_OMITTED = "[provider explanation omitted]";
+
+export function redactProviderRefusalExplanations(text: string): string {
+	return text.replace(PROVIDER_REFUSAL_EXPLANATION, `Refusal ($1): ${PROVIDER_REFUSAL_EXPLANATION_OMITTED}`);
+}
+
+/**
  * Serialize LLM messages to text for summarization.
  * This prevents the model from treating it as a conversation to continue.
  * Call convertToLlm() first to handle custom message types.
@@ -175,7 +189,7 @@ export function serializeConversation(messages: Message[]): string {
 		}
 	}
 
-	return parts.join("\n\n");
+	return redactProviderRefusalExplanations(parts.join("\n\n"));
 }
 
 // ============================================================================
