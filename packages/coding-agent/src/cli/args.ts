@@ -3,10 +3,8 @@
  */
 import * as path from "node:path";
 import { type Effort, THINKING_EFFORTS } from "@sayknow-cli/ai";
-import { logger } from "@sayknow-cli/utils";
 import { CliParseError } from "@sayknow-cli/utils/cli";
 import { parseEffort } from "../thinking";
-import { BUILTIN_TOOLS } from "../tools";
 
 export type Mode = "text" | "json" | "acp";
 
@@ -189,22 +187,18 @@ export function parseArgs(args: string[]): Args {
 		} else if (arg === "--tmux") {
 			result.tmux = true;
 		} else if (arg === "--tools" && i + 1 < args.length) {
-			const toolNames = args[++i]
-				.split(",")
-				.map(s => s.trim().toLowerCase())
-				.filter(Boolean);
-			const validTools: string[] = [];
-			for (const name of toolNames) {
-				if (name in BUILTIN_TOOLS) {
-					validTools.push(name);
-				} else {
-					logger.warn("Unknown tool passed to --tools", {
-						tool: name,
-						validTools: Object.keys(BUILTIN_TOOLS),
-					});
-				}
-			}
-			result.tools = validTools;
+			// Keep non-builtin names: custom, plugin-bundle, and MCP tools are only
+			// known once the session registry is built, which resolves (and warns
+			// about) names that match nothing. Dropping them here turned
+			// `--tools <plugin_tool>` into an empty list, which disables every tool.
+			result.tools = [
+				...new Set(
+					args[++i]
+						.split(",")
+						.map(s => s.trim().toLowerCase())
+						.filter(Boolean),
+				),
+			];
 		} else if (arg === "--thinking") {
 			// Match --credential / --mcp-config: a missing value or a following flag is
 			// a usage error, not a silent no-op / accidental consumption of `-p`.

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- `--tools` naming a plugin-bundle, custom, or MCP tool no longer disables every tool. The parser dropped names that were not built-in, so `--tools verification_run` became an empty allowlist (the zero-tool selection), and a plugin tool requested by name was quarantined as a collision with its own request. Names now resolve against the session registry, which logs the unknown ones.
+
 ## [0.7.9] - 2026-10-17
 
 ### Fixed

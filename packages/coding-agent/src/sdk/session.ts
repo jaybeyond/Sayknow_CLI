@@ -1605,7 +1605,11 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		const getReservedSubskillToolNames = () => [
 			...new Set([
 				...builtinTools.map(tool => tool.name),
-				...(options.toolNames?.map(name => name.toLowerCase()) ?? []),
+				// Reserve only built-in names from the allowlist: a plugin tool requested
+				// by name must not be quarantined as a collision with its own request.
+				...(options.toolNames
+					?.map(name => name.toLowerCase())
+					.filter(name => Object.hasOwn(BUILTIN_TOOLS, name) || Object.hasOwn(HIDDEN_TOOLS, name)) ?? []),
 				...(options.customTools?.map(tool => (isCustomTool(tool) ? tool.name : tool.name)) ?? []),
 				...customTools.map(tool => tool.name),
 			]),
@@ -2218,6 +2222,13 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				]
 			: toolNamesFromRegistry;
 		const normalizedRequested = requestedToolNames.filter(name => toolRegistry.has(name));
+		if (hasExplicitToolNames) {
+			for (const name of requestedToolNames) {
+				if (!toolRegistry.has(name)) {
+					logger.warn("Unknown tool passed to --tools", { tool: name, validTools: toolNamesFromRegistry });
+				}
+			}
+		}
 		const explicitRequestedToolNames = hasExplicitToolNames ? normalizedRequested : [];
 		const requestedToolNameSet = new Set(normalizedRequested);
 		// Normalize the user-facing mcp.discoveryMode alias once at session construction.
