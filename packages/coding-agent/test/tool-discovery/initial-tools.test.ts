@@ -15,6 +15,7 @@ import {
 	computeEssentialBuiltinNames,
 	createTools,
 	DEFAULT_ESSENTIAL_TOOL_NAMES,
+	GitlabTool,
 	IrcTool,
 	JobTool,
 	LocateTool,
@@ -104,6 +105,8 @@ async function getToolMetadata(): Promise<Map<string, { loadMode?: string; summa
 		new RecipeTool(toolSession, []),
 		new IrcTool(toolSession),
 		new TelegramSendTool(toolSession),
+		// Registered only when `glab` is installed, which CI hosts do not have.
+		new GitlabTool(toolSession),
 		// Offered only with a TypeSafe key, which this session does not have.
 		new LocateTool(toolSession),
 	]) {

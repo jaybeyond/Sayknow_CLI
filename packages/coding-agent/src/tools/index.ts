@@ -88,6 +88,7 @@ export * from "./debug";
 export * from "./eval";
 export * from "./find";
 export * from "./gh";
+export * from "./gitlab";
 export * from "./image-gen";
 export * from "./irc";
 export * from "./job";
