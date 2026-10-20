@@ -100,6 +100,13 @@ skc ultragoal complete-goals
 - **带证据地执行**：`ultragoal` 跟踪目标、修订、检查以及完成证据。
 - **在有用时并行化**：`team` 为较大的任务协调 tmux 支持的工作进程。
 - **保持外部化且可评审**：从所选的仓库或工作树中运行，无需给另一个智能体运行时打补丁。
+- **提供商出故障也能继续**：默认模型受阻（缺少凭据、配额耗尽、认证或服务器错误）时，会话会换用另一个提供商的模型继续进行；`/fallback` 用于查看和编辑这条回退链。因重启或瞬时故障而中断的步骤会在同一模型上自动恢复一次。Z.AI `1113` 这类配额响应只请求一次就会切换，不会白白耗尽重试预算。
+- **长会话始终留在上下文窗口内**：压缩（compaction）之后，Codex 会从一个全新的、提供商可见的基线开始，而不是一路增长到 `context_length_exceeded`；压缩摘要的措辞也经过调整，避免被提供商拒绝。
+- **按含义查找代码**：手头没有可供 grep 的名称时，`locate` 工具能根据一句普通描述找到相应行为所在的位置。
+- **把工作交给合适的模型**：`/model` 可按角色和细分用途分配模型；子智能体任务声明 `specialty` 后，就会落到你为这类工作选定的模型上。
+- **在会话内完成交付**：`github` 和 `gitlab` 工具可以创建和查看 pull/merge request 及 CI，无需离开 SKC。
+- **证明测试确实跑在这份代码上**：`verification-receipts` 插件为每次测试运行保存一份回执（receipt），并在代码此后发生变化时告诉你。
+- **随时回到任意会话**：`alt+r` 打开恢复选择器，`ctrl+q` 继续最近一次会话，此外还有 `/star`、`/fork`、`/rename`，以及用于导入 Codex 和 Claude Code 记录的 `/import-session`。
 
 ## Workflow surface
 
@@ -123,6 +130,38 @@ Sayknow-CLI 内置四项默认工作流技能：
 
 没有庞杂的默认技能堆砌：SKC 通过把这一精简方法做得更好来持续改进。
 
+## Built-in tools
+
+智能体通过以下工具开展工作。标记为 *需启用* 的工具默认关闭，需在 **Settings → Tools**（或 `~/.skc/config.yml` 中列出的键）里开启。
+
+| Area | Tools |
+| ---- | ----- |
+| 文件与代码 | `read`、`write`、`edit`、`find`、`search`、`locate`（按描述查找代码）、`ast_grep` / `ast_edit`（语法感知的搜索与重写）、`lsp` |
+| Shell 与运行时 | `bash`、`eval`（JS/Python 单元）、`ssh`、`debug`、`bisect`、`calc` |
+| 委派与跟踪 | `task`（子智能体）、`subagent`、`job`、`monitor`、`cron`、`irc`（与运行中的智能体对话）、`todo_write`、`goal`、`checkpoint` / `rewind` |
+| Git 托管 | `github`（*需启用*，`github.enabled`）：通过 `gh` 处理 pull request、推送和 CI 运行 · `gitlab`（*需启用*，`gitlab.enabled`，需要 [`glab`](https://gitlab.com/gitlab-org/cli)）：`mr_create`（若已有打开的 MR 则直接返回，不会重复创建）、`mr_view`、`mr_list`、`ci_status`，支持 gitlab.com 和自托管实例 |
+| 网页与设备 | `web_search`、`browser`、`computer`、`render_mermaid` |
+| 发现 | `search_tool_bm25`（按需激活隐藏工具和 MCP 工具）、`skill`、`skill_discovery`、`ask` |
+
+用 `--tools read,bash,...` 为单次运行指定工具集；插件、自定义和 MCP 工具的名称同样可以写在这里。
+
+## Plugins
+
+SKC 会加载插件包（工具、hook、技能、MCP 服务器）：安装时校验哈希，之后一旦有文件被改动，该插件包就会被隔离。使用 `skc plugin install|list|...` 管理插件。
+
+**`verification-receipts`**（随本仓库提供）回答的问题是“测试真的在当前这份代码上通过了吗？”：
+
+- `verification_run` 使用 `bun test` 或 `node --test` 运行明确指定的测试文件，并保存一份不可变的回执：每个文件的通过/失败计数，外加工作树的指纹。
+- `verification_status` 无需重跑测试即可重新计算该指纹，并报告 `fresh`；代码一旦改动则报告 `stale`。
+- `verification_loop` 及其 hook 会在后台 `task` 已结束、却没有 fresh 回执时提醒你。
+
+它仅供参考（advisory），只支持 POSIX，且 `node --test` 需要 Node 24.11.1+。它不包含在 npm 包中，请从源码检出中安装：
+
+```sh
+git clone https://github.com/jaybeyond/Sayknow_CLI.git
+skc plugin install ./Sayknow_CLI/packages/coding-agent/bundles/verification-receipts --user
+```
+
 ## Works beside your existing agent or bot
 
 | Tool or bot | Recommended SKC command | Boundary |
@@ -137,7 +176,7 @@ Sayknow-CLI 内置四项默认工作流技能：
 
 ## Configuration
 
-提供商重试预算位于 `~/.skc/config.yml`：
+提供商的重试、恢复与回退行为位于 `~/.skc/config.yml`（以下为默认值）：
 
 ```yaml
 retry:
@@ -145,9 +184,14 @@ retry:
   streamMaxRetries: 100
   maxRetries: 3
   maxDelayMs: 300000
+  autoResume: true          # 中断的步骤在同一模型上自动恢复一次
+  maxSilentTimeouts: 3      # 连续出现这么多次无输出超时后停止
+fallback:
+  auto: true                # 默认模型受阻时，换用另一个已登录的提供商继续
+  maxAttempts: 3            # 链中每个模型的尝试次数，用完后切换到下一个
 ```
 
-`requestMaxRetries` 在流（stream）建立之前生效。`streamMaxRetries` 仅适用于可安全重放的瞬时流失败。无效的认证、不受支持的模型/提供商、格式错误的请求、上下文溢出、用户中止以及永久性配额失败仍然保持快速失败（fail-fast）。
+`requestMaxRetries` 在流（stream）建立之前生效。`streamMaxRetries` 仅适用于可安全重放的瞬时流失败。无效的认证、不受支持的模型/提供商、格式错误的请求、上下文溢出、用户中止以及永久性配额失败会在当前模型上快速失败（fail-fast）；启用 `fallback.auto` 时，受阻的默认模型随后会交接给链中的下一个模型（`/fallback` 可查看和编辑这条链）。
 
 ## TUI identity
 

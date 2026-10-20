@@ -101,6 +101,13 @@ Fügen Sie `skc team ...` nur hinzu, wenn koordinierte tmux-Worker spürbar helf
 - **Ausführen mit Nachweisen**: `ultragoal` verfolgt Ziele, Revisionen, Prüfungen und Abschlussnachweise.
 - **Parallelisieren, wenn sinnvoll**: `team` koordiniert tmux-gestützte Worker für größere Aufgaben.
 - **Extern und überprüfbar bleiben**: Laufen Sie aus einem gewählten Repo oder Worktree, ohne eine andere Agent-Runtime zu patchen.
+- **Weiterarbeiten, wenn ein Provider ausfällt**: Ist das Standardmodell blockiert (keine Zugangsdaten, Kontingent erschöpft, Auth- oder Serverfehler), läuft die Sitzung mit einem Modell eines anderen Providers weiter; `/fallback` zeigt und bearbeitet diese Kette. Ein Schritt, der durch einen Neustart oder einen vorübergehenden Fehler unterbrochen wurde, wird einmal von selbst auf demselben Modell fortgesetzt. Bei Kontingentantworten wie Z.AI `1113` geht es nach einer einzigen Anfrage weiter, statt das Retry-Budget aufzubrauchen.
+- **Lange Sitzungen bleiben im Kontextfenster**: Nach einer Kompaktierung startet Codex von einer frischen, für den Provider sichtbaren Basis, statt auf `context_length_exceeded` zuzuwachsen, und Kompaktierungs-Zusammenfassungen sind so formuliert, dass Provider sie nicht ablehnen.
+- **Code nach Bedeutung finden**: Das Tool `locate` findet anhand einer einfachen Beschreibung, wo ein Verhalten implementiert ist, wenn Sie keinen Namen zum Greppen haben.
+- **Arbeit an das richtige Modell leiten**: `/model` weist Modelle pro Rolle und pro Einsatzzweck im Detail zu; Subagent-Aufgaben deklarieren eine `specialty`, damit sie auf dem Modell landen, das Sie für diese Art von Arbeit gewählt haben.
+- **Direkt aus der Sitzung ausliefern**: Die Tools `github` und `gitlab` öffnen und prüfen Pull-/Merge-Requests und CI, ohne SKC zu verlassen.
+- **Belegen, dass die Tests auf diesem Code liefen**: Das Plugin `verification-receipts` speichert zu jedem Testlauf einen Beleg und meldet, wenn sich der Code seitdem geändert hat.
+- **Zu jeder Sitzung zurückkehren**: `alt+r` öffnet die Fortsetzen-Auswahl, `ctrl+q` setzt die letzte Sitzung fort, dazu `/star`, `/fork`, `/rename` und `/import-session` für Codex- und Claude-Code-Transkripte.
 
 ## Workflow-Oberfläche
 
@@ -124,6 +131,38 @@ Und vier mitgelieferte Rollen-Agenten:
 
 Kein wucherndes Standard-Skill-Zoo: SKC verbessert sich, indem es diese kleine Methode besser macht.
 
+## Integrierte Tools
+
+Der Agent arbeitet mit diesen Tools. Als *opt-in* markierte Tools bleiben deaktiviert, bis Sie sie unter **Settings → Tools** (oder über den angegebenen Schlüssel in `~/.skc/config.yml`) aktivieren.
+
+| Bereich | Tools |
+| ---- | ----- |
+| Dateien und Code | `read`, `write`, `edit`, `find`, `search`, `locate` (Code per Beschreibung finden), `ast_grep` / `ast_edit` (syntaxbewusstes Suchen und Umschreiben), `lsp` |
+| Shell und Laufzeit | `bash`, `eval` (JS-/Python-Zellen), `ssh`, `debug`, `bisect`, `calc` |
+| Delegation und Tracking | `task` (Subagents), `subagent`, `job`, `monitor`, `cron`, `irc` (mit laufenden Agenten sprechen), `todo_write`, `goal`, `checkpoint` / `rewind` |
+| Git-Hosting | `github` (*opt-in*, `github.enabled`): Pull Requests, Pushes, CI-Läufe über `gh` · `gitlab` (*opt-in*, `gitlab.enabled`, benötigt [`glab`](https://gitlab.com/gitlab-org/cli)): `mr_create` (liefert den bereits offenen MR statt eines Duplikats), `mr_view`, `mr_list`, `ci_status` für gitlab.com und selbst gehostete Instanzen |
+| Web und Geräte | `web_search`, `browser`, `computer`, `render_mermaid` |
+| Discovery | `search_tool_bm25` (aktiviert versteckte und MCP-Tools bei Bedarf), `skill`, `skill_discovery`, `ask` |
+
+Mit `--tools read,bash,...` wählen Sie das Tool-Set für einen einzelnen Lauf; auch Plugin-, benutzerdefinierte und MCP-Toolnamen werden dort akzeptiert.
+
+## Plugins
+
+SKC lädt Plugin-Bundles (Tools, Hooks, Skills, MCP-Server), deren Hashes bei der Installation geprüft werden und die in Quarantäne kommen, wenn sich danach eine Datei ändert. Verwaltet werden sie mit `skc plugin install|list|...`.
+
+**`verification-receipts`** (in diesem Repository enthalten) beantwortet die Frage „Haben die Tests auf dem Code, der jetzt da ist, tatsächlich bestanden?“:
+
+- `verification_run` führt explizit angegebene Testdateien mit `bun test` oder `node --test` aus und speichert einen unveränderlichen Beleg: Bestanden-/Fehlgeschlagen-Zahlen pro Datei plus einen Fingerabdruck des Arbeitsverzeichnisses.
+- `verification_status` berechnet diesen Fingerabdruck neu, ohne die Tests erneut auszuführen, und meldet `fresh` oder, sobald sich der Code geändert hat, `stale`.
+- `verification_loop` und seine Hooks erinnern Sie, wenn ein `task` im Hintergrund ohne aktuellen Beleg beendet wurde.
+
+Es dient nur als Hinweis, läuft nur unter POSIX und benötigt Node 24.11.1+ für `node --test`. Es ist nicht Teil des npm-Pakets; installieren Sie es aus einem Checkout:
+
+```sh
+git clone https://github.com/jaybeyond/Sayknow_CLI.git
+skc plugin install ./Sayknow_CLI/packages/coding-agent/bundles/verification-receipts --user
+```
+
 ## Funktioniert neben Ihrem bestehenden Agenten oder Bot
 
 | Tool oder Bot | Empfohlener SKC-Befehl | Grenze |
@@ -138,7 +177,7 @@ Für generisches Drittanbieter-Bot-Setup und anbieterunabhängige Smokes siehe [
 
 ## Konfiguration
 
-Provider-Retry-Budgets liegen in `~/.skc/config.yml`:
+Retry-, Resume- und Fallback-Verhalten der Provider liegt in `~/.skc/config.yml` (die Werte unten sind die Standardwerte):
 
 ```yaml
 retry:
@@ -146,9 +185,14 @@ retry:
   streamMaxRetries: 100
   maxRetries: 3
   maxDelayMs: 300000
+  autoResume: true          # einen unterbrochenen Schritt einmal fortsetzen, auf demselben Modell
+  maxSilentTimeouts: 3      # nach so vielen Timeouts ohne Ausgabe abbrechen
+fallback:
+  auto: true                # bei blockiertem Standardmodell mit einem anderen angemeldeten Provider weitermachen
+  maxAttempts: 3            # Versuche pro Modell der Kette, bevor zum nächsten gewechselt wird
 ```
 
-`requestMaxRetries` gilt, bevor ein Stream aufgebaut wird. `streamMaxRetries` gilt nur für replay-sichere, vorübergehende Stream-Fehler. Ungültige Authentifizierung, nicht unterstützte Modelle/Provider, fehlerhafte Requests, Kontextüberlauf, Benutzerabbrüche und dauerhafte Kontingentfehler bleiben fail-fast.
+`requestMaxRetries` gilt, bevor ein Stream aufgebaut wird. `streamMaxRetries` gilt nur für replay-sichere, vorübergehende Stream-Fehler. Ungültige Authentifizierung, nicht unterstützte Modelle/Provider, fehlerhafte Requests, Kontextüberlauf, Benutzerabbrüche und dauerhafte Kontingentfehler schlagen auf dem aktuellen Modell sofort fehl; mit `fallback.auto` übergibt ein blockiertes Standardmodell dann an das nächste Modell der Kette (`/fallback` zeigt und bearbeitet sie).
 
 ## TUI-Identität
 

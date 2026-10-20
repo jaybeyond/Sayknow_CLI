@@ -100,6 +100,13 @@ skc ultragoal complete-goals
 - **증거와 함께 실행**: `ultragoal`은 목표, 수정, 점검, 완료 증거를 추적합니다.
 - **유용할 때 병렬화**: `team`은 더 큰 작업을 위해 tmux 기반 워커를 조율합니다.
 - **외부에서 검토 가능하게 유지**: 다른 에이전트 런타임을 패치하지 않고 선택한 저장소나 워크트리에서 실행합니다.
+- **공급자가 실패해도 계속 진행**: 기본 모델이 막히면(자격 증명 없음, 할당량 소진, 인증·서버 오류) 다른 공급자의 모델로 세션을 이어 갑니다. 이 체인은 `/fallback`으로 확인하고 편집할 수 있습니다. 재시작이나 일시적 실패로 중단된 단계는 같은 모델에서 한 번 자동으로 재개됩니다. Z.AI `1113` 같은 할당량 응답은 재시도 예산을 소모하지 않고 요청 한 번 만에 다음으로 넘어갑니다.
+- **긴 세션도 컨텍스트 윈도 안에서**: 압축(compaction) 후 Codex는 `context_length_exceeded`를 향해 계속 불어나는 대신 공급자에게 보이는 새 기준점에서 다시 시작하며, 압축 요약은 공급자가 거부하지 않도록 작성됩니다.
+- **의미로 코드 찾기**: `locate` 도구는 grep할 이름이 없을 때도 평범한 설명만으로 해당 동작이 어디에 있는지 찾아 줍니다.
+- **작업을 알맞은 모델로 라우팅**: `/model`로 역할별·세부 용도별 모델을 지정합니다. 서브에이전트 작업은 `specialty`를 선언해 그 종류의 작업에 지정한 모델에서 실행됩니다.
+- **세션 안에서 PR/MR까지**: `github`와 `gitlab` 도구로 SKC를 벗어나지 않고 풀/머지 리퀘스트를 열고 살펴보며 CI도 확인합니다.
+- **이 코드에서 테스트가 실행됐음을 증명**: `verification-receipts` 플러그인은 테스트를 실행할 때마다 영수증을 저장하고, 그 뒤로 코드가 바뀌면 알려 줍니다.
+- **어떤 세션으로든 복귀**: `alt+r` 재개 선택기, 최신 세션을 이어 가는 `ctrl+q`, `/star`, `/fork`, `/rename`, 그리고 Codex·Claude Code 대화 기록을 가져오는 `/import-session`.
 
 ## Workflow surface
 
@@ -123,6 +130,38 @@ Sayknow-CLI는 네 가지 기본 워크플로 스킬을 제공합니다:
 
 광범위한 기본 스킬 동물원은 없습니다: SKC는 이 작은 방법을 더 좋게 만들어 개선됩니다.
 
+## Built-in tools
+
+에이전트는 다음 도구들로 작업합니다. *opt-in*으로 표시된 도구는 **Settings → Tools**(또는 `~/.skc/config.yml`의 해당 키)에서 켜기 전까지 꺼져 있습니다.
+
+| Area | Tools |
+| ---- | ----- |
+| 파일과 코드 | `read`, `write`, `edit`, `find`, `search`, `locate`(설명으로 코드 찾기), `ast_grep` / `ast_edit`(구문을 인식하는 검색과 재작성), `lsp` |
+| 셸과 런타임 | `bash`, `eval`(JS/Python 셀), `ssh`, `debug`, `bisect`, `calc` |
+| 위임과 추적 | `task`(서브에이전트), `subagent`, `job`, `monitor`, `cron`, `irc`(실행 중인 에이전트와 대화), `todo_write`, `goal`, `checkpoint` / `rewind` |
+| Git 호스팅 | `github`(*opt-in*, `github.enabled`): `gh`를 통한 풀 리퀘스트, 푸시, CI 실행 · `gitlab`(*opt-in*, `gitlab.enabled`, [`glab`](https://gitlab.com/gitlab-org/cli) 필요): `mr_create`(중복을 만들지 않고 이미 열린 MR을 반환), `mr_view`, `mr_list`, `ci_status` — gitlab.com과 셀프 호스팅 인스턴스 지원 |
+| 웹과 기기 | `web_search`, `browser`, `computer`, `render_mermaid` |
+| 탐색 | `search_tool_bm25`(숨겨진 도구와 MCP 도구를 필요할 때 활성화), `skill`, `skill_discovery`, `ask` |
+
+한 번의 실행에 쓸 도구 세트는 `--tools read,bash,...`로 고를 수 있으며, 플러그인·커스텀·MCP 도구 이름도 여기에 지정할 수 있습니다.
+
+## Plugins
+
+SKC는 플러그인 번들(도구, 훅, 스킬, MCP 서버)을 로드합니다. 번들은 설치 시점에 해시로 검사되고, 이후 파일이 바뀌면 격리됩니다. 관리는 `skc plugin install|list|...`로 합니다.
+
+**`verification-receipts`**(이 저장소에 번들로 포함)는 "지금 있는 코드에서 테스트가 실제로 통과했는가?"에 답합니다:
+
+- `verification_run`은 지정한 테스트 파일을 `bun test` 또는 `node --test`로 실행하고, 변경할 수 없는 영수증을 저장합니다: 파일별 통과/실패 개수와 작업 트리의 지문(fingerprint).
+- `verification_status`는 테스트를 다시 실행하지 않고 그 지문을 다시 계산해, `fresh`인지 아니면 코드가 바뀌어 `stale`인지 보고합니다.
+- `verification_loop`와 그 훅은 백그라운드 `task`가 최신 영수증 없이 끝났을 때 알려 줍니다.
+
+참고용(advisory)이고 POSIX 전용이며, `node --test`를 쓰려면 Node 24.11.1+가 필요합니다. npm 패키지에는 포함되지 않으므로 체크아웃에서 설치하세요:
+
+```sh
+git clone https://github.com/jaybeyond/Sayknow_CLI.git
+skc plugin install ./Sayknow_CLI/packages/coding-agent/bundles/verification-receipts --user
+```
+
 ## Works beside your existing agent or bot
 
 | Tool or bot | Recommended SKC command | Boundary |
@@ -137,7 +176,7 @@ Sayknow-CLI는 네 가지 기본 워크플로 스킬을 제공합니다:
 
 ## Configuration
 
-공급자 재시도 예산은 `~/.skc/config.yml`에 있습니다:
+공급자 재시도, 재개, 폴백 동작은 `~/.skc/config.yml`에서 설정합니다(아래 값이 기본값입니다):
 
 ```yaml
 retry:
@@ -145,9 +184,14 @@ retry:
   streamMaxRetries: 100
   maxRetries: 3
   maxDelayMs: 300000
+  autoResume: true          # 중단된 단계를 같은 모델에서 한 번 재개
+  maxSilentTimeouts: 3      # 출력 없는 타임아웃이 이 횟수만큼 나면 중단
+fallback:
+  auto: true                # 기본 모델이 막히면 로그인된 다른 공급자로 계속 진행
+  maxAttempts: 3            # 체인의 다음 모델로 넘어가기 전 모델당 시도 횟수
 ```
 
-`requestMaxRetries`는 스트림이 설정되기 전에 적용됩니다. `streamMaxRetries`는 재생 안전한 일시적 스트림 실패에만 적용됩니다. 잘못된 인증, 지원되지 않는 모델/공급자, 잘못된 형식의 요청, 컨텍스트 오버플로, 사용자 중단, 영구적인 할당량 실패는 즉시 실패(fail-fast)로 유지됩니다.
+`requestMaxRetries`는 스트림이 설정되기 전에 적용됩니다. `streamMaxRetries`는 재생 안전한 일시적 스트림 실패에만 적용됩니다. 잘못된 인증, 지원되지 않는 모델/공급자, 잘못된 형식의 요청, 컨텍스트 오버플로, 사용자 중단, 영구적인 할당량 실패는 현재 모델에서 즉시 실패(fail-fast)합니다. `fallback.auto`가 켜져 있으면 막힌 기본 모델은 체인의 다음 모델로 넘겨집니다(`/fallback`으로 확인하고 편집할 수 있습니다).
 
 ## TUI identity
 

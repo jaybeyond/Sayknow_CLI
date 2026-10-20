@@ -101,6 +101,13 @@ skc ultragoal complete-goals
 - **エビデンスとともに実行する**: `ultragoal` はゴール、リビジョン、チェック、完了エビデンスを追跡します。
 - **役立つときに並列化する**: `team` はより大きなタスクのために tmux ベースのワーカーを協調させます。
 - **外部かつレビュー可能であり続ける**: 別のエージェントランタイムにパッチを当てることなく、選択したリポジトリまたは worktree から実行します。
+- **プロバイダーが失敗しても作業を続ける**: デフォルトモデルがブロックされたとき (認証情報なし、クォータ超過、認証エラーやサーバーエラー)、セッションは別プロバイダーのモデルで続行します。このチェーンは `/fallback` で確認・編集できます。再起動や一時的な障害で中断したステップは、同じモデルで一度だけ自動的に再開します。Z.AI `1113` のようなクォータ応答では、リトライバジェットを使い果たさずに 1 回のリクエストで次へ進みます。
+- **長いセッションでもコンテキストウィンドウに収める**: コンパクション後、Codex は `context_length_exceeded` に向かって膨らみ続けるのではなく、プロバイダーから見える新しいベースラインから再開します。また、コンパクションの要約はプロバイダーに拒否されない表現で書かれます。
+- **意味でコードを探す**: `locate` ツールは、grep する名前がなくても、平易な説明から該当する振る舞いがどこにあるかを見つけます。
+- **作業を適切なモデルに振り分ける**: `/model` でロールごと、さらに詳細な用途ごとにモデルを割り当てます。サブエージェントのタスクは `specialty` を宣言し、その種類の作業用に選んだモデルで実行されます。
+- **セッションを離れずにシップする**: `github` と `gitlab` ツールで、SKC から離れることなくプル/マージリクエストを作成・確認し、CI も確認できます。
+- **テストがこのコードで実行されたことを証明する**: `verification-receipts` プラグインはテスト実行ごとにレシートを保存し、その後コードが変更されたら知らせます。
+- **どのセッションにも戻れる**: `alt+r` の再開ピッカー、最新のセッションを続ける `ctrl+q`、`/star`、`/fork`、`/rename`、そして Codex と Claude Code のトランスクリプトを取り込む `/import-session`。
 
 ## Workflow surface
 
@@ -124,6 +131,38 @@ Sayknow-CLI は 4 つのデフォルトワークフロースキルを同梱し�
 
 肥大化したデフォルトスキルの動物園はありません: SKC はこの小さなメソッドをより良くすることで改善されます。
 
+## Built-in tools
+
+エージェントは以下のツールを通じて作業します。*opt-in* と記されたツールは、**Settings → Tools** (または `~/.skc/config.yml` の該当キー) で有効にするまでオフのままです。
+
+| Area | Tools |
+| ---- | ----- |
+| ファイルとコード | `read`、`write`、`edit`、`find`、`search`、`locate` (説明からコードを探す)、`ast_grep` / `ast_edit` (構文を理解した検索と書き換え)、`lsp` |
+| シェルとランタイム | `bash`、`eval` (JS/Python セル)、`ssh`、`debug`、`bisect`、`calc` |
+| 委任とトラッキング | `task` (サブエージェント)、`subagent`、`job`、`monitor`、`cron`、`irc` (実行中のエージェントと会話)、`todo_write`、`goal`、`checkpoint` / `rewind` |
+| Git ホスティング | `github` (*opt-in*、`github.enabled`): `gh` を通じたプルリクエスト、プッシュ、CI 実行 · `gitlab` (*opt-in*、`gitlab.enabled`、[`glab`](https://gitlab.com/gitlab-org/cli) が必要): `mr_create` (重複を作らず、既にオープンな MR を返す)、`mr_view`、`mr_list`、`ci_status`。gitlab.com とセルフホストのインスタンスに対応 |
+| Web とデバイス | `web_search`、`browser`、`computer`、`render_mermaid` |
+| ディスカバリー | `search_tool_bm25` (非表示ツールや MCP ツールを必要に応じて有効化)、`skill`、`skill_discovery`、`ask` |
+
+1 回の実行で使うツールセットは `--tools read,bash,...` で選べます。プラグイン、カスタム、MCP のツール名もここで指定できます。
+
+## Plugins
+
+SKC はプラグインバンドル (ツール、フック、スキル、MCP サーバー) を読み込みます。バンドルはインストール時にハッシュで検証され、その後ファイルが変更されると隔離されます。管理には `skc plugin install|list|...` を使います。
+
+**`verification-receipts`** (このリポジトリに同梱) は「今あるコードで、テストは本当に通ったのか?」に答えます:
+
+- `verification_run` は指定したテストファイルを `bun test` または `node --test` で実行し、変更不可のレシートを保存します: ファイルごとの成功/失敗件数と、作業ツリーのフィンガープリントです。
+- `verification_status` はテストを再実行せずにそのフィンガープリントを再計算し、`fresh` か、コードが変更されて `stale` になったかを報告します。
+- `verification_loop` とそのフックは、バックグラウンドの `task` が最新のレシートなしで終了したときに知らせます。
+
+これは参考情報を示すだけ (advisory) で、POSIX 専用です。`node --test` には Node 24.11.1+ が必要です。npm パッケージには含まれないため、チェックアウトからインストールしてください:
+
+```sh
+git clone https://github.com/jaybeyond/Sayknow_CLI.git
+skc plugin install ./Sayknow_CLI/packages/coding-agent/bundles/verification-receipts --user
+```
+
 ## Works beside your existing agent or bot
 
 | Tool or bot | Recommended SKC command | Boundary |
@@ -138,7 +177,7 @@ Sayknow-CLI は 4 つのデフォルトワークフロースキルを同梱し�
 
 ## Configuration
 
-プロバイダーのリトライバジェットは `~/.skc/config.yml` にあります:
+プロバイダーのリトライ、再開、フォールバックの動作は `~/.skc/config.yml` で設定します (以下の値がデフォルトです):
 
 ```yaml
 retry:
@@ -146,9 +185,14 @@ retry:
   streamMaxRetries: 100
   maxRetries: 3
   maxDelayMs: 300000
+  autoResume: true          # 中断したステップを同じモデルで一度だけ再開
+  maxSilentTimeouts: 3      # 出力のないタイムアウトがこの回数に達したら停止
+fallback:
+  auto: true                # デフォルトモデルがブロックされたら、ログイン済みの別プロバイダーで続行
+  maxAttempts: 3            # チェーン内の次のモデルへ移る前の、モデルごとの試行回数
 ```
 
-`requestMaxRetries` はストリームが確立される前に適用されます。`streamMaxRetries` はリプレイ安全な一時的ストリーム障害にのみ適用されます。無効な認証、サポートされていないモデル/プロバイダー、不正な形式のリクエスト、コンテキストオーバーフロー、ユーザーによる中断、および恒久的なクォータ障害は、引き続きフェイルファストのままです。
+`requestMaxRetries` はストリームが確立される前に適用されます。`streamMaxRetries` はリプレイ安全な一時的ストリーム障害にのみ適用されます。無効な認証、サポートされていないモデル/プロバイダー、不正な形式のリクエスト、コンテキストオーバーフロー、ユーザーによる中断、および恒久的なクォータ障害は、現在のモデルで即座に失敗 (フェイルファスト) します。`fallback.auto` が有効な場合、ブロックされたデフォルトモデルはチェーン内の次のモデルに引き継がれます (`/fallback` で確認・編集できます)。
 
 ## TUI identity
 

@@ -174,6 +174,13 @@ Add `skc team ...` only when coordinated tmux workers materially help.
 - **Execute with evidence**: `ultragoal` tracks goals, revisions, checks, and completion evidence.
 - **Parallelize when useful**: `team` coordinates tmux-backed workers for larger tasks.
 - **Stay external and reviewable**: run from a chosen repo or worktree without patching another agent runtime.
+- **Keep going when a provider fails**: when the default model is blocked (no credentials, quota, auth or server errors) the session continues on a model from another provider; `/fallback` shows and edits that chain. A step interrupted by a restart or a transient failure resumes once on its own, on the same model. Quota answers such as Z.AI `1113` move on after one request instead of burning the retry budget.
+- **Long sessions stay inside the context window**: after compaction, Codex starts from a fresh provider-visible baseline instead of growing toward `context_length_exceeded`, and compaction summaries are worded so providers do not refuse them.
+- **Find code by meaning**: the `locate` tool finds where behaviour lives from a plain description when you have no name to grep for.
+- **Route work to the right model**: `/model` assigns models per role and per detailed use; subagent tasks declare a `specialty` to land on the model you chose for that kind of work.
+- **Ship from the session**: `github` and `gitlab` tools open and inspect pull/merge requests and CI without leaving SKC.
+- **Prove the tests ran on this code**: the `verification-receipts` plugin stores a receipt for each test run and tells you when the code has changed since.
+- **Come back to any session**: `alt+r` resume picker, `ctrl+q` to continue the latest, `/star`, `/fork`, `/rename`, and `/import-session` for Codex and Claude Code transcripts.
 
 ## Workflow surface
 
@@ -197,6 +204,38 @@ And four bundled role agents:
 
 No sprawling default skill zoo: SKC improves by making this small method better.
 
+## Built-in tools
+
+The agent works through these tools. Tools marked *opt-in* stay off until you enable them in **Settings → Tools** (or the listed key in `~/.skc/config.yml`).
+
+| Area | Tools |
+| ---- | ----- |
+| Files and code | `read`, `write`, `edit`, `find`, `search`, `locate` (find code by description), `ast_grep` / `ast_edit` (syntax-aware search and rewrite), `lsp` |
+| Shell and runtime | `bash`, `eval` (JS/Python cells), `ssh`, `debug`, `bisect`, `calc` |
+| Delegation and tracking | `task` (subagents), `subagent`, `job`, `monitor`, `cron`, `irc` (talk to running agents), `todo_write`, `goal`, `checkpoint` / `rewind` |
+| Git hosting | `github` (*opt-in*, `github.enabled`): pull requests, pushes, CI runs through `gh` · `gitlab` (*opt-in*, `gitlab.enabled`, needs [`glab`](https://gitlab.com/gitlab-org/cli)): `mr_create` (returns the open MR instead of a duplicate), `mr_view`, `mr_list`, `ci_status` for gitlab.com and self-hosted instances |
+| Web and devices | `web_search`, `browser`, `computer`, `render_mermaid` |
+| Discovery | `search_tool_bm25` (activates hidden and MCP tools on demand), `skill`, `skill_discovery`, `ask` |
+
+Pick the tool set for one run with `--tools read,bash,...`; plugin, custom, and MCP tool names are accepted there too.
+
+## Plugins
+
+SKC loads plugin bundles (tools, hooks, skills, MCP servers) that are hash-checked at install time and quarantined if a file changes afterwards. Manage them with `skc plugin install|list|...`.
+
+**`verification-receipts`** (bundled in this repository) answers "did the tests actually pass on the code that is there now?":
+
+- `verification_run` runs explicit test files with `bun test` or `node --test` and stores an immutable receipt: per-file pass/fail counts plus a fingerprint of the working tree.
+- `verification_status` recomputes that fingerprint without rerunning tests and reports `fresh` or `stale` once the code has changed.
+- `verification_loop` and its hooks remind you when a background `task` finished without a fresh receipt.
+
+It is advisory, POSIX-only, and needs Node 24.11.1+ for `node --test`. It is not part of the npm package; install it from a checkout:
+
+```sh
+git clone https://github.com/jaybeyond/Sayknow_CLI.git
+skc plugin install ./Sayknow_CLI/packages/coding-agent/bundles/verification-receipts --user
+```
+
 ## Works beside your existing agent or bot
 
 | Tool or bot | Recommended SKC command | Boundary |
@@ -211,7 +250,7 @@ For generic third-party bot setup and provider-independent smokes, see [`docs/bo
 
 ## Configuration
 
-Provider retry budgets live in `~/.skc/config.yml`:
+Provider retry, resume, and fallback behaviour lives in `~/.skc/config.yml` (values below are the defaults):
 
 ```yaml
 retry:
@@ -219,9 +258,14 @@ retry:
   streamMaxRetries: 100
   maxRetries: 3
   maxDelayMs: 300000
+  autoResume: true          # resume an interrupted step once, on the same model
+  maxSilentTimeouts: 3      # stop after this many timeouts with no output
+fallback:
+  auto: true                # continue on another logged-in provider when the default model is blocked
+  maxAttempts: 3            # tries per model in the chain before moving on
 ```
 
-`requestMaxRetries` applies before a stream is established. `streamMaxRetries` applies only to replay-safe transient stream failures. Invalid auth, unsupported models/providers, malformed requests, context overflow, user aborts, and permanent quota failures remain fail-fast.
+`requestMaxRetries` applies before a stream is established. `streamMaxRetries` applies only to replay-safe transient stream failures. Invalid auth, unsupported models/providers, malformed requests, context overflow, user aborts, and permanent quota failures fail fast on the current model; with `fallback.auto` a blocked default model then hands over to the next model in the chain (`/fallback` shows and edits it).
 
 ## TUI identity
 
