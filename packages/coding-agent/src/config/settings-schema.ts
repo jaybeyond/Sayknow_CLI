@@ -2772,6 +2772,17 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"gitlab.enabled": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "tools",
+			label: "GitLab CLI",
+			description:
+				"Enable the gitlab tool (op-based dispatch for merge request create/view/list and pipeline status via glab)",
+		},
+	},
+
 	"github.cache.enabled": {
 		type: "boolean",
 		default: true,

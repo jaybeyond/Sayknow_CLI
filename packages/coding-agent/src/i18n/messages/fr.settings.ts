@@ -560,6 +560,9 @@ export const frSettings: Record<string, string> = {
 		"Activer l'outil skill pour que l'agent puisse enchaîner vers une autre skill disponible à son prochain tour",
 	"set:fetch.enabled:l": "Lire les URL",
 	"set:fetch.enabled:d": "Autoriser l'outil read à récupérer et traiter les URL",
+	"set:gitlab.enabled:l": "GitLab CLI",
+	"set:gitlab.enabled:d":
+		"Activer l'outil gitlab (répartition par op pour créer/afficher/lister les merge requests et l'état des pipelines via glab)",
 	"set:github.enabled:d":
 		"Activer l'outil github (dispatch par opérations pour dépôt, issue, pull request, diff, recherche, checkout, push et workflows de surveillance Actions)",
 	"set:github.cache.enabled:l": "Cache des vues GitHub",

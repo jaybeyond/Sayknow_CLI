@@ -573,6 +573,9 @@ export const esSettings: Record<string, string> = {
 		"Habilitar la herramienta skill para que el agente pueda encadenar otra skill disponible en su siguiente turno",
 	"set:fetch.enabled:l": "Leer URLs",
 	"set:fetch.enabled:d": "Permitir que la herramienta read obtenga y procese URLs",
+	"set:gitlab.enabled:l": "GitLab CLI",
+	"set:gitlab.enabled:d":
+		"Habilitar la herramienta gitlab (despacho por op para crear/ver/listar merge requests y estado de pipelines mediante glab)",
 	"set:github.enabled:d":
 		"Habilitar la herramienta github (despacho basado en operaciones para repositorios, issues, pull requests, diff, búsqueda, checkout, push y flujos de monitoreo de Actions)",
 	"set:github.cache.enabled:l": "Caché de vistas de GitHub",

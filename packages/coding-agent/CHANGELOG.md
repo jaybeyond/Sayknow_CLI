@@ -5,6 +5,7 @@
 ### Added
 
 - Bundled plugin `verification-receipts` (`packages/coding-agent/bundles/verification-receipts`, checkout install with `skc plugin install ... --user`). It adds `verification_run` (bun test or node --test on explicit files, per-file attribution, immutable freshness-bound receipts in a private store), `verification_status` and `verification_loop`, plus hooks that record a delegation gate when a background `task` starts and remind when it finishes. Advisory only; node:test needs Node 24.11.1 or newer.
+- `gitlab` tool (opt-in with `gitlab.enabled`, registered when `glab` is installed): `mr_create` (returns an existing open MR instead of a duplicate, never prompts), `mr_view`, `mr_list`, and `ci_status` for gitlab.com and self-hosted instances known to `glab auth login`.
 
 ### Fixed
 

@@ -596,6 +596,9 @@ export const jaSettings: Record<string, string> = {
 	"set:skill.enabled:d": "エージェントが次のターンで別の利用可能なスキルに連鎖できるよう skill ツールを有効化",
 	"set:fetch.enabled:l": "URL を読み込む",
 	"set:fetch.enabled:d": "read ツールが URL を取得・処理できるよう許可",
+	"set:gitlab.enabled:l": "GitLab CLI",
+	"set:gitlab.enabled:d":
+		"gitlab ツールを有効化 (glab によるマージリクエストの作成/表示/一覧とパイプライン状態の op ベースのディスパッチ)",
 	"set:github.enabled:d":
 		"github ツールを有効化（リポジトリ、Issue、プルリクエスト、diff、検索、チェックアウト、プッシュ、Actions ウォッチワークフローに対する op ベースのディスパッチ）",
 	"set:github.cache.enabled:l": "GitHub ビューキャッシュ",

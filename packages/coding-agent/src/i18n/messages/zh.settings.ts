@@ -574,6 +574,8 @@ export const zhSettings: Record<string, string> = {
 	"set:skill.enabled:d": "启用 skill 工具，使代理可在下一轮链接到另一个可用技能",
 	"set:fetch.enabled:l": "读取 URL",
 	"set:fetch.enabled:d": "允许 read 工具获取并处理 URL",
+	"set:gitlab.enabled:l": "GitLab CLI",
+	"set:gitlab.enabled:d": "启用 gitlab 工具（通过 glab 对合并请求创建/查看/列表及流水线状态进行基于 op 的调度）",
 	"set:github.enabled:d":
 		"启用 github 工具（针对仓库、议题、拉取请求、diff、搜索、检出、推送和 Actions 监视工作流的基于 op 的分发）",
 	"set:github.cache.enabled:l": "GitHub 视图缓存",

@@ -2151,6 +2151,17 @@
 			},
 			"additionalProperties": false
 		},
+		"gitlab": {
+			"type": "object",
+			"properties": {
+				"enabled": {
+					"type": "boolean",
+					"description": "Enable the gitlab tool (op-based dispatch for merge request create/view/list and pipeline status via glab)",
+					"default": false
+				}
+			},
+			"additionalProperties": false
+		},
 		"web_search": {
 			"type": "object",
 			"properties": {

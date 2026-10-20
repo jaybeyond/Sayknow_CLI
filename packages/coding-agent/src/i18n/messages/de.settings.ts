@@ -589,6 +589,9 @@ export const deSettings: Record<string, string> = {
 		"skill-Tool aktivieren, damit der Agent im nächsten Zug zu einer anderen verfügbaren Skill wechseln kann",
 	"set:fetch.enabled:l": "URLs lesen",
 	"set:fetch.enabled:d": "read-Tool das Abrufen und Verarbeiten von URLs erlauben",
+	"set:gitlab.enabled:l": "GitLab CLI",
+	"set:gitlab.enabled:d":
+		"gitlab-Werkzeug aktivieren (op-basierte Ausführung für Merge-Request-Erstellung/-Ansicht/-Liste und Pipeline-Status über glab)",
 	"set:github.enabled:d":
 		"github-Tool aktivieren (operationsbasiertes Dispatching für Repository, Issue, Pull Request, Diff, Suche, Checkout, Push und Actions-Watch-Workflows)",
 	"set:github.cache.enabled:l": "GitHub-Ansichts-Cache",

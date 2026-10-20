@@ -590,6 +590,9 @@ export const koSettings: Record<string, string> = {
 	"set:skill.enabled:d": "에이전트가 다음 턴에 사용 가능한 다른 스킬로 연결할 수 있도록 skill 도구 활성화",
 	"set:fetch.enabled:l": "URL 읽기",
 	"set:fetch.enabled:d": "read 도구가 URL을 가져와 처리하도록 허용",
+	"set:gitlab.enabled:l": "GitLab CLI",
+	"set:gitlab.enabled:d":
+		"gitlab 도구 활성화 (glab을 통한 머지 리퀘스트 생성/조회/목록 및 파이프라인 상태에 대한 op 기반 디스패치)",
 	"set:github.enabled:d":
 		"github 도구 활성화 (리포지토리, 이슈, 풀 리퀘스트, diff, 검색, 체크아웃, 푸시, Actions 워치 워크플로에 대한 op 기반 디스패치)",
 	"set:github.cache.enabled:l": "GitHub 뷰 캐시",

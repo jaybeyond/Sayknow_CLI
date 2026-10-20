@@ -1607,3 +1607,131 @@ export const github = {
 		return result.stdout;
 	},
 };
+
+// ════════════════════════════════════════════════════════════════════════════
+// API: gitlab (GitLab CLI)
+// ════════════════════════════════════════════════════════════════════════════
+
+export interface GlabCommandOptions {
+	repoProvided?: boolean;
+}
+
+/** Collapse glab's boxed, ANSI-colored error banner into one plain line. */
+export function cleanGlabMessage(text: string): string {
+	return text
+		.replace(/\u001b\[[0-9;?]*[A-Za-z]/g, "")
+		.split("\n")
+		.map(line => line.trim())
+		.filter(
+			line =>
+				line.length > 0 &&
+				line !== "ERROR" &&
+				!line.startsWith("DEPRECATION WARNING") &&
+				!/^A new version of glab|^https:\/\/gitlab\.com\/gitlab-org\/cli\/-\/releases/.test(line),
+		)
+		.map(line => line.replace(/^X\s+/, ""))
+		.join(" ")
+		.trim();
+}
+
+export function formatGlabFailure(
+	args: readonly string[],
+	stdout: string,
+	stderr: string,
+	options?: GlabCommandOptions,
+): string {
+	const message = cleanGlabMessage(stderr || stdout);
+	if (/401 Unauthorized|glab auth login|No token found|could not authenticate/i.test(message)) {
+		return `GitLab CLI is not authenticated for this host. Run \`glab auth login\`. (${message})`;
+	}
+	if (
+		!options?.repoProvided &&
+		/not a git repository|no git remotes found|none of the git remotes configured/i.test(message)
+	) {
+		return "GitLab repository context is unavailable. Pass `repo` explicitly or run the tool inside a GitLab checkout.";
+	}
+	if (message.length > 0) return message;
+	return `GitLab CLI command failed: glab ${args.join(" ")}`;
+}
+
+/**
+ * Parse `glab --output json` stdout. glab prints deprecation/update notices on stdout ahead of the
+ * payload in some versions, so parsing starts at the first line that opens a JSON value.
+ */
+export function parseGlabJson<T>(stdout: string): T {
+	const lines = stdout.split("\n");
+	const start = lines.findIndex(line => /^\s*[[{]/.test(line));
+	if (start < 0) {
+		throw new ToolError(
+			stdout.trim() ? "GitLab CLI returned invalid JSON output." : "GitLab CLI returned empty output.",
+		);
+	}
+	try {
+		return JSON.parse(lines.slice(start).join("\n")) as T;
+	} catch {
+		throw new ToolError("GitLab CLI returned invalid JSON output.");
+	}
+}
+
+export const gitlab = {
+	/** Check if `glab` CLI is installed. */
+	available(): boolean {
+		return Boolean($which("glab"));
+	},
+
+	/** Run a raw non-interactive `glab` command. Does not throw on non-zero exit. */
+	async run(cwd: string, args: string[], signal?: AbortSignal): Promise<GhCommandResult> {
+		throwIfAborted(signal);
+		if (!$which("glab")) {
+			throw new ToolError("GitLab CLI (glab) is not installed. Install it from https://gitlab.com/gitlab-org/cli.");
+		}
+		try {
+			const child = Bun.spawn(["glab", ...args], {
+				cwd,
+				stdin: "ignore",
+				stdout: "pipe",
+				stderr: "pipe",
+				windowsHide: true,
+				signal,
+				env: {
+					...process.env,
+					NO_COLOR: "1",
+					GLAB_NO_PROMPT: "1",
+					GLAB_CHECK_UPDATE: "false",
+					GLAB_SEND_TELEMETRY: "false",
+				},
+			});
+			if (!child.stdout || !child.stderr) {
+				throw new ToolError("Failed to capture GitLab CLI output.");
+			}
+			const [stdout, stderr, exitCode] = await Promise.all([
+				new Response(child.stdout).text(),
+				new Response(child.stderr).text(),
+				child.exited,
+			]);
+			throwIfAborted(signal);
+			return { exitCode: exitCode ?? 0, stdout: stdout.trim(), stderr: stderr.trim() };
+		} catch (error) {
+			if (signal?.aborted) throw new ToolAbortError();
+			throw error;
+		}
+	},
+
+	/** Run `glab` and parse stdout as JSON. Throws on non-zero exit or invalid JSON. */
+	async json<T>(cwd: string, args: string[], signal?: AbortSignal, options?: GlabCommandOptions): Promise<T> {
+		const result = await gitlab.run(cwd, args, signal);
+		if (result.exitCode !== 0) {
+			throw new ToolError(formatGlabFailure(args, result.stdout, result.stderr, options));
+		}
+		return parseGlabJson<T>(result.stdout);
+	},
+
+	/** Run `glab` and return stdout as text. Throws on non-zero exit. */
+	async text(cwd: string, args: string[], signal?: AbortSignal, options?: GlabCommandOptions): Promise<string> {
+		const result = await gitlab.run(cwd, args, signal);
+		if (result.exitCode !== 0) {
+			throw new ToolError(formatGlabFailure(args, result.stdout, result.stderr, options));
+		}
+		return result.stdout;
+	},
+};

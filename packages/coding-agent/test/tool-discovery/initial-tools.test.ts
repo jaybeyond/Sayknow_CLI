@@ -31,6 +31,7 @@ const allToolsSettings = Settings.isolated({
 	"find.enabled": true,
 	"search.enabled": true,
 	"github.enabled": true,
+	"gitlab.enabled": true,
 	"lsp.enabled": true,
 	"web_search.enabled": true,
 	"calc.enabled": true,
