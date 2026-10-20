@@ -1,0 +1,53 @@
+{
+  "kind": "sayknow-cli-plugin",
+  "name": "verification-receipts",
+  "version": "0.1.0",
+  "tools": [
+    {
+      "name": "verification_run",
+      "path": "tools/verification-run.ts",
+      "description": "Run explicit test files with bun test or node --test and store an immutable freshness-bound receipt"
+    },
+    {
+      "name": "verification_status",
+      "path": "tools/verification-status.ts",
+      "description": "Recompute the freshness of a stored verification receipt without rerunning tests"
+    },
+    "tools/verification-git.ts",
+    {
+      "name": "verification_loop",
+      "path": "tools/verification-loop.ts",
+      "description": "Recheck this session's delegation verification gates and list closed gap kinds"
+    }
+  ],
+  "hooks": [
+    {
+      "name": "verification-gate-baseline",
+      "event": "tool_call",
+      "target": "task",
+      "phase": "before",
+      "path": "hooks/verification-baseline.ts"
+    },
+    {
+      "name": "verification-gate-task",
+      "event": "tool_result",
+      "target": "task",
+      "phase": "after",
+      "path": "hooks/verification-gate.ts"
+    },
+    {
+      "name": "verification-gate-subagent",
+      "event": "tool_result",
+      "target": "subagent",
+      "phase": "after",
+      "path": "hooks/verification-gate.ts"
+    },
+    {
+      "name": "verification-gate-job",
+      "event": "tool_result",
+      "target": "job",
+      "phase": "after",
+      "path": "hooks/verification-gate.ts"
+    }
+  ]
+}

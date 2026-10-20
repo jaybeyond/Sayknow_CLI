@@ -14,6 +14,7 @@ attribution visible:
 - [`oh-my-pi`](https://github.com/jaybeyond/oh-my-pi) — the upstream red-octopus lineage and implementation DNA.
 - [`oh-my-codex`](https://github.com/jaybeyond/oh-my-codex) — Codex-focused orchestration experiments.
 - [`oh-my-claudecode`](https://github.com/jaybeyond/oh-my-claudecode) — Claude Code workflow exploration.
+- [`jjongguet/gjc-plugin`](https://github.com/jjongguet/gjc-plugin) — contract reference for `packages/coding-agent/bundles/verification-receipts` (MIT License, Copyright (c) 2026 jjongguet). Independent re-implementation, no source copied; license text in that directory's `LICENSE.gjc-plugin`.
 
 ## Vendored submodules
 
