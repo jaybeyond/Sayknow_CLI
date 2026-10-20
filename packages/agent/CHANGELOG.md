@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.7.10] - 2026-10-20
+
 ### Changed
 
 - The post-compaction context message now presents the summary as this session's compacted work state instead of "a summary of another language model's thinking process". The old framing read as handing over another model's reasoning and correlated with Anthropic `reasoning_extraction` refusals in long sessions.

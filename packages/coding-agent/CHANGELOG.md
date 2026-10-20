@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.7.10] - 2026-10-20
+
 ### Added
 
 - Bundled plugin `verification-receipts` (`packages/coding-agent/bundles/verification-receipts`, checkout install with `skc plugin install ... --user`). It adds `verification_run` (bun test or node --test on explicit files, per-file attribution, immutable freshness-bound receipts in a private store), `verification_status` and `verification_loop`, plus hooks that record a delegation gate when a background `task` starts and remind when it finishes. Advisory only; node:test needs Node 24.11.1 or newer.
