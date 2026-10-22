@@ -213,6 +213,12 @@ function transformMCPConfig(
 				cwd: serverConfig.cwd,
 				url: serverConfig.url,
 				headers: serverConfig.headers,
+				publicNetwork:
+					serverConfig.type === "http" &&
+					"publicNetwork" in serverConfig &&
+					(serverConfig as { publicNetwork?: boolean }).publicNetwork === true
+						? true
+						: undefined,
 				auth: serverConfig.auth,
 				oauth: serverConfig.oauth,
 				transport: serverConfig.type,

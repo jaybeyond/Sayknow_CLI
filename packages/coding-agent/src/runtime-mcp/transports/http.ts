@@ -25,7 +25,7 @@ import {
 	readMCPResponseText,
 } from "../content-limits";
 import { fetchMcpRespectingOrigin } from "../mcp-redirect";
-import { fetchPluginMcpRequest, isPluginMcpPublicNetworkBound } from "../plugin-network-boundary";
+import { fetchPluginMcpRequest, usesPublicNetworkMcpFetch } from "../plugin-network-boundary";
 
 /**
  * HTTP transport for MCP servers.
@@ -65,7 +65,7 @@ export class HttpTransport implements MCPTransport {
 	}
 
 	#fetch(init: BunFetchRequestInit): Promise<Response> {
-		return isPluginMcpPublicNetworkBound(this.config)
+		return usesPublicNetworkMcpFetch(this.config)
 			? fetchPluginMcpRequest(this.config.url, init)
 			: fetchMcpRespectingOrigin(this.config.url, init);
 	}
