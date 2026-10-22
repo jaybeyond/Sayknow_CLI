@@ -1259,6 +1259,14 @@ export function wrapAnthropicFetchForGzip(baseFetch: FetchImpl): FetchImpl {
 // We surface the resulting provider error ourselves, so keep the SDK quiet.
 const ANTHROPIC_SDK_LOG_LEVEL = "off" as const;
 
+/**
+ * Anthropic's keepalive frame. The SDK does not type it because it drops it; the
+ * raw iterator forwards it so the idle watchdog can tell a live connection that
+ * is thinking silently (`thinking.display: "omitted"`) from a dead one.
+ */
+type AnthropicPingEvent = { type: "ping" };
+type AnthropicStreamEvent = RawMessageStreamEvent | AnthropicPingEvent;
+
 const ANTHROPIC_MESSAGE_EVENTS: ReadonlySet<string> = new Set([
 	"message_start",
 	"message_delta",
@@ -1272,7 +1280,7 @@ async function* iterateAnthropicEvents(
 	response: Response,
 	signal?: AbortSignal,
 	onSseEvent?: AnthropicOptions["onSseEvent"],
-): AsyncGenerator<RawMessageStreamEvent> {
+): AsyncGenerator<AnthropicStreamEvent> {
 	if (!response.body) {
 		throw new Error("Attempted to iterate over an Anthropic response with no body");
 	}
@@ -1284,6 +1292,11 @@ async function* iterateAnthropicEvents(
 		notifyRawSseEvent(onSseEvent, sse);
 		if (sse.event === "error") {
 			throw new Error(sse.data);
+		}
+
+		if (sse.event === "ping") {
+			yield { type: "ping" };
+			continue;
 		}
 
 		if (!ANTHROPIC_MESSAGE_EVENTS.has(sse.event ?? "")) {
@@ -1335,7 +1348,7 @@ async function getAnthropicStreamResponse(
 	request: unknown,
 	signal?: AbortSignal,
 	onSseEvent?: AnthropicOptions["onSseEvent"],
-): Promise<{ events: AsyncIterable<RawMessageStreamEvent>; response: Response; requestId: string | null }> {
+): Promise<{ events: AsyncIterable<AnthropicStreamEvent>; response: Response; requestId: string | null }> {
 	if (hasAnthropicRawResponseRequest(request)) {
 		const response = await request.asResponse();
 		return {
@@ -1435,17 +1448,53 @@ function shouldIgnoreAnthropicPreambleEvent(eventType: unknown): boolean {
 	return !ANTHROPIC_PRE_MESSAGE_START_EVENT_TYPES.has(eventType);
 }
 
-function createAnthropicStreamProgressPredicate(): (event: unknown) => boolean {
+/**
+ * How many idle windows a silent thinking block may run on keepalives alone.
+ * With `thinking.display: "omitted"` Anthropic sends nothing but a `ping` every
+ * ~30s until the block ends (observed: 245s of pings on Opus 5.5 at xhigh), so
+ * the idle window alone kills any hidden think longer than one window. Three
+ * windows (30 min at the 600s default) clears a full 128k-token think at the
+ * observed ~125 tok/s (~17 min) while still bounding a proxy that pings forever
+ * (#3167).
+ */
+const ANTHROPIC_SILENT_THINKING_IDLE_WINDOWS = 3;
+
+function createAnthropicStreamProgressPredicate({
+	silentThinking,
+	idleTimeoutMs,
+}: {
+	/** The request did not ask for summarized thinking, so thinking blocks may stream no deltas. */
+	silentThinking: boolean;
+	idleTimeoutMs: number | undefined;
+}): (event: unknown) => boolean {
 	let outputTokens = -1;
+	const silentThinkingMaxMs =
+		silentThinking && idleTimeoutMs !== undefined && idleTimeoutMs > 0
+			? idleTimeoutMs * ANTHROPIC_SILENT_THINKING_IDLE_WINDOWS
+			: undefined;
+	let openThinkingBlock: { index: unknown; startedAt: number } | undefined;
 
 	return event => {
 		if (!isRecord(event) || typeof event.type !== "string") return false;
-		if (
-			event.type === "message_start" ||
-			event.type === "content_block_start" ||
-			event.type === "content_block_stop" ||
-			event.type === "message_stop"
-		) {
+		if (event.type === "ping") {
+			return (
+				silentThinkingMaxMs !== undefined &&
+				openThinkingBlock !== undefined &&
+				Date.now() - openThinkingBlock.startedAt < silentThinkingMaxMs
+			);
+		}
+		if (event.type === "content_block_start") {
+			openThinkingBlock =
+				isRecord(event.content_block) && event.content_block.type === "thinking"
+					? { index: event.index, startedAt: Date.now() }
+					: undefined;
+			return true;
+		}
+		if (event.type === "content_block_stop") {
+			if (openThinkingBlock?.index === event.index) openThinkingBlock = undefined;
+			return true;
+		}
+		if (event.type === "message_start" || event.type === "message_stop") {
 			return true;
 		}
 		if (event.type === "content_block_delta") {
@@ -1758,7 +1807,10 @@ export const streamAnthropic: StreamFunction<"anthropic-messages"> = (
 					let sawEvent = false;
 					let sawMessageStart = false;
 					let sawTerminalEnvelope = false;
-					const isProgressEvent = createAnthropicStreamProgressPredicate();
+					const isProgressEvent = createAnthropicStreamProgressPredicate({
+						silentThinking: !summarizedThinking,
+						idleTimeoutMs,
+					});
 
 					for await (const event of iterateWithIdleTimeout(anthropicStream, {
 						idleTimeoutMs,
@@ -1770,6 +1822,8 @@ export const streamAnthropic: StreamFunction<"anthropic-messages"> = (
 						abortSignal: options?.signal,
 						isProgressItem: isProgressEvent,
 					})) {
+						// Keepalives only feed the idle watchdog above; they carry no message state.
+						if (event.type === "ping") continue;
 						sawEvent = true;
 						if (sawProviderSafetyStop) {
 							if (event.type === "message_stop") {
