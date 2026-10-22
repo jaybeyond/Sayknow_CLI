@@ -99,6 +99,15 @@ interface TaskResumeDescriptor {
 function isTaskResumeDescriptor(value: unknown): value is TaskResumeDescriptor {
 	return typeof value === "object" && value !== null && "task" in value && "params" in value;
 }
+/** Approval policy copied into a task child. A missing mode stays `allow`, the child default. */
+function inheritedSubagentApproval(session: ToolSession) {
+	const mode = session.getSdkPermissionMode?.();
+	return {
+		sdkPermissionMode: mode === "deny" || mode === "prompt" ? mode : ("allow" as const),
+		clientBridge: session.getClientBridge?.(),
+	};
+}
+
 function renderTaskAssignment(assignment: string, simpleMode: TaskSimpleMode): string {
 	return renderSubagentUserPrompt(assignment, simpleMode === "independent");
 }
@@ -1596,6 +1605,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 						agentRegistry: this.session.agentRegistry,
 						settings: this.session.settings,
 						inheritedServiceTier: this.session.serviceTier,
+						...inheritedSubagentApproval(this.session),
 						contextFiles,
 						skills: availableSkills,
 						autoloadSkills: resolvedAutoloadSkills,
@@ -1672,6 +1682,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 						agentRegistry: this.session.agentRegistry,
 						settings: this.session.settings,
 						inheritedServiceTier: this.session.serviceTier,
+						...inheritedSubagentApproval(this.session),
 						contextFiles,
 						skills: availableSkills,
 						autoloadSkills: resolvedAutoloadSkills,

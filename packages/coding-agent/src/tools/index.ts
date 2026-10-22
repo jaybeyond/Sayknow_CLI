@@ -338,6 +338,8 @@ export interface ToolSession {
 	/** Goal runtime for the active agent session. */
 	getGoalRuntime?: () => GoalRuntime | undefined;
 	/** Bridge to the connected client (e.g. ACP editor host). Tools should route fs/terminal/permission requests through this when available. */
+	/** Live ACP/SDK approval mode. Task children copy this at spawn; absent means `allow`. */
+	getSdkPermissionMode?: () => "prompt" | "allow" | "deny";
 	getClientBridge?: () => ClientBridge | undefined;
 	/** Get compact conversation context for subagents (excludes tool results, system prompts) */
 	getCompactContext?: () => string;

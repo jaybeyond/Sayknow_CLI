@@ -38,6 +38,7 @@ import { createAgentSession, discoverAuthStorage } from "../sdk";
 import type { AgentSession, AgentSessionEvent, ForkContextSeed } from "../session/agent-session";
 import type { ArtifactManager } from "../session/artifacts";
 import type { AuthStorage } from "../session/auth-storage";
+import type { ClientBridge } from "../session/client-bridge";
 import { SKILL_PROMPT_MESSAGE_TYPE } from "../session/messages";
 import type { DetectedLanguage } from "../session/response-language";
 import { SessionManager } from "../session/session-manager";
@@ -242,6 +243,16 @@ export interface ExecutorOptions {
 	 * subagents, and a main-model fast-mode auto-disable does not clobber it.
 	 */
 	inheritedServiceTier?: ServiceTier;
+	/**
+	 * Parent ACP/SDK approval mode. `deny` and `prompt` replace the child
+	 * default (`allow`) before the first prompt. `allow` is that default.
+	 */
+	sdkPermissionMode?: "prompt" | "allow" | "deny";
+	/**
+	 * Parent client bridge. Only `requestPermission` is copied onto the child.
+	 * Terminal, filesystem, and deferAgentInitiatedTurns stay on the parent.
+	 */
+	clientBridge?: ClientBridge;
 	/** Override local:// protocol options so subagent shares parent's local:// root */
 	localProtocolOptions?: LocalProtocolOptions;
 	/**
@@ -736,6 +747,16 @@ export function createSubagentSettings(baseSettings: Settings, inheritedServiceT
 /**
  * Run a single agent in-process.
  */
+/** Permission callback only. Terminal, filesystem, and defer flags stay on the parent. */
+function permissionOnlyBridge(bridge: ClientBridge | undefined): ClientBridge | undefined {
+	if (!bridge?.requestPermission || bridge.capabilities.requestPermission !== true) return undefined;
+	const requestPermission = bridge.requestPermission.bind(bridge);
+	return {
+		capabilities: { requestPermission: true },
+		requestPermission: (toolCall, options, signal) => requestPermission(toolCall, options, signal),
+	};
+}
+
 export async function runSubprocess(options: ExecutorOptions): Promise<SingleResult> {
 	const {
 		cwd,
@@ -1667,6 +1688,12 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			);
 
 			activeSession = session;
+			// `allow` is the child default. deny/prompt must be copied before the first prompt.
+			if (options.sdkPermissionMode === "deny" || options.sdkPermissionMode === "prompt") {
+				session.setSdkPermissionMode(options.sdkPermissionMode);
+			}
+			const approvalBridge = permissionOnlyBridge(options.clientBridge);
+			if (approvalBridge) session.setClientBridge(approvalBridge);
 			// Each subagent invocation owns a fresh controller; its configured chain
 			// is scoped to this child session and never shares parent sticky state.
 			// Auth-aware resolution can substitute the parent model only after every
