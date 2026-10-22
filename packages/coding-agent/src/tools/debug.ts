@@ -652,7 +652,7 @@ export class DebugTool implements AgentTool<typeof debugSchema, DebugToolDetails
 					);
 				}
 				const snapshot = await dapSessionManager.launch(
-					{ adapter, program, args: params.args, cwd: commandCwd },
+					{ adapter, program, args: params.args, cwd: commandCwd, workspace: this.session.cwd },
 					combinedSignal,
 					timeoutSec * 1000,
 				);
@@ -672,7 +672,14 @@ export class DebugTool implements AgentTool<typeof debugSchema, DebugToolDetails
 					);
 				}
 				const snapshot = await dapSessionManager.attach(
-					{ adapter, cwd: commandCwd, pid: params.pid, port: params.port, host: params.host },
+					{
+						adapter,
+						cwd: commandCwd,
+						workspace: this.session.cwd,
+						pid: params.pid,
+						port: params.port,
+						host: params.host,
+					},
 					combinedSignal,
 					timeoutSec * 1000,
 				);

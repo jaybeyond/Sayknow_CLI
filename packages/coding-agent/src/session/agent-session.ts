@@ -339,7 +339,11 @@ import {
 	readVisibleSkillActiveState,
 	syncSkillActiveState,
 } from "../skill-state/active-state";
-import { assertWorkflowMutationAllowed, isWorkflowMutationTool } from "../skill-state/workflow-mutation-guard";
+import {
+	assertWorkflowMutationAllowed,
+	assertWorkflowMutationRawPathsAllowed,
+	isWorkflowMutationTool,
+} from "../skill-state/workflow-mutation-guard";
 import { invalidateHostMetadata } from "../ssh/connection-manager";
 import { buildVolatileProjectContext } from "../system-prompt";
 import { resolveThinkingLevelForModel, toReasoningEffort } from "../thinking";
@@ -1262,6 +1266,7 @@ const PERMISSION_REQUIRED_TOOLS = new Set([
 	"recipe",
 	"ssh",
 	"github",
+	"debug",
 ]);
 
 function isShellExecutionPermissionTool(toolName: string): boolean {
@@ -1270,7 +1275,11 @@ function isShellExecutionPermissionTool(toolName: string): boolean {
 
 function isExecutionPermissionTool(toolName: string): boolean {
 	return (
-		isShellExecutionPermissionTool(toolName) || toolName === "eval" || toolName === "python" || toolName === "recipe"
+		isShellExecutionPermissionTool(toolName) ||
+		toolName === "eval" ||
+		toolName === "python" ||
+		toolName === "recipe" ||
+		toolName === "debug"
 	);
 }
 
@@ -1403,7 +1412,41 @@ function getPermissionIntent(
 		return { toolName, title: action ? `Computer ${action}` : toolName, cacheKey: toolName };
 	}
 	if (toolName === "github") return githubPermissionIntent(args);
+	if (toolName === "debug") {
+		const action = getStringProperty(a, "action");
+		if (action !== "launch" && action !== "attach") return undefined;
+		if (action === "attach") return { toolName, title: "debug attach", cacheKey: "debug" };
+		const program = getStringProperty(a, "program");
+		const title = program ? `debug launch ${program}` : "debug launch";
+		return { toolName, title: title.slice(0, 80), cacheKey: "debug" };
+	}
 	return undefined;
+}
+
+/**
+ * Launch and attach start an arbitrary program. Treat that as an opaque
+ * mutation so a planning phase fail-closes, including when the program path
+ * would otherwise be neutral temp scratch. A `.skc` program stays blocked
+ * outside planning too. Inspection actions stay allowed.
+ */
+async function assertDebugExecutionMutationAllowed(input: {
+	cwd: string;
+	sessionId?: string;
+	args: unknown;
+}): Promise<void> {
+	const record =
+		input.args && typeof input.args === "object" && !Array.isArray(input.args)
+			? (input.args as Record<string, unknown>)
+			: undefined;
+	const action = record && typeof record.action === "string" ? record.action : undefined;
+	if (action !== "launch" && action !== "attach") return;
+	const program =
+		record && typeof record.program === "string" && record.program.length > 0 ? record.program : undefined;
+	await assertWorkflowMutationRawPathsAllowed({
+		cwd: input.cwd,
+		sessionId: input.sessionId,
+		rawPaths: program ? ["", program] : [""],
+	});
 }
 
 function extractPermissionLocations(
@@ -6306,7 +6349,7 @@ export class AgentSession {
 	/**
 	/** Wrap a tool with the workflow mutation guard before permissions or execution. */
 	#wrapToolForWorkflowMutationGuard<T extends AgentTool>(tool: T): T {
-		if (!isWorkflowMutationTool(tool.name)) return tool;
+		if (!isWorkflowMutationTool(tool.name) && tool.name !== "debug") return tool;
 		return new Proxy(tool, {
 			get: (target, prop) => {
 				if (prop !== "execute") return Reflect.get(target, prop, target);
@@ -6317,12 +6360,20 @@ export class AgentSession {
 					onUpdate: never,
 					ctx: never,
 				) => {
-					await assertWorkflowMutationAllowed({
-						cwd: this.sessionManager.getCwd(),
-						sessionId: this.sessionManager.getSessionId(),
-						tool: target,
-						args,
-					});
+					if (target.name === "debug") {
+						await assertDebugExecutionMutationAllowed({
+							cwd: this.sessionManager.getCwd(),
+							sessionId: this.sessionManager.getSessionId(),
+							args,
+						});
+					} else {
+						await assertWorkflowMutationAllowed({
+							cwd: this.sessionManager.getCwd(),
+							sessionId: this.sessionManager.getSessionId(),
+							tool: target,
+							args,
+						});
+					}
 					return await target.execute(toolCallId, args as never, signal, onUpdate, ctx);
 				};
 			},
