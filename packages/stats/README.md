@@ -54,13 +54,22 @@ console.log(stats.byModel[0].avgTokensPerSecond);
 
 ## API Endpoints
 
+Endpoints marked *range* accept `?range=1h|24h|7d|30d|90d|all` (default `24h`; an unknown value falls back to `24h`). Time series use hourly buckets for `1h` and `24h` and daily buckets for longer ranges.
+
 | Endpoint | Description |
 |----------|-------------|
-| `GET /api/stats` | Overall stats with all breakdowns |
-| `GET /api/stats/models` | Per-model statistics |
-| `GET /api/stats/folders` | Per-folder/project statistics |
-| `GET /api/stats/timeseries` | Hourly time series data |
-| `POST /api/sync` | Trigger sync and return counts |
+| `GET /api/stats` | The full `DashboardStats` object: overall, failures, per-model/folder/agent breakdowns, the time, model, model-performance, and cost series, and the cache-miss attribution (*range*) |
+| `GET /api/stats/overview` | `overall` and `timeSeries` only (*range*) |
+| `GET /api/stats/models` | Per-model statistics, ordered by request count (*range*) |
+| `GET /api/stats/model-dashboard` | `byModel`, `modelSeries`, and `modelPerformanceSeries` (*range*) |
+| `GET /api/stats/folders` | Per-folder/project statistics (*range*) |
+| `GET /api/stats/timeseries` | Requests, errors, tokens, and cost per time bucket (*range*) |
+| `GET /api/stats/costs` | Daily cost per model and provider, split into input/output/cache (*range*) |
+| `GET /api/stats/behavior` | User-message behavior signals (yelling, profanity, repetition, and others): overall, per model, and over time (*range*) |
+| `GET /api/stats/recent` | Most recent requests, newest first (`?limit=`, default 100) |
+| `GET /api/stats/errors` | Most recent requests that stopped with an error (`?limit=`, default 100) |
+| `GET /api/request/:id` | One request with its stored messages and output; `404` if unknown |
+| `POST /api/sync` | Sync session files and return `{ processed, files, totalMessages }`; `409` while a sync is already running |
 
 ## Local server security
 
