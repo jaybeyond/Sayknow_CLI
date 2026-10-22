@@ -640,7 +640,7 @@ async fn spawn_pipeline_processes(
 	let pipeline_len = pipeline.seq.len();
 	let mut pipe_readers = vec![];
 	let mut pipe_writers = vec![];
-	let mut spawn_results = VecDeque::new();
+	let mut spawn_results: VecDeque<ExecutionSpawnResult> = VecDeque::new();
 	let mut process_group_id: Option<i32> = None;
 
 	// Create pipes to use between commands, but only bother doing so if there's
@@ -710,9 +710,22 @@ async fn spawn_pipeline_processes(
 			}
 		};
 
-		let spawn_result = command
+		let spawn_result = match command
 			.execute_in_pipeline(pipeline_context, cmd_params)
-			.await?;
+			.await
+		{
+			Ok(spawn_result) => spawn_result,
+			Err(error) => {
+				// Close pipe ends for stages that were not launched, then join every
+				// stage already started before returning the launch error.
+				drop(pipe_readers);
+				drop(pipe_writers);
+				while let Some(spawn_result) = spawn_results.pop_front() {
+					let _ = spawn_result.wait_with_cancel(params.cancel_token()).await;
+				}
+				return Err(error);
+			},
+		};
 
 		// Update the process group ID if something was spawned.
 		if let ExecutionSpawnResult::StartedProcess(child) = &spawn_result {
@@ -737,16 +750,29 @@ async fn wait_for_pipeline_processes_and_update_status(
 	let mut result = ExecutionResult::success();
 	let mut stopped_children = vec![];
 	let mut last_failure_exit_code: Option<ExecutionExitCode> = None;
+	let mut first_error: Option<error::Error> = None;
 
 	// Clear our the pipeline status so we can start filling it out.
 	shell.last_pipeline_statuses_mut().clear();
 
 	while let Some(child) = process_spawn_results.pop_front() {
 		ensure_not_cancelled(params)?;
-		let wait_result = if !stopped_children.is_empty() {
-			child.poll().await?
+		let wait_result = if first_error.is_some() {
+			child.wait_with_cancel(params.cancel_token()).await
+		} else if !stopped_children.is_empty() {
+			child.poll().await
 		} else {
-			child.wait_with_cancel(params.cancel_token()).await?
+			child.wait_with_cancel(params.cancel_token()).await
+		};
+		let wait_result = match wait_result {
+			Ok(wait_result) => wait_result,
+			Err(error) => {
+				// Keep joining the remaining stages so none outlives the pipeline.
+				if first_error.is_none() {
+					first_error = Some(error);
+				}
+				continue;
+			},
 		};
 
 		match wait_result {
@@ -772,6 +798,10 @@ async fn wait_for_pipeline_processes_and_update_status(
 				stopped_children.push(jobs::JobTask::External(child));
 			},
 		}
+	}
+
+	if let Some(error) = first_error {
+		return Err(error);
 	}
 
 	// Apply pipefail semantics if enabled
@@ -829,10 +859,34 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::Command {
 					}
 				}
 
-				Ok(compound
-					.execute(&mut pipeline_context.shell, &params)
-					.await?
-					.into())
+				match pipeline_context.shell {
+					commands::ShellForCommand::OwnedShell { target, .. } => {
+						let compound = compound.clone();
+						let mut shell = *target;
+						let handle = tokio::runtime::Handle::current();
+						let (sender, receiver) = tokio::sync::oneshot::channel();
+
+						// Compound stages may perform blocking reads and writes. Running
+						// them inline on the pipeline task blocked the reader stage once a
+						// pipe buffer filled; a dedicated thread keeps them off Tokio's
+						// bounded workers and ends with the stage.
+						std::thread::Builder::new()
+							.name("brush-pipeline-stage".into())
+							.spawn(move || {
+								let result = handle.block_on(compound.execute(&mut shell, &params));
+								let _ = sender.send(result);
+							})?;
+
+						Ok(ExecutionSpawnResult::StartedTask(tokio::spawn(async move {
+							receiver
+								.await
+								.map_err(|_| std::io::Error::other("pipeline stage thread terminated"))?
+						})))
+					},
+					commands::ShellForCommand::ParentShell(shell) => {
+						Ok(compound.execute(shell, &params).await?.into())
+					},
+				}
 			},
 			Self::Function(func) => {
 				params.disable_command_output_marking();

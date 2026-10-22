@@ -1,10 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import * as childProcess from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { resetSettingsForTest, Settings } from "@sayknow-cli/coding-agent/config/settings";
 import { getRuntimeResourceCounts } from "@sayknow-cli/coding-agent/debug/runtime-gauges";
 import {
+	type BashResult,
 	disposeAllShellSessions,
 	executeBash,
 	getShellSessionCount,
@@ -41,6 +43,154 @@ describe("executeBash", () => {
 			fs.rmSync(tempDir, { recursive: true });
 		}
 	});
+
+	it("does not deadlock when a compound pipeline stage writes over a pipe buffer", async () => {
+		if (process.platform === "win32") return;
+
+		const result = await executeBash("{ head -c 70000 /dev/zero | tr '\\0' A; echo; } | grep ZZZ || true", {
+			cwd: tempDir,
+			timeout: 4000,
+		});
+		expect(result.cancelled).toBe(false);
+		expect(result.exitCode).toBe(0);
+	}, 10_000);
+
+	it("does not deadlock when a for-loop pipeline stage writes over a pipe buffer", async () => {
+		if (process.platform === "win32") return;
+
+		const result = await executeBash("for i in $(seq 1 20000); do echo line$i; done | grep ZZZ || true", {
+			cwd: tempDir,
+			timeout: 4000,
+		});
+		expect(result.cancelled).toBe(false);
+		expect(result.exitCode).toBe(0);
+	}, 10_000);
+
+	it("does not deadlock when a compound pipeline stage writes over 64 KiB", async () => {
+		if (process.platform === "win32") return;
+
+		const result = await executeBash(
+			"i=0; while [ $i -lt 20000 ]; do echo line$i; i=$((i + 1)); done | grep ZZZ || true",
+			{ cwd: tempDir, timeout: 4000 },
+		);
+		expect(result.cancelled).toBe(false);
+		expect(result.exitCode).toBe(0);
+	}, 10_000);
+
+	it("preserves byte counts through a compound pipeline stage", async () => {
+		if (process.platform === "win32") return;
+
+		const result = await executeBash("{ head -c 200000 /dev/zero | tr '\\0' A; echo; } | wc -c", {
+			cwd: tempDir,
+			timeout: 4000,
+		});
+		expect(result.cancelled).toBe(false);
+		expect(result.exitCode).toBe(0);
+		expect(result.output.trim()).toBe("200001");
+	}, 10_000);
+
+	it("preserves PIPESTATUS and pipefail across a compound pipeline", async () => {
+		if (process.platform === "win32") return;
+
+		const result = await executeBash(
+			`set -o pipefail; { false; } | true; status=$? statuses=("\${PIPESTATUS[@]}"); printf '%s %s %s\\n' "$status" "\${statuses[0]}" "\${statuses[1]}"`,
+			{ cwd: tempDir, timeout: 4000 },
+		);
+		expect(result.cancelled).toBe(false);
+		expect(result.exitCode).toBe(0);
+		expect(result.output.trim()).toBe("1 1 0");
+	}, 10_000);
+
+	it("does not deadlock with multiple blocking compound readers", async () => {
+		if (process.platform === "win32") return;
+
+		const trigger = path.join(tempDir, "trigger");
+		childProcess.execFileSync("mkfifo", [trigger]);
+		const stages = Array.from({ length: 32 }, (_, i) => `{ : > stage-${i}; read v; printf '%s\\n' "$v"; }`);
+		const started = new Set<string>();
+		let released = false;
+		// Poll instead of fs.watch: macOS FSEvents coalesces the stage-file creations,
+		// so a watcher can miss all but one and never release the trigger.
+		const poll = setInterval(() => {
+			for (const filename of fs.readdirSync(tempDir)) {
+				if (filename.startsWith("stage-")) started.add(filename);
+			}
+			if (!released && started.size === stages.length) {
+				released = true;
+				clearInterval(poll);
+				fs.writeFileSync(trigger, "x\n");
+			}
+		}, 10);
+		let result: BashResult;
+		try {
+			result = await executeBash(
+				`shopt -u lastpipe; { read v < trigger; printf '%s\\n' "$v"; } | ${stages.join(" | ")}`,
+				{ cwd: tempDir, timeout: 5000 },
+			);
+		} finally {
+			clearInterval(poll);
+		}
+		expect(result.cancelled).toBe(false);
+		expect(result.exitCode).toBe(0);
+		expect(result.output.trim()).toBe("x");
+	}, 10_000);
+
+	it("joins started compound stages after a later launch error", async () => {
+		if (process.platform === "win32") return;
+
+		const marker = path.join(tempDir, "marker");
+		const result = await executeBash("{ sleep 1; printf late > marker; } | { :; } <&99", {
+			cwd: tempDir,
+			timeout: 5000,
+		});
+		expect(result.cancelled).toBe(false);
+		expect(result.exitCode).toBeDefined();
+		expect(result.exitCode).not.toBe(0);
+		expect(fs.readFileSync(marker, "utf8")).toBe("late");
+	}, 10_000);
+
+	it("joins remaining compound stages after a stage wait error", async () => {
+		if (process.platform === "win32") return;
+
+		const marker = path.join(tempDir, "marker");
+		const sessionKey = "pipeline-wait-error";
+		const result = await executeBash("{ { :; } <&99; } | { sleep 1; printf late > marker; }", {
+			cwd: tempDir,
+			timeout: 5000,
+			sessionKey,
+		});
+		expect(result.cancelled).toBe(false);
+		expect(result.exitCode).toBeDefined();
+		expect(result.exitCode).not.toBe(0);
+		expect(fs.readFileSync(marker, "utf8")).toBe("late");
+
+		const reused = await executeBash("printf reuse-ok", {
+			cwd: tempDir,
+			timeout: 5000,
+			sessionKey,
+		});
+		expect(reused).toMatchObject({ exitCode: 0, cancelled: false });
+		expect(reused.output).toBe("reuse-ok");
+	}, 10_000);
+
+	it("preserves parent compound and lastpipe mutations across a compound pipeline", async () => {
+		if (process.platform === "win32") return;
+
+		const result = await executeBash(
+			"{ value=before; }; { value=changed; printf payload; } | cat >/dev/null; printf 'parent:%s\\n' \"$value\"; shopt -s lastpipe; printf 'line\\n' | { read value; }; printf 'lastpipe:%s\\n' \"$value\"",
+			{ cwd: tempDir, timeout: 4000 },
+		);
+		expect(result.cancelled).toBe(false);
+		expect(result.exitCode).toBe(0);
+		expect(result.output.trim()).toBe("parent:before\nlastpipe:line");
+	}, 10_000);
+
+	it("preserves simple pipeline behavior alongside compound pipelines", async () => {
+		const result = await executeBash("printf 'simple pipeline\\n' | cat", { cwd: tempDir, timeout: 4000 });
+		expect(result.cancelled).toBe(false);
+		expect(result.exitCode).toBe(0);
+		expect(result.output.trim()).toBe("simple pipeline");
+	}, 10_000);
 
 	it("returns non-zero exit codes without cancellation", async () => {
 		const result = await executeBash("exit 7", { cwd: tempDir, timeout: 5000 });
