@@ -3,7 +3,6 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 import { untilAborted } from "@sayknow-cli/utils/abortable";
-import { Snowflake } from "@sayknow-cli/utils/snowflake";
 import type { HTMLElement } from "linkedom";
 import type {
 	Browser,
@@ -78,6 +77,15 @@ const LEGACY_SELECTOR_PREFIXES = ["p-aria/", "p-text/", "p-xpath/", "p-pierce/"]
 type DialogPolicy = "accept" | "dismiss";
 type DragTarget = string | { readonly x: number; readonly y: number };
 type ActionabilityResult = { ok: true; x: number; y: number } | { ok: false; reason: string };
+
+/**
+ * Test seam: override the worker's puppeteer loader so WorkerCore-level tests can
+ * inject a fake browser/page without a live Chromium.
+ */
+let loadPuppeteerInWorkerForTest: typeof loadPuppeteerInWorker | undefined;
+export function __setLoadPuppeteerInWorkerForTest(loader: typeof loadPuppeteerInWorker | undefined): void {
+	loadPuppeteerInWorkerForTest = loader;
+}
 
 interface ScreenshotOptions {
 	selector?: string;
@@ -394,6 +402,31 @@ interface ActiveRun {
 	pendingTools: Map<string, { resolve(value: unknown): void; reject(error: Error): void }>;
 }
 
+async function writePrivateScreenshot(bytes: Uint8Array): Promise<string> {
+	// Random directory plus an exclusive create: a preexisting symlink under the
+	// shared temp directory is not opened, and the screenshot is not left world-readable.
+	// Create the temp root first: base created it with a recursive mkdir, and
+	// mkdtemp fails when that root does not exist yet. Do not change the root's mode.
+	const root = os.tmpdir();
+	await fs.promises.mkdir(root, { recursive: true });
+	const tempDir = await fs.promises.mkdtemp(path.join(root, "skc-sshots-"));
+	try {
+		if (process.platform !== "win32") await fs.promises.chmod(tempDir, 0o700);
+		const dest = path.join(tempDir, "screenshot.png");
+		const handle = await fs.promises.open(dest, "wx", 0o600);
+		try {
+			await handle.writeFile(bytes);
+		} finally {
+			await handle.close();
+		}
+		if (process.platform !== "win32") await fs.promises.chmod(dest, 0o600);
+		return dest;
+	} catch (error) {
+		await fs.promises.rm(tempDir, { recursive: true, force: true });
+		throw error;
+	}
+}
+
 export class WorkerCore {
 	#transport: Transport;
 	#browser?: Browser;
@@ -447,7 +480,7 @@ export class WorkerCore {
 	async #init(payload: WorkerInitPayload): Promise<void> {
 		try {
 			this.#mode = payload.mode;
-			const puppeteer = await loadPuppeteerInWorker(payload.safeDir);
+			const puppeteer = await (loadPuppeteerInWorkerForTest ?? loadPuppeteerInWorker)(payload.safeDir);
 			this.#browser = await puppeteer.connect({
 				browserWSEndpoint: payload.browserWSEndpoint,
 				defaultViewport: null,
@@ -815,20 +848,22 @@ export class WorkerCore {
 			{ maxWidth: 1024, maxHeight: 1024, maxBytes: 150 * 1024, jpegQuality: 70 },
 		);
 		const explicitPath = opts.save ? resolveTabWorkerPath(opts.save, session.cwd) : undefined;
-
-		const dest =
-			explicitPath ??
-			(session.browserScreenshotDir
-				? path.join(
-						session.browserScreenshotDir,
-						`screenshot-${new Date().toISOString().replace(/[:.]/g, "-").slice(0, -1)}.png`,
-					)
-				: path.join(os.tmpdir(), `skc-sshots-${Snowflake.next()}.png`));
-		await fs.promises.mkdir(path.dirname(dest), { recursive: true });
-		const saveFullRes = !!(explicitPath || session.browserScreenshotDir);
+		const configuredDir = session.browserScreenshotDir;
+		const saveFullRes = !!(explicitPath || configuredDir);
 		const savedBuffer = saveFullRes ? buffer : resized.buffer;
 		const savedMimeType = saveFullRes ? "image/png" : resized.mimeType;
-		await Bun.write(dest, savedBuffer);
+		// Caller-chosen destinations stay as they were. Only the shared temp
+		// fallback is an exclusive private file: a preexisting symlink at the old
+		// predictable name is not opened, and the bytes are not left world-readable.
+		const dest = explicitPath
+			? explicitPath
+			: configuredDir
+				? path.join(configuredDir, `screenshot-${new Date().toISOString().replace(/[:.]/g, "-").slice(0, -1)}.png`)
+				: await writePrivateScreenshot(savedBuffer);
+		if (explicitPath || configuredDir) {
+			await fs.promises.mkdir(path.dirname(dest), { recursive: true });
+			await Bun.write(dest, savedBuffer);
+		}
 		const info: ScreenshotResult = {
 			dest,
 			mimeType: savedMimeType,
