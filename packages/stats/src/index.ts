@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 
 import { parseArgs } from "node:util";
-import { formatDuration, formatNumber, formatPercent } from "@sayknow-cli/utils";
+import { formatDuration, formatNumber, formatPercent, sanitizeDisplayLine } from "@sayknow-cli/utils";
 import { getDashboardStats, getTotalMessageCount, syncAllSessions } from "./aggregator";
 import { closeDb } from "./db";
 import { startServer } from "./server";
@@ -68,7 +68,7 @@ async function printStats(): Promise<void> {
 		console.log("\nBy Model:");
 		for (const m of byModel.slice(0, 10)) {
 			console.log(
-				`  ${m.model}: ${formatNumber(m.totalRequests)} reqs, ${formatCost(m.totalCost)}, ${formatPercent(m.cacheRate)} cache`,
+				`  ${sanitizeDisplayLine(m.model)}: ${formatNumber(m.totalRequests)} reqs, ${formatCost(m.totalCost)}, ${formatPercent(m.cacheRate)} cache`,
 			);
 		}
 	}
@@ -76,7 +76,9 @@ async function printStats(): Promise<void> {
 	if (byFolder.length > 0) {
 		console.log("\nBy Folder:");
 		for (const f of byFolder.slice(0, 10)) {
-			console.log(`  ${f.folder}: ${formatNumber(f.totalRequests)} reqs, ${formatCost(f.totalCost)}`);
+			console.log(
+				`  ${sanitizeDisplayLine(f.folder)}: ${formatNumber(f.totalRequests)} reqs, ${formatCost(f.totalCost)}`,
+			);
 		}
 	}
 
