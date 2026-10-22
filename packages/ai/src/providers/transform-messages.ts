@@ -27,6 +27,34 @@ const enum ToolCallStatus {
  * - Injects synthetic "aborted" tool results
  * - Adds a <turn-aborted> guidance marker for the model
  */
+/** Escape untrusted text placed between the stale-tool-result tags. */
+function escapeXmlText(input: string): string {
+	if (!/[&<>]/.test(input)) return input;
+	let output = "";
+	for (const char of input) {
+		if (char === "&") output += "&amp;";
+		else if (char === "<") output += "&lt;";
+		else if (char === ">") output += "&gt;";
+		else output += char;
+	}
+	return output;
+}
+
+/** Escape an untrusted tool name or id used in a double-quoted attribute. */
+function escapeXmlAttribute(input: string): string {
+	if (!/[&<>"']/.test(input)) return input;
+	let output = "";
+	for (const char of input) {
+		if (char === "&") output += "&amp;";
+		else if (char === "<") output += "&lt;";
+		else if (char === ">") output += "&gt;";
+		else if (char === '"') output += "&quot;";
+		else if (char === "'") output += "&apos;";
+		else output += char;
+	}
+	return output;
+}
+
 export function transformMessages<TApi extends Api>(
 	messages: Message[],
 	model: Model<TApi>,
@@ -296,9 +324,12 @@ export function transformMessages<TApi extends Api>(
 				}
 				if (textParts.length > 0) {
 					const errorAttr = msg.isError ? ' is-error="true"' : "";
+					const toolAttr = escapeXmlAttribute(msg.toolName);
+					const idAttr = escapeXmlAttribute(msg.toolCallId);
+					const body = escapeXmlText(textParts.join("\n"));
 					result.push({
 						role: "user",
-						content: `<stale-tool-result tool="${msg.toolName}" id="${msg.toolCallId}"${errorAttr}>\n${textParts.join("\n")}\n</stale-tool-result>`,
+						content: `<stale-tool-result tool="${toolAttr}" id="${idAttr}"${errorAttr}>\n${body}\n</stale-tool-result>`,
 						timestamp: messageTimestamp,
 					} as UserMessage);
 				}
