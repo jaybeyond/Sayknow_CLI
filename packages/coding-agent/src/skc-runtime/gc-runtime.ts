@@ -13,11 +13,13 @@
  * - Dry-run by default: nothing is deleted unless `--prune`/`--force`.
  */
 
-import { getAgentDir } from "@sayknow-cli/utils";
+import { getAgentDir, loadedProjectEnvSnapshot } from "@sayknow-cli/utils";
+import { type ProjectEnvSnapshot, projectEnvSnapshot } from "@sayknow-cli/utils/env-file";
 import { SessionIndex } from "../sdk/broker/session-index";
 import { UnsupportedStateVersionError } from "../sdk/broker/state-version";
 
 import { buildGcReportText } from "./gc-render";
+import { trustedCoordinatorEnv } from "./sidecar-bootstrap-env";
 
 export type GcStore =
 	| "harness_leases"
@@ -366,8 +368,21 @@ export function computeExitCode(report: GcReport): number {
 	return 0;
 }
 
-function resolveGcAgentDir(env: NodeJS.ProcessEnv): string {
-	return env.SKC_CODING_AGENT_DIR?.trim() || env.PI_CODING_AGENT_DIR?.trim() || getAgentDir();
+/**
+ * Operator override only. Same project-dotenv rule as `getAgentDir()`: a value
+ * the checkout declares is ignored, and an operator value it does not declare
+ * is kept. A repository `.env` must not choose the tree `skc gc` reclaims.
+ *
+ * `snapshot` is the dotenv provenance from when that environment was loaded.
+ * `process.env` uses the module-load snapshot. A separate env map uses the
+ * snapshot taken with it before awaited GC work. Neither path rereads files later.
+ */
+function resolveGcAgentDir(env: NodeJS.ProcessEnv, snapshot: ProjectEnvSnapshot): string {
+	return (
+		trustedCoordinatorEnv("SKC_CODING_AGENT_DIR", env, snapshot) ||
+		trustedCoordinatorEnv("PI_CODING_AGENT_DIR", env, snapshot) ||
+		getAgentDir()
+	);
 }
 
 async function collectSessionIndexHealth(repair: boolean, agentDir: string): Promise<GcSessionIndexHealth> {
@@ -406,6 +421,10 @@ export async function runSkcGcCommand(
 	env: NodeJS.ProcessEnv = process.env,
 	adapters?: GcStoreAdapter[],
 ): Promise<GcRunResult> {
+	// process.env was loaded before this module. Reusing that snapshot keeps a
+	// project value rejected after its declaration is removed or changed.
+	// A caller-supplied env is not that load: bind its cwd files once, here.
+	const loadedProjectEnv = env === process.env ? loadedProjectEnvSnapshot() : projectEnvSnapshot(cwd);
 	let parsed: ParsedGcArgs;
 	try {
 		parsed = parseGcArgs(argv);
@@ -422,7 +441,10 @@ export async function runSkcGcCommand(
 	const ctx: GcContext = { probe: gcPidProbe, force: parsed.prune, env, cwd };
 	const report = await collectGcReport(resolvedAdapters, ctx, parsed.prune);
 	report.operation = parsed.repairSessionIndex ? "repair_session_index" : parsed.prune ? "prune" : "dry_run";
-	report.session_index = await collectSessionIndexHealth(parsed.repairSessionIndex, resolveGcAgentDir(env));
+	report.session_index = await collectSessionIndexHealth(
+		parsed.repairSessionIndex,
+		resolveGcAgentDir(env, loadedProjectEnv),
+	);
 	const sessionIndexFailed =
 		report.session_index?.status === "corrupt" ||
 		report.session_index?.status === "unsupported" ||
