@@ -11,7 +11,7 @@ import type { ToolCallContext } from "@sayknow-cli/agent-core";
 import type { Ellipsis } from "@sayknow-cli/natives";
 import type { Component } from "@sayknow-cli/tui";
 import { replaceTabs, truncateToWidth } from "@sayknow-cli/tui";
-import { pluralize } from "@sayknow-cli/utils";
+import { pluralize, sanitizeText } from "@sayknow-cli/utils";
 import { settings } from "../config/settings";
 import type { Theme } from "../modes/theme/theme";
 import { Hasher } from "../tui/utils";
@@ -176,7 +176,7 @@ export function formatMeta(meta: string[], theme: Theme): string {
 }
 
 export function formatErrorMessage(message: string | undefined, theme: Theme): string {
-	const clean = (message ?? "").replace(/^Error:\s*/, "").trim();
+	const clean = sanitizeText((message ?? "").replace(/^Error:\s*/, "").trim());
 	return `${theme.styledSymbol("status.error", "error")} ${theme.fg("error", `Error: ${clean || "Unknown error"}`)}`;
 }
 
