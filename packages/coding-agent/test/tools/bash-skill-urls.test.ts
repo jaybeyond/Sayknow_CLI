@@ -3,7 +3,7 @@ import { lstat, realpath } from "node:fs/promises";
 import * as path from "node:path";
 import type { Skill } from "../../src/extensibility/skills";
 import { resolveLocalUrlToPath } from "../../src/internal-urls";
-import { expandInternalUrls, expandSkillUrls } from "../../src/tools/bash-skill-urls";
+import { expandInternalUrls, expandSkillUrls, resolveSkillUrl } from "../../src/tools/bash-skill-urls";
 import { ToolError } from "../../src/tools/tool-errors";
 
 /** Match bash skill expansion: real ancestor plus the components that do not exist yet. */
@@ -170,6 +170,35 @@ describe("expandSkillUrls", () => {
 	});
 });
 
+describe("resolveSkillUrl skill selection", () => {
+	it("keeps generated nested and prefix-similar roots from changing the named skill", () => {
+		for (let seed = 0; seed < 64; seed++) {
+			const baseDir = path.resolve(`/tmp/skill-url-property-${seed}/skills/outer-${seed}`);
+			const selected = createSkill(`outer-${seed}`, baseDir);
+			const nestedDir = path.join(baseDir, `inner-${seed}`);
+			const nestedChildDir = path.join(nestedDir, `child-${seed}`);
+			const unrelated = [
+				createSkill(`inner-${seed}`, nestedDir),
+				createSkill(`child-${seed}`, nestedChildDir),
+				createSkill(`sibling-${seed}`, `${baseDir}-inner-${seed}`),
+				createSkill(`other-${seed}`, path.resolve(`/tmp/other-skill-${seed}`)),
+			];
+			for (let index = unrelated.length - 1; index > 0; index--) {
+				const swapWith = (seed * 7 + index * 3) % (index + 1);
+				[unrelated[index], unrelated[swapWith]] = [unrelated[swapWith]!, unrelated[index]!];
+			}
+			const insertionIndex = seed % (unrelated.length + 1);
+			unrelated.splice(insertionIndex, 0, selected);
+
+			const url = `skill://${selected.name}/inner-${seed}/child-${seed}/file-${seed}.txt`;
+			const resolved = resolveSkillUrl(url, unrelated);
+
+			expect(resolved.skill).toBe(selected);
+			expect(resolved.lexicalPath).toBe(path.join(baseDir, `inner-${seed}`, `child-${seed}`, `file-${seed}.txt`));
+		}
+	});
+});
+
 describe("expandInternalUrls", () => {
 	it("expands context-free internal URLs in one command", async () => {
 		const skills = [createSkill("valid-skill", "/tmp/skills/valid-skill")];
@@ -178,7 +207,7 @@ describe("expandInternalUrls", () => {
 			"rule://rs-no-unwrap": { sourcePath: "/tmp/rules/rs-no-unwrap.md" },
 		});
 		const command = "cat memory://root/memory_summary.md rule://rs-no-unwrap skill://valid-skill/scripts/init.py";
-		const expectedSkillPath = path.join(skills[0].baseDir, "scripts/init.py");
+		const expectedSkillPath = await canonicalExistingPath(path.join(skills[0].baseDir, "scripts/init.py"));
 
 		await expect(expandInternalUrls(command, { skills, internalRouter: router })).resolves.toBe(
 			`cat ${shellEscape("/tmp/memories/memory_summary.md")} ${shellEscape("/tmp/rules/rs-no-unwrap.md")} ${shellEscape(expectedSkillPath)}`,
