@@ -51,6 +51,7 @@ import { decodeEventStream } from "./aws-eventstream";
 import type { AwsCredentials } from "./aws-sigv4";
 import { signRequest } from "./aws-sigv4";
 import { transformMessages } from "./transform-messages";
+import { NON_VISION_IMAGE_PLACEHOLDER } from "./vision-guard";
 
 export type BedrockThinkingDisplay = "summarized" | "omitted";
 
@@ -683,12 +684,24 @@ function buildSystemPrompt(
 	return blocks;
 }
 
+function convertToolResultContent(
+	content: ToolResultMessage["content"],
+	supportsImages: boolean,
+): Array<TextBlockWire | ImageBlockWire> {
+	return content.map(c => {
+		if (c.type !== "image") return { text: c.text.toWellFormed() };
+		if (!supportsImages) return { text: NON_VISION_IMAGE_PLACEHOLDER };
+		return { image: createImageBlock(c.mimeType, c.data) };
+	});
+}
+
 function convertMessages(
 	context: Context,
 	model: Model<"bedrock-converse-stream">,
 	cacheRetention: CacheRetention,
 ): WireMessage[] {
 	const result: WireMessage[] = [];
+	const supportsImages = model.input.includes("image");
 	const transformedMessages = transformMessages(context.messages, model, normalizeToolCallId);
 
 	for (let i = 0; i < transformedMessages.length; i++) {
@@ -712,7 +725,11 @@ function convertMessages(
 								break;
 							}
 							case "image":
-								contentBlocks.push({ image: createImageBlock(c.mimeType, c.data) });
+								contentBlocks.push(
+									supportsImages
+										? { image: createImageBlock(c.mimeType, c.data) }
+										: { text: NON_VISION_IMAGE_PLACEHOLDER },
+								);
 								break;
 							default:
 								throw new Error("Unknown user content type");
@@ -780,11 +797,7 @@ function convertMessages(
 				toolResults.push({
 					toolResult: {
 						toolUseId: normalizeToolCallId(m.toolCallId),
-						content: m.content.map(c =>
-							c.type === "image"
-								? { image: createImageBlock(c.mimeType, c.data) }
-								: { text: c.text.toWellFormed() },
-						),
+						content: convertToolResultContent(m.content, supportsImages),
 						status: m.isError ? "error" : "success",
 					},
 				});
@@ -795,11 +808,7 @@ function convertMessages(
 					toolResults.push({
 						toolResult: {
 							toolUseId: normalizeToolCallId(nextMsg.toolCallId),
-							content: nextMsg.content.map(c =>
-								c.type === "image"
-									? { image: createImageBlock(c.mimeType, c.data) }
-									: { text: c.text.toWellFormed() },
-							),
+							content: convertToolResultContent(nextMsg.content, supportsImages),
 							status: nextMsg.isError ? "error" : "success",
 						},
 					});
