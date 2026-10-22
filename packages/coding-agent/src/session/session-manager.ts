@@ -1845,7 +1845,15 @@ function isLinkedWorktreePeer(a: string, b: string): boolean {
  * Read the terminal breadcrumb for the current terminal, scoped to a cwd.
  * Returns the session file path if it exists and matches the cwd, null otherwise.
  */
-async function readTerminalBreadcrumb(cwd: string): Promise<string | null> {
+async function readTerminalBreadcrumb(
+	cwd: string,
+	options: {
+		sessionsRoot?: string;
+		allowExplicitOutsideRoot?: boolean;
+		/** Managed continuation inventory, including project-local transcripts. */
+		continuationInventory?: readonly SessionInfo[];
+	} = {},
+): Promise<string | null> {
 	const terminalId = getTerminalId();
 	if (!terminalId) return null;
 
@@ -1866,9 +1874,9 @@ async function readTerminalBreadcrumb(cwd: string): Promise<string | null> {
 		}
 
 		const inspected = inspectResumeSessionFile(sessionFile, new FileSessionStorage());
+		const sessionsRoot = options.sessionsRoot ?? getSessionsDir();
 		if ("kind" in inspected) {
 			if (inspected.reason !== "missing") return null;
-			const sessionsRoot = getSessionsDir();
 			const resolved = resolveManagedScope({
 				cwd: breadcrumbCwd,
 				agentDir: path.resolve(sessionsRoot, ".."),
@@ -1884,7 +1892,6 @@ async function readTerminalBreadcrumb(cwd: string): Promise<string | null> {
 		}
 		const header = inspected.entries[0] as SessionHeader;
 		if (resolveEquivalentPath(header.cwd) !== resolveEquivalentPath(breadcrumbCwd)) return null;
-		const sessionsRoot = getSessionsDir();
 		const resolved = resolveManagedScope({
 			cwd: header.cwd,
 			agentDir: path.resolve(sessionsRoot, ".."),
@@ -1897,7 +1904,22 @@ async function readTerminalBreadcrumb(cwd: string): Promise<string | null> {
 		if (exact) return exact.path;
 		const byIdentity = listing.owned.find(candidate => candidate.sessionId === header.id);
 		if (byIdentity) return byIdentity.path;
-		return pathIsWithin(sessionsRoot, path.resolve(sessionFile)) ? null : path.resolve(sessionFile);
+		// Not an owned managed candidate. A file inside the sessions root stays
+		// rejected. A file outside that root is resumed only when this continuation
+		// inventory already contains it. An explicit destination still receives an
+		// unmatched outside path; the caller applies containment.
+		const resolvedFile = path.resolve(sessionFile);
+		const insideSessionsRoot = pathIsWithin(sessionsRoot, resolvedFile);
+		if (
+			!insideSessionsRoot &&
+			options.continuationInventory?.some(
+				session => session.id === header.id && path.resolve(session.path) === resolvedFile,
+			)
+		) {
+			return resolvedFile;
+		}
+		if (!options.allowExplicitOutsideRoot || insideSessionsRoot) return null;
+		return resolvedFile;
 	} catch (err) {
 		if (!isEnoent(err)) logger.debug("Terminal breadcrumb read failed", { err });
 		// Breadcrumb doesn't exist or is corrupt — fall through
@@ -9398,7 +9420,15 @@ export class SessionManager {
 						storage,
 					);
 
-		const terminalSession = await readTerminalBreadcrumb(cwd);
+		const terminalSession = await readTerminalBreadcrumb(cwd, {
+			...(destination.kind === "managed"
+				? {
+						sessionsRoot: destination.securityContext.sessionsRoot,
+						continuationInventory: managedCandidates,
+					}
+				: {}),
+			allowExplicitOutsideRoot: destination.kind === "explicit",
+		});
 		const terminalSessionIsInExplicitRoot = (() => {
 			if (destination.kind === "managed" || !terminalSession) return destination.kind === "managed";
 			const canonicalRoot = canonicalizeTrustedPath(destination.directory);
