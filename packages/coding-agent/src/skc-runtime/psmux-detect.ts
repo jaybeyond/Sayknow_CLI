@@ -1,4 +1,5 @@
 import * as fs from "node:fs";
+import { canonicalEnvKey, projectEnvSnapshot } from "@sayknow-cli/utils/env-file";
 
 /**
  * Windows psmux detection and tmux-binary resolution.
@@ -272,17 +273,40 @@ export interface ResolvedTmuxBinary {
 	viaExplicitOverride: boolean;
 }
 
+/** Captured when this module loads, before a later `chdir` or dotenv delete. */
+const startupTmuxCommandSnapshot = projectEnvSnapshot();
+
 /**
- * Resolve the tmux command SKC should invoke. Honors the existing
- * SKC_TMUX_COMMAND / SKC_TEAM_TMUX_COMMAND overrides; on Windows when no
- * override is set, psmux (installed as psmux, pmux, or tmux) is picked
- * automatically so the default skc --tmux flow lands on a real multiplexer.
+ * Operator override only. Bun has already copied the project dotenv into the
+ * environment, so a value that matches `projectEnvSnapshot` — a static hit or
+ * a dynamic declaration — must not select the binary. An operator value the
+ * project does not declare is kept.
+ */
+function trustedTmuxCommand(env: NodeJS.ProcessEnv, name: string): string | undefined {
+	const raw = env[name];
+	if (!raw) return undefined;
+	const snapshot = startupTmuxCommandSnapshot;
+	const key = canonicalEnvKey(name);
+	const declared = snapshot.values[key];
+	const trimmed = raw.trim();
+	if (declared !== undefined && (snapshot.dynamic.has(key) || declared === raw || declared === trimmed)) {
+		return undefined;
+	}
+	return trimmed.length > 0 ? trimmed : undefined;
+}
+
+/**
+ * Resolve the tmux command SKC should invoke. Honors an operator
+ * SKC_TMUX_COMMAND / SKC_TEAM_TMUX_COMMAND override; a project dotenv value is
+ * ignored. On Windows when no override is set, psmux (installed as psmux,
+ * pmux, or tmux) is picked automatically so the default skc --tmux flow lands
+ * on a real multiplexer.
  */
 export function resolveSkcTmuxBinary(options: ResolveSkcTmuxBinaryOptions = {}): ResolvedTmuxBinary {
 	const env = options.env ?? process.env;
 	const platform = options.platform ?? process.platform;
 	const runner = options.runner ?? readSpawnRunner();
-	const explicit = env.SKC_TMUX_COMMAND?.trim() || env.SKC_TEAM_TMUX_COMMAND?.trim();
+	const explicit = trustedTmuxCommand(env, "SKC_TMUX_COMMAND") ?? trustedTmuxCommand(env, "SKC_TEAM_TMUX_COMMAND");
 	if (explicit) {
 		const isPsmux =
 			platform === "win32"
