@@ -265,10 +265,25 @@ function validateReadOnlyCommand(words: readonly string[]): BashAllowedPrefixesC
 		}
 	}
 
+	const gitWrite = rejectGitHostAccess(words);
+	if (gitWrite) return gitWrite;
+
 	return { allowed: true };
 }
 
+function rejectGitHostAccess(words: readonly string[]): BashAllowedPrefixesCheck | undefined {
+	if (words[0] !== "git") return undefined;
+	for (const option of optionWords(words)) {
+		if (isLongOption(option, "--output") || isLongOption(option, "--no-index")) {
+			return { allowed: false, reason: "restricted bash does not allow git --output or --no-index" };
+		}
+	}
+	return undefined;
+}
+
 function validateMatchedSkcCommand(words: readonly string[]): BashAllowedPrefixesCheck {
+	const gitWrite = rejectGitHostAccess(words);
+	if (gitWrite) return gitWrite;
 	if (words[0] !== "skc") return { allowed: true };
 
 	if (words[1] === "ralplan") {
