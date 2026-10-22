@@ -111,7 +111,7 @@ async function preflightHashlineSection(options: ExecuteHashlineSingleOptions & 
 
 	const source = await readHashlineFile(absolutePath, sectionPath);
 	if (!source.exists && hasAnchorScopedEdit(edits)) throw new Error(`File not found: ${sectionPath}`);
-	if (source.exists) assertEditableFileContent(source.rawContent, sectionPath);
+	if (source.exists) assertEditableFileContent(source.rawContent, sectionPath, session.settings);
 
 	const { text } = stripBom(source.rawContent);
 	const normalized = normalizeToLF(text);
@@ -144,7 +144,7 @@ async function executeHashlineSection(
 
 	const source = await readHashlineFile(absolutePath, sourcePath);
 	if (!source.exists && hasAnchorScopedEdit(edits)) throw new Error(`File not found: ${sourcePath}`);
-	if (source.exists) assertEditableFileContent(source.rawContent, sourcePath);
+	if (source.exists) assertEditableFileContent(source.rawContent, sourcePath, session.settings);
 
 	const { bom, text } = stripBom(source.rawContent);
 	const originalEnding = detectLineEnding(text);

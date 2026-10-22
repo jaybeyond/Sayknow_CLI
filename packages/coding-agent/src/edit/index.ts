@@ -29,7 +29,7 @@ import type { VimToolDetails } from "../vim/types";
 import { type ApplyPatchParams, applyPatchSchema, expandApplyPatchToEntries } from "./modes/apply-patch";
 import applyPatchGrammar from "./modes/apply-patch.lark" with { type: "text" };
 import { executePatchSingle, type PatchEditEntry, type PatchParams, patchEditSchema } from "./modes/patch";
-import { executeReplaceSingle, type ReplaceEditEntry, type ReplaceParams, replaceEditSchema } from "./modes/replace";
+import { executeReplaceEntries, type ReplaceEditEntry, type ReplaceParams, replaceEditSchema } from "./modes/replace";
 import { type EditToolDetails, type EditToolPerFileResult, getLspBatchRequest, type LspBatchRequest } from "./renderer";
 
 export { DEFAULT_EDIT_MODE, type EditMode, normalizeEditMode } from "../utils/edit-mode";
@@ -575,24 +575,20 @@ export class EditTool implements AgentTool<TInput> {
 					params: EditParams,
 					signal: AbortSignal | undefined,
 					batchRequest: LspBatchRequest | undefined,
-					onUpdate?: (partialResult: AgentToolResult<EditToolDetails, TInput>) => void,
+					_onUpdate?: (partialResult: AgentToolResult<EditToolDetails, TInput>) => void,
 				) => {
 					const { edits, path } = params as ReplaceParams;
-					const runs = (edits as ReplaceEditEntry[]).map(
-						entry => (br: LspBatchRequest | undefined) =>
-							executeReplaceSingle({
-								session: tool.session,
-								path,
-								params: entry,
-								signal,
-								batchRequest: br,
-								allowFuzzy: tool.#allowFuzzy,
-								fuzzyThreshold: tool.#fuzzyThreshold,
-								writethrough: tool.#writethrough,
-								beginDeferredDiagnosticsForPath: p => tool.#beginDeferredDiagnosticsForPath(p),
-							}),
-					);
-					return executeSinglePathEntries(path, runs, batchRequest, onUpdate);
+					return executeReplaceEntries({
+						session: tool.session,
+						path,
+						edits: edits as ReplaceEditEntry[],
+						signal,
+						batchRequest,
+						allowFuzzy: tool.#allowFuzzy,
+						fuzzyThreshold: tool.#fuzzyThreshold,
+						writethrough: tool.#writethrough,
+						beginDeferredDiagnosticsForPath: p => tool.#beginDeferredDiagnosticsForPath(p),
+					});
 				},
 			},
 			vim: {

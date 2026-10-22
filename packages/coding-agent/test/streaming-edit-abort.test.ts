@@ -478,7 +478,7 @@ it("aborts auto-generated file edits as soon as the path is available", async ()
 		waitBeforeFirstDelta.resolve();
 		await promptPromise;
 
-		expect(checkSpy).toHaveBeenCalledWith(generatedPath, "generated.ts");
+		expect(checkSpy).toHaveBeenCalledWith(generatedPath, "generated.ts", session.settings);
 		expect(abortSpy).toHaveBeenCalled();
 		expect(abortSignalRef.current?.aborted ?? false).toBe(true);
 		const lastAssistant = lastAssistantMessage(session.state.messages);

@@ -485,7 +485,7 @@ export class VimTool implements AgentTool<typeof vimSchema, VimToolDetails> {
 	async #beforeMutate(buffer: VimBuffer): Promise<void> {
 		enforcePlanModeWrite(this.session, buffer.displayPath, { op: buffer.baseFingerprint ? "update" : "create" });
 		if (!buffer.editabilityChecked && buffer.baseFingerprint) {
-			await assertEditableFile(buffer.filePath, buffer.displayPath);
+			await assertEditableFile(buffer.filePath, buffer.displayPath, this.session.settings);
 			buffer.editabilityChecked = true;
 		}
 	}
@@ -493,7 +493,7 @@ export class VimTool implements AgentTool<typeof vimSchema, VimToolDetails> {
 	async #saveBuffer(buffer: VimBuffer, options?: { force?: boolean }): Promise<VimSaveResult> {
 		enforcePlanModeWrite(this.session, buffer.displayPath, { op: buffer.baseFingerprint ? "update" : "create" });
 		if (buffer.baseFingerprint) {
-			await assertEditableFile(buffer.filePath, buffer.displayPath);
+			await assertEditableFile(buffer.filePath, buffer.displayPath, this.session.settings);
 		}
 		if (!options?.force) {
 			const diskFingerprint = await statFingerprint(buffer.filePath);
