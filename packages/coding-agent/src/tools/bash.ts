@@ -56,6 +56,7 @@ import { checkComposerBashPolicy } from "./composer-bash-policy";
 import { formatStyledTruncationWarning, type OutputMeta, stripOutputNotice } from "./output-meta";
 import { resolveToCwd } from "./path-utils";
 import { formatToolWorkingDirectory, replaceTabs } from "./render-utils";
+import { assertCwdInsideWorkspace } from "./restricted-cwd";
 import { checkTmuxSelfInjection } from "./tmux-self-injection-guard";
 import { ToolAbortError, ToolError } from "./tool-errors";
 import { toolResult } from "./tool-result";
@@ -761,6 +762,9 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		}
 		if (!cwdStat.isDirectory()) {
 			throw new ToolError(`Working directory is not a directory: ${commandCwd}`);
+		}
+		if (this.session.bashRestrictionProfile === "read-only" || (allowedPrefixes?.length ?? 0) > 0) {
+			await assertCwdInsideWorkspace(this.session.cwd, commandCwd);
 		}
 		// Issue #5039: refuse tmux write verbs whose target resolves to this
 		// agent's own tmux pane — such bytes forge a human `user` turn in the
