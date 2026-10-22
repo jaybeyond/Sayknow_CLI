@@ -1,3 +1,4 @@
+import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { APP_NAME, extractHttpStatusFromError, getLogsDir } from "@sayknow-cli/utils";
 import { isCopilotTransientModelError } from "./retry.js";
@@ -24,7 +25,16 @@ type ErrorWithStatus = {
 	status?: unknown;
 };
 
-const SENSITIVE_HEADERS = ["authorization", "x-api-key", "api-key", "cookie", "set-cookie", "proxy-authorization"];
+const SENSITIVE_HEADERS = [
+	"authorization",
+	"x-api-key",
+	"api-key",
+	"cookie",
+	"set-cookie",
+	"proxy-authorization",
+	"x-goog-api-key",
+	"cf-aig-authorization",
+];
 
 /**
  * Connection-level failure codes, meaning the request never reached the
@@ -105,10 +115,12 @@ export async function appendRawHttpRequestDumpFor400(
 
 	const sanitizedDump = sanitizeDump(dump);
 	const fileName = `${Date.now()}-${Bun.hash(JSON.stringify(sanitizedDump)).toString(36)}.json`;
-	const filePath = path.join(getLogsDir(), "http-400-requests", fileName);
+	const dumpDir = path.join(getLogsDir(), "http-400-requests");
+	const filePath = path.join(dumpDir, fileName);
 
 	try {
-		await Bun.write(filePath, `${JSON.stringify(sanitizedDump, null, 2)}\n`);
+		await fs.mkdir(dumpDir, { recursive: true });
+		await fs.writeFile(filePath, `${JSON.stringify(sanitizedDump, null, 2)}\n`, { mode: 0o600 });
 		return `${message}\nraw-http-request=${filePath}\n${RAW_HTTP_REQUEST_PRIVACY_NOTE}`;
 	} catch (writeError) {
 		const writeMessage = writeError instanceof Error ? writeError.message : String(writeError);
