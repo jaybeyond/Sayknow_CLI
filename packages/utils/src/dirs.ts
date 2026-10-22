@@ -5,82 +5,36 @@
  * config root and SKC_CODING_AGENT_DIR (legacy alias PI_CODING_AGENT_DIR) to
  * override the agent directory.
  *
- * On Linux, if XDG_DATA_HOME / XDG_STATE_HOME / XDG_CACHE_HOME environment
- * variables are set, paths are redirected to XDG-compliant locations under
- * $XDG_*_HOME/skc/. This requires running `skc config migrate` first to
- * move data to the new locations. No filesystem existence checks are performed
- * — if the env var is set, skc trusts that the migration has been done.
+ * On Linux and macOS, a category (data, state, cache) is redirected to
+ * $XDG_*_HOME/skc/ only when the trusted XDG_*_HOME variable is set, the
+ * $XDG_*_HOME/skc directory already exists (`skc config init-xdg` creates it),
+ * and the agent directory is the default. Otherwise paths stay under the config
+ * root. `init-xdg` only creates the directories; existing data is not moved.
  */
 
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { engines, version } from "../package.json" with { type: "json" };
-import { parseEnvFile } from "./env-file";
+import { resolveCanonicalLogsDir } from "./canonical-log-dir";
+import { APP_NAME } from "./cli-metadata";
+import { canonicalEnvKey, type ProjectEnvSnapshot, projectEnvSnapshot } from "./env-file";
 
-/** App name (e.g. "skc") */
-export const APP_NAME: string = "skc";
+/**
+ * Entry metadata lives in the pure `cli-metadata` leaf so the actual CLI entry can
+ * import it without loading this module's load-time directory resolution. These
+ * re-exports keep the existing `@sayknow-cli/utils/dirs` surface unchanged.
+ */
+export { APP_NAME, formatBunRuntimeError, MIN_BUN_VERSION, VERSION } from "./cli-metadata";
+// The provenance snapshot and its key fold live in the leaf `env-file` module so
+// `scripts/test-preload.ts` can share this exact logic without importing this
+// module (whose load-time resolver construction would freeze state before the
+// preload sets its isolation variables). Re-exported here because `env.ts` and
+// `test/env-provenance.windows.test.ts` import `canonicalEnvKey` from this
+// module's public surface.
+export { canonicalEnvKey };
 
 /** Config directory name (e.g. ".skc") */
 export const CONFIG_DIR_NAME: string = ".skc";
-
-/** Version (e.g. "1.0.0") */
-export const VERSION: string = version;
-
-/** Minimum Bun version */
-export const MIN_BUN_VERSION: string = engines.bun.replace(/[^0-9.]/g, "");
-
-/**
- * Build the diagnostic shown when the Bun runtime executing `skc` is older
- * than {@link MIN_BUN_VERSION}. This is the most common Windows native-install
- * failure (issue #525): `bun install -g sayknow-cli` probes a recent Bun while
- * the `skc` launcher resolves an older Bun still on PATH. The message names the
- * exact detected runtime path and gives a platform-specific upgrade + PATH fix
- * instead of a bare `bun upgrade`.
- *
- * Pure and platform-parameterized so it can be unit-tested cross-platform.
- */
-export function formatBunRuntimeError(opts: {
-	currentVersion: string;
-	minVersion: string;
-	execPath?: string;
-	platform?: NodeJS.Platform;
-}): string {
-	const platform = opts.platform ?? process.platform;
-	const lines = [
-		`error: ${APP_NAME} requires Bun >= ${opts.minVersion}, but the running Bun is v${opts.currentVersion}.`,
-	];
-	if (opts.execPath) {
-		lines.push(`  detected Bun runtime: ${opts.execPath}`);
-	}
-	if (platform === "win32") {
-		lines.push(
-			"",
-			"The 'skc' launcher is using an older Bun than the one used to install it.",
-			"Upgrade Bun, then restart your terminal so PATH and the runtime refresh:",
-			"",
-			'  powershell -c "irm bun.sh/install.ps1|iex"',
-			"",
-			"After restarting the terminal, verify both versions match:",
-			"  bun --version",
-			"  skc --version",
-			"",
-			"If 'skc' still loads the old runtime, make sure %USERPROFILE%\\.bun\\bin is",
-			"first on PATH and remove any stale Bun installs shadowing it.",
-		);
-	} else {
-		lines.push(
-			"",
-			"Upgrade Bun, then restart your terminal:",
-			"  bun upgrade",
-			"",
-			"Then verify:",
-			"  bun --version",
-			"  skc --version",
-		);
-	}
-	return `${lines.join("\n")}\n`;
-}
 
 // =============================================================================
 // Project directory
@@ -90,7 +44,7 @@ export function formatBunRuntimeError(opts: {
  * On macOS, strip /private prefix only when both paths resolve to the same location.
  * This preserves aliases like /private/tmp -> /tmp without rewriting unrelated paths.
  */
-function standardizeMacOSPath(p: string): string {
+export function standardizeMacOSPath(p: string): string {
 	if (process.platform !== "darwin" || !p.startsWith("/private/")) return p;
 	const stripped = p.slice("/private".length);
 	try {
@@ -108,6 +62,25 @@ export function resolveEquivalentPath(inputPath: string): string {
 	} catch {
 		return resolvedPath;
 	}
+}
+
+/**
+ * Return a stable key for comparing existing filesystem paths.
+ *
+ * Windows path spelling is not a safe identity: most directories are
+ * case-insensitive, while directories can opt into case-sensitive names. Use
+ * the filesystem object's identity when it is available instead of folding
+ * path text. If the path does not exist or the filesystem has no usable inode,
+ * retain the resolved spelling so distinct case-sensitive paths never alias.
+ */
+export function pathIdentityKey(inputPath: string): string {
+	const resolvedPath = resolveEquivalentPath(inputPath);
+	if (process.platform !== "win32") return resolvedPath;
+	try {
+		const stats = fs.statSync(resolvedPath, { bigint: true });
+		if (stats.ino !== 0n) return JSON.stringify(["win32-file-id", stats.dev.toString(), stats.ino.toString()]);
+	} catch {}
+	return resolvedPath;
 }
 
 export function normalizePathForComparison(inputPath: string, platform: NodeJS.Platform = process.platform): string {
@@ -145,8 +118,9 @@ export function getProjectDir(): string {
 
 /** Set the project directory. */
 export function setProjectDir(dir: string): void {
-	projectDir = standardizeMacOSPath(path.resolve(dir));
-	process.chdir(projectDir);
+	const resolved = standardizeMacOSPath(path.resolve(dir));
+	process.chdir(resolved);
+	projectDir = standardizeMacOSPath(process.cwd());
 }
 
 /**
@@ -169,9 +143,9 @@ function sanitizeConfigDirName(value: string | undefined): string | undefined {
 	return trimmed;
 }
 
-/** Get the config directory name relative to home (e.g. ".skc" or PI_CONFIG_DIR override). */
 /**
- * Config-directory name, rejected when it comes from the caller's project `.env`.
+ * Resolve an environment value only when it is not supplied by the caller's
+ * project dotenv (or when the inherited value is observably distinct).
  *
  * The name is joined with the home directory to build the config root, and that
  * root plus the agent directory beneath it supply two of the `.env` files
@@ -181,28 +155,190 @@ function sanitizeConfigDirName(value: string | undefined): string | undefined {
  * recovering every endpoint and credential redirect the boundary rejects.
  *
  * `env.ts` imports this module, so the check cannot go through `$credentialEnv`;
- * it applies the same conservative ambiguity rule directly, matching how
- * `SKC_CODING_AGENT_DIR` is treated.
+ * it applies the same conservative ambiguity rule directly: a value that matches
+ * what the project `.env` sets is not honoured. An operator whose environment
+ * happens to carry the identical value loses the override, which is the same
+ * trade-off `resolveLiveCredentialEnvValue` already makes.
  */
-function trustedConfigDirName(name: "SKC_CONFIG_DIR" | "PI_CONFIG_DIR"): string | undefined {
+function trustedValue(name: string, project: ProjectEnvSnapshot): string | undefined {
 	const value = process.env[name];
 	if (!value) return undefined;
-	if (parseEnvFile(path.join(process.cwd(), ".env"))[name] === value) return undefined;
+	const key = canonicalEnvKey(name);
+	const projectValue = project.values[key];
+	if (projectValue !== undefined && (project.dynamic.has(key) || projectValue === value)) return undefined;
 	return value;
 }
 
-export function getConfigDirName(): string {
-	// Both guards apply: the value must come from a trusted source (not the
-	// caller's project `.env`), and it must still be a single name that stays
-	// beneath home once joined.
+function resolveConfigDirName(project: ProjectEnvSnapshot): string {
 	return (
-		sanitizeConfigDirName(trustedConfigDirName("SKC_CONFIG_DIR")) ??
-		sanitizeConfigDirName(trustedConfigDirName("PI_CONFIG_DIR")) ??
+		sanitizeConfigDirName(trustedValue("SKC_CONFIG_DIR", project)) ??
+		sanitizeConfigDirName(trustedValue("PI_CONFIG_DIR", project)) ??
 		CONFIG_DIR_NAME
 	);
 }
 
-/** Get the config agent directory name relative to home (e.g. ".skc/agent" or PI_CONFIG_DIR + "/agent"). */
+/**
+ * A home directory is usable only when it is absolute and resolves to somewhere
+ * strictly below a filesystem root. A relative value would anchor user state
+ * beneath whatever the current directory happens to be, and a root would place
+ * it at `/.skc`.
+ *
+ * The root test normalizes first, because a root has many spellings: `/.`, `//`,
+ * `/foo/..` and `C:\x\..` are all roots that a raw string comparison against
+ * `path.parse(home).root` misses, and `path.join(home, ".skc")` would happily
+ * produce `/.skc` from every one of them.
+ *
+ * The **original spelling** is returned, never the normalized form. Provenance
+ * compares the declared dotenv value against this result, and both sides must
+ * stay in the same spelling: canonicalizing only this side would make
+ * `HOME=/tmp/base/../attacker` compare unequal to its own declaration and let a
+ * project-planted home through as if it were operator-supplied.
+ */
+function usableHome(home: string | undefined): string | undefined {
+	if (!home || !path.isAbsolute(home)) return undefined;
+	const normalized = path.resolve(home);
+	return normalized === path.parse(normalized).root ? undefined : home;
+}
+
+/**
+ * The account home for the running uid, read through the operating system's own
+ * account database.
+ *
+ * On Linux this must go through NSS rather than parsing `/etc/passwd`: LDAP and
+ * SSSD accounts have no local passwd entry, and a direct file read would miss
+ * them and fall through to an environment-derived value. `getent passwd` is the
+ * NSS front end, so it resolves local and directory-backed accounts alike.
+ *
+ * Only an **environment-independent** result is memoized, and only on success.
+ * The cache is keyed by the effective account identity, not by process lifetime:
+ * a setuid or container identity transition must never reuse another uid's home.
+ * The NSS answer cannot change during one identity's process lifetime, so
+ * per-identity caching is safe.
+ * The `os.userInfo()` fallback is different: Bun derives `homedir` from `$HOME`,
+ * so caching it would freeze one side of the independence comparison in
+ * {@link resolveTrustedHome}. A planted home that was live at first resolution
+ * would stay cached, and once the runtime home moved it would no longer *equal*
+ * the runtime home -- passing the echo check and being promoted to independent
+ * evidence. Provenance is carried with the value so that can never happen.
+ */
+type AccountHome = { home: string; envDerived: boolean };
+type AccountIdentity = { key: string; uid: number };
+
+const accountHomeCache = new Map<string, AccountHome>();
+
+function accountIdentity(info: os.UserInfo<string>): AccountIdentity {
+	const uid = process.platform === "win32" ? info.uid : (process.geteuid?.() ?? info.uid);
+	return {
+		key: `${process.platform}:uid=${uid}:user=${info.username}`,
+		uid,
+	};
+}
+
+/** The uid's home field from the NSS account database, or undefined. */
+function nssAccountHome(uid: number): string | undefined {
+	try {
+		// Spawned with an empty environment so nothing the caller controls (HOME,
+		// NSS module configuration, locale) can steer the answer.
+		const result = Bun.spawnSync({
+			cmd: ["getent", "passwd", String(uid)],
+			env: { PATH: "/usr/bin:/bin:/usr/sbin:/sbin", LC_ALL: "C" },
+			stdout: "pipe",
+			stderr: "ignore",
+		});
+		if (result.exitCode !== 0) return undefined;
+		// `getent` echoes passwd-format records; the home directory is field 6.
+		const line = new TextDecoder().decode(result.stdout).split("\n")[0];
+		return usableHome(line?.split(":")[5]);
+	} catch {
+		return undefined;
+	}
+}
+
+function accountHomeFromSystem(): AccountHome | undefined {
+	try {
+		const info = os.userInfo();
+		const identity = accountIdentity(info);
+		const cached = accountHomeCache.get(identity.key);
+		if (cached !== undefined) return cached;
+		if (process.platform === "linux") {
+			const nss = nssAccountHome(identity.uid);
+			if (nss !== undefined) {
+				// NSS is environment-independent and stable: safe to memoize.
+				const result = { home: nss, envDerived: false };
+				accountHomeCache.set(identity.key, result);
+				return result;
+			}
+		}
+		// `os.userInfo().homedir` is the portable path for macOS and Windows, and on
+		// Linux is reached only when NSS is unavailable. Bun derives it from `$HOME`,
+		// so it is re-read every time and never cached, and it is flagged so the
+		// caller can refuse to treat it as independent evidence.
+		const fallback = usableHome(info.homedir);
+		if (fallback !== undefined) return { home: fallback, envDerived: true };
+	} catch {
+		// Do not retain or consult a prior identity's result when the current
+		// identity cannot be observed. An unavailable uid is not evidence for any
+		// other uid and must fail closed instead of inheriting stale state.
+		return undefined;
+	}
+	return undefined;
+}
+
+/**
+ * Resolve the authoritative home for user-scope state.
+ *
+ * Two properties must hold together, and pinning either one alone breaks the
+ * other (issue #4761):
+ *
+ * 1. **Provenance.** Bun overlays a checkout's `.env` into `process.env` before
+ *    any module runs, so a repository can plant HOME/USERPROFILE and redirect
+ *    user state — including the `.env` files `$credentialEnv` treats as trusted.
+ *    When the platform-authoritative variable is indistinguishable from the
+ *    value the project dotenv declares, the OS account database wins instead.
+ * 2. **Call-time resolution.** The trusted home is *derived*, never snapshotted
+ *    at module load. A resolution frozen at import silently loses every
+ *    user-scope location whenever the runtime home is established or changed
+ *    after this module initializes — which is exactly how user-scope skill and
+ *    MCP discovery regressed.
+ *
+ * `os.homedir()` is the runtime candidate: on POSIX it reflects HOME, on Windows
+ * USERPROFILE, and it falls back to the account database on its own. Reading it
+ * per call is what makes the contract call-time; the provenance comparison above
+ * is what keeps an untrusted mutable home from being honored.
+ */
+function resolveTrustedHome(project: ProjectEnvSnapshot): string {
+	const authoritativeHomeKey = process.platform === "win32" ? "USERPROFILE" : "HOME";
+	const declaredHomeKey = canonicalEnvKey(authoritativeHomeKey);
+	const declaredHome = project.values[declaredHomeKey];
+	// A relative or filesystem-root runtime home would anchor user state beneath
+	// the current directory (or at `/`), so it is not a usable candidate no matter
+	// how it was supplied. Validate it exactly as the account home is validated.
+	const runtimeHome = usableHome(os.homedir());
+	// Only the platform-authoritative variable can select the home. In particular,
+	// do not let the opposite platform variable (or a project dotenv value
+	// overlaid into it) redirect user state when this is absent.
+	const ambiguousHome =
+		declaredHome !== undefined && (project.dynamic.has(declaredHomeKey) || declaredHome === runtimeHome);
+	// The account lookup is consulted lazily. It can spawn the NSS front end, and
+	// this resolver runs on every directory access, so an unambiguous runtime home
+	// -- the ordinary CLI path -- must never pay for it.
+	if (!ambiguousHome && runtimeHome !== undefined) return runtimeHome;
+
+	const accountHome = accountHomeFromSystem();
+	if (ambiguousHome) {
+		// The account home is independent evidence only when it is not itself derived
+		// from the environment. An `os.userInfo()` fallback echoes `$HOME`, so a
+		// project-declared home would otherwise come back as its own justification.
+		// Fail closed: with no independent evidence the resolver yields a filesystem
+		// root, which `#homeAvailable` rejects, rather than honoring the declared
+		// home. Issue #4773 owns widening that fallback; do not weaken it here.
+		if (accountHome === undefined || accountHome.envDerived) return path.parse(process.cwd()).root;
+		return accountHome.home;
+	}
+	// No usable runtime home: fall back to whatever the account database reports.
+	if (accountHome !== undefined) return accountHome.home;
+	throw new Error("Unable to determine a trustworthy account home directory");
+}
 export function getConfigAgentDirName(): string {
 	return `${getConfigDirName()}/agent`;
 }
@@ -218,64 +354,158 @@ type XdgCategory = "data" | "state" | "cache";
  * variables are set, paths are redirected under $XDG_*_HOME/skc/. A new
  * instance is created whenever the agent directory changes, which naturally
  * invalidates all cached paths.
+ *
+ * The trusted home is re-derived on each access (see {@link resolveTrustedHome})
+ * and every cached path is rebuilt when it changes, so a home established or
+ * mocked after module load is honored without weakening the provenance rule.
  */
 class DirResolver {
-	readonly configRoot: string;
-	readonly agentDir: string;
+	configRoot: string;
+	agentDir: string;
+	readonly #projectEnv: ProjectEnvSnapshot;
+	#configDirName: string;
+	readonly #agentDirOverride: boolean;
+	#trustedHome: string;
+	/**
+	 * Whether this resolver's agent directory may follow `$XDG_*_HOME`, decided
+	 * once at construction and never re-derived from the path afterwards.
+	 */
+	#xdgEligible: boolean;
 
 	// Per-category base dirs. Without XDG, all three equal configRoot / agentDir.
 	// With XDG on Linux, they point to $XDG_*_HOME/skc/.
-	readonly #rootDirs: Record<XdgCategory, string>;
-	readonly #agentDirs: Record<XdgCategory, string>;
+	#rootDirs: Record<XdgCategory, string>;
+	#defaultRootDirs: Record<XdgCategory, string>;
+	#agentDirs: Record<XdgCategory, string>;
 
 	readonly #rootCache = new Map<string, string>();
+	readonly #defaultRootCache = new Map<string, string>();
 	readonly #agentCache = new Map<string, string>();
 
-	constructor(agentDirOverride?: string) {
-		this.configRoot = path.join(os.homedir(), getConfigDirName());
+	constructor(agentDirOverride?: string, snapshot = projectEnvSnapshot()) {
+		this.#projectEnv = snapshot;
+		this.#configDirName = resolveConfigDirName(snapshot);
+		this.#trustedHome = resolveTrustedHome(snapshot);
+		this.configRoot = path.join(this.#trustedHome, this.#configDirName);
 
 		const defaultAgent = path.join(this.configRoot, "agent");
+		this.#agentDirOverride = Boolean(agentDirOverride);
 		this.agentDir = agentDirOverride ? path.resolve(agentDirOverride) : defaultAgent;
-		const isDefault = this.agentDir === defaultAgent;
+		// An agent directory equal to the home-derived default *is* the default
+		// profile, XDG categories included, however it arrived.
+		//
+		// Deciding this from override state instead was tried and reverted: it is
+		// unobservably wrong. `setAgentDir()` exports `SKC_CODING_AGENT_DIR`, so a
+		// child process inherits the same value the parent set programmatically and
+		// cannot tell the two apart. Treating the inherited form as "not default"
+		// put parent and child on different storage lanes for one logical profile --
+		// the parent reading `$XDG_STATE_HOME/skc/python-gateway` while the child
+		// read `<agentDir>/python-gateway`. Splitting a live store in half is worse
+		// than the narrower complaint it was meant to answer.
+		const isDefault = normalizePathForComparison(this.agentDir) === normalizePathForComparison(defaultAgent);
+		// That decision is then *sticky*. Recomputing it later from path shape is
+		// what let a pinned agent directory silently change storage lane when a home
+		// refresh made it coincide with the new default: `getAgentDir()` looked
+		// unchanged while `agent.db` moved into `$XDG_DATA_HOME/skc`.
+		this.#xdgEligible = isDefault;
 
-		// XDG is a Linux convention. On other platforms, or for non-default
-		// profiles, all categories resolve to the legacy paths.
+		this.#rootDirs = { data: this.configRoot, state: this.configRoot, cache: this.configRoot };
+		this.#defaultRootDirs = { data: this.configRoot, state: this.configRoot, cache: this.configRoot };
+		this.#agentDirs = { data: this.agentDir, state: this.agentDir, cache: this.agentDir };
+		this.refreshCategoryDirs(snapshot, isDefault);
+	}
+
+	get profileAuthority(): "default" | "custom" {
+		return this.#xdgEligible ? "default" : "custom";
+	}
+
+	/**
+	 * `isDefault` decides whether the agent directory may follow `$XDG_*_HOME`.
+	 *
+	 * It is always supplied by the caller and never defaulted: the only correct
+	 * value is the construction-time decision held in `#xdgEligible`, and
+	 * re-deriving it from path shape is exactly the bug that let a directory
+	 * change storage lane when a home refresh made its path coincide with the
+	 * new default.
+	 */
+	private refreshCategoryDirs(snapshot: ProjectEnvSnapshot, isDefault: boolean): void {
 		let xdgData: string | undefined;
 		let xdgState: string | undefined;
 		let xdgCache: string | undefined;
-		if ((process.platform === "linux" || process.platform === "darwin") && isDefault) {
+		if (process.platform === "linux" || process.platform === "darwin") {
 			const resolveIf = (envVar: string) => {
-				const value = process.env[envVar];
-				if (value) {
-					try {
-						const joined = path.join(value, APP_NAME);
-						if (fs.existsSync(joined)) {
-							return joined;
-						}
-					} catch {}
+				const value = trustedValue(envVar, snapshot);
+				if (!value) return undefined;
+				try {
+					const joined = path.join(value, APP_NAME);
+					return fs.existsSync(joined) ? joined : undefined;
+				} catch {
+					return undefined;
 				}
-				return undefined;
 			};
 			xdgData = resolveIf("XDG_DATA_HOME");
 			xdgState = resolveIf("XDG_STATE_HOME");
 			xdgCache = resolveIf("XDG_CACHE_HOME");
 		}
-
-		this.#rootDirs = {
+		this.#defaultRootDirs = {
 			data: xdgData ?? this.configRoot,
 			state: xdgState ?? this.configRoot,
 			cache: xdgCache ?? this.configRoot,
 		};
-		// XDG flattens the agent/ prefix: ~/.skc/agent/sessions → $XDG_DATA_HOME/skc/sessions
-		this.#agentDirs = {
-			data: xdgData ?? this.agentDir,
-			state: xdgState ?? this.agentDir,
-			cache: xdgCache ?? this.agentDir,
+		this.#rootDirs = {
+			data: isDefault ? (xdgData ?? this.configRoot) : this.configRoot,
+			state: isDefault ? (xdgState ?? this.configRoot) : this.configRoot,
+			cache: isDefault ? (xdgCache ?? this.configRoot) : this.configRoot,
 		};
+		this.#agentDirs = {
+			data: isDefault ? (xdgData ?? this.agentDir) : this.agentDir,
+			state: isDefault ? (xdgState ?? this.agentDir) : this.agentDir,
+			cache: isDefault ? (xdgCache ?? this.agentDir) : this.agentDir,
+		};
+	}
+
+	/**
+	 * Re-derive the trusted home and the caller-supplied config-dir override
+	 * without replacing the trust snapshot.
+	 *
+	 * Both inputs are call-time: the home comes from {@link resolveTrustedHome}
+	 * (provenance-checked, never an import-time snapshot) and the config-dir name
+	 * from the trusted-value rule. When either changes, the config root, the
+	 * default agent dir, the XDG category dirs and both path caches are rebuilt
+	 * so reads and writes cannot straddle two different homes.
+	 */
+	refreshConfigDirOverride(): void {
+		const nextConfigDirName = resolveConfigDirName(this.#projectEnv);
+		const nextHome = resolveTrustedHome(this.#projectEnv);
+		if (nextConfigDirName === this.#configDirName && nextHome === this.#trustedHome) return;
+		const nextConfigRoot = path.join(nextHome, nextConfigDirName);
+		const nextAgentDir = this.#agentDirOverride ? this.agentDir : path.join(nextConfigRoot, "agent");
+		this.#trustedHome = nextHome;
+		this.#configDirName = nextConfigDirName;
+		this.configRoot = nextConfigRoot;
+		this.agentDir = nextAgentDir;
+		// Reuse the construction-time decision rather than re-deriving it, so an
+		// agent directory never changes storage lane just because a home refresh made
+		// its path coincide with (or diverge from) the new default.
+		this.refreshCategoryDirs(this.#projectEnv, this.#xdgEligible);
+		this.#rootCache.clear();
+		this.#defaultRootCache.clear();
+		this.#agentCache.clear();
+	}
+
+	/** Whether the resolved home is a real directory rather than a filesystem root. */
+	get #homeAvailable(): boolean {
+		return this.#trustedHome !== path.parse(this.#trustedHome).root;
+	}
+
+	isProjectEnvDeclaration(name: string): boolean {
+		return Object.hasOwn(this.#projectEnv.values, canonicalEnvKey(name));
 	}
 
 	/** Config-root subdirectory, with optional XDG override. */
 	rootSubdir(subdir: string, xdg?: XdgCategory): string {
+		this.refreshConfigDirOverride();
+		if (!this.#homeAvailable) throw new Error("User state is unavailable: no trustworthy home directory");
 		const cached = this.#rootCache.get(subdir);
 		if (cached) return cached;
 		const base = xdg ? this.#rootDirs[xdg] : this.configRoot;
@@ -286,7 +516,9 @@ class DirResolver {
 
 	/** Agent subdirectory, with optional XDG override. */
 	agentSubdir(userAgentDir: string | undefined, subdir: string, xdg?: XdgCategory): string {
-		if (!userAgentDir || userAgentDir === this.agentDir) {
+		this.refreshConfigDirOverride();
+		if (!this.#homeAvailable) throw new Error("User state is unavailable: no trustworthy home directory");
+		if (!userAgentDir || normalizePathForComparison(userAgentDir) === normalizePathForComparison(this.agentDir)) {
 			const cached = this.#agentCache.get(subdir);
 			if (cached) return cached;
 			const base = xdg ? this.#agentDirs[xdg] : this.agentDir;
@@ -296,51 +528,50 @@ class DirResolver {
 		}
 		return path.join(userAgentDir, subdir);
 	}
+
+	/** Config-root subdirectory for the resolver-owned default profile. */
+	rootSubdirForDefaultProfile(subdir: string, xdg?: XdgCategory): string {
+		this.refreshConfigDirOverride();
+		if (!this.#homeAvailable) throw new Error("User state is unavailable: no trustworthy home directory");
+		const cacheKey = `${xdg ?? "config"}:${subdir}`;
+		const cached = this.#defaultRootCache.get(cacheKey);
+		if (cached) return cached;
+		const base = xdg ? this.#defaultRootDirs[xdg] : this.configRoot;
+		const result = path.join(base, subdir);
+		this.#defaultRootCache.set(cacheKey, result);
+		return result;
+	}
+
+	get configDirName(): string {
+		return this.#configDirName;
+	}
+	get trustedHome(): string {
+		this.refreshConfigDirOverride();
+		return this.#trustedHome;
+	}
+	assertHomeAvailable(): void {
+		this.refreshConfigDirOverride();
+		if (!this.#homeAvailable) throw new Error("User state is unavailable: no trustworthy home directory");
+	}
+	get trustSnapshot(): ProjectEnvSnapshot {
+		return this.#projectEnv;
+	}
 }
+
+const INITIAL_PROJECT_SNAPSHOT = projectEnvSnapshot();
+const trustedAgentOverride =
+	trustedValue("SKC_CODING_AGENT_DIR", INITIAL_PROJECT_SNAPSHOT) ??
+	trustedValue("PI_CODING_AGENT_DIR", INITIAL_PROJECT_SNAPSHOT);
+let dirs = new DirResolver(trustedAgentOverride, INITIAL_PROJECT_SNAPSHOT);
 
 /**
- * Agent-directory override, rejected when it comes from the caller's project
- * `.env`.
- *
- * This directory selects the agent's own `.env`, which is one of the trusted
- * sources `$credentialEnv` consults. Bun loads `cwd/.env` into `process.env`
- * before any module runs, so a repository could otherwise point this at a
- * directory it ships and have its own `.env` treated as trusted — recovering
- * every redirect the credential boundary is meant to reject.
- *
- * `env.ts` imports this module, so the check cannot go through `$credentialEnv`;
- * it applies the same conservative ambiguity rule directly: a value that matches
- * what the project `.env` sets is not honoured. An operator whose environment
- * happens to carry the identical value loses the override, which is the same
- * trade-off `resolveLiveCredentialEnvValue` already makes.
+ * Project dotenv as captured when this module loaded.
+ * A later edit or delete of those files does not change the returned provenance.
  */
-function trustedAgentDirOverrideFor(name: "SKC_CODING_AGENT_DIR" | "PI_CODING_AGENT_DIR"): string | undefined {
-	const value = process.env[name];
-	if (!value) return undefined;
-	if (parseEnvFile(path.join(process.cwd(), ".env"))[name] === value) return undefined;
-	return value;
+export function loadedProjectEnvSnapshot(): ProjectEnvSnapshot {
+	const snapshot = dirs.trustSnapshot;
+	return { values: { ...snapshot.values }, dynamic: new Set(snapshot.dynamic) };
 }
-
-/**
- * Both spellings are honoured, mirroring `getConfigDirName`.
- *
- * `PI_CODING_AGENT_DIR` is the legacy alias this module's own header documents,
- * and parts of the product already resolve it (`gc-runtime.ts:370`,
- * `deep-interview-runtime.ts:384`). Reading only the `SKC_` spelling here split
- * the agent directory in two: `skc gc` operated on the aliased directory while
- * everything reaching `getAgentDir()` stayed on the default.
- */
-function trustedAgentDirOverride(): string | undefined {
-	return trustedAgentDirOverrideFor("SKC_CODING_AGENT_DIR") ?? trustedAgentDirOverrideFor("PI_CODING_AGENT_DIR");
-}
-
-let dirs = new DirResolver(trustedAgentDirOverride());
-
-// Anchor home for the resolver. Captured at module load to stay stable across
-// test mocks of `os.homedir()`. `getPluginsDir(home)` compares against this so
-// production callers (`home === RESOLVER_HOME`) hit the XDG-aware resolver while
-// tests passing a temp HOME short-circuit to a deterministic path.
-const RESOLVER_HOME = os.homedir();
 
 // =============================================================================
 // Root directories
@@ -348,18 +579,84 @@ const RESOLVER_HOME = os.homedir();
 
 /** Get the config root directory (~/.skc). */
 export function getConfigRootDir(): string {
+	dirs.refreshConfigDirOverride();
+	dirs.assertHomeAvailable();
 	return dirs.configRoot;
 }
 
-/** Set the coding agent directory. Creates a fresh resolver, invalidating all cached paths. */
+/**
+ * The authoritative home for user-scope state.
+ *
+ * Provenance-checked and resolved at call time: a home established or changed
+ * after this module loaded is honored, while a home the project dotenv could
+ * have planted is rejected in favor of the OS account database. See
+ * {@link resolveTrustedHome}.
+ */
+export function getTrustedHomeDir(): string {
+	dirs.assertHomeAvailable();
+	return dirs.trustedHome;
+}
+
+/** Trusted config root, resolved at call time; preserves the configured nested config-dir name. */
+export function getTrustedConfigRootDir(): string {
+	dirs.refreshConfigDirOverride();
+	dirs.assertHomeAvailable();
+	return dirs.configRoot;
+}
+
+/**
+ * Set the coding agent directory. Creates a fresh resolver, invalidating all
+ * cached paths.
+ *
+ * This also exports `SKC_CODING_AGENT_DIR`, so child processes inherit the same
+ * selection and resolve the same storage lane.
+ */
 export function setAgentDir(dir: string): void {
-	dirs = new DirResolver(dir);
+	dirs = new DirResolver(dir, dirs.trustSnapshot);
 	process.env.SKC_CODING_AGENT_DIR = dir;
+}
+
+/**
+ * Rebuild the resolver from the current trusted environment. Callers that
+ * temporarily used {@link setAgentDir} must first restore the original
+ * SKC_CODING_AGENT_DIR / PI_CODING_AGENT_DIR values, then call this function;
+ * an originally absent override remains absent and keeps following HOME.
+ */
+export function resetAgentDirFromEnvironment(): void {
+	const snapshot = dirs.trustSnapshot;
+	const override = trustedValue("SKC_CODING_AGENT_DIR", snapshot) ?? trustedValue("PI_CODING_AGENT_DIR", snapshot);
+	dirs = new DirResolver(override, snapshot);
 }
 
 /** Get the agent config directory (~/.skc/agent). */
 export function getAgentDir(): string {
+	dirs.refreshConfigDirOverride();
+	dirs.assertHomeAvailable();
 	return dirs.agentDir;
+}
+
+/** Resolver-owned profile classification, stable across HOME refreshes. */
+export function getAgentProfileAuthority(): "default" | "custom" {
+	return dirs.profileAuthority;
+}
+
+export function getConfigDirName(): string {
+	dirs.refreshConfigDirOverride();
+	return dirs.configDirName;
+}
+/**
+ * Join a file under the provenance-checked agent directory, never the XDG
+ * state category. Automatic crash relay must not follow `XDG_STATE_HOME`:
+ * a checkout `.env` can set that variable and create `$XDG_STATE_HOME/skc`,
+ * which the ordinary state resolver would then treat as the crash store.
+ */
+export function getTrustedAgentFile(filename: string): string {
+	return path.join(getAgentDir(), filename);
+}
+
+/** Whether the current checkout declares an environment key in its `.env`. */
+export function isProjectEnvDeclaration(name: string): boolean {
+	return dirs.isProjectEnvDeclaration(name);
 }
 
 /** Get the project-local config directory (.skc). */
@@ -378,29 +675,96 @@ export function getReportsDir(): string {
 
 /** Get the logs directory (~/.skc/logs). */
 export function getLogsDir(): string {
-	return dirs.rootSubdir("logs", "state");
+	const home = getTrustedHomeDir();
+	return resolveCanonicalLogsDir({
+		home,
+		env: {
+			SKC_CONFIG_DIR: process.env.SKC_CONFIG_DIR,
+			PI_CONFIG_DIR: process.env.PI_CONFIG_DIR,
+			XDG_STATE_HOME: process.env.XDG_STATE_HOME,
+		},
+		projectEnv: dirs.trustSnapshot,
+		xdgEligible: dirs.profileAuthority === "default",
+		pathExists: fs.existsSync,
+	});
+}
+
+/** Dated log file name, shared by the canonical and effective log paths so they cannot drift. */
+function datedLogFileName(date: Date): string {
+	return `${APP_NAME}.${date.toISOString().slice(0, 10)}.log`;
 }
 
 /** Get the path to a dated log file (~/.skc/logs/skc.YYYY-MM-DD.log). */
 export function getLogPath(date = new Date()): string {
-	return path.join(getLogsDir(), `${APP_NAME}.${date.toISOString().slice(0, 10)}.log`);
+	return path.join(getLogsDir(), datedLogFileName(date));
+}
+
+/**
+ * The logs directory the process actually reads and writes.
+ *
+ * A trusted `SKC_LOG_DIR` redirects the sink — the test preload pins it to a
+ * per-process temp directory so `bun test` stops appending fixture
+ * `level:error` records to the operator's shared log (issue #5618) — and
+ * everything else falls back to {@link getLogsDir}.
+ *
+ * The override is provenance-checked through the same {@link trustedValue} rule
+ * as the config and agent directories: Bun loads `cwd/.env` into `process.env`
+ * before any module runs, so a repository could otherwise redirect where the
+ * operator's production logs are written. A dynamic (`$`/backtick) declaration
+ * is rejected there too, which fails closed onto the canonical path.
+ *
+ * This is deliberately *not* folded into {@link getLogsDir}: that function's
+ * config-root semantics are pinned by tests, and the preload sets `SKC_LOG_DIR`
+ * for every test process, so folding the override in would move it under every
+ * test. Writers and readers must both come through here instead — the split
+ * between the two is what let the transport and the log readers disagree.
+ */
+export function getEffectiveLogsDir(): string {
+	const override = trustedValue("SKC_LOG_DIR", dirs.trustSnapshot)?.trim();
+	return override || getLogsDir();
+}
+
+/** Get the dated log file under {@link getEffectiveLogsDir}. */
+export function getEffectiveLogPath(date = new Date()): string {
+	return path.join(getEffectiveLogsDir(), datedLogFileName(date));
 }
 
 /**
  * Get the plugins directory (~/.skc/plugins or its XDG equivalent).
  *
  * No-arg form (production callers) goes through the XDG-aware DirResolver so
- * reads and writes always agree. The optional `home` parameter is for test
- * isolation: when it differs from `os.homedir()` it short-circuits the resolver
- * and returns `<home>/<configDir>/plugins` so tests with a temp HOME get a
- * deterministic path. Passing `os.homedir()` explicitly is identical to the
- * no-arg form — XDG semantics are preserved.
+ * reads and writes always agree. The optional `home` parameter names an explicit
+ * home: when it differs from the authoritative home resolved right now it
+ * short-circuits the resolver and returns `<home>/<configDir>/plugins`, giving
+ * callers that carry their own home (and tests with a temp HOME) a deterministic
+ * path. Passing the authoritative home explicitly is identical to the no-arg
+ * form — XDG semantics are preserved.
  */
 export function getPluginsDir(home?: string): string {
-	if (home !== undefined && home !== RESOLVER_HOME) {
-		return path.join(home, getConfigDirName(), "plugins");
+	if (home !== undefined) {
+		const explicitPath = () => path.join(home, resolveConfigDirName(dirs.trustSnapshot), "plugins");
+		try {
+			const canonical = (value: string): string => {
+				try {
+					return fs.realpathSync.native(value);
+				} catch {
+					return path.resolve(value);
+				}
+			};
+			if (canonical(home) !== canonical(dirs.trustedHome)) return explicitPath();
+		} catch {
+			// An explicit home is the caller's documented escape hatch. If the
+			// authoritative home is unavailable, do not let its fail-closed resolver
+			// prevent a caller-owned plugin path from being returned.
+			return explicitPath();
+		}
 	}
 	return dirs.rootSubdir("plugins", "data");
+}
+
+/** Get the default-profile plugin directory without ambient profile authority. */
+export function getDefaultPluginsDir(): string {
+	return dirs.rootSubdirForDefaultProfile("plugins", "data");
 }
 
 /** Where npm installs packages (~/.skc/plugins/node_modules). */
@@ -473,6 +837,8 @@ export function getWorktreeDir(segment: string): string {
 
 /** Get the GPU cache path (~/.skc/gpu_cache.json). */
 export function getGpuCachePath(): string {
+	const defaultAgentDir = path.join(dirs.trustedHome, dirs.configDirName, "agent");
+	if (path.resolve(dirs.agentDir) !== path.resolve(defaultAgentDir)) return path.join(dirs.agentDir, "gpu_cache.json");
 	return dirs.rootSubdir("gpu_cache.json", "cache");
 }
 
@@ -482,9 +848,14 @@ export function getGpuCachePath(): string {
  * cache file without touching the rest of the config root.
  */
 export function getGithubCacheDbPath(): string {
-	const override = process.env.SKC_GITHUB_CACHE_DB;
+	const override = trustedValue("SKC_GITHUB_CACHE_DB", dirs.trustSnapshot)?.trim();
 	if (override) return override;
 	return dirs.rootSubdir(path.join("cache", "github-cache.db"), "cache");
+}
+
+/** Get the durable tool-choice capability cache path. */
+export function getToolChoiceCapabilityCachePath(): string {
+	return dirs.rootSubdir(path.join("cache", "tool-choice-capabilities.db"), "cache");
 }
 
 /** Get the resolved Claude Code client-version cache path (~/.skc/cache/claude-code-version.json). */
@@ -495,6 +866,11 @@ export function getClaudeCodeVersionCachePath(): string {
 /** Get the natives directory (~/.skc/natives). */
 export function getNativesDir(): string {
 	return dirs.rootSubdir("natives", "cache");
+}
+
+/** Get the local tool-issue report database path (~/.skc/tool-issues.db). */
+export function getToolIssuesDbPath(): string {
+	return dirs.rootSubdir("tool-issues.db", "data");
 }
 
 /** Get the stats database path (~/.skc/stats.db). */
@@ -551,6 +927,16 @@ export function getBlobsDir(agentDir?: string): string {
 	return dirs.agentSubdir(agentDir, "blobs", "data");
 }
 
+/** Get the resident-text cache root for a profile agent directory. */
+export function getResidentCacheRootDir(profileAgentDir: string): string {
+	return dirs.agentSubdir(profileAgentDir, "resident-cache", "cache");
+}
+
+/** Get the managed cold-history sidecar cache root for a profile agent directory. */
+export function getSidecarCacheRootDir(profileAgentDir: string): string {
+	return dirs.agentSubdir(profileAgentDir, "sidecar-cache", "cache");
+}
+
 /** Get the custom themes directory (~/.skc/agent/themes). */
 export function getCustomThemesDir(agentDir?: string): string {
 	return dirs.agentSubdir(agentDir, "themes");
@@ -591,6 +977,31 @@ export function getCrashLogPath(agentDir?: string): string {
 	return dirs.agentSubdir(agentDir, "skc-crash.log", "state");
 }
 
+/** Get the crash event journal path (~/.skc/agent/skc-crash-events.jsonl). */
+export function getCrashEventsPath(agentDir?: string): string {
+	return dirs.agentSubdir(agentDir, "skc-crash-events.jsonl", "state");
+}
+
+/** Get the compacted crash signature index path (~/.skc/agent/skc-crash-index.json). */
+export function getCrashIndexPath(agentDir?: string): string {
+	return dirs.agentSubdir(agentDir, "skc-crash-index.json", "state");
+}
+
+/** Get the handled error log path (~/.skc/agent/skc-error.log). */
+export function getHandledErrorLogPath(agentDir?: string): string {
+	return dirs.agentSubdir(agentDir, "skc-error.log", "state");
+}
+
+/** Get the handled error event journal path (~/.skc/agent/skc-error-events.jsonl). */
+export function getHandledErrorEventsPath(agentDir?: string): string {
+	return dirs.agentSubdir(agentDir, "skc-error-events.jsonl", "state");
+}
+
+/** Get the compacted handled error signature index path (~/.skc/agent/skc-error-index.json). */
+export function getHandledErrorIndexPath(agentDir?: string): string {
+	return dirs.agentSubdir(agentDir, "skc-error-index.json", "state");
+}
+
 /** Get the debug log path (~/.skc/agent/skc-debug.log). */
 export function getDebugLogPath(agentDir?: string): string {
 	return dirs.agentSubdir(agentDir, `${APP_NAME}-debug.log`, "state");
@@ -619,18 +1030,25 @@ export function getProjectPluginOverridesPath(cwd: string = getProjectDir()): st
 // MCP config paths
 // =============================================================================
 
-/** Get the primary MCP config file path (first candidate). */
-export function getMCPConfigPath(scope: "user" | "project", cwd: string = getProjectDir()): string {
+/**
+ * Get the primary MCP config file path (first candidate).
+ *
+ * User scope lives in the agent directory, so a profile override
+ * (`--agent-dir`, `SKC_CODING_AGENT_DIR`, `setAgentDir()`) moves it. Pass
+ * `agentDir` to resolve the scope of a session whose agent directory differs
+ * from the process-wide one.
+ */
+export function getMCPConfigPath(scope: "user" | "project", cwd: string = getProjectDir(), agentDir?: string): string {
 	if (scope === "user") {
-		return path.join(getAgentDir(), "mcp.json");
+		return path.join(agentDir ?? getAgentDir(), "mcp.json");
 	}
 	return path.join(getProjectAgentDir(cwd), "mcp.json");
 }
 
 /** Get the SSH config file path. */
-export function getSSHConfigPath(scope: "user" | "project", cwd: string = getProjectDir()): string {
+export function getSSHConfigPath(scope: "user" | "project", cwd: string = getProjectDir(), agentDir?: string): string {
 	if (scope === "user") {
-		return path.join(getAgentDir(), "ssh.json");
+		return path.join(agentDir ?? getAgentDir(), "ssh.json");
 	}
 	return path.join(getProjectAgentDir(cwd), "ssh.json");
 }

@@ -23,6 +23,8 @@ export interface FlagDescriptor<K extends "string" | "boolean" | "integer" = "st
 	multiple?: boolean;
 	options?: readonly string[];
 	required?: boolean;
+	/** The string value may be omitted; parsers decide whether to consume it. */
+	optionalValue?: boolean;
 }
 
 export interface ArgDescriptor {
@@ -40,6 +42,8 @@ interface FlagInput {
 	multiple?: boolean;
 	options?: readonly string[];
 	required?: boolean;
+	/** The string value may be omitted; parsers decide whether to consume it. */
+	optionalValue?: boolean;
 }
 
 interface ArgInput {
@@ -352,7 +356,14 @@ function renderCommandBody(lines: string[], Cmd: CommandCtor): void {
 		for (const [name, desc] of flagEntries) {
 			const charPart = desc.char ? `-${desc.char}, ` : "    ";
 			const namePart = `--${name}`;
-			const typePart = desc.kind === "boolean" ? "" : desc.kind === "integer" ? "=<int>" : "=<value>";
+			const typePart =
+				desc.kind === "boolean"
+					? ""
+					: desc.kind === "integer"
+						? "=<int>"
+						: desc.optionalValue
+							? "[=<value>]"
+							: "=<value>";
 			formatted.push([`  ${charPart}${namePart}${typePart}`, desc.description ?? ""]);
 		}
 		const maxLeft = Math.max(...formatted.map(([l]) => l.length));
@@ -383,6 +394,15 @@ export interface CommandEntry {
 	name: string;
 	load: () => Promise<CommandCtor>;
 	aliases?: string[];
+	/** Owns parsing, help, loading and failures for this family when supplied. */
+	dispatch?: (argv: string[], context: CommandEntryContext) => Promise<void>;
+}
+
+export interface CommandEntryContext {
+	bin: string;
+	version: string;
+	/** Canonical registered entry name, including when invoked through an alias. */
+	command: string;
 }
 
 export interface RunOptions {
@@ -428,9 +448,17 @@ export async function run(opts: RunOptions): Promise<void> {
 		return;
 	}
 
+	const dispatchedEntry = findEntry(opts.commands, commandId);
+	if (dispatchedEntry?.dispatch) {
+		await dispatchedEntry.dispatch(commandArgv, { bin, version, command: dispatchedEntry.name });
+		return;
+	}
+
 	// Per-command help. Commands with nested subcommands can opt into receiving
 	// help flags themselves so `cmd subcommand --help` can render subcommand help.
-	if (commandArgv.includes("--help") || commandArgv.includes("-h")) {
+	const delimiterIndex = commandArgv.indexOf("--");
+	const helpArgs = delimiterIndex === -1 ? commandArgv : commandArgv.slice(0, delimiterIndex);
+	if (helpArgs.includes("--help") || helpArgs.includes("-h")) {
 		const entry = findEntry(opts.commands, commandId);
 		if (!entry) {
 			process.stderr.write(`Unknown command: ${commandId}\n`);

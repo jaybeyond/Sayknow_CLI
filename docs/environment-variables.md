@@ -503,9 +503,6 @@ These are consumed via `@sayknow-cli/utils/dirs` and affect where coding-agent s
 
 | Variable                   | Behavior                                                                       |
 | -------------------------- | ------------------------------------------------------------------------------ |
-| `SKC_BASH_NO_CI`            | Suppresses automatic `CI=true` injection into spawned shell env                |
-| `PI_BASH_NO_CI`             | Legacy alias fallback for `SKC_BASH_NO_CI`                                     |
-| `CLAUDE_BASH_NO_CI`         | Legacy alias fallback for `SKC_BASH_NO_CI`                                     |
 | `SKC_BASH_NO_LOGIN`         | Disables login-shell mode; shell args become `['-c']` instead of `['-l','-c']` |
 | `PI_BASH_NO_LOGIN`          | Legacy alias fallback for `SKC_BASH_NO_LOGIN`                                  |
 | `CLAUDE_BASH_NO_LOGIN`      | Legacy alias fallback for `SKC_BASH_NO_LOGIN`                                  |
@@ -514,7 +511,7 @@ These are consumed via `@sayknow-cli/utils/dirs` and affect where coding-agent s
 | `VISUAL`                   | Preferred external editor command                                              |
 | `EDITOR`                   | Fallback external editor command                                               |
 
-Current implementation: `SKC_BASH_NO_CI` and `SKC_BASH_NO_LOGIN` are resolved first, then the `PI_*` and `CLAUDE_*` aliases above. Both are boolean-like: only `1`/`Y`/`TRUE`/`YES`/`ON` (case-insensitive) enable them, so an explicit `SKC_BASH_NO_LOGIN=0` keeps the login shell even when a legacy alias is truthy. The shell prefix is read from `PI_SHELL_PREFIX`/`CLAUDE_CODE_SHELL_PREFIX` only; `SKC_SHELL_PREFIX` is not currently honored.
+Current implementation: `SKC_BASH_NO_LOGIN` is resolved first, then the `PI_BASH_NO_LOGIN` and `CLAUDE_BASH_NO_LOGIN` aliases above. It is boolean-like: only `1`/`Y`/`TRUE`/`YES`/`ON` (case-insensitive) enable it, so an explicit `SKC_BASH_NO_LOGIN=0` keeps the login shell even when a legacy alias is truthy. The spawned shell no longer injects `CI`; an inherited `CI` is passed through unchanged. The shell prefix is read from `PI_SHELL_PREFIX`/`CLAUDE_CODE_SHELL_PREFIX` only; `SKC_SHELL_PREFIX` is not currently honored.
 
 ---
 

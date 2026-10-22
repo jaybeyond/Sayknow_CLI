@@ -137,6 +137,10 @@ export async function loadGitignorePatterns(baseDir: string): Promise<string[]> 
  */
 export async function globPaths(patterns: string | string[], options: GlobPathsOptions = {}): Promise<string[]> {
 	const { cwd, exclude, signal, timeoutMs, dot, onlyFiles = true, gitignore } = options;
+	const timeoutSignal = timeoutMs ? AbortSignal.timeout(timeoutMs) : undefined;
+	const combinedSignal =
+		signal && timeoutSignal ? AbortSignal.any([signal, timeoutSignal]) : (signal ?? timeoutSignal);
+	throwIfGlobAborted(combinedSignal);
 
 	// Build exclude list: always exclude .git, exclude node_modules unless pattern references it
 	const patternArray = Array.isArray(patterns) ? patterns : [patterns];
@@ -147,6 +151,7 @@ export async function globPaths(patterns: string | string[], options: GlobPathsO
 
 	if (gitignore) {
 		const gitignorePatterns = await loadGitignorePatterns(cwd ?? getProjectDir());
+		throwIfGlobAborted(combinedSignal);
 		effectiveExclude = [...effectiveExclude, ...gitignorePatterns];
 	}
 
@@ -158,11 +163,6 @@ export async function globPaths(patterns: string | string[], options: GlobPathsO
 	// file; dedupe so a path is returned at most once regardless of pattern overlap.
 	const seen = new Set<string>();
 
-	// Combine timeout and abort signals
-	const timeoutSignal = timeoutMs ? AbortSignal.timeout(timeoutMs) : undefined;
-	const combinedSignal =
-		signal && timeoutSignal ? AbortSignal.any([signal, timeoutSignal]) : (signal ?? timeoutSignal);
-
 	for (const pattern of patternArray) {
 		const glob = new Glob(pattern);
 		const scanOptions = {
@@ -173,11 +173,7 @@ export async function globPaths(patterns: string | string[], options: GlobPathsO
 		};
 
 		for await (const entry of glob.scan(scanOptions)) {
-			if (combinedSignal?.aborted) {
-				const reason = combinedSignal.reason;
-				if (reason instanceof Error) throw reason;
-				throw new DOMException("Aborted", "AbortError");
-			}
+			throwIfGlobAborted(combinedSignal);
 
 			// Check exclusion patterns
 			const normalized = entry.replace(/\\/g, "/");
@@ -190,7 +186,14 @@ export async function globPaths(patterns: string | string[], options: GlobPathsO
 			seen.add(normalized);
 			allResults.push(normalized);
 		}
+		throwIfGlobAborted(combinedSignal);
 	}
 
 	return allResults;
+}
+
+function throwIfGlobAborted(signal: AbortSignal | undefined): void {
+	if (!signal?.aborted) return;
+	if (signal.reason instanceof Error) throw signal.reason;
+	throw new DOMException("Aborted", "AbortError");
 }
