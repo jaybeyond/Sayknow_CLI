@@ -1285,7 +1285,10 @@ export const WRAP_PREFIX_CHARS = `${UNTRUSTED_CONTENT_OPEN}\n`.length;
 const WRAP_SUFFIX = `\n${UNTRUSTED_CONTENT_CLOSE}`;
 
 export function escapeUntrustedContent(content: string): string {
-	return content.replace(/<\/untrusted-content>/gi, "&lt;/untrusted-content>");
+	// HTML and XML accept whitespace between the tag name and ">".
+	return content
+		.replace(/<\/untrusted-content>/gi, "&lt;/untrusted-content>")
+		.replace(/<\/untrusted-content[ \t\n\r\f]+>/gi, "&lt;/untrusted-content>");
 }
 
 export function wrapUntrustedContent(content: string): string {
