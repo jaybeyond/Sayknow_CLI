@@ -14,6 +14,7 @@ import {
 	assertWorkflowMutationRawPathsAllowed,
 	DEEP_INTERVIEW_MUTATION_BLOCK_MESSAGE,
 	getWorkflowMutationDecision,
+	isWorkflowMutationTool,
 	RALPLAN_MUTATION_BLOCK_MESSAGE,
 	readWorkflowGuardContext,
 	ULTRAGOAL_GOAL_PLANNING_MUTATION_BLOCK_MESSAGE,
@@ -1233,6 +1234,292 @@ describe("workflow mutation guard", () => {
 			expect(cleared.status, skill).toBe(0);
 			await assertWorkflowMutationAllowed(edit);
 			expect((await getWorkflowMutationDecision(edit)).blocked, skill).toBe(false);
+		}
+	});
+});
+
+describe("eval and python mutation guard", () => {
+	it("covers eval and python on the same mutation-tool gate as edit and bash", () => {
+		expect(isWorkflowMutationTool("eval")).toBe(true);
+		expect(isWorkflowMutationTool("python")).toBe(true);
+		expect(isWorkflowMutationTool("read")).toBe(false);
+	});
+
+	it("blocks eval and python product writes during ralplan through the public guard", async () => {
+		const cwd = await makeTempRoot();
+		await writeActiveSkill(cwd, "ralplan", "planner");
+		const cases: Array<[string, unknown]> = [
+			["python", { code: 'write("src/product.ts", "x")\n' }],
+			["python", { code: 'open("src/product.ts", "w").write("x")\n' }],
+			["python", { code: 'from pathlib import Path\nPath("src/product.ts").write_text("x")\n' }],
+			["python", { code: 'os.remove("src/product.ts")\n' }],
+			["python", { code: 'shutil.copy("/tmp/ralplan-scratch.md", "src/product.ts")\n' }],
+			["python", { code: 'os.rename("/tmp/ralplan-scratch.md", "src/product.ts")\n' }],
+			[
+				"eval",
+				{ cells: [{ language: "js", code: 'fs.renameSync("/tmp/ralplan-scratch.md", "src/product.ts")\n' }] },
+			],
+			[
+				"eval",
+				{ cells: [{ language: "js", code: 'fs.copyFileSync("/tmp/ralplan-scratch.md", "src/product.ts")\n' }] },
+			],
+			["eval", { cells: [{ language: "py", code: 'append("src/product.ts", "x")\n' }] }],
+			["eval", { cells: [{ language: "js", code: 'await write("src/product.ts", "x")\n' }] }],
+			["eval", { cells: [{ language: "js", code: 'await Bun.write("src/product.ts", "x")\n' }] }],
+			["python", { code: 'write("/tmp/ralplan-scratch.md", "x")\nwrite("src/product.ts", "y")\n' }],
+		];
+		for (const [name, args] of cases) {
+			const input = { cwd, sessionId: "session-a", tool: tool(name), args };
+			await expect(assertWorkflowMutationAllowed(input)).rejects.toBeInstanceOf(ToolError);
+			const decision = await getWorkflowMutationDecision(input);
+			expect(decision.blocked, name).toBe(true);
+			expect(decision.reason, `${name} ${JSON.stringify(args)}`).toBe("phase-boundary");
+			expect(decision.message).toBe(RALPLAN_MUTATION_BLOCK_MESSAGE);
+		}
+	});
+
+	// The fork mutation guard does not gate autoresearch; deep-interview stands in for it.
+	it("blocks eval and python product writes during a deep-interview", async () => {
+		const cwd = await makeTempRoot();
+		await writeActiveSkill(cwd, "deep-interview", "interviewing");
+		for (const [name, args] of [
+			["python", { action: "execute", code: 'write("src/product.ts", "x")\n' }],
+			["eval", { cells: [{ language: "js", code: 'fs.writeFileSync("src/product.ts", "x")\n' }] }],
+			["python", { code: 'shutil.copy("/tmp/ralplan-scratch.md", "src/product.ts")\n' }],
+		] as const) {
+			const decision = await getWorkflowMutationDecision({
+				cwd,
+				sessionId: "session-a",
+				tool: tool(name),
+				args,
+			});
+			expect(decision.blocked).toBe(true);
+			expect(decision.message).toBe(DEEP_INTERVIEW_MUTATION_BLOCK_MESSAGE);
+		}
+	});
+
+	it("keeps non-mutating eval or python allowed during planning", async () => {
+		const cwd = await makeTempRoot();
+		await writeActiveSkill(cwd, "ralplan", "planner");
+		for (const [name, args] of [
+			["python", { code: "print(1 + 1)\n" }],
+			["python", { code: 'text = read("package.json")\n' }],
+			["python", { code: 'open("src/product.ts", encoding="utf-8").read()\n' }],
+			["python", { code: '# write("src/product.ts", "x")\nprint(1)\n' }],
+			["python", { code: "print(\"write('src/product.ts', 'x')\")\n" }],
+			["python", { action: "clear" }],
+			["python", { code: 'write("/tmp/ralplan-scratch.md", "x")\n' }],
+			["python", { code: 'shutil.copy("/tmp/ralplan-scratch.md", "/tmp/ralplan-other.md")\n' }],
+			["eval", { cells: [{ language: "py", code: "print(1 + 1)\n" }] }],
+			["eval", { cells: [{ language: "js", code: 'await read("package.json")\n' }] }],
+			["eval", { cells: [{ language: "js", code: 'file.write("not-a-product-write")\n' }] }],
+		] as const) {
+			const decision = await getWorkflowMutationDecision({
+				cwd,
+				sessionId: "session-a",
+				tool: tool(name),
+				args,
+			});
+			expect(decision.blocked, `${name} ${JSON.stringify(args)}`).toBe(false);
+		}
+	});
+
+	it("still allows eval and python product writes when no planning skill is active", async () => {
+		const cwd = await makeTempRoot();
+		const decision = await getWorkflowMutationDecision({
+			cwd,
+			sessionId: "session-a",
+			tool: tool("python"),
+			args: { code: 'write("src/product.ts", "x")\n' },
+		});
+		expect(decision.blocked).toBe(false);
+	});
+
+	it("fails closed when an eval or python write target is not a literal", async () => {
+		const cwd = await makeTempRoot();
+		await writeActiveSkill(cwd, "ralplan", "planner");
+		for (const [name, args] of [
+			["python", { code: 'write(path, "x")\n' }],
+			["eval", { cells: [{ language: "js", code: "await write(target, 'x')\n" }] }],
+		] as const) {
+			const decision = await getWorkflowMutationDecision({
+				cwd,
+				sessionId: "session-a",
+				tool: tool(name),
+				args,
+			});
+			expect(decision.blocked).toBe(true);
+			expect(decision.reason).toBe("unknown-target");
+		}
+	});
+
+	it("fails closed when a literal path prefix is followed by an expression", async () => {
+		const cwd = await makeTempRoot();
+		await writeActiveSkill(cwd, "ralplan", "planner");
+		const decision = await getWorkflowMutationDecision({
+			cwd,
+			sessionId: "session-a",
+			tool: tool("python"),
+			args: { code: 'write("/tmp/" + target, "x")\n' },
+		});
+		expect(decision.blocked).toBe(true);
+		expect(decision.reason).toBe("unknown-target");
+	});
+
+	it("finds Python open write mode after other keyword arguments", async () => {
+		const cwd = await makeTempRoot();
+		await writeActiveSkill(cwd, "ralplan", "planner");
+		const input = {
+			cwd,
+			sessionId: "session-a",
+			tool: tool("python"),
+			args: { code: 'open("src/product.ts", encoding="utf-8", mode="w").write("x")\n' },
+		};
+		const decision = await getWorkflowMutationDecision(input);
+		expect(decision.blocked).toBe(true);
+		expect(decision.reason).toBe("phase-boundary");
+		expect(decision.targets).toContain("src/product.ts");
+
+		const readOnly = await getWorkflowMutationDecision({
+			...input,
+			args: { code: 'open("src/product.ts", encoding="utf-8", mode="r").read()\n' },
+		});
+		expect(readOnly.blocked).toBe(false);
+	});
+
+	it("blocks python writes into runtime-owned .skc state", async () => {
+		const cwd = await makeTempRoot();
+		const decision = await getWorkflowMutationDecision({
+			cwd,
+			sessionId: "session-a",
+			tool: tool("python"),
+			args: { code: 'write(".skc/state/skill-active-state.json", "{}")\n' },
+		});
+		expect(decision.blocked).toBe(true);
+		expect(decision.reason).toBe("workflow-state-target");
+		expect(decision.message).toContain("runtime-owned");
+	});
+
+	it("blocks a qualified copy or rename destination when a gap precedes the attribute", async () => {
+		const cwd = await makeTempRoot();
+		await writeActiveSkill(cwd, "ralplan", "planner");
+		const cases: Array<[string, unknown]> = [
+			["python", { code: 'shutil .copy("/tmp/a.md", "src/product.ts")\n' }],
+			["python", { code: 'os .rename("/tmp/a.md", "src/product.ts")\n' }],
+			["python", { code: 'shutil\\\n.copy("/tmp/a.md", "src/product.ts")\n' }],
+			["eval", { cells: [{ language: "js", code: 'fs .renameSync("/tmp/a.md", "src/product.ts")\n' }] }],
+		];
+		for (const [name, args] of cases) {
+			const input = { cwd, sessionId: "session-a", tool: tool(name), args };
+			await expect(assertWorkflowMutationAllowed(input)).rejects.toBeInstanceOf(ToolError);
+			const decision = await getWorkflowMutationDecision(input);
+			expect(decision.blocked, `${name} ${JSON.stringify(args)}`).toBe(true);
+			expect(decision.targets, `${name} ${JSON.stringify(args)}`).toContain("src/product.ts");
+			expect(decision.reason).toBe("phase-boundary");
+		}
+		const scratch = await getWorkflowMutationDecision({
+			cwd,
+			sessionId: "session-a",
+			tool: tool("python"),
+			args: { code: 'shutil .copy("/tmp/a.md", "/tmp/b.md")\n' },
+		});
+		expect(scratch.blocked).toBe(false);
+		expect(scratch.targets).toContain("/tmp/b.md");
+
+		await writeActiveSkill(cwd, "deep-interview", "interviewing");
+		const research = await getWorkflowMutationDecision({
+			cwd,
+			sessionId: "session-a",
+			tool: tool("python"),
+			args: { code: 'os .rename("/tmp/a.md", "src/product.ts")\n' },
+		});
+		expect(research.blocked).toBe(true);
+		expect(research.targets).toContain("src/product.ts");
+		expect(research.message).toBe(DEEP_INTERVIEW_MUTATION_BLOCK_MESSAGE);
+	});
+
+	it("still allows a gapped qualified copy when planning is inactive", async () => {
+		const cwd = await makeTempRoot();
+		const decision = await getWorkflowMutationDecision({
+			cwd,
+			sessionId: "session-a",
+			tool: tool("python"),
+			args: { code: 'shutil .copy("/tmp/a.md", "src/product.ts")\n' },
+		});
+		expect(decision.blocked).toBe(false);
+	});
+
+	it("fails closed when an open mode is a non-literal variable", async () => {
+		const cwd = await makeTempRoot();
+		await writeActiveSkill(cwd, "ralplan", "planner");
+		for (const code of [
+			'encoding = "w"; open("src/product.ts", encoding).write("x")\n',
+			'open("src/product.ts", mode=encoding).write("x")\n',
+		]) {
+			const input = { cwd, sessionId: "session-a", tool: tool("python"), args: { code } };
+			await expect(assertWorkflowMutationAllowed(input)).rejects.toBeInstanceOf(ToolError);
+			const decision = await getWorkflowMutationDecision(input);
+			expect(decision.blocked, code).toBe(true);
+			expect(decision.reason, code).toBe("unknown-target");
+		}
+	});
+
+	it("blocks a multi-argument Path write and an unresolved Path receiver", async () => {
+		const cwd = await makeTempRoot();
+		await writeActiveSkill(cwd, "ralplan", "planner");
+		for (const code of [
+			'Path("src", "product.ts").write_text("x")\n',
+			'Path("src", "product.ts").write_bytes(b"x")\n',
+		]) {
+			const input = { cwd, sessionId: "session-a", tool: tool("python"), args: { code } };
+			await expect(assertWorkflowMutationAllowed(input)).rejects.toBeInstanceOf(ToolError);
+			const decision = await getWorkflowMutationDecision(input);
+			expect(decision.blocked, code).toBe(true);
+			expect(decision.targets, code).toContain("src/product.ts");
+			expect(decision.reason, code).toBe("phase-boundary");
+		}
+		const dynamic = await getWorkflowMutationDecision({
+			cwd,
+			sessionId: "session-a",
+			tool: tool("python"),
+			args: { code: 'Path(root, "product.ts").write_text("x")\n' },
+		});
+		expect(dynamic.blocked).toBe(true);
+		expect(dynamic.reason).toBe("unknown-target");
+	});
+
+	it("resets a Path receiver at a later absolute component before the scratch check", async () => {
+		const cwd = await makeTempRoot();
+		await writeActiveSkill(cwd, "ralplan", "planner");
+		const productPath = path.join(cwd, "src", "product.ts");
+		const decision = await getWorkflowMutationDecision({
+			cwd,
+			sessionId: "session-a",
+			tool: tool("python"),
+			args: { code: `Path("/tmp", ${JSON.stringify(productPath)}).write_text("x")\n` },
+		});
+		expect(decision.blocked).toBe(true);
+		expect(decision.reason).toBe("phase-boundary");
+		expect(decision.targets).toContain(productPath);
+	});
+
+	it("allows a multi-part temp Path write and a non-writing Path read", async () => {
+		const cwd = await makeTempRoot();
+		await writeActiveSkill(cwd, "ralplan", "planner");
+		for (const code of [
+			'Path("/tmp", "ralplan-note.md").write_text("x")\n',
+			'Path("src", "product.ts").read_text()\n',
+			'open("src/product.ts", "r").read()\n',
+			'open("src/product.ts", mode="r").read()\n',
+			'open("src/product.ts", buffering=-1).read()\n',
+		]) {
+			const decision = await getWorkflowMutationDecision({
+				cwd,
+				sessionId: "session-a",
+				tool: tool("python"),
+				args: { code },
+			});
+			expect(decision.blocked, code).toBe(false);
 		}
 	});
 });

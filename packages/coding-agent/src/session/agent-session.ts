@@ -339,7 +339,7 @@ import {
 	readVisibleSkillActiveState,
 	syncSkillActiveState,
 } from "../skill-state/active-state";
-import { assertWorkflowMutationAllowed } from "../skill-state/workflow-mutation-guard";
+import { assertWorkflowMutationAllowed, isWorkflowMutationTool } from "../skill-state/workflow-mutation-guard";
 import { invalidateHostMetadata } from "../ssh/connection-manager";
 import { buildVolatileProjectContext } from "../system-prompt";
 import { resolveThinkingLevelForModel, toReasoningEffort } from "../thinking";
@@ -6301,7 +6301,7 @@ export class AgentSession {
 	/**
 	/** Wrap a tool with the workflow mutation guard before permissions or execution. */
 	#wrapToolForWorkflowMutationGuard<T extends AgentTool>(tool: T): T {
-		if (!["edit", "write", "ast_edit", "bash"].includes(tool.name)) return tool;
+		if (!isWorkflowMutationTool(tool.name)) return tool;
 		return new Proxy(tool, {
 			get: (target, prop) => {
 				if (prop !== "execute") return Reflect.get(target, prop, target);
