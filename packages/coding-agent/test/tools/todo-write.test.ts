@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import { Settings } from "@sayknow-cli/coding-agent/config/settings";
 import type { ToolSession } from "@sayknow-cli/coding-agent/tools";
 import { type TodoPhase, TodoWriteTool } from "@sayknow-cli/coding-agent/tools";
+import { phasesToMarkdown } from "../../src/tools/todo-write";
 
 function createSession(initialPhases: TodoPhase[] = []): ToolSession {
 	let phases = initialPhases;
@@ -200,5 +201,64 @@ describe("TodoWriteTool ops operations", () => {
 		const result = await tool.execute("call-2", { ops: [{ op: "drop", phase: "Work" }] });
 		const tasks = result.details?.phases[0]?.tasks ?? [];
 		expect(tasks.map(task => task.status)).toEqual(["abandoned", "abandoned"]);
+	});
+});
+
+/**
+ * `TodoItem.notes` is only typed as `string[]`: a persisted session or a bridged
+ * caller reaches the tool with whatever the stored array holds.
+ */
+function phasesWithRawNotes(notes: unknown[]): TodoPhase[] {
+	return [
+		{
+			name: "Work",
+			tasks: [{ content: "Apply fix", status: "in_progress", notes: notes as string[] }],
+		},
+	];
+}
+
+describe("TodoWriteTool note robustness", () => {
+	it("returns a result when a stored note is not a string", async () => {
+		// Every render path called `.split("\n")` on each note, so one non-string
+		// element (real sessions reported `a.notes[f].split is not a function`)
+		// turned the call into a rejected promise instead of a tool result.
+		const tool = new TodoWriteTool(createSession(phasesWithRawNotes([42])));
+
+		const result = await tool.execute("call-raw-note", {
+			ops: [{ op: "note", task: "Apply fix", text: "keep going" }],
+		});
+
+		const text = result.content.map(block => ("text" in block ? block.text : "")).join("\n");
+		expect(text).toContain("42");
+		expect(text).toContain("keep going");
+		expect(text).toContain("(+2 notes)");
+		expect(result.isError).toBeUndefined();
+		const notes = result.details?.phases[0]?.tasks[0]?.notes ?? [];
+		expect(notes).toHaveLength(2);
+		expect(notes).toContain("keep going");
+	});
+
+	it("rejects a non-string note body with an actionable message", async () => {
+		// Bridges that call execute directly skip raw validation, so the body has to
+		// be checked here instead of being stored and crashing a later render.
+		const tool = new TodoWriteTool(
+			createSession([{ name: "Work", tasks: [{ content: "Apply fix", status: "in_progress" }] }]),
+		);
+
+		const result = await tool.execute("call-object-note", {
+			ops: [{ op: "note", task: "Apply fix", text: { item: "x" } as unknown as string }],
+		});
+
+		expect(result.isError).toBe(true);
+		const text = result.content.map(block => ("text" in block ? block.text : "")).join("\n");
+		expect(text).toContain("Note text must be a string");
+		expect(text).toContain('Pass the note body as "text"');
+		// The fork reports op errors without upstream's transactional "not applied" wording.
+		expect(result.details?.phases[0]?.tasks[0]?.notes).toBeUndefined();
+	});
+
+	it("renders a stored non-string note in the markdown round-trip", () => {
+		const markdown = phasesToMarkdown(phasesWithRawNotes([{ item: "x" }]));
+		expect(markdown).toContain('  > {"item":"x"}');
 	});
 });
