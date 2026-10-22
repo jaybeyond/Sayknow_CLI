@@ -70,7 +70,7 @@ export async function runMigrate(args: MigrateCommandArgs): Promise<MigrateRepor
 	}
 
 	const { actions, warnings } = await planMigration({ results, destinations, force: args.force });
-	const finalActions = args.dryRun ? actions : await executeActions(actions);
+	const finalActions = args.dryRun ? actions : await executeActions(actions, { project: args.project });
 
 	return buildReport({
 		actions: finalActions,

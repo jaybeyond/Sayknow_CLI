@@ -287,3 +287,64 @@ describe("executeActions — skill destination safety", () => {
 		}
 	});
 });
+
+describe("executeActions — mcp destination safety", () => {
+	test("does not follow a symlinked .skc while writing mcp config", async () => {
+		const outside = await fs.mkdtemp(path.join(os.tmpdir(), "migrate-executor-mcp-outside-"));
+		try {
+			const agentRoot = path.join(tmp, ".skc");
+			await fs.symlink(outside, agentRoot, "dir");
+			const [action] = await executeActions(
+				[
+					{
+						source: "claude-code",
+						type: "mcp",
+						name: "alpha",
+						destination: path.join(agentRoot, "mcp.json"),
+						operation: "create",
+						status: "imported",
+						mcp: { config: { command: "alpha-bin" }, force: false },
+					},
+				],
+				{ project: true },
+			);
+
+			expect(action).toMatchObject({ operation: "fail", status: "failed_io" });
+			expect(
+				await fs.access(path.join(outside, "mcp.json")).then(
+					() => true,
+					() => false,
+				),
+			).toBe(false);
+		} finally {
+			await fs.rm(outside, { recursive: true, force: true });
+		}
+	});
+
+	test("still allows an update when .skc is a real directory", async () => {
+		const agentRoot = path.join(tmp, ".skc");
+		await fs.mkdir(agentRoot);
+		const destination = path.join(agentRoot, "mcp.json");
+		await fs.writeFile(destination, JSON.stringify({ mcpServers: { alpha: { command: "old-bin" } } }), "utf-8");
+		const [action] = await executeActions(
+			[
+				{
+					source: "claude-code",
+					type: "mcp",
+					name: "alpha",
+					destination,
+					operation: "update",
+					status: "updated",
+					mcp: { config: { command: "new-bin" }, force: true },
+				},
+			],
+			{ project: true },
+		);
+
+		expect(action).toMatchObject({ operation: "update", status: "updated" });
+		const written = JSON.parse(await fs.readFile(destination, "utf-8")) as {
+			mcpServers: { alpha: { command: string } };
+		};
+		expect(written.mcpServers.alpha.command).toBe("new-bin");
+	});
+});

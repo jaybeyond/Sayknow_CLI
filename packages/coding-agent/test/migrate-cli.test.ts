@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { setAgentDir } from "@sayknow-cli/utils";
+import { resetAgentDirFromEnvironment, setAgentDir } from "@sayknow-cli/utils";
 import { MigrateArgsError, resolveSources, runMigrate } from "../src/cli/migrate-cli";
 
 let home: string;
@@ -129,6 +129,82 @@ describe("runMigrate", () => {
 			cwd,
 		});
 		expect(report.ok).toBe(false);
+	});
+
+	test("does not follow a symlinked project .skc while migrating mcp", async () => {
+		const outside = await fs.mkdtemp(path.join(os.tmpdir(), "migrate-cli-mcp-outside-"));
+		try {
+			await fs.symlink(outside, path.join(cwd, ".skc"), "dir");
+			const report = await runMigrate({
+				from: ["claude-code"],
+				project: true,
+				force: false,
+				dryRun: false,
+				json: false,
+				homeDir: home,
+				cwd,
+			});
+			const mcp = report.actions.find(action => action.type === "mcp" && action.name === "srv");
+			expect(mcp).toMatchObject({ operation: "fail", status: "failed_io" });
+			expect(await exists(path.join(outside, "mcp.json"))).toBe(false);
+		} finally {
+			await fs.rm(outside, { recursive: true, force: true });
+		}
+	});
+
+	test("still allows a user-scope agent dir that is a symlink named .skc", async () => {
+		const outside = await fs.mkdtemp(path.join(os.tmpdir(), "migrate-cli-user-outside-"));
+		const linkParent = await fs.mkdtemp(path.join(os.tmpdir(), "migrate-cli-user-link-"));
+		const previous = process.env.SKC_CODING_AGENT_DIR;
+		const agentDir = path.join(linkParent, ".skc");
+		await fs.symlink(outside, agentDir, "dir");
+		setAgentDir(agentDir);
+		try {
+			const report = await runMigrate({
+				from: ["claude-code"],
+				project: false,
+				force: false,
+				dryRun: false,
+				json: false,
+				homeDir: home,
+				cwd,
+			});
+			const mcp = report.actions.find(action => action.type === "mcp" && action.name === "srv");
+			expect(mcp).toMatchObject({ operation: "create", status: "imported" });
+			expect(await exists(path.join(outside, "mcp.json"))).toBe(true);
+		} finally {
+			if (previous === undefined) delete process.env.SKC_CODING_AGENT_DIR;
+			else process.env.SKC_CODING_AGENT_DIR = previous;
+			resetAgentDirFromEnvironment();
+			await fs.rm(outside, { recursive: true, force: true });
+			await fs.rm(linkParent, { recursive: true, force: true });
+		}
+	});
+
+	test("still allows a user-scope agent dir whose parents do not exist yet", async () => {
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "migrate-cli-user-missing-"));
+		const previous = process.env.SKC_CODING_AGENT_DIR;
+		const agentDir = path.join(root, "missing", "profile", ".skc");
+		setAgentDir(agentDir);
+		try {
+			const report = await runMigrate({
+				from: ["claude-code"],
+				project: false,
+				force: false,
+				dryRun: false,
+				json: false,
+				homeDir: home,
+				cwd,
+			});
+			const mcp = report.actions.find(action => action.type === "mcp" && action.name === "srv");
+			expect(mcp).toMatchObject({ operation: "create", status: "imported" });
+			expect(await exists(path.join(agentDir, "mcp.json"))).toBe(true);
+		} finally {
+			if (previous === undefined) delete process.env.SKC_CODING_AGENT_DIR;
+			else process.env.SKC_CODING_AGENT_DIR = previous;
+			resetAgentDirFromEnvironment();
+			await fs.rm(root, { recursive: true, force: true });
+		}
 	});
 
 	test("--from all and repeated --from load every selected source once", async () => {

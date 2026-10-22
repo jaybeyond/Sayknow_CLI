@@ -19,17 +19,22 @@ function trustedSkillDestinationBase(destination: string): string {
 	return path.basename(scopeRoot) === ".skc" ? path.dirname(scopeRoot) : scopeRoot;
 }
 
-async function ensureRealDirectoryPathNoFollow(directory: string, trustedBase: string): Promise<void> {
+async function ensureRealDirectoryPathNoFollow(
+	directory: string,
+	trustedBase: string,
+	label = "skill destination",
+	createMissing = true,
+): Promise<void> {
 	const resolvedBase = path.resolve(trustedBase);
 	const resolvedDirectory = path.resolve(directory);
 	const relative = path.relative(resolvedBase, resolvedDirectory);
 	if (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
-		throw new Error(`skill destination escapes trusted base: ${resolvedDirectory}`);
+		throw new Error(`${label} escapes trusted base: ${resolvedDirectory}`);
 	}
 
 	const baseStat = await fs.stat(resolvedBase);
 	if (!baseStat.isDirectory()) {
-		throw new Error(`skill destination base is not a directory: ${resolvedBase}`);
+		throw new Error(`${label} base is not a directory: ${resolvedBase}`);
 	}
 
 	let current = resolvedBase;
@@ -38,14 +43,17 @@ async function ensureRealDirectoryPathNoFollow(directory: string, trustedBase: s
 		try {
 			const stat = await fs.lstat(current);
 			if (!stat.isDirectory() || stat.isSymbolicLink()) {
-				throw new Error(`skill destination ancestor is not a real directory: ${current}`);
+				throw new Error(`${label} ancestor is not a real directory: ${current}`);
 			}
 		} catch (error) {
 			if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+			// A missing project `.skc` is created by the MCP writer (mode 0o700).
+			// Do not mkdir here, or that mode is lost. An existing symlink still fails above.
+			if (!createMissing) return;
 			await fs.mkdir(current);
 			const stat = await fs.lstat(current);
 			if (!stat.isDirectory() || stat.isSymbolicLink()) {
-				throw new Error(`skill destination ancestor is not a real directory: ${current}`);
+				throw new Error(`${label} ancestor is not a real directory: ${current}`);
 			}
 		}
 	}
@@ -66,7 +74,10 @@ async function writeSkillFileNoFollow(destination: string, content: string): Pro
 	}
 }
 
-export async function executeActions(actions: MigrateAction[]): Promise<MigrateAction[]> {
+export async function executeActions(
+	actions: MigrateAction[],
+	options?: { project?: boolean },
+): Promise<MigrateAction[]> {
 	const out: MigrateAction[] = [];
 	for (const action of actions) {
 		if (action.operation !== "create" && action.operation !== "update") {
@@ -75,6 +86,17 @@ export async function executeActions(actions: MigrateAction[]): Promise<MigrateA
 		}
 		try {
 			if (action.type === "mcp" && action.mcp && action.name && action.destination) {
+				// `project` is the migrate scope, not a guess from the directory name.
+				// A user agent dir may itself be named `.skc`.
+				if (options?.project) {
+					const directory = path.dirname(action.destination);
+					await ensureRealDirectoryPathNoFollow(
+						directory,
+						path.dirname(path.resolve(directory)),
+						"mcp destination",
+						false,
+					);
+				}
 				await upsertMCPServer(action.destination, action.name, action.mcp.config, {
 					force: action.operation === "update",
 				});
