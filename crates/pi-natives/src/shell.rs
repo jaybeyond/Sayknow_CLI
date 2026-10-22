@@ -88,6 +88,8 @@ pub struct ShellRunOptions<'env> {
 	pub cwd:        Option<String>,
 	/// Environment variables to apply for this command only.
 	pub env:        Option<HashMap<String, String>>,
+	/// Environment variable names to mask for this command only.
+	pub unset_env:  Option<Vec<String>>,
 	/// Timeout in milliseconds before cancelling the command.
 	pub timeout_ms: Option<u32>,
 	/// Abort signal for cancelling the operation.
@@ -103,6 +105,8 @@ pub struct ShellExecuteOptions<'env> {
 	pub cwd:           Option<String>,
 	/// Environment variables to apply for this command only.
 	pub env:           Option<HashMap<String, String>>,
+	/// Environment variable names to mask for this command only.
+	pub unset_env:     Option<Vec<String>>,
 	/// Environment variables to apply once per session.
 	pub session_env:   Option<HashMap<String, String>>,
 	/// Timeout in milliseconds before cancelling the command.
@@ -213,6 +217,7 @@ impl Shell {
 			command:    options.command,
 			cwd:        options.cwd,
 			env:        options.env,
+			unset_env:  options.unset_env,
 			timeout_ms: options.timeout_ms,
 		};
 		task::future(env, "shell.run", async move {
@@ -256,6 +261,7 @@ pub fn execute_shell<'env>(
 		command:       options.command,
 		cwd:           options.cwd,
 		env:           options.env,
+		unset_env:     options.unset_env,
 		session_env:   options.session_env,
 		timeout_ms:    options.timeout_ms,
 		snapshot_path: options.snapshot_path,
@@ -419,6 +425,7 @@ mod tests {
 						command:    "/bin/sh -c 'printf \"%d\\n\" \"$$\"; sleep 0.5'".to_string(),
 						cwd:        None,
 						env:        None,
+						unset_env:  None,
 						timeout_ms: None,
 					},
 					Some(tx),
@@ -462,6 +469,7 @@ mod tests {
 						command:    "sh -c 'sleep 30 & wait'".to_string(),
 						cwd:        None,
 						env:        None,
+						unset_env:  None,
 						timeout_ms: None,
 					},
 					None,

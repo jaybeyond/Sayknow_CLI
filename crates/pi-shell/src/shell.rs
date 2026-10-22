@@ -20,6 +20,7 @@ use brush_core::{
 	builtins,
 	env::EnvironmentScope,
 	openfiles::{self, OpenFile, OpenFiles},
+	variables::ShellValueUnsetType,
 };
 use bytes::Bytes;
 use clap::Parser;
@@ -114,6 +115,7 @@ struct ShellRunConfig {
 	command:   String,
 	cwd:       Option<String>,
 	env:       Option<HashMap<String, String>>,
+	unset_env: Option<Vec<String>>,
 	minimizer: Option<minimizer::MinimizerConfig>,
 }
 
@@ -122,6 +124,7 @@ pub struct ShellRunOptions {
 	pub command:    String,
 	pub cwd:        Option<String>,
 	pub env:        Option<HashMap<String, String>>,
+	pub unset_env:  Option<Vec<String>>,
 	pub timeout_ms: Option<u32>,
 }
 
@@ -153,6 +156,7 @@ pub struct ShellExecuteOptions {
 	pub command:       String,
 	pub cwd:           Option<String>,
 	pub env:           Option<HashMap<String, String>>,
+	pub unset_env:     Option<Vec<String>>,
 	pub session_env:   Option<HashMap<String, String>>,
 	pub timeout_ms:    Option<u32>,
 	pub snapshot_path: Option<String>,
@@ -201,6 +205,7 @@ impl Shell {
 			command:   options.command,
 			cwd:       options.cwd,
 			env:       options.env,
+			unset_env: options.unset_env,
 			minimizer: self.config.minimizer.clone(),
 		};
 		run_shell_session(
@@ -233,8 +238,13 @@ pub async fn execute_shell(
 		snapshot_path: options.snapshot_path,
 		minimizer:     minimizer.clone(),
 	};
-	let run_config =
-		ShellRunConfig { command: options.command, cwd: options.cwd, env: options.env, minimizer };
+	let run_config = ShellRunConfig {
+		command: options.command,
+		cwd: options.cwd,
+		env: options.env,
+		unset_env: options.unset_env,
+		minimizer,
+	};
 	run_shell_oneshot(config, run_config, on_chunk, cancel_token).await
 }
 
@@ -269,6 +279,7 @@ pub async fn execute_shell_streams(
 		command:   options.command,
 		cwd:       options.cwd,
 		env:       options.env,
+		unset_env: options.unset_env,
 		minimizer: None,
 	};
 	run_shell_oneshot_streams(config, run_config, streams, cancel_token).await
@@ -664,7 +675,8 @@ async fn run_shell_command(
 			.map_err(|err| Error::msg(format!("Failed to set cwd: {err}")))?;
 	}
 
-	let env_scope_pushed = apply_command_env(&mut session.shell, options.env.as_ref())?;
+	let env_scope_pushed =
+		apply_command_env(&mut session.shell, options.unset_env.as_deref(), options.env.as_ref())?;
 
 	let minimizer_mode = if let Some(config) = options.minimizer.as_ref() {
 		minimizer::engine::mode_for(&options.command, config)
@@ -879,7 +891,8 @@ async fn run_shell_command_streams(
 			.map_err(|err| Error::msg(format!("Failed to set cwd: {err}")))?;
 	}
 
-	let env_scope_pushed = apply_command_env(&mut session.shell, options.env.as_ref())?;
+	let env_scope_pushed =
+		apply_command_env(&mut session.shell, options.unset_env.as_deref(), options.env.as_ref())?;
 
 	let (stdout_reader, stdout_writer) = pipe_to_files("stdout")?;
 	let (stderr_reader, stderr_writer) = pipe_to_files("stderr")?;
@@ -1165,32 +1178,55 @@ async fn terminate_background_jobs(shell: &BrushShell) {
 	targets.signal(process::KILL_SIGNAL);
 }
 
-/// Apply per-command environment variables onto a freshly pushed
-/// `Command` scope. Returns `true` when a scope was pushed (so the caller
-/// can pop it after the command runs), `false` when there were no vars and
-/// the existing scopes remain untouched.
+/// Apply per-command environment removals and variables onto a freshly pushed
+/// `Command` scope. Exported unset variables shadow inherited values without
+/// mutating parent scopes. Explicit values are applied afterward and therefore
+/// take precedence. Returns `true` when a scope was pushed.
 fn apply_command_env(
 	shell: &mut BrushShell,
+	unset_env: Option<&[String]>,
 	env: Option<&HashMap<String, String>>,
 ) -> Result<bool> {
-	let Some(env) = env else {
+	let has_unset_env = unset_env.is_some_and(|names| !names.is_empty());
+	let has_env = env.is_some_and(|values| !values.is_empty());
+	if !has_unset_env && !has_env {
 		return Ok(false);
-	};
+	}
 	shell.env_mut().push_scope(EnvironmentScope::Command);
-	for (key, value) in env {
-		let normalized_key = normalize_env_key(key);
-		if should_skip_env_var(normalized_key) {
-			continue;
+	let result = (|| {
+		if let Some(unset_env) = unset_env {
+			for key in unset_env {
+				let normalized_key = normalize_env_key(key);
+				if should_skip_env_var(normalized_key) {
+					continue;
+				}
+				let mut var = ShellVariable::new(ShellValue::Unset(ShellValueUnsetType::Untyped));
+				var.export();
+				shell
+					.env_mut()
+					.add(normalized_key, var, EnvironmentScope::Command)
+					.map_err(|err| Error::msg(format!("Failed to remove env: {err}")))?;
+			}
 		}
-		let mut var = ShellVariable::new(ShellValue::String(value.clone()));
-		var.export();
-		if let Err(err) = shell
-			.env_mut()
-			.add(normalized_key, var, EnvironmentScope::Command)
-		{
-			let _ = shell.env_mut().pop_scope(EnvironmentScope::Command);
-			return Err(Error::msg(format!("Failed to set env: {err}")));
+		if let Some(env) = env {
+			for (key, value) in env {
+				let normalized_key = normalize_env_key(key);
+				if should_skip_env_var(normalized_key) {
+					continue;
+				}
+				let mut var = ShellVariable::new(ShellValue::String(value.clone()));
+				var.export();
+				shell
+					.env_mut()
+					.add(normalized_key, var, EnvironmentScope::Command)
+					.map_err(|err| Error::msg(format!("Failed to set env: {err}")))?;
+			}
 		}
+		Ok(())
+	})();
+	if let Err(err) = result {
+		let _ = shell.env_mut().pop_scope(EnvironmentScope::Command);
+		return Err(err);
 	}
 	Ok(true)
 }
@@ -1873,6 +1909,19 @@ mod tests {
 	#[cfg(unix)]
 	static PROCESS_TEST_LOCK: TokioMutex<()> = TokioMutex::const_new(());
 	#[cfg(unix)]
+	async fn run_and_capture(shell: &Shell, options: ShellRunOptions) -> (ShellRunResult, String) {
+		let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+		let result = shell
+			.run(options, Some(tx), CancelToken::default())
+			.await
+			.expect("shell command should execute");
+		let mut output = String::new();
+		while let Some(chunk) = rx.recv().await {
+			output.push_str(&chunk);
+		}
+		(result, output)
+	}
+	#[cfg(unix)]
 	async fn wait_until_descendant_visible(pid: i32) {
 		for _ in 0..100 {
 			if process::current_descendant_pids().contains(&pid) {
@@ -2542,6 +2591,100 @@ mod tests {
 
 	#[cfg(unix)]
 	#[tokio::test]
+	async fn command_env_removals_mask_ambient_values_temporarily_and_explicit_values_win() {
+		let _process_test_guard = PROCESS_TEST_LOCK.lock().await;
+		const NAME: &str = "PI_SHELL_COMMAND_SCOPE_TEST";
+		const READ_VALUE: &str = "sh -c 'printf \"%s\" \"${PI_SHELL_COMMAND_SCOPE_TEST-unset}\"'";
+		let shell = Shell::new(Some(ShellOptions {
+			session_env: Some(HashMap::from([(NAME.to_string(), "ambient".to_string())])),
+			..Default::default()
+		}));
+		let removal = Some(vec![NAME.to_string()]);
+
+		// A removal-only call still gets a temporary command scope. The exported
+		// unset sentinel masks the session value and is omitted from child env.
+		let (removed, output) = run_and_capture(&shell, ShellRunOptions {
+			command: READ_VALUE.to_string(),
+			unset_env: removal.clone(),
+			..Default::default()
+		})
+		.await;
+		assert_eq!(removed.exit_code, Some(0));
+		assert_eq!(output, "unset");
+
+		// Adding an explicit value after the removal shadows the sentinel.
+		let (overridden, output) = run_and_capture(&shell, ShellRunOptions {
+			command: READ_VALUE.to_string(),
+			env: Some(HashMap::from([(NAME.to_string(), "explicit".to_string())])),
+			unset_env: removal.clone(),
+			..Default::default()
+		})
+		.await;
+		assert_eq!(overridden.exit_code, Some(0));
+		assert_eq!(output, "explicit");
+
+		// A nonzero command still pops its command scope before the next run.
+		let (failed, _) = run_and_capture(&shell, ShellRunOptions {
+			command: "sh -c 'exit 1'".to_string(),
+			unset_env: removal,
+			..Default::default()
+		})
+		.await;
+		assert_eq!(failed.exit_code, Some(1));
+		let (restored, output) = run_and_capture(&shell, ShellRunOptions {
+			command: READ_VALUE.to_string(),
+			..Default::default()
+		})
+		.await;
+		assert_eq!(restored.exit_code, Some(0));
+		assert_eq!(output, "ambient");
+	}
+
+	#[cfg(unix)]
+	#[tokio::test]
+	async fn execute_shell_removals_mask_session_values_and_explicit_values_win() {
+		let _process_test_guard = PROCESS_TEST_LOCK.lock().await;
+		const NAME: &str = "PI_SHELL_ONESHOT_SCOPE_TEST";
+		const READ_VALUE: &str = "sh -c 'printf \"%s\" \"${PI_SHELL_ONESHOT_SCOPE_TEST-unset}\"'";
+		let session_env = Some(HashMap::from([(NAME.to_string(), "ambient".to_string())]));
+
+		async fn capture(options: ShellExecuteOptions) -> String {
+			let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+			let result = execute_shell(options, Some(tx), CancelToken::default())
+				.await
+				.expect("execute_shell should succeed");
+			assert_eq!(result.exit_code, Some(0));
+			let mut output = String::new();
+			while let Some(chunk) = rx.recv().await {
+				output.push_str(&chunk);
+			}
+			output
+		}
+
+		// The one-shot path builds a fresh session, so a removal must mask the
+		// value that session imported, not only a per-command value.
+		let removed = capture(ShellExecuteOptions {
+			command: READ_VALUE.to_string(),
+			session_env: session_env.clone(),
+			unset_env: Some(vec![NAME.to_string()]),
+			..Default::default()
+		})
+		.await;
+		assert_eq!(removed, "unset");
+
+		let overridden = capture(ShellExecuteOptions {
+			command: READ_VALUE.to_string(),
+			env: Some(HashMap::from([(NAME.to_string(), "explicit".to_string())])),
+			session_env,
+			unset_env: Some(vec![NAME.to_string()]),
+			..Default::default()
+		})
+		.await;
+		assert_eq!(overridden, "explicit");
+	}
+
+	#[cfg(unix)]
+	#[tokio::test]
 	async fn env_scope_pop_error_cleanup_cancels_reader_and_bridges() {
 		let (reader, writer) = pipe_to_files("env-pop-error").expect("pipe should be created");
 		let stdout_file = OpenFile::from(writer.try_clone().expect("clone writer"));
@@ -2575,7 +2718,7 @@ mod tests {
 		let mut session = create_session(&config).await.expect("create_session");
 		let mut env = HashMap::new();
 		env.insert("U3_POP_ERROR".to_string(), "1".to_string());
-		assert!(apply_command_env(&mut session.shell, Some(&env)).expect("push command env"));
+		assert!(apply_command_env(&mut session.shell, None, Some(&env)).expect("push command env"));
 
 		let mut params = session.shell.default_exec_params();
 		params.set_fd(OpenFiles::STDIN_FD, null_file().expect("null stdin"));

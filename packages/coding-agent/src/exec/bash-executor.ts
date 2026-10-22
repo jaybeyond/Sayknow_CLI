@@ -6,6 +6,7 @@
 import * as fs from "node:fs/promises";
 import { executeShell, type MinimizerOptions, Shell } from "@sayknow-cli/natives";
 import { postmortem } from "@sayknow-cli/utils";
+import { projectDeclaredSpawnHookNames, stripProjectSpawnHooks } from "@sayknow-cli/utils/shell-config";
 import { Settings, type ShellMinimizerSettings } from "../config/settings";
 import { formatCrashDiagnosticNotice, writeCrashReport } from "../debug/crash-diagnostics";
 import { OutputSink } from "../session/streaming-output";
@@ -29,6 +30,8 @@ export interface BashExecutorOptions {
 	sessionKey?: string;
 	/** Additional environment variables to inject */
 	env?: Record<string, string>;
+	/** Environment variable names to remove for this command only. Explicit `env` values win. */
+	unsetEnv?: string[];
 	/** Artifact path/id for full output storage */
 	artifactPath?: string;
 	artifactId?: string;
@@ -122,9 +125,27 @@ export function buildMinimizerOptions(group: ShellMinimizerSettings): MinimizerO
 	};
 }
 
+function projectHookUnsetEnv(
+	unsetEnv: string[] | undefined,
+	env: Record<string, string> | undefined,
+	sessionEnv: Record<string, string>,
+): string[] | undefined {
+	// Keys present in `sessionEnv` (e.g. the trusted HOME replacement) already
+	// override the ambient import, so only shadow the ones it does not carry.
+	const hooks = projectDeclaredSpawnHookNames().filter(
+		name => !Object.hasOwn(env ?? {}, name) && !Object.hasOwn(sessionEnv, name),
+	);
+	if (hooks.length === 0) return unsetEnv;
+	return [...(unsetEnv ?? []), ...hooks.filter(name => !unsetEnv?.includes(name))];
+}
+
 export async function executeBash(command: string, options?: BashExecutorOptions): Promise<BashResult> {
 	const settings = await Settings.init();
-	const { shell, env: shellEnv, prefix } = settings.getShellConfig();
+	const { shell, env: configEnv, prefix } = settings.getShellConfig();
+	// The shell config env is shared with other consumers (Python kernels keep
+	// their own documented allowlist). Only the bash tool's shell must not see
+	// project hook variables such as GIT_CONFIG_* or NODE_OPTIONS.
+	const shellEnv = stripProjectSpawnHooks({ ...configEnv });
 	const configuredPrefix = options?.ignoreShellPrefix ? undefined : prefix;
 	const snapshotPath =
 		!options?.disableShellSnapshot && shell.includes("bash") ? await getOrCreateSnapshot(shell, shellEnv) : null;
@@ -133,6 +154,10 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 
 	const commandCwd = await resolveShellCwd(options?.cwd);
 	const commandEnv = options?.env ? { ...NON_INTERACTIVE_ENV, ...options.env } : NON_INTERACTIVE_ENV;
+	// The native shell runs in-process and imports the host environment, which
+	// holds the autoloaded project `.env`, before `sessionEnv`. Shadow project
+	// hook variables per run unless this call sets them explicitly.
+	const unsetEnv = projectHookUnsetEnv(options?.unsetEnv, options?.env, shellEnv);
 
 	// Apply command prefix if configured and allowed for this execution.
 	const prefixedCommand = configuredPrefix ? `${configuredPrefix} ${command}` : command;
@@ -234,6 +259,7 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 						command: finalCommand,
 						cwd: commandCwd,
 						env: commandEnv,
+						unsetEnv,
 						timeoutMs: executionTimeoutMs,
 						signal: runAbortController.signal,
 					},
@@ -248,6 +274,7 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 						command: finalCommand,
 						cwd: commandCwd,
 						env: commandEnv,
+						unsetEnv,
 						sessionEnv: shellEnv,
 						snapshotPath: snapshotPath ?? undefined,
 						minimizer,

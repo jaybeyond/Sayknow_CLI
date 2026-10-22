@@ -11,6 +11,7 @@ import {
 	visibleWidth,
 } from "@sayknow-cli/tui";
 import { sanitizeText } from "@sayknow-cli/utils";
+import { projectDeclaredSpawnHookNames, projectSafeHomeOverride } from "@sayknow-cli/utils/shell-config";
 import type { Terminal as XtermTerminalType } from "@xterm/headless";
 import { Settings } from "../config/settings";
 import { NON_INTERACTIVE_ENV } from "../exec/non-interactive-env";
@@ -283,6 +284,10 @@ class BashInteractiveOverlayComponent implements Component {
 	}
 }
 
+function ptyUnsetHookNames(explicit: Record<string, string> | undefined): string[] {
+	return projectDeclaredSpawnHookNames().filter(name => !Object.hasOwn(explicit ?? {}, name));
+}
+
 export async function runInteractiveBashPty(
 	ui: NonNullable<AgentToolContext["ui"]>,
 	options: {
@@ -363,10 +368,15 @@ export async function runInteractiveBashPty(
 						command: options.command,
 						cwd: options.cwd,
 						timeoutMs: options.timeoutMs,
+						// The PTY child inherits the process env; drop project hook variables
+						// unless this call sets them explicitly. A dropped HOME is replaced by
+						// the trusted account home so the shell and git still have one.
 						env: {
+							...projectSafeHomeOverride(options.env),
 							...NON_INTERACTIVE_ENV,
 							...options.env,
 						},
+						unsetEnv: ptyUnsetHookNames(options.env),
 						signal: options.signal,
 						cols,
 						rows,
