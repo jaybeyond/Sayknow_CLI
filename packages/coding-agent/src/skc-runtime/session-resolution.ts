@@ -54,8 +54,12 @@ export class SessionResolutionError extends Error {
 	}
 }
 
+function isUnsafeResolvedSessionId(sessionId: string): boolean {
+	return sessionId === "." || sessionId === ".." || /[/\\]/.test(sessionId);
+}
+
 function assertSafeResolvedSessionId(sessionId: string): void {
-	if (sessionId === "." || sessionId === ".." || /[/\\]/.test(sessionId)) {
+	if (isUnsafeResolvedSessionId(sessionId)) {
 		throw new SessionResolutionError(
 			"session id must be a single path component (no separators or traversal)",
 			"unsafe_session",
@@ -143,8 +147,17 @@ interface SessionCandidate {
  * or an ambiguous tie.
  */
 export async function detectLatestSession(cwd: string): Promise<SkcSessionContext> {
-	const candidates = await collectActiveSessionCandidates(cwd);
+	const found = await collectActiveSessionCandidates(cwd);
+	const candidates = found.candidates;
 	if (candidates.length === 0) {
+		// No safe session was selectable. Keep the unsafe-id error when a crafted
+		// directory was the reason nothing could be chosen, matching explicit ids.
+		if (found.sawUnsafe) {
+			throw new SessionResolutionError(
+				"session id must be a single path component (no separators or traversal)",
+				"unsafe_session",
+			);
+		}
 		throw new SessionResolutionError(
 			"no active SKC session found: pass --session-id or set SKC_SESSION_ID",
 			"no_session",
@@ -164,19 +177,27 @@ export async function detectLatestSession(cwd: string): Promise<SkcSessionContex
 	return { skcSessionId: first.skcSessionId, sessionRoot: first.sessionRoot, source: "latest" };
 }
 
-async function collectActiveSessionCandidates(cwd: string): Promise<SessionCandidate[]> {
+async function collectActiveSessionCandidates(
+	cwd: string,
+): Promise<{ candidates: SessionCandidate[]; sawUnsafe: boolean }> {
 	const root = skcRoot(cwd);
 	let entries: import("node:fs").Dirent[];
 	try {
 		entries = await fs.readdir(root, { withFileTypes: true });
 	} catch {
-		return [];
+		return { candidates: [], sawUnsafe: false };
 	}
 	const candidates: SessionCandidate[] = [];
+	let sawUnsafe = false;
 	for (const entry of entries) {
 		if (!entry.isDirectory()) continue;
 		const skcSessionId = sessionIdFromDirName(entry.name);
 		if (!skcSessionId) continue;
+		// Skip; throwing here would stop discovery for every other session.
+		if (isUnsafeResolvedSessionId(skcSessionId)) {
+			sawUnsafe = true;
+			continue;
+		}
 		assertSafeResolvedSessionId(skcSessionId);
 		const dir = path.join(root, entry.name);
 		const activityMs = await readActivityMs(path.join(dir, SKC_SESSION_ACTIVITY_FILE));
@@ -185,7 +206,7 @@ async function collectActiveSessionCandidates(cwd: string): Promise<SessionCandi
 		if (activityMs === undefined) continue;
 		candidates.push({ skcSessionId, sessionRoot: dir, activityMs });
 	}
-	return candidates;
+	return { candidates, sawUnsafe };
 }
 
 async function readActivityMs(markerPath: string): Promise<number | undefined> {
