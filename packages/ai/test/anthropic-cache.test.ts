@@ -119,6 +119,136 @@ describe("Anthropic prompt caching", () => {
 		});
 	});
 
+	for (const callerMarkerCount of [3, 4]) {
+		it(`respects ${callerMarkerCount} caller markers in automatic mode`, () => {
+			const params = cacheParams({
+				tools: [
+					{
+						name: "lookup",
+						input_schema: { type: "object", properties: {} },
+						cache_control: { type: "ephemeral" },
+					},
+				],
+				system: [{ type: "text", text: "stable", cache_control: { type: "ephemeral" } }],
+				messages: [
+					{
+						role: "user",
+						content: Array.from({ length: callerMarkerCount - 2 }, (_, index) => ({
+							type: "text" as const,
+							text: `question ${index}`,
+							cache_control: { type: "ephemeral" as const },
+						})),
+					},
+				],
+			});
+			const before = structuredClone(params);
+
+			applyPromptCaching(params, "automatic", { type: "ephemeral" });
+
+			if (callerMarkerCount === 4) {
+				expect(params.cache_control).toBeUndefined();
+				expect(params).toEqual(before);
+			} else {
+				expect(params.cache_control).toEqual({ type: "ephemeral" });
+				expect(params).toEqual({ ...before, cache_control: { type: "ephemeral" } });
+			}
+			expect(cacheControls(params)).toHaveLength(4);
+			expect(() => normalizeCacheControlTtlOrdering(params)).not.toThrow();
+		});
+	}
+
+	it("still replaces an existing root marker in automatic mode", () => {
+		const params = cacheParams({ cache_control: { type: "ephemeral" } });
+
+		applyPromptCaching(params, "automatic", { type: "ephemeral", ttl: "1h" });
+
+		expect(params.cache_control).toEqual({ type: "ephemeral", ttl: "1h" });
+	});
+
+	describe("generated automatic root-marker layouts", () => {
+		const seededRandom = (seed: number): (() => number) => {
+			let state = seed >>> 0;
+			return () => {
+				state = (state + 0x6d2b79f5) >>> 0;
+				let value = Math.imul(state ^ (state >>> 15), state | 1);
+				value ^= value + Math.imul(value ^ (value >>> 7), value | 61);
+				return ((value ^ (value >>> 14)) >>> 0) / 0x1_0000_0000;
+			};
+		};
+		const pick = <T>(random: () => number, items: readonly T[]): T => items[Math.floor(random() * items.length)]!;
+		const withoutRoot = (payload: Payload): Payload => {
+			const { cache_control: _root, ...rest } = payload;
+			return rest as Payload;
+		};
+
+		for (let seed = 0; seed < 500; seed++) {
+			it(`keeps caller markers and the four-breakpoint cap for seed ${seed}`, () => {
+				const random = seededRandom(seed);
+				// One TTL for every marker so each layout satisfies the long-before-short ordering rule.
+				const control: CacheControlEphemeral = { type: "ephemeral" };
+				const ttl = pick(random, [undefined, "5m", "1h"] as const);
+				if (ttl) control.ttl = ttl;
+				const params = cacheParams({
+					tools: Array.from({ length: pick(random, [0, 1, 2, 3]) }, (_, index) => ({
+						name: `tool_${index}`,
+						input_schema: { type: "object" as const },
+					})),
+					system: Array.from({ length: pick(random, [0, 1, 2, 3]) }, (_, index) => ({
+						type: "text" as const,
+						text: `System ${index}`,
+					})),
+					messages: Array.from({ length: pick(random, [1, 2, 3]) }, (_, index) => ({
+						role: index % 2 === 0 ? ("user" as const) : ("assistant" as const),
+						content: Array.from({ length: pick(random, [1, 2]) }, (_, block) => ({
+							type: "text" as const,
+							text: `Message ${index}.${block}`,
+						})),
+					})),
+				});
+				const slots: Array<{ cache_control?: CacheControl | null }> = [
+					params,
+					...(params.tools ?? []),
+					...(Array.isArray(params.system) ? params.system : []),
+					...params.messages.flatMap(message => (Array.isArray(message.content) ? message.content : [])),
+				] as Array<{ cache_control?: CacheControl | null }>;
+				for (let index = slots.length - 1; index > 0; index--) {
+					const other = Math.floor(random() * (index + 1));
+					[slots[index], slots[other]] = [slots[other]!, slots[index]!];
+				}
+				for (const slot of slots.slice(0, pick(random, [0, 1, 2, 3, 4]))) slot.cache_control = { ...control };
+				const before = structuredClone(params);
+				const countBefore = cacheControls(before).length;
+				const rootBefore = params.cache_control;
+
+				// The fork has no generated-marker budget: it always behaves like upstream budget >= 2.
+				applyPromptCaching(params, "automatic", { ...control });
+
+				// The root marker is replaced or added only while it fits the cap; then the last system
+				// block gains one only when no system block had one and the cap still has room.
+				const rootAfter = before.cache_control || countBefore < 4;
+				const countAfterRoot = countBefore + (before.cache_control || !rootAfter ? 0 : 1);
+				const systemBefore = Array.isArray(before.system) ? before.system : [];
+				const systemAdds =
+					systemBefore.length > 0 && !systemBefore.some(block => block.cache_control) && countAfterRoot < 4;
+				const expected = withoutRoot(before);
+				if (systemAdds && Array.isArray(expected.system)) expected.system.at(-1)!.cache_control = control;
+				expect(withoutRoot(params)).toEqual(expected);
+				if (before.cache_control) {
+					// replaced by a fresh marker, even when the caller's root already had the same value
+					expect(params.cache_control).not.toBe(rootBefore);
+					expect(params.cache_control).toEqual(control);
+				} else if (rootAfter) {
+					expect(params.cache_control).toEqual(control);
+				} else {
+					expect(params.cache_control).toBeUndefined();
+				}
+				expect(cacheControls(params)).toHaveLength(countAfterRoot + (systemAdds ? 1 : 0));
+				expect(cacheControls(params).length).toBeLessThanOrEqual(4);
+				expect(() => normalizeCacheControlTtlOrdering(params)).not.toThrow();
+			});
+		}
+	});
+
 	it("counts top-level automatic and caller controls together without mutating a callback replacement", async () => {
 		const replacement = cacheParams({
 			cache_control: { type: "ephemeral", ttl: "1h" },
