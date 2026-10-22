@@ -49,7 +49,9 @@ export async function resolveGitBase(cwd: string, branch?: string): Promise<stri
 			"master",
 		];
 		const currentBranch = await spawnText(["git", "symbolic-ref", "--quiet", "HEAD"], { cwd, timeoutMs: 3000 });
+		const currentRef = currentBranch.ok ? currentBranch.stdout.trim() : undefined;
 		let best: { ref: string; ahead: number } | undefined;
+		let checkedOut: string | undefined;
 		for (const candidate of candidates) {
 			const exists = await spawnText(["git", "rev-parse", "--symbolic-full-name", "--verify", candidate], {
 				cwd,
@@ -57,8 +59,13 @@ export async function resolveGitBase(cwd: string, branch?: string): Promise<stri
 			});
 			if (!exists.ok) continue;
 			// Exclude only the checked-out local ref, not distinct refs at the same
-			// commit or remote-tracking refs with the same branch name.
-			if (currentBranch.ok && exists.stdout.trim() === currentBranch.stdout.trim()) continue;
+			// commit or remote-tracking refs with the same branch name. A trunk
+			// checkout (the normal case when no worktree/branch exists yet) still
+			// needs a base, so remember it as the fallback.
+			if (currentRef && exists.stdout.trim() === currentRef) {
+				checkedOut ??= candidate;
+				continue;
+			}
 			const mergeBase = await spawnText(["git", "merge-base", "HEAD", candidate], { cwd, timeoutMs: 3000 });
 			if (!mergeBase.ok || !mergeBase.stdout.trim()) continue;
 			const count = await spawnText(["git", "rev-list", "--count", `${mergeBase.stdout.trim()}..HEAD`], {
@@ -69,7 +76,11 @@ export async function resolveGitBase(cwd: string, branch?: string): Promise<stri
 			if (!Number.isFinite(ahead)) continue;
 			if (!best || ahead < best.ahead) best = { ref: candidate, ahead };
 		}
+		// Fall back to the checked-out branch when it is the only candidate: its
+		// committed range is empty by definition, so the change set is exactly the
+		// working-tree diff, which is what an on-trunk run should review.
 		if (best) return best.ref;
+		if (checkedOut) return checkedOut;
 	}
 	const mergeBase = await spawnText(["git", "merge-base", "HEAD", "origin/main"], { cwd, timeoutMs: 3000 });
 	if (mergeBase.ok && mergeBase.stdout.trim()) return mergeBase.stdout.trim();

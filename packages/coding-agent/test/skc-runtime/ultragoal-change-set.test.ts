@@ -3,6 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import {
+	computeCheckpointChangeSet,
 	parseGitNameStatus,
 	resolveGitBase,
 	spawnText,
@@ -53,6 +54,19 @@ describe("ultragoal Git integration base resolution", () => {
 			await fixtureGit(root, "checkout", "-b", "feature");
 			await commitFixtureFile(root, "feature.txt");
 			expect(await resolveGitBase(root)).toBe("develop");
+		});
+	});
+
+	it("falls back to the checked-out branch when it is the only integration ref", async () => {
+		await withRepository("develop", async root => {
+			const baseline = await fixtureGit(root, "rev-parse", "HEAD");
+			await Bun.write(path.join(root, "feature.txt"), "feature.txt\n");
+			expect(await resolveGitBase(root)).toBe("develop");
+			const changeSet = await computeCheckpointChangeSet(root);
+			expect(changeSet?.baseRef).toBe("develop");
+			// On-trunk work has no committed range beyond the base: the change set is
+			// exactly the working-tree diff (here an untracked file is not yet listed).
+			expect(changeSet?.mergeBase).toBe(baseline);
 		});
 	});
 
