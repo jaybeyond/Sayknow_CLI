@@ -26,12 +26,14 @@ import {
 	replaceTabs,
 	type ToolUIStatus,
 	truncateToWidth,
+	wrapTextWithAnsi,
 } from "./render-utils";
 import { type SubagentSnapshot, type SubagentToolDetails, subagentAwaitRenderedStateSignature } from "./subagent";
 
 export { subagentAwaitRenderedStateSignature } from "./subagent";
 
 const PREVIEW_LINES_COLLAPSED = 1;
+const GUIDANCE_MAX_LINES = 12;
 const PREVIEW_LINES_EXPANDED = 4;
 const PREVIEW_LINE_WIDTH = 80;
 
@@ -93,6 +95,44 @@ function boundSubagentBodyLines(lines: string[], width: number): string[] {
 	return lines.map(line => (line.length > 0 ? truncateToWidth(replaceTabs(line), width, Ellipsis.Omit) : ""));
 }
 
+// Guidance is an instruction the caller must act on (e.g. "inspect before
+// cancelling" after an await timeout), so it wraps to the terminal width instead
+// of being cut to one preview line.
+function renderSubagentGuidanceLines(snapshot: SubagentSnapshot, width: number, theme: Theme): string[] {
+	const guidance = snapshot.guidance?.trim();
+	if (!guidance) return [];
+	const indent = "  ";
+	const wrapWidth = Math.max(1, width - indent.length);
+	const wrapped = guidance.split("\n").flatMap(segment => wrapTextWithAnsi(replaceTabs(segment), wrapWidth));
+	// Still bounded: producer guidance is a short fixed sentence, so the cap only
+	// bites on pathologically narrow terminals.
+	if (wrapped.length > GUIDANCE_MAX_LINES) {
+		wrapped.length = GUIDANCE_MAX_LINES;
+		wrapped[GUIDANCE_MAX_LINES - 1] = truncateToWidth(
+			`${wrapped[GUIDANCE_MAX_LINES - 1]!}…`,
+			wrapWidth,
+			Ellipsis.Unicode,
+		);
+	}
+	return wrapped.map(line => `${indent}${theme.fg("dim", line)}`);
+}
+
+function renderBoundSubagentBody(
+	snapshot: SubagentSnapshot,
+	expanded: boolean,
+	width: number,
+	theme: Theme,
+	staticTime: boolean,
+): string[] {
+	return boundSubagentBodyLines(
+		[
+			...renderSubagentSnapshotBody(snapshot, expanded, theme, staticTime),
+			...renderSubagentGuidanceLines(snapshot, width, theme),
+		],
+		width,
+	);
+}
+
 function renderCachedSubagentBody(
 	snapshot: SubagentSnapshot,
 	signature: string,
@@ -108,7 +148,7 @@ function renderCachedSubagentBody(
 		subagentBodyCache.set(key, hit);
 		return hit;
 	}
-	const lines = boundSubagentBodyLines(renderSubagentSnapshotBody(snapshot, expanded, theme), width);
+	const lines = renderBoundSubagentBody(snapshot, expanded, width, theme, true);
 	subagentBodyRenderCount += 1;
 	subagentBodyCache.set(key, lines);
 	if (subagentBodyCache.size > SUBAGENT_BODY_CACHE_MAX) {
@@ -125,7 +165,7 @@ function renderDynamicSubagentBody(
 	theme: Theme,
 ): string[] {
 	subagentBodyRenderCount += 1;
-	return boundSubagentBodyLines(renderSubagentSnapshotBody(snapshot, expanded, theme, false), width);
+	return renderBoundSubagentBody(snapshot, expanded, width, theme, false);
 }
 
 function statusIconKind(status: SubagentSnapshot["status"]): ToolUIStatus {
@@ -231,11 +271,7 @@ function renderSubagentSnapshotBody(
 		}
 	}
 
-	if (snapshot.guidance) {
-		for (const line of getPreviewLines(snapshot.guidance, 1, PREVIEW_LINE_WIDTH, Ellipsis.Unicode)) {
-			lines.push(`  ${theme.fg("dim", replaceTabs(line))}`);
-		}
-	}
+	// `snapshot.guidance` is appended by renderBoundSubagentBody, wrapped to width.
 
 	return lines;
 }

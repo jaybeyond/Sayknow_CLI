@@ -358,6 +358,62 @@ describe("interrupted await receipts", () => {
 		expect(out).not.toContain("0-Terminal\n  Inspect");
 	});
 
+	it("wraps await-timeout guidance to the terminal width instead of cutting it to one line", () => {
+		const guidance =
+			"Still running after the await timeout; timeout only bounded this wait and is not a failure. Inspect progress, continue independent work, and never cancel just because an await timed out; cancel only if the subagent has actually failed, gone off-track, or become unrecoverably wrong.";
+		for (const width of [60, 80]) {
+			const component = subagentToolRenderer.renderResult(
+				{
+					content: [{ type: "text", text: "" }],
+					details: {
+						awaitOutcome: "timed_out",
+						subagents: [snapshot({ id: "0-Slow", status: "running", guidance })],
+					},
+				},
+				{ expanded: false, isPartial: false, spinnerFrame: 0 },
+				theme,
+			);
+			const lines = component.render(width).map(line => Bun.stripANSI(line));
+			for (const line of lines) expect(Bun.stringWidth(line)).toBeLessThanOrEqual(width);
+			const text = lines.join(" ").replace(/\s+/g, " ");
+			expect(text).toContain("Inspect progress");
+			expect(text).toContain("never cancel just because an await timed out");
+			expect(text).toContain("unrecoverably wrong.");
+		}
+	});
+
+	it("never exceeds the terminal width with guidance on very narrow terminals", () => {
+		for (const width of [0, 1, 2, 3]) {
+			const component = subagentToolRenderer.renderResult(
+				{
+					content: [{ type: "text", text: "" }],
+					details: { subagents: [snapshot({ id: "0-Narrow", status: "running", guidance: "A" })] },
+				},
+				{ expanded: false, isPartial: false, spinnerFrame: 0 },
+				theme,
+			);
+			for (const line of component.render(width))
+				expect(Bun.stringWidth(Bun.stripANSI(line))).toBeLessThanOrEqual(width);
+		}
+	});
+
+	it("keeps pathological guidance bounded", () => {
+		const component = subagentToolRenderer.renderResult(
+			{
+				content: [{ type: "text", text: "" }],
+				details: { subagents: [snapshot({ id: "0-Long", status: "running", guidance: "word ".repeat(400) })] },
+			},
+			{ expanded: false, isPartial: false, spinnerFrame: 0 },
+			theme,
+		);
+		const guidanceLines = component
+			.render(40)
+			.map(line => Bun.stripANSI(line))
+			.filter(line => line.includes("word"));
+		expect(guidanceLines).toHaveLength(12);
+		expect(guidanceLines.at(-1)).toEndWith("…");
+	});
+
 	it("includes changed interruption guidance in the receipt signature and body cache key", () => {
 		const active = snapshot({ id: "0-Await", guidance: "Await interrupted; inspect it." });
 		const terminal = snapshot({ id: "0-Await", guidance: undefined });

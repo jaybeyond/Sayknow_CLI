@@ -109,6 +109,11 @@ condition in prose. Error guidance states the safe recovery action without
 showing credentials. Confirmations are explicit focused choices; destructive
 remove/disable actions are never the default side effect of navigation.
 
+Guidance the user must act on (for example the subagent await-timeout
+"inspect before cancelling" instruction) wraps to the terminal width instead of
+being clipped to one preview line, so the action survives narrow terminals. It
+stays bounded: at most 12 wrapped rows, the last ending in `…` if cut.
+
 A non-cancellable action visibly locks navigation and names the reason. A
 cancellable action names cancellation while it is pending, aborts on exit, and
 must not render a late completion after disposal. This follows the selector's
