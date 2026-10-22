@@ -121,22 +121,23 @@ const projectTmpdirProbe = path.join(import.meta.dir, "fixtures/workflow-mutatio
 
 async function runProjectTmpdirProbe(input: {
 	cwd: string;
+	processCwd?: string;
 	target: string;
 	sessionId: string;
 	drop?: "unlink" | "chdir";
+	tmpdir?: string;
 	expectedTmpdir?: string;
 }): Promise<{ blocked: boolean; message?: string }> {
-	const env: Record<string, string> = {};
-	for (const [key, value] of Object.entries(process.env)) {
-		if (value !== undefined && key !== "TMPDIR") env[key] = value;
-	}
+	const env: Record<string, string> = { ...process.env } as Record<string, string>;
+	if (input.expectedTmpdir !== undefined) delete env.TMPDIR;
+	if (input.tmpdir !== undefined) env.TMPDIR = input.tmpdir;
 	env.SKC_TMPDIR_PROBE_CWD = input.cwd;
 	env.SKC_TMPDIR_PROBE_PATH = input.target;
 	env.SKC_TMPDIR_PROBE_SESSION = input.sessionId;
 	if (input.drop) env.SKC_TMPDIR_PROBE_DROP = input.drop;
 	if (input.expectedTmpdir !== undefined) env.SKC_TMPDIR_PROBE_EXPECT = input.expectedTmpdir;
 	const proc = Bun.spawn([process.execPath, projectTmpdirProbe], {
-		cwd: input.cwd,
+		cwd: input.processCwd ?? input.cwd,
 		env,
 		stdin: "ignore",
 		stdout: "pipe",
@@ -945,6 +946,59 @@ describe("workflow mutation guard", () => {
 			} finally {
 				await removeDirLeafFirst(projectTmp);
 			}
+		}
+	}, 60_000);
+
+	it("uses the caller cwd dotenv snapshot when the guard was imported elsewhere", async () => {
+		const cwd = await makeTempRoot();
+		const processCwd = await makeTempRoot();
+		await writeActiveDeepInterview(cwd);
+		const projectTmp = await makeNonNeutralDir();
+		try {
+			const product = path.join(projectTmp, "src", "product.ts");
+			await fs.mkdir(path.dirname(product), { recursive: true });
+			await Bun.write(product, "original\n");
+			await Bun.write(path.join(cwd, ".env"), `TMPDIR=${projectTmp}\n`);
+
+			const decision = await runProjectTmpdirProbe({
+				cwd,
+				processCwd,
+				target: product,
+				sessionId: "session-a",
+				tmpdir: projectTmp,
+				expectedTmpdir: projectTmp,
+			});
+			expect(decision.blocked).toBe(true);
+			expect(decision.message).toBe(DEEP_INTERVIEW_MUTATION_BLOCK_MESSAGE);
+			expect(await Bun.file(product).text()).toBe("original\n");
+		} finally {
+			await removeDirLeafFirst(projectTmp);
+		}
+	}, 60_000);
+
+	it("fails closed when the caller cwd dotenv exceeds the bounded snapshot size", async () => {
+		const cwd = await makeTempRoot();
+		const processCwd = await makeTempRoot();
+		await writeActiveDeepInterview(cwd);
+		const projectTmp = await makeNonNeutralDir();
+		try {
+			const product = path.join(projectTmp, "src", "product.ts");
+			await fs.mkdir(path.dirname(product), { recursive: true });
+			await Bun.write(product, "original\n");
+			await Bun.write(path.join(cwd, ".env"), `TMPDIR=${projectTmp}\n${"#".repeat(128 * 1024)}\n`);
+
+			const decision = await runProjectTmpdirProbe({
+				cwd,
+				processCwd,
+				target: product,
+				sessionId: "session-a",
+				tmpdir: projectTmp,
+			});
+			expect(decision.blocked).toBe(true);
+			expect(decision.message).toBe(DEEP_INTERVIEW_MUTATION_BLOCK_MESSAGE);
+			expect(await Bun.file(product).text()).toBe("original\n");
+		} finally {
+			await removeDirLeafFirst(projectTmp);
 		}
 	}, 60_000);
 
