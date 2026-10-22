@@ -166,6 +166,40 @@ function resolveNpmManagedTarget(
 	return undefined;
 }
 
+/**
+ * Detect a project-local package install: `<...>/node_modules/.bin/<name>` with
+ * or without an executable extension.
+ *
+ * On Windows a dependency-installed CLI is a real `.exe` copied into
+ * `node_modules/.bin`, so the `.cmd`/`.ps1` shim rules never match it and
+ * `skc update` used to treat it as a standalone binary and try to replace it.
+ * That file belongs to the package manager and to the project's dependency
+ * tree: replacing it breaks the lockfile contract and, on Windows, fails on the
+ * file's ACL. The caller must redirect to the package manager instead of
+ * downloading a replacement.
+ */
+function resolveProjectLocalPackageInstall(
+	ompPath: string,
+	platform: PathPlatform = process.platform,
+): { packageRoot: string } | undefined {
+	const pathApi = pathApiForPlatform(platform);
+	const resolved = pathApi.normalize(ompPath);
+	const binDir = pathApi.dirname(resolved);
+	if (pathApi.basename(binDir).toLowerCase() !== ".bin") return undefined;
+	if (pathApi.basename(pathApi.dirname(binDir)).toLowerCase() !== "node_modules") return undefined;
+	const extension = pathApi.extname(resolved).toLowerCase();
+	const basename = extension ? pathApi.basename(resolved, extension) : pathApi.basename(resolved);
+	if (basename.toLowerCase() !== APP_NAME.toLowerCase()) return undefined;
+	return { packageRoot: pathApi.dirname(binDir) };
+}
+
+export function resolveProjectLocalPackageInstallForTest(
+	ompPath: string,
+	platform: PathPlatform,
+): { packageRoot: string } | undefined {
+	return resolveProjectLocalPackageInstall(ompPath, platform);
+}
+
 function resolveUpdateMethod(ompPath: string, bunBinDir: string | undefined): "bun" | "npm" | "binary" {
 	if (resolveNpmManagedTarget(ompPath)) return "npm";
 	if (!bunBinDir) return "binary";
@@ -186,6 +220,14 @@ export function resolveNpmManagedTargetForTest(
 async function resolveUpdateTarget(): Promise<UpdateTarget> {
 	const bunBinDir = await getBunGlobalBinDir();
 	const ompPath = resolveSkcPath();
+
+	if (ompPath && resolveProjectLocalPackageInstall(ompPath)) {
+		throw new Error(
+			formatUnsupportedTargetMessage(
+				`${APP_NAME} at ${ompPath} is installed by a package manager in this project's node_modules; update the dependency instead of replacing that file`,
+			),
+		);
+	}
 
 	if (ompPath) {
 		const npmTarget = resolveNpmManagedTarget(ompPath);
