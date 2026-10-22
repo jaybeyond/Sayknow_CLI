@@ -32,9 +32,10 @@ async function makeTempRoot(): Promise<string> {
 
 /** A directory that is not the project cwd and not a platform temp root. */
 async function makeNonNeutralDir(): Promise<string> {
-	const tmpParent = path.dirname(path.resolve(os.tmpdir()));
-	const parent = tmpParent === path.parse(tmpParent).root ? os.homedir() : tmpParent;
-	return fs.mkdtemp(path.join(parent, "skc-plan-tmpdir-"));
+	// Bun's os.userInfo().homedir follows HOME, which shard harnesses may place
+	// below /tmp. Use a sibling of the checkout so this target is not neutral temp.
+	const repoRoot = path.resolve(import.meta.dir, "../../..");
+	return fs.mkdtemp(path.join(path.dirname(repoRoot), "skc-plan-tmpdir-"));
 }
 
 async function removeDirLeafFirst(dir: string): Promise<void> {
@@ -117,6 +118,43 @@ function tool(name: string, extra: Record<string, unknown> = {}): AgentTool {
 function parseStateCommandJson(stdout: string | undefined): Record<string, unknown> {
 	if (!stdout) throw new Error("missing state command stdout");
 	return JSON.parse(stdout) as Record<string, unknown>;
+}
+
+function makeSeededRandom(seed: number): () => number {
+	let state = seed >>> 0;
+	return () => {
+		state = (Math.imul(state, 1_664_525) + 1_013_904_223) >>> 0;
+		return state / 0x1_0000_0000;
+	};
+}
+
+function seededToken(random: () => number, length: number): string {
+	const alphabet = "abcdefghijklmnopqrstuvwxyz0123456789";
+	let value = "";
+	for (let index = 0; index < length; index++) {
+		value += alphabet[Math.floor(random() * alphabet.length)] ?? "a";
+	}
+	return value;
+}
+
+function quoteBashSingle(value: string): string {
+	return `'${value.replaceAll("'", "'\\''")}'`;
+}
+
+function quoteBashDouble(value: string): string {
+	return `"${value.replaceAll("\\", "\\\\").replaceAll('"', '\\"').replaceAll("$", "\\$").replaceAll("`", "\\`")}"`;
+}
+
+function quoteBashAnsiC(value: string): string {
+	return `$'${value.replaceAll("\\", "\\\\").replaceAll("'", "\\'").replaceAll("\n", "\\n")}'`;
+}
+
+function quoteBashConcatenation(value: string, firstSplit: number, secondSplit: number): string {
+	return [
+		quoteBashSingle(value.slice(0, firstSplit)),
+		quoteBashDouble(value.slice(firstSplit, secondSplit)),
+		quoteBashAnsiC(value.slice(secondSplit)),
+	].join("");
 }
 
 const projectTmpdirProbe = path.join(import.meta.dir, "fixtures/workflow-mutation-tmpdir-probe.ts");
@@ -244,7 +282,7 @@ describe("workflow mutation guard", () => {
 				tool("write"),
 				{ path: ".skc/_session-session-a/state/skill-active-state.json", content: "{}" },
 			],
-			...(["deep-interview", "ralplan", "ultragoal", "team"] as const).map(
+			...(["deep-interview", "ralplan", "ultragoal"] as const).map(
 				skill =>
 					[
 						`write ${skill}`,
@@ -252,7 +290,7 @@ describe("workflow mutation guard", () => {
 						{ path: `.skc/state/sessions/session-a/${skill}-state.json`, content: "{}" },
 					] as [string, AgentTool, unknown],
 			),
-			...(["deep-interview", "ralplan", "ultragoal", "team"] as const).map(
+			...(["deep-interview", "ralplan", "ultragoal"] as const).map(
 				skill =>
 					[
 						`write generated ${skill}`,
@@ -264,7 +302,7 @@ describe("workflow mutation guard", () => {
 				"apply_patch state",
 				tool("edit", { mode: "apply_patch", customWireName: "apply_patch" }),
 				{
-					input: "*** Begin Patch\n*** Update File: .skc/state/team-state.json\n@@\n-a\n+b\n*** End Patch\n",
+					input: "*** Begin Patch\n*** Update File: .skc/state/autoresearch-state.json\n@@\n-a\n+b\n*** End Patch\n",
 				},
 			],
 			[
@@ -275,7 +313,7 @@ describe("workflow mutation guard", () => {
 			[
 				"ast_edit state",
 				tool("ast_edit"),
-				{ paths: [".skc/state/**/team-state.json"], ops: [{ pat: "foo", out: "bar" }] },
+				{ paths: [".skc/state/**/autoresearch-state.json"], ops: [{ pat: "foo", out: "bar" }] },
 			],
 		];
 
@@ -363,6 +401,141 @@ describe("workflow mutation guard", () => {
 			});
 			expect(decision.blocked).toBe(false);
 			expect(decision.targets).toEqual([]);
+		}
+	});
+
+	it("does not misread heredoc document bodies as mutations during active deep-interview (#false-positive)", async () => {
+		const cwd = await makeTempRoot();
+		await writeActiveDeepInterview(cwd);
+
+		// Markdown spec bodies contain `>` quotes, `a > b` prose, apostrophes, and
+		// even shell-looking lines — all inert data when the heredoc feeds a data
+		// consumer writing to neutral temp scratch.
+		const specBody = [
+			"# Spec: Memory System",
+			"",
+			"- retrieval: session > project > global precedence",
+			"- don't hardcode `~/.skc`; user's overrides matter",
+			"| Round | Prior → New | 66.5% → 62.3% |",
+			"rm -rf src is what we must never do",
+			"echo x > src/product.ts (quoted example, not a command)",
+		].join("\n");
+
+		for (const command of [
+			`cat > /tmp/mem-spec.md <<'SPECEOF'\n${specBody}\nSPECEOF\nwc -l /tmp/mem-spec.md`,
+			`cat <<'EOF' > /tmp/plan-draft.md\n${specBody}\nEOF`,
+			`tee /tmp/spec.md >/dev/null <<'DOC'\n${specBody}\nDOC`,
+			`cat <<-'TABDOC' > /tmp/spec.md\n\tindented body a > b\n\tTABDOC`,
+			`cat <<'CNT' | wc -l\n${specBody}\nCNT`,
+			`cat <<'PIPE' | grep -c retrieval | sort\n${specBody}\nPIPE`,
+			// A stray quote inside a comment must not poison cross-line quote state (Codex P2).
+			`# don't trip on this apostrophe\ncat <<'CMT' > /tmp/spec.md\n${specBody}\nCMT`,
+			// `#` after `)` is a comment boundary too (Codex P2).
+			`(true)# don't trip here either\ncat <<'PRN' > /tmp/spec.md\n${specBody}\nPRN`,
+			// A spec body DOCUMENTING a shadow definition is inert data, not a real shadow (Codex P2).
+			`cat <<'SHD' > /tmp/spec.md\nexample: cat() { bash -s; } and alias cat=evil\n${specBody}\nSHD`,
+			// eval/source/. in ARGUMENT position never trip the evaluated-payload fail-close (Codex P2).
+			`find . -name '*.md'\ncat <<'ARG' > /tmp/spec.md\n${specBody}\nARG`,
+			`echo eval source .\ncat <<'TOK' > /tmp/spec.md\n${specBody}\nTOK`,
+			// `function cat` in ARGUMENT position is not a shadow declaration (Codex P2).
+			`echo function cat\ncat <<'FNC' > /tmp/spec.md\n${specBody}\nFNC`,
+			// `command -v eval` only DESCRIBES eval; it is not an evaluated command (Codex P2).
+			`command -v eval\ncat <<'CMV' > /tmp/spec.md\n${specBody}\nCMV`,
+		]) {
+			const decision = await getWorkflowMutationDecision({
+				cwd,
+				sessionId: "session-a",
+				tool: tool("bash"),
+				args: { command },
+			});
+			expect(decision.blocked, command).toBe(false);
+		}
+	});
+
+	it("still blocks heredocs that mutate product paths or execute their body", async () => {
+		const cwd = await makeTempRoot();
+		await writeActiveDeepInterview(cwd);
+
+		for (const command of [
+			// Redirect target on the OPENER line is product code — blocked regardless of body.
+			"cat <<'EOF' > src/product.ts\ninert body\nEOF",
+			// Script consumers keep their bodies live: mutations inside count.
+			"bash <<'EOF'\nrm src/product.ts\nEOF",
+			'python3 <<PY\nopen("src/product.ts", "w").write("x")\nPY',
+			"patch -p1 <<'EOF'\n--- a/src/product.ts\n+++ b/src/product.ts\nEOF",
+			// Unknown/non-allowlisted consumers keep their bodies live too (Codex P1).
+			"awk -f - <<'EOF'\nBEGIN { x } # rm src/product.ts via body\necho x > src/product.ts\nEOF",
+			// A `<<` inside a comment is not an opener; the following live line still mutates (Codex P1).
+			"# <<'EOF'\nrm src/product.ts\nEOF",
+			// A `<<` inside double-quoted argument data is not an opener either.
+			'printf "%s" "<<\'EOF\'"\nrm src/product.ts\nEOF',
+			// Escaped quotes must not re-expose a quoted `<<` as an opener (Codex P1).
+			'cat "a \\" <<\'EOF\' \\" b"\nrm src/product.ts\nEOF',
+			// A downstream pipe stage can execute the body even when the opener is inert (Codex P1).
+			"cat <<'EOF' | bash\nrm src/product.ts\nEOF",
+			"cat <<'EOF' | grep -v noop | sh\nrm src/product.ts\nEOF",
+			// Escaped `|` keeps `cat` as an ARGUMENT to bash -s, not a pipe stage (Codex P1).
+			"bash -s \\| cat <<'EOF'\nrm src/product.ts\nEOF",
+			// A shadowed allowlisted name executes the body through its function body (Codex P1).
+			"cat() { bash -s; }; cat <<'EOF'\nrm src/product.ts\nEOF",
+			// `)` closing a $() substitution is a word char, so `#` stays literal and the shadow stays live (Codex P1).
+			"x=$(true)#lit; cat() { bash -s; }; cat <<'EOF'\nrm src/product.ts\nEOF",
+			// Arithmetic $(( )) has nested parens: depth must stay balanced (Codex P1).
+			"x=$((1))#lit; cat() { bash -s; }\ncat <<'EOF'\nrm src/product.ts\nEOF",
+			// eval after a reserved word is still a command position (Codex P1).
+			"if eval 'cat(){ bash -s; }'; then :; fi\ncat <<'EOF'\nrm src/product.ts\nEOF",
+			// `builtin`/`command` wrappers still reach the evaluated command (Codex P1).
+			"builtin eval 'cat(){ bash -s; }'; cat <<'EOF'\nrm src/product.ts\nEOF",
+			"command -- eval 'cat(){ bash -s; }'; cat <<'EOF'\nrm src/product.ts\nEOF",
+			// Leading redirections precede the command word — attached or separated (Codex P1).
+			"</dev/null eval 'cat(){ bash -s; }'; cat <<'EOF'\nrm src/product.ts\nEOF",
+			"< /dev/null eval 'cat(){ bash -s; }'; cat <<'EOF'\nrm src/product.ts\nEOF",
+			// Backslash-newline folds away: a split `e\`+`val` is still eval (Codex P1).
+			"e\\\nval 'cat(){ bash -s; }'; cat <<'EOF'\nrm src/product.ts\nEOF",
+			// ANSI-C quoting strips the `$` during quote removal: $'eval' is eval (Codex P1).
+			"$'eval' 'cat(){ bash -s; }'; cat <<'EOF'\nrm src/product.ts\nEOF",
+			// A continuation between `$` and its ANSI-C quote still yields eval (Codex P1).
+			"$\\\n'eval' 'cat(){ bash -s; }'; cat <<'EOF'\nrm src/product.ts\nEOF",
+			// Locale-translated `$"…"` strips the `$` too: $"eval" is eval (Codex P1).
+			"$\"eval\" 'cat(){ bash -s; }'; cat <<'EOF'\nrm src/product.ts\nEOF",
+			// A continuation between `$` and its locale-translated quote also yields eval (Codex P1).
+			"$\\\n\"eval\" 'cat(){ bash -s; }'; cat <<'EOF'\nrm src/product.ts\nEOF",
+			// ANSI-C escape sequences decode at runtime — fail closed (Codex P1).
+			"$'\\145val' 'cat(){ bash -s; }'; cat <<'EOF'\nrm src/product.ts\nEOF",
+			// ANSI-C opener split by a continuation still carries runtime escapes (Codex P1).
+			"$\\\n'\\145val' 'cat(){ bash -s; }'; cat <<'EOF'\nrm src/product.ts\nEOF",
+			// A continuation inside double quotes still splits a command word (Codex P1).
+			"\"e\\\nval\" 'cat(){ bash -s; }'; cat <<'EOF'\nrm src/product.ts\nEOF",
+			// Bash's `function name()` hybrid form is still a declaration (Codex P1).
+			"function cat() { bash -s; }; cat <<'EOF'\nrm src/product.ts\nEOF",
+			// Function shadows after reserved words are still declarations (Codex P1).
+			"if true; then cat() { bash -s; }; fi\ncat <<'EOF'\nrm src/product.ts\nEOF",
+			// A nested subshell's `)` is an operator: `#` after it comments out the fake opener (Codex P1).
+			"x=$( (true)# ; cat <<'EOF'\n)\nrm src/product.ts\nEOF",
+			// `case` pattern `)` desyncs the depth scanner — fail closed (Codex P1).
+			"x=$(case x in x) true;; esac)#lit; cat() { bash -s; }\ncat <<'EOF'\nrm src/product.ts\nEOF",
+			// eval/source can install a shadow from quoted data the syntax view blanked (Codex P1).
+			"eval 'cat(){ bash -s; }'; cat <<'EOF'\nrm src/product.ts\nEOF",
+			"source /dev/stdin <<'DEF'\ncat(){ bash -s; }\nDEF\ncat <<'EOF'\nrm src/product.ts\nEOF",
+			// Quoted/escaped spellings of eval must still be recognized after quote removal (Codex P1).
+			"e\\val 'cat(){ bash -s; }'; cat <<'EOF'\nrm src/product.ts\nEOF",
+			"'ev'al 'cat(){ bash -s; }'; cat <<'EOF'\nrm src/product.ts\nEOF",
+			// A line-continued opener hides the downstream interpreter stage (Codex P1).
+			"cat <<'EOF' \\\n| bash\nrm src/product.ts\nEOF",
+			// A multiline double-quoted string containing `cat <<'EOF'` is data, not an opener (Codex P1).
+			"printf '%s' \"\ncat <<'EOF'\n\" > /dev/null\nrm src/product.ts\nEOF",
+			// Unquoted delimiter + command substitution in body expands at runtime — fail closed.
+			"cat <<EOF > /tmp/out.md\n$(rm src/product.ts)\nEOF",
+			// Unterminated heredoc is unparseable — body scanned as before, mutation caught.
+			"cat <<'EOF' > /tmp/out.md\necho x > src/product.ts",
+		]) {
+			const decision = await getWorkflowMutationDecision({
+				cwd,
+				sessionId: "session-a",
+				tool: tool("bash"),
+				args: { command },
+			});
+			expect(decision.blocked).toBe(true);
 		}
 	});
 
@@ -717,13 +890,13 @@ describe("workflow mutation guard", () => {
 		});
 		expect(temp.blocked).toBe(false);
 
-		const skcBash = await getWorkflowMutationDecision({
+		const gjcBash = await getWorkflowMutationDecision({
 			cwd,
 			sessionId: "session-a",
 			tool: tool("bash"),
 			args: { command: "skc ralplan --write --stage planner --stage_n 1 --artifact /tmp/plan.md" },
 		});
-		expect(skcBash.blocked).toBe(false);
+		expect(gjcBash.blocked).toBe(false);
 	});
 
 	it("keeps an unsigned stricter phase when the active entry has left planning", async () => {
@@ -768,19 +941,6 @@ describe("workflow mutation guard", () => {
 			args: { path: "src/product.ts", content: "x" },
 		});
 		expect(executing.blocked).toBe(false);
-	});
-
-	it("does not block product mutation while team is active", async () => {
-		const cwd = await makeTempRoot();
-		await writeActiveSkill(cwd, "team", "running");
-
-		const decision = await getWorkflowMutationDecision({
-			cwd,
-			sessionId: "session-a",
-			tool: tool("write"),
-			args: { path: "src/product.ts", content: "x" },
-		});
-		expect(decision.blocked).toBe(false);
 	});
 
 	it("keeps blocking ralplan at the pre-approval terminal phases (final, handoff)", async () => {
@@ -1238,7 +1398,349 @@ describe("workflow mutation guard", () => {
 	});
 });
 
-describe("eval and python mutation guard", () => {
+describe("bash scanner command substitutions", () => {
+	function decideBash(cwd: string, command: string) {
+		return getWorkflowMutationDecision({ cwd, sessionId: "session-a", tool: tool("bash"), args: { command } });
+	}
+
+	it("scans command substitutions as the live code they are", async () => {
+		const cwd = await makeTempRoot();
+		await writeActiveSkill(cwd, "deep-interview", "interviewing");
+
+		// A substitution executes even inside a double-quoted span, so its body is
+		// a nested command list and must be scanned like an `sh -c` payload.
+		for (const command of [
+			'echo "$(rm -rf src/product.ts)"',
+			'echo "`rm -rf src/product.ts`"',
+			"echo $(printf x > src/product.ts)",
+			'echo "$(echo "$(rm -rf src/product.ts)")"',
+		]) {
+			expect((await decideBash(cwd, command)).blocked, command).toBe(true);
+		}
+
+		// Single quotes suppress substitution entirely, so this one is inert text.
+		expect((await decideBash(cwd, `skc autoresearch verdict --evidence '$(echo inert)' --evaluator r`)).blocked).toBe(
+			false,
+		);
+	});
+
+	it("tracks quotes the way the shell does while locating substitutions", async () => {
+		const cwd = await makeTempRoot();
+		await writeActiveSkill(cwd, "deep-interview", "interviewing");
+
+		for (const command of [
+			// An apostrophe inside a double-quoted word is data, not a single-quote
+			// opener; the substitution after it is still live.
+			`echo "it's $(rm -rf src/product.ts)"`,
+			// A `)` inside a quoted argument does not close the body; the trailing
+			// command is still part of the substitution.
+			`echo "$(printf ')'; rm -rf src/product.ts)"`,
+			`echo "$(printf ")"; rm -rf src/product.ts)"`,
+			// Backtick body with an escaped backtick inside.
+			'echo "`printf \\`; rm -rf src/product.ts`"',
+		]) {
+			expect((await decideBash(cwd, command)).blocked, command).toBe(true);
+		}
+	});
+
+	it("fails closed on an unbalanced substitution", async () => {
+		const cwd = await makeTempRoot();
+		await writeActiveSkill(cwd, "deep-interview", "interviewing");
+		for (const command of ['echo "$(rm -rf src/product.ts"', 'echo "`rm -rf src/product.ts"']) {
+			const decision = await decideBash(cwd, command);
+			expect(decision.blocked, command).toBe(true);
+			expect(decision.reason).toBe("unknown-target");
+		}
+	});
+
+	it("fails closed when substitution parser frames exceed their nesting bound", async () => {
+		const cwd = await makeTempRoot();
+		await writeActiveSkill(cwd, "deep-interview", "interviewing");
+		const nested = `${"$(".repeat(128)}rm -rf src/product.ts${")".repeat(128)}`;
+		const decision = await decideBash(cwd, `printf "%s" "${nested}"`);
+		expect(decision.blocked).toBe(true);
+		expect(decision.reason).toBe("unknown-target");
+	});
+
+	it("ignores substitutions in literal data heredocs and shell comments", async () => {
+		const cwd = await makeTempRoot();
+		await writeActiveSkill(cwd, "deep-interview", "interviewing");
+
+		for (const command of [
+			"cat <<'EOF' > /tmp/spec.md\n$(rm -rf src/product.ts)\nEOF",
+			"cat <<'EOF' > /tmp/spec.md\n`rm -rf src/product.ts`\nEOF",
+			"# $(rm -rf src/product.ts) and an 'unterminated quote\ncat <<'EOF' > /tmp/spec.md\nsafe\nEOF",
+			"printf '%s' safe # `rm -rf src/product.ts` and an 'unterminated quote\ncat <<'EOF' > /tmp/spec.md\nsafe\nEOF",
+			"printf '%s' safe # $(rm -rf src/product.ts)\ncat <<'EOF' > /tmp/spec.md\nsafe\nEOF",
+		]) {
+			const decision = await decideBash(cwd, command);
+			expect(decision.blocked, command).toBe(false);
+		}
+	});
+
+	it("keeps live substitutions and executable or expanding heredocs blocked", async () => {
+		const cwd = await makeTempRoot();
+		await writeActiveSkill(cwd, "deep-interview", "interviewing");
+
+		for (const command of [
+			'printf "%s" "$(rm -rf src/product.ts)"',
+			'printf "%s" "$(printf "#"; rm -rf src/product.ts)"',
+			'printf "%s" "$(printf ")"; rm -rf src/product.ts)"',
+			'printf "%s" "# $(rm -rf src/product.ts)"',
+			"printf '%s' foo\\# $(rm -rf src/product.ts)",
+			"printf '%s' foo# $(rm -rf src/product.ts)",
+			"bash <<'EOF'\nrm src/product.ts\nEOF",
+			"cat <<'EOF' | bash\nrm src/product.ts\nEOF",
+			"cat <<EOF > /tmp/spec.md\n$(rm src/product.ts)\nEOF",
+		]) {
+			const decision = await decideBash(cwd, command);
+			expect(decision.blocked, command).toBe(true);
+		}
+	});
+});
+
+describe("opaque interpreter writes during planning", () => {
+	function decideBash(cwd: string, command: string) {
+		return getWorkflowMutationDecision({ cwd, sessionId: "session-a", tool: tool("bash"), args: { command } });
+	}
+
+	it("fails closed on an opaque interpreter write that names no target", async () => {
+		const cwd = await makeTempRoot();
+		await writeActiveSkill(cwd, "deep-interview", "interviewing");
+
+		// These resolve to NO extracted target, so an allowance keyed on
+		// `paths.every(...)` alone is vacuously true and waves them through even
+		// though they really do overwrite product code.
+		for (const command of [
+			`python3 -c "open('src/product.ts','w').write('x')"`,
+			`node -e "require('fs').writeFileSync('src/product.ts','x')"`,
+		]) {
+			expect((await decideBash(cwd, command)).blocked, command).toBe(true);
+		}
+	});
+});
+
+describe("bash scanner quoting model", () => {
+	function decideBash(cwd: string, command: string) {
+		return getWorkflowMutationDecision({ cwd, sessionId: "session-a", tool: tool("bash"), args: { command } });
+	}
+
+	it("treats shell metacharacters inside double-quoted prose as literal data", async () => {
+		const cwd = await makeTempRoot();
+		await writeActiveSkill(cwd, "deep-interview", "interviewing");
+
+		// Every one of these is a sanctioned CLI call whose quoted VALUE merely
+		// mentions `>`/`->` or a destructive word. None of them writes a file.
+		for (const command of [
+			`skc autoresearch verdict --status-json '{"v":1}' --evidence "p99 500ms -> 120ms" --evaluator run-3 --json`,
+			'skc autoresearch verdict --evidence "throughput > baseline" --evaluator run-3 --json',
+			'skc autoresearch critic --caveat "n=3 -> low power" --evaluator critic-1 --json',
+			'skc autoresearch verdict --evidence "we did not rm the cache; mv was avoided" --evaluator r',
+			'git commit -m "fix thing\\nrm was considered\\n"',
+		]) {
+			const decision = await decideBash(cwd, command);
+			expect(decision.blocked).toBe(false);
+			expect(decision.targets).toEqual([]);
+		}
+	});
+
+	it("still blocks real writes around and after quoted prose", async () => {
+		const cwd = await makeTempRoot();
+		await writeActiveSkill(cwd, "deep-interview", "interviewing");
+
+		for (const command of [
+			'echo "harmless -> prose" > src/product.ts',
+			'echo "a > b" > src/product.ts && echo "c -> d"',
+			'echo "metric -> value" | tee src/product.ts',
+			'echo "he said \\"hi\\"" > src/product.ts',
+			"echo pwned > src/product.ts",
+			"rm -rf src/product.ts",
+		]) {
+			expect((await decideBash(cwd, command)).blocked).toBe(true);
+		}
+	});
+
+	it("blocks mutators reached through a root-level compound command", async () => {
+		const cwd = await makeTempRoot();
+		await writeActiveSkill(cwd, "deep-interview", "interviewing");
+
+		// The mutation regex keys on a `;`/`|`/`&`/newline before the command word.
+		// A root compound puts the mutator after a KEYWORD instead, so these used to
+		// extract no target and no unknown flag, and the planning guard allowed them.
+		for (const command of [
+			"{ rm src/product.ts; }",
+			"if true; then rm src/product.ts; fi",
+			"for f in a; do rm src/product.ts; done",
+			"while true; do printf x > src/product.ts; done",
+			"case x in a) rm src/product.ts;; esac",
+		]) {
+			expect((await decideBash(cwd, command)).blocked, command).toBe(true);
+		}
+	});
+
+	it("blocks mutators reached through an executable wrapper", async () => {
+		const cwd = await makeTempRoot();
+		await writeActiveSkill(cwd, "deep-interview", "interviewing");
+
+		for (const command of [
+			"command rm src/product.ts",
+			"builtin rm src/product.ts",
+			"env rm src/product.ts",
+			"env FOO=bar rm src/product.ts",
+			"exec rm src/product.ts",
+			"nohup rm src/product.ts",
+			"nice -n 5 rm src/product.ts",
+			"command tee src/product.ts",
+		]) {
+			expect((await decideBash(cwd, command)).blocked, command).toBe(true);
+		}
+	});
+
+	it("normalizes ANSI-C and locale-quoted executable names", async () => {
+		const cwd = await makeTempRoot();
+		await writeActiveSkill(cwd, "deep-interview", "interviewing");
+
+		// Bash drops the `$` during quote removal, so these really execute `rm`.
+		for (const command of ["$'rm' src/product.ts", '$"rm" src/product.ts', "$'r''m' src/product.ts"]) {
+			expect((await decideBash(cwd, command)).blocked, command).toBe(true);
+		}
+	});
+
+	it("classifies single-quoted redirection operands like double-quoted ones", async () => {
+		const cwd = await makeTempRoot();
+		await writeActiveSkill(cwd, "deep-interview", "interviewing");
+
+		// `/dev/null` is a sanctioned sink in either quoting style.
+		for (const command of ["printf x > '/dev/null'", "printf x >> '/dev/null'", "dd if=a of='/dev/null'"]) {
+			expect((await decideBash(cwd, command)).blocked, command).toBe(false);
+		}
+		// A single-quoted product path is still a real write.
+		for (const command of [
+			"printf x > 'src/product.ts'",
+			"printf x >> 'src/product.ts'",
+			"dd if=a of='src/product.ts'",
+		]) {
+			expect((await decideBash(cwd, command)).blocked, command).toBe(true);
+		}
+	});
+
+	it("stays fail-closed on an unbalanced quote", async () => {
+		const cwd = await makeTempRoot();
+		await writeActiveSkill(cwd, "deep-interview", "interviewing");
+		for (const command of ['echo "unterminated > src/product.ts', "echo 'unterminated > src/product.ts"]) {
+			expect((await decideBash(cwd, command)).blocked).toBe(true);
+		}
+	});
+
+	it("blocks quote-boundary bypass attempts", async () => {
+		const cwd = await makeTempRoot();
+		await writeActiveSkill(cwd, "deep-interview", "interviewing");
+
+		for (const command of [
+			'skc autoresearch verdict --evidence "safe" > src/product.ts',
+			'skc autoresearch verdict --evidence "a > b"; rm src/product.ts',
+			'skc autoresearch verdict --evidence "p99 -> ok" && rm -rf src/product.ts',
+			`sh -c "echo 'a -> b' > src/product.ts"`,
+			'dd if=/dev/zero of="src/product.ts" count=1',
+			'printf x > "src/product.ts"',
+			'printf x >> "src/product.ts"',
+		]) {
+			expect((await decideBash(cwd, command)).blocked).toBe(true);
+		}
+	});
+
+	it("blocks quoted and quote-split mutators in planning phases", async () => {
+		const commands = [
+			'rm "src/product.ts"',
+			'r"m" -rf src/product.ts',
+			"r'm' -rf 'src/product.ts'",
+			'r\\\nm "src/product.ts"',
+			"echo \"$(printf 'x)'; rm src/product.ts)\"",
+			'echo "$(printf "x)"; rm src/product.ts)"',
+			'echo "$(printf "$(printf \'x)\')"; rm src/product.ts)"',
+			'echo "$(printf x\\); rm src/product.ts)"',
+			'echo "$(printf \\ #; rm src/product.ts)"',
+			'echo "$(printf x # )\nrm src/product.ts)"',
+			'echo "$(case x in x) true;; esac; rm src/product.ts)"',
+		];
+
+		for (const [skill, phase] of [
+			["deep-interview", "interviewing"],
+			["ralplan", "planner"],
+		] as const) {
+			const cwd = await makeTempRoot();
+			await writeActiveSkill(cwd, skill, phase);
+			for (const command of commands) {
+				const decision = await decideBash(cwd, command);
+				expect(decision.blocked, command).toBe(true);
+				expect(decision.targets, command).toContain("src/product.ts");
+			}
+		}
+	});
+
+	it("fails closed on a recognized targetless mutator during a deep-interview", async () => {
+		const cwd = await makeTempRoot();
+		await writeActiveSkill(cwd, "deep-interview", "interviewing");
+
+		const decision = await decideBash(cwd, "rm -rf");
+		expect(decision.blocked).toBe(true);
+		expect(decision.reason).toBe("unknown-target");
+		expect(decision.targets).toEqual([]);
+	});
+
+	it("fails closed on unmodeled compound commands in live substitutions", async () => {
+		for (const [skill, phase] of [
+			["deep-interview", "interviewing"],
+			["ralplan", "planner"],
+		] as const) {
+			const cwd = await makeTempRoot();
+			await writeActiveSkill(cwd, skill, phase);
+			for (const command of [
+				'echo "$({ rm -f src/product.ts; })"',
+				'echo "$(if true; then rm src/product.ts; fi)"',
+				'echo "$(for x in one; do rm src/product.ts; done)"',
+				'echo "$(while false; do rm src/product.ts; done)"',
+				'echo "$(until true; do rm src/product.ts; done)"',
+				'echo "$(! rm src/product.ts)"',
+				'echo "$(time rm src/product.ts)"',
+				'echo "`{ rm -f src/product.ts; }`"',
+				'touch autoresearch.sh; echo "$({ rm -f src/product.ts; })"',
+			]) {
+				const decision = await decideBash(cwd, command);
+				expect(decision.blocked, command).toBe(true);
+				expect(decision.reason, command).toBe("unknown-target");
+			}
+		}
+	});
+
+	it("allows quoted non-mutator arguments while retaining quoted redirection targets", async () => {
+		const cwd = await makeTempRoot();
+		await writeActiveSkill(cwd, "deep-interview", "interviewing");
+
+		for (const command of [
+			'git commit -m "rm src/product.ts"',
+			'echo "a > b; rm src/product.ts"',
+			'printf x > "/dev/null"',
+			"echo \"$(printf 'x)')\"",
+			'echo "$(printf x # ) rm src/product.ts\n)"',
+		]) {
+			const decision = await decideBash(cwd, command);
+			expect(decision.blocked).toBe(false);
+		}
+
+		const redirected = await decideBash(cwd, 'printf x > "src/product.ts"');
+		expect(redirected.blocked).toBe(true);
+		expect(redirected.targets).toContain("src/product.ts");
+	});
+
+	it("treats an escaped quote as keeping the span open, matching the shell", async () => {
+		const cwd = await makeTempRoot();
+		await writeActiveSkill(cwd, "deep-interview", "interviewing");
+		// A real shell prints `x " > src/product.ts` and creates no file: the
+		// escaped quote does not close the span, so the `>` never redirects.
+		expect((await decideBash(cwd, 'echo "x \\" > src/product.ts"')).blocked).toBe(false);
+	});
+
 	it("covers eval and python on the same mutation-tool gate as edit and bash", () => {
 		expect(isWorkflowMutationTool("eval")).toBe(true);
 		expect(isWorkflowMutationTool("python")).toBe(true);
@@ -1276,10 +1778,20 @@ describe("eval and python mutation guard", () => {
 			expect(decision.reason, `${name} ${JSON.stringify(args)}`).toBe("phase-boundary");
 			expect(decision.message).toBe(RALPLAN_MUTATION_BLOCK_MESSAGE);
 		}
+		for (const [name, args] of [
+			["python", { code: 'exec("open(\\"src/product.ts\\",\\"w\\").write(\\"x\\")")\n' }],
+			["python", { code: `value = f"{exec('open("src/product.ts","w").write("x")')}"\n` }],
+			["eval", { cells: [{ language: "py", code: '__import__("os").system("echo x > src/product.ts")\n' }] }],
+		] as const) {
+			const input = { cwd, sessionId: "session-a", tool: tool(name), args };
+			await expect(assertWorkflowMutationAllowed(input)).rejects.toBeInstanceOf(ToolError);
+			const decision = await getWorkflowMutationDecision(input);
+			expect(decision.blocked, name).toBe(true);
+			expect(decision.reason, `${name} ${JSON.stringify(args)}`).toBe("unknown-target");
+		}
 	});
 
-	// The fork mutation guard does not gate autoresearch; deep-interview stands in for it.
-	it("blocks eval and python product writes during a deep-interview", async () => {
+	it("blocks eval and python product writes and copies during a deep-interview", async () => {
 		const cwd = await makeTempRoot();
 		await writeActiveSkill(cwd, "deep-interview", "interviewing");
 		for (const [name, args] of [
@@ -1295,32 +1807,6 @@ describe("eval and python mutation guard", () => {
 			});
 			expect(decision.blocked).toBe(true);
 			expect(decision.message).toBe(DEEP_INTERVIEW_MUTATION_BLOCK_MESSAGE);
-		}
-	});
-
-	it("keeps non-mutating eval or python allowed during planning", async () => {
-		const cwd = await makeTempRoot();
-		await writeActiveSkill(cwd, "ralplan", "planner");
-		for (const [name, args] of [
-			["python", { code: "print(1 + 1)\n" }],
-			["python", { code: 'text = read("package.json")\n' }],
-			["python", { code: 'open("src/product.ts", encoding="utf-8").read()\n' }],
-			["python", { code: '# write("src/product.ts", "x")\nprint(1)\n' }],
-			["python", { code: "print(\"write('src/product.ts', 'x')\")\n" }],
-			["python", { action: "clear" }],
-			["python", { code: 'write("/tmp/ralplan-scratch.md", "x")\n' }],
-			["python", { code: 'shutil.copy("/tmp/ralplan-scratch.md", "/tmp/ralplan-other.md")\n' }],
-			["eval", { cells: [{ language: "py", code: "print(1 + 1)\n" }] }],
-			["eval", { cells: [{ language: "js", code: 'await read("package.json")\n' }] }],
-			["eval", { cells: [{ language: "js", code: 'file.write("not-a-product-write")\n' }] }],
-		] as const) {
-			const decision = await getWorkflowMutationDecision({
-				cwd,
-				sessionId: "session-a",
-				tool: tool(name),
-				args,
-			});
-			expect(decision.blocked, `${name} ${JSON.stringify(args)}`).toBe(false);
 		}
 	});
 
@@ -1464,6 +1950,950 @@ describe("eval and python mutation guard", () => {
 		}
 	});
 
+	it("blocks Path writes and an unresolved Path receiver", async () => {
+		const cwd = await makeTempRoot();
+		await writeActiveSkill(cwd, "ralplan", "planner");
+		for (const code of [
+			'Path("src", "product.ts").write_text("x")\n',
+			'Path("src", "product.ts").write_bytes(b"x")\n',
+			'Path("src", "product.ts").touch()\n',
+		]) {
+			const input = { cwd, sessionId: "session-a", tool: tool("python"), args: { code } };
+			await expect(assertWorkflowMutationAllowed(input)).rejects.toBeInstanceOf(ToolError);
+			const decision = await getWorkflowMutationDecision(input);
+			expect(decision.blocked, code).toBe(true);
+			expect(decision.targets, code).toContain("src/product.ts");
+			expect(decision.reason, code).toBe("phase-boundary");
+		}
+		const dynamic = await getWorkflowMutationDecision({
+			cwd,
+			sessionId: "session-a",
+			tool: tool("python"),
+			args: { code: 'Path(root, "product.ts").write_text("x")\n' },
+		});
+		expect(dynamic.blocked).toBe(true);
+		expect(dynamic.reason).toBe("unknown-target");
+		for (const code of [
+			'from pathlib import Path as P; P("src/product.ts").write_text("x")\n',
+			'from pathlib import Path; Path("src").joinpath("product.ts").write_text("x")\n',
+		]) {
+			const decision = await getWorkflowMutationDecision({
+				cwd,
+				sessionId: "session-a",
+				tool: tool("python"),
+				args: { code },
+			});
+			expect(decision.blocked, code).toBe(true);
+			expect(decision.reason, code).toBe("unknown-target");
+		}
+	});
+
+	it("resets a Path receiver at a later absolute component before the scratch check", async () => {
+		const cwd = await makeTempRoot();
+		await writeActiveSkill(cwd, "ralplan", "planner");
+		const productPath = path.join(cwd, "src", "product.ts");
+		const decision = await getWorkflowMutationDecision({
+			cwd,
+			sessionId: "session-a",
+			tool: tool("python"),
+			args: { code: `Path("/tmp", ${JSON.stringify(productPath)}).write_text("x")\n` },
+		});
+		expect(decision.blocked).toBe(true);
+		expect(decision.reason).toBe("phase-boundary");
+		expect(decision.targets).toContain(productPath);
+	});
+
+	it("keeps planning Bash interpreter and inline-program boundaries fail-closed", async () => {
+		const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "skc-plan workspace-"));
+		tempRoots.push(cwd);
+		await writeActiveSkill(cwd, "ralplan", "planner");
+		const scratch = path.join(os.tmpdir(), `skc-plan-multi-write-${process.pid}.txt`);
+		const escapedScratch = path.join(os.tmpdir(), `skc-plan-escaped\\${process.pid}.txt`);
+		const spacedProjectTarget = path.join(cwd, "src", "product.ts");
+		const cases: Array<{
+			name: string;
+			command: string;
+			blocked: boolean;
+			reason?: "phase-boundary" | "unknown-target";
+			target?: string;
+		}> = [
+			{
+				name: "ANSI-C quoted Python write source",
+				command: `python3 -c $'open("src/product.ts","w").write("PWNED")'`,
+				blocked: true,
+				reason: "unknown-target",
+			},
+			{
+				name: "Python exec-wrapped write source",
+				command: `python3 -c 'exec(${JSON.stringify('open("src/product.ts","w").write("PWNED")')})'`,
+				blocked: true,
+				reason: "unknown-target",
+			},
+			{
+				name: "Python eval-wrapped write source",
+				command: `python3 -c 'eval(${JSON.stringify('open("src/product.ts","w").write("PWNED")')})'`,
+				blocked: true,
+				reason: "unknown-target",
+			},
+			{
+				name: "Ruby attached -e write source",
+				command: `ruby -e'File.open("src/product.ts","w").write("PWNED")'`,
+				blocked: true,
+				reason: "unknown-target",
+			},
+			{
+				name: "Ruby eval-wrapped write source",
+				command: `ruby -e 'eval("File.open(\\"src/product.ts\\",\\"w\\").write(\\"PWNED\\")")'`,
+				blocked: true,
+				reason: "unknown-target",
+			},
+			{
+				name: "Ruby reflective send source",
+				command: `ruby -e 'send(:eval, "File.open(\\"src/product.ts\\",\\"w\\").write(\\"PWNED\\")")'`,
+				blocked: true,
+				reason: "unknown-target",
+			},
+			{
+				name: "Node eval-wrapped write source",
+				command: `node -e 'eval(${JSON.stringify('require("fs").writeFileSync("src/product.ts","PWNED")')})'`,
+				blocked: true,
+				reason: "unknown-target",
+			},
+			{
+				name: "Node Function constructor source",
+				command: `node -e 'Function(${JSON.stringify('require("fs").writeFileSync("src/product.ts","PWNED")')})()'`,
+				blocked: true,
+				reason: "unknown-target",
+			},
+			{
+				name: "Node dynamic eval inside an interpolated template",
+				command: "node -e '`" + "$" + "{eval(command)}`'",
+				blocked: true,
+				reason: "unknown-target",
+			},
+			{
+				name: "Node filesystem module loaded by string",
+				command: `node -e 'const fs = require("node:fs"); fs.writeFileSync("src/product.ts", "PWNED")'`,
+				blocked: true,
+				reason: "unknown-target",
+			},
+			{
+				name: "filesystem module loading is opaque without a visible write call",
+				command: `node -e 'require("node:fs/promises")'`,
+				blocked: true,
+				reason: "unknown-target",
+			},
+			{
+				name: "Perl eval source",
+				command: `perl -e 'eval $payload'`,
+				blocked: true,
+				reason: "unknown-target",
+			},
+			{
+				name: "PHP eval source",
+				command: `php -r 'eval($payload);'`,
+				blocked: true,
+				reason: "unknown-target",
+			},
+			{
+				name: "Lua dynamic load source",
+				command: `lua -e 'loadstring(payload)()'`,
+				blocked: true,
+				reason: "unknown-target",
+			},
+			{
+				name: "Lua filesystem module loaded by string",
+				command: `lua -e 'require("io")'`,
+				blocked: true,
+				reason: "unknown-target",
+			},
+			{
+				name: "Bash -c eval source",
+				command: `bash -c 'eval "$payload"'`,
+				blocked: true,
+				reason: "unknown-target",
+			},
+			{
+				name: "dynamic execution spelling inside an interpreter string span",
+				command: `ruby -e 'puts "eval(\\"File.open(\\"src/product.ts\\",\\"w\\")\\")"'`,
+				blocked: true,
+				reason: "unknown-target",
+			},
+			{
+				name: "PHP direct file write API",
+				command: `php -r 'file_put_contents("src/product.ts", "PWNED");'`,
+				blocked: true,
+				reason: "unknown-target",
+			},
+			{
+				name: "opaque AWK file program",
+				command: "awk -f scripts/plan.awk",
+				blocked: true,
+				reason: "unknown-target",
+			},
+			{
+				name: "opaque long-option AWK file program",
+				command: "awk --file=scripts/plan.awk",
+				blocked: true,
+				reason: "unknown-target",
+			},
+			{
+				name: "AWK assignment option before quoted program",
+				command: `awk -v x=1 'BEGIN { print "PWNED" > "src/product.ts" }' input`,
+				blocked: true,
+				reason: "phase-boundary",
+				target: "src/product.ts",
+			},
+			{
+				name: "GNU AWK alias direct output write",
+				command: `gawk 'BEGIN { print "PWNED" > "src/product.ts" }' input`,
+				blocked: true,
+				reason: "phase-boundary",
+				target: "src/product.ts",
+			},
+			{
+				name: "MAWK alias direct output write",
+				command: `mawk 'BEGIN { print "PWNED" > "src/product.ts" }' input`,
+				blocked: true,
+				reason: "phase-boundary",
+				target: "src/product.ts",
+			},
+			{
+				name: "AWK command-pipe write",
+				command: `awk 'BEGIN { print "PWNED" | "tee src/product.ts" }'`,
+				blocked: true,
+				reason: "unknown-target",
+			},
+			{
+				name: "AWK system command execution",
+				command: `awk 'BEGIN { system("touch src/product.ts") }'`,
+				blocked: true,
+				reason: "unknown-target",
+			},
+			{
+				name: "AWK second statement in quoted program",
+				command: `awk 'BEGIN { print 1; print "PWNED" > "src/product.ts" }' input`,
+				blocked: true,
+				reason: "phase-boundary",
+				target: "src/product.ts",
+			},
+			{
+				name: "sed addressed write after regex address",
+				command: "sed -n '/needle/w src/product.ts' input",
+				blocked: true,
+				reason: "phase-boundary",
+				target: "src/product.ts",
+			},
+			{
+				name: "sed write in a conditional command position",
+				command: "if sed -n 'w src/product.ts' <<<x; then :; fi",
+				blocked: true,
+				reason: "phase-boundary",
+				target: "src/product.ts",
+			},
+			{
+				name: "sed write after a semicolon in the quoted program",
+				command: "sed -n '1p;w src/product.ts' packages/coding-agent/package.json",
+				blocked: true,
+				reason: "phase-boundary",
+				target: "src/product.ts",
+			},
+			{
+				name: "sed destination is not truncated to a neutral temporary prefix",
+				command: `sed -n 'w ${spacedProjectTarget}' input`,
+				blocked: true,
+				reason: "phase-boundary",
+				target: spacedProjectTarget,
+			},
+			{
+				name: "later sed destination after a temporary first destination",
+				command: `sed -n 'w ${scratch};w src/product.ts' input`,
+				blocked: true,
+				reason: "unknown-target",
+			},
+			{
+				name: "Python compile-only source remains inert",
+				command: `python3 -c 'compile(${JSON.stringify('open("src/product.ts","w").write("x")')}, "<string>", "exec")'`,
+				blocked: false,
+			},
+			{
+				name: "Python pathlib Path.write_text",
+				command: `python3 -c 'from pathlib import Path; Path("src/product.ts").write_text("PWNED")'`,
+				blocked: true,
+				reason: "phase-boundary",
+				target: "src/product.ts",
+			},
+			{
+				name: "Python pathlib Path imported under an alias fails closed",
+				command: `python3 -c 'from pathlib import Path as P; P("src/product.ts").write_text("PWNED")'`,
+				blocked: true,
+				reason: "unknown-target",
+			},
+			{
+				name: "Python chained pathlib write fails closed",
+				command: `python3 -c 'from pathlib import Path; Path("src").joinpath("product.ts").write_text("PWNED")'`,
+				blocked: true,
+				reason: "unknown-target",
+			},
+			{
+				name: "Python built-in open for writing",
+				command: `python3 -c 'open("src/product.ts", "w").write("PWNED")'`,
+				blocked: true,
+				reason: "unknown-target",
+			},
+			{
+				name: "Python pathlib Path.write_bytes",
+				command: `python3 -c 'from pathlib import Path; Path("src/product.ts").write_bytes(b"PWNED")'`,
+				blocked: true,
+				reason: "phase-boundary",
+				target: "src/product.ts",
+			},
+			{
+				name: "Python pathlib.Path.open for writing",
+				command: `python3 -c 'import pathlib; pathlib.Path("src/product.ts").open("w")'`,
+				blocked: true,
+				reason: "phase-boundary",
+				target: "src/product.ts",
+			},
+			{
+				name: "Python pathlib Path.touch retains the legacy write-API denial",
+				command: `python3 -c 'from pathlib import Path; Path("src/product.ts").touch()'`,
+				blocked: true,
+				reason: "unknown-target",
+			},
+			{
+				name: "Python tempfile file write retains the legacy write-API denial",
+				command: `python3 -c $'import tempfile\\nf=tempfile.NamedTemporaryFile(dir=".", delete=False)\\nf.write(b"x")'`,
+				blocked: true,
+				reason: "unknown-target",
+			},
+			{
+				name: "Python non-path write API retains the legacy denial",
+				command: `python3 -c 'fwrite("src/product.ts", "PWNED")'`,
+				blocked: true,
+				reason: "unknown-target",
+			},
+			{
+				name: "Node process.stdout.write rebound to a file writer",
+				command: `node -e 'process.stdout.write=process.getBuiltinModule("fs")["writeFileSync"],process.stdout.write("src/product.ts","PWNED")'`,
+				blocked: true,
+				reason: "unknown-target",
+			},
+			{
+				name: "Node bracketed process.stdout access rebound to a file writer",
+				command: `node -e 'process["stdout"].write=process.getBuiltinModule("fs").writeFileSync;process.stdout.write("src/product.ts","PWNED")'`,
+				blocked: true,
+				reason: "unknown-target",
+			},
+			{
+				name: "Node computed process stream method rebound to a file writer",
+				command: `node -e 'const stream="stdout";process[stream].write=process.getBuiltinModule("fs").writeFileSync;process.stdout.write("src/product.ts","PWNED")'`,
+				blocked: true,
+				reason: "unknown-target",
+			},
+			{
+				name: "Node console method rebound to a file writer",
+				command: `node -e 'console.log=process.getBuiltinModule("fs").writeFileSync;console.log("src/product.ts","PWNED")'`,
+				blocked: true,
+				reason: "unknown-target",
+			},
+			{
+				name: "Node computed console method rebound to a file writer",
+				command: `node -e 'const method="log";global.console[method]=process.getBuiltinModule("fs").writeFileSync;global.console[method]("src/product.ts","PWNED")'`,
+				blocked: true,
+				reason: "unknown-target",
+			},
+			{
+				name: "Python stdout method rebound to a file writer",
+				command: `python3 -c 'import sys; sys.stdout.write=open("src/product.ts","w").write; sys.stdout.write("PWNED")'`,
+				blocked: true,
+				reason: "unknown-target",
+			},
+			{
+				name: "Python write API name in inert output text",
+				command: `python3 -c "print('shutil.copy(')"`,
+				blocked: false,
+			},
+			{
+				name: "Node write API name in inert output text",
+				command: `node -e "console.log('writeFileSync(')"`,
+				blocked: false,
+			},
+			{
+				name: "Python API name in comment",
+				command: `python3 -c "print(1) # shutil.copy('stage/pwn.txt','src/product.ts')"`,
+				blocked: false,
+			},
+			{
+				name: "Node write API name in comment",
+				command: `node -e "/* writeFileSync('src/product.ts','x') */ console.log(1)"`,
+				blocked: false,
+			},
+			{
+				name: "Python literal read-only os.system command",
+				command: `python3 -c "import os; os.system('ls')"`,
+				blocked: false,
+			},
+			{
+				name: "sed input filename that resembles a write script",
+				command: "sed -n '1p' 'w src/product.ts'",
+				blocked: false,
+			},
+			{
+				name: "conditional read-only sed remains allowed",
+				command: "if sed -n '1p' input; then :; fi",
+				blocked: false,
+			},
+			{
+				name: "quoted sed command text is not a command",
+				command: `echo 'prefix; sed -n "w src/product.ts"'`,
+				blocked: false,
+			},
+			{
+				name: "AWK quoted string comparison rather than redirection",
+				command: `awk '$1 > "m" { print }' input`,
+				blocked: false,
+			},
+			{
+				name: "GNU AWK informational version query",
+				command: "awk -W version",
+				blocked: false,
+			},
+			{
+				name: "GNU AWK lint option and read-only program",
+				command: "awk -W lint '$1 > 5 { print $1 }' input",
+				blocked: false,
+			},
+			{
+				name: "GNU AWK POSIX compatibility option and read-only program",
+				command: "awk -W posix '$1 > 5 { print $1 }' input",
+				blocked: false,
+			},
+			{
+				name: "AWK escaped temporary destination",
+				command: `awk 'BEGIN { printf "x" > ${JSON.stringify(escapedScratch)} }'`,
+				blocked: false,
+			},
+			{
+				name: "Lua read-only inline source",
+				command: `lua -e 'print("ok")'`,
+				blocked: false,
+			},
+			{
+				name: "Perl explicit read-mode open",
+				command: `perl -e 'open(F, "<", "src/product.ts"); print 1;'`,
+				blocked: false,
+			},
+			{
+				name: "Perl list-form open for writing",
+				command: `perl -e 'open F, ">", "src/product.ts"; print F "PWNED";'`,
+				blocked: true,
+				reason: "unknown-target",
+			},
+			{
+				name: "Perl list-form open with a variable mode fails closed",
+				command: `perl -e 'open F, $mode, "src/product.ts"; print F "PWNED";'`,
+				blocked: true,
+				reason: "unknown-target",
+			},
+			{
+				name: "Perl list-form read-mode open stays allowed",
+				command: `perl -e 'open F, "<", "src/product.ts"; print 1;'`,
+				blocked: false,
+			},
+			{
+				name: "Node stream method rebound reflectively then written",
+				command: `node -e 'Object.assign(process.stdout,{write:process.getBuiltinModule("fs").writeFileSync});process.stdout.write("src/product.ts","PWNED")'`,
+				blocked: true,
+				reason: "unknown-target",
+			},
+			{
+				name: "Node stream method defined reflectively then written",
+				command: `node -e 'Object.defineProperty(process.stdout,"write",{value:process.getBuiltinModule("fs").writeFileSync});process.stdout.write("src/product.ts","PWNED")'`,
+				blocked: true,
+				reason: "unknown-target",
+			},
+			{
+				name: "sed GNU e command hides a shell redirection",
+				command: `printf x | sed 'e : > src/product.ts'`,
+				blocked: true,
+				reason: "unknown-target",
+			},
+			{
+				name: "sed substitution e flag runs the replacement as a shell command",
+				command: `printf x | sed 's|x|: > src/product.ts|e'`,
+				blocked: true,
+				reason: "unknown-target",
+			},
+			{
+				name: "Python os.system captured as a callable then invoked",
+				command: `python3 -c 'import os; run=os.system; run("printf PWNED > src/product.ts")'`,
+				blocked: true,
+				reason: "unknown-target",
+			},
+			{
+				name: "Python os module aliased then system invoked",
+				command: `python3 -c 'import os as o; o.system("printf PWNED > src/product.ts")'`,
+				blocked: true,
+				reason: "unknown-target",
+			},
+		];
+
+		for (const scenario of cases) {
+			const decision = await getWorkflowMutationDecision({
+				cwd,
+				sessionId: "session-a",
+				tool: tool("bash"),
+				args: { command: scenario.command },
+			});
+			expect(decision.blocked, scenario.name).toBe(scenario.blocked);
+			if (scenario.reason) expect(decision.reason, scenario.name).toBe(scenario.reason);
+			if (scenario.target) expect(decision.targets, scenario.name).toContain(scenario.target);
+		}
+	});
+
+	it("blocks planning bash writes outside the old denylist and still allows read-only commands", async () => {
+		const cwd = await makeTempRoot();
+		await writeActiveSkill(cwd, "ralplan", "planner");
+		const scratch = path.join(os.tmpdir(), `skc-plan-bash-${process.pid}.txt`);
+		const escapedScratch = path.join(os.tmpdir(), `skc-plan-escaped\\${process.pid}.txt`);
+		const unknownTargetCommands = new Set([
+			`python3 -c 'exec("open(\\"src/product.ts\\",\\"w\\").write(\\"PWNED\\")")'`,
+			`python3 -c 'eval("open(\\"src/product.ts\\",\\"w\\").write(\\"PWNED\\")")'`,
+			`python3 -c '__import__("os").system("echo PWNED > src/product.ts")'`,
+			`python3 -c 'import importlib; importlib.import_module("project_plugin")'`,
+			`python3 -c 'import runpy; runpy.run_path("src/payload.py")'`,
+			`python3 -c 'spec.loader.exec_module(module)'`,
+			`python3 -c 'import pathlib; pathlib.Path("src/product.ts").open(mode=mode)'`,
+			`python3 -c 'open("src/product.ts", mode=mode).write("PWNED")'`,
+			`node -e"require('fs').appendFileSync('src/product.ts','x')"`,
+			`perl -e'open(F,">","src/product.ts"); print F "PWNED";'`,
+			`ruby -e'File.open("src/product.ts","w").write("PWNED")'`,
+		]);
+		const blocked = [
+			...unknownTargetCommands,
+			"sed -n 'w src/product.ts' stage/pwn.txt",
+			"sed -e 'w src/product.ts' stage/pwn.txt",
+			"sed -n '/needle/w src/product.ts' input",
+			"sed -n 's/a/b/w src/product.ts' stage/pwn.txt",
+			`sed -n 'w ${scratch};w src/product.ts' input`,
+			`python3 -c "import shutil; shutil.copy('stage/pwn.txt','src/product.ts')"`,
+			`python3 -c $'open("src/product.ts","w").write("PWNED")'`,
+			`python3 -c "import os; os.system('printf PWNED > src/product.ts')"`,
+			`python3 -c "import os; os.system(command)"`,
+			`node -e "require('fs').appendFileSync('src/product.ts','x')"`,
+			`perl -e 'open(F,">","src/product.ts"); print F "PWNED";'`,
+			`awk 'BEGIN{printf "PWNED" > "src/product.ts"}'`,
+			`awk -v x=1 'BEGIN { print "PWNED" > "src/product.ts" }' input`,
+			`awk 'BEGIN { print 1; print "PWNED" > "src/product.ts" }' input`,
+			"awk -W unsupported-extension",
+			`if awk 'BEGIN { print "PWNED" > "src/product.ts" }' input; then :; fi`,
+			`sed -n '/x/e printf PWNED > src/product.ts' input`,
+			`sed -n '/needle/e touch src/product.ts' input`,
+			`if python3 -c 'open("src/product.ts","w").write("x")'; then :; fi`,
+			`while true; do node -e "require('fs').writeFileSync('src/product.ts','x')"; done`,
+			`until ruby -e 'File.write("src/product.ts","x")'; do :; done`,
+			"ln -sf stage/pwn.txt src/product.ts",
+			`python3 -c "import os; os.symlink('stage/pwn.txt','src/pwn-link.ts')"`,
+		];
+		for (const command of blocked) {
+			const decision = await getWorkflowMutationDecision({
+				cwd,
+				sessionId: "session-a",
+				tool: tool("bash"),
+				args: { command },
+			});
+			expect(decision.blocked, command).toBe(true);
+			if (unknownTargetCommands.has(command)) expect(decision.reason, command).toBe("unknown-target");
+		}
+		const systemWrite = await getWorkflowMutationDecision({
+			cwd,
+			sessionId: "session-a",
+			tool: tool("bash"),
+			args: { command: `python3 -c "import os; os.system('printf PWNED > src/product.ts')"` },
+		});
+		expect(systemWrite.targets).toContain("src/product.ts");
+		const dynamicSystem = await getWorkflowMutationDecision({
+			cwd,
+			sessionId: "session-a",
+			tool: tool("bash"),
+			args: { command: `python3 -c "import os; os.system(command)"` },
+		});
+		expect(dynamicSystem.reason).toBe("unknown-target");
+		await expect(
+			assertWorkflowMutationAllowed({
+				cwd,
+				sessionId: "session-a",
+				tool: tool("bash"),
+				args: { command: "sed -n 'w src/product.ts' stage/pwn.txt" },
+			}),
+		).rejects.toBeInstanceOf(ToolError);
+
+		for (const command of [
+			"sed -n '1p' src/product.ts",
+			"sed -n '/needle/p' 'w src/product.ts'",
+			"sed -n '1p' 'w src/product.ts'",
+			"sed -e '1p' 'w src/product.ts'",
+			"sed -n '1,80p' packages/coding-agent/src/skill-state/workflow-mutation-guard.ts",
+			"sed -n 's/a/b/p' src/product.ts",
+			"awk '$1 > 5 {print $1}' src/product.ts",
+			`awk '$1 > "m" { print }' input`,
+			"awk -W version",
+			"awk -W lint '$1 > 5 { print $1 }' input",
+			`awk 'BEGIN { print 1 # > "src/product.ts"\n}' input`,
+			`awk -v x=1 'BEGIN { print x }' input`,
+			`if awk '$1 > "m" { print }' input; then :; fi`,
+			`python3 -c "import os; os.system('ls')"`,
+			`python3 -c "import pathlib; pathlib.Path('src/product.ts').open('r').read()"`,
+			`python3 -c 'from pathlib import Path as P; P("src").joinpath("product.ts").open("r").read()'`,
+			`python3 -c 'from pathlib import Path; Path("/tmp/ralplan-note.md").write_text("x")'`,
+			`python3 -c $'print("open(")'`,
+			`python3 -c "print('writeFileSync(')"`,
+			`python3 -c "print('shutil.copy(')"`,
+			`python3 -c "print(1) # shutil.copy('stage/pwn.txt','src/product.ts')"`,
+			`python3 -c "print(1)"`,
+			`node -e "console.log('appendFileSync(')"`,
+			`node -e "/* appendFileSync('src/product.ts','x') */ console.log(1)"`,
+			`node -e "console.log(1)"`,
+			`node -e 'process.stdout.write("status")'`,
+			`node -e 'process["exitCode"]=1;console.log("status")'`,
+			`node -e "console.log('process.stdout.write = fs.writeFileSync')"`,
+			`perl -e 'print 1'`,
+			`ruby -e'puts "open("'`,
+			"ls src/product.ts",
+			"readlink src/product.ts",
+			`ln -sf stage/pwn.txt ${scratch}`,
+			`sed -n 'w ${scratch}' src/product.ts`,
+			`awk 'BEGIN { printf "x" > ${JSON.stringify(scratch)} }'`,
+			`awk 'BEGIN { printf "x" > ${JSON.stringify(escapedScratch)} }'`,
+		]) {
+			const decision = await getWorkflowMutationDecision({
+				cwd,
+				sessionId: "session-a",
+				tool: tool("bash"),
+				args: { command },
+			});
+			expect(decision.blocked, command).toBe(false);
+		}
+		await assertWorkflowMutationAllowed({
+			cwd,
+			sessionId: "session-a",
+			tool: tool("bash"),
+			args: { command: "sed -n '1p' src/product.ts" },
+		});
+
+		const idle = await makeTempRoot();
+		const outsidePlanning = await getWorkflowMutationDecision({
+			cwd: idle,
+			sessionId: "session-a",
+			tool: tool("bash"),
+			args: { command: "ln -sf stage/pwn.txt src/product.ts" },
+		});
+		expect(outsidePlanning.blocked).toBe(false);
+	});
+
+	it("blocks sed writes whose destination contains spaces", async () => {
+		const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "skc-plan workspace-"));
+		tempRoots.push(cwd);
+		await writeActiveSkill(cwd, "ralplan", "planner");
+		const destination = path.join(cwd, "src", "product.ts");
+		const decision = await getWorkflowMutationDecision({
+			cwd,
+			sessionId: "session-a",
+			tool: tool("bash"),
+			args: { command: `sed -n 'w ${destination}' input` },
+		});
+
+		expect(decision.blocked).toBe(true);
+		expect(decision.targets).toContain(destination);
+	});
+
+	it("allows a multi-part temp Path write and a non-writing Path read", async () => {
+		const cwd = await makeTempRoot();
+		await writeActiveSkill(cwd, "ralplan", "planner");
+		for (const code of [
+			'Path("/tmp", "ralplan-note.md").write_text("x")\n',
+			'Path("src", "product.ts").open("r").read()\n',
+			'Path("src", "product.ts").read_text()\n',
+			'open("src/product.ts", "r").read()\n',
+			'open("src/product.ts", mode="r").read()\n',
+			'open("src/product.ts", buffering=-1).read()\n',
+		]) {
+			const decision = await getWorkflowMutationDecision({
+				cwd,
+				sessionId: "session-a",
+				tool: tool("python"),
+				args: { code },
+			});
+			expect(decision.blocked, code).toBe(false);
+		}
+	});
+
+	it("keeps generated write payloads blocked across equivalent shell quoting", async () => {
+		const cwd = await makeTempRoot();
+		await writeActiveSkill(cwd, "ralplan", "planner");
+		const guardContext = await readWorkflowGuardContext(cwd, { sessionId: "session-a" });
+		const random = makeSeededRandom(0x6801);
+
+		for (let sample = 0; sample < 12; sample++) {
+			const target = `src/generated-${seededToken(random, 8)}.ts`;
+			const content = seededToken(random, 10);
+			const destination = JSON.stringify(target);
+			const data = JSON.stringify(content);
+			const scripts = [
+				{
+					interpreter: "python3 -c",
+					source: `open(${destination}, "w").write(${data})`,
+					target,
+				},
+				{
+					interpreter: "python3 -c",
+					source: `Path(${destination}).write_text(${data})`,
+					target,
+				},
+				{
+					interpreter: "python3 -c",
+					source: `pathlib.Path(${destination}).write_bytes(b${data})`,
+					target,
+				},
+				{
+					interpreter: "node -e",
+					source: `process.stdout.write = process.getBuiltinModule("fs").writeFileSync; process.stdout.write(${destination}, ${data})`,
+					expectedReason: "unknown-target",
+				},
+				{
+					interpreter: "node -e",
+					source: `console.log = process.getBuiltinModule("fs").writeFileSync; console.log(${destination}, ${data})`,
+					expectedReason: "unknown-target",
+				},
+			];
+
+			for (const { interpreter, source, expectedReason, target: expectedTarget } of scripts) {
+				const firstSplit = 1 + Math.floor(random() * (source.length - 2));
+				const secondSplit = firstSplit + 1 + Math.floor(random() * (source.length - firstSplit - 1));
+				const operands = [
+					quoteBashSingle(source),
+					quoteBashDouble(source),
+					quoteBashAnsiC(source),
+					quoteBashConcatenation(source, firstSplit, secondSplit),
+				];
+				let expectedVerdict: { blocked: boolean } | undefined;
+
+				for (const operand of operands) {
+					const command = `${interpreter} ${operand}`;
+					const decision = await getWorkflowMutationDecision({
+						cwd,
+						sessionId: "session-a",
+						guardContext,
+						tool: tool("bash"),
+						args: { command },
+					});
+					const verdict = { blocked: decision.blocked };
+					expect(decision.blocked, command).toBe(true);
+					if (expectedReason) expect(decision.reason, command).toBe(expectedReason);
+					if (expectedTarget) {
+						if (decision.reason === "phase-boundary") expect(decision.targets, command).toContain(expectedTarget);
+						else expect(decision.reason, command).toBe("unknown-target");
+					} else {
+						expect(decision.reason, command).toBe("unknown-target");
+					}
+					if (expectedVerdict) expect(verdict, command).toEqual(expectedVerdict);
+					else expectedVerdict = verdict;
+				}
+			}
+		}
+	});
+
+	it("preserves the merge-base opaque interpreter-write denylist floor", async () => {
+		const cwd = await makeTempRoot();
+		await writeActiveSkill(cwd, "ralplan", "planner");
+		const guardContext = await readWorkflowGuardContext(cwd, { sessionId: "session-a" });
+		const random = makeSeededRandom(0x6801_2026);
+		// Exact BASH_OPAQUE_INTERPRETER_WRITE_RE from merge-base 3756eeec.
+		// Generated inputs below are real writes, not inert string-literal matches.
+		const mergeBaseOpaqueInterpreterWriteRe =
+			/(?:^|[;&|\n])\s*(?:\w+=[^\s]+\s+)*(?:sudo\s+)?(?:python3?|node|ruby)\b[^;&|\n]*(?:-c|-e)\b[^;&|\n]*(?:open\s*\(|writeFile(?:Sync)?\s*\(|\.write\s*\()/i;
+
+		for (let sample = 0; sample < 8; sample++) {
+			const target = `src/floor-${seededToken(random, 8)}.ts`;
+			const content = seededToken(random, 10);
+			const destination = JSON.stringify(target);
+			const data = JSON.stringify(content);
+			const scripts = [
+				{ interpreter: "python3 -c", source: `open(${destination}, "w").write(${data})` },
+				{ interpreter: "node -e", source: `require("fs").writeFileSync(${destination}, ${data})` },
+				{ interpreter: "ruby -e", source: `File.open(${destination}, "w").write(${data})` },
+			];
+
+			for (const { interpreter, source } of scripts) {
+				const operands = [quoteBashSingle(source), quoteBashDouble(source), quoteBashAnsiC(source)];
+				for (const operand of operands) {
+					const command = `${interpreter} ${operand}`;
+					expect(mergeBaseOpaqueInterpreterWriteRe.test(command), command).toBe(true);
+					const decision = await getWorkflowMutationDecision({
+						cwd,
+						sessionId: "session-a",
+						guardContext,
+						tool: tool("bash"),
+						args: { command },
+					});
+					expect(decision.blocked, command).toBe(true);
+				}
+			}
+		}
+	});
+
+	it("allows generated inert interpreter literals that resemble write APIs", async () => {
+		const cwd = await makeTempRoot();
+		await writeActiveSkill(cwd, "ralplan", "planner");
+		const guardContext = await readWorkflowGuardContext(cwd, { sessionId: "session-a" });
+		const random = makeSeededRandom(0x1_6801_2026);
+		const apiSpellings = ["open(", "writeFileSync(", "appendFileSync(", "shutil.copy(", ".write("];
+
+		for (const api of apiSpellings) {
+			for (let sample = 0; sample < 6; sample++) {
+				const note = `${api} src/literal-${seededToken(random, 8)}.ts`;
+				for (const language of ["python", "node"] as const) {
+					const source =
+						language === "python" ? `print(${JSON.stringify(note)})` : `console.log(${JSON.stringify(note)})`;
+					const alternateSource = language === "python" ? `print('${note}')` : `console.log('${note}')`;
+					const operands = [quoteBashSingle(source), quoteBashAnsiC(source), quoteBashDouble(alternateSource)];
+					for (const operand of operands) {
+						const command = `${language === "python" ? "python3 -c" : "node -e"} ${operand}`;
+						const decision = await getWorkflowMutationDecision({
+							cwd,
+							sessionId: "session-a",
+							guardContext,
+							tool: tool("bash"),
+							args: { command },
+						});
+						expect(decision.blocked, command).toBe(false);
+					}
+				}
+			}
+		}
+	});
+
+	// Regression tests for review findings from #6895
+	it("blocks Node preload (-r) with stdout exemption", async () => {
+		const cwd = await makeTempRoot();
+		await writeActiveSkill(cwd, "ralplan", "planner");
+		// Node -r loads code before -e, which is not scanned
+		const decision = await getWorkflowMutationDecision({
+			cwd,
+			sessionId: "session-a",
+			tool: tool("bash"),
+			args: { command: `node -r /tmp/payload.cjs -e 'process.stdout.write("status")'` },
+		});
+		expect(decision.blocked).toBe(true);
+	});
+
+	it("blocks aliased stdout stream mutations", async () => {
+		const cwd = await makeTempRoot();
+		await writeActiveSkill(cwd, "ralplan", "planner");
+		// Can reassign stdout through an alias and then write
+		const decision = await getWorkflowMutationDecision({
+			cwd,
+			sessionId: "session-a",
+			tool: tool("bash"),
+			args: {
+				command: `node -e '(s => (s.write=require("fs").writeFileSync, s.write("src/product.ts","PWNED")))(process.stdout)'`,
+			},
+		});
+		expect(decision.blocked).toBe(true);
+	});
+
+	it("classifies Perl open mode operand, not unrelated strings", async () => {
+		const cwd = await makeTempRoot();
+		await writeActiveSkill(cwd, "ralplan", "planner");
+		// Perl open with unrelated die string should not be treated as read-only
+		const decision = await getWorkflowMutationDecision({
+			cwd,
+			sessionId: "session-a",
+			tool: tool("bash"),
+			args: {
+				command: `perl -e 'my $m = ">"; open F, $m, "src/product.ts" or die "<"; print F "PWNED"'`,
+			},
+		});
+		expect(decision.blocked).toBe(true);
+	});
+
+	it("detects imported os.system callable aliases in Python", async () => {
+		const cwd = await makeTempRoot();
+		await writeActiveSkill(cwd, "ralplan", "planner");
+		// from os import system as run; run(...) should be detected
+		const decision = await getWorkflowMutationDecision({
+			cwd,
+			sessionId: "session-a",
+			tool: tool("bash"),
+			args: {
+				command: `python3 -c 'from os import system as run; run("printf PWNED > src/product.ts")'`,
+			},
+		});
+		expect(decision.blocked).toBe(true);
+	});
+});
+
+// Fork coverage kept alongside the upstream suite.
+describe("workflow mutation guard (fork coverage)", () => {
+	it("does not block product mutation while team is active", async () => {
+		const cwd = await makeTempRoot();
+		await writeActiveSkill(cwd, "team", "running");
+
+		const decision = await getWorkflowMutationDecision({
+			cwd,
+			sessionId: "session-a",
+			tool: tool("write"),
+			args: { path: "src/product.ts", content: "x" },
+		});
+		expect(decision.blocked).toBe(false);
+	});
+
+	it("blocks eval and python product writes during a deep-interview", async () => {
+		const cwd = await makeTempRoot();
+		await writeActiveSkill(cwd, "deep-interview", "interviewing");
+		for (const [name, args] of [
+			["python", { action: "execute", code: 'write("src/product.ts", "x")\n' }],
+			["eval", { cells: [{ language: "js", code: 'fs.writeFileSync("src/product.ts", "x")\n' }] }],
+			["python", { code: 'shutil.copy("/tmp/ralplan-scratch.md", "src/product.ts")\n' }],
+		] as const) {
+			const decision = await getWorkflowMutationDecision({
+				cwd,
+				sessionId: "session-a",
+				tool: tool(name),
+				args,
+			});
+			expect(decision.blocked).toBe(true);
+			expect(decision.message).toBe(DEEP_INTERVIEW_MUTATION_BLOCK_MESSAGE);
+		}
+	});
+
+	it("keeps non-mutating eval or python allowed during planning", async () => {
+		const cwd = await makeTempRoot();
+		await writeActiveSkill(cwd, "ralplan", "planner");
+		for (const [name, args] of [
+			["python", { code: "print(1 + 1)\n" }],
+			["python", { code: 'text = read("package.json")\n' }],
+			["python", { code: 'open("src/product.ts", encoding="utf-8").read()\n' }],
+			["python", { code: '# write("src/product.ts", "x")\nprint(1)\n' }],
+			["python", { code: "print(\"write('src/product.ts', 'x')\")\n" }],
+			["python", { action: "clear" }],
+			["python", { code: 'write("/tmp/ralplan-scratch.md", "x")\n' }],
+			["python", { code: 'shutil.copy("/tmp/ralplan-scratch.md", "/tmp/ralplan-other.md")\n' }],
+			["eval", { cells: [{ language: "py", code: "print(1 + 1)\n" }] }],
+			["eval", { cells: [{ language: "js", code: 'await read("package.json")\n' }] }],
+			["eval", { cells: [{ language: "js", code: 'file.write("not-a-product-write")\n' }] }],
+		] as const) {
+			const decision = await getWorkflowMutationDecision({
+				cwd,
+				sessionId: "session-a",
+				tool: tool(name),
+				args,
+			});
+			expect(decision.blocked, `${name} ${JSON.stringify(args)}`).toBe(false);
+		}
+	});
+
 	it("blocks a multi-argument Path write and an unresolved Path receiver", async () => {
 		const cwd = await makeTempRoot();
 		await writeActiveSkill(cwd, "ralplan", "planner");
@@ -1486,40 +2916,5 @@ describe("eval and python mutation guard", () => {
 		});
 		expect(dynamic.blocked).toBe(true);
 		expect(dynamic.reason).toBe("unknown-target");
-	});
-
-	it("resets a Path receiver at a later absolute component before the scratch check", async () => {
-		const cwd = await makeTempRoot();
-		await writeActiveSkill(cwd, "ralplan", "planner");
-		const productPath = path.join(cwd, "src", "product.ts");
-		const decision = await getWorkflowMutationDecision({
-			cwd,
-			sessionId: "session-a",
-			tool: tool("python"),
-			args: { code: `Path("/tmp", ${JSON.stringify(productPath)}).write_text("x")\n` },
-		});
-		expect(decision.blocked).toBe(true);
-		expect(decision.reason).toBe("phase-boundary");
-		expect(decision.targets).toContain(productPath);
-	});
-
-	it("allows a multi-part temp Path write and a non-writing Path read", async () => {
-		const cwd = await makeTempRoot();
-		await writeActiveSkill(cwd, "ralplan", "planner");
-		for (const code of [
-			'Path("/tmp", "ralplan-note.md").write_text("x")\n',
-			'Path("src", "product.ts").read_text()\n',
-			'open("src/product.ts", "r").read()\n',
-			'open("src/product.ts", mode="r").read()\n',
-			'open("src/product.ts", buffering=-1).read()\n',
-		]) {
-			const decision = await getWorkflowMutationDecision({
-				cwd,
-				sessionId: "session-a",
-				tool: tool("python"),
-				args: { code },
-			});
-			expect(decision.blocked, code).toBe(false);
-		}
 	});
 });

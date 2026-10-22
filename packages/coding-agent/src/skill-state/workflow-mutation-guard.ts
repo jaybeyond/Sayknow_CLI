@@ -67,17 +67,134 @@ const BASH_EXEC_REDIRECT_RE = /(?:^|[;&|\n])\s*(?:sudo\s+)?exec\b[^;&|\n]*[<>]/i
 const ARCHIVE_OR_SQLITE_BASE_RE = /^(.+?\.(?:tar\.gz|sqlite3|sqlite|db3|zip|tgz|tar|db))(?:$|:)/i;
 const INTERNAL_SCHEME_RE = /^[a-z][a-z0-9+.-]*:\/\//i;
 const VIM_FILE_SWITCH_RE = /^\s*:(?:e|e!|edit|edit!)(?:\s+([^<\r\n]+))?(?:<CR>|\r|\n|$)/i;
-const BASH_MUTATION_COMMAND_RE =
-	/(?:^|[;&|\n])\s*(?:\w+=[^\s]+\s+)*(?:sudo\s+)?(?:[^\s;&|]*\/)?(?:tee|touch|rm|mkdir|cp|mv|install|truncate)\b([^;&|\n]*)|(?:^|[^<>])(?:>>?|\d>>?)\s*([^\s;&|]+)/gi;
-const BASH_IN_PLACE_MUTATION_COMMAND_RE = /(?:^|[;&|\n])\s*(?:\w+=[^\s]+\s+)*(?:sudo\s+)?(?:sed|perl)\b([^;&|\n]*)/gi;
-const BASH_OPAQUE_INTERPRETER_WRITE_RE =
-	/(?:^|[;&|\n])\s*(?:\w+=[^\s]+\s+)*(?:sudo\s+)?(?:python3?|node|ruby)\b[^;&|\n]*(?:-c|-e)\b[^;&|\n]*(?:open\s*\(|writeFile(?:Sync)?\s*\(|\.write\s*\()/i;
-const BASH_HEREDOC_OPAQUE_INTERPRETER_WRITE_RE =
-	/(?:^|[;&|\n])\s*(?:\w+=[^\s]+\s+)*(?:sudo\s+)?(?:python3?|node|ruby)\b[^;&|\n]*(?:<<[-]?\s*['"]?\w+['"]?)[\s\S]*(?:open\s*\(|writeFile(?:Sync)?\s*\(|\.write\s*\()/i;
-const BASH_DD_OUTPUT_RE = /(?:^|[;&|\n])\s*(?:\w+=[^\s]+\s+)*(?:sudo\s+)?(?:[^\s;&|]*\/)?dd\b([^;&|\n]*)/gi;
+/**
+ * Executable wrappers that run their operand as a command (`command rm x`,
+ * `env rm x`, `exec rm x`). Bash resolves through them, so the mutator that
+ * follows is a real write. Left unmodeled they produced no target and no
+ * unknown flag, letting a mutation cross the planning boundary. `env` may
+ * carry `NAME=value` assignments before the wrapped command.
+ */
+const BASH_COMMAND_WRAPPER_SOURCE =
+	"(?:(?:command|builtin|exec|nohup|nice|ionice|stdbuf|setsid|time|env)\\s+(?:-[^\\s]+\\s+(?:\\d+\\s+)?|\\w+=[^\\s]*\\s+)*)*";
+/**
+ * Shell keywords that open a NEW command position without a `;`/`|`/`&`
+ * separator in front of the command word (`then rm x`, `do rm x`, `else rm x`).
+ * Normalizing them to separators lets the existing mutation regexes see the
+ * command position instead of treating `then rm` as one opaque word.
+ */
+const BASH_COMMAND_POSITION_KEYWORD_RE = /(?:^|[;&|(\n{}])\s*(?:then|else|elif|do|in|\{|!)(?=\s)/gi;
+const BASH_MUTATION_COMMAND_RE = new RegExp(
+	`(?:^|[;&|(\\n])\\s*(?:\\w+=[^\\s]+\\s+)*(?:sudo\\s+)?${BASH_COMMAND_WRAPPER_SOURCE}(?:[^\\s;&|()]*\\/)?(?:tee|touch|rm|mkdir|cp|mv|install|truncate|chmod|ln)\\b([^;&|()\\n]*)|(?:^|[^<>])(?:>>?|\\d>>?)\\s*([^\\s;&|]+)`,
+	"gi",
+);
+/** Command-word extractor; must accept the same prefixes as `BASH_MUTATION_COMMAND_RE`. */
+const BASH_MUTATION_COMMAND_NAME_RE = new RegExp(
+	`(?:^|[;&|(\\n])\\s*(?:\\w+=[^\\s]+\\s+)*(?:sudo\\s+)?${BASH_COMMAND_WRAPPER_SOURCE}(?:[^\\s;&|()]*\\/)?(tee|touch|rm|mkdir|cp|mv|install|truncate|chmod|ln)\\b`,
+	"i",
+);
+const BASH_CHMOD_MODE_RE = /^(?:[0-7]{1,4}|(?:[ugoa]*[+=-][rwxXstugo]*)(?:,[ugoa]*[+=-][rwxXstugo]*)*)$/;
+const BASH_IN_PLACE_MUTATION_COMMAND_RE = new RegExp(
+	`(?:^|[;&|(\\n])\\s*(?:\\w+=[^\\s]+\\s+)*(?:sudo\\s+)?${BASH_COMMAND_WRAPPER_SOURCE}(?:[^\\s;&|()]*\\/)?(?:sed|perl)\\b([^;&|()\\n]*)`,
+	"gi",
+);
+/**
+ * Write APIs a planning one-liner cannot be allowed to call. The destination is
+ * not a static path the temp allowlist can trust, so a match fails closed the
+ * same way `open(` / `writeFile(` / `.write(` already do. `perl` is included
+ * because `perl -e 'open(...)'` is that same call.
+ */
+const BASH_INTERPRETER_WRITE_API_PATTERNS = [
+	"open\\s*\\(",
+	"writeFile(?:Sync)?\\s*\\(",
+	"appendFile(?:Sync)?\\s*\\(",
+	"file_put_contents\\s*\\(",
+	"fwrite\\s*\\(",
+	"fputs\\s*\\(",
+	"unlink\\s*\\(",
+	"rename\\s*\\(",
+	"mkdir\\s*\\(",
+	"rmdir\\s*\\(",
+	"copy\\s*\\(",
+	"symlink\\s*\\(",
+	"link\\s*\\(",
+	"move_uploaded_file\\s*\\(",
+	"truncate\\s*\\(",
+	"touch\\s*\\(",
+	"\\.write\\s*\\(",
+	"shutil\\s*\\.\\s*(?:copy2?|copyfileobj|copyfile)\\s*\\(",
+	"os\\s*\\.\\s*symlink\\s*\\(",
+] as const;
+const BASH_INTERPRETER_WRITE_API = `(?:${BASH_INTERPRETER_WRITE_API_PATTERNS.join("|")})`;
+const BASH_INTERPRETER_WRITE_API_EXCLUDING_OPEN = `(?:${BASH_INTERPRETER_WRITE_API_PATTERNS.slice(1).join("|")})`;
+const INTERPRETER_OUTPUT_METHOD_ASSIGNMENT_RE =
+	/^\b(?:(?:process|Bun|Deno|sys)(?:\s*\.\s*(?:stdout|stderr)|\s*\[\s*["'`](?:stdout|stderr)["'`]\s*\])|(?:process|Bun|Deno|sys)\s*\[\s*[^\]]+\s*\]\s*(?:\.\s*write|\[\s*["'`]write["'`]\s*\])|(?:(?:globalThis|global)\s*\.\s*)?console)(?:\s*(?:\.\s*[\w$]+|\[\s*[^\]]+\s*\]))?\s*(?:\|\|=|&&=|\?\?=|[+\-*/%&|^]?=(?!=|>))/;
+
+/**
+ * A stream object can also be mutated reflectively, so an exempted
+ * `process.stdout.write(...)` is only trustworthy when nothing in the source can
+ * have replaced that method (`Object.assign(process.stdout, {write: ...})`).
+ */
+const INTERPRETER_OUTPUT_STREAM_MUTATION_RE =
+	/\b(?:Object\s*\.\s*(?:assign|definePropert(?:y|ies))|Reflect\s*\.\s*(?:set|defineProperty))\s*\(\s*(?:process|Bun|Deno|sys)\s*(?:\.\s*(?:stdout|stderr)|\[\s*["'`](?:stdout|stderr)["'`]\s*\])/;
+/**
+ * Inline interpreter source is opaque whenever it exposes code evaluation or
+ * reflective loading. This deliberately scans the complete source spelling,
+ * including quoted spans, because another language may evaluate those spans.
+ */
+const INTERPRETER_DYNAMIC_EXECUTION_RE =
+	/\b(?:eval|exec|execfile|Function|instance_eval|instance_exec|class_eval|class_exec|module_eval|module_exec|send|public_send|__send__|method_missing|__import__|exec_module|import_module|run_path|run_module|loadstring|dofile|loadfile|load|source|include|include_once|require_once|create_function|call_user_func(?:_array)?|setTimeout|setInterval|runInThisContext|runInNewContext|runInContext|getattr|setattr|__getattr__|__getattribute__|ReflectionClass|ReflectionFunction|ReflectionMethod|invokeMethod|invokeArgs)\b/;
+const INTERPRETER_FILESYSTEM_REQUIRE_RE =
+	/\b(?:require|import|from)\s*(?:\(\s*)?(['"\x60])(?:node:)?(?:fs(?:\/promises)?|fs-extra|graceful-fs|child_process|fileutils|io|lfs)\1(?:\s*\))?/i;
+const INTERPRETER_NONLITERAL_REQUIRE_RE = /\brequire\s*(?:\(\s*(?!['"\x60])|\s+(?!['"\x60]))/i;
+const SHELL_DOT_SOURCE_RE = /(?:^|[;&|\n])\s*(?:(?:if|then|do)\s+)?\.\s+(?:["'$`]|[A-Za-z0-9_./~])/;
+/** Executable Python source evaluation and dynamic imports make payloads opaque; compile() alone is inert. */
+const PYTHON_DYNAMIC_EXECUTION_IDENTIFIER_RE =
+	/^(?:exec|eval|execfile|__import__|exec_module|import_module|run_path|run_module|getattr|setattr|__getattr__|__getattribute__)\b/;
+const PYTHON_DYNAMIC_EXECUTION_TOKEN_RE =
+	/\b(?:exec|eval|execfile|__import__|exec_module|import_module|run_path|run_module|getattr|setattr|__getattr__|__getattribute__)\b/;
+/** JavaScript eval and Function construct executable code from runtime strings. */
+const JAVASCRIPT_DYNAMIC_EXECUTION_IDENTIFIER_RE = /^(?:eval|Function)\b/;
+const JAVASCRIPT_DYNAMIC_EXECUTION_TOKEN_RE = /\b(?:eval|Function)\b/;
+const BASH_HEREDOC_OPAQUE_INTERPRETER_WRITE_RE = new RegExp(
+	`(?:^|[;&|\\n])\\s*(?:\\w+=[^\\s]+\\s+)*(?:sudo\\s+)?(?:python3?|node|ruby|perl)\\b[^;&|\\n]*(?:<<[-]?\\s*['"]?\\w+['"]?)[\\s\\S]*${BASH_INTERPRETER_WRITE_API}`,
+	"i",
+);
+const BASH_DD_OUTPUT_RE = new RegExp(
+	`(?:^|[;&|\\n])\\s*(?:\\w+=[^\\s]+\\s+)*(?:sudo\\s+)?${BASH_COMMAND_WRAPPER_SOURCE}(?:[^\\s;&|]*\\/)?dd\\b([^;&|\\n]*)`,
+	"gi",
+);
 /** Literal `sh|bash|zsh -c '<script>'` payloads whose nested script must also be scanned. */
 const BASH_NESTED_SHELL_RE =
 	/(?:^|[;&|\n])\s*(?:\w+=[^\s]+\s+)*(?:sudo\s+)?(?:[^\s;&|]*\/)?(?:ba|z|da)?sh\s+(?:-[A-Za-z]+\s+)*-[A-Za-z]*c\s+(?:(')([^']*)'|(")([^"]*)")/g;
+/** Heredoc opener (`<<`/`<<-` plus an optionally quoted delimiter); `<<<` here-strings excluded. */
+const BASH_HEREDOC_OPEN_RE = /(?<!<)<<(?!<)(-?)\s*(?:'([^'\s]+)'|"([^"\s]+)"|(\\)?([A-Za-z_][\w.-]*))/g;
+/** Consumers whose stdin is inert data: their heredoc bodies are safe to mask. Anything else stays live. */
+const HEREDOC_DATA_CONSUMERS = new Set([
+	"cat",
+	"tee",
+	"head",
+	"tail",
+	"wc",
+	"sort",
+	"uniq",
+	"tr",
+	"cut",
+	"grep",
+	"column",
+	"nl",
+	"fold",
+	"fmt",
+	"base64",
+	"md5sum",
+	"sha1sum",
+	"sha256sum",
+	"sha512sum",
+	"shasum",
+	"jq",
+	"yq",
+]);
+/** Stdin appliers whose heredoc body mutates files in ways no body scan can model. */
+const HEREDOC_MUTATING_CONSUMERS = new Set(["patch", "ed", "ex", "sqlite3"]);
 
 type ToolWithEditMode = AgentTool & {
 	mode?: unknown;
@@ -209,8 +326,11 @@ function modeStateMatchesContext(state: ModeState, sessionId?: string, threadId?
 	return true;
 }
 
-/** Workflow skills that have a pre-approval planning posture this guard enforces. `team` never does. */
-function isPlanningSkill(skill: string): skill is "deep-interview" | "ralplan" | "ultragoal" {
+/** Canonical workflow skills whose active posture gates product-code mutation. */
+type MutationGatedSkill = "deep-interview" | "ralplan" | "ultragoal";
+
+/** Workflow skills whose active posture this guard enforces against product-code mutation. */
+function isPlanningSkill(skill: string): skill is MutationGatedSkill {
 	return skill === "deep-interview" || skill === "ralplan" || skill === "ultragoal";
 }
 
@@ -222,14 +342,14 @@ function isPlanningSkill(skill: string): skill is "deep-interview" | "ralplan" |
  * `ultragoal` only blocks during `goal-planning`; once goals are created it is an
  * executor and mutates freely.
  */
-function isBlockingPlanningPhase(skill: "deep-interview" | "ralplan" | "ultragoal", phase: string): boolean {
+function isBlockingPlanningPhase(skill: MutationGatedSkill, phase: string): boolean {
 	const normalized = phase.trim().toLowerCase();
 	if (skill === "ultragoal") return normalized === "goal-planning";
 	return !getSkillManifest(skill).stopReleasingPhases.includes(normalized);
 }
 
 interface ActivePlanningSkill {
-	skill: "deep-interview" | "ralplan" | "ultragoal";
+	skill: MutationGatedSkill;
 	phase: string;
 }
 
@@ -240,11 +360,11 @@ interface ActivePlanningSkill {
  * to `active:false`, which `listActiveSkills` already filters out). If several
  * are momentarily active, prefer the most-recently-updated entry so a stale
  * planning row (e.g. a still-active ralplan `final`) can never be selected over a
- * newer executor (ultragoal/team), and a planning *return* (newer `updated_at`)
+ * newer executor (ultragoal), and a planning *return* (newer `updated_at`)
  * reliably wins. Ties fall back to the resolved top-level `skill`, then to the
  * first entry, matching how the HUD/chain guard pick `activeSkills[0]`.
  */
-function resolveCurrentWorkflowEntry(entries: SkillActiveEntry[], topLevelSkill: string): SkillActiveEntry {
+export function resolveCurrentWorkflowEntry(entries: SkillActiveEntry[], topLevelSkill: string): SkillActiveEntry {
 	const ts = (entry: SkillActiveEntry): number => {
 		const value = Date.parse(safeString(entry.updated_at) || safeString(entry.activated_at));
 		return Number.isNaN(value) ? -1 : value;
@@ -270,10 +390,20 @@ function resolveCurrentWorkflowEntry(entries: SkillActiveEntry[], topLevelSkill:
  * governs, so a stale planning entry can never block while an executor runs and
  * a resumed planning phase reliably re-blocks.
  *
- * Fail-open contract: a missing or invalid durable mode-state releases the block
- * (a corrupt state file must not lock all mutation), matching the guard's
- * historical behavior — this is intentionally looser than the Stop hook, which
- * fails closed for handoff-required skills.
+ * Fail-open contract: a missing or schema-invalid durable mode-state releases
+ * the block (a corrupt state file must not lock all mutation), matching the
+ * guard's historical behavior — this is intentionally looser than the Stop
+ * hook, which fails closed for handoff-required skills. A checksum mismatch is
+ * not that case: the file is still schema-valid, and the CLI already refuses
+ * it as an out-of-band edit. The guard keeps the active entry's phase instead
+ * of letting the forged `current_phase` or `active: false` release the block.
+ * An unsigned envelope may restate that entry, but it may not release a block
+ * the entry still holds. It may still name a stricter blocking phase: the
+ * pre-fix guard honored that phase, and dropping it would allow an edit the
+ * base rejected. A `session_id` or `thread_id` that does not match this
+ * session is the same kind of claim: it does not make the file someone else's,
+ * and it does not open the block. A matching `content_sha256` whose context
+ * also matches is the existing writer stamp and is trusted.
  */
 async function getActivePlanningSkill(
 	cwd: string,
@@ -319,7 +449,7 @@ async function getActivePlanningSkill(
  * entry's block: the file was read from this session's path.
  */
 function planningPostureFromModeState(
-	skill: "deep-interview" | "ralplan" | "ultragoal",
+	skill: MutationGatedSkill,
 	activePhase: string,
 	modeState: ModeState,
 	sessionId?: string,
@@ -472,30 +602,2323 @@ function cleanShellWord(value: string): string {
 }
 
 /**
- * Blank out single-quoted spans so shell metacharacters inside a literal
- * argument value (e.g. `--value 'uses `x`; a > b'`) are not misread as
- * redirections or separators. Single quotes suppress every expansion in POSIX
- * shells, so their contents are always inert data. Double-quoted spans are left
- * intact because they still expand `$(...)` and backticks.
+ * Blank out quoted spans so shell metacharacters inside a literal argument
+ * value (e.g. `--evidence "p99 500ms -> 120ms"`) are not misread as
+ * redirections or separators.
+ *
+ * Both quote styles are masked because in POSIX shells neither one can contain
+ * a redirection or a command separator: `>`, `|`, `;`, and `&` are always
+ * literal data inside quotes. Masking only single quotes made every `>` in
+ * double-quoted PROSE look like a real redirect, so ordinary evidence text
+ * (`"throughput > baseline"`, `"500ms -> 120ms"`) was scanned as a file write
+ * and blocked.
+ *
+ * Double quotes differ from single quotes in one way that matters here: they
+ * still expand `$(...)` and backticks, and that substitution IS live code. So
+ * the literal text of a double-quoted span is masked while any substitution
+ * inside it is preserved verbatim for the scanners that follow.
+ *
+ * One span is never prose: a quoted word that is the OPERAND of a redirection
+ * or of `of=` (`> "/dev/null"`, `>" src.ts"`, `of=" /dev/null"`) names a file.
+ * Masking it would erase the very path the sink and bypass checks must read, so
+ * operand spans are preserved verbatim. The returned dequoted view performs
+ * shell quote removal for executable-word/argument extraction while replacing
+ * quoted separators with inert placeholders.
  */
-function maskSingleQuotedSpans(command: string): string {
+/**
+ * Does the double quote at `quoteIndex` open a redirection / `of=` operand
+ * rather than a prose argument? Only whitespace may sit between the operator
+ * and the quote, so `> "x"`, `>"x"`, `2>>"x"`, `>|"x"`, and `of="x"` all
+ * qualify, while `--evidence "a > b"` does not.
+ */
+function opensRedirectionOperand(command: string, quoteIndex: number): boolean {
+	let cursor = quoteIndex - 1;
+	while (cursor >= 0 && (command[cursor] === " " || command[cursor] === "\t")) cursor -= 1;
+	if (cursor < 0) return false;
+	const previous = command[cursor];
+	if (previous === ">" || previous === "<" || previous === "|" || previous === "&") {
+		// `|`/`&` qualify only as part of a redirection operator (`>|`, `>&`).
+		if (previous === "|" || previous === "&") {
+			const before = command[cursor - 1];
+			return before === ">" || before === "<";
+		}
+		return true;
+	}
+	// `of="..."` (dd) names an output file the same way a redirection does.
+	return previous === "=" && /(?:^|[\s;&|])of=$/i.test(command.slice(0, cursor + 1));
+}
+
+interface MaskedQuotedSpans {
+	masked: string;
+	/**
+	 * Quote removal preserves executable word characters while neutralizing
+	 * quoted separators/metacharacters. This lets mutation extraction recognize
+	 * `r"m"` and `rm "src/product.ts"` without re-exposing prose as syntax.
+	 */
+	dequoted: string;
+	/** True when live syntax cannot be balanced by this lightweight parser. */
+	unmodeled: boolean;
+}
+
+type QuotedSpanFrame = {
+	kind: "root" | "paren" | "backtick";
+	quote: "none" | "single" | "double";
+	parenDepth: number;
+	quotedOperand: boolean;
+	/** An unquoted `#` comment consumes the rest of this live frame line. */
+	comment: boolean;
+	/** Last live byte in this frame, used for comment-boundary recognition. */
+	previous: string;
+	/** True while the frame is at a command-list boundary before its first word. */
+	expectCommand: boolean;
+};
+
+function maskQuotedSpans(command: string): MaskedQuotedSpans {
 	let masked = "";
-	let inSingle = false;
-	for (const character of command) {
-		if (character === "'") {
-			inSingle = !inSingle;
-			masked += character;
+	let dequoted = "";
+	let unmodeledSyntax = false;
+	const frames: QuotedSpanFrame[] = [
+		{
+			kind: "root",
+			quote: "none",
+			parenDepth: 0,
+			quotedOperand: false,
+			comment: false,
+			previous: "",
+			expectCommand: true,
+		},
+	];
+	const dequoteData = (character: string): string => (/[\w./-]/.test(character) ? character : "_");
+	const appendLive = (frame: QuotedSpanFrame, character: string): void => {
+		masked += character;
+		dequoted += character;
+		frame.previous = character;
+		if (character === "\n" || ";|&".includes(character)) frame.expectCommand = true;
+		else if (character === "(" && frame.kind === "paren") frame.expectCommand = true;
+		else if (!/\s/.test(character)) frame.expectCommand = false;
+	};
+	const appendQuoted = (character: string, operand: boolean): void => {
+		if (operand) masked += character;
+		else masked += character === "\n" ? "\n" : " ";
+		dequoted += dequoteData(character);
+	};
+
+	for (let index = 0; index < command.length; index += 1) {
+		const frame = frames.at(-1) as QuotedSpanFrame;
+		const character = command[index] as string;
+		const next = command[index + 1];
+
+		// A comment inside a live substitution must not let a literal `)` close
+		// that substitution. Preserve the newline as syntax, but mask all bytes
+		// before it as inert comment data.
+		if (frame.comment) {
+			if (character === "\n") {
+				frame.comment = false;
+				appendLive(frame, character);
+			} else {
+				appendQuoted(character, false);
+			}
 			continue;
 		}
-		masked += inSingle && character !== "\n" ? " " : character;
+
+		// Backslash escapes are quote syntax, not command boundaries. In the
+		// dequoted view the escaped byte survives only as data; in the masked
+		// view preserve the historical bytes so redirection extraction remains
+		// conservative.
+		if (character === "\\" && frame.quote !== "single") {
+			if (next === undefined) {
+				appendQuoted(character, frame.quote !== "none" && frame.quotedOperand);
+				continue;
+			}
+			if (next === "\n") {
+				index += 1;
+				continue;
+			}
+			if (frame.quote === "none" || frame.quotedOperand) masked += character + next;
+			else masked += "  ";
+			dequoted += dequoteData(next);
+			frame.previous = "_";
+			if (frame.quote === "none") frame.expectCommand = false;
+			index += 1;
+			continue;
+		}
+
+		if (frame.quote === "single") {
+			if (character === "'") {
+				masked += character;
+				frame.quote = "none";
+				frame.quotedOperand = false;
+				frame.previous = character;
+			} else {
+				appendQuoted(character, frame.quotedOperand);
+			}
+			continue;
+		}
+
+		if (frame.quote === "double") {
+			if (character === '"') {
+				masked += character;
+				frame.quote = "none";
+				frame.quotedOperand = false;
+				frame.previous = character;
+				continue;
+			}
+			// A substitution is live even when it appears inside a double-quoted
+			// argument. Push a separate parser frame so quotes/parentheses inside
+			// the substitution cannot close the surrounding `"` prematurely.
+			if (character === "$" && next === "(") {
+				masked += "$(";
+				dequoted += "$(";
+				frame.previous = "(";
+				frame.expectCommand = false;
+				frames.push({
+					kind: "paren",
+					quote: "none",
+					parenDepth: 0,
+					quotedOperand: false,
+					comment: false,
+					previous: "",
+					expectCommand: true,
+				});
+				index += 1;
+				continue;
+			}
+			if (character === "`") {
+				masked += character;
+				dequoted += character;
+				frame.previous = character;
+				frame.expectCommand = false;
+				frames.push({
+					kind: "backtick",
+					quote: "none",
+					parenDepth: 0,
+					quotedOperand: false,
+					comment: false,
+					previous: "",
+					expectCommand: true,
+				});
+				continue;
+			}
+			appendQuoted(character, frame.quotedOperand);
+			continue;
+		}
+
+		// A command-substitution frame closes only at its own unquoted `)`.
+		// Parentheses nested inside `$((…))`/`$( (… ) …)` are tracked separately.
+		if (frame.kind === "paren" && character === ")") {
+			if (frame.parenDepth > 0) {
+				frame.parenDepth -= 1;
+				appendLive(frame, character);
+			} else {
+				appendLive(frame, character);
+				frames.pop();
+				const parent = frames.at(-1);
+				if (parent) {
+					// A substitution close belongs to the current shell word.
+					parent.previous = "_";
+					parent.expectCommand = false;
+				}
+			}
+			continue;
+		}
+		if (frame.kind === "backtick" && character === "`") {
+			appendLive(frame, character);
+			frames.pop();
+			const parent = frames.at(-1);
+			if (parent) {
+				parent.previous = character;
+				parent.expectCommand = false;
+			}
+			continue;
+		}
+
+		if (frame.quote === "none" && character === "#" && (frame.previous === "" || /[\s;|&()]/.test(frame.previous))) {
+			frame.comment = true;
+			appendQuoted(character, false);
+			continue;
+		}
+		if (frame.quote === "none" && frame.expectCommand) {
+			const ahead = command.slice(index, index + 9);
+			if (
+				frame.kind !== "root" &&
+				/^(?:case|if|for|while|until|select|function|time|!|\{)(?:[\s;|&()]|$)/.test(ahead)
+			) {
+				// Compound commands have command positions the mutation regexes do
+				// not model; `case` also uses `)` as a pattern terminator. Balanced
+				// parentheses alone cannot authorize these live substitution bodies.
+				unmodeledSyntax = true;
+			} else if (frame.kind === "root" && /^(?:case|select|function)(?:[\s;|&()]|$)/.test(ahead)) {
+				// At the root the other compounds are recovered by command-position
+				// keyword normalization below, but `case` overloads `)` as a pattern
+				// terminator and `select`/`function` introduce command positions the
+				// regexes cannot attribute. Fail closed instead of scanning blind.
+				unmodeledSyntax = true;
+			}
+		}
+		if (character === "'") {
+			masked += character;
+			frame.quote = "single";
+			// A single-quoted redirection/`of=` operand names a file exactly like a
+			// double-quoted one (`> '/dev/null'`, `of='/dev/null'`). Masking it would
+			// erase the path the sink and bypass checks must read.
+			frame.quotedOperand = opensRedirectionOperand(command, index);
+			frame.previous = character;
+			frame.expectCommand = false;
+			continue;
+		}
+		if (character === '"') {
+			masked += character;
+			frame.quote = "double";
+			frame.quotedOperand = opensRedirectionOperand(command, index);
+			frame.previous = character;
+			frame.expectCommand = false;
+			continue;
+		}
+		if (character === "$" && next === "(") {
+			masked += "$(";
+			dequoted += "$(";
+			frame.previous = "(";
+			frame.expectCommand = false;
+			frames.push({
+				kind: "paren",
+				quote: "none",
+				parenDepth: 0,
+				quotedOperand: false,
+				comment: false,
+				previous: "",
+				expectCommand: true,
+			});
+			index += 1;
+			continue;
+		}
+		// ANSI-C (`$'…'`) and locale-translated (`$"…"`) quoting: bash strips the
+		// `$` during quote removal, so `$'rm' src/product.ts` really executes `rm`.
+		// The dequoted view must drop the `$` too, otherwise the executable word
+		// keeps a leading `$` and misses the mutation regexes entirely. The masked
+		// (syntax) view keeps the byte so redirection offsets stay conservative.
+		if (character === "$" && (next === "'" || next === '"')) {
+			masked += character;
+			frame.quote = next === "'" ? "single" : "double";
+			masked += next;
+			frame.quotedOperand = opensRedirectionOperand(command, index);
+			frame.previous = next;
+			frame.expectCommand = false;
+			index += 1;
+			continue;
+		}
+		if (character === "`") {
+			appendLive(frame, character);
+			frames.push({
+				kind: "backtick",
+				quote: "none",
+				parenDepth: 0,
+				quotedOperand: false,
+				comment: false,
+				previous: "",
+				expectCommand: true,
+			});
+			continue;
+		}
+		if (frame.kind === "paren" && character === "(") frame.parenDepth += 1;
+		appendLive(frame, character);
 	}
-	// An unbalanced quote means the parse is unreliable; keep the original text
-	// so the scanner stays fail-closed rather than blind.
-	return inSingle ? command : masked;
+
+	// An unbalanced quote/substitution means the parse is unreliable; keep the
+	// original text so both passes remain fail-closed rather than going blind.
+	const root = frames[0];
+	const unbalanced = frames.length !== 1 || root?.quote !== "none";
+	if (unbalanced || unmodeledSyntax) {
+		return { masked: command, dequoted: command, unmodeled: true };
+	}
+	// `then rm x` / `do rm x` / `{ rm x` put a mutator in a command position that
+	// is not preceded by a `;`/`|`/`&` separator, so the mutation regexes would
+	// read `then rm` as a single opaque word. Replacing the keyword with a `;`
+	// keeps byte length (match offsets stay aligned) while exposing the position.
+	const exposeCommandPositions = (value: string): string =>
+		value.replace(BASH_COMMAND_POSITION_KEYWORD_RE, segment => {
+			const keyword = segment.trimEnd();
+			return `${keyword.slice(0, keyword.length - 1)};`.padEnd(segment.length, " ");
+		});
+	return { masked: exposeCommandPositions(masked), dequoted: exposeCommandPositions(dequoted), unmodeled: false };
 }
 
 function isDeviceSinkPath(value: string): boolean {
 	return DEVICE_SINK_PATHS.has(cleanShellWord(value));
+}
+
+interface HeredocMaskResult {
+	masked: string;
+	/** An unquoted-delimiter heredoc body carried `$(…)`/backtick expansion — live code the scanner cannot model. */
+	opaqueExpansion: boolean;
+	/** The heredoc feeds a stdin applier (patch/ed/ex/sqlite3) whose body mutates files no scan can attribute. */
+	mutatingConsumer: boolean;
+}
+
+/** Quote/substitution state carried ACROSS physical lines so multiline constructs cannot fake heredoc openers. */
+interface ShellQuoteState {
+	inSingle: boolean;
+	inDouble: boolean;
+	/** The open single quote is ANSI-C (`$'…'`): backslash escapes inside it decode at runtime. */
+	inAnsiC: boolean;
+	/**
+	 * Paren stack inside substitutions: `true` for a `$(`/`<(`/`>(` opener
+	 * (its `)` is a word character), `false` for a plain nested paren (its `)`
+	 * is an operator, so a following `#` starts a comment).
+	 */
+	parenStack: boolean[];
+}
+
+/**
+ * Mask one physical line for syntax analysis, carrying `state` across lines:
+ * quoted spans and backslash-escaped characters become spaces (they are data,
+ * never syntax), so a `<<` inside `"…"`/`'…'` — even when the quote opened on a
+ * PREVIOUS line — or an escaped separator like `\|` is never misread. An
+ * unquoted `#` at a word boundary starts a comment: the rest of the line is
+ * blanked without touching quote state, so a stray quote inside a comment
+ * cannot poison later lines. A `)` closing a `$(`/`<(`/`>(` substitution is
+ * part of the current word (`x=$(true)#literal`), not a comment boundary.
+ * `masked` is the same length as the input so match offsets stay aligned.
+ * `dequoted` applies bash-like QUOTE REMOVAL instead — quote/backslash marks
+ * drop, quoted word characters stay, quoted metacharacters neutralize to `_` —
+ * so obfuscated spellings (`e\val`, `'ev'al`) reassemble into their real
+ * command word without quoted data ever forming fake command boundaries. A
+ * leading `$` immediately before `'…'` (ANSI-C) or `"…"` (locale-translated)
+ * is stripped during quote removal too, so `$'eval'`/`$"eval"` dequote to
+ * plain `eval`, matching real bash quote-removal semantics for both forms.
+ * `continued` reports an unescaped trailing backslash outside quotes (logical
+ * line continuation).
+ */
+function maskLineForSyntax(
+	line: string,
+	state: ShellQuoteState,
+): { masked: string; dequoted: string; continued: boolean; ansiCEscape: boolean } {
+	let masked = "";
+	let dequoted = "";
+	let escaped = false;
+	let previous = "";
+	let ansiCEscape = false;
+	// Quoted data keeps word characters (so `'ev'al` reassembles to `eval`) but
+	// neutralizes everything else to `_` so it can never form a command boundary.
+	const dequoteData = (character: string): string => (/[\w./-]/.test(character) ? character : "_");
+	for (const character of line) {
+		if (state.inSingle) {
+			if (character === "'") {
+				state.inSingle = false;
+				state.inAnsiC = false;
+			} else {
+				// ANSI-C escapes (`$'\145val'`) decode at runtime into characters the
+				// dequoted view cannot reproduce — flag them so the caller fails closed.
+				if (state.inAnsiC && character === "\\") ansiCEscape = true;
+				masked += " ";
+				dequoted += dequoteData(character);
+				previous = character;
+				continue;
+			}
+			masked += "'";
+			previous = character;
+			continue;
+		}
+		if (escaped) {
+			escaped = false;
+			masked += " ";
+			dequoted += dequoteData(character);
+			previous = character;
+			continue;
+		}
+		if (character === "\\") {
+			escaped = true;
+			masked += " ";
+			previous = character;
+			continue;
+		}
+		if (state.inDouble) {
+			if (character === '"') state.inDouble = false;
+			else {
+				masked += " ";
+				dequoted += dequoteData(character);
+				previous = character;
+				continue;
+			}
+			masked += '"';
+			previous = character;
+			continue;
+		}
+		if (
+			character === "(" &&
+			(previous === "$" || previous === "<" || previous === ">" || state.parenStack.length > 0)
+		) {
+			// Substitution opener, or any paren nested INSIDE one (e.g. `$((1))`,
+			// `$(f (x))`): both must be balanced before the substitution closes.
+			state.parenStack.push(previous === "$" || previous === "<" || previous === ">");
+			masked += character;
+			dequoted += character;
+			previous = character;
+			continue;
+		}
+		if (character === ")" && state.parenStack.length > 0) {
+			const wasSubstitutionOpener = state.parenStack.pop() === true;
+			masked += character;
+			dequoted += character;
+			// A substitution close binds to the surrounding word (`x=$(true)#lit`);
+			// a nested subshell close is an operator, so `#` after it comments.
+			previous = wasSubstitutionOpener ? "x" : ")";
+			continue;
+		}
+		if (
+			character === "#" &&
+			(previous === "" || previous === " " || previous === "\t" || ";|&()".includes(previous))
+		) {
+			// Comment: blank the remainder without evaluating quotes inside it.
+			masked += " ".repeat(line.length - masked.length);
+			return { masked, dequoted, continued: false, ansiCEscape };
+		}
+		if (character === "'") {
+			state.inSingle = true;
+			masked += "'";
+			// ANSI-C quoting `$'…'`: bash strips the `$` during quote removal, and
+			// escapes inside decode at runtime.
+			if (dequoted.endsWith("$")) {
+				dequoted = dequoted.slice(0, -1);
+				state.inAnsiC = true;
+			}
+			previous = character;
+			continue;
+		}
+		if (character === '"') {
+			state.inDouble = true;
+			masked += '"';
+			// `$"…"` locale-translated strings undergo the same quote removal as
+			// ANSI-C `$'…'`: bash drops the `$`, so `$"eval"` dequotes to `eval`.
+			if (dequoted.endsWith("$")) dequoted = dequoted.slice(0, -1);
+			previous = character;
+			continue;
+		}
+		masked += character;
+		dequoted += character;
+		previous = character;
+	}
+	return { masked, dequoted, continued: escaped, ansiCEscape };
+}
+
+const DATA_CONSUMER_NAMES = new Set(HEREDOC_DATA_CONSUMERS);
+/**
+ * Command-position words that force the fail-closed pass. `eval`/`source`/`.`
+ * can install a shadow from data the syntax view has blanked (quoted strings,
+ * /dev/stdin). `case` introduces pattern `)` terminators that desync the
+ * substitution-depth scanner (`$(case x in x) …;; esac)`), making comment
+ * detection unreliable — masking is disabled rather than guessing.
+ */
+const SHELL_EVALUATED_COMMANDS = new Set(["eval", "source", ".", "case"]);
+
+/** Wrappers whose next word is still the effective command (`builtin eval …`, `command cat …`). */
+const SHELL_COMMAND_WRAPPER_WORDS = new Set(["sudo", "builtin", "command", "exec", "nohup", "nice"]);
+
+/** Reserved words that introduce a nested command position (`if eval …`, `while eval …`). */
+const SHELL_RESERVED_PREFIX_WORDS = new Set([
+	"if",
+	"then",
+	"else",
+	"elif",
+	"while",
+	"until",
+	"do",
+	"time",
+	"coproc",
+	"{",
+	"!",
+]);
+
+/** A redirection token (`</dev/null`, `2>err`, `>out`) — not a command word. */
+const SHELL_REDIRECTION_TOKEN_RE = /^\d*[<>]/;
+
+/** Command-position words of one command-list segment: the first real word plus words after reserved prefixes. */
+function commandPositionWords(segment: string): string[] {
+	const words: string[] = [];
+	let expectCommand = true;
+	let afterWrapper = false;
+	let afterBareRedirection = false;
+	for (const word of segment.trim().split(/\s+/)) {
+		if (!word) continue;
+		// A bare redirection operator (`<`, `2>`) consumes the NEXT word as its target.
+		if (afterBareRedirection) {
+			afterBareRedirection = false;
+			continue;
+		}
+		if (expectCommand) {
+			if (/^\w+=/.test(word)) continue;
+			// Leading redirections precede the command word (`</dev/null eval …`).
+			// A bare operator (`<`, `2>`) additionally consumes its separated target.
+			if (SHELL_REDIRECTION_TOKEN_RE.test(word)) {
+				if (/^\d*[<>]+$/.test(word)) afterBareRedirection = true;
+				continue;
+			}
+			if (SHELL_COMMAND_WRAPPER_WORDS.has(word.toLowerCase())) {
+				// The wrapper's effective command follows, possibly after options/`--`.
+				afterWrapper = true;
+				continue;
+			}
+			if (afterWrapper && (word === "--" || word.startsWith("-"))) {
+				// `command -v`/`-V` only DESCRIBES its operand — the rest is data.
+				if (/^-[a-zA-Z]*[vV]/.test(word)) return words;
+				// Other wrapper options (`command -p`, `builtin --`) precede the real command.
+				continue;
+			}
+			afterWrapper = false;
+			if (SHELL_RESERVED_PREFIX_WORDS.has(word.toLowerCase())) {
+				// Reserved word keeps the NEXT word in command position.
+				continue;
+			}
+			words.push(word.split("/").pop()?.toLowerCase() ?? "");
+			expectCommand = false;
+		}
+		// Argument position: only real list operators (handled by the segment
+		// split) restore command position — reserved-word TEXT here is data.
+	}
+	return words;
+}
+
+/** Command-list segments of a dequoted view (split at `;`, `|`, `&`, `(`, backtick, newline). */
+function commandListSegments(dequotedView: string): string[] {
+	return dequotedView.split(/[;|&(`\n]/);
+}
+
+/**
+ * True when any command-position word of the dequoted syntax view is
+ * eval/source/`.` — including nested positions after reserved words
+ * (`if eval …`). `echo eval` and `find .` never match because their
+ * tokens sit in argument position.
+ */
+function hasShellEvaluatedCommand(dequotedView: string): boolean {
+	return commandListSegments(dequotedView).some(segment =>
+		commandPositionWords(segment).some(word => SHELL_EVALUATED_COMMANDS.has(word)),
+	);
+}
+
+/**
+ * True when live syntax actually DECLARES a shadow of an allowlisted
+ * data-consumer name: `name()` at a command-list start, `function name`,
+ * or `alias name=…` — each in command position, so `echo function cat`
+ * (argument position) never matches.
+ */
+function hasDataConsumerShadow(dequotedView: string): boolean {
+	for (const segment of commandListSegments(dequotedView)) {
+		const words = commandPositionWords(segment);
+		for (let index = 0; index < words.length; index++) {
+			const word = words[index] ?? "";
+			if (word === "function") {
+				// commandPositionWords stops after the first non-reserved word, so
+				// re-inspect the raw segment for the name following `function`.
+				const rawWords = segment.trim().split(/\s+/).filter(Boolean);
+				const at = rawWords.findIndex(raw => raw.toLowerCase() === "function");
+				const name = rawWords[at + 1]?.split("/").pop()?.toLowerCase() ?? "";
+				if (DATA_CONSUMER_NAMES.has(name)) return true;
+			}
+			if (word === "alias") {
+				const rawWords = segment.trim().split(/\s+/).filter(Boolean);
+				if (rawWords.some(raw => DATA_CONSUMER_NAMES.has(raw.split("=")[0]?.toLowerCase() ?? ""))) return true;
+			}
+		}
+	}
+	// `name()` / `name ()` in command position — allow reserved-word prefixes
+	// (`then cat() { … }`) before the name (POSIX function definition).
+	const nameGroup = [...DATA_CONSUMER_NAMES].join("|");
+	const reservedGroup = [...SHELL_RESERVED_PREFIX_WORDS].filter(word => /^\w+$/.test(word)).join("|");
+	return new RegExp(
+		`(?:^|[;|&{(\`\\n])\\s*(?:(?:${reservedGroup}|\\{|!)\\s+)*(?:${nameGroup})\\s*\\(\\s*\\)`,
+		"i",
+	).test(dequotedView);
+}
+
+/** First command word of a pipeline-segment slice of a quote-masked opener line. */
+function firstCommandWord(segment: string): string {
+	return commandPositionWords(segment)[0] ?? "";
+}
+
+/**
+ * Classify the command consuming the heredoc at offset `at` of the comment-cut,
+ * quote-masked opener line — including every DOWNSTREAM pipe stage, because
+ * `cat <<'EOF' | bash` hands the body to the interpreter even though `cat` is
+ * inert. Only a pipeline whose every stage is an explicitly inert data consumer
+ * qualifies for body masking; any stdin applier stage fails closed; anything
+ * else (interpreters, awk, unknown binaries) keeps the body live.
+ */
+function heredocConsumerKind(syntaxLine: string, at: number): "data" | "mutating" | "other" {
+	let start = 0;
+	for (let index = at - 1; index >= 0; index--) {
+		const character = syntaxLine[index] ?? "";
+		if (";|&(`".includes(character) || character === "\n") {
+			start = index + 1;
+			break;
+		}
+	}
+	// The heredoc's own simple command plus every downstream `|` stage until the
+	// command list ends (`;`, `&&`, `||`, `&`, backtick, or subshell close).
+	const segments: string[] = [syntaxLine.slice(start, at)];
+	let cursor = at;
+	while (cursor < syntaxLine.length) {
+		const character = syntaxLine[cursor] ?? "";
+		if (character === ";" || character === "&" || character === "`" || character === ")") break;
+		if (character === "|") {
+			if (syntaxLine[cursor + 1] === "|") break;
+			let stageEnd = cursor + 1;
+			while (stageEnd < syntaxLine.length && !";|&`)".includes(syntaxLine[stageEnd] ?? "")) stageEnd++;
+			segments.push(syntaxLine.slice(cursor + 1, stageEnd));
+			cursor = stageEnd;
+			continue;
+		}
+		cursor++;
+	}
+	let kind: "data" | "mutating" | "other" = "data";
+	for (const segment of segments) {
+		const base = firstCommandWord(segment);
+		if (HEREDOC_MUTATING_CONSUMERS.has(base)) return "mutating";
+		if (!HEREDOC_DATA_CONSUMERS.has(base)) kind = "other";
+	}
+	return kind;
+}
+
+/**
+ * Blank out heredoc BODY lines so document payloads (markdown specs, plans,
+ * fixtures) piped to an explicitly inert data consumer (`cat <<'EOF' >
+ * /tmp/spec.md`) are not misread as shell commands: body text like `a > b` or
+ * stray apostrophes must not register redirection targets or unbalance the
+ * quote masker. Bodies stay UNMASKED (scanned as today) for every other
+ * consumer — interpreters, awk, unknown binaries — because there the body may
+ * be live code. Stdin appliers (patch/ed/ex/sqlite3) flag `mutatingConsumer`
+ * and the caller fails closed. Unquoted-delimiter bodies still expand
+ * `$(…)`/backticks in real shells, so masked ones flag `opaqueExpansion`. A
+ * `<<` inside a comment or a quoted span (including a quote opened on a
+ * previous line) is not an opener; a line-continued opener, a shadowed
+ * data-consumer name (`cat() { … }`), and an unterminated heredoc all keep
+ * their bodies live so the scanner stays fail-closed rather than blind.
+ */
+function maskHeredocBodies(command: string): HeredocMaskResult {
+	if (!command.includes("<<")) return { masked: command, opaqueExpansion: false, mutatingConsumer: false };
+	const first = maskHeredocBodiesPass(command, false);
+	// Fail closed on live-syntax constructs that can install a shadow the syntax
+	// view cannot see: a function/alias definition of an allowlisted consumer
+	// name, or a command-position eval/source/`.` whose argument is blanked
+	// quoted data. Both run against the DEQUOTED view so quoting tricks
+	// (`e\val`, `'ev'al`) cannot hide the word, while heredoc bodies and
+	// comments stay excluded — a spec that merely DOCUMENTS `cat() { … }` or
+	// mentions "eval" in prose stays inert.
+	if (first.ansiCEscape || hasDataConsumerShadow(first.dequotedView) || hasShellEvaluatedCommand(first.dequotedView)) {
+		return maskHeredocBodiesPass(command, true).result;
+	}
+	return first.result;
+}
+
+function maskHeredocBodiesPass(
+	command: string,
+	shadowed: boolean,
+): { result: HeredocMaskResult; dequotedView: string; ansiCEscape: boolean } {
+	const lines = command.split("\n");
+	const out: string[] = [];
+	const dequotedLines: string[] = [];
+	const state: ShellQuoteState = { inSingle: false, inDouble: false, inAnsiC: false, parenStack: [] };
+	let previousContinued = false;
+	let opaqueExpansion = false;
+	let mutatingConsumer = false;
+	let sawAnsiCEscape = false;
+	for (let index = 0; index < lines.length; index++) {
+		const line = lines[index] ?? "";
+		out.push(line);
+		// Cross-line quote masking decides whether a `<<` is real syntax or inert
+		// data — even when the enclosing quote opened on a previous line.
+		const { masked, dequoted, continued, ansiCEscape } = maskLineForSyntax(line, state);
+		if (ansiCEscape) sawAnsiCEscape = true;
+		const syntax = masked;
+		const isContinuationLine = previousContinued;
+		// Bash removes a backslash-newline pair entirely: fold a continuation into
+		// the previous dequoted line so split command words (`e\` + `val`)
+		// reassemble for command/shadow detection.
+		if (isContinuationLine && dequotedLines.length > 0) {
+			let previousDequoted = dequotedLines[dequotedLines.length - 1] ?? "";
+			// A continuation can also split ANSI-C/locale quoting (`$\` + `'eval'` or
+			// `$\` + `"eval"`): the rejoined `$'`/`$"` still drops its `$` during
+			// quote removal.
+			if (previousDequoted.endsWith("$") && (line.startsWith("'") || line.startsWith('"'))) {
+				previousDequoted = previousDequoted.slice(0, -1);
+				// The masker already opened this quote as ordinary (it ran before the
+				// fold), so re-check the rejoined ANSI-C span for runtime-decoding
+				// escapes (`$\` + `'\145val'`) it could not have flagged.
+				if (line.startsWith("'") && /^'[^']*\\/.test(line)) sawAnsiCEscape = true;
+			}
+			dequotedLines[dequotedLines.length - 1] = previousDequoted + dequoted;
+		} else {
+			dequotedLines.push(dequoted);
+		}
+		previousContinued = continued;
+		for (const match of line.matchAll(BASH_HEREDOC_OPEN_RE)) {
+			const at = match.index ?? 0;
+			if (syntax.slice(at, at + 2) !== "<<") continue;
+			const delimiter = match[2] ?? match[3] ?? match[5] ?? "";
+			if (!delimiter) continue;
+			let kind = heredocConsumerKind(syntax, at);
+			// A continued/continuation opener line hides part of the pipeline
+			// (`cat <<'EOF' \` / `| bash`); a shadowed consumer name is untrustworthy.
+			// Both downgrade masking eligibility, never block eligibility.
+			if (kind === "data" && (shadowed || continued || isContinuationLine)) kind = "other";
+			if (kind === "mutating") mutatingConsumer = true;
+			const quoted = match[2] !== undefined || match[3] !== undefined || match[4] !== undefined;
+			const stripTabs = match[1] === "-";
+			let end = -1;
+			for (let scan = index + 1; scan < lines.length; scan++) {
+				const candidate = stripTabs ? (lines[scan] ?? "").replace(/^\t+/, "") : (lines[scan] ?? "");
+				if (candidate === delimiter) {
+					end = scan;
+					break;
+				}
+			}
+			if (end === -1) {
+				return {
+					result: { masked: command, opaqueExpansion, mutatingConsumer },
+					dequotedView: dequotedLines.join("\n"),
+					ansiCEscape: sawAnsiCEscape,
+				};
+			}
+			const maskBody = kind === "data" || kind === "mutating";
+			for (let body = index + 1; body < end; body++) {
+				const bodyLine = lines[body] ?? "";
+				if (maskBody && !quoted && /\$\(|`/.test(bodyLine)) opaqueExpansion = true;
+				out.push(maskBody ? "" : bodyLine);
+			}
+			out.push(lines[end] ?? "");
+			index = end;
+			// Heredoc bodies are data: they never affect the shell quote state or
+			// the syntax view used for shadow detection.
+			previousContinued = false;
+		}
+	}
+	return {
+		result: { masked: out.join("\n"), opaqueExpansion, mutatingConsumer },
+		dequotedView: dequotedLines.join("\n"),
+		ansiCEscape: sawAnsiCEscape,
+	};
+}
+
+/**
+ * A command-substitution body and whether its delimiters were balanced. An
+ * unbalanced body is an unreliable parse and the caller fails closed on it.
+ */
+interface SubstitutionBody {
+	body: string;
+	balanced: boolean;
+}
+
+/** Keep parser-frame recursion bounded before extractBashTargets' semantic depth guard. */
+const SUBSTITUTION_PARSER_MAX_DEPTH = 64;
+
+/**
+ * Scan a `$(` body starting just after the opening paren. Quotes inside the
+ * body are honoured: a `)` inside `'...'` or `"..."` is data, not the closer.
+ * Nested substitutions are scanned with their own quote/comment frame, so a
+ * `#` or quote inside `$(...)` nested in a double-quoted outer substitution
+ * cannot desynchronise this frame. Returns the body and the index just past
+ * its closing paren, or `end === command.length` with `balanced: false`.
+ */
+function scanDollarParenBody(command: string, start: number, parserDepth = 0): SubstitutionBody & { end: number } {
+	let depth = 1;
+	let inSingle = false;
+	let inDouble = false;
+	let inComment = false;
+	let previous = "";
+	for (let cursor = start; cursor < command.length; cursor += 1) {
+		const character = command[cursor];
+		if (inComment) {
+			if (character === "\n") {
+				inComment = false;
+				previous = character;
+			}
+			continue;
+		}
+		if (character === "\\" && !inSingle) {
+			cursor += 1;
+			previous = "x";
+			continue;
+		}
+		if (character === "'" && !inDouble) {
+			inSingle = !inSingle;
+			previous = character;
+			continue;
+		}
+		if (character === '"' && !inSingle) {
+			inDouble = !inDouble;
+			previous = character;
+			continue;
+		}
+		if (inSingle) continue;
+		if (character === "$" && command[cursor + 1] === "(") {
+			if (parserDepth >= SUBSTITUTION_PARSER_MAX_DEPTH) {
+				return { body: command.slice(start), balanced: false, end: command.length };
+			}
+			const nested = scanDollarParenBody(command, cursor + 2, parserDepth + 1);
+			if (!nested.balanced) {
+				return { body: command.slice(start), balanced: false, end: command.length };
+			}
+			cursor = nested.end - 1;
+			previous = "x";
+			continue;
+		}
+		if (character === "`") {
+			if (parserDepth >= SUBSTITUTION_PARSER_MAX_DEPTH) {
+				return { body: command.slice(start), balanced: false, end: command.length };
+			}
+			const nested = scanBacktickBody(command, cursor + 1, parserDepth + 1);
+			if (!nested.balanced) {
+				return { body: command.slice(start), balanced: false, end: command.length };
+			}
+			cursor = nested.end - 1;
+			previous = "x";
+			continue;
+		}
+		if (!inDouble && character === "#" && (previous === "" || /\s/.test(previous) || ";|&()".includes(previous))) {
+			inComment = true;
+			continue;
+		}
+		if (!inDouble && character === "(") depth += 1;
+		else if (!inDouble && character === ")") {
+			depth -= 1;
+			if (depth === 0) {
+				return { body: command.slice(start, cursor), balanced: true, end: cursor + 1 };
+			}
+			previous = ")";
+			continue;
+		}
+		previous = character;
+	}
+	return { body: command.slice(start), balanced: false, end: command.length };
+}
+
+/**
+ * Scan a backtick command substitution with the same quote/comment rules as
+ * `scanDollarParenBody`. Nested `$()` frames are skipped with their own
+ * parser so backticks in those frames cannot close this one.
+ */
+function scanBacktickBody(command: string, start: number, parserDepth = 0): SubstitutionBody & { end: number } {
+	let inSingle = false;
+	let inDouble = false;
+	let inComment = false;
+	let previous = "";
+	for (let cursor = start; cursor < command.length; cursor += 1) {
+		const character = command[cursor];
+		if (inComment) {
+			if (character === "\n") {
+				inComment = false;
+				previous = character;
+			}
+			continue;
+		}
+		if (character === "\\" && !inSingle) {
+			cursor += 1;
+			previous = "x";
+			continue;
+		}
+		if (character === "'" && !inDouble) {
+			inSingle = !inSingle;
+			previous = character;
+			continue;
+		}
+		if (character === '"' && !inSingle) {
+			inDouble = !inDouble;
+			previous = character;
+			continue;
+		}
+		if (inSingle) continue;
+		if (character === "$" && command[cursor + 1] === "(") {
+			if (parserDepth >= SUBSTITUTION_PARSER_MAX_DEPTH) {
+				return { body: command.slice(start), balanced: false, end: command.length };
+			}
+			const nested = scanDollarParenBody(command, cursor + 2, parserDepth + 1);
+			if (!nested.balanced) {
+				return { body: command.slice(start), balanced: false, end: command.length };
+			}
+			cursor = nested.end - 1;
+			previous = "x";
+			continue;
+		}
+		if (character === "`") {
+			return { body: command.slice(start, cursor), balanced: true, end: cursor + 1 };
+		}
+		if (!inDouble && character === "#" && (previous === "" || /\s/.test(previous) || ";|&()".includes(previous))) {
+			inComment = true;
+			continue;
+		}
+		previous = character;
+	}
+	return { body: command.slice(start), balanced: false, end: command.length };
+}
+
+/**
+ * Collect the bodies of `$(...)` and backtick command substitutions. Their
+ * contents are a live command list wherever they appear -- including inside a
+ * double-quoted span -- so the caller rescans each one as its own script.
+ *
+ * Quote state is tracked the way the shell does it: an apostrophe inside a
+ * double-quoted word is data, not a single-quote opener, so `"it's $(rm x)"`
+ * still yields the substitution; a `)` inside a quoted argument does not close
+ * the body, so `$(printf ')'; rm x)` yields the whole body. Single-quoted spans
+ * are skipped because they suppress substitution entirely. Shell comments are
+ * skipped only at word boundaries, and their quote-like text cannot poison the
+ * surrounding frame. A body whose delimiters never balance is reported as such
+ * so the caller fails closed.
+ */
+function extractSubstitutionBodies(command: string): SubstitutionBody[] {
+	const bodies: SubstitutionBody[] = [];
+	let inSingle = false;
+	let inDouble = false;
+	let inComment = false;
+	let previous = "";
+	for (let index = 0; index < command.length; index += 1) {
+		const character = command[index];
+		if (inComment) {
+			if (character === "\n") {
+				inComment = false;
+				previous = character;
+			}
+			continue;
+		}
+		if (character === "\\" && !inSingle) {
+			index += 1;
+			previous = "x";
+			continue;
+		}
+		if (character === "'" && !inDouble) {
+			inSingle = !inSingle;
+			previous = character;
+			continue;
+		}
+		if (character === '"' && !inSingle) {
+			inDouble = !inDouble;
+			previous = character;
+			continue;
+		}
+		if (inSingle) continue;
+		if (character === "$" && command[index + 1] === "(") {
+			const scanned = scanDollarParenBody(command, index + 2);
+			bodies.push({ body: scanned.body, balanced: scanned.balanced });
+			index = scanned.end - 1;
+			previous = "x";
+			continue;
+		}
+		if (character === "`") {
+			const scanned = scanBacktickBody(command, index + 1);
+			bodies.push({ body: scanned.body, balanced: scanned.balanced });
+			index = scanned.end - 1;
+			previous = "x";
+			continue;
+		}
+		if (!inDouble && character === "#" && (previous === "" || /\s/.test(previous) || ";|&()".includes(previous))) {
+			inComment = true;
+			continue;
+		}
+		previous = character;
+	}
+	return bodies;
+}
+
+const BASH_SED_COMMAND_RE = new RegExp(
+	`(?:^|[;&|(\\n])\\s*(?:(?:if|then|else|elif|do|in|while|until)\\s+)*(?:!\\s+)?(?:\\w+=[^\\s]+\\s+)*(?:sudo\\s+)?${BASH_COMMAND_WRAPPER_SOURCE}(?:[^\\s;&|()]*\\/)?sed\\b((?:'[^']*'|"(?:\\\\.|[^"\\\\])*"|\\\\.|[^'";&|()\\n\\\\])*)`,
+	"gi",
+);
+const BASH_AWK_COMMAND_RE = new RegExp(
+	`(?:^|[;&|(\\n])\\s*(?:(?:if|then|else|elif|do|in)\\s+)*(?:!\\s+)?(?:\\w+=[^\\s]+\\s+)*(?:sudo\\s+)?${BASH_COMMAND_WRAPPER_SOURCE}(?:[^\\s;&|()]*\\/)?(?:awk|gawk|mawk|nawk|busybox\\s+awk)\\b((?:'[^']*'|"(?:\\\\.|[^"\\\\])*"|\\\\.|[^'";&|()\\n\\\\])*)`,
+	"gi",
+);
+
+/** `true` when index sits at a sed command letter, not inside a pattern. */
+function sedCommandPosition(script: string, index: number): boolean {
+	if (index === 0) return true;
+	return /[\s;{}\n\d$,]/.test(script[index - 1] ?? "");
+}
+
+function sedWriteName(script: string, index: number): { path: string | null; next: number } {
+	let cursor = index;
+	while (cursor < script.length && (script[cursor] === " " || script[cursor] === "\t")) cursor++;
+	const start = cursor;
+	while (cursor < script.length && script[cursor] !== ";" && script[cursor] !== "\n" && script[cursor] !== "}") {
+		cursor++;
+	}
+	return { path: cursor > start ? script.slice(start, cursor) : null, next: cursor };
+}
+
+function sedAddressEnd(script: string, start: number): number | undefined {
+	if (script[start] === "/") {
+		let cursor = start + 1;
+		while (cursor < script.length) {
+			if (script[cursor] === "\\") {
+				cursor += 2;
+				continue;
+			}
+			if (script[cursor] === "/") return cursor + 1;
+			cursor++;
+		}
+		return undefined;
+	}
+	if (script[start] === "$") return start + 1;
+	if (!/\d/.test(script[start] ?? "")) return undefined;
+	let cursor = start + 1;
+	while (/\d/.test(script[cursor] ?? "")) cursor++;
+	if (script[cursor] === "~") {
+		cursor++;
+		while (/\d/.test(script[cursor] ?? "")) cursor++;
+	}
+	return cursor;
+}
+
+function sedAddressWithModifiersEnd(script: string, start: number): number | undefined {
+	let cursor = sedAddressEnd(script, start);
+	if (cursor === undefined) return undefined;
+	if (script[start] === "/") {
+		while (script[cursor] === "I" || script[cursor] === "M") cursor++;
+	}
+	return cursor;
+}
+
+function sedRegexAddressWritePath(script: string, start: number): { path: string | null; next: number } | undefined {
+	let cursor = sedAddressWithModifiersEnd(script, start);
+	if (cursor === undefined) return undefined;
+	while (script[cursor] === " " || script[cursor] === "\t") cursor++;
+	if (script[cursor] === ",") {
+		cursor++;
+		while (script[cursor] === " " || script[cursor] === "\t") cursor++;
+		const rangeEnd = sedAddressWithModifiersEnd(script, cursor);
+		if (rangeEnd === undefined) return undefined;
+		cursor = rangeEnd;
+		while (script[cursor] === " " || script[cursor] === "\t") cursor++;
+	}
+	if (script[cursor] === "!") cursor++;
+	while (script[cursor] === " " || script[cursor] === "\t") cursor++;
+	if ((script[cursor] !== "w" && script[cursor] !== "W") || !" \t;\n}".includes(script[cursor + 1] ?? "\n")) {
+		return undefined;
+	}
+	return sedWriteName(script, cursor + 1);
+}
+
+/**
+ * Filename a sed script writes with the `w`/`W` command or an `s///w file` flag.
+ * `undefined` means this text does not write. `null` means it writes without a
+ * literal filename.
+ */
+/**
+ * GNU sed can execute shell commands: the `e` command replaces the pattern
+ * space with a shell command's output and `s///e` runs the result. Neither form
+ * names a file, so their write targets cannot be derived and the whole program
+ * must be treated as an unclassified mutation.
+ */
+function sedScriptRunsShellCommand(script: string): boolean {
+	// GNU sed accepts a numeric, `$`, or regular-expression address (`/re/e cmd`).
+	if (/(?:^|[;{}\n])\s*(?:(?:[0-9$]+(?:,[0-9$]+)?|\/(?:\\[\s\S]|[^\\/\n])*\/)\s*!?\s*)?e(?=[\s;}\n]|$)/.test(script))
+		return true;
+	return /\bs(\W)(?:\\.|(?!\1)[^\n])*?\1(?:\\.|(?!\1)[^\n])*?\1[gpiImM0-9]*e(?![A-Za-z])/.test(script);
+}
+
+function sedScriptWritePath(script: string): string | null | undefined {
+	if (sedScriptRunsShellCommand(script)) return null;
+	let index = 0;
+	let foundWrite = false;
+	let foundPath: string | null | undefined;
+	while (index < script.length) {
+		const character = script[index] ?? "";
+		if (" \t\n;{}".includes(character)) {
+			index++;
+			continue;
+		}
+		if (character === "/" && sedCommandPosition(script, index)) {
+			const written = sedRegexAddressWritePath(script, index);
+			if (written) {
+				if (foundWrite) return null;
+				foundWrite = true;
+				foundPath = written.path;
+				index = Math.max(written.next, index + 1);
+				continue;
+			}
+		}
+		if ((character === "w" || character === "W") && sedCommandPosition(script, index)) {
+			const next = script[index + 1];
+			if (next === undefined || " \t;\n}".includes(next)) {
+				const taken = sedWriteName(script, index + 1);
+				if (foundWrite) return null;
+				foundWrite = true;
+				foundPath = taken.path;
+				index = Math.max(taken.next, index + 1);
+				continue;
+			}
+		}
+		if (character === "s" && index + 1 < script.length) {
+			const delimiter = script[index + 1] ?? "";
+			if (delimiter && !/[\s\\]/.test(delimiter)) {
+				index += 2;
+				let fields = 1;
+				while (index < script.length && fields < 3) {
+					if (script[index] === "\\") {
+						index += 2;
+						continue;
+					}
+					if (script[index] === delimiter) fields++;
+					index++;
+				}
+				while (index < script.length && script[index] !== ";" && script[index] !== "\n" && script[index] !== "}") {
+					if (
+						(script[index] === "w" || script[index] === "W") &&
+						(script[index + 1] === " " || script[index + 1] === "\t")
+					) {
+						const taken = sedWriteName(script, index + 1);
+						if (foundWrite) return null;
+						foundWrite = true;
+						foundPath = taken.path;
+						index = Math.max(taken.next, index + 1);
+						break;
+					}
+					index++;
+				}
+				continue;
+			}
+		}
+		index++;
+	}
+	return foundWrite ? foundPath : undefined;
+}
+
+/**
+ * `-c`/`-e` bodies are one shell word, so a `;` inside the quotes is not a
+ * statement break. The line-oriented interpreter regex stops at that `;` and
+ * misses `import shutil; shutil.copy(...)`.
+ */
+function interpreterStatementEnd(command: string, start: number): number {
+	let index = start;
+	let inSingle = false;
+	let inDouble = false;
+	while (index < command.length) {
+		const character = command[index] ?? "";
+		if (inSingle) {
+			if (character === "'") inSingle = false;
+			index++;
+			continue;
+		}
+		if (inDouble) {
+			if (character === "\\") {
+				index += 2;
+				continue;
+			}
+			if (character === '"') inDouble = false;
+			index++;
+			continue;
+		}
+		if (character === "'") {
+			inSingle = true;
+			index++;
+			continue;
+		}
+		if (character === '"') {
+			inDouble = true;
+			index++;
+			continue;
+		}
+		if (character === "\\") {
+			index += 2;
+			continue;
+		}
+		if (character === ";" || character === "&" || character === "|" || character === "\n") break;
+		index++;
+	}
+	return index;
+}
+
+function pythonSystemCallArguments(script: string): { starts: number[]; unclassifiable: boolean } {
+	const starts: number[] = [];
+	let quote: "'" | '"' | null = null;
+	let tripleQuote = false;
+	let inComment = false;
+	let unclassifiable = false;
+	for (let index = 0; index < script.length; index++) {
+		const character = script[index] ?? "";
+		if (inComment) {
+			if (character === "\n") inComment = false;
+			continue;
+		}
+		if (quote) {
+			if (character === "\\") {
+				index++;
+				continue;
+			}
+			if (tripleQuote && script.startsWith(quote.repeat(3), index)) {
+				quote = null;
+				tripleQuote = false;
+				index += 2;
+				continue;
+			}
+			if (!tripleQuote && character === quote) quote = null;
+			continue;
+		}
+		if (character === "#") {
+			inComment = true;
+			continue;
+		}
+		if (character === "'" || character === '"') {
+			const isFString = /(?:^|[^\w])(?:[rR]?[fF]|[fF][rR])$/.test(script.slice(0, index));
+			tripleQuote = script.startsWith(character.repeat(3), index);
+			quote = character;
+			if (tripleQuote) {
+				const close = script.indexOf(character.repeat(3), index + 3);
+				const body = close < 0 ? script.slice(index + 3) : script.slice(index + 3, close);
+				if (isFString && /\bos\s*\.\s*system\s*\(/.test(body)) unclassifiable = true;
+				index += 2;
+			} else if (isFString) {
+				let close = index + 1;
+				while (close < script.length) {
+					if (script[close] === "\\") {
+						close += 2;
+						continue;
+					}
+					if (script[close] === character) break;
+					close++;
+				}
+				if (/\bos\s*\.\s*system\s*\(/.test(script.slice(index + 1, close))) unclassifiable = true;
+			}
+			continue;
+		}
+		const call = script.slice(index).match(/^\bos\s*\.\s*system\s*\(/);
+		if (call) {
+			starts.push(index + call[0].length);
+			index += call[0].length - 1;
+		}
+	}
+	// `os.system` can reach the shell under another name: a captured callable
+	// (`run = os.system`), a module alias (`import os as o`), a direct import alias
+	// (`from os import system as run`), or any other `<obj>.system(...)`. Neither form
+	// names its command here, so the shell payload is unclassifiable rather than invisible.
+	const systemCalls = (script.match(/\.\s*system\s*\(/g) ?? []).length;
+	const osSystemCalls = (script.match(/\bos\s*\.\s*system\s*\(/g) ?? []).length;
+	if (systemCalls > osSystemCalls) unclassifiable = true;
+	if (/\b[A-Za-z_]\w*\s*=\s*(?:os\s*\.\s*(?:system|popen)|subprocess\s*\.\s*\w+)\b/.test(script))
+		unclassifiable = true;
+	// Detect `from os import system as <name>` and then calls to `<name>(...)`
+	const fromOsImport = /\bfrom\s+os\s+import\s+system\s+as\s+([A-Za-z_]\w*)\b/.exec(script);
+	if (fromOsImport) {
+		const importedName = fromOsImport[1];
+		const importedCalls = new RegExp(`\\b${importedName}\\s*\\(`, "g");
+		if (importedCalls.test(script)) {
+			unclassifiable = true;
+		}
+	}
+	return { starts, unclassifiable };
+}
+
+function pythonSystemCommand(script: string, start: number): string | undefined {
+	let index = start;
+	while (/\s/.test(script[index] ?? "")) index++;
+	const quote = script[index];
+	if (quote !== "'" && quote !== '"') return undefined;
+	const tripleQuote = script.startsWith(quote.repeat(3), index);
+	index += tripleQuote ? 3 : 1;
+	let value = "";
+	let hasEscape = false;
+	while (index < script.length) {
+		if (script[index] === "\\") {
+			hasEscape = true;
+			index += 2;
+			continue;
+		}
+		if (tripleQuote && script.startsWith(quote.repeat(3), index)) {
+			index += 3;
+			while (/\s/.test(script[index] ?? "")) index++;
+			return !hasEscape && script[index] === ")" ? value : undefined;
+		}
+		if (!tripleQuote && script[index] === quote) {
+			index++;
+			while (/\s/.test(script[index] ?? "")) index++;
+			return !hasEscape && script[index] === ")" ? value : undefined;
+		}
+		value += script[index];
+		index++;
+	}
+	return undefined;
+}
+
+function collectPythonSystemWrites(script: string, targets: ExtractedTargets, depth: number): void {
+	const calls = pythonSystemCallArguments(script);
+	if (calls.unclassifiable) {
+		targets.explicitMutation = true;
+		targets.unknown = true;
+	}
+	for (const start of calls.starts) {
+		const payload = pythonSystemCommand(script, start);
+		if (payload === undefined || depth >= 2) {
+			targets.explicitMutation = true;
+			targets.unknown = true;
+			continue;
+		}
+		const nested = extractBashTargets({ command: payload }, depth + 1);
+		for (const nestedPath of nested.paths) addPath(targets, nestedPath);
+		if (nested.unknown) {
+			targets.explicitMutation = true;
+			targets.unknown = true;
+		}
+		if (nested.explicitMutation) targets.explicitMutation = true;
+	}
+}
+
+function cleanInterpreterCodeWord(word: string): string | undefined {
+	if (!word.startsWith("$'")) {
+		const fullyQuoted = (/^'[^']*'$/.test(word) || /^"(?:\\.|[^"\\])*"$/.test(word)) && word.length >= 2;
+		if (word.includes("$'") && !fullyQuoted) return undefined;
+		return cleanShellWord(word);
+	}
+	if (word.length < 3 || !word.endsWith("'")) return undefined;
+
+	let decoded = "";
+	for (let index = 2; index < word.length - 1; index++) {
+		const character = word[index] ?? "";
+		if (character !== "\\") {
+			if (character === "'") return undefined;
+			decoded += character;
+			continue;
+		}
+		const escapeCode = word[++index];
+		if (escapeCode === undefined) return undefined;
+		switch (escapeCode) {
+			case "a":
+				decoded += "\x07";
+				break;
+			case "b":
+				decoded += "\b";
+				break;
+			case "e":
+			case "E":
+				decoded += "\x1b";
+				break;
+			case "f":
+				decoded += "\f";
+				break;
+			case "n":
+				decoded += "\n";
+				break;
+			case "r":
+				decoded += "\r";
+				break;
+			case "t":
+				decoded += "\t";
+				break;
+			case "v":
+				decoded += "\v";
+				break;
+			case "\\":
+			case "'":
+			case '"':
+			case "?":
+				decoded += escapeCode;
+				break;
+			case "c": {
+				const control = word[++index];
+				if (control === undefined || control.charCodeAt(0) > 0x7f) return undefined;
+				const code = control === "?" ? 0x7f : control.toUpperCase().charCodeAt(0) & 0x1f;
+				if (code === 0) return undefined;
+				decoded += String.fromCharCode(code);
+				break;
+			}
+			case "x": {
+				let digits = "";
+				while (digits.length < 2 && /[\da-f]/i.test(word[index + 1] ?? "")) {
+					digits += word[++index];
+				}
+				if (!digits) return undefined;
+				const code = Number.parseInt(digits, 16);
+				if (code === 0) return undefined;
+				decoded += String.fromCharCode(code);
+				break;
+			}
+			case "u":
+			case "U": {
+				const width = escapeCode === "u" ? 4 : 8;
+				const digits = word.slice(index + 1, index + 1 + width);
+				if (digits.length !== width || !new RegExp(`^[\\da-f]{${width}}$`, "i").test(digits)) return undefined;
+				const code = Number.parseInt(digits, 16);
+				if (code === 0 || code > 0x10ffff || (code >= 0xd800 && code <= 0xdfff)) return undefined;
+				decoded += String.fromCodePoint(code);
+				index += width;
+				break;
+			}
+			default: {
+				if (!/[0-7]/.test(escapeCode)) return undefined;
+				let digits = escapeCode;
+				while (digits.length < 3 && /[0-7]/.test(word[index + 1] ?? "")) {
+					digits += word[++index];
+				}
+				const code = Number.parseInt(digits, 8);
+				if (code === 0 || code > 0xff) return undefined;
+				decoded += String.fromCharCode(code);
+				break;
+			}
+		}
+	}
+	return decoded;
+}
+
+function collectInterpreterOneLinerWrites(command: string, targets: ExtractedTargets, depth: number): void {
+	const api = new RegExp(BASH_INTERPRETER_WRITE_API, "i");
+	const names = new RegExp(
+		`(?:^|[;&|\\n])\\s*(?:(?:if|then|else|elif|do|in|while|until)\\s+)*(?:!\\s+)?(?:\\w+=[^\\s]+\\s+)*(?:sudo\\s+)?${BASH_COMMAND_WRAPPER_SOURCE}(?:[^\\s;&|()]*\\/)?(?:busybox\\s+)?(python(?:\\d+(?:\\.\\d+)*)?|pypy(?:\\d+(?:\\.\\d+)*)?|node(?:js)?|bun|deno|ruby|jruby|perl|php(?:\\d+(?:\\.\\d+)*)?|lua(?:\\d+(?:\\.\\d+)*)?|bash|ash|sh|zsh|dash|ksh|fish)\\b`,
+		"gi",
+	);
+	for (const match of command.matchAll(names)) {
+		const start = (match.index ?? 0) + match[0].length;
+		const tail = command.slice(start, interpreterStatementEnd(command, start));
+		const words = shellWords(tail);
+		const parts = words.map(cleanShellWord);
+		const binary = (match[1] ?? "").toLowerCase();
+		const options = interpreterCodeOptions(binary);
+		for (let index = 0; index < parts.length; index++) {
+			const part = parts[index] ?? "";
+			let rawScript: string | undefined;
+			const option = options.find(
+				candidate =>
+					part === candidate || (candidate.length === 2 && part.startsWith(candidate) && part.length > 2),
+			);
+			if (option && part === option) {
+				rawScript = words[++index];
+			} else if (option) {
+				const rawWord = words[index] ?? "";
+				rawScript = rawWord.startsWith("-") ? rawWord.slice(option.length) : part.slice(option.length);
+			} else {
+				const longOption = options.find(
+					candidate => candidate.startsWith("--") && part.startsWith(`${candidate}=`),
+				);
+				if (!longOption) continue;
+				rawScript = words[index]?.slice(longOption.length + 1);
+			}
+			if (rawScript === undefined) continue;
+			// Node preload options (-r/--require) load external files that cannot be scanned,
+			// so fail closed when encountered.
+			if ((option === "-r" || option === "--require") && /^(?:node|bun)$/.test(binary)) {
+				targets.explicitMutation = true;
+				targets.unknown = true;
+				return;
+			}
+			const script = cleanInterpreterCodeWord(rawScript);
+			if (
+				script === undefined ||
+				(!rawScript.startsWith("$'") && shellWordHasExpansion(rawScript)) ||
+				containsOpaqueInterpreterSource(script, binary)
+			) {
+				targets.explicitMutation = true;
+				targets.unknown = true;
+				return;
+			}
+			if (/^(?:bash|ash|sh|zsh|dash|ksh|fish)$/.test(binary)) {
+				if (depth >= 2) {
+					targets.explicitMutation = true;
+					targets.unknown = true;
+					return;
+				}
+				const nested = extractBashTargets({ command: script }, depth + 1);
+				for (const nestedPath of nested.paths) addPath(targets, nestedPath);
+				if (nested.unknown) targets.unknown = true;
+				if (nested.explicitMutation) targets.explicitMutation = true;
+				continue;
+			}
+			const language = /^(?:python|pypy)/.test(binary)
+				? "py"
+				: /^(?:node|bun|deno)$/.test(binary)
+					? "js"
+					: /^(?:ruby|jruby)$/.test(binary)
+						? "ruby"
+						: "perl";
+			if (/^(?:python|pypy)/.test(binary)) {
+				scanInterpreterWrites(script, "py", targets);
+				if (
+					interpreterCodeContainsWriteApi(script, "py", new RegExp(BASH_INTERPRETER_WRITE_API_EXCLUDING_OPEN, "i"))
+				) {
+					targets.explicitMutation = true;
+					targets.unknown = true;
+				}
+				collectPythonSystemWrites(script, targets, depth);
+				continue;
+			}
+			if (interpreterCodeContainsWriteApi(script, language, api)) {
+				targets.explicitMutation = true;
+				targets.unknown = true;
+				return;
+			}
+		}
+	}
+}
+
+function interpreterCodeOptions(binary: string): string[] {
+	if (/^(?:python|pypy)/.test(binary)) return ["-c"];
+	if (/^(?:node|bun)$/.test(binary)) return ["-r", "--require", "-e", "--eval", "-p", "--print"];
+	if (binary === "deno") return ["eval", "-e", "--eval"];
+	if (/^(?:ruby|jruby|perl|lua)/.test(binary)) return ["-e"];
+	if (/^php/.test(binary)) return ["-r"];
+	if (/^(?:bash|ash|sh|zsh|dash|ksh|fish)$/.test(binary)) return ["-c"];
+	return [];
+}
+
+function containsOpaqueInterpreterSource(source: string, binary: string): boolean {
+	return (
+		(!/^(?:python|pypy)/.test(binary) && INTERPRETER_DYNAMIC_EXECUTION_RE.test(source)) ||
+		INTERPRETER_FILESYSTEM_REQUIRE_RE.test(source) ||
+		INTERPRETER_NONLITERAL_REQUIRE_RE.test(source) ||
+		(/^php/.test(binary) && /\bassert\b/i.test(source)) ||
+		(/^(?:bash|ash|sh|zsh|dash|ksh|fish)$/.test(binary) && SHELL_DOT_SOURCE_RE.test(source))
+	);
+}
+
+function interpreterCodeContainsWriteApi(
+	script: string,
+	language: "py" | "js" | "ruby" | "perl",
+	api: RegExp,
+): boolean {
+	const apiAtStart = new RegExp(`^(?:${api.source})`, "i");
+	// Reflective mutation of a stream object defeats the stdout/stderr write
+	// exemption: the method that runs may write to a file. Fail closed instead.
+	const streamMutated =
+		INTERPRETER_OUTPUT_METHOD_ASSIGNMENT_RE.test(script) || INTERPRETER_OUTPUT_STREAM_MUTATION_RE.test(script);
+	let index = 0;
+	while (index < script.length) {
+		if (language === "py" || language === "js") {
+			const next =
+				language === "js" && script[index] === "`"
+					? skipJavaScriptTemplate(script, index)
+					: skipNoise(script, index, language);
+			if (next !== index) {
+				const skipped = script.slice(index, next);
+				const isInterpolated =
+					(language === "js" && script[index] === "`" && skipped.includes("${")) ||
+					(language === "py" &&
+						/(?:^|[^\w])(?:[rR]?[fF]|[fF][rR])$/.test(script.slice(Math.max(0, index - 3), index)) &&
+						skipped.includes("{"));
+				if (
+					isInterpolated &&
+					(api.test(skipped) ||
+						(language === "py" && PYTHON_DYNAMIC_EXECUTION_TOKEN_RE.test(skipped)) ||
+						(language === "js" && JAVASCRIPT_DYNAMIC_EXECUTION_TOKEN_RE.test(skipped)))
+				)
+					return true;
+				index = next;
+				continue;
+			}
+		} else {
+			const next = skipOtherInterpreterNoise(script, index);
+			if (next !== index) {
+				const skipped = script.slice(index, next);
+				if (language === "ruby" && script[index] !== "'" && skipped.includes("#{") && api.test(skipped))
+					return true;
+				index = next;
+				continue;
+			}
+		}
+		if (INTERPRETER_OUTPUT_METHOD_ASSIGNMENT_RE.test(script.slice(index))) return true;
+		if (language === "py" && PYTHON_DYNAMIC_EXECUTION_IDENTIFIER_RE.test(script.slice(index))) return true;
+		if (language === "js" && JAVASCRIPT_DYNAMIC_EXECUTION_IDENTIFIER_RE.test(script.slice(index))) return true;
+		if (language === "perl" && /^open\b/.test(script.slice(index))) {
+			// Both `open(...)` and the list form `open H, MODE, EXPR` matter; only an
+			// explicit read mode is safe, and an unparsed open fails closed.
+			if (!isReadOnlyPerlOpen(script, index)) return true;
+			index += "open".length;
+			continue;
+		}
+		if (apiAtStart.test(script.slice(index))) {
+			const outputWrite =
+				!streamMutated &&
+				/^\.\s*write\s*\(/.test(script.slice(index)) &&
+				/\b(?:process|Bun)\s*\.\s*(?:stdout|stderr)\s*$/.test(script.slice(0, index));
+			// Aliased mutation: if process.stdout is passed through a function or parameter,
+			// it may be rebound. Fail closed when there are function definitions or calls
+			// that could capture and mutate the stream object.
+			const hasAliasVectors =
+				outputWrite &&
+				/[([]\s*[A-Za-z_]\w*\s*=>|\([^)]*(?:process|Bun)\s*\.\s*(?:stdout|stderr)[^)]*\)/.test(script);
+			if (!outputWrite || hasAliasVectors) return true;
+		}
+		index += 1;
+	}
+	return false;
+}
+
+/**
+ * Perl `open` accepts two spellings — `open(H, MODE, EXPR)` and the list form
+ * `open H, MODE, EXPR` — and only an explicit read mode is safe. Any other shape
+ * (write/pipe modes, a variable mode, or an unparsed statement) fails closed.
+ */
+function isReadOnlyPerlOpen(script: string, index: number): boolean {
+	const rest = script.slice(index);
+	if (!/^open\b/.test(rest)) return false;
+	const parenthesized = /^open\s*\(/.exec(rest);
+	const body = parenthesized ? rest.slice(parenthesized[0].length) : rest.slice("open".length);
+	const statementEnd = body.search(/[;\n}]/);
+	const statement = statementEnd < 0 ? body : body.slice(0, statementEnd);
+
+	// Parse arguments properly: count commas to find the MODE position (second argument)
+	// and extract only that argument.
+	let depth = 0;
+	let inString = false;
+	let stringChar = "";
+	let commaCount = 0;
+	let modeStart = -1;
+	let modeEnd = -1;
+
+	for (let i = 0; i < statement.length; i++) {
+		const ch = statement[i];
+
+		if (inString) {
+			if (ch === "\\" && i + 1 < statement.length) {
+				i++; // skip escape sequence
+				continue;
+			}
+			if (ch === stringChar) {
+				inString = false;
+			}
+			continue;
+		}
+
+		if (ch === "'" || ch === '"') {
+			inString = true;
+			stringChar = ch;
+			continue;
+		}
+
+		if (ch === "(") depth++;
+		else if (ch === ")") depth--;
+		else if (ch === "," && depth === 0) {
+			commaCount++;
+			if (commaCount === 1) {
+				// This comma separates first and second arguments
+				modeStart = i + 1;
+			}
+			if (commaCount === 2) {
+				// This comma ends the mode argument
+				modeEnd = i;
+				break;
+			}
+		}
+	}
+
+	if (modeStart === -1) return false; // Can't find MODE argument
+	if (modeEnd === -1) modeEnd = statement.length;
+
+	const modeArg = statement.slice(modeStart, modeEnd).trim();
+
+	// Extract the mode value if it's a quoted string; if it's a variable, fail closed
+	const quotedMode = /^(['"])(.*?)\1$/.exec(modeArg);
+	if (!quotedMode) return false; // Variable mode, fail closed
+
+	const mode = quotedMode[2].trim();
+	return mode.startsWith("<") && !mode.startsWith("<+");
+}
+
+function skipJavaScriptTemplate(script: string, index: number): number {
+	let cursor = index + 1;
+	while (cursor < script.length) {
+		if (script[cursor] === "\\") {
+			cursor += 2;
+			continue;
+		}
+		if (script[cursor] === "`") return cursor + 1;
+		cursor += 1;
+	}
+	return script.length;
+}
+
+function skipOtherInterpreterNoise(script: string, index: number): number {
+	const character = script[index] ?? "";
+	if (character === "#") {
+		const end = script.indexOf("\n", index);
+		return end < 0 ? script.length : end;
+	}
+	if (character !== "'" && character !== '"' && character !== "`") return index;
+	let cursor = index + 1;
+	while (cursor < script.length) {
+		if (script[cursor] === "\\") {
+			cursor += 2;
+			continue;
+		}
+		if (script[cursor] === character) return cursor + 1;
+		cursor += 1;
+	}
+	return script.length;
+}
+
+function collectSedScriptWrites(command: string, targets: ExtractedTargets): void {
+	for (const match of command.matchAll(BASH_SED_COMMAND_RE)) {
+		const matchIndex = match.index ?? 0;
+		if (!shellSyntaxPosition(command, matchIndex)) continue;
+		const words = shellWords(match[1] ?? "").map(cleanShellWord);
+		const parsed = sedScriptOperands(words);
+		if (parsed.unknown) {
+			targets.explicitMutation = true;
+			targets.unknown = true;
+		}
+		for (const script of parsed.scripts) {
+			const writePath = sedScriptWritePath(script);
+			if (writePath === undefined) continue;
+			targets.explicitMutation = true;
+			if (writePath && !isDeviceSinkPath(writePath)) addPath(targets, writePath);
+			else if (!writePath) targets.unknown = true;
+		}
+	}
+}
+
+function sedScriptOperands(words: string[]): { scripts: string[]; unknown: boolean } {
+	const scripts: string[] = [];
+	let hasBareScript = false;
+	let unknown = false;
+	for (let index = 0; index < words.length; index++) {
+		const word = words[index] ?? "";
+		if (!word) continue;
+		if (word === "--") {
+			if (!hasBareScript && scripts.length === 0 && words[index + 1]) scripts.push(words[index + 1] ?? "");
+			break;
+		}
+		if (word === "-e" || word === "--expression") {
+			const script = words[index + 1];
+			if (script) scripts.push(script);
+			index += 1;
+			continue;
+		}
+		if (word.startsWith("--expression=")) {
+			scripts.push(word.slice("--expression=".length));
+			continue;
+		}
+		if (word.startsWith("-e") && word.length > 2) {
+			scripts.push(word.slice(2));
+			continue;
+		}
+		if (word === "-f" || word === "--file") {
+			// The script contents are not present in the command, so their write behavior is opaque.
+			unknown = true;
+			index += 1;
+			continue;
+		}
+		if (word.startsWith("--file=") || (word.startsWith("-f") && word.length > 2)) {
+			unknown = true;
+			continue;
+		}
+		if (word === "-l" || word === "--line-length") {
+			index += 1;
+			continue;
+		}
+		if (word.startsWith("-")) continue;
+		if (!hasBareScript && scripts.length === 0) {
+			scripts.push(word);
+			hasBareScript = true;
+		}
+	}
+	return { scripts, unknown };
+}
+
+function shellSyntaxPosition(command: string, targetIndex: number, allowComment = false): boolean {
+	let quote: "'" | '"' | null = null;
+	let inComment = false;
+	let previous = "";
+	for (let index = 0; index < targetIndex; index++) {
+		const character = command[index] ?? "";
+		if (inComment) {
+			if (character === "\n") {
+				inComment = false;
+				previous = character;
+			}
+			continue;
+		}
+		if (quote === "'") {
+			if (character === "'") quote = null;
+			continue;
+		}
+		if (quote === '"') {
+			if (character === "\\") {
+				index++;
+				continue;
+			}
+			if (character === '"') quote = null;
+			continue;
+		}
+		if (character === "\\") {
+			index++;
+			continue;
+		}
+		if (character === "'" || character === '"') {
+			quote = character;
+			continue;
+		}
+		if (character === "#" && (previous === "" || /\s/.test(previous) || ";|&()".includes(previous))) {
+			inComment = true;
+			continue;
+		}
+		previous = character;
+	}
+	if (command[targetIndex] === "\n" && inComment) return quote === null;
+	return quote === null && (allowComment || !inComment);
+}
+
+function awkRegexCanStart(tokens: AwkToken[]): boolean {
+	const previous = tokens.at(-1);
+	if (!previous) return true;
+	if (previous.kind === "separator") return true;
+	return (
+		(previous.kind === "symbol" &&
+			["{", "(", "[", ",", "?", ":", "=", "==", "!=", "!", "&&", "||", "~", "!~"].includes(previous.value)) ||
+		(previous.kind === "word" && ["print", "printf", "return"].includes(previous.value))
+	);
+}
+
+function awkRegexEnd(program: string, start: number): number | undefined {
+	let inCharacterClass = false;
+	for (let index = start + 1; index < program.length; index++) {
+		const character = program[index] ?? "";
+		if (character === "\\") {
+			index++;
+			continue;
+		}
+		if (character === "[" && !inCharacterClass) inCharacterClass = true;
+		else if (character === "]" && inCharacterClass) inCharacterClass = false;
+		else if (character === "/" && !inCharacterClass) return index + 1;
+		else if (character === "\n") return undefined;
+	}
+	return undefined;
+}
+
+interface AwkToken {
+	kind: "word" | "string" | "symbol" | "separator";
+	value: string;
+	unsafeEscapes?: boolean;
+}
+
+function tokenizeAwkProgram(program: string): { tokens: AwkToken[]; balanced: boolean } {
+	const tokens: AwkToken[] = [];
+	let balanced = true;
+	for (let index = 0; index < program.length; ) {
+		const character = program[index] ?? "";
+		if (character === "\n") {
+			tokens.push({ kind: "separator", value: character });
+			index++;
+			continue;
+		}
+		if (/\s/.test(character)) {
+			index++;
+			continue;
+		}
+		if (character === "#") {
+			while (index < program.length && program[index] !== "\n") index++;
+			continue;
+		}
+		if (character === '"') {
+			let value = "";
+			let unsafeEscapes = false;
+			let closed = false;
+			index++;
+			while (index < program.length) {
+				const next = program[index] ?? "";
+				if (next === "\\") {
+					const escapedChar = program[index + 1] ?? "";
+					if (escapedChar === "\\" || escapedChar === '"') {
+						value += escapedChar;
+						index += 2;
+						continue;
+					}
+					switch (escapedChar) {
+						case "a":
+							value += "\u0007";
+							index += 2;
+							continue;
+						case "b":
+							value += "\b";
+							index += 2;
+							continue;
+						case "f":
+							value += "\f";
+							index += 2;
+							continue;
+						case "n":
+							value += "\n";
+							index += 2;
+							continue;
+						case "r":
+							value += "\r";
+							index += 2;
+							continue;
+						case "t":
+							value += "\t";
+							index += 2;
+							continue;
+						case "v":
+							value += "\u000b";
+							index += 2;
+							continue;
+					}
+					if (/[0-7]/.test(escapedChar)) {
+						let end = index + 1;
+						while (end < program.length && end < index + 4 && /[0-7]/.test(program[end] ?? "")) end++;
+						value += String.fromCharCode(Number.parseInt(program.slice(index + 1, end), 8));
+						index = end;
+						continue;
+					}
+					if (escapedChar === "x") {
+						let end = index + 2;
+						while (end < program.length && /[\da-f]/i.test(program[end] ?? "")) end++;
+						const hex = program.slice(index + 2, end);
+						const codePoint = hex ? Number.parseInt(hex, 16) : Number.NaN;
+						if (hex && codePoint <= 0xffff) value += String.fromCharCode(codePoint);
+						else unsafeEscapes = true;
+						index = end;
+						continue;
+					}
+					unsafeEscapes = true;
+					if (escapedChar) value += escapedChar;
+					index += escapedChar ? 2 : 1;
+					continue;
+				}
+				if (next === '"') {
+					closed = true;
+					index++;
+					break;
+				}
+				value += next;
+				index++;
+			}
+			if (!closed) balanced = false;
+			tokens.push({ kind: "string", value, unsafeEscapes });
+			continue;
+		}
+		if (character === "/" && awkRegexCanStart(tokens)) {
+			const end = awkRegexEnd(program, index);
+			if (end === undefined) balanced = false;
+			else {
+				tokens.push({ kind: "symbol", value: "regex" });
+				index = end;
+				continue;
+			}
+		}
+		if (/[A-Za-z_]/.test(character)) {
+			const start = index++;
+			while (/[A-Za-z0-9_]/.test(program[index] ?? "")) index++;
+			tokens.push({ kind: "word", value: program.slice(start, index) });
+			continue;
+		}
+		if (character === ";") {
+			tokens.push({ kind: "separator", value: character });
+			index++;
+			continue;
+		}
+		const pair = program.slice(index, index + 2);
+		const operator = [">>", ">=", "==", "!=", "<=", "&&", "||", "!~", "++", "--"].includes(pair) ? pair : character;
+		tokens.push({ kind: "symbol", value: operator });
+		index += operator.length;
+	}
+	return { tokens, balanced };
+}
+
+interface AwkProgramSource {
+	source: string;
+	expanded: boolean;
+}
+
+function shellWordHasExpansion(word: string): boolean {
+	let quote: "'" | '"' | null = null;
+	for (let index = 0; index < word.length; index++) {
+		const character = word[index] ?? "";
+		if (quote === "'") {
+			if (character === "'") quote = null;
+			continue;
+		}
+		if (quote === '"') {
+			if (character === "\\") {
+				index++;
+				continue;
+			}
+			if (character === '"') quote = null;
+			else if (character === "$" || character === "`") return true;
+			continue;
+		}
+		if (character === "\\") {
+			index++;
+			continue;
+		}
+		if (character === "'" || character === '"') quote = character;
+		else if (character === "$" || character === "`") return true;
+	}
+	return quote !== null;
+}
+
+function awkPrograms(words: string[]): { programs: AwkProgramSource[]; unknown: boolean } {
+	const programs: AwkProgramSource[] = [];
+	const noOperandOptions = new Set([
+		"-b",
+		"-c",
+		"-C",
+		"-g",
+		"-h",
+		"-M",
+		"-n",
+		"-N",
+		"-O",
+		"-P",
+		"-r",
+		"-s",
+		"-S",
+		"-t",
+		"-V",
+		"--characters-as-bytes",
+		"--csv",
+		"--help",
+		"--lint",
+		"--lint-no-ext",
+		"--lint-old",
+		"--posix",
+		"--sandbox",
+		"--traditional",
+		"--version",
+	]);
+	let unknown = false;
+	let hasFileProgram = false;
+	let hasSourceOption = false;
+	const programSource = (raw: string): AwkProgramSource => ({
+		source: cleanShellWord(raw),
+		expanded: shellWordHasExpansion(raw),
+	});
+	const operand = (index: number): string | undefined => {
+		const next = words[index + 1];
+		if (!next) {
+			unknown = true;
+			return undefined;
+		}
+		return next;
+	};
+	for (let index = 0; index < words.length; index++) {
+		const word = words[index];
+		if (!word) continue;
+		if (/^(?:\d+)?(?:>>?|<<<?|&>)/.test(word)) {
+			if (/^(?:\d+)?(?:>>?|<<<?)$/.test(word)) index++;
+			continue;
+		}
+		const part = cleanShellWord(word);
+		if (part === "--") {
+			if (hasFileProgram || hasSourceOption) break;
+			const program = words[index + 1];
+			if (!program) unknown = true;
+			else programs.push(programSource(program));
+			break;
+		}
+		if (part === "-e" || part === "--source") {
+			const program = operand(index);
+			if (program) programs.push(programSource(program));
+			hasSourceOption = true;
+			index++;
+			continue;
+		}
+		if (part.startsWith("--source=")) {
+			programs.push(programSource(part.slice("--source=".length)));
+			hasSourceOption = true;
+			continue;
+		}
+		if (part === "-v" || part === "--assign" || part === "-F" || part === "--field-separator") {
+			if (!operand(index)) continue;
+			index++;
+			continue;
+		}
+		if (part === "-W") {
+			const extension = operand(index);
+			if (extension !== "version" && extension !== "lint" && extension !== "posix") {
+				unknown = true;
+				break;
+			}
+			index++;
+			continue;
+		}
+		if (part.startsWith("-W")) {
+			const extension = part.slice(2);
+			if (extension !== "version" && extension !== "lint" && extension !== "posix") {
+				unknown = true;
+				break;
+			}
+			continue;
+		}
+		if (part.startsWith("--assign=") || part.startsWith("--field-separator=")) continue;
+		if (part === "-f" || part === "--file" || part === "-E") {
+			if (!operand(index)) continue;
+			hasFileProgram = true;
+			index++;
+			continue;
+		}
+		if (part.startsWith("--file=") || (part.startsWith("-f") && part.length > 2)) {
+			hasFileProgram = true;
+			continue;
+		}
+		if (part.startsWith("-e") && part.length > 2) {
+			programs.push(programSource(part.slice(2)));
+			hasSourceOption = true;
+			continue;
+		}
+		if (part.startsWith("-v") && part.length > 2) continue;
+		if (part.startsWith("-F") && part.length > 2) continue;
+		if (part.startsWith("-") && noOperandOptions.has(part)) continue;
+		if (part.startsWith("-") && /^-[bcCghMnNPrStV]+$/.test(part)) continue;
+		if (part.startsWith("-")) {
+			unknown = true;
+			break;
+		}
+		if (hasFileProgram || hasSourceOption) break;
+		programs.push(programSource(word));
+		break;
+	}
+	if (hasFileProgram) unknown = true;
+	return { programs, unknown };
+}
+
+function analyzeAwkProgram(program: string): { paths: string[]; unknown: boolean } {
+	const { tokens, balanced } = tokenizeAwkProgram(program);
+	const paths: string[] = [];
+	let unknown =
+		!balanced ||
+		tokens.some(
+			(token, index) => token.kind === "word" && token.value === "system" && tokens[index + 1]?.value === "(",
+		);
+	let braceDepth = 0;
+	let parenDepth = 0;
+	let bracketDepth = 0;
+	let statementStart = true;
+	let pendingControlParen = false;
+	const controlParens: boolean[] = [];
+	let printStatement: { braceDepth: number; parenDepth: number; bracketDepth: number } | undefined;
+	for (let index = 0; index < tokens.length; index++) {
+		const token = tokens[index];
+		if (!token) continue;
+		if (token.kind === "separator") {
+			if (parenDepth === 0 && bracketDepth === 0) {
+				printStatement = undefined;
+				statementStart = true;
+				pendingControlParen = false;
+			}
+			continue;
+		}
+		if (token.kind === "string" || token.kind === "word") {
+			if (token.kind === "word" && statementStart && (token.value === "print" || token.value === "printf")) {
+				printStatement = { braceDepth, parenDepth, bracketDepth };
+				statementStart = false;
+				pendingControlParen = false;
+				continue;
+			}
+			if (token.kind === "word" && statementStart && ["for", "if", "while"].includes(token.value)) {
+				pendingControlParen = true;
+				statementStart = false;
+				continue;
+			}
+			if (token.kind === "word" && statementStart && ["do", "else"].includes(token.value)) {
+				statementStart = true;
+				pendingControlParen = false;
+				continue;
+			}
+			statementStart = false;
+			pendingControlParen = false;
+			continue;
+		}
+		if (token.value === "{") {
+			braceDepth++;
+			printStatement = undefined;
+			statementStart = true;
+			pendingControlParen = false;
+			continue;
+		}
+		if (token.value === "}") {
+			braceDepth--;
+			if (braceDepth < 0) unknown = true;
+			printStatement = undefined;
+			statementStart = true;
+			pendingControlParen = false;
+			continue;
+		}
+		if (token.value === "(") {
+			controlParens.push(pendingControlParen);
+			pendingControlParen = false;
+			parenDepth++;
+			statementStart = false;
+			continue;
+		}
+		if (token.value === ")") {
+			parenDepth--;
+			if (parenDepth < 0) unknown = true;
+			statementStart = controlParens.pop() ?? false;
+			continue;
+		}
+		if (token.value === "[") {
+			bracketDepth++;
+			statementStart = false;
+			continue;
+		}
+		if (token.value === "]") {
+			bracketDepth--;
+			if (bracketDepth < 0) unknown = true;
+			statementStart = false;
+			continue;
+		}
+		if (token.value === ">" || token.value === ">>") {
+			if (
+				printStatement &&
+				braceDepth === printStatement.braceDepth &&
+				parenDepth === printStatement.parenDepth &&
+				bracketDepth === printStatement.bracketDepth
+			) {
+				const destination = tokens[index + 1];
+				const trailing = tokens[index + 2];
+				if (
+					destination?.kind !== "string" ||
+					destination.unsafeEscapes ||
+					(destination.value !== "" && trailing && trailing.kind !== "separator" && trailing.value !== "}")
+				) {
+					unknown = true;
+				} else if (destination.value) {
+					paths.push(destination.value);
+				} else {
+					unknown = true;
+				}
+			}
+			statementStart = false;
+			continue;
+		}
+		if (token.value === "|") {
+			// AWK pipe I/O executes a command; print, printf, and getline effects are opaque.
+			unknown = true;
+			statementStart = false;
+			continue;
+		}
+		if (token.value === ";" && parenDepth === 0 && bracketDepth === 0) {
+			printStatement = undefined;
+			statementStart = true;
+			pendingControlParen = false;
+			continue;
+		}
+		statementStart = false;
+		pendingControlParen = false;
+	}
+	if (braceDepth !== 0 || parenDepth !== 0 || bracketDepth !== 0 || controlParens.length > 0) unknown = true;
+	return { paths, unknown };
+}
+
+function collectAwkProgramWrites(command: string, targets: ExtractedTargets): void {
+	for (const match of command.matchAll(BASH_AWK_COMMAND_RE)) {
+		const matchIndex = match.index ?? 0;
+		if (!shellSyntaxPosition(command, matchIndex)) continue;
+		const matchEnd = matchIndex + match[0].length;
+		const { programs, unknown } = awkPrograms(shellWords(match[1] ?? ""));
+		if (!shellSyntaxPosition(command, matchEnd, true) || unknown) {
+			targets.explicitMutation = true;
+			targets.unknown = true;
+		}
+		for (const program of programs) {
+			if (program.expanded) {
+				targets.explicitMutation = true;
+				targets.unknown = true;
+			}
+			const analyzed = analyzeAwkProgram(program.source);
+			if (analyzed.unknown) {
+				targets.explicitMutation = true;
+				targets.unknown = true;
+			}
+			for (const destination of analyzed.paths) {
+				targets.explicitMutation = true;
+				if (!isDeviceSinkPath(destination)) addPath(targets, destination);
+			}
+		}
+	}
 }
 
 function extractBashTargets(args: unknown, depth = 0): ExtractedTargets {
@@ -520,25 +2943,58 @@ function extractBashTargets(args: unknown, depth = 0): ExtractedTargets {
 		if (nested.unknown) targets.unknown = true;
 		if (nested.explicitMutation) targets.explicitMutation = true;
 	}
-	// Nested scripts were read from the raw text above; every scanner below works
-	// on the masked view so quoted argument data cannot look like a redirection.
-	const scanned = maskSingleQuotedSpans(command);
-	if (BASH_OPAQUE_INTERPRETER_WRITE_RE.test(command) || BASH_HEREDOC_OPAQUE_INTERPRETER_WRITE_RE.test(command)) {
+	// `$(...)` / backticks are a nested command list, exactly like `sh -c`: the
+	// statement anchors below (`^`, `;`, `&`, `|`, newline) never see inside one,
+	// so `echo "$(rm -rf src/x.ts)"` would otherwise scan clean. Heredoc masking
+	// removes literal data-consumer bodies first; the extractor then ignores
+	// inert `#` tails without touching quote/escape bytes needed by extraction.
+	const heredoc = maskHeredocBodies(command);
+	for (const substitution of extractSubstitutionBodies(heredoc.masked)) {
+		if (depth >= 2 || !substitution.balanced) {
+			targets.explicitMutation = true;
+			targets.unknown = true;
+			break;
+		}
+		const nested = extractBashTargets({ command: substitution.body }, depth + 1);
+		for (const nestedPath of nested.paths) addPath(targets, nestedPath);
+		if (nested.unknown) targets.unknown = true;
+		if (nested.explicitMutation) targets.explicitMutation = true;
+	}
+	// Heredoc bodies fed to data consumers are inert document payloads; mask them
+	// so spec/plan text cannot fake redirections. Script-consumer bodies survive
+	// the mask and are still scanned as live code below.
+	if (heredoc.opaqueExpansion || heredoc.mutatingConsumer) {
+		targets.explicitMutation = true;
+		targets.unknown = true;
+	}
+	// Nested scripts were read from the raw text above. Redirection extraction
+	// uses the quote-preserving syntax view; command extraction uses its
+	// dequoted executable-word view so quoted operands and split command words
+	// remain visible without turning prose into syntax.
+	const scanned = maskQuotedSpans(heredoc.masked);
+	if (scanned.unmodeled) {
+		// A live substitution construct we cannot balance (for example a
+		// `case` pattern whose `)` is not the substitution close) must never
+		// silently hide a mutation from the scanner.
+		targets.explicitMutation = true;
+		targets.unknown = true;
+	}
+	if (BASH_HEREDOC_OPAQUE_INTERPRETER_WRITE_RE.test(heredoc.masked)) {
 		targets.explicitMutation = true;
 		targets.unknown = true;
 	}
 	// `exec 1<>file` rebinds a descriptor, so a later `>/dev/null` may not reach the device at all.
-	if (BASH_EXEC_REDIRECT_RE.test(scanned)) {
+	if (BASH_EXEC_REDIRECT_RE.test(scanned.masked)) {
 		targets.explicitMutation = true;
 		targets.unknown = true;
 	}
-	for (const match of scanned.matchAll(BASH_EXTENDED_WRITE_RE)) {
+	for (const match of scanned.masked.matchAll(BASH_EXTENDED_WRITE_RE)) {
 		targets.explicitMutation = true;
 		const cleaned = cleanShellWord(match[1] ?? "");
 		if (!cleaned) targets.unknown = true;
 		else if (!isDeviceSinkPath(cleaned)) addPath(targets, cleaned);
 	}
-	for (const match of scanned.matchAll(BASH_DD_OUTPUT_RE)) {
+	for (const match of scanned.masked.matchAll(BASH_DD_OUTPUT_RE)) {
 		targets.explicitMutation = true;
 		const parts = shellWords(match[1] ?? "").map(cleanShellWord);
 		// Every `of=` counts: GNU dd honors the last one, so `of=/dev/null of=real.ts` writes real.ts.
@@ -550,7 +3006,7 @@ function extractBashTargets(args: unknown, depth = 0): ExtractedTargets {
 			else if (!isDeviceSinkPath(outputPath)) addPath(targets, outputPath);
 		}
 	}
-	for (const match of scanned.matchAll(BASH_IN_PLACE_MUTATION_COMMAND_RE)) {
+	for (const match of scanned.dequoted.matchAll(BASH_IN_PLACE_MUTATION_COMMAND_RE)) {
 		const parts = shellWords(match[1] ?? "").map(cleanShellWord);
 		const hasInPlaceFlag = parts.some(part => /^-.*i/.test(part));
 		if (!hasInPlaceFlag) continue;
@@ -559,32 +3015,57 @@ function extractBashTargets(args: unknown, depth = 0): ExtractedTargets {
 		if (target) addPath(targets, target);
 		else targets.unknown = true;
 	}
-	for (const match of scanned.matchAll(BASH_MUTATION_COMMAND_RE)) {
-		targets.explicitMutation = true;
+	for (const match of scanned.masked.matchAll(BASH_MUTATION_COMMAND_RE)) {
 		const redirected = match[2]?.trim();
-		if (redirected) {
-			const cleaned = cleanShellWord(redirected);
-			// A capture that dequotes to nothing (e.g. `>" src.ts"`) is a truncated parse, not a safe no-op.
-			if (!cleaned) targets.unknown = true;
-			else if (!isDeviceSinkPath(cleaned)) addPath(targets, cleaned);
-			continue;
-		}
+		if (!redirected) continue;
+		targets.explicitMutation = true;
+		const cleaned = cleanShellWord(redirected);
+		// A capture that dequotes to nothing (e.g. `>" src.ts"`) is a truncated parse, not a safe no-op.
+		if (!cleaned) targets.unknown = true;
+		else if (!isDeviceSinkPath(cleaned)) addPath(targets, cleaned);
+	}
+	for (const match of scanned.dequoted.matchAll(BASH_MUTATION_COMMAND_RE)) {
+		// Redirections are extracted from the quote-preserving syntax view above.
+		// The dequoted view exists so quote-split command words (`r"m"`) and
+		// quoted operands (`rm "src/product.ts"`) still reach this command branch.
+		if (match[2]) continue;
+		targets.explicitMutation = true;
 		const parts = shellWords(match[1] ?? "");
-		const commandName = match[0]
-			?.match(
-				/(?:^|[;&|\n])\s*(?:\w+=[^\s]+\s+)*(?:sudo\s+)?(?:[^\s;&|]*\/)?(tee|touch|rm|mkdir|cp|mv|install|truncate)\b/i,
-			)?.[1]
-			?.toLowerCase();
-		const targetParts =
-			commandName === "cp" || commandName === "mv" || commandName === "install" || commandName === "truncate"
-				? parts.slice(-1)
-				: parts;
+		const commandName = match[0]?.match(BASH_MUTATION_COMMAND_NAME_RE)?.[1]?.toLowerCase();
+		const chmodModeIndex =
+			commandName === "chmod" ? parts.findIndex(part => BASH_CHMOD_MODE_RE.test(cleanShellWord(part))) : -1;
+		let targetParts = parts;
+		if (
+			commandName === "cp" ||
+			commandName === "mv" ||
+			commandName === "install" ||
+			commandName === "truncate" ||
+			commandName === "ln"
+		) {
+			targetParts = parts.slice(-1);
+		} else if (commandName === "chmod" && chmodModeIndex >= 0) {
+			targetParts = parts.filter((_part, index) => index !== chmodModeIndex);
+		}
+		let extractedTarget = false;
 		for (const part of targetParts) {
 			const cleaned = cleanShellWord(part);
 			if (!cleaned || cleaned.startsWith("-")) continue;
+			// Redirection/heredoc operator words (`>/dev/null`, `<<'DOC'`, `2>&1`) are
+			// not argument paths; their targets are captured by the redirect scanners.
+			if (/^\d*[<>]/.test(cleaned)) continue;
 			addPath(targets, cleaned);
+			extractedTarget = true;
 		}
+		// A recognized mutator with no attributable operand is not a safe no-op:
+		// quote masking, unsupported expansions, and option-only invocations all
+		// fail closed rather than allowing a targetless mutation through planning.
+		if (!extractedTarget) targets.unknown = true;
 	}
+	// `sed w file` and `s///w file` write without `-i`. `awk 'print > "file"'`
+	// writes inside the program, which is not a shell redirection.
+	collectInterpreterOneLinerWrites(heredoc.masked, targets, depth);
+	collectSedScriptWrites(heredoc.masked, targets);
+	collectAwkProgramWrites(heredoc.masked, targets);
 	return targets;
 }
 /**
@@ -603,6 +3084,12 @@ function simpleLiteral(raw: string): string | null {
 	if ((quote !== "'" && quote !== '"') || trimmed.length < 2 || trimmed[trimmed.length - 1] !== quote) return null;
 	const body = trimmed.slice(1, -1);
 	return /[\\\n${]/.test(body) || body.includes(quote) ? null : body;
+}
+
+function pythonFStringContainsDynamicExecution(code: string, start: number, end: number): boolean {
+	const source = code.slice(start, end);
+	const isFString = /(?:^|[^\w])(?:[rR]?[fF]|[fF][rR])$/.test(code.slice(Math.max(0, start - 3), start));
+	return isFString && source.includes("{") && PYTHON_DYNAMIC_EXECUTION_TOKEN_RE.test(source);
 }
 
 function skipNoise(code: string, index: number, language: "py" | "js"): number {
@@ -660,9 +3147,15 @@ function modeWrites(raw: string | undefined): boolean | null {
 	return literal === null ? null : /[wax+]/.test(literal);
 }
 
-const PY_OS_MUTATORS = new Set("remove unlink rename replace rmtree move copy copy2 copyfile".split(" "));
+const PY_OS_MUTATORS = new Set(
+	"remove unlink rename replace rmtree move copy copy2 copyfile symlink link mkdir makedirs rmdir truncate open".split(
+		" ",
+	),
+);
 /** Copy and rename write the destination, not only the source. */
-const TWO_ARG_MUTATORS = new Set("rename replace move copy copy2 copyfile renameSync copyFileSync".split(" "));
+const TWO_ARG_MUTATORS = new Set(
+	"rename replace move copy copy2 copyfile symlink link renameSync copyFileSync".split(" "),
+);
 const JS_FS_MUTATORS = new Set(
 	"writeFileSync writeFile appendFileSync appendFile rmSync unlinkSync renameSync copyFileSync mkdirSync openSync".split(
 		" ",
@@ -774,14 +3267,70 @@ function literalPathReceiver(parts: string[]): string | null {
 	return joined.length === 0 ? "." : joined;
 }
 
+/** `Path.open()` defaults to read mode; a dynamic mode cannot be proven read-only. */
+function pathlibOpenModeWrites(code: string, methodAt: number): boolean | null {
+	const call = /^\s*\.\s*open\s*\(/.exec(code.slice(methodAt));
+	if (!call) return false;
+	let cursor = methodAt + call[0].length;
+	let mode: string | undefined;
+	let modeSeen = false;
+	let unknownMode = false;
+	let positionalIndex = 0;
+	while (cursor < code.length) {
+		while (/\s/.test(code[cursor] ?? "")) cursor += 1;
+		if (code[cursor] === ")") break;
+		const argument = readArg(code, cursor);
+		if (!argument) return null;
+		const raw = argument.raw.trim();
+		if (raw.startsWith("*") || raw.startsWith("**")) {
+			unknownMode = true;
+		} else {
+			const keyword = /^([A-Za-z_]\w*)\s*=\s*([\s\S]*)$/.exec(raw);
+			if (keyword?.[1] === "mode") {
+				if (modeSeen) unknownMode = true;
+				else {
+					mode = keyword[2];
+					modeSeen = true;
+				}
+			} else if (!keyword && positionalIndex === 0) {
+				if (modeSeen) unknownMode = true;
+				else {
+					mode = raw;
+					modeSeen = true;
+				}
+			}
+		}
+		positionalIndex += 1;
+		cursor = argument.end;
+		while (/\s/.test(code[cursor] ?? "")) cursor += 1;
+		if (code[cursor] === ",") cursor += 1;
+		else if (code[cursor] !== ")") return null;
+	}
+	return unknownMode ? null : modeWrites(mode);
+}
+
 /** Calls inside strings or comments are skipped. A non-literal write path fails closed. */
 function scanInterpreterWrites(code: string, language: "py" | "js", targets: ExtractedTargets): void {
 	let index = 0;
+	const recognizedPathMethodIndexes = new Set<number>();
 	while (index < code.length) {
 		const trivia = skipNoise(code, index, language);
 		if (trivia !== index) {
+			if (language === "py" && pythonFStringContainsDynamicExecution(code, index, trivia)) {
+				targets.explicitMutation = true;
+				targets.unknown = true;
+				return;
+			}
 			index = trivia;
 			continue;
+		}
+		if (
+			INTERPRETER_OUTPUT_METHOD_ASSIGNMENT_RE.test(code.slice(index)) ||
+			INTERPRETER_OUTPUT_STREAM_MUTATION_RE.test(code.slice(index))
+		) {
+			targets.explicitMutation = true;
+			targets.unknown = true;
+			return;
 		}
 		const previous = index === 0 ? "" : (code[index - 1] ?? "");
 		if ((index > 0 && /[\w]/.test(previous)) || !/[A-Za-z_]/.test(code[index] ?? "")) {
@@ -794,6 +3343,29 @@ function scanInterpreterWrites(code: string, language: "py" | "js", targets: Ext
 			continue;
 		}
 		const name = ident[0];
+		if (language === "py" && PYTHON_DYNAMIC_EXECUTION_IDENTIFIER_RE.test(name)) {
+			targets.explicitMutation = true;
+			targets.unknown = true;
+			return;
+		}
+		let receiverDot = index - 1;
+		while (receiverDot >= 0 && /\s/.test(code[receiverDot] ?? "")) receiverDot -= 1;
+		const unresolvedPathMethod =
+			language === "py" &&
+			code[receiverDot] === "." &&
+			(/^write_\w+$/.test(name) || name === "touch" || name === "open");
+		if (unresolvedPathMethod && !recognizedPathMethodIndexes.has(index)) {
+			const callAt = skipCallGap(code, index + name.length);
+			if (code[callAt] === "(") {
+				const writes = name === "open" ? pathlibOpenModeWrites(code, receiverDot) : true;
+				if (writes !== false) {
+					targets.explicitMutation = true;
+					targets.unknown = true;
+				}
+				index = Math.max(callAt + 1, index + name.length);
+				continue;
+			}
+		}
 		if ((name === "write" || name === "append") && previous === ".") {
 			index += name.length;
 			continue;
@@ -809,7 +3381,8 @@ function scanInterpreterWrites(code: string, language: "py" | "js", targets: Ext
 		const paren = /^\s*\(/.exec(code.slice(cursor));
 		const helper = (name === "write" || name === "append") && dotted === "";
 		const open = (name === "open" && language === "py") || (name === "openSync" && language === "js");
-		const pathCtor = name === "Path" && dotted === "";
+		const pathCtor =
+			(name === "Path" && dotted === "") || (language === "py" && name === "pathlib" && dotted === "Path");
 		const osCall =
 			language === "py" &&
 			((name === "os" && PY_OS_MUTATORS.has(dotted)) || (name === "shutil" && PY_OS_MUTATORS.has(dotted)));
@@ -827,12 +3400,18 @@ function scanInterpreterWrites(code: string, language: "py" | "js", targets: Ext
 				index += 1;
 				continue;
 			}
-			const method = /^\s*\.\s*(write_text|write_bytes)\b/.exec(code.slice(ctor.after));
+			const method = /^\s*\.\s*(write_\w+|open|touch)\s*\(/.exec(code.slice(ctor.after));
 			if (method) {
-				targets.explicitMutation = true;
-				const receiver = literalPathReceiver(ctor.parts);
-				if (receiver === null || receiver.length === 0) targets.unknown = true;
-				else addPath(targets, receiver);
+				if (ctor.parts.length > 1) {
+					recognizedPathMethodIndexes.add(ctor.after + method[0].indexOf(method[1]));
+				}
+				const writes = method[1] === "open" ? pathlibOpenModeWrites(code, ctor.after) : true;
+				if (writes !== false) {
+					targets.explicitMutation = true;
+					const receiver = literalPathReceiver(ctor.parts);
+					if (writes === null || receiver === null || receiver.length === 0) targets.unknown = true;
+					else addPath(targets, receiver);
+				}
 			}
 			// Extra segments stay in the argument walk so a nested mutator is still recorded.
 			index =
@@ -953,7 +3532,7 @@ function blockedWorkflowStateSkill(cwd: string, rawPath: string): CanonicalSkcWo
 	if (generatedRoot === "specs" || generatedRoot === "plans") return null;
 	if (generatedRoot !== "state") return null;
 	const fileName = segments.at(-1) ?? "";
-	for (const skillName of ["deep-interview", "ralplan", "ultragoal", "team"] as const) {
+	for (const skillName of ["deep-interview", "ralplan", "ultragoal"] as const) {
 		if (fileName === workflowModeStateFileName(skillName)) return skillName;
 	}
 	if (fileName === "skill-active-state.json") return "deep-interview";
