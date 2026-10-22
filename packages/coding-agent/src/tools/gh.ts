@@ -10,7 +10,7 @@ import type { Settings } from "../config/settings";
 import githubDescription from "../prompts/tools/github.md" with { type: "text" };
 import * as git from "../utils/git";
 import type { ToolSession } from ".";
-import { wrapUntrustedContent } from "./fetch";
+import { publishExplicitArtifactText, wrapUntrustedContent } from "./fetch";
 import { formatShortSha } from "./gh-format";
 import { type CacheStatus, getOrFetchView, resolveGithubCacheAuthKey } from "./github-cache";
 import type { OutputMeta } from "./output-meta";
@@ -2541,7 +2541,7 @@ async function saveArtifactText(session: ToolSession, toolType: string, text: st
 		return undefined;
 	}
 
-	await Bun.write(artifactPath, text);
+	await publishExplicitArtifactText(artifactPath, text);
 	return artifactId;
 }
 
