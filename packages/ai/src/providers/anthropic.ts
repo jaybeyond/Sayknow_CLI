@@ -1879,8 +1879,11 @@ export const streamAnthropic: StreamFunction<"anthropic-messages"> = (
 						continue;
 					}
 					const thinkingSignatureInvalid = isAnthropicThinkingSignatureInvalidError(streamFailure);
+					// Runs on managed fallback runs too. Resending the same history to the
+					// same model can only 400 again, and a non-retryable 400 never reaches the
+					// chain's recovery budget, so without this one-shot shape repair a managed
+					// session fails on every turn until the user starts a new session.
 					if (
-						!options?.fallbackManaged &&
 						!thinkingRepairAttempted &&
 						firstTokenTime === undefined &&
 						(thinkingSignatureInvalid || isAnthropicThinkingBlockMutationError(streamFailure))

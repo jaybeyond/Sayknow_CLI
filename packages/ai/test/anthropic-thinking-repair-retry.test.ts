@@ -217,6 +217,34 @@ describe("Anthropic thinking replay repair retry", () => {
 		expect(secondBody).toContain("late answer");
 	});
 
+	it("repairs the invalid-signature 400 on managed fallback runs too", async () => {
+		// Regression: the repair was skipped when fallbackManaged was set (the default
+		// with fallback.auto), so the same broken history 400'd on every turn.
+		const user: UserMessage = { role: "user", content: "first", timestamp: Date.now() };
+		const context: Context = {
+			messages: [
+				user,
+				makeSignedAssistant("early", "early answer"),
+				{ ...user, content: "next prompt", timestamp: Date.now() + 1 },
+			],
+		};
+		const requestBodies: unknown[] = [];
+		let attempt = 0;
+		const create = ((body: unknown) => {
+			requestBodies.push(body);
+			attempt += 1;
+			return (attempt === 1 ? createAnthropicSignatureInvalid400() : createSuccessfulRequest()) as never;
+		}) as unknown as Anthropic["messages"]["create"];
+		const client = { messages: { create } } as Anthropic;
+
+		const result = await streamAnthropic(model, context, { client, fallbackManaged: true }).result();
+
+		expect(result.stopReason).toBe("stop");
+		expect(requestBodies).toHaveLength(2);
+		expect(JSON.stringify(requestBodies[1])).not.toContain("sig_early");
+		expect(JSON.stringify(requestBodies[1])).toContain("early answer");
+	});
+
 	it("stops after exactly two requests when the invalid-signature 400 persists", async () => {
 		const user: UserMessage = {
 			role: "user",

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Anthropic: the one-shot repair for `Invalid signature in thinking block` (and the latest-assistant thinking mutation 400) now also runs on managed fallback runs. It was skipped whenever `fallback.auto` managed the request, so the same rejected history was resent on every turn and the session stayed stuck until a new one was started.
+
 ## [0.7.10] - 2026-10-20
 
 ## [0.7.9] - 2026-10-17
