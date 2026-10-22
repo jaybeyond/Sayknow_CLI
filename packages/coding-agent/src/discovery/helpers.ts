@@ -405,8 +405,17 @@ export async function scanSkillsFromDir(
  * Expand environment variables in a string.
  * Supports ${VAR} and ${VAR:-default} syntax.
  */
-function expandEnvVars(value: string, extraEnv?: Record<string, string>): string {
+const SENSITIVE_ENV_NAME = /key|secret|token|pass|auth|credential|cookie|dsn|url$/i;
+
+export function isSensitiveEnvName(name: string): boolean {
+	return SENSITIVE_ENV_NAME.test(name);
+}
+
+function expandEnvVars(value: string, extraEnv?: Record<string, string>, skipSensitiveNames = false): string {
 	return value.replace(/\$\{([^}:]+)(?::-([^}]*))?\}/g, (_, varName: string, defaultValue?: string) => {
+		if (skipSensitiveNames && isSensitiveEnvName(varName)) {
+			return defaultValue !== undefined ? defaultValue : `\${${varName}}`;
+		}
 		const envValue = extraEnv?.[varName] ?? Bun.env[varName];
 		if (envValue !== undefined) return envValue;
 		if (defaultValue !== undefined) return defaultValue;
@@ -417,17 +426,17 @@ function expandEnvVars(value: string, extraEnv?: Record<string, string>): string
 /**
  * Recursively expand environment variables in an object.
  */
-export function expandEnvVarsDeep<T>(obj: T, extraEnv?: Record<string, string>): T {
+export function expandEnvVarsDeep<T>(obj: T, extraEnv?: Record<string, string>, skipSensitiveNames = false): T {
 	if (typeof obj === "string") {
-		return expandEnvVars(obj, extraEnv) as T;
+		return expandEnvVars(obj, extraEnv, skipSensitiveNames) as T;
 	}
 	if (Array.isArray(obj)) {
-		return obj.map(item => expandEnvVarsDeep(item, extraEnv)) as T;
+		return obj.map(item => expandEnvVarsDeep(item, extraEnv, skipSensitiveNames)) as T;
 	}
 	if (obj !== null && typeof obj === "object") {
 		const result: Record<string, unknown> = {};
 		for (const [key, value] of Object.entries(obj)) {
-			result[key] = expandEnvVarsDeep(value, extraEnv);
+			result[key] = expandEnvVarsDeep(value, extraEnv, skipSensitiveNames);
 		}
 		return result as T;
 	}
