@@ -2,6 +2,7 @@ import { createHash, randomBytes } from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { getConfigRootDir } from "@sayknow-cli/utils";
+import { sanitizeImportedString } from "../session-import/redact";
 import { syncSkillActiveState } from "../skill-state/active-state";
 import { buildRalplanHudSummary } from "../skill-state/workflow-hud";
 import { WORKFLOW_STATE_VERSION } from "../skill-state/workflow-state-contract";
@@ -1492,6 +1493,16 @@ async function buildRalplanHud(options: {
 	});
 }
 
+/**
+ * Credential scrub for a ralplan stage body. The result is what
+ * `skc ralplan --write` hashes and stores.
+ */
+export function scrubRalplanPersistedBody(content: string): string {
+	const normalized = content.endsWith("\n") ? content : `${content}\n`;
+	const scrubbed = sanitizeImportedString(normalized);
+	return scrubbed.endsWith("\n") ? scrubbed : `${scrubbed}\n`;
+}
+
 async function handleArtifactWrite(args: readonly string[], cwd: string): Promise<RalplanCommandResult> {
 	const resolved = await resolveArtifactArgs(args, cwd);
 	const persistedRoleState = parsePersistedRoleStateArgs(args, resolved.stage);
@@ -1514,7 +1525,9 @@ async function handleArtifactWrite(args: readonly string[], cwd: string): Promis
 			// Non-file / missing path is inline content; resolveArtifactContent already handled it.
 		}
 	}
-	const content = resolved.artifact.endsWith("\n") ? resolved.artifact : `${resolved.artifact}\n`;
+	// Scrub before the content hash. The ledger, dedupe, and pending-approval copy
+	// all trust this digest, so it has to name the bytes that actually land on disk.
+	const content = scrubRalplanPersistedBody(resolved.artifact);
 	const sha256 = createHash("sha256").update(content).digest("hex");
 
 	// Read the ledger once before persistence. The dedupe guard and both gates

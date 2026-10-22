@@ -24,7 +24,7 @@ Import is available in the local interactive CLI only. Path-bearing `/import-ses
 
 Activation acquires an idle-only session transition after import finishes. If a response or turn starts first, the imported session remains durable and resumable from the session picker while the active work continues unchanged.
 
-Every imported string passes through deterministic credential redaction before persistence. Redaction covers API keys and tokens, private keys, JWTs, authorization values (including JSON and non-Bearer schemes), secret assignments, and credentials embedded in URLs. A summary reports only counts and redaction kinds, never secret values.
+Every imported string passes through deterministic credential redaction before persistence. Terminal escape sequences (CSI/OSC) and invisible or bidirectional control characters are stripped first. Redaction covers API keys and tokens, private keys, JWTs, authorization values (including JSON and non-Bearer schemes), secret assignments, and credentials embedded in URLs. A summary reports only counts and redaction kinds, never secret values.
 
 Only the redacted source basename and exact source-byte digest enter durable provenance. The selected path and the provider's original workspace path are omitted from reconstructed model context and operator errors.
 

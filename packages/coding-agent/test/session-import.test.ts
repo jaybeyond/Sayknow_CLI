@@ -10,7 +10,7 @@ import { parseClaudeCodeTranscript, parseClaudeExport } from "../src/session-imp
 import { parseCodexRollout } from "../src/session-import/codex";
 import { parseImportSessionArgs, runSessionImportCommand } from "../src/session-import/command";
 import { detectSessionImportFormat } from "../src/session-import/detect";
-import { redactImportedText } from "../src/session-import/redact";
+import { IMPORT_SANITIZER_VERSION, redactImportedText } from "../src/session-import/redact";
 import {
 	formatSessionImportError,
 	formatSessionImportSummary,
@@ -668,7 +668,7 @@ describe("session import safety", () => {
 			destination: path.join(dir, "sessions"),
 		});
 		expect(result.prepared.counts.redacted).toBeGreaterThanOrEqual(secrets.length);
-		expect(result.prepared.provenance.sanitizerVersion).toBe(5);
+		expect(result.prepared.provenance.sanitizerVersion).toBe(IMPORT_SANITIZER_VERSION);
 		const persisted = fs.readFileSync(result.targetPath, "utf8");
 		for (const secret of secrets) {
 			expect(result.prepared.contextText).not.toContain(secret);

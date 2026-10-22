@@ -9,7 +9,15 @@
 
 export const IMPORT_REDACTED_PLACEHOLDER = "[REDACTED]";
 /** Bumped when patterns change; persisted in import provenance. */
-export const IMPORT_SANITIZER_VERSION = 5;
+export const IMPORT_SANITIZER_VERSION = 6;
+
+// Terminal escapes and invisible/bidi controls never survive import: they can
+// restyle or hide transcript text when the imported session is rendered.
+const UNSAFE_CONTROL =
+	/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2060\u2066-\u2069\ufeff]/gu;
+const HEADER_CREDENTIAL = /(\b(?:authorization|cookie|set-cookie)\b[ \t]*:[ \t]*)([^\r\n]*)/giu;
+const JSON_AUTHORIZATION = /((?:\\?")authorization(?:\\?")\s*:\s*(?:\\?")?)([^",}\r\n]+)/giu;
+
 interface RedactionRule {
 	readonly id: string;
 	readonly pattern: RegExp;
@@ -48,7 +56,8 @@ const REDACTION_RULES: readonly RedactionRule[] = [
 	{ id: "gitlab-token", pattern: /glpat-[A-Za-z0-9_-]{16,}/g },
 	{ id: "npm-token", pattern: /npm_[A-Za-z0-9]{20,}/g },
 	{ id: "google-oauth-token", pattern: /ya29\.[A-Za-z0-9_-]{16,}/g },
-	{ id: "stripe-live-key", pattern: /(?:sk|rk)_live_[A-Za-z0-9]{16,}/g },
+	{ id: "stripe-key", pattern: /(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{16,}/g },
+	{ id: "huggingface-token", pattern: /hf_[A-Za-z0-9]{20,}/g },
 	// Authorization values in headers, JSON, YAML, or diagnostic output.
 	{
 		id: "authorization-credential",
@@ -86,6 +95,58 @@ const REDACTION_RULES: readonly RedactionRule[] = [
 	},
 ];
 
+/**
+ * Linear CSI/OSC strip. An unterminated `ESC ]` used to make the global
+ * replace rescan every later suffix, which is quadratic in the prefix count.
+ */
+function stripImportedAnsiEscapes(input: string): string {
+	if (!input.includes("\u001b")) return input;
+	const parts: string[] = [];
+	let from = 0;
+	let i = 0;
+	let oscLive = true;
+	const n = input.length;
+	while (i < n) {
+		const esc = input.indexOf("\u001b", i);
+		if (esc < 0 || esc + 1 >= n) break;
+		const kind = input.charCodeAt(esc + 1);
+		let end = -1;
+		if (kind === 0x5b) end = csiSequenceEnd(input, esc + 2);
+		else if (kind === 0x5d && oscLive) end = oscSequenceEnd(input, esc + 2);
+		// No BEL and no ST anywhere after this prefix, so later OSC cannot terminate.
+		if (kind === 0x5d && end < 0) oscLive = false;
+		if (end < 0) {
+			i = esc + 1;
+			continue;
+		}
+		if (esc > from) parts.push(input.slice(from, esc));
+		from = end;
+		i = end;
+	}
+	if (from === 0) return input;
+	if (from < n) parts.push(input.slice(from));
+	return parts.join("");
+}
+
+function csiSequenceEnd(input: string, j: number): number {
+	const n = input.length;
+	while (j < n && input.charCodeAt(j) >= 0x30 && input.charCodeAt(j) <= 0x3f) j++;
+	while (j < n && input.charCodeAt(j) >= 0x20 && input.charCodeAt(j) <= 0x2f) j++;
+	const finalByte = input.charCodeAt(j);
+	return finalByte >= 0x40 && finalByte <= 0x7e ? j + 1 : -1;
+}
+
+function oscSequenceEnd(input: string, index: number): number {
+	// One forward scan. A second search to the end of the suffix is quadratic for repeated OSC sequences.
+	const n = input.length;
+	for (let j = index; j < n; j++) {
+		const code = input.charCodeAt(j);
+		if (code === 0x07) return j + 1;
+		if (code === 0x1b && j + 1 < n && input.charCodeAt(j + 1) === 0x5c) return j + 2;
+	}
+	return -1;
+}
+
 export interface ImportRedactionResult {
 	value: string;
 	redacted: number;
@@ -97,9 +158,21 @@ export interface ImportRedactionResult {
  * is used for all kinds so a partial pattern overlap cannot leak fragments.
  */
 export function redactImportedText(input: string): ImportRedactionResult {
-	let value = input;
+	let value = stripImportedAnsiEscapes(input).replace(UNSAFE_CONTROL, "");
 	let redacted = 0;
 	const kinds = new Set<string>();
+	value = value.replace(HEADER_CREDENTIAL, (_match, prefix: string, raw: string) => {
+		if (!raw.trim()) return `${prefix}${raw}`;
+		redacted++;
+		kinds.add("credential-header");
+		return `${prefix}${IMPORT_REDACTED_PLACEHOLDER}`;
+	});
+	value = value.replace(JSON_AUTHORIZATION, (_match, prefix: string, raw: string) => {
+		if (!raw.trim()) return `${prefix}${raw}`;
+		redacted++;
+		kinds.add("authorization-json");
+		return `${prefix}${IMPORT_REDACTED_PLACEHOLDER}`;
+	});
 	for (const rule of REDACTION_RULES) {
 		rule.pattern.lastIndex = 0;
 		value = value.replace(rule.pattern, match => {
