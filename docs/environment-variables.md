@@ -320,7 +320,9 @@ Coordinator MCP currently exposes durable polling/await tools, not push subscrip
 | --- | --- |
 | `SKC_COORDINATOR_MCP_WORKDIR_ROOTS` | Required allowlist for workdir and artifact paths. `skc setup hermes` renders absolute normalized paths joined with the platform path delimiter (`:` on POSIX, `;` on Windows). The bridge parser also accepts commas, semicolons, and newlines for legacy manual configs. |
 | `SKC_COORDINATOR_MCP_MUTATIONS` | Enables mutating tool classes as a comma-separated list (`sessions`, `questions`, `reports`) or `all`. `sessions` covers session startup, prompt delivery, durable turn journal updates, queue, and force operations. Per-call `allow_mutation: true` is still required. |
-| `SKC_COORDINATOR_MCP_ARTIFACT_BYTE_CAP` | Max bytes returned by artifact reads (default `65536`, capped at `1048576`). |
+| `SKC_COORDINATOR_MCP_ARTIFACT_BYTE_CAP` | Max bytes returned by artifact reads (default `65536`, capped at `1048576`). The value must be plain decimal digits (surrounding whitespace is ignored); anything else, such as `64KB`, `1e6`, or `0`, falls back to the default. |
+| `SKC_COORDINATOR_MCP_SESSION_IDLE_TTL_MS` | Idle time in milliseconds before the coordinator reaps an idle coordinator-created session (never a registered resident session) (default `1800000`, 30 minutes; values below `60000` are raised to `60000`). Plain decimal digits only; anything else falls back to the default. |
+| `SKC_COORDINATOR_MCP_SESSION_SWEEP_INTERVAL_MS` | Interval in milliseconds between idle-session sweeps (default `300000`, 5 minutes; values below `30000` are raised to `30000`). Plain decimal digits only; anything else falls back to the default. |
 | `SKC_COORDINATOR_MCP_STATE_ROOT` | Bridge coordination state root (default `<cwd>/.skc/state/coordinator-mcp`). |
 | `SKC_COORDINATOR_MCP_PROFILE` | Optional profile namespace for session/question/report state. Missing scope never widens to global session enumeration. |
 | `SKC_COORDINATOR_MCP_REPO` | Optional repo namespace for session/question/report state. Missing scope never widens to global session enumeration. |
