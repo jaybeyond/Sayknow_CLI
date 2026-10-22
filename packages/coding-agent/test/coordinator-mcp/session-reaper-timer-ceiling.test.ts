@@ -13,7 +13,6 @@ describe("session reaper sweep interval ceiling", () => {
 					return [];
 				},
 				reapSession: async () => {},
-				markSessionDead: async () => {},
 				now: () => Date.now(),
 			},
 			{ idleTtlMs: 30 * 60_000, sweepIntervalMs: 2 ** 31 },
