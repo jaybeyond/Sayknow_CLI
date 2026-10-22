@@ -3126,7 +3126,10 @@ export class AgentSession {
 				cacheIdentity: options.cacheIdentity ?? this.sessionId,
 			};
 		}
-		const transformedMessages = await this.#transformContext([...this.messages], options.signal);
+		const transformedMessages = await this.#transformContext(
+			this.#withoutEphemeralCustomMessages(this.messages),
+			options.signal,
+		);
 		const convertedMessages = await this.#convertToLlm(transformedMessages);
 		const providerMessages = this.model
 			? normalizeMessagesForProvider(convertedMessages, this.model)
@@ -6883,8 +6886,18 @@ export class AgentSession {
 	}
 
 	/** All messages including custom types like BashExecutionMessage */
+	/**
+	 * All messages including custom types like BashExecutionMessage. Request-scoped
+	 * ephemeral copies are retained only in `agent.state.messages` to keep the provider
+	 * cache prefix stable; they are never part of this public view.
+	 */
 	get messages(): AgentMessage[] {
-		return this.agent.state.messages;
+		const messages = this.agent.state.messages;
+		return messages.some(
+			message => message.role === "custom" && this.#isEphemeralCustomMessageType(message.customType),
+		)
+			? this.#withoutEphemeralCustomMessages(messages)
+			: messages;
 	}
 	get transcriptPromptGeneration(): number {
 		return this.#promptGeneration;
@@ -7017,9 +7030,16 @@ export class AgentSession {
 		let hindsightRecall: string | undefined;
 		try {
 			const volatileProjectContextMessage = await this.#buildVolatileProjectContextMessage();
-			this.agent.appendMessage(volatileProjectContextMessage);
+			if (!this.#isLatestRetainedEphemeralCopy(volatileProjectContextMessage)) {
+				this.agent.appendMessage(volatileProjectContextMessage);
+			}
 			const untrustedMcpServerInstructionsMessage = this.#buildUntrustedMcpServerInstructionsMessage();
-			if (untrustedMcpServerInstructionsMessage) this.agent.appendMessage(untrustedMcpServerInstructionsMessage);
+			if (
+				untrustedMcpServerInstructionsMessage &&
+				!this.#isLatestRetainedEphemeralCopy(untrustedMcpServerInstructionsMessage)
+			) {
+				this.agent.appendMessage(untrustedMcpServerInstructionsMessage);
+			}
 			const hindsightState = this.getHindsightSessionState();
 			await hindsightState?.maybeRecallOnAgentStart();
 			hindsightRecall = hindsightState?.getRecallSnippetForInjection();
@@ -7069,7 +7089,6 @@ export class AgentSession {
 			}
 			throw error;
 		} finally {
-			this.#removeEphemeralCustomMessages();
 			this.#endInFlight();
 			await this.#waitForSessionSettlement();
 		}
@@ -7825,6 +7844,21 @@ export class AgentSession {
 		);
 	}
 
+	/**
+	 * Sent ephemeral copies stay in live state so the provider prefix is stable. A new
+	 * copy is only worth appending when its provider-visible content changed; an
+	 * identical one would just repeat tokens that still count against the window.
+	 */
+	#isLatestRetainedEphemeralCopy(message: CustomMessage): boolean {
+		const messages = this.agent.state.messages;
+		for (let index = messages.length - 1; index >= 0; index--) {
+			const candidate = messages[index];
+			if (candidate?.role !== "custom" || candidate.customType !== message.customType) continue;
+			return JSON.stringify(candidate.content) === JSON.stringify(message.content);
+		}
+		return false;
+	}
+
 	#removeEphemeralCustomMessages(): void {
 		const messages = this.agent.state.messages;
 		const withoutEphemeralMessages = this.#withoutEphemeralCustomMessages(messages);
@@ -8422,8 +8456,6 @@ export class AgentSession {
 				throw new Error(formatNoCredentialOnboardingError(this.model.provider));
 			}
 
-			this.#removeEphemeralCustomMessages();
-
 			// Check if we need to compact before sending (catches aborted responses)
 			const lastAssistant = this.#findLastAssistantMessage();
 			if (lastAssistant && !options?.skipCompactionCheck) {
@@ -8452,9 +8484,16 @@ export class AgentSession {
 				messages.push(goalModeMessage);
 			}
 			const volatileProjectContextMessage = await this.#buildVolatileProjectContextMessage();
-			messages.push(volatileProjectContextMessage);
+			if (!this.#isLatestRetainedEphemeralCopy(volatileProjectContextMessage)) {
+				messages.push(volatileProjectContextMessage);
+			}
 			const untrustedMcpServerInstructionsMessage = this.#buildUntrustedMcpServerInstructionsMessage();
-			if (untrustedMcpServerInstructionsMessage) messages.push(untrustedMcpServerInstructionsMessage);
+			if (
+				untrustedMcpServerInstructionsMessage &&
+				!this.#isLatestRetainedEphemeralCopy(untrustedMcpServerInstructionsMessage)
+			) {
+				messages.push(untrustedMcpServerInstructionsMessage);
+			}
 
 			if (rosterClaim && this.#isCurrentIrcRosterClaim(rosterClaim.token, rosterClaim.epoch)) {
 				messages.push(rosterClaim.message);
@@ -8629,7 +8668,6 @@ export class AgentSession {
 				return;
 			throw error;
 		} finally {
-			this.#removeEphemeralCustomMessages();
 			if (rosterClaim) {
 				this.agent.replaceMessages(
 					this.agent.state.messages.filter(
@@ -11761,7 +11799,7 @@ export class AgentSession {
 			}
 
 			const handoffText = await generateHandoff(
-				this.agent.state.messages,
+				this.#withoutEphemeralCustomMessages(this.agent.state.messages),
 				model,
 				apiKey,
 				{
@@ -11973,7 +12011,7 @@ export class AgentSession {
 				sessionId: this.sessionId,
 				cwd: this.sessionManager.getCwd(),
 				sessionFile: this.sessionFile,
-				messages: this.agent.state.messages,
+				messages: this.#withoutEphemeralCustomMessages(this.agent.state.messages),
 				customInstructions: options.customInstructions,
 			},
 			options,
@@ -16671,7 +16709,8 @@ export class AgentSession {
 
 	/** Build a background snapshot with in-flight assistant and optional context. */
 	#buildEphemeralSnapshot(promptText: string, prependMessages?: AgentMessage[]): AgentMessage[] {
-		const messages = [...this.messages];
+		// Side requests run in a fresh provider session with no prefix to preserve.
+		const messages = this.#withoutEphemeralCustomMessages(this.messages);
 		const streaming = this.agent.state.streamMessage;
 		if (streaming && streaming.role === "assistant") {
 			const preservedBlocks: AssistantMessage["content"] = [];
@@ -17494,7 +17533,7 @@ export class AgentSession {
 		const branchEntries = this.sessionManager.getBranch();
 		const latestCompaction = getLatestCompactionEntry(branchEntries);
 		const boundaryTs = latestCompaction ? new Date(latestCompaction.timestamp).getTime() : 0;
-		const anchor = this.#findAnchorableUsageIndex(this.messages, boundaryTs);
+		const anchor = this.#findAnchorableUsageIndex(this.agent.state.messages, boundaryTs);
 		let value: ContextUsage;
 		if (latestCompaction && !anchor) {
 			value = { tokens: null, contextWindow, percent: null, source: "unknown" };
@@ -17517,7 +17556,7 @@ export class AgentSession {
 	}
 
 	#contextUsageCacheKey(model: Model, contextWindow: number): string {
-		const messages = this.messages;
+		const messages = this.agent.state.messages;
 		const lastMessage = messages[messages.length - 1];
 		// Entry and leaf revisions change whenever the active branch changes, avoiding getBranch() on warm reads.
 		const revision = this.sessionManager.revisionSnapshot();
@@ -17666,7 +17705,7 @@ export class AgentSession {
 	 * raw promptTokens/estimatedTokens quotient). Clamped to [0.5, 2] downstream.
 	 */
 	#computeCompactionTokenCorrectionRatio(): number | undefined {
-		const messages = this.messages;
+		const messages = this.agent.state.messages;
 		let lastUsageIndex = -1;
 		let lastUsage: Usage | undefined;
 		for (let i = messages.length - 1; i >= 0; i--) {
@@ -17716,7 +17755,7 @@ export class AgentSession {
 		tokens: number;
 		anchored: boolean;
 	} {
-		const messages = this.messages;
+		const messages = this.agent.state.messages;
 		let anchor = knownAnchor;
 		if (boundaryTs === undefined) {
 			const latestCompaction = getLatestCompactionEntry(this.sessionManager.getBranch());
@@ -17899,7 +17938,7 @@ export class AgentSession {
 	 */
 	formatSessionAsText(): string {
 		return formatSessionDumpText({
-			messages: this.messages,
+			messages: this.#withoutEphemeralCustomMessages(this.messages),
 			systemPrompt: this.agent.state.systemPrompt,
 			model: this.agent.state.model,
 			thinkingLevel: this.#thinkingLevel,
