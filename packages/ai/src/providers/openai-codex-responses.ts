@@ -103,6 +103,8 @@ const CODEX_MAX_RETRIES = 5;
 const CODEX_RETRY_DELAY_MS = 500;
 const CODEX_WEBSOCKET_CONNECT_TIMEOUT_MS = 10000;
 const CODEX_WEBSOCKET_IDLE_TIMEOUT_MS = 300000;
+/** Longest delay setTimeout honors; larger delays fire after 1 ms, so waits are capped here. */
+const CODEX_MAX_TIMER_DELAY_MS = 2 ** 31 - 1;
 const CODEX_WEBSOCKET_FIRST_EVENT_TIMEOUT_MS = 15000;
 const CODEX_WEBSOCKET_RETRY_BUDGET = CODEX_MAX_RETRIES;
 const CODEX_WEBSOCKET_TRANSPORT_ERROR_PREFIX = "Codex websocket transport error";
@@ -2513,14 +2515,17 @@ class CodexWebSocketConnection {
 			let timedOut = false;
 			let timeout: NodeJS.Timeout | undefined;
 			if (timeoutMs > 0) {
-				timeout = setTimeout(() => {
-					timedOut = true;
-					const waiterIndex = this.#waiters.indexOf(resolve);
-					if (waiterIndex >= 0) {
-						this.#waiters.splice(waiterIndex, 1);
-					}
-					resolve();
-				}, timeoutMs);
+				timeout = setTimeout(
+					() => {
+						timedOut = true;
+						const waiterIndex = this.#waiters.indexOf(resolve);
+						if (waiterIndex >= 0) {
+							this.#waiters.splice(waiterIndex, 1);
+						}
+						resolve();
+					},
+					Math.min(timeoutMs, CODEX_MAX_TIMER_DELAY_MS),
+				);
 			}
 			await promise;
 			if (timeout) clearTimeout(timeout);

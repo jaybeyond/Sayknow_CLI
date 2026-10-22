@@ -2278,6 +2278,41 @@ describe("openai-codex streaming", () => {
 		expect(fetchMock).not.toHaveBeenCalled();
 	});
 
+	it("does not time out a websocket stream right away when the idle timeout exceeds the timer limit", async () => {
+		const tempDir = TempDir.createSync("@pi-codex-stream-");
+		setAgentDir(tempDir.path());
+		const fetchSpy = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("Unexpected SSE replay"));
+		class SlowWebSocket extends MockWebSocket {
+			constructor(url: string, options?: { headers?: WsHeaders }) {
+				super(url, options);
+				this.scheduleOpen();
+			}
+
+			send(): void {
+				// The reply arrives 30 ms after the request, well past a 1 ms timer.
+				setTimeout(() => {
+					this.emitCodexResponse({ messageId: "msg_slow", responseId: "resp_slow", text: "late reply" });
+				}, 30);
+			}
+		}
+		global.WebSocket = SlowWebSocket as unknown as typeof WebSocket;
+		const result = await streamOpenAICodexResponses(
+			{ ...createCodexTestModel("https://chatgpt.com/backend-api"), preferWebsockets: true },
+			createCodexTestContext(),
+			{
+				apiKey: createCodexTestToken(),
+				sessionId: "ws-timer-ceiling",
+				preferWebsockets: true,
+				// One past the 32-bit setTimeout limit (about 24.9 days); setTimeout would treat it as 1 ms.
+				streamIdleTimeoutMs: 2 ** 31,
+				providerSessionState: new Map<string, ProviderSessionState>(),
+			},
+		).result();
+		expect(result.stopReason).toBe("stop");
+		expect(result.content.find(block => block.type === "text")?.text).toBe("late reply");
+		expect(fetchSpy).not.toHaveBeenCalled();
+	});
+
 	it("captures websocket handshake metadata and replays it on later SSE requests", async () => {
 		const tempDir = TempDir.createSync("@pi-codex-stream-");
 		setAgentDir(tempDir.path());

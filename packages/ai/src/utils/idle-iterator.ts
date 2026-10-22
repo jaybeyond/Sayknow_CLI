@@ -140,6 +140,13 @@ export function takeCodexStreamTimeoutPolicy(options?: {
 
 export type Watchdog = NodeJS.Timeout | undefined;
 
+/**
+ * Longest delay setTimeout honors. Bun, like Node, fires any larger delay after 1 ms,
+ * so a very long timeout (for example an env value meant as "effectively never")
+ * would otherwise abort the stream immediately.
+ */
+const MAX_TIMER_DELAY_MS = 2 ** 31 - 1;
+
 const dummyWatchdog = setTimeout(() => {}, 1);
 clearTimeout(dummyWatchdog);
 
@@ -149,7 +156,7 @@ clearTimeout(dummyWatchdog);
  */
 export function createWatchdog(timeoutMs: number | undefined, onTimeout: () => void): Watchdog {
 	if (timeoutMs !== undefined && timeoutMs > 0) {
-		return setTimeout(onTimeout, timeoutMs);
+		return setTimeout(onTimeout, Math.min(timeoutMs, MAX_TIMER_DELAY_MS));
 	}
 	return undefined;
 }
@@ -303,10 +310,10 @@ export async function* iterateWithIdleTimeout<T>(
 			!noTimeoutEnforced &&
 			activeTimeoutMs !== undefined &&
 			(awaitingFirstItem ? activeTimeoutMs > 0 : activeTimeoutMs >= 0);
-		if (enforceTimeout) {
+		if (enforceTimeout && activeTimeoutMs !== undefined) {
 			const { promise, resolve } = Promise.withResolvers<{ kind: "timeout" }>();
 			resolveTimeout = resolve;
-			timer = setTimeout(() => resolve({ kind: "timeout" }), activeTimeoutMs);
+			timer = setTimeout(() => resolve({ kind: "timeout" }), Math.min(activeTimeoutMs, MAX_TIMER_DELAY_MS));
 			racers.push(promise);
 		}
 
