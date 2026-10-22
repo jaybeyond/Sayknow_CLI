@@ -249,6 +249,15 @@ impl From<std::io::PipeWriter> for OpenFile {
 impl std::io::Read for OpenFile {
 	fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
 		match self {
+			// Read fd 0 directly instead of through `std::io::Stdin`'s internal
+			// `BufReader`: bytes buffered there but not consumed would be invisible to
+			// raw-fd readiness polls and to child processes that inherit fd 0.
+			#[cfg(unix)]
+			Self::Stdin(f) => {
+				use std::os::fd::AsFd as _;
+				nix::unistd::read(f.as_fd(), buf).map_err(std::io::Error::from)
+			},
+			#[cfg(not(unix))]
 			Self::Stdin(f) => f.read(buf),
 			Self::Stdout(_) => {
 				Err(std::io::Error::other(error::ErrorKind::OpenFileNotReadable("stdout")))
@@ -459,5 +468,52 @@ where
 	fn from(iter: I) -> Self {
 		let files = iter.map(|(fd, file)| (fd, Some(file))).collect();
 		Self { files }
+	}
+}
+
+#[cfg(test)]
+#[cfg(unix)]
+mod tests {
+	use std::io::{Read as _, Write as _};
+
+	use anyhow::Result;
+
+	use super::OpenFile;
+
+	const CHILD_ENV: &str = "BRUSH_OPENFILE_STDIN_CHILD";
+	const TEST_NAME: &str = "openfiles::tests::stdin_read_leaves_unread_bytes_on_fd0";
+
+	#[test]
+	fn stdin_read_leaves_unread_bytes_on_fd0() -> Result<()> {
+		if std::env::var_os(CHILD_ENV).is_some() {
+			// Child: take one byte through `OpenFile::Stdin`, then read the rest from a
+			// duplicate of fd 0, the way a forked command inheriting stdin would.
+			let mut stdin = OpenFile::Stdin(std::io::stdin());
+			let mut first = [0u8; 1];
+			stdin.read_exact(&mut first)?;
+
+			let mut raw = std::fs::File::from(stdin.try_clone_to_owned()?);
+			let mut rest = String::new();
+			raw.read_to_string(&mut rest)?;
+
+			println!("first={} rest={rest}", char::from(first[0]));
+			return Ok(());
+		}
+
+		let mut child = std::process::Command::new(std::env::current_exe()?)
+			.args(["--exact", TEST_NAME, "--nocapture", "--test-threads=1"])
+			.env(CHILD_ENV, "1")
+			.stdin(std::process::Stdio::piped())
+			.stdout(std::process::Stdio::piped())
+			.spawn()?;
+		if let Some(mut pipe) = child.stdin.take() {
+			pipe.write_all(b"abcdef")?;
+		}
+		let output = child.wait_with_output()?;
+		anyhow::ensure!(output.status.success(), "child test run failed: {:?}", output.status);
+
+		let stdout = String::from_utf8_lossy(&output.stdout);
+		anyhow::ensure!(stdout.contains("first=a rest=bcdef"), "unexpected child output: {stdout}");
+		Ok(())
 	}
 }
