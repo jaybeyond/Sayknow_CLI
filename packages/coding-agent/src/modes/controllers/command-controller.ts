@@ -57,6 +57,7 @@ import {
 	buildConversationTitleInput,
 	generateSessionTitle,
 	setSessionTerminalTitle,
+	titleInputObfuscator,
 } from "../../utils/title-generator";
 import { prepareTranscriptRebuild } from "../utils/ui-helpers";
 
@@ -1148,7 +1149,9 @@ export class CommandController {
 		try {
 			if (!title?.trim()) {
 				const generation = beginSessionTitleGeneration(this.ctx.sessionManager);
-				const input = buildConversationTitleInput(this.ctx.session.messages);
+				const activeCwd = this.ctx.sessionManager.getCwd();
+				const obfuscateText = await titleInputObfuscator(this.ctx.settings, activeCwd);
+				const input = buildConversationTitleInput(this.ctx.session.messages, obfuscateText);
 				if (!input) {
 					this.ctx.showError("Nothing to summarize yet — pass a title: /rename <title>");
 					return;
@@ -1161,10 +1164,11 @@ export class CommandController {
 					this.ctx.session.sessionId,
 					this.ctx.session.model,
 					provider => this.ctx.session.agent.metadataForProvider(provider),
+					activeCwd,
 				);
 				if (
 					!isSessionTitleGenerationCurrent(this.ctx.sessionManager, generation) ||
-					buildConversationTitleInput(this.ctx.session.messages) !== input
+					buildConversationTitleInput(this.ctx.session.messages, obfuscateText) !== input
 				)
 					return;
 				if (!generated) {

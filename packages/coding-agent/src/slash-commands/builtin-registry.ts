@@ -57,7 +57,7 @@ import {
 	invalidateSessionTitleGeneration,
 	isSessionTitleGenerationCurrent,
 } from "../utils/session-title-generation";
-import { buildConversationTitleInput, generateSessionTitle } from "../utils/title-generator";
+import { buildConversationTitleInput, generateSessionTitle, titleInputObfuscator } from "../utils/title-generator";
 import { buildContextReportText } from "./helpers/context-report";
 import { buildFastStatusReport } from "./helpers/fast-status-report";
 import { formatDuration } from "./helpers/format";
@@ -123,7 +123,9 @@ function fastStatusRoleTargets(): Array<{ id: SkcModelAssignmentTargetId; label:
 async function regenerateSessionTitle(runtime: SlashCommandRuntime): Promise<SlashCommandResult> {
 	try {
 		const generation = beginSessionTitleGeneration(runtime.sessionManager);
-		const input = buildConversationTitleInput(runtime.session.messages);
+		const activeCwd = runtime.sessionManager.getCwd();
+		const obfuscateText = await titleInputObfuscator(runtime.settings, activeCwd);
+		const input = buildConversationTitleInput(runtime.session.messages, obfuscateText);
 		if (!input) {
 			return usage("Nothing to summarize yet — pass a title: /rename <title>", runtime);
 		}
@@ -135,11 +137,12 @@ async function regenerateSessionTitle(runtime: SlashCommandRuntime): Promise<Sla
 			runtime.session.sessionId,
 			runtime.session.model,
 			provider => runtime.session.agent.metadataForProvider(provider),
+			activeCwd,
 		);
 		// A newer prompt, message, or explicit rename landed while the model ran: drop this result.
 		if (
 			!isSessionTitleGenerationCurrent(runtime.sessionManager, generation) ||
-			buildConversationTitleInput(runtime.session.messages) !== input
+			buildConversationTitleInput(runtime.session.messages, obfuscateText) !== input
 		)
 			return commandConsumed();
 		if (!generated) {
