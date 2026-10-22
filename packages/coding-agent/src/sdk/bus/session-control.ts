@@ -1,3 +1,4 @@
+import { setSessionOutboundRedact } from "../host/events";
 import {
 	getCurrentTelegramActivationMarker,
 	isNotificationStreamingEnabled,
@@ -369,6 +370,7 @@ export class NotificationSessionController {
 		policy: Omit<NotificationRuntimePolicy, "mode">,
 		mode: NotificationRuntimePolicy["mode"],
 	): void {
+		setSessionOutboundRedact(binding.sessionId, policy.redact);
 		runtime?.refreshPolicy?.(binding, { ...policy, mode });
 	}
 

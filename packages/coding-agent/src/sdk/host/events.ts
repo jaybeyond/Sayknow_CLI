@@ -25,10 +25,37 @@ export interface EventReplay {
 	gap?: EventReplayGap;
 }
 
+/** Kinds emit sites suppress once notification redaction is on. */
+const REDACTED_REPLAY_KINDS: ReadonlySet<string> = new Set([
+	"turn_stream",
+	"context_update",
+	"image_attachment",
+	"file_attachment",
+	"reasoning_summary",
+	"tool_activity",
+]);
+
+const outboundRedactBySession = new Map<string, boolean>();
+
+/** Notification policy refresh records the live redaction bit for one session ring. */
+export function setSessionOutboundRedact(sessionId: string, enabled: boolean): void {
+	outboundRedactBySession.set(sessionId, enabled);
+}
+
+function frameSessionId(frame: SdkFrame): string | undefined {
+	if (typeof frame.sessionId === "string") return frame.sessionId;
+	const payload = frame.payload;
+	if (!payload || typeof payload !== "object") return undefined;
+	const sessionId = (payload as { sessionId?: unknown }).sessionId;
+	return typeof sessionId === "string" ? sessionId : undefined;
+}
+
 export class SessionEventStream {
 	#generation = 0;
 	#seq = 0;
 	#frames: EventFrame[] = [];
+	#outboundRedact = false;
+	#sessionId: string | undefined;
 	readonly #ringSize: number;
 	readonly #resyncQueries: string[];
 
@@ -45,6 +72,12 @@ export class SessionEventStream {
 		return this.#seq;
 	}
 
+	/** Follow the session redaction bit. Replay then drops kinds emit sites already suppress. */
+	setOutboundRedact(enabled: boolean): void {
+		this.#outboundRedact = enabled;
+		if (this.#sessionId !== undefined) outboundRedactBySession.set(this.#sessionId, enabled);
+	}
+
 	restart(): number {
 		this.#generation += 1;
 		this.#seq = 0;
@@ -53,6 +86,8 @@ export class SessionEventStream {
 	}
 
 	emit(frame: SdkFrame): EventFrame {
+		this.#noteSession(frame);
+		this.#noteConfigRedact(frame);
 		const event: EventFrame = { ...frame, type: "event", generation: this.#generation, seq: ++this.#seq };
 		this.#frames.push(event);
 		if (this.#frames.length > this.#ringSize) this.#frames.shift();
@@ -61,10 +96,9 @@ export class SessionEventStream {
 
 	/** Replays retained current-generation events and reports any required resynchronization. */
 	replay(lastSeq: number, generation = this.#generation): EventReplay {
-		const events = this.#frames.filter(frame => frame.seq > lastSeq);
 		if (generation !== this.#generation) {
 			return {
-				events: [...this.#frames],
+				events: this.#visible(this.#frames),
 				gap: {
 					kind: "generation_reset",
 					fromGeneration: generation,
@@ -77,7 +111,7 @@ export class SessionEventStream {
 		const replayFrom = lastSeq + 1;
 		if (replayFrom < oldest) {
 			return {
-				events: this.#frames.filter(frame => frame.seq >= oldest),
+				events: this.#visible(this.#frames.filter(frame => frame.seq >= oldest)),
 				gap: {
 					kind: "sequence_gap",
 					fromSeq: replayFrom,
@@ -86,6 +120,35 @@ export class SessionEventStream {
 				},
 			};
 		}
-		return { events };
+		return { events: this.#visible(this.#frames.filter(frame => frame.seq > lastSeq)) };
+	}
+
+	#noteSession(frame: SdkFrame): void {
+		if (this.#sessionId !== undefined) return;
+		this.#sessionId = frameSessionId(frame);
+	}
+
+	#noteConfigRedact(frame: SdkFrame): void {
+		if (frame.kind !== "config_update") return;
+		const payload = frame.payload;
+		if (!payload || typeof payload !== "object") return;
+		const redact = (payload as { redact?: unknown }).redact;
+		if (typeof redact !== "boolean") return;
+		this.setOutboundRedact(redact);
+	}
+
+	#replayRedact(): boolean {
+		if (this.#sessionId !== undefined) {
+			const noted = outboundRedactBySession.get(this.#sessionId);
+			if (noted !== undefined) return noted;
+		}
+		return this.#outboundRedact;
+	}
+
+	#visible(frames: readonly EventFrame[]): EventFrame[] {
+		const retained = this.#replayRedact()
+			? frames.filter(frame => !REDACTED_REPLAY_KINDS.has(String(frame.kind)))
+			: frames;
+		return [...retained];
 	}
 }
