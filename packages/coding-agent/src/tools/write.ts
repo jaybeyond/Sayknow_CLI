@@ -4,7 +4,7 @@ import * as path from "node:path";
 import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@sayknow-cli/agent-core";
 import type { Component } from "@sayknow-cli/tui";
 import { Text } from "@sayknow-cli/tui";
-import { isEnoent, isRecord, prompt, untilAborted } from "@sayknow-cli/utils";
+import { isEnoent, isRecord, pathIsWithin, prompt, untilAborted } from "@sayknow-cli/utils";
 import * as z from "zod/v4";
 import { stripHashlinePrefixes } from "../edit";
 import type { RenderResultOptions } from "../extensibility/custom-tools/types";
@@ -175,6 +175,31 @@ function parseSqliteWriteTarget(subPath: string, queryString: string): { table: 
 	}
 
 	return { table, key };
+}
+
+/**
+ * `new Database` follows symlinks. A lexical path inside the workspace can
+ * still name a file outside it, so open only the real path that stays inside
+ * the same session workspace an ordinary write resolves against.
+ */
+async function realSqliteDatabaseInWorkspace(
+	workspaceRoot: string,
+	absolutePath: string,
+	signal?: AbortSignal,
+): Promise<string> {
+	signal?.throwIfAborted();
+	let realPath: string;
+	try {
+		realPath = await fs.realpath(absolutePath);
+	} catch (error) {
+		if (isEnoent(error)) throw error;
+		throw new ToolError(error instanceof Error ? error.message : String(error));
+	}
+	signal?.throwIfAborted();
+	if (!pathIsWithin(workspaceRoot, realPath)) {
+		throw new ToolError(`SQLite write target resolves outside the workspace: ${absolutePath}`);
+	}
+	return realPath;
 }
 
 /**
@@ -375,6 +400,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 		displayPath: string,
 		content: string,
 		resolvedSqlitePath: ResolvedSqliteWritePath,
+		signal?: AbortSignal,
 	): Promise<AgentToolResult<WriteToolDetails>> {
 		let db: Database | null = null;
 		try {
@@ -382,7 +408,13 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 				throw new ToolError(`SQLite database '${displayPath}' not found`);
 			}
 
-			db = new Database(resolvedSqlitePath.absolutePath, { create: false, strict: true });
+			const realDatabasePath = await realSqliteDatabaseInWorkspace(
+				this.session.cwd,
+				resolvedSqlitePath.absolutePath,
+				signal,
+			);
+			signal?.throwIfAborted();
+			db = new Database(realDatabasePath, { create: false, strict: true });
 			db.run("PRAGMA busy_timeout = 3000");
 
 			const trimmedContent = content.trim();
@@ -721,7 +753,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 			if (resolvedSqlitePath) {
 				enforcePlanModeWrite(this.session, resolvedSqlitePath.sqlitePath, { op: "update" });
 
-				const sqliteResult = await this.#writeSqliteRow(path, cleanContent, resolvedSqlitePath);
+				const sqliteResult = await this.#writeSqliteRow(path, cleanContent, resolvedSqlitePath, signal);
 				if (stripped) {
 					const firstText = sqliteResult.content.find(
 						(block): block is { type: "text"; text: string } =>
