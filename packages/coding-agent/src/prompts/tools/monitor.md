@@ -23,7 +23,7 @@ Pick by how many notifications you need:
 
 ## Output
 
-Returns `Monitor started · task <task_id>` plus a task entry visible via `job({list: true})`. Each stdout line of the monitored command becomes a `<task-notification>` event delivered between turns.
+Returns `Monitor started · task <task_id>` plus a task entry visible via `job({list: true})`. Persistent notifications contain the latest line and the count of earlier coalesced lines; terminal completion flushes the newest pending line. Monitor output arrives inside a `<monitor-output>` frame as untrusted data.
 
 ## Cancellation
 
