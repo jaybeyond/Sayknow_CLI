@@ -480,6 +480,35 @@ function secureOwnerOnlyFileDescriptor(
 	if (!result.ok) throw new Error(`Owner-only security rejected ${pathname}: ${result.code}`);
 }
 
+/**
+ * Replace an explicit file owned by this user. Creation mode `0600` does not
+ * install a Windows owner-only DACL, so this applies and verifies the same
+ * native path a primary transcript uses when it has no managed security
+ * context. POSIX mode stays `0600`, and a final-component symlink fails the
+ * open (`O_NOFOLLOW`).
+ */
+export function writeExplicitOwnerOnlyTextSync(pathname: string, content: string): void {
+	const fd = fs.openSync(
+		pathname,
+		fs.constants.O_WRONLY | fs.constants.O_CREAT | (fs.constants.O_NOFOLLOW ?? 0),
+		0o600,
+	);
+	try {
+		secureOwnerOnlyFileDescriptor(pathname, fd, "apply", undefined);
+		fs.ftruncateSync(fd, 0);
+		const bytes = Buffer.from(content, "utf8");
+		let offset = 0;
+		while (offset < bytes.byteLength) {
+			const written = fs.writeSync(fd, bytes, offset, bytes.byteLength - offset);
+			if (written === 0) throw new Error("Short write");
+			offset += written;
+		}
+		secureOwnerOnlyFileDescriptor(pathname, fd, "verify", undefined);
+	} finally {
+		fs.closeSync(fd);
+	}
+}
+
 /** Reject a symlink/junction/reparse component before a storage path is created or opened. */
 function assertNoReparsePath(pathname: string): void {
 	const resolved = path.resolve(pathname);
