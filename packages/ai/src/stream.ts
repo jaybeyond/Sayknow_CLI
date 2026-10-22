@@ -606,6 +606,17 @@ const castApi = <TApi extends Api>(api: OptionsForApi<TApi>): OptionsForApi<Api>
 /** Default output cap when the caller does not set `maxTokens`. */
 const DEFAULT_REQUEST_MAX_TOKENS = 32000;
 
+/**
+ * Output cap a request uses when the caller supplies `requested` (or omits it):
+ * a positive `requested` wins, otherwise the model limit capped at the request default.
+ */
+export function resolveDefaultRequestMaxTokens<TApi extends Api>(model: Model<TApi>, requested?: number): number {
+	if (requested !== undefined && Number.isSafeInteger(requested) && requested > 0) return requested;
+	return Number.isSafeInteger(model.maxTokens) && model.maxTokens > 0
+		? Math.min(model.maxTokens, DEFAULT_REQUEST_MAX_TOKENS)
+		: DEFAULT_REQUEST_MAX_TOKENS;
+}
+
 function mapOptionsForApi<TApi extends Api>(
 	model: Model<TApi>,
 	options?: SimpleStreamOptions,
