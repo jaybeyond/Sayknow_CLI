@@ -20,6 +20,13 @@ export type CodexErrorInfo = {
 	raw?: string;
 };
 
+const BEARER_TEXT_RE = /\bBearer\s+\S+/gi;
+const SK_TOKEN_RE = /\bsk-[A-Za-z0-9_-]{8,}\b/g;
+
+function redactPersistedSecrets(text: string): string {
+	return text.replace(BEARER_TEXT_RE, "Bearer [REDACTED]").replace(SK_TOKEN_RE, "[REDACTED]");
+}
+
 export async function parseCodexError(response: Response): Promise<CodexErrorInfo> {
 	const raw = await response.text();
 	let message = raw || response.statusText || "Request failed";
@@ -72,13 +79,16 @@ export async function parseCodexError(response: Response): Promise<CodexErrorInf
 		// raw body not JSON
 	}
 
+	message = redactPersistedSecrets(message);
+	if (friendlyMessage) friendlyMessage = redactPersistedSecrets(friendlyMessage);
+
 	return {
 		message,
 		status: response.status,
 		friendlyMessage,
 		code,
 		rateLimits,
-		raw: raw,
+		raw: redactPersistedSecrets(raw),
 	};
 }
 
