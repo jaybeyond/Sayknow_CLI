@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.7.11] - 2026-10-22
+
 ### Fixed
 
 - Signed `thinking` and `redactedThinking` blocks stay inline in the session instead of being moved to the resident text cache. A lost cache file was replaced with placeholder text under the original signature, and Anthropic then rejected every request with `Invalid signature in thinking block`. Sessions that already lost such a blob now drop that reasoning block (text and signature together) instead of replaying the placeholder.
