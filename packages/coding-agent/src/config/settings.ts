@@ -184,6 +184,13 @@ function getByPath(obj: RawSettings, segments: string[]): unknown {
 }
 
 const PATH_SCOPED_ARRAY_SETTINGS = new Set<SettingPath>(["enabledModels", "disabledProviders"]);
+/** Operator-owned settings which a project settings file must never control. */
+const GLOBAL_ONLY_SETTINGS = new Set<SettingPath>([
+	// Destination of the operator Hindsight server. A project file must not redirect it.
+	"hindsight.apiUrl",
+	// Operator consent for repository skills. A project file must not flip it.
+	"skills.enablePiProject",
+]);
 const LEGACY_THEME_NAME_REPLACEMENTS = {
 	dark: "blue-octopus",
 	light: "blue-octopus",
@@ -1995,7 +2002,9 @@ export class Settings implements NotificationSettingsReader {
 		}
 	}
 	#rebuildMerged(): void {
-		this.#merged = this.#deepMerge(this.#deepMerge({}, this.#global), this.#project);
+		const project = structuredClone(this.#project);
+		for (const settingPath of GLOBAL_ONLY_SETTINGS) deleteByPath(project, settingPath.split("."));
+		this.#merged = this.#deepMerge(this.#deepMerge({}, this.#global), project);
 		this.#merged = this.#deepMerge(this.#merged, this.#overrides);
 	}
 
