@@ -1227,14 +1227,27 @@ async function discardPreparedNewSessionAfterFailure(
 // ============================================================================
 
 /** Tools that require user permission before execution when an ACP client is connected. */
-const PERMISSION_REQUIRED_TOOLS = new Set(["bash", "monitor", "eval", "edit", "delete", "move"]);
+const PERMISSION_REQUIRED_TOOLS = new Set([
+	"bash",
+	"monitor",
+	"eval",
+	"edit",
+	"delete",
+	"move",
+	"computer",
+	"python",
+	"recipe",
+	"ssh",
+]);
 
 function isShellExecutionPermissionTool(toolName: string): boolean {
-	return toolName === "bash" || toolName === "monitor";
+	return toolName === "bash" || toolName === "monitor" || toolName === "ssh";
 }
 
 function isExecutionPermissionTool(toolName: string): boolean {
-	return isShellExecutionPermissionTool(toolName) || toolName === "eval";
+	return (
+		isShellExecutionPermissionTool(toolName) || toolName === "eval" || toolName === "python" || toolName === "recipe"
+	);
 }
 
 /** Permission options presented to the client on each gated tool call. */
@@ -1316,6 +1329,16 @@ function getPermissionIntent(
 			cacheKey: toolName,
 		};
 	}
+	if (toolName === "python") {
+		const action = getStringProperty(a, "action");
+		if (action === "clear") return { toolName, title: "python clear", cacheKey: toolName };
+		const code = getStringProperty(a, "code")?.slice(0, 80);
+		return { toolName, title: code && code.length > 0 ? code : "python", cacheKey: toolName };
+	}
+	if (toolName === "recipe") {
+		const op = getStringProperty(a, "op")?.slice(0, 80);
+		return { toolName, title: op && op.length > 0 ? op : "recipe", cacheKey: toolName };
+	}
 	if (toolName === "delete") {
 		const p = getStringProperty(a, "path");
 		return { toolName, title: p ? `Delete ${p}` : toolName, paths: p ? [p] : undefined, cacheKey: toolName };
@@ -1350,6 +1373,10 @@ function getPermissionIntent(
 			paths: intent.paths,
 			cacheKey: "edit:move",
 		};
+	}
+	if (toolName === "computer") {
+		const action = getStringProperty(a, "action");
+		return { toolName, title: action ? `Computer ${action}` : toolName, cacheKey: toolName };
 	}
 	return undefined;
 }
