@@ -16382,7 +16382,11 @@ export class AgentSession {
 				snapshot = this.#buildEphemeralSnapshot(args.promptText);
 				llmMessages = await awaitEphemeralAbort(this.convertMessagesToLlm(snapshot, args.signal), args.signal);
 			}
-			const context: Context = { systemPrompt: this.systemPrompt, messages: llmMessages, tools: [] };
+			const context: Context = {
+				systemPrompt: this.systemPrompt,
+				messages: normalizeMessagesForProvider(llmMessages, model),
+				tools: [],
+			};
 			const ephemeralSessionId = crypto.randomUUID();
 			const options = this.prepareSimpleStreamOptions(
 				{
