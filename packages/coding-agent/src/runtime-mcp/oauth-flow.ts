@@ -8,11 +8,41 @@
 import type { OAuthCallbackFlowOptions } from "@sayknow-cli/ai/utils/oauth/callback-server";
 import { OAuthCallbackFlow } from "@sayknow-cli/ai/utils/oauth/callback-server";
 import type { OAuthController, OAuthCredentials } from "@sayknow-cli/ai/utils/oauth/types";
+import { guardedPublicFetch } from "../web/insane/url-guard";
+import { cancelMCPStream } from "./content-limits";
 import { assertPublicOAuthUrl } from "./oauth-public-url";
 
 const DEFAULT_PORT = 3000;
 const CALLBACK_PATH = "/callback";
 const CALLBACK_BIND_HOSTNAME = "127.0.0.1";
+function isOAuthRedirect(response: Response): boolean {
+	return response.type === "opaqueredirect" || (response.status >= 300 && response.status < 400);
+}
+
+/**
+ * Dial the URL on an address `guardedPublicFetch` just accepted. That helper
+ * forces `redirect: "manual"`, so a 3xx is a refusal rather than a followed hop.
+ */
+async function fetchPinnedOAuthEndpoint(
+	url: string,
+	init: { method: string; headers: Record<string, string>; body?: string; signal?: AbortSignal },
+): Promise<Response> {
+	const dialed = await guardedPublicFetch(url, {
+		method: init.method,
+		headers: init.headers,
+		body: init.body,
+		signal: init.signal,
+	});
+	if (!dialed.ok) {
+		throw new Error(`Refusing non-public OAuth endpoint: ${dialed.reason}`);
+	}
+	if (isOAuthRedirect(dialed.response)) {
+		cancelMCPStream(dialed.response.body);
+		throw new Error("Refusing non-public OAuth endpoint: redirect");
+	}
+	return dialed.response;
+}
+
 function isLoopbackHostname(hostname: string): boolean {
 	return hostname === "localhost" || hostname === "127.0.0.1";
 }
@@ -215,7 +245,7 @@ export class MCPOAuthFlow extends OAuthCallbackFlow {
 		}
 
 		await assertPublicOAuthUrl(this.config.tokenUrl);
-		const response = await fetch(this.config.tokenUrl, {
+		const response = await fetchPinnedOAuthEndpoint(this.config.tokenUrl, {
 			method: "POST",
 			headers: {
 				"Content-Type": "application/x-www-form-urlencoded",
@@ -293,7 +323,7 @@ export class MCPOAuthFlow extends OAuthCallbackFlow {
 
 		try {
 			await assertPublicOAuthUrl(registrationEndpoint);
-			const response = await fetch(registrationEndpoint, {
+			const response = await fetchPinnedOAuthEndpoint(registrationEndpoint, {
 				method: "POST",
 				headers: {
 					"Content-Type": "application/json",
@@ -332,9 +362,8 @@ export class MCPOAuthFlow extends OAuthCallbackFlow {
 			const authorizationEndpoint = new URL(this.config.authorizationUrl);
 			const metadataUrl = new URL("/.well-known/oauth-authorization-server", authorizationEndpoint.origin);
 			await assertPublicOAuthUrl(metadataUrl.toString());
-			const response = await fetch(metadataUrl.toString(), {
+			const response = await fetchPinnedOAuthEndpoint(metadataUrl.toString(), {
 				method: "GET",
-				redirect: "error",
 				headers: { Accept: "application/json" },
 			});
 
@@ -352,11 +381,15 @@ export class MCPOAuthFlow extends OAuthCallbackFlow {
 
 	async #assertClientIdNotRequired(authorizationUrl: string): Promise<void> {
 		try {
-			const response = await fetch(authorizationUrl, {
+			// Pin the GET to the addresses that passed validation. A plain fetch would
+			// resolve the hostname again and could reach a loopback or private
+			// authorization URL. Skip the probe when that route cannot be established.
+			const probed = await guardedPublicFetch(authorizationUrl, {
 				method: "GET",
-				redirect: "manual",
 				headers: { Accept: "text/plain,text/html,application/json" },
 			});
+			if (!probed.ok) return;
+			const response = probed.response;
 			if (response.status < 400) return;
 			const body = await response.text();
 			if (/client[_-]?id/i.test(body) && /(required|missing|invalid)/i.test(body)) {
