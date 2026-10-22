@@ -555,7 +555,7 @@ test("session host exact cutoff writes proven pre-session absence", async () => 
 				cwd: root,
 				processIncarnation: () => "test-incarnation",
 			}),
-		).rejects.toThrow("readiness cutoff");
+		).resolves.toBeUndefined();
 		const artifact = JSON.parse(
 			await fs.readFile(path.join(stateRoot, "sdk", `${sessionId}.lifecycle.failure.${effectMarker}.json`), "utf8"),
 		) as { rollback: Record<string, unknown>; reason: string };
@@ -576,6 +576,72 @@ test("session host exact cutoff writes proven pre-session absence", async () => 
 		await fs.rm(root, { recursive: true, force: true });
 	}
 });
+
+test("shipped session host exits promptly after publishing a cutoff receipt", async () => {
+	const root = await fs.mkdtemp(path.join(process.env.TMPDIR ?? "/tmp", "skc-sdk-process-cutoff-"));
+	const agentDir = path.join(root, "agent");
+	const stateRoot = path.join(root, ".skc", "state");
+	const sessionId = "process-cutoff";
+	const effectMarker = "process-cutoff-marker";
+	const deadlines = deriveLifecycleDeadlines(Date.now() - 10_000, 4_000);
+	const failurePath = path.join(stateRoot, "sdk", `${sessionId}.lifecycle.failure.${effectMarker}.json`);
+	let child: Bun.Subprocess | undefined;
+	try {
+		await fs.mkdir(path.join(stateRoot, "sdk"), { recursive: true, mode: 0o700 });
+		await fs.mkdir(agentDir, { recursive: true, mode: 0o700 });
+		child = Bun.spawn([process.execPath, "run", cliEntrypoint, "sdk", "session-host-internal"], {
+			cwd: root,
+			env: {
+				...process.env,
+				HOME: root,
+				SKC_AGENT_DIR: agentDir,
+				SKC_CODING_AGENT_DIR: agentDir,
+				SKC_SESSION_ID: sessionId,
+				SKC_STATE_ROOT: stateRoot,
+				SKC_LIFECYCLE_REQUEST_ID: effectMarker,
+				SKC_SDK_LIFECYCLE_REQUEST: JSON.stringify({
+					operation: "session.create",
+					sessionId,
+					cwd: root,
+					stateRoot,
+					effectMarker,
+					...deadlines,
+				}),
+			},
+			stdout: "pipe",
+			stderr: "pipe",
+		});
+		if (!child.pid) throw new Error("session host has no pid");
+		const childIncarnation = await incarnation(child.pid);
+		const cutoffStartedAt = performance.now();
+		await fs.writeFile(
+			path.join(stateRoot, "sdk", `${sessionId}.lifecycle.json`),
+			JSON.stringify({ pid: child.pid, effectMarker, incarnation: childIncarnation }),
+		);
+		const outcome = await Promise.race([
+			child.exited.then(code => ({ code, latencyMs: performance.now() - cutoffStartedAt })),
+			Bun.sleep(1_500).then(() => undefined),
+		]);
+		expect(outcome).toBeDefined();
+		if (!outcome) throw new Error("Session host did not exit within 1500 ms of cutoff marker publication.");
+		console.log(`process cutoff exit latency ms=${outcome.latencyMs.toFixed(1)} exit=${outcome.code}`);
+		expect(outcome.code).toBe(0);
+		expect(outcome.latencyMs).toBeLessThan(1_500);
+		const failure = JSON.parse(await fs.readFile(failurePath, "utf8")) as {
+			rollback?: Record<string, unknown>;
+		};
+		expect(failure.rollback).toMatchObject({
+			fenced: true,
+			runtimeRemoved: true,
+			hostStopped: true,
+			brokerRegistrationReleased: true,
+		});
+	} finally {
+		if (child && child.exitCode === null) child.kill("SIGTERM");
+		if (child) await child.exited;
+		await fs.rm(root, { recursive: true, force: true });
+	}
+}, 10_000);
 
 test("session host fails closed when its lifecycle effect marker is corrupt", async () => {
 	const root = await fs.mkdtemp(path.join(process.env.TMPDIR ?? "/tmp", "skc-lifecycle-corrupt-marker-"));

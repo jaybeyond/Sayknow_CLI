@@ -284,8 +284,7 @@ export async function runSessionHost(
 			},
 			absent.result,
 		);
-
-		throw new Error("SDK startup did not complete before readiness cutoff.");
+		return;
 	}
 
 	// Inlined rather than extracted to a helper: TypeScript's definite-assignment
