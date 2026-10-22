@@ -627,6 +627,39 @@ export function setCellDimensions(dims: CellDimensions): void {
 	cellDimensions = dims;
 }
 
+/**
+ * RFC 4648 base64. The alphabet excludes ESC, ST, and BEL, so a payload cannot
+ * end an APC or OSC early and smuggle a terminal escape out of an image.
+ * A linear scan, not a repeating-group regex: that regex rejects some
+ * multi-megabyte valid payloads in this runtime.
+ */
+function isBase64Alphabet(code: number): boolean {
+	return (
+		(code >= 65 && code <= 90) ||
+		(code >= 97 && code <= 122) ||
+		(code >= 48 && code <= 57) ||
+		code === 43 ||
+		code === 47
+	);
+}
+
+export function isRfc4648Base64(value: string): boolean {
+	const length = value.length;
+	if (length % 4 !== 0) return false;
+	let body = length;
+	if (length > 0 && value.charCodeAt(length - 1) === 61) {
+		body = value.charCodeAt(length - 2) === 61 ? length - 2 : length - 1;
+	}
+	for (let index = 0; index < body; index++) {
+		if (!isBase64Alphabet(value.charCodeAt(index))) return false;
+	}
+	return true;
+}
+
+function assertImageBase64(value: string): void {
+	if (!isRfc4648Base64(value)) throw new Error("Invalid RFC 4648 base64");
+}
+
 export function encodeKitty(
 	base64Data: string,
 	options: {
@@ -636,6 +669,7 @@ export function encodeKitty(
 		placementId?: number;
 	} = {},
 ): string {
+	assertImageBase64(base64Data);
 	const CHUNK_SIZE = 4096;
 
 	const params: string[] = ["a=T", "f=100", "q=2"];
@@ -711,6 +745,7 @@ export function setKittyTransmitWriter(writer: (sequence: string) => void): void
  * {@link encodeKittyPlacement} only.
  */
 export function encodeKittyTransmit(base64Data: string, imageId: number): string {
+	assertImageBase64(base64Data);
 	const CHUNK_SIZE = 4096;
 	const params = ["a=t", "f=100", "q=2", `i=${imageId}`];
 
@@ -767,6 +802,7 @@ export function encodeITerm2(
 		inline?: boolean;
 	} = {},
 ): string {
+	assertImageBase64(base64Data);
 	const params: string[] = [`inline=${options.inline !== false ? 1 : 0}`];
 
 	if (options.width !== undefined) params.push(`width=${options.width}`);
@@ -984,6 +1020,8 @@ export function renderImage(
 	if (!TERMINAL.imageProtocol) {
 		return null;
 	}
+	// An image that is not RFC 4648 base64 could close the escape early; render the text fallback.
+	if (!isRfc4648Base64(base64Data)) return null;
 
 	const cellDims = getCellDimensions();
 	const fit = calculateImageFit(imageDimensions, options, cellDims);
