@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, mock, spyOn } from "bun:test";
+import { getShellConfig } from "@sayknow-cli/utils/shell-config";
 import type { ClientBridge, ClientBridgeTerminalHandle } from "../src/session/client-bridge";
 import type { ToolSession } from "../src/tools";
 import { BashTool } from "../src/tools/bash";
@@ -10,6 +11,8 @@ function makeSession(bridge: ClientBridge): ToolSession {
 		skills: [],
 		getSessionFile: () => null,
 		settings: {
+			// Bash runs the tmux self-injection guard with the configured shell env.
+			getShellConfig: () => getShellConfig(),
 			get(key: string) {
 				if (key === "async.enabled") return false;
 				if (key === "bash.autoBackground.enabled") return false;

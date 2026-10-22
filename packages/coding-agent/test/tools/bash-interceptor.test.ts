@@ -4,6 +4,7 @@ import * as path from "node:path";
 import type { AgentToolContext } from "@sayknow-cli/agent-core";
 import { validateToolArguments } from "@sayknow-cli/ai/utils/validation";
 import { sessionDirName } from "@sayknow-cli/coding-agent/skc-runtime/session-layout";
+import { getShellConfig } from "@sayknow-cli/utils/shell-config";
 import { Settings } from "../../src/config/settings";
 import type { BashInterceptorRule } from "../../src/config/settings-schema";
 import { disposeAllShellSessions, getShellSessionCount } from "../../src/exec/bash-executor";
@@ -92,6 +93,8 @@ describe("BashTool head/tail stripping", () => {
 			getSessionFile: () => null,
 			getSessionId: () => undefined,
 			settings: {
+				// Bash runs the tmux self-injection guard with the configured shell env.
+				getShellConfig: () => getShellConfig(),
 				get(key: string) {
 					if (key === "bashInterceptor.enabled") return false;
 					if (key === "async.enabled") return false;
@@ -144,6 +147,8 @@ describe("BashTool restricted role-agent allowlist", () => {
 			bashAllowedPrefixes,
 			bashRestrictionProfile,
 			settings: {
+				// Bash runs the tmux self-injection guard with the configured shell env.
+				getShellConfig: () => getShellConfig(),
 				get(key: string) {
 					if (key === "bashInterceptor.enabled") return false;
 					if (key === "async.enabled") return false;

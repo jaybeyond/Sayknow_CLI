@@ -32,6 +32,7 @@ import { checkComposerBashPolicy } from "./composer-bash-policy";
 import { formatStyledTruncationWarning, type OutputMeta, stripOutputNotice } from "./output-meta";
 import { resolveToCwd } from "./path-utils";
 import { formatToolWorkingDirectory, replaceTabs } from "./render-utils";
+import { checkTmuxSelfInjection } from "./tmux-self-injection-guard";
 import { ToolAbortError, ToolError } from "./tool-errors";
 import { toolResult } from "./tool-result";
 import { clampTimeout, TOOL_TIMEOUTS } from "./tool-timeouts";
@@ -687,6 +688,22 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		}
 		if (!cwdStat.isDirectory()) {
 			throw new ToolError(`Working directory is not a directory: ${commandCwd}`);
+		}
+		// Issue #5039: refuse tmux write verbs whose target resolves to this
+		// agent's own tmux pane — such bytes forge a human `user` turn in the
+		// transcript. This is after command/env/cwd preparation but before any
+		// spawn, so guard discovery matches execution without trusting caller env
+		// for the agent's tmux identity.
+		if (this.session.bashRestrictionProfile !== "read-only") {
+			const shellConfigEnv = this.session.settings.getShellConfig().env;
+			const injection = await checkTmuxSelfInjection(command, {
+				env: process.env,
+				cwd: commandCwd,
+				executionEnv: { ...process.env, ...shellConfigEnv, ...resolvedEnv },
+			});
+			if (injection.block) {
+				throw new ToolError(injection.reason ?? "Blocked: tmux self-pane injection.");
+			}
 		}
 
 		const requestedTimeoutSec = input.timeout ?? 300;
