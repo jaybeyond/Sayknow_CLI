@@ -82,6 +82,11 @@ export class EventStream<T, R = T> implements AsyncIterable<T> {
 		return this.#pendingConsumerDrains.size;
 	}
 
+	/** Whether an async iterator is currently consuming this stream. */
+	get hasActiveConsumer(): boolean {
+		return this.#activeConsumerCount > 0;
+	}
+
 	#settleConsumerDrain(drain: ConsumerDrain, status: "resolve" | "reject", reason?: unknown): void {
 		if (drain.settled) return;
 		drain.settled = true;
