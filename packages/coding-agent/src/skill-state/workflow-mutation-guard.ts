@@ -1173,6 +1173,19 @@ async function isNeutralTempPath(cwd: string, rawPath: string): Promise<boolean>
 	return realRoots.some(root => isPathWithin(root, realTarget));
 }
 
+/** realpath cannot expose another name for the same inode outside a writable root. */
+async function hasUnsharedFileTarget(cwd: string, rawPath: string): Promise<boolean> {
+	const { absolutePath, unknown } = resolveRawPath(cwd, rawPath);
+	if (unknown || !absolutePath) return false;
+	try {
+		const target = await fs.stat(absolutePath);
+		return !target.isFile() || target.nlink === 1;
+	} catch (error) {
+		// New scratch files remain writable; inaccessible or unresolvable targets fail closed.
+		return (error as NodeJS.ErrnoException).code === "ENOENT";
+	}
+}
+
 /** Targets that remain disallowed during a planning phase (excludes neutral temp scratch). */
 async function planningBlockedTargets(
 	cwd: string,
@@ -1181,6 +1194,10 @@ async function planningBlockedTargets(
 ): Promise<string[]> {
 	const blocked: string[] = [];
 	for (const rawPath of targets.paths) {
+		if (!(await hasUnsharedFileTarget(cwd, rawPath))) {
+			blocked.push(rawPath);
+			continue;
+		}
 		if (isAllowlistedPath(cwd, rawPath, sessionId)) continue;
 		if (!(await isNeutralTempPath(cwd, rawPath))) blocked.push(rawPath);
 	}
