@@ -1,3 +1,4 @@
+import * as fs from "node:fs";
 import * as path from "node:path";
 import type { AgentState } from "@sayknow-cli/agent-core";
 import { APP_NAME, isCredentialKey, isEnoent, redactCrashSecrets } from "@sayknow-cli/utils";
@@ -5,6 +6,7 @@ import { getResolvedThemeColors, getThemeExportColors } from "../../modes/theme/
 import { type SessionEntry, type SessionHeader, SessionManager } from "../../session/session-manager";
 // Pre-generated template (created by scripts/generate-template.ts at publish time)
 import { cssColorOrFallback } from "./css-color";
+import { openHtmlExportDestination } from "./html-export-destination";
 import { TEMPLATE } from "./template.generated";
 
 export interface ExportOptions {
@@ -193,6 +195,17 @@ async function generateHtml(sessionData: SessionData, themeName?: string): Promi
 	);
 }
 
+/** Write the export through an owner-only, no-follow descriptor; a replaced file is truncated on it. */
+function writeHtmlExport(outputPath: string, html: string): void {
+	const fd = openHtmlExportDestination(outputPath);
+	try {
+		fs.ftruncateSync(fd, 0);
+		fs.writeFileSync(fd, html);
+	} finally {
+		fs.closeSync(fd);
+	}
+}
+
 /** Export session to HTML using SessionManager and AgentState. */
 export async function exportSessionToHtml(
 	sm: SessionManager,
@@ -215,7 +228,7 @@ export async function exportSessionToHtml(
 	const html = await generateHtml(sessionData, opts.themeName);
 	const outputPath = opts.outputPath || `${APP_NAME}-session-${path.basename(sessionFile, ".jsonl")}.html`;
 
-	await Bun.write(outputPath, html);
+	writeHtmlExport(outputPath, html);
 	return outputPath;
 }
 
@@ -241,7 +254,7 @@ export async function exportFromFile(inputPath: string, options?: ExportOptions 
 		const html = await generateHtml(sessionData, opts.themeName);
 		const outputPath = opts.outputPath || `${APP_NAME}-session-${path.basename(inputPath, ".jsonl")}.html`;
 
-		await Bun.write(outputPath, html);
+		writeHtmlExport(outputPath, html);
 		return outputPath;
 	} finally {
 		await sm.close();
