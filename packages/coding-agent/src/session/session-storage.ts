@@ -714,7 +714,8 @@ export class FileSessionStorage implements SessionStorage {
 
 	writeTextSync(fpath: string, content: string): void {
 		this.ensureDirSync(path.dirname(fpath));
-		fs.writeFileSync(fpath, content);
+		// New fork and branch transcripts are created here.
+		writeExplicitOwnerOnlyTextSync(fpath, content);
 	}
 
 	readTextSync(fpath: string): string {

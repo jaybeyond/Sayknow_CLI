@@ -14,6 +14,7 @@ import {
 	type ManagedSessionDescendantStore,
 	publishManagedFileNoReplace,
 } from "./internal/managed-session-storage";
+import { writeExplicitOwnerOnlyTextSync } from "./session-storage";
 import { DEFAULT_ARTIFACT_MAX_BYTES, truncateHeadBytes } from "./streaming-output";
 
 export interface ManagedOutputGeneration {
@@ -138,7 +139,8 @@ export class ArtifactManager {
 		if (!/^[a-zA-Z0-9_.-]+$/.test(filename)) throw new Error("Unsafe named artifact");
 		await this.#ensureDir();
 		if (this.#store) await this.#store.replace(filename, Buffer.from(content, "utf8"));
-		else await Bun.write(path.join(this.#dir, filename), content);
+		// Named files, including draft.txt, are created here.
+		else writeExplicitOwnerOnlyTextSync(path.join(this.#dir, filename), content);
 	}
 
 	async replaceNamedBytes(filename: string, bytes: Uint8Array): Promise<void> {
