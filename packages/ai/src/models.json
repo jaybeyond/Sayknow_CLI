@@ -7983,8 +7983,8 @@
 				"text"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 3.0,
+				"output": 9.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -8002,8 +8002,8 @@
 				"text"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 3.0,
+				"output": 9.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -8022,8 +8022,8 @@
 				"image"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 4.0,
+				"output": 12.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -8042,8 +8042,8 @@
 				"image"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 4.0,
+				"output": 12.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -8067,8 +8067,8 @@
 				"image"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 3.0,
+				"output": 9.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -8087,8 +8087,8 @@
 				"image"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 3.0,
+				"output": 9.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -8111,8 +8111,8 @@
 				"text"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 4.0,
+				"output": 12.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -8130,8 +8130,8 @@
 				"text"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 4.0,
+				"output": 12.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -8149,8 +8149,8 @@
 				"text"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 4.0,
+				"output": 12.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -8168,8 +8168,8 @@
 				"text"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 6.0,
+				"output": 18.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -8187,8 +8187,8 @@
 				"text"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 6.0,
+				"output": 18.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -8206,8 +8206,8 @@
 				"text"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 6.0,
+				"output": 18.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -8225,8 +8225,8 @@
 				"text"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 3.0,
+				"output": 9.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -8244,8 +8244,8 @@
 				"text"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 3.0,
+				"output": 9.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -8263,8 +8263,8 @@
 				"text"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 4.0,
+				"output": 12.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -8282,8 +8282,8 @@
 				"text"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 2.0,
+				"output": 6.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -8301,8 +8301,8 @@
 				"text"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 6.0,
+				"output": 18.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -8320,8 +8320,8 @@
 				"text"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 3.0,
+				"output": 9.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -8339,8 +8339,8 @@
 				"text"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 4.0,
+				"output": 12.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -8358,8 +8358,8 @@
 				"text"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 2.0,
+				"output": 6.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -8377,8 +8377,8 @@
 				"text"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 6.0,
+				"output": 18.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -8396,8 +8396,8 @@
 				"text"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 3.0,
+				"output": 9.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -8415,8 +8415,8 @@
 				"text"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 4.0,
+				"output": 12.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -8434,8 +8434,8 @@
 				"text"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 4.0,
+				"output": 12.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -8453,8 +8453,8 @@
 				"text"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 4.0,
+				"output": 12.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -8472,8 +8472,8 @@
 				"text"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 4.0,
+				"output": 12.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -8491,8 +8491,8 @@
 				"text"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 2.0,
+				"output": 6.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -8510,8 +8510,8 @@
 				"text"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 2.0,
+				"output": 6.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -8529,8 +8529,8 @@
 				"text"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 6.0,
+				"output": 18.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -8548,8 +8548,8 @@
 				"text"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 6.0,
+				"output": 18.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -8567,8 +8567,8 @@
 				"text"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 3.0,
+				"output": 9.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -8586,8 +8586,8 @@
 				"text"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 3.0,
+				"output": 9.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -8605,8 +8605,8 @@
 				"text"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 4.0,
+				"output": 12.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -8624,8 +8624,8 @@
 				"text"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 4.0,
+				"output": 12.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -8643,8 +8643,8 @@
 				"text"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 2.0,
+				"output": 6.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -8662,8 +8662,8 @@
 				"text"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 2.0,
+				"output": 6.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -8681,8 +8681,8 @@
 				"text"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 6.0,
+				"output": 18.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -8700,8 +8700,8 @@
 				"text"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 6.0,
+				"output": 18.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -8719,8 +8719,8 @@
 				"text"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 3.0,
+				"output": 9.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -8738,8 +8738,8 @@
 				"text"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 3.0,
+				"output": 9.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -8757,8 +8757,8 @@
 				"text"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 4.0,
+				"output": 12.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -8776,8 +8776,8 @@
 				"text"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 4.0,
+				"output": 12.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -8795,8 +8795,8 @@
 				"text"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 4.0,
+				"output": 12.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -8814,8 +8814,8 @@
 				"text"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 4.0,
+				"output": 12.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -8834,8 +8834,8 @@
 				"image"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 4.0,
+				"output": 12.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -8854,8 +8854,8 @@
 				"image"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 4.0,
+				"output": 12.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -8874,8 +8874,8 @@
 				"image"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 2.0,
+				"output": 6.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -8894,8 +8894,8 @@
 				"image"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 2.0,
+				"output": 6.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -8914,8 +8914,8 @@
 				"image"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 6.0,
+				"output": 18.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -8934,8 +8934,8 @@
 				"image"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 6.0,
+				"output": 18.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -8954,8 +8954,8 @@
 				"image"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 3.0,
+				"output": 9.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -8974,8 +8974,8 @@
 				"image"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 3.0,
+				"output": 9.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -8994,8 +8994,8 @@
 				"image"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 4.0,
+				"output": 12.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -9014,8 +9014,8 @@
 				"image"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 4.0,
+				"output": 12.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -9034,8 +9034,8 @@
 				"image"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 2.0,
+				"output": 6.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -9054,8 +9054,8 @@
 				"image"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 2.0,
+				"output": 6.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -9074,8 +9074,8 @@
 				"image"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 6.0,
+				"output": 18.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -9094,8 +9094,8 @@
 				"image"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 6.0,
+				"output": 18.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -9114,8 +9114,8 @@
 				"image"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 3.0,
+				"output": 9.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -9134,8 +9134,8 @@
 				"image"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 3.0,
+				"output": 9.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -9154,8 +9154,8 @@
 				"image"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 4.0,
+				"output": 12.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -9174,8 +9174,8 @@
 				"image"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 4.0,
+				"output": 12.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -9194,8 +9194,8 @@
 				"image"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 4.0,
+				"output": 12.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -9214,8 +9214,8 @@
 				"image"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 4.0,
+				"output": 12.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -9233,8 +9233,8 @@
 				"text"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 3.0,
+				"output": 9.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -9252,8 +9252,8 @@
 				"text"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 3.0,
+				"output": 9.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -9271,8 +9271,8 @@
 				"text"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 0.5,
+				"output": 2.5,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -9290,8 +9290,8 @@
 				"text"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 3.0,
+				"output": 15.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -9310,8 +9310,8 @@
 				"image"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 3.0,
+				"output": 9.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -9330,8 +9330,8 @@
 				"image"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 3.0,
+				"output": 9.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -9355,8 +9355,8 @@
 				"image"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 3.0,
+				"output": 9.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -9384,8 +9384,8 @@
 				"image"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 3.0,
+				"output": 9.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -9413,8 +9413,8 @@
 				"image"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 3.0,
+				"output": 9.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -9438,8 +9438,8 @@
 				"image"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 3.0,
+				"output": 9.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -9463,8 +9463,8 @@
 				"image"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 3.0,
+				"output": 9.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -9488,8 +9488,8 @@
 				"image"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 6.0,
+				"output": 18.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -9513,8 +9513,8 @@
 				"image"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 4.0,
+				"output": 12.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -9537,8 +9537,8 @@
 				"text"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 4.0,
+				"output": 12.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -9556,8 +9556,8 @@
 				"text"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 2.0,
+				"output": 6.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -9575,8 +9575,8 @@
 				"text"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 2.0,
+				"output": 6.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -9594,8 +9594,8 @@
 				"text"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 3.0,
+				"output": 9.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -9613,8 +9613,8 @@
 				"text"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 3.0,
+				"output": 9.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -9632,8 +9632,8 @@
 				"text"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 4.0,
+				"output": 12.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -9651,8 +9651,8 @@
 				"text"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 4.0,
+				"output": 12.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -9671,8 +9671,8 @@
 				"image"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 3.0,
+				"output": 9.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -9695,8 +9695,8 @@
 				"text"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 4.0,
+				"output": 12.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -9714,8 +9714,8 @@
 				"text"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 2.0,
+				"output": 6.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -9733,8 +9733,8 @@
 				"text"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 4.0,
+				"output": 12.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -9752,8 +9752,8 @@
 				"text"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 2.0,
+				"output": 6.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -9772,8 +9772,8 @@
 				"image"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 3.0,
+				"output": 9.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -9797,8 +9797,8 @@
 				"image"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 3.0,
+				"output": 9.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -9821,8 +9821,8 @@
 				"text"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 3.0,
+				"output": 9.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -9840,8 +9840,8 @@
 				"text"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 4.0,
+				"output": 12.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -9859,8 +9859,8 @@
 				"text"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 4.0,
+				"output": 12.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -9878,8 +9878,8 @@
 				"text"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 2.0,
+				"output": 6.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -9897,8 +9897,8 @@
 				"text"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 2.0,
+				"output": 6.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -9916,8 +9916,8 @@
 				"text"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 4.0,
+				"output": 12.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -9935,8 +9935,8 @@
 				"text"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 4.0,
+				"output": 12.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -9954,8 +9954,8 @@
 				"text"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 3.0,
+				"output": 9.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -9974,8 +9974,8 @@
 				"image"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 4.0,
+				"output": 12.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -9998,8 +9998,8 @@
 				"text"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 4.0,
+				"output": 12.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -10017,8 +10017,8 @@
 				"text"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 2.0,
+				"output": 6.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -10036,8 +10036,8 @@
 				"text"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 2.0,
+				"output": 6.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -10055,8 +10055,8 @@
 				"text"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 4.0,
+				"output": 12.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -10074,8 +10074,8 @@
 				"text"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 4.0,
+				"output": 12.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -10094,8 +10094,8 @@
 				"image"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 3.0,
+				"output": 9.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -10118,8 +10118,8 @@
 				"text"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 3.0,
+				"output": 9.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -10137,8 +10137,8 @@
 				"text"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 4.0,
+				"output": 12.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -10156,8 +10156,8 @@
 				"text"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 4.0,
+				"output": 12.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -10175,8 +10175,8 @@
 				"text"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 2.0,
+				"output": 6.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -10194,8 +10194,8 @@
 				"text"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 2.0,
+				"output": 6.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -10213,8 +10213,8 @@
 				"text"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 3.0,
+				"output": 9.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -10232,8 +10232,8 @@
 				"text"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 4.0,
+				"output": 12.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -10251,8 +10251,8 @@
 				"text"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 4.0,
+				"output": 12.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -10270,8 +10270,8 @@
 				"text"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 4.0,
+				"output": 12.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -10289,8 +10289,8 @@
 				"text"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 4.0,
+				"output": 12.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -10308,8 +10308,8 @@
 				"text"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 2.0,
+				"output": 6.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -10327,8 +10327,8 @@
 				"text"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 3.0,
+				"output": 9.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -10346,8 +10346,8 @@
 				"text"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 3.0,
+				"output": 9.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -10365,8 +10365,8 @@
 				"text"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 4.0,
+				"output": 12.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -10384,8 +10384,8 @@
 				"text"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 2.0,
+				"output": 6.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -10403,8 +10403,8 @@
 				"text"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 3.0,
+				"output": 9.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -10422,8 +10422,8 @@
 				"text"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 2.5,
+				"output": 7.5,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -10441,8 +10441,8 @@
 				"text"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 4.0,
+				"output": 12.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -10460,8 +10460,8 @@
 				"text"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 4.0,
+				"output": 12.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -10479,8 +10479,8 @@
 				"text"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 2.0,
+				"output": 6.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -10498,8 +10498,8 @@
 				"text"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 3.0,
+				"output": 9.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -10517,8 +10517,8 @@
 				"text"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 2.5,
+				"output": 7.5,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -10536,8 +10536,8 @@
 				"text"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 4.0,
+				"output": 12.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -10555,8 +10555,8 @@
 				"text"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 4.0,
+				"output": 12.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -10574,8 +10574,8 @@
 				"text"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 4.0,
+				"output": 12.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -10593,8 +10593,8 @@
 				"text"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 4.0,
+				"output": 12.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -10612,8 +10612,8 @@
 				"text"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 4.0,
+				"output": 12.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -10631,8 +10631,8 @@
 				"text"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 4.0,
+				"output": 12.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -10650,8 +10650,8 @@
 				"text"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 4.0,
+				"output": 12.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -10669,8 +10669,8 @@
 				"text"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 2.0,
+				"output": 6.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -10688,8 +10688,8 @@
 				"text"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 2.0,
+				"output": 6.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -10707,8 +10707,8 @@
 				"text"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 3.0,
+				"output": 9.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -10726,8 +10726,8 @@
 				"text"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 3.0,
+				"output": 9.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -10745,8 +10745,8 @@
 				"text"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 2.5,
+				"output": 7.5,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -10764,8 +10764,8 @@
 				"text"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 2.5,
+				"output": 7.5,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -10784,8 +10784,8 @@
 				"image"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 2.0,
+				"output": 6.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -10809,8 +10809,8 @@
 				"image"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 2.0,
+				"output": 6.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -10833,8 +10833,8 @@
 				"text"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 2.5,
+				"output": 7.5,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -10858,8 +10858,8 @@
 				"image"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 2.0,
+				"output": 6.0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
