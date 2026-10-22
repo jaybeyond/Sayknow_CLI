@@ -9,6 +9,7 @@ import { BashTool } from "./bash";
 import type { ToolSession } from "./index";
 import { assertMonitorMutationAllowed } from "./monitor-mutation";
 import { ToolError } from "./tool-errors";
+import { TOOL_TIMEOUTS } from "./tool-timeouts";
 
 const monitorKindEnum = z.enum(["log", "poll", "watch", "other"]);
 
@@ -53,6 +54,10 @@ const MONITOR_LABEL_MAX = 120;
 const MAX_PENDING_MONITOR_NOTIFICATIONS = 3;
 const MONITOR_NOTIFICATION_LINE_MAX_BYTES = 16 * 1024;
 const MONITOR_NOTIFICATION_LINE_MAX_LINES = 20;
+// Monitor jobs run through the Bash pipeline, which clamps explicit timeouts to
+// the Bash ceiling. The schema stays aligned with the upstream parity fixture, so
+// the ceiling is enforced here: reject instead of silently running a shorter job.
+const MONITOR_TIMEOUT_MAX_SEC = TOOL_TIMEOUTS.bash.max;
 
 function buildMonitorLabel(params: MonitorParams): string {
 	const base = `[monitor:${params.kind}] ${params.description}`;
@@ -113,6 +118,11 @@ export class MonitorTool implements AgentTool<typeof monitorSchema, MonitorToolD
 		_onUpdate?: AgentToolUpdateCallback<MonitorToolDetails>,
 		context?: AgentToolContext,
 	): Promise<AgentToolResult<MonitorToolDetails>> {
+		if (params.timeout !== undefined && params.timeout > MONITOR_TIMEOUT_MAX_SEC) {
+			throw new ToolError(
+				`Monitor timeout ${params.timeout}s exceeds the ${MONITOR_TIMEOUT_MAX_SEC}s maximum. Omit timeout to run for the session lifetime; use the cron tool to run something later.`,
+			);
+		}
 		const manager = AsyncJobManager.instance();
 		if (!manager) {
 			throw new ToolError("Async execution is disabled; the monitor tool is unavailable in this session.");
