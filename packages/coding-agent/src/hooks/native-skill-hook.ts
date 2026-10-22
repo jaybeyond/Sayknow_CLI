@@ -469,7 +469,9 @@ async function readStdinJson(): Promise<{ payload: HookPayload; parseError: Erro
 }
 
 async function logHookError(cwd: string, type: string, error: unknown): Promise<void> {
-	const skcSessionId = process.env.SKC_SESSION_ID?.trim();
+	// Bun has already copied the project dotenv into the environment. A value
+	// that matches that snapshot must not select another session's log directory.
+	const skcSessionId = trustedCoordinatorEnv("SKC_SESSION_ID", process.env, projectEnvSnapshot(cwd));
 	if (!skcSessionId) {
 		console.error(
 			JSON.stringify({
