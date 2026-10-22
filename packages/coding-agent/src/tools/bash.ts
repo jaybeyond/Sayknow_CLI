@@ -14,10 +14,34 @@ import bashDescription from "../prompts/tools/bash.md" with { type: "text" };
 import type { ClientBridgeTerminalExitStatus, ClientBridgeTerminalOutput } from "../session/client-bridge";
 import { DEFAULT_MAX_BYTES, streamTailUpdates, TailBuffer } from "../session/streaming-output";
 import { buildSkcRuntimeSessionEnv } from "../skc-runtime/goal-mode-request";
+import { SKC_TMUX_LAUNCHED_ENV } from "../skc-runtime/launch-tmux";
+import {
+	MANAGED_OWNER_PREDECESSOR_GENERATION_ENV,
+	MANAGED_OWNER_PREDECESSOR_INCARNATION_ENV,
+	MANAGED_OWNER_PREDECESSOR_RUN_ID_ENV,
+	MANAGED_OWNER_PREDECESSOR_TOKEN_ENV,
+	MANAGED_OWNER_TRANSCRIPT_PATH_ENV,
+} from "../skc-runtime/managed-owner-admission";
+import {
+	MANAGED_OWNER_CHILD_TOKEN_ENV,
+	MANAGED_OWNER_COMMAND_ENV,
+	MANAGED_OWNER_GENERATION_ENV,
+	MANAGED_OWNER_INCARNATION_ENV,
+	MANAGED_OWNER_RUN_ID_ENV,
+	MANAGED_OWNER_STATE_DIR_ENV,
+} from "../skc-runtime/managed-owner-supervisor";
 import {
 	SKC_RALPLAN_ARTIFACT_ENV,
 	SKC_RESTRICTED_ROLE_AGENT_BASH_ENV,
 } from "../skc-runtime/restricted-role-agent-bash";
+import {
+	SKC_COORDINATOR_SESSION_BRANCH_ENV,
+	SKC_COORDINATOR_SESSION_ID_ENV,
+	SKC_COORDINATOR_SESSION_LAUNCH_ID_ENV,
+	SKC_COORDINATOR_SESSION_READINESS_FILE_ENV,
+	SKC_COORDINATOR_SESSION_STATE_FILE_ENV,
+	SKC_TMUX_OWNER_SERVER_KEY_ENV,
+} from "../skc-runtime/session-state-sidecar";
 import { renderStatusLine } from "../tui";
 import { CachedOutputBlock } from "../tui/output-block";
 import { getSixelLineMask } from "../utils/sixel";
@@ -40,6 +64,38 @@ import { clampTimeout, TOOL_TIMEOUTS } from "./tool-timeouts";
 export const BASH_DEFAULT_PREVIEW_LINES = 10;
 
 const BASH_ENV_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
+// Managed-owner env vars that must be scrubbed from child processes.
+// Exported for testing the env scrubbing behavior.
+export const MANAGED_OWNER_BASH_ENV = [
+	MANAGED_OWNER_STATE_DIR_ENV,
+	MANAGED_OWNER_GENERATION_ENV,
+	MANAGED_OWNER_RUN_ID_ENV,
+	MANAGED_OWNER_INCARNATION_ENV,
+	MANAGED_OWNER_CHILD_TOKEN_ENV,
+	MANAGED_OWNER_COMMAND_ENV,
+	MANAGED_OWNER_PREDECESSOR_TOKEN_ENV,
+	MANAGED_OWNER_PREDECESSOR_GENERATION_ENV,
+	MANAGED_OWNER_PREDECESSOR_RUN_ID_ENV,
+	MANAGED_OWNER_PREDECESSOR_INCARNATION_ENV,
+	MANAGED_OWNER_TRANSCRIPT_PATH_ENV,
+	// The rest of the tmux-owner tuple (tmux-sessions.ts managedEnvironment): leaving
+	// either behind makes ownerTerminalContextFromEnvironment() report "invalid" in a
+	// nested skc, because a server key or SKC_TMUX_LAUNCHED=1 without generation/state
+	// dir is an incomplete owner context.
+	SKC_TMUX_OWNER_SERVER_KEY_ENV,
+	SKC_TMUX_LAUNCHED_ENV,
+] as const;
+
+// Coordinator-only session markers. A nested skc started from the bash tool
+// would otherwise adopt this session's state file and identity.
+const COORDINATOR_ONLY_BASH_ENV = [
+	SKC_COORDINATOR_SESSION_STATE_FILE_ENV,
+	SKC_COORDINATOR_SESSION_ID_ENV,
+	SKC_COORDINATOR_SESSION_BRANCH_ENV,
+	SKC_COORDINATOR_SESSION_LAUNCH_ID_ENV,
+	SKC_COORDINATOR_SESSION_READINESS_FILE_ENV,
+	...MANAGED_OWNER_BASH_ENV,
+] as const;
 const DEFAULT_AUTO_BACKGROUND_THRESHOLD_MS = 60_000;
 const READ_ONLY_BASH_ENV: Record<string, string> = {
 	GREP_OPTIONS: "",
@@ -402,6 +458,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		notices?: readonly string[];
 
 		resolvedEnv?: Record<string, string>;
+		unsetEnv: string[];
 		onUpdate?: AgentToolUpdateCallback<BashToolDetails>;
 		startBackgrounded: boolean;
 	}): ManagedBashJobHandle {
@@ -434,6 +491,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 						timeout: options.timeoutMs,
 						signal: runSignal,
 						env: options.resolvedEnv,
+						unsetEnv: options.unsetEnv,
 						artifactPath,
 						artifactId,
 						oneShot: true,
@@ -546,6 +604,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		command: string;
 		commandCwd: string;
 		resolvedEnv: Record<string, string>;
+		unsetEnv: string[];
 		requestedTimeoutSec: number;
 		timeoutSec: number;
 		timeoutMs: number;
@@ -684,6 +743,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			...(this.session.bashRestrictionProfile === "read-only" ? READ_ONLY_BASH_ENV : {}),
 			...(allowedPrefixes && allowedPrefixes.length > 0 ? { [SKC_RESTRICTED_ROLE_AGENT_BASH_ENV]: "1" } : {}),
 		};
+		const unsetEnv = COORDINATOR_ONLY_BASH_ENV.filter(name => !Object.hasOwn(expandedEnv ?? {}, name));
 
 		if (cwd?.includes("://") || cwd?.includes("local:/")) {
 			cwd = await expandInternalUrls(cwd, { ...internalUrlOptions, noEscape: true });
@@ -726,7 +786,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		const timeoutClampNotice = formatTimeoutClampNotice(requestedTimeoutSec, timeoutSec);
 		if (timeoutClampNotice) notices.push(timeoutClampNotice);
 
-		return { command, commandCwd, resolvedEnv, requestedTimeoutSec, timeoutSec, timeoutMs, notices };
+		return { command, commandCwd, resolvedEnv, unsetEnv, requestedTimeoutSec, timeoutSec, timeoutMs, notices };
 	}
 
 	/**
@@ -809,6 +869,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 						timeout: monitorTimeoutMs,
 						signal,
 						env: prepared.resolvedEnv,
+						unsetEnv: prepared.unsetEnv,
 						artifactPath,
 						artifactId,
 						oneShot: true,
@@ -873,6 +934,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			command,
 			commandCwd,
 			resolvedEnv,
+			unsetEnv,
 			requestedTimeoutSec,
 			timeoutSec,
 			timeoutMs,
@@ -892,6 +954,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 				notices: pendingNotices,
 
 				resolvedEnv,
+				unsetEnv,
 				onUpdate,
 				startBackgrounded: true,
 			});
@@ -927,6 +990,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 				notices: pendingNotices,
 
 				resolvedEnv,
+				unsetEnv,
 				onUpdate,
 				startBackgrounded,
 			});
@@ -1157,6 +1221,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 					timeoutMs,
 					signal,
 					env: resolvedEnv,
+					unsetEnv,
 					artifactPath,
 					artifactId,
 				})
@@ -1167,6 +1232,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 					timeout: timeoutMs,
 					signal,
 					env: resolvedEnv,
+					unsetEnv,
 					artifactPath,
 					artifactId,
 					onChunk: streamTailUpdates(tailBuffer, onUpdate),

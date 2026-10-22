@@ -73,6 +73,49 @@ describe("executeBash", () => {
 		}
 	});
 
+	it("unsets all managed-owner env vars to allow nested admission to return fresh (issue #6139)", async () => {
+		const names = [
+			"SKC_MANAGED_OWNER_RUN_ID",
+			"SKC_MANAGED_OWNER_INCARNATION",
+			"SKC_MANAGED_OWNER_CHILD_TOKEN",
+			"SKC_TMUX_OWNER_STATE_DIR",
+			"SKC_TMUX_OWNER_GENERATION",
+			"SKC_MANAGED_OWNER_PREDECESSOR_TOKEN",
+			"SKC_MANAGED_OWNER_COMMAND_JSON",
+		];
+		const previous = new Map(names.map(name => [name, process.env[name]]));
+		for (const name of names) process.env[name] = `test-${name}`;
+
+		try {
+			await disposeAllShellSessions();
+			// Explicitly unset managed-owner vars like the bash tool does
+			const unsetEnv = [
+				...names,
+				"SKC_COORDINATOR_SESSION_ID",
+				"SKC_MANAGED_OWNER_PREDECESSOR_GENERATION",
+				"SKC_MANAGED_OWNER_PREDECESSOR_RUN_ID",
+				"SKC_MANAGED_OWNER_PREDECESSOR_INCARNATION",
+			];
+			const read = names.map(name => `"$(printenv ${name} || printf unset)"`).join(" ");
+			for (const oneShot of [false, true]) {
+				const result = await executeBash(`printf "%s|%s|%s|%s|%s|%s|%s" ${read}`, {
+					cwd: tempDir,
+					timeout: 5000,
+					sessionKey: "managed-owner-unset-test",
+					oneShot,
+					unsetEnv,
+				});
+				expect(result.output).toBe(names.map(() => "unset").join("|"));
+			}
+		} finally {
+			for (const [name, value] of previous) {
+				if (value === undefined) delete process.env[name];
+				else process.env[name] = value;
+			}
+			await disposeAllShellSessions();
+		}
+	});
+
 	it("retains then fully disposes persistent shell sessions (MEM-7)", async () => {
 		await disposeAllShellSessions();
 		expect(getShellSessionCount()).toBe(0);

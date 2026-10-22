@@ -296,6 +296,8 @@ export async function runInteractiveBashPty(
 		timeoutMs: number;
 		signal?: AbortSignal;
 		env?: Record<string, string>;
+		/** Environment names to hide from the PTY child. Explicit `env` values win. */
+		unsetEnv?: string[];
 		artifactPath?: string;
 		artifactId?: string;
 	},
@@ -376,7 +378,7 @@ export async function runInteractiveBashPty(
 							...NON_INTERACTIVE_ENV,
 							...options.env,
 						},
-						unsetEnv: ptyUnsetHookNames(options.env),
+						unsetEnv: [...(options.unsetEnv ?? []), ...ptyUnsetHookNames(options.env)],
 						signal: options.signal,
 						cols,
 						rows,
