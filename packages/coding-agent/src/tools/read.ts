@@ -1833,6 +1833,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			entityLabel: string;
 			raw?: boolean;
 			immutable?: boolean;
+			wrapUntrusted?: boolean;
 			truncationDirection?: TruncationDirection;
 			cacheLinesFor?: string;
 		},
@@ -1944,7 +1945,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		const finalText =
 			notices.length > 0 ? (outputText ? `${outputText}\n${notices.join("\n")}` : notices.join("\n")) : outputText;
 		details.spillEligible = parts.length > 0 && !hasPartialSegment;
-		resultBuilder.text(finalText);
+		resultBuilder.text(options.wrapUntrusted ? wrapUntrustedContent(finalText) : finalText);
 		if (columnTruncated > 0) resultBuilder.limits({ columnMax: columnTruncated });
 		return resultBuilder.done();
 	}
@@ -3379,6 +3380,8 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			throw new ToolError(e instanceof Error ? e.message : String(e));
 		}
 		const scheme = urlMeta.protocol.replace(/:$/, "").toLowerCase();
+		// issue:// and pr:// are remote third-party text, the same boundary as an HTTP fetch.
+		const wrapUntrusted = scheme === "issue" || scheme === "pr";
 		let hasExtraction = false;
 		if (scheme === "agent") {
 			const hasPathExtraction = urlMeta.pathname && urlMeta.pathname !== "/" && urlMeta.pathname !== "";
@@ -3419,6 +3422,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 				entityLabel: "resource",
 				immutable: resource.immutable,
 				raw,
+				wrapUntrusted,
 				truncationDirection: direction,
 			});
 		}
@@ -3432,6 +3436,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			ignoreResultLimits: scheme === "skill",
 			immutable: resource.immutable,
 			raw,
+			wrapUntrusted,
 			truncationDirection: direction,
 			bodyFooterPath: parsedSel.kind === "none" && !raw ? url : undefined,
 		});
