@@ -950,10 +950,12 @@ export class Settings implements NotificationSettingsReader {
 	}
 
 	/**
-	 * Get shell configuration based on settings.
+	 * Shell configuration for bash and the Python executor.
+	 * `shellPath` comes from the user/global config only, so a project
+	 * `.skc/settings.json` cannot select the binary those executors run.
 	 */
 	getShellConfig() {
-		const shell = this.get("shellPath");
+		const shell = this.getGlobal("shellPath");
 		return procmgr.getShellConfig(shell);
 	}
 
