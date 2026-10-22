@@ -886,16 +886,23 @@ export class Broker {
 			const begun = await this.ledger.begin(identity, requestHash);
 			if (begun.kind === "replay") {
 				const replay = begun.entry.response as BrokerResponse;
+				// Proven errors are immutable even when their response carries cleanup
+				// metadata. Only unproven cleanup outcomes may execute again.
+				if (begun.entry.state === "terminal_error") return replay;
 				if (!(!replay.ok && replay.error.cleanup)) return replay;
 				const cleanup = replay.error.cleanup;
 				const outcome = await executeLifecycle(this, operation, input, identity, cleanup);
 				const response = outcome.response;
-				await this.ledger.transition(identity, lifecycleResponseState(response), {
+				const recorded = await this.ledger.transition(identity, lifecycleResponseState(response), {
 					response,
 					responseDigest: createHash("sha256").update(canonicalJson(response)).digest("hex"),
 					...(outcome.durableEffects ? { durableEffects: outcome.durableEffects } : {}),
 					...(outcome.startupFailure ? { startupFailure: outcome.startupFailure } : {}),
 				});
+				// A late transition may have proven a terminal result already. The ledger
+				// preserves that row; return it instead of the freshly computed response.
+				if (recorded.state === "terminal_error" && recorded.response !== undefined)
+					return recorded.response as BrokerResponse;
 				return response;
 			}
 			if (begun.kind === "idempotency_conflict")
@@ -906,12 +913,14 @@ export class Broker {
 					return replay ?? error("terminal_uncertain", "prior lifecycle operation outcome is uncertain");
 				const outcome = await executeLifecycle(this, operation, input, identity, replay.error.cleanup);
 				const response = outcome.response;
-				await this.ledger.transition(identity, lifecycleResponseState(response), {
+				const recorded = await this.ledger.transition(identity, lifecycleResponseState(response), {
 					response,
 					responseDigest: createHash("sha256").update(canonicalJson(response)).digest("hex"),
 					...(outcome.durableEffects ? { durableEffects: outcome.durableEffects } : {}),
 					...(outcome.startupFailure ? { startupFailure: outcome.startupFailure } : {}),
 				});
+				if (recorded.state === "terminal_error" && recorded.response !== undefined)
+					return recorded.response as BrokerResponse;
 				return response;
 			}
 			if (begun.kind === "in_progress") return error("broker_restarting", "lifecycle operation is in progress");
