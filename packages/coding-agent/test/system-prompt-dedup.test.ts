@@ -65,14 +65,14 @@ describe("SYSTEM.md prompt assembly", () => {
 		}
 	}, 15_000);
 
-	it("prefers project SYSTEM.md over user SYSTEM.md", async () => {
+	it("uses the user SYSTEM.md when a repository SYSTEM.md is present", async () => {
 		const projectDir = path.join(tempDir, "project");
 		fs.mkdirSync(path.join(projectDir, ".skc"), { recursive: true });
 		fs.mkdirSync(path.join(tempHomeDir, ".skc", "agent"), { recursive: true });
 		fs.writeFileSync(path.join(tempHomeDir, ".skc", "agent", "SYSTEM.md"), "User SYSTEM prompt");
 		fs.writeFileSync(path.join(projectDir, ".skc", "SYSTEM.md"), "Project SYSTEM prompt");
 
-		await expect(loadSystemPromptFiles({ cwd: projectDir })).resolves.toBe("Project SYSTEM prompt");
+		await expect(loadSystemPromptFiles({ cwd: projectDir })).resolves.toBe("User SYSTEM prompt");
 	});
 	it("does not load user-home context or prompt files into project context", async () => {
 		const projectDir = path.join(tempDir, "project");
