@@ -26,9 +26,9 @@ import {
 	formatMiddleElisionMarker,
 	truncateHead,
 	truncateHeadBytes,
-	truncateLine,
 	truncateMiddleWindows,
 	truncateTailBytes,
+	truncateTextWithSecretAwareness,
 } from "../session/streaming-output";
 import { fileHyperlink, renderCodeCell, renderMarkdownCell, renderStatusLine, tryResolveInternalUrlSync } from "../tui";
 import { CachedOutputBlock } from "../tui/output-block";
@@ -245,12 +245,7 @@ function renderReadWindow(
 		const hash = shouldAddHashLines && segment.kind === "lines";
 		const numbers = !hash && shouldAddLineNumbers;
 		const renderContent =
-			!hash && maxColumns > 0
-				? segment.content
-						.split("\n")
-						.map(line => truncateLine(line, maxColumns).text)
-						.join("\n")
-				: segment.content;
+			!hash && maxColumns > 0 ? truncateTextWithSecretAwareness(segment.content, maxColumns).text : segment.content;
 		return formatTextWithMode(renderContent, segment.origin.startLine, hash, numbers);
 	};
 	const marker = formatMiddleElisionMarker(window.elidedLines, window.elidedBytes);
@@ -1861,17 +1856,12 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 				// A partial line is a byte suffix, not a complete source line. Never
 				// give it an anchor that could make the preview look fully readable.
 				const numbers = !hash && shouldAddLineNumbers && segment.kind === "lines";
-				const renderContent =
-					!options.raw && !hash && maxColumns > 0
-						? segment.content
-								.split("\n")
-								.map(line => {
-									const result = truncateLine(line, maxColumns);
-									if (result.wasTruncated) columnTruncated = maxColumns;
-									return result.text;
-								})
-								.join("\n")
-						: segment.content;
+				let renderContent = segment.content;
+				if (!options.raw && !hash && maxColumns > 0) {
+					const result = truncateTextWithSecretAwareness(segment.content, maxColumns);
+					if (result.wasTruncated) columnTruncated = maxColumns;
+					renderContent = result.text;
+				}
 				return formatTextWithMode(renderContent, segment.origin.startLine, hash, numbers);
 			};
 			let text = "";
@@ -2051,12 +2041,10 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			const collectedLines = streamResult.lines;
 			const cacheLines = collectedLines.slice();
 			if (!rawSelector && !shouldAddHashLines && maxColumns > 0) {
-				for (let i = 0; i < collectedLines.length; i++) {
-					const { text, wasTruncated } = truncateLine(collectedLines[i], maxColumns);
-					if (wasTruncated) {
-						collectedLines[i] = text;
-						columnTruncated = maxColumns;
-					}
+				const clipped = truncateTextWithSecretAwareness(collectedLines.join("\n"), maxColumns);
+				if (clipped.wasTruncated) {
+					collectedLines.splice(0, collectedLines.length, ...clipped.text.split("\n"));
+					columnTruncated = maxColumns;
 				}
 			}
 
@@ -2978,11 +2966,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 						const directionalMaxColumns = rawSelector ? 0 : resolveOutputMaxColumns(this.session.settings);
 						if (!rawSelector && !shouldAddDirectionalHashLines && directionalMaxColumns > 0) {
 							for (const segment of windowSegments(window)) {
-								if (
-									segment.content
-										.split("\n")
-										.some(line => truncateLine(line, directionalMaxColumns).wasTruncated)
-								) {
+								if (truncateTextWithSecretAwareness(segment.content, directionalMaxColumns).wasTruncated) {
 									columnTruncated = directionalMaxColumns;
 									break;
 								}
@@ -3110,12 +3094,10 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 						const shouldAddHashLines = !rawSelector && displayMode.hashLines;
 						const maxColumns = resolveOutputMaxColumns(this.session.settings);
 						if (!rawSelector && !shouldAddHashLines && maxColumns > 0) {
-							for (let i = 0; i < collectedLines.length; i++) {
-								const { text, wasTruncated } = truncateLine(collectedLines[i], maxColumns);
-								if (wasTruncated) {
-									collectedLines[i] = text;
-									columnTruncated = maxColumns;
-								}
+							const clipped = truncateTextWithSecretAwareness(collectedLines.join("\n"), maxColumns);
+							if (clipped.wasTruncated) {
+								collectedLines.splice(0, collectedLines.length, ...clipped.text.split("\n"));
+								columnTruncated = maxColumns;
 							}
 						}
 
