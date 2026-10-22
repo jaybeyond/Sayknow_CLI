@@ -147,7 +147,12 @@ function validateExactMCPConfig(config: unknown): {
 /**
  * Transform raw MCP config to canonical MCPServer format.
  */
-function transformMCPConfig(config: MCPConfigFile, source: SourceMeta, quiet = false): MCPServer[] {
+function transformMCPConfig(
+	config: MCPConfigFile,
+	source: SourceMeta,
+	quiet = false,
+	skipSensitiveEnvNames = false,
+): MCPServer[] {
 	const servers: MCPServer[] = [];
 
 	if (config.mcpServers) {
@@ -215,14 +220,17 @@ function transformMCPConfig(config: MCPConfigFile, source: SourceMeta, quiet = f
 			};
 
 			// Expand environment variables
-			if (server.command) server.command = expandEnvVarsDeep(server.command);
-			if (server.args) server.args = expandEnvVarsDeep(server.args);
-			if (server.env) server.env = expandEnvVarsDeep(server.env);
-			if (server.cwd) server.cwd = expandEnvVarsDeep(server.cwd);
-			if (server.url) server.url = expandEnvVarsDeep(server.url);
-			if (server.headers) server.headers = expandEnvVarsDeep(server.headers);
-			if (server.auth) server.auth = expandEnvVarsDeep(server.auth);
-			if (server.oauth) server.oauth = expandEnvVarsDeep(server.oauth);
+			// Repo-root mcp.json is project content. Exact `--mcp-config` passes
+			// skipSensitiveEnvNames false so a trusted file can still reference secrets.
+			const expand = <T>(value: T): T => expandEnvVarsDeep(value, undefined, skipSensitiveEnvNames);
+			if (server.command) server.command = expand(server.command);
+			if (server.args) server.args = expand(server.args);
+			if (server.env) server.env = expand(server.env);
+			if (server.cwd) server.cwd = expand(server.cwd);
+			if (server.url) server.url = expand(server.url);
+			if (server.headers) server.headers = expand(server.headers);
+			if (server.auth) server.auth = expand(server.auth);
+			if (server.oauth) server.oauth = expand(server.oauth);
 			servers.push(server);
 		}
 	}
@@ -431,7 +439,7 @@ async function readExactMCPConfigFile(filePath: string): Promise<string | null> 
 export async function loadMCPJsonFile(
 	filePath: string,
 	level: "user" | "project",
-	options?: { quiet?: boolean; useCache?: boolean },
+	options?: { quiet?: boolean; useCache?: boolean; skipSensitiveEnvNames?: boolean },
 ): Promise<MCPJsonLoadResult> {
 	const warnings: string[] = [];
 	const items: MCPServer[] = [];
@@ -466,7 +474,7 @@ export async function loadMCPJsonFile(
 		validConfig = config as MCPConfigFile;
 	}
 	const source = createSourceMeta(PROVIDER_ID, filePath, level);
-	items.push(...transformMCPConfig(validConfig, source, options?.quiet));
+	items.push(...transformMCPConfig(validConfig, source, options?.quiet, options?.skipSensitiveEnvNames === true));
 
 	return {
 		items,
@@ -481,7 +489,9 @@ export async function loadMCPJsonFile(
 async function load(ctx: LoadContext): Promise<LoadResult<MCPServer>> {
 	const filenames = ["mcp.json", ".mcp.json"];
 	const results = await Promise.all(
-		filenames.map(filename => loadMCPJsonFile(path.join(ctx.cwd, filename), "project")),
+		filenames.map(filename =>
+			loadMCPJsonFile(path.join(ctx.cwd, filename), "project", { skipSensitiveEnvNames: true }),
+		),
 	);
 
 	const allItems = results.flatMap(r => r.items);

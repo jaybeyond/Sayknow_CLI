@@ -9,6 +9,7 @@ import {
 	updateMCPServer,
 } from "../../runtime-mcp/config-writer";
 import { MCPManager } from "../../runtime-mcp/manager";
+import { nativeMcpSource } from "../../runtime-mcp/project-host-values";
 import { getSmitheryApiKey } from "../../runtime-mcp/smithery-auth";
 import { searchSmitheryRegistry } from "../../runtime-mcp/smithery-registry";
 import type { MCPServerConfig, MCPServerConnection } from "../../runtime-mcp/types";
@@ -199,6 +200,7 @@ async function withPreparedMcpConnection<T>(
 	runtime: SlashCommandRuntime,
 	name: string,
 	config: MCPServerConfig,
+	scope: AcpMcpScope,
 	fn: (connection: MCPServerConnection) => Promise<T>,
 ): Promise<T> {
 	let connection: MCPServerConnection | undefined;
@@ -209,7 +211,10 @@ async function withPreparedMcpConnection<T>(
 		// Without this, `/mcp test|resources|prompts` silently fails for any
 		// server saved by the TUI/reauth path.
 		manager.setAuthStorage(runtime.session.modelRegistry.authStorage);
-		const resolvedConfig = await manager.prepareConfig(config);
+		const resolvedConfig = await manager.prepareConfig(
+			config,
+			nativeMcpSource(scope, getMCPConfigPath(scope, runtime.cwd)),
+		);
 		connection = await connectToServer(name, resolvedConfig);
 		return await fn(connection);
 	} finally {
@@ -235,9 +240,9 @@ async function collectConnectedMcpLines(
 	if (servers.length === 0) return undefined;
 
 	const lines: string[] = [];
-	for (const { name, config } of servers) {
+	for (const { name, config, scope } of servers) {
 		try {
-			const collected = await withPreparedMcpConnection(runtime, name, config, connection =>
+			const collected = await withPreparedMcpConnection(runtime, name, config, scope, connection =>
 				collect(name, connection),
 			);
 			lines.push(...collected);
@@ -282,7 +287,7 @@ async function handleTestCommand(rest: string, runtime: SlashCommandRuntime): Pr
 	if (!server) return usage(`Server "${name}" not found. Run /mcp list to see configured servers.`, runtime);
 
 	try {
-		return await withPreparedMcpConnection(runtime, name, server.config, async connection => {
+		return await withPreparedMcpConnection(runtime, name, server.config, server.scope, async connection => {
 			const tools = await listTools(connection);
 			const lines = [`Server "${name}" connected (${tools.length} tools).`];
 			for (const tool of tools) lines.push(`  - ${tool.name}`);
