@@ -4383,6 +4383,17 @@ function sessionMatchesResumeArg(session: SessionInfo, sessionArg: string): bool
 	return fileSessionId.startsWith(normalizedArg);
 }
 
+/**
+ * Equal session id first, the same `id ===` check managed resume already uses.
+ * Prefix matching stays for every other argument, in list order.
+ */
+export function pickResumableSession(sessions: readonly SessionInfo[], sessionArg: string): SessionInfo | undefined {
+	return (
+		sessions.find(session => session.id === sessionArg) ??
+		sessions.find(session => sessionMatchesResumeArg(session, sessionArg))
+	);
+}
+
 export async function resolveResumableSession(
 	sessionArg: string,
 	cwd: string,
@@ -4393,7 +4404,7 @@ export async function resolveResumableSession(
 	const localSessions = sessionDir
 		? await SessionManager.list(cwd, sessionDir, storage)
 		: await SessionManager.listManagedForResumePickerReadOnly(cwd, managedAgentDir, storage);
-	const localMatch = localSessions.find(session => sessionMatchesResumeArg(session, sessionArg));
+	const localMatch = pickResumableSession(localSessions, sessionArg);
 	if (localMatch) {
 		return { session: localMatch, scope: "local" };
 	}
@@ -4403,7 +4414,7 @@ export async function resolveResumableSession(
 	}
 
 	const globalSessions = await SessionManager.listAll(storage, managedAgentDir);
-	const globalMatch = globalSessions.find(session => sessionMatchesResumeArg(session, sessionArg));
+	const globalMatch = pickResumableSession(globalSessions, sessionArg);
 	if (!globalMatch) {
 		return undefined;
 	}
