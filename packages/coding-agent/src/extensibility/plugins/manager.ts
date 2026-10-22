@@ -12,6 +12,7 @@ import {
 } from "@sayknow-cli/utils";
 import { settings } from "../../config/settings";
 import { extractPackageName, parsePluginSpec } from "./parser";
+import { resolvePluginLinkPath } from "./plugin-link-path";
 import { scanPluginDir, toDoctorChecks } from "./security-scanner";
 import type {
 	DoctorCheck,
@@ -335,11 +336,11 @@ export class PluginManager {
 
 		await this.#ensurePluginsDir();
 
-		const linkPath = path.join(getPluginsNodeModules(), pkg.name);
+		const linkPath = resolvePluginLinkPath(getPluginsNodeModules(), pkg.name);
 
 		// Handle scoped packages
 		if (pkg.name.startsWith("@")) {
-			const scopeDir = path.join(getPluginsNodeModules(), pkg.name.split("/")[0]);
+			const scopeDir = path.dirname(linkPath);
 			await fs.promises.mkdir(scopeDir, { recursive: true });
 		}
 
