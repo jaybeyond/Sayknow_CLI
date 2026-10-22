@@ -19,6 +19,9 @@ export type CodexErrorInfo = {
 	rateLimits?: CodexRateLimits;
 	raw?: string;
 };
+// Matches the gate's bare rejection body ("Request blocked." / "Request
+// blocked (…)") but never messages that merely mention blocking mid-text.
+const REQUEST_BLOCKED_MESSAGE_RE = /^\s*request blocked\b/i;
 
 const BEARER_TEXT_RE = /\bBearer\s+\S+/gi;
 const SK_TOKEN_RE = /\bsk-[A-Za-z0-9_-]{8,}\b/g;
@@ -29,13 +32,13 @@ function redactPersistedSecrets(text: string): string {
 
 export async function parseCodexError(response: Response): Promise<CodexErrorInfo> {
 	const raw = await response.text();
-	let message = raw || response.statusText || "Request failed";
+	let message = raw || response.statusText || `Codex request failed (HTTP ${response.status})`;
 	let friendlyMessage: string | undefined;
 	let rateLimits: CodexRateLimits | undefined;
 	let code: string | undefined;
 
 	try {
-		const parsed = JSON.parse(raw) as { error?: Record<string, unknown> };
+		const parsed = JSON.parse(raw) as { error?: Record<string, unknown>; detail?: unknown };
 		const err = parsed?.error ?? {};
 
 		const headers = response.headers;
@@ -74,11 +77,29 @@ export async function parseCodexError(response: Response): Promise<CodexErrorInf
 		}
 
 		const errMessage = (err as { message?: string }).message;
-		message = errMessage || friendlyMessage || message;
+		// The chatgpt.com/backend-api gate rejects with a bare-`detail` body
+		// (`{"detail": "Request blocked."}`) that carries no `error.*` envelope.
+		const detail =
+			typeof parsed?.detail === "string"
+				? parsed.detail
+				: typeof (parsed?.detail as { message?: unknown } | undefined)?.message === "string"
+					? (parsed.detail as { message: string }).message
+					: undefined;
+		message = errMessage || detail || friendlyMessage || message;
 	} catch {
 		// raw body not JSON
 	}
 
+	// A bare "Request blocked" body (detail-shaped JSON or plain text) is the
+	// pre-model gate's form of the deterministic `invalid_prompt` content
+	// rejection. It never carries a structured code, so classify it explicitly
+	// here; otherwise `isInvalidPromptError`, the codex non-retryable event set,
+	// and the session-level circuit breaker all miss it and the failure surfaces
+	// as an unexplained, unrepairable "Request Blocked".
+	if (!code && REQUEST_BLOCKED_MESSAGE_RE.test(message)) {
+		code = "invalid_prompt";
+		friendlyMessage = `${message.trim().replace(/\.+$/, "")} (code=invalid_prompt)`;
+	}
 	message = redactPersistedSecrets(message);
 	if (friendlyMessage) friendlyMessage = redactPersistedSecrets(friendlyMessage);
 

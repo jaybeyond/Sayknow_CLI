@@ -70,6 +70,8 @@ export interface CustomToolContext {
 	sessionManager: ReadonlySessionManager;
 	/** Model registry - use for API key resolution and model retrieval */
 	modelRegistry: ModelRegistry;
+	/** Credential-selection identity for provider authentication. */
+	credentialSessionId?: string;
 	/** Current model (may be undefined if no model is selected yet) */
 	model: Model | undefined;
 	/** Whether the agent is idle (not streaming) */
@@ -78,7 +80,7 @@ export interface CustomToolContext {
 	hasQueuedMessages(): boolean;
 	/** Abort the current agent operation (fire-and-forget, does not wait) */
 	abort(): void;
-	/** Settings instance for the current session. Prefer over the global singleton. */
+	/** Settings-compatible, read-only session facade. Mutating or secret accessors are blocked at runtime. */
 	settings?: Settings;
 }
 
