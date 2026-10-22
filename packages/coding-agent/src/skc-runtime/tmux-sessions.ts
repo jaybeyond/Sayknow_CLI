@@ -4,6 +4,8 @@ import * as fsSync from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { Process } from "@sayknow-cli/natives";
+import { startupProjectEnvSnapshot } from "@sayknow-cli/utils/env";
+import { canonicalEnvKey, type ProjectEnvSnapshot, projectEnvSnapshot } from "@sayknow-cli/utils/env-file";
 import { readLinuxProcStartTime, readLinuxProcStartTimeSync } from "./linux-proc";
 import { resolveSkcTmuxBinary } from "./psmux-detect";
 import { tmuxRuntimeSessionPath } from "./session-layout";
@@ -14,6 +16,7 @@ import {
 	SKC_TMUX_OWNER_SERVER_KEY_ENV,
 	SKC_TMUX_OWNER_STATE_DIR_ENV,
 } from "./session-state-sidecar";
+import { trustedCoordinatorEnv } from "./sidecar-bootstrap-env";
 import {
 	buildSkcTmuxExactOptionTarget,
 	buildSkcTmuxExactSessionTarget,
@@ -482,6 +485,81 @@ export function abandonedIdentityCensus(
 	};
 }
 
+const TMUX_LAUNCH_IDENTITY_ENV_NAMES = [
+	"SKC_SESSION_ID",
+	SKC_COORDINATOR_SESSION_ID_ENV,
+	SKC_COORDINATOR_SESSION_STATE_FILE_ENV,
+	"SKC_TMUX_SESSION",
+] as const;
+
+/**
+ * Drop project-dotenv copies of the tmux session name, coordinator id, and
+ * state-file path. A pin is kept only when every snapshot accepts it, so a
+ * declaration Bun loaded before `chdir` is refused even if the launch cwd no
+ * longer contains that file. Acceptance uses the shared helper, but the
+ * original string stays: callers trim at use, and a later check must see the
+ * same value that was accepted.
+ */
+export function trustedTmuxLaunchIdentityEnv(
+	env: NodeJS.ProcessEnv,
+	snapshots: readonly ProjectEnvSnapshot[],
+): NodeJS.ProcessEnv {
+	const denied: string[] = [];
+	for (const name of TMUX_LAUNCH_IDENTITY_ENV_NAMES) {
+		if (!env[name]) continue;
+		for (const snapshot of snapshots) {
+			if (trustedCoordinatorEnv(name, env, snapshot) === undefined) {
+				denied.push(name);
+				break;
+			}
+		}
+	}
+	if (denied.length === 0) return env;
+	const next: NodeJS.ProcessEnv = { ...env };
+	for (const name of denied) delete next[name];
+	return next;
+}
+
+export function tmuxLaunchIdentityEnv(env: NodeJS.ProcessEnv, cwd: string): NodeJS.ProcessEnv {
+	return trustedTmuxLaunchIdentityEnv(env, [projectEnvSnapshot(cwd), startupProjectEnvSnapshot()]);
+}
+
+/**
+ * Session id the launched child must see. A trusted pin is passed through.
+ * A rejected project pin is replaced by the same fallback the launch plan uses
+ * for the session root, which also stops Bun from reloading that dotenv value
+ * (`SKC_TMUX_LAUNCHED=1` skips the planner filter). An omitted id stays omitted.
+ */
+export function resolvedChildSkcSessionId(input: {
+	trusted: string | undefined;
+	inherited: string | undefined;
+	projectDeclared: boolean;
+	fallback: string;
+}): string | undefined {
+	const trusted = input.trusted?.trim();
+	if (trusted) return trusted;
+	if (!input.inherited?.trim() && !input.projectDeclared) return undefined;
+	const fallback = input.fallback.trim();
+	return fallback.length > 0 ? fallback : undefined;
+}
+
+export function childSkcSessionIdAssignment(
+	env: NodeJS.ProcessEnv,
+	identityEnv: NodeJS.ProcessEnv,
+	cwd: string,
+	fallbackSessionId: string,
+): Record<string, string> {
+	const snapshot = projectEnvSnapshot(cwd);
+	const key = canonicalEnvKey("SKC_SESSION_ID");
+	const value = resolvedChildSkcSessionId({
+		trusted: identityEnv.SKC_SESSION_ID,
+		inherited: env.SKC_SESSION_ID,
+		projectDeclared: snapshot.values[key] !== undefined || snapshot.dynamic.has(key),
+		fallback: fallbackSessionId,
+	});
+	return value === undefined ? {} : { SKC_SESSION_ID: value };
+}
+
 /**
  * A lost reservation means another process already recovered this identity.
  * The caller must perform no further tmux mutation.
@@ -496,12 +574,14 @@ export function createSkcTmuxSession(
 ): SkcTmuxSessionStatus {
 	const platform = options.platform ?? process.platform;
 	const tmuxCommand = resolveSkcTmuxCommand(env, platform);
-	const sessionName = buildSkcTmuxSessionName(env);
 	const cwd = options.cwd ?? process.cwd();
-	const sessionId = env[SKC_COORDINATOR_SESSION_ID_ENV]?.trim() || sessionName;
+	const identityEnv = tmuxLaunchIdentityEnv(env, cwd);
+	const sessionName = buildSkcTmuxSessionName(identityEnv);
+	const sessionId = identityEnv[SKC_COORDINATOR_SESSION_ID_ENV]?.trim() || sessionName;
+	const filteredSkcSessionId = identityEnv.SKC_SESSION_ID?.trim() || sessionId;
 	const stateFile =
-		env[SKC_COORDINATOR_SESSION_STATE_FILE_ENV]?.trim() ||
-		tmuxRuntimeSessionPath(cwd, env.SKC_SESSION_ID?.trim() || sessionId, buildSkcTmuxSessionSlug(sessionName));
+		identityEnv[SKC_COORDINATOR_SESSION_STATE_FILE_ENV]?.trim() ||
+		tmuxRuntimeSessionPath(cwd, filteredSkcSessionId, buildSkcTmuxSessionSlug(sessionName));
 	const stateDir = (platform === "win32" ? path.win32 : path).dirname(stateFile);
 	const generation = crypto.randomUUID();
 	const childEnvironment: Record<string, string> = {
@@ -511,6 +591,7 @@ export function createSkcTmuxSession(
 		[SKC_TMUX_OWNER_SERVER_KEY_ENV]: tmuxCommand,
 		[SKC_COORDINATOR_SESSION_ID_ENV]: sessionId,
 		[SKC_COORDINATOR_SESSION_STATE_FILE_ENV]: stateFile,
+		...childSkcSessionIdAssignment(env, identityEnv, cwd, filteredSkcSessionId),
 	};
 	const shellQuote = (value: string): string => `'${value.replace(/'/g, `'\\''`)}'`;
 	const childArgs = options.childArgs ?? [];

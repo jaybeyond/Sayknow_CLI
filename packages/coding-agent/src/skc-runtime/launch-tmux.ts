@@ -26,7 +26,13 @@ import {
 	releaseIdentityCreate,
 	reserveIdentityCreate,
 } from "./tmux-owner-isolation";
-import { findSkcTmuxSessionByName, findSkcTmuxSessionByScope, type SkcTmuxSessionStatus } from "./tmux-sessions";
+import {
+	childSkcSessionIdAssignment,
+	findSkcTmuxSessionByName,
+	findSkcTmuxSessionByScope,
+	type SkcTmuxSessionStatus,
+	tmuxLaunchIdentityEnv,
+} from "./tmux-sessions";
 
 export {
 	buildSkcTmuxExactSessionTarget,
@@ -241,6 +247,8 @@ function buildWindowsPowerShellInnerCommand(context: CommandResolutionContext, r
 
 export function applySkcTmuxProfile(context: SkcTmuxProfileContext): SkcTmuxProfileResult {
 	const env = context.env ?? process.env;
+	const cwd = context.cwd ?? process.cwd();
+	const identityEnv = tmuxLaunchIdentityEnv(env, cwd);
 	const branchSlug = context.branch ? buildSkcTmuxSessionSlug(context.branch) : (context.branchSlug ?? null);
 	// The psmux UX filter (mouse / set-clipboard / mode-style /
 	// set-window-option) now lives in buildSkcTmuxProfileCommands so every
@@ -256,15 +264,14 @@ export function applySkcTmuxProfile(context: SkcTmuxProfileContext): SkcTmuxProf
 			branch: context.branch ?? null,
 			branchSlug,
 			project: context.project ?? null,
-			sessionId: context.sessionId ?? env[SKC_COORDINATOR_SESSION_ID_ENV] ?? null,
-			sessionStateFile: context.sessionStateFile ?? env[SKC_COORDINATOR_SESSION_STATE_FILE_ENV] ?? null,
+			sessionId: context.sessionId ?? identityEnv[SKC_COORDINATOR_SESSION_ID_ENV] ?? null,
+			sessionStateFile: context.sessionStateFile ?? identityEnv[SKC_COORDINATOR_SESSION_STATE_FILE_ENV] ?? null,
 			version: context.version ?? null,
 		},
 		{ tmuxCommand: context.tmuxCommand },
 	);
 	if (commands.length === 0) return { skipped: true, commands: [], failures: [] };
 	const spawnSync = context.spawnSync ?? defaultSpawnSync;
-	const cwd = context.cwd ?? process.cwd();
 	const options: TmuxSpawnOptions = { cwd, env, stdin: "inherit", stdout: "inherit", stderr: "inherit" };
 	const failures: SkcTmuxProfileResult["failures"] = [];
 	for (const command of commands) {
@@ -540,33 +547,35 @@ export function buildDefaultTmuxLaunchPlan(context: TmuxLaunchContext): TmuxLaun
 	if (policy === "tmux" && !isInteractiveRootLaunch(context.parsed, tty)) return undefined;
 
 	const cwd = context.cwd ?? process.cwd();
+	const identityEnv = tmuxLaunchIdentityEnv(env, cwd);
 	const branch = context.worktreeBranch ?? context.currentBranch ?? readCurrentBranch(cwd);
 	const project = context.project ?? cwd;
-	const sessionName = buildSkcTmuxSessionName(env, { branch });
+	const sessionName = buildSkcTmuxSessionName(identityEnv, { branch });
 	// Pick the most appropriate tmux binary for this platform. On native Windows
 	// the resolver walks psmux / pmux / tmux and uses the first one present on
 	// PATH, so the default `skc --tmux` flow lands on a real multiplexer even
 	// without an explicit SKC_TMUX_COMMAND override.
 	const resolvedBinary = resolveSkcTmuxBinary({ platform, env });
 	const tmuxCommand = resolvedBinary.command;
-	const sessionId = env[SKC_COORDINATOR_SESSION_ID_ENV]?.trim() || sessionName;
+	const sessionId = identityEnv[SKC_COORDINATOR_SESSION_ID_ENV]?.trim() || sessionName;
 	// The session ROOT is keyed by the active SKC session (SKC_SESSION_ID), NOT the
 	// coordinator/tmux identity. Fall back to the coordinator id only for standalone
-	// tmux launches with no SKC session context.
-	const skcSessionId = env.SKC_SESSION_ID?.trim() || sessionId;
+	// tmux launches with no SKC session context. Project dotenv pins are already
+	// removed from identityEnv.
+	const skcSessionId = identityEnv.SKC_SESSION_ID?.trim() || sessionId;
 	const sessionStateFile =
-		env[SKC_COORDINATOR_SESSION_STATE_FILE_ENV]?.trim() ||
+		identityEnv[SKC_COORDINATOR_SESSION_STATE_FILE_ENV]?.trim() ||
 		tmuxRuntimeSessionPath(cwd, skcSessionId, buildSkcTmuxSessionSlug(sessionName));
 	const tmuxAvailable = context.tmuxAvailable ?? Bun.which(tmuxCommand) !== null;
 	if (!tmuxAvailable) {
 		(context.diagnosticWriter ?? safeStderrWrite)(formatTmuxUnavailableDiagnostic(platform, tmuxCommand));
 		return undefined;
 	}
-	const existingSessionName = allowsExistingTmuxAttach(context.parsed, env)
+	const existingSessionName = allowsExistingTmuxAttach(context.parsed, identityEnv)
 		? "existingBranchSessionName" in context
 			? (context.existingBranchSessionName ?? undefined)
 			: findExistingSessionForLaunch({
-					env,
+					env: identityEnv,
 					project,
 					branch,
 				})
@@ -577,6 +586,7 @@ export function buildDefaultTmuxLaunchPlan(context: TmuxLaunchContext): TmuxLaun
 			argv: context.argv ?? process.argv,
 			execPath: context.execPath ?? process.execPath,
 			extraEnv: {
+				...childSkcSessionIdAssignment(env, identityEnv, cwd, skcSessionId),
 				[SKC_COORDINATOR_SESSION_ID_ENV]: sessionId,
 				[SKC_COORDINATOR_SESSION_STATE_FILE_ENV]: sessionStateFile,
 			},
