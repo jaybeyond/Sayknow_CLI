@@ -979,14 +979,36 @@ function hasExactKeys(value: Record<string, unknown>, expectedKeys: string[], al
 function redactSecrets(input: string): string {
 	let out = input;
 	const patterns = [
+		// A PEM block is redacted whole and therefore runs first; the narrower rules
+		// would otherwise consume its base64 body and leave a truncated key behind.
+		/-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY-----/g,
 		/(?:sk|pk|rk|tok|key|secret|token|password)[-_A-Za-z0-9]{12,}/g,
-		/[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}/g,
-		/(?:AKIA|ASIA)[A-Z0-9]{16}/g,
+		// The leading boundary is anchored. Without it the first segment re-tries
+		// every offset of a long token-character run before failing to find `.`,
+		// which is quadratic: 200 KB of ordinary prose cost ~10.6s.
+		/(?<![A-Za-z0-9_-])[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}/g,
+		// ABIA (bearer) and ACCA (context) complete the AWS identifier prefixes the
+		// session-import and crash scrubbers already list.
+		/(?:AKIA|ASIA|ABIA|ACCA)[A-Z0-9]{16}/g,
 		// GitHub tokens carry no keyword the first pattern recognizes, so without
 		// this they reached MEMORY.md and memory_summary.md verbatim — and the
 		// summary is injected into every later session. Same shapes the
 		// contribution-prep scrubber already covers.
 		/\b(?:gh[opsur]_[A-Za-z0-9_]{12,}|github_pat_[A-Za-z0-9_]{12,})\b/g,
+		// Google API keys are a fixed 39-character shape carrying no keyword.
+		/\bAIza[0-9A-Za-z_-]{35}\b/g,
+		/\bxox[baprs]-[A-Za-z0-9-]{10,}\b/g,
+		// The shapes `crash/upstream/envelope.ts` classifies as credential-like.
+		// Stripe and Hugging Face separate with `_`, so the keyword rule above,
+		// which requires `sk`/`pk`/`rk` followed by `[-_A-Za-z0-9]`, still misses
+		// `hf_` and `npm_` entirely.
+		/\bnpm_[A-Za-z0-9]{20,}\b/g,
+		/\bglpat-[A-Za-z0-9_-]{20,}\b/g,
+		/\b(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{16,}\b/g,
+		/\bhf_[A-Za-z0-9]{20,}\b/g,
+		// Basic-auth credentials in a URL. The scheme repetition is bounded for the
+		// same reason the boundary above is anchored.
+		/(?<![A-Za-z0-9+.-])[a-z][a-z0-9+.-]{0,15}:\/\/[^/\s:@]{1,256}:[^/\s@]{1,256}@/gi,
 	];
 	for (const pattern of patterns) {
 		out = out.replace(pattern, "[REDACTED]");
