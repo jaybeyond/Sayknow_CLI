@@ -24,6 +24,30 @@ There is no MCP config discovery or merge, reload while the session runs, subage
 | Editor/ACP client owns MCP servers | ACP via `skc --mode acp` or `skc acp` | ACP remains a stdio editor protocol. |
 | Codex / Claude Code delegation plugin | [Canonical sayknow-cli plugin](./hermes-mcp-bridge.md) | Installs Coordinator MCP plus SKC delegation commands. |
 
+## Example: free web search with Parallel
+
+[Parallel Search MCP](https://docs.parallel.ai/integrations/mcp/search-mcp) provides web search and page fetching over Streamable HTTP without an account or API key. Anonymous searches use Fast mode and have lower rate limits intended for exploration and light use.
+
+Search objectives, queries, and fetch URLs are sent to Parallel when these tools are called; avoid including sensitive information.
+
+From the project where you want the tools, register the server:
+
+```bash
+skc mcp add parallel-search --project \
+  --type http --url https://search.parallel.ai/mcp \
+  --header 'User-Agent=sayknow-cli/parallel-search-mcp' \
+  --timeout 30000
+skc mcp list --project
+```
+
+The registration is stored in `./.skc/mcp.json`. `list` confirms the stored definition and autoload eligibility; it does not test the remote connection. Start a new `skc` session in that project to load the server. The two tools are exposed as `mcp__parallel_search_web_search` and `mcp__parallel_search_web_fetch`. Use search for current information and fetch for a specific page that needs closer reading. Reuse one `session_id` across related calls in a conversation when supplying that optional argument.
+
+This adds MCP tools alongside the built-in `web_search` tool; it does not select or configure the built-in Parallel API provider. Existing registrations are preserved, and an existing `parallel-search` entry is not overwritten unless you explicitly pass `--force`. Keep the positive timeout so remote discovery can complete in the background after the bounded startup wait described above. To remove the project registration:
+
+```bash
+skc mcp remove parallel-search --project
+```
+
 ## Boundary
 
 Standalone SKC does not inherit arbitrary MCP server configurations from Claude Code, Codex, OpenCode, or other tools. MCP servers often carry credentials, filesystem reach, browser state, approval semantics, and lifecycle that belong to the configuring host.
