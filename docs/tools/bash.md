@@ -81,6 +81,7 @@ Stdout and stderr are merged before the model sees them. Non-zero exit codes are
 4. Auto-backgrounded non-PTY job
    - Requires `bash.autoBackground.enabled`, no PTY, and an async job manager.
    - Starts like a foreground managed job, then backgrounds it when it outlives the wait window.
+   - Large completion results use secured session artifact storage. A storage refusal still delivers the bounded completion preview with an explicit unavailable notice, not a fabricated artifact link or a dropped completion. Saved notices identify completion output rather than full command stdout; capped artifacts report omitted UTF-8 bytes. Existing cancelled/suppressed delivery rules are unchanged.
 5. Intercepted command
    - No subprocess created.
    - Returns a `ToolError` pointing the model at `read`, `search`, `find`, `edit`, or `write`.

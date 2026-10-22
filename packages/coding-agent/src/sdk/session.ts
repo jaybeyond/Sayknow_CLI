@@ -34,6 +34,7 @@ import {
 	resolveAppendOnlyMode,
 } from "../append-only-mode";
 import { type AsyncJob, AsyncJobManager, isBackgroundJobSupportEnabled, jobElapsedMs } from "../async";
+import { formatAsyncResultForFollowUp } from "../async/result-formatting";
 import { loadCapability } from "../capability";
 import { type Rule, ruleCapability, setActiveRules } from "../capability/rule";
 import { kNoAuth, ModelRegistry } from "../config/model-registry";
@@ -1391,28 +1392,6 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 
 		const backgroundJobsEnabled = isBackgroundJobSupportEnabled(settings);
 		const asyncMaxJobs = Math.min(100, Math.max(1, settings.get("async.maxJobs") ?? 100));
-		const ASYNC_INLINE_RESULT_MAX_CHARS = 12_000;
-		const ASYNC_PREVIEW_MAX_CHARS = 4_000;
-		const formatAsyncResultForFollowUp = async (result: string): Promise<string> => {
-			if (result.length <= ASYNC_INLINE_RESULT_MAX_CHARS) {
-				return result;
-			}
-
-			const preview = `${result.slice(0, ASYNC_PREVIEW_MAX_CHARS)}\n\n[Output truncated. Showing first ${ASYNC_PREVIEW_MAX_CHARS.toLocaleString()} characters.]`;
-			try {
-				const { path: artifactPath, id: artifactId } = await sessionManager.allocateArtifactPath("async");
-				if (artifactPath && artifactId) {
-					await Bun.write(artifactPath, result);
-					return `${preview}\nFull output: artifact://${artifactId}`;
-				}
-			} catch (error) {
-				logger.warn("Failed to persist async follow-up artifact", {
-					error: error instanceof Error ? error.message : String(error),
-				});
-			}
-
-			return preview;
-		};
 		// Only top-level sessions own an AsyncJobManager. Subagents reach the
 		// parent's manager via `AsyncJobManager.instance()` (set below), so creating
 		// a second instance here just to leave it orphaned wastes a constructor and
@@ -1423,7 +1402,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 						maxRunningJobs: asyncMaxJobs,
 						onJobComplete: async (jobId, result, job) => {
 							if (!session || asyncJobManager!.isDeliverySuppressed(jobId)) return;
-							const formattedResult = await formatAsyncResultForFollowUp(result);
+							const formattedResult = await formatAsyncResultForFollowUp(sessionManager, result);
 							if (asyncJobManager!.isDeliverySuppressed(jobId)) return;
 
 							const durationMs = job ? jobElapsedMs(job) : undefined;
