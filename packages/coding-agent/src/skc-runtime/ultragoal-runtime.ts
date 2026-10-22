@@ -34,6 +34,7 @@ import {
 import {
 	assertUltragoalAdoptionPublished,
 	assertUltragoalGoalNotFenced,
+	readUltragoalSuccessionFence,
 	runUltragoalSuccessionCommand,
 } from "./ultragoal-succession";
 
@@ -512,22 +513,27 @@ export async function resolveUltragoalNudgeBudget(cwd: string): Promise<{ budget
  */
 export function selectUltragoalNudgeTarget(
 	plan: UltragoalPlan,
-	options: { currentGoalObjective?: string; retryFailed?: boolean } = {},
+	options: { currentGoalObjective?: string; retryFailed?: boolean; excludedGoalIds?: readonly string[] } = {},
 ): UltragoalNudgeTarget | null {
 	const objective = options.currentGoalObjective?.trim();
+	const isExcluded = (goalId: string): boolean => options.excludedGoalIds?.includes(goalId) ?? false;
 	if (objective) {
 		const matched = plan.goals.find(
-			goal => goal.objective.trim() === objective && SCHEDULABLE_STATUSES.has(goal.status),
+			goal => goal.objective.trim() === objective && SCHEDULABLE_STATUSES.has(goal.status) && !isExcluded(goal.id),
 		);
 		if (matched) return { goalId: matched.id, targetKind: "story" };
 	}
-	const next = chooseNextGoal(plan, options.retryFailed === true);
+	const schedulableGoals = options.excludedGoalIds?.length
+		? plan.goals.filter(goal => !isExcluded(goal.id))
+		: plan.goals;
+	const next = selectNextSchedulableGoal(schedulableGoals, options.retryFailed === true);
 	if (next) return { goalId: next.id, targetKind: "story" };
 	const completion = getUltragoalRunCompletionState(plan, { retryFailed: options.retryFailed });
 	if (completion.needsFinalAggregateReceipt) {
 		const required = requiredUltragoalGoals(plan);
 		const finalGoal = required.at(-1);
-		if (finalGoal) return { goalId: finalGoal.id, targetKind: "final_aggregate_receipt" };
+		if (finalGoal && !isExcluded(finalGoal.id))
+			return { goalId: finalGoal.id, targetKind: "final_aggregate_receipt" };
 	}
 	return null;
 }
@@ -1448,7 +1454,11 @@ export async function getUltragoalStatus(cwd: string, sessionId?: string | null)
 	else if (counts.active > 0) status = "active";
 	else if (counts.failed > 0) status = "failed";
 	else if (counts.blocked > 0 || counts.review_blocked > 0) status = "blocked";
-	const nudgeTarget = selectUltragoalNudgeTarget(plan, { currentGoalObjective: currentGoal?.objective });
+	const fence = await readUltragoalSuccessionFence(cwd, resolvedSessionId);
+	const nudgeTarget = selectUltragoalNudgeTarget(plan, {
+		currentGoalObjective: currentGoal?.objective,
+		excludedGoalIds: fence?.selectedGoalIds,
+	});
 	let nudgeFields: Partial<UltragoalStatusSummary> = {};
 	if (nudgeTarget) {
 		const { budget } = await resolveUltragoalNudgeBudget(cwd);
@@ -1619,12 +1629,19 @@ export async function createUltragoalPlan(input: {
 	return plan;
 }
 
-function chooseNextGoal(plan: UltragoalPlan, retryFailed: boolean): UltragoalGoal | undefined {
+export function selectNextSchedulableGoal<T extends { status: UltragoalGoalStatus }>(
+	goals: readonly T[],
+	retryFailed: boolean,
+): T | undefined {
 	return (
-		plan.goals.find(goal => goal.status === "active") ??
-		plan.goals.find(goal => goal.status === "pending") ??
-		(retryFailed ? plan.goals.find(goal => goal.status === "failed") : undefined)
+		goals.find(goal => goal.status === "active") ??
+		goals.find(goal => goal.status === "pending") ??
+		(retryFailed ? goals.find(goal => goal.status === "failed") : undefined)
 	);
+}
+
+function chooseNextGoal(plan: UltragoalPlan, retryFailed: boolean): UltragoalGoal | undefined {
+	return selectNextSchedulableGoal(plan.goals, retryFailed);
 }
 export interface UltragoalRunCompletionState {
 	requiredGoals: UltragoalGoal[];

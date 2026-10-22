@@ -8,10 +8,12 @@ import * as stateWriter from "@sayknow-cli/coding-agent/skc-runtime/state-writer
 import {
 	checkpointUltragoalGoal,
 	createUltragoalPlan,
+	getUltragoalStatus,
 	readUltragoalLedger,
 	readUltragoalPlan,
 	recordUltragoalReviewBlockers,
 	runNativeUltragoalCommand,
+	selectUltragoalNudgeTarget,
 	startNextUltragoalGoal,
 } from "@sayknow-cli/coding-agent/skc-runtime/ultragoal-runtime";
 import {
@@ -221,6 +223,36 @@ describe("ultragoal succession — source ownership fence is honored by admissio
 
 		const started = await startNextUltragoalGoal({ cwd: source, sessionId: SOURCE_SESSION });
 		expect(started.goal?.id).toBe("G001");
+	});
+
+	// Upstream 5d89ac82e1 (#6807): a goal handed off to a successor is not this run's
+	// resolvable work, so neither the nudge guard nor status may target it.
+	it("never nudges toward a goal handed off to a successor", async () => {
+		const source = await tempRepo("source");
+		await seedSourcePlan(source);
+		await plantFence(source, ["G001"]);
+
+		const status = await getUltragoalStatus(source, SOURCE_SESSION);
+		expect(status.nudgeGoalId).toBe("G002");
+
+		await plantFence(source, ["G001", "G002", "G003"]);
+		const allFenced = await getUltragoalStatus(source, SOURCE_SESSION);
+		expect(allFenced.nudgeGoalId).toBeUndefined();
+	});
+
+	it("skips excluded goals in the objective match, schedulable pick and aggregate receipt", async () => {
+		const source = await tempRepo("source");
+		await seedSourcePlan(source);
+		const plan = await readUltragoalPlan(source, SOURCE_SESSION);
+		if (!plan) throw new Error("expected seeded plan");
+		const first = plan.goals[0];
+		if (!first) throw new Error("expected first goal");
+
+		expect(selectUltragoalNudgeTarget(plan, { currentGoalObjective: first.objective })?.goalId).toBe("G001");
+		expect(
+			selectUltragoalNudgeTarget(plan, { currentGoalObjective: first.objective, excludedGoalIds: ["G001"] })?.goalId,
+		).toBe("G002");
+		expect(selectUltragoalNudgeTarget(plan, { excludedGoalIds: ["G001", "G002", "G003"] })).toBeNull();
 	});
 });
 
