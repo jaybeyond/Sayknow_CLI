@@ -188,6 +188,8 @@ const PATH_SCOPED_ARRAY_SETTINGS = new Set<SettingPath>(["enabledModels", "disab
 const GLOBAL_ONLY_SETTINGS = new Set<SettingPath>([
 	// Destination of the operator Hindsight server. A project file must not redirect it.
 	"hindsight.apiUrl",
+	// Destination of generic remote compaction. A project file must not redirect the transcript POST.
+	"compaction.remoteEndpoint",
 	// Operator consent for repository skills. A project file must not flip it.
 	"skills.enablePiProject",
 ]);
@@ -2002,10 +2004,17 @@ export class Settings implements NotificationSettingsReader {
 		}
 	}
 	#rebuildMerged(): void {
+		// Global-only destinations come from the operator's user layer; neither a
+		// project file nor a runtime override may redirect them.
 		const project = structuredClone(this.#project);
-		for (const settingPath of GLOBAL_ONLY_SETTINGS) deleteByPath(project, settingPath.split("."));
+		const overrides = structuredClone(this.#overrides);
+		for (const settingPath of GLOBAL_ONLY_SETTINGS) {
+			const segments = settingPath.split(".");
+			deleteByPath(project, segments);
+			deleteByPath(overrides, segments);
+		}
 		this.#merged = this.#deepMerge(this.#deepMerge({}, this.#global), project);
-		this.#merged = this.#deepMerge(this.#merged, this.#overrides);
+		this.#merged = this.#deepMerge(this.#merged, overrides);
 	}
 
 	#fireAllHooks(): void {
