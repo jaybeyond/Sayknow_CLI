@@ -6,6 +6,7 @@
  */
 
 import { getProjectDir, readJsonl, Snowflake } from "@sayknow-cli/utils";
+import { projectSafeSpawnEnv } from "@sayknow-cli/utils/shell-config";
 import { type OwnedProcess, spawnOwnedProcess } from "../../runtime/process-lifecycle";
 import type {
 	JsonRpcError,
@@ -107,7 +108,7 @@ export class StdioTransport implements MCPTransport {
 		const env = this.config.noInheritEnv
 			? buildMinimalStdioEnv(this.config.env)
 			: {
-					...Bun.env,
+					...projectSafeSpawnEnv(),
 					...this.config.env,
 				};
 		const cwd = this.config.cwd ?? getProjectDir();
