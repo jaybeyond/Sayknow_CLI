@@ -274,7 +274,7 @@ export function resolveAzureConfigForTest(
 
 function createClient(model: Model<"azure-openai-responses">, apiKey: string, options?: AzureOpenAIResponsesOptions) {
 	if (!apiKey) {
-		const envKey = $env.AZURE_OPENAI_API_KEY;
+		const envKey = $credentialEnv("AZURE_OPENAI_API_KEY");
 		if (!envKey) {
 			throw new Error(
 				"Azure OpenAI API key is required. Set AZURE_OPENAI_API_KEY environment variable or pass it as an argument.",

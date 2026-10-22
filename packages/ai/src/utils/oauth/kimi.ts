@@ -7,7 +7,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { scheduler } from "node:timers/promises";
-import { $env, getAgentDir, isEnoent } from "@sayknow-cli/utils";
+import { $pickCredentialEnv, getAgentDir, isEnoent } from "@sayknow-cli/utils";
 import packageJson from "../../../package.json" with { type: "json" };
 import type { OAuthController, OAuthCredentials, OAuthRefreshOptions } from "./types";
 
@@ -39,7 +39,7 @@ interface TokenResponse {
 }
 
 function resolveOAuthHost(): string {
-	return $env.KIMI_CODE_OAUTH_HOST || $env.KIMI_OAUTH_HOST || DEFAULT_OAUTH_HOST;
+	return $pickCredentialEnv("KIMI_CODE_OAUTH_HOST", "KIMI_OAUTH_HOST") || DEFAULT_OAUTH_HOST;
 }
 
 function formatDeviceModel(system: string, release: string, arch: string): string {

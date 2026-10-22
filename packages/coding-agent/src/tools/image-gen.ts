@@ -12,7 +12,7 @@ import {
 	URL_PATHS,
 } from "@sayknow-cli/ai/providers/openai-codex/constants";
 import {
-	$env,
+	$credentialEnv,
 	isEnoent,
 	parseImageMetadata,
 	prompt,
@@ -827,7 +827,7 @@ async function findImageApiKey(
 		if (config.provider === "gemini") {
 			const geminiKey = getEnvApiKey("google");
 			if (geminiKey) return { provider: "gemini", apiKey: geminiKey };
-			const googleKey = $env.GOOGLE_API_KEY;
+			const googleKey = $credentialEnv("GOOGLE_API_KEY");
 			return googleKey ? { provider: "gemini", apiKey: googleKey } : null;
 		}
 		if (config.provider === "openrouter") {
@@ -850,7 +850,7 @@ async function findImageApiKey(
 	} else if (preferredImageProvider === "gemini") {
 		const geminiKey = getEnvApiKey("google");
 		if (geminiKey) return { provider: "gemini", apiKey: geminiKey };
-		const googleKey = $env.GOOGLE_API_KEY;
+		const googleKey = $credentialEnv("GOOGLE_API_KEY");
 		return googleKey ? { provider: "gemini", apiKey: googleKey } : null;
 	} else if (preferredImageProvider === "openrouter") {
 		const openRouterKey = getEnvApiKey("openrouter");
@@ -874,7 +874,7 @@ async function findImageApiKey(
 	const geminiKey = getEnvApiKey("google");
 	if (geminiKey) return { provider: "gemini", apiKey: geminiKey };
 
-	const googleKey = $env.GOOGLE_API_KEY;
+	const googleKey = $credentialEnv("GOOGLE_API_KEY");
 	if (googleKey) return { provider: "gemini", apiKey: googleKey };
 
 	const alibaba = await findAlibabaImageCredentials(modelRegistry, sessionId);
@@ -1106,7 +1106,7 @@ function getOpenAIBaseUrl(model: Model, authCredentialType?: "api_key" | "oauth"
 		return (model.baseUrl || CODEX_BASE_URL).replace(/\/+$/, "");
 	}
 	if (authCredentialType === "oauth") return DEFAULT_OPENAI_BASE_URL;
-	const envBaseUrl = $env.OPENAI_BASE_URL?.trim();
+	const envBaseUrl = $credentialEnv("OPENAI_BASE_URL")?.trim();
 	const configuredBaseUrl = model.baseUrl?.trim();
 	if (envBaseUrl && (!configuredBaseUrl || configuredBaseUrl.toLowerCase().includes("api.openai.com"))) {
 		return envBaseUrl.replace(/\/+$/, "");
