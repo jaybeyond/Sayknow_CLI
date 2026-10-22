@@ -5,7 +5,7 @@ import * as path from "node:path";
 
 import type { AgentMessage } from "@sayknow-cli/agent-core";
 import { type Api, type AssistantMessage, completeSimple, type Model, type Tool } from "@sayknow-cli/ai";
-import { logger, prompt } from "@sayknow-cli/utils";
+import { logger, prompt, redactCrashSecrets } from "@sayknow-cli/utils";
 import type { ModelRegistry } from "../config/model-registry";
 import { resolveRoleSelection } from "../config/model-resolver";
 import type { Settings } from "../config/settings";
@@ -158,7 +158,12 @@ ${truncatedMessage}
 		userMessage,
 		maxTokens,
 	};
-	logger.debug("title-generator: request", request);
+	logger.debug("title-generator: request", {
+		model: request.model,
+		systemPrompt: request.systemPrompt,
+		userMessage: redactCrashSecrets(request.userMessage),
+		maxTokens: request.maxTokens,
+	});
 
 	try {
 		const response = await completeSimple(
