@@ -174,6 +174,30 @@ export interface MCPLoadResult {
 	exaApiKeys: string[];
 }
 
+/** Drop project stdio servers unless the caller approved project stdio. */
+export function omitUnapprovedProjectStdio(
+	configs: Record<string, MCPServerConfig>,
+	sources: Record<string, SourceMeta>,
+	allowProjectStdio: boolean,
+	toolsOnly = false,
+): void {
+	if (allowProjectStdio) return;
+	for (const name of Object.keys(configs)) {
+		const config = configs[name];
+		if (!config || config.type === "http" || config.type === "sse") continue;
+		if (!isUntrustedProjectMcpSource(sources[name], toolsOnly)) continue;
+		delete configs[name];
+		delete sources[name];
+		if (!toolsOnly) {
+			logger.warn("Skipping MCP autoload registration", {
+				path: `mcp:${name}`,
+				serverName: name,
+				reason: "project stdio server is not user-approved",
+			});
+		}
+	}
+}
+
 /** Options for discovering and connecting to MCP servers */
 export interface MCPDiscoverOptions {
 	/** Whether to load project-level config (default: true) */
@@ -193,6 +217,12 @@ export interface MCPDiscoverOptions {
 export interface MCPManagerOptions {
 	/** Restrict this instance to tools from an explicit MCP config. */
 	toolsOnly?: boolean;
+	/**
+	 * Spawn stdio servers loaded from a project MCP file during discovery.
+	 * Default false. User-scope servers and an explicit `--mcp-config` file are
+	 * unaffected, and so is an explicit connectServers() call.
+	 */
+	allowUntrustedProjectStdio?: boolean;
 	/**
 	 * Ceiling for the startup wait, in milliseconds. Only ACP lifecycle launches
 	 * set this, so a slow ACP MCP handshake gets the readiness budget while every
@@ -248,6 +278,7 @@ export class MCPManager {
 	/** Monotonic epoch incremented on disconnectAll to invalidate stale reconnections. */
 	#epoch = 0;
 	readonly #toolsOnly: boolean;
+	readonly #allowUntrustedProjectStdio: boolean;
 	#toolsOnlyConfigLoaded = false;
 	#connectionSetSealed = false;
 
@@ -292,6 +323,7 @@ export class MCPManager {
 		options: MCPManagerOptions = {},
 	) {
 		this.#toolsOnly = options.toolsOnly === true;
+		this.#allowUntrustedProjectStdio = options.allowUntrustedProjectStdio === true;
 		this.#maxStartupTimeoutMs = options.maxStartupTimeoutMs;
 	}
 
@@ -428,6 +460,7 @@ export class MCPManager {
 			autoloadOnly: options?.autoloadOnly,
 			configPath: options?.configPath,
 		});
+		omitUnapprovedProjectStdio(configs, sources, this.#allowUntrustedProjectStdio, this.#toolsOnly);
 		const result = await this.#connectServers(configs, sources, options?.onConnecting);
 		if (configurationWarning) result.errors.set("$config", "MCP configuration unavailable");
 		result.exaApiKeys = exaApiKeys;
