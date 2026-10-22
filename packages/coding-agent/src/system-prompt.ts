@@ -629,6 +629,17 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		path: escapePromptMetadata(rule.path),
 		content: sanitizeEmbeddedPromptContent(rule.content),
 	}));
+	// Both rulebook templates compile with noEscape. Encode the fields they interpolate
+	// so repository frontmatter cannot close <rules> or the name attribute.
+	const sanitizedRulebookRules = (rules ?? []).map(rule => ({
+		...rule,
+		name: escapePromptMetadata(rule.name),
+		description:
+			rule.description === undefined
+				? undefined
+				: escapePromptMetadata(rule.description, { preserveNewlines: true }),
+		globs: rule.globs?.map(glob => escapePromptMetadata(glob)),
+	}));
 	const data = {
 		systemPromptCustomization: effectiveSystemPromptCustomization,
 		customPrompt: resolvedCustomPrompt,
@@ -641,7 +652,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		contextFiles: sanitizedContextFiles,
 		agentsMdSearch: { files: agentsMdFiles.map(file => escapePromptMetadata(file)) },
 		workspaceTree,
-		rules: rules ?? [],
+		rules: sanitizedRulebookRules,
 		alwaysApplyRules: sanitizedAlwaysApplyRules,
 		date,
 		dateTime,
