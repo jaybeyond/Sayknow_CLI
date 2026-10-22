@@ -6,6 +6,7 @@ import { type AsyncJob, AsyncJobManager, jobElapsedMs, type SubagentRecord } fro
 import subagentDescription from "../prompts/tools/subagent.md" with { type: "text" };
 import type { AgentProgress, AgentSource, TaskToolDetails } from "../task/types";
 import { Ellipsis, truncateToWidth } from "../tui";
+import { wrapUntrustedContent } from "./fetch";
 import type { ToolSession } from "./index";
 import { replaceTabs } from "./render-utils";
 import { ToolError } from "./tool-errors";
@@ -603,13 +604,16 @@ export class SubagentTool implements AgentTool<typeof subagentSchema, SubagentTo
 			}
 			if (snapshot.description) lines.push(`Description: ${snapshot.description}`);
 			if (snapshot.outputRef) lines.push(`Output: ${snapshot.outputRef}`);
-			if (snapshot.assignment) lines.push("Assignment:", "```", snapshot.assignment, "```");
+			// A markdown fence is not a boundary: subagent text can contain ``` and
+			// close it, leaving the rest as raw tool-result text. Frame the data.
+			if (snapshot.assignment) lines.push(wrapUntrustedContent(`Assignment:\n${snapshot.assignment}`));
 			if (snapshot.steerMessage) {
-				lines.push(`Steer (${snapshot.steerState ?? "queued"}):`, "```", snapshot.steerMessage, "```");
+				lines.push(wrapUntrustedContent(`Steer (${snapshot.steerState ?? "queued"}):\n${snapshot.steerMessage}`));
 				lines.push(STEER_QUEUED_GUIDANCE);
 			}
 			if (snapshot.resultPreview) {
-				lines.push(snapshot.errorText ? "Error preview:" : "Result preview:", "```", snapshot.resultPreview, "```");
+				const previewLabel = snapshot.errorText ? "Error preview:" : "Result preview:";
+				lines.push(wrapUntrustedContent(`${previewLabel}\n${snapshot.resultPreview}`));
 				if (snapshot.truncated)
 					lines.push("Preview truncated; use the output ref or explicit ids with `verbosity=full` for more.");
 			}
