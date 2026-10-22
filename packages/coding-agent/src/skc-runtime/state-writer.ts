@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
-import type { Stats } from "node:fs";
+import type * as nodeFs from "node:fs";
+import { constants as fsConstants, type Stats } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { type FileLockOptions, withFileLock } from "../config/file-lock";
@@ -821,10 +822,113 @@ export async function updateJsonAtomic<T = unknown>(
 	);
 }
 
+async function assertAppendRegularFile(filePath: string): Promise<void> {
+	try {
+		const stat = await fs.lstat(filePath);
+		if (stat.isSymbolicLink() || !stat.isFile()) throw new Error("state append path is not a regular file");
+	} catch (error) {
+		if (!isErrno(error, "ENOENT")) throw error;
+	}
+}
+
+/**
+ * Append bytes owner-only (shared with `appendAuditEntry`): mode 0600, `O_NOFOLLOW`
+ * when the path already exists, and `O_EXCL` when it does not. An existing mode 0666
+ * file, and any other group or other permission bits, is tightened to 0600 before the write.
+ */
+async function tightenReadOnlyAppendMode(filePath: string): Promise<void> {
+	if (process.platform === "win32") return;
+	const noFollow = fsConstants.O_NOFOLLOW ?? 0;
+	const initialStat = await fs.lstat(filePath, { bigint: true });
+	if (initialStat.isSymbolicLink() || !initialStat.isFile())
+		throw new Error("state append path is not a regular file");
+	// A duplicate idempotent append must not require a writable file. Owner-only
+	// modes such as 0400 stay as they are; only group or other bits are tightened.
+	const handle = await fs.open(filePath, fsConstants.O_RDONLY | noFollow);
+	try {
+		const openedStat = await handle.stat({ bigint: true });
+		const pathStat = await fs.lstat(filePath, { bigint: true });
+		const sameObject = (left: nodeFs.BigIntStats, right: nodeFs.BigIntStats) =>
+			left.dev === right.dev && left.ino === right.ino && left.nlink === right.nlink;
+		if (
+			openedStat.isSymbolicLink() ||
+			!openedStat.isFile() ||
+			pathStat.isSymbolicLink() ||
+			!pathStat.isFile() ||
+			!sameObject(initialStat, openedStat) ||
+			!sameObject(openedStat, pathStat)
+		)
+			throw new Error("state append path identity changed before append");
+		if ((Number(openedStat.mode) & 0o077) === 0) return;
+		await handle.chmod(0o600);
+		const tightened = await handle.stat({ bigint: true });
+		if ((Number(tightened.mode) & 0o777) !== 0o600)
+			throw new Error("state append path could not be tightened to mode 0600");
+	} finally {
+		await handle.close();
+	}
+}
+
+async function appendOwnerOnlyText(filePath: string, text: string): Promise<void> {
+	await fs.mkdir(path.dirname(filePath), { recursive: true });
+	await assertAppendRegularFile(filePath);
+	const noFollow = process.platform === "win32" ? 0 : (fsConstants.O_NOFOLLOW ?? 0);
+	let handle: fs.FileHandle | undefined;
+	let initialStat: nodeFs.BigIntStats | undefined;
+	// O_EXCL matches appendAuditEntry for a missing path. Concurrent appends can
+	// create the same file together, so an EEXIST loser retries the existing-file
+	// open, which carries O_NOFOLLOW and will not follow a symlink.
+	for (let attempt = 0; attempt < 2; attempt++) {
+		initialStat = undefined;
+		try {
+			initialStat = await fs.lstat(filePath, { bigint: true });
+			if (initialStat.isSymbolicLink() || !initialStat.isFile())
+				throw new Error("state append path is not a regular file");
+		} catch (error) {
+			if (!isErrno(error, "ENOENT")) throw error;
+		}
+		const flags = initialStat
+			? fsConstants.O_WRONLY | fsConstants.O_APPEND | noFollow
+			: fsConstants.O_WRONLY | fsConstants.O_APPEND | fsConstants.O_CREAT | fsConstants.O_EXCL;
+		try {
+			handle = await fs.open(filePath, flags, 0o600);
+			break;
+		} catch (error) {
+			if (isErrno(error, "ELOOP")) throw new Error("state append path is not a regular file");
+			if (initialStat === undefined && isErrno(error, "EEXIST") && attempt === 0) continue;
+			throw error;
+		}
+	}
+	if (!handle) throw new Error("state append path identity changed before append");
+	try {
+		const openedStat = await handle.stat({ bigint: true });
+		const pathStat = await fs.lstat(filePath, { bigint: true });
+		const sameObject = (left: nodeFs.BigIntStats, right: nodeFs.BigIntStats) =>
+			left.dev === right.dev && left.ino === right.ino && left.nlink === right.nlink;
+		if (
+			openedStat.isSymbolicLink() ||
+			!openedStat.isFile() ||
+			pathStat.isSymbolicLink() ||
+			!pathStat.isFile() ||
+			(initialStat !== undefined && !sameObject(initialStat, openedStat)) ||
+			!sameObject(openedStat, pathStat)
+		)
+			throw new Error("state append path identity changed before append");
+		if (process.platform !== "win32" && (Number(openedStat.mode) & 0o077) !== 0) {
+			await handle.chmod(0o600);
+			const tightened = await handle.stat({ bigint: true });
+			if ((Number(tightened.mode) & 0o777) !== 0o600)
+				throw new Error("state append path could not be tightened to mode 0600");
+		}
+		await handle.writeFile(text, "utf-8");
+	} finally {
+		await handle?.close();
+	}
+}
+
 export async function appendJsonl(targetPath: string, entry: unknown, options?: StateWriterOptions): Promise<string> {
 	const filePath = resolveSkcTarget(targetPath, cwdForOptions(options));
-	await fs.mkdir(path.dirname(filePath), { recursive: true });
-	await fs.appendFile(filePath, `${JSON.stringify(entry)}\n`, "utf-8");
+	await appendOwnerOnlyText(filePath, `${JSON.stringify(entry)}\n`);
 	await maybeAudit(filePath, options);
 	return filePath;
 }
@@ -922,12 +1026,14 @@ export async function appendJsonlIdempotent(
 	return lockResolvedWorkflowTarget(
 		filePath,
 		async () => {
+			await assertAppendRegularFile(filePath);
 			const existing = await readJsonlEntries(filePath);
 			const duplicate = findJsonlDuplicate(existing, entry, options);
 			if (duplicate !== undefined) {
+				await tightenReadOnlyAppendMode(filePath);
 				return { path: filePath, appended: false, duplicate };
 			}
-			await fs.appendFile(filePath, `${JSON.stringify(entry)}\n`, "utf-8");
+			await appendOwnerOnlyText(filePath, `${JSON.stringify(entry)}\n`);
 			await maybeAudit(filePath, options);
 			return { path: filePath, appended: true };
 		},
@@ -937,8 +1043,7 @@ export async function appendJsonlIdempotent(
 
 export async function appendText(targetPath: string, text: string, options?: StateWriterOptions): Promise<string> {
 	const filePath = resolveSkcTarget(targetPath, cwdForOptions(options));
-	await fs.mkdir(path.dirname(filePath), { recursive: true });
-	await fs.appendFile(filePath, text, "utf-8");
+	await appendOwnerOnlyText(filePath, text);
 	await maybeAudit(filePath, options);
 	return filePath;
 }
@@ -1242,8 +1347,7 @@ export async function appendAuditEntry(
 	const entry = typeof sessionIdOrEntry === "string" ? maybeEntry : sessionIdOrEntry;
 	if (!entry) throw new Error("audit entry is required");
 	const filePath = resolveSkcTarget(layoutAuditPath(cwd, sessionId), cwd);
-	await fs.mkdir(path.dirname(filePath), { recursive: true });
-	await fs.appendFile(filePath, `${JSON.stringify(entry)}\n`, "utf-8");
+	await appendOwnerOnlyText(filePath, `${JSON.stringify(entry)}\n`);
 	return filePath;
 }
 
