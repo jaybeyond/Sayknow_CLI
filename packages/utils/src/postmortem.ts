@@ -10,6 +10,7 @@ import inspector from "node:inspector";
 import * as path from "node:path";
 import { isMainThread } from "node:worker_threads";
 import { BROKEN_PIPE_EXIT_CODE, createProcessStdoutEpipeClassifier } from "./broken-pipe";
+import { redactCrashSecrets } from "./crash-redaction";
 import { getCrashLogPath } from "./dirs";
 import * as logger from "./logger";
 import { safeStderrWrite } from "./safe-stderr";
@@ -216,61 +217,6 @@ export const CRASH_LOG_MAX_BYTES = 512 * 1024;
  */
 export const CRASH_RECORD_MAX_BYTES = 64 * 1024;
 const CRASH_RECORD_TRUNCATION_MARKER = "\n… [crash record truncated]\n\n";
-
-/**
- * Best-effort scrub of credential material from a crash record before it is
- * persisted indefinitely. Covers bearer/basic-style headers, key=value or
- * JSON key forms of common credential names, and well-known vendor token
- * shapes. Normal messages and stack frames are untouched; matches are
- * replaced in place so surrounding diagnostic context survives.
- */
-function redactCrashSecrets(text: string): string {
-	let redacted = text;
-	redacted = redacted.replace(/\b(?:Bearer|Basic|Token)\s+[A-Za-z0-9._~+/=-]{8,}/gi, "«redacted-auth»");
-	redacted = redacted.replace(/\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g, "«redacted-jwt»");
-	redacted = redacted.replace(/\bsk-[A-Za-z0-9_-]{8,}\b/g, "«redacted-api-key»");
-	// `gh[opsur]_` covers the classic PAT/OAuth/server/user/refresh prefixes;
-	// fine-grained PATs use an entirely different `github_pat_` prefix.
-	redacted = redacted.replace(/\bgh[opsur]_[A-Za-z0-9]{16,}\b/g, "«redacted-github-token»");
-	redacted = redacted.replace(/\bgithub_pat_[A-Za-z0-9_]{20,}\b/g, "«redacted-github-token»");
-	redacted = redacted.replace(/\bxox[baprs]-[A-Za-z0-9-]{8,}\b/g, "«redacted-slack-token»");
-	redacted = redacted.replace(/\bnpm_[A-Za-z0-9]{20,}\b/g, "«redacted-npm-token»");
-	redacted = redacted.replace(/\bglpat-[A-Za-z0-9_-]{20,}\b/g, "«redacted-gitlab-token»");
-	// Stripe separates with `_`, so the `sk-` rule above never matched one.
-	redacted = redacted.replace(/\b(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{16,}\b/g, "«redacted-api-key»");
-	redacted = redacted.replace(/\bhf_[A-Za-z0-9]{20,}\b/g, "«redacted-api-key»");
-	// A PEM block carries the key material itself, so it is redacted whole rather
-	// than line by line, before narrower rules can chew on the base64 body.
-	redacted = redacted.replace(
-		/-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY-----/g,
-		"«redacted-private-key»",
-	);
-	// Google API keys are a fixed 39-character shape with no label of their own.
-	redacted = redacted.replace(
-		/(?<![A-Za-z0-9_-])AIza[0-9A-Za-z_-]{35}(?![A-Za-z0-9_-])/g,
-		"«redacted-google-api-key»",
-	);
-	// Basic-auth credentials embedded in a URL. Scheme and host stay readable
-	// because they are the diagnostic value; only the userinfo is dropped. The
-	// scheme-character run is boundary anchored so a long alphabetic run cannot
-	// go quadratic, while leading digits and scheme punctuation stay in the
-	// capture so longer and boundary-adjacent URLs still redact.
-	redacted = redacted.replace(
-		/(?<![A-Za-z0-9+.-])([0-9+.-]*[a-z][a-z0-9+.-]*:\/\/)[^/\s:@]{1,256}:[^/\s@]{1,256}@/gi,
-		"$1«redacted-url-credential»@",
-	);
-	// AKIA is the long-term AWS access key id; ASIA the temporary/STS one, which
-	// is the shape that actually shows up in a crashed request. ABIA/ACCA
-	// complete the set. The id alone is not the credential: STS payloads carry
-	// `SecretAccessKey` and `SessionToken` alongside it, so the labeled-value
-	// rule below names both.
-	redacted = redacted.replace(/\b(?:AKIA|ASIA|ABIA|ACCA)[0-9A-Z]{16}\b/g, "«redacted-aws-key»");
-	redacted = redacted.replace(
-		/(?<![A-Za-z0-9_])(["']?(?:api[_-]?key|apikey|access[_-]?token|refresh[_-]?token|id[_-]?token|session[_-]?token|client[_-]?secret|secret[_-]?key|secret[_-]?access[_-]?key|password|passwd|authorization)["']?\s*[=:]\s*["']?)[^\s"',;}\]]{8,}/gi,
-		"$1«redacted»",
-	);
-	return redacted;
-}
 
 /**
  * Bound one record to CRASH_RECORD_MAX_BYTES without splitting a UTF-8

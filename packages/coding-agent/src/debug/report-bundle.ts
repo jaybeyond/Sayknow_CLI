@@ -6,7 +6,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { WorkProfile } from "@sayknow-cli/natives";
-import { APP_NAME, getLogPath, getLogsDir, getReportsDir, isEnoent } from "@sayknow-cli/utils";
+import { APP_NAME, getLogPath, getLogsDir, getReportsDir, isEnoent, redactCrashSecrets } from "@sayknow-cli/utils";
 import type { CpuProfile, HeapSnapshot } from "./profiler";
 import { sessionBelongsToParent } from "./report-bundle-parent";
 import { collectSystemInfo, sanitizeEnv } from "./system-info";
@@ -156,10 +156,28 @@ export async function createReportBundle(options: ReportBundleOptions): Promise<
 		}
 	}
 
+	// Scrub the transcript copies only. Settings, system info, and profiles are
+	// separate payloads and stay as collected. Sources on disk are not rewritten.
+	for (const archivePath of Object.keys(data)) {
+		const content = data[archivePath];
+		if (content === undefined || !reportEntryCarriesUserText(archivePath)) continue;
+		data[archivePath] = redactCrashSecrets(content);
+	}
+
 	// Write archive
 	await Bun.Archive.write(outputPath, data, { compress: "gzip" });
 
 	return { path: outputPath, files };
+}
+
+/** Session, log, artifact, and subagent copies are the transcript the user may attach. */
+function reportEntryCarriesUserText(archivePath: string): boolean {
+	return (
+		archivePath === "logs.txt" ||
+		archivePath === "session.jsonl" ||
+		archivePath.startsWith("artifacts/") ||
+		archivePath.startsWith("subagents/")
+	);
 }
 
 /** Add all files from a directory to the archive */
