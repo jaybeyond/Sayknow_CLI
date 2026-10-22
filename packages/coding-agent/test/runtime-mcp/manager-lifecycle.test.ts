@@ -10,6 +10,7 @@ import { createMCPManager, MCPManager } from "../../src/runtime-mcp/manager";
 import { MCPTool } from "../../src/runtime-mcp/tool-bridge";
 import type { JsonRpcMessage, MCPServerConfig, MCPServerConnection, MCPTransport } from "../../src/runtime-mcp/types";
 import { MCPExpectedFailure } from "../../src/runtime-mcp/types";
+import { wrapUntrustedContent } from "../../src/tools/fetch";
 
 async function mkdtempExact(prefix: string): Promise<string> {
 	return realpath(await mkdtemp(join(tmpdir(), prefix)));
@@ -1259,7 +1260,7 @@ setInterval(() => {}, 1000);
 			expect(result.connectedServers).toEqual(["exact"]);
 			expect(result.tools.map(tool => tool.name)).toEqual(["mcp__exact_tool"]);
 			const toolResult = await result.tools[0]!.execute("exact-call", {}, undefined, {} as never);
-			expect(toolResult.content).toEqual([{ type: "text", text: "exact-ok" }]);
+			expect(toolResult.content).toEqual([{ type: "text", text: wrapUntrustedContent("exact-ok") }]);
 			expect(toolCallCount).toBe(1);
 			expect(initializeCapabilities).toEqual({});
 			expect(requestMethods).toEqual(["initialize", "notifications/initialized", "tools/list", "tools/call"]);
