@@ -603,6 +603,9 @@ function resolveOpenAiReasoningEffort<TApi extends Api>(
 
 const castApi = <TApi extends Api>(api: OptionsForApi<TApi>): OptionsForApi<Api> => api as OptionsForApi<Api>;
 
+/** Default output cap when the caller does not set `maxTokens`. */
+const DEFAULT_REQUEST_MAX_TOKENS = 32000;
+
 function mapOptionsForApi<TApi extends Api>(
 	model: Model<TApi>,
 	options?: SimpleStreamOptions,
@@ -615,7 +618,7 @@ function mapOptionsForApi<TApi extends Api>(
 		minP: options?.minP,
 		presencePenalty: options?.presencePenalty,
 		repetitionPenalty: options?.repetitionPenalty,
-		maxTokens: options?.maxTokens || Math.min(model.maxTokens, 32000),
+		maxTokens: options?.maxTokens || Math.min(model.maxTokens, DEFAULT_REQUEST_MAX_TOKENS),
 		signal: options?.signal,
 		apiKey: apiKey || options?.apiKey,
 		cacheRetention: options?.cacheRetention ?? model.cacheRetention,
@@ -670,8 +673,28 @@ function mapOptionsForApi<TApi extends Api>(
 			// For older models: use budget-based thinking
 			if (model.thinking?.mode === "anthropic-adaptive") {
 				const effort = mapEffortToAnthropicAdaptiveEffort(model, reasoning);
+
+				// Adaptive mode sends effort directly (no explicit budget_tokens).
+				// However, the thinking consumes tokens from the overall max_tokens budget.
+				// If max_tokens is capped at DEFAULT_REQUEST_MAX_TOKENS (32k),
+				// high/xhigh/max reasoning consumes all 32k, leaving no output tokens.
+				// Solution: when caller did not explicitly set maxTokens,
+				// increase the cap to model.maxTokens to allow room for output.
+				let adaptiveMaxTokens = base.maxTokens ?? model.maxTokens;
+				const hasExplicitMaxTokens = Number.isSafeInteger(options?.maxTokens) && (options?.maxTokens as number) > 0;
+				if (
+					!hasExplicitMaxTokens &&
+					adaptiveMaxTokens === DEFAULT_REQUEST_MAX_TOKENS &&
+					Number.isSafeInteger(model.maxTokens) &&
+					model.maxTokens > DEFAULT_REQUEST_MAX_TOKENS
+				) {
+					// Increase to model.maxTokens to leave room for both thinking and output
+					adaptiveMaxTokens = model.maxTokens;
+				}
+
 				return castApi<"anthropic-messages">({
 					...base,
+					maxTokens: adaptiveMaxTokens,
 					thinkingEnabled: true,
 					effort,
 					toolChoice: mapAnthropicToolChoice(options?.toolChoice),

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Compaction and branch summaries reinserted into the next turn are framed as `<untrusted-content>` and markup-encoded inside the summary template, so a stored summary containing tool output or fetched text cannot close the `<summary>` block. (gajae #6924)
+
 ## [0.7.11] - 2026-10-22
 
 ## [0.7.10] - 2026-10-20

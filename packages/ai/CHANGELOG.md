@@ -2,9 +2,17 @@
 
 ## [Unreleased]
 
+### Changed
+
+- First-party Anthropic requests (`api.anthropic.com` over HTTPS) send gzip-compressed bodies with `Content-Encoding: gzip`. Third-party endpoints, non-standard ports, and stream bodies are sent unchanged, and a stale `Content-Length` is dropped so the transport recomputes it. (gajae #6865)
+- Automatic Anthropic prompt caching also marks the last system block when no system block carries a breakpoint and the four-breakpoint cap has room, so a new session reuses the cached tools + system prefix instead of rewriting it. (gajae #6913)
+
 ### Fixed
 
 - Anthropic API-key requests no longer carry Claude Code client markers: the `claude-code-20250219` and `oauth-2025-04-20` betas, the `X-App: cli` header, and the OAuth beta list on `/v1/models` discovery are now sent only with OAuth credentials. Anthropic classified API-key requests carrying them as Claude Code usage, which excluded them from API credit grants such as the Max plan's monthly API credit (`credit balance too low`). Feature betas and the OAuth path are unchanged. (gajae #6503, #6522)
+- Anthropic-adaptive models with reasoning enabled get `max_tokens` raised from the 32,000 default to the model limit when the caller set none, so high/xhigh/max effort no longer spends the whole budget on thinking and returns no output. Explicit `maxTokens` stays authoritative, and `maxTokens: 0` counts as unset. (gajae #6157)
+- An image Anthropic rejects with `Could not process image` no longer fails every later request in the session. The rejected image is replaced with a text placeholder and stays omitted on later turns and fallback models; the first repair omits the newest message's images, the second every image. Like the thinking-signature repair, the resend also happens inside managed fallback runs. (gajae #6811)
+- Automatic Anthropic caching no longer adds a root `cache_control` marker to a request that already holds four block markers, which made the request fail validation. An existing root marker is still replaced. (gajae 67812c6)
 
 ## [0.7.11] - 2026-10-22
 

@@ -3,6 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import { scheduler } from "node:timers/promises";
 import * as tls from "node:tls";
+import { gzipSync } from "node:zlib";
 import Anthropic, { type ClientOptions as AnthropicSdkClientOptions } from "@anthropic-ai/sdk";
 import type {
 	ContentBlockParam,
@@ -335,15 +336,27 @@ const ANTHROPIC_PROVIDER_SESSION_STATE_KEY = "anthropic-messages";
 type AnthropicProviderSessionState = ProviderSessionState & {
 	strictToolsDisabled: boolean;
 	fastModeDisabled: boolean;
+	/**
+	 * sha256 digests of base64 image payloads Anthropic rejected with
+	 * "Could not process image". The image stays in session history, so every
+	 * later build must keep replacing it or each turn draws the same 400.
+	 */
+	omittedImageDigests: Set<string>;
+	/** Image omissions spent since the last completed stream; bounds escalation. */
+	imageOmissionRepairs: number;
 };
 
 function createAnthropicProviderSessionState(): AnthropicProviderSessionState {
 	const state: AnthropicProviderSessionState = {
 		strictToolsDisabled: false,
 		fastModeDisabled: false,
+		omittedImageDigests: new Set(),
+		imageOmissionRepairs: 0,
 		close: () => {
 			state.strictToolsDisabled = false;
 			state.fastModeDisabled = false;
+			state.omittedImageDigests.clear();
+			state.imageOmissionRepairs = 0;
 		},
 	};
 	return state;
@@ -437,6 +450,87 @@ export function isAnthropicThinkingSignatureInvalidError(error: unknown): boolea
 		/thinking|redacted_thinking/i.test(message) &&
 		/invalid\s+`?signature`?/i.test(message)
 	);
+}
+
+/**
+ * 400 shape where Anthropic cannot decode one of the request's images:
+ * `{"type":"invalid_request_error","message":"Could not process image"}`.
+ * Observed for a truncated JPEG (no end-of-image marker) that local resizing
+ * also failed to decode and therefore forwarded unchanged. The body names no
+ * image, and the image stays in history, so without omission every later
+ * request of the session draws the same rejection.
+ */
+export function isAnthropicImageUnprocessableError(error: unknown): boolean {
+	const status = extractHttpStatusFromError(error);
+	if (status !== 400 && status !== undefined) return false;
+	const message = error instanceof Error ? error.message : String(error);
+	return /invalid_request_error/i.test(message) && /could not process image/i.test(message);
+}
+
+/**
+ * Bounds image omission per stream: the first rejection omits the images of the
+ * newest message that carries any (the request before it was accepted, so the
+ * rejected image is almost always new), the second omits every remaining image.
+ */
+const ANTHROPIC_MAX_IMAGE_OMISSION_REPAIRS = 2;
+
+export const ANTHROPIC_OMITTED_IMAGE_PLACEHOLDER =
+	"[Image omitted: Anthropic could not process this image. The file may be corrupt or truncated; re-export or convert it before attaching it again.]";
+
+type AnthropicImageSite = {
+	digest: string;
+	messageIndex: number;
+	container: unknown[];
+	index: number;
+};
+
+function collectAnthropicImageSites(params: MessageCreateParamsStreaming): AnthropicImageSite[] {
+	const sites: AnthropicImageSite[] = [];
+	const visit = (container: unknown[], messageIndex: number): void => {
+		for (let index = 0; index < container.length; index++) {
+			const block = container[index];
+			if (!isRecord(block)) continue;
+			if (block.type === "tool_result" && Array.isArray(block.content)) {
+				visit(block.content, messageIndex);
+				continue;
+			}
+			if (block.type !== "image" || !isRecord(block.source)) continue;
+			const data = block.source.data;
+			if (typeof data !== "string") continue;
+			const digest = nodeCrypto.createHash("sha256").update(data).digest("hex");
+			sites.push({ digest, messageIndex, container, index });
+		}
+	};
+	params.messages.forEach((message, messageIndex) => {
+		if (Array.isArray(message.content)) visit(message.content as unknown[], messageIndex);
+	});
+	return sites;
+}
+
+/** Replace every image whose payload digest is listed, keeping its cache breakpoint. */
+function omitAnthropicImages(params: MessageCreateParamsStreaming, digests: ReadonlySet<string>): void {
+	for (const site of collectAnthropicImageSites(params)) {
+		if (!digests.has(site.digest)) continue;
+		const image = site.container[site.index] as Record<string, unknown>;
+		site.container[site.index] = {
+			type: "text",
+			text: ANTHROPIC_OMITTED_IMAGE_PLACEHOLDER,
+			...(image.cache_control === undefined ? {} : { cache_control: image.cache_control }),
+		};
+	}
+}
+
+/** Digests to omit after a rejection: the newest image-bearing message first, then everything. */
+function selectAnthropicImagesToOmit(
+	params: MessageCreateParamsStreaming,
+	omitted: ReadonlySet<string>,
+	scope: "latest" | "all",
+): string[] {
+	const remaining = collectAnthropicImageSites(params).filter(site => !omitted.has(site.digest));
+	if (remaining.length === 0) return [];
+	const newest = Math.max(...remaining.map(site => site.messageIndex));
+	const selected = scope === "latest" ? remaining.filter(site => site.messageIndex === newest) : remaining;
+	return [...new Set(selected.map(site => site.digest))];
 }
 
 function hasStrictAnthropicTools(params: MessageCreateParamsStreaming): boolean {
@@ -1041,6 +1135,51 @@ function wrapAnthropicFetchForBoundedRateLimits(baseFetch: FetchImpl, maxRetryDe
 	);
 }
 
+/** Body bytes for a request `BodyInit`, or `undefined` when the body cannot be inspected. */
+function requestBodyBuffer(body: RequestInit["body"]): Buffer | undefined {
+	if (typeof body === "string") return Buffer.from(body, "utf-8");
+	if (body instanceof ArrayBuffer) return Buffer.from(body);
+	if (ArrayBuffer.isView(body)) return Buffer.from(body.buffer, body.byteOffset, body.byteLength);
+	return undefined;
+}
+
+/** Compresses request bodies with gzip for first-party Anthropic endpoints only. */
+export function wrapAnthropicFetchForGzip(baseFetch: FetchImpl): FetchImpl {
+	return Object.assign(
+		async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+			const url = new URL(input instanceof Request ? input.url : String(input), "https://api.anthropic.com");
+			const isFirstPartyAnthropicApi =
+				url.protocol.toLowerCase() === "https:" &&
+				url.hostname.toLowerCase() === "api.anthropic.com" &&
+				(url.port === "" || url.port === "443");
+			const bodyBuffer = init?.body ? requestBodyBuffer(init.body) : undefined;
+			if (!isFirstPartyAnthropicApi || !bodyBuffer) return baseFetch(input, init);
+
+			let compressedBody: Buffer;
+			try {
+				compressedBody = gzipSync(bodyBuffer);
+			} catch (error) {
+				logger.debug("anthropic: gzip compression failed, falling back to uncompressed", {
+					error: error instanceof Error ? error.message : String(error),
+				});
+				return baseFetch(input, init);
+			}
+
+			// The caller's Content-Length describes the uncompressed body; drop it so
+			// fetch recomputes the length for the compressed payload.
+			const headers = new Headers(init?.headers ?? {});
+			headers.set("Content-Encoding", "gzip");
+			headers.delete("Content-Length");
+			logger.debug("anthropic: gzip compression", {
+				uncompressed: bodyBuffer.length,
+				compressed: compressedBody.length,
+			});
+			return baseFetch(input, { ...init, body: compressedBody, headers });
+		},
+		baseFetch.preconnect ? { preconnect: baseFetch.preconnect } : {},
+	);
+}
+
 // The Anthropic SDK logs malformed SSE frames directly before rethrowing them.
 // We surface the resulting provider error ourselves, so keep the SDK quiet.
 const ANTHROPIC_SDK_LOG_LEVEL = "off" as const;
@@ -1415,6 +1554,10 @@ export const streamAnthropic: StreamFunction<"anthropic-messages"> = (
 			let droppedForcedToolChoice = false;
 			let repairLatestAssistantThinking = false;
 			let repairAllAssistantThinking = false;
+			// Shared with the session so later turns keep omitting a rejected image
+			// that is still in history; per-stream when no session state is shared.
+			const omittedImageDigests = providerSessionState?.omittedImageDigests ?? new Set<string>();
+			let imageOmissionRepairs = providerSessionState?.imageOmissionRepairs ?? 0;
 			const prepareParams = async (): Promise<MessageCreateParamsStreaming> => {
 				// Degradation state is cumulative: every fallback rebuild must merge all
 				// repairs activated so far. Rebuilding from only the immediate call lets
@@ -1433,6 +1576,9 @@ export const streamAnthropic: StreamFunction<"anthropic-messages"> = (
 				}
 				if (dropFastMode) {
 					dropAnthropicFastMode(nextParams);
+				}
+				if (omittedImageDigests.size > 0) {
+					omitAnthropicImages(nextParams, omittedImageDigests);
 				}
 				const replacementPayload = await options?.onPayload?.(nextParams, model);
 				if (replacementPayload !== undefined) {
@@ -1829,6 +1975,11 @@ export const streamAnthropic: StreamFunction<"anthropic-messages"> = (
 					if (output.stopReason === "aborted" || output.stopReason === "error") {
 						throw new Error(output.errorMessage ?? "An unknown error occurred");
 					}
+					// Omitted digests stay recorded (the images are still in history); only
+					// the escalation budget re-arms for a different image rejected later.
+					if (providerSessionState && imageOmissionRepairs > 0) {
+						providerSessionState.imageOmissionRepairs = 0;
+					}
 					break;
 				} catch (streamError) {
 					const streamFailure = activeAbortTracker.getLocalAbortReason() ?? streamError;
@@ -1880,6 +2031,33 @@ export const streamAnthropic: StreamFunction<"anthropic-messages"> = (
 						providerRetryAttempt = 0;
 						resetOutputForRetry();
 						continue;
+					}
+					// An image Anthropic cannot decode fails the whole request and stays in
+					// history, so the session never recovers on its own. Like the thinking
+					// repair below this also runs on managed fallback runs: a non-retryable 400
+					// never reaches the chain's recovery budget, so the omission must resend here.
+					if (
+						firstTokenTime === undefined &&
+						imageOmissionRepairs < ANTHROPIC_MAX_IMAGE_OMISSION_REPAIRS &&
+						isAnthropicImageUnprocessableError(streamFailure)
+					) {
+						const scope = imageOmissionRepairs === 0 ? "latest" : "all";
+						const digests = selectAnthropicImagesToOmit(params, omittedImageDigests, scope);
+						if (digests.length > 0) {
+							for (const digest of digests) omittedImageDigests.add(digest);
+							imageOmissionRepairs++;
+							if (providerSessionState) providerSessionState.imageOmissionRepairs = imageOmissionRepairs;
+							logger.warn("anthropic: provider could not process an image; omitting it from the request", {
+								model: model.id,
+								scope,
+								omittedImages: digests.length,
+								managed: options?.fallbackManaged === true,
+							});
+							params = await prepareParams();
+							providerRetryAttempt = 0;
+							resetOutputForRetry();
+							continue;
+						}
 					}
 					const thinkingSignatureInvalid = isAnthropicThinkingSignatureInvalidError(streamFailure);
 					// Runs on managed fallback runs too. Resending the same history to the
@@ -2077,7 +2255,8 @@ export function buildAnthropicClientOptions(args: AnthropicClientOptionsArgs): A
 	const tlsFetchOptions = buildClaudeCodeTlsFetchOptions(model, baseUrl);
 	const baseFetch = args.fetch ?? fetch;
 	const boundedFetch = wrapAnthropicFetchForBoundedRateLimits(baseFetch, args.maxRetryDelayMs);
-	const debugFetch = onSseEvent ? wrapFetchForSseDebug(boundedFetch, event => onSseEvent(event, model)) : boundedFetch;
+	const gzipFetch = wrapAnthropicFetchForGzip(boundedFetch);
+	const debugFetch = onSseEvent ? wrapFetchForSseDebug(gzipFetch, event => onSseEvent(event, model)) : gzipFetch;
 	if (model.provider === "github-copilot") {
 		const copilotApiKey = parseGitHubCopilotApiKey(apiKey).accessToken;
 		const betaFeatures = [...extraBetas];
@@ -2336,7 +2515,7 @@ function applyExplicitPromptCaching(params: AnthropicCacheParams, cacheControl: 
 	}
 }
 
-function applyPromptCaching(
+export function applyPromptCaching(
 	params: AnthropicCacheParams,
 	cacheMode: AnthropicCacheMode,
 	cacheControl?: AnthropicCacheControl,
@@ -2344,7 +2523,22 @@ function applyPromptCaching(
 	if (!cacheControl || cacheMode === "none") return;
 	validateCacheControls(params);
 	if (cacheMode === "automatic") {
-		params.cache_control = { ...cacheControl };
+		// A caller layout that already holds four block markers leaves no room for a new root marker;
+		// adding one anyway made validateCacheControls reject the request. An existing root is still replaced.
+		if (params.cache_control || countCacheControlBreakpoints(params) < 4) {
+			params.cache_control = { ...cacheControl };
+		}
+		// #2383's moving breakpoint reasoning holds within a session, not across
+		// sessions: anchor tools + system so new messages can reuse that prefix.
+		// The fork has no generated-marker budget; the four-breakpoint cap is the bound.
+		if (
+			Array.isArray(params.system) &&
+			!params.system.some(block => block.cache_control) &&
+			countCacheControlBreakpoints(params) < 4
+		) {
+			const lastBlock = params.system.at(-1);
+			if (lastBlock) lastBlock.cache_control = { ...cacheControl };
+		}
 		return;
 	}
 	applyExplicitPromptCaching(params, cacheControl);

@@ -155,7 +155,7 @@ describe("Anthropic request fingerprint alignment", () => {
 		});
 	});
 
-	it("places canonical automatic cache control at the request level", async () => {
+	it("places canonical automatic cache control at the request level and last system block", async () => {
 		const payload = (await captureAnthropicPayload(
 			ANTHROPIC_MODEL,
 			{
@@ -171,7 +171,7 @@ describe("Anthropic request fingerprint alignment", () => {
 		expect(payload.cache_control).toEqual({ type: "ephemeral", ttl: "1h" });
 		expect(payload.system).toEqual([
 			{ type: "text", text: "stable system" },
-			{ type: "text", text: "stable durable context" },
+			{ type: "text", text: "stable durable context", cache_control: { type: "ephemeral", ttl: "1h" } },
 		]);
 	});
 
