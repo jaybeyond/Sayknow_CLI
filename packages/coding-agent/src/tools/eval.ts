@@ -21,7 +21,7 @@ import {
 	stripOutputNotice,
 } from "./output-meta";
 import { formatTitle, replaceTabs, shortenPath, truncateToWidth, wrapBrackets } from "./render-utils";
-import { ToolAbortError, ToolError } from "./tool-errors";
+import { ToolError, throwIfAborted } from "./tool-errors";
 import { toolResult } from "./tool-result";
 import { clampTimeout } from "./tool-timeouts";
 
@@ -262,23 +262,27 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 		}
 		const session = this.session;
 
-		const cells: ResolvedEvalCell[] = [];
-		for (let i = 0; i < params.cells.length; i++) {
-			const cell = params.cells[i];
-			const language: EvalLanguage = cell.language === "py" ? "python" : "js";
-			const resolved = await resolveBackend(session, language);
-			cells.push({
-				index: i,
-				title: cell.title,
-				code: cell.code,
-				timeoutMs: (cell.timeout ?? 30) * 1000,
-				reset: cell.reset ?? false,
-				resolved,
-			});
-		}
-		const languages = uniqueEvalLanguages(cells);
-		const notice = detailsNotice(cells);
+		// Register the complete invocation before any asynchronous preflight: backend
+		// resolution can spawn a kernel probe, and disposal must be able to abort and
+		// await it. Session identity is captured once so a mid-run session switch
+		// cannot retarget the kernel.
+		session.assertEvalExecutionAllowed?.();
+		const cwd = session.cwd;
+		const settings = session.settings;
+		const sessionFile = session.getSessionFile?.() ?? null;
+		const kernelOwnerId = session.getEvalKernelOwnerId?.() ?? null;
+		const sessionId = sessionFile ? `session:${sessionFile}:cwd:${cwd}` : `cwd:${cwd}`;
+		const evalSession: ToolSession = {
+			...session,
+			cwd,
+			settings,
+			getSessionFile: () => sessionFile,
+			getEvalKernelOwnerId: () => kernelOwnerId,
+		};
 		const sessionAbortController = new AbortController();
+		const abortFromCaller = (): void => sessionAbortController.abort(signal?.reason);
+		if (signal?.aborted) abortFromCaller();
+		else signal?.addEventListener("abort", abortFromCaller, { once: true });
 		let outputSink: OutputSink | undefined;
 		let outputSummary: OutputSummary | undefined;
 		let outputDumped = false;
@@ -289,12 +293,30 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 			return outputSummary;
 		};
 
-		const execution = (async (): Promise<AgentToolResult<EvalToolDetails | undefined>> => {
+		const execution = Promise.resolve().then(async (): Promise<AgentToolResult<EvalToolDetails | undefined>> => {
 			try {
-				if (signal?.aborted) {
-					throw new ToolAbortError();
-				}
+				throwIfAborted(sessionAbortController.signal);
 				session.assertEvalExecutionAllowed?.();
+				const cells: ResolvedEvalCell[] = [];
+				for (let i = 0; i < params.cells.length; i++) {
+					throwIfAborted(sessionAbortController.signal);
+					session.assertEvalExecutionAllowed?.();
+					const cell = params.cells[i];
+					const language: EvalLanguage = cell.language === "py" ? "python" : "js";
+					const resolved = await resolveBackend(evalSession, language);
+					throwIfAborted(sessionAbortController.signal);
+					session.assertEvalExecutionAllowed?.();
+					cells.push({
+						index: i,
+						title: cell.title,
+						code: cell.code,
+						timeoutMs: (cell.timeout ?? 30) * 1000,
+						reset: cell.reset ?? false,
+						resolved,
+					});
+				}
+				const languages = uniqueEvalLanguages(cells);
+				const notice = detailsNotice(cells);
 
 				const tailBuffer = new TailBuffer(DEFAULT_MAX_BYTES * 2);
 				const jsonOutputs: unknown[] = [];
@@ -348,31 +370,28 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 					});
 				};
 
-				const sessionFile = session.getSessionFile?.() ?? undefined;
-				const kernelOwnerId = session.getEvalKernelOwnerId?.() ?? undefined;
+				throwIfAborted(sessionAbortController.signal);
+				session.assertEvalExecutionAllowed?.();
 				const { path: artifactPath, id: artifactId } = (await session.allocateOutputArtifact?.("eval")) ?? {};
+				throwIfAborted(sessionAbortController.signal);
 				session.assertEvalExecutionAllowed?.();
 				outputSink = new OutputSink({
 					artifactPath,
 					artifactId,
-					headBytes: resolveOutputSinkHeadBytes(session.settings),
-					maxColumns: resolveOutputMaxColumns(session.settings),
+					headBytes: resolveOutputSinkHeadBytes(settings),
+					maxColumns: resolveOutputMaxColumns(settings),
 					onChunk: chunk => {
 						appendTail(chunk);
 						pushUpdate();
 					},
 				});
-				const sessionId = sessionFile ? `session:${sessionFile}:cwd:${session.cwd}` : `cwd:${session.cwd}`;
-
 				for (let i = 0; i < cells.length; i++) {
 					const cell = cells[i];
 					const backend = cell.resolved.backend;
 					const timeoutSec = timeoutSecondsFromMs(cell.timeoutMs);
 					const deadlineMs = Date.now() + timeoutSec * 1000;
 					const timeoutSignal = AbortSignal.timeout(Math.max(0, deadlineMs - Date.now()));
-					const combinedSignal = signal
-						? AbortSignal.any([signal, timeoutSignal, sessionAbortController.signal])
-						: AbortSignal.any([timeoutSignal, sessionAbortController.signal]);
+					const combinedSignal = AbortSignal.any([timeoutSignal, sessionAbortController.signal]);
 
 					const cellResult = cellResults[i];
 					cellResult.status = "running";
@@ -381,15 +400,17 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 					cellResult.exitCode = undefined;
 					cellResult.durationMs = undefined;
 					pushUpdate();
+					throwIfAborted(sessionAbortController.signal);
+					session.assertEvalExecutionAllowed?.();
 
 					const startTime = Date.now();
 					const result = await backend.execute(cell.code, {
-						cwd: session.cwd,
+						cwd,
 						sessionId,
 						sessionFile: sessionFile ?? undefined,
-						kernelOwnerId,
+						kernelOwnerId: kernelOwnerId ?? undefined,
 						signal: combinedSignal,
-						session,
+						session: evalSession,
 						deadlineMs,
 						reset: cell.reset,
 						artifactPath,
@@ -533,13 +554,14 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 					.truncationFromSummary(summaryForMeta, { direction: "tail" })
 					.done();
 			} finally {
+				signal?.removeEventListener("abort", abortFromCaller);
 				if (!outputDumped) {
 					try {
 						await finalizeOutput();
 					} catch {}
 				}
 			}
-		})();
+		});
 
 		return await (session.trackEvalExecution?.(execution, sessionAbortController) ?? execution);
 	}
