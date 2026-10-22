@@ -2,11 +2,13 @@ import { appendFile, mkdir, stat } from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { getAgentDir, getConfigDirName } from "@sayknow-cli/utils";
+import { projectEnvSnapshot } from "@sayknow-cli/utils/env-file";
 import { YAML } from "bun";
 import type { SkillDiscoverySettings } from "../config/skill-settings-defaults";
 import { DEFAULT_DISABLED_EXTENSIONS, DEFAULT_SKILL_DISCOVERY_SETTINGS } from "../config/skill-settings-defaults";
 import type { PromptTriager } from "../decisions/prompt-triage";
 import { sessionLogsDir } from "../skc-runtime/session-layout";
+import { trustedCoordinatorEnv } from "../skc-runtime/sidecar-bootstrap-env";
 import { routeNativePrompt } from "./native-prompt-routing";
 import {
 	buildActiveUltragoalPromptContext,
@@ -278,14 +280,14 @@ function readTurnId(payload: HookPayload): string | undefined {
 	return safeString(payload.turn_id ?? payload.turnId).trim() || undefined;
 }
 
-function readSessionFile(payload: HookPayload): string | undefined {
-	return (
-		safeString(
-			payload.session_file ?? payload.sessionFile ?? payload.transcript_path ?? payload.transcriptPath,
-		).trim() ||
-		process.env.SKC_SESSION_FILE?.trim() ||
-		undefined
-	);
+function readSessionFile(payload: HookPayload, cwd: string): string | undefined {
+	const explicit = safeString(
+		payload.session_file ?? payload.sessionFile ?? payload.transcript_path ?? payload.transcriptPath,
+	).trim();
+	if (explicit) return explicit;
+	// Bun has already copied the project dotenv into the environment. A value
+	// that matches that snapshot must not select another transcript.
+	return trustedCoordinatorEnv("SKC_SESSION_FILE", process.env, projectEnvSnapshot(cwd));
 }
 
 export async function dispatchSkcNativeSkillHook(
@@ -308,6 +310,7 @@ async function dispatchSkcNativeSkillHookInner(
 ): Promise<SkcNativeHookDispatchResult> {
 	const hookEventName = readHookEventName(payload);
 	const cwd = (options.cwd ?? safeString(payload.cwd).trim()) || process.cwd();
+	const sessionFile = readSessionFile(payload, cwd);
 	if (hookEventName === "UserPromptSubmit") {
 		const prompt = readPromptText(payload);
 		// Compute the bundled UI-skill directive first so a later state/recovery
@@ -332,7 +335,7 @@ async function dispatchSkcNativeSkillHookInner(
 				threadId: readThreadId(payload),
 				stateDir: options.stateDir,
 				prompt,
-				sessionFile: readSessionFile(payload),
+				sessionFile,
 			});
 			recoveryContext = buildStateRecoveryDiagnosticsContext(recoveryDiagnostics);
 		} catch {
@@ -384,7 +387,7 @@ async function dispatchSkcNativeSkillHookInner(
 						threadId: readThreadId(payload),
 						stateDir: options.stateDir,
 						prompt,
-						sessionFile: readSessionFile(payload),
+						sessionFile,
 					});
 		} catch {
 			activeUltragoalContext = null;
@@ -432,7 +435,7 @@ async function dispatchSkcNativeSkillHookInner(
 				sessionId: readSessionId(payload),
 				threadId: readThreadId(payload),
 				stateDir: options.stateDir,
-				sessionFile: readSessionFile(payload),
+				sessionFile,
 			}),
 		};
 	}
