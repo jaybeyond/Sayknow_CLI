@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { $which, hasFsCode, isEnoent, Snowflake } from "@sayknow-cli/utils";
+import { $which, hasFsCode, isEnoent } from "@sayknow-cli/utils";
 import {
 	parseDiffHunks as parseCommitDiffHunks,
 	parseFileDiffs,
@@ -363,9 +363,24 @@ function buildApplyArgs(patchPath: string, options: PatchOptions): string[] {
 }
 
 async function writeTempPatch(content: string): Promise<string> {
-	const tempPath = path.join(os.tmpdir(), `skc-git-patch-${Snowflake.next()}.patch`);
-	await Bun.write(tempPath, content);
-	return tempPath;
+	// Random directory plus an exclusive create: a preexisting symlink under the
+	// shared temp directory is not opened, and the patch is not left world-readable.
+	const tempDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "skc-git-patch-"));
+	try {
+		if (process.platform !== "win32") await fs.promises.chmod(tempDir, 0o700);
+		const tempPath = path.join(tempDir, "patch");
+		const handle = await fs.promises.open(tempPath, "wx", 0o600);
+		try {
+			await handle.writeFile(content);
+		} finally {
+			await handle.close();
+		}
+		if (process.platform !== "win32") await fs.promises.chmod(tempPath, 0o600);
+		return tempPath;
+	} catch (error) {
+		await fs.promises.rm(tempDir, { recursive: true, force: true });
+		throw error;
+	}
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -1180,7 +1195,7 @@ export const patch = {
 		try {
 			await patch.apply(cwd, tempPath, options);
 		} finally {
-			await fs.promises.rm(tempPath, { force: true });
+			await fs.promises.rm(path.dirname(tempPath), { recursive: true, force: true });
 		}
 	},
 
@@ -1201,7 +1216,7 @@ export const patch = {
 		try {
 			return await patch.canApply(cwd, tempPath, options);
 		} finally {
-			await fs.promises.rm(tempPath, { force: true });
+			await fs.promises.rm(path.dirname(tempPath), { recursive: true, force: true });
 		}
 	},
 
