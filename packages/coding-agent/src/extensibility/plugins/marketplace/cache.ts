@@ -40,6 +40,21 @@ function validateCacheComponents(marketplace: string, pluginName: string, versio
 	}
 }
 
+/** Write a regular file. A symlink at the destination is removed, not followed. */
+export async function writeCachedRegularFile(targetPath: string, content: string): Promise<void> {
+	try {
+		const stat = await fs.lstat(targetPath);
+		if (stat.isSymbolicLink()) {
+			await fs.unlink(targetPath);
+		} else if (!stat.isFile()) {
+			throw new Error("unsafe cache artifact");
+		}
+	} catch (error) {
+		if (!isEnoent(error)) throw error;
+	}
+	await Bun.write(targetPath, content);
+}
+
 /**
  * Return the absolute path for a cached plugin directory.
  * Throws if any component fails validation.
