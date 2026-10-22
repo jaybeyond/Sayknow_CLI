@@ -10,6 +10,7 @@ import {
 } from "@sayknow-cli/coding-agent/skc-runtime/session-layout";
 import { runNativeStateCommand } from "@sayknow-cli/coding-agent/skc-runtime/state-runtime";
 import {
+	assertWorkflowMutationAllowed,
 	assertWorkflowMutationRawPathsAllowed,
 	DEEP_INTERVIEW_MUTATION_BLOCK_MESSAGE,
 	getWorkflowMutationDecision,
@@ -397,6 +398,73 @@ describe("workflow mutation guard", () => {
 			expect(decision.blocked).toBe(false);
 			expect(decision.targets.length).toBeGreaterThan(0);
 		}
+	});
+
+	it("blocks bash writes to another session's specs and plans during planning", async () => {
+		const cwd = await makeTempRoot();
+		await writeActiveDeepInterview(cwd, "session-a");
+
+		for (const command of [
+			"echo x > .skc/_session-session-b/specs/deep-interview-x.md",
+			"echo x > .skc/_session-session-b/plans/plan.md",
+			"mkdir -p .skc/_session-session-a-extra/specs",
+			"echo x > .skc/_session-session-a/specs/a.md; echo y > .skc/_session-session-b/plans/b.md",
+		]) {
+			await expect(
+				assertWorkflowMutationAllowed({
+					cwd,
+					sessionId: "session-a",
+					tool: tool("bash"),
+					args: { command },
+				}),
+			).rejects.toThrow(DEEP_INTERVIEW_MUTATION_BLOCK_MESSAGE);
+		}
+
+		await writeActiveDeepInterview(cwd, "a.b");
+		await expect(
+			assertWorkflowMutationAllowed({
+				cwd,
+				sessionId: "a.b",
+				tool: tool("bash"),
+				args: { command: "echo x > .skc/_session-a.b/specs/x.md" },
+			}),
+		).rejects.toThrow(DEEP_INTERVIEW_MUTATION_BLOCK_MESSAGE);
+	});
+
+	it("allows the current session's specs and plans and unscoped planning artifacts", async () => {
+		const cwd = await makeTempRoot();
+		await writeActiveDeepInterview(cwd, "session-a");
+
+		for (const command of [
+			"echo x > .skc/_session-session-a/specs/deep-interview-x.md",
+			"echo x > .skc/_session-session-a/plans/plan.md",
+			"cat source.md > .skc/specs/deep-interview-x.md",
+			"mkdir -p .skc/plans",
+		]) {
+			await assertWorkflowMutationAllowed({
+				cwd,
+				sessionId: "session-a",
+				tool: tool("bash"),
+				args: { command },
+			});
+		}
+
+		const directWrite = await getWorkflowMutationDecision({
+			cwd,
+			sessionId: "session-a",
+			tool: tool("write"),
+			args: { path: ".skc/_session-session-a/specs/deep-interview-x.md", content: "x" },
+		});
+		expect(directWrite.blocked).toBe(true);
+		expect(directWrite.reason).toBe("skc-target");
+
+		await writeActiveDeepInterview(cwd, "a.b");
+		await assertWorkflowMutationAllowed({
+			cwd,
+			sessionId: "a.b",
+			tool: tool("bash"),
+			args: { command: "echo x > .skc/_session-a%2Eb/specs/x.md" },
+		});
 	});
 
 	it("allows the /dev/null sink during active deep-interview", async () => {
