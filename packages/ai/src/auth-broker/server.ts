@@ -10,8 +10,9 @@
  * the server only checks a bearer token against an allow-list per request.
  */
 import { logger } from "@sayknow-cli/utils";
+import { isNoAuthBrowserOriginRequest } from "../auth-gateway/http";
 import type { AuthStorage } from "../auth-storage";
-import { parseBind } from "../utils/parse-bind";
+import { assertAuthenticatedOrLoopback, hostHeaderMatchesBind, parseBind } from "../utils/parse-bind";
 import { AuthBrokerRefresher, type AuthBrokerRefresherSchedule } from "./refresher";
 import type {
 	CredentialDisableResponse,
@@ -505,6 +506,7 @@ function serveSnapshotStream(
 export function startAuthBroker(opts: AuthBrokerServerOptions): AuthBrokerServerHandle {
 	const bind = parseBind(opts.bind ?? DEFAULT_AUTH_BROKER_BIND);
 	const tokens = new Set<string>(opts.bearerTokens);
+	assertAuthenticatedOrLoopback(bind, tokens.size, "auth-broker");
 	const version = opts.version;
 	const streamKeepaliveMs = opts.streamKeepaliveMs ?? DEFAULT_STREAM_KEEPALIVE_MS;
 
@@ -517,6 +519,8 @@ export function startAuthBroker(opts: AuthBrokerServerOptions): AuthBrokerServer
 			});
 	refresher?.start();
 	const generationGate = new GenerationGate(opts.storage);
+
+	let listenPort = bind.port;
 
 	const server = Bun.serve({
 		hostname: bind.hostname,
@@ -531,6 +535,26 @@ export function startAuthBroker(opts: AuthBrokerServerOptions): AuthBrokerServer
 				if (req.method === "GET" && pathname === "/v1/healthz") {
 					const body: HealthzResponse = { ok: true, version };
 					return json(200, body);
+				}
+				if (isNoAuthBrowserOriginRequest(req, tokens)) {
+					logger.info("auth-broker no-auth browser-origin request rejected", {
+						method: req.method,
+						path: pathname,
+						peer,
+						originPresent: true,
+					});
+					return json(403, { error: "no-auth rejects requests carrying Origin" });
+				}
+				if (tokens.size === 0) {
+					if (!hostHeaderMatchesBind(req.headers.get("host"), { hostname: bind.hostname, port: listenPort })) {
+						logger.info("auth-broker no-auth host rejected", {
+							method: req.method,
+							path: pathname,
+							peer,
+							hostPresent: req.headers.has("host"),
+						});
+						return json(403, { error: "no-auth rejects a host that is not the loopback bind" });
+					}
 				}
 				if (!isAuthorized(req, tokens)) {
 					logger.info("auth-broker request unauthorized", { method: req.method, path: pathname, peer });
@@ -664,6 +688,7 @@ export function startAuthBroker(opts: AuthBrokerServerOptions): AuthBrokerServer
 		},
 	});
 
+	listenPort = server.port ?? listenPort;
 	const boundHost = server.hostname ?? bind.hostname;
 	const boundPort = server.port ?? bind.port;
 	return {
