@@ -30,7 +30,7 @@ function assertNoOsc(text: string): void {
 
 describe("tool tree render controls", () => {
 	it("hides osc controls in ast grep, ast edit, and find results", async () => {
-		const theme = await getThemeByName("red-claw");
+		const theme = await getThemeByName("red-octopus");
 		expect(theme).toBeDefined();
 		const uiTheme = theme!;
 		const opts = { expanded: true, isPartial: false };
@@ -86,7 +86,7 @@ describe("tool tree render controls", () => {
 	});
 
 	it("keeps ordinary ast grep, ast edit, and find result text", async () => {
-		const theme = await getThemeByName("red-claw");
+		const theme = await getThemeByName("red-octopus");
 		expect(theme).toBeDefined();
 		const uiTheme = theme!;
 		const opts = { expanded: true, isPartial: false };

@@ -2,12 +2,12 @@
   "schemaVersion": 1,
   "kind": "algorithm-boundary-report",
   "story": "G011",
-  "status": "failed",
-  "e2eStatus": "failed",
-  "redTeamStatus": "failed",
+  "status": "passed",
+  "e2eStatus": "passed",
+  "redTeamStatus": "passed",
   "evidence": [
     "PARITY-FUZZ:passed",
-    "FRAME-PARITY:failed",
+    "FRAME-PARITY:passed",
     "FFI-COUNT:passed",
     "TAB-WIDTH:passed",
     "NULLISH:passed",
@@ -37,7 +37,7 @@
     {
       "contractRef": "G011.2",
       "obligation": "Frame hot path emits byte-identical output vs per-line normalization reference",
-      "status": "failed",
+      "status": "passed",
       "surfaceEvidenceRefs": [
         "SE-FRAME-PARITY"
       ],
@@ -103,7 +103,7 @@
       "contractRef": "G011.2",
       "surface": "algorithm",
       "invocation": "bun test packages/tui/test/g011-batched-natives-redteam.test.ts",
-      "verdict": "failed"
+      "verdict": "passed"
     },
     {
       "id": "SE-FFI-COUNT",
@@ -191,13 +191,13 @@
       "contractRef": "G011.2",
       "scenario": "Full render of mixed ASCII, ANSI, CJK, emoji, Thai, and Kitty image lines",
       "expectedBehavior": "TUI emitted bytes match per-line normalization/truncation reference exactly",
-      "verdict": "failed",
+      "verdict": "passed",
       "details": {
-        "actualByteLength": 271,
+        "actualByteLength": 261,
         "expectedByteLength": 261,
-        "diffAt": 15,
-        "actualSlice": "\u001b[?2004h\u001b[?25l\u001bPtmux;\u001b\u001b[16t\u001b\\\u001b[?2026h\u001b[2J\u001b[H\u001b[3Jascii s",
-        "expectedSlice": "\u001b[?2004h\u001b[?25l\u001b[16t\u001b[?2026h\u001b[2J\u001b[H\u001b[3Jascii short\u001b[0m\r\n"
+        "diffAt": -1,
+        "actualSlice": "\u001b[?2004h\u001b[?25l\u001b[16t\u001b[?2026h\u001b[2J\u001b[H\u001b[3Ja",
+        "expectedSlice": "\u001b[?2004h\u001b[?25l\u001b[16t\u001b[?2026h\u001b[2J\u001b[H\u001b[3Ja"
       }
     },
     {
@@ -255,18 +255,5 @@
       }
     }
   ],
-  "blockers": [
-    {
-      "id": "FRAME-PARITY",
-      "contractRef": "G011.2",
-      "reason": "FRAME-PARITY failed: TUI emitted bytes match per-line normalization/truncation reference exactly",
-      "details": {
-        "actualByteLength": 271,
-        "expectedByteLength": 261,
-        "diffAt": 15,
-        "actualSlice": "\u001b[?2004h\u001b[?25l\u001bPtmux;\u001b\u001b[16t\u001b\\\u001b[?2026h\u001b[2J\u001b[H\u001b[3Jascii s",
-        "expectedSlice": "\u001b[?2004h\u001b[?25l\u001b[16t\u001b[?2026h\u001b[2J\u001b[H\u001b[3Jascii short\u001b[0m\r\n"
-      }
-    }
-  ]
+  "blockers": []
 }

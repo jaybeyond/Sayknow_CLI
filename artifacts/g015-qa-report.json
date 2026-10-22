@@ -32,8 +32,8 @@
 					"differentialGuardVisibleWidthCalls": 0
 				},
 				"writes": [
-					"[2026-07-29T07:09:26.031Z] fullRender: terminal width changed (-1 -> 20) (prev=0, new=2, height=4)\n",
-					"[2026-07-29T07:09:26.059Z] fullRender: terminal width changed (-1 -> 20) (prev=0, new=2, height=4)\n"
+					"[2026-10-22T13:51:30.360Z] fullRender: terminal width changed (-1 -> 20) (prev=0, new=2, height=4)\n",
+					"[2026-10-22T13:51:30.387Z] fullRender: terminal width changed (-1 -> 20) (prev=0, new=2, height=4)\n"
 				]
 			}
 		},
@@ -75,8 +75,8 @@
 			"details": {
 				"scenario": "Legacy full normalization reference vs default cached/viewport path for append, wide line, resize",
 				"expectedBehavior": "Viewport and terminal write bytes match exactly",
-				"referenceWrites": 10,
-				"candidateWrites": 10
+				"referenceWrites": 11,
+				"candidateWrites": 11
 			}
 		},
 		{
@@ -246,8 +246,8 @@
 					"differentialGuardVisibleWidthCalls": 0
 				},
 				"writes": [
-					"[2026-07-29T07:09:26.031Z] fullRender: terminal width changed (-1 -> 20) (prev=0, new=2, height=4)\n",
-					"[2026-07-29T07:09:26.059Z] fullRender: terminal width changed (-1 -> 20) (prev=0, new=2, height=4)\n"
+					"[2026-10-22T13:51:30.360Z] fullRender: terminal width changed (-1 -> 20) (prev=0, new=2, height=4)\n",
+					"[2026-10-22T13:51:30.387Z] fullRender: terminal width changed (-1 -> 20) (prev=0, new=2, height=4)\n"
 				]
 			}
 		},
@@ -298,8 +298,8 @@
 			"details": {
 				"scenario": "Legacy full normalization reference vs default cached/viewport path for append, wide line, resize",
 				"expectedBehavior": "Viewport and terminal write bytes match exactly",
-				"referenceWrites": 10,
-				"candidateWrites": 10
+				"referenceWrites": 11,
+				"candidateWrites": 11
 			}
 		},
 		{

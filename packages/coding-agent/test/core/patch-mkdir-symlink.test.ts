@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeAll, describe, expect, test } from "bun:test";
 import * as fsSync from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
@@ -12,6 +12,11 @@ import {
 } from "@sayknow-cli/coding-agent/edit";
 import { writethroughNoop } from "@sayknow-cli/coding-agent/lsp";
 import type { ToolSession } from "@sayknow-cli/coding-agent/tools";
+
+// `assertEditableFile` (auto-generated guard) reads the global settings instance.
+beforeAll(async () => {
+	await Settings.init({ inMemory: true, cwd: process.cwd() });
+});
 
 const temporaryDirectories: string[] = [];
 
