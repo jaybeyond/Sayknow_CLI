@@ -13,6 +13,7 @@ import {
 } from "../skc-runtime/session-layout";
 import { resolveSkcSessionForRead } from "../skc-runtime/session-resolution";
 import { ModeStateSchema } from "../skc-runtime/state-schema";
+import { workflowEnvelopeChecksumStatus } from "../skc-runtime/state-writer";
 import { getSkillManifest } from "../skc-runtime/workflow-manifest";
 import { resolveToCwd } from "../tools/path-utils";
 import { ToolError } from "../tools/tool-errors";
@@ -283,11 +284,73 @@ async function getActivePlanningSkill(
 	const modeState = guardContext.modeStates.get(current.skill) ?? null;
 
 	if (!modeState) return null;
-	if (modeState.active !== true) return null;
-	if (!modeStateMatchesContext(modeState, resolvedSessionId, threadId)) return null;
-	const phase = String(modeState.current_phase ?? current.phase ?? "").trim();
-	if (!isBlockingPlanningPhase(current.skill, phase)) return null;
-	return { skill: current.skill, phase };
+	const activePhase = String(current.phase ?? "").trim();
+	const posture = planningPostureFromModeState(current.skill, activePhase, modeState, resolvedSessionId, threadId);
+	if (posture.tampered) {
+		warnInvalidModeState(
+			modeStatePath(cwd, current.skill, resolvedSessionId),
+			"out-of-band edit detected (content_sha256 mismatch)",
+		);
+	}
+	if (!posture.blocking) return null;
+	return { skill: current.skill, phase: posture.phase };
+}
+
+/**
+ * Decide whether `modeState` may release the planning block.
+ *
+ * The active entry is the seal. A mode-state file releases that seal only when
+ * its writer-stamped `content_sha256` matches and its session context matches,
+ * or when an unsigned file in the same context does not claim a looser posture
+ * than the entry. An unsigned file may still impose a stricter blocking phase.
+ * Checksum mismatch ignores the file. A context mismatch does not release the
+ * entry's block: the file was read from this session's path.
+ */
+function planningPostureFromModeState(
+	skill: "deep-interview" | "ralplan" | "ultragoal",
+	activePhase: string,
+	modeState: ModeState,
+	sessionId?: string,
+	threadId?: string,
+): { blocking: boolean; phase: string; tampered: boolean } {
+	const status = workflowEnvelopeChecksumStatus(modeState);
+	if (status === "mismatch") {
+		return {
+			blocking: isBlockingPlanningPhase(skill, activePhase),
+			phase: activePhase,
+			tampered: true,
+		};
+	}
+	if (!modeStateMatchesContext(modeState, sessionId, threadId)) {
+		return {
+			blocking: isBlockingPlanningPhase(skill, activePhase),
+			phase: activePhase,
+			tampered: false,
+		};
+	}
+	if (status === "match") {
+		if (modeState.active !== true) return { blocking: false, phase: activePhase, tampered: false };
+		const phase = String(modeState.current_phase ?? activePhase).trim();
+		return { blocking: isBlockingPlanningPhase(skill, phase), phase, tampered: false };
+	}
+	if (!isBlockingPlanningPhase(skill, activePhase)) {
+		const stricterPhase = String(modeState.current_phase ?? "").trim();
+		if (modeState.active === true && stricterPhase && isBlockingPlanningPhase(skill, stricterPhase)) {
+			return { blocking: true, phase: stricterPhase, tampered: false };
+		}
+		return { blocking: false, phase: activePhase, tampered: false };
+	}
+	if (modeState.active !== true) return { blocking: true, phase: activePhase, tampered: false };
+	const modePhase = String(modeState.current_phase ?? "").trim();
+	if (
+		modePhase &&
+		!isBlockingPlanningPhase(skill, modePhase) &&
+		modePhase.trim().toLowerCase() !== activePhase.trim().toLowerCase()
+	) {
+		return { blocking: true, phase: activePhase, tampered: false };
+	}
+	const phase = modePhase || activePhase;
+	return { blocking: isBlockingPlanningPhase(skill, phase), phase, tampered: false };
 }
 
 function normalizePosix(value: string): string {
