@@ -3503,7 +3503,14 @@ export class AgentSession {
 			const artifactId = await this.sessionManager.saveArtifact(fullText, "tool-result");
 			if (!artifactId) return;
 			const digest = crypto.createHash("sha256").update(fullText).digest("hex");
-			const preview = createPreAdmissionArtifactSpillPreview(fullText, artifactId, digest);
+			// Cut the preview from redacted text. The artifact stores fullText.
+			const obfuscator = this.#obfuscator;
+			const preview = createPreAdmissionArtifactSpillPreview(
+				fullText,
+				artifactId,
+				digest,
+				obfuscator?.hasSecrets() ? text => obfuscator.obfuscate(text) : undefined,
+			);
 			const spillMeta = outputMeta()
 				.truncationFromText(preview, {
 					direction: "middle",
