@@ -38,11 +38,27 @@ export async function resolveGitBase(cwd: string, branch?: string): Promise<stri
 		// and mis-attributes other people's changes to this story (e.g. falsely
 		// tripping change-scoped gates). Among existing candidates, pick the one
 		// whose merge-base with HEAD is closest to HEAD (fewest commits ahead).
-		const candidates = ["origin/dev", "dev", "origin/main", "origin/master", "main", "master"];
+		const candidates = [
+			"origin/dev",
+			"dev",
+			"origin/develop",
+			"develop",
+			"origin/main",
+			"origin/master",
+			"main",
+			"master",
+		];
+		const currentBranch = await spawnText(["git", "symbolic-ref", "--quiet", "HEAD"], { cwd, timeoutMs: 3000 });
 		let best: { ref: string; ahead: number } | undefined;
 		for (const candidate of candidates) {
-			const exists = await spawnText(["git", "rev-parse", "--verify", candidate], { cwd, timeoutMs: 3000 });
+			const exists = await spawnText(["git", "rev-parse", "--symbolic-full-name", "--verify", candidate], {
+				cwd,
+				timeoutMs: 3000,
+			});
 			if (!exists.ok) continue;
+			// Exclude only the checked-out local ref, not distinct refs at the same
+			// commit or remote-tracking refs with the same branch name.
+			if (currentBranch.ok && exists.stdout.trim() === currentBranch.stdout.trim()) continue;
 			const mergeBase = await spawnText(["git", "merge-base", "HEAD", candidate], { cwd, timeoutMs: 3000 });
 			if (!mergeBase.ok || !mergeBase.stdout.trim()) continue;
 			const count = await spawnText(["git", "rev-list", "--count", `${mergeBase.stdout.trim()}..HEAD`], {
