@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Signed `thinking` and `redactedThinking` blocks stay inline in the session instead of being moved to the resident text cache. A lost cache file was replaced with placeholder text under the original signature, and Anthropic then rejected every request with `Invalid signature in thinking block`. Sessions that already lost such a blob now drop that reasoning block (text and signature together) instead of replaying the placeholder.
+- Auto-compaction no longer fails with `Missing resident text blob` when old history already lost a resident blob; the spilled copy records the missing-content placeholder, so compaction can still replace the damaged history.
+- A failed `/fork` rolled back to entries that still pointed into the resident store the fork had just disposed, so every large string in the session became unreadable afterwards. The rollback now restores the materialized entries.
+
 ## [0.7.10] - 2026-10-20
 
 ### Added

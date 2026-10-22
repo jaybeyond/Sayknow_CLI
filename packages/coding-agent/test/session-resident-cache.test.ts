@@ -246,6 +246,45 @@ describe("resident text cache missing-blob and reference hygiene", () => {
 		}
 	});
 
+	it("keeps signed thinking inline so a lost resident cache cannot break its signature", async () => {
+		const root = makeTempDir();
+		const sm = SessionManager.create(root, path.join(root, "sessions"));
+		const thinking = `long private reasoning ${"t".repeat(4096)}`;
+		const signature = `sig_${"s".repeat(2048)}`;
+		const redacted = `redacted_${"d".repeat(2048)}`;
+		sm.appendMessage({
+			...assistantMessage("visible answer"),
+			content: [
+				{ type: "thinking", thinking, thinkingSignature: signature },
+				{ type: "redactedThinking", data: redacted },
+				{ type: "text", text: "visible answer" },
+			],
+		});
+
+		await fs.promises.rm(residentCacheRoot(sm), { recursive: true, force: true });
+		Bun.gc(true);
+		sm.appendMessage(assistantMessage("invalidate warm resident view"));
+		const replayed = JSON.stringify(sm.buildSessionContext());
+		expect(replayed).toContain(thinking);
+		expect(replayed).toContain(signature);
+		expect(replayed).toContain(redacted);
+		expect(replayed).not.toContain("Session resident text blob missing");
+		await sm.close();
+	});
+
+	it("keeps large text readable after a failed fork rolls back", async () => {
+		const sentinel = `fork rollback resident text ${"f".repeat(4096)}`;
+		const { sm } = await createPersistedLargeTextSession(sentinel);
+		vi.spyOn(sm, "copyArtifactsForFork").mockRejectedValue(new Error("simulated fork failure"));
+		await expect(sm.fork()).rejects.toThrow("simulated fork failure");
+
+		sm.appendMessage(assistantMessage("invalidate warm resident view"));
+		const after = JSON.stringify(sm.getEntries());
+		expect(after).toContain(sentinel);
+		expect(after).not.toContain("Session resident text blob missing");
+		await sm.close();
+	});
+
 	it("standalone export close does not destroy the live manager resident cache", async () => {
 		const sentinel = `export sharing ${"q".repeat(2048)}`;
 		const { sm, sessionFile, cacheDir } = await createPersistedLargeTextSession(sentinel);

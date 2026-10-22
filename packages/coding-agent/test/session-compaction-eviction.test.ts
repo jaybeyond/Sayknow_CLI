@@ -9,6 +9,7 @@ import { ModelRegistry } from "@sayknow-cli/coding-agent/config/model-registry";
 import { Settings } from "@sayknow-cli/coding-agent/config/settings";
 import { AgentSession } from "@sayknow-cli/coding-agent/session/agent-session";
 import { AuthStorage } from "@sayknow-cli/coding-agent/session/auth-storage";
+import { MemoryBlobStore } from "@sayknow-cli/coding-agent/session/blob-store";
 import {
 	type ColdSpillRef,
 	type CustomMessageEntry,
@@ -708,6 +709,29 @@ describe("SessionManager compacted cold-spill eviction", () => {
 
 		const fidelity = session.getEntryForFidelity(oldEntryId) as SessionMessageEntry;
 		expect(messageContentText(fidelity)).toContain(oldNeedle);
+	});
+	it("still evicts compacted history when a resident text blob is already missing", () => {
+		// Regression: a single lost resident blob made every later auto-compaction
+		// fail with `Missing resident text blob`, so the damaged history stayed.
+		const session = SessionManager.inMemory("/cwd", new MemorySessionStorage());
+		const oldNeedle = `lost-resident-text-${"l".repeat(4096)}-end`;
+		const oldEntryId = session.appendMessage({
+			role: "user",
+			content: [{ type: "text", text: oldNeedle }],
+			timestamp: Date.now(),
+		});
+		const firstKeptEntryId = session.appendMessage({ role: "user", content: "kept", timestamp: Date.now() });
+		const compactionEntryId = session.appendCompaction("summary", "short", firstKeptEntryId, 123);
+		const getSync = vi.spyOn(MemoryBlobStore.prototype, "getSync").mockReturnValue(null);
+		try {
+			expect(() => session.evictCompactedContent(firstKeptEntryId, compactionEntryId)).not.toThrow();
+		} finally {
+			getSync.mockRestore();
+		}
+
+		const fidelity = session.getEntryForFidelity(oldEntryId) as SessionMessageEntry;
+		expect(messageContentText(fidelity)).toContain("Session resident text blob missing");
+		expect(messageContentText(fidelity)).not.toContain(oldNeedle);
 	});
 	it("does not materialize promoted resident text as a heap string (originalChars is byte length)", () => {
 		const session = SessionManager.inMemory("/cwd", new MemorySessionStorage());

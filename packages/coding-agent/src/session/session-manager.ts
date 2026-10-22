@@ -2824,6 +2824,9 @@ function externalizeResidentValueSync(obj: unknown, stores: ResidentBlobStores, 
 		return changed ? result : obj;
 	}
 	if (typeof obj === "object") {
+		// Signed reasoning replays byte-for-byte; keep it inline so a lost cache
+		// file can never turn it into placeholder text under a valid signature.
+		if (isSignedReasoningBlock(obj)) return obj;
 		let changed = false;
 		const entries: Array<readonly [string, unknown]> = [];
 		for (const [childKey, value] of Object.entries(obj)) {
@@ -2838,6 +2841,34 @@ function externalizeResidentValueSync(obj: unknown, stores: ResidentBlobStores, 
 
 function prepareEntryForResidentSync(entry: FileEntry, stores: ResidentBlobStores): FileEntry {
 	return externalizeResidentValueSync(entry, stores) as FileEntry;
+}
+
+/**
+ * Thinking and redacted-thinking blocks: providers verify their text against a
+ * signature (Anthropic) or treat it as opaque replay data, so the bytes cannot
+ * be substituted.
+ */
+function isSignedReasoningBlock(obj: object): boolean {
+	const type = (obj as { type?: unknown }).type;
+	return type === "thinking" || type === "redactedThinking";
+}
+
+/**
+ * Reasoning whose resident blob is gone (sessions written before reasoning was
+ * kept inline). The original bytes are unrecoverable, so drop the text and the
+ * signature together: an empty unsigned block is skipped on replay, while
+ * placeholder text under the original signature is rejected by the provider
+ * (`Invalid signature in thinking block`) on every later request.
+ */
+function withoutLostReasoning(obj: object): object {
+	if ((obj as { type?: unknown }).type === "redactedThinking") return { type: "redactedThinking", data: "" };
+	const kept: Record<string, unknown> = { type: "thinking", thinking: "" };
+	for (const [childKey, value] of Object.entries(obj)) {
+		if (childKey === "type" || childKey === "thinking" || childKey === "thinkingSignature") continue;
+		if (isResidentBlobSentinel(value)) continue;
+		kept[childKey] = value;
+	}
+	return kept;
 }
 
 function materializeResidentValueSync(
@@ -2882,6 +2913,14 @@ function materializeResidentValueSync(
 		return changed ? result : obj;
 	}
 	if (typeof obj === "object") {
+		if (missingPolicy === "placeholder" && isSignedReasoningBlock(obj)) {
+			try {
+				return materializeResidentValueSync(obj, stores, key, cache, "throw");
+			} catch (err) {
+				if (!(err instanceof ResidentBlobMissingError)) throw err;
+				return withoutLostReasoning(obj);
+			}
+		}
 		let changed = false;
 		const entries = Object.entries(obj).map(([childKey, value]) => {
 			const newValue = materializeResidentValueSync(value, stores, childKey, cache, missingPolicy);
@@ -3070,7 +3109,17 @@ function coldSpillResidentValue(
 	writes: ColdSpillWrite[],
 	promotion: ColdSpillResidentPromotion,
 ): string {
-	const data = residentBlobBytesForColdSpill(value, promotion);
+	// Spilled history is already covered by a compaction summary and never reaches
+	// the provider again. A missing resident blob is unrecoverable either way;
+	// failing here only blocked every later compaction, so the session could never
+	// drop the damaged history.
+	let data: Buffer;
+	try {
+		data = residentBlobBytesForColdSpill(value, promotion);
+	} catch (err) {
+		if (!(err instanceof ResidentBlobMissingError)) throw err;
+		data = Buffer.from(residentBlobMissingPlaceholder(err), "utf8");
+	}
 	writes.push({ path: basePath, encoding: "utf8", data, originalChars: data.byteLength });
 	return COLD_SPILL_NOTICE;
 }
@@ -5292,7 +5341,10 @@ export class SessionManager {
 		const oldSessionFile = this.#sessionFile;
 		const oldSessionId = this.#sessionId;
 		const materializedEntries = materializeResidentEntriesForReadSync(this.#fileEntries, this.#residentBlobStores());
-		const oldFileEntries = this.#fileEntries;
+		// Roll back from materialized text: the live entries hold resident sentinels
+		// into the store that the fork disposes, so restoring them as-is would leave
+		// every large string (and signed thinking) pointing at a deleted blob.
+		const oldFileEntries = materializedEntries;
 		const oldSessionName = this.#sessionName;
 		const oldTitleSource = this.#titleSource;
 

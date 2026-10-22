@@ -72,6 +72,41 @@ describe("resident byte-sensitive TEXT materialization is fail-closed", () => {
 		expect(serialized).toContain("original content unavailable");
 		expect(serialized).not.toContain(MISSING_REF);
 	});
+
+	test("drops lost signed reasoning instead of keeping its signature over placeholder text", () => {
+		// Regression: placeholder text under the original thinking signature made
+		// Anthropic reject every later request with `Invalid signature in thinking block`.
+		const store = makeStore();
+		const entry = {
+			type: "message",
+			id: "missing-thinking-entry",
+			parentId: null,
+			timestamp: new Date(0).toISOString(),
+			message: {
+				role: "assistant",
+				content: [
+					{
+						type: "thinking",
+						thinking: residentBlobSentinelForTests("text", MISSING_REF),
+						thinkingSignature: "sig_kept_only_if_text_is_intact",
+						itemId: "rs_1",
+					},
+					{ type: "redactedThinking", data: residentBlobSentinelForTests("text", MISSING_REF) },
+					{ type: "text", text: "visible answer" },
+				],
+				timestamp: 0,
+			},
+		};
+
+		const [materialized] = materializeResidentEntriesForPersistenceForTests([entry], store);
+		const content = (materialized as { message: { content: unknown[] } }).message.content;
+		expect(content).toEqual([
+			{ type: "thinking", thinking: "", itemId: "rs_1" },
+			{ type: "redactedThinking", data: "" },
+			{ type: "text", text: "visible answer" },
+		]);
+		expect(JSON.stringify(materialized)).not.toContain("sig_kept_only_if_text_is_intact");
+	});
 });
 
 describe("legacy persisted-image materialization warn-and-returns (documented compatibility boundary)", () => {
