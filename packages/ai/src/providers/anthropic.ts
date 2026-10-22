@@ -138,12 +138,8 @@ export function buildBetaHeader(baseBetas: string[], extraBetas: string[]): stri
 	return result.join(",");
 }
 
-const claudeCodeBetaDefaults = [
-	"claude-code-20250219",
-	"oauth-2025-04-20",
-	"context-management-2025-06-27",
-	"prompt-caching-scope-2026-01-05",
-];
+const featureBetaDefaults = ["context-management-2025-06-27", "prompt-caching-scope-2026-01-05"];
+const claudeCodeBetaDefaults = ["claude-code-20250219", "oauth-2025-04-20", ...featureBetaDefaults];
 const fineGrainedToolStreamingBeta = "fine-grained-tool-streaming-2025-05-14";
 const interleavedThinkingBeta = "interleaved-thinking-2025-05-14";
 const fastModeBeta = "fast-mode-2026-02-01";
@@ -178,6 +174,12 @@ const sharedHeaders = {
 	"Content-Type": "application/json",
 	"Anthropic-Version": "2023-06-01",
 	"Anthropic-Dangerous-Direct-Browser-Access": "true",
+};
+
+// Claude Code client marker. Like the claude-code/oauth betas it is sent only with
+// OAuth credentials: Anthropic classifies API-key requests carrying it as Claude
+// Code usage, which excludes them from API credit grants.
+const claudeCodeAppHeaders = {
 	"X-App": "cli",
 };
 
@@ -246,7 +248,7 @@ export function buildAnthropicHeaders(options: AnthropicHeaderOptions): Record<s
 	const oauthToken = options.isOAuth ?? isAnthropicOAuthToken(options.apiKey);
 	const extraBetas = options.extraBetas ?? [];
 	const stream = options.stream ?? false;
-	const betaHeader = buildBetaHeader(claudeCodeBetaDefaults, extraBetas);
+	const betaHeader = buildBetaHeader(oauthToken ? claudeCodeBetaDefaults : featureBetaDefaults, extraBetas);
 	const acceptHeader = stream ? "text/event-stream" : "application/json";
 	const modelHeaders = Object.fromEntries(
 		Object.entries(options.modelHeaders ?? {}).filter(([key]) => !enforcedHeaderKeys.has(key.toLowerCase())),
@@ -273,6 +275,7 @@ export function buildAnthropicHeaders(options: AnthropicHeaderOptions): Record<s
 			Accept: acceptHeader,
 			Authorization: `Bearer ${options.apiKey}`,
 			...sharedHeaders,
+			...claudeCodeAppHeaders,
 			"Anthropic-Beta": betaHeader,
 			"User-Agent": userAgent,
 		};

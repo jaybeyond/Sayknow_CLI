@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Anthropic API-key requests no longer carry Claude Code client markers: the `claude-code-20250219` and `oauth-2025-04-20` betas, the `X-App: cli` header, and the OAuth beta list on `/v1/models` discovery are now sent only with OAuth credentials. Anthropic classified API-key requests carrying them as Claude Code usage, which excluded them from API credit grants such as the Max plan's monthly API credit (`credit balance too low`). Feature betas and the OAuth path are unchanged. (gajae #6503, #6522)
+
 ## [0.7.11] - 2026-10-22
 
 ### Fixed
