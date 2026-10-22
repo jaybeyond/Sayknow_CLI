@@ -4534,7 +4534,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 			`);
 			this.#db.run("DROP TABLE auth_credentials_v0");
 		});
-		migrate();
+		migrate.immediate();
 	}
 
 	#migrateAuthSchemaV1OrV2ToV3(): void {
@@ -4556,7 +4556,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 			`);
 			this.#db.run("DROP TABLE auth_credentials_legacy");
 		});
-		migrate();
+		migrate.immediate();
 	}
 
 	#migrateAuthSchemaV3ToV4(): void {
@@ -4578,7 +4578,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 			`);
 			this.#db.run("DROP TABLE auth_credentials_v3");
 		});
-		migrate();
+		migrate.immediate();
 	}
 
 	#backfillCredentialIdentityKeys(): void {
@@ -4659,7 +4659,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 			return result;
 		});
 
-		const result = replace(provider, credentials);
+		const result = replace.immediate(provider, credentials);
 		this.#purgeSupersededDisabledRows(provider, result);
 		return result;
 	}
@@ -4706,7 +4706,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 			return result;
 		});
 
-		const result = upsert(provider, credential);
+		const result = upsert.immediate(provider, credential);
 		this.#purgeSupersededDisabledRows(provider, result);
 		return result;
 	}
