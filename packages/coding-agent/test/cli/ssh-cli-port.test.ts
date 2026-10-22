@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, type Mock, spyOn } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -8,7 +8,7 @@ import { runSSHCommand } from "../../src/cli/ssh-cli";
 const originalProjectDir = getProjectDir();
 let tempDir: TempDir | null = null;
 let stdout: string[] = [];
-let writeSpy: ReturnType<typeof spyOn<typeof process.stdout, "write">> | undefined;
+let writeSpy: Mock<typeof process.stdout.write> | undefined;
 
 beforeEach(() => {
 	tempDir = TempDir.createSync(path.join(os.tmpdir(), "skc-ssh-cli-port-"));

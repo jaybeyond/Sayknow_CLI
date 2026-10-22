@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { scheduler } from "node:timers/promises";
+import { gunzipSync } from "node:zlib";
 import { Agent, type AgentMessage, type AgentTool, ThinkingLevel } from "@sayknow-cli/agent-core";
 import { type AssistantMessage, getBundledModel, type Model, streamSimple } from "@sayknow-cli/ai";
 import { ModelRegistry } from "@sayknow-cli/coding-agent/config/model-registry";
@@ -37,6 +38,14 @@ interface WireLog {
 	bodies: string[];
 }
 
+/** Wire body text; first-party Anthropic requests are gzip-compressed on the wire (#6865). */
+function wireBodyText(init?: Parameters<typeof fetch>[1]): string {
+	const body = init?.body;
+	if (typeof body === "string") return body;
+	if (!(body instanceof Uint8Array)) return "";
+	const gzip = new Headers(init?.headers).get("content-encoding") === "gzip";
+	return new TextDecoder().decode(gzip ? gunzipSync(body) : body);
+}
 function installReplies(replies: readonly Reply[]): WireLog {
 	const log: WireLog = { bodies: [] };
 	vi.spyOn(globalThis, "fetch").mockImplementation((async (
@@ -46,7 +55,7 @@ function installReplies(replies: readonly Reply[]): WireLog {
 		// Startup may refresh model catalogs in the background; only inference is the wire.
 		const url = input instanceof Request ? input.url : String(input);
 		if (!url.endsWith("/chat/completions")) return new Response("{}", { status: 404 });
-		log.bodies.push(typeof init?.body === "string" ? init.body : "");
+		log.bodies.push(wireBodyText(init));
 		const reply = replies[log.bodies.length - 1];
 		if (!reply) throw new Error(`Unexpected outbound request #${log.bodies.length}`);
 		return reply();
@@ -545,7 +554,7 @@ describe("automatic same-model resume", () => {
 			init?: Parameters<typeof fetch>[1],
 		) => {
 			urls.push(input instanceof Request ? input.url : String(input));
-			bodies.push(typeof init?.body === "string" ? init.body : "");
+			bodies.push(wireBodyText(init));
 			const reply = replies[bodies.length - 1];
 			return reply ? reply() : status503();
 		}) as typeof fetch);
@@ -1276,7 +1285,7 @@ describe("automatic same-model resume", () => {
 		) => {
 			const url = input instanceof Request ? input.url : String(input);
 			if (!url.endsWith("/v1/messages")) return new Response("{}", { status: 404 });
-			log.bodies.push(typeof init?.body === "string" ? init.body : "");
+			log.bodies.push(wireBodyText(init));
 			const reply = replies[log.bodies.length - 1];
 			if (!reply) throw new Error(`Unexpected outbound request #${log.bodies.length}`);
 			return reply();

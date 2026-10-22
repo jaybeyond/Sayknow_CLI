@@ -122,7 +122,7 @@ function assertFramed(text: string): void {
 }
 
 async function settle<T>(work: Promise<T>): Promise<T> {
-	let timer: ReturnType<typeof setTimeout> | undefined;
+	let timer: NodeJS.Timeout | undefined;
 	const timeout = new Promise<never>((_, reject) => {
 		timer = setTimeout(() => reject(new Error("browser tool execute hung")), 2_000);
 	});

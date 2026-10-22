@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import { scheduler } from "node:timers/promises";
+import { gunzipSync } from "node:zlib";
 import { Agent, type AgentTool, ThinkingLevel } from "@sayknow-cli/agent-core";
 import { type AssistantMessage, getBundledModel, streamSimple } from "@sayknow-cli/ai";
 import { ModelRegistry } from "@sayknow-cli/coding-agent/config/model-registry";
@@ -144,6 +145,14 @@ function sseReply(frames: readonly string[], end: "close" | "disconnect"): WireR
 	};
 }
 
+/** Wire body text; first-party Anthropic requests are gzip-compressed on the wire (#6865). */
+function wireBodyText(init?: Parameters<typeof fetch>[1]): string {
+	const body = init?.body;
+	if (typeof body === "string") return body;
+	if (!(body instanceof Uint8Array)) return "";
+	const gzip = new Headers(init?.headers).get("content-encoding") === "gzip";
+	return new TextDecoder().decode(gzip ? gunzipSync(body) : body);
+}
 function requestUrl(input: Parameters<typeof fetch>[0]): string {
 	if (input instanceof Request) return input.url;
 	if (input instanceof URL) return input.href;
@@ -163,8 +172,9 @@ function installWire(replies: readonly WireReply[]): WireBody[] {
 	) => {
 		const url = requestUrl(input);
 		if (!new URL(url).pathname.endsWith("/v1/messages")) throw new Error(`Unexpected outbound request: ${url}`);
-		if (typeof init?.body !== "string") throw new Error("Expected a serialized JSON request body");
-		bodies.push(JSON.parse(init.body) as WireBody);
+		const text = wireBodyText(init);
+		if (!text) throw new Error("Expected a serialized JSON request body");
+		bodies.push(JSON.parse(text) as WireBody);
 		const reply = replies[bodies.length - 1];
 		if (!reply) throw new Error(`Unexpected outbound request #${bodies.length}`);
 		return reply();

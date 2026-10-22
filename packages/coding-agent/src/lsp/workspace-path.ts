@@ -1,3 +1,4 @@
+import type { Stats } from "node:fs";
 import * as fs from "node:fs/promises";
 import path from "node:path";
 import { ToolError } from "../tools/tool-errors";
@@ -21,7 +22,7 @@ async function canonicalize(filePath: string): Promise<string> {
 	const missing: string[] = [];
 	let cursor = filePath;
 	for (;;) {
-		let stat: Awaited<ReturnType<typeof fs.lstat>> | undefined;
+		let stat: Stats | undefined;
 		try {
 			stat = await fs.lstat(cursor);
 		} catch (error) {

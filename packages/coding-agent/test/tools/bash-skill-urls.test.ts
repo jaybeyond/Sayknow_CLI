@@ -1,9 +1,28 @@
 import { describe, expect, it } from "bun:test";
+import { lstat, realpath } from "node:fs/promises";
 import * as path from "node:path";
 import type { Skill } from "../../src/extensibility/skills";
 import { resolveLocalUrlToPath } from "../../src/internal-urls";
 import { expandInternalUrls, expandSkillUrls } from "../../src/tools/bash-skill-urls";
 import { ToolError } from "../../src/tools/tool-errors";
+
+/** Match bash skill expansion: real ancestor plus the components that do not exist yet. */
+async function canonicalExistingPath(target: string): Promise<string> {
+	const missing: string[] = [];
+	let cursor = target;
+	for (;;) {
+		try {
+			await lstat(cursor);
+			return path.join(await realpath(cursor), ...missing);
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+		}
+		const parent = path.dirname(cursor);
+		if (parent === cursor) return target;
+		missing.unshift(path.basename(cursor));
+		cursor = parent;
+	}
+}
 
 function shellEscape(p: string): string {
 	return `'${p.replace(/'/g, "'\\''")}'`;
@@ -185,7 +204,9 @@ describe("expandInternalUrls", () => {
 			getSessionId: () => "session-1",
 		};
 		const command = "mv /tmp/source.json local://handoffs/new-file.json";
-		const expectedPath = resolveLocalUrlToPath("local://handoffs/new-file.json", localOptions);
+		const expectedPath = await canonicalExistingPath(
+			resolveLocalUrlToPath("local://handoffs/new-file.json", localOptions),
+		);
 
 		await expect(expandInternalUrls(command, { skills: [], localOptions })).resolves.toBe(
 			`mv /tmp/source.json ${shellEscape(expectedPath)}`,
@@ -198,7 +219,7 @@ describe("expandInternalUrls", () => {
 			getSessionId: () => "session-1",
 		};
 		const command = 'cat "local:/PLAN.md"';
-		const expectedPath = resolveLocalUrlToPath("local:///PLAN.md", localOptions);
+		const expectedPath = await canonicalExistingPath(resolveLocalUrlToPath("local:///PLAN.md", localOptions));
 
 		await expect(expandInternalUrls(command, { skills: [], localOptions })).resolves.toBe(
 			`cat ${shellEscape(expectedPath)}`,
@@ -211,7 +232,7 @@ describe("expandInternalUrls", () => {
 			getSessionId: () => "session-1",
 		};
 		const command = "cat 'local:/PLAN.md'";
-		const expectedPath = resolveLocalUrlToPath("local:///PLAN.md", localOptions);
+		const expectedPath = await canonicalExistingPath(resolveLocalUrlToPath("local:///PLAN.md", localOptions));
 
 		await expect(expandInternalUrls(command, { skills: [], localOptions })).resolves.toBe(
 			`cat ${shellEscape(expectedPath)}`,
@@ -224,7 +245,7 @@ describe("expandInternalUrls", () => {
 			getSessionId: () => "session-1",
 		};
 		const command = "cat local:/PLAN.md";
-		const expectedPath = resolveLocalUrlToPath("local:///PLAN.md", localOptions);
+		const expectedPath = await canonicalExistingPath(resolveLocalUrlToPath("local:///PLAN.md", localOptions));
 
 		await expect(expandInternalUrls(command, { skills: [], localOptions })).resolves.toBe(
 			`cat ${shellEscape(expectedPath)}`,
@@ -277,7 +298,7 @@ describe("expandInternalUrls", () => {
 			getSessionId: () => "session-1",
 		};
 		const command = "cat local:/PLAN.md";
-		const expectedPath = resolveLocalUrlToPath("local://PLAN.md", localOptions);
+		const expectedPath = await canonicalExistingPath(resolveLocalUrlToPath("local://PLAN.md", localOptions));
 		await expect(expandInternalUrls(command, { skills: [], localOptions })).resolves.toBe(
 			`cat ${shellEscape(expectedPath)}`,
 		);
