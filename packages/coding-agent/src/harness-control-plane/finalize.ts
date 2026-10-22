@@ -12,6 +12,7 @@
 import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { readFile } from "node:fs/promises";
+import { checkTmuxSelfInjection } from "../tools/tmux-self-injection-guard";
 import {
 	buildReceipt,
 	type CompletionEvidence,
@@ -312,6 +313,15 @@ function git(workspace: string, args: string[]): string | null {
 export function defaultFinalizeChecks(workspace: string): FinalizeChecks {
 	return {
 		async runValidation(spec) {
+			// Same preflight as BashTool: refuse before spawn so a plan command cannot type into this pane.
+			const injection = await checkTmuxSelfInjection(spec.command, {
+				env: process.env,
+				cwd: workspace,
+				executionEnv: process.env,
+			});
+			if (injection.block) {
+				return { exactCommand: spec.command, cwd: workspace, exitStatus: 1, pass: false };
+			}
 			const proc = Bun.spawnSync(["bash", "-lc", spec.command], { cwd: workspace, stdout: "pipe", stderr: "pipe" });
 			const exitStatus = proc.exitCode ?? 1;
 			return { exactCommand: spec.command, cwd: workspace, exitStatus, pass: exitStatus === 0 };
