@@ -5,6 +5,7 @@
  * createAgentSession() options. The SDK does the heavy lifting.
  */
 
+import { existsSync } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -21,13 +22,14 @@ import {
 	VERSION,
 } from "@sayknow-cli/utils";
 import chalk from "chalk";
+import { selectAppendSystemPromptFile } from "./cli/append-system-prompt";
 import type { Args } from "./cli/args";
 import { processFileArguments } from "./cli/file-processor";
 import { buildInitialMessage } from "./cli/initial-message";
 import { resolveLaunchDisposition } from "./cli/launch-disposition";
 import { runListModelsCommand } from "./cli/list-models";
 import { selectSession } from "./cli/session-picker";
-import { findConfigFile } from "./config";
+import { getConfigDirs } from "./config";
 import { activateModelProfile, ModelProfileCredentialError } from "./config/model-profile-activation";
 import { ModelRegistry, ModelsConfigFile } from "./config/model-registry";
 import { resolveCliModel, resolveModelRoleValue, resolveModelScope, type ScopedModel } from "./config/model-resolver";
@@ -896,17 +898,13 @@ async function maybeAutoChdir(parsed: Args): Promise<void> {
 	}
 }
 
-/** Discover APPEND_SYSTEM.md file if no CLI append system prompt was provided */
+/** User APPEND_SYSTEM.md only. Repository copies are not appended. */
 function discoverAppendSystemPromptFile(): string | undefined {
-	const projectPath = findConfigFile("APPEND_SYSTEM.md", { user: false });
-	if (projectPath) {
-		return projectPath;
-	}
-	const globalPath = findConfigFile("APPEND_SYSTEM.md", { user: true });
-	if (globalPath) {
-		return globalPath;
-	}
-	return undefined;
+	const candidates = getConfigDirs("", { existingOnly: false }).flatMap(entry => {
+		const filePath = path.join(entry.path, "APPEND_SYSTEM.md");
+		return existsSync(filePath) ? [{ level: entry.level, path: filePath }] : [];
+	});
+	return selectAppendSystemPromptFile(candidates);
 }
 
 async function buildSessionOptions(
