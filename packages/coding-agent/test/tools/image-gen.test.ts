@@ -4,6 +4,7 @@ import { EventEmitter } from "node:events";
 import * as fs from "node:fs/promises";
 import * as http from "node:http";
 import * as https from "node:https";
+import * as path from "node:path";
 import { Readable } from "node:stream";
 import type { Model } from "@sayknow-cli/ai";
 import type { ModelRegistry } from "@sayknow-cli/coding-agent/config/model-registry";
@@ -27,7 +28,13 @@ const generatedImagePaths: string[] = [];
 
 afterEach(async () => {
 	vi.restoreAllMocks();
-	await Promise.all(generatedImagePaths.splice(0).map(imagePath => fs.rm(imagePath, { force: true })));
+	await Promise.all(
+		generatedImagePaths.splice(0).map(async imagePath => {
+			await fs.rm(imagePath, { force: true });
+			const parent = path.dirname(imagePath);
+			if (path.basename(parent).startsWith("skc-image-")) await fs.rm(parent, { recursive: true, force: true });
+		}),
+	);
 	global.fetch = originalFetch;
 	if (originalOpenRouterKey === undefined) {
 		delete Bun.env.OPENROUTER_API_KEY;
