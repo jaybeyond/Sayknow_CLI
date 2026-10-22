@@ -3,8 +3,9 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as natives from "@sayknow-cli/natives";
-import { getWorktreeDir, hashPath, logger, Snowflake } from "@sayknow-cli/utils";
+import { getWorktreeDir, getWorktreesDir, hashPath, logger, Snowflake } from "@sayknow-cli/utils";
 import * as git from "../utils/git";
+import { allocateDisjointIsolationDir, assertIsolationTeardownTarget, removeIsolationDirectory } from "./isolation-dir";
 
 const { IsoBackendKind } = natives;
 type IsoBackendKind = natives.IsoBackendKind;
@@ -312,15 +313,20 @@ export async function ensureIsolation(
 	preferred?: IsoBackendKind,
 ): Promise<IsolationHandle> {
 	const repoRoot = await getRepoRoot(baseCwd);
-	const baseDir = getWorktreeDir(`${id}-${hashPath(repoRoot)}`);
+	// Task ids are allocated inside one session, so `<id>-<repo hash>` is shared
+	// by every fresh session's first task. Never remove that canonical directory.
+	// Each attempt gets an exclusive sibling and only that sibling is removed.
+	const canonicalBaseDir = getWorktreeDir(`${id}-${hashPath(repoRoot)}`);
+	const baseDir = await allocateDisjointIsolationDir(canonicalBaseDir);
 	const mergedDir = path.join(baseDir, "merged");
+	const worktreeRoot = getWorktreesDir();
 
 	const resolution = natives.isoResolve(preferred ?? null);
 	const candidates = resolution.candidates.length > 0 ? resolution.candidates : [resolution.kind];
 	let fallbackReason = resolution.reason ?? null;
 
 	for (const candidate of candidates) {
-		await fs.rm(baseDir, { recursive: true, force: true });
+		await removeIsolationDirectory(mergedDir, worktreeRoot);
 		try {
 			await natives.isoStart(candidate, repoRoot, mergedDir);
 			return {
@@ -330,7 +336,7 @@ export async function ensureIsolation(
 				fallbackReason,
 			};
 		} catch (err) {
-			await fs.rm(baseDir, { recursive: true, force: true });
+			await removeIsolationDirectory(mergedDir, worktreeRoot);
 			const message = errorMessage(err);
 			if (!natives.isoIsUnavailableError(message)) {
 				throw err;
@@ -344,6 +350,11 @@ export async function ensureIsolation(
 
 /** Tear down a handle returned by {@link ensureIsolation}. */
 export async function cleanupIsolation(handle: IsolationHandle): Promise<void> {
+	const worktreeRoot = getWorktreesDir();
+	// Native isoStop removes `mergedDir` and follows symlinks. Refuse a
+	// symlink that is already present before that call.
+	const teardown = await assertIsolationTeardownTarget(handle.mergedDir, worktreeRoot);
+	if (teardown === "skip") return;
 	try {
 		try {
 			await natives.isoStop(handle.backend, handle.mergedDir);
@@ -355,9 +366,7 @@ export async function cleanupIsolation(handle: IsolationHandle): Promise<void> {
 			});
 		}
 	} finally {
-		// baseDir is the parent of the merged directory
-		const baseDir = path.dirname(handle.mergedDir);
-		await fs.rm(baseDir, { recursive: true, force: true });
+		await removeIsolationDirectory(handle.mergedDir, worktreeRoot);
 	}
 }
 
