@@ -1,4 +1,4 @@
-import { getMCPConfigPath, logger } from "@sayknow-cli/utils";
+import { getMCPConfigPath, logger, sanitizeDisplayLine } from "@sayknow-cli/utils";
 import { connectToServer, disconnectServer, listPrompts, listResources, listTools } from "../../runtime-mcp/client";
 import {
 	addMCPServer,
@@ -196,6 +196,14 @@ function parseMcpSearchArgs(rest: string): ParsedMcpSearchArgs {
 	return { keyword, scope, limit, semantic };
 }
 
+/**
+ * One terminal row for an untrusted MCP server or tool name.
+ * Ordinary names are unchanged. Controls, OSC, and line breaks are not.
+ */
+export function mcpTerminalLabel(value: string): string {
+	return sanitizeDisplayLine(value);
+}
+
 async function withPreparedMcpConnection<T>(
 	runtime: SlashCommandRuntime,
 	name: string,
@@ -290,7 +298,7 @@ async function handleTestCommand(rest: string, runtime: SlashCommandRuntime): Pr
 		return await withPreparedMcpConnection(runtime, name, server.config, server.scope, async connection => {
 			const tools = await listTools(connection);
 			const lines = [`Server "${name}" connected (${tools.length} tools).`];
-			for (const tool of tools) lines.push(`  - ${tool.name}`);
+			for (const tool of tools) lines.push(`  - ${mcpTerminalLabel(tool.name)}`);
 			await runtime.output(lines.join("\n"));
 			return commandConsumed();
 		});
@@ -410,7 +418,7 @@ async function handleListCommand(runtime: SlashCommandRuntime): Promise<SlashCom
 					} else {
 						location = (config as { command: string }).command;
 					}
-					return `${name} | ${type} | ${enabled} | ${location ?? "(unknown)"} [${scope}]`;
+					return `${mcpTerminalLabel(name)} | ${type} | ${enabled} | ${location ?? "(unknown)"} [${scope}]`;
 				})
 				.join("\n"),
 		);
