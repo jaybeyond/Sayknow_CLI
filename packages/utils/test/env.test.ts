@@ -1,15 +1,16 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
+import { rmSync as safeRmSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { pathToFileURL } from "node:url";
-import { $flag, $pickenvpos, $pickflag, filterProcessEnv, parseEnvFile, parseShellEnvFile } from "../src/env";
+import { $envpos, $flag, $pickenvpos, $pickflag, filterProcessEnv, parseEnvFile, parseShellEnvFile } from "../src/env";
 
 const tempDirs: string[] = [];
 
 afterEach(() => {
 	for (const dir of tempDirs.splice(0)) {
-		fs.rmSync(dir, { force: true, recursive: true });
+		safeRmSync(dir, { force: true, recursive: true });
 	}
 });
 
@@ -73,6 +74,54 @@ describe("parseEnvFile", () => {
 			SKC_FEATURE: "enabled",
 		});
 	});
+	it("accepts every assignment shape Bun's dotenv loader accepts", () => {
+		const filePath = writeTempEnv(
+			[
+				"PLAIN=value",
+				"export EXPORTED=exported-value",
+				"export\tTABBED=tabbed-value",
+				"SPACED_AROUND = spaced-value",
+				"export SPACED_EXPORT = spaced-export-value",
+				"INLINE_COMMENT=value # note",
+				"INLINE_COMMENT_TIGHT=value#note",
+				"ESCAPED_HASH=value\\#note",
+				"ESCAPED_HASH_EVEN=value\\\\#note",
+				'QUOTED_ESCAPED_HASH="value\\#kept"',
+				'QUOTED_HASH="value # kept"',
+				"MULTI_WORD=a b",
+			].join("\n"),
+		);
+
+		expect(parseEnvFile(filePath)).toEqual({
+			PLAIN: "value",
+			EXPORTED: "exported-value",
+			TABBED: "tabbed-value",
+			SPACED_AROUND: "spaced-value",
+			SPACED_EXPORT: "spaced-export-value",
+			INLINE_COMMENT: "value",
+			INLINE_COMMENT_TIGHT: "value",
+			ESCAPED_HASH: "value\\",
+			ESCAPED_HASH_EVEN: "value\\\\",
+			QUOTED_ESCAPED_HASH: "value\\#kept",
+			QUOTED_HASH: "value # kept",
+			MULTI_WORD: "a b",
+		});
+	});
+
+	it("loads Bun colon-form declarations in the project dotenv", () => {
+		const filePath = writeTempEnv(
+			[
+				"AWS_ACCESS_KEY_ID: project-access",
+				"GOOGLE_APPLICATION_CREDENTIALS: /tmp/project-adc.json",
+				"DSN: postgres://project",
+			].join("\n"),
+		);
+		expect(parseEnvFile(filePath)).toEqual({
+			AWS_ACCESS_KEY_ID: "project-access",
+			GOOGLE_APPLICATION_CREDENTIALS: "/tmp/project-adc.json",
+			DSN: "postgres://project",
+		});
+	});
 });
 
 describe("parseShellEnvFile", () => {
@@ -120,6 +169,9 @@ assertEqual($env.SKC_ENV_TEST_INHERITED_ONLY, "overlay-after-import", "live $env
 Bun.env.SKC_ENV_TEST_FALLBACK_ONLY = "fallback-after-import";
 assertEqual($inheritedEnv("SKC_ENV_TEST_FALLBACK_ONLY"), undefined, "absent inherited value");
 assertEqual($env.SKC_ENV_TEST_FALLBACK_ONLY, "fallback-after-import", "fallback remains available through $env");
+delete Bun.env.SKC_ENV_TEST_INHERITED_ONLY;
+assertEqual($inheritedEnv("SKC_ENV_TEST_INHERITED_ONLY"), undefined, "deleted key is no longer inherited");
+assertEqual($env.SKC_ENV_TEST_INHERITED_ONLY, undefined, "deleted key is gone from merged env");
 `,
 			{ SKC_ENV_TEST_INHERITED_ONLY: "shell-from-parent" },
 			dir,
@@ -128,6 +180,108 @@ assertEqual($env.SKC_ENV_TEST_FALLBACK_ONLY, "fallback-after-import", "fallback 
 });
 
 describe("$credentialEnv", () => {
+	it("keeps colon-form project credentials out of the credential view", () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-utils-env-credential-colon-"));
+		const home = fs.mkdtempSync(path.join(os.tmpdir(), "pi-utils-env-home-"));
+		const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-utils-env-agent-"));
+		tempDirs.push(dir, home, agentDir);
+		fs.writeFileSync(
+			path.join(dir, ".env"),
+			[
+				"DSN: postgres://project",
+				"AWS_ACCESS_KEY_ID: project-access",
+				"GOOGLE_APPLICATION_CREDENTIALS: /tmp/project-adc.json",
+			].join("\n"),
+		);
+		const envSourceUrl = pathToFileURL(path.resolve(import.meta.dir, "../src/env.ts")).href;
+		runEnvIsolationScript(
+			`
+import { $credentialEnv, $env } from ${JSON.stringify(envSourceUrl)};
+if ($env.DSN !== "postgres://project" || $env.AWS_ACCESS_KEY_ID !== "project-access" || $env.GOOGLE_APPLICATION_CREDENTIALS !== "/tmp/project-adc.json") throw new Error("colon dotenv values were not loaded");
+for (const key of ["DSN", "AWS_ACCESS_KEY_ID", "GOOGLE_APPLICATION_CREDENTIALS"]) if ($credentialEnv(key) !== undefined) throw new Error("project colon credential leaked");
+`,
+			{ HOME: home, SKC_CODING_AGENT_DIR: agentDir },
+			dir,
+		);
+	});
+
+	it("lets a static higher-precedence dotenv value clear dynamic provenance", () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-utils-env-credential-dynamic-layer-"));
+		const home = fs.mkdtempSync(path.join(os.tmpdir(), "pi-utils-env-home-"));
+		const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-utils-env-agent-"));
+		tempDirs.push(dir, home, agentDir);
+		fs.writeFileSync(path.join(dir, ".env"), "LAYERED_PROVIDER_KEY: $UNTRUSTED_DYNAMIC\n");
+		fs.writeFileSync(path.join(dir, ".env.local"), "LAYERED_PROVIDER_KEY: static-project\n");
+		const envSourceUrl = pathToFileURL(path.resolve(import.meta.dir, "../src/env.ts")).href;
+		runEnvIsolationScript(
+			`
+import { $credentialEnv } from ${JSON.stringify(envSourceUrl)};
+if ($credentialEnv("LAYERED_PROVIDER_KEY") !== "inherited-trusted") throw new Error("static winning dotenv layer was tainted by a lower dynamic declaration");
+`,
+			{ HOME: home, SKC_CODING_AGENT_DIR: agentDir, LAYERED_PROVIDER_KEY: "inherited-trusted" },
+			dir,
+		);
+	});
+
+	it("uses only the platform-effective HOME variable for trusted home files", () => {
+		if (process.platform === "win32") return;
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-utils-env-home-platform-"));
+		const home = fs.mkdtempSync(path.join(os.tmpdir(), "pi-utils-env-home-"));
+		const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-utils-env-agent-"));
+		tempDirs.push(dir, home, agentDir);
+		fs.writeFileSync(path.join(home, ".env"), "HOME_TRUSTED_KEY: trusted-home\n");
+		fs.writeFileSync(path.join(dir, ".env"), "USERPROFILE: $ATTACKER_HOME\n");
+		const envSourceUrl = pathToFileURL(path.resolve(import.meta.dir, "../src/env.ts")).href;
+		runEnvIsolationScript(
+			`
+import { $credentialEnv } from ${JSON.stringify(envSourceUrl)};
+if ($credentialEnv("HOME_TRUSTED_KEY") !== "trusted-home") throw new Error("non-effective USERPROFILE changed trusted HOME selection");
+`,
+			{ HOME: home, SKC_CODING_AGENT_DIR: agentDir },
+			dir,
+		);
+	});
+
+	it("preserves inherited credentials when a hostile project HOME overlays the runtime HOME", () => {
+		if (process.platform === "win32") return;
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-utils-env-hostile-home-"));
+		const hostileHome = fs.mkdtempSync(path.join(os.tmpdir(), "pi-utils-env-hostile-home-root-"));
+		const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-utils-env-agent-"));
+		tempDirs.push(dir, hostileHome, agentDir);
+		fs.writeFileSync(path.join(hostileHome, ".env"), "HOSTILE_HOME_CREDENTIAL=must-not-load\n");
+		fs.writeFileSync(path.join(dir, ".env"), "HOME=$HOSTILE_HOME\n");
+		const envSourceUrl = pathToFileURL(path.resolve(import.meta.dir, "../src/env.ts")).href;
+		runEnvIsolationScript(
+			`
+import { $credentialEnv } from ${JSON.stringify(envSourceUrl)};
+if ($credentialEnv("HOSTILE_HOME_CREDENTIAL") !== undefined) throw new Error("hostile HOME credential was loaded");
+if ($credentialEnv("PRESERVED_OPERATOR_CREDENTIAL") !== "operator-value") throw new Error("inherited credential was dropped");
+`,
+			{ HOME: hostileHome, SKC_CODING_AGENT_DIR: agentDir, PRESERVED_OPERATOR_CREDENTIAL: "operator-value" },
+			dir,
+		);
+	});
+	it("keeps POSIX environment names case-sensitive when folding Windows declarations", () => {
+		if (process.platform === "win32") return;
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-utils-env-case-"));
+		const home = fs.mkdtempSync(path.join(os.tmpdir(), "pi-utils-env-case-home-"));
+		const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-utils-env-agent-"));
+		tempDirs.push(dir, home, agentDir);
+		fs.writeFileSync(path.join(home, ".env"), "HOME_TRUSTED_KEY=trusted-home\n");
+		// On POSIX `home` and `HOME` are distinct variables, so a lowercase
+		// declaration must not make the authoritative home ambiguous. Folding it
+		// would drop the trusted home's credentials on every POSIX host.
+		fs.writeFileSync(path.join(dir, ".env"), "home=$ATTACKER_HOME\n");
+		const envSourceUrl = pathToFileURL(path.resolve(import.meta.dir, "../src/env.ts")).href;
+		runEnvIsolationScript(
+			`
+import { $credentialEnv } from ${JSON.stringify(envSourceUrl)};
+if ($credentialEnv("HOME_TRUSTED_KEY") !== "trusted-home") throw new Error("lowercase home declaration folded into HOME on POSIX");
+`,
+			{ HOME: home, SKC_CODING_AGENT_DIR: agentDir },
+			dir,
+		);
+	});
 	it("does not read provider credentials from the current project's .env overlay", () => {
 		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-utils-env-credential-"));
 		const home = fs.mkdtempSync(path.join(os.tmpdir(), "pi-utils-env-home-"));
@@ -239,6 +393,142 @@ if ($credentialEnv("LIVE_PROVIDER_KEY") !== undefined) {
 			{
 				HOME: home,
 				SKC_CODING_AGENT_DIR: agentDir,
+			},
+			dir,
+		);
+	});
+
+	it("reloads credentials whose inherited value came from the trusted agent env", () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-utils-env-credential-rotating-"));
+		const home = fs.mkdtempSync(path.join(os.tmpdir(), "pi-utils-env-home-"));
+		const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-utils-env-agent-"));
+		tempDirs.push(dir, home, agentDir);
+		const agentEnvPath = path.join(agentDir, ".env");
+		fs.writeFileSync(agentEnvPath, "ROTATING_PROVIDER_KEY=old-token\n");
+
+		const envSourceUrl = pathToFileURL(path.resolve(import.meta.dir, "../src/env.ts")).href;
+		runEnvIsolationScript(
+			`
+import * as fs from "node:fs";
+import { $rotatingCredentialEnv } from ${JSON.stringify(envSourceUrl)};
+
+if ($rotatingCredentialEnv("ROTATING_PROVIDER_KEY") !== "old-token") {
+	throw new Error("initial agent credential was not resolved");
+}
+fs.writeFileSync(${JSON.stringify(path.join(agentDir, ".env.next"))}, "ROTATING_PROVIDER_KEY=new-token\\n");
+fs.renameSync(${JSON.stringify(path.join(agentDir, ".env.next"))}, ${JSON.stringify(agentEnvPath)});
+if ($rotatingCredentialEnv("ROTATING_PROVIDER_KEY") !== "new-token") {
+	throw new Error("rotated agent credential was not reloaded");
+}
+const concurrentValues = await Promise.all(
+	Array.from({ length: 32 }, () => Promise.resolve($rotatingCredentialEnv("ROTATING_PROVIDER_KEY"))),
+);
+if (concurrentValues.some(value => value !== "new-token")) {
+	throw new Error("concurrent credential reads observed an inconsistent value");
+}
+fs.writeFileSync(${JSON.stringify(path.join(agentDir, ".env.next"))}, "");
+fs.renameSync(${JSON.stringify(path.join(agentDir, ".env.next"))}, ${JSON.stringify(agentEnvPath)});
+if ($rotatingCredentialEnv("ROTATING_PROVIDER_KEY") !== undefined) {
+	throw new Error("removed agent credential must not fall back to its stale inherited value");
+}
+`,
+			{
+				HOME: home,
+				SKC_CODING_AGENT_DIR: agentDir,
+				ROTATING_PROVIDER_KEY: "old-token",
+			},
+			dir,
+		);
+	});
+
+	it("keeps shell precedence for names never owned by the agent env", () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-utils-env-credential-shell-"));
+		const home = fs.mkdtempSync(path.join(os.tmpdir(), "pi-utils-env-home-"));
+		const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-utils-env-agent-"));
+		tempDirs.push(dir, home, agentDir);
+		fs.writeFileSync(path.join(dir, ".env"), "PROJECT_ONLY_PROVIDER_KEY=project-token\n");
+
+		const envSourceUrl = pathToFileURL(path.resolve(import.meta.dir, "../src/env.ts")).href;
+		runEnvIsolationScript(
+			`
+import { $rotatingCredentialEnv } from ${JSON.stringify(envSourceUrl)};
+
+if ($rotatingCredentialEnv("SHELL_ONLY_PROVIDER_KEY") !== "shell-token") {
+	throw new Error("a name never owned by the agent env lost shell precedence");
+}
+if ($rotatingCredentialEnv("PROJECT_ONLY_PROVIDER_KEY") !== undefined) {
+	throw new Error("project dotenv must remain excluded from rotating credential resolution");
+}
+`,
+			{
+				HOME: home,
+				SKC_CODING_AGENT_DIR: agentDir,
+				SHELL_ONLY_PROVIDER_KEY: "shell-token",
+			},
+			dir,
+		);
+	});
+
+	it("lets the trusted agent env replace a stale inherited credential", () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-utils-env-credential-pinned-"));
+		const home = fs.mkdtempSync(path.join(os.tmpdir(), "pi-utils-env-home-"));
+		const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-utils-env-agent-"));
+		tempDirs.push(dir, home, agentDir);
+		const agentEnvPath = path.join(agentDir, ".env");
+		fs.writeFileSync(agentEnvPath, "PINNED_PROVIDER_KEY=agent-token\n");
+
+		const envSourceUrl = pathToFileURL(path.resolve(import.meta.dir, "../src/env.ts")).href;
+		runEnvIsolationScript(
+			`
+import * as fs from "node:fs";
+import { $rotatingCredentialEnv } from ${JSON.stringify(envSourceUrl)};
+
+fs.writeFileSync(${JSON.stringify(agentEnvPath)}, "PINNED_PROVIDER_KEY=rotated-agent-token\\n");
+if ($rotatingCredentialEnv("PINNED_PROVIDER_KEY") !== "rotated-agent-token") {
+	throw new Error("the trusted agent credential did not replace the stale inherited value");
+}
+`,
+			{
+				HOME: home,
+				SKC_CODING_AGENT_DIR: agentDir,
+				PINNED_PROVIDER_KEY: "explicit-shell-token",
+			},
+			dir,
+		);
+	});
+
+	it("fails closed for a symlinked or unreadable trusted agent env", () => {
+		if (process.platform === "win32") return;
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-utils-env-credential-link-"));
+		const home = fs.mkdtempSync(path.join(os.tmpdir(), "pi-utils-env-home-"));
+		const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-utils-env-agent-"));
+		tempDirs.push(dir, home, agentDir);
+		const agentEnvPath = path.join(agentDir, ".env");
+		const outsideEnvPath = path.join(dir, "outside.env");
+		fs.writeFileSync(agentEnvPath, "UNSAFE_PROVIDER_KEY=old-token\n");
+		fs.writeFileSync(outsideEnvPath, "UNSAFE_PROVIDER_KEY=outside-token\n");
+
+		const envSourceUrl = pathToFileURL(path.resolve(import.meta.dir, "../src/env.ts")).href;
+		runEnvIsolationScript(
+			`
+import * as fs from "node:fs";
+import { $rotatingCredentialEnv } from ${JSON.stringify(envSourceUrl)};
+
+fs.rmSync(${JSON.stringify(agentEnvPath)});
+fs.symlinkSync(${JSON.stringify(outsideEnvPath)}, ${JSON.stringify(agentEnvPath)});
+if ($rotatingCredentialEnv("UNSAFE_PROVIDER_KEY") !== undefined) {
+	throw new Error("a symlinked agent env must not provide credentials");
+}
+fs.rmSync(${JSON.stringify(agentEnvPath)});
+fs.mkdirSync(${JSON.stringify(agentEnvPath)});
+if ($rotatingCredentialEnv("UNSAFE_PROVIDER_KEY") !== undefined) {
+	throw new Error("an unreadable agent env shape must fail closed");
+}
+`,
+			{
+				HOME: home,
+				SKC_CODING_AGENT_DIR: agentDir,
+				UNSAFE_PROVIDER_KEY: "old-token",
 			},
 			dir,
 		);
@@ -381,6 +671,36 @@ describe("$pickflag", () => {
 	});
 });
 
+describe("$envpos", () => {
+	const NAME = "__SKC_UTILS_ENVPOS_PROBE";
+
+	afterEach(() => {
+		delete process.env[NAME];
+	});
+
+	it.each([
+		"12oops",
+		"1.5",
+		"1e3",
+		"0",
+		"-1",
+		String(Number.MAX_SAFE_INTEGER + 1),
+	])("returns the default for invalid complete-token value %j", value => {
+		process.env[NAME] = value;
+		expect($envpos(NAME, 100)).toBe(100);
+	});
+
+	it("accepts a whitespace-padded positive safe integer", () => {
+		process.env[NAME] = " 42 ";
+		expect($envpos(NAME, 100)).toBe(42);
+	});
+
+	it("accepts a zero-padded positive safe integer", () => {
+		process.env[NAME] = "00042";
+		expect($envpos(NAME, 100)).toBe(42);
+	});
+});
+
 describe("$pickenvpos", () => {
 	const SKC_NAME = "__SKC_UTILS_PICKENVPOS_PROBE";
 	const PI_NAME = "__PI_UTILS_PICKENVPOS_PROBE";
@@ -411,6 +731,12 @@ describe("$pickenvpos", () => {
 
 	it("skips a set-but-invalid SKC key and falls through to a valid PI key", () => {
 		process.env[SKC_NAME] = "-5";
+		process.env[PI_NAME] = "3";
+		expect($pickenvpos([SKC_NAME, PI_NAME], 100)).toBe(3);
+	});
+
+	it("skips a partially parsed SKC value and falls through to a valid PI key", () => {
+		process.env[SKC_NAME] = "12oops";
 		process.env[PI_NAME] = "3";
 		expect($pickenvpos([SKC_NAME, PI_NAME], 100)).toBe(3);
 	});

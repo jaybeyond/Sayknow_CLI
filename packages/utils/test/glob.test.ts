@@ -19,6 +19,15 @@ afterEach(async () => {
 });
 
 describe("globPaths", () => {
+	it("rejects an already-aborted scan even when the pattern has no matches", async () => {
+		const cwd = await makeTempDir();
+		const controller = new AbortController();
+		const reason = new Error("cancelled");
+		controller.abort(reason);
+
+		await expect(globPaths("definitely-no-match-*", { cwd, signal: controller.signal })).rejects.toBe(reason);
+	});
+
 	it("applies exclude patterns without dropping included files", async () => {
 		const cwd = await makeTempDir();
 		await mkdir(join(cwd, "src"), { recursive: true });

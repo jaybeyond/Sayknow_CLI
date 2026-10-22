@@ -19,7 +19,11 @@ const PROBE = path.join(import.meta.dir, "fixtures", "agent-dir-trust-probe.ts")
 const PROBE_VAR = "SKC_TRUST_PROBE_VALUE";
 
 interface Resolved {
+	trustedHome: string;
 	agentDir: string;
+	configRoot: string;
+	pluginsDir: string;
+	pythonGatewayDir: string;
 	probeValue: string | null;
 }
 
@@ -68,6 +72,46 @@ async function resolveIn(cwd: string, overrides: Record<string, string> = {}): P
 	return JSON.parse(stdout.trim()) as Resolved;
 }
 
+async function resolveWithoutPlatformHome(cwd: string, hostileHome: string): Promise<Resolved> {
+	const env: Record<string, string> = {};
+	for (const [key, value] of Object.entries(process.env)) {
+		if (value !== undefined) env[key] = value;
+	}
+	if (process.platform === "win32") {
+		delete env.USERPROFILE;
+		env.HOME = hostileHome;
+	} else {
+		delete env.HOME;
+		env.USERPROFILE = hostileHome;
+	}
+	const proc = Bun.spawn([process.execPath, PROBE], { cwd, env, stdout: "pipe", stderr: "pipe" });
+	const [stdout, stderr] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
+	const exitCode = await proc.exited;
+	if (exitCode !== 0) throw new Error(`probe failed (${exitCode}): ${stderr}`);
+	return JSON.parse(stdout.trim()) as Resolved;
+}
+
+/** The account home of the running user, from the passwd database on Linux. */
+async function accountHomeOfRunningUser(): Promise<string> {
+	if (process.platform === "linux") {
+		// NSS, matching production: reading `/etc/passwd` directly would disagree
+		// with the resolver for any LDAP- or SSSD-backed account, which has no local
+		// entry, and report a false failure.
+		// `Bun.spawn` throws when the executable is missing rather than returning a
+		// non-zero exit, so a host without `getent` must fall through to the portable
+		// path instead of failing the suite.
+		try {
+			const uid = os.userInfo().uid;
+			const proc = Bun.spawn(["getent", "passwd", String(uid)], { stdout: "pipe", stderr: "ignore" });
+			const stdout = await new Response(proc.stdout).text();
+			if ((await proc.exited) === 0) {
+				const home = stdout.split("\n")[0]?.split(":")[5];
+				if (home && path.isAbsolute(home) && home !== path.parse(home).root) return home;
+			}
+		} catch {}
+	}
+	return os.userInfo().homedir;
+}
 describe("agent directory trust boundary", () => {
 	it("honors an agent directory inherited from the launching shell", async () => {
 		const agentDir = agentDirWith("from-operator-agent-env");
@@ -79,6 +123,20 @@ describe("agent directory trust boundary", () => {
 	it("ignores an agent directory planted by the project .env", async () => {
 		const agentDir = agentDirWith("from-attacker-agent-env");
 		const resolved = await resolveIn(projectDir(`SKC_CODING_AGENT_DIR=${agentDir}\n`));
+		expect(resolved.agentDir).not.toBe(agentDir);
+		expect(resolved.probeValue).toBeNull();
+	});
+
+	it("ignores an exported agent directory planted by the project .env", async () => {
+		const agentDir = agentDirWith("from-attacker-exported-agent-env");
+		const resolved = await resolveIn(projectDir(`export SKC_CODING_AGENT_DIR=${agentDir}\n`));
+		expect(resolved.agentDir).not.toBe(agentDir);
+		expect(resolved.probeValue).toBeNull();
+	});
+	it("ignores an agent directory planted with whitespace around the equals sign", async () => {
+		// Bun's dotenv loader accepts `KEY = value`; the guard must see the same key.
+		const agentDir = agentDirWith("from-attacker-spaced-agent-env");
+		const resolved = await resolveIn(projectDir(`SKC_CODING_AGENT_DIR = ${agentDir}\n`));
 		expect(resolved.agentDir).not.toBe(agentDir);
 		expect(resolved.probeValue).toBeNull();
 	});
@@ -138,5 +196,63 @@ describe("agent directory trust boundary", () => {
 			PI_CODING_AGENT_DIR: piDir,
 		});
 		expect(resolved.agentDir).toBe(skcDir);
+	});
+
+	it("uses the static higher-precedence dotenv layer for agent and XDG resolution", async () => {
+		if (process.platform !== "linux") return;
+		const operatorAgent = agentDirWith("from-layered-operator-agent");
+		const home = tempDir();
+		const xdgState = tempDir();
+		const staticXdgState = tempDir();
+		const xdgData = tempDir();
+		const xdgCache = tempDir();
+		for (const root of [xdgState, xdgData, xdgCache]) fs.mkdirSync(path.join(root, "skc"), { recursive: true });
+		const cwd = projectDir(
+			`SKC_CODING_AGENT_DIR=$LOWER_DYNAMIC\nSKC_CONFIG_DIR=.layered\nXDG_STATE_HOME=$LOWER_STATE\n`,
+		);
+		fs.writeFileSync(
+			path.join(cwd, ".env.local"),
+			"SKC_CODING_AGENT_DIR=/tmp/static-project-agent\nSKC_CONFIG_DIR=.layered-static\nXDG_STATE_HOME=" +
+				staticXdgState +
+				"\n",
+		);
+		const resolved = await resolveIn(cwd, {
+			HOME: home,
+			NODE_ENV: "production",
+			SKC_CODING_AGENT_DIR: operatorAgent,
+			SKC_CONFIG_DIR: ".operator-config",
+			XDG_STATE_HOME: xdgState,
+			XDG_DATA_HOME: xdgData,
+			XDG_CACHE_HOME: xdgCache,
+		});
+		expect(resolved.agentDir).toBe(operatorAgent);
+		expect(resolved.configRoot).toBe(path.join(home, ".operator-config"));
+		expect(resolved.pythonGatewayDir).toBe(path.join(operatorAgent, "python-gateway"));
+		expect(resolved.pluginsDir).toBe(path.join(home, ".operator-config", "plugins"));
+	});
+
+	it("uses the account home when POSIX HOME is absent despite hostile USERPROFILE", async () => {
+		if (process.platform === "win32") return;
+		const cwd = projectDir("SOMETHING_ELSE=1\n");
+		const hostileHome = tempDir();
+		const resolved = await resolveWithoutPlatformHome(cwd, hostileHome);
+		// Expect the passwd database directly: a parent-side os.userInfo().homedir
+		// follows an isolated HOME, while the child probe has HOME deleted and
+		// resolves the real account home.
+		const accountHome = await accountHomeOfRunningUser();
+		expect(resolved.trustedHome).toBe(accountHome);
+		expect(resolved.trustedHome).not.toBe(hostileHome);
+		expect(resolved.configRoot).toBe(path.join(accountHome, ".skc"));
+	});
+
+	it("uses the account home when Windows USERPROFILE is absent despite hostile HOME", async () => {
+		if (process.platform !== "win32") return;
+		const cwd = projectDir("SOMETHING_ELSE=1\n");
+		const hostileHome = tempDir();
+		const resolved = await resolveWithoutPlatformHome(cwd, hostileHome);
+		const accountHome = await accountHomeOfRunningUser();
+		expect(resolved.trustedHome).toBe(accountHome);
+		expect(resolved.trustedHome).not.toBe(hostileHome);
+		expect(resolved.configRoot).toBe(path.join(accountHome, ".skc"));
 	});
 });

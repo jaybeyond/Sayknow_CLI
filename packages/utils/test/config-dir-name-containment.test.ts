@@ -1,4 +1,6 @@
 import { afterEach, describe, expect, it } from "bun:test";
+import * as fs from "node:fs";
+import { rmSync as safeRmSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { CONFIG_DIR_NAME, getConfigAgentDirName, getConfigDirName } from "../src/dirs";
@@ -82,5 +84,33 @@ describe("config directory name containment", () => {
 	it("ignores a blank configured name", () => {
 		setOnly("SKC_CONFIG_DIR", "   ");
 		expect(getConfigDirName()).toBe(CONFIG_DIR_NAME);
+	});
+
+	it("ignores POSIX USERPROFILE-only project declarations", async () => {
+		if (process.platform === "win32") return;
+		const project = fs.mkdtempSync(path.join(os.tmpdir(), "pi-utils-home-project-"));
+		const home = fs.mkdtempSync(path.join(os.tmpdir(), "pi-utils-home-runtime-"));
+		try {
+			fs.writeFileSync(path.join(project, ".env"), "USERPROFILE=/tmp/suspect-project-home\n");
+			const source = path.resolve(import.meta.dir, "../src/dirs.ts");
+			const proc = Bun.spawn(
+				[
+					process.execPath,
+					"-e",
+					`import { getConfigRootDir } from ${JSON.stringify(source)}; console.log(getConfigRootDir())`,
+				],
+				{
+					cwd: project,
+					env: { ...process.env, HOME: home, USERPROFILE: "/tmp/suspect-runtime-home" },
+					stdout: "pipe",
+					stderr: "pipe",
+				},
+			);
+			const output = await new Response(proc.stdout).text();
+			expect(output.trim()).toBe(path.join(home, CONFIG_DIR_NAME));
+		} finally {
+			safeRmSync(project, { recursive: true, force: true });
+			safeRmSync(home, { recursive: true, force: true });
+		}
 	});
 });
