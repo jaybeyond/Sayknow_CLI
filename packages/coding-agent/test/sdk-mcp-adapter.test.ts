@@ -2,6 +2,7 @@ import { afterEach, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import path from "node:path";
+import { VERSION } from "@sayknow-cli/utils";
 import { brokerProcessIncarnation } from "../src/sdk/broker/discovery";
 import { brokerOwnerForTest } from "../src/sdk/broker/ensure";
 import { createSdkMcpServer } from "../src/sdk/mcp";
@@ -58,6 +59,29 @@ function fixture() {
 	);
 	return { repo, sessionId, sent: () => sends };
 }
+
+test("SDK MCP initialize negotiates supported versions and reports server version", async () => {
+	const mcp = createSdkMcpServer({ repo: process.cwd() });
+	const cases = [
+		{ protocolVersion: "2025-06-18", expected: "2025-06-18" },
+		{ protocolVersion: "2024-11-05", expected: "2024-11-05" },
+		{ protocolVersion: "unsupported", expected: "2025-06-18" },
+		{ protocolVersion: undefined, expected: "2025-06-18" },
+	] as const;
+
+	for (const input of cases) {
+		const response = await mcp.handleJsonRpc({
+			jsonrpc: "2.0",
+			id: 1,
+			method: "initialize",
+			...(input.protocolVersion === undefined ? {} : { params: { protocolVersion: input.protocolVersion } }),
+		});
+		const result = response.result as { protocolVersion: string; serverInfo: { version: string } };
+		expect(result.protocolVersion).toBe(input.expected);
+		expect(result.serverInfo.version).toBe(VERSION);
+		expect(result.serverInfo.version.length).toBeGreaterThan(0);
+	}
+});
 
 test("MCP SDK schemas exclude endpoint credentials and reject G02 before any WebSocket send", async () => {
 	const { repo, sessionId, sent } = fixture();
