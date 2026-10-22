@@ -1073,6 +1073,54 @@ async function resolvePatchDeletePath(
 	return path.join(realParent, path.basename(absolutePath));
 }
 
+/**
+ * `mkdir` follows a directory symlink. Walk to the nearest existing ancestor
+ * and return its real path plus the missing suffix. A parent that is already
+ * lexically outside the workspace or session local root is unchanged.
+ */
+async function resolvePatchMkdirPath(
+	cwd: string,
+	absolutePath: string,
+	localRoot: string | undefined,
+	parentDir: string,
+	displayPath: string,
+	signal?: AbortSignal,
+): Promise<string> {
+	signal?.throwIfAborted();
+	const boundary = path.resolve(boundaryForPatchDelete(cwd, absolutePath, localRoot));
+	const lexicalParent = path.resolve(parentDir);
+	if (!pathIsWithin(lexicalParent, boundary)) return parentDir;
+	// A root that does not exist yet is not an escape. Keep the missing suffix
+	// under its real ancestor, which is what mkdir did before this check.
+	const realRoot = await realpathThroughExistingAncestor(boundary, signal);
+	signal?.throwIfAborted();
+	const realParent = await realpathThroughExistingAncestor(lexicalParent, signal);
+	signal?.throwIfAborted();
+	if (!pathIsWithin(realParent, realRoot)) {
+		throw new ApplyPatchError(`Parent directory resolves outside its root: ${displayPath}`);
+	}
+	return realParent;
+}
+
+async function realpathThroughExistingAncestor(target: string, signal?: AbortSignal): Promise<string> {
+	const resolved = path.resolve(target);
+	const missing: string[] = [];
+	let cursor = resolved;
+	for (;;) {
+		signal?.throwIfAborted();
+		try {
+			const real = await fs.promises.realpath(cursor);
+			return missing.length === 0 ? real : path.join(real, ...missing.reverse());
+		} catch (error) {
+			if (!isEnoent(error)) throw error;
+			const parent = path.dirname(cursor);
+			if (parent === cursor) return resolved;
+			missing.push(path.basename(cursor));
+			cursor = parent;
+		}
+	}
+}
+
 async function readExistingPatchFile(fileSystem: FileSystem, absolutePath: string, path: string): Promise<string> {
 	try {
 		return await fileSystem.read(absolutePath);
@@ -1499,11 +1547,44 @@ export async function applyPatch(input: PatchInput, options: ApplyPatchOptions):
 		const destPath = resolvePath(input.rename);
 		if (destPath !== absolutePath) mutationPaths.push(destPath);
 	}
+	// The cross-process lock creates missing parent directories for `<path>.lock`.
+	// Check every locked create/move path, including a rename on create, first.
+	await preflightPatchMkdir(input, options);
 	const usingDefaultFs = options.fs === undefined || options.fs === defaultFileSystem;
 	// dryRun/preview must stay read-only: never create durable `<path>.lock` dirs
 	// (would fail on read-only parents and mutate the FS during preview) (#2900 review).
 	const crossProcess = options.dryRun === true ? false : (options.crossProcessLock ?? usingDefaultFs);
 	return withEditPathMutation(mutationPaths, () => applyNormalizedPatch(input, options), { crossProcess });
+}
+
+/** Read-only mkdir check for one patch hunk. Does not create directories. */
+export async function preflightPatchMkdir(input: PatchInput, options: ApplyPatchOptions): Promise<void> {
+	const resolvePath = (p: string): string => resolveToCwd(p, options.cwd);
+	const absolutePath = resolvePath(input.path);
+	const op = input.op ?? "update";
+	if (op === "create") {
+		await rejectPatchMkdirEscape(options.cwd, absolutePath, options.localRoot, input.path, options.signal);
+	}
+	if (input.rename) {
+		const destPath = resolvePath(input.rename);
+		if (destPath !== absolutePath) {
+			// The source is locked too. Check it before that lock can mkdir through a symlink.
+			await rejectPatchMkdirEscape(options.cwd, absolutePath, options.localRoot, input.path, options.signal);
+			await rejectPatchMkdirEscape(options.cwd, destPath, options.localRoot, input.rename, options.signal);
+		}
+	}
+}
+
+async function rejectPatchMkdirEscape(
+	cwd: string,
+	absolutePath: string,
+	localRoot: string | undefined,
+	displayPath: string,
+	signal?: AbortSignal,
+): Promise<void> {
+	const parentDir = path.dirname(absolutePath);
+	if (!parentDir || parentDir === ".") return;
+	await resolvePatchMkdirPath(cwd, absolutePath, localRoot, parentDir, displayPath, signal);
 }
 
 /**
@@ -1542,11 +1623,17 @@ async function applyNormalizedPatch(input: PatchInput, options: ApplyPatchOption
 		const normalizedContent = normalizeCreateContent(input.diff);
 		const content = normalizedContent.endsWith("\n") ? normalizedContent : `${normalizedContent}\n`;
 
+		const parentDir = path.dirname(absolutePath);
+		const mkdirPath =
+			parentDir && parentDir !== "."
+				? await resolvePatchMkdirPath(cwd, absolutePath, localRoot, parentDir, input.path, signal)
+				: undefined;
 		if (!dryRun) {
-			const parentDir = path.dirname(absolutePath);
-			if (parentDir && parentDir !== ".") {
-				await fs.mkdir(parentDir);
+			if (mkdirPath) {
+				signal?.throwIfAborted();
+				await fs.mkdir(mkdirPath);
 			}
+			signal?.throwIfAborted();
 			await fs.write(absolutePath, content);
 		}
 
@@ -1612,6 +1699,20 @@ async function applyNormalizedPatch(input: PatchInput, options: ApplyPatchOption
 	const finalContent = bom + restoreLineEndings(newContent, lineEnding);
 	const destPath = input.rename ? resolvePath(input.rename) : absolutePath;
 	const isMove = Boolean(input.rename) && destPath !== absolutePath;
+	let moveParent: string | undefined;
+	if (isMove) {
+		const parentDir = path.dirname(destPath);
+		if (parentDir && parentDir !== ".") {
+			moveParent = await resolvePatchMkdirPath(
+				cwd,
+				destPath,
+				localRoot,
+				parentDir,
+				input.rename ?? input.path,
+				signal,
+			);
+		}
+	}
 
 	if (!dryRun) {
 		// Commit-time CAS: reject if another writer mutated the file after our
@@ -1621,10 +1722,11 @@ async function applyNormalizedPatch(input: PatchInput, options: ApplyPatchOption
 			throw new ApplyPatchError(`concurrent edit conflict: file changed since read: ${input.path}`);
 		}
 		if (isMove) {
-			const parentDir = path.dirname(destPath);
-			if (parentDir && parentDir !== ".") {
-				await fs.mkdir(parentDir);
+			if (moveParent) {
+				signal?.throwIfAborted();
+				await fs.mkdir(moveParent);
 			}
+			signal?.throwIfAborted();
 			await fs.write(destPath, finalContent);
 			await fs.delete(absolutePath);
 		} else {
