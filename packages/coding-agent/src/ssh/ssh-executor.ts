@@ -38,8 +38,10 @@ export interface SSHResult {
 	outputLines: number;
 	/** Number of bytes included in the output text */
 	outputBytes: number;
-	/** Artifact ID if full output was saved to artifact storage */
+	/** Artifact ID if output was saved to artifact storage. */
 	artifactId?: string;
+	/** Bytes omitted from artifact storage after its hard cap was reached. */
+	artifactTruncatedBytes?: number;
 }
 
 function quoteForCompatShell(command: string): string {
