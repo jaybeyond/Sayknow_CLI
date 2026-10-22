@@ -10,7 +10,7 @@ import { registerProvider } from "../capability";
 import { type ContextFile, contextFileCapability } from "../capability/context-file";
 import { readFile } from "../capability/fs";
 import type { LoadContext, LoadResult } from "../capability/types";
-import { calculateDepth, createSourceMeta } from "./helpers";
+import { calculateDepth, createSourceMeta, getReadOptions } from "./helpers";
 
 const PROVIDER_ID = "agents-md";
 const DISPLAY_NAME = "AGENTS.md";
@@ -24,10 +24,11 @@ async function loadAgentsMd(ctx: LoadContext): Promise<LoadResult<ContextFile>> 
 
 	// Walk up from cwd looking for AGENTS.md files
 	let current = ctx.cwd;
+	const readOptions = getReadOptions(ctx, "project");
 
 	while (true) {
 		const candidate = path.join(current, "AGENTS.md");
-		const content = await readFile(candidate);
+		const content = await readFile(candidate, readOptions);
 
 		if (content !== null) {
 			const parent = path.dirname(candidate);

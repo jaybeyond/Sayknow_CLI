@@ -19,7 +19,7 @@ import { readFile } from "../capability/fs";
 import { type Instruction, instructionCapability } from "../capability/instruction";
 import type { LoadContext, LoadResult, SourceMeta } from "../capability/types";
 
-import { calculateDepth, createSourceMeta, getProjectPath, loadFilesFromDir } from "./helpers";
+import { calculateDepth, createSourceMeta, getProjectPath, getReadOptions, loadFilesFromDir } from "./helpers";
 
 const PROVIDER_ID = "github";
 const DISPLAY_NAME = "GitHub Copilot";
@@ -35,7 +35,7 @@ async function loadContextFiles(ctx: LoadContext): Promise<LoadResult<ContextFil
 
 	const copilotInstructionsPath = getProjectPath(ctx, "github", "copilot-instructions.md");
 	if (copilotInstructionsPath) {
-		const content = await readFile(copilotInstructionsPath);
+		const content = await readFile(copilotInstructionsPath, getReadOptions(ctx, "project"));
 		if (content) {
 			const fileDir = path.dirname(copilotInstructionsPath);
 			const depth = calculateDepth(ctx.cwd, fileDir, path.sep);

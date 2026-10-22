@@ -35,6 +35,7 @@ import {
 	createSourceMeta,
 	discoverExtensionModulePaths,
 	getProjectPath,
+	getReadOptions,
 	getUserPath,
 	loadFilesFromDir,
 	scanSkillsFromDir,
@@ -218,7 +219,7 @@ async function loadSettings(ctx: LoadContext): Promise<LoadResult<Settings>> {
 
 	// Project-level: opencode.json in project root
 	const projectConfigPath = path.join(ctx.cwd, "opencode.json");
-	const content = await readFile(projectConfigPath);
+	const content = await readFile(projectConfigPath, getReadOptions(ctx, "project"));
 	if (content) {
 		const parsed = tryParseJson<Record<string, unknown>>(content);
 		if (parsed) {

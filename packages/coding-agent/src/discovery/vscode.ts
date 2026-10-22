@@ -9,7 +9,7 @@ import { registerProvider } from "../capability";
 import { readFile } from "../capability/fs";
 import { type MCPServer, mcpCapability } from "../capability/mcp";
 import type { LoadContext, LoadResult } from "../capability/types";
-import { createSourceMeta, expandEnvVarsDeep, getProjectPath } from "./helpers";
+import { createSourceMeta, expandEnvVarsDeep, getProjectPath, getReadOptions } from "./helpers";
 
 const PROVIDER_ID = "vscode";
 const DISPLAY_NAME = "VS Code";
@@ -45,14 +45,14 @@ registerProvider<MCPServer>(mcpCapability.id, {
  * VS Code uses nested structure: { "mcp": { "servers": { ... } } }
  */
 async function loadMCPConfig(
-	_ctx: LoadContext,
+	ctx: LoadContext,
 	path: string,
 	level: "user" | "project",
 ): Promise<LoadResult<MCPServer>> {
 	const items: MCPServer[] = [];
 	const warnings: string[] = [];
 
-	const content = await readFile(path);
+	const content = await readFile(path, getReadOptions(ctx, level));
 	if (!content) {
 		warnings.push(`Failed to read ${path}`);
 		return { items, warnings };

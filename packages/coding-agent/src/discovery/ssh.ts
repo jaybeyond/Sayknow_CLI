@@ -12,7 +12,7 @@ import { type SSHHost, sshCapability } from "../capability/ssh";
 import type { LoadContext, LoadResult, SourceMeta } from "../capability/types";
 import { validateSshDestination } from "../ssh/utils";
 import { expandTilde } from "../tools/path-utils";
-import { createSourceMeta, expandEnvVarsDeep } from "./helpers";
+import { createSourceMeta, expandEnvVarsDeep, getReadOptions } from "./helpers";
 
 const PROVIDER_ID = "ssh-json";
 const DISPLAY_NAME = "SSH Config";
@@ -107,7 +107,7 @@ async function loadSshJsonFile(
 ): Promise<LoadResult<SSHHost>> {
 	const items: SSHHost[] = [];
 	const warnings: string[] = [];
-	const content = await readFile(filePath);
+	const content = await readFile(filePath, getReadOptions(ctx, level));
 	if (content === null) {
 		return { items, warnings };
 	}

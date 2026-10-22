@@ -25,6 +25,7 @@ import {
 	discoverExtensionModulePaths,
 	expandEnvVarsDeep,
 	getExtensionNameFromPath,
+	getReadOptions,
 	loadFilesFromDir,
 	scanSkillsFromDir,
 } from "./helpers";
@@ -46,7 +47,7 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 	const items: MCPServer[] = [];
 	const projectBase = getProjectClaude(ctx);
 	const projectPaths = [path.join(projectBase, ".mcp.json"), path.join(projectBase, "mcp.json")];
-	const contents = await Promise.all(projectPaths.map(filePath => readFile(filePath)));
+	const contents = await Promise.all(projectPaths.map(filePath => readFile(filePath, getReadOptions(ctx, "project"))));
 
 	const parseMcpServers = (content: string | null, filePath: string): MCPServer[] => {
 		if (!content) return [];
@@ -85,7 +86,7 @@ async function loadContextFiles(ctx: LoadContext): Promise<LoadResult<ContextFil
 	const items: ContextFile[] = [];
 	const projectBase = getProjectClaude(ctx);
 	const projectClaudeMd = path.join(projectBase, "CLAUDE.md");
-	const projectContent = await readFile(projectClaudeMd);
+	const projectContent = await readFile(projectClaudeMd, getReadOptions(ctx, "project"));
 	if (projectContent !== null) {
 		const depth = calculateDepth(ctx.cwd, path.dirname(projectBase), path.sep);
 		items.push({
@@ -202,7 +203,7 @@ async function loadTools(ctx: LoadContext): Promise<LoadResult<CustomTool>> {
 
 async function loadSystemPrompts(ctx: LoadContext): Promise<LoadResult<SystemPrompt>> {
 	const projectSystemMd = path.join(getProjectClaude(ctx), "SYSTEM.md");
-	const content = await readFile(projectSystemMd);
+	const content = await readFile(projectSystemMd, getReadOptions(ctx, "project"));
 	return {
 		items:
 			content === null
@@ -223,7 +224,7 @@ async function loadSettings(ctx: LoadContext): Promise<LoadResult<Settings>> {
 	const items: Settings[] = [];
 	const warnings: string[] = [];
 	const projectSettingsJson = path.join(getProjectClaude(ctx), "settings.json");
-	const projectContent = await readFile(projectSettingsJson);
+	const projectContent = await readFile(projectSettingsJson, getReadOptions(ctx, "project"));
 	if (projectContent) {
 		const data = tryParseJson<Record<string, unknown>>(projectContent);
 		if (data) {

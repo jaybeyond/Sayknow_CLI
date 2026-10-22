@@ -10,7 +10,7 @@ import { readDirEntries, readFile } from "../capability/fs";
 import type { Rule } from "../capability/rule";
 import { ruleCapability } from "../capability/rule";
 import type { LoadContext, LoadResult } from "../capability/types";
-import { buildRuleFromMarkdown, createSourceMeta, loadFilesFromDir } from "./helpers";
+import { buildRuleFromMarkdown, createSourceMeta, getReadOptions, loadFilesFromDir } from "./helpers";
 
 const PROVIDER_ID = "cline";
 const DISPLAY_NAME = "Cline";
@@ -60,7 +60,7 @@ async function loadRules(ctx: LoadContext): Promise<LoadResult<Rule>> {
 		if (result.warnings) warnings.push(...result.warnings);
 	} else {
 		// Single file format
-		const content = await readFile(found.path);
+		const content = await readFile(found.path, getReadOptions(ctx, "project"));
 		if (content === null) {
 			warnings.push(`Failed to read .clinerules at ${found.path}`);
 			return { items, warnings };

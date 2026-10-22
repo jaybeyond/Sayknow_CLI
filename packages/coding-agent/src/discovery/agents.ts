@@ -19,6 +19,7 @@ import {
 	buildRuleFromMarkdown,
 	calculateDepth,
 	createSourceMeta,
+	getReadOptions,
 	loadFilesFromDir,
 	scanSkillsFromDir,
 } from "./helpers";
@@ -181,7 +182,7 @@ registerProvider<SlashCommand>(slashCommandCapability.id, {
 // Context Files (AGENTS.md)
 async function loadContextFiles(ctx: LoadContext): Promise<LoadResult<ContextFile>> {
 	const load = async (filePath: string, level: "user" | "project"): Promise<ContextFile | null> => {
-		const content = await readFile(filePath);
+		const content = await readFile(filePath, getReadOptions(ctx, level));
 		if (!content) return null;
 		// filePath is <ancestor>/.agent(s)/AGENTS.md — go up past the config dir to the ancestor
 		const ancestorDir = path.dirname(path.dirname(filePath));
@@ -208,7 +209,7 @@ registerProvider<ContextFile>(contextFileCapability.id, {
 // System Prompt (SYSTEM.md)
 async function loadSystemPrompt(ctx: LoadContext): Promise<LoadResult<SystemPrompt>> {
 	const load = async (filePath: string, level: "user" | "project"): Promise<SystemPrompt | null> => {
-		const content = await readFile(filePath);
+		const content = await readFile(filePath, getReadOptions(ctx, level));
 		if (!content) return null;
 		return { path: filePath, content, level, _source: createSourceMeta(PROVIDER_ID, filePath, level) };
 	};

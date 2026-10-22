@@ -31,6 +31,7 @@ import {
 	buildExtensionModuleItems,
 	createSourceMeta,
 	discoverExtensionModulePaths,
+	getReadOptions,
 	loadFilesFromDir,
 	scanSkillsFromDir,
 } from "./helpers";
@@ -46,7 +47,7 @@ function getProjectCodexDir(ctx: LoadContext): string {
 async function loadContextFiles(ctx: LoadContext): Promise<LoadResult<ContextFile>> {
 	const items: ContextFile[] = [];
 	const agentsMd = path.join(getProjectCodexDir(ctx), "AGENTS.md");
-	const agentsContent = await readFile(agentsMd);
+	const agentsContent = await readFile(agentsMd, getReadOptions(ctx, "project"));
 	if (agentsContent) {
 		items.push({
 			path: agentsMd,
@@ -62,7 +63,7 @@ async function loadContextFiles(ctx: LoadContext): Promise<LoadResult<ContextFil
 async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> {
 	const warnings: string[] = [];
 	const projectConfigPath = path.join(getProjectCodexDir(ctx), "config.toml");
-	const projectConfig = await loadTomlConfig(projectConfigPath);
+	const projectConfig = await loadTomlConfig(ctx, projectConfigPath);
 	const items: MCPServer[] = [];
 	if (projectConfig) {
 		const servers = extractMCPServersFromToml(projectConfig);
@@ -77,8 +78,8 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 	return { items, warnings };
 }
 
-async function loadTomlConfig(filePath: string): Promise<Record<string, unknown> | null> {
-	const content = await readFile(filePath);
+async function loadTomlConfig(ctx: LoadContext, filePath: string): Promise<Record<string, unknown> | null> {
+	const content = await readFile(filePath, getReadOptions(ctx, "project"));
 	if (!content) return null;
 	try {
 		return Bun.TOML.parse(content) as Record<string, unknown>;
@@ -243,7 +244,7 @@ async function loadTools(ctx: LoadContext): Promise<LoadResult<CustomTool>> {
 
 async function loadSettings(ctx: LoadContext): Promise<LoadResult<Settings>> {
 	const projectConfigPath = path.join(getProjectCodexDir(ctx), "config.toml");
-	const projectConfig = await loadTomlConfig(projectConfigPath);
+	const projectConfig = await loadTomlConfig(ctx, projectConfigPath);
 	return {
 		items: projectConfig
 			? [

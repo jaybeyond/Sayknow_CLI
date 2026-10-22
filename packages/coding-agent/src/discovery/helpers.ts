@@ -13,7 +13,13 @@ import {
 	tryParseJson,
 } from "@sayknow-cli/utils";
 import type { ExtensionModule } from "../capability/extension-module";
-import { invalidate as invalidateFsCache, readDirEntries, readFile } from "../capability/fs";
+import {
+	invalidate as invalidateFsCache,
+	type ReadFileOptions,
+	type ReadScope,
+	readDirEntries,
+	readFile,
+} from "../capability/fs";
 import { parseRuleConditionAndScope, type Rule, type RuleFrontmatter } from "../capability/rule";
 import type { Skill, SkillFrontmatter } from "../capability/skill";
 import type { LoadContext, LoadResult, SourceMeta } from "../capability/types";
@@ -99,6 +105,19 @@ export function getProjectPath(ctx: LoadContext, source: SourceId, subpath: stri
 	if (!paths.projectDir) return null;
 
 	return path.join(ctx.cwd, paths.projectDir, subpath);
+}
+
+/**
+ * Filesystem authority for a provider read. Project reads are bounded by the
+ * repository (or the opened directory without one): a repository symlink to a
+ * file outside it must not be loaded into the prompt as its external target.
+ */
+export function getReadOptions(
+	ctx: Pick<LoadContext, "cwd" | "repoRoot">,
+	scope: ReadScope,
+): ReadFileOptions | undefined {
+	if (scope !== "project") return undefined;
+	return { containmentRoot: ctx.repoRoot ?? ctx.cwd, scope };
 }
 
 /**
@@ -341,12 +360,13 @@ export function compareSkillOrder(aName: string, aPath: string, bName: string, b
 }
 
 export async function scanSkillsFromDir(
-	_ctx: LoadContext,
+	ctx: LoadContext,
 	options: ScanSkillsFromDirOptions,
 ): Promise<LoadResult<Skill>> {
 	const items: Skill[] = [];
 	const warnings: string[] = [];
 	const { dir, level, providerId, requireDescription = false } = options;
+	const readOptions = getReadOptions(ctx, level);
 
 	let entries: fs.Dirent[];
 	try {
@@ -359,7 +379,7 @@ export async function scanSkillsFromDir(
 	}
 	const loadSkill = async (skillPath: string) => {
 		try {
-			const content = await readFile(skillPath);
+			const content = await readFile(skillPath, readOptions);
 			if (!content) return;
 			const { frontmatter, body } = parseFrontmatter(content, { source: skillPath });
 			if (frontmatter.enabled === false) {
@@ -448,7 +468,7 @@ export function expandEnvVarsDeep<T>(obj: T, extraEnv?: Record<string, string>, 
  * Uses native glob for fast filesystem scanning with gitignore support.
  */
 export async function loadFilesFromDir<T>(
-	_ctx: LoadContext,
+	ctx: LoadContext,
 	dir: string,
 	provider: string,
 	level: "user" | "project",
@@ -465,6 +485,7 @@ export async function loadFilesFromDir<T>(
 	const warnings: string[] = [];
 	// Build glob pattern based on extensions and recursion
 	const { extensions, recursive = false } = options;
+	const readOptions = getReadOptions(ctx, level);
 
 	let pattern: string;
 	if (extensions && extensions.length > 0) {
@@ -494,7 +515,7 @@ export async function loadFilesFromDir<T>(
 	const fileResults = await Promise.all(
 		matches.map(async match => {
 			const filePath = path.join(dir, match.path);
-			const content = await readFile(filePath);
+			const content = await readFile(filePath, readOptions);
 			return { filePath, content };
 		}),
 	);

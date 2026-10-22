@@ -25,7 +25,14 @@ import { ruleCapability } from "../capability/rule";
 import type { Settings } from "../capability/settings";
 import { settingsCapability } from "../capability/settings";
 import type { LoadContext, LoadResult, SourceMeta } from "../capability/types";
-import { buildRuleFromMarkdown, createSourceMeta, getProjectPath, getUserPath, loadFilesFromDir } from "./helpers";
+import {
+	buildRuleFromMarkdown,
+	createSourceMeta,
+	getProjectPath,
+	getReadOptions,
+	getUserPath,
+	loadFilesFromDir,
+} from "./helpers";
 
 const PROVIDER_ID = "cursor";
 const DISPLAY_NAME = "Cursor";
@@ -86,7 +93,9 @@ async function loadSettings(ctx: LoadContext): Promise<LoadResult<Settings>> {
 		getProjectPath(ctx, "cursor", "settings.json"),
 	]);
 
-	const projectContentPromise = projectPath ? readFile(projectPath) : Promise.resolve(null);
+	const projectContentPromise = projectPath
+		? readFile(projectPath, getReadOptions(ctx, "project"))
+		: Promise.resolve(null);
 
 	if (userContent && userPath) {
 		const parsed = tryParseJson<Record<string, unknown>>(userContent);

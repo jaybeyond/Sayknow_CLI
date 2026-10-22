@@ -33,6 +33,7 @@ import {
 	createSourceMeta,
 	discoverExtensionModulePaths,
 	getProjectPath,
+	getReadOptions,
 	getUserPath,
 } from "./helpers";
 
@@ -65,7 +66,7 @@ async function loadContextFiles(ctx: LoadContext): Promise<LoadResult<ContextFil
 	// Project-level: .gemini/GEMINI.md
 	const projectGeminiMd = getProjectPath(ctx, "gemini", "GEMINI.md");
 	if (projectGeminiMd) {
-		const content = await readFile(projectGeminiMd);
+		const content = await readFile(projectGeminiMd, getReadOptions(ctx, "project"));
 		if (content) {
 			const projectBase = getProjectPath(ctx, "gemini", "");
 			const depth = projectBase ? calculateDepth(ctx.cwd, projectBase, path.sep) : 0;
@@ -195,7 +196,7 @@ async function loadSettings(ctx: LoadContext): Promise<LoadResult<Settings>> {
 	// Project-level: .gemini/settings.json
 	const projectPath = getProjectPath(ctx, "gemini", "settings.json");
 	if (projectPath) {
-		const content = await readFile(projectPath);
+		const content = await readFile(projectPath, getReadOptions(ctx, "project"));
 		if (content) {
 			const parsed = tryParseJson<Record<string, unknown>>(content);
 			if (parsed) {
@@ -250,7 +251,7 @@ async function loadSystemPrompt(ctx: LoadContext): Promise<LoadResult<SystemProm
 	// Project-level: .gemini/system.md
 	const projectSystemMd = getProjectPath(ctx, "gemini", "system.md");
 	if (projectSystemMd) {
-		const content = await readFile(projectSystemMd);
+		const content = await readFile(projectSystemMd, getReadOptions(ctx, "project"));
 		if (content) {
 			items.push({
 				path: projectSystemMd,

@@ -29,6 +29,7 @@ import {
 	discoverExtensionModulePaths,
 	expandEnvVarsDeep,
 	getExtensionNameFromPath,
+	getReadOptions,
 	loadFilesFromDir,
 	SOURCE_PATHS,
 	scanSkillsFromDir,
@@ -241,7 +242,7 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 
 	const contents = await Promise.allSettled(
 		paths.map(async p => {
-			const content = await readFile(p.path);
+			const content = await readFile(p.path, getReadOptions(ctx, p.level));
 			if (content) {
 				return { path: p.path, content, level: p.level };
 			}
@@ -287,7 +288,7 @@ async function loadSystemPrompt(ctx: LoadContext): Promise<LoadResult<SystemProm
 	const nearestProjectConfigDir = await findNearestProjectConfigDir(ctx.cwd, ctx.repoRoot);
 	if (nearestProjectConfigDir) {
 		const projectPath = path.join(nearestProjectConfigDir.dir, "SYSTEM.md");
-		const projectContent = await readFile(projectPath);
+		const projectContent = await readFile(projectPath, getReadOptions(ctx, "project"));
 		if (projectContent) {
 			items.push({
 				path: projectPath,
@@ -405,14 +406,14 @@ async function loadRules(ctx: LoadContext): Promise<LoadResult<Rule>> {
 	// Project scope: nearest .skc/RULES.md walking up from cwd to repoRoot
 	for (const userAgentDir of getUserAgentDirs()) {
 		const userRulesFile = path.join(ctx.home, userAgentDir, "RULES.md");
-		const userRule = await loadStickyRulesFile(userRulesFile, "user");
+		const userRule = await loadStickyRulesFile(ctx, userRulesFile, "user");
 		if (userRule) items.push(userRule);
 	}
 
 	const nearestProjectConfigDir = await findNearestProjectConfigDir(ctx.cwd, ctx.repoRoot);
 	if (nearestProjectConfigDir) {
 		const projectRulesFile = path.join(nearestProjectConfigDir.dir, "RULES.md");
-		const projectRule = await loadStickyRulesFile(projectRulesFile, "project");
+		const projectRule = await loadStickyRulesFile(ctx, projectRulesFile, "project");
 		if (projectRule) items.push(projectRule);
 	}
 
@@ -423,8 +424,12 @@ async function loadRules(ctx: LoadContext): Promise<LoadResult<Rule>> {
  * Read a top-level `RULES.md` and synthesize an always-apply rule.
  * Returns null when the file is absent or empty so callers can short-circuit.
  */
-async function loadStickyRulesFile(filePath: string, level: "user" | "project"): Promise<Rule | null> {
-	const content = await readFile(filePath);
+async function loadStickyRulesFile(
+	ctx: LoadContext,
+	filePath: string,
+	level: "user" | "project",
+): Promise<Rule | null> {
+	const content = await readFile(filePath, getReadOptions(ctx, level));
 	if (!content) return null;
 	const source = createSourceMeta(PROVIDER_ID, filePath, level);
 	const rule = buildRuleFromMarkdown("RULES.md", content, filePath, source, { ruleName: "RULES" });
@@ -496,7 +501,9 @@ async function loadExtensionModules(ctx: LoadContext): Promise<LoadResult<Extens
 
 	const [discoveredResults, settingsResults] = await Promise.all([
 		Promise.all(configDirs.map(({ dir }) => discoverExtensionModulePaths(ctx, path.join(dir, "extensions")))),
-		Promise.all(configDirs.map(({ dir }) => readFile(path.join(dir, "settings.json")))),
+		Promise.all(
+			configDirs.map(({ dir, level }) => readFile(path.join(dir, "settings.json"), getReadOptions(ctx, level))),
+		),
 	]);
 
 	for (let i = 0; i < configDirs.length; i++) {
@@ -876,7 +883,7 @@ async function loadSettings(ctx: LoadContext): Promise<LoadResult<Settings>> {
 
 	for (const { dir, level } of await getConfigDirs(ctx)) {
 		const settingsPath = path.join(dir, "settings.json");
-		const settingsContent = await readFile(settingsPath);
+		const settingsContent = await readFile(settingsPath, getReadOptions(ctx, level));
 		if (settingsContent) {
 			const data = tryParseJson<Record<string, unknown>>(settingsContent);
 			if (data) {
@@ -892,7 +899,7 @@ async function loadSettings(ctx: LoadContext): Promise<LoadResult<Settings>> {
 		}
 
 		const configPath = path.join(dir, "config.yml");
-		const configContent = await readFile(configPath);
+		const configContent = await readFile(configPath, getReadOptions(ctx, level));
 		if (!configContent) continue;
 
 		const data = parseYamlSettings(configContent, configPath);
@@ -936,7 +943,7 @@ async function loadContextFiles(ctx: LoadContext): Promise<LoadResult<ContextFil
 	const nearestProjectConfigDir = await findNearestProjectConfigDir(ctx.cwd, ctx.repoRoot);
 	if (nearestProjectConfigDir) {
 		const projectPath = path.join(nearestProjectConfigDir.dir, "AGENTS.md");
-		const projectContent = await readFile(projectPath);
+		const projectContent = await readFile(projectPath, getReadOptions(ctx, "project"));
 		if (projectContent) {
 			items.push({
 				path: projectPath,
