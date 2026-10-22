@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
+import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentToolContext } from "@sayknow-cli/agent-core";
 import { validateToolArguments } from "@sayknow-cli/ai/utils/validation";
@@ -179,6 +180,27 @@ describe("BashTool restricted role-agent allowlist", () => {
 		await expect(tool.execute("tool-call", { command: "echo should-not-run" })).rejects.toThrow(
 			"restricted role-agent bash only allows commands starting with",
 		);
+	});
+
+	it("rejects an skc write aimed at another session or repository before execution", async () => {
+		const root = await fs.realpath(await fs.mkdtemp(path.join(process.cwd(), ".tmp-restricted-bind-")));
+		// Outside this repository, so it is not another worktree of the same git common dir.
+		const other = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "skc-restricted-bind-other-")));
+		try {
+			const tool = createRestrictedBashTool(root);
+			for (const command of [
+				'skc state ralplan write --session-id victim-session --input \'{"current_phase":"handoff"}\' --json',
+				'skc state ralplan write --input \'{"session_id":"victim-session","current_phase":"handoff"}\' --json',
+				`skc ralplan --write --session-id restricted-bash-test --worktree-root '${other}' --stage critic --stage_n 1 --artifact x`,
+			]) {
+				await expect(tool.execute("tool-call", { command })).rejects.toThrow(
+					"restricted role-agent bash binds skc",
+				);
+			}
+		} finally {
+			await fs.rm(root, { recursive: true, force: true });
+			await fs.rm(other, { recursive: true, force: true });
+		}
 	});
 
 	it("surfaces read-only bash restrictions in the tool description", () => {

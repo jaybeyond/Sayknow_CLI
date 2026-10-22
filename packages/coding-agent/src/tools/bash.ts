@@ -593,9 +593,22 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		}
 		if (allowedPrefixes && allowedPrefixes.length > 0) {
 			const commandsToCheck = rawCommand === command ? [command] : [rawCommand, command];
+			const invocationCwd =
+				cwd && !cwd.includes("://") && !cwd.includes("local:/")
+					? resolveToCwd(cwd, this.session.cwd)
+					: this.session.cwd;
 			for (const commandToCheck of commandsToCheck) {
 				const allowlist = checkBashAllowedPrefixes(commandToCheck, allowedPrefixes, {
 					profile: this.session.bashRestrictionProfile,
+					...(this.session.bashRestrictionProfile === "read-only"
+						? {}
+						: {
+								skcSessionBinding: {
+									sessionId: this.session.getSessionId?.() ?? null,
+									worktreeRoot: this.session.cwd,
+									invocationCwd,
+								},
+							}),
 				});
 				if (!allowlist.allowed) {
 					throw new ToolError(allowlist.reason ?? "Command blocked by restricted role-agent bash allowlist.");

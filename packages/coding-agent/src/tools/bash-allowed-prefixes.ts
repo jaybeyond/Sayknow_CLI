@@ -1,3 +1,5 @@
+import * as fs from "node:fs";
+import * as path from "node:path";
 import {
 	classifyStateArgv,
 	STATE_ACTION_NAMES,
@@ -13,8 +15,19 @@ export interface BashAllowedPrefixesCheck {
 
 export type BashRestrictionProfile = "workflow" | "read-only";
 
+/** Session identity and workspace the restricted `skc` command may name. */
+export interface SkcSessionBinding {
+	/** Tool session id; it is also the SKC_SESSION_ID the restricted child receives. */
+	sessionId?: string | null;
+	/** Session workspace. A `--worktree-root` must be this repo, not a foreign one. */
+	worktreeRoot: string;
+	/** Child cwd. Relative `--worktree-root` resolves against it, as ralplan does. */
+	invocationCwd: string;
+}
+
 export interface BashRestrictionOptions {
 	profile?: BashRestrictionProfile;
+	skcSessionBinding?: SkcSessionBinding;
 }
 
 const SHELL_CONTROL_CHARS = new Set([";", "|", "&", "<", ">", "(", ")"]);
@@ -284,7 +297,104 @@ function rejectGitHostAccess(words: readonly string[]): BashAllowedPrefixesCheck
 	return undefined;
 }
 
-function validateMatchedSkcCommand(words: readonly string[]): BashAllowedPrefixesCheck {
+const SKC_SESSION_BIND_REASON = "restricted role-agent bash binds skc to the current session";
+const SKC_WORKTREE_BIND_REASON = "restricted role-agent bash binds skc --worktree-root to the current repository";
+
+function separateFlagValues(words: readonly string[], flag: string): string[] {
+	const values: string[] = [];
+	for (let index = 0; index < words.length; index += 1) {
+		if (words[index] !== flag) continue;
+		values.push(words[index + 1] ?? "");
+		index += 1;
+	}
+	return values;
+}
+
+function boundSessionIds(binding: SkcSessionBinding): ReadonlySet<string> {
+	const ids = new Set<string>();
+	const trimmed = typeof binding.sessionId === "string" ? binding.sessionId.trim() : "";
+	if (trimmed) ids.add(trimmed);
+	return ids;
+}
+
+function inlineStateSessionIds(words: readonly string[]): string[] {
+	if (words[1] !== "state") return [];
+	const ids: string[] = [];
+	for (const input of classifyStateArgv(words.slice(2)).inputs) {
+		if (input.kind !== "inline") continue;
+		let payload: unknown;
+		try {
+			payload = JSON.parse(input.raw);
+		} catch {
+			continue;
+		}
+		if (!payload || typeof payload !== "object" || Array.isArray(payload)) continue;
+		const sessionId = (payload as Record<string, unknown>).session_id;
+		if (typeof sessionId === "string") ids.push(sessionId);
+	}
+	return ids;
+}
+
+function gitCommonDir(directory: string): string | undefined {
+	const result = Bun.spawnSync(["git", "-C", directory, "rev-parse", "--git-common-dir"], {
+		stdout: "pipe",
+		stderr: "ignore",
+	});
+	if (result.exitCode !== 0) return undefined;
+	const text = result.stdout.toString().trim();
+	if (!text) return undefined;
+	const absolute = path.isAbsolute(text) ? text : path.resolve(directory, text);
+	try {
+		return fs.realpathSync(absolute);
+	} catch {
+		return undefined;
+	}
+}
+
+/** Same directory, or another worktree of the same git common dir (isolated tasks). */
+function sameRepository(workspace: string, target: string): boolean {
+	let workspaceReal: string;
+	let targetReal: string;
+	try {
+		workspaceReal = fs.realpathSync(workspace);
+		targetReal = fs.realpathSync(target);
+	} catch {
+		return false;
+	}
+	if (workspaceReal === targetReal) return true;
+	const workspaceCommon = gitCommonDir(workspaceReal);
+	const targetCommon = gitCommonDir(targetReal);
+	return workspaceCommon !== undefined && workspaceCommon === targetCommon;
+}
+
+function worktreeSelectorAllowed(binding: SkcSessionBinding, rawTarget: string): boolean {
+	const trimmed = rawTarget.trim();
+	if (!trimmed) return false;
+	const resolved = path.isAbsolute(trimmed) ? trimmed : path.resolve(binding.invocationCwd, trimmed);
+	return sameRepository(binding.worktreeRoot, resolved);
+}
+
+function rejectUnboundSkcCommand(
+	words: readonly string[],
+	options: BashRestrictionOptions,
+): BashAllowedPrefixesCheck | undefined {
+	const binding = options.skcSessionBinding;
+	if (!binding) return undefined;
+	const allowed = boundSessionIds(binding);
+	const sessionSelectors = [...separateFlagValues(words, "--session-id"), ...inlineStateSessionIds(words)];
+	if (sessionSelectors.some(value => !allowed.has(value.trim()))) {
+		return { allowed: false, reason: SKC_SESSION_BIND_REASON };
+	}
+	if (separateFlagValues(words, "--worktree-root").some(value => !worktreeSelectorAllowed(binding, value))) {
+		return { allowed: false, reason: SKC_WORKTREE_BIND_REASON };
+	}
+	return undefined;
+}
+
+function validateMatchedSkcCommand(
+	words: readonly string[],
+	options: BashRestrictionOptions,
+): BashAllowedPrefixesCheck {
 	const gitWrite = rejectGitHostAccess(words);
 	if (gitWrite) return gitWrite;
 	if (words[0] !== "skc") return { allowed: true };
@@ -293,7 +403,7 @@ function validateMatchedSkcCommand(words: readonly string[]): BashAllowedPrefixe
 		if (!words.includes("--write")) {
 			return { allowed: false, reason: "restricted role-agent bash only allows `skc ralplan --write ...`" };
 		}
-		return { allowed: true };
+		return rejectUnboundSkcCommand(words, options) ?? { allowed: true };
 	}
 
 	if (words[1] === "state") {
@@ -311,10 +421,10 @@ function validateMatchedSkcCommand(words: readonly string[]): BashAllowedPrefixe
 				reason: `restricted role-agent bash does not allow \`skc state ${classification.parsed.action}\``,
 			};
 		}
-		return { allowed: true };
+		return rejectUnboundSkcCommand(words, options) ?? { allowed: true };
 	}
 
-	return { allowed: true };
+	return rejectUnboundSkcCommand(words, options) ?? { allowed: true };
 }
 
 function commandAllowedPrefixesReason(normalizedPrefixes: readonly string[], options: BashRestrictionOptions): string {
@@ -360,5 +470,5 @@ export function checkBashAllowedPrefixes(
 	if (options.profile === "read-only") {
 		return validateReadOnlyCommand(parsed.words);
 	}
-	return validateMatchedSkcCommand(parsed.words);
+	return validateMatchedSkcCommand(parsed.words, options);
 }

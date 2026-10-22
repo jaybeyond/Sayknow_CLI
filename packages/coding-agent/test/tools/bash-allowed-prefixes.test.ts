@@ -1,6 +1,9 @@
 import { describe, expect, it } from "bun:test";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import { classifyStateArgv } from "../../src/skc-runtime/state-argv";
-import { checkBashAllowedPrefixes } from "../../src/tools/bash-allowed-prefixes";
+import { checkBashAllowedPrefixes, type SkcSessionBinding } from "../../src/tools/bash-allowed-prefixes";
 
 const ROLE_AGENT_PREFIXES = ["skc ralplan --write", "skc state"] as const;
 describe("shared state argv classification", () => {
@@ -446,5 +449,111 @@ describe("checkBashAllowedPrefixes", () => {
 
 		expect(result.allowed).toBe(false);
 		expect(result.reason).toContain("restricted role-agent bash only allows commands starting with");
+	});
+});
+
+describe("restricted skc session and worktree binding", () => {
+	function binding(root: string, invocation = root): SkcSessionBinding {
+		return {
+			sessionId: "current-session",
+			worktreeRoot: root,
+			invocationCwd: invocation,
+		};
+	}
+
+	it("rejects another session and still allows the current session", () => {
+		const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "skc-bind-session-")));
+		try {
+			const options = { skcSessionBinding: binding(root) };
+			const foreign = [
+				'skc state ralplan write --session-id victim-session --input \'{"current_phase":"handoff"}\' --json',
+				'skc state ralplan write --input \'{"session_id":"victim-session","current_phase":"handoff"}\' --json',
+				"skc ralplan --write --session-id victim-session --stage critic --stage_n 1 --artifact x",
+				"skc ralplan --write --session-id owner-session --stage critic --stage_n 1 --artifact x",
+			];
+			for (const command of foreign) {
+				const result = checkBashAllowedPrefixes(command, ROLE_AGENT_PREFIXES, options);
+				expect(result.allowed).toBe(false);
+				expect(result.reason).toContain("current session");
+			}
+			const allowed = [
+				"skc state ralplan read --json",
+				'skc state ralplan write --session-id current-session --input \'{"current_phase":"handoff"}\' --json',
+				'skc state ralplan write --input \'{"session_id":"current-session","current_phase":"handoff"}\' --json',
+				"skc ralplan --write --session-id current-session --stage critic --stage_n 1 --artifact x",
+			];
+			for (const command of allowed) {
+				expect(checkBashAllowedPrefixes(command, ROLE_AGENT_PREFIXES, options).allowed).toBe(true);
+			}
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("rejects a foreign worktree root and still allows this directory via a symlink", () => {
+		const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "skc-bind-wt-")));
+		const other = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "skc-bind-other-")));
+		const link = path.join(root, "self-link");
+		try {
+			fs.symlinkSync(root, link);
+			const options = { skcSessionBinding: binding(root) };
+			const blocked = checkBashAllowedPrefixes(
+				`skc ralplan --write --worktree-root '${other}' --stage critic --stage_n 1 --artifact x`,
+				ROLE_AGENT_PREFIXES,
+				options,
+			);
+			expect(blocked.allowed).toBe(false);
+			expect(blocked.reason).toContain("current repository");
+			expect(
+				checkBashAllowedPrefixes(
+					`skc ralplan --write --worktree-root '${link}' --stage critic --stage_n 1 --artifact x`,
+					ROLE_AGENT_PREFIXES,
+					options,
+				).allowed,
+			).toBe(true);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+			fs.rmSync(other, { recursive: true, force: true });
+		}
+	});
+
+	it.skipIf(!Bun.which("git"))("still allows a linked worktree of the same repository", () => {
+		const parent = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "skc-bind-repo-")));
+		const root = path.join(parent, "main");
+		const linked = path.join(parent, "linked");
+		const foreign = path.join(parent, "foreign");
+		const git = (cwd: string, args: string[]) => {
+			const result = Bun.spawnSync(["git", "-C", cwd, ...args], { stdout: "pipe", stderr: "pipe" });
+			if (result.exitCode !== 0) throw new Error(result.stderr.toString());
+		};
+		try {
+			fs.mkdirSync(root);
+			git(root, ["init"]);
+			git(root, ["config", "user.email", "bind@example.com"]);
+			git(root, ["config", "user.name", "bind"]);
+			fs.writeFileSync(path.join(root, "a.txt"), "a\n");
+			git(root, ["add", "a.txt"]);
+			git(root, ["commit", "-m", "init"]);
+			git(root, ["worktree", "add", "--detach", linked]);
+			fs.mkdirSync(foreign);
+			git(foreign, ["init"]);
+			const options = { skcSessionBinding: binding(linked) };
+			expect(
+				checkBashAllowedPrefixes(
+					`skc ralplan --write --worktree-root '${root}' --stage critic --stage_n 1 --artifact x`,
+					ROLE_AGENT_PREFIXES,
+					options,
+				).allowed,
+			).toBe(true);
+			const blocked = checkBashAllowedPrefixes(
+				`skc ralplan --write --worktree-root '${foreign}' --stage critic --stage_n 1 --artifact x`,
+				ROLE_AGENT_PREFIXES,
+				options,
+			);
+			expect(blocked.allowed).toBe(false);
+			expect(blocked.reason).toContain("current repository");
+		} finally {
+			fs.rmSync(parent, { recursive: true, force: true });
+		}
 	});
 });
