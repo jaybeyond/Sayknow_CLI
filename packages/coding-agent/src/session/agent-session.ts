@@ -363,6 +363,7 @@ import {
 import { assertEditableFile } from "../tools/auto-generated-guard";
 import { releaseTabsForOwner } from "../tools/browser/tab-supervisor";
 import type { CheckpointState } from "../tools/checkpoint";
+import { githubPermissionIntent } from "../tools/github-side-effect";
 import { outputMeta, wrapToolWithMetaNotice } from "../tools/output-meta";
 import { normalizeLocalScheme, resolveReadPath, resolveToCwd } from "../tools/path-utils";
 import { registerResourceGcSession } from "../tools/resource-gc";
@@ -1260,6 +1261,7 @@ const PERMISSION_REQUIRED_TOOLS = new Set([
 	"python",
 	"recipe",
 	"ssh",
+	"github",
 ]);
 
 function isShellExecutionPermissionTool(toolName: string): boolean {
@@ -1400,6 +1402,7 @@ function getPermissionIntent(
 		const action = getStringProperty(a, "action");
 		return { toolName, title: action ? `Computer ${action}` : toolName, cacheKey: toolName };
 	}
+	if (toolName === "github") return githubPermissionIntent(args);
 	return undefined;
 }
 
@@ -6220,7 +6223,9 @@ export class AgentSession {
 							: undefined;
 					const commandContent = command
 						? [{ type: "content" as const, content: { type: "text" as const, text: `$ ${command}` } }]
-						: undefined;
+						: target.name === "github"
+							? [{ type: "content" as const, content: { type: "text" as const, text: permissionIntent.title } }]
+							: undefined;
 					if (this.#sdkPermissionMode === "allow") {
 						return await target.execute(toolCallId, args as never, signal, onUpdate, ctx);
 					}

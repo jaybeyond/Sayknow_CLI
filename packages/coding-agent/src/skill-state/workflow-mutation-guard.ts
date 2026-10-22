@@ -15,6 +15,7 @@ import { resolveSkcSessionForRead } from "../skc-runtime/session-resolution";
 import { ModeStateSchema } from "../skc-runtime/state-schema";
 import { workflowEnvelopeChecksumStatus } from "../skc-runtime/state-writer";
 import { getSkillManifest } from "../skc-runtime/workflow-manifest";
+import { isGithubReadOnlyArgs } from "../tools/github-side-effect";
 import { resolveToCwd } from "../tools/path-utils";
 import { ToolError } from "../tools/tool-errors";
 import { listActiveSkills, readVisibleSkillActiveState, type SkillActiveEntry } from "./active-state";
@@ -41,10 +42,11 @@ function planningPhaseBlockMessage(skill: CanonicalSkcWorkflowSkill): string {
 }
 
 /**
- * Tools whose execute path can mutate product state. `eval` and `python` run
- * code that can write files without going through edit, write, or bash.
+ * Tools whose execute path can mutate product state. `github` is included so
+ * side-effect ops share this guard. `eval` and `python` run code that can write
+ * files without going through edit, write, or bash.
  */
-export const WORKFLOW_MUTATION_TOOL_NAMES = ["edit", "write", "ast_edit", "bash", "eval", "python"] as const;
+export const WORKFLOW_MUTATION_TOOL_NAMES = ["edit", "write", "ast_edit", "bash", "github", "eval", "python"] as const;
 
 const BLOCKED_TOOL_NAMES = new Set<string>(WORKFLOW_MUTATION_TOOL_NAMES);
 
@@ -585,6 +587,16 @@ function extractBashTargets(args: unknown, depth = 0): ExtractedTargets {
 	}
 	return targets;
 }
+/**
+ * Read-only github ops extract no mutation. Every other op fails closed during
+ * planning: remote push, PR creation, and worktree/config writes are not a
+ * filesystem path the planning allowlist can clear.
+ */
+function extractGithubTargets(args: unknown): ExtractedTargets {
+	if (isGithubReadOnlyArgs(args)) return { paths: [], unknown: false };
+	return { paths: [], unknown: true, explicitMutation: true };
+}
+
 function simpleLiteral(raw: string): string | null {
 	const trimmed = raw.trim();
 	const quote = trimmed[0];
@@ -892,6 +904,7 @@ function extractTargets(tool: ToolWithEditMode, args: unknown): ExtractedTargets
 	if (tool.name === "ast_edit") return extractAstEditTargets(args);
 	if (tool.name === "edit") return extractEditTargets(args, tool);
 	if (tool.name === "bash") return extractBashTargets(args);
+	if (tool.name === "github") return extractGithubTargets(args);
 	if (tool.name === "python" || tool.name === "eval") return extractCodeToolTargets(tool.name, args);
 	return { paths: [], unknown: true };
 }
