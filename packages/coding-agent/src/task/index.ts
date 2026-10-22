@@ -25,6 +25,7 @@ import { normalizeModelSelectorValue } from "../config/model-selector-value";
 import type { TaskModelSpecialty } from "../config/task-model-specialties";
 import type { TaskRoutingResult } from "../decisions/task-routing";
 import type { Theme } from "../modes/theme/theme";
+import type { PlanModeState } from "../plan-mode/state";
 import planModeSubagentPrompt from "../prompts/system/plan-mode-subagent.md" with { type: "text" };
 import taskDescriptionTemplate from "../prompts/tools/task.md" with { type: "text" };
 import taskSummaryTemplate from "../prompts/tools/task-summary.md" with { type: "text" };
@@ -105,6 +106,20 @@ function inheritedSubagentApproval(session: ToolSession) {
 	return {
 		sdkPermissionMode: mode === "deny" || mode === "prompt" ? mode : ("allow" as const),
 		clientBridge: session.getClientBridge?.(),
+	};
+}
+
+/** Enabled plan mode only. A missing or disabled state leaves the child writable. */
+function inheritedPlanMode(session: ToolSession): { planModeState?: PlanModeState } {
+	const state = session.getPlanModeState?.();
+	if (!state?.enabled || !state.planFilePath) return {};
+	return {
+		planModeState: {
+			enabled: true,
+			planFilePath: state.planFilePath,
+			...(state.workflow ? { workflow: state.workflow } : {}),
+			...(state.reentry !== undefined ? { reentry: state.reentry } : {}),
+		},
 	};
 }
 
@@ -1606,6 +1621,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 						settings: this.session.settings,
 						inheritedServiceTier: this.session.serviceTier,
 						...inheritedSubagentApproval(this.session),
+						...inheritedPlanMode(this.session),
 						contextFiles,
 						skills: availableSkills,
 						autoloadSkills: resolvedAutoloadSkills,
@@ -1683,6 +1699,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 						settings: this.session.settings,
 						inheritedServiceTier: this.session.serviceTier,
 						...inheritedSubagentApproval(this.session),
+						...inheritedPlanMode(this.session),
 						contextFiles,
 						skills: availableSkills,
 						autoloadSkills: resolvedAutoloadSkills,
