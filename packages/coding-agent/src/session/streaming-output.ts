@@ -29,6 +29,10 @@ const NL = "\n";
 
 const ELLIPSIS = "…";
 
+// Bound the temporary parts/join allocation in #applyColumnCap for a single
+// large callback. Keep batches small enough to avoid per-line retention work.
+const COLUMN_CAP_BATCH_CHARS = 64 * 1024;
+
 const outputPlainSecrets = new AsyncLocalStorage<readonly string[]>();
 
 /** Run `fn` while column caps can see these plain secrets. */
@@ -1211,13 +1215,33 @@ export class OutputSink {
 
 		// Retain line by line: a secret-aware column cut-back may retract output a prior line already retained.
 		if (this.#maxColumns > 0) {
-			let cursor = 0;
-			while (cursor < sanitizedChunk.length) {
-				const newline = sanitizedChunk.indexOf(NL, cursor);
-				const end = newline === -1 ? sanitizedChunk.length : newline + 1;
-				const visibleLine = this.#applyColumnCap(sanitizedChunk.slice(cursor, end));
-				this.#retainVisible(visibleLine);
-				cursor = end;
+			if (this.#plainSecrets) {
+				// Secret-aware cuts can retract text from an earlier line, so retain
+				// each line before processing the next one.
+				let cursor = 0;
+				while (cursor < sanitizedChunk.length) {
+					const newline = sanitizedChunk.indexOf(NL, cursor);
+					const end = newline === -1 ? sanitizedChunk.length : newline + 1;
+					this.#retainVisible(this.#applyColumnCap(sanitizedChunk.slice(cursor, end)));
+					cursor = end;
+				}
+			} else {
+				// Batch ordinary output while bounding #applyColumnCap's temporary
+				// parts/join allocation for large single callbacks. Retaining each
+				// line separately repeats accounting millions of times.
+				let cursor = 0;
+				while (cursor < sanitizedChunk.length) {
+					let end = Math.min(cursor + COLUMN_CAP_BATCH_CHARS, sanitizedChunk.length);
+					// UTF-8 byte accounting must not observe a surrogate pair as two
+					// replacement characters when a batch boundary lands between them.
+					if (end < sanitizedChunk.length) {
+						const before = sanitizedChunk.charCodeAt(end - 1);
+						const after = sanitizedChunk.charCodeAt(end);
+						if (before >= 0xd800 && before <= 0xdbff && after >= 0xdc00 && after <= 0xdfff) end--;
+					}
+					this.#retainVisible(this.#applyColumnCap(sanitizedChunk.slice(cursor, end)));
+					cursor = end;
+				}
 			}
 		} else {
 			this.#retainVisible(sanitizedChunk);
@@ -1243,6 +1267,7 @@ export class OutputSink {
 				return;
 			}
 			const headSlice = truncateHeadBytes(visibleChunk, room);
+			this.#headRetentionDisabled = true;
 			if (headSlice.bytes > 0) {
 				this.#appendHead(headSlice.text, headSlice.bytes);
 				tailChunk = visibleChunk.substring(headSlice.text.length);
