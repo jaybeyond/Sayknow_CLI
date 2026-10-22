@@ -11,6 +11,7 @@ import * as path from "node:path";
 import type { AgentToolResult } from "@sayknow-cli/agent-core";
 import { isEnoent } from "@sayknow-cli/utils";
 import * as z from "zod/v4";
+import type { Settings } from "../../config/settings";
 import {
 	type FileDiagnosticsResult,
 	flushLspWritethroughBatch,
@@ -107,6 +108,14 @@ export interface ApplyPatchOptions {
 	/** Explicit artifacts `local` root for this call. The caller session owns it. */
 	localRoot?: string;
 	signal?: AbortSignal;
+	/**
+	 * Recheck a rename destination while this call holds the path mutation lock.
+	 * The request preflight runs before that lock.
+	 */
+	destinationGuard?: {
+		settings: Pick<Settings, "get">;
+		displayPath: string;
+	};
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1722,6 +1731,13 @@ async function applyNormalizedPatch(input: PatchInput, options: ApplyPatchOption
 			throw new ApplyPatchError(`concurrent edit conflict: file changed since read: ${input.path}`);
 		}
 		if (isMove) {
+			// Preflight can pass, then another writer holding this lock can
+			// turn a handwritten destination into a generated file.
+			if (options.destinationGuard) {
+				signal?.throwIfAborted();
+				await assertEditableFile(destPath, options.destinationGuard.displayPath, options.destinationGuard.settings);
+				signal?.throwIfAborted();
+			}
 			if (moveParent) {
 				signal?.throwIfAborted();
 				await fs.mkdir(moveParent);
@@ -1921,7 +1937,15 @@ export async function executePatchSingle(
 	const resolvedPath = resolvePlanPath(session, path);
 	const resolvedRename = rename ? resolvePlanPath(session, rename) : undefined;
 
-	await assertEditableFile(resolvedPath, path);
+	signal?.throwIfAborted();
+	await assertEditableFile(resolvedPath, path, session.settings);
+	// The rename destination is the path that is written. The source call above
+	// already uses this helper, including generated names that do not exist yet.
+	signal?.throwIfAborted();
+	if (resolvedRename && rename && resolvedRename !== resolvedPath) {
+		await assertEditableFile(resolvedRename, rename, session.settings);
+		signal?.throwIfAborted();
+	}
 
 	// Capture pre-edit content so we can verify the write actually hit disk.
 	// `LspFileSystem.writeFile` delegates to a writethrough callback that, in
@@ -1956,6 +1980,9 @@ export async function executePatchSingle(
 		crossProcessLock: true,
 		localRoot,
 		signal,
+		...(op === "update" && resolvedRename && rename && resolvedRename !== resolvedPath
+			? { destinationGuard: { settings: session.settings, displayPath: rename } }
+			: {}),
 	});
 
 	// Post-write verification: only meaningful for in-place updates where the
