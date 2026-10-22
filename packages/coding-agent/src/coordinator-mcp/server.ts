@@ -1177,8 +1177,20 @@ async function readCoordinatorEvents(namespaceDir: string): Promise<CoordinatorE
 	}
 }
 
+// Tool arguments and env values arrive untyped. `Number.parseInt(String(v))`
+// reads a leading digit prefix ("1e4" -> 1, "5s" -> 5) and flattens arrays
+// ([50] -> "50"), so a malformed value silently became a 1 ms timeout or a
+// one-row limit. Numbers pass through; strings must be plain decimal digits;
+// anything else is NaN so each caller falls back to its default.
+function integerArg(value: unknown): number {
+	if (typeof value === "number") return value;
+	if (typeof value !== "string") return Number.NaN;
+	const trimmed = value.trim();
+	return /^\d+$/.test(trimmed) ? Number.parseInt(trimmed, 10) : Number.NaN;
+}
+
 function boundedEventLimit(value: unknown): number {
-	const parsed = typeof value === "number" ? value : Number.parseInt(String(value ?? ""), 10);
+	const parsed = integerArg(value);
 	if (!Number.isFinite(parsed) || parsed <= 0) return 100;
 	return Math.min(parsed, 100);
 }
@@ -1764,7 +1776,7 @@ export const COORDINATOR_EVENT_WATCH_TIMEOUT_MAX_MS = 30_000;
 export const COORDINATOR_POLL_INTERVAL_MAX_MS = 10_000;
 
 function parsePositiveIntegerMs(value: unknown, fallback: number): number {
-	const parsed = typeof value === "number" ? value : Number.parseInt(String(value ?? ""), 10);
+	const parsed = integerArg(value);
 	return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
@@ -1788,7 +1800,7 @@ export function boundedPollIntervalMs(value: unknown): number {
 }
 
 function boundedLineCount(value: unknown): number {
-	const parsed = typeof value === "number" ? value : Number.parseInt(String(value ?? ""), 10);
+	const parsed = integerArg(value);
 	if (!Number.isFinite(parsed) || parsed <= 0) return 80;
 	return Math.min(parsed, 400);
 }
