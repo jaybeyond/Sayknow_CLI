@@ -17,7 +17,7 @@ const DRAFT_07_SCHEMA_URIS: Record<string, true> = {
  * entry rather than the map object itself so legacy `definitions`-style refs
  * inside property schemas get rewritten.
  */
-const SCHEMA_MAP_KEYS: Record<string, true> = { properties: true, patternProperties: true, dependentSchemas: true };
+const SCHEMA_MAP_KEYS = new Set(["properties", "patternProperties", "dependentSchemas"]);
 /**
  * Keys whose values are JSON-Schema *values*, not nested schemas. The upgrade
  * walker must NOT descend into these — `type: ["string","null"]` is not a
@@ -34,6 +34,14 @@ const NON_SCHEMA_VALUE_KEYS: Record<string, true> = {
 	type: true,
 };
 
+function setOwnKey(target: JsonObject, key: string, value: unknown): void {
+	if (key === "__proto__") {
+		Object.defineProperty(target, key, { value, writable: true, enumerable: true, configurable: true });
+		return;
+	}
+	target[key] = value;
+}
+
 /** Rewrite draft-07's `#/definitions/Foo` ref form to draft 2020-12's `#/$defs/Foo`. External refs (`http://…`) pass through. */
 function convertRef(value: string): string {
 	return value.startsWith("#/definitions/") ? `#/$defs/${value.slice("#/definitions/".length)}` : value;
@@ -41,10 +49,10 @@ function convertRef(value: string): string {
 
 /** Get-or-create a child object map on `target[key]`. Used to lazily build up `$defs`/`dependentRequired`/`dependentSchemas` during conversion. */
 function getObjectMap(target: JsonObject, key: string): JsonObject {
-	const existing = target[key];
+	const existing = Object.hasOwn(target, key) ? target[key] : undefined;
 	if (isJsonObject(existing)) return existing;
 	const next: JsonObject = {};
-	target[key] = next;
+	setOwnKey(target, key, next);
 	return next;
 }
 
@@ -52,13 +60,14 @@ function getObjectMap(target: JsonObject, key: string): JsonObject {
 function mergeSchemaMap(target: JsonObject, key: string, value: JsonObject, cache: WeakMap<object, unknown>): void {
 	const map = getObjectMap(target, key);
 	for (const name in value) {
-		map[name] = upgradeJsonSchemaTo202012Impl(value[name], cache);
+		if (!Object.hasOwn(value, name)) continue;
+		setOwnKey(map, name, upgradeJsonSchemaTo202012Impl(value[name], cache));
 	}
 }
 /** Copy a schema-map field with upgrade; non-object values are passed through verbatim. */
 function copySchemaMap(target: JsonObject, key: string, value: unknown, cache: WeakMap<object, unknown>): void {
 	if (!isJsonObject(value)) {
-		target[key] = value;
+		setOwnKey(target, key, value);
 		return;
 	}
 	mergeSchemaMap(target, key, value, cache);
@@ -107,20 +116,21 @@ function mergePrefixItems(existing: unknown, convertedItems: unknown[]): unknown
 /** Record `key → deps` in `dependentRequired`, unioning with any existing array. */
 function mergeDependentRequired(target: JsonObject, key: string, deps: unknown[]): void {
 	const dependentRequired = getObjectMap(target, "dependentRequired");
-	const existing = dependentRequired[key];
+	const existing = Object.hasOwn(dependentRequired, key) ? dependentRequired[key] : undefined;
 	if (existing === undefined) {
-		dependentRequired[key] = deps;
+		setOwnKey(dependentRequired, key, deps);
 		return;
 	}
 	if (Array.isArray(existing)) {
-		dependentRequired[key] = mergeArrayValues(existing, deps);
+		setOwnKey(dependentRequired, key, mergeArrayValues(existing, deps));
 	}
 }
 
 /** Record `key → schema` in `dependentSchemas`, intersecting with any existing entry. */
 function mergeDependentSchema(target: JsonObject, key: string, schema: unknown): void {
 	const dependentSchemas = getObjectMap(target, "dependentSchemas");
-	dependentSchemas[key] = combineSchemas(dependentSchemas[key], schema);
+	const existing = Object.hasOwn(dependentSchemas, key) ? dependentSchemas[key] : undefined;
+	setOwnKey(dependentSchemas, key, combineSchemas(existing, schema));
 }
 
 /**
@@ -130,9 +140,10 @@ function mergeDependentSchema(target: JsonObject, key: string, schema: unknown):
  *   - schema value → `dependentSchemas`
  */
 function convertDependencies(source: JsonObject, target: JsonObject, cache: WeakMap<object, unknown>): void {
-	const dependencies = source.dependencies;
+	const dependencies = Object.hasOwn(source, "dependencies") ? source.dependencies : undefined;
 	if (!isJsonObject(dependencies)) return;
 	for (const key in dependencies) {
+		if (!Object.hasOwn(dependencies, key)) continue;
 		const dependency = dependencies[key];
 		const converted = upgradeJsonSchemaTo202012Impl(dependency, cache);
 		if (Array.isArray(converted)) {
@@ -150,7 +161,9 @@ function hasNullType(type: unknown): boolean {
 
 /** True if any variant in `anyOf` declares (only) a null type. Used to avoid double-adding `{type:"null"}`. */
 function hasNullVariant(variants: unknown[]): boolean {
-	return variants.some(variant => isJsonObject(variant) && hasNullType(variant.type));
+	return variants.some(
+		variant => isJsonObject(variant) && Object.hasOwn(variant, "type") && hasNullType(variant.type),
+	);
 }
 
 /**
@@ -182,6 +195,7 @@ function makeNullable(schema: JsonObject): JsonObject {
 function schemaMapNeedsDraft202012Upgrade(value: unknown, epoch: number): boolean {
 	if (!isJsonObject(value)) return false;
 	for (const k in value) {
+		if (!Object.hasOwn(value, k)) continue;
 		if (schemaNeedsDraft202012UpgradeImpl(value[k], epoch)) return true;
 	}
 	return false;
@@ -203,9 +217,10 @@ function schemaNeedsDraft202012UpgradeImpl(value: unknown, epoch: number): boole
 	if (!once(value, epoch)) return false;
 
 	for (const key in value) {
+		if (!Object.hasOwn(value, key)) continue;
 		const entry = value[key];
 		if (key === "$schema") {
-			if (typeof entry === "string" && entry in DRAFT_07_SCHEMA_URIS) return true;
+			if (typeof entry === "string" && Object.hasOwn(DRAFT_07_SCHEMA_URIS, entry)) return true;
 			continue;
 		}
 		if (key === "definitions" || key === "dependencies" || key === "additionalItems" || key === "nullable") {
@@ -216,11 +231,11 @@ function schemaNeedsDraft202012UpgradeImpl(value: unknown, epoch: number): boole
 			continue;
 		}
 		if (key === "items" && Array.isArray(entry)) return true;
-		if (key === "$defs" || key in SCHEMA_MAP_KEYS) {
+		if (key === "$defs" || SCHEMA_MAP_KEYS.has(key)) {
 			if (schemaMapNeedsDraft202012Upgrade(entry, epoch)) return true;
 			continue;
 		}
-		if (key in NON_SCHEMA_VALUE_KEYS) continue;
+		if (Object.hasOwn(NON_SCHEMA_VALUE_KEYS, key)) continue;
 		if (schemaNeedsDraft202012UpgradeImpl(entry, epoch)) return true;
 	}
 
@@ -253,6 +268,7 @@ function upgradeJsonSchemaTo202012Impl(value: unknown, cache: WeakMap<object, un
 	// Seed cache before recursion so back-edges in cyclic graphs resolve.
 	cache.set(value, result);
 	for (const key in value) {
+		if (!Object.hasOwn(value, key)) continue;
 		const entry = value[key];
 		// `definitions` is the draft-07 name; merge under the canonical `$defs`.
 		// `$defs` may appear pre-upgraded — still walk entries to upgrade their bodies.
@@ -261,13 +277,13 @@ function upgradeJsonSchemaTo202012Impl(value: unknown, cache: WeakMap<object, un
 			continue;
 		}
 		// Recurse into each entry; the map shape itself is preserved.
-		if (key in SCHEMA_MAP_KEYS) {
+		if (SCHEMA_MAP_KEYS.has(key)) {
 			copySchemaMap(result, key, entry, cache);
 			continue;
 		}
 		// JSON-Schema *value* keywords — copy verbatim.
-		if (key in NON_SCHEMA_VALUE_KEYS) {
-			result[key] = entry;
+		if (Object.hasOwn(NON_SCHEMA_VALUE_KEYS, key)) {
+			setOwnKey(result, key, entry);
 			continue;
 		}
 		// Draft-07-only keywords with no draft 2020-12 spelling — drop entirely.
@@ -278,7 +294,9 @@ function upgradeJsonSchemaTo202012Impl(value: unknown, cache: WeakMap<object, un
 		// Rewrite `$schema` URI to the 2020-12 form; non-draft-07 URIs pass through.
 		if (key === "$schema") {
 			result.$schema =
-				typeof entry === "string" && entry in DRAFT_07_SCHEMA_URIS ? JSON_SCHEMA_DRAFT_2020_12_URI : entry;
+				typeof entry === "string" && Object.hasOwn(DRAFT_07_SCHEMA_URIS, entry)
+					? JSON_SCHEMA_DRAFT_2020_12_URI
+					: entry;
 			continue;
 		}
 		// `#/definitions/Foo` → `#/$defs/Foo`.
@@ -290,15 +308,20 @@ function upgradeJsonSchemaTo202012Impl(value: unknown, cache: WeakMap<object, un
 		if (key === "items" && Array.isArray(entry)) {
 			continue;
 		}
-		result[key] = upgradeJsonSchemaTo202012Impl(entry, cache);
+		setOwnKey(result, key, upgradeJsonSchemaTo202012Impl(entry, cache));
 	}
 
 	// Draft-07 tuple form: `items: [a, b]` (+ optional `additionalItems`) becomes
 	// draft 2020-12 `prefixItems: [a, b]` (+ optional `items` for the rest).
-	if (Array.isArray(value.items)) {
-		const convertedItems = upgradeJsonSchemaTo202012Impl(value.items, cache) as unknown[];
+	const tupleItems = Object.hasOwn(value, "items") && Array.isArray(value.items) ? value.items : undefined;
+	if (tupleItems !== undefined) {
+		const convertedItems = upgradeJsonSchemaTo202012Impl(tupleItems, cache) as unknown[];
 		result.prefixItems = mergePrefixItems(result.prefixItems, convertedItems);
-		if (value.additionalItems !== undefined && value.additionalItems !== true) {
+		if (
+			Object.hasOwn(value, "additionalItems") &&
+			value.additionalItems !== undefined &&
+			value.additionalItems !== true
+		) {
 			result.items = upgradeJsonSchemaTo202012Impl(value.additionalItems, cache);
 		} else {
 			// `additionalItems: true` (or absent) in draft-07 == no `items` in 2020-12.
@@ -311,7 +334,7 @@ function upgradeJsonSchemaTo202012Impl(value: unknown, cache: WeakMap<object, un
 	// OpenAPI 3.0 `nullable: true` → 2020-12 nullability. `makeNullable` may
 	// return a fresh wrapper object, in which case update the cache so callers
 	// referring to the same input see the wrapper instead of the inner result.
-	if (value.nullable === true) {
+	if (Object.hasOwn(value, "nullable") && value.nullable === true) {
 		const nullable = makeNullable(result);
 		if (nullable !== result) cache.set(value, nullable);
 		return nullable;

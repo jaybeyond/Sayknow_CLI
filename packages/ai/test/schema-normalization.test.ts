@@ -4,6 +4,7 @@ import { convertTools } from "@sayknow-cli/ai/providers/google-shared";
 import type { Context, Model, TJsonSchema, Tool } from "@sayknow-cli/ai/types";
 import {
 	enforceStrictSchema,
+	isValidJsonSchema,
 	mergeCompatibleEnumSchemas,
 	normalizeSchemaForCCA,
 	normalizeSchemaForGoogle,
@@ -349,6 +350,32 @@ describe("normalizeSchemaForMCP", () => {
 		});
 	});
 
+	it("makes implicit propertyless MCP argument maps explicitly open without loosening declared objects", () => {
+		const schema = {
+			type: "object",
+			properties: {
+				action: { type: "string" },
+				args: { type: "object", description: "Dispatcher arguments" },
+				explicitlyClosed: { type: "object", additionalProperties: false },
+				declared: { type: "object", properties: { path: { type: "string" } } },
+				literalCarrier: { type: "string", default: { type: "object" } },
+			},
+		};
+		const before = structuredClone(schema);
+
+		expect(normalizeSchemaForMCP(schema)).toEqual({
+			type: "object",
+			properties: {
+				action: { type: "string" },
+				args: { type: "object", description: "Dispatcher arguments", additionalProperties: true },
+				explicitlyClosed: { type: "object", additionalProperties: false },
+				declared: { type: "object", properties: { path: { type: "string" } } },
+				literalCarrier: { type: "string", default: { type: "object" } },
+			},
+		});
+		expect(schema).toEqual(before);
+	});
+
 	// Regression: issue #1101. Some MCP servers ship `JSON.stringify(zodSchema)`
 	// directly as a tool's `inputSchema`. Zod 4 surfaces `.type`, `.enum`,
 	// `.options`, and `.def` on every schema instance — those keys collide with
@@ -440,6 +467,363 @@ describe("normalizeSchemaForMCP", () => {
 			required: ["def"],
 		};
 		expect(normalizeSchemaForMCP(schema)).toEqual(schema);
+	});
+
+	// A tool schema arriving over the MCP wire is `JSON.parse`d, so `__proto__` is
+	// an ordinary own data property. Copying it with `out[key] = value` would hit
+	// `Object.prototype`'s `__proto__` setter and silently drop the property name.
+	it("preserves parsed `__proto__`, `constructor`, and `prototype` property names as own data", () => {
+		const parsed = JSON.parse(
+			'{"type":"object","properties":{"__proto__":{"type":"object","description":"open map"},"constructor":{"type":"string"},"prototype":{"type":"string"}},"required":["__proto__"]}',
+		);
+		const normalized = normalizeSchemaForMCP(parsed) as Record<string, Record<string, unknown>>;
+
+		expect(Object.keys(normalized.properties)).toEqual(["__proto__", "constructor", "prototype"]);
+		expect(Object.getOwnPropertyDescriptor(normalized.properties, "__proto__")?.value).toEqual({
+			type: "object",
+			description: "open map",
+			additionalProperties: true,
+		});
+		expect(Object.getPrototypeOf(normalized.properties)).toBe(Object.prototype);
+		expect(({} as Record<string, unknown>).description).toBeUndefined();
+	});
+
+	// `default`, `const`, `enum`, and `examples` carry instance data, not
+	// subschemas. The generic pre-walk used to recurse into them and rewrite user
+	// payloads as schemas; every value below changes visibly if that regresses.
+	it("copies literal payloads verbatim instead of normalizing them as schemas", () => {
+		const schema = {
+			type: "string",
+			$defs: { RootDefinition: { type: "number" } },
+			default: {
+				type: "object",
+				nullable: true,
+				format: null,
+				$ref: "#/$defs/Literal",
+				$defs: { Literal: { type: "string" } },
+				nestedZodLookingData: {
+					def: { type: "enum", entries: { literal: "literal" } },
+					type: "enum",
+					enum: { literal: "literal" },
+					options: ["literal"],
+				},
+			},
+			examples: [{ anyOf: [{ const: "a" }, { const: "b" }] }],
+		};
+		const before = structuredClone(schema);
+
+		expect(normalizeSchemaForMCP(schema)).toEqual({
+			type: "string",
+			default: {
+				type: "object",
+				nullable: true,
+				format: null,
+				$ref: "#/$defs/Literal",
+				$defs: { Literal: { type: "string" } },
+				nestedZodLookingData: {
+					def: { type: "enum", entries: { literal: "literal" } },
+					type: "enum",
+					enum: { literal: "literal" },
+					options: ["literal"],
+				},
+			},
+			examples: [{ anyOf: [{ const: "a" }, { const: "b" }] }],
+		});
+		expect(schema).toEqual(before);
+	});
+
+	it("does not alias literal payloads back to the caller's input", () => {
+		const defaultValue = { nested: { keep: true } };
+		const schema = { type: "object", properties: {}, default: defaultValue };
+		const normalized = normalizeSchemaForMCP(schema) as { default: typeof defaultValue };
+
+		expect(normalized.default).toEqual(defaultValue);
+		expect(normalized.default).not.toBe(defaultValue);
+		expect(normalized.default.nested).not.toBe(defaultValue.nested);
+	});
+
+	it("treats every properties key as data, including schema-key names and prototype keys", () => {
+		const parsed = JSON.parse(
+			'{"type":"object","properties":{"type":{"type":"object"},"default":{"type":"object"},"const":{"type":"object"},"enum":{"type":"object"},"examples":{"type":"object"},"__proto__":{"type":"object"},"constructor":{"type":"object"},"prototype":{"type":"object"}},"required":["type","default","const","enum","examples","__proto__","constructor","prototype"]}',
+		) as Record<string, unknown>;
+
+		const normalized = normalizeSchemaForMCP(parsed) as Record<string, unknown>;
+		const properties = normalized.properties as Record<string, unknown>;
+		const propertyNames = ["type", "default", "const", "enum", "examples", "__proto__", "constructor", "prototype"];
+
+		expect(Object.keys(properties)).toEqual(propertyNames);
+		for (const propertyName of propertyNames) {
+			expect(properties[propertyName]).toEqual({ type: "object", additionalProperties: true });
+		}
+		expect(Object.getOwnPropertyDescriptor(properties, "__proto__")?.value).toEqual({
+			type: "object",
+			additionalProperties: true,
+		});
+		expect(Object.getPrototypeOf(properties)).toBe(Object.prototype);
+		expect(({} as Record<string, unknown>).additionalProperties).toBeUndefined();
+		expect(isValidJsonSchema(normalized)).toBe(true);
+	});
+
+	it("keeps a root prototype-colliding extension out of draft dispatch and Object.prototype", () => {
+		const parsed = JSON.parse(
+			'{"$schema":"http://json-schema.org/draft-07/schema#","type":"object","__proto__":{"marker":"data"}}',
+		) as Record<string, unknown>;
+
+		const normalized = normalizeSchemaForMCP(parsed) as Record<string, unknown>;
+
+		expect(Object.hasOwn(normalized, "__proto__")).toBe(true);
+		expect(Object.getOwnPropertyDescriptor(normalized, "__proto__")?.value).toEqual({ marker: "data" });
+		expect(Object.getPrototypeOf(normalized)).toBe(Object.prototype);
+		expect(({} as Record<string, unknown>).marker).toBeUndefined();
+		expect(isValidJsonSchema(normalized)).toBe(true);
+	});
+
+	it("keeps null-prototype and defineProperty-created maps safe during MCP copying", () => {
+		const properties = Object.create(null) as Record<string, unknown>;
+		Object.defineProperty(properties, "__proto__", {
+			value: Object.assign(Object.create(null), { type: "object" }),
+			configurable: true,
+			enumerable: true,
+			writable: true,
+		});
+		Object.defineProperty(properties, "constructor", {
+			value: { type: "string" },
+			configurable: true,
+			enumerable: true,
+			writable: true,
+		});
+		const schema = Object.create(null) as Record<string, unknown>;
+		Object.defineProperty(schema, "type", { value: "object", configurable: true, enumerable: true, writable: true });
+		Object.defineProperty(schema, "properties", {
+			value: properties,
+			configurable: true,
+			enumerable: true,
+			writable: true,
+		});
+
+		const normalized = normalizeSchemaForMCP(schema) as Record<string, unknown>;
+		const normalizedProperties = normalized.properties as Record<string, unknown>;
+
+		expect(Object.hasOwn(normalizedProperties, "__proto__")).toBe(true);
+		expect(Object.hasOwn(normalizedProperties, "constructor")).toBe(true);
+		expect(Object.getOwnPropertyDescriptor(normalizedProperties, "__proto__")?.value).toEqual({
+			type: "object",
+			additionalProperties: true,
+		});
+		expect(Object.getOwnPropertyDescriptor(normalizedProperties, "__proto__")?.enumerable).toBe(true);
+		expect(Object.getPrototypeOf(normalizedProperties)).toBe(Object.prototype);
+		expect(({} as Record<string, unknown>).additionalProperties).toBeUndefined();
+		expect(isValidJsonSchema(normalized)).toBe(true);
+	});
+
+	it("preserves dangerous keys when draft upgrade and definition dereferencing allocate copies", () => {
+		const parsed = JSON.parse(
+			'{"$schema":"http://json-schema.org/draft-07/schema#","nullable":true,"type":"object","properties":{"__proto__":{"type":"object"},"constructor":{"type":"object"},"prototype":{"type":"object"}},"items":[{"type":"object"}],"$defs":{"Definition":{"type":"object"}}}',
+		) as Record<string, unknown>;
+
+		const normalized = normalizeSchemaForMCP(parsed) as Record<string, unknown>;
+		const properties = normalized.properties as Record<string, unknown>;
+
+		expect(Object.keys(properties)).toEqual(["__proto__", "constructor", "prototype"]);
+		expect(Object.hasOwn(properties, "__proto__")).toBe(true);
+		expect(Object.getOwnPropertyDescriptor(properties, "__proto__")?.value).toEqual({
+			type: "object",
+			additionalProperties: true,
+		});
+		expect(normalized.prefixItems).toEqual([{ type: "object", additionalProperties: true }]);
+		expect(normalized.$defs).toBeUndefined();
+		expect(isValidJsonSchema(normalized)).toBe(true);
+		expect(({} as Record<string, unknown>).additionalProperties).toBeUndefined();
+	});
+
+	it("preserves dangerous keys while cleaning serialized Zod object schemas", () => {
+		const leaked = JSON.parse(
+			'{"type":"object","def":{"type":"object","shape":{"__proto__":{"type":"object"},"constructor":{"type":"string"},"prototype":{"type":"string"}}}}',
+		) as Record<string, unknown>;
+
+		const normalized = normalizeSchemaForMCP(leaked) as Record<string, unknown>;
+		const properties = normalized.properties as Record<string, unknown>;
+
+		expect(Object.keys(properties)).toEqual(["__proto__", "constructor", "prototype"]);
+		expect(Object.getOwnPropertyDescriptor(properties, "__proto__")?.value).toEqual({
+			type: "object",
+			additionalProperties: true,
+		});
+		expect(Object.getPrototypeOf(properties)).toBe(Object.prototype);
+		expect(isValidJsonSchema(normalized)).toBe(true);
+		expect(({} as Record<string, unknown>).additionalProperties).toBeUndefined();
+	});
+
+	it("does not resolve an inherited prototype value for an unresolved local ref", () => {
+		const schema = {
+			$defs: { Safe: { type: "string" } },
+			$ref: "#/$defs/__proto__",
+		};
+
+		const normalized = normalizeSchemaForMCP(schema) as Record<string, unknown>;
+
+		expect(normalized).toEqual({ $defs: { Safe: { type: "string" } }, $ref: "#/$defs/__proto__" });
+		expect(isValidJsonSchema(normalized)).toBe(true);
+	});
+
+	it("dereferences refs in schema arrays, nested definitions, escaped names, and boolean definitions", () => {
+		const schema = {
+			type: "object",
+			properties: {
+				nested: {
+					$defs: { Inner: { type: "string" } },
+					$ref: "#/properties/nested/$defs/Inner",
+				},
+			},
+			$defs: {
+				"Array/Definition": { type: "object" },
+				BooleanDefinition: false,
+				Base: { type: "string" },
+				Sibling: { type: "number" },
+			},
+			anyOf: [{ $ref: "#/$defs/Array~1Definition" }, { $ref: "#/$defs/BooleanDefinition" }],
+			additionalProperties: {
+				$ref: "#/$defs/Base",
+				anyOf: [{ $ref: "#/$defs/Sibling" }],
+				default: { $ref: "#/$defs/BooleanDefinition" },
+			},
+		};
+
+		const normalized = normalizeSchemaForMCP(schema) as Record<string, unknown>;
+		const properties = normalized.properties as Record<string, unknown>;
+		const alternatives = normalized.anyOf as Array<Record<string, unknown> | boolean>;
+		const additionalProperties = normalized.additionalProperties as Record<string, unknown>;
+
+		expect(properties.nested).toEqual({ type: "string" });
+		expect(alternatives).toEqual([{ type: "object", additionalProperties: true }, false]);
+		expect(additionalProperties).toEqual({
+			type: "string",
+			anyOf: [{ type: "number" }],
+			default: { $ref: "#/$defs/BooleanDefinition" },
+		});
+		expect(normalized.$defs).toBeUndefined();
+		expect(isValidJsonSchema(normalized)).toBe(true);
+	});
+
+	it("keeps reserved words as schema-map names through dereference and Zod cleanup", () => {
+		const schema = {
+			type: "object",
+			properties: {
+				default: { $ref: "#/$defs/Value" },
+				const: {
+					type: "enum",
+					def: { type: "enum", entries: { enabled: "enabled" } },
+					enum: { enabled: "enabled" },
+				},
+			},
+			$defs: { Value: { type: "string" } },
+		};
+
+		const normalized = normalizeSchemaForMCP(schema) as Record<string, unknown>;
+		const properties = normalized.properties as Record<string, unknown>;
+
+		expect(properties.default).toEqual({ type: "string" });
+		expect(properties.const).toEqual({ type: "string", enum: ["enabled"] });
+		expect(normalized.$defs).toBeUndefined();
+		expect(isValidJsonSchema(normalized)).toBe(true);
+	});
+
+	it("applies sibling constraints when a local ref resolves to the boolean true schema", () => {
+		const schema = {
+			type: "object",
+			properties: {
+				value: { $ref: "#/$defs/Any", type: "string" },
+			},
+			$defs: { Any: true },
+		};
+
+		const normalized = normalizeSchemaForMCP(schema) as Record<string, unknown>;
+		const properties = normalized.properties as Record<string, unknown>;
+
+		expect(properties.value).toEqual({ type: "string" });
+		expect(normalized.$defs).toBeUndefined();
+		expect(isValidJsonSchema(normalized)).toBe(true);
+	});
+
+	it("terminates direct object cycles encountered while dereferencing definitions", () => {
+		const schema: Record<string, unknown> = {
+			$defs: { Node: { type: "object" } },
+			type: "object",
+			properties: {},
+		};
+		(schema.properties as Record<string, unknown>).self = schema;
+
+		const normalized = normalizeSchemaForMCP(schema) as Record<string, unknown>;
+		const properties = normalized.properties as Record<string, unknown>;
+
+		expect(properties.self).toEqual({});
+		expect(normalized.$defs).toBeUndefined();
+		expect(isValidJsonSchema(normalized)).toBe(true);
+	});
+
+	it("recurses nested additionalProperties, unions, arrays, and referenced definitions", () => {
+		const schema = {
+			type: "object",
+			properties: {
+				map: { type: "object", additionalProperties: { type: "object" } },
+				union: { anyOf: [{ type: "object" }, { type: "string" }] },
+				list: {
+					type: "array",
+					items: { type: "object" },
+					prefixItems: [{ type: "object" }],
+					contains: { type: "object" },
+				},
+				fromDefs: { $ref: "#/$defs/Definition" },
+			},
+			$defs: {
+				Definition: {
+					type: "object",
+					properties: { nested: { type: "object" } },
+				},
+			},
+		};
+
+		const normalized = normalizeSchemaForMCP(schema) as Record<string, unknown>;
+		const properties = normalized.properties as Record<string, Record<string, unknown>>;
+		const map = properties.map.additionalProperties as Record<string, unknown>;
+		const union = properties.union.anyOf as Array<Record<string, unknown>>;
+		const list = properties.list;
+		const definition = properties.fromDefs;
+
+		expect(map).toEqual({ type: "object", additionalProperties: true });
+		expect(union[0]).toEqual({ type: "object", additionalProperties: true });
+		expect(union[1]).toEqual({ type: "string" });
+		expect(list.items).toEqual({ type: "object", additionalProperties: true });
+		expect(list.prefixItems).toEqual([{ type: "object", additionalProperties: true }]);
+		expect(list.contains).toEqual({ type: "object", additionalProperties: true });
+		expect(definition).toEqual({
+			type: "object",
+			properties: { nested: { type: "object", additionalProperties: true } },
+		});
+		expect(normalized.$defs).toBeUndefined();
+		expect(isValidJsonSchema(normalized)).toBe(true);
+		expect(normalizeSchemaForMCP(normalized)).toEqual(normalized);
+	});
+
+	it("terminates cyclic schemas with the existing empty-schema cycle boundary", () => {
+		const schema: Record<string, unknown> = { type: "object", properties: {} };
+		(schema.properties as Record<string, unknown>).self = schema;
+
+		const normalized = normalizeSchemaForMCP(schema) as Record<string, unknown>;
+		const properties = normalized.properties as Record<string, unknown>;
+
+		expect(properties.self).toEqual({});
+		expect(normalizeSchemaForMCP(normalized)).toEqual(normalized);
+	});
+
+	it("does not turn malformed MCP schemas into valid JSON Schema", () => {
+		const malformed = {
+			type: "not-a-json-schema-type",
+			properties: [],
+		};
+
+		expect(isValidJsonSchema(malformed)).toBe(false);
+		expect(isValidJsonSchema(normalizeSchemaForMCP(malformed))).toBe(false);
 	});
 });
 
@@ -735,6 +1119,20 @@ describe("stripResidualCombiners", () => {
 // ---------------------------------------------------------------------------
 
 describe("normalizeSchemaForCCA", () => {
+	it("normalizes colliding property names as schema-map entries", () => {
+		const normalized = normalizeSchemaForCCA({
+			type: "object",
+			properties: {
+				default: { anyOf: [{ type: "string" }, { type: "null" }] },
+			},
+			required: ["default"],
+		}) as Record<string, unknown>;
+		const properties = normalized.properties as Record<string, unknown>;
+
+		expect(properties.default).toEqual({ type: "string" });
+		expect(normalized.required).toEqual(["default"]);
+	});
+
 	it("collapses same-type anyOf variants when mixed-type collapse bails out", () => {
 		const prepared = normalizeSchemaForCCA({
 			type: "object",

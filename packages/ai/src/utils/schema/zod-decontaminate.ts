@@ -114,15 +114,38 @@ const KEYS_THAT_ACCEPT_NULL: Record<string, true> = {
 	const: true,
 	examples: true,
 };
+const JSON_SCHEMA_LITERAL_PAYLOAD_KEYS = new Set(["default", "const", "enum", "examples"]);
+const JSON_SCHEMA_MAP_KEYS = new Set([
+	"properties",
+	"patternProperties",
+	"dependencies",
+	"dependentSchemas",
+	"$defs",
+	"definitions",
+]);
+
+function setOwnKey(target: JsonObject, key: string, value: unknown): void {
+	if (key === "__proto__") {
+		Object.defineProperty(target, key, { value, writable: true, enumerable: true, configurable: true });
+		return;
+	}
+	target[key] = value;
+}
 
 function isZodLeak(node: JsonObject): boolean {
+	if (!Object.hasOwn(node, "def") || !Object.hasOwn(node, "type")) return false;
 	const def = node.def;
 	if (!isJsonObject(def)) return false;
+	if (!Object.hasOwn(def, "type")) return false;
 	const defType = def.type;
-	if (typeof defType !== "string" || !ZOD_KINDS[defType]) return false;
+	if (typeof defType !== "string" || !Object.hasOwn(ZOD_KINDS, defType)) return false;
 	// Both surface and inner `.type` must agree — Zod always mirrors `_def.type`
 	// onto the instance, so this is a near-zero false-positive guard.
 	return node.type === defType;
+}
+
+function ownValue(object: JsonObject, key: string): unknown {
+	return Object.hasOwn(object, key) ? object[key] : undefined;
 }
 
 function inferTypeFromValues(values: readonly unknown[]): string {
@@ -139,16 +162,20 @@ function unwrapInnerSchema(def: JsonObject): unknown {
 	//   optional/nullable/readonly/brand/default → `innerType`
 	//   pipe → `in` (or `out`)
 	//   lazy → `getter` (a function — gone after JSON.stringify); fall back to {}
-	return def.innerType ?? def.in ?? def.out ?? def.schema ?? def.element ?? {};
+	for (const key of ["innerType", "in", "out", "schema", "element"]) {
+		if (Object.hasOwn(def, key) && def[key] !== undefined) return def[key];
+	}
+	return {};
 }
 
 function copyWithoutNoise(node: JsonObject): JsonObject {
 	const out: JsonObject = {};
 	for (const key in node) {
-		if (ZOD_NOISE_KEYS[key]) continue;
+		if (!Object.hasOwn(node, key)) continue;
+		if (Object.hasOwn(ZOD_NOISE_KEYS, key)) continue;
 		const value = node[key];
-		if (value === null && !KEYS_THAT_ACCEPT_NULL[key]) continue;
-		out[key] = value;
+		if (value === null && !Object.hasOwn(KEYS_THAT_ACCEPT_NULL, key)) continue;
+		setOwnKey(out, key, value);
 	}
 	return out;
 }
@@ -161,15 +188,19 @@ function rewriteZodNode(node: JsonObject, seen: WeakSet<object>): unknown {
 		case "enum": {
 			// Prefer node.options (array form Zod exposes) → def.entries values →
 			// object-shaped node.enum values. All three carry the same data.
-			const optionsArray = Array.isArray(node.options) ? (node.options as unknown[]) : null;
-			const entries = isJsonObject(def.entries) ? Object.values(def.entries) : null;
-			const enumObj = isJsonObject(node.enum) ? Object.values(node.enum) : null;
+			const optionsValue = Object.hasOwn(node, "options") ? node.options : undefined;
+			const entriesValue = Object.hasOwn(def, "entries") ? def.entries : undefined;
+			const enumValue = Object.hasOwn(node, "enum") ? node.enum : undefined;
+			const optionsArray = Array.isArray(optionsValue) ? optionsValue : null;
+			const entries = isJsonObject(entriesValue) ? Object.values(entriesValue) : null;
+			const enumObj = isJsonObject(enumValue) ? Object.values(enumValue) : null;
 			const values = optionsArray ?? entries ?? enumObj ?? [];
 			return { type: inferTypeFromValues(values), enum: values };
 		}
 
 		case "literal": {
-			const values = Array.isArray(def.values) ? (def.values as unknown[]) : [];
+			const valuesValue = ownValue(def, "values");
+			const values = Array.isArray(valuesValue) ? valuesValue : [];
 			if (values.length === 1) {
 				return { const: values[0] };
 			}
@@ -181,49 +212,50 @@ function rewriteZodNode(node: JsonObject, seen: WeakSet<object>): unknown {
 
 		case "union":
 		case "discriminatedUnion": {
-			const arms = Array.isArray(def.options)
-				? (def.options as unknown[])
-				: Array.isArray(node.options)
-					? (node.options as unknown[])
-					: [];
+			const defOptions = Object.hasOwn(def, "options") ? def.options : undefined;
+			const nodeOptions = Object.hasOwn(node, "options") ? node.options : undefined;
+			const arms = Array.isArray(defOptions) ? defOptions : Array.isArray(nodeOptions) ? nodeOptions : [];
 			return { anyOf: arms.map(x => walk(x, seen)) };
 		}
 
 		case "intersection": {
 			return {
-				allOf: [walk(def.left, seen), walk(def.right, seen)],
+				allOf: [walk(ownValue(def, "left"), seen), walk(ownValue(def, "right"), seen)],
 			};
 		}
 
 		case "array": {
-			return { type: "array", items: walk(def.element, seen) };
+			return { type: "array", items: walk(ownValue(def, "element"), seen) };
 		}
 
 		case "set": {
-			const element = def.valueType ?? def.element;
+			const element = ownValue(def, "valueType") ?? ownValue(def, "element");
 			return { type: "array", uniqueItems: true, items: walk(element, seen) };
 		}
 
 		case "tuple": {
-			const items = Array.isArray(def.items) ? (def.items as unknown[]) : [];
+			const itemsValue = ownValue(def, "items");
+			const items = Array.isArray(itemsValue) ? itemsValue : [];
 			const out: JsonObject = { type: "array", prefixItems: items.map(x => walk(x, seen)) };
-			const rest = def.rest;
+			const rest = ownValue(def, "rest");
 			if (rest != null) out.items = walk(rest, seen);
 			return out;
 		}
 
 		case "record":
 		case "map": {
-			return { type: "object", additionalProperties: walk(def.valueType, seen) };
+			return { type: "object", additionalProperties: walk(ownValue(def, "valueType"), seen) };
 		}
 
 		case "object": {
-			const shape = isJsonObject(def.shape) ? def.shape : ({} as JsonObject);
+			const shapeValue = ownValue(def, "shape");
+			const shape = isJsonObject(shapeValue) ? shapeValue : ({} as JsonObject);
 			const properties: JsonObject = {};
 			const required: string[] = [];
 			for (const key in shape) {
+				if (!Object.hasOwn(shape, key)) continue;
 				const inner = walk(shape[key], seen);
-				properties[key] = inner;
+				setOwnKey(properties, key, inner);
 				if (!isOptionalEntry(shape[key])) required.push(key);
 			}
 			const out: JsonObject = { type: "object", properties };
@@ -244,10 +276,10 @@ function rewriteZodNode(node: JsonObject, seen: WeakSet<object>): unknown {
 		case "transform": {
 			const inner = walk(unwrapInnerSchema(def), seen);
 			if (kind === "nullable" && isJsonObject(inner)) {
-				if (typeof inner.type === "string") {
+				if (Object.hasOwn(inner, "type") && typeof inner.type === "string") {
 					return { ...inner, type: [inner.type, "null"] };
 				}
-				if (Array.isArray(inner.type)) {
+				if (Object.hasOwn(inner, "type") && Array.isArray(inner.type)) {
 					return (inner.type as string[]).includes("null")
 						? inner
 						: { ...inner, type: [...(inner.type as string[]), "null"] };
@@ -266,7 +298,7 @@ function rewriteZodNode(node: JsonObject, seen: WeakSet<object>): unknown {
 			const mapped = ZOD_SCALAR_TO_JSON_TYPE[kind];
 			if (mapped) {
 				cleaned.type = mapped;
-			} else if (typeof cleaned.type === "string" && !VALID_JSON_SCHEMA_TYPES[cleaned.type]) {
+			} else if (typeof cleaned.type === "string" && !Object.hasOwn(VALID_JSON_SCHEMA_TYPES, cleaned.type)) {
 				delete cleaned.type;
 			}
 			// Object-shaped `enum` survives as a noise field — remove if present.
@@ -281,7 +313,8 @@ function rewriteZodNode(node: JsonObject, seen: WeakSet<object>): unknown {
 function isOptionalEntry(value: unknown): boolean {
 	if (!isJsonObject(value)) return false;
 	if (!isZodLeak(value)) return false;
-	const kind = (value.def as JsonObject).type;
+	const def = value.def as JsonObject;
+	const kind = Object.hasOwn(def, "type") ? def.type : undefined;
 	return kind === "optional" || kind === "default" || kind === "prefault";
 }
 
@@ -294,7 +327,20 @@ export function decontaminateZodInstance(value: unknown): unknown {
 	return walk(value, new WeakSet());
 }
 
-function walk(value: unknown, seen: WeakSet<object>): unknown {
+function walkSchemaMap(value: JsonObject, seen: WeakSet<object>): JsonObject {
+	let changed = false;
+	const out: JsonObject = {};
+	for (const key in value) {
+		if (!Object.hasOwn(value, key)) continue;
+		const child = value[key];
+		const rewritten = walk(child, seen);
+		if (rewritten !== child) changed = true;
+		setOwnKey(out, key, rewritten);
+	}
+	return changed ? out : value;
+}
+
+function walk(value: unknown, seen: WeakSet<object>, inSchemaMap = false): unknown {
 	if (Array.isArray(value)) {
 		if (seen.has(value)) return value;
 		seen.add(value);
@@ -322,10 +368,18 @@ function walk(value: unknown, seen: WeakSet<object>): unknown {
 	let changed = false;
 	const out: JsonObject = {};
 	for (const key in value) {
+		if (!Object.hasOwn(value, key)) continue;
 		const child = value[key];
-		const rewritten = walk(child, seen);
+		if (!inSchemaMap && JSON_SCHEMA_LITERAL_PAYLOAD_KEYS.has(key)) {
+			setOwnKey(out, key, child);
+			continue;
+		}
+		const rewritten =
+			!inSchemaMap && JSON_SCHEMA_MAP_KEYS.has(key) && isJsonObject(child)
+				? walkSchemaMap(child, seen)
+				: walk(child, seen);
 		if (rewritten !== child) changed = true;
-		out[key] = rewritten;
+		setOwnKey(out, key, rewritten);
 	}
 	return changed ? out : value;
 }
