@@ -3,6 +3,8 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { Args, CliParseError, Command, Flags, renderCommandHelp } from "@sayknow-cli/utils/cli";
+import { startupProjectEnvSnapshot } from "@sayknow-cli/utils/env";
+import { type ProjectEnvSnapshot, projectEnvSnapshot } from "@sayknow-cli/utils/env-file";
 import type { Args as ParsedArgs } from "../cli/args";
 import { Settings } from "../config/settings";
 import { applyStartupModelProfiles, createSessionManager } from "../main";
@@ -34,6 +36,7 @@ import {
 	type ResumeSessionIdentity,
 	SessionManager,
 } from "../session/session-manager";
+import { trustedCoordinatorEnv } from "../skc-runtime/sidecar-bootstrap-env";
 
 export async function lifecycleArgs(
 	request: SessionLifecycleLaunchRequest,
@@ -198,6 +201,38 @@ export async function openLifecycleSessionManager(
 	return { parsed, sessionManager };
 }
 
+const SDK_CWD_EQUALITY_TEST_SEAMS = [
+	"SKC_SDK_TEST_HANG_MODEL_PROFILE",
+	"SKC_SDK_TEST_FAIL_AFTER_REGISTRATION",
+] as const;
+
+type SdkCwdEqualityTestSeam = (typeof SDK_CWD_EQUALITY_TEST_SEAMS)[number];
+
+function isSdkCwdEqualityTestSeam(name: string): name is SdkCwdEqualityTestSeam {
+	return (SDK_CWD_EQUALITY_TEST_SEAMS as readonly string[]).includes(name);
+}
+
+function sdkCwdEqualitySnapshots(cwd: string): ProjectEnvSnapshot[] {
+	// The startup snapshot keeps a declaration Bun loaded before a later chdir.
+	return [projectEnvSnapshot(cwd), startupProjectEnvSnapshot()];
+}
+
+/**
+ * Cwd-equality test seams accept only an operator value. A project dotenv line,
+ * including one Bun expands from `$PWD`, never arms the seam.
+ */
+export function sdkCwdEqualityTestSeamActive(
+	name: string,
+	cwd: string,
+	env: NodeJS.ProcessEnv = process.env,
+	snapshots: readonly ProjectEnvSnapshot[] = sdkCwdEqualitySnapshots(cwd),
+): boolean {
+	if (!isSdkCwdEqualityTestSeam(name) || env[name] !== cwd) return false;
+	// Provenance only. trustedCoordinatorEnv trims, so a second compare to cwd
+	// would drop a trusted path that still matches exactly, including trailing space.
+	return snapshots.every(snapshot => trustedCoordinatorEnv(name, env, snapshot) !== undefined);
+}
+
 /** Runs the same persisted AgentSession bootstrap used by the production CLI. */
 export async function runSessionHost(
 	timing: {
@@ -214,6 +249,9 @@ export async function runSessionHost(
 	const agentDir = process.env.SKC_AGENT_DIR;
 	if (!agentDir) throw new Error("SKC_AGENT_DIR is required for sdk session-host-internal.");
 	const cwd = timing.cwd ?? process.cwd();
+	const cwdSeamSnapshots = sdkCwdEqualitySnapshots(cwd);
+	const cwdEqualitySeam = (name: SdkCwdEqualityTestSeam): boolean =>
+		sdkCwdEqualityTestSeamActive(name, cwd, process.env, cwdSeamSnapshots);
 	if ((await fs.realpath(request.cwd)) !== (await fs.realpath(cwd)))
 		throw new Error(`Lifecycle worktree mismatch: expected ${request.cwd}, got ${cwd}.`);
 	if (
@@ -460,15 +498,14 @@ export async function runSessionHost(
 	};
 
 	try {
-		const modelProfileStartup =
-			process.env.SKC_SDK_TEST_HANG_MODEL_PROFILE === cwd
-				? new Promise<void>(() => {})
-				: applyStartupModelProfiles({
-						session,
-						settings: session.settings,
-						modelRegistry: session.modelRegistry,
-						parsedArgs: parsed,
-					});
+		const modelProfileStartup = cwdEqualitySeam("SKC_SDK_TEST_HANG_MODEL_PROFILE")
+			? new Promise<void>(() => {})
+			: applyStartupModelProfiles({
+					session,
+					settings: session.settings,
+					modelRegistry: session.modelRegistry,
+					parsedArgs: parsed,
+				});
 		await beforeCutoff(modelProfileStartup);
 		throwIfCutoff();
 		await beforeCutoff(
@@ -486,7 +523,7 @@ export async function runSessionHost(
 		const startup = await beforeCutoff(capability.promise);
 		if (startup.status !== "started") throw startup.failure;
 		throwIfCutoff();
-		if (process.env.SKC_SDK_TEST_FAIL_AFTER_REGISTRATION === cwd)
+		if (cwdEqualitySeam("SKC_SDK_TEST_FAIL_AFTER_REGISTRATION"))
 			throw new Error("Lifecycle test failure after SDK host registration.");
 
 		await session.sessionManager.ensureOnDisk();
