@@ -4,6 +4,7 @@ import { $ } from "bun";
 import { detectHostAvx2Support } from "../../../scripts/host-detect";
 import { assertRequiredSymbols } from "./embed-guard";
 import { generateEnumExports } from "./gen-enums";
+import { resolveNativeBuildOutputPaths } from "./native-build-paths";
 import { resolveCargoToolchainPath } from "./rust-toolchain-path";
 
 const repoRoot = path.join(import.meta.dir, "../../..");
@@ -131,12 +132,6 @@ async function resolveBuiltAddonPath(outputDir: string, canonicalFilename: strin
 	);
 }
 
-function resolveBuildOutputDirPrefix(profileLabel: string): string {
-	const buildTarget = crossTarget ?? `${targetPlatform}-${targetArch}`;
-	const variantLabel = effectiveVariant ?? "default";
-	return path.join(nativeDir, ".build", `${buildTarget}-${variantLabel}-${profileLabel}-`);
-}
-
 async function installGeneratedBindings(outputDir: string): Promise<void> {
 	const sourcePath = path.join(outputDir, "index.d.ts");
 	const destPath = path.join(nativeDir, "index.d.ts");
@@ -223,7 +218,15 @@ const profileLabel = resolveNativeBuildProfile({
 });
 const profileSuffix = ` (${profileLabel})`;
 
-const buildOutputDirPrefix = resolveBuildOutputDirPrefix(profileLabel);
+const { buildOutputDirPrefix, canonicalAddonFilename, canonicalAddonPath } = resolveNativeBuildOutputPaths({
+	nativeDir,
+	crossTarget,
+	targetPlatform,
+	targetArch,
+	variantSuffix,
+	variantLabel: effectiveVariant ?? "default",
+	profileLabel,
+});
 
 // Build napi args
 const napiArgs = [
@@ -244,9 +247,6 @@ const napiArgs = [
 
 if (crossTarget) napiArgs.push("--target", crossTarget);
 if (languageSet === "full") napiArgs.push("--", "--features", "full-langs");
-
-const canonicalAddonFilename = `pi_natives.${targetPlatform}-${targetArch}${variantSuffix}.node`;
-const canonicalAddonPath = path.join(nativeDir, canonicalAddonFilename);
 
 console.log(`Building pi-natives for ${targetPlatform}-${targetArch}${variantSuffix}${profileSuffix}…`);
 
