@@ -136,7 +136,7 @@ Environment is filtered before launching the runner:
 
 Runtime selection order:
 
-1. Active/located venv (`VIRTUAL_ENV`, then `<cwd>/.venv`, `<cwd>/venv`)
+1. Active/located venv (`VIRTUAL_ENV`, then `<cwd>/.venv`, `<cwd>/venv`). A workspace `.venv`/`venv` is repository content: it is used only when it contains `pyvenv.cfg` and its interpreter resolves (after symlinks) outside the workspace and project root. An in-tree script or binary is never executed as the interpreter.
 2. Managed venv at `~/.skc/python-env`
 3. `python` or `python3` on PATH
 
