@@ -14,6 +14,7 @@ import type {
 	ToolResultMessage,
 } from "@sayknow-cli/ai";
 import { sanitizeText } from "@sayknow-cli/utils";
+import { assertDeleteInsideWorkspace } from "./cursor-delete-path";
 import { resolveToCwd } from "./tools/path-utils";
 
 interface CursorExecBridgeOptions {
@@ -123,6 +124,7 @@ async function executeDelete(options: CursorExecBridgeOptions, pathArg: string, 
 			throw new Error(`Path is not a file: ${pathArg}`);
 		}
 
+		await assertDeleteInsideWorkspace(options.cwd, absolutePath);
 		fs.rmSync(absolutePath);
 
 		const sizeText = fileStat.size ? ` (${fileStat.size} bytes)` : "";
