@@ -3,6 +3,7 @@ import { getSupportedEfforts, type Model, modelsAreEqual } from "@sayknow-cli/ai
 import {
 	Container,
 	fuzzyFilter,
+	fuzzyMatch,
 	getKeybindings,
 	Input,
 	matchesKey,
@@ -114,6 +115,8 @@ interface ModelItem extends SearchableItem {
 	selector: string;
 	thinkingLevel?: ThinkingLevel;
 	explicitThinkingLevel?: boolean;
+	/** Tokenized fuzzy match score for the active query; lower is better. */
+	fuzzyScore?: number;
 }
 
 interface CanonicalModelItem extends SearchableItem {
@@ -124,6 +127,141 @@ interface CanonicalModelItem extends SearchableItem {
 	variantCount: number;
 	thinkingLevel?: ThinkingLevel;
 	explicitThinkingLevel?: boolean;
+	/** Tokenized fuzzy match score for the active query; lower is better. */
+	fuzzyScore?: number;
+}
+
+type ModelScoreItem = Pick<ModelItem, "id" | "provider" | "fuzzyScore">;
+type CanonicalScoreItem = Pick<CanonicalModelItem, "searchText" | "fuzzyScore">;
+type RankedModelItem = Pick<ModelItem, "id" | "provider" | "model" | "selector" | "fuzzyScore">;
+type RankedCanonicalItem = Pick<CanonicalModelItem, "id" | "model" | "fuzzyScore">;
+
+/** Sum of per-token fuzzy scores, matching fuzzyFilter's token semantics; undefined on any miss. */
+function fuzzyTokensScore(query: string, text: string): number | undefined {
+	const tokens = query
+		.trim()
+		.split(/\s+/)
+		.filter(token => token.length > 0);
+	if (tokens.length === 0) return undefined;
+	let total = 0;
+	for (const token of tokens) {
+		const match = fuzzyMatch(token, text);
+		if (!match.matches) return undefined;
+		total += match.score;
+	}
+	return total;
+}
+
+/** Assign every item its score for `query`, overwriting stale scores from an earlier query. */
+export function assignFuzzyScoresToModels(items: ModelScoreItem[], query: string): void {
+	const active = query.trim().length > 0;
+	for (const item of items) {
+		item.fuzzyScore = active ? fuzzyTokensScore(query, `${item.id} ${item.provider}`) : undefined;
+	}
+}
+
+export function assignFuzzyScoresToCanonicalModels(items: CanonicalScoreItem[], query: string): void {
+	const active = query.trim().length > 0;
+	for (const item of items) {
+		item.fuzzyScore = active ? fuzzyTokensScore(query, item.searchText) : undefined;
+	}
+}
+
+export interface RankedModelOrderContext {
+	roles: Record<string, RoleAssignment | undefined>;
+	mruIndex: ReadonlyMap<string, number>;
+	providerAuthStateById: ReadonlyMap<string, ProviderAuthState>;
+}
+
+const MODEL_DATE_RE = /-(\d{8})$/;
+const MODEL_LATEST_RE = /-latest$/;
+
+/** Match quality first while searching; ties keep default, MRU, provider, then recency order. */
+function compareFuzzyScores(a: number | undefined, b: number | undefined): number {
+	if (a === undefined && b === undefined) return 0;
+	return (a ?? Number.MAX_SAFE_INTEGER) - (b ?? Number.MAX_SAFE_INTEGER);
+}
+
+export function compareModelItemsForRanking(
+	a: RankedModelItem,
+	b: RankedModelItem,
+	context: RankedModelOrderContext,
+): number {
+	const { roles, mruIndex, providerAuthStateById } = context;
+	const scoreCmp = compareFuzzyScores(a.fuzzyScore, b.fuzzyScore);
+	if (scoreCmp !== 0) return scoreCmp;
+
+	const aRank = computeModelRank(a.model, roles);
+	const bRank = computeModelRank(b.model, roles);
+	if (aRank !== bRank) return aRank - bRank;
+
+	// Then MRU order (models in mruIndex come before those not in it)
+	const aMru = mruIndex.get(a.selector) ?? Number.MAX_SAFE_INTEGER;
+	const bMru = mruIndex.get(b.selector) ?? Number.MAX_SAFE_INTEGER;
+	if (aMru !== bMru) return aMru - bMru;
+
+	const providerCmp = compareRankedProviders(
+		{ id: a.provider, label: a.provider, authState: providerAuthStateById.get(a.provider) ?? "none" },
+		{ id: b.provider, label: b.provider, authState: providerAuthStateById.get(b.provider) ?? "none" },
+	);
+	if (providerCmp !== 0) return providerCmp;
+
+	// Priority field (lower = better, e.g. OpenAI code backend priority values)
+	const aPri = a.model.priority ?? Number.MAX_SAFE_INTEGER;
+	const bPri = b.model.priority ?? Number.MAX_SAFE_INTEGER;
+	if (aPri !== bPri) return aPri - bPri;
+
+	// Version number descending (higher version = better model)
+	const aVer = extractVersionNumber(a.id);
+	const bVer = extractVersionNumber(b.id);
+	if (aVer !== bVer) return bVer - aVer;
+
+	const aIsLatest = MODEL_LATEST_RE.test(a.id);
+	const bIsLatest = MODEL_LATEST_RE.test(b.id);
+	const aDate = a.id.match(MODEL_DATE_RE)?.[1] ?? "";
+	const bDate = b.id.match(MODEL_DATE_RE)?.[1] ?? "";
+	// Models with recency info come before those without; -latest first, then newest date.
+	const aHasRecency = aIsLatest || aDate !== "";
+	const bHasRecency = bIsLatest || bDate !== "";
+	if (aHasRecency !== bHasRecency) return aHasRecency ? -1 : 1;
+	if (!aHasRecency) return a.id.localeCompare(b.id);
+	if (aIsLatest !== bIsLatest) return aIsLatest ? -1 : 1;
+	if (aDate && bDate) return bDate.localeCompare(aDate);
+	return aIsLatest ? -1 : bIsLatest ? 1 : a.id.localeCompare(b.id);
+}
+
+export function compareCanonicalModelItemsForRanking(
+	a: RankedCanonicalItem,
+	b: RankedCanonicalItem,
+	context: RankedModelOrderContext,
+): number {
+	const { roles, mruIndex, providerAuthStateById } = context;
+	const scoreCmp = compareFuzzyScores(a.fuzzyScore, b.fuzzyScore);
+	if (scoreCmp !== 0) return scoreCmp;
+
+	const aRank = computeModelRank(a.model, roles);
+	const bRank = computeModelRank(b.model, roles);
+	if (aRank !== bRank) return aRank - bRank;
+
+	const aMru = mruIndex.get(`${a.model.provider}/${a.model.id}`) ?? Number.MAX_SAFE_INTEGER;
+	const bMru = mruIndex.get(`${b.model.provider}/${b.model.id}`) ?? Number.MAX_SAFE_INTEGER;
+	if (aMru !== bMru) return aMru - bMru;
+
+	const providerCmp = compareRankedProviders(
+		{
+			id: a.model.provider,
+			label: a.model.provider,
+			authState: providerAuthStateById.get(a.model.provider) ?? "none",
+		},
+		{
+			id: b.model.provider,
+			label: b.model.provider,
+			authState: providerAuthStateById.get(b.model.provider) ?? "none",
+		},
+	);
+	if (providerCmp !== 0) return providerCmp;
+
+	return a.id.localeCompare(b.id);
 }
 
 type ScopedModelItem = ScopedModelSelection;
@@ -646,73 +784,8 @@ export class ModelSelectorComponent extends Container {
 			}
 		}
 
-		const modelRank = (item: ModelItem) => computeModelRank(item.model, this.#roles);
-
-		const dateRe = /-(\d{8})$/;
-		const latestRe = /-latest$/;
-
-		models.sort((a, b) => {
-			const aKey = a.selector;
-			const bKey = b.selector;
-
-			const aRank = modelRank(a);
-			const bRank = modelRank(b);
-			if (aRank !== bRank) return aRank - bRank;
-
-			// Then MRU order (models in mruIndex come before those not in it)
-			const aMru = mruIndex.get(aKey) ?? Number.MAX_SAFE_INTEGER;
-			const bMru = mruIndex.get(bKey) ?? Number.MAX_SAFE_INTEGER;
-			if (aMru !== bMru) return aMru - bMru;
-
-			// By provider, then recency within provider
-			const providerCmp = compareRankedProviders(
-				{
-					id: a.provider,
-					label: a.provider,
-					authState: providerAuthStateById.get(a.provider) ?? "none",
-				},
-				{
-					id: b.provider,
-					label: b.provider,
-					authState: providerAuthStateById.get(b.provider) ?? "none",
-				},
-			);
-			if (providerCmp !== 0) return providerCmp;
-
-			// Priority field (lower = better, e.g. OpenAI code backend priority values)
-			const aPri = a.model.priority ?? Number.MAX_SAFE_INTEGER;
-			const bPri = b.model.priority ?? Number.MAX_SAFE_INTEGER;
-			if (aPri !== bPri) return aPri - bPri;
-
-			// Version number descending (higher version = better model)
-			const aVer = extractVersionNumber(a.id);
-			const bVer = extractVersionNumber(b.id);
-			if (aVer !== bVer) return bVer - aVer;
-
-			const aIsLatest = latestRe.test(a.id);
-			const bIsLatest = latestRe.test(b.id);
-			const aDate = a.id.match(dateRe)?.[1] ?? "";
-			const bDate = b.id.match(dateRe)?.[1] ?? "";
-
-			// Both have dates or latest tags — sort by recency
-			const aHasRecency = aIsLatest || aDate !== "";
-			const bHasRecency = bIsLatest || bDate !== "";
-
-			// Models with recency info come before those without
-			if (aHasRecency !== bHasRecency) return aHasRecency ? -1 : 1;
-
-			// If neither has recency info, fall back to alphabetical
-			if (!aHasRecency) return a.id.localeCompare(b.id);
-
-			// -latest always sorts first within recency group
-			if (aIsLatest !== bIsLatest) return aIsLatest ? -1 : 1;
-
-			// Both have dates — descending (newest first)
-			if (aDate && bDate) return bDate.localeCompare(aDate);
-
-			// One has date, other is latest — latest first
-			return aIsLatest ? -1 : bIsLatest ? 1 : a.id.localeCompare(b.id);
-		});
+		const context: RankedModelOrderContext = { roles: this.#roles, mruIndex, providerAuthStateById };
+		models.sort((a, b) => compareModelItemsForRanking(a, b, context));
 	}
 
 	#sortCanonicalModels(models: CanonicalModelItem[]): void {
@@ -725,33 +798,8 @@ export class ModelSelectorComponent extends Container {
 			}
 		}
 
-		const modelRank = (item: CanonicalModelItem) => computeModelRank(item.model, this.#roles);
-
-		models.sort((a, b) => {
-			const aRank = modelRank(a);
-			const bRank = modelRank(b);
-			if (aRank !== bRank) return aRank - bRank;
-
-			const aMru = mruIndex.get(`${a.model.provider}/${a.model.id}`) ?? Number.MAX_SAFE_INTEGER;
-			const bMru = mruIndex.get(`${b.model.provider}/${b.model.id}`) ?? Number.MAX_SAFE_INTEGER;
-			if (aMru !== bMru) return aMru - bMru;
-
-			const providerCmp = compareRankedProviders(
-				{
-					id: a.model.provider,
-					label: a.model.provider,
-					authState: providerAuthStateById.get(a.model.provider) ?? "none",
-				},
-				{
-					id: b.model.provider,
-					label: b.model.provider,
-					authState: providerAuthStateById.get(b.model.provider) ?? "none",
-				},
-			);
-			if (providerCmp !== 0) return providerCmp;
-
-			return a.id.localeCompare(b.id);
-		});
+		const context: RankedModelOrderContext = { roles: this.#roles, mruIndex, providerAuthStateById };
+		models.sort((a, b) => compareCanonicalModelItemsForRanking(a, b, context));
 	}
 
 	async #loadModels(): Promise<void> {
@@ -960,10 +1008,12 @@ export class ModelSelectorComponent extends Container {
 
 			if (isCanonicalTab) {
 				const fuzzyMatches = filterSearchableItems(baseCanonicalModels, query);
+				assignFuzzyScoresToCanonicalModels(fuzzyMatches, query);
 				this.#sortCanonicalModels(fuzzyMatches);
 				this.#filteredCanonicalModels = fuzzyMatches;
 			} else {
 				const fuzzyMatches = filterSearchableItems(baseModels, query);
+				assignFuzzyScoresToModels(fuzzyMatches, query);
 				this.#sortModels(fuzzyMatches);
 				this.#filteredModels = fuzzyMatches;
 			}
