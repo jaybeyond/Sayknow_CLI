@@ -9,7 +9,12 @@
 
 import { $credentialEnv, $env, $flag, extractHttpStatusFromError, fetchWithRetry } from "@sayknow-cli/utils";
 import type { Effort } from "../model-thinking";
-import { mapEffortToAnthropicAdaptiveEffort, requireSupportedEffort } from "../model-thinking";
+import {
+	mapEffortToAnthropicAdaptiveEffort,
+	requireSupportedEffort,
+	requiresAnthropicThinkingDisableWhenOff,
+	supportsAnthropicHaikuAdaptiveThinkingDisplay,
+} from "../model-thinking";
 import { calculateCost } from "../models";
 import type {
 	Api,
@@ -210,7 +215,21 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 			// When the resolved tool_choice forces tool use, disable thinking to avoid API errors.
 			if (toolConfig?.toolChoice && additionalModelRequestFields) {
 				const tc = toolConfig.toolChoice;
-				if (tc.any || tc.tool) additionalModelRequestFields = undefined;
+				if ((tc.any || tc.tool) && requiresAnthropicThinkingDisableWhenOff(model.id)) {
+					// Haiku 5+ enables adaptive thinking when the field is omitted, which a forced
+					// tool choice rejects, and applies the effort to tool-call arguments too: send an
+					// explicit `disabled` and keep the selected effort (capped at `high` while
+					// thinking is disabled).
+					const effort = (additionalModelRequestFields.output_config as { effort?: string } | undefined)?.effort;
+					additionalModelRequestFields = {
+						thinking: { type: "disabled" },
+						...(effort
+							? { output_config: { effort: effort === "xhigh" || effort === "max" ? "high" : effort } }
+							: {}),
+					};
+				} else if (tc.any || tc.tool) {
+					additionalModelRequestFields = undefined;
+				}
 			}
 
 			const commandInput: ConverseStreamRequest = {
@@ -871,6 +890,9 @@ function buildAdditionalModelRequestFields(
 	options: BedrockOptions,
 ): Record<string, unknown> | undefined {
 	const reasoning = options.reasoning;
+	if (requiresAnthropicThinkingDisableWhenOff(model.id) && (!reasoning || !model.reasoning)) {
+		return { thinking: { type: "disabled" } };
+	}
 	if (!reasoning || !model.reasoning) return undefined;
 
 	const mode = model.thinking?.mode;
@@ -928,6 +950,7 @@ function buildAdditionalModelRequestFields(
  */
 function supportsAdaptiveThinkingDisplay(modelId: string): boolean {
 	if (/claude-fable-\d/.test(modelId)) return true;
+	if (supportsAnthropicHaikuAdaptiveThinkingDisplay(modelId)) return true;
 	const match = /claude-opus-(\d+)-(\d+)/.exec(modelId);
 	if (!match) return false;
 	const major = Number(match[1]);

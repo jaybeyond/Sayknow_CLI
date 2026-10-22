@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Added
+
+- Claude Sonnet 5.5 and Claude Haiku 5.5 on the direct Anthropic API, Amazon Bedrock (unprefixed plus `au.`/`eu.`/`global.`/`jp.`/`us.` profiles) and the gateways that list them; Gemini 4 Argon (`gemini-4-argon`, 65,536 output-token cap across aliases); GPT-6.1 Sol on OpenAI, Codex, Bedrock and Copilot. Long-context pricing tiers and the ultrafast service tier are not part of the fork and are omitted from these rows. (gajae #6872, #6874, #6731, af1dc0f, 08b1ab4)
+- Haiku 5.x resolves to adaptive thinking with low..max efforts and a medium default. Off sends an explicit `thinking: {type: "disabled"}` (Haiku 5 enables thinking when the field is omitted), sampling controls are stripped, summarized thinking display is requested, and a forced tool choice keeps the selected effort capped at `high` with thinking disabled. Bedrock Converse follows the same contract.
+- Gemini 4.x uses `thinkingLevel` (`google-level`) instead of a thinking budget; Gemini 3.7+ Flash and Gemini 4 Argon accept low/medium/high only.
+
 ### Changed
 
 - First-party Anthropic requests (`api.anthropic.com` over HTTPS) send gzip-compressed bodies with `Content-Encoding: gzip`. Third-party endpoints, non-standard ports, and stream bodies are sent unchanged, and a stale `Content-Length` is dropped so the transport recomputes it. (gajae #6865)

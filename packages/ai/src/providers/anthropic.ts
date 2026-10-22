@@ -21,7 +21,12 @@ import {
 	logger,
 	readSseEvents,
 } from "@sayknow-cli/utils";
-import { hasOpus47ApiRestrictions, mapEffortToAnthropicAdaptiveEffort } from "../model-thinking";
+import {
+	hasAnthropicModelSamplingRestrictions,
+	mapEffortToAnthropicAdaptiveEffort,
+	requiresAnthropicThinkingDisableWhenOff,
+	supportsAnthropicHaikuAdaptiveThinkingDisplay,
+} from "../model-thinking";
 import { calculateCost } from "../models";
 import { isUsageLimitError } from "../rate-limit-utils";
 import { getEnvApiKey, OUTPUT_FALLBACK_BUFFER } from "../stream";
@@ -320,10 +325,11 @@ let warnedStopSequencesTrim = false;
  * Older adaptive-thinking models (Opus 4.6, Sonnet 4.6+) reject the field.
  * Fable (5+) postdates Opus 4.7, accepts `display`, and defaults it to
  * "omitted" — thinking tokens are billed but no content streams back — so it
- * must opt in like Opus 4.7+ (issue #2791).
+ * must opt in like Opus 4.7+ (issue #2791). Haiku 5+ behaves the same.
  */
 function supportsAdaptiveThinkingDisplay(modelId: string): boolean {
 	if (/claude-fable-\d/.test(modelId)) return true;
+	if (supportsAnthropicHaikuAdaptiveThinkingDisplay(modelId)) return true;
 	const match = /claude-opus-(\d+)-(\d+)/.exec(modelId);
 	if (!match) return false;
 	const major = Number(match[1]);
@@ -1570,6 +1576,9 @@ export const streamAnthropic: StreamFunction<"anthropic-messages"> = (
 				});
 				if (droppedForcedToolChoice) {
 					delete nextParams.tool_choice;
+					if (options?.thinkingEnabled === false && requiresAnthropicThinkingDisableWhenOff(model.id)) {
+						nextParams.thinking = { type: "disabled" };
+					}
 				}
 				if (disableStrictTools) {
 					dropAnthropicStrictTools(nextParams);
@@ -2345,13 +2354,25 @@ function createClient(
 	return { client, isOAuthToken: oauthToken };
 }
 
-function disableThinkingIfToolChoiceForced(params: MessageCreateParamsStreaming): void {
+function disableThinkingIfToolChoiceForced(params: MessageCreateParamsStreaming, modelId: string): void {
 	const toolChoice = params.tool_choice;
 	if (!toolChoice) return;
-	if (toolChoice.type === "any" || toolChoice.type === "tool") {
-		delete params.thinking;
-		delete params.output_config;
+	if (toolChoice.type !== "any" && toolChoice.type !== "tool") return;
+	if (requiresAnthropicThinkingDisableWhenOff(modelId)) {
+		// Haiku 5+ enables adaptive thinking when `thinking` is omitted, which a forced tool
+		// choice rejects, and applies `output_config.effort` to all response tokens including
+		// tool-call arguments. Send an explicit `disabled` and keep the selected effort;
+		// effort is capped at `high` while thinking is disabled.
+		params.thinking = { type: "disabled" };
+		const effort = params.output_config?.effort as string | undefined;
+		if (effort === "xhigh" || effort === "max") {
+			params.output_config = { ...params.output_config, effort: "high" } as typeof params.output_config;
+		}
+		return;
 	}
+	// An explicit `disabled` is compatible with forced tool use and is kept.
+	if (params.thinking?.type !== "disabled") delete params.thinking;
+	delete params.output_config;
 }
 
 function mapAnthropicToolChoice(
@@ -2606,8 +2627,8 @@ function buildParams(
 			seqs.length > ANTHROPIC_STOP_SEQUENCES_MAX ? seqs.slice(0, ANTHROPIC_STOP_SEQUENCES_MAX) : seqs;
 	}
 
-	// Opus 4.7+ rejects non-default sampling parameters with 400 error.
-	if (hasOpus47ApiRestrictions(model.id)) {
+	// Opus 4.7+ and Haiku 5+ reject non-default sampling parameters with 400 error.
+	if (hasAnthropicModelSamplingRestrictions(model.id)) {
 		delete params.top_p;
 		delete params.top_k;
 		delete params.temperature;
@@ -2626,7 +2647,9 @@ function buildParams(
 		);
 	}
 
-	if (model.reasoning) {
+	if (options?.thinkingEnabled === false && requiresAnthropicThinkingDisableWhenOff(model.id)) {
+		params.thinking = { type: "disabled" };
+	} else if (model.reasoning) {
 		if (options?.thinkingEnabled) {
 			const mode = model.thinking?.mode;
 			const requestedEffort = options.reasoning;
@@ -2636,8 +2659,8 @@ function buildParams(
 
 			const compat = getAnthropicCompat(model);
 			if (mode === "anthropic-adaptive" && !compat.disableAdaptiveThinking) {
-				// Starting with Anthropic model Opus 4.7, adaptive thinking content is omitted from the
-				// response by default. Opt into summarized reasoning so thinking deltas keep
+				// Opus 4.7+, Fable, and Haiku 5+ omit adaptive thinking content by
+				// default. Opt into summarized reasoning so thinking deltas keep
 				// streaming with human-readable content for callers that rely on it.
 				const adaptive: { type: "adaptive"; display?: AnthropicThinkingDisplay } = { type: "adaptive" };
 				if (supportsAdaptiveThinkingDisplay(model.id)) {
@@ -2705,7 +2728,7 @@ function buildParams(
 	if (systemBlocks) {
 		params.system = systemBlocks;
 	}
-	disableThinkingIfToolChoiceForced(params);
+	disableThinkingIfToolChoiceForced(params, model.id);
 	ensureMaxTokensForThinking(params, model);
 	applyPromptCaching(params as AnthropicCacheParams, cacheMode, cacheControl);
 	enforceCacheControlLimit(params, 4);

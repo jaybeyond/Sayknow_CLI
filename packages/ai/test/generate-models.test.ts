@@ -21,6 +21,7 @@ describe("injectCodexGpt6Models", () => {
 		expect(models).toEqual([
 			expect.objectContaining({ ...shared, id: "gpt-6-astra", name: "GPT-6-Astra", priority: 1 }),
 			expect.objectContaining({ ...shared, id: "gpt-6-sol", name: "GPT-6-Sol" }),
+			expect.objectContaining({ ...shared, id: "gpt-6.1-sol", name: "GPT-6.1-Sol" }),
 			expect.objectContaining({ ...shared, id: "gpt-6-luna", name: "GPT-6-Luna" }),
 		]);
 		// Only the flagship is promoted; Sol and Luna keep default catalog order.
@@ -34,6 +35,7 @@ describe("injectCodexGpt6Models", () => {
 		const costOf = (id: string) => models.find(model => model.id === id)?.cost;
 		expect(costOf("gpt-6-astra")).toEqual({ input: 10, output: 50, cacheRead: 1, cacheWrite: 12.5 });
 		expect(costOf("gpt-6-sol")).toEqual({ input: 2, output: 10, cacheRead: 0.2, cacheWrite: 2.5 });
+		expect(costOf("gpt-6.1-sol")).toEqual({ input: 2, output: 10, cacheRead: 0.1, cacheWrite: 2.5 });
 		expect(costOf("gpt-6-luna")).toEqual({ input: 0.1, output: 0.5, cacheRead: 0.01, cacheWrite: 0.125 });
 	});
 
@@ -55,7 +57,7 @@ describe("injectCodexGpt6Models", () => {
 		injectCodexGpt6Models(models);
 
 		expect(models.filter(model => model.id === "gpt-6-sol")).toEqual([discovered]);
-		expect(models.map(model => model.id)).toEqual(["gpt-6-sol", "gpt-6-astra", "gpt-6-luna"]);
+		expect(models.map(model => model.id)).toEqual(["gpt-6-sol", "gpt-6-astra", "gpt-6.1-sol", "gpt-6-luna"]);
 	});
 });
 describe("injectImageGenerationModels", () => {

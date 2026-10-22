@@ -112,6 +112,7 @@ export function injectCodexGpt6Models(models: Model[]): void {
 	const bundled: Model<"openai-codex-responses">[] = [
 		gpt6("gpt-6-astra", "GPT-6-Astra", { input: 10, output: 50, cacheRead: 1, cacheWrite: 12.5 }, 1),
 		gpt6("gpt-6-sol", "GPT-6-Sol", { input: 2, output: 10, cacheRead: 0.2, cacheWrite: 2.5 }),
+		gpt6("gpt-6.1-sol", "GPT-6.1-Sol", { input: 2, output: 10, cacheRead: 0.1, cacheWrite: 2.5 }),
 		gpt6("gpt-6-luna", "GPT-6-Luna", { input: 0.1, output: 0.5, cacheRead: 0.01, cacheWrite: 0.125 }),
 	];
 	for (const model of bundled) {

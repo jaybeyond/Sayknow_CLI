@@ -45,8 +45,21 @@ const DEFAULT_REASONING_EFFORTS_WITH_XHIGH_AND_MAX: readonly Effort[] = [
 	Effort.XHigh,
 	Effort.Max,
 ];
+// Haiku 5.5 supports low, medium, high, xhigh, and max on both Anthropic
+// Messages and Bedrock Converse; neither contract lists minimal.
+// https://platform.claude.com/docs/en/build-with-claude/effort#effort-levels
+// https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-anthropic-claude-haiku-5-5.html
+const ANTHROPIC_HAIKU_5_5_EFFORTS: readonly Effort[] = [
+	Effort.Low,
+	Effort.Medium,
+	Effort.High,
+	Effort.XHigh,
+	Effort.Max,
+];
 const GEMINI_3_PRO_EFFORTS: readonly Effort[] = [Effort.Low, Effort.High];
 const GEMINI_3_FLASH_EFFORTS: readonly Effort[] = [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High];
+// Gemini 3.7 Flash dropped `minimal`; the official API returns an error for it.
+const GEMINI_3_7_FLASH_EFFORTS: readonly Effort[] = [Effort.Low, Effort.Medium, Effort.High];
 const GPT_5_2_PLUS_EFFORTS: readonly Effort[] = [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh];
 const GPT_5_6_PLUS_EFFORTS: readonly Effort[] = [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh, Effort.Max];
 const GPT_5_5_DEFAULT_EFFORT = Effort.XHigh;
@@ -61,8 +74,8 @@ type SemVer = {
 	patch: number;
 };
 
-type GeminiKind = "pro" | "flash";
-type AnthropicKind = "opus" | "sonnet" | "fable";
+type GeminiKind = "pro" | "flash" | "argon";
+type AnthropicKind = "opus" | "sonnet" | "fable" | "haiku";
 type OpenAIVariant =
 	| "astra"
 	| "base"
@@ -373,6 +386,32 @@ export function hasOpus47ApiRestrictions(modelId: string): boolean {
 	return semverGte(parsed.version, "4.7") && parsed.kind === "opus";
 }
 
+function isAnthropicHaikuAdaptiveModel(modelId: string): boolean {
+	const parsed = parseAnthropicModel(getCanonicalModelId(modelId));
+	return parsed?.kind === "haiku" && semverGte(parsed.version, "5.0");
+}
+
+/**
+ * Haiku 5+ enables adaptive thinking when the `thinking` field is omitted.
+ * An explicit user-facing Off choice must therefore send `type: "disabled"`.
+ */
+export function requiresAnthropicThinkingDisableWhenOff(modelId: string): boolean {
+	return isAnthropicHaikuAdaptiveModel(modelId);
+}
+
+/**
+ * Haiku 5+ and Opus 4.7+ reject sampling parameters on the Anthropic Messages API.
+ * https://platform.claude.com/docs/en/models/haiku-5-5/migration-guide#remove-sampling-parameters
+ */
+export function hasAnthropicModelSamplingRestrictions(modelId: string): boolean {
+	return hasOpus47ApiRestrictions(modelId) || isAnthropicHaikuAdaptiveModel(modelId);
+}
+
+/** Haiku 5+ accepts adaptive thinking `display` and defaults it to "omitted", like Opus 4.7+. */
+export function supportsAnthropicHaikuAdaptiveThinkingDisplay(modelId: string): boolean {
+	return isAnthropicHaikuAdaptiveModel(modelId);
+}
+
 function anthropicModelHasRealXHighEffort<TApi extends Api>(model: ApiModel<TApi>): boolean {
 	if (model.api !== "anthropic-messages") return false;
 	const parsedModel = parseKnownModel(model.id);
@@ -504,6 +543,17 @@ function applyGeneratedModelPolicy(model: ApiModel<Api>): void {
 			delete model.thinking.levels;
 		}
 	}
+	// Google Gemini 4 Argon supports up to 65,536 output tokens across provider
+	// aliases. Strip catalog provider prefixes and OpenRouter's batch suffix.
+	// https://ai.google.dev/gemini-api/docs/models/gemini-4-argon
+	const canonicalId = model.id
+		.toLowerCase()
+		.split("/")
+		.at(-1)
+		?.replace(/:batch$/, "");
+	if (canonicalId === "gemini-4-argon") {
+		model.maxTokens = Math.min(model.maxTokens, 65_536);
+	}
 }
 
 function scrubGeneratedModelName(name: string): string {
@@ -613,6 +663,19 @@ function inferDefaultEffort<TApi extends Api>(model: ApiModel<TApi>, parsedModel
 	if (model.provider === "omlx") {
 		return Effort.Medium;
 	}
+	if (
+		parsedModel.family === "anthropic" &&
+		parsedModel.kind === "haiku" &&
+		((model.provider === "anthropic" &&
+			model.api === "anthropic-messages" &&
+			semverGte(parsedModel.version, "5.0")) ||
+			(model.provider === "amazon-bedrock" &&
+				model.api === "bedrock-converse-stream" &&
+				semverGte(parsedModel.version, "5.5")))
+	) {
+		// Haiku 5.5 defaults to medium adaptive effort instead of the global high.
+		return Effort.Medium;
+	}
 	return undefined;
 }
 
@@ -713,7 +776,15 @@ function inferGeminiSupportedEfforts(model: GeminiModel): readonly Effort[] {
 	if (!semverGte(model.version, "3.0")) {
 		return DEFAULT_REASONING_EFFORTS;
 	}
-	return model.kind === "pro" ? GEMINI_3_PRO_EFFORTS : GEMINI_3_FLASH_EFFORTS;
+	if (model.kind === "pro") {
+		return GEMINI_3_PRO_EFFORTS;
+	}
+	// Gemini 3.7+ Flash and Gemini 4 Argon accept low/medium/high only.
+	// https://ai.google.dev/gemini-api/docs/models/gemini-4-argon
+	if (semverGte(model.version, "3.7")) {
+		return GEMINI_3_7_FLASH_EFFORTS;
+	}
+	return GEMINI_3_FLASH_EFFORTS;
 }
 
 function inferAnthropicSupportedEfforts<TApi extends Api>(
@@ -724,6 +795,9 @@ function inferAnthropicSupportedEfforts<TApi extends Api>(
 		(model.api === "anthropic-messages" || model.api === "bedrock-converse-stream") &&
 		semverGte(parsedModel.version, "4.6")
 	) {
+		if (parsedModel.kind === "haiku" && semverGte(parsedModel.version, "5.5")) {
+			return ANTHROPIC_HAIKU_5_5_EFFORTS;
+		}
 		if (parsedModel.kind === "fable") {
 			// Fable exposes Anthropic's Messages-only xhigh preset; Bedrock
 			// Converse lacks it (same split as Opus 4.7+ below).
@@ -772,11 +846,7 @@ function inferThinkingControlMode<TApi extends Api>(
 		case "google-generative-ai":
 		case "google-gemini-cli":
 		case "google-vertex":
-			return parsedModel.family === "gemini" &&
-				semverGte(parsedModel.version, "3.0") &&
-				parsedModel.version.major === 3
-				? "google-level"
-				: "budget";
+			return parsedModel.family === "gemini" && semverGte(parsedModel.version, "3.0") ? "google-level" : "budget";
 
 		case "anthropic-messages":
 			if (parsedModel.family === "anthropic") {
@@ -793,7 +863,7 @@ function inferThinkingControlMode<TApi extends Api>(
 			if (parsedModel.family === "anthropic") {
 				if (
 					semverGte(parsedModel.version, "4.6") &&
-					(parsedModel.kind === "opus" || parsedModel.kind === "fable")
+					(parsedModel.kind === "opus" || parsedModel.kind === "fable" || parsedModel.kind === "haiku")
 				) {
 					return "anthropic-adaptive";
 				}
@@ -822,7 +892,7 @@ function parseGeminiModel(modelId: string): GeminiModel | null {
 	if (modelId.endsWith(GEMINI_SUFFIX)) {
 		modelId = modelId.slice(0, -GEMINI_SUFFIX.length);
 	}
-	const match = /gemini-(\d+(?:\.\d+){0,2})-(pro|flash)\b/.exec(modelId);
+	const match = /gemini-(\d+(?:\.\d+){0,2})-(pro|flash|argon)\b/.exec(modelId);
 	if (!match) {
 		return null;
 	}
@@ -834,12 +904,17 @@ function parseGeminiModel(modelId: string): GeminiModel | null {
 }
 
 function parseAnthropicModel(modelId: string): AnthropicModel | null {
-	const match = /claude-(opus|sonnet|fable)-(\d{1,2}(?:[.-]\d{1,2}){0,2})\b/.exec(modelId);
+	const match = /claude-(opus|sonnet|fable|haiku)-(\d{1,2}(?:[.-]\d{1,2}){0,2})\b/.exec(modelId);
 	if (!match) {
 		return null;
 	}
 	const version = parseSemVer(match[2]);
 	if (!version) {
+		return null;
+	}
+	// Haiku is recognized from generation 5 only. Haiku 4.5 predates the
+	// adaptive-thinking policy and keeps the generic (unparsed) budget ladder.
+	if (match[1] === "haiku" && !semverGte(version, "5.0")) {
 		return null;
 	}
 	return { family: "anthropic", kind: match[1] as AnthropicKind, version };
