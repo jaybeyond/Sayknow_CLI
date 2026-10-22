@@ -156,6 +156,7 @@ import {
 	WriteTool,
 } from "../tools";
 import { ToolContextStore } from "../tools/context";
+import { wrapUntrustedContent } from "../tools/fetch";
 import { getImageGenTools } from "../tools/image-gen";
 import { wrapToolWithMetaNotice } from "../tools/output-meta";
 import { guardToolForUltragoalAsk } from "../tools/ultragoal-ask-guard";
@@ -862,7 +863,10 @@ function buildMCPPromptCommands(manager: MCPManager): LoadedCustomCommand[] {
 								}
 							}
 						}
-						return parts.join("\n\n");
+						const body = parts.join("\n\n");
+						// A blank body must stay blank so the prompt entry still rejects it.
+						if (body.trim().length === 0) return body;
+						return wrapUntrustedContent(body);
 					},
 				},
 			});
