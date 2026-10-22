@@ -83,6 +83,10 @@ function createCompletedCodexSse(text: string): string {
 	].join("\n\n")}\n\n`;
 }
 
+function createCodexErrorSse(events: Record<string, unknown>[]): string {
+	return `${events.map(event => `data: ${JSON.stringify(event)}`).join("\n\n")}\n\n`;
+}
+
 function getRequestSignal(input: string | URL | Request, init: RequestInit | undefined): AbortSignal | undefined {
 	if (init?.signal) return init.signal;
 	if (input instanceof Request) return input.signal;
@@ -319,6 +323,118 @@ describe("openai-codex streaming", () => {
 		const toolCalls = result.content.filter(block => block.type === "toolCall");
 		expect(toolCalls).toHaveLength(1);
 		expect(toolCalls[0]).toMatchObject({ name: "computer", arguments: { action: "screenshot" } });
+	});
+
+	it("salvages finalized function calls after a transient stream close", async () => {
+		const sse = createCodexErrorSse([
+			{
+				type: "response.output_item.added",
+				item: { type: "function_call", id: "fc_1", call_id: "call_1", name: "todo_write", arguments: "" },
+			},
+			{ type: "response.function_call_arguments.delta", item_id: "fc_1", delta: '{"ops":[]}' },
+			{
+				type: "response.output_item.done",
+				item: {
+					type: "function_call",
+					id: "fc_1",
+					call_id: "call_1",
+					name: "todo_write",
+					arguments: '{"ops":[]}',
+				},
+			},
+			{
+				type: "error",
+				code: "request_timeout",
+				message:
+					"stream disconnected before completion: stream closed before response.completed (code=request_timeout)",
+			},
+		]);
+		global.fetch = vi.fn(
+			async () => new Response(sse, { status: 200, headers: { "content-type": "text/event-stream" } }),
+		) as unknown as typeof fetch;
+
+		const result = await streamOpenAICodexResponses(
+			{ ...createCodexTestModel("https://chatgpt.com/backend-api"), preferWebsockets: false },
+			createCodexTestContext(),
+			{ apiKey: createCodexTestToken() },
+		).result();
+
+		expect(result.stopReason).toBe("toolUse");
+		expect(result.errorCode).toBe("codex_stream_closed_after_finalized_tool_calls");
+		// The fork keeps the streamed argument buffer on finalized tool calls (as on a normal completion).
+		expect(result.content as unknown[]).toEqual([
+			{
+				type: "toolCall",
+				id: "call_1|fc_1",
+				name: "todo_write",
+				arguments: { ops: [] },
+				partialJson: '{"ops":[]}',
+			},
+		]);
+	});
+
+	it.each([
+		[
+			"unfinalized function call",
+			[
+				{
+					type: "response.output_item.added",
+					item: { type: "function_call", id: "fc_1", call_id: "call_1", name: "todo_write", arguments: "" },
+				},
+				{ type: "response.function_call_arguments.delta", item_id: "fc_1", delta: '{"ops":' },
+			],
+		],
+		[
+			"non-transient failure",
+			[
+				{
+					type: "response.output_item.added",
+					item: { type: "function_call", id: "fc_1", call_id: "call_1", name: "todo_write", arguments: "" },
+				},
+				{
+					type: "response.output_item.done",
+					item: {
+						type: "function_call",
+						id: "fc_1",
+						call_id: "call_1",
+						name: "todo_write",
+						arguments: '{"ops":[]}',
+					},
+				},
+			],
+		],
+		[
+			"text-only partial",
+			[
+				{
+					type: "response.output_item.added",
+					item: { type: "message", id: "msg_1", role: "assistant", status: "in_progress", content: [] },
+				},
+				{ type: "response.output_text.delta", delta: "partial" },
+			],
+		],
+	] as const)("keeps %s stream failures terminal", async (label, prefix) => {
+		const error =
+			label === "non-transient failure"
+				? { type: "error", code: "invalid_request_error", message: "invalid request" }
+				: {
+						type: "error",
+						code: "request_timeout",
+						message:
+							"stream disconnected before completion: stream closed before response.completed (code=request_timeout)",
+					};
+		const sse = createCodexErrorSse([...prefix, error]);
+		global.fetch = vi.fn(
+			async () => new Response(sse, { status: 200, headers: { "content-type": "text/event-stream" } }),
+		) as unknown as typeof fetch;
+
+		const result = await streamOpenAICodexResponses(
+			{ ...createCodexTestModel("https://chatgpt.com/backend-api"), preferWebsockets: false },
+			createCodexTestContext(),
+			{ apiKey: createCodexTestToken() },
+		).result();
+
+		expect(result.stopReason).toBe("error");
 	});
 
 	it.each([
@@ -2428,6 +2544,147 @@ describe("openai-codex streaming", () => {
 			lastDeltaInputItems: 1,
 			lastPreviousResponseId: "resp_1",
 		});
+	});
+
+	it("resets websocket append state after salvaging a finalized tool call", async () => {
+		const tempDir = TempDir.createSync("@pi-codex-stream-salvage-");
+		setAgentDir(tempDir.path());
+		const token = createCodexTestToken();
+		const sentRequests: Array<Record<string, unknown>> = [];
+		const fetchMock = vi.fn(async () => {
+			throw new Error("SSE fallback should not be called");
+		});
+		global.fetch = fetchMock as unknown as typeof fetch;
+
+		class SalvageWebSocket extends MockWebSocket {
+			constructor(url: string, options?: { headers?: WsHeaders }) {
+				super(url, options);
+				this.scheduleOpen();
+			}
+
+			send(data: string): void {
+				const request = JSON.parse(data) as Record<string, unknown>;
+				sentRequests.push(request);
+				const requestIndex = sentRequests.length;
+
+				if (requestIndex === 1) {
+					this.emitCodexResponse({
+						messageId: "msg_a",
+						responseId: "resp_a",
+						text: "Answer A",
+						terminalType: "response.completed",
+						includeCreated: true,
+					});
+					return;
+				}
+
+				if (requestIndex === 2) {
+					this.sendJson({ type: "response.created", response: { id: "resp_b" } });
+					this.sendJson({
+						type: "response.output_item.added",
+						item: { type: "function_call", id: "fc_b", call_id: "call_b", name: "todo_write", arguments: "" },
+					});
+					this.sendJson({
+						type: "response.function_call_arguments.delta",
+						item_id: "fc_b",
+						delta: '{"ops":[]}',
+					});
+					this.sendJson({
+						type: "response.output_item.done",
+						item: {
+							type: "function_call",
+							id: "fc_b",
+							call_id: "call_b",
+							name: "todo_write",
+							arguments: '{"ops":[]}',
+						},
+					});
+					this.sendJson({
+						type: "error",
+						code: "request_timeout",
+						message:
+							"stream disconnected before completion: stream closed before response.completed (code=request_timeout)",
+					});
+					return;
+				}
+
+				if (requestIndex === 3) {
+					expect(request.previous_response_id).toBeUndefined();
+					this.emitCodexResponse({
+						messageId: "msg_c",
+						responseId: "resp_c",
+						text: "Answer C",
+						terminalType: "response.completed",
+						includeCreated: true,
+					});
+					return;
+				}
+
+				throw new Error(`Unexpected websocket request index: ${requestIndex}`);
+			}
+		}
+
+		global.WebSocket = SalvageWebSocket as unknown as typeof WebSocket;
+		const model = createCodexTestModel("https://chatgpt.com/backend-api");
+		const providerSessionState = new Map<string, ProviderSessionState>();
+		const sessionId = "ws-salvage-session";
+		const firstContext: Context = {
+			systemPrompt: ["You are a helpful assistant."],
+			messages: [{ role: "user", content: "Question A", timestamp: Date.now() }],
+		};
+		const firstResponse = await streamOpenAICodexResponses(model, firstContext, {
+			apiKey: token,
+			sessionId,
+			providerSessionState,
+		}).result();
+		const secondContext: Context = {
+			systemPrompt: ["You are a helpful assistant."],
+			messages: [
+				...firstContext.messages,
+				firstResponse,
+				{ role: "user", content: "Question B", timestamp: Date.now() + 1 },
+			],
+		};
+		const secondResponse = await streamOpenAICodexResponses(model, secondContext, {
+			apiKey: token,
+			sessionId,
+			providerSessionState,
+		}).result();
+
+		expect(secondResponse.stopReason).toBe("toolUse");
+		expect(secondResponse.errorCode).toBe("codex_stream_closed_after_finalized_tool_calls");
+		const thirdContext: Context = {
+			systemPrompt: ["You are a helpful assistant."],
+			messages: [
+				...secondContext.messages,
+				secondResponse,
+				{
+					role: "toolResult",
+					toolCallId: "call_b|fc_b",
+					toolName: "todo_write",
+					content: [{ type: "text", text: "Tool completed" }],
+					isError: false,
+					timestamp: Date.now() + 2,
+				},
+			],
+		};
+		await streamOpenAICodexResponses(model, thirdContext, {
+			apiKey: token,
+			sessionId,
+			providerSessionState,
+		}).result();
+
+		expect(fetchMock).not.toHaveBeenCalled();
+		expect(sentRequests).toHaveLength(3);
+		expect(sentRequests[2]?.previous_response_id).toBeUndefined();
+		const fullInput = sentRequests[2]?.input;
+		expect(Array.isArray(fullInput)).toBe(true);
+		const serializedInput = JSON.stringify(fullInput);
+		expect(serializedInput).toContain("Question A");
+		expect(serializedInput).toContain("Question B");
+		expect(serializedInput).toContain("function_call");
+		expect(serializedInput).toContain("function_call_output");
+		expect(serializedInput).toContain("Tool completed");
 	});
 
 	it.each([
