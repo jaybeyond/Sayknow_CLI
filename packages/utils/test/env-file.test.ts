@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { canonicalEnvKey, parseEnvFileContent, projectEnvSnapshot } from "../src/env-file";
+import { canonicalEnvKey, type ProjectEnvSnapshot, parseEnvFileContent, projectEnvSnapshot } from "../src/env-file";
 
 const tempDirs: string[] = [];
 
@@ -211,6 +211,91 @@ describe("projectEnvSnapshot quoted declarations", () => {
 		fs.writeFileSync(path.join(cwd, ".env"), 'SKC_CODING_AGENT_DIR="/tmp/planted-multiline\nagent"\n');
 		const snapshot = projectEnvSnapshot(cwd);
 		expect(snapshot.dynamic.has("SKC_CODING_AGENT_DIR")).toBe(true);
+	});
+
+	/** Starts a fresh Bun in `cwd` and returns what its dotenv loader set for `keys`. */
+	async function bunLoaded(cwd: string, keys: string[]): Promise<Record<string, string | null>> {
+		const proc = Bun.spawn(
+			[
+				process.execPath,
+				"-e",
+				`console.log(JSON.stringify(Object.fromEntries(${JSON.stringify(keys)}.map(k => [k, process.env[k] ?? null]))))`,
+			],
+			{ cwd, env: { PATH: process.env.PATH ?? "", HOME: cwd }, stdout: "pipe", stderr: "pipe" },
+		);
+		const [stdout, stderr, exitCode] = await Promise.all([
+			new Response(proc.stdout).text(),
+			new Response(proc.stderr).text(),
+			proc.exited,
+		]);
+		expect(exitCode, stderr).toBe(0);
+		return JSON.parse(stdout.trim()) as Record<string, string | null>;
+	}
+
+	function expectRefusedOrExact(snapshot: ProjectEnvSnapshot, loaded: Record<string, string | null>): void {
+		for (const [key, value] of Object.entries(loaded)) {
+			// Provenance must either refuse the key or hold exactly what this Bun loaded.
+			const safe = value === null || snapshot.dynamic.has(key) || snapshot.values[key] === value;
+			expect(safe, `${key}: loaded ${JSON.stringify(value)}, snapshot ${JSON.stringify(snapshot.values[key])}`).toBe(
+				true,
+			);
+		}
+	}
+
+	test("refuses a quoted value with a suffix, which Bun 1.3 and 1.4 load differently", async () => {
+		const cwd = tempDir("skc-env-quote-suffix-snap-");
+		const declarations: Array<[string, string]> = [
+			["CLOSED_COMMENT", '"v" #c'],
+			["CLOSED_SPACES", '"v"   '],
+			["SUFFIX_SPACE", '"v" ignored'],
+			["SUFFIX_TIGHT", '"v"ignored'],
+			["SUFFIX_SINGLE", "'v' x"],
+			["SUFFIX_REQUOTED", '"v"x"'],
+			["SUFFIX_HASH_INSIDE", '"a#b" c'],
+			["SUFFIX_EMPTY", '"" x'],
+			["SUFFIX_URL", '"https://attacker.example/v1" ignored'],
+		];
+		fs.writeFileSync(path.join(cwd, ".env"), declarations.map(([key, raw]) => `${key}=${raw}\n`).join(""));
+		const snapshot = projectEnvSnapshot(cwd);
+		expectRefusedOrExact(
+			snapshot,
+			await bunLoaded(
+				cwd,
+				declarations.map(([key]) => key),
+			),
+		);
+		for (const [key] of declarations.slice(2)) expect(snapshot.dynamic.has(key), key).toBe(true);
+		expect(snapshot.dynamic.has("CLOSED_COMMENT")).toBe(false);
+		expect(snapshot.values.CLOSED_COMMENT).toBe("v");
+		expect(snapshot.dynamic.has("CLOSED_SPACES")).toBe(false);
+		expect(snapshot.values.CLOSED_SPACES).toBe("v");
+	});
+
+	test("refuses a later declaration a multi-line quoted value may have swallowed", async () => {
+		const files = [
+			'K=planted\nX="a" c\nK="other"\n',
+			"K=planted\nX='a' c\nK='other'\n",
+			'K=planted\nX="a\nK="other"\n',
+			'K=planted\nX="\nK=other\n"\n',
+			'K=planted\nX="a\\"\nK="other"\n',
+			'K=planted\nnpm-x="a\nK="other"\n',
+			'K=planted\r\nX="a" c\r\nK="other"\r\n',
+		];
+		for (const content of files) {
+			const cwd = tempDir("skc-env-quote-swallow-snap-");
+			fs.writeFileSync(path.join(cwd, ".env"), content);
+			const snapshot = projectEnvSnapshot(cwd);
+			expectRefusedOrExact(snapshot, await bunLoaded(cwd, ["K", "X"]));
+			expect(snapshot.dynamic.has("K"), JSON.stringify(content)).toBe(true);
+		}
+	});
+
+	test("keeps comparing declarations when every quoted value closes on its line", () => {
+		const cwd = tempDir("skc-env-quote-closed-snap-");
+		fs.writeFileSync(path.join(cwd, ".env"), "A=\"a\" # note\nB='b'\nK=planted\n");
+		const snapshot = projectEnvSnapshot(cwd);
+		expect(snapshot.dynamic.has("K")).toBe(false);
+		expect(snapshot.values.K).toBe("planted");
 	});
 });
 

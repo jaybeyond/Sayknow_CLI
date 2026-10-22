@@ -150,7 +150,8 @@ export function parseEnvFileContent(content: string): Record<string, string> {
 
 		// Strip an unquoted trailing `# comment` the way Bun's dotenv loader
 		// does (`KEY=v#note` loads as `v`); quoted `#` survives. A quoted value
-		// then ends at the first unescaped closer; Bun drops the suffix.
+		// then ends at the first unescaped closer, as Bun 1.4 loads it; a suffix
+		// after the closer is classified dynamic below because Bun 1.3 keeps it.
 		let value = stripInlineDotenvComment(match[2] ?? "").trim();
 		value = dotenvQuotedLiteral(value);
 		if (!isSafeEnvValue(value)) continue;
@@ -193,15 +194,6 @@ export function canonicalEnvKey(name: string): string {
 }
 
 /**
- * Keys whose last declaration is not safe to value-compare.
- *
- * The line parser drops the suffix after the first unescaped closing quote,
- * matching Bun, and strips an unquoted `#` comment even when a backslash
- * precedes the hash. Classification refuses a value that parser would not
- * store the way Bun loaded it. Other backslashes stay in the compared text.
- * The bytes inside the quotes are not decoded.
- */
-/**
  * Keys Bun's dotenv loader accepts that are not shell identifiers. Bun loads
  * names containing `-` or `.` (e.g. `npm_config_node-options`, which npm reads as
  * `node-options`), but the line parser keeps only identifiers, so provenance
@@ -218,18 +210,53 @@ function nonIdentifierDeclarationKeys(content: string): Set<string> {
 	return keys;
 }
 
+/**
+ * Whether Bun 1.3 may continue this quoted value onto later physical lines.
+ *
+ * Bun 1.3 ends a quoted value at a closer followed only by whitespace or a `#`
+ * comment, scanning across newlines until it finds one. A line without such a
+ * closer can therefore swallow later `KEY=` lines, which the line parser still
+ * reads as declarations. A closer preceded by a backslash is not trusted.
+ */
+function quotedValueMayContinue(raw: string): boolean {
+	const value = raw.trimStart();
+	const opener = value[0];
+	if (opener !== '"' && opener !== "'" && opener !== "`") return false;
+	for (let i = 1; i < value.length; i++) {
+		if (value[i] !== opener || value[i - 1] === "\\") continue;
+		if (/^\s*(?:#.*)?$/.test(value.slice(i + 1))) return false;
+	}
+	return true;
+}
+
+/**
+ * Keys whose last declaration is not safe to value-compare.
+ *
+ * The line parser drops the suffix after the first unescaped closing quote,
+ * matching Bun 1.4, and strips an unquoted `#` comment even when a backslash
+ * precedes the hash. Classification refuses a value that parser would not
+ * store the way Bun loaded it. Other backslashes stay in the compared text.
+ * The bytes inside the quotes are not decoded. Every declaration after a quoted
+ * value that may continue onto later lines is refused: Bun 1.3 may have read
+ * that line as part of the value and kept an earlier declaration of the key.
+ */
 function quotedDeclarationKeys(content: string): Set<string> {
 	const quoted = new Set<string>();
+	let continued = false;
 	for (const line of content.split("\n")) {
 		const trimmed = line.trim();
 		if (!trimmed || trimmed.startsWith("#")) continue;
+		const wasContinued = continued;
+		// Any declaration Bun reads can open a value, including a name the line parser drops.
+		const separator = /[=:]/.exec(trimmed);
+		if (separator && quotedValueMayContinue(trimmed.slice(separator.index + 1))) continued = true;
 		// `.` stops at a carriage return, which is why the line parser drops the key.
 		const match = /^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*(?:=|:)\s*([\s\S]*)$/.exec(trimmed);
 		const key = match?.[1];
 		if (!key || !isValidEnvName(key)) continue;
 		const canonical = canonicalEnvKey(key);
 		const comparable = stripInlineDotenvComment(match[2] ?? "");
-		if (rawValueDisagreesWithLineParser(comparable)) quoted.add(canonical);
+		if (wasContinued || rawValueDisagreesWithLineParser(comparable)) quoted.add(canonical);
 		else quoted.delete(canonical);
 	}
 	return quoted;
@@ -248,9 +275,11 @@ function indexOfUnescapedCloser(value: string, opener: '"' | "'"): number {
 }
 
 /**
- * Bun ends a quoted dotenv value at the first unescaped closer and drops the
- * suffix (`KEY="v" ignored` loads as `v`). Bytes inside the quotes are not decoded.
- * An unclosed value keeps the previous surrounding-pair cut.
+ * Bun 1.4 ends a quoted dotenv value at the first unescaped closer and drops
+ * the suffix (`KEY="v" ignored` loads as `v`). Bun 1.3 keeps that whole line
+ * text instead, so `rawValueDisagreesWithLineParser` refuses a suffixed value.
+ * Bytes inside the quotes are not decoded. An unclosed value keeps the
+ * previous surrounding-pair cut.
  */
 function dotenvQuotedLiteral(value: string): string {
 	const opener = value[0];
@@ -267,6 +296,9 @@ function rawValueDisagreesWithLineParser(raw: string): boolean {
 	if (opener === '"' || opener === "'") {
 		const closed = indexOfUnescapedCloser(trimmed, opener);
 		if (closed !== -1) {
+			// Bun 1.3 (the runtime SKC ships on) loads `"v" x` as the raw text, while
+			// Bun 1.4 loads `v`. Neither form can be value-compared safely across both.
+			if (trimmed.slice(closed + 1).trim() !== "") return true;
 			const inner = trimmed.slice(1, closed);
 			if (inner.includes(opener) || inner.includes("`") || inner.includes("\r") || inner.includes("\n")) return true;
 			// Bun turns only `\n` and `\r` into controls inside double quotes.
