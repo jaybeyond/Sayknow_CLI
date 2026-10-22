@@ -2854,7 +2854,7 @@ export function convertOpenAICodexResponsesTools(
 			name: codexToolWireName(tool.name),
 			description: tool.description || "",
 			parameters,
-			...(effectiveStrict && { strict: true }),
+			strict: effectiveStrict,
 		};
 	});
 }

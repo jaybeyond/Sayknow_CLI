@@ -772,7 +772,7 @@ export function convertTools(tools: Tool[], strictMode: boolean, model: Model<"o
 			name: tool.name,
 			description: tool.description || "",
 			parameters,
-			...(effectiveStrict && { strict: true }),
+			strict: effectiveStrict,
 		} as OpenAITool;
 	});
 }
