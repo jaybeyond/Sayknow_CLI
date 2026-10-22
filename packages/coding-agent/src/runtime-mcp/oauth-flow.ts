@@ -8,6 +8,7 @@
 import type { OAuthCallbackFlowOptions } from "@sayknow-cli/ai/utils/oauth/callback-server";
 import { OAuthCallbackFlow } from "@sayknow-cli/ai/utils/oauth/callback-server";
 import type { OAuthController, OAuthCredentials } from "@sayknow-cli/ai/utils/oauth/types";
+import { assertPublicOAuthUrl } from "./oauth-public-url";
 
 const DEFAULT_PORT = 3000;
 const CALLBACK_PATH = "/callback";
@@ -213,6 +214,7 @@ export class MCPOAuthFlow extends OAuthCallbackFlow {
 			params.set("client_secret", clientSecret);
 		}
 
+		await assertPublicOAuthUrl(this.config.tokenUrl);
 		const response = await fetch(this.config.tokenUrl, {
 			method: "POST",
 			headers: {
@@ -290,6 +292,7 @@ export class MCPOAuthFlow extends OAuthCallbackFlow {
 		if (!registrationEndpoint) return;
 
 		try {
+			await assertPublicOAuthUrl(registrationEndpoint);
 			const response = await fetch(registrationEndpoint, {
 				method: "POST",
 				headers: {
