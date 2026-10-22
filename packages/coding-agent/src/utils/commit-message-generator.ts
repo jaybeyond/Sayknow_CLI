@@ -5,7 +5,8 @@
 import type { ThinkingLevel } from "@sayknow-cli/agent-core";
 import type { Api, Model } from "@sayknow-cli/ai";
 import { completeSimple } from "@sayknow-cli/ai";
-import { logger, prompt } from "@sayknow-cli/utils";
+import { logger, prompt, redactCrashSecrets } from "@sayknow-cli/utils";
+import { redactChangelogEntry } from "../commit/changelog";
 import type { ModelRegistry } from "../config/model-registry";
 import { resolveModelRoleValue } from "../config/model-resolver";
 import type { Settings } from "../config/settings";
@@ -33,6 +34,11 @@ function filterDiffNoise(diff: string): string {
 		if (!skip) filtered.push(line);
 	}
 	return filtered.join("\n");
+}
+
+/** Keep changelog patterns, then scrub known credential shapes on the whole string. */
+function redactCommitMessageText(text: string): string {
+	return redactCrashSecrets(redactChangelogEntry(text));
 }
 
 function getModelCandidates(
@@ -87,7 +93,7 @@ export async function generateCommitMessage(
 		logger.debug("commit-msg-generator: diff is empty after noise filtering");
 		return null;
 	}
-	const userMessage = `<diff>\n${truncatedDiff}\n</diff>`;
+	const userMessage = `<diff>\n${redactCommitMessageText(truncatedDiff)}\n</diff>`;
 
 	for (const candidate of candidates) {
 		const apiKey = await registry.getApiKey(candidate.model, sessionId);
@@ -120,6 +126,7 @@ export async function generateCommitMessage(
 
 			// Clean up: remove wrapping quotes, backticks, trailing period
 			msg = msg.replace(/^[`"']|[`"']$/g, "").replace(/\.$/, "");
+			msg = redactCommitMessageText(msg);
 
 			logger.debug("commit-msg-generator: generated", { model: candidate.model.id, msg });
 			return msg;
