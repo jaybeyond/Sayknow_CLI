@@ -251,6 +251,9 @@ function validateReadOnlyCommand(words: readonly string[]): BashAllowedPrefixesC
 			if (isLongOption(option, "--pre") || isLongOption(option, "--pre-glob")) {
 				return { allowed: false, reason: "read-only bash does not allow ripgrep preprocessors" };
 			}
+			if (isLongOption(option, "--hostname-bin")) {
+				return { allowed: false, reason: "read-only bash does not allow ripgrep hostname commands" };
+			}
 			if (isLongOption(option, "--search-zip") || hasShortOption(option, "z")) {
 				return { allowed: false, reason: "read-only bash does not allow ripgrep compressed-file subprocesses" };
 			}
