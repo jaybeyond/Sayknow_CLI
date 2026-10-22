@@ -15,7 +15,7 @@ const MODE_KEY = "SKC_ACP_PERMISSION_MODE";
 const tempDirs: string[] = [];
 
 function tempDir(dotenv?: string): string {
-	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "gjc-acp-mode-"));
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "skc-acp-mode-"));
 	tempDirs.push(dir);
 	if (dotenv !== undefined) fs.writeFileSync(path.join(dir, ".env"), dotenv);
 	return dir;
