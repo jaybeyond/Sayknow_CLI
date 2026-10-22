@@ -46,7 +46,11 @@ import { renderStatusLine } from "../tui";
 import { CachedOutputBlock } from "../tui/output-block";
 import { getSixelLineMask } from "../utils/sixel";
 import type { ToolSession } from ".";
-import { checkBashAllowedPrefixes, normalizeReadOnlyBashCommand } from "./bash-allowed-prefixes";
+import {
+	checkBashAllowedPrefixes,
+	normalizeReadOnlyBashCommand,
+	normalizeWorkflowBashCommand,
+} from "./bash-allowed-prefixes";
 import { applyBashFixups } from "./bash-command-fixup";
 import { type BashInteractiveResult, runInteractiveBashPty } from "./bash-interactive";
 import { checkBashInterception } from "./bash-interceptor";
@@ -496,8 +500,8 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 						artifactPath,
 						artifactId,
 						oneShot: true,
-						ignoreShellPrefix: this.session.bashRestrictionProfile === "read-only",
-						disableShellSnapshot: this.session.bashRestrictionProfile === "read-only",
+						ignoreShellPrefix: this.#isolateRestrictedShell(),
+						disableShellSnapshot: this.#isolateRestrictedShell(),
 						onChunk: chunk => {
 							tailBuffer.append(chunk);
 							latestText = tailBuffer.text();
@@ -589,6 +593,11 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		if (this.#autoBackgroundThresholdMs <= 0) return 0;
 		const timeoutBufferMs = 1_000;
 		return Math.max(0, Math.min(this.#autoBackgroundThresholdMs, timeoutMs - timeoutBufferMs));
+	}
+
+	/** Read-only and workflow allowlists must not source a snapshot or a shell prefix. */
+	#isolateRestrictedShell(): boolean {
+		return this.session.bashRestrictionProfile === "read-only" || (this.session.bashAllowedPrefixes?.length ?? 0) > 0;
 	}
 
 	/**
@@ -783,6 +792,23 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			}
 		}
 
+		// Every restricted workflow command is rebound to its resolved executable
+		// here, after the allowlist and interceptor have seen the caller's text.
+		if (this.session.bashRestrictionProfile !== "read-only" && allowedPrefixes && allowedPrefixes.length > 0) {
+			const normalizedWorkflowCommand = normalizeWorkflowBashCommand(command, allowedPrefixes, {
+				profile: "workflow",
+				skcSessionBinding: {
+					sessionId: this.session.getSessionId?.() ?? null,
+					worktreeRoot: this.session.cwd,
+					invocationCwd: commandCwd,
+				},
+			});
+			if (!normalizedWorkflowCommand) {
+				throw new ToolError("Restricted role-agent bash command could not be normalized safely.");
+			}
+			command = normalizedWorkflowCommand;
+		}
+
 		const requestedTimeoutSec = input.timeout ?? 300;
 		const timeoutSec = clampTimeout("bash", requestedTimeoutSec);
 		const timeoutMs = timeoutSec * 1000;
@@ -877,8 +903,8 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 						artifactPath,
 						artifactId,
 						oneShot: true,
-						ignoreShellPrefix: this.session.bashRestrictionProfile === "read-only",
-						disableShellSnapshot: this.session.bashRestrictionProfile === "read-only",
+						ignoreShellPrefix: this.#isolateRestrictedShell(),
+						disableShellSnapshot: this.#isolateRestrictedShell(),
 						onChunk: chunk => {
 							tailBuffer.append(chunk);
 							void reportProgress(tailBuffer.text(), {
@@ -1241,8 +1267,8 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 					artifactId,
 					onChunk: streamTailUpdates(tailBuffer, onUpdate),
 					onMinimizedSave: originalText => saveBashOriginalArtifactForTests(this.session, originalText),
-					ignoreShellPrefix: this.session.bashRestrictionProfile === "read-only",
-					disableShellSnapshot: this.session.bashRestrictionProfile === "read-only",
+					ignoreShellPrefix: this.#isolateRestrictedShell(),
+					disableShellSnapshot: this.#isolateRestrictedShell(),
 				});
 		if (result.cancelled) {
 			if (signal?.aborted) {

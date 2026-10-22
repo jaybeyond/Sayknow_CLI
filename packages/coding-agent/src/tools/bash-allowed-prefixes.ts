@@ -276,7 +276,9 @@ function shellQuote(value: string): string {
 }
 
 function resolvedExternalCommand(command: string): string | undefined {
-	return Bun.which(command) ?? undefined;
+	// Bun.which caches a command name until PATH is passed explicitly, so a test
+	// or a later session that changes PATH must be visible here.
+	return Bun.which(command, { PATH: process.env.PATH ?? "" }) ?? undefined;
 }
 
 function validateReadOnlyCommand(words: readonly string[]): BashAllowedPrefixesCheck {
@@ -318,14 +320,48 @@ function validateReadOnlyCommand(words: readonly string[]): BashAllowedPrefixesC
 	return { allowed: true };
 }
 
+const GIT_DIFF_FAMILY_SUBCOMMANDS = new Set(["blame", "diff", "log", "show"]);
+
+function gitOptionName(word: string): string {
+	const equalsAt = word.indexOf("=");
+	return equalsAt === -1 ? word : word.slice(0, equalsAt);
+}
+
+/** Enabling forms only. `--no-ext-diff` and `--no-textconv` stay allowed. */
+function gitEnablesExternalHelper(word: string): boolean {
+	if (!word.startsWith("--")) return false;
+	const name = gitOptionName(word);
+	return name === "--ext-diff" || name === "--textconv";
+}
+
 function rejectGitHostAccess(words: readonly string[]): BashAllowedPrefixesCheck | undefined {
 	if (words[0] !== "git") return undefined;
 	for (const option of optionWords(words)) {
 		if (isLongOption(option, "--output") || isLongOption(option, "--no-index")) {
 			return { allowed: false, reason: "restricted bash does not allow git --output or --no-index" };
 		}
+		if (gitEnablesExternalHelper(option)) {
+			return {
+				allowed: false,
+				reason: "restricted bash does not allow git external diff or textconv helpers",
+			};
+		}
 	}
 	return undefined;
+}
+
+/**
+ * Diff-family git commands run `diff.external`, `GIT_EXTERNAL_DIFF`, and textconv
+ * filters unless these flags are present. Place them immediately after the
+ * subcommand so a later value-taking option cannot consume them and they stay
+ * before a `--` pathspec. The gate rejects a later `--ext-diff` or `--textconv`,
+ * which would otherwise win.
+ */
+function disableGitExternalHelpers(commandName: string, argv: readonly string[]): string[] {
+	if (commandName !== "git" || !GIT_DIFF_FAMILY_SUBCOMMANDS.has(argv[1] ?? "")) return [...argv];
+	const next = [...argv];
+	next.splice(2, 0, "--no-ext-diff", "--no-textconv");
+	return next;
 }
 
 const SKC_SESSION_BIND_REASON = "restricted role-agent bash binds skc to the current session";
@@ -463,6 +499,30 @@ function commandAllowedPrefixesReason(normalizedPrefixes: readonly string[], opt
 	return options.profile === "read-only"
 		? `read-only bash only allows commands starting with: ${prefixList}`
 		: `restricted role-agent bash only allows commands starting with: ${prefixList}`;
+}
+
+/**
+ * Workflow restricted bash keeps the lexical prefix check, then runs the resolved
+ * executable. Callers also skip the shell snapshot and shell prefix, because a
+ * snapshot function can be named for that absolute path.
+ */
+export function normalizeWorkflowBashCommand(
+	command: string,
+	allowedPrefixes: readonly string[] | undefined,
+	options: BashRestrictionOptions = {},
+): string | undefined {
+	if (options.profile === "read-only") return undefined;
+	const gate = checkBashAllowedPrefixes(command, allowedPrefixes, { ...options, profile: "workflow" });
+	if (!gate.allowed) return undefined;
+	const parsed = parseShellWords(command.trim());
+	if (parsed.reason || parsed.words.length === 0) return undefined;
+	const [head, ...rest] = parsed.words;
+	if (!head) return undefined;
+	const resolvedHead = resolvedExternalCommand(head);
+	if (!resolvedHead) return undefined;
+	return disableGitExternalHelpers(head, [resolvedHead, ...rest])
+		.map(shellQuote)
+		.join(" ");
 }
 
 export function normalizeReadOnlyBashCommand(command: string): string | undefined {
