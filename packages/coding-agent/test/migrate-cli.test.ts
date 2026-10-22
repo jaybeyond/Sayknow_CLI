@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { resetAgentDirFromEnvironment, setAgentDir } from "@sayknow-cli/utils";
 import { MigrateArgsError, resolveSources, runMigrate } from "../src/cli/migrate-cli";
+import { renderHuman } from "../src/migrate/report";
 
 let home: string;
 let cwd: string;
@@ -52,6 +53,7 @@ describe("resolveSources", () => {
 
 describe("runMigrate", () => {
 	test("--dry-run writes nothing", async () => {
+		await fs.writeFile(path.join(cwd, "CLAUDE.md"), "Project instructions.", "utf-8");
 		const report = await runMigrate({
 			from: ["claude-code"],
 			project: true,
@@ -63,8 +65,13 @@ describe("runMigrate", () => {
 		});
 		expect(report.dryRun).toBe(true);
 		expect(report.actions.length).toBeGreaterThan(0);
+		expect(report.actions).toContainEqual(
+			expect.objectContaining({ type: "instruction", name: "CLAUDE.md", status: "imported" }),
+		);
+		expect(renderHuman(report)).toContain("[claude-code] CLAUDE.md: imported");
 		expect(await exists(path.join(cwd, ".skc", "mcp.json"))).toBe(false);
 		expect(await exists(path.join(cwd, ".skc", "skills"))).toBe(false);
+		expect(await exists(path.join(cwd, ".skc", "AGENTS.md"))).toBe(false);
 	});
 
 	test("--json report carries taxonomy counts by total/type/source", async () => {
@@ -80,10 +87,12 @@ describe("runMigrate", () => {
 		expect(report.summary.total).toHaveProperty("imported");
 		expect(report.summary.byType).toHaveProperty("mcp");
 		expect(report.summary.byType).toHaveProperty("skill");
+		expect(report.summary.byType).toHaveProperty("instruction");
 		expect(report.summary.bySource).toHaveProperty("claude-code");
 	});
 
 	test("--project writes under cwd/.skc", async () => {
+		await fs.writeFile(path.join(cwd, "CLAUDE.md"), "Project instructions.", "utf-8");
 		await runMigrate({
 			from: ["claude-code"],
 			project: true,
@@ -95,10 +104,12 @@ describe("runMigrate", () => {
 		});
 		expect(await exists(path.join(cwd, ".skc", "mcp.json"))).toBe(true);
 		expect(await exists(path.join(cwd, ".skc", "skills", "alpha", "SKILL.md"))).toBe(true);
+		expect(await fs.readFile(path.join(cwd, ".skc", "AGENTS.md"), "utf-8")).toBe("Project instructions.");
 	});
 
 	test("user scope writes under the agent dir", async () => {
 		const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "migrate-agent-"));
+		await write(".claude/CLAUDE.md", "User instructions.");
 		setAgentDir(agentDir);
 		try {
 			await runMigrate({
@@ -112,6 +123,7 @@ describe("runMigrate", () => {
 			});
 			expect(await exists(path.join(agentDir, "mcp.json"))).toBe(true);
 			expect(await exists(path.join(agentDir, "skills", "alpha", "SKILL.md"))).toBe(true);
+			expect(await fs.readFile(path.join(agentDir, "AGENTS.md"), "utf-8")).toBe("User instructions.");
 		} finally {
 			await fs.rm(agentDir, { recursive: true, force: true });
 		}

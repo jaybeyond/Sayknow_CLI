@@ -9,6 +9,7 @@
 import * as fsSync from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { getTrustedHomeDir } from "@sayknow-cli/utils";
 import { upsertMCPServer } from "../runtime-mcp/config-writer";
 import type { MigrateAction } from "./types";
 
@@ -24,6 +25,7 @@ async function ensureRealDirectoryPathNoFollow(
 	trustedBase: string,
 	label = "skill destination",
 	createMissing = true,
+	mode?: number,
 ): Promise<void> {
 	const resolvedBase = path.resolve(trustedBase);
 	const resolvedDirectory = path.resolve(directory);
@@ -50,7 +52,7 @@ async function ensureRealDirectoryPathNoFollow(
 			// A missing project `.skc` is created by the MCP writer (mode 0o700).
 			// Do not mkdir here, or that mode is lost. An existing symlink still fails above.
 			if (!createMissing) return;
-			await fs.mkdir(current);
+			await fs.mkdir(current, mode === undefined ? undefined : { mode });
 			const stat = await fs.lstat(current);
 			if (!stat.isDirectory() || stat.isSymbolicLink()) {
 				throw new Error(`${label} ancestor is not a real directory: ${current}`);
@@ -62,6 +64,52 @@ async function ensureRealDirectoryPathNoFollow(
 async function writeSkillFileNoFollow(destination: string, content: string): Promise<void> {
 	const skillDir = path.dirname(destination);
 	await ensureRealDirectoryPathNoFollow(skillDir, trustedSkillDestinationBase(destination));
+	const handle = await fs.open(
+		destination,
+		fsSync.constants.O_WRONLY | fsSync.constants.O_CREAT | fsSync.constants.O_TRUNC | fsSync.constants.O_NOFOLLOW,
+		0o666,
+	);
+	try {
+		await handle.writeFile(content, "utf-8");
+	} finally {
+		await handle.close();
+	}
+}
+
+async function ensureInstructionDirectory(directory: string, project: boolean): Promise<void> {
+	let trustedBase = path.dirname(directory);
+	if (!project) {
+		const home = path.resolve(getTrustedHomeDir());
+		const resolvedDirectory = path.resolve(directory);
+		const relative = path.relative(home, resolvedDirectory);
+		const isWithinHome =
+			relative === "" || (relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
+		if (isWithinHome) {
+			trustedBase = home;
+		} else {
+			let current = path.dirname(resolvedDirectory);
+			while (true) {
+				try {
+					const stat = await fs.lstat(current);
+					if (!stat.isDirectory() || stat.isSymbolicLink()) {
+						throw new Error(`user instruction destination ancestor is not a real directory: ${current}`);
+					}
+					trustedBase = current;
+					break;
+				} catch (error) {
+					if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+					const parent = path.dirname(current);
+					if (parent === current) throw error;
+					current = parent;
+				}
+			}
+		}
+	}
+	await ensureRealDirectoryPathNoFollow(directory, trustedBase, "instruction destination", true, 0o700);
+}
+
+async function writeInstructionFileNoFollow(destination: string, content: string, project: boolean): Promise<void> {
+	await ensureInstructionDirectory(path.dirname(destination), project);
 	const handle = await fs.open(
 		destination,
 		fsSync.constants.O_WRONLY | fsSync.constants.O_CREAT | fsSync.constants.O_TRUNC | fsSync.constants.O_NOFOLLOW,
@@ -103,6 +151,13 @@ export async function executeActions(
 				out.push(action);
 			} else if (action.type === "skill" && action.skill && action.destination) {
 				await writeSkillFileNoFollow(action.destination, action.skill.content);
+				out.push(action);
+			} else if (action.type === "instruction" && action.instruction && action.destination) {
+				await writeInstructionFileNoFollow(
+					action.destination,
+					action.instruction.content,
+					options?.project ?? false,
+				);
 				out.push(action);
 			} else {
 				out.push(action);

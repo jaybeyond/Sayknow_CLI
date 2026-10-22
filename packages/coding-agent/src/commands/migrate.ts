@@ -1,11 +1,11 @@
 /**
- * Import MCP servers and skills from other coding agents into SKC.
+ * Import MCP servers, skills, and instructions from other coding agents into SKC.
  */
 import { Command, Flags } from "@sayknow-cli/utils/cli";
 import { type MigrateCommandArgs, runMigrateCommand } from "../cli/migrate-cli";
 
 export default class Migrate extends Command {
-	static description = "Import MCP servers and skills from Claude Code, Codex, or OpenCode";
+	static description = "Import MCP servers and skills, plus Claude Code/Codex instructions";
 
 	static examples = [
 		"skc migrate --from claude-code",
@@ -25,7 +25,7 @@ export default class Migrate extends Command {
 			default: false,
 		}),
 		force: Flags.boolean({
-			description: "Overwrite existing skills/MCP servers instead of skipping them",
+			description: "Overwrite existing skills, MCP servers, or instruction files instead of skipping them",
 			default: false,
 		}),
 		"dry-run": Flags.boolean({ description: "Preview the migration without writing anything", default: false }),
