@@ -820,6 +820,14 @@ export class Settings implements NotificationSettingsReader {
 	}
 
 	/**
+	 * Get a runtime override value only (not persisted; excludes user and project files).
+	 */
+	getOverride<P extends SettingPath>(path: P): SettingValue<P> | undefined {
+		const value = getByPath(this.#overrides, path.split("."));
+		return value === undefined ? undefined : (value as SettingValue<P>);
+	}
+
+	/**
 	 * Clear a runtime override.
 	 */
 	clearOverride(path: SettingPath): void {

@@ -1880,6 +1880,9 @@
 				"settingsPath": {
 					"type": "string"
 				},
+				"settingsHash": {
+					"type": "string"
+				},
 				"only": {
 					"type": "array",
 					"items": true,
