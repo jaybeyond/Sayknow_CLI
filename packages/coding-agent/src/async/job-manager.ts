@@ -1784,16 +1784,24 @@ export class AsyncJobManager {
 			return;
 		}
 
-		this.#deliveryLoop = this.#runDeliveryLoop()
+		// Publish the loop future before the loop body runs: a delivery callback can
+		// reenter (drain, dispose) synchronously, and it must see this loop, not none.
+		const completion = Promise.withResolvers<void>();
+		const promise = completion.promise;
+		this.#deliveryLoop = promise;
+		const operation = this.#runDeliveryLoop()
 			.catch(error => {
 				logger.error("Async job delivery loop crashed", { error: String(error) });
 			})
 			.finally(() => {
-				this.#deliveryLoop = undefined;
-				if (!this.#disposed && this.#hasDeliverable()) {
-					this.#ensureDeliveryLoop();
+				if (this.#deliveryLoop === promise) {
+					this.#deliveryLoop = undefined;
+					if (!this.#disposed && this.#hasDeliverable()) {
+						this.#ensureDeliveryLoop();
+					}
 				}
 			});
+		void operation.then(completion.resolve, completion.reject);
 	}
 
 	async #runDeliveryLoop(): Promise<void> {
@@ -1816,8 +1824,12 @@ export class AsyncJobManager {
 	}
 
 	#deliverDelivery(delivery: AsyncJobDelivery): Promise<void> {
-		const promise = (async () => {
-			this.#inFlightDeliveries.push(delivery);
+		// Enroll the in-flight future before the callback starts, so a reentrant
+		// drain from inside `onJobComplete` waits on it instead of finding none.
+		const completion = Promise.withResolvers<void>();
+		delivery.promise = completion.promise;
+		this.#inFlightDeliveries.push(delivery);
+		const operation = (async () => {
 			try {
 				await this.#onJobComplete(delivery.jobId, delivery.text, this.#jobs.get(delivery.jobId));
 			} catch (error) {
@@ -1848,12 +1860,14 @@ export class AsyncJobManager {
 				if (!this.#disposed && this.#hasDeliverable()) this.#ensureDeliveryLoop();
 			}
 		})();
-		delivery.promise = promise;
-		return promise;
+		void operation.then(completion.resolve, completion.reject);
+		return completion.promise;
 	}
 
 	async #waitForDeliveryPromise(promise: Promise<void> | undefined, deadline: number): Promise<boolean> {
-		if (!promise) return true;
+		// Missing an enrolled in-flight future is uncertainty, never evidence of
+		// successful settlement.
+		if (!promise) return false;
 		if (deadline === Number.POSITIVE_INFINITY) {
 			await promise;
 			return true;
