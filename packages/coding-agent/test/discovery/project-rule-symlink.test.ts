@@ -10,6 +10,7 @@ import { loadCapability } from "../../src/capability";
 import { clearCache, readFile } from "../../src/capability/fs";
 import { type Rule, ruleCapability } from "../../src/capability/rule";
 import "../../src/discovery";
+import { scanSkillsFromDir } from "../../src/discovery/helpers";
 
 const PROPERTY_SEED = 487487;
 const PROPERTY_INPUTS = 64;
@@ -192,4 +193,21 @@ test.skipIf(!canSymlink)("generated project rule paths stay inside the repositor
 	const first = await loadNames();
 	const second = await loadNames();
 	expect(second).toEqual(first);
+});
+
+test.skipIf(!canSymlink)("a refused project skill link names its target and the customDirectories fix", async () => {
+	const outsideSkill = path.join(outside, "shared-skills", "demo", "SKILL.md");
+	writeFile(outsideSkill, "---\nname: demo\ndescription: outside\n---\nOUTSIDE_SKILL\n");
+	fs.mkdirSync(path.join(project, ".skc", "skills"), { recursive: true });
+	fs.symlinkSync(path.dirname(outsideSkill), path.join(project, ".skc", "skills", "demo"), "dir");
+	const realSkill = fs.realpathSync(outsideSkill);
+	clearCache();
+	const result = await scanSkillsFromDir(
+		{ cwd: project, home: tempDir, repoRoot: project },
+		{ dir: path.join(project, ".skc", "skills"), providerId: "test", level: "project" },
+	);
+	expect(result.items).toEqual([]);
+	expect(result.warnings).toEqual([
+		`Refusing skill path outside project root: ${path.join(project, ".skc", "skills", "demo", "SKILL.md")} (resolves to ${realSkill}; add ${path.dirname(path.dirname(realSkill))} to skills.customDirectories to load it)`,
+	]);
 });

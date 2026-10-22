@@ -44,6 +44,25 @@ async function containedReadPath(abs: string, options?: ReadFileOptions): Promis
 	}
 }
 
+/**
+ * The real target a contained read refused: the path is lexically inside the
+ * containment root but resolves outside it. Null when the read was not refused
+ * for containment (no root, outside lexically, inside after realpath, missing).
+ */
+export async function containmentRefusalTarget(filePath: string, options?: ReadFileOptions): Promise<string | null> {
+	const root = options?.containmentRoot;
+	if (!root) return null;
+	const abs = resolvePath(filePath);
+	const boundary = path.resolve(root);
+	if (!isWithinOrEqual(boundary, abs)) return null;
+	try {
+		const [boundaryReal, targetReal] = await Promise.all([fs.promises.realpath(boundary), fs.promises.realpath(abs)]);
+		return isWithinOrEqual(boundaryReal, targetReal) ? null : targetReal;
+	} catch {
+		return null;
+	}
+}
+
 export async function readFile(filePath: string, options?: ReadFileOptions): Promise<string | null> {
 	const abs = resolvePath(filePath);
 	// A contained read must not share the lexical cache with a different boundary.

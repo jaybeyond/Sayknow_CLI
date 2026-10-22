@@ -14,6 +14,7 @@ import {
 } from "@sayknow-cli/utils";
 import type { ExtensionModule } from "../capability/extension-module";
 import {
+	containmentRefusalTarget,
 	invalidate as invalidateFsCache,
 	type ReadFileOptions,
 	type ReadScope,
@@ -380,7 +381,16 @@ export async function scanSkillsFromDir(
 	const loadSkill = async (skillPath: string) => {
 		try {
 			const content = await readFile(skillPath, readOptions);
-			if (!content) return;
+			if (!content) {
+				const refusedTarget = await containmentRefusalTarget(skillPath, readOptions);
+				// Name the resolved file and the setting that loads it, so a symlinked skills repo is fixable (#6371).
+				if (refusedTarget) {
+					warnings.push(
+						`Refusing skill path outside project root: ${skillPath} (resolves to ${refusedTarget}; add ${path.dirname(path.dirname(refusedTarget))} to skills.customDirectories to load it)`,
+					);
+				}
+				return;
+			}
 			const { frontmatter, body } = parseFrontmatter(content, { source: skillPath });
 			if (frontmatter.enabled === false) {
 				return;
