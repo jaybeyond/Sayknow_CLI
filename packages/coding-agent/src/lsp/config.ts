@@ -335,14 +335,21 @@ export function resolveCommand(command: string, cwd: string): string | null {
 	return $which(command);
 }
 
-/** Resolve an LSP executable without consulting project-controlled bin directories. */
+/**
+ * Resolve an LSP executable without consulting project-controlled bin directories.
+ *
+ * Trust is evaluated on both the discovered and canonical paths, but the returned
+ * path is the discovered one: multiplexed launchers such as rustup pick the proxied
+ * tool from argv[0], so `~/.cargo/bin/rust-analyzer -> rustup` must be spawned as
+ * `rust-analyzer`, not as the resolved `rustup` binary.
+ */
 function resolveTrustedLspCommand(command: string, cwd: string): string | null {
 	if (!path.isAbsolute(command) && (command.includes("/") || command.includes("\\"))) return null;
 	const discovered = path.isAbsolute(command) ? command : $which(command);
 	if (!discovered) return null;
 	if (isProjectControlledPath(discovered, cwd)) return null;
-	const canonical = canonicalExistingPath(discovered);
-	return canonical;
+	if (!canonicalExistingPath(discovered)) return null;
+	return discovered;
 }
 
 interface ConfigSource {

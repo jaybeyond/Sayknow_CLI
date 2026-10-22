@@ -303,9 +303,7 @@ describe("LSP repository command trust", () => {
 		expect(loadConfig(repositoryRoot).servers["typescript-language-server"]).toBeUndefined();
 
 		which.mockImplementation(command => (command === "typescript-language-server" ? externalSymlink : null));
-		expect(loadConfig(repositoryRoot).servers["typescript-language-server"]?.resolvedCommand).toBe(
-			fs.realpathSync(externalServer),
-		);
+		expect(loadConfig(repositoryRoot).servers["typescript-language-server"]?.resolvedCommand).toBe(externalSymlink);
 	});
 
 	it("finds repository-root executables through a symlinked nested session cwd", async () => {
@@ -413,7 +411,7 @@ describe("LSP repository command trust", () => {
 			.mockImplementation(command => (command === "typescript-language-server" ? userServer : null));
 
 		expect(isProjectControlledPath(userServer, cwd)).toBe(false);
-		expect(loadConfig(cwd).servers["typescript-language-server"]?.resolvedCommand).toBe(fs.realpathSync(userServer));
+		expect(loadConfig(cwd).servers["typescript-language-server"]?.resolvedCommand).toBe(userServer);
 		resetLspmuxStateForTesting();
 		which.mockImplementation(command => (command === "lspmux" ? userLspmux : null));
 		expect((await detectLspmux(cwd)).available).toBe(true);
@@ -441,13 +439,58 @@ describe("LSP repository command trust", () => {
 		for (const cwd of [lexicalHome, canonicalHome]) {
 			expect(isProjectControlledPath(userServer, cwd)).toBe(false);
 			const server = loadConfig(cwd).servers["typescript-language-server"];
-			expect(server?.resolvedCommand).toBe(fs.realpathSync(userServer));
+			expect(server?.resolvedCommand).toBe(userServer);
 
 			resetLspmuxStateForTesting();
 			which.mockImplementation(command => (command === "lspmux" ? userLspmux : null));
 			expect((await detectLspmux(cwd)).available).toBe(true);
 			which.mockImplementation(command => (command === "typescript-language-server" ? userServer : null));
 		}
+	});
+
+	it("keeps the invocation path for a trusted symlinked launcher so rustup-style proxies see argv[0]", async () => {
+		if (process.platform === "win32") return;
+
+		using tempDir = TempDir.createSync("@skc-lsp-symlink-launcher-");
+		const home = path.join(tempDir.path(), "home");
+		const cwd = path.join(home, "workspace");
+		const cargoBin = path.join(home, ".cargo", "bin");
+		const rustup = path.join(cargoBin, "rustup");
+		const rustAnalyzer = path.join(cargoBin, "rust-analyzer");
+		await fs.promises.mkdir(cargoBin, { recursive: true });
+		await fs.promises.mkdir(cwd, { recursive: true });
+		await Bun.write(path.join(cwd, "Cargo.toml"), "[package]\n");
+		await Bun.write(rustup, "#!/bin/sh\nexit 0\n");
+		await fs.promises.chmod(rustup, 0o755);
+		await fs.promises.symlink("rustup", rustAnalyzer);
+		vi.spyOn(os, "homedir").mockReturnValue(home);
+		vi.spyOn(piUtils, "$which").mockImplementation(command => (command === "rust-analyzer" ? rustAnalyzer : null));
+
+		const server = loadConfig(cwd).servers["rust-analyzer"];
+		expect(fs.realpathSync(rustAnalyzer)).toBe(fs.realpathSync(rustup));
+		expect(server?.resolvedCommand).toBe(rustAnalyzer);
+	});
+
+	it("still rejects a symlinked launcher whose invocation path is project-controlled", async () => {
+		if (process.platform === "win32") return;
+
+		using tempDir = TempDir.createSync("@skc-lsp-symlink-project-");
+		const home = path.join(tempDir.path(), "home");
+		const cwd = path.join(home, "workspace");
+		const cargoBin = path.join(home, ".cargo", "bin");
+		const rustup = path.join(cargoBin, "rustup");
+		const projectLink = path.join(cwd, "bin", "rust-analyzer");
+		await fs.promises.mkdir(cargoBin, { recursive: true });
+		await fs.promises.mkdir(path.join(cwd, "bin"), { recursive: true });
+		await fs.promises.mkdir(path.join(cwd, ".git"), { recursive: true });
+		await Bun.write(path.join(cwd, "Cargo.toml"), "[package]\n");
+		await Bun.write(rustup, "#!/bin/sh\nexit 0\n");
+		await fs.promises.chmod(rustup, 0o755);
+		await fs.promises.symlink(rustup, projectLink);
+		vi.spyOn(os, "homedir").mockReturnValue(home);
+		vi.spyOn(piUtils, "$which").mockImplementation(command => (command === "rust-analyzer" ? projectLink : null));
+
+		expect(loadConfig(cwd).servers["rust-analyzer"]).toBeUndefined();
 	});
 
 	it("treats a repository ..bin child as contained while preserving external executables", async () => {
@@ -474,9 +517,8 @@ describe("LSP repository command trust", () => {
 
 		expect(loadConfig(repositoryRoot).servers["typescript-language-server"]).toBeUndefined();
 		which.mockImplementation(command => (command === "typescript-language-server" ? externalServer : null));
-		expect(loadConfig(repositoryRoot).servers["typescript-language-server"]?.resolvedCommand).toBe(
-			fs.realpathSync(externalServer),
-		);
+		// The invocation path is returned (macOS tmp is a /private/var alias, so not its realpath).
+		expect(loadConfig(repositoryRoot).servers["typescript-language-server"]?.resolvedCommand).toBe(externalServer);
 
 		resetLspmuxStateForTesting();
 		which.mockImplementation(command => (command === "lspmux" ? repositoryLspmux : null));
