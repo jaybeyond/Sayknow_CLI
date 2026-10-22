@@ -8,7 +8,9 @@ const SKC_VAR = "$" + "{SKC_PLUGIN_ROOT}";
 
 export function substitutePluginRoot<T>(value: T, rootPath: string): T {
 	if (typeof value === "string") {
-		return value.replaceAll(CLAUDE_VAR, rootPath).replaceAll(SKC_VAR, rootPath) as T;
+		// Function replacers: a string replacement would expand `$&`, `$$`, `` $` ``
+		// and `$'` inside the install path instead of inserting it verbatim.
+		return value.replaceAll(CLAUDE_VAR, () => rootPath).replaceAll(SKC_VAR, () => rootPath) as T;
 	}
 	if (Array.isArray(value)) {
 		return value.map(v => substitutePluginRoot(v, rootPath)) as T;
