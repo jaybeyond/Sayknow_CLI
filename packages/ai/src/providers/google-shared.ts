@@ -257,11 +257,16 @@ export function convertMessages<T extends GoogleApiType>(model: Model<T>, contex
 					// part. Another model's reasoning is dropped rather than resent as visible
 					// text, which would present it as the assistant's spoken output.
 					if (!isSameProviderAndModel) continue;
+					// A thought part needs a valid signature too (gajae #4630): Cloud Code Assist
+					// maps an unsigned `thought: true` to an Anthropic thinking block and rejects
+					// the whole request (`thinking.signature: Field required`), and Gemini cannot
+					// round-trip it either. Drop it for the same reason as foreign reasoning.
 					const thoughtSignature = resolveThoughtSignature(isSameProviderAndModel, block.thinkingSignature);
+					if (!thoughtSignature) continue;
 					parts.push({
 						thought: true,
 						text: block.thinking.toWellFormed(),
-						...(thoughtSignature && { thoughtSignature }),
+						thoughtSignature,
 					});
 				} else if (block.type === "toolCall") {
 					const thoughtSignature = resolveThoughtSignature(isSameProviderAndModel, block.thoughtSignature);

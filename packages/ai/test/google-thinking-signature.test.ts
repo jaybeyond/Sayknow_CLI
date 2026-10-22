@@ -92,7 +92,7 @@ function signedThinking(): AssistantMessage["content"] {
  * bricking the session.
  */
 describe("Google thinking signature replay", () => {
-	it("degrades same-provider unsigned thinking to plain text for Claude models", () => {
+	it("drops same-provider unsigned thinking instead of replaying it for Claude models (fork policy)", () => {
 		const model = createGeminiCliModel("google-antigravity", "claude-opus-4-6-thinking");
 		const assistant = makeAssistant(model, [
 			{ type: "thinking", thinking: "I should inspect the file first." },
@@ -106,11 +106,11 @@ describe("Google thinking signature replay", () => {
 		const parts = contents.flatMap(content => content.parts ?? []);
 		expect(parts.some(part => part.thought === true)).toBe(false);
 		expect(parts.some(part => part.thoughtSignature !== undefined)).toBe(false);
-		expect(parts).toContainEqual({ text: "I should inspect the file first." });
+		expect(parts).not.toContainEqual({ text: "I should inspect the file first." });
 		expect(parts).toContainEqual({ text: "Reading the file now." });
 	});
 
-	it("degrades same-provider empty-string-signature thinking to plain text for Claude models", () => {
+	it("drops same-provider empty-string-signature thinking for Claude models (fork policy)", () => {
 		// Persistence clears oversized thinkingSignature to "" (#4630 persisted-session shape).
 		const model = createGeminiCliModel("google-antigravity", "claude-opus-4-6-thinking");
 		const assistant = makeAssistant(model, [
@@ -122,10 +122,10 @@ describe("Google thinking signature replay", () => {
 		const parts = contents.flatMap(content => content.parts ?? []);
 		expect(parts.some(part => part.thought === true)).toBe(false);
 		expect(parts.some(part => part.thoughtSignature !== undefined)).toBe(false);
-		expect(parts).toContainEqual({ text: "I should inspect the file first." });
+		expect(parts.some(part => part.text === "I should inspect the file first.")).toBe(false);
 	});
 
-	it("degrades invalid (non-base64) signature thinking to plain text for Claude models", () => {
+	it("drops invalid (non-base64) signature thinking for Claude models (fork policy)", () => {
 		const model = createGeminiCliModel("google-antigravity", "claude-opus-4-6-thinking");
 		const assistant = makeAssistant(model, [
 			{ type: "thinking", thinking: "Hmm", thinkingSignature: "not base64!!" },
@@ -135,7 +135,7 @@ describe("Google thinking signature replay", () => {
 		const contents = convertMessages(model, context);
 		const parts = contents.flatMap(content => content.parts ?? []);
 		expect(parts.some(part => part.thought === true)).toBe(false);
-		expect(parts).toContainEqual({ text: "Hmm" });
+		expect(parts.some(part => part.text === "Hmm")).toBe(false);
 	});
 
 	it("preserves validly signed same-provider thinking as thought parts for Claude models", () => {
@@ -153,7 +153,7 @@ describe("Google thinking signature replay", () => {
 		expect(parts).toContainEqual({ text: "Reading the file now." });
 	});
 
-	it("degrades unsigned same-provider thinking to plain text for Gemini models too", () => {
+	it("drops unsigned same-provider thinking for Gemini models too (fork policy)", () => {
 		// Gemini native replay also cannot round-trip thought:true without a
 		// signature; the unsigned marker would violate the thought-signature
 		// replay contract on every provider using this converter.
@@ -164,7 +164,7 @@ describe("Google thinking signature replay", () => {
 		const contents = convertMessages(model, context);
 		const parts = contents.flatMap(content => content.parts ?? []);
 		expect(parts.some(part => part.thought === true)).toBe(false);
-		expect(parts).toContainEqual({ text: "Plan the answer." });
+		expect(parts.some(part => part.text === "Plan the answer.")).toBe(false);
 	});
 
 	it("preserves validly signed same-provider thinking for Gemini models", () => {

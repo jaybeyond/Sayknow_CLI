@@ -368,7 +368,10 @@ export class AuthBrokerClient {
 					headers,
 					body: payload,
 					signal,
-					redirect: "error",
+					// Never follow a redirect with the bearer token and credential body. `manual`
+					// instead of `error`: Bun 1.3.14 also throws `UnexpectedRedirect` on the 304
+					// snapshot long-poll reply, and every other 3xx fails the `!ok` check below.
+					redirect: "manual",
 				});
 				if (!response.ok && response.status !== 304) {
 					const text = await response.text();
