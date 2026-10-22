@@ -1,6 +1,6 @@
 import * as path from "node:path";
 import { isRecord } from "@sayknow-cli/utils";
-import { hasRootMarkers, resolveCommand } from "../lsp/config";
+import { hasRootMarkers, resolveTrustedCommand } from "../lsp/config";
 import DEFAULTS from "./defaults.json" with { type: "json" };
 import type { DapAdapterConfig, DapResolvedAdapter } from "./types";
 
@@ -51,7 +51,7 @@ export function getAdapterConfigs(): Record<string, DapAdapterConfig> {
 export function resolveAdapter(adapterName: string, cwd: string): DapResolvedAdapter | null {
 	const config = DEFAULT_ADAPTERS[adapterName];
 	if (!config) return null;
-	const resolvedCommand = resolveCommand(config.command, cwd);
+	const resolvedCommand = resolveTrustedCommand(config.command, cwd);
 	if (!resolvedCommand) return null;
 	return {
 		name: adapterName,
