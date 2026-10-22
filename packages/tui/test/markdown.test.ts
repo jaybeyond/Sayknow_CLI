@@ -1,4 +1,8 @@
-import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, beforeAll, describe, expect, it, vi } from "bun:test";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
+import * as url from "node:url";
 import type { Terminal as XtermTerminalType } from "@xterm/headless";
 import { Chalk } from "chalk";
 import { clearRenderCache, Markdown, renderInlineMarkdown } from "../src/components/markdown.js";
@@ -1088,6 +1092,240 @@ bar`,
 			const output = markdown.render(80).join("\n");
 			expect(output.includes("\x1b]8;;https://example.com\x07")).toBeTruthy();
 			expect(output.includes("\x1b]8;;\x07")).toBeTruthy();
+		});
+
+		const absoluteFilePath = path.join(os.tmpdir(), "markdown link.ts");
+		const filesystemLinkCases = [
+			{
+				name: "relative",
+				target: "src/file.ts",
+				resolvePath: () => path.resolve(process.cwd(), "src/file.ts"),
+			},
+			{
+				name: "current-directory",
+				target: "./src/file.ts",
+				resolvePath: () => path.resolve(process.cwd(), "src/file.ts"),
+			},
+			{
+				name: "parent-directory",
+				target: "../shared/file.ts",
+				resolvePath: () => path.resolve(process.cwd(), "../shared/file.ts"),
+			},
+			{
+				name: "home-relative",
+				target: "~/Documents/file.ts",
+				resolvePath: () => path.join(os.homedir(), "Documents", "file.ts"),
+			},
+			{
+				name: "absolute",
+				target: absoluteFilePath,
+				resolvePath: () => absoluteFilePath,
+			},
+			{
+				name: "space and non-ASCII",
+				target: "src/naïve file.md",
+				resolvePath: () => path.resolve(process.cwd(), "src/naïve file.md"),
+			},
+		];
+
+		it.each(filesystemLinkCases)("normalizes $name file links to absolute file URIs", ({ target, resolvePath }) => {
+			const markdown = new Markdown(`[source](<${target}>)`, 0, 0, defaultMarkdownTheme);
+			const output = markdown.render(80).join("\n");
+			const expectedUri = url.pathToFileURL(resolvePath()).href;
+
+			expect(output).toContain(`\x1b]8;;${expectedUri}\x07`);
+			expect(output).toContain("\x1b]8;;\x07");
+			if (target.includes("naïve")) {
+				expect(expectedUri).toContain("%20");
+				expect(expectedUri).toContain("%C3%AF");
+			}
+		});
+
+		it("resolves file links against the current cwd instead of reusing another cwd's cached URI", async () => {
+			const originalCwd = process.cwd();
+			// realpath: process.cwd() reports the resolved path (macOS /var -> /private/var).
+			const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "markdown-link-cwd-")));
+			const firstCwd = path.join(root, "first");
+			const secondCwd = path.join(root, "second");
+			await fs.mkdir(firstCwd);
+			await fs.mkdir(secondCwd);
+			const markdown = new Markdown("[source](src/file.ts)", 0, 0, defaultMarkdownTheme);
+
+			try {
+				process.chdir(firstCwd);
+				const firstOutput = markdown.render(80).join("\n");
+				process.chdir(secondCwd);
+				const secondOutput = markdown.render(80).join("\n");
+
+				expect(firstOutput).toContain(`\x1b]8;;${url.pathToFileURL(path.join(firstCwd, "src/file.ts")).href}\x07`);
+				expect(secondOutput).toContain(
+					`\x1b]8;;${url.pathToFileURL(path.join(secondCwd, "src/file.ts")).href}\x07`,
+				);
+			} finally {
+				process.chdir(originalCwd);
+				await fs.rm(root, { recursive: true, force: true });
+			}
+		});
+
+		it("does not emit OSC 8 for relative paths when cwd cannot be resolved", () => {
+			const cwd = vi.spyOn(process, "cwd").mockImplementation(() => {
+				throw new Error("cwd unavailable");
+			});
+			try {
+				const markdown = new Markdown("[source](src/file.ts)", 0, 0, defaultMarkdownTheme);
+				const output = markdown.render(80).join("\n");
+
+				expect(output).not.toContain("\x1b]8;;");
+			} finally {
+				cwd.mockRestore();
+			}
+		});
+
+		const hyperlinkDestinations = (output: string): string[] =>
+			[...output.matchAll(/\x1b\]8;;([^\x07]+)\x07/gu)].map(match => match[1]);
+		const renderedDestination = (target: string): string | undefined =>
+			hyperlinkDestinations(
+				new Markdown(`[source](<${target}>)`, 0, 0, defaultMarkdownTheme).render(80).join("\n"),
+			)[0];
+
+		it.each([
+			{ name: "an encoded space", target: "docs/a%20b.md", filePath: "docs/a b.md", suffix: "" },
+			{ name: "an encoded percent sign", target: "docs/100%25.md", filePath: "docs/100%.md", suffix: "" },
+			{ name: "a literal percent sign", target: "docs/50%off.md", filePath: "docs/50%off.md", suffix: "" },
+			{ name: "an encoded non-ASCII name", target: "docs/na%C3%AFve.md", filePath: "docs/naïve.md", suffix: "" },
+			{ name: "a line fragment", target: "src/file.ts#L12", filePath: "src/file.ts", suffix: "#L12" },
+			{ name: "a heading fragment", target: "docs/guide.md#install", filePath: "docs/guide.md", suffix: "#install" },
+			{
+				name: "a query and fragment",
+				target: "docs/a%20b.md?plain=1#L3",
+				filePath: "docs/a b.md",
+				suffix: "?plain=1#L3",
+			},
+		])("treats a relative file link with $name as a URI reference", ({ target, filePath, suffix }) => {
+			const expected = url.pathToFileURL(path.resolve(process.cwd(), filePath)).href + suffix;
+
+			expect(renderedDestination(target)).toBe(expected);
+		});
+
+		it("keeps the fragment of an absolute file link", () => {
+			const absolutePath = path.join(os.tmpdir(), "markdown link.ts");
+
+			expect(renderedDestination(`${absolutePath}#L7`)).toBe(`${url.pathToFileURL(absolutePath).href}#L7`);
+		});
+
+		describe("generated destinations", () => {
+			const seed = 0x0518_c0de;
+			const caseCount = 64;
+			const seededRandom = (initial: number): (() => number) => {
+				let state = initial >>> 0;
+				return () => {
+					state = (Math.imul(state, 1_664_525) + 1_013_904_223) >>> 0;
+					return state / 0x1_0000_0000;
+				};
+			};
+			const pick = <T>(random: () => number, values: readonly T[]): T =>
+				values[Math.floor(random() * values.length)];
+			// Filename characters, including URI delimiters, percent signs, spaces and non-ASCII text.
+			const nameAlphabet = [..."abcXYZ019-_.~ %#?&=+;,@!$'()[]éñ漢😀"];
+			const randomSegment = (random: () => number): string => {
+				let segment = "";
+				const length = 1 + Math.floor(random() * 8);
+				while (segment.length < length) segment += pick(random, nameAlphabet);
+				// `~` would make the first segment home-relative; dot segments would change the expected path.
+				if (segment.startsWith("~") || segment === "." || segment === "..") return `x${segment}`;
+				return segment;
+			};
+			const randomSegments = (random: () => number): string[] =>
+				Array.from({ length: 1 + Math.floor(random() * 3) }, () => randomSegment(random));
+
+			it("round-trips percent-encoded relative paths and fragments to the same file and fragment", () => {
+				const random = seededRandom(seed);
+				for (let caseIndex = 0; caseIndex < caseCount; caseIndex++) {
+					const segments = randomSegments(random);
+					const fragment = random() < 0.5 ? "" : `L${Math.floor(random() * 1000)}`;
+					const target = segments.map(encodeURIComponent).join("/") + (fragment ? `#${fragment}` : "");
+					const context = `seed ${seed}, case ${caseIndex}, target ${target}`;
+					const destination = renderedDestination(target);
+
+					expect(destination, context).toBeDefined();
+					const parsed = new URL(destination!);
+					expect(parsed.protocol, context).toBe("file:");
+					expect(url.fileURLToPath(parsed), context).toBe(path.resolve(process.cwd(), ...segments));
+					expect(parsed.hash, context).toBe(fragment ? `#${fragment}` : "");
+				}
+			});
+
+			it("round-trips unencoded relative paths without URI delimiters to the same file", () => {
+				const random = seededRandom(seed ^ 0x5a5a_5a5a);
+				const delimiterFree = (segment: string): string => segment.replaceAll(/[%#?]/gu, "_");
+				for (let caseIndex = 0; caseIndex < caseCount; caseIndex++) {
+					const segments = randomSegments(random).map(delimiterFree);
+					const target = segments.join("/");
+					const context = `seed ${seed}, case ${caseIndex}, target ${target}`;
+					const destination = renderedDestination(target);
+
+					expect(destination, context).toBeDefined();
+					expect(url.fileURLToPath(destination!), context).toBe(path.resolve(process.cwd(), ...segments));
+				}
+			});
+
+			it("leaves generated scheme URLs unchanged", () => {
+				const random = seededRandom(seed ^ 0x0f0f_0f0f);
+				for (let caseIndex = 0; caseIndex < caseCount; caseIndex++) {
+					const scheme = pick(random, ["https", "http", "mailto", "vscode", "git+ssh"]);
+					const target = `${scheme}://example.com/${randomSegments(random).map(encodeURIComponent).join("/")}`;
+
+					expect(renderedDestination(target), `seed ${seed}, case ${caseIndex}`).toBe(target);
+				}
+			});
+
+			it("never links generated destinations containing a control character", () => {
+				const random = seededRandom(seed ^ 0x3c3c_3c3c);
+				// Line breaks end the Markdown destination and tabs are expanded to spaces before parsing.
+				const controls = [
+					...Array.from({ length: 0x20 }, (_, code) => String.fromCharCode(code)),
+					...Array.from({ length: 0x21 }, (_, offset) => String.fromCharCode(0x7f + offset)),
+				].filter(control => control !== "\n" && control !== "\r" && control !== "\t");
+				for (let caseIndex = 0; caseIndex < caseCount; caseIndex++) {
+					const base =
+						pick(random, ["https://example.com/", "src/", "~/", `${os.tmpdir()}/`]) +
+						randomSegments(random).map(encodeURIComponent).join("/");
+					const position = Math.floor(random() * (base.length + 1));
+					const control = pick(random, controls);
+					const target = base.slice(0, position) + control + base.slice(position);
+
+					expect(
+						renderedDestination(target),
+						`seed ${seed}, case ${caseIndex}, control U+${control.charCodeAt(0).toString(16)}`,
+					).toBeUndefined();
+				}
+			});
+		});
+
+		it.each([
+			{ name: "HTTPS", target: "https://example.com/source.ts" },
+			{ name: "mailto", target: "mailto:dev@example.com" },
+			{ name: "custom scheme", target: "git+ssh://example.com/repo" },
+			{ name: "fragment", target: "#section" },
+			{ name: "network-path reference", target: "//example.com/docs" },
+			{ name: "network-path reference with fragment", target: "//example.com/docs#intro" },
+		])("leaves $name link destinations unchanged", ({ target }) => {
+			const markdown = new Markdown(`[source](<${target}>)`, 0, 0, defaultMarkdownTheme);
+			const output = markdown.render(80).join("\n");
+
+			expect(output).toContain(`\x1b]8;;${target}\x07`);
+		});
+
+		it.each([
+			{ name: "ESC", control: "\x1b" },
+			{ name: "BEL", control: "\x07" },
+			{ name: "NUL", control: "\x00" },
+		])("rejects OSC 8 destinations containing $name", ({ control }) => {
+			const target = `https://example.com/a${control}b`;
+			const markdown = new Markdown(`[source](<${target}>)`, 0, 0, defaultMarkdownTheme);
+			const output = markdown.render(80).join("\n");
+
+			expect(output).not.toContain("\x1b]8;;");
 		});
 
 		it("should keep wrapped URLs inside a single OSC 8 hyperlink span", () => {
