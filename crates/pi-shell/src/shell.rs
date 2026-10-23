@@ -2921,4 +2921,87 @@ mod tests {
 		}
 		assert_eq!(stdout, b"prod:8080");
 	}
+
+	async fn execute_captured(command: String) -> (ShellExecuteResult, String) {
+		let _process_test_guard = PROCESS_TEST_LOCK.lock().await;
+		let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+		let result = execute_shell(
+			ShellExecuteOptions { command, ..Default::default() },
+			Some(tx),
+			CancelToken::default(),
+		)
+		.await
+		.expect("shell execution");
+		let mut output = String::new();
+		while let Some(chunk) = rx.recv().await {
+			output.push_str(&chunk);
+		}
+		(result, output)
+	}
+
+	/// Writes raw input bytes to a unique temporary file and returns its shell
+	/// path.
+	fn raw_input_file(name: &str, bytes: &[u8]) -> std::path::PathBuf {
+		let path = std::env::temp_dir().join(format!("pi-shell-read-{}-{name}", std::process::id()));
+		std::fs::write(&path, bytes).expect("write raw input");
+		path
+	}
+
+	/// Contract (#6543): `read` assigns UTF-8 input as text, not one Latin-1
+	/// character per byte.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn read_decodes_utf8_input() {
+		let (result, output) = execute_captured(
+			"printf 'café 한글\\n' | { read -r first rest; echo \"$first|$rest\"; }".to_owned(),
+		)
+		.await;
+		assert_eq!(result.exit_code, Some(0), "{output:?}");
+		assert_eq!(output, "café|한글\n");
+	}
+
+	/// Contract (#6543): `read -n` and `-N` count whole characters, never
+	/// splitting a multi-byte character.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn read_count_takes_whole_utf8_characters() {
+		let (result, output) = execute_captured(
+			"printf '한글x' | { read -r -n 2 c; echo \"<$c>\"; }; printf 'a\\n€😀z' | { read -r -N 4 \
+			 c; echo \"<$c>\"; }"
+				.to_owned(),
+		)
+		.await;
+		assert_eq!(result.exit_code, Some(0), "{output:?}");
+		assert_eq!(output, "<한글>\n<a\n€😀>\n");
+	}
+
+	/// Contract: a malformed sequence decodes to one replacement character, and
+	/// the byte that ended it (here the delimiter) still takes effect.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn read_decodes_malformed_bytes_as_replacement_text() {
+		let path = raw_input_file("malformed", b"a\xC3\nb\xFFc\n");
+		let (result, output) = execute_captured(format!(
+			"{{ read -r x; read -r y; echo \"<$x><$y>\"; }} < '{}'",
+			path.display()
+		))
+		.await;
+		let _ = std::fs::remove_file(&path);
+		assert_eq!(result.exit_code, Some(0), "{output:?}");
+		assert_eq!(output, "<a\u{FFFD}><b\u{FFFD}c>\n");
+	}
+
+	/// Contract: a character left incomplete at EOF still counts toward
+	/// `-N` and is assigned as replacement text.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn read_count_counts_an_incomplete_character_at_eof() {
+		let path = raw_input_file("incomplete", b"a\xE2");
+		let (result, output) = execute_captured(format!(
+			"read -r -N 2 c < '{}'; status=$?; echo \"<$c>$status\"",
+			path.display()
+		))
+		.await;
+		let _ = std::fs::remove_file(&path);
+		assert_eq!(result.exit_code, Some(0), "{output:?}");
+		assert_eq!(output, "<a\u{FFFD}>0\n");
+	}
 }

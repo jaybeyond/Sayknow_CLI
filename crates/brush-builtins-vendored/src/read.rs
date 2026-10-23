@@ -298,15 +298,15 @@ struct InputReader {
 	input:      brush_core::openfiles::OpenFile,
 	/// Optional deadline for timeout.
 	deadline:   Option<Instant>,
-	/// Single-byte read buffer.
-	///
-	/// TODO(utf-8): This only handles ASCII correctly. Multi-byte UTF-8
-	/// characters will be read as separate bytes and incorrectly interpreted.
-	/// To fix this, we would need to buffer up to 4 bytes and decode
-	/// incrementally using `std::str::from_utf8`. Note that bash's `-n` counts
-	/// bytes, not Unicode codepoints, so the fix needs to preserve that
-	/// behavior.
+	/// Single-byte read buffer. Bytes are read one at a time so a `read` never
+	/// consumes input past its own line; multi-byte UTF-8 characters are
+	/// assembled from consecutive reads.
 	buffer:     [u8; 1],
+	/// A byte that proved the previous sequence malformed and starts the next
+	/// character. It is only ever filled while decoding malformed input.
+	lookahead:  Option<u8>,
+	/// Events decoded together with a character, delivered after it.
+	pending:    std::collections::VecDeque<InputEvent>,
 	/// Terminal mode guard - kept alive for RAII cleanup on drop.
 	/// The guard restores original terminal settings when dropped, even though
 	/// we don't access the field directly after construction.
@@ -317,6 +317,7 @@ struct InputReader {
 }
 
 /// Events that can occur when reading input.
+#[derive(Clone, Copy)]
 enum InputEvent {
 	/// A regular character was read.
 	Char(char),
@@ -352,6 +353,8 @@ impl InputReader {
 			input,
 			deadline: timeout.map(|t| Instant::now() + t),
 			buffer: [0; 1],
+			lookahead: None,
+			pending: std::collections::VecDeque::new(),
 			_term_mode: term_mode,
 		}
 	}
@@ -419,31 +422,129 @@ impl InputReader {
 		Ok(None)
 	}
 
-	/// Reads the next input event, handling timeout and control characters.
-	fn read_event<F>(&mut self, is_cancelled: &F) -> Result<InputEvent, brush_core::Error>
+	/// Reads one byte, or the timeout/EOF event that prevented it.
+	fn next_byte<F>(&mut self, is_cancelled: &F) -> Result<Result<u8, InputEvent>, brush_core::Error>
 	where
 		F: Fn() -> bool,
 	{
 		if let Some(event) = self.wait_for_input(is_cancelled)? {
-			return Ok(event);
+			return Ok(Err(event));
 		}
 
 		ensure_not_cancelled(is_cancelled)?;
 
 		let n = self.input.read(&mut self.buffer)?;
 		if n == 0 {
-			return Ok(InputEvent::Eof);
+			return Ok(Err(InputEvent::Eof));
+		}
+		Ok(Ok(self.buffer[0]))
+	}
+
+	/// Reports a malformed byte sequence. Unix input is UTF-8, so it decodes to
+	/// one replacement character, as lossy UTF-8 decoding does. Windows native
+	/// commands may emit the ANSI code page; those bytes keep the historical
+	/// one-character-per-byte mapping rather than becoming replacement text.
+	fn queue_malformed(&mut self, bytes: &[u8]) {
+		if cfg!(windows) {
+			self.pending.extend(bytes.iter().map(|&byte| InputEvent::Char(char::from(byte))));
+		} else {
+			self.pending.push_back(InputEvent::Char(char::REPLACEMENT_CHARACTER));
+		}
+	}
+
+	/// Reads the next input event, decoding UTF-8 and handling timeout and
+	/// control characters.
+	fn read_event<F>(&mut self, is_cancelled: &F) -> Result<InputEvent, brush_core::Error>
+	where
+		F: Fn() -> bool,
+	{
+		if let Some(event) = self.pending.pop_front() {
+			return Ok(event);
 		}
 
-		let ch = self.buffer[0] as char;
+		let lead = match self.lookahead.take() {
+			Some(byte) => byte,
+			None => match self.next_byte(is_cancelled)? {
+				Ok(byte) => byte,
+				Err(event) => return Ok(event),
+			},
+		};
 
-		// Map control characters to events.
-		Ok(match ch {
-			CTRL_C => InputEvent::CtrlC,
-			CTRL_D => InputEvent::CtrlD,
-			_ => InputEvent::Char(ch),
-		})
+		if lead.is_ascii() {
+			let ch = char::from(lead);
+			// Map control characters to events.
+			return Ok(match ch {
+				CTRL_C => InputEvent::CtrlC,
+				CTRL_D => InputEvent::CtrlD,
+				_ => InputEvent::Char(ch),
+			});
+		}
+
+		let width = utf8_sequence_width(lead);
+		if width == 0 {
+			self.queue_malformed(&[lead]);
+			return Ok(self.pending.pop_front().unwrap_or(InputEvent::Eof));
+		}
+
+		let mut bytes = [lead, 0, 0, 0];
+		for index in 1..width {
+			match self.next_byte(is_cancelled)? {
+				Ok(byte) if is_utf8_continuation(lead, index, byte) => bytes[index] = byte,
+				Ok(byte) => {
+					// The byte that shows the sequence is malformed starts the next
+					// character (it may be the delimiter itself).
+					self.lookahead = Some(byte);
+					self.queue_malformed(&bytes[..index]);
+					return Ok(self.pending.pop_front().unwrap_or(InputEvent::Eof));
+				},
+				Err(event) => {
+					// A sequence cut short by EOF or timeout is still part of the
+					// result: it decodes to replacement text before the event.
+					self.queue_malformed(&bytes[..index]);
+					self.pending.push_back(event);
+					return Ok(self.pending.pop_front().unwrap_or(InputEvent::Eof));
+				},
+			}
+		}
+
+		let decoded = std::str::from_utf8(&bytes[..width])
+			.ok()
+			.and_then(|text| text.chars().next());
+		match decoded {
+			Some(ch) => Ok(InputEvent::Char(ch)),
+			None => {
+				self.queue_malformed(&bytes[..width]);
+				Ok(self.pending.pop_front().unwrap_or(InputEvent::Eof))
+			},
+		}
 	}
+}
+
+/// Byte length of a UTF-8 sequence from its lead byte, or 0 when the byte
+/// cannot start a character.
+const fn utf8_sequence_width(lead: u8) -> usize {
+	match lead {
+		0xC2..=0xDF => 2,
+		0xE0..=0xEF => 3,
+		0xF0..=0xF4 => 4,
+		_ => 0,
+	}
+}
+
+/// Whether `byte` may follow the bytes before `index` of a sequence starting
+/// with `lead`, using the second-byte ranges that exclude overlong forms,
+/// surrogates, and code points past U+10FFFF.
+const fn is_utf8_continuation(lead: u8, index: usize, byte: u8) -> bool {
+	if index == 1 {
+		return match lead {
+			0xE0 => matches!(byte, 0xA0..=0xBF),
+			0xED => matches!(byte, 0x80..=0x9F),
+			0xF0 => matches!(byte, 0x90..=0xBF),
+			0xF4 => matches!(byte, 0x80..=0x8F),
+			_ => matches!(byte, 0x80..=0xBF),
+		};
+	}
+	matches!(byte, 0x80..=0xBF)
 }
 
 /// Configuration for line reading behavior.
@@ -475,6 +576,9 @@ where
 	F: Fn() -> bool,
 {
 	let mut line = String::new();
+	// `-n`/`-N` limits count characters, as bash does in a UTF-8 locale; the
+	// String length is in bytes.
+	let mut char_count = 0usize;
 	let mut pending_backslash = false;
 
 	loop {
@@ -523,10 +627,11 @@ where
 
 						// For other chars, add char literally (backslash consumed).
 						line.push(ch);
+						char_count += 1;
 
 						// Check character limit (based on output length).
 						if let Some(limit) = config.char_limit
-							&& line.len() >= limit
+							&& char_count >= limit
 						{
 							return Ok(ReadResult::Line(line));
 						}
@@ -552,10 +657,11 @@ where
 				}
 
 				line.push(ch);
+				char_count += 1;
 
 				// Check character limit (based on output length).
 				if let Some(limit) = config.char_limit
-					&& line.len() >= limit
+					&& char_count >= limit
 				{
 					return Ok(ReadResult::Line(line));
 				}
