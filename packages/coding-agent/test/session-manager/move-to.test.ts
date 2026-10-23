@@ -10,7 +10,7 @@ import {
 	syncSessionMoveDirectory,
 } from "@sayknow-cli/coding-agent/session/session-manager";
 import { stripOuterDoubleQuotes } from "@sayknow-cli/coding-agent/tools/path-utils";
-import { getConfigRootDir, getSessionsDir, setAgentDir } from "@sayknow-cli/utils";
+import { getSessionsDir, resetAgentDirFromEnvironment, setAgentDir } from "@sayknow-cli/utils";
 import { resolveManagedScope } from "../../src/session/internal/managed-session-scope";
 import { makeAssistantMessage } from "./helpers";
 
@@ -95,8 +95,10 @@ describe("SessionManager.moveTo", () => {
 	let testAgentDir: string;
 	let cwdA: string;
 	let cwdB: string;
-	const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
-	const fallbackAgentDir = path.join(getConfigRootDir(), "agent");
+	// Restore the exact override env, then rebuild the resolver: re-pinning a
+	// fallback path would point later tests at the real user agent dir.
+	const originalSkcAgentDirEnv = process.env.SKC_CODING_AGENT_DIR;
+	const originalPiAgentDirEnv = process.env.PI_CODING_AGENT_DIR;
 
 	beforeEach(async () => {
 		testAgentDir = await fsp.mkdtemp(path.join(os.tmpdir(), "skc-move-test-"));
@@ -108,12 +110,11 @@ describe("SessionManager.moveTo", () => {
 	});
 
 	afterEach(async () => {
-		if (originalAgentDir) {
-			setAgentDir(originalAgentDir);
-		} else {
-			setAgentDir(fallbackAgentDir);
-			delete process.env.PI_CODING_AGENT_DIR;
-		}
+		if (originalSkcAgentDirEnv === undefined) delete process.env.SKC_CODING_AGENT_DIR;
+		else process.env.SKC_CODING_AGENT_DIR = originalSkcAgentDirEnv;
+		if (originalPiAgentDirEnv === undefined) delete process.env.PI_CODING_AGENT_DIR;
+		else process.env.PI_CODING_AGENT_DIR = originalPiAgentDirEnv;
+		resetAgentDirFromEnvironment();
 		await fsp.rm(testAgentDir, { recursive: true, force: true });
 	});
 

@@ -9,7 +9,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentSideConnection, InitializeRequest } from "@agentclientprotocol/sdk";
 import acpProtocolSchema from "@agentclientprotocol/sdk/schema/schema.json" with { type: "json" };
-import { getConfigRootDir, setAgentDir } from "@sayknow-cli/utils";
+import { resetAgentDirFromEnvironment, setAgentDir } from "@sayknow-cli/utils";
 import { fromJSONSchema } from "zod/v4";
 import type * as z from "zod/v4/core";
 import { AcpAgent } from "../src/modes/acp/acp-agent";
@@ -17,8 +17,10 @@ import { ACP_TERMINAL_AUTH_FLAG, prepareAcpTerminalAuthArgs } from "../src/modes
 import { expectAcpStructure } from "./helpers/acp-schema";
 
 const cleanupRoots: string[] = [];
-const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
-const fallbackAgentDir = path.join(getConfigRootDir(), "agent");
+// Restore the exact override env, then rebuild the resolver: re-pinning a
+// fallback path would point later tests at the real user agent dir.
+const originalSkcAgentDirEnv = process.env.SKC_CODING_AGENT_DIR;
+const originalPiAgentDirEnv = process.env.PI_CODING_AGENT_DIR;
 const zInitializeResponse = fromJSONSchema({
 	$schema: acpProtocolSchema.$schema,
 	$ref: "#/$defs/InitializeResponse",
@@ -26,12 +28,11 @@ const zInitializeResponse = fromJSONSchema({
 } as unknown as z.JSONSchema.JSONSchema);
 
 afterEach(async () => {
-	if (originalAgentDir) {
-		setAgentDir(originalAgentDir);
-	} else {
-		setAgentDir(fallbackAgentDir);
-		delete process.env.PI_CODING_AGENT_DIR;
-	}
+	if (originalSkcAgentDirEnv === undefined) delete process.env.SKC_CODING_AGENT_DIR;
+	else process.env.SKC_CODING_AGENT_DIR = originalSkcAgentDirEnv;
+	if (originalPiAgentDirEnv === undefined) delete process.env.PI_CODING_AGENT_DIR;
+	else process.env.PI_CODING_AGENT_DIR = originalPiAgentDirEnv;
+	resetAgentDirFromEnvironment();
 	for (const root of cleanupRoots.splice(0)) {
 		await fs.promises.rm(root, { recursive: true, force: true });
 	}

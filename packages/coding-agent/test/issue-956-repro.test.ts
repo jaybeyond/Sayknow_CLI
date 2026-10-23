@@ -2,14 +2,16 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { getConfigRootDir, getProjectDir, setAgentDir, setProjectDir } from "@sayknow-cli/utils";
+import { getProjectDir, resetAgentDirFromEnvironment, setAgentDir, setProjectDir } from "@sayknow-cli/utils";
 import { MCPCommandController } from "../src/modes/controllers/runtime-mcp-command-controller";
 import { initTheme } from "../src/modes/theme/theme";
 import * as mcpClient from "../src/runtime-mcp/client";
 
 const originalProjectDir = getProjectDir();
-const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
-const fallbackAgentDir = path.join(getConfigRootDir(), "agent");
+// Restore the exact override env, then rebuild the resolver: re-pinning a
+// fallback path would point later tests at the real user agent dir.
+const originalSkcAgentDirEnv = process.env.SKC_CODING_AGENT_DIR;
+const originalPiAgentDirEnv = process.env.PI_CODING_AGENT_DIR;
 
 describe("issue #956: interactive /mcp test", () => {
 	let projectDir = "";
@@ -46,12 +48,11 @@ describe("issue #956: interactive /mcp test", () => {
 	afterEach(async () => {
 		vi.restoreAllMocks();
 		setProjectDir(originalProjectDir);
-		if (originalAgentDir) {
-			setAgentDir(originalAgentDir);
-		} else {
-			setAgentDir(fallbackAgentDir);
-			delete process.env.PI_CODING_AGENT_DIR;
-		}
+		if (originalSkcAgentDirEnv === undefined) delete process.env.SKC_CODING_AGENT_DIR;
+		else process.env.SKC_CODING_AGENT_DIR = originalSkcAgentDirEnv;
+		if (originalPiAgentDirEnv === undefined) delete process.env.PI_CODING_AGENT_DIR;
+		else process.env.PI_CODING_AGENT_DIR = originalPiAgentDirEnv;
+		resetAgentDirFromEnvironment();
 		await fs.rm(projectDir, { recursive: true, force: true });
 		await fs.rm(agentDir, { recursive: true, force: true });
 	});

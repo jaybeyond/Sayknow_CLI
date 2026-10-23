@@ -16,7 +16,13 @@ import {
 
 import { MemorySessionStorage } from "@sayknow-cli/coding-agent/session/session-storage";
 
-import { getConfigRootDir, getSessionsDir, getTerminalSessionsDir, Snowflake, setAgentDir } from "@sayknow-cli/utils";
+import {
+	getSessionsDir,
+	getTerminalSessionsDir,
+	resetAgentDirFromEnvironment,
+	Snowflake,
+	setAgentDir,
+} from "@sayknow-cli/utils";
 import { listManagedCandidates, resolveManagedScope } from "../../src/session/internal/managed-session-scope";
 
 describe("loadEntriesFromFile", () => {
@@ -534,8 +540,10 @@ describe("resolveResumableSession", () => {
 
 describe("SessionManager temp cwd session dirs", () => {
 	let testAgentDir: string;
-	const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
-	const fallbackAgentDir = path.join(getConfigRootDir(), "agent");
+	// Restore the exact override env, then rebuild the resolver: re-pinning a
+	// fallback path would point later tests at the real user agent dir.
+	const originalSkcAgentDirEnv = process.env.SKC_CODING_AGENT_DIR;
+	const originalPiAgentDirEnv = process.env.PI_CODING_AGENT_DIR;
 
 	function managedDirectoryName(cwd: string): string {
 		const sessionsRoot = getSessionsDir();
@@ -561,12 +569,11 @@ describe("SessionManager temp cwd session dirs", () => {
 	});
 
 	afterEach(() => {
-		if (originalAgentDir) {
-			setAgentDir(originalAgentDir);
-		} else {
-			setAgentDir(fallbackAgentDir);
-			delete process.env.PI_CODING_AGENT_DIR;
-		}
+		if (originalSkcAgentDirEnv === undefined) delete process.env.SKC_CODING_AGENT_DIR;
+		else process.env.SKC_CODING_AGENT_DIR = originalSkcAgentDirEnv;
+		if (originalPiAgentDirEnv === undefined) delete process.env.PI_CODING_AGENT_DIR;
+		else process.env.PI_CODING_AGENT_DIR = originalPiAgentDirEnv;
+		resetAgentDirFromEnvironment();
 		fs.rmSync(testAgentDir, { recursive: true, force: true });
 	});
 

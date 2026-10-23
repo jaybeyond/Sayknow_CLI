@@ -10,7 +10,7 @@ import {
 	SessionManager,
 } from "@sayknow-cli/coding-agent/session/session-manager";
 import { FileSessionStorage, type SessionStorageWriter } from "@sayknow-cli/coding-agent/session/session-storage";
-import { getConfigRootDir, parseJsonlLenient, setAgentDir } from "@sayknow-cli/utils";
+import { parseJsonlLenient, resetAgentDirFromEnvironment, setAgentDir } from "@sayknow-cli/utils";
 
 import { makeAssistantMessage } from "./helpers";
 import { injectManagedAppend } from "./managed-failure-injection";
@@ -60,8 +60,10 @@ class FailingPatchStorage extends FileSessionStorage {
 describe("session title source persistence", () => {
 	let testAgentDir: string;
 	let cwd: string;
-	const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
-	const fallbackAgentDir = path.join(getConfigRootDir(), "agent");
+	// Restore the exact override env, then rebuild the resolver: re-pinning a
+	// fallback path would point later tests at the real user agent dir.
+	const originalSkcAgentDirEnv = process.env.SKC_CODING_AGENT_DIR;
+	const originalPiAgentDirEnv = process.env.PI_CODING_AGENT_DIR;
 
 	beforeEach(() => {
 		testAgentDir = fs.mkdtempSync(path.join(os.tmpdir(), "skc-title-source-"));
@@ -71,12 +73,11 @@ describe("session title source persistence", () => {
 	});
 
 	afterEach(() => {
-		if (originalAgentDir) {
-			setAgentDir(originalAgentDir);
-		} else {
-			setAgentDir(fallbackAgentDir);
-			delete process.env.PI_CODING_AGENT_DIR;
-		}
+		if (originalSkcAgentDirEnv === undefined) delete process.env.SKC_CODING_AGENT_DIR;
+		else process.env.SKC_CODING_AGENT_DIR = originalSkcAgentDirEnv;
+		if (originalPiAgentDirEnv === undefined) delete process.env.PI_CODING_AGENT_DIR;
+		else process.env.PI_CODING_AGENT_DIR = originalPiAgentDirEnv;
+		resetAgentDirFromEnvironment();
 		fs.rmSync(testAgentDir, { recursive: true, force: true });
 	});
 
