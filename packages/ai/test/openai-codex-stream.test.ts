@@ -1644,6 +1644,43 @@ describe("openai-codex streaming", () => {
 		expect(result.stopReason).toBe("stop");
 		expect(result.content.find(block => block.type === "text")?.text).toBe("Hello after retry");
 	});
+
+	it.each([
+		{ code: "server_is_overloaded", label: "absent prose", message: undefined },
+		{ code: "server_is_overloaded", label: "generic prose", message: "Something went wrong." },
+		{ code: "server_error", label: "absent prose", message: undefined },
+		{ code: "internal_error", label: "absent prose", message: undefined },
+	])("retries typed $code SSE events with $label", async ({ code, message }) => {
+		const tempDir = TempDir.createSync("@pi-codex-stream-");
+		setAgentDir(tempDir.path());
+		let requestCount = 0;
+		const errorSse = createCodexErrorSse([{ type: "error", code, ...(message === undefined ? {} : { message }) }]);
+		const successSse = `${[
+			`data: ${JSON.stringify({ type: "response.output_item.added", item: { type: "message", id: "msg_retry", role: "assistant", status: "in_progress", content: [] } })}`,
+			`data: ${JSON.stringify({ type: "response.content_part.added", part: { type: "output_text", text: "" } })}`,
+			`data: ${JSON.stringify({ type: "response.output_text.delta", delta: "Recovered after overload" })}`,
+			`data: ${JSON.stringify({ type: "response.output_item.done", item: { type: "message", id: "msg_retry", role: "assistant", status: "completed", content: [{ type: "output_text", text: "Recovered after overload" }] } })}`,
+			`data: ${JSON.stringify({ type: "response.completed", response: { status: "completed", usage: { input_tokens: 5, output_tokens: 3, total_tokens: 8, input_tokens_details: { cached_tokens: 0 } } } })}`,
+		].join("\n\n")}\n\n`;
+		const fetchMock = vi.fn(async () => {
+			requestCount += 1;
+			return new Response(requestCount === 1 ? errorSse : successSse, {
+				status: 200,
+				headers: { "content-type": "text/event-stream" },
+			});
+		});
+		global.fetch = fetchMock as unknown as typeof fetch;
+
+		const result = await streamOpenAICodexResponses(
+			{ ...createCodexTestModel("https://chatgpt.com/backend-api"), preferWebsockets: false },
+			createCodexTestContext(),
+			{ apiKey: createCodexTestToken() },
+		).result();
+
+		expect(requestCount).toBe(2);
+		expect(result.stopReason).toBe("stop");
+		expect(result.content.find(block => block.type === "text")?.text).toBe("Recovered after overload");
+	});
 	it("does not retry non-recoverable Codex schema validation SSE events", async () => {
 		const tempDir = TempDir.createSync("@pi-codex-stream-");
 		setAgentDir(tempDir.path());

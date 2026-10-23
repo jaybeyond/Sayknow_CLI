@@ -113,7 +113,9 @@ const CODEX_SALVAGED_STREAM_CLOSE_ERROR_CODE = "codex_stream_closed_after_finali
 const CODEX_PREVIOUS_RESPONSE_STALE_CODES = new Set(["previous_response_not_found", "codex_previous_response_stale"]);
 const CODEX_PREVIOUS_RESPONSE_STALE_MESSAGE =
 	/^(?:Invalid [`'"]?previous_response_id[`'"]?\.?|Previous response with id (?:'[^'\r\n]+'|"[^"\r\n]+") not found\.?)$/i;
-const CODEX_RETRYABLE_EVENT_CODES = new Set(["model_error", "server_error", "internal_error"]);
+// `server_is_overloaded` is a typed capacity rejection; it is retryable even when
+// the event carries no prose or only generic prose.
+const CODEX_RETRYABLE_EVENT_CODES = new Set(["model_error", "server_error", "internal_error", "server_is_overloaded"]);
 const CODEX_NON_RETRYABLE_EVENT_CODES = new Set([
 	"invalid_function_parameters",
 	"invalid_request_error",
