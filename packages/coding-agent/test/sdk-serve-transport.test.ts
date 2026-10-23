@@ -444,6 +444,11 @@ describe("SDK serve CLI and discovery", () => {
 			action: "broker-internal",
 			agentDir: "/tmp/a",
 		});
+		expect(parseSdkInternalArgv(["broker-trampoline-internal", "--agent-dir", "/tmp/a"])).toEqual({
+			action: "broker-trampoline-internal",
+			agentDir: "/tmp/a",
+		});
+		expect(() => parseSdkInternalArgv(["broker-trampoline-internal"])).toThrow(CliParseError);
 		expect(parseSdkInternalArgv(["session-host-internal"])).toEqual({ action: "session-host-internal" });
 		expect(() => parseSdkInternalArgv(["broker-internal"])).toThrow(CliParseError);
 		const output: string[] = [];

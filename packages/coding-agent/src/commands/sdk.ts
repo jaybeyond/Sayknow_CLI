@@ -1,3 +1,4 @@
+import { type ChildProcess, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
@@ -22,6 +23,7 @@ import {
 } from "../sdk/broker/lifecycle";
 import { exitIfSourceGone, startSessionHostGuard } from "../sdk/broker/process-guard";
 import { processIncarnation } from "../sdk/broker/process-incarnation";
+import { resolveSdkInternalSpawnCommand } from "../sdk/broker/runtime";
 import { type CreateLifecycleAgentSessionResult, createLifecycleAgentSession } from "../sdk/lifecycle-session";
 import { listManagedSessionCandidates, resolveManagedSessionScope } from "../sdk/session-directory";
 import {
@@ -546,14 +548,73 @@ export async function runSessionHost(
 	await new Promise<void>(() => {});
 }
 
-export type SdkInternalArgv = { action: "broker-internal"; agentDir: string } | { action: "session-host-internal" };
+export type SdkInternalArgv =
+	| { action: "broker-internal"; agentDir: string }
+	| { action: "broker-trampoline-internal"; agentDir: string }
+	| { action: "session-host-internal" };
 
 /** Parses the exact private argv contracts used by SDK child-process spawns. */
 export function parseSdkInternalArgv(argv: readonly string[]): SdkInternalArgv {
 	if (argv[0] === "session-host-internal" && argv.length === 1) return { action: "session-host-internal" };
 	if (argv[0] === "broker-internal" && argv.length === 3 && argv[1] === "--agent-dir" && argv[2])
 		return { action: "broker-internal", agentDir: argv[2] };
+	if (argv[0] === "broker-trampoline-internal" && argv.length === 3 && argv[1] === "--agent-dir" && argv[2])
+		return { action: "broker-trampoline-internal", agentDir: argv[2] };
 	throw new CliParseError("Invalid internal SDK invocation.");
+}
+
+/**
+ * Detached trampoline for the shared broker (POSIX only): it starts the real
+ * broker, reports its exact `pid\tincarnation` on stdout, and exits so the
+ * broker reparents out of the spawner's process tree before that tree can be
+ * reaped. The spawner binds startup evidence to the reported identity, never to
+ * the trampoline.
+ */
+async function runBrokerTrampoline(agentDir: string): Promise<void> {
+	if (process.platform === "win32") throw new CliParseError("Broker trampoline is unavailable on Windows.");
+	const command = resolveSdkInternalSpawnCommand("broker-internal");
+	let child: ChildProcess;
+	try {
+		child = spawn(command.file, [...command.args, "--agent-dir", agentDir], {
+			detached: true,
+			stdio: ["ignore", "ignore", "inherit"],
+			env: command.env,
+			...(command.kind === "bun-source" ? { cwd: command.cwd } : {}),
+		});
+	} catch (error) {
+		throw new Error("Broker trampoline could not start broker.", { cause: error });
+	}
+	let spawnError: Error | undefined;
+	child.once("error", error => {
+		spawnError = error;
+	});
+	if (child.pid === undefined) throw new Error("Broker trampoline could not start broker.");
+	const incarnation = processIncarnation(child.pid);
+	if (!incarnation) {
+		try {
+			child.kill("SIGKILL");
+		} catch {
+			// The child may already have exited; either way identity was not established.
+		}
+		throw new Error("Broker trampoline could not observe broker identity.");
+	}
+	if (spawnError) throw new Error("Broker trampoline could not start broker.", { cause: spawnError });
+	const stdoutWrite = Promise.withResolvers<void>();
+	process.stdout.write(`${child.pid}\t${incarnation}\n`, error => {
+		if (error) stdoutWrite.reject(error);
+		else stdoutWrite.resolve();
+	});
+	try {
+		await stdoutWrite.promise;
+	} catch (error) {
+		try {
+			child.kill("SIGKILL");
+		} catch {
+			// The child may already have exited; reporting failure remains authoritative.
+		}
+		throw error;
+	}
+	child.unref();
 }
 
 class SdkServeHelp extends Command {
@@ -583,9 +644,13 @@ export default class Sdk extends Command {
 			await runSdkServe(this.argv.slice(1));
 			return;
 		}
-		if (action !== "broker-internal" && action !== "session-host-internal")
+		if (action !== "broker-internal" && action !== "broker-trampoline-internal" && action !== "session-host-internal")
 			throw new CliParseError("Expected action to be serve.");
 		const internal = parseSdkInternalArgv(this.argv);
+		if (internal.action === "broker-trampoline-internal") {
+			await runBrokerTrampoline(internal.agentDir);
+			return;
+		}
 		if (internal.action === "session-host-internal") {
 			await runSessionHost();
 			return;
