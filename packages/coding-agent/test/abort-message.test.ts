@@ -44,7 +44,7 @@ describe("buildAbortDisplayMessage", () => {
 				retryAttempt: 1,
 			}),
 		).toBe(
-			"Aborted after 1 retry attempt: Anthropic stream stalled while waiting for the next event. Hint: set PI_STREAM_IDLE_TIMEOUT_MS=600000 for slow reasoning/proxy streams, or PI_STREAM_IDLE_TIMEOUT_MS=0 to disable the watchdog.",
+			"Aborted after 1 retry attempt: Anthropic stream stalled while waiting for the next event. Hint: set PI_STREAM_IDLE_TIMEOUT_MS=1200000 for slow reasoning/proxy streams, or PI_STREAM_IDLE_TIMEOUT_MS=0 to disable the watchdog.",
 		);
 	});
 
@@ -52,17 +52,17 @@ describe("buildAbortDisplayMessage", () => {
 		const hint = (errorMessage: string) =>
 			/PI_STREAM_IDLE_TIMEOUT_MS=(\d+) for/.exec(buildAbortDisplayMessage({ errorMessage, retryAttempt: 1 }))?.[1];
 		const stall = "Anthropic stream stalled while waiting for the next event";
-		// Anthropic's built-in window is 300000: suggesting it again would change nothing.
-		expect(Number(hint(stall))).toBeGreaterThan(300_000);
+		// Anthropic's built-in window is 600000: suggesting it again would change nothing.
+		expect(Number(hint(stall))).toBeGreaterThan(600_000);
 		Bun.env.PI_STREAM_IDLE_TIMEOUT_MS = "900000";
 		expect(hint(stall)).toBe("1800000");
 		Bun.env.PI_STREAM_IDLE_TIMEOUT_MS = "60000";
-		expect(hint(stall)).toBe("600000");
+		expect(hint(stall)).toBe("1200000");
 	});
 
 	it("is idempotent for replayed abort display labels without retry context", () => {
 		const formatted =
-			"Aborted after 1 retry attempt: Anthropic stream stalled while waiting for the next event. Hint: set PI_STREAM_IDLE_TIMEOUT_MS=600000 for slow reasoning/proxy streams, or PI_STREAM_IDLE_TIMEOUT_MS=0 to disable the watchdog.";
+			"Aborted after 1 retry attempt: Anthropic stream stalled while waiting for the next event. Hint: set PI_STREAM_IDLE_TIMEOUT_MS=1200000 for slow reasoning/proxy streams, or PI_STREAM_IDLE_TIMEOUT_MS=0 to disable the watchdog.";
 		expect(buildAbortDisplayMessage({ errorMessage: formatted, retryAttempt: 0 })).toBe(formatted);
 		expect(buildAbortDisplayMessage({ errorMessage: "Operation aborted: fetch failed", retryAttempt: 0 })).toBe(
 			"Operation aborted: fetch failed",

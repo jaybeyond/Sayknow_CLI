@@ -8,9 +8,10 @@ const KIMI_CODE_FIRST_EVENT_TIMEOUT_MS = 300_000;
  * Anthropic models open a thinking block and can stay semantically silent for minutes
  * (only `ping` keepalives, which do not count as progress) before the tool call
  * arrives — observed: healthy Opus turns of ~10k output tokens taking 98–121 s, and
- * the next ones aborted at exactly 120 s. Ported from upstream #4097.
+ * the next ones aborted at exactly 120 s. Ported from upstream #4097; widened to
+ * 600 s by upstream #6441 after long-reasoning gaps still crossed 300 s.
  */
-const ANTHROPIC_STREAM_IDLE_TIMEOUT_MS = 300_000;
+const ANTHROPIC_STREAM_IDLE_TIMEOUT_MS = 600_000;
 
 /** Provider-specific idle window floor, or undefined for the shared default. */
 export function getProviderStreamIdleTimeoutFallbackMs(provider: string): number | undefined {

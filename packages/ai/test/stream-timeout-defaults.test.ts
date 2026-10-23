@@ -58,9 +58,9 @@ describe("getProviderFirstEventTimeoutFallbackMs(provider)", () => {
 });
 
 describe("getProviderStreamIdleTimeoutFallbackMs(provider)", () => {
-	it("gives Anthropic a 300-second idle window for silent thinking blocks", () => {
-		expect(getProviderStreamIdleTimeoutFallbackMs("anthropic")).toBe(300_000);
-		expect(getStreamIdleTimeoutMs(getProviderStreamIdleTimeoutFallbackMs("anthropic"))).toBe(300_000);
+	it("gives Anthropic a 600-second idle window for silent thinking blocks", () => {
+		expect(getProviderStreamIdleTimeoutFallbackMs("anthropic")).toBe(600_000);
+		expect(getStreamIdleTimeoutMs(getProviderStreamIdleTimeoutFallbackMs("anthropic"))).toBe(600_000);
 	});
 
 	it("keeps the shared 120-second default for other providers", () => {

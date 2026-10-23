@@ -368,7 +368,7 @@ OAuth host chain: `KIMI_CODE_OAUTH_HOST` → `KIMI_OAUTH_HOST` → `https://auth
 | `SKC_OPENAI_CODE_WEBSOCKET_IDLE_TIMEOUT_MS` | Positive integer override (default 300000)           |
 | `SKC_OPENAI_CODE_WEBSOCKET_RETRY_BUDGET`    | Non-negative integer override (default 5)            |
 | `SKC_OPENAI_CODE_WEBSOCKET_RETRY_DELAY_MS`  | Positive integer base backoff override (default 500) |
-| `SKC_OPENAI_STREAM_IDLE_TIMEOUT_MS`   | Positive integer OpenAI stream idle timeout override |
+| `SKC_OPENAI_STREAM_IDLE_TIMEOUT_MS`   | Positive integer stream idle timeout override (also applies to Anthropic). Unset: 120s generally, 600s for Anthropic long-reasoning gaps. `0` disables. |
 
 ### Cursor provider debug
 
