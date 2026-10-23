@@ -558,7 +558,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 
 	async #waitForManagedBashJob(
 		job: ManagedBashJobHandle,
-		thresholdMs: number,
+		thresholdMs: number | undefined,
 		signal?: AbortSignal,
 		backgroundRequest?: Promise<void>,
 	): Promise<ManagedBashJobCompletion | { kind: "running" } | { kind: "aborted" }> {
@@ -566,26 +566,32 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			return { kind: "aborted" };
 		}
 
+		// No threshold means no timer fold: the job leaves the foreground only on an
+		// explicit background request.
+		let thresholdTimer: NodeJS.Timeout | undefined;
 		const waiters: Array<Promise<ManagedBashJobCompletion | { kind: "running" } | { kind: "aborted" }>> = [
 			job.completion,
-			Bun.sleep(thresholdMs).then(() => ({ kind: "running" as const })),
 		];
+		if (thresholdMs !== undefined) {
+			const threshold = Promise.withResolvers<{ kind: "running" }>();
+			thresholdTimer = setTimeout(() => threshold.resolve({ kind: "running" }), Math.max(0, thresholdMs));
+			waiters.push(threshold.promise);
+		}
 		if (backgroundRequest) {
 			waiters.push(backgroundRequest.then(() => ({ kind: "running" as const })));
 		}
 
-		if (!signal) {
-			return await Promise.race(waiters);
-		}
-
 		const { promise: abortedPromise, resolve: resolveAborted } = Promise.withResolvers<{ kind: "aborted" }>();
 		const onAbort = () => resolveAborted({ kind: "aborted" });
-		signal.addEventListener("abort", onAbort, { once: true });
-		waiters.push(abortedPromise);
+		if (signal) {
+			signal.addEventListener("abort", onAbort, { once: true });
+			waiters.push(abortedPromise);
+		}
 		try {
 			return await Promise.race(waiters);
 		} finally {
-			signal.removeEventListener("abort", onAbort);
+			if (thresholdTimer !== undefined) clearTimeout(thresholdTimer);
+			signal?.removeEventListener("abort", onAbort);
 		}
 	}
 
@@ -1005,11 +1011,11 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		// even when auto-background is disabled. When a client terminal will handle the
 		// command, keep the existing bridge path unless auto-background is enabled.
 		if (!pty && autoBgManager && (this.#autoBackgroundEnabled || !clientTerminalActive)) {
-			// With auto-background off, wait past the command's own timeout so the job only
-			// leaves the foreground on an explicit Ctrl+B fold, never on an auto-background timer.
+			// With auto-background off, the foreground wait has no timer threshold, so the job
+			// only leaves the foreground on an explicit Ctrl+B fold.
 			const autoBackgroundWaitMs = this.#autoBackgroundEnabled
 				? this.#resolveAutoBackgroundWaitMs(timeoutMs)
-				: timeoutMs + 1_000;
+				: undefined;
 			const startBackgrounded = autoBackgroundWaitMs === 0;
 			const job = this.#startManagedBashJob({
 				command,
