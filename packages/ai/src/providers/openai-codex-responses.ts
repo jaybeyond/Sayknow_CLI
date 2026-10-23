@@ -25,6 +25,7 @@ import { getEnvApiKey } from "../stream";
 import {
 	type Api,
 	type AssistantMessage,
+	type AssistantMessageEvent,
 	type Context,
 	type FetchImpl,
 	type Model,
@@ -189,6 +190,37 @@ function isCodexStreamProgressEvent(event: unknown): boolean {
 	if (!event || typeof event !== "object") return false;
 	const type = (event as { type?: unknown }).type;
 	return typeof type === "string" && CODEX_PROGRESS_EVENT_TYPES.has(type);
+}
+
+/**
+ * Public-event progress predicate for the Codex semantic guard. A
+ * whitespace-only argument delta after a function call's arguments already
+ * form complete JSON is not progress: a model streaming trailing whitespace
+ * would otherwise reset the idle watchdog forever. Whitespace inside incomplete
+ * or malformed arguments, custom-tool input, text, and reasoning still counts.
+ */
+export function createCodexSemanticProgressClassifier(): (item: unknown) => boolean {
+	const argumentBuffers = new Map<number, string>();
+	return item => {
+		const event = item as AssistantMessageEvent;
+		if (event?.type === "toolcall_start") {
+			argumentBuffers.delete(event.contentIndex);
+			return false;
+		}
+		if (!isSemanticContentDelta(item)) return false;
+		if (event.type !== "toolcall_delta") return true;
+		const block = event.partial.content[event.contentIndex];
+		if (block?.type === "toolCall" && block.customWireName !== undefined) return true;
+		const previous = argumentBuffers.get(event.contentIndex) ?? "";
+		argumentBuffers.set(event.contentIndex, previous + event.delta);
+		if (event.delta.trim().length > 0) return true;
+		try {
+			JSON.parse(previous);
+			return false;
+		} catch {
+			return true;
+		}
+	};
 }
 type CodexTransport = "sse" | "websocket";
 type CodexEventItem = ResponseReasoningItem | ResponseOutputMessage | ResponseFunctionToolCall | ResponseCustomToolCall;
@@ -1874,7 +1906,7 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 				onIdle: () => abortRequest(idleError),
 				onFirstItemTimeout: () => abortRequest(firstError),
 				abortSignal: options?.signal,
-				isProgressItem: isSemanticContentDelta,
+				isProgressItem: createCodexSemanticProgressClassifier(),
 			})) {
 				guardedStream.push(event);
 			}
