@@ -312,6 +312,7 @@ import ttsrInterruptTemplate from "../prompts/system/ttsr-interrupt.md" with { t
 import ttsrToolReminderTemplate from "../prompts/system/ttsr-tool-reminder.md" with { type: "text" };
 import { type AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import { MCPManager } from "../runtime-mcp/manager";
+import { omitPluginMcpNameShadows, retainPluginMcpMandatoryNames } from "../runtime-mcp/plugin-mcp-name-filter";
 import type { NotificationSessionController } from "../sdk/bus/session-control";
 import { deobfuscateSessionContext, obfuscateMessages, type SecretObfuscator } from "../secrets/obfuscator";
 import { formatNoCredentialOnboardingError, formatNoModelOnboardingError } from "../setup/model-onboarding-guidance";
@@ -6737,7 +6738,7 @@ export class AgentSession {
 			},
 		});
 
-		for (const customTool of mcpTools) {
+		for (const customTool of omitPluginMcpNameShadows(mcpTools)) {
 			const wrapped = CustomToolAdapter.wrap(customTool, getCustomToolContext) as AgentTool;
 			const finalTool = (
 				this.#extensionRunner ? new ExtensionToolWrapper(wrapped, this.#extensionRunner) : wrapped
@@ -6745,6 +6746,11 @@ export class AgentSession {
 			this.#toolRegistry.set(finalTool.name, finalTool);
 		}
 
+		// An omitted plugin tool no longer owns its normalized name, so it must not
+		// keep forcing the colliding user tool active.
+		this.#mandatoryMCPToolNames = new Set(
+			retainPluginMcpMandatoryNames(mcpTools, [...this.#mandatoryMCPToolNames]).map(name => name.toLowerCase()),
+		);
 		this.#setDiscoverableMCPTools(this.#collectDiscoverableMCPToolsFromRegistry());
 		this.#pruneSelectedMCPToolNames();
 		const hasPersistedMCPToolSelection = this.buildDisplaySessionContext().hasPersistedMCPToolSelection;

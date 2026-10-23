@@ -91,6 +91,7 @@ import btwUserPrompt from "../prompts/system/btw-user.md" with { type: "text" };
 import asyncResultTemplate from "../prompts/tools/async-result.md" with { type: "text" };
 import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import { MCPManager } from "../runtime-mcp";
+import { omitPluginMcpNameShadows, retainPluginMcpMandatoryNames } from "../runtime-mcp/plugin-mcp-name-filter";
 import { createNotificationsExtension } from "../sdk/bus";
 import {
 	getNotificationConfig,
@@ -1745,7 +1746,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		// register in-process tools/providers without enabling filesystem discovery.
 		const inlineExtensions: ExtensionFactory[] = [...(options.extensions ?? [])];
 		if (customTools.length > 0) {
-			inlineExtensions.push(createCustomToolsExtension(customTools));
+			inlineExtensions.push(createCustomToolsExtension(omitPluginMcpNameShadows(customTools)));
 		}
 
 		// Always-on constrained plugin hooks (validated registry surfaces). Additive
@@ -2255,6 +2256,13 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				}
 			}
 		}
+		// Mandatory names follow the plugin tools that survived registration.
+		// A colliding user tool keeps the normalized name and must stay selectable.
+		pluginMcpToolNames.splice(
+			0,
+			pluginMcpToolNames.length,
+			...retainPluginMcpMandatoryNames(customTools, pluginMcpToolNames),
+		);
 		const mandatoryMCPToolNameSet = new Set(pluginMcpToolNames);
 		const selectableExplicitMCPToolNames = explicitlyRequestedMCPToolNames.filter(
 			name => !mandatoryMCPToolNameSet.has(name),

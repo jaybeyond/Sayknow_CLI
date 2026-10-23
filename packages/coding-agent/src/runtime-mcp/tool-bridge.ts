@@ -26,6 +26,7 @@ import {
 	MCP_MAX_IMAGE_SOURCE_PIXELS,
 	MCP_MAX_IMAGES,
 } from "./content-limits";
+import { SKC_PLUGIN_MCP_PROVIDER } from "./plugin-mcp-name-filter";
 import { renderMCPCall, renderMCPResult } from "./render";
 import type { MCPContent, MCPServerConnection, MCPToolCallParams, MCPToolCallResult, MCPToolDefinition } from "./types";
 
@@ -367,6 +368,8 @@ export class MCPTool implements CustomTool<TSchema, MCPToolDetails> {
 	readonly mcpToolName: string;
 	/** Server name */
 	readonly mcpServerName: string;
+	/** True when this tool came from a repository SKC plugin bundle. */
+	readonly skcPluginBundle: boolean;
 
 	/** Create MCPTool instances for all tools from an MCP server connection */
 	static fromTools(connection: MCPServerConnection, tools: MCPToolDefinition[], reconnect?: MCPReconnect): MCPTool[] {
@@ -384,6 +387,7 @@ export class MCPTool implements CustomTool<TSchema, MCPToolDetails> {
 		this.parameters = mcpModelParameters(tool.inputSchema);
 		this.mcpToolName = tool.name;
 		this.mcpServerName = connection.name;
+		this.skcPluginBundle = connection._source?.provider === SKC_PLUGIN_MCP_PROVIDER;
 	}
 
 	renderCall(args: unknown, _options: RenderResultOptions, theme: Theme) {
@@ -457,6 +461,8 @@ export class DeferredMCPTool implements CustomTool<TSchema, MCPToolDetails> {
 	readonly mcpToolName: string;
 	/** Server name */
 	readonly mcpServerName: string;
+	/** True when this tool came from a repository SKC plugin bundle. */
+	readonly skcPluginBundle: boolean;
 	readonly #fallbackProvider: string | undefined;
 	readonly #fallbackProviderName: string | undefined;
 
@@ -484,6 +490,7 @@ export class DeferredMCPTool implements CustomTool<TSchema, MCPToolDetails> {
 		this.parameters = mcpModelParameters(tool.inputSchema);
 		this.mcpToolName = tool.name;
 		this.mcpServerName = serverName;
+		this.skcPluginBundle = source?.provider === SKC_PLUGIN_MCP_PROVIDER;
 		this.#fallbackProvider = source?.provider;
 		this.#fallbackProviderName = source?.providerName;
 	}
