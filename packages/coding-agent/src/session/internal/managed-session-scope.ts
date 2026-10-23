@@ -95,14 +95,22 @@ function bindManagedWriteAuthority(scope: ManagedScope, authority: ManagedCandid
 function assertRetainedManagedDirectoryIdentity(scope: ManagedScope): void {
 	const expected = managedDirectoryIdentities.get(scope);
 	if (!expected) return;
-	const current = fs.lstatSync(scope.directoryPath, { bigint: true });
-	if (
-		!current.isDirectory() ||
-		current.isSymbolicLink() ||
-		current.dev !== expected.dev ||
-		current.ino !== expected.ino
-	)
-		throw new Error("Managed session directory changed");
+	assertSameManagedDirectoryIdentity(fs.lstatSync(scope.directoryPath, { bigint: true }), expected);
+}
+
+/**
+ * Fence a managed directory to the identity it was bound with. The decision is
+ * the same for every mismatch; only the reported reason differs. The same
+ * inode on a different `dev` is the shape a remount, drive-letter change or
+ * volume-serial change leaves behind (#6750). It is still refused, because an
+ * inode is only unique within one volume, but it is named so an operator is
+ * not sent looking for a corrupted binding.
+ */
+function assertSameManagedDirectoryIdentity(current: fs.BigIntStats, expected: { dev: bigint; ino: bigint }): void {
+	if (!current.isDirectory() || current.isSymbolicLink()) throw new Error("Managed session directory changed");
+	if (current.dev === expected.dev && current.ino === expected.ino) return;
+	if (current.ino === expected.ino) throw new Error("volume_identity_changed");
+	throw new Error("Managed session directory changed");
 }
 
 export function managedDirectoryAuthorityForScope(scope: ManagedScope): native.RecoveryFsRoot | undefined {
@@ -175,6 +183,7 @@ export type ManagedScopeResolution =
 			message: string;
 			cause?: { readonly classification: string; readonly diagnostic?: string };
 	  };
+
 
 export interface ManagedCandidate {
 	sessionId: string;
@@ -949,13 +958,7 @@ export function prepareManagedSessionScopeForWriteSync(
 		const validated = validateBindingRaw(scope, capturedBinding.bytes.toString("utf8"));
 		managedDirectoryAuthorities.set(scope, retainedAuthority);
 		const directoryStat = fs.lstatSync(scope.directoryPath, { bigint: true });
-		if (
-			!directoryStat.isDirectory() ||
-			directoryStat.isSymbolicLink() ||
-			directoryStat.dev !== preparedDirectory.dev ||
-			directoryStat.ino !== preparedDirectory.ino
-		)
-			throw new Error("Managed session directory changed");
+		assertSameManagedDirectoryIdentity(directoryStat, preparedDirectory);
 		managedDirectoryIdentities.set(scope, { dev: preparedDirectory.dev, ino: preparedDirectory.ino });
 		if (validated) return validated;
 		const internal = managedInternalDirectory(scope);
