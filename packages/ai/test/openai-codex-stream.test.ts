@@ -1681,6 +1681,109 @@ describe("openai-codex streaming", () => {
 		expect(result.stopReason).toBe("stop");
 		expect(result.content.find(block => block.type === "text")?.text).toBe("Recovered after overload");
 	});
+	it("ends an incomplete request_timeout with a bounded error instead of partial tool arguments", async () => {
+		const tempDir = TempDir.createSync("@pi-codex-stream-");
+		setAgentDir(tempDir.path());
+		const events: Record<string, unknown>[] = [
+			{
+				type: "response.output_item.added",
+				item: {
+					type: "function_call",
+					id: "fc_timeout",
+					call_id: "call_timeout",
+					name: "todo_write",
+					arguments: "",
+				},
+			},
+			{
+				type: "response.function_call_arguments.delta",
+				item_id: "fc_timeout",
+				delta: `{"ops":"${"x".repeat(2_530_317)}`,
+			},
+			{
+				type: "error",
+				code: "request_timeout",
+				message: "stream error: stream disconnected before completion: stream closed before response.completed",
+			},
+		];
+		const fetchMock = vi.fn(
+			async () =>
+				new Response(createCodexErrorSse(events), {
+					status: 200,
+					headers: { "content-type": "text/event-stream" },
+				}),
+		);
+		global.fetch = fetchMock as unknown as typeof fetch;
+
+		const result = await streamOpenAICodexResponses(
+			{ ...createCodexTestModel("https://chatgpt.com/backend-api"), preferWebsockets: false },
+			createCodexTestContext(),
+			{ apiKey: createCodexTestToken(), streamMaxRetries: 0 },
+		).result();
+
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+		expect(result.stopReason).toBe("error");
+		expect(result.errorCode).toBe("request_timeout");
+		expect(result.errorMessage).toContain("request_timeout");
+		expect(result.content).toEqual([
+			expect.objectContaining({
+				type: "toolCall",
+				id: "call_timeout|fc_timeout",
+				name: "todo_write",
+				arguments: {},
+			}),
+		]);
+		expect(Buffer.byteLength(JSON.stringify(result))).toBeLessThan(256 * 1024);
+	});
+
+	it("keeps finalized tool-call arguments when a later stream error ends the turn", async () => {
+		const tempDir = TempDir.createSync("@pi-codex-stream-");
+		setAgentDir(tempDir.path());
+		const events: Record<string, unknown>[] = [
+			{
+				type: "response.output_item.added",
+				item: { type: "function_call", id: "fc_done", call_id: "call_done", name: "todo_write", arguments: "" },
+			},
+			{ type: "response.function_call_arguments.delta", item_id: "fc_done", delta: '{"ops":[]}' },
+			{
+				type: "response.output_item.done",
+				item: {
+					type: "function_call",
+					id: "fc_done",
+					call_id: "call_done",
+					name: "todo_write",
+					arguments: '{"ops":[]}',
+				},
+			},
+			{
+				type: "response.output_item.added",
+				item: { type: "function_call", id: "fc_open", call_id: "call_open", name: "todo_write", arguments: "" },
+			},
+			{ type: "response.function_call_arguments.delta", item_id: "fc_open", delta: '{"ops":"partial' },
+			{ type: "error", code: "invalid_request_error", message: "invalid request" },
+		];
+		global.fetch = vi.fn(
+			async () =>
+				new Response(createCodexErrorSse(events), {
+					status: 200,
+					headers: { "content-type": "text/event-stream" },
+				}),
+		) as unknown as typeof fetch;
+
+		const result = await streamOpenAICodexResponses(
+			{ ...createCodexTestModel("https://chatgpt.com/backend-api"), preferWebsockets: false },
+			createCodexTestContext(),
+			{ apiKey: createCodexTestToken(), streamMaxRetries: 0 },
+		).result();
+
+		expect(result.stopReason).toBe("error");
+		expect(result.errorCode).toBeUndefined();
+		expect(result.content).toEqual([
+			expect.objectContaining({ id: "call_done|fc_done", arguments: { ops: [] } }),
+			expect.objectContaining({ id: "call_open|fc_open", arguments: {} }),
+		]);
+	});
+
 	it("does not retry non-recoverable Codex schema validation SSE events", async () => {
 		const tempDir = TempDir.createSync("@pi-codex-stream-");
 		setAgentDir(tempDir.path());

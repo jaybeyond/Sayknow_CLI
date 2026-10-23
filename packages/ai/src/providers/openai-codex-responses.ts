@@ -1887,8 +1887,16 @@ function finalizeCodexResponse(
 async function handleCodexStreamFailure(
 	context: CodexStreamProcessingContext,
 	error: unknown,
+	finalizedToolCallIds: ReadonlySet<string>,
 ): Promise<AssistantMessage> {
 	const { output } = context;
+	// Keep a failed call's identity for diagnostics but not its unvalidated
+	// arguments: a stalled call can otherwise make the terminal error oversized.
+	for (const block of output.content) {
+		if (block.type !== "toolCall" || finalizedToolCallIds.has(block.id) || !("partialJson" in block)) continue;
+		block.arguments = {};
+		delete (block as { partialJson?: string }).partialJson;
+	}
 	removeTransientBlockIndices(output);
 	if (context.requestContext.websocketState) {
 		resetCodexWebSocketAppendState(context.requestContext.websocketState);
@@ -1897,6 +1905,8 @@ async function handleCodexStreamFailure(
 	output.stopReason = context.options?.signal?.aborted ? "aborted" : "error";
 	output.errorStatus = extractHttpStatusFromError(error);
 	output.transportFailure = transportFailureFacts(error);
+	// Keep the provider's timeout as structured evidence; retry policy is unchanged.
+	if (error instanceof CodexProviderStreamError && error.code === "request_timeout") output.errorCode = error.code;
 	output.errorMessage = await finalizeErrorMessage(error, context.requestContext.rawRequestDump);
 	output.duration = Date.now() - context.startTime;
 	if (context.firstTokenTime) {
@@ -1955,6 +1965,7 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 	(async () => {
 		const startTime = Date.now();
 		let processingContext: CodexStreamProcessingContext | undefined;
+		let finalizedToolCallIds: ReadonlySet<string> = new Set<string>();
 
 		try {
 			const requestContext = await buildCodexRequestContext(model, context, options, output);
@@ -1977,6 +1988,7 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 				...initialTransport,
 				websocketState: requestContext.websocketState,
 			});
+			finalizedToolCallIds = runtime.finalizedToolCallIds;
 			if (requestContext.websocketState) {
 				requestContext.websocketState.lastTransport = initialTransport.transport;
 			}
@@ -2025,7 +2037,7 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 					},
 					startTime,
 				} satisfies CodexStreamProcessingContext);
-			const failure = await handleCodexStreamFailure(failureContext, error);
+			const failure = await handleCodexStreamFailure(failureContext, error, finalizedToolCallIds);
 			stream.push({ type: "error", reason: failure.stopReason as "error" | "aborted", error: failure });
 			stream.end();
 		}
