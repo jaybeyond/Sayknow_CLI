@@ -1935,10 +1935,11 @@ export class AuthStorage {
 				break;
 			}
 			case "glm-zcode": {
-				const { loginGlmZcode } = await import("./utils/oauth/glm-zcode");
+				const { loginGlmZcode, GLM_ZCODE_MANUAL_INPUT_PROMPT } = await import("./utils/oauth/glm-zcode");
 				credentials = await loginGlmZcode({
 					...ctrl,
-					onManualCodeInput: ctrl.onManualCodeInput ?? manualCodeInput,
+					onManualCodeInput:
+						ctrl.onManualCodeInput ?? (() => ctrl.onPrompt({ message: GLM_ZCODE_MANUAL_INPUT_PROMPT })),
 				});
 				break;
 			}
