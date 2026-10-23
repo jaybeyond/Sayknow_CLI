@@ -62,8 +62,61 @@ describe("agentLoop: truncated tool-call guard", () => {
 		expect(toolResults).toHaveLength(1);
 		expect(toolResults[0].isError).toBe(true);
 		expect(toolResults[0].text).toContain("cut off");
+		expect(toolResults[0].text).toContain("output token limit");
 		expect(toolResults[0].text.toLowerCase()).toContain("re-issue");
 	});
+
+	// Ported from upstream gajae 6271dfc8a9 (#6728): only a length stop proves the
+	// output-token limit, so any other incomplete call must not blame it.
+	for (const stopReason of ["toolUse", "stop"] as const) {
+		it(`rejects an incomplete call under stopReason ${stopReason} without blaming the output token limit`, async () => {
+			const executed: Array<Record<string, unknown>> = [];
+			const toolSchema = z.object({ path: z.string(), content: z.string() });
+			const tool: AgentTool<typeof toolSchema, Record<string, never>> = {
+				name: "write_file",
+				label: "Write",
+				description: "Write a file",
+				parameters: toolSchema,
+				async execute(_id, params) {
+					executed.push(params as Record<string, unknown>);
+					return { content: [{ type: "text", text: "wrote" }], details: {} };
+				},
+			};
+			const context: AgentContext = { systemPrompt: [""], messages: [], tools: [tool] };
+			const mock = createMockModel({
+				responses: [
+					{
+						content: [
+							{
+								type: "toolCall",
+								id: "tc-1",
+								name: "write_file",
+								arguments: { path: "a.ts" },
+								incompleteArguments: true,
+							},
+						],
+						stopReason,
+					},
+					{ content: ["recovered"] },
+				],
+			});
+			const config: AgentLoopConfig = { model: mock.model, convertToLlm: identityConverter, fallbackManaged: true };
+			const texts: string[] = [];
+			const stream = agentLoop([createUserMessage("write the file")], context, config, undefined, mock.stream);
+			for await (const event of stream) {
+				if (event.type === "tool_execution_end") {
+					expect(event.isError).toBe(true);
+					const first = event.result.content?.[0];
+					texts.push(first?.type === "text" ? first.text : "");
+				}
+			}
+			expect(executed).toHaveLength(0);
+			expect(texts).toHaveLength(1);
+			expect(texts[0]).toContain('Tool call "write_file" was incomplete before its arguments finished streaming');
+			expect(texts[0]).not.toContain("output token limit");
+			expect(texts[0]).toContain("Re-issue the call with complete arguments");
+		});
+	}
 
 	it("executes normally when incompleteArguments is not set", async () => {
 		const executed: Array<Record<string, unknown>> = [];

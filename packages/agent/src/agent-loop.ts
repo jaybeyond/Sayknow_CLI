@@ -3526,14 +3526,20 @@ async function executeToolCalls(
 				}
 				if (toolCall.incompleteArguments) {
 					record.argumentValidationFailed = true;
-					// The provider flagged this call's argument JSON as truncated
-					// (the model hit its output-token limit mid-call). Executing the
-					// best-effort partial parse would run the tool on wrong input, so
-					// reject with a retryable, actionable error instead.
+					// The provider flagged this call's argument JSON as incomplete.
+					// Executing the best-effort partial parse would run the tool on
+					// wrong input, so reject with a retryable, actionable error instead.
+					// The output-token-limit sentence asserts WHY the arguments stopped,
+					// and only a length stop proves it; any other incomplete call is
+					// rejected with the same guidance without blaming a limit.
+					const guidance =
+						"Re-issue the call with complete arguments, splitting the work into smaller steps if needed.";
 					throw new Error(
-						`Tool call "${toolCall.name}" was cut off before its arguments finished streaming ` +
-							`(the response hit its output token limit). The partial arguments cannot be executed. ` +
-							`Re-issue the call with complete arguments, splitting the work into smaller steps if needed.`,
+						assistantMessage.stopReason === "length"
+							? `Tool call "${toolCall.name}" was cut off before its arguments finished streaming ` +
+									`(the response hit its output token limit). The partial arguments cannot be executed. ${guidance}`
+							: `Tool call "${toolCall.name}" was incomplete before its arguments finished streaming. ` +
+									`The partial arguments cannot be executed. ${guidance}`,
 					);
 				}
 				if (!tool) {
