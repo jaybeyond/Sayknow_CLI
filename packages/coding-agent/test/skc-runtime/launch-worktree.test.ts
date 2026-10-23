@@ -78,6 +78,12 @@ describe("default launch worktrees", () => {
 			detached: true,
 			name: null,
 		});
+		expect(parseLaunchWorktreeMode(["--worktree", "fix this bug"]).remainingArgs).toEqual(["fix this bug"]);
+		expect(parseLaunchWorktreeMode(["--worktree", "fix this bug"]).mode).toEqual({
+			enabled: true,
+			detached: true,
+			name: null,
+		});
 		expect(parseLaunchWorktreeMode(["--worktree=feature/demo", "hello"])).toEqual({
 			mode: { enabled: true, detached: false, name: "feature/demo" },
 			remainingArgs: ["hello"],
