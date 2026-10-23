@@ -80,7 +80,8 @@ const expectedDomainErrors: Readonly<Record<string, string>> = {
 	"queue.message.update": "invalid_message",
 	"transcript.body": "resource_gone",
 	"goal.list/get": "resource_gone",
-	"session.last_assistant": "resource_gone",
+	// session.last_assistant is intentionally absent: without readable assistant
+	// text it returns an empty observation (ok: true, page.items: [null]) (#5821).
 	"resource.body": "resource_gone",
 	"artifact.read": "resource_gone",
 	"retry.last": "nothing_to_retry",
@@ -106,7 +107,15 @@ const expectedGlobalErrors: Readonly<Record<string, string>> = {
 function expectSemanticResult(operation: Operation, result: unknown): void {
 	const code = expectedDomainErrors[operation.sdkId];
 	if (code) expect(result).toMatchObject({ ok: false, error: { code } });
-	else expect(result).toMatchObject({ ok: true });
+	else if (operation.sdkId === "session.last_assistant") {
+		const envelope = result as { ok?: unknown; page?: unknown; result?: unknown; data?: unknown } | null;
+		if (envelope !== null && typeof envelope === "object" && "ok" in envelope)
+			expect(result).toMatchObject({ ok: true });
+		const page = (envelope?.page ??
+			(envelope?.result as { page?: unknown } | undefined)?.page ??
+			(envelope?.data as { page?: unknown } | undefined)?.page) as { items?: unknown[] } | undefined;
+		expect(page?.items).toEqual([null]);
+	} else expect(result).toMatchObject({ ok: true });
 }
 
 function expectGlobalSemanticResult(operation: Operation, result: unknown): void {
