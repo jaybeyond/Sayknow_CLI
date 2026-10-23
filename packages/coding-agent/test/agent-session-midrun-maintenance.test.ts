@@ -1236,6 +1236,46 @@ describe("AgentSession mid-run maintenance outcomes", () => {
 		}
 	});
 
+	/**
+	 * One oversized early message (a pasted transcript) and a short tail: the
+	 * keep window reaches back past the only cut point, so prepareCompaction has
+	 * nothing to summarize and the compaction is skipped.
+	 */
+	async function seedUncompactableConversation(s: AgentSession, finalUsageTotal: number): Promise<void> {
+		const m = s.model!;
+		await seed(s, [
+			{ role: "user", content: `pasted transcript: ${"x".repeat(600_000)}`, timestamp: Date.now() },
+			assistant(m, usage(finalUsageTotal - 5_000), "read it"),
+			{ role: "user", content: "next question", timestamp: Date.now() },
+			assistant(m, usage(finalUsageTotal), "answer"),
+		]);
+	}
+
+	it("sends the unchanged context when nothing is compactable and it still fits the window", async () => {
+		// Default auto threshold on a 1M window is the 300k ceiling; 320k crosses it
+		// but leaves the request far from the window.
+		session = await buildSession({
+			contextWindow: 1_000_000,
+			shortCircuit: true,
+			settings: { "compaction.thresholdTokens": -1 },
+		});
+		await seedUncompactableConversation(session, 320_000);
+		const outcome = await session.runMidRunMaintenanceForTests(contextOf(session));
+		expect(outcome).toBe("not-needed");
+		expect(getLatestCompactionEntry(session.sessionManager.getBranch())).toBeNull();
+	});
+
+	it("still fails when nothing is compactable and the context no longer fits the window", async () => {
+		session = await buildSession({
+			contextWindow: 340_000,
+			shortCircuit: true,
+			settings: { "compaction.thresholdTokens": -1 },
+		});
+		await seedUncompactableConversation(session, 320_000);
+		const outcome = await session.runMidRunMaintenanceForTests(contextOf(session));
+		expect(outcome).toBe("failed");
+		expect(getLatestCompactionEntry(session.sessionManager.getBranch())).toBeNull();
+	});
 	it("does not double-compact while a compaction is already in flight", async () => {
 		session = await buildSession({ shortCircuit: true, settings: { "compaction.keepRecentTokens": 10 } });
 		await seedCompactableConversation(session, THRESHOLD * 3);
