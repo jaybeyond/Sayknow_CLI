@@ -3002,6 +3002,16 @@ export class AgentSession {
 		this.#standingResolveHandler = handler ?? undefined;
 	}
 
+	/**
+	 * The session file does not store resolve closures. Once switchSession commits
+	 * a different file, drop the predecessor queue (including a `-requeued` replay)
+	 * and the standing handler so ResolveTool cannot run them in the successor.
+	 */
+	#releasePredecessorResolveDispatch(): void {
+		this.#standingResolveHandler = undefined;
+		this.#toolChoiceQueue.clear();
+	}
+
 	#sdkPlanModeHandler: ((on: boolean) => Promise<PlanModeState | undefined>) | undefined;
 
 	setSdkPlanModeHandler(handler: ((on: boolean) => Promise<PlanModeState | undefined>) | null): void {
@@ -16885,6 +16895,8 @@ export class AgentSession {
 			// the existing message objects is sufficient and avoids structured-clone failures for
 			// extension/custom metadata that is valid to persist but not cloneable.
 			const previousAgentMessages = [...this.agent.state.messages];
+			const previousCheckpointState = this.#checkpointState;
+			const previousPendingRewindReport = this.#pendingRewindReport;
 			const previousSteeringMessages = [...this.#steeringMessages];
 			const previousFollowUpMessages = [...this.#followUpMessages];
 			const previousPendingNextTurnMessages = [...this.#pendingNextTurnMessages];
@@ -17004,6 +17016,11 @@ export class AgentSession {
 					// before the identity was published (#2797 / #2925).
 					this.#resetHindsightConversationTrackingIfHindsight();
 					this.#resetIrcRosterDeliveryState();
+					// A checkpoint count and entry id belong to the predecessor file.
+					// Leaving them armed lets a later rewind slice the successor and
+					// branch it from a missing entry, which falls back to the root.
+					this.#checkpointState = undefined;
+					this.#pendingRewindReport = undefined;
 				}
 
 				this.#reconnectToAgent();
@@ -17023,6 +17040,10 @@ export class AgentSession {
 						...(options?.transition ? { transition: options.transition } : {}),
 					});
 				}
+				// Resolve closures are not persisted with the session file. Drop the
+				// predecessor's only once the switch can no longer roll back: the queue
+				// has no snapshot, and session_switch hooks cannot start a resolve turn.
+				if (switchingToDifferentSession) this.#releasePredecessorResolveDispatch();
 				return true;
 			} catch (error) {
 				this.sessionManager.restoreState(previousSessionState);
@@ -17052,6 +17073,8 @@ export class AgentSession {
 				this.#steeringMessages = previousSteeringMessages;
 				this.#followUpMessages = previousFollowUpMessages;
 				this.#pendingNextTurnMessages = previousPendingNextTurnMessages;
+				this.#checkpointState = previousCheckpointState;
+				this.#pendingRewindReport = previousPendingRewindReport;
 				this.#scheduledHiddenNextTurnGeneration = previousScheduledHiddenNextTurnGeneration;
 				this.agent.clearAllQueues();
 				this.agent.restoreSteering(previousAgentSteeringQueue);
