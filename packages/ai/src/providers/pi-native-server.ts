@@ -302,7 +302,10 @@ function sanitizeEvent(event: AssistantMessageEvent): AssistantMessageEvent | un
 		case "done":
 			return { ...event, message: sanitizeMessage(event.message) };
 		case "error":
-			return { ...event, error: sanitizeMessage(event.error) };
+			// Rebuild from the known fields: a provider that attaches an extra snapshot
+			// (for example the pre-error partial) must not have it serialized past
+			// sanitizeMessage onto the wire.
+			return { type: "error", reason: event.reason, error: sanitizeMessage(event.error) };
 		case "toolChoiceIncapability":
 			return event;
 		case "thinking_start":

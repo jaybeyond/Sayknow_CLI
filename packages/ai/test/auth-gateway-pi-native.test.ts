@@ -231,6 +231,19 @@ describe("pi-native parseRequest", () => {
 	});
 });
 describe("pi-native encodeStream", () => {
+	it("drops an extra credential-bearing snapshot on an error event before SSE", async () => {
+		const credential = "ksk_upstream-secret-value";
+		const errored = baseAssistant({ stopReason: "error", errorMessage: "Upstream request failed" });
+		const partial = baseAssistant({ errorMessage: `authorization=Bearer ${credential}` });
+		// The fork's error event type carries no snapshot; a provider attaching one
+		// at runtime must still not reach the wire.
+		const events = [{ type: "error", reason: "error", error: errored, partial }] as unknown as AssistantMessageEvent[];
+
+		const frames = (await collectSse(encodeStream(makeEventStream(events, errored)))).map(parseSseLine);
+		expect(JSON.stringify(frames)).not.toContain(credential);
+		expect(frames[0]).not.toHaveProperty("partial");
+		expect(frames[0]).toMatchObject({ type: "error", reason: "error" });
+	});
 	it("ships every AssistantMessageEvent verbatim, terminated by [DONE]", async () => {
 		// Pi-native is skc-talks-to-skc: the client feeds parsed events directly
 		// into `AssistantMessageEventStream.push()`, so the wire IS the canonical
