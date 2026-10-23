@@ -82,7 +82,8 @@ describe.skipIf(!recoveryReads)("managed owner transcript provenance through adm
 			await writeTerminal(cwd);
 			await fsp.writeFile(path.join(cwd, ".env"), "SKC_MANAGED_OWNER_TRANSCRIPT_PATH=predecessor.jsonl\n");
 			const forged = await admit(stateDir, cwd, {});
-			expect(forged.stderr).toContain("child admission blocked: transcript_path_untrusted");
+			// The fork records a blocked admission only in the durable handoff (no stderr line; upstream blockAdmission).
+			expect(forged.handoffs).toContainEqual(expect.objectContaining({ reason: "transcript_path_untrusted" }));
 			expect(forged.result).toEqual({ kind: "blocked", exitCode: 75 });
 			expect(await journal(cwd)).not.toContain(canary);
 			await fsp.rm(path.join(cwd, ".env"), { force: true });
@@ -110,7 +111,7 @@ describe.skipIf(!recoveryReads)("managed owner transcript provenance through adm
 			const forged = await admit(stateDir, cwd, {
 				SKC_MANAGED_OWNER_TRANSCRIPT_PATH: "predecessor.jsonl",
 			});
-			expect(forged.stderr).toContain("child admission blocked: transcript_path_untrusted");
+			expect(forged.handoffs).toContainEqual(expect.objectContaining({ reason: "transcript_path_untrusted" }));
 			expect(forged.result.kind).toBe("blocked");
 			expect(await journal(cwd)).not.toContain(canary);
 			await fsp.writeFile(path.join(cwd, ".env"), "SKC_SESSION_FILE=other.jsonl\n");
