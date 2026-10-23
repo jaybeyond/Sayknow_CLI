@@ -23,6 +23,8 @@ const MAX_PATHS_PER_SESSION = 30;
 export interface FileReadSnapshot {
 	/** 1-indexed line number → exact line content as observed by `read`/`search`. */
 	lines: Map<number, string>;
+	/** Total line count when the snapshot is known to cover the whole file. */
+	lineCount?: number;
 	recordedAt: number;
 }
 
@@ -39,6 +41,12 @@ export class FileReadCache {
 		if (lines.length === 0) return;
 		const entries: Array<readonly [number, string]> = lines.map((line, idx) => [startLine + idx, line] as const);
 		this.#record(absPath, entries);
+	}
+
+	/** Record the complete content of a file (e.g. the result of an edit this session wrote). */
+	recordFull(absPath: string, lines: readonly string[]): void {
+		const entries: Array<readonly [number, string]> = lines.map((line, idx) => [idx + 1, line] as const);
+		this.#record(absPath, entries, lines.length);
 	}
 
 	/** Record sparse `(lineNumber, content)` pairs (e.g. `search` matches plus context). */
@@ -58,28 +66,38 @@ export class FileReadCache {
 		this.#snapshots.clear();
 	}
 
-	#record(absPath: string, entries: ReadonlyArray<readonly [number, string]>): void {
+	#record(absPath: string, entries: ReadonlyArray<readonly [number, string]>, lineCount?: number): void {
 		const existing = this.#snapshots.get(absPath);
-		if (existing && hasConflict(existing.lines, entries)) {
+		if (existing && hasConflict(existing, entries, lineCount)) {
 			// File content has changed since we last recorded. Drop the stale
 			// snapshot and start fresh with whatever we just observed.
-			this.#snapshots.set(absPath, { lines: new Map(entries), recordedAt: Date.now() });
+			this.#snapshots.set(absPath, { lines: new Map(entries), lineCount, recordedAt: Date.now() });
 			return;
 		}
 		if (existing) {
 			for (const [lineNum, content] of entries) existing.lines.set(lineNum, content);
+			if (lineCount !== undefined) existing.lineCount = lineCount;
 			existing.recordedAt = Date.now();
 			// `get` above already touched LRU recency for this key.
 			return;
 		}
-		this.#snapshots.set(absPath, { lines: new Map(entries), recordedAt: Date.now() });
+		this.#snapshots.set(absPath, { lines: new Map(entries), lineCount, recordedAt: Date.now() });
 	}
 }
 
-function hasConflict(existing: Map<number, string>, incoming: ReadonlyArray<readonly [number, string]>): boolean {
+function hasConflict(
+	existing: FileReadSnapshot,
+	incoming: ReadonlyArray<readonly [number, string]>,
+	incomingLineCount: number | undefined,
+): boolean {
 	for (const [lineNum, content] of incoming) {
-		const prior = existing.get(lineNum);
+		const prior = existing.lines.get(lineNum);
 		if (prior !== undefined && prior !== content) return true;
+		if (existing.lineCount !== undefined && lineNum > existing.lineCount) return true;
+	}
+	if (incomingLineCount !== undefined) {
+		if (existing.lineCount !== undefined && existing.lineCount !== incomingLineCount) return true;
+		for (const lineNum of existing.lines.keys()) if (lineNum > incomingLineCount) return true;
 	}
 	return false;
 }

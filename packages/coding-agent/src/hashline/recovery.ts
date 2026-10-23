@@ -1,8 +1,9 @@
 import * as Diff from "diff";
 import { generateDiffString } from "../edit/diff";
-import type { FileReadCache } from "../edit/file-read-cache";
+import type { FileReadCache, FileReadSnapshot } from "../edit/file-read-cache";
 import { HashlineMismatchError } from "./anchors";
 import { applyHashlineEdits, type HashlineApplyResult } from "./apply";
+import { RANGE_INTERIOR_HASH } from "./constants";
 import { computeLineHash } from "./hash";
 import type { Anchor, HashlineApplyOptions, HashlineEdit } from "./types";
 
@@ -27,6 +28,69 @@ const HASHLINE_RECOVERY_FUZZ_FACTOR = 0;
 
 const HASHLINE_RECOVERY_WARNING =
 	"Recovered from stale anchors using a previous read snapshot (file changed externally between read and edit).";
+
+/**
+ * Line numbers outside a partial snapshot were filled from the live file when
+ * building the replay base, so they say nothing about the version the anchors
+ * were authored against. Drop such lines from a hunk's leading and trailing
+ * context; refuse the hunk if any remaining old-side line is not covered.
+ */
+function trimHunkToSnapshot(
+	hunk: Diff.StructuredPatchHunk,
+	snapshot: FileReadSnapshot,
+): Diff.StructuredPatchHunk | null {
+	const oldLineNumbers: Array<number | undefined> = [];
+	let oldLine = hunk.oldStart;
+	for (const line of hunk.lines) {
+		if (line[0] === " " || line[0] === "-") oldLineNumbers.push(oldLine++);
+		else oldLineNumbers.push(undefined);
+	}
+	const covered = (index: number): boolean => {
+		const lineNum = oldLineNumbers[index];
+		return lineNum !== undefined && snapshot.lines.has(lineNum);
+	};
+
+	let start = 0;
+	while (start < hunk.lines.length && hunk.lines[start][0] === " " && !covered(start)) start++;
+	let end = hunk.lines.length;
+	while (end > start && hunk.lines[end - 1][0] === " " && !covered(end - 1)) end--;
+	const lines = hunk.lines.slice(start, end);
+	for (let index = start; index < end; index++) {
+		if (oldLineNumbers[index] !== undefined && !covered(index)) return null;
+	}
+	return {
+		oldStart: hunk.oldStart + start,
+		oldLines: lines.filter(line => line[0] === " " || line[0] === "-").length,
+		newStart: hunk.newStart + start,
+		newLines: lines.filter(line => line[0] === " " || line[0] === "+").length,
+		lines,
+	};
+}
+
+/**
+ * `Diff.applyPatch` searches the whole file for a spot where a hunk's context
+ * matches, so a hunk whose old side (context + deleted lines) occurs more than
+ * once could land on the wrong copy. Refuse such replays.
+ */
+function everyHunkLandsUniquely(hunks: Diff.StructuredPatchHunk[], lines: string[]): boolean {
+	for (const hunk of hunks) {
+		const oldSide = hunk.lines.filter(line => line[0] === " " || line[0] === "-").map(line => line.slice(1));
+		if (oldSide.length === 0) return false;
+		let occurrences = 0;
+		for (let start = 0; start + oldSide.length <= lines.length; start++) {
+			let matches = true;
+			for (let offset = 0; offset < oldSide.length; offset++) {
+				if (lines[start + offset] !== oldSide[offset]) {
+					matches = false;
+					break;
+				}
+			}
+			if (matches && ++occurrences > 1) return false;
+		}
+		if (occurrences !== 1) return false;
+	}
+	return true;
+}
 
 /** Collect every line anchor an edit batch depends on. */
 function collectEditAnchors(edits: HashlineEdit[]): Anchor[] {
@@ -64,11 +128,14 @@ export function tryRecoverHashlineWithCache(args: HashlineRecoveryArgs): Hashlin
 	// Precondition: the model's anchors must be vouched-for by the cache. If
 	// even one anchored line is missing from the snapshot, or its cached
 	// content hashes to a different value than the model supplied, refuse —
-	// any merge from here is a guess.
+	// any merge from here is a guess. Range interiors carry no model-supplied
+	// hash (the endpoints vouch for the range), so they only need to be present;
+	// the replayed hunk still has to match those snapshot lines exactly.
 	const anchors = collectEditAnchors(edits);
 	for (const anchor of anchors) {
 		const cachedLine = snapshot.lines.get(anchor.line);
 		if (cachedLine === undefined) return null;
+		if (anchor.hash === RANGE_INTERIOR_HASH) continue;
 		if (computeLineHash(anchor.line, cachedLine) !== anchor.hash) return null;
 	}
 
@@ -81,6 +148,9 @@ export function tryRecoverHashlineWithCache(args: HashlineRecoveryArgs): Hashlin
 	for (const [lineNum, content] of snapshot.lines) {
 		overlaid[lineNum - 1] = content;
 	}
+	// A full-file snapshot is authoritative about length too: live lines past
+	// its end did not exist in the version the anchors were authored against.
+	if (snapshot.lineCount !== undefined) overlaid.length = snapshot.lineCount;
 	const previousText = overlaid.join("\n");
 	if (previousText === currentText) return null;
 
@@ -94,6 +164,19 @@ export function tryRecoverHashlineWithCache(args: HashlineRecoveryArgs): Hashlin
 	if (applied.lines === previousText) return null;
 
 	const patch = Diff.structuredPatch("file", "file", previousText, applied.lines, "", "", { context: 3 });
+	const hunks: Diff.StructuredPatchHunk[] = [];
+	for (const hunk of patch.hunks) {
+		const trimmed = trimHunkToSnapshot(hunk, snapshot);
+		if (!trimmed) return null;
+		hunks.push(trimmed);
+	}
+	patch.hunks = hunks;
+	// Content is the only location evidence a replayed hunk carries, so it must
+	// identify one site in the authored version and in the live file. A single
+	// live match may otherwise be an unrelated identical copy left standing after
+	// the anchored copy changed out-of-band.
+	if (!everyHunkLandsUniquely(hunks, previousText.split("\n"))) return null;
+	if (!everyHunkLandsUniquely(hunks, currentText.split("\n"))) return null;
 	const merged = Diff.applyPatch(currentText, patch, { fuzzFactor: HASHLINE_RECOVERY_FUZZ_FACTOR });
 	if (typeof merged !== "string" || merged === currentText) return null;
 

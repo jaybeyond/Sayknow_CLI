@@ -752,6 +752,81 @@ describe("hashline — anchor-stale recovery via read snapshot cache", () => {
 		expect(recovered).toBeNull();
 	});
 
+	// Ported from upstream gajae 57ceee2fb1 + f0a027a249 (in b37ba33f1b). The fork
+	// cache keeps one snapshot, so the stale range comes from an out-of-band shift.
+	it("lands a stale multi-line range whose interior carries no model-supplied hash", async () => {
+		await withTempDir(async tempDir => {
+			const filePath = path.join(tempDir, "a.ts");
+			const v0Lines = ["function a() {", "  return 1;", "}", "", "function b() {", "  return 2;", "}"];
+			await Bun.write(filePath, `${v0Lines.join("\n")}\n`);
+			const session = makeHashlineSession(tempDir);
+			getFileReadCache(session).recordContiguous(filePath, 1, [...v0Lines, ""]);
+			await Bun.write(filePath, `// header\n${v0Lines.join("\n")}\n`);
+
+			// Line 6 is a range interior: only the endpoints vouch for the snapshot.
+			const input = `§a.ts\n≔${tag(5, "function b() {")}..${tag(7, "}")}\nfunction b() {\n  return 3;\n}\n`;
+			const result = await executeHashlineSingle(hashlineExecuteOptions(tempDir, input, undefined, session));
+
+			expect(await Bun.file(filePath).text()).toBe(
+				["// header", "function a() {", "  return 1;", "}", "", "function b() {", "  return 3;", "}", ""].join(
+					"\n",
+				),
+			);
+			expect(toolText(result)).toMatch(/Recovered from stale anchors using a previous read snapshot/);
+		});
+	});
+
+	it("refuses multi-line range recovery when a range interior line changed in the live file", () => {
+		const cache = new FileReadCache();
+		const fakePath = "/tmp/__hashline-recovery-interior-changed__.ts";
+		cache.recordContiguous(fakePath, 1, ["function b() {", "  return 2;", "}", ""]);
+		const currentText = ["// header", "function b() {", "  return 99;", "}", ""].join("\n");
+		const edits = parseHashline(`≔${tag(1, "function b() {")}..${tag(3, "}")}\nfunction b() {\n  return 3;\n}`);
+		expect(
+			tryRecoverHashlineWithCache({ cache, absolutePath: fakePath, currentText, edits, options: {} }),
+		).toBeNull();
+	});
+
+	it("refuses multi-line range recovery when the snapshot never held a range interior line", () => {
+		const cache = new FileReadCache();
+		const fakePath = "/tmp/__hashline-recovery-interior-missing__.ts";
+		cache.recordSparse(fakePath, [
+			[1, "function b() {"],
+			[3, "}"],
+		]);
+		const currentText = ["// header", "function b() {", "  return 2;", "}", ""].join("\n");
+		const edits = parseHashline(`≔${tag(1, "function b() {")}..${tag(3, "}")}\nfunction b() {\n  return 3;\n}`);
+		expect(
+			tryRecoverHashlineWithCache({ cache, absolutePath: fakePath, currentText, edits, options: {} }),
+		).toBeNull();
+	});
+
+	it("refuses range recovery that would relocate onto an identical copy after the anchored copy changed", () => {
+		const cache = new FileReadCache();
+		const fakePath = "/tmp/__hashline-recovery-relocate__.ts";
+		const pad = ["x", "x", "x"];
+		const block = ["function b() {", "  return 2;", "}"];
+		cache.recordContiguous(fakePath, 1, [...pad, ...block, ...pad, ...block, ...pad]);
+		const currentText = [...pad, "function b(y) {", "  return 2;", "}", ...pad, ...block, ...pad].join("\n");
+		const edits = parseHashline(`≔${tag(4, "function b() {")}..${tag(6, "}")}\nfunction b() {\n  return 3;\n}`);
+		expect(
+			tryRecoverHashlineWithCache({ cache, absolutePath: fakePath, currentText, edits, options: {} }),
+		).toBeNull();
+	});
+
+	it("refuses a single-line replay onto an identical live copy after the anchored line changed in place", () => {
+		const cache = new FileReadCache();
+		const fakePath = "/tmp/__hashline-recovery-ambiguous__.ts";
+		// A partial read saw lines 1..5. Line 3 then changed in place; an identical
+		// copy of the block (with identical trailing context) sits further down.
+		cache.recordContiguous(fakePath, 1, ["a", "b", "c", "d", "e"]);
+		const currentText = ["a", "b", "C2", "d", "e", "Q", "a", "b", "c", "d", "e", "Q"].join("\n");
+		const edits = parseHashline(`≔${sameLineRange(tag(3, "c"))}\n${pl("C-MODEL")}`);
+		expect(
+			tryRecoverHashlineWithCache({ cache, absolutePath: fakePath, currentText, edits, options: {} }),
+		).toBeNull();
+	});
+
 	it("isolates caches across sessions", () => {
 		const a = new FileReadCache();
 		const b = new FileReadCache();

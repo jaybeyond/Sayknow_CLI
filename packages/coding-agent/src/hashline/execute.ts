@@ -182,7 +182,7 @@ async function executeHashlineSection(
 	// of the file: the model just received it back as the diff/preview. Cache
 	// it so a follow-up edit anchored against this state can still recover
 	// if the file is touched out-of-band before the next edit lands.
-	getFileReadCache(session).recordContiguous(absolutePath, 1, result.lines.split("\n"));
+	getFileReadCache(session).recordFull(absolutePath, result.lines.split("\n"));
 
 	const diffResult = generateDiffString(originalNormalized, result.lines);
 	const meta = outputMeta()
