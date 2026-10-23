@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -8,6 +8,7 @@ import type { ModelProfileDefinition } from "@sayknow-cli/coding-agent/config/mo
 import { ModelRegistry } from "@sayknow-cli/coding-agent/config/model-registry";
 import type { ModelProfileConfig } from "@sayknow-cli/coding-agent/config/models-config-schema";
 import { Settings } from "@sayknow-cli/coding-agent/config/settings";
+import { getLanguage, setLanguage } from "@sayknow-cli/coding-agent/i18n/index";
 import { CustomModelPresetWizardComponent } from "@sayknow-cli/coding-agent/modes/components/custom-model-preset-wizard";
 import {
 	ModelSelectorComponent,
@@ -17,6 +18,16 @@ import { getThemeByName, setThemeInstance } from "@sayknow-cli/coding-agent/mode
 import { AuthStorage } from "@sayknow-cli/coding-agent/session/auth-storage";
 import type { TUI } from "@sayknow-cli/tui";
 import { YAML } from "bun";
+
+// These assertions are English UI text. Settings.init elsewhere in the process
+// can resolve language "auto" to the host locale (e.g. macOS AppleLocale).
+const originalLanguage = getLanguage();
+beforeAll(() => {
+	setLanguage("en");
+});
+afterAll(() => {
+	setLanguage(originalLanguage);
+});
 
 let tempDir: string;
 let authStorage: AuthStorage;

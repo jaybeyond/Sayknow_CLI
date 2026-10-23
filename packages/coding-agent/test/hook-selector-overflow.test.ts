@@ -1,7 +1,18 @@
-import { beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { getLanguage, setLanguage } from "@sayknow-cli/coding-agent/i18n/index";
 import { HookSelectorComponent } from "@sayknow-cli/coding-agent/modes/components/hook-selector";
 import { getThemeByName, setThemeInstance, theme } from "@sayknow-cli/coding-agent/modes/theme/theme";
 import { visibleWidth } from "@sayknow-cli/tui";
+
+// These assertions are English UI text. Settings.init elsewhere in the process
+// can resolve language "auto" to the host locale (e.g. macOS AppleLocale).
+const originalLanguage = getLanguage();
+beforeAll(() => {
+	setLanguage("en");
+});
+afterAll(() => {
+	setLanguage(originalLanguage);
+});
 
 // =============================================================================
 // Helpers shared across required tests.

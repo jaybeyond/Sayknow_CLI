@@ -1,5 +1,6 @@
-import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import { BUILTIN_SLASH_COMMANDS } from "@sayknow-cli/coding-agent/extensibility/slash-commands";
+import { getLanguage, setLanguage } from "@sayknow-cli/coding-agent/i18n/index";
 import { initTheme } from "@sayknow-cli/coding-agent/modes/theme/theme";
 import type { InteractiveModeContext } from "@sayknow-cli/coding-agent/modes/types";
 import {
@@ -9,6 +10,16 @@ import {
 	lookupBuiltinSlashCommand,
 } from "@sayknow-cli/coding-agent/slash-commands/builtin-registry";
 import { ImageProtocol, TERMINAL } from "@sayknow-cli/tui";
+
+// These assertions are English UI text. Settings.init elsewhere in the process
+// can resolve language "auto" to the host locale (e.g. macOS AppleLocale).
+const originalLanguage = getLanguage();
+beforeAll(() => {
+	setLanguage("en");
+});
+afterAll(() => {
+	setLanguage(originalLanguage);
+});
 
 const mutableTerminal = TERMINAL as unknown as { imageProtocol: ImageProtocol | null };
 const originalImageProtocol = mutableTerminal.imageProtocol;

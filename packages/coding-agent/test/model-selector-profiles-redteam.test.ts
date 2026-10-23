@@ -1,8 +1,9 @@
-import { beforeAll, describe, expect, test, vi } from "bun:test";
+import { afterAll, beforeAll, describe, expect, test, vi } from "bun:test";
 import { ThinkingLevel } from "@sayknow-cli/agent-core";
 import type { Model } from "@sayknow-cli/ai";
 import type { ModelProfileDefinition } from "@sayknow-cli/coding-agent/config/model-profiles";
 import { Settings } from "@sayknow-cli/coding-agent/config/settings";
+import { getLanguage, setLanguage } from "@sayknow-cli/coding-agent/i18n/index";
 import {
 	ModelSelectorComponent,
 	type ModelSelectorSelection,
@@ -10,6 +11,16 @@ import {
 import { SelectorController } from "@sayknow-cli/coding-agent/modes/controllers/selector-controller";
 import { getThemeByName, setThemeInstance } from "@sayknow-cli/coding-agent/modes/theme/theme";
 import type { TUI } from "@sayknow-cli/tui";
+
+// These assertions are English UI text. Settings.init elsewhere in the process
+// can resolve language "auto" to the host locale (e.g. macOS AppleLocale).
+const originalLanguage = getLanguage();
+beforeAll(() => {
+	setLanguage("en");
+});
+afterAll(() => {
+	setLanguage(originalLanguage);
+});
 
 const model = (provider: string, id: string): Model =>
 	({ provider, id, name: id, api: "openai-responses", contextWindow: 1000, maxTokens: 1000 }) as Model;
