@@ -4,7 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentTool } from "@sayknow-cli/agent-core";
 import { activeEntryPath, activeStateDir, modeStatePath } from "../src/skc-runtime/session-layout";
-import { writeActiveEntry } from "../src/skc-runtime/state-writer";
+import { stampWorkflowEnvelopeChecksum, writeActiveEntry } from "../src/skc-runtime/state-writer";
 import {
 	invalidateVisibleSkillActiveStateCache,
 	readVisibleSkillActiveState,
@@ -37,12 +37,13 @@ async function writeExternalModeState(
 	currentPhase: string,
 ): Promise<string> {
 	const filePath = modeStatePath(cwd, sessionId, skill);
-	await fs.mkdir(path.dirname(filePath), { recursive: true });
-	await fs.writeFile(
+	// A mode-state phase overlays the active entry only with a matching writer stamp (#6558).
+	const state = stampWorkflowEnvelopeChecksum(
+		{ active: true, current_phase: currentPhase, session_id: sessionId, receipt: {} },
 		filePath,
-		`${JSON.stringify({ active: true, current_phase: currentPhase, session_id: sessionId }, null, 2)}\n`,
-		"utf8",
 	);
+	await fs.mkdir(path.dirname(filePath), { recursive: true });
+	await fs.writeFile(filePath, `${JSON.stringify(state, null, 2)}\n`, "utf8");
 	return filePath;
 }
 function tool(name: string): AgentTool {
