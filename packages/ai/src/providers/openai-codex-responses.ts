@@ -133,11 +133,22 @@ const CODEX_NON_RETRYABLE_EVENT_MESSAGE =
 const CODEX_RETRYABLE_EVENT_MESSAGE =
 	/processing your request|retry your request|temporar(?:y|ily)|overloaded|service.?unavailable|internal error|server error/i;
 const CODEX_PROVIDER_SESSION_STATE_KEY = "openai-codex-responses";
+/**
+ * Public session keys whose websocket prewarm hit a fatal handshake rejection.
+ * The verdict survives an account-scoped key change and a recreated provider
+ * session-state map for the same public session.
+ */
+const disabledCodexPublicSessionKeys = new Set<string>();
 const X_CODEX_TURN_STATE_HEADER = "x-codex-turn-state";
 const X_MODELS_ETAG_HEADER = "x-models-etag";
 const X_REASONING_INCLUDED_HEADER = "x-reasoning-included";
 /** Connection-level websocket failures that should immediately fall back to SSE without retrying. */
-const CODEX_WEBSOCKET_FATAL_PATTERNS = ["websocket error:", "websocket closed before open", "connection timeout"];
+const CODEX_WEBSOCKET_FATAL_PATTERNS = [
+	"websocket error:",
+	"websocket closed before open",
+	"websocket is closed before the connection is established",
+	"connection timeout",
+];
 /** Max total time to spend retrying 429s with server-provided delays (5 minutes). */
 const CODEX_RATE_LIMIT_BUDGET_MS = 5 * 60 * 1000;
 
@@ -256,6 +267,7 @@ type CodexWebSocketSessionState = {
 interface CodexProviderSessionState extends ProviderSessionState {
 	webSocketSessions: Map<string, CodexWebSocketSessionState>;
 	webSocketPublicToPrivate: Map<string, string>;
+	disabledWebSocketPublicSessions: Set<string>;
 }
 
 interface CodexRequestContext {
@@ -411,12 +423,14 @@ function createCodexProviderSessionState(): CodexProviderSessionState {
 	const state: CodexProviderSessionState = {
 		webSocketSessions: new Map(),
 		webSocketPublicToPrivate: new Map(),
+		disabledWebSocketPublicSessions: new Set(),
 		close: () => {
 			for (const session of state.webSocketSessions.values()) {
 				session.connection?.close("session_disposed");
 			}
 			state.webSocketSessions.clear();
 			state.webSocketPublicToPrivate.clear();
+			state.disabledWebSocketPublicSessions.clear();
 		},
 	};
 	return state;
@@ -697,6 +711,13 @@ async function buildCodexRequestContext(
 	}
 	const websocketState =
 		sessionKey && providerSessionState ? getCodexWebSocketSessionState(sessionKey, providerSessionState) : undefined;
+	if (
+		websocketState &&
+		publicSessionKey &&
+		isCodexPublicSessionWebSocketDisabled(publicSessionKey, providerSessionState)
+	) {
+		websocketState.disableWebsocket = true;
+	}
 
 	return {
 		apiKey,
@@ -2034,6 +2055,9 @@ export async function prewarmOpenAICodexResponses(
 	}
 	if (!sessionKey || !providerSessionState) return;
 	const state = getCodexWebSocketSessionState(sessionKey, providerSessionState);
+	if (publicSessionKey && isCodexPublicSessionWebSocketDisabled(publicSessionKey, providerSessionState)) {
+		state.disableWebsocket = true;
+	}
 	if (!shouldUseCodexWebSocket(model, state, options?.preferWebsockets)) return;
 	const headers = logger.time(
 		"prewarmCodex:createHeaders",
@@ -2045,7 +2069,7 @@ export async function prewarmOpenAICodexResponses(
 		"websocket",
 		state,
 	);
-	await logger.time(
+	const connectionPromise = logger.time(
 		"prewarmCodex:establishWs",
 		getOrCreateCodexWebSocketConnection,
 		state,
@@ -2053,7 +2077,50 @@ export async function prewarmOpenAICodexResponses(
 		headers,
 		options?.signal,
 	);
-	state.prewarmed = true;
+	const attemptedConnection = state.connection;
+	try {
+		await connectionPromise;
+	} catch (error) {
+		const websocketError = error instanceof Error ? error : new Error(String(error));
+		const superseded =
+			attemptedConnection?.wasClosedLocally() === true ||
+			(attemptedConnection !== undefined && state.connection !== attemptedConnection);
+		// A handshake rejection is a verdict on this session's websocket; a connect
+		// timeout, an abort, or a normal close is not, and a superseded attempt says
+		// nothing about its successor.
+		const fatalPrewarmFailure =
+			isCodexWebSocketFatalError(websocketError) &&
+			!websocketError.message.toLowerCase().includes("connection timeout") &&
+			!/websocket closed before open \((?:1000|1001|1005)\)$/i.test(websocketError.message) &&
+			!superseded &&
+			state.connection === attemptedConnection;
+		if (fatalPrewarmFailure) {
+			recordCodexWebSocketFailure(state, true);
+			if (publicSessionKey) {
+				providerSessionState.disabledWebSocketPublicSessions.add(publicSessionKey);
+				disabledCodexPublicSessionKeys.add(publicSessionKey);
+			}
+		} else if (superseded) {
+			logCodexDebug("ignoring superseded Codex websocket prewarm failure", {
+				error: websocketError.message,
+				publicSessionKey,
+			});
+		}
+		throw error;
+	}
+	if (state.connection === attemptedConnection) {
+		state.prewarmed = true;
+	}
+}
+
+function isCodexPublicSessionWebSocketDisabled(
+	publicSessionKey: string,
+	providerSessionState: CodexProviderSessionState | undefined,
+): boolean {
+	return (
+		disabledCodexPublicSessionKeys.has(publicSessionKey) ||
+		providerSessionState?.disabledWebSocketPublicSessions.has(publicSessionKey) === true
+	);
 }
 
 function getCodexWebSocketSessionKey(
@@ -2319,6 +2386,7 @@ class CodexWebSocketConnection {
 	#waiters: Array<() => void> = [];
 	#connectPromise?: Promise<void>;
 	#activeRequest = false;
+	#localCloseReason?: string;
 
 	constructor(url: string, headers: Record<string, string>, options: CodexWebSocketConnectionOptions) {
 		this.#url = url;
@@ -2336,7 +2404,12 @@ class CodexWebSocketConnection {
 		return this.#headers.authorization === headers.authorization;
 	}
 
+	wasClosedLocally(): boolean {
+		return this.#localCloseReason !== undefined;
+	}
+
 	close(reason = "done"): void {
+		this.#localCloseReason = reason;
 		if (
 			this.#socket &&
 			(this.#socket.readyState === WebSocket.OPEN || this.#socket.readyState === WebSocket.CONNECTING)
