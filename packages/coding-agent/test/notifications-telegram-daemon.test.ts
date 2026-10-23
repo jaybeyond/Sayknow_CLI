@@ -2896,11 +2896,12 @@ describe("telegram daemon", () => {
 			}),
 		);
 	}
-	test("keeps wire protocol 3 while generation 30 adds capability-versioned tool activity", () => {
+	test("keeps wire protocol 3 while generation 31 adds Windows cooperative control stop", () => {
 		expect(NOTIFICATION_PROTOCOL_VERSION).toBe(3);
 		// Generation 29 adds structural serving safeguards; generation 30 adds
-		// capability-versioned tool activity without changing the wire protocol.
-		expect(DAEMON_GENERATION).toBe(30);
+		// capability-versioned tool activity; generation 31 adds the Windows
+		// cooperative control stop, all without changing the wire protocol.
+		expect(DAEMON_GENERATION).toBe(31);
 	});
 	test.each([
 		"1",
@@ -8629,6 +8630,78 @@ describe("telegram daemon", () => {
 		);
 		releasePoll();
 		await runPromise;
+	});
+
+	// Ported from upstream gajae 37e3e84d1d (#6174): a Windows controller cannot
+	// signal the owner, so the owner watches its control request during a long poll.
+	test("control watcher aborts a blocked getUpdates long-poll when a stop is requested", async () => {
+		FakeWs.instances = [];
+		const agentDir = tempAgentDir();
+		const s = setPrivateAgentDir(settings(agentDir), agentDir);
+		await acquireDaemonOwnership({
+			settings: s,
+			tokenFingerprint: tokenFingerprint("tok"),
+			chatId: "42",
+			pid: process.pid,
+			randomId: () => "owner",
+		});
+		await registerNotificationRoot({ settings: s, cwd: path.join(agentDir, "cwd-a"), sessionId: "A" });
+		const endpointDir = path.join(agentDir, "cwd-a", ".skc", "state", "sdk");
+		fs.mkdirSync(endpointDir, { recursive: true });
+		fs.writeFileSync(path.join(endpointDir, "A.json"), JSON.stringify({ url: "ws://a", token: "tok" }));
+
+		const watchTimers = new Map<number, () => void>();
+		let nextWatchTimer = 1;
+		const pollEntered = Promise.withResolvers<void>();
+		let shouldStop = false;
+		let aborted = false;
+		const inner = new FakeBotApi();
+		const daemon = new TelegramNotificationDaemon({
+			settings: s,
+			ownerId: "owner",
+			botToken: "tok",
+			chatId: "42",
+			botApi: {
+				async call(method: string, body: unknown, options?: { signal?: AbortSignal }): Promise<unknown> {
+					if (method !== "getUpdates") return inner.call(method, body);
+					pollEntered.resolve();
+					await new Promise<void>(resolve => {
+						const onAbort = () => {
+							aborted = true;
+							resolve();
+						};
+						if (options?.signal?.aborted) onAbort();
+						else options?.signal?.addEventListener("abort", onAbort, { once: true });
+					});
+					return { ok: true, result: [] };
+				},
+			},
+			WebSocketImpl: FakeWs as any,
+			scanIntervalMs: 5,
+			idleTimeoutMs: 60_000,
+			createLifecycleControlServer: null,
+			control: { shouldStop: async () => shouldStop },
+			setTimeoutImpl: ((callback: () => void, ms = 0) => {
+				if (ms !== 750) return setTimeout(callback, ms);
+				const id = nextWatchTimer++;
+				watchTimers.set(id, callback);
+				return id as unknown as NodeJS.Timeout;
+			}) as typeof setTimeout,
+			clearTimeoutImpl: ((timer: NodeJS.Timeout) => {
+				if (!watchTimers.delete(timer as unknown as number)) clearTimeout(timer);
+			}) as typeof clearTimeout,
+		});
+
+		const runPromise = daemon.run();
+		await pollEntered.promise;
+		shouldStop = true;
+		const [watchId, watch] = [...watchTimers.entries()][0] ?? [];
+		expect(watch).toBeDefined();
+		if (watchId !== undefined) watchTimers.delete(watchId);
+		watch?.();
+		await runPromise;
+		expect(aborted).toBe(true);
+		expect(watchTimers.size).toBe(0);
 	});
 
 	test("pollOnce survives a transient getUpdates failure instead of crashing", async () => {

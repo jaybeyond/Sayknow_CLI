@@ -245,6 +245,9 @@ const BOT_API_RETRY_ATTEMPTS = 3;
 // Backoff after a failed getUpdates long-poll so a persistent outage does not
 // busy-loop the daemon.
 const POLL_BACKOFF_MS = 1_000;
+// A Windows controller cannot signal the owner, so the owner also polls its
+// control request while a long poll is in flight instead of only between loops.
+const CONTROL_STOP_WATCH_INTERVAL_MS = 750;
 const AUTOMATIC_RELOAD_COOLDOWN_MS = 10 * 60 * 1_000;
 // Default freshness-poll window a cooldown contender waits for a sibling's
 // replacement daemon to publish a fresh ready owner before reloading itself.
@@ -4135,6 +4138,7 @@ export class TelegramNotificationDaemon {
 	private running = false;
 	/** Once set, a concurrent startup await can never restore a running daemon. */
 	private stopRequested = false;
+	#controlStopCheck: Promise<boolean> | undefined;
 
 	private readonly fsImpl: TelegramDaemonFs;
 	private readonly botApi: BotApi;
@@ -9558,6 +9562,9 @@ export class TelegramNotificationDaemon {
 		// token, there is no authenticated daemon identity or lifecycle authority.
 		if (!validBotToken(this.opts.botToken)) return;
 		let ownershipProved = false;
+		let controlWatchTimer: Timer | NodeJS.Timeout | undefined;
+		let controlWatchActive = true;
+		const clearTimeoutImpl = this.opts.clearTimeoutImpl ?? clearTimeout;
 		try {
 			const renewed = await renewDaemonHeartbeat({
 				settings: this.opts.settings,
@@ -9605,6 +9612,19 @@ export class TelegramNotificationDaemon {
 			await this.replyStore.load();
 			await this.runScan();
 			let idleSince = this.runtime.now();
+			const setTimeoutImpl = this.opts.setTimeoutImpl ?? setTimeout;
+			const watchControl = () => {
+				if (!controlWatchActive || !this.running || !this.opts.control) return;
+				controlWatchTimer = setTimeoutImpl(() => {
+					controlWatchTimer = undefined;
+					void this.controlStopRequested()
+						.catch(() => false)
+						.finally(() => {
+							if (controlWatchActive && this.running) watchControl();
+						});
+				}, CONTROL_STOP_WATCH_INTERVAL_MS);
+			};
+			if (this.opts.control) watchControl();
 			while (this.running) {
 				if (await this.controlStopRequested()) break;
 				if (
@@ -9653,6 +9673,8 @@ export class TelegramNotificationDaemon {
 				await this.runtime.sleep(10);
 			}
 		} finally {
+			controlWatchActive = false;
+			if (controlWatchTimer !== undefined) clearTimeoutImpl(controlWatchTimer);
 			this.running = false;
 			this.runtime.stop();
 			this.stopOwnershipHeartbeatTimer();
@@ -9722,8 +9744,26 @@ export class TelegramNotificationDaemon {
 	private async controlStopRequested(): Promise<boolean> {
 		if (this.runtime.stopRequested) return true;
 		if (!this.opts.control) return false;
+		// The loop and the in-flight watch share one file read at a time.
+		if (this.#controlStopCheck) return this.#controlStopCheck;
+		const check = this.checkControlStopRequested();
+		this.#controlStopCheck = check;
 		try {
-			return await this.opts.control.shouldStop(this.opts.ownerId);
+			return await check;
+		} finally {
+			if (this.#controlStopCheck === check) this.#controlStopCheck = undefined;
+		}
+	}
+
+	private async checkControlStopRequested(): Promise<boolean> {
+		try {
+			const control = this.opts.control;
+			if (!control) return false;
+			const requested = await control.shouldStop(this.opts.ownerId);
+			if (!requested) return false;
+			// Abort the in-flight long poll so the run loop sees the stop now.
+			this.requestStop("stop");
+			return true;
 		} catch {
 			return false;
 		}
