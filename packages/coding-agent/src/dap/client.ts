@@ -344,6 +344,8 @@ export class DapClient {
 			throw signal.reason instanceof Error ? signal.reason : new ToolAbortError();
 		}
 		const { promise, resolve, reject } = Promise.withResolvers<TBody>();
+		// A transport close can reject this before the caller awaits it; the caller still observes the rejection.
+		void promise.catch(() => {});
 		let timeout: NodeJS.Timeout | undefined;
 		const cleanup = () => {
 			unsubscribe();
@@ -395,6 +397,10 @@ export class DapClient {
 			arguments: args,
 		};
 		const { promise, resolve, reject } = Promise.withResolvers<TBody>();
+		// The readable side can close (rejecting every pending request) while the write below is still awaited,
+		// before this promise is returned to a caller. Mark it handled so that rejection is not reported as
+		// unhandled; the caller still observes it when it awaits the returned promise.
+		void promise.catch(() => {});
 		let timeout: NodeJS.Timeout | undefined;
 		const cleanup = () => {
 			if (timeout) clearTimeout(timeout);

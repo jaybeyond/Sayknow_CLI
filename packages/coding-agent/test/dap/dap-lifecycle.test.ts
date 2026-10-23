@@ -223,6 +223,57 @@ describe("DAP lifecycle behavior", () => {
 		expect(awaitExit).toHaveBeenCalledTimes(1);
 	});
 
+	it("does not leak an unhandled rejection when the readable closes while a request write is pending", async () => {
+		const writeGate = Promise.withResolvers<number>();
+		const sink = {
+			write: vi.fn(() => writeGate.promise),
+			flush: vi.fn(() => undefined),
+		};
+		const owner = {
+			child: {
+				stdin: sink,
+				stdout: new ReadableStream<Uint8Array>(),
+				stderr: new ReadableStream<Uint8Array>(),
+				exited: Promise.resolve(0),
+				exitCode: null,
+				killed: false,
+				kill: () => true,
+			},
+			dispose: vi.fn(async () => {}),
+			awaitExit: vi.fn(async () => ({ exited: true, code: 0 })),
+		} as unknown as OwnedProcess;
+		let readableController: ReadableStreamDefaultController<Uint8Array> | undefined;
+		const readable = new ReadableStream<Uint8Array>({
+			start(controller) {
+				readableController = controller;
+			},
+		});
+		const unhandled: unknown[] = [];
+		const onUnhandled = (reason: unknown) => {
+			unhandled.push(reason);
+		};
+		process.on("unhandledRejection", onUnhandled);
+		try {
+			const client = new DapClient(STDIO_ADAPTER, "/tmp", owner, { readable, writeSink: sink });
+			const readerLoop = client.startMessageReader();
+			// The adapter exits right after spawn: its stdout closes while the initialize write is still in flight.
+			const pending = captureError(client.sendRequest("initialize", {}, undefined, 5_000));
+			await Bun.sleep(0);
+			expect(sink.write).toHaveBeenCalledTimes(1);
+			readableController?.close();
+			await readerLoop;
+			writeGate.reject(Object.assign(new Error("write EPIPE"), { code: "EPIPE" }));
+
+			const error = await pending;
+			expect(error.message).toBe("DAP adapter fake-stdio transport closed");
+			await Bun.sleep(10);
+			expect(unhandled).toEqual([]);
+			await client.dispose();
+		} finally {
+			process.off("unhandledRejection", onUnhandled);
+		}
+	});
+
 	it.skipIf(process.platform !== "linux")("socket-mode Unix startup failure unlinks the temporary .sock", async () => {
 		const cwd = await tempDir("skc-dap-unix-socket-timeout-");
 		try {
