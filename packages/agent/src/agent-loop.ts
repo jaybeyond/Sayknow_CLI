@@ -1950,7 +1950,7 @@ function buildAgentEndEvent(
 	messages: AgentMessage[],
 	telemetry: AgentTelemetry | undefined,
 	stepCount: number,
-	stopReason: "completed" | "paused" = "completed",
+	stopReason: "completed" | "paused" | "cancelled" = "completed",
 ): Extract<AgentEvent, { type: "agent_end" }> {
 	const base = { type: "agent_end" as const, messages, stopReason };
 	if (!telemetry) return base;
@@ -2389,6 +2389,22 @@ async function runLoopBody(
 	// the loop could run forever. Any turn that produces a non-malformed batch
 	// resets the counter, so healthy runs are unaffected.
 	let consecutiveMalformedTurns = 0;
+	// A subscriber may abort reentrantly from the final assistant message_end;
+	// do not relabel that already-accepted answer as cancelled.
+	let lastAttemptAcceptedFinalAssistantMessage = false;
+	const commitMessages = (messages: AgentMessage[]): void => {
+		for (const message of messages) {
+			stream.push({ type: "message_start", message });
+			stream.push({ type: "message_end", message });
+			currentContext.messages.push(message);
+			newMessages.push(message);
+		}
+	};
+	// Observed cancellation takes precedence over pause and normal completion.
+	const finishCancelled = (): void => {
+		stream.push(buildAgentEndEvent(newMessages, telemetry, stepCounter.count, "cancelled"));
+		stream.end(newMessages);
+	};
 
 	// Outer loop: continues when queued follow-up messages arrive after agent would stop
 	while (true) {
@@ -2396,6 +2412,7 @@ async function runLoopBody(
 
 		// Inner loop: process tool calls and steering messages
 		while (hasMoreToolCalls || pendingMessages.length > 0) {
+			lastAttemptAcceptedFinalAssistantMessage = false;
 			const transaction =
 				initialTransaction ??
 				(config.fallbackManaged
@@ -2412,12 +2429,7 @@ async function runLoopBody(
 			// Commit queued user input outside the provisional assistant transaction so a
 			// discarded managed attempt cannot lose it before its retry continuation.
 			if (pendingMessages.length > 0) {
-				for (const message of pendingMessages) {
-					stream.push({ type: "message_start", message });
-					stream.push({ type: "message_end", message });
-					currentContext.messages.push(message);
-					newMessages.push(message);
-				}
+				commitMessages(pendingMessages);
 				pendingMessages = [];
 			}
 
@@ -2747,7 +2759,14 @@ async function runLoopBody(
 						evidence: recovery.evidence,
 					});
 				} else {
-					stream.push(buildAgentEndEvent(newMessages, telemetry, stepCounter.count));
+					stream.push(
+						buildAgentEndEvent(
+							newMessages,
+							telemetry,
+							stepCounter.count,
+							message.stopReason === "aborted" ? "cancelled" : "completed",
+						),
+					);
 				}
 				stream.end(newMessages);
 				return;
@@ -2756,6 +2775,7 @@ async function runLoopBody(
 			// Check for tool calls
 			const toolCalls = message.content.filter(c => c.type === "toolCall");
 			hasMoreToolCalls = toolCalls.length > 0;
+			lastAttemptAcceptedFinalAssistantMessage = !hasMoreToolCalls;
 
 			// Reusing an already-seen call identity cannot establish a new operation.
 			// Stop the whole batch before any tool starts, including unresolved calls
@@ -2868,6 +2888,10 @@ async function runLoopBody(
 			}
 			pendingMessages = (await config.getSteeringMessages?.()) || [];
 			if (pendingMessages.length > 0) continue;
+			// An aborted run must not open another turn: the provider rejects it before
+			// the first token and the attempt only appends an aborted assistant message.
+			// The stop boundary below reports the cancellation instead.
+			if (loopSignal.aborted) break;
 			if (config.shouldPause?.()) {
 				stream.push(buildAgentEndEvent(newMessages, telemetry, stepCounter.count, "paused"));
 				stream.end(newMessages);
@@ -2897,13 +2921,30 @@ async function runLoopBody(
 		}
 
 		// Agent would stop here. Check for follow-up messages.
+		if (loopSignal.aborted) {
+			if (lastAttemptAcceptedFinalAssistantMessage) break;
+			finishCancelled();
+			return;
+		}
 		await config.onBeforeYield?.();
+		if (loopSignal.aborted) {
+			if (lastAttemptAcceptedFinalAssistantMessage) break;
+			finishCancelled();
+			return;
+		}
 		if (config.shouldPause?.()) {
 			stream.push(buildAgentEndEvent(newMessages, telemetry, stepCounter.count, "paused"));
 			stream.end(newMessages);
 			return;
 		}
 		const followUpMessages = (await config.getFollowUpMessages?.()) || [];
+		if (loopSignal.aborted) {
+			// A follow-up dequeued before the abort landed is committed, not lost.
+			commitMessages(followUpMessages);
+			if (lastAttemptAcceptedFinalAssistantMessage && followUpMessages.length === 0) break;
+			finishCancelled();
+			return;
+		}
 		if (followUpMessages.length > 0) {
 			// Set as pending so inner loop processes them
 			pendingMessages = followUpMessages;

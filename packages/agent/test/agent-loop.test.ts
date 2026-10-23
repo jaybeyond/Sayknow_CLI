@@ -90,7 +90,175 @@ describe("agentLoop with AgentMessage", () => {
 		if (finalMessage.role !== "assistant") throw new Error("Expected assistant message");
 		expect(finalMessage.stopReason).toBe("aborted");
 		expect(finalMessage.errorMessage).toBe("Request was aborted");
-		expect(events.map(event => event.type)).toContain("agent_end");
+		const agentEnd = events.find(
+			(event): event is Extract<AgentEvent, { type: "agent_end" }> => event.type === "agent_end",
+		);
+		expect(agentEnd?.stopReason).toBe("cancelled");
+	});
+
+	// Ported from upstream gajae adecf8ceb3 (#6693) + 81b257ddb5 (#6715).
+	it("reports cancellation when abort interrupts a pending tool", async () => {
+		for (const concurrency of ["shared", "exclusive"] as const) {
+			for (const pauseOnAbort of [false, true]) {
+				const abortController = new AbortController();
+				const toolEntered = Promise.withResolvers<void>();
+				const releaseTool = Promise.withResolvers<void>();
+				const toolFinished = Promise.withResolvers<void>();
+				let toolCompleted = false;
+				const toolSchema = z.object({ value: z.string() });
+				const tool: AgentTool<typeof toolSchema, { value: string }> = {
+					name: "wait",
+					label: "Wait",
+					description: "Waits for the test to release it",
+					parameters: toolSchema,
+					concurrency,
+					async execute(_toolCallId, params, signal) {
+						toolEntered.resolve();
+						try {
+							await Promise.race([
+								releaseTool.promise,
+								new Promise<never>((_, reject) => {
+									signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+								}),
+							]);
+							toolCompleted = true;
+							return { content: [{ type: "text", text: params.value }], details: { value: params.value } };
+						} finally {
+							toolFinished.resolve();
+						}
+					},
+				};
+				const context: AgentContext = { systemPrompt: [""], messages: [], tools: [tool] };
+				const mock = createMockModel({
+					responses: [
+						{ content: [{ type: "toolCall", id: "tool-1", name: "wait", arguments: { value: "done" } }] },
+						{ content: ["must not run after cancellation"] },
+					],
+				});
+				let modelCalls = 0;
+				const events: AgentEvent[] = [];
+				const stream = agentLoop(
+					[createUserMessage("wait")],
+					context,
+					{
+						model: mock.model,
+						convertToLlm: identityConverter,
+						shouldPause: () => pauseOnAbort,
+					},
+					abortController.signal,
+					(model, streamContext, options) => {
+						modelCalls++;
+						return mock.stream(model, streamContext, options);
+					},
+				);
+				const completion = (async () => {
+					for await (const event of stream) events.push(event);
+					return stream.result();
+				})();
+
+				try {
+					await toolEntered.promise;
+					abortController.abort();
+					await completion;
+
+					const agentEnds = events.filter(
+						(event): event is Extract<AgentEvent, { type: "agent_end" }> => event.type === "agent_end",
+					);
+					expect(toolCompleted, `${concurrency}, pause=${pauseOnAbort}`).toBe(false);
+					expect(agentEnds, `${concurrency}, pause=${pauseOnAbort}`).toHaveLength(1);
+					expect(agentEnds[0]?.stopReason, `${concurrency}, pause=${pauseOnAbort}`).toBe("cancelled");
+					expect(modelCalls, `${concurrency}, pause=${pauseOnAbort}`).toBe(1);
+				} finally {
+					releaseTool.resolve();
+					await toolFinished.promise;
+				}
+
+				await Bun.sleep(0);
+				expect(events.filter(event => event.type === "agent_end")).toHaveLength(1);
+				expect(modelCalls).toBe(1);
+			}
+		}
+	});
+
+	it("commits a follow-up dequeued before cancellation instead of losing it", async () => {
+		const abortController = new AbortController();
+		const followUpConsumptionStarted = Promise.withResolvers<void>();
+		const releaseFollowUpConsumption = Promise.withResolvers<void>();
+		const followUp = createUserMessage("queued follow-up");
+		let followUpDequeued = false;
+		let modelCalls = 0;
+		const events: AgentEvent[] = [];
+		const mock = createMockModel({
+			responses: [{ content: ["initial answer"] }, { content: ["must not answer after cancellation"] }],
+		});
+		const stream = agentLoop(
+			[createUserMessage("start")],
+			{ systemPrompt: [""], messages: [], tools: [] },
+			{
+				model: mock.model,
+				convertToLlm: identityConverter,
+				getFollowUpMessages: async () => {
+					if (followUpDequeued) return [];
+					followUpDequeued = true;
+					followUpConsumptionStarted.resolve();
+					await releaseFollowUpConsumption.promise;
+					return [followUp];
+				},
+			},
+			abortController.signal,
+			(model, context, options) => {
+				modelCalls++;
+				return mock.stream(model, context, options);
+			},
+		);
+		const completion = (async () => {
+			for await (const event of stream) events.push(event);
+			return stream.result();
+		})();
+
+		try {
+			await followUpConsumptionStarted.promise;
+			abortController.abort();
+			releaseFollowUpConsumption.resolve();
+			const messages = await completion;
+
+			expect(messages.some(message => message.role === "user" && message.content === "queued follow-up")).toBe(true);
+			const agentEnds = events.filter(
+				(event): event is Extract<AgentEvent, { type: "agent_end" }> => event.type === "agent_end",
+			);
+			expect(agentEnds).toHaveLength(1);
+			expect(agentEnds[0]?.stopReason).toBe("cancelled");
+			expect(modelCalls).toBe(1);
+		} finally {
+			releaseFollowUpConsumption.resolve();
+		}
+	});
+
+	it("keeps an accepted final answer completed when a subscriber aborts on its message_end", async () => {
+		const abortController = new AbortController();
+		const mock = createMockModel({ responses: [{ content: ["final answer"] }, { content: ["must not run"] }] });
+		const events: AgentEvent[] = [];
+		let modelCalls = 0;
+		const stream = agentLoop(
+			[createUserMessage("start")],
+			{ systemPrompt: [""], messages: [], tools: [] },
+			{ model: mock.model, convertToLlm: identityConverter, getFollowUpMessages: async () => [] },
+			abortController.signal,
+			(model, context, options) => {
+				modelCalls++;
+				return mock.stream(model, context, options);
+			},
+		);
+		for await (const event of stream) {
+			events.push(event);
+			if (event.type === "message_end" && event.message.role === "assistant") abortController.abort();
+		}
+		const agentEnds = events.filter(
+			(event): event is Extract<AgentEvent, { type: "agent_end" }> => event.type === "agent_end",
+		);
+		expect(modelCalls).toBe(1);
+		expect(agentEnds).toHaveLength(1);
+		expect(agentEnds[0]?.stopReason).toBe("completed");
 	});
 
 	it("should handle custom message types via convertToLlm", async () => {
