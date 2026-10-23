@@ -607,12 +607,13 @@ async function handleSpecialUrls(
 	timeout: number,
 	signal: AbortSignal | undefined,
 	storage: AgentStorage | null,
+	settings: Settings,
 ): Promise<FetchRenderResult | null> {
 	for (const handler of specialHandlers) {
 		if (signal?.aborted) {
 			throw new ToolAbortError();
 		}
-		const result = await handler(url, timeout, signal, storage);
+		const result = await handler(url, timeout, signal, storage, settings);
 		if (result) return result;
 	}
 	return null;
@@ -691,7 +692,7 @@ async function renderUrl(
 
 	// Step 1: Try special handlers for known sites (unless raw mode)
 	if (!raw) {
-		const specialResult = await handleSpecialUrls(url, timeout, signal, storage);
+		const specialResult = await handleSpecialUrls(url, timeout, signal, storage, settings);
 		if (specialResult) return specialResult;
 	}
 
