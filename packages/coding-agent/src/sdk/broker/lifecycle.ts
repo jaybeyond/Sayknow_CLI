@@ -3557,25 +3557,27 @@ export async function executeLifecycle(
 				)
 			: undefined;
 	const cleanupProof = await exactCleanupProof(broker, root, entry?.intendedSessionId, expected, evidence);
-	const startupFailure: LifecycleStartupFailureReceipt | undefined = evidence
-		? {
-				artifactDigest: evidence.digest,
-				phase: evidence.artifact.phase,
-				reason: evidence.artifact.reason,
-				message: evidence.artifact.message,
-				...(evidence.artifact.code === undefined
-					? {}
-					: { code: evidence.artifact.code, details: evidence.artifact.details }),
-				rollback: {
-					endpointGeneration: evidence.artifact.rollback.endpointGeneration,
-					fenced: evidence.artifact.rollback.fenced,
-					runtimeRemoved: evidence.artifact.rollback.runtimeRemoved,
-					hostStopped: evidence.artifact.rollback.hostStopped,
-					brokerRegistrationReleased: evidence.artifact.rollback.brokerRegistrationReleased,
-				},
-				...(cleanupProof ? { cleanupProof } : {}),
-			}
-		: undefined;
+	// A successful response carries no startup failure, even when cleanup evidence exists.
+	const startupFailure: LifecycleStartupFailureReceipt | undefined =
+		evidence && !response.ok
+			? {
+					artifactDigest: evidence.digest,
+					phase: evidence.artifact.phase,
+					reason: evidence.artifact.reason,
+					message: evidence.artifact.message,
+					...(evidence.artifact.code === undefined
+						? {}
+						: { code: evidence.artifact.code, details: evidence.artifact.details }),
+					rollback: {
+						endpointGeneration: evidence.artifact.rollback.endpointGeneration,
+						fenced: evidence.artifact.rollback.fenced,
+						runtimeRemoved: evidence.artifact.rollback.runtimeRemoved,
+						hostStopped: evidence.artifact.rollback.hostStopped,
+						brokerRegistrationReleased: evidence.artifact.rollback.brokerRegistrationReleased,
+					},
+					...(cleanupProof ? { cleanupProof } : {}),
+				}
+			: undefined;
 	const durableEffectsBody: Omit<LifecycleDurableEffectsReceipt, "digest"> = {
 		...(priorDurableEffects?.worktree ? { worktree: priorDurableEffects.worktree } : {}),
 		...(evidence?.artifact.transcript
