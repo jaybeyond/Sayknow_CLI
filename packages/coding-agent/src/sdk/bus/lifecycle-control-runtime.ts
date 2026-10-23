@@ -19,6 +19,7 @@ import {
 	MANAGED_OWNER_PREDECESSOR_RUN_ID_ENV,
 	MANAGED_OWNER_PREDECESSOR_TOKEN_ENV,
 	MANAGED_OWNER_TRANSCRIPT_PATH_ENV,
+	trustedManagedOwnerLaunchSessionFile,
 } from "../../skc-runtime/managed-owner-admission";
 import {
 	MANAGED_OWNER_INCARNATION_ENV,
@@ -924,7 +925,10 @@ export function daemonSpawnCreate(
 							[MANAGED_OWNER_PREDECESSOR_GENERATION_ENV]: predecessor.generation,
 							[MANAGED_OWNER_PREDECESSOR_RUN_ID_ENV]: predecessor.runId,
 							[MANAGED_OWNER_PREDECESSOR_INCARNATION_ENV]: predecessor.incarnation,
-							[MANAGED_OWNER_TRANSCRIPT_PATH_ENV]: env.SKC_SESSION_FILE ?? "",
+							[MANAGED_OWNER_TRANSCRIPT_PATH_ENV]: trustedManagedOwnerLaunchSessionFile(
+								{ SKC_SESSION_FILE: env.SKC_SESSION_FILE },
+								cwd,
+							),
 						}
 					: {}),
 			};
@@ -1168,7 +1172,10 @@ export function daemonResumeSession(
 							[MANAGED_OWNER_PREDECESSOR_GENERATION_ENV]: predecessor.generation,
 							[MANAGED_OWNER_PREDECESSOR_RUN_ID_ENV]: predecessor.runId,
 							[MANAGED_OWNER_PREDECESSOR_INCARNATION_ENV]: predecessor.incarnation,
-							[MANAGED_OWNER_TRANSCRIPT_PATH_ENV]: env.SKC_SESSION_FILE ?? "",
+							[MANAGED_OWNER_TRANSCRIPT_PATH_ENV]: trustedManagedOwnerLaunchSessionFile(
+								{ SKC_SESSION_FILE: env.SKC_SESSION_FILE },
+								resolvedResumeCwd,
+							),
 						}
 					: {}),
 			};
