@@ -2480,8 +2480,8 @@ function sdkControlSurface(
 				return unavailable("model.cycle", "no session model-cycle seam is installed")();
 			return { changed: (await ctx.cycleModel()) !== undefined };
 		},
-		setThinking: level => {
-			api.setThinkingLevel(level as ThinkingLevel);
+		setThinking: async level => {
+			await api.setThinkingLevelForControl(level as ThinkingLevel, false);
 			return { changed: true };
 		},
 		cycleThinking: () => {
