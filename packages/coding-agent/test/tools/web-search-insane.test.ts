@@ -451,6 +451,10 @@ describe("Insane public-route provider", () => {
 			if (!result || !("attempts" in result) || "sources" in result) throw new Error("expected a refused route");
 			expect(result.attempts.every(item => item.note === "public_url_rejected")).toBe(true);
 		} finally {
+			// Bun keeps a proxy it already read when the key is only deleted; blank
+			// it first so later test files in the same process dial directly.
+			process.env.HTTPS_PROXY = "";
+			process.env.NO_PROXY = "";
 			if (previousProxy === undefined) delete process.env.HTTPS_PROXY;
 			else process.env.HTTPS_PROXY = previousProxy;
 			if (previousNoProxy === undefined) delete process.env.NO_PROXY;

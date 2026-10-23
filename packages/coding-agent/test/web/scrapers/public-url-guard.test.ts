@@ -77,6 +77,9 @@ describe("loadPage public URL guard", () => {
 			});
 			expect(await guardedPublicFetch("https://public.example", {}, { resolver })).toMatchObject({ ok: false });
 		} finally {
+			// Bun keeps a proxy it already read when the key is only deleted; blank
+			// it first so later test files in the same process dial directly.
+			process.env.http_proxy = "";
 			if (previousLateProxy === undefined) delete process.env.http_proxy;
 			else process.env.http_proxy = previousLateProxy;
 		}
