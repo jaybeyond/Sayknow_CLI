@@ -11,13 +11,16 @@ import githubDescription from "../prompts/tools/github.md" with { type: "text" }
 import { assertWorkflowMutationAllowed } from "../skill-state/workflow-mutation-guard";
 import * as git from "../utils/git";
 import type { ToolSession } from ".";
-import { publishExplicitArtifactText, wrapUntrustedContent } from "./fetch";
+import { publishExplicitArtifactText } from "./explicit-artifact";
 import { formatShortSha } from "./gh-format";
 import { type CacheStatus, getOrFetchView, resolveGithubCacheAuthKey } from "./github-cache";
 import { githubMutationTool, isGithubReadOnlyOp } from "./github-side-effect";
 import type { OutputMeta } from "./output-meta";
 import { ToolError, throwIfAborted } from "./tool-errors";
 import { toolResult } from "./tool-result";
+// Not "./fetch": gh is reachable from config/settings (internal-urls ->
+// issue-pr-protocol), and fetch would pull the web scrapers into that cycle.
+import { wrapUntrustedContent } from "./untrusted-content";
 
 const GH_REPO_FIELDS = [
 	"nameWithOwner",
