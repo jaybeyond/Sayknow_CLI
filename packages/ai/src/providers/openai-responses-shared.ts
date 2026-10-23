@@ -756,6 +756,12 @@ export async function processResponsesStream<TApi extends Api>(
 			populateResponsesUsageFromResponse(output, response?.usage);
 			calculateCost(model, output.usage);
 			output.stopReason = mapOpenAIResponsesStopReason(response?.status);
+			if (output.stopReason === "length" && response?.incomplete_details?.reason === "content_filter") {
+				// Diagnostic only: retain truncation guards and never grant safety-stop
+				// authority or change fallback policy based on a wire-provided reason.
+				output.errorMessage =
+					"Provider reported content_filter: the response was stopped by content filtering, not an output-token limit.";
+			}
 			if (response?.status === "failed" || response?.status === "cancelled") {
 				const error = response?.error ?? (response as any)?.status_details?.error;
 				const details = response?.incomplete_details;

@@ -58,6 +58,56 @@ function toolBlocks(output: AssistantMessage): ToolCall[] {
 }
 
 describe("Responses provider: truncated tool-call detection", () => {
+	// Ported from upstream gajae 592a237840 (#6413). The fork maps only
+	// response.completed status "incomplete" to a length stop.
+	test("preserves the content-filter diagnostic and tool guard for an incomplete response", async () => {
+		const output = makeOutput();
+		const { stream } = makeCapture();
+		await processResponsesStream(
+			makeStream([
+				{
+					type: "response.output_item.added",
+					output_index: 0,
+					item: {
+						type: "function_call",
+						id: "fc_filter",
+						call_id: "call_filter",
+						name: "write_file",
+						arguments: "",
+					},
+				},
+				{
+					type: "response.function_call_arguments.delta",
+					item_id: "fc_filter",
+					output_index: 0,
+					delta: '{"path":"unfinished',
+				},
+				{
+					type: "response.completed",
+					response: {
+						id: "resp_filter",
+						status: "incomplete",
+						incomplete_details: {
+							reason: "content_filter",
+							message: "untrusted provider text",
+							retryable: false,
+						},
+					},
+				},
+			]),
+			output,
+			stream,
+			makeModel(),
+		);
+
+		expect(output.stopReason).toBe("length");
+		expect(output.errorMessage).toBe(
+			"Provider reported content_filter: the response was stopped by content filtering, not an output-token limit.",
+		);
+		expect(output.errorKind).toBeUndefined();
+		expect(toolBlocks(output)[0].incompleteArguments).toBe(true);
+	});
+
 	test("flags a tool call whose arguments were cut off (status incomplete)", async () => {
 		const events = [
 			{
@@ -82,6 +132,7 @@ describe("Responses provider: truncated tool-call detection", () => {
 		await processResponsesStream(makeStream(events), output, stream, makeModel());
 
 		expect(output.stopReason).toBe("length");
+		expect(output.errorMessage).toBeUndefined();
 		const tools = toolBlocks(output);
 		expect(tools).toHaveLength(1);
 		expect(tools[0].name).toBe("write_file");
