@@ -619,7 +619,14 @@ export class RuntimeOwner {
 			kind: string,
 			evidence: Record<string, unknown>,
 		): Promise<void> => {
-			if (kind === "operate_blocked" || kind === "operate_finalized") {
+			if (kind === "operate_observation_window_ended") {
+				// The observation budget ended, not the work: persist the resumable state.
+				const windowState = await this.#loadState();
+				windowState.lifecycle = evidence.lifecycle === "submitted" ? "submitted" : "observing";
+				windowState.blockers = [];
+				windowState.updatedAt = new Date(this.#opts.clock ? this.#opts.clock() : Date.now()).toISOString();
+				await writeSessionState(this.#opts.root, windowState);
+			} else if (kind === "operate_blocked" || kind === "operate_finalized") {
 				const terminalState = await this.#loadState();
 				terminalState.lifecycle =
 					kind === "operate_finalized" && evidence.completed === true ? "completed" : "blocked";
