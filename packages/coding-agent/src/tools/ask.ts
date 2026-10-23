@@ -16,6 +16,8 @@
  */
 
 import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@sayknow-cli/agent-core";
+import type { RawArgumentValidationResult } from "@sayknow-cli/ai/types";
+import { validateToolArguments } from "@sayknow-cli/ai/utils/validation";
 import {
 	type Component,
 	Container,
@@ -171,10 +173,16 @@ const WorkflowGateMeta = z.object({
 	kind: z.enum(["question", "approval", "execution"]).describe("workflow gate kind"),
 });
 
+const QuestionText = z
+	.string()
+	.min(1)
+	.refine(value => value.trim().length > 0, "ask question body must contain non-whitespace text")
+	.describe("non-empty question text");
+
 function createQuestionItemSchema(deepInterviewSchema: z.ZodType<DeepInterviewMeta>) {
 	return z.object({
 		id: z.string().describe("question id"),
-		question: z.string().describe("question text"),
+		question: QuestionText,
 		options: z.array(OptionItem).describe("available options"),
 		multi: z.boolean().describe("allow multiple selections").optional(),
 		recommended: z.number().describe("recommended option index").optional(),
@@ -184,10 +192,21 @@ function createQuestionItemSchema(deepInterviewSchema: z.ZodType<DeepInterviewMe
 }
 
 const QuestionItem = createQuestionItemSchema(DeepInterviewMeta);
-/** Round 0 of an active deep interview: only the topology confirmation may carry intent authority. */
-const TopologyQuestionItem = createQuestionItemSchema(DeepInterviewTopologyMeta);
+/**
+ * Round 0 of an active deep interview: only the topology confirmation may carry intent authority.
+ * The metadata is required: question prose and `workflowGate` cannot record an interview answer.
+ */
+const TopologyQuestionItem = createQuestionItemSchema(DeepInterviewTopologyMeta).extend({
+	deepInterview: DeepInterviewTopologyMeta.describe("required Round 0 topology and locked-intent metadata"),
+});
 /** After Round 0 locked a manifest: ordinary rounds and reduction reviews, never a new contract. */
-const PostTopologyQuestionItem = createQuestionItemSchema(z.union([DeepInterviewRoundMeta, DeepInterviewReviewMeta]));
+const PostTopologyQuestionItem = createQuestionItemSchema(
+	z.union([DeepInterviewRoundMeta, DeepInterviewReviewMeta]),
+).extend({
+	deepInterview: z
+		.union([DeepInterviewRoundMeta, DeepInterviewReviewMeta])
+		.describe("required positive-round interview metadata"),
+});
 
 /**
  * Outside an active deep interview no deep-interview authority exists, so the
@@ -195,7 +214,7 @@ const PostTopologyQuestionItem = createQuestionItemSchema(z.union([DeepInterview
  */
 const OrdinaryQuestionItem = z.object({
 	id: z.string().describe("question id"),
-	question: z.string().describe("question text"),
+	question: QuestionText,
 	options: z.array(OptionItem).describe("available options"),
 	multi: z.boolean().describe("allow multiple selections").optional(),
 	recommended: z.number().describe("recommended option index").optional(),
@@ -207,12 +226,57 @@ export const askSchema = z.object({
 });
 
 const topologyAskSchema = z.object({
-	questions: z.array(TopologyQuestionItem).min(1).describe("questions to ask"),
+	questions: z.array(TopologyQuestionItem).length(1).describe("exactly one Round 0 topology question"),
 });
 
 const postTopologyAskSchema = z.object({
-	questions: z.array(PostTopologyQuestionItem).min(1).describe("questions to ask"),
+	questions: z.array(PostTopologyQuestionItem).length(1).describe("exactly one positive-round interview question"),
 });
+
+type DeepInterviewAskStage = "topology" | "post-topology" | undefined;
+
+/** Tool-call arguments may carry containers as JSON text before coercion. */
+function decodeEncodedContainer(value: unknown): unknown {
+	if (typeof value !== "string") return value;
+	const trimmed = value.trim();
+	if (!trimmed.startsWith("{") && !trimmed.startsWith("[")) return value;
+	try {
+		return JSON.parse(trimmed);
+	} catch {
+		return value;
+	}
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Integrity rejections with actionable corrections, checked on the raw
+ * arguments before any coercion: blank question bodies (including empty extra
+ * "metadata"/"ignore" questions), and active-interview asks that carry more
+ * than one question or no structured `deepInterview` metadata.
+ */
+function askIntegrityRejection(
+	arguments_: Record<string, unknown>,
+	stage: DeepInterviewAskStage,
+): RawArgumentValidationResult | undefined {
+	const root = decodeEncodedContainer(arguments_);
+	if (!isPlainRecord(root)) return undefined;
+	const questions = decodeEncodedContainer(root.questions);
+	if (!Array.isArray(questions)) return undefined;
+	for (const rawQuestion of questions) {
+		const question = decodeEncodedContainer(rawQuestion);
+		if (isPlainRecord(question) && typeof question.question === "string" && question.question.trim().length === 0)
+			return { outcome: "reject", code: "ask-question-body-required" };
+	}
+	if (stage === undefined) return undefined;
+	if (questions.length !== 1) return { outcome: "reject", code: "ask-deep-interview-single-question-required" };
+	const question = decodeEncodedContainer(questions[0]);
+	if (isPlainRecord(question) && decodeEncodedContainer(question.deepInterview) == null)
+		return { outcome: "reject", code: "ask-deep-interview-metadata-required" };
+	return undefined;
+}
 
 const ordinaryAskSchema = z.object({
 	questions: z.array(OrdinaryQuestionItem).min(1).describe("questions to ask"),
@@ -677,6 +741,8 @@ export class AskTool implements AgentTool<AskParametersSchema, AskToolDetails> {
 		if (stage === "post-topology") return postTopologyAskSchema;
 		return ordinaryAskSchema;
 	}
+	readonly rawArgumentValidation = (arguments_: Record<string, unknown>): RawArgumentValidationResult =>
+		askIntegrityRejection(arguments_, this.session.getDeepInterviewAskStage?.()) ?? { outcome: "passthrough" };
 	readonly strict = true;
 	/**
 	 * These fields are rendered to the user and carry no executable or durable
@@ -753,6 +819,19 @@ export class AskTool implements AgentTool<AskParametersSchema, AskToolDetails> {
 		context?: AgentToolContext,
 	): Promise<AgentToolResult<AskToolDetails>> {
 		await assertUltragoalAskAllowed(this.session.cwd);
+		// Recheck at execution time as well: direct SDK callers and a phase change
+		// after tool-call validation must not open an unrecordable interview ask.
+		params = askSchema.parse(
+			validateToolArguments(
+				{
+					name: this.name,
+					description: this.description,
+					parameters: this.parameters,
+					rawArgumentValidation: this.rawArgumentValidation,
+				},
+				{ type: "toolCall", id: _toolCallId, name: this.name, arguments: params },
+			),
+		);
 		const gateEmitter = this.session.getWorkflowGateEmitter?.();
 		// A negotiated unattended run answers through workflow gates even when a UI
 		// exists; otherwise gates are the headless answer path only.
@@ -994,13 +1073,6 @@ export class AskTool implements AgentTool<AskParametersSchema, AskToolDetails> {
 
 		// Send notification if waiting and not suppressed
 		this.#sendAskNotification();
-
-		if (params.questions.length === 0) {
-			return {
-				content: [{ type: "text" as const, text: "Error: questions must not be empty" }],
-				details: {},
-			};
-		}
 
 		const askQuestion = async (
 			q: AskParams["questions"][number],

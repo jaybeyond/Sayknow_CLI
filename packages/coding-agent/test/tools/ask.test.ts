@@ -1,11 +1,12 @@
 import { afterEach, beforeAll, describe, expect, it, spyOn, vi } from "bun:test";
 import type { AgentToolContext } from "@sayknow-cli/agent-core";
+import { validateToolArguments } from "@sayknow-cli/ai/utils/validation";
 import { Settings } from "@sayknow-cli/coding-agent/config/settings";
 import { getThemeByName, initTheme } from "@sayknow-cli/coding-agent/modes/theme/theme";
 import type { AppendOrMergeResult } from "@sayknow-cli/coding-agent/skc-runtime/deep-interview-recorder";
 import * as deepInterviewRecorder from "@sayknow-cli/coding-agent/skc-runtime/deep-interview-recorder";
 import type { ToolSession } from "@sayknow-cli/coding-agent/tools";
-import { AskTool, askSchema, askToolRenderer } from "@sayknow-cli/coding-agent/tools/ask";
+import { AskTool, type AskToolInput, askSchema, askToolRenderer } from "@sayknow-cli/coding-agent/tools/ask";
 import { ToolAbortError } from "@sayknow-cli/coding-agent/tools/tool-errors";
 import { logger } from "@sayknow-cli/utils";
 
@@ -86,6 +87,101 @@ function singleDeepInterviewQuestion() {
 		deepInterview: deepInterviewMeta(),
 	};
 }
+
+// Ported from upstream gajae f8a993ab57 (#6229).
+describe("AskTool execution integrity", () => {
+	it("rejects empty ordinary bodies before local or remote UI side effects", async () => {
+		const select = vi.fn(async () => "yes");
+		const awaitAnswer = vi.fn(async () => "yes");
+		const tool = new AskTool(createSession({ getAskAnswerSource: () => ({ awaitAnswer }) } as Partial<ToolSession>));
+		for (const question of ["", " \t\n"]) {
+			await expect(
+				tool.execute(
+					"blank",
+					{ questions: [{ id: "metadata", question, options: [] }] },
+					undefined,
+					undefined,
+					createContext({ select }),
+				),
+			).rejects.toThrow("remove empty extra questions");
+		}
+		expect(select).not.toHaveBeenCalled();
+		expect(awaitAnswer).not.toHaveBeenCalled();
+	});
+
+	it("rejects interview defects before selector, answer registration, gate or recorder", async () => {
+		const select = vi.fn(async () => "Yes");
+		const awaitAnswer = vi.fn(async () => "Yes");
+		const getAskAnswerSource = vi.fn(() => ({ awaitAnswer }));
+		const emitGate = vi.fn(async () => ({ selected: ["Yes"] }));
+		const recorder = spyOn(deepInterviewRecorder, "appendOrMergeDeepInterviewRound");
+		const tool = new AskTool(
+			createSession({
+				getDeepInterviewAskStage: () => "topology",
+				getAskAnswerSource,
+				getWorkflowGateEmitter: () => ({ supportsRemoteGateAnswers: () => true, emitGate }),
+			} as Partial<ToolSession>),
+		);
+		const question = { id: "q", question: "Continue?", options: [{ label: "Yes" }] };
+		for (const [questions, correction] of [
+			[[question], "require structured deepInterview metadata"],
+			[[{ ...question, deepInterview: null }], "require structured deepInterview metadata"],
+			[[question, { id: "metadata", question: " \t\n", options: [] }], "remove empty extra questions"],
+			[[question, question], "require exactly one question"],
+		] as const) {
+			for (const encoded of [questions, JSON.stringify(questions)]) {
+				const malformed = { questions: encoded } as unknown as AskToolInput;
+				await expect(
+					tool.execute("interview-defect", malformed, undefined, undefined, createContext({ select })),
+				).rejects.toThrow(correction);
+			}
+		}
+		expect(select).not.toHaveBeenCalled();
+		expect(getAskAnswerSource).not.toHaveBeenCalled();
+		expect(awaitAnswer).not.toHaveBeenCalled();
+		expect(emitGate).not.toHaveBeenCalled();
+		expect(recorder).not.toHaveBeenCalled();
+	});
+
+	it("preserves ordinary multi-question free-text answers", async () => {
+		let answerIndex = 0;
+		const answers = ["SDK only", "No shell"];
+		const tool = new AskTool(createSession());
+		const result = await tool.execute(
+			"ordinary-free",
+			{
+				questions: [
+					{ id: "first", question: "Name the first boundary", options: [] },
+					{ id: "second", question: "Name the second boundary", options: [] },
+				],
+			},
+			undefined,
+			undefined,
+			createContext({
+				select: async (_prompt, options) => options.find(option => option.includes("Other")),
+				editor: async () => answers[answerIndex++],
+			}),
+		);
+		expect(result.details?.results?.map(answer => answer.customInput)).toEqual(["SDK only", "No shell"]);
+	});
+
+	it("rechecks the current phase before opening a previously validated ask", async () => {
+		let stage: "topology" | "post-topology" | undefined;
+		const select = vi.fn(async () => "Yes");
+		const tool = new AskTool(createSession({ getDeepInterviewAskStage: () => stage }));
+		const payload = {
+			questions: [{ id: "scope", question: "Continue with this scope?", options: [{ label: "Yes" }] }],
+		};
+		const parsed = askSchema.parse(
+			validateToolArguments(tool, { type: "toolCall", id: "phase-race", name: "ask", arguments: payload }),
+		);
+		stage = "topology";
+		await expect(tool.execute("phase-race", parsed, undefined, undefined, createContext({ select }))).rejects.toThrow(
+			"require structured deepInterview metadata",
+		);
+		expect(select).not.toHaveBeenCalled();
+	});
+});
 
 describe("AskTool cancellation", () => {
 	it("aborts the turn when the user cancels selection", async () => {

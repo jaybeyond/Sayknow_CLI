@@ -7,6 +7,7 @@ import { getBundledModel } from "@sayknow-cli/ai";
 import { validateToolArguments } from "@sayknow-cli/ai/utils/validation";
 import { createAgentSession } from "@sayknow-cli/coding-agent/sdk";
 import { Settings } from "../src/config/settings";
+import { ensureWorkflowSkillActivationState } from "../src/hooks/skill-state";
 import {
 	BrokerWorkflowGateEmitter,
 	FileGateStore,
@@ -41,6 +42,83 @@ describe("SDK ToolSession forwards getWorkflowGateEmitter", () => {
 	afterEach(() => {
 		for (const d of tempDirs.splice(0)) fs.rmSync(d, { recursive: true, force: true });
 	});
+
+	// Ported from upstream gajae f8a993ab57 (#6229).
+	it("rejects unrecordable interview asks before emission and allows ordinary asks after handoff", async () => {
+		await initTheme(false);
+		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "skc-ask-integrity-"));
+		tempDirs.push(tempDir);
+		const sessionManager = SessionManager.create(tempDir, tempDir);
+		await sessionManager.ensureOnDisk();
+		const sessionId = sessionManager.getSessionId();
+		await ensureWorkflowSkillActivationState({ cwd: tempDir, skill: "deep-interview", sessionId });
+		const { session } = await createAgentSession({
+			cwd: tempDir,
+			agentDir: tempDir,
+			sessionManager,
+			settings: Settings.isolated(),
+			model: getBundledModel("openai", "gpt-4o-mini"),
+			hasUI: false,
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+		});
+		try {
+			const emitGate = vi.fn(async (input: OpenGateInput) => ({ selected: [input.options?.[0]?.label ?? ""] }));
+			session.setWorkflowGateEmitter({ supportsRemoteGateAnswers: () => true, emitGate });
+			const ask = session.getToolByName("ask");
+			if (!ask) throw new Error("Expected real SDK ask tool");
+			const statePath = modeStatePath(tempDir, sessionId, "deep-interview");
+			const initial = JSON.parse(await Bun.file(statePath).text()) as Record<string, unknown>;
+			expect(initial.current_phase).toBe("interviewing");
+			expect(session.getDeepInterviewAskStage()).toBe("topology");
+			const initialState = await Bun.file(statePath).text();
+			const missing = {
+				id: "dot-skc-topology",
+				question: "Round 0 | Topology confirmation\n\n범위와 의도가 맞습니까?",
+				options: [{ label: "이 범위와 의도가 맞음" }],
+				workflowGate: { stage: "deep-interview", kind: "question" },
+			};
+			for (const questions of [
+				[missing],
+				[missing, { id: "metadata", question: "", options: [] }],
+				JSON.stringify([missing]),
+				JSON.stringify([{ ...missing, deepInterview: null }]),
+				JSON.stringify([missing, { id: "metadata", question: " \t\n", options: [] }]),
+			]) {
+				const call = { type: "toolCall" as const, id: "incident", name: "ask", arguments: { questions } };
+				expect(() => validateToolArguments(ask, call)).toThrow("raw arguments rejected before coercion");
+				await expect(ask.execute("incident", { questions })).rejects.toThrow(
+					"raw arguments rejected before coercion",
+				);
+			}
+			expect(emitGate).not.toHaveBeenCalled();
+			expect(await Bun.file(statePath).text()).toBe(initialState);
+
+			// A persisted final spec moves the workflow to handoff: next-workflow and
+			// approval choices are ordinary asks without interview round metadata.
+			await Bun.write(statePath, JSON.stringify({ ...initial, current_phase: "handoff" }));
+			expect(session.getDeepInterviewAskStage()).toBeUndefined();
+			const handoff = {
+				questions: [
+					{ id: "next", question: "Which workflow next?", options: [{ label: "ralplan" }, { label: "stop" }] },
+				],
+			};
+			const validated = validateToolArguments(ask, {
+				type: "toolCall",
+				id: "handoff",
+				name: "ask",
+				arguments: handoff,
+			});
+			const result = await ask.execute("handoff", validated);
+			expect(emitGate).toHaveBeenCalledTimes(1);
+			expect(JSON.stringify(result.details)).toContain("ralplan");
+		} finally {
+			await session.dispose();
+		}
+	}, 15_000);
 
 	it("makes the real ask tool emit a workflow_gate when an emitter is attached to the session", async () => {
 		await initTheme(false);
