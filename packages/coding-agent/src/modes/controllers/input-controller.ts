@@ -33,6 +33,7 @@ import { CommandPalette, type CommandPaletteAction, type CommandPaletteEntry } f
 import type { PasteTextContext } from "../components/custom-editor";
 import { QueuePaneComponent } from "../components/queue-pane";
 import { type QueuedMessageMoveDirection, QueuedMessageSelectorComponent } from "../components/queued-message-selector";
+import { createUnforwardedOptionChordWarner } from "../utils/macos-option-forwarding";
 
 const QUEUE_SELECTOR_NAVIGATION_ACTIONS = [
 	"tui.select.up",
@@ -645,6 +646,12 @@ export class InputController {
 		this.ctx.editor.setActionKeys("app.message.queue", this.ctx.keybindings.getKeys("app.message.queue"));
 		this.ctx.editor.onQueue = () => this.#executeAction("app.message.queue");
 		this.#registerCommandPaletteAction("app.message.queue", () => this.#executeAction("app.message.queue"), true);
+		this.ctx.editor.onUnforwardedOptionChord ??= createUnforwardedOptionChordWarner({
+			platform: process.platform,
+			terminalProgram: Bun.env.TERM_PROGRAM,
+			formatKeyHint: key => this.ctx.keybindings.formatKeyHint(key),
+			showWarning: message => this.ctx.showWarning(message),
+		});
 
 		this.ctx.editor.onViewportPageScroll = direction => this.ctx.ui.scrollViewportPages(direction);
 		this.ctx.editor.onViewportFollowLive = () => {
