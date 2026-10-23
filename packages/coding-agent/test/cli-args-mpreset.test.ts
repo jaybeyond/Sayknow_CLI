@@ -1,6 +1,7 @@
 import { describe, expect, spyOn, test, vi } from "bun:test";
 import { ThinkingLevel } from "@sayknow-cli/agent-core";
 import { type Model, THINKING_EFFORTS } from "@sayknow-cli/ai";
+import { logger } from "@sayknow-cli/utils";
 import { CliParseError } from "@sayknow-cli/utils/cli";
 import { parseArgs } from "../src/cli/args";
 import type { ModelProfileDefinition } from "../src/config/model-profiles";
@@ -472,6 +473,48 @@ test("root startup recovers a missing credential only for an input-free interact
 	expect(result.recoverableErrors).toEqual([
 		expect.stringContaining('Model profile "codex-medium" requires credentials for: openai-codex'),
 	]);
+});
+
+test("interactive startup logs a default profile skipped for missing credentials", async () => {
+	const settings = Settings.isolated({ "modelProfile.default": "logged-pinned-default" });
+	const registry = {
+		...fakeRegistry([
+			{
+				name: "logged-pinned-default",
+				requiredProviders: ["profile-provider"],
+				modelMapping: { default: "profile-provider/default" },
+				source: "user",
+			},
+		]),
+		getApiKeyForProvider: async () => undefined,
+	} as never;
+	const warnSpy = spyOn(logger, "warn").mockImplementation(() => {});
+	try {
+		const result = await applyStartupModelProfilesForRoot({
+			session: fakeSession(),
+			settings,
+			modelRegistry: registry,
+			parsedArgs: {},
+			startupModel: undefined,
+			startupThinkingLevel: undefined,
+			isInteractive: true,
+			hasInteractiveTerminal: true,
+			initialMessage: undefined,
+			initialMessages: [],
+			resumeAction: undefined,
+		});
+		expect(result.recoverableErrors).toHaveLength(1);
+		expect(warnSpy).toHaveBeenCalledWith(
+			"Startup model profile not applied: missing provider credentials",
+			expect.objectContaining({
+				profile: "logged-pinned-default",
+				errorClass: "ModelProfileCredentialError",
+				providers: ["profile-provider"],
+			}),
+		);
+	} finally {
+		warnSpy.mockRestore();
+	}
 });
 
 test.each([

@@ -425,6 +425,13 @@ async function applyStartupModelProfilesWithPolicy(
 			);
 		} catch (error) {
 			if (onCredentialError && error instanceof ModelProfileCredentialError) {
+				// The toast/stderr warning is transient; keep a log record so a session
+				// left on the provisional model can be diagnosed afterwards.
+				logger.warn("Startup model profile not applied: missing provider credentials", {
+					profile: profileName,
+					errorClass: error.name,
+					providers: error.providers,
+				});
 				onCredentialError(error);
 				return;
 			}
