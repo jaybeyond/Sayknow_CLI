@@ -261,7 +261,7 @@ export class RootHelpCommand extends Command {
 		"api-key": Flags.string({ description: "API key (defaults to env vars)" }),
 		credential: Flags.string({
 			description:
-				"Stored credential selector: email:<addr>, id:<n>, account:<id>, project:<id>, or provider/email:<addr>",
+				"Stored credential selector: email:<addr>, id:<n>, account:<id>, project:<id>, org:<organization id or name>, or provider/email:<addr>",
 		}),
 		"system-prompt": Flags.string({ description: "System prompt (default: coding assistant prompt)" }),
 		"append-system-prompt": Flags.string({ description: "Append text or file contents to the system prompt" }),

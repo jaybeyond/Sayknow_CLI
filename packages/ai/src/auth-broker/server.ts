@@ -11,7 +11,7 @@
  */
 import { logger } from "@sayknow-cli/utils";
 import { isNoAuthBrowserOriginRequest } from "../auth-gateway/http";
-import type { AuthStorage } from "../auth-storage";
+import { type AuthStorage, formatOAuthIdentityLabel } from "../auth-storage";
 import { assertAuthenticatedOrLoopback, hostHeaderMatchesBind, parseBind } from "../utils/parse-bind";
 import { AuthBrokerRefresher, type AuthBrokerRefresherSchedule } from "./refresher";
 import type {
@@ -659,7 +659,7 @@ export function startAuthBroker(opts: AuthBrokerServerOptions): AuthBrokerServer
 						const entries = opts.storage.upsertCredential(provider, credential);
 						const identity =
 							credential.type === "oauth"
-								? (credential.email ?? credential.accountId ?? credential.projectId ?? "(no identity)")
+								? (formatOAuthIdentityLabel(credential) ?? "(no identity)")
 								: "(api key)";
 						logger.info("auth-broker credential upserted", {
 							provider,

@@ -141,6 +141,9 @@ export interface UsageCredential {
 	projectId?: string;
 	email?: string;
 	enterpriseUrl?: string;
+	/** Organization the OAuth token is scoped to; usage limits are per organization. */
+	organizationId?: string;
+	organizationName?: string;
 	metadata?: Record<string, unknown>;
 }
 

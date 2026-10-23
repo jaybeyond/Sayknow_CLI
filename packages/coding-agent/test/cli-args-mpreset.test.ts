@@ -131,6 +131,12 @@ describe("CLI credential selector args", () => {
 	test("rejects malformed credential selector", () => {
 		expect(() => parseCliCredentialSelector("openai-codex/nope")).toThrow("Invalid --credential selector");
 	});
+
+	test("parses an organization credential selector with a display name", () => {
+		const selector = parseCliCredentialSelector("anthropic/org:Acme Team");
+		expect(selector.provider).toBe("anthropic");
+		expect(selector.selector).toEqual({ kind: "org", value: "Acme Team" });
+	});
 });
 
 describe("MCP config CLI args", () => {
