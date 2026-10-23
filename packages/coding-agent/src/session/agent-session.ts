@@ -16910,6 +16910,8 @@ export class AgentSession {
 			const previousAgentMessages = [...this.agent.state.messages];
 			const previousCheckpointState = this.#checkpointState;
 			const previousPendingRewindReport = this.#pendingRewindReport;
+			const previousPendingBashMessages = [...this.#pendingBashMessages];
+			const previousPendingPythonMessages = [...this.#pendingPythonMessages];
 			const previousSteeringMessages = [...this.#steeringMessages];
 			const previousFollowUpMessages = [...this.#followUpMessages];
 			const previousPendingNextTurnMessages = [...this.#pendingNextTurnMessages];
@@ -17034,6 +17036,11 @@ export class AgentSession {
 					// branch it from a missing entry, which falls back to the root.
 					this.#checkpointState = undefined;
 					this.#pendingRewindReport = undefined;
+					// Deferred bash and python rows belong to the predecessor file.
+					// Leaving them queued lets the next prompt append that command
+					// text to the successor transcript.
+					this.#pendingBashMessages = [];
+					this.#pendingPythonMessages = [];
 				}
 
 				this.#reconnectToAgent();
@@ -17088,6 +17095,8 @@ export class AgentSession {
 				this.#pendingNextTurnMessages = previousPendingNextTurnMessages;
 				this.#checkpointState = previousCheckpointState;
 				this.#pendingRewindReport = previousPendingRewindReport;
+				this.#pendingBashMessages = previousPendingBashMessages;
+				this.#pendingPythonMessages = previousPendingPythonMessages;
 				this.#scheduledHiddenNextTurnGeneration = previousScheduledHiddenNextTurnGeneration;
 				this.agent.clearAllQueues();
 				this.agent.restoreSteering(previousAgentSteeringQueue);
