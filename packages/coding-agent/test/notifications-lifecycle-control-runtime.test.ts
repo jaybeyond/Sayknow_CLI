@@ -52,6 +52,7 @@ import {
 	prepareManagedSessionScopeForWriteSync,
 	resolveManagedScope,
 } from "../src/session/internal/managed-session-scope";
+import { captureAgentDirEnv, restoreAgentDirEnv } from "./helpers/agent-dir-override";
 
 type NativeSecurity = { ok: true } | { ok: false; code: string };
 
@@ -2286,7 +2287,7 @@ describe("lifecycle control runtime", () => {
 describe("lifecycle creators share the identity create fence", () => {
 	// The fence database lives under the agent dir; isolate it so these tests
 	// never write into the developer's real ~/.skc.
-	const originalAgentDir = process.env.SKC_CODING_AGENT_DIR;
+	const originalAgentDirEnv = captureAgentDirEnv();
 	const fenceAgentRoots: string[] = [];
 	beforeEach(() => {
 		const isolated = fs.mkdtempSync(path.join(os.tmpdir(), "skc-fence-agent-"));
@@ -2335,7 +2336,7 @@ describe("lifecycle creators share the identity create fence", () => {
 
 	afterEach(() => {
 		__setOwnerIncarnationReaderForTests(null);
-		if (originalAgentDir) setAgentDir(originalAgentDir);
+		restoreAgentDirEnv(originalAgentDirEnv);
 		for (const dir of fenceAgentRoots.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
 		for (const dir of fenceRoots.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
 	});

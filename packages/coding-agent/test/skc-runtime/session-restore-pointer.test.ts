@@ -25,8 +25,9 @@ import {
 	reserveIdentityCreate,
 } from "../../src/skc-runtime/tmux-owner-isolation";
 import { __setCreateOwnerIsolationForTests } from "../../src/skc-runtime/tmux-sessions";
+import { captureAgentDirEnv, restoreAgentDirEnv } from "../helpers/agent-dir-override";
 
-const originalAgentDir = process.env.SKC_CODING_AGENT_DIR;
+const originalAgentDirEnv = captureAgentDirEnv();
 const roots: string[] = [];
 
 const RECORDED: BootGeneration = { source: "darwin-kern-boottime", value: "1.000001" };
@@ -71,7 +72,7 @@ function deps(currentBoot: BootGeneration): RestoreCandidateDeps {
 }
 
 afterEach(() => {
-	if (originalAgentDir) setAgentDir(originalAgentDir);
+	restoreAgentDirEnv(originalAgentDirEnv);
 	for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
 });
 

@@ -6,6 +6,7 @@ import { setAgentDir } from "@sayknow-cli/utils/dirs";
 import SessionCommand from "../src/commands/session";
 import { publishRestorePointer } from "../src/skc-runtime/session-restore";
 import * as tmuxSessions from "../src/skc-runtime/tmux-sessions";
+import { captureAgentDirEnv, restoreAgentDirEnv } from "./helpers/agent-dir-override";
 
 type SpawnSyncMock = {
 	mockImplementation: (implementation: (cmd: string[]) => unknown) => void;
@@ -368,7 +369,7 @@ describe("skc session command", () => {
 
 	it("restore --dry-run mutates nothing for valid, corrupt, and missing pointers", async () => {
 		const root = await fs.mkdtemp(path.join(os.tmpdir(), "skc-restore-cli-"));
-		const previousAgentDir = process.env.SKC_CODING_AGENT_DIR;
+		const previousAgentDirEnv = captureAgentDirEnv();
 		setAgentDir(path.join(root, "agent"));
 		const project = path.join(root, "project");
 		await fs.mkdir(project, { recursive: true });
@@ -454,7 +455,7 @@ describe("skc session command", () => {
 			expect(await snapshotTree(agentDir)).toEqual(before);
 			expectNoTmuxMutation(result.calls.filter(call => call[0] === "tmux"));
 		} finally {
-			if (previousAgentDir) setAgentDir(previousAgentDir);
+			restoreAgentDirEnv(previousAgentDirEnv);
 			await fs.rm(root, { recursive: true, force: true });
 		}
 	});

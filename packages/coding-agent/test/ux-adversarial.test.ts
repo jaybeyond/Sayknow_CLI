@@ -9,16 +9,17 @@ import {
 	TUI_KEYBINDINGS,
 	KeybindingsManager as TuiKeybindingsManager,
 } from "@sayknow-cli/tui/keybindings";
-import { getConfigRootDir, setAgentDir } from "@sayknow-cli/utils";
+import { setAgentDir } from "@sayknow-cli/utils";
 import { inspectConfigFile } from "../src/cli/config-cli";
 import { parseNotifyArgs } from "../src/cli/notify-cli";
 import { KeybindingsManager } from "../src/config/keybindings";
 import { resetSettingsForTest } from "../src/config/settings";
 import { SqliteAuthCredentialStore } from "../src/session/auth-storage";
 import { addApiCompatibleProvider } from "../src/setup/provider-onboarding";
+import { captureAgentDirEnv, restoreAgentDirEnv } from "./helpers/agent-dir-override";
 
 let root = "";
-const fallbackAgentDir = path.join(getConfigRootDir(), "agent");
+const originalAgentDirEnv = captureAgentDirEnv();
 const theme = {
 	label: (text: string) => text,
 	value: (text: string) => text,
@@ -53,7 +54,7 @@ beforeEach(async () => {
 
 afterEach(async () => {
 	resetSettingsForTest();
-	setAgentDir(fallbackAgentDir);
+	restoreAgentDirEnv(originalAgentDirEnv);
 	await fs.rm(root, { recursive: true, force: true });
 });
 

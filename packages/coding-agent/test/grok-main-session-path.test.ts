@@ -8,10 +8,12 @@ import { Settings } from "../src/config/settings";
 import { BUNDLED_GROK_BUILD_EXTENSION_ID } from "../src/defaults/skc-grok-cli";
 import { createAgentSession } from "../src/sdk";
 import { SessionManager } from "../src/session/session-manager";
+import { captureAgentDirEnv, restoreAgentDirEnv } from "./helpers/agent-dir-override";
 
 describe("bundled Grok Build session path", () => {
 	it("loads Grok Build OAuth and models with extension discovery disabled", async () => {
 		const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "skc-grok-main-session-"));
+		const originalAgentDirEnv = captureAgentDirEnv();
 		setAgentDir(agentDir);
 		try {
 			const { session } = await createAgentSession({
@@ -43,6 +45,7 @@ describe("bundled Grok Build session path", () => {
 				await session.dispose();
 			}
 		} finally {
+			restoreAgentDirEnv(originalAgentDirEnv);
 			await fs.rm(agentDir, { recursive: true, force: true });
 		}
 	});

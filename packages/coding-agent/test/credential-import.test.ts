@@ -20,6 +20,7 @@ import {
 	importCredentials,
 	isAutoImportOAuthCredential,
 } from "../src/setup/credential-import";
+import { captureAgentDirEnv, restoreAgentDirEnv } from "./helpers/agent-dir-override";
 
 const CLAUDE_ACCESS = "sk-ant-oat01-claude-access-token-value";
 const CLAUDE_REFRESH = "sk-ant-ort01-claude-refresh-token-value";
@@ -338,18 +339,17 @@ describe("discoverExternalCredentials", () => {
 describe("importCredentials", () => {
 	let homeDir = "";
 	let agentDir = "";
-	let originalAgentDir: string | undefined;
+	let originalAgentDirEnv = captureAgentDirEnv();
 
 	beforeEach(async () => {
-		originalAgentDir = process.env.SKC_AGENT_DIR;
+		originalAgentDirEnv = captureAgentDirEnv();
 		homeDir = await fs.mkdtemp(path.join(os.tmpdir(), "skc-cred-import-home-"));
 		agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "skc-cred-import-agent-"));
 		setAgentDir(agentDir);
 	});
 
 	afterEach(async () => {
-		if (originalAgentDir === undefined) delete process.env.SKC_AGENT_DIR;
-		else process.env.SKC_AGENT_DIR = originalAgentDir;
+		restoreAgentDirEnv(originalAgentDirEnv);
 		await fs.rm(homeDir, { recursive: true, force: true });
 		await fs.rm(agentDir, { recursive: true, force: true });
 	});

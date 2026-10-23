@@ -9,11 +9,14 @@ import type { Args } from "../src/cli/args";
 import { Settings } from "../src/config/settings";
 import { createSessionManager } from "../src/main";
 import { SessionManager } from "../src/session/session-manager";
+import { captureAgentDirEnv, restoreAgentDirEnv } from "./helpers/agent-dir-override";
 
 const LIFECYCLE_ENV = ["SKC_LIFECYCLE_REQUEST_ID", "SKC_SESSION_ID"] as const;
+const originalAgentDirEnv = captureAgentDirEnv();
 
 afterEach(() => {
 	for (const k of LIFECYCLE_ENV) delete process.env[k];
+	restoreAgentDirEnv(originalAgentDirEnv);
 });
 
 test("normal root launch creates a current SessionManager for root token logs", async () => {

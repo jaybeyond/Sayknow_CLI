@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { SessionManager, SessionMigrationPolicyError } from "@sayknow-cli/coding-agent/session/session-manager";
 import { getSessionsDir, getTerminalSessionsDir, Snowflake, setAgentDir } from "@sayknow-cli/utils";
+import { captureAgentDirEnv, restoreAgentDirEnv } from "../helpers/agent-dir-override";
 
 function git(cwd: string, ...args: string[]): string {
 	const result = Bun.spawnSync(["git", ...args], { cwd, stdout: "pipe", stderr: "pipe" });
@@ -50,6 +51,7 @@ describe("continueRecent with --worktree sessions", () => {
 	let worktree: string;
 	const prevTmux = process.env.TMUX;
 	const prevPane = process.env.TMUX_PANE;
+	const originalAgentDirEnv = captureAgentDirEnv();
 
 	beforeEach(() => {
 		root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "wt-continue-")));
@@ -67,6 +69,7 @@ describe("continueRecent with --worktree sessions", () => {
 		else process.env.TMUX = prevTmux;
 		if (prevPane === undefined) delete process.env.TMUX_PANE;
 		else process.env.TMUX_PANE = prevPane;
+		restoreAgentDirEnv(originalAgentDirEnv);
 		fs.rmSync(root, { recursive: true, force: true });
 	});
 

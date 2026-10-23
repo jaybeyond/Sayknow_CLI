@@ -26,6 +26,16 @@ import { activeEntryPath, modeStatePath, sessionStateDir } from "../src/skc-runt
 import { getSkillActiveStatePaths, syncSkillActiveState } from "../src/skill-state/active-state";
 import { registerWorkflowGateEmitterListener } from "../src/tools/ask-answer-registry";
 
+/**
+ * Poll until `done` holds or the budget elapses. Gate emission and tool
+ * activation settle asynchronously; a fixed 20 x 1 ms loop missed them once the
+ * full suite had warmed the process (observed after notifications-lifecycle tests).
+ */
+async function waitUntil(done: () => boolean, budgetMs = 2_000): Promise<void> {
+	const deadline = Date.now() + budgetMs;
+	while (!done() && Date.now() < deadline) await Bun.sleep(1);
+}
+
 function attachTerminalController(emitter: WorkflowGateEmitter): void {
 	emitter.registerGateTerminalController?.({
 		completeGateInteractions: () => "already_terminal",
@@ -341,8 +351,7 @@ describe("SDK ToolSession forwards getWorkflowGateEmitter", () => {
 					timestamp: Date.now(),
 				},
 			});
-			for (let attempt = 0; attempt < 20 && !session.getActiveToolNames().includes("ask"); attempt += 1)
-				await Bun.sleep(1);
+			await waitUntil(() => session.getActiveToolNames().includes("ask"));
 			expect(session.getActiveToolNames()).toContain("ask");
 		} finally {
 			await session.dispose();
@@ -680,8 +689,7 @@ describe("SDK ToolSession forwards getWorkflowGateEmitter", () => {
 					timestamp: Date.now(),
 				},
 			});
-			for (let attempt = 0; attempt < 20 && !session.getActiveToolNames().includes("ask"); attempt += 1)
-				await Bun.sleep(1);
+			await waitUntil(() => session.getActiveToolNames().includes("ask"));
 			expect(session.getActiveToolNames()).toContain("ask");
 		} finally {
 			await session.dispose();
@@ -721,7 +729,7 @@ describe("SDK ToolSession forwards getWorkflowGateEmitter", () => {
 				undefined,
 				{ hasUI: false, abort: () => {} } as unknown as AgentToolContext,
 			);
-			for (let i = 0; i < 20 && !gate; i += 1) await Bun.sleep(1);
+			await waitUntil(() => gate !== undefined);
 			expect(gate).toBeDefined();
 			const response = {
 				gate_id: gate!.gate_id,

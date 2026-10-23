@@ -15,6 +15,7 @@ import {
 	releaseIdentityCreate,
 	reserveIdentityCreate,
 } from "../../src/skc-runtime/tmux-owner-isolation";
+import { captureAgentDirEnv, restoreAgentDirEnv } from "../helpers/agent-dir-override";
 
 let root: string;
 let key: IdentityCreateKey;
@@ -27,7 +28,7 @@ function makeKey(stateDir: string, sessionId = "sess-a"): IdentityCreateKey {
 	return { stateDir, sessionId, stateFile };
 }
 
-const originalAgentDir = process.env.SKC_CODING_AGENT_DIR;
+const originalAgentDirEnv = captureAgentDirEnv();
 
 beforeEach(() => {
 	root = mkdtempSync(path.join(tmpdir(), "skc-identity-fence-"));
@@ -40,7 +41,7 @@ beforeEach(() => {
 
 afterEach(() => {
 	__setOwnerIncarnationReaderForTests(null);
-	if (originalAgentDir) setAgentDir(originalAgentDir);
+	restoreAgentDirEnv(originalAgentDirEnv);
 	rmSync(root, { recursive: true, force: true });
 });
 

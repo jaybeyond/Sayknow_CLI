@@ -30,6 +30,7 @@ import {
 } from "@sayknow-cli/coding-agent/skc-runtime/tmux-sessions";
 import { buildWindowsPowerShellInnerCommand } from "@sayknow-cli/coding-agent/skc-runtime/windows-powershell-command";
 import { setAgentDir } from "@sayknow-cli/utils/dirs";
+import { captureAgentDirEnv, restoreAgentDirEnv } from "../helpers/agent-dir-override";
 
 type SpawnSyncResult = Bun.SyncSubprocess<"pipe", "pipe">;
 type SpawnSyncCommandMock = (command: string[]) => SpawnSyncResult;
@@ -1254,7 +1255,7 @@ describe("SKC tmux session management", () => {
 describe("shared identity create fence", () => {
 	// The fence database lives under the agent dir; isolate it so these tests
 	// never write into the developer's real ~/.skc.
-	const originalAgentDir = process.env.SKC_CODING_AGENT_DIR;
+	const originalAgentDirEnv = captureAgentDirEnv();
 	beforeEach(() => {
 		const isolated = fsSync.mkdtempSync(path.join(os.tmpdir(), "skc-fence-agent-"));
 		fenceAgentRoots.push(isolated);
@@ -1286,7 +1287,7 @@ describe("shared identity create fence", () => {
 
 	afterEach(() => {
 		__setOwnerIncarnationReaderForTests(null);
-		if (originalAgentDir) setAgentDir(originalAgentDir);
+		restoreAgentDirEnv(originalAgentDirEnv);
 		for (const dir of fenceAgentRoots.splice(0)) fsSync.rmSync(dir, { recursive: true, force: true });
 		__setCreateOwnerIsolationForTests(null);
 	});

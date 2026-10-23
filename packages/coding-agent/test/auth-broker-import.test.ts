@@ -5,6 +5,7 @@ import * as path from "node:path";
 import { type AuthBrokerServerHandle, AuthStorage, SqliteAuthCredentialStore, startAuthBroker } from "@sayknow-cli/ai";
 import { getAgentDbPath, setAgentDir } from "@sayknow-cli/utils";
 import { runAuthBrokerCommand } from "../src/cli/auth-broker-cli";
+import { captureAgentDirEnv, restoreAgentDirEnv } from "./helpers/agent-dir-override";
 
 const ORIGINAL_STDOUT_WRITE = process.stdout.write.bind(process.stdout);
 
@@ -20,10 +21,10 @@ function silenceStdout(): () => string {
 describe("auth-broker import (CLIProxyAPI)", () => {
 	let agentDir = "";
 	let cliproxyDir = "";
-	let originalAgentDir: string | undefined;
+	let originalAgentDirEnv = captureAgentDirEnv();
 
 	beforeEach(async () => {
-		originalAgentDir = process.env.SKC_AGENT_DIR;
+		originalAgentDirEnv = captureAgentDirEnv();
 		agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "skc-import-agent-"));
 		cliproxyDir = await fs.mkdtemp(path.join(os.tmpdir(), "skc-import-cliproxy-"));
 		setAgentDir(agentDir);
@@ -31,8 +32,7 @@ describe("auth-broker import (CLIProxyAPI)", () => {
 
 	afterEach(async () => {
 		process.stdout.write = ORIGINAL_STDOUT_WRITE;
-		if (originalAgentDir === undefined) delete process.env.SKC_AGENT_DIR;
-		else process.env.SKC_AGENT_DIR = originalAgentDir;
+		restoreAgentDirEnv(originalAgentDirEnv);
 		await fs.rm(agentDir, { recursive: true, force: true });
 		await fs.rm(cliproxyDir, { recursive: true, force: true });
 	});

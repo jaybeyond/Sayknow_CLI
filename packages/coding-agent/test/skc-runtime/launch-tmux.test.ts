@@ -24,6 +24,7 @@ import {
 	reserveIdentityCreate,
 } from "@sayknow-cli/coding-agent/skc-runtime/tmux-owner-isolation";
 import { setAgentDir } from "@sayknow-cli/utils/dirs";
+import { captureAgentDirEnv, restoreAgentDirEnv } from "../helpers/agent-dir-override";
 
 function args(overrides: Partial<Args> = {}): Args {
 	return {
@@ -1317,7 +1318,7 @@ it("emits a UTF-16LE BOM and a script-block &-invocation for native Windows --tm
 describe("default launch identity create fence", () => {
 	// The fence database lives under the agent dir; isolate it so these tests
 	// never write into the developer's real ~/.skc.
-	const originalAgentDir = process.env.SKC_CODING_AGENT_DIR;
+	const originalAgentDirEnv = captureAgentDirEnv();
 	beforeEach(() => {
 		const isolated = fs.mkdtempSync(path.join(os.tmpdir(), "skc-fence-agent-"));
 		fenceAgentRoots.push(isolated);
@@ -1354,7 +1355,7 @@ describe("default launch identity create fence", () => {
 
 	afterEach(() => {
 		__setOwnerIncarnationReaderForTests(null);
-		if (originalAgentDir) setAgentDir(originalAgentDir);
+		restoreAgentDirEnv(originalAgentDirEnv);
 		for (const dir of fenceAgentRoots.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
 		for (const dir of fenceDirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
 	});
