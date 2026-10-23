@@ -1,5 +1,5 @@
 import { $credentialEnv, $env, extractHttpStatusFromError, logger } from "@sayknow-cli/utils";
-import OpenAI from "openai";
+import OpenAI, { type ClientOptions as OpenAIClientOptions } from "openai";
 import type {
 	ChatCompletionAssistantMessageParam,
 	ChatCompletionChunk,
@@ -1217,6 +1217,22 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions"> = (
 	return stream;
 };
 
+/**
+ * The OpenAI SDK retries pre-header timeouts and connection failures silently
+ * (its retry lines log at `info`, below the default `warn`, and go to console,
+ * which corrupts the TUI). Route them into the skc log so a request stuck
+ * before response headers — where our stream watchdogs are not armed yet —
+ * leaves a trace instead of looking like a hung turn.
+ */
+const OPENAI_SDK_LOGGER: NonNullable<OpenAIClientOptions["logger"]> = {
+	error: message => logger.warn(`openai-sdk: ${message}`),
+	warn: message => logger.warn(`openai-sdk: ${message}`),
+	info: message => {
+		if (/retrying|timed out|connection failed/.test(message)) logger.warn(`openai-sdk: ${message}`);
+	},
+	debug: () => {},
+};
+
 async function createClient(
 	model: Model<"openai-completions">,
 	context: Context,
@@ -1373,6 +1389,8 @@ async function createClient(
 			defaultQuery: azureDefaultQuery,
 			fetch: debugFetch,
 			...(sdkTimeoutMs !== undefined ? { timeout: sdkTimeoutMs } : {}),
+			logLevel: "info",
+			logger: OPENAI_SDK_LOGGER,
 		}),
 		copilotPremiumRequests,
 		baseUrl,
