@@ -2,16 +2,15 @@
  * Host-value policy for MCP config that comes from an untrusted project file.
  *
  * User mcp.json and an explicit `--mcp-config` file may still substitute
- * secret-named environment variables and run `!` shell commands. A project
- * file (native `.skc/mcp.json` or a repo-root `mcp.json`) uses the same
- * sensitive-name rule as project `ssh.json`: do not copy those host values
- * into server env or headers, and do not execute `!`.
+ * secret-named environment variables and run `!` shell commands. Any
+ * project-level source, including providers other than native `.skc/mcp.json`
+ * and repo-root `mcp.json`, uses the same sensitive-name rule as project
+ * `ssh.json`: do not copy those host values into server env or headers, and
+ * do not execute `!`.
  */
 
 import type { SourceMeta } from "../capability/types";
 import { isSensitiveEnvName } from "../discovery/helpers";
-
-const UNTRUSTED_PROJECT_MCP_PROVIDERS = new Set(["native", "mcp-json"]);
 
 export function nativeMcpSource(level: "user" | "project", filePath: string): SourceMeta {
 	return {
@@ -22,10 +21,15 @@ export function nativeMcpSource(level: "user" | "project", filePath: string): So
 	};
 }
 
-/** True when this server was loaded from untrusted project MCP config. */
+/**
+ * True when this server was loaded from untrusted project MCP config.
+ * Every project-level provider is untrusted, including providers other than
+ * native `.skc/mcp.json` and repo-root `mcp.json`. User scope and a tools-only
+ * load stay on the previous path.
+ */
 export function isUntrustedProjectMcpSource(source: SourceMeta | undefined, toolsOnly: boolean): boolean {
 	if (toolsOnly || !source || source.level !== "project") return false;
-	return UNTRUSTED_PROJECT_MCP_PROVIDERS.has(source.provider);
+	return true;
 }
 
 export type ProjectHostValueDecision =
