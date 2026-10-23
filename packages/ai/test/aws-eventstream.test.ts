@@ -102,6 +102,14 @@ describe("aws-eventstream", () => {
 		expect(collected[0].text).toContain('"hi"');
 	});
 
+	test("names the trailing byte count when the stream ends mid-frame", async () => {
+		const frame = encodeFrame({ ":message-type": "event", ":event-type": "contentBlockDelta" }, new Uint8Array([1]));
+		const partial = new Uint8Array(frame.subarray(0, 7));
+		await expect(collect(streamFrom([partial]))).rejects.toThrow(
+			"eventstream: truncated message at end of stream (7 trailing bytes)",
+		);
+	});
+
 	test("decodes multiple messages packed into one chunk", async () => {
 		const a = encodeFrame(
 			{ ":message-type": "event", ":event-type": "messageStart" },
