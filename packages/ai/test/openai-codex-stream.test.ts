@@ -1784,6 +1784,200 @@ describe("openai-codex streaming", () => {
 		]);
 	});
 
+	it.each([
+		["empty message item", []],
+		["non-empty message item", [{ type: "output_text", text: "visible text" }]],
+	])("handles a later %s after a finalized todo_write call", async (_label, content) => {
+		const sse = createCodexErrorSse([
+			{
+				type: "response.output_item.added",
+				output_index: 0,
+				item: {
+					type: "reasoning",
+					id: "rs_0d4a2e17e5cd3232016ac0dd08c6a487d0bb045aa97bfa8b58",
+					summary: [],
+					encrypted_content: "encrypted",
+				},
+			},
+			{
+				type: "response.output_item.done",
+				output_index: 0,
+				item: {
+					type: "reasoning",
+					id: "rs_0d4a2e17e5cd3232016ac0dd08c6a487d0bb045aa97bfa8b58",
+					summary: [],
+					encrypted_content: "encrypted",
+				},
+			},
+			{
+				type: "response.output_item.added",
+				output_index: 1,
+				item: {
+					type: "function_call",
+					id: "fc_0d4a2e17e5cd3232016ac0dd08c6a487d0bb045aa97bfa8b58",
+					call_id: "call_1Oy7wVQBglbUc9rgt73OWP8l",
+					name: "todo_write",
+					arguments: '{"ops":[]}',
+				},
+			},
+			{
+				type: "response.output_item.done",
+				output_index: 1,
+				item: {
+					type: "function_call",
+					id: "fc_0d4a2e17e5cd3232016ac0dd08c6a487d0bb045aa97bfa8b58",
+					call_id: "call_1Oy7wVQBglbUc9rgt73OWP8l",
+					name: "todo_write",
+					arguments: '{"ops":[]}',
+				},
+			},
+			{
+				type: "response.output_item.added",
+				output_index: 2,
+				item: {
+					type: "message",
+					id: "msg_after_call",
+					role: "assistant",
+					content,
+				},
+			},
+			{
+				type: "error",
+				error: {
+					type: "request_timeout",
+					code: "request_timeout",
+					message:
+						"stream error: stream disconnected before completion: stream closed before response.completed (code=request_timeout)",
+				},
+			},
+		]);
+		global.fetch = vi.fn(
+			async () => new Response(sse, { status: 200, headers: { "content-type": "text/event-stream" } }),
+		) as unknown as typeof fetch;
+
+		const result = await streamOpenAICodexResponses(
+			{ ...createCodexTestModel("https://chatgpt.com/backend-api"), preferWebsockets: false },
+			createCodexTestContext(),
+			{ apiKey: createCodexTestToken() },
+		).result();
+
+		if (content.length === 0) {
+			expect(result.stopReason).toBe("toolUse");
+			expect(result.content).toContainEqual(
+				// The fork keeps the streamed argument buffer on finalized calls.
+				expect.objectContaining({
+					type: "toolCall",
+					id: "call_1Oy7wVQBglbUc9rgt73OWP8l|fc_0d4a2e17e5cd3232016ac0dd08c6a487d0bb045aa97bfa8b58",
+					name: "todo_write",
+					arguments: { ops: [] },
+				}),
+			);
+		} else {
+			expect(result.stopReason).toBe("error");
+		}
+	});
+
+	it.each([
+		"finalized",
+		"unfinished",
+		"visible text",
+	])("handles EOF without response.completed after a %s tool call", async state => {
+		const item = {
+			type: "function_call",
+			id: "fc_eof",
+			call_id: "call_eof",
+			name: "todo_write",
+			arguments: '{"ops":[]}',
+		};
+		const events: Record<string, unknown>[] = [{ type: "response.output_item.added", output_index: 0, item }];
+		if (state !== "unfinished") {
+			events.push({ type: "response.output_item.done", output_index: 0, item });
+		}
+		events.push({
+			type: "response.output_item.added",
+			output_index: 1,
+			item: {
+				type: "message",
+				id: "msg_eof",
+				role: "assistant",
+				content: state === "visible text" ? [{ type: "output_text", text: "visible" }] : [],
+			},
+		});
+		const fetchMock = vi.fn(
+			async () =>
+				new Response(createCodexErrorSse(events), {
+					status: 200,
+					headers: { "content-type": "text/event-stream" },
+				}),
+		);
+		global.fetch = fetchMock as unknown as typeof fetch;
+		const result = await streamOpenAICodexResponses(
+			{ ...createCodexTestModel("https://chatgpt.com/backend-api"), preferWebsockets: false },
+			createCodexTestContext(),
+			{ apiKey: createCodexTestToken() },
+		).result();
+
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+		expect(result.stopReason).toBe(state === "finalized" ? "toolUse" : "error");
+		if (state === "finalized") {
+			expect(result.errorCode).toBe("codex_stream_closed_after_finalized_tool_calls");
+			expect(result.providerPayload).toMatchObject({
+				items: [{ ...item }],
+			});
+			expect(result.content).toContainEqual(
+				// The fork keeps the streamed argument buffer on finalized calls.
+				expect.objectContaining({
+					type: "toolCall",
+					id: "call_eof|fc_eof",
+					name: "todo_write",
+					arguments: { ops: [] },
+				}),
+			);
+		}
+	});
+
+	it.each([
+		["output item snapshot only", '{"ops":[1]}', [] as string[]],
+		["terminal item overriding streamed deltas", '{"ops":[2]}', ['{"ops":[1]}']],
+	])("keeps the finalized arguments from the %s", async (_label, terminalArguments, deltas) => {
+		const tempDir = TempDir.createSync("@pi-codex-stream-");
+		setAgentDir(tempDir.path());
+		const item = {
+			type: "function_call",
+			id: "fc_snapshot",
+			call_id: "call_snapshot",
+			name: "todo_write",
+			arguments: deltas.length === 0 ? terminalArguments : "",
+		};
+		global.fetch = vi.fn(
+			async () =>
+				new Response(
+					createCodexErrorSse([
+						{ type: "response.output_item.added", output_index: 0, item },
+						...deltas.map(delta => ({ type: "response.function_call_arguments.delta", item_id: item.id, delta })),
+						{
+							type: "response.output_item.done",
+							output_index: 0,
+							item: { ...item, arguments: terminalArguments },
+						},
+						{ type: "response.completed", response: { status: "completed", usage: DEFAULT_USAGE } },
+					]),
+					{ status: 200, headers: { "content-type": "text/event-stream" } },
+				),
+		) as unknown as typeof fetch;
+
+		const result = await streamOpenAICodexResponses(
+			{ ...createCodexTestModel("https://chatgpt.com/backend-api"), preferWebsockets: false },
+			createCodexTestContext(),
+			{ apiKey: createCodexTestToken() },
+		).result();
+
+		expect(result.stopReason).toBe("toolUse");
+		expect(result.content).toEqual([
+			expect.objectContaining({ id: "call_snapshot|fc_snapshot", arguments: JSON.parse(terminalArguments) }),
+		]);
+	});
+
 	it("does not retry non-recoverable Codex schema validation SSE events", async () => {
 		const tempDir = TempDir.createSync("@pi-codex-stream-");
 		setAgentDir(tempDir.path());

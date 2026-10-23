@@ -1055,6 +1055,14 @@ async function processCodexResponseStream(
 				});
 				if (runtime.sawTerminalEvent) break;
 			}
+			if (!runtime.sawTerminalEvent) {
+				// EOF proves the stream closed; finalized calls are still deliverable.
+				trySalvageCodexFinalizedToolCalls(
+					context,
+					runtime,
+					new Error("Codex stream ended before terminal completion event"),
+				);
+			}
 			return { firstTokenTime };
 		} catch (error) {
 			if (trySalvageCodexFinalizedToolCalls(context, runtime, error)) {
@@ -1075,16 +1083,36 @@ function trySalvageCodexFinalizedToolCalls(
 ): boolean {
 	const toolCalls = context.output.content.filter((block): block is ToolCall => block.type === "toolCall");
 	// The fork keeps a finalized function call as the current block until the
-	// next item starts, so only an unfinished block blocks the salvage.
+	// next item starts, so only an unfinished block blocks the salvage. A message
+	// item that has started but produced no text does not either.
 	const pending = runtime.currentBlock;
 	const pendingIsFinalizedToolCall = pending?.type === "toolCall" && runtime.finalizedToolCallIds.has(pending.id);
+	const pendingIsEmptyMessage =
+		runtime.currentItem?.type === "message" &&
+		pending?.type === "text" &&
+		pending.text === "" &&
+		runtime.currentItem.content.every(content =>
+			content.type === "output_text" ? content.text === "" : content.refusal === "",
+		);
+	const isUnexpectedStreamEnd =
+		error instanceof Error && error.message === "Codex stream ended before terminal completion event";
 	if (
-		!isCodexTransientStreamClose(error) ||
+		!(isCodexTransientStreamClose(error) || isUnexpectedStreamEnd) ||
 		toolCalls.length === 0 ||
-		(pending !== null && !pendingIsFinalizedToolCall) ||
-		context.output.content.some(block => block.type !== "thinking" && block.type !== "toolCall") ||
+		(pending !== null && !pendingIsFinalizedToolCall && !pendingIsEmptyMessage) ||
+		context.output.content.some(
+			block =>
+				block.type !== "thinking" && block.type !== "toolCall" && !(block.type === "text" && block.text === ""),
+		) ||
 		toolCalls.some(toolCall => !runtime.finalizedToolCallIds.has(toolCall.id))
 	) {
+		logCodexDebug("codex stream close salvage refused", {
+			error: error instanceof Error ? error.message : String(error),
+			toolCallCount: toolCalls.length,
+			finalizedToolCallCount: toolCalls.filter(toolCall => runtime.finalizedToolCallIds.has(toolCall.id)).length,
+			currentItemType: runtime.currentItem?.type ?? null,
+			currentBlockType: pending?.type ?? null,
+		});
 		return false;
 	}
 
@@ -1505,11 +1533,24 @@ function handleOutputItemDone(
 	if (item.type === "function_call") {
 		const id = encodeResponsesToolCallId(item.call_id, item.id);
 		runtime.finalizedToolCallIds.add(id);
+		// The terminal item's arguments are authoritative. The content block is what
+		// the agent executes, so it must not keep stale deltas or the empty object
+		// it started with when the arguments arrived only in an item snapshot.
+		const terminalArguments =
+			typeof item.arguments === "string" && item.arguments.length > 0 ? item.arguments : undefined;
+		const block = output.content.find(
+			(candidate): candidate is ToolCall & { partialJson: string } =>
+				candidate.type === "toolCall" && candidate.id === id && "partialJson" in candidate,
+		);
+		if (block && terminalArguments !== undefined) {
+			block.partialJson = terminalArguments;
+			block.arguments = parseStreamingJson(terminalArguments);
+		}
 		const toolCall: ToolCall = {
 			type: "toolCall",
 			id,
 			name: codexToolCanonicalName(item.name),
-			arguments: parseStreamingJson(item.arguments || "{}"),
+			arguments: block?.arguments ?? parseStreamingJson(terminalArguments ?? "{}"),
 		};
 		runtime.canSafelyReplayWebsocketOverSse = false;
 		stream.push({ type: "toolcall_end", contentIndex: blockIndex(), toolCall, partial: output });
