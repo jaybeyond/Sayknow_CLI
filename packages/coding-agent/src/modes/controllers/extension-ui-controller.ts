@@ -46,6 +46,15 @@ export class ExtensionUiController {
 
 	constructor(private ctx: InteractiveModeContext) {}
 
+	/** Model switches from extensions refresh the editor chrome, which also syncs the welcome model pills. */
+	async #withModelChangeRefresh<T>(changeModel: () => Promise<T>): Promise<T> {
+		try {
+			return await changeModel();
+		} finally {
+			this.ctx.updateEditorBorderColor();
+		}
+	}
+
 	#clearActiveHookCustom(): void {
 		const component = this.#activeHookCustomComponent;
 		const overlay = this.#activeHookCustomOverlay;
@@ -392,12 +401,13 @@ export class ExtensionUiController {
 				return tool ? { safeSummary: tool.safeSummary, safeSummaryFields: tool.safeSummaryFields } : undefined;
 			},
 			setActiveTools: toolNames => this.ctx.session.setActiveToolsByName(toolNames),
-			setModel: async model => {
-				const key = await this.ctx.session.modelRegistry.getApiKey(model);
-				if (!key) return false;
-				await this.ctx.session.setModel(model, "default", { cause: "user-selection" });
-				return true;
-			},
+			setModel: model =>
+				this.#withModelChangeRefresh(async () => {
+					const key = await this.ctx.session.modelRegistry.getApiKey(model);
+					if (!key) return false;
+					await this.ctx.session.setModel(model, "default", { cause: "user-selection" });
+					return true;
+				}),
 			getThinkingLevel: () => this.ctx.session.thinkingLevel,
 			setThinkingLevel: (level, persist) => this.ctx.session.setThinkingLevel(level, persist),
 			getThinkingVisibility: () => this.ctx.session.getThinkingVisibility(),
@@ -407,7 +417,7 @@ export class ExtensionUiController {
 			setThinkingVisibilityForControl: (visibility, persist) =>
 				this.ctx.session.setThinkingVisibilityForControl(visibility, persist),
 			setModelTemporaryForControl: (model, expectedSessionId) =>
-				this.ctx.session.setModelTemporaryForControl(model, expectedSessionId),
+				this.#withModelChangeRefresh(() => this.ctx.session.setModelTemporaryForControl(model, expectedSessionId)),
 			fetchUsageReportsForControl: () => this.ctx.session.fetchUsageReportsForControl(),
 			getThinkingScopeForControl: () => this.ctx.session.getThinkingScopeForControl(),
 			getCommands: () => getSessionSlashCommands(this.ctx.session),
@@ -442,8 +452,9 @@ export class ExtensionUiController {
 			compact: instructionsOrOptions => this.#compactSession(instructionsOrOptions),
 			getSystemPrompt: () => this.ctx.session.systemPrompt,
 			clearContext: () => this.ctx.session.clearContext(),
-			cycleModel: () => this.ctx.session.cycleModel(),
-			setModelProfile: name => this.ctx.session.activateModelProfileForControl(name),
+			cycleModel: () => this.#withModelChangeRefresh(() => this.ctx.session.cycleModel()),
+			setModelProfile: name =>
+				this.#withModelChangeRefresh(() => this.ctx.session.activateModelProfileForControl(name)),
 			cycleThinkingLevel: () => this.ctx.session.cycleThinkingLevel(),
 			setQueueMode: (kind, mode) => {
 				if (kind === "steering" && (mode === "all" || mode === "one-at-a-time")) {
@@ -691,12 +702,13 @@ export class ExtensionUiController {
 				return tool ? { safeSummary: tool.safeSummary, safeSummaryFields: tool.safeSummaryFields } : undefined;
 			},
 			setActiveTools: toolNames => this.ctx.session.setActiveToolsByName(toolNames),
-			setModel: async model => {
-				const key = await this.ctx.session.modelRegistry.getApiKey(model);
-				if (!key) return false;
-				await this.ctx.session.setModel(model, "default", { cause: "user-selection" });
-				return true;
-			},
+			setModel: model =>
+				this.#withModelChangeRefresh(async () => {
+					const key = await this.ctx.session.modelRegistry.getApiKey(model);
+					if (!key) return false;
+					await this.ctx.session.setModel(model, "default", { cause: "user-selection" });
+					return true;
+				}),
 			getThinkingLevel: () => this.ctx.session.thinkingLevel,
 			setThinkingLevel: (level, persist) => this.ctx.session.setThinkingLevel(level, persist),
 			getThinkingVisibility: () => this.ctx.session.getThinkingVisibility(),
@@ -706,7 +718,7 @@ export class ExtensionUiController {
 			setThinkingVisibilityForControl: (visibility, persist) =>
 				this.ctx.session.setThinkingVisibilityForControl(visibility, persist),
 			setModelTemporaryForControl: (model, expectedSessionId) =>
-				this.ctx.session.setModelTemporaryForControl(model, expectedSessionId),
+				this.#withModelChangeRefresh(() => this.ctx.session.setModelTemporaryForControl(model, expectedSessionId)),
 			fetchUsageReportsForControl: () => this.ctx.session.fetchUsageReportsForControl(),
 			getThinkingScopeForControl: () => this.ctx.session.getThinkingScopeForControl(),
 			getCommands: () => getSessionSlashCommands(this.ctx.session),
@@ -741,8 +753,9 @@ export class ExtensionUiController {
 			compact: instructionsOrOptions => this.#compactSession(instructionsOrOptions),
 			getSystemPrompt: () => this.ctx.session.systemPrompt,
 			clearContext: () => this.ctx.session.clearContext(),
-			cycleModel: () => this.ctx.session.cycleModel(),
-			setModelProfile: name => this.ctx.session.activateModelProfileForControl(name),
+			cycleModel: () => this.#withModelChangeRefresh(() => this.ctx.session.cycleModel()),
+			setModelProfile: name =>
+				this.#withModelChangeRefresh(() => this.ctx.session.activateModelProfileForControl(name)),
 			cycleThinkingLevel: () => this.ctx.session.cycleThinkingLevel(),
 			setQueueMode: (kind, mode) => {
 				if (kind === "steering" && (mode === "all" || mode === "one-at-a-time")) {
@@ -960,7 +973,7 @@ export class ExtensionUiController {
 							// Signal shutdown request
 						},
 						getSystemPrompt: () => [...this.ctx.session.systemPrompt],
-						cycleModel: () => this.ctx.session.cycleModel(),
+						cycleModel: () => this.#withModelChangeRefresh(() => this.ctx.session.cycleModel()),
 						cycleThinkingLevel: () => this.ctx.session.cycleThinkingLevel(),
 						setQueueMode: (kind, mode) => {
 							if (kind === "steering" && (mode === "all" || mode === "one-at-a-time")) {

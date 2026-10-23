@@ -4,6 +4,7 @@ import { formatBuildLabel } from "../../build-metadata";
 import { formatKeyHint, type KeyDisplayContext } from "../../config/keybindings";
 import { type MsgKey, t } from "../../i18n";
 import { theme } from "../../modes/theme/theme";
+import { sanitizeStatusText } from "../shared";
 
 export interface RecentSession {
 	name: string;
@@ -368,10 +369,10 @@ export class WelcomeComponent implements Component {
 		if (this.modelName === "Unknown" || this.modelName.length === 0) {
 			return `${theme.fg("accent", t("welcome.chooseModel"))}${sep}${theme.fg("dim", t("welcome.modelHint"))}`;
 		}
-		const parts = [theme.bold(theme.fg("statusLineModel", this.modelName))];
+		const parts = [theme.bold(theme.fg("statusLineModel", sanitizeStatusText(this.modelName)))];
 		const level = this.#snapshot.thinkingLevel;
 		if (level) parts.push(theme.getThinkingBorderColor(String(level) as ThinkingLevel)(String(level)));
-		else if (this.providerName) parts.push(theme.fg("muted", this.providerName));
+		else if (this.providerName) parts.push(theme.fg("muted", sanitizeStatusText(this.providerName)));
 		return parts.join(sep);
 	}
 

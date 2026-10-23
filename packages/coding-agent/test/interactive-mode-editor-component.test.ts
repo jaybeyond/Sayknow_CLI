@@ -172,6 +172,65 @@ describe("InteractiveMode.setEditorComponent", () => {
 		expect(mode.chatContainer.render(80).join("\n")).toContain("visible extension message");
 	});
 
+	it("keeps the welcome model pills in sync with extension model switches", async () => {
+		vi.spyOn(mode.ui, "start").mockImplementation(() => {});
+		forceTerminalSize(mode, 160, 40);
+		await mode.init();
+		const welcome = mode.ui.children.find(child => child instanceof WelcomeComponent);
+		if (!(welcome instanceof WelcomeComponent)) throw new Error("Expected welcome component");
+		const initial = session.model;
+		const next = session.modelRegistry.find("openai", "gpt-4o");
+		if (!initial || !next) throw new Error("Expected registry models");
+		authStorage.setRuntimeApiKey("openai", "test-key");
+		let actions: ExtensionActions | undefined;
+		const extensionRunner = {
+			initialize(capturedActions: ExtensionActions): void {
+				actions = capturedActions;
+			},
+			getMessageRenderer: () => undefined,
+		};
+		Object.defineProperty(session, "extensionRunner", {
+			configurable: true,
+			value: extensionRunner as unknown as AgentSession["extensionRunner"],
+		});
+		new ExtensionUiController(mode).initializeHookRunner({} as ExtensionUIContext, false);
+		if (!actions) throw new Error("Extension actions were not initialized");
+		const renderWelcome = () => welcome.render(160).map(stripRenderControls).join("\n");
+		expect(renderWelcome()).toContain(initial.name);
+
+		expect(await actions.setModel(next)).toBe(true);
+		expect(session.model).toBe(next);
+
+		const rendered = renderWelcome();
+		expect(rendered).toContain(next.name);
+		expect(rendered).not.toContain(initial.name);
+	});
+
+	it("strips terminal control sequences from initial and switched welcome model metadata", () => {
+		const initialAttack = "clipboard-initial-secret";
+		const switchedAttack = "clipboard-switched-secret";
+		const welcome = new WelcomeComponent(
+			"1.2.3",
+			`initial-\x1b]52;c;${initialAttack}\x07-model`,
+			`provider-\x1b]52;c;${initialAttack}\x07-name`,
+			[],
+			"ascii",
+		);
+		const initialRender = welcome.render(120).join("\n");
+		expect(initialRender).toContain("initial--model");
+		expect(initialRender).not.toContain("\x1b]52;");
+		expect(initialRender).not.toContain(initialAttack);
+
+		welcome.setModel(
+			`switched-\x1b]52;c;${switchedAttack}\x07-model`,
+			`provider-\x1b]52;c;${switchedAttack}\x07-name`,
+		);
+		const switchedRender = welcome.render(120).join("\n");
+		expect(switchedRender).toContain("switched--model");
+		expect(switchedRender).not.toContain("\x1b]52;");
+		expect(switchedRender).not.toContain(switchedAttack);
+	});
+
 	it("renders the default composer as an open rail, not a box", () => {
 		const lines = mode.editor.render(48).map(stripRenderControls);
 
