@@ -365,7 +365,14 @@ export class SlackNotificationDaemon {
 			)
 				return current;
 			if (current?.state === "posting_root") {
-				if (current.rootPublicationOwner === this.#publicationOwnerId) return current;
+				// A live lease of our own belongs to an in-flight post; an expired one is
+				// reclaimed under a new fence exactly like a crashed peer's, otherwise the
+				// root waiter would re-enter postRoot until it gives up (upstream 98cb96aaa7).
+				if (
+					current.rootPublicationOwner === this.#publicationOwnerId &&
+					!this.#leaseExpired(current.rootPublicationLeaseExpiresAt, now)
+				)
+					return current;
 				claimed = true;
 				return nextRecord(current, {
 					rootPublicationOwner: this.#publicationOwnerId,

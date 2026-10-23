@@ -9,7 +9,6 @@ import { getAgentDir, setAgentDir } from "@sayknow-cli/utils";
 
 const originalAgentDir = getAgentDir();
 const originalAgentDirOverride = process.env.SKC_CODING_AGENT_DIR;
-const originalPath = process.env.PATH;
 
 function createContainer() {
 	return {
@@ -58,7 +57,6 @@ describe("/share temporary export security", () => {
 		setAgentDir(originalAgentDir);
 		if (originalAgentDirOverride === undefined) delete process.env.SKC_CODING_AGENT_DIR;
 		else process.env.SKC_CODING_AGENT_DIR = originalAgentDirOverride;
-		process.env.PATH = originalPath;
 	});
 
 	it("uses exclusive owner-private staging and removes it after export failure", async () => {
@@ -176,7 +174,7 @@ process.stdout.write("https://gist.github.com/example/deadbeef\\n");
 `,
 			);
 			await fs.chmod(fakeGh, 0o755);
-			process.env.PATH = `${binDir}:${originalPath ?? ""}`;
+			vi.spyOn(Bun, "which").mockReturnValue(fakeGh);
 
 			let stagedFile = "";
 			const { ctx, editorContainer } = createContext(async file => {

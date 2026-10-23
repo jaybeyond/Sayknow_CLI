@@ -37,10 +37,11 @@ export type ChatDaemonAction = "stop" | "reload";
  * files before retained native authority opens. Generation 14 reloads shared
  * chat daemons after notification configuration parsing changes. Generation 15
  * retires a running owner once its notifications are definitely disabled.
+ * Slack generation 16 reclaims the daemon's own expired root publication lease.
  */
 export const CHAT_DAEMON_GENERATIONS: Readonly<Record<ChatDaemonKind, number>> = {
 	discord: 15,
-	slack: 15,
+	slack: 16,
 };
 
 export function chatDaemonGeneration(kind: ChatDaemonKind): number {

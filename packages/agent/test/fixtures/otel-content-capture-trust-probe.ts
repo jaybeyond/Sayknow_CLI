@@ -10,6 +10,7 @@ import { GenAIAttr, PiGenAIAttr } from "@sayknow-cli/agent-core/telemetry";
 import type { AgentContext, AgentLoopConfig, AgentMessage } from "@sayknow-cli/agent-core/types";
 import type { Message } from "@sayknow-cli/ai";
 import { createMockModel } from "@sayknow-cli/ai/providers/mock";
+import { setProjectDir } from "@sayknow-cli/utils";
 
 const CANARY = "skc-capture-canary";
 const ENV_NAME = "OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT";
@@ -25,6 +26,8 @@ async function main(): Promise<void> {
 	// "delete" removes the key after import and before the first loop.
 	if (beforeLoop === "delete") delete process.env[ENV_NAME];
 	else if (beforeLoop !== undefined) process.env[ENV_NAME] = beforeLoop;
+	const moveTo = process.env.OTEL_CAPTURE_TRUST_MOVE_TO;
+	if (moveTo !== undefined) setProjectDir(moveTo);
 	trace.disable();
 	context.disable();
 	const contextManager = new AsyncLocalStorageContextManager().enable();

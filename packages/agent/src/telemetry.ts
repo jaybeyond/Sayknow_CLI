@@ -47,7 +47,8 @@ import {
 	type ToolChoice,
 	type Usage,
 } from "@sayknow-cli/ai";
-import { $credentialEnv } from "@sayknow-cli/utils";
+import { $credentialEnv, startupProjectEnvSnapshot } from "@sayknow-cli/utils";
+import { canonicalEnvKey } from "@sayknow-cli/utils/env-file";
 import { AgentRunCollector, type AgentRunCoverage, type AgentRunSummary, type ToolStatus } from "./run-collector";
 import type { AgentTool } from "./types";
 
@@ -465,8 +466,16 @@ function readContentCaptureEnv(): ResolvedTelemetryContentCapture {
 	// A present higher rank cannot raise the pin.
 	const trusted = $credentialEnv(CONTENT_CAPTURE_ENV);
 	const live = Bun.env[CONTENT_CAPTURE_ENV];
+	// A live value that came from the project `.env` (Bun auto-load) is not an
+	// operator downgrade or opt-in: it falls back to the trusted pin.
+	const key = canonicalEnvKey(CONTENT_CAPTURE_ENV);
+	const project = startupProjectEnvSnapshot();
+	const projectDeclaration = project.values[key];
+	const liveIsProjectValue =
+		projectDeclaration !== undefined && (project.dynamic.has(key) || live === projectDeclaration);
 	let raw: string | undefined;
 	if (live === undefined) raw = undefined;
+	else if (liveIsProjectValue) raw = trusted;
 	else if (contentCaptureRank(live) < contentCaptureRank(trusted)) raw = live;
 	else raw = trusted;
 	if (!raw) {
