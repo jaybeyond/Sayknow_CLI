@@ -184,7 +184,6 @@ export type ManagedScopeResolution =
 			cause?: { readonly classification: string; readonly diagnostic?: string };
 	  };
 
-
 export interface ManagedCandidate {
 	sessionId: string;
 	path: string;

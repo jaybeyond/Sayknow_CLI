@@ -237,7 +237,9 @@ describe("pi-native encodeStream", () => {
 		const partial = baseAssistant({ errorMessage: `authorization=Bearer ${credential}` });
 		// The fork's error event type carries no snapshot; a provider attaching one
 		// at runtime must still not reach the wire.
-		const events = [{ type: "error", reason: "error", error: errored, partial }] as unknown as AssistantMessageEvent[];
+		const events = [
+			{ type: "error", reason: "error", error: errored, partial },
+		] as unknown as AssistantMessageEvent[];
 
 		const frames = (await collectSse(encodeStream(makeEventStream(events, errored)))).map(parseSseLine);
 		expect(JSON.stringify(frames)).not.toContain(credential);
