@@ -719,6 +719,71 @@ describe("Coordinator MCP canonical SDK controls", () => {
 		});
 		expect(queries).toEqual(["session.last_assistant"]);
 	});
+	// Ported from upstream gajae a22a0e0d90 (#5821).
+	it.each([
+		null,
+		"snapshot payload is unavailable",
+		"snapshot store is closing",
+	])("keeps absent assistant text distinct from missing resources: %s", async payload => {
+		const root = await tempRoot();
+		const server = await createSdkControlServer(root, [], [], query =>
+			query === "session.last_assistant"
+				? payload === null
+					? { type: "query_response", id: "query-1", ok: true, page: { items: [null], complete: true } }
+					: {
+							type: "query_response",
+							id: "query-1",
+							ok: false,
+							error: { code: "resource_gone", message: payload },
+						}
+				: {
+						type: "query_response",
+						id: "query-1",
+						ok: true,
+						page: { items: [{ isStreaming: true }], complete: true, revision: "test" },
+					},
+		);
+		await registerSdkSession(server, root);
+		const tail = await server.callTool("skc_coordinator_read_tail", { session_id: "visible-session" });
+		expect(tail).toMatchObject(
+			payload === "snapshot store is closing"
+				? { ok: false, error: { code: "resource_gone" } }
+				: { ok: true, source: "sdk", lines: [] },
+		);
+	});
+	it("rejects outside-root report evidence as input without exposing the denied path", async () => {
+		const root = await tempRoot();
+		const outsideRoot = await tempRoot();
+		const server = await createSdkControlServer(root, []);
+		await registerSdkSession(server, root);
+		const deniedPath = path.join(outsideRoot, "private-session.jsonl");
+		await fs.writeFile(deniedPath, "private session contents");
+		const request = {
+			session_id: "visible-session",
+			status: "blocked",
+			summary: "evidence validation",
+			evidence_paths: [deniedPath],
+			idempotency_key: "denied-evidence",
+			allow_mutation: true,
+		};
+		const rejected = await server.callTool("skc_coordinator_report_status", request);
+		expect(rejected).toMatchObject({
+			ok: false,
+			reason: "artifact_outside_allowed_roots",
+			error: { code: "invalid_input" },
+		});
+		expect(JSON.stringify(rejected)).not.toContain(outsideRoot);
+		await expect(server.callTool("skc_coordinator_report_status", request)).resolves.toEqual(rejected);
+		const evidencePath = path.join(root, "evidence.txt");
+		await fs.writeFile(evidencePath, "approved evidence");
+		expect(
+			await server.callTool("skc_coordinator_report_status", {
+				...request,
+				evidence_paths: [evidencePath],
+				idempotency_key: "corrected-evidence",
+			}),
+		).toMatchObject({ ok: true });
+	});
 	it("reads active-turn status through SDK context", async () => {
 		const root = await tempRoot();
 		const controls: SdkControl[] = [];

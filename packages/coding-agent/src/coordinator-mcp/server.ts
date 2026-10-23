@@ -85,6 +85,13 @@ interface JsonRpcResponse {
 	error?: { code: number; message: string; data?: unknown };
 }
 
+function artifactRejectionReason(error: unknown): string | undefined {
+	if (!(error instanceof Error)) return undefined;
+	if (error.message.startsWith("coordinator_artifact_outside_allowed_roots:")) return "artifact_outside_allowed_roots";
+	if (error.message === "coordinator_artifact_state_root_denied") return "artifact_state_root_denied";
+	return undefined;
+}
+
 function sinkErrorCode(error: unknown): string | undefined {
 	if (error === null || (typeof error !== "object" && typeof error !== "function")) return undefined;
 	try {
@@ -2505,7 +2512,20 @@ export function createCoordinatorMcpServer(options: CoordinatorMcpServerOptions 
 	}
 
 	async function queryLastAssistant(session: Record<string, unknown>): Promise<string | null> {
-		const item = sdkQueryPageItem(await querySession(session, "session.last_assistant"), "session.last_assistant");
+		let item: unknown;
+		try {
+			item = sdkQueryPageItem(await querySession(session, "session.last_assistant"), "session.last_assistant");
+		} catch (error) {
+			// Compatibility with running older hosts: this exact Q17 diagnostic
+			// denotes an absent text payload, not a missing session or closed store.
+			if (
+				error instanceof SdkClientError &&
+				error.code === "resource_gone" &&
+				error.message === "snapshot payload is unavailable"
+			)
+				return null;
+			throw error;
+		}
 		if (typeof item === "string") return item;
 		const message = asRecord(item);
 		return typeof message?.text === "string"
@@ -4758,6 +4778,14 @@ export function createCoordinatorMcpServer(options: CoordinatorMcpServerOptions 
 			return { ok: false, reason: "unknown_tool", tool: name };
 		} catch (error) {
 			if (error instanceof SdkClientError) return sdkError(error);
+			const artifactReason = artifactRejectionReason(error);
+			// Evidence-root rejections are caller input errors; the denied path stays private.
+			if (artifactReason)
+				return {
+					ok: false,
+					reason: artifactReason,
+					error: { code: "invalid_input", message: "Coordinator request input is invalid." },
+				};
 			return { ok: false, reason: error instanceof Error ? error.message : String(error) };
 		}
 	}

@@ -1840,7 +1840,9 @@ function sdkQuerySurface(
 		kind: ctx.sessionMetadata?.kind ?? "main",
 	});
 	// A continued answer includes its preserved prefix (the same chain print and /copy use).
-	const lastAssistantText = () => lastVisibleAnswerText(ctx.sessionManager.getBranch());
+	// Missing assistant text is an empty observation (null), not an unavailable
+	// snapshot payload: `undefined` would surface as Q17 `resource_gone`.
+	const lastAssistantText = () => lastVisibleAnswerText(ctx.sessionManager.getBranch()) ?? null;
 	const getDiff = async () => {
 		try {
 			const { stdout } = await execFileAsync("git", ["diff", "--no-ext-diff"], {

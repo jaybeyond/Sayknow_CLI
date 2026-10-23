@@ -2761,7 +2761,7 @@ test("SDK host replay gaps are generation-scoped and sequence gaps remain cohere
 	await host.stop();
 });
 
-test("Q17 returns resource_gone without an assistant and reads a completed persisted turn after reopen", async () => {
+test("Q17 returns an empty observation without an assistant and reads a completed persisted turn after reopen", async () => {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "skc-sdk-last-assistant-"));
 	dirs.push(cwd);
 	const original = SessionManager.create(cwd, cwd);
@@ -2827,8 +2827,8 @@ test("Q17 returns resource_gone without an assistant and reads a completed persi
 			String(frames.find(frame => frame.type === "control_command_result" && frame.requestId === "before")?.message),
 		),
 	).toMatchObject({
-		ok: false,
-		error: { code: "resource_gone" },
+		ok: true,
+		page: { items: [null] },
 	});
 	socket.send(
 		JSON.stringify({
