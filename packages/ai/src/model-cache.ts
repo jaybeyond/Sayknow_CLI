@@ -78,7 +78,13 @@ export function closeModelCache(dbPath?: string): boolean {
 }
 
 function migrateCacheSchema(db: Database): void {
-	const columns = db.query("PRAGMA table_info(model_cache)").all() as TableInfoRow[];
+	const tableInfo = db.query("PRAGMA table_info(model_cache)");
+	let columns: TableInfoRow[];
+	try {
+		columns = tableInfo.all() as TableInfoRow[];
+	} finally {
+		tableInfo.finalize();
+	}
 	if (!columns.some(column => column.name === "static_fingerprint")) {
 		db.run("ALTER TABLE model_cache ADD COLUMN static_fingerprint TEXT NOT NULL DEFAULT ''");
 	}
@@ -93,7 +99,13 @@ export function readModelCache<TApi extends Api>(
 ): CacheEntry<TApi> | null {
 	try {
 		const db = getDb(dbPath);
-		const row = db.query<CacheRow, [string]>("SELECT * FROM model_cache WHERE provider_id = ?").get(providerId);
+		const select = db.query<CacheRow, [string]>("SELECT * FROM model_cache WHERE provider_id = ?");
+		let row: CacheRow | null;
+		try {
+			row = select.get(providerId);
+		} finally {
+			select.finalize();
+		}
 		if (!row || row.version !== CACHE_SCHEMA_VERSION) {
 			return null;
 		}
