@@ -13,6 +13,10 @@ const inventoryPath = process.env.SKC_SDK_OPERATION_INVENTORY
 const LOCKED_EXCLUSIONS: Readonly<Record<string, string>> = {
 	"agent_session:getAutoCompactionThresholdTokens":
 		"internal compaction-threshold accessor feeding the /context breakdown; exposed through context.get, not an independent SDK operation",
+	"agent_session:resolvePromptSkillInvocation":
+		"internal prompt-dispatch classifier shared with interactive title seeding, not a user-facing control seam",
+	"agent_session:isLocallyHandledSlashCommand":
+		"internal slash-command classifier that keeps command text out of title seeding, not a user-facing control seam",
 	"slash_command:settings": "visual/local-only command, not a user-facing SDK control seam",
 	"slash_command:theme": "visual/local-only command, not a user-facing SDK control seam",
 	"slash_command:copy": "visual/local-only command, not a user-facing SDK control seam",

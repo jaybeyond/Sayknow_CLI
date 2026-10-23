@@ -270,6 +270,7 @@ import { loadActiveSubskillTools } from "../extensibility/skc-plugins/tools";
 import {
 	buildSkillPromptMessage,
 	getSkillSlashCommandName,
+	type ParsedSkillInvocation,
 	parseSkillInvocations,
 	type Skill,
 	type SkillWarning,
@@ -8107,6 +8108,36 @@ export class AgentSession {
 		}
 	}
 
+	/**
+	 * The loaded skill a prompt's text dispatches to, or undefined when `prompt`
+	 * would submit it as ordinary text (unknown or disabled `/skill:` names,
+	 * chains, or attached images). Single source for dispatch and for callers
+	 * that must mirror it, such as startup title seeding.
+	 */
+	resolvePromptSkillInvocation(text: string, images?: readonly unknown[]): ParsedSkillInvocation | undefined {
+		if (images?.length || !text.startsWith("/skill:")) return undefined;
+		const skillCommands = new Map(this.skills.map(skill => [getSkillSlashCommandName(skill), skill]));
+		const invocations = parseSkillInvocations(text, skillCommands);
+		return invocations.length === 1 ? invocations[0] : undefined;
+	}
+
+	/**
+	 * Whether `prompt` intercepts this slash text as an extension or custom/MCP
+	 * command. Used to keep command arguments away from the title model. Mirrors the
+	 * command lookup in `#tryExecuteExtensionCommand` / `#tryExecuteCustomCommand`
+	 * without executing anything.
+	 */
+	isLocallyHandledSlashCommand(text: string): boolean {
+		if (!text.startsWith("/")) return false;
+		const spaceIndex = text.indexOf(" ");
+		const commandName = spaceIndex === -1 ? text.slice(1) : text.slice(1, spaceIndex);
+		return (
+			this.#extensionRunner?.getCommand(commandName) !== undefined ||
+			this.#customCommands.some(c => c.command.name === commandName) ||
+			this.#mcpPromptCommands.some(c => c.command.name === commandName)
+		);
+	}
+
 	async prompt(text: string, options?: PromptOptions): Promise<void> {
 		assertPromptNotEmpty(text, options?.images);
 		// A newer human prompt makes any in-flight /rename regeneration stale.
@@ -8115,26 +8146,22 @@ export class AgentSession {
 		this.#assertRecoveryHydrationPromoted();
 		const expandPromptTemplates = options?.expandPromptTemplates ?? true;
 
-		if (expandPromptTemplates && text.startsWith("/skill:") && !options?.images?.length) {
-			const skillCommands = new Map(this.skills.map(skill => [getSkillSlashCommandName(skill), skill]));
-			const invocations = parseSkillInvocations(text, skillCommands);
-			if (invocations.length === 1) {
-				const invocation = invocations[0];
-				if (invocation) {
-					await this.invokeSkill(
-						invocation.skill.name,
-						invocation.args,
-						options?.onPreflightAccepted || options?.onPreflightAcceptCommit
-							? {
-									...(options.onPreflightAccepted ? { onPreflightAccepted: options.onPreflightAccepted } : {}),
-									...(options.onPreflightAcceptCommit
-										? { onPreflightAcceptCommit: options.onPreflightAcceptCommit }
-										: {}),
-								}
-							: undefined,
-					);
-					return;
-				}
+		if (expandPromptTemplates) {
+			const invocation = this.resolvePromptSkillInvocation(text, options?.images);
+			if (invocation) {
+				await this.invokeSkill(
+					invocation.skill.name,
+					invocation.args,
+					options?.onPreflightAccepted || options?.onPreflightAcceptCommit
+						? {
+								...(options.onPreflightAccepted ? { onPreflightAccepted: options.onPreflightAccepted } : {}),
+								...(options.onPreflightAcceptCommit
+									? { onPreflightAcceptCommit: options.onPreflightAcceptCommit }
+									: {}),
+							}
+						: undefined,
+				);
+				return;
 			}
 		}
 
