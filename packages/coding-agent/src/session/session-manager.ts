@@ -4043,6 +4043,68 @@ const SESSION_LIST_MAX_WORKERS = 16;
 const sessionListPrefixDecoder = new TextDecoder("utf-8", { fatal: false });
 let residentCacheInstanceCounter = 0;
 
+/** Nearest real directory at or above `start`. A file or missing path is not a root. */
+function nearestExistingDirectory(start: string): string | null {
+	let current = path.resolve(start);
+	for (let depth = 0; depth < 64; depth++) {
+		try {
+			if (fs.lstatSync(current).isDirectory()) return current;
+		} catch {
+			// Missing components are not worktree roots.
+		}
+		const parent = path.dirname(current);
+		if (parent === current) return null;
+		current = parent;
+	}
+	return null;
+}
+
+/**
+ * Canonical path of `start`, following a symlink ancestor. The unmatched suffix
+ * is appended so a not-yet-created cache directory classifies the directory the
+ * blob store would create it in.
+ */
+function canonicalCachePath(start: string): string | null {
+	let current = path.resolve(start);
+	const pending: string[] = [];
+	for (let depth = 0; depth < 64; depth++) {
+		try {
+			const stat = fs.lstatSync(current);
+			if (stat.isDirectory() || stat.isSymbolicLink()) {
+				const real = fs.realpathSync(current);
+				return pending.length === 0 ? real : path.join(real, ...pending.reverse());
+			}
+		} catch {
+			// Missing components are resolved from the nearest existing ancestor.
+		}
+		const parent = path.dirname(current);
+		if (parent === current) return null;
+		pending.push(path.basename(current));
+		current = parent;
+	}
+	return null;
+}
+
+/**
+ * Resident text is a second plaintext copy of assistant and tool output. A cache
+ * directory inside a Git worktree can be staged by a later `git add`, so that
+ * cache stays in memory. Both the lexical and the canonical directory are
+ * classified: a symlink outside the worktree must not hide a target inside it.
+ * No existing directory within 64 ancestors, or a resolver error, stays in memory.
+ */
+export function residentTextCacheRootAllowsDisk(cacheRoot: string): boolean {
+	try {
+		const lexical = nearestExistingDirectory(cacheRoot);
+		if (lexical === null || git.repo.resolveSync(lexical) !== null) return false;
+		const canonical = canonicalCachePath(cacheRoot);
+		if (canonical === null) return false;
+		const canonicalDirectory = nearestExistingDirectory(canonical);
+		return canonicalDirectory !== null && git.repo.resolveSync(canonicalDirectory) === null;
+	} catch {
+		return false;
+	}
+}
+
 async function readSessionListPrefix(file: string, storage: SessionStorage, buffer: Buffer): Promise<string> {
 	if (!(storage instanceof FileSessionStorage)) {
 		return storage.readTextPrefix(file, buffer.byteLength);
@@ -4641,7 +4703,12 @@ export class SessionManager {
 			this.#sessionFile &&
 			this.storage instanceof FileSessionStorage
 		) {
-			this.#residentTextBlobStore = new EphemeralBlobStore(this.#residentCacheDir(this.#sessionFile));
+			const cacheDir = this.#residentCacheDir(this.#sessionFile);
+			// The fork keeps the resident cache next to the session file. A session
+			// directory inside a Git worktree keeps resident text in memory instead.
+			if (residentTextCacheRootAllowsDisk(cacheDir)) {
+				this.#residentTextBlobStore = new EphemeralBlobStore(cacheDir);
+			}
 		}
 	}
 

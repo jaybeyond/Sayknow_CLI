@@ -1,11 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import type { AssistantMessage } from "@sayknow-cli/ai";
 import { exportSessionToHtml } from "@sayknow-cli/coding-agent/export/html";
 import { SessionManager, type SessionMessageEntry } from "@sayknow-cli/coding-agent/session/session-manager";
 import * as native from "@sayknow-cli/natives";
-import { getConfigRootDir } from "@sayknow-cli/utils";
 
 const tempDirs: string[] = [];
 afterEach(async () => {
@@ -14,9 +14,7 @@ afterEach(async () => {
 });
 
 function tempRoot(prefix = "skc-resident-life-"): string {
-	const parent = getConfigRootDir();
-	fs.mkdirSync(parent, { recursive: true, mode: 0o700 });
-	const dir = fs.mkdtempSync(path.join(parent, prefix));
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
 	tempDirs.push(dir);
 	return dir;
 }
