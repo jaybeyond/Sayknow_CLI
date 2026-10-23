@@ -14881,7 +14881,15 @@ export class AgentSession {
 				(BARE_DEFAULT_SERVER_OVERLOAD_ERROR.test(message.errorMessage ?? "") ||
 					isServerHttpStatus(this.#extractExplicitHttpStatusFromErrorMessage(message.errorMessage ?? ""))) &&
 				(!transportFailure || classifyFallbackTrigger(transportFailure).class === "server");
-			if (!(bareWatchdog || bareThinkingOnly) || !this.#hasCleanContinuationSafety) {
+			// A content-free unexpected socket close is replay-safe when the attempt
+			// carries no conflicting facts; the clean-continuation check below still
+			// gates it, and retry.maxRetries still bounds it.
+			const bareSocketClose =
+				!visibleFailure &&
+				classification === "transient" &&
+				!hasBareDefaultRetryDisqualifyingFacts(message) &&
+				isUnexpectedSocketCloseMessage(message.errorMessage ?? "");
+			if (!(bareWatchdog || bareThinkingOnly || bareSocketClose) || !this.#hasCleanContinuationSafety) {
 				return false;
 			}
 		}
