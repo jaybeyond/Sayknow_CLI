@@ -2922,8 +2922,10 @@ mod tests {
 		assert_eq!(stdout, b"prod:8080");
 	}
 
-	#[cfg(unix)]
 	async fn execute_captured(command: String) -> (ShellExecuteResult, String) {
+		// PROCESS_TEST_LOCK serializes tests that touch the process environment and
+		// exists only on Unix; Windows builds have no such tests contending for it.
+		#[cfg(unix)]
 		let _process_test_guard = PROCESS_TEST_LOCK.lock().await;
 		let (tx, mut rx) = mpsc::unbounded_channel::<String>();
 		let result = execute_shell(
