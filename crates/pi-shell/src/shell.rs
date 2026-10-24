@@ -2922,6 +2922,7 @@ mod tests {
 		assert_eq!(stdout, b"prod:8080");
 	}
 
+	#[cfg(unix)]
 	async fn execute_captured(command: String) -> (ShellExecuteResult, String) {
 		let _process_test_guard = PROCESS_TEST_LOCK.lock().await;
 		let (tx, mut rx) = mpsc::unbounded_channel::<String>();
