@@ -17,6 +17,7 @@ attribution visible:
 - [`oh-my-codex`](https://github.com/jaybeyond/oh-my-codex) — Codex-focused orchestration experiments.
 - [`oh-my-claudecode`](https://github.com/jaybeyond/oh-my-claudecode) — Claude Code workflow exploration.
 - [`jjongguet/gjc-plugin`](https://github.com/jjongguet/gjc-plugin) — contract reference for `packages/coding-agent/bundles/verification-receipts` (MIT License, Copyright (c) 2026 jjongguet). Independent re-implementation, no source copied; license text in that directory's `LICENSE.gjc-plugin`.
+- [`morluto/rea`](https://github.com/morluto/rea) — the `reverse_engineer` tool runs the pinned `rea-agents` npm release (MIT License, Copyright (c) 2026 morluto) on demand. REA is not vendored here; its CLI command list for the pinned version is mirrored in `packages/coding-agent/src/tools/reverse-engineer.ts`.
 
 ## Vendored submodules
 

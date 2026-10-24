@@ -390,6 +390,8 @@ export interface BuildSystemPromptOptions {
 	intentField?: string;
 	/** Whether built-in tool discovery is active; enables the tool-discovery prompt block. */
 	toolDiscoveryActive?: boolean;
+	/** Whether the discoverable `reverse_engineer` tool is registered; enables its routing hint. */
+	reverseEngineerAvailable?: boolean;
 	/** Encourage the agent to delegate via tasks unless changes are trivial. */
 	eagerTasks?: boolean;
 	/** Rules with alwaysApply=true — their full content is injected into the prompt. */
@@ -463,6 +465,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		alwaysApplyRules,
 		intentField,
 		toolDiscoveryActive = false,
+		reverseEngineerAvailable = false,
 		eagerTasks = false,
 		secretsEnabled = false,
 		reasoningLanguage = "off",
@@ -662,6 +665,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		intentTracing: !!intentField,
 		intentField: intentField ?? "",
 		toolDiscoveryActive: toolDiscoveryActive && hasHiddenToolDiscoveryTool,
+		reverseEngineerAvailable,
 		eagerTasks,
 		secretsEnabled,
 		reasoningLanguageEnglish: reasoningLanguage === "english",

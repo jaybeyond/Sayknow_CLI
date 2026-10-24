@@ -560,6 +560,9 @@ export const frSettings: Record<string, string> = {
 		"Activer l'outil skill pour que l'agent puisse enchaîner vers une autre skill disponible à son prochain tour",
 	"set:fetch.enabled:l": "Lire les URL",
 	"set:fetch.enabled:d": "Autoriser l'outil read à récupérer et traiter les URL",
+	"set:reverseEngineer.enabled:l": "Rétro-ingénierie (REA)",
+	"set:reverseEngineer.enabled:d":
+		"Activer l'outil reverse_engineer (REA via npx/bunx) pour construire quelque chose sur le modèle d'un lien, d'une app ou d'un binaire fourni par l'utilisateur",
 	"set:gitlab.enabled:l": "GitLab CLI",
 	"set:gitlab.enabled:d":
 		"Activer l'outil gitlab (répartition par op pour créer/afficher/lister les merge requests et l'état des pipelines via glab)",

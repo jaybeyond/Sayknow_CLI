@@ -2789,6 +2789,17 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"reverseEngineer.enabled": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "tools",
+			label: "Reverse Engineer (REA)",
+			description:
+				"Enable the reverse_engineer tool (REA via npx/bunx) for building something modeled on a user-supplied link, app, or binary",
+		},
+	},
+
 	"github.cache.enabled": {
 		type: "boolean",
 		default: true,

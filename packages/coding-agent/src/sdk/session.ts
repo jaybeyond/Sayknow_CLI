@@ -2177,6 +2177,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				repeatToolDescriptions,
 				intentField,
 				toolDiscoveryActive: effectiveDiscoveryMode === "all" || mcpDiscoveryEnabled,
+				reverseEngineerAvailable: toolRegistry.has("reverse_engineer"),
 				eagerTasks,
 				secretsEnabled,
 				reasoningLanguage,

@@ -573,6 +573,9 @@ export const esSettings: Record<string, string> = {
 		"Habilitar la herramienta skill para que el agente pueda encadenar otra skill disponible en su siguiente turno",
 	"set:fetch.enabled:l": "Leer URLs",
 	"set:fetch.enabled:d": "Permitir que la herramienta read obtenga y procese URLs",
+	"set:reverseEngineer.enabled:l": "Ingeniería inversa (REA)",
+	"set:reverseEngineer.enabled:d":
+		"Habilitar la herramienta reverse_engineer (REA mediante npx/bunx) para construir algo basado en un enlace, app o binario proporcionado por el usuario",
 	"set:gitlab.enabled:l": "GitLab CLI",
 	"set:gitlab.enabled:d":
 		"Habilitar la herramienta gitlab (despacho por op para crear/ver/listar merge requests y estado de pipelines mediante glab)",

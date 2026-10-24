@@ -2504,7 +2504,8 @@ const MODELS_DEV_PROVIDER_DESCRIPTORS_CORE: readonly ModelsDevProviderDescriptor
 	openAiCompletionsDescriptor("deepseek", "deepseek", "https://api.deepseek.com", {
 		// Only ship the v4 family as built-ins; older deepseek-chat / deepseek-reasoner
 		// ids are kept off the catalog until the issue thread asks for them.
-		filterModel: (id, m) => m.tool_call === true && id.startsWith("deepseek-v4"),
+		// `deepseek-flash` is the current Flash name (served by DeepSeek-V4.1-Flash-1017).
+		filterModel: (id, m) => m.tool_call === true && (id.startsWith("deepseek-v4") || id === "deepseek-flash"),
 		compat: {
 			// DeepSeek V4 only accepts `high`/`max`; map lower SKC levels upward so
 			// subagent "minimal" turns stay in documented thinking mode instead of

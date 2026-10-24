@@ -65,6 +65,33 @@ describe("SearchToolBm25Tool", () => {
 		expect(session.getSelected()).toEqual(["mcp__github_create_issue", "mcp__github_list_pull_requests"]);
 	});
 
+	it("reports matches that are already active instead of an empty result", async () => {
+		const session = createSession(tools);
+		const search = new SearchToolBm25Tool(session);
+		await search.execute("first", { query: "github", limit: 2 });
+		const repeat = await search.execute("second", { query: "github", limit: 2 });
+		const content = JSON.parse((repeat.content[0] as { text: string }).text);
+
+		expect(content.activated_tools).toEqual([]);
+		expect(content.already_active_tools).toEqual(["mcp__github_create_issue", "mcp__github_list_pull_requests"]);
+		const fresh = JSON.parse(
+			((await search.execute("third", { query: "find" })).content[0] as { text: string }).text,
+		);
+		expect(fresh).not.toHaveProperty("already_active_tools");
+	});
+
+	it("lists active tools when the session index omits them and nothing new matches", async () => {
+		const session = createSession(tools);
+		await new SearchToolBm25Tool(session).execute("first", { query: "github", limit: 1 });
+		const indexWithoutActive = buildDiscoverableToolSearchIndex(tools.slice(1));
+		const live = Object.assign(session, { getDiscoverableToolSearchIndex: () => indexWithoutActive });
+		const repeat = await new SearchToolBm25Tool(live).execute("second", { query: "create issue" });
+		const content = JSON.parse((repeat.content[0] as { text: string }).text);
+
+		expect(content.match_count).toBe(0);
+		expect(content.already_active_tools).toEqual(["mcp__github_create_issue"]);
+	});
+
 	it("uses the generic cached index for discovery execution", async () => {
 		const session = createSession(tools);
 		const result = await new SearchToolBm25Tool(session).execute("call", { query: "find" });

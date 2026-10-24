@@ -244,6 +244,22 @@ describe("system Handlebars prompt templates", () => {
 		expect(disabled).not.toContain("<tool-discovery>");
 	});
 
+	test("system-prompt routes build-it-like-this requests to reverse_engineer only when it is registered", async () => {
+		const template = await Bun.file(path.join(systemPromptsDir, "system-prompt.md")).text();
+		const hint = "use the activated `reverse_engineer` tool";
+
+		const available = prompt.render(template, {
+			...baseRenderContext,
+			toolDiscoveryActive: true,
+			reverseEngineerAvailable: true,
+		});
+		expect(available).toContain(hint);
+		expect(available).toContain("똑같이 만들어줘");
+
+		const unavailable = prompt.render(template, { ...baseRenderContext, toolDiscoveryActive: true });
+		expect(unavailable).not.toContain(hint);
+	});
+
 	test("system-prompt renders detached subagent semantics", async () => {
 		const templatePath = path.join(systemPromptsDir, "system-prompt.md");
 		const template = await Bun.file(templatePath).text();

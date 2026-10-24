@@ -2165,6 +2165,17 @@
 			},
 			"additionalProperties": false
 		},
+		"reverseEngineer": {
+			"type": "object",
+			"properties": {
+				"enabled": {
+					"type": "boolean",
+					"description": "Enable the reverse_engineer tool (REA via npx/bunx) for building something modeled on a user-supplied link, app, or binary",
+					"default": true
+				}
+			},
+			"additionalProperties": false
+		},
 		"web_search": {
 			"type": "object",
 			"properties": {

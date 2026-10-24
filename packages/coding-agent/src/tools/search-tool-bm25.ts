@@ -45,6 +45,8 @@ export interface SearchToolBm25Details {
 	limit: number;
 	total_tools: number;
 	activated_tools: string[];
+	/** Matching (or, when nothing new matched, all) already-active discovered tools. */
+	already_active_tools: string[];
 	active_selected_tools: string[];
 	tools: SearchToolBm25Match[];
 }
@@ -65,6 +67,7 @@ function buildSearchToolBm25Content(details: SearchToolBm25Details): string {
 	return JSON.stringify({
 		query: details.query,
 		activated_tools: details.activated_tools,
+		...(details.already_active_tools.length > 0 ? { already_active_tools: details.already_active_tools } : {}),
 		match_count: details.tools.length,
 		total_tools: details.total_tools,
 	});
@@ -192,10 +195,17 @@ export class SearchToolBm25Tool implements AgentTool<typeof searchToolBm25Schema
 		const searchIndex = getDiscoverableToolSearchIndexForExecution(this.session);
 		const selectedToolNames = new Set(getSelectedToolNames(this.session));
 		let ranked: Array<{ tool: DiscoverableTool; score: number }> = [];
+		let alreadyActive: string[] = [];
 		try {
-			ranked = searchDiscoverableTools(searchIndex, query, searchIndex.documents.length)
-				.filter(result => !selectedToolNames.has(result.tool.name))
-				.slice(0, limit);
+			const matches = searchDiscoverableTools(searchIndex, query, searchIndex.documents.length);
+			ranked = matches.filter(result => !selectedToolNames.has(result.tool.name)).slice(0, limit);
+			alreadyActive = matches
+				.filter(result => selectedToolNames.has(result.tool.name))
+				.slice(0, limit)
+				.map(result => result.tool.name);
+			// The session index omits active tools, so a repeated search finds nothing. Say what
+			// is already active rather than reporting a bare miss the model reads as "unavailable".
+			if (ranked.length === 0 && alreadyActive.length === 0) alreadyActive = [...selectedToolNames];
 		} catch (error) {
 			if (error instanceof Error) {
 				throw new ToolError(error.message);
@@ -215,6 +225,7 @@ export class SearchToolBm25Tool implements AgentTool<typeof searchToolBm25Schema
 			limit,
 			total_tools: searchIndex.documents.length,
 			activated_tools: activated,
+			already_active_tools: alreadyActive,
 			active_selected_tools: getSelectedToolNames(this.session),
 			tools: ranked.map(result => formatMatch(result.tool, result.score)),
 		};

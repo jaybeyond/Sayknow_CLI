@@ -574,6 +574,9 @@ export const zhSettings: Record<string, string> = {
 	"set:skill.enabled:d": "启用 skill 工具，使代理可在下一轮链接到另一个可用技能",
 	"set:fetch.enabled:l": "读取 URL",
 	"set:fetch.enabled:d": "允许 read 工具获取并处理 URL",
+	"set:reverseEngineer.enabled:l": "逆向工程 (REA)",
+	"set:reverseEngineer.enabled:d":
+		"启用 reverse_engineer 工具（通过 npx/bunx 运行 REA），用于参照用户提供的链接、应用或二进制文件构建类似功能",
 	"set:gitlab.enabled:l": "GitLab CLI",
 	"set:gitlab.enabled:d": "启用 gitlab 工具（通过 glab 对合并请求创建/查看/列表及流水线状态进行基于 op 的调度）",
 	"set:github.enabled:d":

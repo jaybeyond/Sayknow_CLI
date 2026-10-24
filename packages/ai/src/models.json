@@ -12337,6 +12337,53 @@
 		}
 	},
 	"deepseek": {
+		"deepseek-flash": {
+			"id": "deepseek-flash",
+			"name": "DeepSeek V4.1 Flash 1017",
+			"api": "openai-completions",
+			"provider": "deepseek",
+			"baseUrl": "https://api.deepseek.com",
+			"reasoning": true,
+			"input": [
+				"text",
+				"image"
+			],
+			"cost": {
+				"input": 0.15,
+				"output": 0.6,
+				"cacheRead": 0.003,
+				"cacheWrite": 0
+			},
+			"contextWindow": 1048576,
+			"maxTokens": 393216,
+			"compat": {
+				"supportsDeveloperRole": false,
+				"supportsReasoningEffort": true,
+				"reasoningEffortMap": {
+					"minimal": "high",
+					"low": "high",
+					"medium": "high",
+					"high": "high",
+					"xhigh": "max",
+					"max": "max"
+				},
+				"maxTokensField": "max_tokens",
+				"supportsToolChoice": false,
+				"extraBody": {
+					"thinking": {
+						"type": "enabled"
+					}
+				},
+				"reasoningContentField": "reasoning_content",
+				"requiresReasoningContentForToolCalls": true,
+				"requiresAssistantContentForToolCalls": true
+			},
+			"thinking": {
+				"mode": "effort",
+				"minLevel": "minimal",
+				"maxLevel": "xhigh"
+			}
+		},
 		"deepseek-v4-flash": {
 			"id": "deepseek-v4-flash",
 			"name": "DeepSeek V4 Flash",
@@ -12345,16 +12392,17 @@
 			"baseUrl": "https://api.deepseek.com",
 			"reasoning": true,
 			"input": [
-				"text"
+				"text",
+				"image"
 			],
 			"cost": {
-				"input": 0.14,
-				"output": 0.28,
-				"cacheRead": 0.0028,
+				"input": 0.15,
+				"output": 0.6,
+				"cacheRead": 0.003,
 				"cacheWrite": 0
 			},
-			"contextWindow": 1000000,
-			"maxTokens": 384000,
+			"contextWindow": 1048576,
+			"maxTokens": 393216,
 			"compat": {
 				"supportsDeveloperRole": false,
 				"supportsReasoningEffort": true,
@@ -12395,13 +12443,13 @@
 				"image"
 			],
 			"cost": {
-				"input": 0.14,
-				"output": 0.28,
-				"cacheRead": 0.0028,
+				"input": 0.15,
+				"output": 0.6,
+				"cacheRead": 0.003,
 				"cacheWrite": 0
 			},
-			"contextWindow": 1000000,
-			"maxTokens": 384000,
+			"contextWindow": 1048576,
+			"maxTokens": 393216,
 			"compat": {
 				"supportsDeveloperRole": false,
 				"supportsReasoningEffort": true,
@@ -12441,13 +12489,13 @@
 				"text"
 			],
 			"cost": {
-				"input": 0.435,
-				"output": 0.87,
-				"cacheRead": 0.003625,
+				"input": 0.66,
+				"output": 1.98,
+				"cacheRead": 0.022,
 				"cacheWrite": 0
 			},
-			"contextWindow": 1000000,
-			"maxTokens": 384000,
+			"contextWindow": 1048576,
+			"maxTokens": 393216,
 			"compat": {
 				"supportsDeveloperRole": false,
 				"supportsReasoningEffort": true,

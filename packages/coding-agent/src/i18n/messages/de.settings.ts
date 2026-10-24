@@ -589,6 +589,9 @@ export const deSettings: Record<string, string> = {
 		"skill-Tool aktivieren, damit der Agent im nächsten Zug zu einer anderen verfügbaren Skill wechseln kann",
 	"set:fetch.enabled:l": "URLs lesen",
 	"set:fetch.enabled:d": "read-Tool das Abrufen und Verarbeiten von URLs erlauben",
+	"set:reverseEngineer.enabled:l": "Reverse Engineer (REA)",
+	"set:reverseEngineer.enabled:d":
+		"reverse_engineer-Werkzeug aktivieren (REA über npx/bunx), um etwas nach einem vom Benutzer angegebenen Link, einer App oder Binärdatei nachzubauen",
 	"set:gitlab.enabled:l": "GitLab CLI",
 	"set:gitlab.enabled:d":
 		"gitlab-Werkzeug aktivieren (op-basierte Ausführung für Merge-Request-Erstellung/-Ansicht/-Liste und Pipeline-Status über glab)",

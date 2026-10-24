@@ -236,6 +236,12 @@ git clone https://github.com/jaybeyond/Sayknow_CLI.git
 skc plugin install ./Sayknow_CLI/packages/coding-agent/bundles/verification-receipts --user
 ```
 
+## Reverse engineering with REA
+
+Give SKC a link or an app and ask it to build one like it ("make this", "참고해서 만들어줘", "똑같이 만들어줘"). The built-in `reverse_engineer` tool then inspects the shipped product with [REA (Reverse Engineer Anything)](https://github.com/morluto/rea) and reports evidence and limitations, which the agent uses to write the code. Supported targets are websites, Electron/JavaScript apps, native binaries, .NET assemblies and APKs. For a website, the agent captures the page in a headless Chromium (`op: "browsers"` finds one), exports its scripts, and analyzes the module graph.
+
+The tool stays hidden until such a request arrives, and it is not used for ordinary coding or for source repositories. It runs the pinned `rea-agents` release through `npx` or `bunx` on first use, so it needs Node.js or Bun. REA is not bundled because its install tree is about 230 MB. Commands that change the host or a device, open unrestricted debugger consoles, or drive the user's running apps are not exposed. Native binary analysis also needs Hopper, Ghidra or IDA. Turn the tool off with `skc config set reverseEngineer.enabled false`.
+
 ## Works beside your existing agent or bot
 
 | Tool or bot | Recommended SKC command | Boundary |

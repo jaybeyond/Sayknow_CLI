@@ -590,6 +590,9 @@ export const koSettings: Record<string, string> = {
 	"set:skill.enabled:d": "에이전트가 다음 턴에 사용 가능한 다른 스킬로 연결할 수 있도록 skill 도구 활성화",
 	"set:fetch.enabled:l": "URL 읽기",
 	"set:fetch.enabled:d": "read 도구가 URL을 가져와 처리하도록 허용",
+	"set:reverseEngineer.enabled:l": "리버스 엔지니어링 (REA)",
+	"set:reverseEngineer.enabled:d":
+		"reverse_engineer 도구 활성화 (npx/bunx로 REA 실행). 사용자가 준 링크·앱·바이너리를 참고해 비슷하게 만들 때 사용",
 	"set:gitlab.enabled:l": "GitLab CLI",
 	"set:gitlab.enabled:d":
 		"gitlab 도구 활성화 (glab을 통한 머지 리퀘스트 생성/조회/목록 및 파이프라인 상태에 대한 op 기반 디스패치)",

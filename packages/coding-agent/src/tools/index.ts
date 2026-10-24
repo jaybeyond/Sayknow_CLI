@@ -56,6 +56,7 @@ import { ReadTool } from "./read";
 import { RecipeTool } from "./recipe";
 import { RenderMermaidTool } from "./render-mermaid";
 import { ResolveTool } from "./resolve";
+import { ReverseEngineerTool } from "./reverse-engineer";
 import { reportFindingTool } from "./review";
 import { SearchTool } from "./search";
 import { SearchToolBm25Tool } from "./search-tool-bm25";
@@ -98,6 +99,7 @@ export * from "./read";
 export * from "./recipe";
 export * from "./render-mermaid";
 export * from "./resolve";
+export * from "./reverse-engineer";
 export * from "./review";
 export * from "./search";
 export * from "./search-tool-bm25";
@@ -481,6 +483,7 @@ export const BUILTIN_TOOLS: Record<string, ToolFactory> = {
 	ssh: loadSshTool,
 	github: GithubTool.createIf,
 	gitlab: GitlabTool.createIf,
+	reverse_engineer: ReverseEngineerTool.createIf,
 	find: s => new FindTool(s),
 	search: s => new SearchTool(s),
 	locate: LocateTool.createIf,
@@ -706,6 +709,7 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 		if (name === "search") return session.settings.get("search.enabled");
 		if (name === "github") return session.settings.get("github.enabled");
 		if (name === "gitlab") return session.settings.get("gitlab.enabled");
+		if (name === "reverse_engineer") return session.settings.get("reverseEngineer.enabled");
 		if (name === "ast_grep") return session.settings.get("astGrep.enabled");
 		if (name === "ast_edit") return session.settings.get("astEdit.enabled");
 		if (name === "render_mermaid") return session.settings.get("renderMermaid.enabled");
