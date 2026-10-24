@@ -1,7 +1,8 @@
 # Notices
 
 Sayknow-CLI is an **independently developed, MIT-licensed** project. It descends
-from the original MIT work of Mario Zechner and Can Bölük and extends that
+from the original MIT work of Mario Zechner and Can Bölük, and from Gajae Code
+(Yeachan-Heo and Gajae Code Contributors), and extends that
 lineage substantially with its own features, workflows, tooling, and brand. It
 is **not** maintained or endorsed by the original authors.
 
@@ -12,6 +13,7 @@ Sayknow-CLI also builds on lessons from a small family of agent harnesses and ke
 attribution visible:
 
 - [`oh-my-pi`](https://github.com/jaybeyond/oh-my-pi) — the upstream red-octopus lineage and implementation DNA.
+- [`Yeachan-Heo/gajae-code`](https://github.com/Yeachan-Heo/gajae-code) — the `upstream` remote of this repository (MIT License, Copyright (c) 2025-2026 Yeachan-Heo and Gajae Code Contributors). Many fixes are ported from it; commits marked `port` cite the upstream PR and commit. Some ports carry upstream code, others are re-implementations adapted to this fork. The copyright notice is retained in [`LICENSE`](LICENSE).
 - [`oh-my-codex`](https://github.com/jaybeyond/oh-my-codex) — Codex-focused orchestration experiments.
 - [`oh-my-claudecode`](https://github.com/jaybeyond/oh-my-claudecode) — Claude Code workflow exploration.
 - [`jjongguet/gjc-plugin`](https://github.com/jjongguet/gjc-plugin) — contract reference for `packages/coding-agent/bundles/verification-receipts` (MIT License, Copyright (c) 2026 jjongguet). Independent re-implementation, no source copied; license text in that directory's `LICENSE.gjc-plugin`.
