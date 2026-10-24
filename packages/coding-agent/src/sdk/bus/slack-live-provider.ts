@@ -89,7 +89,9 @@ function retryAfterMilliseconds(response: Response, body: SlackApiResponse, maxi
 }
 
 function socketFromGlobal(url: string): SlackWebSocket {
-	return new WebSocket(url);
+	// bun-types 1.4.4 types WebSocket.onerror with ErrorEvent, which is not
+	// assignable to the DOM Event handler this structural interface declares.
+	return new WebSocket(url) as unknown as SlackWebSocket;
 }
 
 /**
