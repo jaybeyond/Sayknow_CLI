@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.7.12] - 2026-10-24
+
 ### Added
 
 - Claude Sonnet 5.5 and Claude Haiku 5.5 on the direct Anthropic API, Amazon Bedrock (unprefixed plus `au.`/`eu.`/`global.`/`jp.`/`us.` profiles) and the gateways that list them; Gemini 4 Argon (`gemini-4-argon`, 65,536 output-token cap across aliases); GPT-6.1 Sol on OpenAI, Codex, Bedrock and Copilot. Long-context pricing tiers and the ultrafast service tier are not part of the fork and are omitted from these rows. (gajae #6872, #6874, #6731, af1dc0f, 08b1ab4)

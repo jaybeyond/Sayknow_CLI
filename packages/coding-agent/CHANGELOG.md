@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.7.12] - 2026-10-24
+
 ### Added
 
 - `reverse_engineer` tool: when you give a link, app, or binary and ask SKC to build one like it ("make this", "참고해서 만들어줘", "똑같이 만들어줘"), the agent inspects the shipped product with [REA](https://github.com/morluto/rea) (`rea-agents@6.7.0`, run through npx/bunx on first use) and builds from the evidence. The tool is hidden until such a request and is not used otherwise. Commands that change the host or a device, open debugger consoles, or drive the user's running apps are not exposed. Disable it with `reverseEngineer.enabled: false`.
