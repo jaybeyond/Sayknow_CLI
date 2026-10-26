@@ -72,6 +72,38 @@ export function isThinkingOnlyFailure(message: AgentMessage | undefined): boolea
 	return thinking;
 }
 
+/**
+ * A failed attempt cut off before any answer text whose only public content is tool
+ * calls: the loop runs tools only after a stream completes, so these calls never ran
+ * and only got placeholder results. Like a reasoning-only failure it holds no answer;
+ * recovery drops it with those placeholders and asks the same model again.
+ */
+function isUnexecutedToolCallFailure(message: AgentMessage): boolean {
+	if (message.role !== "assistant" || message.stopReason !== "error") return false;
+	let toolCall = false;
+	for (const block of message.content) {
+		if (block.type === "toolCall") toolCall = true;
+		else if (block.type === "text" && block.text.trim().length > 0) return false;
+	}
+	return toolCall;
+}
+
+/**
+ * The transcript before its trailing unexecuted tool-call failure, without the error
+ * placeholder results paired with its calls; undefined when the tail is anything else.
+ */
+export function dropUnexecutedToolCallFailure(messages: readonly AgentMessage[]): AgentMessage[] | undefined {
+	const index = messages.findLastIndex(message => message.role === "assistant");
+	if (index === -1) return undefined;
+	const failed = messages[index];
+	if (failed.role !== "assistant" || !isUnexecutedToolCallFailure(failed)) return undefined;
+	const callIds = new Set(failed.content.flatMap(block => (block.type === "toolCall" ? [block.id] : [])));
+	for (const message of messages.slice(index + 1)) {
+		if (message.role !== "toolResult" || !message.isError || !callIds.has(message.toolCallId)) return undefined;
+	}
+	return messages.slice(0, index);
+}
+
 /** Built-in tools whose execution has no side effects and may run again after a restart. */
 const RESTART_SAFE_TOOL_CLASSES = [ReadTool, SearchTool, FindTool, AstGrepTool, LocateTool] as const;
 
@@ -129,7 +161,8 @@ export function findInterruptedToolCalls(messages: readonly AgentMessage[]): Too
  * Tails that cannot be resumed safely: a failed step holding private signed reasoning
  * next to an answer or tool calls (possibly cut off mid-arguments), a call without an
  * id, or unanswered calls whose results could no longer be placed directly after their
- * assistant. A failure that streamed only reasoning is dropped before resuming instead.
+ * assistant. A failure that streamed only reasoning, or tool calls that never ran, is
+ * dropped before resuming instead.
  */
 function hasUnsafeAssistantTail(messages: readonly AgentMessage[]): boolean {
 	const assistantIndex = messages.findLastIndex(message => message.role === "assistant");
@@ -194,14 +227,18 @@ export function resolveAutoResumePolicy(input: AutoResumePolicyInput): AutoResum
 	if (input.userInputPending) return { type: "pause", reason: "user_input_pending" };
 	if (!input.selectorAvailable) return { type: "pause", reason: "selector_unavailable" };
 	if (!input.budgetAdmits) return { type: "pause", reason: "budget_exhausted" };
-	if (hasUnsafeAssistantTail(input.messages)) return { type: "pause", reason: "unsafe_tail" };
-	if (hasVisibleFailedPrefix(input.messages) && !input.prefixReplayable)
-		return { type: "pause", reason: "unsafe_tail" };
-	const tail = input.messages.at(-1);
+	// Tool calls cut off by the failure never ran: the attempt is dropped before resuming,
+	// so only the transcript before it is judged.
+	const withoutAttempt = dropUnexecutedToolCallFailure(input.messages);
+	const messages = withoutAttempt ?? input.messages;
+	if (hasUnsafeAssistantTail(messages)) return { type: "pause", reason: "unsafe_tail" };
+	if (hasVisibleFailedPrefix(messages) && !input.prefixReplayable) return { type: "pause", reason: "unsafe_tail" };
+	const tail = messages.at(-1);
 	if (!tail) return { type: "pause", reason: "not_interrupted" };
-	// Only a restart can find a user message whose request never settled.
+	// Only a restart can find a user message whose request never settled, unless the
+	// failed attempt answering it was just dropped.
 	if (tail.role === "user") {
-		return input.trigger === "restart"
+		return input.trigger === "restart" || withoutAttempt
 			? { type: "resume", mode: "full", interruptedCalls: [] }
 			: { type: "pause", reason: "not_interrupted" };
 	}
@@ -210,7 +247,7 @@ export function resolveAutoResumePolicy(input: AutoResumePolicyInput): AutoResum
 		const settled = !tail.content.some(block => block.type === "toolCall");
 		if (settled) return { type: "pause", reason: "not_interrupted" };
 	}
-	const interruptedCalls = findInterruptedToolCalls(input.messages);
+	const interruptedCalls = findInterruptedToolCalls(messages);
 	if (interruptedCalls.length === 0) return { type: "resume", mode: "full", interruptedCalls };
 	if (!input.selectedTools.some(tool => isRestartSafeTool(tool, input.selectedTools))) {
 		return { type: "pause", reason: "no_restart_safe_tools" };

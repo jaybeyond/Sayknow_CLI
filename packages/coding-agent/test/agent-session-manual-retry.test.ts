@@ -249,6 +249,55 @@ describe("AgentSession manual retry", () => {
 		]);
 	});
 
+	it("drops a failure cut off mid tool call and retries without running or replaying the call", async () => {
+		const model = getTestModel();
+		const mock = createMockModel({
+			responses: [{ content: ["retried after cut-off call"], stopReason: "stop" }],
+		});
+		const messages: AgentMessage[] = [
+			{ role: "user", content: [{ type: "text", text: "write the file" }], timestamp: Date.now() },
+			{
+				role: "assistant",
+				api: model.api,
+				provider: model.provider,
+				model: model.id,
+				content: [{ type: "toolCall", id: "cut-1", name: "write", arguments: { path: "partial" } }],
+				usage: emptyUsage(),
+				stopReason: "error",
+				errorMessage: "The socket connection was closed unexpectedly. (transport=ECONNRESET)",
+				timestamp: Date.now(),
+			},
+			{
+				role: "toolResult",
+				toolCallId: "cut-1",
+				toolName: "write",
+				content: [{ type: "text", text: "Tool execution failed due to an error: socket closed" }],
+				isError: true,
+				timestamp: Date.now(),
+			},
+		];
+		const agent = new Agent({
+			getApiKey: provider => `${provider}-test-key`,
+			initialState: { model, systemPrompt: ["Test"], tools: [], messages },
+			streamFn: mock.stream,
+		});
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "compaction.enabled": false, "retry.enabled": false }),
+			modelRegistry: new ModelRegistry(authStorage),
+		});
+		session.subscribe(() => {});
+
+		await expect(session.retry()).resolves.toBe(true);
+		await session.waitForIdle();
+
+		expect(mock.calls.length).toBe(1);
+		expect(mock.calls[0].context.messages.map(message => message.role)).toEqual(["user"]);
+		expect(session.agent.state.messages.some(message => message.role === "toolResult")).toBe(false);
+		expect(lastAgentMessage(session).content).toContainEqual({ type: "text", text: "retried after cut-off call" });
+	});
+
 	it("returns false when the trailing assistant turn succeeded", async () => {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) {

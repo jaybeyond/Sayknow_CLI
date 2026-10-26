@@ -410,6 +410,7 @@ import {
 	type AutoResumeMarker,
 	type AutoResumeMode,
 	type AutoResumeTrigger,
+	dropUnexecutedToolCallFailure,
 	hasAutoResumeMarkerSinceLastUser,
 	hasVisibleFailedPrefix,
 	INTERRUPTED_TOOL_RESULT_TEXT,
@@ -14888,14 +14889,20 @@ export class AgentSession {
 		// only reasoning holds no answer and its signed blocks cannot be replayed: it
 		// is dropped and retried like a failure that showed nothing.
 		const thinkingOnlyFailure = !managedOutcome && isThinkingOnlyFailure(message);
-		const visibleFailure =
-			!managedOutcome && !thinkingOnlyFailure && assistantMessageHasVisibleOrToolContent(message);
+		// Tool calls cut off by the failure never ran (see #withoutUnexecutedToolCallFailure):
+		// without answer text the attempt is dropped like a reasoning-only failure.
+		const unexecutedToolCallFailure =
+			!managedOutcome &&
+			this.agent.state.messages.findLast(item => item.role === "assistant") === message &&
+			this.#withoutUnexecutedToolCallFailure() !== undefined;
+		const answerlessFailure = thinkingOnlyFailure || unexecutedToolCallFailure;
+		const visibleFailure = !managedOutcome && !answerlessFailure && assistantMessageHasVisibleOrToolContent(message);
 		const visibleContinuation = visibleFailure && this.#canContinueVisibleFailure(message);
 		if (visibleFailure && !visibleContinuation) return false;
 		// Bare defaults admit only clean canonical stream watchdog failures, plus a
-		// transient server failure that streamed only reasoning (e.g. an SSE
-		// overloaded_error after thinking_delta): the provider's own pre-content
-		// retry cannot cover it, and it has no answer to preserve. Completed tool
+		// transient server failure that streamed only reasoning or never-run tool calls
+		// (e.g. an SSE overloaded_error after thinking_delta): the provider's own
+		// pre-content retry cannot cover it, and it has no answer to preserve. Completed tool
 		// pairs and preserved visible output stay in the transcript and are never
 		// re-executed; only hooks/commands/user shell/abort make the run unsafe.
 		if (!managedFallback && !legacyRetryConfigured) {
@@ -14903,8 +14910,8 @@ export class AgentSession {
 				!hasBareDefaultRetryDisqualifyingFacts(message) &&
 				(classification === "transient" || classification === "first_event_timeout") &&
 				BARE_DEFAULT_WATCHDOG_ERROR.test(message.errorMessage ?? "");
-			const bareThinkingOnly =
-				thinkingOnlyFailure &&
+			const bareAnswerless =
+				answerlessFailure &&
 				classification === "transient" &&
 				message.errorKind === undefined &&
 				!BARE_DEFAULT_THROTTLE_ERROR.test(message.errorMessage ?? "") &&
@@ -14919,7 +14926,7 @@ export class AgentSession {
 				classification === "transient" &&
 				!hasBareDefaultRetryDisqualifyingFacts(message) &&
 				isUnexpectedSocketCloseMessage(message.errorMessage ?? "");
-			if (!(bareWatchdog || bareThinkingOnly || bareSocketClose) || !this.#hasCleanContinuationSafety) {
+			if (!(bareWatchdog || bareAnswerless || bareSocketClose) || !this.#hasCleanContinuationSafety) {
 				return false;
 			}
 		}
@@ -15116,7 +15123,10 @@ export class AgentSession {
 			// after the backoff instead (see below).
 			if (!visibleContinuation) {
 				const messages = this.agent.state.messages;
-				if (messages.length > 0 && messages[messages.length - 1].role === "assistant") {
+				const withoutAttempt = unexecutedToolCallFailure ? this.#withoutUnexecutedToolCallFailure() : undefined;
+				if (withoutAttempt) {
+					this.agent.replaceMessages(withoutAttempt);
+				} else if (messages.length > 0 && messages[messages.length - 1].role === "assistant") {
 					this.agent.replaceMessages(messages.slice(0, -1));
 				}
 			}
@@ -15676,6 +15686,18 @@ export class AgentSession {
 			logger.debug("auto_resume_paused", { trigger, reason: decision.reason });
 			if (decision.reason === "already_resumed") {
 				this.emitNotice("info", "Automatic resume was already used for this request.", "retry");
+			} else if (
+				trigger === "interrupted" &&
+				decision.reason !== "disabled" &&
+				decision.reason !== "not_interrupted" &&
+				decision.reason !== "user_input_pending"
+			) {
+				// Otherwise the step just stops: a failed tool-call tail renders only as a tool error.
+				this.emitNotice(
+					"warning",
+					"The interrupted step was not resumed automatically. Send a message to continue.",
+					"retry",
+				);
 			}
 			return false;
 		}
@@ -15719,10 +15741,14 @@ export class AgentSession {
 			logger.warn("auto_resume_abandoned", { trigger, reason: "state changed while the marker was written" });
 			return false;
 		}
-		// A failed attempt that showed nothing, or only private reasoning, is not part of the
-		// answer; resending it only adds an empty assistant turn (the same rule manual retry applies).
+		// A failed attempt that showed nothing, only private reasoning, or tool calls that
+		// never ran is not part of the answer; resending it only adds an empty assistant
+		// turn (the same rule manual retry applies).
+		const withoutAttempt = this.#withoutUnexecutedToolCallFailure();
 		const tailMessage = this.agent.state.messages.at(-1);
-		if (
+		if (placeholders.length === 0 && withoutAttempt) {
+			this.agent.replaceMessages(withoutAttempt);
+		} else if (
 			placeholders.length === 0 &&
 			tailMessage?.role === "assistant" &&
 			(tailMessage.stopReason === "error" || tailMessage.stopReason === "aborted") &&
@@ -15897,11 +15923,27 @@ export class AgentSession {
 	}
 
 	/**
+	 * The transcript without a trailing failed attempt whose only public content is tool
+	 * calls cut off before they could run: the loop executes tools only after a completed
+	 * stream and pairs a failed stream's calls with placeholder results. Opaque transports
+	 * execute calls remotely, so their attempts are never dropped.
+	 */
+	#withoutUnexecutedToolCallFailure(): AgentMessage[] | undefined {
+		const messages = this.agent.state.messages;
+		const failed = messages.findLast(message => message.role === "assistant");
+		if (failed?.role !== "assistant" || failed.api === "cursor-agent" || this.model?.transport === "pi-native") {
+			return undefined;
+		}
+		return dropUnexecutedToolCallFailure(messages);
+	}
+
+	/**
 	 * Manually retry the last failed assistant turn, or resume an interrupted tail
 	 * left by a non-graceful process exit after the user/custom/tool-result message
 	 * was persisted but before the agent emitted a terminal assistant response.
 	 * Removes only a failed/aborted assistant tail with no visible output or tool
-	 * calls, then re-attempts with a fresh retry budget.
+	 * calls, or a failed tail whose cut-off tool calls never ran (with their placeholder
+	 * results), then re-attempts with a fresh retry budget.
 	 * @returns false when the agent is busy, no retryable tail exists, the tail shows
 	 * output or tool calls, a persisted recovery is unresolved, or the step dispatched
 	 * unobservable remote work; true when a retry/resume was scheduled.
@@ -15919,7 +15961,9 @@ export class AgentSession {
 		const lastMsg = messages[messages.length - 1];
 		if (!lastMsg) return false;
 
-		if (lastMsg.role !== "assistant") {
+		const withoutAttempt = this.#withoutUnexecutedToolCallFailure();
+
+		if (lastMsg.role !== "assistant" && !withoutAttempt) {
 			if (!this.#isInterruptedRetryTail(lastMsg)) return false;
 			this.#retryAttempt = 0;
 			this.#endStepRecoveryBudget();
@@ -15927,15 +15971,21 @@ export class AgentSession {
 			return true;
 		}
 
-		const assistantMsg = lastMsg as AssistantMessage;
-		// Explicit retry does not establish the outcome of an interrupted operation
-		// and is never permission to erase a prefix already shown to the user. A failure
-		// that streamed only reasoning holds no answer and is dropped like an empty one.
-		if (!isThinkingOnlyFailure(assistantMsg) && assistantMessageHasVisibleOrToolContent(assistantMsg)) return false;
-		if (assistantMsg.stopReason !== "error" && assistantMsg.stopReason !== "aborted") return false;
+		if (withoutAttempt) {
+			// Cut-off tool calls that never ran are dropped with their placeholder results.
+			this.agent.replaceMessages(withoutAttempt);
+		} else {
+			const assistantMsg = lastMsg as AssistantMessage;
+			// Explicit retry does not establish the outcome of an interrupted operation
+			// and is never permission to erase a prefix already shown to the user. A failure
+			// that streamed only reasoning holds no answer and is dropped like an empty one.
+			if (!isThinkingOnlyFailure(assistantMsg) && assistantMessageHasVisibleOrToolContent(assistantMsg))
+				return false;
+			if (assistantMsg.stopReason !== "error" && assistantMsg.stopReason !== "aborted") return false;
 
-		// Remove the empty failed/aborted assistant message before re-attempting.
-		this.agent.replaceMessages(messages.slice(0, -1));
+			// Remove the empty failed/aborted assistant message before re-attempting.
+			this.agent.replaceMessages(messages.slice(0, -1));
+		}
 
 		// Reset retry budget for a fresh attempt: a manual retry is a new invocation.
 		this.#retryAttempt = 0;

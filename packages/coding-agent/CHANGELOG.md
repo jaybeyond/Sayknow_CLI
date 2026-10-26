@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- A transient failure (e.g. `The socket connection was closed unexpectedly`) that cut off a tool call before it ran no longer ends the step with only a failed tool row. When the attempt streamed no answer text, automatic retry, `/retry`, and restart resume drop the cut-off call with its placeholder error result and ask the same model again; the call is never executed or replayed. When answer text was already shown, the step still stops, and a warning now says it was not resumed automatically.
+
 ## [0.7.12] - 2026-10-24
 
 ### Added

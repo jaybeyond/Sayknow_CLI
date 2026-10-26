@@ -415,6 +415,49 @@ describe("automatic same-model resume", () => {
 		expect(markerCount(session)).toBe(1);
 	});
 
+	it("18d) a restart resumes a step cut off mid tool call without the attempt or re-running the call", async () => {
+		const m = groq();
+		const write = counted("write");
+		const reopened = await interruptedSession({
+			messages: [
+				{ role: "user", content: "update the file", timestamp: Date.now() },
+				{
+					...assistantWithCall(m, "cut1", "write"),
+					content: [
+						{ type: "thinking", thinking: "private plan", thinkingSignature: "sig" },
+						{ type: "toolCall", id: "cut1", name: "write", arguments: { path: "partial" } },
+					],
+					stopReason: "error",
+					errorMessage: "The socket connection was closed unexpectedly. (transport=ECONNRESET)",
+				},
+				{
+					role: "toolResult",
+					toolCallId: "cut1",
+					toolName: "write",
+					content: [{ type: "text", text: "Tool execution failed due to an error: socket closed" }],
+					isError: true,
+					timestamp: Date.now(),
+				},
+			],
+			checkpoint: restartCheckpoint(m),
+		});
+		const log = installReplies([textReply(m.id, "done")]);
+		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		session = build({ model: m, tools: [write.tool, readTool()], sessionManager: reopened });
+		session.agent.replaceMessages(reopened.buildSessionContext().messages);
+
+		await session.continuePersistedHistory();
+		await session.waitForIdle();
+
+		expect(log.bodies).toHaveLength(1);
+		expect(write.runs()).toBe(0);
+		// The never-run call is not replayed, so the full tool set stays available.
+		expect(log.bodies[0]).not.toContain("cut1");
+		expect(log.bodies[0]).not.toContain("private plan");
+		expect(toolNames(log.bodies[0])).toEqual(["read", "write"]);
+		expect(markerCount(session)).toBe(1);
+	});
+
 	it("15) a restart on a different model than the interrupted step pauses", async () => {
 		const m = groq();
 		const reopened = await interruptedSession({
@@ -719,7 +762,8 @@ describe("automatic same-model resume", () => {
 		] as AgentMessage[];
 		expect(findInterruptedToolCalls(completed)).toEqual([]);
 		expect(resolveAutoResumePolicy({ ...base, messages: completed })).toMatchObject({ type: "resume", mode: "full" });
-		// Signed reasoning next to a call, or a cut-off call, in a failed tail never resumes.
+		// A failure cut off mid tool call never ran the call (tools run only after a
+		// completed stream): it is dropped with its placeholder results and resumed.
 		const failedWithThinking: AssistantMessage = {
 			...assistantWithCall(m, "w2", "write"),
 			content: [
@@ -728,8 +772,39 @@ describe("automatic same-model resume", () => {
 			],
 			stopReason: "error",
 		};
+		const placeholder = {
+			role: "toolResult",
+			toolCallId: "w2",
+			toolName: "write",
+			content: [{ type: "text", text: "Tool execution failed due to an error: socket closed" }],
+			isError: true,
+			timestamp: 1,
+		};
+		for (const tail of [[failedWithThinking], [failedWithThinking, placeholder]]) {
+			expect(resolveAutoResumePolicy({ ...base, messages: [base.messages[0], ...tail] as AgentMessage[] })).toEqual({
+				type: "resume",
+				mode: "full",
+				interruptedCalls: [],
+			});
+		}
+		// Signed reasoning next to a call in an aborted tail, or next to answer text, never resumes.
+		const abortedWithThinking: AssistantMessage = { ...failedWithThinking, stopReason: "aborted" };
+		const failedTextAndCall: AssistantMessage = {
+			...failedWithThinking,
+			content: [{ type: "text", text: "partial" }, ...failedWithThinking.content],
+		};
+		for (const failed of [abortedWithThinking, failedTextAndCall]) {
+			expect(resolveAutoResumePolicy({ ...base, messages: [base.messages[0], failed] as AgentMessage[] })).toEqual({
+				type: "pause",
+				reason: "unsafe_tail",
+			});
+		}
+		// A successful result means the call ran: the tail is not dropped.
 		expect(
-			resolveAutoResumePolicy({ ...base, messages: [base.messages[0], failedWithThinking] as AgentMessage[] }),
+			resolveAutoResumePolicy({
+				...base,
+				messages: [base.messages[0], failedWithThinking, { ...placeholder, isError: false }] as AgentMessage[],
+			}),
 		).toEqual({ type: "pause", reason: "unsafe_tail" });
 		// A failure that streamed only reasoning holds no answer: it is dropped and resumed.
 		const failedThinkingOnly: AssistantMessage = {

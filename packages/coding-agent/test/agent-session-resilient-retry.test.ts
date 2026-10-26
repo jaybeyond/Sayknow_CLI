@@ -123,6 +123,10 @@ describe("AgentSession resilient retry", () => {
 		transportFailure?: AssistantMessage["transportFailure"];
 		recoveredContent?: string;
 		partialContent?: string;
+		/** Blocks the failed attempt streamed before the error; overrides `partialContent`. */
+		partialBlocks?: AssistantMessage["content"];
+		/** Roles of every message each request was sent with. */
+		requestedRoles?: string[][];
 		bareDefault?: boolean;
 		messageApi?: AssistantMessage["api"];
 		messageProvider?: string;
@@ -141,6 +145,7 @@ describe("AgentSession resilient retry", () => {
 			streamFn: (requestedModel, context, opts) => {
 				calls++;
 				requestedModels.push(`${requestedModel.provider}/${requestedModel.id}`);
+				options.requestedRoles?.push(context.messages.map(message => message.role));
 				if (calls > 1 && options.recoveredContent) {
 					return createMockModel({ responses: [{ content: [options.recoveredContent] }] }).stream(
 						requestedModel,
@@ -152,7 +157,9 @@ describe("AgentSession resilient retry", () => {
 				queueMicrotask(() => {
 					const message: AssistantMessage = {
 						role: "assistant",
-						content: options.partialContent ? [{ type: "text", text: options.partialContent }] : [],
+						content:
+							options.partialBlocks ??
+							(options.partialContent ? [{ type: "text", text: options.partialContent }] : []),
 						api: options.messageApi ?? requestedModel.api,
 						provider: options.messageProvider ?? requestedModel.provider,
 						model: options.messageModel ?? requestedModel.id,
@@ -1364,6 +1371,70 @@ describe("AgentSession resilient retry", () => {
 		) as AssistantMessage | undefined;
 		expect(failed?.content).toEqual([{ type: "text", text: "already visible" }]);
 		expect(session.messages.some(message => message.role === "custom")).toBe(true);
+	});
+	it("retries a socket close that cut off a tool call before it ran, without replaying the attempt", async () => {
+		const requestedModels: string[] = [];
+		const requestedRoles: string[][] = [];
+		const errorMessage =
+			"The socket connection was closed unexpectedly. For more information, pass `verbose: true` in the second argument to fetch() (transport=ECONNRESET url=<redacted>)";
+		session = buildStatusErrorSession({
+			errorMessage,
+			bareDefault: true,
+			partialBlocks: [
+				{ type: "thinking", thinking: "plan the call", thinkingSignature: "sig" },
+				{ type: "toolCall", id: "call_cut", name: "eval", arguments: { code: "print(" } },
+			],
+			recoveredContent: "recovered",
+			requestedModels,
+			requestedRoles,
+		});
+		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		const { retryStartEvents, retryEndEvents } = track(session);
+
+		await session.prompt("bare-config socket close mid tool call");
+		await session.waitForIdle();
+
+		expect(retryStartEvents).toHaveLength(1);
+		expect(requestedModels).toHaveLength(2);
+		// The cut-off call and its placeholder result are never sent back.
+		expect(requestedRoles[1]).toEqual(["user"]);
+		expect(retryEndEvents).toEqual([expect.objectContaining({ success: true })]);
+		expect(session.agent.state.messages.some(message => message.role === "toolResult")).toBe(false);
+		expect(lastAssistant(session)).toMatchObject({
+			stopReason: "stop",
+			content: [{ type: "text", text: "recovered" }],
+		});
+	});
+	it("does not replay a socket close after answer text next to a cut-off tool call", async () => {
+		const requestedModels: string[] = [];
+		session = buildStatusErrorSession({
+			errorMessage: "The socket connection was closed unexpectedly. (transport=ECONNRESET)",
+			bareDefault: true,
+			partialBlocks: [
+				{ type: "text", text: "already visible" },
+				{ type: "toolCall", id: "call_cut", name: "eval", arguments: {} },
+			],
+			recoveredContent: "should-not-reach",
+			requestedModels,
+		});
+		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		const { retryStartEvents } = track(session);
+		const notices: string[] = [];
+		session.subscribe(event => {
+			if (event.type === "notice") notices.push(event.message);
+		});
+
+		await session.prompt("bare-config visible socket close mid tool call");
+		await session.waitForIdle();
+
+		expect(retryStartEvents).toHaveLength(0);
+		expect(requestedModels).toHaveLength(1);
+		const failed = session.messages.find(
+			message => message.role === "assistant" && (message as AssistantMessage).stopReason === "error",
+		) as AssistantMessage | undefined;
+		expect(failed?.content[0]).toEqual({ type: "text", text: "already visible" });
+		// The stop is announced instead of leaving only a failed tool row behind.
+		expect(notices).toContain("The interrupted step was not resumed automatically. Send a message to continue.");
 	});
 	it("does not retry an unexpected socket close when retry is disabled", async () => {
 		const requestedModels: string[] = [];
