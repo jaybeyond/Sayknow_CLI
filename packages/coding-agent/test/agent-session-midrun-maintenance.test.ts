@@ -416,6 +416,19 @@ describe("AgentSession mid-run maintenance outcomes", () => {
 		expect(rewriteSpy).toHaveBeenCalledTimes(1);
 	});
 
+	it("defers a lowered threshold past mid-run on a million-token window", async () => {
+		// 150K is the configured boundary threshold; inside the run only the 300K ceiling applies.
+		const settings = { "compaction.thresholdTokens": 150_000, "compaction.keepRecentTokens": 10 };
+		session = await buildSession({ contextWindow: 1_000_000, shortCircuit: true, settings });
+		await seedCompactableConversation(session, 200_000);
+		expect(await session.runMidRunMaintenanceForTests(contextOf(session))).toBe("not-needed");
+
+		const over = await buildSession({ contextWindow: 1_000_000, shortCircuit: true, settings });
+		await seedCompactableConversation(over, 320_000);
+		expect(await over.runMidRunMaintenanceForTests(contextOf(over))).toBe("compacted");
+		await over.dispose();
+	});
+
 	it("returns not-needed at exactly the threshold and maintains just past it", async () => {
 		session = await buildSession({ shortCircuit: true, settings: { "compaction.keepRecentTokens": 10 } });
 		const model = session.model!;

@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Inside a tool loop, auto-compaction no longer fires at a lowered `compaction.thresholdTokens` on large-window models. A configured threshold (e.g. 150K on a 1M-token model) now applies at answer boundaries (end of a run, before the next prompt); mid-run, compaction waits until the default ceiling (300K) or the model's usable window, whichever is lower. Models whose usable window is at or below the ceiling still compact mid-run at the configured threshold.
+- Threshold compaction after a finished answer (`stop` with no tool calls) no longer prompts an extra continuation turn. A continuation is still sent when the answer was cut off (for example `length`).
+
+### Fixed
+
+- After compaction, the active SKC workflow skill (`ultragoal`, `deep-interview`, `ralplan`, `team`) gets its instructions back automatically, so the agent no longer re-reads `SKILL.md` after every compaction. The instructions are restored only for a skill invoked on the current branch and only when they are not already in context.
+- The Telegram daemon no longer logs a warning every few seconds when the bot token is rejected (`getChat` 401). It retries the paired-chat privacy check with exponential backoff (15s up to 10 minutes) and logs each distinct failure once.
+- `ask` no longer crashes with `theme.checkbox` undefined in headless and SDK runs.
+- macOS: coordinator MCP `skc_coordinator_read_artifact` works on macOS. It previously refused every artifact because identity checks needed `/proc`; it now resolves the opened handle through `/dev/fd` and verifies the device and inode.
+- macOS: reusing an existing session import returns the same canonical path (`/private/var/...`) as a fresh import.
+
 ## [0.7.13] - 2026-10-26
 
 ### Fixed

@@ -126,6 +126,11 @@ describe("AgentSession auto-compaction continuation", () => {
 		vi.restoreAllMocks();
 	});
 
+	/** A run that ended without finishing its answer (output cut at the token limit). */
+	function unfinishedAnswer(): AssistantMessage {
+		return assistantMessage({ stopReason: "length" });
+	}
+
 	async function driveCompaction(message = assistantMessage()) {
 		sessionManager.appendMessage(message);
 		session.agent.emitExternalEvent({ type: "message_end", message });
@@ -138,7 +143,7 @@ describe("AgentSession auto-compaction continuation", () => {
 		const promptSpy = vi.spyOn(session.agent, "prompt").mockResolvedValue();
 		const events: string[] = [];
 		session.subscribe(event => events.push(event.type));
-		await driveCompaction();
+		await driveCompaction(unfinishedAnswer());
 		await advancePostPrompt(50);
 		await session.waitForIdle();
 		expect(promptSpy).toHaveBeenCalledTimes(1);
@@ -160,7 +165,7 @@ describe("AgentSession auto-compaction continuation", () => {
 		const promptSpy = vi.spyOn(session.agent, "prompt").mockResolvedValue();
 		const events: string[] = [];
 		session.subscribe(event => events.push(event.type));
-		await driveCompaction();
+		await driveCompaction(unfinishedAnswer());
 		await advancePostPrompt(50);
 		await session.waitForIdle();
 		expect(promptSpy).toHaveBeenCalledTimes(1);
@@ -315,8 +320,24 @@ describe("AgentSession auto-compaction continuation", () => {
 
 	it("starts synthetic continuation when no generation supersedes it", async () => {
 		const promptSpy = vi.spyOn(session.agent, "prompt").mockResolvedValue();
-		await driveCompaction();
+		await driveCompaction(unfinishedAnswer());
 		expect(promptSpy).toHaveBeenCalledTimes(1);
+	});
+
+	it("threshold compaction after a finished answer compacts without prompting a continuation", async () => {
+		const continueSpy = vi.spyOn(session.agent, "continue").mockResolvedValue();
+		const promptSpy = vi.spyOn(session.agent, "prompt").mockResolvedValue();
+		const events: string[] = [];
+		session.subscribe(event => events.push(event.type));
+		await driveCompaction();
+		await advancePostPrompt(200);
+		await session.waitForIdle();
+		expect(getRuntimeSignals().filter(signal => signal === "compaction:start:threshold")).toHaveLength(1);
+		expect(events).toContain("auto_compaction_end");
+		expect(promptSpy).not.toHaveBeenCalled();
+		expect(continueSpy).not.toHaveBeenCalled();
+		// Nothing continues the run, so its agent_end is the terminal one.
+		expect(events.filter(type => type === "agent_end")).toHaveLength(1);
 	});
 
 	it("flushes the predecessor terminal event when a queued continuation is cancelled before agent.continue", async () => {
@@ -413,7 +434,7 @@ describe("AgentSession auto-compaction continuation", () => {
 		await createSession({ "compaction.strategy": "handoff" });
 		vi.spyOn(session, "handoff").mockResolvedValue({ document: "handoff", savedPath: "handoff.md" });
 		const promptSpy = vi.spyOn(session.agent, "prompt").mockResolvedValue();
-		await driveCompaction();
+		await driveCompaction(unfinishedAnswer());
 		await advancePostPrompt(50);
 		await session.waitForIdle();
 		expect(promptSpy).toHaveBeenCalledTimes(1);

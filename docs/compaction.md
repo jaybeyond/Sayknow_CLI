@@ -111,7 +111,12 @@ The automatic paths are intentionally different:
   - Context promotion is tried before compaction.
   - If promotion is unavailable, auto maintenance runs with `reason: "threshold"` and `willRetry: false`.
   - With `compaction.strategy: "handoff"`, threshold maintenance starts a new handoff session instead of writing a compaction entry; if handoff returns no document without aborting, it falls back to context-full compaction.
-  - On success, if `compaction.autoContinue !== false`, schedules an agent-authored developer auto-continue prompt from `prompts/system/auto-continue.md`.
+  - On success, if `compaction.autoContinue !== false` and the triggering answer was unfinished (it called tools or stopped for a reason other than `stop`), schedules an agent-authored developer auto-continue prompt from `prompts/system/auto-continue.md`. A finished answer is compacted without a continuation turn.
+
+- **Mid-run maintenance** (inside a tool loop)
+  - Trigger: between tool-loop steps, against `resolveMidRunThresholdTokens(...)`. When the model's usable window (`contextWindow - reserve`) exceeds the default ceiling (300K), a lower configured threshold is deferred to the ceiling, so a 150K threshold on a 1M-token model compacts at answer boundaries instead of mid-task. Smaller windows use the configured threshold as-is.
+  - The run ends with `stopReason: "maintenance"` and the session resumes it with `agent.continue()` on the rewritten context.
+  - After a compaction, if an SKC workflow skill (`deep-interview`, `ralplan`, `ultragoal`, `team`) invoked on the current branch is active and its instructions are no longer in context, they are re-attached as a hidden `workflow-skill-context` message. The same restore runs before the next prompt after an answer-boundary compaction.
 
 - **Idle maintenance**
   - Trigger: `runIdleCompaction()` when not streaming or already compacting.

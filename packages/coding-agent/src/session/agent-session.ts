@@ -66,6 +66,7 @@ import {
 	prepareCompaction,
 	type RemoteCompactionFallbackHealthEvent,
 	type RemoteCompactionFallbackHealthHooks,
+	resolveMidRunThresholdTokens,
 	resolveThresholdTokens,
 	type SummaryOptions,
 	shouldCompact,
@@ -1006,6 +1007,8 @@ function assistantMessageHasVisibleOrToolContent(message: AssistantMessage): boo
 /** Serializers with a verified projection of a failed plain-text assistant prefix. */
 const VISIBLE_CONTINUATION_APIS: ReadonlySet<string> = new Set(["openai-completions", "anthropic-messages"]);
 const RECOVERY_CHECKPOINT_CUSTOM_TYPE = "recovery_checkpoint";
+/** Re-attached workflow skill instructions after compaction summarized the original prompt away. */
+const WORKFLOW_SKILL_CONTEXT_CUSTOM_TYPE = "workflow-skill-context";
 const VISIBLE_CONTINUATION_PROMPT =
 	"The connection was interrupted while you were answering. Your answer above is preserved exactly as the user saw it. Continue directly from where it stops: do not repeat any of it and do not redo completed work.";
 
@@ -1015,6 +1018,11 @@ function isTextVisibleTail(message: AssistantMessage): boolean {
 		message.content.every(block => block.type === "text") &&
 		message.content.some(block => block.type === "text" && block.text.trim().length > 0)
 	);
+}
+
+/** The model ended its turn normally with no pending tool calls: the answer is complete. */
+function isFinishedAnswer(message: AssistantMessage): boolean {
+	return message.stopReason === "stop" && !message.content.some(block => block.type === "toolCall");
 }
 
 function isLocalModelEndpoint(model: Model | undefined): boolean {
@@ -4194,7 +4202,22 @@ export class AgentSession {
 					maintenanceGeneration !== undefined &&
 					this.#promptGeneration === maintenanceGeneration
 				) {
-					this.#scheduleAgentContinue({ generation: maintenanceGeneration, skipCompactionCheck: true });
+					// Compaction may have summarized away the active workflow's instructions;
+					// re-attach them inside the tracked continuation (registered synchronously,
+					// so the run never looks idle) before the loop's first model call.
+					const invokedWorkflowSkills = outcome === "compacted" ? this.#invokedWorkflowSkillArgs() : undefined;
+					this.#scheduleAgentContinue({
+						generation: maintenanceGeneration,
+						skipCompactionCheck: true,
+						beforeContinue:
+							invokedWorkflowSkills && invokedWorkflowSkills.size > 0
+								? async () => {
+										const workflowSkillMessage =
+											await this.#buildWorkflowSkillContextMessage(invokedWorkflowSkills);
+										if (workflowSkillMessage) this.agent.steer(workflowSkillMessage);
+									}
+								: undefined,
+					});
 				}
 				return;
 			}
@@ -4404,6 +4427,8 @@ export class AgentSession {
 		onError?: (error: unknown) => void;
 		/** Run on the current model only: no managed chain, no fallback switch. */
 		pinnedModel?: boolean;
+		/** Runs inside the tracked task after the continue checks pass, before agent.continue. */
+		beforeContinue?: () => Promise<void>;
 	}): Promise<void> {
 		const predecessorAgentEndHold = options?.suppressPredecessorAgentEnd
 			? this.#reserveDeferredAgentEndForContinuation()
@@ -4471,6 +4496,10 @@ export class AgentSession {
 					if (this.#handoffTransitionActive) {
 						skip("handoff_in_progress");
 						return;
+					}
+					if (options?.beforeContinue) {
+						await options.beforeContinue();
+						if (!canContinue()) return;
 					}
 					const predecessorAgentEnd = this.#claimDeferredAgentEndForContinuation(predecessorAgentEndHold);
 					const startsQueuedSuccessor =
@@ -7844,6 +7873,70 @@ export class AgentSession {
 	}
 
 	/**
+	 * The active workflow skill's instructions, when compaction has summarized the
+	 * original skill prompt out of live context. A workflow (ralplan, ultragoal, ...)
+	 * spans many turns and follows its SKILL.md step by step; a summary of it is not
+	 * enough to keep following it, and the model otherwise re-reads the file.
+	 * Returns null while the skill prompt (or a restored copy) is still in context.
+	 */
+	/**
+	 * Workflow skills this branch actually invoked, with their latest args. Sync and
+	 * in-memory so sessions that never ran a workflow skill pay no state-file IO.
+	 * A leftover state row from another session or an abandoned run must not inject
+	 * instructions, so only branch-invoked skills are restore candidates.
+	 */
+	#invokedWorkflowSkillArgs(): Map<string, string> {
+		const invoked = new Map<string, string>();
+		for (const entry of this.sessionManager.getBranch()) {
+			if (entry.type !== "custom_message" || entry.customType !== SKILL_PROMPT_MESSAGE_TYPE) continue;
+			const details = entry.details as { name?: unknown; args?: unknown } | undefined;
+			if (typeof details?.name !== "string" || !isCanonicalSkcWorkflowSkill(details.name)) continue;
+			invoked.set(details.name, typeof details.args === "string" ? details.args : "");
+		}
+		return invoked;
+	}
+
+	async #buildWorkflowSkillContextMessage(invoked: Map<string, string>): Promise<CustomMessage | null> {
+		const sessionId = this.sessionManager.getSessionId();
+		let activeSkill: string | undefined;
+		try {
+			const activeState = await readVisibleSkillActiveState(this.sessionManager.getCwd(), sessionId);
+			activeSkill = activeState?.active_skills
+				?.filter(entry => entry.active !== false && entry.session_id === sessionId)
+				.filter(entry => isCanonicalSkcWorkflowSkill(entry.skill))
+				.sort((a, b) => (b.updated_at ?? "").localeCompare(a.updated_at ?? ""))[0]?.skill;
+		} catch (error) {
+			logger.warn("Failed to read workflow skill state for post-compaction restore", {
+				error: error instanceof Error ? error.message : String(error),
+			});
+			return null;
+		}
+		if (!activeSkill || this.#isDisposed || this.sessionManager.getSessionId() !== sessionId) return null;
+		const skillNameOf = (message: AgentMessage): string | undefined =>
+			message.role === "custom" &&
+			(message.customType === SKILL_PROMPT_MESSAGE_TYPE || message.customType === WORKFLOW_SKILL_CONTEXT_CUSTOM_TYPE)
+				? ((message.details as { name?: unknown } | undefined)?.name as string | undefined)
+				: undefined;
+		if (this.agent.state.messages.some(message => skillNameOf(message) === activeSkill)) return null;
+		const skill = this.skills.find(candidate => candidate.name === activeSkill);
+		const args = invoked.get(activeSkill);
+		if (!skill || args === undefined) return null;
+		const built = await buildSkillPromptMessage(skill, args, {
+			cwd: this.sessionManager.getCwd(),
+			sessionId,
+		});
+		return {
+			role: "custom",
+			customType: WORKFLOW_SKILL_CONTEXT_CUSTOM_TYPE,
+			content: `The conversation was compacted. The active ${activeSkill} workflow's instructions are restored below; keep following them from the current step recorded in its state.\n\n${built.message}`,
+			display: false,
+			details: { name: activeSkill, args: args || undefined },
+			attribution: "agent",
+			timestamp: Date.now(),
+		};
+	}
+
+	/**
 	 * Clear the goal/plan static-once injection signatures so the next prompt
 	 * re-injects the active mode context once. MUST be called whenever the live
 	 * message set is rebuilt in a way that can evict a previously injected
@@ -8538,6 +8631,12 @@ export class AgentSession {
 			const goalModeMessage = this.#buildAutomaticGoalModeMessage();
 			if (goalModeMessage) {
 				messages.push(goalModeMessage);
+			}
+			const invokedWorkflowSkills = this.#invokedWorkflowSkillArgs();
+			const workflowSkillMessage =
+				invokedWorkflowSkills.size > 0 ? await this.#buildWorkflowSkillContextMessage(invokedWorkflowSkills) : null;
+			if (workflowSkillMessage) {
+				messages.push(workflowSkillMessage);
 			}
 			const volatileProjectContextMessage = await this.#buildVolatileProjectContextMessage();
 			if (!this.#isLatestRetainedEphemeralCopy(volatileProjectContextMessage)) {
@@ -12194,7 +12293,11 @@ export class AgentSession {
 			// Try promotion first — if a larger model is available, switch instead of compacting
 			const promoted = await this.#tryContextPromotion(assistantMessage);
 			if (!promoted) {
-				await this.#runAutoCompaction("threshold", false);
+				// A finished answer has nothing to resume; prompting the model to continue
+				// would start an extra turn that can redo the work it just reported.
+				await this.#runAutoCompaction("threshold", false, false, {
+					promptContinuation: !isFinishedAnswer(assistantMessage),
+				});
 			}
 		}
 		return true;
@@ -12249,13 +12352,20 @@ export class AgentSession {
 			// A compaction already in flight (overflow recovery, manual, idle) owns the
 			// context; never double-compact underneath it.
 			if (this.isCompacting) return "not-needed";
+			// The configured threshold is enforced at answer boundaries; inside a run
+			// only the ceiling/window limit applies, so work is not summarized away
+			// and redone mid-task.
+			const runSettings = {
+				...compactionSettings,
+				thresholdTokens: resolveMidRunThresholdTokens(contextWindow, compactionSettings),
+			};
 
 			// Model maxTokens is a capability ceiling, not a per-turn reservation;
 			// track actual context fullness (mirrors the agent_end / pre-prompt checks).
 			const autoCompactionOutputReserveTokens = 0;
 			const anchor = this.#findMidRunUsageAnchor(context.messages);
 			let contextTokens = this.#estimateMidRunContextTokens(context.messages);
-			if (!shouldCompact(contextTokens, contextWindow, compactionSettings, autoCompactionOutputReserveTokens)) {
+			if (!shouldCompact(contextTokens, contextWindow, runSettings, autoCompactionOutputReserveTokens)) {
 				return "not-needed";
 			}
 			// Anti-loop (#1662): a given provider response anchors at most one
@@ -12288,7 +12398,7 @@ export class AgentSession {
 				!shouldCompact(
 					Math.max(0, contextTokens - pruneEstimate.tokensSaved),
 					contextWindow,
-					compactionSettings,
+					runSettings,
 					autoCompactionOutputReserveTokens,
 				)
 			) {
@@ -12296,7 +12406,7 @@ export class AgentSession {
 				if (isAborted()) return "aborted";
 				if (pruneResult) contextTokens = Math.max(0, contextTokens - pruneResult.tokensSaved);
 			}
-			if (!shouldCompact(contextTokens, contextWindow, compactionSettings, autoCompactionOutputReserveTokens)) {
+			if (!shouldCompact(contextTokens, contextWindow, runSettings, autoCompactionOutputReserveTokens)) {
 				return pruneResult?.prunedCount ? "pruned" : "not-needed";
 			}
 
@@ -13588,6 +13698,7 @@ export class AgentSession {
 		deferred = false,
 		options?: {
 			continueAfterMaintenance?: boolean;
+			promptContinuation?: boolean;
 			deferHandoffMaintenance?: boolean;
 			force?: boolean;
 			signal?: AbortSignal;
@@ -13606,6 +13717,7 @@ export class AgentSession {
 		deferred = false,
 		options?: {
 			continueAfterMaintenance?: boolean;
+			promptContinuation?: boolean;
 			deferHandoffMaintenance?: boolean;
 			force?: boolean;
 			signal?: AbortSignal;
@@ -13640,6 +13752,7 @@ export class AgentSession {
 		let action: "context-full" | "handoff" =
 			compactionSettings.strategy === "handoff" && reason !== "overflow" ? "handoff" : "context-full";
 		const continueAfterMaintenance = options?.continueAfterMaintenance !== false;
+		const promptContinuation = continueAfterMaintenance && options?.promptContinuation !== false;
 		// Register the controller before the observable start event so an abort from
 		// a local subscriber, extension, dispose, or caller signal owns this run.
 		this.#autoCompactionAbortController?.abort();
@@ -13703,7 +13816,7 @@ export class AgentSession {
 						willRetry: false,
 					});
 					if (autoCompactionSignal.aborted) return { kind: "aborted", source: "signal" };
-					if (continueAfterMaintenance && reason !== "idle" && compactionSettings.autoContinue !== false) {
+					if (promptContinuation && reason !== "idle" && compactionSettings.autoContinue !== false) {
 						this.#scheduleAutoContinuePrompt(generation);
 					}
 					if (autoCompactionSignal.aborted) return { kind: "aborted", source: "signal" };
@@ -13804,7 +13917,7 @@ export class AgentSession {
 						onSkip: skipReason => this.#logCompactionContinuationSkipped("queued_continue", skipReason),
 						onError: error => this.#logCompactionContinuationError("queued_continue", error),
 					});
-				} else if (continueAfterMaintenance && reason !== "idle" && compactionSettings.autoContinue !== false) {
+				} else if (promptContinuation && reason !== "idle" && compactionSettings.autoContinue !== false) {
 					this.#scheduleAutoContinuePrompt(generation);
 				}
 				return { kind: "skipped" };
@@ -14048,7 +14161,7 @@ export class AgentSession {
 					onSkip: reason => this.#logCompactionContinuationSkipped("queued_continue", reason),
 					onError: error => this.#logCompactionContinuationError("queued_continue", error),
 				});
-			} else if (continueAfterMaintenance && reason !== "idle" && compactionSettings.autoContinue !== false) {
+			} else if (promptContinuation && reason !== "idle" && compactionSettings.autoContinue !== false) {
 				this.#scheduleAutoContinuePrompt(generation);
 			}
 			return { kind: "compacted" };

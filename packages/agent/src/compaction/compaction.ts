@@ -502,6 +502,21 @@ export function resolveThresholdTokens(
 	return Math.floor(contextWindow * (adaptiveThresholdPercent / 100));
 }
 
+/**
+ * Threshold for compaction inside a running tool loop. The configured threshold
+ * is applied at answer boundaries (agent_end, before a prompt). Compacting in the
+ * middle of a run makes the model redo work it already did, so when the window
+ * has room past the default ceiling, a lower configured threshold does not apply
+ * mid-run: the run compacts at the ceiling. Smaller windows have no such room and
+ * keep the configured threshold, which is what keeps them under the provider limit.
+ */
+export function resolveMidRunThresholdTokens(contextWindow: number, settings: CompactionSettings): number {
+	const configured = resolveThresholdTokens(contextWindow, settings);
+	const windowLimit = contextWindow - effectiveReserveTokens(contextWindow, settings);
+	if (windowLimit <= DEFAULT_AUTO_THRESHOLD_CEILING_TOKENS) return configured;
+	return Math.max(configured, DEFAULT_AUTO_THRESHOLD_CEILING_TOKENS);
+}
+
 // ============================================================================
 // Cut point detection
 // ============================================================================
