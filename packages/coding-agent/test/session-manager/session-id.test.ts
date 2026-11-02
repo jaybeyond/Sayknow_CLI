@@ -90,33 +90,37 @@ describe("SessionManager session ids", () => {
 		expect(session.getHeader()?.parentSession).toBe(firstId);
 	});
 
-	it("rolls back fork identity before publishing a transcript when artifact import fails", async () => {
-		using tempDir = TempDir.createSync("@pi-session-fork-rollback-");
-		const destination = SessionManager.managedDestination(tempDir.path(), tempDir.path());
-		const session = SessionManager.create(tempDir.path(), destination);
-		session.appendMessage({ role: "user", content: "hello", timestamp: 1 });
-		await session.ensureOnDisk();
-		await session.flush();
-		await session.saveArtifact("artifact", "test");
-		const oldSessionFile = session.getSessionFile();
-		const oldSessionId = session.getSessionId();
-		if (!oldSessionFile) throw new Error("Expected session file");
-		const injection = injectManagedTreeRename((source, _destination) =>
-			source.includes(".fork-staging") ? publishFailure("io_error", "io_failure") : "passthrough",
-		);
-		try {
-			await expect(session.fork()).rejects.toThrow("io_error");
-			injection.assertHit();
-			expect(session.getSessionFile()).toBe(oldSessionFile);
-			expect(session.getSessionId()).toBe(oldSessionId);
-			const entries = await fs.readdir(path.dirname(oldSessionFile));
-			expect(entries.filter(entry => entry.endsWith(".jsonl"))).toEqual([path.basename(oldSessionFile)]);
-			expect(entries.some(entry => entry.includes("fork-staging"))).toBe(false);
-		} finally {
-			injection.restore();
-			await session.close();
-		}
-	});
+	// Linux-only: final staging removal needs retained RecoveryFsRoot authority; other POSIX hosts keep a detached `.removing` root (cleanup_pending).
+	it.skipIf(process.platform !== "linux")(
+		"rolls back fork identity before publishing a transcript when artifact import fails",
+		async () => {
+			using tempDir = TempDir.createSync("@pi-session-fork-rollback-");
+			const destination = SessionManager.managedDestination(tempDir.path(), tempDir.path());
+			const session = SessionManager.create(tempDir.path(), destination);
+			session.appendMessage({ role: "user", content: "hello", timestamp: 1 });
+			await session.ensureOnDisk();
+			await session.flush();
+			await session.saveArtifact("artifact", "test");
+			const oldSessionFile = session.getSessionFile();
+			const oldSessionId = session.getSessionId();
+			if (!oldSessionFile) throw new Error("Expected session file");
+			const injection = injectManagedTreeRename((source, _destination) =>
+				source.includes(".fork-staging") ? publishFailure("io_error", "io_failure") : "passthrough",
+			);
+			try {
+				await expect(session.fork()).rejects.toThrow("io_error");
+				injection.assertHit();
+				expect(session.getSessionFile()).toBe(oldSessionFile);
+				expect(session.getSessionId()).toBe(oldSessionId);
+				const entries = await fs.readdir(path.dirname(oldSessionFile));
+				expect(entries.filter(entry => entry.endsWith(".jsonl"))).toEqual([path.basename(oldSessionFile)]);
+				expect(entries.some(entry => entry.includes("fork-staging"))).toBe(false);
+			} finally {
+				injection.restore();
+				await session.close();
+			}
+		},
+	);
 
 	it("forks managed artifacts above the recovery-state size cap", async () => {
 		using tempDir = TempDir.createSync("@pi-session-fork-large-artifact-");
@@ -219,36 +223,40 @@ describe("SessionManager session ids", () => {
 		}
 	});
 
-	it("removes published fork artifacts when transcript publication fails", async () => {
-		using tempDir = TempDir.createSync("@pi-session-fork-transcript-failure-");
-		const destination = SessionManager.managedDestination(tempDir.path(), tempDir.path());
-		const session = SessionManager.create(tempDir.path(), destination);
-		session.appendMessage({ role: "user", content: "hello", timestamp: 1 });
-		await session.ensureOnDisk();
-		await session.saveArtifact("artifact", "test");
-		const oldSessionFile = session.getSessionFile();
-		const oldSessionId = session.getSessionId();
-		if (!oldSessionFile) throw new Error("Expected session file");
-		const injection = injectManagedFileRename((_source, destination) =>
-			destination.endsWith(".jsonl") ? publishFailure("io_error", "io_failure") : "passthrough",
-		);
-		try {
-			await expect(session.fork()).rejects.toThrow("io_error");
-			injection.assertHit();
-			expect(session.getSessionFile()).toBe(oldSessionFile);
-			expect(session.getSessionId()).toBe(oldSessionId);
-			const entries = await fs.readdir(path.dirname(oldSessionFile));
-			expect(entries.filter(entry => entry.endsWith(".jsonl"))).toEqual([path.basename(oldSessionFile)]);
-			const artifactDirectories = entries.filter(
-				entry => !entry.startsWith(".") && entry !== path.basename(oldSessionFile),
+	// Linux-only: retained RecoveryFsRoot publishes a new transcript no-replace and removes artifacts; other POSIX hosts use a replacing rename and keep a detached `.removing` root.
+	it.skipIf(process.platform !== "linux")(
+		"removes published fork artifacts when transcript publication fails",
+		async () => {
+			using tempDir = TempDir.createSync("@pi-session-fork-transcript-failure-");
+			const destination = SessionManager.managedDestination(tempDir.path(), tempDir.path());
+			const session = SessionManager.create(tempDir.path(), destination);
+			session.appendMessage({ role: "user", content: "hello", timestamp: 1 });
+			await session.ensureOnDisk();
+			await session.saveArtifact("artifact", "test");
+			const oldSessionFile = session.getSessionFile();
+			const oldSessionId = session.getSessionId();
+			if (!oldSessionFile) throw new Error("Expected session file");
+			const injection = injectManagedFileRename((_source, destination) =>
+				destination.endsWith(".jsonl") ? publishFailure("io_error", "io_failure") : "passthrough",
 			);
-			expect(artifactDirectories).toContain(path.basename(oldSessionFile, ".jsonl"));
-			expect(artifactDirectories).toHaveLength(1);
-		} finally {
-			injection.restore();
-			await session.close();
-		}
-	});
+			try {
+				await expect(session.fork()).rejects.toThrow("io_error");
+				injection.assertHit();
+				expect(session.getSessionFile()).toBe(oldSessionFile);
+				expect(session.getSessionId()).toBe(oldSessionId);
+				const entries = await fs.readdir(path.dirname(oldSessionFile));
+				expect(entries.filter(entry => entry.endsWith(".jsonl"))).toEqual([path.basename(oldSessionFile)]);
+				const artifactDirectories = entries.filter(
+					entry => !entry.startsWith(".") && entry !== path.basename(oldSessionFile),
+				);
+				expect(artifactDirectories).toContain(path.basename(oldSessionFile, ".jsonl"));
+				expect(artifactDirectories).toHaveLength(1);
+			} finally {
+				injection.restore();
+				await session.close();
+			}
+		},
+	);
 
 	it("preserves existing session ids when reopening a saved session", async () => {
 		using tempDir = TempDir.createSync("@pi-session-id-open-");

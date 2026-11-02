@@ -73,7 +73,9 @@ async function setup(cwd: string): Promise<string> {
 	return transcript;
 }
 
-describe("Ultragoal owner-loss recovery", () => {
+// Linux-only: the supervisor proves process identity from /proc and the
+// recovery filesystem is compiled only for Linux (crates/pi-natives recovery_fs.rs).
+describe.skipIf(process.platform !== "linux")("Ultragoal owner-loss recovery", () => {
 	it("resumes only from exact durable terminal JSONL, preserving dirty product files despite live sidecars", async () => {
 		const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "skc-owner-loss-"));
 		try {

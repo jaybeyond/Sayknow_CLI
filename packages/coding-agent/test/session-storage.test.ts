@@ -557,73 +557,89 @@ describe("FileSessionStorageWriter path security", () => {
 		}
 	});
 
-	it("does not truncate through an fd after same-fd security rejects a replacement", () => {
-		const sessionPath = path.join(tempDir, "replacement.jsonl");
-		const protectedPath = `${sessionPath}.secure-b`;
-		fs.writeFileSync(sessionPath, "protected\n");
-		const apply = vi.spyOn(native, "applyOwnerOnlyFdSecurity").mockImplementation(pathname => {
-			fs.renameSync(pathname, protectedPath);
-			fs.writeFileSync(pathname, "attacker replacement\n");
-			return { ok: false, code: "identity_unavailable" };
-		});
+	// Linux-only: native applyOwnerOnlyFdSecurity is cfg(target_os = "linux"); other hosts use pathname security.
+	it.skipIf(process.platform !== "linux")(
+		"does not truncate through an fd after same-fd security rejects a replacement",
+		() => {
+			const sessionPath = path.join(tempDir, "replacement.jsonl");
+			const protectedPath = `${sessionPath}.secure-b`;
+			fs.writeFileSync(sessionPath, "protected\n");
+			const apply = vi.spyOn(native, "applyOwnerOnlyFdSecurity").mockImplementation(pathname => {
+				fs.renameSync(pathname, protectedPath);
+				fs.writeFileSync(pathname, "attacker replacement\n");
+				return { ok: false, code: "identity_unavailable" };
+			});
 
-		expect(() => storage.openWriter(sessionPath, managedOptions({ flags: "w" }))).toThrow("identity_unavailable");
+			expect(() => storage.openWriter(sessionPath, managedOptions({ flags: "w" }))).toThrow("identity_unavailable");
 
-		expect(fs.readFileSync(protectedPath, "utf8")).toBe("protected\n");
-		expect(fs.readFileSync(sessionPath, "utf8")).toBe("attacker replacement\n");
-		apply.mockRestore();
-	});
+			expect(fs.readFileSync(protectedPath, "utf8")).toBe("protected\n");
+			expect(fs.readFileSync(sessionPath, "utf8")).toBe("attacker replacement\n");
+			apply.mockRestore();
+		},
+	);
 
-	it("fails fsync when the live transcript name is replaced after writing", async () => {
-		const sessionPath = path.join(tempDir, "fsync-replacement.jsonl");
-		const detachedPath = `${sessionPath}.detached`;
-		const writer = storage.openWriter(sessionPath, managedOptions({ flags: "w" }));
-		await writer.writeLine("authorized\n");
-		await fsp.rename(sessionPath, detachedPath);
-		await fsp.writeFile(sessionPath, "replacement\n", { mode: 0o600 });
+	// Linux-only: descriptor-bound verifyOwnerOnlyFdSecurity is cfg(target_os = "linux"); other hosts use pathname security.
+	it.skipIf(process.platform !== "linux")(
+		"fails fsync when the live transcript name is replaced after writing",
+		async () => {
+			const sessionPath = path.join(tempDir, "fsync-replacement.jsonl");
+			const detachedPath = `${sessionPath}.detached`;
+			const writer = storage.openWriter(sessionPath, managedOptions({ flags: "w" }));
+			await writer.writeLine("authorized\n");
+			await fsp.rename(sessionPath, detachedPath);
+			await fsp.writeFile(sessionPath, "replacement\n", { mode: 0o600 });
 
-		await expect(writer.fsync()).rejects.toThrow();
-		expect(await fsp.readFile(sessionPath, "utf8")).toBe("replacement\n");
-		await writer.close().catch(() => {});
-	});
+			await expect(writer.fsync()).rejects.toThrow();
+			expect(await fsp.readFile(sessionPath, "utf8")).toBe("replacement\n");
+			await writer.close().catch(() => {});
+		},
+	);
 
-	it("uses caller-fd security rather than pathname security for open writers", async () => {
-		const sessionPath = path.join(tempDir, "fd-security.jsonl");
-		const apply = vi.spyOn(native, "applyOwnerOnlyFdSecurity");
-		const verify = vi.spyOn(native, "verifyOwnerOnlyFdSecurity");
-		const pathApply = vi.spyOn(native, "applyOwnerOnlyPathSecurity");
-		const pathVerify = vi.spyOn(native, "verifyOwnerOnlyPathSecurity");
+	// Linux-only: native *OwnerOnlyFdSecurity is cfg(target_os = "linux"); other hosts use pathname security.
+	it.skipIf(process.platform !== "linux")(
+		"uses caller-fd security rather than pathname security for open writers",
+		async () => {
+			const sessionPath = path.join(tempDir, "fd-security.jsonl");
+			const apply = vi.spyOn(native, "applyOwnerOnlyFdSecurity");
+			const verify = vi.spyOn(native, "verifyOwnerOnlyFdSecurity");
+			const pathApply = vi.spyOn(native, "applyOwnerOnlyPathSecurity");
+			const pathVerify = vi.spyOn(native, "verifyOwnerOnlyPathSecurity");
 
-		const writer = storage.openWriter(sessionPath, managedOptions({ flags: "w" }));
-		writer.writeLineSync("payload\n");
-		await writer.close();
+			const writer = storage.openWriter(sessionPath, managedOptions({ flags: "w" }));
+			writer.writeLineSync("payload\n");
+			await writer.close();
 
-		expect(apply).toHaveBeenCalledWith(sessionPath, "file", expect.any(Number));
-		expect(verify).toHaveBeenCalledWith(sessionPath, "file", expect.any(Number));
-		expect(pathApply).not.toHaveBeenCalled();
-		expect(pathVerify).not.toHaveBeenCalled();
-	});
+			expect(apply).toHaveBeenCalledWith(sessionPath, "file", expect.any(Number));
+			expect(verify).toHaveBeenCalledWith(sessionPath, "file", expect.any(Number));
+			expect(pathApply).not.toHaveBeenCalled();
+			expect(pathVerify).not.toHaveBeenCalled();
+		},
+	);
 
-	it("rejects terminal pathname or descriptor verification before dispatching close", () => {
-		const close = vi.fn();
-		const verify = vi
-			.spyOn(native, "verifyOwnerOnlyFdSecurity")
-			.mockReturnValue({ ok: false, code: "identity_unavailable" });
+	// Linux-only: native verifyOwnerOnlyFdSecurity is cfg(target_os = "linux"); other hosts use pathname security.
+	it.skipIf(process.platform !== "linux")(
+		"rejects terminal pathname or descriptor verification before dispatching close",
+		() => {
+			const close = vi.fn();
+			const verify = vi
+				.spyOn(native, "verifyOwnerOnlyFdSecurity")
+				.mockReturnValue({ ok: false, code: "identity_unavailable" });
 
-		const writer = storage.openWriter(
-			path.join(tempDir, "verify-reject.jsonl"),
-			managedOptions({ closeAdapter: { close } }),
-		);
-		writer.writeLineSync("payload\n");
+			const writer = storage.openWriter(
+				path.join(tempDir, "verify-reject.jsonl"),
+				managedOptions({ closeAdapter: { close } }),
+			);
+			writer.writeLineSync("payload\n");
 
-		expect(() => writer.closeSync()).toThrow("identity_unavailable");
-		expect(writer.getCloseState()).toBe("close_failed_retryable");
-		expect(close).not.toHaveBeenCalled();
+			expect(() => writer.closeSync()).toThrow("identity_unavailable");
+			expect(writer.getCloseState()).toBe("close_failed_retryable");
+			expect(close).not.toHaveBeenCalled();
 
-		verify.mockRestore();
-		writer.closeSync();
-		expect(writer.getCloseState()).toBe("closed");
-	});
+			verify.mockRestore();
+			writer.closeSync();
+			expect(writer.getCloseState()).toBe("closed");
+		},
+	);
 
 	it("rejects a symlinked or junctioned storage parent before opening the writer", async () => {
 		const target = path.join(tempDir, "target");

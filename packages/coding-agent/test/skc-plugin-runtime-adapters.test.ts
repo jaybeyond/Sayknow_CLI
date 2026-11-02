@@ -1,18 +1,29 @@
-import { afterEach, describe, expect, spyOn, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { setAgentDir } from "@sayknow-cli/utils/dirs";
 import {
 	installSkcPluginBundle,
 	loadAlwaysOnPluginTools,
 	renderSkillAdvertisement,
 } from "../src/extensibility/skc-plugins";
+import { captureAgentDirEnv, restoreAgentDirEnv } from "./helpers/agent-dir-override";
 
 const fixturesRoot = path.join(import.meta.dir, "fixtures", "skc-plugins");
 const sixSurface = path.join(fixturesRoot, "valid-six-surface-bundle");
 const tempDirs: string[] = [];
 
+// Isolate the user plugin scope so the developer's real ~/.skc/agent/skc-plugins never leaks in.
+const originalAgentDirEnv = captureAgentDirEnv();
+beforeEach(async () => {
+	const agentRoot = await fs.mkdtemp(path.join(os.tmpdir(), "skc-rt-agent-"));
+	tempDirs.push(agentRoot);
+	setAgentDir(path.join(agentRoot, "agent"));
+});
+
 afterEach(async () => {
+	restoreAgentDirEnv(originalAgentDirEnv);
 	for (const d of tempDirs.splice(0)) await fs.rm(d, { recursive: true, force: true });
 });
 

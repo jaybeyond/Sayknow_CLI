@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -9,13 +9,26 @@ import {
 } from "@sayknow-cli/coding-agent/harness-control-plane/gc-adapter";
 import type { GcContext, GcPidProbe } from "@sayknow-cli/coding-agent/skc-runtime/gc-runtime";
 import { teamWorkersGcAdapter } from "@sayknow-cli/coding-agent/skc-runtime/team-gc";
+import { setAgentDir } from "@sayknow-cli/utils/dirs";
+import { captureAgentDirEnv, restoreAgentDirEnv } from "./helpers/agent-dir-override";
 
 const DEAD_PID = 4242;
 const ALIVE_PID = 4243;
 
 const tempDirs: string[] = [];
 
+// File-lock GC walks the config root and agent dir. Point both at a temp home so
+// the entry-capped walk never scans (or prunes) the developer's real ~/.skc.
+const originalAgentDirEnv = captureAgentDirEnv();
+beforeEach(async () => {
+	const home = await makeTemp();
+	vi.spyOn(os, "homedir").mockReturnValue(home);
+	setAgentDir(path.join(home, ".skc", "agent"));
+});
+
 afterEach(async () => {
+	vi.restoreAllMocks();
+	restoreAgentDirEnv(originalAgentDirEnv);
 	for (const dir of tempDirs.splice(0)) {
 		await fs.rm(dir, { recursive: true, force: true });
 	}

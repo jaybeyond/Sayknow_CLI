@@ -43,7 +43,7 @@ async function initGitRepo(root: string): Promise<void> {
 
 describe("repository binding (#2901)", () => {
 	it("captures and matches the same repository identity", async () => {
-		const root = await fsp.mkdtemp(path.join(os.tmpdir(), "skc-repo-bind-"));
+		const root = await fsp.realpath(await fsp.mkdtemp(path.join(os.tmpdir(), "skc-repo-bind-")));
 		tempRoots.push(root);
 		await initGitRepo(root);
 
@@ -58,7 +58,7 @@ describe("repository binding (#2901)", () => {
 	});
 
 	it("fails closed when active cwd is a sibling repository", async () => {
-		const parent = await fsp.mkdtemp(path.join(os.tmpdir(), "skc-repo-siblings-"));
+		const parent = await fsp.realpath(await fsp.mkdtemp(path.join(os.tmpdir(), "skc-repo-siblings-")));
 		tempRoots.push(parent);
 		const left = path.join(parent, "left");
 		const right = path.join(parent, "right");
@@ -92,7 +92,7 @@ describe("repository binding (#2901)", () => {
 	});
 
 	it("stamps omitted task bindings from session cwd (no implicit unbound lane)", async () => {
-		const root = await fsp.mkdtemp(path.join(os.tmpdir(), "skc-repo-stamp-"));
+		const root = await fsp.realpath(await fsp.mkdtemp(path.join(os.tmpdir(), "skc-repo-stamp-")));
 		tempRoots.push(root);
 		await initGitRepo(root);
 
@@ -103,7 +103,7 @@ describe("repository binding (#2901)", () => {
 	});
 
 	it("rejects declared task binding that points at a sibling repo", async () => {
-		const parent = await fsp.mkdtemp(path.join(os.tmpdir(), "skc-repo-task-sib-"));
+		const parent = await fsp.realpath(await fsp.mkdtemp(path.join(os.tmpdir(), "skc-repo-task-sib-")));
 		tempRoots.push(parent);
 		const left = path.join(parent, "left");
 		const right = path.join(parent, "right");
@@ -119,7 +119,7 @@ describe("repository binding (#2901)", () => {
 	});
 
 	it("preserves source repository identity in a linked git worktree", async () => {
-		const root = await fsp.mkdtemp(path.join(os.tmpdir(), "skc-repo-wt-"));
+		const root = await fsp.realpath(await fsp.mkdtemp(path.join(os.tmpdir(), "skc-repo-wt-")));
 		tempRoots.push(root);
 		const main = path.join(root, "main");
 		const linked = path.join(root, "linked");
@@ -169,7 +169,7 @@ describe("repository binding (#2901)", () => {
 	});
 
 	it("enforces ralplan repository binding on stage write after seed", async () => {
-		const parent = await fsp.mkdtemp(path.join(os.tmpdir(), "skc-ralplan-bind-"));
+		const parent = await fsp.realpath(await fsp.mkdtemp(path.join(os.tmpdir(), "skc-ralplan-bind-")));
 		tempRoots.push(parent);
 		const left = path.join(parent, "left");
 		const right = path.join(parent, "right");

@@ -196,7 +196,9 @@ describe("browser stealth target setup", () => {
 	});
 
 	it("gives a slow page-like target a bounded but non-trivial window to receive user-agent override", async () => {
-		const slowPage = new FakeTarget("page", 200);
+		// The target answers far beyond the 50ms window, so finishing well before it proves the
+		// window is bounded with headroom for a loaded runner (a tight 150ms cap flaked at ~260ms).
+		const slowPage = new FakeTarget("page", 1_000);
 		const browser = new FakeBrowser([slowPage]);
 		const started = performance.now();
 
@@ -204,6 +206,6 @@ describe("browser stealth target setup", () => {
 
 		const elapsed = performance.now() - started;
 		expect(elapsed).toBeGreaterThanOrEqual(45);
-		expect(elapsed).toBeLessThan(150);
+		expect(elapsed).toBeLessThan(700);
 	});
 });

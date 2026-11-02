@@ -33,7 +33,8 @@ function testSlug(value: string): string {
 }
 
 async function createRepo(prefix: string): Promise<string> {
-	const root = await fs.mkdtemp(path.join(os.tmpdir(), prefix));
+	// realpath: macOS tmpdir is a /var -> /private/var symlink.
+	const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), prefix)));
 	cleanupRoots.push(root);
 	run("git", ["init"], root);
 	run("git", ["config", "user.email", "test@example.com"], root);

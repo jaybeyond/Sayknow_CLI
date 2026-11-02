@@ -72,8 +72,19 @@ function injectSafeMutationProof(): void {
 }
 
 describe("SKC tmux session management", () => {
+	// Create paths reserve identities in the agent-dir fence database; isolate it so
+	// reruns never collide with rows (or write into the developer's real ~/.skc).
+	const originalAgentDirEnv = captureAgentDirEnv();
+	const managementAgentRoots: string[] = [];
+	beforeEach(() => {
+		const isolated = fsSync.mkdtempSync(path.join(os.tmpdir(), "skc-tmux-agent-"));
+		managementAgentRoots.push(isolated);
+		setAgentDir(path.join(isolated, "agent"));
+	});
 	afterEach(async () => {
 		vi.restoreAllMocks();
+		restoreAgentDirEnv(originalAgentDirEnv);
+		for (const dir of managementAgentRoots.splice(0)) fsSync.rmSync(dir, { recursive: true, force: true });
 		__setCreateOwnerIsolationForTests(null);
 		__setMutationServerProofForTests(null);
 		await Promise.all(

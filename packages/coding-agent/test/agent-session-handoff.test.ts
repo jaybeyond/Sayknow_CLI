@@ -447,6 +447,8 @@ describe("AgentSession handoff", () => {
 			}),
 			modelRegistry,
 		});
+		// Never read the test runner's real heap: a full-suite heap trips the emergency compaction floor.
+		session.setResourceSampler(() => ({ heapUsedBytes: 0, providerBytes: 0, messageCount: 0, imageBytes: 0 }));
 		session.subscribe(event => {
 			events.push(event);
 		});

@@ -252,14 +252,14 @@ export async function safeOpenCoordinatorArtifact(
 	if (typeof artifactPath !== "string" || artifactPath.trim().length === 0)
 		throw new Error("coordinator_artifact_path_required");
 	if (config.allowedRoots.length === 0) throw new Error("coordinator_artifact_roots_required");
-	if (process.platform !== "linux") throw new Error("artifact_identity_unavailable");
+	if (process.platform !== "linux" && process.platform !== "darwin") throw new Error("artifact_identity_unavailable");
 	const requested = path.resolve(artifactPath);
 	await assertCoordinatorArtifactPath(config, requested);
 	const handle = await fs.open(requested, nodeFs.constants.O_RDONLY | nodeFs.constants.O_NOFOLLOW);
 	try {
 		const opened = await handle.stat({ bigint: true });
 		if (!opened.isFile()) throw new Error("artifact_identity_unavailable");
-		const canonicalTarget = await fs.realpath(`/proc/self/fd/${handle.fd}`);
+		const canonicalTarget = await openedArtifactPath(handle, opened);
 		const canonicalStateRoot = await realpathIfExists(config.stateRoot);
 		const roots = await canonicalAllowedRoots(config);
 		if (isInside(canonicalTarget, canonicalStateRoot)) throw new Error("coordinator_artifact_state_root_denied");
@@ -270,4 +270,15 @@ export async function safeOpenCoordinatorArtifact(
 		await handle.close();
 		throw error;
 	}
+}
+
+/** Canonical path of an opened artifact, derived from the handle rather than the racy requested pathname. */
+async function openedArtifactPath(handle: fs.FileHandle, opened: nodeFs.BigIntStats): Promise<string> {
+	if (process.platform === "linux") return fs.realpath(`/proc/self/fd/${handle.fd}`);
+	// darwin has no /proc; Bun resolves /dev/fd/N via fcntl(F_GETPATH), which follows the opened inode.
+	const fdPath = `/dev/fd/${handle.fd}`;
+	const canonical = await fs.realpath(fdPath).catch(() => fdPath);
+	const named = canonical === fdPath ? null : await fs.lstat(canonical, { bigint: true }).catch(() => null);
+	if (!named || named.dev !== opened.dev || named.ino !== opened.ino) throw new Error("artifact_identity_unavailable");
+	return canonical;
 }

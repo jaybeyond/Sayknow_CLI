@@ -75,7 +75,8 @@ function strictTranscript(id: string, cwd: string): string {
 }
 
 async function fixture() {
-	const root = await fs.mkdtemp(path.join(os.tmpdir(), "skc-managed-write-"));
+	// realpath: macOS tmpdir is a /var -> /private/var symlink.
+	const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "skc-managed-write-")));
 	temporaryDirectories.push(root);
 	const cwd = path.join(root, "workspace");
 	const agentDir = path.join(root, "agent");

@@ -7,6 +7,7 @@ import * as path from "node:path";
 import { canContinuePersistedHistory } from "@sayknow-cli/agent-core";
 import { getAgentDir } from "@sayknow-cli/utils";
 import { withFileLock } from "../config/file-lock";
+import { canonicalizeTrustedPath } from "../session/internal/managed-session-scope";
 import { type SessionDestinationInput, SessionManager } from "../session/session-manager";
 import { FileSessionStorage, type SessionStorageSnapshot } from "../session/session-storage";
 import { parseClaudeCodeTranscript, parseClaudeExport } from "./claude";
@@ -548,7 +549,8 @@ function findExistingWorkspaceImport(
 		}
 		return {
 			targetSessionId: candidate.id,
-			targetPath: candidate.path,
+			// Same canonical form SessionManager gives a freshly materialized import (macOS /var -> /private/var).
+			targetPath: canonicalizeTrustedPath(candidate.path),
 			title:
 				typeof header.title === "string" && header.title.trim()
 					? truncateText(header.title, MAX_TITLE_CHARS)

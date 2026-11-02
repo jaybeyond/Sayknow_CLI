@@ -40,7 +40,9 @@ const repoRoot = path.resolve(import.meta.dir, "..", "..", "..", "..");
 const roots: string[] = [];
 
 async function tempDir(prefix = "skc-handoff-thrift-"): Promise<string> {
-	const dir = await fs.mkdtemp(path.join(os.tmpdir(), prefix));
+	// Canonical path: the runtime binds the real worktree root, and macOS tmpdir is a
+	// /var -> /private/var symlink.
+	const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), prefix)));
 	roots.push(dir);
 	return dir;
 }
@@ -55,9 +57,9 @@ const activeTempArtifact = new RegExp(`${escapedTempRoot}/(?:skill-tool|skc)-[^\
 
 function scrub(text: string): string {
 	return text
+		.replaceAll(/\/private\/var\/[^\n"]+/g, "/tmp/SCRUBBED")
 		.replaceAll(activeTempArtifact, "/tmp/SCRUBBED")
 		.replaceAll(/\/var\/folders\/[^\n"]+/g, "/tmp/SCRUBBED")
-		.replaceAll(/\/private\/var\/[^\n"]+/g, "/tmp/SCRUBBED")
 		.replaceAll(/[0-9a-f]{64}/g, "<sha256>")
 		.replaceAll(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z/g, "<iso>");
 }

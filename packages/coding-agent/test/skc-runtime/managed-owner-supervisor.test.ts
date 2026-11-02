@@ -72,7 +72,9 @@ function fastSigabrtCommand(): string[] {
 	return [process.execPath, "-e", "process.kill(process.pid, 'SIGABRT')"];
 }
 
-describe("managed owner supervisor", () => {
+// Linux-only: the supervisor proves process identity from /proc and the
+// recovery filesystem is compiled only for Linux (crates/pi-natives recovery_fs.rs).
+describe.skipIf(process.platform !== "linux")("managed owner supervisor", () => {
 	it("records one exact durable SIGABRT receipt and exits with the abort status", async () => {
 		const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "skc-managed-owner-"));
 		try {

@@ -564,7 +564,8 @@ describe("SessionManager temp cwd session dirs", () => {
 	}
 
 	beforeEach(() => {
-		testAgentDir = fs.mkdtempSync(path.join(os.tmpdir(), "skc-session-dir-test-"));
+		// realpath: macOS tmpdir is a /var -> /private/var symlink.
+		testAgentDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "skc-session-dir-test-")));
 		setAgentDir(testAgentDir);
 	});
 

@@ -137,6 +137,35 @@ describe("canonical SDK coordinator compatibility handler", () => {
 			});
 		});
 	});
+
+	it("authorizes artifacts by the opened file's canonical location", async () => {
+		await withTempRoot(async root => {
+			// root stays in the un-realpathed os.tmpdir() form (/var -> /private/var on macOS) on purpose.
+			const allowed = path.join(root, "allowed");
+			const outside = path.join(root, "outside");
+			await fs.mkdir(path.join(allowed, "real"), { recursive: true });
+			await fs.mkdir(outside);
+			await Bun.write(path.join(allowed, "real", "inside.txt"), "inside artifact");
+			await Bun.write(path.join(outside, "secret.txt"), "outside secret");
+			await fs.symlink(path.join(allowed, "real"), path.join(allowed, "inside-dir"));
+			await fs.symlink(outside, path.join(allowed, "outside-dir"));
+			await fs.symlink(path.join(outside, "secret.txt"), path.join(allowed, "outside-file.txt"));
+			const server = createCoordinatorMcpServer({ env: { SKC_COORDINATOR_MCP_WORKDIR_ROOTS: allowed } });
+			const read = (artifact: string) => server.callTool("skc_coordinator_read_artifact", { path: artifact });
+			expect(await read(path.join(allowed, "inside-dir", "inside.txt"))).toMatchObject({
+				ok: true,
+				text: "inside artifact",
+			});
+			expect(await read(path.join(allowed, "outside-dir", "secret.txt"))).toEqual({
+				ok: false,
+				reason: "artifact_outside_allowed_roots",
+			});
+			expect(await read(path.join(allowed, "outside-file.txt"))).toEqual({
+				ok: false,
+				reason: "artifact_outside_allowed_roots",
+			});
+		});
+	});
 });
 
 describe("coordinator and hermes check contract", () => {

@@ -120,7 +120,9 @@ async function writeRecoveryEvidence(cwd: string): Promise<string> {
 	return transcript;
 }
 
-describe("managed owner admission", () => {
+// Linux-only: the supervisor proves process identity from /proc and the
+// recovery filesystem is compiled only for Linux (crates/pi-natives recovery_fs.rs).
+describe.skipIf(process.platform !== "linux")("managed owner admission", () => {
 	it("admits only the exact token binding for the current session and generation", async () => {
 		const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "skc-managed-admission-"));
 		try {

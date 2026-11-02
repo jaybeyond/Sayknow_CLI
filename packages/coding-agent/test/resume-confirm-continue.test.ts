@@ -243,7 +243,8 @@ describe("bare resume startup gating", () => {
 	});
 
 	it("uses the scoped managed root for default inventory and strict-open authority", async () => {
-		const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), "skc-resume-managed-root-"));
+		// realpath: macOS tmpdir is a /var -> /private/var symlink.
+		const agentDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "skc-resume-managed-root-")));
 		let listedAgentDir: string | undefined;
 		let openedIdentity: ResumeSessionIdentity | undefined;
 		let openedDestination: SessionDestination | undefined;

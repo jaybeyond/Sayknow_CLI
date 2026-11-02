@@ -2,6 +2,9 @@ import { describe, expect, it } from "bun:test";
 import * as path from "node:path";
 
 const packageDir = path.resolve(import.meta.dir, "..");
+// `bun pm pack --dry-run` runs prepack and packs ~1.6k files (31MB): ~1.5s warm, but past
+// bun's 5s default per-test timeout on a cold or loaded disk.
+const PACK_TEST_TIMEOUT_MS = 30_000;
 
 function packedFiles(): string[] {
 	const result = Bun.spawnSync({
@@ -21,32 +24,40 @@ function packedFiles(): string[] {
 }
 
 describe("coding-agent package files", () => {
-	it("excludes duplicate/generated-source package payloads without dropping runtime generated docs", () => {
-		const files = packedFiles();
-		const fileSet = new Set(files);
+	it(
+		"excludes duplicate/generated-source package payloads without dropping runtime generated docs",
+		() => {
+			const files = packedFiles();
+			const fileSet = new Set(files);
 
-		expect(files.some(file => file.startsWith("vendor/insane-search/engine/tests/"))).toBe(false);
-		expect(fileSet.has("src/export/html/template.html")).toBe(false);
-		expect(fileSet.has("src/export/html/template.css")).toBe(false);
-		expect(fileSet.has("src/export/html/template.js")).toBe(false);
+			expect(files.some(file => file.startsWith("vendor/insane-search/engine/tests/"))).toBe(false);
+			expect(fileSet.has("src/export/html/template.html")).toBe(false);
+			expect(fileSet.has("src/export/html/template.css")).toBe(false);
+			expect(fileSet.has("src/export/html/template.js")).toBe(false);
 
-		expect(fileSet.has("src/export/html/template.generated.ts")).toBe(true);
-		expect(fileSet.has("src/internal-urls/docs-index.generated.ts")).toBe(true);
-		expect(fileSet.has("src/sdk/broker/internal-source.bunfig.toml")).toBe(true);
-		expect(fileSet.has("src/sdk/broker/internal-source-marker-2178.txt")).toBe(true);
-	});
+			expect(fileSet.has("src/export/html/template.generated.ts")).toBe(true);
+			expect(fileSet.has("src/internal-urls/docs-index.generated.ts")).toBe(true);
+			expect(fileSet.has("src/sdk/broker/internal-source.bunfig.toml")).toBe(true);
+			expect(fileSet.has("src/sdk/broker/internal-source-marker-2178.txt")).toBe(true);
+		},
+		PACK_TEST_TIMEOUT_MS,
+	);
 
-	it("packs the vendored mupdf wasm required by published installs", () => {
-		const files = packedFiles();
-		const fileSet = new Set(files);
-		expect(fileSet.has("vendor/mupdf/mupdf-wasm.wasm")).toBe(true);
-		expect(fileSet.has("src/utils/mupdf-wasm.ts")).toBe(true);
-		expect(files.some(file => file.includes("node_modules/mupdf"))).toBe(false);
+	it(
+		"packs the vendored mupdf wasm required by published installs",
+		() => {
+			const files = packedFiles();
+			const fileSet = new Set(files);
+			expect(fileSet.has("vendor/mupdf/mupdf-wasm.wasm")).toBe(true);
+			expect(fileSet.has("src/utils/mupdf-wasm.ts")).toBe(true);
+			expect(files.some(file => file.includes("node_modules/mupdf"))).toBe(false);
 
-		const wasmPath = path.resolve(packageDir, "vendor/mupdf/mupdf-wasm.wasm");
-		const bytes = Bun.file(wasmPath);
-		// Keep the pack-path guard honest: the packed path must resolve to a real
-		// wasm blob, not a missing/LFS stub that would recreate the 0.5.8 crash.
-		expect(bytes.size).toBeGreaterThan(1_000_000);
-	});
+			const wasmPath = path.resolve(packageDir, "vendor/mupdf/mupdf-wasm.wasm");
+			const bytes = Bun.file(wasmPath);
+			// Keep the pack-path guard honest: the packed path must resolve to a real
+			// wasm blob, not a missing/LFS stub that would recreate the 0.5.8 crash.
+			expect(bytes.size).toBeGreaterThan(1_000_000);
+		},
+		PACK_TEST_TIMEOUT_MS,
+	);
 });

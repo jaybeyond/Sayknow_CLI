@@ -114,6 +114,8 @@ describe("AgentSession managed fallback cancellation completion", () => {
 			modelRegistry: new ModelRegistry(authStorage),
 		});
 		session.setConfiguredModelChain("default", [selector(primary), selector(fallback)], "test");
+		// Never read the test runner's real heap: a full-suite heap trips the emergency compaction floor.
+		session.setResourceSampler(() => ({ heapUsedBytes: 0, providerBytes: 0, messageCount: 0, imageBytes: 0 }));
 	}
 
 	it("clears streaming state and emits one cancelled completion when aborted during an attempt", async () => {

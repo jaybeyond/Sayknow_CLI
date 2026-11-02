@@ -1,5 +1,6 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import { resetSettingsForTest, Settings, settings } from "@sayknow-cli/coding-agent/config/settings";
+import { getLanguage, setLanguage } from "@sayknow-cli/coding-agent/i18n/index";
 import { SettingsSelectorComponent } from "@sayknow-cli/coding-agent/modes/components/settings-selector";
 import { initTheme } from "@sayknow-cli/coding-agent/modes/theme/theme";
 
@@ -7,12 +8,16 @@ beforeAll(async () => {
 	await initTheme();
 });
 
+const originalLanguage = getLanguage();
 beforeEach(async () => {
 	resetSettingsForTest();
 	await Settings.init({ inMemory: true });
+	// Settings.init re-applies the "auto" language hook; pin English so labels are locale-independent.
+	setLanguage("en");
 });
 
 afterEach(() => {
+	setLanguage(originalLanguage);
 	resetSettingsForTest();
 });
 

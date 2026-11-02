@@ -101,7 +101,8 @@ describe("SessionManager.moveTo", () => {
 	const originalPiAgentDirEnv = process.env.PI_CODING_AGENT_DIR;
 
 	beforeEach(async () => {
-		testAgentDir = await fsp.mkdtemp(path.join(os.tmpdir(), "skc-move-test-"));
+		// realpath: macOS tmpdir is a /var -> /private/var symlink.
+		testAgentDir = await fsp.realpath(await fsp.mkdtemp(path.join(os.tmpdir(), "skc-move-test-")));
 		setAgentDir(testAgentDir);
 		cwdA = path.join(testAgentDir, "cwd-a");
 		cwdB = path.join(testAgentDir, "cwd-b");

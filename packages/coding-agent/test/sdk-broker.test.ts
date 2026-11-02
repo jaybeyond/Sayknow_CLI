@@ -1236,7 +1236,8 @@ describe("SDK broker identity and discovery", () => {
 	});
 
 	it("preserves typed verified-delete partial-cleanup evidence", async () => {
-		const dir = await temp();
+		// realpath: macOS tmpdir is a /var -> /private/var symlink.
+		const dir = await fs.realpath(await temp());
 		const cwd = path.join(dir, "workspace");
 		const sessionId = "pending-delete";
 		const sessionPath = await managedSessionPath(dir, cwd, sessionId);

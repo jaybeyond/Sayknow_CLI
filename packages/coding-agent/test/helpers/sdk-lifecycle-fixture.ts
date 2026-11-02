@@ -99,7 +99,8 @@ export async function createSharedLifecycleFixture(
 		B: "shared-b-source",
 	},
 ): Promise<SharedLifecycleFixture> {
-	const root = await fs.mkdtemp(path.join(tmpdir(), "skc-sdk-shared-lifecycle-"));
+	// realpath: macOS tmpdir is a /var -> /private/var symlink.
+	const root = await fs.realpath(await fs.mkdtemp(path.join(tmpdir(), "skc-sdk-shared-lifecycle-")));
 	const agentDir = path.join(root, "agent");
 	const environment = createFixtureBrokerEnvironment(root, agentDir);
 	const started = await startFixtureBrokerWithLeaseForTest({ agentDir, env: environment });

@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -6,9 +6,19 @@ import type { AssistantMessage } from "@sayknow-cli/ai";
 import { exportSessionToHtml } from "@sayknow-cli/coding-agent/export/html";
 import { SessionManager, type SessionMessageEntry } from "@sayknow-cli/coding-agent/session/session-manager";
 import * as native from "@sayknow-cli/natives";
+import { setAgentDir } from "@sayknow-cli/utils/dirs";
+import { captureAgentDirEnv, restoreAgentDirEnv } from "./helpers/agent-dir-override";
 
 const tempDirs: string[] = [];
+// `moveTo` relocates into the default agent sessions dir. Isolate it so the test
+// never writes into the developer's real ~/.skc (a Git worktree keeps resident
+// text in memory, which hides the on-disk cache this file asserts on).
+const originalAgentDirEnv = captureAgentDirEnv();
+beforeEach(() => {
+	setAgentDir(path.join(tempRoot("skc-resident-agent-"), "agent"));
+});
 afterEach(async () => {
+	restoreAgentDirEnv(originalAgentDirEnv);
 	for (const dir of tempDirs.splice(0)) await fs.promises.rm(dir, { recursive: true, force: true });
 	vi.restoreAllMocks();
 });

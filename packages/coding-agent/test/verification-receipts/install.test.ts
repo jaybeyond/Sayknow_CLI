@@ -1,14 +1,24 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { setAgentDir } from "@sayknow-cli/utils/dirs";
 import {
 	installSkcPluginBundle,
 	loadAlwaysOnPluginTools,
 	loadConstrainedPluginHooks,
 } from "../../src/extensibility/skc-plugins";
+import { captureAgentDirEnv, restoreAgentDirEnv } from "../helpers/agent-dir-override";
 import { BUNDLE, cleanupTemps, mkTemp } from "./helpers";
 
-afterEach(cleanupTemps);
+// Isolate the user plugin scope so the developer's real ~/.skc/agent/skc-plugins never leaks in.
+const originalAgentDirEnv = captureAgentDirEnv();
+beforeEach(async () => {
+	setAgentDir(path.join(await mkTemp("skc-vr-agent-"), "agent"));
+});
+afterEach(async () => {
+	restoreAgentDirEnv(originalAgentDirEnv);
+	await cleanupTemps();
+});
 
 const CLI = path.resolve(import.meta.dir, "../../src/cli.ts");
 async function skc(args: string[], env: Record<string, string>, cwd: string) {

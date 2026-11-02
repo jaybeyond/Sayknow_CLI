@@ -197,7 +197,9 @@ async function retireLiveFixtureOwner(): Promise<void> {
 }
 
 beforeEach(async () => {
-	root = await mkdtemp(path.join(tmpdir(), "harness-tmux-owner-"));
+	// Short prefix: children get TMPDIR=root/tmp, which hosts the owner's control socket, and the
+	// 48-byte macOS tmpdir would otherwise push it past MAX_UNIX_SOCKET_PATH_BYTES (100).
+	root = await mkdtemp(path.join(tmpdir(), "hto-"));
 	workspace = await mkdtemp(path.join(tmpdir(), "harness-tmux-workspace-"));
 	cliEnv = await createHarnessCliEnvWithFixtureBroker(repoRoot, root);
 });

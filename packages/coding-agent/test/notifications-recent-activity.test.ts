@@ -12,7 +12,8 @@ import { FileSessionStorage } from "../src/session/session-storage";
 
 const roots: string[] = [];
 function tempRoot(): string {
-	const root = fs.mkdtempSync(path.join(os.tmpdir(), "skc-recent-"));
+	// realpath: macOS tmpdir is a /var -> /private/var symlink.
+	const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "skc-recent-")));
 	roots.push(root);
 	return root;
 }

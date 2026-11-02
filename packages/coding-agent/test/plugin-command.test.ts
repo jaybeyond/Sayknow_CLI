@@ -20,6 +20,8 @@ async function runPluginCommand(
 	const proc = Bun.spawn({
 		cmd: [process.execPath, path.join(import.meta.dir, "../src/cli.ts"), "plugin", ...args],
 		cwd,
+		// Sibling agent dir from makeTempProject(): never list or write the developer's real ~/.skc/agent.
+		env: { ...process.env, SKC_CODING_AGENT_DIR: path.join(path.dirname(cwd), "agent") },
 		stdout: "pipe",
 		stderr: "pipe",
 	});
@@ -33,7 +35,9 @@ async function runPluginCommand(
 
 async function makeTempProject(): Promise<string> {
 	tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "skc-plugin-command-"));
-	return tempRoot;
+	const cwd = path.join(tempRoot, "project");
+	await fs.mkdir(cwd);
+	return cwd;
 }
 
 describe("Plugin command scope parsing", () => {
