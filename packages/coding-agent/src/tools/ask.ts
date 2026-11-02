@@ -867,8 +867,11 @@ export class AskTool implements AgentTool<AskParametersSchema, AskToolDetails> {
 			activeRemoteReceipt = undefined;
 			if (receipt) await receipt.settle(settlement);
 		};
-		const checkedPrefix = `${theme.checkbox.checked} `;
-		const uncheckedPrefix = `${theme.checkbox.unchecked} `;
+		// Headless/SDK sessions never initialize the TUI theme and never render
+		// checkbox-decorated labels, so any non-matching prefix is correct there.
+		const checkbox = theme?.checkbox ?? { checked: "[x]", unchecked: "[ ]" };
+		const checkedPrefix = `${checkbox.checked} `;
+		const uncheckedPrefix = `${checkbox.unchecked} `;
 		/** The option a displayed label stands for, without checkbox, numbering, or recommendation decoration. */
 		const semanticLabel = (label: string): string =>
 			stripRecommendedSuffix(

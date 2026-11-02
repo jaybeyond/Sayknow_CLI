@@ -840,6 +840,8 @@ export class TelegramBotTransport implements BotApi {
 }
 
 type PairedChatPrivacy = "private" | "non-private" | "indeterminate";
+const PAIRED_CHAT_PRIVACY_RETRY_BASE_MS = 15_000;
+const PAIRED_CHAT_PRIVACY_RETRY_MAX_MS = 10 * 60_000;
 
 export type TelegramUpdateOutcome = "consumed" | "retry";
 
@@ -1049,6 +1051,15 @@ export class TelegramNotificationDaemon {
 	private readonly flatIdentitySent = new Set<string>();
 	/** Cached result of whether the paired chat is a private chat (flat-fallback gate). */
 	private pairedChatPrivate: boolean | undefined;
+	/**
+	 * Backoff for indeterminate privacy checks. A rejected bot token or a deleted
+	 * chat fails the same way on every attempt; re-asking on every delivery tick
+	 * flooded the log (one warning per 4s) and the Bot API. Retry with backoff and
+	 * warn only when the failure changes.
+	 */
+	private pairedChatPrivacyRetryAt = 0;
+	private pairedChatPrivacyFailures = 0;
+	private pairedChatPrivacyLastWarning: string | undefined;
 	/** Bot username from getMe, cached once at owner startup for group/forum command targeting. */
 	private botUsername: string | undefined;
 	/** Sessions whose agent loop is currently busy (drives the typing indicator). */
@@ -2550,14 +2561,22 @@ export class TelegramNotificationDaemon {
 	 */
 	private async resolvePairedChatPrivacy(): Promise<PairedChatPrivacy> {
 		if (this.pairedChatPrivate !== undefined) return this.pairedChatPrivate ? "private" : "non-private";
+		const now = this.opts.now?.() ?? Date.now();
+		if (now < this.pairedChatPrivacyRetryAt) return "indeterminate";
 		try {
 			const res = (await this.botApi.call("getChat", { chat_id: this.opts.chatId })) as {
 				ok?: unknown;
+				error_code?: unknown;
+				description?: unknown;
 				result?: { type?: unknown };
 			};
 			if (res?.ok !== true) {
-				logger.warn("notifications: getChat privacy check indeterminate (non-success response)");
-				return "indeterminate";
+				const code = typeof res?.error_code === "number" ? ` ${res.error_code}` : "";
+				const description = typeof res?.description === "string" ? `: ${res.description}` : "";
+				return this.deferPairedChatPrivacy(
+					now,
+					`notifications: getChat privacy check indeterminate (non-success response${code}${description})`,
+				);
 			}
 			if (res.result?.type === "private") {
 				this.pairedChatPrivate = true;
@@ -2567,12 +2586,35 @@ export class TelegramNotificationDaemon {
 				this.pairedChatPrivate = false;
 				return "non-private";
 			}
-			logger.warn("notifications: getChat privacy check indeterminate (missing or invalid chat type)");
-			return "indeterminate";
+			return this.deferPairedChatPrivacy(
+				now,
+				"notifications: getChat privacy check indeterminate (missing or invalid chat type)",
+			);
 		} catch {
-			logger.warn("notifications: getChat privacy check indeterminate (request failed)");
-			return "indeterminate";
+			return this.deferPairedChatPrivacy(now, "notifications: getChat privacy check indeterminate (request failed)");
 		}
+	}
+
+	/**
+	 * Fail closed for now and schedule the next check. A single failure retries on
+	 * the next attempt (transient errors clear quickly); repeated failures back off
+	 * exponentially. Warn once per distinct failure.
+	 */
+	private deferPairedChatPrivacy(now: number, warning: string | undefined): PairedChatPrivacy {
+		this.pairedChatPrivacyFailures += 1;
+		const delayMs =
+			this.pairedChatPrivacyFailures < 2
+				? 0
+				: Math.min(
+						PAIRED_CHAT_PRIVACY_RETRY_MAX_MS,
+						PAIRED_CHAT_PRIVACY_RETRY_BASE_MS * 2 ** (this.pairedChatPrivacyFailures - 2),
+					);
+		this.pairedChatPrivacyRetryAt = now + delayMs;
+		if (warning && warning !== this.pairedChatPrivacyLastWarning) {
+			this.pairedChatPrivacyLastWarning = warning;
+			logger.warn(warning, { retryInMs: delayMs });
+		}
+		return "indeterminate";
 	}
 
 	/** Keep existing outbound callers fail-closed for indeterminate privacy. */

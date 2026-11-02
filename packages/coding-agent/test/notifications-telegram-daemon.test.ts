@@ -10593,6 +10593,49 @@ test("threaded off + unresolvable getChat: fails closed", async () => {
 	expect(bot.calls.filter(c => c.method === "sendMessage")).toHaveLength(0);
 });
 
+test("rejected getChat backs off and warns once instead of on every delivery", async () => {
+	const agentDir = tempAgentDir();
+	const bot = new FakeBotApi();
+	bot.call = (async (method: string, body: any) => {
+		bot.calls.push({ method, body });
+		if (method === "getChat") return { ok: false, error_code: 401, description: "Unauthorized" };
+		return { ok: true, result: true };
+	}) as any;
+	let now = 1_000_000;
+	const daemon = new TelegramNotificationDaemon({
+		settings: settings(agentDir),
+		ownerId: "owner",
+		botToken: "tok",
+		chatId: "42",
+		botApi: bot,
+		now: () => now,
+	});
+	const session = { sessionId: "S", token: "tok", ws: { readyState: 1, send() {} }, pending: new Map() };
+	const warnSpy = spyOn(logger, "warn");
+	const deliver = () =>
+		daemon.handleSessionMessage(session as any, { type: "context_update", sessionId: "S", lastMessage: "x" });
+	const getChatCalls = () => bot.calls.filter(c => c.method === "getChat").length;
+	try {
+		await deliver();
+		await deliver(); // one failure retries right away
+		expect(getChatCalls()).toBe(2);
+		for (let tick = 0; tick < 20; tick++) await deliver(); // repeated failure: backing off
+		expect(getChatCalls()).toBe(2);
+		now += 15_000;
+		await deliver();
+		expect(getChatCalls()).toBe(3);
+		now += 15_000; // backoff doubled to 30s
+		await deliver();
+		expect(getChatCalls()).toBe(3);
+		const privacyWarnings = warnSpy.mock.calls.filter(call => String(call[0]).includes("getChat privacy check"));
+		expect(privacyWarnings).toHaveLength(1);
+		expect(String(privacyWarnings[0]?.[0])).toContain("401");
+		expect(bot.calls.filter(c => c.method === "sendMessage")).toHaveLength(0);
+	} finally {
+		warnSpy.mockRestore();
+	}
+});
+
 test("identity_header without a title names the topic repo/branch", async () => {
 	const agentDir = tempAgentDir();
 	const bot = new FakeBotApi();
