@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.7.14] - 2026-11-02
+
 ### Changed
 
 - Inside a tool loop, auto-compaction no longer fires at a lowered `compaction.thresholdTokens` on large-window models. A configured threshold (e.g. 150K on a 1M-token model) now applies at answer boundaries (end of a run, before the next prompt); mid-run, compaction waits until the default ceiling (300K) or the model's usable window, whichever is lower. Models whose usable window is at or below the ceiling still compact mid-run at the configured threshold.
