@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Upgrading now replaces a Telegram daemon that is already running from an older release, so the rejected-token poll pause from 0.7.15 takes effect without a manual daemon restart. The daemon serving epoch moves to 4 and the generation to 32; the next session start reloads an epoch-3 daemon.
+
 ## [0.7.15] - 2026-11-03
 
 ### Added

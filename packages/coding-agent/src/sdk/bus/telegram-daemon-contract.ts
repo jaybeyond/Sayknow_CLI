@@ -43,12 +43,17 @@ export const NOTIFICATION_PROTOCOL_VERSION = 3;
  * and capability-versioned mixed-host compatibility.
  * Generation 31 lets a Windows controller wait for a cooperative stop and has
  * the owner watch its control request during a long poll (upstream #6174).
+ * Generation 32 pauses getUpdates with backoff while Telegram rejects the bot
+ * token and records the rejection for `skc notify health`, so an upgraded host
+ * reloads a predecessor that would otherwise poll a revoked token every second.
  */
-export const DAEMON_GENERATION = 31;
+export const DAEMON_GENERATION = 32;
 
 /**
  * Serving-compatibility boundary for daemon lifecycle requests. Epoch 1 covers
  * all builds published before this field existed; epoch 2 covered generation 29;
- * bump this to force serving convergence and reload of compatible live predecessors.
+ * epoch 3 covered generations 30-31; epoch 4 reloads those predecessors into
+ * generation 32 so a revoked bot token stops being polled every second.
+ * Bump this to force serving convergence and reload of compatible live predecessors.
  */
-export const SERVING_EPOCH = 3;
+export const SERVING_EPOCH = 4;

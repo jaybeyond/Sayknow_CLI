@@ -2896,12 +2896,13 @@ describe("telegram daemon", () => {
 			}),
 		);
 	}
-	test("keeps wire protocol 3 while generation 31 adds Windows cooperative control stop", () => {
+	test("keeps wire protocol 3 while generation 32 adds the rejected-token poll pause", () => {
 		expect(NOTIFICATION_PROTOCOL_VERSION).toBe(3);
 		// Generation 29 adds structural serving safeguards; generation 30 adds
 		// capability-versioned tool activity; generation 31 adds the Windows
-		// cooperative control stop, all without changing the wire protocol.
-		expect(DAEMON_GENERATION).toBe(31);
+		// cooperative control stop; generation 32 pauses polling on a rejected
+		// bot token, all without changing the wire protocol.
+		expect(DAEMON_GENERATION).toBe(32);
 	});
 	test.each([
 		"1",
@@ -19302,9 +19303,11 @@ test("Telegram Bot API 429 cooldown clamps malformed retry_after values and does
 // ---------------------------------------------------------------------------
 
 describe("PR #3186 blockers", () => {
-	test("serving epoch 3 replaces pre-policy (epoch 1 and 2) daemons via isCurrentCompatibleOwner", () => {
+	test("serving epoch 4 replaces earlier-epoch daemons via isCurrentCompatibleOwner", () => {
 		// Epoch 1: legacy daemon states that never published servingEpoch.
-		expect(SERVING_EPOCH).toBe(3);
+		// Epoch 4 reloads epoch-3 daemons; 0.7.14 and earlier among them poll a
+		// rejected bot token every second until the generation 32 poller replaces them.
+		expect(SERVING_EPOCH).toBe(4);
 		const freshInput = (servingEpoch?: number) => {
 			const state: DaemonState = {
 				pid: 999,
@@ -19332,12 +19335,13 @@ describe("PR #3186 blockers", () => {
 		};
 		// Epoch undefined (epoch 1) — not compatible.
 		expect(isCurrentCompatibleOwner(freshInput(undefined))).toBe(false);
-		// Epoch 2 — not compatible with epoch 3.
+		// Epochs 2 and 3 — not compatible with epoch 4.
 		expect(isCurrentCompatibleOwner(freshInput(2))).toBe(false);
-		// Epoch 3 — compatible.
-		expect(isCurrentCompatibleOwner(freshInput(3))).toBe(true);
-		// Future epoch 4 — still compatible (>= check).
+		expect(isCurrentCompatibleOwner(freshInput(3))).toBe(false);
+		// Epoch 4 — compatible.
 		expect(isCurrentCompatibleOwner(freshInput(4))).toBe(true);
+		// Future epoch 5 — still compatible (>= check).
+		expect(isCurrentCompatibleOwner(freshInput(5))).toBe(true);
 	});
 
 	test("visible v1 starts are terminated with terminalization on policy transition", async () => {
