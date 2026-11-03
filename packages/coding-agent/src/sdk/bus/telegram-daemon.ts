@@ -3597,14 +3597,28 @@ export class TelegramBotTransport implements BotApi {
 type PairedChatPrivacy = "private" | "non-private" | "indeterminate";
 const PAIRED_CHAT_PRIVACY_RETRY_BASE_MS = 15_000;
 const PAIRED_CHAT_PRIVACY_RETRY_MAX_MS = 10 * 60_000;
+// A rejected bot token (401 revoked / 404 deleted) does not heal by retrying;
+// re-pairing swaps the token and replaces this daemon. Pause polling with a
+// long exponential backoff instead of hitting the Bot API every second.
+const AUTH_REJECTED_RETRY_BASE_MS = 60_000;
+const AUTH_REJECTED_RETRY_MAX_MS = 30 * 60_000;
+// Bound one paused wait so the run loop still reaches its idle-exit/stop checks.
+const AUTH_REJECTED_WAIT_STEP_MS = 25_000;
+
+export interface TelegramAuthRejection {
+	errorCode: number;
+	description: string;
+}
 
 export type TelegramUpdateOutcome = "consumed" | "retry";
 
 export type TelegramPollResult =
 	| { kind: "success"; updateCount: number }
 	| { kind: "aborted" }
+	| { kind: "auth_paused" }
 	| { kind: "getUpdates_failed"; error: string }
 	| { kind: "api_failure"; errorCode?: number; description: string }
+	| ({ kind: "auth_rejected"; retryInMs: number } & TelegramAuthRejection)
 	| { kind: "conflict"; description: string; backoffMs: number };
 
 export interface TelegramUpdatePollerOptions {
@@ -3613,16 +3627,18 @@ export interface TelegramUpdatePollerOptions {
 	backoff: { next(): number; reset(): void };
 	processUpdate: (update: unknown) => Promise<TelegramUpdateOutcome>;
 	health?: TelegramPollHealth;
+	/** Called on each transition into (rejection) or out of (undefined) the auth-rejected state. */
+	onAuthRejected?: (rejection: TelegramAuthRejection | undefined) => void;
 }
 
-type TelegramPollHealthStatus = "healthy" | "getUpdates_failed" | "api_failure" | "conflict";
+type TelegramPollHealthStatus = "healthy" | "getUpdates_failed" | "api_failure" | "auth_rejected" | "conflict";
 
 export class TelegramPollHealth {
 	#status: TelegramPollHealthStatus = "healthy";
 	#suppressedCount = 0;
 
 	record(result: TelegramPollResult): void {
-		if (result.kind === "aborted") return;
+		if (result.kind === "aborted" || result.kind === "auth_paused") return;
 		if (result.kind === "success") {
 			if (this.#status !== "healthy") {
 				logger.info("notifications daemon: Telegram getUpdates recovered", {
@@ -3652,6 +3668,19 @@ export class TelegramPollHealth {
 				previousStatus,
 				suppressedCount,
 			});
+			return;
+		}
+		if (result.kind === "auth_rejected") {
+			logger.error(
+				"notifications daemon: Telegram rejected the bot token; polling paused. Re-pair with `skc notify setup`",
+				{
+					errorCode: result.errorCode,
+					description: result.description,
+					retryInMs: result.retryInMs,
+					previousStatus,
+					suppressedCount,
+				},
+			);
 			return;
 		}
 		if (result.kind === "api_failure") {
@@ -3691,6 +3720,10 @@ export class TelegramUpdatePoller {
 	#offset = 0;
 	#opts: TelegramUpdatePollerOptions;
 	#health: TelegramPollHealth;
+	#authFailures = 0;
+	#authRetryAt = 0;
+	/** Last state passed to onAuthRejected; undefined until the first verdict so a stale marker is cleared. */
+	#authReported: boolean | undefined;
 
 	constructor(opts: TelegramUpdatePollerOptions) {
 		this.#opts = opts;
@@ -3710,6 +3743,13 @@ export class TelegramUpdatePoller {
 			description?: string;
 			result?: Array<{ update_id: number } & Record<string, unknown>>;
 		};
+		if (this.#authRetryAt > 0) {
+			const remainingMs = this.#authRetryAt - this.#opts.runtime.now();
+			if (remainingMs > 0) {
+				await this.#opts.runtime.sleep(Math.min(remainingMs, AUTH_REJECTED_WAIT_STEP_MS), signal);
+				return { kind: "auth_paused" };
+			}
+		}
 		try {
 			body = (await this.#opts.botApi.call(
 				"getUpdates",
@@ -3730,6 +3770,23 @@ export class TelegramUpdatePoller {
 			await this.#opts.runtime.sleep(backoffMs, signal);
 			return { kind: "conflict", description: sanitizeDiagnostic(body.description ?? "no description"), backoffMs };
 		}
+		if (body?.ok === false && (body.error_code === 401 || body.error_code === 404)) {
+			this.#authFailures += 1;
+			const retryInMs = Math.min(
+				AUTH_REJECTED_RETRY_MAX_MS,
+				AUTH_REJECTED_RETRY_BASE_MS * 2 ** (this.#authFailures - 1),
+			);
+			this.#authRetryAt = this.#opts.runtime.now() + retryInMs;
+			const rejection = {
+				errorCode: body.error_code,
+				description: sanitizeDiagnostic(body.description ?? "Unauthorized"),
+			};
+			if (this.#authReported !== true) {
+				this.#authReported = true;
+				this.#opts.onAuthRejected?.(rejection);
+			}
+			return { kind: "auth_rejected", retryInMs, ...rejection };
+		}
 		if (body?.ok !== true || !Array.isArray(body.result)) {
 			await this.#opts.runtime.sleep(POLL_BACKOFF_MS, signal);
 			return {
@@ -3739,6 +3796,12 @@ export class TelegramUpdatePoller {
 			};
 		}
 		this.#opts.backoff.reset();
+		this.#authFailures = 0;
+		this.#authRetryAt = 0;
+		if (this.#authReported !== false) {
+			this.#authReported = false;
+			this.#opts.onAuthRejected?.(undefined);
+		}
 		let malformedSeen = false;
 		for (const update of body.result) {
 			// A single malformed update_id must not wedge the poller. Skip the
@@ -4175,6 +4238,8 @@ export class TelegramNotificationDaemon {
 	readonly #deliveryAbort = new AbortController();
 	private readonly pool: RateLimitPool<TelegramQueuePayload>;
 	private readonly poller: TelegramUpdatePoller;
+	/** Serializes auth-rejected marker writes so a quick reject→recover cannot reorder. */
+	private authMarkerWrite: Promise<void> = Promise.resolve();
 	private readonly dispatchState = new TelegramEventDispatchState();
 	/** Bot-wide flood-control window; inbound polling remains eligible during it. */
 	private botCooldownUntil = 0;
@@ -4691,7 +4756,36 @@ export class TelegramNotificationDaemon {
 			runtime: this.runtime,
 			backoff: this.pollConflictBackoff,
 			processUpdate: update => this.processTelegramUpdate(update),
+			onAuthRejected: rejection => this.recordAuthRejected(rejection),
 		});
+	}
+
+	/**
+	 * Persist the auth-rejected verdict for offline `notify health`, keyed by the
+	 * token fingerprint so a re-paired config ignores a predecessor's marker.
+	 */
+	private recordAuthRejected(rejection: TelegramAuthRejection | undefined): void {
+		const file = daemonPaths(this.opts.settings.getAgentDir()).authRejected;
+		this.authMarkerWrite = this.authMarkerWrite
+			.then(async () => {
+				if (rejection) {
+					await writeJsonAtomic(this.fsImpl, file, {
+						tokenFingerprint: tokenFingerprint(this.opts.botToken),
+						errorCode: rejection.errorCode,
+						description: rejection.description,
+						since: this.runtime.now(),
+					});
+				} else {
+					await this.fsImpl.unlink(file).catch(error => {
+						if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+					});
+				}
+			})
+			.catch(error => {
+				logger.warn("notifications daemon: failed to update Telegram auth-rejected marker", {
+					error: sanitizeDiagnostic(String(error), this.opts.botToken),
+				});
+			});
 	}
 
 	private createSessionRouter(): OperatorEventRouter<SessionSocket> {

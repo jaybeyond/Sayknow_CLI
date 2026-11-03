@@ -12242,7 +12242,7 @@ test("TelegramUpdatePoller treats non-conflict API failures as unhealthy until a
 	const bot = {
 		async call() {
 			calls += 1;
-			if (calls <= 2) return { ok: false, error_code: 401, description: "Unauthorized" };
+			if (calls <= 2) return { ok: false, error_code: 502, description: "Bad Gateway" };
 			return { ok: true, result: [] };
 		},
 	};
@@ -12265,8 +12265,8 @@ test("TelegramUpdatePoller treats non-conflict API failures as unhealthy until a
 		);
 		expect(apiFailures).toHaveLength(1);
 		expect(apiFailures[0]?.[1]).toMatchObject({
-			errorCode: 401,
-			description: "Unauthorized",
+			errorCode: 502,
+			description: "Bad Gateway",
 			suppressedCount: 0,
 		});
 		const recoveries = infoSpy.mock.calls.filter(
@@ -12275,6 +12275,73 @@ test("TelegramUpdatePoller treats non-conflict API failures as unhealthy until a
 		expect(recoveries).toHaveLength(1);
 		expect(recoveries[0]?.[1]).toMatchObject({ from: "api_failure", suppressedCount: 1, updateCount: 0 });
 		expect(sleeps).toEqual([1_000, 1_000]);
+	} finally {
+		errorSpy.mockRestore();
+		infoSpy.mockRestore();
+	}
+});
+
+test("TelegramUpdatePoller pauses polling with exponential backoff while Telegram rejects the bot token", async () => {
+	let now = 0;
+	const sleeps: number[] = [];
+	let calls = 0;
+	let rejectToken = true;
+	const bot = {
+		async call() {
+			calls += 1;
+			return rejectToken ? { ok: false, error_code: 401, description: "Unauthorized" } : { ok: true, result: [] };
+		},
+	};
+	const transitions: Array<unknown> = [];
+	const errorSpy = spyOn(logger, "error").mockImplementation(() => {});
+	const infoSpy = spyOn(logger, "info").mockImplementation(() => {});
+	try {
+		const poller = new TelegramUpdatePoller({
+			botApi: bot,
+			runtime: {
+				now: () => now,
+				sleep: async (ms: number) => {
+					sleeps.push(ms);
+					now += ms;
+				},
+			} as any,
+			backoff: { next: () => 500, reset() {} } as any,
+			processUpdate: async () => "consumed",
+			onAuthRejected: rejection => void transitions.push(rejection),
+		});
+		const pollUntilCall = async (target: number) => {
+			for (let i = 0; i < 1_000 && calls < target; i++) await poller.pollOnce();
+			expect(calls).toBe(target);
+		};
+
+		expect(await poller.pollOnce()).toBe(0);
+		expect(calls).toBe(1);
+		// Paused: no Bot API request until the 60s window elapses, in bounded wait steps.
+		await pollUntilCall(2);
+		expect(sleeps).toEqual([25_000, 25_000, 10_000]);
+		expect(now).toBe(60_000);
+		// Second rejection doubles the window.
+		sleeps.length = 0;
+		await pollUntilCall(3);
+		expect(now).toBe(180_000);
+		expect(sleeps.reduce((a, b) => a + b, 0)).toBe(120_000);
+
+		rejectToken = false;
+		sleeps.length = 0;
+		await pollUntilCall(4);
+		expect(now).toBe(420_000);
+		// Healthy again: the next poll calls Telegram immediately.
+		await poller.pollOnce();
+		expect(calls).toBe(5);
+
+		expect(transitions).toEqual([{ errorCode: 401, description: "Unauthorized" }, undefined]);
+		const rejections = errorSpy.mock.calls.filter(call => String(call[0]).includes("rejected the bot token"));
+		expect(rejections).toHaveLength(1);
+		expect(rejections[0]?.[1]).toMatchObject({ errorCode: 401, retryInMs: 60_000 });
+		const recoveries = infoSpy.mock.calls.filter(
+			call => call[0] === "notifications daemon: Telegram getUpdates recovered",
+		);
+		expect(recoveries[0]?.[1]).toMatchObject({ from: "auth_rejected", suppressedCount: 2 });
 	} finally {
 		errorSpy.mockRestore();
 		infoSpy.mockRestore();

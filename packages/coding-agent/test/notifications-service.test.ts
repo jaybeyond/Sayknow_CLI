@@ -273,6 +273,35 @@ describe("notification-service health", () => {
 		expect(report.checks.find(c => c.name === "daemon")?.detail).toContain("different bot token or chat");
 	});
 
+	test("a rejected bot token marker for the configured token is an error; a predecessor's is ignored", async () => {
+		const markerPath = daemonPaths(settings.getAgentDir()).authRejected;
+		const marker = (fingerprint: string) =>
+			JSON.stringify({ tokenFingerprint: fingerprint, errorCode: 401, description: "Unauthorized", since: 1_000 });
+		const health = async (fingerprint: string) =>
+			checkNotificationHealth({
+				settings,
+				stateRoot: "/tmp/skc-none",
+				deps: {
+					fs: mockFs({
+						[statePath]: daemonStateJson({ pid: 1000, heartbeatAt: 1_490 }),
+						[markerPath]: marker(fingerprint),
+					}).fs,
+					now: () => 1_500,
+					pidAlive: pid => pid === 1000,
+				},
+			});
+
+		const rejected = await health(tokenFingerprint(TOKEN));
+		expect(rejected.overall).toBe("error");
+		const check = rejected.checks.find(c => c.name === "telegram_auth");
+		expect(check?.level).toBe("error");
+		expect(check?.detail).toContain("401 Unauthorized");
+		expect(check?.detail).toContain("skc notify setup");
+
+		const repaired = await health(tokenFingerprint("9999999999:previous-token-before-repair-xxxxxxx"));
+		expect(repaired.checks.some(c => c.name === "telegram_auth")).toBe(false);
+	});
+
 	test("healthy daemon with fresh heartbeat and matching identity is ok", async () => {
 		const { fs } = mockFs({
 			[statePath]: daemonStateJson({ pid: 1000, heartbeatAt: 1_490, generation: DAEMON_GENERATION }),

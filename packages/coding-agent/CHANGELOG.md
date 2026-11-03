@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- The Telegram daemon no longer polls `getUpdates` every second when Telegram rejects the bot token (401 revoked or 404 deleted bot). Polling pauses with exponential backoff (1 minute up to 30 minutes), the rejection is logged once with a re-pair hint, and `skc notify health` reports a `telegram_auth` error until a poll succeeds or the bot is re-paired.
+
 ## [0.7.14] - 2026-11-02
 
 ### Changed

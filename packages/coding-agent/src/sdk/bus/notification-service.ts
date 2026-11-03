@@ -634,6 +634,22 @@ export async function checkNotificationHealth(opts: HealthOptions): Promise<Noti
 		checks.push({ name: "daemon", level: "ok", detail: `daemon pid ${daemon.pid} alive with a fresh heartbeat` });
 	}
 
+	// A daemon whose bot token Telegram rejected (401/404) keeps a marker until a
+	// poll succeeds again; only the current token's marker is relevant.
+	if (telegramConfigured) {
+		const marker = await fs
+			.readFile(daemonPaths(opts.settings.getAgentDir()).authRejected, "utf8")
+			.then(raw => JSON.parse(raw) as { tokenFingerprint?: unknown; errorCode?: unknown; description?: unknown })
+			.catch(() => undefined);
+		if (marker?.tokenFingerprint === tokenFingerprint(cfg.botToken)) {
+			checks.push({
+				name: "telegram_auth",
+				level: "error",
+				detail: `Telegram rejected the configured bot token (${String(marker.errorCode)} ${sanitizeDiagnostic(String(marker.description ?? ""), cfg.botToken)}); polling is paused. Re-pair with \`skc notify setup\`.`,
+			});
+		}
+	}
+
 	// Per-session endpoint discovery files.
 	const dir = endpointDir(stateRoot);
 	const files = await listEndpointFiles(fs, dir);

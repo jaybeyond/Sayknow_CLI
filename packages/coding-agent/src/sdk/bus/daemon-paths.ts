@@ -18,6 +18,8 @@ export interface DaemonPaths {
 	steal: string;
 	aliases: string;
 	seenUpdates: string;
+	/** Present while the running daemon's bot token is rejected by Telegram (401/404). */
+	authRejected: string;
 }
 
 export function daemonPaths(agentDir: string): DaemonPaths {
@@ -32,5 +34,6 @@ export function daemonPaths(agentDir: string): DaemonPaths {
 		steal: path.join(dir, "telegram-daemon.steal"),
 		aliases: path.join(dir, "telegram-callback-aliases.json"),
 		seenUpdates: path.join(dir, "telegram-seen-updates.json"),
+		authRejected: path.join(dir, "telegram-auth-rejected.json"),
 	};
 }

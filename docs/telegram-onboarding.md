@@ -459,6 +459,15 @@ foreign or unknown owner. If you own the other process, stop or reconfigure it,
 then use `skc notify health`, `skc notify recovery`, or `skc notify reconnect`;
 recovery removes only dead-owner artifacts and never touches a live owner.
 
+### Telegram rejects the bot token (401/404)
+
+A revoked token (401) or a deleted bot (404) does not recover by retrying. The
+daemon pauses `getUpdates` with exponential backoff (1 minute up to 30 minutes)
+instead of polling every second, logs the rejection once, and
+`skc notify health` reports a `telegram_auth` error. Run `skc notify setup` with
+a new token; the marker is keyed to the rejected token, so health ignores it
+once the config holds the new one.
+
 ### A session does not send notifications
 
 Check, in order:
