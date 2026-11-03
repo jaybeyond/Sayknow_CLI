@@ -15,7 +15,7 @@
     },
     "packages/agent": {
       "name": "@sayknow-cli/agent-core",
-      "version": "0.7.15",
+      "version": "0.7.16",
       "dependencies": {
         "@opentelemetry/api": "catalog:",
         "@sayknow-cli/ai": "catalog:",
@@ -30,7 +30,7 @@
     },
     "packages/ai": {
       "name": "@sayknow-cli/ai",
-      "version": "0.7.15",
+      "version": "0.7.16",
       "bin": {
         "pi-ai": "./src/cli.ts",
       },
@@ -48,14 +48,14 @@
     },
     "packages/bridge-client": {
       "name": "@sayknow-cli/bridge-client",
-      "version": "0.7.15",
+      "version": "0.7.16",
       "devDependencies": {
         "@types/bun": "catalog:",
       },
     },
     "packages/coding-agent": {
       "name": "@sayknow-cli/coding-agent",
-      "version": "0.7.15",
+      "version": "0.7.16",
       "bin": {
         "skc": "bin/skc.js",
       },
@@ -91,7 +91,7 @@
     },
     "packages/natives": {
       "name": "@sayknow-cli/natives",
-      "version": "0.7.15",
+      "version": "0.7.16",
       "devDependencies": {
         "@napi-rs/cli": "catalog:",
         "@types/bun": "catalog:",
@@ -107,23 +107,23 @@
     },
     "packages/natives-darwin-arm64": {
       "name": "@sayknow-cli/natives-darwin-arm64",
-      "version": "0.7.15",
+      "version": "0.7.16",
     },
     "packages/natives-darwin-x64": {
       "name": "@sayknow-cli/natives-darwin-x64",
-      "version": "0.7.15",
+      "version": "0.7.16",
     },
     "packages/natives-linux-arm64": {
       "name": "@sayknow-cli/natives-linux-arm64",
-      "version": "0.7.15",
+      "version": "0.7.16",
     },
     "packages/natives-linux-x64": {
       "name": "@sayknow-cli/natives-linux-x64",
-      "version": "0.7.15",
+      "version": "0.7.16",
     },
     "packages/natives-win32-x64": {
       "name": "@sayknow-cli/natives-win32-x64",
-      "version": "0.7.15",
+      "version": "0.7.16",
     },
     "packages/orchestration-token-benchmark": {
       "name": "@sayknow-cli/orchestration-token-benchmark",
@@ -134,7 +134,7 @@
     },
     "packages/sayknow-cli": {
       "name": "sayknow-cli",
-      "version": "0.7.15",
+      "version": "0.7.16",
       "bin": {
         "skc": "bin/skc.js",
       },
@@ -144,7 +144,7 @@
     },
     "packages/stats": {
       "name": "@sayknow-cli/stats",
-      "version": "0.7.15",
+      "version": "0.7.16",
       "bin": {
         "skc-stats": "./src/index.ts",
       },
@@ -169,7 +169,7 @@
     },
     "packages/telegram-remote": {
       "name": "@sayknow-cli/telegram-remote",
-      "version": "0.7.15",
+      "version": "0.7.16",
       "dependencies": {
         "@sayknow-cli/coding-agent": "catalog:",
       },
@@ -179,7 +179,7 @@
     },
     "packages/tui": {
       "name": "@sayknow-cli/tui",
-      "version": "0.7.15",
+      "version": "0.7.16",
       "dependencies": {
         "@sayknow-cli/natives": "catalog:",
         "@sayknow-cli/utils": "catalog:",
@@ -220,7 +220,7 @@
     },
     "packages/utils": {
       "name": "@sayknow-cli/utils",
-      "version": "0.7.15",
+      "version": "0.7.16",
       "dependencies": {
         "@sayknow-cli/natives": "catalog:",
         "beautiful-mermaid": "catalog:",
@@ -267,14 +267,14 @@
     "@opentelemetry/context-async-hooks": "^2.0.0",
     "@opentelemetry/sdk-trace-base": "^2.0.0",
     "@puppeteer/browsers": "^2.13.0",
-    "@sayknow-cli/agent-core": "0.7.15",
-    "@sayknow-cli/ai": "0.7.15",
-    "@sayknow-cli/bridge-client": "0.7.15",
-    "@sayknow-cli/coding-agent": "0.7.15",
-    "@sayknow-cli/natives": "0.7.15",
-    "@sayknow-cli/stats": "0.7.15",
-    "@sayknow-cli/tui": "0.7.15",
-    "@sayknow-cli/utils": "0.7.15",
+    "@sayknow-cli/agent-core": "0.7.16",
+    "@sayknow-cli/ai": "0.7.16",
+    "@sayknow-cli/bridge-client": "0.7.16",
+    "@sayknow-cli/coding-agent": "0.7.16",
+    "@sayknow-cli/natives": "0.7.16",
+    "@sayknow-cli/stats": "0.7.16",
+    "@sayknow-cli/tui": "0.7.16",
+    "@sayknow-cli/utils": "0.7.16",
     "@tailwindcss/node": "^4.2.4",
     "@tailwindcss/vite": "^4.2.4",
     "@types/babel__generator": "^7.27.0",
@@ -926,7 +926,7 @@
 
     "duck": ["duck@0.1.12", "", { "dependencies": { "underscore": "^1.13.1" } }, "sha512-wkctla1O6VfP89gQ+J/yDesM0S7B7XLXjKGzXxMDVFg7uEn706niAtyYovKbyq1oT9YwDcly721/iUWoc8MVRg=="],
 
-    "electron-to-chromium": ["electron-to-chromium@1.5.471", "", {}, "sha512-Lo7jyyneHRYUQYM3WZ2rBEei9FcUIwValFPLifTbr4NTpc6oyUB+nN2rrOtbn3CE5pgz930mYxRJeD+glR7d6Q=="],
+    "electron-to-chromium": ["electron-to-chromium@1.5.472", "", {}, "sha512-s4+nfT29b0FKpVKoaIxl2pWsoNcn7A/nMPSrxayw4T3BsmPeV2lF9Y06BsAQeMGhCTQ4nYJ5XST7jkqe4ZEqFw=="],
 
     "elkjs": ["elkjs@0.11.1", "", {}, "sha512-zxxR9k+rx5ktMwT/FwyLdPCrq7xN6e4VGGHH8hA01vVYKjTFik7nHOxBnAYtrgYUB1RpAiLvA1/U2YraWxyKKg=="],
 
@@ -1134,7 +1134,7 @@
 
     "node-pty": ["node-pty@1.1.0", "", { "dependencies": { "node-addon-api": "^7.1.0" } }, "sha512-20JqtutY6JPXTUnL0ij1uad7Qe1baT46lyolh2sSENDd4sTzKZ4nmAFkeAARDKwmlLjPx6XKRlwRUxwjOy+lUg=="],
 
-    "node-releases": ["node-releases@2.0.62", "", {}, "sha512-A0Eq+qVDQI97IbAD6g/HriIuv256el9N8EwF4+xqJ49pwrdRYpdCSmLk0sO4I3fnS6hpYE5v22B73Bk+WArEoQ=="],
+    "node-releases": ["node-releases@2.0.63", "", {}, "sha512-6li2QanLsAXpIH2R6j77MzRyvOyrvdTqlKtO4CgBdHGNvN99ZZfyxszHc5o5+IZBWD5u6Hzwg83JoGXmqZNG9Q=="],
 
     "nth-check": ["nth-check@3.0.1", "", { "dependencies": { "boolbase": "^2.0.0" } }, "sha512-GX0gsdbGVCgnRgbeGaubfjpBXyYRWOOCVeYh08bSQvDZqxz5ndXs1OTfAt/h36G1xvI94YIspsI0sVFqAV9+RQ=="],
 
@@ -1336,7 +1336,7 @@
 
     "wrappy": ["wrappy@1.0.2", "", {}, "sha512-l4Sp/DRseor9wL6EvV2+TuQn63dMkPjZ/sp9XkghTEbV9KlPS1xUsZ3u7/IQO4wxtcFB4bgpQPRcR3QCvezPcQ=="],
 
-    "ws": ["ws@8.22.0", "", { "peerDependencies": { "bufferutil": "^4.0.1", "utf-8-validate": ">=5.0.2" }, "optionalPeers": ["bufferutil", "utf-8-validate"] }, "sha512-Ydggc987+RO0AnWtZ/7Wq9FtNvcrL1b/RO0ud9mWjUPgDrsAAwQSF51sm2hm1XofbU/4jkpGEsLFsZZxU+1DOg=="],
+    "ws": ["ws@8.22.1", "", { "peerDependencies": { "bufferutil": "^4.0.1", "utf-8-validate": ">=5.0.2" }, "optionalPeers": ["bufferutil", "utf-8-validate"] }, "sha512-oyL6OPYme/CmiFvNuGzeoxCJ4nOrZE2O1FwM9MWM1AsGri6nLXB2pg+lNA8aLeXMSav0J6eIVS1j6vUPzUtK9g=="],
 
     "xml-naming": ["xml-naming@0.3.0", "", {}, "sha512-ghig2TBE/H11aOVgmahA3MhimvkBr6JIYknH/Dhdk10nXwdbIqBJsbfMxpvFPG8bAw77gN29aQWvKpmVoPlvPQ=="],
 
