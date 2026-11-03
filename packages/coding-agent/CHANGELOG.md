@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- The bundled `emil-design-eng` skill now carries mandatory rules for faux product UI (hero demos, feature cards, bento grids, cursor walkthroughs), adapted from Benji Taylor's [Stageshow](https://benji.org/stageshow) (MIT). Depicted UI feedback keeps the skill's existing timing and easing; only storytelling motion runs slower. For a faux UI build the agent installs the full Stageshow skill and kit into the project itself. Prompts such as "hero demo", "bento grid", "mocked dashboard", "제품 데모" now route to the skill.
+
 ### Fixed
 
 - The Telegram daemon no longer polls `getUpdates` every second when Telegram rejects the bot token (401 revoked or 404 deleted bot). Polling pauses with exponential backoff (1 minute up to 30 minutes), the rejection is logged once with a re-pair hint, and `skc notify health` reports a `telegram_auth` error until a poll succeeds or the bot is re-paired.

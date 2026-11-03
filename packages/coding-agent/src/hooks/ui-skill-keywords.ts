@@ -118,7 +118,7 @@ export const UI_SKILL_KEYWORD_DEFINITIONS: readonly UiSkillKeywordDefinition[] =
 		skill: UI_SKILL_BASE,
 		priority: 40,
 		pattern:
-			/\b(ui|ux|frontend|front-end|interface|design system|component|css|tailwind|styling|layout|responsive|modal|dropdown|tooltip|popover|drawer|button|spacing|typography)\b|프론트\s*엔드|프론트엔드|디자인\s*(시스템)?|컴포넌트|버튼|모달|드롭다운|툴팁|레이아웃|반응형|스타일링/i,
+			/\b(ui|ux|frontend|front-end|interface|design system|component|css|tailwind|styling|layout|responsive|modal|dropdown|tooltip|popover|drawer|button|spacing|typography)\b|\b(faux|fake|mock(ed)?) (ui|interface|app|dashboard)\b|\b(product|hero|cursor) (demo|shot|walkthrough|illustration)s?\b|\b(feature card|bento( grid)?|hero section)s?\b|프론트\s*엔드|프론트엔드|디자인\s*(시스템)?|컴포넌트|버튼|모달|드롭다운|툴팁|레이아웃|반응형|스타일링|목업|제품\s*(데모|소개\s*영상)|히어로|벤토|피처\s*카드/i,
 	},
 ];
 
@@ -221,7 +221,7 @@ export function buildUiSkillDirectiveForSkill(skill: BundledSkcUiSkillName): str
  */
 export const BUNDLED_UI_SKILL_MEANINGS: Record<BundledSkcUiSkillName, string> = {
 	"emil-design-eng":
-		"General web UI/UX craft: building or reviewing components, layout, spacing, typography, design systems, CSS. The default for frontend work with no more specific fit.",
+		"General web UI/UX craft: building or reviewing components, layout, spacing, typography, design systems, CSS. The default for frontend work with no more specific fit. Also faux product UI for marketing and docs pages: hero demos, feature cards, bento grids, cursor walkthroughs, mocked app screenshots.",
 	animate:
 		"Adding new motion to a web UI: animations, transitions, easing, keyframes, hover effects, micro-interactions.",
 	"review-animations": "Reviewing motion that already exists and judging whether it is good.",

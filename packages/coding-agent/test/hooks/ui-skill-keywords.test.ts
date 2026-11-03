@@ -68,6 +68,15 @@ describe("automatic frontend UI skill routing", () => {
 		expect(detectUiSkillKeywords("clean up the button component styling")).toHaveLength(1);
 	});
 
+	it("routes faux product UI work to the craft baseline that carries the Stageshow rules", () => {
+		expect(leadSkill("a small looping hero demo for our homepage: someone assigns an issue")).toBe("emil-design-eng");
+		expect(leadSkill("make a dark bento grid of four tiles for Kanso")).toBe("emil-design-eng");
+		expect(leadSkill("build a mocked dashboard for the docs page")).toBe("emil-design-eng");
+		expect(leadSkill("랜딩 히어로에 들어갈 제품 데모 만들어줘")).toBe("emil-design-eng");
+		const base = getEmbeddedSkcUiSkills().find(skill => skill.name === "emil-design-eng");
+		expect(base?.content ?? "").toContain("## Faux product UI (Stageshow) — mandatory");
+	});
+
 	it("pairs a specialized match with the craft baseline", () => {
 		const matches = detectUiSkillKeywords("animate the modal in our react component");
 		expect(matches.map(match => match.skill)).toEqual(["animate", "emil-design-eng"]);

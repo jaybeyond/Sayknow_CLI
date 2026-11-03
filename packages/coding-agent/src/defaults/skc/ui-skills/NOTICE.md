@@ -25,6 +25,21 @@ loose companion files here expecting them to be readable at runtime.
 | [emilkowalski/skills](https://github.com/emilkowalski/skills) | MIT (`LICENSE.emilkowalski`), Copyright (c) 2026 Emil Kowalski | `emil-design-eng`, `animate`, `review-animations`, `improve-animations`, `find-animation-opportunities`, `pick-ui-library`, `prototype`, `mobile-native`, `animation-vocabulary`, `apple-design`, `ask-sonner` |
 | [Appllama/appllama-skills](https://github.com/Appllama/appllama-skills) | MIT (`LICENSE.appllama`) | `appllama-app-design-skill` |
 
+## SKC overlays
+
+`scripts/ui-skill-overlays/<skill>.md` holds SKC-authored sections that the
+generator splices into a vendored skill right after its `## SKC invocation`
+block, so a regeneration keeps them.
+
+| Overlay | Adapted from | License |
+| --- | --- | --- |
+| `emil-design-eng`: "Faux product UI (Stageshow) — mandatory" | [benjitaylor/skills `stageshow`](https://github.com/benjitaylor/skills/tree/main/stageshow) at `8020574` ([write-up](https://benji.org/stageshow)) | MIT (`LICENSE.benjitaylor`), Copyright (c) 2026 Benji Taylor |
+
+Only the rules are adapted. The Stageshow kit, examples and filming scripts are
+not vendored (they are React/TS sources, not readable from an embedded skill);
+the overlay tells the agent to install the full skill into the user's project
+with `npx -y skills@latest add benjitaylor/skills --skill stageshow -a universal -y`.
+
 ## Deliberate exclusions
 
 - `write-swift`, `animate-expo` (emilkowalski) — not web frontend craft.

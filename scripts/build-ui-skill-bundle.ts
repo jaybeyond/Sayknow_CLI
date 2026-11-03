@@ -20,6 +20,12 @@ import * as path from "node:path";
 
 const repoRoot = path.resolve(import.meta.dir, "..");
 const bundleRoot = path.join(repoRoot, "packages/coding-agent/src/defaults/skc/ui-skills");
+/**
+ * SKC-authored sections spliced into a vendored skill right after its
+ * `## SKC invocation` block (`<overlayRoot>/<skill>.md`). They carry SKC's own
+ * mandatory guidance, so a regeneration from upstream keeps them.
+ */
+const overlayRoot = path.join(repoRoot, "scripts/ui-skill-overlays");
 
 interface UpstreamSource {
 	id: string;
@@ -70,6 +76,11 @@ function stripInitialResponse(body: string): string {
 	const rest = body.slice(start + heading.length);
 	const nextHeading = rest.search(/\n##? /);
 	return nextHeading < 0 ? body.slice(0, start) : body.slice(0, start) + rest.slice(nextHeading + 1);
+}
+
+async function readOverlay(skillName: string): Promise<string> {
+	const file = Bun.file(path.join(overlayRoot, `${skillName}.md`));
+	return (await file.exists()) ? `\n${(await file.text()).trim()}\n` : "";
 }
 
 function invocationBlock(companionNames: readonly string[]): string {
@@ -137,7 +148,7 @@ async function buildSkill(sourceDir: string, skillName: string): Promise<string>
 	const companions = await listCompanions(skillDir);
 	body = stripInitialResponse(body);
 	body = rewriteCompanionLinks(body, companions);
-	body = insertAfterTitle(body, invocationBlock(companions));
+	body = insertAfterTitle(body, invocationBlock(companions) + (await readOverlay(skillName)));
 
 	const appendices: string[] = [];
 	for (const companion of companions) {
