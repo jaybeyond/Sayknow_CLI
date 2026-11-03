@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.7.15] - 2026-11-03
+
 ### Added
 
 - The bundled `emil-design-eng` skill now carries mandatory rules for faux product UI (hero demos, feature cards, bento grids, cursor walkthroughs), adapted from Benji Taylor's [Stageshow](https://benji.org/stageshow) (MIT). Depicted UI feedback keeps the skill's existing timing and easing; only storytelling motion runs slower. For a faux UI build the agent installs the full Stageshow skill and kit into the project itself. Prompts such as "hero demo", "bento grid", "mocked dashboard", "제품 데모" now route to the skill.
