@@ -632,7 +632,9 @@ pub(crate) fn execute_external_command(
 				// Don't set process_group(0) - setsid() in pre_exec will handle it.
 				cmd.lead_session();
 			}
-			ChildSessionAction::TakeForeground | ChildSessionAction::None => {
+			ChildSessionAction::TakeForeground
+			| ChildSessionAction::ReleaseControllingTerminal
+			| ChildSessionAction::None => {
 				// Normal case: create new process group in current session.
 				cmd.process_group(0);
 			}
@@ -646,6 +648,7 @@ pub(crate) fn execute_external_command(
 	// pipeline groups.
 	match session_action {
 		ChildSessionAction::DetachSession => cmd.detach_session(),
+		ChildSessionAction::ReleaseControllingTerminal => cmd.release_controlling_terminal(),
 		ChildSessionAction::TakeForeground if !command_leads_session => cmd.take_foreground(),
 		ChildSessionAction::TakeForeground | ChildSessionAction::None => {}
 	}
@@ -952,6 +955,10 @@ pub enum ChildSessionAction {
 	/// Move the child to the foreground of its tty so it participates in
 	/// interactive job control.
 	TakeForeground,
+	/// Keep the session and process group but drop the inherited controlling
+	/// terminal (`cmd.release_controlling_terminal()`), so the child cannot
+	/// take the terminal foreground from the host.
+	ReleaseControllingTerminal,
 	/// Leave session/foreground state alone.
 	None,
 }
@@ -969,7 +976,10 @@ pub enum ChildSessionAction {
 /// causing later stages' `setpgid()` to fail with EPERM; for later stages it
 /// either fails with EPERM or moves the child into a fresh session, breaking the
 /// pipeline's shared process group and job-control signal propagation. Pipeline
-/// stages therefore keep their pre-fix behavior (no detach).
+/// stages therefore stay in the session and only drop the controlling terminal:
+/// a stage that kept it let any descendant that took the terminal foreground
+/// (`tcsetpgrp`) move the host into the background, and the host's next
+/// terminal read stopped it with SIGTTIN.
 ///
 /// Foregrounding remains gated on `new_pg && child_stdin_is_terminal`.
 pub fn child_session_action(
@@ -986,7 +996,7 @@ pub fn child_session_action(
 	}
 
 	if in_pipeline_group {
-		return ChildSessionAction::None;
+		return ChildSessionAction::ReleaseControllingTerminal;
 	}
 
 	ChildSessionAction::DetachSession

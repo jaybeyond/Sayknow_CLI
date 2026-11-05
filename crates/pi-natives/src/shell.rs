@@ -389,7 +389,10 @@ mod tests {
 		#[test]
 		fn non_terminal_stdin_leading_new_pgroup_detaches_unless_pipeline() {
 			assert_eq!(child_session_action(true, false, false), ChildSessionAction::DetachSession);
-			assert_eq!(child_session_action(true, false, true), ChildSessionAction::None);
+			assert_eq!(
+				child_session_action(true, false, true),
+				ChildSessionAction::ReleaseControllingTerminal
+			);
 		}
 
 		#[test]
@@ -408,8 +411,11 @@ mod tests {
 		}
 
 		#[test]
-		fn pipeline_stage_does_not_detach() {
-			assert_eq!(child_session_action(false, false, true), ChildSessionAction::None);
+		fn pipeline_stage_releases_controlling_terminal() {
+			assert_eq!(
+				child_session_action(false, false, true),
+				ChildSessionAction::ReleaseControllingTerminal
+			);
 		}
 	}
 

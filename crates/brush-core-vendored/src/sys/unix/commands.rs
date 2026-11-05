@@ -73,6 +73,9 @@ impl CommandFgControlExt for std::process::Command {
 pub trait CommandSessionExt {
 	/// Arranges for the command to run in a new POSIX session with no controlling terminal.
 	fn detach_session(&mut self);
+	/// Arranges for the command to drop the inherited controlling terminal while
+	/// keeping its session and process group.
+	fn release_controlling_terminal(&mut self);
 }
 
 impl CommandSessionExt for std::process::Command {
@@ -82,6 +85,15 @@ impl CommandSessionExt for std::process::Command {
 		// before exec. `setsid(2)` is async-signal-safe.
 		unsafe {
 			self.pre_exec(pre_exec_detach_session);
+		}
+	}
+
+	fn release_controlling_terminal(&mut self) {
+		// SAFETY:
+		// This arranges for a provided function to run in the forked child
+		// before exec. `open(2)`, `ioctl(2)` and `close(2)` are async-signal-safe.
+		unsafe {
+			self.pre_exec(pre_exec_release_controlling_terminal);
 		}
 	}
 }
@@ -118,4 +130,33 @@ fn pre_exec_detach_session() -> Result<(), std::io::Error> {
 		Ok(_) | Err(nix::errno::Errno::EPERM) => Ok(()),
 		Err(errno) => Err(std::io::Error::from_raw_os_error(errno as i32)),
 	}
+}
+
+/// Drops the controlling terminal of a process that cannot `setsid()` (a
+/// pipeline stage must stay in the pipeline's process group). Without a
+/// controlling terminal the child and its descendants can neither open
+/// `/dev/tty` nor `tcsetpgrp` the host's terminal, so no job-control program
+/// they start can take the foreground away from the host and stop it with
+/// SIGTTIN.
+fn pre_exec_release_controlling_terminal() -> Result<(), std::io::Error> {
+	// SAFETY: the path is a NUL-terminated literal and the flags are valid.
+	let fd = unsafe { libc::open(c"/dev/tty".as_ptr(), libc::O_RDONLY | libc::O_NOCTTY | libc::O_CLOEXEC) };
+	if fd < 0 {
+		// No controlling terminal: nothing to release.
+		return Ok(());
+	}
+
+	#[cfg(not(target_os = "macos"))]
+	let control = libc::TIOCNOTTY;
+	#[cfg(target_os = "macos")]
+	let control: u64 = libc::TIOCNOTTY.into();
+
+	// SAFETY: `fd` is an open descriptor owned by this function. A failed
+	// release keeps the inherited terminal, which is the pre-fix behavior, so
+	// the result is intentionally ignored rather than failing the spawn.
+	unsafe {
+		libc::ioctl(fd, control, 0);
+		libc::close(fd);
+	}
+	Ok(())
 }

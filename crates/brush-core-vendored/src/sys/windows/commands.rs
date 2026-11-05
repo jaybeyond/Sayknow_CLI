@@ -109,10 +109,17 @@ pub trait CommandSessionExt {
 	/// terminal. On Windows this is a no-op; process-group behavior is handled
 	/// by `CommandFgControlExt` via `CREATE_NEW_PROCESS_GROUP`.
 	fn detach_session(&mut self);
+	/// Arranges for the command to drop the inherited controlling terminal. On
+	/// Windows this is a no-op.
+	fn release_controlling_terminal(&mut self);
 }
 
 impl CommandSessionExt for std::process::Command {
 	fn detach_session(&mut self) {
 		// NOTE: Windows has no setsid; intentionally a no-op.
+	}
+
+	fn release_controlling_terminal(&mut self) {
+		// NOTE: Windows has no controlling terminal; intentionally a no-op.
 	}
 }

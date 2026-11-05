@@ -98,10 +98,16 @@ impl CommandFgControlExt for std::process::Command {
 pub trait CommandSessionExt {
 	/// Arranges for the command to run in a new session with no controlling terminal.
 	fn detach_session(&mut self);
+	/// Arranges for the command to drop the inherited controlling terminal.
+	fn release_controlling_terminal(&mut self);
 }
 
 impl CommandSessionExt for std::process::Command {
 	fn detach_session(&mut self) {
 		// NOTE: This is a no-op on platforms without setsid support.
+	}
+
+	fn release_controlling_terminal(&mut self) {
+		// NOTE: This is a no-op on platforms without controlling terminals.
 	}
 }

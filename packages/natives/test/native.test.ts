@@ -561,6 +561,55 @@ describe("pi-natives", () => {
 				} catch {}
 			}
 		});
+
+		it("keeps pipeline stages from inheriting the host's controlling terminal", async () => {
+			if (process.platform === "win32") {
+				return;
+			}
+
+			// A pipeline stage that keeps the host's controlling terminal lets any
+			// descendant that grabs the terminal (an interactive shell, for example)
+			// `tcsetpgrp` the host into the background, and the host's next terminal
+			// read stops it with SIGTTIN. Run a host with a real controlling terminal
+			// and probe `/dev/tty` from inside a pipeline stage.
+			const probe = `sh -c 'if (: </dev/tty) 2>/dev/null; then echo tty; else echo no-tty; fi'`;
+			const hostScript = path.join(testDir, "pipeline-tty-host.ts");
+			await fs.writeFile(
+				hostScript,
+				[
+					`import { executeShell } from ${JSON.stringify(path.join(import.meta.dir, "..", "native", "index.js"))};`,
+					`let out = "";`,
+					`await executeShell({ command: ${JSON.stringify(`${probe} | cat`)}, cwd: ${JSON.stringify(testDir)} }, (err, chunk) => {`,
+					`\tif (!err) out += chunk;`,
+					`});`,
+					`console.log("PIPELINE=" + out.trim());`,
+				].join("\n"),
+			);
+
+			const session = new PtySession();
+			let output = "";
+			try {
+				const result = await session.start(
+					{
+						command: `echo "HOST=$(${probe})"; '${process.execPath}' '${hostScript}'`,
+						cwd: testDir,
+						timeoutMs: 20_000,
+					},
+					(err, chunk) => {
+						if (!err) output += chunk;
+					},
+				);
+				expect(result.exitCode).toBe(0);
+			} finally {
+				try {
+					session.kill();
+				} catch {}
+			}
+
+			// Precondition: the host really has a controlling terminal.
+			expect(output).toContain("HOST=tty");
+			expect(output).toContain("PIPELINE=no-tty");
+		});
 	});
 
 	describe("shell", () => {

@@ -1953,11 +1953,15 @@ mod tests {
 
 		/// Brush leading a new pgroup with non-terminal stdin detaches only when
 		/// it is not part of a multi-command pipeline. Pipeline leaders must stay
-		/// in the parent session so later stages can join their process group.
+		/// in the parent session so later stages can join their process group,
+		/// so they only drop the controlling terminal.
 		#[test]
 		fn non_terminal_stdin_leading_new_pgroup_detaches_unless_pipeline() {
 			assert_eq!(child_session_action(true, false, false), ChildSessionAction::DetachSession,);
-			assert_eq!(child_session_action(true, false, true), ChildSessionAction::None,);
+			assert_eq!(
+				child_session_action(true, false, true),
+				ChildSessionAction::ReleaseControllingTerminal,
+			);
 		}
 
 		/// Non-interactive brush, terminal stdin, no pipeline: nothing to do.
@@ -1988,10 +1992,15 @@ mod tests {
 		/// different session, so later stages fail to join its group with
 		/// EPERM. For later stages, `setsid()` would either fail with EPERM or
 		/// move the child into a new session, breaking the pipeline's shared
-		/// process group and job-control signal propagation.
+		/// process group and job-control signal propagation. The stage still
+		/// drops the controlling terminal so it cannot steal the host's
+		/// foreground.
 		#[test]
-		fn pipeline_stage_does_not_detach() {
-			assert_eq!(child_session_action(false, false, true), ChildSessionAction::None,);
+		fn pipeline_stage_releases_controlling_terminal() {
+			assert_eq!(
+				child_session_action(false, false, true),
+				ChildSessionAction::ReleaseControllingTerminal,
+			);
 		}
 	}
 
