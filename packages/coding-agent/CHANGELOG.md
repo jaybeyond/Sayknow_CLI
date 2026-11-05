@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- A turn that streamed only blank text before failing is now dropped and retried on the same model instead of stopping the session. Long Grok sessions hit this when grok-4.7 degenerated into a few thousand whitespace tokens and xAI aborted the stream with "Internal error during token generation"; the whitespace counted as visible output, so neither retry nor auto-resume ran. A code-less "internal error" also now counts as a server failure for the default retry policy.
+
 ## [0.7.16] - 2026-11-03
 
 ### Fixed

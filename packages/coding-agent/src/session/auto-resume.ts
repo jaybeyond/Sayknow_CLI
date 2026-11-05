@@ -58,18 +58,20 @@ export interface AutoResumeMarker {
 }
 
 /**
- * A failed attempt that streamed only private reasoning: no answer text, no tool call.
- * Nothing in it is part of the answer and its signed blocks can never be replayed, so
- * recovery drops it and asks the same model again instead of stopping.
+ * A failed attempt that streamed no answer: only private reasoning and/or blank text
+ * (e.g. a whitespace decode loop the provider then aborted), no tool call. Nothing in
+ * it is part of the answer and its signed blocks can never be replayed, so recovery
+ * drops it and asks the same model again instead of stopping.
  */
-export function isThinkingOnlyFailure(message: AgentMessage | undefined): boolean {
+export function isAnswerlessFailure(message: AgentMessage | undefined): boolean {
 	if (message?.role !== "assistant" || message.stopReason !== "error") return false;
-	let thinking = false;
+	let streamed = false;
 	for (const block of message.content) {
-		if (block.type === "thinking" || block.type === "redactedThinking") thinking = true;
+		if (block.type === "thinking" || block.type === "redactedThinking") streamed = true;
 		else if (block.type !== "text" || block.text.trim().length > 0) return false;
+		else if (block.text.length > 0) streamed = true;
 	}
-	return thinking;
+	return streamed;
 }
 
 /**
@@ -170,7 +172,7 @@ function hasUnsafeAssistantTail(messages: readonly AgentMessage[]): boolean {
 	if (assistantIndex === -1 || assistantIndex < messages.findLastIndex(message => message.role === "user"))
 		return false;
 	const assistant = messages[assistantIndex] as AssistantMessage;
-	if ((assistant.stopReason === "error" || assistant.stopReason === "aborted") && !isThinkingOnlyFailure(assistant)) {
+	if ((assistant.stopReason === "error" || assistant.stopReason === "aborted") && !isAnswerlessFailure(assistant)) {
 		if (
 			assistant.content.some(
 				block => block.type === "thinking" || block.type === "redactedThinking" || block.type === "toolCall",
@@ -193,7 +195,7 @@ export function hasVisibleFailedPrefix(messages: readonly AgentMessage[]): boole
 		return false;
 	const assistant = messages[assistantIndex] as AssistantMessage;
 	if (assistant.stopReason !== "error" && assistant.stopReason !== "aborted") return false;
-	return assistant.content.some(block => block.type === "text" && block.text.length > 0);
+	return assistant.content.some(block => block.type === "text" && block.text.trim().length > 0);
 }
 
 export interface AutoResumePolicyInput {

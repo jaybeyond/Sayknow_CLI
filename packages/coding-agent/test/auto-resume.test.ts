@@ -1594,4 +1594,27 @@ describe("automatic same-model resume", () => {
 		expect(last.stopReason).toBe("error");
 		expect(last.content.some(block => block.type === "text" && block.text === "answer")).toBe(true);
 	});
+
+	it("with no retry settings, a blank-text failure on a code-less internal error retries without replaying the blanks", async () => {
+		// grok-4.7 degenerates into ~4K whitespace tokens, then xAI aborts the stream with
+		// "Internal error during token generation" and no error code.
+		const m = claude();
+		const blanks = "\n \n\n \n".repeat(40);
+		const degenerate = sse([
+			...anthropicFrames(m, ["text"], blanks),
+			af("error", { type: "error", error: { message: "Internal error during token generation" } }),
+		]);
+		const log = installAnthropic([degenerate, anthropicReply(m, ["text"], "stop")]);
+		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		session = build({ model: m, settings: BARE_RETRY });
+
+		await session.prompt("keep going");
+		await session.waitForIdle();
+
+		expect(log.bodies).toHaveLength(2);
+		expect(log.bodies[1]).not.toContain(JSON.stringify(blanks).slice(1, -1));
+		const assistants = session.agent.state.messages.filter(message => message.role === "assistant");
+		expect(assistants).toHaveLength(1);
+		expect((assistants[0] as AssistantMessage).stopReason).toBe("stop");
+	});
 });

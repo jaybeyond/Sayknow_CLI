@@ -415,9 +415,9 @@ import {
 	hasAutoResumeMarkerSinceLastUser,
 	hasVisibleFailedPrefix,
 	INTERRUPTED_TOOL_RESULT_TEXT,
+	isAnswerlessFailure,
 	isRestartSafeTool,
 	isSynthesizedResumeResult,
-	isThinkingOnlyFailure,
 	RESTART_RESUME_MAX_REQUESTS,
 	RESTART_RESUME_WINDOW_MS,
 	resolveAutoResumePolicy,
@@ -943,8 +943,12 @@ type RetryErrorClassification =
 
 const BARE_DEFAULT_WATCHDOG_ERROR =
 	/^(?:[A-Za-z][A-Za-z0-9-]*(?: [A-Za-z][A-Za-z0-9-]*){0,3} )stream (?:timed out while waiting for the first event|stalled while waiting for the next event)$/;
-/** Server-side overload/unavailability wording. Bare numbers never count: "500 requests per minute" is a throttle. */
-const BARE_DEFAULT_SERVER_OVERLOAD_ERROR = /overloaded|service.?unavailable|internal.?server.?error|\bapi_error\b/i;
+/**
+ * Server-side failure wording. Bare numbers never count: "500 requests per minute" is a throttle.
+ * Covers xAI's code-less "Internal error during token generation" stream error.
+ */
+const BARE_DEFAULT_SERVER_OVERLOAD_ERROR =
+	/overloaded|service.?unavailable|internal.?(?:server.?)?error|\bapi_error\b/i;
 /** Throttle or quota wording, in any phrasing a provider uses for it. */
 const BARE_DEFAULT_THROTTLE_ERROR =
 	/rate.?limit|too many requests|quota|usage.?limit|requests? per (?:second|minute|hour|day)|\b(?:rpm|tpm|rpd)\b|throttl/i;
@@ -999,7 +1003,7 @@ function hasBareDefaultRetryDisqualifyingFacts(message: AssistantMessage): boole
 
 function assistantMessageHasVisibleOrToolContent(message: AssistantMessage): boolean {
 	return message.content.some(content => {
-		if (content.type === "text") return content.text.length > 0;
+		if (content.type === "text") return content.text.trim().length > 0;
 		return content.type === "thinking" || content.type === "redactedThinking" || content.type === "toolCall";
 	});
 }
@@ -14999,16 +15003,16 @@ export class AgentSession {
 		// A text-only tail on a verified serializer continues on the same model;
 		// any other public tail (tool calls, images, tainted run) stops with the
 		// output preserved for the user to resume explicitly. A failure that streamed
-		// only reasoning holds no answer and its signed blocks cannot be replayed: it
-		// is dropped and retried like a failure that showed nothing.
-		const thinkingOnlyFailure = !managedOutcome && isThinkingOnlyFailure(message);
+		// only reasoning or blank text holds no answer (and signed reasoning cannot be
+		// replayed): it is dropped and retried like a failure that showed nothing.
+		const noAnswerFailure = !managedOutcome && isAnswerlessFailure(message);
 		// Tool calls cut off by the failure never ran (see #withoutUnexecutedToolCallFailure):
 		// without answer text the attempt is dropped like a reasoning-only failure.
 		const unexecutedToolCallFailure =
 			!managedOutcome &&
 			this.agent.state.messages.findLast(item => item.role === "assistant") === message &&
 			this.#withoutUnexecutedToolCallFailure() !== undefined;
-		const answerlessFailure = thinkingOnlyFailure || unexecutedToolCallFailure;
+		const answerlessFailure = noAnswerFailure || unexecutedToolCallFailure;
 		const visibleFailure = !managedOutcome && !answerlessFailure && assistantMessageHasVisibleOrToolContent(message);
 		const visibleContinuation = visibleFailure && this.#canContinueVisibleFailure(message);
 		if (visibleFailure && !visibleContinuation) return false;
@@ -15865,7 +15869,7 @@ export class AgentSession {
 			placeholders.length === 0 &&
 			tailMessage?.role === "assistant" &&
 			(tailMessage.stopReason === "error" || tailMessage.stopReason === "aborted") &&
-			(isThinkingOnlyFailure(tailMessage) || !assistantMessageHasVisibleOrToolContent(tailMessage))
+			(isAnswerlessFailure(tailMessage) || !assistantMessageHasVisibleOrToolContent(tailMessage))
 		) {
 			this.agent.replaceMessages(this.agent.state.messages.slice(0, -1));
 		}
@@ -16092,8 +16096,7 @@ export class AgentSession {
 			// Explicit retry does not establish the outcome of an interrupted operation
 			// and is never permission to erase a prefix already shown to the user. A failure
 			// that streamed only reasoning holds no answer and is dropped like an empty one.
-			if (!isThinkingOnlyFailure(assistantMsg) && assistantMessageHasVisibleOrToolContent(assistantMsg))
-				return false;
+			if (!isAnswerlessFailure(assistantMsg) && assistantMessageHasVisibleOrToolContent(assistantMsg)) return false;
 			if (assistantMsg.stopReason !== "error" && assistantMsg.stopReason !== "aborted") return false;
 
 			// Remove the empty failed/aborted assistant message before re-attempting.
