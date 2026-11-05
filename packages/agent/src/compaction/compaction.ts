@@ -1270,18 +1270,30 @@ export interface PrepareCompactionOptions {
 
 /**
  * Leave reserve headroom below the compaction trigger for the kept history.
- * When the default 300K ceiling applies, cap that headroom to half the threshold
- * so large context windows do not reduce the safe keep window to zero. The caller
- * separately clamps an oversized configured keep floor and corrected budget below
- * the threshold so they cannot prevent an actual compaction.
+ * The headroom is capped to half the trigger: the reserve scales with the model
+ * window (15% of 1M is 150K), so a trigger at or below it — the 300K default
+ * ceiling or an explicit/adaptive threshold — would otherwise reduce the safe
+ * keep window to zero and drop every recent turn. The caller separately clamps
+ * an oversized configured keep floor and corrected budget below the threshold
+ * so they cannot prevent an actual compaction.
  */
 function resolveThresholdSafeKeepRecentTokens(contextWindow: number, settings: CompactionSettings): number {
 	const thresholdTokens = resolveThresholdTokens(contextWindow, settings);
 	const reserveTokens = effectiveReserveTokens(contextWindow, settings, 0);
-	const headroomTokens = isDefaultAutoThresholdCeilingApplied(contextWindow, settings)
-		? Math.min(reserveTokens, Math.floor(thresholdTokens * 0.5))
-		: reserveTokens;
-	return Math.max(1, thresholdTokens - headroomTokens);
+	return Math.max(1, thresholdTokens - Math.min(reserveTokens, Math.floor(thresholdTokens * 0.5)));
+}
+
+/**
+ * The budget the 30% keep window scales against: the model window when
+ * compaction triggers at its reserve-derived default, otherwise the lower
+ * trigger itself (default ceiling, explicit, or adaptive threshold). Scaling a
+ * 500K window against a 150K trigger kept half the trigger, so the
+ * post-compaction prompt landed close to the next compaction.
+ */
+function resolveKeepScaleBudget(contextWindow: number, settings: CompactionSettings): number {
+	const thresholdTokens = resolveThresholdTokens(contextWindow, settings);
+	const reserveDerivedThreshold = contextWindow - effectiveReserveTokens(contextWindow, settings, 0);
+	return thresholdTokens < reserveDerivedThreshold ? thresholdTokens : contextWindow;
 }
 
 export function prepareCompaction(
@@ -1320,11 +1332,15 @@ export function prepareCompaction(
 			: configuredKeepRecentTokens;
 	const keepRecentTokens = Math.min(configuredKeepRecentTokens, thresholdSafeKeepRecentTokens);
 	// Preserve the legacy fixed window for smaller models. At 66k and above,
-	// retain up to 30% of the model context, but never enough to leave the
-	// post-compaction prompt immediately above its configured threshold.
+	// retain up to 30% of the budget compaction runs in (the model context, or a
+	// lower trigger), but never enough to leave the post-compaction prompt
+	// immediately above its configured threshold.
 	const scaledKeepRecentTokens =
 		contextWindow !== undefined && Number.isFinite(contextWindow) && contextWindow >= 66_000
-			? Math.min(thresholdSafeKeepRecentTokens, Math.max(keepRecentTokens, Math.floor(contextWindow * 0.3)))
+			? Math.min(
+					thresholdSafeKeepRecentTokens,
+					Math.max(keepRecentTokens, Math.floor(resolveKeepScaleBudget(contextWindow, settings) * 0.3)),
+				)
 			: keepRecentTokens;
 	const rawRatio = options.tokenCorrectionRatio;
 	const appliedRatio =

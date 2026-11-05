@@ -75,13 +75,13 @@ describe("compaction large-window keep-recent", () => {
 		}
 	});
 
-	it("keeps a reserve's worth of headroom below the ceiling on windows whose reserve reaches it", () => {
+	it("scales the keep window to 30% of the default ceiling on windows whose reserve reaches it", () => {
 		const settings = { ...DEFAULT_COMPACTION_SETTINGS, remoteEnabled: false };
 		const history = createLongHistory();
 		for (const contextWindow of [1_000_000, 2_000_000, 10_000_000, 20_000_000]) {
 			const preparation = prepareCompaction(history, settings, { contextWindow });
 			if (!preparation) throw new Error(`Expected compaction preparation for a ${contextWindow}-token window`);
-			expect(preparation.tokenCorrection.keepRecentTokensCorrected).toBe(150_000);
+			expect(preparation.tokenCorrection.keepRecentTokensCorrected).toBe(90_000);
 		}
 	});
 

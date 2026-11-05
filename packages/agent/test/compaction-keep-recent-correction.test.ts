@@ -113,7 +113,7 @@ describe("prepareCompaction scaled keep window", () => {
 		expect(prep?.recentMessages.length ?? 0).toBeGreaterThanOrEqual(5_000);
 	});
 
-	test("caps scaled retention below an explicit threshold with reserve headroom", () => {
+	test("caps scaled retention below an explicit threshold at half-threshold headroom", () => {
 		const configured = {
 			...settings(40_000),
 			thresholdTokens: 50_000,
@@ -121,7 +121,17 @@ describe("prepareCompaction scaled keep window", () => {
 		};
 		const prep = prepareCompaction(buildEntries(500, 8_000), configured, { contextWindow: 200_000 });
 		expect(prep).toBeDefined();
-		expect(prep?.tokenCorrection.keepRecentTokensCorrected).toBe(20_000);
+		expect(prep?.tokenCorrection.keepRecentTokensCorrected).toBe(25_000);
+	});
+
+	test("scales against an explicit threshold below the window instead of the window itself", () => {
+		const configured = { ...settings(20_000), thresholdTokens: 150_000 };
+		const history = buildEntries(500, 8_000);
+		// 500K (grok-4.7) previously kept 75K, half the trigger; 1M kept 1 token and dropped every recent turn.
+		for (const contextWindow of [500_000, 1_000_000]) {
+			const prep = prepareCompaction(history, configured, { contextWindow });
+			expect(prep?.tokenCorrection.keepRecentTokensCorrected).toBe(45_000);
+		}
 	});
 
 	test("a context window below 66k uses the legacy fixed keepRecentTokens value", () => {

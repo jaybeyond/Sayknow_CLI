@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Compaction now scales the kept recent-history window to 30% of the threshold it actually triggers at (explicit, adaptive, or the 300K default ceiling) instead of 30% of the model window. With `thresholdTokens: 150000`, a 500K-window model such as grok-4.7 kept 75K tokens (half the trigger), so post-compaction context sat near the next compaction; a 1M-window model kept a single token and dropped every recent turn. Both now keep 45K.
+
 ## [0.7.16] - 2026-11-03
 
 ## [0.7.12] - 2026-10-24

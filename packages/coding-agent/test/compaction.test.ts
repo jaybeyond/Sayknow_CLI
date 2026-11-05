@@ -263,7 +263,7 @@ describe("default compaction threshold ceiling", () => {
 		expect(keepRecentTokens).toBeLessThanOrEqual(resolveThresholdTokens(1_000_000, settings));
 	});
 
-	it("does not apply the reserve cap to explicit 300K token or percent thresholds", () => {
+	it("scales the keep window to 30% of explicit 300K token or percent thresholds", () => {
 		const entries: SessionEntry[] = Array.from({ length: 80 }, (_, index) =>
 			createMessageEntry(createUserMessage(`turn ${index} ${"recent context ".repeat(1_000)}`)),
 		);
@@ -277,7 +277,7 @@ describe("default compaction threshold ceiling", () => {
 			const preparation = prepareCompaction(entries, settings, { contextWindow: 1_000_000 });
 			if (!preparation) throw new Error("Expected compaction preparation for a large history");
 
-			expect(preparation.tokenCorrection.keepRecentTokensCorrected).toBe(150_000);
+			expect(preparation.tokenCorrection.keepRecentTokensCorrected).toBe(90_000);
 		}
 	});
 });
