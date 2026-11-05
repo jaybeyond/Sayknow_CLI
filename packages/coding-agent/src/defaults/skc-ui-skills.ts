@@ -15,6 +15,7 @@ import pickUiLibrarySkill from "./skc/ui-skills/pick-ui-library/SKILL.md" with {
 import prototypeSkill from "./skc/ui-skills/prototype/SKILL.md" with { type: "text" };
 import reactBitsSkill from "./skc/ui-skills/react-bits/SKILL.md" with { type: "text" };
 import reviewAnimationsSkill from "./skc/ui-skills/review-animations/SKILL.md" with { type: "text" };
+import stageshowSkill from "./skc/ui-skills/stageshow/SKILL.md" with { type: "text" };
 
 /**
  * Bundled frontend UI/UX craft skills. These are NOT public SKC workflow skills.
@@ -24,6 +25,7 @@ import reviewAnimationsSkill from "./skc/ui-skills/review-animations/SKILL.md" w
  * `skc/ui-skills/NOTICE.md`; regenerate with `scripts/build-ui-skill-bundle.ts`.
  */
 export const BUNDLED_SKC_UI_SKILL_NAMES = [
+	"stageshow",
 	"emil-design-eng",
 	"animate",
 	"review-animations",
@@ -48,6 +50,7 @@ interface BundledUiSkillSource {
 }
 
 const BUNDLED_UI_SKILL_SOURCES: readonly BundledUiSkillSource[] = [
+	{ name: "stageshow", relativePath: "ui-skills/stageshow/SKILL.md", content: stageshowSkill },
 	{ name: "emil-design-eng", relativePath: "ui-skills/emil-design-eng/SKILL.md", content: emilDesignEngSkill },
 	{ name: "animate", relativePath: "ui-skills/animate/SKILL.md", content: animateSkill },
 	{ name: "review-animations", relativePath: "ui-skills/review-animations/SKILL.md", content: reviewAnimationsSkill },

@@ -11,8 +11,8 @@
  * not exist.
  *
  * Usage:
- *   bun scripts/build-ui-skill-bundle.ts --source emilkowalski=<dir> --source appllama=<dir>
- *   bun scripts/build-ui-skill-bundle.ts --check   (verify committed output is in sync)
+ *   bun scripts/build-ui-skill-bundle.ts --source emilkowalski=<dir> --source appllama=<dir> --source benjitaylor=<dir>
+ *   bun scripts/build-ui-skill-bundle.ts --check --source ...   (verify committed output is in sync)
  */
 
 import * as fs from "node:fs/promises";
@@ -27,12 +27,22 @@ const bundleRoot = path.join(repoRoot, "packages/coding-agent/src/defaults/skc/u
  */
 const overlayRoot = path.join(repoRoot, "scripts/ui-skill-overlays");
 
+interface SourceLayout {
+	/** Directory holding the skill folders, relative to the checkout root. */
+	skillsDir: string;
+	/** Upstream license file, relative to the checkout root. */
+	license: string;
+	/** Companion markdown files to inline; every `.md` beside `SKILL.md` when omitted. */
+	companion?: (relativePath: string) => boolean;
+}
+
 interface UpstreamSource {
 	id: string;
 	/** Repository root of the upstream skills checkout. */
 	dir: string;
-	/** Skill directory names to vendor, relative to `<dir>/skills`. */
+	/** Skill directory names to vendor, relative to `<dir>/<layout.skillsDir>`. */
 	skills: readonly string[];
+	layout: SourceLayout;
 }
 
 const SOURCE_SKILLS: Record<string, readonly string[]> = {
@@ -53,6 +63,21 @@ const SOURCE_SKILLS: Record<string, readonly string[]> = {
 	// Native mobile screen craft. `appllama-usage` is excluded: it only drives
 	// the paid Appllama MCP, which SKC does not ship or enable.
 	appllama: ["appllama-app-design-skill"],
+	// SKC's design center: every frontend task loads it first.
+	benjitaylor: ["stageshow"],
+};
+
+const DEFAULT_LAYOUT: SourceLayout = { skillsDir: "skills", license: "LICENSE" };
+
+const SOURCE_LAYOUTS: Record<string, SourceLayout> = {
+	// Skills live at the repository root and carry their own LICENSE. Only the
+	// rule references and the notice are inlined: the READMEs and source lists
+	// describe the kit, examples and playground, which are not vendored.
+	benjitaylor: {
+		skillsDir: ".",
+		license: "stageshow/LICENSE",
+		companion: relativePath => relativePath.startsWith("references/") || relativePath === "NOTICE.md",
+	},
 };
 
 
@@ -120,17 +145,18 @@ function rewriteCompanionLinks(body: string, companions: readonly string[]): str
 	return out;
 }
 
-async function listCompanions(skillDir: string): Promise<string[]> {
+async function listCompanions(skillDir: string, include: SourceLayout["companion"]): Promise<string[]> {
 	const found: string[] = [];
 	const walk = async (dir: string, prefix: string): Promise<void> => {
 		const entries = await fs.readdir(dir, { withFileTypes: true });
 		for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
 			const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
 			if (entry.isDirectory()) {
-				await walk(path.join(dir, entry.name), rel);
+				if (entry.name !== "node_modules") await walk(path.join(dir, entry.name), rel);
 				continue;
 			}
 			if (entry.name === "SKILL.md" || !entry.name.endsWith(".md")) continue;
+			if (include && !include(rel)) continue;
 			found.push(rel);
 		}
 	};
@@ -138,14 +164,14 @@ async function listCompanions(skillDir: string): Promise<string[]> {
 	return found;
 }
 
-async function buildSkill(sourceDir: string, skillName: string): Promise<string> {
-	const skillDir = path.join(sourceDir, "skills", skillName);
+async function buildSkill(source: UpstreamSource, skillName: string): Promise<string> {
+	const skillDir = path.join(source.dir, source.layout.skillsDir, skillName);
 	const raw = await Bun.file(path.join(skillDir, "SKILL.md")).text();
 	const frontmatterMatch = raw.match(/^---\n[\s\S]*?\n---\n/);
 	const frontmatter = frontmatterMatch ? frontmatterMatch[0] : "";
 	let body = frontmatterMatch ? raw.slice(frontmatter.length) : raw;
 
-	const companions = await listCompanions(skillDir);
+	const companions = await listCompanions(skillDir, source.layout.companion);
 	body = stripInitialResponse(body);
 	body = rewriteCompanionLinks(body, companions);
 	body = insertAfterTitle(body, invocationBlock(companions) + (await readOverlay(skillName)));
@@ -171,7 +197,7 @@ async function readSources(argv: string[]): Promise<UpstreamSource[]> {
 		if (!id || !dir) throw new Error(`invalid --source value: ${value}`);
 		const skills = SOURCE_SKILLS[id];
 		if (!skills) throw new Error(`unknown source id: ${id}`);
-		sources.push({ id, dir: path.resolve(dir), skills });
+		sources.push({ id, dir: path.resolve(dir), skills, layout: SOURCE_LAYOUTS[id] ?? DEFAULT_LAYOUT });
 	}
 	return sources;
 }
@@ -180,14 +206,16 @@ const argv = Bun.argv.slice(2);
 const check = argv.includes("--check");
 const sources = await readSources(argv);
 if (sources.length === 0) {
-	console.error("usage: bun scripts/build-ui-skill-bundle.ts --source emilkowalski=<dir> [--source appllama=<dir>]");
+	console.error(
+		"usage: bun scripts/build-ui-skill-bundle.ts --source emilkowalski=<dir> [--source appllama=<dir>] [--source benjitaylor=<dir>]",
+	);
 	process.exit(2);
 }
 
 const drift: string[] = [];
 for (const source of sources) {
 	for (const skillName of source.skills) {
-		const content = await buildSkill(source.dir, skillName);
+		const content = await buildSkill(source, skillName);
 		const target = path.join(bundleRoot, skillName, "SKILL.md");
 		if (check) {
 			const existing = await Bun.file(target)
@@ -200,7 +228,7 @@ for (const source of sources) {
 		await Bun.write(target, content);
 		console.log(`wrote ${path.relative(repoRoot, target)} (${content.split("\n").length} lines)`);
 	}
-	const license = path.join(source.dir, "LICENSE");
+	const license = path.join(source.dir, source.layout.license);
 	const licenseTarget = path.join(bundleRoot, `LICENSE.${source.id}`);
 	const licenseText = await Bun.file(license).text();
 	if (check) {

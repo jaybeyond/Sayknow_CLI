@@ -7,6 +7,7 @@ import { dispatchSkcNativeSkillHook } from "@sayknow-cli/coding-agent/hooks/nati
 import {
 	buildExternalUiSkillContext,
 	buildUiSkillActivationContext,
+	buildUiSkillDirectiveForSkill,
 	detectExternalUiSkills,
 	detectUiSkillKeywords,
 } from "@sayknow-cli/coding-agent/hooks/ui-skill-keywords";
@@ -48,8 +49,9 @@ afterAll(async () => {
 	await Promise.all(hookRoots.map(root => fs.rm(root, { recursive: true, force: true })));
 });
 
+/** The specialized skill; index 0 is always the `stageshow` design center. */
 function leadSkill(text: string): string | undefined {
-	return detectUiSkillKeywords(text)[0]?.skill;
+	return detectUiSkillKeywords(text)[1]?.skill;
 }
 
 describe("automatic frontend UI skill routing", () => {
@@ -65,21 +67,49 @@ describe("automatic frontend UI skill routing", () => {
 
 	it("routes generic frontend work to the craft baseline", () => {
 		expect(leadSkill("clean up the button component styling")).toBe("emil-design-eng");
-		expect(detectUiSkillKeywords("clean up the button component styling")).toHaveLength(1);
+		expect(detectUiSkillKeywords("clean up the button component styling").map(match => match.skill)).toEqual([
+			"stageshow",
+			"emil-design-eng",
+		]);
 	});
 
-	it("routes faux product UI work to the craft baseline that carries the Stageshow rules", () => {
-		expect(leadSkill("a small looping hero demo for our homepage: someone assigns an issue")).toBe("emil-design-eng");
-		expect(leadSkill("make a dark bento grid of four tiles for Kanso")).toBe("emil-design-eng");
-		expect(leadSkill("build a mocked dashboard for the docs page")).toBe("emil-design-eng");
-		expect(leadSkill("랜딩 히어로에 들어갈 제품 데모 만들어줘")).toBe("emil-design-eng");
-		const base = getEmbeddedSkcUiSkills().find(skill => skill.name === "emil-design-eng");
-		expect(base?.content ?? "").toContain("## Faux product UI (Stageshow) — mandatory");
+	it("leads every frontend match with the stageshow design center", () => {
+		for (const prompt of [
+			"add a toast when the upload finishes",
+			"clean up the button component styling",
+			"build the onboarding screen in Expo",
+			"add a cursor trail",
+			"the web app feels like a website on my phone",
+			"랜딩 히어로에 들어갈 제품 데모 만들어줘",
+			"버튼 컴포넌트 스타일링 정리해줘",
+		]) {
+			expect(detectUiSkillKeywords(prompt)[0]?.skill).toBe("stageshow");
+		}
 	});
 
-	it("pairs a specialized match with the craft baseline", () => {
+	it("bundles the full Stageshow skill with its references inlined", () => {
+		for (const prompt of [
+			"a small looping hero demo for our homepage: someone assigns an issue",
+			"make a dark bento grid of four tiles for Kanso",
+			"build a mocked dashboard for the docs page",
+		]) {
+			expect(detectUiSkillKeywords(prompt).map(match => match.skill)).toEqual(["stageshow", "emil-design-eng"]);
+		}
+		const stageshow = getEmbeddedSkcUiSkills().find(skill => skill.name === "stageshow")?.content ?? "";
+		expect(stageshow).toContain("## SKC: the design center — mandatory for all frontend work");
+		expect(stageshow).toContain("**It reads as a real product, simplified to what the viewer needs");
+		for (const reference of ["craft", "framing", "motion", "verify", "kit", "rehearse"]) {
+			expect(stageshow).toContain(`## Appendix: ${reference}.md`);
+		}
+		expect(stageshow).toContain("npx -y skills@latest add benjitaylor/skills --skill stageshow -a universal -y");
+		const base = getEmbeddedSkcUiSkills().find(skill => skill.name === "emil-design-eng")?.content ?? "";
+		expect(base).toContain("## Stageshow is the design center — mandatory");
+		expect(base).not.toContain("## Faux product UI (Stageshow)");
+	});
+
+	it("pairs a specialized match with the design center and the craft baseline", () => {
 		const matches = detectUiSkillKeywords("animate the modal in our react component");
-		expect(matches.map(match => match.skill)).toEqual(["animate", "emil-design-eng"]);
+		expect(matches.map(match => match.skill)).toEqual(["stageshow", "animate", "emil-design-eng"]);
 	});
 
 	it("routes native app screen work to the app design skill", () => {
@@ -89,9 +119,9 @@ describe("automatic frontend UI skill routing", () => {
 		expect(leadSkill("앱 화면 온보딩 만들어줘")).toBe("appllama-app-design-skill");
 	});
 
-	it("keeps the native app skill unpaired because it carries its own craft bar", () => {
+	it("keeps the native app skill off the web baseline but under the design center", () => {
 		const matches = detectUiSkillKeywords("build the expo paywall screen with animation");
-		expect(matches.map(match => match.skill)).toEqual(["appllama-app-design-skill"]);
+		expect(matches.map(match => match.skill)).toEqual(["stageshow", "appllama-app-design-skill"]);
 	});
 
 	it("separates native app screens from web-app-on-a-phone work", () => {
@@ -197,16 +227,26 @@ describe("automatic frontend UI skill routing", () => {
 
 	it("builds a directive that names the skills and forbids install prompts", () => {
 		const context = buildUiSkillActivationContext("animate the drawer");
-		expect(context).toContain("`animate`");
-		expect(context).toContain("`emil-design-eng`");
-		expect(context).toContain("skill` tool");
+		expect(context).toContain("load `stageshow` then `animate` then `emil-design-eng` with the `skill` tool");
+		expect(context).toContain('matched "animate"');
+		expect(context).toContain("real product UI included");
 		expect(context).toContain("never tell the user to install them");
+	});
+
+	it("never lists the design center twice when the semantic stage picks it", () => {
+		expect(buildUiSkillDirectiveForSkill("stageshow")).toContain(
+			"load `stageshow` then `emil-design-eng` with the `skill` tool",
+		);
+		expect(buildUiSkillDirectiveForSkill("appllama-app-design-skill")).toContain(
+			"load `stageshow` then `appllama-app-design-skill` with the `skill` tool",
+		);
 	});
 
 	it("injects the directive through the native UserPromptSubmit hook", async () => {
 		const result = await dispatchIsolatedHook("animate the dropdown open");
 		const context = hookContext(result);
 		expect(context).toContain("`animate`");
+		expect(context).toContain("`stageshow`");
 	});
 
 	it("fires even when a workflow keyword already matched", async () => {
@@ -220,5 +260,6 @@ describe("automatic frontend UI skill routing", () => {
 		const result = await dispatchIsolatedHook("bump the package version");
 		const context = hookContext(result);
 		expect(context).not.toContain("emil-design-eng");
+		expect(context).not.toContain("stageshow");
 	});
 });

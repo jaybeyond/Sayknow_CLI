@@ -10,7 +10,8 @@ Regenerate with:
 ```bash
 bun scripts/build-ui-skill-bundle.ts \
   --source emilkowalski=<checkout> \
-  --source appllama=<checkout>
+  --source appllama=<checkout> \
+  --source benjitaylor=<checkout>
 ```
 
 Only `SKILL.md` is compiled into the binary, and a bundled skill's `baseDir`
@@ -24,6 +25,7 @@ loose companion files here expecting them to be readable at runtime.
 | --- | --- | --- |
 | [emilkowalski/skills](https://github.com/emilkowalski/skills) | MIT (`LICENSE.emilkowalski`), Copyright (c) 2026 Emil Kowalski | `emil-design-eng`, `animate`, `review-animations`, `improve-animations`, `find-animation-opportunities`, `pick-ui-library`, `prototype`, `mobile-native`, `animation-vocabulary`, `apple-design`, `ask-sonner` |
 | [Appllama/appllama-skills](https://github.com/Appllama/appllama-skills) | MIT (`LICENSE.appllama`) | `appllama-app-design-skill` |
+| [benjitaylor/skills](https://github.com/benjitaylor/skills) at `299140f` (Stageshow 1.1.1, [write-up](https://benji.org/stageshow)) | MIT (`LICENSE.benjitaylor`, from `stageshow/LICENSE`), Copyright (c) 2026 Benji Taylor | `stageshow` (`SKILL.md`, `references/*.md` and `NOTICE.md` inlined) |
 
 ## SKC overlays
 
@@ -31,14 +33,16 @@ loose companion files here expecting them to be readable at runtime.
 generator splices into a vendored skill right after its `## SKC invocation`
 block, so a regeneration keeps them.
 
-| Overlay | Adapted from | License |
-| --- | --- | --- |
-| `emil-design-eng`: "Faux product UI (Stageshow) — mandatory" | [benjitaylor/skills `stageshow`](https://github.com/benjitaylor/skills/tree/main/stageshow) at `8020574` ([write-up](https://benji.org/stageshow)) | MIT (`LICENSE.benjitaylor`), Copyright (c) 2026 Benji Taylor |
+| Overlay | Purpose |
+| --- | --- |
+| `stageshow`: "SKC: the design center — mandatory for all frontend work" | Makes Stageshow the bar for every frontend surface, says which rules apply to real UI versus faux UI, and how it fits with the other bundled skills |
+| `emil-design-eng`: "Stageshow is the design center — mandatory" | Points the craft baseline at `stageshow` and defers conflicts to it |
 
-Only the rules are adapted. The Stageshow kit, examples and filming scripts are
-not vendored (they are React/TS sources, not readable from an embedded skill);
-the overlay tells the agent to install the full skill into the user's project
-with `npx -y skills@latest add benjitaylor/skills --skill stageshow -a universal -y`.
+The Stageshow kit, examples, `teaching/`, filming scripts and playground are not
+vendored: they are React/TS sources (unreadable from an embedded skill) and
+include app-icon artwork the Stageshow MIT license does not cover. The overlay
+tells the agent to install the full skill into the user's project for faux UI
+builds with `npx -y skills@latest add benjitaylor/skills --skill stageshow -a universal -y`.
 
 ## Deliberate exclusions
 

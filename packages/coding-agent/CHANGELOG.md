@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Benji Taylor's [Stageshow](https://benji.org/stageshow) skill (MIT, 1.1.1) is now bundled as `stageshow` and is the design center for all frontend work: every frontend prompt routes to `stageshow` first, then the matching specialized skill, then `emil-design-eng`, and the system and executor prompts require it for real product UI as well as faux UI. Its `SKILL.md` ships with every `references/*.md` file inlined; the React kit, gold examples and filming scripts are not bundled, so for faux UI builds the agent installs the full skill into the project itself. The earlier adapted Stageshow section in `emil-design-eng` is replaced by a pointer to `stageshow`. The routing directive now quotes the prompt text that matched instead of the skill name.
+
 ### Fixed
 
 - A turn that streamed only blank text before failing is now dropped and retried on the same model instead of stopping the session. Long Grok sessions hit this when grok-4.7 degenerated into a few thousand whitespace tokens and xAI aborted the stream with "Internal error during token generation"; the whitespace counted as visible output, so neither retry nor auto-resume ran. A code-less "internal error" also now counts as a server failure for the default retry policy.

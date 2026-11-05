@@ -122,10 +122,11 @@ Apply sanitization to success, error, diff, and streaming render paths.
 
 ## UI design and visual QA
 
-For frontend UI, web, dashboard, mobile-web, animation, and visual-polish work, invoke the matching bundled UI skill before writing or reviewing that surface. The skills are compiled into SKC (`packages/coding-agent/src/defaults/skc/ui-skills`); users do not install them. They are not a fifth public workflow — the four workflows remain `deep-interview`, `ralplan`, `ultragoal`, and `team`.
+For frontend UI, web, dashboard, mobile-web, animation, visual-polish, and faux product UI work, invoke `stageshow` first, then the matching bundled UI skill, before writing or reviewing that surface. The skills are compiled into SKC (`packages/coding-agent/src/defaults/skc/ui-skills`); users do not install them. They are not a fifth public workflow — the four workflows remain `deep-interview`, `ralplan`, `ultragoal`, and `team`.
 
 | Skill | Use when |
 | --- | --- |
+| `stageshow` | **Mandatory first for every frontend task** (design center): the one idea, five failures, craft/framing/motion/verify bar for real UI; the full workflow and kit for faux product UI |
 | `emil-design-eng` | General UI/UX craft, component polish, animation decisions |
 | `animate` | Building new motion |
 | `review-animations` | Reviewing existing motion |

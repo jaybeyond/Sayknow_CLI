@@ -23,20 +23,27 @@ export interface UiSkillKeywordDefinition {
 	pattern: RegExp;
 }
 
+/**
+ * SKC's design center. Every frontend match loads it first, ahead of the
+ * specialized lead and the craft baseline, whatever the surface.
+ */
+export const UI_SKILL_CORE: BundledSkcUiSkillName = "stageshow";
+
 /** Base craft skill paired with any specialized web frontend match. */
 export const UI_SKILL_BASE: BundledSkcUiSkillName = "emil-design-eng";
 
 /**
  * Skills that already carry their own complete craft bar, so pairing them with
  * the web baseline only adds noise. `appllama-app-design-skill` targets native
- * Expo/React Native screens and ships its own motion and fidelity rules.
+ * Expo/React Native screens and ships its own motion and fidelity rules. The
+ * design center still leads them.
  */
 const SELF_SUFFICIENT_UI_SKILLS = new Set<BundledSkcUiSkillName>(["appllama-app-design-skill"]);
 
 /**
  * Ordered specialized detectors. The first (highest priority) match selects the
- * lead skill; `emil-design-eng` is added as the craft baseline for build and
- * review work.
+ * lead skill; `stageshow` is loaded ahead of it and `emil-design-eng` after it
+ * as the craft baseline for build and review work.
  */
 export const UI_SKILL_KEYWORD_DEFINITIONS: readonly UiSkillKeywordDefinition[] = [
 	{
@@ -134,45 +141,52 @@ const WEB_SURFACE_PATTERN =
 	/\b(web|browser|css|html|react|vue|svelte|next\.?js|tailwind|dom|mobile|ios|android|page|screen)\b|웹|브라우저|화면|페이지/i;
 
 /**
- * Detect frontend UI/UX intent. Returns matches ordered by priority, most
- * specific first, with `emil-design-eng` appended as the craft baseline.
+ * Detect frontend UI/UX intent. Returns `stageshow` first, then the most
+ * specific match, then `emil-design-eng` as the craft baseline.
  */
 export function detectUiSkillKeywords(text: string): UiSkillKeywordMatch[] {
+	const lead = detectLeadUiSkill(text);
+	return lead ? pairWithCoreAndBaseline(lead) : [];
+}
+
+/** The highest-priority specialized match, or null when the prompt is not frontend work. */
+function detectLeadUiSkill(text: string): UiSkillKeywordMatch | null {
 	const trimmed = text.trim();
-	if (!trimmed) return [];
+	if (!trimmed) return null;
 	// A prompt about SKC's own TUI with no web surface mentioned is handled by
 	// docs/ui-design-visual-qa.md, not the web craft skills.
-	if (TERMINAL_ONLY_PATTERN.test(trimmed) && !WEB_SURFACE_PATTERN.test(trimmed)) return [];
+	if (TERMINAL_ONLY_PATTERN.test(trimmed) && !WEB_SURFACE_PATTERN.test(trimmed)) return null;
 
-	const matches: UiSkillKeywordMatch[] = [];
+	let lead: UiSkillKeywordMatch | null = null;
 	for (const definition of UI_SKILL_KEYWORD_DEFINITIONS) {
 		const match = trimmed.match(definition.pattern);
 		if (!match) continue;
-		matches.push({ skill: definition.skill, keyword: match[0], priority: definition.priority });
+		const candidate = { skill: definition.skill, keyword: match[0], priority: definition.priority };
+		if (
+			!lead ||
+			candidate.priority > lead.priority ||
+			(candidate.priority === lead.priority && candidate.skill.localeCompare(lead.skill) < 0)
+		) {
+			lead = candidate;
+		}
 	}
-	if (matches.length === 0) return [];
+	return lead;
+}
 
-	matches.sort((a, b) => b.priority - a.priority || a.skill.localeCompare(b.skill));
-	const deduped: UiSkillKeywordMatch[] = [];
-	for (const item of matches) {
-		if (deduped.some(existing => existing.skill === item.skill)) continue;
-		deduped.push(item);
-	}
-	// Keep the lead skill plus the craft baseline; more than that is noise.
-	const lead = deduped[0]!;
-	return pairWithBaseline(lead.skill);
+function skillMatch(skill: BundledSkcUiSkillName): UiSkillKeywordMatch {
+	const definition = UI_SKILL_KEYWORD_DEFINITIONS.find(item => item.skill === skill);
+	return { skill, keyword: skill, priority: definition?.priority ?? 0 };
 }
 
 /**
- * A specialized skill plus the craft baseline, which is the pairing the skills
- * themselves assume. Skills that carry their own complete craft bar stand alone.
+ * The design center, the specialized lead, then the craft baseline the skills
+ * themselves assume. Skills that carry their own complete craft bar skip the
+ * baseline but never the design center.
  */
-function pairWithBaseline(skill: BundledSkcUiSkillName): UiSkillKeywordMatch[] {
-	const definition = UI_SKILL_KEYWORD_DEFINITIONS.find(item => item.skill === skill);
-	const lead: UiSkillKeywordMatch = { skill, keyword: skill, priority: definition?.priority ?? 0 };
-	if (skill === UI_SKILL_BASE || SELF_SUFFICIENT_UI_SKILLS.has(skill)) return [lead];
-	const base = UI_SKILL_KEYWORD_DEFINITIONS.find(item => item.skill === UI_SKILL_BASE);
-	return [lead, { skill: UI_SKILL_BASE, keyword: UI_SKILL_BASE, priority: base?.priority ?? 0 }];
+function pairWithCoreAndBaseline(lead: UiSkillKeywordMatch): UiSkillKeywordMatch[] {
+	const paired = [skillMatch(UI_SKILL_CORE), lead];
+	if (!SELF_SUFFICIENT_UI_SKILLS.has(lead.skill)) paired.push(skillMatch(UI_SKILL_BASE));
+	return paired.filter((item, index) => paired.findIndex(other => other.skill === item.skill) === index);
 }
 
 function renderUiSkillDirective(skills: readonly BundledSkcUiSkillName[], evidence: string): string {
@@ -180,6 +194,7 @@ function renderUiSkillDirective(skills: readonly BundledSkcUiSkillName[], eviden
 	return [
 		`SKC detected frontend UI/UX work in this prompt (${evidence}).`,
 		`Before writing or reviewing that surface, load ${names} with the \`skill\` tool.`,
+		`\`${UI_SKILL_CORE}\` is the design center for every frontend surface, real product UI included; apply it even when the task is not a demo.`,
 		"These skills are bundled with SKC: never tell the user to install them, and never skip them because the task looks small.",
 		"They are not workflow skills and have no `skc state` mode state.",
 	].join(" ");
@@ -187,15 +202,15 @@ function renderUiSkillDirective(skills: readonly BundledSkcUiSkillName[], eviden
 
 /**
  * Build the `UserPromptSubmit` directive that makes the agent load the matching
- * bundled UI skill for this turn. Returns null when the prompt is not frontend
+ * bundled UI skills for this turn. Returns null when the prompt is not frontend
  * UI/UX work.
  */
 export function buildUiSkillActivationContext(text: string): string | null {
-	const matches = detectUiSkillKeywords(text);
-	if (matches.length === 0) return null;
+	const lead = detectLeadUiSkill(text);
+	if (!lead) return null;
 	return renderUiSkillDirective(
-		matches.map(match => match.skill),
-		`matched "${matches[0]!.keyword}"`,
+		pairWithCoreAndBaseline(lead).map(match => match.skill),
+		`matched "${lead.keyword}"`,
 	);
 }
 
@@ -207,7 +222,7 @@ export function buildUiSkillActivationContext(text: string): string | null {
  */
 export function buildUiSkillDirectiveForSkill(skill: BundledSkcUiSkillName): string {
 	return renderUiSkillDirective(
-		pairWithBaseline(skill).map(match => match.skill),
+		pairWithCoreAndBaseline(skillMatch(skill)).map(match => match.skill),
 		"semantic match",
 	);
 }
@@ -220,8 +235,10 @@ export function buildUiSkillDirectiveForSkill(skill: BundledSkcUiSkillName): str
  * signal. Kept next to the patterns so the two cannot drift apart.
  */
 export const BUNDLED_UI_SKILL_MEANINGS: Record<BundledSkcUiSkillName, string> = {
+	stageshow:
+		"Faux product UI for marketing and docs pages: hero demos, feature cards, bento grids, cursor walkthroughs, mocked app screenshots, product shots. Every other frontend pick loads it too as the design center.",
 	"emil-design-eng":
-		"General web UI/UX craft: building or reviewing components, layout, spacing, typography, design systems, CSS. The default for frontend work with no more specific fit. Also faux product UI for marketing and docs pages: hero demos, feature cards, bento grids, cursor walkthroughs, mocked app screenshots.",
+		"General web UI/UX craft: building or reviewing components, layout, spacing, typography, design systems, CSS. The default for frontend work with no more specific fit.",
 	animate:
 		"Adding new motion to a web UI: animations, transitions, easing, keyframes, hover effects, micro-interactions.",
 	"review-animations": "Reviewing motion that already exists and judging whether it is good.",

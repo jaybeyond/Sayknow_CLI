@@ -100,10 +100,10 @@ describe("default SKC definitions", () => {
 		expect(team?.content).not.toMatch(/auto-delegate `researcher`|`researcher` as an evidence lane/i);
 	});
 
-	it("bundles Emil Kowalski frontend UI skills separately from the four public workflows", () => {
+	it("bundles frontend UI skills separately from the four public workflows", () => {
 		const uiSkills = getEmbeddedSkcUiSkills();
 		expect(uiSkills.map(skill => skill.name).sort()).toEqual([...BUNDLED_SKC_UI_SKILL_NAMES].sort());
-		expect(uiSkills).toHaveLength(13);
+		expect(uiSkills).toHaveLength(14);
 		expect(uiSkills.every(skill => skill.source === "bundled:ui")).toBe(true);
 		expect(uiSkills.every(skill => skill.filePath.startsWith("embedded:skc/ui-skills/"))).toBe(true);
 		expect(uiSkills.every(skill => skill.content?.includes("SKC loads this skill automatically"))).toBe(true);
@@ -119,6 +119,7 @@ describe("default SKC definitions", () => {
 			.filter(definition => definition.kind === "skill")
 			.map(definition => definition.name as string);
 		expect(workflowNames).not.toContain("emil-design-eng");
+		expect(workflowNames).not.toContain("stageshow");
 	});
 
 	it("exposes deep-interview fragments only through the parent-scoped fragment accessor", () => {
