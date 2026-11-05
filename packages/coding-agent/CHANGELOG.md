@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.7.17] - 2026-11-05
+
 ### Added
 
 - Benji Taylor's [Stageshow](https://benji.org/stageshow) skill (MIT, 1.1.1) is now bundled as `stageshow` and is the design center for all frontend work: every frontend prompt routes to `stageshow` first, then the matching specialized skill, then `emil-design-eng`, and the system and executor prompts require it for real product UI as well as faux UI. Its `SKILL.md` ships with every `references/*.md` file inlined; the React kit, gold examples and filming scripts are not bundled, so for faux UI builds the agent installs the full skill into the project itself. The earlier adapted Stageshow section in `emil-design-eng` is replaced by a pointer to `stageshow`. The routing directive now quotes the prompt text that matched instead of the skill name.

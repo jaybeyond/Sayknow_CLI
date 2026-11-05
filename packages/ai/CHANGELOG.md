@@ -2,11 +2,11 @@
 
 ## [Unreleased]
 
+## [0.7.17] - 2026-11-05
+
 ### Fixed
 
 - OpenAI Responses stream errors without an error code no longer read `Error Code null: …`; only the provider message is shown.
-
-## [0.7.16] - 2026-11-03
 
 ## [0.7.12] - 2026-10-24
 

@@ -2,11 +2,11 @@
 
 ## [Unreleased]
 
+## [0.7.17] - 2026-11-05
+
 ### Fixed
 
 - Late or duplicate replies to terminal queries (DA1, XTSMGRAPHICS, Mode 2031, OSC color, kitty graphics) no longer reach the focused component. The interactive PTY console forwarded them to the child, whose tty echoed them as `^[[?62;4;9;22c` garbage.
-
-## [0.7.16] - 2026-11-03
 
 ## [0.7.2] - 2026-09-29
 

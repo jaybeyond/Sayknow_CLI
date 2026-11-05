@@ -2,11 +2,11 @@
 
 ## [Unreleased]
 
+## [0.7.17] - 2026-11-05
+
 ### Fixed
 
 - Pipeline stages run by the embedded shell drop the host's controlling terminal before exec. A stage used to keep it, so any descendant that took the terminal foreground (`tcsetpgrp`) moved the host into the background, and the host's next terminal read stopped it with SIGTTIN (`zsh: suspended (tty input)`). Single commands were already detached with `setsid()`; pipeline stages keep their shared process group and session.
-
-## [0.7.16] - 2026-11-03
 
 ## [0.5.7] - 2026-09-10
 
