@@ -100,6 +100,16 @@ type MouseSelectionPoint = {
 	column: number;
 };
 
+/**
+ * Replies to terminal queries: private CSI reports (DA1 `CSI ? … c`,
+ * XTSMGRAPHICS `CSI ? … S`, Mode 2031 `CSI ? … n`, kitty flags `CSI ? … u`,
+ * DECRPM `CSI ? … $ y`), numbered OSC replies (`OSC 11 ; rgb:… ST`), and kitty
+ * graphics replies (`APC G … ST`). No key encoding produces these shapes, so
+ * whatever is left after the probe listeners is a late or duplicate reply.
+ */
+const TERMINAL_REPLY_PATTERN =
+	/^(?:\x1b\[\?[\d;]*[\x20-\x2f]*[\x40-\x7e]|\x1b\]\d+;[^\x07\x1b]*(?:\x07|\x1b\\)|\x1b_G[^\x1b]*\x1b\\)$/;
+
 /** Parse xterm SGR mouse reports for wheel, left-click, drag, and release events. */
 export function parseSgrMouseEvent(data: string): MouseEvent | undefined {
 	const match = data.match(/^\x1b\[<(\d+);(\d+);(\d+)([Mm])$/);
@@ -2181,6 +2191,12 @@ export class TUI extends Container {
 		}
 		// SGR-looking reports, including malformed reports, are terminal controls.
 		if (data.startsWith("\x1b[<")) return;
+
+		// A reply that arrives after its probe stopped listening (or a terminal
+		// that answers one query twice) must not reach the focused component: the
+		// editor ignores it, but an interactive PTY console would forward it to the
+		// child, whose tty echoes it as `^[[?62;4;9;22c` garbage.
+		if (TERMINAL_REPLY_PATTERN.test(data)) return;
 
 		// Consume terminal cell size responses without blocking unrelated input.
 		if (this.#consumeCellSizeResponse(data)) {
