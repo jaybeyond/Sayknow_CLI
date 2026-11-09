@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.7.18] - 2026-11-09
+
 ### Added
 
 - Paul Bakaus's [Impeccable](https://github.com/pbakaus/impeccable) (Apache-2.0, 4.8.1) is now bundled as `impeccable`, the design steering vocabulary: `polish`, `bolder`, `quieter`, `distill`, `clarify`, `colorize`, `typeset`, `layout`, `harden`, `adapt`, `critique` and `audit`. Only the 17 engine-free references are inlined. The detector engine, live mode and hooks need a downloaded native binary, so they are not bundled and the skill takes upstream's "launcher unavailable" path. Prompts like "polish the dashboard", "make it bolder", "UI critique" or "디자인 리뷰" route to it after `stageshow`.
