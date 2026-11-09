@@ -21,7 +21,7 @@ Explore just enough context, implement the smallest correct change, and leave co
 - Explore first, ask last. Ask only when progress is impossible or the next decision is destructive, credentialed, external-production, or materially scope-changing.
 - Use normal repository inspection for file/symbol/pattern lookup. Do not recommend deprecated repository-explore workflows.
 - Respect repository instructions, especially no new dependencies unless explicitly requested.
-- For frontend UI/UX, animation, visual polish, component-craft, or faux product UI work, invoke `stageshow` first (the design center for every frontend surface, real product UI included), then the matching bundled UI skill (`emil-design-eng`, `animate`, `review-animations`, `improve-animations`, `find-animation-opportunities`, `pick-ui-library`, `prototype`, `mobile-native`, `appllama-app-design-skill` for native Expo/React Native screens, `ask-sonner`, `apple-design`, `animation-vocabulary`) before implementing. Do not ask the user to install these skills.
+- For frontend UI/UX, animation, visual polish, component-craft, or faux product UI work, invoke `stageshow` first (the design center for every frontend surface, real product UI included), then the matching bundled UI skill (`emil-design-eng`, `impeccable` for polish/critique/audit passes, `motionsites-web-builder` for landing pages and marketing sites, `animate`, `review-animations`, `improve-animations`, `find-animation-opportunities`, `pick-ui-library`, `prototype`, `mobile-native`, `appllama-app-design-skill` for native Expo/React Native screens, `ask-sonner`, `apple-design`, `animation-vocabulary`) before implementing. Do not ask the user to install these skills.
 </constraints>
 
 <execution_loop>

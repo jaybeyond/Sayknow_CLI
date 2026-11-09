@@ -17,7 +17,7 @@
  */
 import { logger } from "@sayknow-cli/utils";
 import { BUNDLED_SKC_UI_SKILL_NAMES, type BundledSkcUiSkillName } from "../defaults/skc-ui-skills";
-import { BUNDLED_UI_SKILL_MEANINGS } from "../hooks/ui-skill-keywords";
+import { BUNDLED_UI_SKILL_MEANINGS, UI_SKILL_CORE } from "../hooks/ui-skill-keywords";
 import { CANONICAL_SKC_WORKFLOW_SKILLS, type CanonicalSkcWorkflowSkill } from "../skill-state/active-state";
 import type { DecisionService } from "./index";
 import {
@@ -33,10 +33,18 @@ import type { Question } from "./types";
 const UI_INSTRUCTIONS =
 	"Which bundled UI craft skill should be loaded for this request? Choose none unless the request is about building, reviewing, or polishing a user-visible interface.";
 
-/** Exported so tests can assert the contract the model is actually given. */
+/**
+ * Exported so tests can assert the contract the model is actually given.
+ *
+ * The design center is not an option: every pick loads it first anyway, so
+ * choosing it yields the same directive as choosing the craft baseline, and
+ * leaving it out keeps the question under the backend's option ceiling.
+ */
 export function buildUiSkillCriteria(): Record<string, string> {
 	const criteria: Record<string, string> = {};
-	for (const skill of BUNDLED_SKC_UI_SKILL_NAMES) criteria[skill] = BUNDLED_UI_SKILL_MEANINGS[skill];
+	for (const skill of BUNDLED_SKC_UI_SKILL_NAMES) {
+		if (skill !== UI_SKILL_CORE) criteria[skill] = BUNDLED_UI_SKILL_MEANINGS[skill];
+	}
 	criteria[NONE_CHOICE] =
 		"Not interface work: backend, data, infrastructure, tooling, SKC's own terminal UI, or a question with no surface to build.";
 	return criteria;

@@ -11,7 +11,8 @@
  * not exist.
  *
  * Usage:
- *   bun scripts/build-ui-skill-bundle.ts --source emilkowalski=<dir> --source appllama=<dir> --source benjitaylor=<dir>
+ *   bun scripts/build-ui-skill-bundle.ts --source emilkowalski=<dir> --source appllama=<dir> --source benjitaylor=<dir> \
+ *     --source pbakaus=<dir> --source motionsites=<dir>
  *   bun scripts/build-ui-skill-bundle.ts --check --source ...   (verify committed output is in sync)
  */
 
@@ -34,6 +35,12 @@ interface SourceLayout {
 	license: string;
 	/** Companion markdown files to inline; every `.md` beside `SKILL.md` when omitted. */
 	companion?: (relativePath: string) => boolean;
+	/**
+	 * SKC-authored `SKILL.md` (repo-relative) that replaces the upstream one.
+	 * Used when the upstream entry carries instructions SKC must not ship, while
+	 * its companion references are still vendored.
+	 */
+	entry?: string;
 }
 
 interface UpstreamSource {
@@ -65,6 +72,10 @@ const SOURCE_SKILLS: Record<string, readonly string[]> = {
 	appllama: ["appllama-app-design-skill"],
 	// SKC's design center: every frontend task loads it first.
 	benjitaylor: ["stageshow"],
+	// Design steering vocabulary (polish, critique, audit, bolder, quieter...).
+	pbakaus: ["impeccable"],
+	// Cinematic landing-page workflow; the entry is SKC-authored (see layout).
+	motionsites: ["motionsites-web-builder"],
 };
 
 const DEFAULT_LAYOUT: SourceLayout = { skillsDir: "skills", license: "LICENSE" };
@@ -78,8 +89,52 @@ const SOURCE_LAYOUTS: Record<string, SourceLayout> = {
 		license: "stageshow/LICENSE",
 		companion: relativePath => relativePath.startsWith("references/") || relativePath === "NOTICE.md",
 	},
+	// The `.pi` build matches SKC's Pi lineage. Only engine-free references are
+	// vendored: `new-work` (owned by `stageshow`), `animate` (owned by
+	// `animate`), the native/iOS/Android references (owned by
+	// `appllama-app-design-skill`) and every reference that drives the
+	// downloaded engine binary, live browser mode or hooks are left out.
+	pbakaus: {
+		skillsDir: ".pi/skills",
+		license: "LICENSE",
+		companion: relativePath => IMPECCABLE_REFERENCES.has(relativePath),
+	},
+	// Only the MIT part is vendored. `examples/` and `media/` are (c) MotionSites
+	// and may not be redistributed as a collection, and the upstream `SKILL.md`
+	// requires a paid-upgrade ad in every delivery, so SKC ships its own entry.
+	// The seven technique recipe files (~285 KB) are read on demand from the
+	// pinned upstream commit instead of being inlined.
+	motionsites: {
+		skillsDir: "plugins/motionsites-web-builder/skills",
+		license: "LICENSE",
+		entry: "scripts/ui-skill-overlays/motionsites-web-builder.entry.md",
+		companion: relativePath =>
+			relativePath.startsWith("references/") &&
+			(!relativePath.startsWith("references/techniques/") || relativePath === "references/techniques/INDEX.md"),
+	},
 };
 
+const IMPECCABLE_REFERENCES = new Set(
+	[
+		"craft-floor",
+		"mode-operate",
+		"mode-persuade",
+		"mode-read",
+		"operate",
+		"critique",
+		"audit",
+		"polish",
+		"bolder",
+		"quieter",
+		"distill",
+		"clarify",
+		"colorize",
+		"typeset",
+		"layout",
+		"harden",
+		"adapt",
+	].map(name => `reference/${name}.md`),
+);
 
 /**
  * Skills authored by SKC rather than vendored from an upstream checkout.
@@ -166,7 +221,8 @@ async function listCompanions(skillDir: string, include: SourceLayout["companion
 
 async function buildSkill(source: UpstreamSource, skillName: string): Promise<string> {
 	const skillDir = path.join(source.dir, source.layout.skillsDir, skillName);
-	const raw = await Bun.file(path.join(skillDir, "SKILL.md")).text();
+	const entry = source.layout.entry ? path.join(repoRoot, source.layout.entry) : path.join(skillDir, "SKILL.md");
+	const raw = await Bun.file(entry).text();
 	const frontmatterMatch = raw.match(/^---\n[\s\S]*?\n---\n/);
 	const frontmatter = frontmatterMatch ? frontmatterMatch[0] : "";
 	let body = frontmatterMatch ? raw.slice(frontmatter.length) : raw;
@@ -207,7 +263,7 @@ const check = argv.includes("--check");
 const sources = await readSources(argv);
 if (sources.length === 0) {
 	console.error(
-		"usage: bun scripts/build-ui-skill-bundle.ts --source emilkowalski=<dir> [--source appllama=<dir>] [--source benjitaylor=<dir>]",
+		"usage: bun scripts/build-ui-skill-bundle.ts --source emilkowalski=<dir> [--source appllama=<dir>] [--source benjitaylor=<dir>] [--source pbakaus=<dir>] [--source motionsites=<dir>]",
 	);
 	process.exit(2);
 }

@@ -147,6 +147,72 @@ describe("automatic frontend UI skill routing", () => {
 		expect(skill?.content).not.toContain("useEffect(");
 	});
 
+	it("routes design steering and evaluation prompts to impeccable", () => {
+		expect(leadSkill("polish the settings page before launch")).toBe("impeccable");
+		expect(leadSkill("make it bolder, the hero is too safe")).toBe("impeccable");
+		expect(leadSkill("run a UI critique on the checkout flow")).toBe("impeccable");
+		expect(leadSkill("this dashboard looks too generic")).toBe("impeccable");
+		expect(leadSkill("대시보드 디자인 리뷰 해줘")).toBe("impeccable");
+		expect(detectUiSkillKeywords("polish the dashboard layout").map(match => match.skill)).toEqual([
+			"stageshow",
+			"impeccable",
+			"emil-design-eng",
+		]);
+	});
+
+	it("keeps impeccable's refine verbs off non-visual work", () => {
+		expect(detectUiSkillKeywords("polish the API error messages")).toEqual([]);
+		expect(detectUiSkillKeywords("harden the auth endpoint against replay")).toEqual([]);
+		expect(leadSkill("audit the animations in this app")).toBe("improve-animations");
+	});
+
+	it("routes whole marketing surfaces to motionsites-web-builder", () => {
+		expect(leadSkill("build a landing page for our sleep-tracking ring")).toBe("motionsites-web-builder");
+		expect(leadSkill("make a cinematic hero for the portfolio site")).toBe("motionsites-web-builder");
+		expect(leadSkill("write a Lovable prompt for a waitlist page")).toBe("motionsites-web-builder");
+		expect(leadSkill("랜딩 페이지 만들어줘")).toBe("motionsites-web-builder");
+		// A faux product demo stays with the design center alone.
+		expect(detectUiSkillKeywords("a small looping hero demo for our homepage").map(match => match.skill)).toEqual([
+			"stageshow",
+			"emil-design-eng",
+		]);
+	});
+
+	it("bundles impeccable's engine-free references and routes around the engine", () => {
+		const impeccable = getEmbeddedSkcUiSkills().find(skill => skill.name === "impeccable")?.content ?? "";
+		expect(impeccable).toContain("## SKC: how this bundled copy runs");
+		expect(impeccable).toContain("Skip Setup step 1");
+		for (const reference of [
+			"craft-floor",
+			"polish",
+			"critique",
+			"audit",
+			"typeset",
+			"layout",
+			"bolder",
+			"quieter",
+		]) {
+			expect(impeccable).toContain(`## Appendix: ${reference}.md`);
+		}
+		for (const excluded of ["new-work", "live", "hooks", "doctor", "ios", "android"]) {
+			expect(impeccable).not.toContain(`## Appendix: ${excluded}.md`);
+		}
+	});
+
+	it("bundles the MIT motionsites workflow without examples, media or the upgrade ad", () => {
+		const motionsites =
+			getEmbeddedSkcUiSkills().find(skill => skill.name === "motionsites-web-builder")?.content ?? "";
+		for (const reference of ["craft", "spec-template", "review", "builders", "assets", "INDEX"]) {
+			expect(motionsites).toContain(`## Appendix: ${reference}.md`);
+		}
+		expect(motionsites).toContain(
+			"https://raw.githubusercontent.com/Motionsites-AI/claude-skill/faa30d512e3973e58675c72101a7ef42ed37ae83/",
+		);
+		expect(motionsites).not.toContain("motionsites.ai/unlimited");
+		expect(motionsites).not.toContain("utm_");
+		expect(motionsites).not.toContain("## Appendix: scroll.md");
+	});
+
 	it("routes transition-shaped prompts to the user-installed transitions-dev skill", () => {
 		expect(detectExternalUiSkills("add a skeleton loader")[0]?.skill).toBe("transitions-dev");
 		expect(detectExternalUiSkills("shimmer text while it loads")[0]?.skill).toBe("transitions-dev");

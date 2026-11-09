@@ -103,7 +103,7 @@ describe("default SKC definitions", () => {
 	it("bundles frontend UI skills separately from the four public workflows", () => {
 		const uiSkills = getEmbeddedSkcUiSkills();
 		expect(uiSkills.map(skill => skill.name).sort()).toEqual([...BUNDLED_SKC_UI_SKILL_NAMES].sort());
-		expect(uiSkills).toHaveLength(14);
+		expect(uiSkills).toHaveLength(16);
 		expect(uiSkills.every(skill => skill.source === "bundled:ui")).toBe(true);
 		expect(uiSkills.every(skill => skill.filePath.startsWith("embedded:skc/ui-skills/"))).toBe(true);
 		expect(uiSkills.every(skill => skill.content?.includes("SKC loads this skill automatically"))).toBe(true);
@@ -120,6 +120,8 @@ describe("default SKC definitions", () => {
 			.map(definition => definition.name as string);
 		expect(workflowNames).not.toContain("emil-design-eng");
 		expect(workflowNames).not.toContain("stageshow");
+		expect(workflowNames).not.toContain("impeccable");
+		expect(workflowNames).not.toContain("motionsites-web-builder");
 	});
 
 	it("exposes deep-interview fragments only through the parent-scoped fragment accessor", () => {

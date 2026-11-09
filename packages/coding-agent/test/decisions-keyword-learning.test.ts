@@ -204,6 +204,10 @@ test("the UI criteria stay inside the backend's option ceiling", () => {
 	expect(Object.keys(criteria).length).toBeLessThanOrEqual(MAX_OPTIONS);
 	expect(criteria.none).toBeTruthy();
 	expect(criteria["appllama-app-design-skill"]).toContain("Expo");
+	expect(criteria.impeccable).toContain("polish");
+	expect(criteria["motionsites-web-builder"]).toContain("landing page");
+	// The design center loads with every pick, so it is never offered as one.
+	expect(criteria.stageshow).toBeUndefined();
 });
 
 test("workflow and UI ride one call, not two", async () => {

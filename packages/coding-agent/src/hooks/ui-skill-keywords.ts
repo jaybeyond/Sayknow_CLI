@@ -27,7 +27,7 @@ export interface UiSkillKeywordDefinition {
  * SKC's design center. Every frontend match loads it first, ahead of the
  * specialized lead and the craft baseline, whatever the surface.
  */
-export const UI_SKILL_CORE: BundledSkcUiSkillName = "stageshow";
+export const UI_SKILL_CORE = "stageshow" satisfies BundledSkcUiSkillName;
 
 /** Base craft skill paired with any specialized web frontend match. */
 export const UI_SKILL_BASE: BundledSkcUiSkillName = "emil-design-eng";
@@ -114,6 +114,24 @@ export const UI_SKILL_KEYWORD_DEFINITIONS: readonly UiSkillKeywordDefinition[] =
 		priority: 68,
 		pattern:
 			/\bapple\b[^.?!]{0,40}\b(design|motion|style|feel|hig)\b|\b(spring|gesture|drag|swipe|sheet)\b[^.?!]{0,40}\b(animation|motion|physics)\b|애플\s*(디자인|스타일|느낌)/i,
+	},
+	{
+		// Impeccable's steering and evaluation vocabulary applied to a visual
+		// surface. The refine verbs need a UI noun nearby so "polish the API
+		// errors" or "harden the auth endpoint" stay out of frontend routing.
+		skill: "impeccable",
+		priority: 67,
+		pattern:
+			/\b(polish|bolder|quieter|distill|critique|harden|typeset|colorize|declutter)\b[^.?!]{0,40}\b(ui|ux|design|page|screen|layout|interface|site|website|dashboard|landing|hero|form|card|components?|typography|palette)\b|\b(ui|ux|visual) (design )?(critique|audit|review)\b|\bdesign (critique|audit)\b|\bmake it (bolder|quieter|pop)\b|\b(looks?|feels?) (too )?(bland|generic|boring)\b|\bai[- ]slop\b|\bimpeccable\b|(ui|ux)\s*(리뷰|검토|점검|감사|크리틱)|디자인\s*(리뷰|검토|점검|감사|크리틱|비평)|(화면|페이지|디자인|ui)[^.?!]{0,20}(다듬|폴리싱|밋밋|과감하게|차분하게|톤\s*다운)|ai\s*슬롭/i,
+	},
+	{
+		// Whole marketing surfaces: landing pages, marketing sites, cinematic
+		// heroes, and build prompts for Lovable/Bolt/v0. A faux product demo
+		// inside such a page is still built by `stageshow`, which loads first.
+		skill: "motionsites-web-builder",
+		priority: 66,
+		pattern:
+			/\blanding[- ]?pages?\b|\bmarketing (site|website|page)s?\b|\bhero sections?\b|\b(cinematic|award[- ](winning|level))\b[^.?!]{0,40}\b(site|website|page|hero|landing)\b|\b(lovable|bolt|v0)\b[^.?!]{0,40}\bprompts?\b|랜딩\s*페이지|히어로\s*섹션|마케팅\s*(사이트|페이지)|시네마틱/i,
 	},
 	{
 		skill: "animate",
@@ -232,13 +250,12 @@ export function buildUiSkillDirectiveForSkill(skill: BundledSkcUiSkillName): str
  *
  * This is the whole contract with the routing model — the skill ids alone carry
  * almost no signal, and `appllama-app-design-skill` carries actively misleading
- * signal. Kept next to the patterns so the two cannot drift apart.
+ * signal. Kept next to the patterns so the two cannot drift apart. The design
+ * center has no entry: every pick loads it, so it is never a routing option.
  */
-export const BUNDLED_UI_SKILL_MEANINGS: Record<BundledSkcUiSkillName, string> = {
-	stageshow:
-		"Faux product UI for marketing and docs pages: hero demos, feature cards, bento grids, cursor walkthroughs, mocked app screenshots, product shots. Every other frontend pick loads it too as the design center.",
+export const BUNDLED_UI_SKILL_MEANINGS: Record<Exclude<BundledSkcUiSkillName, typeof UI_SKILL_CORE>, string> = {
 	"emil-design-eng":
-		"General web UI/UX craft: building or reviewing components, layout, spacing, typography, design systems, CSS. The default for frontend work with no more specific fit.",
+		"General web UI/UX craft: building or reviewing components, layout, spacing, typography, design systems, CSS, and faux product UI for marketing and docs pages (hero demos, bento grids, cursor walkthroughs, mocked app screens). The default for frontend work with no more specific fit.",
 	animate:
 		"Adding new motion to a web UI: animations, transitions, easing, keyframes, hover effects, micro-interactions.",
 	"review-animations": "Reviewing motion that already exists and judging whether it is good.",
@@ -254,6 +271,10 @@ export const BUNDLED_UI_SKILL_MEANINGS: Record<BundledSkcUiSkillName, string> = 
 	"ask-sonner": "Toast notifications, specifically the Sonner library.",
 	"appllama-app-design-skill": "Native app screens built with Expo or React Native — not a website viewed on a phone.",
 	"react-bits": "Pre-built animated React components: animated text, animated backgrounds, cursor and scroll effects.",
+	impeccable:
+		"Steering or evaluating an existing visual design: polish, make bolder or quieter, distill, typography, color, layout, UX copy, hardening, design critique or audit, removing AI slop.",
+	"motionsites-web-builder":
+		"Building a whole landing page, marketing site or cinematic hero section, or writing a build prompt for Lovable, Bolt or v0.",
 };
 
 /**

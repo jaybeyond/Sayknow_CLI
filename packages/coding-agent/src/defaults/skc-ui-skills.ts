@@ -9,8 +9,10 @@ import emilDesignEngSkill from "./skc/ui-skills/emil-design-eng/SKILL.md" with {
 import findAnimationOpportunitiesSkill from "./skc/ui-skills/find-animation-opportunities/SKILL.md" with {
 	type: "text",
 };
+import impeccableSkill from "./skc/ui-skills/impeccable/SKILL.md" with { type: "text" };
 import improveAnimationsSkill from "./skc/ui-skills/improve-animations/SKILL.md" with { type: "text" };
 import mobileNativeSkill from "./skc/ui-skills/mobile-native/SKILL.md" with { type: "text" };
+import motionsitesWebBuilderSkill from "./skc/ui-skills/motionsites-web-builder/SKILL.md" with { type: "text" };
 import pickUiLibrarySkill from "./skc/ui-skills/pick-ui-library/SKILL.md" with { type: "text" };
 import prototypeSkill from "./skc/ui-skills/prototype/SKILL.md" with { type: "text" };
 import reactBitsSkill from "./skc/ui-skills/react-bits/SKILL.md" with { type: "text" };
@@ -39,6 +41,8 @@ export const BUNDLED_SKC_UI_SKILL_NAMES = [
 	"ask-sonner",
 	"appllama-app-design-skill",
 	"react-bits",
+	"impeccable",
+	"motionsites-web-builder",
 ] as const;
 
 export type BundledSkcUiSkillName = (typeof BUNDLED_SKC_UI_SKILL_NAMES)[number];
@@ -80,6 +84,12 @@ const BUNDLED_UI_SKILL_SOURCES: readonly BundledUiSkillSource[] = [
 		content: appllamaAppDesignSkill,
 	},
 	{ name: "react-bits", relativePath: "ui-skills/react-bits/SKILL.md", content: reactBitsSkill },
+	{ name: "impeccable", relativePath: "ui-skills/impeccable/SKILL.md", content: impeccableSkill },
+	{
+		name: "motionsites-web-builder",
+		relativePath: "ui-skills/motionsites-web-builder/SKILL.md",
+		content: motionsitesWebBuilderSkill,
+	},
 ];
 
 export function getEmbeddedSkcUiSkills(): Skill[] {

@@ -140,6 +140,8 @@ For frontend UI, web, dashboard, mobile-web, animation, visual-polish, and faux 
 | `react-bits` | Animated React components (text/background/cursor effects) from the React Bits registry |
 | `apple-design` | Apple-style motion, materials, and gesture UI |
 | `animation-vocabulary` | Naming a motion effect |
+| `impeccable` | Steering and evaluating a design: `polish`, `bolder`, `quieter`, `distill`, `typeset`, `colorize`, `layout`, `clarify`, `harden`, `adapt`, `critique`, `audit` (engine-free subset; the detector engine is not bundled) |
+| `motionsites-web-builder` | Landing pages, marketing sites, cinematic hero sections, Lovable/Bolt/v0 build prompts (MIT workflow and references; technique recipes read on demand from the pinned upstream commit) |
 
 Some frontend skills are routed to but deliberately **not** bundled, because their license permits using the content while forbidding redistribution of the collection. Add them to a project once with `skc setup ui-skills` (`--check` to audit, `--force` to reinstall); SKC also installs on demand mid-task when a matching prompt arrives and the skill is absent.
 
@@ -147,7 +149,7 @@ Some frontend skills are routed to but deliberately **not** bundled, because the
 | --- | --- | --- |
 | `transitions-dev` | [Jakubantalik/transitions.dev](https://github.com/Jakubantalik/transitions.dev) | `<project>/.agents/skills/` |
 
-Installs run upstream's own publisher CLI; SKC never republishes the payload. Do not vendor those payloads into `defaults/skc/ui-skills`; only redistributable (MIT) skill sources belong there.
+Installs run upstream's own publisher CLI; SKC never republishes the payload. Do not vendor those payloads into `defaults/skc/ui-skills`; only redistributable (MIT or Apache-2.0) skill sources belong there.
 
 For Sayknow-CLI's own TUI/dashboard visual QA process, also follow [`docs/ui-design-visual-qa.md`](docs/ui-design-visual-qa.md): pre-implementation workflow branch, first-party `DESIGN.md`, component showcase/state harness, and fresh full-surface visual evidence. Do not copy raw third-party design corpora into product `DESIGN.md`.
 

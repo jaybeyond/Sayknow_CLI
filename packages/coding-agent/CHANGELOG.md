@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Added
+
+- Paul Bakaus's [Impeccable](https://github.com/pbakaus/impeccable) (Apache-2.0, 4.8.1) is now bundled as `impeccable`, the design steering vocabulary: `polish`, `bolder`, `quieter`, `distill`, `clarify`, `colorize`, `typeset`, `layout`, `harden`, `adapt`, `critique` and `audit`. Only the 17 engine-free references are inlined. The detector engine, live mode and hooks need a downloaded native binary, so they are not bundled and the skill takes upstream's "launcher unavailable" path. Prompts like "polish the dashboard", "make it bolder", "UI critique" or "디자인 리뷰" route to it after `stageshow`.
+- A `motionsites-web-builder` skill for landing pages, marketing sites, cinematic hero sections and Lovable/Bolt/v0 build prompts, adapted from the MIT part of [Motionsites-AI/claude-skill](https://github.com/Motionsites-AI/claude-skill). It bundles the spec template, craft rules, review rubric, builder and media guides and the technique index; the agent reads the 58 technique recipes on demand from the pinned upstream commit. The (c) MotionSites examples and media and the upstream paid-upgrade ad block are not shipped.
+
 ## [0.7.17] - 2026-11-05
 
 ### Added
