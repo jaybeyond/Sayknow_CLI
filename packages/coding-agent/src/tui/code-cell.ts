@@ -2,6 +2,7 @@
  * Render a code or markdown cell with optional output section.
  */
 import { Markdown } from "@sayknow-cli/tui";
+import { sanitizeText } from "@sayknow-cli/utils";
 import { getMarkdownTheme, highlightCode, type Theme } from "../modes/theme/theme";
 import {
 	formatDuration,
@@ -166,7 +167,13 @@ export function renderMarkdownCell(options: MarkdownCellOptions, theme: Theme): 
 	// Markdown component manages its own wrapping at the inner content width.
 	// `renderOutputBlock` adds a `│ ` prefix + `│` suffix → 3 visible columns.
 	const innerWidth = Math.max(20, width - 3);
-	const allLines = content.trim() ? new Markdown(content, 0, 0, getMarkdownTheme()).render(innerWidth) : [];
+	// Repository markdown is untrusted. The Markdown component writes text as-is
+	// and only later adds its own hyperlink sequences, so strip terminal controls
+	// from the source before that render.
+	const markdownSource = sanitizeText(content);
+	const allLines = markdownSource.trim()
+		? new Markdown(markdownSource, 0, 0, getMarkdownTheme()).render(innerWidth)
+		: [];
 	const maxContentLines = expanded ? allLines.length : Math.min(allLines.length, contentMaxLines);
 	const contentLines = allLines.slice(0, maxContentLines);
 	const hiddenContentLines = allLines.length - maxContentLines;
