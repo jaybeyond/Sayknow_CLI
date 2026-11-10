@@ -63,7 +63,9 @@ async function retainFromProject(options: {
 	delete env[KEY];
 	delete env.NODE_ENV;
 	delete env.BUN_ENV;
-	env.HOME = tempDir();
+	const home = tempDir();
+	env.HOME = home;
+	env.USERPROFILE = home;
 	env.SKC_CODING_AGENT_DIR = agentDir;
 	env.OPERATOR_HINDSIGHT_URL = options.operatorUrl ?? OPERATOR_URL;
 	env.GRANDCHILD_PROBE = CHILD;
