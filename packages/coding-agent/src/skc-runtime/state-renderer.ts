@@ -1,5 +1,16 @@
+import { sanitizeDisplayLine, sanitizeText } from "@sayknow-cli/utils";
 import type { CanonicalSkcWorkflowSkill } from "../skill-state/active-state";
 import type { SkillManifest } from "./workflow-manifest";
+
+/** Markdown prose. Newlines stay; terminal controls are removed. */
+function terminalText(value: string): string {
+	return sanitizeText(value);
+}
+
+/** One status row. Breaks collapse, then terminal controls are removed. */
+function terminalLine(value: string): string {
+	return sanitizeDisplayLine(value);
+}
 
 function scalar(value: unknown): string | undefined {
 	if (typeof value === "string") return value.trim() || undefined;
@@ -265,7 +276,7 @@ export function renderUltragoalStatusMarkdown(summary: {
 	if (!summary.exists)
 		return `# ultragoal status\n\n- status: missing\n- No ultragoal plan found at ${summary.paths.goalsPath}. Run \`skc ultragoal create-goals --brief "..."\` first.\n`;
 	const counts = Object.entries(summary.counts)
-		.map(([key, value]) => `${key}=${value}`)
+		.map(([key, value]) => `${terminalLine(key)}=${value}`)
 		.join(" ");
 	const lines = [
 		"# ultragoal status",
