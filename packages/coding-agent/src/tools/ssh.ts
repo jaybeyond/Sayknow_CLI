@@ -79,7 +79,8 @@ async function formatDescription(hosts: SSHHost[]): Promise<string> {
 		return baseDescription;
 	}
 	const hostList = (await Promise.all(hosts.map(formatHostEntry))).join("\n");
-	return `${baseDescription}\n\nAvailable hosts:\n${hostList}`;
+	// Encode each entry first. Frame the finished list; this text is not truncated.
+	return `${baseDescription}\n\nAvailable hosts:\n${wrapUntrustedContent(hostList)}`;
 }
 
 function quoteRemotePath(value: string): string {
