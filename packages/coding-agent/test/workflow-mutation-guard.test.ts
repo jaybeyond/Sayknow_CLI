@@ -2788,6 +2788,63 @@ describe("bash scanner quoting model", () => {
 		expect(decision.blocked).toBe(true);
 	});
 
+	it("blocks assignment aliases of output streams across shell quoting", async () => {
+		const cwd = await makeTempRoot();
+		await writeActiveSkill(cwd, "ralplan", "planner");
+		const guardContext = await readWorkflowGuardContext(cwd, { sessionId: "session-a" });
+		const random = makeSeededRandom(0x6947);
+		for (let sample = 0; sample < 8; sample++) {
+			const alias = `s${seededToken(random, 6)}`;
+			for (const stream of ["stdout", "stderr"]) {
+				for (const source of [
+					`const ${alias}=process.${stream};${alias}["write"]=process.getBuiltinModule("fs")["writeFileSync"];process.${stream}.write("src/product.ts","PWNED")`,
+					`let ${alias};${alias}=process.${stream};Object.assign(${alias},{write:writer});process.${stream}.write("src/product.ts","PWNED")`,
+					`const ${alias}=process["${stream}"];Reflect.set(${alias},"write",writer);process.${stream}.write("src/product.ts","PWNED")`,
+					`const ${alias}=process./**/${stream};${alias}["write"]=writer;process.${stream}.write("src/product.ts","PWNED")`,
+					`const ${alias}=process["std\\x${stream === "stdout" ? "6fut" : "65rr"}"];${alias}["write"]=writer;process.${stream}.write("src/product.ts","PWNED")`,
+					`const ${alias}=process.std\\u00${stream === "stdout" ? "6fut" : "65rr"};${alias}["write"]=writer;process.${stream}.write("src/product.ts","PWNED")`,
+					`\`\${(s=>s["write"]=process.getBuiltinModule("fs")["writeFileSync"])(process.${stream})}\`;process.${stream}.write("src/product.ts","PWNED")`,
+					`const {${stream}:${alias}}=process;${alias}["write"]=writer;process.${stream}.write("src/product.ts","PWNED")`,
+					`const ${alias}=Bun.${stream};${alias}["write"]=writer;Bun.${stream}.write("src/product.ts","PWNED")`,
+				]) {
+					for (const operand of [quoteBashSingle(source), quoteBashDouble(source), quoteBashAnsiC(source)]) {
+						const command = `node -e ${operand}`;
+						const decision = await getWorkflowMutationDecision({
+							cwd,
+							sessionId: "session-a",
+							guardContext,
+							tool: tool("bash"),
+							args: { command },
+						});
+						expect(decision.blocked, command).toBe(true);
+						expect(decision.reason, command).toBe("unknown-target");
+					}
+				}
+			}
+		}
+	});
+
+	it("allows ordinary output with unrelated arrows and inert stream aliases", async () => {
+		const cwd = await makeTempRoot();
+		await writeActiveSkill(cwd, "ralplan", "planner");
+		for (const source of [
+			`const format = x => x.toUpperCase();process.stdout.write(format("status"))`,
+			`const format = (x) => x;process.stderr.write(format("status"))`,
+			`process.stdout.write(["status"].map(x => x).join(""))`,
+			`/* const s=process.stdout;s.write=writer */ process.stdout.write("status")`,
+			`console.log("const s=process.stdout;s.write=writer");process.stdout.write("status")`,
+			`process.stdout.write(process.env.HOME)`,
+			`const subprocess=0;console.log(subprocess)`,
+			`const isBun=false;console.log(isBun)`,
+			`const process$=0;console.log(process$)`,
+			`process.stdout.write(\`status \${1}\`)`,
+			`process.stdout.write(\`const s=process.stdout\`)`,
+		]) {
+			const command = `node -e ${quoteBashSingle(source)}`;
+			expect((await decideBash(cwd, command)).blocked, command).toBe(false);
+		}
+	});
+
 	it("blocks aliased stdout stream mutations", async () => {
 		const cwd = await makeTempRoot();
 		await writeActiveSkill(cwd, "ralplan", "planner");

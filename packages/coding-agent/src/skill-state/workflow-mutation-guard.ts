@@ -2192,7 +2192,8 @@ function interpreterCodeContainsWriteApi(
 					isInterpolated &&
 					(api.test(skipped) ||
 						(language === "py" && PYTHON_DYNAMIC_EXECUTION_TOKEN_RE.test(skipped)) ||
-						(language === "js" && JAVASCRIPT_DYNAMIC_EXECUTION_TOKEN_RE.test(skipped)))
+						(language === "js" &&
+							(JAVASCRIPT_DYNAMIC_EXECUTION_TOKEN_RE.test(skipped) || /\b(?:process|Bun)\b/.test(skipped))))
 				)
 					return true;
 				index = next;
@@ -2211,6 +2212,21 @@ function interpreterCodeContainsWriteApi(
 		if (INTERPRETER_OUTPUT_METHOD_ASSIGNMENT_RE.test(script.slice(index))) return true;
 		if (language === "py" && PYTHON_DYNAMIC_EXECUTION_IDENTIFIER_RE.test(script.slice(index))) return true;
 		if (language === "js" && JAVASCRIPT_DYNAMIC_EXECUTION_IDENTIFIER_RE.test(script.slice(index))) return true;
+		if (
+			language === "js" &&
+			!/[\w$]/.test(script[index - 1] ?? "") &&
+			/^(?:process|Bun)(?![\w$])/.test(script.slice(index))
+		) {
+			const access = script.slice(index).replace(/^(?:process|Bun)\s*/, "");
+			// Only direct writes retain stream identity. Aliases, argument passing,
+			// destructuring and computed access can expose a mutable stream object.
+			if (!/^(?:\.\s*[A-Za-z_$][\w$]*(?![\w$\\])|\[\s*["'][^"'\\]+["']\s*\])/.test(access)) return true;
+			if (
+				/^(?:\.\s*(?:stdout|stderr)\b|\[\s*["'`](?:stdout|stderr)["'`]\s*\])/.test(access) &&
+				!/^\.\s*(?:stdout|stderr)\s*\.\s*write\s*\(/.test(access)
+			)
+				return true;
+		}
 		if (language === "perl" && /^open\b/.test(script.slice(index))) {
 			// Both `open(...)` and the list form `open H, MODE, EXPR` matter; only an
 			// explicit read mode is safe, and an unparsed open fails closed.
@@ -2223,13 +2239,7 @@ function interpreterCodeContainsWriteApi(
 				!streamMutated &&
 				/^\.\s*write\s*\(/.test(script.slice(index)) &&
 				/\b(?:process|Bun)\s*\.\s*(?:stdout|stderr)\s*$/.test(script.slice(0, index));
-			// Aliased mutation: if process.stdout is passed through a function or parameter,
-			// it may be rebound. Fail closed when there are function definitions or calls
-			// that could capture and mutate the stream object.
-			const hasAliasVectors =
-				outputWrite &&
-				/[([]\s*[A-Za-z_]\w*\s*=>|\([^)]*(?:process|Bun)\s*\.\s*(?:stdout|stderr)[^)]*\)/.test(script);
-			if (!outputWrite || hasAliasVectors) return true;
+			if (!outputWrite) return true;
 		}
 		index += 1;
 	}
