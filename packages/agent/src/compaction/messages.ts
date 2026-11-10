@@ -77,13 +77,19 @@ function getPrunedToolResultContent(message: ToolResultMessage): (TextContent | 
 }
 
 /**
- * Encode a stored summary before it is placed in the summary template.
- * `prompt.render` does not escape, and the summary can contain tool output,
- * repository text, or fetched pages. Newlines stay so the summary remains readable.
+ * 저장된 요약을 템플릿에 넣기 전에 정리한다. `prompt.render`는 이스케이프하지 않고,
+ * 요약에는 도구 출력·저장소 텍스트·받아온 페이지가 섞일 수 있다.
+ *
+ * 코드 문자는 보존한다. `<`, `>`, `&`, `"`를 엔티티로 바꾸면 `if a < b` 같은 코드가
+ * 깨진 채로 모델에 들어간다. 대신 래퍼를 깨는 태그(<summary>, </summary>,
+ * <untrusted-content>, </untrusted-content>)만 열기 꺾쇠 뒤에 폭 없는 공백을 넣어
+ * 태그로 파싱되지 않게 한다. 개행과 탭은 그대로 두고, 그 밖 제어문자·양방향 문자·
+ * 짝 없는 서로게이트는 그대로 걷어낸다.
  */
 function escapeSummaryMarkup(value: string): string {
-	return value.replace(
-		/[&<>"\u0000-\u001f\u007f-\u009f\u061c\u200e-\u200f\u202a-\u202e\u2066-\u2069\ud800-\udfff]/g,
+	const neutralized = value.replace(/<\s*\/?\s*(?:untrusted-content|summary)(?=[\s>])[^>]*>/gi, (tag) => `<\u200b${tag.slice(1)}`);
+	return neutralized.replace(
+		/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069\ud800-\udfff]/g,
 		(char, offset) => {
 			const code = char.charCodeAt(0);
 			const next = value.charCodeAt(offset + 1);
@@ -95,18 +101,7 @@ function escapeSummaryMarkup(value: string): string {
 				return char;
 			}
 			if (char === "\n" || char === "\t") return char;
-			switch (char) {
-				case "&":
-					return "&amp;";
-				case "<":
-					return "&lt;";
-				case ">":
-					return "&gt;";
-				case '"':
-					return "&quot;";
-				default:
-					return `\\u${code.toString(16).padStart(4, "0")}`;
-			}
+			return `\\u${code.toString(16).padStart(4, "0")}`;
 		},
 	);
 }

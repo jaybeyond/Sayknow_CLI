@@ -139,7 +139,8 @@ export function format(content: string, options: PromptFormatOptions = {}): stri
 	const topLevelTags: string[] = [];
 
 	for (let i = 0; i < lines.length; i++) {
-		let line = lines[i].trimEnd();
+		// 끝의 일반 공백만 자른다. 탭은 요약 안 코드(Makefile, 들여쓴 블록)에 의미가 있어 보존한다.
+		let line = lines[i].replace(/ +$/, "");
 		let trimmedStart = line.trimStart();
 		if (trimmedStart.startsWith("```") || trimmedStart.startsWith("~~~")) {
 			inCodeBlock = !inCodeBlock;

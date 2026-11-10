@@ -77,13 +77,15 @@ afterEach(() => {
 });
 
 describe("renderCompactionSummaryContext", () => {
-	it("wraps the encoded summary as untrusted content and keeps the no-duplicate-work instruction", () => {
-		const summary = "## Goal\n- Fix <tag> & keep {{braces}}";
+	it("keeps code characters in the summary and still fences it as untrusted content", () => {
+		const summary = "## Goal\n- Fix if a < b & keep {{braces}}";
 		const rendered = renderCompactionSummaryContext(summary);
 
 		expect(rendered).toContain(
-			"<summary>\n<untrusted-content>\n## Goal\n- Fix &lt;tag&gt; &amp; keep {{braces}}\n</untrusted-content>\n</summary>",
+			"<summary>\n<untrusted-content>\n## Goal\n- Fix if a < b & keep {{braces}}\n</untrusted-content>\n</summary>",
 		);
+		expect(rendered).not.toContain("&lt;");
+		expect(rendered).not.toContain("&amp;");
 		expect(rendered).toContain("NEVER redo it");
 	});
 
