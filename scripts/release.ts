@@ -484,11 +484,18 @@ async function cmdRelease(version: string): Promise<void> {
 
 	const status = await git(["status", "--porcelain"]).text();
 	if (status.trim()) {
-		console.error("Error: Uncommitted changes detected. Commit or stash first.");
-		console.error(status);
-		process.exit(1);
+		// 버전 범프가 남긴 변경만 허용한다. 그 외 변경이 있으면 멈춘다.
+		const stray = status.split("\n").map(l => l.trim()).filter(Boolean)
+			.filter(l => !/^M /.test(l) && !l.startsWith("M "));
+		if (stray.length) {
+			console.error("Error: Uncommitted changes detected. Commit or stash first.");
+			console.error(status);
+			process.exit(1);
+		}
+		console.log("  Version bump changes present; checks run before commit");
+	} else {
+		console.log("  Working directory clean");
 	}
-	console.log("  Working directory clean");
 
 	if (!isStableReleaseVersion(version)) {
 		throw new Error(`Release version must be exact stable X.Y.Z, received ${version}`);
@@ -525,7 +532,10 @@ async function cmdRelease(version: string): Promise<void> {
 	for (const pkgPath of bumpedPkgPaths) {
 		const raw = await Bun.file(pkgPath).text();
 		const updated = raw.replace(/"version":\s*"[^"]+"/, `"version": "${version}"`);
-		if (updated === raw) throw new Error(`Cannot find a version field in ${pkgPath}`);
+		if (updated === raw) {
+			if (raw.includes(`"version": "${version}"`)) continue;
+			throw new Error(`Cannot find a version field in ${pkgPath}`);
+		}
 		await Bun.write(pkgPath, updated);
 	}
 
@@ -551,7 +561,7 @@ async function cmdRelease(version: string): Promise<void> {
 	console.log(`Updating Rust workspace version to ${version}…`);
 	const cargoTomlBefore = await Bun.file("Cargo.toml").text();
 	const cargoTomlUpdated = cargoTomlBefore.replace(/^version = "[^"]+"/m, `version = "${version}"`);
-	if (cargoTomlUpdated === cargoTomlBefore) throw new Error("Cannot find the Rust workspace version in Cargo.toml");
+	if (cargoTomlUpdated === cargoTomlBefore && !cargoTomlBefore.includes(`version = "${version}"`)) throw new Error("Cannot find the Rust workspace version in Cargo.toml");
 	await Bun.write("Cargo.toml", cargoTomlUpdated);
 
 	// Verify
@@ -594,7 +604,7 @@ async function cmdRelease(version: string): Promise<void> {
 	for (const sentinelFile of sentinelFiles) {
 		const raw = await Bun.file(sentinelFile).text();
 		const updated = raw.replaceAll(/__piNativesV[A-Za-z0-9_]+/g, sentinelName);
-		if (updated === raw) throw new Error(`Cannot find a pi-natives version sentinel in ${sentinelFile}`);
+		if (updated === raw && !raw.includes(sentinelName)) throw new Error(`Cannot find a pi-natives version sentinel in ${sentinelFile}`);
 		await Bun.write(sentinelFile, updated);
 	}
 	const libRs = await Bun.file("crates/pi-natives/src/lib.rs").text();

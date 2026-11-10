@@ -87,7 +87,10 @@ function getPrunedToolResultContent(message: ToolResultMessage): (TextContent | 
  * 짝 없는 서로게이트는 그대로 걷어낸다.
  */
 function escapeSummaryMarkup(value: string): string {
-	const neutralized = value.replace(/<\s*\/?\s*(?:untrusted-content|summary)(?=[\s>])[^>]*>/gi, (tag) => `<\u200b${tag.slice(1)}`);
+	const neutralized = value.replace(
+		/<\s*\/?\s*(?:untrusted-content|summary)(?=[\s>])[^>]*>/gi,
+		tag => `<\u200b${tag.slice(1)}`,
+	);
 	return neutralized.replace(
 		/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069\ud800-\udfff]/g,
 		(char, offset) => {
