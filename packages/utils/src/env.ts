@@ -309,17 +309,24 @@ function resolveLiveCredentialEnvValue(name: string): string | undefined {
  * control socket directory and the session-root registry. The harness reads both
  * from the process environment after this module loads, so a project `.env` must
  * not point either at a path the repository controls.
+ * `HINDSIGHT_API_URL` selects the Hindsight server. Project settings already
+ * cannot redirect that host. The client reads this process environment, so a
+ * project `.env` value is removed here and is not copied back. A launching-shell
+ * value that differs from the project declaration is kept, including loopback.
  */
 const PROJECT_DENIED_ENV_NAMES = [
 	"NODE_TLS_REJECT_UNAUTHORIZED",
 	"SKC_HARNESS_SOCKET_DIR",
 	"SKC_HARNESS_ROOT_REGISTRY_DIR",
+	"HINDSIGHT_API_URL",
 ] as const;
 
 // Bun may have loaded cwd/.env before JS runs. Drop a value the project declares
 // (same provenance rule as the credential snapshot) and never copy it below.
 // Removing `NODE_TLS_REJECT_UNAUTHORIZED` restores verification: Bun reads that
-// switch per TLS connection. The same drop covers the harness directory names.
+// switch per TLS connection. The same drop covers the harness directory names
+// and `HINDSIGHT_API_URL`, so a later spawn that inherits this environment
+// cannot see the rejected project value.
 // A quoted escape is dynamic even when the line parser did not store a value.
 for (const name of PROJECT_DENIED_ENV_NAMES) {
 	const key = canonicalEnvKey(name);
