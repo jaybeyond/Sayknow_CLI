@@ -18,17 +18,25 @@
  * resolves in a workspace checkout but breaks every published install
  * (`bun install -g` / npm) where `@sayknow-cli/coding-agent` sits several
  * directories deeper and mupdf is hoisted elsewhere — that was the 0.5.8
- * startup crash. Refresh the vendored bytes from
- * `node_modules/mupdf/dist/mupdf-wasm.wasm` whenever markit-ai's mupdf
- * dependency moves.
+ * startup crash.
+ *
+ * MuPDF's JavaScript loader only runs the wasm built for the same release, so
+ * the hook is seeded in compiled binaries only. Anywhere else `mupdf` finds the
+ * wasm next to its own loader, which always matches, whatever version the
+ * installer resolved for markit-ai's `^1.27.0` range. A binary pairs these
+ * vendored bytes with the loader the lockfile resolves, so the root
+ * `overrides.mupdf` pin and the bytes
+ * (`node_modules/mupdf/dist/mupdf-wasm.wasm`) move together.
  *
  * This must run before the first `import("mupdf")` anywhere in the process.
  */
+import { isCompiledBinary } from "@sayknow-cli/utils/env";
 import mupdfWasmPath from "../../vendor/mupdf/mupdf-wasm.wasm" with { type: "file" };
 
 const MODULE_CONFIG_KEY = "$libmupdf_wasm_Module";
 
-export function ensureMupdfWasmResolution(): void {
+export function ensureMupdfWasmResolution(compiled: boolean = isCompiledBinary()): void {
+	if (!compiled) return;
 	const globalScope = globalThis as typeof globalThis & Record<string, unknown>;
 	if (globalScope[MODULE_CONFIG_KEY] !== undefined) return;
 	globalScope[MODULE_CONFIG_KEY] = { locateFile: () => String(mupdfWasmPath) };

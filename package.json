@@ -81,7 +81,9 @@
       "zod": "4.4.3"
     }
   },
-  "overrides": {},
+  "overrides": {
+    "mupdf": "1.28.1"
+  },
   "scripts": {
     "install:dev": "bun install && bun --cwd=packages/coding-agent link && bun --cwd=packages/ai link && bun run dev:link && bun packages/coding-agent/src/cli.ts setup defaults",
     "install:defaults": "bun packages/coding-agent/src/cli.ts setup defaults",

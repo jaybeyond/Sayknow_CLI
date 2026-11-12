@@ -31,16 +31,34 @@ describe("mupdf wasm embedding (upstream #5433)", () => {
 		expect(importLines.some(line => line.includes("node_modules/mupdf"))).toBe(false);
 	});
 
-	it("seeds the emscripten module config with a locateFile hook", () => {
+	it("vendors the wasm of the mupdf release that markit-ai loads", () => {
+		const mupdfEntry = Bun.resolveSync("mupdf", Bun.resolveSync("markit-ai", import.meta.dirname));
+		const installed = path.join(path.dirname(mupdfEntry), "mupdf-wasm.wasm");
+		expect(fs.readFileSync(resolveVendoredMupdfWasmPath()).equals(fs.readFileSync(installed))).toBe(true);
+	});
+
+	it("leaves mupdf's own wasm lookup alone outside a compiled binary", () => {
 		const globalScope = globalThis as typeof globalThis & Record<string, unknown>;
 		const previous = globalScope[MODULE_CONFIG_KEY];
 		delete globalScope[MODULE_CONFIG_KEY];
 		try {
-			ensureMupdfWasmResolution();
+			ensureMupdfWasmResolution(false);
+			expect(globalScope[MODULE_CONFIG_KEY]).toBeUndefined();
+		} finally {
+			if (previous !== undefined) globalScope[MODULE_CONFIG_KEY] = previous;
+		}
+	});
+
+	it("seeds the emscripten module config with a locateFile hook in a compiled binary", () => {
+		const globalScope = globalThis as typeof globalThis & Record<string, unknown>;
+		const previous = globalScope[MODULE_CONFIG_KEY];
+		delete globalScope[MODULE_CONFIG_KEY];
+		try {
+			ensureMupdfWasmResolution(true);
 			const seeded = globalScope[MODULE_CONFIG_KEY] as { locateFile?: unknown } | undefined;
 			expect(typeof seeded?.locateFile).toBe("function");
 			// Idempotent: seeding again must not replace an existing config.
-			ensureMupdfWasmResolution();
+			ensureMupdfWasmResolution(true);
 			expect(globalScope[MODULE_CONFIG_KEY]).toBe(seeded);
 		} finally {
 			if (previous === undefined) {
@@ -57,7 +75,7 @@ describe("mupdf wasm embedding (upstream #5433)", () => {
 		const previous = globalScope[MODULE_CONFIG_KEY];
 		globalScope[MODULE_CONFIG_KEY] = sentinel;
 		try {
-			ensureMupdfWasmResolution();
+			ensureMupdfWasmResolution(true);
 			expect(globalScope[MODULE_CONFIG_KEY]).toBe(sentinel);
 		} finally {
 			if (previous === undefined) {
