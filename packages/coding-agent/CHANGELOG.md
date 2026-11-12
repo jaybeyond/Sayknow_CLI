@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.7.22] - 2026-11-12
+
 ### Added
 
 - A bundled `security-review` skill for a white-box security review of your own codebase, diff or pull request, adapted from the source-review methodology of [usestrix/strix](https://github.com/usestrix/strix) (Apache-2.0, 1.7.1). It enumerates candidates from source, closes each one as confirmed, ruled out by a named control or an open proof gap, calibrates severity, and gates a fix on verification. Prompts like "security review", "audit this PR for vulnerabilities", "보안 검사" or "취약점 점검" route to it, with matching phrases in Japanese, Chinese, Spanish, French and German. It reviews only code you own, stays read-only unless you ask for a fix, and never tests a running system. The Strix runtime (Docker sandbox, proxy, browser) and its live-testing playbooks are not bundled.
@@ -11,8 +13,6 @@
 ### Fixed
 
 - A session at its compaction threshold no longer re-writes its whole prompt cache every few requests. Tool-output pruning used to run whenever it got the context back under the threshold, even by a few thousand tokens; each such prune changed cached history, so the next request re-wrote the entire prompt, and the session was back at the threshold shortly after. Pruning now runs only when it leaves 20% of the threshold free, and the session compacts otherwise.
-
-## [0.7.21] - 2026-11-11
 
 ## [0.7.18] - 2026-11-09
 

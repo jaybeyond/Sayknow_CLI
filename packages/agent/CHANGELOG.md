@@ -2,11 +2,11 @@
 
 ## [Unreleased]
 
+## [0.7.22] - 2026-11-12
+
 ### Added
 
 - `shouldPruneAtThreshold(...)` decides whether a session over its compaction threshold prunes tool outputs or compacts: a prune must leave `CompactionSettings.pruneMinHeadroomPercent` (default 20) percent of the threshold free.
-
-## [0.7.21] - 2026-11-11
 
 ## [0.7.17] - 2026-11-05
 
