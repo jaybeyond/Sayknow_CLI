@@ -1,7 +1,8 @@
 #!/usr/bin/env bun
 /**
- * Regenerate the bundled frontend UI/UX skill sources under
- * `packages/coding-agent/src/defaults/skc/ui-skills`.
+ * Regenerate the bundled skill sources under
+ * `packages/coding-agent/src/defaults/skc/<bundleDir>`: the frontend UI/UX
+ * skills in `ui-skills` and the security review skill in `security-skills`.
  *
  * Only `SKILL.md` is compiled into the binary, and a bundled skill's `baseDir`
  * is a virtual `embedded:skc/...` path — so a companion file left beside it on
@@ -12,7 +13,7 @@
  *
  * Usage:
  *   bun scripts/build-ui-skill-bundle.ts --source emilkowalski=<dir> --source appllama=<dir> --source benjitaylor=<dir> \
- *     --source pbakaus=<dir> --source motionsites=<dir>
+ *     --source pbakaus=<dir> --source motionsites=<dir> --source usestrix=<dir>
  *   bun scripts/build-ui-skill-bundle.ts --check --source ...   (verify committed output is in sync)
  */
 
@@ -20,7 +21,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 
 const repoRoot = path.resolve(import.meta.dir, "..");
-const bundleRoot = path.join(repoRoot, "packages/coding-agent/src/defaults/skc/ui-skills");
+const defaultsRoot = path.join(repoRoot, "packages/coding-agent/src/defaults/skc");
 /**
  * SKC-authored sections spliced into a vendored skill right after its
  * `## SKC invocation` block (`<overlayRoot>/<skill>.md`). They carry SKC's own
@@ -41,6 +42,14 @@ interface SourceLayout {
 	 * its companion references are still vendored.
 	 */
 	entry?: string;
+	/** Bundle directory under `defaults/skc`; `ui-skills` when omitted. */
+	bundleDir?: string;
+	/** Directory walked for companions, relative to the checkout root; the skill folder when omitted. */
+	companionDir?: string;
+	/** Opening lines of the `## SKC invocation` block; the frontend wording when omitted. */
+	invocation?: readonly string[];
+	/** Rewrites each companion before it is inlined. */
+	transformCompanion?: (text: string, relativePath: string) => string;
 }
 
 interface UpstreamSource {
@@ -76,6 +85,8 @@ const SOURCE_SKILLS: Record<string, readonly string[]> = {
 	pbakaus: ["impeccable"],
 	// Cinematic landing-page workflow; the entry is SKC-authored (see layout).
 	motionsites: ["motionsites-web-builder"],
+	// White-box security review of the user's own code; the entry is SKC-authored.
+	usestrix: ["security-review"],
 };
 
 const DEFAULT_LAYOUT: SourceLayout = { skillsDir: "skills", license: "LICENSE" };
@@ -112,6 +123,25 @@ const SOURCE_LAYOUTS: Record<string, SourceLayout> = {
 			relativePath.startsWith("references/") &&
 			(!relativePath.startsWith("references/techniques/") || relativePath === "references/techniques/INDEX.md"),
 	},
+	// Strix is a Python agent runtime (Docker sandbox, proxy, browser) whose own
+	// skills only drive its CLI, so SKC ships its own entry and vendors the five
+	// source-review methodology documents. The live-exploitation playbooks
+	// (vulnerability classes, recon, tooling, cloud) are left out: this skill
+	// reviews source the user owns and never tests a running system.
+	usestrix: {
+		skillsDir: "strix/skills",
+		license: "LICENSE",
+		entry: "scripts/ui-skill-overlays/security-review.entry.md",
+		bundleDir: "security-skills",
+		companionDir: "strix/skills",
+		companion: relativePath => STRIX_REFERENCES.has(relativePath),
+		invocation: [
+			"SKC loads this skill automatically for matching security review work.",
+			"Do not wait for a follow-up question. Apply the review rules immediately",
+			"and keep going on the user's actual task.",
+		],
+		transformCompanion: resolveStrixTemplate,
+	},
 };
 
 const IMPECCABLE_REFERENCES = new Set(
@@ -135,6 +165,30 @@ const IMPECCABLE_REFERENCES = new Set(
 		"adapt",
 	].map(name => `reference/${name}.md`),
 );
+
+const STRIX_REFERENCES = new Set([
+	"analysis/source_aware_discovery.md",
+	"analysis/counterevidence.md",
+	"analysis/severity_calibration.md",
+	"analysis/fix_verification.md",
+	"scan_modes/diff.md",
+]);
+
+/**
+ * Strix renders these documents through Jinja with a `coverage_tools` flag for
+ * its own coverage ledger tools. SKC has no such tools, so every conditional
+ * resolves to its `else` branch. Any other template syntax fails the build
+ * instead of shipping raw Jinja to the agent.
+ */
+function resolveStrixTemplate(text: string, relativePath: string): string {
+	const body = text.replace(/^---\n[\s\S]*?\n---\n/, "");
+	const resolved = body.replace(
+		/\{% if coverage_tools %\}\n([\s\S]*?)\{% endif %\}\n?/g,
+		(_match, inner: string) => inner.split("{% else %}\n")[1] ?? "",
+	);
+	if (/\{%|\{\{/.test(resolved)) throw new Error(`unresolved template syntax in ${relativePath}`);
+	return resolved;
+}
 
 /**
  * Skills authored by SKC rather than vendored from an upstream checkout.
@@ -163,14 +217,14 @@ async function readOverlay(skillName: string): Promise<string> {
 	return (await file.exists()) ? `\n${(await file.text()).trim()}\n` : "";
 }
 
-function invocationBlock(companionNames: readonly string[]): string {
-	const lines = [
-		"## SKC invocation",
-		"",
-		"SKC loads this skill automatically for matching frontend UI/UX work.",
-		"Do not wait for a follow-up question. Apply the craft rules immediately",
-		"and keep going on the user's actual task.",
-	];
+const UI_INVOCATION = [
+	"SKC loads this skill automatically for matching frontend UI/UX work.",
+	"Do not wait for a follow-up question. Apply the craft rules immediately",
+	"and keep going on the user's actual task.",
+] as const;
+
+function invocationBlock(companionNames: readonly string[], opening: readonly string[] = UI_INVOCATION): string {
+	const lines = ["## SKC invocation", "", ...opening];
 	if (companionNames.length > 0) {
 		lines.push(
 			"",
@@ -227,14 +281,19 @@ async function buildSkill(source: UpstreamSource, skillName: string): Promise<st
 	const frontmatter = frontmatterMatch ? frontmatterMatch[0] : "";
 	let body = frontmatterMatch ? raw.slice(frontmatter.length) : raw;
 
-	const companions = await listCompanions(skillDir, source.layout.companion);
+	const companionDir = source.layout.companionDir ? path.join(source.dir, source.layout.companionDir) : skillDir;
+	const companions = await listCompanions(companionDir, source.layout.companion);
 	body = stripInitialResponse(body);
 	body = rewriteCompanionLinks(body, companions);
-	body = insertAfterTitle(body, invocationBlock(companions) + (await readOverlay(skillName)));
+	body = insertAfterTitle(
+		body,
+		invocationBlock(companions, source.layout.invocation) + (await readOverlay(skillName)),
+	);
 
 	const appendices: string[] = [];
 	for (const companion of companions) {
-		const text = (await Bun.file(path.join(skillDir, companion)).text()).trim();
+		const raw = await Bun.file(path.join(companionDir, companion)).text();
+		const text = (source.layout.transformCompanion?.(raw, companion) ?? raw).trim();
 		const base = path.basename(companion);
 		appendices.push(`## Appendix: ${base}\n\n${rewriteCompanionLinks(text, companions)}`);
 	}
@@ -263,13 +322,14 @@ const check = argv.includes("--check");
 const sources = await readSources(argv);
 if (sources.length === 0) {
 	console.error(
-		"usage: bun scripts/build-ui-skill-bundle.ts --source emilkowalski=<dir> [--source appllama=<dir>] [--source benjitaylor=<dir>] [--source pbakaus=<dir>] [--source motionsites=<dir>]",
+		"usage: bun scripts/build-ui-skill-bundle.ts --source emilkowalski=<dir> [--source appllama=<dir>] [--source benjitaylor=<dir>] [--source pbakaus=<dir>] [--source motionsites=<dir>] [--source usestrix=<dir>]",
 	);
 	process.exit(2);
 }
 
 const drift: string[] = [];
 for (const source of sources) {
+	const bundleRoot = path.join(defaultsRoot, source.layout.bundleDir ?? "ui-skills");
 	for (const skillName of source.skills) {
 		const content = await buildSkill(source, skillName);
 		const target = path.join(bundleRoot, skillName, "SKILL.md");

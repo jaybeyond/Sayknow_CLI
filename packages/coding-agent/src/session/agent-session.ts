@@ -280,6 +280,7 @@ import { expandSlashCommand, type FileSlashCommand } from "../extensibility/slas
 import { GoalRuntime } from "../goals/runtime";
 import type { Goal, GoalModeState } from "../goals/state";
 import type { HindsightSessionState } from "../hindsight/state";
+import { buildSecuritySkillActivationContext } from "../hooks/security-skill-keywords";
 import {
 	buildSkillStopOutput,
 	detectPrimarySkillKeyword,
@@ -8354,6 +8355,7 @@ export class AgentSession {
 			const eagerTodoPrelude =
 				!options?.synthetic && !hasPendingUserDirective ? this.#createEagerTodoPrelude(expandedText) : undefined;
 			const uiSkillPrelude = options?.synthetic ? undefined : this.#createUiSkillPrelude(expandedText);
+			const securitySkillPrelude = options?.synthetic ? undefined : this.#createSecuritySkillPrelude(expandedText);
 			const languagePrelude = options?.synthetic
 				? undefined
 				: this.#createResponseLanguagePrelude(expandedText, claimsGenuineUserIntent);
@@ -8386,10 +8388,11 @@ export class AgentSession {
 				await this.#promptWithMessage(message, expandedText, {
 					...options,
 					prependMessages:
-						eagerTodoPrelude || uiSkillPrelude || languagePrelude
+						eagerTodoPrelude || uiSkillPrelude || securitySkillPrelude || languagePrelude
 							? [
 									...(languagePrelude ? [languagePrelude] : []),
 									...(uiSkillPrelude ? [uiSkillPrelude] : []),
+									...(securitySkillPrelude ? [securitySkillPrelude] : []),
 									...(eagerTodoPrelude ? [eagerTodoPrelude.message] : []),
 								]
 							: undefined,
@@ -12787,6 +12790,20 @@ export class AgentSession {
 			promptChars: promptText.length,
 			source: matched ? "pattern" : "semantic",
 		});
+		return {
+			role: "developer",
+			content: [{ type: "text", text: `<system-reminder>\n${directive}\n</system-reminder>` }],
+			attribution: "agent",
+			timestamp: Date.now(),
+		};
+	}
+
+	/** Same reminder shape as the UI skills, for the bundled security review skill. */
+	#createSecuritySkillPrelude(promptText: string): AgentMessage | undefined {
+		if (this.#planModeState?.enabled) return undefined;
+		const directive = buildSecuritySkillActivationContext(promptText);
+		if (!directive) return undefined;
+		logger.debug("agent-session: bundled security skill matched", { promptChars: promptText.length });
 		return {
 			role: "developer",
 			content: [{ type: "text", text: `<system-reminder>\n${directive}\n</system-reminder>` }],

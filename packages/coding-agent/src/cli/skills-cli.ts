@@ -1,11 +1,12 @@
 /**
- * Handles `skc skills` for inspecting bundled workflow and UI skill definitions.
+ * Handles `skc skills` for inspecting bundled workflow, UI and security skill definitions.
  */
 import {
 	DEFAULT_SKC_DEFINITION_NAMES,
 	type EmbeddedDefaultSkcSkill,
 	getEmbeddedDefaultSkcSkills,
 } from "../defaults/skc-defaults";
+import { getEmbeddedSkcSecuritySkills } from "../defaults/skc-security-skills";
 import { getEmbeddedSkcUiSkills } from "../defaults/skc-ui-skills";
 import type { Skill } from "../extensibility/skills";
 
@@ -30,21 +31,21 @@ interface SkillsReadEntry extends SkillsListEntry {
 	content: string;
 }
 
+function getBundledSkills(): Array<EmbeddedDefaultSkcSkill | Skill> {
+	return [...getEmbeddedDefaultSkcSkills(), ...getEmbeddedSkcUiSkills(), ...getEmbeddedSkcSecuritySkills()];
+}
+
 function getEmbeddedSkill(name: string): EmbeddedDefaultSkcSkill | Skill | undefined {
-	return (
-		getEmbeddedDefaultSkcSkills().find(skill => skill.name === name) ??
-		getEmbeddedSkcUiSkills().find(skill => skill.name === name)
-	);
+	return getBundledSkills().find(skill => skill.name === name);
 }
 
 function listEmbeddedSkills(): SkillsListEntry[] {
-	const toEntry = (skill: EmbeddedDefaultSkcSkill | Skill): SkillsListEntry => ({
+	return getBundledSkills().map(skill => ({
 		name: skill.name,
 		description: skill.description,
 		path: skill.filePath,
 		source: skill.source,
-	});
-	return [...getEmbeddedDefaultSkcSkills().map(toEntry), ...getEmbeddedSkcUiSkills().map(toEntry)];
+	}));
 }
 
 function writeJson(value: unknown): void {
@@ -67,7 +68,7 @@ export async function runSkillsCommand(cmd: SkillsCommandArgs): Promise<void> {
 	const name = cmd.name?.trim();
 	if (!name) {
 		process.stderr.write(
-			`error: skill name is required for read (${DEFAULT_SKC_DEFINITION_NAMES.join(", ")}, or a bundled UI skill such as emil-design-eng)\n`,
+			`error: skill name is required for read (${DEFAULT_SKC_DEFINITION_NAMES.join(", ")}, a bundled UI skill such as emil-design-eng, or security-review)\n`,
 		);
 		process.exitCode = 1;
 		return;
@@ -76,7 +77,7 @@ export async function runSkillsCommand(cmd: SkillsCommandArgs): Promise<void> {
 	const skill = getEmbeddedSkill(name);
 	if (!skill) {
 		process.stderr.write(
-			`error: unknown embedded skill "${name}" (${DEFAULT_SKC_DEFINITION_NAMES.join(", ")}, or a bundled UI skill such as emil-design-eng)\n`,
+			`error: unknown embedded skill "${name}" (${DEFAULT_SKC_DEFINITION_NAMES.join(", ")}, a bundled UI skill such as emil-design-eng, or security-review)\n`,
 		);
 		process.exitCode = 1;
 		return;

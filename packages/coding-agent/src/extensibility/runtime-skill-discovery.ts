@@ -4,6 +4,7 @@ import * as path from "node:path";
 import { findRepoRoot } from "../capability/fs";
 import type { Skill as CapabilitySkill } from "../capability/skill";
 import type { SkillsSettings } from "../config/settings-schema";
+import { BUNDLED_SKC_SECURITY_SKILL_NAMES } from "../defaults/skc-security-skills";
 import { BUNDLED_SKC_UI_SKILL_NAMES } from "../defaults/skc-ui-skills";
 import { compareSkillOrder, SOURCE_PATHS, scanSkillsFromDir } from "../discovery/helpers";
 import { CANONICAL_SKC_WORKFLOW_SKILLS } from "../skill-state/canonical-skills";
@@ -34,7 +35,11 @@ function getRuntimeHome(): string {
 
 const DEFAULT_LIMIT = 20;
 const MAX_LIMIT = 50;
-const BUILT_IN_SKILL_NAMES = new Set<string>([...CANONICAL_SKC_WORKFLOW_SKILLS, ...BUNDLED_SKC_UI_SKILL_NAMES]);
+const BUILT_IN_SKILL_NAMES = new Set<string>([
+	...CANONICAL_SKC_WORKFLOW_SKILLS,
+	...BUNDLED_SKC_UI_SKILL_NAMES,
+	...BUNDLED_SKC_SECURITY_SKILL_NAMES,
+]);
 
 function normalizeLimit(limit: number | undefined): number {
 	if (limit === undefined || !Number.isFinite(limit)) return DEFAULT_LIMIT;

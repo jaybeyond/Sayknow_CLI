@@ -10,6 +10,7 @@ import type { PromptTriager } from "../decisions/prompt-triage";
 import { sessionLogsDir } from "../skc-runtime/session-layout";
 import { trustedCoordinatorEnv } from "../skc-runtime/sidecar-bootstrap-env";
 import { routeNativePrompt } from "./native-prompt-routing";
+import { buildSecuritySkillActivationContext } from "./security-skill-keywords";
 import {
 	buildActiveUltragoalPromptContext,
 	buildSkillActivationAdditionalContext,
@@ -316,6 +317,7 @@ async function dispatchSkcNativeSkillHookInner(
 		// Compute the bundled UI-skill directive first so a later state/recovery
 		// lookup cannot abort the turn without it.
 		const uiSkillContext = buildUiSkillActivationContext(prompt);
+		const securitySkillContext = buildSecuritySkillActivationContext(prompt);
 		let externalUiContext: string | null = null;
 		try {
 			externalUiContext = await buildExternalUiSkillContext({
@@ -409,6 +411,7 @@ async function dispatchSkcNativeSkillHookInner(
 			skillState ? buildSkillActivationAdditionalContext(skillState, effectiveSkillConfig) : activeUltragoalContext,
 			uiSkillContext ?? semanticUiContext,
 			externalUiContext,
+			securitySkillContext,
 			recoveryContext,
 			classifyQuestionOnlyPrompt(prompt),
 		]

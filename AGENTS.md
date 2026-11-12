@@ -153,6 +153,12 @@ Installs run upstream's own publisher CLI; SKC never republishes the payload. Do
 
 For Sayknow-CLI's own TUI/dashboard visual QA process, also follow [`docs/ui-design-visual-qa.md`](docs/ui-design-visual-qa.md): pre-implementation workflow branch, first-party `DESIGN.md`, component showcase/state harness, and fresh full-surface visual evidence. Do not copy raw third-party design corpora into product `DESIGN.md`.
 
+## Security review
+
+For a security review or audit, a vulnerability check, or a fix for a security issue in the user's code, invoke the bundled `security-review` skill before reviewing or fixing. It is compiled into SKC (`packages/coding-agent/src/defaults/skc/security-skills`); users do not install it. It is not a fifth public workflow.
+
+The skill is an SKC-authored entry (`scripts/ui-skill-overlays/security-review.entry.md`) over five source-review methodology documents vendored from [usestrix/strix](https://github.com/usestrix/strix) (Apache-2.0). Its scope rules are part of the contract: review only code the user owns or is authorized to assess, stay read-only unless a fix was requested, and never send test input to a system the user did not ask to test. The Strix runtime and its live-testing playbooks are deliberately not bundled; see that directory's `NOTICE.md` before adding to it.
+
 ## Commands and verification
 
 - Never commit unless explicitly asked.

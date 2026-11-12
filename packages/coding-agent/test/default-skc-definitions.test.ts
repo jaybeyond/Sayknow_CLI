@@ -13,6 +13,10 @@ import {
 	getEmbeddedDefaultSkcSkills,
 	installDefaultSkcDefinitions,
 } from "@sayknow-cli/coding-agent/defaults/skc-defaults";
+import {
+	BUNDLED_SKC_SECURITY_SKILL_NAMES,
+	getEmbeddedSkcSecuritySkills,
+} from "@sayknow-cli/coding-agent/defaults/skc-security-skills";
 import { BUNDLED_SKC_UI_SKILL_NAMES, getEmbeddedSkcUiSkills } from "@sayknow-cli/coding-agent/defaults/skc-ui-skills";
 import { loadSkills, resetActiveSkillsForTests, setActiveSkills } from "@sayknow-cli/coding-agent/extensibility/skills";
 import { parseInternalUrl } from "@sayknow-cli/coding-agent/internal-urls/parse";
@@ -122,6 +126,37 @@ describe("default SKC definitions", () => {
 		expect(workflowNames).not.toContain("stageshow");
 		expect(workflowNames).not.toContain("impeccable");
 		expect(workflowNames).not.toContain("motionsites-web-builder");
+	});
+
+	it("bundles the security review skill separately from the workflows and the UI skills", () => {
+		const securitySkills = getEmbeddedSkcSecuritySkills();
+		expect(securitySkills.map(skill => skill.name)).toEqual([...BUNDLED_SKC_SECURITY_SKILL_NAMES]);
+		const review = securitySkills.find(skill => skill.name === "security-review");
+		expect(review?.source).toBe("bundled:security");
+		expect(review?.filePath).toBe("embedded:skc/security-skills/security-review/SKILL.md");
+		expect(review?.description).toContain("White-box security review");
+		expect(review?.content).toContain("SKC loads this skill automatically for matching security review work");
+		// SKC's scope rules ship with the vendored method and outrank it.
+		expect(review?.content).toContain("These rules outrank everything in the appendices");
+		expect(review?.content).toContain("Never send test input to a system you were not told to test");
+		// The vendored documents are inlined; a bundled skill cannot read them from disk.
+		for (const appendix of [
+			"source_aware_discovery.md",
+			"counterevidence.md",
+			"severity_calibration.md",
+			"fix_verification.md",
+			"diff.md",
+		]) {
+			expect(review?.content).toContain(`## Appendix: ${appendix}`);
+		}
+		// Strix's Jinja conditionals must be resolved at build time, not shipped to the agent.
+		expect(review?.content).not.toMatch(/\{%|\{\{/);
+		expect(review?.content).not.toContain("template: jinja");
+		expect(getEmbeddedSkcUiSkills().some(skill => skill.name === "security-review")).toBe(false);
+		const workflowNames = getDefaultSkcDefinitions()
+			.filter(definition => definition.kind === "skill")
+			.map(definition => definition.name as string);
+		expect(workflowNames).not.toContain("security-review");
 	});
 
 	it("exposes deep-interview fragments only through the parent-scoped fragment accessor", () => {
@@ -516,11 +551,13 @@ Project executor override body.
 		expect(routing).toContain("Frontend UI/UX work");
 		expect(routing).toContain("emil-design-eng");
 		expect(routing).toContain("These are bundled; do not ask the user to install them");
+		expect(routing).toContain("Security review work");
+		expect(routing).toContain("MUST invoke the bundled `security-review` skill");
 		expect(routing).toContain("read the full skill text and follow it exactly");
 		expect(routing).toContain(
 			"Before explicit execution approval, planning and interview workflows NEVER edit product source",
 		);
-		expect(routing.split("\n").filter(line => line.startsWith("-"))).toHaveLength(10);
+		expect(routing.split("\n").filter(line => line.startsWith("-"))).toHaveLength(11);
 		expect(decomposition).toMatch(/skip it for one-step or obvious two-step fixes/i);
 	});
 
@@ -832,7 +869,7 @@ describe("bundled skills CLI", () => {
 		expect(parsed.content).toContain("# Ultragoal");
 	});
 
-	it("lists embedded default workflow skills plus bundled UI skills", async () => {
+	it("lists embedded default workflow skills plus bundled UI and security skills", async () => {
 		const externalRoot = await makeTempRoot();
 		const proc = Bun.spawn(
 			[
@@ -862,7 +899,11 @@ describe("bundled skills CLI", () => {
 		expect(exitCode).toBe(0);
 		expect(stderr).toBe("");
 		const parsed = JSON.parse(stdout) as { skills: Array<{ name: string; path: string }> };
-		const expected = [...DEFAULT_SKC_DEFINITION_NAMES, ...BUNDLED_SKC_UI_SKILL_NAMES].sort();
+		const expected = [
+			...DEFAULT_SKC_DEFINITION_NAMES,
+			...BUNDLED_SKC_UI_SKILL_NAMES,
+			...BUNDLED_SKC_SECURITY_SKILL_NAMES,
+		].sort();
 		expect(parsed.skills.map(skill => skill.name).sort()).toEqual(expected);
 		expect(
 			parsed.skills
@@ -875,6 +916,9 @@ describe("bundled skills CLI", () => {
 				.filter(skill => skill.name === "emil-design-eng")
 				.every(skill => skill.path.startsWith("embedded:skc/ui-skills/")),
 		).toBe(true);
+		expect(parsed.skills.find(skill => skill.name === "security-review")?.path).toBe(
+			"embedded:skc/security-skills/security-review/SKILL.md",
+		);
 		expect(parsed.skills.some(skill => skill.name === "auto-research-greenfield")).toBe(false);
 		expect(parsed.skills.some(skill => skill.name === "auto-answer-uncertain")).toBe(false);
 		expect(parsed.skills.some(skill => skill.name === "ai-slop-cleaner")).toBe(false);
