@@ -451,6 +451,64 @@ describe("AgentSession mid-run maintenance outcomes", () => {
 		await over.dispose();
 	});
 
+	/**
+	 * Three 30k-token tool outputs under an assistant anchored at `anchorTokens`.
+	 * The 40k protect window covers the two newest, so one (30k) is pruneable.
+	 */
+	async function seedOnePruneableOutput(s: AgentSession, anchorTokens: number): Promise<void> {
+		await seed(s, [
+			{ role: "user", content: "earlier request", timestamp: Date.now() },
+			...["a", "b", "c"].map((fill, index) => ({
+				role: "toolResult",
+				toolCallId: `old-output-${index}`,
+				toolName: "bash",
+				content: [{ type: "text", text: fill.repeat(120_000) }],
+				timestamp: Date.now(),
+			})),
+			assistant(s.model!, usage(anchorTokens)),
+		]);
+	}
+
+	function prunedToolResultCount(s: AgentSession): number {
+		return s.sessionManager
+			.getBranch()
+			.filter(
+				entry =>
+					entry.type === "message" && entry.message.role === "toolResult" && entry.message.prunedAt !== undefined,
+			).length;
+	}
+
+	it("compacts instead of pruning when the prune would leave too little headroom", async () => {
+		// 115k -> 85k is back under the 100k threshold, but not under the 80k a
+		// prune must reach by default, so the session compacts and prunes nothing.
+		session = await buildSession({ shortCircuit: true, settings: { "compaction.keepRecentTokens": 10 } });
+		await seedOnePruneableOutput(session, THRESHOLD + 15_000);
+
+		expect(await session.runMidRunMaintenanceForTests(contextOf(session))).toBe("compacted");
+		expect(prunedToolResultCount(session)).toBe(0);
+	});
+
+	it("prunes the same context when compaction.pruneMinHeadroomPercent is 0", async () => {
+		session = await buildSession({
+			shortCircuit: true,
+			settings: { "compaction.keepRecentTokens": 10, "compaction.pruneMinHeadroomPercent": 0 },
+		});
+		await seedOnePruneableOutput(session, THRESHOLD + 15_000);
+
+		expect(await session.runMidRunMaintenanceForTests(contextOf(session))).toBe("pruned");
+		expect(prunedToolResultCount(session)).toBe(1);
+		expect(getLatestCompactionEntry(session.sessionManager.getBranch())).toBeNull();
+	});
+
+	it("compacts instead of pruning before a prompt under the same headroom rule", async () => {
+		session = await buildSession({ shortCircuit: true, settings: { "compaction.keepRecentTokens": 10 } });
+		await seedOnePruneableOutput(session, THRESHOLD + 15_000);
+
+		await session.runPrePromptContextCheckForTests();
+		expect(getLatestCompactionEntry(session.sessionManager.getBranch())).not.toBeNull();
+		expect(prunedToolResultCount(session)).toBe(0);
+	});
+
 	it("returns not-needed when auto maintenance is disabled or strategy is off", async () => {
 		session = await buildSession({ settings: { "compaction.strategy": "off" } });
 		const model = session.model!;

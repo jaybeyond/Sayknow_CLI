@@ -187,6 +187,7 @@ Artifacts and side channels:
   - sync path: `mapWithConcurrencyLimit(...)`
   - async path: `Semaphore(...)` around job bodies
 - Recursion depth gate: `task.maxRecursionDepth` from settings; `packages/coding-agent/src/tools/index.ts` hides the `task` tool at or beyond the limit, and `runSubprocess(...)` also strips child `task` access at max depth.
+- Prompt-cache retention: `task.cacheRetention` from settings (`inherit`, `none`, `short`, `long`; default `inherit`). `createAgentSession(...)` in `packages/coding-agent/src/sdk/session.ts` passes any value other than `inherit` as the request-time `cacheRetention` of subagent sessions; the main session is not affected.
 - Final inline summary preview per task uses `fullOutputThreshold = 5000` chars in `packages/coding-agent/src/task/index.ts`; longer outputs are summarized while `agent://<id>` points to the full artifact.
 
 ## Errors

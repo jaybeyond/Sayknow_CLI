@@ -811,11 +811,12 @@ describe("AgentSession mid-run compaction (issue #2035)", () => {
 				await originalRewriteEntries();
 			};
 			try {
-				// Five 30k-token outputs leave 90k pruneable after the 40k protection
-				// window, enough to avert the 100k threshold from the 180k usage anchor.
+				// Six 30k-token outputs leave 120k pruneable after the 40k protection
+				// window: the 180k usage anchor drops to 60k, under the 80k a prune at
+				// the 100k threshold must reach to run instead of compaction.
 				await seedLoop(loop.session, [
 					{ role: "user", content: "old request", timestamp: Date.now() },
-					...Array.from({ length: 5 }, (_, index) => ({
+					...Array.from({ length: 6 }, (_, index) => ({
 						role: "toolResult",
 						toolCallId: `${operation}-prunable-${index}`,
 						toolName: "bash",
@@ -1072,11 +1073,12 @@ describe("AgentSession mid-run compaction (issue #2035)", () => {
 			await originalRewriteEntries();
 		};
 		try {
-			// Five 30k-token outputs leave 90k pruneable after the 40k protection
-			// window, enough to avert the 100k threshold from the 180k usage anchor.
+			// Six 30k-token outputs leave 120k pruneable after the 40k protection
+			// window: the 180k usage anchor drops to 60k, under the 80k a prune at
+			// the 100k threshold must reach to run instead of compaction.
 			await seedLoop(loop.session, [
 				{ role: "user", content: "old request", timestamp: Date.now() },
-				...Array.from({ length: 5 }, (_, index) => ({
+				...Array.from({ length: 6 }, (_, index) => ({
 					role: "toolResult" as const,
 					toolCallId: `old-prunable-output-${index}`,
 					toolName: "bash",

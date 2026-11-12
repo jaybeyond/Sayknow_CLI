@@ -138,6 +138,12 @@ export interface CompactionSettings {
 	strategy?: "context-full" | "handoff" | "off";
 	thresholdPercent?: number;
 	thresholdTokens?: number;
+	/**
+	 * Share of the threshold (0-100) a prune at the threshold must leave free to run
+	 * instead of compaction. Absent uses `DEFAULT_PRUNE_MIN_HEADROOM_PERCENT`; 0 lets
+	 * any prune that gets back under the threshold run.
+	 */
+	pruneMinHeadroomPercent?: number;
 	/** Opt-in adaptive threshold controls. Absent or disabled keeps the fixed threshold. */
 	adaptive?: AdaptiveCompactionOptions;
 	/** Call-rate state a threshold decision reads; supplied by the session's tracker. */

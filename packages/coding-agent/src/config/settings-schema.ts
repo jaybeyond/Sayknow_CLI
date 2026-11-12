@@ -1222,6 +1222,20 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	/**
+	 * Prompt-cache retention sent with task-tool subagent requests. "inherit"
+	 * sends none, so the model, provider, `SKC_CACHE_RETENTION` and runtime
+	 * default decide as they do for the main session. Any other value is a
+	 * request-time option for subagent sessions only and wins over all of those.
+	 * Anthropic prices a 1h cache write at 2x input and a 5m write at 1.25x, so
+	 * "short" is cheaper for subagents that rarely pause longer than 5 minutes.
+	 */
+	"task.cacheRetention": {
+		type: "enum",
+		values: ["inherit", "none", "short", "long"] as const,
+		default: "inherit",
+	},
+
 	"fallback.maxAttempts": {
 		type: "number",
 		default: 3,
@@ -1802,6 +1816,12 @@ export const SETTINGS_SCHEMA = {
 	"compaction.maintenancePruningEnabled": { type: "boolean", default: false },
 
 	"compaction.maintenancePruningMinSavingsTokens": { type: "number", default: 8000 },
+
+	// A prune at the compaction threshold rewrites history the provider has
+	// cached, so it runs only when it leaves this percent of the threshold free;
+	// otherwise the session compacts. 0 restores "any prune that gets back under
+	// the threshold". Not exposed in settings UI.
+	"compaction.pruneMinHeadroomPercent": { type: "number", default: 20 },
 
 	// Idle compaction
 	"compaction.idleEnabled": {

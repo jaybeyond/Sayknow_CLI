@@ -76,6 +76,7 @@ import {
 	estimateToolOutputPruneSavings,
 	pruneAssistantToolArguments,
 	pruneToolOutputs,
+	shouldPruneAtThreshold,
 	shouldRunMaintenancePrune,
 } from "@sayknow-cli/agent-core/compaction/pruning";
 import type {
@@ -12284,16 +12285,17 @@ export class AgentSession {
 		// Cache-epoch invariant: pruning rewrites already-sent toolResult history,
 		// which breaks the provider prompt-cache prefix mid-epoch. Only prune at a
 		// sanctioned maintenance boundary, i.e. when the un-pruned context already
-		// crosses the compaction threshold. Pruning may then avert full compaction.
+		// crosses the compaction threshold, and only when it frees enough headroom
+		// to be worth the cache rewrite (shouldPruneAtThreshold). Otherwise compact.
 		if (!shouldCompact(contextTokens, contextWindow, compactionSettings, autoCompactionOutputReserveTokens))
 			return true;
 		const pruneEstimate = estimateToolOutputPruneSavings(this.sessionManager.getBranch(), DEFAULT_PRUNE_CONFIG, {
 			relaxedMinimum: 0,
 		});
 		if (
-			pruneEstimate.tokensSaved > 0 &&
-			!shouldCompact(
-				Math.max(0, contextTokens - pruneEstimate.tokensSaved),
+			shouldPruneAtThreshold(
+				contextTokens,
+				pruneEstimate.tokensSaved,
 				contextWindow,
 				compactionSettings,
 				autoCompactionOutputReserveTokens,
@@ -12399,17 +12401,18 @@ export class AgentSession {
 			await this.sessionManager.flush();
 			if (isAborted()) return "aborted";
 
-			// 1) Prune stale tool outputs first — cheaper than compaction, may avert it,
-			//    and (like all history rewrites) resets the codex provider session /
-			//    prompt-cache epoch via #closeCodexProviderSessionsForHistoryRewrite.
+			// 1) Prune stale tool outputs when that frees enough headroom to avert
+			//    compaction for a while (shouldPruneAtThreshold). Like all history
+			//    rewrites it resets the codex provider session / prompt-cache epoch
+			//    via #closeCodexProviderSessionsForHistoryRewrite.
 			const pruneEstimate = estimateToolOutputPruneSavings(this.sessionManager.getBranch(), DEFAULT_PRUNE_CONFIG, {
 				relaxedMinimum: 0,
 			});
 			let pruneResult: { prunedCount: number; tokensSaved: number } | undefined;
 			if (
-				pruneEstimate.tokensSaved > 0 &&
-				!shouldCompact(
-					Math.max(0, contextTokens - pruneEstimate.tokensSaved),
+				shouldPruneAtThreshold(
+					contextTokens,
+					pruneEstimate.tokensSaved,
 					contextWindow,
 					runSettings,
 					autoCompactionOutputReserveTokens,
@@ -12610,9 +12613,9 @@ export class AgentSession {
 			relaxedMinimum: 0,
 		});
 		if (
-			pruneEstimate.tokensSaved > 0 &&
-			!shouldCompact(
-				Math.max(0, contextTokens - pruneEstimate.tokensSaved),
+			shouldPruneAtThreshold(
+				contextTokens,
+				pruneEstimate.tokensSaved,
 				contextWindow,
 				compactionSettings,
 				autoCompactionOutputReserveTokens,

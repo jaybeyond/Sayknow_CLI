@@ -107,7 +107,7 @@ The automatic paths are intentionally different:
 
 - **Threshold maintenance**
   - Trigger: successful, non-error assistant message whose adjusted context tokens exceed `resolveThresholdTokens(...)`.
-  - Tool-output pruning can reduce the measured token count before threshold comparison.
+  - Tool-output pruning runs instead of compaction only when it leaves enough headroom under the threshold (see [Pre-compaction pruning](#pre-compaction-pruning)).
   - Context promotion is tried before compaction.
   - If promotion is unavailable, auto maintenance runs with `reason: "threshold"` and `willRetry: false`.
   - With `compaction.strategy: "handoff"`, threshold maintenance starts a new handoff session instead of writing a compaction entry; if handoff returns no document without aborting, it falls back to context-full compaction.
@@ -137,6 +137,8 @@ Pruned tool results are replaced with:
 - `[Output truncated - N tokens]`
 
 If pruning changes entries, session storage is rewritten and agent message state is refreshed before compaction decisions.
+
+Pruning rewrites history the provider has already cached, so the next request re-writes almost the whole prompt cache. At the compaction threshold a prune therefore runs only when it brings the context down to at most `100 - compaction.pruneMinHeadroomPercent` percent of the threshold (`shouldPruneAtThreshold`; default `20`, so 240K under the 300K ceiling). A smaller prune would reach the threshold again within a few requests and pay the rewrite each time, so the session compacts instead. `compaction.pruneMinHeadroomPercent: 0` accepts any prune that gets back under the threshold.
 
 ### Boundary and cut-point logic
 

@@ -2482,6 +2482,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			: serviceTierSetting === "none"
 				? undefined
 				: serviceTierSetting;
+		const taskCacheRetention = settings.get("task.cacheRetention");
+		const subagentCacheRetention =
+			isCanonicalSubSession && taskCacheRetention !== "inherit" ? taskCacheRetention : undefined;
 
 		const appendOnlyContext =
 			model && resolveAppendOnlyMode(settings.get("provider.appendOnlyContext"), model.provider)
@@ -2559,6 +2562,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			streamFn: (streamModel, context, streamOptions) =>
 				streamSimple(streamModel, context, {
 					...streamOptions,
+					...(subagentCacheRetention ? { cacheRetention: subagentCacheRetention } : {}),
 					onAuthError: async (provider, oldKey, error) => {
 						// Invalidation (a broker forced refresh) and the re-fetch share the step's admission.
 						const credentialOptions = {

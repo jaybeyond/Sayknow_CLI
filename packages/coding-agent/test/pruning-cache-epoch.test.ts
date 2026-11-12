@@ -112,11 +112,14 @@ describe("pruning cache-epoch invariant", () => {
 		vi.restoreAllMocks();
 	});
 
+	const PRUNABLE_RESULT_COUNT = 40;
+
 	function seedPrunableHistory(): void {
 		sessionManager.appendMessage({ role: "user", content: "hello", timestamp: Date.now() });
-		// ~75k tokens of toolResult output: well past the 40k protect window and
-		// 20k minimum-savings hysteresis, so pruning WOULD fire if invoked.
-		for (let i = 0; i < 25; i++) {
+		// ~120k tokens of toolResult output: ~78k pruneable past the 40k protect
+		// window, enough to take a 190k context under 80% of the 170k threshold
+		// (136k), so pruning WOULD fire if invoked.
+		for (let i = 0; i < PRUNABLE_RESULT_COUNT; i++) {
 			sessionManager.appendMessage(toolResultMessage(i, 12_000));
 		}
 	}
@@ -152,24 +155,35 @@ describe("pruning cache-epoch invariant", () => {
 		await driveTurnEnd(assistantMessage(50_000));
 		expect(prunedEntryCount()).toBe(0);
 		// Already-sent toolResult history must be byte-identical (no mid-epoch rewrite).
-		expect(JSON.stringify(sessionManager.getBranch().slice(0, 26))).toBe(
-			JSON.stringify(JSON.parse(branchBefore).slice(0, 26)),
+		const seededEntries = PRUNABLE_RESULT_COUNT + 1;
+		expect(JSON.stringify(sessionManager.getBranch().slice(0, seededEntries))).toBe(
+			JSON.stringify(JSON.parse(branchBefore).slice(0, seededEntries)),
 		);
 	});
 
 	it("prunes tool outputs at the compaction maintenance boundary", async () => {
 		await createSession();
 		seedPrunableHistory();
-		// 190k tokens on a 200k-context model: over the threshold, so context
-		// maintenance (pruning, then compaction if still over) is sanctioned.
+		// 190k tokens on a 200k-context model: over the threshold, and the prune
+		// leaves the required headroom, so it runs as context maintenance.
 		await driveTurnEnd(assistantMessage(190_000));
 		expect(prunedEntryCount()).toBeGreaterThan(0);
 	});
 
-	it("uses sub-normal-minimum output savings to avert threshold compaction", async () => {
+	it("compacts instead of pruning when the savings would leave no headroom", async () => {
 		await createSession();
 		seedSubMinimumPrunableHistory();
 		session.settings.set("compaction.thresholdTokens", 187_000);
+		await driveTurnEnd(assistantMessage(188_000));
+		expect(prunedEntryCount()).toBe(0);
+		expect(sessionManager.getBranch().some(entry => entry.type === "compaction")).toBe(true);
+	});
+
+	it("uses sub-normal-minimum output savings to avert threshold compaction when pruneMinHeadroomPercent is 0", async () => {
+		await createSession();
+		seedSubMinimumPrunableHistory();
+		session.settings.set("compaction.thresholdTokens", 187_000);
+		session.settings.set("compaction.pruneMinHeadroomPercent", 0);
 		await driveTurnEnd(assistantMessage(188_000));
 		expect(prunedEntryCount()).toBeGreaterThan(0);
 		expect(sessionManager.getBranch().some(entry => entry.type === "compaction")).toBe(false);

@@ -1,9 +1,11 @@
 import { describe, expect, test } from "bun:test";
+import { type CompactionSettings, DEFAULT_COMPACTION_SETTINGS } from "@sayknow-cli/agent-core/compaction/compaction";
 import type { SessionEntry, SessionMessageEntry } from "@sayknow-cli/agent-core/compaction/entries";
 import {
 	estimateToolOutputPruneSavings,
 	type PruneConfig,
 	pruneToolOutputs,
+	shouldPruneAtThreshold,
 	shouldRunMaintenancePrune,
 } from "@sayknow-cli/agent-core/compaction/pruning";
 import type { ToolResultMessage } from "@sayknow-cli/ai/types";
@@ -110,5 +112,45 @@ describe("shouldRunMaintenancePrune (Finding 13)", () => {
 
 	test("no cache means no reset cost, so a large reclaim runs", () => {
 		expect(shouldRunMaintenancePrune({ ...base, cacheEpochResetCost: 0 })).toBe(true);
+	});
+});
+
+describe("shouldPruneAtThreshold", () => {
+	// A million-token window with default settings compacts at the 300k ceiling,
+	// so a prune must bring the context to 240k or less (20% of the threshold free).
+	const window = 1_000_000;
+	const settings: CompactionSettings = { ...DEFAULT_COMPACTION_SETTINGS };
+
+	test("skips a prune that only just gets back under the threshold", () => {
+		expect(shouldPruneAtThreshold(300_001, 18_000, window, settings)).toBe(false);
+		expect(shouldPruneAtThreshold(300_001, 60_000, window, settings)).toBe(false);
+	});
+
+	test("runs a prune that leaves the minimum headroom, inclusive at the boundary", () => {
+		expect(shouldPruneAtThreshold(300_001, 60_001, window, settings)).toBe(true);
+		expect(shouldPruneAtThreshold(360_000, 120_000, window, settings)).toBe(true);
+		expect(shouldPruneAtThreshold(360_000, 119_999, window, settings)).toBe(false);
+	});
+
+	test("never runs without savings", () => {
+		expect(shouldPruneAtThreshold(100_000, 0, window, settings)).toBe(false);
+	});
+
+	test("measures headroom against a configured threshold", () => {
+		const fixed: CompactionSettings = { ...settings, thresholdTokens: 100_000 };
+		expect(shouldPruneAtThreshold(115_000, 35_000, window, fixed)).toBe(true);
+		expect(shouldPruneAtThreshold(115_000, 30_000, window, fixed)).toBe(false);
+	});
+
+	test("pruneMinHeadroomPercent 0 accepts any prune that gets back under the threshold", () => {
+		const noHeadroom: CompactionSettings = { ...settings, pruneMinHeadroomPercent: 0 };
+		expect(shouldPruneAtThreshold(300_001, 1, window, noHeadroom)).toBe(true);
+		expect(shouldPruneAtThreshold(300_002, 1, window, noHeadroom)).toBe(false);
+	});
+
+	test("a larger pruneMinHeadroomPercent demands more headroom", () => {
+		const half: CompactionSettings = { ...settings, pruneMinHeadroomPercent: 50 };
+		expect(shouldPruneAtThreshold(300_001, 150_001, window, half)).toBe(true);
+		expect(shouldPruneAtThreshold(300_001, 150_000, window, half)).toBe(false);
 	});
 });

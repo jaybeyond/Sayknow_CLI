@@ -775,6 +775,16 @@
 					"description": "Service tier applied to task-tool subagents only. \"inherit\" copies the main session tier; any explicit value overrides it for subagents without touching the main session.",
 					"default": "inherit"
 				},
+				"cacheRetention": {
+					"type": "string",
+					"enum": [
+						"inherit",
+						"none",
+						"short",
+						"long"
+					],
+					"default": "inherit"
+				},
 				"modelRouting": {
 					"type": "object",
 					"properties": {
@@ -1343,6 +1353,10 @@
 				"maintenancePruningMinSavingsTokens": {
 					"type": "number",
 					"default": 8000
+				},
+				"pruneMinHeadroomPercent": {
+					"type": "number",
+					"default": 20
 				},
 				"idleEnabled": {
 					"type": "boolean",

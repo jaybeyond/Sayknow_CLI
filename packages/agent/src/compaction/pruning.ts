@@ -11,7 +11,12 @@
 import type { ToolCall, ToolResultMessage } from "@sayknow-cli/ai";
 import { sanitizeText } from "@sayknow-cli/utils";
 import type { AgentMessage } from "../types";
-import { estimateEntryTokens, estimateTextTokensHeuristic } from "./compaction";
+import {
+	type CompactionSettings,
+	estimateEntryTokens,
+	estimateTextTokensHeuristic,
+	resolveThresholdTokens,
+} from "./compaction";
 import type { SessionEntry, SessionMessageEntry } from "./entries";
 
 export interface PruneConfig {
@@ -751,6 +756,38 @@ export function shouldRunMaintenancePrune(args: {
 	if (!args.enabled) return false;
 	if (args.estimatedSavings < args.minSavings) return false;
 	return args.estimatedSavings > args.cacheEpochResetCost;
+}
+
+export const DEFAULT_PRUNE_MIN_HEADROOM_PERCENT = 20;
+
+function pruneMinHeadroomPercent(settings: CompactionSettings): number {
+	const percent = settings.pruneMinHeadroomPercent;
+	if (typeof percent !== "number" || !Number.isFinite(percent)) return DEFAULT_PRUNE_MIN_HEADROOM_PERCENT;
+	return Math.min(100, Math.max(0, percent));
+}
+
+/**
+ * Whether a session over its compaction threshold should prune tool outputs
+ * instead of compacting.
+ *
+ * Pruning rewrites history the provider has already cached, so the request
+ * after it re-writes almost the whole prompt cache. A prune that only just
+ * gets back under the threshold is at the threshold again a few requests later
+ * and pays that rewrite each time, which costs more than the compaction it
+ * postpones. It runs only when it leaves `pruneMinHeadroomPercent` of the
+ * threshold free.
+ */
+export function shouldPruneAtThreshold(
+	contextTokens: number,
+	pruneSavingsTokens: number,
+	contextWindow: number,
+	settings: CompactionSettings,
+	maxOutputTokens = 0,
+): boolean {
+	if (pruneSavingsTokens <= 0) return false;
+	const remainingTokens = Math.max(0, contextTokens - pruneSavingsTokens);
+	const thresholdTokens = resolveThresholdTokens(contextWindow, settings, maxOutputTokens, remainingTokens);
+	return remainingTokens * 100 <= thresholdTokens * (100 - pruneMinHeadroomPercent(settings));
 }
 
 export interface PruneToolOutputsOptions {
