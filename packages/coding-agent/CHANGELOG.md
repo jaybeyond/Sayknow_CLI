@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.7.23] - 2026-11-12
+
 ### Fixed
 
 - Reading a PDF works again. SKC pointed mupdf at its bundled 1.28.1 wasm in every install, but npm and bun installs resolve mupdf through markit-ai's `^1.27.0` range, and a loader from any other release (1.28.0, 1.28.6) cannot run that wasm (`m_[_] is not a function`). The bundled wasm is now used by compiled binaries only; other installs use the wasm that ships with the mupdf they resolved. 0.7.22 binaries were built with mupdf 1.28.6 and had the same failure; the build now pins mupdf to 1.28.1.
