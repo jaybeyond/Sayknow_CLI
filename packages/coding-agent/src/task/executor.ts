@@ -221,6 +221,8 @@ export interface ExecutorOptions {
 	enableLsp?: boolean;
 	signal?: AbortSignal;
 	onProgress?: (progress: AgentProgress) => void;
+	/** A parent UI renders this subagent's live progress; enables intent tracing in the child. */
+	progressObserved?: boolean;
 	sessionFile?: string | null;
 	persistArtifacts?: boolean;
 	artifactsDir?: string;
@@ -1668,6 +1670,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					},
 					sessionManager,
 					hasUI: false,
+					progressObserved: options.progressObserved === true,
 					spawns: spawnsEnv,
 					taskDepth: childDepth,
 					currentAgentType: agent.name,

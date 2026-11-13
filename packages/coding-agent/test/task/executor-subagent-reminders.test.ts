@@ -1080,6 +1080,35 @@ describe("runSubprocess yield reminders", () => {
 		expect(createAgentSessionSpy.mock.calls[0]?.[0]?.responseLanguage).toEqual({ code: "ko", name: "Korean" });
 	});
 
+	it("forwards parent progress observation to the child session without granting UI", async () => {
+		const runOnce = async (progressObserved: boolean | undefined) => {
+			vi.clearAllMocks();
+			const session = createMockSession(({ emit }) => {
+				emit({
+					type: "tool_execution_end",
+					toolCallId: "tool-observed",
+					toolName: "yield",
+					result: {
+						content: [{ type: "text", text: "Result submitted." }],
+						details: { status: "success", data: { ok: true } },
+					},
+					isError: false,
+				});
+			});
+			const createAgentSessionSpy = mockCreateAgentSession(session);
+			await runSubprocess({ ...baseOptions, id: "subagent-observed", progressObserved });
+			return createAgentSessionSpy.mock.calls[0]?.[0];
+		};
+
+		const observed = await runOnce(true);
+		expect(observed?.progressObserved).toBe(true);
+		expect(observed?.hasUI).toBe(false);
+
+		const unobserved = await runOnce(undefined);
+		expect(unobserved?.progressObserved).toBe(false);
+		expect(unobserved?.hasUI).toBe(false);
+	});
+
 	it("prefers explicit modelOverride thinking suffix over provided thinking level, including off", async () => {
 		vi.clearAllMocks();
 		const modelRegistry = {

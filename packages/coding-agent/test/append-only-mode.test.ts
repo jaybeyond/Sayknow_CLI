@@ -67,4 +67,22 @@ describe("intent tracing UI gating", () => {
 			}
 		}
 	});
+
+	it("enables intent tracing for a UI-less subagent whose progress a parent UI renders", () => {
+		const previousFlag = Bun.env.PI_INTENT_TRACING;
+		try {
+			delete Bun.env.PI_INTENT_TRACING;
+			expect(resolveIntentTracingEnabled(true, false, true)).toBe(true);
+			expect(resolveIntentTracingEnabled(true, false, false)).toBe(false);
+			// The setting still wins: an observed subagent never traces when tracing is off.
+			expect(resolveIntentTracingEnabled(false, false, true)).toBe(false);
+			expect(resolveIntentTracingEnabled(undefined, false, true)).toBe(false);
+		} finally {
+			if (previousFlag === undefined) {
+				delete Bun.env.PI_INTENT_TRACING;
+			} else {
+				Bun.env.PI_INTENT_TRACING = previousFlag;
+			}
+		}
+	});
 });

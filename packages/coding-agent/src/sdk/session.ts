@@ -454,6 +454,11 @@ export interface CreateAgentSessionOptions {
 
 	/** Whether UI is available (enables interactive tools like ask). Default: false */
 	hasUI?: boolean;
+	/**
+	 * A parent UI renders this session's live progress (subagent panel). Enables intent
+	 * tracing like `hasUI` does, without enabling interactive tools. Default: false
+	 */
+	progressObserved?: boolean;
 	/** Whether this host mode can own a notification session endpoint. Default: true. */
 	notificationHostModeSupported?: boolean;
 	/** Whether this host mode can own the root SDK endpoint. Default: true. */
@@ -919,8 +924,12 @@ function withEmbeddedDefaultSkcSkills(skills: Skill[]): Skill[] {
 	return withEmbeddedSkcSecuritySkills(withEmbeddedSkcUiSkills([...byName.values()]));
 }
 
-export function resolveIntentTracingEnabled(intentTracingSetting: boolean | undefined, hasUI: boolean): boolean {
-	return (!!intentTracingSetting || $flag("PI_INTENT_TRACING")) && hasUI;
+export function resolveIntentTracingEnabled(
+	intentTracingSetting: boolean | undefined,
+	hasUI: boolean,
+	progressObserved = false,
+): boolean {
+	return (!!intentTracingSetting || $flag("PI_INTENT_TRACING")) && (hasUI || progressObserved);
 }
 
 const MCP_CONFIG_PATH_AND_MANAGER_ERROR = "mcpConfigPath and mcpManager are mutually exclusive";
@@ -1430,6 +1439,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				return sessionManager.getCwd();
 			},
 			hasUI: options.hasUI ?? false,
+			progressObserved: options.progressObserved ?? false,
 			workflowGateEligible: true,
 			enableLsp,
 			get hasEditTool() {
@@ -2123,6 +2133,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		const intentTracingEnabled = resolveIntentTracingEnabled(
 			settings.get("tools.intentTracing"),
 			options.hasUI ?? false,
+			options.progressObserved ?? false,
 		);
 		const intentField = intentTracingEnabled ? INTENT_FIELD : undefined;
 		const rebuildSystemPrompt = async (

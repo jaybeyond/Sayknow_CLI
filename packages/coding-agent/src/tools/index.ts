@@ -225,6 +225,11 @@ export interface ToolSession {
 	cwd: string;
 	/** Whether UI is available */
 	hasUI: boolean;
+	/**
+	 * A parent UI renders this session's live progress (the subagent panel), so tool
+	 * calls carry intent even though `hasUI` is false. Propagates to nested subagents.
+	 */
+	progressObserved?: boolean;
 	/** Whether this session will bind a workflow-gate emitter after tool construction. */
 	workflowGateEligible?: boolean;
 	/** Skip Python kernel availability check and warmup */
