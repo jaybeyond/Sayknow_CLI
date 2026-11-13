@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.7.24] - 2026-11-13
+
 ### Changed
 
 - A subagent's line in the live panel above the input now says what it is doing (for example "Running chromium stall control") instead of the start of its raw command. Subagents launched from an interactive session now fill the `_i` intent field, which they skipped before because they have no UI of their own. Sessions without a UI, such as print mode and RPC, still skip it, and `tools.intentTracing: false` still turns it off everywhere. Each subagent tool call costs a few more output tokens.
