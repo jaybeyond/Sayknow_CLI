@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.7.25] - 2026-11-17
+
 ### Fixed
 
 - Rendering a streamed multi-question `ask` call no longer throws `text.trim` errors before a question body arrives. Completed questions remain visible while later questions are still streaming; execution-time question validation is unchanged.
