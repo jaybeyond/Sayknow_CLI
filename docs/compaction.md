@@ -212,6 +212,7 @@ Remote summarization modes:
   - `{ systemPrompt, prompt }`
 - Expects JSON containing at least `{ summary }`.
 - For OpenAI/OpenAI code provider models, compaction first tries the provider-native `/responses/compact` endpoint when remote compaction is enabled. It preserves provider replacement history in `preserveData.openaiRemoteCompaction` and falls back to local summarization if that native request fails.
+- Codex's provider-native request has a 60-second network deadline, including response-body reads. If it expires, compaction proceeds to the existing summary path. Cancelling compaction still stops it without starting a fallback summary.
 
 ### Handoff generation
 

@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Rendering a streamed multi-question `ask` call no longer throws `text.trim` errors before a question body arrives. Completed questions remain visible while later questions are still streaming; execution-time question validation is unchanged.
+- Normal compaction checks no longer load the full transcript just to rule out an old overflow. Codex remote compaction switches to the existing summary path after a 60-second network deadline; user cancellation still stops compaction.
+
 ## [0.7.24] - 2026-11-13
 
 ### Changed

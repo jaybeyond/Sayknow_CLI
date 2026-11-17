@@ -12187,6 +12187,12 @@ export class AgentSession {
 		);
 	}
 
+	#isBeforeLatestCompaction(timestamp: number): boolean {
+		// An overflow error retained after compaction must not trigger it again.
+		const entry = getLatestCompactionEntry(this.sessionManager.getBranch());
+		return entry !== null && timestamp < new Date(entry.timestamp).getTime();
+	}
+
 	/**
 	 * Check if context maintenance or promotion is needed and run it.
 	 * Called after agent_end and before prompt submission.
@@ -12222,18 +12228,11 @@ export class AgentSession {
 		// shouldn't trigger compaction for the new model.
 		const sameModel =
 			this.model && assistantMessage.provider === this.model.provider && assistantMessage.model === this.model.id;
-		// This handles the case where an error was kept after compaction (in the "kept" region).
-		// The error shouldn't trigger another compaction since we already compacted.
-		// Example: opus fails -> switch to OpenAI code backend -> compact -> switch back to opus -> opus error
-		// is still in context but shouldn't trigger compaction again.
-		const compactionEntry = getLatestCompactionEntry(this.sessionManager.getBranch());
-		const errorIsFromBeforeCompaction =
-			compactionEntry !== null && assistantMessage.timestamp < new Date(compactionEntry.timestamp).getTime();
-		if (
+		const isNewOverflow =
 			sameModel &&
-			!errorIsFromBeforeCompaction &&
-			classifyContextOverflow(assistantMessage, assistantMessage.transportFailure, contextWindow)
-		) {
+			classifyContextOverflow(assistantMessage, assistantMessage.transportFailure, contextWindow) &&
+			!this.#isBeforeLatestCompaction(assistantMessage.timestamp);
+		if (isNewOverflow) {
 			this.#overflowMaintenanceAttempts += 1;
 			if (this.#overflowMaintenanceAttempts > 1) return false;
 			// Remove the error message from agent state (it IS saved to session for history,

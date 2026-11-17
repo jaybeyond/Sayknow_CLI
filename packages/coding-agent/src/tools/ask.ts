@@ -1347,8 +1347,8 @@ interface AskRenderArgs {
 	multi?: boolean;
 	questions?: Array<{
 		id: string;
-		question: string;
-		options: Array<{ label: string }>;
+		question?: string;
+		options?: Array<{ label: string }>;
 		multi?: boolean;
 	}>;
 }
@@ -1410,6 +1410,7 @@ export const askToolRenderer = {
 
 			for (let i = 0; i < args.questions.length; i++) {
 				const q = args.questions[i];
+				const question = q.question ?? "";
 				const isLastQ = i === args.questions.length - 1;
 				const qBranch = isLastQ ? uiTheme.tree.last : uiTheme.tree.branch;
 				const continuation = isLastQ ? " " : uiTheme.tree.vertical;
@@ -1422,15 +1423,15 @@ export const askToolRenderer = {
 				container.addChild(
 					new Text(` ${uiTheme.fg("dim", qBranch)} ${uiTheme.fg("dim", `[${q.id}]`)}${metaStr}`, 0, 0),
 				);
-				const deepInterviewQuestion = renderDeepInterviewAskQuestion(q.question, uiTheme);
-				container.addChild(deepInterviewQuestion ?? new Markdown(q.question, 3, 0, mdTheme, accentStyle));
+				const deepInterviewQuestion = renderDeepInterviewAskQuestion(question, uiTheme);
+				container.addChild(deepInterviewQuestion ?? new Markdown(question, 3, 0, mdTheme, accentStyle));
 
 				const qOptions = q.options;
 				if (qOptions?.length) {
 					const entries = qOptions.map((opt, j) => {
 						const isLastOpt = j === qOptions.length - 1;
 						const optBranch = isLastOpt ? uiTheme.tree.last : uiTheme.tree.branch;
-						const shouldNumberOption = deepInterviewQuestion !== null || isDeepInterviewAskQuestion(q.question);
+						const shouldNumberOption = deepInterviewQuestion !== null || isDeepInterviewAskQuestion(question);
 						const displayLabel = shouldNumberOption ? formatNumberedOptionLabel(opt.label, j) : opt.label;
 						const optLabel = renderInlineMarkdown(displayLabel, mdTheme, t => uiTheme.fg("muted", t));
 						return {

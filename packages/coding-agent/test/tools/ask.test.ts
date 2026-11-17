@@ -988,6 +988,43 @@ describe("AskTool custom input", () => {
 });
 
 describe("AskTool option rendering", () => {
+	it("renders a streamed question before its body arrives", async () => {
+		const theme = await getThemeByName("red-octopus");
+		const args = { questions: [{ id: "streaming" }] };
+
+		const component = askToolRenderer.renderCall(args, { expanded: true, isPartial: true }, theme!);
+		const text = stripAnsi(component.render(80).join("\n"));
+		expect(text).toContain("streaming");
+		expect(text).not.toContain("undefined");
+
+		const completed = askToolRenderer.renderCall(
+			{ questions: [{ id: "streaming", question: "Choose a path", options: [{ label: "Continue" }] }] },
+			{ expanded: true, isPartial: false },
+			theme!,
+		);
+		const completedText = stripAnsi(completed.render(80).join("\n"));
+		expect(completedText).toContain("Choose a path");
+		expect(completedText).toContain("Continue");
+	});
+
+	it("keeps completed questions visible while the next question body is streaming", async () => {
+		const theme = await getThemeByName("red-octopus");
+		const component = askToolRenderer.renderCall(
+			{
+				questions: [
+					{ id: "complete", question: "First question", options: [{ label: "First choice" }] },
+					{ id: "pending", options: [] },
+				],
+			},
+			{ expanded: true, isPartial: true },
+			theme!,
+		);
+		const text = stripAnsi(component.render(44).join("\n"));
+		expect(text).toContain("First question");
+		expect(text).toContain("First choice");
+		expect(text).toContain("pending");
+		expect(text).not.toContain("undefined");
+	});
 	it("wraps long single-question option labels without ellipsis", async () => {
 		const theme = await getThemeByName("red-octopus");
 		expect(theme).toBeDefined();

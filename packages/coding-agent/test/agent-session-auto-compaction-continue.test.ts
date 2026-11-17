@@ -139,6 +139,17 @@ describe("AgentSession auto-compaction continuation", () => {
 		await session.waitForIdle();
 	}
 
+	it("does not materialize the transcript for a successful answer below the threshold", async () => {
+		const getBranch = vi.spyOn(sessionManager, "getBranch");
+		const message = assistantMessage({
+			content: [{ type: "text", text: "Done" }],
+			usage: { ...assistantMessage().usage, input: 1000, output: 10, totalTokens: 1010 },
+		});
+		await driveCompaction(message);
+		expect(getRuntimeSignals()).toEqual([]);
+		expect(getBranch).not.toHaveBeenCalled();
+	});
+
 	it("threshold default starts one synthetic auto-continue prompt without re-compacting", async () => {
 		const promptSpy = vi.spyOn(session.agent, "prompt").mockResolvedValue();
 		const events: string[] = [];

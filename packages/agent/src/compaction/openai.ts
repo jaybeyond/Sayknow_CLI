@@ -72,6 +72,8 @@ export interface RemoteCompactionResponse {
 // OpenAI provider gating + endpoint resolution
 // ============================================================================
 
+const CODEX_REMOTE_COMPACTION_TIMEOUT_MS = 60_000;
+
 export function shouldUseOpenAiRemoteCompaction(model: Model): boolean {
 	return model.provider === "openai" || model.provider === "openai-codex";
 }
@@ -512,18 +514,32 @@ export async function requestOpenAiRemoteCompaction(
 		headers[OPENAI_HEADERS.ORIGINATOR] = OPENAI_HEADER_VALUES.ORIGINATOR_CODEX;
 	}
 
-	const response = await fetch(endpoint, {
-		method: "POST",
-		headers,
-		body: JSON.stringify(request),
-		signal,
-	});
-
-	if (!response.ok) {
-		throw new Error(`Remote compaction failed (${response.status} ${response.statusText})`);
+	const deadline =
+		model.provider === "openai-codex" ? AbortSignal.timeout(CODEX_REMOTE_COMPACTION_TIMEOUT_MS) : undefined;
+	const requestSignal = signal && deadline ? AbortSignal.any([signal, deadline]) : (signal ?? deadline);
+	let data: { output?: unknown } | undefined;
+	try {
+		const response = await fetch(endpoint, {
+			method: "POST",
+			headers,
+			body: JSON.stringify(request),
+			signal: requestSignal,
+		});
+		if (!response.ok) {
+			throw new Error(`Remote compaction failed (${response.status} ${response.statusText})`);
+		}
+		data = (await response.json()) as { output?: unknown } | undefined;
+		requestSignal?.throwIfAborted();
+	} catch (error) {
+		// Transport implementations can report a deadline as AbortError. Only
+		// caller cancellation should abort compaction rather than fall back.
+		if (!signal?.aborted && deadline?.aborted) {
+			throw new Error(`Codex remote compaction timed out after ${CODEX_REMOTE_COMPACTION_TIMEOUT_MS}ms`, {
+				cause: error,
+			});
+		}
+		throw error;
 	}
-
-	const data = (await response.json()) as { output?: unknown } | undefined;
 	if (!Array.isArray(data?.output)) {
 		throw new Error(`Remote compaction response malformed output (outputType=${typeof data?.output})`);
 	}

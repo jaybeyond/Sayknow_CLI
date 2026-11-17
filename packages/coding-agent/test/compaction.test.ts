@@ -641,6 +641,65 @@ describe("remote compaction setting", () => {
 		]);
 	});
 
+	it("falls back when Codex remote compaction reaches its deadline without cancelling the session", async () => {
+		const base = getBundledModel("openai", "gpt-5.1");
+		if (!base) throw new Error("Expected openai/gpt-5.1 to exist");
+		const model = { ...base, provider: "openai-codex", baseUrl: "https://chatgpt.com/backend-api" };
+		const preparation = prepareCompaction(
+			[
+				createMessageEntry(createUserMessage("Turn 1")),
+				createMessageEntry(createOpenAiAssistantMessage("Answer 1", model, createMockUsage(0, 100, 9000, 0), "")),
+				createMessageEntry(createUserMessage("Turn 2")),
+			],
+			{ ...DEFAULT_COMPACTION_SETTINGS, keepRecentTokens: 1 },
+		);
+		if (!preparation) throw new Error("Expected compaction preparation");
+
+		const caller = new AbortController();
+		const deadline = new AbortController();
+		const timeoutSpy = vi.spyOn(AbortSignal, "timeout").mockReturnValue(deadline.signal);
+		using _hook = hookFetch((_url, init) => {
+			const signal = init?.signal;
+			deadline.abort(new DOMException("Deadline elapsed", "TimeoutError"));
+			expect(signal?.aborted).toBe(true);
+			// Some fetch implementations report any signal cancellation as AbortError.
+			return Promise.reject(new DOMException("Fetch aborted", "AbortError"));
+		});
+		const summary = vi.spyOn(ai, "completeSimple").mockResolvedValue(createAssistantMessage("Local summary"));
+		const result = await compact(preparation, model, "test-api-key", undefined, caller.signal);
+		expect(timeoutSpy).toHaveBeenCalledWith(60_000);
+		expect(caller.signal.aborted).toBe(false);
+		expect(summary).toHaveBeenCalledTimes(1);
+		expect(result.summary).toContain("Local summary");
+	});
+
+	it("preserves caller cancellation for Codex remote compaction", async () => {
+		const base = getBundledModel("openai", "gpt-5.1");
+		if (!base) throw new Error("Expected openai/gpt-5.1 to exist");
+		const model = { ...base, provider: "openai-codex", baseUrl: "https://chatgpt.com/backend-api" };
+		const preparation = prepareCompaction(
+			[
+				createMessageEntry(createUserMessage("Turn 1")),
+				createMessageEntry(createOpenAiAssistantMessage("Answer 1", model, createMockUsage(0, 100, 9000, 0), "")),
+				createMessageEntry(createUserMessage("Turn 2")),
+			],
+			{ ...DEFAULT_COMPACTION_SETTINGS, keepRecentTokens: 1 },
+		);
+		if (!preparation) throw new Error("Expected compaction preparation");
+
+		const caller = new AbortController();
+		const reason = new DOMException("Cancelled by caller", "AbortError");
+		using _hook = hookFetch((_url, init) => {
+			caller.abort(reason);
+			expect(init?.signal?.reason).toBe(reason);
+			return Promise.reject(init?.signal?.reason);
+		});
+		const summary = vi.spyOn(ai, "completeSimple").mockResolvedValue(createAssistantMessage("Unexpected summary"));
+		await expect(compact(preparation, model, "test-api-key", undefined, caller.signal)).rejects.toThrow(
+			"Cancelled by caller",
+		);
+		expect(summary).not.toHaveBeenCalled();
+	});
 	it("does not report remote compaction cancellation as fallback health", async () => {
 		const model = getBundledModel("openai", "gpt-5.1");
 		if (!model) throw new Error("Expected openai/gpt-5.1 model to exist");
