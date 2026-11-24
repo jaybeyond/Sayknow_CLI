@@ -9,11 +9,6 @@ import {
 } from "@sayknow-cli/tui";
 import { getMarkdownTheme, theme } from "../../modes/theme/theme";
 
-// OSC 133 shell integration: marks prompt zones for terminal multiplexers
-const OSC133_ZONE_START = "\x1b]133;A\x07";
-const OSC133_ZONE_END = "\x1b]133;B\x07";
-const OSC133_ZONE_FINAL = "\x1b]133;C\x07";
-
 /** Columns taken by the rail glyph plus the gap before the prompt text. */
 const RAIL_WIDTH = 2;
 
@@ -36,13 +31,18 @@ export class UserMessageComponent extends Container {
 		this.addChild(new Spacer(1));
 		// A replayed prompt is not something the user just typed; say so once, quietly.
 		if (synthetic) this.addChild(new Text(`${rail()} ${theme.fg("dim", "replay")}`, 0, 0));
-		const prompt = new PromptZoneMarkdown(text, color, rail);
+		const prompt = new RailMarkdown(text, color, rail);
 		this.addChild(prompt);
 		if (this.#viewportAnchorSource) this.setViewportAnchorSource(prompt, this.#viewportAnchorSource);
 	}
 }
 
-class PromptZoneMarkdown implements Component {
+/**
+ * Markdown behind the user rail. It deliberately emits no OSC 133 shell-prompt
+ * marks: terminals such as Tern treat a prompt mark as "the program exited" and
+ * reset the Kitty keyboard flags SKC pushed, which breaks Shift+Enter.
+ */
+class RailMarkdown implements Component {
 	#markdown: Markdown;
 	#rail: () => string;
 
@@ -55,13 +55,9 @@ class PromptZoneMarkdown implements Component {
 		this.#markdown.invalidate();
 	}
 
-	#withRailAndPromptZone(lines: string[]): string[] {
-		if (lines.length === 0) return lines;
+	#withRail(lines: string[]): string[] {
 		const rail = this.#rail();
-		const zoned = lines.map(line => `${rail} ${line}`);
-		zoned[0] = OSC133_ZONE_START + zoned[0];
-		zoned[zoned.length - 1] = `${zoned[zoned.length - 1]}${OSC133_ZONE_END}${OSC133_ZONE_FINAL}`;
-		return zoned;
+		return lines.map(line => `${rail} ${line}`);
 	}
 
 	#innerWidth(width: number): number {
@@ -70,9 +66,9 @@ class PromptZoneMarkdown implements Component {
 
 	renderWithViewportAnchorSource(width: number, source: ViewportAnchorSource): ViewportAnchorRender {
 		const rendered = this.#markdown.renderWithViewportAnchorSource(this.#innerWidth(width), source);
-		return { lines: this.#withRailAndPromptZone(rendered.lines), anchors: rendered.anchors };
+		return { lines: this.#withRail(rendered.lines), anchors: rendered.anchors };
 	}
 	render(width: number): string[] {
-		return this.#withRailAndPromptZone(this.#markdown.render(this.#innerWidth(width)));
+		return this.#withRail(this.#markdown.render(this.#innerWidth(width)));
 	}
 }

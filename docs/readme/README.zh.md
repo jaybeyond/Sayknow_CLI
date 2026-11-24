@@ -195,7 +195,7 @@ fallback:
 
 ## TUI identity
 
-默认的 TUI 标识是 SKC 的 **ink-octopus**（章鱼墨汁）主题——温暖的石墨色、纸色文字、唯一的琥珀色强调——用于深色终端，浅色终端使用 **blue-octopus**（蓝章鱼）。还捆绑了一个暖色调的 **red-octopus**（红章鱼）变体，供偏好更深、高对比度配色的用户使用。另有三个迁移主题——`claude-code`、`codex` 和 `opencode`——分别复刻了这些工具的外观，以便于视觉迁移，可从 Settings 或 `/theme` 中选择。显式的用户主题设置仍然优先生效。
+默认的 TUI 标识是 SKC 的 **ink-octopus**（章鱼墨汁）主题——温暖的石墨色、纸色文字、唯一的琥珀色强调——用于深色终端，浅色终端使用 **blue-octopus-light**（浅色蓝章鱼）。还捆绑了一个暖色调的 **red-octopus**（红章鱼）变体，供偏好更深、高对比度配色的用户使用。另有三个迁移主题——`claude-code`、`codex` 和 `opencode`——分别复刻了这些工具的外观，以便于视觉迁移，可从 Settings 或 `/theme` 中选择。显式的用户主题设置仍然优先生效。
 
 ### Bundled theme grid
 
@@ -203,7 +203,8 @@ fallback:
 
 | Theme | Visual feel | Best fit |
 | --- | --- | --- |
-| `blue-octopus` | 蓝章鱼配色，带触手蓝点缀。 | 浅色终端的默认主题。 |
+| `blue-octopus` | 蓝章鱼配色，带触手蓝点缀。 | 深色备选。 |
+| `blue-octopus-light` | 以深色墨水呈现的蓝章鱼配色，适合浅色背景。 | 浅色终端的默认主题。 |
 | `red-octopus` | 暖色调红章鱼变体，状态对比强烈。 | 高对比度的深色替代方案。 |
 | `ink-octopus` | 章鱼墨汁 — 温暖的石墨色背景、纸色文字、唯一的琥珀色强调。 | 深色终端的默认主题。 |
 | `glow-octopus` | 深海生物荧光 — 青黑底色配荧光绿，辅以紫色。 | 需要鲜明强调色的深色终端。 |
@@ -273,7 +274,7 @@ bun test packages/coding-agent/test/default-skc-definitions.test.ts
 
 ## Inspirations and lineage
 
-Sayknow-CLI 默认的 TUI 标识是章鱼家族：深色默认 ink-octopus，浅色默认 blue-octopus，以及 red-octopus、glow-octopus、violet-octopus 备选。它还捆绑了 `claude-code`、`codex` 和 `opencode` 迁移主题，其配色受这些工具启发，以便从它们迁移过来的用户能获得熟悉的外观。它在一个小型智能体框架家族的经验之上构建，同时有意保持公共 SKC 界面的专注。历史归属保留在 [`NOTICE.md`](NOTICE.md) 中。
+Sayknow-CLI 默认的 TUI 标识是章鱼家族：深色默认 ink-octopus，浅色默认 blue-octopus-light，以及 red-octopus、glow-octopus、violet-octopus 备选。它还捆绑了 `claude-code`、`codex` 和 `opencode` 迁移主题，其配色受这些工具启发，以便从它们迁移过来的用户能获得熟悉的外观。它在一个小型智能体框架家族的经验之上构建，同时有意保持公共 SKC 界面的专注。历史归属保留在 [`NOTICE.md`](NOTICE.md) 中。
 
 ## License
 

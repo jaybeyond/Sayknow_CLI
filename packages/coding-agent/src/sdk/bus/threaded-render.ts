@@ -214,7 +214,7 @@ export function renderThreadedFrame(frame: ThreadedFrame): ThreadedSend | undefi
 								: "unknown";
 			const argsSummary = str(frame.argsSummary);
 			const resultSummary = str(frame.resultSummary);
-			const lines = [`⚙ ${escapeHtml(truncate(str(frame.toolName) ?? "tool", 300))} — ${status}`];
+			const lines = [`⚙ ${escapeHtml(truncate(str(frame.toolName) ?? "tool", 300))}: ${status}`];
 			if (argsSummary) lines.push(`args:\n${pre(truncate(argsSummary, 1200))}`);
 			if (resultSummary) lines.push(`result:\n${pre(truncate(resultSummary, 1200))}`);
 			return {

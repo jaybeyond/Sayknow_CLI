@@ -1,6 +1,7 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import { stripVTControlCharacters } from "node:util";
 import { resetSettingsForTest, Settings, settings } from "@sayknow-cli/coding-agent/config/settings";
+import { setLanguage } from "@sayknow-cli/coding-agent/i18n/index";
 import { SettingsSelectorComponent } from "@sayknow-cli/coding-agent/modes/components/settings-selector";
 import { initTheme } from "@sayknow-cli/coding-agent/modes/theme/theme";
 
@@ -11,6 +12,8 @@ beforeAll(async () => {
 beforeEach(async () => {
 	resetSettingsForTest();
 	await Settings.init({ inMemory: true });
+	// Labels are matched in English; settings init may apply the host locale.
+	setLanguage("en");
 });
 
 afterEach(() => {

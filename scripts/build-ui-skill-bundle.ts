@@ -13,7 +13,8 @@
  *
  * Usage:
  *   bun scripts/build-ui-skill-bundle.ts --source emilkowalski=<dir> --source appllama=<dir> --source benjitaylor=<dir> \
- *     --source pbakaus=<dir> --source motionsites=<dir> --source usestrix=<dir>
+ *     --source pbakaus=<dir> --source motionsites=<dir> --source usestrix=<dir> --source heydamir=<dir> \
+ *     --source miqdadbadjuber=<dir>
  *   bun scripts/build-ui-skill-bundle.ts --check --source ...   (verify committed output is in sync)
  */
 
@@ -48,6 +49,10 @@ interface SourceLayout {
 	companionDir?: string;
 	/** Opening lines of the `## SKC invocation` block; the frontend wording when omitted. */
 	invocation?: readonly string[];
+	/** Rewrites the entry `SKILL.md` body (frontmatter excluded) before SKC blocks are spliced in. */
+	transformEntry?: (body: string, skillName: string) => string;
+	/** Extra upstream license files to carry: checkout-relative path to the bundle file name. */
+	extraLicenses?: Readonly<Record<string, string>>;
 	/** Rewrites each companion before it is inlined. */
 	transformCompanion?: (text: string, relativePath: string) => string;
 }
@@ -87,6 +92,12 @@ const SOURCE_SKILLS: Record<string, readonly string[]> = {
 	motionsites: ["motionsites-web-builder"],
 	// White-box security review of the user's own code; the entry is SKC-authored.
 	usestrix: ["security-review"],
+	// Removes the look of AI-generated UI. CC BY 4.0: attribution stays in the
+	// text and NOTICE.md records the SKC changes.
+	heydamir: ["unslop"],
+	// The antislop rule system: the core filter plus its four design skills.
+	// `antislop-code` (code comment hygiene) is not design work and is left out.
+	miqdadbadjuber: ["antislop", "antislop-ui", "antislop-human", "antislop-layoutmobile", "antislop-copywriting"],
 };
 
 const DEFAULT_LAYOUT: SourceLayout = { skillsDir: "skills", license: "LICENSE" };
@@ -141,6 +152,39 @@ const SOURCE_LAYOUTS: Record<string, SourceLayout> = {
 			"and keep going on the user's actual task.",
 		],
 		transformCompanion: resolveStrixTemplate,
+	},
+	// Scripts and reference images cannot be read from an embedded skill, so
+	// image links point at the pinned commit and the SKC overlay says how to
+	// fetch the two Node scripts from it.
+	heydamir: {
+		skillsDir: "skills",
+		license: "LICENSE",
+		transformEntry: pinUnslopImageLinks,
+		transformCompanion: pinUnslopImageLinks,
+	},
+	// The installer/update section only applies to upstream's own install
+	// routes; SKC ships the skills, so it is dropped. The web-quality references
+	// carry Addy Osmani's MIT license, vendored beside the antislop one.
+	miqdadbadjuber: {
+		skillsDir: "skills",
+		license: "LICENSE",
+		invocation: [
+			"SKC loads this skill automatically for matching frontend UI/UX work.",
+			"Do not wait for a follow-up question. Apply the rules immediately",
+			"and keep going on the user's actual task.",
+			"",
+			"In SKC, `antislop.md` (the core) is the bundled `antislop` skill. The",
+			"design skills `antislop-ui`, `antislop-human`, `antislop-layoutmobile` and",
+			"`antislop-copywriting` are bundled too; load them with the `skill` tool",
+			"where a skill below says to read or load them. `antislop-code` is not",
+			"bundled. Paths like `skills/antislop-copywriting/SKILL.md` name those skills.",
+		],
+		transformEntry: (body, skillName) => {
+			if (skillName !== "antislop") return body;
+			return dropSection(dropSection(body, "## Already installed, and the user asks how to update"), "## Two Usage Modes")
+				.replace(/^> Before applying antislop, resolve its mode.*\n/m, "");
+		},
+		extraLicenses: { "skills/antislop-ui/LICENSE-web-quality-skills": "LICENSE.addyosmani" },
 	},
 };
 
@@ -202,14 +246,30 @@ function appendixAnchor(fileName: string): string {
 	return `#appendix-${fileName.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")}`;
 }
 
-/** Drop the upstream "wait for the user to ask" greeting; SKC auto-invokes. */
-function stripInitialResponse(body: string): string {
-	const heading = "## Initial Response";
+/** Remove one `##`/`#` section, up to the next heading of that level or higher. */
+function dropSection(body: string, heading: string): string {
 	const start = body.indexOf(heading);
-	if (start < 0) return body;
+	if (start < 0) throw new Error(`section to drop not found: ${heading}`);
 	const rest = body.slice(start + heading.length);
 	const nextHeading = rest.search(/\n##? /);
 	return nextHeading < 0 ? body.slice(0, start) : body.slice(0, start) + rest.slice(nextHeading + 1);
+}
+
+/** Drop the upstream "wait for the user to ask" greeting; SKC auto-invokes. */
+function stripInitialResponse(body: string): string {
+	return body.includes("## Initial Response") ? dropSection(body, "## Initial Response") : body;
+}
+
+/** Pinned unslop commit; the overlay fetches scripts from the same commit. */
+const UNSLOP_COMMIT = "620163eedb3529d9cd23a3994ed8d287d06f760d";
+const UNSLOP_RAW = `https://raw.githubusercontent.com/heydamir/unslop/${UNSLOP_COMMIT}/skills/unslop`;
+
+/** Point reference image links at the pinned commit; an embedded skill has no image files. */
+function pinUnslopImageLinks(text: string): string {
+	return text.replace(
+		/\]\((?:references\/)?(refs\/[\w.-]+\.webp)\)/g,
+		(_match, file: string) => `](${UNSLOP_RAW}/references/${file})`,
+	);
 }
 
 async function readOverlay(skillName: string): Promise<string> {
@@ -284,6 +344,7 @@ async function buildSkill(source: UpstreamSource, skillName: string): Promise<st
 	const companionDir = source.layout.companionDir ? path.join(source.dir, source.layout.companionDir) : skillDir;
 	const companions = await listCompanions(companionDir, source.layout.companion);
 	body = stripInitialResponse(body);
+	if (source.layout.transformEntry) body = source.layout.transformEntry(body, skillName);
 	body = rewriteCompanionLinks(body, companions);
 	body = insertAfterTitle(
 		body,
@@ -322,7 +383,7 @@ const check = argv.includes("--check");
 const sources = await readSources(argv);
 if (sources.length === 0) {
 	console.error(
-		"usage: bun scripts/build-ui-skill-bundle.ts --source emilkowalski=<dir> [--source appllama=<dir>] [--source benjitaylor=<dir>] [--source pbakaus=<dir>] [--source motionsites=<dir>] [--source usestrix=<dir>]",
+		"usage: bun scripts/build-ui-skill-bundle.ts --source emilkowalski=<dir> [--source appllama=<dir>] [--source benjitaylor=<dir>] [--source pbakaus=<dir>] [--source motionsites=<dir>] [--source usestrix=<dir>] [--source heydamir=<dir>] [--source miqdadbadjuber=<dir>]",
 	);
 	process.exit(2);
 }
@@ -344,16 +405,21 @@ for (const source of sources) {
 		await Bun.write(target, content);
 		console.log(`wrote ${path.relative(repoRoot, target)} (${content.split("\n").length} lines)`);
 	}
-	const license = path.join(source.dir, source.layout.license);
-	const licenseTarget = path.join(bundleRoot, `LICENSE.${source.id}`);
-	const licenseText = await Bun.file(license).text();
-	if (check) {
-		const existing = await Bun.file(licenseTarget)
-			.text()
-			.catch(() => null);
-		if (existing !== licenseText) drift.push(path.relative(repoRoot, licenseTarget));
-	} else {
-		await Bun.write(licenseTarget, licenseText);
+	const licenses: [string, string][] = [
+		[source.layout.license, `LICENSE.${source.id}`],
+		...Object.entries(source.layout.extraLicenses ?? {}),
+	];
+	for (const [license, targetName] of licenses) {
+		const licenseTarget = path.join(bundleRoot, targetName);
+		const licenseText = await Bun.file(path.join(source.dir, license)).text();
+		if (check) {
+			const existing = await Bun.file(licenseTarget)
+				.text()
+				.catch(() => null);
+			if (existing !== licenseText) drift.push(path.relative(repoRoot, licenseTarget));
+		} else {
+			await Bun.write(licenseTarget, licenseText);
+		}
 	}
 }
 

@@ -1342,13 +1342,16 @@ export class Markdown implements Component {
 		// is unit 0; each source data row is its own width-invariant unit below.
 		if (units) while (units.length < lines.length) units.push(0);
 
-		// Render rows with wrapping
+		// Render rows with wrapping. Rules between rows only earn their row when a cell
+		// wraps; single-line rows read cleanly from column alignment alone.
+		const bodyCellLines: string[][][] = token.rows.map(row =>
+			row.map((cell, i) =>
+				this.#wrapCellText(this.#renderInlineTokens(cell.tokens || [], styleContext), columnWidths[i]),
+			),
+		);
+		const anyRowWraps = bodyCellLines.some(cells => cells.some(cellLines => cellLines.length > 1));
 		for (let rowIndex = 0; rowIndex < token.rows.length; rowIndex++) {
-			const row = token.rows[rowIndex];
-			const rowCellLines: string[][] = row.map((cell, i) => {
-				const text = this.#renderInlineTokens(cell.tokens || [], styleContext);
-				return this.#wrapCellText(text, columnWidths[i]);
-			});
+			const rowCellLines = bodyCellLines[rowIndex];
 			const rowLineCount = Math.max(...rowCellLines.map(c => c.length));
 
 			for (let lineIdx = 0; lineIdx < rowLineCount; lineIdx++) {
@@ -1359,7 +1362,7 @@ export class Markdown implements Component {
 				lines.push(`${v} ${rowParts.join(` ${v} `)} ${v}`);
 			}
 
-			if (rowIndex < token.rows.length - 1) {
+			if (anyRowWraps && rowIndex < token.rows.length - 1) {
 				lines.push(separatorLine);
 			}
 			if (units) while (units.length < lines.length) units.push(rowIndex + 1);

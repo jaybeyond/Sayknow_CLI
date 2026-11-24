@@ -399,4 +399,19 @@ describe("task renderer: nested live rendering", () => {
 			Date.now = originalNow;
 		}
 	});
+
+	it("renders the error text for failed executions whose details carry no results", async () => {
+		// agent-loop reports a thrown/aborted tool execution as `details: {}`.
+		const theme = (await getThemeByName("red-octopus"))!;
+		const component = taskToolRenderer.renderResult(
+			{
+				content: [{ type: "text", text: "Tool execution failed due to an error: The operation timed out." }],
+				details: {} as TaskToolDetails,
+			},
+			{ expanded: false, isPartial: false, spinnerFrame: 0 },
+			theme,
+		);
+		const text = Bun.stripANSI(component.render(160).join("\n"));
+		expect(text).toContain("Tool execution failed due to an error: The operation timed out.");
+	});
 });

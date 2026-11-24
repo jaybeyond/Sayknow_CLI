@@ -337,7 +337,7 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 				const descScore = fuzzyMatch(lowerPrefix, lowerDesc) ? fuzzyScore(lowerPrefix, lowerDesc) * 0.5 : 0;
 				const hint = "argumentHint" in cmd && cmd.argumentHint ? cmd.argumentHint : undefined;
 				const desc = cmd.description ?? "";
-				const fullDesc = hint ? (desc ? `${hint} — ${desc}` : hint) : desc;
+				const fullDesc = hint ? (desc ? `${hint} · ${desc}` : hint) : desc;
 				const priority = "priority" in cmd && typeof cmd.priority === "number" ? cmd.priority : 0;
 				return {
 					value: name,

@@ -3,7 +3,7 @@ import * as path from "node:path";
 import { type Agent, type AgentMessage, ThinkingLevel } from "@sayknow-cli/agent-core";
 import type { CompactionOutcome } from "@sayknow-cli/agent-core/compaction";
 import type { AssistantMessage, ImageContent, Message, UsageReport } from "@sayknow-cli/ai";
-import type { Component, EditorTheme, SlashCommand } from "@sayknow-cli/tui";
+import type { Component, EditorAction, EditorTheme, SlashCommand } from "@sayknow-cli/tui";
 import {
 	Container,
 	clearRenderCache,
@@ -23,7 +23,6 @@ import { AsyncJobManager } from "../async";
 import {
 	type AppKeybinding,
 	defaultMessageQueueKeysForPlatform,
-	formatKeyHint,
 	formatKeyHints,
 	KeybindingsManager,
 	type KeyDisplayContext,
@@ -39,6 +38,7 @@ import type {
 import type { CompactOptions } from "../extensibility/extensions/types";
 import { resolveSkillSlashCommands, type Skill } from "../extensibility/skills";
 import { BUILTIN_SLASH_COMMANDS, loadSlashCommands } from "../extensibility/slash-commands";
+import { t } from "../i18n";
 import { getLspStartupWarningMessage, LSP_STARTUP_EVENT_CHANNEL, type LspStartupEvent } from "../lsp/startup-events";
 import {
 	createStarReminderBeforeAgentStartContributor,
@@ -51,17 +51,15 @@ import { HistoryStorage } from "../session/history-storage";
 import type { SessionContext, SessionManager } from "../session/session-manager";
 import { getRecentSessions, getSessionMessageEntryId } from "../session/session-manager";
 import type { LspStartupServerInfo } from "../tools";
-import { shortenPath } from "../tools/render-utils";
 import { formatPhaseDisplayName } from "../tools/todo-write";
 import { copyToClipboard } from "../utils/clipboard";
 import type { EventBus } from "../utils/event-bus";
-import * as gitUtils from "../utils/git";
 import { getSessionAccentAnsi, getSessionAccentHex } from "../utils/session-color";
 import { popTerminalTitle, pushTerminalTitle, setSessionTerminalTitle } from "../utils/title-generator";
 import type { AssistantMessageComponent } from "./components/assistant-message";
 import type { BashExecutionComponent } from "./components/bash-execution";
 import type { CommandPaletteAction } from "./components/command-palette";
-import { CustomEditor } from "./components/custom-editor";
+import { COMPOSER_ACTION, CustomEditor } from "./components/custom-editor";
 import type { EvalExecutionComponent } from "./components/eval-execution";
 import type { HookEditorComponent } from "./components/hook-editor";
 import type { HookInputComponent } from "./components/hook-input";
@@ -74,11 +72,10 @@ import {
 	warnWhenPetCapabilitySettled,
 } from "./components/pet-capability";
 import { type PetMode, SayknowPetWidget } from "./components/sayknow-pet-widget";
-import { resolveCurrentBranch } from "./components/status-line/git-utils";
 import type { ToolExecutionHandle } from "./components/tool-execution";
 import { StatusLineComponent } from "./components/tool-status-header";
 import { composeToolText } from "./components/tool-transcript-format";
-import { type RecentSession, WelcomeComponent, type WelcomeLogoMode, type WelcomeSnapshot } from "./components/welcome";
+import { type RecentSession, WelcomeComponent, type WelcomeLogoMode } from "./components/welcome";
 import { BtwController } from "./controllers/btw-controller";
 import { CommandController } from "./controllers/command-controller";
 import { EventController } from "./controllers/event-controller";
@@ -117,35 +114,28 @@ import {
 import type { ParsedIrcMessage } from "./utils/irc-message";
 import { addChatChild, prepareTranscriptRebuild, UiHelpers } from "./utils/ui-helpers";
 
+/**
+ * The empty composer names only what the keys do right now: what Enter does while a
+ * turn runs, the queue key, and how to break a line. Model, thinking and history keys
+ * live on the welcome key row and the `?` keymap, so they are not repeated here.
+ */
 function buildComposerPlaceholder(
 	keybindings: Pick<KeybindingsManager, "getDisplayString">,
 	context: KeyDisplayContext,
 	options: { readonly busy: boolean; readonly busyPromptMode: "steer" | "queue" },
 ): string {
-	const parts: string[] = [];
+	const parts = [t("composer.placeholder")];
 	const submitKey = options.busy ? keybindings.getDisplayString("tui.input.submit", context) : "";
 	if (submitKey) {
-		const submitAction = options.busyPromptMode === "steer" ? "Steer" : "Queue";
-		parts.push(`${submitKey}: ${submitAction}`);
+		parts.push(`${submitKey} ${t(options.busyPromptMode === "steer" ? "composer.steer" : "composer.queue")}`);
 	}
 
-	const queueKey = keybindings.getDisplayString("app.message.queue", context);
-	const submitQueues = options.busy && options.busyPromptMode === "queue" && submitKey;
-	if (queueKey && !submitQueues) parts.push(`${queueKey}: ${options.busy ? "Queue" : "Queue (busy)"}`);
-
-	const actionHints = [
-		["app.thinking.cycle", "Thinking"],
-		["app.model.select", "Model"],
-		["app.history.search", "History"],
-	] as const;
-	for (const [id, label] of actionHints) {
-		const key = keybindings.getDisplayString(id, context);
-		if (key) parts.push(`${key}: ${label}`);
-	}
+	const queueKey = options.busy ? keybindings.getDisplayString("app.message.queue", context) : "";
+	if (queueKey && !(options.busyPromptMode === "queue" && submitKey)) parts.push(`${queueKey} ${t("composer.queue")}`);
 
 	const newlineKeys = context.platform === "win32" ? ["alt+enter", "ctrl+j"] : ["shift+enter", "ctrl+j"];
-	parts.push(`${formatKeyHints(newlineKeys, context)}: New line`, `${formatKeyHint("ctrl+c", context)}: Clear`);
-	return `Type your message... ${parts.join(" · ")}`;
+	parts.push(`${formatKeyHints(newlineKeys, context)} ${t("composer.newLine")}`);
+	return parts.join(" · ");
 }
 
 export function getDefaultComposerPlaceholder(
@@ -168,6 +158,26 @@ export function getComposerPlaceholder(
 	options: { readonly busy: boolean; readonly busyPromptMode: "steer" | "queue" },
 ): string {
 	return buildComposerPlaceholder(keybindings, context, options);
+}
+
+/**
+ * The composer's clickable rail: Attach starts an `@` file reference (the same
+ * mention that attaches files and images), and the primary action names what the
+ * submit key does right now, with that key.
+ */
+export function getComposerActions(
+	keybindings: Pick<KeybindingsManager, "getDisplayString">,
+	context: KeyDisplayContext,
+	options: { readonly busy: boolean; readonly busyPromptMode: "steer" | "queue" },
+): EditorAction[] {
+	const submitKey = keybindings.getDisplayString("tui.input.submit", context);
+	const verb = t(
+		options.busy ? (options.busyPromptMode === "steer" ? "composer.steer" : "composer.queue") : "composer.send",
+	);
+	return [
+		{ id: COMPOSER_ACTION.attach, label: `@ ${t("composer.attach")}` },
+		{ id: COMPOSER_ACTION.send, label: submitKey ? `${submitKey} ${verb}` : verb, primary: true },
+	];
 }
 const WELCOME_RESERVED_CONTAINER_CHILD_LIMIT = 8;
 const COMPOSER_RIGHT_GUTTER_WIDTH = 1;
@@ -624,7 +634,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.btwContainer = new Container();
 		this.editor = new CustomEditor(getEditorTheme());
 		configureDefaultComposerChrome(this.editor);
-		this.editor.setPlaceholder(this.#getComposerPlaceholder());
+		this.#applyComposerHints(this.editor);
 		this.editor.setUseTerminalCursor(this.ui.getShowHardwareCursor());
 		this.editor.setAutocompleteMaxVisible(settings.get("autocompleteMaxVisible"));
 		this.editor.onAutocompleteCancel = () => {
@@ -768,7 +778,6 @@ export class InteractiveMode implements InteractiveModeContext {
 					collapseChangelog: settings.get("collapseChangelog"),
 					keyDisplayContext: this.#keyDisplayContext,
 					skipLogoAnimation,
-					snapshot: this.#buildWelcomeSnapshot(),
 					resumeKey: this.keybindings.getKeys("app.session.resume")[0],
 					continueKey: this.keybindings.getKeys("app.session.continue")[0],
 					onOpenSession: session => void this.#openWelcomeSession(session),
@@ -907,7 +916,6 @@ export class InteractiveMode implements InteractiveModeContext {
 							error: error instanceof Error ? error.message : String(error),
 						});
 					});
-				this.#probeWelcomeWorkspace(welcomeComponent);
 			}, 0);
 			recentSessionsTimer.unref?.();
 		}
@@ -966,7 +974,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			clearRenderCache();
 			this.#ircSplitView.invalidateTheme();
 			configureDefaultComposerChrome(this.editor);
-			this.editor.setPlaceholder(this.#getComposerPlaceholder());
+			this.#applyComposerHints(this.editor);
 			this.ui.invalidate();
 			this.updateEditorChrome();
 			this.ui.requestRender();
@@ -1185,11 +1193,14 @@ export class InteractiveMode implements InteractiveModeContext {
 		return this.session.isStreaming || this.session.isCompacting;
 	}
 
-	#getComposerPlaceholder(): string {
-		return getComposerPlaceholder(this.keybindings, this.#keyDisplayContext, {
+	/** Placeholder and action rail both describe what the submit key does now; refresh them together. */
+	#applyComposerHints(editor: CustomEditor): void {
+		const options = {
 			busy: this.#isPromptDeliveryBusy(),
 			busyPromptMode: this.settings.get("busyPromptMode"),
-		});
+		} as const;
+		editor.setPlaceholder(getComposerPlaceholder(this.keybindings, this.#keyDisplayContext, options));
+		editor.setActions(getComposerActions(this.keybindings, this.#keyDisplayContext, options));
 	}
 
 	#getWelcomeReservedRows(width: number): number {
@@ -1246,10 +1257,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		// Re-read the glyph so a symbol-preset switch (unicode/nerd/ascii) reaches the rail.
 		this.editor.setRailGutter(theme.rail.user);
 		this.editor.setInputBackground(composerInputBackground());
-		this.editor.setPlaceholder(this.#getComposerPlaceholder());
+		this.#applyComposerHints(this.editor);
 		this.#setComposerTopBorder();
 		// Every live model switch (/model, profiles, cycling, fallback) refreshes the
-		// editor chrome; keep the welcome model/provider pills on the same signal.
+		// editor chrome; the welcome card's choose-model prompt follows the same signal.
 		this.#welcomeComponent?.setModel(
 			this.session.model?.name ?? "Unknown",
 			this.session.model?.provider ?? "Unknown",
@@ -1569,7 +1580,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			: new CustomEditor(getEditorTheme());
 
 		configureDefaultComposerChrome(nextEditor);
-		nextEditor.setPlaceholder(this.#getComposerPlaceholder());
+		this.#applyComposerHints(nextEditor);
 		nextEditor.setUseTerminalCursor(this.ui.getShowHardwareCursor());
 		nextEditor.setAutocompleteMaxVisible(this.settings.get("autocompleteMaxVisible"));
 		nextEditor.onAutocompleteCancel = () => {
@@ -1646,30 +1657,6 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (warningMessage) {
 			this.showWarning(warningMessage);
 		}
-	}
-
-	/** Facts the launch card can show synchronously, before the git probe runs. */
-	#buildWelcomeSnapshot(): WelcomeSnapshot {
-		const projectDir = getProjectDir();
-		let branch: string | null = null;
-		try {
-			branch = resolveCurrentBranch(projectDir).branch;
-		} catch {
-			branch = null;
-		}
-		return { cwd: shortenPath(projectDir), branch, thinkingLevel: this.session.thinkingLevel };
-	}
-
-	/** Fill in the git change counts, which need I/O. */
-	#probeWelcomeWorkspace(welcomeComponent: WelcomeComponent): void {
-		void gitUtils.status
-			.summary(getProjectDir())
-			.then(gitChanges => {
-				if (this.#welcomeComponent !== welcomeComponent) return;
-				welcomeComponent.setSnapshot({ gitChanges });
-				this.ui.requestRender();
-			})
-			.catch(() => {});
 	}
 
 	#getWorkingMessageAccent(): WorkingMessageAccent | undefined {

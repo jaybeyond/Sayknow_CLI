@@ -1,29 +1,14 @@
-import type { ThinkingLevel } from "@sayknow-cli/agent-core";
 import { type Component, padding, truncateToWidth, visibleWidth } from "@sayknow-cli/tui";
 import { formatBuildLabel } from "../../build-metadata";
 import { formatKeyHint, type KeyDisplayContext } from "../../config/keybindings";
 import { type MsgKey, t } from "../../i18n";
 import { theme } from "../../modes/theme/theme";
-import { sanitizeStatusText } from "../shared";
 
 export interface RecentSession {
 	name: string;
 	timeAgo: string;
 	/** Session file; present when the row can be opened from the card. */
 	path?: string;
-}
-
-/**
- * Workspace facts on the launch card. Every field is optional: the card renders
- * what is known and fills in git state once the asynchronous probe settles.
- */
-export interface WelcomeSnapshot {
-	/** Display path of the project directory (already home-shortened). */
-	cwd?: string;
-	/** Current branch, `"detached"`, or `null` outside a git repository. */
-	branch?: string | null;
-	gitChanges?: { staged: number; unstaged: number; untracked: number } | null;
-	thinkingLevel?: ThinkingLevel | string;
 }
 
 export type WelcomeLogoMode = "unicode" | "square" | "ascii";
@@ -37,7 +22,6 @@ export interface WelcomeComponentOptions {
 	buildLabel?: string;
 	keyDisplayContext?: KeyDisplayContext;
 	skipLogoAnimation?: boolean;
-	snapshot?: WelcomeSnapshot;
 	/** Key bound to the resume picker (`app.session.resume`); the card names it. */
 	resumeKey?: string;
 	/** Key bound to `app.session.continue`, which resumes the first session on the card. */
@@ -58,19 +42,6 @@ const MAX_CARD_WIDTH = 76;
 /** Recent sessions on the card; the resume picker has the rest. */
 const SESSION_ROWS = 3;
 
-/**
- * The wordmark: SAYKNOW in the brand's box-drawing letters, then CLI. Each row is the
- * SAYKNOW part and the CLI part, drawn in different colors.
- */
-// biome-ignore format: preserve letter layout
-const WORDMARK: ReadonlyArray<readonly [string, string]> = [
-	["╔═╗╔═╗╦ ╦╦╔═╔╗╔╔═╗╦ ╦", "╔═╗╦  ╦"],
-	["╚═╗╠═╣╚╦╝╠╩╗║║║║ ║║║║", "║  ║  ║"],
-	["╚═╝╩ ╩ ╩ ╩ ╩╝╚╝╚═╝╚╩╝", "╚═╝╩═╝╩"],
-];
-const WORDMARK_GAP = 2;
-const WORDMARK_WIDTH = 21 + WORDMARK_GAP + 7;
-
 const SECTION_STAGGER_MS = 55;
 const SECTION_SETTLE_MS = 90;
 const INTRO_MS = SECTION_SETTLE_MS + 4 * SECTION_STAGGER_MS;
@@ -85,13 +56,12 @@ interface Section {
 }
 
 /**
- * Sayknow-CLI launch card: the wordmark, model and workspace, release note,
- * recent sessions and shortcuts. The composer pet does not appear on this card.
+ * Sayknow-CLI launch card: the wordmark, build, release note, recent sessions and
+ * shortcuts. Model, place and version belong to the status line. The composer pet does not appear on this card.
  */
 export class WelcomeComponent implements Component {
 	#animStart: number | null = null;
 	#animTimer: NodeJS.Timeout | null = null;
-	#snapshot: WelcomeSnapshot;
 	/** Highlighted session row while picking with the keyboard; undefined when not picking. */
 	#selected: number | undefined;
 	/** Session index per rendered line, from the last frame. */
@@ -101,13 +71,11 @@ export class WelcomeComponent implements Component {
 	constructor(
 		private readonly version: string,
 		private modelName: string,
-		private providerName: string,
+		_providerName: string,
 		private recentSessions: RecentSession[] = [],
 		private readonly logoMode: WelcomeLogoMode = "unicode",
 		private readonly options: WelcomeComponentOptions = {},
-	) {
-		this.#snapshot = { ...options.snapshot };
-	}
+	) {}
 
 	invalidate(): void {}
 
@@ -140,19 +108,14 @@ export class WelcomeComponent implements Component {
 		this.#animStart = null;
 	}
 
-	setModel(modelName: string, providerName: string): void {
+	/** The provider is shown on the status line; the card only needs to know a model is set. */
+	setModel(modelName: string, _providerName: string): void {
 		this.modelName = modelName;
-		this.providerName = providerName;
 	}
 
 	setRecentSessions(sessions: RecentSession[]): void {
 		this.recentSessions = sessions;
 		if (this.#selected !== undefined && this.#selected >= this.#openable().length) this.#selected = undefined;
-	}
-
-	/** Merge newly probed workspace facts into the card. */
-	setSnapshot(patch: WelcomeSnapshot): void {
-		this.#snapshot = { ...this.#snapshot, ...patch };
 	}
 
 	// ── Picking a session ───────────────────────────────────────────────────
@@ -254,7 +217,7 @@ export class WelcomeComponent implements Component {
 
 		const targetRows = this.#targetRows(termWidth);
 		if (targetRows !== undefined && targetRows <= 0) return [];
-		if (targetRows === 1) return this.#withRightGutter([this.#fit(this.#titleLine(), width)], gutterWidth);
+		if (targetRows === 1) return this.#withRightGutter([this.#fit(this.#titleLine(width), width)], gutterWidth);
 
 		const cardWidth = Math.max(1, Math.min(MAX_CARD_WIDTH, width - MARGIN));
 		const sections = this.#sections(cardWidth);
@@ -313,109 +276,55 @@ export class WelcomeComponent implements Component {
 
 	#sections(cardWidth: number): { identity: string[]; others: Section[] } {
 		const others: Section[] = [];
-		const note = this.#releaseNoteLine(cardWidth);
-		if (note) others.push({ lines: [note], dropRank: 2 });
 		const sessions = this.#sessionSection(cardWidth);
 		others.push({ ...sessions, dropRank: 1 });
+		const note = this.#releaseNoteLine(cardWidth);
+		if (note) others.push({ lines: [note], dropRank: 2 });
 		others.push({ lines: [this.#keysLine(cardWidth)], dropRank: 3 });
 		return { identity: this.#identityLines(cardWidth), others };
 	}
 
-	// ── Identity: wordmark, model and workspace ───────────────────────────────
+	// ── Identity ────────────────────────────────────────────────────────────
 
 	#identityLines(cardWidth: number): string[] {
-		const withWordmark = this.logoMode !== "ascii" && cardWidth >= WORDMARK_WIDTH;
-		const head = withWordmark
-			? WORDMARK.map(
-					([word, suffix]) =>
-						`${theme.bold(theme.fg("accent", word))}${padding(WORDMARK_GAP)}${theme.fg("text", suffix)}`,
-				)
-			: [this.#truncate(this.#titleLine(), cardWidth)];
-		const versionLine = this.#spread(
-			theme.fg("muted", t("welcome.tagline")),
-			theme.fg("dim", this.#versionLabel()),
-			cardWidth,
-		);
-		const info = [...head, withWordmark ? versionLine : theme.fg("muted", t("welcome.tagline"))];
-		return [...info, ...this.#statusLines(cardWidth)];
+		const title = this.#titleLine(cardWidth);
+		return this.#hasModel() ? [title] : [title, this.#chooseModelPart(cardWidth)];
 	}
 
-	#versionLabel(): string {
-		const buildLabel = this.options.buildLabel ?? formatBuildLabel();
-		return `v${this.version} · ${buildLabel}`;
+	/** Release or source build: the one launch fact the status line does not carry. */
+	#buildLabel(): string {
+		return this.options.buildLabel ?? formatBuildLabel();
 	}
 
-	/** One-line title for layouts without room for the wordmark. */
-	#titleLine(): string {
-		return `${theme.bold(theme.fg("accent", "Sayknow-CLI"))}${theme.fg("dim", ` ${this.#versionLabel()}`)}`;
+	/** A single wordmark in every preset; omit the metadata before clipping the name. */
+	#titleLine(width: number): string {
+		const name = theme.bold(theme.fg("accent", "Sayknow-CLI"));
+		const build = `${name}${theme.fg("dim", ` · ${this.#buildLabel()}`)}`;
+		return visibleWidth(build) <= width ? build : this.#truncate(name, width);
 	}
 
-	/**
-	 * Model and reasoning, then project path and branch: on one row when both fit whole,
-	 * otherwise the place gets its own row rather than being cut to nothing.
-	 */
-	#statusLines(width: number): string[] {
-		const model = this.#truncate(this.#modelPart(), width);
-		const sep = theme.fg("dim", "  ·  ");
-		const fullWhere = this.#wherePart(Number.POSITIVE_INFINITY);
-		if (!fullWhere) return [model];
-		if (visibleWidth(model) + visibleWidth(sep) + visibleWidth(fullWhere) <= width)
-			return [`${model}${sep}${fullWhere}`];
-		return [model, this.#wherePart(width)];
+	#hasModel(): boolean {
+		return this.modelName !== "Unknown" && this.modelName.length > 0;
 	}
 
-	#modelPart(): string {
-		const sep = theme.fg("dim", " · ");
-		if (this.modelName === "Unknown" || this.modelName.length === 0) {
-			return `${theme.fg("accent", t("welcome.chooseModel"))}${sep}${theme.fg("dim", t("welcome.modelHint"))}`;
-		}
-		const parts = [theme.bold(theme.fg("statusLineModel", sanitizeStatusText(this.modelName)))];
-		const level = this.#snapshot.thinkingLevel;
-		if (level) parts.push(theme.getThinkingBorderColor(String(level) as ThinkingLevel)(String(level)));
-		else if (this.providerName) parts.push(theme.fg("muted", sanitizeStatusText(this.providerName)));
-		return parts.join(sep);
-	}
-
-	#wherePart(width: number): string {
-		const { cwd, branch } = this.#snapshot;
-		const sep = theme.fg("dim", " · ");
-		const branchPart =
-			typeof branch === "string"
-				? `${theme.fg(this.#isDirty() ? "statusLineGitDirty" : "statusLineGitClean", branch)}${this.#changeSummary()}`
-				: "";
-		if (!cwd) return branchPart;
-		const pathBudget = Math.max(8, width - (branchPart ? visibleWidth(branchPart) + 3 : 0));
-		const path = theme.fg("statusLinePath", this.#shortenFromLeft(cwd, pathBudget));
-		return branchPart ? `${path}${sep}${branchPart}` : path;
-	}
-
-	#isDirty(): boolean {
-		const changes = this.#snapshot.gitChanges;
-		return !!changes && changes.staged + changes.unstaged + changes.untracked > 0;
-	}
-
-	#changeSummary(): string {
-		const changes = this.#snapshot.gitChanges;
-		if (!changes || !this.#isDirty()) return "";
-		const parts: string[] = [];
-		if (changes.staged > 0) parts.push(theme.fg("statusLineStaged", `+${changes.staged}`));
-		if (changes.unstaged > 0) parts.push(theme.fg("statusLineDirty", `~${changes.unstaged}`));
-		if (changes.untracked > 0) parts.push(theme.fg("statusLineUntracked", `?${changes.untracked}`));
-		return ` ${parts.join(" ")}`;
+	#chooseModelPart(width: number): string {
+		const label = theme.fg("accent", t("welcome.chooseModel"));
+		const context = this.options.keyDisplayContext ?? { platform: process.platform };
+		const hint = `${label}${theme.fg("dim", ` · ${formatKeyHint("ctrl+l", context)}`)}`;
+		return visibleWidth(hint) <= width ? hint : this.#truncate(label, width);
 	}
 
 	// ── Release note, sessions, keys ────────────────────────────────────────
 
-	/**
-	 * A section header that is also the divider: the label, a hairline rule filling the
-	 * row, and hints at the right end.
-	 */
-	#ruleHeader(label: string, hint: string, width: number): string {
+	/** Primary section divider. Drop complete hints as space gets tighter. */
+	#sessionHeading(label: string, hints: string[], width: number): string {
 		const left = `${label} `;
-		const right = hint ? ` ${hint}` : "";
+		while (hints.length > 0 && visibleWidth(`${left}    ${hints.join(" · ")}`) > width) hints.pop();
+		const right = hints.length ? ` ${theme.fg("dim", hints.join(" · "))}` : "";
 		const fill = width - visibleWidth(left) - visibleWidth(right);
-		if (fill < 3) return this.#truncate(`${label}${right}`, width);
-		return `${left}${theme.fg("borderMuted", "─".repeat(fill))}${right}`;
+		if (fill < 3) return this.#truncate(label, width);
+		const rule = this.logoMode === "ascii" ? "-" : "─";
+		return `${left}${theme.fg("borderMuted", rule.repeat(fill))}${right}`;
 	}
 
 	/** One line, only after an update: the new version and its first note, pointing at /changelog. */
@@ -423,18 +332,20 @@ export class WelcomeComponent implements Component {
 		const changelog = this.options.changelogMarkdown?.trim();
 		if (!changelog) return undefined;
 		const version = this.#latestChangelogVersion(changelog);
-		const lead = theme.bold(theme.fg("accent", `v${version}`));
+		const lead = theme.fg("muted", `v${version}`);
 		const pointer = theme.fg("dim", "/changelog");
+		const gap = theme.fg("dim", " · ");
 		const first = this.options.collapseChangelog ? undefined : this.#changelogItems(changelog)[0];
-		const room = width - visibleWidth(lead) - visibleWidth(pointer) - 8;
-		const label = first && room >= 12 ? `${lead} ${theme.fg("muted", this.#truncate(first, room))}` : lead;
-		return this.#ruleHeader(label, pointer, width);
+		const room = width - visibleWidth(`${lead}${gap}${gap}${pointer}`);
+		const suffix = `${gap}${pointer}`;
+		if (first && room >= 12) return `${lead}${gap}${theme.fg("dim", truncateAtWord(first, room))}${suffix}`;
+		return visibleWidth(`${lead}${suffix}`) <= width ? `${lead}${suffix}` : this.#truncate(lead, width);
 	}
 
 	#sessionSection(width: number): Pick<Section, "lines" | "sessionRows"> {
 		const heading = theme.bold(theme.fg("accent", t("welcome.sessionTrail")));
 		if (this.recentSessions.length === 0) {
-			return { lines: [this.#ruleHeader(heading, "", width), `  ${theme.fg("dim", t("welcome.noSessions"))}`] };
+			return { lines: [this.#sessionHeading(heading, [], width), `  ${theme.fg("dim", t("welcome.noSessions"))}`] };
 		}
 		const context = this.options.keyDisplayContext ?? { platform: process.platform };
 		const picking = this.#selected !== undefined;
@@ -447,7 +358,7 @@ export class WelcomeComponent implements Component {
 						: []),
 					t("welcome.allSessions", { key: this.#resumeKey() }),
 				];
-		const lines = [this.#ruleHeader(heading, theme.fg("dim", hints.join(" · ")), width)];
+		const lines = [this.#sessionHeading(heading, hints, width)];
 		const sessionRows: Array<number | undefined> = [undefined];
 		const openable = this.#openable();
 		this.recentSessions.slice(0, SESSION_ROWS).forEach((session, index) => {
@@ -455,13 +366,17 @@ export class WelcomeComponent implements Component {
 			const selected = picking && openIndex === this.#selected;
 			// Idle: the first row is the one the continue key resumes. Picking: the highlighted row.
 			const marked = picking ? selected : index === 0 && !!this.options.continueKey;
-			const lead = marked ? theme.fg("accent", "› ") : "  ";
+			const lead = marked ? theme.fg("accent", `${theme.nav.cursor} `) : "  ";
 			const time = theme.fg("dim", session.timeAgo);
 			const nameWidth = Math.max(1, width - visibleWidth(lead) - visibleWidth(time) - 2);
 			const tone = selected ? "text" : picking ? "muted" : index === 0 ? "text" : "muted";
 			const name = this.#truncate(session.name, nameWidth);
 			lines.push(
-				this.#spread(`${lead}${selected ? theme.bold(theme.fg(tone, name)) : theme.fg(tone, name)}`, time, width),
+				this.#spread(
+					`${lead}${selected || (!picking && index === 0) ? theme.bold(theme.fg(tone, name)) : theme.fg(tone, name)}`,
+					time,
+					width,
+				),
 			);
 			sessionRows.push(openIndex >= 0 ? openIndex : undefined);
 		});
@@ -471,7 +386,7 @@ export class WelcomeComponent implements Component {
 			const label = t("welcome.allSessionsRow");
 			lines.push(
 				selected
-					? `${theme.fg("accent", "› ")}${theme.bold(theme.fg("text", label))}`
+					? `${theme.fg("accent", `${theme.nav.cursor} `)}${theme.bold(theme.fg("text", label))}`
 					: `  ${theme.fg("dim", label)}`,
 			);
 			sessionRows.push(allIndex);
@@ -483,14 +398,13 @@ export class WelcomeComponent implements Component {
 		const context = this.options.keyDisplayContext ?? { platform: process.platform };
 		const items: ReadonlyArray<{ key: string; label: MsgKey }> = [
 			{ key: "/", label: "welcome.commands" },
-			{ key: this.#resumeKey(), label: "welcome.sessions" },
 			{ key: formatKeyHint("ctrl+l", context), label: "welcome.model" },
 			{ key: "?", label: "welcome.keymap" },
 		];
-		const text = items
-			.map(item => `${theme.fg("accent", item.key)} ${theme.fg("dim", t(item.label))}`)
-			.join(theme.fg("borderMuted", "  ·  "));
-		return this.#truncate(text, width);
+		const labels = items.map(item => `${theme.fg("accent", item.key)} ${theme.fg("dim", t(item.label))}`);
+		const separator = theme.fg("borderMuted", "  ·  ");
+		while (labels.length > 0 && visibleWidth(labels.join(separator)) > width) labels.pop();
+		return labels.join(separator);
 	}
 
 	/**
@@ -559,15 +473,6 @@ export class WelcomeComponent implements Component {
 		return visibleWidth(text) > width ? truncateToWidth(text, width) : text;
 	}
 
-	/** Keep the tail of a long path — the project directory is the part that identifies it. */
-	#shortenFromLeft(value: string, width: number): string {
-		if (visibleWidth(value) <= width) return value;
-		if (width <= 1) return "…";
-		let tail = value;
-		while (tail.length > 0 && visibleWidth(tail) > width - 1) tail = tail.slice(1);
-		return `…${tail}`;
-	}
-
 	/** Fit a string to exactly `width` columns (native ANSI/wide-glyph aware). */
 	#fit(str: string, width: number): string {
 		const visLen = visibleWidth(str);
@@ -605,3 +510,19 @@ export function resolveWelcomeIntroTickMs(
 
 /** Render at 30fps directly, but cap native Windows multiplexers at 10fps to avoid ConPTY output backpressure. */
 const INTRO_TICK_MS = resolveWelcomeIntroTickMs();
+
+/** Cut prose at the last whole word that fits, so a note never ends mid-word. */
+export function truncateAtWord(text: string, width: number): string {
+	if (visibleWidth(text) <= width) return text;
+	const cut = truncateToWidth(text, width);
+	const body = cut.endsWith("…") ? cut.slice(0, -1) : cut;
+	// The cut landed after a whole word (next is a space or punctuation): keep it, minus
+	// trailing punctuation so the ellipsis does not read as `world.…`.
+	if (text.startsWith(body) && /^[^\p{L}\p{N}]/u.test(text.slice(body.length))) {
+		const whole = body.replace(/[\s,.;:!?]+$/, "");
+		if (whole.length > 0) return `${whole}…`;
+	}
+	const boundary = body.search(/\s+\S*$/);
+	if (boundary <= 0) return cut;
+	return `${body.slice(0, boundary).replace(/[\s,.;:!?]+$/, "")}…`;
+}

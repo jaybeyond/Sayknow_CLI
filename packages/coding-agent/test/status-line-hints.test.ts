@@ -1,8 +1,9 @@
-import { beforeAll, describe, expect, it } from "bun:test";
+import { afterEach, beforeAll, describe, expect, it } from "bun:test";
 import { visibleWidth } from "@sayknow-cli/tui";
 import { formatKeyHints, KEYBINDINGS, KeybindingsManager } from "../src/config/keybindings";
 import { resetSettingsForTest, Settings } from "../src/config/settings";
 import { SETTINGS_SCHEMA } from "../src/config/settings-schema";
+import { setLanguage } from "../src/i18n";
 import { ActionRegistry } from "../src/modes/action-registry";
 import { getAvailableActionHints, StatusLineComponent } from "../src/modes/components/tool-status-header";
 import { initTheme } from "../src/modes/theme/theme";
@@ -10,7 +11,13 @@ import { initTheme } from "../src/modes/theme/theme";
 beforeAll(async () => {
 	resetSettingsForTest();
 	await Settings.init({ inMemory: true });
+	// Hint titles are asserted in English; settings init may apply the host locale.
+	setLanguage("en");
 	await initTheme();
+});
+
+afterEach(() => {
+	setLanguage("en");
 });
 
 function createSession() {
@@ -145,6 +152,14 @@ describe("status line action hints", () => {
 			getAvailableActionHints(registry, () => keybindings, firstHintWidth - 1, "composer", { platform: "darwin" }),
 		).toEqual([]);
 	});
+	it("translates hint titles for the active language and keeps the key display", () => {
+		const registry = new ActionRegistry<void>({ context: undefined, showError: () => {} });
+		registerAction(registry, "app.commandPalette.open", () => true);
+		const keybindings = KeybindingsManager.inMemory({ "app.commandPalette.open": "super+alt+p" });
+		setLanguage("ko");
+		const [hint] = getAvailableActionHints(registry, () => keybindings, 120, "composer", { platform: "darwin" });
+		expect(Bun.stripANSI(hint?.content ?? "")).toBe("⌥⌘P 명령 팔레트 열기");
+	});
 	it("keeps persistent placeholder actions out of status while allowing an actionable queue hint", () => {
 		const registry = new ActionRegistry<void>({ context: undefined, showError: () => {} });
 		registerAction(registry, "app.message.queue", () => true);
@@ -229,5 +244,29 @@ describe("status line action hints", () => {
 		expect(narrow).toContain("no-model");
 		expect(narrow).not.toContain("Toggle plan mode");
 		expect(visibleWidth(narrow)).toBeLessThanOrEqual(30);
+	});
+
+	it("drops contextual hints before the version when the right side overflows", () => {
+		const registry = new ActionRegistry<void>({ context: undefined, showError: () => {} });
+		registerAction(registry, "app.commandPalette.open", () => true);
+		const component = new StatusLineComponent(createSession(), {
+			actionRegistry: registry,
+			getKeybindings: () => KeybindingsManager.inMemory({ "app.commandPalette.open": "super+alt+p" }),
+			focusDomain: "composer",
+			version: "9.9.9",
+		});
+		component.updateSettings({
+			preset: "custom",
+			leftSegments: [],
+			rightSegments: ["model"],
+			separator: "pipe",
+			showSkillHud: false,
+		});
+		const wide = Bun.stripANSI(component.render(120).join("\n"));
+		expect(wide).toContain("v9.9.9");
+		expect(wide).toContain("Open command palette");
+		const narrow = Bun.stripANSI(component.render(30).join("\n"));
+		expect(narrow).toContain("v9.9.9");
+		expect(narrow).not.toContain("Open command palette");
 	});
 });

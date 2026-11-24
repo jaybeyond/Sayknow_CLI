@@ -14460,7 +14460,7 @@ describe("Telegram tool activity capability and routing", () => {
 		await Promise.all([daemon.handleSessionMessage(session, unknown), daemon.handleSessionMessage(session, unknown)]);
 
 		const edit = bot.calls.find(call => call.method === "editMessageText");
-		expect(String(edit?.body.text)).toContain("read — cancelled");
+		expect(String(edit?.body.text)).toContain("read: cancelled");
 		expect(String(edit?.body.text)).not.toContain("secret");
 		expect(bot.calls.filter(call => call.method === "editMessageText")).toHaveLength(1);
 	});
@@ -14488,7 +14488,7 @@ describe("Telegram tool activity capability and routing", () => {
 		const releaseStartSend = Promise.withResolvers<void>();
 		const originalCall = bot.call.bind(bot);
 		bot.call = async (method, body, options) => {
-			if (method === "sendMessage" && String((body as { text?: unknown }).text).includes("read — started")) {
+			if (method === "sendMessage" && String((body as { text?: unknown }).text).includes("read: started")) {
 				startSendEntered.resolve();
 				await releaseStartSend.promise;
 			}
@@ -14531,10 +14531,10 @@ describe("Telegram tool activity capability and routing", () => {
 		await Promise.all([started, unknown]);
 
 		const starts = bot.calls.filter(
-			call => call.method === "sendMessage" && String(call.body.text).includes("read — started"),
+			call => call.method === "sendMessage" && String(call.body.text).includes("read: started"),
 		);
 		const cancelledEdits = bot.calls.filter(
-			call => call.method === "editMessageText" && String(call.body.text).includes("read — cancelled"),
+			call => call.method === "editMessageText" && String(call.body.text).includes("read: cancelled"),
 		);
 		expect(starts).toHaveLength(1);
 		expect(cancelledEdits).toHaveLength(1);
@@ -14683,7 +14683,7 @@ describe("Telegram tool activity capability and routing", () => {
 		const release = Promise.withResolvers<void>();
 		const originalCall = bot.call.bind(bot);
 		bot.call = async (method, body, options) => {
-			if (method === "sendMessage" && String((body as { text?: unknown }).text).includes("read — started")) {
+			if (method === "sendMessage" && String((body as { text?: unknown }).text).includes("read: started")) {
 				entered.resolve();
 				await release.promise;
 			}
@@ -14718,8 +14718,8 @@ describe("Telegram tool activity capability and routing", () => {
 		await (daemon as unknown as { toolTerminalizationChain: Promise<void> }).toolTerminalizationChain;
 
 		expect(session.toolActivityCapability).toBe("v2");
-		expect(bot.calls.filter(call => String(call.body.text).includes("read — started"))).toHaveLength(1);
-		expect(bot.calls.filter(call => String(call.body.text).includes("read — cancelled"))).toHaveLength(1);
+		expect(bot.calls.filter(call => String(call.body.text).includes("read: started"))).toHaveLength(1);
+		expect(bot.calls.filter(call => String(call.body.text).includes("read: cancelled"))).toHaveLength(1);
 		expect(bot.calls.every(call => !String(call.body.text).includes("must not leak"))).toBe(true);
 	});
 
@@ -14748,7 +14748,7 @@ describe("Telegram tool activity capability and routing", () => {
 		const release = Promise.withResolvers<void>();
 		const originalCall = bot.call.bind(bot);
 		bot.call = async (method, body, options) => {
-			if (method === "sendMessage" && String((body as { text?: unknown }).text).includes("read — started")) {
+			if (method === "sendMessage" && String((body as { text?: unknown }).text).includes("read: started")) {
 				entered.resolve();
 				await release.promise;
 			}
@@ -14788,8 +14788,8 @@ describe("Telegram tool activity capability and routing", () => {
 		await Promise.all([start, unknown, policyTransition]);
 		await (daemon as unknown as { toolTerminalizationChain: Promise<void> }).toolTerminalizationChain;
 
-		expect(bot.calls.filter(call => String(call.body.text).includes("read — started"))).toHaveLength(1);
-		expect(bot.calls.filter(call => String(call.body.text).includes("read — cancelled"))).toHaveLength(1);
+		expect(bot.calls.filter(call => String(call.body.text).includes("read: started"))).toHaveLength(1);
+		expect(bot.calls.filter(call => String(call.body.text).includes("read: cancelled"))).toHaveLength(1);
 		expect(bot.calls.every(call => !String(call.body.text).includes("must not leak"))).toBe(true);
 		expect(runtime.legacyToolStarts.has("S:tool:policy-race")).toBe(false);
 	});
@@ -14818,7 +14818,7 @@ describe("Telegram tool activity capability and routing", () => {
 		const release = Promise.withResolvers<void>();
 		const originalCall = bot.call.bind(bot);
 		bot.call = async (method, body, options) => {
-			if (method === "sendMessage" && String((body as { text?: unknown }).text).includes("bash — started")) {
+			if (method === "sendMessage" && String((body as { text?: unknown }).text).includes("bash: started")) {
 				entered.resolve();
 				await release.promise;
 			}
@@ -14859,8 +14859,8 @@ describe("Telegram tool activity capability and routing", () => {
 			});
 		}
 
-		expect(bot.calls.filter(call => String(call.body.text).includes("bash — started"))).toHaveLength(1);
-		expect(bot.calls.filter(call => String(call.body.text).includes("bash — cancelled"))).toHaveLength(1);
+		expect(bot.calls.filter(call => String(call.body.text).includes("bash: started"))).toHaveLength(1);
+		expect(bot.calls.filter(call => String(call.body.text).includes("bash: cancelled"))).toHaveLength(1);
 		const runtime = daemon as unknown as { legacyToolStarts: Map<string, unknown> };
 		expect(runtime.legacyToolStarts.has("S:tool:replaced")).toBe(false);
 	});
@@ -14870,7 +14870,7 @@ describe("Telegram tool activity capability and routing", () => {
 		let rejectedAttempts = 0;
 		const originalCall = bot.call.bind(bot);
 		bot.call = async (method, body, options) => {
-			if (method === "sendMessage" && String((body as { text?: unknown }).text).includes("read — started")) {
+			if (method === "sendMessage" && String((body as { text?: unknown }).text).includes("read: started")) {
 				rejectedAttempts++;
 				return { ok: false, description: "rejected" };
 			}
@@ -15159,7 +15159,7 @@ describe("Telegram tool activity capability and routing", () => {
 			resultSummary: "secret opt-out result",
 		});
 		const terminalEdit = bot.calls.find(
-			call => call.method === "editMessageText" && String(call.body.text).includes("read — ok"),
+			call => call.method === "editMessageText" && String(call.body.text).includes("read: ok"),
 		);
 		expect(terminalEdit).toBeDefined();
 		expect(String(terminalEdit?.body.text)).not.toContain("secret opt-out args");
@@ -15250,7 +15250,7 @@ describe("Telegram tool activity capability and routing", () => {
 		nowMs += 1_000;
 		await internal.flushPool();
 		const terminalEdit = bot.calls.find(
-			call => call.method === "editMessageText" && String(call.body.text).includes("read — ok"),
+			call => call.method === "editMessageText" && String(call.body.text).includes("read: ok"),
 		);
 		expect(terminalEdit).toBeDefined();
 		expect(String(terminalEdit?.body.text)).not.toContain("stale policy args");
@@ -15354,7 +15354,7 @@ describe("Telegram tool activity capability and routing", () => {
 			repo: "repo",
 			branch: "branch",
 		});
-		expect(bot.calls.some(call => String(call.body.text).includes("pending-topic — started"))).toBe(false);
+		expect(bot.calls.some(call => String(call.body.text).includes("pending-topic: started"))).toBe(false);
 
 		await daemon.handleTelegramUpdate({
 			update_id: 964,
@@ -15401,8 +15401,8 @@ describe("Telegram tool activity capability and routing", () => {
 			message: { chat: { id: 42, type: "private" }, text: "/toolactivity off", message_id: 5 },
 		});
 		expect(internal.pool.pending).toBe(0);
-		expect(bot.calls.some(call => String(call.body.text).includes("subagent — started"))).toBe(false);
-		expect(bot.calls.some(call => String(call.body.text).includes("subagent — ok"))).toBe(false);
+		expect(bot.calls.some(call => String(call.body.text).includes("subagent: started"))).toBe(false);
+		expect(bot.calls.some(call => String(call.body.text).includes("subagent: ok"))).toBe(false);
 	});
 
 	test("/toolactivity off preserves a queued terminal for an already-granted start", async () => {
@@ -15430,7 +15430,7 @@ describe("Telegram tool activity capability and routing", () => {
 		const release = Promise.withResolvers<void>();
 		const originalCall = bot.call.bind(bot);
 		bot.call = async (method, body, options) => {
-			if (method === "sendMessage" && String((body as { text?: unknown }).text).includes("read — started")) {
+			if (method === "sendMessage" && String((body as { text?: unknown }).text).includes("read: started")) {
 				entered.resolve();
 				await release.promise;
 			}
@@ -15472,12 +15472,12 @@ describe("Telegram tool activity capability and routing", () => {
 		expect(acknowledgedBeforeRelease).toBe(false);
 		expect(disabledBeforeRelease).toBe(true);
 		await Promise.all([toolSend, toggle, terminal]);
-		const toolIndex = bot.calls.findIndex(call => String(call.body.text).includes("read — started"));
+		const toolIndex = bot.calls.findIndex(call => String(call.body.text).includes("read: started"));
 		const ackIndex = bot.calls.findIndex(call => call.body.text === "Tool activity: off");
 		expect(toolIndex).toBeGreaterThanOrEqual(0);
 		expect(ackIndex).toBeGreaterThan(toolIndex);
 		expect(
-			bot.calls.some(call => call.method === "editMessageText" && String(call.body.text).includes("read — ok")),
+			bot.calls.some(call => call.method === "editMessageText" && String(call.body.text).includes("read: ok")),
 		).toBe(true);
 	});
 	test("parallel tool bubbles retain in-flight entries and evict completed entries", async () => {
@@ -15518,7 +15518,7 @@ describe("Telegram tool activity capability and routing", () => {
 		await sendToolActivity("A", "completed");
 		expect(bot.calls.filter(call => call.method === "editMessageText")).toEqual([
 			expect.objectContaining({
-				body: expect.objectContaining({ message_id: 1, text: expect.stringContaining("tool-A — ok") }),
+				body: expect.objectContaining({ message_id: 1, text: expect.stringContaining("tool-A: ok") }),
 			}),
 		]);
 		expect(liveMessages.has("S:tool:A")).toBe(false);
@@ -15531,8 +15531,8 @@ describe("Telegram tool activity capability and routing", () => {
 		expect(edits).toHaveLength(2);
 		expect(edits.map(call => call.body.message_id)).toEqual([1, 2]);
 		expect(edits.map(call => call.body.text)).toEqual([
-			expect.stringContaining("tool-A — ok"),
-			expect.stringContaining("tool-B — ok"),
+			expect.stringContaining("tool-A: ok"),
+			expect.stringContaining("tool-B: ok"),
 		]);
 		expect(liveMessages.has("S:tool:A")).toBe(false);
 		expect(liveMessages.has("S:tool:B")).toBe(false);
@@ -15573,7 +15573,7 @@ describe("Telegram tool activity capability and routing", () => {
 		expect(bot.calls.filter(call => call.method === "sendMessage")).toHaveLength(1);
 		expect(bot.calls.filter(call => call.method === "editMessageText")).toEqual([
 			expect.objectContaining({
-				body: expect.objectContaining({ message_id: 1, text: expect.stringContaining("read — ok") }),
+				body: expect.objectContaining({ message_id: 1, text: expect.stringContaining("read: ok") }),
 			}),
 		]);
 		expect(liveMessages.has("LOGICAL-B:tool:recovered-tool")).toBe(false);
@@ -15655,7 +15655,7 @@ describe("Telegram tool activity capability and routing", () => {
 			toolName: "read",
 			phase: "started",
 		});
-		expect(bot.calls.some(call => String(call.body.text).includes("read — started"))).toBe(false);
+		expect(bot.calls.some(call => String(call.body.text).includes("read: started"))).toBe(false);
 
 		await daemon.handleSessionMessage(session, {
 			type: "identity_header",
@@ -15663,7 +15663,7 @@ describe("Telegram tool activity capability and routing", () => {
 			repo: "repo",
 			branch: "branch",
 		});
-		expect(bot.calls.some(call => String(call.body.text).includes("read — started"))).toBe(true);
+		expect(bot.calls.some(call => String(call.body.text).includes("read: started"))).toBe(true);
 	});
 
 	test("drops a queued tool start when endpoint authority changes during topic creation", async () => {
@@ -15710,7 +15710,7 @@ describe("Telegram tool activity capability and routing", () => {
 		await identity;
 		await (daemon as unknown as { toolTerminalizationChain: Promise<void> }).toolTerminalizationChain;
 
-		expect(bot.calls.some(call => String(call.body.text).includes("read — started"))).toBe(false);
+		expect(bot.calls.some(call => String(call.body.text).includes("read: started"))).toBe(false);
 	});
 	test("drops a queued tool start after close and same-authority reconnect during topic creation", async () => {
 		FakeWs.instances = [];
@@ -15758,7 +15758,7 @@ describe("Telegram tool activity capability and routing", () => {
 		await (daemon as unknown as { toolTerminalizationChain: Promise<void> }).toolTerminalizationChain;
 
 		expect(daemon.sessions.get("S")).not.toBe(oldSession);
-		expect(bot.calls.some(call => String(call.body.text).includes("read — started"))).toBe(false);
+		expect(bot.calls.some(call => String(call.body.text).includes("read: started"))).toBe(false);
 	});
 	test("settings-driven daemon replacement terminalizes visible tools before disabled successor starts", async () => {
 		FakeWs.instances = [];
@@ -15790,7 +15790,7 @@ describe("Telegram tool activity capability and routing", () => {
 			toolName: "read",
 			phase: "started",
 		});
-		expect(bot.calls.some(call => String(call.body.text).includes("read — started"))).toBe(true);
+		expect(bot.calls.some(call => String(call.body.text).includes("read: started"))).toBe(true);
 		expect(
 			(
 				oldDaemon as unknown as {
@@ -15807,10 +15807,10 @@ describe("Telegram tool activity capability and routing", () => {
 		expect(bot.calls.filter(call => call.method === "editMessageText")).toHaveLength(1);
 		expect(
 			bot.calls.some(
-				call => call.method === "editMessageText" && String(call.body.text).includes("read — cancelled"),
+				call => call.method === "editMessageText" && String(call.body.text).includes("read: cancelled"),
 			),
 		).toBe(true);
-		expect(bot.calls.some(call => String(call.body.text).includes("read — unknown"))).toBe(false);
+		expect(bot.calls.some(call => String(call.body.text).includes("read: unknown"))).toBe(false);
 
 		const callsAfterCleanup = bot.calls.length;
 		const successor = new TelegramNotificationDaemon({
@@ -15893,7 +15893,7 @@ describe("Telegram tool activity capability and routing", () => {
 			events: [],
 		});
 
-		expect(bot.calls.some(call => String(call.body.text).includes("subagent — started"))).toBe(false);
+		expect(bot.calls.some(call => String(call.body.text).includes("subagent: started"))).toBe(false);
 	});
 
 	test("disabled terminals cannot cross endpoint authority when toolCallId is reused", async () => {
@@ -16006,7 +16006,7 @@ describe("Telegram tool activity capability and routing", () => {
 		releaseTopic.resolve();
 		await identity;
 
-		expect(bot.calls.some(call => String(call.body.text).includes("read — started"))).toBe(false);
+		expect(bot.calls.some(call => String(call.body.text).includes("read: started"))).toBe(false);
 	});
 
 	test("shutdown waits for a granted start and rejects ambiguous delivery", async () => {
@@ -16041,7 +16041,7 @@ describe("Telegram tool activity capability and routing", () => {
 		const release = Promise.withResolvers<void>();
 		const originalCall = bot.call.bind(bot);
 		bot.call = async (method, body, options) => {
-			if (method === "sendMessage" && String((body as { text?: unknown }).text).includes("read — started")) {
+			if (method === "sendMessage" && String((body as { text?: unknown }).text).includes("read: started")) {
 				started.resolve();
 				await release.promise;
 				throw new Error("ambiguous transport");
@@ -16065,10 +16065,10 @@ describe("Telegram tool activity capability and routing", () => {
 		);
 		expect(
 			bot.calls.some(
-				call => call.method === "editMessageText" && String(call.body.text).includes("subagent — cancelled"),
+				call => call.method === "editMessageText" && String(call.body.text).includes("subagent: cancelled"),
 			),
 		).toBe(true);
-		expect(bot.calls.some(call => String(call.body.text).includes("subagent — unknown"))).toBe(false);
+		expect(bot.calls.some(call => String(call.body.text).includes("subagent: unknown"))).toBe(false);
 	});
 
 	test("strict shutdown sees a delayed best-effort cleanup failure", async () => {
@@ -19486,7 +19486,7 @@ describe("PR #3186 blockers", () => {
 		const realCall = bot.call.bind(bot);
 		let startAttempts = 0;
 		bot.call = async (method, body, options) => {
-			if (method === "sendMessage" && String((body as { text?: unknown }).text).includes("read — started")) {
+			if (method === "sendMessage" && String((body as { text?: unknown }).text).includes("read: started")) {
 				startAttempts++;
 				entered.resolve();
 				await release.promise;
@@ -19540,7 +19540,7 @@ describe("PR #3186 blockers", () => {
 		let startSendSeen = false;
 		bot.call = async (method, body, options) => {
 			const text = String((body as { text?: unknown }).text ?? "");
-			if (method === "sendMessage" && text.includes("bash — started") && !startSendSeen) {
+			if (method === "sendMessage" && text.includes("bash: started") && !startSendSeen) {
 				startSendSeen = true;
 				entered.resolve();
 				await release.promise;

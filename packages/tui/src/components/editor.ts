@@ -336,6 +336,14 @@ function wordWrapLine(line: string, maxWidth: number): TextChunk[] {
 }
 
 const DEFAULT_PAGE_SCROLL_LINES = 10;
+/** Cells between the text area and the first action label. */
+const ACTION_GAP_WIDTH = 2;
+/** Cells between two action labels. */
+const ACTION_SEPARATOR_WIDTH = 2;
+/** Cells after the last action label, inside the input band. */
+const ACTION_TRAILING_WIDTH = 1;
+/** The action rail is dropped rather than leave less than this for typing. */
+const ACTION_MIN_BODY_WIDTH = 40;
 
 interface EditorState {
 	lines: string[];
@@ -373,6 +381,26 @@ export interface EditorTheme {
 	editorPaddingX?: number;
 	/** Style function for inline hint/ghost text (dim text after cursor) */
 	hintStyle?: (text: string) => string;
+	/** Style for an enabled primary action (for example, Send while the draft has text). Must not change visible width. */
+	actionStyle?: (text: string) => string;
+}
+
+/**
+ * A clickable action drawn at the right end of a borderless editor's last input row.
+ * `label` is plain text; the editor styles it. A primary action reads as enabled only
+ * while the draft has text and submit is allowed.
+ */
+export interface EditorAction {
+	id: string;
+	label: string;
+	primary?: boolean;
+}
+
+interface EditorActionHitbox {
+	id: string;
+	row: number;
+	startColumn: number;
+	endColumn: number;
 }
 
 export interface EditorTopBorder {
@@ -433,6 +461,8 @@ export class Editor implements Component, Focusable {
 	#inputPrefix: string | undefined;
 	#inputPrefixWidth = 0;
 	#placeholder: string | undefined;
+	#actions: readonly EditorAction[] = [];
+	#actionHitboxes: EditorActionHitbox[] = [];
 
 	// Store last layout width for cursor navigation
 	#lastLayoutWidth: number = 80;
@@ -490,6 +520,8 @@ export class Editor implements Component, Focusable {
 	onAltEnter?: (text: string) => void;
 	onChange?: (text: string) => void;
 	onAutocompleteCancel?: () => void;
+	/** Called when a clicked action from {@link Editor.setActions} is activated. */
+	onAction?: (id: string) => void;
 	onTabDeclined?: (text: string) => void;
 	/**
 	 * Called before Tab opens/applies autocomplete. Return true to consume Tab
@@ -605,6 +637,108 @@ export class Editor implements Component, Focusable {
 		const trimmed = placeholder?.trim();
 		this.#placeholder = trimmed ? trimmed : undefined;
 		this.#invalidateLayoutCache();
+	}
+
+	/**
+	 * Draw clickable actions at the right end of the last input row of a borderless
+	 * editor. The text area narrows by the rail's width so typed text never runs
+	 * under it. Ignored while the border is visible or when the row is too narrow.
+	 */
+	setActions(actions: readonly EditorAction[] | undefined): void {
+		this.#actions = actions ? [...actions] : [];
+		this.#actionHitboxes = [];
+		this.#invalidateLayoutCache();
+	}
+
+	/** Map a left click on a rendered row to an action from {@link Editor.setActions}. */
+	handleClick(line: number, column: number): boolean {
+		if (this.#borderVisible) return false;
+		const hit = this.#actionHitboxes.find(
+			box => box.row === line && column >= box.startColumn && column < box.endColumn,
+		);
+		if (!hit) return false;
+		this.onAction?.(hit.id);
+		return true;
+	}
+
+	/** Submit the draft as the submit key does: an open slash-command list applies its highlighted item, other lists are dismissed, and a partial slash command is completed. With `disableSubmit` set it does nothing, leaving the draft and any open list as they are. */
+	submit(): void {
+		if (this.disableSubmit) return;
+		if (this.#isSlashCompletionOpen()) this.#applySelectedSlashCompletion();
+		this.#cancelAutocomplete();
+		this.#completeSlashCommandBeforeSubmit();
+		this.#submitValue();
+	}
+
+	#isSlashCompletionOpen(): boolean {
+		return this.#autocompleteState === "regular" && this.#autocompletePrefix.startsWith("/");
+	}
+
+	/** Apply the highlighted slash-command item and close the list; a stale selection only closes it. */
+	#applySelectedSlashCompletion(): void {
+		const selected = this.#autocompleteList?.getSelectedItem();
+		if (!this.#isAutocompleteSelectionCurrent()) {
+			this.#cancelAutocomplete();
+			return;
+		}
+		if (!selected || !this.#autocompleteProvider) return;
+		const result = this.#autocompleteProvider.applyCompletion(
+			this.#state.lines,
+			this.#state.cursorLine,
+			this.#state.cursorCol,
+			selected,
+			this.#autocompletePrefix,
+		);
+		this.#state.lines = result.lines;
+		this.#bumpDocumentVersion();
+		this.#state.cursorLine = result.cursorLine;
+		this.#setCursorCol(result.cursorCol);
+		result.onApplied?.();
+		this.#cancelAutocomplete();
+	}
+
+	/**
+	 * Complete a partially typed slash command synchronously before submitting, for the
+	 * race where async autocomplete has not resolved yet (user types /q quickly + Enter).
+	 * Matches the selected-item behavior when autocomplete is showing.
+	 */
+	#completeSlashCommandBeforeSubmit(): void {
+		if (this.#autocompleteState) return;
+		const currentLine = this.#state.lines[this.#state.cursorLine] ?? "";
+		const textBeforeCursor = currentLine.slice(0, this.#state.cursorCol);
+		if (
+			(this.#isInSubmittedSlashCommandContext() ||
+				this.#getSlashTokenBeforeCursor()?.startsWith("/skill") === true) &&
+			this.#autocompleteProvider?.trySyncSlashCompletion
+		) {
+			const syncResult = this.#autocompleteProvider.trySyncSlashCompletion(textBeforeCursor);
+			if (syncResult && syncResult.items.length > 0) {
+				// Invalidate any pending async autocomplete so its stale results are discarded
+				this.#autocompleteRequestId += 1;
+				// Apply the best match and submit the completed command
+				const selected = syncResult.items[0]!;
+				const result = this.#autocompleteProvider.applyCompletion(
+					this.#state.lines,
+					this.#state.cursorLine,
+					this.#state.cursorCol,
+					selected,
+					syncResult.prefix,
+				);
+				this.#state.lines = result.lines;
+				this.#bumpDocumentVersion();
+				this.#state.cursorLine = result.cursorLine;
+				this.#setCursorCol(result.cursorCol);
+				result.onApplied?.();
+			}
+		}
+	}
+
+	/** Start an `@` file reference at the cursor and open file completion. */
+	beginFileReference(): void {
+		const line = this.#state.lines[this.#state.cursorLine] ?? "";
+		const charBefore = line[this.#state.cursorCol - 1];
+		if (charBefore !== undefined && charBefore !== " " && charBefore !== "\t") this.#insertCharacter(" ");
+		this.#insertCharacter("@");
 	}
 
 	/**
@@ -791,6 +925,42 @@ export class Editor implements Component, Focusable {
 		};
 	}
 
+	/**
+	 * Lay out the action rail for a row `renderWidth` cells wide: a two-cell gap, the
+	 * labels two cells apart, one trailing cell. Empty when there is no room to keep
+	 * a usable text area beside it.
+	 */
+	#layoutActionRail(
+		renderWidth: number,
+		borderVisible: boolean,
+	): { width: number; text: string; hitboxes: Omit<EditorActionHitbox, "row">[] } {
+		const none = { width: 0, text: "", hitboxes: [] };
+		if (borderVisible || this.#actions.length === 0) return none;
+		const labelWidths = this.#actions.map(action => visibleWidth(action.label));
+		const labelsWidth =
+			labelWidths.reduce((sum, w) => sum + w, 0) + ACTION_SEPARATOR_WIDTH * (labelWidths.length - 1);
+		const width = ACTION_GAP_WIDTH + labelsWidth + ACTION_TRAILING_WIDTH;
+		if (renderWidth - width < ACTION_MIN_BODY_WIDTH) return none;
+
+		const dim = this.#theme.hintStyle ?? ((t: string) => `\x1b[2m${t}\x1b[0m`);
+		const primaryEnabled = !this.disableSubmit && !this.#isEditorEmpty();
+		const hitboxes: Omit<EditorActionHitbox, "row">[] = [];
+		let text = padding(ACTION_GAP_WIDTH);
+		let column = ACTION_GAP_WIDTH;
+		this.#actions.forEach((action, index) => {
+			if (index > 0) {
+				text += padding(ACTION_SEPARATOR_WIDTH);
+				column += ACTION_SEPARATOR_WIDTH;
+			}
+			const style = action.primary && primaryEnabled ? (this.#theme.actionStyle ?? dim) : dim;
+			text += style(action.label);
+			hitboxes.push({ id: action.id, startColumn: column, endColumn: column + labelWidths[index]! });
+			column += labelWidths[index]!;
+		});
+		text += padding(ACTION_TRAILING_WIDTH);
+		return { width, text, hitboxes };
+	}
+
 	#getContentWidth(width: number, paddingX: number): number {
 		const chromeWidth = 2 * this.#getHorizontalChromeWidth(paddingX);
 		return Math.max(0, width - chromeWidth - this.#getPromptGutterWidth(width, paddingX));
@@ -908,10 +1078,14 @@ export class Editor implements Component, Focusable {
 		const renderWidth = Math.max(1, width - rightGutterWidth);
 		const paddingX = this.#getEditorPaddingX();
 		const borderVisible = this.#borderVisible;
-		const promptGutter = this.#getPromptGutter(renderWidth, paddingX);
-		const contentAreaWidth = this.#getContentWidth(renderWidth, paddingX);
+		const actionRail = this.#layoutActionRail(renderWidth, borderVisible);
+		this.#actionHitboxes = [];
+		// The text area ends where the action rail begins, so typed text never runs under it.
+		const bodyWidth = renderWidth - actionRail.width;
+		const promptGutter = this.#getPromptGutter(bodyWidth, paddingX);
+		const contentAreaWidth = this.#getContentWidth(bodyWidth, paddingX);
 		const inputPrefixWidth = this.#inputPrefixWidth;
-		const layoutWidth = Math.max(1, this.#getLayoutWidth(renderWidth, paddingX) - inputPrefixWidth);
+		const layoutWidth = Math.max(1, this.#getLayoutWidth(bodyWidth, paddingX) - inputPrefixWidth);
 		this.#lastLayoutWidth = layoutWidth;
 
 		// Box-drawing characters for the configured input box shape.
@@ -982,7 +1156,8 @@ export class Editor implements Component, Focusable {
 			// blinking cursor shows immediately on focus (not only after typing).
 			// When NOT focused, show the placeholder alone with no caret.
 			if (showPlaceholder && !this.focused) {
-				const hintText = hintStyle(truncateToWidth(this.#placeholder ?? "", lineContentWidth));
+				const fittedPlaceholder = fitHintText(this.#placeholder ?? "", lineContentWidth);
+				const hintText = hintStyle(fittedPlaceholder);
 				// Anchor the hardware cursor at the input start (terminal-cursor mode) even
 				// while the placeholder shows. Otherwise no cursor marker is emitted, the
 				// hardware cursor is left at its stale position from the previous frame,
@@ -990,7 +1165,7 @@ export class Editor implements Component, Focusable {
 				// The marker is zero-width and stripped before output, so the placeholder is unchanged.
 				const anchorCursor = emitCursorMarker && this.#useTerminalCursor && visibleIndex === 0;
 				displayText = anchorCursor ? marker + hintText : hintText;
-				displayWidth = Math.min(visibleWidth(this.#placeholder ?? ""), lineContentWidth);
+				displayWidth = visibleWidth(fittedPlaceholder);
 				hasCursor = false;
 			}
 
@@ -1044,9 +1219,9 @@ export class Editor implements Component, Focusable {
 					const after = displayText.slice(layoutLine.cursorPos);
 					const ghostText = showPlaceholder ? this.#placeholder : inlineHint;
 					if (after.length === 0 && ghostText) {
-						const hintText = hintStyle(truncateToWidth(ghostText, Math.max(0, lineContentWidth - displayWidth)));
-						displayText = before + marker + hintText;
-						displayWidth += Math.min(visibleWidth(ghostText), Math.max(0, lineContentWidth - displayWidth));
+						const fittedHint = fitHintText(ghostText, Math.max(0, lineContentWidth - displayWidth));
+						displayText = before + marker + hintStyle(fittedHint);
+						displayWidth += visibleWidth(fittedHint);
 					} else if (after.length === 0 && !borderVisible && displayWidth >= lineContentWidth) {
 						displayText = this.#renderTerminalCursorMarker(before, marker, lineContentWidth);
 					} else {
@@ -1081,9 +1256,10 @@ export class Editor implements Component, Focusable {
 						displayWidth = widthLimitedCursor.width;
 					} else if (ghostText) {
 						const availWidth = Math.max(0, lineContentWidth - displayWidth - overrideWidth);
-						const hintText = hintStyle(truncateToWidth(ghostText, availWidth));
+						const fittedHint = fitHintText(ghostText, availWidth);
+						const hintText = hintStyle(fittedHint);
 						displayText = before + marker + this.cursorOverride + hintText;
-						displayWidth += overrideWidth + Math.min(visibleWidth(ghostText), availWidth);
+						displayWidth += overrideWidth + visibleWidth(fittedHint);
 					} else {
 						displayText = before + marker + this.cursorOverride;
 						displayWidth += overrideWidth;
@@ -1100,9 +1276,10 @@ export class Editor implements Component, Focusable {
 						displayWidth = widthLimitedCursor.width;
 					} else if (ghostText) {
 						const availWidth = Math.max(0, lineContentWidth - displayWidth - cursorWidth);
-						const hintText = hintStyle(truncateToWidth(ghostText, availWidth));
+						const fittedHint = fitHintText(ghostText, availWidth);
+						const hintText = hintStyle(fittedHint);
 						displayText = before + marker + cursor + hintText;
-						displayWidth += cursorWidth + Math.min(visibleWidth(ghostText), availWidth);
+						displayWidth += cursorWidth + visibleWidth(fittedHint);
 					} else {
 						displayText = before + marker + cursor;
 						displayWidth += cursorWidth;
@@ -1138,6 +1315,23 @@ export class Editor implements Component, Focusable {
 				const leftBorder = this.borderColor(`${box.vertical}${padding(paddingX)}`);
 				const rightBorder = this.borderColor(`${padding(rightPaddingWidth)}${box.vertical}`);
 				result.push(leftBorder + displayWithPrefix + linePad + rightBorder);
+			}
+		}
+
+		if (actionRail.width > 0 && result.length > inputRowsStart) {
+			const railRow = result.length - 1;
+			for (let row = inputRowsStart; row < result.length; row++) {
+				const line = result[row]!;
+				const fill = padding(Math.max(0, bodyWidth - visibleWidth(line)));
+				result[row] = line + fill + (row === railRow ? actionRail.text : padding(actionRail.width));
+			}
+			for (const hitbox of actionRail.hitboxes) {
+				this.#actionHitboxes.push({
+					id: hitbox.id,
+					row: railRow,
+					startColumn: bodyWidth + hitbox.startColumn,
+					endColumn: bodyWidth + hitbox.endColumn,
+				});
 			}
 		}
 
@@ -1296,30 +1490,8 @@ export class Editor implements Component, Focusable {
 				}
 
 				// If Enter was pressed on a slash command, apply completion and submit
-				if (
-					(kb.matches(data, "tui.input.submit") || data === "\n") &&
-					this.#autocompleteState === "regular" &&
-					this.#autocompletePrefix.startsWith("/")
-				) {
-					const selected = this.#autocompleteList.getSelectedItem();
-					if (!this.#isAutocompleteSelectionCurrent()) {
-						this.#cancelAutocomplete();
-					} else if (selected && this.#autocompleteProvider) {
-						const result = this.#autocompleteProvider.applyCompletion(
-							this.#state.lines,
-							this.#state.cursorLine,
-							this.#state.cursorCol,
-							selected,
-							this.#autocompletePrefix,
-						);
-
-						this.#state.lines = result.lines;
-						this.#bumpDocumentVersion();
-						this.#state.cursorLine = result.cursorLine;
-						this.#setCursorCol(result.cursorCol);
-						result.onApplied?.();
-						this.#cancelAutocomplete();
-					}
+				if ((kb.matches(data, "tui.input.submit") || data === "\n") && this.#isSlashCompletionOpen()) {
+					this.#applySelectedSlashCompletion();
 					// Don't return - fall through to submission logic
 				}
 				// If Enter was pressed on a file path, apply completion
@@ -1435,39 +1607,7 @@ export class Editor implements Component, Focusable {
 				return;
 			}
 
-			// Synchronous slash command completion for the race condition where
-			// async autocomplete hasn't resolved yet (user types /q quickly + Enter).
-			// Match the existing selected-item behavior when autocomplete IS showing.
-			if (!this.#autocompleteState) {
-				const currentLine = this.#state.lines[this.#state.cursorLine] ?? "";
-				const textBeforeCursor = currentLine.slice(0, this.#state.cursorCol);
-				if (
-					(this.#isInSubmittedSlashCommandContext() ||
-						this.#getSlashTokenBeforeCursor()?.startsWith("/skill") === true) &&
-					this.#autocompleteProvider?.trySyncSlashCompletion
-				) {
-					const syncResult = this.#autocompleteProvider.trySyncSlashCompletion(textBeforeCursor);
-					if (syncResult && syncResult.items.length > 0) {
-						// Invalidate any pending async autocomplete so its stale results are discarded
-						this.#autocompleteRequestId += 1;
-						// Apply the best match and submit the completed command
-						const selected = syncResult.items[0]!;
-						const result = this.#autocompleteProvider.applyCompletion(
-							this.#state.lines,
-							this.#state.cursorLine,
-							this.#state.cursorCol,
-							selected,
-							syncResult.prefix,
-						);
-						this.#state.lines = result.lines;
-						this.#bumpDocumentVersion();
-						this.#state.cursorLine = result.cursorLine;
-						this.#setCursorCol(result.cursorCol);
-						result.onApplied?.();
-					}
-				}
-			}
-
+			this.#completeSlashCommandBeforeSubmit();
 			this.#submitValue();
 		}
 		// Backspace (including Shift+Backspace)
@@ -3140,4 +3280,20 @@ function paintBackground(line: string, background: string, width: number): strin
 	const fill = Math.max(0, width - visibleWidth(line));
 	const held = line.replace(/\x1b\[(?:0)?m|\x1b\[49m/g, match => `${match}${background}`);
 	return `${background}${held}${padding(fill)}\x1b[0m`;
+}
+
+const HINT_SEPARATOR = " · ";
+
+/**
+ * Fit hint text to `width` by dropping whole trailing ` · ` entries, so a key hint is
+ * never cut mid-label; only a first entry that cannot fit on its own is truncated.
+ */
+export function fitHintText(text: string, width: number): string {
+	if (visibleWidth(text) <= width) return text;
+	const entries = text.split(HINT_SEPARATOR);
+	for (let count = entries.length - 1; count >= 1; count--) {
+		const candidate = entries.slice(0, count).join(HINT_SEPARATOR);
+		if (visibleWidth(candidate) <= width) return candidate;
+	}
+	return truncateToWidth(entries[0]!, width);
 }

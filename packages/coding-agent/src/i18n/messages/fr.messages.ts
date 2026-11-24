@@ -207,8 +207,8 @@ export const frMsgs: Record<string, string> = {
 	"Only one role model available": "Un seul modèle de rôle disponible",
 	"Opened:": "Ouvert :",
 	"Paste handling": "Gestion du collage",
-	"Plan approved, but compaction was cancelled — execution not dispatched. Submit a turn to continue.":
-		"Plan approuvé, mais le compactage a été annulé — exécution non lancée. Soumettez un tour pour continuer.",
+	"Plan approved, but compaction was cancelled: execution not dispatched. Submit a turn to continue.":
+		"Plan approuvé, mais le compactage a été annulé: exécution non lancée. Soumettez un tour pour continuer.",
 	"Plan file not found at": "Fichier de plan introuvable à",
 	"Plan mode enabled. Plan file:": "Mode plan activé. Fichier de plan :",
 	"Plan mode is disabled. Enable it in settings (plan.enabled).":
@@ -291,10 +291,10 @@ export const frMsgs: Record<string, string> = {
 	"Usage: /memory mm history <id>": "Usage : /memory mm history <id>",
 	"Usage: /memory mm show <id>": "Usage : /memory mm show <id>",
 	"Usage: /move <path>": "Usage : /move <chemin>",
-	"Nothing to summarize yet — pass a title: /rename <title>":
-		"Rien à résumer pour l'instant — indiquez un titre : /rename <titre>",
-	"Could not generate a session title — pass one: /rename <title>":
-		"Impossible de générer un titre de session — indiquez-en un : /rename <titre>",
+	"Nothing to summarize yet. Pass a title: /rename <title>":
+		"Rien à résumer pour l'instant. Indiquez un titre : /rename <titre>",
+	"Could not generate a session title. Pass one: /rename <title>":
+		"Impossible de générer un titre de session. Indiquez-en un : /rename <titre>",
 	"Usage: /ssh add <name> --host <host> [--user <user>] [--port <port>] [--key <keyPath>] [--desc <description>] [--compat] [--scope project|user]":
 		"Usage : /ssh add <nom> --host <host> [--user <utilisateur>] [--port <port>] [--key <cheminClé>] [--desc <description>] [--compat] [--scope project|user]",
 	"Usage: /todo append [<phase>] <task...>": "Usage : /todo append [<phase>] <tâche...>",

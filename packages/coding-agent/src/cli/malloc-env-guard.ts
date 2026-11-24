@@ -1,13 +1,15 @@
 /**
  * macOS malloc-stack-logging launch boundary.
  *
- * On macOS, an inherited `MallocStackLogging` / `MallocStackLoggingNoCompact`
- * environment variable (from an Xcode scheme's malloc diagnostics, Instruments,
- * `launchctl setenv`, or a debug-attached shell) makes libmalloc print
+ * On macOS, an inherited `MallocStackLogging*` environment variable
+ * (`MallocStackLogging`, `MallocStackLoggingNoCompact`, `MallocStackLoggingLite`,
+ * `MallocStackLoggingDirectory`, ... — from an Xcode scheme's malloc diagnostics,
+ * Instruments, `launchctl setenv`, or a debug-attached shell) turns on malloc
+ * stack logging, and every child forked from that process then prints
  *
  *   MallocStackLogging: can't turn off malloc stack logging because it was not enabled.
  *
- * to the stderr of every TTY-attached process. Bun snapshots the spawn-default
+ * to its inherited stderr — the TTY. Bun snapshots the spawn-default
  * environment at process startup — before any JS runs — so neither
  * `delete process.env.X` nor a real libc `unsetenv()` cleans the environment
  * that children inherit by default (verified on Bun 1.3.14). Inside the TUI,
@@ -29,25 +31,29 @@
  * `launchctl unsetenv` fix.
  */
 
-import { filterProcessEnv } from "@sayknow-cli/utils/env";
+import { filterProcessEnv, isMacOSMallocStackLoggingEnvName } from "@sayknow-cli/utils/env";
 import type { Subprocess } from "bun";
-
-/** Env vars that make macOS libmalloc write to a TTY when inherited. */
-export const MACOS_MALLOC_ENV_VARS = ["MallocStackLogging", "MallocStackLoggingNoCompact"] as const;
 
 /** Loop guard set on the scrubbed re-exec so it never re-execs itself again. */
 export const MALLOC_ENV_REEXEC_GUARD = "SKC_MALLOC_ENV_REEXEC";
 
+/** Names of the macOS malloc-stack-logging vars present in `env`, sorted. */
+export function macOSMallocEnvNames(env: Record<string, string | undefined>): string[] {
+	return Object.keys(env)
+		.filter(name => env[name] !== undefined && isMacOSMallocStackLoggingEnvName(name))
+		.sort();
+}
+
 /** True when at least one macOS malloc-stack-logging var is present in `env`. */
 export function hasMacOSMallocEnv(env: Record<string, string | undefined>): boolean {
-	return MACOS_MALLOC_ENV_VARS.some(name => env[name] !== undefined);
+	return macOSMallocEnvNames(env).length > 0;
 }
 
 /**
  * True iff we must re-exec to escape a contaminated macOS startup snapshot:
  * darwin, not already inside the scrubbed re-exec, and at least one malloc var
  * present. Off darwin or on the re-exec'd child this is always false, so the
- * common launch path pays only two cheap lookups.
+ * common launch path pays only one cheap scan.
  */
 export function shouldReexecForMacOSMallocEnv(
 	env: Record<string, string | undefined>,
@@ -75,16 +81,16 @@ export function buildMallocReexecArgv(argv: readonly string[], execPath: string)
 	return [execPath, ...argv.slice(1)];
 }
 
-/** One-time, human-actionable notice pointing at the permanent environment fix. */
-export function formatMallocEnvNotice(): string {
+/** One-time, human-actionable notice naming the detected vars and their permanent fix. */
+export function formatMallocEnvNotice(names: readonly string[]): string {
+	const unsetLines = names.map(name => `    launchctl unsetenv ${name}\n`).join("");
 	return (
 		"sayknow-cli: detected macOS malloc-stack-logging environment variables " +
-		"(MallocStackLogging / MallocStackLoggingNoCompact); relaunching once with a " +
+		`(${names.join(", ")}); relaunching once with a ` +
 		"scrubbed environment so they do not flood the terminal.\n" +
 		"  Remove them permanently with:\n" +
-		"    unset MallocStackLogging MallocStackLoggingNoCompact\n" +
-		"    launchctl unsetenv MallocStackLogging\n" +
-		"    launchctl unsetenv MallocStackLoggingNoCompact\n"
+		`    unset ${names.join(" ")}\n` +
+		unsetLines
 	);
 }
 
@@ -106,7 +112,7 @@ export async function reexecWithScrubbedMallocEnv(): Promise<number | null> {
 	// screen, and only on an interactive terminal (piped/CI stderr is not a TTY,
 	// so libmalloc stays silent there and the notice would just be noise).
 	if (process.stderr.isTTY) {
-		process.stderr.write(formatMallocEnvNotice());
+		process.stderr.write(formatMallocEnvNotice(macOSMallocEnvNames(process.env)));
 	}
 
 	let child: Subprocess;

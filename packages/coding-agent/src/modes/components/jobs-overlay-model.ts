@@ -24,7 +24,7 @@ function preview(text: string, max = PROMPT_PREVIEW_MAX): string {
 
 /** Compact relative time, e.g. "in 5m", "2m ago", "now". */
 export function formatRelative(targetMs: number | undefined, nowMs = Date.now()): string {
-	if (targetMs === undefined) return "—";
+	if (targetMs === undefined) return "-";
 	const deltaMs = targetMs - nowMs;
 	const abs = Math.abs(deltaMs);
 	const mins = Math.round(abs / 60_000);

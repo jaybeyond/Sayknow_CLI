@@ -1,3 +1,4 @@
+ Golden rich text                                                                   
                                                                                     
  │ Deterministic quote with link (https://example.test/golden).                     
                                                                                     
@@ -9,7 +10,6 @@
  +--------+------------+                                                            
  | family | 👨‍👩‍👧‍👦         |                                                          
   
- +--------+------------+                                                            
  | wide   | コンニチハ |                                                            
  +--------+------------+                                                            
                                                                                     

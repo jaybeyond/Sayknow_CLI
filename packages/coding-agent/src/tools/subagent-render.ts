@@ -224,7 +224,7 @@ function renderSubagentSnapshotBody(
 	if (snapshot.effectiveModel) {
 		if (snapshot.modelFellBack && snapshot.requestedModel) {
 			lines.push(
-				`  ${theme.fg("warning", `Model: ${snapshot.effectiveModel} (requested ${snapshot.requestedModel}, fell back — no credentials)`)}`,
+				`  ${theme.fg("warning", `Model: ${snapshot.effectiveModel} (requested ${snapshot.requestedModel}, fell back, no credentials)`)}`,
 			);
 		} else {
 			lines.push(`  ${theme.fg("dim", `Model: ${snapshot.effectiveModel}`)}`);

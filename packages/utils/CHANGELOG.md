@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- `filterProcessEnv` and `scrubProcessEnv` remove every `MallocStackLogging*` variable, not only `MallocStackLogging` and `MallocStackLoggingNoCompact`. New export: `isMacOSMallocStackLoggingEnvName`.
+
 ## [0.7.25] - 2026-11-17
 
 ## [0.5.14] - 2026-09-16

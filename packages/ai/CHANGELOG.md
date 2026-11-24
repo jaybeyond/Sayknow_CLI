@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- When Codex requests overlap in one session, only the overlapping request uses HTTP/SSE. The active WebSocket request can finish, and later requests can reuse the connection.
+
 ## [0.7.25] - 2026-11-17
 
 ## [0.7.17] - 2026-11-05

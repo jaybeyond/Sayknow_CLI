@@ -3,6 +3,12 @@ import { BracketedPasteHandler } from "@sayknow-cli/tui/bracketed-paste";
 import { type AppKeybinding, KEYBINDINGS } from "../../config/keybindings";
 import { macosOptionChordForComposedText } from "../utils/macos-option-forwarding";
 
+/** Ids of the clickable actions at the right end of the composer row. */
+export const COMPOSER_ACTION = {
+	attach: "composer.attach",
+	send: "composer.send",
+} as const;
+
 type ConfigurableEditorAction = Extract<
 	AppKeybinding,
 	| "app.interrupt"
@@ -230,6 +236,16 @@ export class CustomEditor extends Editor {
 		this.#resetPendingPasteState(new Error("Editor disposed during paste handling"));
 		this.#pasteHandler = new BracketedPasteHandler();
 		super.dispose();
+	}
+
+	submit(): void {
+		if (this.#pasteDecisionPending) return;
+		super.submit();
+	}
+
+	beginFileReference(): void {
+		if (this.#pasteDecisionPending) return;
+		super.beginFileReference();
 	}
 
 	#drainPendingPasteInput(initialInput: string | undefined, queuedInput: readonly string[]): void {

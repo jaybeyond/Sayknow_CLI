@@ -471,16 +471,24 @@ impl Drop for WindowsOpenptyAttempt {
 	}
 }
 
-/// Remove the macOS malloc-stack-logging debug vars from a PTY child command.
+/// Remove every macOS malloc-stack-logging var (`MallocStackLogging*`) from a
+/// PTY child command.
 ///
-/// macOS libmalloc prints `MallocStackLogging: …` to any TTY-attached process
-/// that inherits these vars, and PTY children always have a TTY stderr, so a
-/// contaminated parent would flood the terminal once per child. Applied after
-/// any caller-supplied env so explicit forwarding cannot reintroduce them.
-/// No-op off macOS (the vars are simply absent).
+/// libmalloc turns stack logging on for any var with this prefix
+/// (`MallocStackLogging`, `MallocStackLoggingNoCompact`, `MallocStackLoggingLite`,
+/// `MallocStackLoggingDirectory`, ...), and PTY children always have a TTY
+/// stderr, so a contaminated parent would flood the terminal once per child.
+/// Applied after any caller-supplied env so explicit forwarding cannot
+/// reintroduce them. No-op off macOS (the vars are simply absent).
 fn scrub_macos_malloc_stack_logging_env(cmd: &mut CommandBuilder) {
-	cmd.env_remove("MallocStackLogging");
-	cmd.env_remove("MallocStackLoggingNoCompact");
+	let names: Vec<String> = cmd
+		.iter_full_env_as_str()
+		.filter(|(name, _)| name.starts_with("MallocStackLogging"))
+		.map(|(name, _)| name.to_owned())
+		.collect();
+	for name in names {
+		cmd.env_remove(name);
+	}
 }
 
 /// Build the PTY child command from a run config.
@@ -949,23 +957,25 @@ mod tests {
 
 	#[test]
 	fn build_pty_command_scrubs_macos_malloc_stack_logging_env() {
+		let names = [
+			"MallocStackLogging",
+			"MallocStackLoggingNoCompact",
+			"MallocStackLoggingLite",
+			"MallocStackLoggingDirectory",
+		];
 		let mut env = std::collections::HashMap::new();
-		env.insert("MallocStackLogging".to_string(), "1".to_string());
-		env.insert("MallocStackLoggingNoCompact".to_string(), "1".to_string());
+		for name in names {
+			env.insert(name.to_string(), "1".to_string());
+		}
 		env.insert("KEEP_ME".to_string(), "value".to_string());
 		let mut config = test_config("true");
 		config.env = Some(env);
 
 		let cmd = build_pty_command(&config);
 
-		assert!(
-			cmd.get_env("MallocStackLogging").is_none(),
-			"MallocStackLogging must be scrubbed even when explicitly forwarded",
-		);
-		assert!(
-			cmd.get_env("MallocStackLoggingNoCompact").is_none(),
-			"MallocStackLoggingNoCompact must be scrubbed even when explicitly forwarded",
-		);
+		for name in names {
+			assert!(cmd.get_env(name).is_none(), "{name} must be scrubbed even when explicitly forwarded");
+		}
 		assert_eq!(
 			cmd.get_env("KEEP_ME"),
 			Some(std::ffi::OsStr::new("value")),

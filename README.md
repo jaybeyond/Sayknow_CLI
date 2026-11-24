@@ -215,13 +215,13 @@ The agent works through these tools. Tools marked *opt-in* stay off until you en
 | Delegation and tracking | `task` (subagents), `subagent`, `job`, `monitor`, `cron`, `irc` (talk to running agents), `todo_write`, `goal`, `checkpoint` / `rewind` |
 | Git hosting | `github` (*opt-in*, `github.enabled`): pull requests, pushes, CI runs through `gh` · `gitlab` (*opt-in*, `gitlab.enabled`, needs [`glab`](https://gitlab.com/gitlab-org/cli)): `mr_create` (returns the open MR instead of a duplicate), `mr_view`, `mr_list`, `ci_status` for gitlab.com and self-hosted instances |
 | Web and devices | `web_search`, `browser`, `computer`, `render_mermaid` |
-| Discovery | `search_tool_bm25` (activates hidden and MCP tools on demand), `skill`, `skill_discovery`, `ask` |
+| Discovery | `search_tool_bm25` (activates hidden and external tools on demand), `skill`, `skill_discovery`, `ask` |
 
-Pick the tool set for one run with `--tools read,bash,...`; plugin, custom, and MCP tool names are accepted there too.
+Pick the tool set for one run with `--tools read,bash,...`; plugin, custom, and external tool names are accepted there too.
 
 ## Plugins
 
-SKC loads plugin bundles (tools, hooks, skills, MCP servers) that are hash-checked at install time and quarantined if a file changes afterwards. Manage them with `skc plugin install|list|...`.
+SKC loads plugin bundles (tools, hooks, skills, external tool servers) that are hash-checked at install time and quarantined if a file changes afterwards. Manage them with `skc plugin install|list|...`.
 
 **`verification-receipts`** (bundled in this repository) answers "did the tests actually pass on the code that is there now?":
 
@@ -275,7 +275,7 @@ fallback:
 
 ## TUI identity
 
-The default TUI identity is the SKC **ink-octopus** theme — octopus ink: warm graphite, paper text, one amber accent — for dark terminals, with **blue-octopus** for light terminals. A warm **red-octopus** variant is also bundled for those who prefer a darker, high-contrast palette. Three additional migration themes — `claude-code`, `codex`, and `opencode` — mirror the look of those tools for easy eye-migration and are selectable from Settings or `/theme`. Explicit user theme settings still win.
+The default TUI identity is the SKC **ink-octopus** theme — octopus ink: warm graphite, paper text, one amber accent — for dark terminals, with **blue-octopus-light** for light terminals. A warm **red-octopus** variant is also bundled for those who prefer a darker, high-contrast palette. Three additional migration themes — `claude-code`, `codex`, and `opencode` — mirror the look of those tools for easy eye-migration and are selectable from Settings or `/theme`. Explicit user theme settings still win.
 
 ### Bundled theme grid
 
@@ -283,7 +283,8 @@ Pick from Settings (`Appearance -> Dark theme` / `Light theme`) or `/theme`.
 
 | Theme | Visual feel | Best fit |
 | --- | --- | --- |
-| `blue-octopus` | Blue octopus palette with tentacle-blue accents. | Default for light terminals. |
+| `blue-octopus` | Blue octopus palette with tentacle-blue accents. | Dark alternate. |
+| `blue-octopus-light` | The blue octopus palette in dark ink for light backgrounds. | Default for light terminals. |
 | `red-octopus` | Warm red octopus variant with strong status contrast. | High-contrast dark alternative. |
 | `ink-octopus` | Octopus ink — warm graphite background, paper text, one amber accent. | Default for dark terminals. |
 | `glow-octopus` | Deep-sea bioluminescence — teal-black with glowing green and a violet secondary. | Dark terminals that want a vivid accent. |
@@ -353,7 +354,7 @@ Contributions, bug reports, and release validation are welcome through GitHub Is
 
 ## Inspirations and lineage
 
-Sayknow-CLI's default TUI identity is the octopus family: ink-octopus as the dark default, blue-octopus as the light default, and warm red-octopus, glow-octopus, and violet-octopus alternates. It also bundles `claude-code`, `codex`, and `opencode` migration themes whose palettes are inspired by those tools so users moving from them get a familiar look. It builds on lessons from a small family of agent harnesses while keeping the public SKC surface intentionally focused. Historical attribution is kept in [`NOTICE.md`](NOTICE.md).
+Sayknow-CLI's default TUI identity is the octopus family: ink-octopus as the dark default, blue-octopus-light as the light default, and warm red-octopus, glow-octopus, and violet-octopus alternates. It also bundles `claude-code`, `codex`, and `opencode` migration themes whose palettes are inspired by those tools so users moving from them get a familiar look. It builds on lessons from a small family of agent harnesses while keeping the public SKC surface intentionally focused. Historical attribution is kept in [`NOTICE.md`](NOTICE.md).
 
 ## License
 

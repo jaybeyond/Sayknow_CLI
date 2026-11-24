@@ -1587,7 +1587,7 @@ export class SelectorController {
 								void this.showOAuthSelector("login", oauth.id);
 							} else {
 								this.ctx.showStatus(
-									`${selection.providerId} needs an API key — run /provider add ${selection.providerId}`,
+									`${selection.providerId} needs an API key: run /provider add ${selection.providerId}`,
 								);
 							}
 							this.ctx.ui.requestRender();

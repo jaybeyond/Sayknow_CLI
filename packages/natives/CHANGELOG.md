@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- PTY child commands drop every `MallocStackLogging*` variable, not only `MallocStackLogging` and `MallocStackLoggingNoCompact`.
+
 ## [0.7.25] - 2026-11-17
 
 ## [0.7.17] - 2026-11-05

@@ -490,14 +490,14 @@ export class PlanModeController {
 		if (previousTools.length) await this.ctx.session.setActiveToolsByName(previousTools);
 		if (!sessionSwitchCompleted)
 			return this.ctx.showWarning(
-				"Plan approved, but the new session could not be created — execution was not dispatched.",
+				"Plan approved, but the new session could not be created, so execution was not dispatched.",
 			);
 		this.ctx.session.setPlanReferencePath(options.finalPlanFilePath);
 		if (compactOutcome === "cancelled") {
 			this.#planApprovalDispatchPending = false;
 			await this.ctx.flushCompactionQueue({ willRetry: false });
 			return this.ctx.showWarning(
-				"Plan approved, but compaction was cancelled — execution not dispatched. Submit a turn to continue.",
+				"Plan approved, but compaction was cancelled: execution not dispatched. Submit a turn to continue.",
 			);
 		}
 		const name = humanizePlanTitle(options.title);

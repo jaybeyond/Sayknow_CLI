@@ -257,6 +257,7 @@ type CodexWebSocketSessionState = {
 	modelsEtag?: string;
 	reasoningIncluded?: boolean;
 	connection?: CodexWebSocketConnection;
+	requestInFlight?: boolean;
 	lastTransport?: CodexTransport;
 	fallbackCount: number;
 	lastFallbackAt?: number;
@@ -2007,9 +2008,20 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 		const startTime = Date.now();
 		let processingContext: CodexStreamProcessingContext | undefined;
 		let finalizedToolCallIds: ReadonlySet<string> = new Set<string>();
+		let ownedSession: CodexWebSocketSessionState | undefined;
 
 		try {
 			const requestContext = await buildCodexRequestContext(model, context, options, output);
+			const session = requestContext.websocketState;
+			if (session?.requestInFlight) {
+				// Only the owner may update the connection, turn metadata or append anchor.
+				// This request has not sent anything; use full-context SSE for it alone.
+				requestContext.websocketState = undefined;
+				logCodexDebug("codex websocket busy, using SSE for overlapping request");
+			} else if (session && shouldUseCodexWebSocket(model, session, options?.preferWebsockets)) {
+				session.requestInFlight = true;
+				ownedSession = session;
+			}
 			let initialTransport: Awaited<ReturnType<typeof openInitialCodexEventStream>>;
 			try {
 				initialTransport = await openInitialCodexEventStream(model, options, requestSetup, requestContext);
@@ -2078,9 +2090,17 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 					},
 					startTime,
 				} satisfies CodexStreamProcessingContext);
-			const failure = await handleCodexStreamFailure(failureContext, error, finalizedToolCallIds);
+			const failureResult = handleCodexStreamFailure(failureContext, error, finalizedToolCallIds);
+			// Session state is already reset; formatting diagnostics need not hold ownership.
+			if (ownedSession) {
+				ownedSession.requestInFlight = false;
+				ownedSession = undefined;
+			}
+			const failure = await failureResult;
 			stream.push({ type: "error", reason: failure.stopReason as "error" | "aborted", error: failure });
 			stream.end();
+		} finally {
+			if (ownedSession) ownedSession.requestInFlight = false;
 		}
 	})();
 
@@ -2111,7 +2131,7 @@ export async function prewarmOpenAICodexResponses(
 	if (publicSessionKey && isCodexPublicSessionWebSocketDisabled(publicSessionKey, providerSessionState)) {
 		state.disableWebsocket = true;
 	}
-	if (!shouldUseCodexWebSocket(model, state, options?.preferWebsockets)) return;
+	if (state.requestInFlight || !shouldUseCodexWebSocket(model, state, options?.preferWebsockets)) return;
 	const headers = logger.time(
 		"prewarmCodex:createHeaders",
 		createCodexHeaders,

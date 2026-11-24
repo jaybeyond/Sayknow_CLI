@@ -15873,14 +15873,22 @@ export class AgentSession {
 			});
 			return false;
 		}
-		if (
-			this.#isDisposed ||
-			this.#promptGeneration !== generation ||
-			this.agent.state.messages !== messages ||
-			messages.at(-1) !== tailBeforeFlush
-		) {
+		const changed = [
+			...(this.#isDisposed ? ["disposed"] : []),
+			...(this.#promptGeneration !== generation ? ["prompt_generation"] : []),
+			...(this.agent.state.messages !== messages ? ["messages_replaced"] : []),
+			...(messages.at(-1) !== tailBeforeFlush ? ["tail_changed"] : []),
+		];
+		if (changed.length > 0) {
 			// Fail-safe: nothing is sent. The durable marker still consumes this turn's resume.
-			logger.warn("auto_resume_abandoned", { trigger, reason: "state changed while the marker was written" });
+			const tail = this.agent.state.messages.at(-1);
+			logger.warn("auto_resume_abandoned", {
+				trigger,
+				reason: "state changed while the marker was written",
+				changed,
+				tailRole: tail?.role,
+				tailCustomType: tail?.role === "custom" ? tail.customType : undefined,
+			});
 			return false;
 		}
 		// A failed attempt that showed nothing, only private reasoning, or tool calls that

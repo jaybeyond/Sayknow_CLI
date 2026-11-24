@@ -27,7 +27,7 @@ const SECURITY_REVIEW_PATTERNS: readonly RegExp[] = [
 	// en
 	/\bsecurity[- ](review|audit|scan|check|assessment|analysis|test(ing)?)\b|\b(review|audit|scan|analy[sz]e|assess)\b[^.?!]{0,40}\bsecurity\b|\bsecurity (issue|hole|flaw|bug|risk|problem)s?\b/,
 	// "vulnerability" in en, fr, it, es and pt, plus tool and standard names that are the same everywhere.
-	/\bvuln[eé]rabilit(y|ies|[eé]s?|à)|\bvulnerabilidad(es?)?|\b(owasp|sast|pen[- ]?test(ing|s)?|penetration[- ]test(ing|s)?|strix)\b/,
+	/\bvuln[eé]rabilit(y|ies|[eé]s?|à)|\bvulnerabilidad(es?)?|\b(owasp|sast|pen[- ]?test(ing|s)?|penetration[- ]test(ing|s)?|strix|agentshield)\b/,
 	// ko
 	/보안\s*(검사|점검|리뷰|검토|감사|진단|스캔|분석|테스트|체크|이슈|문제|결함|구멍|허점)|취약점|모의\s*해킹|침투\s*테스트|스트릭스/,
 	// ja

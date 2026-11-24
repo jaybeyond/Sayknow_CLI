@@ -16,7 +16,7 @@ import {
 	canApplyComposerSubmission,
 	type InteractiveModeContext,
 } from "../../modes/types";
-import type { AgentSessionEvent, QueuedMessageEditEntry } from "../../session/agent-session";
+import type { AgentSession, AgentSessionEvent, QueuedMessageEditEntry } from "../../session/agent-session";
 import { SKILL_PROMPT_MESSAGE_TYPE, type SkillPromptDetails } from "../../session/messages";
 import { getUserMessageViewportAnchorIds } from "../../session/session-manager";
 import { executeBuiltinSlashCommand } from "../../slash-commands/builtin-registry";
@@ -30,7 +30,7 @@ import { invalidateSessionTitleGeneration } from "../../utils/session-title-gene
 import { generateSessionTitle, setSessionTerminalTitle } from "../../utils/title-generator";
 import { ActionRegistry, APP_ACTION_METADATA } from "../action-registry";
 import { CommandPalette, type CommandPaletteAction, type CommandPaletteEntry } from "../components/command-palette";
-import type { PasteTextContext } from "../components/custom-editor";
+import { COMPOSER_ACTION, type PasteTextContext } from "../components/custom-editor";
 import { QueuePaneComponent } from "../components/queue-pane";
 import { type QueuedMessageMoveDirection, QueuedMessageSelectorComponent } from "../components/queued-message-selector";
 import { createUnforwardedOptionChordWarner } from "../utils/macos-option-forwarding";
@@ -266,10 +266,12 @@ export class InputController {
 	#lastBackgroundFoldKeyTime = 0;
 	#slashCommands: SlashCommand[] = [];
 
-	/** Set after a first Esc silently consumes a queued steer. Kept until the
-	 *  queued steer is either cancelled by a second Esc or drained by continuation,
-	 *  so abort cleanup going idle cannot turn the second Esc into an idle action. */
-	#steerConsumePending = false;
+	/** Set after a first Esc silently consumes a queued steer, bound to the session
+	 *  it interrupted. Kept until a second Esc cancels the queued steer or the
+	 *  steer-on-interrupt continuation starts (that session's next `agent_start`),
+	 *  so abort cleanup going idle cannot turn the second Esc into an idle action,
+	 *  while a steer still queued behind the delivered one gets a fresh first Esc. */
+	#steerConsume: { session: AgentSession; unsubscribe: () => void } | undefined;
 	#commandPaletteActions = new Map<AppKeybinding, CommandPaletteAction>();
 	readonly #availabilityGatedPaletteActions = new Set<AppKeybinding>();
 	#paletteCommandInFlight = false;
@@ -388,18 +390,39 @@ export class InputController {
 			this.ctx.retryEscapePrimed = false;
 		}
 		if (options.streaming && this.ctx.session.isStreaming) {
-			if (this.ctx.session.hasQueuedSteering && !this.#steerConsumePending) {
+			if (this.ctx.session.hasQueuedSteering && !this.#isSteerConsumePending()) {
 				// First Esc with a queued steer: silently consume it and
 				// auto-continue via steer-on-interrupt instead of stalling on
 				// "Operation aborted".
-				this.#steerConsumePending = true;
-				void this.#abortInteractive({ silent: true });
+				this.#consumeQueuedSteer();
 			} else {
 				void this.#abortInteractive();
 			}
 			return true;
 		}
 		return false;
+	}
+
+	#isSteerConsumePending(): boolean {
+		return this.#steerConsume?.session === this.ctx.session;
+	}
+
+	/** First Esc on a queued steer: silently abort so steer-on-interrupt resumes
+	 *  into it, and latch the gesture until that continuation starts. */
+	#consumeQueuedSteer(): void {
+		this.#endSteerConsume();
+		const session = this.ctx.session;
+		const unsubscribe = session.subscribe(event => {
+			if (event.type === "agent_start" && this.#steerConsume?.unsubscribe === unsubscribe) this.#endSteerConsume();
+		});
+		this.#steerConsume = { session, unsubscribe };
+		void this.#abortInteractive({ silent: true });
+	}
+
+	#endSteerConsume(): void {
+		const consume = this.#steerConsume;
+		this.#steerConsume = undefined;
+		consume?.unsubscribe();
 	}
 
 	#installGlobalInterruptListener(): void {
@@ -461,7 +484,7 @@ export class InputController {
 			const bypassAutocomplete = Boolean(
 				this.ctx.loadingAnimation ||
 					this.ctx.hasActiveBtw() ||
-					(this.#steerConsumePending && this.ctx.session.hasQueuedSteering) ||
+					(this.#isSteerConsumePending() && this.ctx.session.hasQueuedSteering) ||
 					this.ctx.session.isStreaming ||
 					this.ctx.session.isCompacting ||
 					this.ctx.session.isGeneratingHandoff ||
@@ -493,17 +516,19 @@ export class InputController {
 				this.#resetEscapeGestures();
 				return;
 			}
-			if (this.#steerConsumePending) {
-				this.#resetEscapeGestures();
-				if (this.ctx.session.hasQueuedSteering) {
-					// Second Esc before the scheduled steer continuation drains the
-					// queue: restore/drop the queued steer and perform a real abort,
-					// even if abort cleanup already made the session look idle.
-					this.#steerConsumePending = false;
-					this.restoreQueuedMessagesToEditor({ abort: true });
-					return;
+			if (this.#steerConsume) {
+				const pending = this.#isSteerConsumePending();
+				this.#endSteerConsume();
+				if (pending) {
+					this.#resetEscapeGestures();
+					if (this.ctx.session.hasQueuedSteering) {
+						// Second Esc before the scheduled steer continuation starts:
+						// restore/drop the queued steer and perform a real abort,
+						// even if abort cleanup already made the session look idle.
+						this.restoreQueuedMessagesToEditor({ abort: true });
+						return;
+					}
 				}
-				this.#steerConsumePending = false;
 			}
 			if (this.#handleCancellableWorkEscape({ maintenance: true, retry: true })) {
 				this.#resetEscapeGestures();
@@ -658,6 +683,12 @@ export class InputController {
 		this.ctx.editor.onViewportPageScroll = direction => this.ctx.ui.scrollViewportPages(direction);
 		this.ctx.editor.onViewportFollowLive = () => {
 			this.ctx.ui.followLiveViewport();
+		};
+		this.ctx.editor.onAction = id => {
+			this.ctx.ui.followLiveViewport();
+			if (id === COMPOSER_ACTION.send) this.ctx.editor.submit();
+			else if (id === COMPOSER_ACTION.attach) this.ctx.editor.beginFileReference();
+			this.ctx.ui.requestRender();
 		};
 
 		this.ctx.editor.clearCustomKeyHandlers();

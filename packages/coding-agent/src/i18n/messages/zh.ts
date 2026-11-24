@@ -4,7 +4,6 @@ import type { MsgKey } from "./en";
 export const zh: Partial<Record<MsgKey, string>> = {
 	"lang.auto": "自动 (跟随系统)",
 
-	"welcome.tagline": "写代码，本该如思考。",
 	"welcome.commands": "命令",
 	"welcome.keymap": "按键表",
 	"welcome.model": "模型",
@@ -17,7 +16,18 @@ export const zh: Partial<Record<MsgKey, string>> = {
 	"welcome.pickActive": "↑↓ 移动 · ⏎ 打开 · esc 返回",
 	"welcome.sessions": "会话",
 	"welcome.chooseModel": "选择模型",
-	"welcome.modelHint": "ctrl+l 选择 · / 命令",
+	"composer.placeholder": "输入消息",
+	"composer.send": "发送",
+	"composer.attach": "附件",
+	"composer.steer": "引导",
+	"composer.queue": "排队",
+	"composer.newLine": "换行",
+	"settings.title": "设置",
+	"settings.preview": "预览:",
+	"settings.tabCycle": "Tab 切换",
+	"settings.changeHint": "Enter/Space 修改 · Esc 取消",
+	"settings.on": "开",
+	"settings.off": "关",
 
 	"settings.tab.appearance": "外观",
 	"settings.tab.model": "模型",
@@ -29,6 +39,8 @@ export const zh: Partial<Record<MsgKey, string>> = {
 	"settings.tab.tasks": "任务",
 	"settings.tab.providers": "提供商",
 	"settings.tab.integrations": "集成",
+	"settings.tab.notifications": "通知",
+	"settings.tab.plugins": "插件",
 
 	"settings.language.label": "语言",
 	"settings.language.desc": "界面语言。自动模式跟随系统区域设置。",
@@ -40,11 +52,12 @@ export const zh: Partial<Record<MsgKey, string>> = {
 	"help.envVars": "环境变量",
 	"help.tools": "可用工具",
 	"help.usefulCommands": "常用命令",
-	"help.appDescription": "Sayknow-CLI — AI 编程助手",
+	"help.appDescription": "Sayknow-CLI: AI 编程助手",
 
 	"statusline.plan": "计划",
 	"statusline.goal": "目标",
 	"statusline.paused": "暂停",
+	"statusline.subscription": "订阅",
 
 	"common.yes": "是",
 	"common.no": "否",

@@ -4,7 +4,7 @@ import * as path from "node:path";
 import { canonicalEnvKey, getAgentDir, getConfigRootDir, getTrustedHomeDir, pathIdentityKey } from "./dirs";
 import { isSafeEnvName, isSafeEnvValue } from "./spawn-env";
 
-export { filterProcessEnv, isSafeEnvName, isSafeEnvValue } from "./spawn-env";
+export { filterProcessEnv, isMacOSMallocStackLoggingEnvName, isSafeEnvName, isSafeEnvValue } from "./spawn-env";
 
 import {
 	parseEnvFile,

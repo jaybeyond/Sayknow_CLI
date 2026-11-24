@@ -44,7 +44,7 @@ export async function ensureAutoresearchBranch(
 			branchName: null,
 			created: false,
 			warning:
-				"Not in a git repository — autoresearch will run without branch isolation, baseline reset, or auto-commits.",
+				"Not in a git repository: autoresearch will run without branch isolation, baseline reset, or auto-commits.",
 		};
 	}
 
@@ -68,7 +68,7 @@ export async function ensureAutoresearchBranch(
 		const preview = formatDirtyPaths(dirtyPaths);
 		return {
 			ok: false,
-			error: `Worktree is dirty (${preview}). Commit or stash these changes before starting autoresearch — a fresh autoresearch/* branch needs a clean baseline.`,
+			error: `Worktree is dirty (${preview}). Commit or stash these changes before starting autoresearch: a fresh autoresearch/* branch needs a clean baseline.`,
 		};
 	}
 

@@ -679,7 +679,7 @@ export async function handleCredentialsSetup(
 
 		if (flags.dryRun) {
 			if (flags.json) process.stdout.write(`${JSON.stringify({ ...redactedPlan, dryRun: true, imported: [] })}\n`);
-			else process.stdout.write(chalk.dim(`\nDry run — no credentials imported.\n`));
+			else process.stdout.write(chalk.dim(`\nDry run, no credentials imported.\n`));
 			return;
 		}
 

@@ -199,7 +199,7 @@ test("#2960 red-team identity, ask, and visible tool activity retain lazy creati
 	expect(calls(tool.bot, "createForumTopic")).toHaveLength(1);
 	expect(
 		tool.bot.calls.some(
-			call => String(call.body.text).includes("read — started") && call.body.message_thread_id === 77,
+			call => String(call.body.text).includes("read: started") && call.body.message_thread_id === 77,
 		),
 	).toBe(true);
 });

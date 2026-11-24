@@ -205,22 +205,23 @@ describe("Markdown component", () => {
 			expect(plainLines.some(line => line.includes("-"))).toBeTruthy();
 		});
 
-		it("should render row dividers between data rows", () => {
-			const markdown = new Markdown(
-				`| Name | Age |
-| --- | --- |
-| Alice | 30 |
-| Bob | 25 |`,
-				0,
-				0,
-				defaultMarkdownTheme,
+		it("rules between data rows only when a row wraps", () => {
+			const plain = (text: string, width: number) =>
+				new Markdown(text, 0, 0, defaultMarkdownTheme)
+					.render(width)
+					.map(line => line.replace(/\x1b\[[0-9;]*m/g, ""));
+			// Top border, header separator, bottom border: no rule between single-line rows.
+			const singleLine = plain("| Name | Age |\n| --- | --- |\n| Alice | 30 |\n| Bob | 25 |", 80);
+			expect(singleLine.filter(line => line.includes("+"))).toHaveLength(3);
+			const alice = singleLine.findIndex(line => line.includes("Alice"));
+			expect(singleLine[alice + 1]).toContain("Bob");
+
+			// A wrapped cell spans several lines, so rows need a rule to stay distinct.
+			const wrapped = plain(
+				"| Name | Note |\n| --- | --- |\n| Alice | a long note that has to wrap across several lines here |\n| Bob | short |",
+				30,
 			);
-
-			const lines = markdown.render(80);
-			const plainLines = lines.map(line => line.replace(/\x1b\[[0-9;]*m/g, ""));
-			const dividerLines = plainLines.filter(line => line.includes("+"));
-
-			expect(dividerLines.length >= 2, "Expected header + row divider").toBeTruthy();
+			expect(wrapped.filter(line => line.includes("+"))).toHaveLength(4);
 		});
 
 		it("should keep column width at least the longest word", () => {

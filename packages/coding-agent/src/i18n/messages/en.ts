@@ -12,7 +12,6 @@ export const en = {
 	"lang.de": "Deutsch",
 
 	// ── Welcome surface ──
-	"welcome.tagline": "Coding should feel like thinking.",
 	"welcome.commands": "commands",
 	"welcome.keymap": "keymap",
 	"welcome.model": "model",
@@ -25,7 +24,27 @@ export const en = {
 	"welcome.pickActive": "↑↓ move · ⏎ open · esc back",
 	"welcome.sessions": "sessions",
 	"welcome.chooseModel": "choose a model",
-	"welcome.modelHint": "ctrl+l to pick · / for commands",
+
+	// ── Composer and settings chrome ──
+	"composer.placeholder": "Type your message",
+	"composer.send": "Send",
+	"composer.attach": "Attach",
+	"composer.steer": "Steer",
+	"composer.queue": "Queue",
+	"composer.newLine": "New line",
+	"settings.title": "Settings",
+	"settings.preview": "Preview:",
+	"settings.tabCycle": "Tab to switch",
+	"settings.changeHint": "Enter/Space change · Esc cancel",
+	"settings.on": "on",
+	"settings.off": "off",
+	"settings.automatic": "Automatic",
+	"settings.defaultValue": "Default",
+	"settings.unset": "Not set",
+	"settings.openEditor": "Open",
+	"settings.used": "Used",
+	"settings.remaining": "Remaining",
+	"settings.panelActions": "Enter change · Esc close",
 
 	// ── Settings tabs ──
 	"settings.tab.appearance": "Appearance",
@@ -39,6 +58,7 @@ export const en = {
 	"settings.tab.providers": "Providers",
 	"settings.tab.integrations": "Integrations",
 	"settings.tab.notifications": "Notifications",
+	"settings.tab.plugins": "Plugins",
 
 	// ── Language setting ──
 	"settings.language.label": "Language",
@@ -52,12 +72,13 @@ export const en = {
 	"help.envVars": "ENVIRONMENT VARIABLES",
 	"help.tools": "AVAILABLE TOOLS",
 	"help.usefulCommands": "USEFUL COMMANDS",
-	"help.appDescription": "Sayknow-CLI — an AI coding assistant",
+	"help.appDescription": "Sayknow-CLI: an AI coding assistant",
 
 	// ── Status line ──
 	"statusline.plan": "Plan",
 	"statusline.goal": "Goal",
 	"statusline.paused": "paused",
+	"statusline.subscription": "subscription",
 
 	// ── Common UI ──
 	"common.yes": "Yes",

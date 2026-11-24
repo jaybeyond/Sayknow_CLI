@@ -223,7 +223,7 @@ async function runServe(flags: AuthGatewayCommandArgs["flags"]): Promise<void> {
 	if (gatewayToken) {
 		process.stdout.write(`bearer token: ${getTokenFilePath()} (chmod 0600)\n`);
 	} else {
-		process.stdout.write(`auth: disabled (--no-auth) — any client can call this gateway\n`);
+		process.stdout.write(`auth: disabled (--no-auth): any client can call this gateway\n`);
 	}
 	if (source.kind === "broker") {
 		process.stdout.write(`upstream broker: ${source.brokerUrl}\n`);
@@ -432,7 +432,7 @@ async function runCheck(flags: AuthGatewayCommandArgs["flags"]): Promise<void> {
 					const identity =
 						row.email ?? row.accountId ?? (row.type === "api_key" ? "(api key)" : "(no identity on credential)");
 					const remote = row.remoteRefresh ? chalk.dim(" [remote-refresh]") : "";
-					const reason = row.reason ? chalk.dim(` — ${row.reason}`) : "";
+					const reason = row.reason ? chalk.dim(`, ${row.reason}`) : "";
 					process.stdout.write(
 						`  ${status} id=${row.id.toString().padStart(3)} ${row.type.padEnd(7)} ${identity}${remote}${reason}\n`,
 					);

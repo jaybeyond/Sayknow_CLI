@@ -388,7 +388,7 @@
 				"light": {
 					"type": "string",
 					"description": "Theme used when terminal has light background",
-					"default": "blue-octopus"
+					"default": "blue-octopus-light"
 				}
 			},
 			"additionalProperties": false
@@ -553,7 +553,7 @@
 				},
 				"artifactHeadBytes": {
 					"type": "number",
-					"description": "Amount of head content kept inline alongside the tail when output spills to artifact (middle elision). 0 disables — keep tail only.",
+					"description": "Amount of head content kept inline alongside the tail when output spills to artifact (middle elision). 0 disables: keep tail only.",
 					"default": 20
 				},
 				"outputMaxColumns": {
@@ -1579,7 +1579,7 @@
 				},
 				"mentalModelsEnabled": {
 					"type": "boolean",
-					"description": "Read curated reflect summaries (mental models) into developer instructions at boot. Loads existing models on the bank — does not write. Pair with hindsight.mentalModelAutoSeed to also auto-create the built-in seed set.",
+					"description": "Read curated reflect summaries (mental models) into developer instructions at boot. Loads existing models on the bank: does not write. Pair with hindsight.mentalModelAutoSeed to also auto-create the built-in seed set.",
 					"default": true
 				},
 				"mentalModelAutoSeed": {
@@ -1628,7 +1628,7 @@
 						"discard",
 						"keep"
 					],
-					"description": "What to do with partial output when TTSR triggers. 'discard' (recommended) drops the aborted partial turn so it never accumulates in context. 'keep' retains every aborted partial turn, which grows the token footprint each time a rule fires — prefer 'discard' unless you specifically need the partial output.",
+					"description": "What to do with partial output when TTSR triggers. 'discard' (recommended) drops the aborted partial turn so it never accumulates in context. 'keep' retains every aborted partial turn, which grows the token footprint each time a rule fires: prefer 'discard' unless you specifically need the partial output.",
 					"default": "discard"
 				},
 				"interruptMode": {

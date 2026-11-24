@@ -515,7 +515,7 @@ export async function sendNotificationTest(opts: TestOptions): Promise<Notificat
 
 /** Render a test result as a single human-readable line (no secrets). */
 export function formatNotificationTestResult(result: NotificationTestResult): string {
-	return `Notification test (${result.adapter}): ${result.ok ? "OK" : "FAILED"} — ${result.detail}`;
+	return `Notification test (${result.adapter}): ${result.ok ? "OK" : "FAILED"}: ${result.detail}`;
 }
 
 // --- recovery -----------------------------------------------------------
@@ -705,6 +705,6 @@ export function formatNotificationRecoveryReport(report: NotificationRecoveryRep
 	for (const ep of report.endpointsRemoved) {
 		lines.push(`    - removed ${ep.sessionId} (pid ${ep.pid ?? "?"}, ${ep.reason})`);
 	}
-	lines.push(`  daemon: ${report.daemon.action} — ${report.daemon.detail}`);
+	lines.push(`  daemon: ${report.daemon.action}, ${report.daemon.detail}`);
 	return lines.join("\n");
 }

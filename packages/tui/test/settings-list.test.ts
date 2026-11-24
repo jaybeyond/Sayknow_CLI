@@ -27,6 +27,7 @@ describe("SettingsList", () => {
 					id: "mode",
 					label: "Mode",
 					currentValue: "off",
+					formatValue: value => (value === "off" ? "꺼짐" : "켜짐"),
 					values: ["off", "on"],
 				},
 			],
@@ -39,10 +40,12 @@ describe("SettingsList", () => {
 				throw new Error("cancel should not be called");
 			},
 		);
+		expect(list.render(40).join("\n")).toContain("꺼짐");
 
 		list.handleInput("\n");
 
 		expect(changes).toEqual([["mode", "on"]]);
+		expect(list.render(40).join("\n")).toContain("켜짐");
 	});
 	it("keeps populated confirm precedence when cancel also matches Enter", () => {
 		setKeybindings(

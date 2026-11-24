@@ -279,7 +279,7 @@ export function renderDashboardLines(
 	if (runtime.lastRunSummary) {
 		lines.push(
 			truncateToWidth(
-				`Pending run: #${runtime.lastRunSummary.runNumber} (${runtime.lastRunSummary.passed ? "passed" : "failed"}) — log_experiment required`,
+				`Pending run: #${runtime.lastRunSummary.runNumber} (${runtime.lastRunSummary.passed ? "passed" : "failed"}): log_experiment required`,
 				width,
 			),
 		);

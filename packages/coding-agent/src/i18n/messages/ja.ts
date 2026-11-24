@@ -4,7 +4,6 @@ import type { MsgKey } from "./en";
 export const ja: Partial<Record<MsgKey, string>> = {
 	"lang.auto": "自動 (システム)",
 
-	"welcome.tagline": "コーディングは、思考のように。",
 	"welcome.commands": "コマンド",
 	"welcome.keymap": "キーマップ",
 	"welcome.model": "モデル",
@@ -17,7 +16,18 @@ export const ja: Partial<Record<MsgKey, string>> = {
 	"welcome.pickActive": "↑↓ 移動 · ⏎ 開く · esc 戻る",
 	"welcome.sessions": "セッション",
 	"welcome.chooseModel": "モデルを選択",
-	"welcome.modelHint": "ctrl+l で選択 · / でコマンド",
+	"composer.placeholder": "メッセージを入力",
+	"composer.send": "送信",
+	"composer.attach": "添付",
+	"composer.steer": "指示",
+	"composer.queue": "キュー",
+	"composer.newLine": "改行",
+	"settings.title": "設定",
+	"settings.preview": "プレビュー:",
+	"settings.tabCycle": "Tab で切替",
+	"settings.changeHint": "Enter/Space 変更 · Esc 取消",
+	"settings.on": "オン",
+	"settings.off": "オフ",
 
 	"settings.tab.appearance": "外観",
 	"settings.tab.model": "モデル",
@@ -29,6 +39,8 @@ export const ja: Partial<Record<MsgKey, string>> = {
 	"settings.tab.tasks": "タスク",
 	"settings.tab.providers": "プロバイダー",
 	"settings.tab.integrations": "統合",
+	"settings.tab.notifications": "通知",
+	"settings.tab.plugins": "プラグイン",
 
 	"settings.language.label": "言語",
 	"settings.language.desc": "インターフェース言語。自動はシステムのロケールに従います。",
@@ -40,11 +52,12 @@ export const ja: Partial<Record<MsgKey, string>> = {
 	"help.envVars": "環境変数",
 	"help.tools": "利用可能なツール",
 	"help.usefulCommands": "便利なコマンド",
-	"help.appDescription": "Sayknow-CLI — AI コーディングアシスタント",
+	"help.appDescription": "Sayknow-CLI: AI コーディングアシスタント",
 
 	"statusline.plan": "計画",
 	"statusline.goal": "目標",
 	"statusline.paused": "一時停止",
+	"statusline.subscription": "サブスク",
 
 	"common.yes": "はい",
 	"common.no": "いいえ",

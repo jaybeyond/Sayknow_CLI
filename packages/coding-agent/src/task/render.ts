@@ -972,12 +972,15 @@ export function renderResult(
 
 			const lines: string[] = [];
 
+			// Failed/aborted tool executions report `details: {}` (agent-loop), so
+			// `results` is absent even though `details` is set.
+			const results = details.results ?? [];
 			const hasProgress = Boolean(details.progress && details.progress.length > 0);
-			const shouldRenderProgress = hasProgress && (isPartial || details.results.length === 0);
-			const hasResults = details.results.length > 0;
+			const shouldRenderProgress = hasProgress && (isPartial || results.length === 0);
+			const hasResults = results.length > 0;
 			if (hasResults) {
-				details.results.forEach((res, i) => {
-					const isLast = !shouldRenderProgress && i === details.results.length - 1;
+				results.forEach((res, i) => {
+					const isLast = !shouldRenderProgress && i === results.length - 1;
 					lines.push(...renderAgentResult(res, isLast, expanded, theme));
 				});
 			}
@@ -989,10 +992,10 @@ export function renderResult(
 				});
 			}
 			if (hasResults && !shouldRenderProgress) {
-				const abortedCount = details.results.filter(r => r.status === "aborted").length;
-				const mergeFailedCount = details.results.filter(r => r.status === "merge_failed").length;
-				const successCount = details.results.filter(r => r.status === "completed").length;
-				const failCount = details.results.length - successCount - mergeFailedCount - abortedCount;
+				const abortedCount = results.filter(r => r.status === "aborted").length;
+				const mergeFailedCount = results.filter(r => r.status === "merge_failed").length;
+				const successCount = results.filter(r => r.status === "completed").length;
+				const failCount = results.length - successCount - mergeFailedCount - abortedCount;
 				let summary = `${theme.fg("dim", "Total:")} `;
 				if (abortedCount > 0) {
 					summary += theme.fg("error", `${abortedCount} aborted`);

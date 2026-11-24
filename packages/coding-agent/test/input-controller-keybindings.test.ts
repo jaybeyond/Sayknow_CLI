@@ -6,7 +6,7 @@ import * as path from "node:path";
 import { defaultEditorTheme } from "../../tui/test/test-themes";
 import { formatKeyHint as formatKeyHintForPlatform } from "../src/config/keybindings";
 import { resetSettingsForTest, Settings } from "../src/config/settings";
-import { CustomEditor, type PasteTextContext } from "../src/modes/components/custom-editor";
+import { COMPOSER_ACTION, CustomEditor, type PasteTextContext } from "../src/modes/components/custom-editor";
 import { QueuedMessageSelectorComponent } from "../src/modes/components/queued-message-selector";
 import { InputController } from "../src/modes/controllers/input-controller";
 import { initTheme } from "../src/modes/theme/theme";
@@ -47,6 +47,9 @@ type FakeEditor = {
 	onSubmit?: (text: string) => void | Promise<void>;
 	onTabDeclined?: (text: string) => void;
 	onTab?: (text: string) => boolean | undefined;
+	onAction?: (id: string) => void;
+	submit?: () => void;
+	beginFileReference?: () => void;
 	setText(text: string): void;
 	getText(): string;
 	insertText(text: string): void;
@@ -481,6 +484,23 @@ describe("InputController keybinding setup", () => {
 			followUpQueuePolicy: "sequential",
 		});
 		expect(spies.updatePendingMessagesDisplay).toHaveBeenCalledTimes(1);
+	});
+
+	it("routes composer rail clicks: Send submits, Attach starts a file reference, unknown ids do nothing", async () => {
+		const { InputController, ctx, editor } = await createContext();
+		editor.submit = vi.fn();
+		editor.beginFileReference = vi.fn();
+		new InputController(ctx).setupKeyHandlers();
+
+		editor.onAction?.(COMPOSER_ACTION.send);
+		expect(editor.submit).toHaveBeenCalledTimes(1);
+		expect(editor.beginFileReference).not.toHaveBeenCalled();
+		editor.onAction?.(COMPOSER_ACTION.attach);
+		expect(editor.beginFileReference).toHaveBeenCalledTimes(1);
+		editor.onAction?.("unknown");
+		expect(editor.submit).toHaveBeenCalledTimes(1);
+		expect(editor.beginFileReference).toHaveBeenCalledTimes(1);
+		expect(ctx.ui.followLiveViewport).toHaveBeenCalledTimes(3);
 	});
 
 	it("does not register a default Ctrl+Enter follow-up handler", async () => {

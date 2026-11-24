@@ -2488,6 +2488,64 @@ describe("openai-codex streaming", () => {
 		expect(transportDetails.fallbackCount).toBe(1);
 	});
 
+	it("uses SSE only for an overlapping Codex request and keeps the original websocket reusable", async () => {
+		const tempDir = TempDir.createSync("@pi-codex-ws-overlap-");
+		setAgentDir(tempDir.path());
+		const fetchMock = vi.fn(
+			async () =>
+				new Response(createCompletedCodexSse("Overlap via SSE"), {
+					headers: { "content-type": "text/event-stream" },
+				}),
+		);
+		global.fetch = fetchMock as unknown as typeof fetch;
+		const firstSend = Promise.withResolvers<MockWebSocket>();
+		let connections = 0;
+		let sends = 0;
+		class HeldWebSocket extends MockWebSocket {
+			constructor(url: string, options?: { headers?: WsHeaders }) {
+				super(url, options);
+				connections++;
+				this.scheduleOpen();
+			}
+
+			send(): void {
+				sends++;
+				if (sends === 1) firstSend.resolve(this);
+				else this.emitCodexResponse({ messageId: "msg_next", responseId: "resp_next", text: "Reused websocket" });
+			}
+		}
+		global.WebSocket = HeldWebSocket as unknown as typeof WebSocket;
+		const model = { ...createCodexTestModel("https://chatgpt.com/backend-api"), preferWebsockets: true };
+		const options = {
+			apiKey: createCodexTestToken(),
+			sessionId: "ws-overlap-session",
+			providerSessionState: new Map<string, ProviderSessionState>(),
+			fallbackManaged: true,
+			streamMaxRetries: 0,
+			streamFirstEventTimeoutMs: 1_000,
+		};
+		const first = streamOpenAICodexResponses(model, createCodexTestContext(), options).result();
+		const socket = await firstSend.promise;
+		const overlapping = await streamOpenAICodexResponses(model, createCodexTestContext(), options).result();
+		const stateWhileBusy = socket.readyState;
+		socket.emitCodexResponse({ messageId: "msg_first", responseId: "resp_first", text: "Original websocket" });
+		const original = await first;
+		const next = await streamOpenAICodexResponses(model, createCodexTestContext(), options).result();
+
+		expect(overlapping.errorMessage).toBeUndefined();
+		expect(overlapping.stopReason).toBe("stop");
+		expect(stateWhileBusy).toBe(MockWebSocket.OPEN);
+		expect(original.content[0]).toMatchObject({ type: "text", text: "Original websocket" });
+		expect(next.content[0]).toMatchObject({ type: "text", text: "Reused websocket" });
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+		expect(connections).toBe(1);
+		expect(sends).toBe(2);
+		expect(getOpenAICodexTransportDetails(model, options)).toMatchObject({
+			lastTransport: "websocket",
+			websocketDisabled: false,
+			fallbackCount: 0,
+		});
+	});
 	it("does not admit an upstream request when the websocket connect fails before any frame is sent", async () => {
 		const tempDir = TempDir.createSync("@pi-codex-ws-admission-");
 		setAgentDir(tempDir.path());

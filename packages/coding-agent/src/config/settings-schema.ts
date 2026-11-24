@@ -73,7 +73,7 @@ export const TAB_METADATA: Record<SettingTab, { label: string; icon: `tab.${stri
 	tools: { label: "Tools", icon: "tab.tools" },
 	tasks: { label: "Tasks", icon: "tab.tasks" },
 	providers: { label: "Providers", icon: "tab.providers" },
-	notifications: { label: "Notifications", icon: "tab.providers" },
+	notifications: { label: "Notifications", icon: "tab.notifications" },
 	integrations: { label: "Integrations", icon: "tab.integrations" },
 };
 
@@ -541,7 +541,7 @@ export const SETTINGS_SCHEMA = {
 
 	"theme.light": {
 		type: "string",
-		default: "blue-octopus",
+		default: "blue-octopus-light",
 		ui: {
 			tab: "appearance",
 			label: "Light Theme",
@@ -802,7 +802,7 @@ export const SETTINGS_SCHEMA = {
 			tab: "tools",
 			label: "Artifact head size (KB)",
 			description:
-				"Amount of head content kept inline alongside the tail when output spills to artifact (middle elision). 0 disables — keep tail only.",
+				"Amount of head content kept inline alongside the tail when output spills to artifact (middle elision). 0 disables: keep tail only.",
 			options: [
 				{ value: "0", label: "0 KB", description: "Disabled; tail-only truncation" },
 				{ value: "1", label: "1 KB", description: "~250 tokens" },
@@ -1977,12 +1977,12 @@ export const SETTINGS_SCHEMA = {
 				{
 					value: "global",
 					label: "Global",
-					description: "One shared bank — every project sees the same memories",
+					description: "One shared bank: every project sees the same memories",
 				},
 				{
 					value: "per-project",
 					label: "Per project",
-					description: "Isolated bank per cwd basename — projects cannot see each other's memories",
+					description: "Isolated bank per cwd basename: projects cannot see each other's memories",
 				},
 				{
 					value: "per-project-tagged",
@@ -2060,7 +2060,7 @@ export const SETTINGS_SCHEMA = {
 			tab: "memory",
 			label: "Hindsight Mental Models",
 			description:
-				"Read curated reflect summaries (mental models) into developer instructions at boot. Loads existing models on the bank — does not write. Pair with hindsight.mentalModelAutoSeed to also auto-create the built-in seed set.",
+				"Read curated reflect summaries (mental models) into developer instructions at boot. Loads existing models on the bank: does not write. Pair with hindsight.mentalModelAutoSeed to also auto-create the built-in seed set.",
 			condition: "hindsightActive",
 		},
 	},
@@ -2190,7 +2190,7 @@ export const SETTINGS_SCHEMA = {
 			tab: "context",
 			label: "TTSR Context Mode",
 			description:
-				"What to do with partial output when TTSR triggers. 'discard' (recommended) drops the aborted partial turn so it never accumulates in context. 'keep' retains every aborted partial turn, which grows the token footprint each time a rule fires — prefer 'discard' unless you specifically need the partial output.",
+				"What to do with partial output when TTSR triggers. 'discard' (recommended) drops the aborted partial turn so it never accumulates in context. 'keep' retains every aborted partial turn, which grows the token footprint each time a rule fires: prefer 'discard' unless you specifically need the partial output.",
 		},
 	},
 
@@ -3677,7 +3677,7 @@ export const SETTINGS_SCHEMA = {
 				{
 					value: "duckduckgo",
 					label: "DuckDuckGo",
-					description: "Keyless default — no API key or OAuth required",
+					description: "Keyless default: no API key or OAuth required",
 				},
 				{
 					value: "insane",

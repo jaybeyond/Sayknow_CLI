@@ -2,6 +2,42 @@
 
 ## [Unreleased]
 
+### Added
+
+- New `blue-octopus-light` theme, now the default light theme (`theme.light`). Previously light terminals reused the dark `blue-octopus` palette.
+- The composer row now ends in `@ Attach` and a send action named for what the submit key does now (`↩ Send`, `↩ Steer`, or `↩ Queue`). Send is bold and in the accent color only when there is a draft, so the state also shows without color. With mouse reporting on, clicking Attach opens `@` file completion; the same mention attaches files and images. Clicking Send submits the draft the same way the submit key does, completing a partly typed slash command first. The actions hide when they would leave fewer than 40 cells for typing (about 60 columns, depending on the key labels and language).
+- The bundled `security-review` skill now reviews coding-agent configuration as its own surface: `AGENTS.md`, `SYSTEM.md`, hooks, MCP servers, skills, extensions, and permission settings under `.skc/`, `~/.skc/agent/`, and the other harness directories SKC discovers. It checks for injected instructions, literal secrets, unsafe hooks, risky MCP server launches, and permission bypasses, and rates a committed project config above a setting in your own home directory. The check families follow AgentShield's rule taxonomy. When the AgentShield CLI is already installed, the review runs it locally; it never downloads it with `npx` or uses its auto-fix or remote analysis modes. Mentioning `agentshield` in a prompt also loads the skill.
+- Bundled design skills `unslop` ([heydamir/unslop](https://github.com/heydamir/unslop), CC BY 4.0) and the antislop rules from [miqdadbadjuber/anti-slop](https://github.com/miqdadbadjuber/anti-slop) (MIT): `antislop`, `antislop-ui`, `antislop-human`, `antislop-layoutmobile`, and `antislop-copywriting`. They load automatically: `unslop` for screens that look AI-generated or vibecoded, `antislop` when you name it, `antislop-human` for accessibility and contrast, `antislop-layoutmobile` for breakpoints and reflow, and `antislop-copywriting` for interface copy. The antislop design skills bring the `antislop` core with them. In SKC, antislop picks its during or after mode from the request instead of asking every session. `antislop-code` is not included.
+
+### Changed
+
+- `dim` and `muted` text in every bundled theme now reaches at least 4.5:1 contrast against the background, so hints and setting descriptions stay readable.
+- Theme icons are monochrome Unicode glyphs tinted by the theme instead of color emoji. Settings tabs show no icons in the Unicode preset, Plugins included; the Nerd Font and ASCII presets give every tab, including Notifications and Plugins, its own icon.
+- The welcome screen replaces the box-drawing logo with a one-line Sayknow-CLI wordmark and puts recent sessions ahead of release notes and shortcuts. Build metadata and shortcut labels drop as whole units when space is tight. The model, directory, and version stay on the status line; the welcome screen still prompts users to choose a model when none is set.
+- The idle composer placeholder shows only the newline hint. Steer and Queue keys appear only while the agent is busy. Thinking, model, and history hints remain on the welcome key row and in the `?` keymap.
+- The status line labels its values: the context percentage next to the model carries the context icon, and subscription billing reads `subscription` instead of `(sub)`.
+- The settings title, tab hint, footer hint, and on/off values are translated. Boolean settings show `on`/`off` instead of `true`/`false`, while the stored values are unchanged. About 80 previously untranslated setting labels now have translations in ko, ja, zh, de, es, and fr; Korean also gets the descriptions.
+- Settings keep the active tab bracketed and visible on one line, including on narrow terminals and without color. The main panel explains how to switch tabs and close it, and model defaults and unset model profiles have readable values.
+- Custom `Alt+0`–`Alt+9` bindings, including tool expansion, accept the legacy Escape-prefixed digit encoding in addition to CSI-u and modifyOtherKeys.
+- Numeric keypad digits and operators type text in Kitty-protocol terminals that omit the Num Lock bit, such as Ghostty, WezTerm, and kitty, and in application-keypad mode (`ESC O q`). Previously keypad `1` could act as End. Keypad keys held with Ctrl or Alt keep their navigation meaning.
+- Markdown tables draw a rule between body rows only when a row wraps.
+- Status-line action hints (`⌃P Open command palette` and similar) and the settings `Preview:` label follow the UI language.
+- A legacy flat `theme: light` setting now migrates to `blue-octopus-light` instead of the dark `blue-octopus` palette. A `theme.light: blue-octopus` value saved by an earlier migration is kept as an explicit choice; select `blue-octopus-light` under Settings › Appearance to switch.
+- User-facing text no longer uses em dashes. Model-facing prompts, tool descriptions, tool results, and machine-read output (ultragoal and team runtime messages, `skc session --json` error details, daemon result lines) keep their wording, as does the transcript's `New output — type to follow` notice.
+- The status line drops contextual action hints before the version when space runs out, so the version stays visible at common widths.
+- The settings tab bar fits more tabs per row; in Korean all tabs fit on one row at 110 columns.
+- When the composer placeholder's key hints don't fit, whole hints are dropped from the end instead of cutting one mid-label (`⌃C: Cle…`).
+- When an automatic resume is cancelled because session state changed while its checkpoint was saved, the `auto_resume_abandoned` log entry now lists what changed: `disposed`, `prompt_generation`, `messages_replaced`, or `tail_changed`. It also records the role of the last message.
+- Deep-interview now offers a standing `This is enough, stop at current ambiguity (X%)` option as the last choice on every interview-round question from round 1, regardless of the ambiguity score, so you can end the interview without typing "stop". Choosing it records `exit_reason: "user_enough"` with the ambiguity at exit, shows the remaining weakest dimensions as a residual-risk warning when ambiguity is still above the threshold, and then writes the spec as usual. The spec reports the exit reason, the ambiguity at exit, and a Residual Risks section. The previous round-3 minimum for early exit is removed. "stop", "cancel", and "abort" still stop immediately and save state for resume without writing a spec.
+- Ultragoal groups blocking review findings and focuses intermediate checks on the fix and affected behavior. Naming, wording, formatting, or style polish that cannot change behavior, interfaces, output, or workflow instructions no longer reopens work, and the final full verification gate is unchanged.
+
+### Fixed
+
+- A `task` call that fails or times out before returning a result no longer triggers `details.results.length` errors in the transcript. The renderer shows the tool's error text.
+- On macOS, `skc` now relaunches with a clean environment when any `MallocStackLogging*` variable is set, including `MallocStackLoggingLite` and `MallocStackLoggingDirectory`. Previously only `MallocStackLogging` and `MallocStackLoggingNoCompact` were detected. With the other names, every bash command printed `MallocStackLogging: can't turn off malloc stack logging because it was not enabled.` into the TUI.
+- Shift+Enter keeps inserting a newline after the first message in terminals that reset keyboard modes at a shell prompt, such as Tern. Rendered user messages no longer carry OSC 133 shell-prompt marks, which told the terminal SKC had exited and made it drop the Kitty keyboard flags.
+- With two or more queued steers, Esc during the continuation that delivered the first steer now silently interrupts and injects the next one instead of hard-aborting the turn and dumping it into the composer. A second Esc before the consumed steer is delivered still cancels and restores the queue to the composer.
+
 ## [0.7.25] - 2026-11-17
 
 ### Fixed

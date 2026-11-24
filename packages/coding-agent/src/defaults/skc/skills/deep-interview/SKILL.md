@@ -50,8 +50,8 @@ Inspired by the [Ouroboros project](https://github.com/Q00/ouroboros) which demo
 - When the locked topology has multiple active components, score and target each component explicitly so depth-first clarity on one component cannot hide ambiguity in siblings
 - Keep prompt payloads budgeted: summarize or trim oversized initial context/history before composing question, scoring, spec, or handoff prompts
 - If the user's initial context is oversized, create a concise prompt-safe summary first and wait for that summary before ambiguity scoring, question generation, or downstream execution handoff
-- Do not proceed to execution until ambiguity ≤ the resolved threshold for this run and the user explicitly approves a scoped execution path
-- Allow early exit with a clear warning if ambiguity is still high
+- Do not proceed to execution until ambiguity ≤ the resolved threshold for this run (or the user explicitly ended the interview early after seeing the residual-risk warning) and the user explicitly approves a scoped execution path
+- Offer a standing "This is enough, stop at current ambiguity" option on every interview-round question so the user can end the interview at any round without typing "stop"; an early exit always shows a clear residual-risk warning when ambiguity is still above the threshold
 - Persist interview state for resume across session interruptions
 - A multi-persona lateral-review panel convenes at ambiguity-milestone transitions (and before synthesizing any agent-supplied answer) to expose blind spots from independent perspectives
 - Refine free-text answers into a structured interpretation and confirm nothing is lost before scoring
@@ -365,6 +365,15 @@ GUESS: {your hypothesis} — {why you hold it}. If it is {the other reading} ins
 
 Options should include contextually relevant choices plus free-text, translated/localized according to `language.instruction` when present.
 
+**Standing early-exit option (every interview round, from round 1).** Every interview-round `ask` (Step 2b questions for round ≥ 1, including Phase 4a closure follow-ups) MUST list, as its final option, `This is enough, stop at current ambiguity ({score}%)`, where `{score}` is exactly the ambiguity shown on the Round line and in `deepInterview.ambiguity`. Offer it regardless of the ambiguity score or round number — above the threshold, at it, or below it — and never mark it as the recommended option. Localize the label per `language.instruction` while keeping the numeric percentage unchanged. It is not offered on the Round 0 topology gate, the Phase 4b Restate gate, the auto-answer threshold-crossing confirmation, or the Phase 5 execution gate; a `clarificationQuestion` re-ask repeats the original options, so it keeps the option. The Ask UI still adds its own free-text control; never imitate that control with this option.
+
+Selecting the standing option is an explicit **early proceed** (see Step 2f), not a round answer and not a hard cancellation:
+
+1. Do not run Step 2b′ auto-answer, Step 2b″ refine, Step 2c scoring, Step 2d progress, or Step 2e `record-round` enrichment for that selection; the runtime's `answered` shell for the round is the recorded exit evidence and stays unscored.
+2. Record the exit before anything else: `skc deep-interview write --input '{"state":{"exit_reason":"user_enough","exit_round":<n>,"exit_ambiguity":<current_ambiguity>}}' --json`, using the runtime-owned `current_ambiguity` (0..1) from the latest `read`/`apply`/`write` output.
+3. Show the early-exit warning: when ambiguity > threshold, state `Current ambiguity is {score}% (threshold: <resolvedThresholdPercent>)`, list the weakest component/dimension pairs with their scores and open gaps, and name the residual risk of proceeding; when ambiguity ≤ threshold, state that the threshold is already met. Do not follow it with a generic "continue anyway?" ask — the user already chose.
+4. Continue to Phase 4 crystallization as usual (closure audit, Restate gate, spec). The threshold itself is unchanged: an early exit never rewrites `threshold`, `current_ambiguity`, or round scores, and the spec reports the real ambiguity.
+
 After applying `language.instruction` to the visible question, options, and generated rationale, apply the self-proofread once to new prose only; preserve only the Round/Component/Targeting/Ambiguity line structure, fixed labels (including the `GUESS:` marker), numeric ambiguity value, component/target identifiers, and `deepInterview.*` metadata keys. Do not exempt generated natural-language rationale such as Why now or the guess text that follows the `GUESS:` marker.
 
 When calling `ask`, SHOULD include optional structured metadata so the runtime can record the round without manual state writes: `deepInterview.round_id?`, `deepInterview.round`, `deepInterview.component`, `deepInterview.dimension`, and `deepInterview.ambiguity`. Keep this metadata aligned with the visible Round/Component/Targeting/Ambiguity line; if metadata cannot be supplied, the legacy formatted question text remains the fallback.
@@ -602,11 +611,17 @@ To dispute: send `{ "id": "<fact-id>", "disputed": true }`. To supersede: send `
 
 Confirmation cadence is tiered by round, adopted from ouroboros's ooo interview, while the hard safety cap is retained:
 
-- **Rounds 1-3 (auto-continue)**: minimum context gathering — proceed to the next question without a "continue?" prompt.
-- **Rounds 4-15 (ask to continue)**: after each round, ask "Continue, or proceed with current clarity ({score}%)?" so the user controls depth.
+- **Rounds 1-3 (auto-continue)**: context gathering — proceed to the next question without a "continue?" prompt. This is not a minimum round for exiting: the standing early-exit option and explicit exit intents below stay available from round 1.
+- **Rounds 4-15 (ask to continue)**: after each round, ask "Continue, or proceed with current clarity ({score}%)?" so the user controls depth. Choosing to proceed there is an early proceed and follows the same Step 2b early-exit path.
 - **Rounds 16+ (diminishing-returns warning)**: keep asking "Continue?" but prefix a diminishing-returns warning: "We're at {n} rounds (ambiguity: {score}%); each further round yields less. Continue or proceed?"
-- **Round 3+ early exit**: still allow immediate exit if the user says "enough", "let's go", "build it".
 - **Round 100 (hard cap)**: "Maximum interview rounds reached. Proceeding with current clarity level ({score}%)." The tiered cadence never removes this hard safety cap.
+
+Explicit user exit keeps two distinct exit-intent classes in any session language:
+
+- **Hard cancellation**: "stop", "cancel", "abort", or equivalent stops immediately at any round and saves state for resume without writing a spec. Never turn a hard cancellation into a clarifying question.
+- **Early proceed**: selecting the standing `This is enough, stop at current ambiguity ({score}%)` option, or replying "enough", "let's go", "build it", or equivalent, ends the interview at any round (no minimum round) and follows the Step 2b early-exit path: record `exit_reason: "user_enough"`, show the early-exit warning when ambiguity > threshold, then crystallize. It produces a spec; do not treat that early-proceed intent as a hard cancellation, and do not convert it into another clarifying question.
+
+The user always keeps passive exit control: any answer, option, or free-text reply can carry an exit intent. Hard cancellations are honored immediately and save state without a spec; early-proceed intents end the interview with the residual-risk warning and a crystallized spec. The standing early-exit option makes the early-proceed path visible on every interview round, so the user never has to type an exit phrase.
 
 ## Phase 3: Lateral Review Panel (milestone-triggered)
 
@@ -651,6 +666,8 @@ Advisory fanout is an assist layer, not a decision maker: it never replaces or d
 
 When ambiguity ≤ threshold (or hard cap / early exit):
 
+**User early exit (`exit_reason: "user_enough"`).** When the user ended the interview through the standing early-exit option or an equivalent early-proceed reply, the 4a audit still runs, but every material gap it finds is recorded as a residual risk for the spec instead of becoming another follow-up question — the user has already declined further questioning, so do not override their exit with a closure follow-up. The 4b Restate gate still runs. If the user answers it with **Missing scope** (or otherwise asks to keep interviewing), clear the exit with `skc deep-interview write --input '{"state":{"exit_reason":null,"exit_round":null,"exit_ambiguity":null}}' --json` and resume Phase 2; the standing option stays available on every later round.
+
 **Before generating the spec, two gates must pass, in order:**
 
 **4a. Closure / Acceptance Guard.** Even when ambiguity ≤ threshold, do not treat the math as completion. Run an independent readiness audit from the full main-session perspective (including explore findings, established facts, and triggers the scorer may not have fully weighed). Confirm every active topology component has goal/constraint/criteria coverage, no unresolved or disputed trigger remains on a path that matters, and no low-confidence auto-answer is standing in for user-confirmed truth above the clarity cap. If a material gap exists, explicitly override the gate to the user — "The math says ready, but I am not accepting it yet because {gap}" — and ask the single highest-impact follow-up, returning to Phase 2. Record any override in `state.closure_overrides`.
@@ -681,6 +698,8 @@ Spec structure:
 - Threshold Source: <resolvedThresholdSource>
 - Initial Context Summarized: {yes|no}
 - Status: {PASSED | BELOW_THRESHOLD_EARLY_EXIT}
+- Exit Reason: {threshold_met | user_enough | hard_cap}
+- Ambiguity at Exit: {exit_ambiguity as a percentage, or the final ambiguity when the threshold was met}
 - Auto-Researched Rounds: {auto_researched_rounds}
 - Auto-Answered Rounds: {auto_answered_rounds}
 - Architect Failures: {architect_failures}
@@ -762,6 +781,9 @@ Spec structure:
 | 2 | {n} | {new} | {changed} | {stable} | {ratio}% |
 | ... | ... | ... | ... | ... | ... |
 | {final} | {n} | {new} | {changed} | {stable} | {ratio}% |
+
+## Residual Risks
+{Required whenever the closure audit found gaps (Phase 4a runs regardless of ambiguity threshold): list each weakest component/dimension with its score and open gap, every closure-audit gap recorded instead of asked, and the rework risk of proceeding. Otherwise write "None — no closure-audit gaps found".}
 
 ## Interview Transcript
 <details>
@@ -903,17 +925,24 @@ Why good: The lateral panel's contrarian persona challenges a specific assumptio
 </Good>
 
 <Good>
-Early exit with warning:
+Standing early-exit option with warning:
 ```
-User: "That's enough, just build it"
-System: "Current ambiguity is 35% (threshold: <resolvedThresholdPercent>). Areas still unclear:
+Round 2 | Component: Search | Targeting: Success Criteria | Why now: ranking quality has no testable bar yet | Ambiguity: 35%
+
+How should we judge that search ranking is good enough to ship?
+GUESS: a fixed query set with a top-3 hit rate — the request mentions relevance but no reviewers. If it is manual review instead, acceptance becomes a human sign-off step.
+  [Top-3 hit rate on a fixed query set] [Manual review of 20 queries] [No ranking bar for v1]
+  [This is enough, stop at current ambiguity (35%)]
+
+User selects: This is enough, stop at current ambiguity (35%)
+System: (records exit_reason=user_enough, exit_round=2, exit_ambiguity=0.35)
+"Current ambiguity is 35% (threshold: <resolvedThresholdPercent>). Areas still unclear:
   - Success Criteria: 0.5 (How do we verify the search ranking algorithm works correctly?)
   - Constraints: 0.6 (No performance targets defined yet)
-
-Proceeding may require rework. Continue anyway?"
-  [Yes, proceed] [Ask 2-3 more questions] [Cancel]
+Proceeding may require rework; these gaps go into the spec as residual risks."
+→ Phase 4 closure audit + Restate gate → spec with Exit Reason: user_enough
 ```
-Why good: Respects user's desire to stop but transparently shows the risk.
+Why good: The exit is one click away on every round, even round 2 and even well above the threshold; the user still sees the residual risk, and the spec records the real ambiguity instead of pretending the threshold was met.
 </Good>
 
 <Good>
@@ -950,8 +979,8 @@ Why bad: 45% ambiguity means nearly half the requirements are unclear. The mathe
 <Escalation_And_Stop_Conditions>
 - **Hard cap at 100 rounds**: Proceed with whatever clarity exists, noting the risk
 - **Soft warning at 10 rounds**: Offer to continue or proceed
-- **Early exit (round 3+)**: Allow with warning if ambiguity > threshold
-- **User says "stop", "cancel", "abort"**: Stop immediately, save state for resume
+- **Early exit (any round, standing option)**: every interview-round `ask` from round 1 offers `This is enough, stop at current ambiguity ({score}%)`; selecting it (or an equivalent early-proceed reply) records `exit_reason: "user_enough"` with `exit_ambiguity`, shows the residual-risk warning when ambiguity > threshold, then crystallizes the spec
+- **User says "stop", "cancel", "abort"**: Stop immediately, save state for resume (no spec; distinct from the early-exit option)
 - **Ambiguity stalls** (same score +-0.05 for 3 rounds): Activate Ontologist mode to reframe
 - **All dimensions at 0.9+**: Skip to spec generation even if not at round minimum
 - **Codebase exploration fails**: Proceed as greenfield, note the limitation
@@ -969,6 +998,7 @@ Why bad: 45% ambiguity means nearly half the requirements are unclear. The mathe
 - [ ] Free-text answers passed the Refine gate; dialectic rhythm guard forced a user question after 3 agent-resolved answers; any auto-answer threshold crossing explicitly confirmed
 - [ ] Closure / Acceptance Guard and the one-sentence Restate gate both passed before crystallization
 - [ ] Interview reached ambiguity ≤ threshold OR an explicit early exit with warning
+- [ ] Every interview-round `ask` from round 1 ended with the standing `This is enough, stop at current ambiguity ({score}%)` option; a user early exit persisted `exit_reason: "user_enough"`, `exit_round`, and `exit_ambiguity`, and the spec reports Exit Reason, Ambiguity at Exit, and Residual Risks
 - [ ] Spec persisted to `.skc/_session-{sessionid}/specs/deep-interview-{slug}.md` exactly via the SKC CLI (no direct `.skc/` edits without force override), covering every active topology component plus goal/constraints/acceptance criteria/clarity/ontology/transcript
 - [ ] Spec metadata includes the auto/lateral counters (`auto_researched_rounds`, `auto_answered_rounds`, `lateral_reviews`, `refined_rounds`, `architect_failures`, `lateral_panel_failures`)
 - [ ] Execution bridge presented via `ask`; execution invoked only after explicit approval through a public workflow entrypoint (never direct implementation); state cleaned up after handoff

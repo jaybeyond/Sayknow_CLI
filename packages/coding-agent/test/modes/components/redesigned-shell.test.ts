@@ -11,7 +11,7 @@ import { STATUS_LINE_PRESETS } from "@sayknow-cli/coding-agent/modes/components/
 import { UserMessageComponent } from "@sayknow-cli/coding-agent/modes/components/user-message";
 import { WelcomeComponent } from "@sayknow-cli/coding-agent/modes/components/welcome";
 import { resolveWelcomeLogoMode } from "@sayknow-cli/coding-agent/modes/interactive-mode";
-import { getEditorTheme, initTheme, theme } from "@sayknow-cli/coding-agent/modes/theme/theme";
+import { getEditorTheme, getSettingsListTheme, initTheme, theme } from "@sayknow-cli/coding-agent/modes/theme/theme";
 import type { AgentSession } from "@sayknow-cli/coding-agent/session/agent-session";
 import { type TUI, visibleWidth } from "@sayknow-cli/tui";
 import { ToolExecutionComponent } from "../../../src/modes/components/tool-execution";
@@ -96,7 +96,7 @@ beforeAll(async () => {
 describe("redesigned interactive shell chrome", () => {
 	it("renders the user prompt behind a rail instead of a labelled bubble", () => {
 		const lines = new UserMessageComponent("hello\n\nsecond paragraph").render(80);
-		const plain = lines.map(line => Bun.stripANSI(line).replace(/\x1b\]133;[ABC]\x07/g, ""));
+		const plain = lines.map(line => Bun.stripANSI(line));
 		const body = plain.slice(1);
 
 		expect(plain[0]!.trim()).toBe("");
@@ -132,11 +132,7 @@ describe("redesigned interactive shell chrome", () => {
 		const wideLines = new UserMessageComponent(prompt).render(160);
 		const contentWidths = (lines: string[]) =>
 			lines
-				.map(line =>
-					Bun.stripANSI(line)
-						.replace(/\x1b\]133;[ABC]\x07/g, "")
-						.trimEnd(),
-				)
+				.map(line => Bun.stripANSI(line).trimEnd())
 				.filter(line => line.includes("안녕하세요"))
 				.map(line => visibleWidth(line));
 
@@ -158,8 +154,10 @@ describe("redesigned interactive shell chrome", () => {
 		const lines = component.render(54);
 		const rendered = Bun.stripANSI(lines.join("\n"));
 
-		expect(rendered).toContain("╔═╗╔═╗");
-		expect(rendered).toContain("gpt-5.5");
+		expect(rendered).toMatch(/^ {2}Sayknow-CLI · /m);
+		expect(rendered).not.toContain("╔═╗╔═╗");
+		// The model lives on the status line; the launch card does not repeat it.
+		expect(rendered).not.toContain("gpt-5.5");
 		// No enclosing box: the wordmark and sections stand on the background.
 		expect(rendered).not.toContain("╭");
 		expect(rendered).not.toContain("│");
@@ -172,31 +170,27 @@ describe("redesigned interactive shell chrome", () => {
 		const component = new WelcomeComponent("1.2.3", "gpt-5.5", "openai");
 		const narrowLines = component.render(100);
 		const wideLines = component.render(160);
-		const titleRow = (lines: string[]) => Bun.stripANSI(lines.find(line => line.includes("╔═╗╔═╗")) ?? "");
+		const titleRow = (lines: string[]) => Bun.stripANSI(lines.find(line => line.includes("Sayknow-CLI")) ?? "");
 		const narrowTop = titleRow(narrowLines);
 		const wideTop = titleRow(wideLines);
 
 		expect(visibleWidth(narrowTop)).toBe(100);
 		expect(visibleWidth(wideTop)).toBe(160);
 		expect(visibleWidth(wideTop)).toBeGreaterThan(visibleWidth(narrowTop));
-		expect(wideTop).toContain("╔═╗╔═╗");
+		expect(wideTop).toMatch(/^ {2}Sayknow-CLI · /);
 		for (const line of wideLines) {
 			expect(visibleWidth(line)).toBeLessThanOrEqual(160);
 		}
 	});
 
-	it("keeps the launch card mascot-free in ASCII and Unicode modes", () => {
-		const ascii = Bun.stripANSI(
-			new WelcomeComponent("1.2.3", "gpt-5.5", "openai", [], "ascii").render(80).join("\n"),
-		);
-		const unicode = Bun.stripANSI(
-			new WelcomeComponent("1.2.3", "gpt-5.5", "openai", [], "unicode").render(80).join("\n"),
-		);
-
-		expect(ascii).toContain("Sayknow-CLI v1.2.3");
-		expect(ascii).not.toMatch(/[█▀▄╔\u{10eeee}]/u);
-		expect(unicode).toContain("╔═╗╔═╗");
-		expect(unicode).not.toMatch(/[▀▄\u{10eeee}]/u);
+	it("keeps the launch card to a text wordmark in ASCII and Unicode modes", () => {
+		for (const mode of ["ascii", "unicode"] as const) {
+			const rendered = Bun.stripANSI(
+				new WelcomeComponent("1.2.3", "gpt-5.5", "openai", [], mode).render(80).join("\n"),
+			);
+			expect(rendered).toMatch(/^ {2}Sayknow-CLI · /m);
+			expect(rendered).not.toMatch(/[█▀▄╔\u{10eeee}]/u);
+		}
 	});
 
 	it("resolves welcome banner auto and manual override modes", () => {
@@ -297,12 +291,13 @@ describe("redesigned interactive shell chrome", () => {
 		expect(stripped).toContain("          print('b')");
 	});
 
-	it("keeps OSC 133 prompt markers scoped to the message body", () => {
-		const rendered = new UserMessageComponent("hello").render(80);
+	it("renders user messages without OSC 133 shell-prompt marks", () => {
+		// A prompt mark tells some terminals (Tern) the program exited, so they reset
+		// the Kitty keyboard flags SKC pushed and Shift+Enter starts submitting.
+		const rendered = new UserMessageComponent("hello").render(80).join("");
 
-		expect(rendered[0]).not.toContain("\x1b]133;A\x07");
-		expect(rendered[1]).toContain("\x1b]133;A\x07");
-		expect(rendered[rendered.length - 1]).toContain("\x1b]133;B\x07\x1b]133;C\x07");
+		expect(rendered).toContain("hello");
+		expect(rendered).not.toMatch(/\x1b\]133;/);
 	});
 
 	it("budgets footer prefixes before truncating pulse", () => {
@@ -357,5 +352,29 @@ describe("redesigned interactive shell chrome", () => {
 		for (const line of first) {
 			expect(visibleWidth(line)).toBeLessThanOrEqual(96);
 		}
+	});
+});
+
+describe("settings and composer chrome text", () => {
+	it("shows stored boolean setting values as localized on/off and leaves other values alone", () => {
+		try {
+			setLanguage("en");
+			const en = getSettingsListTheme();
+			expect(Bun.stripANSI(en.value("true", false))).toBe("on");
+			expect(Bun.stripANSI(en.value("false", true))).toBe("off");
+			expect(Bun.stripANSI(en.value("auto", false))).toBe("auto");
+			setLanguage("ko");
+			const ko = getSettingsListTheme();
+			expect(Bun.stripANSI(ko.value("true", false))).toBe("켜짐");
+			expect(ko.footerHint).toBe("Enter/Space 변경 · Esc 취소");
+		} finally {
+			setLanguage("en");
+		}
+	});
+
+	it("marks the enabled primary composer action with bold, not color alone", () => {
+		const styled = getEditorTheme().actionStyle!("Send");
+		expect(styled).toContain("\x1b[1m");
+		expect(Bun.stripANSI(styled)).toBe("Send");
 	});
 });

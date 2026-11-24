@@ -5,9 +5,9 @@ import { getLanguage, setLanguage } from "../src/i18n";
 import {
 	type RecentSession,
 	resolveWelcomeIntroTickMs,
+	truncateAtWord,
 	WelcomeComponent,
 	type WelcomeComponentOptions,
-	type WelcomeSnapshot,
 } from "../src/modes/components/welcome";
 import { theme as activeTheme, getThemeByName, setThemeInstance } from "../src/modes/theme/theme";
 
@@ -31,13 +31,6 @@ afterAll(() => {
 
 const plain = (lines: string[]): string[] => lines.map(line => stripVTControlCharacters(line));
 
-const SNAPSHOT: WelcomeSnapshot = {
-	cwd: "~/Dev/sayknow-cli",
-	branch: "feature/card",
-	gitChanges: { staged: 2, unstaged: 5, untracked: 1 },
-	thinkingLevel: "xhigh",
-};
-
 const SESSIONS: RecentSession[] = Array.from({ length: 8 }, (_, index) => ({
 	name: `session-${index + 1}`,
 	timeAgo: `${index + 1}m ago`,
@@ -46,10 +39,7 @@ const SESSIONS: RecentSession[] = Array.from({ length: 8 }, (_, index) => ({
 const CHANGELOG = ["## [1.2.3]", "", "### Added", "", "- `/fork` is back", "- Second note", "- Third note"].join("\n");
 
 function card(options: WelcomeComponentOptions = {}, sessions: RecentSession[] = SESSIONS, width = 120): string[] {
-	const welcome = new WelcomeComponent("1.2.3", "Claude Opus 5.5", "anthropic", sessions, "unicode", {
-		snapshot: SNAPSHOT,
-		...options,
-	});
+	const welcome = new WelcomeComponent("1.2.3", "Claude Opus 5.5", "anthropic", sessions, "unicode", options);
 	return plain(welcome.render(width));
 }
 
@@ -62,37 +52,21 @@ describe("welcome intro cadence", () => {
 });
 
 describe("launch card content", () => {
-	it("shows the wordmark, then who and where: version, model with reasoning, path, branch and changes", () => {
+	it("shows the wordmark and build, leaving model, place and version to the status line", () => {
 		const lines = card({ buildLabel: "release build" });
 		const text = lines.join("\n");
-		expect(text).toContain("╔═╗╔═╗╦ ╦╦╔═╔╗╔╔═╗╦ ╦  ╔═╗╦  ╦");
-		expect(text).toContain("╚═╝╩ ╩ ╩ ╩ ╩╝╚╝╚═╝╚╩╝  ╚═╝╩═╝╩");
-		expect(text).toMatch(/Coding should feel like thinking\.\s+v1\.2\.3 · release build/);
-		expect(text).toContain("Claude Opus 5.5 · xhigh");
-		// Reclaiming the mascot's columns lets model and place share a row.
-		expect(lines.find(line => line.includes("~/Dev/sayknow-cli"))).toMatch(
-			/Claude Opus 5\.5 · xhigh {2}· {2}~\/Dev\/sayknow-cli · feature\/card \+2 ~5 \?1/,
-		);
-	});
-
-	it("keeps model and place on one row when both fit", () => {
-		const text = card({ snapshot: { cwd: "~/x", branch: "main", thinkingLevel: "high" } }).join("\n");
-		expect(text).toMatch(/Claude Opus 5\.5 · high {2}· {2}~\/x · main/);
-	});
-
-	it("moves the workspace below the model when the card is narrow", () => {
-		const lines = card({ snapshot: SNAPSHOT }, [], 52);
-		const modelLine = lines.findIndex(line => line.includes("Claude Opus 5.5"));
-		const projectLine = lines.findIndex(line => line.includes("~/Dev/sayknow-cli"));
-		expect(projectLine).toBe(modelLine + 1);
-		expect(lines[projectLine]).toContain("feature/card");
+		expect(lines[1]?.trim()).toBe("Sayknow-CLI · release build");
+		expect(text).not.toMatch(/[╔╚]/);
+		expect(text).not.toContain("Coding should feel like thinking.");
+		expect(text).not.toContain("v1.2.3");
+		expect(text).not.toContain("Claude Opus 5.5");
 	});
 
 	it("keeps the card short: three sessions, one release line, one row of keys", () => {
 		const text = card({ changelogMarkdown: CHANGELOG, getViewportRows: () => 80 }).join("\n");
 		expect(text).toContain("session-3");
 		expect(text).not.toContain("session-4");
-		expect(text).toMatch(/v1\.2\.3 +\/fork is back|v1\.2\.3 +\/changelog/);
+		expect(text).toContain("v1.2.3 · /fork is back · /changelog");
 		expect(text).toContain("/fork is back");
 		expect(text).not.toContain("Second note");
 		expect(text).toContain("/changelog");
@@ -104,7 +78,7 @@ describe("launch card content", () => {
 	it("names the key that opens the full session list", () => {
 		const text = card({ resumeKey: "alt+r", keyDisplayContext: { platform: "linux" } }).join("\n");
 		expect(text).toMatch(/Recent sessions ─+ Alt\+R all sessions/);
-		expect(text).toMatch(/\/ commands {2}· {2}Alt\+R sessions {2}· {2}Ctrl\+L model {2}· {2}\? keymap/);
+		expect(text).toMatch(/\/ commands {2}· {2}Ctrl\+L model {2}· {2}\? keymap/);
 
 		const unbound = card().join("\n");
 		expect(unbound).toContain("/resume all sessions");
@@ -119,7 +93,6 @@ describe("launch card content", () => {
 			"\n",
 		);
 		expect(mac).toContain("/resume all sessions");
-		expect(mac).toContain("/resume sessions");
 		expect(mac).not.toMatch(/⌥|Option|Alt\+R/);
 		// Control chords stay: they never compose into text.
 		expect(mac).toContain("continue");
@@ -129,41 +102,43 @@ describe("launch card content", () => {
 		const lines = card({ resumeKey: "alt+r", continueKey: "ctrl+q", keyDisplayContext: { platform: "linux" } });
 		const text = lines.join("\n");
 		expect(text).toMatch(/Recent sessions ─+ Ctrl\+Q continue · Alt\+R all sessions/);
-		expect(lines.find(line => line.includes("session-1"))).toMatch(/^ {2}› session-1/);
+		expect(lines.find(line => line.includes("session-1"))).toMatch(/^ {2}❯ session-1/);
 		expect(lines.find(line => line.includes("session-2"))).toMatch(/^ {4}session-2/);
 
 		// Without a continue key nothing is marked.
-		expect(card().find(line => line.includes("session-1"))).not.toContain("›");
+		expect(card().find(line => line.includes("session-1"))).not.toContain("❯");
 	});
 
 	it("collapses the release line to the version when asked", () => {
 		const text = card({ changelogMarkdown: CHANGELOG, collapseChangelog: true }).join("\n");
-		expect(text).toMatch(/v1\.2\.3 ─+ \/changelog/);
+		expect(text).toContain("v1.2.3 · /changelog");
 		expect(text).not.toContain("/fork is back");
 		expect(text).toContain("/changelog");
 		expect(card().join("\n")).not.toContain("/changelog");
 	});
 
 	it("guides model selection instead of printing Unknown", () => {
-		const welcome = new WelcomeComponent("1.2.3", "Unknown", "", [], "unicode");
-		const text = plain(welcome.render(120)).join("\n");
-		expect(text).toContain("choose a model");
-		expect(text).not.toContain("Unknown");
-	});
-
-	it("fills in probed git counts as they arrive", () => {
-		const welcome = new WelcomeComponent("1.2.3", "m", "p", [], "unicode", {
-			snapshot: { cwd: "~/x", branch: "main" },
+		const welcome = new WelcomeComponent("1.2.3", "Unknown", "", [], "unicode", {
+			keyDisplayContext: { platform: "linux" },
 		});
-		expect(plain(welcome.render(120)).join("\n")).not.toContain("~5");
-		welcome.setSnapshot({ gitChanges: { staged: 0, unstaged: 5, untracked: 0 } });
-		expect(plain(welcome.render(120)).join("\n")).toContain("main ~5");
+		const text = plain(welcome.render(26)).join("\n");
+		expect(text).toContain("choose a model · Ctrl+L");
+		expect(text).not.toContain("Unknown");
+		const cramped = plain(welcome.render(20)).find(line => line.includes("choose a model"));
+		expect(cramped?.trim()).toBe("choose a model");
 	});
 
-	it("keeps the tail of a long project path, the part that names the project", () => {
-		const text = card({ snapshot: { cwd: `~/${"deep/".repeat(30)}my-project`, branch: "main" } }).join("\n");
-		expect(text).toContain("my-project");
-		expect(text).toContain("…");
+	it("cuts the release note at a word boundary", () => {
+		expect(truncateAtWord("Rendering a streamed multi-question ask call no longer stalls", 40)).toBe(
+			"Rendering a streamed multi-question ask…",
+		);
+		expect(truncateAtWord("short note", 40)).toBe("short note");
+		expect(truncateAtWord("Supercalifragilisticexpialidocious", 10)).toBe("Supercali…");
+		// A word followed by punctuation is whole; the punctuation gives way to the ellipsis.
+		expect(truncateAtWord("Hello, world, again", 13)).toBe("Hello, world…");
+		expect(truncateAtWord("Fix it. Then ship the rest", 8)).toBe("Fix it…");
+		// A cut inside a word still drops that word.
+		expect(truncateAtWord("Fix the flaky login test today", 12)).toBe("Fix the…");
 	});
 });
 
@@ -172,28 +147,33 @@ describe("launch card layout", () => {
 		for (const mode of ["unicode", "square", "ascii"] as const) {
 			const lines = plain(new WelcomeComponent("1.2.3", "m", "p", SESSIONS, mode).render(120));
 			const text = lines.join("\n");
-			expect(lines[1]).toStartWith(mode === "ascii" ? "  Sayknow-CLI" : "  ╔═╗╔═╗");
+			expect(lines[1]).toStartWith("  Sayknow-CLI");
 			expect(text).not.toMatch(/[▀▄\u{10eeee}]/u);
 			expect(text).not.toContain("( oo )");
 		}
 	});
 
-	it("divides sections with rule headers", () => {
+	it("puts recent work above the quieter release and shortcut rows", () => {
 		const lines = card({ changelogMarkdown: CHANGELOG, resumeKey: "alt+r" });
-		expect(lines.find(line => line.includes("Recent sessions"))).toMatch(/Recent sessions ─{3,} /);
-		expect(lines.find(line => line.includes("/changelog"))).toMatch(/v1\.2\.3 \/fork is back ─{3,} \/changelog/);
+		const heading = lines.findIndex(line => line.includes("Recent sessions"));
+		const firstSession = lines.findIndex(line => line.includes("session-1"));
+		const release = lines.findIndex(line => line.includes("/changelog"));
+		const keys = lines.findIndex(line => line.includes("commands"));
+		expect(heading).toBeGreaterThan(1);
+		expect(lines[heading]).toMatch(/Recent sessions ─{3,} /);
+		expect(firstSession).toBe(heading + 1);
+		expect(release).toBeGreaterThan(firstSession);
+		expect(keys).toBeGreaterThan(release);
 	});
 
-	it("shows only the title in ASCII mode and drops the wordmark when narrow", () => {
+	it("keeps the wordmark and drops whole metadata and hints at narrow widths", () => {
 		const ascii = plain(new WelcomeComponent("1.2.3", "m", "p", [], "ascii").render(100)).join("\n");
-		expect(ascii).toContain("Sayknow-CLI v1.2.3");
-		expect(ascii).not.toMatch(/[█▀▄╔╚]/);
-
-		const narrow = card({}, SESSIONS, 36).join("\n");
-		expect(narrow).toContain("╔═╗╔═╗");
-		const tiny = card({}, SESSIONS, 26).join("\n");
-		expect(tiny).not.toContain("╔═╗");
-		expect(tiny).toContain("Sayknow-CLI");
+		expect(ascii).toMatch(/Recent sessions -{3,}/);
+		expect(ascii).not.toMatch(/[█▀▄╔╚─]/);
+		const narrow = card({ buildLabel: "a very long build label", continueKey: "ctrl+q" }, SESSIONS, 26);
+		expect(narrow[1]?.trim()).toBe("Sayknow-CLI");
+		expect(narrow.find(line => line.includes("Recent sessions"))?.trim()).toMatch(/^Recent sessions ─+$/);
+		expect(narrow.find(line => line.includes("commands"))?.trim()).toMatch(/^\/ commands(?: {2}· {2}.* model)?$/);
 	});
 
 	it("does not stretch across wide terminals", () => {
@@ -212,22 +192,21 @@ describe("launch card layout", () => {
 	it("drops keys, then the release line, then sessions when rows run short", () => {
 		const rows = (count: number) =>
 			card({ changelogMarkdown: CHANGELOG, getViewportRows: () => count, resumeKey: "alt+r" }).join("\n");
-		// Blank + wordmark/tagline/model and place + release + sessions + keys = 15.
-		const full = rows(15);
+		const full = rows(11);
 		expect(full).toContain("commands");
 		expect(full).toContain("/changelog");
 
-		const noKeys = rows(14);
+		const noKeys = rows(10);
 		expect(noKeys).not.toContain("commands");
 		expect(noKeys).toContain("/changelog");
 		expect(noKeys).toContain("session-1");
 
-		const sessionsOnly = rows(12);
+		const sessionsOnly = rows(7);
 		expect(sessionsOnly).not.toContain("/changelog");
 		expect(sessionsOnly).toContain("session-1");
 
-		const identityOnly = rows(7);
-		expect(identityOnly).toContain("╔═╗╔═╗");
+		const identityOnly = rows(6);
+		expect(identityOnly).toContain("Sayknow-CLI");
 		expect(identityOnly).not.toContain("session-1");
 	});
 
@@ -252,7 +231,7 @@ describe("launch card layout", () => {
 	it("renders the build label from metadata when no override is provided", () => {
 		process.env.SKC_BUILD_CHANNEL = "release";
 		const text = plain(new WelcomeComponent("1.2.3", "m", "p", [], "ascii").render(120)).join("\n");
-		expect(text).toContain("Sayknow-CLI v1.2.3 · release build");
+		expect(text).toContain("Sayknow-CLI · release build");
 		expect(text).not.toContain("dev build");
 	});
 });
@@ -302,9 +281,9 @@ describe("opening a session from the card", () => {
 		const text = plain(raw);
 		expect(text.join("\n")).toContain("↑↓ move · ⏎ open · esc back");
 		const row = raw.findIndex(line => Bun.stripANSI(line).includes("third"));
-		expect(text[row]).toMatch(/^ {2}› third/);
+		expect(text[row]).toMatch(/^ {2}❯ third/);
 		expect(raw[row]).toContain(activeTheme.getBgAnsi("selectedBg"));
-		expect(text.find(line => line.includes("first"))).not.toContain("›");
+		expect(text.find(line => line.includes("first"))).not.toContain("❯");
 
 		expect(welcome.openSelected()).toBe(true);
 		expect(opened.map(session => session.path)).toEqual(["/s/3.jsonl"]);
@@ -359,7 +338,7 @@ describe("opening a session from the card", () => {
 		welcome.select(0);
 		welcome.moveSelection(10);
 		expect(welcome.selectedIndex).toBe(3);
-		expect(plain(welcome.render(120))[allRow]).toMatch(/^ {2}› All sessions…/);
+		expect(plain(welcome.render(120))[allRow]).toMatch(/^ {2}❯ All sessions…/);
 		expect(welcome.openSelected()).toBe(true);
 		expect(showAll).toBe(1);
 		expect(opened).toEqual([]);

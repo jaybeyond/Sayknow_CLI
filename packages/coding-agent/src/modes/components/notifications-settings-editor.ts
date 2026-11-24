@@ -245,7 +245,7 @@ export class NotificationsSettingsEditorComponent implements Component, Focusabl
 	#state = emptyState();
 	#mode: EditorMode = "home";
 	#selectedIndex = 0;
-	#status = "INFO — Loading notification status…";
+	#status = "INFO: Loading notification status…";
 	#lastTest: NotificationTestResult | undefined;
 	#prepared: PreparedTelegramConfiguration | undefined;
 	#preflightIdentity: ProposedTelegramIdentity["status"] | undefined;
@@ -267,7 +267,7 @@ export class NotificationsSettingsEditorComponent implements Component, Focusabl
 	) {
 		this.#chatInput.onSubmit = () => {
 			this.#mode = "token-entry";
-			this.#status = "INFO — Paste the Telegram bot token. It is masked and never shown again.";
+			this.#status = "INFO: Paste the Telegram bot token. It is masked and never shown again.";
 		};
 		this.#chatInput.onEscape = () => this.#cancelCurrentMode();
 		this.#tokenInput.onSubmit = token => this.#startPreflight(token);
@@ -312,7 +312,7 @@ export class NotificationsSettingsEditorComponent implements Component, Focusabl
 		if (this.#disposed) return;
 		if (this.#guarded) {
 			this.#status =
-				"WARNING — Request in progress; it may already have been delivered or started. Navigation is locked.";
+				"WARNING: Request in progress; it may already have been delivered or started. Navigation is locked.";
 			return;
 		}
 		if (this.#cancellableWork) {
@@ -321,7 +321,7 @@ export class NotificationsSettingsEditorComponent implements Component, Focusabl
 					"Cancellable notification operation cancelled; saved configuration is unchanged.",
 				);
 			} else {
-				this.#status = "PENDING — Cancellable notification operation in progress. Press Esc to cancel it.";
+				this.#status = "PENDING: Cancellable notification operation in progress. Press Esc to cancel it.";
 			}
 			return;
 		}
@@ -387,7 +387,7 @@ export class NotificationsSettingsEditorComponent implements Component, Focusabl
 			this.#preferencesDraft = undefined;
 			this.#mode = "home";
 			this.#selectedIndex = 0;
-			this.#status = "INFO — Preference changes discarded.";
+			this.#status = "INFO: Preference changes discarded.";
 			return;
 		}
 		const keybindings = getKeybindings();
@@ -410,7 +410,7 @@ export class NotificationsSettingsEditorComponent implements Component, Focusabl
 				this.#preferencesDraft = undefined;
 				this.#mode = "home";
 				this.#selectedIndex = 0;
-				this.#status = "INFO — Preference changes discarded.";
+				this.#status = "INFO: Preference changes discarded.";
 				return;
 			}
 			this.#togglePreference(action.id);
@@ -425,7 +425,7 @@ export class NotificationsSettingsEditorComponent implements Component, Focusabl
 				this.#confirmation = undefined;
 				this.#mode = "home";
 				this.#selectedIndex = 0;
-				this.#status = "INFO — Confirmation cancelled; configuration is unchanged.";
+				this.#status = "INFO: Confirmation cancelled; configuration is unchanged.";
 			}
 			return;
 		}
@@ -445,7 +445,7 @@ export class NotificationsSettingsEditorComponent implements Component, Focusabl
 				this.#confirmation = undefined;
 				this.#mode = "home";
 				this.#selectedIndex = 0;
-				this.#status = "INFO — Confirmation cancelled; configuration is unchanged.";
+				this.#status = "INFO: Confirmation cancelled; configuration is unchanged.";
 			}
 		}
 	}
@@ -455,17 +455,17 @@ export class NotificationsSettingsEditorComponent implements Component, Focusabl
 			case "configure":
 				this.#mode = "provider-selection";
 				this.#selectedIndex = 0;
-				this.#status = "INFO — Select a notification provider to begin setup.";
+				this.#status = "INFO: Select a notification provider to begin setup.";
 				return;
 			case "telegram":
 				this.#mode = "chat-entry";
 				this.#selectedIndex = 0;
 				this.#chatInput.setValue("");
 				this.#tokenInput.clear();
-				this.#status = "INFO — Enter a private chat ID, or leave it blank for guided pairing discovery.";
+				this.#status = "INFO: Enter a private chat ID, or leave it blank for guided pairing discovery.";
 				return;
 			case "external":
-				this.#status = "INFO — Discord and Slack credentials are managed in their respective provider settings.";
+				this.#status = "INFO: Discord and Slack credentials are managed in their respective provider settings.";
 				return;
 			case "enable":
 				this.#enableGlobally();
@@ -498,7 +498,7 @@ export class NotificationsSettingsEditorComponent implements Component, Focusabl
 				this.#preferencesDraft = copyPreferences(this.#state.preferences);
 				this.#selectedIndex = 0;
 				this.#mode = "preferences";
-				this.#status = "INFO — Edit the draft, then explicitly save it atomically.";
+				this.#status = "INFO: Edit the draft, then explicitly save it atomically.";
 				return;
 			case "save":
 				this.#commitConfiguration();
@@ -526,7 +526,7 @@ export class NotificationsSettingsEditorComponent implements Component, Focusabl
 		this.#clearDrafts();
 		this.#mode = "home";
 		this.#selectedIndex = 0;
-		this.#status = "INFO — Setup cancelled; saved notification configuration is unchanged.";
+		this.#status = "INFO: Setup cancelled; saved notification configuration is unchanged.";
 	}
 
 	#clearDrafts(disposeSecret = false): void {
@@ -546,8 +546,8 @@ export class NotificationsSettingsEditorComponent implements Component, Focusabl
 		this.#pairingPhase = chatId ? "validation" : "discovery";
 		this.#mode = "pairing";
 		this.#status = chatId
-			? "PENDING — Private-chat validation in progress. Escape cancels before configuration changes."
-			: "PENDING — Pairing discovery in progress. Escape cancels before configuration changes.";
+			? "PENDING: Private-chat validation in progress. Escape cancels before configuration changes."
+			: "PENDING: Pairing discovery in progress. Escape cancels before configuration changes.";
 		this.#runCancellable(
 			signal =>
 				this.operations.preflightProposedIdentity(
@@ -566,14 +566,14 @@ export class NotificationsSettingsEditorComponent implements Component, Focusabl
 					this.#clearDrafts();
 					this.#mode = "home";
 					this.#selectedIndex = 0;
-					this.#status = "ABORTED — Pairing cancelled; saved notification configuration is unchanged.";
+					this.#status = "ABORTED: Pairing cancelled; saved notification configuration is unchanged.";
 					return;
 				}
 				if (result.status !== "ready" || !result.draft) {
 					this.#clearDrafts();
 					this.#mode = "home";
 					this.#selectedIndex = 0;
-					this.#status = `ERROR — ${safeDetail(result.message, "Telegram setup could not be completed.")}`;
+					this.#status = `ERROR: ${safeDetail(result.message, "Telegram setup could not be completed.")}`;
 					return;
 				}
 				this.#prepared = result.draft;
@@ -583,8 +583,8 @@ export class NotificationsSettingsEditorComponent implements Component, Focusabl
 				const identity = result.identity.status;
 				this.#status =
 					identity === "foreign" || identity === "unknown"
-						? `WARNING — ${safeDetail(result.message, "A foreign or unknown Telegram daemon identity blocks activation.")}`
-						: `OK — ${safeDetail(result.message, "Telegram setup is ready to save.")}`;
+						? `WARNING: ${safeDetail(result.message, "A foreign or unknown Telegram daemon identity blocks activation.")}`
+						: `OK: ${safeDetail(result.message, "Telegram setup is ready to save.")}`;
 			},
 		);
 	}
@@ -594,7 +594,7 @@ export class NotificationsSettingsEditorComponent implements Component, Focusabl
 		this.#clearDrafts();
 		this.#mode = "home";
 		this.#selectedIndex = 0;
-		this.#status = `ABORTED — ${message}`;
+		this.#status = `ABORTED: ${message}`;
 	}
 
 	#runCancellable<T>(work: (signal: AbortSignal) => Promise<T>, complete: (result: T) => void): void {
@@ -610,7 +610,7 @@ export class NotificationsSettingsEditorComponent implements Component, Focusabl
 				if (this.#disposed || controller.signal.aborted || controller !== this.#abortController) return;
 				this.#mode = "home";
 				this.#selectedIndex = 0;
-				this.#status = "ERROR — Cancellable notification operation failed safely; retry when ready.";
+				this.#status = "ERROR: Cancellable notification operation failed safely; retry when ready.";
 			} finally {
 				if (this.#cancellableWork === pending) this.#cancellableWork = undefined;
 			}
@@ -625,17 +625,17 @@ export class NotificationsSettingsEditorComponent implements Component, Focusabl
 				() => this.operations.refreshHealth({ probe: true }),
 				health => {
 					this.#state = { ...this.#state, health };
-					this.#status = `${statusLabel(health.overall)} — ${this.#healthSummary(health)}`;
+					this.#status = `${statusLabel(health.overall)}: ${this.#healthSummary(health)}`;
 				},
 			);
 			return;
 		}
-		this.#status = "PENDING — Refreshing notification health.";
+		this.#status = "PENDING: Refreshing notification health.";
 		this.#runCancellable(
 			signal => this.operations.refreshHealth({ probe: false, signal }),
 			health => {
 				this.#state = { ...this.#state, health };
-				this.#status = `${statusLabel(health.overall)} — ${this.#healthSummary(health)}`;
+				this.#status = `${statusLabel(health.overall)}: ${this.#healthSummary(health)}`;
 			},
 		);
 	}
@@ -643,7 +643,7 @@ export class NotificationsSettingsEditorComponent implements Component, Focusabl
 	#runGuarded<T>(pending: string, work: () => Promise<T>, complete: (result: T) => Promise<void> | void): void {
 		if (this.#guarded || this.#disposed) return;
 		this.#guarded = true;
-		this.#status = `PENDING — ${pending} Navigation is locked; it may already have started or delivered.`;
+		this.#status = `PENDING: ${pending} Navigation is locked; it may already have started or delivered.`;
 		void (async () => {
 			try {
 				const result = await work();
@@ -651,7 +651,7 @@ export class NotificationsSettingsEditorComponent implements Component, Focusabl
 				await complete(result);
 			} catch {
 				if (!this.#disposed) {
-					this.#status = "ERROR — Notification action failed safely. Retry when ready; no credential is shown.";
+					this.#status = "ERROR: Notification action failed safely. Retry when ready; no credential is shown.";
 				}
 			} finally {
 				if (!this.#disposed) this.#guarded = false;
@@ -683,7 +683,7 @@ export class NotificationsSettingsEditorComponent implements Component, Focusabl
 			async result => {
 				if (!(await this.#afterDurableMutation())) return;
 
-				this.#status = `OK — ${safeDetail(result.message, "Global notifications enabled using stored credentials.")}`;
+				this.#status = `OK: ${safeDetail(result.message, "Global notifications enabled using stored credentials.")}`;
 			},
 		);
 	}
@@ -699,7 +699,7 @@ export class NotificationsSettingsEditorComponent implements Component, Focusabl
 					if (!(await this.#afterDurableMutation())) return;
 					this.#mode = "home";
 					this.#selectedIndex = 0;
-					this.#status = `OK — ${safeDetail(result.message, "Notifications disabled globally.")}`;
+					this.#status = `OK: ${safeDetail(result.message, "Notifications disabled globally.")}`;
 				},
 			);
 			return;
@@ -712,7 +712,7 @@ export class NotificationsSettingsEditorComponent implements Component, Focusabl
 					if (!(await this.#afterDurableMutation())) return;
 					this.#mode = "home";
 					this.#selectedIndex = 0;
-					this.#status = `OK — ${safeDetail(
+					this.#status = `OK: ${safeDetail(
 						result.message,
 						result.globallyDisabled
 							? "Telegram removed and global notifications disabled."
@@ -737,18 +737,18 @@ export class NotificationsSettingsEditorComponent implements Component, Focusabl
 				this.#selectedIndex = 0;
 				switch (result.status) {
 					case "restored":
-						this.#status = "OK — Previous Telegram configuration restored after the blocked activation.";
+						this.#status = "OK: Previous Telegram configuration restored after the blocked activation.";
 						return;
 					case "conflict":
-						this.#status = `ERROR — Previous configuration was not restored because settings changed at: ${result.paths.join(", ")}. Saved configuration remains inactive.`;
+						this.#status = `ERROR: Previous configuration was not restored because settings changed at: ${result.paths.join(", ")}. Saved configuration remains inactive.`;
 						return;
 					case "still_blocked":
 						this.#status =
-							"ERROR — Previous configuration restored, but activation remains blocked by a foreign daemon. Current session remains inactive.";
+							"ERROR: Previous configuration restored, but activation remains blocked by a foreign daemon. Current session remains inactive.";
 						return;
 					case "discarded":
 						this.#status =
-							"WARNING — Previous configuration was not restored. Saved configuration remains inactive.";
+							"WARNING: Previous configuration was not restored. Saved configuration remains inactive.";
 						return;
 				}
 			},
@@ -768,7 +768,7 @@ export class NotificationsSettingsEditorComponent implements Component, Focusabl
 				this.#mode = "home";
 				this.#selectedIndex = 0;
 				this.#status =
-					"WARNING — Configuration saved but activation blocked by a foreign daemon. Saved configuration remains inactive.";
+					"WARNING: Configuration saved but activation blocked by a foreign daemon. Saved configuration remains inactive.";
 			},
 		);
 	}
@@ -779,8 +779,8 @@ export class NotificationsSettingsEditorComponent implements Component, Focusabl
 		this.#selectedIndex = 1;
 		this.#status =
 			action === "disable"
-				? "WARNING — Disable globally stops configured adapters. Confirm explicitly to continue."
-				: "WARNING — Remove only Telegram credentials. Discord and Slack remain unchanged.";
+				? "WARNING: Disable globally stops configured adapters. Confirm explicitly to continue."
+				: "WARNING: Remove only Telegram credentials. Discord and Slack remain unchanged.";
 	}
 
 	#setSessionLocal(enabled: boolean): void {
@@ -791,10 +791,10 @@ export class NotificationsSettingsEditorComponent implements Component, Focusabl
 				if (!(await this.#refreshAfterOperation())) return;
 
 				if (!result.status.eligible) {
-					this.#status = "WARNING — Session notification controls are unavailable in this host session.";
+					this.#status = "WARNING: Session notification controls are unavailable in this host session.";
 					return;
 				}
-				this.#status = `OK — Session notifications ${result.status.locallyEnabled ? "enabled" : "disabled"}; runtime is ${
+				this.#status = `OK: Session notifications ${result.status.locallyEnabled ? "enabled" : "disabled"}; runtime is ${
 					result.status.running ? "active" : "inactive"
 				}.`;
 			},
@@ -809,7 +809,7 @@ export class NotificationsSettingsEditorComponent implements Component, Focusabl
 				this.#lastTest = result;
 				if (!(await this.#refreshAfterOperation())) return;
 
-				this.#status = `${result.ok ? "OK" : "ERROR"} — Test ${result.ok ? "delivered" : "failed"}: ${safeDetail(
+				this.#status = `${result.ok ? "OK" : "ERROR"}: Test ${result.ok ? "delivered" : "failed"}: ${safeDetail(
 					result.detail,
 					"No delivery detail returned.",
 				)}`;
@@ -824,7 +824,7 @@ export class NotificationsSettingsEditorComponent implements Component, Focusabl
 			async result => {
 				if (!(await this.#refreshAfterOperation())) return;
 
-				this.#status = `OK — Recovery scanned ${result.endpointsScanned} endpoint(s); removed ${result.endpointsRemoved.length}. ${safeDetail(
+				this.#status = `OK: Recovery scanned ${result.endpointsScanned} endpoint(s); removed ${result.endpointsRemoved.length}. ${safeDetail(
 					result.daemon.detail,
 					"Daemon recovery completed.",
 				)}`;
@@ -841,8 +841,8 @@ export class NotificationsSettingsEditorComponent implements Component, Focusabl
 
 				this.#status =
 					result === "blocked_identity"
-						? "ERROR — Telegram activation is blocked by a foreign daemon. Current session is stopped; foreign daemon untouched."
-						: `OK — Telegram daemon ${result}.`;
+						? "ERROR: Telegram activation is blocked by a foreign daemon. Current session is stopped; foreign daemon untouched."
+						: `OK: Telegram daemon ${result}.`;
 			},
 		);
 	}
@@ -851,7 +851,7 @@ export class NotificationsSettingsEditorComponent implements Component, Focusabl
 		const draft = this.#prepared;
 		if (!draft) {
 			this.#mode = "home";
-			this.#status = "ERROR — The setup draft expired. Re-enter the masked Telegram token.";
+			this.#status = "ERROR: The setup draft expired. Re-enter the masked Telegram token.";
 			return;
 		}
 		this.#runGuarded(
@@ -865,7 +865,7 @@ export class NotificationsSettingsEditorComponent implements Component, Focusabl
 					this.#confirmation = "blocked_identity";
 					this.#mode = "confirmation";
 					this.#selectedIndex = 0;
-					this.#status = `ERROR — ${safeDetail(
+					this.#status = `ERROR: ${safeDetail(
 						result.message,
 						"Configuration saved but activation blocked by a foreign daemon.",
 					)}`;
@@ -874,7 +874,7 @@ export class NotificationsSettingsEditorComponent implements Component, Focusabl
 				if (!(await this.#afterDurableMutation())) return;
 				this.#mode = "home";
 				this.#selectedIndex = 0;
-				this.#status = `OK — ${safeDetail(result.message, "Telegram configuration saved and reconciled.")}`;
+				this.#status = `OK: ${safeDetail(result.message, "Telegram configuration saved and reconciled.")}`;
 			},
 		);
 	}
@@ -888,7 +888,7 @@ export class NotificationsSettingsEditorComponent implements Component, Focusabl
 			async result => {
 				if (result.status === "unavailable") {
 					this.#mode = "review";
-					this.#status = `WARNING — ${safeDetail(result.guidance, "Save inactive is unavailable while another adapter is globally enabled.")}`;
+					this.#status = `WARNING: ${safeDetail(result.guidance, "Save inactive is unavailable while another adapter is globally enabled.")}`;
 					return;
 				}
 				if (!(await this.#afterDurableMutation())) return;
@@ -896,7 +896,7 @@ export class NotificationsSettingsEditorComponent implements Component, Focusabl
 				this.#clearDrafts();
 				this.#mode = "home";
 				this.#selectedIndex = 0;
-				this.#status = `OK — ${safeDetail(result.message, "Telegram configuration saved inactive; foreign daemon untouched.")}`;
+				this.#status = `OK: ${safeDetail(result.message, "Telegram configuration saved inactive; foreign daemon untouched.")}`;
 			},
 		);
 	}
@@ -912,7 +912,7 @@ export class NotificationsSettingsEditorComponent implements Component, Focusabl
 				this.#preferencesDraft = undefined;
 				this.#mode = "home";
 				this.#selectedIndex = 0;
-				this.#status = `OK — ${safeDetail(result.message, "Notification preferences saved atomically.")}`;
+				this.#status = `OK: ${safeDetail(result.message, "Notification preferences saved atomically.")}`;
 			},
 		);
 	}
@@ -1118,7 +1118,7 @@ export class NotificationsSettingsEditorComponent implements Component, Focusabl
 	}
 
 	#renderChatEntry(width: number): string[] {
-		const lines = [theme.bold(theme.fg("accent", "Telegram setup — private chat ID (optional)"))];
+		const lines = [theme.bold(theme.fg("accent", "Telegram setup, private chat ID (optional)"))];
 		this.#appendWrapped(
 			lines,
 			"Enter a Telegram private chat ID to validate it, or leave this blank for guided private-chat discovery when polling is safe. A live same-token daemon reuses and validates its stored chat without polling.",
@@ -1135,7 +1135,7 @@ export class NotificationsSettingsEditorComponent implements Component, Focusabl
 	}
 
 	#renderTokenEntry(width: number): string[] {
-		const lines = [theme.bold(theme.fg("accent", "Telegram setup — masked bot token"))];
+		const lines = [theme.bold(theme.fg("accent", "Telegram setup, masked bot token"))];
 		this.#appendWrapped(
 			lines,
 			"Paste the bot token. Only bullets render; the saved token is never prefilled or displayed.",
@@ -1157,7 +1157,7 @@ export class NotificationsSettingsEditorComponent implements Component, Focusabl
 			theme.bold(
 				theme.fg(
 					"accent",
-					validating ? "Telegram setup — private-chat validation" : "Telegram setup — pairing discovery",
+					validating ? "Telegram setup: private-chat validation" : "Telegram setup: pairing discovery",
 				),
 			),
 		];
@@ -1196,7 +1196,7 @@ export class NotificationsSettingsEditorComponent implements Component, Focusabl
 	}
 
 	#renderPreferences(width: number): string[] {
-		const lines = [theme.bold(theme.fg("accent", "Notification preferences — unsaved draft"))];
+		const lines = [theme.bold(theme.fg("accent", "Notification preferences, unsaved draft"))];
 		this.#appendWrapped(
 			lines,
 			"These safe scalar changes do not affect settings until Save preferences completes atomically.",
@@ -1316,7 +1316,7 @@ export class NotificationsSettingsEditorComponent implements Component, Focusabl
 		if (this.#lastTest && width >= 120) {
 			lines.push(
 				this.#truncate(
-					`  Last in-editor test: ${this.#lastTest.ok ? "OK" : "ERROR"} — ${safeDetail(this.#lastTest.detail, "No detail returned.")}`,
+					`  Last in-editor test: ${this.#lastTest.ok ? "OK" : "ERROR"}: ${safeDetail(this.#lastTest.detail, "No detail returned.")}`,
 					width,
 				),
 			);
@@ -1349,7 +1349,7 @@ export class NotificationsSettingsEditorComponent implements Component, Focusabl
 	}
 
 	#appendStatus(lines: string[], width: number): void {
-		const separator = " — ";
+		const separator = ": ";
 		const separatorIndex = this.#status.indexOf(separator);
 		const label = separatorIndex === -1 ? this.#status : this.#status.slice(0, separatorIndex);
 		const guidance = separatorIndex === -1 ? "" : this.#status.slice(separatorIndex + separator.length).trim();
@@ -1394,10 +1394,10 @@ export class NotificationsSettingsEditorComponent implements Component, Focusabl
 			const state = await this.operations.loadState();
 			if (this.#disposed || sequence !== this.#loadSequence) return;
 			this.#state = state;
-			if (state.health) this.#status = `${statusLabel(state.health.overall)} — ${this.#healthSummary(state.health)}`;
+			if (state.health) this.#status = `${statusLabel(state.health.overall)}: ${this.#healthSummary(state.health)}`;
 		} catch {
 			if (this.#disposed || sequence !== this.#loadSequence) return;
-			this.#status = "WARNING — Notification status is temporarily unavailable; refresh health to retry.";
+			this.#status = "WARNING: Notification status is temporarily unavailable; refresh health to retry.";
 		}
 	}
 }

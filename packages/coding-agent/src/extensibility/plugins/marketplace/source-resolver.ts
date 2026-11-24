@@ -52,7 +52,7 @@ async function resolveRelativeSource(
 	context: ResolveContext,
 ): Promise<{ dir: string; tempCloneRoot?: string }> {
 	if (!source.startsWith("./")) {
-		throw new Error(`Relative plugin source paths must start with "./" — got: "${source}"`);
+		throw new Error(`Relative plugin source paths must start with "./", got: "${source}"`);
 	}
 
 	if (!context.marketplaceClonePath) {

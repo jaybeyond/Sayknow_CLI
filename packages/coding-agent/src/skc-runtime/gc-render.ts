@@ -34,16 +34,16 @@ function renderRecord(record: GcRecord): string {
 	const target = record.path ?? record.id;
 	const pid = record.pid !== undefined ? ` pid=${record.pid}` : "";
 	const pidStatus = record.pid_status ? ` (${record.pid_status})` : "";
-	const note = record.detail ? ` — ${record.detail}` : "";
-	return `  [${actionLabel(record)}] ${target}${pid}${pidStatus} :: ${record.status} — ${record.reason}${note}`;
+	const note = record.detail ? `: ${record.detail}` : "";
+	return `  [${actionLabel(record)}] ${target}${pid}${pidStatus} :: ${record.status}: ${record.reason}${note}`;
 }
 
 export function buildGcReportText(report: GcReport): string {
 	const lines: string[] = [];
 	if (report.operation === "repair_session_index") {
-		lines.push("skc gc — session-index repair (other stores are report-only)");
+		lines.push("skc gc, session-index repair (other stores are report-only)");
 	} else {
-		lines.push(report.dry_run ? "skc gc — dry run (no changes made; pass --prune to remove)" : "skc gc — prune");
+		lines.push(report.dry_run ? "skc gc, dry run (no changes made; pass --prune to remove)" : "skc gc: prune");
 	}
 	lines.push("");
 

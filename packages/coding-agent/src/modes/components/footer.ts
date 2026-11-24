@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import { ThinkingLevel } from "@sayknow-cli/agent-core";
 import { type Component, padding, truncateToWidth, visibleWidth } from "@sayknow-cli/tui";
 import { formatNumber, getProjectDir } from "@sayknow-cli/utils";
+import { t } from "../../i18n";
 import { theme } from "../../modes/theme/theme";
 import type { AgentSession } from "../../session/agent-session";
 import { shortenPath } from "../../tools/render-utils";
@@ -177,7 +178,7 @@ export class FooterComponent implements Component {
 			const billingParts: string[] = [];
 			if (totalCost) billingParts.push(`$${totalCost.toFixed(3)}`);
 			if (normalizedPremiumRequests) billingParts.push(`★ ${formatNumber(normalizedPremiumRequests)}`);
-			if (usingSubscription) billingParts.push("(sub)");
+			if (usingSubscription) billingParts.push(t("statusline.subscription"));
 			if (billingParts.length > 0) statsParts.push(billingParts.join(" "));
 		}
 

@@ -1,4 +1,5 @@
 import blue_octopus from "./blue-octopus.json" with { type: "json" };
+import blue_octopus_light from "./blue-octopus-light.json" with { type: "json" };
 import claude_code from "./claude-code.json" with { type: "json" };
 import codex from "./codex.json" with { type: "json" };
 import glow_octopus from "./glow-octopus.json" with { type: "json" };
@@ -10,6 +11,7 @@ import violet_octopus from "./violet-octopus.json" with { type: "json" };
 
 export const defaultThemes = {
 	"blue-octopus": blue_octopus,
+	"blue-octopus-light": blue_octopus_light,
 	"claude-code": claude_code,
 	codex,
 	"glow-octopus": glow_octopus,

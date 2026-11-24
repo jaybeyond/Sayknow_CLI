@@ -634,7 +634,52 @@ function decodeModifyOtherKeysPrintable(data: string): string | undefined {
  * undefined for control sequences and modifier-only events.
  */
 export function decodePrintableKey(data: string): string | undefined {
-	return decodeKittyPrintable(data) ?? decodeModifyOtherKeysPrintable(data);
+	const input = normalizeKeypadText(data);
+	if (input !== data && input.length === 1) return input;
+	return decodeKittyPrintable(input) ?? decodeModifyOtherKeysPrintable(input);
+}
+
+/** Legacy terminals can encode Alt+digit as ESC followed by the digit. */
+function parseLegacyAltDigit(data: string): string | undefined {
+	return /^\x1b[0-9]$/.test(data) && data.length === 2 ? `alt+${data[1]}` : undefined;
+}
+
+const KITTY_KEYPAD_TEXT_PATTERN = /^\x1b\[(\d+)(?::\d*)?(?::\d+)?(?:;(\d+)(?::(\d+))?)?(?:;[\d:]*)?u$/;
+const SS3_KEYPAD_TEXT: Record<string, string> = {
+	j: "*",
+	k: "+",
+	m: "-",
+	n: ".",
+	o: "/",
+	p: "0",
+	q: "1",
+	r: "2",
+	s: "3",
+	t: "4",
+	u: "5",
+	v: "6",
+	w: "7",
+	x: "8",
+	y: "9",
+	X: "=",
+};
+
+/**
+ * Normalize unmodified text-producing keypad keys to the character they type.
+ *
+ * Kitty-protocol terminals send keypad digits with their own codepoints and omit
+ * the Num Lock bit for text-producing keys; navigation uses separate KP_* codes.
+ * Application-keypad mode sends the same keys as SS3 sequences.
+ */
+function normalizeKeypadText(data: string): string {
+	const ss3Text = data.length === 3 && data.startsWith("\x1bO") ? SS3_KEYPAD_TEXT[data[2] ?? ""] : undefined;
+	if (ss3Text) return ss3Text;
+	const match = data.match(KITTY_KEYPAD_TEXT_PATTERN);
+	if (!match || match[3] === "3") return data;
+	const codepoint = Number.parseInt(match[1] ?? "", 10);
+	const text = KITTY_NUMPAD_TEXT[codepoint] ?? KITTY_KEYPAD_OPERATOR_TEXT[codepoint];
+	const modifier = Number.parseInt(match[2] ?? "1", 10) - 1;
+	return text && (modifier & ~KITTY_LOCK_MASK) === 0 ? text : data;
 }
 
 /**
@@ -654,7 +699,12 @@ export function decodePrintableKey(data: string): string | undefined {
  * @param keyId - Key identifier (e.g., "ctrl+c", "escape", Key.ctrl("c"))
  */
 export function matchesKey(data: string, keyId: KeyId): boolean {
-	return matchesPsmuxModifiedEnter(data, keyId) || matchesKeyNative(data, keyId, kittyProtocolActive);
+	const input = normalizeKeypadText(data);
+	return (
+		matchesPsmuxModifiedEnter(input, keyId) ||
+		parseLegacyAltDigit(input) === keyId.trim().toLowerCase() ||
+		matchesKeyNative(input, keyId, kittyProtocolActive)
+	);
 }
 
 /**
@@ -666,5 +716,11 @@ export function matchesKey(data: string, keyId: KeyId): boolean {
  * @param data - Raw input data from terminal
  */
 export function parseKey(data: string): string | undefined {
-	return parsePsmuxModifiedEnter(data) ?? parseKeyNative(data, kittyProtocolActive) ?? undefined;
+	const input = normalizeKeypadText(data);
+	return (
+		parsePsmuxModifiedEnter(input) ??
+		parseLegacyAltDigit(input) ??
+		parseKeyNative(input, kittyProtocolActive) ??
+		undefined
+	);
 }

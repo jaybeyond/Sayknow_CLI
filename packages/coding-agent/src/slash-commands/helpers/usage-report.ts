@@ -53,7 +53,7 @@ function renderUsageReports(reports: UsageReport[], nowMs: number): string {
 				const limit = report.limits[index]!;
 				const window = limit.window?.label ?? limit.scope.windowId;
 				const tier = limit.scope.tier ? ` (${limit.scope.tier})` : "";
-				lines.push(`- ${limit.label}${tier}${window ? ` — ${window}` : ""}`);
+				lines.push(`- ${limit.label}${tier}${window ? `, ${window}` : ""}`);
 				lines.push(`  ${formatUsageReportAccount(report, limit, index)}: ${formatUsageAmount(limit)}`);
 				lines.push(`  ${renderAsciiBar(limit.amount.usedFraction)}`);
 				if (limit.window?.resetsAt) lines.push(`  resets in ${formatDuration(limit.window.resetsAt - nowMs)}`);

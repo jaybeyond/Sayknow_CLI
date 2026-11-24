@@ -11,6 +11,8 @@ export interface SettingItem {
 	description?: string;
 	/** Current value to display (right side) */
 	currentValue: string;
+	/** Presentation only: callbacks still receive the raw value. */
+	formatValue?: (value: string) => string;
 	/** If provided, Enter/Space cycles through these values */
 	values?: string[];
 	/** If provided, Enter opens this submenu. Receives current value and done callback. */
@@ -23,6 +25,8 @@ export interface SettingsListTheme {
 	description: (text: string) => string;
 	cursor: string;
 	hint: (text: string) => string;
+	/** Footer key hint; hosts pass a translated line. */
+	footerHint?: string;
 }
 
 export class SettingsList implements Component {
@@ -137,7 +141,7 @@ export class SettingsList implements Component {
 			const valueMaxWidth = width - usedWidth - 2;
 
 			const valueText = this.#theme.value(
-				truncateToWidth(item.currentValue, valueMaxWidth, Ellipsis.Omit),
+				truncateToWidth(item.formatValue?.(item.currentValue) ?? item.currentValue, valueMaxWidth, Ellipsis.Omit),
 				isSelected,
 			);
 
@@ -171,7 +175,12 @@ export class SettingsList implements Component {
 
 		// Add hint
 		lines.push("");
-		lines.push(truncateToWidth(this.#theme.hint("  Enter/Space to change · Esc to cancel"), width));
+		lines.push(
+			truncateToWidth(
+				this.#theme.hint(`  ${this.#theme.footerHint ?? "Enter/Space to change · Esc to cancel"}`),
+				width,
+			),
+		);
 
 		return lines;
 	}

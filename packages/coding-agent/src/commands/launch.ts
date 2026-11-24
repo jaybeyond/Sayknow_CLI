@@ -59,7 +59,7 @@ export async function persistCoordinatorLaunchFailure(
 }
 
 export default class Index extends Command {
-	static description = "Sayknow-CLI — an AI coding assistant";
+	static description = "Sayknow-CLI: an AI coding assistant";
 	static hidden = true;
 
 	static args = {

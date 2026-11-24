@@ -40,23 +40,45 @@ Source material:
   indented two spaces and are secondary. Do not invent rounded cards, shadow,
   or pixel-like padding. Preserve the compact one-cell vertical rhythm used by
   `Spacer(1)`.
+- **Contrast and punctuation:** `dim` and `muted` must stay at or above 4.5:1
+  against the theme background, because hints and descriptions carry real
+  information. Product copy uses no em dash; use a colon, comma, or period.
+  Two kinds of text keep their wording: model-facing text (prompts, tool
+  descriptions, tool results) and pinned contracts such as the manual-viewport
+  notice `New output — type to follow` and the daemon result head line.
+  Icons are monochrome Unicode glyphs tinted by a theme role, never color emoji.
+- **One home per fact:** model, place, branch, and version belong to the status
+  line. The welcome card shows only the build label, plus a choose-model call to
+  action when no model is set. The idle composer placeholder shows only the
+  newline hint; busy delivery keys (`Steer`, `Queue`) appear only while busy.
+  Status-line values carry their own label: the context percentage is prefixed
+  with the context icon and subscription billing reads `subscription`.
+- **Chrome text is localized:** settings titles, tab hints, footer hints,
+  boolean values (`on`/`off`, stored as `true`/`false`), setting labels, and
+  composer actions resolve through `t()`/`td()`; the `tui` package takes them as
+  optional theme fields with English fallbacks.
+- **Tables:** markdown tables draw a rule between body rows only when some row
+  wraps; single-line rows read from column alignment alone.
+
+### Launch screen
+
+Use the existing design system. A one-line Sayknow-CLI wordmark anchors the launch screen; the recent-session list is the primary content, not the brand or release note. Keep build metadata quiet and omit it as a unit when it does not fit. Align the list, release note and shortcuts to the same left edge; secondary information yields before recent sessions as the terminal gets shorter. On narrow terminals, keep complete shortcut labels rather than cutting a chord or its explanation in half. Preserve the keyboard selection cursor and band, the session picker, and the missing-model action. Use theme roles and the existing color-only intro; do not add layout motion.
 
 ### Frame and navigation anatomy
 
 The existing settings selector is a vertically stacked frame:
 
 1. a `DynamicBorder` renders a full-width sharp horizontal rule in `border`;
-2. a `TabBar` renders `Settings:` followed by tab chunks and the dim
-   `(tab to cycle)` hint;
+2. the localized `Settings:` title and tab strip share one row; brackets mark
+   the active tab even without color;
 3. one blank spacer row separates navigation from content;
 4. the selected tab content renders; and
 5. the same border closes the frame.
 
-`TabBar` gives each tab a leading/trailing space, leaves two spaces between
-chunks, and wraps *between chunks* when the next chunk exceeds the available
-visible width. It cycles with Tab/Right and Shift+Tab/Left. The tab label and
-hint can occupy their own lines at narrow widths; this is intentional rather
-than a reason to truncate tab identities.
+The settings tab strip keeps the active tab in view and shows contiguous neighbors
+when space allows. Ellipses indicate tabs outside the visible range. Tab/Right
+and Shift+Tab/Left still cycle through every tab. The main list footer names the
+Tab shortcut and Escape closes the settings panel.
 
 `SettingsList` uses a two-column row: cursor/indent, a label padded to a
 visible-width-aligned column capped at 30 cells, two spaces, then a truncated
@@ -64,7 +86,7 @@ value. The selected row uses the themed cursor; unselected rows reserve two
 spaces. It centers the selected item inside its `maxVisible` window, reports
 scroll position as `(current/total)`, places a blank row before the selected
 item description, and ends with the dim
-`Enter/Space to change · Esc to cancel` hint. Hosts that need stable height
+`Tab to switch · Enter change · Esc close` hint on the main panel. Hosts that need stable height
 reserve fixed description rows; the status-line custom editor reserves two.
 
 Submenus are a content replacement, not a modal overlay: a bold accent title,
@@ -266,6 +288,28 @@ record both manifest counts as 108 plus CJK review results.
 
 No raw third-party design corpus, screenshot, or reference asset is stored by
 this workflow.
+
+## Composer action rail
+
+The composer is a borderless rail row on the `userMessageBg` band. Its last
+input row ends in exactly two actions, two cells apart, inside the band:
+`@ Attach` and the submit action. The submit label names what the submit key
+does now (`Send`, `Steer`, or `Queue`), prefixed by that key's display string.
+It is bold `accent` only while there is a draft to send (bold keeps the
+state visible without color); otherwise both actions are `dim`. Every other row reserves the rail's width as blank band, so typed
+text wraps before the rail and never runs under it. The rail is dropped when
+it would leave fewer than 40 cells for typing.
+
+The labels are keyboard hints first: `@` is the key that starts an attachment,
+and the submit label shows its key. With mouse reporting on, clicking Attach
+inserts `@` (preceded by a space after a word) and opens file completion, and
+clicking the submit action submits the draft: an open slash-command list
+applies its highlighted item first, any other open completion list closes, and
+a partly typed slash command is completed. Clicks reach the rail while the
+transcript is scrolled by hand and right after returning to the live view,
+because the composer stays pinned at the bottom. Placeholder hints that don't
+fit drop whole `·` entries from the end, down to the bare `Type your message`
+lead; a key hint is never cut mid-label.
 
 ## Sticky transcript viewport contract
 

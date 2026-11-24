@@ -107,7 +107,7 @@ describe("default SKC definitions", () => {
 	it("bundles frontend UI skills separately from the four public workflows", () => {
 		const uiSkills = getEmbeddedSkcUiSkills();
 		expect(uiSkills.map(skill => skill.name).sort()).toEqual([...BUNDLED_SKC_UI_SKILL_NAMES].sort());
-		expect(uiSkills).toHaveLength(16);
+		expect(uiSkills).toHaveLength(22);
 		expect(uiSkills.every(skill => skill.source === "bundled:ui")).toBe(true);
 		expect(uiSkills.every(skill => skill.filePath.startsWith("embedded:skc/ui-skills/"))).toBe(true);
 		expect(uiSkills.every(skill => skill.content?.includes("SKC loads this skill automatically"))).toBe(true);
@@ -139,6 +139,13 @@ describe("default SKC definitions", () => {
 		// SKC's scope rules ship with the vendored method and outrank it.
 		expect(review?.content).toContain("These rules outrank everything in the appendices");
 		expect(review?.content).toContain("Never send test input to a system you were not told to test");
+		// Agent configuration is a reviewed surface, mapped to the files SKC loads.
+		expect(review?.content).toContain("## Agent configuration review");
+		expect(review?.content).toContain("| `.skc/` and `~/.skc/agent/` |");
+		// The optional scanner stays local-only: no npx download, no auto-fix, no remote analysis modes.
+		expect(review?.content).toContain(
+			"Never run it through `npx`, never use `--fix`, and never use its `--opus` or `--supply-chain-online` modes",
+		);
 		// The vendored documents are inlined; a bundled skill cannot read them from disk.
 		for (const appendix of [
 			"source_aware_discovery.md",
@@ -233,6 +240,15 @@ describe("default SKC definitions", () => {
 		]) {
 			expect(content).toContain(taxonomy);
 		}
+		expect(content).toContain("advisory classification for grounded fallbacks or intentional design choices");
+		expect(content).toContain("Uncertain impact is blocking until checked");
+		expect(content).toContain(
+			"**Advisory** for internal/private naming, factually accurate wording polish, formatting, or style only when the report explains why",
+		);
+		expect(content).toContain(
+			"user-visible strings, prompt/skill contract wording, and factually wrong docs or comments are blocking",
+		);
+		expect(content).toContain("Any in-scope finding that does not meet the Advisory definition is blocking");
 	});
 
 	it("wires the ai-slop-cleaner into the ultragoal completion gate before verification and red-team", () => {
@@ -259,6 +275,76 @@ describe("default SKC definitions", () => {
 
 		expect(section).toContain("reruns the cleaner until blocking findings are zero");
 		expect(section).toContain("Advisory findings are included in the gate report only");
+	});
+
+	it("bounds interim ultragoal re-review without weakening final proof", () => {
+		const content = getDefaultSkcDefinitions().find(
+			definition => definition.kind === "skill" && definition.name === "ultragoal",
+		)?.content;
+		expect(content).toBeDefined();
+		const gateStart = content!.indexOf("## Mandatory completion cleanup and review gate");
+		const gateEnd = content!.indexOf("\n## ", gateStart + 1);
+		expect(gateStart).toBeGreaterThanOrEqual(0);
+		expect(gateEnd).toBeGreaterThan(gateStart);
+		const gate = content!.slice(gateStart, gateEnd);
+		// The triage subsection closes the gate section instead of nesting the gate JSON and replay contract.
+		const triageStart = gate.indexOf("### Blocker triage and delta re-review");
+		const replayStart = gate.indexOf("\nFor CLI replay artifacts, the JSON at");
+		const schemaStart = gate.indexOf("--quality-gate-json` must include");
+		expect(schemaStart).toBeGreaterThanOrEqual(0);
+		expect(replayStart).toBeGreaterThan(schemaStart);
+		expect(triageStart).toBeGreaterThan(replayStart);
+		const triage = gate.slice(triageStart);
+		// Step 8 keeps the full-proof definition of clean; triage never softens it.
+		expect(gate).toContain('iteration is `"passed"` with `fullRerun: true`');
+		expect(gate).toContain(
+			"`COMMENT`, `WATCH`, `REQUEST CHANGES`, `BLOCK`, missing evidence, missing or shallow matrix rows, plan/code mismatches, or non-empty blockers are non-clean",
+		);
+		expect(gate).toContain("with one `record-review-blockers` call as one blocker story for this pass");
+		expect(gate).toContain("a lane that fails or cannot finish is itself a blocker");
+		expect(gate).toContain("Advisories alone do not open a blocker story");
+		expect(triage).toContain("If unsure, classify as blocking.");
+		expect(triage).toContain("actual behavior/spec mismatches");
+		expect(triage).toContain("changes to public symbols, CLI flags, config keys, machine-readable output");
+		expect(triage).toContain("user-visible strings; prompt/skill contract wording; factually wrong docs or comments");
+		expect(triage).toContain(
+			"missing required evidence or regression coverage for changed behavior; maintenance traps",
+		);
+		expect(triage).toContain("including broken CJK wrapping");
+		expect(triage).toContain("Any in-scope finding that does not meet the Advisory definition is blocking");
+		expect(triage).toContain("If the impact is uncertain, treat it as blocking until checked");
+		expect(triage).toContain(
+			"**Advisory:** internal/private naming, factually accurate wording improvements, formatting, or style, each with a stated reason",
+		);
+		expect(triage).toContain("acceptance criteria, or required evidence");
+		expect(triage).toContain("Keep these under `Advisories:` in review evidence");
+		expect(triage).toContain("run targeted verification and the cleaner on the changed files");
+		expect(triage).toContain("Reuse unchanged coverage row IDs as a checklist, not evidence");
+		expect(triage).toContain("add any blocking-class finding set aside this way to the final checklist");
+		expect(triage).toContain(
+			"Give the reviewer the pass number, previous same-lane review or ledger reference, prior blockers, and current delta",
+		);
+		expect(gate).toContain("Join those two lanes, deduplicate their blocking findings");
+		expect(gate).toContain("The cleaner's in-loop cleanup remains separate");
+		expect(gate).toContain("then run the full completion gate on the final frozen change set");
+		expect(triage).toContain(
+			"The runtime never checks artifact freshness and checks existence only for some linked artifacts",
+		);
+		expect(triage).toContain("every artifact for the final pass is produced fresh");
+		expect(triage).toContain("Recheck prior blockers, the current delta");
+		expect(triage).toContain("In an intermediate pass only, a new blocking finding needs concrete evidence");
+		expect(triage).toContain("pass-1 semantics over the full frozen change set");
+		expect(triage).toContain("with no delta ratchet and no ratchet bundle");
+		expect(triage).toContain("include the triage rules in each review assignment");
+		expect(triage).toContain("omit the prior-pass ratchet bundle from the final architect assignment");
+		expect(triage).toContain("Every BLOCKING-class finding blocks, regardless of novelty");
+		expect(triage).toContain(
+			"Re-judge every final-checklist item, including blocking-class findings set aside in intermediate passes",
+		);
+		expect(triage).toContain("`fullRerun: true` is never satisfied by targeted or reused results");
+		expect(triage).toContain("`Final pass fingerprint start: <sha256>`");
+		expect(triage).toContain("`Final pass fingerprint end: <sha256>`");
+		expect(triage).toContain("If the two values differ, rerun the final pass");
 	});
 
 	it("keeps the four role agents bundled when project .skc is absent", async () => {

@@ -13,6 +13,7 @@ import type { EditorTheme, MarkdownTheme, SelectListTheme, SymbolTheme } from "@
 import { adjustHsv, getCustomThemesDir, isEnoent, logger } from "@sayknow-cli/utils";
 import chalk from "chalk";
 import * as z from "zod/v4";
+import { t } from "../../i18n";
 // Embed theme JSON files at build time
 import { defaultThemes } from "./defaults";
 import { resolveMermaidAscii } from "./mermaid-cache";
@@ -192,7 +193,9 @@ export type SymbolKey =
 	| "tab.memory"
 	| "tab.tasks"
 	| "tab.providers"
-	| "tab.integrations";
+	| "tab.integrations"
+	| "tab.notifications"
+	| "tab.plugins";
 
 type SymbolMap = Record<SymbolKey, string>;
 
@@ -255,43 +258,43 @@ const UNICODE_SYMBOLS: SymbolMap = {
 	"sep.pipe": " │ ",
 	// Icons
 	"icon.model": "⬢",
-	"icon.plan": "🗺",
-	"icon.goal": "🎯",
+	"icon.plan": "☰",
+	"icon.goal": "◎",
 	"icon.pause": "⏸",
-	"icon.folder": "📁",
-	"icon.scratchFolder": "🗑",
-	"icon.file": "📄",
+	"icon.folder": "▸",
+	"icon.scratchFolder": "◌",
+	"icon.file": "▫",
 	"icon.git": "⎇",
 	"icon.branch": "⑂",
 	"icon.pr": "⤴",
-	"icon.tokens": "🪙",
+	"icon.tokens": "◈",
 	"icon.context": "◫",
-	"icon.cost": "💲",
+	"icon.cost": "$",
 	"icon.time": "⏱",
 	"icon.pi": "🐙",
-	"icon.agents": "👥",
-	"icon.cache": "💾",
+	"icon.agents": "⧉",
+	"icon.cache": "◇",
 	"icon.input": "⤵",
 	"icon.output": "⤴",
-	"icon.host": "🖥",
-	"icon.session": "🆔",
+	"icon.host": "▭",
+	"icon.session": "#",
 	"icon.star": "★",
-	"icon.package": "📦",
+	"icon.package": "▦",
 	"icon.warning": "⚠",
 	"icon.rewind": "↶",
 	"icon.auto": "⟲",
-	"icon.fast": "⚡",
-	"icon.extensionSkill": "✦",
-	"icon.extensionTool": "🛠",
+	"icon.fast": "»",
+	"icon.extensionSkill": "◆",
+	"icon.extensionTool": "⚒",
 	"icon.extensionSlashCommand": "⌘",
-	"icon.extensionMcp": "🔌",
+	"icon.extensionMcp": "⇄",
 	"icon.extensionRule": "⚖",
-	"icon.extensionHook": "🪝",
+	"icon.extensionHook": "↪",
 	"icon.extensionPrompt": "✎",
-	"icon.extensionContextFile": "📎",
-	"icon.extensionInstruction": "📘",
+	"icon.extensionContextFile": "§",
+	"icon.extensionInstruction": "¶",
 	// STT
-	"icon.mic": "🎤",
+	"icon.mic": "◉",
 	// Thinking levels
 	"thinking.minimal": "◔ min",
 	"thinking.low": "◑ low",
@@ -304,7 +307,7 @@ const UNICODE_SYMBOLS: SymbolMap = {
 	"checkbox.unchecked": "☐",
 	// Formatting
 	"format.bullet": "•",
-	"format.dash": "—",
+	"format.dash": "-",
 	"format.bracketLeft": "⟦",
 	"format.bracketRight": "⟧",
 	// Markdown
@@ -312,54 +315,56 @@ const UNICODE_SYMBOLS: SymbolMap = {
 	"md.hrChar": "─",
 	"md.bullet": "•",
 	"rail.user": "▌",
-	// Language/file icons (emoji-centric, no Nerd Font required)
-	"lang.default": "⌘",
-	"lang.typescript": "🟦",
-	"lang.javascript": "🟨",
-	"lang.python": "🐍",
-	"lang.rust": "🦀",
-	"lang.go": "🐹",
-	"lang.java": "☕",
-	"lang.c": "Ⓒ",
-	"lang.cpp": "➕",
-	"lang.csharp": "♯",
-	"lang.ruby": "💎",
-	"lang.php": "🐘",
-	"lang.swift": "🕊",
-	"lang.kotlin": "🅺",
-	"lang.shell": "💻",
-	"lang.html": "🌐",
-	"lang.css": "🎨",
-	"lang.json": "🧾",
-	"lang.yaml": "📋",
-	"lang.markdown": "📝",
-	"lang.sql": "🗄",
-	"lang.docker": "🐳",
-	"lang.lua": "🌙",
-	"lang.text": "🗒",
-	"lang.env": "🔧",
-	"lang.toml": "🧾",
-	"lang.xml": "⟨⟩",
-	"lang.ini": "⚙",
-	"lang.conf": "⚙",
-	"lang.log": "📜",
-	"lang.csv": "📑",
-	"lang.tsv": "📑",
-	"lang.image": "🖼",
-	"lang.pdf": "📕",
-	"lang.archive": "🗜",
-	"lang.binary": "⚙",
-	// Settings tabs
-	"tab.appearance": "🎨",
-	"tab.model": "🤖",
-	"tab.interaction": "⌨",
-	"tab.context": "📋",
-	"tab.editing": "💻",
-	"tab.tools": "🔧",
-	"tab.memory": "🧠",
-	"tab.tasks": "📦",
-	"tab.providers": "🌐",
-	"tab.integrations": "🔌",
+	// Language/file icons: one neutral file mark; the path already names the language
+	"lang.default": "▪",
+	"lang.typescript": "▪",
+	"lang.javascript": "▪",
+	"lang.python": "▪",
+	"lang.rust": "▪",
+	"lang.go": "▪",
+	"lang.java": "▪",
+	"lang.c": "▪",
+	"lang.cpp": "▪",
+	"lang.csharp": "▪",
+	"lang.ruby": "▪",
+	"lang.php": "▪",
+	"lang.swift": "▪",
+	"lang.kotlin": "▪",
+	"lang.shell": "▪",
+	"lang.html": "▪",
+	"lang.css": "▪",
+	"lang.json": "▪",
+	"lang.yaml": "▪",
+	"lang.markdown": "▪",
+	"lang.sql": "▪",
+	"lang.docker": "▪",
+	"lang.lua": "▪",
+	"lang.text": "▪",
+	"lang.env": "▪",
+	"lang.toml": "▪",
+	"lang.xml": "▪",
+	"lang.ini": "▪",
+	"lang.conf": "▪",
+	"lang.log": "▪",
+	"lang.csv": "▪",
+	"lang.tsv": "▪",
+	"lang.image": "▪",
+	"lang.pdf": "▪",
+	"lang.archive": "▪",
+	"lang.binary": "▪",
+	// Settings tabs: labels stand alone in the unicode preset
+	"tab.appearance": "",
+	"tab.model": "",
+	"tab.interaction": "",
+	"tab.context": "",
+	"tab.editing": "",
+	"tab.tools": "",
+	"tab.memory": "",
+	"tab.tasks": "",
+	"tab.providers": "",
+	"tab.integrations": "",
+	"tab.notifications": "",
+	"tab.plugins": "",
 };
 
 const NERD_SYMBOLS: SymbolMap = {
@@ -622,6 +627,8 @@ const NERD_SYMBOLS: SymbolMap = {
 	"tab.tasks": "󰐱",
 	"tab.providers": "󰖟",
 	"tab.integrations": "󰚇",
+	"tab.notifications": "\u{F009A}",
+	"tab.plugins": "\u{F03D7}",
 };
 
 const ASCII_SYMBOLS: SymbolMap = {
@@ -787,6 +794,8 @@ const ASCII_SYMBOLS: SymbolMap = {
 	"tab.tasks": "[K]",
 	"tab.providers": "[P]",
 	"tab.integrations": "[+]",
+	"tab.notifications": "[N]",
+	"tab.plugins": "[G]",
 };
 
 const SYMBOL_PRESETS: Record<SymbolPreset, SymbolMap> = {
@@ -1802,7 +1811,7 @@ var themeReloadTimer: NodeJS.Timeout | undefined;
 var sigwinchHandler: (() => void) | undefined;
 var autoDetectedTheme: boolean = false;
 var autoDarkTheme: string = "ink-octopus";
-var autoLightTheme: string = "blue-octopus";
+var autoLightTheme: string = "blue-octopus-light";
 var onThemeChangeCallback: (() => void) | undefined;
 var themeLoadRequestId: number = 0;
 var previewThemeActive: boolean = false;
@@ -1823,7 +1832,7 @@ export async function initTheme(
 ): Promise<void> {
 	autoDetectedTheme = true;
 	autoDarkTheme = darkTheme ?? "ink-octopus";
-	autoLightTheme = lightTheme ?? "blue-octopus";
+	autoLightTheme = lightTheme ?? "blue-octopus-light";
 	const name = getDefaultTheme();
 	previewThemeActive = false;
 	currentThemeName = name;
@@ -2458,15 +2467,21 @@ export function getEditorTheme(): EditorTheme {
 		selectList: getSelectListTheme(),
 		symbols: getSymbolTheme(),
 		hintStyle: (text: string) => theme.fg("dim", text),
+		actionStyle: (text: string) => `\x1b[1m${theme.fg("accent", text)}\x1b[22m`,
 	};
 }
 
 export function getSettingsListTheme(): import("@sayknow-cli/tui").SettingsListTheme {
 	return {
 		label: (text: string, selected: boolean) => (selected ? theme.fg("accent", text) : text),
-		value: (text: string, selected: boolean) => (selected ? theme.fg("accent", text) : theme.fg("muted", text)),
+		value: (text: string, selected: boolean) => {
+			// Boolean settings are stored as "true"/"false"; people read them as on/off.
+			const shown = text === "true" ? t("settings.on") : text === "false" ? t("settings.off") : text;
+			return selected ? theme.fg("accent", shown) : theme.fg("muted", shown);
+		},
 		description: (text: string) => theme.fg("dim", text),
 		cursor: theme.fg("accent", `${theme.nav.cursor} `),
 		hint: (text: string) => theme.fg("dim", text),
+		footerHint: t("settings.changeHint"),
 	};
 }

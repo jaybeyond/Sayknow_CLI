@@ -2,6 +2,22 @@
 
 ## [Unreleased]
 
+### Added
+
+- `Editor.setActions()` draws clickable actions at the right end of a borderless editor's last input row and narrows the text area to match. It also adds `onAction`, `handleClick()`, `submit()`, and `beginFileReference()`, plus `EditorTheme.actionStyle` for an enabled primary action. `submit()` behaves like the submit key: an open slash-command list applies its highlighted item, and a partly typed slash command is completed.
+- `Container.handleClick()` sends a click to the child on that row, so clickable components keep working inside containers.
+- `SettingsListTheme.footerHint` and `TabBarTheme.hintText` let callers localize the settings footer and tab-cycle hint. The English text is the fallback.
+- `fitHintText()` fits `·`-separated hint text by dropping whole entries; the editor uses it for placeholders and ghost hints.
+
+### Changed
+
+- Markdown tables draw a rule between body rows only when at least one row wraps. Single-line rows rely on column alignment.
+- `TabBar` separates tabs by one cell instead of two, and shows the navigation hint only when it fits after the last tab instead of wrapping it onto a row of its own.
+- Clicks on the bottom-pinned component and the children after it land on the row actually drawn after the pinned area is padded to the terminal bottom. When the pinned area has to be trimmed to fit, its children stop receiving clicks.
+- While the transcript is scrolled by hand, and right after `followLiveViewport()` returns to the live view, clicks on the pinned rows at the bottom (status line and composer) reach the child drawn there instead of being dropped or landing on blank padding. Returning to the live view right after a resize or a scroll, before the next render, keeps the transcript and the pinned rows painted where they belong.
+- `TabBar` never draws a row of only spacing at narrow widths.
+- Slash-command suggestions join an argument hint and its description with ` · ` instead of an em dash.
+
 ## [0.7.25] - 2026-11-17
 
 ## [0.7.17] - 2026-11-05

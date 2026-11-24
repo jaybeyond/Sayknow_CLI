@@ -16,8 +16,8 @@
  * when nothing is.
  */
 import { logger } from "@sayknow-cli/utils";
-import { BUNDLED_SKC_UI_SKILL_NAMES, type BundledSkcUiSkillName } from "../defaults/skc-ui-skills";
-import { BUNDLED_UI_SKILL_MEANINGS, UI_SKILL_CORE } from "../hooks/ui-skill-keywords";
+import type { BundledSkcUiSkillName } from "../defaults/skc-ui-skills";
+import { BUNDLED_UI_SKILL_MEANINGS, type SemanticUiSkillName } from "../hooks/ui-skill-keywords";
 import { CANONICAL_SKC_WORKFLOW_SKILLS, type CanonicalSkcWorkflowSkill } from "../skill-state/active-state";
 import type { DecisionService } from "./index";
 import {
@@ -33,18 +33,19 @@ import type { Question } from "./types";
 const UI_INSTRUCTIONS =
 	"Which bundled UI craft skill should be loaded for this request? Choose none unless the request is about building, reviewing, or polishing a user-visible interface.";
 
+const SEMANTIC_UI_SKILLS = Object.keys(BUNDLED_UI_SKILL_MEANINGS) as SemanticUiSkillName[];
+
 /**
  * Exported so tests can assert the contract the model is actually given.
  *
  * The design center is not an option: every pick loads it first anyway, so
  * choosing it yields the same directive as choosing the craft baseline, and
- * leaving it out keeps the question under the backend's option ceiling.
+ * leaving it out keeps the question under the backend's option ceiling. The
+ * keyword-only skills are left out for the same ceiling.
  */
 export function buildUiSkillCriteria(): Record<string, string> {
 	const criteria: Record<string, string> = {};
-	for (const skill of BUNDLED_SKC_UI_SKILL_NAMES) {
-		if (skill !== UI_SKILL_CORE) criteria[skill] = BUNDLED_UI_SKILL_MEANINGS[skill];
-	}
+	for (const skill of SEMANTIC_UI_SKILLS) criteria[skill] = BUNDLED_UI_SKILL_MEANINGS[skill];
 	criteria[NONE_CHOICE] =
 		"Not interface work: backend, data, infrastructure, tooling, SKC's own terminal UI, or a question with no surface to build.";
 	return criteria;
@@ -135,7 +136,7 @@ export function createPromptTriage(service: DecisionService): PromptTriager {
 			: resolveChoice(result.answers.workflow, CANONICAL_SKC_WORKFLOW_SKILLS, result.calibrated, "workflow");
 		const uiSkill = request.skipUiSkill
 			? { value: null, confidence: undefined }
-			: resolveChoice(result.answers.uiSkill, BUNDLED_SKC_UI_SKILL_NAMES, result.calibrated, "uiSkill");
+			: resolveChoice(result.answers.uiSkill, SEMANTIC_UI_SKILLS, result.calibrated, "uiSkill");
 
 		logger.debug("decisions/prompt-triage: answered", {
 			workflow: workflow.value,

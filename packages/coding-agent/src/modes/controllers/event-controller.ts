@@ -1034,7 +1034,7 @@ export class EventController {
 		this.#clearRetryCountdown();
 		const reason = friendlyRetryReason(event.errorMessage);
 		const attemptLabel = event.unbounded ? `attempt ${event.attempt}` : `${event.attempt}/${event.maxAttempts}`;
-		const reasonSuffix = reason ? ` — ${reason}` : "";
+		const reasonSuffix = reason ? `: ${reason}` : "";
 		const deadline = Date.now() + event.delayMs;
 		const buildMessage = () => {
 			const remainingSeconds = Math.max(0, Math.round((deadline - Date.now()) / 1000));

@@ -1801,7 +1801,7 @@ describe("AskTool deep-interview rendering middleware", () => {
 		expect(prompt).toContain("Reading:");
 		expect(prompt).toContain("I'm currently reading the scope as these 2 top-level components.");
 		expect(prompt).toContain(
-			"1. Brand and theme system — red-octopus/SKC default theme and semantic color separation.",
+			"1. Brand and theme system: red-octopus/SKC default theme and semantic color separation.",
 		);
 		expect(prompt).toContain("Question:");
 		expect(prompt).not.toContain("Context:");

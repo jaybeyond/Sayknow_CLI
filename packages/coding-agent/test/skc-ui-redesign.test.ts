@@ -15,17 +15,17 @@ describe("SKC red-octopus redesign defaults", () => {
 		vi.restoreAllMocks();
 	});
 
-	it("uses ink-octopus on dark terminals and blue-octopus on light terminals", async () => {
+	it("uses ink-octopus on dark terminals and blue-octopus-light on light terminals", async () => {
 		themeModule.onTerminalAppearanceChange("dark");
 		await themeModule.initTheme(false);
 
 		expect(SETTINGS_SCHEMA["theme.dark"].default).toBe("ink-octopus");
-		expect(SETTINGS_SCHEMA["theme.light"].default).toBe("blue-octopus");
+		expect(SETTINGS_SCHEMA["theme.light"].default).toBe("blue-octopus-light");
 		expect(themeModule.getCurrentThemeName()).toBe("ink-octopus");
 
 		themeModule.onTerminalAppearanceChange("light");
 		await themeModule.initTheme(false);
-		expect(themeModule.getCurrentThemeName()).toBe("blue-octopus");
+		expect(themeModule.getCurrentThemeName()).toBe("blue-octopus-light");
 	});
 
 	it("keeps red-octopus brand tokens separate from semantic warning/error/diff tokens", async () => {
@@ -53,6 +53,7 @@ describe("SKC red-octopus redesign defaults", () => {
 
 		const expected = [
 			"blue-octopus",
+			"blue-octopus-light",
 			"claude-code",
 			"codex",
 			"glow-octopus",
@@ -65,7 +66,7 @@ describe("SKC red-octopus redesign defaults", () => {
 		expect(themes).toEqual(expected);
 		expect(Object.keys(defaultThemes).sort()).toEqual(expected);
 		expect(SETTINGS_SCHEMA["theme.dark"].default).toBe("ink-octopus");
-		expect(SETTINGS_SCHEMA["theme.light"].default).toBe("blue-octopus");
+		expect(SETTINGS_SCHEMA["theme.light"].default).toBe("blue-octopus-light");
 	});
 
 	it("validates every bundled built-in theme against the schema-required token set", async () => {

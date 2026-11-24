@@ -13,7 +13,7 @@ export type PetPixelProtocol = "sixel" | "kitty";
 
 export const PET_UNAVAILABLE_DESCRIPTION = "Unavailable: requires compatible Kitty or Sixel overlay rendering";
 export const PET_SAVED_UNAVAILABLE_DESCRIPTION =
-	"Saved, unavailable — requires compatible Kitty or Sixel overlay rendering";
+	"Saved, unavailable: requires compatible Kitty or Sixel overlay rendering";
 export const PET_UNAVAILABLE_WARNING =
 	"⚠ Pets aren’t available in this terminal. Its image support isn’t compatible with Sayknow Pet’s overlay rendering yet. Try Kitty, Ghostty, WezTerm, or a terminal with compatible Sixel support.";
 const PET_TMUX_UNAVAILABLE_WARNING =

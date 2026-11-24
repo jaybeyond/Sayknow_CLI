@@ -213,6 +213,66 @@ describe("automatic frontend UI skill routing", () => {
 		expect(motionsites).not.toContain("## Appendix: scroll.md");
 	});
 
+	it("routes AI-looking screens to unslop and antislop prompts to the antislop system", () => {
+		expect(leadSkill("unslop this vibecoded dashboard")).toBe("unslop");
+		expect(leadSkill("the pricing page looks AI-generated")).toBe("unslop");
+		expect(leadSkill("remove the ai slop from the settings screen")).toBe("unslop");
+		expect(leadSkill("이 화면 너무 ai 티 나")).toBe("unslop");
+		// Refine verbs on a screen that is not slop stay with impeccable.
+		expect(leadSkill("this dashboard looks too generic")).toBe("impeccable");
+
+		// The core filter brings its UI and human skills; the design skills bring the core.
+		expect(detectUiSkillKeywords("apply antislop to the checkout page").map(match => match.skill)).toEqual([
+			"stageshow",
+			"antislop",
+			"antislop-ui",
+			"antislop-human",
+			"emil-design-eng",
+		]);
+		expect(detectUiSkillKeywords("check color contrast on the login form").map(match => match.skill)).toEqual([
+			"stageshow",
+			"antislop-human",
+			"antislop",
+			"emil-design-eng",
+		]);
+		expect(leadSkill("접근성 점검해줘, 키보드 탐색이 안 돼")).toBe("antislop-human");
+		expect(leadSkill("rewrite the landing page copy so it stops sounding like a robot")).toBe("antislop-copywriting");
+		expect(leadSkill("버튼 문구 다듬어줘")).toBe("antislop-copywriting");
+		expect(leadSkill("the grid breaks at the tablet breakpoint")).toBe("antislop-layoutmobile");
+		// A landing page build is still a marketing surface, not a copy task.
+		expect(leadSkill("build a landing page for our sleep-tracking ring")).toBe("motionsites-web-builder");
+		expect(detectUiSkillKeywords("fix the ai ticket importer")).toEqual([]);
+		expect(detectUiSkillKeywords("remove AI slop from backend logs")).toEqual([]);
+		expect(leadSkill("use antislop-ui on the checkout page")).toBe("antislop-ui");
+	});
+
+	it("bundles unslop and the antislop design skills without upstream install steps", () => {
+		const skills = new Map(getEmbeddedSkcUiSkills().map(skill => [skill.name, skill.content ?? ""]));
+		const unslop = skills.get("unslop") ?? "";
+		for (const reference of ["signs", "tokens", "effects", "visuals", "refs", "rtl"]) {
+			expect(unslop).toContain(`## Appendix: ${reference}.md`);
+		}
+		// Embedded skills have no image files or scripts on disk: both come from the pinned commit.
+		const pinned = "https://raw.githubusercontent.com/heydamir/unslop/620163eedb3529d9cd23a3994ed8d287d06f760d/";
+		expect(unslop).toContain(`${pinned}skills/unslop/references/refs/unslop-hero-after.webp`);
+		expect(unslop).not.toContain("](refs/");
+		expect(unslop).toContain(`${pinned}skills/unslop/scripts/$f.mjs`);
+		expect(unslop).toContain("CC BY 4.0");
+
+		const core = skills.get("antislop") ?? "";
+		expect(core).toContain("## Mode in SKC");
+		expect(core).toContain("#### R-37");
+		expect(core).not.toContain("## Already installed, and the user asks how to update");
+		expect(core).not.toContain("## Two Usage Modes");
+		expect(core).not.toContain("npx antislop-ai --update");
+		expect(skills.get("antislop-ui")).toContain("## Appendix: CORE-WEB-VITALS.md");
+		const human = skills.get("antislop-human") ?? "";
+		expect(human).toContain("## Appendix: WCAG.md");
+		expect(human).toContain("Use the formula and table below");
+		expect(human).not.toContain("| python3 -");
+		expect(skills.has("antislop-code")).toBe(false);
+	});
+
 	it("routes transition-shaped prompts to the user-installed transitions-dev skill", () => {
 		expect(detectExternalUiSkills("add a skeleton loader")[0]?.skill).toBe("transitions-dev");
 		expect(detectExternalUiSkills("shimmer text while it loads")[0]?.skill).toBe("transitions-dev");

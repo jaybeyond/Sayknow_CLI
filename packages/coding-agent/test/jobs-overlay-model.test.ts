@@ -218,6 +218,6 @@ describe("jobs overlay model", () => {
 		const now = 1_000_000;
 		expect(formatRelative(now + 300_000, now)).toBe("in 5m");
 		expect(formatRelative(now - 120_000, now)).toBe("2m ago");
-		expect(formatRelative(undefined, now)).toBe("—");
+		expect(formatRelative(undefined, now)).toBe("-");
 	});
 });

@@ -12,6 +12,7 @@ import {
 } from "../../config/keybindings";
 import { settings } from "../../config/settings";
 import type { StatusLinePreset, StatusLineSegmentId, StatusLineSeparatorStyle } from "../../config/settings-schema";
+import { td } from "../../i18n";
 import { theme } from "../../modes/theme/theme";
 import type { AgentSession } from "../../session/agent-session";
 import { readVisibleSkillActiveState, type SkillActiveEntry } from "../../skill-state/active-state";
@@ -142,7 +143,7 @@ export function getAvailableActionHints(
 		if (keys.length === 0) continue;
 		const content =
 			theme.fg("dim", keybindings.getDisplayString(bindingId, keyDisplayContext)) +
-			theme.fg("muted", ` ${action.title}`);
+			theme.fg("muted", ` ${td(`action:${action.id}`, action.title)}`);
 		const nextWidth = visibleWidth(content) + (selected.length === 0 ? 0 : 3);
 		if (used + nextWidth > width) break;
 		selected.push({ id: action.id, content });
@@ -907,8 +908,6 @@ export class StatusLineComponent implements Component {
 				right.push(highlightSegment(segId, rendered.content));
 			}
 		}
-		right.push(...actionHints.map(hint => hint.content));
-
 		const runningBackgroundJobs =
 			this.session.getAsyncJobSnapshot()?.running.filter(job => job.metadata?.monitor !== true).length ?? 0;
 		if (runningBackgroundJobs > 0) {
@@ -919,6 +918,9 @@ export class StatusLineComponent implements Component {
 		if (this.#version) {
 			right.push(theme.fg("dim", `v${this.#version}`));
 		}
+		// Overflow pops from the end: contextual hints (also in the `?` keymap) give way
+		// before the version and running-job count.
+		right.push(...actionHints.map(hint => hint.content));
 
 		return {
 			ctx,

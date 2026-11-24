@@ -7,6 +7,7 @@ import type {
 	InteractiveModeContext,
 	SubmittedUserInput,
 } from "@sayknow-cli/coding-agent/modes/types";
+import type { AgentSessionEvent } from "@sayknow-cli/coding-agent/session/agent-session";
 import { associateSessionMessageViewportAnchorId } from "@sayknow-cli/coding-agent/session/session-manager";
 import { SubagentTool, type ToolSession } from "@sayknow-cli/coding-agent/tools";
 import type { SlashCommand } from "@sayknow-cli/tui";
@@ -73,6 +74,7 @@ function createContext(): {
 	ctx: InteractiveModeContext;
 	editor: FakeEditor;
 	inputListeners: FakeInputListener[];
+	emitSessionEvent: (event: AgentSessionEvent) => void;
 	spies: {
 		abort: ReturnType<typeof vi.fn>;
 		abortBash: ReturnType<typeof vi.fn>;
@@ -116,6 +118,16 @@ function createContext(): {
 	const handleBtwEscape = vi.fn(() => true);
 	const hasActiveBtw = vi.fn(() => false);
 	const inputListeners: FakeInputListener[] = [];
+	const sessionListeners = new Set<(event: AgentSessionEvent) => void>();
+	const subscribe = (listener: (event: AgentSessionEvent) => void) => {
+		sessionListeners.add(listener);
+		return () => {
+			sessionListeners.delete(listener);
+		};
+	};
+	const emitSessionEvent = (event: AgentSessionEvent) => {
+		for (const listener of [...sessionListeners]) listener(event);
+	};
 	const addInputListener = vi.fn((listener: FakeInputListener) => {
 		inputListeners.push(listener);
 		return () => {
@@ -192,6 +204,7 @@ function createContext(): {
 			retryNow,
 			clearQueue,
 			prompt,
+			subscribe,
 		} as unknown as InteractiveModeContext["session"],
 		sessionManager: {
 			getSessionName: () => "existing session",
@@ -235,6 +248,7 @@ function createContext(): {
 		ctx,
 		editor,
 		inputListeners,
+		emitSessionEvent,
 		spies: {
 			abort,
 			abortBash,
@@ -591,6 +605,31 @@ describe("InputController escape behavior", () => {
 		expect(spies.clearQueue).toHaveBeenCalledTimes(1);
 		expect(editor.getText()).toBe("stop after this");
 		expect(editor.shouldBypassAutocompleteOnEscape?.()).toBe(false);
+	});
+
+	it("treats Esc as a fresh steer consume once the continuation has started", () => {
+		const { ctx, editor, emitSessionEvent, spies } = createContext();
+		(ctx.session as { isStreaming: boolean; hasQueuedSteering: boolean }).isStreaming = true;
+		(ctx.session as { hasQueuedSteering: boolean }).hasQueuedSteering = true;
+		spies.clearQueue.mockReturnValue({ steering: ["second steer"], followUp: [] });
+		const controller = new InputController(ctx);
+
+		controller.setupKeyHandlers();
+		editor.onEscape?.(); // consumes the first steer
+		emitSessionEvent({ type: "agent_start" } as AgentSessionEvent); // continuation delivering it
+		editor.onEscape?.(); // the second steer is still queued: consume it too
+
+		expect(spies.abort).toHaveBeenCalledTimes(2);
+		expect(spies.abort.mock.calls[1]?.[0]).toMatchObject({ silent: true });
+		expect(spies.clearQueue).not.toHaveBeenCalled();
+		expect(editor.getText()).toBe("");
+
+		// The re-armed gesture keeps its own second-Esc cancel.
+		editor.onEscape?.();
+		expect(spies.abort).toHaveBeenCalledTimes(3);
+		expect(spies.abort.mock.calls[2]?.[0]?.silent).toBeUndefined();
+		expect(spies.clearQueue).toHaveBeenCalledTimes(1);
+		expect(editor.getText()).toBe("second steer");
 	});
 	it("interrupts an active stream even when the composer contains a draft", () => {
 		const { ctx, editor, spies } = createContext();

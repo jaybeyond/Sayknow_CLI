@@ -21,6 +21,7 @@ companion files here expecting them to be readable at runtime.
 | Upstream | License | Vendored |
 | --- | --- | --- |
 | [usestrix/strix](https://github.com/usestrix/strix) at `685bbc8` (Strix 1.7.1) | Apache-2.0 (`LICENSE.usestrix`), Copyright 2025 OmniSecure Inc. | `security-review`: SKC-authored entry (`scripts/ui-skill-overlays/security-review.entry.md`) with `strix/skills/analysis/source_aware_discovery.md`, `counterevidence.md`, `severity_calibration.md`, `fix_verification.md` and `strix/skills/scan_modes/diff.md` inlined |
+| [affaan-m/agentshield](https://github.com/affaan-m/agentshield) at `b089130` (ecc-agentshield 1.6.0) | MIT | Nothing vendored. The entry's "Agent configuration review" section is SKC-authored; its check families follow AgentShield's rule taxonomy, mapped to the configuration files SKC discovers. |
 
 Modified by SKC: each vendored document loses its YAML frontmatter, and its
 Jinja `{% if coverage_tools %}` conditionals are resolved to the branch without

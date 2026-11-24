@@ -205,8 +205,8 @@ export const deMsgs: Record<string, string> = {
 	"Only one role model available": "Nur ein Rollenmodell verfügbar",
 	"Opened:": "Geöffnet:",
 	"Paste handling": "Einfügeverhalten",
-	"Plan approved, but compaction was cancelled — execution not dispatched. Submit a turn to continue.":
-		"Plan genehmigt, aber Komprimierung abgebrochen — Ausführung nicht gestartet. Sende einen Zug, um fortzufahren.",
+	"Plan approved, but compaction was cancelled: execution not dispatched. Submit a turn to continue.":
+		"Plan genehmigt, aber Komprimierung abgebrochen: Ausführung nicht gestartet. Sende einen Zug, um fortzufahren.",
 	"Plan file not found at": "Plandatei nicht gefunden unter",
 	"Plan mode enabled. Plan file:": "Planmodus aktiviert. Plandatei:",
 	"Plan mode is disabled. Enable it in settings (plan.enabled).":
@@ -287,10 +287,10 @@ export const deMsgs: Record<string, string> = {
 	"Usage: /memory mm history <id>": "Verwendung: /memory mm history <id>",
 	"Usage: /memory mm show <id>": "Verwendung: /memory mm show <id>",
 	"Usage: /move <path>": "Verwendung: /move <Pfad>",
-	"Nothing to summarize yet — pass a title: /rename <title>":
-		"Noch nichts zum Zusammenfassen — gib einen Titel an: /rename <Titel>",
-	"Could not generate a session title — pass one: /rename <title>":
-		"Sitzungstitel konnte nicht erzeugt werden — gib einen an: /rename <Titel>",
+	"Nothing to summarize yet. Pass a title: /rename <title>":
+		"Noch nichts zum Zusammenfassen. Gib einen Titel an: /rename <Titel>",
+	"Could not generate a session title. Pass one: /rename <title>":
+		"Sitzungstitel konnte nicht erzeugt werden. Gib einen an: /rename <Titel>",
 	"Usage: /ssh add <name> --host <host> [--user <user>] [--port <port>] [--key <keyPath>] [--desc <description>] [--compat] [--scope project|user]":
 		"Verwendung: /ssh add <Name> --host <host> [--user <Benutzer>] [--port <Port>] [--key <Schlüsselpfad>] [--desc <Beschreibung>] [--compat] [--scope project|user]",
 	"Usage: /todo append [<phase>] <task...>": "Verwendung: /todo append [<Phase>] <Aufgabe...>",

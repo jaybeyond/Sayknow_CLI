@@ -1166,6 +1166,46 @@ describe("native SKC ultragoal runtime", () => {
 			else process.env.CI_DEV_CHANGED_PATHS = savedChangedPaths;
 		}
 	});
+
+	it("rejects validation batch deferred completion without a full rerun before mutation", async () => {
+		const root = await batchTempDir();
+		const plan = await createUltragoalPlan({
+			cwd: root,
+			brief: "@goal: A\na\n@goal: B\nb\n@goal: C\nc",
+			validationBatches: [
+				{ schemaVersion: 1, batchId: "VB001", memberIds: ["G001", "G002", "G003"], finalGoalId: "G003" },
+			],
+		});
+		await startNextUltragoalGoal({ cwd: root });
+		const dir = sessionUltragoalDir(root, TEST_SESSION_ID);
+		const goals = Bun.file(path.join(dir, "goals.json"));
+		const ledger = Bun.file(path.join(dir, "ledger.jsonl"));
+		const before = [await goals.text(), await ledger.text()];
+		for (const patch of [
+			{ fullRerun: false },
+			{ fullRerun: undefined },
+			{ status: "failed" },
+			{ rerunCommands: [] },
+		]) {
+			const gate = JSON.parse(deferredBatchGate("G001", plan.goals[0]!.validationBatch!));
+			Object.assign(gate.deferredToBatch.iteration, patch);
+			await expect(
+				checkpointUltragoalGoal({
+					cwd: root,
+					goalId: "G001",
+					status: "complete",
+					evidence: "only a targeted rerun was performed",
+					qualityGateJson: JSON.stringify(gate),
+				}),
+			).rejects.toThrow(
+				"rerunCommands" in patch
+					? "deferredToBatch.iteration.rerunCommands must be non-empty"
+					: "deferredToBatch.iteration must pass with fullRerun true",
+			);
+			expect([await goals.text(), await ledger.text()]).toEqual(before);
+		}
+	});
+
 	it("validation batch deferred: accepts deferred gate and rejects strict keys/uncovered paths", async () => {
 		const root = await batchTempDir();
 		await writeStructuralArtifacts(root);
@@ -3823,6 +3863,39 @@ describe("native SKC ultragoal runtime", () => {
 		expect(shallowGate.stderr).toContain("qualityGate contains unsupported keys");
 		expect(status.goals[0]?.status).toBe("active");
 		expect(status.counts.complete).toBe(0);
+	});
+
+	it("rejects incomplete fullRerun evidence before mutation", async () => {
+		const root = await tempDir();
+		await createUltragoalPlan({ cwd: root, brief: "Ship the fix" });
+		await startNextUltragoalGoal({ cwd: root });
+		await writeStructuralArtifacts(root);
+		const dir = sessionUltragoalDir(root, TEST_SESSION_ID);
+		const goals = Bun.file(path.join(dir, "goals.json"));
+		const ledger = Bun.file(path.join(dir, "ledger.jsonl"));
+		const before = [await goals.text(), await ledger.text()];
+		for (const patch of [
+			{ fullRerun: false },
+			{ fullRerun: undefined },
+			{ status: "failed" },
+			{ rerunCommands: [] },
+		]) {
+			const qualityGateJson = mutateQualityGate(gate => Object.assign(gate.iteration!, patch));
+			await expect(
+				checkpointUltragoalGoal({
+					cwd: root,
+					goalId: "G001",
+					status: "complete",
+					evidence: "rerun attempted",
+					qualityGateJson,
+				}),
+			).rejects.toThrow(
+				"rerunCommands" in patch
+					? "rerunCommands must be a non-empty string array"
+					: "iteration must be passed with fullRerun true",
+			);
+			expect([await goals.text(), await ledger.text()]).toEqual(before);
+		}
 	});
 
 	it("rejects shallow gates with missing command arrays before mutation", async () => {

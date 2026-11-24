@@ -196,7 +196,7 @@ fallback:
 
 ## TUI identity
 
-デフォルトの TUI アイデンティティは SKC の **ink-octopus** テーマ — タコの墨: 温かみのあるグラファイト、紙色の文字、琥珀色のアクセント 1 色 — でダークターミナルに適用され、ライトターミナルには **blue-octopus** が適用されます。より暗めでハイコントラストなパレットを好む人のために、温かみのある **red-octopus** バリアントも同梱されています。さらに 3 つの移行用テーマ — `claude-code`、`codex`、`opencode` — がそれらのツールの見た目を再現しており、視覚的な移行を容易にし、Settings または `/theme` から選択できます。ユーザーが明示的に設定したテーマは引き続き優先されます。
+デフォルトの TUI アイデンティティは SKC の **ink-octopus** テーマ — タコの墨: 温かみのあるグラファイト、紙色の文字、琥珀色のアクセント 1 色 — でダークターミナルに適用され、ライトターミナルには **blue-octopus-light** が適用されます。より暗めでハイコントラストなパレットを好む人のために、温かみのある **red-octopus** バリアントも同梱されています。さらに 3 つの移行用テーマ — `claude-code`、`codex`、`opencode` — がそれらのツールの見た目を再現しており、視覚的な移行を容易にし、Settings または `/theme` から選択できます。ユーザーが明示的に設定したテーマは引き続き優先されます。
 
 ### Bundled theme grid
 
@@ -204,7 +204,8 @@ Settings (`Appearance -> Dark theme` / `Light theme`) または `/theme` から�
 
 | Theme | Visual feel | Best fit |
 | --- | --- | --- |
-| `blue-octopus` | テンタクルブルーのアクセントを持つ青いタコのパレット。 | ライトターミナルのデフォルト。 |
+| `blue-octopus` | テンタクルブルーのアクセントを持つ青いタコのパレット。 | ダーク向けの代替。 |
+| `blue-octopus-light` | 明るい背景向けに濃いインクで描いた青いタコのパレット。 | ライトターミナルのデフォルト。 |
 | `red-octopus` | 強いステータスコントラストを持つ温かみのある赤いタコのバリアント。 | ハイコントラストなダークの代替。 |
 | `ink-octopus` | タコの墨 — 温かみのあるグラファイト背景、紙色の文字、琥珀色のアクセント 1 色。 | ダークターミナルのデフォルト。 |
 | `glow-octopus` | 深海の生物発光 — ティールがかった黒に発光グリーン、サブにバイオレット。 | 鮮やかなアクセントが欲しいダークターミナル。 |
@@ -274,7 +275,7 @@ bun test packages/coding-agent/test/default-skc-definitions.test.ts
 
 ## Inspirations and lineage
 
-Sayknow-CLI のデフォルト TUI アイデンティティはタコのファミリーです: ダークのデフォルト ink-octopus、ライトのデフォルト blue-octopus、そして red-octopus・glow-octopus・violet-octopus の代替。また、`claude-code`、`codex`、`opencode` の移行用テーマも同梱しており、これらのパレットはそれらのツールにインスパイアされているため、移行してくるユーザーが見慣れた見た目を得られます。これは、公開された SKC 面を意図的に集中させたまま、小さなエージェントハーネス一族からの教訓の上に構築されています。歴史的な帰属表示は [`NOTICE.md`](NOTICE.md) に保持されています。
+Sayknow-CLI のデフォルト TUI アイデンティティはタコのファミリーです: ダークのデフォルト ink-octopus、ライトのデフォルト blue-octopus-light、そして red-octopus・glow-octopus・violet-octopus の代替。また、`claude-code`、`codex`、`opencode` の移行用テーマも同梱しており、これらのパレットはそれらのツールにインスパイアされているため、移行してくるユーザーが見慣れた見た目を得られます。これは、公開された SKC 面を意図的に集中させたまま、小さなエージェントハーネス一族からの教訓の上に構築されています。歴史的な帰属表示は [`NOTICE.md`](NOTICE.md) に保持されています。
 
 ## License
 

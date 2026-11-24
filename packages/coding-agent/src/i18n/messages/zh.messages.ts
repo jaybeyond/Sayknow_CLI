@@ -199,8 +199,8 @@ export const zhMsgs: Record<string, string> = {
 	"Only one role model available": "仅有一个角色模型可用",
 	"Opened:": "已打开：",
 	"Paste handling": "粘贴处理",
-	"Plan approved, but compaction was cancelled — execution not dispatched. Submit a turn to continue.":
-		"计划已批准，但压缩被取消 — 未派发执行。提交一轮以继续。",
+	"Plan approved, but compaction was cancelled: execution not dispatched. Submit a turn to continue.":
+		"计划已批准，但压缩被取消: 未派发执行。提交一轮以继续。",
 	"Plan file not found at": "未找到计划文件：",
 	"Plan mode enabled. Plan file:": "已启用计划模式。计划文件：",
 	"Plan mode is disabled. Enable it in settings (plan.enabled).": "计划模式已禁用。请在设置中启用（plan.enabled）。",
@@ -279,8 +279,8 @@ export const zhMsgs: Record<string, string> = {
 	"Usage: /memory mm history <id>": "用法： /memory mm history <id>",
 	"Usage: /memory mm show <id>": "用法： /memory mm show <id>",
 	"Usage: /move <path>": "用法： /move <path>",
-	"Nothing to summarize yet — pass a title: /rename <title>": "还没有可总结的对话 — 请直接提供标题： /rename <title>",
-	"Could not generate a session title — pass one: /rename <title>": "无法生成会话标题 — 请直接提供： /rename <title>",
+	"Nothing to summarize yet. Pass a title: /rename <title>": "还没有可总结的对话。请直接提供标题： /rename <title>",
+	"Could not generate a session title. Pass one: /rename <title>": "无法生成会话标题。请直接提供： /rename <title>",
 	"Usage: /ssh add <name> --host <host> [--user <user>] [--port <port>] [--key <keyPath>] [--desc <description>] [--compat] [--scope project|user]":
 		"用法： /ssh add <name> --host <host> [--user <user>] [--port <port>] [--key <keyPath>] [--desc <description>] [--compat] [--scope project|user]",
 	"Usage: /todo append [<phase>] <task...>": "用法： /todo append [<phase>] <task...>",

@@ -13,7 +13,9 @@ bun scripts/build-ui-skill-bundle.ts \
   --source appllama=<checkout> \
   --source benjitaylor=<checkout> \
   --source pbakaus=<checkout> \
-  --source motionsites=<checkout>
+  --source motionsites=<checkout> \
+  --source heydamir=<checkout> \
+  --source miqdadbadjuber=<checkout>
 ```
 
 Only `SKILL.md` is compiled into the binary, and a bundled skill's `baseDir`
@@ -30,6 +32,8 @@ loose companion files here expecting them to be readable at runtime.
 | [benjitaylor/skills](https://github.com/benjitaylor/skills) at `299140f` (Stageshow 1.1.1, [write-up](https://benji.org/stageshow)) | MIT (`LICENSE.benjitaylor`, from `stageshow/LICENSE`), Copyright (c) 2026 Benji Taylor | `stageshow` (`SKILL.md`, `references/*.md` and `NOTICE.md` inlined) |
 | [pbakaus/impeccable](https://github.com/pbakaus/impeccable) at `613fbf8` (Impeccable 4.8.1, `.pi` build) | Apache-2.0 (`LICENSE.pbakaus`), Copyright 2025 Paul Bakaus | `impeccable` (`SKILL.md` and 17 engine-free `reference/*.md` files inlined, see exclusions). Modified by SKC: subset of references plus the overlay below |
 | [Motionsites-AI/claude-skill](https://github.com/Motionsites-AI/claude-skill) at `faa30d5` | MIT for the instructions, references and scripts (`LICENSE.motionsites`), Copyright (c) 2026 MotionSites | `motionsites-web-builder`: SKC-authored entry (`scripts/ui-skill-overlays/motionsites-web-builder.entry.md`, adapted from the upstream workflow) with `references/*.md` and `references/techniques/INDEX.md` inlined |
+| [heydamir/unslop](https://github.com/heydamir/unslop) at `620163e` | CC BY 4.0 (`LICENSE.heydamir`), by Damir Sokolovsky ([@heydamir](https://x.com/heydamir)) | `unslop` (`SKILL.md` and `references/*.md` inlined). Modified by SKC: the overlay below, and reference image links rewritten to the pinned commit |
+| [miqdadbadjuber/anti-slop](https://github.com/miqdadbadjuber/anti-slop) at `7f6a03d` (antislop 3.2.32) | MIT (`LICENSE.miqdadbadjuber`), Copyright (c) 2026 Miqdad Badjuber; the `antislop-ui` and `antislop-human` references adapt Addy Osmani's web-quality-skills, MIT (`LICENSE.addyosmani`) | `antislop`, `antislop-ui`, `antislop-human`, `antislop-layoutmobile`, `antislop-copywriting` (`SKILL.md` and `references/*.md` inlined). Modified by SKC: upstream update and mode sections are replaced by the overlays below |
 
 ## SKC overlays
 
@@ -41,6 +45,9 @@ block, so a regeneration keeps them.
 | --- | --- |
 | `stageshow`: "SKC: the design center — mandatory for all frontend work" | Makes Stageshow the bar for every frontend surface, says which rules apply to real UI versus faux UI, and how it fits with the other bundled skills |
 | `emil-design-eng`: "Stageshow is the design center — mandatory" | Points the craft baseline at `stageshow` and defers conflicts to it |
+| `unslop`: "SKC: how this bundled copy runs" | Keeps `stageshow` as the design center and says how to fetch `snapshot.mjs`, `story.mjs` and `story-path.mjs` from the pinned commit, since an embedded skill has no skill folder |
+| `antislop`: "SKC: how this bundled copy runs" | Keeps `stageshow` as the design center, infers the antislop mode from the request instead of asking on every prompt, and replaces the upstream update routes |
+| `antislop-human`: "SKC: the contrast checker" | Uses the bundled contrast formula or an existing local tool; the upstream script and MCP server are not bundled |
 | `impeccable`: "SKC: how this bundled copy runs" | Keeps `stageshow` as the design center, routes around the unbundled engine (`scripts/impeccable` launcher, detector, live mode, hooks), and maps every unbundled reference to the SKC skill that covers it |
 
 A layout `entry` replaces the upstream `SKILL.md` with an SKC-authored one while
@@ -66,6 +73,8 @@ skips its steps and takes upstream's own "Launcher unavailable" path.
 
 ## Deliberate exclusions
 
+- `antislop-code` (anti-slop): code comment hygiene, not design work. The antislop installer CLI, plugin manifests, `contrast-mcp.py` and the banner images are not vendored either.
+- unslop's `scripts/`, `examples/` and reference images: an embedded skill cannot read or run them. The images and scripts are read from the pinned commit `620163e` on demand.
 - `write-swift`, `animate-expo` (emilkowalski) — not web frontend craft.
 - `appllama-usage` (Appllama) — it exists only to drive the paid Appllama MCP
   (`mcp.appllama.io`). SKC neither ships nor enables that connector, so

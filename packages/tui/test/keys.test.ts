@@ -63,6 +63,31 @@ describe("matchesKey", () => {
 		setKittyProtocolActive(false);
 	});
 
+	it("treats unmodified keypad digits as text when the terminal omits the Num Lock bit", () => {
+		setKittyProtocolActive(true);
+		expect(parseKey("\x1b[57400u")).toBe("1");
+		expect(matchesKey("\x1b[57400u", "1")).toBe(true);
+		expect(matchesKey("\x1b[57400u", "end")).toBe(false);
+		expect(extractPrintableText("\x1b[57409;1u")).toBe(".");
+		expect(extractPrintableText("\x1b[57400;1:3u")).toBeUndefined();
+		expect(parseKey("\x1b[57400;5u")).toBe("ctrl+end");
+		setKittyProtocolActive(false);
+	});
+
+	it("decodes application-keypad SS3 digits and operators", () => {
+		for (const [input, text] of [
+			["\x1bOp", "0"],
+			["\x1bOq", "1"],
+			["\x1bOy", "9"],
+			["\x1bOn", "."],
+			["\x1bOk", "+"],
+		] as const) {
+			expect(parseKey(input)).toBe(text);
+			expect(extractPrintableText(input)).toBe(text);
+		}
+		expect(parseKey("\x1bOM")).toBe("enter");
+	});
+
 	it("matches keypad operators as their printable symbols", () => {
 		setKittyProtocolActive(true);
 		expect(matchesKey("\x1b[57410u", "/")).toBe(true);

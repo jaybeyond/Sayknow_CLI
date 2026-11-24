@@ -626,7 +626,7 @@ async function handleList(manager: PluginManager, flags: { json?: boolean }): Pr
 				.filter((v): v is string => Boolean(v))
 				.join(", ");
 			console.log(
-				`${status} ${plugin.name}@${plugin.version}${scopeLabel}${detail ? chalk.dim(` — ${detail}`) : ""}`,
+				`${status} ${plugin.name}@${plugin.version}${scopeLabel}${detail ? chalk.dim(`, ${detail}`) : ""}`,
 			);
 		}
 	}

@@ -196,7 +196,7 @@ fallback:
 
 ## TUI-Identität
 
-Die Standard-TUI-Identität ist das SKC-**ink-octopus**-Theme — Oktopus-Tinte: warmer Graphit, papierfarbener Text, ein Bernstein-Akzent — für dunkle Terminals, mit **blue-octopus** für helle Terminals. Eine warme **red-octopus**-Variante ist ebenfalls dabei für alle, die eine dunklere, kontrastreiche Palette bevorzugen. Drei zusätzliche Migrations-Themes — `claude-code`, `codex` und `opencode` — spiegeln das Aussehen dieser Tools für einen einfachen Augen-Umstieg wider und sind über Settings oder `/theme` auswählbar. Explizite Benutzer-Theme-Einstellungen gewinnen weiterhin.
+Die Standard-TUI-Identität ist das SKC-**ink-octopus**-Theme — Oktopus-Tinte: warmer Graphit, papierfarbener Text, ein Bernstein-Akzent — für dunkle Terminals, mit **blue-octopus-light** für helle Terminals. Eine warme **red-octopus**-Variante ist ebenfalls dabei für alle, die eine dunklere, kontrastreiche Palette bevorzugen. Drei zusätzliche Migrations-Themes — `claude-code`, `codex` und `opencode` — spiegeln das Aussehen dieser Tools für einen einfachen Augen-Umstieg wider und sind über Settings oder `/theme` auswählbar. Explizite Benutzer-Theme-Einstellungen gewinnen weiterhin.
 
 ### Raster der mitgelieferten Themes
 
@@ -204,7 +204,8 @@ Wählen Sie über Settings (`Appearance -> Dark theme` / `Light theme`) oder `/t
 
 | Theme | Visueller Eindruck | Beste Eignung |
 | --- | --- | --- |
-| `blue-octopus` | Blaue Oktopus-Palette mit tentakelblauen Akzenten. | Standard für helle Terminals. |
+| `blue-octopus` | Blaue Oktopus-Palette mit tentakelblauen Akzenten. | Dunkle Alternative. |
+| `blue-octopus-light` | Die blaue Oktopus-Palette in dunkler Tinte für helle Hintergründe. | Standard für helle Terminals. |
 | `red-octopus` | Warme rote Oktopus-Variante mit starkem Status-Kontrast. | Kontrastreiche dunkle Alternative. |
 | `ink-octopus` | Oktopus-Tinte — warmer Graphit-Hintergrund, papierfarbener Text, ein einziger Bernstein-Akzent. | Standard für dunkle Terminals. |
 | `glow-octopus` | Tiefsee-Biolumineszenz — Petrol-Schwarz mit leuchtendem Grün und Violett als Zweitfarbe. | Dunkle Terminals mit kräftigem Akzent. |
@@ -274,7 +275,7 @@ Beiträge, Fehlerberichte und Release-Validierung sind über GitHub Issues und P
 
 ## Inspirationen und Herkunft
 
-Die Standard-TUI-Identität von Sayknow-CLI ist die Oktopus-Familie: ink-octopus als dunkler Standard, blue-octopus als heller Standard sowie red-octopus, glow-octopus und violet-octopus als Alternativen. Es liefert außerdem die Migrations-Themes `claude-code`, `codex` und `opencode`, deren Paletten von diesen Tools inspiriert sind, damit Benutzer, die von ihnen wechseln, einen vertrauten Look erhalten. Es baut auf Erkenntnissen aus einer kleinen Familie von Agent-Harnesses auf und hält die öffentliche SKC-Oberfläche bewusst fokussiert. Die historische Zuordnung wird in [`NOTICE.md`](NOTICE.md) geführt.
+Die Standard-TUI-Identität von Sayknow-CLI ist die Oktopus-Familie: ink-octopus als dunkler Standard, blue-octopus-light als heller Standard sowie red-octopus, glow-octopus und violet-octopus als Alternativen. Es liefert außerdem die Migrations-Themes `claude-code`, `codex` und `opencode`, deren Paletten von diesen Tools inspiriert sind, damit Benutzer, die von ihnen wechseln, einen vertrauten Look erhalten. Es baut auf Erkenntnissen aus einer kleinen Familie von Agent-Harnesses auf und hält die öffentliche SKC-Oberfläche bewusst fokussiert. Die historische Zuordnung wird in [`NOTICE.md`](NOTICE.md) geführt.
 
 ## Lizenz
 

@@ -52,6 +52,7 @@ async function verifyThemeDefaults(): Promise<GateResult> {
 
 	const expectedBuiltIns = [
 		"blue-octopus",
+		"blue-octopus-light",
 		"claude-code",
 		"codex",
 		"glow-octopus",
@@ -65,6 +66,7 @@ async function verifyThemeDefaults(): Promise<GateResult> {
 		[...defaultIndex.matchAll(/^import /gm)].length === expectedBuiltIns.length &&
 		[...defaultIndex.matchAll(/^\t/gm)].length === expectedBuiltIns.length &&
 		defaultIndex.includes('"blue-octopus": blue_octopus') &&
+		defaultIndex.includes('"blue-octopus-light": blue_octopus_light') &&
 		defaultIndex.includes('"claude-code": claude_code') &&
 		defaultIndex.includes("\tcodex,") &&
 		defaultIndex.includes('"glow-octopus": glow_octopus') &&
@@ -78,12 +80,12 @@ async function verifyThemeDefaults(): Promise<GateResult> {
 		isRecord(blueOctopus.colors);
 
 	return {
-		name: "ink-octopus dark default, blue-octopus light default, red-octopus alternate, semantic token split",
+		name: "ink-octopus dark default, blue-octopus-light light default, red-octopus alternate, semantic token split",
 		passed:
 			settings.includes('default: "ink-octopus"') &&
-			settings.includes('default: "blue-octopus"') &&
+			settings.includes('default: "blue-octopus-light"') &&
 			themeRuntime.includes('autoDarkTheme: string = "ink-octopus"') &&
-			themeRuntime.includes('autoLightTheme: string = "blue-octopus"') &&
+			themeRuntime.includes('autoLightTheme: string = "blue-octopus-light"') &&
 			retainedBuiltIns &&
 			resolveColor(colors.accent, vars) === resolveColor(vars.tentacle, vars) &&
 			resolveColor(colors.error, vars) === resolveColor(vars.dangerRed, vars) &&
@@ -92,9 +94,9 @@ async function verifyThemeDefaults(): Promise<GateResult> {
 			semanticFindings.length === 0,
 		details: [
 			`settings dark default ink-octopus: ${settings.includes('default: "ink-octopus"')}`,
-			`settings light default blue-octopus: ${settings.includes('default: "blue-octopus"')}`,
+			`settings light default blue-octopus-light: ${settings.includes('default: "blue-octopus-light"')}`,
 			`runtime autoDarkTheme ink-octopus: ${themeRuntime.includes('autoDarkTheme: string = "ink-octopus"')}`,
-			`runtime autoLightTheme blue-octopus: ${themeRuntime.includes('autoLightTheme: string = "blue-octopus"')}`,
+			`runtime autoLightTheme blue-octopus-light: ${themeRuntime.includes('autoLightTheme: string = "blue-octopus-light"')}`,
 			`expected built-in themes (${expectedBuiltIns.join(", ")}): ${retainedBuiltIns}`,
 			`semantic collisions: ${semanticFindings.join("; ") || "<none>"}`,
 		],
@@ -184,18 +186,18 @@ async function verifyDocsBranding(): Promise<GateResult> {
 		name: "public docs current SKC cephalopod theme direction",
 		passed:
 			rootReadme.includes("default TUI identity is the SKC **ink-octopus** theme") &&
-			rootReadme.includes("**blue-octopus** for light terminals") &&
+			rootReadme.includes("**blue-octopus-light** for light terminals") &&
 			packageReadme.includes("defaults to the bundled `ink-octopus`") &&
 			packageReadme.includes("`red-octopus`") &&
 			themeDoc.includes('theme.dark = "ink-octopus"') &&
-			themeDoc.includes('theme.light = "blue-octopus"'),
+			themeDoc.includes('theme.light = "blue-octopus-light"'),
 		details: [
 			`README ink-octopus dark default: ${rootReadme.includes("default TUI identity is the SKC **ink-octopus** theme")}`,
-			`README blue-octopus light default: ${rootReadme.includes("**blue-octopus** for light terminals")}`,
+			`README blue-octopus-light light default: ${rootReadme.includes("**blue-octopus-light** for light terminals")}`,
 			`package README default ink-octopus: ${packageReadme.includes("defaults to the bundled `ink-octopus`")}`,
 			`package README red-octopus alternate: ${packageReadme.includes("`red-octopus`")}`,
 			`theme docs default dark ink-octopus: ${themeDoc.includes('theme.dark = "ink-octopus"')}`,
-			`theme docs default light blue-octopus: ${themeDoc.includes('theme.light = "blue-octopus"')}`,
+			`theme docs default light blue-octopus-light: ${themeDoc.includes('theme.light = "blue-octopus-light"')}`,
 		],
 	};
 }

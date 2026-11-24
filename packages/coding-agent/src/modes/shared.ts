@@ -1,4 +1,5 @@
 import type { TabBarTheme } from "@sayknow-cli/tui";
+import { t } from "../i18n";
 import { theme } from "./theme/theme";
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -33,6 +34,7 @@ export function getTabBarTheme(): TabBarTheme {
 		activeTab: (text: string) => theme.bold(theme.bg("selectedBg", theme.fg("text", text))),
 		inactiveTab: (text: string) => theme.fg("muted", text),
 		hint: (text: string) => theme.fg("dim", text),
+		hintText: t("settings.tabCycle"),
 	};
 }
 

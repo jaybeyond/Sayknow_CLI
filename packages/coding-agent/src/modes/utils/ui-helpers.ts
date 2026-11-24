@@ -236,7 +236,7 @@ export class CollapsedChatHistoryComponent implements Component {
 	}
 
 	render(_width: number): string[] {
-		const label = `[${this.count} earlier messages collapsed — ${formatChatCollapseTime(this.startTime)} to ${formatChatCollapseTime(this.endTime)}]`;
+		const label = `[${this.count} earlier messages collapsed: ${formatChatCollapseTime(this.startTime)} to ${formatChatCollapseTime(this.endTime)}]`;
 		return [theme.fg("dim", label)];
 	}
 

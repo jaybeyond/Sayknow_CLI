@@ -750,6 +750,6 @@ export function formatSessionImportSummary(result: SessionImportCompleted): stri
 }
 export function formatSessionImportError(error: unknown): string {
 	if (error instanceof SessionImportError)
-		return `Import failed: ${error.code} [${error.phase}]${error.retryable ? " (retryable)" : ""} — ${error.message}`;
-	return "Import failed: unexpected_error — An unexpected session import error occurred.";
+		return `Import failed: ${error.code} [${error.phase}]${error.retryable ? " (retryable)" : ""}: ${error.message}`;
+	return "Import failed: unexpected_error: An unexpected session import error occurred.";
 }

@@ -272,7 +272,7 @@ export function formatCacheWarningLine(warning: CacheBehaviorWarning): string {
 		return `Cache warning: ${warning.reason}; next step: ${warning.nextStep}.`;
 	}
 	if (warning.attribution === "provider-side-suspected") {
-		const detail = warning.unknown ? ` — ${warning.unknown}` : "";
+		const detail = warning.unknown ? `: ${warning.unknown}` : "";
 		return `Cache notice: ${warning.reason}; provider-side suspected / not user-actionable${detail}.`;
 	}
 	const detail = warning.unknown ? `; ${warning.unknown}` : "";

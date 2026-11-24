@@ -336,6 +336,7 @@ describe("SettingsSelectorComponent status line custom editor", () => {
 		try {
 			resetSettingsForTest();
 			await Settings.init({ agentDir });
+			setLanguage("en");
 			settings.set("statusLine.preset", "minimal");
 			settings.set("statusLine.leftSegments", []);
 			settings.set("statusLine.rightSegments", []);
@@ -349,6 +350,7 @@ describe("SettingsSelectorComponent status line custom editor", () => {
 
 			resetSettingsForTest();
 			await Settings.init({ agentDir });
+			setLanguage("en");
 
 			expect(settings.get("statusLine.preset")).toBe("custom");
 			expect(settings.get("statusLine.leftSegments")).toEqual(getPreset("minimal").leftSegments);

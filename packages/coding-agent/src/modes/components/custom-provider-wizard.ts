@@ -227,7 +227,7 @@ export class CustomProviderWizardComponent extends Container {
 
 	#renderConfirmStep(force: boolean): void {
 		this.#contentContainer.addChild(
-			new Text(theme.fg("accent", force ? "Provider exists — replace it?" : "Confirm custom provider")),
+			new Text(theme.fg("accent", force ? "Provider exists, replace it?" : "Confirm custom provider")),
 		);
 		this.#contentContainer.addChild(new Spacer(1));
 		if (this.#lastSubmitError) {

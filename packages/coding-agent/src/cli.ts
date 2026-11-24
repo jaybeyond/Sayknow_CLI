@@ -8,6 +8,7 @@ import "@sayknow-cli/utils/postmortem";
 import { THINKING_EFFORTS } from "@sayknow-cli/ai";
 import { Args, type CliConfig, Command, type CommandEntry, Flags, run } from "@sayknow-cli/utils/cli";
 import { APP_NAME, formatBunRuntimeError, MIN_BUN_VERSION, VERSION } from "@sayknow-cli/utils/dirs";
+import { isMacOSMallocStackLoggingEnvName } from "@sayknow-cli/utils/spawn-env";
 import { loadNative as loadNativeBindings } from "../../natives/native/loader-state.js";
 import { runFixtureReport } from "./cli/fixture-report";
 import { admitManagedOwnerBeforeCli, completeManagedOwnerRecovery } from "./skc-runtime/managed-owner-admission";
@@ -96,8 +97,9 @@ async function installRuntimeGlobals(): Promise<void> {
 	// reads it directly. Kept as belt-and-braces for the rare re-exec-unavailable
 	// fallback; managed spawns already use filterProcessEnv and the native PTY lane
 	// strips them independently.
-	delete process.env.MallocStackLogging;
-	delete process.env.MallocStackLoggingNoCompact;
+	for (const name of Object.keys(process.env)) {
+		if (isMacOSMallocStackLoggingEnvName(name)) delete process.env[name];
+	}
 }
 
 function isStatsHelpFastPath(argv: string[]): boolean {
@@ -241,7 +243,7 @@ function hasRootVersionFlag(argv: string[]): boolean {
 }
 
 export class RootHelpCommand extends Command {
-	static description = "Sayknow-CLI — an AI coding assistant";
+	static description = "Sayknow-CLI: an AI coding assistant";
 	static hidden = true;
 	static args = {
 		messages: Args.string({
@@ -407,11 +409,11 @@ export async function runCli(argv: string[]): Promise<void> {
 	// tmux-owner-isolation and notify-daemon fast paths so those lanes execute inside
 	// the already-scrubbed process too. The cheap inline predicate keeps the common
 	// (uncontaminated / non-darwin) path free of extra module loads; the guard module
-	// (MACOS_MALLOC_ENV_VARS / SKC_MALLOC_ENV_REEXEC) loads only when a re-exec is due.
+	// (SKC_MALLOC_ENV_REEXEC) loads only when a re-exec is due.
 	if (
 		process.platform === "darwin" &&
 		process.env.SKC_MALLOC_ENV_REEXEC === undefined &&
-		(process.env.MallocStackLogging !== undefined || process.env.MallocStackLoggingNoCompact !== undefined)
+		Object.keys(process.env).some(isMacOSMallocStackLoggingEnvName)
 	) {
 		const { reexecWithScrubbedMallocEnv } = await import("./cli/malloc-env-guard");
 		const code = await reexecWithScrubbedMallocEnv();

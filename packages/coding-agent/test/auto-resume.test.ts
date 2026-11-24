@@ -1538,6 +1538,117 @@ describe("automatic same-model resume", () => {
 		const last = session.agent.state.messages.findLast(message => message.role === "assistant") as AssistantMessage;
 		expect(last.stopReason).toBe("stop");
 	});
+
+	/** A completed read, then a read call cut mid-arguments by Bun's socket idle `TimeoutError`. */
+	async function readThenSocketTimeout(m: Model): Promise<Reply[]> {
+		const cutMidCall: Reply = () => {
+			const encoder = new TextEncoder();
+			const frames = [
+				anthropicFrames(m, [])[0],
+				af("content_block_start", {
+					type: "content_block_start",
+					index: 0,
+					content_block: { type: "tool_use", id: "toolu_cut", name: "read", input: {} },
+				}),
+				af("content_block_delta", {
+					type: "content_block_delta",
+					index: 0,
+					delta: { type: "input_json_delta", partial_json: '{"pa' },
+				}),
+			];
+			let next = 0;
+			const body = new ReadableStream<Uint8Array>(
+				{
+					pull(controller) {
+						if (next < frames.length) controller.enqueue(encoder.encode(frames[next++]));
+						else controller.error(new DOMException("The operation timed out.", "TimeoutError"));
+					},
+				},
+				{ highWaterMark: 0 },
+			);
+			return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
+		};
+		const readCall: Reply = sse([
+			anthropicFrames(m, [])[0],
+			af("content_block_start", {
+				type: "content_block_start",
+				index: 0,
+				content_block: { type: "tool_use", id: "toolu_read", name: "read", input: {} },
+			}),
+			af("content_block_delta", {
+				type: "content_block_delta",
+				index: 0,
+				delta: { type: "input_json_delta", partial_json: JSON.stringify({ path: "notes.txt" }) },
+			}),
+			af("content_block_stop", { type: "content_block_stop", index: 0 }),
+			af("message_delta", {
+				type: "message_delta",
+				delta: { stop_reason: "tool_use", stop_sequence: null },
+				usage: { output_tokens: 1 },
+			}),
+			af("message_stop", { type: "message_stop" }),
+		]);
+		await Bun.write(path.join(tempDir.path(), "notes.txt"), "contents");
+		return [readCall, cutMidCall, anthropicReply(m, ["text"], "stop")];
+	}
+
+	function buildFileSession(m: Model): AgentSession {
+		return build({
+			model: m,
+			tools: [readTool()],
+			settings: { "retry.maxRetries": 0 },
+			sessionManager: SessionManager.create(tempDir.path(), tempDir.path()),
+		});
+	}
+
+	it("a socket timeout in the middle of a streamed tool call resumes once after tools ran", async () => {
+		// Bun's fetch fails an idle response body with `TimeoutError: The operation timed
+		// out.` (default socket idle timeout: 300 s). The loop pairs the cut call with an
+		// error result; with retries off the step must still resume once on the same model.
+		const m = claude();
+		const log = installAnthropic(await readThenSocketTimeout(m));
+		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		session = buildFileSession(m);
+		const warn = vi.spyOn(logger, "warn");
+
+		await session.prompt("check the file");
+		await session.waitForIdle();
+		for (let i = 0; i < 50 && log.bodies.length < 3; i++) await Bun.sleep(5);
+		await session.waitForIdle();
+
+		expect(warn.mock.calls.some(([message]) => message === "auto_resume_abandoned")).toBe(false);
+		expect(markerCount(session)).toBe(1);
+		expect(log.bodies).toHaveLength(3);
+		expect(log.bodies[2]).toContain("contents");
+		expect(log.bodies[2]).not.toContain("toolu_cut");
+		const last = session.agent.state.messages.findLast(message => message.role === "assistant") as AssistantMessage;
+		expect(last.stopReason).toBe("stop");
+	});
+
+	it("a resume abandoned while its marker is written sends nothing and names what changed", async () => {
+		const m = claude();
+		const log = installAnthropic(await readThenSocketTimeout(m));
+		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		const built = buildFileSession(m);
+		session = built;
+		const warn = vi.spyOn(logger, "warn");
+		const manager = built.sessionManager;
+		const flush = manager.flush.bind(manager);
+		vi.spyOn(manager, "flush").mockImplementation(async () => {
+			await flush();
+			// Interrupt the moment the resume marker is durable, before the resume is sent.
+			if (markerCount(built) === 1) await built.abort();
+		});
+
+		await built.prompt("check the file");
+		await built.waitForIdle();
+		await Bun.sleep(20);
+
+		expect(log.bodies).toHaveLength(2);
+		expect(markerCount(built)).toBe(1);
+		const abandoned = warn.mock.calls.find(([message]) => message === "auto_resume_abandoned");
+		expect(abandoned?.[1]).toMatchObject({ trigger: "interrupted", changed: ["prompt_generation"] });
+	});
 	it("a long thinking-only overload on a managed fallback chain retries the same model, never the next entry", async () => {
 		const m = claude();
 		const thinkingThenStall: Reply = () => {

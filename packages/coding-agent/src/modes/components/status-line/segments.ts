@@ -118,9 +118,9 @@ const modelSegment: StatusLineSegment = {
 			if (window > 0) {
 				if (typeof pct === "number" && Number.isFinite(pct)) {
 					const color = getContextUsageThemeColor(getContextUsageLevel(pct, window));
-					content += `${theme.sep.dot}${theme.fg(color, `${pct.toFixed(1)}%`)}`;
+					content += `${theme.sep.dot}${theme.fg(color, withIcon(theme.icon.context, `${pct.toFixed(1)}%`))}`;
 				} else {
-					content += `${theme.sep.dot}${theme.fg("statusLineContext", "?")}`;
+					content += `${theme.sep.dot}${theme.fg("statusLineContext", withIcon(theme.icon.context, "?"))}`;
 				}
 			}
 		}
@@ -376,7 +376,7 @@ const costSegment: StatusLineSegment = {
 		const billingParts: string[] = [];
 		if (cost) billingParts.push(`$${cost.toFixed(2)}`);
 		if (normalizedPremiumRequests) billingParts.push(`★ ${formatNumber(normalizedPremiumRequests)}`);
-		if (usingSubscription) billingParts.push("(sub)");
+		if (usingSubscription) billingParts.push(t("statusline.subscription"));
 
 		return { content: theme.fg("statusLineCost", billingParts.join(" ")), visible: true };
 	},

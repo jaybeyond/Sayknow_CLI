@@ -35,7 +35,8 @@
 		"shell": "#ffe7dc",
 		"dangerRed": "#ff4d5e",
 		"warningAmber": "#f5b84b",
-		"diffRemovalRed": "#d84a4a"
+		"diffRemovalRed": "#d84a4a",
+		"dimText": "#a07d77"
 	},
 	"colors": {
 		"accent": "tentacle",
@@ -46,7 +47,7 @@
 		"error": "dangerRed",
 		"warning": "warningAmber",
 		"muted": "mutedShell",
-		"dim": "dimShell",
+		"dim": "dimText",
 		"text": "shell",
 		"thinkingText": "mutedShell",
 		"selectedBg": "surfaceBright",
@@ -62,19 +63,19 @@
 		"toolOutput": "mutedShell",
 		"mdHeading": "brandRed",
 		"mdLink": "coral",
-		"mdLinkUrl": "dimShell",
+		"mdLinkUrl": "dimText",
 		"mdCode": "sand",
 		"mdCodeBlock": "seafoam",
 		"mdCodeBlockBorder": "deepRed",
 		"mdQuote": "mutedShell",
 		"mdQuoteBorder": "deepRed",
-		"mdHr": "dimShell",
+		"mdHr": "dimText",
 		"mdListBullet": "tentacle",
 		"toolDiffAdded": "kelp",
 		"toolDiffRemoved": "diffRemovalRed",
 		"toolDiffContext": "mutedShell",
 		"link": "coral",
-		"syntaxComment": "dimShell",
+		"syntaxComment": "dimText",
 		"syntaxKeyword": "brandRed",
 		"syntaxFunction": "sand",
 		"syntaxVariable": "foam",
@@ -82,8 +83,8 @@
 		"syntaxNumber": "seafoam",
 		"syntaxType": "tentacle",
 		"syntaxOperator": "mutedShell",
-		"syntaxPunctuation": "dimShell",
-		"thinkingOff": "dimShell",
+		"syntaxPunctuation": "dimText",
+		"thinkingOff": "dimText",
 		"thinkingMinimal": "mutedShell",
 		"thinkingLow": "coral",
 		"thinkingMedium": "tentacle",
@@ -91,7 +92,7 @@
 		"thinkingXhigh": "dangerRed",
 		"bashMode": "tentacle",
 		"statusLineBg": "deepRed",
-		"statusLineSep": "dimShell",
+		"statusLineSep": "dimText",
 		"statusLineModel": "tentacle",
 		"statusLinePath": "coral",
 		"statusLineGitClean": "kelp",
@@ -114,10 +115,9 @@
 	"symbols": {
 		"preset": "unicode",
 		"overrides": {
-			"icon.pi": "\ud83d\udc19",
-			"icon.agents": "\ud83e\udd91",
-			"status.running": "\ud83c\udf0a",
-			"md.bullet": "\u25b8"
+			"icon.pi": "🐙",
+			"status.running": "◐",
+			"md.bullet": "▸"
 		}
 	}
 }

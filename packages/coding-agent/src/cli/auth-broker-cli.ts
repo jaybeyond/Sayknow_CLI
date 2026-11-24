@@ -434,7 +434,7 @@ async function runImport(flags: AuthBrokerCommandArgs["flags"]): Promise<void> {
 
 	if (flags.dryRun === true) {
 		if (!flags.json) {
-			process.stdout.write(`Dry run — would import ${entries.length} credential(s):\n`);
+			process.stdout.write(`Dry run, would import ${entries.length} credential(s):\n`);
 			for (const entry of entries) process.stdout.write(`  ${describeImportEntry(entry)}\n`);
 		}
 		return;
@@ -620,7 +620,7 @@ async function runMigrate(flags: AuthBrokerCommandArgs["flags"]): Promise<void> 
 		for (const provider of listProvidersWithEnvKey()) {
 			const envValue = getEnvApiKey(provider);
 			if (!envValue) continue;
-			if (envValue === "<authenticated>") continue; // Bedrock/Vertex sentinels — not literal keys.
+			if (envValue === "<authenticated>") continue; // Bedrock/Vertex sentinels: not literal keys.
 			const credential: AuthCredential = { type: "api_key", key: envValue };
 			if (brokerAlreadyHas(existing, provider, credential)) {
 				skipped.push({
@@ -668,7 +668,7 @@ async function runMigrate(flags: AuthBrokerCommandArgs["flags"]): Promise<void> 
 
 	if (flags.dryRun === true) {
 		if (!flags.json) {
-			process.stdout.write(`Dry run — would upload ${plan.length} credential(s):\n`);
+			process.stdout.write(`Dry run, would upload ${plan.length} credential(s):\n`);
 			for (const entry of plan) {
 				process.stdout.write(`  [${entry.source}] ${entry.provider} ${entry.identity}\n`);
 			}

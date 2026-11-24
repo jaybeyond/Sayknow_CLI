@@ -169,8 +169,8 @@ describe("renderThreadedFrame", () => {
 		});
 		expect(started).toMatchObject({ lane: "live", coalesceKey: "tool:call-7", editable: true });
 		expect(completed).toMatchObject({ lane: "finalized", coalesceKey: "tool:call-7", editable: true });
-		expect(started?.text).toContain("⚙ shell — started");
-		expect(completed?.text).toContain("⚙ shell — ok");
+		expect(started?.text).toContain("⚙ shell: started");
+		expect(completed?.text).toContain("⚙ shell: ok");
 		expect(completed?.richMarkdown).toBeUndefined();
 	});
 

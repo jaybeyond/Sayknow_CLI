@@ -289,8 +289,8 @@ describe("executeNotificationControlCommand", () => {
 				"Cost: $0.012345",
 				"",
 				"Usage windows",
-				"5-hour limit — 90% used — resets 2027-01-02 03:04:05 UTC",
-				"Weekly limit — 25% used — resets 2026-01-09 03:04:05 UTC",
+				"5-hour limit, 90% used, resets 2027-01-02 03:04:05 UTC",
+				"Weekly limit, 25% used, resets 2026-01-09 03:04:05 UTC",
 			].join("\n"),
 		});
 		expect(apiState.usageFetchCalls).toBe(1);

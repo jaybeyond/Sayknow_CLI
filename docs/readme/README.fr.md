@@ -195,7 +195,7 @@ fallback:
 
 ## TUI identity
 
-L'identité TUI par défaut est le thème SKC **ink-octopus** — encre de poulpe : graphite chaud, texte couleur papier, un seul accent ambre — pour les terminaux sombres, avec **blue-octopus** pour les terminaux clairs. Une variante chaleureuse **red-octopus** est également incluse pour ceux qui préfèrent une palette plus sombre et à fort contraste. Trois thèmes de migration supplémentaires — `claude-code`, `codex` et `opencode` — reflètent l'apparence de ces outils pour faciliter la migration visuelle et sont sélectionnables depuis Settings ou `/theme`. Les réglages de thème explicites de l'utilisateur l'emportent toujours.
+L'identité TUI par défaut est le thème SKC **ink-octopus** — encre de poulpe : graphite chaud, texte couleur papier, un seul accent ambre — pour les terminaux sombres, avec **blue-octopus-light** pour les terminaux clairs. Une variante chaleureuse **red-octopus** est également incluse pour ceux qui préfèrent une palette plus sombre et à fort contraste. Trois thèmes de migration supplémentaires — `claude-code`, `codex` et `opencode` — reflètent l'apparence de ces outils pour faciliter la migration visuelle et sont sélectionnables depuis Settings ou `/theme`. Les réglages de thème explicites de l'utilisateur l'emportent toujours.
 
 ### Bundled theme grid
 
@@ -203,7 +203,8 @@ Choisissez depuis Settings (`Appearance -> Dark theme` / `Light theme`) ou `/the
 
 | Theme | Visual feel | Best fit |
 | --- | --- | --- |
-| `blue-octopus` | Palette poulpe bleu avec des accents bleu tentacule. | Par défaut pour les terminaux clairs. |
+| `blue-octopus` | Palette poulpe bleu avec des accents bleu tentacule. | Alternative sombre. |
+| `blue-octopus-light` | La palette poulpe bleu en encre sombre pour les fonds clairs. | Par défaut pour les terminaux clairs. |
 | `red-octopus` | Variante chaleureuse poulpe rouge avec un fort contraste d'état. | Alternative sombre à fort contraste. |
 | `ink-octopus` | Encre de poulpe — fond graphite chaud, texte couleur papier, un seul accent ambre. | Par défaut pour les terminaux sombres. |
 | `glow-octopus` | Bioluminescence abyssale — noir sarcelle avec un vert lumineux et un violet secondaire. | Terminaux sombres qui veulent un accent vif. |
@@ -273,7 +274,7 @@ Les contributions, les rapports de bugs et la validation de release sont les bie
 
 ## Inspirations and lineage
 
-L'identité TUI par défaut de Sayknow-CLI est la famille de poulpes : ink-octopus par défaut en sombre, blue-octopus par défaut en clair, et red-octopus, glow-octopus et violet-octopus en alternatives. Il inclut aussi les thèmes de migration `claude-code`, `codex` et `opencode` dont les palettes sont inspirées de ces outils afin que les utilisateurs qui en proviennent retrouvent une apparence familière. Il s'appuie sur les leçons d'une petite famille de harnais d'agents tout en gardant la surface publique SKC volontairement ciblée. L'attribution historique est conservée dans [`NOTICE.md`](NOTICE.md).
+L'identité TUI par défaut de Sayknow-CLI est la famille de poulpes : ink-octopus par défaut en sombre, blue-octopus-light par défaut en clair, et red-octopus, glow-octopus et violet-octopus en alternatives. Il inclut aussi les thèmes de migration `claude-code`, `codex` et `opencode` dont les palettes sont inspirées de ces outils afin que les utilisateurs qui en proviennent retrouvent une apparence familière. Il s'appuie sur les leçons d'une petite famille de harnais d'agents tout en gardant la surface publique SKC volontairement ciblée. L'attribution historique est conservée dans [`NOTICE.md`](NOTICE.md).
 
 ## License
 

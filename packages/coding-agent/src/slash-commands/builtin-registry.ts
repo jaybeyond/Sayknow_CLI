@@ -127,7 +127,7 @@ async function regenerateSessionTitle(runtime: SlashCommandRuntime): Promise<Sla
 		const obfuscateText = await titleInputObfuscator(runtime.settings, activeCwd);
 		const input = buildConversationTitleInput(runtime.session.messages, obfuscateText);
 		if (!input) {
-			return usage("Nothing to summarize yet — pass a title: /rename <title>", runtime);
+			return usage("Nothing to summarize yet. Pass a title: /rename <title>", runtime);
 		}
 
 		const generated = await generateSessionTitle(
@@ -146,7 +146,7 @@ async function regenerateSessionTitle(runtime: SlashCommandRuntime): Promise<Sla
 		)
 			return commandConsumed();
 		if (!generated) {
-			return usage("Could not generate a session title — pass one: /rename <title>", runtime);
+			return usage("Could not generate a session title. Pass one: /rename <title>", runtime);
 		}
 
 		const stored = await runtime.sessionManager.setSessionName(generated, "user");
@@ -1316,7 +1316,7 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 			const snapshot = runtime.session.getAsyncJobSnapshot({ recentLimit: 5 });
 			if (!snapshot || (snapshot.running.length === 0 && snapshot.recent.length === 0)) {
 				await runtime.output(
-					"No background jobs running. (Background jobs run async tools — e.g. long-running bash, debug, or task subagents that would otherwise tie up a turn. They appear here while alive and for ~5 minutes after.)",
+					"No background jobs running. (Background jobs run async tools, e.g. long-running bash, debug, or task subagents that would otherwise tie up a turn. They appear here while alive and for ~5 minutes after.)",
 				);
 				return commandConsumed();
 			}
@@ -1325,14 +1325,14 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 			if (snapshot.running.length > 0) {
 				lines.push("", "Running Jobs");
 				for (const job of snapshot.running) {
-					lines.push(`  [${job.id}] ${job.type} (${job.status}) — ${formatDuration(jobElapsedMs(job, now))}`);
+					lines.push(`  [${job.id}] ${job.type} (${job.status}): ${formatDuration(jobElapsedMs(job, now))}`);
 					lines.push(`    ${job.label}`);
 				}
 			}
 			if (snapshot.recent.length > 0) {
 				lines.push("", "Recent Jobs");
 				for (const job of snapshot.recent) {
-					lines.push(`  [${job.id}] ${job.type} (${job.status}) — ${formatDuration(jobElapsedMs(job, now))}`);
+					lines.push(`  [${job.id}] ${job.type} (${job.status}): ${formatDuration(jobElapsedMs(job, now))}`);
 					lines.push(`    ${job.label}`);
 				}
 			}

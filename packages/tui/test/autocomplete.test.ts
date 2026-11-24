@@ -340,6 +340,16 @@ describe("inline slash command suggestions", () => {
 		expect(result!.items.map(item => item.value)).not.toContain("model");
 	});
 
+	it("joins a command's argument hint and description with a middle dot", async () => {
+		const provider = new CombinedAutocompleteProvider(
+			[{ name: "model", description: "Switch model", argumentHint: "<name>" }],
+			"/tmp",
+		);
+		const result = await provider.getSuggestions(["/mod"], 0, 4);
+
+		expect(result!.items.find(item => item.value === "model")?.description).toBe("<name> · Switch model");
+	});
+
 	it("matches normalized inline slash command prefixes", async () => {
 		const provider = new CombinedAutocompleteProvider(
 			[{ name: "skill:team", description: "Run team workflow", value: "skill:team" }],

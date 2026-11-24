@@ -220,7 +220,7 @@ export const createAutoresearchExtension: ExtensionFactory = api => {
 			if (goalArg !== null) {
 				api.sendUserMessage(goalArg);
 			} else {
-				ctx.ui.notify("Autoresearch enabled—describe what to optimize in your next message.", "info");
+				ctx.ui.notify("Autoresearch enabled. Describe what to optimize in your next message.", "info");
 			}
 		},
 	});
@@ -433,7 +433,7 @@ export const createAutoresearchExtension: ExtensionFactory = api => {
 				);
 			}
 		} else if (shouldResetTree) {
-			ctx.ui.notify("No baseline commit recorded — skipped worktree reset.", "warning");
+			ctx.ui.notify("No baseline commit recorded, skipped worktree reset.", "warning");
 		}
 
 		removeLegacyArtifacts(ctx.cwd);

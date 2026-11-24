@@ -29,7 +29,7 @@ export default class AuthGateway extends Command {
 		regenerate: Flags.boolean({ description: "Regenerate the gateway bearer token (token)" }),
 		"no-auth": Flags.boolean({
 			description:
-				"Disable inbound bearer-token auth (serve). Useful when bound to loopback — any caller is allowed.",
+				"Disable inbound bearer-token auth (serve). Useful when bound to loopback: any caller is allowed.",
 		}),
 	};
 

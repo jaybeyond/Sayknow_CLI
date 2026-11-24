@@ -172,7 +172,7 @@ describe("InteractiveMode.setEditorComponent", () => {
 		expect(mode.chatContainer.render(80).join("\n")).toContain("visible extension message");
 	});
 
-	it("keeps the welcome model pills in sync with extension model switches", async () => {
+	it("leaves the model to the status line across extension model switches", async () => {
 		vi.spyOn(mode.ui, "start").mockImplementation(() => {});
 		forceTerminalSize(mode, 160, 40);
 		await mode.init();
@@ -196,17 +196,18 @@ describe("InteractiveMode.setEditorComponent", () => {
 		new ExtensionUiController(mode).initializeHookRunner({} as ExtensionUIContext, false);
 		if (!actions) throw new Error("Extension actions were not initialized");
 		const renderWelcome = () => welcome.render(160).map(stripRenderControls).join("\n");
-		expect(renderWelcome()).toContain(initial.name);
+		expect(renderWelcome()).not.toContain(initial.name);
+		expect(renderWelcome()).not.toContain(t("welcome.chooseModel"));
 
 		expect(await actions.setModel(next)).toBe(true);
 		expect(session.model).toBe(next);
 
 		const rendered = renderWelcome();
-		expect(rendered).toContain(next.name);
-		expect(rendered).not.toContain(initial.name);
+		expect(rendered).not.toContain(next.name);
+		expect(rendered).not.toContain(t("welcome.chooseModel"));
 	});
 
-	it("strips terminal control sequences from initial and switched welcome model metadata", () => {
+	it("never prints initial or switched model metadata, so control sequences cannot reach the card", () => {
 		const initialAttack = "clipboard-initial-secret";
 		const switchedAttack = "clipboard-switched-secret";
 		const welcome = new WelcomeComponent(
@@ -217,7 +218,7 @@ describe("InteractiveMode.setEditorComponent", () => {
 			"ascii",
 		);
 		const initialRender = welcome.render(120).join("\n");
-		expect(initialRender).toContain("initial--model");
+		expect(initialRender).toContain("Sayknow-CLI");
 		expect(initialRender).not.toContain("\x1b]52;");
 		expect(initialRender).not.toContain(initialAttack);
 
@@ -226,7 +227,7 @@ describe("InteractiveMode.setEditorComponent", () => {
 			`provider-\x1b]52;c;${switchedAttack}\x07-name`,
 		);
 		const switchedRender = welcome.render(120).join("\n");
-		expect(switchedRender).toContain("switched--model");
+		expect(switchedRender).toContain("Sayknow-CLI");
 		expect(switchedRender).not.toContain("\x1b]52;");
 		expect(switchedRender).not.toContain(switchedAttack);
 	});
@@ -238,7 +239,7 @@ describe("InteractiveMode.setEditorComponent", () => {
 		expect(lines.every(line => line.endsWith(" "))).toBe(true);
 		expect(lines.every(line => line.startsWith(`${theme.rail.user} `))).toBe(true);
 		const joined = lines.join("\n");
-		expect(joined).toContain("Type your message...");
+		expect(joined).toContain(t("composer.placeholder"));
 		for (const boxGlyph of ["╭", "╮", "╰", "╯", "│", "›"]) expect(joined).not.toContain(boxGlyph);
 	});
 
@@ -364,8 +365,7 @@ describe("InteractiveMode.setEditorComponent", () => {
 		const replayLabelRow = plainLines.findIndex(line => line.trim() === `${theme.rail.user} replay`);
 		expect(replayLabelRow).toBeGreaterThanOrEqual(0);
 		expect(rendered.anchors[replayLabelRow]).toBeNull();
-		expect(rendered.lines.join("")).toContain("\x1b]133;A\x07");
-		expect(rendered.lines.join("")).toContain("\x1b]133;B\x07\x1b]133;C\x07");
+		expect(rendered.lines.join("")).not.toMatch(/\x1b\]133;/);
 		expect(syntheticRow).toBeGreaterThanOrEqual(0);
 		expect(rendered.anchors[syntheticRow]).toBeNull();
 		expect(statusRow).toBeGreaterThanOrEqual(0);
@@ -523,7 +523,7 @@ describe("InteractiveMode.setEditorComponent", () => {
 	function expectedNewlineShortcutHint(): string {
 		const newlineKeys =
 			injectedKeyDisplayContext.platform === "win32" ? ["alt+enter", "ctrl+j"] : ["shift+enter", "ctrl+j"];
-		return `${formatKeyHints(newlineKeys, injectedKeyDisplayContext)}: New line`;
+		return `${formatKeyHints(newlineKeys, injectedKeyDisplayContext)} ${t("composer.newLine")}`;
 	}
 
 	it("keeps the rail composer inside its trailing gutter for CJK input", () => {
@@ -540,34 +540,30 @@ describe("InteractiveMode.setEditorComponent", () => {
 		expect(promptLine!).toContain("이전 커밋들");
 	});
 
-	function expectedQueueShortcutHint(action = "Queue"): string {
+	function expectedQueueShortcutHint(): string {
 		const shortcut = mode.keybindings.getKeys("app.message.queue")[0];
 		if (!shortcut) throw new Error("Expected a queue message keybinding");
-		return `${formatKeyHint(shortcut, injectedKeyDisplayContext)}: ${action}`;
+		return `${formatKeyHint(shortcut, injectedKeyDisplayContext)} ${t("composer.queue")}`;
 	}
-	function expectedSubmitShortcutHint(action = "Steer"): string {
+	function expectedSubmitShortcutHint(): string {
 		const shortcut = mode.keybindings.getDisplayString("tui.input.submit", injectedKeyDisplayContext);
 		if (!shortcut) throw new Error("Expected a submit keybinding");
-		return `${shortcut}: ${action}`;
+		return `${shortcut} ${t("composer.steer")}`;
 	}
 
-	it("keeps common shortcut discovery in the composer and shows actionable busy delivery hints", () => {
+	it("keeps the idle composer to the newline hint and names busy delivery keys", () => {
 		let rendered = mode.editor.render(300).map(stripRenderControls).join("\n");
-		expect(rendered).toContain("Type your message...");
+		expect(rendered).toContain(t("composer.placeholder"));
 		expect(rendered).toContain(expectedNewlineShortcutHint());
-		expect(rendered).toContain(`${formatKeyHint("ctrl+c", injectedKeyDisplayContext)}: Clear`);
-		expect(rendered).toContain(`${formatKeyHint("ctrl+r", injectedKeyDisplayContext)}: History`);
-		expect(rendered).toContain(`${formatKeyHint("shift+tab", injectedKeyDisplayContext)}: Thinking`);
+		expect(rendered).not.toContain(formatKeyHint("ctrl+r", injectedKeyDisplayContext));
 		expect(rendered).not.toContain(expectedSubmitShortcutHint());
-		expect(rendered).toContain(expectedQueueShortcutHint("Queue (busy)"));
-		const narrowRendered = mode.editor.render(80).map(stripRenderControls).join("\n");
-		expect(narrowRendered).toContain(expectedQueueShortcutHint("Queue (busy)"));
+		expect(rendered).not.toContain(expectedQueueShortcutHint());
 
 		(session.agent as unknown as { state: { isStreaming: boolean } }).state.isStreaming = true;
 		mode.updateEditorChrome();
 
 		rendered = mode.editor.render(300).map(stripRenderControls).join("\n");
-		expect(rendered).toContain("Type your message...");
+		expect(rendered).toContain(t("composer.placeholder"));
 		expect(rendered).toContain(expectedSubmitShortcutHint());
 		expect(rendered).toContain(expectedQueueShortcutHint());
 
@@ -575,9 +571,9 @@ describe("InteractiveMode.setEditorComponent", () => {
 		mode.updateEditorChrome();
 
 		rendered = mode.editor.render(300).map(stripRenderControls).join("\n");
-		expect(rendered).toContain("Type your message...");
+		expect(rendered).toContain(t("composer.placeholder"));
 		expect(rendered).not.toContain(expectedSubmitShortcutHint());
-		expect(rendered).toContain(expectedQueueShortcutHint("Queue (busy)"));
+		expect(rendered).not.toContain(expectedQueueShortcutHint());
 	});
 	it("uses the effective submit binding in busy hints and omits it when unbound", () => {
 		(session.agent as unknown as { state: { isStreaming: boolean } }).state.isStreaming = true;
@@ -586,7 +582,7 @@ describe("InteractiveMode.setEditorComponent", () => {
 
 		let rendered = mode.editor.render(300).map(stripRenderControls).join("\n");
 		const remappedSubmit = mode.keybindings.getDisplayString("tui.input.submit", injectedKeyDisplayContext);
-		expect(rendered).toContain(`${remappedSubmit}: Steer`);
+		expect(rendered).toContain(`${remappedSubmit} ${t("composer.steer")}`);
 		expect(rendered).toContain(expectedQueueShortcutHint());
 
 		mode.keybindings.setUserBindings({
@@ -596,11 +592,11 @@ describe("InteractiveMode.setEditorComponent", () => {
 		});
 		mode.updateEditorChrome();
 
-		rendered = mode.editor.render(300).map(stripRenderControls).join("\n");
-		expect(rendered).not.toContain(": Steer");
-		expect(rendered).toContain(`${formatKeyHint("shift+tab", injectedKeyDisplayContext)}: Thinking`);
-		expect(rendered).not.toContain(": Queue");
-		expect(rendered).toContain("Type your message...");
+		const placeholder = mode.editor.render(300).map(stripRenderControls)[0] ?? "";
+		rendered = placeholder;
+		expect(rendered).not.toContain(`${remappedSubmit} ${t("composer.steer")}`);
+		expect(rendered).not.toContain(` ${t("composer.queue")} `);
+		expect(rendered).toContain(t("composer.placeholder"));
 	});
 	it("propagates the injected non-host key display context to the composed TUI surfaces", async () => {
 		vi.spyOn(mode.ui, "start").mockImplementation(() => {});
@@ -610,7 +606,6 @@ describe("InteractiveMode.setEditorComponent", () => {
 		const composer = mode.editor.render(300).map(stripRenderControls).join("\n");
 		const welcome = mode.ui.render(160).map(stripRenderControls).join("\n");
 		expect(composer).toContain(expectedNewlineShortcutHint());
-		expect(composer).toContain(mode.keybindings.getDisplayString("app.model.select", injectedKeyDisplayContext));
 		expect(welcome).toContain(`${formatKeyHint("ctrl+l", injectedKeyDisplayContext)} ${t("welcome.model")}`);
 
 		mode.statusLine.setActionRegistry(
@@ -632,7 +627,7 @@ describe("InteractiveMode.setEditorComponent", () => {
 		const assertComposerFollowsStatusLine = () => {
 			const rendered = mode.ui.render(48).map(stripRenderControls);
 			// The rail composer has no top border: its first row is the input row.
-			const composerIndex = rendered.findIndex(line => line.includes("Type your message..."));
+			const composerIndex = rendered.findIndex(line => line.includes(t("composer.placeholder")));
 			const statusRows = mode.statusLine.render(48).map(stripRenderControls);
 
 			expect(composerIndex).toBeGreaterThan(0);
@@ -664,9 +659,9 @@ describe("InteractiveMode.setEditorComponent", () => {
 		const renderedText = rendered.join("\n");
 		const noticeIndex = rendered.findIndex(line => line.includes("New session started"));
 		expect(rendered.length).toBeLessThanOrEqual(rows);
-		expect(renderedText).toContain("╔═╗╔═╗");
+		expect(renderedText).toContain("Sayknow-CLI");
 		// The card gives up rows to the notice instead of pushing it off screen.
-		expect(noticeIndex).toBeGreaterThan(rendered.findIndex(line => line.includes("╔═╗╔═╗")));
+		expect(noticeIndex).toBeGreaterThan(rendered.findIndex(line => line.includes("Sayknow-CLI")));
 		expect(renderedText).toContain("New session started");
 	});
 
@@ -684,7 +679,7 @@ describe("InteractiveMode.setEditorComponent", () => {
 			expect(lines.every(line => line.startsWith(`${theme.rail.user} `))).toBe(true);
 			expect(lines.length).toBeGreaterThanOrEqual(text.includes("\n") ? 2 : 1);
 			expect(lines.join("\n")).not.toContain("╭");
-			expect(lines.join("\n")).not.toContain("Type your message...");
+			expect(lines.join("\n")).not.toContain(t("composer.placeholder"));
 		}
 	});
 
@@ -972,7 +967,7 @@ describe("InteractiveMode.setEditorComponent", () => {
 				const highlighted = mode.ui
 					.render(120)
 					.map(stripRenderControls)
-					.find(line => line.includes("›"));
+					.find(line => line.includes(`${theme.nav.cursor} `));
 				expect(highlighted).toContain("older work");
 				tap("\r", "\x1b[13;1:3u"); // Enter
 				for (let i = 0; i < 20 && resume.mock.calls.length === 0; i++) await Bun.sleep(5);
@@ -1030,7 +1025,7 @@ describe("InteractiveMode.setEditorComponent", () => {
 			const welcome = mode.ui.children.find(child => child instanceof WelcomeComponent) as WelcomeComponent;
 			expect(welcome).toBeDefined();
 			const lines = welcome.render(120).map(stripRenderControls);
-			expect(lines[1]).toMatch(/^ {2}╔═╗╔═╗/);
+			expect(lines[1]).toMatch(/^ {2}Sayknow-CLI · /);
 			expect(lines.join("\n")).not.toContain(String.fromCodePoint(0x10eeee));
 		});
 

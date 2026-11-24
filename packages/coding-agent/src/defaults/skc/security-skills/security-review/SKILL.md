@@ -1,6 +1,6 @@
 ---
 name: security-review
-description: White-box security review of your own codebase, diff or pull request. Enumerate candidates from source, close each one as confirmed, ruled out or an open proof gap, calibrate severity honestly, then fix the root cause and verify the fix. Use when the user asks for a security review, security audit, vulnerability check or a fix for a security issue in their code.
+description: White-box security review of your own codebase, diff or pull request, including the coding-agent configuration it ships (AGENTS.md, hooks, MCP servers, skills, extensions). Enumerate candidates from source, close each one as confirmed, ruled out or an open proof gap, calibrate severity honestly, then fix the root cause and verify the fix. Use when the user asks for a security review, security audit, vulnerability check or a fix for a security issue in their code.
 license: Apache-2.0
 ---
 
@@ -79,6 +79,7 @@ Before judging anything, find:
 - **Trust boundaries**: where unauthenticated, authenticated, tenant and admin input enter, and where stored values written by one party are later read by another.
 - **The authorization model**: where identity is established, where ownership and tenancy are checked, and which routes skip the shared guard.
 - **Dangerous sinks**: process execution, query construction, filesystem paths, deserialization, template rendering, outbound requests, redirects, dynamic code loading.
+- **Agent configuration**: instruction files, hooks, MCP servers, extensions, skills and permission settings that a coding agent loads from the repository. When any of them are in scope, also run the sweep under "Agent configuration review".
 
 Ask the user only for what the code cannot tell you: the tenancy model, which inputs an attacker controls, and how the service is exposed.
 
@@ -93,6 +94,7 @@ Scanner output is a list of candidates, never a list of findings.
 - Dependencies: the ecosystem's own audit (`bun audit`, `npm audit`, `pnpm audit`, `pip-audit`, `cargo audit`, `govulncheck`), or `trivy fs` when present. For each advisory, check whether the vulnerable function is reachable from this code before rating it.
 - Secrets: `gitleaks` or `trufflehog` when present.
 - Patterns: `opengrep` or `semgrep` when present.
+- Agent configuration: `agentshield scan --path <dir> --format json` when the AgentShield CLI is already installed. Never run it through `npx`, never use `--fix`, and never use its `--opus` or `--supply-chain-online` modes, which send configuration to a remote service.
 
 Use only tools that are already installed. Name a missing one in the coverage section rather than installing it.
 
@@ -142,6 +144,29 @@ Order findings by severity. A clean result still lists coverage, so a cleared ar
 ### 8. Fix, when asked
 
 Follow `fix_verification.md`. State the security invariant in one sentence, enforce it at the narrowest shared place, add a regression check that fails without the change, then run the repository's own tests, linter and type checker. Withhold a fix you could not verify and say which gate it failed.
+
+## Agent configuration review
+
+Coding-agent configuration runs with the user's credentials: instruction files steer every turn, hooks and MCP servers start processes, and extensions load as in-process modules. Sweep it as its own surface when the scope includes these files or the user asks to audit agent, MCP, hook, skill, plugin or permission setup. The check families follow the rule taxonomy of [affaan-m/agentshield](https://github.com/affaan-m/agentshield) (MIT, commit `b089130`), mapped to the files SKC loads.
+
+Where SKC reads configuration. Project files are found from the working directory upward; user files live under the home directory.
+
+| Surface | Files |
+| --- | --- |
+| `.skc/` and `~/.skc/agent/` | `AGENTS.md`, `SYSTEM.md`, `settings.json`, `config.yml`, `mcp.json`, `.mcp.json`, `commands/`, `hooks/pre/`, `hooks/post/`, `extensions/`, `skills/`, `agents/` |
+| Repository root and parent directories | `AGENTS.md`, `mcp.json`, `.mcp.json` |
+| Other harnesses SKC also discovers | `.claude/`, `.codex/`, `.gemini/`, `.cursor/`, `.vscode/mcp.json`, `.agent/`, `.agents/`, OpenCode config, installed plugins |
+
+Check each family:
+
+- **Instruction text** (`AGENTS.md`, `SYSTEM.md`, skill, agent and command bodies): instruction overrides and role escapes; hidden text in HTML comments, zero-width or bidirectional Unicode, or encoded blobs; directions to fetch and run remote content; directions to send files, environment variables or transcripts to a URL, including markdown image links; directions to skip review, approvals or logging; skill descriptions written to trigger on unrelated prompts.
+- **Secrets**: literal tokens, API keys, private keys, webhook URLs and credentialed URLs in any configuration file or `env` block, and MCP `env` entries that copy host secrets into a server that does not need them.
+- **Hooks**: tool input or file paths interpolated into a shell command without quoting; network calls that carry environment variables or file contents; background processes and persistence (cron, shell profiles, launch agents); access to git config, SSH keys or credential stores; file deletion; silenced errors (`2>/dev/null`, `|| true`) in a hook that enforces a control; hooks that approve tools or rewrite tool input; session-start hooks that download and execute code.
+- **MCP servers**: shell wrappers (`sh -c`, `bash -c`); `npx -y`, `bunx` or `uvx` with unpinned packages, git URL dependencies or unpinned container images; arguments that grant the root or home directory; plaintext `http` remote transports; tokens in URLs or literal headers; listeners bound to all interfaces or with wildcard CORS; tool descriptions that carry instructions; tool names that shadow built-in tools; blanket auto-approval.
+- **Permissions and settings**: approval bypass or unrestricted shell; broad writable roots or extra directories; environment overrides that redirect the model endpoint, base URL or login flow; plugin or marketplace sources over insecure transport.
+- **Extensions and plugins**: they run with full process access. Check where each one comes from, whether its version is pinned, and whether a project-level extension in a cloned repository executes at session start.
+
+Rate these like any other candidate, by who can write the file and what runs it. A committed project hook, `mcp.json` or extension in a repository other people contribute to is an attacker-controlled entry point that executes on the next session. The same setting in the user's own `~/.skc/agent/` is the user's choice: report it as hardening, not as a vulnerability. Close each candidate under `counterevidence.md` before rating it.
 
 ## How it fits with the rest of SKC
 

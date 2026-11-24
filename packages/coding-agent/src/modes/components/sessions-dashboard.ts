@@ -114,7 +114,7 @@ export class SessionsDashboardComponent extends Container {
 				: `[${this.#scrollOffset + 1}-${this.#scrollOffset + visible.length}/${this.sessions.length}]`;
 		return [
 			fit(theme.bold("Sessions dashboard"), width),
-			fit(theme.fg("dim", "Read-only — use /resume to open a session."), width),
+			fit(theme.fg("dim", "Read-only, use /resume to open a session."), width),
 			"",
 			...(visible.length === 0
 				? [fit(theme.fg("dim", "No persisted sessions found."), width)]

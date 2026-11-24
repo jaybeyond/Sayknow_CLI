@@ -210,7 +210,7 @@ export const esMsgs: Record<string, string> = {
 	"Only one role model available": "Solo hay un modelo de rol disponible",
 	"Opened:": "Abierto:",
 	"Paste handling": "Gestión de pegado",
-	"Plan approved, but compaction was cancelled — execution not dispatched. Submit a turn to continue.":
+	"Plan approved, but compaction was cancelled: execution not dispatched. Submit a turn to continue.":
 		"Plan aprobado, pero se canceló la compactación: ejecución no iniciada. Envía un turno para continuar.",
 	"Plan file not found at": "Archivo de plan no encontrado en",
 	"Plan mode enabled. Plan file:": "Modo de planificación activado. Archivo de plan:",
@@ -293,10 +293,10 @@ export const esMsgs: Record<string, string> = {
 	"Usage: /memory mm history <id>": "Uso: /memory mm history <id>",
 	"Usage: /memory mm show <id>": "Uso: /memory mm show <id>",
 	"Usage: /move <path>": "Uso: /move <ruta>",
-	"Nothing to summarize yet — pass a title: /rename <title>":
-		"Aún no hay nada que resumir — indica un título: /rename <título>",
-	"Could not generate a session title — pass one: /rename <title>":
-		"No se pudo generar un título de sesión — indica uno: /rename <título>",
+	"Nothing to summarize yet. Pass a title: /rename <title>":
+		"Aún no hay nada que resumir. Indica un título: /rename <título>",
+	"Could not generate a session title. Pass one: /rename <title>":
+		"No se pudo generar un título de sesión. Indica uno: /rename <título>",
 	"Usage: /ssh add <name> --host <host> [--user <user>] [--port <port>] [--key <keyPath>] [--desc <description>] [--compat] [--scope project|user]":
 		"Uso: /ssh add <nombre> --host <host> [--user <usuario>] [--port <puerto>] [--key <rutaClave>] [--desc <descripción>] [--compat] [--scope project|user]",
 	"Usage: /todo append [<phase>] <task...>": "Uso: /todo append [<fase>] <tarea...>",

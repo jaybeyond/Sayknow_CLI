@@ -512,6 +512,8 @@ export class Container implements ViewportAnchorProvider {
 	children: Component[] = [];
 	#disposed = false;
 	#viewportAnchorSources = new Map<Component, ViewportAnchorSource>();
+	/** Row span of each child in the last render, for routing clicks. */
+	#childRowSpans = new Map<Component, { start: number; count: number }>();
 
 	addChild(component: Component): void {
 		this.children.push(component);
@@ -575,18 +577,29 @@ export class Container implements ViewportAnchorProvider {
 		width = Math.max(1, width);
 		const lines: string[] = [];
 		const anchors: Array<ViewportAnchorRow | null> = [];
+		this.#childRowSpans.clear();
 		for (const child of this.children) {
 			const source = this.#viewportAnchorSources.get(child);
 			const rendered =
 				source === undefined
 					? safeRenderComponentWithViewportAnchors(child, width, "container-child")
 					: safeRenderComponentWithViewportAnchorSource(child, width, source, "container-anchor-child");
+			if (child.handleClick) this.#childRowSpans.set(child, { start: lines.length, count: rendered.lines.length });
 			for (let index = 0; index < rendered.lines.length; index++) {
 				lines.push(rendered.lines[index]);
 				anchors.push(rendered.anchors[index] ?? null);
 			}
 		}
 		return { lines, anchors };
+	}
+
+	/** Route a click to the child whose rows it landed on, if that child takes clicks. */
+	handleClick(line: number, column: number): boolean {
+		for (const [child, span] of this.#childRowSpans) {
+			if (line < span.start || line >= span.start + span.count) continue;
+			return child.handleClick?.(line - span.start, column) ?? false;
+		}
+		return false;
 	}
 }
 
@@ -823,6 +836,8 @@ export class TUI extends Container {
 	#manualOutputNotice = false;
 	#manualTranscriptLineCount = 0;
 	#manualSuffixLineCount = 0;
+	/** Blank rows padded into #latestRenderedLines right after the transcript lines. */
+	#latestPaddingRows = 0;
 	#committedTranscriptRows: Array<number | null> = [];
 	#paintedManualOutputNotice = false;
 
@@ -1261,17 +1276,34 @@ export class TUI extends Container {
 		if (this.#manualViewportTop === undefined) return false;
 		const height = this.terminal.rows;
 		const width = this.terminal.columns;
+		// The latest frame may already carry padding baked in for an earlier
+		// terminal height; strip it so the frame is padded for the current height.
+		const transcriptLineCount = this.#manualTranscriptLineCount;
+		const bakedEnd = transcriptLineCount + this.#latestPaddingRows;
+		const bakedRows =
+			this.#latestPaddingRows > 0 &&
+			bakedEnd <= this.#latestRenderedLines.length &&
+			this.#latestRenderedLines.slice(transcriptLineCount, bakedEnd).every(line => Bun.stripANSI(line).trim() === "")
+				? this.#latestPaddingRows
+				: 0;
+		const sourceLines =
+			bakedRows > 0
+				? [...this.#latestRenderedLines.slice(0, transcriptLineCount), ...this.#latestRenderedLines.slice(bakedEnd)]
+				: this.#latestRenderedLines;
 		const paddedLiveLines = this.#padBeforeBottomPinnedComponent(
-			this.#latestRenderedLines,
+			sourceLines,
 			height,
-			this.#manualSuffixLineCount,
+			this.#manualSuffixLineCount - bakedRows,
 		);
 		const liveLines = paddedLiveLines.lines;
+		// Suffix rows recorded against the baked padding move by the difference only,
+		// including when the current height leaves no room to pad.
+		const suffixRowShift = paddedLiveLines.insertedBlankRows - bakedRows;
 		let liveCursorPosition = this.#lastCursorPosition;
-		if (liveCursorPosition !== null && liveCursorPosition.row >= paddedLiveLines.insertionRow) {
+		if (suffixRowShift !== 0 && liveCursorPosition !== null && liveCursorPosition.row >= transcriptLineCount) {
 			liveCursorPosition = {
 				...liveCursorPosition,
-				row: liveCursorPosition.row + paddedLiveLines.insertedBlankRows,
+				row: liveCursorPosition.row + suffixRowShift,
 			};
 		}
 		const liveViewportTop = Math.max(0, liveLines.length - height);
@@ -1293,6 +1325,17 @@ export class TUI extends Container {
 				this.#paintedManualOutputNotice = false;
 				this.#lastCursorPosition = liveCursorPosition;
 				this.#previousLines = liveLines;
+				// The live repaint padded the suffix down to the terminal bottom; keep
+				// click rows in step and record the padded frame as a live render
+				// would, so a second follow before the next render pads nothing more.
+				if (suffixRowShift !== 0) {
+					for (const rows of this.#childRows.values()) {
+						if (rows.start >= transcriptLineCount) rows.start += suffixRowShift;
+					}
+				}
+				this.#latestRenderedLines = liveLines;
+				this.#latestPaddingRows = paddedLiveLines.insertedBlankRows;
+				this.#manualSuffixLineCount = Math.max(0, liveLines.length - transcriptLineCount);
 				if (this.#scrollbackResumeViewportTop === undefined) {
 					this.#nativeScrollbackViewportTop = liveViewportTop;
 				}
@@ -1906,6 +1949,7 @@ export class TUI extends Container {
 		// a resume.
 		this.#previousLines = [];
 		this.#latestRenderedLines = [];
+		this.#latestPaddingRows = 0;
 		this.#previousRaw = [];
 		this.#lineNormalizationCache.clear();
 		this.#lineTruncationCache.clear();
@@ -2016,6 +2060,7 @@ export class TUI extends Container {
 			this.#inputRenderPending = false;
 			this.#previousLines = [];
 			this.#latestRenderedLines = [];
+			this.#latestPaddingRows = 0;
 			this.#previousRaw = [];
 			this.#lineNormalizationCache.clear();
 			this.#lineTruncationCache.clear();
@@ -2239,7 +2284,7 @@ export class TUI extends Container {
 	#dispatchChildClick(mouse: MouseEvent): boolean {
 		if (this.#childRows.size === 0) return false;
 		if (this.overlayStack.some(overlay => overlay.component === this.#focusedComponent)) return false;
-		const point = this.#mouseSelectionPoint(mouse);
+		const point = this.#manualSuffixPoint(mouse) ?? this.#mouseSelectionPoint(mouse);
 		if (point === null) return false;
 		for (const [child, rows] of this.#childRows) {
 			if (point.line < rows.start || point.line >= rows.start + rows.count) continue;
@@ -2249,6 +2294,19 @@ export class TUI extends Container {
 			}
 		}
 		return false;
+	}
+
+	/**
+	 * While the transcript is scrolled by hand the pinned suffix stays painted at the
+	 * bottom (see the manual paint loop); map a click there to its rendered line.
+	 */
+	#manualSuffixPoint(mouse: MouseEvent): MouseSelectionPoint | null {
+		if (this.#manualViewportTop === undefined) return null;
+		const height = this.terminal.rows;
+		const noticeRows = this.#manualOutputNotice && height > this.#manualSuffixLineCount ? 1 : 0;
+		const suffixRow = mouse.y - 1 - this.#manualTranscriptCapacity(height) - noticeRows;
+		if (suffixRow < 0 || suffixRow >= this.#manualSuffixLineCount) return null;
+		return { line: this.#manualTranscriptLineCount + suffixRow, column: mouse.x - 1 };
 	}
 
 	#mouseSelectionPoint(mouse: MouseEvent): MouseSelectionPoint | null {
@@ -3078,8 +3136,8 @@ export class TUI extends Container {
 		for (const child of this.children) {
 			const rendered = safeRenderComponentWithViewportAnchors(child, width, "tui-child");
 			renderedChildren.set(child, rendered.lines);
-			// Children above the pinned suffix keep these rows: padding and suffix trimming
-			// only touch the pinned tail.
+			// Rows are pre-layout; pinned-suffix children are realigned below once the
+			// suffix has been constrained and padded.
 			if (child.handleClick)
 				this.#childRows.set(child, { start: renderedLines.length, count: rendered.lines.length });
 			if (child === this.#viewportAnchorComponent && rendered.anchors.some(anchor => anchor !== null)) {
@@ -3101,16 +3159,32 @@ export class TUI extends Container {
 					.reduce((count, child) => count + this.#pinnedChildLines(child, renderedChildren).length, 0)
 			: renderedLines.length;
 		const anchorRenderFailed = viewportAnchorRenderFailureCount !== anchorRenderFailureCountBefore;
+		const unconstrainedLineCount = renderedLines.length;
 		let newLines = this.#constrainPinnedSuffix(renderedLines, height, renderedChildren);
 		this.#viewportAnchorFrame = anchorFrame;
 		if (renderMetrics.enabled) renderMetrics.recordHelper("renderTree", renderMetrics.now() - renderTreeStart);
 
+		let suffixRowShift = 0;
 		if (hasStickySuffix && height > 0 && this.#manualViewportTop === undefined) {
-			newLines = this.#padBeforeBottomPinnedComponent(
+			const padded = this.#padBeforeBottomPinnedComponent(
 				newLines,
 				height,
 				newLines.length - sourceTranscriptLineCount,
-			).lines;
+			);
+			newLines = padded.lines;
+			suffixRowShift = padded.insertedBlankRows;
+		}
+		if (hasStickySuffix) {
+			// A trimmed suffix keeps only some rows of each child, so recorded rows no longer
+			// describe what is on screen: drop those children from click routing. Padding only
+			// pushes the whole suffix down.
+			const suffixTrimmed = newLines.length - suffixRowShift !== unconstrainedLineCount;
+			for (let index = pinnedChildIndex; index < this.children.length; index++) {
+				const rows = this.#childRows.get(this.children[index]);
+				if (rows === undefined) continue;
+				if (suffixTrimmed) this.#childRows.delete(this.children[index]);
+				else rows.start += suffixRowShift;
+			}
 		}
 
 		// Composite overlays into the rendered lines (before differential compare)
@@ -3184,6 +3258,7 @@ export class TUI extends Container {
 			if (usedWindowNormalize) renderMetrics.recordLineCount("offscreenScan", diffStart);
 		}
 		this.#latestRenderedLines = newLines;
+		this.#latestPaddingRows = suffixRowShift;
 		this.#manualTranscriptLineCount = sourceTranscriptLineCount;
 		this.#manualSuffixLineCount = Math.max(0, newLines.length - sourceTranscriptLineCount);
 		const naturalViewportTop = Math.max(0, newLines.length - height);

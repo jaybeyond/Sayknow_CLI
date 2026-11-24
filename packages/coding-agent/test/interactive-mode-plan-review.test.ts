@@ -603,7 +603,7 @@ describe("InteractiveMode plan review rendering", () => {
 		expect(clear).toHaveBeenCalledTimes(1);
 		expect(prompt).not.toHaveBeenCalledWith(expect.any(String), { synthetic: true });
 		expect(warning).toHaveBeenCalledWith(
-			"Plan approved, but the new session could not be created — execution was not dispatched.",
+			"Plan approved, but the new session could not be created, so execution was not dispatched.",
 		);
 	});
 

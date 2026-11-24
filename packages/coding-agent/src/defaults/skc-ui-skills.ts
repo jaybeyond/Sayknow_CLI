@@ -2,6 +2,11 @@ import { parseFrontmatter } from "@sayknow-cli/utils";
 import type { Skill } from "../extensibility/skills";
 import animateSkill from "./skc/ui-skills/animate/SKILL.md" with { type: "text" };
 import animationVocabularySkill from "./skc/ui-skills/animation-vocabulary/SKILL.md" with { type: "text" };
+import antislopSkill from "./skc/ui-skills/antislop/SKILL.md" with { type: "text" };
+import antislopCopywritingSkill from "./skc/ui-skills/antislop-copywriting/SKILL.md" with { type: "text" };
+import antislopHumanSkill from "./skc/ui-skills/antislop-human/SKILL.md" with { type: "text" };
+import antislopLayoutmobileSkill from "./skc/ui-skills/antislop-layoutmobile/SKILL.md" with { type: "text" };
+import antislopUiSkill from "./skc/ui-skills/antislop-ui/SKILL.md" with { type: "text" };
 import appleDesignSkill from "./skc/ui-skills/apple-design/SKILL.md" with { type: "text" };
 import appllamaAppDesignSkill from "./skc/ui-skills/appllama-app-design-skill/SKILL.md" with { type: "text" };
 import askSonnerSkill from "./skc/ui-skills/ask-sonner/SKILL.md" with { type: "text" };
@@ -18,6 +23,7 @@ import prototypeSkill from "./skc/ui-skills/prototype/SKILL.md" with { type: "te
 import reactBitsSkill from "./skc/ui-skills/react-bits/SKILL.md" with { type: "text" };
 import reviewAnimationsSkill from "./skc/ui-skills/review-animations/SKILL.md" with { type: "text" };
 import stageshowSkill from "./skc/ui-skills/stageshow/SKILL.md" with { type: "text" };
+import unslopSkill from "./skc/ui-skills/unslop/SKILL.md" with { type: "text" };
 
 /**
  * Bundled frontend UI/UX craft skills. These are NOT public SKC workflow skills.
@@ -43,6 +49,12 @@ export const BUNDLED_SKC_UI_SKILL_NAMES = [
 	"react-bits",
 	"impeccable",
 	"motionsites-web-builder",
+	"unslop",
+	"antislop",
+	"antislop-ui",
+	"antislop-human",
+	"antislop-layoutmobile",
+	"antislop-copywriting",
 ] as const;
 
 export type BundledSkcUiSkillName = (typeof BUNDLED_SKC_UI_SKILL_NAMES)[number];
@@ -89,6 +101,20 @@ const BUNDLED_UI_SKILL_SOURCES: readonly BundledUiSkillSource[] = [
 		name: "motionsites-web-builder",
 		relativePath: "ui-skills/motionsites-web-builder/SKILL.md",
 		content: motionsitesWebBuilderSkill,
+	},
+	{ name: "unslop", relativePath: "ui-skills/unslop/SKILL.md", content: unslopSkill },
+	{ name: "antislop", relativePath: "ui-skills/antislop/SKILL.md", content: antislopSkill },
+	{ name: "antislop-ui", relativePath: "ui-skills/antislop-ui/SKILL.md", content: antislopUiSkill },
+	{ name: "antislop-human", relativePath: "ui-skills/antislop-human/SKILL.md", content: antislopHumanSkill },
+	{
+		name: "antislop-layoutmobile",
+		relativePath: "ui-skills/antislop-layoutmobile/SKILL.md",
+		content: antislopLayoutmobileSkill,
+	},
+	{
+		name: "antislop-copywriting",
+		relativePath: "ui-skills/antislop-copywriting/SKILL.md",
+		content: antislopCopywritingSkill,
 	},
 ];
 

@@ -277,7 +277,7 @@ async function handleResourcesCommand(runtime: SlashCommandRuntime): Promise<Sla
 async function handlePromptsCommand(runtime: SlashCommandRuntime): Promise<SlashCommandResult> {
 	const lines = await collectConnectedMcpLines(runtime, async (name, connection) => {
 		const prompts = await listPrompts(connection);
-		return prompts.map(prompt => `${name}/${prompt.name}${prompt.description ? ` — ${prompt.description}` : ""}`);
+		return prompts.map(prompt => `${name}/${prompt.name}${prompt.description ? `, ${prompt.description}` : ""}`);
 	});
 	if (!lines) {
 		await runtime.output("No MCP servers configured.");
@@ -356,7 +356,7 @@ async function handleSmitherySearchCommand(rest: string, runtime: SlashCommandRu
 			results
 				.map(
 					result =>
-						`${result.display.displayName} (${result.name})${result.display.description ? ` — ${result.display.description}` : ""}`,
+						`${result.display.displayName} (${result.name})${result.display.description ? `: ${result.display.description}` : ""}`,
 				)
 				.join("\n"),
 		);

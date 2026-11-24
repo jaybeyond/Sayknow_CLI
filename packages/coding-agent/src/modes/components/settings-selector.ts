@@ -129,7 +129,7 @@ class SelectSubmenu extends Container {
 		// Preview (if provided)
 		if (getPreview) {
 			this.addChild(new Spacer(1));
-			this.addChild(new Text(theme.fg("muted", "Preview:"), 0, 0));
+			this.addChild(new Text(theme.fg("muted", t("settings.preview")), 0, 0));
 			this.#previewText = new Text(getPreview(), 0, 0);
 			this.addChild(this.#previewText);
 		}
@@ -313,7 +313,13 @@ class StatusLineCustomEditor extends Container {
 
 	#build(): void {
 		this.clear();
-		this.addChild(new Text(theme.bold(theme.fg("accent", "Status Line Custom Editor")), 0, 0));
+		this.addChild(
+			new Text(
+				theme.bold(theme.fg("accent", td("set:statusLine.customEditor:l", "Status Line Custom Editor"))),
+				0,
+				0,
+			),
+		);
 		this.addChild(new Spacer(1));
 		this.#list = new SettingsList(
 			this.#items(),
@@ -666,14 +672,21 @@ class StatusLineCustomEditor extends Container {
 	}
 }
 
+/** A preset may leave a tab icon empty; the label then stands alone. */
+function withTabIcon(icon: string, label: string): string {
+	return icon ? `${icon} ${label}` : label;
+}
+
 function getSettingsTabs(): Tab[] {
 	return [
 		...SETTING_TABS.map(id => {
 			const meta = TAB_METADATA[id];
-			const icon = theme.symbol(meta.icon as Parameters<typeof theme.symbol>[0]);
-			return { id, label: `${icon} ${t(`settings.tab.${id}`)}` };
+			return {
+				id,
+				label: withTabIcon(theme.symbol(meta.icon as Parameters<typeof theme.symbol>[0]), t(`settings.tab.${id}`)),
+			};
 		}),
-		{ id: "plugins", label: `${theme.icon.package} Plugins` },
+		{ id: "plugins", label: withTabIcon(theme.symbol("tab.plugins"), t("settings.tab.plugins")) },
 	];
 }
 
@@ -781,7 +794,12 @@ export class SettingsSelectorComponent extends Container {
 		this.addChild(new DynamicBorder());
 
 		// Tab bar
-		this.#tabBar = new TabBar("Settings", getSettingsTabs(), getTabBarTheme());
+		const tabTheme = getTabBarTheme();
+		this.#tabBar = new TabBar(t("settings.title"), getSettingsTabs(), {
+			...tabTheme,
+			compact: true,
+			activeTab: label => tabTheme.activeTab(`[${label.trim()}]`),
+		});
 		this.#tabBar.onTabChange = () => {
 			this.#switchToTab(this.#tabBar.getActiveTab().id as SettingTab | "plugins");
 		};
@@ -874,6 +892,8 @@ export class SettingsSelectorComponent extends Container {
 					label,
 					description,
 					currentValue: currentValue as string,
+					formatValue: value =>
+						value === "off" ? t("settings.off") : value === "auto" ? t("settings.automatic") : value,
 					values: [...def.values],
 				};
 
@@ -883,6 +903,18 @@ export class SettingsSelectorComponent extends Container {
 					label,
 					description,
 					currentValue: this.#getSubmenuCurrentValue(def.path, currentValue),
+					formatValue: value => {
+						if (def.path === "modelProfile.default" && !value) return t("settings.unset");
+						if (
+							value === "-1" &&
+							def.options.some(option => option.value === "-1" && option.label === "Default")
+						) {
+							return t("settings.defaultValue");
+						}
+						const fallback =
+							value === "auto" ? t("settings.automatic") : value === "off" ? t("settings.off") : value;
+						return td(`set:${def.path}:o:${value}:l`, fallback);
+					},
 					submenu: (cv, done) => this.#createSubmenu(def, cv, done),
 				};
 
@@ -1130,7 +1162,7 @@ export class SettingsSelectorComponent extends Container {
 		if (tabId === "appearance") {
 			this.#statusPreviewContainer = new Container();
 			this.#statusPreviewContainer.addChild(new Spacer(1));
-			this.#statusPreviewContainer.addChild(new Text(theme.fg("muted", "Preview:"), 0, 0));
+			this.#statusPreviewContainer.addChild(new Text(theme.fg("muted", t("settings.preview")), 0, 0));
 			this.#statusPreviewText = new Text(this.#getStatusPreviewString(), 0, 0);
 			this.#statusPreviewContainer.addChild(this.#statusPreviewText);
 			this.#statusPreviewContainer.addChild(new Spacer(1));
@@ -1140,7 +1172,7 @@ export class SettingsSelectorComponent extends Container {
 		this.#currentList = new SettingsList(
 			this.#buildItemsForTab(defs, tabId),
 			10,
-			getSettingsListTheme(),
+			{ ...getSettingsListTheme(), footerHint: `${t("settings.tabCycle")} · ${t("settings.panelActions")}` },
 			(id, newValue) => {
 				if (id === STATUS_LINE_USAGE_MODE_ID) {
 					const segmentOptions = getUsageModeSettings(newValue);
@@ -1218,10 +1250,13 @@ export class SettingsSelectorComponent extends Container {
 			};
 			const customEditorItem: SettingItem = {
 				id: STATUS_LINE_CUSTOM_EDITOR_ID,
-				label: "Status Line Custom Editor",
-				description:
+				label: td("set:statusLine.customEditor:l", "Status Line Custom Editor"),
+				description: td(
+					"set:statusLine.customEditor:d",
 					"Edit custom status line segments, placement, separator, and typed segment options with live previews.",
+				),
 				currentValue: "open",
+				formatValue: () => t("settings.openEditor"),
 				submenu: (_currentValue, done) => new StatusLineCustomEditor(customEditorCallbacks, done),
 			};
 			const presetIndex = items.findIndex(item => item.id === "statusLine.preset");
@@ -1233,9 +1268,13 @@ export class SettingsSelectorComponent extends Container {
 			{
 				const usageModeItem: SettingItem = {
 					id: STATUS_LINE_USAGE_MODE_ID,
-					label: "Status Line Usage Mode",
-					description: "Show provider quota in the status line as used or remaining.",
+					label: td("set:statusLine.usageMode:l", "Status Line Usage Mode"),
+					description: td(
+						"set:statusLine.usageMode:d",
+						"Show provider quota in the status line as used or remaining.",
+					),
 					currentValue: getSavedUsageMode(),
+					formatValue: value => (value === "used" ? t("settings.used") : t("settings.remaining")),
 					values: [...USAGE_MODE_VALUES],
 				};
 				if (presetIndex >= 0) {

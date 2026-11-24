@@ -345,7 +345,7 @@ export function formatDeepInterviewSelectorPrompt(question: string): string | nu
 				? [
 						"Components:",
 						...model.components.map(
-							(component, index) => `${index + 1}. ${component.name} — ${component.description}`,
+							(component, index) => `${index + 1}. ${component.name}: ${component.description}`,
 						),
 					]
 				: [];

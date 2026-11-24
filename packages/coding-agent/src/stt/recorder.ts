@@ -353,7 +353,7 @@ export async function verifyRecordingFile(filePath: string): Promise<number> {
 		const stat = await fs.stat(filePath);
 		if (stat.size < 100) {
 			throw new Error(
-				`Recording file is too small (${stat.size} bytes) — audio may not have been captured. ` +
+				`Recording file is too small (${stat.size} bytes): audio may not have been captured. ` +
 					"Check that a microphone is connected and permissions are granted.",
 			);
 		}

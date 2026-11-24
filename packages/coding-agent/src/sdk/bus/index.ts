@@ -1404,7 +1404,7 @@ function formatRemoteUsageWindows(reports: unknown): string[] {
 		if (window.usedFraction !== undefined) details.push(`${Number((window.usedFraction * 100).toFixed(1))}% used`);
 		const resetTime = window.resetsAt === undefined ? undefined : formatStableResetTime(window.resetsAt);
 		if (resetTime) details.push(`resets ${resetTime}`);
-		return [details.join(" — ")];
+		return [details.join(", ")];
 	});
 }
 

@@ -74,7 +74,7 @@ function parseArgs(argv: string[]): CliArgs {
 function printHelpAndExit(): never {
 	process.stdout.write(
 		[
-			"skc notifications — Telegram reference client",
+			"skc notifications: Telegram reference client",
 			"",
 			"  --bot-token <token>     Telegram bot token (or env SKC_TG_BOT_TOKEN)",
 			"  --chat-id <id>          Target chat id (or env SKC_TG_CHAT_ID; auto-resolved if omitted)",

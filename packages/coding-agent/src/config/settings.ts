@@ -195,7 +195,7 @@ const GLOBAL_ONLY_SETTINGS = new Set<SettingPath>([
 ]);
 const LEGACY_THEME_NAME_REPLACEMENTS = {
 	dark: "blue-octopus",
-	light: "blue-octopus",
+	light: "blue-octopus-light",
 } as const;
 
 function isLegacyThemeName(name: string): name is keyof typeof LEGACY_THEME_NAME_REPLACEMENTS {
@@ -1527,7 +1527,7 @@ export class Settings implements NotificationSettingsReader {
 			const migratedTheme = this.#migrateLegacyBuiltInThemeName(oldTheme);
 			if (oldTheme === "dark" && migratedTheme === "blue-octopus") {
 				raw.theme = { dark: migratedTheme };
-			} else if (oldTheme === "light" && migratedTheme === "blue-octopus") {
+			} else if (oldTheme === "light" && migratedTheme === "blue-octopus-light") {
 				raw.theme = { light: migratedTheme };
 			} else {
 				const slot = this.#getThemeSlotForName(migratedTheme);

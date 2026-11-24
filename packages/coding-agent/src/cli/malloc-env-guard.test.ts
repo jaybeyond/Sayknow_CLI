@@ -3,8 +3,8 @@ import {
 	buildMallocReexecArgv,
 	formatMallocEnvNotice,
 	hasMacOSMallocEnv,
-	MACOS_MALLOC_ENV_VARS,
 	MALLOC_ENV_REEXEC_GUARD,
+	macOSMallocEnvNames,
 	shouldReexecForMacOSMallocEnv,
 } from "./malloc-env-guard";
 
@@ -17,8 +17,19 @@ describe("hasMacOSMallocEnv", () => {
 		expect(hasMacOSMallocEnv({ MallocStackLoggingNoCompact: "1" })).toBe(true);
 	});
 
-	it("is false when neither var is present", () => {
-		expect(hasMacOSMallocEnv({ PATH: "/usr/bin", HOME: "/home/x" })).toBe(false);
+	// libmalloc enables stack logging for these too; matching only the two
+	// classic names let a contaminated launch skip the re-exec.
+	it("detects MallocStackLoggingLite and MallocStackLoggingDirectory", () => {
+		expect(hasMacOSMallocEnv({ MallocStackLoggingLite: "1" })).toBe(true);
+		expect(hasMacOSMallocEnv({ MallocStackLoggingDirectory: "/tmp" })).toBe(true);
+	});
+
+	it("is false when no MallocStackLogging* var is present", () => {
+		expect(hasMacOSMallocEnv({ PATH: "/usr/bin", HOME: "/home/x", MallocNanoZone: "1" })).toBe(false);
+	});
+
+	it("ignores a malloc var whose value is undefined", () => {
+		expect(hasMacOSMallocEnv({ MallocStackLogging: undefined })).toBe(false);
 	});
 
 	it("is false for an empty environment", () => {
@@ -81,24 +92,26 @@ describe("buildMallocReexecArgv", () => {
 	});
 });
 
-describe("formatMallocEnvNotice", () => {
-	it("names both env vars and the permanent launchctl fix", () => {
-		const notice = formatMallocEnvNotice();
-		for (const name of MACOS_MALLOC_ENV_VARS) {
-			expect(notice).toContain(name);
-		}
-		expect(notice).toContain("launchctl unsetenv MallocStackLogging");
-		expect(notice).toContain("launchctl unsetenv MallocStackLoggingNoCompact");
-		expect(notice.endsWith("\n")).toBe(true);
+describe("macOSMallocEnvNames", () => {
+	it("returns only the MallocStackLogging* names, sorted", () => {
+		expect(
+			macOSMallocEnvNames({
+				PATH: "/usr/bin",
+				MallocStackLoggingNoCompact: "1",
+				MallocNanoZone: "1",
+				MallocStackLogging: "0",
+			}),
+		).toEqual(["MallocStackLogging", "MallocStackLoggingNoCompact"]);
 	});
 });
 
-describe("module constants", () => {
-	it("exposes exactly the two macOS malloc env vars", () => {
-		expect([...MACOS_MALLOC_ENV_VARS]).toEqual(["MallocStackLogging", "MallocStackLoggingNoCompact"]);
-	});
-
-	it("uses a namespaced loop-guard variable", () => {
-		expect(MALLOC_ENV_REEXEC_GUARD).toBe("SKC_MALLOC_ENV_REEXEC");
+describe("formatMallocEnvNotice", () => {
+	it("names every detected var and its permanent launchctl fix", () => {
+		const notice = formatMallocEnvNotice(["MallocStackLogging", "MallocStackLoggingLite"]);
+		expect(notice).toContain("(MallocStackLogging, MallocStackLoggingLite)");
+		expect(notice).toContain("unset MallocStackLogging MallocStackLoggingLite\n");
+		expect(notice).toContain("launchctl unsetenv MallocStackLogging\n");
+		expect(notice).toContain("launchctl unsetenv MallocStackLoggingLite\n");
+		expect(notice).not.toContain("MallocStackLoggingNoCompact");
 	});
 });

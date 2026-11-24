@@ -27,8 +27,8 @@ Classify every finding against the full taxonomy:
 
 ## Blocking vs advisory
 
-- **Blocking** if it can mask failures, violate accepted contracts, weaken boundaries, leave changed behavior untested, create maintenance traps, or make later verification unsafe.
-- **Advisory** if it is nice-to-have, stylistic/contextual, or outside safe story scope.
+- **Blocking** if it can mask failures, violate accepted contracts, weaken boundaries, leave changed behavior untested, create maintenance traps, or make later verification unsafe. Changes to public symbols, CLI flags, config keys, machine-readable output, error messages, or schemas, user-visible strings, prompt/skill contract wording, and factually wrong docs or comments are blocking. Any in-scope finding that does not meet the Advisory definition is blocking.
+- **Advisory** for internal/private naming, factually accurate wording polish, formatting, or style only when the report explains why it cannot affect behavior, public interfaces, user-facing output, machine-readable output, workflow instructions, acceptance criteria, or required evidence. This does not override the taxonomy's advisory classification for grounded fallbacks or intentional design choices with documented rationale. Record unrelated findings as out of scope unless they undermine this story's contract, safety, or evidence. Uncertain impact is blocking until checked.
 - Advisory findings stay in the gate report only; they are NOT written to the Ultragoal ledger.
 
 ## Report

@@ -693,6 +693,12 @@ describe("Editor component", () => {
 			expect(editor.getText()).toBe("a1");
 		});
 
+		it("types keypad digits from terminals that omit Num Lock or use application keypad mode", () => {
+			const editor = new Editor(defaultEditorTheme);
+			for (const input of ["\x1b[57400u", "\x1b[57401;1u", "\x1bOs", "\x1bOn", "\x1bOt"]) editor.handleInput(input);
+			expect(editor.getText()).toBe("123.4");
+		});
+
 		it("inserts a newline for Ctrl+Enter variants with NumLock or keypad Enter metadata", () => {
 			const variants = ["\x1b[13;133u", "\x1b[57414;5u", "\x1b[57414;133u"];
 

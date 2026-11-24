@@ -208,8 +208,8 @@ export const koMsgs: Record<string, string> = {
 	"Only one role model available": "역할 모델이 하나만 사용 가능",
 	"Opened:": "열림:",
 	"Paste handling": "붙여넣기 처리",
-	"Plan approved, but compaction was cancelled — execution not dispatched. Submit a turn to continue.":
-		"플랜 승인됨, 그러나 압축이 취소됨 — 실행이 디스패치되지 않음. 계속하려면 턴을 제출하세요.",
+	"Plan approved, but compaction was cancelled: execution not dispatched. Submit a turn to continue.":
+		"플랜 승인됨, 그러나 압축이 취소됨: 실행이 디스패치되지 않음. 계속하려면 턴을 제출하세요.",
 	"Plan file not found at": "플랜 파일을 찾을 수 없음:",
 	"Plan mode enabled. Plan file:": "플랜 모드 활성화됨. 플랜 파일:",
 	"Plan mode is disabled. Enable it in settings (plan.enabled).":
@@ -291,10 +291,10 @@ export const koMsgs: Record<string, string> = {
 	"Usage: /memory mm history <id>": "사용법: /memory mm history <id>",
 	"Usage: /memory mm show <id>": "사용법: /memory mm show <id>",
 	"Usage: /move <path>": "사용법: /move <path>",
-	"Nothing to summarize yet — pass a title: /rename <title>":
-		"아직 요약할 대화가 없습니다 — 제목을 직접 넣으세요: /rename <title>",
-	"Could not generate a session title — pass one: /rename <title>":
-		"세션 제목을 생성하지 못했습니다 — 직접 넣으세요: /rename <title>",
+	"Nothing to summarize yet. Pass a title: /rename <title>":
+		"아직 요약할 대화가 없습니다. 제목을 직접 넣으세요: /rename <title>",
+	"Could not generate a session title. Pass one: /rename <title>":
+		"세션 제목을 생성하지 못했습니다. 직접 넣으세요: /rename <title>",
 	"Usage: /ssh add <name> --host <host> [--user <user>] [--port <port>] [--key <keyPath>] [--desc <description>] [--compat] [--scope project|user]":
 		"사용법: /ssh add <name> --host <host> [--user <user>] [--port <port>] [--key <keyPath>] [--desc <description>] [--compat] [--scope project|user]",
 	"Usage: /todo append [<phase>] <task...>": "사용법: /todo append [<phase>] <task...>",

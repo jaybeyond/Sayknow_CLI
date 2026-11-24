@@ -1,61 +1,46 @@
-import { describe, expect, it } from "bun:test";
+import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { KeybindingsManager } from "../src/config/keybindings";
-import { getComposerPlaceholder, getDefaultComposerPlaceholder } from "../src/modes/interactive-mode";
+import { getLanguage, setLanguage } from "../src/i18n";
+import {
+	getComposerActions,
+	getComposerPlaceholder,
+	getDefaultComposerPlaceholder,
+} from "../src/modes/interactive-mode";
+
+// Assertions read English labels; a non-English system locale must not leak in.
+const originalLanguage = getLanguage();
+beforeAll(() => setLanguage("en"));
+afterAll(() => setLanguage(originalLanguage));
 
 describe("composer placeholder", () => {
 	it.each([
-		["darwin", "⌥Q: Queue (busy) · ⇧⇥: Thinking · ⌃L: Model · ⌃R: History · ⇧↩/⌃J: New line · ⌃C: Clear"],
-		[
-			"win32",
-			"Alt+Q: Queue (busy) · Shift+Tab: Thinking · Ctrl+L: Model · Ctrl+R: History · Alt+Enter/Ctrl+J: New line · Ctrl+C: Clear",
-		],
-		[
-			"linux",
-			"Alt+Enter: Queue (busy) · Shift+Tab: Thinking · Ctrl+L: Model · Ctrl+R: History · Shift+Enter/Ctrl+J: New line · Ctrl+C: Clear",
-		],
-	] as const)("formats platform defaults for %s independently of the host", (platform, expected) => {
-		expect(getDefaultComposerPlaceholder({ platform })).toBe(`Type your message... ${expected}`);
+		["darwin", "⇧↩/⌃J New line"],
+		["win32", "Alt+Enter/Ctrl+J New line"],
+		["linux", "Shift+Enter/Ctrl+J New line"],
+	] as const)("formats the idle newline hint for %s independently of the host", (platform, expected) => {
+		expect(getDefaultComposerPlaceholder({ platform })).toBe(`Type your message · ${expected}`);
 	});
 
-	it("uses effective remapped discovery bindings", () => {
+	it("leaves model, thinking, history and queue keys to the keymap while idle", () => {
 		const keybindings = KeybindingsManager.inMemory({
 			"app.history.search": "alt+h",
 			"app.thinking.cycle": "ctrl+t",
 			"app.model.select": "super+m",
 			"app.message.queue": "ctrl+k",
 		});
-
-		expect(getDefaultComposerPlaceholder({ platform: "darwin" }, keybindings)).toBe(
-			"Type your message... ⌃K: Queue (busy) · ⌃T: Thinking · ⌘M: Model · ⌥H: History · ⇧↩/⌃J: New line · ⌃C: Clear",
-		);
 		expect(
 			getComposerPlaceholder(keybindings, { platform: "darwin" }, { busy: false, busyPromptMode: "steer" }),
-		).toBe(
-			"Type your message... ⌃K: Queue (busy) · ⌃T: Thinking · ⌘M: Model · ⌥H: History · ⇧↩/⌃J: New line · ⌃C: Clear",
-		);
+		).toBe("Type your message · ⇧↩/⌃J New line");
 	});
 
-	it("omits unbound discovery actions", () => {
-		const keybindings = KeybindingsManager.inMemory({
-			"app.history.search": [],
-			"app.thinking.cycle": [],
-			"app.model.select": [],
-			"app.message.queue": [],
-		});
-
-		expect(getComposerPlaceholder(keybindings, { platform: "linux" }, { busy: false, busyPromptMode: "steer" })).toBe(
-			"Type your message... Shift+Enter/Ctrl+J: New line · Ctrl+C: Clear",
-		);
-	});
-
-	it("shows distinct submit and queue actions while busy in steer mode", () => {
+	it("names what Enter does and the queue key while busy in steer mode", () => {
 		const keybindings = KeybindingsManager.inMemory({
 			"app.message.queue": "alt+q",
 			"tui.input.submit": "enter",
 		});
 
 		expect(getComposerPlaceholder(keybindings, { platform: "darwin" }, { busy: true, busyPromptMode: "steer" })).toBe(
-			"Type your message... ↩: Steer · ⌥Q: Queue · ⇧⇥: Thinking · ⌃L: Model · ⌃R: History · ⇧↩/⌃J: New line · ⌃C: Clear",
+			"Type your message · ↩ Steer · ⌥Q Queue · ⇧↩/⌃J New line",
 		);
 	});
 
@@ -66,7 +51,7 @@ describe("composer placeholder", () => {
 		});
 
 		expect(getComposerPlaceholder(keybindings, { platform: "darwin" }, { busy: true, busyPromptMode: "queue" })).toBe(
-			"Type your message... ↩: Queue · ⇧⇥: Thinking · ⌃L: Model · ⌃R: History · ⇧↩/⌃J: New line · ⌃C: Clear",
+			"Type your message · ↩ Queue · ⇧↩/⌃J New line",
 		);
 	});
 
@@ -77,7 +62,46 @@ describe("composer placeholder", () => {
 		});
 
 		expect(getComposerPlaceholder(keybindings, { platform: "win32" }, { busy: true, busyPromptMode: "queue" })).toBe(
-			"Type your message... Ctrl+K: Queue · Shift+Tab: Thinking · Ctrl+L: Model · Ctrl+R: History · Alt+Enter/Ctrl+J: New line · Ctrl+C: Clear",
+			"Type your message · Ctrl+K Queue · Alt+Enter/Ctrl+J New line",
 		);
+	});
+
+	it("follows the interface language", () => {
+		setLanguage("ko");
+		try {
+			expect(getDefaultComposerPlaceholder({ platform: "darwin" })).toBe("메시지 입력 · ⇧↩/⌃J 줄바꿈");
+			const keybindings = KeybindingsManager.inMemory({ "tui.input.submit": "enter" });
+			expect(
+				getComposerActions(keybindings, { platform: "darwin" }, { busy: false, busyPromptMode: "steer" }).map(
+					action => action.label,
+				),
+			).toEqual(["@ 첨부", "↩ 보내기"]);
+		} finally {
+			setLanguage("en");
+		}
+	});
+});
+
+describe("composer actions", () => {
+	const keybindings = KeybindingsManager.inMemory({ "tui.input.submit": "enter" });
+	const labels = (busy: boolean, busyPromptMode: "steer" | "queue", platform: NodeJS.Platform = "darwin") =>
+		getComposerActions(keybindings, { platform }, { busy, busyPromptMode }).map(action => action.label);
+
+	it("names what the submit key does now, with that key", () => {
+		expect(labels(false, "steer")).toEqual(["@ Attach", "↩ Send"]);
+		expect(labels(true, "steer")).toEqual(["@ Attach", "↩ Steer"]);
+		expect(labels(true, "queue")).toEqual(["@ Attach", "↩ Queue"]);
+		expect(labels(false, "steer", "linux")).toEqual(["@ Attach", "Enter Send"]);
+	});
+
+	it("marks only the submit action as primary", () => {
+		const actions = getComposerActions(keybindings, { platform: "darwin" }, { busy: false, busyPromptMode: "steer" });
+		expect(actions.filter(action => action.primary).map(action => action.label)).toEqual(["↩ Send"]);
+	});
+
+	it("drops the key when submit is unbound", () => {
+		const unbound = KeybindingsManager.inMemory({ "tui.input.submit": [] });
+		const actions = getComposerActions(unbound, { platform: "darwin" }, { busy: false, busyPromptMode: "steer" });
+		expect(actions.map(action => action.label)).toEqual(["@ Attach", "Send"]);
 	});
 });

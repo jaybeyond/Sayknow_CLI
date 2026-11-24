@@ -44,6 +44,22 @@ describe("CustomEditor temporary model selector keybinding", () => {
 	});
 });
 
+describe("CustomEditor tool expansion keybinding", () => {
+	it("dispatches legacy and enhanced Alt+digit without stealing plain digits", () => {
+		const editor = createEditor();
+		const expand = vi.fn();
+		editor.onExpandTools = expand;
+		editor.setActionKeys("app.tools.expand", ["alt+1"]);
+		for (const input of ["\x1b1", "\x1b[49;3u", "\x1b[27;3;49~"]) {
+			expect(parseKey(input)).toBe("alt+1");
+			editor.handleInput(input);
+		}
+		editor.handleInput("1");
+		expect(expand).toHaveBeenCalledTimes(3);
+		expect(editor.getText()).toBe("1");
+	});
+});
+
 describe("CustomEditor queue keybinding", () => {
 	it("triggers explicit queue from the configured action key", () => {
 		const editor = createEditor();
@@ -198,6 +214,28 @@ describe("CustomEditor bracketed paste interception", () => {
 		await Bun.sleep(0);
 
 		expect(editor.getText()).toBe("before middle after");
+	});
+
+	it("ignores rail Send and Attach while a paste decision is pending", async () => {
+		const editor = createEditor();
+		const pasteDecision = Promise.withResolvers<boolean>();
+		editor.onPasteText = vi.fn(() => pasteDecision.promise);
+		const onSubmit = vi.fn();
+		editor.onSubmit = onSubmit;
+
+		editor.handleInput("before ");
+		editor.handleInput("\x1b[200~middle\x1b[201~");
+		editor.submit();
+		editor.beginFileReference();
+		expect(onSubmit).not.toHaveBeenCalled();
+		expect(editor.getText()).toBe("before ");
+
+		pasteDecision.resolve(false);
+		await Bun.sleep(0);
+		editor.beginFileReference();
+		expect(editor.getText()).toBe("before middle @");
+		editor.submit();
+		expect(onSubmit).toHaveBeenCalledWith("before middle @");
 	});
 
 	it("drops queued input and ignores late async paste decisions after timeout", async () => {

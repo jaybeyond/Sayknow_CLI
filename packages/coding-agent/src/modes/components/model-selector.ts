@@ -1672,7 +1672,7 @@ export class ModelSelectorComponent extends Container {
 		const assigned = this.#settings.get("task.modelRouting.specialtyModels")?.[action.specialty];
 		const current = selectorHead(assigned);
 		const label = t(`modelSelector.specialty.${action.specialty}`);
-		return current ? `${label} ${theme.fg("muted", `— ${current}`)}` : label;
+		return current ? `${label} ${theme.fg("muted", `- ${current}`)}` : label;
 	}
 
 	#renderActionMenu(item: ModelItem | CanonicalModelItem): void {
@@ -1745,7 +1745,7 @@ export class ModelSelectorComponent extends Container {
 			const level = choice.levels[i];
 			const metadata = getThinkingLevelMetadata(level);
 			const prefix = i === this.#selectedThinkingIndex ? theme.fg("accent", `${theme.nav.cursor} `) : "  ";
-			const label = `${metadata.label} — ${metadata.description}`;
+			const label = `${metadata.label}: ${metadata.description}`;
 			this.#listContainer.addChild(
 				new Text(`${prefix}${i === this.#selectedThinkingIndex ? theme.fg("accent", label) : label}`, 0, 0),
 			);

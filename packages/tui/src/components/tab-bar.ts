@@ -30,6 +30,10 @@ export interface TabBarTheme {
 	inactiveTab: (text: string) => string;
 	/** Style for the hint text (e.g., "(tab to cycle)") */
 	hint: (text: string) => string;
+	/** Navigation hint text; hosts pass a translated hint. */
+	hintText?: string;
+	/** Keep the active tab and its nearest neighbors on one row. */
+	compact?: boolean;
 }
 
 /**
@@ -113,28 +117,19 @@ export class TabBar implements Component {
 	/** Render the tab bar, wrapping to multiple lines if needed */
 	render(width: number): string[] {
 		const maxWidth = Math.max(1, width);
-		const chunks: string[] = [];
+		const label = this.#theme.label(`${this.#label}:`);
+		const tabs = this.#tabs.map((tab, index) =>
+			index === this.#activeIndex
+				? this.#theme.activeTab(` ${tab.label} `)
+				: this.#theme.inactiveTab(` ${tab.label} `),
+		);
+		if (this.#theme.compact) return [this.#renderCompact(label, tabs, maxWidth)];
 
-		// Label prefix
-		chunks.push(this.#theme.label(`${this.#label}:`));
-		chunks.push("  ");
-
-		// Tab buttons
-		for (let i = 0; i < this.#tabs.length; i++) {
-			const tab = this.#tabs[i];
-			if (i === this.#activeIndex) {
-				chunks.push(this.#theme.activeTab(` ${tab.label} `));
-			} else {
-				chunks.push(this.#theme.inactiveTab(` ${tab.label} `));
-			}
-			if (i < this.#tabs.length - 1) {
-				chunks.push("  ");
-			}
+		const chunks = [label, "  "];
+		for (const tab of tabs) {
+			if (chunks.length > 2) chunks.push(" ");
+			chunks.push(tab);
 		}
-
-		// Navigation hint
-		chunks.push("  ");
-		chunks.push(this.#theme.hint("(tab to cycle)"));
 
 		const lines: string[] = [];
 		let currentLine = "";
@@ -143,6 +138,10 @@ export class TabBar implements Component {
 		for (const chunk of chunks) {
 			const chunkWidth = visibleWidth(chunk);
 			if (chunkWidth <= 0) {
+				continue;
+			}
+			// Spacing never starts a row or wraps onto one of its own.
+			if (chunk.trim() === "" && (currentWidth === 0 || currentWidth + chunkWidth > maxWidth)) {
 				continue;
 			}
 
@@ -166,10 +165,49 @@ export class TabBar implements Component {
 			currentWidth += chunkWidth;
 		}
 
+		// The navigation hint follows the last tab only when it fits on that row; on a
+		// row of its own it would read as another tab.
+		const hint = `  ${this.#theme.hint(this.#theme.hintText ?? "(tab to cycle)")}`;
+		const hintWidth = visibleWidth(hint);
+		if (currentLine && currentWidth + hintWidth <= maxWidth) {
+			currentLine += hint;
+		}
+
 		if (currentLine) {
 			lines.push(currentLine);
 		}
 
 		return lines.length > 0 ? lines : [""];
+	}
+
+	#renderCompact(label: string, tabs: string[], width: number): string {
+		const makeLine = (start: number, end: number) => {
+			const overflow = this.#theme.hint("...");
+			return [label, start > 0 ? overflow : "", tabs.slice(start, end).join(" "), end < tabs.length ? overflow : ""]
+				.filter(Boolean)
+				.join(" ");
+		};
+		const full = makeLine(0, tabs.length);
+		if (visibleWidth(full) <= width) return full;
+		let start = this.#activeIndex;
+		let end = start + 1;
+		let line = makeLine(start, end);
+		if (visibleWidth(line) > width) return truncateToWidth(tabs[start] ?? label, width);
+		while (start > 0 || end < tabs.length) {
+			const left = start > 0 ? makeLine(start - 1, end) : undefined;
+			const right = end < tabs.length ? makeLine(start, end + 1) : undefined;
+			if (
+				right &&
+				visibleWidth(right) <= width &&
+				(!left || visibleWidth(left) > width || end - this.#activeIndex <= this.#activeIndex - start + 1)
+			) {
+				line = right;
+				end++;
+			} else if (left && visibleWidth(left) <= width) {
+				line = left;
+				start--;
+			} else break;
+		}
+		return line;
 	}
 }

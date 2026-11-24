@@ -208,6 +208,8 @@ test("the UI criteria stay inside the backend's option ceiling", () => {
 	expect(criteria["motionsites-web-builder"]).toContain("landing page");
 	// The design center loads with every pick, so it is never offered as one.
 	expect(criteria.stageshow).toBeUndefined();
+	expect(criteria.unslop).toBeUndefined();
+	expect(criteria.antislop).toBeUndefined();
 });
 
 test("workflow and UI ride one call, not two", async () => {

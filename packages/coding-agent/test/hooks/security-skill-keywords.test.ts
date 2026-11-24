@@ -56,6 +56,7 @@ describe("automatic security review skill routing", () => {
 			"check this against the OWASP top 10",
 			"pentest the API",
 			"add strix to our checks",
+			"run agentshield on our MCP config",
 		]) {
 			expect(detectSecurityReviewKeyword(prompt)).not.toBeNull();
 		}

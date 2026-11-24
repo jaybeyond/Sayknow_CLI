@@ -1076,7 +1076,7 @@ export class CommandController {
 				.slice()
 				.sort((a, b) => a.id.localeCompare(b.id))
 				.map(summarizeMentalModel);
-			showMarkdownPanel(this.ctx, `Mental Models — ${state.bankId}`, lines.join("\n"));
+			showMarkdownPanel(this.ctx, `Mental Models, ${state.bankId}`, lines.join("\n"));
 		} catch (error) {
 			this.ctx.showError(`mm list failed: ${error instanceof Error ? error.message : String(error)}`);
 		}
@@ -1092,7 +1092,7 @@ export class CommandController {
 			const tags = model.tags && model.tags.length > 0 ? `\n_tags: ${model.tags.join(", ")}_` : "";
 			const refreshed = model.last_refreshed_at ? `\n_last refreshed: ${model.last_refreshed_at}_` : "";
 			const sourceQuery = model.source_query ? `\n\n**Source query:** ${model.source_query}` : "";
-			const content = (model.content ?? "_(empty — background reflect may still be running)_").trim();
+			const content = (model.content ?? "_(empty, background reflect may still be running)_").trim();
 			showMarkdownPanel(
 				this.ctx,
 				model.name,
@@ -1184,7 +1184,7 @@ export class CommandController {
 				const diff = diffMentalModelContent(before, after);
 				sections.push(`### ${history[i].changed_at}\n\n\`\`\`diff\n${diff}\n\`\`\``);
 			}
-			showMarkdownPanel(this.ctx, `History — ${model.name}`, sections.join("\n\n"));
+			showMarkdownPanel(this.ctx, `History, ${model.name}`, sections.join("\n\n"));
 		} catch (error) {
 			this.ctx.showError(`mm history failed: ${error instanceof Error ? error.message : String(error)}`);
 		}
@@ -1427,7 +1427,7 @@ export class CommandController {
 				const obfuscateText = await titleInputObfuscator(this.ctx.settings, activeCwd);
 				const input = buildConversationTitleInput(this.ctx.session.messages, obfuscateText);
 				if (!input) {
-					this.ctx.showError("Nothing to summarize yet — pass a title: /rename <title>");
+					this.ctx.showError("Nothing to summarize yet. Pass a title: /rename <title>");
 					return;
 				}
 
@@ -1446,7 +1446,7 @@ export class CommandController {
 				)
 					return;
 				if (!generated) {
-					this.ctx.showError("Could not generate a session title — pass one: /rename <title>");
+					this.ctx.showError("Could not generate a session title. Pass one: /rename <title>");
 					return;
 				}
 

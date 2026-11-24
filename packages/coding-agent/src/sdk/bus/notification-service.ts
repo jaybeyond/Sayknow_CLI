@@ -806,7 +806,7 @@ export async function sendNotificationTest(opts: TestOptions): Promise<Notificat
 
 /** Render a test result as a single human-readable line (no secrets). */
 export function formatNotificationTestResult(result: NotificationTestResult): string {
-	return `Notification test (${result.adapter}): ${result.ok ? "OK" : "FAILED"} — ${result.detail}`;
+	return `Notification test (${result.adapter}): ${result.ok ? "OK" : "FAILED"}: ${result.detail}`;
 }
 
 // --- recovery -----------------------------------------------------------
@@ -1247,6 +1247,6 @@ export function formatNotificationRecoveryReport(report: NotificationRecoveryRep
 		lines.push(`    - retained exchange placeholder cleanup path ${placeholder}`);
 	for (const unknown of report.endpointsRetainedUnknown ?? [])
 		lines.push(`    - retained unverified cleanup path ${unknown}`);
-	lines.push(`  daemon: ${report.daemon.action} — ${report.daemon.detail}`);
+	lines.push(`  daemon: ${report.daemon.action}, ${report.daemon.detail}`);
 	return lines.join("\n");
 }
