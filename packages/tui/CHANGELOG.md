@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.7.26] - 2026-11-24
+
 ### Added
 
 - `Editor.setActions()` draws clickable actions at the right end of a borderless editor's last input row and narrows the text area to match. It also adds `onAction`, `handleClick()`, `submit()`, and `beginFileReference()`, plus `EditorTheme.actionStyle` for an enabled primary action. `submit()` behaves like the submit key: an open slash-command list applies its highlighted item, and a partly typed slash command is completed.
@@ -17,8 +19,6 @@
 - While the transcript is scrolled by hand, and right after `followLiveViewport()` returns to the live view, clicks on the pinned rows at the bottom (status line and composer) reach the child drawn there instead of being dropped or landing on blank padding. Returning to the live view right after a resize or a scroll, before the next render, keeps the transcript and the pinned rows painted where they belong.
 - `TabBar` never draws a row of only spacing at narrow widths.
 - Slash-command suggestions join an argument hint and its description with ` · ` instead of an em dash.
-
-## [0.7.25] - 2026-11-17
 
 ## [0.7.17] - 2026-11-05
 
