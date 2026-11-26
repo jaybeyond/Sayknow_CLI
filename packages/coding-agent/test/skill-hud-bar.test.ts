@@ -29,7 +29,7 @@ describe("skill HUD bar renderer", () => {
 	});
 
 	it("is included as a native status-line rail without changing preset segments", () => {
-		expect(STATUS_LINE_PRESETS.default.leftSegments).toEqual(["model", "mode", "git", "pr", "path"]);
+		expect(STATUS_LINE_PRESETS.default.leftSegments).toEqual(["model", "path", "mode", "git", "pr"]);
 		const rendered = Bun.stripANSI(renderSkillHudBar([{ skill: "team", phase: "running" }], 100) ?? "");
 		expect(rendered).toContain("hud team:running");
 	});
